@@ -16,7 +16,7 @@ def main():
     harness='#include \"OLED_MessageText.h\"\n'+harness
     harness=harness.replace('// INSERT_PRODUCTION',source)
     harness=harness.replace('// INSERT_POLICY',(COMPONENT/'Transcription_UI_Policy.h').read_text().replace('#pragma once',''))
-    bridge=extract_block((COMPONENT/'OLED_Utils.cpp').read_text(),'bool submitOLEDCommandForSession(')
+    bridge=extract_block((COMPONENT/'OLED_Utils.cpp').read_text(),'bool submitOledCommandForSession(')
     harness=harness.replace('// INSERT_BRIDGE',bridge)
     with tempfile.TemporaryDirectory(prefix='hw1-oled-transcription-') as tmp:
         unit=Path(tmp)/'test.cpp';exe=Path(tmp)/'test';unit.write_text(harness)

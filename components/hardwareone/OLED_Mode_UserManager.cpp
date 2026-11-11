@@ -6,7 +6,7 @@
 // The list comes from System_User's read-only roster snapshot (full names,
 // normalized roles); every mutation dispatches a real command (useradd /
 // userdelete confirm / userpromote / userdemote) with the full username
-// through executeOLEDCommandWithResult so the rank/admin gating in the command
+// through executeOledCommandWithResult so the rank/admin gating in the command
 // layer applies and we never touch the user store directly. Only the on-screen
 // label is shortened.
 
@@ -102,7 +102,7 @@ static void umDispatch(const String& cmd) {
   if (!sessionAuthed || sessionEpoch == kNoTransportSessionEpoch) return;
 
   char out[96] = {};
-  bool ok = executeOLEDCommandWithResultForSession(
+  bool ok = executeOledCommandWithResultForSession(
       cmd, sessionEpoch, out, sizeof(out));
   // Re-check authority before publishing owner-only UI state. Then take FS for
   // the users.json refresh without a display lifecycle lease; credential
@@ -227,9 +227,9 @@ static void umStartKeyboard(uint8_t stage, const char* title, int maxLen) {
   gUmKbStage = stage;
   // Stage 0 is a public username; stage 1 is the new account password, which
   // denies dictation and opens masked (one '*' per character).
-  const OLEDKeyboardDictationPolicy policy =
-      stage == 0 ? OLEDKeyboardDictationPolicy::ALLOW_PLAINTEXT
-                 : OLEDKeyboardDictationPolicy::DENY;
+  const OledKeyboardDictationPolicy policy =
+      stage == 0 ? OledKeyboardDictationPolicy::ALLOW_PLAINTEXT
+                 : OledKeyboardDictationPolicy::DENY;
   oledKeyboardInit(title, "", maxLen, policy, stage != 0);
   gUmKbActive = true;
 }
@@ -341,7 +341,7 @@ static void userManagerOnEnter(bool isForward) {
 
 static bool userManagerAvailable(String* /*reason*/) { return true; }
 
-static const OLEDModeEntry userManagerModes[] = {
+static const OledModeEntry userManagerModes[] = {
   { OLED_USER_MANAGER, "User Manager", "user", displayUserManager,
     userManagerAvailable, userManagerInput, false, -1, "A:Select B:Back", userManagerOnEnter },
 };

@@ -94,15 +94,15 @@ def build_unit(component: Path, source_dir: Path | None) -> str:
 
     max_items = re.search(r"(?m)^#define OLED_SCROLL_MAX_ITEMS\s+\d+", utils_h)
     require(max_items is not None, "OLED_SCROLL_MAX_ITEMS not found in OLED_Utils.h")
-    mode_enum = definition(display_h, "enum OLEDMode").replace(
-        "enum OLEDMode", "enum OLEDMode : int", 1)
+    mode_enum = definition(display_h, "enum OledMode").replace(
+        "enum OledMode", "enum OledMode : int", 1)
     types = "\n".join([
         max_items.group(0),
         mode_enum + ";",
         definition(display_h, "enum class MenuAvailability") + ";",
-        definition(display_h, "struct OLEDMenuItem") + ";",
-        definition(utils_h, "struct OLEDScrollItem") + ";",
-        definition(utils_h, "struct OLEDScrollState") + ";",
+        definition(display_h, "struct OledMenuItem") + ";",
+        definition(utils_h, "struct OledScrollItem") + ";",
+        definition(utils_h, "struct OledScrollState") + ";",
         # Row capacity from the shared layout, as drawing and navigation use it.
         layout,
         definition(utils_h, "inline constexpr int oledVisibleRows("),

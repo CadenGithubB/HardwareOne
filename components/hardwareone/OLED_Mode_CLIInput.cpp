@@ -62,7 +62,7 @@ static void startInputKeyboard() {
   secureClearString(sessionUser);
   if (!sessionAuthed) sInputEpoch = kNoTransportSessionEpoch;
   oledKeyboardInit("Command:", nullptr, OLED_KEYBOARD_MAX_LENGTH,
-                   OLEDKeyboardDictationPolicy::DENY);
+                   OledKeyboardDictationPolicy::DENY);
   sKeyboardActive = true;
 }
 
@@ -237,7 +237,7 @@ static bool handleCLIInputInput(int deltaX, int deltaY, uint32_t newlyPressed) {
 
     // Execute through the same auth context used by all OLED commands.
     char out[256] = {};
-    bool ok = executeOLEDCommandWithResultForSession(
+    bool ok = executeOledCommandWithResultForSession(
         cmd, sessionEpoch, out, sizeof(out));
     secureClearString(cmd);
 
@@ -325,13 +325,13 @@ void oledCLIInputResetSessionState() {
 // Registration
 // ============================================================================
 
-// Entry hook (was an inline reset inside requestOLEDMode): clear the input
+// Entry hook (was an inline reset inside requestOledMode): clear the input
 // buffer on every entry, forward or back.
 static void cliInputOnEnter(bool /*isForward*/) {
   resetCLIInputState();
 }
 
-static const OLEDModeEntry sCLIInputMode = {
+static const OledModeEntry sCLIInputMode = {
   OLED_CLI_INPUT,
   "CLI Input",
   "terminal",

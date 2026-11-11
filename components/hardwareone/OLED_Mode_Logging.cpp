@@ -23,7 +23,7 @@
 LoggingMenuState loggingCurrentState = LOG_MENU_MAIN;
 int loggingMenuSelection = 0;
 static int loggingSensorConfigSelection = 0;
-EXT_RAM_BSS_ATTR static OLEDScrollState loggingConfigScroll;
+EXT_RAM_BSS_ATTR static OledScrollState loggingConfigScroll;
 
 // Menu items — the Auto-Start toggles moved to Config > Settings (modules
 // "sensorlog" / "systemlog", entries sensorLogAutoStart / systemLogAutoStart,
@@ -542,7 +542,7 @@ static void loggingOnEnter(bool isForward) {
   }
 }
 
-static const OLEDModeEntry loggingModeEntry = {
+static const OledModeEntry loggingModeEntry = {
   OLED_LOGGING,
   "Logging",
   "file_text",
@@ -556,7 +556,7 @@ static const OLEDModeEntry loggingModeEntry = {
 };
 
 // Columns: mode, name, iconName, displayFunc, availFunc, inputFunc, showInMenu, menuOrder, hints
-static const OLEDModeEntry loggingModes[] = { loggingModeEntry };
+static const OledModeEntry loggingModes[] = { loggingModeEntry };
 
 REGISTER_OLED_MODE_MODULE(loggingModes, sizeof(loggingModes) / sizeof(loggingModes[0]), "Logging");
 

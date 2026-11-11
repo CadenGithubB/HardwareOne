@@ -2,8 +2,8 @@
 //
 // Umbrella-compliant (matches OLED_Mode_Power / OLED_Mode_Network): each screen
 // is its own OLED mode — no bluetoothInG2Menu / gBluetoothShowingStatus flag-soup.
-// Menus are OLEDScrollState models; status screens and the G2 submenu are pushed
-// sub-modes entered via requestOLEDMode and popped by the global B handler.
+// Menus are OledScrollState models; status screens and the G2 submenu are pushed
+// sub-modes entered via requestOledMode and popped by the global B handler.
 //   OLED_BLUETOOTH            main menu
 //   OLED_BLUETOOTH_STATUS     BT status detail (pushed)
 //   OLED_BLUETOOTH_G2         G2 glasses submenu (pushed, ENABLE_G2_GLASSES)
@@ -57,7 +57,7 @@ enum BtAction {
   BT_ACT_ADVERTISING,
   BT_ACT_DISCONNECT,
 };
-EXT_RAM_BSS_ATTR static OLEDScrollState sBtMenuScroll;
+EXT_RAM_BSS_ATTR static OledScrollState sBtMenuScroll;
 static bool sBtMenuInit = false;
 EXT_RAM_BSS_ATTR static BtAction sBtActions[OLED_SCROLL_MAX_ITEMS];
 // The link the rows were built from: a tap does what its row said.
@@ -405,7 +405,7 @@ static bool bluetoothInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newly
         }
         break;
       case BT_ACT_STATUS:
-        requestOLEDMode(OLED_BLUETOOTH_STATUS, "bluetooth.status");
+        requestOledMode(OLED_BLUETOOTH_STATUS, "bluetooth.status");
         break;
       case BT_ACT_BOOT_ROLE:
         // The saved role only; what runs now is unchanged until a reboot.
@@ -419,7 +419,7 @@ static bool bluetoothInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newly
         break;
       case BT_ACT_SETTINGS:
         if (openSettingsEditorForModule("bluetooth")) {
-          requestOLEDMode(OLED_SETTINGS, "bluetooth.settings");
+          requestOledMode(OLED_SETTINGS, "bluetooth.settings");
         }
         break;
       case BT_ACT_CONSOLE:  // the role the rows showed (sBtShown)
@@ -429,22 +429,22 @@ static bool bluetoothInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newly
         break;
 #if ENABLE_G2_GLASSES
       case BT_ACT_G2:
-        requestOLEDMode(OLED_BLUETOOTH_G2, "bluetooth.g2");
+        requestOledMode(OLED_BLUETOOTH_G2, "bluetooth.g2");
         break;
       case BT_ACT_R1:
-        requestOLEDMode(OLED_BLUETOOTH_R1, "bluetooth.r1");
+        requestOledMode(OLED_BLUETOOTH_R1, "bluetooth.r1");
         break;
 #endif
 #if ENABLE_BLE_PHONE_PIPE
       case BT_ACT_PHONE:
-        requestOLEDMode(OLED_BLUETOOTH_PHONE, "bluetooth.phone");
+        requestOledMode(OLED_BLUETOOTH_PHONE, "bluetooth.phone");
         break;
 #endif
       case BT_ACT_ADVERTISING:  // the rows' console view (sBtShown)
-        if (sBtShown.consoleView.up) executeOLEDCommand("bleadv toggle");
+        if (sBtShown.consoleView.up) executeOledCommand("bleadv toggle");
         break;
       case BT_ACT_DISCONNECT:
-        if (sBtShown.consoleView.clients) executeOLEDCommand("bledisconnect");
+        if (sBtShown.consoleView.clients) executeOledCommand("bledisconnect");
         break;
       default:
         break;
@@ -466,7 +466,7 @@ static const char g2TextInputBuffer[] = "Hello from ESP32!";  // fixed "Show Tex
 
 enum G2Action { G2_ACT_CONNECT, G2_ACT_RECONNECT, G2_ACT_DISCONNECT, G2_ACT_AUTORECON,
                 G2_ACT_STATUS, G2_ACT_SHOW_TEXT, G2_ACT_NAV_MODE };
-EXT_RAM_BSS_ATTR static OLEDScrollState sG2MenuScroll;  // PSRAM, matching sBtMenuScroll
+EXT_RAM_BSS_ATTR static OledScrollState sG2MenuScroll;  // PSRAM, matching sBtMenuScroll
 EXT_RAM_BSS_ATTR static G2Action sG2Actions[OLED_SCROLL_MAX_ITEMS];
 static bool sG2MenuInit = false;
 
@@ -532,13 +532,13 @@ static bool g2InputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed
     if (idx < 0 || idx >= sG2MenuScroll.itemCount) return true;
     switch (sG2Actions[idx]) {
       case G2_ACT_CONNECT:  // admin-gated via cmd_exec (cmd_g2connect stamps)
-        if (!isG2Connected()) executeOLEDCommand("openg2");
+        if (!isG2Connected()) executeOledCommand("openg2");
         break;
       case G2_ACT_RECONNECT:  // the saved pair, as the glasses' "Reconnect G2"
         (void)oledRunCommand("openg2 saved");
         break;
       case G2_ACT_DISCONNECT:
-        if (isG2Connected()) executeOLEDCommand("closeg2");
+        if (isG2Connected()) executeOledCommand("closeg2");
         break;
       case G2_ACT_AUTORECON:  // dispatch the opposite of the current state
         (void)oledRunCommand(blePeerAutoReconnectEnabled(BLE_PEER_G2_GLASSES)
@@ -546,7 +546,7 @@ static bool g2InputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed
                              : "bleautoreconnect g2-glasses on");
         break;
       case G2_ACT_STATUS:
-        requestOLEDMode(OLED_BLUETOOTH_G2_STATUS, "bluetooth.g2.status");
+        requestOledMode(OLED_BLUETOOTH_G2_STATUS, "bluetooth.g2.status");
         break;
       case G2_ACT_SHOW_TEXT:  // fixed payload
         if (isG2Connected()) g2ShowText(g2TextInputBuffer);
@@ -591,7 +591,7 @@ static void displayG2StatusDetail() {
 // surface. A status line above a scrolling list; AutoReconnect used to sit
 // under the footer on the 64 px panel.
 enum R1Action { R1_ACT_CONNECT, R1_ACT_RECONNECT, R1_ACT_DISCONNECT, R1_ACT_AUTORECON };
-EXT_RAM_BSS_ATTR static OLEDScrollState sR1MenuScroll;
+EXT_RAM_BSS_ATTR static OledScrollState sR1MenuScroll;
 EXT_RAM_BSS_ATTR static R1Action sR1Actions[OLED_SCROLL_MAX_ITEMS];
 static bool sR1MenuInit = false;
 
@@ -652,7 +652,7 @@ static bool r1InputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed
       case R1_ACT_CONNECT:  // async, self-scans; admin-gated on cmd_exec
         if (!g2RingIsConnected()) {
           char out[96];
-          if (!executeOLEDCommandWithResult("openring", out, sizeof(out))) {
+          if (!executeOledCommandWithResult("openring", out, sizeof(out))) {
             oledToastShow(bleCentralRingShouldYield() ? "Ring paused: pipe on" : "Ring connect refused", 2000);
           }
         }
@@ -661,10 +661,10 @@ static bool r1InputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed
         (void)oledRunCommand("openring reconnect");
         break;
       case R1_ACT_DISCONNECT:  // async, admin-gated
-        if (g2RingIsConnected()) executeOLEDCommand("closering");
+        if (g2RingIsConnected()) executeOledCommand("closering");
         break;
       case R1_ACT_AUTORECON:  // dispatch the opposite of the current state
-        executeOLEDCommand(blePeerAutoReconnectEnabled(BLE_PEER_R1_RING)
+        executeOledCommand(blePeerAutoReconnectEnabled(BLE_PEER_R1_RING)
                            ? "bleautoreconnect r1-ring off"
                            : "bleautoreconnect r1-ring on");
         break;
@@ -686,7 +686,7 @@ static bool r1InputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed
 enum PhoneAction { PH_ACT_PIPE, PH_ACT_AUTO, PH_ACT_LABEL,
                    PH_ACT_PAIR, PH_ACT_PAIR_NEW, PH_ACT_FORGET };
 static constexpr int kPhoneHeaderLines = 3;  // pipe + pairing, the pipe's words, the console
-EXT_RAM_BSS_ATTR static OLEDScrollState sPhoneScroll;
+EXT_RAM_BSS_ATTR static OledScrollState sPhoneScroll;
 static bool sPhoneScrollInit = false;
 EXT_RAM_BSS_ATTR static PhoneAction sPhoneActions[OLED_SCROLL_MAX_ITEMS];
 // The state the visible rows were built from: a tap does what its row said.
@@ -930,7 +930,7 @@ void oledBluetoothLinkWatch() {
   // cmd_exec gets 2 s to land. Its countdown redraws once a second.
   const PhonePairView pair = phonePipePairView(nullptr);
   if (pair.state == PhonePairWindow::Open && pair.onDisplay) {
-    if (currentOLEDMode == OLED_BLUETOOTH_PHONE_CODE) sPairShownId = pair.id;
+    if (currentOledMode == OLED_BLUETOOTH_PHONE_CODE) sPairShownId = pair.id;
     else if (sPairShownId == pair.id || pair.ageMs >= 2000) phonePipePairClose(pair.id);
     pairSig = (pair.msLeft + 999) / 1000 + 1;  // the screen's seconds, never 0
   }
@@ -947,15 +947,15 @@ void oledBluetoothLinkWatch() {
 }
 
 // Availability check for Bluetooth OLED mode
-static bool bluetoothOLEDModeAvailable(String* /*outReason*/) {
+static bool bluetoothOledModeAvailable(String* /*outReason*/) {
   return true;  // Always show in menu
 }
 
 // ---- Registration ----------------------------------------------------------
 // Columns: mode, name, iconName, displayFunc, availFunc, inputFunc, showInMenu, menuOrder, hints
-static const OLEDModeEntry bluetoothOLEDModes[] = {
+static const OledModeEntry bluetoothOledModes[] = {
   { OLED_BLUETOOTH,        "Bluetooth", "bt_idle", displayBluetoothStatus,
-    bluetoothOLEDModeAvailable, bluetoothInputHandler, true,  45, "A:Select B:Back" },
+    bluetoothOledModeAvailable, bluetoothInputHandler, true,  45, "A:Select B:Back" },
   { OLED_BLUETOOTH_STATUS, "BT Status", "bt_idle", displayBluetoothStatusDetail,
     nullptr, nullptr,                                  false, -1, "B:Back" },
 #if ENABLE_G2_GLASSES
@@ -974,11 +974,11 @@ static const OLEDModeEntry bluetoothOLEDModes[] = {
 #endif
 };
 
-REGISTER_OLED_MODE_MODULE(bluetoothOLEDModes, sizeof(bluetoothOLEDModes) / sizeof(bluetoothOLEDModes[0]), "Bluetooth");
+REGISTER_OLED_MODE_MODULE(bluetoothOledModes, sizeof(bluetoothOledModes) / sizeof(bluetoothOledModes[0]), "Bluetooth");
 
 // Linker anchor — with no external reference, --gc-sections drops this whole object
 // file and the registrar above never runs, so OLED_BLUETOOTH renders "no render".
-// printRegisteredOLEDModes() calls this no-op to force the file to be linked.
+// printRegisteredOledModes() calls this no-op to force the file to be linked.
 // (Mirrors oledMenuModeInit() in OLED_Mode_Menu.cpp.)
 void oledBluetoothModeInit() {}
 

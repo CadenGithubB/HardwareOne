@@ -66,8 +66,8 @@ void oledToastRender();
 // (Removed) OledList modal list-selector overlay
 // ----------------------------------------------------------------------------
 // The OledList component was a dormant modal list-picker superseded by
-// OLEDScrollState (OLED_Utils.h). It had no callers and was removed. For any
-// list/menu, use OLEDScrollState + oledScrollRenderSimple/oledScrollHandleNav.
+// OledScrollState (OLED_Utils.h). It had no callers and was removed. For any
+// list/menu, use OledScrollState + oledScrollRenderSimple/oledScrollHandleNav.
 
 // ----------------------------------------------------------------------------
 // Pairing Ribbon Component - Animated status indicator

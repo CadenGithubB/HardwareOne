@@ -1,6 +1,6 @@
 // test_sensorlog_ui.py, second unit: the Logging "Configure" list drawn by the
 // shipping scroll code. The driver splices in the sensor catalog, the
-// OLEDScrollItem/OLEDScrollState types (OLED_Utils.h), the scroll primitives and
+// OledScrollItem/OledScrollState types (OLED_Utils.h), the scroll primitives and
 // both list renderers (OLED_Utils.cpp), the Logging row constants,
 // handleLoggingModeInput and the LOG_MENU_SENSOR_CONFIG render block. The
 // display records every draw so each frame can be checked against the
@@ -66,8 +66,8 @@ class Adafruit_SSD1306 {
  private:
   int cx_ = 0, cy_ = 0;
 };
-struct OLEDFooterHints;
-void oledRenderFooter(Adafruit_SSD1306*, const OLEDFooterHints*) {}
+struct OledFooterHints;
+void oledRenderFooter(Adafruit_SSD1306*, const OledFooterHints*) {}
 bool oledDrawIcon(Adafruit_SSD1306*, const char*, int, int, int) { return true; }
 
 struct NavEvents {
@@ -79,18 +79,18 @@ NavEvents gNavEvents = {};
 // INSERT_TYPES
 
 // Declarations with the header's default arguments (OLED_Utils.h).
-void oledScrollInit(OLEDScrollState* state, const char* title = nullptr, int visibleLines = 4);
-bool oledScrollAddItem(OLEDScrollState* state, const char* line1, const char* line2 = nullptr,
+void oledScrollInit(OledScrollState* state, const char* title = nullptr, int visibleLines = 4);
+bool oledScrollAddItem(OledScrollState* state, const char* line1, const char* line2 = nullptr,
                        bool selectable = true, void* userData = nullptr);
-void oledScrollClear(OLEDScrollState* state);
-void oledScrollClampSelection(OLEDScrollState* state);
-void oledScrollUp(OLEDScrollState* state);
-void oledScrollDown(OLEDScrollState* state);
-bool oledScrollHandleNav(OLEDScrollState* state, bool leftRightNav = false);
-void oledScrollSetSplitPane(OLEDScrollState* state, int listWidth, int separatorX, int iconSize = 32);
-void oledScrollRender(Adafruit_SSD1306* display, OLEDScrollState* state, bool showScrollbar = true,
-                      bool showSelection = true, const OLEDFooterHints* footerHints = nullptr);
-void oledScrollRenderSimple(Adafruit_SSD1306* display, OLEDScrollState* state,
+void oledScrollClear(OledScrollState* state);
+void oledScrollClampSelection(OledScrollState* state);
+void oledScrollUp(OledScrollState* state);
+void oledScrollDown(OledScrollState* state);
+bool oledScrollHandleNav(OledScrollState* state, bool leftRightNav = false);
+void oledScrollSetSplitPane(OledScrollState* state, int listWidth, int separatorX, int iconSize = 32);
+void oledScrollRender(Adafruit_SSD1306* display, OledScrollState* state, bool showScrollbar = true,
+                      bool showSelection = true, const OledFooterHints* footerHints = nullptr);
+void oledScrollRenderSimple(Adafruit_SSD1306* display, OledScrollState* state,
                             bool showSelection = true, int startY = OLED_CONTENT_START_Y);
 
 // INSERT_SCROLL
@@ -107,14 +107,14 @@ static LoggingMenuState loggingCurrentState = LOG_MENU_MAIN;
 static int loggingMenuSelection = 0, loggingSensorConfigSelection = 0;
 static const int loggingMainMenuCount = 3, loggingSensorMenuCount = 3;
 static const int loggingSystemMenuCount = 3;
-static OLEDScrollState loggingConfigScroll;
+static OledScrollState loggingConfigScroll;
 static Adafruit_SSD1306 display;
 static Adafruit_SSD1306* oledDisplay = &display;
 enum { INPUT_BUTTON_A = 1, INPUT_BUTTON_B = 2 };
 #define INPUT_CHECK(value, button) ((value) & (button))
 bool oledGuestBlocksMutate() { return false; }
 static std::vector<std::string> requests;
-void executeOLEDCommand(const String& command) { requests.emplace_back(command.c_str()); }
+void executeOledCommand(const String& command) { requests.emplace_back(command.c_str()); }
 bool oledRunCommand(const String& command) { requests.emplace_back(command.c_str()); return true; }
 // System Logging > Configure has its own block and test (systemlog_config_ui);
 // these record the hand-off from the shared handler.

@@ -243,13 +243,13 @@ static void draw() {
     oledDisplay->println(state.error[0] ? state.error : "X: Start camera");
   }
 }
-static const OLEDModeEntry modes[] = {
+static const OledModeEntry modes[] = {
   {OLED_CAMERA, "Camera", "notify_sensor", draw, nullptr, input, true, 21, "A:Hold Y:Photo B:Back"}
 };
 REGISTER_OLED_MODE_MODULE(modes, 1, "Camera");
 } // namespace
 
-void resetOLEDCameraPreview() {
+void resetOledCameraPreview() {
   portENTER_CRITICAL(&mutex);
   const bool workerRunning = view.worker;
   const bool workInFlight = view.working;
@@ -267,18 +267,18 @@ void resetOLEDCameraPreview() {
 }
 
 void prepareCameraPreviewData() {
-  const bool here = currentOLEDMode == OLED_CAMERA && gOledRunning && oledConnected &&
+  const bool here = currentOledMode == OLED_CAMERA && gOledRunning && oledConnected &&
                     displayIsReady() && powerLocalDisplayAwake() && !oledIsGuestSession();
   auto state = snapshot();
   if (!here) {
-    if (state.active || state.ready) resetOLEDCameraPreview();
+    if (state.active || state.ready) resetOledCameraPreview();
     return;
   }
   String user;
   bool authed = false;
   const auto epoch = localDisplayTransportSessionSnapshot(user, authed);
-  if (!authed || !epoch) { if (state.active) resetOLEDCameraPreview(); return; }
-  if (state.active && state.epoch != epoch) { resetOLEDCameraPreview(); state = snapshot(); }
+  if (!authed || !epoch) { if (state.active) resetOledCameraPreview(); return; }
+  if (state.active && state.epoch != epoch) { resetOledCameraPreview(); state = snapshot(); }
   portENTER_CRITICAL(&mutex);
   view.active = true;
   view.epoch = epoch;

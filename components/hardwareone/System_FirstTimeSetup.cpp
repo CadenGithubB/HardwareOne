@@ -217,7 +217,7 @@ static void noteNtpStateBeforeSetupReboot() {
 
 #if ENABLE_WIFI
 // Serial WiFi scan + pick for "Import from Backup" when ENABLE_OLED_DISPLAY is off
-// (getOLEDWifiSelection lives in OLED_FirstTimeSetup.cpp and is not built).
+// (getOledWifiSelection lives in OLED_FirstTimeSetup.cpp and is not built).
 static bool serialWifiSelectionForRestore(String& outSSID) {
   outSSID = "";
   while (true) {
@@ -417,7 +417,7 @@ static bool setOwnerCredentialAgain() {
   broadcastOutput("");
 #if ENABLE_OLED_DISPLAY
   if (gOledRunning && oledConnected) {
-    showOLEDMessage("Owner login lost\n\nSet a new\nowner password", false);
+    showOledMessage("Owner login lost\n\nSet a new\nowner password", false);
   }
 #endif
 
@@ -428,7 +428,7 @@ static bool setOwnerCredentialAgain() {
 #if ENABLE_OLED_DISPLAY
     if (gOledRunning && oledConnected) {
       bool cancelled = false;
-      p = getOLEDTextInput("Owner Password:", true, "", 32, &cancelled, false);
+      p = getOledTextInput("Owner Password:", true, "", 32, &cancelled, false);
       if (cancelled) return false;
     } else {
 #endif
@@ -491,7 +491,7 @@ static bool runPostRestoreCredentialSetup(bool ownerRecovery = false) {
   broadcastOutput("");
 #if ENABLE_OLED_DISPLAY
   if (gOledRunning && oledConnected) {
-    showOLEDMessage("Restore done!\n\nCreate your\nadmin login", false);
+    showOledMessage("Restore done!\n\nCreate your\nadmin login", false);
   }
 #endif
 
@@ -502,7 +502,7 @@ static bool runPostRestoreCredentialSetup(bool ownerRecovery = false) {
 #if ENABLE_OLED_DISPLAY
     if (gOledRunning && oledConnected) {
       bool cancelled = false;
-      u = getOLEDTextInput("Admin Username:", false, "", 32, &cancelled, false);
+      u = getOledTextInput("Admin Username:", false, "", 32, &cancelled, false);
       if (cancelled) return false;
     } else {
 #endif
@@ -521,7 +521,7 @@ static bool runPostRestoreCredentialSetup(bool ownerRecovery = false) {
 #if ENABLE_OLED_DISPLAY
     if (gOledRunning && oledConnected) {
       bool cancelled = false;
-      p = getOLEDTextInput("Admin Password:", true, "", 32, &cancelled, false);
+      p = getOledTextInput("Admin Password:", true, "", 32, &cancelled, false);
       if (cancelled) return false;
     } else {
 #endif
@@ -604,7 +604,7 @@ void firstTimeSetupIfNeeded() {
 #if ENABLE_OLED_DISPLAY
   // Use OLED selection if available
   if (gOledRunning && oledConnected) {
-    getOLEDSetupModeSelection(setupMode);
+    getOledSetupModeSelection(setupMode);
   } else {
 #endif
     // Serial-only mode selection
@@ -647,7 +647,7 @@ void firstTimeSetupIfNeeded() {
     while (!wifiSelected) {
       // Network selection (scan + pick from list)
 #if ENABLE_OLED_DISPLAY
-      if (!getOLEDWifiSelection(restoreSSID)) {
+      if (!getOledWifiSelection(restoreSSID)) {
         // User pressed B / cancelled — go back to setup mode selection
         goBack = true;
         break;
@@ -667,7 +667,7 @@ void firstTimeSetupIfNeeded() {
       bool passwordCancelled = false;
 #if ENABLE_OLED_DISPLAY
       if (gOledRunning && oledConnected) {
-        restorePass = getOLEDTextInput("WiFi Password:", true, "", 64, &passwordCancelled);
+        restorePass = getOledTextInput("WiFi Password:", true, "", 64, &passwordCancelled);
       } else {
 #endif
         broadcastOutput("Enter WiFi Password (blank for open, 'back' to re-select): ");
@@ -696,7 +696,7 @@ void firstTimeSetupIfNeeded() {
     // Step 2: Save WiFi credentials and connect using the proven connection infrastructure
     broadcastOutput("Connecting to WiFi: " + restoreSSID);
 #if ENABLE_OLED_DISPLAY
-    showOLEDMessage(("Connecting WiFi:\n" + restoreSSID).c_str(), false);
+    showOledMessage(("Connecting WiFi:\n" + restoreSSID).c_str(), false);
 #endif
 
     const WifiNetworkSaveResult wifiSaved =
@@ -705,7 +705,7 @@ void firstTimeSetupIfNeeded() {
     if (wifiSaved != WifiNetworkSaveResult::Accepted) {
       broadcastOutput("Returning to setup mode selection.");
 #if ENABLE_OLED_DISPLAY
-      showOLEDMessage("WiFi save failed\nReturning to\nsetup menu", true);
+      showOledMessage("WiFi save failed\nReturning to\nsetup menu", true);
 #endif
       continue;
     }
@@ -719,7 +719,7 @@ void firstTimeSetupIfNeeded() {
       broadcastOutput("Error: Failed to connect to WiFi. Cannot use Import from Backup.");
       broadcastOutput("Falling back to Basic Setup.");
 #if ENABLE_OLED_DISPLAY
-      showOLEDMessage("WiFi connect\nfailed!\n\nFalling back to\nBasic Setup", true);
+      showOledMessage("WiFi connect\nfailed!\n\nFalling back to\nBasic Setup", true);
 #endif
       setupMode = 0;
     } else {
@@ -754,7 +754,7 @@ void firstTimeSetupIfNeeded() {
       broadcastOutput("");
 
 #if ENABLE_OLED_DISPLAY
-      // The full restore message doesn't fit the OLED (showOLEDMessage shows ~5
+      // The full restore message doesn't fit the OLED (showOledMessage shows ~5
       // lines), so present it as flip-able pages — A = next, B = back. Serial
       // (above) shows the whole thing at once. Pages are rendered in the wait loop.
       String rtitles[3] = { "Restore Mode", "Device IP", "Get the Tool" };
@@ -783,8 +783,8 @@ void firstTimeSetupIfNeeded() {
           broadcastOutput("Confirm to write files and reboot.");
 #if ENABLE_OLED_DISPLAY
           // Default No — LAN upload alone must not apply. Serial y/n also works
-          // inside getOLEDYesNoPrompt (OLED path listens to serial too).
-          bool confirmed = getOLEDYesNoPrompt(migrationStagedOledPrompt().c_str(), false);
+          // inside getOledYesNoPrompt (OLED path listens to serial too).
+          bool confirmed = getOledYesNoPrompt(migrationStagedOledPrompt().c_str(), false);
 #else
           broadcastOutput("Type 'yes' to apply, or 'no' to discard: ");
           String line = waitForSerialInputBlocking();
@@ -795,7 +795,7 @@ void firstTimeSetupIfNeeded() {
           if (confirmed) {
             broadcastOutput("Applying restore...");
 #if ENABLE_OLED_DISPLAY
-            showOLEDMessage("Applying\nrestore...", false);
+            showOledMessage("Applying\nrestore...", false);
 #endif
             if (!applyStagedMigrationRestore()) {
               broadcastOutput("Restore apply failed. Waiting for another backup...");
@@ -807,7 +807,7 @@ void firstTimeSetupIfNeeded() {
             discardStagedMigrationRestore();
             broadcastOutput("Restore discarded. Waiting for another backup...");
 #if ENABLE_OLED_DISPLAY
-            showOLEDMessage("Restore\ndiscarded", true);
+            showOledMessage("Restore\ndiscarded", true);
             lastRpage = -1;
 #endif
           }
@@ -858,7 +858,7 @@ void firstTimeSetupIfNeeded() {
         broadcastOutput("");
         broadcastOutput("Returning to setup mode selection...");
 #if ENABLE_OLED_DISPLAY
-        showOLEDMessage("Returning to\nsetup menu...", false);
+        showOledMessage("Returning to\nsetup menu...", false);
 #endif
         continue;  // Restart outer while(true) loop
       }
@@ -889,7 +889,7 @@ void firstTimeSetupIfNeeded() {
     int archIdx = 0;
 #if ENABLE_OLED_DISPLAY
     if (gOledRunning && oledConnected) {
-      archIdx = getOLEDArchetypeSelection();   // index, or -1 = back
+      archIdx = getOledArchetypeSelection();   // index, or -1 = back
     } else {
 #endif
       broadcastOutput("");
@@ -938,7 +938,7 @@ void firstTimeSetupIfNeeded() {
   while (u.length() == 0) {
 #if ENABLE_OLED_DISPLAY
     bool cancelled = false;
-    u = getOLEDTextInput("Admin Username:", false, "", 32, &cancelled, false);
+    u = getOledTextInput("Admin Username:", false, "", 32, &cancelled, false);
     if (cancelled) { setupBack = true; break; }
 #else
     u = waitForSerialInputBlocking();
@@ -951,7 +951,7 @@ void firstTimeSetupIfNeeded() {
         broadcastOutput("Username cannot be blank ('b' to go back): ");
       }
 #if ENABLE_OLED_DISPLAY
-      showOLEDMessage("Username cannot\nbe blank!", true);
+      showOledMessage("Username cannot\nbe blank!", true);
 #endif
     }
   }
@@ -967,7 +967,7 @@ void firstTimeSetupIfNeeded() {
     }
 #if ENABLE_OLED_DISPLAY
     bool cancelled = false;
-    p = getOLEDTextInput("Admin Password:", true, "", 32, &cancelled, false);
+    p = getOledTextInput("Admin Password:", true, "", 32, &cancelled, false);
     if (cancelled) { setupBack = true; break; }
 #else
     p = waitForSerialInputBlocking();
@@ -980,7 +980,7 @@ void firstTimeSetupIfNeeded() {
         broadcastOutput("Password cannot be blank ('b' to go back): ");
       }
 #if ENABLE_OLED_DISPLAY
-      showOLEDMessage("Password cannot\nbe blank!", true);
+      showOledMessage("Password cannot\nbe blank!", true);
 #endif
     }
   }
@@ -1031,7 +1031,7 @@ void firstTimeSetupIfNeeded() {
   String themeInput = "";
 #if ENABLE_OLED_DISPLAY
   bool darkSelected = false;
-  if (gOledRunning && oledConnected && getOLEDThemeSelection(darkSelected)) {
+  if (gOledRunning && oledConnected && getOledThemeSelection(darkSelected)) {
     themeInput = darkSelected ? "2" : "1";
   } else {
     themeInput = waitForSerialInputBlocking();

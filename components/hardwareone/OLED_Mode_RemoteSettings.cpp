@@ -95,7 +95,7 @@ static bool handleRemoteSettingsInput(int deltaX, int deltaY, uint32_t newlyPres
 }
 
 // Remote settings mode entry
-static const OLEDModeEntry remoteSettingsModeEntry = {
+static const OledModeEntry remoteSettingsModeEntry = {
   OLED_REMOTE_SETTINGS,
   "Remote Settings",
   "settings",

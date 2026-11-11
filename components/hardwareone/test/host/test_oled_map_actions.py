@@ -71,7 +71,7 @@ def map_actions_unit(component: Path) -> str:
         extract_block(user, "struct AuthContext") + ";",
         define_lines(file_manager, "FILE_MANAGER_MAX_PATH", "FILE_MANAGER_MAX_NAME"),
         extract_block(file_manager, "struct FileEntry") + ";",
-        extract_block(display, "enum OLEDMode") + ";",
+        extract_block(display, "enum OledMode") + ";",
         extract_block(display, "struct FilePickerRequest") + ";",
         extract_block(maps_h, "enum MapFeatureType") + ";",
         define_lines(maps_h, "HWMAP_FTYPE_", "HWMAP_FEATURE_HEADER_SIZE", "LAYER_",
@@ -79,9 +79,9 @@ def map_actions_unit(component: Path) -> str:
         extract_block(maps_h, "struct Waypoint") + ";",
     ]
     guard = []
-    if "class OLEDMapCtxGuard" in oled:
+    if "class OledMapCtxGuard" in oled:
         guard = [extract_block(oled, "static AuthContext oledMapAuthContext("),
-                 extract_block(oled, "class OLEDMapCtxGuard") + ";"]
+                 extract_block(oled, "class OledMapCtxGuard") + ";"]
     display_head = extract_block(oled, "static void displayGPSMap(")
     display_head = display_head[:display_head.index("  // Initialize async renderer on first call")] + "}\n"
     production = [

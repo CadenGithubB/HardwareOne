@@ -101,14 +101,14 @@ static void updateInputState() {
 static uint32_t getNewlyPressedButtons() { return currentInput.buttons; }
 static void getJoystickDelta(int& x, int& y) { x = currentInput.x; y = currentInput.y; }
 
-enum class OLEDKeyboardDictationPolicy { DENY, ALLOW_PLAINTEXT };
+enum class OledKeyboardDictationPolicy { DENY, ALLOW_PLAINTEXT };
 static struct { char text[OLED_KEYBOARD_MAX_LENGTH + 1] = {}; int textLength = 0; } gOledKeyboardState;
 static bool keyboardActive, keyboardCancelled;
 static int keyboardResetCalls;
-static OLEDKeyboardDictationPolicy lastDictationPolicy;
+static OledKeyboardDictationPolicy lastDictationPolicy;
 static bool lastMasked;
 static std::vector<std::string> renderedTexts;  // the field buffer at each keyboard render
-static void oledKeyboardInit(const char*, const char* value, int, OLEDKeyboardDictationPolicy policy,
+static void oledKeyboardInit(const char*, const char* value, int, OledKeyboardDictationPolicy policy,
                              bool masked = false) {
   keyboardActive = true; keyboardCancelled = false; lastDictationPolicy = policy; lastMasked = masked;
   std::snprintf(gOledKeyboardState.text, sizeof(gOledKeyboardState.text), "%s", value ? value : "");
@@ -195,7 +195,7 @@ static void renderWizardPage() {}
 static void clearWizardWifiChoices() { ++wifiClearCalls; }
 static bool cliModeNoteActivity() { ++activityCalls; return true; }
 static void cliExitMode() { ++exitCalls; exitSawCompleted = sWizard.result.completed; }
-static String getOLEDTextInput(const char*, bool, const char*, int, bool* = nullptr, bool = true);
+static String getOledTextInput(const char*, bool, const char*, int, bool* = nullptr, bool = true);
 
 // INSERT_PRODUCTION
 
@@ -224,14 +224,14 @@ static void testKeyboardCancelAndTimeout() {
   // never echoed; only the idle timeout cancels it.
   reset(); serialInputs.push_back({0, " CaNcEl "});
   bool cancelled = false;
-  assert(getOLEDTextInput("Password", true, "not-persisted", 32, &cancelled) == "CaNcEl");
+  assert(getOledTextInput("Password", true, "not-persisted", 32, &cancelled) == "CaNcEl");
   assert(!cancelled && !isWizardCancelRequested());
-  assert(lastDictationPolicy == OLEDKeyboardDictationPolicy::DENY && output.empty());
+  assert(lastDictationPolicy == OledKeyboardDictationPolicy::DENY && output.empty());
   assertKeyboardReleased();
   // The password prompt opens the keyboard masked, and its render leaves the
   // shared buffer alone: the keyboard draws the '*', not the caller.
   reset(); setSerialWaitTimeout(75); renderedTexts.clear(); cancelled = false;
-  assert(getOLEDTextInput("Password", true, "Kq7mZp3R", 32, &cancelled).empty() && cancelled);
+  assert(getOledTextInput("Password", true, "Kq7mZp3R", 32, &cancelled).empty() && cancelled);
   assert(lastMasked && "a password prompt must open the keyboard masked");
   assert(!renderedTexts.empty());
   for (const std::string& rendered : renderedTexts) {
@@ -239,19 +239,19 @@ static void testKeyboardCancelAndTimeout() {
   }
   assertKeyboardReleased();
   reset(); setSerialWaitTimeout(75); cancelled = false;
-  assert(getOLEDTextInput("Password", true, "", 32, &cancelled).empty());
+  assert(getOledTextInput("Password", true, "", 32, &cancelled).empty());
   assert(cancelled && isWizardCancelRequested() && nowMs == 100);
   assertKeyboardReleased();
 
   reset(); setSerialWaitTimeout(75);
   cancelled = false;
-  assert(getOLEDTextInput("Name", false, "draft", 32, &cancelled).empty());
+  assert(getOledTextInput("Name", false, "draft", 32, &cancelled).empty());
   assert(cancelled && isWizardCancelRequested() && nowMs == 100);
   assertKeyboardReleased();
 
   reset(); physicalInputs.push_back({0, INPUT_MASK(INPUT_BUTTON_B)});
   cancelled = false;
-  assert(getOLEDTextInput("Name", false, "draft", 32, &cancelled).empty());
+  assert(getOledTextInput("Name", false, "draft", 32, &cancelled).empty());
   assert(cancelled && !isWizardCancelRequested()); // B means Back within text input.
   assertKeyboardReleased();
 
@@ -259,19 +259,19 @@ static void testKeyboardCancelAndTimeout() {
   physicalInputs.push_back({50, 0, 0, 0, 1});
   physicalInputs.push_back({100, INPUT_MASK(INPUT_BUTTON_A)});
   cancelled = false;
-  assert(getOLEDTextInput("Name", false, "draft", 32, &cancelled) == "draft");
+  assert(getOledTextInput("Name", false, "draft", 32, &cancelled) == "draft");
   assert(!cancelled && !isWizardCancelRequested() && nowMs == 150);
   assert(!lastMasked && "a plain prompt opens the keyboard unmasked");
   assertKeyboardReleased();
 
   reset(); requestWizardCancel(); gWizardOwnsSerial = false;
   serialInputs.push_back({0, "cancel"}); cancelled = false;
-  assert(getOLEDTextInput("Basic text", false, "", 32, &cancelled) == "cancel");
+  assert(getOledTextInput("Basic text", false, "", 32, &cancelled) == "cancel");
   assert(!cancelled); // Basic/Import callers do not reserve the wizard cancel word.
   assertKeyboardReleased();
 
   reset(); oledConnected = false; serialInputs.push_back({0, "cancel"}); cancelled = false;
-  assert(getOLEDTextInput("Name", false, "", 32, &cancelled).empty());
+  assert(getOledTextInput("Name", false, "", 32, &cancelled).empty());
   assert(cancelled && isWizardCancelRequested());
 }
 
@@ -305,30 +305,30 @@ static void testRetryOrSkipWait() {
 static void testWifiPickerCancel() {
   reset(); serialInputs.push_back({0, "cancel"});
   String selected = "old scratch";
-  assert(!getOLEDWifiSelection(selected) && isWizardCancelRequested());
+  assert(!getOledWifiSelection(selected) && isWizardCancelRequested());
 #if ENABLE_WIFI
   assert(selected.empty() && sFtsWifiStoredCount == 0);
   reset(); setSerialWaitTimeout(75); selected = "old scratch";
-  assert(!getOLEDWifiSelection(selected) && isWizardCancelRequested() && nowMs == 100);
+  assert(!getOledWifiSelection(selected) && isWizardCancelRequested() && nowMs == 100);
   assert(selected.empty() && sFtsWifiStoredCount == 0);
 
   for (bool failedScan : {false, true}) {
     reset(); scanAccepted = !failedScan; scannedNetworks.clear();
     serialInputs.push_back({0, "cancel"});
-    assert(!getOLEDWifiSelection(selected) && isWizardCancelRequested());
+    assert(!getOledWifiSelection(selected) && isWizardCancelRequested());
     assert(scanCalls == 1 && sFtsWifiStoredCount == 0);
     // Serial 'skip' and 'rescan' act like the B and A the display offers.
     reset(); scanAccepted = !failedScan; scannedNetworks.clear();
     serialInputs.push_back({0, "skip"});
-    assert(!getOLEDWifiSelection(selected) && !isWizardCancelRequested() && scanCalls == 1);
+    assert(!getOledWifiSelection(selected) && !isWizardCancelRequested() && scanCalls == 1);
     reset(); scanAccepted = !failedScan; scannedNetworks.clear();
     serialInputs.push_back({0, "rescan"}); serialInputs.push_back({10, "skip"});
-    assert(!getOLEDWifiSelection(selected) && !isWizardCancelRequested() && scanCalls == 2);
+    assert(!getOledWifiSelection(selected) && !isWizardCancelRequested() && scanCalls == 2);
   }
 
   reset(); requestWizardCancel(); gWizardOwnsSerial = false;
   serialInputs.push_back({0, "cancel"});
-  assert(getOLEDWifiSelection(selected) && selected == "cancel");
+  assert(getOledWifiSelection(selected) && selected == "cancel");
   assert(sFtsWifiStoredCount == 0); // Ordinary callers still accept this SSID.
 #endif
 }

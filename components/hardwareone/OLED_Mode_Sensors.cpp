@@ -95,12 +95,12 @@ void prepareConnectedSensorsData() {
   }
   
   // Reset scroll state when switching away from this mode
-  static OLEDMode lastMode = OLED_OFF;
-  if (currentOLEDMode != lastMode) {
+  static OledMode lastMode = OLED_OFF;
+  if (currentOledMode != lastMode) {
     connectedSensorsRenderData.scrollOffset = 0;
     scrollComplete = false;
     lastScrollTime = now;
-    lastMode = currentOLEDMode;
+    lastMode = currentOledMode;
   }
   
   connectedSensorsRenderData.isPaused = false;
@@ -351,7 +351,7 @@ static void i2cDiagRunScan() {
   }
 }
 
-// Pre-render hook (registered in the updateOLEDDisplay switch). Advances the
+// Pre-render hook (registered in the updateOledDisplay switch). Advances the
 // scan phase; the actual sweep runs here, off the render transaction.
 void prepareI2cDiagData() {
   if (sI2cDiagPhase == 1) { sI2cDiagPhase = 2; return; }  // let "Scanning" paint
@@ -432,7 +432,7 @@ static void i2cDiagOnEnter(bool isForward) {
 // Mode Registration
 // ============================================================================
 
-static const OLEDModeEntry sSensorModes[] = {
+static const OledModeEntry sSensorModes[] = {
   { OLED_SENSOR_DATA,  "Sensor Data", "notify_sensor", displaySensorData,              nullptr, sensorDataInputHandler, false, -1, "B:Back" },
   { OLED_SENSOR_LIST,  "Sensor List", "notify_sensor", displayConnectedSensorsRendered, nullptr, nullptr,               false, -1, "B:Back" },
   { OLED_BOOT_SENSORS, "Boot",        "notify_sensor", displayConnectedSensorsRendered, nullptr, nullptr,               false, -1, "B:Back" },

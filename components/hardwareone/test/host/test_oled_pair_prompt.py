@@ -70,10 +70,10 @@ def build_unit(component: Path, source_dir: Path | None) -> str:
     oled = read_source(component, source_dir, "OLED_ESPNow.cpp")
     utils = read_source(component, source_dir, "OLED_Utils.cpp")
     display = read_source(component, source_dir, "OLED_Display.h")
-    types = [extract_block(display, marker) + ";" for marker in ("enum OLEDMode", "struct NavEvents")]
-    state = re.search(r"(?m)^static OLEDConfirmState gOledConfirmState\b[^\n]*;", utils)
+    types = [extract_block(display, marker) + ";" for marker in ("enum OledMode", "struct NavEvents")]
+    state = re.search(r"(?m)^static OledConfirmState gOledConfirmState\b[^\n]*;", utils)
     require(state is not None, "OLED_Utils.cpp: gOledConfirmState is missing")
-    confirm = [extract_block(utils, "struct OLEDConfirmState") + ";", state.group(0)]
+    confirm = [extract_block(utils, "struct OledConfirmState") + ";", state.group(0)]
     confirm += [definition(utils, signature) for signature in CONFIRM_FUNCTIONS]
     # The shared refusal helper exists only after the A2/A12 fixes; a tree
     # without it still compiles here and is judged by the behavioral cases.

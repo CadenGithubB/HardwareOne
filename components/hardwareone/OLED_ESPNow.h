@@ -22,7 +22,7 @@
 // - Gamepad navigation for all interactions
 
 // ESP-NOW OLED view states
-enum OLEDEspNowView {
+enum OledEspNowView {
   ESPNOW_VIEW_INIT_PROMPT,    // Initialization prompt (Y to start)
   ESPNOW_VIEW_NAME_KEYBOARD,  // Virtual keyboard for device naming
   ESPNOW_VIEW_MAIN_MENU,      // Top-level menu (like Bluetooth mode)
@@ -41,16 +41,16 @@ enum OLEDEspNowView {
 };
 
 // ESP-NOW interaction mode
-enum OLEDEspNowMode {
+enum OledEspNowMode {
   ESPNOW_MODE_TEXT,
   ESPNOW_MODE_REMOTE,
   ESPNOW_MODE_FILE
 };
 
 // OLED ESP-NOW state
-struct OLEDEspNowState {
-  OLEDEspNowView currentView;
-  OLEDEspNowMode interactionMode;
+struct OledEspNowState {
+  OledEspNowView currentView;
+  OledEspNowMode interactionMode;
   
   // Currently selected device (MAC address)
   uint8_t selectedDeviceMac[6];
@@ -104,7 +104,7 @@ struct OLEDEspNowState {
 };
 
 // Global ESP-NOW OLED state
-extern OLEDEspNowState gOledEspNowState;
+extern OledEspNowState gOledEspNowState;
 
 // Initialize OLED ESP-NOW interface
 void oledEspNowInit();
@@ -119,7 +119,7 @@ const char* oledEspNowHeaderTitle();
 // Launch the shared OLED file browser (OLED_FILE_BROWSER) targeting a specific
 // ESP-NOW peer. Receive → browse + FS_GET download the peer's files; Send →
 // pick a local file and send it to the peer. Defined in OLED_Mode_FileBrowser.cpp.
-// Caller transitions to OLED_FILE_BROWSER via requestOLEDMode() afterward.
+// Caller transitions to OLED_FILE_BROWSER via requestOledMode() afterward.
 void oledFileBrowserStartEspNowReceive(const uint8_t mac[6]);
 void oledFileBrowserStartEspNowSend(const uint8_t mac[6]);
 

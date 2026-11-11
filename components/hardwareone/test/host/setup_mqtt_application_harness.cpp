@@ -72,7 +72,7 @@ static String readInput() {
   return inputs[inputIndex++];
 }
 static String waitForSerialInputBlocking() { return readInput(); }
-static String getOLEDTextInput(const char*, bool, const char*, int, bool* cancelled) {
+static String getOledTextInput(const char*, bool, const char*, int, bool* cancelled) {
   String value = readInput();
   *cancelled = cancelRequested;
   return value;
@@ -172,24 +172,24 @@ static void serialCases() {
 static void oledCases() {
   SetupWizardResult result{}; bool running = true;
   reset(); inputs = {"new.host", "65535", "new-user", "new-secret"};
-  handleOLEDMQTTPage(result, running);
+  handleOledMQTTPage(result, running);
   submitted("new.host", 65535, "new-user", "new-secret"); assert(nextCalls == 1 && running);
   reset(); result = {}; inputs = {"new.host", "70000", "1883", "user", "pass"};
-  handleOLEDMQTTPage(result, running);
+  handleOledMQTTPage(result, running);
   submitted("new.host", 1883, "user", "pass"); assert(inputIndex == 5);
   for (int cancel = 0; cancel < 4; ++cancel) {
     reset(); result = {}; running = true; inputs = {"new.host", "2000", "new-user", "new-secret"}; cancelInput = cancel;
-    handleOLEDMQTTPage(result, running);
+    handleOledMQTTPage(result, running);
     broker(); assert(staged.empty() && previousCalls == 0 && nextCalls == 0 && !running);
   }
   reset(); result = {}; introChoice = 0;
-  handleOLEDMQTTPage(result, running);
+  handleOledMQTTPage(result, running);
   broker(); assert(draftAutoStart && staged.empty() && nextCalls == 1);
   reset(); result = {}; introChoice = 0; draftValues.mqttHost = "";
-  handleOLEDMQTTPage(result, running);
+  handleOledMQTTPage(result, running);
   broker(); assert(!draftAutoStart && staged.empty() && nextCalls == 1);
   reset(); result = {}; inputs = {"new.host", "1883", "user", "pass"}; stageSucceeds = false;
-  handleOLEDMQTTPage(result, running); broker(); assert(nextCalls == 0 && staged.size() == 1);
+  handleOledMQTTPage(result, running); broker(); assert(nextCalls == 0 && staged.size() == 1);
 }
 static void cliCases() {
   reset();

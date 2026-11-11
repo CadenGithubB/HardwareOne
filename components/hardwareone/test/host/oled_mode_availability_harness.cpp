@@ -1,9 +1,9 @@
 // Host harness for test_oled_mode_availability.py: launcher availability must
-// apply each mode module's own entry rule (OLEDModeEntry::availFunc, found
+// apply each mode module's own entry rule (OledModeEntry::availFunc, found
 // through the production registry) on top of the central build/hardware/
 // feature classification.
 //
-// The suite pastes the production mode enum, callback typedefs, OLEDModeEntry
+// The suite pastes the production mode enum, callback typedefs, OledModeEntry
 // and MenuAvailability (OLED_Display.h), the registry and getMenuAvailability
 // (OLED_Utils.cpp) and the real availFuncs of CLI Input, Gamepad PW, Logout,
 // GPS and thermal into the markers below.
@@ -144,7 +144,7 @@ static std::string printable(const String& text) {
   return out;
 }
 
-static void expect(OLEDMode mode, const char* row, MenuAvailability wanted,
+static void expect(OledMode mode, const char* row, MenuAvailability wanted,
                    const char* wantedReason, const std::string& why) {
   String reason = "stale";
   const MenuAvailability got = getMenuAvailability(mode, &reason);
@@ -154,11 +154,11 @@ static void expect(OLEDMode mode, const char* row, MenuAvailability wanted,
             printable(reason) + "\"");
 }
 
-static OLEDModeEntry gEntries[8];
+static OledModeEntry gEntries[8];
 static size_t gEntryCount = 0;
 
-static void addEntry(OLEDMode mode, const char* name, OLEDAvailabilityFunc rule) {
-  OLEDModeEntry entry{};
+static void addEntry(OledMode mode, const char* name, OledAvailabilityFunc rule) {
+  OledModeEntry entry{};
   entry.mode = mode;
   entry.name = name;
   entry.availFunc = rule;
@@ -169,12 +169,12 @@ static void registerModules() {
   addEntry(OLED_CLI_INPUT, "CLI Input", isCLIInputAvailable);
   addEntry(OLED_SET_PATTERN, "Gamepad Password", isSetPatternAvailable);
   addEntry(OLED_LOGOUT, "Logout", isLogoutModeAvailable);
-  addEntry(OLED_GPS_DATA, "GPS", gpsOLEDModeAvailable);
-  addEntry(OLED_THERMAL_VISUAL, "Thermal", thermalOLEDModeAvailable);
+  addEntry(OLED_GPS_DATA, "GPS", gpsOledModeAvailable);
+  addEntry(OLED_THERMAL_VISUAL, "Thermal", thermalOledModeAvailable);
   addEntry(OLED_LOGGING, "Logging", noteRule);
   addEntry(OLED_PERF_STATS, "Perf", silentRefusal);
   addEntry(OLED_CAMERA, "Camera", nullptr);
-  registerOLEDModes(gEntries, gEntryCount);
+  registerOledModes(gEntries, gEntryCount);
 }
 
 static void detect(uint8_t address) {

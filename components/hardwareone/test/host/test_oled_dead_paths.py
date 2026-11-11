@@ -14,7 +14,7 @@
    back-navigation) and the live drawing helpers (oledDrawIcon,
    oledDrawLevelBars) must still be defined, so the contract cannot pass
    vacuously.
-2. Compiled with oled_dead_paths_harness.cpp: the production enum OLEDMode
+2. Compiled with oled_dead_paths_harness.cpp: the production enum OledMode
    (OLED_Display.h) with modeFromSlug and slugFromMode (OLED_Utils.cpp).
    `oledmode unified` names no mode, no mode's slug resolves to a different mode,
    and "actions"/"imuactions" still open IMU actions.
@@ -75,7 +75,7 @@ REMOVED = {
 KEPT = (
     "oledUIRender", "oledToastRender", "oledPairingRibbonRender", "displaySystemStatusRendered",
     "displayMemoryStatsRendered", "displayWebStatsRendered", "displayConnectedSensorsRendered",
-    "findOLEDMode", "popOLEDMode", "oledMenuBack", "modeFromSlug", "slugFromMode",
+    "findOledMode", "popOledMode", "oledMenuBack", "modeFromSlug", "slugFromMode",
     "oledDrawIcon", "oledDrawLevelBars",
 )
 
@@ -181,14 +181,14 @@ def definition(source: str, signature: str) -> str:
 def build_unit(component: Path, source_dir: Path | None) -> str:
     display_h = read_source(component, source_dir, "OLED_Display.h")
     oled = read_source(component, source_dir, "OLED_Utils.cpp")
-    mode_enum = definition(display_h, "enum OLEDMode")
+    mode_enum = definition(display_h, "enum OledMode")
     closing = mode_enum.rstrip().rfind("}")
     body = mode_enum[:closing].rstrip()
     if not body.endswith(","):
         body += ","
     mode_enum = body + "\n  OLED_HARNESS_MODE_END\n};"
     slugs = "\n\n".join(definition(oled, signature) for signature in (
-        "OLEDMode modeFromSlug(", "const char* slugFromMode("))
+        "OledMode modeFromSlug(", "const char* slugFromMode("))
     harness = (HERE / "oled_dead_paths_harness.cpp").read_text(encoding="utf-8")
     for marker, text in (("// INSERT_ENUM", mode_enum), ("// INSERT_SLUGS", slugs)):
         require(harness.count(marker) == 1, f"harness marker missing: {marker}")

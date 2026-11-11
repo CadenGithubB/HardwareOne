@@ -27,11 +27,11 @@ void oledEarlyInit();
 void oledApplySettings();
 
 // Apply OLED brightness from gSettings (can be called independently)
-void applyOLEDBrightness();
+void applyOledBrightness();
 
 // Apply OLED rotation (oledFlipped) from gSettings — calls setRotation + clears
 // the buffer so the next render tick repaints in the new orientation.
-void applyOLEDRotation();
+void applyOledRotation();
 
 // Sleep lifecycle. On boards where the OLED rides an I2C bus with a
 // software-controllable power rail (I2C2_POWER_PIN), oledPrepareForSleep()
@@ -72,7 +72,7 @@ void oledShowSleepScreen(int seconds);
 #include "HAL_Display.h"
 
 // Animation system types and globals
-enum OLEDAnimationType {
+enum OledAnimationType {
   ANIM_BOUNCE,
   ANIM_WAVE,
   ANIM_SPINNER,
@@ -86,18 +86,18 @@ enum OLEDAnimationType {
   ANIM_SCROLLTEST,
   ANIM_BOOT_PROGRESS
 };
-struct OLEDAnimation {
+struct OledAnimation {
   const char* name;
-  OLEDAnimationType type;
+  OledAnimationType type;
   void (*renderFunc)();
   const char* description;
 };
-extern OLEDAnimationType currentAnimation;
-extern const OLEDAnimation gAnimationRegistry[];
+extern OledAnimationType currentAnimation;
+extern const OledAnimation gAnimationRegistry[];
 extern const int gAnimationCount;
 
 // OLED Display Modes
-enum OLEDMode {
+enum OledMode {
   OLED_OFF,
   OLED_MENU,           // Main menu with app icons
   OLED_SENSOR_MENU,    // Sensor submenu
@@ -168,21 +168,21 @@ enum OLEDMode {
 };
 
 // Guest OLED session helpers (view-only UX). Allowlist drives menu filter +
-// requestOLEDMode gate; oledGuestBlocksMutate covers direct-API mutates.
+// requestOledMode gate; oledGuestBlocksMutate covers direct-API mutates.
 // The guest and admin answers come from a per-session role cache (dropped at
 // the session boundary, refilled on a gIdentityGeneration change); a failed
 // lookup is guest and non-admin. Commands still check the role themselves.
 bool oledIsGuestSession();
 bool oledSessionIsAdmin();
-bool oledModeAllowedForGuest(OLEDMode mode);
+bool oledModeAllowedForGuest(OledMode mode);
 // True if guest — toast shown; callers should no-op the mutate.
 bool oledGuestBlocksMutate();
 
 // Menu item structure for OLED menu (legacy - kept for compatibility)
-struct OLEDMenuItem {
+struct OledMenuItem {
   const char* name;      // Display name
   const char* iconName;  // Icon name from embedded icons
-  OLEDMode targetMode;   // Mode to switch to when selected
+  OledMode targetMode;   // Mode to switch to when selected
 };
 
 // ============================================================================
@@ -190,32 +190,32 @@ struct OLEDMenuItem {
 // ============================================================================
 
 // Function pointer types for OLED mode callbacks
-typedef void (*OLEDDisplayFunc)();
-typedef bool (*OLEDAvailabilityFunc)(String* outReason);  // Returns true if available
-typedef bool (*OLEDInputFunc)(int deltaX, int deltaY, uint32_t newlyPressed);  // Returns true if input handled
-// Optional per-mode entry hook. Fires once from requestOLEDMode() when this mode
+typedef void (*OledDisplayFunc)();
+typedef bool (*OledAvailabilityFunc)(String* outReason);  // Returns true if available
+typedef bool (*OledInputFunc)(int deltaX, int deltaY, uint32_t newlyPressed);  // Returns true if input handled
+// Optional per-mode entry hook. Fires once from requestOledMode() when this mode
 // actually becomes current. `isForward` is true for forward navigation (menu
 // select, CLI command, boot, login) and false for back-navigation (B button /
-// popOLEDMode), so a mode can reset its view on a fresh visit but preserve state
+// popOledMode), so a mode can reset its view on a fresh visit but preserve state
 // when the user returns to it. nullptr = no entry side-effects. This mirrors the
 // onEnter/onExit lifecycle the CLI mode framework already uses (System_CLIMode.h)
 // — the single place that owns "what happens when this mode is entered", instead
 // of scattering resets across cmd_oledmode / the menu-select path.
-typedef void (*OLEDModeEnterFunc)(bool isForward);
+typedef void (*OledModeEnterFunc)(bool isForward);
 
 // OLED Mode Entry - defines a display mode that can be registered from any module
-struct OLEDModeEntry {
-  OLEDMode mode;              // The enum value for this mode
+struct OledModeEntry {
+  OledMode mode;              // The enum value for this mode
   const char* name;           // Display name for menu
   const char* iconName;       // Icon name for menu (from embedded icons)
-  OLEDDisplayFunc displayFunc;      // Function to render this mode
-  OLEDAvailabilityFunc availFunc;   // The mode's own entry rule (nullptr = none): false refuses entry
+  OledDisplayFunc displayFunc;      // Function to render this mode
+  OledAvailabilityFunc availFunc;   // The mode's own entry rule (nullptr = none): false refuses entry
                                     // with *outReason. getMenuAvailability() and oledmode consult it.
-  OLEDInputFunc inputFunc;          // Function to handle gamepad input (nullptr = default B=back, X=action)
+  OledInputFunc inputFunc;          // Function to handle gamepad input (nullptr = default B=back, X=action)
   bool showInMenu;            // Not read: launcher rows come from the oledMenuCategory tables
   int menuOrder;              // Not read (see showInMenu)
   const char* hints;          // Footer hints string (nullptr = use central switch fallback)
-  OLEDModeEnterFunc onEnterFunc;  // Optional entry hook (nullptr = none). Trailing field:
+  OledModeEnterFunc onEnterFunc;  // Optional entry hook (nullptr = none). Trailing field:
                                   // existing 9-field initializers value-initialize it to nullptr.
 };
 
@@ -224,17 +224,17 @@ struct OLEDModeEntry {
 #define MAX_OLED_MODES 64
 
 // OLED Mode Registration Functions
-void registerOLEDMode(const OLEDModeEntry* mode);
-void registerOLEDModes(const OLEDModeEntry* modes, size_t count);
-const OLEDModeEntry* findOLEDMode(OLEDMode mode);
-const OLEDModeEntry* getOLEDModeByIndex(size_t index);
-size_t getRegisteredOLEDModeCount();
-void printRegisteredOLEDModes();  // Print summary of registered modes (call from setup)
+void registerOledMode(const OledModeEntry* mode);
+void registerOledModes(const OledModeEntry* modes, size_t count);
+const OledModeEntry* findOledMode(OledMode mode);
+const OledModeEntry* getOledModeByIndex(size_t index);
+size_t getRegisteredOledModeCount();
+void printRegisteredOledModes();  // Print summary of registered modes (call from setup)
 
 // Auto-registration class for use in module files
-class OLEDModeRegistrar {
+class OledModeRegistrar {
 public:
-  OLEDModeRegistrar(const OLEDModeEntry* modes, size_t count, const char* moduleName);
+  OledModeRegistrar(const OledModeEntry* modes, size_t count, const char* moduleName);
 };
 
 // Macro for automatic registration in module files
@@ -243,12 +243,12 @@ public:
 #define _OLED_REG_CONCAT2(a, b) a##b
 #define _OLED_REG_CONCAT(a, b) _OLED_REG_CONCAT2(a, b)
 #define REGISTER_OLED_MODE_MODULE(modes, count, name) \
-  static OLEDModeRegistrar _OLED_REG_CONCAT(_oled_mode_registrar_, __LINE__)(modes, count, name)
+  static OledModeRegistrar _OLED_REG_CONCAT(_oled_mode_registrar_, __LINE__)(modes, count, name)
 
 // ============================================================================
 // Centralized Navigation Events (computed once per frame, use in inputFunc handlers)
 // ============================================================================
-// These are set by processOLEDInput() before calling any inputFunc handler.
+// These are set by processOledInput() before calling any inputFunc handler.
 // Use these instead of raw deltaX/deltaY to get proper debounce and auto-repeat.
 
 struct NavEvents {
@@ -272,21 +272,21 @@ extern int oledMenuSelectedIndex;
 // Category menu system
 extern int oledMenuCategorySelected;
 extern int oledMenuCategoryItemIndex;
-extern const OLEDMenuItem oledMenuCategories[];
+extern const OledMenuItem oledMenuCategories[];
 extern const int oledMenuCategoryCount;
-extern const OLEDMenuItem oledMenuCategory0[];
+extern const OledMenuItem oledMenuCategory0[];
 extern const int oledMenuCategory0Count;
-extern const OLEDMenuItem oledMenuCategory1[];
+extern const OledMenuItem oledMenuCategory1[];
 extern const int oledMenuCategory1Count;
-extern const OLEDMenuItem oledMenuCategory2[];
+extern const OledMenuItem oledMenuCategory2[];
 extern const int oledMenuCategory2Count;
-extern const OLEDMenuItem oledMenuCategory3[];
+extern const OledMenuItem oledMenuCategory3[];
 extern const int oledMenuCategory3Count;
-extern const OLEDMenuItem oledMenuCategory4[];
+extern const OledMenuItem oledMenuCategory4[];
 extern const int oledMenuCategory4Count;
-extern const OLEDMenuItem oledMenuCategory5[];
+extern const OledMenuItem oledMenuCategory5[];
 extern const int oledMenuCategory5Count;
-extern const OLEDMenuItem oledSensorMenuItems[];
+extern const OledMenuItem oledSensorMenuItems[];
 extern const int oledSensorMenuItemCount;
 
 // Menu availability enum for checking if menu items are accessible
@@ -298,15 +298,15 @@ enum class MenuAvailability {
   NOT_DETECTED           // Hardware not found
 };
 
-// The mode module's own entry rule (its registered OLEDModeEntry::availFunc).
+// The mode module's own entry rule (its registered OledModeEntry::availFunc).
 // True when the mode registers no rule or its rule allows entry; on a refusal
 // *outReason gets the module's reason.
-bool oledModeRuleAllows(OLEDMode mode, String* outReason);
+bool oledModeRuleAllows(OledMode mode, String* outReason);
 
 // Launcher availability: the build, hardware and feature state of the mode
 // (not built, not detected, turned off), then the mode's own entry rule, whose
 // refusal makes an otherwise available mode FEATURE_DISABLED with its reason.
-MenuAvailability getMenuAvailability(OLEDMode mode, String* outReason);
+MenuAvailability getMenuAvailability(OledMode mode, String* outReason);
 
 // =============================================================================
 // Display Hardware Abstraction Layer
@@ -351,36 +351,36 @@ extern bool oledConnected;
 extern bool gOledRunning;
 
 // OLED State Variables (defined in oled_display.cpp)
-extern OLEDMode currentOLEDMode;
-void setOLEDMode(OLEDMode newMode);  // internal – prefer requestOLEDMode for external transitions
+extern OledMode currentOledMode;
+void setOledMode(OledMode newMode);  // internal – prefer requestOledMode for external transitions
 
 // Single authoritative mode transition entry point.
 // Handles auth gating, back-nav stack push, and standardised debug logging.
-// Use this for all user/external mode changes; keep setOLEDMode for pop/internal transitions.
+// Use this for all user/external mode changes; keep setOledMode for pop/internal transitions.
 // pushStack=false skips the back-nav push (for boot, system, or replace-in-place transitions).
-// isBackNav: pass true ONLY for back-navigation (popOLEDMode() destinations) so the
+// isBackNav: pass true ONLY for back-navigation (popOledMode() destinations) so the
 // target mode's onEnterFunc receives isForward=false and can preserve its state.
 // Called off the OLED owner task (cmd_exec for CLI, web, MQTT, BLE and automation
 // commands), it posts the request and returns; the owner applies it, gates and
 // onEnter hook included, at the start of its next frame.
-void requestOLEDMode(OLEDMode newMode, const char* reason, bool pushStack = true, bool isBackNav = false);
+void requestOledMode(OledMode newMode, const char* reason, bool pushStack = true, bool isBackNav = false);
 
-// requestOLEDMode() with a preparation step (a mode's own state reset) that runs
+// requestOledMode() with a preparation step (a mode's own state reset) that runs
 // on the owner task right before the transition. Same deferral off the owner.
-void requestOLEDModePrepared(OLEDMode newMode, const char* reason, bool pushStack,
+void requestOledModePrepared(OledMode newMode, const char* reason, bool pushStack,
                              void (*prepare)());
 
 // Slug <-> enum helpers (canonical CLI slugs; used by CLI, boot defaults, and Web selects).
-// modeFromSlug returns (OLEDMode)-1 for unknown slugs.
-OLEDMode     modeFromSlug(const String& slug);
-const char*  slugFromMode(OLEDMode mode);
+// modeFromSlug returns (OledMode)-1 for unknown slugs.
+OledMode     modeFromSlug(const String& slug);
+const char*  slugFromMode(OledMode mode);
 
-extern String customOLEDText;
+extern String customOledText;
 extern unsigned long oledLastUpdate;
 extern unsigned long animationFrame;
 
 // (Network menu state flags removed — OLED_NETWORK_STATUS and the saved/scan
-//  pickers are real pushed sub-modes; footer hints come from OLEDModeEntry::hints.)
+//  pickers are real pushed sub-modes; footer hints come from OledModeEntry::hints.)
 extern unsigned long animationLastUpdate;
 extern int animationFPS;
 
@@ -390,9 +390,9 @@ extern int bootProgressPercent;
 extern String bootProgressLabel;
 
 // OLED Initialization and Control
-bool initOLEDDisplay();
-void stopOLEDDisplay();
-void updateOLEDDisplay();
+bool initOledDisplay();
+void stopOledDisplay();
+void updateOledDisplay();
 void displayAnimation();
 
 // ============================================================================
@@ -404,15 +404,15 @@ void displayAnimation();
 // Call oledMarkDirty() only for non-sensor changes (menu state, settings, etc.)
 
 void oledMarkDirty();              // Force next render (for non-sensor changes)
-void oledMarkDirtyMode(OLEDMode mode);  // Force next render (compatibility)
+void oledMarkDirtyMode(OledMode mode);  // Force next render (compatibility)
 bool oledIsDirty();                // Check if anything changed since last render
 void oledClearDirty();             // Record current sequences after render
 void oledSetAlwaysDirty(bool always);  // For animations that need constant refresh
 void oledMarkDirtyUntil(unsigned long untilMs);  // Keep rendering until timestamp (for popup auto-dismiss)
 
 // Boot sequence helpers (called from setup() and loop())
-bool earlyOLEDInit();  // Probe and init OLED for boot animation
-void processOLEDBootSequence();  // Handle boot phase transitions
+bool earlyOledInit();  // Probe and init OLED for boot animation
+void processOledBootSequence();  // Handle boot phase transitions
 
 // Display Mode Functions
 void displayMenu();
@@ -420,14 +420,14 @@ void displayLogo();
 
 // Power mode functions (OLED_Mode_Power.cpp)
 // Navigation, actions, and input handling are now registered via REGISTER_OLED_MODE_MODULE.
-// Display functions still declared for the render switch in updateOLEDDisplay().
+// Display functions still declared for the render switch in updateOledDisplay().
 void displayPower();
 void displayPowerCPU();
 void displayPowerSleep();
 
 // Network mode functions (OLED_Mode_Network.cpp)
 // All display/input/navigation registered via REGISTER_OLED_MODE_MODULE for:
-//   OLED_NETWORK_INFO       — WiFi menu (OLEDScrollState; owns the Add-WiFi keyboard flow)
+//   OLED_NETWORK_INFO       — WiFi menu (OledScrollState; owns the Add-WiFi keyboard flow)
 //   OLED_NETWORK_STATUS     — WiFi status detail (pushed sub-mode)
 //   OLED_WEB_STATS          — Web menu (server, auto start, HTTPS); OLED_WEB_STATUS detail
 //   OLED_MESH_STATUS, OLED_ESPNOW, OLED_REMOTE_SENSORS
@@ -449,19 +449,19 @@ void displayAPDSData();
 #endif
 
 // Menu navigation. The launcher's up/down/select now live in its registered
-// inputFunc (mainMenuInputHandler) on an OLEDScrollState; oledMenuBack() remains
+// inputFunc (mainMenuInputHandler) on an OledScrollState; oledMenuBack() remains
 // the shared "B = pop the mode stack" helper used by the global input handler.
 bool oledMenuBack();  // Returns true if handled (was in submenu)
-void resetOLEDMenu();
+void resetOledMenu();
 
 
 // (The sensor menu's filter/sort is now folded into populateMenuScroll() in
 // OLED_Mode_Menu.cpp — it no longer exposes sort/index helpers.)
 
 // Mode stack navigation (for submenus and back navigation)
-void pushOLEDMode(OLEDMode mode);
-OLEDMode popOLEDMode();
-void clearOLEDModeStack();
+void pushOledMode(OledMode mode);
+OledMode popOledMode();
+void clearOledModeStack();
 
 // Input helper functions (for OLED UI components)
 void updateInputState();
@@ -483,7 +483,7 @@ void oledFileBrowserBack();
 // ============================================================================
 // Lets any OLED mode use the file browser as a *picker* instead of just a
 // viewer. Caller fills out a FilePickerRequest, calls oledFilePickerPush(),
-// then transitions to OLED_FILE_BROWSER via requestOLEDMode(). When the user
+// then transitions to OLED_FILE_BROWSER via requestOledMode(). When the user
 // picks a file (or cancels at root), the browser pops back to the requester
 // mode and fires onPicked exactly once.
 //
@@ -515,19 +515,19 @@ struct FilePickerRequest {
   // Required. Called exactly once when the picker resolves:
   //   cancelled=false → user selected a file; fullPath is valid
   //   cancelled=true  → user backed out at root; fullPath is nullptr
-  // Runs AFTER the mode pop, so currentOLEDMode == requesterMode when
-  // the callback fires. The callback may freely call requestOLEDMode /
+  // Runs AFTER the mode pop, so currentOledMode == requesterMode when
+  // the callback fires. The callback may freely call requestOledMode /
   // mutate state in the requester's locals.
   void (*onPicked)(const char* fullPath, bool cancelled);
 
   // The OLED mode that requested the picker. Stored so we can sanity-check
   // we're popping back to a valid mode (e.g. user didn't navigate away
   // mid-picker via global Home).
-  OLEDMode requesterMode;
+  OledMode requesterMode;
 };
 
 // Push a picker request. Caller is responsible for transitioning to the
-// browser via requestOLEDMode(OLED_FILE_BROWSER, ...) after pushing. Only
+// browser via requestOledMode(OLED_FILE_BROWSER, ...) after pushing. Only
 // one picker can be active at a time; pushing while another is pending is
 // rejected (returns false).
 bool oledFilePickerPush(const FilePickerRequest& req);

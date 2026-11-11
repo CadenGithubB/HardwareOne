@@ -520,7 +520,7 @@ void gpsTask(void* parameter) {
 
         // Mark OLED dirty if GPS page is active (enables real-time display updates)
 #if ENABLE_OLED_DISPLAY
-        if (currentOLEDMode == OLED_GPS_DATA) {
+        if (currentOledMode == OLED_GPS_DATA) {
           oledMarkDirty();
         }
 #endif

@@ -62,20 +62,20 @@ void displayPresenceData() {
     }
   }
   
-  // Don't call display() here - let updateOLEDDisplay() render footer and display in same frame
+  // Don't call display() here - let updateOledDisplay() render footer and display in same frame
 }
 
 // Availability check for Presence OLED mode
-static bool presenceOLEDModeAvailable(String* outReason) {
+static bool presenceOledModeAvailable(String* outReason) {
   return true;  // Always allow navigation
 }
 
 static void presenceToggleConfirmed(void* userData) {
   (void)userData;
   if (gPresenceRunning) {
-    executeOLEDCommand("closepresence");
+    executeOledCommand("closepresence");
   } else {
-    executeOLEDCommand("openpresence");
+    executeOledCommand("openpresence");
   }
 }
 
@@ -93,13 +93,13 @@ static bool presenceInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) 
 }
 
 // Presence OLED mode entry
-static const OLEDModeEntry presenceOLEDModes[] = {
+static const OledModeEntry presenceOledModes[] = {
   {
     OLED_PRESENCE_DATA,          // mode enum
     "Presence",                  // menu name
     "notify_sensor",             // icon name
     displayPresenceData,         // displayFunc
-    presenceOLEDModeAvailable,   // availFunc
+    presenceOledModeAvailable,   // availFunc
     presenceInputHandler,        // inputFunc - X toggles sensor
     true,                        // showInMenu
     36,                          // menuOrder (after APDS at 35)
@@ -108,6 +108,6 @@ static const OLEDModeEntry presenceOLEDModes[] = {
 };
 
 // Auto-register Presence OLED mode
-REGISTER_OLED_MODE_MODULE(presenceOLEDModes, sizeof(presenceOLEDModes) / sizeof(presenceOLEDModes[0]), "Presence");
+REGISTER_OLED_MODE_MODULE(presenceOledModes, sizeof(presenceOledModes) / sizeof(presenceOledModes[0]), "Presence");
 
 #endif // I2CSENSOR_STHS34PF80_OLED_H

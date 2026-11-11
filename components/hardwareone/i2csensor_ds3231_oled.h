@@ -92,7 +92,7 @@ static void displayRTCData() {
 }
 
 // Availability check for RTC OLED mode
-static bool rtcOLEDModeAvailable(String* outReason) {
+static bool rtcOledModeAvailable(String* outReason) {
   // Check if RTC is running
   if (gRtcConnected && gRtcRunning) {
     return true;
@@ -113,16 +113,16 @@ static void rtcToggleConfirmed(void* userData) {
 
   if (gRtcRunning && gRtcConnected) {
     DEBUG_RTCF("[RTC] Confirmed: Stopping RTC...");
-    executeOLEDCommand("closertc");
+    executeOledCommand("closertc");
   } else {
     DEBUG_RTCF("[RTC] Confirmed: Starting RTC...");
-    executeOLEDCommand("openrtc");
+    executeOledCommand("openrtc");
   }
 }
 
 static void rtcNTPSyncConfirmed(void* userData) {
   (void)userData;
-  executeOLEDCommand("ntpsync");
+  executeOledCommand("ntpsync");
   // ntpsync handles RTC sync internally when RTC is connected
   oledNotificationBannerShow("NTP sync requested", PairingRibbonIcon::SUCCESS, 2000);
 }
@@ -159,13 +159,13 @@ static bool rtcInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
 }
 
 // RTC OLED mode entry
-static const OLEDModeEntry rtcOLEDModes[] = {
+static const OledModeEntry rtcOledModes[] = {
   {
     OLED_RTC_DATA,           // mode enum
     "RTC",                   // menu name
     "clock",                 // icon name
     displayRTCData,          // displayFunc
-    rtcOLEDModeAvailable,    // availFunc
+    rtcOledModeAvailable,    // availFunc
     rtcInputHandler,         // inputFunc - X toggles sensor
     true,                    // showInMenu
     55,                      // menuOrder
@@ -174,6 +174,6 @@ static const OLEDModeEntry rtcOLEDModes[] = {
 };
 
 // Auto-register RTC OLED mode
-REGISTER_OLED_MODE_MODULE(rtcOLEDModes, sizeof(rtcOLEDModes) / sizeof(rtcOLEDModes[0]), "RTC");
+REGISTER_OLED_MODE_MODULE(rtcOledModes, sizeof(rtcOledModes) / sizeof(rtcOledModes[0]), "RTC");
 
 #endif // I2CSENSOR_DS3231_OLED_H

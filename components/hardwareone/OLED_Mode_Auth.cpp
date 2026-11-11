@@ -142,7 +142,7 @@ static void displayLoginMode() {
 
 // Login input handler
 static bool handleLoginModeInput(int deltaX, int deltaY, uint32_t newlyPressed) {
-  // Keyboard input is now handled centrally in processOLEDInput() before this is called.
+  // Keyboard input is now handled centrally in processOledInput() before this is called.
   // We only need to check for keyboard completion/cancellation to update our state.
   if (loginKeyboardActive) {
     if (oledKeyboardIsCompleted()) {
@@ -241,10 +241,10 @@ static bool handleLoginModeInput(int deltaX, int deltaY, uint32_t newlyPressed) 
         initialText = passwordBuffer.c_str();
       }
       
-      const OLEDKeyboardDictationPolicy policy =
+      const OledKeyboardDictationPolicy policy =
           currentField == FIELD_USERNAME
-              ? OLEDKeyboardDictationPolicy::ALLOW_PLAINTEXT
-              : OLEDKeyboardDictationPolicy::DENY;
+              ? OledKeyboardDictationPolicy::ALLOW_PLAINTEXT
+              : OledKeyboardDictationPolicy::DENY;
       oledKeyboardInit(title, initialText, 32, policy,
                        currentField == FIELD_PASSWORD);
       loginKeyboardActive = true;
@@ -412,7 +412,7 @@ static bool isLogoutModeAvailable(String* outReason) {
 // ============================================================================
 
 // Login mode entry
-static const OLEDModeEntry loginModeEntry = {
+static const OledModeEntry loginModeEntry = {
   OLED_LOGIN,
   "Login",
   "notify_system",
@@ -425,7 +425,7 @@ static const OLEDModeEntry loginModeEntry = {
 };
 
 // Logout mode entry
-static const OLEDModeEntry logoutModeEntry = {
+static const OledModeEntry logoutModeEntry = {
   OLED_LOGOUT,
   "Logout",
   "notify_system",
@@ -439,7 +439,7 @@ static const OLEDModeEntry logoutModeEntry = {
 
 // Combined auth modes array
 // Columns: mode, name, iconName, displayFunc, availFunc, inputFunc, showInMenu, menuOrder, hints
-static const OLEDModeEntry authModes[] = { loginModeEntry, logoutModeEntry };
+static const OledModeEntry authModes[] = { loginModeEntry, logoutModeEntry };
 
 REGISTER_OLED_MODE_MODULE(authModes, sizeof(authModes) / sizeof(authModes[0]), "Auth");
 

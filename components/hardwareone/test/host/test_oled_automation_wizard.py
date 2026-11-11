@@ -51,8 +51,8 @@ def keyboard_types(utils_header: str) -> str:
     cap = re.search(r"^#define OLED_KEYBOARD_MAX_LENGTH\s+\d+\s*$", utils_header, re.M)
     require(cap is not None, "OLED_Utils.h: OLED_KEYBOARD_MAX_LENGTH missing")
     return "\n\n".join([cap.group(0),
-                        extract_block(utils_header, "enum OLEDKeyboardMode") + ";",
-                        extract_block(utils_header, "enum class OLEDKeyboardDictationPolicy") + ";"])
+                        extract_block(utils_header, "enum OledKeyboardMode") + ";",
+                        extract_block(utils_header, "enum class OledKeyboardDictationPolicy") + ";"])
 
 
 def generated(read) -> str:

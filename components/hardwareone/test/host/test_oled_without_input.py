@@ -62,7 +62,7 @@ int main() {
     int x = 12, y = -8;
     getJoystickDelta(x, y);
     assert(x == 0 && y == 0 && getNewlyPressedButtons() == 0);
-    assert(!processOLEDInput());
+    assert(!processOledInput());
     tryAutoStartInputForMenu();
     assert(gNavEvents.deltaX == 0 && gNavEvents.wheelDelta == 0);
 }

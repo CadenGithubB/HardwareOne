@@ -67,7 +67,7 @@ enum class LLMUIState : uint8_t {
   LOADING,
   READY,
   GENERATING,
-  // Home menu + model picker, both list pickers over OLEDScrollState, the same
+  // Home menu + model picker, both list pickers over OledScrollState, the same
   // shape as the three guided levels below. HOME is where the mode opens and
   // where B returns from the chat view and the pickers; PICK_MODEL is reached
   // from HOME's Model row or with A from NO_MODEL.
@@ -86,7 +86,7 @@ static bool       sKeyboardActive = false;
 static LLMUIState sKeyboardReturn = LLMUIState::HOME;  // where a cancelled or empty prompt goes
 static bool       sLoadReturnsHome = false; // a picker load settles on HOME, not the chat view
 
-// The shared footer (drawOLEDFooter) clears and draws the bottom strip after
+// The shared footer (drawOledFooter) clears and draws the bottom strip after
 // this mode renders, so the mode hands it its hint instead of drawing one.
 static char sFooterHint[LLM_CHARS + 1] = "";
 
@@ -110,24 +110,24 @@ static int          sReaderTop   = 0;      // first visible line
 // ============================================================================
 // Guided-input menu picker state (LLM_GUIDED_MENU_SPEC §8)
 // ============================================================================
-// Three nested sub-states, each an OLEDScrollState (the per-mode picker pattern;
+// Three nested sub-states, each an OledScrollState (the per-mode picker pattern;
 // the generic modal picker was deliberately removed — not recreated here). The
 // shared System_LLM_Menu API composes + fires the question by integer index, then
 // the normal GENERATING view streams the answer.
 
 // Entities can number in the thousands, so the entity picker shows a windowed
 // page of up to this many rows plus '< Prev' / 'Next >' edge rows (total <= 32,
-// the OLEDScrollState item cap). Groups (<=8) and templates fit directly and just
+// the OledScrollState item cap). Groups (<=8) and templates fit directly and just
 // scroll within one list.
 static const int LLM_ENT_PAGE = 29;
 
-// OLEDScrollState stores string POINTERS (no copy), so each row's text must live
+// OledScrollState stores string POINTERS (no copy), so each row's text must live
 // in stable backing storage while its list is on screen. Rows are truncated to
 // LLM_CHARS (display only — selection is by index). Kept in PSRAM: DRAM is tight
 // and menu data is not secret.
-EXT_RAM_BSS_ATTR static OLEDScrollState sGroupScroll;
-EXT_RAM_BSS_ATTR static OLEDScrollState sTplScroll;
-EXT_RAM_BSS_ATTR static OLEDScrollState sEntScroll;
+EXT_RAM_BSS_ATTR static OledScrollState sGroupScroll;
+EXT_RAM_BSS_ATTR static OledScrollState sTplScroll;
+EXT_RAM_BSS_ATTR static OledScrollState sEntScroll;
 static bool sPickScrollInit = false;
 
 // Home menu + model picker. sModelDescs is the selection source of truth —
@@ -135,9 +135,9 @@ static bool sPickScrollInit = false;
 // so no pointer into a rebuilt list can go stale.
 #define LLM_MODEL_ROWS 12
 #define LLM_HOME_ROWS  8
-EXT_RAM_BSS_ATTR static OLEDScrollState sHomeScroll;
+EXT_RAM_BSS_ATTR static OledScrollState sHomeScroll;
 EXT_RAM_BSS_ATTR static llmhome::Row    sHomeRows[LLM_HOME_ROWS];
-EXT_RAM_BSS_ATTR static OLEDScrollState sModelScroll;
+EXT_RAM_BSS_ATTR static OledScrollState sModelScroll;
 EXT_RAM_BSS_ATTR static char         sModelRows[LLM_MODEL_ROWS][LLM_CHARS + 1];
 EXT_RAM_BSS_ATTR static LlmModelDesc sModelDescs[LLM_MODEL_ROWS];
 static int  sModelCount = 0;
@@ -237,7 +237,7 @@ static bool submitLlmCommand(const char* line, uint8_t op) {
   bool authed = false;
   const TransportSessionEpoch epoch = localDisplayTransportSessionSnapshot(user, authed);
   if (epoch == kNoTransportSessionEpoch) return false;
-  if (!submitOLEDCommandForSession(String(line), epoch, llmCommandDone,
+  if (!submitOledCommandForSession(String(line), epoch, llmCommandDone,
                                    (void*)(uintptr_t)op)) {
     return false;
   }
@@ -398,7 +398,7 @@ static void ensurePickScrollInit();
 // Was a FilePickerRequest into the generic file browser. That could only ever
 // offer things that are FILES on this device, so a remote model — which has no
 // path here at all — was literally unrepresentable. This is the same
-// OLEDScrollState pattern the guided levels below already use.
+// OledScrollState pattern the guided levels below already use.
 
 // Model rows carry (void*)(index + 1); the Unload row sits past every index.
 static void* const MODEL_ROW_UNLOAD = (void*)(uintptr_t)(LLM_MODEL_ROWS + 1);
@@ -452,7 +452,7 @@ static void enterPickModel() {
 // Commit the highlighted row. Selection is BY INDEX into sModelDescs, so a
 // rebuild between frames cannot leave us holding a stale pointer.
 static void commitModelPick() {
-  OLEDScrollItem* sel = oledScrollGetSelected(&sModelScroll);
+  OledScrollItem* sel = oledScrollGetSelected(&sModelScroll);
   if (!sel || !sel->userData) return;
   if (sel->userData == MODEL_ROW_UNLOAD) {
     if (sCmdInFlight != LLM_CMD_NONE) { sMenuStatus = "busy"; return; }
@@ -542,7 +542,7 @@ static void tplDisplayRow(uint8_t g, uint16_t t, char* out, size_t cap, bool* ha
 }
 
 // Rebuilt every frame (oledScrollClearKeepSelection preserves the cursor). All
-// row text is copied into stable backing storage because OLEDScrollState stores
+// row text is copied into stable backing storage because OledScrollState stores
 // pointers, not copies.
 static void populateGroupPicker() {
   ensurePickScrollInit();
@@ -567,7 +567,7 @@ static void populateTemplatePicker() {
   LLMMenuGroupInfo gi;
   uint16_t n = llmMenuGroupInfo(sPickGroup, &gi) ? gi.tplCount : 0;
   // Curation targets 5-15 templates/group; the format allows up to 64. One
-  // OLEDScrollState scrolls up to OLED_SCROLL_MAX_ITEMS, which comfortably covers
+  // OledScrollState scrolls up to OLED_SCROLL_MAX_ITEMS, which comfortably covers
   // the curated range — cap here so a rogue overlong list can't overflow.
   if (n > OLED_SCROLL_MAX_ITEMS) n = OLED_SCROLL_MAX_ITEMS;
   for (uint16_t t = 0; t < n; t++) {
@@ -759,7 +759,7 @@ static void drawFooter(const char* line) {
   strlcpy(sFooterHint, line ? line : "", sizeof(sFooterHint));
 }
 
-// The hint drawOLEDFooter() shows for this mode: whatever the last frame set.
+// The hint drawOledFooter() shows for this mode: whatever the last frame set.
 const char* oledLLMFooterHint() {
   return sFooterHint;
 }
@@ -957,7 +957,7 @@ static void displayLLM() {
 // returns to `from`, a submitted one to the chat view to watch the answer.
 static void openPrompt(LLMUIState from) {
   oledKeyboardInit("Prompt:", nullptr, OLED_KEYBOARD_MAX_LENGTH,
-                   OLEDKeyboardDictationPolicy::ALLOW_PLAINTEXT);
+                   OledKeyboardDictationPolicy::ALLOW_PLAINTEXT);
   sKeyboardActive = true;
   sKeyboardReturn = from;
 }
@@ -1084,7 +1084,7 @@ static bool handleLLMInput(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed
     case LLMUIState::HOME: {
       if (oledScrollHandleNav(&sHomeScroll)) { sMenuStatus = nullptr; return true; }
       if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A) || INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
-        OLEDScrollItem* sel = oledScrollGetSelected(&sHomeScroll);
+        OledScrollItem* sel = oledScrollGetSelected(&sHomeScroll);
         if (!sel || !sel->userData) return true;
         sMenuStatus = nullptr;
         switch ((LlmHomeAction)((uintptr_t)sel->userData - 1)) {
@@ -1175,7 +1175,7 @@ static bool handleLLMInput(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed
     case LLMUIState::PICK_ENTITY: {
       if (oledScrollHandleNav(&sEntScroll)) { sPickStatus = nullptr; return true; }
       if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A) || INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
-        OLEDScrollItem* sel = oledScrollGetSelected(&sEntScroll);
+        OledScrollItem* sel = oledScrollGetSelected(&sEntScroll);
         if (!sel) return true;
         void* ud = sel->userData;
         if (ud == ENT_ROW_PREV) {
@@ -1218,7 +1218,7 @@ static bool isLLMAvailable(String* /*outReason*/) {
   return true;
 }
 
-void resetLLMOLEDState() {
+void resetLLMOledState() {
   chatInit();
   if (sKeyboardActive) {
     oledKeyboardReset();
@@ -1240,13 +1240,13 @@ void resetLLMOLEDState() {
 // Registration
 // ============================================================================
 
-// Entry hook (was an inline reset inside requestOLEDMode, guarded by
+// Entry hook (was an inline reset inside requestOledMode, guarded by
 // ENABLE_LLM_SOURCE_ONBOARD — now owned here, where the whole file is already gated).
 static void llmOnEnter(bool /*isForward*/) {
-  resetLLMOLEDState();
+  resetLLMOledState();
 }
 
-static const OLEDModeEntry sLLMModeEntry = {
+static const OledModeEntry sLLMModeEntry = {
   OLED_LLM,
   "LLM Chat",
   "terminal",

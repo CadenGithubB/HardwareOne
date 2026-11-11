@@ -1743,28 +1743,28 @@ bool OffscreenMapRenderer::shouldRenderFeature(uint8_t type, uint8_t subtype) {
 }
 
 // =============================================================================
-// OLEDMapRenderer Implementation
+// OledMapRenderer Implementation
 // =============================================================================
 
 #if ENABLE_OLED_DISPLAY
 
-OLEDMapRenderer::OLEDMapRenderer(Adafruit_SSD1306* display) : _display(display) {
+OledMapRenderer::OledMapRenderer(Adafruit_SSD1306* display) : _display(display) {
   _width = DISPLAY_WIDTH;
   _height = DISPLAY_CONTENT_HEIGHT;  // Content area only (between header and footer)
   _offsetY = DISPLAY_CONTENT_START_Y;  // Offset to content area start
 }
 
-void OLEDMapRenderer::setViewport(int width, int height) {
+void OledMapRenderer::setViewport(int width, int height) {
   _width = width;
   _height = height;
 }
 
-void OLEDMapRenderer::clear() {
+void OledMapRenderer::clear() {
   // Don't clear - OLED display is managed by the mode system
 }
 
 // Cohen-Sutherland line clipping to content area [0, _offsetY, _width-1, _offsetY+_height-1]
-bool OLEDMapRenderer::clipToContent(int16_t& x0, int16_t& y0, int16_t& x1, int16_t& y1) {
+bool OledMapRenderer::clipToContent(int16_t& x0, int16_t& y0, int16_t& x1, int16_t& y1) {
   const int16_t xmin = 0, ymin = _offsetY, xmax = _width - 1, ymax = _offsetY + _height - 1;
   
   auto outcode = [&](int16_t x, int16_t y) -> int {
@@ -1812,7 +1812,7 @@ bool OLEDMapRenderer::clipToContent(int16_t& x0, int16_t& y0, int16_t& x1, int16
   return false;
 }
 
-void OLEDMapRenderer::drawLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1,
+void OledMapRenderer::drawLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1,
                                 const MapFeatureStyle& style) {
   if (!_display) return;
   
@@ -1839,7 +1839,7 @@ void OLEDMapRenderer::drawLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1,
   }
 }
 
-void OLEDMapRenderer::drawDashedLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1, int dashLen) {
+void OledMapRenderer::drawDashedLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1, int dashLen) {
   int adx = abs(x1 - x0);
   int ady = abs(y1 - y0);
   int len = (adx > ady) ? (adx + ady / 2) : (ady + adx / 2);  // Fast length approx
@@ -1869,7 +1869,7 @@ void OLEDMapRenderer::drawDashedLine(int16_t x0, int16_t y0, int16_t x1, int16_t
   }
 }
 
-void OLEDMapRenderer::drawDottedLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1, int spacing) {
+void OledMapRenderer::drawDottedLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1, int spacing) {
   int adx = abs(x1 - x0);
   int ady = abs(y1 - y0);
   int len = (adx > ady) ? (adx + ady / 2) : (ady + adx / 2);  // Fast length approx
@@ -1888,7 +1888,7 @@ void OLEDMapRenderer::drawDottedLine(int16_t x0, int16_t y0, int16_t x1, int16_t
   }
 }
 
-void OLEDMapRenderer::drawPositionMarker(int16_t x, int16_t y) {
+void OledMapRenderer::drawPositionMarker(int16_t x, int16_t y) {
   if (!_display) return;
   
   // Apply content area offset
@@ -1909,7 +1909,7 @@ void OLEDMapRenderer::drawPositionMarker(int16_t x, int16_t y) {
     _display->drawCircle(x, y, 3, SSD1306_WHITE);
 }
 
-void OLEDMapRenderer::drawOverlayText(int16_t x, int16_t y, const char* text, bool inverted) {
+void OledMapRenderer::drawOverlayText(int16_t x, int16_t y, const char* text, bool inverted) {
   if (!_display) return;
   
   _display->setCursor(x, y + _offsetY);
@@ -1922,7 +1922,7 @@ void OLEDMapRenderer::drawOverlayText(int16_t x, int16_t y, const char* text, bo
   _display->setTextColor(SSD1306_WHITE);  // Reset
 }
 
-void OLEDMapRenderer::drawContextBar(const char* text, int scrollOffset) {
+void OledMapRenderer::drawContextBar(const char* text, int scrollOffset) {
   if (!_display || !text) return;
   
   // Context bar at top of content area (8 pixels high)
@@ -1960,11 +1960,11 @@ void OLEDMapRenderer::drawContextBar(const char* text, int scrollOffset) {
   _display->setTextColor(SSD1306_WHITE);  // Reset
 }
 
-void OLEDMapRenderer::flush() {
+void OledMapRenderer::flush() {
   // Display update is handled by OLED mode system
 }
 
-MapFeatureStyle OLEDMapRenderer::getFeatureStyle(MapFeatureType type) {
+MapFeatureStyle OledMapRenderer::getFeatureStyle(MapFeatureType type) {
   // OLED-optimized styles - ALL features rendered as white lines (the OLED
   // draws 1-bit, so shade values here are inert; kept on the shared band
   // ladder for consistency)
@@ -1998,7 +1998,7 @@ MapFeatureStyle OLEDMapRenderer::getFeatureStyle(MapFeatureType type) {
   }
 }
 
-bool OLEDMapRenderer::shouldRenderFeature(uint8_t type, uint8_t subtype) {
+bool OledMapRenderer::shouldRenderFeature(uint8_t type, uint8_t subtype) {
   switch (type) {
     case MAP_FEATURE_WATER:
       // Only render rivers (linear feature) — skip lakes/coastlines (polygon outlines)

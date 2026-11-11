@@ -2,11 +2,11 @@
 // Provides status, control, and live detection feedback for ESP-SR.
 //
 // Umbrella-compliant (matches OLED_Mode_Power / OLED_Mode_Network):
-//   • the control menu is an OLEDScrollState (not a raw int + options array),
+//   • the control menu is an OledScrollState (not a raw int + options array),
 //     navigated by oledScrollHandleNav and rebuilt per-frame with
 //     oledScrollClearKeepSelection + oledScrollClampSelection;
 //   • the live status detail is a pushed sub-mode (OLED_SPEECH_STATUS) entered
-//     via requestOLEDMode and popped by the global B handler — not a
+//     via requestOledMode and popped by the global B handler — not a
 //     `speechShowingStatus` flag faking a second screen.
 
 #include "OLED_Display.h"
@@ -21,8 +21,8 @@
 #include "System_ESPSR.h"
 #include "OLED_SettingsEditor.h"  // openSettingsEditorForModule
 
-// Control menu — shared OLEDScrollState (same model as Power/Network menus).
-EXT_RAM_BSS_ATTR static OLEDScrollState sSpeechMenuScroll;
+// Control menu — shared OledScrollState (same model as Power/Network menus).
+EXT_RAM_BSS_ATTR static OledScrollState sSpeechMenuScroll;
 static bool sSpeechMenuInit = false;
 
 // Animation state for the wake-word "listening" indicator (status sub-mode).
@@ -167,7 +167,7 @@ void displaySpeechInfo() {
   }
 
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-  // Footer handled by global drawOLEDFooter()
+  // Footer handled by global drawOledFooter()
 }
 
 // ============================================================================
@@ -181,17 +181,17 @@ bool speechInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed) {
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A) || INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
     switch (sSpeechMenuScroll.selectedIndex) {
       case 0:  // View Status — push the live status sub-mode
-        requestOLEDMode(OLED_SPEECH_STATUS, "speech.status");
+        requestOledMode(OLED_SPEECH_STATUS, "speech.status");
         break;
       case 1:  // Start / Stop SR
         if (isESPSRRunning()) stopESPSR(); else startESPSR();
         break;
       case 2:  // Models (placeholder — shows status for now, as before)
-        requestOLEDMode(OLED_SPEECH_STATUS, "speech.models");
+        requestOledMode(OLED_SPEECH_STATUS, "speech.models");
         break;
       case 3:  // Settings — open the ESP-SR settings editor (was a dead TODO)
         if (openSettingsEditorForModule("espsr")) {
-          requestOLEDMode(OLED_SETTINGS, "speech.settings");
+          requestOledMode(OLED_SETTINGS, "speech.settings");
         }
         break;
     }
@@ -207,7 +207,7 @@ bool speechInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed) {
 // ============================================================================
 
 // Columns: mode, name, iconName, displayFunc, availFunc, inputFunc, showInMenu, menuOrder, hints
-static const OLEDModeEntry speechModeEntries[] = {
+static const OledModeEntry speechModeEntries[] = {
   { OLED_SPEECH,        "Speech", "mic", displaySpeechInfo,   nullptr, speechInputHandler, true,  50, "A:Select B:Back" },
   { OLED_SPEECH_STATUS, "SR",     "mic", displaySpeechStatus, nullptr, nullptr,            false, -1, "B:Back" },
 };

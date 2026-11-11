@@ -18,7 +18,7 @@ waiting: the executor double finishes each command only when a case says so,
 and the reply is delivered by the display-task poll (one request at a time, a
 refused queue toasts, a reply from a replaced display session is dropped). Static checks cover the call sites the harness
 does not run: the Logging, WiFi and Web screens, the Quick Settings section and the
-unavailable-page actions (OLED_Utils.cpp handleOLEDActionButton) no longer fire
+unavailable-page actions (OLED_Utils.cpp handleOledActionButton) no longer fire
 commands whose reply is dropped, and their success lines are conditional; the
 Bluetooth menu's on/off row runs openble, not the role-aware Quick Settings
 toggle. `--component <dir>` runs the same cases against saved sources (the
@@ -94,17 +94,17 @@ def static_checks(read) -> list[str]:
                         ", ".join(" ".join(w.split()) for w in waits))
     utils = read("OLED_Utils.cpp")
     if ASYNC[1] in utils and "oledDeliverCommandReply();" not in strip_comments(
-            extract_block(utils, "void updateOLEDDisplay(")):
-        failures.append("updateOLEDDisplay never delivers oledRunCommandAsync replies")
+            extract_block(utils, "void updateOledDisplay(")):
+        failures.append("updateOledDisplay never delivers oledRunCommandAsync replies")
 
-    action = strip_comments(extract_block(read("OLED_Utils.cpp"), "void handleOLEDActionButton("))
+    action = strip_comments(extract_block(read("OLED_Utils.cpp"), "void handleOledActionButton("))
     for command in ('"automation system enable"', '"openhttp"', '"closehttp"', '"openble"'):
-        if f"executeOLEDCommand({command})" in action:
-            failures.append(f"handleOLEDActionButton drops the reply of {command}")
+        if f"executeOledCommand({command})" in action:
+            failures.append(f"handleOledActionButton drops the reply of {command}")
     for match in re.finditer(r'broadcastOutput\("\[OLED\][^"]*"\)', action):
         statement_start = max(action.rfind(";", 0, match.start()), action.rfind("}", 0, match.start()))
         if "if (oledRunCommand(" not in action[statement_start + 1:match.start()]:
-            failures.append(f"handleOLEDActionButton prints {match.group(0)} whatever the command answered")
+            failures.append(f"handleOledActionButton prints {match.group(0)} whatever the command answered")
     # Client-capable builds start their shared stack; server-only profiles
     # start the app console. Both paths must report the command outcome.
     bt_input = strip_comments(extract_block(read("OLED_Mode_Bluetooth.cpp"),

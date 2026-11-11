@@ -298,7 +298,7 @@ static bool handleChangePasswordModeInput(int deltaX, int deltaY, uint32_t newly
       
       // Execute password change via the unified command dispatcher so the
       // request runs under the OLED-logged-in user's identity (built by
-      // executeOLEDCommand from SOURCE_LOCAL_DISPLAY + gLocalDisplayUser) and
+      // executeOledCommand from SOURCE_LOCAL_DISPLAY + gLocalDisplayUser) and
       // gets a normal [CMD] audit-log entry. Direct cmd_user_changepassword()
       // call previously bypassed both the identity install and the audit log.
       passwordChangeInProgress = true;
@@ -306,7 +306,7 @@ static bool handleChangePasswordModeInput(int deltaX, int deltaY, uint32_t newly
       // Do not pin identity replacement through password hashing/FS work. The
       // command carries the exact epoch and result publication is fenced.
       char resultBuf[256] = {};
-      const bool commandOk = executeOLEDCommandWithResultForSession(
+      const bool commandOk = executeOledCommandWithResultForSession(
           args, sessionEpoch, resultBuf, sizeof(resultBuf));
       secureClearString(args);
       const char* result = resultBuf;
@@ -368,8 +368,8 @@ static bool handleChangePasswordModeInput(int deltaX, int deltaY, uint32_t newly
         delay(2000);
         if (transportSessionEpochIsLive(
                 SOURCE_LOCAL_DISPLAY, sessionEpoch)) {
-          requestOLEDMode(OLED_MENU, "changepw.done", false);
-          resetOLEDMenu();
+          requestOledMode(OLED_MENU, "changepw.done", false);
+          resetOledMenu();
         }
       }
       
@@ -390,7 +390,7 @@ static bool handleChangePasswordModeInput(int deltaX, int deltaY, uint32_t newly
       }
       
       oledKeyboardInit(title, initialText, 32,
-                       OLEDKeyboardDictationPolicy::DENY, /*masked=*/true);
+                       OledKeyboardDictationPolicy::DENY, /*masked=*/true);
       changePasswordKeyboardActive = true;
     }
     handled = true;
@@ -427,7 +427,7 @@ static bool isChangePasswordModeAvailable(String* outReason) {
 // ============================================================================
 
 // Columns: mode, name, iconName, displayFunc, availFunc, inputFunc, showInMenu, menuOrder, hints
-static const OLEDModeEntry changePasswordModeEntries[] = {
+static const OledModeEntry changePasswordModeEntries[] = {
   {
     OLED_CHANGE_PASSWORD,
     "Change Password",

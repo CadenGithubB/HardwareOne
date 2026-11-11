@@ -11,12 +11,12 @@
 //   OLED_REMOTE_SENSORS     — Bonded device sensor data (scrollable)
 //
 // Standards followed (matches OLED_Mode_Power.cpp / OLED_Mode_SetPattern.cpp):
-//   • Every scrollable list uses OLEDScrollState — no hand-rolled selection ints,
+//   • Every scrollable list uses OledScrollState — no hand-rolled selection ints,
 //     no "---" placeholder hacks, no render-time state mutation.
-//   • Sub-screens are real OLED enum values entered via requestOLEDMode(); B back
+//   • Sub-screens are real OLED enum values entered via requestOledMode(); B back
 //     pops via the global mode stack. No gShowing* flag soup.
 //   • Keyboard flow follows the codebase-wide overlay pattern: input is intercepted
-//     centrally by processOLEDInput() when oledKeyboardIsActive(); each frame the
+//     centrally by processOledInput() when oledKeyboardIsActive(); each frame the
 //     mode polls oledKeyboardIsCompleted()/IsCancelled() to advance its state
 //     machine. The active mode's display func short-circuits to oledKeyboardDisplay
 //     while the keyboard is up (the "defensive curtain").
@@ -117,7 +117,7 @@ void prepareNetworkData() {
 }
 
 // ============================================================================
-// OLED_NETWORK_INFO — WiFi menu (Power-style OLEDScrollState)
+// OLED_NETWORK_INFO — WiFi menu (Power-style OledScrollState)
 // ============================================================================
 // The glasses' WiFi page in the same order (G2_Page_Network.cpp showWifiMenu):
 // radio, connect or disconnect, status, scan, saved networks, Auto Start; plus
@@ -138,7 +138,7 @@ enum NetworkMainAction {
   NET_ACT_SETTINGS,
 };
 
-EXT_RAM_BSS_ATTR static OLEDScrollState sNetworkMainScroll;
+EXT_RAM_BSS_ATTR static OledScrollState sNetworkMainScroll;
 EXT_RAM_BSS_ATTR static NetworkMainAction sNetworkMainActions[OLED_SCROLL_MAX_ITEMS];
 static bool sNetworkMainInitialized = false;
 
@@ -266,26 +266,26 @@ static bool networkMainInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t new
         oledRunCommand("wifidisconnect");
         break;
       case NET_ACT_VIEW_STATUS:
-        requestOLEDMode(OLED_NETWORK_STATUS, "network.status");
+        requestOledMode(OLED_NETWORK_STATUS, "network.status");
         break;
       case NET_ACT_SCAN:
         startWifiScan();
         break;
       case NET_ACT_SAVED:
-        requestOLEDMode(OLED_NETWORK_WIFI_LIST, "network.wifi.list");
+        requestOledMode(OLED_NETWORK_WIFI_LIST, "network.wifi.list");
         break;
       case NET_ACT_ADD:
         startWifiAddSSID();
         break;
       case NET_ACT_REMOVE:
-        requestOLEDMode(OLED_NETWORK_WIFI_REMOVE, "network.wifi.remove");
+        requestOledMode(OLED_NETWORK_WIFI_REMOVE, "network.wifi.remove");
         break;
       case NET_ACT_AUTO_START:
         oledRunCommand(gSettings.wifiAutoStart ? "wifiautostart 0" : "wifiautostart 1");
         break;
       case NET_ACT_SETTINGS:
         if (openSettingsEditorForModule("wifi")) {
-          requestOLEDMode(OLED_SETTINGS, "network.settings");
+          requestOledMode(OLED_SETTINGS, "network.settings");
         }
         break;
     }
@@ -300,10 +300,10 @@ static bool networkMainInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t new
 // OLED_NETWORK_STATUS — WiFi status detail (pushed sub-mode, read-only)
 // ============================================================================
 // The glasses' WiFi Status page. More lines than the 128x64 panel shows, so the
-// lines live in an OLEDScrollState drawn without a cursor; up/down move the
+// lines live in an OledScrollState drawn without a cursor; up/down move the
 // window a line at a time.
 
-EXT_RAM_BSS_ATTR static OLEDScrollState sNetStatusScroll;
+EXT_RAM_BSS_ATTR static OledScrollState sNetStatusScroll;
 EXT_RAM_BSS_ATTR static char sNetStatusLines[8][24];
 static bool sNetStatusInitialized = false;
 
@@ -391,17 +391,17 @@ static String sWifiAddPass = "";
 static TransportSessionEpoch sWifiAddEpoch = kNoTransportSessionEpoch;
 
 // Saved-networks picker (shared by the List + Remove sub-modes) and scan-results
-// picker. Both are plain OLEDScrollState lists rendered the SAME way as this menu
+// picker. Both are plain OledScrollState lists rendered the SAME way as this menu
 // and the Power submenus (oledScrollRenderSimple) — no separate popup mechanism.
-EXT_RAM_BSS_ATTR static OLEDScrollState sSavedNetScroll;
+EXT_RAM_BSS_ATTR static OledScrollState sSavedNetScroll;
 static bool sSavedNetInitialized = false;
 EXT_RAM_BSS_ATTR static WifiNetworkSnapshot sSavedNetSnapshot;  // PSRAM: presentation copy, no credentials
 static bool sSavedNetSnapshotValid = false;
-EXT_RAM_BSS_ATTR static OLEDScrollState sWifiScanScroll;
+EXT_RAM_BSS_ATTR static OledScrollState sWifiScanScroll;
 static bool sWifiScanInitialized = false;
 
 // Scan results: bare SSID (for connect/add) + display label with signal bars.
-// Kept in stable storage because OLEDScrollState items store pointers, not copies.
+// Kept in stable storage because OledScrollState items store pointers, not copies.
 EXT_RAM_BSS_ATTR static char sWifiScanSSIDs[16][33];
 EXT_RAM_BSS_ATTR static char sWifiScanLabels[16][40];
 EXT_RAM_BSS_ATTR static char sWifiScanFailure[40];
@@ -423,14 +423,14 @@ static void startWifiAddSSID() {
   secureClearString(sWifiAddSSID);
   secureClearString(sWifiAddPass);
   oledKeyboardInit("Enter SSID:", "", OLED_KEYBOARD_MAX_LENGTH,
-                   OLEDKeyboardDictationPolicy::ALLOW_PLAINTEXT);
+                   OledKeyboardDictationPolicy::ALLOW_PLAINTEXT);
   sWifiKeyboardActive = true;
 }
 
 static void startWifiAddPass() {
   sWifiAddStep = WIFI_ADD_PASS;
   oledKeyboardInit("Enter Password:", "", OLED_KEYBOARD_MAX_LENGTH,
-                   OLEDKeyboardDictationPolicy::DENY, /*masked=*/true);
+                   OledKeyboardDictationPolicy::DENY, /*masked=*/true);
   sWifiKeyboardActive = true;
 }
 
@@ -483,7 +483,7 @@ static void startWifiAddFromScan(const char* ssid) {
   sWifiAddSSID = String(ssid);
   secureClearString(sWifiAddPass);
   oledKeyboardInit("Enter Password:", "", OLED_KEYBOARD_MAX_LENGTH,
-                   OLEDKeyboardDictationPolicy::DENY, /*masked=*/true);
+                   OledKeyboardDictationPolicy::DENY, /*masked=*/true);
   sWifiKeyboardActive = true;
 }
 
@@ -530,7 +530,7 @@ static bool wifiAddKeyboardTick(bool* handled) {
         // Expected-epoch admission/result fencing below fails closed if a
         // replacement arrives during FS/network I/O.
         char result[oled_message::kMessageBytes] = {};
-        const bool added = executeOLEDCommandWithResultForSession(
+        const bool added = executeOledCommandWithResultForSession(
             command, sessionEpoch, result, sizeof(result));
         secureClearString(command);
         outcomeOk = added;
@@ -538,7 +538,7 @@ static bool wifiAddKeyboardTick(bool* handled) {
         oledCommandReplyText(added, result, "Network saved", "Add failed",
                              toast, sizeof(toast));
         if (added && connectAfter) {
-          const bool connected = executeOLEDCommandWithResultForSession(
+          const bool connected = executeOledCommandWithResultForSession(
               "openwifi --best", sessionEpoch, result, sizeof(result));
           outcomeOk = connected;
           oledCommandReplyText(connected, result, "Connected", "Connect failed",
@@ -570,7 +570,7 @@ static bool wifiAddKeyboardTick(bool* handled) {
 // ============================================================================
 // OLED_NETWORK_WIFI_LIST / OLED_NETWORK_WIFI_REMOVE — saved-network pickers
 // ============================================================================
-// Plain OLEDScrollState lists, pushed via requestOLEDMode and popped by the
+// Plain OledScrollState lists, pushed via requestOledMode and popped by the
 // global B handler — identical mechanism to the WiFi menu and Power submenus.
 // Both render the same saved-network list (shared display); they differ only in
 // the A action: List connects, Remove confirms+deletes via oledConfirmRequest.
@@ -725,7 +725,7 @@ static bool cacheOledWifiScanRecord(const WifiScanRecord& record,
 // Blocking WiFi scan, then push the scan sub-mode showing the results.
 static void startWifiScan() {
   // Immediate "Scanning..." feedback before the blocking scan (mirrors the
-  // first-time-setup wizard's getOLEDWifiSelection()).
+  // first-time-setup wizard's getOledWifiSelection()).
   if (oledDisplay) {
     OLED_TRANSACTION(
       oledDisplay->fillRect(0, 0, oledDisplay->width(), oledDisplay->height(), DISPLAY_COLOR_BLACK);
@@ -761,7 +761,7 @@ static void startWifiScan() {
 
   sWifiScanScroll.selectedIndex = 0;
   sWifiScanScroll.scrollOffset = 0;
-  requestOLEDMode(OLED_NETWORK_WIFI_SCAN, "network.wifi.scan");
+  requestOledMode(OLED_NETWORK_WIFI_SCAN, "network.wifi.scan");
 }
 
 // ============================================================================
@@ -804,7 +804,7 @@ void displayEspNow() {
     oledDisplay->println("initialized");
     oledDisplay->println();
     // Match what Y actually does (see the OLED_ESPNOW Y handler in
-    // processOLEDInput): if a device name already exists, Y runs "openespnow"
+    // processOledInput): if a device name already exists, Y runs "openespnow"
     // directly; only a first-time, unnamed device opens the name keyboard.
     if (gSettings.espnowDeviceName.length() > 0) {
       oledDisplay->println("Press Y to");
@@ -900,7 +900,7 @@ enum WebMenuAction {
   WEB_ACT_SETTINGS,
 };
 
-EXT_RAM_BSS_ATTR static OLEDScrollState sWebMenuScroll;
+EXT_RAM_BSS_ATTR static OledScrollState sWebMenuScroll;
 EXT_RAM_BSS_ATTR static WebMenuAction sWebMenuActions[OLED_SCROLL_MAX_ITEMS];
 static bool sWebMenuInitialized = false;
 
@@ -1005,11 +1005,11 @@ static bool webMenuInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPr
 #endif
         break;
       case WEB_ACT_STATUS:
-        requestOLEDMode(OLED_WEB_STATUS, "web.status");
+        requestOledMode(OLED_WEB_STATUS, "web.status");
         break;
       case WEB_ACT_SETTINGS:
         if (openSettingsEditorForModule("http")) {
-          requestOLEDMode(OLED_SETTINGS, "web.settings");
+          requestOledMode(OLED_SETTINGS, "web.settings");
         }
         break;
     }
@@ -1177,7 +1177,7 @@ void displayMeshStatusRendered() {
 // ============================================================================
 // OLED_REMOTE_SENSORS — bonded device sensor data (scrollable detail screens)
 // ============================================================================
-// Each "row" of the OLEDScrollState is one cached sensor entry; we use the
+// Each "row" of the OledScrollState is one cached sensor entry; we use the
 // scroll state purely as a navigation model (selectedIndex + wrap-around +
 // oledScrollHandleNav) and render the *current* entry's bespoke detail view
 // ourselves (sensors have wildly different layouts — joystick, dial, lat/lon,
@@ -1188,7 +1188,7 @@ void displayMeshStatusRendered() {
 #include "System_ESPNow_Sensors.h"
 #include <ArduinoJson.h>
 
-EXT_RAM_BSS_ATTR static OLEDScrollState sRemoteSensorScroll;
+EXT_RAM_BSS_ATTR static OledScrollState sRemoteSensorScroll;
 static bool sRemoteSensorScrollInitialized = false;
 
 static int collectConnectedRemoteSensors(int* outValidIndices, int maxOut) {
@@ -1536,7 +1536,7 @@ static bool remoteSensorsInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t /
 }
 
 // Remote Sensors OLED mode entry (bond mode: shows bonded device sensor data)
-static const OLEDModeEntry remoteSensorsOLEDModes[] = {
+static const OledModeEntry remoteSensorsOledModes[] = {
   {
     OLED_REMOTE_SENSORS,       // mode enum
     "Bond",                    // menu name (shows bonded device capabilities)
@@ -1550,8 +1550,8 @@ static const OLEDModeEntry remoteSensorsOLEDModes[] = {
   }
 };
 
-REGISTER_OLED_MODE_MODULE(remoteSensorsOLEDModes,
-                          sizeof(remoteSensorsOLEDModes) / sizeof(remoteSensorsOLEDModes[0]),
+REGISTER_OLED_MODE_MODULE(remoteSensorsOledModes,
+                          sizeof(remoteSensorsOledModes) / sizeof(remoteSensorsOledModes[0]),
                           "RemoteSensors");
 
 #endif // ENABLE_ESPNOW
@@ -1562,7 +1562,7 @@ REGISTER_OLED_MODE_MODULE(remoteSensorsOLEDModes,
 // Columns: mode, name, iconName, displayFunc, availFunc, inputFunc,
 //          showInMenu, menuOrder, hints, onEnter
 
-static const OLEDModeEntry sNetworkModes[] = {
+static const OledModeEntry sNetworkModes[] = {
   { OLED_NETWORK_INFO,      "WiFi",    "wifi",          displayNetworkInfoRendered,
     nullptr, networkMainInputHandler,     false, -1, "A:Select B:Back" },
   { OLED_NETWORK_STATUS,    "WiFi Status", "wifi",      displayNetworkStatusRendered,

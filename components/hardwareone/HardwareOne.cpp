@@ -2517,7 +2517,7 @@ static void powerDisplayTick() {
   if (!powerSleepTransitionAllowed(nullptr)) return;
   powerSleepTransitionMark();
   oledPrepareForSleep();   // DISPLAYOFF (+ LDO2 cut on FeatherS3); board-aware
-  gOledRunning = false;    // updateOLEDDisplay() now early-returns → refresh stops
+  gOledRunning = false;    // updateOledDisplay() now early-returns → refresh stops
   asleep = true;
   manualSleep = requested;
   if (requested) powerSetManualIdle(true);
@@ -2692,7 +2692,7 @@ void hardwareone_loop() {
   // ========================================================================
 
 #if ENABLE_OLED_DISPLAY
-  processOLEDBootSequence();
+  processOledBootSequence();
 #endif
 
   oledUpdate();
@@ -2928,7 +2928,7 @@ void hardwareone_loop() {
           // log lines read `[CMD] AuthBypass@serial: ...` (clear physical-user
           // origin) instead of `[CMD] @serial: ...` (ambiguous). Reserved
           // username; see adminCreateUser. Matches the OLED sentinel pattern
-          // in buildOLEDCommand.
+          // in buildOledCommand.
           const TransportSessionEpoch commandSessionEpoch =
               admittedSerialEpoch;
           actx.user = admittedSerialAuthed && admittedSerialUser.length()

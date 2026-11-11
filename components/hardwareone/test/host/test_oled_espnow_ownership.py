@@ -38,7 +38,7 @@ def generated(component: Path) -> str:
     header = (component / "OLED_ESPNow.h").read_text()
     display = (component / "OLED_Display.h").read_text()
     types = [extract_block(header, marker) + ";" for marker in (
-        "enum OLEDEspNowView", "enum OLEDEspNowMode", "struct OLEDEspNowState")]
+        "enum OledEspNowView", "enum OledEspNowMode", "struct OledEspNowState")]
     types.append(extract_block(display, "struct NavEvents") + ";")
     # The shared refusal helper exists only after the fix; a tree without it
     # still compiles here and is judged by the behavioral cases.

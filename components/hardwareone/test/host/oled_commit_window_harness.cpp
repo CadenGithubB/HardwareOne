@@ -2,7 +2,7 @@
 // (test_oled_commit_window.py).
 //
 // The suite pastes from OLED_Utils.cpp: the command-result path
-// (executeOLEDCommandWithResultImpl, with oledDisplayEpochLiveUnderWriter where
+// (executeOledCommandWithResultImpl, with oledDisplayEpochLiveUnderWriter where
 // the tree has it) and, when the tree has them, the frame-commit fence
 // (oledFrameCommitAllowed, oledCommitFrame). The fakes model the display
 // lifecycle writer as a mutex another task's publisher has to wait for, the
@@ -166,7 +166,7 @@ struct Command {
   String line;
   CommandContext ctx;
 };
-static Command buildOLEDCommand(const String& line) {
+static Command buildOledCommand(const String& line) {
   Command command;
   command.line = line;
   command.ctx.transportSessionEpoch = sOledUiSessionEpoch;
@@ -236,7 +236,7 @@ static void resultDelivered() {
   loggedIn();
   char out[32];
   std::memset(out, 'x', sizeof(out));
-  CHECK(executeOLEDCommandWithResultImpl(String("filelist /"), 0, false, out, sizeof(out)));
+  CHECK(executeOledCommandWithResultImpl(String("filelist /"), 0, false, out, sizeof(out)));
   CHECK(std::strcmp(out, "OK: done") == 0);
   CHECK(gSubmits == 1 && gCopies == 1);
   // The copy runs with the writer released, and nothing is left held.
@@ -248,14 +248,14 @@ static void resultDelivered() {
   loggedIn();
   gExecOut = "OK: a long result that does not fit";
   char small[8];
-  CHECK(executeOLEDCommandWithResultImpl(String("x"), 0, false, small, sizeof(small)));
+  CHECK(executeOledCommandWithResultImpl(String("x"), 0, false, small, sizeof(small)));
   CHECK(std::strlen(small) == sizeof(small) - 1 && std::strncmp(small, "OK: a l", 7) == 0);
 
   // A handler error is delivered with the executor's flag.
   loggedIn();
   gExecOk = false;
   gExecOut = "Error: nope";
-  CHECK(!executeOLEDCommandWithResultImpl(String("x"), 0, false, out, sizeof(out)));
+  CHECK(!executeOledCommandWithResultImpl(String("x"), 0, false, out, sizeof(out)));
   CHECK(std::strcmp(out, "Error: nope") == 0);
 }
 
@@ -265,7 +265,7 @@ static void resultFenced() {
   gPublishAtExec = Publish::Replace;
   char out[32];
   std::memset(out, 'x', sizeof(out));
-  CHECK(!executeOLEDCommandWithResultImpl(String("x"), 0, false, out, sizeof(out)));
+  CHECK(!executeOledCommandWithResultImpl(String("x"), 0, false, out, sizeof(out)));
   CHECK(gPublished == 1 && out[0] == '\0' && gCopies == 0);
   CHECK(!gWriterHeld);
 
@@ -274,7 +274,7 @@ static void resultFenced() {
   loggedIn();
   gPublishAtCopy = Publish::Replace;
   std::memset(out, 'x', sizeof(out));
-  const bool delivered = executeOLEDCommandWithResultImpl(String("x"), 0, false, out, sizeof(out));
+  const bool delivered = executeOledCommandWithResultImpl(String("x"), 0, false, out, sizeof(out));
   CHECK(gPublisherBlocked == 0);
   CHECK(gPublished == 1);
   CHECK(!delivered);
@@ -285,7 +285,7 @@ static void resultFenced() {
   loggedIn();
   gPublishAtCopy = Publish::Logout;
   std::memset(out, 'x', sizeof(out));
-  CHECK(!executeOLEDCommandWithResultImpl(String("x"), 0, false, out, sizeof(out)));
+  CHECK(!executeOledCommandWithResultImpl(String("x"), 0, false, out, sizeof(out)));
   CHECK(allZero(out, sizeof(out)));
 
   // Logged out during the copy with display auth off: refused, and the
@@ -294,7 +294,7 @@ static void resultFenced() {
   gRequireAuth = false;
   gPublishAtCopy = Publish::Logout;
   std::memset(out, 'x', sizeof(out));
-  CHECK(!executeOLEDCommandWithResultImpl(String("x"), 0, false, out, sizeof(out)));
+  CHECK(!executeOledCommandWithResultImpl(String("x"), 0, false, out, sizeof(out)));
   CHECK(allZero(out, sizeof(out)));
   CHECK(gOpens == 0);
 
@@ -302,11 +302,11 @@ static void resultFenced() {
   loggedIn();
   const TransportSessionEpoch stale = sOledUiSessionEpoch - 1;
   std::memset(out, 'x', sizeof(out));
-  CHECK(!executeOLEDCommandWithResultImpl(String("x"), stale, true, out, sizeof(out)));
+  CHECK(!executeOledCommandWithResultImpl(String("x"), stale, true, out, sizeof(out)));
   CHECK(gSubmits == 0 && out[0] == '\0');
-  CHECK(!executeOLEDCommandWithResultImpl(String("x"), kNoTransportSessionEpoch, true, out, sizeof(out)));
+  CHECK(!executeOledCommandWithResultImpl(String("x"), kNoTransportSessionEpoch, true, out, sizeof(out)));
   CHECK(gSubmits == 0);
-  CHECK(executeOLEDCommandWithResultImpl(String("x"), sOledUiSessionEpoch, true, out, sizeof(out)));
+  CHECK(executeOledCommandWithResultImpl(String("x"), sOledUiSessionEpoch, true, out, sizeof(out)));
   CHECK(gSubmits == 1 && std::strcmp(out, "OK: done") == 0);
 }
 

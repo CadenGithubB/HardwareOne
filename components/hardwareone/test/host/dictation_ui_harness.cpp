@@ -59,13 +59,13 @@ void g2TextEntryPadEvent(char){}
 bool dictationBeginFor(CommandSource,uint32_t){++beginCalls;return true;}
 bool kbdPadReturnToKeys(const char*,bool){++returnCalls;gKbdPad.micSessionStarted=false;return true;}
 // INSERT_G2
-enum class OLEDKeyboardDictationPolicy {DENY,ALLOW_PLAINTEXT};
+enum class OledKeyboardDictationPolicy {DENY,ALLOW_PLAINTEXT};
 constexpr int KEYBOARD_MODE_MIC=5,KEYBOARD_MODE_LOWERCASE=1;
-struct OLEDKeyboardState{bool active=true;OLEDKeyboardDictationPolicy dictationPolicy=OLEDKeyboardDictationPolicy::ALLOW_PLAINTEXT;int mode=KEYBOARD_MODE_MIC,textLength=0,maxLength=256;char text[257]={};};
-static OLEDKeyboardState gOledKeyboardState;
+struct OledKeyboardState{bool active=true;OledKeyboardDictationPolicy dictationPolicy=OledKeyboardDictationPolicy::ALLOW_PLAINTEXT;int mode=KEYBOARD_MODE_MIC,textLength=0,maxLength=256;char text[257]={};};
+static OledKeyboardState gOledKeyboardState;
 void oledMarkDirty(){++paints;}
 // INSERT_OLED
-static void reset(){pending.clear();offset=0;sequence=1;owner=SOURCE_G2_GLASSES;live=commitOK=true;commits.clear();fullCalls=cancelCalls=returnCalls=beginCalls=paints=0;gTE=TextEntry{};gOledKeyboardState=OLEDKeyboardState{};gKbdPad=KbdPadState{};gKbdPad.active=true;gKbdPad.page=kKbdPageMic;gKbdPad.micSessionStarted=true;snap=DictationSnapshot{};snap.state=DictationState::RECORDING;}
+static void reset(){pending.clear();offset=0;sequence=1;owner=SOURCE_G2_GLASSES;live=commitOK=true;commits.clear();fullCalls=cancelCalls=returnCalls=beginCalls=paints=0;gTE=TextEntry{};gOledKeyboardState=OledKeyboardState{};gKbdPad=KbdPadState{};gKbdPad.active=true;gKbdPad.page=kKbdPageMic;gKbdPad.micSessionStarted=true;snap=DictationSnapshot{};snap.state=DictationState::RECORDING;}
 int main(){
  reset();pending="first";kbdPadDictationServiceOnTap(7);assert(std::string(gTE.buf)=="first"&&commits==std::vector<size_t>{5}&&!returnCalls);
  pending=" second piece";offset=5;kbdPadDictationServiceOnTap(7);assert(std::string(gTE.buf)=="first second piece"&&!returnCalls); // no artificial space inside chunk
@@ -82,7 +82,7 @@ int main(){
  reset();owner=SOURCE_LOCAL_DISPLAY;pending="first";oledKeyboardDictationTick();assert(std::string(gOledKeyboardState.text)=="first"&&commits==std::vector<size_t>{5});
  pending=" next";offset=5;oledKeyboardDictationTick();assert(std::string(gOledKeyboardState.text)=="first next");pending="phrase";offset=0;sequence=2;oledKeyboardDictationTick();assert(std::string(gOledKeyboardState.text)=="first next phrase");
  reset();owner=SOURCE_LOCAL_DISPLAY;gOledKeyboardState.maxLength=3;pending="abcdef";oledKeyboardDictationTick();assert(std::string(gOledKeyboardState.text)=="abc"&&commits==std::vector<size_t>{3}&&fullCalls==1);
- reset();owner=SOURCE_LOCAL_DISPLAY;gOledKeyboardState.dictationPolicy=OLEDKeyboardDictationPolicy::DENY;pending="private";oledKeyboardDictationTick();assert(!gOledKeyboardState.textLength&&commits.empty()&&cancelCalls==1);
+ reset();owner=SOURCE_LOCAL_DISPLAY;gOledKeyboardState.dictationPolicy=OledKeyboardDictationPolicy::DENY;pending="private";oledKeyboardDictationTick();assert(!gOledKeyboardState.textLength&&commits.empty()&&cancelCalls==1);
  reset();owner=SOURCE_LOCAL_DISPLAY;live=false;pending="private";oledKeyboardDictationTick();assert(!gOledKeyboardState.textLength&&commits.empty());
  puts("Shared OLED/G2 consumers: real field filtering/capacity, piece commits, countdown and continuous service lifecycle passed");
 }

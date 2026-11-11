@@ -74,7 +74,7 @@ String migrationStagedSummary();
 // file, so it says they will not match.
 String migrationStagedCheckAdvice();
 
-// The same, as three 21-character lines for getOLEDYesNoPrompt.
+// The same, as three 21-character lines for getOledYesNoPrompt.
 String migrationStagedOledPrompt();
 
 #endif // ENABLE_MIGRATION_TOOL

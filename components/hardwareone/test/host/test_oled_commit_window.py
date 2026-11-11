@@ -2,7 +2,7 @@
 """The OLED owner holds the display-session writer for the check only.
 
 Compiles, with oled_commit_window_harness.cpp, from OLED_Utils.cpp:
-  * the command-result path, executeOLEDCommandWithResultImpl (with
+  * the command-result path, executeOledCommandWithResultImpl (with
     oledDisplayEpochLiveUnderWriter where the tree has it);
   * the frame-commit fence, oledFrameCommitAllowed and oledCommitFrame.
 The fakes model the display lifecycle writer as a mutex another task's
@@ -16,7 +16,7 @@ push marks the frame dirty; a stale session (boundary pending, other epoch,
 user or auth state) pushes nothing and marks dirty; the logged-out login
 screen does not re-mark itself dirty; the re-checks open no bypass session
 (display auth off); an expected epoch that is no longer the display's is
-refused before submitting. A source contract checks that updateOLEDDisplay
+refused before submitting. A source contract checks that updateOledDisplay
 commits through oledCommitFrame() and pushes nothing itself. The writer-window
 scan over OLED_Utils.cpp lives in session_snapshot.
 --component/--source-dir point the suite at another production tree.
@@ -36,7 +36,7 @@ from test_web_batch_handlers import extract_block, require
 HERE = Path(__file__).resolve().parent
 
 RESULT_PATH = ("static bool oledDisplayEpochLiveUnderWriter(",
-               "static bool executeOLEDCommandWithResultImpl(")
+               "static bool executeOledCommandWithResultImpl(")
 COMMIT_FENCE = ("static bool oledFrameCommitAllowed(", "static void oledCommitFrame(")
 
 
@@ -64,11 +64,11 @@ def code_only(text: str) -> str:
 
 def contract_failures(oled: str) -> list[str]:
     failures = []
-    update = code_only(definition(oled, "void updateOLEDDisplay("))
+    update = code_only(definition(oled, "void updateOledDisplay("))
     if "displayUpdate(" in update:
-        failures.append("updateOLEDDisplay pushes the panel itself instead of through oledCommitFrame()")
+        failures.append("updateOledDisplay pushes the panel itself instead of through oledCommitFrame()")
     if update.count("oledCommitFrame();") != 1:
-        failures.append("updateOLEDDisplay must commit through oledCommitFrame() exactly once")
+        failures.append("updateOledDisplay must commit through oledCommitFrame() exactly once")
     for signature in COMMIT_FENCE + RESULT_PATH:
         if not has_definition(oled, signature):
             continue

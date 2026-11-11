@@ -42,20 +42,20 @@ void displayAPDSData() {
     }
   }
   
-  // Don't call display() here - let updateOLEDDisplay() render footer and display in same frame
+  // Don't call display() here - let updateOledDisplay() render footer and display in same frame
 }
 
 // Availability check for APDS OLED mode
-static bool apdsOLEDModeAvailable(String* outReason) {
+static bool apdsOledModeAvailable(String* outReason) {
   return true;  // Always allow navigation
 }
 
 static void apdsToggleConfirmed(void* userData) {
   (void)userData;
   if (gApdsColorRunning || gApdsProximityRunning) {
-    executeOLEDCommand("closeapds");
+    executeOledCommand("closeapds");
   } else {
-    executeOLEDCommand("openapds");
+    executeOledCommand("openapds");
   }
 }
 
@@ -73,13 +73,13 @@ static bool apdsInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
 }
 
 // APDS OLED mode entry
-static const OLEDModeEntry apdsOLEDModes[] = {
+static const OledModeEntry apdsOledModes[] = {
   {
     OLED_APDS_DATA,          // mode enum
     "APDS",                  // menu name
     "notify_sensor",         // icon name
     displayAPDSData,         // displayFunc
-    apdsOLEDModeAvailable,   // availFunc
+    apdsOledModeAvailable,   // availFunc
     apdsInputHandler,        // inputFunc - X toggles sensor
     true,                    // showInMenu
     35,                      // menuOrder
@@ -88,6 +88,6 @@ static const OLEDModeEntry apdsOLEDModes[] = {
 };
 
 // Auto-register APDS OLED mode
-REGISTER_OLED_MODE_MODULE(apdsOLEDModes, sizeof(apdsOLEDModes) / sizeof(apdsOLEDModes[0]), "APDS");
+REGISTER_OLED_MODE_MODULE(apdsOledModes, sizeof(apdsOledModes) / sizeof(apdsOledModes[0]), "APDS");
 
 #endif // I2CSENSOR_APDS9960_OLED_H

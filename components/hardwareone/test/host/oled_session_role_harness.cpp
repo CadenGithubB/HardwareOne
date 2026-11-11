@@ -89,8 +89,8 @@ constexpr TransportSessionEpoch kNoTransportSessionEpoch = 0;
 
 bool oledIsGuestSession();
 bool oledSessionIsAdmin();
-bool oledModeAllowedForGuest(OLEDMode mode);
-MenuAvailability getMenuAvailability(OLEDMode mode, String* outReason);
+bool oledModeAllowedForGuest(OledMode mode);
+MenuAvailability getMenuAvailability(OledMode mode, String* outReason);
 
 struct Account {
   std::string role;
@@ -163,9 +163,9 @@ TransportSessionEpoch localDisplayTransportSessionBeginUiSync(String& user, bool
 }
 void localDisplayTransportSessionEndUiSync() { --gWriterHeld; }
 void secureClearString(String& value) { value.clear(); }
-void resetOLEDTranscription() {}
+void resetOledTranscription() {}
 static unsigned cameraPreviewResets = 0;
-void resetOLEDCameraPreview() { ++cameraPreviewResets; }
+void resetOledCameraPreview() { ++cameraPreviewResets; }
 void oledResetLocalDisplaySessionTransients() {}
 void oledMarkDirty() {}
 void tryAutoStartInputForMenu() {}
@@ -176,19 +176,19 @@ bool oledConnected = true;
 void* server = nullptr;
 // No mode module registers an entry rule here (test_oled_mode_availability
 // covers them): every mode passes its own rule.
-bool oledModeRuleAllows(OLEDMode /*mode*/, String* /*outReason*/) { return true; }
+bool oledModeRuleAllows(OledMode /*mode*/, String* /*outReason*/) { return true; }
 
-OLEDMode currentOLEDMode = OLED_SYSTEM_STATUS;
+OledMode currentOledMode = OLED_SYSTEM_STATUS;
 int gModeRequests = 0;
 bool gLastGateGuest = false;
-// Mirrors requestOLEDMode's guest gate: the boundary's own navigation must see
+// Mirrors requestOledMode's guest gate: the boundary's own navigation must see
 // the role of the identity it just installed.
-void requestOLEDMode(OLEDMode newMode, const char* /*reason*/, bool /*pushStack*/ = true,
+void requestOledMode(OledMode newMode, const char* /*reason*/, bool /*pushStack*/ = true,
                      bool /*isBackNav*/ = false) {
   ++gModeRequests;
   gLastGateGuest = oledIsGuestSession();
   if (gLastGateGuest && !oledModeAllowedForGuest(newMode)) newMode = OLED_MENU;
-  currentOLEDMode = newMode;
+  currentOledMode = newMode;
 }
 
 static bool oledIsOwnerTask() {
@@ -196,29 +196,29 @@ static bool oledIsOwnerTask() {
 }
 
 // Scroll primitives (OLED_Utils.cpp) reduced to the list bookkeeping.
-void oledScrollInit(OLEDScrollState* state, const char* title, int visibleLines) {
-  *state = OLEDScrollState{};
+void oledScrollInit(OledScrollState* state, const char* title, int visibleLines) {
+  *state = OledScrollState{};
   state->title = title;
   state->visibleLines = visibleLines;
 }
-void oledScrollSetSplitPane(OLEDScrollState* state, int listWidth, int separatorX, int iconSize) {
+void oledScrollSetSplitPane(OledScrollState* state, int listWidth, int separatorX, int iconSize) {
   state->listWidth = listWidth;
   state->separatorX = separatorX;
   state->iconSize = iconSize;
 }
-void oledScrollClearKeepSelection(OLEDScrollState* state) { state->itemCount = 0; }
-bool oledScrollAddItem(OLEDScrollState* state, const char* line1, const char* line2,
+void oledScrollClearKeepSelection(OledScrollState* state) { state->itemCount = 0; }
+bool oledScrollAddItem(OledScrollState* state, const char* line1, const char* line2,
                        bool selectable, void* userData) {
   if (state->itemCount >= OLED_SCROLL_MAX_ITEMS) return false;
-  OLEDScrollItem& item = state->items[state->itemCount++];
-  item = OLEDScrollItem{};
+  OledScrollItem& item = state->items[state->itemCount++];
+  item = OledScrollItem{};
   item.line1 = line1;
   item.line2 = line2;
   item.isSelectable = selectable;
   item.userData = userData;
   return true;
 }
-void oledScrollClampSelection(OLEDScrollState* state) {
+void oledScrollClampSelection(OledScrollState* state) {
   if (state->itemCount <= 0) {
     state->selectedIndex = 0;
   } else if (state->selectedIndex >= state->itemCount) {
@@ -233,27 +233,27 @@ void oledScrollClampSelection(OLEDScrollState* state) {
 int oledMenuSelectedIndex = 0;
 int oledMenuCategorySelected = -1;
 int oledMenuCategoryItemIndex = 0;
-const OLEDMenuItem oledMenuCategories[] = {
-    {"System", "system", (OLEDMode)0}, {"Config", "settings", (OLEDMode)1},
-    {"Power", "power", (OLEDMode)2}};
+const OledMenuItem oledMenuCategories[] = {
+    {"System", "system", (OledMode)0}, {"Config", "settings", (OledMode)1},
+    {"Power", "power", (OledMode)2}};
 const int oledMenuCategoryCount = 3;
-const OLEDMenuItem oledMenuCategory0[] = {{"Status", "status", OLED_SYSTEM_STATUS},
+const OledMenuItem oledMenuCategory0[] = {{"Status", "status", OLED_SYSTEM_STATUS},
                                           {"Memory", "memory", OLED_MEMORY_STATS}};
-const OLEDMenuItem oledMenuCategory1[] = {{"Users", "user", OLED_USER_MANAGER},
+const OledMenuItem oledMenuCategory1[] = {{"Users", "user", OLED_USER_MANAGER},
                                           {"Settings", "settings", OLED_SETTINGS},
                                           {"Notifications", "notify", OLED_NOTIFICATIONS}};
-const OLEDMenuItem oledMenuCategory2[] = {{"Power", "power", OLED_POWER},
+const OledMenuItem oledMenuCategory2[] = {{"Power", "power", OLED_POWER},
                                           {"Sleep", "sleep", OLED_POWER_SLEEP}};
-const OLEDMenuItem oledMenuCategory3[] = {{"Unused", "x", OLED_LOGO}};
-const OLEDMenuItem oledMenuCategory4[] = {{"Unused", "x", OLED_LOGO}};
-const OLEDMenuItem oledMenuCategory5[] = {{"Unused", "x", OLED_LOGO}};
+const OledMenuItem oledMenuCategory3[] = {{"Unused", "x", OLED_LOGO}};
+const OledMenuItem oledMenuCategory4[] = {{"Unused", "x", OLED_LOGO}};
+const OledMenuItem oledMenuCategory5[] = {{"Unused", "x", OLED_LOGO}};
 const int oledMenuCategory0Count = 2;
 const int oledMenuCategory1Count = 3;
 const int oledMenuCategory2Count = 2;
 const int oledMenuCategory3Count = 1;
 const int oledMenuCategory4Count = 1;
 const int oledMenuCategory5Count = 1;
-void resetOLEDMenu() {
+void resetOledMenu() {
   oledMenuSelectedIndex = 0;
   oledMenuCategorySelected = -1;
   oledMenuCategoryItemIndex = 0;
@@ -296,7 +296,7 @@ static void applyBoundary(const char* user) {
   gAuthorityAuthed = user != nullptr;
   ++gAuthorityEpoch;
   sOledSessionBoundaryRequested.fetch_add(1, std::memory_order_release);
-  currentOLEDMode = OLED_SYSTEM_STATUS;  // so the boundary navigates to the menu
+  currentOledMode = OLED_SYSTEM_STATUS;  // so the boundary navigates to the menu
   gModeRequests = 0;
   oledApplyPendingSessionBoundary();
 }

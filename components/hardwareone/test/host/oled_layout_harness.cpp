@@ -64,12 +64,12 @@ struct Adafruit_SSD1306 {
   }
   void println(const char* text=""){print(text);x=0;y+=8;}
 };
-struct OLEDFooterHints {};
-void oledRenderFooter(Adafruit_SSD1306*, const OLEDFooterHints*){}
+struct OledFooterHints {};
+void oledRenderFooter(Adafruit_SSD1306*, const OledFooterHints*){}
 void oledDrawIcon(Adafruit_SSD1306*, const char*, int, int, int){}
 // INSERT_TYPES
 // INSERT_FUNCTIONS
-static OLEDScrollState sMainScroll;
+static OledScrollState sMainScroll;
 static bool sMainScrollInit=false;
 // INSERT_MENU_INIT
 // INSERT_MAP_PACK
@@ -141,7 +141,7 @@ int main(int argc,char** argv) {
       save(menu,std::string(argv[1])+"/menu-"+std::to_string(height)+".pgm");
       if(height==128) save(menu,std::string(argv[1])+"/p4-panel.pgm",true);
     }
-    OLEDScrollState simple;
+    OledScrollState simple;
     oledScrollInit(&simple,nullptr,oledVisibleRows(8,10,3));
     for(int i=0;i<24;++i) oledScrollAddItem(&simple,"Transcript",nullptr,true,nullptr);
     for(int selected=0;selected<24;++selected) {

@@ -49,21 +49,21 @@
 // GPSTrackManager) check file access against currentAuthContext(), and the
 // main-loop input/render path that runs this mode installs no identity (an
 // empty user is refused). Every direct owner call below therefore runs inside
-// an OLEDMapCtxGuard: the composed identity + NOTIF_SOURCE_OLED scope, as
-// OLEDFileBrowserCtxGuard does for the file browser. Installed per action,
+// an OledMapCtxGuard: the composed identity + NOTIF_SOURCE_OLED scope, as
+// OledFileBrowserCtxGuard does for the file browser. Installed per action,
 // not per frame.
 static AuthContext oledMapAuthContext() {
   return oledAuthContext("/oled/map");
 }
 
-class OLEDMapCtxGuard {
+class OledMapCtxGuard {
  public:
-  OLEDMapCtxGuard() : scope_(oledMapAuthContext()) {}
-  ~OLEDMapCtxGuard() = default;
-  OLEDMapCtxGuard(const OLEDMapCtxGuard&)            = delete;
-  OLEDMapCtxGuard& operator=(const OLEDMapCtxGuard&) = delete;
-  OLEDMapCtxGuard(OLEDMapCtxGuard&&)                 = delete;
-  OLEDMapCtxGuard& operator=(OLEDMapCtxGuard&&)      = delete;
+  OledMapCtxGuard() : scope_(oledMapAuthContext()) {}
+  ~OledMapCtxGuard() = default;
+  OledMapCtxGuard(const OledMapCtxGuard&)            = delete;
+  OledMapCtxGuard& operator=(const OledMapCtxGuard&) = delete;
+  OledMapCtxGuard(OledMapCtxGuard&&)                 = delete;
+  OledMapCtxGuard& operator=(OledMapCtxGuard&&)      = delete;
  private:
   CommandIdentityScope scope_;
 };
@@ -71,7 +71,7 @@ class OLEDMapCtxGuard {
 // External OLED display pointer (provided via HAL_Display.h #define oledDisplay gDisplay)
 
 // Singleton renderer for OLED (used only for overlays now)
-static OLEDMapRenderer* gOledMapRenderer = nullptr;
+static OledMapRenderer* gOledMapRenderer = nullptr;
 
 // =============================================================================
 // Async Double-Buffer Rendering
@@ -1046,7 +1046,7 @@ static void mapRenderTask(void* param) {
     // TCB go back to internal heap; a give meanwhile waits in the semaphore.
     if (xSemaphoreTake(sRenderSemaphore, pdMS_TO_TICKS(kMapRenderIdleRetireMs)) != pdTRUE) {
       taskENTER_CRITICAL(&sSwapSpinlock);
-      const bool leave = currentOLEDMode != OLED_GPS_MAP && sRenderTaskHandle == self;
+      const bool leave = currentOledMode != OLED_GPS_MAP && sRenderTaskHandle == self;
       if (leave) sRenderTaskHandle = nullptr;
       taskEXIT_CRITICAL(&sSwapSpinlock);
       if (leave) vTaskDelete(nullptr);
@@ -1193,7 +1193,7 @@ static void displayGPSMap() {
     if (!sAutoLoadTried || now - sAutoLoadLastMs >= 5000) {
       sAutoLoadTried = true;
       sAutoLoadLastMs = now;
-      OLEDMapCtxGuard ctxGuard;
+      OledMapCtxGuard ctxGuard;
       char maps[8][96];
       int mapCount = MapCore::getAvailableMaps(maps, 8);
       if (mapCount > 0) {
@@ -1245,7 +1245,7 @@ static void displayGPSMap() {
   
   // Create OLED renderer for overlays (context bar, text, etc.)
   if (!gOledMapRenderer) {
-    gOledMapRenderer = new OLEDMapRenderer(oledDisplay);
+    gOledMapRenderer = new OledMapRenderer(oledDisplay);
   }
   
   // Check if viewport changed since last render request
@@ -1460,7 +1460,7 @@ static bool mapPickerShowsFile(const FileEntry& entry) {
 
 static void mapPickerOnPicked(const char* fullPath, bool cancelled) {
   if (cancelled || !fullPath) return;
-  OLEDMapCtxGuard ctxGuard;
+  OledMapCtxGuard ctxGuard;
   if (MapCore::loadMapFile(fullPath)) {
     gMapCenterSet = false;
     gMapManuallyPanned = false;
@@ -1480,13 +1480,13 @@ static void openMapPicker() {
     oledToastShow("File picker busy", 3000, OledUIIcon::ERROR);
     return;
   }
-  requestOLEDMode(OLED_FILE_BROWSER, "map.browse.maps");  // pushes currentOLEDMode so the pick returns here
+  requestOledMode(OLED_FILE_BROWSER, "map.browse.maps");  // pushes currentOledMode so the pick returns here
 }
 
 // Mark Waypoint completion: add at the map center as the OLED user and say
 // why when nothing was added.
 static void markWaypointAtCenter(const char* name) {
-  OLEDMapCtxGuard ctxGuard;
+  OledMapCtxGuard ctxGuard;
   const int idx = WaypointManager::addWaypoint(gMapCenterLat, gMapCenterLon, name);
   if (idx >= 0) {
     INFO_MAPSF("Marked waypoint %d: %s at %.5f, %.5f", idx, name, gMapCenterLat, gMapCenterLon);
@@ -1511,7 +1511,7 @@ static void executeSubmenuAction(int submenuType, int action) {
   int currentIdx;
   const LoadedMap& currentMap = MapCore::getCurrentMap();
   // Map list/load, navigation target and track scan run as the OLED user.
-  OLEDMapCtxGuard ctxGuard;
+  OledMapCtxGuard ctxGuard;
 
   switch (submenuType) {
     case MENU_CAT_VIEW:
@@ -1605,8 +1605,8 @@ static void executeSubmenuAction(int submenuType, int action) {
           break;
         case 1:  // Toggle GPS
           {
-            if (gGpsRunning) executeOLEDCommand("closegps");
-            else executeOLEDCommand("opengps");
+            if (gGpsRunning) executeOledCommand("closegps");
+            else executeOledCommand("opengps");
           }
           break;
         case 2: goBackToMainMenu(); break;  // Back
@@ -1622,7 +1622,7 @@ static void executeSubmenuAction(int submenuType, int action) {
             snprintf(defaultName, sizeof(defaultName), "WP%d", WaypointManager::getActiveCount());
             oledKeyboardInit(
                 "Name Waypoint", defaultName, WAYPOINT_NAME_LEN - 1,
-                OLEDKeyboardDictationPolicy::ALLOW_PLAINTEXT);
+                OledKeyboardDictationPolicy::ALLOW_PLAINTEXT);
             gMapWaypointNameMode = true;
             gMapMenuOpen = false;
             gMapSubmenuLevel = 0;
@@ -1659,7 +1659,7 @@ static void executeSubmenuAction(int submenuType, int action) {
         case 1:  // Clear Track
           {
             char result[160] = {};
-            const bool executed = executeOLEDCommandWithResult(
+            const bool executed = executeOledCommandWithResult(
                 "gpstrack clear", result, sizeof(result));
             const char* message = strncmp(result, "OK: ", 4) == 0 ? result + 4 : result;
             if (!executed || strcmp(message, "GPS track cleared") != 0) {
@@ -1685,7 +1685,7 @@ static void executeSubmenuAction(int submenuType, int action) {
             // One owner decides whether to start or stop, under this display's
             // authenticated command session, and publishes the resulting state.
             char result[160] = {};
-            const bool executed = executeOLEDCommandWithResult(
+            const bool executed = executeOledCommandWithResult(
                 "gpstrack live toggle", result, sizeof(result));
             if (!executed || strncmp(result, "SUCCESS:", 8) != 0) {
               oledToastShow(result[0] ? result : "Live track failed", 3000,
@@ -1724,7 +1724,7 @@ static void executeSubmenuAction(int submenuType, int action) {
           gMapSearchMode = true;
           gMapMenuOpen = false;
           oledKeyboardInit("Search:", "", 20,
-                           OLEDKeyboardDictationPolicy::ALLOW_PLAINTEXT);
+                           OledKeyboardDictationPolicy::ALLOW_PLAINTEXT);
           oledKeyboardSetAutocomplete(mapNameAutocomplete, nullptr);
           break;
         case 3:  // Transit Routes
@@ -2153,7 +2153,7 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
   if (gTrackSelectMode != 0) {
     if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {  // A button: load or delete track
       if (gTrackFileCount > 0 && gTrackFileIdx < gTrackFileCount) {
-        OLEDMapCtxGuard ctxGuard;  // the track owner opens/removes the file as the OLED user
+        OledMapCtxGuard ctxGuard;  // the track owner opens/removes the file as the OLED user
         if (gTrackSelectMode == 1) {
           // Load track
           String errorMsg;
@@ -2202,7 +2202,7 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
     int wpCount = WaypointManager::getActiveCount();
 
     if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
-      OLEDMapCtxGuard ctxGuard;  // target and deletion are saved as the OLED user
+      OledMapCtxGuard ctxGuard;  // target and deletion are saved as the OLED user
       int activeIdx = 0;
       for (int i = 0; i < MAX_WAYPOINTS; i++) {
         const Waypoint* wp = WaypointManager::getWaypoint(i);
@@ -2440,7 +2440,7 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
 
 // Map OLED mode entry
 // Columns: mode, name, iconName, displayFunc, availFunc, inputFunc, showInMenu, menuOrder, hints
-static const OLEDModeEntry gpsMapOLEDModes[] = {
+static const OledModeEntry gpsMapOledModes[] = {
   {
     OLED_GPS_MAP,
     "Map",
@@ -2454,6 +2454,6 @@ static const OLEDModeEntry gpsMapOLEDModes[] = {
   }
 };
 
-REGISTER_OLED_MODE_MODULE(gpsMapOLEDModes, 1, "Map");
+REGISTER_OLED_MODE_MODULE(gpsMapOledModes, 1, "Map");
 
 #endif // ENABLE_OLED_DISPLAY

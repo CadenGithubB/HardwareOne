@@ -1606,7 +1606,7 @@ python3 components/hardwareone/test/host/test_oled_commit_window.py --sanitize
 
 `oled_commit_window` compiles two pieces of `OLED_Utils.cpp`:
 
-- the command-result path: `executeOLEDCommandWithResultImpl` with
+- the command-result path: `executeOledCommandWithResultImpl` with
   `oledDisplayEpochLiveUnderWriter`;
 - the frame-commit fence: `oledFrameCommitAllowed` and `oledCommitFrame`.
 
@@ -1631,7 +1631,7 @@ The checks:
 - With display auth off, the re-checks open no bypass session.
 - An expected epoch that is no longer the display's is refused before anything
   is submitted.
-- A source contract: `updateOLEDDisplay` commits through `oledCommitFrame()` and
+- A source contract: `updateOledDisplay` commits through `oledCommitFrame()` and
   never pushes the panel itself.
 
 The writer-window scan over `OLED_Utils.cpp` lives in `session_snapshot`. The
@@ -4168,7 +4168,7 @@ not run.
 python3 components/hardwareone/test/host/test_oled_owner_requests.py --sanitize
 ```
 
-`oled_owner_requests` compiles the production `requestOLEDMode`, the owner-request queue, `cmd_oledmode`, `cmd_oledtext`, `cmd_oledclear`, `cmd_oledanim` and `oledUpdate` from OLED_Utils.cpp with `cmd_setpattern` (`setgamepadpassword`) from OLED_Mode_SetPattern.cpp. A task double makes `xTaskGetCurrentTaskHandle()` answer the main loop or cmd_exec, and fakes record which task touched the framebuffer, ran an onEnter hook, read the display role or auth mirror, pushed the back stack or auto-started input. Called as cmd_exec, every command and `requestOLEDMode` leave `customOLEDText`, the mode, the stack, the animation and the pattern flow unchanged until the owner runs `oledUpdate()`. The owner then applies them in post order with the same side effects as before: `oledmode menu` auto-starts input; `oledmode off` and `oledclear` blank the panel on the owner, and `oledclear` leaves the page clean; `setgamepadpassword` pushes the previous mode and restarts the flow; the auth gate still redirects to the login page. A command posted before a session boundary hands over its text or reset but does not navigate after that boundary. A command posted after a boundary the frame has not applied yet waits for it. A ninth request drops the oldest without leaking its text copy, and nothing allocates inside the queue lock. A source check requires `updateOLEDDisplay()` to drain the requests right after its first session-boundary apply. `--component` / `--source-dir` read production sources from another tree; the f4cc542 sources fail 26 checks (state written on cmd_exec) and the source check.
+`oled_owner_requests` compiles the production `requestOledMode`, the owner-request queue, `cmd_oledmode`, `cmd_oledtext`, `cmd_oledclear`, `cmd_oledanim` and `oledUpdate` from OLED_Utils.cpp with `cmd_setpattern` (`setgamepadpassword`) from OLED_Mode_SetPattern.cpp. A task double makes `xTaskGetCurrentTaskHandle()` answer the main loop or cmd_exec, and fakes record which task touched the framebuffer, ran an onEnter hook, read the display role or auth mirror, pushed the back stack or auto-started input. Called as cmd_exec, every command and `requestOledMode` leave `customOledText`, the mode, the stack, the animation and the pattern flow unchanged until the owner runs `oledUpdate()`. The owner then applies them in post order with the same side effects as before: `oledmode menu` auto-starts input; `oledmode off` and `oledclear` blank the panel on the owner, and `oledclear` leaves the page clean; `setgamepadpassword` pushes the previous mode and restarts the flow; the auth gate still redirects to the login page. A command posted before a session boundary hands over its text or reset but does not navigate after that boundary. A command posted after a boundary the frame has not applied yet waits for it. A ninth request drops the oldest without leaking its text copy, and nothing allocates inside the queue lock. A source check requires `updateOledDisplay()` to drain the requests right after its first session-boundary apply. `--component` / `--source-dir` read production sources from another tree; the f4cc542 sources fail 26 checks (state written on cmd_exec) and the source check.
 
 ## OLED mode availability
 
@@ -4176,7 +4176,7 @@ python3 components/hardwareone/test/host/test_oled_owner_requests.py --sanitize
 python3 components/hardwareone/test/host/test_oled_mode_availability.py --sanitize
 ```
 
-`oled_mode_availability` compiles these from the production tree: `getMenuAvailability`, with its `oledModeFeatureState` classification and `oledModeRuleAllows`; the mode registry (`registerOLEDMode`, `registerOLEDModes`, `findOLEDMode`) from OLED_Utils.cpp; and `OLEDModeEntry`, the callback typedefs and `MenuAvailability` from OLED_Display.h. It registers the real entry rules of CLI Input, Gamepad PW, Logout, GPS (i2csensor_pa1010d_oled.h) and thermal through the registry, with GPS and thermal compiled in. A module's refusal makes its launcher row FEATURE_DISABLED with the module's reason. Without a named display session, CLI Input and Gamepad PW show "Login required" and Logout shows "Not logged in". The central classification keeps its class and reason: GPS or thermal not detected is NOT_DETECTED, detected but stopped is FEATURE_DISABLED "Disabled / Press X to start", and a mode that is not built is NOT_BUILT. Modes without a rule are unchanged, and a note an allowing rule leaves never reaches the launcher. A source check requires `requestOLEDModePrepared()` to be declared in OLED_Display.h beside `requestOLEDMode()` and in no other file. `--component` / `--source-dir` read production sources from another tree. On f4cc542 the suite fails five checks (the rules are ignored) and the prototype check.
+`oled_mode_availability` compiles these from the production tree: `getMenuAvailability`, with its `oledModeFeatureState` classification and `oledModeRuleAllows`; the mode registry (`registerOledMode`, `registerOledModes`, `findOledMode`) from OLED_Utils.cpp; and `OledModeEntry`, the callback typedefs and `MenuAvailability` from OLED_Display.h. It registers the real entry rules of CLI Input, Gamepad PW, Logout, GPS (i2csensor_pa1010d_oled.h) and thermal through the registry, with GPS and thermal compiled in. A module's refusal makes its launcher row FEATURE_DISABLED with the module's reason. Without a named display session, CLI Input and Gamepad PW show "Login required" and Logout shows "Not logged in". The central classification keeps its class and reason: GPS or thermal not detected is NOT_DETECTED, detected but stopped is FEATURE_DISABLED "Disabled / Press X to start", and a mode that is not built is NOT_BUILT. Modes without a rule are unchanged, and a note an allowing rule leaves never reaches the launcher. A source check requires `requestOledModePrepared()` to be declared in OLED_Display.h beside `requestOledMode()` and in no other file. `--component` / `--source-dir` read production sources from another tree. On f4cc542 the suite fails five checks (the rules are ignored) and the prototype check.
 
 ## Dead OLED code paths
 
@@ -4194,7 +4194,7 @@ python3 components/hardwareone/test/host/test_oled_dead_paths.py --sanitize
 - the helpers those deletions left without a caller: `hasRemoteSettings`, `oledDrawBox`, `oledDrawButton` and `oledDrawTextCentered`;
 - the unified actions mode.
 
-The live replacements must stay defined: `oledUIRender`, the toast and ribbon renders, the live drawing helpers `oledDrawIcon` and `oledDrawLevelBars`, the `*Rendered` displays, the mode registry, back-navigation and the slug functions. The suite then compiles the production `enum OLEDMode`, `modeFromSlug` and `slugFromMode` and checks three things: `oledmode unified` names no mode, no mode's slug resolves to a different mode, and "actions"/"imuactions" still open IMU actions. `--component`/`--source-dir` read production sources from another tree. On f4cc542 the contract names 65 identifiers, and the slug harness fails 2 checks: "unified" opens a mode, and `slugFromMode(OLED_UNIFIED_MENU)` is "actions", which opens IMU actions.
+The live replacements must stay defined: `oledUIRender`, the toast and ribbon renders, the live drawing helpers `oledDrawIcon` and `oledDrawLevelBars`, the `*Rendered` displays, the mode registry, back-navigation and the slug functions. The suite then compiles the production `enum OledMode`, `modeFromSlug` and `slugFromMode` and checks three things: `oledmode unified` names no mode, no mode's slug resolves to a different mode, and "actions"/"imuactions" still open IMU actions. `--component`/`--source-dir` read production sources from another tree. On f4cc542 the contract names 65 identifiers, and the slug harness fails 2 checks: "unified" opens a mode, and `slugFromMode(OLED_UNIFIED_MENU)` is "actions", which opens IMU actions.
 
 `oled_without_input` also accepts `--component`/`--source-dir`/`--sanitize`. It requires that the display-state API carry no bonded data-source selection.
 
@@ -4234,9 +4234,9 @@ The checks:
   leaves nothing in flight; a reply from a replaced display session shows nothing; an
   over-long reply stays inside the mailbox.
 - Static: the Automations, Logging and Network screens, the Quick Settings section and the
-  unavailable-page / Web Stats actions (`handleOLEDActionButton`) no longer fire commands
+  unavailable-page / Web Stats actions (`handleOledActionButton`) no longer fire commands
   whose reply is dropped, and their `broadcastOutput` success lines are conditional. The
-  Quick Settings section never calls the waiting `oledRunCommand`, and `updateOLEDDisplay`
+  Quick Settings section never calls the waiting `oledRunCommand`, and `updateOledDisplay`
   delivers `oledRunCommandAsync` replies.
 
 `--component`/`--source-dir` point it at another tree; the f4cc542 sources fail it (no
@@ -4333,7 +4333,7 @@ A second unit compiles the shipping OLED virtual keyboard from `OLED_Utils.cpp`:
 - `oledKeyboardInit` and `oledKeyboardReset`;
 - the preview helper and `oledKeyboardDisplay`.
 
-It uses the real `OLEDKeyboardState` and the Set Pattern openers, and draws on a
+It uses the real `OledKeyboardState` and the Set Pattern openers, and draws on a
 recording display.
 
 The checks:
@@ -4427,7 +4427,7 @@ The checks:
   module; a 6-row module's window follows the cursor with the right arrows.
 
 `sensorlog_ui` also builds a second unit (`sensorlog_config_list_harness.cpp`) that draws the Logging
-"Configure" list with the shipping scroll code (`OLEDScrollState`, the scroll primitives and both
+"Configure" list with the shipping scroll code (`OledScrollState`, the scroll primitives and both
 renderers from `OLED_Utils`) through the real `handleLoggingModeInput` and render block, walks the
 11 rows down and up, and checks every frame: rows inside the content area, every glyph on the 128x64
 panel, a visible scroll indicator while rows are hidden, the selected row drawn, and as many rows as

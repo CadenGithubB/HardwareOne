@@ -28,7 +28,7 @@ class String : public std::string {
 // INSERT_TYPES
 
 static NavEvents gNavEvents{};
-static OLEDEspNowState gOledEspNowState{};
+static OledEspNowState gOledEspNowState{};
 struct EspNowState { bool initialized = true; bool encryptionEnabled = true; };
 static EspNowState sEspNow;
 static EspNowState* gEspNow = &sEspNow;
@@ -38,18 +38,18 @@ static EspNowState* gEspNow = &sEspNow;
 // Recorded boundaries.
 static std::vector<std::string> commands;   // every line handed to either executor
 static std::vector<std::string> toasts;
-static bool execOk = true;                  // executeOLEDCommandWithResult's return value
+static bool execOk = true;                  // executeOledCommandWithResult's return value
 static std::string execReply;               // and the reply it copies out
 static int dirtyMarks = 0;
 static int deleteCalls = 0, removeCalls = 0, openCalls = 0, closeCalls = 0;
 static bool pairModeActive = false;
 static int candidateCount = 0;
 
-[[maybe_unused]] static void executeOLEDCommand(const String& line) { commands.push_back(line); }
+[[maybe_unused]] static void executeOledCommand(const String& line) { commands.push_back(line); }
 // Mirrors OLED_Utils.cpp: the reply is copied (truncated) into out; a replaced
 // display session returns false with out[0] == '\0'. The executor reports an
 // "Error..." reply as a failed command.
-[[maybe_unused]] static bool executeOLEDCommandWithResult(const String& line, char* out, size_t outSize) {
+[[maybe_unused]] static bool executeOledCommandWithResult(const String& line, char* out, size_t outSize) {
   commands.push_back(line);
   std::snprintf(out, outSize, "%s", execReply.c_str());
   return execOk && std::strncmp(out, "Error", 5) != 0;
@@ -99,7 +99,7 @@ static bool noOwnerCalls() {
   return deleteCalls == 0 && removeCalls == 0 && openCalls == 0 && closeCalls == 0;
 }
 
-static void beginCase(const char* name, OLEDEspNowView view) {
+static void beginCase(const char* name, OledEspNowView view) {
   currentCase = name;
   commands.clear();
   toasts.clear();

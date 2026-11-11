@@ -82,11 +82,11 @@ static LoggingMenuState loggingCurrentState = LOG_MENU_MAIN;
 static int loggingMenuSelection = 0, loggingSensorConfigSelection = 0;
 static const int loggingMainMenuCount = 3, loggingSensorMenuCount = 3;
 static const int loggingSystemMenuCount = 3;
-struct OLEDScrollState {
+struct OledScrollState {
   int selectedIndex = 0, scrollOffset = 0;
   std::vector<std::string> rows;
 };
-static OLEDScrollState loggingConfigScroll;
+static OledScrollState loggingConfigScroll;
 static struct { bool up = false, down = false; } gNavEvents;
 static bool guest = false, navigationPending = false;
 static int navigationSelection = 0;
@@ -96,13 +96,13 @@ static std::vector<std::string> oledRequests;
 enum { INPUT_BUTTON_A = 1, INPUT_BUTTON_B = 2 };
 #define INPUT_CHECK(value, button) ((value) & (button))
 bool oledGuestBlocksMutate() { return guest; }
-bool oledScrollHandleNav(OLEDScrollState* state) {
+bool oledScrollHandleNav(OledScrollState* state) {
   if (!navigationPending) return false;
   navigationPending = false;
   state->selectedIndex = navigationSelection;
   return true;
 }
-void executeOLEDCommand(const String& command) { oledRequests.emplace_back(command.c_str()); }
+void executeOledCommand(const String& command) { oledRequests.emplace_back(command.c_str()); }
 bool oledRunCommand(const String& command) { oledRequests.emplace_back(command.c_str()); return true; }
 // System Logging > Configure has its own block and test (systemlog_config_ui);
 // these record the hand-off from the shared handler.
@@ -110,14 +110,14 @@ static bool systemConfigOpened = false;
 static bool loggingStateIsSystemConfig(LoggingMenuState) { return false; }
 static bool handleSystemConfigInput(uint32_t) { return false; }
 static void openSystemConfig() { systemConfigOpened = true; }
-void oledScrollInit(OLEDScrollState* state, const char*, int) { *state = {}; }
-void oledScrollSetSplitPane(OLEDScrollState*, int, int, int) {}
-void oledScrollClear(OLEDScrollState* state) { *state = {}; }
-void oledScrollAddItem(OLEDScrollState* state, const char* row, void*) {
+void oledScrollInit(OledScrollState* state, const char*, int) { *state = {}; }
+void oledScrollSetSplitPane(OledScrollState*, int, int, int) {}
+void oledScrollClear(OledScrollState* state) { *state = {}; }
+void oledScrollAddItem(OledScrollState* state, const char* row, void*) {
   state->rows.emplace_back(row);
 }
-void oledScrollRender(void*, OLEDScrollState*, bool, bool) { ++scrollRenders; }
-void oledScrollRenderSimple(void*, OLEDScrollState*) { ++scrollRenders; }
+void oledScrollRender(void*, OledScrollState*, bool, bool) { ++scrollRenders; }
+void oledScrollRenderSimple(void*, OledScrollState*) { ++scrollRenders; }
 
 // INSERT_PRODUCTION
 

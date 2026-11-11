@@ -1248,7 +1248,7 @@ void imuTask(void* parameter) {
         
         // Mark OLED dirty if IMU page is active (enables real-time display updates)
 #if ENABLE_OLED_DISPLAY
-        if (result && currentOLEDMode == OLED_IMU_ACTIONS) {
+        if (result && currentOledMode == OLED_IMU_ACTIONS) {
           oledMarkDirty();
         }
 #endif

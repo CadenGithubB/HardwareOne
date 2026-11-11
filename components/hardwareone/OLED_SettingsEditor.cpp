@@ -79,7 +79,7 @@ SettingsEditorContext gSettingsEditor;
 // login) cannot leave the local editor pointed at the peer's modules.
 static bool editorIsRemote() {
 #if ENABLE_ESPNOW && ENABLE_BONDED_MODE
-  return currentOLEDMode == OLED_REMOTE_SETTINGS;
+  return currentOledMode == OLED_REMOTE_SETTINGS;
 #else
   return false;
 #endif
@@ -240,7 +240,7 @@ static bool setSettingValueStr(const SettingEntry* entry, const String& value) {
   }
   if (editorIsRemote()) return commitRemoteSettingValue(entry, value);
   char out[128];
-  bool ok = executeOLEDCommandWithResult(String(cmdName) + " " + value, out, sizeof(out));
+  bool ok = executeOledCommandWithResult(String(cmdName) + " " + value, out, sizeof(out));
   if (!ok) {
     gSettingsEditor.errorMessage = (out[0] != '\0') ? String(out) : String("Save failed");
     gSettingsEditor.errorDisplayUntil = millis() + 2500;
@@ -546,7 +546,7 @@ void displaySettingsEditor() {
     }
   }
   
-  // Don't call display() here - let updateOLEDDisplay() render footer and display in same frame
+  // Don't call display() here - let updateOledDisplay() render footer and display in same frame
 }
 
 // ============================================================================
@@ -836,7 +836,7 @@ void settingsEditorSelect() {
         // isEditableEntry() excludes SettingEntry::isSecret, so every string
         // that reaches this branch is an explicitly non-secret setting.
         oledKeyboardInit(label, cur.c_str(), OLED_KEYBOARD_MAX_LENGTH,
-                         OLEDKeyboardDictationPolicy::ALLOW_PLAINTEXT);
+                         OledKeyboardDictationPolicy::ALLOW_PLAINTEXT);
         gSettingsEditor.hasChanges = false;
         gSettingsEditor.state = SETTINGS_VALUE_EDIT;
       } else {
@@ -966,8 +966,8 @@ void settingsEditorBack() {
 // Settings Mode Registration (merged from oled_settings_mode.cpp)
 // ============================================================================
 
-// Forward declaration for registerOLEDModes
-void registerOLEDModes(const OLEDModeEntry* modes, size_t count);
+// Forward declaration for registerOledModes
+void registerOledModes(const OledModeEntry* modes, size_t count);
 
 // Display handler for settings mode
 void displaySettingsMode() {
@@ -1005,7 +1005,7 @@ bool isSettingsAvailable(String* outReason) {
 }
 
 // Settings mode entry
-static const OLEDModeEntry settingsModeEntry = {
+static const OledModeEntry settingsModeEntry = {
   OLED_SETTINGS,
   "Settings",
   "settings",  // Icon name
@@ -1019,12 +1019,12 @@ static const OLEDModeEntry settingsModeEntry = {
 
 // Settings modes array
 // Columns: mode, name, iconName, displayFunc, availFunc, inputFunc, showInMenu, menuOrder, hints
-static const OLEDModeEntry settingsOLEDModes[] = {
+static const OledModeEntry settingsOledModes[] = {
   settingsModeEntry
 };
 
 // Auto-register settings mode
-REGISTER_OLED_MODE_MODULE(settingsOLEDModes, sizeof(settingsOLEDModes) / sizeof(settingsOLEDModes[0]), "Settings");
+REGISTER_OLED_MODE_MODULE(settingsOledModes, sizeof(settingsOledModes) / sizeof(settingsOledModes[0]), "Settings");
 
 // ============================================================================
 // Quick Settings Mode (merged from oled_quick_settings.cpp)
@@ -1253,7 +1253,7 @@ bool quickSettingsInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
   initQuickItems();
   if (quickItemCount == 0) {
     if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
-      requestOLEDMode(popOLEDMode(), "quicksettings.back.empty", false, /*isBackNav=*/true);
+      requestOledMode(popOledMode(), "quicksettings.back.empty", false, /*isBackNav=*/true);
       return true;
     }
     return false;
@@ -1277,7 +1277,7 @@ bool quickSettingsInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
   }
   
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
-    requestOLEDMode(popOLEDMode(), "quicksettings.back", false, /*isBackNav=*/true);
+    requestOledMode(popOledMode(), "quicksettings.back", false, /*isBackNav=*/true);
     handled = true;
   }
   

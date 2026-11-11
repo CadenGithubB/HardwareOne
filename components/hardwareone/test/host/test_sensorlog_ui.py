@@ -6,7 +6,7 @@ come from production. Display, input, logger reads and executor boundaries
 are stubbed; owner mutation and authorization are covered separately.
 
 A second unit (sensorlog_config_list_harness.cpp) draws the OLED "Configure"
-list with the shipping scroll code (OLEDScrollState, the scroll primitives and
+list with the shipping scroll code (OledScrollState, the scroll primitives and
 both renderers from OLED_Utils) through the real handleLoggingModeInput and
 render block, and checks every frame against the 128x64 panel: rows inside the
 content area, every glyph on the panel, a visible scroll indicator while rows
@@ -90,8 +90,8 @@ def generated_config_list(read) -> str:
     cap = re.search(r"(?m)^#define OLED_SCROLL_MAX_ITEMS\s+\d+\s*$", utils_header)
     require(cap is not None, "OLED_Utils.h: OLED_SCROLL_MAX_ITEMS missing")
     types = logging_types(read) + [cap.group(0),
-                                   extract_block(utils_header, "struct OLEDScrollItem") + ";",
-                                   extract_block(utils_header, "struct OLEDScrollState") + ";",
+                                   extract_block(utils_header, "struct OledScrollItem") + ";",
+                                   extract_block(utils_header, "struct OledScrollState") + ";",
                                    # Row capacity from the shared layout, as the renderers use it.
                                    read("OLED_Layout.h").replace("#pragma once", ""),
                                    extract_block(utils_header, "inline constexpr int oledVisibleRows(")]

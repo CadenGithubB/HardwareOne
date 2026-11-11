@@ -136,7 +136,7 @@ static void displayGamepadVisual() {
 }
 
 // Availability check for Gamepad OLED mode
-static bool gamepadOLEDModeAvailable(String* outReason) {
+static bool gamepadOledModeAvailable(String* outReason) {
   return true;  // Always show in menu, display function handles inactive state
 }
 
@@ -146,9 +146,9 @@ static void gamepadToggleConfirmed(void* userData) {
   // when the Seesaw gamepad and ANO encoder moved behind the shared HAL_Input
   // layer; they no longer resolve, so this toggle silently did nothing.
   if (gInputRunning && gInputConnected) {
-    executeOLEDCommand("closeinput");
+    executeOledCommand("closeinput");
   } else {
-    executeOLEDCommand("openinput");
+    executeOledCommand("openinput");
   }
 }
 
@@ -166,13 +166,13 @@ static bool gamepadInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
 }
 
 // Gamepad OLED mode entry
-static const OLEDModeEntry gamepadOLEDModes[] = {
+static const OledModeEntry gamepadOledModes[] = {
   {
     OLED_GAMEPAD_VISUAL,     // mode enum
     "Gamepad",               // menu name
     "gamepad",               // icon name
     displayGamepadVisual,    // displayFunc
-    gamepadOLEDModeAvailable, // availFunc
+    gamepadOledModeAvailable, // availFunc
     gamepadInputHandler,     // inputFunc - X toggles gamepad
     true,                    // showInMenu
     25,                      // menuOrder
@@ -181,6 +181,6 @@ static const OLEDModeEntry gamepadOLEDModes[] = {
 };
 
 // Auto-register Gamepad OLED mode
-REGISTER_OLED_MODE_MODULE(gamepadOLEDModes, sizeof(gamepadOLEDModes) / sizeof(gamepadOLEDModes[0]), "Gamepad");
+REGISTER_OLED_MODE_MODULE(gamepadOledModes, sizeof(gamepadOledModes) / sizeof(gamepadOledModes[0]), "Gamepad");
 
 #endif // I2CSENSOR_SEESAW_OLED_H

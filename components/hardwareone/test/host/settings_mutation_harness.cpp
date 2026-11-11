@@ -165,28 +165,28 @@ static bool writeSettingsJson() {
 #if ENABLE_OLED_DISPLAY
 // Display boundaries of the dedicated `oledenabled` command (OLED_Utils.cpp).
 // The enum has a fixed underlying type because the command compares
-// modeFromSlug()'s (OLEDMode)-1 "unknown slug" result.
-enum OLEDMode : int { OLED_OFF, OLED_SYSTEM_STATUS, OLED_MENU };
-static OLEDMode currentOLEDMode = OLED_OFF;
+// modeFromSlug()'s (OledMode)-1 "unknown slug" result.
+enum OledMode : int { OLED_OFF, OLED_SYSTEM_STATUS, OLED_MENU };
+static OledMode currentOledMode = OLED_OFF;
 static bool oledConnected, gOledRunning, oledInitSucceeds;
 static char debugBuffer[1024];
 static bool ensureDebugBuffer() { return true; }
 static char* getDebugBuffer() { return debugBuffer; }
-static bool initOLEDDisplay() {
+static bool initOledDisplay() {
   effectOrder.emplace_back("display init");
   return oledInitSucceeds;
 }
-static void stopOLEDDisplay() { effectOrder.emplace_back("display stop"); }
-static void updateOLEDDisplay() { effectOrder.emplace_back("display update"); }
+static void stopOledDisplay() { effectOrder.emplace_back("display stop"); }
+static void updateOledDisplay() { effectOrder.emplace_back("display update"); }
 static void broadcastOutput(const char* text) { effectOrder.emplace_back(std::string("output: ") + text); }
-static OLEDMode modeFromSlug(const String& slug) {
-  return slug == "status" ? OLED_SYSTEM_STATUS : slug == "menu" ? OLED_MENU : (OLEDMode)-1;
+static OledMode modeFromSlug(const String& slug) {
+  return slug == "status" ? OLED_SYSTEM_STATUS : slug == "menu" ? OLED_MENU : (OledMode)-1;
 }
-static void requestOLEDMode(OLEDMode mode, const char*, bool) {
-  currentOLEDMode = mode;
+static void requestOledMode(OledMode mode, const char*, bool) {
+  currentOledMode = mode;
   effectOrder.emplace_back("display mode");
 }
-static void debugOLEDModeChange(const char*, OLEDMode, OLEDMode, const String&) {}
+static void debugOledModeChange(const char*, OledMode, OledMode, const String&) {}
 // INSERT_OLED_COMMAND
 #endif
 
@@ -464,7 +464,7 @@ static void prepareOled(const char* input, bool enabled, bool connected, bool ru
   reset();
   gSettings.oledEnabled = enabled;
   oledConnected = connected; gOledRunning = running; oledInitSucceeds = true;
-  currentOLEDMode = OLED_OFF;
+  currentOledMode = OLED_OFF;
   context = std::string("oledenabled '") + input + "' from " + (enabled ? "enabled" : "disabled");
 }
 
@@ -503,7 +503,7 @@ static void oledEnabledCommand() {
         "init failure reply changed");
   check(effectOrder == Effects{"persist", "display init"}, "init failure lost persist/report order");
   prepareOled("1", false, true, false);
-  check(cmd_oled_enabled("1") == enabledReply && gOledRunning && currentOLEDMode == OLED_SYSTEM_STATUS,
+  check(cmd_oled_enabled("1") == enabledReply && gOledRunning && currentOledMode == OLED_SYSTEM_STATUS,
         "connected panel did not resume in the default mode");
   check(effectOrder == Effects{"persist", "display mode", "display update"}, "resume effects changed");
   for (const char* input : {"on", "foo"}) {

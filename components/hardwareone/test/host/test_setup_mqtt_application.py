@@ -39,7 +39,7 @@ def main():
             mode = (source_dir / "System_SetupWizardMode.cpp").read_text()
             header = (source_dir / "System_SetupWizard.h").read_text()
             handlers = [extract_block(setup, "static void handleSerialMQTTPage("),
-                        extract_block(oled, "void handleOLEDMQTTPage("),
+                        extract_block(oled, "void handleOledMQTTPage("),
                         extract_block(mode[mode.rindex("static CLIModeInputResult dispatchMQTT("):],
                                       "static CLIModeInputResult dispatchMQTT(")]
             if label == "current":

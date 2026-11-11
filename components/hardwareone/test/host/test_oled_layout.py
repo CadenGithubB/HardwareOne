@@ -19,7 +19,7 @@ def run(component, output, baseline=False, sanitize=False):
     source = (component / 'OLED_Utils.cpp').read_text()
     header = (component / 'OLED_Utils.h').read_text()
     harness = (HERE / 'oled_layout_harness.cpp').read_text()
-    types = '\n'.join(extract_block(header, 'struct '+name)+';' for name in ('OLEDScrollItem','OLEDScrollState'))
+    types = '\n'.join(extract_block(header, 'struct '+name)+';' for name in ('OledScrollItem','OledScrollState'))
     functions = '\n'.join(extract_block(source, signature) for signature in (
         'void oledScrollInit(', 'bool oledScrollAddItem(', 'void oledScrollClampSelection(',
         'void oledScrollUp(', 'void oledScrollDown(', 'void oledScrollPageUp(',

@@ -19,11 +19,11 @@
 // ============================================================================
 // Shared menu primitives (used by BOTH the sensor menu and the main launcher)
 // ============================================================================
-// These collapse the formerly hand-rolled list/menu systems onto OLEDScrollState:
+// These collapse the formerly hand-rolled list/menu systems onto OledScrollState:
 //   * menuItemRightPaneDraw - availability badge + status dot in the icon pane
-//   * populateMenuScroll     - fill an OLEDScrollState from an OLEDMenuItem[]
+//   * populateMenuScroll     - fill an OledScrollState from an OledMenuItem[]
 //   * oledMenuExecuteItem    - availability-aware "select" dispatch
-// Per-mode entry init for launched modes now runs via OLEDModeEntry::onEnterFunc,
+// Per-mode entry init for launched modes now runs via OledModeEntry::onEnterFunc,
 // so the dispatch here stays tiny.
 
 // Right-pane decorator for the SELECTED item. A column between the divider
@@ -31,10 +31,10 @@
 // hardware or not built), then a status dot, filled when the item is ready
 // and hollow otherwise. It never moves the icon and fits every canvas height.
 // Reads the backing descriptor via item->userData.
-static void menuItemRightPaneDraw(Adafruit_SSD1306* d, OLEDScrollItem* item,
+static void menuItemRightPaneDraw(Adafruit_SSD1306* d, OledScrollItem* item,
                                   int areaX, int /*iconY*/, int /*iconSize*/) {
   if (!d || !item || !item->userData) return;
-  const OLEDMenuItem* mi = (const OLEDMenuItem*)item->userData;
+  const OledMenuItem* mi = (const OledMenuItem*)item->userData;
   MenuAvailability avail = getMenuAvailability(mi->targetMode, nullptr);
 
   // areaX is 4 px past the divider and the icon starts at least 4 px further.
@@ -67,12 +67,12 @@ static int menuAvailRank(MenuAvailability a) {
   }
 }
 
-// Fill `s` from an OLEDMenuItem[] array: line1 = name, iconName = icon, and
+// Fill `s` from an OledMenuItem[] array: line1 = name, iconName = icon, and
 // userData = the descriptor (so the right-pane callback + oledMenuExecuteItem
 // can read targetMode). dropNotBuilt skips compiled-out entries; sortByAvailability
 // orders Ready->Off->No-HW (the sensor-menu behavior). Preserves the cursor.
 // Guests skip modes outside oledModeAllowedForGuest (view-only launcher).
-static void populateMenuScroll(OLEDScrollState* s, const OLEDMenuItem* items, int count,
+static void populateMenuScroll(OledScrollState* s, const OledMenuItem* items, int count,
                                bool sortByAvailability, bool dropNotBuilt) {
   oledScrollClearKeepSelection(s);
 
@@ -102,7 +102,7 @@ static void populateMenuScroll(OLEDScrollState* s, const OLEDMenuItem* items, in
   }
 
   for (int k = 0; k < n; k++) {
-    const OLEDMenuItem* mi = &items[order[k]];
+    const OledMenuItem* mi = &items[order[k]];
     oledScrollAddItem(s, mi->name, nullptr, true, (void*)mi);
     s->items[s->itemCount - 1].iconName = mi->iconName;  // oledScrollAddItem doesn't set iconName
   }
@@ -112,9 +112,9 @@ static void populateMenuScroll(OLEDScrollState* s, const OLEDMenuItem* items, in
 // Availability-aware "select": switch to an available item's target mode (that
 // mode's own onEnterFunc handles its entry init), or push the current menu and
 // show the unavailable page (so B returns here). `slug` is the trace reason.
-static void oledMenuExecuteItem(const OLEDMenuItem* item, const char* slug) {
+static void oledMenuExecuteItem(const OledMenuItem* item, const char* slug) {
   if (!item) return;
-  OLEDMode target = item->targetMode;
+  OledMode target = item->targetMode;
   String reason;
   MenuAvailability avail = getMenuAvailability(target, &reason);
   if (avail != MenuAvailability::AVAILABLE) {
@@ -126,11 +126,11 @@ static void oledMenuExecuteItem(const OLEDMenuItem* item, const char* slug) {
         default:                                 reason = "Unavailable"; break;
       }
     }
-    pushOLEDMode(currentOLEDMode);  // B from the unavailable page returns to this menu
+    pushOledMode(currentOledMode);  // B from the unavailable page returns to this menu
     enterUnavailablePage(item->name, reason);
     return;
   }
-  requestOLEDMode(target, slug);
+  requestOledMode(target, slug);
 }
 
 // ============================================================================
@@ -138,7 +138,7 @@ static void oledMenuExecuteItem(const OLEDMenuItem* item, const char* slug) {
 // ============================================================================
 
 // Helper to get category items and count
-void getCategoryItems(int categoryId, const OLEDMenuItem** outItems, int* outCount) {
+void getCategoryItems(int categoryId, const OledMenuItem** outItems, int* outCount) {
   switch (categoryId) {
     case 0: *outItems = oledMenuCategory0; *outCount = oledMenuCategory0Count; break;
     case 1: *outItems = oledMenuCategory1; *outCount = oledMenuCategory1Count; break;
@@ -151,18 +151,18 @@ void getCategoryItems(int categoryId, const OLEDMenuItem** outItems, int* outCou
 }
 
 // ============================================================================
-// Main Launcher - OLEDScrollState (categories -> category items)
+// Main Launcher - OledScrollState (categories -> category items)
 // ============================================================================
 // Two live levels: the top-level category list and one category's item list.
 // The authoritative cursor/level still lives in the globals the header
-// breadcrumb and resetOLEDMenu read (oledMenuSelectedIndex /
+// breadcrumb and resetOledMenu read (oledMenuSelectedIndex /
 // oledMenuCategorySelected / oledMenuCategoryItemIndex); sMainScroll is a
 // per-frame VIEW rebuilt from them, so those consumers keep working unchanged.
 //
 // (The old launcher's dynamic "remote submenu" path was dead and was removed
 // pre-1.0; the live launcher is just these two levels.)
 
-EXT_RAM_BSS_ATTR static OLEDScrollState sMainScroll;
+EXT_RAM_BSS_ATTR static OledScrollState sMainScroll;
 static bool sMainScrollInit = false;
 EXT_RAM_BSS_ATTR static char sCatLabels[8][20];  // "<Category> >" decorated labels (persist for line1 ptrs)
 
@@ -175,7 +175,7 @@ static void mainMenuEnsureInit() {
 
 // True if a launcher category has at least one guest-visible item.
 static bool categoryVisibleForGuest(int categoryId) {
-  const OLEDMenuItem* items = nullptr;
+  const OledMenuItem* items = nullptr;
   int count = 0;
   getCategoryItems(categoryId, &items, &count);
   for (int i = 0; i < count; i++) {
@@ -206,7 +206,7 @@ static void mainMenuPopulate() {
     sMainScroll.selectedIndex = oledMenuSelectedIndex;
   } else {
     // Level 1 - the selected category's items, with availability badges.
-    const OLEDMenuItem* items = nullptr;
+    const OledMenuItem* items = nullptr;
     int count = 0;
     getCategoryItems(oledMenuCategorySelected, &items, &count);
     populateMenuScroll(&sMainScroll, items, count, /*sort=*/false, /*dropNotBuilt=*/false);
@@ -235,19 +235,19 @@ static bool mainMenuInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyP
   // A - descend into a category, or launch the selected item.
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
     if (oledMenuCategorySelected < 0) {
-      OLEDScrollItem* sel = oledScrollGetSelected(&sMainScroll);
+      OledScrollItem* sel = oledScrollGetSelected(&sMainScroll);
       oledMenuSelectedIndex = sMainScroll.selectedIndex;
       // Category id lives in targetMode (not list index) so guest filtering
       // that hides empty categories (e.g. Power) does not remap ids.
       if (sel && sel->userData) {
-        oledMenuCategorySelected = (int)((const OLEDMenuItem*)sel->userData)->targetMode;
+        oledMenuCategorySelected = (int)((const OledMenuItem*)sel->userData)->targetMode;
       } else {
         oledMenuCategorySelected = sMainScroll.selectedIndex;
       }
       oledMenuCategoryItemIndex = 0;
     } else {
-      OLEDScrollItem* sel = oledScrollGetSelected(&sMainScroll);
-      if (sel && sel->userData) oledMenuExecuteItem((const OLEDMenuItem*)sel->userData, "menu.select");
+      OledScrollItem* sel = oledScrollGetSelected(&sMainScroll);
+      if (sel && sel->userData) oledMenuExecuteItem((const OledMenuItem*)sel->userData, "menu.select");
     }
     return true;
   }
@@ -269,10 +269,10 @@ static bool mainMenuInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyP
   return false;
 }
 
-// Entry hook: a fresh visit returns to the top category list (resetOLEDMenu);
+// Entry hook: a fresh visit returns to the top category list (resetOledMenu);
 // back-navigation preserves your place (isForward == false).
 static void menuOnEnter(bool isForward) {
-  if (isForward) resetOLEDMenu();
+  if (isForward) resetOledMenu();
 }
 
 // ============================================================================
@@ -280,10 +280,10 @@ static void menuOnEnter(bool isForward) {
 // ============================================================================
 
 // ============================================================================
-// Sensor Menu - OLEDScrollState (split-pane, availability badge + status)
+// Sensor Menu - OledScrollState (split-pane, availability badge + status)
 // ============================================================================
 
-EXT_RAM_BSS_ATTR static OLEDScrollState sSensorScroll;
+EXT_RAM_BSS_ATTR static OledScrollState sSensorScroll;
 static bool sSensorScrollInit = false;
 
 static void sensorMenuPopulate() {
@@ -309,9 +309,9 @@ static bool sensorMenuInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newl
   if (oledScrollHandleNav(&sSensorScroll)) return true;
 
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
-    OLEDScrollItem* sel = oledScrollGetSelected(&sSensorScroll);
+    OledScrollItem* sel = oledScrollGetSelected(&sSensorScroll);
     if (sel && sel->userData) {
-      oledMenuExecuteItem((const OLEDMenuItem*)sel->userData, "sensormenu.select");
+      oledMenuExecuteItem((const OledMenuItem*)sel->userData, "sensormenu.select");
     }
     return true;
   }
@@ -321,7 +321,7 @@ static bool sensorMenuInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newl
 }
 
 // Columns: mode, name, iconName, displayFunc, availFunc, inputFunc, showInMenu, menuOrder, hints
-static const OLEDModeEntry sSensorMenuModes[] = {
+static const OledModeEntry sSensorMenuModes[] = {
   { OLED_SENSOR_MENU, "Sensors", "sensor", displaySensorMenu, nullptr, sensorMenuInputHandler, false, -1, "A:Select B:Back" },
 };
 
@@ -505,14 +505,14 @@ void displayLogo() {
 // Logo Mode Registration
 // ============================================================================
 
-static const OLEDModeEntry sLogoModes[] = {
+static const OledModeEntry sLogoModes[] = {
   { OLED_MENU, "Menu", "menu", displayMenuListStyle, nullptr, mainMenuInputHandler, false, -1, "A:Select B:Back", menuOnEnter },
   { OLED_LOGO, "Logo", "logo", displayLogo,          nullptr, nullptr, false, -1, "B:Back" },
 };
 
 REGISTER_OLED_MODE_MODULE(sLogoModes, sizeof(sLogoModes) / sizeof(sLogoModes[0]), "MenuAndLogo");
 
-// Linker anchor — called once from printRegisteredOLEDModes(). This file's only
+// Linker anchor — called once from printRegisteredOledModes(). This file's only
 // external reference used to be getCategoryItems() (called by the now-deleted
 // oledMenuUp/Down/Select in OLED_Utils.cpp). With that gone, --gc-sections would
 // drop this entire object file, so the SensorMenu + MenuAndLogo static registrars

@@ -80,21 +80,21 @@ static void displayFmRadio() {
 }
 
 // Availability check for FM Radio OLED mode
-static bool fmRadioOLEDModeAvailable(String* outReason) {
+static bool fmRadioOledModeAvailable(String* outReason) {
   return true;  // Always allow navigation, display function handles "not active" state
 }
 
 static void fmRadioToggleConfirmed(void* userData) {
   (void)userData;
   if (gRadioInitialized && gFmRadioConnected) {
-    executeOLEDCommand("closefmradio");
+    executeOledCommand("closefmradio");
   } else {
-    executeOLEDCommand("openfmradio");
+    executeOledCommand("openfmradio");
   }
 }
 
 // Input handler for FM Radio OLED mode. Full tuner controls (all dispatched
-// through executeOLEDCommand so they carry the [CMD] audit line and the OLED
+// through executeOledCommand so they carry the [CMD] audit line and the OLED
 // auth identity — same stance as the LED screen):
 //   L/R      tune -/+ 0.1 MHz        Up/Down  seek down/up (async core)
 //   A        mute/unmute             Y        volume ladder 0>3>6>9>12>15>0
@@ -126,7 +126,7 @@ static bool fmRadioInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPr
     if (f > 10800) f = 10800;
     char cmd[28];
     snprintf(cmd, sizeof(cmd), "fmradiotune %d", f);
-    executeOLEDCommand(cmd);
+    executeOledCommand(cmd);
     return true;
   }
 
@@ -134,7 +134,7 @@ static bool fmRadioInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPr
   if (gNavEvents.up || gNavEvents.down) {
     if (oledGuestBlocksMutate()) return true;
     if (!snap.seekInProgress) {
-      executeOLEDCommand(gNavEvents.up ? "fmradioseek up" : "fmradioseek down");
+      executeOledCommand(gNavEvents.up ? "fmradioseek up" : "fmradioseek down");
       oledMarkDirty();  // show the Seek... indicator immediately
     }
     return true;
@@ -143,7 +143,7 @@ static bool fmRadioInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPr
   // A: mute toggle.
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
     if (oledGuestBlocksMutate()) return true;
-    executeOLEDCommand(snap.muted ? "fmradiounmute" : "fmradiomute");
+    executeOledCommand(snap.muted ? "fmradiounmute" : "fmradiomute");
     return true;
   }
 
@@ -157,7 +157,7 @@ static bool fmRadioInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPr
     }
     char cmd[24];
     snprintf(cmd, sizeof(cmd), "fmradiovolume %u", (unsigned)next);
-    executeOLEDCommand(cmd);
+    executeOledCommand(cmd);
     return true;
   }
 
@@ -165,13 +165,13 @@ static bool fmRadioInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPr
 }
 
 // FM Radio OLED mode entry
-static const OLEDModeEntry fmRadioOLEDModes[] = {
+static const OledModeEntry fmRadioOledModes[] = {
   {
     OLED_FM_RADIO,           // mode enum
     "FM Radio",              // menu name
     "radio",                 // icon name
     displayFmRadio,          // displayFunc
-    fmRadioOLEDModeAvailable,// availFunc
+    fmRadioOledModeAvailable,// availFunc
     fmRadioInputHandler,     // inputFunc - full tuner controls (see handler)
     true,                    // showInMenu
     60,                      // menuOrder
@@ -180,6 +180,6 @@ static const OLEDModeEntry fmRadioOLEDModes[] = {
 };
 
 // Auto-register FM Radio OLED mode
-REGISTER_OLED_MODE_MODULE(fmRadioOLEDModes, sizeof(fmRadioOLEDModes) / sizeof(fmRadioOLEDModes[0]), "FMRadio");
+REGISTER_OLED_MODE_MODULE(fmRadioOledModes, sizeof(fmRadioOledModes) / sizeof(fmRadioOledModes[0]), "FMRadio");
 
 #endif // I2CSENSOR_RDA5807_OLED_H

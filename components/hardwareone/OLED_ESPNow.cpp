@@ -36,13 +36,13 @@ static const char* espnowMenuItems[] = {
 static const int ESPNOW_MENU_ITEM_COUNT = 6;
 
 // Global state
-OLEDEspNowState gOledEspNowState;
+OledEspNowState gOledEspNowState;
 
 // Match the rest of the OLED subsystem: the large pointer/metadata-only scroll
 // states live in external BSS, while gOledEspNowState keeps its non-trivial
 // String fields (including the remote-login form) in internal DRAM.
-EXT_RAM_BSS_ATTR static OLEDScrollState sEspNowDeviceListScroll;
-EXT_RAM_BSS_ATTR static OLEDScrollState sEspNowMessageListScroll;
+EXT_RAM_BSS_ATTR static OledScrollState sEspNowDeviceListScroll;
+EXT_RAM_BSS_ATTR static OledScrollState sEspNowMessageListScroll;
 
 // Sent text is now recorded in the SHARED per-peer history (sent[] ring) at the
 // cmd_espnow_send chokepoint, so the OLED no longer keeps a private sent ring —
@@ -62,7 +62,7 @@ EXT_RAM_BSS_ATTR static struct { bool isSent; uint32_t msgId; uint8_t sendState;
 // only when the owner accepted the command.
 static bool oledEspNowRunOwnerCommand(const char* cmd, const char* failToast) {
   char out[160];
-  if (executeOLEDCommandWithResult(cmd, out, sizeof(out))) return true;
+  if (executeOledCommandWithResult(cmd, out, sizeof(out))) return true;
   oledToastShow(strstr(out, "Admin access required") ? "Admin required" : failToast, 2500);
   return false;
 }
@@ -80,7 +80,7 @@ static bool oledEspNowRunOwnerCommand(const char* cmd, const char* failToast) {
 // The conversation view relies on the GLOBAL header bar (title "ESPNOW: Text"),
 // so message rows start at OLED_CONTENT_START_Y like the sibling ESP-NOW views
 // and stack down to the GLOBAL footer band. The footer top is
-// OLED_HEADER_HEIGHT + OLED_CONTENT_HEIGHT (the exact value drawOLEDFooter() uses),
+// OLED_HEADER_HEIGHT + OLED_CONTENT_HEIGHT (the exact value drawOledFooter() uses),
 // so deriving the visible-row count and the render/scrollbar bounds from it here
 // keeps the shared scroll window (oledScrollUp/Down + the follow-tail restore) in
 // lockstep with what actually fits. Hardcoding it (the old visibleLines=3 / yPos<56)
@@ -185,7 +185,7 @@ void oledEspNowShowNameKeyboard() {
     initialText = gSettings.espnowDeviceName.c_str();
   }
   oledKeyboardInit("Device Name:", initialText, 19,
-                   OLEDKeyboardDictationPolicy::ALLOW_PLAINTEXT);
+                   OledKeyboardDictationPolicy::ALLOW_PLAINTEXT);
 }
 
 void oledEspNowDisplay(Adafruit_SSD1306* display) {
@@ -672,7 +672,7 @@ void oledEspNowPollPairRequest() {
   uint32_t atMs = 0;
   if (!espnowGetIncomingPairRequest(reqName, sizeof(reqName), mac, &atMs)) return;
   if (pairPromptIs(sPairPromptAnswered, mac, atMs)) return;            // answered here
-  if (currentOLEDMode == OLED_LOGIN || !oledSessionIsAdmin()) return;  // cannot answer it
+  if (currentOledMode == OLED_LOGIN || !oledSessionIsAdmin()) return;  // cannot answer it
   sPairPromptShown.valid = true;
   memcpy(sPairPromptShown.mac, mac, 6);
   sPairPromptShown.atMs = atMs;
@@ -791,9 +791,9 @@ void oledEspNowMainMenuSelect() {
     case 4:  // Start/Stop
       {
         if (gEspNow && gEspNow->initialized) {
-          executeOLEDCommand("closeespnow");
+          executeOledCommand("closeespnow");
         } else {
-          executeOLEDCommand("openespnow");
+          executeOledCommand("openespnow");
         }
       }
       break;
@@ -892,7 +892,7 @@ void oledEspNowDisplayDeviceDetail(Adafruit_SSD1306* display) {
 
   const int rightEdge = SCREEN_WIDTH - 4;  // leave room for the scrollbar
   for (int i = visibleStart; i < visibleEnd && (yPos + kMsgRowHeight) <= footerTopY; i++) {
-    OLEDScrollItem* item = &sEspNowMessageListScroll.items[i];
+    OledScrollItem* item = &sEspNowMessageListScroll.items[i];
     bool isSelected = (i == sEspNowMessageListScroll.selectedIndex);
     bool isSent = gOledRowMeta[i].isSent;  // left = received, right = sent (web-style)
 
@@ -1056,7 +1056,7 @@ bool oledEspNowHandleInput(int deltaX, int deltaY, uint32_t newlyPressed) {
             char cmd[48];
             snprintf(cmd, sizeof(cmd), "espnowpairrequest " MAC_FMT,
                      MAC_ARGS(mac));
-            executeOLEDCommand(cmd);   // waits for the other device to Accept
+            executeOledCommand(cmd);   // waits for the other device to Accept
           }
           oledMarkDirty();
           return true;
@@ -1265,10 +1265,10 @@ bool oledEspNowHandleInput(int deltaX, int deltaY, uint32_t newlyPressed) {
         if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
           if (gOledEspNowState.fileChooserIndex == 1) {
             oledFileBrowserStartEspNowReceive(gOledEspNowState.selectedDeviceMac);
-            requestOLEDMode(OLED_FILE_BROWSER, "espnow.receive");  // B returns here
+            requestOledMode(OLED_FILE_BROWSER, "espnow.receive");  // B returns here
           } else {
             oledFileBrowserStartEspNowSend(gOledEspNowState.selectedDeviceMac);
-            requestOLEDMode(OLED_FILE_BROWSER, "espnow.send");
+            requestOledMode(OLED_FILE_BROWSER, "espnow.send");
           }
           return true;
         }
@@ -1278,7 +1278,7 @@ bool oledEspNowHandleInput(int deltaX, int deltaY, uint32_t newlyPressed) {
           gOledEspNowState.currentView = ESPNOW_VIEW_TEXT_KEYBOARD;
           gOledEspNowState.textMessageBuffer = "";
           oledKeyboardInit("Send Message:", "", 128,
-                           OLEDKeyboardDictationPolicy::ALLOW_PLAINTEXT);
+                           OledKeyboardDictationPolicy::ALLOW_PLAINTEXT);
           return true;
         }
         
@@ -1389,7 +1389,7 @@ bool oledEspNowHandleInput(int deltaX, int deltaY, uint32_t newlyPressed) {
 }
 
 void oledEspNowSelectDevice() {
-  OLEDScrollItem* selected = oledScrollGetSelected(&sEspNowDeviceListScroll);
+  OledScrollItem* selected = oledScrollGetSelected(&sEspNowDeviceListScroll);
   if (!selected || !selected->userData) return;
   
   // Store selected device MAC
@@ -1884,10 +1884,10 @@ bool oledEspNowHandleRemoteFormInput(int deltaX, int deltaY, uint32_t newlyPress
     
     // A remote username is plain identity metadata. Passwords and arbitrary
     // command payloads can contain secrets and must never accept dictation.
-    const OLEDKeyboardDictationPolicy policy =
+    const OledKeyboardDictationPolicy policy =
         gOledEspNowState.remoteFormField == 0
-            ? OLEDKeyboardDictationPolicy::ALLOW_PLAINTEXT
-            : OLEDKeyboardDictationPolicy::DENY;
+            ? OledKeyboardDictationPolicy::ALLOW_PLAINTEXT
+            : OledKeyboardDictationPolicy::DENY;
     oledKeyboardInit(title, initialText, 64, policy,
                      gOledEspNowState.remoteFormField == 1);  // password
     return true;
@@ -1929,7 +1929,7 @@ void oledEspNowSendTextMessage() {
   char cmdBuf[256];
   snprintf(cmdBuf, sizeof(cmdBuf), "espnowsend json %s %s", macStr, gOledEspNowState.textMessageBuffer.c_str());
   char resp[96];
-  if (executeOLEDCommandWithResult(cmdBuf, resp, sizeof(resp))) {
+  if (executeOledCommandWithResult(cmdBuf, resp, sizeof(resp))) {
     const char* p = strstr(resp, "\"msgId\":");  // cheap strstr — avoids a JSON parse
     if (p && (uint32_t)strtoul(p + 8, nullptr, 10) != 0) {
       oledMarkDirtyUntil(millis() + 13000);
@@ -1964,7 +1964,7 @@ void oledEspNowSendRemoteCommand() {
            gOledEspNowState.remoteUsername.c_str(),
            gOledEspNowState.remotePassword.c_str(),
            gOledEspNowState.remoteCommand.c_str());
-  executeOLEDCommand(cmdBuf);
+  executeOledCommand(cmdBuf);
 
   // Scrub the stack copy too — cmdBuf holds the full "espnowremote ... <pass>"
   // line in plaintext. Volatile so the optimizer can't elide a memset on a
@@ -2125,7 +2125,7 @@ bool oledEspNowHandleSettingsInput(int deltaX, int deltaY, uint32_t newlyPressed
     
     // Stationary: toggle boolean via command
     if (gOledEspNowState.settingsEditField == 5) {
-      executeOLEDCommand(gSettings.espnowStationary ? "espnowstationary 0" : "espnowstationary 1");
+      executeOledCommand(gSettings.espnowStationary ? "espnowstationary 0" : "espnowstationary 1");
       gOledEspNowState.settingsEditField = -1;
       return true;
     }
@@ -2133,11 +2133,11 @@ bool oledEspNowHandleSettingsInput(int deltaX, int deltaY, uint32_t newlyPressed
     // Role: cycle through options via command
     if (gOledEspNowState.settingsEditField == 7) {
       if (gSettings.meshRole == MESH_ROLE_WORKER) {
-        executeOLEDCommand("espnowmeshrole master");
+        executeOledCommand("espnowmeshrole master");
       } else if (gSettings.meshRole == MESH_ROLE_MASTER) {
-        executeOLEDCommand("espnowmeshrole backup");
+        executeOledCommand("espnowmeshrole backup");
       } else {
-        executeOLEDCommand("espnowmeshrole worker");
+        executeOledCommand("espnowmeshrole worker");
       }
       gOledEspNowState.settingsEditField = -1;
       return true;
@@ -2150,7 +2150,7 @@ bool oledEspNowHandleSettingsInput(int deltaX, int deltaY, uint32_t newlyPressed
     if (gOledEspNowState.settingsEditField == 10) {
       uint8_t c = gSettings.espnowChannel;
       const char* next = (c == 0) ? "1" : (c < 6) ? "6" : (c < 11) ? "11" : "auto";
-      executeOLEDCommand(String("espnowchannel ") + next);
+      executeOledCommand(String("espnowchannel ") + next);
       gOledEspNowState.settingsEditField = -1;
       return true;
     }
@@ -2195,10 +2195,10 @@ bool oledEspNowHandleSettingsInput(int deltaX, int deltaY, uint32_t newlyPressed
         break;
     }
     
-    const OLEDKeyboardDictationPolicy policy =
+    const OledKeyboardDictationPolicy policy =
         gOledEspNowState.settingsEditField == 6
-            ? OLEDKeyboardDictationPolicy::DENY
-            : OLEDKeyboardDictationPolicy::ALLOW_PLAINTEXT;
+            ? OledKeyboardDictationPolicy::DENY
+            : OledKeyboardDictationPolicy::ALLOW_PLAINTEXT;
     oledKeyboardInit(prompt, initialValue.c_str(), maxLen, policy,
                      gOledEspNowState.settingsEditField == 6);  // passphrase
     gOledEspNowState.currentView = ESPNOW_VIEW_SETTINGS_KEYBOARD;
@@ -2247,7 +2247,7 @@ void oledEspNowApplySettingsEdit(const String& value) {
       break;
   }
   if (cmd.length() > 0) {
-    executeOLEDCommand(cmd);
+    executeOledCommand(cmd);
   }
   gOledEspNowState.settingsEditField = -1;
 }
@@ -2331,7 +2331,7 @@ bool oledEspNowHandleDeviceConfigInput(int deltaX, int deltaY, uint32_t newlyPre
         {
           char cmdBuf[64];
           snprintf(cmdBuf, sizeof(cmdBuf), "espnow cmd %s restart", macStr);
-          executeOLEDCommand(cmdBuf);
+          executeOledCommand(cmdBuf);
           broadcastOutput("[ESP-NOW] Sent restart command");
           gOledEspNowState.currentView = ESPNOW_VIEW_DEVICE_DETAIL;
         }
@@ -2341,7 +2341,7 @@ bool oledEspNowHandleDeviceConfigInput(int deltaX, int deltaY, uint32_t newlyPre
         gOledEspNowState.deviceConfigEditField = 1;
         oledKeyboardInit(
             "Role (master/backup/worker):", "", 16,
-            OLEDKeyboardDictationPolicy::ALLOW_PLAINTEXT);
+            OledKeyboardDictationPolicy::ALLOW_PLAINTEXT);
         gOledEspNowState.currentView = ESPNOW_VIEW_DEVICE_CONFIG_KEYBOARD;
         break;
         
@@ -2349,28 +2349,28 @@ bool oledEspNowHandleDeviceConfigInput(int deltaX, int deltaY, uint32_t newlyPre
         gOledEspNowState.deviceConfigEditField = 2;
         oledKeyboardInit(
             "Device Name:", gOledEspNowState.selectedDeviceName.c_str(), 16,
-            OLEDKeyboardDictationPolicy::ALLOW_PLAINTEXT);
+            OledKeyboardDictationPolicy::ALLOW_PLAINTEXT);
         gOledEspNowState.currentView = ESPNOW_VIEW_DEVICE_CONFIG_KEYBOARD;
         break;
         
       case 3: // Set Room
         gOledEspNowState.deviceConfigEditField = 3;
         oledKeyboardInit("Room:", "", 16,
-                         OLEDKeyboardDictationPolicy::ALLOW_PLAINTEXT);
+                         OledKeyboardDictationPolicy::ALLOW_PLAINTEXT);
         gOledEspNowState.currentView = ESPNOW_VIEW_DEVICE_CONFIG_KEYBOARD;
         break;
         
       case 4: // Set Zone
         gOledEspNowState.deviceConfigEditField = 4;
         oledKeyboardInit("Zone:", "", 16,
-                         OLEDKeyboardDictationPolicy::ALLOW_PLAINTEXT);
+                         OledKeyboardDictationPolicy::ALLOW_PLAINTEXT);
         gOledEspNowState.currentView = ESPNOW_VIEW_DEVICE_CONFIG_KEYBOARD;
         break;
         
       case 5: // Set Pretty Name
         gOledEspNowState.deviceConfigEditField = 5;
         oledKeyboardInit("Pretty Name:", "", 24,
-                         OLEDKeyboardDictationPolicy::ALLOW_PLAINTEXT);
+                         OledKeyboardDictationPolicy::ALLOW_PLAINTEXT);
         gOledEspNowState.currentView = ESPNOW_VIEW_DEVICE_CONFIG_KEYBOARD;
         break;
         
@@ -2404,7 +2404,7 @@ void oledEspNowApplyDeviceConfigEdit(const String& value) {
       {
         char cmdBuf[96];
         snprintf(cmdBuf, sizeof(cmdBuf), "espnow cmd %s meshrole %s", macStr, value.c_str());
-        executeOLEDCommand(cmdBuf);
+        executeOledCommand(cmdBuf);
         broadcastOutput("[ESP-NOW] Sent role change command");
       }
       break;
@@ -2413,7 +2413,7 @@ void oledEspNowApplyDeviceConfigEdit(const String& value) {
       {
         char cmdBuf[96];
         snprintf(cmdBuf, sizeof(cmdBuf), "espnow cmd %s espnowname %s", macStr, value.c_str());
-        executeOLEDCommand(cmdBuf);
+        executeOledCommand(cmdBuf);
         gOledEspNowState.selectedDeviceName = value;
         broadcastOutput("[ESP-NOW] Sent name change command");
       }
@@ -2423,7 +2423,7 @@ void oledEspNowApplyDeviceConfigEdit(const String& value) {
       {
         char cmdBuf[96];
         snprintf(cmdBuf, sizeof(cmdBuf), "espnow cmd %s room %s", macStr, value.c_str());
-        executeOLEDCommand(cmdBuf);
+        executeOledCommand(cmdBuf);
         broadcastOutput("[ESP-NOW] Sent room change command");
       }
       break;
@@ -2432,7 +2432,7 @@ void oledEspNowApplyDeviceConfigEdit(const String& value) {
       {
         char cmdBuf[96];
         snprintf(cmdBuf, sizeof(cmdBuf), "espnow cmd %s zone %s", macStr, value.c_str());
-        executeOLEDCommand(cmdBuf);
+        executeOledCommand(cmdBuf);
         broadcastOutput("[ESP-NOW] Sent zone change command");
       }
       break;
@@ -2441,7 +2441,7 @@ void oledEspNowApplyDeviceConfigEdit(const String& value) {
       {
         char cmdBuf[96];
         snprintf(cmdBuf, sizeof(cmdBuf), "espnow cmd %s prettyname %s", macStr, value.c_str());
-        executeOLEDCommand(cmdBuf);
+        executeOledCommand(cmdBuf);
         broadcastOutput("[ESP-NOW] Sent pretty name change command");
       }
       break;

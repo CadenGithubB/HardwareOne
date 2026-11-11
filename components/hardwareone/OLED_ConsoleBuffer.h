@@ -37,7 +37,7 @@
 // The ring is null until init() allocates it, and stays null if that allocation
 // fails, so every accessor tolerates a null ring: the console then degrades to
 // "no history" instead of faulting.
-struct OLEDConsoleBuffer {
+struct OledConsoleBuffer {
   char (*lines)[OLED_CONSOLE_LINE_LEN];  // [capacity][LINE_LEN], INTERNAL DRAM
   uint32_t* timestamps;                  // [capacity], INTERNAL DRAM (allocated alongside lines)
   uint8_t head;      // Write position (next slot to write)
@@ -45,7 +45,7 @@ struct OLEDConsoleBuffer {
   uint8_t capacity;  // Allocated depth = gSettings.oledCliHistorySize (latched at init); 0 if unallocated
   SemaphoreHandle_t mutex;
   
-  OLEDConsoleBuffer();
+  OledConsoleBuffer();
   void init();
   void clear();  // blocking identity-boundary erase
   void append(const char* text, uint32_t timestamp);
@@ -55,7 +55,7 @@ struct OLEDConsoleBuffer {
 };
 
 // Global OLED console buffer instance
-extern OLEDConsoleBuffer gOledConsole;
+extern OledConsoleBuffer gOledConsole;
 
 #endif // ENABLE_OLED_DISPLAY
 

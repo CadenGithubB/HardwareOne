@@ -50,7 +50,7 @@ struct FakeDisplay {
   int x = 0, y = 0;
   std::map<int, std::string> rows;  // cursor y -> characters by column
   bool wrapped = false;             // a row ran past 21 columns
-  bool intoFooter = false;          // text where drawOLEDFooter clears
+  bool intoFooter = false;          // text where drawOledFooter clears
   void clear() { *this = FakeDisplay(); }
   void setTextSize(int) {}
   void setTextColor(int) {}
@@ -74,57 +74,57 @@ static FakeDisplay gScreen;
 static FakeDisplay* oledDisplay = &gScreen;
 
 // ---- OLED framework ------------------------------------------------------------
-enum OLEDMode { OLED_BLUETOOTH, OLED_BLUETOOTH_STATUS, OLED_BLUETOOTH_G2, OLED_BLUETOOTH_G2_STATUS,
+enum OledMode { OLED_BLUETOOTH, OLED_BLUETOOTH_STATUS, OLED_BLUETOOTH_G2, OLED_BLUETOOTH_G2_STATUS,
                 OLED_BLUETOOTH_R1, OLED_BLUETOOTH_PHONE, OLED_BLUETOOTH_PHONE_CODE, OLED_SETTINGS };
-static OLEDMode currentOLEDMode = OLED_BLUETOOTH;
-typedef void (*OLEDDisplayFunc)();
-typedef bool (*OLEDAvailabilityFunc)(String*);
-typedef bool (*OLEDInputFunc)(int, int, uint32_t);
-typedef void (*OLEDModeEnterFunc)(bool);
-struct OLEDModeEntry {
-  OLEDMode mode;
+static OledMode currentOledMode = OLED_BLUETOOTH;
+typedef void (*OledDisplayFunc)();
+typedef bool (*OledAvailabilityFunc)(String*);
+typedef bool (*OledInputFunc)(int, int, uint32_t);
+typedef void (*OledModeEnterFunc)(bool);
+struct OledModeEntry {
+  OledMode mode;
   const char* name;
   const char* iconName;
-  OLEDDisplayFunc displayFunc;
-  OLEDAvailabilityFunc availFunc;
-  OLEDInputFunc inputFunc;
+  OledDisplayFunc displayFunc;
+  OledAvailabilityFunc availFunc;
+  OledInputFunc inputFunc;
   bool showInMenu;
   int menuOrder;
   const char* hints;
-  OLEDModeEnterFunc onEnterFunc;
+  OledModeEnterFunc onEnterFunc;
 };
 #define REGISTER_OLED_MODE_MODULE(modes, count, name)               \
-  static const OLEDModeEntry* const kRegisteredModes = (modes);     \
+  static const OledModeEntry* const kRegisteredModes = (modes);     \
   static const size_t kRegisteredModeCount = (count)
 
 #define OLED_SCROLL_MAX_ITEMS 16
-struct OLEDScrollItem { const char* line1; const char* line2; bool isSelectable; };
-struct OLEDScrollState {
-  OLEDScrollItem items[OLED_SCROLL_MAX_ITEMS];
+struct OledScrollItem { const char* line1; const char* line2; bool isSelectable; };
+struct OledScrollState {
+  OledScrollItem items[OLED_SCROLL_MAX_ITEMS];
   int itemCount, selectedIndex, scrollOffset, visibleLines;
 };
-static void oledScrollInit(OLEDScrollState* st, const char*, int visibleLines) {
-  *st = OLEDScrollState{};
+static void oledScrollInit(OledScrollState* st, const char*, int visibleLines) {
+  *st = OledScrollState{};
   st->visibleLines = visibleLines;
 }
-static bool oledScrollAddItem(OLEDScrollState* st, const char* line1, const char* line2 = nullptr,
+static bool oledScrollAddItem(OledScrollState* st, const char* line1, const char* line2 = nullptr,
                               bool selectable = true) {
   if (st->itemCount >= OLED_SCROLL_MAX_ITEMS) return false;
   st->items[st->itemCount++] = {line1, line2, selectable};
   return true;
 }
-static void oledScrollClearKeepSelection(OLEDScrollState* st) { st->itemCount = 0; }
-static void oledScrollClampSelection(OLEDScrollState* st) {
+static void oledScrollClearKeepSelection(OledScrollState* st) { st->itemCount = 0; }
+static void oledScrollClampSelection(OledScrollState* st) {
   if (st->selectedIndex >= st->itemCount) st->selectedIndex = st->itemCount - 1;
   if (st->selectedIndex < 0) st->selectedIndex = 0;
   if (st->selectedIndex < st->scrollOffset) st->scrollOffset = st->selectedIndex;
   if (st->selectedIndex >= st->scrollOffset + st->visibleLines)
     st->scrollOffset = st->selectedIndex - st->visibleLines + 1;
 }
-static bool oledScrollHandleNav(OLEDScrollState*) { return false; }
+static bool oledScrollHandleNav(OledScrollState*) { return false; }
 // OLED_Utils.cpp oledScrollRenderSimple: one 8 px row per visible item, "> " on
 // the selection. Its scrollbar is pixels, not text, so it is left out here.
-static void oledScrollRenderSimple(FakeDisplay* display, OLEDScrollState* state,
+static void oledScrollRenderSimple(FakeDisplay* display, OledScrollState* state,
                                    bool showSelection = true, int startY = OLED_CONTENT_START_Y) {
   oledScrollClampSelection(state);
   const int end = std::min(state->itemCount, state->scrollOffset + state->visibleLines);
@@ -136,8 +136,8 @@ static void oledScrollRenderSimple(FakeDisplay* display, OLEDScrollState* state,
     display->println();
   }
 }
-static void oledScrollUp(OLEDScrollState*) {}
-static void oledScrollDown(OLEDScrollState*) {}
+static void oledScrollUp(OledScrollState*) {}
+static void oledScrollDown(OledScrollState*) {}
 inline constexpr int oledVisibleRows(int rowHeight, int reservedHeight = 0, int baselineRows = 0) {
   return oled_layout::visibleRows(OLED_CONTENT_HEIGHT, rowHeight, reservedHeight, baselineRows);
 }
@@ -154,8 +154,8 @@ static std::string gToast;
 static int gMarks = 0;
 static void oledMarkDirty() { ++gMarks; }
 static bool oledRunCommand(const char* cmd) { gCommands.push_back(cmd); return true; }
-static void executeOLEDCommand(const char* cmd) { gCommands.push_back(cmd); }
-static bool executeOLEDCommandWithResult(const char* cmd, char* out, size_t n) {
+static void executeOledCommand(const char* cmd) { gCommands.push_back(cmd); }
+static bool executeOledCommandWithResult(const char* cmd, char* out, size_t n) {
   gCommands.push_back(cmd);
   std::snprintf(out, n, "OK");
   return true;
@@ -169,17 +169,17 @@ static bool oledRunCommandAsync(const char* cmd, OledCommandDoneFn, const void*)
   gAsyncCommands.push_back(cmd);
   return true;
 }
-typedef void (*OLEDConfirmCallback)(void*);
+typedef void (*OledConfirmCallback)(void*);
 // The open confirm: lines as drawn, the default and the Yes callback.
 struct Confirm {
   bool open = false;
   std::string line1, line2;
   bool defaultYes = true;
-  OLEDConfirmCallback onYes = nullptr;
+  OledConfirmCallback onYes = nullptr;
   void* userData = nullptr;
 };
 static Confirm gConfirm;
-static bool oledConfirmRequest(const char* line1, const char* line2, OLEDConfirmCallback onYes,
+static bool oledConfirmRequest(const char* line1, const char* line2, OledConfirmCallback onYes,
                                void* userData, bool defaultYes = true) {
   if (gConfirm.open) return false;  // one at a time, as OLED_Utils.cpp
   gConfirm = Confirm{true, line1 ? line1 : "", line2 ? line2 : "", defaultYes, onYes, userData};
@@ -193,7 +193,7 @@ static void confirmYes() {
   gConfirm = Confirm();
 }
 static bool oledGuestBlocksMutate() { return false; }
-static void requestOLEDMode(OLEDMode mode, const char*) { currentOLEDMode = mode; }
+static void requestOledMode(OledMode mode, const char*) { currentOledMode = mode; }
 static bool openSettingsEditorForModule(const char*) { return false; }
 
 // ---- The live state bleLinkStatus() and the screens read ----------------------------
@@ -352,7 +352,7 @@ struct JsonObject {
 // ---- Helpers -----------------------------------------------------------------------
 using Rows = std::vector<std::string>;
 
-static const OLEDModeEntry& modeEntry(OLEDMode mode) {
+static const OledModeEntry& modeEntry(OledMode mode) {
   for (size_t i = 0; i < kRegisteredModeCount; ++i)
     if (kRegisteredModes[i].mode == mode) return kRegisteredModes[i];
   std::fprintf(stderr, "mode %d is not registered\n", int(mode));
@@ -361,7 +361,7 @@ static const OLEDModeEntry& modeEntry(OLEDMode mode) {
 
 // Draws a mode and returns its content rows, trailing blanks and the scroll
 // arrows trimmed. Nothing may wrap past 21 columns or reach the footer.
-static Rows render(OLEDMode mode) {
+static Rows render(OledMode mode) {
   gScreen.clear();
   modeEntry(mode).displayFunc();
   CHECK(!gScreen.wrapped);
@@ -411,7 +411,7 @@ static void reset() {
   gConfirm = Confirm();
   gToasts.clear();
   gAsyncCommands.clear();
-  currentOLEDMode = OLED_BLUETOOTH;
+  currentOledMode = OLED_BLUETOOTH;
 #if ENABLE_BLE_PHONE_PIPE
   gPair = PairWorld();
   gPairCloses.clear();
@@ -736,7 +736,7 @@ static void mainMenu() {
 // The G2 and R1 submenus: the glasses' rows (AutoReconnect, Reconnect) in a
 // scrolling list under a status line, so render() finds nothing under the
 // footer; each row sends the command the glasses' row sends.
-static int rowIndex(const OLEDScrollState& st, const char* label) {
+static int rowIndex(const OledScrollState& st, const char* label) {
   for (int i = 0; i < st.itemCount; ++i)
     if (std::strcmp(st.items[i].line1, label) == 0) return i;
   return -1;
@@ -1134,10 +1134,10 @@ static void pairCodeScreen() {
   sPhoneScroll.selectedIndex = 0;
 
   // The code screen: the time left, then the code as XXXX-XXXX on two large rows.
-  const OLEDModeEntry& screen = modeEntry(OLED_BLUETOOTH_PHONE_CODE);
+  const OledModeEntry& screen = modeEntry(OLED_BLUETOOTH_PHONE_CODE);
   CHECK(!screen.showInMenu && std::strcmp(screen.hints, "B:Close") == 0);
   openPairWindow(41, 999, true);
-  currentOLEDMode = OLED_BLUETOOTH_PHONE_CODE;
+  currentOledMode = OLED_BLUETOOTH_PHONE_CODE;
   EXPECT_EXACT(render(OLED_BLUETOOTH_PHONE_CODE), "Pairing code  3:00", "7K2M-QX4P", "", "9TVW-H3RA");
   gPair.view.msLeft = 61000;
   EXPECT_ROWS(render(OLED_BLUETOOTH_PHONE_CODE), "Pairing code  1:01");
@@ -1196,7 +1196,7 @@ static void pairCodeScreen() {
   for (const auto& s : gCommands) CHECK(!carriesShownCode(s));
   for (const auto& s : gAsyncCommands) CHECK(!carriesShownCode(s));
   CHECK(!carriesShownCode(gConfirm.line1) && !carriesShownCode(gConfirm.line2));
-  currentOLEDMode = OLED_BLUETOOTH;
+  currentOledMode = OLED_BLUETOOTH;
 }
 
 static void pairWatch() {
@@ -1208,7 +1208,7 @@ static void pairWatch() {
   gPair.view.ageMs = 9000; TICK(0);
   CHECK(gPairCloses.empty());
   // A window for the OLED while its screen request is on its way: 2 s grace.
-  currentOLEDMode = OLED_BLUETOOTH_PHONE;
+  currentOledMode = OLED_BLUETOOTH_PHONE;
   openPairWindow(7, 0, true); TICK(1);
   gPair.view.ageMs = 1990; gPair.view.msLeft = 178010; TICK(1);  // a new second on the countdown
   CHECK(gPairCloses.empty());
@@ -1218,14 +1218,14 @@ static void pairWatch() {
   // On its screen it lives; the countdown redraws once a second.
   gPairCloses.clear();
   openPairWindow(8, 0, true);
-  currentOLEDMode = OLED_BLUETOOTH_PHONE_CODE;
+  currentOledMode = OLED_BLUETOOTH_PHONE_CODE;
   TICK(1);
   gPair.view.ageMs = 3500; gPair.view.msLeft = 176500; TICK(1);
   gPair.view.ageMs = 3900; gPair.view.msLeft = 176100; TICK(0);  // same second
   gPair.view.ageMs = 4000; gPair.view.msLeft = 176000; TICK(1);
   CHECK(gPairCloses.empty());
   // Leaving the screen (B popped it, a jump elsewhere, a logout) closes it.
-  currentOLEDMode = OLED_BLUETOOTH_PHONE;
+  currentOledMode = OLED_BLUETOOTH_PHONE;
   TICK(0);
   CHECK(gPairCloses.size() == 1 && gPairCloses[0] == 8);
   TICK(1);

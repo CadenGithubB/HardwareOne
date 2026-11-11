@@ -180,12 +180,12 @@ const char* lastError() { return sLastError; }
 // INSERT_REMOTE_REPLY
 
 // ---- OLED command executor doubles ---------------------------------------------
-static std::vector<std::string> gWithResult;  // executeOLEDCommandWithResult lines
-static std::vector<std::string> gLocal;       // executeOLEDCommand lines (local, fire-and-forget)
+static std::vector<std::string> gWithResult;  // executeOledCommandWithResult lines
+static std::vector<std::string> gLocal;       // executeOledCommand lines (local, fire-and-forget)
 static bool gExecOk = true;
 static std::string gExecText;                 // "" = the remote: owner's "sent" reply
 static uint32_t gLastMsgId = 41;              // msgId of the last remote: send
-bool executeOLEDCommandWithResult(const String& cmd, char* out, size_t outSize) {
+bool executeOledCommandWithResult(const String& cmd, char* out, size_t outSize) {
   gWithResult.emplace_back(cmd.c_str());
   ++gLastMsgId;  // generateMessageId() for the CMD frame
   if (!gExecText.empty()) {
@@ -200,13 +200,13 @@ bool executeOLEDCommandWithResult(const String& cmd, char* out, size_t outSize) 
 #endif
   return gExecOk;
 }
-void executeOLEDCommand(const String& cmd) { gLocal.emplace_back(cmd.c_str()); }
+void executeOledCommand(const String& cmd) { gLocal.emplace_back(cmd.c_str()); }
 
 // ---- OLED editor types (production) and mode ------------------------------------
 // INSERT_EDITOR_TYPES
 SettingsEditorContext gSettingsEditor;
-enum OLEDMode { OLED_MENU, OLED_SETTINGS, OLED_REMOTE_SETTINGS };
-static OLEDMode currentOLEDMode = OLED_MENU;
+enum OledMode { OLED_MENU, OLED_SETTINGS, OLED_REMOTE_SETTINGS };
+static OledMode currentOledMode = OLED_MENU;
 void initSettingsEditor();
 void settingsEditorShowError(const String& message, uint32_t durationMs);
 
@@ -300,7 +300,7 @@ static void resetWorld() {
   gLocal.clear();
   gFailAllocAt = 0;
   gAllocCalls = 0;
-  currentOLEDMode = OLED_MENU;
+  currentOledMode = OLED_MENU;
   gNowMs += 100000;
   initSettingsEditor();
   gDisplay = HarnessDisplay();
@@ -656,7 +656,7 @@ static void case_editor_commits_remote_in_remote_mode() {
   gCase = "editor_commits_remote_in_remote_mode";
   resetWorld();
   loadRemoteSettingsModules();
-  currentOLEDMode = OLED_REMOTE_SETTINGS;
+  currentOledMode = OLED_REMOTE_SETTINGS;
   size_t n = 0;
   const SettingsModule** mods = editorModules(n);
   const SettingEntry* b = findIn(mods, n, "oledBrightness");
@@ -687,7 +687,7 @@ static void case_editor_commits_local_otherwise() {
   gCase = "editor_commits_local_otherwise";
   resetWorld();
   loadRemoteSettingsModules();
-  currentOLEDMode = OLED_SETTINGS;
+  currentOledMode = OLED_SETTINGS;
   gExecText = "OK: oledBrightness = 5";
   setSettingValue(&kLocalOledEntries[0], 5);
   EXPECT(commandsAre(gWithResult, {"oledbrightness 5"}) && gLocal.empty(),
@@ -702,7 +702,7 @@ static void case_editor_commits_local_otherwise() {
 static void case_editor_local_int_refusal_shown() {
   gCase = "editor_local_int_refusal_shown";
   resetWorld();
-  currentOLEDMode = OLED_SETTINGS;
+  currentOledMode = OLED_SETTINGS;
   gExecOk = false;
   gExecText = "Error: Admin access required for command 'oledbrightness'. Contact an administrator.";
   setSettingValue(&kLocalOledEntries[0], 5);
@@ -720,10 +720,10 @@ static void case_editor_module_source_follows_mode() {
   size_t remoteN = 0, localN = 0, n = 0;
   const SettingsModule** remote = getRemoteSettingsModules(remoteN);
   const SettingsModule** local = getSettingsModules(localN);
-  currentOLEDMode = OLED_REMOTE_SETTINGS;
+  currentOledMode = OLED_REMOTE_SETTINGS;
   const SettingsModule** got = editorModules(n);
   EXPECT(n == remoteN && n > 0 && got[0] == remote[0], "the remote screen edits the peer's module set");
-  currentOLEDMode = OLED_SETTINGS;
+  currentOledMode = OLED_SETTINGS;
   got = editorModules(n);
   EXPECT(n == localN && got[0] == local[0], "every other mode edits the local registry");
 }
@@ -735,14 +735,14 @@ static void case_editor_drops_foreign_module() {
   size_t n = 0;
   const SettingsModule** remote = getRemoteSettingsModules(n);
   if (n == 0) { EXPECT(false, "remote modules loaded"); return; }
-  currentOLEDMode = OLED_SETTINGS;
+  currentOledMode = OLED_SETTINGS;
   gSettingsEditor.state = SETTINGS_ITEM_SELECT;
   gSettingsEditor.categoryIndex = 1;
   gSettingsEditor.currentModule = remote[1];
   editorDropForeignModule();
   EXPECT(gSettingsEditor.state == SETTINGS_CATEGORY_SELECT && gSettingsEditor.currentModule == nullptr,
          "the local screen does not keep editing a peer module left behind by the remote screen");
-  currentOLEDMode = OLED_REMOTE_SETTINGS;
+  currentOledMode = OLED_REMOTE_SETTINGS;
   gSettingsEditor.state = SETTINGS_ITEM_SELECT;
   gSettingsEditor.categoryIndex = 1;
   gSettingsEditor.currentModule = remote[1];
@@ -807,7 +807,7 @@ static bool shown(const char* text) {
 static void case_adapter_reports_peer_answer() {
   gCase = "adapter_reports_peer_answer";
   resetWorld();
-  currentOLEDMode = OLED_REMOTE_SETTINGS;
+  currentOledMode = OLED_REMOTE_SETTINGS;
   onEnterRemoteSettings(true);
   gSettingsEditor.state = SETTINGS_ITEM_SELECT;
   displayRemoteSettingsMode();
@@ -849,7 +849,7 @@ static void case_adapter_reports_peer_answer() {
 static void case_adapter_load_screens() {
   gCase = "adapter_load_screens";
   resetWorld();
-  currentOLEDMode = OLED_REMOTE_SETTINGS;
+  currentOledMode = OLED_REMOTE_SETTINGS;
   gSchemaText.clear();
   onEnterRemoteSettings(true);
   displayRemoteSettingsMode();
@@ -859,7 +859,7 @@ static void case_adapter_load_screens() {
          "B while fetching leaves the screen");
 
   resetWorld();
-  currentOLEDMode = OLED_REMOTE_SETTINGS;
+  currentOledMode = OLED_REMOTE_SETTINGS;
   gSchemaText.clear();
   gOnline = false;
   onEnterRemoteSettings(true);

@@ -650,7 +650,7 @@ void inputTask(void* parameter) {
           // Active-low: gamepad code does `~buttons` to get active-high pressed
           // state. We store ~btns so the inversion yields the ANO_BTN_* bits.
           // Joystick X/Y stay at CENTER — encoder→nav-event happens via the
-          // ANO-specific branch in processOLEDInput, not joystick math.
+          // ANO-specific branch in processOledInput, not joystick math.
           inputPublishState(~btns, JOYSTICK_CENTER, JOYSTICK_CENTER,
                             newlyPressed, (btns != prevButtons) || (detentDelta != 0), nowMs);
 

@@ -36,7 +36,7 @@ static String operator+(const char* left, const String& right) {
 
 // INSERT_PRODUCTION_TYPES
 
-struct OLEDScrollState {
+struct OledScrollState {
   const char* items[OLED_SCROLL_MAX_ITEMS] = {};
   int itemCount = 0;
   int selectedIndex = 0;
@@ -72,23 +72,23 @@ static bool wifiNetworkSnapshot(WifiNetworkSnapshot& out) {
   out = snapshotAvailable ? ownerSnapshot : WifiNetworkSnapshot{};
   return snapshotAvailable;
 }
-static void oledScrollInit(OLEDScrollState* state, void*, int) { *state = {}; }
-static void oledScrollClearKeepSelection(OLEDScrollState* state) { state->itemCount = 0; }
-static void oledScrollAddItem(OLEDScrollState* state, const char* label) {
+static void oledScrollInit(OledScrollState* state, void*, int) { *state = {}; }
+static void oledScrollClearKeepSelection(OledScrollState* state) { state->itemCount = 0; }
+static void oledScrollAddItem(OledScrollState* state, const char* label) {
   assert(state->itemCount < OLED_SCROLL_MAX_ITEMS);
   state->items[state->itemCount++] = label;
 }
-static void oledScrollClampSelection(OLEDScrollState* state) {
+static void oledScrollClampSelection(OledScrollState* state) {
   if (state->selectedIndex >= state->itemCount) state->selectedIndex = state->itemCount - 1;
   if (state->selectedIndex < 0) state->selectedIndex = 0;
 }
-static void oledScrollRenderSimple(Display*, const OLEDScrollState* state) {
+static void oledScrollRenderSimple(Display*, const OledScrollState* state) {
   rendered.clear();
   for (int i = 0; i < state->itemCount; ++i) rendered.emplace_back(state->items[i]);
 }
 static bool oledGuestBlocksMutate() { return guest; }
-static bool oledScrollHandleNav(OLEDScrollState*) { return navConsumed; }
-static void executeOLEDCommand(const String& line) { commands.push_back(line); }
+static bool oledScrollHandleNav(OledScrollState*) { return navConsumed; }
+static void executeOledCommand(const String& line) { commands.push_back(line); }
 static bool oledRunCommand(const String& line) { commands.push_back(line); return true; }
 static void oledMenuBack() {}
 static void oledMarkDirty() {}

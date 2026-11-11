@@ -62,11 +62,11 @@ static int showWizardOptionalPageIntro(SetupWizardPage page, const char*, const 
   if (value == -2) requestWizardCancel();
   return value;
 }
-static bool getOLEDWifiSelection(String& ssid) {
+static bool getOledWifiSelection(String& ssid) {
   assert(!pickedNetworks.empty()); ssid = pickedNetworks.front(); pickedNetworks.pop_front();
   return !ssid.empty();
 }
-static String getOLEDTextInput(const char*, bool masked, const char*, int, bool* cancelled) {
+static String getOledTextInput(const char*, bool masked, const char*, int, bool* cancelled) {
   assert(masked); String value = waitForSerialInputBlocking();
   // A masked keyboard prompt takes text literally; only the timeout cancels it.
   *cancelled = passwordBack || cancelRequested;

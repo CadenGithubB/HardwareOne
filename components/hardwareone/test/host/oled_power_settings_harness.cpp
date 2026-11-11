@@ -75,14 +75,14 @@ static char* getDebugBuffer() { return gDebugBuffer; }
 // INSERT_CMD_POWERSAVE
 
 // ---- OLED command executor doubles ------------------------------------------------------
-// executeOLEDCommandWithResult models submitAndExecuteSync for `powersave`: the
+// executeOledCommandWithResult models submitAndExecuteSync for `powersave`: the
 // admin gate (its real refusal text) when the production row is admin-only, then
 // the real handler, and a [CMD] audit record for an executed command.
 static bool gAdmin = false;
-static std::vector<std::string> gSubmitted;      // executeOLEDCommandWithResult lines
-static std::vector<std::string> gFireAndForget;  // executeOLEDCommand lines
+static std::vector<std::string> gSubmitted;      // executeOledCommandWithResult lines
+static std::vector<std::string> gFireAndForget;  // executeOledCommand lines
 static std::vector<std::string> gAudit;
-bool executeOLEDCommandWithResult(const String& line, char* out, size_t outSize) {
+bool executeOledCommandWithResult(const String& line, char* out, size_t outSize) {
   const std::string text = line.c_str();
   gSubmitted.push_back(text);
   const size_t space = text.find(' ');
@@ -104,7 +104,7 @@ bool executeOLEDCommandWithResult(const String& line, char* out, size_t outSize)
   if (out && outSize) std::snprintf(out, outSize, "%s", reply.c_str());
   return ok;
 }
-void executeOLEDCommand(const String& line) { gFireAndForget.emplace_back(line.c_str()); }
+void executeOledCommand(const String& line) { gFireAndForget.emplace_back(line.c_str()); }
 
 // ---- global toast (OLED_UI.h) -------------------------------------------------------
 enum class OledUIIcon : uint8_t { NONE, INFO, SUCCESS, WARNING, ERROR, QUESTION };
@@ -121,10 +121,10 @@ static void oledToastShow(const char* message, uint32_t = 3000, OledUIIcon = Ole
 #endif
 
 // ---- Power screen doubles -------------------------------------------------------------
-struct OLEDScrollState { int selectedIndex = 0; };
-static OLEDScrollState sPowerSleepScroll;
+struct OledScrollState { int selectedIndex = 0; };
+static OledScrollState sPowerSleepScroll;
 static void initPowerScrollStates() {}
-static bool oledScrollHandleNav(OLEDScrollState*, bool = false) { return false; }
+static bool oledScrollHandleNav(OledScrollState*, bool = false) { return false; }
 static const uint32_t INPUT_BUTTON_A = 1u << 0;
 static const uint32_t INPUT_BUTTON_B = 1u << 1;
 static const uint32_t INPUT_BUTTON_X = 1u << 2;
@@ -150,7 +150,7 @@ static void resetWorld() {
   gAudit.clear();
   gToast.clear();
   gToastCount = 0;
-  sPowerSleepScroll = OLEDScrollState();
+  sPowerSleepScroll = OledScrollState();
   gGuest = false;
 }
 

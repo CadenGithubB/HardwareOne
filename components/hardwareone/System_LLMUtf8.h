@@ -132,7 +132,7 @@ static inline void jsonSanitizeServedBytes(char* buf, int n) {
 // sequence truncated by the end of the buffer. Adding a longer replacement
 // without that guard would corrupt the buffer.
 //
-// Deliberately different from OLEDConsoleBuffer::append, which DROPS multi-byte
+// Deliberately different from OledConsoleBuffer::append, which DROPS multi-byte
 // sequences outright: dropping turns "café" into "caf" and a word can
 // vanish silently. Substituting is louder and shorter.
 static inline size_t utf8FoldToAscii(char* s, size_t n) {

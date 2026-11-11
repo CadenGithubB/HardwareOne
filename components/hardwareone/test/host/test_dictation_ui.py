@@ -31,7 +31,7 @@ SECRET_FIELDS=(
     ('OLED_Mode_Network.cpp','static void startWifiAddFromScan(','true'),
     ('OLED_ESPNow.cpp','bool oledEspNowHandleRemoteFormInput(','gOledEspNowState.remoteFormField == 1'),
     ('OLED_ESPNow.cpp','bool oledEspNowHandleSettingsInput(','gOledEspNowState.settingsEditField == 6'),
-    ('OLED_FirstTimeSetup.cpp','String getOLEDTextInput(','isPassword'),
+    ('OLED_FirstTimeSetup.cpp','String getOledTextInput(','isPassword'),
     ('OLED_Mode_UserManager.cpp','static void umStartKeyboard(','stage != 0'),
 )
 PLAIN_FIELDS=(('OLED_Mode_Network.cpp','static void startWifiAddSSID('),)
@@ -63,13 +63,13 @@ def secret_field_failures(component):
     for name,signature in PLAIN_FIELDS:
         for args in keyboard_init_args(extract_block((component/name).read_text(),signature)):
             if len(args)>4 and args[4] not in ('false',):failures.append(f'{name} {signature}: a plain field passes masked `{args[4]}`')
-    fts=extract_block((component/'OLED_FirstTimeSetup.cpp').read_text(),'String getOLEDTextInput(')
+    fts=extract_block((component/'OLED_FirstTimeSetup.cpp').read_text(),'String getOledTextInput(')
     # Debug traces must not print a masked field's text or the character just typed.
     for line in (component/'OLED_Utils.cpp').read_text().splitlines():
         if 'DEBUG_DISPLAYF' in line and re.search(r'gOledKeyboardState\.text(?!\w)',line):
             failures.append('OLED_Utils.cpp: a keyboard debug trace prints gOledKeyboardState.text directly (use oledKeyboardTraceText, which hides a masked field)')
     if re.search(r"gOledKeyboardState\.text\[[^\]]*\]\s*=\s*'\*'",fts):
-        failures.append("OLED_FirstTimeSetup.cpp getOLEDTextInput: writes '*' into the shared keyboard buffer around its render (masking belongs to the keyboard)")
+        failures.append("OLED_FirstTimeSetup.cpp getOledTextInput: writes '*' into the shared keyboard buffer around its render (masking belongs to the keyboard)")
     return failures
 
 def mask_unit(component):
@@ -79,9 +79,9 @@ def mask_unit(component):
     types='\n'.join([extract_block(transcript,'struct TranscriptStatus')+';',
         extract_block(dictation,'enum class DictationState')+';',extract_block(dictation,'struct DictationSnapshot')+';',
         '\n'.join(re.findall(r'(?m)^#define OLED_KEYBOARD_\w+ .*$',header)),
-        extract_block(header,'enum OLEDKeyboardMode')+';',extract_block(header,'enum class OLEDKeyboardDictationPolicy')+';',
-        re.search(r'(?m)^typedef int \(\*OLEDKeyboardAutocompleteFunc\)[^;]*;',header)[0],
-        extract_block(header,'struct OLEDKeyboardState')+';','extern OLEDKeyboardState gOledKeyboardState;',
+        extract_block(header,'enum OledKeyboardMode')+';',extract_block(header,'enum class OledKeyboardDictationPolicy')+';',
+        re.search(r'(?m)^typedef int \(\*OledKeyboardAutocompleteFunc\)[^;]*;',header)[0],
+        extract_block(header,'struct OledKeyboardState')+';','extern OledKeyboardState gOledKeyboardState;',
         re.search(r'void oledKeyboardInit\([^;]*\);',header)[0],'void oledKeyboardReset();','void oledKeyboardDisplay(Adafruit_SSD1306* display);'])
     start=utils.index('const char OLED_KEYBOARD_CHARS_UPPER[OLED_KEYBOARD_ROWS][OLED_KEYBOARD_COLS] =')
     keyboard=utils[start:utils.index('bool oledKeyboardHandleInput(',start)]

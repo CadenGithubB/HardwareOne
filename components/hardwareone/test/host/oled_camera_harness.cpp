@@ -100,9 +100,9 @@ struct Display {
 } display;
 static Display* oledDisplay=&display;
 // INSERT_OLED_ENUM
-static OLEDMode currentOLEDMode=OLED_CAMERA;
-using OLEDDisplayFunc=void(*)();using OLEDAvailabilityFunc=bool(*)(String*);
-using OLEDInputFunc=bool(*)(int,int,uint32_t);using OLEDModeEnterFunc=void(*)(bool);
+static OledMode currentOledMode=OLED_CAMERA;
+using OledDisplayFunc=void(*)();using OledAvailabilityFunc=bool(*)(String*);
+using OledInputFunc=bool(*)(int,int,uint32_t);using OledModeEnterFunc=void(*)(bool);
 // INSERT_OLED_ENTRY
 #define REGISTER_OLED_MODE_MODULE(...)
 #define free trackedFree
@@ -110,14 +110,14 @@ using OLEDInputFunc=bool(*)(int,int,uint32_t);using OLEDModeEnterFunc=void(*)(bo
 #undef free
 
 static void enter() {
-  resetOLEDCameraPreview();currentOLEDMode=OLED_CAMERA;authed=true;awake=true;guest=false;sourceRunning=true;
+  resetOledCameraPreview();currentOledMode=OLED_CAMERA;authed=true;awake=true;guest=false;sourceRunning=true;
   nowMs+=4000;prepareCameraPreviewData();assert(snapshot().active&&snapshot().worker&&task);
 }
 int main() {
   enter();unsigned delays=0;
   onDelay=[&]{++delays;if(delays==1){assert(snapshot().ready);draw();input(0,0,INPUT_BUTTON_A);}
     else if(delays==2){assert(snapshot().frozen&&captures==1);input(0,0,INPUT_BUTTON_A);}
-    else {assert(captures==2);currentOLEDMode=OLED_MENU;prepareCameraPreviewData();}};
+    else {assert(captures==2);currentOledMode=OLED_MENU;prepareCameraPreviewData();}};
   task(nullptr);assert(!snapshot().worker&&!snapshot().ready&&!sessions&&allocations.empty());
   assert(!input(0,0,INPUT_BUTTON_B));
   // Stopping an externally paused source must clear hold, so restarting can
@@ -125,14 +125,14 @@ int main() {
   enter();delays=0;
   onDelay=[&]{++delays;if(delays==1){input(0,0,INPUT_BUTTON_A);sourceRunning=false;}
     else if(delays==2){assert(!snapshot().ready&&!snapshot().frozen);sourceRunning=true;}
-    else {assert(snapshot().ready);currentOLEDMode=OLED_MENU;prepareCameraPreviewData();}};
+    else {assert(snapshot().ready);currentOledMode=OLED_MENU;prepareCameraPreviewData();}};
   task(nullptr);assert(allocations.empty()&&!sessions);
-  enter();onDelay=[&]{currentOLEDMode=OLED_MENU;prepareCameraPreviewData();};
-  onDecode=[&]{currentOLEDMode=OLED_MENU;prepareCameraPreviewData();};
+  enter();onDelay=[&]{currentOledMode=OLED_MENU;prepareCameraPreviewData();};
+  onDecode=[&]{currentOledMode=OLED_MENU;prepareCameraPreviewData();};
   task(nullptr);assert(!snapshot().ready&&!snapshot().sequence&&allocations.empty()&&!sessions);onDecode=nullptr;
   enter();onDecode=[&]{authed=false;liveEpoch=2;prepareCameraPreviewData();};
   task(nullptr);assert(!snapshot().ready&&!snapshot().active&&allocations.empty()&&!sessions);onDecode=nullptr;
-  enter();decodeFail=true;onDelay=[&]{assert(strstr(snapshot().error,"no memory"));currentOLEDMode=OLED_MENU;prepareCameraPreviewData();};
+  enter();decodeFail=true;onDelay=[&]{assert(strstr(snapshot().error,"no memory"));currentOledMode=OLED_MENU;prepareCameraPreviewData();};
   task(nullptr);assert(allocations.empty()&&!sessions);decodeFail=false;
   // Photo waits until this preview's capture/decode has drained; frozen frames
   // reject a late producer, and a completed save restores the prior live state.
@@ -140,11 +140,11 @@ int main() {
   onDelay=[&]{++turns;if(turns==2){prepareCameraPreviewData();assert(commands.size()==1&&commands[0]=="camerasave");
       assert(snapshot().frozen);input(0,0,INPUT_BUTTON_A);assert(snapshot().frozen);
       assert(completion);completion(true,completionContext);assert(!snapshot().frozen);}
-    if(turns==3){currentOLEDMode=OLED_MENU;prepareCameraPreviewData();}};
+    if(turns==3){currentOledMode=OLED_MENU;prepareCameraPreviewData();}};
   task(nullptr);assert(allocations.empty()&&!sessions);onCapture=nullptr;
   enter();refuseScratch=true;task(nullptr);assert(!snapshot().worker&&strstr(snapshot().error,"memory")&&allocations.empty());refuseScratch=false;
-  resetOLEDCameraPreview();refuseTask=true;nowMs+=4000;prepareCameraPreviewData();assert(!snapshot().worker);refuseTask=false;
-  resetOLEDCameraPreview();guest=true;prepareCameraPreviewData();assert(!snapshot().active);guest=false;
+  resetOledCameraPreview();refuseTask=true;nowMs+=4000;prepareCameraPreviewData();assert(!snapshot().worker);refuseTask=false;
+  resetOledCameraPreview();guest=true;prepareCameraPreviewData();assert(!snapshot().active);guest=false;
   validateOnly=true;assert(std::string(cmd_oledcameraread(""))=="VALID");validateOnly=false;
   assert(strstr(cmd_oledcameraread(""),"workerActive"));
   replyBufferAvailable=false;

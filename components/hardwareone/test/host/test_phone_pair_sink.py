@@ -82,10 +82,10 @@ __attribute__((format(printf,2,3))) [[maybe_unused]] static void debugQueuePrint
 struct FakeConsole{void append(const char* s){oledConsole.emplace_back(s);}};
 [[maybe_unused]] static FakeConsole gOledConsole;
 // ---- The display the code screen sink posts to ------------------------------------
-enum OLEDMode{OLED_BLUETOOTH_PHONE,OLED_BLUETOOTH_PHONE_CODE};
+enum OledMode{OLED_BLUETOOTH_PHONE,OLED_BLUETOOTH_PHONE_CODE};
 static bool oledConnected=true,gOledRunning=true;
-static std::vector<std::pair<OLEDMode,std::string>> modeRequests;
-static void requestOLEDMode(OLEDMode mode,const char* reason){assert(ownerDepth==0);modeRequests.emplace_back(mode,reason);}
+static std::vector<std::pair<OledMode,std::string>> modeRequests;
+static void requestOledMode(OledMode mode,const char* reason){assert(ownerDepth==0);modeRequests.emplace_back(mode,reason);}
 '''
 
 TESTS = r'''

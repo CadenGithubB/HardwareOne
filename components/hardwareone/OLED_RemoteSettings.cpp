@@ -430,7 +430,7 @@ bool applyRemoteSettingChange(const SettingEntry* entry, const String& value, St
   char out[128];
   out[0] = '\0';
   const String cmd = String("remote:") + entry->cmdKey + " " + trimmed;
-  if (!executeOLEDCommandWithResult(cmd, out, sizeof(out))) {
+  if (!executeOledCommandWithResult(cmd, out, sizeof(out))) {
     errOut = out[0] ? String(out) : String("Send failed");
     DEBUGF(DEBUG_ESPNOW_ROUTER, "[RemoteSettings] %s not sent: %s", entry->cmdKey, errOut.c_str());
     return false;

@@ -425,7 +425,7 @@ static void rtcReadAndCacheOnce(unsigned long now) {
     }
   }
 #if ENABLE_OLED_DISPLAY
-  if (currentOLEDMode == OLED_RTC_DATA) {
+  if (currentOledMode == OLED_RTC_DATA) {
     oledMarkDirty();
   }
 #endif
@@ -477,7 +477,7 @@ void rtcTask(void* pvParameters) {
 
     // Poll fast when OLED is displaying RTC, slow otherwise
 #if ENABLE_OLED_DISPLAY
-    unsigned long interval = (currentOLEDMode == OLED_RTC_DATA) ? CACHE_UPDATE_FAST : CACHE_UPDATE_SLOW;
+    unsigned long interval = (currentOledMode == OLED_RTC_DATA) ? CACHE_UPDATE_FAST : CACHE_UPDATE_SLOW;
 #else
     unsigned long interval = CACHE_UPDATE_SLOW;
 #endif

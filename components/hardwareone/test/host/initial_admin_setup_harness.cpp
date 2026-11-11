@@ -189,14 +189,14 @@ struct Reboot {};
 static void rebootWithMessage(const char*) {
   ++rebootCalls; operations.emplace_back("reboot"); check(usersJson.length() > 0); throw Reboot{};
 }
-static void showOLEDMessage(const char*, bool) {}
+static void showOledMessage(const char*, bool) {}
 static std::vector<String> inputs;
 static size_t inputIndex;
 static int cancelInput;
 static String waitForSerialInputBlocking() {
   check(inputIndex < inputs.size()); return inputs[inputIndex++];
 }
-static String getOLEDTextInput(const char*, bool, const char*, int, bool* cancelled, bool wizardInput) {
+static String getOledTextInput(const char*, bool, const char*, int, bool* cancelled, bool wizardInput) {
   check(!wizardInput); // Account values must not inherit the feature wizard's cancel-word policy.
   *cancelled = static_cast<int>(inputIndex) == cancelInput;
   return waitForSerialInputBlocking();

@@ -268,7 +268,7 @@ static std::vector<std::string> oledRequests;
 static bool oledGuestBlocksMutate() { return oledGuest; }
 static void healthKickPollBurst() { ++pollRequests; }
 [[maybe_unused]] static bool healthRequireAdmin() { return adminUser; }  // 0.99.97.4 OLED gate
-static void executeOLEDCommand(const String& command) { oledRequests.emplace_back(command.c_str()); }
+static void executeOledCommand(const String& command) { oledRequests.emplace_back(command.c_str()); }
 [[maybe_unused]] static uint32_t sHealthDeniedUntilMs;
 [[maybe_unused]] static unsigned oledDirtyMarks;
 [[maybe_unused]] static void oledMarkDirty() { ++oledDirtyMarks; }
@@ -276,7 +276,7 @@ static String oledUser = "bob";
 static std::string lastOledResult;
 // OLED_Utils.cpp: the display identity, the shared executor, the result copied
 // into the caller's buffer.
-[[maybe_unused]] static bool executeOLEDCommandWithResult(const String& command, char* out,
+[[maybe_unused]] static bool executeOledCommandWithResult(const String& command, char* out,
                                                           size_t outSize) {
   oledRequests.emplace_back(command.c_str());
   AuthContext display{};

@@ -45,14 +45,14 @@ uint32_t millis(){return clockMs;}
 TransportSessionEpoch localDisplayTransportSessionSnapshot(String& user,bool& yes){yes=authed;user=authed?"alice":"";return liveEpoch;}
 bool oledGuestBlocksMutate(){return guest;}
 struct Command {String line;struct{TransportSessionEpoch transportSessionEpoch;unsigned behaviorFlags=0;}ctx;};
-static Command buildOLEDCommand(const String& line){Command cmd;cmd.line=line;cmd.ctx.transportSessionEpoch=liveEpoch;return cmd;}
+static Command buildOledCommand(const String& line){Command cmd;cmd.line=line;cmd.ctx.transportSessionEpoch=liveEpoch;return cmd;}
 struct Request{Command command;ExecAsyncCallback callback;void* context;};
 static std::vector<Request> requests;
 bool submitCommandAsync(const Command& command,ExecAsyncCallback callback,void* opaque){if(!queueOkay)return false;requests.push_back({command,callback,opaque});return true;}
 // INSERT_BRIDGE
-struct OLEDScrollState {const char* items[16]{};int count=0,selectedIndex=0,visibleLines=4;};
-enum OLEDMode {OLED_MENU,OLED_TRANSCRIPTION,OLED_TRANSCRIPTION_LIVE,OLED_TRANSCRIPTS,OLED_TRANSCRIPT_VIEW};
-static OLEDMode currentOLEDMode=OLED_MENU;
+struct OledScrollState {const char* items[16]{};int count=0,selectedIndex=0,visibleLines=4;};
+enum OledMode {OLED_MENU,OLED_TRANSCRIPTION,OLED_TRANSCRIPTION_LIVE,OLED_TRANSCRIPTS,OLED_TRANSCRIPT_VIEW};
+static OledMode currentOledMode=OLED_MENU;
 static struct{bool up=false,down=false;}gNavEvents;
 constexpr uint32_t INPUT_BUTTON_A=1,INPUT_BUTTON_B=2,INPUT_BUTTON_X=4;
 #define INPUT_CHECK(buttons,mask) ((buttons)&(mask))
@@ -62,7 +62,7 @@ static unsigned toastDuration;
 static OledUIIcon toastIcon;
 void oledToastShow(const char* text,unsigned duration,OledUIIcon icon=OledUIIcon::NONE){toast=text;toastDuration=duration;toastIcon=icon;}
 void oledMarkDirty(){}
-void requestOLEDMode(OLEDMode mode,const char*){currentOLEDMode=mode;}
+void requestOledMode(OledMode mode,const char*){currentOledMode=mode;}
 #include "OLED_Layout.h"
 #ifndef TEST_CANVAS_HEIGHT
 #define TEST_CANVAS_HEIGHT 64
@@ -74,14 +74,14 @@ constexpr int oledVisibleRows(int rowHeight,int reservedHeight=0,int baselineRow
 struct Display{std::string printed,body;void setTextSize(int){}void setCursor(int,int){}void write(char c){body+=c;}void print(const char* text){printed=text;}};
 static Display display;
 static Display* oledDisplay=&display;
-void oledScrollInit(OLEDScrollState* s,const char*,int visible){*s={};s->visibleLines=visible;}
-void oledScrollClearKeepSelection(OLEDScrollState* s){s->count=0;}
-void oledScrollAddItem(OLEDScrollState* s,const char* text){assert(s->count<16);s->items[s->count++]=text;}
-void oledScrollClampSelection(OLEDScrollState* s){s->selectedIndex=std::max(0,std::min(s->selectedIndex,s->count-1));}
-bool oledScrollHandleNav(OLEDScrollState* s){if(gNavEvents.up){if(s->selectedIndex)--s->selectedIndex;return true;}if(gNavEvents.down){if(s->selectedIndex+1<s->count)++s->selectedIndex;return true;}return false;}
-void oledScrollRenderSimple(Display*,OLEDScrollState*,bool=false,int=0){}
-struct OLEDModeEntry{OLEDMode mode;const char* name;const char* icon;void(*draw)();bool(*available)();bool(*input)(int,int,uint32_t);bool shown;int order;const char* hint;};
-void resetOLEDTranscription();
+void oledScrollInit(OledScrollState* s,const char*,int visible){*s={};s->visibleLines=visible;}
+void oledScrollClearKeepSelection(OledScrollState* s){s->count=0;}
+void oledScrollAddItem(OledScrollState* s,const char* text){assert(s->count<16);s->items[s->count++]=text;}
+void oledScrollClampSelection(OledScrollState* s){s->selectedIndex=std::max(0,std::min(s->selectedIndex,s->count-1));}
+bool oledScrollHandleNav(OledScrollState* s){if(gNavEvents.up){if(s->selectedIndex)--s->selectedIndex;return true;}if(gNavEvents.down){if(s->selectedIndex+1<s->count)++s->selectedIndex;return true;}return false;}
+void oledScrollRenderSimple(Display*,OledScrollState*,bool=false,int=0){}
+struct OledModeEntry{OledMode mode;const char* name;const char* icon;void(*draw)();bool(*available)();bool(*input)(int,int,uint32_t);bool shown;int order;const char* hint;};
+void resetOledTranscription();
 // INSERT_PRODUCTION
 static const char* id="0123456789abcdef";
 static std::string status(bool active,const char* exchange=id){return std::string("{\"success\":true,\"exchange\":\"")+exchange+"\",\"active\":"+(active?"true":"false")+",\"busy\":false,\"available\":true,\"continuous\":true,\"preparing\":false,\"captureActive\":"+(active?"true":"false")+",\"saveDefault\":false}";}
@@ -90,11 +90,11 @@ static std::string request(){assert(requests.size()==1);assert(requests[0].comma
 static void answer(const std::string& text,bool okay=true){assert(requests.size()==1);auto request=requests.front();requests.clear();std::thread worker([&]{request.callback(okay,text.c_str(),request.context);});worker.join();}
 static void reset(){
   // Complete owned callbacks even when abandoning a test scenario.
-  while(!requests.empty()){answer("{\"success\":false,\"error\":\"test cleanup\"}",false);currentOLEDMode=OLED_MENU;tick(1);}
-  resetOLEDTranscription();v=View{};inFlight=false;ready=false;pending=String();pendingAck=String();
-  currentOLEDMode=OLED_MENU;authed=queueOkay=true;guest=false;liveEpoch=10;clockMs=1000;gNavEvents={};cancellations.clear();toast.clear();display={};
+  while(!requests.empty()){answer("{\"success\":false,\"error\":\"test cleanup\"}",false);currentOledMode=OLED_MENU;tick(1);}
+  resetOledTranscription();v=View{};inFlight=false;ready=false;pending=String();pendingAck=String();
+  currentOledMode=OLED_MENU;authed=queueOkay=true;guest=false;liveEpoch=10;clockMs=1000;gNavEvents={};cancellations.clear();toast.clear();display={};
 }
-static void home(){currentOLEDMode=OLED_TRANSCRIPTION;tick();assert(request()=="transcription status");answer(status(false,""));tick(1);}
+static void home(){currentOledMode=OLED_TRANSCRIPTION;tick();assert(request()=="transcription status");answer(status(false,""));tick(1);}
 static void start(){v.menu.selectedIndex=0;menuInput(0,0,INPUT_BUTTON_A);tick(1);assert(request()=="transcription start");answer(status(true));tick(1);}
 static void list(){v.menu.selectedIndex=3;menuInput(0,0,INPUT_BUTTON_A);tick(1);assert(request()=="transcripts list internal 0");answer("{\"success\":true,\"offset\":0,\"nextOffset\":2,\"more\":true,\"entries\":[{\"name\":\"one.txt\",\"path\":\"/stt/u7/one.txt\"},{\"name\":\"two.txt\",\"path\":\"/stt/u7/two.txt\"}]}");tick(1);}
 int main(){
@@ -110,13 +110,13 @@ int main(){
   tick();assert(request()==std::string("transcription status ")+id);answer(status(true));tick(1);tick();assert(request()==std::string("transcription next ")+id);
   answer("{\"success\":true,\"available\":true,\"sequence\":1,\"offset\":6,\"length\":5,\"sttText\":\"world\",\"display\":\"World\"}");tick(1);assert(std::string(v.recent)=="hello World");tick();assert(request()==std::string("transcription ack ")+id+" 1 6 5");answer("{\"success\":true}");tick(1);
   // Back invalidates the model and cancels its exact lease only.
-  currentOLEDMode=OLED_MENU;tick(1);assert(v.recent[0]==0&&!v.entered&&!cancellations.empty());assert(cancellations.back().exchange==0x0123456789abcdefULL);
+  currentOledMode=OLED_MENU;tick(1);assert(v.recent[0]==0&&!v.entered&&!cancellations.empty());assert(cancellations.back().exchange==0x0123456789abcdefULL);
   // A start which finishes after exit/re-entry cannot publish into its successor.
-  reset();home();v.menu.selectedIndex=0;menuInput(0,0,INPUT_BUTTON_A);tick(1);assert(request()=="transcription start");currentOLEDMode=OLED_MENU;tick(1);currentOLEDMode=OLED_TRANSCRIPTION;tick(1);assert(requests.size()==1);answer(status(true));tick(1);assert(!v.active&&v.exchange[0]==0&&cancellations.size()==1);assert(request()=="transcription status");answer(status(false,""));tick(1);
+  reset();home();v.menu.selectedIndex=0;menuInput(0,0,INPUT_BUTTON_A);tick(1);assert(request()=="transcription start");currentOledMode=OLED_MENU;tick(1);currentOledMode=OLED_TRANSCRIPTION;tick(1);assert(requests.size()==1);answer(status(true));tick(1);assert(!v.active&&v.exchange[0]==0&&cancellations.size()==1);assert(request()=="transcription status");answer(status(false,""));tick(1);
   // Queue rejection keeps the action pending and retries without duplicating it.
   queueOkay=false;v.menu.selectedIndex=0;menuInput(0,0,INPUT_BUTTON_A);tick(1);assert(requests.empty()&&pending.length());queueOkay=true;tick(1);assert(request()=="transcription start");answer(status(false,""));tick(1);
   // Exact bridge epoch fence is independent of a caller's command contents.
-  assert(!submitOLEDCommandForSession("transcription start",99,nullptr,nullptr));
+  assert(!submitOledCommandForSession("transcription start",99,nullptr,nullptr));
   // Numeric toggle reports ordinary command failure and refreshes state.
   v.menu.selectedIndex=2;menuInput(0,0,INPUT_BUTTON_A);tick(1);assert(request()=="sttsavetranscripts 1");answer("Error: Admin required",true);tick(1);assert(std::string(v.message)=="Error: Admin required");assert(toast=="Error: Admin required"&&toastDuration==8000&&toastIcon==OledUIIcon::ERROR);assert(request()=="transcription status");answer(status(false,""));tick(1);
   // List and file reads cannot publish after Back or selecting another file.
@@ -126,12 +126,12 @@ int main(){
   assert(request()=="transcription status");answer("{\"success\":true,\"available\":true,\"micSource\":\"pdm\",\"micPdm\":true,\"micG2\":false}");tick(1);
   populateMenu();assert(std::string(v.menu.items[5])=="Mic: Onboard");
   v.menu.selectedIndex=5;menuInput(0,0,INPUT_BUTTON_A);tick(1);assert(request()=="micsource auto");answer("ok",true);tick(1);answer(status(false,""));tick(1);
-  list();v.list.selectedIndex=0;listInput(0,0,INPUT_BUTTON_A);tick(1);assert(request()=="transcripts read \"/stt/u7/one.txt\" 0");currentOLEDMode=OLED_TRANSCRIPTS;tick(1);v.list.selectedIndex=1;listInput(0,0,INPUT_BUTTON_A);tick(1);assert(requests.size()==1);answer("{\"success\":true,\"sttText\":\"late private one\",\"offset\":0,\"nextOffset\":10,\"eof\":true}");tick(1);assert(v.text[0]==0);assert(request()=="transcripts read \"/stt/u7/two.txt\" 0");answer("{\"success\":true,\"sttText\":\"second file\",\"offset\":0,\"nextOffset\":509,\"eof\":false}");tick(1);assert(std::string(v.text)=="second file");
+  list();v.list.selectedIndex=0;listInput(0,0,INPUT_BUTTON_A);tick(1);assert(request()=="transcripts read \"/stt/u7/one.txt\" 0");currentOledMode=OLED_TRANSCRIPTS;tick(1);v.list.selectedIndex=1;listInput(0,0,INPUT_BUTTON_A);tick(1);assert(requests.size()==1);answer("{\"success\":true,\"sttText\":\"late private one\",\"offset\":0,\"nextOffset\":10,\"eof\":true}");tick(1);assert(v.text[0]==0);assert(request()=="transcripts read \"/stt/u7/two.txt\" 0");answer("{\"success\":true,\"sttText\":\"second file\",\"offset\":0,\"nextOffset\":509,\"eof\":false}");tick(1);assert(std::string(v.text)=="second file");
   gNavEvents.down=true;fileInput(0,0,0);gNavEvents={};tick(1);assert(request()=="transcripts read \"/stt/u7/two.txt\" 509");answer("{\"success\":true,\"sttText\":\"next window\",\"offset\":509,\"nextOffset\":1021,\"eof\":false}");tick(1);gNavEvents.up=true;fileInput(0,0,0);gNavEvents={};tick(1);assert(request()=="transcripts read \"/stt/u7/two.txt\" 0");answer("{\"success\":true,\"sttText\":\"first window\",\"offset\":0,\"nextOffset\":509,\"eof\":false}");tick(1);
   // A queued read is dropped if navigation leaves before command admission.
-  queueOkay=false;gNavEvents.down=true;fileInput(0,0,0);gNavEvents={};tick(1);assert(pending.length());currentOLEDMode=OLED_TRANSCRIPTS;tick(1);assert(!pending.length());queueOkay=true;
+  queueOkay=false;gNavEvents.down=true;fileInput(0,0,0);gNavEvents={};tick(1);assert(pending.length());currentOledMode=OLED_TRANSCRIPTS;tick(1);assert(!pending.length());queueOkay=true;
   // Session boundary reset clears cached private file/live text before rendering.
-  std::strcpy(v.recent,"old user");std::strcpy(v.text,"old file");resetOLEDTranscription();liveEpoch=11;currentOLEDMode=OLED_MENU;tick(1);assert(v.recent[0]==0&&v.text[0]==0);
+  std::strcpy(v.recent,"old user");std::strcpy(v.text,"old file");resetOledTranscription();liveEpoch=11;currentOledMode=OLED_MENU;tick(1);assert(v.recent[0]==0&&v.text[0]==0);
   // Wrapped display status reserves menu space; UTF-8 glyph walking is bounded.
   std::memset(v.message,'M',sizeof(v.message)-1);v.message[sizeof(v.message)-1]=0;displayTranscriptionHome();assert(display.printed.size()<=21&&v.menu.visibleLines>=2);
   assert(lines("\xc3\xa9\xe2\x82\xac\nend")==2);v.preparing=true;display.body.clear();displayTranscriptionLive();assert(display.body=="Preparing...");

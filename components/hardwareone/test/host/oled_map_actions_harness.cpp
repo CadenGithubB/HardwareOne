@@ -8,7 +8,7 @@
 // refuse the anonymous one, as checkPerm does for FsRole::ANON.
 // Input: HAL_Input's real button mapping tables and INPUT_CHECK are inserted
 // for the device chosen with -DMAP_TEST_DEVICE, and frame() hands the handler
-// what processOLEDInput hands a mode for that device.
+// what processOledInput hands a mode for that device.
 #include <algorithm>
 using std::max;
 #include <cmath>
@@ -317,14 +317,14 @@ static void drawMapMenu() {}
 
 // The keyboard: init/complete/cancel/reset follow OLED_Utils (completing or
 // cancelling clears `active`; while active the central router feeds it).
-enum class OLEDKeyboardDictationPolicy { ALLOW_PLAINTEXT };
-typedef int (*OLEDKeyboardAutocompleteFunc)(const char*, const char**, int, void*);
+enum class OledKeyboardDictationPolicy { ALLOW_PLAINTEXT };
+typedef int (*OledKeyboardAutocompleteFunc)(const char*, const char**, int, void*);
 struct { bool active; } gOledKeyboardState;
 static bool kbCompleted, kbCancelled;
 static std::string kbText, kbTitle;
 static int kbDraws, kbResets, kbInputs;
 static void oledKeyboardInit(const char* title, const char* initialText, int,
-                             OLEDKeyboardDictationPolicy) {
+                             OledKeyboardDictationPolicy) {
   gOledKeyboardState.active = true;
   kbCompleted = kbCancelled = false;
   kbTitle = title ? title : "";
@@ -342,7 +342,7 @@ static void oledKeyboardReset() {
 }
 static bool oledKeyboardHandleInput(int, int, uint32_t) { ++kbInputs; return true; }
 static void oledKeyboardDisplay(TestDisplay*) { ++kbDraws; }
-static void oledKeyboardSetAutocomplete(OLEDKeyboardAutocompleteFunc, void*) {}
+static void oledKeyboardSetAutocomplete(OledKeyboardAutocompleteFunc, void*) {}
 static void keyboardFinish(const char* typed, bool complete) {
   kbText = typed;
   kbCompleted = complete;
@@ -355,13 +355,13 @@ static std::vector<std::string> toasts;
 static void oledToastShow(const char* message, uint32_t, OledUIIcon) { toasts.emplace_back(message); }
 static bool gGuest;
 static bool oledGuestBlocksMutate() { return gGuest; }
-static std::vector<OLEDMode> modeRequests;
-static void requestOLEDMode(OLEDMode mode, const char*, bool = true, bool = false) {
+static std::vector<OledMode> modeRequests;
+static void requestOledMode(OledMode mode, const char*, bool = true, bool = false) {
   modeRequests.push_back(mode);
 }
 static std::vector<std::string> commands;
-static void executeOLEDCommand(const String& line) { commands.emplace_back(line.c_str()); }
-static bool executeOLEDCommandWithResult(const String& line, char* out, size_t length) {
+static void executeOledCommand(const String& line) { commands.emplace_back(line.c_str()); }
+static bool executeOledCommandWithResult(const String& line, char* out, size_t length) {
   commands.emplace_back(line.c_str());
   std::snprintf(out, length, "%s", "OK: GPS track cleared");
   return true;
@@ -668,7 +668,7 @@ static void caseSelectMap() {
 }
 
 // ---------------------------------------------------------------------------
-// Input devices: one frame as processOLEDInput (OLED_Utils.cpp) hands it to
+// Input devices: one frame as processOledInput (OLED_Utils.cpp) hands it to
 // the mode. newlyPressed is the device's raw press bits; gNavEvents carries
 // the wheel's detents and its sign as up/down (vertical axis), the ANO dpad's
 // press edges as nav booleans, and the stick's deflection with a nav event

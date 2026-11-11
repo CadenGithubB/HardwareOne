@@ -98,13 +98,13 @@ static const uint32_t INPUT_BUTTON_B = 1u << 1;
 // INSERT_KEYBOARD_TYPES
 
 // ---- keyboard doubles ---------------------------------------------------------------
-struct KeyboardOpen { std::string title; int maxLength; OLEDKeyboardDictationPolicy policy; };
+struct KeyboardOpen { std::string title; int maxLength; OledKeyboardDictationPolicy policy; };
 static std::vector<KeyboardOpen> gKeyboardOpens;
 static int gKeyboardResets = 0;
-struct HarnessKeyboardState { OLEDKeyboardMode mode = KEYBOARD_MODE_LOWERCASE; };
+struct HarnessKeyboardState { OledKeyboardMode mode = KEYBOARD_MODE_LOWERCASE; };
 static HarnessKeyboardState gOledKeyboardState;
 static void oledKeyboardInit(const char* title, const char*, int maxLength,
-                             OLEDKeyboardDictationPolicy policy) {
+                             OledKeyboardDictationPolicy policy) {
   gKeyboardOpens.push_back({title ? title : "", maxLength, policy});
   gOledKeyboardState.mode = KEYBOARD_MODE_LOWERCASE;
 }
@@ -130,7 +130,7 @@ static bool systemEventCatalogFamilyKindAt(SystemEventFamily family, size_t inde
 
 // ---- OLED command executor double ---------------------------------------------------
 static std::vector<std::string> gSent;
-static bool executeOLEDCommandWithResult(const String& cmd, char* out, size_t outSize) {
+static bool executeOledCommandWithResult(const String& cmd, char* out, size_t outSize) {
   gSent.emplace_back(cmd.c_str());
   if (out && outSize) std::snprintf(out, outSize, "%s", "OK");
   return true;
@@ -326,9 +326,9 @@ static void case_keyboard_capacity() {
                " characters but the wizard keeps " + std::to_string(sizeof(sWizCommand) - 1));
   }
   const KeyboardOpen& commandKeyboard = gKeyboardOpens.back();
-  EXPECT(commandKeyboard.title == "Command:" && commandKeyboard.policy == OLEDKeyboardDictationPolicy::DENY,
+  EXPECT(commandKeyboard.title == "Command:" && commandKeyboard.policy == OledKeyboardDictationPolicy::DENY,
          "the command keyboard denies dictation");
-  EXPECT(gKeyboardOpens.front().policy == OLEDKeyboardDictationPolicy::ALLOW_PLAINTEXT,
+  EXPECT(gKeyboardOpens.front().policy == OledKeyboardDictationPolicy::ALLOW_PLAINTEXT,
          "the name keyboard admits dictation");
   press(INPUT_BUTTON_A);
   EXPECT(gSent.size() == 1 && gSent[0] == addLine("Max", command),

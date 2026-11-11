@@ -32,7 +32,7 @@
 #include "System_WiFi.h"
 #endif
 
-// Draw FTS footer at the standard position (matching drawOLEDFooter in the normal program)
+// Draw FTS footer at the standard position (matching drawOledFooter in the normal program)
 static void drawFTSFooter(const char* text) {
   const int footerY = OLED_HEADER_HEIGHT + OLED_CONTENT_HEIGHT;
   oledDisplay->drawFastHLine(0, footerY, 128, SSD1306_WHITE);
@@ -49,7 +49,7 @@ static void drawFTSFooter(const char* text) {
 /**
  * Check if OLED is available for interactive input
  */
-static bool isOLEDAvailable() {
+static bool isOledAvailable() {
   return oledDisplay && oledConnected && gOledRunning;
 }
 
@@ -103,14 +103,14 @@ static uint32_t waitForRetryOrSkip() {
 // OLED Text Input (with Virtual Keyboard)
 // ============================================================================
 
-String getOLEDTextInput(const char* prompt, bool isPassword,
+String getOledTextInput(const char* prompt, bool isPassword,
                         const char* initialText, int maxLength,
                         bool* wasCancelled, bool canSkip) {
   // Initialize output parameter
   if (wasCancelled) *wasCancelled = false;
   
   // Fallback to serial if OLED not available
-  if (!isOLEDAvailable()) {
+  if (!isOledAvailable()) {
     Serial.print(prompt);
     Serial.print(": ");
     String input = waitForSerialInputBlocking();
@@ -124,8 +124,8 @@ String getOLEDTextInput(const char* prompt, bool isPassword,
   // Initialize keyboard
   oledKeyboardInit(
       prompt, initialText, maxLength,
-      isPassword ? OLEDKeyboardDictationPolicy::DENY
-                 : OLEDKeyboardDictationPolicy::ALLOW_PLAINTEXT,
+      isPassword ? OledKeyboardDictationPolicy::DENY
+                 : OledKeyboardDictationPolicy::ALLOW_PLAINTEXT,
       isPassword);
 
   // Also echo prompt to serial so users monitoring via terminal know to type here
@@ -246,9 +246,9 @@ String getOLEDTextInput(const char* prompt, bool isPassword,
 // OLED Yes/No Prompt
 // ============================================================================
 
-bool getOLEDYesNoPrompt(const char* prompt, bool defaultYes) {
+bool getOledYesNoPrompt(const char* prompt, bool defaultYes) {
   // Fallback to serial if OLED not available
-  if (!isOLEDAvailable()) {
+  if (!isOledAvailable()) {
     Serial.print(prompt);
     Serial.print(" (y/n) [default: ");
     Serial.print(defaultYes ? "y" : "n");
@@ -446,9 +446,9 @@ struct FtsWifiScanCacheGuard {
 };
 #endif
 
-bool getOLEDWifiSelection(String& outSSID) {
+bool getOledWifiSelection(String& outSSID) {
   // Fallback to serial if OLED not available
-  if (!isOLEDAvailable()) {
+  if (!isOledAvailable()) {
     Serial.println("Enter WiFi SSID (or press Enter to skip): ");
     outSSID = waitForSerialInputBlocking();
     if (gWizardOwnsSerial && wizardHandleCancelInput(outSSID)) { outSSID = ""; return false; }
@@ -695,7 +695,7 @@ bool getOLEDWifiSelection(String& outSSID) {
     if (rescanRequested || selection == rescanIdx) continue;
     if (selection == manualIdx) {
       bool cancelled = false;
-      outSSID = getOLEDTextInput("WiFi SSID:", false, "", 32,
+      outSSID = getOledTextInput("WiFi SSID:", false, "", 32,
                                  &cancelled);
       if (cancelled || outSSID.length() == 0) continue;
       return true;
@@ -731,8 +731,8 @@ bool getOLEDWifiSelection(String& outSSID) {
 // OLED Message Display
 // ============================================================================
 
-void showOLEDMessage(const char* message, bool waitForButton) {
-  if (!isOLEDAvailable()) {
+void showOledMessage(const char* message, bool waitForButton) {
+  if (!isOledAvailable()) {
     Serial.println(message);
     if (waitForButton) {
       Serial.println("Press Enter to continue...");

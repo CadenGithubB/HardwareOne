@@ -649,7 +649,7 @@ String migrationStagedOledPrompt() {
   const char* source = s.source == StagedRestoreSource::ThisDevice    ? "this dev"
                        : s.source == StagedRestoreSource::OtherDevice ? "other dev"
                                                                       : "unverified";
-  // getOLEDYesNoPrompt shows three 21-character lines above Yes/No.
+  // getOledYesNoPrompt shows three 21-character lines above Yes/No.
   char text[72];
   snprintf(text, sizeof(text), "Apply %.14s?\n%uB sha %s\n%s, reboots", s.host, (unsigned)s.bytes, s.sha8,
            source);

@@ -9,7 +9,7 @@
 #include <Adafruit_SSD1306.h>
 
 // Persistent scroll state for the GPS view — survives between render frames
-static OLEDContentArea sGPSContent;
+static OledContentArea sGPSContent;
 static bool sGPSContentInited = false;
 
 // GPS OLED display function - shows GPS data using the shared content area system
@@ -70,7 +70,7 @@ static void displayGPSData() {
 }
 
 // Availability check for GPS OLED mode
-static bool gpsOLEDModeAvailable(String* outReason) {
+static bool gpsOledModeAvailable(String* outReason) {
   if (gGpsConnected && gGpsRunning) return true;
 
   // Check if hardware was detected during I2C scan (address 0x10)
@@ -87,9 +87,9 @@ static bool gpsOLEDModeAvailable(String* outReason) {
 static void gpsToggleConfirmed(void* userData) {
   (void)userData;
   if (gGpsRunning && gGpsConnected) {
-    executeOLEDCommand("closegps");
+    executeOledCommand("closegps");
   } else {
-    executeOLEDCommand("opengps");
+    executeOledCommand("opengps");
   }
 }
 
@@ -117,13 +117,13 @@ static bool gpsInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
 }
 
 // GPS OLED mode entry
-static const OLEDModeEntry gpsOLEDModes[] = {
+static const OledModeEntry gpsOledModes[] = {
   {
     OLED_GPS_DATA,           // mode enum
     "GPS",                   // menu name
     "compass",               // icon name
     displayGPSData,          // displayFunc
-    gpsOLEDModeAvailable,    // availFunc
+    gpsOledModeAvailable,    // availFunc
     gpsInputHandler,         // inputFunc
     true,                    // showInMenu
     50,                      // menuOrder
@@ -132,6 +132,6 @@ static const OLEDModeEntry gpsOLEDModes[] = {
 };
 
 // Auto-register GPS OLED mode
-REGISTER_OLED_MODE_MODULE(gpsOLEDModes, sizeof(gpsOLEDModes) / sizeof(gpsOLEDModes[0]), "GPS");
+REGISTER_OLED_MODE_MODULE(gpsOledModes, sizeof(gpsOledModes) / sizeof(gpsOledModes[0]), "GPS");
 
 #endif // I2CSENSOR_PA1010D_OLED_H

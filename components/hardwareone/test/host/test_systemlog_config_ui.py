@@ -47,8 +47,8 @@ def generate(read) -> str:
              read("System_DebugFlags.h"),
              extract_block(utils_h, "enum LoggingMenuState") + ";",
              cap.group(0),
-             extract_block(utils_h, "struct OLEDScrollItem") + ";",
-             extract_block(utils_h, "struct OLEDScrollState") + ";",
+             extract_block(utils_h, "struct OledScrollItem") + ";",
+             extract_block(utils_h, "struct OledScrollState") + ";",
              read("OLED_Layout.h").replace("#pragma once", ""),
              extract_block(utils_h, "inline constexpr int oledVisibleRows(")]
 

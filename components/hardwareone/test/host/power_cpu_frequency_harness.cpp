@@ -102,7 +102,7 @@ struct { int oledBrightness = 1; uint8_t powerMode = POWER_MODE_PERFORMANCE; } g
 template <typename T, typename U> static void setSetting(T& field, U value) {
   trace.push_back("setting"); ++settingWrites; field = value;
 }
-void applyOLEDBrightness() { trace.push_back("brightness"); ++brightnessCalls; }
+void applyOledBrightness() { trace.push_back("brightness"); ++brightnessCalls; }
 static void systemEventPost(int type, const char* text) {
   assert(type == 1); trace.push_back("event"); events.push_back(text);
 }

@@ -30,7 +30,7 @@
  * @param wasCancelled Output parameter - set to true if user cancelled (optional)
  * @return User's input string (empty if cancelled)
  */
-String getOLEDTextInput(const char* prompt, bool isPassword = false,
+String getOledTextInput(const char* prompt, bool isPassword = false,
                         const char* initialText = nullptr, int maxLength = 32,
                         bool* wasCancelled = nullptr, bool canSkip = true);
 
@@ -42,7 +42,7 @@ String getOLEDTextInput(const char* prompt, bool isPassword = false,
  * @param defaultYes If true, default selection is "Yes"
  * @return true if user selected Yes, false if No
  */
-bool getOLEDYesNoPrompt(const char* prompt, bool defaultYes = true);
+bool getOledYesNoPrompt(const char* prompt, bool defaultYes = true);
 
 /**
  * Show WiFi network selection menu on OLED
@@ -52,7 +52,7 @@ bool getOLEDYesNoPrompt(const char* prompt, bool defaultYes = true);
  * @param outSSID Selected network SSID (output parameter)
  * @return true if network selected, false if skipped/cancelled
  */
-bool getOLEDWifiSelection(String& outSSID);
+bool getOledWifiSelection(String& outSSID);
 
 /**
  * Display a message on OLED and wait for user acknowledgment
@@ -60,7 +60,7 @@ bool getOLEDWifiSelection(String& outSSID);
  * @param message Message to display
  * @param waitForButton If true, wait for button press before continuing
  */
-void showOLEDMessage(const char* message, bool waitForButton = false);
+void showOledMessage(const char* message, bool waitForButton = false);
 
 #endif // ENABLE_OLED_DISPLAY
 

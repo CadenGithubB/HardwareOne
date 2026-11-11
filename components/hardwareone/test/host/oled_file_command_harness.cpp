@@ -54,7 +54,7 @@ static FileManager* gOledFileManager = &fileManager;
 static std::vector<std::string> submitted;
 static bool execOk = true;
 static std::string execOut;
-static bool executeOLEDCommandWithResult(const String& line, char* out, size_t outSize) {
+static bool executeOledCommandWithResult(const String& line, char* out, size_t outSize) {
   submitted.push_back(line.value);
   std::snprintf(out, outSize, "%s", execOut.c_str());
   return execOk;

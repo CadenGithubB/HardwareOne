@@ -42,7 +42,7 @@
 #endif
 
 // Thin wrapper over the shared oledAuthContext() builder — names the file-
-// browser-specific path so the OLEDFileBrowserCtxGuard below reads cleanly
+// browser-specific path so the OledFileBrowserCtxGuard below reads cleanly
 // and audit lines / [PERM] denials show "/oled/files" rather than the
 // generic "/oled". Identity body and AuthBypass behavior are the shared
 // helper's job; see OLED_Utils.h::oledAuthContext for the rationale.
@@ -55,14 +55,14 @@ static AuthContext oledFileBrowserAuthContext() {
 // of G2 paired-user identity. Drop one at the top of the file browser's
 // data-prepare entry point to install identity + NOTIF_SOURCE_OLED in one
 // move.
-class OLEDFileBrowserCtxGuard {
+class OledFileBrowserCtxGuard {
  public:
-  OLEDFileBrowserCtxGuard() : scope_(oledFileBrowserAuthContext()) {}
-  ~OLEDFileBrowserCtxGuard() = default;
-  OLEDFileBrowserCtxGuard(const OLEDFileBrowserCtxGuard&)            = delete;
-  OLEDFileBrowserCtxGuard& operator=(const OLEDFileBrowserCtxGuard&) = delete;
-  OLEDFileBrowserCtxGuard(OLEDFileBrowserCtxGuard&&)                 = delete;
-  OLEDFileBrowserCtxGuard& operator=(OLEDFileBrowserCtxGuard&&)      = delete;
+  OledFileBrowserCtxGuard() : scope_(oledFileBrowserAuthContext()) {}
+  ~OledFileBrowserCtxGuard() = default;
+  OledFileBrowserCtxGuard(const OledFileBrowserCtxGuard&)            = delete;
+  OledFileBrowserCtxGuard& operator=(const OledFileBrowserCtxGuard&) = delete;
+  OledFileBrowserCtxGuard(OledFileBrowserCtxGuard&&)                 = delete;
+  OledFileBrowserCtxGuard& operator=(OledFileBrowserCtxGuard&&)      = delete;
  private:
   CommandIdentityScope scope_;
 };
@@ -76,7 +76,7 @@ class OLEDFileBrowserCtxGuard {
 // ============================================================================
 
 // Pending action enum for deferred filesystem operations. FS I/O and mutations
-// may ONLY run in prepareFileBrowserData() (under OLEDFileBrowserCtxGuard);
+// may ONLY run in prepareFileBrowserData() (under OledFileBrowserCtxGuard);
 // input/confirm callbacks set these flags and prepare executes them next frame.
 enum class FileBrowserPendingAction {
   NONE,
@@ -112,13 +112,13 @@ static bool     sFbRenameActive = false;         // keyboard open for a rename
 static char     sFbDeletePrompt[40] = {0};       // outlives the confirm dialog (raw ptr)
 
 // The per-file action menu (View/Rename/Delete/Back) renders through the shared
-// OLEDScrollState scrolling system — the same primitive Power/Network/LED use —
+// OledScrollState scrolling system — the same primitive Power/Network/LED use —
 // instead of the old fixed 4-row layout, whose last row ("< Back") spilled under
 // the global footer with no way to reach it. The filename occupies one header
 // line above the list, so this is the Power main menu's "status line + scrollable
 // list" shape: the list window is offset one row (OLED_CONTENT_START_Y + 8) and
 // visibleLines is sized to the remaining content height.
-EXT_RAM_BSS_ATTR static OLEDScrollState sFbActionScroll;
+EXT_RAM_BSS_ATTR static OledScrollState sFbActionScroll;
 static bool     sFbActionScrollInited = false;
 
 static void fbInitActionScroll() {
@@ -219,14 +219,14 @@ static int fbBuildActionRows(const char* labels[FB_ACTION_ROWS_MAX]) {
 // handlers apply the per-path policy (System_Filesystem.cpp). The
 // target is the selected entry's full path from FileManager (entry.name is a
 // bounded display copy); resolving it walks the folder through the guarded
-// VFS, so these run in the prepare pass under OLEDFileBrowserCtxGuard.
+// VFS, so these run in the prepare pass under OledFileBrowserCtxGuard.
 enum class FbMutateResult : uint8_t { Done, Unresolved, QuoteInName, AdminOnly, NoAccess, Failed };
 
 static FbMutateResult fbSubmitMutate(const String& line) {
   char out[96] = {};
   // The executor stamps "OK" on a handler success; refusals and handler
   // errors start with "Error".
-  if (executeOLEDCommandWithResult(line, out, sizeof(out)) && strncmp(out, "OK", 2) == 0) {
+  if (executeOledCommandWithResult(line, out, sizeof(out)) && strncmp(out, "OK", 2) == 0) {
     gOledFileManager->forceRescan();   // refresh() is generation-gated
     return FbMutateResult::Done;
   }
@@ -325,7 +325,7 @@ bool oledFilePickerPush(const FilePickerRequest& req) {
 // Resolve the picker — fire callback exactly once, clear state, pop mode.
 // Called from inside prepareFileBrowserData's pending-action processing,
 // which is the safe context (not inside an I2C transaction). After this
-// returns, currentOLEDMode is the requester's mode (assuming oledMenuBack
+// returns, currentOledMode is the requester's mode (assuming oledMenuBack
 // successfully popped) and the FileBrowser will not render again under
 // the consumed picker.
 static void firePickerCallback(const char* fullPath, bool cancelled) {
@@ -333,7 +333,7 @@ static void firePickerCallback(const char* fullPath, bool cancelled) {
   // gOledFileManager's filter is released BEFORE we hand control back to
   // the requester, so the callback can freely re-push another picker.
   void (*onPicked)(const char*, bool) = sPickerReq.onPicked;
-  OLEDMode requester = sPickerReq.requesterMode;
+  OledMode requester = sPickerReq.requesterMode;
 
   sPickerActive = false;
   sPickerReq = FilePickerRequest{};
@@ -341,14 +341,14 @@ static void firePickerCallback(const char* fullPath, bool cancelled) {
   fileBrowserPendingAction = FileBrowserPendingAction::NONE;
   fileBrowserRenderData.valid = false;
 
-  // Pop back to the requester mode. After this currentOLEDMode == requester
+  // Pop back to the requester mode. After this currentOledMode == requester
   // (unless something funky happened to the stack — guarded below).
   oledMenuBack();
 
   // Lifecycle safety: if the user navigated AWAY from the requester mode
   // mid-picker (e.g. Home button took them elsewhere), don't fire — the
   // requester's locals may be invalidated. Drops the callback silently.
-  if (onPicked && currentOLEDMode == requester) {
+  if (onPicked && currentOledMode == requester) {
     onPicked(fullPath, cancelled);
   }
 }
@@ -444,7 +444,7 @@ enum class PeerListStatus : uint8_t {
 // X-cycle in the input handler and oledFileBrowserStartEspNowReceive) before
 // any PEER-gated reader can run; initFileBrowser() re-roots it per entry as
 // before. Do NOT rely on init alone: the input pump runs every
-// updateOLEDDisplay pass while prepare/init sits behind the render throttle.
+// updateOledDisplay pass while prepare/init sits behind the render throttle.
 // If a third `sCurrentSource = FsSource::PEER` site is ever added, it MUST
 // also root this path.
 EXT_RAM_BSS_ATTR static char sPeerPath[FILE_MANAGER_MAX_PATH];
@@ -709,7 +709,7 @@ void oledFileBrowserStartEspNowReceive(const uint8_t mac[6]) {
   sSourceChangePending = true;         // make initFileBrowser issue the root FS_LIST_REQ
   strlcpy(sPeerPath, "/", sizeof(sPeerPath));  // zero-init BSS: root before any PEER-gated read
   oledFileBrowserNeedsInit = true;
-  // Caller transitions: requestOLEDMode(OLED_FILE_BROWSER, "espnow.receive").
+  // Caller transitions: requestOledMode(OLED_FILE_BROWSER, "espnow.receive").
 }
 
 void oledFileBrowserStartEspNowSend(const uint8_t mac[6]) {
@@ -723,7 +723,7 @@ void oledFileBrowserStartEspNowSend(const uint8_t mac[6]) {
   req.onPicked = espnowSendOnPicked;
   req.requesterMode = OLED_ESPNOW;
   oledFilePickerPush(req);
-  // Caller transitions: requestOLEDMode(OLED_FILE_BROWSER, "espnow.send").
+  // Caller transitions: requestOledMode(OLED_FILE_BROWSER, "espnow.send").
 }
 
 #endif // ENABLE_ESPNOW
@@ -835,7 +835,7 @@ void prepareFileBrowserData() {
   // app_main" was stale — that pattern was removed when identity moved to
   // per-task TLS (see commit history on System_AuthIdentity).
   //
-  // OLEDFileBrowserCtxGuard installs:
+  // OledFileBrowserCtxGuard installs:
   //   * Identity = OLED owner's synchronized session mirror (or
   //     "AuthBypass" when displayRequireAuth is off)
   //   * Notification source = NOTIF_SOURCE_OLED with the same user as
@@ -845,7 +845,7 @@ void prepareFileBrowserData() {
   //     with their own identity; see fbSubmitMutate.)
   // Both via the composed CommandIdentityScope primitive — see G2HijackCtx-
   // Guard for the parallel construction on the G2 side.
-  OLEDFileBrowserCtxGuard ctxGuard;
+  OledFileBrowserCtxGuard ctxGuard;
 
   // Initialize or reinitialize if needed
   if (!gOledFileManager || oledFileBrowserNeedsInit) {
@@ -910,7 +910,7 @@ void prepareFileBrowserData() {
             // existed before the picker layer was added.
             if (fullPath.endsWith(".hwmap")) {
               if (MapCore::loadMapFile(fullPath.c_str())) {
-                requestOLEDMode(OLED_GPS_MAP, "filebrowser.loadmap", false);
+                requestOledMode(OLED_GPS_MAP, "filebrowser.loadmap", false);
                 gMapCenterSet = false;
                 gMapManuallyPanned = false;
               }
@@ -1141,7 +1141,7 @@ void displayFileBrowserRendered() {
   if (oledKeyboardDrawIfActive(oledDisplay)) return;
 
   // Per-file action menu (View(s) / Rename / Delete / Back) — shared scrolling list
-  // (OLEDScrollState) with the filename on a one-line header above it, so the
+  // (OledScrollState) with the filename on a one-line header above it, so the
   // options fit the content area and scroll instead of spilling under the footer.
   if (sFbLevel == FbLevel::ACTION_MENU) {
     fbPopulateActionScroll();
@@ -1320,7 +1320,7 @@ void displayFileBrowserRendered() {
   }
   
   // Note: Footer navigation hints now handled by global footer system
-  // Don't call display() here - let updateOLEDDisplay() render footer and display in same frame
+  // Don't call display() here - let updateOledDisplay() render footer and display in same frame
 }
 
 // ============================================================================
@@ -1336,14 +1336,14 @@ void oledFileBrowserUp() {
   if (!gOledFileManager) return;
 
   gOledFileManager->moveUp();
-  // Display will update on next updateOLEDDisplay() call
+  // Display will update on next updateOledDisplay() call
 }
 
 void oledFileBrowserDown() {
   if (!gOledFileManager) return;
 
   gOledFileManager->moveDown();
-  // Display will update on next updateOLEDDisplay() call
+  // Display will update on next updateOledDisplay() call
 }
 
 void oledFileBrowserSelect() {
@@ -1363,7 +1363,7 @@ void oledFileBrowserBack() {
 }
 
 // ============================================================================
-// File Browser Input Handler (registered via OLEDModeEntry)
+// File Browser Input Handler (registered via OledModeEntry)
 // ============================================================================
 
 static bool fileBrowserInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
@@ -1444,7 +1444,7 @@ static bool fileBrowserInputHandler(int deltaX, int deltaY, uint32_t newlyPresse
           sFbRenameActive = true;
           oledKeyboardInit("Rename:", sFbActionName,
                            OLED_KEYBOARD_MAX_LENGTH,
-                           OLEDKeyboardDictationPolicy::ALLOW_PLAINTEXT);
+                           OledKeyboardDictationPolicy::ALLOW_PLAINTEXT);
         }
       } else if (strcmp(pick, "Delete") == 0) {
         if (!oledGuestBlocksMutate()) {
@@ -1531,7 +1531,7 @@ static void fileBrowserOnEnter(bool isForward) {
 }
 
 // Columns: mode, name, iconName, displayFunc, availFunc, inputFunc, showInMenu, menuOrder, hints, onEnter
-static const OLEDModeEntry sFileBrowserModes[] = {
+static const OledModeEntry sFileBrowserModes[] = {
   { OLED_FILE_BROWSER, "Files", "file_text", displayFileBrowserRendered, nullptr, fileBrowserInputHandler, false, -1, nullptr, fileBrowserOnEnter },
 };
 

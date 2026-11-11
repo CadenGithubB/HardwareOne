@@ -31,7 +31,7 @@ static int bondSensorSelection = 0;
 
 // Device picker (shown when not yet bonded)
 static int bondPickerSelection = 0;
-static OLEDScrollState* bondPickerScroll = nullptr;
+static OledScrollState* bondPickerScroll = nullptr;
 static char (*pickerLabels)[24] = nullptr;  // Heap-allocated on first use to avoid DRAM BSS overflow
 static int pickerDeviceIndices[16] = {};    // Maps scroll index -> gEspNow->devices[] index (self filtered out)
 static int pickerFilteredCount = 0;         // Number of devices after filtering self
@@ -276,7 +276,7 @@ void displayRemoteMode() {
 
     // Init scroll state and label buffer on first use (heap to save ~800 bytes DRAM BSS)
     if (!bondPickerScroll) {
-      bondPickerScroll = (OLEDScrollState*)ps_alloc(sizeof(OLEDScrollState), AllocPref::PreferPSRAM, "oled.bondpicker");
+      bondPickerScroll = (OledScrollState*)ps_alloc(sizeof(OledScrollState), AllocPref::PreferPSRAM, "oled.bondpicker");
       if (!bondPickerScroll) return;
       oledScrollInit(bondPickerScroll, nullptr, oledVisibleRows(10, 1, 4));
       oledScrollSetSplitPane(bondPickerScroll, 128, 0, 0);
@@ -391,7 +391,7 @@ static void handlePickerInput(uint32_t newlyPressed) {
         snprintf(cmd, sizeof(cmd), "bondconnect " MAC_FMT,
                  MAC_ARGS(dev.mac));
       }
-      executeOLEDCommand(cmd);
+      executeOledCommand(cmd);
     }
   }
 }
@@ -444,10 +444,10 @@ static void swapRolesConfirmed(void* userData) {
   char cmd[48];
   // Remote first (so peer is ready before local handshake restarts)
   snprintf(cmd, sizeof(cmd), "remote:bondrole %s", wasMaster ? "master" : "worker");
-  executeOLEDCommand(cmd);
+  executeOledCommand(cmd);
   // Then local
   snprintf(cmd, sizeof(cmd), "bondrole %s", wasMaster ? "worker" : "master");
-  executeOLEDCommand(cmd);
+  executeOledCommand(cmd);
 }
 
 static void executeBondAction() {
@@ -474,13 +474,13 @@ static void executeBondAction() {
       bool currentlyOn = isRemoteSensorEnabled(sd.mask);
       char cmd[32];
       snprintf(cmd, sizeof(cmd), "remote:%s%s", currentlyOn ? "close" : "open", sd.id);
-      executeOLEDCommand(cmd);
+      executeOledCommand(cmd);
     } else {
       // Toggle stream: flip the local bondStream* setting
       bool currentlyStreaming = *(sd.streamSetting);
       char cmd[40];
       snprintf(cmd, sizeof(cmd), "bondstream%s %d", sd.id, currentlyStreaming ? 0 : 1);
-      executeOLEDCommand(cmd);
+      executeOledCommand(cmd);
     }
     return;
   }
@@ -509,7 +509,7 @@ static void bondMenuBack() {
 }
 
 // =============================================================================
-// Input Handler (registered via OLEDModeEntry or called from switch-case)
+// Input Handler (registered via OledModeEntry or called from switch-case)
 // =============================================================================
 
 bool bondModeInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
@@ -558,7 +558,7 @@ bool bondModeInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
 // Remote Mode Registration
 // ============================================================================
 
-static const OLEDModeEntry sRemoteModes[] = {
+static const OledModeEntry sRemoteModes[] = {
   { OLED_REMOTE, "Bond", "notify_espnow", displayRemoteMode, nullptr, bondModeInputHandler, false, -1, "A:Select  B:Back" },
 };
 

@@ -148,9 +148,9 @@ const SettingsModule** getSettingsModules(size_t& count) { count = gModuleCount;
 
 // Keyboard, value read/commit and slider doubles (not under test).
 #define OLED_KEYBOARD_MAX_LENGTH 128
-enum class OLEDKeyboardDictationPolicy : uint8_t { DENY = 0, ALLOW_PLAINTEXT = 1 };
+enum class OledKeyboardDictationPolicy : uint8_t { DENY = 0, ALLOW_PLAINTEXT = 1 };
 static bool oledKeyboardDrawIfActive(Adafruit_SSD1306*) { return false; }
-static void oledKeyboardInit(const char*, const char*, int, OLEDKeyboardDictationPolicy) {}
+static void oledKeyboardInit(const char*, const char*, int, OledKeyboardDictationPolicy) {}
 int getSettingCurrentValue(const SettingEntry* entry) { return entry ? entry->intDefault : 0; }
 static bool setSettingValueStr(const SettingEntry*, const String&) { return true; }
 bool setSettingValue(const SettingEntry*, int) { return true; }

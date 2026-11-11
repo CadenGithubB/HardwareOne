@@ -201,9 +201,9 @@ bool renderWifiPage(SetupWizardResult& result) {
     // returns to Configure/Skip; only the intro's Back leaves this page.
     while (true) {
       String selectedSSID;
-      if (!getOLEDWifiSelection(selectedSSID)) break;
+      if (!getOledWifiSelection(selectedSSID)) break;
       bool passwordCancelled = false;
-      String password = getOLEDTextInput("WiFi Password:", true, "", 64, &passwordCancelled);
+      String password = getOledTextInput("WiFi Password:", true, "", 64, &passwordCancelled);
       if (isWizardCancelRequested()) { result.completed = false; return false; }
       if (passwordCancelled) continue;
       result.wifiSSID = selectedSSID;
@@ -286,7 +286,7 @@ bool handleWizardPageInput(uint32_t buttons, JoystickNav& nav, SetupWizardResult
     const WizardMenuItem* item = getWizardMenuItem(getWizardCurrentPage(), getWizardCurrentSelection());
     if (item && item->type == WIZARD_ITEM_DEVICE_NAME) {
       bool cancelled = false;
-      String newName = getOLEDTextInput("Device Name:", false, getWizardDeviceName(), 19, &cancelled);
+      String newName = getOledTextInput("Device Name:", false, getWizardDeviceName(), 19, &cancelled);
       if (!cancelled && !isWizardCancelRequested() && newName.length() > 0) {
         char* buf = getWizardDeviceNameBuf();
         strncpy(buf, newName.c_str(), 19);
@@ -397,7 +397,7 @@ static int showWizardOptionalPageIntro(SetupWizardPage page, const char* title,
 // OLED ESP-NOW Identity Page (text input for each field)
 // ============================================================================
 
-void handleOLEDEspNowPage(SetupWizardResult& result, bool& running) {
+void handleOledEspNowPage(SetupWizardResult& result, bool& running) {
   // Show intro screen: Configure or Skip?
   int choice = showWizardOptionalPageIntro(WIZARD_PAGE_ESPNOW, "ESP-NOW",
       "Optional: ESP-NOW ID");
@@ -418,20 +418,20 @@ void handleOLEDEspNowPage(SetupWizardResult& result, bool& running) {
   // Device Name (used for Bluetooth + ESP-NOW identity)
   const String& draftName = getWizardDraftValues().deviceName;
   String currentName = draftName.length() > 0 ? draftName : "HardwareOne";
-  String deviceName = getOLEDTextInput("Device Name:", false, currentName.c_str(), 19, &cancelled);
+  String deviceName = getOledTextInput("Device Name:", false, currentName.c_str(), 19, &cancelled);
   if (isWizardCancelRequested()) { result.completed = false; running = false; return; }
   if (cancelled) { wizardPrevPage(); return; }
   if (deviceName.length() == 0) deviceName = currentName;
   result.espnowFriendlyName = deviceName;
 
   // Room
-  String room = getOLEDTextInput("Room:", false, getWizardDraftValues().espnowRoom.c_str(), 20, &cancelled);
+  String room = getOledTextInput("Room:", false, getWizardDraftValues().espnowRoom.c_str(), 20, &cancelled);
   if (isWizardCancelRequested()) { result.completed = false; running = false; return; }
   if (cancelled) { wizardPrevPage(); return; }
   result.espnowRoom = room;
 
   // Zone
-  String zone = getOLEDTextInput("Zone:", false, getWizardDraftValues().espnowZone.c_str(), 20, &cancelled);
+  String zone = getOledTextInput("Zone:", false, getWizardDraftValues().espnowZone.c_str(), 20, &cancelled);
   if (isWizardCancelRequested()) { result.completed = false; running = false; return; }
   if (cancelled) { wizardPrevPage(); return; }
   result.espnowZone = zone;
@@ -511,7 +511,7 @@ void handleOLEDEspNowPage(SetupWizardResult& result, bool& running) {
 // OLED MQTT Broker Page (text input for each field)
 // ============================================================================
 
-void handleOLEDMQTTPage(SetupWizardResult& result, bool& running) {
+void handleOledMQTTPage(SetupWizardResult& result, bool& running) {
   // Show intro screen: Configure or Skip?
   int choice = showWizardOptionalPageIntro(WIZARD_PAGE_MQTT, "MQTT",
       "Optional: MQTT broker");
@@ -530,7 +530,7 @@ void handleOLEDMQTTPage(SetupWizardResult& result, bool& running) {
   result.mqttPassword = "";
 
   // Host
-  String host = getOLEDTextInput("MQTT Host:", false,
+  String host = getOledTextInput("MQTT Host:", false,
     getWizardDraftValues().mqttHost.c_str(), 40, &cancelled);
   if (isWizardCancelRequested()) { result.completed = false; running = false; return; }
   if (cancelled) { wizardPrevPage(); return; }
@@ -539,7 +539,7 @@ void handleOLEDMQTTPage(SetupWizardResult& result, bool& running) {
   // Port
   const String currentPort(getWizardDraftValues().mqttPort);
   while (true) {
-    String portStr = getOLEDTextInput("MQTT Port:", false, currentPort.c_str(), 5, &cancelled);
+    String portStr = getOledTextInput("MQTT Port:", false, currentPort.c_str(), 5, &cancelled);
     if (isWizardCancelRequested()) { result.completed = false; running = false; return; }
     if (cancelled) { wizardPrevPage(); return; }
     if (wizardParseMQTTPort(portStr, result.mqttPort)) break;
@@ -547,14 +547,14 @@ void handleOLEDMQTTPage(SetupWizardResult& result, bool& running) {
   }
 
   // Username
-  String user = getOLEDTextInput("MQTT User:", false, getWizardDraftValues().mqttUser.c_str(), 32, &cancelled);
+  String user = getOledTextInput("MQTT User:", false, getWizardDraftValues().mqttUser.c_str(), 32, &cancelled);
   if (isWizardCancelRequested()) { result.completed = false; running = false; return; }
   if (cancelled) { wizardPrevPage(); return; }
   result.mqttUser = user;
 
   // Password (only if username was entered)
   if (user.length() > 0) {
-    String pass = getOLEDTextInput("MQTT Password:", true, "", 32, &cancelled);
+    String pass = getOledTextInput("MQTT Password:", true, "", 32, &cancelled);
     if (isWizardCancelRequested()) { result.completed = false; running = false; return; }
     if (cancelled) { wizardPrevPage(); return; }
     result.mqttPassword = pass;
@@ -678,7 +678,7 @@ void handleModePage(SetupWizardPage page, SetupWizardResult& result, bool& runni
 // Setup Mode Selection (Basic vs Advanced vs Import from Backup)
 // ============================================================================
 
-bool getOLEDSetupModeSelection(int& setupMode) {
+bool getOledSetupModeSelection(int& setupMode) {
   const int optionCount = (int)getSetupModeCount();
   if (optionCount == 0) return false;
   int selection = 0;
@@ -766,7 +766,7 @@ bool getOLEDSetupModeSelection(int& setupMode) {
 // Card-per-item on OLED (name + wrapped blurb + nav), full list + blurbs on
 // serial. Returns the chosen archetype index, or -1 if the user backed out
 // (B button / 'b') to return to the Basic/Advanced/Import menu.
-int getOLEDArchetypeSelection() {
+int getOledArchetypeSelection() {
   // Only offer archetypes whose defining feature is compiled (hides e.g.
   // "G2 Glasses Companion" without Bluetooth, "Meshed Node" without ESP-NOW).
   int avail[16];
@@ -836,7 +836,7 @@ int getOLEDArchetypeSelection() {
 // Theme Selection (Light vs Dark)
 // ============================================================================
 
-bool getOLEDThemeSelection(bool& darkMode) {
+bool getOledThemeSelection(bool& darkMode) {
   int selection = 0;  // 0 = Light, 1 = Dark
   uint32_t lastButtons = 0;
   bool lastButtonsInitialized = false;

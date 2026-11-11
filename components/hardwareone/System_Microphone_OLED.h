@@ -68,7 +68,7 @@ static void displayMicrophone() {
 }
 
 // Availability check for Microphone OLED mode
-static bool microphoneOLEDModeAvailable(String* outReason) {
+static bool microphoneOledModeAvailable(String* outReason) {
   return true;  // Always allow navigation, display function handles "not active" state
 }
 
@@ -114,14 +114,14 @@ static bool microphoneInputHandler(int deltaX, int deltaY, uint32_t newlyPressed
 }
 
 // Microphone OLED mode entry - use a new enum value
-// Note: OLED_MICROPHONE needs to be added to OLEDMode enum in OLED_Display.h
-static const OLEDModeEntry microphoneOLEDModes[] = {
+// Note: OLED_MICROPHONE needs to be added to OledMode enum in OLED_Display.h
+static const OledModeEntry microphoneOledModes[] = {
   {
     OLED_MICROPHONE,             // mode enum
     "Microphone",                // menu name
     "mic",                      // icon name (closest available)
     displayMicrophone,           // displayFunc
-    microphoneOLEDModeAvailable, // availFunc
+    microphoneOledModeAvailable, // availFunc
     microphoneInputHandler,      // inputFunc
     true,                        // showInMenu
     65,                          // menuOrder (after FM Radio at 60)
@@ -130,7 +130,7 @@ static const OLEDModeEntry microphoneOLEDModes[] = {
 };
 
 // Auto-register Microphone OLED mode
-REGISTER_OLED_MODE_MODULE(microphoneOLEDModes, sizeof(microphoneOLEDModes) / sizeof(microphoneOLEDModes[0]), "Microphone");
+REGISTER_OLED_MODE_MODULE(microphoneOledModes, sizeof(microphoneOledModes) / sizeof(microphoneOledModes[0]), "Microphone");
 
 #endif // ENABLE_MICROPHONE && ENABLE_OLED_DISPLAY
 

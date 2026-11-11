@@ -25,10 +25,10 @@ COMPONENT = HERE.parents[1]
 def check_ui_boundary() -> None:
     source = (COMPONENT / "OLED_Utils.cpp").read_text()
     for marker, operation in (
-        ("bool initOLEDDisplay()", "displayInit"),
-        ("bool earlyOLEDInit()", "displayInit"),
-        ("void stopOLEDDisplay()", "displayStop"),
-        ("void applyOLEDBrightness()", "displaySetBrightness"),
+        ("bool initOledDisplay()", "displayInit"),
+        ("bool earlyOledInit()", "displayInit"),
+        ("void stopOledDisplay()", "displayStop"),
+        ("void applyOledBrightness()", "displaySetBrightness"),
         ("void oledDisplayOff()", "displaySetPower"),
         ("void oledDisplayOn()", "displaySetPower"),
         ("void oledPrepareForSleep()", "displayPrepareForSleep"),

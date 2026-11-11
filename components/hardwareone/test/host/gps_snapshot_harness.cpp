@@ -71,7 +71,7 @@ static int trackedSnprintf(char* dst, size_t cap, const char* format, ...) {
 static int destroyed = 0, exited = 0, delays = 0;
 static int trackPoints = 0, events = 0, redraws = 0;
 [[maybe_unused]] static constexpr int SYSEVT_GPS_FIX = 1, SYSEVT_GPS_LOST = 2, OLED_GPS_DATA = 3;
-[[maybe_unused]] static int currentOLEDMode = OLED_GPS_DATA;
+[[maybe_unused]] static int currentOledMode = OLED_GPS_DATA;
 struct GPSTrackManager {
   static bool isLiveTracking() { assert(!semaphore.held); return true; }
   static void appendPoint(float lat, float lon) {

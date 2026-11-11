@@ -41,8 +41,8 @@ void renderWizardPage();
 bool renderWifiPage(SetupWizardResult& result);
 
 // OLED handlers for text-input pages (own event loops)
-void handleOLEDEspNowPage(SetupWizardResult& result, bool& running);
-void handleOLEDMQTTPage(SetupWizardResult& result, bool& running);
+void handleOledEspNowPage(SetupWizardResult& result, bool& running);
+void handleOledMQTTPage(SetupWizardResult& result, bool& running);
 
 // Input handlers (joystick/button - called from unified loop when OLED connected)
 // Returns whether input was handled; result.completed is the Finish signal.
@@ -53,9 +53,9 @@ bool handleWizardPageInput(uint32_t buttons, JoystickNav& nav, SetupWizardResult
 // page model. Called from runSetupWizard() when currentPage is one of those.
 void handleModePage(SetupWizardPage page, SetupWizardResult& result, bool& running);
 
-int getOLEDArchetypeSelection();
-bool getOLEDSetupModeSelection(int& setupMode);
-bool getOLEDThemeSelection(bool& darkMode);
+int getOledArchetypeSelection();
+bool getOledSetupModeSelection(int& setupMode);
+bool getOledThemeSelection(bool& darkMode);
 
 #endif // ENABLE_OLED_DISPLAY
 

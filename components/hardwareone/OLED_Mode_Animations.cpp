@@ -438,7 +438,7 @@ static void renderBootProgressAnimation() {
 // Animation Registry
 // ============================================================================
 
-const OLEDAnimation gAnimationRegistry[] = {
+const OledAnimation gAnimationRegistry[] = {
   { "bounce", ANIM_BOUNCE, renderBounceAnimation, "Bouncing ball" },
   { "wave", ANIM_WAVE, renderWaveAnimation, "Sine wave" },
   { "spinner", ANIM_SPINNER, renderSpinnerAnimation, "Rotating spinner" },
@@ -452,7 +452,7 @@ const OLEDAnimation gAnimationRegistry[] = {
   { "scrolltest", ANIM_SCROLLTEST, renderScrollTestAnimation, "Smooth scroll test" },
   { "bootprogress", ANIM_BOOT_PROGRESS, renderBootProgressAnimation, "Boot progress bar" }
 };
-const int gAnimationCount = sizeof(gAnimationRegistry) / sizeof(OLEDAnimation);
+const int gAnimationCount = sizeof(gAnimationRegistry) / sizeof(OledAnimation);
 
 // ============================================================================
 // Display Animation Function
@@ -494,7 +494,7 @@ static void animationOnEnter(bool isForward) {
   if (isForward) animationFrame = 0;
 }
 
-static const OLEDModeEntry sAnimationModes[] = {
+static const OledModeEntry sAnimationModes[] = {
   { OLED_ANIMATION, "Animation", "animation", displayAnimation, nullptr, nullptr, false, -1, "B:Back", animationOnEnter },
 };
 

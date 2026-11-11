@@ -97,7 +97,7 @@ class ExecIdentityGuard {
 //   CommandIdentityScope     (the unified per-command scope primitive)
 //        ↓ named by ↓
 //   G2HijackCtxGuard         (sugar for G2 direct-FS scopes)
-//   OLEDFileBrowserCtxGuard  (sugar for OLED file browser scope)
+//   OledFileBrowserCtxGuard  (sugar for OLED file browser scope)
 //   executeCommand           (uses CommandIdentityScope directly)
 //
 // USAGE

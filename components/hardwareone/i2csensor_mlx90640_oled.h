@@ -99,16 +99,16 @@ static void displayThermalVisual() {
 }
 
 // Availability check for Thermal OLED mode
-static bool thermalOLEDModeAvailable(String* outReason) {
+static bool thermalOledModeAvailable(String* outReason) {
   return true;  // Always allow navigation, display function handles "not active" state
 }
 
 static void thermalToggleConfirmed(void* userData) {
   (void)userData;
   if (gThermalRunning && gThermalConnected) {
-    executeOLEDCommand("closethermal");
+    executeOledCommand("closethermal");
   } else {
-    executeOLEDCommand("openthermal");
+    executeOledCommand("openthermal");
   }
 }
 
@@ -126,13 +126,13 @@ static bool thermalInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
 }
 
 // Thermal OLED mode entry
-static const OLEDModeEntry thermalOLEDModes[] = {
+static const OledModeEntry thermalOledModes[] = {
   {
     OLED_THERMAL_VISUAL,     // mode enum
     "Thermal",               // menu name
     "thermal",               // icon name
     displayThermalVisual,    // displayFunc
-    thermalOLEDModeAvailable,// availFunc
+    thermalOledModeAvailable,// availFunc
     thermalInputHandler,     // inputFunc - X toggles sensor
     true,                    // showInMenu
     20,                      // menuOrder
@@ -141,6 +141,6 @@ static const OLEDModeEntry thermalOLEDModes[] = {
 };
 
 // Auto-register Thermal OLED mode
-REGISTER_OLED_MODE_MODULE(thermalOLEDModes, sizeof(thermalOLEDModes) / sizeof(thermalOLEDModes[0]), "Thermal");
+REGISTER_OLED_MODE_MODULE(thermalOledModes, sizeof(thermalOledModes) / sizeof(thermalOledModes[0]), "Thermal");
 
 #endif // I2CSENSOR_MLX90640_OLED_H

@@ -30,12 +30,12 @@ class String : public std::string {
 // INSERT_TYPES
 
 static NavEvents gNavEvents{};
-static OLEDMode currentOLEDMode = OLED_MENU;
+static OledMode currentOledMode = OLED_MENU;
 static int dirtyMarks = 0;
 static void oledMarkDirty() { ++dirtyMarks; }
-typedef void (*OLEDConfirmCallback)(void* userData);
-bool oledConfirmRequest(const char* line1, const char* line2, OLEDConfirmCallback onYes, void* userData,
-                        bool defaultYes = true, OLEDConfirmCallback onNo = nullptr);
+typedef void (*OledConfirmCallback)(void* userData);
+bool oledConfirmRequest(const char* line1, const char* line2, OledConfirmCallback onYes, void* userData,
+                        bool defaultYes = true, OledConfirmCallback onNo = nullptr);
 bool oledConfirmIsActive();
 
 // INSERT_CONFIRM
@@ -103,11 +103,11 @@ static bool ownerRun(const std::string& line, std::string& reply) {
   return true;
 }
 
-[[maybe_unused]] static void executeOLEDCommand(const String& line) {
+[[maybe_unused]] static void executeOledCommand(const String& line) {
   std::string reply;
   ownerRun(line, reply);
 }
-[[maybe_unused]] static bool executeOLEDCommandWithResult(const String& line, char* out, size_t outSize) {
+[[maybe_unused]] static bool executeOledCommandWithResult(const String& line, char* out, size_t outSize) {
   std::string reply;
   const bool ok = ownerRun(line, reply);
   std::snprintf(out, outSize, "%s", reply.c_str());
@@ -185,7 +185,7 @@ static void framesAnswering(int n, void (*press)()) {
   }
 }
 
-static void beginCase(const char* name, bool authed, bool admin, OLEDMode mode) {
+static void beginCase(const char* name, bool authed, bool admin, OledMode mode) {
   currentCase = name;
   oledConfirmResetForSessionBoundary();
   commands.clear();
@@ -196,7 +196,7 @@ static void beginCase(const char* name, bool authed, bool admin, OLEDMode mode) 
   pending = PendingRequest{};
   gLocalDisplayAuthed = authed;
   sessionAdmin = admin;
-  currentOLEDMode = mode;
+  currentOledMode = mode;
   opens = 0;
   roleQueries = 0;
   lastPrompt.clear();
@@ -264,7 +264,7 @@ int main() {
   gLocalDisplayAuthed = true;
   sessionAdmin = true;
   ownerRefuses = false;
-  currentOLEDMode = OLED_MENU;
+  currentOledMode = OLED_MENU;
   for (int i = 0; i < 10; ++i) frame();
   CHECK(opens == 1 && oledConfirmIsActive(), "after an admin login the pending request opens once (%d)", opens);
   CHECK(lastPrompt == "'peerX'", "the dialog names the sender ('%s')", lastPrompt.c_str());

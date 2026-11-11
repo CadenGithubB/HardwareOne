@@ -74,9 +74,9 @@
   extern bool oledConnected;
   extern class Adafruit_SSD1306* oledDisplay;
   // Minimal stub functions for initialization calls
-  inline bool earlyOLEDInit() { return false; }
-  inline void processOLEDBootSequence() { }
-  inline void updateOLEDDisplay() { }
+  inline bool earlyOledInit() { return false; }
+  inline void processOledBootSequence() { }
+  inline void updateOledDisplay() { }
 #endif
 
 #if !ENABLE_APDS_SENSOR

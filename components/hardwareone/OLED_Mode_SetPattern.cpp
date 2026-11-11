@@ -57,7 +57,7 @@ void oledSetPatternModeResetSessionState() {
 
 static void startPatternKeyboard(const char* title) {
   oledKeyboardInit(title, nullptr, OLED_KEYBOARD_MAX_LENGTH,
-                   OLEDKeyboardDictationPolicy::DENY, /*masked=*/true);
+                   OledKeyboardDictationPolicy::DENY, /*masked=*/true);
   // Force pattern mode as default for this flow
   gOledKeyboardState.mode = KEYBOARD_MODE_PATTERN;
   sKeyboardActive = true;
@@ -65,7 +65,7 @@ static void startPatternKeyboard(const char* title) {
 
 static void startTextKeyboard(const char* title) {
   oledKeyboardInit(title, nullptr, OLED_KEYBOARD_MAX_LENGTH,
-                   OLEDKeyboardDictationPolicy::DENY, /*masked=*/true);
+                   OledKeyboardDictationPolicy::DENY, /*masked=*/true);
   // Use lowercase mode for text password entry
   gOledKeyboardState.mode = KEYBOARD_MODE_LOWERCASE;
   sKeyboardActive = true;
@@ -193,7 +193,7 @@ static void displaySetPatternMode() {
 // ============================================================================
 
 static bool handleSetPatternInput(int deltaX, int deltaY, uint32_t newlyPressed) {
-  // Keyboard input is now handled centrally in processOLEDInput() before this is called.
+  // Keyboard input is now handled centrally in processOledInput() before this is called.
   // We only need to check for keyboard completion/cancellation to update our state.
   if (sKeyboardActive) {
     if (oledKeyboardIsCompleted()) {
@@ -381,7 +381,7 @@ static const char* cmd_setpattern(const String& argsInput) {
   }
 
   // The owner restarts the flow and opens the page at its next frame.
-  requestOLEDModePrepared(OLED_SET_PATTERN, "cmd.setpattern", true,
+  requestOledModePrepared(OLED_SET_PATTERN, "cmd.setpattern", true,
                           setPatternRestartFromCommand);
   return "Opening gamepad password setup on OLED...";
 }
@@ -390,7 +390,7 @@ static const char* cmd_setpattern(const String& argsInput) {
 // Mode and Command Registration
 // ============================================================================
 
-static const OLEDModeEntry setPatternModeEntry = {
+static const OledModeEntry setPatternModeEntry = {
   OLED_SET_PATTERN,
   "Gamepad Password",
   "notify_system",

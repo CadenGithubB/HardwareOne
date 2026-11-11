@@ -126,11 +126,11 @@ def source_contracts(page: str, oled: str) -> list[str]:
     if missing:
         failures.append("OLED_Mode_FileBrowser.cpp: no command helpers " + ", ".join(missing))
     prepare = extract_block(oled, "void prepareFileBrowserData(")
-    guard = prepare.find("OLEDFileBrowserCtxGuard ctxGuard;")
+    guard = prepare.find("OledFileBrowserCtxGuard ctxGuard;")
     for call in ("fbRenameSelected(newName)", "fbDeleteSelected()"):
         at = prepare.find(call)
         if not 0 <= guard < at:
-            failures.append(f"prepareFileBrowserData: no {call} under OLEDFileBrowserCtxGuard")
+            failures.append(f"prepareFileBrowserData: no {call} under OledFileBrowserCtxGuard")
     if 'strcmp(pick, "Rename")' in oled:
         start = oled.index('strcmp(pick, "Rename")')
         menu = oled[start:oled.index('"< Back"', start)]

@@ -49,18 +49,18 @@ static uint32_t millis() { return gNowMs; }
 // ---- OLED command executor doubles ------------------------------------------------
 // Every submitted line is recorded; gExecOk/gExecText script the executor's
 // verdict and reply (the reply is truncated to the caller's buffer like the real
-// executeOLEDCommandWithResult).
-static std::vector<std::string> gChecked;       // executeOLEDCommandWithResult lines
-static std::vector<std::string> gFireAndForget; // executeOLEDCommand lines (reply dropped)
+// executeOledCommandWithResult).
+static std::vector<std::string> gChecked;       // executeOledCommandWithResult lines
+static std::vector<std::string> gFireAndForget; // executeOledCommand lines (reply dropped)
 static void recordChecked(const char* line) { gChecked.emplace_back(line); }
 static bool gExecOk = true;
 static std::string gExecText = "OK";
-bool executeOLEDCommandWithResult(const String& cmd, char* out, size_t outSize) {
+bool executeOledCommandWithResult(const String& cmd, char* out, size_t outSize) {
   recordChecked(cmd.c_str());
   if (out && outSize) std::snprintf(out, outSize, "%s", gExecText.c_str());
   return gExecOk;
 }
-void executeOLEDCommand(const String& cmd) { gFireAndForget.emplace_back(cmd.c_str()); }
+void executeOledCommand(const String& cmd) { gFireAndForget.emplace_back(cmd.c_str()); }
 
 // ---- global toast (OLED_UI.h) -------------------------------------------------------
 enum class OledUIIcon : uint8_t { NONE, INFO, SUCCESS, WARNING, ERROR, QUESTION };
@@ -92,7 +92,7 @@ typedef int portMUX_TYPE;
 #define portEXIT_CRITICAL(mux) ((void)(mux))
 static TransportSessionEpoch gUiEpoch = 7;    // the display session a command is built for
 static TransportSessionEpoch gLiveEpoch = 7;  // the display session live now
-static Command buildOLEDCommand(const String& line) {
+static Command buildOledCommand(const String& line) {
   Command command;
   command.line = line;
   command.ctx.transportSessionEpoch = gUiEpoch;

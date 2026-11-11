@@ -1,7 +1,7 @@
 // Host harness for test_oled_dead_paths.py: the OLED mode slugs after the dead
 // unified actions mode is gone.
 //
-// The suite pastes the production `enum OLEDMode` (OLED_Display.h, with a
+// The suite pastes the production `enum OledMode` (OLED_Display.h, with a
 // harness sentinel appended) and modeFromSlug / slugFromMode (OLED_Utils.cpp)
 // into the markers below. Checks: `oledmode unified` names no mode, no mode's
 // slug resolves to a different mode, and the IMU actions aliases still work.
@@ -41,7 +41,7 @@ int main() {
         "`oledmode unified` must not open a mode (the unified actions mode is gone)");
 
   for (int value = 0; value < (int)OLED_HARNESS_MODE_END; ++value) {
-    const OLEDMode mode = (OLEDMode)value;
+    const OledMode mode = (OledMode)value;
     const char* slug = slugFromMode(mode);
     if (!slug) continue;
     const int back = (int)modeFromSlug(String(slug));

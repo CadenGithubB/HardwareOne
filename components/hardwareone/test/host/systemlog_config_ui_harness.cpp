@@ -67,15 +67,15 @@ NavEvents gNavEvents = {};
 // INSERT_TYPES
 
 // Declarations with the header defaults (OLED_Utils.h, System_Debug.h).
-void oledScrollInit(OLEDScrollState* state, const char* title = nullptr, int visibleLines = 4);
-bool oledScrollAddItem(OLEDScrollState* state, const char* line1, const char* line2 = nullptr,
+void oledScrollInit(OledScrollState* state, const char* title = nullptr, int visibleLines = 4);
+bool oledScrollAddItem(OledScrollState* state, const char* line1, const char* line2 = nullptr,
                        bool selectable = true, void* userData = nullptr);
-void oledScrollClearKeepSelection(OLEDScrollState* state);
-void oledScrollClampSelection(OLEDScrollState* state);
-void oledScrollUp(OLEDScrollState* state);
-void oledScrollDown(OLEDScrollState* state);
-bool oledScrollHandleNav(OLEDScrollState* state, bool leftRightNav = false);
-void oledScrollRenderSimple(Adafruit_SSD1306* display, OLEDScrollState* state,
+void oledScrollClearKeepSelection(OledScrollState* state);
+void oledScrollClampSelection(OledScrollState* state);
+void oledScrollUp(OledScrollState* state);
+void oledScrollDown(OledScrollState* state);
+bool oledScrollHandleNav(OledScrollState* state, bool leftRightNav = false);
+void oledScrollRenderSimple(Adafruit_SSD1306* display, OledScrollState* state,
                             bool showSelection = true, int startY = OLED_CONTENT_START_Y);
 bool parseSystemLogFlags(const String& flagsStr, DebugFlagMask& out);
 void formatSystemLogFlags(DebugFlagMask mask, char* out, size_t outSize);
@@ -91,7 +91,7 @@ struct HostSettings {
 
 static LoggingMenuState loggingCurrentState = LOG_MENU_SYSTEM;
 static int loggingMenuSelection = 0;
-static OLEDScrollState loggingConfigScroll;
+static OledScrollState loggingConfigScroll;
 static Adafruit_SSD1306 display;
 static Adafruit_SSD1306* oledDisplay = &display;
 enum { INPUT_BUTTON_A = 1, INPUT_BUTTON_B = 2 };

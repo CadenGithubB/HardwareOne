@@ -54,16 +54,16 @@ static void displayToFData() {
 }
 
 // Availability check for ToF OLED mode
-static bool tofOLEDModeAvailable(String* outReason) {
+static bool tofOledModeAvailable(String* outReason) {
   return true;  // Always allow navigation, display function handles "not active" state
 }
 
 static void tofToggleConfirmed(void* userData) {
   (void)userData;
   if (gTofRunning && gTofConnected) {
-    executeOLEDCommand("closetof");
+    executeOledCommand("closetof");
   } else {
-    executeOLEDCommand("opentof");
+    executeOledCommand("opentof");
   }
 }
 
@@ -81,13 +81,13 @@ static bool tofInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
 }
 
 // ToF OLED mode entry
-static const OLEDModeEntry tofOLEDModes[] = {
+static const OledModeEntry tofOledModes[] = {
   {
     OLED_TOF_DATA,           // mode enum
     "ToF",                   // menu name
     "tof_radar",             // icon name
     displayToFData,          // displayFunc
-    tofOLEDModeAvailable,    // availFunc
+    tofOledModeAvailable,    // availFunc
     tofInputHandler,         // inputFunc - X toggles sensor
     true,                    // showInMenu
     30,                      // menuOrder
@@ -96,6 +96,6 @@ static const OLEDModeEntry tofOLEDModes[] = {
 };
 
 // Auto-register ToF OLED mode
-REGISTER_OLED_MODE_MODULE(tofOLEDModes, sizeof(tofOLEDModes) / sizeof(tofOLEDModes[0]), "ToF");
+REGISTER_OLED_MODE_MODULE(tofOledModes, sizeof(tofOledModes) / sizeof(tofOledModes[0]), "ToF");
 
 #endif // I2CSENSOR_VL53L4CX_OLED_H

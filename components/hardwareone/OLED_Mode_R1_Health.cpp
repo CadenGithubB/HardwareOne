@@ -52,7 +52,7 @@ static const char* healthNextDesiredToken(G2RingDesiredState current) {
 // ready) flashes [DENIED] in the header.
 static void healthRunCommand(const char* line) {
   char out[96];
-  if (executeOLEDCommandWithResult(line, out, sizeof(out))) return;
+  if (executeOledCommandWithResult(line, out, sizeof(out))) return;
   sHealthDeniedUntilMs = millis() + 1500;
   oledMarkDirty();
 }
@@ -232,7 +232,7 @@ static bool healthInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPre
         healthKickPollBurst();
         break;
       case HEALTH_ACTION_LOGGING:
-        executeOLEDCommand("healthlogging toggle");
+        executeOledCommand("healthlogging toggle");
         break;
       case HEALTH_ACTION_COLLECTION: {
         G2RingControlStatus status = {};
@@ -266,12 +266,12 @@ static bool healthInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPre
   return false;  // B: global pop
 }
 
-static const OLEDModeEntry r1HealthOLEDModes[] = {
+static const OledModeEntry r1HealthOledModes[] = {
   { OLED_R1_HEALTH, "R1 Health", "bt_idle", displayR1Health,
     nullptr, healthInputHandler, true, 46, "A:Select B:Back", healthOnEnter },
 };
 
-REGISTER_OLED_MODE_MODULE(r1HealthOLEDModes, sizeof(r1HealthOLEDModes) / sizeof(r1HealthOLEDModes[0]), "R1 Health");
+REGISTER_OLED_MODE_MODULE(r1HealthOledModes, sizeof(r1HealthOledModes) / sizeof(r1HealthOledModes[0]), "R1 Health");
 
 void oledR1HealthModeInit() {}
 

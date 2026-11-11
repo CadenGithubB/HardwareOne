@@ -21,7 +21,7 @@
 #include "System_WiFi.h"  // wifiRadioDisplayOn() — RADIO power axis
 #endif
 
-// popOLEDMode is declared in OLED_Display.h
+// popOledMode is declared in OLED_Display.h
 
 // ============================================================================
 // Custom Text Display
@@ -30,7 +30,7 @@
 void displayCustomText() {
   if (!oledDisplay || !oledConnected) return;
   
-  if (customOLEDText.length() == 0) {
+  if (customOledText.length() == 0) {
     oledDisplay->println("No custom text set");
     oledDisplay->println();
     oledDisplay->println("Use:");
@@ -38,7 +38,7 @@ void displayCustomText() {
     return;
   }
 
-  oledDisplay->println(customOLEDText);
+  oledDisplay->println(customOledText);
 }
 
 // ============================================================================
@@ -54,36 +54,36 @@ void displayUnavailable() {
   
   // Show the feature name as a label
   oledDisplay->setCursor(0, y);
-  oledDisplay->println(unavailableOLEDTitle);
+  oledDisplay->println(unavailableOledTitle);
   y += 10;
 
-  if (unavailableOLEDReason.length() == 0) {
+  if (unavailableOledReason.length() == 0) {
     oledDisplay->setCursor(0, y);
     oledDisplay->println("Not available");
   } else {
     int start = 0;
-    while (start < (int)unavailableOLEDReason.length()) {
+    while (start < (int)unavailableOledReason.length()) {
       oledDisplay->setCursor(0, y);
-      int nl = unavailableOLEDReason.indexOf('\n', start);
+      int nl = unavailableOledReason.indexOf('\n', start);
       if (nl < 0) {
-        oledDisplay->println(unavailableOLEDReason.substring(start));
+        oledDisplay->println(unavailableOledReason.substring(start));
         y += 10;
         break;
       }
-      oledDisplay->println(unavailableOLEDReason.substring(start, nl));
+      oledDisplay->println(unavailableOledReason.substring(start, nl));
       y += 10;
       start = nl + 1;
     }
   }
 
   // Only show/perform auto-return when a timeout is active
-  if (unavailableOLEDStartTime != 0) {
+  if (unavailableOledStartTime != 0) {
     oledDisplay->setCursor(0, y + 2);
     oledDisplay->println("Returning...");
 
     const unsigned long UNAVAILABLE_TIMEOUT_MS = 5000;
-    if (millis() - unavailableOLEDStartTime >= UNAVAILABLE_TIMEOUT_MS) {
-      requestOLEDMode(popOLEDMode(), "unavail.timeout.autoreturn", false, /*isBackNav=*/true);
+    if (millis() - unavailableOledStartTime >= UNAVAILABLE_TIMEOUT_MS) {
+      requestOledMode(popOledMode(), "unavail.timeout.autoreturn", false, /*isBackNav=*/true);
     }
   }
 }
@@ -572,7 +572,7 @@ void displaySystemStatusRendered() {
 // Mode Registration
 // ============================================================================
 
-static const OLEDModeEntry sSystemModes[] = {
+static const OledModeEntry sSystemModes[] = {
   { OLED_SYSTEM_STATUS, "System",    "settings", displaySystemStatusRendered, nullptr, nullptr, false, -1, "B:Back" },
   { OLED_CUSTOM_TEXT,   "Text",      "text",     displayCustomText,           nullptr, nullptr, false, -1, "B:Back" },
   { OLED_MEMORY_STATS,  "Memory",    "memory",   displayMemoryStatsRendered,  nullptr, nullptr, false, -1, "B:Back" },

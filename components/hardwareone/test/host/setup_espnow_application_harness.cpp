@@ -76,7 +76,7 @@ struct SerialBoundary {
   String readStringUntil(char) { return readInput(); }
 } Serial;
 static String waitForSerialInputBlocking() { return readInput(); }
-static String getOLEDTextInput(const char*, bool, const char*, int, bool* cancelled) {
+static String getOledTextInput(const char*, bool, const char*, int, bool* cancelled) {
   String value = readInput(); *cancelled = cancelRequested; return value;
 }
 static bool wizardPrevPage() { ++previousCalls; currentPage = WIZARD_PAGE_SYSTEM; return true; }
@@ -203,32 +203,32 @@ static void serialCases() {
 static void oledCases() {
   SetupWizardResult result{}; bool running = true;
   reset(); inputs = {"new-device", "new-room", "new-zone", "s"};
-  handleOLEDEspNowPage(result, running); patch("new-device", "new-room", "new-zone", true);
+  handleOledEspNowPage(result, running); patch("new-device", "new-room", "new-zone", true);
   assert(nextCalls == 1 && running && inputIndex == 4);
   reset(); result = {}; inputs = {"", "", "", ""}; hasNextPage = false;
-  handleOLEDEspNowPage(result, running); patch("old-device");
+  handleOledEspNowPage(result, running); patch("old-device");
   assert(!running && nextCalls == 1 && result.completed);
   for (int cancel = 0; cancel < 3; ++cancel) {
     reset(); result = {}; running = true; inputs = {"new-device", "new-room", "new-zone", "s"};
-    cancelInput = cancel; handleOLEDEspNowPage(result, running);
+    cancelInput = cancel; handleOledEspNowPage(result, running);
     unchanged(); assert(previousCalls == 0 && nextCalls == 0 && !running && gSettings.espnowEnabled);
   }
   reset(); result = {}; running = true; inputs = {"new-device", "new-room", "new-zone", "back"};
-  handleOLEDEspNowPage(result, running);
+  handleOledEspNowPage(result, running);
   unchanged(); assert(previousCalls == 1 && nextCalls == 0 && running);
   reset(); result = {}; running = true; stationarySerial = false;
   inputs = {"new-device", "new-room", "new-zone"}; nextButtons = INPUT_MASK(INPUT_BUTTON_B);
-  handleOLEDEspNowPage(result, running);
+  handleOledEspNowPage(result, running);
   unchanged(); assert(previousCalls == 1 && nextCalls == 0 && running);
   for (bool toggle : {false, true}) {
     reset(); result = {}; running = true; stationarySerial = false; nextDown = toggle;
     inputs = {"new-device", "", ""}; nextButtons = INPUT_MASK(INPUT_BUTTON_A);
-    handleOLEDEspNowPage(result, running);
+    handleOledEspNowPage(result, running);
     patch("new-device", "", "", !toggle);
   }
   for (int intro : {-1, 0}) {
     reset(); result = {}; running = true; introChoice = intro;
-    handleOLEDEspNowPage(result, running); unchanged();
+    handleOledEspNowPage(result, running); unchanged();
     assert(inputIndex == 0 && running && nextCalls == (intro == 0));
     assert(gSettings.espnowEnabled && draftEnabled == (intro == -1));
   }

@@ -4,20 +4,20 @@
 Extracts from the production tree and compiles with an owner-task double
 (oled_owner_requests_harness.cpp):
   * OLED_Utils.cpp: the owner/session-boundary statics and forward declarations
-    at the top, oledBindOwnerTask, oledIsOwnerTask, requestOLEDMode, the
+    at the top, oledBindOwnerTask, oledIsOwnerTask, requestOledMode, the
     owner-request queue (from `struct OledOwnerRequest {` up to cmd_oledmode;
     absent on trees without it), cmd_oledmode, cmd_oledtext, cmd_oledclear,
     cmd_oledanim and oledUpdate (the owner frame);
   * OLED_Mode_SetPattern.cpp: the flow statics, the owner-side restart step
     when present, and cmd_setpattern (setgamepadpassword);
   * OLED_Display.h: the mode enum.
-The harness calls the commands and requestOLEDMode() as cmd_exec and checks that
-customOLEDText, the mode, the back stack, onEnter hooks, the display-role read,
+The harness calls the commands and requestOledMode() as cmd_exec and checks that
+customOledText, the mode, the back stack, onEnter hooks, the display-role read,
 the framebuffer, the animation and the pattern-flow state change only when the
 owner runs oledUpdate(), with the same side effects as before. `oledmode` to a
 mode whose own entry rule refuses (oledModeRuleAllows) shows the unavailable page
 with the module's reason and pushes the previous screen; the display-auth gate
-keeps precedence. A source check confirms that updateOLEDDisplay() drains the
+keeps precedence. A source check confirms that updateOledDisplay() drains the
 requests right after its first session-boundary apply.
 --component/--source-dir point the suite at another production tree.
 """
@@ -93,10 +93,10 @@ def build_unit(component: Path, source_dir: Path | None) -> str:
     oled = read_source(component, source_dir, "OLED_Utils.cpp")
     pattern = read_source(component, source_dir, "OLED_Mode_SetPattern.cpp")
 
-    mode_enum = definition(display_h, "enum OLEDMode").replace(
-        "enum OLEDMode", "enum OLEDMode : int", 1)
+    mode_enum = definition(display_h, "enum OledMode").replace(
+        "enum OledMode", "enum OledMode : int", 1)
     owner = "\n\n".join([owner_top(oled)] + [definition(oled, s) for s in OWNER_FUNCTIONS])
-    transition = "\n\n".join([definition(oled, "void requestOLEDMode("), request_span(oled)] +
+    transition = "\n\n".join([definition(oled, "void requestOledMode("), request_span(oled)] +
                              [definition(oled, s) for s in COMMANDS])
     setpattern = [definition(pattern, "enum PatternSetupStep") + ";",
                   pattern_static(pattern, "static PatternSetupStep sStep"),
@@ -116,20 +116,20 @@ def build_unit(component: Path, source_dir: Path | None) -> str:
 
 
 def frame_drain_failures(component: Path, source_dir: Path | None) -> list[str]:
-    """updateOLEDDisplay() drains posted requests right after the session boundary."""
+    """updateOledDisplay() drains posted requests right after the session boundary."""
     body = definition(read_source(component, source_dir, "OLED_Utils.cpp"),
-                      "void updateOLEDDisplay(")
+                      "void updateOledDisplay(")
     boundary = body.find("oledApplyPendingSessionBoundary();")
     running = body.find("if (!gOledRunning")
     drain = body.find("oledApplyPendingOwnerRequests();", max(boundary, 0))
     if boundary < 0 or running < 0:
-        return ["updateOLEDDisplay(): session-boundary apply or running check not found"]
+        return ["updateOledDisplay(): session-boundary apply or running check not found"]
     if drain < 0 or drain > running:
-        return ["updateOLEDDisplay() does not apply the requests other tasks posted right after "
+        return ["updateOledDisplay() does not apply the requests other tasks posted right after "
                 "its first session-boundary apply (before the running check)"]
     between = body[boundary + len("oledApplyPendingSessionBoundary();"):drain]
     if re.search(r"\b\w+\s*\(", re.sub(r"//[^\n]*", "", between)):
-        return ["updateOLEDDisplay(): nothing may run between the session-boundary apply and "
+        return ["updateOledDisplay(): nothing may run between the session-boundary apply and "
                 "the request drain"]
     return []
 

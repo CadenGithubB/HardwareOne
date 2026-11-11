@@ -64,7 +64,7 @@ static char sPendingDeleteName[AUTO_NAME_MAX] = {0};
 // Guided "New automation" wizard
 // ============================================================================
 // Authoring on-device (the OLED can do more than view/run/toggle now). Emits a
-// real `automationadd ...` command through executeOLEDCommandWithResult — the
+// real `automationadd ...` command through executeOledCommandWithResult — the
 // same canonical creation path the web UI uses via /api/cli — never a direct
 // JSON write (settings-save-via-real-commands rule). Deliberately scoped: one
 // trigger, no condition expressions (a gamepad is the wrong tool for
@@ -234,9 +234,9 @@ static void wizStartKeyboard(AutoWizStep step, const char* title, bool numbers) 
   // Automation names/times are plain labels. The command step is an opaque
   // executable payload and may itself contain credentials, so it never admits
   // microphone text.
-  const OLEDKeyboardDictationPolicy policy =
-      step == AW_COMMAND ? OLEDKeyboardDictationPolicy::DENY
-                         : OLEDKeyboardDictationPolicy::ALLOW_PLAINTEXT;
+  const OledKeyboardDictationPolicy policy =
+      step == AW_COMMAND ? OledKeyboardDictationPolicy::DENY
+                         : OledKeyboardDictationPolicy::ALLOW_PLAINTEXT;
   oledKeyboardInit(title, "", OLED_KEYBOARD_MAX_LENGTH, policy);
   if (numbers) gOledKeyboardState.mode = KEYBOARD_MODE_NUMBERS;
   sWizKbActive = true;
@@ -285,7 +285,7 @@ static void wizCreate() {
   cmd += " enabled=1";
 
   char out[64];
-  bool ok = executeOLEDCommandWithResult(cmd, out, sizeof(out));
+  bool ok = executeOledCommandWithResult(cmd, out, sizeof(out));
   const bool failed = !ok;
   if (failed) {
     // Detail is in the log; keep the user on CONFIRM so A retries, B cancels.
@@ -789,7 +789,7 @@ static void autoRunSelected() {
   // blocking call already returned, so it never reflected success/failure and,
   // without a dirty-window, froze on screen forever.
   char out[64];
-  bool ok = executeOLEDCommandWithResult(String(cmd), out, sizeof(out));
+  bool ok = executeOledCommandWithResult(String(cmd), out, sizeof(out));
   const bool failed = !ok;
 
   if (isAfterDelay) {
@@ -922,7 +922,7 @@ static void automationsOnEnter(bool isForward) {
 }
 
 // Columns: mode, name, iconName, displayFunc, availFunc, inputFunc, showInMenu, menuOrder, hints, onEnter
-static const OLEDModeEntry sAutomationsModes[] = {
+static const OledModeEntry sAutomationsModes[] = {
   { OLED_AUTOMATIONS, "Automations", "notify_automation", displayAutomations, nullptr, automationsInputHandler, false, -1, "A:Run X:On/Off Y:Del", automationsOnEnter },
 };
 

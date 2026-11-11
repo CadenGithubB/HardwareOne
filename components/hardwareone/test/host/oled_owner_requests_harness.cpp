@@ -1,5 +1,5 @@
 // Host harness for test_oled_owner_requests.py: the OLED display commands and
-// requestOLEDMode() called from cmd_exec must leave main-loop-owned OLED state
+// requestOledMode() called from cmd_exec must leave main-loop-owned OLED state
 // alone until the owner task's next frame (oledUpdate), and the owner must then
 // apply them with the same side effects as before.
 //
@@ -121,22 +121,22 @@ static void ps_free(void* ptr) {
 // INSERT_TYPES
 
 // ---- OLED module state and collaborators ----
-enum OLEDAnimationType : int { ANIM_BOOT_PROGRESS = 0, ANIM_STARS = 1, ANIM_WAVE = 2 };
-struct OLEDAnimation {
+enum OledAnimationType : int { ANIM_BOOT_PROGRESS = 0, ANIM_STARS = 1, ANIM_WAVE = 2 };
+struct OledAnimation {
   const char* name;
   const char* description;
-  OLEDAnimationType type;
+  OledAnimationType type;
 };
-static const OLEDAnimation gAnimationRegistry[] = {
+static const OledAnimation gAnimationRegistry[] = {
   {"boot", "Boot progress", ANIM_BOOT_PROGRESS},
   {"stars", "Starfield", ANIM_STARS},
   {"wave", "Sine wave", ANIM_WAVE},
 };
 static const int gAnimationCount = 3;
 
-OLEDMode currentOLEDMode = OLED_SYSTEM_STATUS;
-String customOLEDText;
-OLEDAnimationType currentAnimation = ANIM_BOOT_PROGRESS;
+OledMode currentOledMode = OLED_SYSTEM_STATUS;
+String customOledText;
+OledAnimationType currentAnimation = ANIM_BOOT_PROGRESS;
 unsigned long animationFrame = 0;
 int animationFPS = 10;
 bool oledConnected = true;
@@ -169,16 +169,16 @@ static bool oledIsGuestSession() {
   gGuestReads++;
   return false;
 }
-static bool oledModeAllowedForGuest(OLEDMode) { return true; }
+static bool oledModeAllowedForGuest(OledMode) { return true; }
 static void oledToastShow(const char*, unsigned long) { ownerEffect("toast"); }
 
-static std::vector<OLEDMode> gModeStack;
-static void pushOLEDMode(OLEDMode mode) {
+static std::vector<OledMode> gModeStack;
+static void pushOledMode(OledMode mode) {
   ownerEffect("mode stack push");
   gModeStack.push_back(mode);
 }
 
-struct OLEDModeEntry {
+struct OledModeEntry {
   void (*onEnterFunc)(bool isForward);
   const char* name;
 };
@@ -187,23 +187,23 @@ static void fakeOnEnter(bool) {
   ownerEffect("onEnter hook (keyboard/browser resets)");
   gOnEnterCalls++;
 }
-static const OLEDModeEntry gModeEntry = {fakeOnEnter, "Other"};
-static const OLEDModeEntry gCliInputEntry = {fakeOnEnter, "CLI Input"};
-static const OLEDModeEntry* findOLEDMode(OLEDMode mode) {
+static const OledModeEntry gModeEntry = {fakeOnEnter, "Other"};
+static const OledModeEntry gCliInputEntry = {fakeOnEnter, "CLI Input"};
+static const OledModeEntry* findOledMode(OledMode mode) {
   return mode == OLED_CLI_INPUT ? &gCliInputEntry : &gModeEntry;
 }
 
-// The CLI Input module's entry rule (OLEDModeEntry::availFunc), as
+// The CLI Input module's entry rule (OledModeEntry::availFunc), as
 // oledModeRuleAllows() reports it; every other mode has none.
 static bool gCliInputRefuses = false;
-static bool oledModeRuleAllows(OLEDMode mode, String* outReason) {
+static bool oledModeRuleAllows(OledMode mode, String* outReason) {
   ownerEffect("entry rule read (display session)");
   if (mode != OLED_CLI_INPUT || !gCliInputRefuses) return true;
   if (outReason) *outReason = "Login required";
   return false;
 }
 
-static const char* getOLEDModeName(OLEDMode mode) {
+static const char* getOledModeName(OledMode mode) {
   switch (mode) {
     case OLED_OFF: return "Off";
     case OLED_MENU: return "Menu";
@@ -218,13 +218,13 @@ static const char* getOLEDModeName(OLEDMode mode) {
   }
 }
 
-static OLEDMode modeFromSlug(const String& slug) {
+static OledMode modeFromSlug(const String& slug) {
   if (slug == "menu") return OLED_MENU;
   if (slug == "off") return OLED_OFF;
   if (slug == "status") return OLED_SYSTEM_STATUS;
   if (slug == "text") return OLED_CUSTOM_TEXT;
   if (slug == "cliinput") return OLED_CLI_INPUT;
-  return (OLEDMode)-1;
+  return (OledMode)-1;
 }
 
 static int gInputAutoStarts = 0;
@@ -235,9 +235,9 @@ static void tryAutoStartInputForMenu() {
 static void oledKeyboardDictationTick() { ownerEffect("dictation tick"); }
 
 static int gRenderPasses = 0;
-// The real updateOLEDDisplay() keeps this owner guard; its own request drain is
+// The real updateOledDisplay() keeps this owner guard; its own request drain is
 // checked structurally by the suite.
-static void updateOLEDDisplay() {
+static void updateOledDisplay() {
   if (xTaskGetCurrentTaskHandle() != kOwnerTask) {
     oledMarkDirty();
     return;
@@ -259,7 +259,7 @@ static bool isTransportAuthenticated(CommandSource) { return gDisplayAuthed; }
 using TransportSessionEpoch = uint32_t;
 static const TransportSessionEpoch kNoTransportSessionEpoch = 0;
 
-void requestOLEDMode(OLEDMode newMode, const char* reason, bool pushStack = true,
+void requestOledMode(OledMode newMode, const char* reason, bool pushStack = true,
                      bool isBackNav = false);
 
 // Same contract as OLED_Utils.cpp: record the page text, then a replace-in-place
@@ -271,7 +271,7 @@ static void enterUnavailablePage(const String& title, const String& reason) {
   gUnavailableShown++;
   gUnavailableTitle = title.c_str();
   gUnavailableReason = reason.c_str();
-  requestOLEDMode(OLED_UNAVAILABLE, "unavail.enter", false);
+  requestOledMode(OLED_UNAVAILABLE, "unavail.enter", false);
 }
 
 // INSERT_OWNER
@@ -292,7 +292,7 @@ static void oledApplyPendingSessionBoundary() {
     if (hadIdentity || requested != 0) {
       gBoundaryResets++;
       gModeStack.clear();
-      if (currentOLEDMode != OLED_MENU) requestOLEDMode(OLED_MENU, "auth.notify", false);
+      if (currentOledMode != OLED_MENU) requestOledMode(OLED_MENU, "auth.notify", false);
     }
   }
   if (gAfterBoundaryHook) {
@@ -347,11 +347,11 @@ static void ownerFrame() {
 
 static void onExec() { gCurrentTask = kExecTask; }
 
-static void resetCase(OLEDMode mode) {
+static void resetCase(OledMode mode) {
   ownerFrame();  // drains anything an earlier case left queued
   gCurrentTask = kOwnerTask;
-  currentOLEDMode = mode;
-  customOLEDText = "old text";
+  currentOledMode = mode;
+  customOledText = "old text";
   currentAnimation = ANIM_BOOT_PROGRESS;
   animationFrame = 42;
   gModeStack.clear();
@@ -383,15 +383,15 @@ static void caseCustomText() {
   onExec();
   const char* reply = cmd_oledtext("\"new text\"");
   check(std::strcmp(reply, "OK") == 0, "oledtext replies OK");
-  check(customOLEDText == "old text",
+  check(customOledText == "old text",
         "off-owner oledtext must not reassign customOLEDText before the owner frame "
         "(displayCustomText prints it on the main loop)");
   check(broadcastSaid("Custom text set: new text"), "oledtext reports the text it set");
   checkNothingOffOwner("oledtext");
   const uint32_t dirtyBefore = gDirtySeq;
   ownerFrame();
-  check(customOLEDText == "new text", "the owner frame applies the oledtext text");
-  check(currentOLEDMode == OLED_CUSTOM_TEXT, "oledtext shows the custom-text page");
+  check(customOledText == "new text", "the owner frame applies the oledtext text");
+  check(currentOledMode == OLED_CUSTOM_TEXT, "oledtext shows the custom-text page");
   check(gDirtySeq != dirtyBefore, "oledtext repaints even when already on the page");
   check(gLiveAllocs == 0, "the oledtext copy is freed once applied");
   checkNothingOffOwner("oledtext owner frame");
@@ -401,14 +401,14 @@ static void caseModeMenu() {
   resetCase(OLED_SYSTEM_STATUS);
   onExec();
   check(std::strcmp(cmd_oledmode("menu"), "OK") == 0, "oledmode menu replies OK");
-  check(currentOLEDMode == OLED_SYSTEM_STATUS,
+  check(currentOledMode == OLED_SYSTEM_STATUS,
         "off-owner oledmode must not write currentOLEDMode before the owner frame");
   check(gOnEnterCalls == 0, "off-owner oledmode must not run the target's onEnter hook");
   check(gInputAutoStarts == 0, "off-owner oledmode must not auto-start input on cmd_exec");
   check(broadcastSaid("OLED mode: Menu"), "oledmode reports the requested mode");
   checkNothingOffOwner("oledmode menu");
   ownerFrame();
-  check(currentOLEDMode == OLED_MENU, "the owner frame enters the requested mode");
+  check(currentOledMode == OLED_MENU, "the owner frame enters the requested mode");
   check(gOnEnterCalls == 1, "the owner runs the onEnter hook once");
   check(gInputAutoStarts == 1, "oledmode menu still auto-starts input (on the owner)");
   check(gModeStack.empty(), "oledmode does not push the back stack");
@@ -421,10 +421,10 @@ static void caseModeOff() {
   check(std::strcmp(cmd_oledmode("off"), "OK") == 0, "oledmode off replies OK");
   check(gFakeDisplay.clears == 0 && gFakeDisplay.pushes == 0,
         "off-owner oledmode off must not clear or push the framebuffer");
-  check(currentOLEDMode == OLED_SYSTEM_STATUS, "oledmode off waits for the owner frame");
+  check(currentOledMode == OLED_SYSTEM_STATUS, "oledmode off waits for the owner frame");
   checkNothingOffOwner("oledmode off");
   ownerFrame();
-  check(currentOLEDMode == OLED_OFF, "the owner frame turns the page off");
+  check(currentOledMode == OLED_OFF, "the owner frame turns the page off");
   check(gFakeDisplay.clears == 1 && gFakeDisplay.pushes == 1,
         "the owner blanks and pushes the panel for oledmode off");
   checkNothingOffOwner("oledmode off owner frame");
@@ -434,7 +434,7 @@ static void caseModeOff() {
   check(std::strncmp(cmd_oledmode("bogus"), "Error: Invalid mode.", 20) == 0,
         "an unknown oledmode slug is refused with the reason");
   ownerFrame();
-  check(currentOLEDMode == OLED_SYSTEM_STATUS && gOnEnterCalls == 0,
+  check(currentOledMode == OLED_SYSTEM_STATUS && gOnEnterCalls == 0,
         "a refused oledmode posts nothing");
 }
 
@@ -450,7 +450,7 @@ static void caseClear() {
   ownerFrame();
   check(gFakeDisplay.clears == 1 && gFakeDisplay.pushes == 1,
         "the owner blanks and pushes the panel for oledclear");
-  check(currentOLEDMode == OLED_SYSTEM_STATUS, "oledclear keeps the mode");
+  check(currentOledMode == OLED_SYSTEM_STATUS, "oledclear keeps the mode");
   check(gDirtySeq == dirtyBefore, "oledclear does not mark the page dirty (the blank stays)");
   checkNothingOffOwner("oledclear owner frame");
 }
@@ -460,13 +460,13 @@ static void caseAnimation() {
   onExec();
   check(std::strcmp(cmd_oledanim("stars"), "OK") == 0, "oledanim stars replies OK");
   check(currentAnimation == ANIM_BOOT_PROGRESS && animationFrame == 42 &&
-            currentOLEDMode == OLED_SYSTEM_STATUS,
+            currentOledMode == OLED_SYSTEM_STATUS,
         "off-owner oledanim must not change the animation, its frame or the mode "
         "before the owner frame");
   checkNothingOffOwner("oledanim");
   ownerFrame();
   check(currentAnimation == ANIM_STARS, "the owner selects the requested animation");
-  check(currentOLEDMode == OLED_ANIMATION, "oledanim enters the animation page");
+  check(currentOledMode == OLED_ANIMATION, "oledanim enters the animation page");
   check(animationFrame == 0, "oledanim restarts the animation");
   checkNothingOffOwner("oledanim owner frame");
 }
@@ -479,13 +479,13 @@ static void caseSetPattern() {
   check(sStep == PATTERN_STEP_CONFIRM && sFirstPattern == "^^vv",
         "off-owner setgamepadpassword must not reset the pattern flow the owner's input "
         "handler is comparing");
-  check(currentOLEDMode == OLED_MENU && gModeStack.empty(),
+  check(currentOledMode == OLED_MENU && gModeStack.empty(),
         "off-owner setgamepadpassword must not switch mode or push the back stack");
   checkNothingOffOwner("setgamepadpassword");
   ownerFrame();
   check(sStep == PATTERN_STEP_AUTH_CHECK && sFirstPattern == "",
         "the owner restarts the pattern flow");
-  check(currentOLEDMode == OLED_SET_PATTERN, "the owner opens the pattern page");
+  check(currentOledMode == OLED_SET_PATTERN, "the owner opens the pattern page");
   check(gModeStack.size() == 1 && gModeStack[0] == OLED_MENU,
         "setgamepadpassword pushes the previous mode (B returns there)");
   checkNothingOffOwner("setgamepadpassword owner frame");
@@ -496,21 +496,21 @@ static void caseSetPattern() {
   check(std::strncmp(cmd_setpattern(""), "Error: Log in on OLED first", 27) == 0,
         "setgamepadpassword still needs an OLED login");
   ownerFrame();
-  check(currentOLEDMode == OLED_MENU && sStep == PATTERN_STEP_CONFIRM,
+  check(currentOledMode == OLED_MENU && sStep == PATTERN_STEP_CONFIRM,
         "a refused setgamepadpassword posts nothing");
 }
 
 static void casePlainRequest() {
-  // oledenabled and oledstart reach requestOLEDMode() on cmd_exec.
+  // oledenabled and oledstart reach requestOledMode() on cmd_exec.
   resetCase(OLED_MENU);
   onExec();
-  requestOLEDMode(OLED_SYSTEM_STATUS, "cmd.oledenabled.forceDefault", false);
-  check(currentOLEDMode == OLED_MENU && gOnEnterCalls == 0 && gGuestReads == 0,
+  requestOledMode(OLED_SYSTEM_STATUS, "cmd.oledenabled.forceDefault", false);
+  check(currentOledMode == OLED_MENU && gOnEnterCalls == 0 && gGuestReads == 0,
         "off-owner requestOLEDMode must not transition, run onEnter or read the display "
         "role before the owner frame");
   checkNothingOffOwner("requestOLEDMode");
   ownerFrame();
-  check(currentOLEDMode == OLED_SYSTEM_STATUS && gOnEnterCalls == 1,
+  check(currentOledMode == OLED_SYSTEM_STATUS && gOnEnterCalls == 1,
         "the owner applies an off-owner requestOLEDMode");
   check(gGuestReads > 0, "the guest gate is evaluated on the owner");
   checkNothingOffOwner("requestOLEDMode owner frame");
@@ -518,9 +518,9 @@ static void casePlainRequest() {
   resetCase(OLED_SYSTEM_STATUS);
   gBlockForAuth = true;
   onExec();
-  requestOLEDMode(OLED_MENU, "cli", false);
+  requestOledMode(OLED_MENU, "cli", false);
   ownerFrame();
-  check(currentOLEDMode == OLED_LOGIN, "the display-auth gate still redirects to the login page");
+  check(currentOledMode == OLED_LOGIN, "the display-auth gate still redirects to the login page");
   checkNothingOffOwner("requestOLEDMode auth gate");
 }
 
@@ -530,7 +530,7 @@ static void caseOrder() {
   cmd_oledmode("menu");
   cmd_setpattern("");
   ownerFrame();
-  check(currentOLEDMode == OLED_SET_PATTERN && gModeStack.size() == 1 &&
+  check(currentOledMode == OLED_SET_PATTERN && gModeStack.size() == 1 &&
             gModeStack[0] == OLED_MENU,
         "requests apply in post order (oledmode menu, then setgamepadpassword pushes Menu)");
 
@@ -539,7 +539,7 @@ static void caseOrder() {
   cmd_oledtext("first");
   cmd_oledtext("second");
   ownerFrame();
-  check(customOLEDText == "second" && gLiveAllocs == 0, "the last oledtext wins, no copy leaks");
+  check(customOledText == "second" && gLiveAllocs == 0, "the last oledtext wins, no copy leaks");
   checkNothingOffOwner("ordered requests");
 }
 
@@ -551,9 +551,9 @@ static void caseBoundary() {
   cmd_oledtext("before logout");
   sOledSessionBoundaryRequested.fetch_add(1, std::memory_order_release);
   ownerFrame();
-  check(currentOLEDMode == OLED_MENU,
+  check(currentOledMode == OLED_MENU,
         "a session boundary after the post keeps the boundary's screen");
-  check(customOLEDText == "before logout" && gLiveAllocs == 0,
+  check(customOledText == "before logout" && gLiveAllocs == 0,
         "a superseded oledtext still hands over its text");
 
   resetCase(OLED_SYSTEM_STATUS);
@@ -561,7 +561,7 @@ static void caseBoundary() {
   cmd_setpattern("");
   sOledSessionBoundaryRequested.fetch_add(1, std::memory_order_release);
   ownerFrame();
-  check(currentOLEDMode == OLED_MENU && gModeStack.empty(),
+  check(currentOledMode == OLED_MENU && gModeStack.empty(),
         "a superseded setgamepadpassword does not open the page for the next session");
   check(sStep == PATTERN_STEP_AUTH_CHECK && sFirstPattern == "",
         "a superseded setgamepadpassword still resets the flow");
@@ -572,10 +572,10 @@ static void caseBoundary() {
     sOledSessionBoundaryRequested.fetch_add(1, std::memory_order_release);
     cmd_oledmode("status");
   };
-  currentOLEDMode = OLED_CUSTOM_TEXT;
+  currentOledMode = OLED_CUSTOM_TEXT;
   ownerFrame();
   ownerFrame();
-  check(currentOLEDMode == OLED_SYSTEM_STATUS,
+  check(currentOledMode == OLED_SYSTEM_STATUS,
         "a request posted after a pending session boundary applies after that boundary");
   checkNothingOffOwner("session boundary");
 }
@@ -588,10 +588,10 @@ static void caseOverflow() {
     std::snprintf(text, sizeof(text), "t%d", i);
     cmd_oledtext(text);
   }
-  check(customOLEDText == "old text", "queued oledtext requests wait for the owner frame");
+  check(customOledText == "old text", "queued oledtext requests wait for the owner frame");
   check(gLiveAllocs == 8, "a full queue drops (and frees) the oldest request");
   ownerFrame();
-  check(customOLEDText == "t8" && gLiveAllocs == 0, "the newest request survives an overflow");
+  check(customOledText == "t8" && gLiveAllocs == 0, "the newest request survives an overflow");
   checkNothingOffOwner("overflow");
 }
 
@@ -599,13 +599,13 @@ static void caseOwnerCalls() {
   resetCase(OLED_SYSTEM_STATUS);
   gCurrentTask = kOwnerTask;
   cmd_oledtext("now");
-  check(customOLEDText == "now" && currentOLEDMode == OLED_CUSTOM_TEXT && gLiveAllocs == 0,
+  check(customOledText == "now" && currentOledMode == OLED_CUSTOM_TEXT && gLiveAllocs == 0,
         "on the owner task oledtext applies at once");
   cmd_oledmode("menu");
-  check(currentOLEDMode == OLED_MENU && gInputAutoStarts == 1,
+  check(currentOledMode == OLED_MENU && gInputAutoStarts == 1,
         "on the owner task oledmode applies at once");
-  requestOLEDMode(OLED_SYSTEM_STATUS, "menu.select", true);
-  check(currentOLEDMode == OLED_SYSTEM_STATUS && gModeStack.size() == 1,
+  requestOledMode(OLED_SYSTEM_STATUS, "menu.select", true);
+  check(currentOledMode == OLED_SYSTEM_STATUS && gModeStack.size() == 1,
         "owner-side requestOLEDMode is immediate and pushes the stack");
 }
 
@@ -615,11 +615,11 @@ static void caseModeRule() {
   gCliInputRefuses = true;
   onExec();
   check(std::strcmp(cmd_oledmode("cliinput"), "OK") == 0, "oledmode cliinput replies OK");
-  check(currentOLEDMode == OLED_SYSTEM_STATUS && gUnavailableShown == 0,
+  check(currentOledMode == OLED_SYSTEM_STATUS && gUnavailableShown == 0,
         "oledmode with a refusing entry rule waits for the owner frame");
   checkNothingOffOwner("oledmode cliinput (rule refuses)");
   ownerFrame();
-  check(currentOLEDMode == OLED_UNAVAILABLE,
+  check(currentOledMode == OLED_UNAVAILABLE,
         "oledmode to a mode whose own entry rule refuses (CLI Input, no named display "
         "session) must show the unavailable page instead of entering the mode");
   check(gUnavailableTitle == "CLI Input" && gUnavailableReason == "Login required",
@@ -635,7 +635,7 @@ static void caseModeRule() {
   onExec();
   cmd_oledmode("cliinput");
   ownerFrame();
-  check(currentOLEDMode == OLED_LOGIN && gModeStack.empty() && gUnavailableShown == 0,
+  check(currentOledMode == OLED_LOGIN && gModeStack.empty() && gUnavailableShown == 0,
         "with display auth pending, oledmode still lands on the login page without a stack "
         "push, whatever the mode's rule says");
 
@@ -643,14 +643,14 @@ static void caseModeRule() {
   onExec();
   cmd_oledmode("cliinput");
   ownerFrame();
-  check(currentOLEDMode == OLED_CLI_INPUT && gModeStack.empty() && gUnavailableShown == 0 &&
+  check(currentOledMode == OLED_CLI_INPUT && gModeStack.empty() && gUnavailableShown == 0 &&
             gOnEnterCalls == 1,
         "oledmode enters a mode whose rule allows it, as before");
 
   resetCase(OLED_SYSTEM_STATUS);
   gCliInputRefuses = true;
-  requestOLEDMode(OLED_CLI_INPUT, "menu.select", true);
-  check(currentOLEDMode == OLED_CLI_INPUT && gUnavailableShown == 0,
+  requestOledMode(OLED_CLI_INPUT, "menu.select", true);
+  check(currentOledMode == OLED_CLI_INPUT && gUnavailableShown == 0,
         "requestOLEDMode itself is not gated by entry rules (back-nav, X:Start, login flows)");
 }
 

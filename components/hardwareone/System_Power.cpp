@@ -346,7 +346,7 @@ bool applyPowerMode(uint8_t mode, bool setDisplayBrightness) {
     
     // Apply to hardware if OLED is enabled
     #if ENABLE_OLED_DISPLAY
-      applyOLEDBrightness();
+      applyOledBrightness();
     #endif
   }
   

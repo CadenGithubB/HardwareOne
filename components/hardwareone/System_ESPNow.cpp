@@ -7756,7 +7756,7 @@ static void buildDeviceManifest(JsonDocument& doc) {
   JsonArray apps = doc["uiApps"].to<JsonArray>();
   
 #if ENABLE_OLED_DISPLAY
-  const struct { const OLEDMenuItem* items; int count; } cats[] = {
+  const struct { const OledMenuItem* items; int count; } cats[] = {
     { oledMenuCategory1, oledMenuCategory1Count },
     { oledMenuCategory2, oledMenuCategory2Count },
     { oledMenuCategory3, oledMenuCategory3Count },

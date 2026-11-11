@@ -48,15 +48,15 @@ def generate(component: Path = COMPONENT) -> str:
         "String waitForSerialInputBlocking("))
     time_functions += "\n" + extract_block(setup, "bool wizardHandleCancelInput(")
     cache_start = first.index("static constexpr int FTS_WIFI_MENU_MAX")
-    cache_end = first.index("bool getOLEDWifiSelection(", cache_start)
+    cache_end = first.index("bool getOledWifiSelection(", cache_start)
     functions = "\n\n".join([
         extract_block((COMPONENT / "OLED_Touch.cpp").read_text().split("#else")[-1], "uint32_t oledWizardButtonPresses("),
-        extract_block(first, "static bool isOLEDAvailable("),
+        extract_block(first, "static bool isOledAvailable("),
         extract_block(first, "static uint32_t waitForButtonPress("),
         extract_block(first, "static uint32_t waitForRetryOrSkip("),
-        extract_block(first, "String getOLEDTextInput("),
+        extract_block(first, "String getOledTextInput("),
         "#if ENABLE_WIFI\n" + first[cache_start:cache_end],
-        extract_block(first, "bool getOLEDWifiSelection("),
+        extract_block(first, "bool getOledWifiSelection("),
         extract_block(oled, "static bool wizardNextRequested("),
         extract_block(oled, "bool handleWizardPageInput("),
         extract_block(mode, "static WizardSubMode subModeForPage("),

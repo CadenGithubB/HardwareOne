@@ -30,7 +30,7 @@ def main():
     mode = (COMPONENT / "System_SetupWizardMode.cpp").read_text()
     assert "bool wizardStageEspNowSettings(const SetupWizardResult& result);" in header
     handlers = [extract_block(setup, "static void handleSerialEspNowPage("),
-                extract_block(oled, "void handleOLEDEspNowPage("),
+                extract_block(oled, "void handleOledEspNowPage("),
                 extract_block(mode[mode.rindex("static CLIModeInputResult dispatchEspNow("):],
                               "static CLIModeInputResult dispatchEspNow(")]
     for handler in handlers:

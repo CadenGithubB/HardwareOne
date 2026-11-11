@@ -1,7 +1,7 @@
 // test_dictation_ui.py also compiles this unit: the shipping OLED virtual
 // keyboard (OLED_Utils.cpp: the character tables, getCharAt, oledKeyboardInit,
 // oledKeyboardReset, the preview and oledKeyboardDisplay, with the real
-// OLEDKeyboardState from OLED_Utils.h) and the Set Pattern flow's keyboard
+// OledKeyboardState from OLED_Utils.h) and the Set Pattern flow's keyboard
 // openers (OLED_Mode_SetPattern.cpp). A recording display keeps the text each
 // cursor row printed. A masked (secret) field must never print its text, or any
 // 3-character piece of it, on any keyboard page; its preview shows one '*' per
@@ -98,7 +98,7 @@ static void openFieldWith(long, const char* title, const char* text, int maxLeng
 }
 static void openField(const char* text, bool masked) {
   openFieldWith(0, "Enter Password:", text, OLED_KEYBOARD_MAX_LENGTH,
-                OLEDKeyboardDictationPolicy::DENY, masked);
+                OledKeyboardDictationPolicy::DENY, masked);
 }
 static void typeText(const char* text) {
   std::snprintf(gOledKeyboardState.text, sizeof(gOledKeyboardState.text), "%s", text);
@@ -215,7 +215,7 @@ static void plainAfterMasked() {
   oledKeyboardReset();
   EXPECT(gOledKeyboardState.text[0] == '\0', "reset clears the field");
   oledKeyboardInit("Enter Username:", "alice42", OLED_KEYBOARD_MAX_LENGTH,
-                   OLEDKeyboardDictationPolicy::ALLOW_PLAINTEXT);
+                   OledKeyboardDictationPolicy::ALLOW_PLAINTEXT);
   renderPage(Page::LOWER);
   EXPECT(gPanel.row_at(kPreviewRow) == "alice42_",
          "a plain field after a masked one shows '" + gPanel.row_at(kPreviewRow) + "'");

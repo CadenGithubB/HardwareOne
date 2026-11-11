@@ -628,9 +628,9 @@ private:
 #if ENABLE_OLED_DISPLAY
 class Adafruit_SSD1306;
 
-class OLEDMapRenderer : public MapRenderer {
+class OledMapRenderer : public MapRenderer {
 public:
-  OLEDMapRenderer(Adafruit_SSD1306* display);
+  OledMapRenderer(Adafruit_SSD1306* display);
   
   void setViewport(int width, int height) override;
   void clear() override;

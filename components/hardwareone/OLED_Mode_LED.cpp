@@ -2,12 +2,12 @@
 //
 // Three internal levels inside one OLED mode (mirrors OLED_Mode_FileBrowser's
 // internal-level pattern rather than Power's one-enum-per-submenu, so the
-// mode costs a single OLEDMode value):
+// mode costs a single OledMode value):
 //   ROOT     Color >  /  Effect >  /  Brightness: NN%  /  Off
 //   COLORS   one row per colorTable[] name (+ "off" first) — A = ledcolor <name>
 //   EFFECTS  fade / pulse / blink / rainbow / strobe / off — A = ledeffect <name>
 //
-// All actions route through executeOLEDCommand so they carry the normal [CMD]
+// All actions route through executeOledCommand so they carry the normal [CMD]
 // audit line and the OLED auth identity — same pattern as the Power menu.
 // ledcolor/ledeffect are LIVE-only (persist nothing); brightness persists via
 // ledbrightness, matching the web Live Control panel's behavior. The persisted
@@ -44,9 +44,9 @@
 enum LedLevel : uint8_t { LED_LEVEL_ROOT = 0, LED_LEVEL_COLORS, LED_LEVEL_EFFECTS };
 static LedLevel gLedLevel = LED_LEVEL_ROOT;
 
-EXT_RAM_BSS_ATTR static OLEDScrollState sLedRootScroll;
-EXT_RAM_BSS_ATTR static OLEDScrollState sLedColorScroll;
-EXT_RAM_BSS_ATTR static OLEDScrollState sLedEffectScroll;
+EXT_RAM_BSS_ATTR static OledScrollState sLedRootScroll;
+EXT_RAM_BSS_ATTR static OledScrollState sLedColorScroll;
+EXT_RAM_BSS_ATTR static OledScrollState sLedEffectScroll;
 static bool sLedScrollInitialized = false;
 
 // Effect rows = the shared ledEffectNames table (single source of truth with
@@ -136,10 +136,10 @@ static void executeLedRootAction() {
       char cmd[24];
       snprintf(cmd, sizeof(cmd), "ledbrightness %d",
                ledBrightnessNextPreset(gSettings.ledBrightness));
-      executeOLEDCommand(cmd);
+      executeOledCommand(cmd);
       break;
     }
-    case 3: executeOLEDCommand("ledclear"); break;
+    case 3: executeOledCommand("ledclear"); break;
   }
 }
 
@@ -150,7 +150,7 @@ static void executeLedColorAction() {
   if (!name) return;
   char cmd[40];
   snprintf(cmd, sizeof(cmd), "ledcolor %s", name);
-  executeOLEDCommand(cmd);
+  executeOledCommand(cmd);
   // Stay on the color list so the user can flip through swatches; B backs out.
 }
 
@@ -163,7 +163,7 @@ static void executeLedEffectAction() {
   const char* name = (sel < ledEffectNameCount) ? ledEffectNames[sel] : "off";
   char cmd[32];
   snprintf(cmd, sizeof(cmd), "ledeffect %s", name);
-  executeOLEDCommand(cmd);
+  executeOledCommand(cmd);
 }
 
 // ---------------------------------------------------------------------------
@@ -173,7 +173,7 @@ static bool ledInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPresse
   if (oledGuestBlocksMutate()) return true;
   initLedScrollStates();
 
-  OLEDScrollState* scroll =
+  OledScrollState* scroll =
       (gLedLevel == LED_LEVEL_COLORS)  ? &sLedColorScroll :
       (gLedLevel == LED_LEVEL_EFFECTS) ? &sLedEffectScroll : &sLedRootScroll;
   if (oledScrollHandleNav(scroll)) return true;
@@ -190,7 +190,7 @@ static bool ledInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPresse
     if (next != gSettings.ledBrightness) {
       char cmd[24];
       snprintf(cmd, sizeof(cmd), "ledbrightness %d", next);
-      executeOLEDCommand(cmd);
+      executeOledCommand(cmd);
     }
     return true;
   }
@@ -229,7 +229,7 @@ static void ledOnEnter(bool isForward) {
 //          showInMenu, menuOrder, hints, onEnterFunc.
 // No entry rule (availFunc nullptr): the LED screen is usable whenever it is
 // built; getMenuAvailability() reports NOT_BUILT without ENABLE_NEOPIXEL.
-static const OLEDModeEntry sLedModes[] = {
+static const OledModeEntry sLedModes[] = {
   { OLED_LED, "LED", "notify_sensor", displayLED, nullptr, ledInputHandler,
     false, -1, "A:Sel B:Back", ledOnEnter },
 };

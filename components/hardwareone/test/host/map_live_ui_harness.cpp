@@ -158,7 +158,7 @@ static String oledResult = "SUCCESS: Live tracking started";
 static std::vector<std::string> oledRequests, toasts;
 static int gTrackFileCount, gTrackSelectMode, gTrackFileIdx;
 static bool oledGuestBlocksMutate() { return oledGuest; }
-static bool executeOLEDCommandWithResult(const char* command, char* out, size_t length) {
+static bool executeOledCommandWithResult(const char* command, char* out, size_t length) {
   oledRequests.emplace_back(command); std::snprintf(out, length, "%s", oledResult.c_str());
   return oledExecuted;
 }

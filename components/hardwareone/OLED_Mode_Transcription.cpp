@@ -21,7 +21,7 @@ struct Entry { char name[64]; char path[128]; };
 struct View {
   TransportSessionEpoch epoch;
   uint32_t generation = 1, viewGeneration = 0, pollAt = 0;
-  OLEDMode viewMode = OLED_MENU;
+  OledMode viewMode = OLED_MENU;
   bool entered=false, active=false, busy=false, saveDefault=false, saveEnabled=false;
   bool continuous=false, preparing=false, captureActive=false, inferenceActive=false;
   bool nextPoll=false, more=false, eof=true, micPdm=false, micG2=false;
@@ -31,7 +31,7 @@ struct View {
   uint32_t history[32]{};
   unsigned historyCount=0, line=0;
   bool sd=false;
-  OLEDScrollState menu{}, list{};
+  OledScrollState menu{}, list{};
 };
 EXT_RAM_BSS_ATTR View v;
 // There is at most one request in flight, including across leave/re-enter.
@@ -43,7 +43,7 @@ static Ticket delivered{};
 static bool ready=false, deliveredOk=false;
 static String pending, pendingAck;
 static Op pendingOp=Op::Status;
-static bool family(OLEDMode mode) {
+static bool family(OledMode mode) {
   return mode==OLED_TRANSCRIPTION || mode==OLED_TRANSCRIPTION_LIVE ||
       mode==OLED_TRANSCRIPTS || mode==OLED_TRANSCRIPT_VIEW;
 }
@@ -71,7 +71,7 @@ static bool send(const String& command,Op op) {
   if (inFlight || !v.epoch) return false;
   auto* ticket=new (std::nothrow) Ticket{v.generation,v.viewGeneration,v.epoch,op};
   if (!ticket) return false;
-  if (!submitOLEDCommandForSession(command,v.epoch,completed,ticket)) {
+  if (!submitOledCommandForSession(command,v.epoch,completed,ticket)) {
     delete ticket; return false;
   }
   inFlight=true;
@@ -102,8 +102,8 @@ static void acceptReply(const Ticket& ticket,bool ok) {
   }
   if ((ticket.op==Op::List || ticket.op==Op::Read) &&
       (ticket.viewGeneration!=v.viewGeneration ||
-       (ticket.op==Op::List && currentOLEDMode!=OLED_TRANSCRIPTS) ||
-       (ticket.op==Op::Read && currentOLEDMode!=OLED_TRANSCRIPT_VIEW))) return;
+       (ticket.op==Op::List && currentOledMode!=OLED_TRANSCRIPTS) ||
+       (ticket.op==Op::Read && currentOledMode!=OLED_TRANSCRIPT_VIEW))) return;
   if (!ok || !parsed || doc["success"]==false) {
     copy(v.message,sizeof(v.message),parsed ? (doc["error"]|"Transcription request failed. Retry; check logs if it persists.") : "Invalid transcription reply. Retry; check logs if it persists.");
     // Polling failures stay in the status line; explicit actions show the full
@@ -254,12 +254,12 @@ static bool menuInput(int,int,uint32_t buttons) {
       if(v.active) queue(command("stop"),Op::Stop);
       else if(!v.busy) queue("transcription start",Op::Start);
       break;
-    case 1: v.line=0; requestOLEDMode(OLED_TRANSCRIPTION_LIVE,"transcription.live"); break;
+    case 1: v.line=0; requestOledMode(OLED_TRANSCRIPTION_LIVE,"transcription.live"); break;
     case 2: queue(v.saveDefault?"sttsavetranscripts 0":"sttsavetranscripts 1",Op::Toggle); break;
     case 3: case 4:
       v.sd=v.menu.selectedIndex==4; v.count=0; v.more=false; v.listOffset=0;
       oledScrollInit(&v.list,nullptr,oledVisibleRows(8,0,4)); listAt(0);
-      requestOLEDMode(OLED_TRANSCRIPTS,"transcription.files"); break;
+      requestOledMode(OLED_TRANSCRIPTS,"transcription.files"); break;
     case 5:
       // The source is claimed at session start; a change applies next session.
       if(v.active) oledToastShow("Stop session first",1200);
@@ -283,7 +283,7 @@ static bool listInput(int,int,uint32_t buttons) {
     if(pending.length()) return true;
     copy(v.path,sizeof(v.path),v.files[index].path);
     v.text[0]=0; v.historyCount=0; v.line=0; readAt(0);
-    requestOLEDMode(OLED_TRANSCRIPT_VIEW,"transcription.file");
+    requestOledMode(OLED_TRANSCRIPT_VIEW,"transcription.file");
   } else if(v.more && index==v.count) listAt(v.listNext);
   else if(v.listOffset) listAt(v.listOffset>=8?v.listOffset-8:0);
   return true;
@@ -309,7 +309,7 @@ static bool fileInput(int,int,uint32_t buttons) {
 }
 } // namespace
 
-void resetOLEDTranscription() {
+void resetOledTranscription() {
   cancelId(v.epoch,v.exchange);
   const uint32_t generation=v.generation+1;
   TranscriptionUI::clear(reinterpret_cast<char*>(&v),sizeof(v));
@@ -317,8 +317,8 @@ void resetOLEDTranscription() {
   wipeString(pending); wipeString(pendingAck);
 }
 void prepareTranscriptionData() {
-  const bool here=family(currentOLEDMode);
-  if(v.entered && !here) resetOLEDTranscription();
+  const bool here=family(currentOledMode);
+  if(v.entered && !here) resetOledTranscription();
   if(here && !v.entered) {
     String user; bool authed=false;
     v.epoch=localDisplayTransportSessionSnapshot(user,authed);
@@ -327,10 +327,10 @@ void prepareTranscriptionData() {
     v.entered=true; v.pollAt=0;
     oledScrollInit(&v.menu,nullptr,oledVisibleRows(8,10,3)); oledScrollInit(&v.list,nullptr,oledVisibleRows(8,0,4));
   }
-  if (here && v.entered && v.viewMode!=currentOLEDMode) {
-    v.viewMode=currentOLEDMode; ++v.viewGeneration;
-    if ((pendingOp==Op::List && currentOLEDMode!=OLED_TRANSCRIPTS) ||
-        (pendingOp==Op::Read && currentOLEDMode!=OLED_TRANSCRIPT_VIEW)) wipeString(pending);
+  if (here && v.entered && v.viewMode!=currentOledMode) {
+    v.viewMode=currentOledMode; ++v.viewGeneration;
+    if ((pendingOp==Op::List && currentOledMode!=OLED_TRANSCRIPTS) ||
+        (pendingOp==Op::Read && currentOledMode!=OLED_TRANSCRIPT_VIEW)) wipeString(pending);
   }
   Ticket ticket{}; bool got=false,ok=false;
   portENTER_CRITICAL(&mailboxMux);
@@ -362,7 +362,7 @@ void prepareTranscriptionData() {
     v.pollAt=millis()+600;
   }
 }
-static const OLEDModeEntry transcriptionModes[]={
+static const OledModeEntry transcriptionModes[]={
   {OLED_TRANSCRIPTION,"Transcription","mic",displayTranscriptionHome,nullptr,menuInput,true,51,"A:Select B:Cancel"},
   {OLED_TRANSCRIPTION_LIVE,"Recent text","mic",displayTranscriptionLive,nullptr,liveInput,false,-1,"A:Stop B:Menu"},
   {OLED_TRANSCRIPTS,"Transcripts","mic",displayTranscriptionFiles,nullptr,listInput,false,-1,"A:Open B:Back"},

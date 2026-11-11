@@ -35,8 +35,8 @@
 #include "HAL_Input.h"
 #include "OLED_Display.h"
 // OLED page handlers for ESP-NOW and MQTT (defined in OLED_SetupWizard.cpp)
-void handleOLEDEspNowPage(SetupWizardResult& result, bool& running);
-void handleOLEDMQTTPage(SetupWizardResult& result, bool& running);
+void handleOledEspNowPage(SetupWizardResult& result, bool& running);
+void handleOledMQTTPage(SetupWizardResult& result, bool& running);
 #endif
 
 // ============================================================================
@@ -1585,7 +1585,7 @@ SetupWizardResult runSetupWizard() {
     if (currentPage == WIZARD_PAGE_ESPNOW) {
 #if ENABLE_OLED_DISPLAY
       if (oledDisplay && oledConnected) {
-        handleOLEDEspNowPage(result, running);
+        handleOledEspNowPage(result, running);
         lastPrintedPage = WIZARD_PAGE_COUNT;
         continue;
       }
@@ -1598,7 +1598,7 @@ SetupWizardResult runSetupWizard() {
     if (currentPage == WIZARD_PAGE_MQTT) {
 #if ENABLE_OLED_DISPLAY
       if (oledDisplay && oledConnected) {
-        handleOLEDMQTTPage(result, running);
+        handleOledMQTTPage(result, running);
         lastPrintedPage = WIZARD_PAGE_COUNT;
         continue;
       }

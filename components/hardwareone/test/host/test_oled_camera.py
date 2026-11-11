@@ -21,8 +21,8 @@ def main():
     oled=(COMPONENT/'OLED_Display.h').read_text();camera=(COMPONENT/'System_Camera_DVP.h').read_text()
     unit=(HERE/'oled_camera_harness.cpp').read_text()
     for marker,value in [('// INSERT_CAMERA_SNAPSHOT',extract_block(camera,'struct CameraStateSnapshot')+';'),
-                         ('// INSERT_OLED_ENUM',extract_block(oled,'enum OLEDMode')+';'),
-                         ('// INSERT_OLED_ENTRY',extract_block(oled,'struct OLEDModeEntry')+';'),
+                         ('// INSERT_OLED_ENUM',extract_block(oled,'enum OledMode')+';'),
+                         ('// INSERT_OLED_ENTRY',extract_block(oled,'struct OledModeEntry')+';'),
                          ('// INSERT_PRODUCTION',source)]:
         assert unit.count(marker)==1,marker
         unit=unit.replace(marker,value)
@@ -38,7 +38,7 @@ def main():
         for display,camera in [(0,1),(1,0),(0,0)]:
             disabled='#include <string>\n#include <cassert>\nusing String=std::string;\n'
             disabled+=f'#define ENABLE_OLED_DISPLAY {display}\n#define ENABLE_CAMERA_SENSOR {camera}\n'
-            disabled+=header+'\n'+source+'\nint main(){prepareCameraPreviewData();resetOLEDCameraPreview();assert(String(cmd_oledcameraread(\"\")).find(\"not built\")!=String::npos);}\n'
+            disabled+=header+'\n'+source+'\nint main(){prepareCameraPreviewData();resetOledCameraPreview();assert(String(cmd_oledcameraread(\"\")).find(\"not built\")!=String::npos);}\n'
             generated.write_text(disabled)
             subprocess.run([*flags,str(generated),'-o',str(exe)],check=True)
             subprocess.run([str(exe)],check=True)

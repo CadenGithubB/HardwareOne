@@ -15,14 +15,14 @@ class String;
 
 #define EXT_RAM_BSS_ATTR
 
-struct OLEDScrollState {
+struct OledScrollState {
   std::vector<std::string> rows;
 };
-static OLEDScrollState sPowerCpuScroll;
+static OledScrollState sPowerCpuScroll;
 static void initPowerScrollStates() {}
-static void oledScrollClearKeepSelection(OLEDScrollState* s) { s->rows.clear(); }
-static void oledScrollAddItem(OLEDScrollState* s, const char* line) { s->rows.push_back(line); }
-static void oledScrollClampSelection(OLEDScrollState*) {}
+static void oledScrollClearKeepSelection(OledScrollState* s) { s->rows.clear(); }
+static void oledScrollAddItem(OledScrollState* s, const char* line) { s->rows.push_back(line); }
+static void oledScrollClampSelection(OledScrollState*) {}
 
 // INSERT_PRODUCTION_DEFINITIONS
 

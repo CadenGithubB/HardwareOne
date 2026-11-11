@@ -22,13 +22,13 @@ inline constexpr int oledVisibleRows(int rowHeight, int reservedHeight = 0, int 
 // OLED Utilities - Scrolling Lists & Virtual Keyboard
 // =============================================================================
 
-bool submitOLEDCommandForSession(const String& command, TransportSessionEpoch epoch,
+bool submitOledCommandForSession(const String& command, TransportSessionEpoch epoch,
                                  ExecAsyncCallback callback, void* context);
 
 // ============= Standardized Header System =============
 
 // Header display options
-struct OLEDHeaderInfo {
+struct OledHeaderInfo {
   const char* title;          // Mode/menu title (nullptr = auto from current mode)
   bool showBattery;           // Show battery icon and percentage
   bool showNotifications;     // Show notification indicator if queue not empty
@@ -37,13 +37,13 @@ struct OLEDHeaderInfo {
 };
 
 // Default header config (shows battery, notifications, auto title)
-extern const OLEDHeaderInfo HEADER_DEFAULT;
+extern const OledHeaderInfo HEADER_DEFAULT;
 
 // Render standardized header bar at top of display
 // Returns the Y position where content should start (after header)
-int oledRenderHeader(Adafruit_SSD1306* display, const OLEDHeaderInfo* info = nullptr);
+int oledRenderHeader(Adafruit_SSD1306* display, const OledHeaderInfo* info = nullptr);
 
-// Get current mode name for header (from currentOLEDMode)
+// Get current mode name for header (from currentOledMode)
 const char* oledGetCurrentModeName();
 
 // ============= Notification Queue System =============
@@ -54,7 +54,7 @@ const char* oledGetCurrentModeName();
 
 // NotificationSource enum is defined in System_Notifications.h (included above).
 
-struct OLEDNotification {
+struct OledNotification {
   char message[OLED_NOTIFICATION_MSG_LEN];
   char subsource[OLED_NOTIFICATION_SUBSOURCE_LEN];  // IP address, device name, or MAC
   uint32_t timestampMs;
@@ -78,12 +78,12 @@ void oledNotificationMarkAllRead();
 void oledNotificationClear();
 
 // Get notification by index (0 = newest)
-const OLEDNotification* oledNotificationGet(int index);
+const OledNotification* oledNotificationGet(int index);
 
 // ============= Standardized Footer System =============
 
 // Footer hint structure for navigation display
-struct OLEDFooterHints {
+struct OledFooterHints {
   const char* buttonA;  // nullptr = hide button
   const char* buttonB;
   const char* buttonX;
@@ -91,14 +91,14 @@ struct OLEDFooterHints {
 };
 
 // Common footer presets
-extern const OLEDFooterHints FOOTER_BACK_ONLY;
-extern const OLEDFooterHints FOOTER_SELECT_BACK;
-extern const OLEDFooterHints FOOTER_CONFIRM_CANCEL;
-extern const OLEDFooterHints FOOTER_KEYBOARD;
-extern const OLEDFooterHints FOOTER_DONE_BACK;
+extern const OledFooterHints FOOTER_BACK_ONLY;
+extern const OledFooterHints FOOTER_SELECT_BACK;
+extern const OledFooterHints FOOTER_CONFIRM_CANCEL;
+extern const OledFooterHints FOOTER_KEYBOARD;
+extern const OledFooterHints FOOTER_DONE_BACK;
 
 // Render standardized footer bar at bottom of display
-void oledRenderFooter(Adafruit_SSD1306* display, const OLEDFooterHints* hints);
+void oledRenderFooter(Adafruit_SSD1306* display, const OledFooterHints* hints);
 
 // ============= Shared Drawing Utilities =============
 
@@ -110,7 +110,7 @@ void oledDrawBar(Adafruit_SSD1306* display, int x, int y, int width, int height,
 // ============= Content Area System =============
 
 // Content area rendering context for scrollable content
-struct OLEDContentArea {
+struct OledContentArea {
   Adafruit_SSD1306* display;
   int16_t scrollOffset;     // Y offset for scrolling (negative = scrolled down)
   int16_t contentHeight;    // Total height of content in pixels
@@ -121,33 +121,33 @@ struct OLEDContentArea {
 };
 
 // Initialize content area for rendering
-void oledContentInit(OLEDContentArea* ctx, Adafruit_SSD1306* display);
+void oledContentInit(OledContentArea* ctx, Adafruit_SSD1306* display);
 
 // Begin content rendering (clears content area, sets up clipping)
-void oledContentBegin(OLEDContentArea* ctx);
+void oledContentBegin(OledContentArea* ctx);
 
 // End content rendering (draws scroll indicators if needed)
-void oledContentEnd(OLEDContentArea* ctx);
+void oledContentEnd(OledContentArea* ctx);
 
 // Print text in content area (respects scroll offset and boundaries)
-void oledContentPrint(OLEDContentArea* ctx, const char* text, bool newline = true);
-void oledContentPrintAt(OLEDContentArea* ctx, int16_t x, int16_t y, const char* text);
+void oledContentPrint(OledContentArea* ctx, const char* text, bool newline = true);
+void oledContentPrintAt(OledContentArea* ctx, int16_t x, int16_t y, const char* text);
 
 // Set cursor position in content area (absolute Y, will be adjusted by scroll offset)
-void oledContentSetCursor(OLEDContentArea* ctx, int16_t x, int16_t y);
+void oledContentSetCursor(OledContentArea* ctx, int16_t x, int16_t y);
 
 // Scroll content area up/down by lines (8 pixels per line)
-void oledContentScrollUp(OLEDContentArea* ctx, int lines = 1);
-void oledContentScrollDown(OLEDContentArea* ctx, int lines = 1);
+void oledContentScrollUp(OledContentArea* ctx, int lines = 1);
+void oledContentScrollDown(OledContentArea* ctx, int lines = 1);
 
 // Update scroll state after content is measured
-void oledContentUpdateScroll(OLEDContentArea* ctx);
+void oledContentUpdateScroll(OledContentArea* ctx);
 
 // ============= Scrolling System =============
 
 #define OLED_SCROLL_MAX_ITEMS 32
 
-struct OLEDScrollItem {
+struct OledScrollItem {
   const char* line1;
   const char* line2;
   bool isSelectable;
@@ -158,8 +158,8 @@ struct OLEDScrollItem {
   uint32_t validationKey;
 };
 
-struct OLEDScrollState {
-  OLEDScrollItem items[OLED_SCROLL_MAX_ITEMS];
+struct OledScrollState {
+  OledScrollItem items[OLED_SCROLL_MAX_ITEMS];
   int itemCount;
   int selectedIndex;
   int scrollOffset;
@@ -181,32 +181,32 @@ struct OLEDScrollState {
   // into the primitive. areaX = left edge of the icon pane (separatorX + 4);
   // iconY/iconSize describe the icon box so the callback can place text below
   // it. nullptr = draw the icon only (the default for every existing user).
-  void (*rightPaneDraw)(Adafruit_SSD1306* display, OLEDScrollItem* selected,
+  void (*rightPaneDraw)(Adafruit_SSD1306* display, OledScrollItem* selected,
                         int areaX, int iconY, int iconSize);
 };
 
-void oledScrollInit(OLEDScrollState* state, const char* title = nullptr, int visibleLines = oledVisibleRows(10, 1, 4));
-bool oledScrollAddItem(OLEDScrollState* state, const char* line1, const char* line2 = nullptr, 
+void oledScrollInit(OledScrollState* state, const char* title = nullptr, int visibleLines = oledVisibleRows(10, 1, 4));
+bool oledScrollAddItem(OledScrollState* state, const char* line1, const char* line2 = nullptr, 
                        bool selectable = true, void* userData = nullptr);
-void oledScrollClear(OLEDScrollState* state);
+void oledScrollClear(OledScrollState* state);
 // Like oledScrollClear() but PRESERVES selectedIndex/scrollOffset, so a menu can
 // be rebuilt every frame (oledScrollClear* + re-add items) without losing the
 // cursor. The selection is clamped back into range automatically by
 // oledScrollHandleNav()/oledScrollRenderSimple(); for hand-rolled render loops
 // (e.g. Power) call oledScrollClampSelection() after re-adding items.
-void oledScrollClearKeepSelection(OLEDScrollState* state);
+void oledScrollClearKeepSelection(OledScrollState* state);
 // Clamp selectedIndex into [0, itemCount-1] and keep it within the visible window.
 // Safe no-op when already valid.
-void oledScrollClampSelection(OLEDScrollState* state);
-void oledScrollUp(OLEDScrollState* state);
-void oledScrollDown(OLEDScrollState* state);
-void oledScrollPageUp(OLEDScrollState* state);
-void oledScrollPageDown(OLEDScrollState* state);
-OLEDScrollItem* oledScrollGetSelected(OLEDScrollState* state);
-OLEDScrollItem* oledScrollGetItem(OLEDScrollState* state, int index);
-void oledScrollRender(Adafruit_SSD1306* display, OLEDScrollState* state,
+void oledScrollClampSelection(OledScrollState* state);
+void oledScrollUp(OledScrollState* state);
+void oledScrollDown(OledScrollState* state);
+void oledScrollPageUp(OledScrollState* state);
+void oledScrollPageDown(OledScrollState* state);
+OledScrollItem* oledScrollGetSelected(OledScrollState* state);
+OledScrollItem* oledScrollGetItem(OledScrollState* state, int index);
+void oledScrollRender(Adafruit_SSD1306* display, OledScrollState* state,
                       bool showScrollbar = true, bool showSelection = true,
-                      const OLEDFooterHints* footerHints = nullptr);
+                      const OledFooterHints* footerHints = nullptr);
 
 // Lightweight single-line list renderer — the compact counterpart to
 // oledScrollRender(). Renders each item on ONE 8px line with a "> " cursor
@@ -220,17 +220,17 @@ void oledScrollRender(Adafruit_SSD1306* display, OLEDScrollState* state,
 // menu draws the filename on the top line, then renders the list one row down) —
 // the same "status line + scrollable list" shape the Power main menu hand-rolls.
 // Size visibleLines to the reduced window ((OLED_CONTENT_HEIGHT - reserved)/8).
-void oledScrollRenderSimple(Adafruit_SSD1306* display, OLEDScrollState* state,
+void oledScrollRenderSimple(Adafruit_SSD1306* display, OledScrollState* state,
                             bool showSelection = true, int startY = OLED_CONTENT_START_Y);
 int oledScrollCalculateVisibleLines(int displayHeight, int textSize, bool hasTitle = false, bool hasFooter = false);
 
 // Generic list-menu navigation helper using centralized gNavEvents.
 // Handles up/down (and optionally left/right) scroll with wrap-around.
 // Returns true if any navigation event was consumed.
-bool oledScrollHandleNav(OLEDScrollState* state, bool leftRightNav = false);
+bool oledScrollHandleNav(OledScrollState* state, bool leftRightNav = false);
 
 // Configure split-pane layout (list on left, icon on right)
-void oledScrollSetSplitPane(OLEDScrollState* state, int listWidth, int separatorX, int iconSize = 32);
+void oledScrollSetSplitPane(OledScrollState* state, int listWidth, int separatorX, int iconSize = 32);
 
 // ============= Virtual Keyboard =============
 
@@ -243,7 +243,7 @@ void oledScrollSetSplitPane(OLEDScrollState* state, int listWidth, int separator
 #define OLED_KEYBOARD_COLS 10
 #define OLED_KEYBOARD_ROWS 3
 
-enum OLEDKeyboardMode {
+enum OledKeyboardMode {
   KEYBOARD_MODE_LOWERCASE = 0,
   KEYBOARD_MODE_UPPERCASE = 1,
   KEYBOARD_MODE_NUMBERS = 2,
@@ -257,7 +257,7 @@ enum OLEDKeyboardMode {
 // DENY as zero: the global keyboard state and any partially initialized copy
 // fail closed. Secret fields and opaque command payloads must never allow a
 // microphone transcript to cross into their buffer.
-enum class OLEDKeyboardDictationPolicy : uint8_t {
+enum class OledKeyboardDictationPolicy : uint8_t {
   DENY = 0,
   ALLOW_PLAINTEXT = 1,
 };
@@ -279,15 +279,15 @@ enum class OLEDKeyboardDictationPolicy : uint8_t {
 // Returns number of suggestions found, fills results array (up to maxResults)
 // Each result is a null-terminated string pointer (must remain valid until next call)
 #define OLED_KEYBOARD_MAX_SUGGESTIONS 8
-typedef int (*OLEDKeyboardAutocompleteFunc)(const char* input, const char** results, int maxResults, void* userData);
+typedef int (*OledKeyboardAutocompleteFunc)(const char* input, const char** results, int maxResults, void* userData);
 
-struct OLEDKeyboardState {
+struct OledKeyboardState {
   char text[OLED_KEYBOARD_MAX_LENGTH + 1];
   int textLength;
   int cursorX;
   int cursorY;
-  OLEDKeyboardMode mode;
-  OLEDKeyboardDictationPolicy dictationPolicy;
+  OledKeyboardMode mode;
+  OledKeyboardDictationPolicy dictationPolicy;
   bool masked;  // secret field: every preview draws '*' per character
   bool active;
   bool cancelled;
@@ -296,7 +296,7 @@ struct OLEDKeyboardState {
   int maxLength;
   
   // Autocomplete system (triggered by Select button)
-  OLEDKeyboardAutocompleteFunc autocompleteFunc;
+  OledKeyboardAutocompleteFunc autocompleteFunc;
   void* autocompleteUserData;
   bool showingSuggestions;
   const char* suggestions[OLED_KEYBOARD_MAX_SUGGESTIONS];
@@ -308,7 +308,7 @@ extern const char OLED_KEYBOARD_CHARS_UPPER[OLED_KEYBOARD_ROWS][OLED_KEYBOARD_CO
 extern const char OLED_KEYBOARD_CHARS_LOWER[OLED_KEYBOARD_ROWS][OLED_KEYBOARD_COLS];
 extern const char OLED_KEYBOARD_CHARS_NUMBERS[OLED_KEYBOARD_ROWS][OLED_KEYBOARD_COLS];
 extern const char OLED_KEYBOARD_CHARS_SYMBOLS[OLED_KEYBOARD_ROWS][OLED_KEYBOARD_COLS];
-extern OLEDKeyboardState gOledKeyboardState;
+extern OledKeyboardState gOledKeyboardState;
 
 // No default for the dictation policy is intentional: adding a text field
 // requires an explicit dictation security decision at its call site.
@@ -318,7 +318,7 @@ extern OLEDKeyboardState gOledKeyboardState;
 // dictation policy because non-secret command fields also deny dictation.
 // Plain fields omit it.
 void oledKeyboardInit(const char* title, const char* initialText, int maxLength,
-                      OLEDKeyboardDictationPolicy dictationPolicy,
+                      OledKeyboardDictationPolicy dictationPolicy,
                       bool masked = false);
 void oledKeyboardReset();
 void oledKeyboardDisplay(Adafruit_SSD1306* display);
@@ -356,7 +356,7 @@ void oledKeyboardToggleMode();
 void oledKeyboardDictationTick();
 
 // Autocomplete support (Select button triggers suggestions)
-void oledKeyboardSetAutocomplete(OLEDKeyboardAutocompleteFunc func, void* userData = nullptr);
+void oledKeyboardSetAutocomplete(OledKeyboardAutocompleteFunc func, void* userData = nullptr);
 void oledKeyboardTriggerAutocomplete();
 void oledKeyboardSelectSuggestion();
 void oledKeyboardDismissSuggestions();
@@ -365,10 +365,10 @@ bool oledKeyboardShowingSuggestions();
 // Draw a small curved back arrow icon (↩) inline at current cursor position
 void oledDrawBackArrowIcon(Adafruit_SSD1306* display, int footerY);
 
-typedef void (*OLEDConfirmCallback)(void* userData);
+typedef void (*OledConfirmCallback)(void* userData);
 // onNo (optional) fires when the user picks No or cancels (B). Existing callers
 // that omit it keep today's behavior (cancel just dismisses).
-bool oledConfirmRequest(const char* line1, const char* line2, OLEDConfirmCallback onYes, void* userData, bool defaultYes = true, OLEDConfirmCallback onNo = nullptr);
+bool oledConfirmRequest(const char* line1, const char* line2, OledConfirmCallback onYes, void* userData, bool defaultYes = true, OledConfirmCallback onNo = nullptr);
 bool oledConfirmIsActive();
 // Poll for an incoming ESP-NOW pair request and pop the shared accept/reject
 // dialog (defined in OLED_ESPNow.cpp; called from oledUpdate each tick).
@@ -380,13 +380,13 @@ void oledBluetoothLinkWatch();
 
 // ============= Shared Command Execution =============
 // Execute a CLI command with OLED display authentication context
-void executeOLEDCommand(const String& argsInput);
+void executeOledCommand(const String& argsInput);
 // Execute a CLI command and return success status + output (for callers that need the result)
-bool executeOLEDCommandWithResult(const String& argsInput, char* out, size_t outSize);
+bool executeOledCommandWithResult(const String& argsInput, char* out, size_t outSize);
 // Session-bound variant for stateful OLED UI flows. `expectedEpoch` is the
 // exact display incarnation that collected the input; submission fails closed
 // if another identity replaced it before admission or result delivery.
-bool executeOLEDCommandWithResultForSession(
+bool executeOledCommandWithResultForSession(
     const String& argsInput, TransportSessionEpoch expectedEpoch,
     char* out, size_t outSize);
 // Toast text for a command's outcome (the toast box fits ~17 columns). Success
@@ -424,7 +424,7 @@ const char* oledBluetoothToggleCommand();
 // drift-bug class (two hand-built AuthContexts in different files going
 // out of sync as fields are added/changed) that Pass 1 caught on the G2
 // path. The `path` argument is the audit-log/permission-check path string:
-// "/oled/command" for CLI submissions via buildOLEDCommand, "/oled/files"
+// "/oled/command" for CLI submissions via buildOledCommand, "/oled/files"
 // for direct-FS work via oledFileBrowserAuthContext, etc.
 //
 // Identity reflects the OLED login state: gLocalDisplayUser when logged in,
@@ -482,9 +482,9 @@ void oledSetPatternModeInit();
 void oledSetPatternModeResetSessionState();
 void oledUserManagerModeInit();
 void oledUserManagerModeResetSessionState();
-extern String unavailableOLEDReason;
-extern unsigned long unavailableOLEDStartTime;
-extern String unavailableOLEDTitle;
+extern String unavailableOledReason;
+extern unsigned long unavailableOledStartTime;
+extern String unavailableOledTitle;
 
 #if ENABLE_OLED_DISPLAY && ENABLE_AUTOMATION
 void oledAutomationsModeResetSessionState();

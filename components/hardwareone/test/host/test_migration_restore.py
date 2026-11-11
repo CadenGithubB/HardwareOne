@@ -185,7 +185,7 @@ def setup_contract(setup: str) -> None:
     confirm = extract_block(setup[setup.index(marker):], marker)
     summary = confirm.find('broadcastOutput("Backup staged " + migrationStagedSummary());')
     advice = confirm.find("broadcastOutput(migrationStagedCheckAdvice());")
-    prompt = confirm.find("getOLEDYesNoPrompt(migrationStagedOledPrompt().c_str(), false)")
+    prompt = confirm.find("getOledYesNoPrompt(migrationStagedOledPrompt().c_str(), false)")
     serial = confirm.find("waitForSerialInputBlocking()")
     require(0 <= summary < prompt and summary < serial, "provenance is shown before either confirm")
     require(summary < advice < prompt and advice < serial, "the check advice is shown before either confirm")

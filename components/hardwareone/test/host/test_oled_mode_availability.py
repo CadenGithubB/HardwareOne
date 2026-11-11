@@ -3,22 +3,22 @@
 
 Extracts from the production tree and compiles with oled_mode_availability_harness.cpp:
   * OLED_Display.h: the mode enum, the OLED*Func callback typedefs, MAX_OLED_MODES,
-    struct OLEDModeEntry and enum class MenuAvailability;
-  * OLED_Utils.cpp: the mode registry (statics, registerOLEDMode,
-    registerOLEDModes, findOLEDMode) and getMenuAvailability, with
+    struct OledModeEntry and enum class MenuAvailability;
+  * OLED_Utils.cpp: the mode registry (statics, registerOledMode,
+    registerOledModes, findOledMode) and getMenuAvailability, with
     oledModeFeatureState and oledModeRuleAllows where the tree has them;
   * the real availFuncs: isCLIInputAvailable (OLED_Mode_CLIInput.cpp),
     isSetPatternAvailable (OLED_Mode_SetPattern.cpp), isLogoutModeAvailable
-    (OLED_Mode_Auth.cpp), gpsOLEDModeAvailable (i2csensor_pa1010d_oled.h) and
-    thermalOLEDModeAvailable (i2csensor_mlx90640_oled.h).
+    (OLED_Mode_Auth.cpp), gpsOledModeAvailable (i2csensor_pa1010d_oled.h) and
+    thermalOledModeAvailable (i2csensor_mlx90640_oled.h).
 The harness registers them through the production registry and checks that a
 module's refusal makes its launcher row unavailable with the module's reason
 (CLI Input and Gamepad PW "Login required" without a named display session,
 Logout "Not logged in"), while the central classification keeps its class and
 reason (GPS/thermal No HW and Off, not built rows) and modes without a rule are
 unchanged.
-A source check requires requestOLEDModePrepared() to be declared in
-OLED_Display.h beside requestOLEDMode() and in no other header or mode file.
+A source check requires requestOledModePrepared() to be declared in
+OLED_Display.h beside requestOledMode() and in no other header or mode file.
 --component/--source-dir point the suite at another production tree.
 """
 from __future__ import annotations
@@ -36,13 +36,13 @@ from test_web_batch_handlers import extract_block, require
 HERE = Path(__file__).resolve().parent
 
 REGISTRY_STATICS = (
-    r"(?m)^[^\n;]*\bstatic const OLEDModeEntry\* oledModeRegistry\[[^\n;]*;",
+    r"(?m)^[^\n;]*\bstatic const OledModeEntry\* oledModeRegistry\[[^\n;]*;",
     r"(?m)^[^\n;]*\bstatic size_t oledModeRegistrySize\b[^\n;]*;",
 )
 REGISTRY_FUNCTIONS = (
-    "void registerOLEDMode(",
-    "void registerOLEDModes(",
-    "const OLEDModeEntry* findOLEDMode(",
+    "void registerOledMode(",
+    "void registerOledModes(",
+    "const OledModeEntry* findOledMode(",
 )
 # Present on trees where getMenuAvailability consults the module rule.
 AVAILABILITY_HELPERS = (
@@ -53,8 +53,8 @@ RULES = (
     ("OLED_Mode_CLIInput.cpp", "static bool isCLIInputAvailable("),
     ("OLED_Mode_SetPattern.cpp", "static bool isSetPatternAvailable("),
     ("OLED_Mode_Auth.cpp", "static bool isLogoutModeAvailable("),
-    ("i2csensor_pa1010d_oled.h", "static bool gpsOLEDModeAvailable("),
-    ("i2csensor_mlx90640_oled.h", "static bool thermalOLEDModeAvailable("),
+    ("i2csensor_pa1010d_oled.h", "static bool gpsOledModeAvailable("),
+    ("i2csensor_mlx90640_oled.h", "static bool thermalOledModeAvailable("),
 )
 
 
@@ -87,17 +87,17 @@ def build_unit(component: Path, source_dir: Path | None) -> str:
     display_h = read_source(component, source_dir, "OLED_Display.h")
     oled = read_source(component, source_dir, "OLED_Utils.cpp")
 
-    mode_enum = definition(display_h, "enum OLEDMode").replace(
-        "enum OLEDMode", "enum OLEDMode : int", 1)
-    typedefs = re.findall(r"(?m)^typedef [^;\n]*\(\*OLED\w+Func\)[^;\n]*;", display_h)
-    require(len(typedefs) >= 4, "OLED_Display.h: the OLED*Func callback typedefs were not found")
+    mode_enum = definition(display_h, "enum OledMode").replace(
+        "enum OledMode", "enum OledMode : int", 1)
+    typedefs = re.findall(r"(?m)^typedef [^;\n]*\(\*Oled\w+Func\)[^;\n]*;", display_h)
+    require(len(typedefs) >= 4, "OLED_Display.h: the Oled*Func callback typedefs were not found")
     types = "\n".join([
         mode_enum + ";",
         *typedefs,
         single(display_h, r"(?m)^#define MAX_OLED_MODES\s+\d+", "MAX_OLED_MODES"),
-        definition(display_h, "struct OLEDModeEntry") + ";",
+        definition(display_h, "struct OledModeEntry") + ";",
         definition(display_h, "enum class MenuAvailability") + ";",
-        "MenuAvailability getMenuAvailability(OLEDMode mode, String* outReason);",
+        "MenuAvailability getMenuAvailability(OledMode mode, String* outReason);",
     ])
 
     registry = [single(oled, pattern, pattern) for pattern in REGISTRY_STATICS]
@@ -119,16 +119,16 @@ def build_unit(component: Path, source_dir: Path | None) -> str:
 
 
 def prototype_failures(component: Path, source_dir: Path | None) -> list[str]:
-    """requestOLEDModePrepared() is declared once, in OLED_Display.h beside requestOLEDMode()."""
+    """requestOledModePrepared() is declared once, in OLED_Display.h beside requestOledMode()."""
     failures = []
     display_h = read_source(component, source_dir, "OLED_Display.h")
-    request = display_h.find("void requestOLEDMode(")
-    prepared = display_h.find("void requestOLEDModePrepared(")
+    request = display_h.find("void requestOledMode(")
+    prepared = display_h.find("void requestOledModePrepared(")
     if prepared < 0:
-        failures.append("OLED_Display.h does not declare requestOLEDModePrepared()")
+        failures.append("OLED_Display.h does not declare requestOledModePrepared()")
     elif request < 0 or not 0 < prepared - request < 800:
-        failures.append("OLED_Display.h: requestOLEDModePrepared() is not declared right after "
-                        "requestOLEDMode()")
+        failures.append("OLED_Display.h: requestOledModePrepared() is not declared right after "
+                        "requestOledMode()")
     names = {path.name for path in component.glob("*.cpp")} | {path.name for path in component.glob("*.h")}
     if source_dir:
         names |= {path.name for path in source_dir.glob("*.cpp")}
@@ -140,8 +140,8 @@ def prototype_failures(component: Path, source_dir: Path | None) -> list[str]:
             text = read_source(component, source_dir, name)
         except (OSError, UnicodeDecodeError):
             continue
-        if re.search(r"(?m)^\s*void requestOLEDModePrepared\(", text):
-            failures.append(f"{name} declares requestOLEDModePrepared() itself; "
+        if re.search(r"(?m)^\s*void requestOledModePrepared\(", text):
+            failures.append(f"{name} declares requestOledModePrepared() itself; "
                             "it belongs in OLED_Display.h")
     return failures
 

@@ -157,7 +157,7 @@ def source_guard() -> None:
     require("executeUnifiedWebCommand(" in unload and '"llmunload"' in unload,
             "handleLLMUnload must submit llmunload through the web command executor")
     require("gSettings.llmMaxContext" not in load, "the context cap belongs to the backend")
-    require("submitOLEDCommandForSession(" in oled, "the OLED must submit through the display executor")
+    require("submitOledCommandForSession(" in oled, "the OLED must submit through the display executor")
     require("llmBuildLoadCommand(" in oled and '"llmunload"' in oled,
             "the OLED picker and Unload row must submit llmload/llmunload")
 

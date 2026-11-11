@@ -17,9 +17,9 @@
 // External references
 
 // Power menu scroll states (replaces manual selection variables)
-EXT_RAM_BSS_ATTR static OLEDScrollState sPowerMainScroll;
-EXT_RAM_BSS_ATTR static OLEDScrollState sPowerCpuScroll;
-EXT_RAM_BSS_ATTR static OLEDScrollState sPowerSleepScroll;
+EXT_RAM_BSS_ATTR static OledScrollState sPowerMainScroll;
+EXT_RAM_BSS_ATTR static OledScrollState sPowerCpuScroll;
+EXT_RAM_BSS_ATTR static OledScrollState sPowerSleepScroll;
 static bool sPowerScrollInitialized = false;
 
 static void initPowerScrollStates() {
@@ -157,20 +157,20 @@ void displayPowerSleep() {
 // through the command system so they get a normal [CMD] audit-log entry.
 static void powerRebootConfirmed(void* /*userData*/) {
   DEBUG_SYSTEMF("[POWER_OLED] Reboot confirmed - restarting device");
-  executeOLEDCommand("reboot");
+  executeOledCommand("reboot");
 }
 
 static void powerRamFlushConfirmed(void* /*userData*/) {
   DEBUG_SYSTEMF("[POWER_OLED] RAM flush confirmed - capturing features and restarting");
-  executeOLEDCommand("ramflush");
+  executeOledCommand("ramflush");
 }
 
 static void executePowerAction() {
   int sel = sPowerMainScroll.selectedIndex;
   if (sel == 0) {
-    requestOLEDMode(OLED_POWER_CPU, "power.submenu.cpu");
+    requestOledMode(OLED_POWER_CPU, "power.submenu.cpu");
   } else if (sel == 1) {
-    requestOLEDMode(OLED_POWER_SLEEP, "power.submenu.sleep");
+    requestOledMode(OLED_POWER_SLEEP, "power.submenu.sleep");
   } else if (sel == 2) {
     // Guard the reboot behind a confirmation, defaulting to "No", so a stray
     // A/X press can't restart the device.
@@ -197,7 +197,7 @@ static void executePowerCpuAction() {
   if (sel >= 0 && sel < (int)(sizeof(cmds) / sizeof(cmds[0]))) {
     DEBUG_SYSTEMF("[POWER_OLED] Executing: %s (selection=%d)", cmds[sel], sel);
     DEBUG_SYSTEMF("[POWER_OLED] Current CPU freq before command: %lu MHz", (unsigned long)getCpuFrequencyMhz());
-    executeOLEDCommand(cmds[sel]);
+    executeOledCommand(cmds[sel]);
     delay(50);
     DEBUG_SYSTEMF("[POWER_OLED] Current CPU freq after command: %lu MHz", (unsigned long)getCpuFrequencyMhz());
   }
@@ -221,13 +221,13 @@ static void executePowerSleepAction() {
       oledRunCommand(cmd);
       break;
     }
-    case 1: executeOLEDCommand("lightsleep 20"); break;
-    case 2: executeOLEDCommand("oledmode off"); break;
+    case 1: executeOledCommand("lightsleep 20"); break;
+    case 2: executeOledCommand("oledmode off"); break;
   }
 }
 
 // ============================================================================
-// Power Input Handlers (registered via OLEDModeEntry)
+// Power Input Handlers (registered via OledModeEntry)
 // ============================================================================
 
 static bool powerMainInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
@@ -277,7 +277,7 @@ static bool powerSleepInputHandler(int deltaX, int deltaY, uint32_t newlyPressed
 // ============================================================================
 
 // Columns: mode, name, iconName, displayFunc, availFunc, inputFunc, showInMenu, menuOrder, hints
-static const OLEDModeEntry sPowerModes[] = {
+static const OledModeEntry sPowerModes[] = {
   { OLED_POWER,       "Power",    "power", displayPower,      nullptr, powerMainInputHandler,  false, -1, "A:Select B:Back" },
   { OLED_POWER_CPU,   "CPU Power","power", displayPowerCPU,   nullptr, powerCpuInputHandler,   false, -1, "A:Execute B:Back" },
   { OLED_POWER_SLEEP, "Sleep",    "power", displayPowerSleep, nullptr, powerSleepInputHandler, false, -1, "A:Execute B:Back" },

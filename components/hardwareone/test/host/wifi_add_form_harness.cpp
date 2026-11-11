@@ -78,14 +78,14 @@ static void secureClearString(String& text) {
 }
 
 #define OLED_KEYBOARD_MAX_LENGTH 128
-enum class OLEDKeyboardDictationPolicy : uint8_t { ALLOW_PLAINTEXT, DENY };
+enum class OledKeyboardDictationPolicy : uint8_t { ALLOW_PLAINTEXT, DENY };
 struct FakeKeyboard {
   bool active = false, completed = false, cancelled = false, masked = false;
   std::string title, text;
 };
 static FakeKeyboard gKeyboard;
 static int gKeyboardOpens = 0;
-static void oledKeyboardInit(const char* title, const char*, int, OLEDKeyboardDictationPolicy,
+static void oledKeyboardInit(const char* title, const char*, int, OledKeyboardDictationPolicy,
                              bool masked = false) {
   gKeyboard = FakeKeyboard{};
   gKeyboard.active = true;
@@ -101,12 +101,12 @@ static const char* oledKeyboardGetText() { return gKeyboard.text.c_str(); }
 // Session-fenced OLED executor: records each admitted line and answers from the
 // scripted replies in order (default: success "OK"). gReplaceSession models a
 // remote login replacing the display session while the command runs: the
-// result is fenced (empty, false) like executeOLEDCommandWithResultImpl.
+// result is fenced (empty, false) like executeOledCommandWithResultImpl.
 struct Reply { bool ok; std::string text; };
 static std::vector<std::string> gOledLines;
 static std::vector<Reply> gReplies;
 static bool gReplaceSession = false;
-static bool executeOLEDCommandWithResultForSession(const String& line, TransportSessionEpoch epoch,
+static bool executeOledCommandWithResultForSession(const String& line, TransportSessionEpoch epoch,
                                                   char* out, size_t outSize) {
   out[0] = '\0';
   if (epoch != gLiveEpoch) return false;

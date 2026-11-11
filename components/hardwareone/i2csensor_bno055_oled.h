@@ -63,16 +63,16 @@ static void displayIMUActions() {
 }
 
 // Availability check for IMU OLED mode
-static bool imuOLEDModeAvailable(String* outReason) {
+static bool imuOledModeAvailable(String* outReason) {
   return true;  // Always allow navigation, display function handles "not active" state
 }
 
 static void imuToggleConfirmed(void* userData) {
   (void)userData;
   if (gImuRunning && gImuConnected) {
-    executeOLEDCommand("closeimu");
+    executeOledCommand("closeimu");
   } else {
-    executeOLEDCommand("openimu");
+    executeOledCommand("openimu");
   }
 }
 
@@ -90,13 +90,13 @@ static bool imuInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
 }
 
 // IMU OLED mode entry
-static const OLEDModeEntry imuOLEDModes[] = {
+static const OledModeEntry imuOledModes[] = {
   {
     OLED_IMU_ACTIONS,        // mode enum
     "IMU",                   // menu name
     "imu_axes",              // icon name
     displayIMUActions,       // displayFunc
-    imuOLEDModeAvailable,    // availFunc
+    imuOledModeAvailable,    // availFunc
     imuInputHandler,         // inputFunc - X toggles sensor
     true,                    // showInMenu
     40,                      // menuOrder
@@ -105,6 +105,6 @@ static const OLEDModeEntry imuOLEDModes[] = {
 };
 
 // Auto-register IMU OLED mode
-REGISTER_OLED_MODE_MODULE(imuOLEDModes, sizeof(imuOLEDModes) / sizeof(imuOLEDModes[0]), "IMU");
+REGISTER_OLED_MODE_MODULE(imuOledModes, sizeof(imuOledModes) / sizeof(imuOledModes[0]), "IMU");
 
 #endif // I2CSENSOR_BNO055_OLED_H
