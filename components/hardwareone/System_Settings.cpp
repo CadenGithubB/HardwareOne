@@ -1242,7 +1242,7 @@ void applySettings() {
 
   // Make localtime_r()/mktime() honor the configured offset from this point
   // on. Must happen before anything formats or schedules a local time —
-  // without it the C library defaults to UTC and only setupNTP()'s
+  // without it the C library defaults to UTC and only setupNtp()'s
   // configTime() (WiFi-only) would ever correct it. See Clock::applyTimezone.
   Clock::applyTimezone();
 
@@ -1356,7 +1356,7 @@ bool buildSettingsJsonDoc(JsonDocument& doc, bool excludePasswords, bool mainFil
 #endif
 
   // NOTE: wifiAutoStart is owned by the wifi module (written under the
-  //       "network.wifi" section). The legacy single-network wifiSSID/
+  //       "network.wifi" section). The legacy single-network wifiSsid/
   //       wifiPassword fields are gone (removed 2026-07-20).
   // NOTE: ntpServer + tzOffsetMinutes are owned by the clock module
   //       ("system.time"), which is registered unconditionally so the timezone
@@ -2174,7 +2174,7 @@ const char* cmd_tzoffsetminutes(const String& argsInput) {
   setSetting(gSettings.tzOffsetMinutes, offset);
   Clock::applyTimezone();  // takes effect with or without WiFi
 #if ENABLE_WIFI
-  setupNTP();
+  setupNtp();
 #endif
   snprintf(getDebugBuffer(), 1024, "Timezone offset set to %d minutes", offset);
   return getDebugBuffer();
@@ -2190,8 +2190,8 @@ const char* cmd_ntpserver(const String& argsInput) {
   const char* p = valStr.c_str();
 
   // Resolve host first
-  IPAddress ntpIP;
-  if (!WiFi.hostByName(p, ntpIP)) {
+  IPAddress ntpIp;
+  if (!WiFi.hostByName(p, ntpIp)) {
     snprintf(getDebugBuffer(), 1024, "Error: Cannot resolve NTP server hostname '%s'", p);
     return getDebugBuffer();
   }
@@ -2204,7 +2204,7 @@ const char* cmd_ntpserver(const String& argsInput) {
   ntpPacket[2] = 6;
   ntpPacket[3] = 0xEC;
   udp.begin(8888);
-  if (!udp.beginPacket(ntpIP, 123)) {
+  if (!udp.beginPacket(ntpIp, 123)) {
     udp.stop();
     snprintf(getDebugBuffer(), 1024, "Error: Cannot connect to NTP server '%s'", p);
     return getDebugBuffer();
@@ -2229,7 +2229,7 @@ const char* cmd_ntpserver(const String& argsInput) {
   }
 
   setSetting(gSettings.ntpServer, p);
-  setupNTP();
+  setupNtp();
   snprintf(getDebugBuffer(), 1024, "NTP server set to %s (connectivity verified)", p);
   return getDebugBuffer();
 }

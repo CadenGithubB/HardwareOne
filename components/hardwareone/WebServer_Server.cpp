@@ -221,10 +221,10 @@ char* gJsonResponseBuffer = nullptr;
 // Session Management Functions
 // ============================================================================
 
-// getClientIP moved to WebCore_Utils.cpp
+// getClientIp moved to WebCore_Utils.cpp
 
 // Session lookup
-int findSessionIndexBySID(const String& sid) {
+int findSessionIndexBySid(const String& sid) {
   if (sid.length() == 0) return -1;
   for (int i = 0; i < MAX_SESSIONS; ++i) {
     if (gSessions[i].sid == sid) return i;
@@ -385,7 +385,7 @@ void webSessionMarkStatusSent(int idx, const String& sid, unsigned long seqSent)
   if (gSensorStatusSeq == seqSent) gSessions[idx].needsStatusUpdate = false;
 }
 
-TransportSessionEpoch webSessionEpochForSID(const String& sid) {
+TransportSessionEpoch webSessionEpochForSid(const String& sid) {
   if (sid.length() != kWebSessionSidChars) return 0;
   WebSessionFenceGuard guard;
   if (!guard) return 0;
@@ -542,8 +542,8 @@ String setSession(httpd_req_t* req, const String& u) {
   pruneExpiredSessions();
 
   // Get current client IP to avoid storing logout reason for same IP
-  String currentIP;
-  getClientIP(req, currentIP);
+  String currentIp;
+  getClientIp(req, currentIp);
   const int currentSockfd = httpd_req_to_sockfd(req);
   String createdSid;
   int socketsToClose[MAX_SESSIONS] = {};
@@ -565,7 +565,7 @@ String setSession(httpd_req_t* req, const String& u) {
   for (int i = 0; i < MAX_SESSIONS; ++i) {
     if (gSessions[i].sid.length() > 0 && gSessions[i].user == u) {
       // Found existing session for this user - only store logout reason if different IP
-      if (gSessions[i].ip.length() > 0 && gSessions[i].ip != currentIP) {
+      if (gSessions[i].ip.length() > 0 && gSessions[i].ip != currentIp) {
         storeLogoutReason(gSessions[i].ip, "You were signed out because you logged in from another device.");
       }
       BROADCAST_PRINTF("[auth] Clearing existing session for user: %s (session limit enforcement)", u.c_str());
@@ -586,7 +586,7 @@ String setSession(httpd_req_t* req, const String& u) {
     // other sign-out (reason for its browser, logout event, socket closed).
     // A revoked session already got its reason and only waits for delivery.
     if (!gSessions[idx].revoked) {
-      if (gSessions[idx].ip.length() > 0 && gSessions[idx].ip != currentIP) {
+      if (gSessions[idx].ip.length() > 0 && gSessions[idx].ip != currentIp) {
         storeLogoutReason(gSessions[idx].ip, "You were signed out because the session limit was reached by another login.");
       }
       systemEventPost(SYSEVT_LOGOUT, gSessions[idx].user.c_str(), "evicted");
@@ -611,7 +611,7 @@ String setSession(httpd_req_t* req, const String& u) {
   DEBUG_AUTHF("Creating session for user '%s' with bootId '%s' (current: '%s')",
               u.c_str(), s.bootId.c_str(), gBootId.c_str());
   String ip;
-  getClientIP(req, ip);
+  getClientIp(req, ip);
   s.ip = ip;
   s.sockfd = currentSockfd;  // Store socket descriptor for force disconnect
   webInvalidateSessionSlot(idx);  // free-slot eviction may replace a live entry
@@ -655,16 +655,16 @@ void clearSession(httpd_req_t* req, const char* logoutReason) {
   // Store logout reason for user's IP before clearing session
   if (logoutReason && logoutReason[0] != '\0') {
     char ipBuf[64];
-    getClientIP(req, ipBuf, sizeof(ipBuf));
+    getClientIp(req, ipBuf, sizeof(ipBuf));
     if (ipBuf[0] != '-' && ipBuf[0] != '\0') {
       storeLogoutReason(ipBuf, logoutReason);
     }
   }
 
   // Revoke current session by cookie value
-  String sid = getCookieSID(req);
+  String sid = getCookieSid(req);
   WebSessionFenceGuard sessionGuard;
-  int idx = findSessionIndexBySID(sid);
+  int idx = findSessionIndexBySid(sid);
   if (sessionGuard && idx >= 0) {
     systemEventPost(SYSEVT_LOGOUT, gSessions[idx].user.c_str(), "manual");
     webInvalidateSessionSlot(idx);
@@ -745,9 +745,9 @@ bool isAuthed(httpd_req_t* req, String& outUser) {
   // httpd_req_t::uri is a fixed-size char array and never NULL; only guard req itself.
   const char* uri = req ? req->uri : "(null)";
   pruneExpiredSessions();
-  String sid = getCookieSID(req);
+  String sid = getCookieSid(req);
   char ipBuf[64];
-  getClientIP(req, ipBuf, sizeof(ipBuf));
+  getClientIp(req, ipBuf, sizeof(ipBuf));
 
   // Permanent IP ban — denied unconditionally before any auth processing
   if (isIpBanned(ipBuf)) {
@@ -791,18 +791,18 @@ bool isAuthed(httpd_req_t* req, String& outUser) {
   WebSessionFenceGuard sessionGuard;
   if (!sessionGuard || !gSessions) return false;
 
-  int idx = findSessionIndexBySID(sid);
+  int idx = findSessionIndexBySid(sid);
   if (idx < 0) {
     // Rate limit session debug/broadcast messages per IP
-    static char lastDebugIP[64] = "";
+    static char lastDebugIp[64] = "";
     static unsigned long lastDebugTime = 0;
     unsigned long now = millis();
 
-    if (strcmp(ipBuf, lastDebugIP) != 0 || (now - lastDebugTime) > 5000) {
+    if (strcmp(ipBuf, lastDebugIp) != 0 || (now - lastDebugTime) > 5000) {
       BROADCAST_PRINTF("[auth] unknown SID for uri=%.*s", 120, uri);
       DEBUG_AUTHF("No session found for SID from IP %s (stale cookie after reboot)", ipBuf);
 
-      strlcpy(lastDebugIP, ipBuf, sizeof(lastDebugIP));
+      strlcpy(lastDebugIp, ipBuf, sizeof(lastDebugIp));
       lastDebugTime = now;
     }
 
@@ -822,19 +822,19 @@ bool isAuthed(httpd_req_t* req, String& outUser) {
 
   // Check if session is from a previous boot (boot ID mismatch)
   // Rate limit boot validation debug messages per IP
-  static char lastBootDebugIP[64] = "";
+  static char lastBootDebugIp[64] = "";
   static unsigned long lastBootDebugTime = 0;
   unsigned long bootNow = millis();
 
-  if (strcmp(ipBuf, lastBootDebugIP) != 0 || (bootNow - lastBootDebugTime) > 5000) {
+  if (strcmp(ipBuf, lastBootDebugIp) != 0 || (bootNow - lastBootDebugTime) > 5000) {
     DEBUG_AUTHF("Validating session: user='%s', sessionBootId='%s', currentBootId='%s'",
                 gSessions[idx].user.c_str(), gSessions[idx].bootId.c_str(), gBootId.c_str());
-    strlcpy(lastBootDebugIP, ipBuf, sizeof(lastBootDebugIP));
+    strlcpy(lastBootDebugIp, ipBuf, sizeof(lastBootDebugIp));
     lastBootDebugTime = bootNow;
   }
 
   if (gSessions[idx].bootId != gBootId) {
-    if (strcmp(ipBuf, lastBootDebugIP) == 0 && (bootNow - lastBootDebugTime) < 1000) {
+    if (strcmp(ipBuf, lastBootDebugIp) == 0 && (bootNow - lastBootDebugTime) < 1000) {
       DEBUG_AUTHF("BOOT ID MISMATCH! Session from previous boot. Storing restart message.");
     }
     BROADCAST_PRINTF("[auth] session from previous boot for uri=%.*s", 120, uri);
@@ -847,7 +847,7 @@ bool isAuthed(httpd_req_t* req, String& outUser) {
     gSessions[idx] = SessionEntry();
     return false;
   } else {
-    if (strcmp(ipBuf, lastBootDebugIP) == 0 && (bootNow - lastBootDebugTime) < 1000) {
+    if (strcmp(ipBuf, lastBootDebugIp) == 0 && (bootNow - lastBootDebugTime) < 1000) {
       DEBUG_AUTHF("Boot ID matches - session is valid for current boot");
     }
   }
@@ -1511,7 +1511,7 @@ bool webRevokeSessionBySid(const String& sid,
                            String* outUser) {
   WebSessionFenceGuard sessionGuard;
   if (!sessionGuard || !gSessions) return false;
-  int idx = findSessionIndexBySID(sid);
+  int idx = findSessionIndexBySid(sid);
   // Session listings expose only an eight-character, non-bearer hint. Accept
   // that hint when it identifies exactly one live session so `sessionrevoke
   // sid <listed-value>` remains useful without disclosing the cookie itself.
@@ -3037,7 +3037,7 @@ esp_err_t handleSessionsList(httpd_req_t* req) {
   doc["success"] = true;
   JsonArray sessions = doc["sessions"].to<JsonArray>();
   
-  String currentSid = getCookieSID(req);
+  String currentSid = getCookieSid(req);
   buildAllSessionsJson(currentSid, sessions);
   
   String response;
@@ -3094,7 +3094,7 @@ esp_err_t handleSensorsStatusWithUpdates(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);
 
   // Check if this session needs a status update notification
-  int sessIdx = findSessionIndexBySID(getCookieSID(req));
+  int sessIdx = findSessionIndexBySid(getCookieSid(req));
   bool needsRefresh = false;
   if (sessIdx >= 0) {
     // Check if flagged for status update
@@ -3399,8 +3399,8 @@ esp_err_t handleCliCommand(httpd_req_t* req) {
   }
 
   // Determine originating session index and set skip for SSE broadcast during this command
-  String sidForCmd = getCookieSID(req);
-  int originIdx = findSessionIndexBySID(sidForCmd);
+  String sidForCmd = getCookieSid(req);
+  int originIdx = findSessionIndexBySid(sidForCmd);
   int prevSkip = gBroadcastSkipSessionIdx;
   gBroadcastSkipSessionIdx = originIdx;
   {
@@ -3688,7 +3688,7 @@ esp_err_t handleLogin(httpd_req_t* req) {
   // Permanent IP ban — return 403 before rendering any page
   {
     char banIpBuf[64];
-    getClientIP(req, banIpBuf, sizeof(banIpBuf));
+    getClientIp(req, banIpBuf, sizeof(banIpBuf));
     if (isIpBanned(banIpBuf)) {
       DEBUG_AUTHF("[login] banned IP %s blocked", banIpBuf);
       httpd_resp_set_status(req, "403 Forbidden");
@@ -3712,10 +3712,10 @@ esp_err_t handleLogin(httpd_req_t* req) {
     httpd_resp_set_type(req, "text/html");
     streamBeginHtml(req, "Sign In", /*isPublic=*/true, "", "login");
     String logoutReason = "";
-    String clientIP;
-    getClientIP(req, clientIP);
-    if (clientIP.length() > 0) {
-      logoutReason = getLogoutReason(clientIP);
+    String clientIp;
+    getClientIp(req, clientIp);
+    if (clientIp.length() > 0) {
+      logoutReason = getLogoutReason(clientIp);
     }
     streamLoginInner(req, "", "", logoutReason);
     streamEndHtml(req);
@@ -3743,7 +3743,7 @@ esp_err_t handleLogin(httpd_req_t* req) {
 
   // --- Brute-force lockout check ---
   String ip;
-  getClientIP(req, ip);
+  getClientIp(req, ip);
   {
     unsigned long remainingMs = 0;
     if (!credentialAttemptAllowed(SOURCE_WEB, ip.c_str(), &remainingMs)) {
@@ -3936,10 +3936,10 @@ static esp_err_t sendRegisterFailPage(httpd_req_t* req, const char* message) {
 // account owner (submitAccountRequest); no command line is built.
 esp_err_t handleRegisterSubmit(httpd_req_t* req) {
   String ip;
-  getClientIP(req, ip);
+  getClientIp(req, ip);
   {
     char banIpBuf[64];
-    getClientIP(req, banIpBuf, sizeof(banIpBuf));
+    getClientIp(req, banIpBuf, sizeof(banIpBuf));
     if (isIpBanned(banIpBuf)) {
       httpd_resp_set_status(req, "403 Forbidden");
       httpd_resp_set_type(req, "text/plain");
@@ -5239,7 +5239,7 @@ esp_err_t handleCliBatch(httpd_req_t* req) {
     }
   }
 
-  String sidForCmd = getCookieSID(req);
+  String sidForCmd = getCookieSid(req);
   const TransportSessionEpoch batchSessionEpoch =
       captureTransportSessionEpoch(ctx);
   const bool interactiveBatch = doc["interactive"] | false;
@@ -5276,7 +5276,7 @@ esp_err_t handleCliBatch(httpd_req_t* req) {
       wrappedSettingsBatch ? allocateSettingsWriteBatchId() : 0;
   SettingsBatchRequestCleanup settingsBatchCleanup(settingsBatchId);
 
-  int originIdx = findSessionIndexBySID(sidForCmd);
+  int originIdx = findSessionIndexBySid(sidForCmd);
   int prevSkip = gBroadcastSkipSessionIdx;
   gBroadcastSkipSessionIdx = originIdx;
   gMeshActivitySuspended = true;

@@ -110,7 +110,7 @@ static WifiNetworkSaveResult saveSetupWifiNetwork(const String& ssid, const Stri
   assert(scopeActive || !scopeAvailable); ++wifiSaveCalls; operations.emplace_back("wifi.save"); return wifiResult;
 }
 struct WifiBoundary { bool isConnected() const { return connected; } } WiFi;
-static void setupNTP() { operations.emplace_back("ntp.setup"); }
+static void setupNtp() { operations.emplace_back("ntp.setup"); }
 struct SettingEntry;
 static void finishSettingChange(const void* field, const SettingEntry*) {
   // Without a batch slot the owner applies unbatched by design.
@@ -527,7 +527,7 @@ static void completionEffects() {
       wizardModeApply(wizardModeMenuForFeature("http"), 1);
 #endif
       auto result = completed(); result.wifiConfigured = true;
-      result.wifiSSID = "fixture-network"; result.wifiPassword = "fixture-secret";
+      result.wifiSsid = "fixture-network"; result.wifiPassword = "fixture-secret";
       check(wizardSaveAndApplySettings(result));
       check(gSettings.logLevel == 0 && gSettings.tzOffsetMinutes == timezones[0].offsetMinutes);
       check(std::count(operations.begin(), operations.end(), "debug.change") == 1);
@@ -558,9 +558,9 @@ static void completionEffects() {
   // dropped, and the caller reads that back from the result.
   reset(); initSetupWizard();
   result = completed(); result.wifiConfigured = true;
-  result.wifiSSID = "fixture-network"; result.wifiPassword = "fixture-secret";
+  result.wifiSsid = "fixture-network"; result.wifiPassword = "fixture-secret";
   check(wizardSaveAndApplySettings(result) && result.applied);
-  check(wifiSaveCalls == 0 && !result.wifiConfigured && result.wifiSSID.empty() && result.wifiPassword.empty());
+  check(wifiSaveCalls == 0 && !result.wifiConfigured && result.wifiSsid.empty() && result.wifiPassword.empty());
 #endif
 }
 

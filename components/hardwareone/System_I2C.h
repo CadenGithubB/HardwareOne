@@ -165,7 +165,7 @@ auto i2cTaskWithTimeout(uint8_t bus, uint8_t address, uint32_t clockHz,
 #define I2C_ADDR_OLED 0x3D
 
 template<typename Func>
-void i2cTransactionNACKTolerant(uint8_t address, uint32_t clockHz, uint32_t lockWaitMs, Func&& operation) {
+void i2cTransactionNackTolerant(uint8_t address, uint32_t clockHz, uint32_t lockWaitMs, Func&& operation) {
   extern bool gI2cBusRunning;
   if (!gI2cBusRunning) return;
 
@@ -183,7 +183,7 @@ void i2cTransactionNACKTolerant(uint8_t address, uint32_t clockHz, uint32_t lock
 // Dual-bus NACK-tolerant variant (FM radio path uses NACK-tolerant for
 // register polling; same shape extended with a bus selector).
 template<typename Func>
-void i2cTransactionNACKTolerant(uint8_t bus, uint8_t address, uint32_t clockHz,
+void i2cTransactionNackTolerant(uint8_t bus, uint8_t address, uint32_t clockHz,
                                 uint32_t lockWaitMs, Func&& operation) {
   extern bool gI2cBusRunning;
   if (!gI2cBusRunning) return;

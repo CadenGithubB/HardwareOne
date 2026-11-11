@@ -154,7 +154,7 @@ static int httpd_req_recv(httpd_req_t* req, char* destination, size_t length) {
   return static_cast<int>(count);
 }
 static bool isBondMaster() { return scenario.bondMaster; }
-static String getCookieSID(httpd_req_t*) { return scenario.stateful ? "session" : ""; }
+static String getCookieSid(httpd_req_t*) { return scenario.stateful ? "session" : ""; }
 static TransportSessionEpoch captureTransportSessionEpoch(const AuthContext&) {
   ++scenario.captures;
   const auto epoch = scenario.stateful ? scenario.epoch : 0;
@@ -166,7 +166,7 @@ static bool webNoteSessionInteraction(const String&, TransportSessionEpoch) {
   ++scenario.interactions; return scenario.live;
 }
 static uint32_t allocateSettingsWriteBatchId() { return 73; }
-static int findSessionIndexBySID(const String&) { return 3; }
+static int findSessionIndexBySid(const String&) { return 3; }
 static uint32_t millis() { scenario.now += 100; return scenario.now; }
 static int pdMS_TO_TICKS(int value) { return value; }
 static void vTaskDelay(int) { ++scenario.delays; }

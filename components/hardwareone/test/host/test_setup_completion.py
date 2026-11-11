@@ -33,7 +33,7 @@ def generate() -> str:
     for adapter in (wrapper, on_exit):
         require(adapter.count("wizardSaveAndApplySettings(") == 1, "adapter must call shared completion once")
         for obsolete in ("saveSetupWifiNetwork(", "writeSettingsJson(", "writeDebugJson(",
-                         "applySettings(", "setupNTP("):
+                         "applySettings(", "setupNtp("):
             require(obsolete not in adapter, f"adapter duplicates completion operation: {obsolete}")
     require("wizardFinalize(" not in setup + mode, "obsolete live finalization remains")
     for dependency in ('"System_NTP.h"', '"network/wifi/System_WiFiNetworks.h"', '<WiFi.h>'):

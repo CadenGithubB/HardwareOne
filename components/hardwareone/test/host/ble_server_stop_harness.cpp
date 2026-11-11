@@ -430,7 +430,7 @@ static TransportSessionEpoch transportSessionOpen(HostCommandSource) {
   ++boundary.sessionOpens;
   return 1000 + boundary.sessionOpens;
 }
-static BleDeviceType bleIdentifyDeviceByMAC(const uint8_t*) { return BLE_DEVICE_UNKNOWN; }
+static BleDeviceType bleIdentifyDeviceByMac(const uint8_t*) { return BLE_DEVICE_UNKNOWN; }
 
 // The console view (Bluetooth.cpp bleConsoleView) for bleLinkStatus().
 static BleConsoleView bleConsoleView() {

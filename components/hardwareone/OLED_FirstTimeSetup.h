@@ -49,10 +49,10 @@ bool getOledYesNoPrompt(const char* prompt, bool defaultYes = true);
  * Scans for networks and allows user to select one
  * Falls back to serial console if OLED unavailable
  * 
- * @param outSSID Selected network SSID (output parameter)
+ * @param outSsid Selected network SSID (output parameter)
  * @return true if network selected, false if skipped/cancelled
  */
-bool getOledWifiSelection(String& outSSID);
+bool getOledWifiSelection(String& outSsid);
 
 /**
  * Display a message on OLED and wait for user acknowledgment

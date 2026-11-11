@@ -222,8 +222,8 @@ struct Settings {
       espnowFirstTimeSetup(false),
       espnowChannel(0),
       meshRole(0),
-      meshMasterMAC(""),
-      meshBackupMAC(""),
+      meshMasterMac(""),
+      meshBackupMac(""),
       meshBackupEnabled(false),
       meshMasterHeartbeatInterval(10000),
       meshFailoverTimeout(20000),
@@ -231,7 +231,7 @@ struct Settings {
       meshTopoDiscoveryInterval(0),
       meshTopoAutoRefresh(false),
       meshHeartbeatBroadcast(true),
-      meshTTL(3),
+      meshTtl(3),
       meshRelay(true),
       meshPeerMax(8),
       sensorBroadcastIntervalMs(1000),
@@ -488,7 +488,7 @@ struct Settings {
     // String members are now initialized in initializer list
   }
 
-  // wifiSSID / wifiPassword removed 2026-07-20 — dead legacy single-network
+  // wifiSsid / wifiPassword removed 2026-07-20 — dead legacy single-network
   // fields; System_WiFiNetworks owns saved credentials (network.wifi.networks).
   bool wifiEnabled;        // Enable/disable WiFi at boot (default: true)
   bool wifiAutoStart;
@@ -780,8 +780,8 @@ struct Settings {
   uint8_t espnowChannel;               // 0=auto, 1-13=preferred channel when offline
   // Mesh role settings
   uint8_t meshRole;                    // 0=worker, 1=master, 2=backup_master
-  String meshMasterMAC;                // MAC of current master (empty if this is master)
-  String meshBackupMAC;                // MAC of designated backup master
+  String meshMasterMac;                // MAC of current master (empty if this is master)
+  String meshBackupMac;                // MAC of designated backup master
   bool meshBackupEnabled;              // Show/use backup master feature (default: false)
   uint32_t meshMasterHeartbeatInterval;  // Master heartbeat interval (ms, default: 10000)
   uint32_t meshFailoverTimeout;        // Backup promotes after this timeout (ms, default: 20000)
@@ -789,7 +789,7 @@ struct Settings {
   uint32_t meshTopoDiscoveryInterval;  // Topology discovery interval (ms, 0=disabled)
   bool meshTopoAutoRefresh;            // Enable automatic topology refresh
   bool meshHeartbeatBroadcast;         // Broadcast heartbeats to FF:FF:FF:FF:FF:FF (public mode)
-  uint8_t meshTTL;                     // Hop budget stamped on relay-eligible frames (1-10,
+  uint8_t meshTtl;                     // Hop budget stamped on relay-eligible frames (1-10,
                                        // default 3). 1 = single hop, i.e. relaying off for
                                        // that frame. Applies to flooded broadcasts and to the
                                        // RELAY_DATA envelope; link-local frames always use 1.

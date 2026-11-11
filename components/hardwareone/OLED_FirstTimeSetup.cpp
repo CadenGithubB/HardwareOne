@@ -446,20 +446,20 @@ struct FtsWifiScanCacheGuard {
 };
 #endif
 
-bool getOledWifiSelection(String& outSSID) {
+bool getOledWifiSelection(String& outSsid) {
   // Fallback to serial if OLED not available
   if (!isOledAvailable()) {
     Serial.println("Enter WiFi SSID (or press Enter to skip): ");
-    outSSID = waitForSerialInputBlocking();
-    if (gWizardOwnsSerial && wizardHandleCancelInput(outSSID)) { outSSID = ""; return false; }
-    outSSID.trim();
-    return (outSSID.length() > 0);
+    outSsid = waitForSerialInputBlocking();
+    if (gWizardOwnsSerial && wizardHandleCancelInput(outSsid)) { outSsid = ""; return false; }
+    outSsid.trim();
+    return (outSsid.length() > 0);
   }
 
 #if ENABLE_WIFI
   FtsWifiScanCacheGuard cacheGuard;
   for (;;) {  // rescan/manual-back return here without recursive stack growth
-    if (gWizardOwnsSerial && isWizardCancelRequested()) { outSSID = ""; return false; }
+    if (gWizardOwnsSerial && isWizardCancelRequested()) { outSsid = ""; return false; }
     clearFtsWifiScanCache();
 
     OLED_TRANSACTION(
@@ -571,7 +571,7 @@ bool getOledWifiSelection(String& outSSID) {
     bool rescanRequested = false;
 
     while (!confirmed) {
-      if (gWizardOwnsSerial && isWizardCancelRequested()) { outSSID = ""; return false; }
+      if (gWizardOwnsSerial && isWizardCancelRequested()) { outSsid = ""; return false; }
       const int maxVisible = oledVisibleRows(10, 1, 5);
       if (selection < scrollOffset) {
         scrollOffset = selection;
@@ -628,7 +628,7 @@ bool getOledWifiSelection(String& outSSID) {
 
       if (Serial.available()) {
         String serialInput = Serial.readStringUntil('\n');
-        if (gWizardOwnsSerial && wizardHandleCancelInput(serialInput)) { outSSID = ""; return false; }
+        if (gWizardOwnsSerial && wizardHandleCancelInput(serialInput)) { outSsid = ""; return false; }
         serialInput.trim();
         if (serialInput.length() > 0) {
           if (serialInput.equalsIgnoreCase("skip")) {
@@ -654,11 +654,11 @@ bool getOledWifiSelection(String& outSSID) {
                             (unsigned)sFtsWifiStoredCount);
               continue;
             }
-            outSSID = sFtsWifiScanEntries[idx - 1].ssid;
+            outSsid = sFtsWifiScanEntries[idx - 1].ssid;
           } else {
-            outSSID = serialInput;
+            outSsid = serialInput;
           }
-          broadcastOutput(outSSID);
+          broadcastOutput(outSsid);
           return true;
         }
       }
@@ -695,16 +695,16 @@ bool getOledWifiSelection(String& outSSID) {
     if (rescanRequested || selection == rescanIdx) continue;
     if (selection == manualIdx) {
       bool cancelled = false;
-      outSSID = getOledTextInput("WiFi SSID:", false, "", 32,
+      outSsid = getOledTextInput("WiFi SSID:", false, "", 32,
                                  &cancelled);
-      if (cancelled || outSSID.length() == 0) continue;
+      if (cancelled || outSsid.length() == 0) continue;
       return true;
     }
 
     if (selection >= 0 && selection < namedMenuCount) {
-      outSSID = sFtsWifiScanEntries[selection].ssid;
-      outSSID.trim();
-      return outSSID.length() > 0;
+      outSsid = sFtsWifiScanEntries[selection].ssid;
+      outSsid.trim();
+      return outSsid.length() > 0;
     }
   }
 

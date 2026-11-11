@@ -482,8 +482,8 @@ void setWizardLogLevelSelection(int sel) {
 const char** getLogLevelNames() { return (const char**)logLevelNames; }
 size_t getLogLevelCount() { return logLevelCount; }
 
-int getWizardNTPSelection() { return ntpSelection; }
-void setWizardNTPSelection(int sel) {
+int getWizardNtpSelection() { return ntpSelection; }
+void setWizardNtpSelection(int sel) {
   if (sel < 0 || sel >= (int)ntpPresetCount || !sWizardDraft.active) return;
   ntpSelection = sel;
   copyWizardString(sWizardDraft.values.ntpServer, ntpPresets[sel]);
@@ -494,8 +494,8 @@ void setWizardLedEffectSelection(int sel) {
   ledEffectSelection = sel;
   copyWizardString(sWizardDraft.values.ledStartupEffect, ledEffects[sel]);
 }
-const char* const* getNTPPresets() { return ntpPresets; }
-size_t getNTPPresetCount() { return ntpPresetCount; }
+const char* const* getNtpPresets() { return ntpPresets; }
+size_t getNtpPresetCount() { return ntpPresetCount; }
 const char* const* getLedEffects() { return ledEffects; }
 size_t getLedEffectCount() { return ledEffectCount; }
 
@@ -926,7 +926,7 @@ bool wizardActivateCurrentItem() {
       setWizardLogLevelSelection((logLevelSelection + 1) % logLevelCount);
       return true;
     case WIZARD_ITEM_NTP:
-      setWizardNTPSelection((ntpSelection + 1) % ntpPresetCount);
+      setWizardNtpSelection((ntpSelection + 1) % ntpPresetCount);
       return true;
     case WIZARD_ITEM_LED_EFFECT:
       setWizardLedEffectSelection((ledEffectSelection + 1) % ledEffectCount);
@@ -1331,13 +1331,13 @@ void wifiScanClearNamed() {
   sWizardNamedWifiCount = 0;
 }
 
-bool wifiScanGetNamedSSID(int zeroBasedIndex, String& outSSID) {
-  outSSID = "";
+bool wifiScanGetNamedSsid(int zeroBasedIndex, String& outSsid) {
+  outSsid = "";
   if (zeroBasedIndex < 0 || zeroBasedIndex >= sWizardNamedWifiCount) {
     return false;
   }
-  outSSID = sWizardNamedWifi[zeroBasedIndex];
-  return outSSID.length() > 0;
+  outSsid = sWizardNamedWifi[zeroBasedIndex];
+  return outSsid.length() > 0;
 }
 
 int wifiScanPrintNamed(int namedCap) {
@@ -1419,7 +1419,7 @@ static void handleSerialWifiPage(SetupWizardResult& result, bool& running) {
     if (ssidInput.equalsIgnoreCase("skip") || ssidInput.length() == 0) {
       wifiScanClearNamed();
       result.wifiConfigured = false;
-      result.wifiSSID = "";
+      result.wifiSsid = "";
       result.wifiPassword = "";
       if (!wizardNextPage(result)) running = false;
       wifiPageDone = true;
@@ -1430,7 +1430,7 @@ static void handleSerialWifiPage(SetupWizardResult& result, bool& running) {
     // Map a bare in-range integer to the Nth NAMED network; anything else
     // (incl. SSIDs that start with a digit, e.g. "2WIRE") is a typed SSID.
     if (idx >= 1 && idx <= namedCount && String(idx) == ssidInput) {
-      if (!wifiScanGetNamedSSID(idx - 1, ssid)) {
+      if (!wifiScanGetNamedSsid(idx - 1, ssid)) {
         wifiScanClearNamed();
         Serial.println("WiFi list expired; scanning again.");
         continue;
@@ -1449,7 +1449,7 @@ static void handleSerialWifiPage(SetupWizardResult& result, bool& running) {
       if (pass.equalsIgnoreCase("b") || pass.equalsIgnoreCase("back")) {
         continue;
       }
-      result.wifiSSID = ssid;
+      result.wifiSsid = ssid;
       result.wifiPassword = pass;
       result.wifiConfigured = true;
     }
@@ -1519,7 +1519,7 @@ SetupWizardResult runSetupWizard() {
   result.completed = false;
   result.wifiEnabled = false;
   result.wifiConfigured = false;
-  result.wifiSSID = "";
+  result.wifiSsid = "";
   result.wifiPassword = "";
   result.deviceName = "HardwareOne";
   result.timezoneOffset = -240;
@@ -1765,17 +1765,17 @@ bool wizardSaveAndApplySettings(SetupWizardResult& result) {
   // A network is saved only while the final draft still shows the Wi-Fi page:
   // Wi-Fi switched off on a later Back drops credentials entered earlier, and
   // the caller reads the same answer back from the result.
-  const bool saveWifi = wizardShouldShowWifi() && result.wifiConfigured && result.wifiSSID.length() > 0;
+  const bool saveWifi = wizardShouldShowWifi() && result.wifiConfigured && result.wifiSsid.length() > 0;
 #if ENABLE_WIFI
   if (saveWifi) {
-    const WifiNetworkSaveResult wifiSaved = saveSetupWifiNetwork(result.wifiSSID, result.wifiPassword);
+    const WifiNetworkSaveResult wifiSaved = saveSetupWifiNetwork(result.wifiSsid, result.wifiPassword);
     broadcastOutput(wifiNetworkSaveResultMessage(wifiSaved));
-    if (wifiSaved == WifiNetworkSaveResult::Accepted) broadcastOutput("WiFi network: " + result.wifiSSID);
+    if (wifiSaved == WifiNetworkSaveResult::Accepted) broadcastOutput("WiFi network: " + result.wifiSsid);
   }
 #endif
   if (!saveWifi) {
     result.wifiConfigured = false;
-    result.wifiSSID = "";
+    result.wifiSsid = "";
     result.wifiPassword = "";
   }
   if (batched && !writes.finish()) {
@@ -1785,7 +1785,7 @@ bool wizardSaveAndApplySettings(SetupWizardResult& result) {
   // disk write retains the accepted live values and the Settings owner's retry.
   applySettings();
 #if ENABLE_WIFI
-  if (WiFi.isConnected()) setupNTP();
+  if (WiFi.isConnected()) setupNtp();
 #endif
 #if ENABLE_HTTPS
   if (gSettings.httpAutoStart && gSettings.httpsEnabled) {

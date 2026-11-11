@@ -1,5 +1,5 @@
 // Production definitions are inserted by test_ble_area_cleanup.py: the BLE
-// server's connection typing (bleIdentifyDeviceByMAC and its MAC helpers),
+// server's connection typing (bleIdentifyDeviceByMac and its MAC helpers),
 // extracted unchanged from Bluetooth.cpp, with BLE_Types.h and the saved-target
 // types from BLE_Peers.h. The peer owner's saved-target snapshot and the
 // phone's console address (the Server-role display identity, kept apart from
@@ -61,7 +61,7 @@ static void expectType(const char* name, const char* mac, BleDeviceType expected
                        const char* why) {
   uint8_t bytes[6];
   parseMac(mac, bytes);
-  const BleDeviceType got = bleIdentifyDeviceByMAC(bytes);
+  const BleDeviceType got = bleIdentifyDeviceByMac(bytes);
   if (got != expected) {
     std::printf("FAIL [%s]: %s typed %s, expected %s (%s)\n", name, mac,
                 bleDeviceTypeToString(got), bleDeviceTypeToString(expected), why);

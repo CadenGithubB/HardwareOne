@@ -14,8 +14,8 @@ static String originPrefix(const char* source, const String& user, const String&
                            const char* suffix = "");
 
 // Web server functions (implemented in web_server.cpp) - declared here to prevent Arduino preprocessor from creating static versions
-void getClientIP(httpd_req_t* req, String& ipOut);
-void getClientIP(httpd_req_t* req, char* ipBuf, size_t bufSize);
+void getClientIp(httpd_req_t* req, String& ipOut);
+void getClientIp(httpd_req_t* req, char* ipBuf, size_t bufSize);
 
 #include "System_BuildConfig.h"  // Must be early for ENABLE_* and NETWORK_FEATURE_LEVEL
 
@@ -210,7 +210,7 @@ const char* AUTOMATIONS_JSON_FILE = "/system/automations.json";
 
 // Forward declarations
 String setSession(httpd_req_t* req, const String& u);
-String getCookieSID(httpd_req_t* req);
+String getCookieSid(httpd_req_t* req);
 void buildAllSessionsJson(const String& currentSid, JsonArray& sessions);
 
 #ifndef DEBUGF
@@ -253,7 +253,7 @@ void broadcastOutput(const String& s, const CommandContext& ctx);
 // ---------------------------------------------------------------------------
 // NTP anchor ID tracking for user creation timestamp resolution
 // Exported to user_system.cpp
-uint32_t gNTPAnchorId = 0;
+uint32_t gNtpAnchorId = 0;
 uint32_t gBootCounter = 0;
 
 bool gSerialAuthed = false;
@@ -344,9 +344,9 @@ static TransportSessionEpoch gSerialCliEpoch = 0;
 
 
 extern "C" void __attribute__((weak)) memAllocDebug(const char* op, void* ptr, size_t size,
-                                                    bool requestedPS, bool usedPS, bool fellBack,
+                                                    bool requestedPs, bool usedPs, bool fellBack,
                                                     const char* tag) {
-  memTrackerRecord(op, ptr, size, requestedPS, usedPS, fellBack, tag);
+  memTrackerRecord(op, ptr, size, requestedPs, usedPs, fellBack, tag);
 }
 
 volatile uint32_t gOutputFlags = MSG_ROUTE_SERIAL;
@@ -1222,11 +1222,11 @@ static void bootNetConnectAndSync(bool background) {
     setupWifi(wifiBootConnectBudgetMs(), WifiConnectOrigin::BACKGROUND);
   } else {
     // Skip NTP sync in wificonnect so we can show it separately in boot progress
-    gSkipNTPInWifiConnect = true;
+    gSkipNtpInWifiConnect = true;
     // The hunt budget shrinks on a trial OTA boot so setup still reaches
     // RUNNING inside the probation window; BOOT lets a console keystroke skip it.
     setupWifi(wifiBootConnectBudgetMs(), WifiConnectOrigin::BOOT);
-    gSkipNTPInWifiConnect = false;  // Reset for future manual connections
+    gSkipNtpInWifiConnect = false;  // Reset for future manual connections
   }
   const bool wifiConnected = WiFi.isConnected();
 #if DEBUG_MEM_SUMMARY
@@ -1264,12 +1264,12 @@ static void bootNetConnectAndSync(bool background) {
       progress(50, "Time from RTC");
       DEBUG_NTPF("[DEBUG] Skipping NTP sync - RTC already provided valid time");
       // Arm lwIP SNTP without blocking for a foreground reply.
-      setupNTP();
+      setupNtp();
     } else {
       progress(45, "Syncing NTP");
       DEBUG_NTPF("[DEBUG] Starting NTP sync");
       NtpSyncOutcome ntpOutcome = NtpSyncOutcome::Failed;
-      bool ntpOk = syncNTPAndResolve(&ntpOutcome);
+      bool ntpOk = syncNtpAndResolve(&ntpOutcome);
       DEBUG_NTPF("%s", ntpOk ? "[DEBUG] NTP sync complete" : "[DEBUG] NTP sync failed");
       const char* ntpMsg = "Time unavailable";
       switch (ntpOutcome) {

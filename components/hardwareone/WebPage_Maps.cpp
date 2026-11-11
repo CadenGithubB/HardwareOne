@@ -50,7 +50,7 @@ void streamMapsPageLodZoomConstants(httpd_req_t* req) {
 // Map Features API
 // =============================================================================
 
-esp_err_t handleMapFeaturesAPI(httpd_req_t* req) {
+esp_err_t handleMapFeaturesApi(httpd_req_t* req) {
   WEB_AUTH_JSON_OR_RETURN(req, ctx);
 
   if (!MapCore::hasValidMap()) {
@@ -116,7 +116,7 @@ static esp_err_t handleGpsLiveTrackAction(httpd_req_t* req, AuthContext& ctx,
   return ESP_OK;
 }
 
-esp_err_t handleGpsTracksAPI(httpd_req_t* req) {
+esp_err_t handleGpsTracksApi(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);
   // GpsTrackManager::loadTrack/saveTrack read+write the filesystem via
   // currentAuthContext() (the per-task TLS identity), NOT the ctx above.
@@ -369,10 +369,10 @@ static esp_err_t handleMapsPage(httpd_req_t* req) {
 
 void registerMapsHandlers(httpd_handle_t server) {
   static const httpd_uri_t mapsPage = { .uri = "/maps", .method = HTTP_GET, .handler = handleMapsPage, .user_ctx = NULL };
-  static const httpd_uri_t mapFeaturesGet = { .uri = "/api/maps/features", .method = HTTP_GET, .handler = handleMapFeaturesAPI, .user_ctx = NULL };
-  static const httpd_uri_t waypointsGet = { .uri = "/api/waypoints", .method = HTTP_GET, .handler = handleWaypointsAPI, .user_ctx = NULL };
-  static const httpd_uri_t waypointsPost = { .uri = "/api/waypoints", .method = HTTP_POST, .handler = handleWaypointsAPI, .user_ctx = NULL };
-  static const httpd_uri_t gpsTracksGet = { .uri = "/api/gps/tracks", .method = HTTP_GET, .handler = handleGpsTracksAPI, .user_ctx = NULL };
+  static const httpd_uri_t mapFeaturesGet = { .uri = "/api/maps/features", .method = HTTP_GET, .handler = handleMapFeaturesApi, .user_ctx = NULL };
+  static const httpd_uri_t waypointsGet = { .uri = "/api/waypoints", .method = HTTP_GET, .handler = handleWaypointsApi, .user_ctx = NULL };
+  static const httpd_uri_t waypointsPost = { .uri = "/api/waypoints", .method = HTTP_POST, .handler = handleWaypointsApi, .user_ctx = NULL };
+  static const httpd_uri_t gpsTracksGet = { .uri = "/api/gps/tracks", .method = HTTP_GET, .handler = handleGpsTracksApi, .user_ctx = NULL };
   
   httpd_register_uri_handler(server, &mapsPage);
   httpd_register_uri_handler(server, &mapFeaturesGet);
@@ -385,7 +385,7 @@ void registerMapsHandlers(httpd_handle_t server) {
 // Waypoints API (merged from WebPage_Waypoints.cpp)
 // =============================================================================
 
-esp_err_t handleWaypointsAPI(httpd_req_t* req) {
+esp_err_t handleWaypointsApi(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);
   
   // Thread-safe JSON response

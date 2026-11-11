@@ -112,8 +112,8 @@ static void* ps_alloc(size_t size, AllocPref, const char*) { return std::malloc(
 
 // Client and lockout adapters (WebServer_Server.cpp keys them by IP).
 static const char* kClientIp = "192.0.2.7";
-static void getClientIP(httpd_req_t*, String& out) { out = kClientIp; }
-static void getClientIP(httpd_req_t*, char* buf, size_t size) { std::snprintf(buf, size, "%s", kClientIp); }
+static void getClientIp(httpd_req_t*, String& out) { out = kClientIp; }
+static void getClientIp(httpd_req_t*, char* buf, size_t size) { std::snprintf(buf, size, "%s", kClientIp); }
 static bool ipBanned = false, ipLocked = false;
 static unsigned failedLogins = 0;
 static bool isIpBanned(const char*) { return ipBanned; }

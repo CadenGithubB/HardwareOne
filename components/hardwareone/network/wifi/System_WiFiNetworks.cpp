@@ -314,7 +314,7 @@ bool wifiNetworkConnectionById(uint32_t id, WifiConnectionTarget& out) {
   return guard && copyConnectionLocked(findByIdLocked(id), out);
 }
 
-bool wifiNetworkConnectionBySSID(const String& ssid, WifiConnectionTarget& out) {
+bool wifiNetworkConnectionBySsid(const String& ssid, WifiConnectionTarget& out) {
   resetTarget(out);
   NetworkGuard guard;
   return guard && copyConnectionLocked(findBySsidLocked(ssid), out);

@@ -120,7 +120,7 @@ static void rtcToggleConfirmed(void* userData) {
   }
 }
 
-static void rtcNTPSyncConfirmed(void* userData) {
+static void rtcNtpSyncConfirmed(void* userData) {
   (void)userData;
   executeOledCommand("ntpsync");
   // ntpsync handles RTC sync internally when RTC is connected
@@ -145,7 +145,7 @@ static bool rtcInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
 #if ENABLE_WIFI
     extern bool Wifi_isConnected();
     if (WiFi.isConnected()) {
-      oledConfirmRequest("Sync NTP?", nullptr, rtcNTPSyncConfirmed, nullptr);
+      oledConfirmRequest("Sync NTP?", nullptr, rtcNtpSyncConfirmed, nullptr);
     } else {
       oledNotificationBannerShow("WiFi not connected", PairingRibbonIcon::ERROR_ICON, 2000);
     }

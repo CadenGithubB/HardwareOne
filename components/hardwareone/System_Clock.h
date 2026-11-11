@@ -86,7 +86,7 @@ int tzOffsetQuarterHours();
 // applySettings) and again whenever tzOffsetMinutes changes.
 //
 // Why this has to exist: TZ used to be set ONLY as a side effect of
-// configTime() inside setupNTP(), which runs only once WiFi is up. On a boot
+// configTime() inside setupNtp(), which runs only once WiFi is up. On a boot
 // that never joins WiFi — precisely when the DS3231 / R1-ring time sources
 // matter — TZ stayed unset, so every localtime_r() in the firmware silently
 // returned UTC while claiming to be local: dated capture folders, day-file

@@ -405,7 +405,7 @@ python3 components/hardwareone/test/host/test_web_file_streaming.py --sanitize
 
 `web_file_streaming` compiles the shipping `streamFileChunks` helper,
 `handleFileRead`, `streamHtmlEscapedChecked` and the GPS track listing tail of
-`handleGpsTracksAPI` against an httpd double that records whether the
+`handleGpsTracksApi` against an httpd double that records whether the
 filesystem mutex or a sensor poll pause was held inside every chunk send, and
 that fails one chosen send. It checks that a 1300-byte download arrives in
 512-byte chunks with one terminator and the file closed, that the lock is taken
@@ -3903,7 +3903,7 @@ It also runs the production `bledisconnect` command and its owner functions (`bl
 
 ## BLE area cleanup coverage
 
-`ble_area_cleanup` runs the production connection typing from Bluetooth.cpp (`bleIdentifyDeviceByMAC`, its MAC helpers and `bleDeviceTypeToString`, extracted unchanged with BLE_Types.h and the saved-target types from BLE_Peers.h) against a host table standing in for the peer owner's saved targets. Saved glasses, ring and phone addresses classify in any letter case, an unsaved or all-zero address is Unknown, and after a re-pair the new addresses classify as the peer and the old ones as Unknown on the next lookup (`bledisconnect` keeps a link open only when it is typed as a G2 temple or the ring). Source contracts on the same files: every characteristic Bluetooth.cpp creates with PROPERTY_WRITE has write callbacks; the uncalled Bluetooth helpers and the MAC cache are absent from Bluetooth.cpp/.h; G2_Ring.cpp carries none of the unregistered ring-to-glasses spoof push or temple bridge (commands, tasks, state) including the no-op `g2RingNoteBridgePoll` hook, and once that code is gone G2_Ring.cpp names the commit that still holds it (f4cc542); and Bluetooth.h compiles with ENABLE_BLUETOOTH=0. `--component <dir>` runs it against another copy of Bluetooth.cpp/.h and G2_Ring.cpp/.h. It does not exercise the GATT server or a real connection.
+`ble_area_cleanup` runs the production connection typing from Bluetooth.cpp (`bleIdentifyDeviceByMac`, its MAC helpers and `bleDeviceTypeToString`, extracted unchanged with BLE_Types.h and the saved-target types from BLE_Peers.h) against a host table standing in for the peer owner's saved targets. Saved glasses, ring and phone addresses classify in any letter case, an unsaved or all-zero address is Unknown, and after a re-pair the new addresses classify as the peer and the old ones as Unknown on the next lookup (`bledisconnect` keeps a link open only when it is typed as a G2 temple or the ring). Source contracts on the same files: every characteristic Bluetooth.cpp creates with PROPERTY_WRITE has write callbacks; the uncalled Bluetooth helpers and the MAC cache are absent from Bluetooth.cpp/.h; G2_Ring.cpp carries none of the unregistered ring-to-glasses spoof push or temple bridge (commands, tasks, state) including the no-op `g2RingNoteBridgePoll` hook, and once that code is gone G2_Ring.cpp names the commit that still holds it (f4cc542); and Bluetooth.h compiles with ENABLE_BLUETOOTH=0. `--component <dir>` runs it against another copy of Bluetooth.cpp/.h and G2_Ring.cpp/.h. It does not exercise the GATT server or a real connection.
 
 ## Ring forwarded telemetry parser
 

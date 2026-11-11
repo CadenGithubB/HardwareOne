@@ -2560,8 +2560,8 @@ void logAuthAttempt(bool success, const char* path, const String& userTried, con
   getTimestampPrefixMsCached(tsPrefix, sizeof(tsPrefix));
   String status = success ? "SUCCESS" : "FAILED";
 
-  String cleanIP = ip;
-  cleanIP.replace("::FFFF:", "");
+  String cleanIp = ip;
+  cleanIp.replace("::FFFF:", "");
 
   // Format: [ts] | STATUS | user=.. | ip=.. | /path [| reason=..]
   String line;
@@ -2569,7 +2569,7 @@ void logAuthAttempt(bool success, const char* path, const String& userTried, con
   if (tsPrefix[0]) line += tsPrefix;  // already includes trailing " | "
   line += status;
   line += " | user="; line += userTried;
-  line += " | ip=";   line += cleanIP;
+  line += " | ip=";   line += cleanIp;
   line += " | ";      line += cleanPath;
   if (reason.length()) { line += " | reason="; line += reason; }
 

@@ -145,7 +145,7 @@ static bool sNetworkMainInitialized = false;
 // Defined with the Add-WiFi flow and the scan picker below; Add Network and
 // Scan Networks start them from this menu.
 static bool wifiAddKeyboardTick(bool* handled);
-static void startWifiAddSSID();
+static void startWifiAddSsid();
 static void startWifiScan();
 
 static void initNetworkMainScroll() {
@@ -275,7 +275,7 @@ static bool networkMainInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t new
         requestOledMode(OLED_NETWORK_WIFI_LIST, "network.wifi.list");
         break;
       case NET_ACT_ADD:
-        startWifiAddSSID();
+        startWifiAddSsid();
         break;
       case NET_ACT_REMOVE:
         requestOledMode(OLED_NETWORK_WIFI_REMOVE, "network.wifi.remove");
@@ -386,7 +386,7 @@ enum WifiAddStep {
 static WifiAddStep sWifiAddStep = WIFI_ADD_NONE;
 static bool sWifiKeyboardActive = false;
 static bool sWifiAddConnectAfter = false;   // true when password flow began from a scan pick
-static String sWifiAddSSID = "";
+static String sWifiAddSsid = "";
 static String sWifiAddPass = "";
 static TransportSessionEpoch sWifiAddEpoch = kNoTransportSessionEpoch;
 
@@ -402,7 +402,7 @@ static bool sWifiScanInitialized = false;
 
 // Scan results: bare SSID (for connect/add) + display label with signal bars.
 // Kept in stable storage because OledScrollState items store pointers, not copies.
-EXT_RAM_BSS_ATTR static char sWifiScanSSIDs[16][33];
+EXT_RAM_BSS_ATTR static char sWifiScanSsids[16][33];
 EXT_RAM_BSS_ATTR static char sWifiScanLabels[16][40];
 EXT_RAM_BSS_ATTR static char sWifiScanFailure[40];
 static int  sWifiScanCount = 0;
@@ -412,7 +412,7 @@ static int  sWifiScanCount = 0;
 static uint32_t sPendingRemoveId = 0;
 static char   sRemovePromptBuf[40];
 
-static void startWifiAddSSID() {
+static void startWifiAddSsid() {
   String sessionUser;
   bool sessionAuthed = false;
   sWifiAddEpoch = localDisplayTransportSessionSnapshot(sessionUser, sessionAuthed);
@@ -420,7 +420,7 @@ static void startWifiAddSSID() {
   (void)sessionAuthed;  // AuthBypass also owns a real policy-scoped epoch.
   sWifiAddStep = WIFI_ADD_SSID;
   sWifiAddConnectAfter = false;  // manual Add = save only (unchanged behavior)
-  secureClearString(sWifiAddSSID);
+  secureClearString(sWifiAddSsid);
   secureClearString(sWifiAddPass);
   oledKeyboardInit("Enter SSID:", "", OLED_KEYBOARD_MAX_LENGTH,
                    OledKeyboardDictationPolicy::ALLOW_PLAINTEXT);
@@ -438,7 +438,7 @@ static void wifiAddReset() {
   sWifiAddStep = WIFI_ADD_NONE;
   sWifiKeyboardActive = false;
   sWifiAddConnectAfter = false;
-  secureClearString(sWifiAddSSID);
+  secureClearString(sWifiAddSsid);
   secureClearString(sWifiAddPass);
   sWifiAddEpoch = kNoTransportSessionEpoch;
   oledKeyboardReset();
@@ -480,7 +480,7 @@ static void startWifiAddFromScan(const char* ssid) {
   (void)sessionAuthed;  // AuthBypass also owns a real policy-scoped epoch.
   sWifiAddStep = WIFI_ADD_PASS;
   sWifiAddConnectAfter = true;   // scan pick = save AND connect
-  sWifiAddSSID = String(ssid);
+  sWifiAddSsid = String(ssid);
   secureClearString(sWifiAddPass);
   oledKeyboardInit("Enter Password:", "", OLED_KEYBOARD_MAX_LENGTH,
                    OledKeyboardDictationPolicy::DENY, /*masked=*/true);
@@ -510,7 +510,7 @@ static bool wifiAddKeyboardTick(bool* handled) {
         wifiAddReset();
         oledToastShow(refusal, oled_message::kErrorDurationMs, OledUIIcon::ERROR);
       } else {
-        sWifiAddSSID = text;
+        sWifiAddSsid = text;
         startWifiAddPass();
       }
     } else if (sWifiAddStep == WIFI_ADD_PASS) {
@@ -522,7 +522,7 @@ static bool wifiAddKeyboardTick(bool* handled) {
       // flag, as the form always sent) or refuses a field it cannot carry.
       String command;
       const char* refusal = wifiAddFieldRefusal(wifiAddCommandLine(
-          sWifiAddSSID, sWifiAddPass, /*priority=*/0, /*hidden=*/false, command));
+          sWifiAddSsid, sWifiAddPass, /*priority=*/0, /*hidden=*/false, command));
       if (refusal) {
         snprintf(toast, sizeof(toast), "%s", refusal);
       } else {
@@ -695,7 +695,7 @@ static bool networkWifiScanInputHandler(int /*dx*/, int /*dy*/, uint32_t newlyPr
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A) || INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
     int sel = sWifiScanScroll.selectedIndex;
     if (sel >= 0 && sel < sWifiScanCount) {
-      startWifiAddFromScan(sWifiScanSSIDs[sel]);  // pre-fill SSID → password
+      startWifiAddFromScan(sWifiScanSsids[sel]);  // pre-fill SSID → password
     }
     return true;
   }
@@ -709,14 +709,14 @@ static bool cacheOledWifiScanRecord(const WifiScanRecord& record,
   if (record.ssid[0] == '\0') return true;  // named picker skips hidden APs
   if (sWifiScanCount >= 16) return false;
 
-  memcpy(sWifiScanSSIDs[sWifiScanCount], record.ssid,
-         sizeof(sWifiScanSSIDs[sWifiScanCount]));
-  sWifiScanSSIDs[sWifiScanCount][32] = '\0';
+  memcpy(sWifiScanSsids[sWifiScanCount], record.ssid,
+         sizeof(sWifiScanSsids[sWifiScanCount]));
+  sWifiScanSsids[sWifiScanCount][32] = '\0';
   const char* bars = (record.rssi > -50) ? " +++"
                     : (record.rssi > -70) ? " ++" : " +";
   snprintf(sWifiScanLabels[sWifiScanCount],
            sizeof(sWifiScanLabels[sWifiScanCount]), "%.32s%s",
-           sWifiScanSSIDs[sWifiScanCount], bars);
+           sWifiScanSsids[sWifiScanCount], bars);
   ++sWifiScanCount;
   return sWifiScanCount < 16;
 }
@@ -1084,14 +1084,14 @@ void prepareMeshStatusData() {
     meshStatusRenderData.myName[11] = '\0';
 
     meshStatusRenderData.meshRole = gSettings.meshRole;
-    meshStatusRenderData.isWorker = (gSettings.meshRole == MESH_ROLE_WORKER && gSettings.meshMasterMAC.length() > 0);
+    meshStatusRenderData.isWorker = (gSettings.meshRole == MESH_ROLE_WORKER && gSettings.meshMasterMac.length() > 0);
 
     if (meshStatusRenderData.isWorker) {
       uint8_t masterMac[6];
-      macFromHexString(gSettings.meshMasterMAC, masterMac);
+      macFromHexString(gSettings.meshMasterMac, masterMac);
       String masterName = getEspNowDeviceName(masterMac);
       if (masterName.length() == 0) {
-        masterName = gSettings.meshMasterMAC.substring(8);
+        masterName = gSettings.meshMasterMac.substring(8);
       }
       if (masterName.length() > 11) {
         masterName = masterName.substring(0, 11);

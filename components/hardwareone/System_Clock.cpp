@@ -81,7 +81,7 @@ void applyTimezone() {
   // Arduino's setTimeZone() (esp32-hal-time.c) but not byte-identical — that
   // helper appends a DST field, so it emits "UTC5DST5" where this emits "UTC5".
   // Same effective offset (std == DST when daylightOffset is 0), which is why
-  // the configTime() call inside setupNTP() re-applies rather than fights it.
+  // the configTime() call inside setupNtp() re-applies rather than fights it.
   // No DST rule is emitted: this firmware's timezone list offers standard and
   // daylight variants as separate picks, so the offset is always absolute.
   const long offset = -(long)tzOffsetMinutes() * 60;

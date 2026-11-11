@@ -35,7 +35,7 @@ bool pollPaused(uint8_t) { return pauseDepth != 0; }
 // Process-wide doubles
 // ---------------------------------------------------------------------------
 bool filesystemReady = true;
-uint32_t gNTPAnchorId = 8;  // non-static: older code declares them extern locally
+uint32_t gNtpAnchorId = 8;  // non-static: older code declares them extern locally
 uint32_t gBootCounter = 5;
 const char* USERS_JSON_FILE = "/system/users/users.json";
 #define PENDING_USERS_FILE "/system/users/pending_users.json"

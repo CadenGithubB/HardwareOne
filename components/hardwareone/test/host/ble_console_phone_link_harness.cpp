@@ -302,7 +302,7 @@ static BLEService* pCommandService = nullptr;
 static BLECharacteristic* pCmdRequestChar = nullptr;
 static BLECharacteristic* pCmdResponseChar = nullptr;
 static BLECharacteristic* pCmdStatusChar = nullptr;
-static BleDeviceType bleIdentifyDeviceByMAC(const uint8_t*) { return BLE_DEVICE_UNKNOWN; }
+static BleDeviceType bleIdentifyDeviceByMac(const uint8_t*) { return BLE_DEVICE_UNKNOWN; }
 
 // Allocation (System_MemUtil.h).
 enum class AllocPref { PreferPsram };

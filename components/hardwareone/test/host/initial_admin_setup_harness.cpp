@@ -47,7 +47,7 @@ static unsigned normalAttempts;
 static bool repairAfterFirstAttempt;
 static unsigned long nowMs;
 static time_t wallTime;
-static uint32_t gNTPAnchorId, gBootCounter, nvsBootCount;
+static uint32_t gNtpAnchorId, gBootCounter, nvsBootCount;
 static bool gFirstTimeSetupPerformed, gOledRunning, oledConnected, gInputRunning;
 static FirstTimeSetupState gFirstTimeSetupState;
 static SetupProgressStage gSetupProgressStage;
@@ -223,7 +223,7 @@ static void reset() {
   credentialOk = indexOk = hashOk = true; automationExists = credentialOverflow = false;
   hashCalls = credentialCalls = indexCalls = timestampCalls = rebootCalls = 0;
   runtimeApplyCalls = settingsWriteCalls = automationCalls = wifiCalls = normalAttempts = 0;
-  nowMs = 123456; wallTime = 0; gNTPAnchorId = 42; gBootCounter = 17; nvsBootCount = 23;
+  nowMs = 123456; wallTime = 0; gNtpAnchorId = 42; gBootCounter = 17; nvsBootCount = 23;
   gFirstTimeSetupPerformed = gOledRunning = oledConnected = gInputRunning = false;
   gFirstTimeSetupState = SETUP_IN_PROGRESS; gSetupProgressStage = SETUP_SAVING_CONFIG;
   gSettings = {}; inputs.clear(); inputIndex = 0; cancelInput = -1;
@@ -254,7 +254,7 @@ static void recordAndOrder(bool dark) {
   check(admin["createdBy"].as<String>() == "firstsetup");
   check(admin["createdAtSource"].as<String>() == "pending");
   check(admin["createdMs"].as<unsigned long>() == nowMs);
-  check(admin["ntpAnchorId"].as<uint32_t>() == gNTPAnchorId);
+  check(admin["ntpAnchorId"].as<uint32_t>() == gNtpAnchorId);
   check(admin["bootCount"].as<int>() == 1);
   check(!admin["password"].is<String>() && !doc["bootAnchors"].is<JsonArray>());
   check(settings.size() == 2 && settings["password"].as<String>() == "fixture-password-hash");

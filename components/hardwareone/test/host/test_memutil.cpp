@@ -27,8 +27,8 @@ struct DebugEvent {
   const char* op = nullptr;
   void* ptr = nullptr;
   size_t size = 0;
-  bool requestedPS = false;
-  bool usedPS = false;
+  bool requestedPs = false;
+  bool usedPs = false;
   bool fellBack = false;
   const char* tag = nullptr;
 };
@@ -121,14 +121,14 @@ void testPolicyRouting() {
   void* defaultPtr = ps_alloc(32, AllocPolicy::DefaultHeap, "test.default");
   assert(defaultPtr != nullptr);
   assert(gCapsCalls.empty());
-  assert(gDebugCalls == 1 && !gLastDebug.usedPS && !gLastDebug.fellBack);
+  assert(gDebugCalls == 1 && !gLastDebug.usedPs && !gLastDebug.fellBack);
   ps_free(defaultPtr);
 
   resetMocks();
   void* psramPtr = ps_alloc(64, AllocPolicy::PreferPsram, "test.prefer_ps");
   assert(psramPtr != nullptr && esp_ptr_external_ram(psramPtr));
   assertCaps(gPreferCaps, {kPsramCaps, kInternalCaps});
-  assert(gLastDebug.requestedPS && gLastDebug.usedPS && !gLastDebug.fellBack);
+  assert(gLastDebug.requestedPs && gLastDebug.usedPs && !gLastDebug.fellBack);
   assert(psAllocFallbackCount() == 0);
   ps_free(psramPtr);
 
@@ -137,7 +137,7 @@ void testPolicyRouting() {
   void* fallbackPtr = ps_alloc(96, AllocPolicy::PreferPsram, "test.fallback");
   assert(fallbackPtr != nullptr && !esp_ptr_external_ram(fallbackPtr));
   assertCaps(gPreferCaps, {kPsramCaps, kInternalCaps});
-  assert(gLastDebug.requestedPS && !gLastDebug.usedPS && gLastDebug.fellBack);
+  assert(gLastDebug.requestedPs && !gLastDebug.usedPs && gLastDebug.fellBack);
   assert(psAllocFallbackCount() == 1);
   ps_free(fallbackPtr);
 
@@ -147,7 +147,7 @@ void testPolicyRouting() {
       ps_alloc(48, AllocPolicy::PreferInternal, "test.prefer_internal");
   assert(preferInternal != nullptr && esp_ptr_external_ram(preferInternal));
   assertCaps(gPreferCaps, {kInternalCaps, kPsramCaps});
-  assert(!gLastDebug.requestedPS && gLastDebug.usedPS && !gLastDebug.fellBack);
+  assert(!gLastDebug.requestedPs && gLastDebug.usedPs && !gLastDebug.fellBack);
   ps_free(preferInternal);
 
   resetMocks();
@@ -174,7 +174,7 @@ void testBypassAndRuntimePresence() {
   assert(ptr != nullptr && !esp_ptr_external_ram(ptr));
   assert(gPreferCaps.empty());
   assertCaps(gCapsCalls, {kInternalCaps});
-  assert(gLastDebug.requestedPS && !gLastDebug.fellBack);
+  assert(gLastDebug.requestedPs && !gLastDebug.fellBack);
   assert(psAllocFallbackCount() == 0);
   ps_free(ptr);
 
@@ -194,7 +194,7 @@ void testNoRegisteredPsram() {
   assert(ptr != nullptr && !esp_ptr_external_ram(ptr));
   assert(gPreferCaps.empty());
   assertCaps(gCapsCalls, {kInternalCaps});
-  assert(gLastDebug.requestedPS && !gLastDebug.usedPS && !gLastDebug.fellBack);
+  assert(gLastDebug.requestedPs && !gLastDebug.usedPs && !gLastDebug.fellBack);
   assert(psAllocFallbackCount() == 0);
   memset(ptr, 0x6c, 48);
   gCapsCalls.clear();
@@ -490,10 +490,10 @@ extern "C" bool esp_ptr_external_ram(const void* ptr) {
 }
 
 extern "C" void memAllocDebug(const char* op, void* ptr, size_t size,
-                               bool requestedPS, bool usedPS, bool fellBack,
+                               bool requestedPs, bool usedPs, bool fellBack,
                                const char* tag) {
   ++gDebugCalls;
-  gLastDebug = {op, ptr, size, requestedPS, usedPS, fellBack, tag};
+  gLastDebug = {op, ptr, size, requestedPs, usedPs, fellBack, tag};
 }
 
 int main() {

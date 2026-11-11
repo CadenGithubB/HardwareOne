@@ -37,7 +37,7 @@ def generated(baseline: Path | None = None) -> str:
     maps = (COMPONENT / "System_Maps.h").read_text()
     auth_start = utils.index("#define WEB_AUTH_OR_RETURN(req, ctx)")
     auth_end = utils.index("\n\n", auth_start)
-    handler = extract_block(web, "esp_err_t handleGpsTracksAPI(")
+    handler = extract_block(web, "esp_err_t handleGpsTracksApi(")
     # Keep every query operation verbatim, including stream output. The
     # unrelated directory traversal suffix remains outside this harness.
     handler = handler[:handler.index("  // No query params - list available GPS log files")]

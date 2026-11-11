@@ -391,9 +391,9 @@ int oledRenderHeader(Adafruit_SSD1306* display, const OledHeaderInfo* info) {
   bool drewRightSide = false;  // tracks whether to draw a "|" separator before notifications
 
   // Battery / USB indicator
-  if (headerInfo.showBattery || headerInfo.showUSB) {
+  if (headerInfo.showBattery || headerInfo.showUsb) {
     const BatteryState battery = getBatterySnapshot();
-    if (battery.usbKnown && battery.usbPresent && headerInfo.showUSB) {
+    if (battery.usbKnown && battery.usbPresent && headerInfo.showUsb) {
       iconX -= 18;  // "USB": three 6-pixel characters
       display->setCursor(iconX, 1);
       display->print("USB");

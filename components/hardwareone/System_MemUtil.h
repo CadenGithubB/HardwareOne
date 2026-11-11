@@ -87,11 +87,11 @@ extern std::atomic<uint32_t> gPsAllocFallbacks;
 uint32_t psAllocFallbackCount();
 
 // Optional allocation debug hook, defined weakly in HardwareOne.cpp. The
-// requestedPS records caller policy, usedPS comes from the returned pointer's
+// requestedPs records caller policy, usedPs comes from the returned pointer's
 // actual memory region, and fellBack is true only when an attempted
 // PreferPsram allocation succeeds from internal DRAM.
 extern "C" void memAllocDebug(const char* op, void* ptr, size_t size,
-                              bool requestedPS, bool usedPS, bool fellBack,
+                              bool requestedPs, bool usedPs, bool fellBack,
                               const char* tag);
 
 // Canonical forms. New call sites should always supply a stable descriptive

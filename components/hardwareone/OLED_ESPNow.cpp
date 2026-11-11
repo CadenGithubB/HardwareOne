@@ -2074,11 +2074,11 @@ void oledEspNowDisplaySettings(Adafruit_SSD1306* display) {
         else value = "Worker";
         break;
       case 8: // Master MAC
-        value = gSettings.meshMasterMAC;
+        value = gSettings.meshMasterMac;
         if (value.length() == 0) value = "(auto)";
         break;
       case 9: // Backup MAC
-        value = gSettings.meshBackupMAC;
+        value = gSettings.meshBackupMac;
         if (value.length() == 0) value = "(none)";
         break;
       case 10: // Channel
@@ -2186,11 +2186,11 @@ bool oledEspNowHandleSettingsInput(int deltaX, int deltaY, uint32_t newlyPressed
         maxLen = 32;
         break;
       case 8: // Master MAC
-        initialValue = gSettings.meshMasterMAC;
+        initialValue = gSettings.meshMasterMac;
         maxLen = 17;  // XX:XX:XX:XX:XX:XX
         break;
       case 9: // Backup MAC
-        initialValue = gSettings.meshBackupMAC;
+        initialValue = gSettings.meshBackupMac;
         maxLen = 17;
         break;
     }

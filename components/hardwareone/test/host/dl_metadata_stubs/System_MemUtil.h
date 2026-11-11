@@ -8,6 +8,6 @@ using AllocPolicy = AllocPref;
 bool psramAvailableRuntime();
 bool psramBypassEnabled();
 extern std::atomic<uint32_t> gPsAllocFallbacks;
-extern "C" void memAllocDebug(const char *op, void *ptr, size_t size, bool requestedPS, bool usedPS, bool fellBack, const char *tag);
+extern "C" void memAllocDebug(const char *op, void *ptr, size_t size, bool requestedPs, bool usedPs, bool fellBack, const char *tag);
 void *ps_alloc(size_t size, AllocPolicy policy, const char *tag);
 void ps_free(void *ptr);

@@ -2,7 +2,7 @@
 //
 // Compiles the shipping streamFileChunks helper, handleFileRead,
 // streamHtmlEscapedChecked and the GPS track listing tail of
-// handleGpsTracksAPI against an httpd double that records whether the
+// handleGpsTracksApi against an httpd double that records whether the
 // filesystem mutex (or a sensor poll pause) was held inside every chunk send,
 // and that can fail one send to prove each loop stops there. The File/VFS
 // stand-in is deliberately tiny: this suite checks who holds which lock when,

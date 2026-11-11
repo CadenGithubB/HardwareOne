@@ -43,7 +43,7 @@ bool wifiSupersedeBackgroundConnect(){return supersedeOk;}
 bool connectToBestWifiNetwork(){++connectCalls;return connectOk;}
 bool connectWifiTarget(const WifiConnectionTarget&,int,bool){return connectOk;}
 bool connectWifiIndex(int,int){return connectOk;}
-bool connectWifiSSID(const String&,int){return false;}
+bool connectWifiSsid(const String&,int){return false;}
 // INSERT_COMMANDS
 int main(){
  gSettings.wifiEnabled=false;initOk=false;

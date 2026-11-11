@@ -47,7 +47,7 @@ static bool wizardIsGroupPage(SetupWizardPage page) {
 }
 static void wifiScanClearNamed() { ++scanClears; }
 static int wifiScanPrintNamed(int) { ++scans; return 1; }
-static bool wifiScanGetNamedSSID(int index, String& ssid) {
+static bool wifiScanGetNamedSsid(int index, String& ssid) {
   assert(index == 0); ssid = "scan-network"; return cachedNameAvailable;
 }
 static void clearWizardWifiChoices() {
@@ -85,7 +85,7 @@ static unsigned checks;
 #define check(value) do { ++checks; assert(value); } while (0)
 static SetupWizardResult acceptedBefore() {
   SetupWizardResult result{}; result.wifiConfigured = true;
-  result.wifiSSID = "old-network"; result.wifiPassword = "old-secret"; return result;
+  result.wifiSsid = "old-network"; result.wifiPassword = "old-secret"; return result;
 }
 static void reset() {
   inputs.clear(); pickedNetworks.clear(); introChoices.clear(); output.clear();
@@ -100,7 +100,7 @@ static void advanced(const SetupWizardResult& result) {
   check(!result.completed);
 }
 static void preserved(const SetupWizardResult& result) {
-  check(result.wifiConfigured && result.wifiSSID == "old-network" && result.wifiPassword == "old-secret");
+  check(result.wifiConfigured && result.wifiSsid == "old-network" && result.wifiPassword == "old-secret");
 }
 static CliModeInputResult cli(const char* line) {
   char response[160]{};
@@ -116,12 +116,12 @@ static void serialCases() {
     reset(); auto result = acceptedBefore(); bool running = true; inputs = {name, "new-secret"};
     handleSerialWifiPage(result, running); advanced(result);
     check(running && result.wifiConfigured && result.wifiPassword == "new-secret");
-    check(result.wifiSSID == (std::string(name) == "1" ? "scan-network" : name));
+    check(result.wifiSsid == (std::string(name) == "1" ? "scan-network" : name));
   }
   for (const char* skip : {"skip", ""}) {
     reset(); auto result = acceptedBefore(); bool running = true; inputs = {skip};
     handleSerialWifiPage(result, running); advanced(result);
-    check(running && !result.wifiConfigured && result.wifiSSID.empty() && result.wifiPassword.empty());
+    check(running && !result.wifiConfigured && result.wifiSsid.empty() && result.wifiPassword.empty());
   }
   for (bool password : {false, true}) {
     reset(); auto result = acceptedBefore(); bool running = true;
@@ -137,7 +137,7 @@ static void serialCases() {
   // The password prompt takes the cancel word literally; only the idle timeout cancels there.
   reset(); result = acceptedBefore(); running = true; inputs = {"new-network", "cancel"};
   handleSerialWifiPage(result, running); advanced(result);
-  check(running && !cancelRequested && result.wifiSSID == "new-network" && result.wifiPassword == "cancel");
+  check(running && !cancelRequested && result.wifiSsid == "new-network" && result.wifiPassword == "cancel");
   reset(); result = acceptedBefore(); running = true; inputs = {"new-network", "<timeout>"};
   handleSerialWifiPage(result, running); preserved(result);
   check(!running && !result.completed && cancelRequested && nextCalls == 0);
@@ -149,10 +149,10 @@ static void serialCases() {
 static void oledCases() {
   reset(); auto result = acceptedBefore(); introChoices = {1}; pickedNetworks = {"new-network"}; inputs = {"new-secret"};
   check(renderWifiPage(result)); advanced(result);
-  check(result.wifiConfigured && result.wifiSSID == "new-network" && result.wifiPassword == "new-secret");
+  check(result.wifiConfigured && result.wifiSsid == "new-network" && result.wifiPassword == "new-secret");
   reset(); result = acceptedBefore(); introChoices = {0};
   check(renderWifiPage(result)); advanced(result);
-  check(!result.wifiConfigured && result.wifiSSID.empty() && result.wifiPassword.empty());
+  check(!result.wifiConfigured && result.wifiSsid.empty() && result.wifiPassword.empty());
   reset(); result = acceptedBefore(); introChoices = {-1};
   check(!renderWifiPage(result)); preserved(result); check(previousCalls == 1 && !nextCalls);
   reset(); result = acceptedBefore(); introChoices = {1, -1}; pickedNetworks = {"new-network", ""};
@@ -165,7 +165,7 @@ static void oledCases() {
   // The masked keyboard prompt takes the cancel word as the password.
   reset(); result = acceptedBefore(); introChoices = {1}; pickedNetworks = {"new-network"}; inputs = {"cancel"};
   check(renderWifiPage(result)); advanced(result);
-  check(!cancelRequested && result.wifiConfigured && result.wifiSSID == "new-network" && result.wifiPassword == "cancel");
+  check(!cancelRequested && result.wifiConfigured && result.wifiSsid == "new-network" && result.wifiPassword == "cancel");
 }
 static void cliCases() {
 #if ENABLE_WIFI
@@ -173,13 +173,13 @@ static void cliCases() {
     reset(); check(cli(name) == CLI_MODE_HANDLED); preserved(sWizard.result);
     check(nextCalls == 0 && sWizard.subMode == WizardSubMode::WIFI_PASSWORD);
     check(cli("new-secret") == CLI_MODE_HANDLED); advanced(sWizard.result);
-    check(sWizard.result.wifiSSID == (std::string(name) == "1" ? "scan-network" : name));
+    check(sWizard.result.wifiSsid == (std::string(name) == "1" ? "scan-network" : name));
     check(sWizard.result.wifiPassword == "new-secret" && sWizard.subMode == WizardSubMode::PAGE_GROUP);
     check(sWizard.wifiPendingSsid.empty());
   }
   for (const char* skip : {"skip", ""}) {
     reset(); check(cli(skip) == CLI_MODE_HANDLED); advanced(sWizard.result);
-    check(!sWizard.result.wifiConfigured && sWizard.result.wifiSSID.empty() && sWizard.result.wifiPassword.empty());
+    check(!sWizard.result.wifiConfigured && sWizard.result.wifiSsid.empty() && sWizard.result.wifiPassword.empty());
   }
   reset(); check(cli("new-network") == CLI_MODE_HANDLED); check(cli("back") == CLI_MODE_HANDLED);
   preserved(sWizard.result); check(sWizard.wifiPendingSsid.empty() && !nextCalls && !previousCalls);
@@ -193,7 +193,7 @@ static void cliCases() {
   // At the password prompt the cancel word is the password.
   reset(); check(cli("new-network") == CLI_MODE_HANDLED); check(cli("cancel") == CLI_MODE_HANDLED);
   advanced(sWizard.result);
-  check(sWizard.result.wifiSSID == "new-network" && sWizard.result.wifiPassword == "cancel");
+  check(sWizard.result.wifiSsid == "new-network" && sWizard.result.wifiPassword == "cancel");
 #else
   reset(); check(cli("skip") == CLI_MODE_HANDLED); advanced(sWizard.result);
 #endif

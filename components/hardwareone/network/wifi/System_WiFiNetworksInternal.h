@@ -25,7 +25,7 @@ struct WifiConnectionTarget {
 #if ENABLE_WIFI
 bool wifiNetworkConnectionByIndex(int index, WifiConnectionTarget& out);
 bool wifiNetworkConnectionById(uint32_t id, WifiConnectionTarget& out);
-bool wifiNetworkConnectionBySSID(const String& ssid, WifiConnectionTarget& out);
+bool wifiNetworkConnectionBySsid(const String& ssid, WifiConnectionTarget& out);
 void wifiNetworkMarkConnected(uint32_t id, uint32_t when);
 #endif
 

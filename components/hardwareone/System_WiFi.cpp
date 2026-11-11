@@ -153,11 +153,11 @@ static bool connectWifiTargetWithin(const WifiConnectionTarget& network, unsigne
 bool connectWifiIndex(int index0based, unsigned long timeoutMs, bool showPriority = false);
 static bool connectWifiId(uint32_t id, unsigned long timeoutMs, bool showPriority,
                           const WifiConnectBounds& bounds);
-bool connectWifiSSID(const String& ssid, unsigned long timeoutMs);
+bool connectWifiSsid(const String& ssid, unsigned long timeoutMs);
 
 // Global flags
 volatile bool gWifiUserCancelled = false;
-bool gSkipNTPInWifiConnect = false;
+bool gSkipNtpInWifiConnect = false;
 
 // WiFi initialization state (lazy initialization like sensor tasks)
 static std::atomic<bool> wifiInitialized{false};
@@ -473,7 +473,7 @@ const char* cmd_wifiinfo(const String& argsInput) {
       doc["rssi"] = WiFi.RSSI();
     } else {
       // Top-priority saved network (array is priority-sorted). The old
-      // gSettings.wifiSSID here was a dead legacy field frozen at "" — it
+      // gSettings.wifiSsid here was a dead legacy field frozen at "" — it
       // showed a blank even with networks saved. The key is omitted (as when
       // connected) if the saved list cannot be copied.
       WifiNetworkSnapshot saved;
@@ -801,8 +801,8 @@ bool connectToBestWifiNetwork(uint32_t budgetMs, WifiConnectOrigin origin) {
 
   // A BACKGROUND connect belongs to the boot sequence, which syncs the clock
   // itself once the hunt has finished.
-  if (connected && !gSkipNTPInWifiConnect && origin != WifiConnectOrigin::BACKGROUND) {
-    syncNTPAndResolve();
+  if (connected && !gSkipNtpInWifiConnect && origin != WifiConnectOrigin::BACKGROUND) {
+    syncNtpAndResolve();
   }
 
   return connected;
@@ -930,7 +930,7 @@ const char* cmd_wificonnect(const String& originalCmd) {
   clearRadioRestoreSnapshot();
 
   CommandArgs a(originalCmd);
-  String prevSSID = WiFi.isConnected() ? WiFi.SSID() : String("");
+  String prevSsid = WiFi.isConnected() ? WiFi.SSID() : String("");
   bool connected = false;
 
   // Preserve CLI indexes; UI snapshots use a stable saved-entry ID.
@@ -986,8 +986,8 @@ const char* cmd_wificonnect(const String& originalCmd) {
     // in 40 ms. 25 s gives the driver room for two full cycles.
     connected = useSavedId ? connectWifiTarget(selected, 35000, false)
                            : connectWifiIndex(index1 - 1, 35000);
-    if (!connected && prevSSID.length() > 0) {
-      connectWifiSSID(prevSSID, 15000);
+    if (!connected && prevSsid.length() > 0) {
+      connectWifiSsid(prevSsid, 15000);
     }
   }
 
@@ -1003,7 +1003,7 @@ const char* cmd_wificonnect(const String& originalCmd) {
       return "Error: No saved Wi-Fi networks. Add one in Wi-Fi settings.";
   }
   broadcastOutput("Failed to connect");
-  if (prevSSID.length() > 0) {
+  if (prevSsid.length() > 0) {
     broadcastOutput("Attempted rollback to previous connection");
   }
   broadcastOutput("Check 'wifistatus' for status");
@@ -2197,9 +2197,9 @@ static bool connectWifiTargetWithin(const WifiConnectionTarget& nw, unsigned lon
 }
 
 // Connect to a saved network by SSID.
-bool connectWifiSSID(const String& ssid, unsigned long timeoutMs) {
+bool connectWifiSsid(const String& ssid, unsigned long timeoutMs) {
   WifiConnectionTarget network;
-  if (!wifiNetworkConnectionBySSID(ssid, network)) return false;
+  if (!wifiNetworkConnectionBySsid(ssid, network)) return false;
   return connectWifiTarget(network, timeoutMs, false);
 }
 
@@ -2211,7 +2211,7 @@ const char* cmd_ntpsync(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   // Allow any authenticated user to sync NTP
   NtpSyncOutcome outcome = NtpSyncOutcome::Failed;
-  bool ok = syncNTPAndResolve(&outcome);
+  bool ok = syncNtpAndResolve(&outcome);
   if (!ok) {
     cliHint("NTP needs an internet connection - check 'wifistatus' and connect with 'openwifi' if offline");
     return "Error: NTP sync failed";
@@ -2304,7 +2304,7 @@ const char* cmd_ntpstatus(const String& argsInput) {
     static_cast<unsigned long>(runtime.lateReplyCount),
     runtime.awaitingLateReply ? "armed" : "not armed",
     gTimeSyncedMarkerWritten ? "written" : "not written",
-    (unsigned long)gNTPAnchorId,
+    (unsigned long)gNtpAnchorId,
     (unsigned long)gBootCounter,
     WiFi.isConnected() ? WiFi.localIP().toString().c_str() : "not connected"
   );

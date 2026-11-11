@@ -26,7 +26,7 @@
 // signal. lwIP's daemon steps the clock itself after a valid reply and can
 // schedule later updates per CONFIG_LWIP_SNTP_UPDATE_DELAY. Before this
 // callback existed those steps were completely invisible: no event, no log,
-// and syncNTPAndResolve's old getLocalTime() "success" test couldn't tell a
+// and syncNtpAndResolve's old getLocalTime() "success" test couldn't tell a
 // reply from a clock that was already set.
 //
 // The callback runs on lwIP's tcpip task (~3 KB stack): STORE-ONLY — no
@@ -158,7 +158,7 @@ void ntpSyncDrainTick() {
   // RTC write-back) drain via Clock::clockDutiesTick() on this same lap.
 }
 
-void setupNTP() {
+void setupNtp() {
   long gmtOffset = (long)Clock::tzOffsetMinutes() * 60;  // seconds
   DEBUG_NTP_SETUPF("[NTP Setup] Starting NTP configuration");
   DEBUG_NTP_SETUPF("[NTP Setup] Primary server: %s", gSettings.ntpServer.c_str());
@@ -183,7 +183,7 @@ void setupNTP() {
   // lwIP stores server-name POINTERS (sntp_setservername does not copy), so
   // the primary must live in storage that never moves. gSettings.ntpServer
   // is an Arduino String whose buffer reallocates on assignment — hand lwIP
-  // a stable copy instead. Refreshed on every setupNTP(), which every
+  // a stable copy instead. Refreshed on every setupNtp(), which every
   // ntpserver-change path already calls.
   static char sNtpServer[64];
   strlcpy(sNtpServer, gSettings.ntpServer.c_str(), sizeof(sNtpServer));
@@ -206,7 +206,7 @@ void setupNTP() {
                    sNtpServer, CONFIG_LWIP_SNTP_MAX_SERVERS);
 }
 
-bool syncNTPAndResolve(NtpSyncOutcome* outcomeOut) {
+bool syncNtpAndResolve(NtpSyncOutcome* outcomeOut) {
   DEBUG_NTP_SYNCF("[syncNTPAndResolve] Starting NTP sync process");
   if (outcomeOut) *outcomeOut = NtpSyncOutcome::Failed;
 
@@ -221,7 +221,7 @@ bool syncNTPAndResolve(NtpSyncOutcome* outcomeOut) {
   // wait loop below detects failure. (A synchronous hostByName probe here
   // used to add 5-8 s of dead wait on healthy networks.)
 
-  // Capture the pre-attempt state BEFORE setupNTP restarts the daemon: the
+  // Capture the pre-attempt state BEFORE setupNtp restarts the daemon: the
   // success test below is "did the reply counter advance", and a reply can
   // land between sntp_init and our first poll.
   const time_t preSyncTime = time(nullptr);
@@ -229,7 +229,7 @@ bool syncNTPAndResolve(NtpSyncOutcome* outcomeOut) {
   const uint32_t startCount = beginSntpForegroundWait();
 
   broadcastOutput("Synchronizing time with NTP server...");
-  setupNTP();
+  setupNtp();
   broadcastOutput("  Contacting NTP server, please wait...");
 
   // Success = an actual SNTP reply (the notification callback fired), NOT
@@ -284,7 +284,7 @@ bool syncNTPAndResolve(NtpSyncOutcome* outcomeOut) {
     // One deliberate exception, the warm-boot baseline: when the clock was
     // ALREADY valid (carried across a soft reboot), the helper sees no
     // invalid→valid edge and a small correction pends nothing — but THIS
-    // boot still needs its anchor (gNTPAnchorId bumps every boot, and
+    // boot still needs its anchor (gNtpAnchorId bumps every boot, and
     // same-boot users can only resolve against a same-boot anchor). The
     // anchor write is an upsert, so this is idempotent with the drain.
     if (preSet) {

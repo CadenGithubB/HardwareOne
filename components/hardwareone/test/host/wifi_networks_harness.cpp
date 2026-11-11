@@ -191,14 +191,14 @@ static void ownerCases(const std::string& scenario) {
     scrubbed.clear();
     {
       WifiConnectionTarget target;
-      assert(wifiNetworkConnectionBySSID("home", target) && target.password == "home-secret");
+      assert(wifiNetworkConnectionBySsid("home", target) && target.password == "home-secret");
     }
     assert(scrubCount("home-secret") == 1 && scrubbed.size() == 1);
     scrubbed.clear();
     {
       WifiConnectionTarget target;
-      assert(wifiNetworkConnectionBySSID("home", target));
-      assert(wifiNetworkConnectionBySSID("cafe", target) && target.password == "cafe-secret");
+      assert(wifiNetworkConnectionBySsid("home", target));
+      assert(wifiNetworkConnectionBySsid("cafe", target) && target.password == "cafe-secret");
       assert(scrubCount("home-secret") == 1);  // reuse zeroes the previous copy first
     }
     scrubbed.clear();
@@ -216,7 +216,7 @@ static void ownerCases(const std::string& scenario) {
     const String cafe("cafe");
     WifiConnectionTarget target;
     wifiTestFailureValue = "cafe"; wifiTestCopiesBeforeFailure = 0;
-    assert(!wifiNetworkConnectionBySSID(cafe, target) && target.password.length() == 0);
+    assert(!wifiNetworkConnectionBySsid(cafe, target) && target.password.length() == 0);
     wifiTestFailureValue = nullptr; wifiTestCopiesBeforeFailure = -1;
     assert(scrubCount("cafe-secret") == 1);
   } else if (scenario == "stable_ids") {

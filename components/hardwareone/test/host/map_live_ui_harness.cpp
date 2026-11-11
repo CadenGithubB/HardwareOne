@@ -253,7 +253,7 @@ static httpd_req_t request(const char* query) {
   httpd_req_t req; req.query = query;
   const unsigned beforeMillis = millisCalls, beforeCapture = captureCalls;
   const size_t beforeCommands = webRequests.size();
-  CHECK(handleGpsTracksAPI(&req) == ESP_OK);
+  CHECK(handleGpsTracksApi(&req) == ESP_OK);
   if (webRequests.size() > beforeCommands) {
     CHECK(webRequests.size() == beforeCommands + 1);
     CHECK(millisCalls == beforeMillis + 2 && captureCalls == beforeCapture + 1);

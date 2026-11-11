@@ -218,8 +218,8 @@ static void noteNtpStateBeforeSetupReboot() {
 #if ENABLE_WIFI
 // Serial WiFi scan + pick for "Import from Backup" when ENABLE_OLED_DISPLAY is off
 // (getOledWifiSelection lives in OLED_FirstTimeSetup.cpp and is not built).
-static bool serialWifiSelectionForRestore(String& outSSID) {
-  outSSID = "";
+static bool serialWifiSelectionForRestore(String& outSsid) {
+  outSsid = "";
   while (true) {
     // The shared helper copies only the numbered SSIDs to PSRAM and releases
     // Arduino's global scan result before this human-input wait begins.
@@ -246,7 +246,7 @@ static bool serialWifiSelectionForRestore(String& outSSID) {
     String ssid = input;
     int idx = input.toInt();
     if (idx >= 1 && idx <= namedCount && String(idx) == input) {
-      if (!wifiScanGetNamedSSID(idx - 1, ssid)) {
+      if (!wifiScanGetNamedSsid(idx - 1, ssid)) {
         wifiScanClearNamed();
         broadcastOutput("WiFi list expired; scanning again.");
         continue;
@@ -258,7 +258,7 @@ static bool serialWifiSelectionForRestore(String& outSSID) {
       broadcastOutput("SSID cannot be empty - please try again.");
       continue;
     }
-    outSSID = ssid;
+    outSsid = ssid;
     return true;
   }
 }
@@ -313,7 +313,7 @@ static bool createInitialAdminUser(const String& username, const String& plainte
   admin["createdBy"] = "firstsetup";          // provenance: onboarding wizard owner
   admin["createdAtSource"] = "pending";       // time-derivation status (see resolver)
   admin["createdMs"] = millis();
-  admin["ntpAnchorId"] = gNTPAnchorId;
+  admin["ntpAnchorId"] = gNtpAnchorId;
   admin["bootCount"] = 1;
   // Boot anchors live in their own file (BOOT_ANCHORS_FILE), not users.json.
 
@@ -640,20 +640,20 @@ void firstTimeSetupIfNeeded() {
     broadcastOutput("WiFi is required for the Migration Tool to connect.");
     broadcastOutput("");
 
-    String restoreSSID = "";
+    String restoreSsid = "";
     String restorePass = "";
     bool wifiSelected = false;
 
     while (!wifiSelected) {
       // Network selection (scan + pick from list)
 #if ENABLE_OLED_DISPLAY
-      if (!getOledWifiSelection(restoreSSID)) {
+      if (!getOledWifiSelection(restoreSsid)) {
         // User pressed B / cancelled — go back to setup mode selection
         goBack = true;
         break;
       }
 #elif ENABLE_WIFI
-      if (!serialWifiSelectionForRestore(restoreSSID)) {
+      if (!serialWifiSelectionForRestore(restoreSsid)) {
         goBack = true;
         break;
       }
@@ -681,7 +681,7 @@ void firstTimeSetupIfNeeded() {
 #endif
 
       if (passwordCancelled) {
-        restoreSSID = "";
+        restoreSsid = "";
         restorePass = "";
         continue;  // Loop back to network selection
       }
@@ -694,13 +694,13 @@ void firstTimeSetupIfNeeded() {
     }
 
     // Step 2: Save WiFi credentials and connect using the proven connection infrastructure
-    broadcastOutput("Connecting to WiFi: " + restoreSSID);
+    broadcastOutput("Connecting to WiFi: " + restoreSsid);
 #if ENABLE_OLED_DISPLAY
-    showOledMessage(("Connecting WiFi:\n" + restoreSSID).c_str(), false);
+    showOledMessage(("Connecting WiFi:\n" + restoreSsid).c_str(), false);
 #endif
 
     const WifiNetworkSaveResult wifiSaved =
-        saveSetupWifiNetwork(restoreSSID, restorePass);
+        saveSetupWifiNetwork(restoreSsid, restorePass);
     broadcastOutput(wifiNetworkSaveResultMessage(wifiSaved));
     if (wifiSaved != WifiNetworkSaveResult::Accepted) {
       broadcastOutput("Returning to setup mode selection.");
@@ -709,7 +709,7 @@ void firstTimeSetupIfNeeded() {
 #endif
       continue;
     }
-    broadcastOutput("WiFi network: " + restoreSSID);
+    broadcastOutput("WiFi network: " + restoreSsid);
 
     // Use the project's standard WiFi connection (ESP-IDF API internally).
     // The wizard runs on the boot task, so a console keystroke may skip it.
@@ -1004,7 +1004,7 @@ void firstTimeSetupIfNeeded() {
       // setup with defaults the user never accepted.
       continue;  // back to the Basic/Advanced/Import menu
     }
-    wifiConfigured = wizardResult.wifiConfigured && wizardResult.wifiSSID.length() > 0;
+    wifiConfigured = wizardResult.wifiConfigured && wizardResult.wifiSsid.length() > 0;
   } else {
     // Basic setup - use sensible defaults
     broadcastOutput("");

@@ -345,7 +345,7 @@ int gpsBuildDataJson(char* buf, size_t bufSize) {
 static char gpsReadChar() {
   if (!gPA1010D) return 0;
   char c = 0;
-  i2cTransactionNACKTolerant((uint8_t)gSettings.gpsBus, I2C_ADDR_GPS, 100000, 100, [&]() {
+  i2cTransactionNackTolerant((uint8_t)gSettings.gpsBus, I2C_ADDR_GPS, 100000, 100, [&]() {
     c = gPA1010D->read();
   });
   return c;

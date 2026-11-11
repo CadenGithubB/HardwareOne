@@ -424,7 +424,7 @@ bool fmRadioStartInternal() {
 
 void updateFmRadio() {
   static unsigned long lastUpdateLog = 0;
-  static int lastRSSI = -999;
+  static int lastRssi = -999;
   static bool lastStereo = false;
   if (!gRadioInitialized || !gFmRadioRunning || pollPaused((uint8_t)gSettings.fmRadioBus)) return;
 
@@ -434,7 +434,7 @@ void updateFmRadio() {
   unsigned long now = 0;
   // Hardware reads and their cache commits share bus ordering with commands.
   // The cache critical section never spans a radio call or output formatting.
-  i2cTransactionNACKTolerant((uint8_t)gSettings.fmRadioBus, I2C_ADDR_FM_RADIO,
+  i2cTransactionNackTolerant((uint8_t)gSettings.fmRadioBus, I2C_ADDR_FM_RADIO,
                            FM_RADIO_I2C_CLOCK, 100, [&]() {
     radio.checkRDS();
     radio.getRadioInfo(&ri);
@@ -474,9 +474,9 @@ void updateFmRadio() {
     systemEventPost(SYSEVT_FM_TUNED, mhz, timedOut ? "seek timeout" : "seek");
     DEBUG_FMRADIO_LIFECYCLEF("[FM_RADIO] Seek finalized at %s MHz%s", mhz, timedOut ? " (timeout)" : "");
   }
-  if (abs(ri.rssi - lastRSSI) >= 2 || ri.stereo != lastStereo || now - lastUpdateLog > 30000) {
+  if (abs(ri.rssi - lastRssi) >= 2 || ri.stereo != lastStereo || now - lastUpdateLog > 30000) {
     DEBUG_FMRADIO_VALUESF("[FM_RADIO] Signal: RSSI=%d, SNR=%d, Stereo=%s", ri.rssi, ri.snr, ri.stereo ? "true" : "false");
-    lastRSSI = ri.rssi;
+    lastRssi = ri.rssi;
     lastStereo = ri.stereo;
     lastUpdateLog = now;
   }

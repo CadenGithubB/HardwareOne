@@ -49,7 +49,7 @@ NETWORK_ROW_FUNCTIONS = (
 )
 # Add-WiFi form functions; the helpers exist only on fixed trees, so a base tree
 # still compiles and fails on behavior. Spliced in source order.
-OLED_ADD_FUNCTIONS = ("startWifiAddSSID", "startWifiAddPass", "wifiAddReset",
+OLED_ADD_FUNCTIONS = ("startWifiAddSsid", "startWifiAddPass", "wifiAddReset",
                       "startWifiAddFromScan", "wifiAddKeyboardTick")
 OLED_ADD_HELPERS = ("wifiAddFieldRefusal",)
 # The shared reply-to-toast mapping the OLED flow toasts the owner's reply with.
@@ -204,6 +204,12 @@ def add_form_contract(component):
 def add_form_unit(component):
     oled = (component / "OLED_Mode_Network.cpp").read_text()
     page = (component / "G2_Page_Network.cpp").read_text()
+    # Each page has its own file-local sWifiAddSsid (a String on the OLED page,
+    # a char buffer on the glasses page). Both pages share this one unit, so
+    # the glasses page's buffer gets its own name here.
+    assert re.search(r"(?m)^static char sWifiAddSsid\[", page), \
+        "the glasses page keeps its add-network name in sWifiAddSsid"
+    page = re.sub(r"\bsWifiAddSsid\b", "sG2WifiAddSsid", page)
     utils = (component / "OLED_Utils.cpp").read_text()
     inserts = (
         ("// INSERT_WIFI_FIELD_OWNER", wifi_field_owner(component)),
@@ -211,13 +217,13 @@ def add_form_unit(component):
          extract_block(utils, OLED_REPLY_TEXT) if OLED_REPLY_TEXT in utils else ""),
         ("// INSERT_OLED_STATE", extract_block(oled, "enum WifiAddStep") + ";\n" + declarations(oled, [
             "sWifiAddStep", "sWifiKeyboardActive", "sWifiAddConnectAfter",
-            "sWifiAddSSID", "sWifiAddPass", "sWifiAddEpoch"])),
+            "sWifiAddSsid", "sWifiAddPass", "sWifiAddEpoch"])),
         ("// INSERT_OLED_FUNCTIONS", definitions_in_order(oled, OLED_ADD_FUNCTIONS, OLED_ADD_HELPERS)),
         ("// INSERT_G2_TYPES", "\n".join(g2_bridge_types(component) + [
             extract_block(page, "enum NetworkSubMode") + ";",
             extract_block(page, "struct CachedAp") + ";"])),
         ("// INSERT_G2_STATE", declarations(page, [
-            "gNetSub", "gScanCache", "gScanCacheCount", "sWifiAddSsid", "sWifiAddMsg"])),
+            "gNetSub", "gScanCache", "gScanCacheCount", "sG2WifiAddSsid", "sWifiAddMsg"])),
         ("// INSERT_G2_FUNCTIONS", definitions_in_order(page, G2_ADD_FUNCTIONS, G2_ADD_HELPERS)),
     )
     harness = (HERE / "wifi_add_form_harness.cpp").read_text()

@@ -749,7 +749,7 @@ static CliModeInputResult dispatchWifi(const String& line,
       }
       if (lc == "skip" || raw.length() == 0) {
         sWizard.result.wifiConfigured = false;
-        sWizard.result.wifiSSID = "";
+        sWizard.result.wifiSsid = "";
         sWizard.result.wifiPassword = "";
         snprintf(out, outSize, "WiFi configuration skipped.");
         return advance();
@@ -759,7 +759,7 @@ static CliModeInputResult dispatchWifi(const String& line,
       String ssid = raw;
       int idx = raw.toInt();
       if (idx >= 1 && idx <= sWizard.wifiNamedCount && String(idx) == raw) {
-        if (!wifiScanGetNamedSSID(idx - 1, ssid)) {
+        if (!wifiScanGetNamedSsid(idx - 1, ssid)) {
           clearWizardWifiChoices();
           snprintf(out, outSize, "WiFi list expired; scanning again.");
           appendPromptTo(out, outSize);
@@ -792,7 +792,7 @@ static CliModeInputResult dispatchWifi(const String& line,
         appendPromptTo(out, outSize);
         return CLI_MODE_HANDLED;
       }
-      sWizard.result.wifiSSID       = sWizard.wifiPendingSsid;
+      sWizard.result.wifiSsid       = sWizard.wifiPendingSsid;
       sWizard.result.wifiPassword   = raw;
       sWizard.result.wifiConfigured = true;
       snprintf(out, outSize, "WiFi credentials captured for '%s'.",

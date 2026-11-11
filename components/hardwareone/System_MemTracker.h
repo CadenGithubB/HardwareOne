@@ -33,5 +33,5 @@ bool memTrackerSnapshot(MemTrackerSnapshot& out,
 // invalid tags, and a full registry are counted explicitly instead of risking
 // latency or corrupting the registry.
 void memTrackerRecord(const char* op, void* ptr, size_t size,
-                      bool requestedPS, bool usedPS, bool fellBack,
+                      bool requestedPs, bool usedPs, bool fellBack,
                       const char* tag);

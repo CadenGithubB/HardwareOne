@@ -688,7 +688,7 @@ static bool bleAdvertiseIfRoomLocked() {
 // the peer owner's current saved targets (BLE_Peers.h snapshot, a short
 // critical-section copy), so a re-paired glasses, ring or phone is typed by
 // its new address from the next connection on.
-BleDeviceType bleIdentifyDeviceByMAC(const uint8_t* mac) {
+BleDeviceType bleIdentifyDeviceByMac(const uint8_t* mac) {
   if (!mac) return BLE_DEVICE_UNKNOWN;
   char macStr[18];
   macToDisplay(mac, macStr, sizeof(macStr));
@@ -911,7 +911,7 @@ class ServerCallbacks : public BLEServerCallbacks {
     bleScReset(param->connect.conn_id);  // fresh secure-channel state for this connection
 
     // Type the link from the peer owner's saved targets (stack only, no heap)
-    gBleState->connections[slot].deviceType = bleIdentifyDeviceByMAC(param->connect.remote_bda);
+    gBleState->connections[slot].deviceType = bleIdentifyDeviceByMac(param->connect.remote_bda);
     gBleState->connections[slot].deviceName = bleDeviceTypeToString(gBleState->connections[slot].deviceType);
     // Publish only after the complete connection identity exists. This token
     // fences login jobs, queued commands and their replies from connId reuse.

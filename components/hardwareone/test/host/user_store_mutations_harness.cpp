@@ -41,7 +41,7 @@ static void checked(bool ok, const char* text, int line) {
 // Doubles for everything System_User.cpp reaches outside the store itself.
 // ---------------------------------------------------------------------------
 bool filesystemReady = true;
-uint32_t gNTPAnchorId = 8;
+uint32_t gNtpAnchorId = 8;
 uint32_t gBootCounter = 5;
 const char* USERS_JSON_FILE = "/system/users/users.json";
 const char* BOOT_ANCHORS_FILE = "/system/boot_anchors.json";
@@ -244,7 +244,7 @@ static fake_vfs::Fs& resetStore() {
   identityBumps = 0; credentialOk = true; credentialSaves = 0;
   allocationFailureAt = -1; allocationCalls = 0; allocationFailed = false;
   gAuth = AuthContext{}; gAuth.user = "fixture-admin";
-  nowMs = 4242; wallTime = 0; gNTPAnchorId = 8; gBootCounter = 5;
+  nowMs = 4242; wallTime = 0; gNtpAnchorId = 8; gBootCounter = 5;
   idMark = 0; idMarkReadOk = true; idMarkWriteOk = true; idMarkWrites = 0;
   return fs;
 }
@@ -489,7 +489,7 @@ static void useraddOrderAndFailures() {
   JsonObject dave = rosterUser(doc, "dave");
   check(dave["id"].as<int>() == 5 && std::string(dave["role"] | "") == "admin" && dave["createdAt"].isNull());
   check(std::string(dave["createdBy"] | "") == "fixture-admin" && std::string(dave["createdAtSource"] | "") == "pending");
-  check(dave["createdMs"].as<unsigned long>() == nowMs && dave["ntpAnchorId"].as<uint32_t>() == gNTPAnchorId);
+  check(dave["createdMs"].as<unsigned long>() == nowMs && dave["ntpAnchorId"].as<uint32_t>() == gNtpAnchorId);
   check(doc["nextId"].as<int>() == 6 && !dave["password"].is<const char*>());
   check(fs.text(settingsPath(5)).find("\"password\":\"" + fakeHash("dave-secret") + "\"") != std::string::npos);
   check(fs.text(settingsPath(5)).find("\"mustChangePassword\":true") != std::string::npos);

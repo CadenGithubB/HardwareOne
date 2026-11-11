@@ -188,7 +188,7 @@ void bleSecurityBootNotice();  // boot-time "set a passphrase" nudge when BLE is
 
 // Device type management
 const char* bleDeviceTypeToString(BleDeviceType type);
-BleDeviceType bleIdentifyDeviceByMAC(const uint8_t* mac);
+BleDeviceType bleIdentifyDeviceByMac(const uint8_t* mac);
 
 // Advertising control
 bool startBleAdvertising();

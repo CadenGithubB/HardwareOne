@@ -29,10 +29,10 @@ bool sseWrite(httpd_req_t* req, const char* chunk) {
 }
 
 int sseBindSession(httpd_req_t* req, String& outSid) {
-  outSid = getCookieSID(req);
-  int idx = findSessionIndexBySID(outSid);
+  outSid = getCookieSid(req);
+  int idx = findSessionIndexBySid(outSid);
   String ip;
-  getClientIP(req, ip);
+  getClientIp(req, ip);
 
   DEBUG_SSEF("sseBindSession: IP=%s SID=%.8s%s idx=%d", ip.c_str(), outSid.length() ? outSid.c_str() : "<none>", outSid.length() > 8 ? "..." : "", idx);
 
@@ -109,7 +109,7 @@ esp_err_t handleEvents(httpd_req_t* req) {
   }
   String u;
   String ip;
-  getClientIP(req, ip);
+  getClientIp(req, ip);
   // httpd_req_t::uri is a fixed-size char array; it is never NULL
   DEBUG_SSEF("handleEvents: incoming from %s, uri=%s", ip.length() ? ip.c_str() : "<no-ip>", req->uri);
 

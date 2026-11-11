@@ -392,7 +392,7 @@ bool ensureFileViewBuffers();
 extern uint32_t gBootCounter;
 extern char* gFileOutBuf;
 extern char* gFileReadBuf;
-extern uint32_t gNTPAnchorId;
+extern uint32_t gNtpAnchorId;
 extern const size_t kFileOutBufSize;
 extern const size_t kFileReadBufSize;
 bool serialCommandSecretSinkReady();

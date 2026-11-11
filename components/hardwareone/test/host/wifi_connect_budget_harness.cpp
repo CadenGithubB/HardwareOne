@@ -248,9 +248,9 @@ static bool gEspNowClosePending = false;
 bool isEspNowInitialized() { return gEspNowInitialized; }
 bool espnowOwnsRadio() { return gEspNowInitialized || gEspNowClosePending; }
 static int gNtpSyncs = 0;
-bool syncNTPAndResolve() { ++gNtpSyncs; return true; }
+bool syncNtpAndResolve() { ++gNtpSyncs; return true; }
 volatile bool gWifiUserCancelled = false;
-bool gSkipNTPInWifiConnect = true;
+bool gSkipNtpInWifiConnect = true;
 
 static std::vector<std::string> gMessages;
 void broadcastOutput(const String& message) { gMessages.emplace_back(message.c_str()); }
@@ -311,7 +311,7 @@ static void reset(std::vector<ScriptedNetwork> script, CommandContext* context, 
   gDelayHook = nullptr;
   gNtpSyncs = 0;
   gConnectFailedEvents = 0;
-  gSkipNTPInWifiConnect = true;
+  gSkipNtpInWifiConnect = true;
   gWifiInitOk = true;
   gEnsureInitCalls = 0;
 #if HW1_WIFI_SUPERSEDE_API
@@ -515,11 +515,11 @@ int main() {
   // It leaves the clock to the boot sequence; a command-origin hunt still syncs.
   {
     reset({{"home", Behaviour::Connects, 2000}}, nullptr, 0);
-    gSkipNTPInWifiConnect = false;
+    gSkipNtpInWifiConnect = false;
     require(huntBest(budget, WifiConnectOrigin::BACKGROUND), "background: joins");
     require(gNtpSyncs == 0, "background: no NTP sync inside the hunt");
     reset({{"home", Behaviour::Connects, 2000}}, &gWebContext, 0);
-    gSkipNTPInWifiConnect = false;
+    gSkipNtpInWifiConnect = false;
     require(huntBest(budget, WifiConnectOrigin::COMMAND), "command: joins");
     require(gNtpSyncs == 1, "command: the hunt syncs NTP after joining");
   }

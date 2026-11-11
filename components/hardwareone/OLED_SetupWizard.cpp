@@ -191,7 +191,7 @@ bool renderWifiPage(SetupWizardResult& result) {
     if (choice < 0) return false; // Back already navigated; Cancel is handled by the owner.
     if (choice == 0) {
       result.wifiConfigured = false;
-      result.wifiSSID = "";
+      result.wifiSsid = "";
       result.wifiPassword = "";
       wizardNextPage(result);
       return true;
@@ -200,13 +200,13 @@ bool renderWifiPage(SetupWizardResult& result) {
     // Back from password entry returns to the picker. Back from the picker
     // returns to Configure/Skip; only the intro's Back leaves this page.
     while (true) {
-      String selectedSSID;
-      if (!getOledWifiSelection(selectedSSID)) break;
+      String selectedSsid;
+      if (!getOledWifiSelection(selectedSsid)) break;
       bool passwordCancelled = false;
       String password = getOledTextInput("WiFi Password:", true, "", 64, &passwordCancelled);
       if (isWizardCancelRequested()) { result.completed = false; return false; }
       if (passwordCancelled) continue;
-      result.wifiSSID = selectedSSID;
+      result.wifiSsid = selectedSsid;
       result.wifiPassword = password;
       result.wifiConfigured = true;
       wizardNextPage(result);

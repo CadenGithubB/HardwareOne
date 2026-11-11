@@ -136,12 +136,12 @@ int main(int argc, char** argv) {
   const std::string scenario = argv[1];
   NtpSyncOutcome outcome = NtpSyncOutcome::Reply;
   if (scenario == "setup") {
-    setupNTP();
+    setupNtp();
     assert((fixture.setupOrder == std::vector<std::string>{"callback", "projection", "configTime", "timezone"}));
     const char* retained = fixture.retainedServer;
     gSettings.ntpServer = std::string(200, 'x');
     assert(std::strcmp(retained, "pool.example.test") == 0);
-    setupNTP();
+    setupNtp();
     assert(fixture.retainedServer == retained && std::strlen(retained) == 63);
     assert(std::string(retained) == std::string(63, 'x'));
     assert(getNtpRuntimeStatus().clientArmed && getNtpRuntimeStatus().replyCount == 0);
@@ -150,7 +150,7 @@ int main(int argc, char** argv) {
   } else if (scenario == "disconnected") {
     fixture.connected = false;
     fixture.epoch = VALID_TIME;
-    assert(!syncNTPAndResolve(&outcome) && outcome == NtpSyncOutcome::Failed);
+    assert(!syncNtpAndResolve(&outcome) && outcome == NtpSyncOutcome::Failed);
     assert(!fixture.configCalls && !fixture.delayCalls && !fixture.anchorCalls);
     assert(getNtpRuntimeStatus().foregroundTimeoutCount == 0);
   } else if (scenario == "cold_reply" || scenario == "warm_reply" || scenario == "deadline_reply") {
@@ -159,7 +159,7 @@ int main(int argc, char** argv) {
     fixture.replyOnConfig = scenario == "cold_reply";
     fixture.replyAfterDelay = warm ? 3 : 0;
     fixture.replyAtDeadline = scenario == "deadline_reply";
-    assert(syncNTPAndResolve(&outcome) && outcome == NtpSyncOutcome::Reply);
+    assert(syncNtpAndResolve(&outcome) && outcome == NtpSyncOutcome::Reply);
     assert(fixture.delayCalls == (warm ? 3 : scenario == "cold_reply" ? 1 : 150));
     assert(fixture.anchorCalls == int(warm) && fixture.resolveCalls == int(warm));
     assert(fixture.markers == (warm ? std::vector<std::string>{"ntp"} : std::vector<std::string>{}));
@@ -170,7 +170,7 @@ int main(int argc, char** argv) {
   } else if (scenario == "carryover" || scenario == "prior_rtc") {
     fixture.epoch = VALID_TIME;
     fixture.priorSource = scenario == "prior_rtc" ? Clock::SYNC_RTC : Clock::SYNC_NONE;
-    assert(syncNTPAndResolve(&outcome) && outcome == NtpSyncOutcome::KeptPrior);
+    assert(syncNtpAndResolve(&outcome) && outcome == NtpSyncOutcome::KeptPrior);
     assert(fixture.delayCalls == 70 && fixture.anchorCalls == 1 && fixture.resolveCalls == 1);
     assert(fixture.markers == std::vector<std::string>{scenario == "prior_rtc" ? "rtc" : "carryover"});
     const auto status = getNtpRuntimeStatus();
@@ -181,7 +181,7 @@ int main(int argc, char** argv) {
   } else if (scenario == "rtc_fallback" || scenario == "rtc_failed") {
     gRtcRunning = gRtcConnected = true;
     fixture.rtcSuccess = scenario == "rtc_fallback";
-    assert(syncNTPAndResolve(&outcome) == fixture.rtcSuccess);
+    assert(syncNtpAndResolve(&outcome) == fixture.rtcSuccess);
     assert(outcome == (fixture.rtcSuccess ? NtpSyncOutcome::RtcFallback : NtpSyncOutcome::Failed));
     assert(fixture.rtcCalls == 1 && fixture.delayCalls == 150);
     assert(fixture.steps.size() == size_t(fixture.rtcSuccess));
@@ -191,7 +191,7 @@ int main(int argc, char** argv) {
     assert(!fixture.anchorCalls && !fixture.resolveCalls && fixture.markers.empty());
   } else if (scenario == "drain_interleaving" || scenario == "coalesced_replies") {
     fixture.epoch = VALID_TIME;
-    setupNTP();
+    setupNtp();
     reply();
     if (scenario == "coalesced_replies") {
       reply(REPLY_TIME + 60);
@@ -209,7 +209,7 @@ int main(int argc, char** argv) {
   } else {
     assert(scenario == "dark_timeout" || scenario == "stopped_timeout" || scenario == "late_reply");
     fixture.armClient = scenario != "stopped_timeout";
-    assert(!syncNTPAndResolve(&outcome) && outcome == NtpSyncOutcome::Failed);
+    assert(!syncNtpAndResolve(&outcome) && outcome == NtpSyncOutcome::Failed);
     assert(fixture.delayCalls == 150 && !fixture.rtcCalls && !fixture.anchorCalls);
     auto status = getNtpRuntimeStatus();
     assert(status.replyCount == 0 && status.foregroundTimeoutCount == 1);

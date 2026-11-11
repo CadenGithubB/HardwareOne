@@ -2,7 +2,7 @@
 """BLE area dead code: connection typing, writable characteristics, removed helpers.
 
 The BLE server types every connection (glasses temple, ring, phone, unknown) in
-onConnect with bleIdentifyDeviceByMAC(); bledisconnect and
+onConnect with bleIdentifyDeviceByMac(); bledisconnect and
 bleDisconnectAppClients() keep a link open only when it is typed as a G2 temple
 or the R1 ring. The function and its MAC helpers are extracted unchanged from
 Bluetooth.cpp and run against a host table standing in for the peer owner's
@@ -65,7 +65,7 @@ def generated(component: Path) -> str:
     definitions += optional(owner, "static bool bleSavedMacMatches(")
     definitions += optional(owner, "static void bleUpdateMACCache(")
     definitions += [extract_block(owner, "const char* bleDeviceTypeToString("),
-                    extract_block(owner, "BleDeviceType bleIdentifyDeviceByMAC(")]
+                    extract_block(owner, "BleDeviceType bleIdentifyDeviceByMac(")]
 
     harness = (HERE / "ble_area_cleanup_harness.cpp").read_text()
     for marker, body in (("// INSERT_TYPES", types), ("// INSERT_PRODUCTION", definitions)):

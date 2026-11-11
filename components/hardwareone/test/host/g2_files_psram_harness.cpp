@@ -132,12 +132,12 @@ extern "C" void* heap_caps_realloc_prefer(void* old, size_t n, size_t count, ...
   return p;
 }
 extern "C" void memAllocDebug(const char*, void* p, size_t, bool requested,
-                              bool usedPS, bool, const char* tag) {
+                              bool usedPs, bool, const char* tag) {
   check(requested, "G2 and JSON allocations prefer PSRAM");
   if (tag && !strcmp(tag, "json.pool")) ++jsonCalls;
   if (tag && !strcmp(tag, "g2.files.input")) {
     ++inputCalls;
-    if (p) inputWasExternal = usedPS;
+    if (p) inputWasExternal = usedPs;
   }
 }
 

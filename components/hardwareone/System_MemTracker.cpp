@@ -150,7 +150,7 @@ bool memTrackerSnapshot(MemTrackerSnapshot& out,
 }
 
 void memTrackerRecord(const char* op, void* ptr, size_t size,
-                      bool requestedPS, bool usedPS, bool fellBack,
+                      bool requestedPs, bool usedPs, bool fellBack,
                       const char* tag) {
   (void)op;
   if (!trackerEnabled()) return;
@@ -176,8 +176,8 @@ void memTrackerRecord(const char* op, void* ptr, size_t size,
   }
 
   const bool actualFallback =
-      ptr != nullptr && requestedPS && !usedPS && fellBack;
-  sRegistry.record(tag, tagLength, size, ptr != nullptr, usedPS,
+      ptr != nullptr && requestedPs && !usedPs && fellBack;
+  sRegistry.record(tag, tagLength, size, ptr != nullptr, usedPs,
                    actualFallback);
   xSemaphoreGive(mutex);
 }

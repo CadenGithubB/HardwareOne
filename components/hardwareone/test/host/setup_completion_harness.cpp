@@ -113,7 +113,7 @@ static void reset() {
 static SetupWizardResult completed() {
   SetupWizardResult result{};
   result.completed = true; result.wifiConfigured = true;
-  result.wifiSSID = "fixture-network"; result.wifiPassword = "fixture-secret";
+  result.wifiSsid = "fixture-network"; result.wifiPassword = "fixture-secret";
   result.timezoneAbbrev = "BEFORE"; return result;
 }
 static bool hasOutput(const char* text) {

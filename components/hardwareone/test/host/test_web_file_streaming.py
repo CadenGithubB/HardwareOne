@@ -2,7 +2,7 @@
 """Lock discipline of the web file streaming paths.
 
 Compiles the shipping streamFileChunks helper, handleFileRead,
-streamHtmlEscapedChecked and the GPS track listing tail of handleGpsTracksAPI
+streamHtmlEscapedChecked and the GPS track listing tail of handleGpsTracksApi
 against an httpd double that records whether the filesystem mutex or a sensor
 poll pause was held inside any chunk send, and that fails one send to prove
 each loop stops there. handleFileView is checked at source level: its non-JSON
@@ -56,9 +56,9 @@ def production() -> str:
               flush=True)
     parts.append(read_handler)
 
-    # GPS listing: the tail of handleGpsTracksAPI after the query handling,
+    # GPS listing: the tail of handleGpsTracksApi after the query handling,
     # wrapped as its own function so the harness can drive it.
-    tracks = extract_block(maps, "esp_err_t handleGpsTracksAPI(")
+    tracks = extract_block(maps, "esp_err_t handleGpsTracksApi(")
     require(LISTING_MARKER in tracks, "GPS track listing marker moved")
     parts.append("static esp_err_t gpsTrackListing(httpd_req_t* req, AuthContext& ctx) {\n"
                  + tracks[tracks.index(LISTING_MARKER):])

@@ -8,8 +8,8 @@
 using TestRegistry = hw1_memtracker_detail::Registry<4>;
 
 static void record(TestRegistry& registry, const char* tag, size_t bytes,
-                   bool success, bool usedPS, bool fellBack) {
-  assert(registry.record(tag, strlen(tag), bytes, success, usedPS, fellBack));
+                   bool success, bool usedPs, bool fellBack) {
+  assert(registry.record(tag, strlen(tag), bytes, success, usedPs, fellBack));
 }
 
 static MemTrackerSnapshot snapshot(const TestRegistry& registry,

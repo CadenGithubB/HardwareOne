@@ -32,7 +32,7 @@ struct OledHeaderInfo {
   const char* title;          // Mode/menu title (nullptr = auto from current mode)
   bool showBattery;           // Show battery icon and percentage
   bool showNotifications;     // Show notification indicator if queue not empty
-  bool showUSB;               // Show USB indicator when connected
+  bool showUsb;               // Show USB indicator when connected
   uint8_t notificationCount;  // Number of unread notifications (0 = none)
 };
 

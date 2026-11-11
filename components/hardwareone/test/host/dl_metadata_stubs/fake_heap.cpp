@@ -149,9 +149,9 @@ void fakeSetBypass(bool on) { gBypass.store(on); }
 bool psramAvailableRuntime() { return true; }
 static fake::DebugHook gDebugHook = nullptr;
 void fakeSetDebugHook(fake::DebugHook hook) { gDebugHook = hook; }
-extern "C" void memAllocDebug(const char* op, void* ptr, size_t size, bool requestedPS, bool usedPS, bool fellBack,
+extern "C" void memAllocDebug(const char* op, void* ptr, size_t size, bool requestedPs, bool usedPs, bool fellBack,
                               const char* tag) {
-  if (gDebugHook) gDebugHook(op, ptr, size, requestedPS, usedPS, fellBack, tag);
+  if (gDebugHook) gDebugHook(op, ptr, size, requestedPs, usedPs, fellBack, tag);
 }
 // As System_MemUtil.cpp: PreferPsram = PSRAM, then internal; a fallback is counted.
 void* ps_alloc(size_t size, AllocPolicy policy, const char* tag) {

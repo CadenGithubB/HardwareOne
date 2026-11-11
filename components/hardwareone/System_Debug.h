@@ -180,7 +180,7 @@ struct DebugSubFlags {
 
   // NTP / DateTime sub-flags
   bool ntpSync;         // DNS validation, wait loop, per-iteration polling, success/timeout
-  bool ntpSetup;        // setupNTP() / configTime() calls, server & offset config
+  bool ntpSetup;        // setupNtp() / configTime() calls, server & offset config
   bool ntpAnchor;       // Boot anchor write/read/cleanup, loadAndIncrementBootSeq
   bool ntpResolve;      // resolvePendingUserCreationTimes(), [resolve] messages
 

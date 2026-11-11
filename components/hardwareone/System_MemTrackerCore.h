@@ -87,10 +87,10 @@ class Registry {
   // when a new tag cannot be attributed because the fixed registry is full;
   // aggregate traffic counters still include that event.
   bool record(const char* tag, size_t tagLength, size_t size,
-              bool success, bool usedPS, bool fellBack) {
+              bool success, bool usedPs, bool fellBack) {
     if (success) {
       ++successCount_;
-      if (usedPS) {
+      if (usedPs) {
         psramBytes_ += static_cast<uint64_t>(size);
       } else {
         dramBytes_ += static_cast<uint64_t>(size);
@@ -108,11 +108,11 @@ class Registry {
         memcpy(entry.tag, tag, tagLength);
         entry.tag[tagLength] = '\0';
         ++entryCount_;
-        updateEntry(entry, size, success, usedPS, fellBack);
+        updateEntry(entry, size, success, usedPs, fellBack);
         return true;
       }
       if (strcmp(entry.tag, tag) == 0) {
-        updateEntry(entry, size, success, usedPS, fellBack);
+        updateEntry(entry, size, success, usedPs, fellBack);
         return true;
       }
       slotIndex = (slotIndex + 1) & mask;
@@ -170,10 +170,10 @@ class Registry {
 
  private:
   static void updateEntry(MemTrackerEntry& entry, size_t size,
-                          bool success, bool usedPS, bool fellBack) {
+                          bool success, bool usedPs, bool fellBack) {
     if (success) {
       ++entry.successCount;
-      if (usedPS) {
+      if (usedPs) {
         entry.psramBytes += static_cast<uint64_t>(size);
       } else {
         entry.dramBytes += static_cast<uint64_t>(size);

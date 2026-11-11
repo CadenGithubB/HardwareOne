@@ -79,7 +79,7 @@ using httpd_handle_t = void*;
 static int serverToken = 0;
 static httpd_handle_t server = &serverToken;
 static bool gServerIsHttps = false;
-static void getClientIP(httpd_req_t* req, String& out) { out = req->ip; }
+static void getClientIp(httpd_req_t* req, String& out) { out = req->ip; }
 static int httpd_req_to_sockfd(httpd_req_t* req) { return req->sockfd; }
 static std::vector<int> closedSockets;
 static esp_err_t httpd_sess_trigger_close(httpd_handle_t, int fd) {

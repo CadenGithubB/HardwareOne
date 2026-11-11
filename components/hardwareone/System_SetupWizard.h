@@ -37,7 +37,7 @@ struct SetupWizardResult {
   bool applied = false;
   bool wifiEnabled = false;
   bool wifiConfigured = false;
-  String wifiSSID;
+  String wifiSsid;
   String wifiPassword;
   String deviceName;           // ESP-NOW device name; UI can also set BLE name
   String bleDeviceName;
@@ -140,12 +140,12 @@ const char** getLogLevelNames();
 size_t getLogLevelCount();
 
 // Picker values and the device-name text buffer.
-int getWizardNTPSelection();
-void setWizardNTPSelection(int sel);
+int getWizardNtpSelection();
+void setWizardNtpSelection(int sel);
 int getWizardLedEffectSelection();
 void setWizardLedEffectSelection(int sel);
-const char* const* getNTPPresets();
-size_t getNTPPresetCount();
+const char* const* getNtpPresets();
+size_t getNtpPresetCount();
 const char* const* getLedEffects();
 size_t getLedEffectCount();
 const char* getWizardDeviceName();
@@ -266,12 +266,12 @@ void printSerialPageStatus();
 // for human input. Output goes through broadcastOutput so every transport sees
 // the same list. Returns the valid numeric-choice count.
 //
-// wifiScanGetNamedSSID uses a zero-based cache index and copies the SSID into
-// outSSID; it returns false for an invalid/stale index. Call
+// wifiScanGetNamedSsid uses a zero-based cache index and copies the SSID into
+// outSsid; it returns false for an invalid/stale index. Call
 // wifiScanClearNamed whenever the list is abandoned or a choice is consumed.
 #if ENABLE_WIFI
 int wifiScanPrintNamed(int namedCap = 24);
-bool wifiScanGetNamedSSID(int zeroBasedIndex, String& outSSID);
+bool wifiScanGetNamedSsid(int zeroBasedIndex, String& outSsid);
 void wifiScanClearNamed();
 #endif
 

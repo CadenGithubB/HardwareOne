@@ -60,10 +60,10 @@ def main():
         disabled.write_text('''#include "System_NTP.h"
 #include <cassert>
 int main() {
-  setupNTP();
+  setupNtp();
   NtpSyncOutcome outcome = NtpSyncOutcome::Reply;
-  assert(!syncNTPAndResolve(&outcome) && outcome == NtpSyncOutcome::Failed);
-  assert(!syncNTPAndResolve());
+  assert(!syncNtpAndResolve(&outcome) && outcome == NtpSyncOutcome::Failed);
+  assert(!syncNtpAndResolve());
   ntpSyncDrainTick();
   const auto status = getNtpRuntimeStatus();
   assert(status.replyCount == 0 && status.foregroundTimeoutCount == 0 && status.lateReplyCount == 0);

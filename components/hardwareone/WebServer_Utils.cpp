@@ -208,7 +208,7 @@ size_t WebMirrorBuf::snapshotTo(char* dest, size_t destSize) {
 // ============================================================================
 
 // Client IP extraction
-void getClientIP(httpd_req_t* req, char* ipBuf, size_t bufSize) {
+void getClientIp(httpd_req_t* req, char* ipBuf, size_t bufSize) {
   if (!ipBuf || bufSize < 2) return;
   ipBuf[0] = '-';
   ipBuf[1] = '\0';
@@ -234,14 +234,14 @@ void getClientIP(httpd_req_t* req, char* ipBuf, size_t bufSize) {
 }
 
 // Legacy String version for compatibility (calls zero-churn version)
-void getClientIP(httpd_req_t* req, String& ipOut) {
+void getClientIp(httpd_req_t* req, String& ipOut) {
   char buf[64];
-  getClientIP(req, buf, sizeof(buf));
+  getClientIp(req, buf, sizeof(buf));
   ipOut = buf;
 }
 
 // Get session ID from cookie
-String getCookieSID(httpd_req_t* req) {
+String getCookieSid(httpd_req_t* req) {
   size_t hdr_len = httpd_req_get_hdr_value_len(req, "Cookie");
   if (hdr_len == 0) {
     // Limit URI length in logs to avoid format-truncation warnings

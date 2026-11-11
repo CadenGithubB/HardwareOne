@@ -2965,13 +2965,13 @@ setInterval(loadWaypoints, 5000);
 // =============================================================================
 
 // Map features API - get map metadata and feature names
-esp_err_t handleMapFeaturesAPI(httpd_req_t* req);
+esp_err_t handleMapFeaturesApi(httpd_req_t* req);
 
 // GPS tracks API - load tracks, list files, live tracking
-esp_err_t handleGpsTracksAPI(httpd_req_t* req);
+esp_err_t handleGpsTracksApi(httpd_req_t* req);
 
 // Waypoints API handler (merged from WebPage_Waypoints)
-esp_err_t handleWaypointsAPI(httpd_req_t* req);
+esp_err_t handleWaypointsApi(httpd_req_t* req);
 
 // Register all maps-related URI handlers
 void registerMapsHandlers(httpd_handle_t server);

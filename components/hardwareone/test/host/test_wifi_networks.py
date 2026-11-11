@@ -34,7 +34,7 @@ static void initializeNetworks() {
 static int networkCount() { return wifiNetworkCount(); }
 static int findNetwork(const String& ssid) {
   WifiConnectionTarget target;
-  return wifiNetworkConnectionBySSID(ssid, target) ? target.index : -1;
+  return wifiNetworkConnectionBySsid(ssid, target) ? target.index : -1;
 }
 static ObservedNetwork readNetwork(int index) {
   WifiNetworkSnapshot snapshot;

@@ -32,11 +32,11 @@ struct NtpRuntimeStatus {
 
 #if ENABLE_WIFI
 // Start/restart the client using the current server and timezone settings.
-void setupNTP();
+void setupNtp();
 
 // Synchronous; runs in the calling task's stack. Returns true for Reply,
 // KeptPrior, or RtcFallback. Disconnected/disabled Wi-Fi returns false.
-bool syncNTPAndResolve(NtpSyncOutcome* outcomeOut = nullptr);
+bool syncNtpAndResolve(NtpSyncOutcome* outcomeOut = nullptr);
 NtpRuntimeStatus getNtpRuntimeStatus();
 // Main-loop drain (HardwareOne loop is the ONLY caller — a second consumer
 // would race the pending flag): hands stored SNTP-reply facts to
@@ -44,8 +44,8 @@ NtpRuntimeStatus getNtpRuntimeStatus();
 // the lwIP daemon can make after this foreground caller has returned.
 void ntpSyncDrainTick();
 #else
-inline void setupNTP() {}
-inline bool syncNTPAndResolve(NtpSyncOutcome* outcomeOut = nullptr) {
+inline void setupNtp() {}
+inline bool syncNtpAndResolve(NtpSyncOutcome* outcomeOut = nullptr) {
   if (outcomeOut) *outcomeOut = NtpSyncOutcome::Failed;
   return false;
 }

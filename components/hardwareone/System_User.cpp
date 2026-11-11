@@ -588,7 +588,7 @@ TransportSessionEpoch captureTransportSessionEpoch(const AuthContext& ctx) {
   switch (ctx.transport) {
     case SOURCE_WEB:
 #if ENABLE_HTTP_SERVER
-      return ctx.sid.length() ? webSessionEpochForSID(ctx.sid) : 0;
+      return ctx.sid.length() ? webSessionEpochForSid(ctx.sid) : 0;
 #else
       return 0;
 #endif
@@ -675,8 +675,8 @@ bool tgRequireAuth(AuthContext& ctx) {
   // Keep the bearer locator separate from the numeric command-generation
   // fence. Basic Auth has no cookie and therefore remains intentionally
   // stateless (empty sid / epoch zero).
-  ctx.sid = getCookieSID(req);
-  if (ctx.ip.length() == 0) { getClientIP(req, ctx.ip); }
+  ctx.sid = getCookieSid(req);
+  if (ctx.ip.length() == 0) { getClientIp(req, ctx.ip); }
   logAuthAttempt(true, ctx.path.c_str(), ctx.user, ctx.ip, "");
   // A forced password change admits only the change form and logout, for
   // pages and APIs alike (userMustChangePassword is the one decision).
@@ -2432,7 +2432,7 @@ static UsersJsonMutation createAccountMutation(JsonDocument& doc, JsonArray user
   newUser["createdBy"] = ctx->account->createdBy.length() ? ctx->account->createdBy.c_str() : "admin";
   newUser["createdAtSource"] = stamped ? "clock" : "pending";
   newUser["createdMs"] = millis();
-  newUser["ntpAnchorId"] = gNTPAnchorId;
+  newUser["ntpAnchorId"] = gNtpAnchorId;
   newUser["bootCount"] = gBootCounter;
   doc["nextId"] = newId + 1;
   return UsersJsonMutation::Changed;
@@ -2928,7 +2928,7 @@ bool isGuestUser(const String& who) {
   return who.length() > 0 && userAccountRank(who) == kRoleRankGuest;
 }
 
-// findSessionIndexBySID moved to web_server.cpp
+// findSessionIndexBySid moved to web_server.cpp
 
 // ============================================================================
 // User Management Internal Functions
@@ -4401,7 +4401,7 @@ static int readBootAnchors(BootAnchor* anchors, int maxCount) {
   return parseBootAnchors(json, anchors, maxCount);
 }
 
-// Highest ntpAnchorId currently persisted (0 if none). Seeds gNTPAnchorId at boot.
+// Highest ntpAnchorId currently persisted (0 if none). Seeds gNtpAnchorId at boot.
 static uint32_t highestBootAnchorId() {
   BootAnchor anchors[16];
   int n = readBootAnchors(anchors, 16);
@@ -4601,7 +4601,7 @@ static UsersJsonMutation resolveCreationTimesMutation(JsonDocument& doc, JsonArr
         shouldApprox = true;
         ordinalN = (uint32_t)bootCount;
       }
-    } else if (ntpAnchorId < gNTPAnchorId) {
+    } else if (ntpAnchorId < gNtpAnchorId) {
       shouldApprox = true;
     }
     if (shouldApprox) {
@@ -4650,7 +4650,7 @@ void resolvePendingUserCreationTimes() {
 // atomically via writeTextAtomic; users.json is NOT touched.
 void writeBootAnchor() {
   time_t now = time(nullptr);
-  if (now <= 0 || gNTPAnchorId == 0) return;
+  if (now <= 0 || gNtpAnchorId == 0) return;
   if (!filesystemReady) return;
 
   unsigned long currentMillis = millis();
@@ -4706,7 +4706,7 @@ void writeBootAnchor() {
   // stale ring-derived one forever. Overwriting in place keeps exactly one
   // row per anchor id, always the freshest (= most accurate) fix.
   for (JsonObject a : bootAnchorsArray) {
-    if (a["ntpAnchorId"].as<uint32_t>() == (uint32_t)gNTPAnchorId) {
+    if (a["ntpAnchorId"].as<uint32_t>() == (uint32_t)gNtpAnchorId) {
       a["epochAtSync"] = (uint32_t)now;
       a["millisAtSync"] = (uint32_t)currentMillis;
       String updated;
@@ -4721,7 +4721,7 @@ void writeBootAnchor() {
   }
 
   JsonObject newAnchor = bootAnchorsArray.add<JsonObject>();
-  newAnchor["ntpAnchorId"] = (uint32_t)gNTPAnchorId;
+  newAnchor["ntpAnchorId"] = (uint32_t)gNtpAnchorId;
   newAnchor["epochAtSync"] = (uint32_t)now;
   newAnchor["millisAtSync"] = (uint32_t)currentMillis;
 
@@ -4815,7 +4815,7 @@ void loadAndIncrementBootSeq() {
 
   // NTP anchor id is derived (read-only) from the highest id in the dedicated
   // anchors file — also decoupled from users.json.
-  gNTPAnchorId = highestBootAnchorId();
+  gNtpAnchorId = highestBootAnchorId();
 
   // Temporarily enable DEBUG_SYSTEM for boot sequence initialization (runs before settings loaded)
   DebugFlagMask _dbgSaved = getDebugFlags();
@@ -4823,7 +4823,7 @@ void loadAndIncrementBootSeq() {
   DEBUG_SYSTEMF("BootSeqInit: filesystemReady=%d, users.json exists=%d, bootCounter=%lu, maxAnchorId=%lu",
                 (int)filesystemReady,
                 (int)(filesystemReady && VFS::existsGuarded(USERS_JSON_FILE, VFS::systemAuth(VFS::Scopes::USERS, "user.bootSeq"))),
-                (unsigned long)gBootCounter, (unsigned long)gNTPAnchorId);
+                (unsigned long)gBootCounter, (unsigned long)gNtpAnchorId);
 
   // Read-only integrity pass over users.json: if it's corrupt, quarantine it so
   // first-time setup re-arms cleanly (otherwise every login fails silently with
@@ -4863,12 +4863,12 @@ void loadAndIncrementBootSeq() {
     }
   }
 
-  gNTPAnchorId++;
+  gNtpAnchorId++;
   // Restore debug flags
   setDebugFlags(_dbgSaved);
   // Use DEBUG macro - now safe since debug system is initialized
   DEBUG_NTP_ANCHORF("[BOOT] NTP anchor ID: %lu (from %s) | Boot counter: %lu (NVS)",
-                    (unsigned long)gNTPAnchorId, BOOT_ANCHORS_FILE, (unsigned long)gBootCounter);
+                    (unsigned long)gNtpAnchorId, BOOT_ANCHORS_FILE, (unsigned long)gBootCounter);
 }
 
 // ============================================================================

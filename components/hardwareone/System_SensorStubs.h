@@ -303,13 +303,13 @@
   inline void startHttpServer() {}
   inline void stopHttpServer() {}
   inline bool isAdminUser(httpd_req_t* req) { return false; }
-  inline void getClientIP(httpd_req_t* req, String& ipOut) { ipOut = "0.0.0.0"; }
-  inline void getClientIP(httpd_req_t* req, char* ipBuf, size_t bufSize) { if (bufSize > 0) ipBuf[0] = '\0'; }
+  inline void getClientIp(httpd_req_t* req, String& ipOut) { ipOut = "0.0.0.0"; }
+  inline void getClientIp(httpd_req_t* req, char* ipBuf, size_t bufSize) { if (bufSize > 0) ipBuf[0] = '\0'; }
   // Session and SSE stub functions
   inline void sseEnqueueEvent(SessionEntry& s, const char* name, const char* data) {}
-  inline String getCookieSID(httpd_req_t* req) { return ""; }
-  inline int findSessionIndexBySID(const String& sid) { return -1; }
-  inline uint32_t webSessionEpochForSID(const String& sid) { return 0; }
+  inline String getCookieSid(httpd_req_t* req) { return ""; }
+  inline int findSessionIndexBySid(const String& sid) { return -1; }
+  inline uint32_t webSessionEpochForSid(const String& sid) { return 0; }
   inline bool webSessionEpochIsLive(uint32_t epoch) { return false; }
   inline void storeLogoutReason(const String& ip, const String& reason) {}
   inline void enqueueTargetedRevokeForSessionIdx(int idx, const String& reason) {}

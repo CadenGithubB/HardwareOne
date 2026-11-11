@@ -34,7 +34,7 @@ SECRET_FIELDS=(
     ('OLED_FirstTimeSetup.cpp','String getOledTextInput(','isPassword'),
     ('OLED_Mode_UserManager.cpp','static void umStartKeyboard(','stage != 0'),
 )
-PLAIN_FIELDS=(('OLED_Mode_Network.cpp','static void startWifiAddSSID('),)
+PLAIN_FIELDS=(('OLED_Mode_Network.cpp','static void startWifiAddSsid('),)
 
 def keyboard_init_args(body):
     """Argument lists of every oledKeyboardInit( call in `body`, comments removed."""

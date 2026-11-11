@@ -121,12 +121,12 @@ bool webPasswordChangeAllows(httpd_req_t* req, const String& user);
 // ============================================================================
 
 // Get client IP address from request
-void getClientIP(httpd_req_t* req, char* ipBuf, size_t bufSize);
-void getClientIP(httpd_req_t* req, String& ipOut);
+void getClientIp(httpd_req_t* req, char* ipBuf, size_t bufSize);
+void getClientIp(httpd_req_t* req, String& ipOut);
 
 
 // Get session ID from cookie
-String getCookieSID(httpd_req_t* req);
+String getCookieSid(httpd_req_t* req);
 
 // Generate a random session token
 String makeSessToken();

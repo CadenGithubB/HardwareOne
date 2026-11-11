@@ -108,7 +108,7 @@ extern LogoutReason* gLogoutReasons;
 
 // Boot-local session-generation lookup used to fence queued commands and
 // interactive CLI ownership. The value is not wall-clock/NTP time.
-TransportSessionEpoch webSessionEpochForSID(const String& sid);
+TransportSessionEpoch webSessionEpochForSid(const String& sid);
 bool webSessionEpochIsLive(TransportSessionEpoch epoch);
 
 #if ENABLE_HTTP_SERVER
@@ -204,7 +204,7 @@ void webSessionMarkStatusSent(int idx, const String& sid, unsigned long seqSent)
 // ============================================================================
 
 // Session lookup and management
-int findSessionIndexBySID(const String& sid);
+int findSessionIndexBySid(const String& sid);
 int findFreeSessionIndex();
 void pruneExpiredSessions();
 int sseBindSession(httpd_req_t* req, String& outSid);
@@ -219,12 +219,12 @@ bool isAuthed(httpd_req_t* req, String& outUser);
 bool isAdminUser(const String& who);
 
 // Cookie and header helpers
-String getCookieSID(httpd_req_t* req);
+String getCookieSid(httpd_req_t* req);
 String makeSessToken();
 
 // Client IP extraction
-void getClientIP(httpd_req_t* req, char* ipBuf, size_t bufSize);
-void getClientIP(httpd_req_t* req, String& ipOut);
+void getClientIp(httpd_req_t* req, char* ipBuf, size_t bufSize);
+void getClientIp(httpd_req_t* req, String& ipOut);
 
 // Construct a SOURCE_WEB AuthContext from an HTTP request. The SID is routing
 // metadata; queued command authority is captured separately as a numeric
@@ -234,8 +234,8 @@ inline AuthContext makeWebAuthCtx(httpd_req_t* req) {
   ctx.transport = SOURCE_WEB;
   ctx.opaque = req;
   ctx.path = req ? req->uri : "";
-  getClientIP(req, ctx.ip);
-  ctx.sid = getCookieSID(req);
+  getClientIp(req, ctx.ip);
+  ctx.sid = getCookieSid(req);
   return ctx;
 }
 

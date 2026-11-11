@@ -2080,18 +2080,18 @@ static bool v4_radio_emit(const uint8_t* dst, const uint8_t* frame, size_t len, 
   // Note: NOT gated on gSettings.meshRelay. That setting governs carrying OTHER
   // nodes' frames; a node that opts out of being a relay still uses the mesh for
   // its own traffic. The "don't multi-hop my own sends either" knob is
-  // meshTTL = 1, which the envelope builder rejects.
+  // meshTtl = 1, which the envelope builder rejects.
   uint8_t nextHop[6];
   uint8_t hops = 0;
-  // hops <= meshTTL is the reachability test, not just a sanity check. An
+  // hops <= meshTtl is the reachability test, not just a sanity check. An
   // envelope is forwarded while its ttl is >= 2 and decremented each time, so a
   // budget of T carries a frame exactly T radio hops. Launching a 4-hop frame
   // with a budget of 3 would strand it at the third node — a silent black hole.
   // Refusing here instead lets the send fail where the caller can see it.
   if (meshRouterLookup(dst, nextHop, &hops) && hops >= 2 && !isSelfMac(nextHop) &&
-      hops <= gSettings.meshTTL) {
+      hops <= gSettings.meshTtl) {
     if (v4_relay_wrap_and_send(nextHop, dst, frame, len,
-                               gSettings.meshTTL, /*hopsUsed=*/0,
+                               gSettings.meshTtl, /*hopsUsed=*/0,
                                ((const EspNowV4Header*)frame)->msgId)) {
       meshRelayMetrics().routedTx++;
       return true;
@@ -2236,7 +2236,7 @@ bool v4_send_session_wrapped(const uint8_t dst[6], uint8_t type, uint16_t baseFl
     setErr("sessionWrapFrame failed");
     return false;
   }
-  UBaseType_t hwmAEAD = uxTaskGetStackHighWaterMark(nullptr);
+  UBaseType_t hwmAead = uxTaskGetStackHighWaterMark(nullptr);
   size_t frameLen = sizeof(EspNowV4Header) + plaintextLen + 16;
   captureEspNowFrame("TX", dst, 0, frame, (int)frameLen);
   // Routed when dst is only reachable via a relay — a sealed frame survives the
@@ -2246,7 +2246,7 @@ bool v4_send_session_wrapped(const uint8_t dst[6], uint8_t type, uint16_t baseFl
   DEBUGF(DEBUG_ESPNOW_CORE,
          "[TXDEPTH] task=%s type=%u len=%u free_words: pre=%u postAEAD=%u postSend=%u",
          pcTaskGetName(nullptr), (unsigned)type, (unsigned)plaintextLen,
-         (unsigned)hwmPre, (unsigned)hwmAEAD, (unsigned)hwmSend);
+         (unsigned)hwmPre, (unsigned)hwmAead, (unsigned)hwmSend);
   if (rc != ESP_OK) {
     if (errOut && errOutLen) snprintf(errOut, errOutLen, "esp_now_send rc=%d", (int)rc);
     return false;
@@ -2921,11 +2921,11 @@ static bool v4_broadcast_time_sync(uint32_t epochTime, int32_t timeOffset) {
   payload.timeOffset = timeOffset;
   uint32_t msgId = generateMessageId();
   DEBUGF(DEBUG_ESPNOW_MESH, "[V4_TX_TIME_SYNC] Broadcasting (BROADCAST_AUTH) msgId=%lu ttl=%u",
-         (unsigned long)msgId, (unsigned)gSettings.meshTTL);
-  // Live meshTTL, not a literal: this is one of the two flood-relayed opcodes,
+         (unsigned long)msgId, (unsigned)gSettings.meshTtl);
+  // Live meshTtl, not a literal: this is one of the two flood-relayed opcodes,
   // so the setting is what decides how far a clock update travels.
   return v4_broadcast(ESPNOW_V4_TYPE_TIME_SYNC, 0, msgId,
-                      (const uint8_t*)&payload, sizeof(payload), gSettings.meshTTL);
+                      (const uint8_t*)&payload, sizeof(payload), gSettings.meshTtl);
 }
 
 static bool v4_send_topo_request(const uint8_t* dst, uint32_t reqId) {
@@ -3248,12 +3248,12 @@ bool v4_broadcast_text(const char* text, uint16_t textLen) {
   
   uint32_t msgId = generateMessageId();
   DEBUGF(DEBUG_ESPNOW_CORE, "[V4_BROADCAST_TEXT] Broadcasting msgId=%lu len=%u ttl=%u",
-         (unsigned long)msgId, textLen, (unsigned)gSettings.meshTTL);
+         (unsigned long)msgId, textLen, (unsigned)gSettings.meshTtl);
 
-  // Live meshTTL — a broadcast text is the headline multi-hop case: it should
+  // Live meshTtl — a broadcast text is the headline multi-hop case: it should
   // reach every node in the mesh, not just those in earshot of the sender.
   bool result = v4_broadcast(ESPNOW_V4_TYPE_TEXT, 0, msgId, (const uint8_t*)text, textLen,
-                             gSettings.meshTTL);
+                             gSettings.meshTtl);
   DEBUGF(DEBUG_ESPNOW_CORE, "[V4_BROADCAST_TEXT] Result: %s", result ? "SUCCESS" : "FAILED");
   return result;
 }
@@ -3681,12 +3681,12 @@ static void v4h_heartbeat(const V4RxCtx& ctx) {
     // silently ignored for the purposes of backup-master state.
     if (ctx.isAuthenticated &&
         meshEnabled() && gSettings.meshBackupEnabled &&
-        gSettings.meshMasterMAC.length() > 0) {
+        gSettings.meshMasterMac.length() > 0) {
       bool isBackupOrPromoted = (gSettings.meshRole == MESH_ROLE_BACKUP_MASTER) ||
                                  (gSettings.meshRole == MESH_ROLE_MASTER && gBackupPromoted);
       if (isBackupOrPromoted) {
         uint8_t masterMac[6] = {};
-        if (parseMacAddress(gSettings.meshMasterMAC, masterMac) &&
+        if (parseMacAddress(gSettings.meshMasterMac, masterMac) &&
             memcmp(ctx.recv_info->src_addr, masterMac, 6) == 0) {
           gLastMasterHeartbeat = millis();
           if (gBackupPromoted) {
@@ -10401,11 +10401,11 @@ void processMeshHeartbeats() {
 
   // 3a. Master: send dedicated unicast heartbeat to backup device
   if (meshEnabled() && gSettings.meshRole == MESH_ROLE_MASTER &&
-      gSettings.meshBackupEnabled && gSettings.meshBackupMAC.length() > 0) {
+      gSettings.meshBackupEnabled && gSettings.meshBackupMac.length() > 0) {
     if (now - gLastBackupHeartbeat >= gSettings.meshMasterHeartbeatInterval) {
       gLastBackupHeartbeat = now;
       uint8_t backupMac[6] = {};
-      if (parseMacAddress(gSettings.meshBackupMAC, backupMac)) {
+      if (parseMacAddress(gSettings.meshBackupMac, backupMac)) {
         V4PayloadHeartbeat hb = {};
         hb.role      = MESH_ROLE_MASTER;
         hb.uptimeSec = now / 1000;
@@ -13299,7 +13299,7 @@ const char* cmd_espnow_meshttl(const String& argsInput) {
              "Known routes: %d (%s)\n"
              "\nTTL 1 = single hop (no relaying). Applies to broadcast text/time sync\n"
              "and to routed unicast; heartbeats and pairing are always single-hop.",
-             gSettings.meshTTL, gSettings.meshTTL == 1 ? "" : "s",
+             gSettings.meshTtl, gSettings.meshTtl == 1 ? "" : "s",
              gSettings.meshRelay ? "enabled" : "disabled",
              meshRouterCount(), "see espnowmeshroutes");
     return getDebugBuffer();
@@ -13310,10 +13310,10 @@ const char* cmd_espnow_meshttl(const String& argsInput) {
     return "Error: TTL must be between 1 and 10 (1 = single hop, no relaying)";
   }
 
-  setSetting(gSettings.meshTTL, (uint8_t)ttl);
+  setSetting(gSettings.meshTtl, (uint8_t)ttl);
 
   if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
-  snprintf(getDebugBuffer(), 1024, "Mesh TTL set to %d%s", gSettings.meshTTL,
+  snprintf(getDebugBuffer(), 1024, "Mesh TTL set to %d%s", gSettings.meshTtl,
            ttl == 1 ? " — multi-hop disabled for this node's own sends" : "");
   return getDebugBuffer();
 }
@@ -13335,7 +13335,7 @@ const char* cmd_espnow_meshroutes(const String& argsInput) {
 
   if (argWantsJson(argsInput)) {
     pos += snprintf(buf + pos, cap - pos, "{\"schema\":1,\"ttl\":%d,\"relay\":%s,\"routes\":[",
-                    gSettings.meshTTL, gSettings.meshRelay ? "true" : "false");
+                    gSettings.meshTtl, gSettings.meshRelay ? "true" : "false");
     bool first = true;
     for (int i = 0; i < MESH_ROUTE_MAX && pos < (int)cap - 128; i++) {
       const MeshRoute* r = meshRouterAt(i);
@@ -13360,7 +13360,7 @@ const char* cmd_espnow_meshroutes(const String& argsInput) {
 
   pos += snprintf(buf + pos, cap - pos, "=== Mesh Routes ===\n");
   pos += snprintf(buf + pos, cap - pos, "TTL %d | relay-for-others %s\n\n",
-                  gSettings.meshTTL, gSettings.meshRelay ? "ON" : "OFF");
+                  gSettings.meshTtl, gSettings.meshRelay ? "ON" : "OFF");
 
   int shown = 0;
   for (int i = 0; i < MESH_ROUTE_MAX && pos < (int)cap - 128; i++) {
@@ -13528,7 +13528,7 @@ const char* cmd_espnow_meshmetrics(const String& argsInput) {
       "\"table\":{\"installed\":%lu,\"replaced\":%lu,\"expired\":%lu,"
       "\"advertsSent\":%lu,\"advertsRecv\":%lu}}",
       (gEspNow->mode == ESPNOW_MODE_MESH) ? "mesh" : "direct",
-      (int)gEspNow->deviceCount, gSettings.meshTTL,
+      (int)gEspNow->deviceCount, gSettings.meshTtl,
       gSettings.meshRelay ? "true" : "false", meshRouterCount(),
       (unsigned long)m.floodForwards, (unsigned long)m.floodFanout,
       (unsigned long)m.floodFanoutFails, (unsigned long)m.floodDropTtl,
@@ -13551,7 +13551,7 @@ const char* cmd_espnow_meshmetrics(const String& argsInput) {
                   (gEspNow->mode == ESPNOW_MODE_MESH) ? "mesh" : "direct");
   pos += snprintf(buf + pos, cap - pos, "Paired devices:  %d\n", (int)gEspNow->deviceCount);
   pos += snprintf(buf + pos, cap - pos, "Known routes:    %d\n", meshRouterCount());
-  pos += snprintf(buf + pos, cap - pos, "Hop budget:      %d\n", gSettings.meshTTL);
+  pos += snprintf(buf + pos, cap - pos, "Hop budget:      %d\n", gSettings.meshTtl);
   pos += snprintf(buf + pos, cap - pos, "Relay for peers: %s\n\n",
                   gSettings.meshRelay ? "ON" : "OFF");
 
@@ -14194,9 +14194,9 @@ const char* cmd_espnow_meshrole(const String& argsInput) {
     PSRAM_JSON_DOC(doc);
     doc["schema"]        = 1;
     doc["role"]          = getMeshRoleString(gSettings.meshRole);
-    doc["masterMac"]     = gSettings.meshMasterMAC;
+    doc["masterMac"]     = gSettings.meshMasterMac;
     doc["backupEnabled"] = gSettings.meshBackupEnabled;
-    doc["backupMac"]     = gSettings.meshBackupMAC;
+    doc["backupMac"]     = gSettings.meshBackupMac;
     serializeJson(doc, getDebugBuffer(), 1024);
     return getDebugBuffer();
   }
@@ -14205,12 +14205,12 @@ const char* cmd_espnow_meshrole(const String& argsInput) {
     int pos = 0;
     char* buf = getDebugBuffer();
     pos += snprintf(buf + pos, 1024 - pos, "Mesh role: %s", getMeshRoleString(gSettings.meshRole));
-    if (gSettings.meshMasterMAC.length() > 0) {
-      pos += snprintf(buf + pos, 1024 - pos, "\nMaster MAC: %s", gSettings.meshMasterMAC.c_str());
+    if (gSettings.meshMasterMac.length() > 0) {
+      pos += snprintf(buf + pos, 1024 - pos, "\nMaster MAC: %s", gSettings.meshMasterMac.c_str());
     }
     pos += snprintf(buf + pos, 1024 - pos, "\nBackup enabled: %s", gSettings.meshBackupEnabled ? "yes" : "no");
-    if (gSettings.meshBackupEnabled && gSettings.meshBackupMAC.length() > 0) {
-      pos += snprintf(buf + pos, 1024 - pos, "\nBackup MAC: %s", gSettings.meshBackupMAC.c_str());
+    if (gSettings.meshBackupEnabled && gSettings.meshBackupMac.length() > 0) {
+      pos += snprintf(buf + pos, 1024 - pos, "\nBackup MAC: %s", gSettings.meshBackupMac.c_str());
     }
     return buf;
   }
@@ -14223,7 +14223,7 @@ const char* cmd_espnow_meshrole(const String& argsInput) {
     return "Role set to worker";
   } else if (role == "master") {
     setSetting(gSettings.meshRole, (uint8_t)MESH_ROLE_MASTER);
-    setSetting(gSettings.meshMasterMAC, String(""));
+    setSetting(gSettings.meshMasterMac, String(""));
     BROADCAST_PRINTF("[MESH] Role set to master");
     return "Role set to master";
   } else if (role == "backup") {
@@ -14338,8 +14338,8 @@ const char* cmd_espnow_meshmaster(const String& argsInput) {
   CommandArgs a(argsInput);
 
   if (a.count() == 0) {
-    if (gSettings.meshMasterMAC.length() > 0) {
-      BROADCAST_PRINTF("Master MAC: %s", gSettings.meshMasterMAC.c_str());
+    if (gSettings.meshMasterMac.length() > 0) {
+      BROADCAST_PRINTF("Master MAC: %s", gSettings.meshMasterMac.c_str());
     } else {
       BROADCAST_PRINTF("No master assigned");
     }
@@ -14359,8 +14359,8 @@ const char* cmd_espnow_meshmaster(const String& argsInput) {
   }
 
   mac.toUpperCase();
-  setSetting(gSettings.meshMasterMAC, mac);
-  BROADCAST_PRINTF("[MESH] Master MAC set to %s", gSettings.meshMasterMAC.c_str());
+  setSetting(gSettings.meshMasterMac, mac);
+  BROADCAST_PRINTF("[MESH] Master MAC set to %s", gSettings.meshMasterMac.c_str());
   return "OK";
 }
 
@@ -14370,8 +14370,8 @@ const char* cmd_espnow_meshbackup(const String& argsInput) {
   CommandArgs a(argsInput);
 
   if (a.count() == 0) {
-    if (gSettings.meshBackupMAC.length() > 0) {
-      BROADCAST_PRINTF("Backup MAC: %s", gSettings.meshBackupMAC.c_str());
+    if (gSettings.meshBackupMac.length() > 0) {
+      BROADCAST_PRINTF("Backup MAC: %s", gSettings.meshBackupMac.c_str());
     } else {
       BROADCAST_PRINTF("No backup assigned");
     }
@@ -14391,8 +14391,8 @@ const char* cmd_espnow_meshbackup(const String& argsInput) {
   }
 
   mac.toUpperCase();
-  setSetting(gSettings.meshBackupMAC, mac);
-  BROADCAST_PRINTF("[MESH] Backup MAC set to %s", gSettings.meshBackupMAC.c_str());
+  setSetting(gSettings.meshBackupMac, mac);
+  BROADCAST_PRINTF("[MESH] Backup MAC set to %s", gSettings.meshBackupMac.c_str());
   return "OK";
 }
 
@@ -18380,13 +18380,13 @@ static const SettingEntry espnowSettingEntries[] = {
   { "friendlyName", SETTING_STRING, &gSettings.espnowFriendlyName, 0, 0, "", 0, 0, "Friendly Name", nullptr, false, "identity", "espnowfriendlyname" },
   { "stationary", SETTING_BOOL, &gSettings.espnowStationary, false, 0, nullptr, 0, 1, "Stationary", nullptr, false, "identity", "espnowstationary" },
   { "firstTimeSetup",             SETTING_BOOL,   &gSettings.espnowFirstTimeSetup,       false, 0, nullptr, 0, 1, "First Time Setup", nullptr, false, nullptr, "espnowfirsttimesetup" },
-  // meshRole is uint8_t — must be SETTING_U8. Same for meshTTL/meshPeerMax/
+  // meshRole is uint8_t — must be SETTING_U8. Same for meshTtl/meshPeerMax/
   // bondRole and the uint16_t buffer-size fields below. Untyped SETTING_INT
   // would write 4 bytes through a uint8/uint16 pointer, corrupting the
   // adjacent struct members (root cause of the 2026-05-18 crash).
   { "meshRole", SETTING_U8, &gSettings.meshRole, 0, 0, nullptr, 0, 2, "Mesh Role", "0:Worker,1:Master,2:Backup Master", false, "mesh", "espnowmeshrole" },
-  { "masterMAC", SETTING_STRING, &gSettings.meshMasterMAC, 0, 0, "", 0, 0, "Master MAC", nullptr, false, "mesh", "espnowmeshmaster" },
-  { "backupMAC", SETTING_STRING, &gSettings.meshBackupMAC, 0, 0, "", 0, 0, "Backup MAC", nullptr, false, "mesh", "espnowmeshbackup" },
+  { "masterMAC", SETTING_STRING, &gSettings.meshMasterMac, 0, 0, "", 0, 0, "Master MAC", nullptr, false, "mesh", "espnowmeshmaster" },
+  { "backupMAC", SETTING_STRING, &gSettings.meshBackupMac, 0, 0, "", 0, 0, "Backup MAC", nullptr, false, "mesh", "espnowmeshbackup" },
   { "backupEnabled", SETTING_BOOL, &gSettings.meshBackupEnabled, false, 0, nullptr, 0, 1, "Backup Master Enabled", nullptr, false, "mesh", "espnowbackupenable" },
   { "masterHeartbeatInterval", SETTING_INT, &gSettings.meshMasterHeartbeatInterval, 10000, 0, nullptr, 1000, 60000, "Heartbeat Interval (ms)", nullptr, false, "mesh", "espnowheartbeatinterval" },
   { "failoverTimeout", SETTING_INT, &gSettings.meshFailoverTimeout, 20000, 0, nullptr, 5000, 120000, "Failover Timeout (ms)", nullptr, false, "mesh", "espnowfailovertimeout" },
@@ -18394,7 +18394,7 @@ static const SettingEntry espnowSettingEntries[] = {
   { "topoDiscoveryInterval", SETTING_INT, &gSettings.meshTopoDiscoveryInterval, 0, 0, nullptr, 0, 300000, "Topo Discovery Interval (ms)", nullptr, false, "mesh", "espnowtopodiscoveryinterval" },
   { "topoAutoRefresh", SETTING_BOOL, &gSettings.meshTopoAutoRefresh, false, 0, nullptr, 0, 1, "Auto Refresh Topology", nullptr, false, "mesh", "espnowtopoautorefresh" },
   { "heartbeatBroadcast", SETTING_BOOL, &gSettings.meshHeartbeatBroadcast, true, 0, nullptr, 0, 1, "Heartbeat Broadcast", nullptr, false, "mesh", "espnowheartbeatbroadcast" },
-  { "meshTTL", SETTING_U8, &gSettings.meshTTL, 3, 0, nullptr, 1, 10, "TTL", nullptr, false, "mesh", "espnowmeshttl" },
+  { "meshTTL", SETTING_U8, &gSettings.meshTtl, 3, 0, nullptr, 1, 10, "TTL", nullptr, false, "mesh", "espnowmeshttl" },
   // Preferred radio channel (0=auto, 1-13). U8 range 0..13. cmdKey routes the
   // settings editor to the custom cmd_espnow_channel so a change applies live.
   { "channel", SETTING_U8, &gSettings.espnowChannel, 0, 0, nullptr, 0, 13, "Preferred Channel (0=auto)", nullptr, false, nullptr, "espnowchannel" },

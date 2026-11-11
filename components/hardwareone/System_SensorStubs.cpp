@@ -187,7 +187,7 @@ const size_t bluetoothCommandsCount = 0;
 
 #if !ENABLE_WIFI
 // WiFi stub variables (global definitions)
-bool gSkipNTPInWifiConnect = false;
+bool gSkipNtpInWifiConnect = false;
 const struct CommandEntry wifiCommands[] = {};
 const size_t wifiCommandsCount = 0;
 // WiFi stub class instance - defined in header as inline class

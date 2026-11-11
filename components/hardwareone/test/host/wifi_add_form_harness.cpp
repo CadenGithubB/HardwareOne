@@ -202,7 +202,7 @@ static void oledType(const char* text) {
   (void)wifiAddKeyboardTick(&handled);
 }
 static void oledManualAdd(const char* ssid, const char* pass) {
-  startWifiAddSSID();
+  startWifiAddSsid();
   oledType(ssid);
   if (gKeyboard.active) oledType(pass);
 }
@@ -344,7 +344,7 @@ static void oledSuccessToast() {
 // The SSID stays plain.
 static void oledPasswordMasked() {
   oledBegin("oled_password_masked");
-  startWifiAddSSID();
+  startWifiAddSsid();
   EXPECT(gKeyboard.active && !gKeyboard.masked, "the SSID keyboard opens plain");
   oledType("HomeNet");
   EXPECT(gKeyboard.active && gKeyboard.title == "Enter Password:" && gKeyboard.masked,
