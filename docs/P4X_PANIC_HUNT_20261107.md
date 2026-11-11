@@ -82,7 +82,7 @@ Serial log `private/sttraw-bench/memdiag-b4-loop/serial.log` (STT repo), ELF
    data written for 0x49b70760 (64 KB + 32 B away). The values decode to this pass's own tags, so this is not
    stale data and not a software overwrite with other content: PSRAM transfers landed at the wrong address.
 3. ~0.2 s later, on core 1, the web server task freeing a command buffer
-   (`handleCLICommand -> submitAndExecuteSync -> releaseSyncExecReqOwner -> heap_caps_free`) hit
+   (`handleCliCommand -> submitAndExecuteSync -> releaseSyncExecReqOwner -> heap_caps_free`) hit
    `CORRUPT HEAP: multi_heap.c:123` (`assert_valid_block`) on PSRAM block ~0x49f8de8c -> `abort()` ->
    reset=panic. A different PSRAM region than the test buffer, corrupted at the same moment.
 4. The console coredump was lost: the USB serial device re-enumerated after the reset (listener got

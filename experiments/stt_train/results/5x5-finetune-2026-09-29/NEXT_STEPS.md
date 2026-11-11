@@ -25,7 +25,7 @@ weights and halves the LR after 2 worse evals in a row.
   falls back to greedy if absent. Host tests stt_lm_tests + stt_lm_parity pass.
 - Morning: retune for the new checkpoint:
   nice -n 15 $P lm/tune.py --ckpt /path/to/stt-data/work/run1/best --lm /path/to/stt-data/work/lm/meeting.lm --out-lm /path/to/stt-data/work/lm/meeting-run1.lm
-- Unresolved: STTLocalStats has no "LM used" field; measure decode time on the P4; LittleFS space (9.86 MB) for 5.5 MB model + 2.5 MB LM.
+- Unresolved: SttLocalStats has no "LM used" field; measure decode time on the P4; LittleFS space (9.86 MB) for 5.5 MB model + 2.5 MB LM.
 
 ## Other pending
 - Export best -> espdl, recalibrate int8 quantisation with more clips, sync the P4 build copy
@@ -46,4 +46,4 @@ weights and halves the LR after 2 worse evals in a row.
 - LittleFS: /STT Models/quartznet5x5.p4.stt (run2) + meeting.lm (unk_log10 -5, hotword 3; -7.5 glued OOV words).
 - Speaker->PDM test (8 held-out clips): 44.7% WER; read speech near perfect, meeting clips weak.
 - Boot log: ring 02:48:57:31:02:1C bond removed on SMP failure (ring likely bonded to the other P4) -> re-pair.
-- TODO: STTLocalStats has no "LM used" flag; merge G2 fix + LM into main properly; retune LM for run3.
+- TODO: SttLocalStats has no "LM used" flag; merge G2 fix + LM into main properly; retune LM for run3.

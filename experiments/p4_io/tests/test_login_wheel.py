@@ -35,7 +35,7 @@ using String = std::string;
 constexpr int JOYSTICK_DEADZONE = 10;
 constexpr int SOURCE_LOCAL_DISPLAY = 1;
 constexpr int SYSEVT_LOGIN_OK = 2, SYSEVT_LOGIN_FAIL = 3;
-enum class OLEDKeyboardDictationPolicy { ALLOW_PLAINTEXT, DENY };
+enum class OledKeyboardDictationPolicy { ALLOW_PLAINTEXT, DENY };
 struct { bool up = false, down = false; } gNavEvents;
 struct { bool localDisplayRequireAuth = true; } gSettings;
 bool authenticated = false, loginAllowed = false;
@@ -43,7 +43,7 @@ bool keyboardCompleted = false, keyboardCancelled = false;
 int keyboardStarts = 0, keyboardResets = 0, loginAttempts = 0, event = 0;
 unsigned long dirtyUntil = 0;
 String keyboardText, keyboardTitle, keyboardInitial;
-OLEDKeyboardDictationPolicy keyboardPolicy = OLEDKeyboardDictationPolicy::DENY;
+OledKeyboardDictationPolicy keyboardPolicy = OledKeyboardDictationPolicy::DENY;
 bool inputIsButtonPressed(uint32_t state, InputButton button) {
   return (state & (1u << button)) != 0;
 }
@@ -55,7 +55,7 @@ bool oledKeyboardIsCancelled() { return keyboardCancelled; }
 const char* oledKeyboardGetText() { return keyboardText.c_str(); }
 void oledKeyboardReset() { ++keyboardResets; }
 void oledKeyboardInit(const char* title, const char* initial, int,
-                      OLEDKeyboardDictationPolicy policy) {
+                      OledKeyboardDictationPolicy policy) {
   ++keyboardStarts; keyboardTitle = title; keyboardInitial = initial;
   keyboardPolicy = policy;
 }
@@ -92,12 +92,12 @@ int main(int argc, char** argv) {
     CHECK(handleLoginModeInput(0, 0, 1u << INPUT_BUTTON_A));
     CHECK(loginKeyboardActive && keyboardStarts == 1);
     CHECK(keyboardTitle == "Enter Username:" && keyboardInitial == "fixture-user");
-    CHECK(keyboardPolicy == OLEDKeyboardDictationPolicy::ALLOW_PLAINTEXT);
+    CHECK(keyboardPolicy == OledKeyboardDictationPolicy::ALLOW_PLAINTEXT);
     resetLoginSessionState(); currentField = FIELD_PASSWORD;
     CHECK(handleLoginModeInput(0, 0, 1u << INPUT_BUTTON_A));
     CHECK(loginKeyboardActive && keyboardStarts == 2);
     CHECK(keyboardTitle == "Enter Password:");
-    CHECK(keyboardPolicy == OLEDKeyboardDictationPolicy::DENY);
+    CHECK(keyboardPolicy == OledKeyboardDictationPolicy::DENY);
     CHECK(!authenticated && loginAttempts == 0);
   } else if (scenario == "back-auth") {
     currentField = FIELD_PASSWORD;

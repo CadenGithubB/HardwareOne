@@ -56,11 +56,11 @@ s=s.replace(marker,marker+'''#if ENABLE_LOCAL_STT
   portENTER_CRITICAL(&gDictMux);
   local = gLocalDict;
   portEXIT_CRITICAL(&gDictMux);
-  STTSnapshot snap;
+  SttSnapshot snap;
   if (local.token && sttSnapshot(local.actor, local.token, &snap)) {
     out.sourceName = sourceLabel(static_cast<AudioSource>(snap.audioSource));
     out.level = snap.level;
-    out.preparing = snap.state == STTState::Preparing;
+    out.preparing = snap.state == SttState::Preparing;
   } else {
     out.level = 0;
     out.preparing = local.beginPending || local.beginInFlight;
@@ -148,13 +148,13 @@ s=s.replace('WAITING,      // WAV closed, request pushed, host is transcribing',
 changes['System_Dictation.h']=s
 
 s=(BASE/'System_STT.h').read_text()
-s=s.replace('bool sttRequestFinish(', '// Internal join predicate: contains no transcript/session data and remains\n// usable after revocation. Unknown or terminal tokens are inactive.\nbool sttRunActive(STTToken token);\nbool sttRequestFinish(',1)
+s=s.replace('bool sttRequestFinish(', '// Internal join predicate: contains no transcript/session data and remains\n// usable after revocation. Unknown or terminal tokens are inactive.\nbool sttRunActive(SttToken token);\nbool sttRequestFinish(',1)
 changes['System_STT.h']=s
 s=(BASE/'System_STT.cpp').read_text()
-s=s.replace('bool sttRequestFinish(','''bool sttRunActive(STTToken token) {
-  portENTER_CRITICAL(&gSTTMux);
-  const bool active = token && gSTT.snapshot.token == token && gSTT.snapshot.workerActive;
-  portEXIT_CRITICAL(&gSTTMux);
+s=s.replace('bool sttRequestFinish(','''bool sttRunActive(SttToken token) {
+  portENTER_CRITICAL(&gSttMux);
+  const bool active = token && gStt.snapshot.token == token && gStt.snapshot.workerActive;
+  portEXIT_CRITICAL(&gSttMux);
   return active;
 }
 

@@ -24,7 +24,7 @@ constexpr size_t MAX_BODY=2000000, SMALL_BODY=8192;
 uint32_t now=0;
 uint32_t millis() { return now; }
 bool allocationFailure=false, hashFailure=false;
-enum class AllocPolicy { PreferPSRAM };
+enum class AllocPolicy { PreferPsram };
 void* ps_alloc(size_t n, AllocPolicy, const char*) { return allocationFailure ? nullptr : malloc(n); }
 void ps_free(void* p) { free(p); }
 class Stream {

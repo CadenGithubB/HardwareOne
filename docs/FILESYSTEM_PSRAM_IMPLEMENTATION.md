@@ -7,7 +7,7 @@ not a claim of fixed BSS savings or measured physical free-heap improvement.
 ## Changes and compatibility boundaries
 
 - `System_PsramBuffer.h`: caller-owned, NUL-terminated, checked growing output.
-  All allocations use the existing `PreferPSRAM` policy with internal fallback.
+  All allocations use the existing `PreferPsram` policy with internal fallback.
   Size/overflow/allocation failures stay sticky until explicit reuse; partial
   output must not be sent as success. Small owner metadata remains internal.
 - Filesystem listings: one output allocation instead of an ordinary String

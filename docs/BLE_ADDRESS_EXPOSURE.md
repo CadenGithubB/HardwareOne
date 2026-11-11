@@ -38,7 +38,7 @@ Each item below changes behaviour or the UI, not just a log line.
 | `G2_Ring.cpp` RING_CONNECTED / RING_DISCONNECTED events | Detail = the ring's address. It reaches `events.log`, the `events` command, the G2 SysEvents page and automation matching. | The transition reason, or the ring profile. First check that no automation matches on the address. |
 | `Bluetooth.cpp` SYSEVT_BLE_CONNECTED (GATT server mode) | Detail = the central's address | `slot N conn M` |
 | `G2_Ring.cpp` ring connect line | `Connected to EVEN R1_<id> …` prints the ring's advertised name, whose suffix identifies the ring (seen in the 498ac7d6 boot log) | Print the name without its suffix, or the profile only |
-| `Bluetooth.cpp` `buildBLEInfoJson` `clients[].mac` | Web Bluetooth page (server mode) | `conn #N` |
+| `Bluetooth.cpp` `buildBleInfoJson` `clients[].mac` | Web Bluetooth page (server mode) | `conn #N` |
 | `BLE_Peers.cpp` `blePeersWriteJson` `mac1`/`mac2` | `GET /api/settings`, the G2 Settings JSON view and the ESP-NOW settings mirror | Saved/not-saved flags in exports. Keep the stored values: backup and restore need them. |
 | `g2info` (`G2_Glasses.cpp`) | Prints both temple addresses; its help text advertises "MAC" | `addr=known/--`. The command-rework session owns command output now. |
 | `blestatus`, `blepeers`, `bleautoreconnect` (query) | Print saved or live addresses on request | The same, in the command rework |

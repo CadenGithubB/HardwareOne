@@ -129,7 +129,7 @@ that diagnostic run. This establishes one way the old scanner produced the
 error; it does not identify the address involved in the earlier boot error or
 attribute that error to the Seesaw gamepad.
 
-Discovery now uses one address-only probe owned by `I2CDeviceManager`. A positive
+Discovery now uses one address-only probe owned by `I2cDeviceManager`. A positive
 result requires two address ACKs under the same bus mutex and clock setting;
 no device payload is read or written. The manager restores its clock policy
 after the probe and does not add scan attempts to sensor health records or

@@ -31,7 +31,7 @@ using portMUX_TYPE = int;
 #define portMUX_INITIALIZER_UNLOCKED 0
 void portENTER_CRITICAL(int*) {}
 void portEXIT_CRITICAL(int*) {}
-enum class AllocPref {PreferPSRAM, RequireInternal};
+enum class AllocPref {PreferPsram, RequireInternal};
 void* ps_alloc(size_t n, AllocPref, const char*) { return malloc(n); }
 void heap_caps_free(void* p) { free(p); }
 #define DEBUG_RING_SETUPF(...) do { printf(__VA_ARGS__); puts(""); } while (0)

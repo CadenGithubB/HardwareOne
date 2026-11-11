@@ -92,7 +92,7 @@ All seven findings were re-checked at 966ee3f1 (`claude/road-to-1.0`), one skept
 | G-83 | Two hand-synchronised known-task tables already disagree by one row | Yes. It is now committed, so the "uncommitted" tag is out of date. | Low, diagnostics only. `[MEMSAMPLE]` never shows `espnow_tx`. MemoryMonitor reads high-water marks live through captured handles, which TaskUtils deliberately avoids. | Small (about 60-100 lines in 2-3 files plus a host check) | Optional cleanup for 0.99.99.x or after 1.0. Do not hold the release. |
 | G-84 | Command handlers registered under two names (11 pairs, now 12) | Yes, with `c6console`/`c6_console` added. The "no-alias policy" framing is overstated, and the proposed direction is backwards. | Small and cosmetic. About 12 extra help and reference rows. Nothing behaves wrongly. | Small for labels only. Medium for real removal. | Downgrade to P3 or defer. Keep the `open<x>`/`close<x>`/`<x>read` convention and label the twins as aliases. Decide removal after 1.0 together with the app clients. |
 | G-85 | System_Utils catch-all header pulls WebServer_Server.h into about half the sources | Yes, slightly larger: 105 of 226 `.cpp` files, 5,290 lines. | Developers only. Long rebuilds, hidden dependencies, and the executor and auth gate are buried in a 5.3k-line utility file. | Medium for the full slice. Small for the include removal alone. | Defer past 1.0 (P2 optional). Remove the include first, then move the executor in a separate commit. |
-| G-86 | Compatibility shims: dead aliases and live APIs mislabelled legacy | Yes. The live APIs have gained callers. `getClientIP(String&)` has about 9 production callers, not 5. | None for end users. Source hygiene only. | Small (about 6 files, roughly 15 lines, mostly comments) | Optional hygiene: one commit if there is a spare slot, otherwise after 1.0. Do not migrate the `getClientIP(String&)` callers. |
+| G-86 | Compatibility shims: dead aliases and live APIs mislabelled legacy | Yes. The live APIs have gained callers. `getClientIp(String&)` has about 9 production callers, not 5. | None for end users. Source hygiene only. | Small (about 6 files, roughly 15 lines, mostly comments) | Optional hygiene: one commit if there is a spare slot, otherwise after 1.0. Do not migrate the `getClientIp(String&)` callers. |
 | G-87 | openwifi blocks the shared command executor | Yes, and worse than stated. Up to about 150 s for plain `openwifi` (the best-network hunt), 50 s for `--index` and `--saved-id`. | Moderate when WiFi is unreachable. All transports queue behind `cmd_exec`. The web caller ties up httpd and times out after 60 s while the hunt keeps running. | Medium | Defer the code fix past 1.0. Document the limitation for 1.0 and correct "~50 s" in the group text. |
 | G-88 | Command-registry drift gate unusable: audit always exits 1, no reference `--check`, and the reference has now drifted | Yes. The drift has now happened: `docs/COMMAND_REFERENCE.md` is missing 9 shipped commands. | Moderate for docs, low for runtime. `help llm` gives the wrong search order. Four HT16K33 matrix settings show as read-only in the settings editor. There is no working gate. | Small (about 1-2 hours) | Fix before 1.0 in one small commit. |
 | G-89 | USERGUIDE multi-hop section contradicts itself on pairing through relays | Yes. Only the line numbers have moved. | Low, docs only. A user may try to pair through a relay and the request never arrives. | Trivial (1-2 lines of docs) | Fix before 1.0 as part of the docs pass. |
@@ -128,7 +128,7 @@ All seven findings were re-checked at 966ee3f1 (`claude/road-to-1.0`), one skept
 
 - **G-87: `openwifi` is synchronous and can stall other commands.**
   - **Evidence:**
-    - Plain `openwifi` runs `connectToBestWiFiNetwork()` with `kWifiConnectHuntBudgetMs = 150000` (`System_WiFi.h:159`, `:190`). Each network gets 35 s with 2 s gaps, plus inline NTP on connect.
+    - Plain `openwifi` runs `connectToBestWifiNetwork()` with `kWifiConnectHuntBudgetMs = 150000` (`System_WiFi.h:159`, `:190`). Each network gets 35 s with 2 s gaps, plus inline NTP on connect.
     - `--index` and `--saved-id` take 35 s, plus a 15 s rollback (`System_WiFi.cpp:993-997`).
     - The web "save and connect" button (`WebPage_Settings.h:2825`) goes through `submitAndExecuteSync` with a 60 s wait on the single httpd task.
     - `G2_Page_Network.cpp:1245` and two host harnesses depend on the synchronous behaviour.
@@ -176,7 +176,7 @@ These four are closed for 1.0 and move to the post-1.0 backlog. Each is still re
 - **G-86: compatibility-shim labels.**
   - **Evidence:**
     - `G2_SID_STATE_EVENT` (`System_G2_Protocol.h:118`) has no users. `formatMacAddrStr` has no callers, and `formatMacAddr` has one (`WebPage_Bond.cpp:982`).
-    - `SCREEN_*` (58/42 hits), `OLEDMenuItem` (42), `getClientIP(String&)` (about 9 production callers) and `SR_TASK_PRIORITY_LEVEL` are live APIs labelled legacy.
+    - `SCREEN_*` (58/42 hits), `OledMenuItem` (42), `getClientIp(String&)` (about 9 production callers) and `SR_TASK_PRIORITY_LEVEL` are live APIs labelled legacy.
   - **Backlog bounded fix:**
     1. Delete `G2_SID_STATE_EVENT`.
     2. Migrate the one `formatMacAddr` caller to `macToDisplay` and delete both aliases at `System_Utils.h:454-461`.

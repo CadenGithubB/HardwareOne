@@ -805,12 +805,12 @@ One skeptic per group re-opened the cited code at 95dc3f34 (read-only) and tried
 
 **Evidence.**
 - `components/hardwareone/System_Filesystem.cpp:2275` append first (2301-2320), cap check (:2325), tail copy to .tmp (2367-2397); an incomplete copy returns false (2398-2402) after the line was already added. The header comment (2267-2274) claims the log 'stays pinned at its cap', which is inaccurate: each append grows it
-- `components/hardwareone/System_VFS.cpp:808` LOG_OVERFLOW_DEFAULT_RESERVE 100 KB 'preserved for NON-log writes'; resolveOverflowPath (886-929) returns the LittleFS path when the latch is set and !isSDAvailable() ('accept the silent-loss behavior')
+- `components/hardwareone/System_VFS.cpp:808` LOG_OVERFLOW_DEFAULT_RESERVE 100 KB 'preserved for NON-log writes'; resolveOverflowPath (886-929) returns the LittleFS path when the latch is set and !isSdAvailable() ('accept the silent-loss behavior')
 - `components/hardwareone/System_Logging.h:54` caps 696,969 x2 + 64 KB + 256 KB x3, plus command-audit 500 KB (System_Utils.cpp:878) and crash-history 64 KB (System_CrashRecord.cpp:525), about 2.8 MB in total
 - `partitions/partitions_no_sr_8mb.csv:32` littlefs 0x23B000 (2.23 MB); partitions_ota_no_sr_8mb.csv littlefs 0x1D0000 (1.81 MB); partitions_sr_8mb.csv only 0x20000
 - `components/hardwareone/WebServer_Server.cpp:3756` a web /login attempt rejected during lockout still calls recordLoginAttempt -> 'web/login' -> LOG_FAIL_FILE, so an unauthenticated client can still grow the login-fail log without a PBKDF2 cost
 - `components/hardwareone/System_Debug.cpp:2512` isSecurityAuditEvent filter: '/api/cli' + 'unauthorized' (WebServer_Server.cpp:3372, :5236) does NOT reach the file; this refutes the original /api/cli path
-- `components/hardwareone/System_VFS.cpp:428` isSDAvailable: the SD.available() yank check exists only for ENABLE_SDMMC_CARD; the SPI build returns gSdMounted. resolveOverflowPath never consults isSDWritable()
+- `components/hardwareone/System_VFS.cpp:428` isSdAvailable: the SD.available() yank check exists only for ENABLE_SDMMC_CARD; the SPI build returns gSdMounted. resolveOverflowPath never consults isSdWritable()
 - `components/hardwareone/HAL_SDCard.cpp:85` SDMMC available(): removal is detected only through a detect pin; Waveshare has SD_MMC_DETECT_PIN -1 (System_Board_WaveshareP4.h:33), so a yank goes undetected there too
 - ... 2 more in verify/D1.json
 
@@ -818,7 +818,7 @@ One skeptic per group re-opened the cited code at 95dc3f34 (read-only) and tried
 
 **Waveshare.** Adds to PERS-5. The Waveshare SDMMC slot (82919267) has no card-detect pin, so a yanked card stays 'available' just like the SPI XIAO case (docs/WAVESHARE_P4_SUPPORT.md:269-274 tell users to sdunmount first). Its 23.9 MB LittleFS makes the latch, and PERS-4, much less likely there.
 
-**Bounded fix.** In appendLineWithCap, when over the cap and free space is below what the copy needs, rotate by rename (dest -> dest.1, as SensorLogging and the new system log already do) or drop the line behind a 'rotation blocked' latch. When the latch is set and no SD is present, refuse non-exempt appends. resolveOverflowPath should require isSDWritable(), and a failed /sd append should call noteSDWriteFailure and retry LittleFS. The system-log writer should also respect the reserve.
+**Bounded fix.** In appendLineWithCap, when over the cap and free space is below what the copy needs, rotate by rename (dest -> dest.1, as SensorLogging and the new system log already do) or drop the line behind a 'rotation blocked' latch. When the latch is set and no SD is present, refuse non-exempt appends. resolveOverflowPath should require isSdWritable(), and a failed /sd append should call noteSdWriteFailure and retry LittleFS. The system-log writer should also respect the reserve.
 
 **Done when.** capped_log_writes gains a low-space case (file never exceeds cap + one line, no repeated copy) and a latched-plus-SD-open-failure case (line lands on LittleFS or a counted drop). A LittleFS pre-filled to <100 KB on a host or XIAO check still saves settings.json.
 
@@ -1145,7 +1145,7 @@ One skeptic per group re-opened the cited code at 95dc3f34 (read-only) and tried
 - `docs/QUICKSTART.md:270` Step 4 Basic-mode advice: `openhttp` or `httpAutoStart 1`.
 - `components/hardwareone/System_FirstTimeSetup.cpp:875` Basic sets wifiAutoStart=true and httpAutoStart=true (875-876). Then 914-916 clear wifiAutoStart because WiFi was never configured.
 - `components/hardwareone/HardwareOne.cpp:1450` bootAutostartHttp starts HTTP only if WiFi.isConnected(). The boot WiFi connect is gated on wifiAutoStart (2187).
-- `components/hardwareone/network/wifi/System_WiFiNetworks.cpp:296` Only the setup path (saveSetupWiFiNetwork, called from the wizard and FirstTimeSetup) turns wifiAutoStart back on. The plain `wifiadd` CLI does not, so a Basic user also needs `wifiautostart 1` (registered, COMMAND_REFERENCE.md:1468) for the web UI to come up on boot.
+- `components/hardwareone/network/wifi/System_WiFiNetworks.cpp:296` Only the setup path (saveSetupWifiNetwork, called from the wizard and FirstTimeSetup) turns wifiAutoStart back on. The plain `wifiadd` CLI does not, so a Basic user also needs `wifiautostart 1` (registered, COMMAND_REFERENCE.md:1468) for the web UI to come up on boot.
 
 **Newer commits.** 365122c0 / 4b3c0550: touched System_SetupWizard/FirstTimeSetup for the GT911 touch input and the Waveshare merge; page order and titles unchanged
 
@@ -1592,7 +1592,7 @@ One skeptic per group re-opened the cited code at 95dc3f34 (read-only) and tried
 
 **Evidence.**
 - `components/hardwareone/System_Utils.cpp:1564` esp_light_sleep_start() result discarded; :1577 always returns 'Woke from light sleep'. OTA-probation refusal (:1506) and anti-flap cooldown (:1515) guards exist
-- `components/hardwareone/OLED_Mode_Power.cpp:224` Sleep submenu row 1 -> executeOLEDCommand("lightsleep 20") with no confirm; Restart and RAM flush use oledConfirmRequest (:177, :180)
+- `components/hardwareone/OLED_Mode_Power.cpp:224` Sleep submenu row 1 -> executeOledCommand("lightsleep 20") with no confirm; Restart and RAM flush use oledConfirmRequest (:177, :180)
 - `components/hardwareone/WebPage_Power.cpp:368` the web light-sleep button already asks hwConfirm, warning that the web interface stops responding
 - `components/hardwareone/System_RadioCompanion.cpp:1204` P4 hooks only pause and resume the companion watchdog
 - `components/hardwareone/System_WiFi.cpp:1959` WIFI_PS_NONE forced; CONFIG_PM_ENABLE unset (config/sdkconfig:1546)
