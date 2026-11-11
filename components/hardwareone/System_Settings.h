@@ -48,7 +48,7 @@ struct Settings {
       tofTransitionMs(200),
       tofUiMaxDistanceMm(3400),
       i2cClockThermalHz(400000),
-      i2cClockToFHz(200000),
+      i2cClockTofHz(200000),
       thermalTargetFps(8),
       thermalWebMaxFps(10),
       thermalRollingMinMaxEnabled(true),
@@ -445,12 +445,12 @@ struct Settings {
       mqttPublishWifi(false),
       mqttPublishSystem(false),
       mqttPublishThermal(false),
-      mqttPublishToF(false),
-      mqttPublishIMU(false),
+      mqttPublishTof(false),
+      mqttPublishImu(false),
       mqttPublishPresence(false),
       mqttPublishGps(false),
-      mqttPublishAPDS(false),
-      mqttPublishRTC(false),
+      mqttPublishApds(false),
+      mqttPublishRtc(false),
       mqttPublishInput(false),
       crashCount(0),
       lastResetReason(0)
@@ -526,7 +526,7 @@ struct Settings {
   int tofTransitionMs;
   int tofUiMaxDistanceMm;
   int i2cClockThermalHz;
-  int i2cClockToFHz;
+  int i2cClockTofHz;
   int thermalTargetFps;
   int thermalWebMaxFps;
   // Thermal rolling min/max stabilization
@@ -1205,12 +1205,12 @@ struct Settings {
   bool mqttPublishWifi;         // Include WiFi info in published data (default: false)
   bool mqttPublishSystem;       // Include system info (uptime, heap, etc.) (default: false)
   bool mqttPublishThermal;      // Include thermal sensor data (default: false)
-  bool mqttPublishToF;          // Include ToF sensor data (default: false)
-  bool mqttPublishIMU;          // Include IMU sensor data (default: false)
+  bool mqttPublishTof;          // Include ToF sensor data (default: false)
+  bool mqttPublishImu;          // Include IMU sensor data (default: false)
   bool mqttPublishPresence;     // Include presence/motion sensor data (default: false)
   bool mqttPublishGps;          // Include GPS location data (default: false)
-  bool mqttPublishAPDS;         // Include gesture/proximity data (default: false)
-  bool mqttPublishRTC;          // Include RTC time data (default: false)
+  bool mqttPublishApds;         // Include gesture/proximity data (default: false)
+  bool mqttPublishRtc;          // Include RTC time data (default: false)
   bool mqttPublishInput;      // Include input device data (default: false)
 
   // Crash / reset tracking (persisted from RTC memory on next healthy boot)

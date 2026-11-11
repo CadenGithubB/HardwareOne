@@ -141,7 +141,7 @@ static void thermalG2FormatValue(char* out, size_t cap) {
 
 #if ENABLE_APDS_SENSOR
 static void apdsG2FormatValue(char* out, size_t cap) {
-  APDSCache apds{};
+  ApdsCache apds{};
   if (apdsCacheSnapshot(apds, 5)) {
     if (apds.apdsDataValid) {
       snprintf(out, cap, "px:%u", (unsigned)apds.apdsProximity);
@@ -175,7 +175,7 @@ static void anoG2FormatValue(char* out, size_t cap) {
 
 #if ENABLE_RTC_SENSOR
 static void rtcG2FormatValue(char* out, size_t cap) {
-  RTCCache rtc{};
+  RtcCache rtc{};
   if (rtcCacheSnapshot(rtc, 5)) {
     if (rtc.dataValid) {
       // Show clock time HH:MM — the temperature reading is a
@@ -231,7 +231,7 @@ static void presenceG2FormatValue(char* out, size_t cap) {
 
 #if ENABLE_FM_RADIO
 static void fmG2FormatValue(char* out, size_t cap) {
-  FMRadioCache fmRadio{};
+  FmRadioCache fmRadio{};
   if (fmRadioCacheSnapshot(fmRadio, 5)) {
     if (fmRadio.dataValid) {
       // Frequency stored in 10 kHz units (10390 = 103.9 MHz).
@@ -931,12 +931,12 @@ static void g2BuildAnoArt(char* out, size_t cap) {
 //   Temp: 24.5 C
 static const char* kRtcDow[8] = { "?", "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
 static void g2BuildRtcReadout(char* out, size_t cap) {
-  RTCCache rtc{};
+  RtcCache rtc{};
   if (!(rtcCacheSnapshot(rtc, 5) && rtc.dataValid)) {
     snprintf(out, cap, "RTC\n(reading...)");
     return;
   }
-  const RTCDateTime& t = rtc.dateTime;
+  const RtcDateTime& t = rtc.dateTime;
   const uint8_t dow = (t.dayOfWeek >= 1 && t.dayOfWeek <= 7) ? t.dayOfWeek : 0;
   snprintf(out, cap,
            "%s %04u-%02u-%02u\n"
@@ -986,7 +986,7 @@ static void g2BuildTofReadout(char* out, size_t cap) {
 #if ENABLE_APDS_SENSOR
 // Proximity, RGBC colour channels, and last gesture code.
 static void g2BuildApdsReadout(char* out, size_t cap) {
-  APDSCache apds{};
+  ApdsCache apds{};
   if (!(apdsCacheSnapshot(apds, 5) && apds.apdsDataValid)) { snprintf(out, cap, "APDS\n(reading...)"); return; }
   snprintf(out, cap,
            "Prox: %u\n"
@@ -1042,7 +1042,7 @@ static void g2BuildPresenceReadout(char* out, size_t cap) {
 #if ENABLE_FM_RADIO
 // Tuned frequency, volume, stereo/mute, signal (RSSI/SNR), RDS station name.
 static void g2BuildFmReadout(char* out, size_t cap) {
-  FMRadioCache fmRadio{};
+  FmRadioCache fmRadio{};
   if (!(fmRadioCacheSnapshot(fmRadio, 5) && fmRadio.dataValid)) { snprintf(out, cap, "FM\n(reading...)"); return; }
   const char* mode = fmRadio.muted ? "Muted"
                    : fmRadio.stereo ? "Stereo" : "Mono";

@@ -444,13 +444,13 @@ void taskHeapMeasureSnapshot(const TaskStatus_t* snapshot, TaskHeapMeasure* out,
 // Create sensor-specific tasks (implementations call xTaskCreateLogged)
 bool createInputTask();
 bool createThermalTask();
-bool createIMUTask();
-bool createToFTask();
-bool createFMRadioTask();
-bool createAPDSTask();
+bool createImuTask();
+bool createTofTask();
+bool createFmRadioTask();
+bool createApdsTask();
 bool createPresenceTask();
 bool createGpsTask();
-bool createRTCTask();
+bool createRtcTask();
 
 // ============================================================================
 // Sensor Task Exit Helper

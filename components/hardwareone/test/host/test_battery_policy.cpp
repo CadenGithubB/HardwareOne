@@ -39,7 +39,7 @@ static void adcDoesNotInventPresenceOrUsb() {
   assert(!state.chargingKnown && !state.isCharging);
   assert(!state.presenceKnown);
   assert(!state.rateValid);
-  assert(state.lastReadMs == 100 && state.rawADC == 2100);
+  assert(state.lastReadMs == 100 && state.rawAdc == 2100);
   assert(BatteryPolicy::classify(state) == BATTERY_FULL);
 
   // A fast voltage increase is not a measurement of charging or external power.

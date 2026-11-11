@@ -43,7 +43,7 @@ static Scenario scenario;
 struct TwoWire {};
 static TwoWire wire;
 struct {
-  int i2cClockToFHz = 200000, tofBus = 1, tofDevicePollMs = 100;
+  int i2cClockTofHz = 200000, tofBus = 1, tofDevicePollMs = 100;
 } gSettings;
 
 class VL53L4CX {
@@ -195,7 +195,7 @@ static void resetScenario() {
   gTofConnected = false; gTofRunning = false; gTofNear = false;
   sTofCache.tofDataValid = true; sTofCache.tofTotalObjects = 4;
   for (auto& object : sTofCache.tofObjects) { object.detected = true; object.valid = true; }
-  gSettings.i2cClockToFHz = 200000; gSettings.tofBus = 1;
+  gSettings.i2cClockTofHz = 200000; gSettings.tofBus = 1;
 }
 static void expectReleased() {
   check(gVL53L4CX == nullptr && scenario.storage == nullptr && !scenario.driverAlive,
@@ -302,7 +302,7 @@ static void testPreallocationGatesAndClock() {
   }
   for (const auto& clock : std::vector<std::pair<int, uint32_t>>{
            {-1, 50000}, {0, 50000}, {1, 50000}, {100000, 100000}, {800000, 400000}}) {
-    resetScenario(); gSettings.i2cClockToFHz = clock.first;
+    resetScenario(); gSettings.i2cClockTofHz = clock.first;
     check(tofInit(), "clock-boundary fixture initializes");
     check(scenario.pingHz == clock.second && scenario.transactionHz == clock.second,
           "existing init clock default/clamping remains unchanged");

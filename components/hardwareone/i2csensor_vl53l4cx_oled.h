@@ -9,7 +9,7 @@
 #include <Adafruit_SSD1306.h>
 
 // ToF OLED display function - shows distance data
-static void displayToFData() {
+static void displayTofData() {
   // Header is rendered by the system - content starts at OLED_CONTENT_START_Y
   int y = OLED_CONTENT_START_Y;
   oledDisplay->setTextSize(1);
@@ -86,7 +86,7 @@ static const OledModeEntry tofOledModes[] = {
     OLED_TOF_DATA,           // mode enum
     "ToF",                   // menu name
     "tof_radar",             // icon name
-    displayToFData,          // displayFunc
+    displayTofData,          // displayFunc
     tofOledModeAvailable,    // availFunc
     tofInputHandler,         // inputFunc - X toggles sensor
     true,                    // showInMenu

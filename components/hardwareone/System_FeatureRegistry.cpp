@@ -96,7 +96,7 @@ static bool isI2cCompiled() {
 #endif
 }
 
-static bool isToFCompiled() {
+static bool isTofCompiled() {
 #if ENABLE_TOF_SENSOR
   return true;
 #else
@@ -104,7 +104,7 @@ static bool isToFCompiled() {
 #endif
 }
 
-static bool isIMUCompiled() {
+static bool isImuCompiled() {
 #if ENABLE_IMU_SENSOR
   return true;
 #else
@@ -120,7 +120,7 @@ static bool isGpsCompiled() {
 #endif
 }
 
-static bool isFMRadioCompiled() {
+static bool isFmRadioCompiled() {
 #if ENABLE_FM_RADIO
   return true;
 #else
@@ -147,7 +147,7 @@ static bool isMicrophoneCompiled() {
 #endif
 }
 
-static bool isAPDSCompiled() {
+static bool isApdsCompiled() {
 #if ENABLE_APDS_SENSOR
   return true;
 #else
@@ -163,7 +163,7 @@ static bool isInputCompiled() {
 #endif
 }
 
-static bool isRTCCompiled() {
+static bool isRtcCompiled() {
 #if ENABLE_RTC_SENSOR
   return true;
 #else
@@ -399,12 +399,12 @@ static constexpr FeatureEntry featureRegistry[] = {
     
   { "tof", "ToF Distance", FEATURE_CAT_SENSOR, 8,
     FEATURE_FLAG_RUNTIME_TOGGLE,
-    &gSettings.tofAutoStart, isToFCompiled,
+    &gSettings.tofAutoStart, isTofCompiled,
     "VL53L4CX time-of-flight ranging" },
     
   { "imu", "IMU", FEATURE_CAT_SENSOR, 12,
     FEATURE_FLAG_RUNTIME_TOGGLE,
-    &gSettings.imuAutoStart, isIMUCompiled,
+    &gSettings.imuAutoStart, isImuCompiled,
     "BNO055 orientation/motion sensing" },
     
   { "gps", "GPS", FEATURE_CAT_SENSOR, 4,
@@ -414,17 +414,17 @@ static constexpr FeatureEntry featureRegistry[] = {
     
   { "fmradio", "FM Radio", FEATURE_CAT_SENSOR, 2,
     FEATURE_FLAG_RUNTIME_TOGGLE,
-    &gSettings.fmRadioAutoStart, isFMRadioCompiled,
+    &gSettings.fmRadioAutoStart, isFmRadioCompiled,
     "RDA5807 FM receiver" },
     
   { "apds", "APDS Gesture", FEATURE_CAT_SENSOR, 4,
     FEATURE_FLAG_RUNTIME_TOGGLE,
-    &gSettings.apdsAutoStart, isAPDSCompiled,
+    &gSettings.apdsAutoStart, isApdsCompiled,
     "APDS9960 gesture/color/proximity" },
 
   { "rtc", "RTC Clock", FEATURE_CAT_SENSOR, 2,
     FEATURE_FLAG_RUNTIME_TOGGLE,
-    &gSettings.rtcAutoStart, isRTCCompiled,
+    &gSettings.rtcAutoStart, isRtcCompiled,
     "DS3231 precision real-time clock" },
 
   { "presence", "Presence Sensor", FEATURE_CAT_SENSOR, 2,

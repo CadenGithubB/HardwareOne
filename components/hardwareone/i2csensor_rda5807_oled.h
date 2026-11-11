@@ -23,7 +23,7 @@ static void displayFmRadio() {
     return;
   }
   
-  FMRadioCache snap;
+  FmRadioCache snap;
   if (!fmRadioCacheSnapshot(snap, 10)) {
     oledDisplay->setCursor(0, y);
     oledDisplay->print("FM reading unavailable");
@@ -115,7 +115,7 @@ static bool fmRadioInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPr
   // Everything below drives a running tuner.
   if (!gRadioInitialized || !gFmRadioConnected) return false;
 
-  FMRadioCache snap;
+  FmRadioCache snap;
   if (!fmRadioCacheSnapshot(snap, 10)) return false;
 
   // L/R: step tune ±0.1 MHz (10 kHz-unit command form), clamped to the band.

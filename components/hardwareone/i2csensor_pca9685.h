@@ -34,7 +34,7 @@ bool servoInit();
 
 // Servo control functions
 void servoSetAngle(uint8_t channel, int angle);
-void servoSetPWM(uint8_t channel, uint16_t value);
+void servoSetPwm(uint8_t channel, uint16_t value);
 
 extern bool gPwmDriverConnected;
 

@@ -200,7 +200,7 @@ void streamMqttInner(httpd_req_t* req) {
 
 #if ENABLE_TOF_SENSOR
   httpd_resp_send_chunk(req, "</td></tr><tr><td>ToF Sensor</td><td>", HTTPD_RESP_USE_STRLEN);
-  httpd_resp_send_chunk(req, gSettings.mqttPublishToF ?
+  httpd_resp_send_chunk(req, gSettings.mqttPublishTof ?
     "<span style=\"color:var(--success);\">✓ Enabled</span>" :
     "<span style=\"color:var(--panel-fg);\">Disabled</span>", HTTPD_RESP_USE_STRLEN);
 #else
@@ -209,7 +209,7 @@ void streamMqttInner(httpd_req_t* req) {
 
 #if ENABLE_IMU_SENSOR
   httpd_resp_send_chunk(req, "</td></tr><tr><td>IMU Sensor</td><td>", HTTPD_RESP_USE_STRLEN);
-  httpd_resp_send_chunk(req, gSettings.mqttPublishIMU ?
+  httpd_resp_send_chunk(req, gSettings.mqttPublishImu ?
     "<span style=\"color:var(--success);\">✓ Enabled</span>" :
     "<span style=\"color:var(--panel-fg);\">Disabled</span>", HTTPD_RESP_USE_STRLEN);
 #else
@@ -236,7 +236,7 @@ void streamMqttInner(httpd_req_t* req) {
 
 #if ENABLE_APDS_SENSOR
   httpd_resp_send_chunk(req, "</td></tr><tr><td>APDS (Proximity)</td><td>", HTTPD_RESP_USE_STRLEN);
-  httpd_resp_send_chunk(req, gSettings.mqttPublishAPDS ?
+  httpd_resp_send_chunk(req, gSettings.mqttPublishApds ?
     "<span style=\"color:var(--success);\">✓ Enabled</span>" :
     "<span style=\"color:var(--panel-fg);\">Disabled</span>", HTTPD_RESP_USE_STRLEN);
 #else
@@ -245,7 +245,7 @@ void streamMqttInner(httpd_req_t* req) {
 
 #if ENABLE_RTC_SENSOR
   httpd_resp_send_chunk(req, "</td></tr><tr><td>RTC Time</td><td>", HTTPD_RESP_USE_STRLEN);
-  httpd_resp_send_chunk(req, gSettings.mqttPublishRTC ?
+  httpd_resp_send_chunk(req, gSettings.mqttPublishRtc ?
     "<span style=\"color:var(--success);\">✓ Enabled</span>" :
     "<span style=\"color:var(--panel-fg);\">Disabled</span>", HTTPD_RESP_USE_STRLEN);
 #else

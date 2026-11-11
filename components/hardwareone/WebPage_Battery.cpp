@@ -20,7 +20,7 @@
 // (buildBatteryJson(JsonDocument&)) so the web /api/battery/status and the
 // `battery json` CLI/BLE command return the IDENTICAL schema. Fields: present,
 // backend, voltage, percentage, status, charging, usbPresent, vbusSense,
-// lastReadMsAgo, ratePctPerHr/etaMinutes (fuelgauge only), rawADC (adc only).
+// lastReadMsAgo, ratePctPerHr/etaMinutes (fuelgauge only), rawAdc (adc only).
 // Availability/validity flags distinguish unknown/null from a measured zero.
 esp_err_t handleBatteryStatus(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);

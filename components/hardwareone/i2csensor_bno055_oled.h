@@ -12,7 +12,7 @@
 extern void imuUpdateActions(bool postEvents);
 
 // IMU OLED display function - shows action detection
-static void displayIMUActions() {
+static void displayImuActions() {
   // Header is rendered by the system - content starts at OLED_CONTENT_START_Y
   int y = OLED_CONTENT_START_Y;
   oledDisplay->setTextSize(1);
@@ -95,7 +95,7 @@ static const OledModeEntry imuOledModes[] = {
     OLED_IMU_ACTIONS,        // mode enum
     "IMU",                   // menu name
     "imu_axes",              // icon name
-    displayIMUActions,       // displayFunc
+    displayImuActions,       // displayFunc
     imuOledModeAvailable,    // availFunc
     imuInputHandler,         // inputFunc - X toggles sensor
     true,                    // showInMenu

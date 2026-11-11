@@ -329,12 +329,12 @@ static const SettingEntry mqttSettingEntries[] = {
   { "mqttPublishWiFi", SETTING_BOOL, &gSettings.mqttPublishWifi, false, 0, nullptr, 0, 1, "Publish WiFi info", nullptr, false, "publish", "mqttPublishWiFi" },
   { "mqttPublishSystem", SETTING_BOOL, &gSettings.mqttPublishSystem, false, 0, nullptr, 0, 1, "Publish system info", nullptr, false, "publish", "mqttPublishSystem" },
   { "mqttPublishThermal", SETTING_BOOL, &gSettings.mqttPublishThermal, false, 0, nullptr, 0, 1, "Publish thermal data", nullptr, false, "publish", "mqttPublishThermal" },
-  { "mqttPublishToF", SETTING_BOOL, &gSettings.mqttPublishToF, false, 0, nullptr, 0, 1, "Publish ToF data", nullptr, false, "publish", "mqttPublishToF" },
-  { "mqttPublishIMU", SETTING_BOOL, &gSettings.mqttPublishIMU, false, 0, nullptr, 0, 1, "Publish IMU data", nullptr, false, "publish", "mqttPublishIMU" },
+  { "mqttPublishToF", SETTING_BOOL, &gSettings.mqttPublishTof, false, 0, nullptr, 0, 1, "Publish ToF data", nullptr, false, "publish", "mqttPublishToF" },
+  { "mqttPublishIMU", SETTING_BOOL, &gSettings.mqttPublishImu, false, 0, nullptr, 0, 1, "Publish IMU data", nullptr, false, "publish", "mqttPublishIMU" },
   { "mqttPublishPresence", SETTING_BOOL, &gSettings.mqttPublishPresence, false, 0, nullptr, 0, 1, "Publish presence data", nullptr, false, "publish", "mqttPublishPresence" },
   { "mqttPublishGPS", SETTING_BOOL, &gSettings.mqttPublishGps, false, 0, nullptr, 0, 1, "Publish GPS data", nullptr, false, "publish", "mqttPublishGPS" },
-  { "mqttPublishAPDS", SETTING_BOOL, &gSettings.mqttPublishAPDS, false, 0, nullptr, 0, 1, "Publish APDS data", nullptr, false, "publish", "mqttPublishAPDS" },
-  { "mqttPublishRTC", SETTING_BOOL, &gSettings.mqttPublishRTC, false, 0, nullptr, 0, 1, "Publish RTC time", nullptr, false, "publish", "mqttPublishRTC" },
+  { "mqttPublishAPDS", SETTING_BOOL, &gSettings.mqttPublishApds, false, 0, nullptr, 0, 1, "Publish APDS data", nullptr, false, "publish", "mqttPublishAPDS" },
+  { "mqttPublishRTC", SETTING_BOOL, &gSettings.mqttPublishRtc, false, 0, nullptr, 0, 1, "Publish RTC time", nullptr, false, "publish", "mqttPublishRTC" },
   { "mqttPublishInput", SETTING_BOOL, &gSettings.mqttPublishInput, false, 0, nullptr, 0, 1, "Publish input device data", nullptr, false, "publish", "mqttPublishInput" }
 };
 
@@ -822,13 +822,13 @@ static void publishMqttDiscovery() {
 #endif
 
 #if ENABLE_TOF_SENSOR
-  if (gSettings.mqttPublishToF) {
+  if (gSettings.mqttPublishTof) {
     publishDiscoveryConfig("sensor", "tof_distance", "ToF Distance", "{{ value_json.tof.distance }}", "mm", "distance", nullptr);
   }
 #endif
 
 #if ENABLE_IMU_SENSOR
-  if (gSettings.mqttPublishIMU) {
+  if (gSettings.mqttPublishImu) {
     publishDiscoveryConfig("sensor", "imu_accel_x", "IMU Accel X", "{{ value_json.imu.accel_x }}", "m/s²", nullptr, "mdi:axis-x-arrow");
     publishDiscoveryConfig("sensor", "imu_accel_y", "IMU Accel Y", "{{ value_json.imu.accel_y }}", "m/s²", nullptr, "mdi:axis-y-arrow");
     publishDiscoveryConfig("sensor", "imu_accel_z", "IMU Accel Z", "{{ value_json.imu.accel_z }}", "m/s²", nullptr, "mdi:axis-z-arrow");
@@ -858,7 +858,7 @@ static void publishMqttDiscovery() {
 #endif
 
 #if ENABLE_APDS_SENSOR
-  if (gSettings.mqttPublishAPDS) {
+  if (gSettings.mqttPublishApds) {
     publishDiscoveryConfig("sensor", "apds_proximity", "Proximity", "{{ value_json.apds.proximity }}", nullptr, nullptr, "mdi:hand-wave");
     publishDiscoveryConfig("sensor", "apds_color_r", "Color Red", "{{ value_json.apds.color.r }}", nullptr, nullptr, "mdi:palette");
     publishDiscoveryConfig("sensor", "apds_color_g", "Color Green", "{{ value_json.apds.color.g }}", nullptr, nullptr, "mdi:palette");
@@ -867,7 +867,7 @@ static void publishMqttDiscovery() {
 #endif
 
 #if ENABLE_RTC_SENSOR
-  if (gSettings.mqttPublishRTC) {
+  if (gSettings.mqttPublishRtc) {
     publishDiscoveryConfig("sensor", "rtc_datetime", "RTC DateTime", "{{ value_json.rtc.datetime }}", nullptr, "timestamp", "mdi:clock-outline");
     publishDiscoveryConfig("sensor", "rtc_temperature", "RTC Temperature", "{{ value_json.rtc.temperature }}", "°C", "temperature", nullptr);
   }
@@ -1499,7 +1499,7 @@ void publishMqttSensorData() {
 #endif
 
 #if ENABLE_TOF_SENSOR
-  if (gSettings.mqttPublishToF && gTofRunning) {
+  if (gSettings.mqttPublishTof && gTofRunning) {
     char tofJson[1024];
     int len = tofBuildDataJson(tofJson, sizeof(tofJson));
     if (len > 0) {
@@ -1509,7 +1509,7 @@ void publishMqttSensorData() {
 #endif
 
 #if ENABLE_IMU_SENSOR
-  if (gSettings.mqttPublishIMU && gImuRunning) {
+  if (gSettings.mqttPublishImu && gImuRunning) {
     char imuJson[1024];
     int len = imuBuildDataJson(imuJson, sizeof(imuJson));
     if (len > 0) {
@@ -1545,7 +1545,7 @@ void publishMqttSensorData() {
 #endif
 
 #if ENABLE_APDS_SENSOR
-  if (gSettings.mqttPublishAPDS && gApdsColorRunning && gApdsConnected) {
+  if (gSettings.mqttPublishApds && gApdsColorRunning && gApdsConnected) {
     pos += snprintf(jsonBuf + pos, 16384 - pos,
       ",\"apds\":{\"proximity\":%u,\"color\":{\"r\":%u,\"g\":%u,\"b\":%u,\"c\":%u}}",
       apdsGetProximity(), apdsGetColorR(), apdsGetColorG(), apdsGetColorB(), apdsGetColorC());
@@ -1553,7 +1553,7 @@ void publishMqttSensorData() {
 #endif
 
 #if ENABLE_RTC_SENSOR
-  if (gSettings.mqttPublishRTC && gRtcRunning && gRtcConnected) {
+  if (gSettings.mqttPublishRtc && gRtcRunning && gRtcConnected) {
     char timeBuf[32];
     snprintf(timeBuf, sizeof(timeBuf), "%04d-%02d-%02dT%02d:%02d:%02d",
              rtcGetYear(), rtcGetMonth(), rtcGetDay(),
@@ -2106,12 +2106,12 @@ const char* cmd_mqttpublish##name(const String& argsInput) { \
 MQTT_PUBLISH_CMD(wifi, mqttPublishWifi, "WiFi")
 MQTT_PUBLISH_CMD(system, mqttPublishSystem, "System")
 MQTT_PUBLISH_CMD(thermal, mqttPublishThermal, "Thermal")
-MQTT_PUBLISH_CMD(tof, mqttPublishToF, "ToF")
-MQTT_PUBLISH_CMD(imu, mqttPublishIMU, "IMU")
+MQTT_PUBLISH_CMD(tof, mqttPublishTof, "ToF")
+MQTT_PUBLISH_CMD(imu, mqttPublishImu, "IMU")
 MQTT_PUBLISH_CMD(presence, mqttPublishPresence, "Presence")
 MQTT_PUBLISH_CMD(gps, mqttPublishGps, "GPS")
-MQTT_PUBLISH_CMD(apds, mqttPublishAPDS, "APDS")
-MQTT_PUBLISH_CMD(rtc, mqttPublishRTC, "RTC")
+MQTT_PUBLISH_CMD(apds, mqttPublishApds, "APDS")
+MQTT_PUBLISH_CMD(rtc, mqttPublishRtc, "RTC")
 #if ENABLE_ANO_ENCODER
 MQTT_PUBLISH_CMD(input, mqttPublishInput, "ANO Encoder")
 #else

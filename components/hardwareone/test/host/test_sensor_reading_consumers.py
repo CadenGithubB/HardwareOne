@@ -19,12 +19,12 @@ COMPONENT = HERE.parents[1]
 SENSORS = [
     ('bno055', 'ImuCache', 'gImuCache', 'imuCacheSnapshot'),
     ('vl53l4cx', 'TofCache', 'gTofCache', 'tofCacheSnapshot'),
-    ('apds9960', 'APDSCache', 'gApdsCache', 'apdsCacheSnapshot'),
-    ('ds3231', 'RTCCache', 'gRtcCache', 'rtcCacheSnapshot'),
+    ('apds9960', 'ApdsCache', 'gApdsCache', 'apdsCacheSnapshot'),
+    ('ds3231', 'RtcCache', 'gRtcCache', 'rtcCacheSnapshot'),
     ('mlx90640', 'ThermalCache', 'gThermalCache', 'thermalCacheSnapshot'),
     ('seesaw', 'InputCache', 'gInputCache', 'inputCacheSnapshot'),
     ('ano_encoder', 'AnoEncoderCache', 'gAnoEncoderCache', 'anoEncoderCacheSnapshot'),
-    ('rda5807', 'FMRadioCache', 'gFmRadioCache', 'fmRadioCacheSnapshot'),
+    ('rda5807', 'FmRadioCache', 'gFmRadioCache', 'fmRadioCacheSnapshot'),
 ]
 FORMATTERS = ['imuG2FormatValue', 'tofG2FormatValue', 'thermalG2FormatValue',
               'apdsG2FormatValue', 'gamepadG2FormatValue', 'anoG2FormatValue',
@@ -37,8 +37,8 @@ def generate(component, baseline):
     types, state, mocks, constants = [], [], [], []
     for chip, typ, glob, api in SENSORS:
         text = (component / f'i2csensor_{chip}.h').read_text()
-        if typ == 'RTCCache':
-            types.append(extract_block(text, 'struct RTCDateTime') + ';')
+        if typ == 'RtcCache':
+            types.append(extract_block(text, 'struct RtcDateTime') + ';')
         if typ == 'InputCache' and 'struct InputCache' not in text:
             text = (component / 'HAL_Input.h').read_text()
         types.append(extract_block(text, f'struct {typ}') + ';')

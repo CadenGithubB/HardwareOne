@@ -72,9 +72,9 @@ namespace Clock { static int offset = -300; static int tzOffsetMinutes() { retur
 // INSERT_STATE
 static unsigned long nowMs = 123456;
 static unsigned long millis() { return nowMs; }
-static RTCDateTime deviceDate{2026, 1, 1, 2, 3, 4, 5};
+static RtcDateTime deviceDate{2026, 1, 1, 2, 3, 4, 5};
 static bool rtcReadSucceeds = true;
-static bool rtcReadDateTime(RTCDateTime* out) { assert(!semaphore.held); *out = deviceDate; return rtcReadSucceeds; }
+static bool rtcReadDateTime(RtcDateTime* out) { assert(!semaphore.held); *out = deviceDate; return rtcReadSucceeds; }
 static float rtcReadTemperature() { assert(!semaphore.held); return -12.5f; }
 using VL53L4CX_Error = int;
 static constexpr int VL53L4CX_ERROR_NONE=0, VL53L4CX_RANGESTATUS_SIGNAL_FAIL=1,
@@ -86,7 +86,7 @@ struct VL53L4CX_MultiRangingData_t {
 };
 static VL53L4CX_MultiRangingData_t tofDevice;
 static int tofError = 0, tofClears = 0;
-static struct { int tofBus=1, i2cClockToFHz=200000; } gSettings;
+static struct { int tofBus=1, i2cClockTofHz=200000; } gSettings;
 static constexpr uint8_t I2C_ADDR_TOF = 0x29;
 template <class F>
 static bool i2cTaskWithTimeout(uint8_t bus, uint8_t address, uint32_t hz, uint32_t wait, F&& operation) {
@@ -163,7 +163,7 @@ static void presentations() {
     if(state==2) admit=false;
     if(state==3) gApdsConnected=gImuConnected=gTofConnected=gRtcConnected=false;
     for(int i=0;i<4;++i) { const auto text=json(builders[i],ms[i]); emit(text); bufferLimits(builders[i],text,i==2); }
-    for(auto draw:{displayAPDSData,displayIMUActions,displayToFData,displayRTCData}) {
+    for(auto draw:{displayApdsData,displayImuActions,displayTofData,displayRtcData}) {
       display.text.clear(); draw(); emit(display.text);
       if(state!=3) waited(10); else assert(waits.empty());
     }
@@ -177,9 +177,9 @@ static void presentations() {
   }
 }
 #if !TEST_BASELINE
-static auto values(const APDSCache& a) { return std::make_tuple(a.apdsRed,a.apdsGreen,a.apdsBlue,a.apdsClear,a.apdsProximity,a.apdsGesture,a.apdsDataValid,a.apdsLastUpdate,a.apdsColorValid,a.apdsProximityValid,a.apdsGestureValid); }
+static auto values(const ApdsCache& a) { return std::make_tuple(a.apdsRed,a.apdsGreen,a.apdsBlue,a.apdsClear,a.apdsProximity,a.apdsGesture,a.apdsDataValid,a.apdsLastUpdate,a.apdsColorValid,a.apdsProximityValid,a.apdsGestureValid); }
 static auto values(const ImuCache& a) { return std::make_tuple(a.accelX,a.accelY,a.accelZ,a.gyroX,a.gyroY,a.gyroZ,a.oriYaw,a.oriPitch,a.oriRoll,a.imuTemp,a.imuDataValid,a.imuLastUpdate,a.imuSeq); }
-static auto values(const RTCCache& a) { const auto& d=a.dateTime; return std::make_tuple(d.year,d.month,d.day,d.hour,d.minute,d.second,d.dayOfWeek,a.temperature,a.dataValid,a.lastUpdate); }
+static auto values(const RtcCache& a) { const auto& d=a.dateTime; return std::make_tuple(d.year,d.month,d.day,d.hour,d.minute,d.second,d.dayOfWeek,a.temperature,a.dataValid,a.lastUpdate); }
 static auto values(const TofCache& a) {
   std::vector<double> out{double(a.tofDataValid),double(a.tofLastUpdate),double(a.tofSeq),double(a.tofTotalObjects)};
   for(const auto& o:a.tofObjects) { for(double v:{double(o.detected),double(o.valid),double(o.distance_mm),double(o.distance_cm),double(o.status),double(o.smoothed_distance_mm),double(o.smoothed_distance_cm),double(o.hasHistory)}) out.push_back(v); }
@@ -196,12 +196,12 @@ template<class T> static void snapshotContract(T& data, SemaphoreHandle_t& mutex
   semaphore.held=true; assert(!copy(out,10) && semaphore.held && waits.empty()); semaphore.held=false;
 }
 static void ownership() {
-  reset(); APDSCache a{}; ImuCache i{}; TofCache t{}; RTCCache r{};
+  reset(); ApdsCache a{}; ImuCache i{}; TofCache t{}; RtcCache r{};
   assert(apdsCacheSnapshot(a)); waited(10); assert(imuCacheSnapshot(i)); waited(10);
   assert(tofCacheSnapshot(t)); waited(10); assert(rtcCacheSnapshot(r)); waited(10);
   snapshotContract(APDS,APDS_MUTEX,apdsCacheSnapshot); snapshotContract(IMU,IMU_MUTEX,imuCacheSnapshot);
   snapshotContract(TOF,TOF_MUTEX,tofCacheSnapshot); snapshotContract(RTC,RTC_MUTEX,rtcCacheSnapshot);
-  assert(apdsCacheStorageBytes()==sizeof(APDSCache)+sizeof(SemaphoreHandle_t));
+  assert(apdsCacheStorageBytes()==sizeof(ApdsCache)+sizeof(SemaphoreHandle_t));
   assert(imuCacheStorageBytes()==sizeof(ImuCache)+sizeof(SemaphoreHandle_t));
   assert(tofCacheStorageBytes()==sizeof(TofCache)+sizeof(SemaphoreHandle_t));
   reset(); admit=false;

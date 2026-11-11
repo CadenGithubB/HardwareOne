@@ -22,14 +22,14 @@ COMPONENT = HERE.parents[1]
 def generated(component: Path, baseline: bool) -> str:
     owner = (component / 'i2csensor_rda5807.cpp').read_text()
     header = (component / 'i2csensor_rda5807.h').read_text()
-    types = extract_block(header, 'struct FMRadioCache') + ';\n'
+    types = extract_block(header, 'struct FmRadioCache') + ';\n'
     types += extract_block((COMPONENT / 'System_Mutex.h').read_text(), 'struct SensorCacheGuard') + ';\n'
     mutex = (COMPONENT / 'System_Mutex.cpp').read_text()
     functions = [extract_block(mutex, 'SensorCacheGuard::SensorCacheGuard('),
                  extract_block(mutex, 'SensorCacheGuard::~SensorCacheGuard('),
                  extract_block((COMPONENT / 'System_I2C.cpp').read_text(), 'int sensorEnvelopeBegin(')]
     if baseline:
-        state = 'FMRadioCache gFmRadioCache;\n#define DATA gFmRadioCache\n#define MUTEX gFmRadioCache.mutex\n'
+        state = 'FmRadioCache gFmRadioCache;\n#define DATA gFmRadioCache\n#define MUTEX gFmRadioCache.mutex\n'
     else:
         names = ['sFmRadioCache', 'sFmRadioCacheMux']
         state = '\n'.join(re.search(r'(?m)^static[^\n]*\b' + name + r'\b[^\n]*;', owner)[0] for name in names)
@@ -38,14 +38,14 @@ def generated(component: Path, baseline: bool) -> str:
         state += re.search(r'bool fmRadioCacheSnapshot\([^;]+;', header)[0] + '\n'
         functions += [extract_block(owner, marker) for marker in [
             'bool fmRadioCacheSnapshot(', 'static void fmRadioSetMuted(', 'static void fmRadioInvalidate(']]
-        require('SemaphoreHandle_t' not in extract_block(header, 'struct FMRadioCache'), 'FM snapshot exposes mutex')
+        require('SemaphoreHandle_t' not in extract_block(header, 'struct FmRadioCache'), 'FM snapshot exposes mutex')
     functions += [extract_block(owner, marker) for marker in [
         'static void rdsScrub(', 'static void RDS_ServiceNameCallback(', 'static void RDS_TextCallback(',
         'int fmRadioBuildDataJson(']]
     functions.append(extract_block((component / 'i2csensor_rda5807_oled.h').read_text(), 'static void displayFmRadio()'))
     if not baseline:
         functions += [extract_block(owner, marker) for marker in [
-            'void updateFMRadio() ', 'const char* cmd_fmradio_tune(', 'const char* cmd_fmradio_seek(',
+            'void updateFmRadio() ', 'const char* cmd_fmradio_tune(', 'const char* cmd_fmradio_seek(',
             'const char* cmd_fmradio_volume(', 'const char* cmd_fmradio_mute(', 'const char* cmd_fmradio_unmute(']]
     return ((HERE / 'fm_radio_snapshot_harness.cpp').read_text()
             .replace('// INSERT_TYPES', types).replace('// INSERT_STATE', state)
@@ -85,7 +85,7 @@ def main() -> None:
         run('disabled', '''#include <cassert>
 #include "i2csensor_rda5807.h"
 int main() {
- FMRadioCache out; out.dataValid=true; out.seekInProgress=true; out.stationName[0]='X';
+ FmRadioCache out; out.dataValid=true; out.seekInProgress=true; out.stationName[0]='X';
  assert(!fmRadioCacheSnapshot(out) && !out.dataValid && !out.seekInProgress && !out.stationName[0]);
  assert(out.frequency==10390 && out.volume==6 && out.stereo);
  assert(!fmRadioCacheSnapshot(out,50));

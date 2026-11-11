@@ -140,7 +140,7 @@ const int numColors = sizeof(colorTable) / sizeof(colorTable[0]);
 // ============================================================================
 
 #if ENABLE_NEOPIXEL
-void initNeoPixelLED() {
+void initNeoPixelLed() {
   // Power rail is asserted by boardPowerRailInit() (called first at boot,
   // independent of this feature — see the rail comment above).
   pixels.begin();
@@ -151,7 +151,7 @@ void initNeoPixelLED() {
   pixels.show();  // Initialize all pixels to 'off'
 }
 
-void setLEDColor(RGB color) {
+void setLedColor(RGB color) {
   pixels.setPixelColor(0, pixels.Color(color.r, color.g, color.b));
   pixels.show();
 }
@@ -331,7 +331,7 @@ void ledEffectStart(int effectType, RGB startColor, RGB endColor, unsigned long 
 void ledEffectStop(bool clearLed) {
   if (!gLedFx.active) return;
   gLedFx.active = false;
-  if (clearLed) setLEDColor({0, 0, 0});  // matches the old end-of-effect clear
+  if (clearLed) setLedColor({0, 0, 0});  // matches the old end-of-effect clear
 }
 
 bool ledEffectActive() { return gLedFx.active; }
@@ -348,14 +348,14 @@ void ledEffectTick() {
   }
   if (now - gLedFx.lastFrameMs < 20) return;
   gLedFx.lastFrameMs = now;
-  setLEDColor(ledEffectFrame(gLedFx.type, gLedFx.c1, gLedFx.c2, elapsed, gLedFx.durationMs));
+  setLedColor(ledEffectFrame(gLedFx.type, gLedFx.c1, gLedFx.c2, elapsed, gLedFx.durationMs));
 }
 
 // Blocking wrapper over the same engine — kept for the boot-time startup
 // effect (HardwareOne.cpp), which deliberately runs before the main loop is
 // ticking and where blocking a few seconds of setup() is the intended UX.
 // Runtime paths (cmd_ledeffect) use ledEffectStart instead.
-void runLEDEffect(int effectType, RGB startColor, RGB endColor, unsigned long duration) {
+void runLedEffect(int effectType, RGB startColor, RGB endColor, unsigned long duration) {
   ledEffectStart(effectType, startColor, endColor, duration);
   while (gLedFx.active) {
     ledEffectTick();
@@ -389,7 +389,7 @@ const char* cmd_ledcolor(const String& argsInput) {
   // Cancel any running effect first, or the next tick would repaint over the
   // user's chosen color within 20 ms.
   ledEffectStop(false);
-  setLEDColor(color);
+  setLedColor(color);
   snprintf(getDebugBuffer(), 1024, "LED set to %s", colorName.c_str());
   return getDebugBuffer();
 }
@@ -397,7 +397,7 @@ const char* cmd_ledcolor(const String& argsInput) {
 const char* cmd_ledclear(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   ledEffectStop(false);  // cancel a running effect too, not just the color
-  setLEDColor({0, 0, 0});
+  setLedColor({0, 0, 0});
   return "LED cleared (turned off)";
 }
 
@@ -410,7 +410,7 @@ const char* cmd_ledeffect(const String& argsInput) {
     // Genuinely cancels now — with the old blocking engine this branch could
     // never run mid-effect because cmd_exec was busy inside the delay loop.
     ledEffectStop(false);
-    setLEDColor({0, 0, 0});
+    setLedColor({0, 0, 0});
     return "LED effect: off";
   }
 

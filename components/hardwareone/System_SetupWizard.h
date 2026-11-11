@@ -142,12 +142,12 @@ size_t getLogLevelCount();
 // Picker values and the device-name text buffer.
 int getWizardNTPSelection();
 void setWizardNTPSelection(int sel);
-int getWizardLEDEffectSelection();
-void setWizardLEDEffectSelection(int sel);
+int getWizardLedEffectSelection();
+void setWizardLedEffectSelection(int sel);
 const char* const* getNTPPresets();
 size_t getNTPPresetCount();
-const char* const* getLEDEffects();
-size_t getLEDEffectCount();
+const char* const* getLedEffects();
+size_t getLedEffectCount();
 const char* getWizardDeviceName();
 char* getWizardDeviceNameBuf();
 

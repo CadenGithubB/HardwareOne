@@ -438,14 +438,14 @@ void displayUnavailable();
 
 // Sensor mode functions (OLED_Mode_Sensors.cpp)
 void displaySensorData();
-// displayIMUActions() - moved to i2csensor_bno055.cpp (modular OLED mode)
+// displayImuActions() - moved to i2csensor_bno055.cpp (modular OLED mode)
 // displayFmRadio() - moved to fm_radio.cpp (modular OLED mode)
 void displayFileBrowser();
 void displayAutomations();
 void displayEspNow();
-// displayToFData() - moved to i2csensor_vl53l4cx.cpp (modular OLED mode)
+// displayTofData() - moved to i2csensor_vl53l4cx.cpp (modular OLED mode)
 #if ENABLE_APDS_SENSOR
-void displayAPDSData();
+void displayApdsData();
 #endif
 
 // Menu navigation. The launcher's up/down/select now live in its registered

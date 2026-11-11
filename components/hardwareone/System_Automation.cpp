@@ -3467,7 +3467,7 @@ bool evaluateCondition(const char* condition) {
  #endif
   } else if (strcmp(sensor, "LIGHT") == 0) {
  #if ENABLE_APDS_SENSOR
-    APDSCache apds{};
+    ApdsCache apds{};
     if (!apdsCacheSnapshot(apds, 50) || !apds.apdsDataValid) return false;
     currentValue = (float)apds.apdsClear;
  #else
@@ -3476,7 +3476,7 @@ bool evaluateCondition(const char* condition) {
   } else if (strcmp(sensor, "MOTION") == 0) {
     isNumeric = false;
  #if ENABLE_APDS_SENSOR
-    APDSCache apds{};
+    ApdsCache apds{};
     if (!apdsCacheSnapshot(apds, 50) || !apds.apdsDataValid) return false;
     strlcpy(currentStringValue, (apds.apdsProximity > 50) ? "DETECTED" : "NONE", sizeof(currentStringValue));
  #else

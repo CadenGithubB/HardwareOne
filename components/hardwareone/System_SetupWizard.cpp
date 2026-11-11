@@ -488,16 +488,16 @@ void setWizardNTPSelection(int sel) {
   ntpSelection = sel;
   copyWizardString(sWizardDraft.values.ntpServer, ntpPresets[sel]);
 }
-int getWizardLEDEffectSelection() { return ledEffectSelection; }
-void setWizardLEDEffectSelection(int sel) {
+int getWizardLedEffectSelection() { return ledEffectSelection; }
+void setWizardLedEffectSelection(int sel) {
   if (sel < 0 || sel >= (int)ledEffectCount || !sWizardDraft.active) return;
   ledEffectSelection = sel;
   copyWizardString(sWizardDraft.values.ledStartupEffect, ledEffects[sel]);
 }
 const char* const* getNTPPresets() { return ntpPresets; }
 size_t getNTPPresetCount() { return ntpPresetCount; }
-const char* const* getLEDEffects() { return ledEffects; }
-size_t getLEDEffectCount() { return ledEffectCount; }
+const char* const* getLedEffects() { return ledEffects; }
+size_t getLedEffectCount() { return ledEffectCount; }
 
 const char* getWizardDeviceName() { return wizardDeviceName; }
 char* getWizardDeviceNameBuf() { return wizardDeviceName; }
@@ -929,7 +929,7 @@ bool wizardActivateCurrentItem() {
       setWizardNTPSelection((ntpSelection + 1) % ntpPresetCount);
       return true;
     case WIZARD_ITEM_LED_EFFECT:
-      setWizardLEDEffectSelection((ledEffectSelection + 1) % ledEffectCount);
+      setWizardLedEffectSelection((ledEffectSelection + 1) % ledEffectCount);
       return true;
     case WIZARD_ITEM_DEVICE_NAME:
       return false; // Adapter opens text input using getWizardDeviceNameBuf().

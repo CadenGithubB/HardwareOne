@@ -838,7 +838,7 @@ void sensorLogTick() {
 
 #if ENABLE_APDS_SENSOR
     if (mask & LOG_APDS) {
-      APDSCache apds{};
+      ApdsCache apds{};
       if (apdsCacheSnapshot(apds, 10)) {
         snap.gApdsColorRunning = gApdsColorRunning;
         snap.gApdsProximityRunning = gApdsProximityRunning;

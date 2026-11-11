@@ -1747,12 +1747,12 @@ const char* cmd_time(const String& argsInput) {
     // — do not replace with the system clock), else the system clock.
 #if ENABLE_RTC_SENSOR
     if (gRtcRunning && gRtcConnected) {
-      RTCDateTime dt;
+      RtcDateTime dt;
       if (rtcReadDateTime(&dt)) {
         // RTC stores UTC; every human-facing surface shows local (ds3231.h
         // contract). This branch used to skip the conversion, so the same
         // "time" field was UTC on RTC boards but local on NTP-only boards.
-        RTCDateTime local = rtcLocalTime(&dt);
+        RtcDateTime local = rtcLocalTime(&dt);
         snprintf(timeBuf, sizeof(timeBuf), "%04d-%02d-%02dT%02d:%02d:%02d",
                  local.year, local.month, local.day, local.hour, local.minute, local.second);
         haveTime = true; haveTemp = true; temp = rtcReadTemperature();
@@ -1796,9 +1796,9 @@ const char* cmd_time(const String& argsInput) {
 #if ENABLE_RTC_SENSOR
   if (gRtcRunning && gRtcConnected) {
     // RTC is primary display source (live register read — deliberate).
-    RTCDateTime dt;
+    RtcDateTime dt;
     if (rtcReadDateTime(&dt)) {
-      RTCDateTime local = rtcLocalTime(&dt);  // RTC stores UTC; show local
+      RtcDateTime local = rtcLocalTime(&dt);  // RTC stores UTC; show local
       char timeBuf[32];
       snprintf(timeBuf, sizeof(timeBuf), "%04d-%02d-%02dT%02d:%02d:%02d",
                local.year, local.month, local.day, local.hour, local.minute, local.second);

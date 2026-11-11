@@ -62,11 +62,11 @@ void boardPowerRailInit();
 #if ENABLE_NEOPIXEL
 
 // LED control functions
-void initNeoPixelLED();
-void setLEDColor(RGB color);
+void initNeoPixelLed();
+void setLedColor(RGB color);
 // Blocking effect runner — boot-time startup effect only (spins the async
 // engine below until done). Runtime paths use the non-blocking API.
-void runLEDEffect(int effectType, RGB startColor, RGB endColor, unsigned long duration);
+void runLedEffect(int effectType, RGB startColor, RGB endColor, unsigned long duration);
 // Non-blocking effect engine: start returns immediately; frames are advanced
 // by ledEffectTick() from the main loop. Starting a new effect replaces the
 // running one; ledcolor/ledclear/`ledeffect off` cancel via ledEffectStop.
@@ -77,9 +77,9 @@ void ledEffectTick();
 
 #else  // !ENABLE_NEOPIXEL — inline no-op stubs so shared callers need no guards
 
-inline void initNeoPixelLED() {}
-inline void setLEDColor(RGB) {}
-inline void runLEDEffect(int, RGB, RGB, unsigned long) {}
+inline void initNeoPixelLed() {}
+inline void setLedColor(RGB) {}
+inline void runLedEffect(int, RGB, RGB, unsigned long) {}
 inline void ledEffectStart(int, RGB, RGB, unsigned long) {}
 inline void ledEffectStop(bool) {}
 inline bool ledEffectActive() { return false; }

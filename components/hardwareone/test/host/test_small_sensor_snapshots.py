@@ -17,16 +17,16 @@ from test_web_batch_handlers import extract_block, require
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
-SENSORS = [('apds', 'apds9960', 'APDSCache', 'Apds', 'APDS'),
+SENSORS = [('apds', 'apds9960', 'ApdsCache', 'Apds', 'APDS'),
            ('imu', 'bno055', 'ImuCache', 'Imu', 'IMU'),
            ('tof', 'vl53l4cx', 'TofCache', 'Tof', 'TOF'),
-           ('rtc', 'ds3231', 'RTCCache', 'Rtc', 'RTC')]
+           ('rtc', 'ds3231', 'RtcCache', 'Rtc', 'RTC')]
 
 
 def generate(component: Path, baseline: bool) -> str:
     mutex = (COMPONENT / 'System_Mutex.cpp').read_text()
     types = [extract_block((COMPONENT / 'System_Mutex.h').read_text(), 'struct SensorCacheGuard') + ';',
-             extract_block((component / 'i2csensor_ds3231.h').read_text(), 'struct RTCDateTime') + ';']
+             extract_block((component / 'i2csensor_ds3231.h').read_text(), 'struct RtcDateTime') + ';']
     state, functions = [], [extract_block(mutex, 'SensorCacheGuard::SensorCacheGuard('),
                            extract_block(mutex, 'SensorCacheGuard::~SensorCacheGuard('),
                            extract_block((COMPONENT / 'System_I2C.cpp').read_text(), 'int sensorEnvelopeBegin(')]
@@ -51,20 +51,20 @@ def generate(component: Path, baseline: bool) -> str:
             require('SemaphoreHandle_t' not in types[-1], f'{typename} exposes synchronization')
             require(not re.search(r'extern.*\bg' + title + r'Cache\b', header), f'{short} live cache is public')
         functions.append(extract_block(owner, f'int {short}BuildDataJson('))
-        oled = {'apds':'void displayAPDSData()', 'imu':'static void displayIMUActions()',
-                'tof':'static void displayToFData()', 'rtc':'static void displayRTCData()'}[short]
+        oled = {'apds':'void displayApdsData()', 'imu':'static void displayImuActions()',
+                'tof':'static void displayTofData()', 'rtc':'static void displayRtcData()'}[short]
         functions.append(extract_block((component / f'i2csensor_{file}_oled.h').read_text(), oled))
         if short == 'apds':
             functions += [extract_block(owner, marker) for marker in ['uint8_t apdsGetProximity(',
                           *[f'uint16_t apdsGetColor{c}(' for c in 'RGBC']]]
         if short == 'rtc':
             functions += [extract_block(owner, marker) for marker in ['static int rtcDaysInMonth(',
-                         'static int rtcDayOfWeek(', 'RTCDateTime rtcLocalTime(',
+                         'static int rtcDayOfWeek(', 'RtcDateTime rtcLocalTime(',
                          *[f'int rtcGet{p}(' for p in ['Year','Month','Day','Hour','Minute','Second']],
                          'float rtcGetTemperature(', 'static void rtcReadAndCacheOnce(']]
         if short == 'tof': functions.append(extract_block(owner, 'bool tofPoll()'))
     # RTC display calls rtcLocalTime before its definition in the generated unit.
-    state.append('RTCDateTime rtcLocalTime(const RTCDateTime*);')
+    state.append('RtcDateTime rtcLocalTime(const RtcDateTime*);')
     return ((HERE / 'small_sensor_snapshot_harness.cpp').read_text()
             .replace('// INSERT_TYPES', '\n'.join(types)).replace('// INSERT_STATE', '\n'.join(state))
             .replace('// INSERT_FUNCTIONS', '\n\n'.join(functions)))

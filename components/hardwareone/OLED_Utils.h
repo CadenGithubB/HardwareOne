@@ -504,7 +504,7 @@ extern bool gMapMenuOpen;
 #endif
 
 #if ENABLE_OLED_DISPLAY && ENABLE_NEOPIXEL
-void oledLEDModeInit();
+void oledLedModeInit();
 #endif
 
 #if ENABLE_OLED_DISPLAY && ENABLE_R1_HEALTH

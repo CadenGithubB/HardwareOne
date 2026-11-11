@@ -8,7 +8,7 @@
 #include <stddef.h>
 
 // APDS sensor cache structure (always available for type-safe references)
-struct APDSCache {
+struct ApdsCache {
   uint16_t apdsRed = 0, apdsGreen = 0, apdsBlue = 0, apdsClear = 0;
   uint8_t apdsProximity = 0;
   uint8_t apdsGesture = 0;
@@ -63,12 +63,12 @@ extern bool gApdsRunning;
 
 // Copy one reading; false clears out when uninitialized or the lock is busy.
 // Success only means a copy was available; check apdsDataValid where required.
-bool apdsCacheSnapshot(APDSCache& out, uint32_t timeoutMs = 10);
+bool apdsCacheSnapshot(ApdsCache& out, uint32_t timeoutMs = 10);
 // Static cache data plus its mutex handle, for memory attribution (not RTOS allocation).
 size_t apdsCacheStorageBytes();
 
 #else
-inline bool apdsCacheSnapshot(APDSCache& out, uint32_t timeoutMs = 10) {
+inline bool apdsCacheSnapshot(ApdsCache& out, uint32_t timeoutMs = 10) {
   (void)timeoutMs;
   out = {};
   return false;

@@ -24,7 +24,7 @@
 // Compiled only when BOTH the OLED and the NeoPixel feature are in the build
 // (ENABLE_NEOPIXEL, System_BuildConfig.h): the body reads gSettings.led*
 // fields that are gated with the feature. The registration anchor in
-// OLED_Utils.cpp (oledLEDModeInit call) is gated in lockstep.
+// OLED_Utils.cpp (oledLedModeInit call) is gated in lockstep.
 
 #include "OLED_Display.h"
 #include "System_BuildConfig.h"
@@ -104,7 +104,7 @@ static void populateLedEffectMenu() {
 // ---------------------------------------------------------------------------
 // Display
 // ---------------------------------------------------------------------------
-void displayLED() {
+void displayLed() {
   if (!oledDisplay || !oledConnected) return;
   switch (gLedLevel) {
     case LED_LEVEL_ROOT:
@@ -230,13 +230,13 @@ static void ledOnEnter(bool isForward) {
 // No entry rule (availFunc nullptr): the LED screen is usable whenever it is
 // built; getMenuAvailability() reports NOT_BUILT without ENABLE_NEOPIXEL.
 static const OledModeEntry sLedModes[] = {
-  { OLED_LED, "LED", "notify_sensor", displayLED, nullptr, ledInputHandler,
+  { OLED_LED, "LED", "notify_sensor", displayLed, nullptr, ledInputHandler,
     false, -1, "A:Sel B:Back", ledOnEnter },
 };
 
 REGISTER_OLED_MODE_MODULE(sLedModes, sizeof(sLedModes) / sizeof(sLedModes[0]), "LED");
 
 // Force linker to include this file - called from OLED_Utils.cpp
-void oledLEDModeInit() {}
+void oledLedModeInit() {}
 
 #endif // ENABLE_OLED_DISPLAY && ENABLE_NEOPIXEL

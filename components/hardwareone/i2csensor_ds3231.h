@@ -12,7 +12,7 @@
 #include <stddef.h>
 
 // RTC type definitions (always available for type-safe references)
-struct RTCDateTime {
+struct RtcDateTime {
   uint16_t year;     // 2000-2099
   uint8_t month;     // 1-12
   uint8_t day;       // 1-31
@@ -22,8 +22,8 @@ struct RTCDateTime {
   uint8_t dayOfWeek; // 1-7 (1=Sunday)
 };
 
-struct RTCCache {
-  RTCDateTime dateTime;
+struct RtcCache {
+  RtcDateTime dateTime;
   float temperature;
   bool dataValid;
   unsigned long lastUpdate;
@@ -56,12 +56,12 @@ extern TaskHandle_t gRtcTaskHandle;
 // Core functions
 bool rtcInit();
 void rtcStop();  // Lifecycle worker only; live tasks complete their own cleanup.
-// createRTCTask() is declared in System_TaskUtils.h
+// createRtcTask() is declared in System_TaskUtils.h
 bool rtcStartInternal();  // For sensor queue processor
 
 // Read/Write functions
-bool rtcReadDateTime(RTCDateTime* dt);
-bool rtcWriteDateTime(const RTCDateTime* dt);
+bool rtcReadDateTime(RtcDateTime* dt);
+bool rtcWriteDateTime(const RtcDateTime* dt);
 float rtcReadTemperature();
 
 // Time sync with ESP32 system time
@@ -70,14 +70,14 @@ bool rtcSyncToSystem();      // RTC -> ESP32 system time
 bool rtcSyncFromSystem();    // ESP32 system time -> RTC
 
 // Utility functions
-uint32_t rtcToUnixTime(const RTCDateTime* dt);
-void unixTimeToRTC(uint32_t unixTime, RTCDateTime* dt);
-String rtcDateTimeToString(const RTCDateTime* dt);
+uint32_t rtcToUnixTime(const RtcDateTime* dt);
+void unixTimeToRtc(uint32_t unixTime, RtcDateTime* dt);
+String rtcDateTimeToString(const RtcDateTime* dt);
 
 // Returns a copy of utc with gSettings.tzOffsetMinutes applied.
 // Handles date rollover (midnight crossing in either direction).
 // Use this before any human-facing display of RTC time.
-RTCDateTime rtcLocalTime(const RTCDateTime* utc);
+RtcDateTime rtcLocalTime(const RtcDateTime* utc);
 
 // JSON building for ESP-NOW streaming
 int rtcBuildDataJson(char* buf, size_t bufSize);
@@ -100,10 +100,10 @@ const char* cmd_rtcstop(const String& argsInput);
 
 // Copy one reading; false clears out when uninitialized or the lock is busy.
 // Success only means a copy was available; check dataValid where required.
-bool rtcCacheSnapshot(RTCCache& out, uint32_t timeoutMs = 10);
+bool rtcCacheSnapshot(RtcCache& out, uint32_t timeoutMs = 10);
 
 #else
-inline bool rtcCacheSnapshot(RTCCache& out, uint32_t timeoutMs = 10) {
+inline bool rtcCacheSnapshot(RtcCache& out, uint32_t timeoutMs = 10) {
   (void)timeoutMs;
   out = {};
   return false;

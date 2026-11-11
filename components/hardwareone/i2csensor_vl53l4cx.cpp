@@ -187,7 +187,7 @@ bool tofStartInternal() {
   }
 
   // Create ToF task lazily
-  if (!createToFTask()) {
+  if (!createTofTask()) {
     DEBUG_CLIF("Failed to create ToF task");
     gTofRunning = false;
     gTofConnected = false;
@@ -266,7 +266,7 @@ bool tofInit() {
   
   // Use i2cTransaction wrapper for safe mutex + clock management
   
-  uint32_t tofHz = (gSettings.i2cClockToFHz > 0) ? (uint32_t)gSettings.i2cClockToFHz : 50000;
+  uint32_t tofHz = (gSettings.i2cClockTofHz > 0) ? (uint32_t)gSettings.i2cClockTofHz : 50000;
   if (tofHz < 50000) tofHz = 50000;
   if (tofHz > 400000) tofHz = 400000;
 
@@ -340,7 +340,7 @@ bool tofPoll() {
   VL53L4CX_MultiRangingData_t* pMultiRangingData = &MultiRangingData;
   bool dataReady = false;
   const uint8_t tofBus = (uint8_t)gSettings.tofBus;
-  const uint32_t tofHz = (gSettings.i2cClockToFHz > 0) ? (uint32_t)gSettings.i2cClockToFHz : 200000;
+  const uint32_t tofHz = (gSettings.i2cClockTofHz > 0) ? (uint32_t)gSettings.i2cClockTofHz : 200000;
   const bool transactionOk = i2cTaskWithTimeout(tofBus, I2C_ADDR_TOF, tofHz, 500, [&]() -> bool {
     // Inspect readiness once. A conversion still in progress is a successful
     // status read; release the shared bus and try again on the next task poll.
@@ -674,7 +674,7 @@ void tofTask(void* parameter) {
                 (unsigned)uxTaskGetStackHighWaterMark(nullptr));
   INFO_TOF_LIFECYCLEF("[MODULAR] tofTask() running from i2csensor_vl53l4cx.cpp");
   gTofNear = false;
-  unsigned long lastToFRead = 0;
+  unsigned long lastTofRead = 0;
   unsigned long lastStackLog = 0;
   while (true) {
     // CRITICAL: Check enabled flag FIRST for graceful shutdown
@@ -719,11 +719,11 @@ void tofTask(void* parameter) {
     if (gTofRunning && gTofConnected && gVL53L4CX != nullptr && !pollPaused(tofBus)) {
       unsigned long tofPollMs = (gSettings.tofDevicePollMs > 0) ? (unsigned long)gSettings.tofDevicePollMs : 100;
       unsigned long nowMs = millis();
-      if (nowMs - lastToFRead >= tofPollMs) {
+      if (nowMs - lastTofRead >= tofPollMs) {
         // The owner separates bus access from cache publication, as presencePoll does.
         bool ok = tofPoll();
         
-        lastToFRead = nowMs;
+        lastTofRead = nowMs;
         
         // A stop is normal cleanup, even if an in-flight read also failed.
         if (!ok && gTofRunning) {
@@ -767,10 +767,10 @@ static const SettingEntry tofSettingEntries[] = {
   { "tofTransitionMs", SETTING_INT, &gSettings.tofTransitionMs, 200, 0, nullptr, 0, 5000, "Transition (ms)", nullptr, false, nullptr, "toftransitionms" },
   { "tofMaxDistanceMm", SETTING_INT, &gSettings.tofUiMaxDistanceMm, 3400, 0, nullptr, 100, 10000, "Max Distance (mm)", nullptr, false, nullptr, "tofmaxdistancemm" },
   { "tofDevicePollMs", SETTING_INT, &gSettings.tofDevicePollMs, 220, 0, nullptr, 100, 2000, "Poll Interval (ms)", nullptr, false, nullptr, "tofdevicepollms" },
-  { "tofI2cClockHz", SETTING_INT, &gSettings.i2cClockToFHz, 200000, 0, nullptr, 50000, 400000, "I2C Clock (Hz)", nullptr, false, nullptr, "tofi2cclockhz" },
+  { "tofI2cClockHz", SETTING_INT, &gSettings.i2cClockTofHz, 200000, 0, nullptr, 50000, 400000, "I2C Clock (Hz)", nullptr, false, nullptr, "tofi2cclockhz" },
 };
 
-static bool isToFConnected() {
+static bool isTofConnected() {
   return gTofConnected;
 }
 
@@ -780,7 +780,7 @@ extern const SettingsModule tofSettingsModule = {
   "hardware.sensors.tof",
   tofSettingEntries,
   sizeof(tofSettingEntries) / sizeof(tofSettingEntries[0]),
-  isToFConnected,
+  isTofConnected,
   "VL53L4CX time-of-flight distance sensor"
 };
 

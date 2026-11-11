@@ -3880,7 +3880,7 @@ void printRegisteredOledModes() {
   oledChangePasswordModeInit();
   oledPowerModeInit();
 #if ENABLE_NEOPIXEL
-  oledLEDModeInit();   // keep OLED_Mode_LED.cpp from being GC'd
+  oledLedModeInit();   // keep OLED_Mode_LED.cpp from being GC'd
 #endif
   oledCLIInputModeInit();
   oledMenuModeInit();   // keep OLED_Mode_Menu.cpp (Menu/Logo/Sensor-menu) from being GC'd
@@ -4077,11 +4077,11 @@ void projectCubePoint(float x, float y, float z, int& screenX, int& screenY, int
 
 // displayLogo() moved to OLED_Mode_Menu.cpp
 
-// displayIMUActions() moved to i2csensor_bno055.cpp (modular OLED mode)
+// displayImuActions() moved to i2csensor_bno055.cpp (modular OLED mode)
 
-// displayToFData() moved to i2csensor_vl53l4cx.cpp (modular OLED mode)
+// displayTofData() moved to i2csensor_vl53l4cx.cpp (modular OLED mode)
 
-// displayAPDSData() moved to i2csensor_apds9960.cpp (modular OLED mode)
+// displayApdsData() moved to i2csensor_apds9960.cpp (modular OLED mode)
 
 // Forward declaration for gamepad input processing
 bool processOledInput();

@@ -422,7 +422,7 @@ bool createThermalTask() {
   return true;  // Task created successfully or already exists
 }
 
-bool createIMUTask() {
+bool createImuTask() {
   if (gImuTaskHandle == nullptr) {
     const uint32_t imuStack = IMU_STACK_WORDS;  // words; ~16KB (BNO055 init retries need extra stack)
     if (xTaskCreateLogged(imuTask, "sensor_imu", imuStack, nullptr, TASK_PRIORITY_LOW, &gImuTaskHandle, "imu", I2C_SENSOR_CORE) != pdPASS) {
@@ -433,7 +433,7 @@ bool createIMUTask() {
   return true;  // Task created successfully or already exists
 }
 
-bool createToFTask() {
+bool createTofTask() {
   if (gTofTaskHandle == nullptr) {
     const uint32_t tofStack = TOF_STACK_WORDS;  // ESP-IDF task stack size in bytes
     if (xTaskCreateLogged(tofTask, "sensor_tof", tofStack, nullptr, TASK_PRIORITY_LOW, &gTofTaskHandle, "tof", I2C_SENSOR_CORE) != pdPASS) {
@@ -444,7 +444,7 @@ bool createToFTask() {
   return true;  // Task created successfully or already exists
 }
 
-bool createFMRadioTask() {
+bool createFmRadioTask() {
   if (gFmRadioTaskHandle == nullptr) {
     const uint32_t fmRadioStack = FMRADIO_STACK_WORDS;  // words; ~18KB
     if (xTaskCreateLogged(fmRadioTask, "sensor_fmradio", fmRadioStack, nullptr, TASK_PRIORITY_LOW, &gFmRadioTaskHandle, "fmradio", I2C_SENSOR_CORE) != pdPASS) {
@@ -456,7 +456,7 @@ bool createFMRadioTask() {
   return true;  // Task created successfully or already exists
 }
 
-bool createAPDSTask() {
+bool createApdsTask() {
   if (gApdsTaskHandle == nullptr) {
     const uint32_t apdsStack = APDS_STACK_WORDS;  // words; ~12KB
     if (xTaskCreateLogged(apdsTask, "sensor_apds", apdsStack, nullptr, TASK_PRIORITY_LOW, &gApdsTaskHandle, "apds", I2C_SENSOR_CORE) != pdPASS) {
@@ -489,7 +489,7 @@ bool createGpsTask() {
   return true;  // Task created successfully or already exists
 }
 
-bool createRTCTask() {
+bool createRtcTask() {
   if (gRtcTaskHandle == nullptr) {
     const uint32_t rtcStack = RTC_STACK_WORDS;  // words; ~16KB
     if (xTaskCreateLogged(rtcTask, "sensor_rtc", rtcStack, nullptr, TASK_PRIORITY_LOW, &gRtcTaskHandle, "rtc", I2C_SENSOR_CORE) != pdPASS) {

@@ -75,7 +75,7 @@ static void diagnostic(const char*, ...) {}
 // INSERT_CONSTANTS
 // INSERT_TYPES
 
-static struct { int tofBus = 0, tofDevicePollMs = 100, i2cClockToFHz = 200000; } gSettings;
+static struct { int tofBus = 0, tofDevicePollMs = 100, i2cClockTofHz = 200000; } gSettings;
 static bool gTofRunning = true, gTofConnected = true, gTofNear = false;
 static TaskHandle_t gTofTaskHandle = reinterpret_cast<void*>(1);
 static volatile UBaseType_t gTofWatermarkNow = 0, gTofWatermarkMin = ~0U;

@@ -101,9 +101,9 @@ SemaphoreHandle_t sRtcCacheMutex = nullptr, sAnoCacheMutex = nullptr;
 TofCache sTofCache{};
 ImuCache sImuCache{};
 GpsCache sGpsCache{};
-APDSCache sApdsCache{};
+ApdsCache sApdsCache{};
 PresenceCache sPresenceCache{};
-RTCCache sRtcCache{};
+RtcCache sRtcCache{};
 AnoEncoderCache sAnoEncoderCache{};
 
 bool initialize(bool& connected, FakeDriver** driver = nullptr) {
@@ -133,14 +133,14 @@ bool createTask(bool running, TaskHandle_t& handle) {
   return true;
 }
 #define CREATE_OWNER(Function, Name) bool create##Function##Task() { return createTask(g##Name##Running, g##Name##TaskHandle); }
-CREATE_OWNER(ToF, Tof)
-CREATE_OWNER(IMU, Imu)
+CREATE_OWNER(Tof, Tof)
+CREATE_OWNER(Imu, Imu)
 CREATE_OWNER(Thermal, Thermal)
 CREATE_OWNER(Gps, Gps)
-CREATE_OWNER(APDS, Apds)
+CREATE_OWNER(Apds, Apds)
 CREATE_OWNER(Presence, Presence)
-CREATE_OWNER(RTC, Rtc)
-CREATE_OWNER(FMRadio, FmRadio)
+CREATE_OWNER(Rtc, Rtc)
+CREATE_OWNER(FmRadio, FmRadio)
 CREATE_OWNER(Input, Input)
 
 void completeHandshake(bool requested, bool& running, bool& connected, bool& done, bool& result) {

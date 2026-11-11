@@ -17,7 +17,7 @@
 
 // RTC OLED display function - shows date, time, and temperature
 // Respects OLED_CONTENT_HEIGHT to not overlap footer/navigation bar
-static void displayRTCData() {
+static void displayRtcData() {
   // Header is rendered by the system - content starts at OLED_CONTENT_START_Y
   int y = OLED_CONTENT_START_Y;
   oledDisplay->setTextSize(1);
@@ -31,11 +31,11 @@ static void displayRTCData() {
   }
   
   // Get cached RTC data (thread-safe)
-  RTCDateTime dt;
+  RtcDateTime dt;
   float temp = 0.0f;
   bool valid = false;
   
-  RTCCache reading{};
+  RtcCache reading{};
   if (rtcCacheSnapshot(reading)) {
     dt = rtcLocalTime(&reading.dateTime);  // Apply timezone offset for display
     temp = reading.temperature;
@@ -164,7 +164,7 @@ static const OledModeEntry rtcOledModes[] = {
     OLED_RTC_DATA,           // mode enum
     "RTC",                   // menu name
     "clock",                 // icon name
-    displayRTCData,          // displayFunc
+    displayRtcData,          // displayFunc
     rtcOledModeAvailable,    // availFunc
     rtcInputHandler,         // inputFunc - X toggles sensor
     true,                    // showInMenu

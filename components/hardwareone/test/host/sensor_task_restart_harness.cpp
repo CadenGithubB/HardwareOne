@@ -127,13 +127,13 @@ int main() {
   const Case cases[] = {
     {"input", createInputTask, inputTask, &gInputTaskHandle},
     {"thermal", createThermalTask, thermalTask, &gThermalTaskHandle},
-    {"imu", createIMUTask, imuTask, &gImuTaskHandle},
-    {"tof", createToFTask, tofTask, &gTofTaskHandle},
-    {"fmradio", createFMRadioTask, fmRadioTask, &gFmRadioTaskHandle},
-    {"apds", createAPDSTask, apdsTask, &gApdsTaskHandle},
+    {"imu", createImuTask, imuTask, &gImuTaskHandle},
+    {"tof", createTofTask, tofTask, &gTofTaskHandle},
+    {"fmradio", createFmRadioTask, fmRadioTask, &gFmRadioTaskHandle},
+    {"apds", createApdsTask, apdsTask, &gApdsTaskHandle},
     {"presence", createPresenceTask, presenceTask, &gPresenceTaskHandle},
     {"gps", createGpsTask, gpsTask, &gGpsTaskHandle},
-    {"rtc", createRTCTask, rtcTask, &gRtcTaskHandle},
+    {"rtc", createRtcTask, rtcTask, &gRtcTaskHandle},
   };
   for (const auto& test : cases) {
     expectedSlot = test.slot;

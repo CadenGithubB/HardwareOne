@@ -24,7 +24,7 @@ def generate() -> str:
     owner = (COMPONENT / "i2csensor_apds9960.cpp").read_text()
     header = (COMPONENT / "i2csensor_apds9960.h").read_text()
     mutex = (COMPONENT / "System_Mutex.cpp").read_text()
-    types = [extract_block(header, "struct APDSCache") + ";",
+    types = [extract_block(header, "struct ApdsCache") + ";",
              extract_block((COMPONENT / "System_Mutex.h").read_text(), "struct SensorCacheGuard") + ";"]
     state = [re.search(r"(?m)^static[^\n]*\b" + name + r"\b[^\n]*;", owner)[0]
              for name in ("sApdsCache", "sApdsCacheMutex")]

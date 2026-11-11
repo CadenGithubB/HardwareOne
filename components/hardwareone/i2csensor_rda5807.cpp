@@ -53,7 +53,7 @@ static bool fmRadioResolveBus(uint8_t* outBus, TwoWire** outWire) {
 }
 
 // Forward declarations
-void updateFMRadio();
+void updateFmRadio();
 
 // BROADCAST_PRINTF now defined in debug_system.h with performance optimizations
 
@@ -73,14 +73,14 @@ unsigned long gFmRadioLastStopTime = 0;
 
 // Fixed-size reading storage. Critical sections copy/compare data only; radio
 // I/O, allocation and presentation always happen outside this short lock.
-static FMRadioCache sFmRadioCache;
+static FmRadioCache sFmRadioCache;
 static portMUX_TYPE sFmRadioCacheMux = portMUX_INITIALIZER_UNLOCKED;
 struct FmRadioCacheGuard {
   FmRadioCacheGuard() { portENTER_CRITICAL(&sFmRadioCacheMux); }
   ~FmRadioCacheGuard() { portEXIT_CRITICAL(&sFmRadioCacheMux); }
 };
 
-bool fmRadioCacheSnapshot(FMRadioCache& out, uint32_t timeoutMs) {
+bool fmRadioCacheSnapshot(FmRadioCache& out, uint32_t timeoutMs) {
   (void)timeoutMs;  // Compatibility with other sensor snapshot interfaces.
   FmRadioCacheGuard guard;
   out = sFmRadioCache;
@@ -197,7 +197,7 @@ bool fmRadioInit() {
     return true;  // Already initialized
   }
   
-  FMRadioCache reading;
+  FmRadioCache reading;
   if (!fmRadioCacheSnapshot(reading, 50)) return false;
   bool success = false;
   INFO_FMRADIO_LIFECYCLEF("Starting FM Radio I2C initialization");
@@ -354,7 +354,7 @@ void fmRadioTask(void* parameter) {
     if (loopCount % 4 == 0) {  // Log every 1 second during normal operation
       DEBUG_FMRADIO_POLLINGF("[FM_RADIO_TASK] Updating radio data (loop %lu)", loopCount);
     }
-    updateFMRadio();
+    updateFmRadio();
 
     // ESP-NOW broadcaster reads fmRadioBuildDataJson() on demand from sFmRadioCache.
     
@@ -397,7 +397,7 @@ bool fmRadioStartInternal() {
   fmRadioInitDone = !fmRadioInitRequested;
   fmRadioInitResult = !fmRadioInitRequested;
   gFmRadioRunning = true;
-  if (!createFMRadioTask()) {
+  if (!createFmRadioTask()) {
     gFmRadioRunning = false;
     fmRadioInitRequested = false;
     fmRadioInitDone = false;
@@ -422,7 +422,7 @@ bool fmRadioStartInternal() {
 // FM Radio Polling (for RDS updates)
 // ============================================================================
 
-void updateFMRadio() {
+void updateFmRadio() {
   static unsigned long lastUpdateLog = 0;
   static int lastRSSI = -999;
   static bool lastStereo = false;
@@ -438,7 +438,7 @@ void updateFMRadio() {
                            FM_RADIO_I2C_CLOCK, 100, [&]() {
     radio.checkRDS();
     radio.getRadioInfo(&ri);
-    FMRadioCache before;
+    FmRadioCache before;
     fmRadioCacheSnapshot(before);
     now = millis();
     bool seekFinished = false;
@@ -641,7 +641,7 @@ const char* cmd_fmradio_volume(const String& argsInput) {
   volStr.trim();
   
   if (volStr.length() == 0) {
-    FMRadioCache reading;
+    FmRadioCache reading;
     if (!fmRadioCacheSnapshot(reading, 50)) return "Error: [FM Radio] Snapshot unavailable";
     BROADCAST_PRINTF("Current volume: %d", reading.volume);
     return "OK";
@@ -744,7 +744,7 @@ const char* cmd_fmradio_status(const String& argsInput) {
       sFmRadioCache.stereo = ri.stereo;
     });
   }
-  FMRadioCache reading;
+  FmRadioCache reading;
   if (!fmRadioCacheSnapshot(reading, 50)) return "Error: [FM Radio] Snapshot unavailable";
   broadcastOutput("FM Radio Status:");
   BROADCAST_PRINTF("  Connected: %s", gFmRadioConnected ? "Yes" : "No");
@@ -771,10 +771,10 @@ const char* cmd_fmradio_status(const String& argsInput) {
 
 int fmRadioBuildDataJson(char* buf, size_t bufSize) {
   if (!buf || !bufSize) return 0;
-  FMRadioCache snap;
+  FmRadioCache snap;
   if (!fmRadioCacheSnapshot(snap, 50)) return 0;
 
-  // valid = fresh poll data (set in updateFMRadio, cleared on deinit),
+  // valid = fresh poll data (set in updateFmRadio, cleared on deinit),
   // connected = radio present on the bus, ts from the last poll. Dropped:
   // top-level "connected" (envelope carries it) AND "enabled" (duplicate of the
   // sensors-json discovery-layer enabled).
@@ -857,7 +857,7 @@ static const SettingEntry fmRadioSettingEntries[] = {
   { "fmRadioDevicePollMs", SETTING_INT, &gSettings.fmRadioDevicePollMs, 250, 0, nullptr, 100, 5000, "Poll Interval (ms)", nullptr, false, nullptr, "fmradiodevicepollms" },
 };
 
-static bool isFMRadioConnected() {
+static bool isFmRadioConnected() {
   return gFmRadioConnected;
 }
 
@@ -867,7 +867,7 @@ extern const SettingsModule fmRadioSettingsModule = {
   "hardware.sensors.fmradio",
   fmRadioSettingEntries,
   sizeof(fmRadioSettingEntries) / sizeof(fmRadioSettingEntries[0]),
-  isFMRadioConnected,
+  isFmRadioConnected,
   "RDA5807 FM radio receiver"
 };
 

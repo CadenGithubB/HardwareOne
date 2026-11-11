@@ -8872,7 +8872,7 @@ static void buildFmTunerReadout(char* out, size_t cap) {
     snprintf(out, cap, "Radio off\nTap Power\nto start");
     return;
   }
-  FMRadioCache snap{};
+  FmRadioCache snap{};
   if (!fmRadioCacheSnapshot(snap)) {
     snprintf(out, cap, "Radio busy\n(reading...)");
     return;
@@ -8977,7 +8977,7 @@ static void g2FmTunerHandleTap(uint32_t idx) {
   }
   if (!on) return;  // seek/vol/mute are no-ops until the radio runs
 
-  FMRadioCache radio{};
+  FmRadioCache radio{};
   if (!fmRadioCacheSnapshot(radio)) return;
 
   switch (idx) {

@@ -188,7 +188,7 @@ static void commonOutputs() {
 #if !TEST_BASELINE
 static void snapshotAndRdsTests() {
   reset(); DATA.dataValid=true; DATA.lastUpdate=789; strcpy(DATA.stationName,"OLD");
-  FMRadioCache out;
+  FmRadioCache out;
   assert(fmRadioCacheSnapshot(out) && out.dataValid && out.lastUpdate==789 && criticalEntries==1);
   DATA.stationName[0]='N'; assert(std::string(out.stationName)=="OLD");
   // Timeout remains source-compatible; fixed-size critical copies have no RTOS admission failure.
@@ -209,23 +209,23 @@ static void snapshotAndRdsTests() {
 static void seekTests() {
   reset(); nowMs=100;
   beforeBus=[] {  // A preceding bus owner polls before seek admission; no reservation exists yet.
-    FMRadioCache pending; assert(fmRadioCacheSnapshot(pending) && !pending.seekInProgress);
-    nowMs=1000; updateFMRadio(); assert(!DATA.seekInProgress && events.empty());
+    FmRadioCache pending; assert(fmRadioCacheSnapshot(pending) && !pending.seekInProgress);
+    nowMs=1000; updateFmRadio(); assert(!DATA.seekInProgress && events.empty());
   };
   seekHook=[] {  // UI can copy a pending seek; radio polling remains serialized by the held bus.
-    FMRadioCache pending; assert(busHeld && fmRadioCacheSnapshot(pending) && pending.seekInProgress);
+    FmRadioCache pending; assert(busHeld && fmRadioCacheSnapshot(pending) && pending.seekInProgress);
     assert(!cacheHeld()); nowMs=2000;
   };
   assert(std::string(cmd_fmradio_seek("up"))=="OK" && radio.seekUpCalls==1);
-  FMRadioCache pending; assert(fmRadioCacheSnapshot(pending) && pending.seekStartMs==2000);
+  FmRadioCache pending; assert(fmRadioCacheSnapshot(pending) && pending.seekStartMs==2000);
   assert(std::string(cmd_fmradio_seek("down")).find("already in progress")!=std::string::npos && radio.seekDownCalls==0);
-  nowMs=2299; updateFMRadio(); assert(DATA.seekInProgress && events.empty());
-  nowMs=2300; updateFMRadio(); assert(!DATA.seekInProgress && DATA.frequency==9950 && events.size()==1);
+  nowMs=2299; updateFmRadio(); assert(DATA.seekInProgress && events.empty());
+  nowMs=2300; updateFmRadio(); assert(!DATA.seekInProgress && DATA.frequency==9950 && events.size()==1);
   assert(events[0]=="1:99.5:seek" && DATA.dataValid && DATA.rssi==35 && DATA.headphonesConnected);
   reset(); nowMs=100; radioInfo.tuned=false;
   assert(std::string(cmd_fmradio_seek(" DOWN "))=="OK" && radio.seekDownCalls==1);
-  nowMs=6100; updateFMRadio(); assert(DATA.seekInProgress && events.empty());
-  nowMs=6101; updateFMRadio(); assert(!DATA.seekInProgress && events==std::vector<std::string>{"1:99.5:seek timeout"});
+  nowMs=6100; updateFmRadio(); assert(DATA.seekInProgress && events.empty());
+  nowMs=6101; updateFmRadio(); assert(!DATA.seekInProgress && events==std::vector<std::string>{"1:99.5:seek timeout"});
   reset(); busAdmit=false; strcpy(DATA.stationName,"OLD");
   assert(std::string(cmd_fmradio_seek("up"))=="Error: [FM Radio] Seek could not start");
   assert(!DATA.seekInProgress && radio.seekUpCalls==0 && criticalEntries==0 && std::string(DATA.stationName)=="OLD");
@@ -236,13 +236,13 @@ static void seekTests() {
     assert(!DATA.seekInProgress && DATA.frequency==9950); nowMs=800;
     assert(std::string(cmd_fmradio_seek("up"))=="OK");
   };
-  updateFMRadio(); assert(DATA.seekInProgress && DATA.seekStartMs==800 && events.size()==1 && DATA.frequency==9950);
-  nowMs=1100; updateFMRadio(); assert(!DATA.seekInProgress && events.size()==2);
+  updateFmRadio(); assert(DATA.seekInProgress && DATA.seekStartMs==800 && events.size()==1 && DATA.frequency==9950);
+  nowMs=1100; updateFmRadio(); assert(!DATA.seekInProgress && events.size()==2);
   reset(); setSeek(true,true,100); nowMs=500; busAdmit=false;
-  updateFMRadio(); assert(DATA.seekInProgress && !DATA.dataValid && events.empty());
-  busAdmit=true; updateFMRadio(); assert(!DATA.seekInProgress && DATA.dataValid && events.size()==1);
+  updateFmRadio(); assert(DATA.seekInProgress && !DATA.dataValid && events.empty());
+  busAdmit=true; updateFmRadio(); assert(!DATA.seekInProgress && DATA.dataValid && events.size()==1);
   reset(); rdsHook=[] { RDS_ServiceNameCallback("ON AIR"); RDS_TextCallback("Song"); };
-  updateFMRadio(); assert(DATA.dataValid && std::string(DATA.stationName)=="ON AIR" && events.size()==1);
+  updateFmRadio(); assert(DATA.dataValid && std::string(DATA.stationName)=="ON AIR" && events.size()==1);
   assert(!cacheHeld() && !busHeld);
 }
 static void commandTests() {
@@ -274,7 +274,7 @@ static void commandTests() {
   // A command ordered after polling must not be overwritten when the old poll returns.
   reset(); setSeek(true,true,100); nowMs=500;
   afterBus=[] { assert(DATA.frequency==9950); assert(std::string(cmd_fmradio_tune("10400"))=="OK"); };
-  updateFMRadio(); assert(DATA.frequency==10400 && radio.frequency==10400);
+  updateFmRadio(); assert(DATA.frequency==10400 && radio.frequency==10400);
 }
 using Command = const char* (*)(const String&);
 static void rejectedCommand(Command command, const char* input) {

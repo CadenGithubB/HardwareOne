@@ -60,7 +60,7 @@ static constexpr uint8_t APDS9960_LEFT = 3, APDS9960_RIGHT = 4;
 // INSERT_STATE
 // INSERT_READER_FUNCTIONS
 
-static auto values(const APDSCache& reading) {
+static auto values(const ApdsCache& reading) {
   return std::make_tuple(reading.apdsRed, reading.apdsGreen, reading.apdsBlue,
                         reading.apdsClear, reading.apdsProximity, reading.apdsGesture,
                         reading.apdsLastUpdate, reading.apdsDataValid, reading.apdsColorValid,
@@ -102,7 +102,7 @@ static void readerTests() {
   bool* const modeFlags[] = {&gApdsColorRunning, &gApdsProximityRunning, &gApdsGestureRunning};
   bool* const validFlags[] = {&sApdsCache.apdsColorValid, &sApdsCache.apdsProximityValid,
                             &sApdsCache.apdsGestureValid};
-  APDSCache empty;
+  ApdsCache empty;
   assert(!empty.apdsDataValid && !empty.apdsColorValid && !empty.apdsProximityValid && !empty.apdsGestureValid);
   for (size_t i = 0; i < 3; ++i) {
     const auto handler = handlers[i];

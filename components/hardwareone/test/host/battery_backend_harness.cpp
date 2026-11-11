@@ -325,7 +325,7 @@ int main() {
   auto s=getBatterySnapshot();
   assert(s.voltageAvailable && s.voltageValid && s.hasSample);
   assert(std::fabs(s.voltage-rawCode*BATTERY_ADC_DIVIDER/1000.0f)<0.001f);
-  assert(s.rawADC==rawCode && readCount==17);
+  assert(s.rawAdc==rawCode && readCount==17);
   assert(!s.usbKnown && !s.chargingKnown && !s.presenceKnown);
   assert(configuredUnit==EXPECTED_UNIT && configuredChannel==EXPECTED_CHANNEL);
   assert(configuredAttenuation==BATTERY_ADC_ATTEN && createCount==1);

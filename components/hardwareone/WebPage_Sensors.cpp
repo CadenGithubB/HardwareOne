@@ -343,12 +343,12 @@ esp_err_t handleSensorData(httpd_req_t* req) {
         }
         
         char buf[256];
-        RTCCache rtc{};
+        RtcCache rtc{};
         if (!rtcCacheSnapshot(rtc, 50) || !rtc.dataValid) {
           sendJsonResponse(req, "{\"error\":\"no_data\"}");
           return ESP_OK;
         }
-        const RTCDateTime& dt = rtc.dateTime;
+        const RtcDateTime& dt = rtc.dateTime;
         const float temp = rtc.temperature;
 
         // RTC stores UTC time - convert to local time using gSettings.tzOffsetMinutes

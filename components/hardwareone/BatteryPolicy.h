@@ -30,7 +30,7 @@ struct BatteryState {
   bool isCharging = false;
   bool usbPresent = false;
   uint32_t lastReadMs = 0;       // Last successful voltage read, never an attempt.
-  uint16_t rawADC = 0;
+  uint16_t rawAdc = 0;
   float cratePctPerHr = NAN;
   bool voltageAvailable = false; // Configured measurement hardware, not cell presence.
   bool voltageValid = false;
@@ -100,7 +100,7 @@ inline bool applyAdcVoltage(BatteryState& s, float volts, uint16_t raw, uint32_t
     return false;
   }
   s.voltage = volts;
-  s.rawADC = raw;
+  s.rawAdc = raw;
   s.voltageValid = s.hasSample = true;
   s.percentage = estimatePercentage(volts);
   s.percentageValid = std::isfinite(s.percentage);

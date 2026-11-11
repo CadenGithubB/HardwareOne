@@ -1828,7 +1828,7 @@ void hardwareone_setup() {
   crashRecordSetPhase(CRASH_PHASE_HARDWARE);
   initBattery();
   boardPowerRailInit();  // Must precede I2C — powers STEMMA QT connector on Feather V2 (independent of ENABLE_NEOPIXEL)
-  initNeoPixelLED();     // no-op stub when ENABLE_NEOPIXEL=0
+  initNeoPixelLed();     // no-op stub when ENABLE_NEOPIXEL=0
 
 #if ENABLE_I2C_SYSTEM
   initI2cBuses();
@@ -2286,19 +2286,19 @@ void hardwareone_setup() {
     effect.toLowerCase();
 
     if (effect == "rainbow") {
-      runLEDEffect(EFFECT_RAINBOW, color1, color1, duration);
+      runLedEffect(EFFECT_RAINBOW, color1, color1, duration);
     } else if (effect == "pulse") {
-      runLEDEffect(EFFECT_PULSE, color1, color1, duration);
+      runLedEffect(EFFECT_PULSE, color1, color1, duration);
     } else if (effect == "fade") {
-      runLEDEffect(EFFECT_FADE, color1, color2, duration);
+      runLedEffect(EFFECT_FADE, color1, color2, duration);
     } else if (effect == "blink") {
-      runLEDEffect(EFFECT_BLINK, color1, color1, duration);
+      runLedEffect(EFFECT_BLINK, color1, color1, duration);
     } else if (effect == "strobe") {
-      runLEDEffect(EFFECT_STROBE, color1, color1, duration);
+      runLedEffect(EFFECT_STROBE, color1, color1, duration);
     } else if (effect == "solid") {
-      setLEDColor(color1);
+      setLedColor(color1);
       delay(duration);
-      setLEDColor({ 0, 0, 0 });
+      setLedColor({ 0, 0, 0 });
     }
     broadcastOutput("Startup effect completed: " + effect);
   }

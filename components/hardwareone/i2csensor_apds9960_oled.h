@@ -9,7 +9,7 @@
 #include "HAL_Display.h"  // For gDisplay and oledDisplay macro alias
 
 // Display function for APDS OLED mode
-void displayAPDSData() {
+void displayApdsData() {
   if (!oledDisplay || !oledConnected) return;
   
   oledDisplay->clearDisplay();
@@ -27,7 +27,7 @@ void displayAPDSData() {
     oledDisplay->println("== APDS DATA ==");
     oledDisplay->println();
     
-    APDSCache reading{};
+    ApdsCache reading{};
     if (apdsCacheSnapshot(reading)) {
       oledDisplay->print("R:");
       oledDisplay->print(reading.apdsRed);
@@ -78,7 +78,7 @@ static const OledModeEntry apdsOledModes[] = {
     OLED_APDS_DATA,          // mode enum
     "APDS",                  // menu name
     "notify_sensor",         // icon name
-    displayAPDSData,         // displayFunc
+    displayApdsData,         // displayFunc
     apdsOledModeAvailable,   // availFunc
     apdsInputHandler,        // inputFunc - X toggles sensor
     true,                    // showInMenu

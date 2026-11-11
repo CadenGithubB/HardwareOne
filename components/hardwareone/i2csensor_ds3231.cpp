@@ -27,10 +27,10 @@
 
 // RTC Cache
 // The mutex is retained across stops; readers never own the live storage.
-static RTCCache sRtcCache{};
+static RtcCache sRtcCache{};
 static SemaphoreHandle_t sRtcCacheMutex = nullptr;
 
-bool rtcCacheSnapshot(RTCCache& out, uint32_t timeoutMs) {
+bool rtcCacheSnapshot(RtcCache& out, uint32_t timeoutMs) {
   out = {};
   SensorCacheGuard guard(sRtcCacheMutex, pdMS_TO_TICKS(timeoutMs), "rtc.snapshot");
   if (!guard.held) return false;
@@ -119,7 +119,7 @@ static bool rtcReadRegisters(uint8_t startReg, uint8_t* buffer, uint8_t count) {
 // RTC Read/Write Functions
 // ============================================================================
 
-bool rtcReadDateTime(RTCDateTime* dt) {
+bool rtcReadDateTime(RtcDateTime* dt) {
   if (!dt) return false;
   
   uint8_t buffer[7];
@@ -138,7 +138,7 @@ bool rtcReadDateTime(RTCDateTime* dt) {
   return true;
 }
 
-bool rtcWriteDateTime(const RTCDateTime* dt) {
+bool rtcWriteDateTime(const RtcDateTime* dt) {
   if (!dt) return false;
   uint8_t bus; TwoWire* w;
   if (!rtcResolveBus(&bus, &w)) return false;
@@ -175,14 +175,14 @@ float rtcReadTemperature() {
 // Time Sync Functions
 // ============================================================================
 
-// UTC RTCDateTime -> epoch without timegm(). Pure civil-calendar arithmetic
+// UTC RtcDateTime -> epoch without timegm(). Pure civil-calendar arithmetic
 // (Howard Hinnant's days_from_civil) — deliberately NOT the old
 // "TZ=UTC0 + mktime + restore" dance: mutating the process-global TZ opens
 // a window in which every other task's localtime_r() silently returns UTC,
 // and the restore-via-saved-getenv-pointer variant was worse (newlib's
 // setenv overwrites the environ string in place, so the saved pointer read
 // back "UTC0" and pinned the device to UTC for the rest of the boot).
-static time_t rtcDateTimeToEpochUtc(const RTCDateTime* dt) {
+static time_t rtcDateTimeToEpochUtc(const RtcDateTime* dt) {
   // days_from_civil: days since 1970-01-01 for a proleptic-Gregorian date.
   int y = dt->year;
   const int m = dt->month;   // 1..12
@@ -199,7 +199,7 @@ static time_t rtcDateTimeToEpochUtc(const RTCDateTime* dt) {
 
 // A DS3231 with a dead/dying coin cell reports 2000-era time; adopting it
 // would step a good clock backwards by decades. One gate, all adopters.
-static inline bool rtcDateTimePlausible(const RTCDateTime* dt) {
+static inline bool rtcDateTimePlausible(const RtcDateTime* dt) {
   return dt->year >= 2020 && dt->year <= 2099;
 }
 
@@ -218,7 +218,7 @@ bool rtcEarlyBootSync() {
     return false;
   }
   
-  RTCDateTime dt;
+  RtcDateTime dt;
   if (!rtcReadDateTime(&dt)) {
     DEBUG_RTC_LIFECYCLEF("[RTC] Early boot sync: Failed to read RTC");
     return false;
@@ -240,7 +240,7 @@ bool rtcEarlyBootSync() {
 }
 
 bool rtcSyncToSystem() {
-  RTCDateTime dt;
+  RtcDateTime dt;
   if (!rtcReadDateTime(&dt)) {
     broadcastOutput("[RTC] Failed to read RTC for sync");
     return false;
@@ -266,7 +266,7 @@ bool rtcSyncFromSystem() {
   struct tm timeinfo;
   gmtime_r(&now, &timeinfo);  // RTC stores UTC, not local time
   
-  RTCDateTime dt;
+  RtcDateTime dt;
   dt.year = timeinfo.tm_year + 1900;
   dt.month = timeinfo.tm_mon + 1;
   dt.day = timeinfo.tm_mday;
@@ -288,13 +288,13 @@ bool rtcSyncFromSystem() {
 // Utility Functions
 // ============================================================================
 
-uint32_t rtcToUnixTime(const RTCDateTime* dt) {
+uint32_t rtcToUnixTime(const RtcDateTime* dt) {
   time_t t = rtcDateTimeToEpochUtc(dt);
 
   return (uint32_t)t;
 }
 
-void unixTimeToRTC(uint32_t unixTime, RTCDateTime* dt) {
+void unixTimeToRtc(uint32_t unixTime, RtcDateTime* dt) {
   time_t t = (time_t)unixTime;
   struct tm timeinfo;
   gmtime_r(&t, &timeinfo);
@@ -308,7 +308,7 @@ void unixTimeToRTC(uint32_t unixTime, RTCDateTime* dt) {
   dt->dayOfWeek = timeinfo.tm_wday + 1;
 }
 
-String rtcDateTimeToString(const RTCDateTime* dt) {
+String rtcDateTimeToString(const RtcDateTime* dt) {
   char buf[32];
   snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d",
            dt->year, dt->month, dt->day,
@@ -330,8 +330,8 @@ static int rtcDayOfWeek(int y, int m, int d) {
   return (y + y/4 - y/100 + y/400 + t[m-1] + d) % 7;
 }
 
-RTCDateTime rtcLocalTime(const RTCDateTime* utc) {
-  RTCDateTime local = *utc;
+RtcDateTime rtcLocalTime(const RtcDateTime* utc) {
+  RtcDateTime local = *utc;
 
   int offsetMinutes = Clock::tzOffsetMinutes();
   if (offsetMinutes == 0) return local;  // UTC, nothing to do
@@ -366,7 +366,7 @@ RTCDateTime rtcLocalTime(const RTCDateTime* utc) {
 
   local.hour   = totalMinutes / 60;
   local.minute = totalMinutes % 60;
-  // dayOfWeek: Sakamoto returns 0=Sun, RTCDateTime uses 1=Sun
+  // dayOfWeek: Sakamoto returns 0=Sun, RtcDateTime uses 1=Sun
   local.dayOfWeek = rtcDayOfWeek(local.year, local.month, local.day) + 1;
 
   return local;
@@ -379,7 +379,7 @@ RTCDateTime rtcLocalTime(const RTCDateTime* utc) {
 int rtcBuildDataJson(char* buf, size_t bufSize) {
   if (!buf || bufSize == 0) return 0;
   
-  RTCCache reading;
+  RtcCache reading;
   const bool available = rtcCacheSnapshot(reading, 50);
   if (!available) {
     // Cache-lock timeout: not-ready envelope (was: return 0 / no output).
@@ -411,7 +411,7 @@ int rtcBuildDataJson(char* buf, size_t bufSize) {
 // cold-start poll before entering its 30s periodic loop — keeps the cache
 // fresh for local readers (OLED, web UI) without waiting up to 30s.
 static void rtcReadAndCacheOnce(unsigned long now) {
-  RTCDateTime dt;
+  RtcDateTime dt;
   float temp = rtcReadTemperature();
   if (!rtcReadDateTime(&dt)) return;
 
@@ -551,7 +551,7 @@ bool rtcInit() {
   return true;
 }
 
-// createRTCTask() is now defined in System_TaskUtils.cpp (centralized helper).
+// createRtcTask() is now defined in System_TaskUtils.cpp (centralized helper).
 
 
 // Called only by the lifecycle worker. A live task owns its own cleanup;
@@ -598,7 +598,7 @@ bool rtcStartInternal() {
     if (!g.held) return false;
     sRtcCache.dataValid = false;
     sRtcCache.temperature = 0.0f;
-    memset(&sRtcCache.dateTime, 0, sizeof(RTCDateTime));
+    memset(&sRtcCache.dateTime, 0, sizeof(RtcDateTime));
   }
 
   if (!rtcInit()) {
@@ -608,10 +608,10 @@ bool rtcStartInternal() {
 
   gRtcRunning = true;  // Set this BEFORE task creation — the task's main loop
                        // is `while (gRtcRunning)`, so flipping this after
-                       // createRTCTask() races and the task exits immediately
+                       // createRtcTask() races and the task exits immediately
                        // (web UI then shows "RTC Closed" despite a successful
                        // openrtc command). Matches IMU/Thermal pattern.
-  if (!createRTCTask()) {
+  if (!createRtcTask()) {
     DEBUG_RTC_LIFECYCLEF("[RTC] Failed to create task");
     gRtcRunning = false;
     gRtcConnected = false;
@@ -648,10 +648,10 @@ const char* cmd_rtc(const String& argsInput) {
       return response.c_str();
     }
     
-    RTCDateTime utc;
+    RtcDateTime utc;
     if (rtcReadDateTime(&utc)) {
       float temp = rtcReadTemperature();
-      RTCDateTime local = rtcLocalTime(&utc);
+      RtcDateTime local = rtcLocalTime(&utc);
       // Shared label helper — the hand-rolled version here lost the sign
       // for negative sub-hour offsets ((offsetMin/60)*sign truncated to +0).
       char tzBuf[12];
@@ -701,7 +701,7 @@ const char* cmd_rtcset(const String& argsInput) {
     return "Error: invalid arguments — Usage: rtcset YYYY-MM-DD HH:MM:SS  or  rtcset <unix_timestamp>";
   }
   
-  RTCDateTime dt;
+  RtcDateTime dt;
   
   // Check if it's a unix timestamp (all digits)
   bool isUnix = true;
@@ -715,7 +715,7 @@ const char* cmd_rtcset(const String& argsInput) {
   if (isUnix) {
     uint32_t unixTime = 0;
     if (!parseIntArg(arg, unixTime)) return kCommandReplyNotANumber;
-    unixTimeToRTC(unixTime, &dt);
+    unixTimeToRtc(unixTime, &dt);
   } else {
     // Parse YYYY-MM-DD HH:MM:SS
     int year, month, day, hour, minute, second;
@@ -803,43 +803,43 @@ const char* cmd_rtcstop(const String& argsInput) {
 // ============================================================================
 
 int rtcGetYear() {
-  RTCCache reading;
+  RtcCache reading;
   if (!gRtcConnected || !rtcCacheSnapshot(reading) || !reading.dataValid) return 0;
   return reading.dateTime.year;
 }
 
 int rtcGetMonth() {
-  RTCCache reading;
+  RtcCache reading;
   if (!gRtcConnected || !rtcCacheSnapshot(reading) || !reading.dataValid) return 0;
   return reading.dateTime.month;
 }
 
 int rtcGetDay() {
-  RTCCache reading;
+  RtcCache reading;
   if (!gRtcConnected || !rtcCacheSnapshot(reading) || !reading.dataValid) return 0;
   return reading.dateTime.day;
 }
 
 int rtcGetHour() {
-  RTCCache reading;
+  RtcCache reading;
   if (!gRtcConnected || !rtcCacheSnapshot(reading) || !reading.dataValid) return 0;
   return reading.dateTime.hour;
 }
 
 int rtcGetMinute() {
-  RTCCache reading;
+  RtcCache reading;
   if (!gRtcConnected || !rtcCacheSnapshot(reading) || !reading.dataValid) return 0;
   return reading.dateTime.minute;
 }
 
 int rtcGetSecond() {
-  RTCCache reading;
+  RtcCache reading;
   if (!gRtcConnected || !rtcCacheSnapshot(reading) || !reading.dataValid) return 0;
   return reading.dateTime.second;
 }
 
 float rtcGetTemperature() {
-  RTCCache reading;
+  RtcCache reading;
   if (!gRtcConnected || !rtcCacheSnapshot(reading) || !reading.dataValid) return 0.0f;
   return reading.temperature;
 }
@@ -858,7 +858,7 @@ static const SettingEntry rtcSettingEntries[] = {
   { "rtcTimeHasBeenSet", SETTING_BOOL, &gSettings.rtcTimeHasBeenSet, 0, 0, nullptr, 0, 1, "RTC time has been set (NTP/manual)", nullptr, false, nullptr, nullptr, true },
 };
 
-static bool isRTCConnectedSetting() {
+static bool isRtcConnectedSetting() {
   return gRtcConnected;
 }
 
@@ -868,7 +868,7 @@ extern const SettingsModule rtcSettingsModule = {
   "hardware.sensors.rtc",
   rtcSettingEntries,
   sizeof(rtcSettingEntries) / sizeof(rtcSettingEntries[0]),
-  isRTCConnectedSetting,
+  isRtcConnectedSetting,
   "DS3231 real-time clock"
 };
 

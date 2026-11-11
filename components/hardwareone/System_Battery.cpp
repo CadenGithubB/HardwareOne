@@ -205,7 +205,7 @@ static esp_err_t fuelGaugeBackendSample(BatteryState& state) {
   state.voltage = reading.voltage;
   state.percentage = reading.socPct;
   state.cratePctPerHr = reading.cratePctPerHr;
-  state.rawADC = 0;
+  state.rawAdc = 0;
   state.voltageValid = state.voltageCalibrated = state.hasSample = true;
   state.percentageValid = std::isfinite(BatteryPolicy::estimatePercentage(reading.voltage));
   state.percentageEstimated = true; // MAX17048 ModelGauge estimates SOC too.
@@ -432,7 +432,7 @@ void buildBatteryJson(JsonDocument& doc) {
   if (state.percentageValid && state.rateValid && state.cratePctPerHr < -0.01f)
     doc["etaMinutes"] = (long)((state.percentage / -state.cratePctPerHr) * 60.0f);
 #elif ENABLE_BATTERY_MONITOR && BATTERY_BACKEND_ADC
-  if (state.voltageValid) doc["rawADC"] = state.rawADC; else doc["rawADC"] = nullptr;
+  if (state.voltageValid) doc["rawADC"] = state.rawAdc; else doc["rawADC"] = nullptr;
   doc["adcPin"] = BATTERY_ADC_PIN;
   doc["divider"] = BATTERY_ADC_DIVIDER;
 #endif

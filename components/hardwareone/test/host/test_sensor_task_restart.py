@@ -39,7 +39,7 @@ def main() -> None:
                       expanded) is not None,
             "sensor exit must publish null immediately before self-deletion")
 
-    families = ("Input", "Thermal", "IMU", "ToF", "FMRadio", "APDS", "Presence", "Gps", "RTC")
+    families = ("Input", "Thermal", "Imu", "Tof", "FmRadio", "Apds", "Presence", "Gps", "Rtc")
     definitions = [extract_block(source, f"bool create{family}Task()") for family in families]
     require(all("eTaskGetState" not in definition for definition in definitions),
             "sensor creation must not inspect potentially retired task handles")

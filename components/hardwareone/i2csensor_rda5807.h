@@ -19,7 +19,7 @@
 // Groups all sensor data fields in one copied reading so readers (web API, OLED,
 // ESP-NOW broadcaster) get a consistent snapshot and writers (fmRadio task,
 // RDS callbacks) don't tear strings mid-update.
-struct FMRadioCache {
+struct FmRadioCache {
   bool dataValid = false;
   unsigned long lastUpdate = 0;  // millis() of the last successful poll — feeds the sensor envelope's ts
   uint16_t frequency = 10390;    // Current frequency in 10kHz units (10390 = 103.9 MHz)
@@ -34,7 +34,7 @@ struct FMRadioCache {
   // Async seek state — cmd_fmradio_seek starts the hardware seek in a short
   // I2C transaction and returns immediately (it used to busy-wait ~5 s while
   // HOLDING the bus mutex, freezing the gamepad + OLED on the shared bus).
-  // fmRadioTask's 250 ms updateFMRadio() poll finalizes via ri.tuned (6 s
+  // fmRadioTask's 250 ms updateFmRadio() poll finalizes via ri.tuned (6 s
   // failsafe). OLED/web render a "Seeking" indicator from seekInProgress.
   bool seekInProgress = false;
   bool seekDirUp = true;           // direction of the pending seek
@@ -53,7 +53,7 @@ extern TaskHandle_t gFmRadioTaskHandle;
 // Fixed-size copy under a private critical section. Enabled builds always
 // acquire it; timeoutMs is retained for snapshot-interface compatibility.
 // No I2C, allocation or formatting occurs in the critical section.
-bool fmRadioCacheSnapshot(FMRadioCache& out, uint32_t timeoutMs = 10);
+bool fmRadioCacheSnapshot(FmRadioCache& out, uint32_t timeoutMs = 10);
 
 // Command handlers
 const char* cmd_fmradio(const String& argsInput);
@@ -75,7 +75,7 @@ void fmRadioPoll();  // Called periodically to update RDS data
 int fmRadioBuildDataJson(char* buf, size_t bufSize);
 
 #else
-inline bool fmRadioCacheSnapshot(FMRadioCache& out, uint32_t timeoutMs = 10) {
+inline bool fmRadioCacheSnapshot(FmRadioCache& out, uint32_t timeoutMs = 10) {
   (void)timeoutMs;
   out = {};
   return false;

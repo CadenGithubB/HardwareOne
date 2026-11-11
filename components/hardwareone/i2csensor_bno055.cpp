@@ -62,7 +62,7 @@ static bool imuInvalidateCache() {
 
 // IMU Action Detection System - definitions
 // Derived action history is internal; only imuUpdateActions and CLI use it.
-struct IMUActionState {
+struct ImuActionState {
   bool isShaking;
   unsigned long lastShakeMs;
   uint32_t shakeCount;
@@ -105,7 +105,7 @@ struct IMUActionState {
   uint32_t stepsInWindow;
 };
 
-static IMUActionState gImuActions = {
+static ImuActionState gImuActions = {
   false, 0, 0, 0.0f,  // shake
   false, 0.0f, 'N',   // tilt
   false, 0, 0, 0.0f,  // tap
@@ -236,7 +236,7 @@ bool imuStartInternal() {
   }
 
   // Create IMU task lazily (after setting gImuRunning=true)
-  if (!createIMUTask()) {
+  if (!createImuTask()) {
     DEBUG_CLIF("Failed to create IMU task (insufficient memory or resources)");
     gImuRunning = false;  // Reset flag on failure
     gImuConnected = false;
@@ -1174,7 +1174,7 @@ void imuTask(void* parameter) {
                 (unsigned)uxTaskGetStackHighWaterMark(nullptr));
   INFO_IMU_LIFECYCLEF("[MODULAR] imuTask() running from i2csensor_bno055.cpp");
   gWasWalking = false;
-  unsigned long lastIMURead = 0;
+  unsigned long lastImuRead = 0;
   unsigned long lastStackLog = 0;
   while (true) {
     // CRITICAL: Check enabled flag FIRST for graceful shutdown
@@ -1233,7 +1233,7 @@ void imuTask(void* parameter) {
     if (gImuRunning && gImuConnected && gBNO055 != nullptr && !pollPaused(imuBus)) {
       unsigned long imuPollMs = (gSettings.imuDevicePollMs > 0) ? (unsigned long)gSettings.imuDevicePollMs : 200;
       unsigned long nowMs = millis();
-      if (nowMs - lastIMURead >= imuPollMs) {
+      if (nowMs - lastImuRead >= imuPollMs) {
         // IMU reads ~5ms at 100kHz; fail fast and retry next poll rather than blocking 1000ms
         I2cDeviceManager* mgr = I2cDeviceManager::getInstance();
         TwoWire* imuWire = mgr ? mgr->getWire(imuBus) : nullptr;
@@ -1244,7 +1244,7 @@ void imuTask(void* parameter) {
           imuPoll();
           return true;
         });
-        lastIMURead = nowMs;
+        lastImuRead = nowMs;
         
         // Mark OLED dirty if IMU page is active (enables real-time display updates)
 #if ENABLE_OLED_DISPLAY
@@ -1293,7 +1293,7 @@ static const SettingEntry imuSettingEntries[] = {
   { "imuYawOffset", SETTING_FLOAT, &gSettings.imuYawOffset, 0, 0.0f, nullptr, -180, 180, "Yaw Offset", nullptr, false, "orientation", "imuyawoffset" },
 };
 
-static bool isIMUConnected() {
+static bool isImuConnected() {
   return gImuConnected;
 }
 
@@ -1303,7 +1303,7 @@ extern const SettingsModule imuSettingsModule = {
   "hardware.sensors.imu",
   imuSettingEntries,
   sizeof(imuSettingEntries) / sizeof(imuSettingEntries[0]),
-  isIMUConnected,
+  isImuConnected,
   "BNO055 9-axis IMU"
 };
 
