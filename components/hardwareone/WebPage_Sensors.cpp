@@ -124,7 +124,7 @@ esp_err_t handleSensorData(httpd_req_t* req) {
           }
           if (gJsonResponseBuffer) {
             char* buf = gJsonResponseBuffer;
-            int jsonLen = thermalBuildDataJSON(buf, JSON_RESPONSE_SIZE);
+            int jsonLen = thermalBuildDataJson(buf, JSON_RESPONSE_SIZE);
             if (jsonLen > 0) {
               // DEBUG: Log buffer usage
               int usagePct = (jsonLen * 100) / JSON_RESPONSE_SIZE;
@@ -151,7 +151,7 @@ esp_err_t handleSensorData(httpd_req_t* req) {
 
         // Use stack-allocated buffer for ToF response
         char tofResponseBuffer[TOF_RESPONSE_SIZE];
-        int jsonLen = tofBuildDataJSON(tofResponseBuffer, TOF_RESPONSE_SIZE);
+        int jsonLen = tofBuildDataJson(tofResponseBuffer, TOF_RESPONSE_SIZE);
 
         // Send response. Guard jsonLen — the builder returns 0 on overflow, and
         // httpd_resp_send with len 0 ships an EMPTY body under
@@ -176,7 +176,7 @@ esp_err_t handleSensorData(httpd_req_t* req) {
 
         // Use stack-allocated buffer for IMU response
         char imuResponseBuffer[IMU_RESPONSE_SIZE];
-        int jsonLen = imuBuildDataJSON(imuResponseBuffer, IMU_RESPONSE_SIZE);
+        int jsonLen = imuBuildDataJson(imuResponseBuffer, IMU_RESPONSE_SIZE);
 
         // Send response — see the tof arm above for why jsonLen is guarded.
         if (jsonLen <= 0) {
@@ -228,7 +228,7 @@ esp_err_t handleSensorData(httpd_req_t* req) {
           return ESP_OK;
         }
         char anoBuf[160];
-        int jsonLen = anoEncoderBuildDataJSON(anoBuf, sizeof(anoBuf));
+        int jsonLen = anoEncoderBuildDataJson(anoBuf, sizeof(anoBuf));
         if (jsonLen <= 0) {
           sendJsonResponse(req, "{\"val\":0, \"error\":\"no_data\"}");
           return ESP_OK;
@@ -248,7 +248,7 @@ esp_err_t handleSensorData(httpd_req_t* req) {
 
         // Use stack-allocated buffer for FM radio response
         char fmRadioResponseBuffer[512];
-        int jsonLen = fmRadioBuildDataJSON(fmRadioResponseBuffer, sizeof(fmRadioResponseBuffer));
+        int jsonLen = fmRadioBuildDataJson(fmRadioResponseBuffer, sizeof(fmRadioResponseBuffer));
 
         if (jsonLen > 0) {
           httpd_resp_set_type(req, "application/json");
@@ -495,7 +495,7 @@ esp_err_t handleRemoteSensors(httpd_req_t* req) {
       if (sscanf(deviceMac, "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx",
                  &mac[0], &mac[1], &mac[2], &mac[3], &mac[4], &mac[5]) == 6) {
         RemoteSensorType type = stringToSensorType(sensorType);
-        String jsonData = getRemoteSensorDataJSON(mac, type);
+        String jsonData = getRemoteSensorDataJson(mac, type);
 
         char dbg[121];
         size_t n = jsonData.length();
@@ -516,7 +516,7 @@ esp_err_t handleRemoteSensors(httpd_req_t* req) {
   }
   
   // Return list of all remote devices with sensors
-  String devicesList = getRemoteDevicesListJSON();
+  String devicesList = getRemoteDevicesListJson();
   DEBUG_HTTPF("/api/sensors/remote list json_len=%u", (unsigned)devicesList.length());
   // Report ESP-NOW's *runtime* state, not just the compile flag. ENABLE_ESPNOW
   // only means the feature is compiled in — the radio may still be uninitialized

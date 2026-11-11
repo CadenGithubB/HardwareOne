@@ -337,8 +337,8 @@ static void bleSessionTick() { ++w.sessionTicks; }
 static volatile uint32_t gOutputFlags = 0;
 static bool bleInitLifecycleMutex() { return true; }
 static bool bleIsStreamEnabled(uint8_t) { return false; }
-static void buildSensorDataJSON(char*, size_t) {}
-static void buildSystemStatusJSON(char*, size_t) {}
+static void buildSensorDataJson(char*, size_t) {}
+static void buildSystemStatusJson(char*, size_t) {}
 static bool blePushSensorData(const char*, size_t) { return false; }
 static bool blePushSystemStatus(const char*, size_t) { return false; }
 

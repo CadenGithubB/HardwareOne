@@ -376,7 +376,7 @@ RTCDateTime rtcLocalTime(const RTCDateTime* utc) {
 // JSON building for ESP-NOW streaming
 // ============================================================================
 
-int rtcBuildDataJSON(char* buf, size_t bufSize) {
+int rtcBuildDataJson(char* buf, size_t bufSize) {
   if (!buf || bufSize == 0) return 0;
   
   RTCCache reading;
@@ -429,7 +429,7 @@ static void rtcReadAndCacheOnce(unsigned long now) {
     oledMarkDirty();
   }
 #endif
-  // ESP-NOW broadcaster reads rtcBuildDataJSON() on demand from the native cache;
+  // ESP-NOW broadcaster reads rtcBuildDataJson() on demand from the native cache;
   // no propagation step needed here.
 }
 
@@ -631,7 +631,7 @@ const char* cmd_rtc(const String& argsInput) {
 
   if (argWantsJson(argsInput)) {
     if (!ensureDebugBuffer()) return SENSOR_JSON_NOBUF;
-    int n = rtcBuildDataJSON(getDebugBuffer(), 1024);  // shared builder (also feeds sensors json)
+    int n = rtcBuildDataJson(getDebugBuffer(), 1024);  // shared builder (also feeds sensors json)
     return (n > 0) ? getDebugBuffer() : SENSOR_JSON_UNAVAILABLE;
   }
 

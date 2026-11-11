@@ -232,7 +232,7 @@ int gpioEncoderConsumeOneDetent() {
   return step;
 }
 
-int gpioEncoderBuildDataJSON(char* buf, size_t size) {
+int gpioEncoderBuildDataJson(char* buf, size_t size) {
   if (!buf || !size) return 0;
   if (!sGpioStateMutex || xSemaphoreTake(sGpioStateMutex, pdMS_TO_TICKS(50)) != pdTRUE) {
     const int n = snprintf(buf, size, "{\"connected\":false,\"valid\":false}");

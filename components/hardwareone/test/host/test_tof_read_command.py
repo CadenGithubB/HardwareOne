@@ -43,7 +43,7 @@ def main() -> None:
                  extract_block(mutex_source, "SensorCacheGuard::~SensorCacheGuard("),
                  extract_block(owner, "bool tofCacheSnapshot("),
                  extract_block((COMPONENT / "System_I2C.cpp").read_text(), "int sensorEnvelopeBegin("),
-                 extract_block(owner, "int tofBuildDataJSON("),
+                 extract_block(owner, "int tofBuildDataJson("),
                  extract_block(owner, "const char* cmd_tof(")]
     harness = (HERE / "tof_read_command_harness.cpp").read_text()
     # The guard's default argument requires the production timeout constant

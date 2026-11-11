@@ -137,10 +137,10 @@ static bool sensorLeaseLapsed(int i, uint32_t nowMs) {
 // output. The broadcaster allocates ONE shared PSRAM buffer sized to the
 // max across all sensors and reuses it forever — no per-tick allocations.
 
-typedef int (*SensorJSONBuilder)(char* buf, size_t bufSize);
+typedef int (*SensorJsonBuilder)(char* buf, size_t bufSize);
 
 struct SensorBroadcastSpec {
-  SensorJSONBuilder builder;
+  SensorJsonBuilder builder;
   uint16_t minIntervalMs;
   uint16_t bufBytes;
 };
@@ -149,57 +149,57 @@ static const SensorBroadcastSpec gSensorSpecs[REMOTE_SENSOR_MAX] = {
 #if ENABLE_THERMAL_SENSOR
   // DISABLED: the 768-pixel frame always exceeds the 200 B sensor-broadcast gate
   // (v4_broadcast_sensor_data), so it was built every second and silently dropped.
-  // Re-enable over the mesh by pointing this at thermalBuildSummaryJSON (~90 B).
+  // Re-enable over the mesh by pointing this at thermalBuildSummaryJson (~90 B).
   [REMOTE_SENSOR_THERMAL]    = { nullptr, 0, 0 },
 #else
   [REMOTE_SENSOR_THERMAL]    = { nullptr, 0, 0 },
 #endif
 #if ENABLE_TOF_SENSOR
-  [REMOTE_SENSOR_TOF]        = { tofBuildDataJSON,            500,  1024 },
+  [REMOTE_SENSOR_TOF]        = { tofBuildDataJson,            500,  1024 },
 #else
   [REMOTE_SENSOR_TOF]        = { nullptr, 0, 0 },
 #endif
 #if ENABLE_IMU_SENSOR
-  [REMOTE_SENSOR_IMU]        = { imuBuildDataJSON,            500,  512  },
+  [REMOTE_SENSOR_IMU]        = { imuBuildDataJson,            500,  512  },
 #else
   [REMOTE_SENSOR_IMU]        = { nullptr, 0, 0 },
 #endif
 #if ENABLE_GPS_SENSOR
-  [REMOTE_SENSOR_GPS]        = { gpsBuildDataJSON,            1000, 256  },
+  [REMOTE_SENSOR_GPS]        = { gpsBuildDataJson,            1000, 256  },
 #else
   [REMOTE_SENSOR_GPS]        = { nullptr, 0, 0 },
 #endif
 #if ENABLE_GAMEPAD_SENSOR
-  [REMOTE_SENSOR_INPUT]    = { gamepadBuildDataJSON,        100,  128  },
+  [REMOTE_SENSOR_INPUT]    = { gamepadBuildDataJson,        100,  128  },
 #elif ENABLE_ANO_ENCODER
   // ANO rotary encoder is the OTHER input device (mutually exclusive with the
   // gamepad — INPUT_DEVICE_TYPE picks exactly one). Same REMOTE_SENSOR_INPUT
-  // slot, same 10 Hz cadence + 128 B budget; anoEncoderBuildDataJSON emits
+  // slot, same 10 Hz cadence + 128 B budget; anoEncoderBuildDataJson emits
   // {"valid":..,"connected":..,"ts":..,"pos":N,"axis":0|1,"buttons":B}
   // (~90 B typical, still under the 128 B budget). Without this branch an
   // ANO build left the input builder nullptr, so the broadcaster's
   // `if (!spec.builder) continue;` silently dropped every input frame —
   // streaming "turned on" but nothing reached the peer.
-  [REMOTE_SENSOR_INPUT]    = { anoEncoderBuildDataJSON,     100,  128  },
+  [REMOTE_SENSOR_INPUT]    = { anoEncoderBuildDataJson,     100,  128  },
 #elif ENABLE_GPIO_ENCODER
-  [REMOTE_SENSOR_INPUT]    = { gpioEncoderBuildDataJSON,    100,  256  },
+  [REMOTE_SENSOR_INPUT]    = { gpioEncoderBuildDataJson,    100,  256  },
 #else
   [REMOTE_SENSOR_INPUT]    = { nullptr, 0, 0 },
 #endif
 #if ENABLE_FM_RADIO
-  [REMOTE_SENSOR_FMRADIO]    = { fmRadioBuildDataJSON,        1000, 512  },
+  [REMOTE_SENSOR_FMRADIO]    = { fmRadioBuildDataJson,        1000, 512  },
 #else
   [REMOTE_SENSOR_FMRADIO]    = { nullptr, 0, 0 },
 #endif
   [REMOTE_SENSOR_CAMERA]     = { nullptr, 0, 0 },
   [REMOTE_SENSOR_MICROPHONE] = { nullptr, 0, 0 },
 #if ENABLE_RTC_SENSOR
-  [REMOTE_SENSOR_RTC]        = { rtcBuildDataJSON,            1000, 256  },
+  [REMOTE_SENSOR_RTC]        = { rtcBuildDataJson,            1000, 256  },
 #else
   [REMOTE_SENSOR_RTC]        = { nullptr, 0, 0 },
 #endif
 #if ENABLE_PRESENCE_SENSOR
-  [REMOTE_SENSOR_PRESENCE]   = { presenceBuildDataJSON,       500,  256  },
+  [REMOTE_SENSOR_PRESENCE]   = { presenceBuildDataJson,       500,  256  },
 #else
   [REMOTE_SENSOR_PRESENCE]   = { nullptr, 0, 0 },
 #endif
@@ -1045,7 +1045,7 @@ bool shutdownSensorDataStreamingForEspNowClose() {
   return true;
 }
 
-String getRemoteSensorDataJSON(const uint8_t* deviceMac, RemoteSensorType sensorType) {
+String getRemoteSensorDataJson(const uint8_t* deviceMac, RemoteSensorType sensorType) {
   RemoteSensorData* entry = findCacheEntry(deviceMac, sensorType);
   if (!entry) {
     // Unknown to us = not connected. Mirrors a local sensor that isn't present.
@@ -1118,7 +1118,7 @@ int formatRemoteSensorReadable(const char* json, char* out, size_t outSize, int 
   return lines;
 }
 
-String getRemoteDevicesListJSON() {
+String getRemoteDevicesListJson() {
   PSRAM_JSON_DOC(doc);
   JsonArray devices = doc["devices"].to<JsonArray>();
   if (!gRemoteSensorCache) {
@@ -1177,7 +1177,7 @@ String getRemoteDevicesListJSON() {
 // ==========================
 
 #if ENABLE_THERMAL_SENSOR
-int buildThermalDataJSONInteger(char* buf, size_t bufSize) {
+int buildThermalDataJsonInteger(char* buf, size_t bufSize) {
   if (!buf || bufSize == 0) return 0;
   std::unique_ptr<int16_t, decltype(&ps_free)> frame(
       static_cast<int16_t*>(ps_alloc(THERMAL_RAW_FRAME_PIXELS * sizeof(int16_t),
@@ -1207,7 +1207,7 @@ int buildThermalDataJSONInteger(char* buf, size_t bufSize) {
   return n < 0 || static_cast<size_t>(n) >= bufSize - pos ? 0 : pos + n;
 }
 #else
-int buildThermalDataJSONInteger(char* buf, size_t bufSize) {
+int buildThermalDataJsonInteger(char* buf, size_t bufSize) {
   if (!buf || bufSize == 0) return 0;
   int pos = snprintf(buf, bufSize, "{\"error\":\"Thermal sensor not compiled\"}");
   return (pos > 0) ? pos : 0;
@@ -1298,7 +1298,7 @@ const char* cmd_espnow_sensorstatus(const String& argsInput) {
     if (isMaster) {
       // Master: nest the remote sensor cache ({"devices":[...]}) verbatim.
       PSRAM_JSON_DOC(tmp);
-      if (deserializeJson(tmp, getRemoteDevicesListJSON()) == DeserializationError::Ok &&
+      if (deserializeJson(tmp, getRemoteDevicesListJson()) == DeserializationError::Ok &&
           tmp["devices"].is<JsonArray>()) {
         doc["devices"] = tmp["devices"];
       } else {
@@ -1323,7 +1323,7 @@ const char* cmd_espnow_sensorstatus(const String& argsInput) {
   
   if (gSettings.meshRole == MESH_ROLE_MASTER) {
     // Master: show remote sensor cache status
-    String devicesList = getRemoteDevicesListJSON();
+    String devicesList = getRemoteDevicesListJson();
     broadcastOutput("[ESP-NOW] Remote sensor cache:");
     broadcastOutput(devicesList);
     return "OK: Remote sensor status displayed";

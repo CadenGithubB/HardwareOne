@@ -41,7 +41,7 @@ def generated(component: Path, baseline: bool) -> str:
         require('SemaphoreHandle_t' not in extract_block(header, 'struct FMRadioCache'), 'FM snapshot exposes mutex')
     functions += [extract_block(owner, marker) for marker in [
         'static void rdsScrub(', 'static void RDS_ServiceNameCallback(', 'static void RDS_TextCallback(',
-        'int fmRadioBuildDataJSON(']]
+        'int fmRadioBuildDataJson(']]
     functions.append(extract_block((component / 'i2csensor_rda5807_oled.h').read_text(), 'static void displayFmRadio()'))
     if not baseline:
         functions += [extract_block(owner, marker) for marker in [
@@ -89,8 +89,8 @@ int main() {
  assert(!fmRadioCacheSnapshot(out) && !out.dataValid && !out.seekInProgress && !out.stationName[0]);
  assert(out.frequency==10390 && out.volume==6 && out.stereo);
  assert(!fmRadioCacheSnapshot(out,50));
- char buf[8]="old"; assert(fmRadioBuildDataJSON(buf,sizeof(buf))==0);
- assert(fmRadioBuildDataJSON(nullptr,0)==0 && fmRadioBuildDataJSON(nullptr,9)==0);
+ char buf[8]="old"; assert(fmRadioBuildDataJson(buf,sizeof(buf))==0);
+ assert(fmRadioBuildDataJson(nullptr,0)==0 && fmRadioBuildDataJson(nullptr,9)==0);
 }
 ''', ['-I', str(work)])
     print('FM snapshot: bounded copies, seek interleavings, invalid/busy/issued commands, RDS and disabled API passed')

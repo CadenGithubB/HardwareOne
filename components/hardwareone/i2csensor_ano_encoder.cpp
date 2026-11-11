@@ -315,7 +315,7 @@ int anoEncoderConsumeOneDetent() {
   return 0;
 }
 
-int anoEncoderBuildDataJSON(char* buf, size_t bufSize) {
+int anoEncoderBuildDataJson(char* buf, size_t bufSize) {
   if (!buf || bufSize == 0) return 0;
   AnoEncoderCache reading;
   if (!anoEncoderCacheSnapshot(reading, 50)) {
@@ -344,7 +344,7 @@ int anoEncoderBuildDataJSON(char* buf, size_t bufSize) {
 const char* cmd_anoencoder(const String& argsInput) {
   if (argWantsJson(argsInput)) {
     if (!ensureDebugBuffer()) return SENSOR_JSON_NOBUF;
-    int n = anoEncoderBuildDataJSON(getDebugBuffer(), 1024);  // shared builder (also feeds web + ESP-NOW)
+    int n = anoEncoderBuildDataJson(getDebugBuffer(), 1024);  // shared builder (also feeds web + ESP-NOW)
     return (n > 0) ? getDebugBuffer() : SENSOR_JSON_UNAVAILABLE;
   }
   if (!gAnoEncoderConnected) {

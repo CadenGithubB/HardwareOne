@@ -73,7 +73,7 @@ void imuApplyOrientationCorrection(float& pitch, float& roll, float& yaw);
 void imuUpdateActions(bool postEvents = false);
 
 // JSON building
-int imuBuildDataJSON(char* buf, size_t bufSize);
+int imuBuildDataJson(char* buf, size_t bufSize);
 
 // IMU command registration (sensor-specific naming)
 void registerImuBno055Commands();
@@ -90,7 +90,7 @@ inline bool imuCacheSnapshot(ImuCache& out, uint32_t timeoutMs = 10) {
   out = {};
   return false;
 }
-inline int imuBuildDataJSON(char* buf, size_t bufSize) {
+inline int imuBuildDataJson(char* buf, size_t bufSize) {
   if (buf && bufSize) buf[0] = '\0';
   return 0;
 }

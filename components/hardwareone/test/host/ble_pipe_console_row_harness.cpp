@@ -174,8 +174,8 @@ static void otaBleUploadHousekeeping() {}
 static void bleConsoleReconcile() {}
 static unsigned sessionTicks = 0;
 static void bleSessionTick() { ++sessionTicks; }
-static void buildSensorDataJSON(char* buf, size_t n) { std::snprintf(buf, n, "{}"); }
-static void buildSystemStatusJSON(char* buf, size_t n) { std::snprintf(buf, n, "{}"); }
+static void buildSensorDataJson(char* buf, size_t n) { std::snprintf(buf, n, "{}"); }
+static void buildSystemStatusJson(char* buf, size_t n) { std::snprintf(buf, n, "{}"); }
 static unsigned sensorPushes = 0, systemPushes = 0, pushesUnderLock = 0;
 static bool blePushSensorData(const char*, size_t) {
   ++sensorPushes;

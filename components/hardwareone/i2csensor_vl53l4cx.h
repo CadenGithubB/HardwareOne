@@ -66,7 +66,7 @@ bool tofInit();
 bool tofPoll();
 
 // JSON building
-int tofBuildDataJSON(char* buf, size_t bufSize);
+int tofBuildDataJson(char* buf, size_t bufSize);
 
 // ToF command registration (sensor-specific naming)
 void registerTofVl53l4cxCommands();
@@ -83,7 +83,7 @@ inline bool tofCacheSnapshot(TofCache& out, uint32_t timeoutMs = 10) {
   out = {};
   return false;
 }
-inline int tofBuildDataJSON(char* buf, size_t bufSize) {
+inline int tofBuildDataJson(char* buf, size_t bufSize) {
   if (buf && bufSize) buf[0] = '\0';
   return 0;
 }

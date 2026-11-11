@@ -523,7 +523,7 @@ static const char* cmd_inputdevicepollms(const String& argsInput) {
 static const char* cmd_gpioencoderread(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   EXT_RAM_BSS_ATTR static char buf[256];  // PSRAM: the reply is copied by the executor
-  return gpioEncoderBuildDataJSON(buf, sizeof(buf)) > 0 ? buf : "Error: GPIO encoder snapshot unavailable";
+  return gpioEncoderBuildDataJson(buf, sizeof(buf)) > 0 ? buf : "Error: GPIO encoder snapshot unavailable";
 }
 #endif
 

@@ -361,7 +361,7 @@ const char* cmd_thermalstart(const String& argsInput) {
 
 // Compact SUMMARY reading on the shared sensor envelope: the raw min/avg/max
 // scene temperature (recomputed from an independent copy of the raw frame).
-// The full 768-pixel frame stays on its own channel (thermalBuildDataJSON /
+// The full 768-pixel frame stays on its own channel (thermalBuildDataJson /
 // the ESP-NOW frame) — this is the lightweight "what's the thermal scene" read.
 // NB: uses the RAW frame min/max, not the rolling/smoothed display-scale values.
 static bool thermalReadRawSummary(ThermalCache& reading, float& minT, float& maxT, float& avgT) {
@@ -385,7 +385,7 @@ static bool thermalReadRawSummary(ThermalCache& reading, float& minT, float& max
   return true;
 }
 
-int thermalBuildSummaryJSON(char* buf, size_t bufSize) {
+int thermalBuildSummaryJson(char* buf, size_t bufSize) {
   if (!buf || bufSize == 0) return 0;
   ThermalCache reading;
   float minT, maxT, avgT;
@@ -422,7 +422,7 @@ const char* cmd_thermalread(const String& argsInput) {
     // this one did not, so an alloc failure silently degraded to the generic
     // "unavailable" reply instead of reporting the buffer failure.
     if (!ensureDebugBuffer()) return SENSOR_JSON_NOBUF;
-    int n = thermalBuildSummaryJSON(getDebugBuffer(), 1024);
+    int n = thermalBuildSummaryJson(getDebugBuffer(), 1024);
     return (n > 0) ? getDebugBuffer() : SENSOR_JSON_UNAVAILABLE;
   }
 
@@ -1108,7 +1108,7 @@ void resetThermalFrameBuffers() {
 // Thermal Frame Streaming (HTTP Response)
 // ============================================================================
 
-int thermalBuildDataJSON(char* buf, size_t bufSize) {
+int thermalBuildDataJson(char* buf, size_t bufSize) {
   if (!buf || bufSize == 0) return 0;
   auto frame = thermalSnapshotBuffer(THERMAL_MAX_FRAME_PIXELS);
   ThermalCache reading;
@@ -1536,8 +1536,8 @@ void thermalTask(void* parameter) {
         }
         
         // Thermal mesh streaming is DISABLED (gSensorSpecs[REMOTE_SENSOR_THERMAL] = {nullptr,0,0});
-        // buildThermalDataJSONInteger() currently has no callers. Re-enable over mesh by pointing
-        // the spec at thermalBuildSummaryJSON (~90 B clears the 200 B gate); the full frame never will.
+        // buildThermalDataJsonInteger() currently has no callers. Re-enable over mesh by pointing
+        // the spec at thermalBuildSummaryJson (~90 B clears the 200 B gate); the full frame never will.
       }
       vTaskDelay(pdMS_TO_TICKS(10));
     } else {

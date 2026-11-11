@@ -175,18 +175,18 @@ static void waited(uint32_t ms) {
 }
 static void emit(const std::string& text) { std::cout << text << '\n'; }
 static std::string json() {
-  char out[512]; const int n = presenceBuildDataJSON(out, sizeof(out));
+  char out[512]; const int n = presenceBuildDataJson(out, sizeof(out));
   assert(n > 0 && n == static_cast<int>(std::strlen(out))); waited(50); return out;
 }
 static void bufferLimits(const std::string& expected) {
   for (size_t cap = 0; cap <= expected.size() + 2; ++cap) {
     std::vector<char> out(cap + 2, 'Z');
-    const int n = presenceBuildDataJSON(out.data() + 1, cap);
+    const int n = presenceBuildDataJson(out.data() + 1, cap);
     assert(out.front() == 'Z' && out.back() == 'Z');
     if (cap <= expected.size()) assert(n == 0);
     else assert(n == static_cast<int>(expected.size()) && std::string(out.data() + 1) == expected);
   }
-  assert(presenceBuildDataJSON(nullptr, 20) == 0); waits.clear();
+  assert(presenceBuildDataJson(nullptr, 20) == 0); waits.clear();
 }
 static void outputContracts() {
   reset(); const auto ready = json(); emit(ready); bufferLimits(ready);
@@ -304,7 +304,7 @@ static void ownerContracts() {
   }
   reset(); MUTEX = nullptr; out.dataValid = true;
   assert(!presenceCacheSnapshot(out) && fields(out) == fields(PresenceCache{}) && waits.empty());
-  char jsonOut[512]; assert(presenceBuildDataJSON(jsonOut, sizeof(jsonOut)) > 0 && waits.empty());
+  char jsonOut[512]; assert(presenceBuildDataJson(jsonOut, sizeof(jsonOut)) > 0 && waits.empty());
   assert(std::string(jsonOut).find("\"ambient\":0,") != std::string::npos);
   reset(); admit = false;
   assert(std::string(cmd_presencestatus("")).find("dataValid=0") != std::string::npos); waited(10);

@@ -1754,40 +1754,40 @@ static void buildSensorsJson(JsonDocument& doc, bool includeData = true) {
   doc["brief"] = !includeData;
   JsonArray arr = doc["sensors"].to<JsonArray>();
 #if ENABLE_PRESENCE_SENSOR
-  addSensorEntry(arr, "presence", "STHS34PF80 presence",    SENSOR_KIND_SCALAR, gPresenceRunning, isSensorConnected("presence"), includeData ? presenceBuildDataJSON : nullptr);
+  addSensorEntry(arr, "presence", "STHS34PF80 presence",    SENSOR_KIND_SCALAR, gPresenceRunning, isSensorConnected("presence"), includeData ? presenceBuildDataJson : nullptr);
 #endif
 #if ENABLE_TOF_SENSOR
-  addSensorEntry(arr, "tof",      "VL53L4CX distance",      SENSOR_KIND_VECTOR, gTofRunning, isSensorConnected("tof"), includeData ? tofBuildDataJSON : nullptr);
+  addSensorEntry(arr, "tof",      "VL53L4CX distance",      SENSOR_KIND_VECTOR, gTofRunning, isSensorConnected("tof"), includeData ? tofBuildDataJson : nullptr);
 #endif
 #if ENABLE_IMU_SENSOR
-  addSensorEntry(arr, "imu",      "BNO055 orientation",     SENSOR_KIND_VECTOR, gImuRunning, isSensorConnected("imu"), includeData ? imuBuildDataJSON : nullptr);
+  addSensorEntry(arr, "imu",      "BNO055 orientation",     SENSOR_KIND_VECTOR, gImuRunning, isSensorConnected("imu"), includeData ? imuBuildDataJson : nullptr);
 #endif
 #if ENABLE_GPS_SENSOR
-  addSensorEntry(arr, "gps",      "PA1010D GPS",            SENSOR_KIND_VECTOR, gGpsRunning, isSensorConnected("gps"), includeData ? gpsBuildDataJSON : nullptr);
+  addSensorEntry(arr, "gps",      "PA1010D GPS",            SENSOR_KIND_VECTOR, gGpsRunning, isSensorConnected("gps"), includeData ? gpsBuildDataJson : nullptr);
 #endif
 #if ENABLE_FM_RADIO
-  addSensorEntry(arr, "fmradio",  "RDA5807 FM radio",       SENSOR_KIND_SCALAR, gFmRadioRunning, isSensorConnected("fmradio"), includeData ? fmRadioBuildDataJSON : nullptr);
+  addSensorEntry(arr, "fmradio",  "RDA5807 FM radio",       SENSOR_KIND_SCALAR, gFmRadioRunning, isSensorConnected("fmradio"), includeData ? fmRadioBuildDataJson : nullptr);
 #endif
 #if ENABLE_RTC_SENSOR
-  addSensorEntry(arr, "rtc",      "DS3231 RTC",             SENSOR_KIND_SCALAR, gRtcRunning, isSensorConnected("rtc"), includeData ? rtcBuildDataJSON : nullptr);
+  addSensorEntry(arr, "rtc",      "DS3231 RTC",             SENSOR_KIND_SCALAR, gRtcRunning, isSensorConnected("rtc"), includeData ? rtcBuildDataJson : nullptr);
 #endif
 #if ENABLE_APDS_SENSOR
   addSensorEntry(arr, "apds",     "APDS9960 gesture/color", SENSOR_KIND_SCALAR,
                  (gApdsColorRunning || gApdsProximityRunning || gApdsGestureRunning),
-                 isSensorConnected("apds"), includeData ? apdsBuildDataJSON : nullptr);
+                 isSensorConnected("apds"), includeData ? apdsBuildDataJson : nullptr);
 #endif
 #if ENABLE_GAMEPAD_SENSOR
   // id is "input" — the canonical, unified module name (Seesaw gamepad OR ANO
   // encoder). Matches controls json / open<id>/close<id> / sensorautostart /
   // the I2C DB moduleName, so the app correlates on one name with no overrides.
-  addSensorEntry(arr, "input",    "Seesaw gamepad",         SENSOR_KIND_SCALAR, gInputRunning, gInputConnected, includeData ? gamepadBuildDataJSON : nullptr);
+  addSensorEntry(arr, "input",    "Seesaw gamepad",         SENSOR_KIND_SCALAR, gInputRunning, gInputConnected, includeData ? gamepadBuildDataJson : nullptr);
 #elif ENABLE_GT911_TOUCH
   addSensorEntry(arr, "input", "GT911 single touch", SENSOR_KIND_SCALAR, gInputRunning, gInputConnected, nullptr);
 #elif ENABLE_GPIO_ENCODER
-  addSensorEntry(arr, "input",    "GPIO rotary encoder",    SENSOR_KIND_SCALAR, gInputRunning, gInputConnected, includeData ? gpioEncoderBuildDataJSON : nullptr);
+  addSensorEntry(arr, "input",    "GPIO rotary encoder",    SENSOR_KIND_SCALAR, gInputRunning, gInputConnected, includeData ? gpioEncoderBuildDataJson : nullptr);
 #endif
 #if ENABLE_THERMAL_SENSOR
-  addSensorEntry(arr, "thermal",  "MLX90640 thermal",       SENSOR_KIND_STREAM, gThermalRunning, isSensorConnected("thermal"), includeData ? thermalBuildSummaryJSON : nullptr);
+  addSensorEntry(arr, "thermal",  "MLX90640 thermal",       SENSOR_KIND_STREAM, gThermalRunning, isSensorConnected("thermal"), includeData ? thermalBuildSummaryJson : nullptr);
 #endif
 }
 

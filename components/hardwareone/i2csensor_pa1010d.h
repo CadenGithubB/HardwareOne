@@ -38,7 +38,7 @@ extern TaskHandle_t gGpsTaskHandle;
 // Build the existing sensor envelope from one snapshot, formatting after the
 // lock is released. A 50 ms lock timeout produces a not-ready envelope.
 // Returns bytes written (excluding NUL), or 0 for an invalid/insufficient buffer.
-int gpsBuildDataJSON(char* buf, size_t bufSize);
+int gpsBuildDataJson(char* buf, size_t bufSize);
 
 // Copy a consistent reading, waiting at most timeoutMs for the cache lock.
 // Success means the copy was available: check dataValid/hasFix before use.
@@ -62,7 +62,7 @@ inline bool gpsCacheSnapshot(GpsCache& out, uint32_t timeoutMs = 10) {
   return false;
 }
 
-inline int gpsBuildDataJSON(char* buf, size_t bufSize) {
+inline int gpsBuildDataJson(char* buf, size_t bufSize) {
   if (buf && bufSize) buf[0] = '\0';
   return 0;
 }

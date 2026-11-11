@@ -125,7 +125,7 @@ void espnowApplySensorSubscription(uint8_t mode, uint32_t sensorMask,
                                    const uint8_t* controllerMac);
 
 // Get remote sensor data for web API
-String getRemoteSensorDataJSON(const uint8_t* deviceMac, RemoteSensorType sensorType);
+String getRemoteSensorDataJson(const uint8_t* deviceMac, RemoteSensorType sensorType);
 
 // Format-agnostic readable renderer for a cached sensor's JSON. Walks the
 // top-level key:value pairs and writes up to `maxLines` newline-separated
@@ -136,7 +136,7 @@ String getRemoteSensorDataJSON(const uint8_t* deviceMac, RemoteSensorType sensor
 int formatRemoteSensorReadable(const char* json, char* out, size_t outSize, int maxLines);
 
 // Get list of all remote devices with sensors
-String getRemoteDevicesListJSON();
+String getRemoteDevicesListJson();
 
 // Helper: Convert sensor type to string
 const char* sensorTypeToString(RemoteSensorType type);
@@ -162,7 +162,7 @@ bool isSensorBroadcastEnabled();
 
 // Build thermal data JSON with integer values (no decimals) for remote streaming
 // Returns length of JSON string written to buf
-int buildThermalDataJSONInteger(char* buf, size_t bufSize);
+int buildThermalDataJsonInteger(char* buf, size_t bufSize);
 
 // ==========================
 // Remote GPS Data Access

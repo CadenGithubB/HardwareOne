@@ -42,7 +42,7 @@
 #include "System_MemoryMonitor.h"
 #include "System_OTA.h"     // encrypted BLE OTA binary-frame sink
 
-// Sensor caches for the BLE sensor-stream path (buildSensorDataJSON). Pull in the
+// Sensor caches for the BLE sensor-stream path (buildSensorDataJson). Pull in the
 // REAL headers — never hand-copy these structs. This file used to re-declare
 // ThermalCache/TofCache/ImuCache locally with stale layouts; because it never
 // included these headers the compiler could not see the conflict, so it linked to
@@ -4931,7 +4931,7 @@ bool bleIsStreamEnabled(uint8_t streamFlag) {
 // AUTO-STREAMING (Call from main loop)
 // =============================================================================
 
-static void buildSensorDataJSON(char* buf, size_t bufSize) {
+static void buildSensorDataJson(char* buf, size_t bufSize) {
   int pos = snprintf(buf, bufSize, "{\"sensors\":{");
   
   #if ENABLE_THERMAL_SENSOR
@@ -4988,7 +4988,7 @@ static void buildSensorDataJSON(char* buf, size_t bufSize) {
   buf[pos] = '\0';
 }
 
-static void buildSystemStatusJSON(char* buf, size_t bufSize) {
+static void buildSystemStatusJson(char* buf, size_t bufSize) {
   uint32_t freeHeap = ESP.getFreeHeap();
   uint32_t minHeap = ESP.getMinFreeHeap();
   uint32_t freePsram = ESP.getFreePsram();
@@ -5041,14 +5041,14 @@ void bleUpdateStreams() {
   // Stream sensor data
   if (sensorsDue) {
     char sensorBuf[512];
-    buildSensorDataJSON(sensorBuf, sizeof(sensorBuf));
+    buildSensorDataJson(sensorBuf, sizeof(sensorBuf));
     blePushSensorData(sensorBuf, strlen(sensorBuf));
   }
   
   // Stream system status
   if (systemDue) {
     char systemBuf[256];
-    buildSystemStatusJSON(systemBuf, sizeof(systemBuf));
+    buildSystemStatusJson(systemBuf, sizeof(systemBuf));
     blePushSystemStatus(systemBuf, strlen(systemBuf));
   }
 }

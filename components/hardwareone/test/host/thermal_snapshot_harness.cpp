@@ -139,9 +139,9 @@ static void commonOutputs() {
   for (bool interpolation : {false, true}) {
     for (int rotation = 0; rotation < 4; ++rotation) {
       reset(interpolation); gSettings.thermalRotation = rotation;
-      emit(output(thermalBuildDataJSON)); waited(100);
-      emit(output(buildThermalDataJSONInteger)); waited(100);
-      const auto summary = output(thermalBuildSummaryJSON); waited(50); emit(summary);
+      emit(output(thermalBuildDataJson)); waited(100);
+      emit(output(buildThermalDataJsonInteger)); waited(100);
+      const auto summary = output(thermalBuildSummaryJson); waited(50); emit(summary);
       assert(summary.find("\"min\":-16.6") != std::string::npos);
       assert(summary.find("\"max\":16.6") != std::string::npos);
       displayThermalVisual(); waited(10);
@@ -154,9 +154,9 @@ static void commonOutputs() {
     if (state == 0) { releaseFrames(); }
     if (state == 1) DATA.thermalDataValid = false;
     if (state == 2) admit = false;
-    emit(output(thermalBuildDataJSON)); waited(100);
-    emit(output(buildThermalDataJSONInteger)); waited(100);
-    emit(output(thermalBuildSummaryJSON)); waited(50);
+    emit(output(thermalBuildDataJson)); waited(100);
+    emit(output(buildThermalDataJsonInteger)); waited(100);
+    emit(output(thermalBuildSummaryJson)); waited(50);
     displayThermalVisual(); waited(10); emit(display.text);
   }
   reset(); gThermalRunning = false;
@@ -252,13 +252,13 @@ static void ownerContracts() {
   reset(); gThermalRunning = false; admit = false; runStopBranch();
   assert((waits == std::vector<uint32_t>{50, 50}) && delays == 1 && exited == 1);
 
-  for (Builder builder : {thermalBuildDataJSON, buildThermalDataJSONInteger, thermalBuildSummaryJSON}) {
+  for (Builder builder : {thermalBuildDataJson, buildThermalDataJsonInteger, thermalBuildSummaryJson}) {
     reset(); bufferBounds(builder);
     reset(true); bufferBounds(builder);
     reset(); admit = false; bufferBounds(builder);
     reset(); releaseFrames(); bufferBounds(builder);
     reset(); allocationAvailable = false;
-    assert(output(builder).find("unavailable") != std::string::npos || builder == thermalBuildSummaryJSON);
+    assert(output(builder).find("unavailable") != std::string::npos || builder == thermalBuildSummaryJson);
     assert(waits.empty() && allocations.size() == 1);
   }
 }

@@ -51,7 +51,7 @@ bool presenceCacheSnapshot(PresenceCache& out, uint32_t timeoutMs = 10);
 // Build the existing sensor envelope from one snapshot, formatting after the
 // lock is released. A 50 ms lock timeout produces a not-ready envelope.
 // Returns bytes written (excluding NUL), or 0 for an invalid/insufficient buffer.
-int presenceBuildDataJSON(char* buf, size_t bufSize);
+int presenceBuildDataJson(char* buf, size_t bufSize);
 
 #else
 
@@ -61,7 +61,7 @@ inline bool presenceCacheSnapshot(PresenceCache& out, uint32_t timeoutMs = 10) {
   return false;
 }
 
-inline int presenceBuildDataJSON(char* buf, size_t bufSize) {
+inline int presenceBuildDataJson(char* buf, size_t bufSize) {
   if (buf && bufSize) buf[0] = '\0';
   return 0;
 }

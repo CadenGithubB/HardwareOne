@@ -144,7 +144,7 @@ const char* cmd_imu(const String& argsInput) {
 
   if (argWantsJson(argsInput)) {
     if (!ensureDebugBuffer()) return SENSOR_JSON_NOBUF;
-    int n = imuBuildDataJSON(getDebugBuffer(), 1024);  // shared builder (also feeds sensors json / MQTT)
+    int n = imuBuildDataJson(getDebugBuffer(), 1024);  // shared builder (also feeds sensors json / MQTT)
     return (n > 0) ? getDebugBuffer() : SENSOR_JSON_UNAVAILABLE;
   }
 
@@ -633,7 +633,7 @@ void imuPoll() {
 // ============================================================================
 
 // Build IMU JSON directly into buffer using snprintf (zero String allocations)
-int imuBuildDataJSON(char* buf, size_t bufSize) {
+int imuBuildDataJson(char* buf, size_t bufSize) {
   if (!buf || bufSize == 0) return 0;
 
   ImuCache reading;
@@ -1264,7 +1264,7 @@ void imuTask(void* parameter) {
           }
         }
         
-        // ESP-NOW broadcaster reads imuBuildDataJSON() on demand from sImuCache.
+        // ESP-NOW broadcaster reads imuBuildDataJson() on demand from sImuCache.
       }
       vTaskDelay(pdMS_TO_TICKS(10));
     } else {

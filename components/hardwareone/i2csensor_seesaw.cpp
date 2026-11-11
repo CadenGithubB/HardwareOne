@@ -85,7 +85,7 @@ volatile UBaseType_t gGamepadWatermarkNow = (UBaseType_t)0;
 const char* cmd_gamepad(const String& argsInput) {
   if (argWantsJson(argsInput)) {
     if (!ensureDebugBuffer()) return SENSOR_JSON_NOBUF;
-    int n = gamepadBuildDataJSON(getDebugBuffer(), 1024);  // shared builder (also feeds sensors json)
+    int n = gamepadBuildDataJson(getDebugBuffer(), 1024);  // shared builder (also feeds sensors json)
     return (n > 0) ? getDebugBuffer() : SENSOR_JSON_UNAVAILABLE;
   }
   if (!gInputConnected) {
@@ -404,7 +404,7 @@ const size_t gamepadCommandsCount = sizeof(gamepadCommands) / sizeof(gamepadComm
 
 // Build gamepad JSON directly into buffer from cache. Safe to call from any task —
 // only reads the shared input reading under its own mutex. Returns bytes written or 0.
-int gamepadBuildDataJSON(char* buf, size_t bufSize) {
+int gamepadBuildDataJson(char* buf, size_t bufSize) {
   if (!buf || bufSize == 0) return 0;
 
   InputCache reading;
@@ -612,7 +612,7 @@ void inputTask(void* parameter) {
           inputPublishGamepadState(buttons, filtX, filtY,
                                    intflags & (~buttons | lastButtons), nowMs);
 
-          // ESP-NOW broadcaster reads gamepadBuildDataJSON() on demand from the shared input reading
+          // ESP-NOW broadcaster reads gamepadBuildDataJson() on demand from the shared input reading
           // (paced per-sensor in gSensorSpecs — 100ms for snappy button-press response).
         } else if (!readSuccess) {
           // Actual I2C transaction failure

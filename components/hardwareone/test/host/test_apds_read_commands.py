@@ -35,7 +35,7 @@ def generate() -> str:
                  extract_block(owner, "static bool apdsInvalidateCache("),
                  extract_block((COMPONENT / "System_Utils.cpp").read_text(), "bool argWantsJson("),
                  extract_block((COMPONENT / "System_I2C.cpp").read_text(), "int sensorEnvelopeBegin("),
-                 extract_block(owner, "int apdsBuildDataJSON(")]
+                 extract_block(owner, "int apdsBuildDataJson(")]
     if "static const char* apdsGestureName(" in owner:
         functions.append(extract_block(owner, "static const char* apdsGestureName("))
     functions.append(extract_block(owner, "static const char* apdsReadSnapshot("))

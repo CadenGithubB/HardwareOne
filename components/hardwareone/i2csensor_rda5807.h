@@ -72,7 +72,7 @@ void fmRadioDeinit();
 void fmRadioPoll();  // Called periodically to update RDS data
 
 // JSON data builder (for web API)
-int fmRadioBuildDataJSON(char* buf, size_t bufSize);
+int fmRadioBuildDataJson(char* buf, size_t bufSize);
 
 #else
 inline bool fmRadioCacheSnapshot(FMRadioCache& out, uint32_t timeoutMs = 10) {
@@ -80,6 +80,6 @@ inline bool fmRadioCacheSnapshot(FMRadioCache& out, uint32_t timeoutMs = 10) {
   out = {};
   return false;
 }
-inline int fmRadioBuildDataJSON(char*, size_t) { return 0; }
+inline int fmRadioBuildDataJson(char*, size_t) { return 0; }
 #endif // ENABLE_FM_RADIO
 #endif // I2CSENSOR_RDA5807_H

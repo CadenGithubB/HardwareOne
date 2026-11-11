@@ -134,7 +134,7 @@ extern const SettingsModule apdsSettingsModule = {
 
 // Shared data builder — feeds `apdsread json`, `sensors json`, and any other
 // consumer. Mirrors the other sensors' *BuildDataJSON contract.
-int apdsBuildDataJSON(char* buf, size_t bufSize) {
+int apdsBuildDataJson(char* buf, size_t bufSize) {
   if (!buf || bufSize == 0) return 0;
 
   // Read the cached RGBC/proximity values UNDER the cache mutex (the poll task
@@ -227,7 +227,7 @@ const char* cmd_apdsread(const String& argsInput) {
 
   if (argWantsJson(argsInput)) {
     if (!ensureDebugBuffer()) return SENSOR_JSON_NOBUF;
-    int n = apdsBuildDataJSON(getDebugBuffer(), 1024);
+    int n = apdsBuildDataJson(getDebugBuffer(), 1024);
     return (n > 0) ? getDebugBuffer() : SENSOR_JSON_UNAVAILABLE;
   }
 

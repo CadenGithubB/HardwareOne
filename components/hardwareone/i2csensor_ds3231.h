@@ -80,7 +80,7 @@ String rtcDateTimeToString(const RTCDateTime* dt);
 RTCDateTime rtcLocalTime(const RTCDateTime* utc);
 
 // JSON building for ESP-NOW streaming
-int rtcBuildDataJSON(char* buf, size_t bufSize);
+int rtcBuildDataJson(char* buf, size_t bufSize);
 
 // Accessor functions (for MQTT and other modules)
 int rtcGetYear();
@@ -108,7 +108,7 @@ inline bool rtcCacheSnapshot(RTCCache& out, uint32_t timeoutMs = 10) {
   out = {};
   return false;
 }
-inline int rtcBuildDataJSON(char* buf, size_t bufSize) {
+inline int rtcBuildDataJson(char* buf, size_t bufSize) {
   if (buf && bufSize) buf[0] = '\0';
   return 0;
 }

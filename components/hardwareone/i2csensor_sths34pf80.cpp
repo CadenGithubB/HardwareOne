@@ -194,7 +194,7 @@ const char* cmd_presenceread(const String& argsInput) {
 
   if (argWantsJson(argsInput)) {
     if (!ensureDebugBuffer()) return SENSOR_JSON_NOBUF;
-    int n = presenceBuildDataJSON(getDebugBuffer(), 1024);  // shared builder (also feeds sensors json)
+    int n = presenceBuildDataJson(getDebugBuffer(), 1024);  // shared builder (also feeds sensors json)
     return (n > 0) ? getDebugBuffer() : SENSOR_JSON_UNAVAILABLE;
   }
 
@@ -226,7 +226,7 @@ const char* cmd_presencestatus(const String& argsInput) {
 
   if (argWantsJson(argsInput)) {
     if (!ensureDebugBuffer()) return SENSOR_JSON_NOBUF;
-    int n = presenceBuildDataJSON(getDebugBuffer(), 1024);
+    int n = presenceBuildDataJson(getDebugBuffer(), 1024);
     return (n > 0) ? getDebugBuffer() : SENSOR_JSON_UNAVAILABLE;
   }
 
@@ -518,7 +518,7 @@ const size_t presenceCommandsCount = sizeof(presenceCommands) / sizeof(presenceC
 // JSON building for ESP-NOW streaming
 // ============================================================================
 
-int presenceBuildDataJSON(char* buf, size_t bufSize) {
+int presenceBuildDataJson(char* buf, size_t bufSize) {
   if (!buf || bufSize == 0) return 0;
   
   PresenceCache presence;
@@ -601,7 +601,7 @@ void presenceTask(void* parameter) {
         bool ok = presencePoll();
         
         if (ok) {
-          // ESP-NOW broadcaster obtains a snapshot through presenceBuildDataJSON().
+          // ESP-NOW broadcaster obtains a snapshot through presenceBuildDataJson().
         } else {
           if (i2cShouldAutoDisable(I2C_ADDR_PRESENCE,
                                    (uint8_t)gSettings.presenceBus)) {

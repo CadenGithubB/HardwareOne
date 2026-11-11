@@ -50,7 +50,7 @@ def generate(component: Path, baseline: bool) -> str:
             functions.append(f'static bool reset{title}Reading() {{\n' + reset + '\nreturn true; }')
             require('SemaphoreHandle_t' not in types[-1], f'{typename} exposes synchronization')
             require(not re.search(r'extern.*\bg' + title + r'Cache\b', header), f'{short} live cache is public')
-        functions.append(extract_block(owner, f'int {short}BuildDataJSON('))
+        functions.append(extract_block(owner, f'int {short}BuildDataJson('))
         oled = {'apds':'void displayAPDSData()', 'imu':'static void displayIMUActions()',
                 'tof':'static void displayToFData()', 'rtc':'static void displayRTCData()'}[short]
         functions.append(extract_block((component / f'i2csensor_{file}_oled.h').read_text(), oled))
@@ -107,9 +107,9 @@ def main() -> None:
             disabled.append(f'''{{ {typename} out{{}}; out.{field}=true;
  assert(!{short}CacheSnapshot(out) && !out.{field}); out.{field}=true;
  assert(!{short}CacheSnapshot(out, 50) && !out.{field});
- char b[8]="filled"; assert({short}BuildDataJSON(b,sizeof(b))==0 && !b[0]);
- assert({short}BuildDataJSON(nullptr,2)==0); b[0]='Z';
- assert({short}BuildDataJSON(b,0)==0 && b[0]=='Z'); }}''')
+ char b[8]="filled"; assert({short}BuildDataJson(b,sizeof(b))==0 && !b[0]);
+ assert({short}BuildDataJson(nullptr,2)==0); b[0]='Z';
+ assert({short}BuildDataJson(b,0)==0 && b[0]=='Z'); }}''')
             if short != 'rtc': disabled.append(f'assert({short}CacheStorageBytes()==0);')
         disabled.append('}')
         run('disabled', '\n'.join(disabled), ['-I', str(work)])

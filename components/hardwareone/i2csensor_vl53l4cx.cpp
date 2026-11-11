@@ -87,7 +87,7 @@ const char* cmd_tof(const String& argsInput) {
 
   if (argWantsJson(argsInput)) {
     if (!ensureDebugBuffer()) return SENSOR_JSON_NOBUF;
-    int n = tofBuildDataJSON(getDebugBuffer(), 1024);  // shared builder (also feeds sensors json / MQTT)
+    int n = tofBuildDataJson(getDebugBuffer(), 1024);  // shared builder (also feeds sensors json / MQTT)
     return (n > 0) ? getDebugBuffer() : SENSOR_JSON_UNAVAILABLE;
   }
 
@@ -481,7 +481,7 @@ bool tofPoll() {
 // ============================================================================
 
 // Build ToF JSON directly into buffer using snprintf (zero String allocations)
-int tofBuildDataJSON(char* buf, size_t bufSize) {
+int tofBuildDataJson(char* buf, size_t bufSize) {
   if (!buf || bufSize == 0) return 0;
 
   buf[0] = '\0';
@@ -741,7 +741,7 @@ void tofTask(void* parameter) {
           DEBUG_TOF_POLLINGF("ToF readObjects: %s", ok ? "ok" : "fail");
         }
         
-        // ESP-NOW broadcaster reads tofBuildDataJSON() on demand from sTofCache.
+        // ESP-NOW broadcaster reads tofBuildDataJson() on demand from sTofCache.
       }
       vTaskDelay(pdMS_TO_TICKS(10));
     } else {

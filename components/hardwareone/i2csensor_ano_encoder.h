@@ -81,7 +81,7 @@ void anoEncoderResetAxisForMode(uint8_t defaultAxis);
 int  anoEncoderConsumeOneDetent();
 
 // JSON snapshot for ESP-NOW / web. Acquires the cache mutex.
-int  anoEncoderBuildDataJSON(char* buf, size_t bufSize);
+int  anoEncoderBuildDataJson(char* buf, size_t bufSize);
 
 // Command handlers — only ANO-specific ones. Unified open/close/autostart/poll
 // live in HAL_Input.cpp (inputCommands table).

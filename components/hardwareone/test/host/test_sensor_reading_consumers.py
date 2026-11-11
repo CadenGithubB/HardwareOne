@@ -55,7 +55,7 @@ def generate(component, baseline):
     functions = [extract_block(g2, 'static void ' + name + '(')
                  for name in ['gpCell', 'anoCell', *FORMATTERS]]
     functions.append(extract_block((component / 'Bluetooth.cpp').read_text(),
-                                   'static void buildSensorDataJSON('))
+                                   'static void buildSensorDataJson('))
     functions.append(extract_block((component / 'G2_Glasses.cpp').read_text(),
                                    'static void buildFmTunerReadout('))
     logs = (component / 'System_SensorLogging.cpp').read_text()

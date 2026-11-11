@@ -35,7 +35,7 @@ class Adafruit_seesaw;
 
 // Build gamepad JSON snapshot from the shared input reading. Safe to call from any task —
 // acquires the HAL cache mutex. Returns bytes written or 0 on failure.
-int gamepadBuildDataJSON(char* buf, size_t bufSize);
+int gamepadBuildDataJson(char* buf, size_t bufSize);
 
 // Seesaw gamepad button bit masks (active-low, so invert before checking)
 #define GAMEPAD_BUTTON_SELECT (1 << 0)   // Select button

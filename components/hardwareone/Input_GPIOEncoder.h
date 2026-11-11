@@ -10,5 +10,5 @@ bool inputStartInternal();
 void gpioEncoderStop();
 bool gpioEncoderHasPendingDetents();
 int gpioEncoderConsumeOneDetent();
-int gpioEncoderBuildDataJSON(char* buf, size_t size);
+int gpioEncoderBuildDataJson(char* buf, size_t size);
 #endif

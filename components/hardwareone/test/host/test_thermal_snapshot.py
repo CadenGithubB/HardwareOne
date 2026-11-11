@@ -54,10 +54,10 @@ def generated(component: Path, baseline: bool) -> str:
         cache_type = extract_block(header, "struct ThermalCache")
         require("*" not in cache_type and "Semaphore" not in cache_type, "thermal snapshot exposes storage")
     functions += [extract_block((COMPONENT / "System_I2C.cpp").read_text(), "int sensorEnvelopeBegin("),
-                  extract_block(owner, "int thermalBuildSummaryJSON("),
-                  extract_block(owner, "int thermalBuildDataJSON("),
+                  extract_block(owner, "int thermalBuildSummaryJson("),
+                  extract_block(owner, "int thermalBuildDataJson("),
                   extract_block((component / "System_ESPNow_Sensors.cpp").read_text(),
-                                "int buildThermalDataJSONInteger("),
+                                "int buildThermalDataJsonInteger("),
                   extract_block((component / "i2csensor_mlx90640_oled.h").read_text(),
                                 "static void displayThermalVisual()")]
     if not baseline:
@@ -116,9 +116,9 @@ int main() {
   assert(!thermalFrameSnapshot(out, &value, 1, true, 50) && value == 7);
   assert(thermalCacheStorageBytes() == 0);
   char buf[10] = "old";
-  assert(thermalBuildDataJSON(buf, sizeof(buf)) == 0 && !buf[0]);
-  assert(thermalBuildSummaryJSON(nullptr, 5) == 0);
-  buf[0] = 'Z'; assert(thermalBuildSummaryJSON(buf, 0) == 0 && buf[0] == 'Z');
+  assert(thermalBuildDataJson(buf, sizeof(buf)) == 0 && !buf[0]);
+  assert(thermalBuildSummaryJson(nullptr, 5) == 0);
+  buf[0] = 'Z'; assert(thermalBuildSummaryJson(buf, 0) == 0 && buf[0] == 'Z');
 }
 ''', ["-I", str(work)])
     print("Thermal snapshot: copies, capacity/lifetime, serializers, contention and disabled API passed")

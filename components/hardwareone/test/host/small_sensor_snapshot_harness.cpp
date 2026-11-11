@@ -155,7 +155,7 @@ static void bufferLimits(Builder builder, const std::string& expected, bool tof)
   assert(builder(nullptr, 5)==0); waits.clear();
 }
 static void presentations() {
-  Builder builders[]={apdsBuildDataJSON,imuBuildDataJSON,tofBuildDataJSON,rtcBuildDataJSON};
+  Builder builders[]={apdsBuildDataJson,imuBuildDataJson,tofBuildDataJson,rtcBuildDataJson};
   const unsigned ms[]={50,100,100,50};
   for (int state=0;state<4;++state) {
     reset();
@@ -236,10 +236,10 @@ static void polling() {
   tofDevice.RangeData[2]={3500,0,32768}; tofDevice.RangeData[3]={6001,0,65536};
   assert(tofPoll()); waited(50); assert(TOF.tofTotalObjects==2 && TOF.tofSeq==1);
   assert(TOF.tofObjects[0].distance_mm==250 && TOF.tofObjects[1].distance_mm==3500);
-  assert(events.size()==1 && events[0]=="near:250mm"); emit(json(tofBuildDataJSON,100));
+  assert(events.size()==1 && events[0]=="near:250mm"); emit(json(tofBuildDataJson,100));
   tofDevice.RangeData[0].RangeMilliMeter=750;
   assert(tofPoll()); waited(50); assert(TOF.tofObjects[0].distance_mm==450);
-  assert(events.size()==2 && events[1]=="far:450mm"); emit(json(tofBuildDataJSON,100));
+  assert(events.size()==2 && events[1]=="far:450mm"); emit(json(tofBuildDataJson,100));
   admit=false;
 #if TEST_BASELINE
   assert(!tofPoll()); waited(50); assert(TOF.tofSeq==2 && tofClears==2);

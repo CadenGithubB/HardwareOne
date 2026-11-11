@@ -48,7 +48,7 @@ def generated(component: Path, baseline: bool) -> str:
                  extract_block(owner, "bool gpsCacheSnapshot("),
                  extract_block((COMPONENT / "System_I2C.cpp").read_text(),
                                "int sensorEnvelopeBegin("),
-                 extract_block(owner, "int gpsBuildDataJSON("),
+                 extract_block(owner, "int gpsBuildDataJson("),
                  extract_block(g2, "static void gpsG2FormatValue("),
                  extract_block(g2, "static void g2BuildGpsReadout(")]
     mqtt_pos = mqtt.index("if (gSettings.mqttPublishGps && gGpsRunning")
@@ -135,11 +135,11 @@ int main() {
   out.hasFix = true;
   assert(!gpsCacheSnapshot(out, 50) && !out.hasFix);
   char buffer[16] = "unchanged";
-  assert(gpsBuildDataJSON(buffer, sizeof(buffer)) == 0);
+  assert(gpsBuildDataJson(buffer, sizeof(buffer)) == 0);
   assert(buffer[0] == '\\0');
-  assert(gpsBuildDataJSON(nullptr, sizeof(buffer)) == 0);
+  assert(gpsBuildDataJson(nullptr, sizeof(buffer)) == 0);
   buffer[0] = 'Z';
-  assert(gpsBuildDataJSON(buffer, 0) == 0 && buffer[0] == 'Z');
+  assert(gpsBuildDataJson(buffer, 0) == 0 && buffer[0] == 'Z');
 }
 '''
         run("gps-disabled", disabled, ["-I", str(work)])

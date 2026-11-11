@@ -15,7 +15,7 @@
 //   - START virtual button (synthesized from RIGHT+IN chord)
 //
 // API endpoint: /api/sensors?sensor=anoencoder → JSON from
-// anoEncoderBuildDataJSON() — {"valid":..,"connected":..,"ts":..,"pos":N,"axis":0|1,"buttons":B}
+// anoEncoderBuildDataJson() — {"valid":..,"connected":..,"ts":..,"pos":N,"axis":0|1,"buttons":B}
 
 inline void streamAnoEncoderSensorCard(httpd_req_t* req) {
   httpd_resp_send_chunk(req, R"HTML(

@@ -120,7 +120,7 @@ static bool fmRadioInitResult = false;
 // multipath signal, without needing a hostile broadcaster.
 //
 // stationName/stationText are the ONLY remote-controlled string fields in any
-// sensor envelope builder, and fmRadioBuildDataJSON prints them with a bare %s
+// sensor envelope builder, and fmRadioBuildDataJson prints them with a bare %s
 // inside JSON string literals. An unescaped '"' does not merely corrupt the
 // payload — radioText is the last field before the closing brace, so 64 chars are
 // enough to close the string and append well-formed keys, overriding the
@@ -356,7 +356,7 @@ void fmRadioTask(void* parameter) {
     }
     updateFMRadio();
 
-    // ESP-NOW broadcaster reads fmRadioBuildDataJSON() on demand from sFmRadioCache.
+    // ESP-NOW broadcaster reads fmRadioBuildDataJson() on demand from sFmRadioCache.
     
     // Log stack usage every 30 seconds (for debugging stack overflow issues)
     unsigned long now = millis();
@@ -731,7 +731,7 @@ const char* cmd_fmradio_status(const String& argsInput) {
 
   if (argWantsJson(argsInput)) {
     if (!ensureDebugBuffer()) return SENSOR_JSON_NOBUF;
-    int n = fmRadioBuildDataJSON(getDebugBuffer(), 1024);  // shared builder (also feeds sensors json)
+    int n = fmRadioBuildDataJson(getDebugBuffer(), 1024);  // shared builder (also feeds sensors json)
     return (n > 0) ? getDebugBuffer() : SENSOR_JSON_UNAVAILABLE;
   }
 
@@ -769,7 +769,7 @@ const char* cmd_fmradio_status(const String& argsInput) {
 // JSON Data Builder (for web API)
 // ============================================================================
 
-int fmRadioBuildDataJSON(char* buf, size_t bufSize) {
+int fmRadioBuildDataJson(char* buf, size_t bufSize) {
   if (!buf || !bufSize) return 0;
   FMRadioCache snap;
   if (!fmRadioCacheSnapshot(snap, 50)) return 0;

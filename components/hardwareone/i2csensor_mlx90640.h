@@ -85,10 +85,10 @@ bool thermalInit();
 bool thermalPoll();
 
 // JSON building
-int thermalBuildDataJSON(char* buf, size_t bufSize);
+int thermalBuildDataJson(char* buf, size_t bufSize);
 // Compact SUMMARY reading (min/avg/max scene temp) on the shared sensor envelope.
-// The full 768-px frame stays on thermalBuildDataJSON / the ESP-NOW frame channel.
-int thermalBuildSummaryJSON(char* buf, size_t bufSize);
+// The full 768-px frame stays on thermalBuildDataJson / the ESP-NOW frame channel.
+int thermalBuildSummaryJson(char* buf, size_t bufSize);
 
 // Thermal interpolation (defined in thermal_sensor.cpp)
 void thermalInterpolateFrame(const float* src, float* dst, int targetWidth, int targetHeight);
@@ -103,11 +103,11 @@ inline bool thermalFrameSnapshot(ThermalCache& out, int16_t* values, size_t capa
   out = {}; return false;
 }
 inline size_t thermalCacheStorageBytes() { return 0; }
-inline int thermalBuildDataJSON(char* buf, size_t bufSize) {
+inline int thermalBuildDataJson(char* buf, size_t bufSize) {
   if (buf && bufSize) buf[0] = '\0';
   return 0;
 }
-inline int thermalBuildSummaryJSON(char* buf, size_t bufSize) {
+inline int thermalBuildSummaryJson(char* buf, size_t bufSize) {
   if (buf && bufSize) buf[0] = '\0';
   return 0;
 }

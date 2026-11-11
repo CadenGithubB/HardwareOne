@@ -139,7 +139,7 @@ int main() {
 #if ENABLE_GPIO_ENCODER_BUTTONS
   assert(held() == x && consumePresses() == x);
   char json[512];
-  assert(gpioEncoderBuildDataJSON(json, sizeof(json)) > 0);
+  assert(gpioEncoderBuildDataJson(json, sizeof(json)) > 0);
   assert(strstr(json, "\"buttons\":4") != nullptr);
 #else
   assert(held() == 0 && consumePresses() == 0);

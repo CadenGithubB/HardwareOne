@@ -1491,7 +1491,7 @@ void publishMQTTSensorData() {
 #if ENABLE_THERMAL_SENSOR
   if (gSettings.mqttPublishThermal && gThermalRunning) {
     char thermalJson[2048];
-    int len = thermalBuildDataJSON(thermalJson, sizeof(thermalJson));
+    int len = thermalBuildDataJson(thermalJson, sizeof(thermalJson));
     if (len > 0) {
       pos += snprintf(jsonBuf + pos, 16384 - pos, ",\"thermal\":%s", thermalJson);
     }
@@ -1501,7 +1501,7 @@ void publishMQTTSensorData() {
 #if ENABLE_TOF_SENSOR
   if (gSettings.mqttPublishToF && gTofRunning) {
     char tofJson[1024];
-    int len = tofBuildDataJSON(tofJson, sizeof(tofJson));
+    int len = tofBuildDataJson(tofJson, sizeof(tofJson));
     if (len > 0) {
       pos += snprintf(jsonBuf + pos, 16384 - pos, ",\"tof\":%s", tofJson);
     }
@@ -1511,7 +1511,7 @@ void publishMQTTSensorData() {
 #if ENABLE_IMU_SENSOR
   if (gSettings.mqttPublishIMU && gImuRunning) {
     char imuJson[1024];
-    int len = imuBuildDataJSON(imuJson, sizeof(imuJson));
+    int len = imuBuildDataJson(imuJson, sizeof(imuJson));
     if (len > 0) {
       pos += snprintf(jsonBuf + pos, 16384 - pos, ",\"imu\":%s", imuJson);
     }

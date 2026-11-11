@@ -213,7 +213,7 @@ const char* cmd_gps(const String& argsInput) {
 
   if (argWantsJson(argsInput)) {
     if (!ensureDebugBuffer()) return SENSOR_JSON_NOBUF;
-    int n = gpsBuildDataJSON(getDebugBuffer(), 1024);  // shared builder (also feeds sensors json / MQTT)
+    int n = gpsBuildDataJson(getDebugBuffer(), 1024);  // shared builder (also feeds sensors json / MQTT)
     return (n > 0) ? getDebugBuffer() : SENSOR_JSON_UNAVAILABLE;
   }
 
@@ -308,7 +308,7 @@ bool gpsCacheSnapshot(GpsCache& out, uint32_t timeoutMs) {
 }
 
 // Serialize a copied reading so formatting never holds the cache mutex.
-int gpsBuildDataJSON(char* buf, size_t bufSize) {
+int gpsBuildDataJson(char* buf, size_t bufSize) {
   if (!buf || bufSize == 0) return 0;
 
   GpsCache gps;
@@ -491,7 +491,7 @@ void gpsTask(void* parameter) {
         (void)published;
 #endif
 
-        // ESP-NOW broadcaster obtains its own snapshot through gpsBuildDataJSON.
+        // ESP-NOW broadcaster obtains its own snapshot through gpsBuildDataJson.
 
         // Bus events: fix-acquired posts on the raw rising edge; fix-lost is
         // held down for 10 s of continuous no-fix so marginal-signal flapping

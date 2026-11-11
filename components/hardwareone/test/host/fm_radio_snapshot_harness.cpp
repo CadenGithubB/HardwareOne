@@ -160,7 +160,7 @@ static void setSeek(bool seek,bool up=true,unsigned long stamp=12000) {
   DATA.seekInProgress=seek; DATA.seekDirUp=up; DATA.seekStartMs=stamp;
 }
 static std::string json() {
-  char buffer[1024]; const int n=fmRadioBuildDataJSON(buffer,sizeof(buffer));
+  char buffer[1024]; const int n=fmRadioBuildDataJson(buffer,sizeof(buffer));
   assert(n>0 && n==static_cast<int>(strlen(buffer))); return buffer;
 }
 static void commonOutputs() {
@@ -198,11 +198,11 @@ static void snapshotAndRdsTests() {
   }
   const auto full=json();
   for(size_t capacity=0;capacity<=full.size()+1;++capacity) {
-    std::vector<char> bytes(capacity+2,'!'); int n=fmRadioBuildDataJSON(bytes.data()+1,capacity);
+    std::vector<char> bytes(capacity+2,'!'); int n=fmRadioBuildDataJson(bytes.data()+1,capacity);
     assert(bytes.front()=='!' && bytes.back()=='!');
     if(capacity<=full.size()) assert(n==0); else assert(n==static_cast<int>(full.size()));
   }
-  assert(fmRadioBuildDataJSON(nullptr,0)==0 && fmRadioBuildDataJSON(nullptr,100)==0);
+  assert(fmRadioBuildDataJson(nullptr,0)==0 && fmRadioBuildDataJson(nullptr,100)==0);
   setSeek(true); fmRadioInvalidate();
   assert(!DATA.dataValid && !DATA.seekInProgress && DATA.muted && !DATA.stationName[0] && !cacheHeld());
 }

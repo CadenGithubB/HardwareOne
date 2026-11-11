@@ -132,7 +132,7 @@ static void waited(uint32_t expected) {
 }
 static std::string json() {
   char out[512];
-  const int n = gpsBuildDataJSON(out, sizeof(out));
+  const int n = gpsBuildDataJson(out, sizeof(out));
   assert(n > 0 && n == static_cast<int>(std::strlen(out)));
   waited(50);
   return out;
@@ -145,12 +145,12 @@ static void commonContracts() {
   // NUL, exercises the actual builder and envelope without an overflow model.
   for (size_t cap = 0; cap <= fixed.size() + 2; ++cap) {
     std::vector<char> buf(cap + 2, 'Z');
-    const int n = gpsBuildDataJSON(buf.data() + 1, cap);
+    const int n = gpsBuildDataJson(buf.data() + 1, cap);
     assert(buf.front() == 'Z' && buf.back() == 'Z');
     if (cap <= fixed.size()) assert(n == 0);
     else assert(n == static_cast<int>(fixed.size()) && std::string(buf.data() + 1) == fixed);
   }
-  assert(gpsBuildDataJSON(nullptr, 20) == 0);
+  assert(gpsBuildDataJson(nullptr, 20) == 0);
   reset(); DATA.hasFix = false;
   const std::string nofix = "{\"valid\":true,\"connected\":true,\"ts\":12345,\"fix\":0,\"quality\":0,\"sats\":9,\"lat\":0,\"lon\":0,\"alt\":0,\"speed\":0}";
   assert(json() == nofix); emit(nofix);
@@ -217,7 +217,7 @@ static void ownerContracts() {
   assert(!gpsCacheSnapshot(out) && fields(out) == fields(GpsCache{}));
   assert(waits.empty());
   char jsonOut[512];
-  assert(gpsBuildDataJSON(jsonOut, sizeof(jsonOut)) > 0 && waits.empty());
+  assert(gpsBuildDataJson(jsonOut, sizeof(jsonOut)) > 0 && waits.empty());
   assert(std::string(jsonOut).find("\"valid\":false") != std::string::npos);
   reset(); admit = false;
   char mqtt[16384]{};

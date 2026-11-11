@@ -35,7 +35,7 @@ extern bool gApdsProximityRunning;
 extern bool gApdsGestureRunning;
 
 // Shared sensor-data JSON builder (apdsread json / sensors json).
-int apdsBuildDataJSON(char* buf, size_t bufSize);
+int apdsBuildDataJson(char* buf, size_t bufSize);
 extern bool gApdsConnected;
 extern unsigned long gApdsLastStopTime;
 extern TaskHandle_t gApdsTaskHandle;
@@ -73,7 +73,7 @@ inline bool apdsCacheSnapshot(APDSCache& out, uint32_t timeoutMs = 10) {
   out = {};
   return false;
 }
-inline int apdsBuildDataJSON(char* buf, size_t bufSize) {
+inline int apdsBuildDataJson(char* buf, size_t bufSize) {
   if (buf && bufSize) buf[0] = '\0';
   return 0;
 }

@@ -99,7 +99,7 @@ int main() {
         assert(tiny[0]=='Z' && tiny[cap+1]=='Z');
       }
     }
-    char ble[1024];buildSensorDataJSON(ble,sizeof(ble));emit(ble);assert(!held);
+    char ble[1024];buildSensorDataJson(ble,sizeof(ble));emit(ble);assert(!held);
     auto log=logReadings(31);
     std::cout<<log.thermalValid<<','<<log.thermalMin<<','<<log.thermalAvg<<','<<log.thermalMax<<','
       <<log.tofValid<<','<<log.tofTotal<<','<<log.tof[3].distance_mm<<','<<log.tof[3].status<<','

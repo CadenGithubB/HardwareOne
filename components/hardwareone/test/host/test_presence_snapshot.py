@@ -47,7 +47,7 @@ def generated(component: Path, baseline: bool) -> str:
     if not baseline:
         functions.append(extract_block(owner, "bool presenceCacheSnapshot("))
     functions += [extract_block(owner, marker) for marker in [
-        "int presenceBuildDataJSON(", "const char* cmd_presenceread(",
+        "int presenceBuildDataJson(", "const char* cmd_presenceread(",
         "const char* cmd_presencestatus(", "bool presencePoll()",
     ]]
     g2 = (component / "G2_Page_Sensors.cpp").read_text()
@@ -134,10 +134,10 @@ int main() {
   out.dataValid = true;
   assert(!presenceCacheSnapshot(out, 100) && !out.dataValid);
   char buffer[16] = "unchanged";
-  assert(presenceBuildDataJSON(buffer, sizeof(buffer)) == 0 && buffer[0] == '\\0');
-  assert(presenceBuildDataJSON(nullptr, 12) == 0);
+  assert(presenceBuildDataJson(buffer, sizeof(buffer)) == 0 && buffer[0] == '\\0');
+  assert(presenceBuildDataJson(nullptr, 12) == 0);
   buffer[0] = 'Z';
-  assert(presenceBuildDataJSON(buffer, 0) == 0 && buffer[0] == 'Z');
+  assert(presenceBuildDataJson(buffer, 0) == 0 && buffer[0] == 'Z');
 }
 ''', ["-I", str(work)])
     print("Presence snapshot: owner, budgets, polling/debounce, consumers and disabled API passed")
