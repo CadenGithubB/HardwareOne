@@ -6,7 +6,7 @@
 #include <sys/time.h>  // gettimeofday — epochMillis()
 #include <esp_timer.h> // esp_timer_get_time — the projection reference
 
-#include "ClockConfirmPolicy.h" // which clock steps the ring is given
+#include "System_ClockConfirmPolicy.h" // which clock steps the ring is given
 #include "System_Settings.h"    // gSettings.tzOffsetMinutes, rtcTimeHasBeenSet
 #include "System_BuildConfig.h" // ENABLE_RTC_SENSOR gate for the write-back duty
 #include "System_Events.h"      // systemEventPost + SYSEVT_TIME_SYNCED (X-macro enum — cannot be forward-declared)
@@ -159,7 +159,7 @@ static constexpr uint8_t PEND_HOLD_START    = 1u << 5;  // an SNTP jump was kept
 static constexpr uint8_t PEND_HOLD_END      = 1u << 6;  // ... and a later step settled it
 static uint8_t sPending = 0;
 
-// The reference for the confirmed clock (ClockConfirmPolicy.h).
+// The reference for the confirmed clock (System_ClockConfirmPolicy.h).
 static ClockConfirm::State sConfirm;
 
 static bool wallAndMonotonicUs(int64_t& wallUs, int64_t& monoUs) {
@@ -249,7 +249,7 @@ void clockStepped(SyncSource src, time_t before) {
   if (edge) pend |= PEND_MARKER | PEND_ANCHOR | PEND_RESOLVE;
 
   // The ring's clock: an SNTP step far from a clock already set this boot is
-  // not passed on (ClockConfirmPolicy.h). A clock adopted from the ring is
+  // not passed on (System_ClockConfirmPolicy.h). A clock adopted from the ring is
   // no reference for a later step, or the ring would vouch for itself.
   int64_t wallUs = 0, monoUs = 0;
   if (wallAndMonotonicUs(wallUs, monoUs)) {
@@ -341,7 +341,7 @@ void clockDutiesFlush() { drainDuties(); }
 // tzOffsetMinutes previously lived in wifiSettingsEntries[], inside
 // System_WiFi.cpp's file-wide #if ENABLE_WIFI. Its CLI command
 // ("tzoffsetminutes") and every consumer (Clock::tzOffsetMinutes,
-// i2csensor_ds3231, G2_Ring, System_R1_Protocol, WebPage_Sensors) are ungated,
+// i2csensor_ds3231, G2_Ring, R1_Protocol, WebPage_Sensors) are ungated,
 // so on a radioless build the user could set the timezone and have it silently
 // revert on the next boot — the registry walk that persists settings had no row
 // to write. Timezone belongs to the clock, not the radio.

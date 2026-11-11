@@ -1,6 +1,6 @@
-// Exercises the production confirmed-clock policy (ClockConfirmPolicy.h) on a
+// Exercises the production confirmed-clock policy (System_ClockConfirmPolicy.h) on a
 // fake wall clock and monotonic timer: no Arduino/IDF replacements here.
-#include "ClockConfirmPolicy.h"
+#include "System_ClockConfirmPolicy.h"
 #include <cstdio>
 #include <cstdlib>
 #include <initializer_list>

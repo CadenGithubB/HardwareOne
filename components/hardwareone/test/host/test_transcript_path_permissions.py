@@ -54,7 +54,7 @@ def main():
                     if args.source_dir and (args.source_dir / 'transcript_path_permissions_harness.cpp').exists()
                     else args.component / 'test/host/transcript_path_permissions_harness.cpp')
     harness = harness_path.read_text()
-    policy = read('Transcript_PathPolicy.h').replace('#pragma once', '')
+    policy = read('System_TranscriptPathPolicy.h').replace('#pragma once', '')
     for marker, value in (('// INSERT_POLICY', policy), ('// INSERT_INTERNAL', internal),
                           ('// INSERT_PRODUCTION', '\n\n'.join(pieces))):
         assert harness.count(marker) == 1

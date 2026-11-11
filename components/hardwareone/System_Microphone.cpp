@@ -34,7 +34,7 @@
 #include "System_LiveAudio.h"     // best-effort owned-recorder PCM shadow
 #include "System_Dictation.h"     // keyboard voice input: terminal capture hook
 #include "G2_Glasses.h"           // native EvenAI owner/login-epoch fence
-#include "Audio_VadPolicy.h"     // shared amplitude decisions; source DSP stays here
+#include "System_AudioVadPolicy.h"     // shared amplitude decisions; source DSP stays here
 #include "HAL_Audio.h"            // single PDM/I2S capture owner (audioCaptureStart/audioReadPcm)
 #include "System_CommandRegistry.h"
 

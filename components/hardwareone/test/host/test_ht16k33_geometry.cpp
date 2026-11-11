@@ -1,4 +1,4 @@
-#include "../../HT16K33_Geometry.h"
+#include "../../i2csensor_ht16k33_geometry.h"
 #include <assert.h>
 #include <stdint.h>
 #include <initializer_list>

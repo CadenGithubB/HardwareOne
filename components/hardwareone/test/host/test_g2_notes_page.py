@@ -214,7 +214,7 @@ def main() -> None:
     harness = (HERE / 'g2_notes_page_harness.cpp').read_text()
     production = re.sub(r'^#include.*\n', '', page, flags=re.M)
     for tag, value in (('// INSERT_PRODUCTION', production),
-                       ('// INSERT_POLICY', (c / 'Transcription_UI_Policy.h').read_text().replace('#pragma once', '')),
+                       ('// INSERT_POLICY', (c / 'System_TranscriptionUIPolicy.h').read_text().replace('#pragma once', '')),
                        ('// INSERT_PAGER', (c / 'System_TextPager.h').read_text().replace('#pragma once', ''))):
         assert harness.count(tag) == 1, tag
         harness = harness.replace(tag, value)

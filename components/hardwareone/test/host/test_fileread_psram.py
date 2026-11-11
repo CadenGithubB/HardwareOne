@@ -73,11 +73,11 @@ def main() -> None:
     limits = read("System_CommandLimits.h")
     harness = ((args.source_dir / "fileread_psram_harness.cpp") if args.source_dir else component / "test/host/fileread_psram_harness.cpp").read_text()
     for marker, production in {
-        "// INSERT_POLICY_HERE": read("Transcript_PathPolicy.h").replace("#pragma once", ""),
+        "// INSERT_POLICY_HERE": read("System_TranscriptPathPolicy.h").replace("#pragma once", ""),
         "// INSERT_PAGER_HERE": "\n".join(
             read(name).replace("#pragma once", "") for name in (
                 "System_TextPager.h", "System_TextWrapStream.h", "System_JsonPretty.h",
-                "FileBrowser_FileKind.h")),
+                "System_FileKind.h")),
         "// INSERT_PRODUCTION_BUFFER_HERE": buffer,
         "// INSERT_PRODUCTION_LIMITS_HERE": limits,
         "// INSERT_PRODUCTION_FILEREAD_HERE": "\n\n".join(definitions),

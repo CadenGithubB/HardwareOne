@@ -1,5 +1,5 @@
 /**
- * System_LLM_Model.cpp - LLM1 model loading (header parse, validation, memory
+ * System_LLMModel.cpp - LLM1 model loading (header parse, validation, memory
  * layout, weight reading, run-state allocation). Extracted verbatim from
  * System_LLM.cpp (no behavioral change).
  */
@@ -7,10 +7,10 @@
 #include "System_MemUtil.h"  // ps_alloc / AllocPref
 #if ENABLE_LLM_SOURCE_ONBOARD
 
-#include "System_LLM_Model.h"
-#include "System_LLM_Internal.h"
-#include "System_LLM_Kernels.h"     // scaleCount
-#include "System_LLM_Tokenizer.h"   // loadTokenizerFromFile
+#include "System_LLMModel.h"
+#include "System_LLMInternal.h"
+#include "System_LLMKernels.h"     // scaleCount
+#include "System_LLMTokenizer.h"   // loadTokenizerFromFile
 #include "System_Debug.h"
 #include "System_Filesystem.h"
 #include "System_VFS.h"

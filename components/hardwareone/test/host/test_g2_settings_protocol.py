@@ -24,11 +24,11 @@ def main():
     if not args.cxx:
         raise SystemExit('a host C++17 compiler is required')
 
-    header = (COMPONENT / 'System_G2_Protocol.h').read_text()
+    header = (COMPONENT / 'G2_Protocol.h').read_text()
     header = header.replace('#include "System_BuildConfig.h"', '')
     header = header.replace('#include <Arduino.h>', '')
-    protocol = (COMPONENT / 'System_G2_Protocol.cpp').read_text()
-    protocol = protocol.replace('#include "System_G2_Protocol.h"', '')
+    protocol = (COMPONENT / 'G2_Protocol.cpp').read_text()
+    protocol = protocol.replace('#include "G2_Protocol.h"', '')
     protocol = protocol.replace('#include <Arduino.h>', '')
     platform = ('#define ENABLE_BLUETOOTH 1\n#define ENABLE_G2_GLASSES 1\n'
                 '#include <stdint.h>\nuint32_t millis() { return 0; }\n'

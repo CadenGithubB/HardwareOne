@@ -29,7 +29,7 @@
 #include "BLE_Peers.h"         // peer registry
 #include "BLE_CoexRecords.h"   // scan/connect records for the coexistence study
 #include "BLE_CentralStack.h"  // bleStackUp / bleStackReady: the ring is a device on the shared stack
-#include "Bluetooth.h"         // explicit BLE role/transition ownership
+#include "BLE_Server.h"         // explicit BLE role/transition ownership
 #include "BLE_CentralTx.h"     // controller-level TX gate (shared with G2)
 #include "G2_Glasses.h"        // g2SetAllTemplesConnPriority, g2WaitForBothConnected
 #include "G2_HealthPush.h"     // `ring panel` rows: stock Health panel feed
@@ -37,8 +37,8 @@
 #include "HAL_Audio.h"         // audioGetSource/audioCaptureOwnedBy — audio arbitration
 #include "System_Microphone.h" // micRecordingBusy — real recording lifecycle
 #endif
-#include "System_R1_Protocol.h"  // R1Encoder + decoder (real wire format)
-#include "System_G2_Protocol.h"  // the bounded protobuf readers for forwarded RingDataPackage frames
+#include "R1_Protocol.h"  // R1Encoder + decoder (real wire format)
+#include "G2_Protocol.h"  // the bounded protobuf readers for forwarded RingDataPackage frames
 #include "G2_Health.h"           // history append + daily backfill
 #include "R1_HealthHistoryStore.h" // `ring health` history/store status
 #include "System_SensorLogging.h"  // `ring health json`, `ring poll`
@@ -3198,7 +3198,7 @@ void g2RingNoteForwardedTelemetry(const uint8_t* pb, size_t pbLen) {
 // logs the trusted decode here in normal task context.
 
 // Decode and print a single ring notify frame using the real R1 wire format
-// (See System_R1_Protocol.h for the full envelope spec.) `data` is the raw
+// (See R1_Protocol.h for the full envelope spec.) `data` is the raw
 // BLE characteristic value — the ring writes one logical frame per notify
 // in our usage so far.
 //

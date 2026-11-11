@@ -13,7 +13,7 @@ class FakeBoard:
     pass
 
 
-# Bluetooth.cpp cmd_blemode's saved keyword and hw1link::roleText of its role.
+# BLE_Server.cpp cmd_blemode's saved keyword and hw1link::roleText of its role.
 SAVED_TEXT = {'server': 'App console', 'client': 'Glasses+pipe', 'phone-client': 'Phone pipe'}
 ROLE_TEXT = {'console': 'App console', 'glasses': 'Glasses', 'glasses-pipe': 'Glasses+pipe',
              'phone-pipe': 'Phone pipe', 'off': 'Off'}

@@ -373,7 +373,7 @@ static void test_paths() {
         "internal note path");
   CHECK(notePathParse(longest.c_str(), &owner, &sd, nullptr, nullptr) && owner == 4294967295u && sd,
         "SD note path");
-  // Transcript_PathPolicy classifies the folder as the owner's private tree.
+  // System_TranscriptPathPolicy classifies the folder as the owner's private tree.
   const auto where = TranscriptPathPolicy::classify("/stt/u7/notes/x.txt");
   CHECK(where.kind == TranscriptPathPolicy::Kind::Owner && where.owner == 7,
         "notes folder is Owner(7) with no policy change");

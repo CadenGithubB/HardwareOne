@@ -216,7 +216,7 @@ One skeptic per group re-opened the cited code at 95dc3f34 (read-only) and tried
 
 **Evidence.**
 - `components/esp_now_hosted/include/esp_now_hosted_companion.h:18` HW1_C6_HOSTED_TAG v2.12.13, BLE max 4, flasher v1.10.0; HAL_Radio.cpp:292-294 and 399-401 require exact major/minor/patch equality
-- `components/hardwareone/System_R1_Protocol.cpp:130` R1 admitted only on exact deviceInfo strings (130-142); not stated in README/USERGUIDE/CHANGELOG
+- `components/hardwareone/R1_Protocol.cpp:130` R1 admitted only on exact deviceInfo strings (130-142); not stated in README/USERGUIDE/CHANGELOG
 - `components/hardwareone/System_Cm5HostControl.cpp:28` kProtocolVersion "1"
 - `tools/phone_link_peer/README.md:35` Says a v1 app (2.7.x) never reaches READY with a v2 P4. No minimum compatible app version is named anywhere
 - `docs/ANDROID_AGENT_PROMPT_CONSOLE_ON_PHONE_LINK.md:1` Now tracked (64713c0d) and marked historical, pointing to the phone-link v2 peer guide, so the dangling-reference part is fixed
@@ -669,7 +669,7 @@ One skeptic per group re-opened the cited code at 95dc3f34 (read-only) and tried
 - `docs/P4X_EYE_PERIPHERALS.md:276` The only 'Known issues' sentence (P4 only).
 - `docs/BOARD_SWITCHING.md:429` '## Troubleshooting': build-time only.
 - `RELEASING.md:57` Release-notes hygiene line only; no security or publishability step.
-- `components/hardwareone/Bluetooth.cpp:3974` The device does print a boot notice that BLE is UNENCRYPTED without a blesecret, so some of the posture is stated at runtime. It is not in any doc.
+- `components/hardwareone/BLE_Server.cpp:3974` The device does print a boot notice that BLE is UNENCRYPTED without a blesecret, so some of the posture is stated at runtime. It is not in any doc.
 
 **Newer commits.** d987fdf5, f688bcc1, b00a95dc, a33742bc: crash-record capture and system-log rotation add more diagnostic primitives, still with no user-facing diagnostics guide; Waveshare docs (WAVESHARE_P4_SUPPORT.md) add no known-issues section
 
@@ -752,7 +752,7 @@ One skeptic per group re-opened the cited code at 95dc3f34 (read-only) and tried
 - `docs/investigations/2026-11-04-p4x-fix-progress.md:984` root cause of the 2026-11-05 four-hour stall: an OPEN timeout left m_semaphoreOpenEvt taken and the client was reused, blocking ble_setup forever (so the 0.99.99 search-lock fix alone was not enough)
 - `docs/investigations/2026-11-04-p4x-fix-progress.md:1059` the escalation path has not run on hardware: the stall cannot be reproduced on demand
 - `docs/investigations/2026-11-04-p4x-fix-progress.md:1101` 2026-11-06 overnight soak on the recovery image: no stall and no overrun line; ring drops track movement. Stationary only
-- `components/hardwareone/BLE_CentralStack.cpp:341` bleSetupOverrunTick: 240 s report sets bleStackSetLifecycleFault(true); 600 s rebootDevice('ble-setup-overrun'). When the run returns only sReported resets; the fault is cleared only by bleStackDown (304) or a recycle (Bluetooth.cpp 2381)
+- `components/hardwareone/BLE_CentralStack.cpp:341` bleSetupOverrunTick: 240 s report sets bleStackSetLifecycleFault(true); 600 s rebootDevice('ble-setup-overrun'). When the run returns only sReported resets; the fault is cleared only by bleStackDown (304) or a recycle (BLE_Server.cpp 2381)
 - `components/hardwareone/G2_Ring.cpp:6967` NEW RISK (code reading): 'ring scan' accepts up to 300 s and runs as one Ring job on the setup worker (G2_Glasses.cpp 20015-20017); it ends early only if another client queues. A manual scan over 240 s with nothing else queued would trip the overrun report and leave the lifecycle fault set, after which G2 scans (G2_Glasses.cpp 1033) and phone admission (BLE_PhonePipe.cpp 1048) refuse until closeble/openble or reboot
 - ... 4 more in verify/E1.json
 
@@ -892,7 +892,7 @@ One skeptic per group re-opened the cited code at 95dc3f34 (read-only) and tried
 
 **Evidence.**
 - `components/hardwareone/System_MemoryMonitor.cpp:116` 'openble/closeble leaks 11,192 B per cycle ... By cycle 5 ... largest=8,192 -- below BTC_TASK's 8,704 B' (116-121) still justifies the 53248 'bluetooth' row (125)
-- `components/hardwareone/Bluetooth.cpp:116` 'ESP32 Bluedroid leaks ~10KB DRAM per init/deinit cycle' toggle tracking still present; the leak print is at 2412-2416
+- `components/hardwareone/BLE_Server.cpp:116` 'ESP32 Bluedroid leaks ~10KB DRAM per init/deinit cycle' toggle tracking still present; the leak print is at 2412-2416
 - `components/hardwareone/HAL_Bluetooth.cpp:1` bluetoothHalDeinit calls BLEDevice::deinitChecked(false) and never releases controller memory, on every target. On P4 the controller is Hosted (C6), so P4 cycle results do not cover the native-controller deinit path.
 - `components/hardwareone/BLE_CentralStack.cpp:270` bleStackDown is the shared teardown. The blestack gate (203) checks total free only, not the largest block, which the old failure mode depended on.
 - `CHANGELOG.md:147` 'stays there across five open/close cycles' is a P4X-EYE result only (also 270, 343)
@@ -1183,7 +1183,7 @@ One skeptic per group re-opened the cited code at 95dc3f34 (read-only) and tried
 
 **Bounded fix.** Fix the 18 lines: oledrequireauth to displayrequireauth; the mqtt block to openmqtt/mqttHost/...; mqttPublishInput; debuginput; delete the camera auto-capture block; espnowsendfile; fmradiotune. Change 988 to (super admin) and MIGRATION.md:66 to otastatus. List the three R1 profiles, add DISPLAY_TYPE 4/5 and INPUT_DEVICE_TYPE 3/4 and the P4 board rows, use RDA5807, drop QT PY ESP32-S3, and correct the peer_paired row. Add a host test that resolves each code-block line of USERGUIDE.md with the System_CommandLookupCore rule against tools/command_registry.py parse_commands(), with an allow-list for IF/NAME/SCHEDULE, debug<flagname> and dictate.
 
-**Done when.** The new USERGUIDE resolution test is registered in CTest, passes, and fails when an unregistered command is added to a code block. git grep -n 'TEA5767\|QT PY ESP32-S3' README.md docs is empty. USERGUIDE.md:228 names the same profiles as System_R1_Protocol.cpp:133-139. The (admin)/(super admin) annotations agree with the registry S/A column.
+**Done when.** The new USERGUIDE resolution test is registered in CTest, passes, and fails when an unregistered command is added to a code block. git grep -n 'TEA5767\|QT PY ESP32-S3' README.md docs is empty. USERGUIDE.md:228 names the same profiles as R1_Protocol.cpp:133-139. The (admin)/(super admin) annotations agree with the registry S/A column.
 
 
 ## G-60 (P1, confirmed): P4 local-STT profile needs a runtime model file no tracked artifact or URL provides
@@ -1649,10 +1649,10 @@ One skeptic per group re-opened the cited code at 95dc3f34 (read-only) and tried
 - `components/hardwareone/BLE_PhonePipe.cpp:326` ESP_GAP_BLE_SEC_REQ_EVT answered with esp_ble_gap_security_rsp(..., false).
 - `components/hardwareone/G2_Glasses.cpp:3693` With a saved-MAC filter, only an exact address match is classified as a temple; the name is ignored.
 - `components/hardwareone/G2_Glasses.cpp:13768` Repair scan uses name-based match only when the side has no saved MAC.
-- `components/hardwareone/System_BleSecureChannel.cpp:164` bleScRequired() = flag && secret non-empty.
-- `components/hardwareone/Bluetooth.cpp:3974` bleSecurityBootNotice prints 'Bluetooth is UNENCRYPTED' when the flag is on and the secret is empty.
-- `components/hardwareone/Bluetooth.cpp:4307` BLE info JSON reports secureChannelRequired = bleScRequired().
-- `components/hardwareone/Bluetooth.cpp:4617` bluetoothAutoStart default false; bluetoothRequireAuth default true (4618); bleRequireSecureChannel default true (4622).
+- `components/hardwareone/BLE_SecureChannel.cpp:164` bleScRequired() = flag && secret non-empty.
+- `components/hardwareone/BLE_Server.cpp:3974` bleSecurityBootNotice prints 'Bluetooth is UNENCRYPTED' when the flag is on and the secret is empty.
+- `components/hardwareone/BLE_Server.cpp:4307` BLE info JSON reports secureChannelRequired = bleScRequired().
+- `components/hardwareone/BLE_Server.cpp:4617` bluetoothAutoStart default false; bluetoothRequireAuth default true (4618); bleRequireSecureChannel default true (4622).
 
 **Newer commits.** c1d1dbac / 295a6a7f: Waveshare enables the glasses and phone links; no change to the link-security model
 

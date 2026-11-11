@@ -272,7 +272,7 @@ def run_role_matrix(cxx: str, sanitize: bool) -> None:
     gate_rows = "\n".join(f'    {{"{name}", {"true" if flag else "false"}}},'
                           for name, flag in gates.items())
     harness = (here / "filesystem_role_matrix_harness.cpp").read_text()
-    policy = (ROOT / "Transcript_PathPolicy.h").read_text().replace("#pragma once", "")
+    policy = (ROOT / "System_TranscriptPathPolicy.h").read_text().replace("#pragma once", "")
     for marker, value in (("// INSERT_POLICY", policy), ("// INSERT_INTERNAL", internal),
                           ("// INSERT_PRODUCTION", "\n\n".join(pieces)),
                           ("// INSERT_COMMAND_GATES", gate_rows)):

@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Compile the real BLE command ingress with the real Secure Channel module and check its policy.
 
-System_BleSecureChannel.cpp is compiled whole against the harness-local
+BLE_SecureChannel.cpp is compiled whole against the harness-local
 ble_sc_stubs/ headers (libsodium, mbedTLS, FreeRTOS, settings and Arduino
 stand-ins). The GATT write entry, the deferred secure-frame and plaintext jobs,
 the command tail with its file-browser gate, and the directed and session
-senders are spliced in from Bluetooth.cpp. The fake GATT keeps one inbox per
+senders are spliced in from BLE_Server.cpp. The fake GATT keeps one inbox per
 connection and the executor records what would run; the GATT entry runs as
 BTC_TASK and deferred jobs run after it as cmd_exec. The suite checks that a
 plaintext write in secure-required mode (and always on the G2 client host,
@@ -118,7 +118,7 @@ def main():
     args = parser.parse_args()
     if not args.cxx:
         parser.error('a host C++17 compiler is required')
-    source = (args.component / 'Bluetooth.cpp').read_text()
+    source = (args.component / 'BLE_Server.cpp').read_text()
 
     failures = tier_failures(source)
     for line in failures:
@@ -136,7 +136,7 @@ def main():
         if marker in source:
             harness = harness.replace(token, function(source, marker))
         elif required:
-            raise SystemExit(f'{marker!r} not found in {args.component / "Bluetooth.cpp"}')
+            raise SystemExit(f'{marker!r} not found in {args.component / "BLE_Server.cpp"}')
         elif slot == 'REQUIRES_LOGIN':
             # An older tree gates on the setting alone.
             print(f'{marker[:-1]} absent from this source tree; the setting alone gates', flush=True)
@@ -149,14 +149,14 @@ def main():
         work = Path(tmp)
         shutil.copytree(STUBS, work, dirs_exist_ok=True,
                         ignore=shutil.ignore_patterns('._*'))
-        for name in ('System_BleSecureChannel.cpp', 'System_BleSecureChannel.h', 'System_BleSecureCrypto.h', 'BLE_Types.h'):
+        for name in ('BLE_SecureChannel.cpp', 'BLE_SecureChannel.h', 'BLE_SecureCrypto.h', 'BLE_Types.h'):
             shutil.copy(args.component / name, work / name)
         unit = work / 'harness.cpp'
         unit.write_text(harness)
         exe = work / 'test'
         command = [args.cxx, '-std=c++17', '-Wall', '-Wextra', '-Werror',
                    '-Wno-unused-function', '-Wno-unused-parameter', '-I', str(work),
-                   str(work / 'System_BleSecureChannel.cpp'), str(unit), '-o', str(exe)]
+                   str(work / 'BLE_SecureChannel.cpp'), str(unit), '-o', str(exe)]
         if args.sanitize:
             command[1:1] = ['-fsanitize=address,undefined', '-fno-omit-frame-pointer', '-g']
         subprocess.run(command, check=True)

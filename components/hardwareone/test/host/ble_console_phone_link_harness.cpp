@@ -1,5 +1,5 @@
 // The app console on the phone pipe's link (G2 client host), as shipped:
-// test_ble_console_phone_link.py inserts Bluetooth.cpp's server callbacks,
+// test_ble_console_phone_link.py inserts BLE_Server.cpp's server callbacks,
 // write callback, console plan helpers, senders, console view, commands,
 // teardown hooks and bleUpdateStreams, and BLE_LinkStatus.cpp's
 // bleLinkStatus(). The pipe's link record, the Secure Channel, the central TX
@@ -179,7 +179,7 @@ static bool blePeerReconnectSnapshot(BlePeerKind, BlePeerReconnectSnapshot& out)
 static bool isG2ClientInitialized() { return w.g2Client; }
 static bool bleServerUp() { return w.serverUp; }
 
-// The Secure Channel (System_BleSecureChannel.h): established per link; an
+// The Secure Channel (BLE_SecureChannel.h): established per link; an
 // encrypted send is one frame through the shipped directed sender.
 struct BleScBinding { uint16_t connId = 0; TransportSessionEpoch epoch = 0; uint32_t generation = 0; };
 static bool bleScRequired() { return w.scRequired; }

@@ -6,7 +6,7 @@
 #endif
 
 #include "HAL_Camera.h"
-#include "CameraRgb565.h"
+#include "HAL_Camera_Rgb565.h"
 #include "HAL_Camera_SCCB.h"
 #if CAMERA_SCCB_SHARED
 #include "System_Settings.h"

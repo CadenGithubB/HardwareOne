@@ -1,6 +1,6 @@
 // Production append operations with controlled I/O, clock and crypto boundaries.
 #include <Print.h>
-#include "BatteryPolicy.h"
+#include "System_BatteryPolicy.h"
 #include <algorithm>
 #include <cstdarg>
 #include <cstdio>

@@ -86,7 +86,7 @@ enum G2RingSetupState : uint8_t {
 
 // Public, dependency-free view of the protocol profile selected from the
 // ring's exact deviceInfo firmware string. Values intentionally mirror the
-// private System_R1_Protocol profile identifiers, but callers do not need to
+// private R1_Protocol profile identifiers, but callers do not need to
 // include the encoder/decoder header.
 enum G2RingProtocolProfile : uint8_t {
   G2_RING_PROFILE_UNKNOWN = 0,

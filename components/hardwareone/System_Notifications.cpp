@@ -32,7 +32,7 @@
 #include "System_Mutex.h"         // FsLockGuard — policy file read
 #include "System_PollPause.h"     // PollPauseGuard — policy file read
 #if ENABLE_BLUETOOTH
-#include "Bluetooth.h"     // blePushNotification / bleGetAuthenticatedSessionInfo — app sink
+#include "BLE_Server.h"     // blePushNotification / bleGetAuthenticatedSessionInfo — app sink
 #include "BLE_Types.h"     // BLE_MAX_CONNECTIONS — bound on the app-sink session sweep
 #endif
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES

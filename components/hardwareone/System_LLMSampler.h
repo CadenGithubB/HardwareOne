@@ -1,5 +1,5 @@
 /**
- * System_LLM_Sampler.h - Token sampling for the LLM engine.
+ * System_LLMSampler.h - Token sampling for the LLM engine.
  *
  * Extracted from System_LLM.cpp with no behavioral change. Operates in-place on
  * a logits buffer (temperature scaling + softmax applied internally) and uses

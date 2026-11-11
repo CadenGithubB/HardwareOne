@@ -1,6 +1,6 @@
 /**
  * HAL_Bluetooth — controller and stack lifecycle for the shared BLE application.
- * GATT services, application authentication and role ownership stay in Bluetooth.
+ * GATT services, application authentication and role ownership stay in BLE_Server.
  * Native targets use the local controller; Hosted targets use its acknowledged
  * remote lifecycle. A Hosted acknowledgement is not a live controller query.
  */

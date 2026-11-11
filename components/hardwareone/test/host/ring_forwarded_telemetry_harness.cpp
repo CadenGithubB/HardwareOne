@@ -1,7 +1,7 @@
 // Host harness for the production forwarded-telemetry parser
 // (g2RingNoteForwardedTelemetry, G2_Ring.cpp). test_ring_forwarded_telemetry.py
 // splices the production function, its local protobuf helpers, the shared
-// g2Pb* readers (System_G2_Protocol.cpp), the R1TelemetryCache layout and the
+// g2Pb* readers (G2_Protocol.cpp), the R1TelemetryCache layout and the
 // G2HealthMetric enum into the INSERT_* markers. The telemetry mutex, the
 // direct-link ownership check, the Health live series and millis() are doubles.
 //

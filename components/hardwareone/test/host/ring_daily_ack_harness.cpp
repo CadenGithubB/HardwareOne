@@ -1,5 +1,5 @@
 // Production G2_Ring.cpp RX/packetAck path, the G2_Health.cpp pending-session
-// model and the System_R1_Protocol.cpp capability/packetAck factories are
+// model and the R1_Protocol.cpp capability/packetAck factories are
 // inserted by test_ring_daily_ack.py. Everything else is a boundary double.
 #include "G2_Health.h"
 

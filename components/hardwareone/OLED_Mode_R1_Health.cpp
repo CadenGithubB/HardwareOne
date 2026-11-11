@@ -23,7 +23,7 @@
 #include "System_SensorLogging.h"
 #include "System_Settings.h"
 #include "System_User.h"
-#include "Bluetooth.h"   // bleSubsystemActive
+#include "BLE_Server.h"   // bleSubsystemActive
 
 enum HealthAction : uint8_t {
   HEALTH_ACTION_POLL = 0,

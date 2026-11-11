@@ -1,5 +1,5 @@
 /**
- * System_LLM_Sampler.cpp - Token sampling for the LLM engine.
+ * System_LLMSampler.cpp - Token sampling for the LLM engine.
  *
  * Sampling primitives: argmax (greedy), top-p (nucleus), min-p, and the
  * temperature/categorical dispatcher. Operates in place on the logits buffer
@@ -8,9 +8,9 @@
 #include "System_BuildConfig.h"
 #if ENABLE_LLM_SOURCE_ONBOARD
 
-#include "System_LLM_Sampler.h"
-#include "System_LLM_Internal.h"   // gLLM.sampleIndices / sampleIndicesSize
-#include "System_LLM_Kernels.h"    // softmax
+#include "System_LLMSampler.h"
+#include "System_LLMInternal.h"   // gLLM.sampleIndices / sampleIndicesSize
+#include "System_LLMKernels.h"    // softmax
 #include "System_Debug.h"          // DEBUG_LLM_GENERATEF
 #include <cmath>
 #include <cstdint>

@@ -1,6 +1,6 @@
 // Production definitions are inserted by test_ble_area_cleanup.py: the BLE
 // server's connection typing (bleIdentifyDeviceByMac and its MAC helpers),
-// extracted unchanged from Bluetooth.cpp, with BLE_Types.h and the saved-target
+// extracted unchanged from BLE_Server.cpp, with BLE_Types.h and the saved-target
 // types from BLE_Peers.h. The peer owner's saved-target snapshot and the
 // phone's console address (the Server-role display identity, kept apart from
 // pipe trust) are host boundaries backed by tables the cases rewrite.

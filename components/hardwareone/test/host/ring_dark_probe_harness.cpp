@@ -1,6 +1,6 @@
 // Production ringSetupServiceDarkProbe (G2_Ring.cpp) against the real R1
 // codec. test_r1_protocol.py inserts the function; everything else is a double.
-#include "System_R1_Protocol.h"
+#include "R1_Protocol.h"
 #include "System_Debug.h"
 #include <cassert>
 #include <cstdio>

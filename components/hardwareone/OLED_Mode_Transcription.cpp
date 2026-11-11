@@ -9,7 +9,7 @@
 #include "HAL_Input.h"
 #include "System_Dictation.h"
 #include "System_AuthIdentity.h"
-#include "Transcription_UI_Policy.h"
+#include "System_TranscriptionUIPolicy.h"
 #include <ArduinoJson.h>
 #include <new>
 #include <cstdio>

@@ -1,5 +1,5 @@
 /**
- * System_LLM_Model.h - LLM1 model loading.
+ * System_LLMModel.h - LLM1 model loading.
  *
  * Extracted from System_LLM.cpp with no behavioral change. Parses the LLM1
  * header, validates config, computes the PSRAM memory layout, reads weights

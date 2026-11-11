@@ -196,7 +196,7 @@ def display(canonical: str) -> str:
     return "-".join(canonical[i:i + 4] for i in range(0, SYMBOLS, 4))
 
 
-# ---- PSK (BLE_PhonePipe.cpp loadPsk, System_BleSecureCrypto.h scPbkdf2) ----------
+# ---- PSK (BLE_PhonePipe.cpp loadPsk, BLE_SecureCrypto.h scPbkdf2) ----------
 
 PIPE_LABEL = "HW1-PIPE-v1"  # hw1phone::kPipeLabel: PBKDF2 salt and HKDF info
 PBKDF2_ITERATIONS = 100_000

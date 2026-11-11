@@ -1,7 +1,7 @@
 // A Bluetooth command's own broadcastOutput lines, as shipped:
 // test_ble_command_output.py inserts System_Debug.cpp's broadcastOutputCore and
 // its public overloads, System_CLI.cpp's help menu (renderHelpMain), and
-// Bluetooth.cpp's command tail (processBleCommandLine), reply callback, output
+// BLE_Server.cpp's command tail (processBleCommandLine), reply callback, output
 // batch, session senders, central TX gate class, console-mirror collector and
 // the slot and session helpers both console hosts use. cmd_exec, the debug
 // queue, the Secure Channel, the central TX gate, IDF GATTS and transport
@@ -72,7 +72,7 @@ static std::vector<std::string> pathFaults;
 #define DEBUG_BLE_DATA 3
 #define DEBUG_MSG_SIZE 256
 using DebugFlagMask = uint32_t;
-// Bluetooth.cpp's BLE_DEBUGF: its lines go through broadcastOutput, so on
+// BLE_Server.cpp's BLE_DEBUGF: its lines go through broadcastOutput, so on
 // cmd_exec they reach the batch, including from helpers that hold the lock.
 static bool coreDebug = false;  // `debugbluetoothcore`
 static bool isDebugFlagSet(DebugFlagMask flag) { return coreDebug && flag == DEBUG_BLE_CORE; }
@@ -265,7 +265,7 @@ TransportSessionEpoch bleSessionEpochForConnection(uint16_t connId);
 static bool bleIsAuthed(uint16_t connId, String& outUser);
 static bool bleRequiresLogin(uint16_t connId);
 
-// Bluetooth.cpp's bleFillCommandAuth, but the session id is set through
+// BLE_Server.cpp's bleFillCommandAuth, but the session id is set through
 // std::string (the host String has no integer constructor).
 static bool bleFillCommandAuth(uint16_t connId, AuthContext& auth, bool forLogin,
                                TransportSessionEpoch& epochOut) {

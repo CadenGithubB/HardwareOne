@@ -1,6 +1,6 @@
 #pragma once
-// The part of Bluetooth.h that System_BleSecureChannel.cpp uses. The harness
-// defines these functions (some spliced in from Bluetooth.cpp).
+// The part of BLE_Server.h that BLE_SecureChannel.cpp uses. The harness
+// defines these functions (some spliced in from BLE_Server.cpp).
 #include <stddef.h>
 #include <stdint.h>
 #include "System_User.h"  // TransportSessionEpoch

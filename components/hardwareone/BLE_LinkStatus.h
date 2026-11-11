@@ -9,7 +9,7 @@
 #include <ArduinoJson.h>
 
 #if ENABLE_BLUETOOTH
-#include "Bluetooth.h"  // BleConsoleView
+#include "BLE_Server.h"  // BleConsoleView
 
 struct BleLinkStatus {
   hw1link::Role role = hw1link::Role::Off;

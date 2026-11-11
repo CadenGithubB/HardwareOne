@@ -3,7 +3,7 @@
 // =============================================================================
 // Rewrite of the earlier stub-level integration against the protocol described
 // in https://github.com/Commute773/g2-kit-unofficial — wire primitives live in
-// System_G2_Protocol.{h,cpp}; this file handles the BLE state machine,
+// G2_Protocol.{h,cpp}; this file handles the BLE state machine,
 // dual-temple connection management, session prelude, and heartbeat task.
 
 #include "G2_Glasses.h"
@@ -31,12 +31,12 @@
 #include <esp_timer.h>        // esp_timer_create/start_once — replaces notifyClearTaskBody
 #include "esp_log.h"
 
-#include "System_G2_Protocol.h"
+#include "G2_Protocol.h"
 #include "G2_ConversateSession.h"
 #include "G2_NativeTerminalSession.h"
 #include "G2_HoldGesture.h"  // long-press pairing + route policy (host-tested)
 #include "System_Lz4.h"     // lz4Compress* — CompressMode=2 image push (Q32/Q32f)
-#include "Bluetooth.h"
+#include "BLE_Server.h"
 #include "HAL_Bluetooth.h"
 #if ENABLE_LOCAL_STT
 #include "System_STT.h"  // transcription page keep-alive
@@ -63,7 +63,7 @@
 #include "G2_HijackCmd.h"   // g2BumpMenuGen() — called from g2SetHijackPage
 #include "System_AuthIdentity.h"  // ExecIdentityGuard + currentAuthContext
 #include "System_CommandRegistry.h"
-#include "System_R1_Protocol.h"
+#include "R1_Protocol.h"
 
 extern "C" {
 #include "lc3.h"  // vendored Google liblc3 — Apache-2.0 (components/hardwareone_libs/liblc3)
@@ -1095,7 +1095,7 @@ static void g2ScanStopIfActive() {
   gG2ScanStoppedEarly = false;
 }
 
-// Navigation-mode toggle — consumed by Bluetooth.cpp. Kept as an
+// Navigation-mode toggle — consumed by BLE_Server.cpp. Kept as an
 // extern so the old UI wiring continues to work.
 bool gG2MenuNavEnabled = false;
 
@@ -12771,7 +12771,7 @@ static bool sendPbFragmented(G2Temple& arm, uint8_t seq, uint8_t sid, uint8_t fl
   // splitter exactly (docs/FlutterApp-main/lib/src/protocol/g2_transport.dart:
   // "needsExtraForCrc = chunks.last.length == maxPacketPayloadLen"), and it is a
   // shape we ALREADY put on the wire today for pbLen % 232 == 0 — our own RX
-  // parser handles it (System_G2_Protocol.cpp: payload=nullptr, payloadLen=0).
+  // parser handles it (G2_Protocol.cpp: payload=nullptr, payloadLen=0).
   //
   // Do NOT fold the CRC into the ceiling (the old (pbLen + 2 + 231) / 232 form).
   // That over-counts by one whenever pbLen % 232 == 231: every non-last fragment
@@ -22537,7 +22537,7 @@ static bool sendRebuildTextNamedAndWait(G2Temple& arm,
 // Historical note (G2_Glasses.cpp:7266): we previously avoided UPDATE_TEXT
 // after a 2026-04-24 firmware crash. That crash was specifically against a
 // LIST container (see L11512). Used against a TEXT child of a compound,
-// it's the documented happy path — see System_G2_Protocol.h:467.
+// it's the documented happy path — see G2_Protocol.h:467.
 //
 // Fire-and-forget — the firmware does not ack UPDATE_TEXT separately
 // from RX delivery. Returns whether the wire write succeeded; "delivered"
@@ -28877,7 +28877,7 @@ static const char* cmd_g2probe(const String& argsInput) {
 
 // g2devcfg <subcommand> [args]
 // Typed senders for sid=0x80 (DevCfgDataPackage). Each subcommand calls a
-// hardcoded-commandId builder in System_G2_Protocol.cpp — no way to
+// hardcoded-commandId builder in G2_Protocol.cpp — no way to
 // reach a destructive opcode (cmd=11 SET_DEVICE_INFO, cmd=13
 // RESTORE_TO_FACTORY_SETTINGS) without writing new C code. The g2probe
 // blocklist for sid=0x80 stays in place; this is a separate code path
@@ -29526,7 +29526,7 @@ static const char* cmd_g2nativeconfig(const String& argsInput) {
 // (UPDATE_IMAGE_RAW_DATA) body carrying `<size>` bytes of test pattern
 // and ships it via the multi-fragment sender. We do NOT issue a
 // CREATE-image first (that schema is unknown — see g2BuildCreateImage
-// TODO in System_G2_Protocol.h), so the firmware will almost certainly
+// TODO in G2_Protocol.h), so the firmware will almost certainly
 // reject this with `ImgRawFailed (5)` because there's no destination
 // container. That rejection IS the useful outcome: it confirms our
 // multi-fragment Cmd=3 wire path is plumbed correctly end-to-end (TX

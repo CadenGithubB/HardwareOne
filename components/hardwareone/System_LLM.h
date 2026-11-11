@@ -41,7 +41,7 @@
 // This is just the upper bound — the actual context used may be lower.
 // NOTE: currently READ BY NOTHING. The comment on llmLoadModel below says
 // "0 = use compile-time LLM_MAX_CONTEXT_LEN", but maxCtx==0 actually means
-// "don't cap" — System_LLM_Model.cpp only applies requestedMaxCtx when it is
+// "don't cap" — System_LLMModel.cpp only applies requestedMaxCtx when it is
 // > 0, so a model's own config.seq_len wins. Left in place rather than deleted
 // because it is #ifndef-guarded for per-board override; treat the comment as
 // aspirational, not as a description of current behaviour.

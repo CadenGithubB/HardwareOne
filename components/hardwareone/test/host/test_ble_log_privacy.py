@@ -14,7 +14,7 @@ import re
 
 ROOT = Path(__file__).resolve().parents[2]
 FILES = ['G2_Glasses.cpp', 'G2_Ring.cpp', 'G2_HijackCmd.cpp', 'G2_Page_ESPNow.cpp', 'G2_Page_Network.cpp',
-         'Bluetooth.cpp', 'HAL_Bluetooth.cpp', 'HAL_Radio.cpp', 'System_RadioCompanion.cpp',
+         'BLE_Server.cpp', 'HAL_Bluetooth.cpp', 'HAL_Radio.cpp', 'System_RadioCompanion.cpp',
          'OLED_Mode_Bluetooth.cpp'] + sorted(p.name for p in ROOT.glob('BLE_*.cpp'))
 ALWAYS_ON = re.compile(r'\b(BROADCAST_PRINTF|ERROR_\w+F|WARN_\w+F|INFO_\w+F|logSystemEvent|ESP_LOG[EWI]|broadcastOutput)\s*\(')
 # Address-bearing values. A saved target's mac1/mac2 may be tested ([0]) but not printed.

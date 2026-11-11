@@ -2,7 +2,7 @@
 #include <stdint.h>
 
 // ============================================================================
-// FactoryWipePolicy — the order of the handover wipe (`factoryreset all`)
+// System_FactoryWipePolicy — the order of the handover wipe (`factoryreset all`)
 // ============================================================================
 // Pure decision code: no IDF or Arduino types, so the host suite runs it on a
 // fake (test/host/test_factory_wipe_policy.cpp). System_FactoryWipe.cpp

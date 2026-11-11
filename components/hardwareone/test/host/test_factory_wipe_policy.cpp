@@ -1,6 +1,6 @@
-// Exercises the production order of the handover wipe (FactoryWipePolicy.h)
+// Exercises the production order of the handover wipe (System_FactoryWipePolicy.h)
 // on a fake device: no Arduino/IDF replacements here.
-#include "FactoryWipePolicy.h"
+#include "System_FactoryWipePolicy.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>

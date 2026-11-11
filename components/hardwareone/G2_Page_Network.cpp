@@ -14,7 +14,7 @@
 #include "G2_Glasses.h"
 #include "System_TaskUtils.h"  // APP_CORE / PRO_CORE task-placement constants
 #include "G2_Ring.h"   // g2RingIsConnected (R1 menu status)
-#include "Bluetooth.h"
+#include "BLE_Server.h"
 #include "BLE_Peers.h"       // gBlePeerData — G2 AutoReconnect in Bluetooth → G2
 #include "BLE_CentralCoordinator.h"  // bleCentralRingShouldYield (R1 menu status)
 #include "BLE_LinkStatus.h"   // role / relay pipe / app console words (Bluetooth + Phone menus)
@@ -2192,7 +2192,7 @@ static void handleBluetoothTap(uint32_t idx) {
 
   if (action == BT_ROW_MODE) {  // Role row: boot role toggle (server ↔ client) — via cmd_exec.
     // `blemode <other>` stores the boot role only; nothing running changes
-    // (see cmd_blemode in Bluetooth.cpp), so the lens hijack survives it. The
+    // (see cmd_blemode in BLE_Server.cpp), so the lens hijack survives it. The
     // server switch itself is `openconsole` on the server power row, which
     // does drop the link we render through. "Other" is the role the row
     // showed (on = to client).
@@ -2222,7 +2222,7 @@ static void handleBluetoothTap(uint32_t idx) {
       break;
 
     case BT_ROW_TOGGLE_ADV: {  // Toggle Adv — routed via cmd_exec (`bleadv toggle` was
-                               // extended in Bluetooth.cpp to support stop/toggle).
+                               // extended in BLE_Server.cpp to support stop/toggle).
       G2CmdCookie cookie{};
       cookie.targetPage   = g2GetHijackPage();
       cookie.targetNetSub = (uint8_t)gNetSub;

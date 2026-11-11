@@ -16,7 +16,7 @@
 
 #include "System_BuildConfig.h"
 #include "R1_HealthHistoryStore.h"
-#include "System_R1_Protocol.h"
+#include "R1_Protocol.h"
 #include <stddef.h>
 #include <stdint.h>
 

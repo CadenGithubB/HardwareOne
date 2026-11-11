@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run the BLE idle logout (bleSessionTick) as shipped.
 
-Bluetooth.cpp's lifecycle guard, slot and session-epoch helpers, bleNewState,
+BLE_Server.cpp's lifecycle guard, slot and session-epoch helpers, bleNewState,
 the phone-link console slot maker, bleBindSession, bleMarkActivity and
 bleSessionTick run here with System_User.cpp's shared idle policy, over doubles
 of the clock, the lifecycle mutex, transport sessions, the directed sender and
@@ -56,8 +56,8 @@ def code_only(text: str) -> str:
 
 
 def generated(component: Path) -> str:
-    owner = (component / "Bluetooth.cpp").read_text()
-    header = (component / "Bluetooth.h").read_text()
+    owner = (component / "BLE_Server.cpp").read_text()
+    header = (component / "BLE_Server.h").read_text()
     user_cpp = (component / "System_User.cpp").read_text()
     user_h = (component / "System_User.h").read_text()
     types = [
@@ -70,7 +70,7 @@ def generated(component: Path) -> str:
     ]
     epochs = re.search(r"^std::atomic<TransportSessionEpoch> sBleSessionEpoch\[BLE_MAX_CONNECTIONS\];",
                        owner, re.MULTILINE)
-    require(epochs is not None, "Bluetooth.cpp keeps a session epoch per slot")
+    require(epochs is not None, "BLE_Server.cpp keeps a session epoch per slot")
     definitions = [
         extract_block(user_cpp, "unsigned long sessionIdleWindowMs(CommandSource transport)"),
         extract_block(user_cpp, "bool sessionIdleExpired(unsigned long lastInteractionMs, "
@@ -102,7 +102,7 @@ def generated(component: Path) -> str:
 
 
 def check_sources(component: Path) -> None:
-    owner = (component / "Bluetooth.cpp").read_text()
+    owner = (component / "BLE_Server.cpp").read_text()
     code = code_only(owner)
     # Every command line stamps its slot before it is parsed or run, and so
     # does every decrypted OTA frame: bleMarkActivity is what the harness lands.
@@ -148,7 +148,7 @@ def main() -> None:
     parser.add_argument("--cxx", default=os.environ.get("CXX") or shutil.which("c++"))
     parser.add_argument("--sanitize", action="store_true")
     parser.add_argument("--component", type=Path, default=COMPONENT,
-                        help="component directory whose Bluetooth.cpp and System_User.cpp are tested")
+                        help="component directory whose BLE_Server.cpp and System_User.cpp are tested")
     args = parser.parse_args()
     require(bool(args.cxx), "a host C++17 compiler is required")
     flags = ["-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic",

@@ -27,13 +27,13 @@ BOOT_MARKER = "// Apply severity-based log level from settings"
 def generate() -> str:
     debug = (COMPONENT / "System_Debug.cpp").read_text()
     debug_h = (COMPONENT / "System_Debug.h").read_text()
-    manager_h = (COMPONENT / "System_Debug_Manager.h").read_text()
+    manager_h = (COMPONENT / "System_DebugManager.h").read_text()
     settings = (COMPONENT / "System_Settings.cpp").read_text()
     settings_h = (COMPONENT / "System_Settings.h").read_text()
     levels = re.findall(r"(?m)^#define LOG_LEVEL_(?:ERROR|WARN|INFO|DEBUG)[ \t]+\d+[ \t]*$", debug_h)
     require(len(levels) == 4, "System_Debug.h defines LOG_LEVEL_ERROR/WARN/INFO/DEBUG")
     manager = re.findall(r"(?m)^#define DEBUG_MANAGER .*$", manager_h)
-    require(len(manager) == 1, "System_Debug_Manager.h defines DEBUG_MANAGER once")
+    require(len(manager) == 1, "System_DebugManager.h defines DEBUG_MANAGER once")
     require(re.search(r"template<typename T>\s*\ninline void setDebugSetting\(", settings_h) is not None,
             "setDebugSetting is the inline template in System_Settings.h")
     setter = "template<typename T>\n" + extract_block(settings_h, "inline void setDebugSetting(")

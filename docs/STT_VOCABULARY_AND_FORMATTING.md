@@ -39,7 +39,7 @@ session lifecycle are unchanged.
 | Lens live page | `G2_Page_Transcription.cpp` | Shows `display`; a known speaker's turn (or the prose when labels are off) starts with a capital. `?:` text keeps the decoder's casing so it does not change case when a label joins it to a turn. Tail bytes and scroll anchors are the display text consistently; receipts stay raw. |
 | OLED live mode, web live view | `OLED_Mode_Transcription.cpp`, `System_Transcription_Web.h` | Show `display`, fall back to `sttText`. The web view keeps phrases per sequence and regroups on late labels. |
 | Transcript header | `System_Transcript.cpp` | `Boot:`, `Power-on:`, `Session:`, `Domain:`, `Title:` lines. The saved lines stay raw. |
-| Title rule shared with notes | `Transcript_TextPolicy.h` | `QuickNote_Policy.h` forwards to it, so a note and a transcript of the same speech get the same title. |
+| Title rule shared with notes | `System_TranscriptTextPolicy.h` | `QuickNote_Policy.h` forwards to it, so a note and a transcript of the same speech get the same title. |
 | Boot ordering | `System_BootState` | `poweron` advances on `ESP_RST_POWERON`; `domain` is drawn once per NVS generation. Both read back for the header. |
 
 ## Vocabulary file

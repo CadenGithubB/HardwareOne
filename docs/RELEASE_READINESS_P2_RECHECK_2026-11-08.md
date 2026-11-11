@@ -175,11 +175,11 @@ These four are closed for 1.0 and move to the post-1.0 backlog. Each is still re
 
 - **G-86: compatibility-shim labels.**
   - **Evidence:**
-    - `G2_SID_STATE_EVENT` (`System_G2_Protocol.h:118`) has no users. `formatMacAddrStr` has no callers, and `formatMacAddr` has one (`WebPage_Bond.cpp:982`).
+    - `G2_SID_STATE_EVENT` (`G2_Protocol.h:118`) has no users. `formatMacAddrStr` has no callers, and `formatMacAddr` has one (`WebPage_Bond.cpp:982`).
     - `SCREEN_*` (58/42 hits), `OledMenuItem` (42), `getClientIp(String&)` (about 9 production callers) and `SR_TASK_PRIORITY_LEVEL` are live APIs labelled legacy.
   - **Backlog bounded fix:**
     1. Delete `G2_SID_STATE_EVENT`.
     2. Migrate the one `formatMacAddr` caller to `macToDisplay` and delete both aliases at `System_Utils.h:454-461`.
-    3. Reword the labels at `HAL_Display.h:226-229` and `:268`, `OLED_Display.h:181`, `WebServer_Utils.cpp:234`, `System_TaskUtils.h:135` and `System_Debug_Manager.h:54` as supported aliases or convenience forms.
+    3. Reword the labels at `HAL_Display.h:226-229` and `:268`, `OLED_Display.h:181`, `WebServer_Utils.cpp:234`, `System_TaskUtils.h:135` and `System_DebugManager.h:54` as supported aliases or convenience forms.
     4. Keep `ESPNOW_V4_FLAG_ENCRYPTED` as a reserved bit.
     - Verify with a feathers3 build.

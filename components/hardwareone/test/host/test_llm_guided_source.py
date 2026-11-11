@@ -100,12 +100,12 @@ def main():
     parser.add_argument('--sanitize', action='store_true')
     args = parser.parse_args()
     component = Path(__file__).resolve().parents[2]
-    source = (component / 'System_LLM_Menu.cpp').read_text()
+    source = (component / 'System_LLMMenu.cpp').read_text()
     # Compile all production lifecycle, composition and accessors; the command
     # formatting section needs Arduino String but is downstream of these APIs.
     source = source.split('// Commands (registered NON-admin', 1)[0] + '\n#endif\n'
     source = re.sub(r'^#include.*\n', '', source, flags=re.M)
-    types = structure((component / 'System_LLM_Internal.h').read_text(), 'LlmMenuGroupDesc')
+    types = structure((component / 'System_LLMInternal.h').read_text(), 'LlmMenuGroupDesc')
     types += '\n' + structure((component / 'System_LLMTypes.h').read_text(), 'LlmMenuGroupInfo')
     unit = HARNESS.replace('// INSERT_TYPES', types).replace('// INSERT_IMPLEMENTATION', source)
     with tempfile.TemporaryDirectory(prefix='hw1-guided-source-') as tmp:

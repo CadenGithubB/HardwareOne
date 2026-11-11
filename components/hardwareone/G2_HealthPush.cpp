@@ -11,7 +11,7 @@
 #include "G2_HealthPushCore.h"
 #include "G2_Ring.h"
 #include "R1_HealthHistoryStore.h"
-#include "System_R1_Protocol.h"
+#include "R1_Protocol.h"
 #include "System_Clock.h"
 #include "System_Debug.h"
 #include "System_MemUtil.h"

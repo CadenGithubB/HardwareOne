@@ -5,7 +5,7 @@
 // Shared BLE Type Definitions
 // ============================================================================
 // Single source of truth for BLE enums and constants shared by the BLE
-// server (Bluetooth.h), the Secure Channel and the notification sink.
+// server (BLE_Server.h), the Secure Channel and the notification sink.
 
 enum BleConnectionState {
   BLE_STATE_IDLE = 0,

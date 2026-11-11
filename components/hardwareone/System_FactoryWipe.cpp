@@ -7,7 +7,7 @@
 #include "nvs.h"
 #include "nvs_flash.h"
 
-#include "FactoryWipePolicy.h"
+#include "System_FactoryWipePolicy.h"
 #include "System_BootState.h"
 #include "System_Filesystem.h"  // kLittleFsPartitionLabel
 #include "System_OTASafety.h"   // otaSafetyEraseNvsForFactoryWipe

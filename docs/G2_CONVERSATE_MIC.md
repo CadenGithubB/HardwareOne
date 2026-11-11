@@ -36,7 +36,7 @@ Capture SHA-256 (btsnoop_hci.log):
 
 ## How it fits Hardware One
 
-`System_G2_Protocol` builds native prep/start/close/heartbeat and menu reply
+`G2_Protocol` builds native prep/start/close/heartbeat and menu reply
 envelopes and strictly parses supported RX events. `G2_ConversateSession.h` contains the
 dependency-free lifetime/watchdog policy. `G2_Glasses.cpp` attaches it to the
 existing G2 control owner and audio subscription; no additional task is created.

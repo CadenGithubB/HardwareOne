@@ -59,7 +59,7 @@ def check_sources(component: Path) -> None:
             and 'std::atomic<PhonePairWindow> pairState{PhonePairWindow::None};' in pipe,
             'lock-free accessors (`phone pair new`\'s window reads as enrolling)')
     require("keep Step in BLE_LinkStatusCore.h's order" in pipe, 'Step and PipeStep are pinned together')
-    bt = (component / 'Bluetooth.cpp').read_text()
+    bt = (component / 'BLE_Server.cpp').read_text()
     helper = extract_block(bt, 'static bool bleAdvertiseIfRoomLocked() ')
     require('activeConnectionCount >= BLE_MAX_CONNECTIONS' in helper and 'sBleAdvertising.store(true)' in helper,
             'advertising re-arms only below the maximum')

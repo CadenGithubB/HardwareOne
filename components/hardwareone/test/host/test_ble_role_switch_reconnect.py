@@ -3,7 +3,7 @@
 
 A role switch away from the client host is not a user disconnect of its peers.
 The unit runs the production reconnect scheduler and tick (BLE_Peers.cpp),
-`openconsole` (Bluetooth.cpp cmd_openconsole), the ring's disconnect, logical down,
+`openconsole` (BLE_Server.cpp cmd_openconsole), the ring's disconnect, logical down,
 admission and `ring disconnect` (G2_Ring.cpp), the glasses' disconnect intent,
 admission, `openg2` and g2ConnectSaved (G2_Glasses.cpp) and the phone pipe's
 peer ops (BLE_PhonePipe.cpp). The role owners (initBluetooth, deinitG2Client,
@@ -52,8 +52,8 @@ def blocks(text: str, *markers: str) -> list:
 def unit(component: Path) -> str:
     peers_h = (component / 'BLE_Peers.h').read_text()
     peers = (component / 'BLE_Peers.cpp').read_text()
-    bluetooth_h = (component / 'Bluetooth.h').read_text()
-    bluetooth = (component / 'Bluetooth.cpp').read_text()
+    bluetooth_h = (component / 'BLE_Server.h').read_text()
+    bluetooth = (component / 'BLE_Server.cpp').read_text()
     glasses_h = (component / 'G2_Glasses.h').read_text()
     glasses = (component / 'G2_Glasses.cpp').read_text()
     ring = (component / 'G2_Ring.cpp').read_text()
@@ -151,7 +151,7 @@ def strip_comments(code: str) -> str:
 def check_text(component: Path) -> None:
     """The role owners the unit fakes, in their production order."""
     glasses = (component / 'G2_Glasses.cpp').read_text()
-    bluetooth = (component / 'Bluetooth.cpp').read_text()
+    bluetooth = (component / 'BLE_Server.cpp').read_text()
     stack = (component / 'BLE_CentralStack.cpp').read_text()
     pipe = (component / 'BLE_PhonePipe.cpp').read_text()
     # bleStackUp arms the peers last, after registering every device owner's

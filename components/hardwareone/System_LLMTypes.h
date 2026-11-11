@@ -167,7 +167,7 @@ const char* llmModelDescription();   // "" when the model carries no description
 bool        llmModelIcon(const uint8_t** bits, uint8_t* width, uint8_t* height);
 
 
-// Guided-input menu API (System_LLM_Menu.cpp)
+// Guided-input menu API (System_LLMMenu.cpp)
 // ============================================================================
 // A model's info block may carry a MENU section: curated, corpus-exact question
 // templates ("What type is {}?") + entity rosters ("Bulbasaur", ...). Surfaces

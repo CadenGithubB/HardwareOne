@@ -45,7 +45,7 @@
 #include "G2_Page_Common.h"      // TextPager + paging ops (shared text viewer)
 #include "G2_HijackCmd.h"        // G2HijackCtxGuard — installs pairedByUser identity
 #include "G2_Page_TextEntry.h"   // on-lens keyboard for Rename
-#include "FileBrowser_FileKind.h"  // file classifier shared with the OLED browser
+#include "System_FileKind.h"  // file classifier shared with the OLED browser
 #include "System_FileManager.h"
 #include "System_Filesystem.h"
 #include "System_VFS.h"          // internal / SD capacity + mount state
@@ -587,7 +587,7 @@ static size_t buildRows() {
 // -----------------------------------------------------------------------------
 
 // Chooser kind for a tapped file, from the classifier the OLED browser shares
-// (FileBrowser_FileKind.h). BMP and JPEG get View / View Full (JPEG is decoded
+// (System_FileKind.h). BMP and JPEG get View / View Full (JPEG is decoded
 // to a 4-bpp BMP before the same wire transport), JSON gets Pretty / JSON
 // View, text (.txt, .csv, .log, .md, ...) gets the raw paged view: a quick peek
 // whose rows soft-wrap at the lens width (no aligned-table mode; the web UI has

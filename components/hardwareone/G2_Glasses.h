@@ -1512,7 +1512,7 @@ inline uint8_t bleStackWedgeStreak(void) { return 0; }
 inline bool bleStackRecycleIfWedged(void) { return false; }
 // No central BLEClient owners exist when G2 is compiled out (every retirement
 // slot is G2/R1), so there is nothing to release after a host teardown. Called
-// unconditionally from Bluetooth.cpp's deinit paths.
+// unconditionally from BLE_Server.cpp's deinit paths.
 inline void bleCentralClientsTerminalTeardownAcknowledged() {}
 inline bool bleCentralClientsRetirementPending() { return false; }
 inline void g2RegisterBlePeer() {}

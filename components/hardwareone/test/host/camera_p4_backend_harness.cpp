@@ -1,6 +1,6 @@
 // Compile the real P4 backend below with only its hardware/SDK boundaries mocked.
 #include "HAL_Camera.h"
-#include "CameraRgb565.h"
+#include "HAL_Camera_Rgb565.h"
 #include <cassert>
 #include <cstdio>
 #include <cstdlib>

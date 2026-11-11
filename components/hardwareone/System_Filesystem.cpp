@@ -19,7 +19,7 @@
 #include "System_MemUtil.h"
 #include "System_PsramBuffer.h"
 #include "System_CommandLimits.h"
-#include "Transcript_PathPolicy.h"
+#include "System_TranscriptPathPolicy.h"
 #include "System_Mutex.h"
 #include "System_Settings.h"
 #include "System_Utils.h"
@@ -33,11 +33,11 @@
 #include "System_TextPager.h"     // sanitize + page-split core — paged fileview (CLI, not BT-gated)
 #include "System_TextWrapStream.h" // fileview wraps its page body as it is written
 #include "System_JsonPretty.h"    // fileview re-indents JSON like the web/OLED/G2 viewers
-#include "FileBrowser_FileKind.h" // which files fileview treats as JSON
+#include "System_FileKind.h" // which files fileview treats as JSON
 #include "System_CaptureCrypto.h" // reveal sealed captures for display (fileview is a presentation surface)
 #include "System_CommandRegistry.h"
 #if ENABLE_BLUETOOTH
-#include "Bluetooth.h"  // bleSessionConfidential/bleSendBinaryToSession — raw-binary `fileread ... bin`
+#include "BLE_Server.h"  // bleSessionConfidential/bleSendBinaryToSession — raw-binary `fileread ... bin`
 #include "System_CommandTypes.h"  // CommandContext: the command's session epoch
 #endif
 

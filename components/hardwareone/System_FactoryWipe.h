@@ -21,7 +21,7 @@
 // data on an SD card that was not mounted). Not reached: the SD card, and on
 // boards with a radio companion chip the WiFi network that chip last joined.
 //
-// Order and retry rules: FactoryWipePolicy.h.
+// Order and retry rules: System_FactoryWipePolicy.h.
 
 // Stores the request. False when it could not be made durable.
 bool factoryWipeArm();

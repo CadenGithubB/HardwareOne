@@ -57,7 +57,7 @@
 #include "System_STTVocabulary.h"
 #endif
 #include "HAL_Audio.h"
-#include "Transcription_UI_Policy.h"
+#include "System_TranscriptionUIPolicy.h"
 #endif
 #include "System_SensorStubs.h" // Stubs for disabled sensors
 #include "i2csensor_rda5807.h"             // fmRadioEnabled, radioInitialized, fmRadioBuildDataJSON

@@ -186,7 +186,7 @@ static CommandContext commandContext;
 static bool haveCommandContext = true;
 static void* currentCommandContext() { return haveCommandContext ? &commandContext : nullptr; }
 static TransportSessionEpoch liveEpoch = 41;
-// Bluetooth.cpp: an established Secure Channel or the phone link's console row,
+// BLE_Server.cpp: an established Secure Channel or the phone link's console row,
 // for this epoch; the body goes as a binary message or a BLOB chain, fenced on it.
 static bool bleSessionConfidential(uint16_t id, TransportSessionEpoch epoch) {
   check(id == expectedConnId, "existing connection ID is preserved");

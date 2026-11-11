@@ -3,8 +3,8 @@
 //
 // Production code: Arduino String (trim, substring, equalsIgnoreCase), the
 // command-name split in System_CommandLookupCore.h, phoneSecretCommand and
-// blePassphrasePolicyError (Bluetooth.cpp), internal secret storage
-// (System_Settings.cpp) and PBKDF2 (System_BleSecureCrypto.h). Two transport
+// blePassphrasePolicyError (BLE_Server.cpp), internal secret storage
+// (System_Settings.cpp) and PBKDF2 (BLE_SecureCrypto.h). Two transport
 // steps are modelled, with their sources:
 //   - the serial reader drops every CR and ends the line at LF
 //     (HardwareOne.cpp, loop() serial drain);
@@ -34,7 +34,7 @@ enum{SOURCE_SERIAL,SOURCE_BLUETOOTH,SOURCE_G2_GLASSES};
 static struct{int transport=SOURCE_SERIAL;} auth;
 static auto currentAuthContext(){return auth;}
 // The BLE role phonePipeReplaceSecret holds from the stop through the store
-// (Bluetooth.cpp; test_phone_secret checks it): always granted here.
+// (BLE_Server.cpp; test_phone_secret checks it): always granted here.
 enum class BleRoleTransition:uint8_t{PHONE_STOP};
 class BleRoleTransitionClaim{public:explicit BleRoleTransitionClaim(BleRoleTransition){}explicit operator bool()const{return true;}};
 static bool phonePipeStop(){return true;}

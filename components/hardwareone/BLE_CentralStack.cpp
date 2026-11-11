@@ -14,7 +14,7 @@
 #include "BLE_Peers.h"
 #include "BLE_PhonePipe.h"
 #include "BLE_SetupWorker.h"
-#include "Bluetooth.h"
+#include "BLE_Server.h"
 #include "G2_Glasses.h"
 #include "G2_Ring.h"
 #include "HAL_Bluetooth.h"

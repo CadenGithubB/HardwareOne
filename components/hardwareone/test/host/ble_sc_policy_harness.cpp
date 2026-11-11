@@ -1,9 +1,9 @@
 // Secure-channel policy harness for the BLE command ingress (test_ble_sc_policy.py).
 //
-// The production System_BleSecureChannel.cpp is compiled whole beside this file
+// The production BLE_SecureChannel.cpp is compiled whole beside this file
 // against the ble_sc_stubs/ headers, so bleScRequired, bleScEstablished, the
 // handshake and DATA-frame decryption are the real ones. The driver splices the
-// production ingress from Bluetooth.cpp into the /*@NAME@*/ slots below: the
+// production ingress from BLE_Server.cpp into the /*@NAME@*/ slots below: the
 // GATT write entry (processIncomingBleCommand), the deferred secure-frame and
 // plaintext jobs, the command tail with its file-browser gate, and the directed
 // and session senders. The fake GATT keeps one inbox per connection. write()
@@ -17,7 +17,7 @@
 #include "System_User.h"
 #include "System_Settings.h"
 #include "BLE_Types.h"
-#include "System_BleSecureChannel.h"
+#include "BLE_SecureChannel.h"
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -134,7 +134,7 @@ BaseType_t xSemaphoreTake(SemaphoreHandle_t, TickType_t wait) {
 BaseType_t xSemaphoreGive(SemaphoreHandle_t) { return pdTRUE; }
 static uint32_t millis() { return 1000; }
 
-// ---- Bluetooth.cpp context: connection table, lifecycle guard, fake GATT ----
+// ---- BLE_Server.cpp context: connection table, lifecycle guard, fake GATT ----
 struct BleConnection {
   bool active = false;
   uint16_t connId = 0;
@@ -155,7 +155,7 @@ static BleSystemState sState;
 static BleSystemState* gBleState = &sState;
 static std::atomic<TransportSessionEpoch> sBleSessionEpoch[BLE_MAX_CONNECTIONS];
 static std::atomic<int> sBleGattsIf{3};
-// Client-host posts made with the lifecycle guard released (Bluetooth.cpp).
+// Client-host posts made with the lifecycle guard released (BLE_Server.cpp).
 static std::atomic<int> sBleConsoleSendsInFlight{0};
 
 static int guardDepth = 0;
@@ -218,7 +218,7 @@ static int broadcastSends = 0;
 namespace hw1console { enum class Mode : uint8_t { Off, Server, ClientRegistered }; }
 static hw1console::Mode consoleMode = hw1console::Mode::Server;
 hw1console::Mode bleConsoleMode() { return consoleMode; }
-// Bluetooth.cpp's client-host check, in a pipe build.
+// BLE_Server.cpp's client-host check, in a pipe build.
 static bool bleConsoleClientHost() { return consoleMode == hw1console::Mode::ClientRegistered; }
 static int gateHeld = 0;
 bool bleCentralTxTryPhone(bool) { ++gateHeld; return true; }
@@ -319,7 +319,7 @@ struct Command {
 typedef void (*ExecAsyncCallback)(bool ok, const char* result, void* userData);
 typedef void (*DeferredFn)(void* arg);
 
-// Bluetooth.cpp's AuthBypass stamp rule (never on the phone link's console row).
+// BLE_Server.cpp's AuthBypass stamp rule (never on the phone link's console row).
 static bool bleRequiresLogin(uint16_t connId);
 static bool bleFillCommandAuth(uint16_t connId, AuthContext& auth, bool,
                                TransportSessionEpoch& epochOut) {
@@ -367,7 +367,7 @@ bool sendBleResponse(const char* data, size_t len, bool blocking = true);
 bool sendBleResponseToSession(uint16_t connId, TransportSessionEpoch expectedEpoch,
                               const char* data, size_t len, bool blocking = true);
 
-// ---- production blocks from Bluetooth.cpp ----------------------------------
+// ---- production blocks from BLE_Server.cpp ----------------------------------
 /*@FENCE_STRUCT@*/;
 /*@FENCE_LIVE@*/
 /*@SECURE_ONLY@*/

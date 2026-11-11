@@ -1,5 +1,5 @@
 /**
- * System_LLM_Menu.cpp - Guided-input menu: shared, thread-safe accessors over the
+ * System_LLMMenu.cpp - Guided-input menu: shared, thread-safe accessors over the
  * MENU section parsed from a model's info block, plus the llmmenu/llmask commands.
  *
  * The menu (curated corpus-exact question templates + entity rosters) is parsed at
@@ -21,7 +21,7 @@
 
 #include "System_LLM.h"
 #include "System_LLMBackend.h"     // keep agent routes separate from onboard guided prompts
-#include "System_LLM_Internal.h"   // gLLM, LLMMenuGroupDesc, lifecycle hooks, llmPsramFree
+#include "System_LLMInternal.h"   // gLLM, LLMMenuGroupDesc, lifecycle hooks, llmPsramFree
 #include "System_LLMChat.h"        // ChatParamOverride, chatBeginTurn, chatGetSessionId
 #include "System_Command.h"        // CommandArgs, argLeadingTokenIsJson
 #include "System_Debug.h"          // cliHint

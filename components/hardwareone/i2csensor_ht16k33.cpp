@@ -10,7 +10,7 @@
 #include "System_I2C.h"
 #include "System_Settings.h"
 #include "System_AuthIdentity.h"
-#include "HT16K33_Geometry.h"
+#include "i2csensor_ht16k33_geometry.h"
 #include "System_CommandRegistry.h"
 
 namespace {

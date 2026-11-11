@@ -2,7 +2,7 @@
 """Feed temple-forwarded ring frames to the production forwarded-telemetry parser.
 
 g2RingNoteForwardedTelemetry and its local protobuf helpers (G2_Ring.cpp) run
-with the shared g2Pb* readers (System_G2_Protocol.cpp), the production
+with the shared g2Pb* readers (G2_Protocol.cpp), the production
 R1TelemetryCache layout and the G2HealthMetric enum. The telemetry mutex, the
 direct-link ownership check, the Health live series and millis() are doubles.
 No G2 transport, temple bridge or ring is simulated.
@@ -49,8 +49,8 @@ def generated(component: Path, source_dir: Path | None) -> str:
         return (overlay if overlay is not None and overlay.exists() else component / name).read_text()
 
     ring = read("G2_Ring.cpp")
-    protocol = read("System_G2_Protocol.cpp")
-    protocol_h = read("System_G2_Protocol.h")
+    protocol = read("G2_Protocol.cpp")
+    protocol_h = read("G2_Protocol.h")
     health_h = read("G2_Health.h")
 
     types = [extract_block(protocol_h, "enum G2PbWire") + ";",

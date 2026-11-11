@@ -7,7 +7,7 @@
 #include "System_Settings.h"
 #include "System_VFS.h"
 #include "System_Utils.h"
-#include "Transcript_TextPolicy.h"
+#include "System_TranscriptTextPolicy.h"
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
 #include "BLE_Peers.h"
 #endif
@@ -150,7 +150,7 @@ bool TranscriptSession::write(const char* text, size_t length, bool first) {
   if (first) {
     // The header names the session's place in time two ways: the UTC start
     // when the clock was synced ("boot" otherwise) and the startup counters
-    // (Transcript_TextPolicy.h and System_BootState.h describe them). Session
+    // (System_TranscriptTextPolicy.h and System_BootState.h describe them). Session
     // is this boot's run number (the low half of the run id in the file name).
     // The title is the first phrase's leading words, the same rule as a note.
     char header[352];

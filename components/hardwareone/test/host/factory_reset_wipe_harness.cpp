@@ -42,7 +42,7 @@ namespace VFS {
 // The pipe secret is a device code (`phone pair new` marked it, phone link v2).
 static struct {String phonePipeSecret="fixture-secret";bool phonePipeSecretGenerated=true;} gSettings;
 static int pipeFailure=0;static bool keyCleared=false,enrollmentCleared=false,secretPersisted=false,generatedPersisted=true;
-// The BLE role token (Bluetooth.h): the reset holds PHONE_STOP from the pipe's
+// The BLE role token (BLE_Server.h): the reset holds PHONE_STOP from the pipe's
 // stop through the secret's clear, so no link start takes the old secret; it
 // is refused while another task holds the token. outsideRole counts the stop,
 // key drop and clear made without it.

@@ -1866,7 +1866,7 @@ G2 status snapshots. Bluetooth's web handler instead executed `bleinfo json`
 as an internal command, copied the result into a static 4 KiB buffer, parsed
 another JSON document, then copied that document into its response.
 
-`Bluetooth.cpp` now owns `buildBleInfoJson(JsonObject)`. Both the CLI JSON
+`BLE_Server.cpp` now owns `buildBleInfoJson(JsonObject)`. Both the CLI JSON
 command and web handler call it with their own document. The intermediate
 command, buffer and parse are removed. Successful CLI JSON and text output
 retain their existing schema and wording; command mutation/authentication paths
@@ -4713,14 +4713,14 @@ the [changelog](../CHANGELOG.md#09998---2026-10-12) for the release summary.
 
 | Module | Owner | What it now owns |
 |---|---|---|
-| `Bluetooth` | `bleRawNotifyToSession` | Now the only radio path for command-service output: each frame goes to one connection and is admitted under the lifecycle mutex only while its session epoch is live. The characteristic-wide raw notify is gone. |
-| `Bluetooth` | `sendBleResponseToSession` | The only targeted BLE send: a command result goes to the connection and session epoch it was admitted under, and is dropped after a logout or a new login on that connection. The connection-only sender is removed, and a BLE result never falls back to the console-mirror sessions. |
-| `System_BleSecureChannel` | `bleScHandleInbound` with the frame's connection and session epoch | Session-scoped secure-channel delivery: handshake replies go only to the connection and session a frame arrived on, and every secure frame goes through the directed sender. File commands, now including `imagedelete`, run only when the command itself arrived encrypted. |
-| `Bluetooth` | `bleCollectMirrorSessions` (private), `bleMirrorRecipientCount` | Console-mirror recipients: logged-in non-guest sessions, each through its own channel. The debug drain buffers BLE output only while the count is non-zero, and `outble` reports it. |
-| `Bluetooth` | `bleDisconnectConnection`, `bleDisconnectAppClients` | Disconnecting one app client or all of them, never a ring or G2 temple link. |
-| `Bluetooth` | `deinitBluetooth` result; `bleCaptureStatusSnapshot` (private) | Whether a server stop happened, which `closeble` and `blemode client` report and the companion reset honours; one guarded status snapshot behind `blestatus`, `bleread` and `bleinfo json`. |
+| `BLE_Server` | `bleRawNotifyToSession` | Now the only radio path for command-service output: each frame goes to one connection and is admitted under the lifecycle mutex only while its session epoch is live. The characteristic-wide raw notify is gone. |
+| `BLE_Server` | `sendBleResponseToSession` | The only targeted BLE send: a command result goes to the connection and session epoch it was admitted under, and is dropped after a logout or a new login on that connection. The connection-only sender is removed, and a BLE result never falls back to the console-mirror sessions. |
+| `BLE_SecureChannel` | `bleScHandleInbound` with the frame's connection and session epoch | Session-scoped secure-channel delivery: handshake replies go only to the connection and session a frame arrived on, and every secure frame goes through the directed sender. File commands, now including `imagedelete`, run only when the command itself arrived encrypted. |
+| `BLE_Server` | `bleCollectMirrorSessions` (private), `bleMirrorRecipientCount` | Console-mirror recipients: logged-in non-guest sessions, each through its own channel. The debug drain buffers BLE output only while the count is non-zero, and `outble` reports it. |
+| `BLE_Server` | `bleDisconnectConnection`, `bleDisconnectAppClients` | Disconnecting one app client or all of them, never a ring or G2 temple link. |
+| `BLE_Server` | `deinitBluetooth` result; `bleCaptureStatusSnapshot` (private) | Whether a server stop happened, which `closeble` and `blemode client` report and the companion reset honours; one guarded status snapshot behind `blestatus`, `bleread` and `bleinfo json`. |
 | `System_RadioCompanion` | `shutDownBleForCompanionReset` | The C6 companion reset stops the BLE server only through `deinitBluetooth`, up to three attempts 500 ms apart. If no attempt completes (the ring owner has not quiesced or the host teardown failed), the host is not forced down: the lifecycle fault keeps Bluetooth off and the reason is logged. |
-| `Bluetooth` | `blePlaintextDeferredInbound` (private) | Plaintext BLE commands run on the command executor like secure frames, not on the Bluetooth stack's task. |
+| `BLE_Server` | `blePlaintextDeferredInbound` (private) | Plaintext BLE commands run on the command executor like secure frames, not on the Bluetooth stack's task. |
 | `G2_Ring` | `ringcontrol` command | Ring collection and low-power controls; the web and OLED health pages submit it through their authorized executors, and the ring's help overview names it. |
 | `System_SensorLogging` | `healthstatus force-history` registry row | The admin freshness bypass is its own admin row, so every interface gets the registry's standard refusal and `help` lists it; the plain `healthstatus` handler refuses the verb instead of running it. The web Health page maps only the registry's admin refusal to 403. |
 | `G2_Ring`, `R1_HealthHistoryStore` | Daily history acknowledgement and day loading | A daily history page from a 2.2.9 ring is acknowledged only after the Health model accepted it. A stored day that cannot be opened loads as a read failure and is merged into, never replaced; a corrupt day is retried, then that sweep is dropped. |
@@ -4732,7 +4732,7 @@ the [changelog](../CHANGELOG.md#09998---2026-10-12) for the release summary.
 | `G2_Page_Common.h` | `g2ShowListPageAndPublish` | A page's sub-mode and row map are published only after the lens accepted the render. Power, Files, Settings, Camera Settings, LED, Sensors and Automations use it. |
 | G2 Network, Files and Sensors pages | `queuePendingViewRedraw`, `filesQueueListRedraw`, `redrawSensorsDetailIfCurrent` (private), on the shared `g2EnqueueRedraw` | Fenced redraws: watchdogs, scan workers and completions publish state and queue a redraw that the lens drops if the menu generation moved. They never draw from their own task. |
 | `G2_Page_Network` | Rendered row actions | Every Network submenu dispatches from the row actions it rendered, so a radio or server change after the render cannot change what a tap does. |
-| `FileBrowser_FileKind.h` | `fileKindForName` | One file classifier for the G2 and OLED file browsers. |
+| `System_FileKind.h` | `fileKindForName` | One file classifier for the G2 and OLED file browsers. |
 | `System_Automation` | `automationCopySummaries`, `automationFindSummary` | Copied list summaries built by the owner's trigger parser; neither display page opens the automations file. |
 | `G2_Page_Files` | Files page recursive mutex | File-manager use, the row buffers and the chooser state, on every task. |
 | `QuickNote_Store` | `QuickNoteStore::sweep` | Removal of interrupted-save temporaries on both storage tiers. |

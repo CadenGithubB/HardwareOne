@@ -111,7 +111,7 @@ def constants():
         "kFixtureIdentityFileVersion": ("uint8_t", find(r"\bkIdentityFileVersion = (\d+);", identity)),
         "kFixturePeerFileVersion": ("uint8_t", find(r"\bkPeerFileVersion = (\d+);", identity)),
         "kFixtureScLabel": ("const char*", '"%s"' % find(r'SC_INFO\[\]\s*=\s*"([^"]+)"',
-                                                         COMPONENT / "System_BleSecureChannel.cpp")),
+                                                         COMPONENT / "BLE_SecureChannel.cpp")),
         "kFixtureCm5Version": ("const char*", '"%s"' % find(r'kProtocolVersion = "(\d+)";',
                                                             COMPONENT / "System_Cm5HostControl.cpp")),
         "kFixturePipeLabel": ("const char*", '"%s"' % find(r'kPipeLabel\[\]\s*=\s*"([^"]+)"',

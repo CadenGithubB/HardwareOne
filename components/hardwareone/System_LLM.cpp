@@ -44,11 +44,11 @@
 
 #include "System_LLM.h"
 #include "System_Mutex.h"
-#include "System_LLM_Internal.h"  // private engine types + gLLM runtime singleton
-#include "System_LLM_Kernels.h"   // rmsnorm/layernorm/softmax/wmatmul/scaleCount
-#include "System_LLM_Sampler.h"   // sample()
-#include "System_LLM_Tokenizer.h" // encode / decode / loadTokenizerFromFile / freeTokenizer
-#include "System_LLM_Model.h"     // loadWeights
+#include "System_LLMInternal.h"  // private engine types + gLLM runtime singleton
+#include "System_LLMKernels.h"   // rmsnorm/layernorm/softmax/wmatmul/scaleCount
+#include "System_LLMSampler.h"   // sample()
+#include "System_LLMTokenizer.h" // encode / decode / loadTokenizerFromFile / freeTokenizer
+#include "System_LLMModel.h"     // loadWeights
 #include "System_Command.h"
 #include "System_Debug.h"
 #include "System_MemUtil.h"
@@ -101,9 +101,9 @@
 static constexpr float GELU_COEFF_A = 0.7978845608f;  // sqrt(2/pi)
 static constexpr float GELU_COEFF_B = 0.044715f;
 
-// (LOGIT_CLAMP_MAX/MIN moved to System_LLM_Sampler.cpp with the sampler.)
+// (LOGIT_CLAMP_MAX/MIN moved to System_LLMSampler.cpp with the sampler.)
 
-// (READ_CHUNK_SIZE moved to System_LLM_Model.cpp with the loader.)
+// (READ_CHUNK_SIZE moved to System_LLMModel.cpp with the loader.)
 
 // EOS token IDs by architecture
 static constexpr int EOS_TOKEN_LLAMA = 2;   // Llama/SentencePiece
@@ -121,14 +121,14 @@ static constexpr int YIELD_INTERVAL      = 1;   // vTaskDelay every N generated 
 static constexpr int HEALTH_LOG_INTERVAL = 16;   // log generation health every N tokens
 
 // ============================================================================
-// 2. Data Structures — moved to System_LLM_Internal.h
+// 2. Data Structures — moved to System_LLMInternal.h
 //    TransformerWeights, RunState, the tokenizer structs, and the LlmRuntime
 //    singleton type now live in the shared internal header so the kernels,
 //    sampler, tokenizer, and model-loader TUs operate on the same `gLlm`.
 // ============================================================================
 
 // ============================================================================
-// 3. Module State — LlmRuntime type defined in System_LLM_Internal.h
+// 3. Module State — LlmRuntime type defined in System_LLMInternal.h
 // ============================================================================
 
 // PSRAM-resident: the runtime struct's always-on inline footprint (~2 KB —
@@ -360,7 +360,7 @@ void setLlmError(const char* fmt, ...) {
 }
 
 // ============================================================================
-// 5. Math Primitives  →  moved to System_LLM_Kernels.{h,cpp}
+// 5. Math Primitives  →  moved to System_LLMKernels.{h,cpp}
 //    rmsnorm, layernorm, softmax, scaleCount, the quant matmuls, and wmatmul.
 //    They are pure functions (no engine state) — the compute seam for SIMD /
 //    per-target backends. forward() and the sampler call them via the header.
@@ -807,18 +807,18 @@ static float* forward(int token, int pos, const ForwardDebugLatch& debug) {
 }
 
 // ============================================================================
-// 8. Sampling  →  moved to System_LLM_Sampler.{h,cpp}
+// 8. Sampling  →  moved to System_LLMSampler.{h,cpp}
 //    sample_argmax/sample_topp (static there), sample().
 //    forward()/llmGenerate call sample() via the header.
 // ============================================================================
 
 // ============================================================================
-// 9. Tokenizer  →  moved to System_LLM_Tokenizer.{h,cpp}
+// 9. Tokenizer  →  moved to System_LLMTokenizer.{h,cpp}
 //    loadTokenizerFromFile / freeTokenizer / encode / decode (called via header).
 // ============================================================================
 
 // ============================================================================
-// 10. Model Loading  →  moved to System_LLM_Model.{h,cpp}
+// 10. Model Loading  →  moved to System_LLMModel.{h,cpp}
 //    loadWeights() (called by llmLoadModel via header); helpers + LoadContext
 //    are static inside that TU.
 // ============================================================================
@@ -833,7 +833,7 @@ void llmInit() {
   SemaphoreHandle_t mutex = llmRuntimeMutex();
   if (mutex && xSemaphoreTake(mutex, portMAX_DELAY) == pdTRUE) {
     // Serialize the menu's lazy lock creation as part of initialization too.
-    llmMenuInit();   // create the guided-menu lock (System_LLM_Menu.cpp)
+    llmMenuInit();   // create the guided-menu lock (System_LLMMenu.cpp)
     xSemaphoreGive(mutex);
   }
 }
@@ -1218,7 +1218,7 @@ int llmGenerate(const char* prompt, LlmTokenCallback tokenCb,
   if (gSettings.llmDomainGate && gLlm.domainVocabCount > 0) {
     // Do:-mode prompts (natural-language → device command) are machine-parsed and
     // must bypass the gate. The app frames them "...\nDo:", but BLE intake
-    // (Bluetooth.cpp) normalizes \n→space, so over BLE it arrives as "... Do:";
+    // (BLE_Server.cpp) normalizes \n→space, so over BLE it arrives as "... Do:";
     // norm_prompt (which restores the newline) isn't built until below, so detect
     // BOTH forms on the raw prompt here — otherwise a domain-gated model refuses
     // every BLE command instead of translating it.
@@ -1325,7 +1325,7 @@ int llmGenerate(const char* prompt, LlmTokenCallback tokenCb,
   char* norm_prompt = (char*)ps_alloc(promptBytes, AllocPref::PreferPsram, "llm.prompt.norm");
   if (norm_prompt) memcpy(norm_prompt, prompt, promptBytes);
   if (norm_prompt) {
-    // BLE intake (Bluetooth.cpp processBleCommandLine) normalizes \r\n\t → space,
+    // BLE intake (BLE_Server.cpp processBleCommandLine) normalizes \r\n\t → space,
     // so the app's "Q: ...\nA:" / "Q: ...\nDo:" framing arrives as "Q: ... A:" /
     // "Q: ... Do:". Restore the trailing newline the model was trained on, so the
     // tokenizer emits the A:(4)/Do:(5) special token as the last prompt token and

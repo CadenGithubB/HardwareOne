@@ -53,7 +53,7 @@ def unit_source():
                  'struct DictationAppSnapshot', 'struct DictationAppOptions'):
         types += extract_block(dictation, name) + ';\n'
     policies = '\n'.join(clean((COMPONENT / name).read_text()) for name in
-                         ('Transcript_PathPolicy.h', 'Transcript_TextPolicy.h', 'Transcription_UI_Policy.h', 'QuickNote_Policy.h'))
+                         ('System_TranscriptPathPolicy.h', 'System_TranscriptTextPolicy.h', 'System_TranscriptionUIPolicy.h', 'QuickNote_Policy.h'))
     policies += '\n' + between(header, '// How the last note ended.', '#else')
     parser = extract_block((COMPONENT / 'System_Command.h').read_text(), 'class CommandArgs') + \
         ';\nconst String CommandArgs::empty_;\n'

@@ -269,7 +269,7 @@ static void esp_ble_gap_security_rsp(uint8_t*,bool accept){assert(!accept);++sec
 // Every wipe is noted, so a test can see a stack copy of the key wiped.
 static std::vector<const void*> memzeroed;
 static void sodium_memzero(void* p,size_t n){memzeroed.push_back(p);std::memset(p,0,n);}
-// The pipe key's PBKDF2 (System_BleSecureCrypto.h): a fake derivation of the
+// The pipe key's PBKDF2 (BLE_SecureCrypto.h): a fake derivation of the
 // secret, never under the owner mutex. onPbkdf2 runs in its middle, as a
 // secret change racing a start does (the real one yields every 4096 rounds).
 static int sodium_init(){return 0;}
@@ -514,7 +514,7 @@ static void blePeerRequestReseek(int kind){assert(kind==BLE_PEER_PHONE && ownerD
 // esp_random() returns these in turn: the code they make is known to the test.
 static uint32_t randomWords[3]={0x1d2c3b4au,0x5f6e7d8cu,0x13579bdfu};static unsigned randomCalls=0;
 static uint32_t esp_random(){return randomWords[randomCalls++%3];}
-// The `phone secret` steps (Bluetooth.cpp, run by test_phone_secret): the real
+// The `phone secret` steps (BLE_Server.cpp, run by test_phone_secret): the real
 // stop and key invalidation, then the store, recorded. replaceFail makes the
 // store step fail, before (false) or after (true) the secret changed.
 bool phonePipeStop();bool phonePipeInvalidateSecret();

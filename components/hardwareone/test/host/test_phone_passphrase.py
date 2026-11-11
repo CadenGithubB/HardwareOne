@@ -39,6 +39,8 @@ def fixture(vectors):
     return {
         'description': 'HW1-PIPE-v1 X3: the same text entered in the Android app and typed into the P4 as '
                        '"phone secret <text>" over serial. Synthetic passphrases only.',
+        # The fixture is pinned by its SHA-256 and shared with the app, so this text
+        # keeps the file name it was generated under. Bluetooth.cpp is BLE_Server.cpp today.
         'generated_by': 'components/hardwareone/test/host/phone_passphrase_vectors.cpp: production Arduino String, '
                         'System_CommandLookupCore.h, phoneSecretCommand and blePassphrasePolicyError '
                         '(Bluetooth.cpp), setInternalSecretSetting and scPbkdf2',
@@ -71,7 +73,7 @@ if __name__ == '__main__':
     parser.add_argument('--crypto-build', type=Path, help='Reuse an already built native crypto directory')
     parser.add_argument('--write-vectors', action='store_true', help='Explicitly regenerate the fixture')
     args = parser.parse_args()
-    bt = (COMPONENT / 'Bluetooth.cpp').read_text()
+    bt = (COMPONENT / 'BLE_Server.cpp').read_text()
     settings = (COMPONENT / 'System_Settings.cpp').read_text()
     utils = (COMPONENT / 'System_Utils.cpp').read_text()
     production = '\n'.join([extract_block(utils, 'void secureClearString('),

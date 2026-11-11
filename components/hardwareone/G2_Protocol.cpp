@@ -1,4 +1,4 @@
-#include "System_G2_Protocol.h"
+#include "G2_Protocol.h"
 
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
 

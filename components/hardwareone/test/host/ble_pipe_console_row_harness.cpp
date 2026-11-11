@@ -1,5 +1,5 @@
 // The phone link's console row (phone link v2), as shipped:
-// test_ble_pipe_console_row.py inserts Bluetooth.cpp's session table, epoch
+// test_ble_pipe_console_row.py inserts BLE_Server.cpp's session table, epoch
 // helpers, the console row's lifecycle, the auth rule, revocation, the
 // disconnect owner functions, the command tail, the record ingress, the output
 // router and design A's slot helpers, and System_OTA.cpp's
@@ -119,7 +119,7 @@ static void systemEventPost(uint8_t kind, const char* = nullptr, const char* = n
   if (kind == SYSEVT_BLE_DISCONNECTED) ++disconnectedEvents;
 }
 
-// The Secure Channel (System_BleSecureChannel.h): established per link id; an
+// The Secure Channel (BLE_SecureChannel.h): established per link id; an
 // encrypted send is recorded with its binding and whether it is binary.
 struct BleScBinding { uint16_t connId = 0; TransportSessionEpoch epoch = 0; uint32_t generation = 0; };
 static std::set<uint16_t> scEstablished;
@@ -269,7 +269,7 @@ static BLEServer gServer;
 static BLEServer* pServer = nullptr;
 #define ENABLE_OLED_DISPLAY 0
 
-// The senders' public declarations (Bluetooth.h's defaults).
+// The senders' public declarations (BLE_Server.h's defaults).
 bool sendBleResponseToSession(uint16_t connId, TransportSessionEpoch expectedEpoch,
                               const char* data, size_t len, bool blocking = true);
 bool sendBleResponse(const char* data, size_t len, bool blocking = true);

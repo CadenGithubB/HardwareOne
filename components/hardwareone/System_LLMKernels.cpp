@@ -1,5 +1,5 @@
 /**
- * System_LLM_Kernels.cpp - Math kernels for the on-device LLM forward pass.
+ * System_LLMKernels.cpp - Math kernels for the on-device LLM forward pass.
  *
  * Extracted verbatim from System_LLM.cpp (no behavioral change). Pure functions
  * over explicit buffers — no engine global state — forming the compute seam for
@@ -11,7 +11,7 @@
 #include "System_BuildConfig.h"
 #if ENABLE_LLM_SOURCE_ONBOARD
 
-#include "System_LLM_Kernels.h"
+#include "System_LLMKernels.h"
 #include <cmath>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"

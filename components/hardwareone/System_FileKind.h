@@ -1,4 +1,4 @@
-// FileBrowser_FileKind.h - what the on-device file browsers can do with a file
+// System_FileKind.h - what the on-device file browsers can do with a file
 //
 // The OLED file browser and the G2 lens Files page both classify a file with
 // fileKindForName, so the same file gets the same viewer on both. The kind

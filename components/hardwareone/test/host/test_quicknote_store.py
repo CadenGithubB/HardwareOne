@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Actual QuickNote store (create/list/read/delete) against a fake guarded VFS.
 
-QuickNote_Store.cpp, QuickNote_Policy.h, Transcript_PathPolicy.h and the
+QuickNote_Store.cpp, QuickNote_Policy.h, System_TranscriptPathPolicy.h and the
 production filesystem path normalizer compile unchanged. The guarded VFS is an
 in-memory tree whose permission decision is the production transcript owner
 mask (TranscriptPathPolicy::permissionMask) with the role tiers
@@ -38,7 +38,7 @@ def main():
     args = parser.parse_args()
     component = args.component.resolve()
     policies = '\n'.join(clean((component / name).read_text()) for name in
-                         ('Transcript_PathPolicy.h', 'Transcript_TextPolicy.h', 'Transcription_UI_Policy.h', 'QuickNote_Policy.h'))
+                         ('System_TranscriptPathPolicy.h', 'System_TranscriptTextPolicy.h', 'System_TranscriptionUIPolicy.h', 'QuickNote_Policy.h'))
     normalizer = function((component / 'System_Filesystem.cpp').read_text(), 'bool normalizeFsPath(')
     store = (clean((component / 'QuickNote_Store.h').read_text()) +
              clean((component / 'QuickNote_Store.cpp').read_text()))

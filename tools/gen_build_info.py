@@ -506,7 +506,7 @@ def source_versions(enabled, firmware="", argv=None, companion=False):
             _match(r"^constexpr uint32_t kBackupFormatVersion = (\d+);", hw + "WebServer_MigrationTool.h"))
     if enabled("ENABLE_BLUETOOTH"):
         add("ble_console_channel", "BLE console channel",
-            _match(r'SC_INFO\[\]\s*=\s*"([^"]+)"', hw + "System_BleSecureChannel.cpp"))
+            _match(r'SC_INFO\[\]\s*=\s*"([^"]+)"', hw + "BLE_SecureChannel.cpp"))
     if enabled("ENABLE_BLUETOOTH") and enabled("ENABLE_BLE_PHONE_PIPE"):
         add("phone_link", "Phone link", "v" + _match(r"\bkVersion = (\d+)", hw + "BLE_PhonePipeCore.h"))
         add("phone_pipe_channel", "Phone pipe channel",

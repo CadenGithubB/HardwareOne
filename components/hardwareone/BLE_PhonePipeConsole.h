@@ -1,7 +1,7 @@
 #pragma once
 // The app console as stream slot 2 of the phone pipe (phone link v2): the
 // console driver between the pipe owner (BLE_PhonePipe.cpp, which owns the
-// Session under its mutex) and the BLE session rows (Bluetooth.cpp, under the
+// Session under its mutex) and the BLE session rows (BLE_Server.cpp, under the
 // lifecycle lock). Records are BLE_PhonePipeConsoleCore.h's.
 //
 // Locks, outermost first: the console chain mutex (L1, this module), the pipe

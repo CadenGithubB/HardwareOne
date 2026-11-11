@@ -20,7 +20,7 @@ Where things live (all in `components/hardwareone/`):
 | Status words every surface shows | `BLE_LinkStatusCore.h` (pure), one snapshot in `BLE_LinkStatus.h` |
 | Which link may hold a console slot, and when | `BLE_ConsoleAttachCore.h` (pure) |
 | The pipe's link record | `phonePipeLinkRecord()` in `BLE_PhonePipe.h` |
-| Registration, admission, Secure Channel, TX gate, commands | `Bluetooth.cpp` |
+| Registration, admission, Secure Channel, TX gate, commands | `BLE_Server.cpp` |
 | Teardown hooks | `bluetoothHalDeinit()` in `HAL_Bluetooth.cpp` |
 
 ## Two roles, one phone link

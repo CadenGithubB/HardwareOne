@@ -1,4 +1,4 @@
-#include "Audio_VadPolicy.h"
+#include "System_AudioVadPolicy.h"
 #include <algorithm>
 #include <array>
 #include <cassert>

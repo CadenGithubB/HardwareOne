@@ -129,7 +129,7 @@ def parse_envelope(raw: bytes) -> Envelope:
     if idx == tot and len(body) >= 2:
         pb, crc = body[:-2], int.from_bytes(body[-2:], "little")
         # CRC-16/CCITT-FALSE over JUST the pb payload, little-endian
-        # (G2_PROTOCOL.md "CRC"; System_G2_Protocol.cpp g2BuildEnvelope).
+        # (G2_PROTOCOL.md "CRC"; G2_Protocol.cpp g2BuildEnvelope).
         crc_ok = crc16_ccitt_false(pb) == crc
     else:
         pb = body
@@ -151,7 +151,7 @@ SETTING_PKG_FIELDS = {1: "commandId", 2: "magicRandom", 3: "deviceReceiveInfoFro
                       6: "deviceRespondToApp", 7: "appRespondToDevice"}
 # DeviceReceiveRequestFromAPP. The glasses answer a BASIC read by echoing this
 # message back in OUTER FIELD 4 with every setting populated (observed on real
-# glasses; System_G2_Protocol.cpp). Outer field 6 Device_Respond_To_App is a
+# glasses; G2_Protocol.cpp). Outer field 6 Device_Respond_To_App is a
 # 2-field ack the firmware never emits for reads.
 SETTING_REQUEST_FIELDS = {
     1: "settingInfoType", 2: "autoBrightnessLevel", 3: "yCoordinateLevelRestored",

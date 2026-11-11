@@ -44,7 +44,7 @@ accessory qualification is implied.
 
 ## Shared voice-activity decision policy
 
-`components/hardwareone/Audio_VadPolicy.h` now holds the common amplitude
+`components/hardwareone/System_AudioVadPolicy.h` now holds the common amplitude
 threshold decision used by the existing recorder and the P4 continuous
 segmenter. Its ambient-relative gate is `max(silenceFloor, 2 * ambientFloor)`;
 its endpoint gate additionally includes `peak / 8`. Speech onset requires a

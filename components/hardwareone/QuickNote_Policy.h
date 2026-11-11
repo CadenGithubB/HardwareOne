@@ -25,7 +25,7 @@
 //
 // It is named <Created>-<Id>.txt inside /<root>/u<accountId>/notes/, root
 // /sd/stt or /stt. That folder is inside the private transcript tree, so
-// Transcript_PathPolicy classifies it Owner(accountId) with no policy change.
+// System_TranscriptPathPolicy classifies it Owner(accountId) with no policy change.
 // Boot and Uptime-s are optional (notes saved before they existed lack them):
 // they let a list say how long ago a "boot" note was saved in this boot, and
 // let the service give it its real time once the clock is set that boot.
@@ -37,8 +37,8 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "Transcript_PathPolicy.h"
-#include "Transcript_TextPolicy.h"
+#include "System_TranscriptPathPolicy.h"
+#include "System_TranscriptTextPolicy.h"
 
 namespace QuickNotePolicy {
 
@@ -163,7 +163,7 @@ inline bool noteMicParse(const char* text, size_t length, Mic* out) {
 
 // --- Words, title and junk ----------------------------------------------------
 // Words and the title are the shared speech-text rules in
-// Transcript_TextPolicy.h (transcripts use the same ones); these names keep
+// System_TranscriptTextPolicy.h (transcripts use the same ones); these names keep
 // QuickNote's callers and tests unchanged.
 constexpr size_t kTitleMax = TranscriptText::kTitleMax;
 inline bool noteGap(unsigned char c) { return TranscriptText::gap(c); }
@@ -302,7 +302,7 @@ inline bool g2NotePath(const char* path) {
 // True only for a canonical note file path, "<noteFolder>/<note file name>",
 // as the guarded VFS's normalizer spells it. Backslashes, dot segments,
 // alternate case, FAT 8.3 aliases and anything outside an owner's notes folder
-// are rejected; Transcript_PathPolicy decides the owner. Outputs are optional.
+// are rejected; System_TranscriptPathPolicy decides the owner. Outputs are optional.
 inline bool notePathParse(const char* path, uint32_t* owner, bool* sd,
                           char* created, uint64_t* id) {
   const TranscriptPathPolicy::Path where = TranscriptPathPolicy::classify(path);

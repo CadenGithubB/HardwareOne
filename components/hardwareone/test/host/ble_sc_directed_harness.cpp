@@ -1,9 +1,9 @@
 // Two-peer routing harness for the BLE Secure Channel (test_ble_sc_directed.py).
 //
-// The production System_BleSecureChannel.cpp is compiled whole beside this file
+// The production BLE_SecureChannel.cpp is compiled whole beside this file
 // against the ble_sc_stubs/ headers. The driver splices the production directed
 // raw sender, session sender, console-mirror entry and deferred inbound job from
-// Bluetooth.cpp into the /*@NAME@*/ slots below. The fake GATT keeps one inbox
+// BLE_Server.cpp into the /*@NAME@*/ slots below. The fake GATT keeps one inbox
 // per connection: a directed esp_ble_gatts_send_indicate lands in the addressed
 // connection's inbox only, and the characteristic-wide notify (bleRawNotify, the
 // pre-fix primitive, modeled on the Arduino wrapper's notify()) lands in every
@@ -14,7 +14,7 @@
 #include "System_User.h"
 #include "System_Settings.h"
 #include "BLE_Types.h"
-#include "System_BleSecureChannel.h"
+#include "BLE_SecureChannel.h"
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -125,7 +125,7 @@ BaseType_t xSemaphoreGive(SemaphoreHandle_t) {
   return pdTRUE;
 }
 
-// ---- Bluetooth.cpp context: connection table, lifecycle guard, fake GATT ----
+// ---- BLE_Server.cpp context: connection table, lifecycle guard, fake GATT ----
 struct BleConnection {
   bool active = false;
   uint16_t connId = 0;
@@ -146,7 +146,7 @@ static BleSystemState sState;
 static BleSystemState* gBleState = &sState;
 static std::atomic<TransportSessionEpoch> sBleSessionEpoch[BLE_MAX_CONNECTIONS];
 static std::atomic<int> sBleGattsIf{3};
-// Client-host posts made with the lifecycle guard released (Bluetooth.cpp).
+// Client-host posts made with the lifecycle guard released (BLE_Server.cpp).
 static std::atomic<int> sBleConsoleSendsInFlight{0};
 
 static int guardDepth = 0;
@@ -201,7 +201,7 @@ static void (*afterWireHook)() = nullptr;  // runs after each frame leaves
 namespace hw1console { enum class Mode : uint8_t { Off, Server, ClientRegistered }; }
 static hw1console::Mode consoleMode = hw1console::Mode::Server;
 hw1console::Mode bleConsoleMode() { return consoleMode; }
-// Bluetooth.cpp's client-host check, in a pipe build.
+// BLE_Server.cpp's client-host check, in a pipe build.
 static bool bleConsoleClientHost() { return consoleMode == hw1console::Mode::ClientRegistered; }
 static bool gateBusy = false;           // another submission holds the gate
 static bool accessoryPressure = false;  // glasses/ring traffic in flight
@@ -244,7 +244,7 @@ esp_err_t esp_ble_gatts_send_indicate(esp_gatt_if_t gattsIf, uint16_t connId, ui
   return ESP_OK;
 }
 
-// The characteristic-wide primitive the pre-fix sources call (Bluetooth.cpp's
+// The characteristic-wide primitive the pre-fix sources call (BLE_Server.cpp's
 // bleRawNotify → Arduino BLECharacteristic::notify()): one shared value, sent
 // to every connected peer, with no session check. Fixed sources never call it.
 bool bleRawNotify(const char* data, size_t len) {
@@ -276,7 +276,7 @@ bool sendBleResponse(const char* data, size_t len, bool blocking = true);
 bool sendBleResponseToSession(uint16_t connId, TransportSessionEpoch expectedEpoch,
                               const char* data, size_t len, bool blocking = true);
 
-// ---- production blocks from Bluetooth.cpp ----------------------------------
+// ---- production blocks from BLE_Server.cpp ----------------------------------
 /*@FENCE_STRUCT@*/;
 /*@FENCE_LIVE@*/
 /*@SECURE_ONLY@*/

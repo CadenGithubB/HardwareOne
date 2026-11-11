@@ -2,7 +2,7 @@
 // test_ble_display_login_lockout.py inserts, unchanged, the credential attempt
 // table and loginTransport from System_User.cpp, the System_User.h table
 // declarations, and BleLoginAsyncJob, bleLoginJobFree and bleLoginDeferred
-// from Bluetooth.cpp. Everything they reach outside themselves is a double
+// from BLE_Server.cpp. Everything they reach outside themselves is a double
 // here: the clock, the critical section, the filesystem lock, the password
 // check, the BLE binder and sender, the console session publishers, the audit
 // line and the event register.

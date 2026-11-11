@@ -16,8 +16,8 @@ def main():
     args = parser.parse_args()
     source = (COMPONENT / 'G2_Glasses.cpp').read_text()
     adapter = source[source.index('// Native Terminal adapter.'):source.index('// End native Terminal adapter.')]
-    header = (COMPONENT / 'System_G2_Protocol.h').read_text().replace('#include "System_BuildConfig.h"', '').replace('#include <Arduino.h>', '')
-    protocol = (COMPONENT / 'System_G2_Protocol.cpp').read_text().replace('#include "System_G2_Protocol.h"', '').replace('#include <Arduino.h>', '')
+    header = (COMPONENT / 'G2_Protocol.h').read_text().replace('#include "System_BuildConfig.h"', '').replace('#include <Arduino.h>', '')
+    protocol = (COMPONENT / 'G2_Protocol.cpp').read_text().replace('#include "G2_Protocol.h"', '').replace('#include <Arduino.h>', '')
     globals_ = source[source.index('// Native Terminal owns its own lifecycle,'):source.index('// =============================================================================\n// Constants')]
     harness = (HERE / 'g2_native_terminal_harness.cpp').read_text()
     harness = harness.replace('// INSERT_PROTOCOL', header + '\n' + protocol)

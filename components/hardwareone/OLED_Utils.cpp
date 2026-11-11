@@ -8,7 +8,7 @@
 #include "OLED_Display.h"
 #include <esp_app_desc.h>
 #include "OLED_UI.h"
-#include "Bluetooth.h"
+#include "BLE_Server.h"
 #if ENABLE_BLUETOOTH
 #include "BLE_PhonePipe.h"  // phonePipeActive (oledBluetoothToggleCommand)
 #include "G2_Glasses.h"     // isG2ClientInitialized (oledBluetoothToggleCommand)
@@ -2868,7 +2868,7 @@ uint32_t OledConsoleBuffer::getTimestamp(int index) const {
 #include "System_User.h"
 
 #if ENABLE_BLUETOOTH
-#include "Bluetooth.h"
+#include "BLE_Server.h"
 #endif
 
 // Get specific action text for Bluetooth X button based on current state

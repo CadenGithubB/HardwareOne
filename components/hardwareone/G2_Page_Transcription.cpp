@@ -13,7 +13,7 @@
 #include "BLE_Peers.h"
 #include "System_MemUtil.h"
 #include "System_TextPager.h"
-#include "Transcription_UI_Policy.h"
+#include "System_TranscriptionUIPolicy.h"
 #include <ArduinoJson.h>
 #include <algorithm>
 #include <cstring>

@@ -52,8 +52,8 @@ inline esp_err_t esp_ble_tx_power_set(int, esp_power_level_t) {
   return ++powerCalls == powerFailAt ? 91 : ESP_OK;
 }
 """,
-    # The console owner's hooks (Bluetooth.h); checks.cpp records each call.
-    "Bluetooth.h": """#pragma once
+    # The console owner's hooks (BLE_Server.h); checks.cpp records each call.
+    "BLE_Server.h": """#pragma once
 void bleConsoleHostTeardownBegin();
 void bleConsoleHostTeardownEnd(bool stopped);
 """,
@@ -96,7 +96,7 @@ struct BLEDevice {
 CHECKS = r"""
 #include "HAL_Bluetooth.h"
 #include <assert.h>
-#include "Bluetooth.h"
+#include "BLE_Server.h"
 #include <string.h>
 int mockHost=0, mockController=0, initCalls=0, powerCalls=0, powerFailAt=-1;
 bool mockInitialized=false, initFail=false, stopFail=false, stopLeavesController=false;

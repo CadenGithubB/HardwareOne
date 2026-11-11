@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run the phone link's console row (phone link v2) as shipped.
 
-The app console is stream slot 2 of the phone pipe. Bluetooth.cpp keeps its
+The app console is stream slot 2 of the phone pipe. BLE_Server.cpp keeps its
 session as a gBleState row with its own id (0x8000 | generation), bound signed
 out when the stream opens and ended when it closes; its output goes to the
 console driver (BLE_PhonePipeConsole.h) as records. This suite splices the
@@ -59,8 +59,8 @@ def found(pattern: str, text: str, what: str) -> str:
 
 
 def generated(component: Path) -> str:
-    owner = (component / "Bluetooth.cpp").read_text()
-    header = (component / "Bluetooth.h").read_text()
+    owner = (component / "BLE_Server.cpp").read_text()
+    header = (component / "BLE_Server.h").read_text()
     ota = (component / "System_OTA.cpp").read_text()
     user_h = (COMPONENT / "System_User.h").read_text()
     types_h = (COMPONENT / "System_CommandTypes.h").read_text()
@@ -93,13 +93,13 @@ def generated(component: Path) -> str:
                     r"^static hw1console::Attach sBleConsoleAttach;",
                     r"^static hw1console::Slot sBleConsoleLogged;",
                     r"^static std::atomic<int> sBleConsoleSlotConnId\{[^}]*\};"):
-        types.append(found(pattern, owner, f"Bluetooth.cpp declares {pattern}"))
+        types.append(found(pattern, owner, f"BLE_Server.cpp declares {pattern}"))
     types.append(extract_block(owner, "static inline bool bleConsoleClientHost() "))
 
     definitions = [
         extract_block(owner, "class BleLifecycleGuard") + ";",
         found(r"^std::atomic<TransportSessionEpoch> sBleSessionEpoch\[BLE_MAX_CONNECTIONS\];", owner,
-              "Bluetooth.cpp keeps a session epoch per slot"),
+              "BLE_Server.cpp keeps a session epoch per slot"),
         "#define PIPE_HOST_LIFECYCLE_HELD() (gLifecycle.depth != 0)",
         pipe_host.PIPE_DOUBLES,
         pipe_host.declarations(owner, pipe_host.ROW_MARKERS + pipe_host.ROUTER_MARKERS),
@@ -147,7 +147,7 @@ def generated(component: Path) -> str:
         "static void processBleCommandLine(",
         "static bool bleSecureChannelOnly(")]
     definitions.append(found(r"^constexpr uint8_t kBlePipeRecordCommand = [^;]+;", owner,
-                             "Bluetooth.cpp names the console's inbound records"))
+                             "BLE_Server.cpp names the console's inbound records"))
     definitions.append(extract_block(owner, "void blePipeConsoleInbound("))
     definitions.append(extract_block(owner, "static BleSystemState* bleNewState("))
     definitions += pipe_host.row_definitions(owner)
@@ -181,7 +181,7 @@ def generated(component: Path) -> str:
 
 
 def check_sources(component: Path) -> None:
-    owner = (component / "Bluetooth.cpp").read_text()
+    owner = (component / "BLE_Server.cpp").read_text()
     code = "\n".join(line.split("//", 1)[0] for line in owner.splitlines())
     # Every call into the pipe's console driver or owner goes through the
     # functions the harness runs (whose lock order the oracle checks), and the
@@ -227,7 +227,7 @@ def main() -> None:
     parser.add_argument("--cxx", default=os.environ.get("CXX") or shutil.which("c++"))
     parser.add_argument("--sanitize", action="store_true")
     parser.add_argument("--component", type=Path, default=COMPONENT,
-                        help="component directory whose Bluetooth.cpp/.h and System_OTA.cpp are tested")
+                        help="component directory whose BLE_Server.cpp/.h and System_OTA.cpp are tested")
     args = parser.parse_args()
     require(bool(args.cxx), "a host C++17 compiler is required")
     flags = ["-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic",

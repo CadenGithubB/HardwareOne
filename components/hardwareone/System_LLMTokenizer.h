@@ -1,8 +1,8 @@
 /**
- * System_LLM_Tokenizer.h - merge-based BPE tokenizer (LLM1 embedded format).
+ * System_LLMTokenizer.h - merge-based BPE tokenizer (LLM1 embedded format).
  *
  * Extracted from System_LLM.cpp with no behavioral change. Operates on the
- * gLlm.tokenizer state (see System_LLM_Internal.h).
+ * gLlm.tokenizer state (see System_LLMInternal.h).
  */
 #pragma once
 

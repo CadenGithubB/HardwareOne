@@ -5,22 +5,22 @@ The BLE server types every connection (glasses temple, ring, phone, unknown) in
 onConnect with bleIdentifyDeviceByMac(); bledisconnect and
 bleDisconnectAppClients() keep a link open only when it is typed as a G2 temple
 or the R1 ring. The function and its MAC helpers are extracted unchanged from
-Bluetooth.cpp and run against a host table standing in for the peer owner's
+BLE_Server.cpp and run against a host table standing in for the peer owner's
 saved targets (BLE_Peers.h snapshot), so a re-pair must change the typing of
 the next connection.
 
 Source contracts, read from the same files:
-* every characteristic Bluetooth.cpp creates with PROPERTY_WRITE has write
+* every characteristic BLE_Server.cpp creates with PROPERTY_WRITE has write
   callbacks (a writable characteristic without them acknowledges writes that do
   nothing);
 * the uncalled Bluetooth helpers and the MAC classification cache are gone, and
-  Bluetooth.h (also with ENABLE_BLUETOOTH=0) no longer declares them;
+  BLE_Server.h (also with ENABLE_BLUETOOTH=0) no longer declares them;
 * G2_Ring.cpp no longer carries the unregistered ring-to-glasses spoof push and
   temple bridge (`ringtoglasses`, `ringbridge`, their tasks and state), while
   g2RingNoteBridgePoll() stays defined for the G2 receive path, and once the
   code is gone G2_Ring.cpp names the commit that still holds it (f4cc542).
 
---component points the suite at another copy of Bluetooth.cpp/.h and
+--component points the suite at another copy of BLE_Server.cpp/.h and
 G2_Ring.cpp/.h (the base tree) to show the pre-fix behavior.
 """
 from __future__ import annotations
@@ -44,7 +44,7 @@ def optional(source: str, marker: str) -> list[str]:
 
 
 def generated(component: Path) -> str:
-    owner = (component / "Bluetooth.cpp").read_text()
+    owner = (component / "BLE_Server.cpp").read_text()
     peers = (COMPONENT / "BLE_Peers.h").read_text()
 
     constants = re.findall(r"^constexpr (?:size_t|uint8_t) BLE_PEER_(?:ADDRESS_TEXT_CAPACITY|"
@@ -59,7 +59,7 @@ def generated(component: Path) -> str:
     definitions = [mac_text()]
     cache = re.search(r"static struct \{[^}]*\} gBLEMACCache = [^;]*;", owner)
     if cache:
-        print("Bluetooth.cpp keeps a MAC classification cache (pre-fix source)")
+        print("BLE_Server.cpp keeps a MAC classification cache (pre-fix source)")
         definitions.append(cache.group())
     definitions += [extract_block(owner, "static void copyMacUpper(")]
     definitions += optional(owner, "static bool bleSavedMacMatches(")
@@ -77,7 +77,7 @@ def generated(component: Path) -> str:
 def writable_without_callbacks(owner: str) -> list[str]:
     created = re.findall(r"(\w+)\s*=\s*\w+->createCharacteristic\(\s*(\w+)\s*,([^;]*?)\);",
                          owner, re.DOTALL)
-    require(len(created) >= 3, "Bluetooth.cpp creates its GATT characteristics")
+    require(len(created) >= 3, "BLE_Server.cpp creates its GATT characteristics")
     return [f"{pointer} ({uuid})" for pointer, uuid, props in created
             if "PROPERTY_WRITE" in props
             and not re.search(rf"\b{pointer}->setCallbacks\(", owner)]
@@ -85,8 +85,8 @@ def writable_without_callbacks(owner: str) -> list[str]:
 
 def symbol_failures(component: Path) -> list[str]:
     failures: list[str] = []
-    owner = (component / "Bluetooth.cpp").read_text()
-    header = (component / "Bluetooth.h").read_text()
+    owner = (component / "BLE_Server.cpp").read_text()
+    header = (component / "BLE_Server.h").read_text()
     ring = (component / "G2_Ring.cpp").read_text()
     ring_h = (component / "G2_Ring.h").read_text()
 
@@ -104,7 +104,7 @@ def symbol_failures(component: Path) -> list[str]:
             ("bleUpdateMACCache", "MAC classification cache filler"),
             ("pStreamControlChar", "write-only characteristic with no handler"),
             ("BLE_STREAM_CONTROL_CHAR_UUID", "write-only characteristic with no handler")):
-        for name, text in (("Bluetooth.cpp", owner), ("Bluetooth.h", header)):
+        for name, text in (("BLE_Server.cpp", owner), ("BLE_Server.h", header)):
             if re.search(rf"\b{symbol}\b", text):
                 failures.append(f"{name} still has {symbol} ({why})")
 
@@ -130,7 +130,7 @@ DISABLED_CHECK = '''#define ARDUINOJSON_ENABLE_ARDUINO_STRING 1
 #define ARDUINOJSON_ENABLE_ARDUINO_STREAM 0
 #define ARDUINOJSON_ENABLE_ARDUINO_PRINT 0
 #define ARDUINOJSON_ENABLE_PROGMEM 0
-#include "Bluetooth.h"
+#include "BLE_Server.h"
 void webBatchTestStringAppend() {}
 int main() {
   return !isBleConnected() && !bleSubsystemActive() ? 0 : 1;
@@ -143,7 +143,7 @@ def main() -> None:
     parser.add_argument("--cxx", default=os.environ.get("CXX") or shutil.which("c++"))
     parser.add_argument("--sanitize", action="store_true")
     parser.add_argument("--component", type=Path, default=COMPONENT,
-                        help="component directory whose Bluetooth.cpp/.h and G2_Ring.cpp/.h are tested")
+                        help="component directory whose BLE_Server.cpp/.h and G2_Ring.cpp/.h are tested")
     args = parser.parse_args()
     require(bool(args.cxx), "a host C++17 compiler is required")
     flags = ["-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic"]
@@ -174,7 +174,7 @@ def main() -> None:
 
         disabled = work / "disabled-include"
         disabled.mkdir()
-        shutil.copyfile(args.component / "Bluetooth.h", disabled / "Bluetooth.h")
+        shutil.copyfile(args.component / "BLE_Server.h", disabled / "BLE_Server.h")
         shutil.copyfile(args.component / "BLE_ConsoleAttachCore.h",
                         disabled / "BLE_ConsoleAttachCore.h")
         # A Bluetooth-off build, with the roles the derived rules turn off with it.
@@ -184,7 +184,7 @@ def main() -> None:
             "#include <cstdint>\nusing TransportSessionEpoch = uint32_t;\n")
         if not compile_and_run("disabled", DISABLED_CHECK,
                                ["-I", str(disabled), "-I", str(JSON_INCLUDE)]):
-            failures.append("Bluetooth.h with ENABLE_BLUETOOTH=0 does not compile")
+            failures.append("BLE_Server.h with ENABLE_BLUETOOTH=0 does not compile")
 
     for failure in symbol_failures(args.component):
         print(f"FAIL [source]: {failure}")

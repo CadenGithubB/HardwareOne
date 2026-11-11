@@ -69,7 +69,7 @@ def insert(harness: str, parts: dict) -> str:
 def types(component: Path) -> str:
     glasses_h = (component / 'G2_Glasses.h').read_text()
     peers = (component / 'BLE_Peers.h').read_text()
-    bluetooth = (component / 'Bluetooth.h').read_text()
+    bluetooth = (component / 'BLE_Server.h').read_text()
     ring_h = (component / 'G2_Ring.h').read_text()
     return '\n'.join([
         extract_block(glasses_h, 'enum class BleConnectKind') + ';',

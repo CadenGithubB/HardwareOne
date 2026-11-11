@@ -10,7 +10,7 @@
 #include "System_Filesystem.h"
 #include "System_VFS.h"
 #include "OLED_ConsoleBuffer.h"
-#include "Bluetooth.h"
+#include "BLE_Server.h"
 #include "G2_Glasses.h"
 #include "System_CLI.h"
 #include "System_CLIMode.h"
@@ -217,7 +217,7 @@ static const uint32_t BLE_OUTPUT_FLUSH_INTERVAL_MS = 150;   // Flush to BLE ever
 // This was 1024, which made every size-triggered flush 768..1023 B (the flush
 // threshold is MAX - DEBUG_MSG_SIZE) — i.e. ALL of them over the limit, so on the
 // plaintext path only the 150 ms timer flushes were getting through. 512 restores
-// the invariant the MTU setup is written against (Bluetooth.cpp: MTU 517 => 514
+// the invariant the MTU setup is written against (BLE_Server.cpp: MTU 517 => 514
 // usable "fully covers the 512-byte gBleOutputBuffer flush"). With 512 the append
 // guard caps length at 511 and flushes run 256..511 B — always deliverable.
 //
@@ -1094,7 +1094,7 @@ static void broadcastOutputCore(const char* text, size_t len, uint8_t routeOverr
 #endif
 
   // 8. A Bluetooth command's own lines also go to the session that sent it
-  //    (Bluetooth.cpp batches them before its result). Lines kept off
+  //    (BLE_Server.cpp batches them before its result). Lines kept off
   //    Bluetooth, such as the BLE send traces, never reach it.
 #if ENABLE_BLUETOOTH
   if (route & MSG_ROUTE_BLE) bleCommandOutputLine(text, len);
@@ -2445,7 +2445,7 @@ static_assert(sizeof(debugCommands) / sizeof(debugCommands[0])
 // Registration handled by gCommandModules[] in System_Utils.cpp
 
 // ============================================================================
-// DebugManager Class Implementation (merged from System_Debug_Manager.cpp)
+// DebugManager Class Implementation (merged from System_DebugManager.cpp)
 // ============================================================================
 
 DebugManager::DebugManager() {}

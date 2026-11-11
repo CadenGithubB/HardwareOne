@@ -8,7 +8,7 @@ and `help all` answered an app with a bare "OK", in server mode and on the phone
 pipe's link alike.
 
 System_Debug.cpp's broadcastOutputCore and its overloads, System_CLI.cpp's help
-menu (renderHelpMain) and Bluetooth.cpp's command tail, reply callback, output
+menu (renderHelpMain) and BLE_Server.cpp's command tail, reply callback, output
 batch, senders, central TX gate class, mirror collector and slot and session
 helpers run here, over doubles of cmd_exec, the debug queue, the Secure
 Channel, the gate, IDF GATTS and transport sessions. Cases, in server mode and
@@ -20,7 +20,7 @@ over-long line keeps its start, marked [CUT]; with `outble` on a mirror
 recipient is not sent the lines twice; a plaintext server session gets
 notifications of at most 512 bytes; a session that ends during the command gets
 nothing more; lines from outside a Bluetooth command and the send traces never
-reach a session; a line printed under the lifecycle lock (Bluetooth.cpp's own
+reach a session; a line printed under the lifecycle lock (BLE_Server.cpp's own
 BLE_DEBUGF, spliced in) joins the batch when it fits and never sends it under
 the lock. On the phone link's console row (phone link v2) `help` and `help all`
 are reliable TEXT chains with the same messages, and a line printed while the
@@ -72,8 +72,8 @@ def found(pattern: str, text: str, what: str) -> str:
 
 
 def generated(component: Path) -> tuple[str, bool]:
-    owner = (component / "Bluetooth.cpp").read_text()
-    header = (component / "Bluetooth.h").read_text()
+    owner = (component / "BLE_Server.cpp").read_text()
+    header = (component / "BLE_Server.h").read_text()
     debug = (component / "System_Debug.cpp").read_text()
     debug_h = (component / "System_Debug.h").read_text()
     cli = (component / "System_CLI.cpp").read_text()
@@ -106,9 +106,9 @@ def generated(component: Path) -> tuple[str, bool]:
         extract_block(header, "struct BleConnection") + ";",
         extract_block(header, "struct BleSystemState") + ";",
         found(r"^static std::atomic<hw1console::Mode> sBleConsoleMode\{[^}]*\};", owner,
-              "Bluetooth.cpp keeps the console mode"),
+              "BLE_Server.cpp keeps the console mode"),
         found(r"^static std::atomic<int> sBleConsoleSendsInFlight\{[^}]*\};", owner,
-              "Bluetooth.cpp counts the client host's posts in flight"),
+              "BLE_Server.cpp counts the client host's posts in flight"),
         # The phone link's console row (phone link v2): its types and holder bits.
         pipe_host.pipe_types(component),
         pipe_host.link_record(component),
@@ -125,7 +125,7 @@ def generated(component: Path) -> tuple[str, bool]:
         extract_block(owner, "static inline bool bleConsoleClientHost() "),
         extract_block(owner, "class BleLifecycleGuard") + ";",
         found(r"^std::atomic<TransportSessionEpoch> sBleSessionEpoch\[BLE_MAX_CONNECTIONS\];", owner,
-              "Bluetooth.cpp keeps a session epoch per slot"),
+              "BLE_Server.cpp keeps a session epoch per slot"),
         # The console driver's doubles; the console row's functions and the
         # output router are declared here and defined last.
         "#define PIPE_HOST_LIFECYCLE_HELD() (gLifecycle.depth != 0)",
@@ -183,7 +183,7 @@ def generated(component: Path) -> tuple[str, bool]:
     ]
     definitions += pipe_host.row_definitions(owner) + pipe_host.router_definitions(owner)
     ble_debugf = found(r"^#define BLE_DEBUGF\(flag, fmt, \.\.\.\) \\\n(?:.*\\\n)*.*$", owner,
-                       "Bluetooth.cpp defines BLE_DEBUGF")
+                       "BLE_Server.cpp defines BLE_DEBUGF")
     harness = (HERE / "ble_command_output_harness.cpp").read_text()
     return (harness.replace("// INSERT_TYPES", "\n\n".join(types)).replace(
         "// INSERT_BLE_DEBUGF", ble_debugf).replace(
@@ -191,7 +191,7 @@ def generated(component: Path) -> tuple[str, bool]:
 
 
 def check_sources(component: Path) -> None:
-    owner = (component / "Bluetooth.cpp").read_text()
+    owner = (component / "BLE_Server.cpp").read_text()
     debug = (component / "System_Debug.cpp").read_text()
     # The hook takes only lines routed to Bluetooth, after they are queued, so
     # the send traces (routed off Bluetooth) cannot feed their own batch.

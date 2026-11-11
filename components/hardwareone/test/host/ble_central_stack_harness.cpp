@@ -7,7 +7,7 @@
 // with its include lines blanked:
 //   Arduino.h             constrain(), the unit's TX power clamp
 //   HAL_Bluetooth.h       BluetoothHalStatus (ready/stopped/hostAbsent), the HAL API
-//   Bluetooth.h           the BleRoleTransition states
+//   BLE_Server.h           the BleRoleTransition states
 //   G2_Glasses.h          G2_BLE_LOCAL_MTU_PREF, the unit's static_assert operand
 //   BLE_CentralStack.h    the public API, which the fakes also observe
 //   BLE_CentralStack.cpp  its whole #if ENABLE_BLUETOOTH region: the unit
@@ -161,7 +161,7 @@ struct World {
   bool setupStartOk = true;
   bool setupReleaseOk = true;
   bool phoneWorkerReleaseOk = true;  // pipe builds: the phone_pipe task left
-  // The role-transition token (Bluetooth.cpp): re-entrant for the task that
+  // The role-transition token (BLE_Server.cpp): re-entrant for the task that
   // holds it, keeping the outer state; another task's claim refuses.
   bool roleHeldByOtherTask = false;
   int roleDepth = 0;

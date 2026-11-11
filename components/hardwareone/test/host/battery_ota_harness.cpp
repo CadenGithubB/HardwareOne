@@ -1,6 +1,6 @@
 // Generated runner inserts only the production OTA admission function below.
 // State schema and freshness policy come from the production header.
-#include "BatteryPolicy.h"
+#include "System_BatteryPolicy.h"
 #include <cassert>
 #include <cstdio>
 #include <cstring>

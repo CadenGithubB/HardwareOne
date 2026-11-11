@@ -1,5 +1,5 @@
 // test_file_kind.py compiles this beside production code read from
-// --component: FileBrowser_FileKind.h (when the tree has it), the G2 Files
+// --component: System_FileKind.h (when the tree has it), the G2 Files
 // page's file-tap branch (the `else` block after `if (e.isFolder)` in
 // g2FilesHandleTap, with the classification functions it calls) and the OLED
 // browser's "View" decision (its `sFbActionViewable = ...;` assignment, with
@@ -14,8 +14,8 @@
 #include <cstring>
 #include <string>
 
-#if __has_include("FileBrowser_FileKind.h")
-#include "FileBrowser_FileKind.h"
+#if __has_include("System_FileKind.h")
+#include "System_FileKind.h"
 #define HAVE_FILE_KIND 1
 #endif
 
@@ -168,7 +168,7 @@ static void sharedClassifier() {
 #else
   ++checks;
   ++failures;
-  std::fprintf(stderr, "FAIL FileBrowser_FileKind.h missing: no shared classifier for the two browsers\n");
+  std::fprintf(stderr, "FAIL System_FileKind.h missing: no shared classifier for the two browsers\n");
 #endif
 }
 

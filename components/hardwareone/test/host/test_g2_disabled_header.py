@@ -226,8 +226,8 @@ static_assert(ENABLE_BLUETOOTH && ENABLE_G2_GLASSES, "enabled G2 branch");
                           standalone=True)
 
     def test_protocol_and_public_header_include_order(self):
-        for headers in (("System_G2_Protocol.h", "G2_Glasses.h"),
-                        ("G2_Glasses.h", "System_G2_Protocol.h")):
+        for headers in (("G2_Protocol.h", "G2_Glasses.h"),
+                        ("G2_Glasses.h", "G2_Protocol.h")):
             with self.subTest(headers=headers):
                 self.compile_unit("".join(f'#include "{header}"\n' for header in headers) +
                                   RENDER_CONTRACT + TYPE_CONTRACT + '''

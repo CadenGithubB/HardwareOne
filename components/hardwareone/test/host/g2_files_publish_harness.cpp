@@ -117,7 +117,7 @@ static void filesRenameCommit(const char*) {}
 static void filesRenameCancel() {}
 static bool showTextFileViaWidget(bool) { return true; }
 // File classification: a pre-fix tree calls its private predicates, the
-// current page calls filesChooserKindFor (FileBrowser_FileKind.h). The
+// current page calls filesChooserKindFor (System_FileKind.h). The
 // scenarios never tap a list row, so whichever the tree uses stays unused.
 [[maybe_unused]] static bool isBmpFilename(const char*) { return false; }
 [[maybe_unused]] static bool isJpgFilename(const char*) { return false; }

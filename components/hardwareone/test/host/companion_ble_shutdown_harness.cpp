@@ -2,7 +2,7 @@
 //
 // The production function is spliced in at the marker below and runs against a
 // fake BLE owner layer. deinitBluetooth() fails while the fake Ring owner has
-// not quiesced (the server stays up with its host, as in Bluetooth.cpp), and
+// not quiesced (the server stays up with its host, as in BLE_Server.cpp), and
 // succeeds once it has, taking the host down itself. bluetoothHalDeinit() while
 // the Ring owner is still busy is the use-after-free the Ring prepare exists to
 // prevent; the harness records it.

@@ -647,7 +647,7 @@ verify_phase3_consumer_references() {
   local oled_utils_owner='OLED_Utils.cpp.obj:'
   local g2_history_owner='G2_Glasses.cpp.obj:'
   local g2_automations_owner='G2_Page_Automations.cpp.obj:'
-  local g2_protocol_owner='System_G2_Protocol.cpp.obj:'
+  local g2_protocol_owner='G2_Protocol.cpp.obj:'
 
   case "$expectation" in
     feather_current|classic_current)
@@ -731,7 +731,7 @@ verify_profile_gates() {
       require_unit "$compile_commands" "$object_dir" "$link_map" "$marker" \
         System_Automation || return $?
       require_unit "$compile_commands" "$object_dir" "$link_map" "$marker" \
-        System_G2_Protocol || return $?
+        G2_Protocol || return $?
       require_unit "$compile_commands" "$object_dir" "$link_map" "$marker" \
         G2_Glasses || return $?
       require_unit "$compile_commands" "$object_dir" "$link_map" "$marker" \
@@ -744,7 +744,7 @@ verify_profile_gates() {
         ENABLE_HTTP_SERVER 1 ENABLE_OLED_DISPLAY 1 ENABLE_AUTOMATION 0 \
         ENABLE_BLUETOOTH 1 ENABLE_G2_GLASSES 1 || return $?
       require_unit "$compile_commands" "$object_dir" "$link_map" "$marker" \
-        System_G2_Protocol || return $?
+        G2_Protocol || return $?
       require_unit "$compile_commands" "$object_dir" "$link_map" "$marker" \
         G2_Glasses || return $?
       require_unit "$compile_commands" "$object_dir" "$link_map" "$marker" \
@@ -769,7 +769,7 @@ verify_profile_gates() {
       require_unit "$compile_commands" "$object_dir" "$link_map" "$marker" \
         System_Automation || return $?
       forbid_unit "$compile_commands" "$object_dir" "$link_map" \
-        System_G2_Protocol || return $?
+        G2_Protocol || return $?
       forbid_unit "$compile_commands" "$object_dir" "$link_map" \
         G2_Page_Automations || return $?
       ;;
@@ -788,7 +788,7 @@ verify_profile_gates() {
       forbid_unit "$compile_commands" "$object_dir" "$link_map" \
         System_Automation || return $?
       forbid_unit "$compile_commands" "$object_dir" "$link_map" \
-        System_G2_Protocol || return $?
+        G2_Protocol || return $?
       forbid_unit "$compile_commands" "$object_dir" "$link_map" \
         G2_Page_Automations || return $?
       ;;

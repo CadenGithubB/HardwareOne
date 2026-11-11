@@ -225,11 +225,11 @@ def check_console_single_caller(component: Path) -> None:
         text = path.read_text(errors="replace")
         if call in text and (count := code_only(text).count(call)):
             users[relative.as_posix()] = count
-    require(users == {"BLE_CentralStack.cpp": 1, "Bluetooth.cpp": 1},
+    require(users == {"BLE_CentralStack.cpp": 1, "BLE_Server.cpp": 1},
             f"the stack owner is the console registration's only caller: {users}")
     require("bool bleConsoleRegisterOnClientHost() {" in
-            code_only((component / "Bluetooth.cpp").read_text()),
-            "Bluetooth.cpp holds the registration's definition, not a call")
+            code_only((component / "BLE_Server.cpp").read_text()),
+            "BLE_Server.cpp holds the registration's definition, not a call")
 
 
 def check_worker_creation_gate(component: Path) -> None:

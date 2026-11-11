@@ -2,8 +2,8 @@
 
 #if ENABLE_BLUETOOTH
 
-#include "System_BleSecureChannel.h"
-#include "System_BleSecureCrypto.h"
+#include "BLE_SecureChannel.h"
+#include "BLE_SecureCrypto.h"
 #include "System_Settings.h"
 #include "BLE_Types.h"          // BLE_MAX_CONNECTIONS
 
@@ -12,7 +12,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>     // vTaskDelay — inter-fragment pacing
 #include <freertos/semphr.h>
-#include "Bluetooth.h"
+#include "BLE_Server.h"
 #include "System_Debug.h"
 
 // Handshake diagnostics — one line per transition so interop can be watched on
@@ -24,7 +24,7 @@ static void scLog(uint16_t connId, const char* msg) {
 }
 
 // ============================================================================
-// Frame types (wire) — see System_BleSecureChannel.h for the full layout.
+// Frame types (wire) — see BLE_SecureChannel.h for the full layout.
 // ============================================================================
 static const uint8_t SC_HELLO       = 0x01;
 static const uint8_t SC_HELLO_ACK   = 0x02;

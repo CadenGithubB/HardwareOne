@@ -2,7 +2,7 @@
 // with `openg2 saved`: what the ring, the glasses and the phone pipe do across
 // the role switch. test_ble_role_switch_reconnect.py inserts the production
 // code: the reconnect scheduler and tick (BLE_Peers.cpp), `openble` and
-// bleSubsystemActive (Bluetooth.cpp), the ring's peer ops, admission, logical
+// bleSubsystemActive (BLE_Server.cpp), the ring's peer ops, admission, logical
 // down, disconnect and `ring disconnect` (G2_Ring.cpp), the glasses' peer ops,
 // admission, disconnect intent, `openg2` and g2ConnectSaved (G2_Glasses.cpp)
 // and the phone pipe's peer ops table (BLE_PhonePipe.cpp).

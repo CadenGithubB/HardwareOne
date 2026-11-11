@@ -10,7 +10,7 @@
  * - Sensor data notifications (push model)
  */
 
-#include "Bluetooth.h"
+#include "BLE_Server.h"
 #include "System_Events.h"  // systemEventPost — event register producer
 #include "System_Mutex.h"  // FsLockGuard for authentication
 #include "System_PollPause.h"   // PollPauseGuard — quiesce sensor polling during BLE init
@@ -61,7 +61,7 @@
 #include "System_SensorStubs.h"     // stubs for disabled sensors
 #include "System_SelfDevice.h"  // SelfDevice::firmwareVersion() for the Device Info BLE characteristic
 #include "System_Settings.h"
-#include "System_BleSecureChannel.h"  // app-layer Secure Channel v1 (replaces BLE link-layer bonding)
+#include "BLE_SecureChannel.h"  // app-layer Secure Channel v1 (replaces BLE link-layer bonding)
 #include "System_AuthIdentity.h"      // currentAuthContext() — gate blesecret to trusted transports
 #include <atomic>
 #include <cctype>                     // passphrase complexity policy
@@ -326,7 +326,7 @@ static bool bleIsPipeRowId(uint16_t connId) {
   const int slot = findConnectionSlotByConnIdLocked(connId);
   return slot >= 0 && blePipeRow(gBleState->connections[slot]);
 }
-// Ends the phone link's console row (Bluetooth.cpp's console-row section).
+// Ends the phone link's console row (BLE_Server.cpp's console-row section).
 static bool blePipeRowEndLocked(bool match = false, uint32_t generation = 0,
                                 uint16_t streamId = 0, PipeConsoleTarget* ended = nullptr);
 
@@ -1102,7 +1102,7 @@ struct BleCommandReplyContext {
 static void bleCommandOutputFlush(BleCommandReplyContext* reply);
 
 // Gate for the verbose BLE TX traces — on only when `debugbluetoothdata` is set
-// (DEBUG_BLE_DATA). Non-static so System_BleSecureChannel.cpp's per-frame [BLE-SC]
+// (DEBUG_BLE_DATA). Non-static so BLE_SecureChannel.cpp's per-frame [BLE-SC]
 // traces share the same flag. The traces themselves still route NOT-to-BLE (0x2F)
 // to avoid feeding the very pipe they trace; this just makes them off by default.
 bool bleDataDebugEnabled() { return isDebugFlagSet(DEBUG_BLE_DATA); }
@@ -2762,7 +2762,7 @@ int bleDisconnectAppClients() {
 // only while `expectedEpoch` is still that connection's live session epoch. A frame for
 // a closed, rotated or reused session is dropped, and server teardown (which invalidates
 // every epoch under the same mutex before the GATT tree is deleted) cannot race a send.
-// The secure-channel encryptor and its handshake replies (System_BleSecureChannel.cpp)
+// The secure-channel encryptor and its handshake replies (BLE_SecureChannel.cpp)
 // emit through this; it does NOT encrypt. Everything that is *output* (results, streamed
 // CLI text) goes through sendBleResponse()/sendBleResponseToSession() instead, which
 // encrypt when a channel is up.

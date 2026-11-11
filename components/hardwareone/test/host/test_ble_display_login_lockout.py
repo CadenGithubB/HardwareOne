@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run the BLE login job and loginTransport against the real credential attempt table.
 
-bleLoginDeferred, bleLoginJobFree and BleLoginAsyncJob (Bluetooth.cpp), and
+bleLoginDeferred, bleLoginJobFree and BleLoginAsyncJob (BLE_Server.cpp), and
 loginTransport plus the credential_attempts table (System_User.cpp, with its
 System_User.h declarations) are compiled unchanged into
 ble_display_login_lockout_harness.cpp. The host replaces the clock, the
@@ -24,7 +24,7 @@ login screen and a bare `login` typed on the display under the reserved
 reports the time left and writes a "Locked out" audit line; a login whose
 session does not publish is not a guess; a published one clears.
 
---component DIR reads Bluetooth.cpp and System_User.cpp/.h from another tree
+--component DIR reads BLE_Server.cpp and System_User.cpp/.h from another tree
 (the pre-fix tree fails the lockout cases behaviourally).
 """
 from __future__ import annotations
@@ -59,7 +59,7 @@ def unique_block(source: str, marker: str, name: str) -> str:
 def generate(component: Path) -> str:
     header = (component / "System_User.h").read_text()
     user = (component / "System_User.cpp").read_text()
-    ble = (component / "Bluetooth.cpp").read_text()
+    ble = (component / "BLE_Server.cpp").read_text()
 
     types = extract_block(header, "enum CommandSource") + ";\n"
     limits = re.findall(r"^static constexpr size_t kPublic(?:Username|Password)MaxLen = \d+;$",
@@ -78,9 +78,9 @@ def generate(component: Path) -> str:
     login = unique_block(user, "bool loginTransport(CommandSource transport", "System_User.cpp")
     has_lockout_out = "lockoutRetryMsOut" in login.split("{", 1)[0]
 
-    job = unique_block(ble, "struct BleLoginAsyncJob", "Bluetooth.cpp") + ";\n"
-    job_free = unique_block(ble, "static void bleLoginJobFree(", "Bluetooth.cpp")
-    deferred = unique_block(ble, "static void bleLoginDeferred(void* arg)", "Bluetooth.cpp")
+    job = unique_block(ble, "struct BleLoginAsyncJob", "BLE_Server.cpp") + ";\n"
+    job_free = unique_block(ble, "static void bleLoginJobFree(", "BLE_Server.cpp")
+    deferred = unique_block(ble, "static void bleLoginDeferred(void* arg)", "BLE_Server.cpp")
 
     harness = (HERE / "ble_display_login_lockout_harness.cpp").read_text()
     for marker, value in (

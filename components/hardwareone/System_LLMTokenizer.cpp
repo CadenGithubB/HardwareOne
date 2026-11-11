@@ -1,12 +1,12 @@
 /**
- * System_LLM_Tokenizer.cpp - merge-based BPE tokenizer (LLM1 embedded format).
+ * System_LLMTokenizer.cpp - merge-based BPE tokenizer (LLM1 embedded format).
  * Extracted verbatim from System_LLM.cpp (no behavioral change).
  */
 #include "System_BuildConfig.h"
 #if ENABLE_LLM_SOURCE_ONBOARD
 
-#include "System_LLM_Tokenizer.h"
-#include "System_LLM_Internal.h"
+#include "System_LLMTokenizer.h"
+#include "System_LLMInternal.h"
 #include "System_Debug.h"
 #include "System_MemUtil.h"  // ps_calloc / AllocPref
 #include <Arduino.h>

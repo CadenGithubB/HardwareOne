@@ -2,7 +2,7 @@
 """Run the app console on the phone pipe's link (G2 client host) as shipped.
 
 In G2 client mode the command service sits on the client host and Bluedroid
-reports every link to it: both temples, the ring and the phone. Bluetooth.cpp's
+reports every link to it: both temples, the ring and the phone. BLE_Server.cpp's
 server callbacks, write callback, console plan helpers (BLE_ConsoleAttachCore.h),
 directed senders, console view, `bledisconnect`, `bleadv`, `bleconsole`, the
 host-teardown hooks and bleUpdateStreams run here with BLE_LinkStatus.cpp's
@@ -64,8 +64,8 @@ def code_only(text: str) -> str:
 
 
 def generated(component: Path) -> str:
-    owner = (component / "Bluetooth.cpp").read_text()
-    header = (component / "Bluetooth.h").read_text()
+    owner = (component / "BLE_Server.cpp").read_text()
+    header = (component / "BLE_Server.h").read_text()
     link = (component / "BLE_LinkStatus.cpp").read_text()
     link_header = (component / "BLE_LinkStatus.h").read_text()
     peers = (COMPONENT / "BLE_Peers.h").read_text()
@@ -108,7 +108,7 @@ def generated(component: Path) -> str:
                     r"^static std::atomic<int> sBleConsoleSlotConnId\{[^}]*\};",
                     r"^static std::atomic<int> sBleConsoleSendsInFlight\{[^}]*\};"):
         found = re.search(pattern, owner, re.MULTILINE)
-        require(found is not None, f"Bluetooth.cpp declares {pattern}")
+        require(found is not None, f"BLE_Server.cpp declares {pattern}")
         types.append(found[0])
     # The client-host check every console path reads (folds away without the pipe).
     types.append(extract_block(owner, "static inline bool bleConsoleClientHost() "))
@@ -144,7 +144,7 @@ def generated(component: Path) -> str:
                     r"^static CmdRequestCallbacks sCmdRequestCallbacks;",
                     r"^static CmdStatusCallbacks sCmdStatusCallbacks;"):
         found = re.search(pattern, owner, re.MULTILINE)
-        require(found is not None, f"Bluetooth.cpp owns {pattern}")
+        require(found is not None, f"BLE_Server.cpp owns {pattern}")
         definitions.append(found[0])
     definitions += [extract_block(owner, marker) for marker in (
         "static bool bleSecureChannelOnly(",
@@ -184,7 +184,7 @@ def generated(component: Path) -> str:
 
 
 def check_sources(component: Path) -> None:
-    owner = (component / "Bluetooth.cpp").read_text()
+    owner = (component / "BLE_Server.cpp").read_text()
     # The BTC-side helpers wait only for the lifecycle lock and never log,
     # advertise, change the MTU or open/close a GATT connection.
     for marker in BTC_HELPERS:
@@ -255,7 +255,7 @@ def main() -> None:
     parser.add_argument("--cxx", default=os.environ.get("CXX") or shutil.which("c++"))
     parser.add_argument("--sanitize", action="store_true")
     parser.add_argument("--component", type=Path, default=COMPONENT,
-                        help="component directory whose Bluetooth.cpp/.h and link status are tested")
+                        help="component directory whose BLE_Server.cpp/.h and link status are tested")
     args = parser.parse_args()
     require(bool(args.cxx), "a host C++17 compiler is required")
     flags = ["-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic",

@@ -246,7 +246,7 @@ def check_contracts() -> None:
     # Bluetooth: one reserved key, checked after the session check and before
     # the password, a success recorded only once the session is bound. The
     # command tail (spliced whole by ble_sc_policy) stays free of the table.
-    ble = (COMPONENT / "Bluetooth.cpp").read_text()
+    ble = (COMPONENT / "BLE_Server.cpp").read_text()
     ble_login = extract_block(ble, "static void bleLoginDeferred(void* arg)")
     require_before("BLE login", ble_login, "bleSessionEpochMatches(",
                    "credentialAttemptAllowed(SOURCE_BLUETOOTH")

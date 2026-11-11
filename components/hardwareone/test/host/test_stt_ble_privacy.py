@@ -28,7 +28,7 @@ def main():
     args=parser.parse_args()
     if not args.cxx:
         parser.error('a host C++17 compiler is required')
-    source=(args.component/'Bluetooth.cpp').read_text()
+    source=(args.component/'BLE_Server.cpp').read_text()
     harness=(HERE/'stt_ble_privacy_harness.cpp').read_text()
     names=[('CLASSIFY','static bool bleOutputHasPrivateStt('),
            ('TRACE','static void bleTxTrace('),

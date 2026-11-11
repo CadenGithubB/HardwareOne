@@ -66,7 +66,7 @@
 #include "System_Battery.h"        // BATTERY: valid battery snapshot
 #include "System_Events.h"         // event triggers: ring drain + kind names
 #include "System_Clock.h"          // NTP: Clock::isSynced()
-#include "Bluetooth.h"             // BLE: isBLEConnected() (stub returns false when BT disabled)
+#include "BLE_Server.h"             // BLE: isBLEConnected() (stub returns false when BT disabled)
 #include "System_ESPNow.h"         // PEERS/bond/pairing: gMeshPeers, isBondModeOnline, espnowPairModeActive, gEspNow
 #include "System_BondedPeer.h"     // BOND_PAIRED: BondedPeer::isPaired()
 #include "System_LLMBackend.h"            // LLM: llmBackendStatus() (header self-guards on ENABLE_LLM_SOURCE_ONBOARD)

@@ -12,9 +12,9 @@
 //   OLED_BLUETOOTH_PHONE      phone submenu: link + pipe settings (pushed, ENABLE_BLE_PHONE_PIPE)
 //   OLED_BLUETOOTH_PHONE_CODE `phone pair new`'s code (pushed by the command, ENABLE_BLE_PHONE_PIPE)
 //
-// (Moved out of Bluetooth.cpp so every OLED mode lives in its own OLED_Mode_*.cpp.
-//  BLE internals are reached through Bluetooth.h; the recent-message buffer stays
-//  file-local in Bluetooth.cpp behind bleGetRecentMessages().)
+// (Moved out of BLE_Server.cpp so every OLED mode lives in its own OLED_Mode_*.cpp.
+//  BLE internals are reached through BLE_Server.h; the recent-message buffer stays
+//  file-local in BLE_Server.cpp behind bleGetRecentMessages().)
 
 #include "OLED_Display.h"
 #include "System_BuildConfig.h"
@@ -26,7 +26,7 @@
 #include "OLED_Utils.h"
 #include "HAL_Input.h"
 #include "System_Settings.h"
-#include "Bluetooth.h"
+#include "BLE_Server.h"
 #include "OLED_SettingsEditor.h"  // openSettingsEditorForModule
 #include "OLED_UI.h"              // oledToastShow (boot role, ring refusals, pairing)
 #if ENABLE_G2_GLASSES
@@ -314,7 +314,7 @@ static void displayBluetoothStatusDetail() {
   btDetail("Int:%lu/%lu", (unsigned long)gBleState->sensorStreamInterval,
            (unsigned long)gBleState->systemStreamInterval);
 
-  // Recent messages (newest first) via the Bluetooth.cpp accessor.
+  // Recent messages (newest first) via the BLE_Server.cpp accessor.
   const char* recent[2];
   int nRecent = bleGetRecentMessages(recent, 2);
   if (nRecent > 0) {

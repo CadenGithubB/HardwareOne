@@ -400,7 +400,7 @@ namespace Scopes {
   constexpr const char* ESPNOW_STATE    = "/system/espnow";
   // ESP-NOW frame captures (System_ESPNow ensureCaptureFile), SD only.
   constexpr const char* ESPNOW_CAPTURES = "/sd/espnow";
-  // On-device LLM model folders (System_LLMBackend / System_LLM_Model).
+  // On-device LLM model folders (System_LLMBackend / System_LLMModel).
   constexpr const char* LLM_MODELS      = "/system/llm";
   constexpr const char* LLM_MODELS_SD   = "/sd/llm";
   // ESP-SR command file, snippets and models (System_ESPSR), either tier.

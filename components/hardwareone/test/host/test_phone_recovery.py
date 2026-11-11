@@ -13,7 +13,7 @@ if __name__ == '__main__':
     args = p.parse_args()
     here = Path(__file__).resolve().parent
     source = here.parents[1]
-    body = extract_block((source/'Bluetooth.cpp').read_text(), 'void bleRecoverStuckPhone(')
+    body = extract_block((source/'BLE_Server.cpp').read_text(), 'void bleRecoverStuckPhone(')
     unit = (here/'phone_recovery_harness.cpp').read_text().replace('// INSERT_PRODUCTION', body)
     with tempfile.TemporaryDirectory(prefix='hw1-phone-recovery-') as tmp:
         cpp, binary = Path(tmp)/'recovery.cpp', Path(tmp)/'recovery'

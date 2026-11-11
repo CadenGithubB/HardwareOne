@@ -14,7 +14,7 @@
 #include "System_CommandTypes.h"
 #include "System_CrashRecord.h"
 /* logSystemEvent() lives here. This include used to arrive only by accident,
- * via Bluetooth.h under #if ENABLE_BLUETOOTH further down -- so the file built
+ * via BLE_Server.h under #if ENABLE_BLUETOOTH further down -- so the file built
  * on every board that happened to have Bluetooth on, and failed to compile the
  * moment one did not (qtpy_esp32 sets CONFIG_BT_ENABLED=n). A translation unit
  * must include the declarations it uses. */
@@ -44,8 +44,8 @@
 #include "System_CommandRegistry.h"
 
 #if ENABLE_BLUETOOTH
-#include "Bluetooth.h"
-#include "System_BleSecureChannel.h"
+#include "BLE_Server.h"
+#include "BLE_SecureChannel.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #endif

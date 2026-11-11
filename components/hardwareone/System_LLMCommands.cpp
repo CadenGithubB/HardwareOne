@@ -37,7 +37,7 @@
 
 #if ENABLE_LLM_SOURCE_ONBOARD
   #include "System_LLM.h"
-  #include "System_LLM_Internal.h"   // cmd_llm_menu / cmd_llm_ask live in System_LLM_Menu.cpp
+  #include "System_LLMInternal.h"   // cmd_llm_menu / cmd_llm_ask live in System_LLMMenu.cpp
 #endif
 
 // Shared reply scratch. Command handlers are serialized by cmd_exec, so a

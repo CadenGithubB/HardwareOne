@@ -6,7 +6,7 @@ accepts is stored canonical and clears the device-made mark, which the
 `phone secret` steps (phonePipeReplaceSecret, shared with `phone pair new`)
 persist together with the secret. Every other text keeps the unchanged policy
 and messages (X3, test_phone_passphrase.py). The steps hold the BLE role
-(PHONE_STOP, Bluetooth.cpp's per-task re-entrant token) from the pipe's stop
+(PHONE_STOP, BLE_Server.cpp's per-task re-entrant token) from the pipe's stop
 through the store and give it back before they return, so no link start can
 take the old secret meanwhile; with the role busy they refuse before stopping.
 """
@@ -19,8 +19,8 @@ from test_web_batch_handlers import extract_block
 from arduino_string_host import arduino_string
 HERE=Path(__file__).resolve().parent;COMPONENT=HERE.parents[1]
 p=argparse.ArgumentParser(description=__doc__);p.add_argument('--sanitize',action='store_true');args=p.parse_args()
-bt=(COMPONENT/'Bluetooth.cpp').read_text();settings=(COMPONENT/'System_Settings.cpp').read_text();utils=(COMPONENT/'System_Utils.cpp').read_text()
-header=(COMPONENT/'Bluetooth.h').read_text()
+bt=(COMPONENT/'BLE_Server.cpp').read_text();settings=(COMPONENT/'System_Settings.cpp').read_text();utils=(COMPONENT/'System_Utils.cpp').read_text()
+header=(COMPONENT/'BLE_Server.h').read_text()
 # The role token: the shipped enum and claim over recording doubles of its begin and end.
 role='\n'.join([extract_block(header,'enum class BleRoleTransition : uint8_t ')+';',
  'static bool roleBusy=false;static unsigned roleDepth=0,roleClaims=0,outsideRole=0;static int roleKind=-1;',

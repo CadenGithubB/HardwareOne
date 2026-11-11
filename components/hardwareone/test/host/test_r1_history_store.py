@@ -36,12 +36,12 @@ def between(source: str, start: str, end: str) -> str:
 def model(root: Path) -> tuple[str, str]:
     """Public types and the production Health history model that drives the store."""
     strip = re.compile(r'^#include [<"](?:System_BuildConfig|Arduino|R1_HealthHistoryStore|'
-                       r'System_R1_Protocol)\.h[>"]\n', re.M)
+                       r'R1_Protocol)\.h[>"]\n', re.M)
     # Header constants the model does not use stay quiet, as they would in a header.
     types = ("#define ENABLE_BLUETOOTH 1\n#define ENABLE_G2_GLASSES 1\n"
              "#pragma GCC diagnostic push\n#pragma GCC diagnostic ignored \"-Wunused-const-variable\"\n" +
              "\n".join(strip.sub("", (root / name).read_text())
-                       for name in ("System_R1_Protocol.h", "G2_Health.h")) +
+                       for name in ("R1_Protocol.h", "G2_Health.h")) +
              "\n#pragma GCC diagnostic pop\n")
     health = (root / "G2_Health.cpp").read_text()
     # The validators start at the shared hourly record check where the source has one.

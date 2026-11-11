@@ -4,7 +4,7 @@
 ringProcessRxFrame, ringExtractTelemetryCache, ringReasmFinalize and the RX
 duplicate/ACK-lane helpers (G2_Ring.cpp) run with the production pending-session
 model (G2_Health.cpp) and the production profile capabilities and packetAck
-descriptor factories (System_R1_Protocol.cpp). The frame decoder, the typed
+descriptor factories (R1_Protocol.cpp). The frame decoder, the typed
 daily parsers, RTOS locks, logging and the setup/transaction/control handlers
 are doubles. No BLE link, ring firmware, owner-loop scheduling or store commit
 is simulated.
@@ -61,10 +61,10 @@ def generated(component: Path, source_dir: Path | None) -> tuple[str, dict[str, 
     ring = read("G2_Ring.cpp")
     ring_h = read("G2_Ring.h")
     health = read("G2_Health.cpp")
-    protocol = read("System_R1_Protocol.cpp")
+    protocol = read("R1_Protocol.cpp")
     store = read("R1_HealthHistoryStore.cpp")
     headers = {name: read(name) for name in (
-        "G2_Health.h", "R1_HealthHistoryStore.h", "System_R1_Protocol.h")}
+        "G2_Health.h", "R1_HealthHistoryStore.h", "R1_Protocol.h")}
 
     types = [*(extract_block(ring_h, f"enum {name}") + ";" for name in (
                  "G2RingTransactionState", "G2RingTransactionError", "G2RingObservedState")),

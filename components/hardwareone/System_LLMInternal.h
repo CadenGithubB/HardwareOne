@@ -1,5 +1,5 @@
 /**
- * System_LLM_Internal.h - Private engine types shared across the LLM TUs.
+ * System_LLMInternal.h - Private engine types shared across the LLM TUs.
  *
  * These were file-local in System_LLM.cpp. They are lifted here so the engine
  * can be split into cooperating translation units (kernels, sampler, tokenizer,
@@ -13,7 +13,7 @@
 #pragma once
 
 #include "System_LLM.h"
-#include "System_LLM_Kernels.h"   // QuantTensor
+#include "System_LLMKernels.h"   // QuantTensor
 #include <cstdint>
 #include <cstddef>
 #include "freertos/FreeRTOS.h"
@@ -195,7 +195,7 @@ struct TokenizerState {
 // One guided-menu group's location inside gLlm.menuBlob. Offsets are byte
 // offsets into the blob; the template/entity lists are consecutive
 // length-prefixed items ([u8 len][UTF-8]) walked on demand. See
-// LLM_GUIDED_MENU_SPEC §5 and System_LLM_Menu.cpp.
+// LLM_GUIDED_MENU_SPEC §5 and System_LLMMenu.cpp.
 struct LlmMenuGroupDesc {
   uint32_t nameOff;   // offset of the group name bytes (nameLen bytes)
   uint32_t tplOff;    // offset of the first template item
@@ -260,7 +260,7 @@ struct LlmRuntime {
 
   // Guided-input menu (optional MENU section in the info block v2). Parsed at
   // load into one PSRAM blob; the descriptors below index into it. Mutated ONLY
-  // under System_LLM_Menu.cpp's sMenuLock — readers run on the OLED loop, httpd,
+  // under System_LLMMenu.cpp's sMenuLock — readers run on the OLED loop, httpd,
   // g2_taps and cmd_exec while llmUnload can free the blob from another task,
   // so every accessor copies out under the lock (no interior pointer escapes).
   // menuGeneration bumps on EVERY load and unload so a surface can detect a model
@@ -314,11 +314,11 @@ void  setLlmError(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 // and again as a recovery step if forward() detects a zeroed RunState pointer
 // (memory-corruption soft-recovery). Returns false if a base block is gone or
 // the config is unusable — in that case only a full reload can recover.
-// Defined in System_LLM_Model.cpp.
+// Defined in System_LLMModel.cpp.
 bool  llmBindRunState();
 
 // ============================================================================
-// Guided-menu lifecycle hooks (defined in System_LLM_Menu.cpp)
+// Guided-menu lifecycle hooks (defined in System_LLMMenu.cpp)
 // ============================================================================
 // These perform the LOCKED mutation of the menu state above. loadInfoBlockFromFile
 // (model loader) publishes a freshly parsed blob; llmUnload clears it. Both take
@@ -336,7 +336,7 @@ void llmMenuPublish(uint8_t* blob, size_t bytes,
 // Free the menu blob, zero the descriptors/count, bump menuGeneration.
 void llmMenuClear(void);
 
-// Guided-menu command handlers (defined in System_LLM_Menu.cpp; registered
+// Guided-menu command handlers (defined in System_LLMMenu.cpp; registered
 // NON-admin in llmCommands[] in System_LLM.cpp).
 const char* cmd_llm_menu(const String& args);
 const char* cmd_llm_ask(const String& args);

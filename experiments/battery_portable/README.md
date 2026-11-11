@@ -8,7 +8,7 @@ unavailable when queried through the shared API; its disabled build profile
 omits the battery CLI and page.
 
 Implementation is in `components/hardwareone/System_Battery.{h,cpp}`,
-`BatteryPolicy.h` and the board settings in `System_BuildConfig.h`. ADC unit and
+`System_BatteryPolicy.h` and the board settings in `System_BuildConfig.h`. ADC unit and
 channel come from IDF's GPIO mapping. Calibration uses SDK capability macros:
 curve fitting on P4/S3 and line fitting on classic ESP32. This is verified with
 ESP-IDF 5.5.5; no IDF 6 migration is needed. A generic P4 build does not inherit EYE wiring;

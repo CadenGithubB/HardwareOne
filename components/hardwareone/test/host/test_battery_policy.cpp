@@ -1,5 +1,5 @@
 // Exercises the production battery policy: no Arduino/IDF replacements here.
-#include "BatteryPolicy.h"
+#include "System_BatteryPolicy.h"
 #include <cassert>
 #include <cmath>
 #include <cstdint>

@@ -16,7 +16,7 @@ def main():
         return re.sub(r'^#include.*\n|^#pragma once\n','',(component/name).read_text(),flags=re.M)
     unit=(here/'g2_native_notes_harness.cpp').read_text()
     parts={
-        '// INSERT_POLICY': '\n'.join(source(n) for n in ('Transcript_PathPolicy.h','Transcript_TextPolicy.h','Transcription_UI_Policy.h','QuickNote_Policy.h')),
+        '// INSERT_POLICY': '\n'.join(source(n) for n in ('System_TranscriptPathPolicy.h','System_TranscriptTextPolicy.h','System_TranscriptionUIPolicy.h','QuickNote_Policy.h')),
         '// INSERT_DECL': source('QuickNote_Store.h')+source('G2_NativeNotes.h'),
         '// INSERT_PROTOCOL': source('G2_NativeNotesProtocol.h'),
         '// INSERT_RUNTIME': source('G2_NativeNotes.cpp'),

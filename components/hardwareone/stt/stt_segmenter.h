@@ -4,7 +4,7 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
-#include "../Audio_VadPolicy.h"
+#include "../System_AudioVadPolicy.h"
 
 namespace hw1::stt {
 inline constexpr size_t kSegmentSampleRate=16000;

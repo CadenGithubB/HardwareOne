@@ -10,7 +10,7 @@
 // Private QuickNote files: /<root>/u<accountId>/notes/<stamp>-<id16>.txt, root
 // /sd/stt when the card is writable, else /stt (the TranscriptSession rule).
 // They sit inside the transcript tree, so every guarded VFS call here applies
-// Transcript_PathPolicy: a note is open to the account that spoke it and to
+// System_TranscriptPathPolicy: a note is open to the account that spoke it and to
 // the unrestricted roles (superadmin, system) only - the same rights as a
 // transcript. Nothing here logs, posts or returns note text except read()'s
 // window, to its caller.

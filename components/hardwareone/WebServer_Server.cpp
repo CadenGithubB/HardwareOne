@@ -80,7 +80,7 @@
 #include "System_MQTT.h"
 #endif
 #if ENABLE_BLUETOOTH
-#include "Bluetooth.h"
+#include "BLE_Server.h"
 #if ENABLE_G2_GLASSES
 #include "G2_Glasses.h"
 #endif

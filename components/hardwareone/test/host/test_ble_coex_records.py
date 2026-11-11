@@ -76,7 +76,7 @@ def check_flag_wiring() -> None:
     assert re.search(r'#if !ENABLE_BLUETOOTH\n  #undef ENABLE_BLE_COEX_RECORDS\n  #define ENABLE_BLE_COEX_RECORDS 0\n#endif',
                      derived), 'off without Bluetooth'
     # The command row and its handler stay in every Bluetooth build (never #if-wrap a registry row).
-    assert 'ENABLE_BLE_COEX_RECORDS' not in (ROOT / 'Bluetooth.cpp').read_text()
+    assert 'ENABLE_BLE_COEX_RECORDS' not in (ROOT / 'BLE_Server.cpp').read_text()
     wifi = (ROOT / 'System_WiFi.h').read_text()
     assert '#if ENABLE_WIFI && ENABLE_BLE_COEX_RECORDS\nWifiCoexTag wifiCoexTag();' in wifi, 'no mirror without the records'
 

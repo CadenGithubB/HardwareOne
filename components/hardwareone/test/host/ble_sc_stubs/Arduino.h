@@ -1,5 +1,5 @@
 #pragma once
-// Host stand-in for the Arduino core: only what System_BleSecureChannel.cpp uses.
+// Host stand-in for the Arduino core: only what BLE_SecureChannel.cpp uses.
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>

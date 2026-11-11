@@ -15,7 +15,7 @@
 #include "freertos/task.h"
 
 #include "BLE_Peers.h"
-#include "Bluetooth.h"
+#include "BLE_Server.h"
 #include "BLE_PhonePipe.h"
 #if ENABLE_BLUETOOTH
 #include "HAL_Bluetooth.h"

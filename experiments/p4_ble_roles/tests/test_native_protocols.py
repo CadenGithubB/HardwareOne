@@ -132,10 +132,10 @@ class NativeProtocolTests(unittest.TestCase):
         return self.compile_and_run(text + f'\nint main() {{ return {entry}() ? 0 : 1; }}\n')
 
     def test_g2_capture_vectors_and_fragment_reassembly(self):
-        self.codec('System_G2_Protocol', 'g2ProtocolGoldenSelfTest')
+        self.codec('G2_Protocol', 'g2ProtocolGoldenSelfTest')
 
     def test_r1_embedded_protocol_vectors(self):
-        output = self.codec('System_R1_Protocol', 'r1ProtocolSelfTest')
+        output = self.codec('R1_Protocol', 'r1ProtocolSelfTest')
         self.assertNotIn('[R1-selftest] FAIL', output)
         self.assertGreaterEqual(output.count('[R1-selftest] PASS'), 59)
 
@@ -143,8 +143,8 @@ class NativeProtocolTests(unittest.TestCase):
         self.compile_and_run(source=COMPONENT / 'test/host/test_g2_health_graph_core.cpp')
 
     def test_actual_role_token_exclusion_and_fault_publication(self):
-        source = (COMPONENT / 'Bluetooth.cpp').read_text()
-        header = (COMPONENT / 'Bluetooth.h').read_text()
+        source = (COMPONENT / 'BLE_Server.cpp').read_text()
+        header = (COMPONENT / 'BLE_Server.h').read_text()
         enum = between(header, 'enum class BleRoleTransition', 'bool bleRoleTransitionBegin')
         state = between(source, 'static portMUX_TYPE sBleRoleTransitionMux', 'class BleRoleTransitionClaim')
         functions = between(source, 'bool bleRoleTransitionBegin', 'bool isBleControllerEnabled()')

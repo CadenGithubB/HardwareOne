@@ -163,7 +163,7 @@ def link_status_unit(component: Path) -> tuple[str, str]:
     BLE_LinkStatus.cpp goes after them. ENABLE_BLE_PHONE_PIPE must be defined.
     """
     core = (component / "BLE_LinkStatusCore.h").read_text().replace("#pragma once\n", "", 1)
-    bluetooth = (component / "Bluetooth.h").read_text()
+    bluetooth = (component / "BLE_Server.h").read_text()
     peers = (component / "BLE_Peers.h").read_text()
     header = (component / "BLE_LinkStatus.h").read_text()
     source = (component / "BLE_LinkStatus.cpp").read_text()

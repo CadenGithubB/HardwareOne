@@ -103,13 +103,13 @@ static void xSemaphoreGiveRecursive(void*) {
   }
   --lockDepth; ++giveCalls; lifecycleMutex.unlock();
 }
-// The G2 client host's console (Bluetooth.cpp): the mode and slot the console
+// The G2 client host's console (BLE_Server.cpp): the mode and slot the console
 // view, the write callback, bledisconnect and the stream commands read. The
 // write fast path and the plan applier run in test_ble_console_phone_link;
 // here they stand in for both modes.
 static std::atomic<hw1console::Mode> sBleConsoleMode{hw1console::Mode::Server};
 static hw1console::Mode bleConsoleMode() { return sBleConsoleMode.load(); }
-// Bluetooth.cpp's client-host check (folds away without the pipe).
+// BLE_Server.cpp's client-host check (folds away without the pipe).
 static inline bool bleConsoleClientHost() {
   return ENABLE_BLE_PHONE_PIPE && sBleConsoleMode.load() == hw1console::Mode::ClientRegistered;
 }

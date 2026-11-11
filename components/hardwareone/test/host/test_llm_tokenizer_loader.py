@@ -25,10 +25,10 @@ COMPONENT = HERE.parents[1]
 
 
 def generate() -> str:
-    internal = (COMPONENT / "System_LLM_Internal.h").read_text()
+    internal = (COMPONENT / "System_LLMInternal.h").read_text()
     types = "\n".join(extract_block(internal, marker) + ";" for marker in (
         "struct MergeEntry", "struct MergeLookup", "struct PreSplitToken", "struct TokenizerState"))
-    source = (COMPONENT / "System_LLM_Tokenizer.cpp").read_text()
+    source = (COMPONENT / "System_LLMTokenizer.cpp").read_text()
     start, end = "// Simple open-addressing hash map", "void freeTokenizer()"
     for marker in (start, end, "int encode(const char* text,", "const char* decode(int prev_token,"):
         require(source.count(marker) == 1, f"one production marker: {marker}")

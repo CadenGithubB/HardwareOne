@@ -1262,7 +1262,7 @@ static void runSelectionPattern(size_t idx) {
   rows[2] = "No";
 
   // Geoms used by multiple cases below — aliases of the validated
-  // edge-anchored presets in System_G2_Protocol.h. Originally these
+  // edge-anchored presets in G2_Protocol.h. Originally these
   // were inline magic numbers in this file; the tests confirmed them
   // empirically (2026-04-30) and they've been promoted to named
   // presets so production UI code can pull from the same vetted

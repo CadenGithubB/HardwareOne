@@ -667,8 +667,8 @@ with `ctest --test-dir build -R '^capture_crypto_key$' --output-on-failure`.
 ## LLM tokenizer loader
 
 `llm_tokenizer_loader` compiles the tokenizer structs from
-`System_LLM_Internal.h` and `loadTokenizerFromFile`, the merge map,
-`freeTokenizer`, `encode` and `decode` from `System_LLM_Tokenizer.cpp`
+`System_LLMInternal.h` and `loadTokenizerFromFile`, the merge map,
+`freeTokenizer`, `encode` and `decode` from `System_LLMTokenizer.cpp`
 unchanged, with an in-memory `File` and a PSRAM allocator that truncates sizes
 to the ESP32's 32-bit `size_t`. A well-formed blob loads and encodes; a blob
 that runs past the file or ends inside the vocab, a `merge_count` that does not
@@ -875,7 +875,7 @@ console and outside OTA health probation, its prompt names what is erased and
 fits the confirm buffer (the size is read from `System_CLIConfirm.cpp`), the
 boot-erase request is stored before anything is removed and is dropped again
 when the reset stops early. `factory_wipe_policy_tests` runs the pure boot-time
-sequence (`FactoryWipePolicy.h`) against a fake device: nothing happens without
+sequence (`System_FactoryWipePolicy.h`) against a fake device: nothing happens without
 a request; the order is attempt record, filesystem, NVS entries, NVS partition;
 a power loss at any step resumes at the next start; a failed step keeps the
 request; a failed partition erase still completes when the entries were
@@ -885,7 +885,7 @@ are not covered and have not been run on hardware.
 
 ## Ring clock confirmation
 
-`clock_confirm_policy_tests` runs `ClockConfirmPolicy.h`, the rule that decides
+`clock_confirm_policy_tests` runs `System_ClockConfirmPolicy.h`, the rule that decides
 which clock the R1 ring is given, against a fake device (wall clock plus
 monotonic time). Covered: no reference while the clock is unset; a first
 network sync and hourly corrections are accepted; a network step that moves a
@@ -1221,7 +1221,7 @@ python3 components/hardwareone/test/host/test_ble_display_login_lockout.py --san
 `ble_display_login_lockout` compiles, unchanged, the credential attempt table
 and `loginTransport` from `System_User.cpp`, the table's `System_User.h`
 declarations, and `BleLoginAsyncJob`, `bleLoginJobFree` and `bleLoginDeferred`
-from `Bluetooth.cpp`. The clock, critical section, filesystem lock, password
+from `BLE_Server.cpp`. The clock, critical section, filesystem lock, password
 check, BLE session fence, binder and directed sender, console session
 publishers, audit line and event register are host doubles. Every job release
 is checked: the password is wiped and the job freed exactly once.
@@ -1411,7 +1411,7 @@ python3 components/hardwareone/test/host/test_ble_mirror_recipients.py --sanitiz
 ```
 
 `ble_mirror_recipients` splices `bleMirrorRecipientCount`,
-`bleCollectMirrorSessions` and `BleSessionFence` from `Bluetooth.cpp` into a
+`bleCollectMirrorSessions` and `BleSessionFence` from `BLE_Server.cpp` into a
 four-slot connection table. The count uses the same collector as
 `sendBleResponse`. The checks:
 
@@ -3457,7 +3457,7 @@ Run the focused portable battery checks:
 python3 components/hardwareone/test/host/test_battery.py --sanitize
 ```
 
-The runner compiles the production `BatteryPolicy.h`, the unmodified backend,
+The runner compiles the production `System_BatteryPolicy.h`, the unmodified backend,
 lifecycle, snapshot/accessor, calibration and JSON functions extracted from
 `System_Battery.cpp`, and the exact OTA `powerIsSafe()` function. SDK ADC,
 FreeRTOS synchronization, GPIO, clock, event delivery and MAX17048 transport are
@@ -3725,7 +3725,7 @@ python3 components/hardwareone/test/host/test_oled_remote_settings.py --sanitize
 
 ## BLE output privacy and console mirror
 
-`stt_ble_privacy` compiles the production BLE output seams from `Bluetooth.cpp` (the private-STT classifier, the trace/history redaction, the directed plaintext and secure per-session senders, the async command-result callback, and the console-mirror chokepoint `sendBleResponse` with its recipient collector `bleCollectMirrorSessions`) against a four-slot fake GATT peer table. A directed send lands only in the addressed slot; the characteristic-wide notify lands in every connected slot, as the vendored Arduino wrapper sends it. The suite checks that private STT results never reach the trace or history mirrors, that command results reach exactly the originating session, and that the console mirror (`outble`, `blesend`) reaches only logged-in non-guest sessions. A connected peer that never logged in, a peer holding a Secure Channel without a login, a guest session, a logged-out slot and a disconnected slot receive nothing. No characteristic-wide notify is used, each recipient gets its own plaintext or encrypted copy, a congested recipient misses one flush without any recipient receiving a chunk twice, and secure-required mode still refuses plaintext. `--component <dir>` points the suite at another copy of the sources (the pre-fix tree fails the unauthenticated-peer, channel-only-peer and guest cases); `--cxx` selects the compiler; ASan/UBSan follow `--sanitize` / `HW1_SANITIZE`.
+`stt_ble_privacy` compiles the production BLE output seams from `BLE_Server.cpp` (the private-STT classifier, the trace/history redaction, the directed plaintext and secure per-session senders, the async command-result callback, and the console-mirror chokepoint `sendBleResponse` with its recipient collector `bleCollectMirrorSessions`) against a four-slot fake GATT peer table. A directed send lands only in the addressed slot; the characteristic-wide notify lands in every connected slot, as the vendored Arduino wrapper sends it. The suite checks that private STT results never reach the trace or history mirrors, that command results reach exactly the originating session, and that the console mirror (`outble`, `blesend`) reaches only logged-in non-guest sessions. A connected peer that never logged in, a peer holding a Secure Channel without a login, a guest session, a logged-out slot and a disconnected slot receive nothing. No characteristic-wide notify is used, each recipient gets its own plaintext or encrypted copy, a congested recipient misses one flush without any recipient receiving a chunk twice, and secure-required mode still refuses plaintext. `--component <dir>` points the suite at another copy of the sources (the pre-fix tree fails the unauthenticated-peer, channel-only-peer and guest cases); `--cxx` selects the compiler; ASan/UBSan follow `--sanitize` / `HW1_SANITIZE`.
 
 ```sh
 python3 components/hardwareone/test/host/test_stt_ble_privacy.py --sanitize
@@ -3733,7 +3733,7 @@ python3 components/hardwareone/test/host/test_stt_ble_privacy.py --sanitize
 
 ## BLE Secure Channel directed delivery
 
-`ble_sc_directed` compiles the production `System_BleSecureChannel.cpp` whole against harness-local libsodium, mbedTLS, FreeRTOS, settings and Arduino stand-ins (`ble_sc_stubs/`). It adds four pieces extracted from `Bluetooth.cpp`: the directed raw sender `bleRawNotifyToSession`, the session sender `sendBleResponseToSession`, the console-mirror entry `sendBleResponse` with its recipient collector, and the deferred inbound job `bleScDeferredInbound`. A two-peer fake GATT keeps one inbox per connection. A directed send lands only in the addressed connection; the characteristic-wide notify that pre-fix sources use lands in every connected one. On the G2 client host (the console on the phone pipe's link) it also splices `bleSecureChannelOnly` and the `BleConsoleTxGate` around the raw sender: every frame is one try of the shared central TX gate taken before the lifecycle guard, a reliable send skips the accessories' soft priority while a best-effort one yields to it, a busy gate gives the bounded six tries with nothing sent, each reliable frame counts as pipe activity (best-effort mirror and card frames do not), plaintext is refused although `blesecure` is off, and server mode never touches the gate.
+`ble_sc_directed` compiles the production `BLE_SecureChannel.cpp` whole against harness-local libsodium, mbedTLS, FreeRTOS, settings and Arduino stand-ins (`ble_sc_stubs/`). It adds four pieces extracted from `BLE_Server.cpp`: the directed raw sender `bleRawNotifyToSession`, the session sender `sendBleResponseToSession`, the console-mirror entry `sendBleResponse` with its recipient collector, and the deferred inbound job `bleScDeferredInbound`. A two-peer fake GATT keeps one inbox per connection. A directed send lands only in the addressed connection; the characteristic-wide notify that pre-fix sources use lands in every connected one. On the G2 client host (the console on the phone pipe's link) it also splices `bleSecureChannelOnly` and the `BleConsoleTxGate` around the raw sender: every frame is one try of the shared central TX gate taken before the lifecycle guard, a reliable send skips the accessories' soft priority while a best-effort one yields to it, a busy gate gives the bounded six tries with nothing sent, each reliable frame counts as pipe activity (best-effort mirror and card frames do not), plaintext is refused although `blesecure` is off, and server mode never touches the gate.
 
 The suite checks that HELLO_ACK, CONFIRM_ACK, both REJECT reasons and every DATA fragment (command results and `fileread ... bin` chunks) reach only the connection and session epoch they belong to, admitted under the BLE lifecycle guard (on the G2 client host the session is checked under it and the post made after it is released, counted in flight). It also checks these cases:
 - A stale session epoch sends nothing.
@@ -3749,7 +3749,7 @@ python3 components/hardwareone/test/host/test_ble_sc_directed.py --sanitize
 
 ## BLE Secure Channel policy
 
-`ble_sc_policy` compiles the production `System_BleSecureChannel.cpp` whole against the `ble_sc_stubs/` stand-ins it shares with `ble_sc_directed`. It splices the BLE command ingress from `Bluetooth.cpp`: the GATT write entry `processIncomingBleCommand`, the deferred secure-frame and plaintext jobs (`bleScDeferredInbound`, `blePlaintextDeferredInbound`), the command tail `processBleCommandLine` with its file-browser gate, and the directed and session senders. The fake GATT keeps one inbox per connection. A write runs the GATT entry as BTC_TASK; deferred jobs queue in submission order and run as cmd_exec after it returns, and the executor records which command would run for which session. On the G2 client host (R4) a plaintext write, login included, gets the fixed refusal on its own link although `blesecure` is off, and the same link's encrypted commands run. The FreeRTOS doubles count every tx-mutex take that may wait and every delay made on BTC_TASK.
+`ble_sc_policy` compiles the production `BLE_SecureChannel.cpp` whole against the `ble_sc_stubs/` stand-ins it shares with `ble_sc_directed`. It splices the BLE command ingress from `BLE_Server.cpp`: the GATT write entry `processIncomingBleCommand`, the deferred secure-frame and plaintext jobs (`bleScDeferredInbound`, `blePlaintextDeferredInbound`), the command tail `processBleCommandLine` with its file-browser gate, and the directed and session senders. The fake GATT keeps one inbox per connection. A write runs the GATT entry as BTC_TASK; deferred jobs queue in submission order and run as cmd_exec after it returns, and the executor records which command would run for which session. On the G2 client host (R4) a plaintext write, login included, gets the fixed refusal on its own link although `blesecure` is off, and the same link's encrypted commands run. The FreeRTOS doubles count every tx-mutex take that may wait and every delay made on BTC_TASK.
 
 The suite checks:
 - With the secure channel required, a plaintext write from a connection without a channel gets the fixed refusal on that connection only, in plaintext. A connection with a channel gets the refusal as one encrypted DATA frame, and its encrypted commands still run.
@@ -3770,7 +3770,7 @@ python3 components/hardwareone/test/host/test_ble_sc_policy.py --sanitize
 
 `ble_server_stop` extracts the production `deinitBluetooth()`, its session
 and advertising helpers, the role-claim and lifecycle-guard classes, and the
-`closeconsole` and `blemode` commands unchanged from `Bluetooth.cpp`. Host
+`closeconsole` and `blemode` commands unchanged from `BLE_Server.cpp`. Host
 boundaries stand in for the role transition, the Ring owner
 (`g2RingPrepareForStackTeardown`), the host/controller teardown, the shared
 client stack (`bleStackReady()`), transport sessions and settings writes. A
@@ -3812,9 +3812,9 @@ stack for glasses, ring and phone (default); server = the app console server
 `openconsole`; a build with no client device compiled in refuses `blemode
 client` (`Error: [BLE] no client device is compiled in`) without a settings
 write. The suite builds with and without the G2 client and the phone pipe. A
-second translation unit compiles the real `Bluetooth.h` with
+second translation unit compiles the real `BLE_Server.h` with
 `ENABLE_BLUETOOTH=0` and checks that the stub returns `bool` true.
-`--component <dir>` runs the suite against another copy of `Bluetooth.cpp/.h`.
+`--component <dir>` runs the suite against another copy of `BLE_Server.cpp/.h`.
 `HW1_SANITIZE` enables ASan/UBSan. Real Ring/host timing still needs a device.
 
 The same suite runs the app console's registration on the client stack's host
@@ -3903,13 +3903,13 @@ It also runs the production `bledisconnect` command and its owner functions (`bl
 
 ## BLE area cleanup coverage
 
-`ble_area_cleanup` runs the production connection typing from Bluetooth.cpp (`bleIdentifyDeviceByMac`, its MAC helpers and `bleDeviceTypeToString`, extracted unchanged with BLE_Types.h and the saved-target types from BLE_Peers.h) against a host table standing in for the peer owner's saved targets. Saved glasses, ring and phone addresses classify in any letter case, an unsaved or all-zero address is Unknown, and after a re-pair the new addresses classify as the peer and the old ones as Unknown on the next lookup (`bledisconnect` keeps a link open only when it is typed as a G2 temple or the ring). Source contracts on the same files: every characteristic Bluetooth.cpp creates with PROPERTY_WRITE has write callbacks; the uncalled Bluetooth helpers and the MAC cache are absent from Bluetooth.cpp/.h; G2_Ring.cpp carries none of the unregistered ring-to-glasses spoof push or temple bridge (commands, tasks, state) including the no-op `g2RingNoteBridgePoll` hook, and once that code is gone G2_Ring.cpp names the commit that still holds it (f4cc542); and Bluetooth.h compiles with ENABLE_BLUETOOTH=0. `--component <dir>` runs it against another copy of Bluetooth.cpp/.h and G2_Ring.cpp/.h. It does not exercise the GATT server or a real connection.
+`ble_area_cleanup` runs the production connection typing from BLE_Server.cpp (`bleIdentifyDeviceByMac`, its MAC helpers and `bleDeviceTypeToString`, extracted unchanged with BLE_Types.h and the saved-target types from BLE_Peers.h) against a host table standing in for the peer owner's saved targets. Saved glasses, ring and phone addresses classify in any letter case, an unsaved or all-zero address is Unknown, and after a re-pair the new addresses classify as the peer and the old ones as Unknown on the next lookup (`bledisconnect` keeps a link open only when it is typed as a G2 temple or the ring). Source contracts on the same files: every characteristic BLE_Server.cpp creates with PROPERTY_WRITE has write callbacks; the uncalled Bluetooth helpers and the MAC cache are absent from BLE_Server.cpp/.h; G2_Ring.cpp carries none of the unregistered ring-to-glasses spoof push or temple bridge (commands, tasks, state) including the no-op `g2RingNoteBridgePoll` hook, and once that code is gone G2_Ring.cpp names the commit that still holds it (f4cc542); and BLE_Server.h compiles with ENABLE_BLUETOOTH=0. `--component <dir>` runs it against another copy of BLE_Server.cpp/.h and G2_Ring.cpp/.h. It does not exercise the GATT server or a real connection.
 
 ## Ring forwarded telemetry parser
 
 `test_ring_forwarded_telemetry.py` compiles the production
 `g2RingNoteForwardedTelemetry` and its local protobuf helpers (`G2_Ring.cpp`)
-with the shared `g2Pb*` readers (`System_G2_Protocol.cpp`), the production
+with the shared `g2Pb*` readers (`G2_Protocol.cpp`), the production
 `R1TelemetryCache` layout and the `G2HealthMetric` enum. The telemetry mutex,
 the direct-link ownership check, the Health live series and `millis()` are
 doubles. Each case runs in its own process with the frame in an exact-size heap
@@ -3930,7 +3930,7 @@ another tree.
 python3 components/hardwareone/test/host/test_ring_daily_ack.py --sanitize
 ```
 
-`ring_daily_ack` compiles the production ring RX path (`ringProcessRxFrame`, `ringExtractTelemetryCache`, `ringReasmFinalize`, the RX duplicate filter and the packetAck lane from G2_Ring.cpp) with the production Health pending-session model (`g2HealthApply*Daily`, `g2HealthHistoryFetchStarted/Finished`, the day-key and peer checks from G2_Health.cpp) and the production profile capabilities and packetAck descriptor factories (System_R1_Protocol.cpp). The frame decoder and typed daily parsers are doubles that return the test's page. On 2.2.9 a daily page gets a packetAck only when the model accepted it into the active sweep: a page outside a sweep, in a sweep dropped behind an uncommitted result or a failing commit, with another day key, with a zero-base day or during a pending peer switch gets none, while it still refreshes the live cache; an accepted page gets exactly one ACK, and its retransmit is ACKed again without a second ingestion. 2.2.7 keeps its established flow control (every eligible daily NOTIFY, sleep and reassembled activity included, is ACKed) until a device check. `--component` / `--source-dir` read the production sources from another tree; the 0.99.97.4 sources fail the seven refused-page checks. No BLE link, ring firmware, owner-loop scheduling or store commit is simulated.
+`ring_daily_ack` compiles the production ring RX path (`ringProcessRxFrame`, `ringExtractTelemetryCache`, `ringReasmFinalize`, the RX duplicate filter and the packetAck lane from G2_Ring.cpp) with the production Health pending-session model (`g2HealthApply*Daily`, `g2HealthHistoryFetchStarted/Finished`, the day-key and peer checks from G2_Health.cpp) and the production profile capabilities and packetAck descriptor factories (R1_Protocol.cpp). The frame decoder and typed daily parsers are doubles that return the test's page. On 2.2.9 a daily page gets a packetAck only when the model accepted it into the active sweep: a page outside a sweep, in a sweep dropped behind an uncommitted result or a failing commit, with another day key, with a zero-base day or during a pending peer switch gets none, while it still refreshes the live cache; an accepted page gets exactly one ACK, and its retransmit is ACKed again without a second ingestion. 2.2.7 keeps its established flow control (every eligible daily NOTIFY, sleep and reassembled activity included, is ACKed) until a device check. `--component` / `--source-dir` read the production sources from another tree; the 0.99.97.4 sources fail the seven refused-page checks. No BLE link, ring firmware, owner-loop scheduling or store commit is simulated.
 
 ## R1 ring health controls and history
 
@@ -4099,7 +4099,7 @@ python3 components/hardwareone/test/host/test_g2_page_api_contract.py --sanitize
 python3 components/hardwareone/test/host/test_file_kind.py --sanitize
 ```
 
-`file_kind` compiles the shared classifier `FileBrowser_FileKind.h` and, over one table of names, the production G2 Files page file-tap branch (the `else` block of `g2FilesHandleTap` with the classification it calls, `showFileChooser` recording the chooser kind) beside the OLED browser's "View" decision (its `sFbActionViewable` assignment). The lens must offer a text or JSON view exactly when the OLED offers View: `.log`, `.md`, `.ini`, `.yaml`, `.html`, `.c` and the other OLED text types open in both, BMP/JPEG open only on the lens, and png, bin, `.tar.gz` and names without an extension get Info/Rename/Delete only. A second harness runs the OLED browser's rename/delete helpers (`fbRenameSelected`, `fbDeleteSelected`, `fbSubmitMutate`) against FileManager and executor doubles: both submit the user-level `filerename` and one-shot `filedelete ... confirm` commands with the selected entry's full path (a 70-byte SD name), re-scan only after the executor's `OK`, report the executor's admin refusal, give the handlers' path-policy refusal ("File does not exist or access denied") its own result and the toast "Not found or denied" (through `fbToastMutate`, which the harness also compiles), and submit nothing for an unresolved selection or a quote. Source contracts check that the OLED browser no longer calls `FileManager::renameItem`/`deleteItem`, that its prepare pass routes Rename/Delete through those helpers under the identity guard, that guests are still stopped on the input path, and that neither browser keeps a private extension list. `--component <dir>` reads the production sources from another tree; the f4cc542 sources fail the agreement checks (the lens gives `.log` and `.md` no viewer while the OLED offers View) and the contracts (direct FileManager rename/delete). No device, executor or FileManager is run.
+`file_kind` compiles the shared classifier `System_FileKind.h` and, over one table of names, the production G2 Files page file-tap branch (the `else` block of `g2FilesHandleTap` with the classification it calls, `showFileChooser` recording the chooser kind) beside the OLED browser's "View" decision (its `sFbActionViewable` assignment). The lens must offer a text or JSON view exactly when the OLED offers View: `.log`, `.md`, `.ini`, `.yaml`, `.html`, `.c` and the other OLED text types open in both, BMP/JPEG open only on the lens, and png, bin, `.tar.gz` and names without an extension get Info/Rename/Delete only. A second harness runs the OLED browser's rename/delete helpers (`fbRenameSelected`, `fbDeleteSelected`, `fbSubmitMutate`) against FileManager and executor doubles: both submit the user-level `filerename` and one-shot `filedelete ... confirm` commands with the selected entry's full path (a 70-byte SD name), re-scan only after the executor's `OK`, report the executor's admin refusal, give the handlers' path-policy refusal ("File does not exist or access denied") its own result and the toast "Not found or denied" (through `fbToastMutate`, which the harness also compiles), and submit nothing for an unresolved selection or a quote. Source contracts check that the OLED browser no longer calls `FileManager::renameItem`/`deleteItem`, that its prepare pass routes Rename/Delete through those helpers under the identity guard, that guests are still stopped on the input path, and that neither browser keeps a private extension list. `--component <dir>` reads the production sources from another tree; the f4cc542 sources fail the agreement checks (the lens gives `.log` and `.md` no viewer while the OLED offers View) and the contracts (direct FileManager rename/delete). No device, executor or FileManager is run.
 
 ## Shared JSON Pretty view
 
@@ -5167,7 +5167,7 @@ Path switching and the OPEN phases are covered as follows:
   has its slot. The text check keeps the core free of BLE, OS and Arduino
   includes.
 - `ble_console_phone_link` runs the shipped wiring of that core in
-  `Bluetooth.cpp` (server callbacks, the request characteristic's write,
+  `BLE_Server.cpp` (server callbacks, the request characteristic's write,
   the console plan helpers, the directed senders, the console view,
   `bledisconnect`, `bleadv`, `bleconsole`, the host-teardown hooks and
   `bleUpdateStreams`) with `BLE_LinkStatus.cpp`'s `bleLinkStatus()`, over
@@ -5199,7 +5199,7 @@ Path switching and the OPEN phases are covered as follows:
   and pin the call order in the callbacks, the raw sender, the main loop, the
   registration and the teardown.
 - `ble_pipe_console_row` runs the phone link's console row (phone link v2: the
-  app console as stream slot 2 of the phone pipe) from `Bluetooth.cpp`: the
+  app console as stream slot 2 of the phone pipe) from `BLE_Server.cpp`: the
   session table and epoch helpers, the row's lifecycle (gBleState holders,
   bind, end, the leaf identity snapshot, the main loop's reconcile), the auth
   rule, revocation, the disconnect owner functions, the command tail, the
@@ -5224,7 +5224,7 @@ Path switching and the OPEN phases are covered as follows:
   state), `ble_sc_policy` the row's whoami and gate with `blerequireauth` off,
   and `fileread_psram` the BLOB path's confidential check and epoch fence.
 - `ble_session_idle` runs the BLE idle logout (`bleSessionTick`) from
-  `Bluetooth.cpp` with login (`bleBindSession`), the activity stamp
+  `BLE_Server.cpp` with login (`bleBindSession`), the activity stamp
   (`bleMarkActivity`), the phone-link slot maker and `System_User.cpp`'s idle
   policy. A contender double stamps a command whenever the tick takes the
   lifecycle lock, as cmd_exec can while the main loop waits for it. A
@@ -5242,7 +5242,7 @@ Path switching and the OPEN phases are covered as follows:
   to the session that sent it: `broadcastOutputCore` from `System_Debug.cpp`,
   the help menu (`renderHelpMain`) from `System_CLI.cpp`, and the command tail,
   reply callback, output batch, senders and mirror collector from
-  `Bluetooth.cpp`. In server mode and on the phone link, `help` and `help all`
+  `BLE_Server.cpp`. In server mode and on the phone link, `help` and `help all`
   answer the session with the menu in whole-line batches of at most 512 bytes,
   then "OK"; the two modes send the same messages, and the phone link sends
   them as reliable gated frames. Another session gets nothing, a JSON result
@@ -5265,7 +5265,7 @@ Path switching and the OPEN phases are covered as follows:
   the delivery cases.
 - `ble_role_switch_reconnect` switches to server mode with `openble` and back
   to the glasses with `openg2 saved`. It runs the reconnect scheduler and tick
-  from `BLE_Peers.cpp`, `openble` from `Bluetooth.cpp`, the ring's disconnect,
+  from `BLE_Peers.cpp`, `openble` from `BLE_Server.cpp`, the ring's disconnect,
   logical down, admission and `ring disconnect` from `G2_Ring.cpp`, the
   glasses' disconnect intent, admission, `openg2` and `g2ConnectSaved` from
   `G2_Glasses.cpp`, and the phone pipe's peer ops. The role owners and the
@@ -5336,7 +5336,7 @@ Path switching and the OPEN phases are covered as follows:
 - `phone_console` runs the console driver (`BLE_PhonePipeConsole.cpp`) as
   shipped, with the real pipe core, record layer and code headers, against
   fakes of the headers it includes; the fakes carry the real declarations
-  extracted from `Bluetooth.h`, `BLE_PhonePipe.h` and the rest, so a changed
+  extracted from `BLE_Server.h`, `BLE_PhonePipe.h` and the rest, so a changed
   signature fails to compile. The harness co-simulates the pipe task, cmd_exec,
   the main loop, the debug task, httpd and a phone on one clock. It covers
   CONSOLE_OFFERED (bleconsole, the generated flag and a valid code), OPEN and

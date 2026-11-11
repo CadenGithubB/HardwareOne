@@ -1,4 +1,4 @@
-#include "CameraMonochrome.h"
+#include "OLED_CameraMonochrome.h"
 #include <cassert>
 #include <cstdio>
 #include <vector>

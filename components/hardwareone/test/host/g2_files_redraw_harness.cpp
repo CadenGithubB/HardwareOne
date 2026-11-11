@@ -27,8 +27,8 @@
 #include "G2_RenderTypes.h"
 #include "System_TextPager.h"
 // The page's file classifier (a pre-fix tree has private predicates instead).
-#if __has_include("FileBrowser_FileKind.h")
-#include "FileBrowser_FileKind.h"
+#if __has_include("System_FileKind.h")
+#include "System_FileKind.h"
 #endif
 
 static unsigned checks = 0, failures = 0;

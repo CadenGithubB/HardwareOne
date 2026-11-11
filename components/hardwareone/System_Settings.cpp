@@ -1184,7 +1184,7 @@ void settingsDefaults() {
   // - oled (OLED_Settings.cpp): enabled, autoInit, modes, brightness
   // - led (System_NeoPixel.cpp): brightness, startup effect/color/duration
   // - power (System_Power.cpp): mode, sleep cooldown, power-save timeout
-  // - bluetooth (Bluetooth.cpp): autoStart, requireAuth, deviceName
+  // - bluetooth (BLE_Server.cpp): autoStart, requireAuth, deviceName
   // ============================================================================
   applyRegisteredDefaults();
 }

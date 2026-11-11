@@ -218,7 +218,7 @@ struct World {
 };
 static World w;
 
-// Bluetooth.h
+// BLE_Server.h
 #define BLE_MAX_CONNECTIONS 4
 enum BleConnectionState { BLE_STATE_IDLE, BLE_STATE_ADVERTISING, BLE_STATE_SCANNING,
                           BLE_STATE_CONNECTING, BLE_STATE_CONNECTED, BLE_STATE_DISCONNECTING };
@@ -274,7 +274,7 @@ static const char* phonePipeStatus() { return w.label; }
 static uint8_t phonePipeStep() { return w.step; }
 static bool phonePipeEnrolling() { return w.enrolling; }
 #if ENABLE_BLE_PHONE_PIPE
-// BLE_PhonePipe.h, BLE_PhonePipeConsole.h and Bluetooth.h (phone link v2), as
+// BLE_PhonePipe.h, BLE_PhonePipeConsole.h and BLE_Server.h (phone link v2), as
 // far as BLE_LinkStatus.cpp reads them: no summary yet and no console stream,
 // so the console words stay the ones these screens pin (test_phone_status
 // runs the stream's words).

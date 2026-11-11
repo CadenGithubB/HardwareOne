@@ -1,4 +1,4 @@
-#include "../../Transcription_UI_Policy.h"
+#include "../../System_TranscriptionUIPolicy.h"
 #include <cassert>
 #include <string>
 #include <cstdio>

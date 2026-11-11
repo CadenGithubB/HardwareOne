@@ -11,7 +11,7 @@ parser and stream-flag helpers) and the data-service push functions against a
 fake directed GATT sender. Outside the server role on the phone link (the G2
 client host, or phone-client mode where the pipe's console row is a connected
 app) blestream and bleevent give the phone-link reason before anything else. --component points the suite at another copy of the
-BLE sources (Bluetooth.cpp/.h, WebPage_Bluetooth.cpp/.h).
+BLE sources (BLE_Server.cpp/.h, WebPage_Bluetooth.cpp/.h).
 
 Also runs the production `blestatus`/`bleread` command against the same table:
 both forms read the guarded snapshot `bleinfo json` uses, so the JSON views
@@ -118,8 +118,8 @@ def mode_choices(owner: str) -> str:
 
 
 def generated(component: Path, baseline: bool) -> str:
-    owner = (component / "Bluetooth.cpp").read_text()
-    header = (component / "Bluetooth.h").read_text()
+    owner = (component / "BLE_Server.cpp").read_text()
+    header = (component / "BLE_Server.h").read_text()
     web = (component / "WebPage_Bluetooth.cpp").read_text()
     g2 = (COMPONENT / "G2_Glasses.h").read_text()
     types = (COMPONENT / "BLE_Types.h").read_text()
@@ -192,7 +192,7 @@ def generated(component: Path, baseline: bool) -> str:
         # The stream commands ask isBleServerInitialized() first (defined below
         # with the console view), and it reads its mirror while the lock is busy.
         mirror = re.search(r"(?m)^static std::atomic<bool> sBleServerStateInitialized\{false\};", owner)
-        require(mirror is not None, "Bluetooth.cpp mirrors the server state's initialized flag")
+        require(mirror is not None, "BLE_Server.cpp mirrors the server state's initialized flag")
         definitions += [mirror[0], "bool isBleServerInitialized();"]
         definitions += stream_definitions(owner)
         # bledisconnect's refusal says how to reach the console (defined below).
@@ -319,21 +319,21 @@ def main() -> None:
             require(old == output, "BLE JSON/text output changed from characterized baseline")
             print("BLE status: successful CLI JSON/text matches pre-change production")
 
-        shutil.copyfile(args.component / "Bluetooth.h", work / "Bluetooth.h")
+        shutil.copyfile(args.component / "BLE_Server.h", work / "BLE_Server.h")
         # A Bluetooth-off build, with the roles the derived rules turn off with it.
         (work / "System_BuildConfig.h").write_text(
             "#define ENABLE_BLUETOOTH 0\n#define ENABLE_G2_GLASSES 0\n#define ENABLE_BLE_PHONE_PIPE 0\n")
         (work / "System_User.h").write_text("#include <cstdint>\nusing TransportSessionEpoch = uint32_t;\n")
         # Disabled bledisconnect owner stubs report unavailable / nothing done.
         disconnect_stubs = ""
-        if "bleDisconnectConnection(" in (args.component / "Bluetooth.h").read_text():
+        if "bleDisconnectConnection(" in (args.component / "BLE_Server.h").read_text():
             disconnect_stubs = ("  assert(bleDisconnectConnection(1) == BleDisconnectResult::UNAVAILABLE &&\n"
                                 "         bleDisconnectAppClients() == 0);\n")
         run("disabled", '''#define ARDUINOJSON_ENABLE_ARDUINO_STRING 1
 #define ARDUINOJSON_ENABLE_ARDUINO_STREAM 0
 #define ARDUINOJSON_ENABLE_ARDUINO_PRINT 0
 #define ARDUINOJSON_ENABLE_PROGMEM 0
-#include "Bluetooth.h"
+#include "BLE_Server.h"
 #include <cassert>
 bool bleTestStringAppend() { return true; }
 int main() {

@@ -1,4 +1,4 @@
-#include "CameraRgb565.h"
+#include "HAL_Camera_Rgb565.h"
 #include <cassert>
 #include <cstdio>
 #include <vector>

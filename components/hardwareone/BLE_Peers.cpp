@@ -17,7 +17,7 @@
 #if ENABLE_BLUETOOTH
 
 #include "System_Settings.h"   // setSetting, persisted peer rows
-#include "Bluetooth.h"         // live server/client role predicates
+#include "BLE_Server.h"         // live server/client role predicates
 #include "System_Debug.h"
 #include "System_Utils.h"      // RETURN_VALID_IF_VALIDATE_CSTR, parseBoolArg
 #include "System_Command.h"    // CommandEntry, ensureDebugBuffer, getDebugBuffer

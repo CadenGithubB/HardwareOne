@@ -1,6 +1,6 @@
 // Production definitions are inserted by test_ble_server_stop.py: the BLE
 // server stop (deinitBluetooth), its session/advertising helpers and the
-// `closeble` / `blemode` commands, extracted unchanged from Bluetooth.cpp, with
+// `closeble` / `blemode` commands, extracted unchanged from BLE_Server.cpp, with
 // bleLinkStatus() from BLE_LinkStatus.cpp for the `blemode` words.
 // Role claims, the Ring owner, the host/controller teardown, transport
 // sessions, settings writes and the pipe/console views are host boundaries.
@@ -397,7 +397,7 @@ static BLECharacteristic* pStreamControlChar = nullptr;
 static BLECharacteristic* pManufacturerChar = nullptr;
 static BLECharacteristic* pModelChar = nullptr;
 static BLECharacteristic* pFirmwareChar = nullptr;
-// The characteristic callbacks the command service installs (Bluetooth.cpp's
+// The characteristic callbacks the command service installs (BLE_Server.cpp's
 // own are not under test here).
 static struct HostCharCallbacks {} sCmdRequestCallbacks, sCmdStatusCallbacks;
 
@@ -432,7 +432,7 @@ static TransportSessionEpoch transportSessionOpen(HostCommandSource) {
 }
 static BleDeviceType bleIdentifyDeviceByMac(const uint8_t*) { return BLE_DEVICE_UNKNOWN; }
 
-// The console view (Bluetooth.cpp bleConsoleView) for bleLinkStatus().
+// The console view (BLE_Server.cpp bleConsoleView) for bleLinkStatus().
 static BleConsoleView bleConsoleView() {
   BleConsoleView view;
   view.up = gBleState && gBleState->initialized;

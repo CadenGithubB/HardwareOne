@@ -1,12 +1,12 @@
-"""Shared pieces for the host suites that splice Bluetooth.cpp's phone-link
+"""Shared pieces for the host suites that splice BLE_Server.cpp's phone-link
 console row (phone link v2) into their harnesses.
 
-The console is stream slot 2 of the phone pipe. Bluetooth.cpp keeps its
+The console is stream slot 2 of the phone pipe. BLE_Server.cpp keeps its
 session as a gBleState row with its own id and writes its output through the
 console driver (BLE_PhonePipeConsole.h), which other suites test. This module
 extracts, as shipped:
 
-- pipe_types(): the driver's kinds, modes, results and target, and Bluetooth.h's
+- pipe_types(): the driver's kinds, modes, results and target, and BLE_Server.h's
   BlePipeConsoleIdentity / blePipeConsoleRowId;
 - holder_state(): gBleState's holder bits and the server state's mirror;
 - slot_state(): the row's slot, its leaf snapshot and blePipeIdentitySyncLocked
@@ -40,7 +40,7 @@ def _found(pattern: str, text: str, what: str) -> str:
 
 def pipe_types(component: Path) -> str:
     console = (component / "BLE_PhonePipeConsole.h").read_text()
-    header = (component / "Bluetooth.h").read_text()
+    header = (component / "BLE_Server.h").read_text()
     parts = [_found(rf"^enum class {name} : uint8_t \{{[^}}]*\}};", console,
                     f"BLE_PhonePipeConsole.h declares {name}")
              for name in ("PipeConsoleKind", "PipeConsoleMode", "PipeConsoleWrite")]
@@ -59,11 +59,11 @@ def link_record(component: Path) -> str:
 
 def holder_state(owner: str) -> str:
     return "\n".join((
-        _found(r"^constexpr uint8_t kBleHoldServer = [^;]+;", owner, "Bluetooth.cpp names the holders"),
-        _found(r"^static uint8_t sBleStateHolders = 0;", owner, "Bluetooth.cpp keeps the holder bits"),
+        _found(r"^constexpr uint8_t kBleHoldServer = [^;]+;", owner, "BLE_Server.cpp names the holders"),
+        _found(r"^static uint8_t sBleStateHolders = 0;", owner, "BLE_Server.cpp keeps the holder bits"),
         # isBleServerInitialized()'s mirror, which retiring the state clears.
         _found(r"^static std::atomic<bool> sBleServerStateInitialized\{false\};", owner,
-               "Bluetooth.cpp mirrors the server state's initialized flag"),
+               "BLE_Server.cpp mirrors the server state's initialized flag"),
         # A harness may splice only some of the holders' users.
         "[[maybe_unused]] static const uint8_t kPipeHostHolders[] = "
         "{kBleHoldServer, kBleHoldClientConsole, kBleHoldPipe};",
@@ -72,11 +72,11 @@ def holder_state(owner: str) -> str:
 
 def slot_state(owner: str) -> str:
     return "\n".join((
-        _found(r"^int sBlePipeRowSlot = -1;", owner, "Bluetooth.cpp keeps the console row's slot"),
+        _found(r"^int sBlePipeRowSlot = -1;", owner, "BLE_Server.cpp keeps the console row's slot"),
         _found(r"^portMUX_TYPE sBlePipeIdentityMux = portMUX_INITIALIZER_UNLOCKED;", owner,
-               "Bluetooth.cpp has the identity snapshot's leaf lock"),
+               "BLE_Server.cpp has the identity snapshot's leaf lock"),
         _found(r"^BlePipeConsoleIdentity sBlePipeIdentity;", owner,
-               "Bluetooth.cpp keeps the identity snapshot"),
+               "BLE_Server.cpp keeps the identity snapshot"),
         extract_block(owner, "void blePipeIdentitySyncLocked() "),
     ))
 
@@ -88,9 +88,9 @@ def row_helpers(owner: str) -> str:
     return "\n\n".join((
         extract_block(owner, "static inline bool blePipeRow("),
         extract_block(owner, "static bool bleIsPipeRowId("),
-        _found(ROW_END_DECL, owner, "Bluetooth.cpp declares blePipeRowEndLocked with its defaults"),
+        _found(ROW_END_DECL, owner, "BLE_Server.cpp declares blePipeRowEndLocked with its defaults"),
         _found(r"^constexpr uint16_t kBlePipeCloseRenewed = [^;]+;", owner,
-               "Bluetooth.cpp names the console CLOSE reasons"),
+               "BLE_Server.cpp names the console CLOSE reasons"),
         # A harness may splice only the callers of one of them.
         "[[maybe_unused]] static const uint16_t kPipeHostCloseReasons[] = "
         "{kBlePipeCloseRenewed, kBlePipeCloseRevoked};",
@@ -125,7 +125,7 @@ def row_definitions(owner: str) -> list[str]:
 
 def router_definitions(owner: str) -> list[str]:
     return [_found(r"^constexpr size_t kBlePipeMirrorMax = \d+;", owner,
-                   "Bluetooth.cpp bounds a MIRROR record")] + \
+                   "BLE_Server.cpp bounds a MIRROR record")] + \
         [extract_block(owner, marker) for marker in ROUTER_MARKERS]
 
 
@@ -192,7 +192,7 @@ static void pipeConsoleRequestClose(uint32_t generation, uint16_t streamId, uint
 }
 static bool pipeConsoleHeldByCurrentTask() { return gPipeHost.chainHeld; }
 static bool phonePipeOwnerHeldByCurrentTask() { return gPipeHost.ownerHeld; }
-// Bluetooth.cpp's cmd_exec probe (gCmdExecTaskHandle is HardwareOne.cpp's).
+// BLE_Server.cpp's cmd_exec probe (gCmdExecTaskHandle is HardwareOne.cpp's).
 static bool bleOnCmdExecTask() { return gPipeHost.onCmdExec; }
 static std::vector<PipeHostCall> pipeHostWrites() {
   std::vector<PipeHostCall> out;

@@ -309,7 +309,7 @@ Ranked by exposure. Items 1-3 take a path from outside the firmware.
    (remaining 8 → model dir), `System_ImageManager.cpp` (6 → computed from
    `gSettings.cameraCaptureFolder`), `System_STTLocal.cpp` (4 →
    `STT_MODELS`/`_SD`), `System_TimeAnchors.cpp` (4), `System_LLMBackend.cpp`
-   + `System_LLM_Model.cpp` (3 → `LLM_MODELS` or the SD model folder),
+   + `System_LLMModel.cpp` (3 → `LLM_MODELS` or the SD model folder),
    `System_BondedPeer.cpp` (2 → `ESPNOW_STATE`), `System_Automation.cpp:909`,
    `System_Notifications`, `WebServer_Server.cpp` 1099/1104 (`USERS`),
    `HardwareOne.cpp` 1726/1755 (`SYSTEM_STATE`), `G2_Glasses.cpp:37996`

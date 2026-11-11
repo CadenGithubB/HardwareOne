@@ -1,7 +1,7 @@
 # Bluetooth hardware boundary
 
 The connectivity copy adds `HAL_Bluetooth.h/.cpp` beside the existing Input,
-Display and Audio HALs. One `Bluetooth.cpp` still owns the GATT services,
+Display and Audio HALs. One `BLE_Server.cpp` still owns the GATT services,
 application authentication, command handling, connection slots and role-transition
 guards. The HAL owns controller selection, stack start/stop checks and power
 capability. No separate P4 Bluetooth application is introduced.

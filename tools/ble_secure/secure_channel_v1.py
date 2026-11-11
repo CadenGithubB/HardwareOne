@@ -1,6 +1,6 @@
 """HardwareOne BLE Secure Channel v1 protocol core.
 
-This module mirrors ``System_BleSecureChannel.cpp`` byte-for-byte while staying
+This module mirrors ``BLE_SecureChannel.cpp`` byte-for-byte while staying
 independent of BLE transports.  It deliberately persists nothing: callers own
 credential prompting and transport lifecycle, and must bind each notification
 callback to the opaque generation returned by :meth:`begin_handshake`.

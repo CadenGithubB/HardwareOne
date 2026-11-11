@@ -67,7 +67,7 @@ bounded-model accuracy evidence remains in [RESULTS.md](RESULTS.md).
 
 `System_Dictation` retains common input ownership and chunk delivery for local
 and Pi providers. OLED/G2 use the same peek/commit mailbox. `HAL_Audio` supplies
-microphones; `Audio_VadPolicy` shares the recorder's amplitude decisions. The
+microphones; `System_AudioVadPolicy` shares the recorder's amplitude decisions. The
 Pi recorder's original processing, thresholds and timing pass parity tests;
 UART v1 remains unchanged. Continuous Pi transport still needs the adaptation
 in [CONTINUOUS_PI.md](CONTINUOUS_PI.md).

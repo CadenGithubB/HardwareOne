@@ -25,7 +25,7 @@ def main():
     source=re.sub(r'^#include.*\n','',source,flags=re.M)
     hp=a.source_dir/'g2_transcription_harness.cpp' if a.source_dir else HERE/'g2_transcription_harness.cpp'
     harness=hp.read_text()
-    for tag,value in [('// INSERT_PRODUCTION',source),('// INSERT_POLICY',read('Transcription_UI_Policy.h').replace('#pragma once','')),
+    for tag,value in [('// INSERT_PRODUCTION',source),('// INSERT_POLICY',read('System_TranscriptionUIPolicy.h').replace('#pragma once','')),
                       ('// INSERT_PAGER',read('System_TextPager.h').replace('#pragma once',''))]:
         assert harness.count(tag)==1
         harness=harness.replace(tag,value)

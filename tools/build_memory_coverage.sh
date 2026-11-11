@@ -198,7 +198,7 @@ run_llm() {
   assert_flag ENABLE_LLM_BACKEND 1
   assert_flag ENABLE_LLM_SOURCE_ONBOARD 1
   assert_flag ENABLE_LLM_SOURCE_CM5 0
-  build_and_check_object System_LLM_Model "onboard LLM implementation" 92
+  build_and_check_object System_LLMModel "onboard LLM implementation" 92
 }
 
 case "$MEMCOV_PASS" in

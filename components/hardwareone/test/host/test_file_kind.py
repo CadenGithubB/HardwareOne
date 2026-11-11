@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """One file classification and one rename/delete authority for the two on-device file browsers.
 
-file_kind_harness.cpp runs the shared classifier (FileBrowser_FileKind.h) and,
+file_kind_harness.cpp runs the shared classifier (System_FileKind.h) and,
 on one table of names, the G2 lens Files page's file-tap branch (extracted from
 g2FilesHandleTap) beside the OLED browser's "View" decision (its
 sFbActionViewable assignment): the lens must offer a text/JSON view exactly
@@ -39,7 +39,7 @@ from test_web_batch_handlers import extract_block, require
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
 
-KIND_HEADER = "FileBrowser_FileKind.h"
+KIND_HEADER = "System_FileKind.h"
 G2_PREDICATES = ("isBmpFilename", "isJpgFilename", "isJsonFilename", "isTxtFilename",
                  "isCsvFilename")
 OLED_HELPERS = ("static FbMutateResult fbSubmitMutate(",

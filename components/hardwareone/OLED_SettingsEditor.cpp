@@ -16,7 +16,7 @@
 #include "System_SettingsEditorCore.h"
 #include "System_Utils.h"
 #if ENABLE_BLUETOOTH
-#include "Bluetooth.h"
+#include "BLE_Server.h"
 #endif
 #if ENABLE_G2_GLASSES
 #include "G2_Glasses.h"

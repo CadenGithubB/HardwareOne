@@ -195,7 +195,7 @@ now names the source of a cancel instead of "phone operation cancelled".
   - Power save is inert in AP+STA (ESP-NOW).
   - On ESP32/S3 the join-time PS_NONE also guards an I2C interrupt-WDT race; that needs a stress run before any
     change.
-- **Don't "fix" `setMinPreferred` twice in `Bluetooth.cpp`.** It is copied from Arduino's own example and is valid as
+- **Don't "fix" `setMinPreferred` twice in `BLE_Server.cpp`.** It is copied from Arduino's own example and is valid as
   is. Changing the second call to `setMaxPreferred(0x12)` would ask centrals for faster connections, which means more
   BLE airtime and less for Wi-Fi.
 - **Don't tune for the P4 in its own Kconfig.** It has no coexistence module, so tune the C6. Its Wi-Fi buffer values

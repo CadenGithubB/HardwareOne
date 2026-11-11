@@ -148,7 +148,7 @@ endif()
 
 # G2 build gate. Matches the per-file `#if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES`
 # guards in each G2/R1 .cpp. When off we drop the protocol .cpp's from the
-# source list entirely (System_G2_Protocol.cpp + System_R1_Protocol.cpp ≈
+# source list entirely (G2_Protocol.cpp + R1_Protocol.cpp ≈
 # 2.7 KLOC of source) so the build doesn't pay the parse + compile cost.
 # The other G2 files (G2_Glasses, G2_Ring, G2_Page_*, G2_HijackFsm) stay
 # in the unconditional list — their bodies are #if-wrapped so they compile
@@ -161,11 +161,11 @@ endif()
 
 set(hardwareone_srcs
         HardwareOne.cpp
-        Bluetooth.cpp
+        BLE_Server.cpp
         HAL_Bluetooth.cpp
         HAL_Radio.cpp
         System_RadioCompanion.cpp
-        System_BleSecureChannel.cpp
+        BLE_SecureChannel.cpp
         G2_Glasses.cpp
         G2_NativeNotes.cpp
         G2_HealthPush.cpp
@@ -318,8 +318,8 @@ endif()
 
 if(HW_CFG_BUILD_G2 GREATER 0)
     list(APPEND hardwareone_srcs
-        System_G2_Protocol.cpp
-        System_R1_Protocol.cpp
+        G2_Protocol.cpp
+        R1_Protocol.cpp
         # Compress-only LZ4 for the CompressMode=2 image path. G2-gated
         # because the image push is its only caller.
         System_Lz4.cpp
@@ -558,11 +558,11 @@ endif()
 # ---------------------------------------------------------------------------
 if(HW_CFG_ENABLE_LLM_SOURCE_ONBOARD GREATER 0)
     list(APPEND hardwareone_srcs System_LLM.cpp)
-    list(APPEND hardwareone_srcs System_LLM_Kernels.cpp)
-    list(APPEND hardwareone_srcs System_LLM_Sampler.cpp)
-    list(APPEND hardwareone_srcs System_LLM_Tokenizer.cpp)
-    list(APPEND hardwareone_srcs System_LLM_Model.cpp)
-    list(APPEND hardwareone_srcs System_LLM_Menu.cpp)
+    list(APPEND hardwareone_srcs System_LLMKernels.cpp)
+    list(APPEND hardwareone_srcs System_LLMSampler.cpp)
+    list(APPEND hardwareone_srcs System_LLMTokenizer.cpp)
+    list(APPEND hardwareone_srcs System_LLMModel.cpp)
+    list(APPEND hardwareone_srcs System_LLMMenu.cpp)
     list(APPEND hardwareone_requires espressif__esp-dsp)
     message(STATUS "LLM source: ONBOARD engine ENABLED")
 endif()

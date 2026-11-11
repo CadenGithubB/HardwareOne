@@ -101,7 +101,7 @@ struct DebugFlagMask {
   }
 };
 
-#include "System_Debug_Manager.h"
+#include "System_DebugManager.h"
 #include "System_BuildConfig.h"
 
 // Helper: construct a single-bit mask (bit 0-255). Shifts past word

@@ -24,7 +24,7 @@ set_target_properties(dictation_policy_tests PROPERTIES
 target_compile_options(dictation_policy_tests PRIVATE
   -Wall -Wextra -Werror -pedantic)
 
-# The order of the handover wipe (`factoryreset all`, FactoryWipePolicy.h):
+# The order of the handover wipe (`factoryreset all`, System_FactoryWipePolicy.h):
 # filesystem before NVS, resume after power loss, bounded attempts.
 add_executable(factory_wipe_policy_tests test_factory_wipe_policy.cpp)
 set_target_properties(factory_wipe_policy_tests PROPERTIES
@@ -32,7 +32,7 @@ set_target_properties(factory_wipe_policy_tests PROPERTIES
 target_include_directories(factory_wipe_policy_tests PRIVATE ../..)
 target_compile_options(factory_wipe_policy_tests PRIVATE -Wall -Wextra -Werror -pedantic)
 
-# The clock the R1 ring is given (ClockConfirmPolicy.h): an SNTP step that
+# The clock the R1 ring is given (System_ClockConfirmPolicy.h): an SNTP step that
 # moves an already-set clock by more than a day is held back from the ring.
 add_executable(clock_confirm_policy_tests test_clock_confirm_policy.cpp)
 set_target_properties(clock_confirm_policy_tests PROPERTIES

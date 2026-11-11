@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """The BLE console mirror buffers only while a session could receive it.
 
-bleMirrorRecipientCount() (Bluetooth.cpp) counts the sessions sendBleResponse
+bleMirrorRecipientCount() (BLE_Server.cpp) counts the sessions sendBleResponse
 would reach: it runs the same collector, bleCollectMirrorSessions. Both are
-spliced from Bluetooth.cpp into a harness with a four-slot connection table: a
+spliced from BLE_Server.cpp into a harness with a four-slot connection table: a
 connected peer that never logged in, a guest session, a slot whose session
 epoch was cleared and an inactive slot are not recipients; logged-in non-guest
 sessions are. Source checks: the debug drain in System_Debug.cpp gates its BLE
@@ -89,13 +89,13 @@ def main():
     parser.add_argument('--sanitize', action='store_true')
     parser.add_argument('--source-dir', '--component', dest='source_dir', type=Path, default=COMPONENT)
     args = parser.parse_args()
-    bluetooth = (args.source_dir / 'Bluetooth.cpp').read_text()
+    bluetooth = (args.source_dir / 'BLE_Server.cpp').read_text()
     debug = (args.source_dir / 'System_Debug.cpp').read_text()
     failures = []
 
     count_marker = 'int bleMirrorRecipientCount()'
     if count_marker not in bluetooth:
-        failures.append('Bluetooth.cpp has no bleMirrorRecipientCount(): the console mirror cannot ask '
+        failures.append('BLE_Server.cpp has no bleMirrorRecipientCount(): the console mirror cannot ask '
                         'whether a flush would reach anybody')
     else:
         count = extract_block(bluetooth, count_marker)

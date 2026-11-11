@@ -6,7 +6,7 @@
 #include "OLED_MessageText.h"
 #include "HAL_Input.h"
 #include "HAL_JPEG.h"
-#include "CameraMonochrome.h"
+#include "OLED_CameraMonochrome.h"
 #include "System_Camera_DVP.h"
 #include "System_User.h"
 #include "System_Power.h"

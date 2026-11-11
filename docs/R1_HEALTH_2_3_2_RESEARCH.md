@@ -48,7 +48,7 @@ decompiled app stay under `tools/p4/companion/private/` (git-ignored).
 |---|---|
 | Decompiled app 2.3.2 build 243 (blutter, `ring-2327/even-2.3.2-build243/blutter-out/asm/`) | `even_connect/ring1/` request builders, enums and models; `even/pages/main_screen/tab_page/health/service/health_glasses_push_service.dart` (sync orchestration and parser call sites) |
 | Capture `ring-2327/btsnoop_hci.log` (app 2.3.1 build 241, ring `2.3.2.0007`, 2026-10-15) | Re-decoded with a throwaway read-only script that reassembles multi-notification frames, checks CRC32 and CRC-16/MODBUS, and prints structure only (lengths, counts, modes, invariants) |
-| HardwareOne | `System_R1_Protocol.cpp/.h`, `G2_Ring.cpp`, `G2_Health.cpp`, host harnesses `r1_protocol_harness.cpp` and `ring_daily_ack_harness.cpp` |
+| HardwareOne | `R1_Protocol.cpp/.h`, `G2_Ring.cpp`, `G2_Health.cpp`, host harnesses `r1_protocol_harness.cpp` and `ring_daily_ack_harness.cpp` |
 
 Enum wire values were read from the enum `subCmd` / `cmd` / `fromByte`
 switches in `ble_ring1_enum.dart`, not from the enum declaration order (they
@@ -508,7 +508,7 @@ plan. What landed differs from it in these ways:
   and deviceStatus checks were confirmed to fail on reverted code. The P4
   build of `p4-phone-pipe-camera-off-test` is clean.
 
-**`System_R1_Protocol.cpp`** (capability helpers only; no layout changes):
+**`R1_Protocol.cpp`** (capability helpers only; no layout changes):
 
 * Add `r1Is232Health(profile)` = 0007 or 0008 (both captured).
 * `r1ProfileSupportsHealthCollectionSet`: 232 → `enabled` (and OFF if

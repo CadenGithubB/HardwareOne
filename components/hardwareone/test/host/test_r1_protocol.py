@@ -17,7 +17,7 @@ def check_public_profile_mirror(component: Path) -> None:
     a missed case would compile (each switch has a default) and report
     "unknown" with protocolProfileKnown=true.
     """
-    header = (component/'System_R1_Protocol.h').read_text()
+    header = (component/'R1_Protocol.h').read_text()
     enum = extract_block(header, 'enum R1ProtocolProfile')
     profiles = re.findall(r'R1_PROFILE_(FW_\w+)\s*=', enum)
     assert profiles, 'no firmware profiles found'
@@ -41,7 +41,7 @@ if __name__ == '__main__':
     check_public_profile_mirror(component)
     with tempfile.TemporaryDirectory(prefix='hw1-r1-protocol-') as tmp:
         root = Path(tmp)
-        for name in ('System_R1_Protocol.cpp', 'System_R1_Protocol.h'):
+        for name in ('R1_Protocol.cpp', 'R1_Protocol.h'):
             shutil.copyfile(component/name, root/name)
         (root/'System_BuildConfig.h').write_text('#define ENABLE_BLUETOOTH 1\n#define ENABLE_G2_GLASSES 1\n')
         (root/'Arduino.h').write_text('#include <stdint.h>\n#include <stddef.h>\n')
@@ -55,7 +55,7 @@ inline void* ps_alloc(size_t size, AllocPref, const char*) {return malloc(size);
 ''')
         binary = root/'test'
         cmd = [os.environ.get('CXX', 'clang++'), '-std=c++17', '-Wall', '-Wextra', '-Werror',
-               '-I', str(root), str(root/'System_R1_Protocol.cpp'),
+               '-I', str(root), str(root/'R1_Protocol.cpp'),
                str(here/'r1_protocol_harness.cpp'), '-o', str(binary)]
         if args.sanitize:
             cmd[1:1] = ['-fsanitize=address,undefined', '-fno-omit-frame-pointer', '-g']
@@ -71,7 +71,7 @@ inline void* ps_alloc(size_t size, AllocPref, const char*) {return malloc(size);
         (root/'ring_dark_probe.cpp').write_text(harness.replace('// INSERT_PROBE', probe))
         probe_binary = root/'probe'
         probe_cmd = [os.environ.get('CXX', 'clang++'), '-std=c++17', '-Wall', '-Wextra', '-Werror',
-                     '-I', str(root), str(root/'System_R1_Protocol.cpp'),
+                     '-I', str(root), str(root/'R1_Protocol.cpp'),
                      str(root/'ring_dark_probe.cpp'), '-o', str(probe_binary)]
         if args.sanitize:
             probe_cmd[1:1] = ['-fsanitize=address,undefined', '-fno-omit-frame-pointer', '-g']
@@ -89,7 +89,7 @@ inline void* ps_alloc(size_t size, AllocPref, const char*) {return malloc(size);
         (root/'ring_adv_identity.cpp').write_text(identity)
         identity_binary = root/'identity'
         identity_cmd = [os.environ.get('CXX', 'clang++'), '-std=c++17', '-Wall', '-Wextra', '-Werror',
-                        '-I', str(root), str(root/'System_R1_Protocol.cpp'),
+                        '-I', str(root), str(root/'R1_Protocol.cpp'),
                         str(root/'ring_adv_identity.cpp'), '-o', str(identity_binary)]
         if args.sanitize:
             identity_cmd[1:1] = ['-fsanitize=address,undefined', '-fno-omit-frame-pointer', '-g']

@@ -13,7 +13,7 @@
 #include <cstring>                  // strrchr — extension detection
 #include "HAL_Input.h"
 #include "System_FileManager.h"
-#include "FileBrowser_FileKind.h"   // file classifier shared with the G2 lens
+#include "System_FileKind.h"   // file classifier shared with the G2 lens
 #include "System_Icons.h"
 #include "System_TextWrapStream.h"  // shared wrap/sanitize sink for the viewer body
 #include "System_JsonPretty.h"      // JSON re-indenter shared with the lens and web viewers

@@ -1,4 +1,4 @@
-// BLE idle logout, as shipped: test_ble_session_idle.py inserts Bluetooth.cpp's
+// BLE idle logout, as shipped: test_ble_session_idle.py inserts BLE_Server.cpp's
 // lifecycle guard, slot and session-epoch helpers, bleNewState, the phone-link
 // console slot maker, bleBindSession (login), bleMarkActivity (the stamp every
 // command and OTA frame makes) and bleSessionTick (the main loop's idle-logout

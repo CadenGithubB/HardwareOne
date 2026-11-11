@@ -27,7 +27,7 @@
 #include "System_Filesystem.h"      // filesystemReady, getPermissions
 #include "System_MemUtil.h"         // ps_alloc — PSRAM-backed reply buffer (off espnow_task stack)
 #include "System_Mutex.h"           // FsLockGuard
-#include "Transcript_PathPolicy.h"
+#include "System_TranscriptPathPolicy.h"
 #include "System_VFS.h"             // guarded storage access and directory traversal
 #include <esp_attr.h>  // EXT_RAM_BSS_ATTR
 

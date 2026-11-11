@@ -277,7 +277,7 @@ void bleCommandOutputLine(const char* text, size_t len);
 
 // Push one notification card to a specific authenticated session. The line is
 // framed as `#NOTIF {json}\n` — see the wire-format contract at the definition
-// in Bluetooth.cpp. Best-effort: returns false if the link is busy or gone.
+// in BLE_Server.cpp. Best-effort: returns false if the link is busy or gone.
 bool blePushNotification(uint16_t connId, TransportSessionEpoch expectedEpoch,
                          const char* kindName, const char* level,
                          const char* title, const char* msg, uint16_t durMs);

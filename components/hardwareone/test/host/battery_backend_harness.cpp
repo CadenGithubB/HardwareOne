@@ -1,6 +1,6 @@
 // Firmware backend/lifecycle code is inserted by test_battery.py. Only SDK,
 // GPIO, time, event delivery and the MAX17048 transport boundary are mocked.
-#include "BatteryPolicy.h"
+#include "System_BatteryPolicy.h"
 #include <ArduinoJson.h>
 #include <atomic>
 #include <cassert>

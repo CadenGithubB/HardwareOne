@@ -4,7 +4,7 @@
 
 #include <BLEDevice.h>
 #include <esp_bt_main.h>
-#include "Bluetooth.h"  // the app console's host-teardown hooks
+#include "BLE_Server.h"  // the app console's host-teardown hooks
 
 #if CONFIG_ESP_HOSTED_ENABLE_BT_BLUEDROID
 #include <esp32-hal-bt.h>
@@ -64,7 +64,7 @@ BluetoothHalShutdownResult bluetoothHalDeinit() {
     }
   }
   // Every host teardown passes here, so the app console's client-host state
-  // is closed before the stop and freed after a terminal one (Bluetooth.h).
+  // is closed before the stop and freed after a terminal one (BLE_Server.h).
   bleConsoleHostTeardownBegin();
   // Arduino owns host callback retirement and controller shutdown ordering.
   // Never release controller memory: this application supports BLE off/on.

@@ -3,7 +3,7 @@
 
 deinitBluetooth(), its session and advertising helpers, the role-claim and
 lifecycle-guard classes and both command handlers are extracted unchanged from
-Bluetooth.cpp; the role transition, Ring owner, host/controller teardown,
+BLE_Server.cpp; the role transition, Ring owner, host/controller teardown,
 transport sessions and settings writes are host boundaries. A stop the Ring
 owner or a busy role transition defers, or a host teardown that fails, must be
 reported to the caller: both commands answer an error and leave `bleMode`
@@ -14,7 +14,7 @@ down (companion_ble_shutdown): there a Ring-deferred stop closes session
 admission (epochs, GATT interface id) and advertising before it returns.
 Built with and without the G2 client; the disabled-Bluetooth header stub is
 compiled too. --component points the suite at another copy of the BLE sources
-(Bluetooth.cpp/.h) to show the pre-fix behavior.
+(BLE_Server.cpp/.h) to show the pre-fix behavior.
 
 `blemode` is the saved BOOT role only (client|server; the phone-client mode
 is gone, the pipe is a device on the shared client stack): it stops nothing
@@ -76,7 +76,7 @@ COMPONENT = HERE.parents[1]
 def link_status_types(component: Path) -> list[str]:
     """BLE_LinkStatusCore.h, BleConsoleView and BleLinkStatus, as shipped."""
     core = (component / "BLE_LinkStatusCore.h").read_text().replace("#pragma once\n", "", 1)
-    header = (component / "Bluetooth.h").read_text()
+    header = (component / "BLE_Server.h").read_text()
     link = (component / "BLE_LinkStatus.h").read_text()
     return [core, extract_block(header, "struct BleConsoleView") + ";",
             extract_block(link, "struct BleLinkStatus") + ";"]
@@ -94,19 +94,19 @@ def link_status_definitions(component: Path, json: bool = False) -> list[str]:
 
 
 def generated(component: Path) -> str:
-    owner = (component / "Bluetooth.cpp").read_text()
-    header = (component / "Bluetooth.h").read_text()
+    owner = (component / "BLE_Server.cpp").read_text()
+    header = (component / "BLE_Server.h").read_text()
     settings = (COMPONENT / "System_Settings.h").read_text()
     hal = (COMPONENT / "HAL_Bluetooth.h").read_text()
 
     modes = re.findall(r"^#define BLE_MODE_(?:SERVER|G2_CLIENT)\s+\d+", header, re.MULTILINE)
-    require(len(modes) == 2, "BLE mode constants (server, client) are present in Bluetooth.h")
-    require("BLE_MODE_PHONE_CLIENT" not in header, "the phone-client mode is gone from Bluetooth.h")
+    require(len(modes) == 2, "BLE mode constants (server, client) are present in BLE_Server.h")
+    require("BLE_MODE_PHONE_CLIENT" not in header, "the phone-client mode is gone from BLE_Server.h")
     default = re.search(r"static constexpr int kBleModeDefaultForBuild = [^;]+;", settings)
     require(default is not None, "kBleModeDefaultForBuild is present in System_Settings.h")
     console = (component / "BLE_ConsoleAttachCore.h").read_text().replace("#pragma once\n", "", 1)
     uuids = re.findall(r"^#define BLE_\w+_UUID\s+\"[^\"]+\"", header, re.MULTILINE)
-    require(len(uuids) >= 7, "BLE service and characteristic UUIDs are present in Bluetooth.h")
+    require(len(uuids) >= 7, "BLE service and characteristic UUIDs are present in BLE_Server.h")
     types = [console, *modes, extract_block(header, "inline bool bleModeIsAvailable("),
              *uuids, default[0], (COMPONENT / "BLE_Types.h").read_text(),
              extract_block(header, "enum class BleRoleTransition") + ";",
@@ -142,7 +142,7 @@ def generated(component: Path) -> str:
                     r"^constexpr int kBleGattsRegPending = [^;]+;",
                     r"^std::atomic<int> sBleGattsRegStatus\{[^}]*\};"):
         found = re.search(pattern, owner, re.MULTILINE)
-        require(found is not None, f"Bluetooth.cpp declares {pattern}")
+        require(found is not None, f"BLE_Server.cpp declares {pattern}")
         definitions.append(found[0])
     # The client-host check every console path reads (folds away without the pipe).
     definitions.append(extract_block(owner, "static inline bool bleConsoleClientHost() "))
@@ -178,7 +178,7 @@ def generated(component: Path) -> str:
         "static bool bleConsoleLinkEventLocked(")]
     definitions.append(extract_block(owner, "class ServerCallbacks") + ";")
     callbacks = re.search(r"^static ServerCallbacks sServerCallbacks;", owner, re.MULTILINE)
-    require(callbacks is not None, "Bluetooth.cpp owns the server callbacks object")
+    require(callbacks is not None, "BLE_Server.cpp owns the server callbacks object")
     definitions.append(callbacks[0])
     definitions += [extract_block(owner, marker) for marker in (
         "static BleSystemState* bleNewState(",
@@ -204,7 +204,7 @@ DISABLED_CHECK = '''#define ARDUINOJSON_ENABLE_ARDUINO_STRING 1
 #define ARDUINOJSON_ENABLE_ARDUINO_STREAM 0
 #define ARDUINOJSON_ENABLE_ARDUINO_PRINT 0
 #define ARDUINOJSON_ENABLE_PROGMEM 0
-#include "Bluetooth.h"
+#include "BLE_Server.h"
 #include <cstdio>
 #include <type_traits>
 void webBatchTestStringAppend() {}
@@ -251,7 +251,7 @@ def check_blemode_row(owner: str) -> None:
 def check_sources(component: Path) -> None:
     """The command service has one builder, and the client-host path never
     advertises, raises the MTU, sets TX power or builds another service."""
-    owner = (component / "Bluetooth.cpp").read_text()
+    owner = (component / "BLE_Server.cpp").read_text()
     check_blemode_row(owner)
     require(owner.count("createService(BLE_COMMAND_SERVICE_UUID)") == 1 and
             "createService(BLE_COMMAND_SERVICE_UUID)" in
@@ -282,7 +282,7 @@ def main() -> None:
     parser.add_argument("--cxx", default=os.environ.get("CXX") or shutil.which("c++"))
     parser.add_argument("--sanitize", action="store_true")
     parser.add_argument("--component", type=Path, default=COMPONENT,
-                        help="component directory whose Bluetooth.cpp/.h are tested")
+                        help="component directory whose BLE_Server.cpp/.h are tested")
     args = parser.parse_args()
     require(bool(args.cxx), "a host C++17 compiler is required")
     flags = ["-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic",
@@ -318,7 +318,7 @@ def main() -> None:
 
         disabled = work / "disabled-include"
         disabled.mkdir()
-        shutil.copyfile(args.component / "Bluetooth.h", disabled / "Bluetooth.h")
+        shutil.copyfile(args.component / "BLE_Server.h", disabled / "BLE_Server.h")
         shutil.copyfile(args.component / "BLE_ConsoleAttachCore.h",
                         disabled / "BLE_ConsoleAttachCore.h")
         (disabled / "System_BuildConfig.h").write_text("#define ENABLE_BLUETOOTH 0\n#define ENABLE_G2_GLASSES 0\n#define ENABLE_BLE_PHONE_PIPE 0\n")

@@ -169,7 +169,7 @@ void secureClearString(String& s) {
   #include "System_ESPNow_Wire.h"   // ESPNOW_V4_TYPE_* / ESPNOW_V4_FLAG_* opcode + flag enums
 #endif
 #if ENABLE_BLUETOOTH
-  #include "Bluetooth.h"
+  #include "BLE_Server.h"
   #include "BLE_PhonePipe.h"
   #include "BLE_LinkStatus.h"  // status json: role, relay pipe, app console
   #include "BLE_Peers.h"

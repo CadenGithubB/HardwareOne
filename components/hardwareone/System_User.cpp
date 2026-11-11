@@ -27,7 +27,7 @@
 #include "System_Settings.h"
 #include "System_ConfigLoad.h"
 #include "System_UartLink.h"
-#include "Bluetooth.h"
+#include "BLE_Server.h"
 #include "BLE_Peers.h"            // synchronized G2 paired-owner authority
 #include <esp_timer.h>            // AuthPerfScope — instrumentation, see below
 #include "System_PollPause.h"   // PollPauseGuard — readRosterJson, mirrors readText

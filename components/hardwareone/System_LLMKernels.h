@@ -1,5 +1,5 @@
 /**
- * System_LLM_Kernels.h - Math kernels for the on-device LLM forward pass.
+ * System_LLMKernels.h - Math kernels for the on-device LLM forward pass.
  *
  * Extracted from System_LLM.cpp with no behavioral change. These are pure
  * functions over explicit buffers — they hold no engine global state — so they

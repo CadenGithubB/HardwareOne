@@ -1,5 +1,5 @@
 // The production mode below owns the state machine. Only platform edges are fake.
-#include "CameraMonochrome.h"
+#include "OLED_CameraMonochrome.h"
 #include "HAL_Camera.h"
 #include "HAL_JPEG.h"
 #include <ArduinoJson.h>

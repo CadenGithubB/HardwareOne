@@ -4,7 +4,7 @@
 #include <Arduino.h>
 #include "System_BuildConfig.h"
 
-#include "BatteryPolicy.h"
+#include "System_BatteryPolicy.h"
 
 // Reference constants, status enum and validity-bearing state live in the
 // platform-independent policy header. Voltage bands are estimates; charger

@@ -30,7 +30,7 @@ These are shared UI coordinates, not the physical P4 panel resolution.
 
 ## Rendering and lifetime
 
-`CameraMonochrome.h` area-downsamples RGB luminance before conversion to an
+`OLED_CameraMonochrome.h` area-downsamples RGB luminance before conversion to an
 MSB-first one-bit bitmap. Bounded histogram contrast avoids amplifying nearly
 flat dark scenes; smoothed tone limits reduce pumping. A fixed destination-
 anchored 4×4 Bayer pattern represents gray as dot density without temporal

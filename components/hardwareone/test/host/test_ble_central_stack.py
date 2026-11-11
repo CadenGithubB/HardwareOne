@@ -5,7 +5,7 @@ BLE_CentralStack.cpp is the one owner of the Bluedroid host and its controller
 link, the setup worker, the scan object, the GAP/GATTC observers and the
 console service on the client host. ble_central_stack_harness.cpp compiles its
 whole `#if ENABLE_BLUETOOTH` region with the real HAL_Bluetooth.h and
-BLE_CentralStack.h, the BleRoleTransition states (Bluetooth.h), the glasses'
+BLE_CentralStack.h, the BleRoleTransition states (BLE_Server.h), the glasses'
 MTU preference (G2_Glasses.h) and Arduino's constrain(). Every boundary call is
 a recording fake, so each case asserts the exact ordered events: the bring-up
 from an absent host (native and Hosted), the already-ready no-op, the
@@ -90,7 +90,7 @@ def unit(component: Path) -> str:
     """The harness with production text spliced in under #line directives."""
     stack = (component / 'BLE_CentralStack.cpp').read_text()
     region = guarded_region(stack, '#if ENABLE_BLUETOOTH')
-    bluetooth_h = (component / 'Bluetooth.h').read_text()
+    bluetooth_h = (component / 'BLE_Server.h').read_text()
     role = extract_block(bluetooth_h, 'enum class BleRoleTransition : uint8_t') + ';'
     glasses_h = (component / 'G2_Glasses.h').read_text()
     mtu = one_line(glasses_h, r'static constexpr uint16_t G2_BLE_LOCAL_MTU_PREF = \d+;', 'G2 MTU preference')
@@ -101,7 +101,7 @@ def unit(component: Path) -> str:
     splices = (
         ('// INSERT_CONSTRAIN', ARDUINO_H, line_number(arduino, constrain), constrain),
         ('// INSERT_HAL_BLUETOOTH', component / 'HAL_Bluetooth.h', 1, blank_includes(hal_h)),
-        ('// INSERT_ROLE_TRANSITION', component / 'Bluetooth.h', line_number(bluetooth_h, role[:-1]), role),
+        ('// INSERT_ROLE_TRANSITION', component / 'BLE_Server.h', line_number(bluetooth_h, role[:-1]), role),
         ('// INSERT_G2_MTU', component / 'G2_Glasses.h', line_number(glasses_h, mtu), mtu),
         ('// INSERT_STACK_HEADER', component / 'BLE_CentralStack.h', 1, blank_includes(stack_h)),
         ('// INSERT_PRODUCTION', component / 'BLE_CentralStack.cpp', line_number(stack, region),

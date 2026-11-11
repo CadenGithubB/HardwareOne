@@ -68,7 +68,7 @@
 #include "System_MQTT.h"
 #endif
 #if ENABLE_BLUETOOTH
-#include "Bluetooth.h"
+#include "BLE_Server.h"
 #endif
 #if ENABLE_LLM_BACKEND
 #include "System_LLMBackend.h"

@@ -14,7 +14,7 @@
 #include "BLE_Peers.h"        // host stub: the real BlePeerKind + BlePeerReconnectSnapshot
 #include "BLE_PhonePipe.h"    // host stub: the pipe's public status calls + link summary
 #include "BLE_PhonePipeConsole.h"  // the real console driver header (its status)
-#include "Bluetooth.h"        // host stub: the real BleConsoleView + console row identity
+#include "BLE_Server.h"        // host stub: the real BleConsoleView + console row identity
 #include "G2_Glasses.h"       // host stub: isG2ClientInitialized
 #include "System_Settings.h"  // host stub: bleMode, the console setting, the phone secret
 

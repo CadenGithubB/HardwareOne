@@ -111,7 +111,7 @@ R1_SUB_NAME = {
 # ── CRC helpers (match firmware) ─────────────────────────────────────────────
 
 def g2_crc16_ccitt_false(data: bytes) -> int:
-    """CRC-16/CCITT-FALSE — same as System_G2_Protocol.cpp g2CrcCcittFalse."""
+    """CRC-16/CCITT-FALSE — same as G2_Protocol.cpp g2CrcCcittFalse."""
     crc = 0xFFFF
     for b in data:
         crc ^= b << 8

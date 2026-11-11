@@ -468,7 +468,7 @@ static void completionFailuresAndNoop() {
   check(!wizardSaveAndApplySettings(unavailableDraft));
   check(liveValues() == initialFailureState && changed.empty() && applyCalls == 0);
 
-  // A BLE role this build cannot run (Bluetooth.h's bleModeIsAvailable) is
+  // A BLE role this build cannot run (BLE_Server.h's bleModeIsAvailable) is
   // refused as a whole; nothing is applied.
   reset(); initSetupWizard();
   check(bleModeIsAvailable(BLE_MODE_SERVER));

@@ -2,7 +2,7 @@
 #include <stdint.h>
 
 // ============================================================================
-// ClockConfirmPolicy — the clock the R1 ring is given (readiness G-79)
+// System_ClockConfirmPolicy — the clock the R1 ring is given (readiness G-79)
 // ============================================================================
 // Pure decision code: no IDF or Arduino types, so the host suite runs it
 // (test/host/test_clock_confirm_policy.cpp). System_Clock.cpp feeds it the

@@ -12,7 +12,7 @@
 
 #include <ArduinoJson.h>
 
-#include "FileBrowser_FileKind.h"
+#include "System_FileKind.h"
 #include "System_JsonPretty.h"
 #include "System_TextPager.h"
 #include "System_TextWrapStream.h"

@@ -56,7 +56,7 @@ struct SerialFake {
 } Serial;
 String originPrefix(const char*, const String&, const String&) { return ""; }
 void broadcastCommandResultQueued(const String&,const String& body,uint8_t) { shared.push_back(body.s); }
-// Bluetooth.cpp's session-fenced sender: delivers only while the connection
+// BLE_Server.cpp's session-fenced sender: delivers only while the connection
 // still holds the expected session epoch (0 is never a session).
 bool sendBleResponseToSession(uint16_t conn,uint32_t epoch,const char* p,size_t n,bool=true) {
   if(epoch==0||epoch!=bleConnEpoch) return false;

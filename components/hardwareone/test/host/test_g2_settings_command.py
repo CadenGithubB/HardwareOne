@@ -22,8 +22,8 @@ def main():
     parser.add_argument('--sanitize', action='store_true')
     args = parser.parse_args()
     owner = (COMPONENT / 'G2_Glasses.cpp').read_text()
-    header = (COMPONENT / 'System_G2_Protocol.h').read_text().replace('#include "System_BuildConfig.h"', '').replace('#include <Arduino.h>', '')
-    protocol = (COMPONENT / 'System_G2_Protocol.cpp').read_text().replace('#include "System_G2_Protocol.h"', '').replace('#include <Arduino.h>', '')
+    header = (COMPONENT / 'G2_Protocol.h').read_text().replace('#include "System_BuildConfig.h"', '').replace('#include <Arduino.h>', '')
+    protocol = (COMPONENT / 'G2_Protocol.cpp').read_text().replace('#include "G2_Protocol.h"', '').replace('#include <Arduino.h>', '')
     functions = [extract_block(owner.replace('static bool g2BothFirmwareExact(const char* expected);', ''), name) for name in (
         'static G2LinkSnapshot g2LinkSnapshot(',
         'static bool g2TempleReadyAtGeneration(',

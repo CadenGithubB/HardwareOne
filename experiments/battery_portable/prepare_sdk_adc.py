@@ -16,7 +16,7 @@ parser.add_argument('--output', required=True, type=Path)
 args = parser.parse_args()
 root = Path(__file__).resolve().parents[2]
 source = root / 'components/hardwareone/System_Battery.cpp'
-policy = root / 'components/hardwareone/BatteryPolicy.h'
+policy = root / 'components/hardwareone/System_BatteryPolicy.h'
 text = source.read_text()
 start = text.index('static adc_oneshot_unit_handle_t sAdcUnit')
 end = text.index('\n#if ENABLE_BATTERY_MONITOR && BATTERY_BACKEND_FUEL_GAUGE', start)
@@ -26,7 +26,7 @@ backend = backend[:-len('#endif')]
 args.output.mkdir(parents=True, exist_ok=True)
 main = args.output / 'main'
 main.mkdir(exist_ok=True)
-(main / 'BatteryPolicy.h').write_bytes(policy.read_bytes())
+(main / 'System_BatteryPolicy.h').write_bytes(policy.read_bytes())
 (args.output / 'CMakeLists.txt').write_text('''cmake_minimum_required(VERSION 3.16)
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(hw1_adc_api_check)
@@ -37,7 +37,7 @@ project(hw1_adc_api_check)
 pin = {'esp32': 35, 'esp32s3': 1, 'esp32p4': 49}[args.target]
 divider = '(1332.0f / 332.0f)' if args.target == 'esp32p4' else '2.0f'
 atten = 'ADC_ATTEN_DB_6' if args.target == 'esp32p4' else 'ADC_ATTEN_DB_12'
-prefix = f'''#include "BatteryPolicy.h"
+prefix = f'''#include "System_BatteryPolicy.h"
 #include <esp_adc/adc_oneshot.h>
 #include <esp_adc/adc_cali.h>
 #include <esp_adc/adc_cali_scheme.h>

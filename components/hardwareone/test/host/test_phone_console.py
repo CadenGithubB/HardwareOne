@@ -4,7 +4,7 @@
 The driver, its header and the pure headers it uses (BLE_PhonePipeCore.h,
 BLE_PhonePipeConsoleCore.h, BLE_PhonePairCode.h) are copied unchanged into a
 temporary directory beside generated fakes of the headers they include. The
-fakes carry the real declarations, extracted from Bluetooth.h, BLE_PhonePipe.h,
+fakes carry the real declarations, extracted from BLE_Server.h, BLE_PhonePipe.h,
 BLE_CentralTx.h, System_Utils.h and System_SelfDevice.h, so a changed
 signature fails to compile here. phone_console_harness.cpp includes the driver
 source and co-simulates the pipe task (owner mutex, the real Session), cmd_exec,
@@ -95,7 +95,7 @@ def check_sources(component: Path) -> None:
 
 
 def fake_headers(component: Path) -> dict[str, str]:
-    bluetooth = (component / 'Bluetooth.h').read_text()
+    bluetooth = (component / 'BLE_Server.h').read_text()
     pipe = (component / 'BLE_PhonePipe.h').read_text()
     central = (component / 'BLE_CentralTx.h').read_text()
     utils = (component / 'System_Utils.h').read_text()
@@ -110,11 +110,11 @@ def fake_headers(component: Path) -> dict[str, str]:
         'using TransportSessionEpoch = uint32_t;',
         extract_block(bluetooth, 'struct BlePipeConsoleIdentity') + ';',
         extract_block(bluetooth, 'inline constexpr uint16_t blePipeConsoleRowId('),
-        decl(r'bool blePipeConsoleBind\(', bluetooth, 'Bluetooth.h declares blePipeConsoleBind'),
-        decl(r'void blePipeConsoleEnd\(', bluetooth, 'Bluetooth.h declares blePipeConsoleEnd'),
-        decl(r'void blePipeConsoleIdentity\(', bluetooth, 'Bluetooth.h declares blePipeConsoleIdentity'),
-        decl(r'void blePipeConsoleInbound\(', bluetooth, 'Bluetooth.h declares blePipeConsoleInbound'),
-        decl(r'bool bleLifecycleHeldByCurrentTask\(', bluetooth, 'Bluetooth.h declares bleLifecycleHeldByCurrentTask'),
+        decl(r'bool blePipeConsoleBind\(', bluetooth, 'BLE_Server.h declares blePipeConsoleBind'),
+        decl(r'void blePipeConsoleEnd\(', bluetooth, 'BLE_Server.h declares blePipeConsoleEnd'),
+        decl(r'void blePipeConsoleIdentity\(', bluetooth, 'BLE_Server.h declares blePipeConsoleIdentity'),
+        decl(r'void blePipeConsoleInbound\(', bluetooth, 'BLE_Server.h declares blePipeConsoleInbound'),
+        decl(r'bool bleLifecycleHeldByCurrentTask\(', bluetooth, 'BLE_Server.h declares bleLifecycleHeldByCurrentTask'),
     ])
     owner = '\n'.join([
         '#pragma once', '#include <cstddef>', '#include <cstdint>',
@@ -129,7 +129,7 @@ def fake_headers(component: Path) -> dict[str, str]:
     return {
         'System_BuildConfig.h': '#pragma once\n#define ENABLE_BLUETOOTH 1\n#define ENABLE_BLE_PHONE_PIPE 1\n'
                                 '#define BOARD_NAME "Host \\"Board\\""\n',
-        'Bluetooth.h': bt + '\n',
+        'BLE_Server.h': bt + '\n',
         'BLE_PhonePipe.h': owner + '\n',
         'BLE_CentralTx.h': '#pragma once\n' + decl(r'bool bleCentralTxAccessoryPressure\(', central,
                                                    'BLE_CentralTx.h declares bleCentralTxAccessoryPressure') + '\n',

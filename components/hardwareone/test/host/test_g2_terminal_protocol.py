@@ -14,10 +14,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--sanitize', action='store_true')
     args = parser.parse_args()
-    header = (COMPONENT / 'System_G2_Protocol.h').read_text()
+    header = (COMPONENT / 'G2_Protocol.h').read_text()
     header = header.replace('#include "System_BuildConfig.h"', '').replace('#include <Arduino.h>', '')
-    protocol = (COMPONENT / 'System_G2_Protocol.cpp').read_text()
-    protocol = protocol.replace('#include "System_G2_Protocol.h"', '').replace('#include <Arduino.h>', '')
+    protocol = (COMPONENT / 'G2_Protocol.cpp').read_text()
+    protocol = protocol.replace('#include "G2_Protocol.h"', '').replace('#include <Arduino.h>', '')
     fragmenter = extract_block((COMPONENT / 'G2_Glasses.cpp').read_text(),
                               'static bool sendPbFragmented(G2Temple& arm,')
     platform = ('#define ENABLE_BLUETOOTH 1\n#define ENABLE_G2_GLASSES 1\n'

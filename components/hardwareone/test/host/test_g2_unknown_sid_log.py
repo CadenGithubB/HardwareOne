@@ -3,7 +3,7 @@
 are logged with their payload so they can be decoded, and nothing else.
 
 Compiles the production g2HexCompact() spliced out of G2_Glasses.cpp and
-g2sidName() out of System_G2_Protocol.cpp, checks the hex at the edges (0, 1,
+g2sidName() out of G2_Protocol.cpp, checks the hex at the edges (0, 1,
 11, 64 and over 64 bytes, short buffers), that sid 0x12 is named for
 g2protostats, and that the longest possible line fits one debug message.
 Then pins the `default:` branch of the RX sid switch: only under DEBUG_G2
@@ -87,7 +87,7 @@ def main() -> None:
     from test_web_batch_handlers import extract_block
 
     glasses = (c / 'G2_Glasses.cpp').read_text()
-    protocol = (c / 'System_G2_Protocol.cpp').read_text()
+    protocol = (c / 'G2_Protocol.cpp').read_text()
 
     # 1. The hex helper and the sid names, compiled and executed.
     cap = re.search(r'static constexpr size_t kG2UnknownSidHexMax = 64;[^\n]*\n', glasses)

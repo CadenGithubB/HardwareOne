@@ -40,7 +40,7 @@
 #include "System_MemUtil.h"
 #include "System_QuickNote.h"   // quickNoteCanStart
 #include "System_TextPager.h"
-#include "Transcription_UI_Policy.h"
+#include "System_TranscriptionUIPolicy.h"
 #include <ArduinoJson.h>
 #include <algorithm>
 #include <cstdio>

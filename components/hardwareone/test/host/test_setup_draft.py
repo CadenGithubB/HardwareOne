@@ -35,8 +35,8 @@ def generate() -> str:
     types += "\n" + "\n".join(extract_block(feature_header, name) + ";" for name in
                                   ("enum FeatureCategory", "enum FeatureFlags", "struct FeatureEntry"))
     types += "\n" + extract_block(wifi_header, "enum class WifiNetworkSaveResult") + ";"
-    # The wizard refuses a BLE role this build cannot run; the rule lives in Bluetooth.h.
-    bluetooth = (COMPONENT / "Bluetooth.h").read_text()
+    # The wizard refuses a BLE role this build cannot run; the rule lives in BLE_Server.h.
+    bluetooth = (COMPONENT / "BLE_Server.h").read_text()
     types += "\n" + "\n".join(re.findall(r"(?m)^#define BLE_MODE_\w+\s+\d+.*$", bluetooth))
     types += "\n" + extract_block(bluetooth, "inline bool bleModeIsAvailable(")
     # The Bluetooth modes are named by the roles they start (the pure header the wizard includes).

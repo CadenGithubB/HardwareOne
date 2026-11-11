@@ -30,7 +30,7 @@
 #include "WebServer_MigrationTool.h"  // kBackupFormatVersion
 #endif
 #if ENABLE_BLUETOOTH
-#include "System_BleSecureChannel.h"
+#include "BLE_SecureChannel.h"
 #endif
 #if ENABLE_BLUETOOTH && ENABLE_BLE_PHONE_PIPE
 #include "BLE_PhonePipeConsoleCore.h"

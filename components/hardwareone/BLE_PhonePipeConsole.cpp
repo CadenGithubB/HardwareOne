@@ -5,7 +5,7 @@
 // admitted records to cmd_exec, closes. Producers write records through
 // pipeConsoleWrite under the chain mutex (L1) with short owner locks. The BLE
 // row is reached only with L2 released (bind/end) and read through its leaf
-// identity snapshot; Bluetooth.cpp reaches back only through the close mailbox.
+// identity snapshot; BLE_Server.cpp reaches back only through the close mailbox.
 // Chain paths log nothing (counters only): a line routed to BLE would come back
 // here as output.
 #include "BLE_CentralTx.h"
@@ -13,7 +13,7 @@
 #include "BLE_PhonePipe.h"
 #include "BLE_PhonePipeConsoleCore.h"
 #include "BLE_PhonePipeCore.h"
-#include "Bluetooth.h"
+#include "BLE_Server.h"
 #include "System_SelfDevice.h"
 #include "System_Settings.h"
 #include "System_Utils.h"

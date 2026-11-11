@@ -66,8 +66,8 @@ def stubs(work: Path, component: Path, pipe: int) -> None:
         "uint8_t phonePipeStep();\nbool phonePipeEnrolling();\n"
         + extract_block(pipe_header, "struct PhonePipeLinkSummary") + ";\n"
         "bool phonePipeLinkSummary(PhonePipeLinkSummary* out);\n")
-    bluetooth = (component / "Bluetooth.h").read_text()
-    (work / "Bluetooth.h").write_text(
+    bluetooth = (component / "BLE_Server.h").read_text()
+    (work / "BLE_Server.h").write_text(
         "#pragma once\n#include <cstdint>\nusing TransportSessionEpoch = uint32_t;\n"
         + extract_block(bluetooth, "struct BleConsoleView") + ";\n"
         + extract_block(bluetooth, "struct BlePipeConsoleIdentity") + ";\n"

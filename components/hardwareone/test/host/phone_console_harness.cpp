@@ -2,7 +2,7 @@
 //
 // BLE_PhonePipeConsole.cpp is included as shipped, so its pool and state are
 // in reach. The real hw1pipe::Session stands for the pipe owner's session; a
-// phone answers it frame by frame; the BLE row (Bluetooth.cpp) and the owner
+// phone answers it frame by frame; the BLE row (BLE_Server.cpp) and the owner
 // API (BLE_PhonePipe.cpp) are recording doubles. Tasks are simulated on one
 // clock: the pipe task's owner pass, cmd_exec, the main loop, the debug task
 // and httpd. A writer that sleeps lets the others run (the owner pass, plus
@@ -109,7 +109,7 @@ namespace SelfDevice {
 const char* firmwareVersion() { return "0.99.99 \"host\""; }
 }
 
-// ---- The BLE row (Bluetooth.cpp) -----------------------------------------
+// ---- The BLE row (BLE_Server.cpp) -----------------------------------------
 BlePipeConsoleIdentity row;  // the leaf snapshot
 TransportSessionEpoch epochs = 500;
 bool refuseBind = false, bindInvisible = false;
@@ -1221,7 +1221,7 @@ void refusals() {
     REQUIRE(pipeConsoleWrite(target(), row.epoch, PipeConsoleKind::Text, p, 3, PipeConsoleMode::TryNow) == PipeConsoleWrite::Refused);
     give(ownerSem);
   }
-  // The caller holds the lifecycle lock (L3: a Bluetooth.cpp path): refused
+  // The caller holds the lifecycle lock (L3: a BLE_Server.cpp path): refused
   // before L1, which the oracle forbids under L3, from cmd_exec or any task.
   const unsigned chainTaken = chainTakes;
   for (HostTask* task : {&execTask, &httpdTask}) {

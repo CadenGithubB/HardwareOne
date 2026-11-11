@@ -112,7 +112,7 @@ static int          sReaderTop   = 0;      // first visible line
 // ============================================================================
 // Three nested sub-states, each an OledScrollState (the per-mode picker pattern;
 // the generic modal picker was deliberately removed — not recreated here). The
-// shared System_LLM_Menu API composes + fires the question by integer index, then
+// shared System_LLMMenu API composes + fires the question by integer index, then
 // the normal GENERATING view streams the answer.
 
 // Entities can number in the thousands, so the entity picker shows a windowed

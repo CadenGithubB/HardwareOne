@@ -44,7 +44,7 @@ descriptors) and our own captures. Together they give three signals.
 
 | Signal | Where it lives | Status |
 |---|---|---|
-| `chargingStatus` (field 13) | sid 0x09 settings reply. The glasses answer a BASIC read by echoing the whole `DeviceReceiveRequestFromAPP` back in **outer field 4** with every setting populated (observed; `System_G2_Protocol.cpp` notes that outer field 6 `Device_Respond_To_App` is a two-field ack the firmware never emits for reads, and `G2_PROTOCOL.md` line ~763 still says "field 6": stale). | Field number is wire data. The community app stores it in its settings snapshot but never acts on it. Our firmware already parses this echo for battery (12) and versions (5/6); field 13 is skipped. **Cheapest signal to add: a few lines in the existing parser.** |
+| `chargingStatus` (field 13) | sid 0x09 settings reply. The glasses answer a BASIC read by echoing the whole `DeviceReceiveRequestFromAPP` back in **outer field 4** with every setting populated (observed; `G2_Protocol.cpp` notes that outer field 6 `Device_Respond_To_App` is a two-field ack the firmware never emits for reads, and `G2_PROTOCOL.md` line ~763 still says "field 6": stale). | Field number is wire data. The community app stores it in its settings snapshot but never acts on it. Our firmware already parses this echo for battery (12) and versions (5/6); field 13 is skipped. **Cheapest signal to add: a few lines in the existing parser.** |
 | `GlassesCaseInfo` (sid 0x81) | `GlassesCaseDataPackage{commandId=CASE_INFO, magicRandom, caseInfo{soc, chargeStatus, lidStatus, inCaseStatus, errorCode}}` | Schema is wire data. Our firmware has **observed** these frames glasses→host when the case is nearby (`08 01 10 <magic> 1A 06 08 0C 10 01`). The community app never consumes `caseInfo`, so nobody has corroborated what the fields mean. The recorded byte shape is internally inconsistent (inner length says 6, only 4 inner bytes follow) because the firmware's RX frame ring keeps only the first 12 payload bytes per frame (`head[12]`, printed by `g2RingDump`); the last two inner bytes were cut off and may be the lid/inCase fields. |
 | `deviceRunningStatus` (field 11) and `wearDetectionSwitchRestored` (field 10) | same settings reply | Running status is unmapped. Wear-detection switch is the glasses' own on/off for their wear sensor, already written by `g2glasses weardetect` (see `G2_WEAR_DETECTION_23214.md`); it is a setting, not a state. |
 
@@ -152,7 +152,7 @@ elision ambiguity is visible in every line.
    `gChargingR/L` (-1 unknown), push a
    `charge-L/R` status event on change only, post `SYSEVT_G2_CHARGING` /
    `SYSEVT_G2_DISCHARGING` (new catalog rows, family GLASSES).
-2. `g2ParseCaseInfo` for sid 0x81 in `System_G2_Protocol.cpp`, validated
+2. `g2ParseCaseInfo` for sid 0x81 in `G2_Protocol.cpp`, validated
    whole-payload like the other parsers (a malformed suffix never yields a
    value). Mirror `gCase{soc, charge, lid, inCase, rxMs}`; post
    `SYSEVT_G2_CASE_LID` (subject open|closed) and `SYSEVT_G2_IN_CASE`

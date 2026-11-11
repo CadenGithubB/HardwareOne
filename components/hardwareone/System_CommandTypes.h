@@ -113,7 +113,7 @@ struct CommandContext {
   uint8_t behaviorFlags = COMMAND_CONTEXT_DEFAULT;
   bool validateOnly = false;
   bool captureOutput = false;  // capture broadcastOutput into HTTP response
-  // ORIGIN_BLUETOOTH: the command's reply context in Bluetooth.cpp, which
+  // ORIGIN_BLUETOOTH: the command's reply context in BLE_Server.cpp, which
   // collects its broadcastOutput lines for its session. Null elsewhere.
   void* replyHandle = nullptr;
   httpd_req_t* httpReq = nullptr;  // used by web origin if needed

@@ -38,11 +38,11 @@ def main():
 
     page = ((args.source_dir or COMPONENT) / 'G2_Page_Transcription.cpp').read_text()
     owner = (COMPONENT / 'G2_Glasses.cpp').read_text()
-    header = (COMPONENT / 'System_G2_Protocol.h').read_text()
+    header = (COMPONENT / 'G2_Protocol.h').read_text()
     header = header.replace('#include "System_BuildConfig.h"', '')
     header = header.replace('#include <Arduino.h>', '')
-    protocol = (COMPONENT / 'System_G2_Protocol.cpp').read_text()
-    protocol = protocol.replace('#include "System_G2_Protocol.h"', '')
+    protocol = (COMPONENT / 'G2_Protocol.cpp').read_text()
+    protocol = protocol.replace('#include "G2_Protocol.h"', '')
     protocol = protocol.replace('#include <Arduino.h>', '')
 
     constants = '\n'.join(declaration(page, pattern) for pattern in (

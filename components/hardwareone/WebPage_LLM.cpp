@@ -164,7 +164,7 @@ static esp_err_t handleLlmModels(httpd_req_t* req) {
 
 // ============================================================================
 // GET /api/llm/menu?kind=groups|tpl|ent&g=<g>&off=<off>
-// Guided-input menu, served straight from the shared System_LLM_Menu API (NOT
+// Guided-input menu, served straight from the shared System_LLMMenu API (NOT
 // via /api/cli, so replies aren't clipped at the 4095 B CLI cap). JSON shapes
 // mirror `llmmenu json` (LLM_GUIDED_MENU_SPEC §6/§7):
 //   kind=groups → {"schema":1,"gen":G,"groups":[{"i":,"name":,"mode":,"templates":,"entities":},...]}

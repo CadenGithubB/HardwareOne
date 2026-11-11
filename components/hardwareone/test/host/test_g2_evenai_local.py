@@ -30,11 +30,11 @@ def main():
     # Exercise the shipping codec at every mocked native send boundary. Only
     # target configuration/platform includes are replaced; no builders are
     # reconstructed in the fixture.
-    header = (COMPONENT / 'System_G2_Protocol.h').read_text()
+    header = (COMPONENT / 'G2_Protocol.h').read_text()
     header = header.replace('#include "System_BuildConfig.h"', '')
     header = header.replace('#include <Arduino.h>', '')
-    protocol = (COMPONENT / 'System_G2_Protocol.cpp').read_text()
-    protocol = protocol.replace('#include "System_G2_Protocol.h"', '')
+    protocol = (COMPONENT / 'G2_Protocol.cpp').read_text()
+    protocol = protocol.replace('#include "G2_Protocol.h"', '')
     protocol = protocol.replace('#include <Arduino.h>', '')
     assert harness.count('// INSERT_PROTOCOL') == 1
     harness = harness.replace('// INSERT_PROTOCOL', header + '\n' + protocol)

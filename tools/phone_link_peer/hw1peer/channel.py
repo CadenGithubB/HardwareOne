@@ -1,7 +1,7 @@
 """HW1-PIPE-v1, the outer secure channel of the phone link: PHONE (initiator) side.
 
 Wire-identical to the P4 responder in ``components/hardwareone/BLE_PhoneSecureChannel.h``
-(primitives from ``System_BleSecureCrypto.h``) and to the Android app's
+(primitives from ``BLE_SecureCrypto.h``) and to the Android app's
 ``PipeSecureChannel.kt``. The outer channel is unchanged in phone link v2.
 
 Handshake, once per BLE session::

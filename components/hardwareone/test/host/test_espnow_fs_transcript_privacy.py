@@ -84,7 +84,7 @@ def main():
                         vfs_header.index('bool getStats(StorageType type')]
     reader += vfs[vfs.index('DirectoryReader::DirectoryReader('):
                   vfs.index('static FS* fsForPath(')]
-    for tag, value in [('// INSERT_POLICY', read('Transcript_PathPolicy.h').replace('#pragma once','')),
+    for tag, value in [('// INSERT_POLICY', read('System_TranscriptPathPolicy.h').replace('#pragma once','')),
                        ('// INSERT_WIRE', wire),
                        ('// INSERT_VFS', routing + '\n\n' + reader),
                        ('// INSERT_PRODUCTION', '\n\n'.join(pieces))]:
