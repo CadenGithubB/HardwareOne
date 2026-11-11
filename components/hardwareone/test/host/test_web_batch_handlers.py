@@ -29,6 +29,12 @@ def require(condition: bool, message: str) -> None:
         raise AssertionError(message)
 
 
+def mac_text(component: Path = COMPONENT) -> str:
+    """System_MacText.h (MAC_FMT, MAC_ARGS, macToDisplay, macToPathToken,
+    macEquals, macParse) as text to place in a generated translation unit."""
+    return (component / "System_MacText.h").read_text().replace("#pragma once\n", "", 1)
+
+
 def extract_block(source: str, marker: str) -> str:
     """Extract an actual C++ definition, ignoring braces in comments/literals."""
     start = source.index(marker)

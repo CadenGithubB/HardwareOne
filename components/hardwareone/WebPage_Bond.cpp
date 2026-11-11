@@ -967,7 +967,7 @@ static esp_err_t handleBondStatus(httpd_req_t* req) {
   // old inline check, just routed through the facade.
   bool peerConfigured = BondedPeer::peerMacBytes(peerMac);
   if (peerConfigured) {
-    formatMacAddr(peerMac, macStr, sizeof(macStr));
+    macToDisplay(peerMac, macStr, sizeof(macStr));
   }
 
   // Local STA MAC — exposed so the Files page (master) can ask the bonded peer
@@ -1752,7 +1752,7 @@ static esp_err_t handleBondPairedDevices(httpd_req_t* req) {
     EspNowDevice& dev = gEspNow->devices[i];
     if (isSelfMac(dev.mac)) continue;
     
-    String macStr = formatMacAddress(dev.mac);
+    String macStr = macToDisplayStr(dev.mac);
     
     if (!first) webBondSendChunk(req, ",");
     first = false;

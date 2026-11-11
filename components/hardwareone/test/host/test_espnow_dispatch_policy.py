@@ -122,6 +122,7 @@ def main():
     failed = []
     with tempfile.TemporaryDirectory(prefix='hw1-espnow-dispatch-') as tmp:
         unit = Path(tmp) / 'test.cpp'
+        (unit.parent / 'System_MacText.h').write_text((HERE.parents[1] / 'System_MacText.h').read_text())
         unit.write_text(harness)
         for bond in (1, 0):
             exe = Path(tmp) / f'test_bond{bond}'

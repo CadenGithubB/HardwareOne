@@ -66,7 +66,7 @@ def main():
     # writers carry their own inline (unchecked) serialize + rename.
     if 'bool writeJsonFileComplete(' in source:
         markers.append('bool writeJsonFileComplete(')
-    markers += ['bool writeIdentityFile(', 'void formatMacNoSep(', 'bool buildPeerPath(',
+    markers += ['bool writeIdentityFile(', 'bool buildPeerPath(',
                 'bool ensurePeerDir(', 'bool writePeerIdentityFile(']
     production = '\n'.join(constants) + '\n\n' + '\n\n'.join(
         body(source, m, 'System_ESPNow_Identity.cpp') for m in markers)
@@ -80,6 +80,7 @@ def main():
     json_include = a.component.parent / 'hardwareone_libs' / 'ArduinoJson' / 'src'
     with tempfile.TemporaryDirectory(prefix='hw1-espnow-identity-') as tmp:
         unit, exe = Path(tmp) / 'espnow_identity_writes.cpp', Path(tmp) / 'espnow_identity_writes'
+        (unit.parent / 'System_MacText.h').write_text((HERE.parents[1] / 'System_MacText.h').read_text())
         unit.write_text(harness)
         cmd = [a.cxx, '-std=c++17', '-Wall', '-Wextra', '-pedantic', '-Werror',
                '-Wno-unused-parameter', '-Wno-unused-function',

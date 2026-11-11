@@ -10,6 +10,7 @@
 #include <map>
 #include <string>
 #include <vector>
+#include "System_MacText.h"  // production MAC text helpers (copied beside this unit)
 // INSERT_POLICY
 class String {
     std::string text_;

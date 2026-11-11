@@ -448,10 +448,9 @@ static void v4_reasm_gc(uint32_t nowMs) {
   if (!gV4Reasm) return;
   for (int i = 0; i < V4_REASM_MAX; i++) {
     if (gV4Reasm[i].active && (nowMs - gV4Reasm[i].lastUpdateMs) > V4_REASM_TIMEOUT_MS) {
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_REASM_GC] Evicting stale msgId=%lu from %02X:%02X:%02X:%02X:%02X:%02X",
+      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_REASM_GC] Evicting stale msgId=%lu from " MAC_FMT,
              (unsigned long)gV4Reasm[i].msgId,
-             gV4Reasm[i].src[0], gV4Reasm[i].src[1], gV4Reasm[i].src[2],
-             gV4Reasm[i].src[3], gV4Reasm[i].src[4], gV4Reasm[i].src[5]);
+             MAC_ARGS(gV4Reasm[i].src));
       if (gEspNow) { gEspNow->routerMetrics.v4FragRxGc++; }
       v4_reasm_reset(gV4Reasm[i]);
     }
@@ -610,9 +609,6 @@ bool v4_broadcast_sensor_status(RemoteSensorType sensorType, bool enabled);
 bool v4_send_sensor_envelope(const uint8_t* dstMac, RemoteSensorType sensorType,
                              const char* jsonData, uint16_t jsonLen);
 bool v4_send_user_sync(const uint8_t* dst, const char* jsonPayload, uint16_t jsonLen);
-
-// MAC address formatting (stack buffer version to reduce heap churn)
-void formatMacAddressBuf(const uint8_t* mac, char* buf, size_t bufSize);
 
 // Forward declaration for internal addEspNowPeerWithEncryption (different from extern version in .ino)
 static bool addEspNowPeerWithEncryption(const uint8_t* mac, bool useEncryption, const uint8_t* encryptionKey);
@@ -794,11 +790,6 @@ bool gMeshActivitySuspended = false;               // Suspend mesh heartbeats du
 // HELPER FUNCTIONS
 // ============================================================================
 
-// MAC address comparison (exported for oled_display.cpp)
-bool macEqual6(const uint8_t a[6], const uint8_t b[6]) {
-  return memcmp(a, b, 6) == 0;
-}
-
 
 // Save named ESP-NOW devices (paired devices with names/keys) to filesystem.
 // Refuses while the registry on disk has not been read (sEspNowDevicesLoad). A
@@ -833,7 +824,7 @@ static bool saveEspNowDevices() {
     if (isSelfMac(gEspNow->devices[i].mac)) continue;
     // Encrypt MAC address at rest (device-bound AES)
     char rawDevMacBuf[18];
-    formatMacAddressBuf(gEspNow->devices[i].mac, rawDevMacBuf, sizeof(rawDevMacBuf));
+    macToDisplay(gEspNow->devices[i].mac, rawDevMacBuf, sizeof(rawDevMacBuf));
     String encMac = encryptString(String(rawDevMacBuf));
     if (encMac.length() == 0) {
       ERROR_ESPNOWF("[ESP-NOW] Failed to encrypt device MAC for '%s', skipping entry", gEspNow->devices[i].name.c_str());
@@ -938,7 +929,7 @@ static void restoreEspNowPeers() {
     if (success) {
       String encStatus = gEspNow->devices[i].encrypted ? " (encrypted)" : " (unencrypted)";
       DEBUGF(DEBUG_ESPNOW_STREAM, "[ESP-NOW] Restored device: %s (%s)%s", 
-             gEspNow->devices[i].name.c_str(), formatMacAddress(gEspNow->devices[i].mac).c_str(), encStatus.c_str());
+             gEspNow->devices[i].name.c_str(), macToDisplayStr(gEspNow->devices[i].mac).c_str(), encStatus.c_str());
     }
   }
 }
@@ -970,7 +961,7 @@ void deriveKeyFromPassphrase(const String& passphrase, uint8_t* key) {
   // DEBUG: Show detailed key derivation info
   uint8_t mac[6];
   espnowSelfStaMac(mac);
-  String macStr = formatMacAddress(mac);
+  String macStr = macToDisplayStr(mac);
 
   DEBUGF(DEBUG_ESPNOW_STREAM, "[ESP-NOW] Encryption key derived successfully");
   // NOTE: Do not call broadcastOutput here - can cause watchdog timeout during init
@@ -1160,7 +1151,7 @@ static bool addEspNowPeerWithEncryption(const uint8_t* mac, bool /*useEncryption
   peerInfo.encrypt = false;  // LMK removed — confidentiality via SESSION_FRAME
 
   DEBUGF(DEBUG_ESPNOW_STREAM, "[ESP-NOW] Adding peer: %s (radio plaintext; AEAD via session if any)",
-         formatMacAddress(mac).c_str());
+         macToDisplayStr(mac).c_str());
 
   esp_err_t result = esp_now_add_peer(&peerInfo);
   if (result != ESP_OK) {
@@ -1899,7 +1890,7 @@ static void broadcast_tracker_check_timeouts() {
         for (int j = 0; j < t->expectedCount; j++) {
           if (!t->ackReceived[j]) {
             char macStr[18];
-            formatMacAddressBuf(t->peerMacs[j], macStr, sizeof(macStr));
+            macToDisplay(t->peerMacs[j], macStr, sizeof(macStr));
             BROADCAST_PRINTF("  No ACK: %s", macStr);
           }
         }
@@ -2331,16 +2322,16 @@ bool v4_send_encrypted_or_queue(const uint8_t dst[6], uint8_t type, uint16_t bas
         setStatus("queued; KEY_EX kick failed (no enabled mesh?)");
         return true;
       }
-      INFO_ESPNOWF("encrypted send: no peer identity for %02X:%02X:%02X:%02X:%02X:%02X — "
+      INFO_ESPNOWF("encrypted send: no peer identity for " MAC_FMT " — "
                    "queued msgId=%lu, kicked KEY_EX",
-                   dst[0], dst[1], dst[2], dst[3], dst[4], dst[5],
+                   MAC_ARGS(dst),
                    (unsigned long)msgId);
     } else {
       // KEY_EX already in flight for this peer (e.g., a sibling caller just
       // kicked it, or the retry sweep is mid-attempt). Just queue.
-      INFO_ESPNOWF("encrypted send: KEY_EX already in flight to %02X:%02X:%02X:%02X:%02X:%02X — "
+      INFO_ESPNOWF("encrypted send: KEY_EX already in flight to " MAC_FMT " — "
                    "queued msgId=%lu",
-                   dst[0], dst[1], dst[2], dst[3], dst[4], dst[5],
+                   MAC_ARGS(dst),
                    (unsigned long)msgId);
     }
     setStatus("queued; KEY_EX");
@@ -2377,16 +2368,16 @@ bool v4_send_encrypted_or_queue(const uint8_t dst[6], uint8_t type, uint16_t bas
       setStatus("queued; SESSION_OPEN kick failed (see log)");
       return true;  // still "queued" — the timeout sweep will clean it up
     }
-    INFO_ESPNOWF("encrypted send: no session yet for %02X:%02X:%02X:%02X:%02X:%02X — "
+    INFO_ESPNOWF("encrypted send: no session yet for " MAC_FMT " — "
                  "queued msgId=%lu, kicked SESSION_OPEN",
-                 dst[0], dst[1], dst[2], dst[3], dst[4], dst[5],
+                 MAC_ARGS(dst),
                  (unsigned long)msgId);
   } else {
     // Already ESTABLISHING / REKEYING — just queue, the existing handshake
     // will drain us.
-    INFO_ESPNOWF("encrypted send: handshake already in flight to %02X:%02X:%02X:%02X:%02X:%02X — "
+    INFO_ESPNOWF("encrypted send: handshake already in flight to " MAC_FMT " — "
                  "queued msgId=%lu",
-                 dst[0], dst[1], dst[2], dst[3], dst[4], dst[5],
+                 MAC_ARGS(dst),
                  (unsigned long)msgId);
   }
   setStatus("queued");
@@ -2657,7 +2648,7 @@ bool v4_send_encrypted_chunked(const uint8_t dst[6], uint8_t type, uint16_t base
   }
 
   char dstMac[18];
-  formatMacAddressBuf(dst, dstMac, sizeof(dstMac));
+  macToDisplay(dst, dstMac, sizeof(dstMac));
   DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_ENC_FRAG_TX] ==============================");
   DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_ENC_FRAG_TX] Starting encrypted fragmented send to %s", dstMac);
   DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_ENC_FRAG_TX] msgId=%lu type=%u payloadLen=%u fragCount=%u",
@@ -2846,9 +2837,9 @@ bool v4_send_payload_smart(const uint8_t* dst, uint8_t type, uint16_t flags,
     (void)espnowSessionOpenInitiate(dst, nullptr);
   }
   DEBUGF(DEBUG_ESPNOW_CORE,
-         "[V4_TX] smart-send: multi-frame send to %02X:%02X:%02X:%02X:%02X:%02X requires "
+         "[V4_TX] smart-send: multi-frame send to " MAC_FMT " requires "
          "ACTIVE session (type=%u msgId=%lu, %u bytes) — kicked %s, dropping. Caller should retry.",
-         dst[0], dst[1], dst[2], dst[3], dst[4], dst[5],
+         MAC_ARGS(dst),
          type, (unsigned long)msgId, payloadLen,
          pid ? "SESSION_OPEN" : "KEY_EX");
   return false;
@@ -2856,7 +2847,7 @@ bool v4_send_payload_smart(const uint8_t* dst, uint8_t type, uint16_t flags,
 
 static bool v4_send_ack(const uint8_t* dst, uint32_t ackFor) {
   char dstMac[18];
-  formatMacAddressBuf(dst, dstMac, sizeof(dstMac));
+  macToDisplay(dst, dstMac, sizeof(dstMac));
   DEBUGF(DEBUG_ESPNOW_CORE, "[V4_ACK_TX] Sending ACK to %s for msgId=%lu", dstMac, (unsigned long)ackFor);
   bool result = v4_send_frame(dst, ESPNOW_V4_TYPE_ACK, 0, ackFor, nullptr, 0, 1);
   DEBUGF(DEBUG_ESPNOW_CORE, "[V4_ACK_TX] Result: %s", result ? "SUCCESS" : "FAILED");
@@ -2878,7 +2869,7 @@ static bool v4_send_file_cancel(const uint8_t* dst, uint32_t msgId, uint8_t reas
 // Send ACK for a specific fragment
 static bool v4_send_frag_ack(const uint8_t* dst, uint32_t msgId, uint8_t fragIndex, uint8_t fragCount) {
   char dstMac[18];
-  formatMacAddressBuf(dst, dstMac, sizeof(dstMac));
+  macToDisplay(dst, dstMac, sizeof(dstMac));
   DEBUGF(DEBUG_ESPNOW_CORE, "[V4_FRAG_ACK_TX] Sending fragment ACK to %s", dstMac);
   DEBUGF(DEBUG_ESPNOW_CORE, "[V4_FRAG_ACK_TX] msgId=%lu fragIdx=%u fragCnt=%u",
          (unsigned long)msgId, fragIndex, fragCount);
@@ -2944,7 +2935,7 @@ static bool v4_send_topo_request(const uint8_t* dst, uint32_t reqId) {
   
   uint32_t msgId = generateMessageId();
   char dstMac[18];
-  formatMacAddressBuf(dst, dstMac, sizeof(dstMac));
+  macToDisplay(dst, dstMac, sizeof(dstMac));
   DEBUGF(DEBUG_ESPNOW_TOPO, "[V4_TX_TOPO_REQ] Sending to %s msgId=%lu reqId=%lu",
          dstMac, (unsigned long)msgId, (unsigned long)reqId);
   // Keep topology on its established plaintext V4 transport. Moving this
@@ -3079,7 +3070,7 @@ void bondNotifySessionEstablished(const uint8_t* peerMac) {
     // heartbeat) and already filtered to the configured bond peer above. Fires on
     // both master and worker. Runs on cmd_exec — safe for the log file write.
     String bondWho = getEspNowDeviceName(peerMac);
-    if (bondWho.length() == 0) bondWho = formatMacAddress(peerMac);
+    if (bondWho.length() == 0) bondWho = macToDisplayStr(peerMac);
     logAuthAttempt(true, "espnow/bond", bondWho, String("espnow"),
                    String("Bond session active (role=") +
                        (isBondMaster() ? "master" : "worker") + ")");
@@ -3193,7 +3184,7 @@ bool v4_send_user_sync(const uint8_t* dst, const char* jsonPayload, uint16_t jso
   }
   uint32_t msgId = generateMessageId();
   char dstMac[18];
-  formatMacAddressBuf(dst, dstMac, sizeof(dstMac));
+  macToDisplay(dst, dstMac, sizeof(dstMac));
   DEBUGF(DEBUG_ESPNOW_MESH, "[V4_TX_USER_SYNC] Sending (encrypted) to %s msgId=%lu len=%u", dstMac, (unsigned long)msgId, jsonLen);
   // USER_SYNC carries user records (possibly hashed credentials). Smart is
   // now strict encrypt-or-fail (2026-05 cleanup) — no plaintext fallback — so
@@ -3209,7 +3200,7 @@ bool v4_send_text(const uint8_t* dst, const char* text, uint16_t textLen) {
   if (!text || textLen == 0) return false;
   uint32_t msgId = generateMessageId();
   char dstMac[18];
-  formatMacAddressBuf(dst, dstMac, sizeof(dstMac));
+  macToDisplay(dst, dstMac, sizeof(dstMac));
   DEBUGF(DEBUG_ESPNOW_CORE, "[V4_TX_TEXT] Sending (encrypted) to %s msgId=%lu len=%u", dstMac, (unsigned long)msgId, textLen);
   // Smart is now strict encrypt-or-fail (2026-05 cleanup) — no plaintext
   // fallback anywhere. v4_send_text's original "refuse if not encryptable"
@@ -3226,7 +3217,7 @@ bool v4_send_command_response(const uint8_t* dst, uint32_t cmdMsgId, bool succes
   // Build response payload: success byte + result text
   uint16_t totalLen = 1 + textLen;
   char dstMac[18];
-  formatMacAddressBuf(dst, dstMac, sizeof(dstMac));
+  macToDisplay(dst, dstMac, sizeof(dstMac));
 
   // ENCRYPT-OR-FAIL — v4_send_payload_smart has no plaintext fallback. With no
   // session up it queues/kicks KEY_EX and returns false, and the CMD_RESP is
@@ -3447,9 +3438,8 @@ static void v4h_text(const V4RxCtx& ctx) {
   if (memcmp(ctx.h->origin, ctx.recv_info->src_addr, 6) != 0 &&
       !espnowOriginIsKnown(ctx.h->origin)) {
     DEBUGF(DEBUG_ESPNOW_ROUTER,
-           "[V4_RX] relayed TEXT from unknown origin %02X:%02X:%02X:%02X:%02X:%02X — dropped",
-           ctx.h->origin[0], ctx.h->origin[1], ctx.h->origin[2],
-           ctx.h->origin[3], ctx.h->origin[4], ctx.h->origin[5]);
+           "[V4_RX] relayed TEXT from unknown origin " MAC_FMT " — dropped",
+           MAC_ARGS(ctx.h->origin));
     return;
   }
   // Bound the printf by both 80 chars AND the actual payloadLen — the
@@ -3495,7 +3485,7 @@ static void v4h_text(const V4RxCtx& ctx) {
         if (originName.length() > 0) {
           strncpy(slot.deviceName, originName.c_str(), sizeof(slot.deviceName) - 1);
         } else {
-          formatMacAddressBuf(ctx.h->origin, slot.deviceName, sizeof(slot.deviceName));
+          macToDisplay(ctx.h->origin, slot.deviceName, sizeof(slot.deviceName));
         }
       }
       slot.deviceName[sizeof(slot.deviceName) - 1] = '\0';
@@ -3667,10 +3657,10 @@ static void v4h_heartbeat(const V4RxCtx& ctx) {
           if (!sessionPrewarmInCooldown(*pw, now)) {  // not currently backing off
             espnowSessionOpenInitiate(pmac, nullptr);
             if (sessionPrewarmNoteAttempt(pw, now)) {
-              WARN_ESPNOWF("Encrypted session to %02X:%02X:%02X:%02X:%02X:%02X not establishing after "
+              WARN_ESPNOWF("Encrypted session to " MAC_FMT " not establishing after "
                            "%u tries - peer likely does not hold our identity (re-flashed/erased?). "
                            "Backing off %us. Re-pair: 'espnowforget' + 'espnowpairsecure' on BOTH devices.",
-                           pmac[0], pmac[1], pmac[2], pmac[3], pmac[4], pmac[5],
+                           MAC_ARGS(pmac),
                            (unsigned)kSessionPrewarmMaxFails, (unsigned)(kSessionPrewarmCooldownMs / 1000));
             }
           }
@@ -4049,7 +4039,7 @@ static void v4h_topo_start(const V4RxCtx& ctx) {
       }
     }
     if (!senderNamePtr) {
-      formatMacAddressBuf(ctx.recv_info->src_addr, senderNameFallBuf, sizeof(senderNameFallBuf));
+      macToDisplay(ctx.recv_info->src_addr, senderNameFallBuf, sizeof(senderNameFallBuf));
       senderNamePtr = senderNameFallBuf;
     }
     strncpy(stream->senderName, senderNamePtr, 31);
@@ -4085,7 +4075,7 @@ static void v4h_topo_peer(const V4RxCtx& ctx) {
   memcpy(wireName, tp.name, sizeof(tp.name));
   wireName[sizeof(tp.name)] = '\0';
   char peerMacStr[18];
-  formatMacAddressBuf(tp.mac, peerMacStr, sizeof(peerMacStr));
+  macToDisplay(tp.mac, peerMacStr, sizeof(peerMacStr));
   DEBUGF(DEBUG_ESPNOW_TOPO, "[V4_RX_TOPO_PEER] reqId=%lu idx=%u isLast=%u mac=%s name=%s",
          (unsigned long)tp.reqId, tp.peerIndex, tp.isLast, peerMacStr, wireName);
   if (tp.isLast > 1) {
@@ -4203,7 +4193,7 @@ static void logBondAuthFailure(const uint8_t* mac, const char* reason) {
       ps_alloc(sizeof(BondAuthFailLog), AllocPref::PreferPSRAM, "espnow.bondfail.log"));
   if (!w) return;
   String who = mac ? getEspNowDeviceName(mac) : String("");
-  if (who.length() == 0 && mac) who = formatMacAddress(mac);
+  if (who.length() == 0 && mac) who = macToDisplayStr(mac);
   if (who.length() == 0) who = "unknown";
   strncpy(w->who, who.c_str(), sizeof(w->who) - 1);     w->who[sizeof(w->who) - 1]     = '\0';
   strncpy(w->ip, "espnow", sizeof(w->ip) - 1);          w->ip[sizeof(w->ip) - 1]       = '\0';
@@ -4846,7 +4836,7 @@ static void v4h_file_data(const V4RxCtx& ctx) {
       // Every later in-flight chunk returns ALREADY_FAILED, so an aborted big-file
       // transfer logs one line, not one per remaining chunk (~1700 on a 343 KB file).
       if (r == STREAM_APPEND_FAIL) {
-        String senderMacStr = formatMacAddress(ctx.recv_info->src_addr);
+        String senderMacStr = macToDisplayStr(ctx.recv_info->src_addr);
         logFileTransferEvent((uint8_t*)ctx.recv_info->src_addr, senderMacStr.c_str(),
                              fileSlotsGetFilename(slot), MSG_FILE_RECV_FAILED);
       }
@@ -4884,7 +4874,7 @@ static void fileWriterFinalizeJob(void* arg) {
   filename[sizeof(filename) - 1] = '\0';
   uint32_t recvBytes = fileSlotsGetReceivedBytes(slot);
   uint32_t msgId     = fileSlotsGetMsgId(slot);
-  String   senderMacStr = formatMacAddress(sndMac);
+  String   senderMacStr = macToDisplayStr(sndMac);
 
   bool ok = fileSlotsStreamFinalizeWrite(slot);  // drain remaining buffers + close .part
   if (ok) {
@@ -4971,7 +4961,7 @@ static void v4h_file_end(const V4RxCtx& ctx) {
   const char*    filename  = fileSlotsGetFilename(slot);
   const uint8_t* dataBuf   = fileSlotsGetBuffer(slot);
   uint32_t       recvBytes = fileSlotsGetReceivedBytes(slot);
-  String senderMacStr = formatMacAddress(sndMac);
+  String senderMacStr = macToDisplayStr(sndMac);
 
   DEBUG_ESPNOWF("[V4_FILE_RX] FILE_END: %s (%lu bytes, %u/%u chunks, success=%d)",
                filename, (unsigned long)recvBytes,
@@ -5176,7 +5166,7 @@ static void v4h_file_end(const V4RxCtx& ctx) {
 
         if (strcmp(filename, "automations.json") == 0) {
           String senderName = getEspNowDeviceName(sndMac);
-          if (senderName.length() == 0) senderName = formatMacAddress(sndMac);
+          if (senderName.length() == 0) senderName = macToDisplayStr(sndMac);
           String jsonStr((char*)dataBuf, recvBytes);
           PSRAM_JSON_DOC(adoc);
           DeserializationError aerr = deserializeJson(adoc, jsonStr);
@@ -5284,7 +5274,7 @@ static void v4h_file_cancel(const V4RxCtx& ctx) {
     sLastRepMsgId = ctx.h->msgId;
     sLastRepMs    = nowMs;
   }
-  String macStr = formatMacAddress(ctx.recv_info->src_addr);
+  String macStr = macToDisplayStr(ctx.recv_info->src_addr);
   BROADCAST_PRINTF("[V4_FILE_TX] file to %s FAILED on receiver (msgId=%lu): %s",
                    macStr.c_str(), (unsigned long)ctx.h->msgId, why);
   logFileTransferEvent((uint8_t*)ctx.recv_info->src_addr, macStr.c_str(), "(remote)", MSG_FILE_SEND_FAILED);
@@ -5497,9 +5487,9 @@ static void v4_relay_maybe_forward(const esp_now_recv_info* recv_info,
 
   m.floodForwards++;
   DEBUGF(DEBUG_ESPNOW_MESH,
-         "[MESH_FLOOD] forwarding type=%u msgId=%lu origin=%02X:%02X:%02X:%02X:%02X:%02X ttl %u->%u",
+         "[MESH_FLOOD] forwarding type=%u msgId=%lu origin=" MAC_FMT " ttl %u->%u",
          (unsigned)h->type, (unsigned long)h->msgId,
-         h->origin[0], h->origin[1], h->origin[2], h->origin[3], h->origin[4], h->origin[5],
+         MAC_ARGS(h->origin),
          (unsigned)h->ttl, (unsigned)oh->ttl);
   v4_relay_fanout(out, outLen, recv_info->src_addr, h->origin, h->meshFingerprint);
 }
@@ -5560,9 +5550,8 @@ static void v4h_relay_data(const V4RxCtx& ctx) {
 
     m.routedDelivered++;
     DEBUGF(DEBUG_ESPNOW_MESH,
-           "[MESH_ROUTED] delivering inner type=%u from %02X:%02X:%02X:%02X:%02X:%02X (%u hops)",
-           (unsigned)ih->type, synthSrc[0], synthSrc[1], synthSrc[2],
-           synthSrc[3], synthSrc[4], synthSrc[5], (unsigned)(env->hopsUsed + 1));
+           "[MESH_ROUTED] delivering inner type=%u from " MAC_FMT " (%u hops)",
+           (unsigned)ih->type, MAC_ARGS(synthSrc), (unsigned)(env->hopsUsed + 1));
 
     gEspNowInRelayDelivery = true;
     v4_try_handle_incoming(&ri, inner, (int)innerLen);
@@ -5579,9 +5568,8 @@ static void v4h_relay_data(const V4RxCtx& ctx) {
   uint8_t hops = 0;
   if (!meshRouterLookup(env->finalDst, nextHop, &hops)) {
     m.routedDropNoRoute++;
-    DEBUGF(DEBUG_ESPNOW_MESH, "[MESH_ROUTED] no route to %02X:%02X:%02X:%02X:%02X:%02X — dropping",
-           env->finalDst[0], env->finalDst[1], env->finalDst[2],
-           env->finalDst[3], env->finalDst[4], env->finalDst[5]);
+    DEBUGF(DEBUG_ESPNOW_MESH, "[MESH_ROUTED] no route to " MAC_FMT " — dropping",
+           MAC_ARGS(env->finalDst));
     return;
   }
   // Never bounce a frame straight back where it came from. Split horizon makes
@@ -5950,7 +5938,7 @@ struct PairCompleteJob { uint8_t mac[6]; char name[24]; };
 static void runDeferredPairComplete(void* arg) {
   PairCompleteJob* w = static_cast<PairCompleteJob*>(arg);
   char macStr[18];
-  formatMacAddressBuf(w->mac, macStr, sizeof(macStr));
+  macToDisplay(w->mac, macStr, sizeof(macStr));
   String args = String(macStr) + " " + w->name;
   const char* res = cmd_espnow_pairsecure(args);
   BROADCAST_PRINTF("[PAIR] paired with %s (%s): %s", w->name, macStr, res ? res : "(null)");
@@ -5981,7 +5969,7 @@ static void v4h_pair_request(const V4RxCtx& ctx) {
     case espnowpair::Reply::Prompt: break;
   }
   char macStr[18];
-  formatMacAddressBuf(mac, macStr, sizeof(macStr));
+  macToDisplay(mac, macStr, sizeof(macStr));
   BROADCAST_PRINTF("[PAIR] '%s' (%s) wants to pair — run 'espnowaccept' or 'espnowreject'.",
                    name, macStr);
   // The OLED polls espnowGetIncomingPairRequest() and opens its accept prompt.
@@ -5994,7 +5982,7 @@ static void v4h_pair_request(const V4RxCtx& ctx) {
 // target's next copy.
 static void pairAnswerReceived(const uint8_t mac[6], espnowpair::Answer answer) {
   portENTER_CRITICAL(&gPairLock);
-  const bool waiting = gPair.out.active && macEqual6(gPair.out.mac, mac);
+  const bool waiting = gPair.out.active && macEquals(gPair.out.mac, mac);
   portEXIT_CRITICAL(&gPairLock);
   if (!waiting) return;   // repeats end here, before any allocation
   PairCompleteJob* w = nullptr;
@@ -6226,7 +6214,7 @@ enum class V4ReasmOutcome : uint8_t { Dropped, Pending, Complete };
 static V4ReasmOutcome v4_reasm_accept(const esp_now_recv_info* recv_info, const EspNowV4Header* h,
                                       const uint8_t*& payload, uint16_t& payloadLen) {
   char srcMac[18];
-  formatMacAddressBuf(recv_info->src_addr, srcMac, sizeof(srcMac));
+  macToDisplay(recv_info->src_addr, srcMac, sizeof(srcMac));
   DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] ==============================");
   DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Fragment received from %s", srcMac);
   DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Fragment %u/%u msgId=%lu type=%u len=%u",
@@ -6412,12 +6400,11 @@ static bool v4_dispatch_table_try(const esp_now_recv_info* recv_info, const EspN
     // (SESSION_FRAME unwrap OR BROADCAST_AUTH HMAC). Plain plaintext from
     // any source — including paired peers pre-KEY_EX — is dropped to defend
     // against on-air spoofing of state-mutating opcodes (TIME_SYNC, etc).
-    WARN_ESPNOWF("[V4_RX] type=%u from %02X:%02X:%02X:%02X:%02X:%02X dropped: "
+    WARN_ESPNOWF("[V4_RX] type=%u from " MAC_FMT " dropped: "
                  "REQ_AUTHENTICATED set but frame was plaintext (no SESSION_FRAME "
                  "or BROADCAST_AUTH)",
                  h->type,
-                 recv_info->src_addr[0], recv_info->src_addr[1], recv_info->src_addr[2],
-                 recv_info->src_addr[3], recv_info->src_addr[4], recv_info->src_addr[5]);
+                 MAC_ARGS(recv_info->src_addr));
     v4_dispatch_post_cleanup(recv_info, h);
     return true;
   }
@@ -6426,11 +6413,10 @@ static bool v4_dispatch_table_try(const esp_now_recv_info* recv_info, const EspN
     // This device holds a mesh key, so every legitimate sender of this opcode
     // signs (BROADCAST_AUTH) or session-wraps its frames; a plaintext one is a
     // spoof. A keyless device skips this gate so a fleet can bootstrap.
-    WARN_ESPNOWF("[V4_RX] type=%u from %02X:%02X:%02X:%02X:%02X:%02X dropped: "
+    WARN_ESPNOWF("[V4_RX] type=%u from " MAC_FMT " dropped: "
                  "mesh has a key but frame was plaintext (REQ_AUTH_WHEN_KEYED)",
                  h->type,
-                 recv_info->src_addr[0], recv_info->src_addr[1], recv_info->src_addr[2],
-                 recv_info->src_addr[3], recv_info->src_addr[4], recv_info->src_addr[5]);
+                 MAC_ARGS(recv_info->src_addr));
     v4_dispatch_post_cleanup(recv_info, h);
     return true;
   }
@@ -6439,11 +6425,10 @@ static bool v4_dispatch_table_try(const esp_now_recv_info* recv_info, const EspN
     // rows require a SESSION_FRAME — drop loudly. Legitimate senders use
     // bondSendEncryptedAsync / v4_send_payload_smart (encrypt-or-fail), so this
     // only fires on spoofed/downgraded frames.
-    WARN_ESPNOWF("[V4_RX] type=%u from %02X:%02X:%02X:%02X:%02X:%02X dropped: "
+    WARN_ESPNOWF("[V4_RX] type=%u from " MAC_FMT " dropped: "
                  "REQ_SESSION_ENC set but frame was not session-encrypted",
                  h->type,
-                 recv_info->src_addr[0], recv_info->src_addr[1], recv_info->src_addr[2],
-                 recv_info->src_addr[3], recv_info->src_addr[4], recv_info->src_addr[5]);
+                 MAC_ARGS(recv_info->src_addr));
     v4_dispatch_post_cleanup(recv_info, h);
     return true;
   }
@@ -6567,10 +6552,9 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
       return true;
     }
     if (sodium_memcmp(expectedTag, receivedTag, 32) != 0) {
-      WARN_ESPNOWF("[V4_RX] BROADCAST_AUTH HMAC mismatch from %02X:%02X:%02X:%02X:%02X:%02X — "
+      WARN_ESPNOWF("[V4_RX] BROADCAST_AUTH HMAC mismatch from " MAC_FMT " — "
                    "forged or wrong group key, dropping",
-                   recv_info->src_addr[0], recv_info->src_addr[1], recv_info->src_addr[2],
-                   recv_info->src_addr[3], recv_info->src_addr[4], recv_info->src_addr[5]);
+                   MAC_ARGS(recv_info->src_addr));
       return true;
     }
     // Tag verified — strip it so downstream handlers see only the real payload.
@@ -6614,10 +6598,9 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
     SessionState* s = sessionFindBySessionId(h->sessionId, recv_info->src_addr);
     if (!s || (s->state != SESSION_ACTIVE && s->state != SESSION_REKEYING)) {
       WARN_ESPNOWF("[V4_RX] SESSION_FRAME no active session for sessionId=%u "
-                   "from %02X:%02X:%02X:%02X:%02X:%02X — dropping (frag %u/%u)",
+                   "from " MAC_FMT " — dropping (frag %u/%u)",
                    (unsigned)h->sessionId,
-                   recv_info->src_addr[0], recv_info->src_addr[1], recv_info->src_addr[2],
-                   recv_info->src_addr[3], recv_info->src_addr[4], recv_info->src_addr[5],
+                   MAC_ARGS(recv_info->src_addr),
                    h->fragIndex + 1, h->fragCount);
       return true;
     }
@@ -6717,7 +6700,7 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
   // Handle ACK (no dedup needed)
   if (h->type == ESPNOW_V4_TYPE_ACK) {
     char srcMac[18];
-    formatMacAddressBuf(recv_info->src_addr, srcMac, sizeof(srcMac));
+    macToDisplay(recv_info->src_addr, srcMac, sizeof(srcMac));
     DEBUGF(DEBUG_ESPNOW_CORE, "[V4_ACK_RX] ACK received from %s for msgId=%lu fragIdx=%u fragCnt=%u",
            srcMac, (unsigned long)h->msgId, h->fragIndex, h->fragCount);
     
@@ -6843,7 +6826,7 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
   }
   char macStrBuf[18]; 
   if (!deviceName || !deviceName[0]) { 
-    formatMacAddressBuf(recv_info->src_addr, macStrBuf, sizeof(macStrBuf)); 
+    macToDisplay(recv_info->src_addr, macStrBuf, sizeof(macStrBuf)); 
     deviceName = macStrBuf; 
   }
   
@@ -7240,8 +7223,8 @@ static void v4_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_
   // "espnow:..." prefix (e.g. cmd_espnow_startstream) work correctly.
   {
     char ipBuf[28];
-    snprintf(ipBuf, sizeof(ipBuf), "espnow:%02X:%02X:%02X:%02X:%02X:%02X",
-             srcMac[0], srcMac[1], srcMac[2], srcMac[3], srcMac[4], srcMac[5]);
+    snprintf(ipBuf, sizeof(ipBuf), "espnow:" MAC_FMT,
+             MAC_ARGS(srcMac));
     cmd.ctx.auth.ip = ipBuf;
   }
   cmd.ctx.id = msgId;
@@ -7709,7 +7692,7 @@ static void buildDeviceManifest(JsonDocument& doc) {
   
   uint8_t mac[6];
   espnowSelfStaMac(mac);
-  device["mac"] = formatMacAddress(mac);
+  device["mac"] = macToDisplayStr(mac);
   device["role"] = isBondMaster() ? "master" : "worker";
   device["uptime"] = millis() / 1000;
   
@@ -9059,7 +9042,7 @@ static void finalizeTopologyStreamLocked(TopologyStream* stream) {
 static TopologyStream* findTopoStreamLocked(const uint8_t* senderMac, uint32_t reqId) {
   for (int i = 0; i < MAX_CONCURRENT_TOPO_STREAMS; i++) {
     if (gTopoStreams[i].occupied && gTopoStreams[i].reqId == reqId &&
-        macEqual6(gTopoStreams[i].senderMac, senderMac)) {
+        macEquals(gTopoStreams[i].senderMac, senderMac)) {
       return &gTopoStreams[i];
     }
   }
@@ -9069,7 +9052,7 @@ static TopologyStream* findTopoStreamLocked(const uint8_t* senderMac, uint32_t r
 static bool topologySenderExpectedLocked(const uint8_t* senderMac) {
   if (!senderMac) return false;
   for (uint8_t i = 0; i < gTopoExpectedTargetCount; i++) {
-    if (macEqual6(gTopoExpectedTargets[i], senderMac)) return true;
+    if (macEquals(gTopoExpectedTargets[i], senderMac)) return true;
   }
   return false;
 }
@@ -9161,21 +9144,6 @@ const char* getMeshRoleString(uint8_t role) {
     case MESH_ROLE_WORKER:
     default: return "worker";
   }
-}
-
-// Helper: Format MAC address into caller-provided buffer (no heap allocation)
-// Buffer must be at least 18 bytes (17 chars + null terminator)
-void formatMacAddressBuf(const uint8_t* mac, char* buf, size_t bufSize) {
-  if (bufSize < 18) {
-    if (bufSize > 0) buf[0] = '\0';
-    return;
-  }
-  macToDisplay(mac, buf, bufSize);  // canonical DISPLAY form (System_Utils.h)
-}
-
-// Helper: Format MAC address as string (convenience wrapper, allocates String)
-String formatMacAddress(const uint8_t* mac) {
-  return macToDisplayStr(mac);  // canonical DISPLAY form (System_Utils.h)
 }
 
 // Helper: Parse MAC address from string (flexible format)
@@ -9463,7 +9431,7 @@ static void loadEspNowDevices() {
       // eliminate prefix collisions by migrating an oversized alias to its
       // unique MAC; retain the original JSON in a one-time backup below.
       char fallbackName[18];
-      formatMacAddressBuf(mac, fallbackName, sizeof(fallbackName));
+      macToDisplay(mac, fallbackName, sizeof(fallbackName));
       (void)dev.name.assign(fallbackName);
       migrationBackupNeeded = true;
       WARN_ESPNOWF("[ESP-NOW] Peer alias for %s exceeds %u bytes; using MAC alias and preserving the original registry backup",
@@ -9588,11 +9556,6 @@ static void loadEspNowDevices() {
 // ============================================================================
 // Public helper functions
 // ============================================================================
-
-// Convert 6-byte MAC to colon-separated hex string ("AA:BB:CC:DD:EE:FF")
-String macToHexString(const uint8_t mac[6]) {
-  return macToDisplayStr(mac);  // canonical DISPLAY form (System_Utils.h)
-}
 
 // Parse MAC string ("AA:BB:CC:DD:EE:FF") into byte array (fills zeros on parse failure)
 void macFromHexString(const String& s, uint8_t out[6]) {
@@ -9815,8 +9778,7 @@ static void fillMeshStatusPeerJsonObject(JsonObject peer, uint32_t now, const ui
   // MAC formatted into stack buffer — must wrap in String() so ArduinoJson
   // deep-copies (otherwise the stored char* dangles after we return).
   char macBuf[18];
-  snprintf(macBuf, sizeof(macBuf), "%02X:%02X:%02X:%02X:%02X:%02X",
-           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+  macToDisplay(mac, macBuf, sizeof(macBuf));
   peer["mac"] = String(macBuf);
   // Name lookup: caller's override wins; otherwise fall back to the shared
   // meta-then-paired-registry resolver. Wrap in String() unconditionally so
@@ -10275,7 +10237,7 @@ void processMeshHeartbeats() {
       // without this it was the one receive-failure kind with no [EVENT] record.
       // Once per expired slot (slot then released), so no flood. Filename isn't
       // retained in the expiry record, so report by MAC + msgId.
-      String toMacStr = formatMacAddress(expiredSlots[i].peerMac);
+      String toMacStr = macToDisplayStr(expiredSlots[i].peerMac);
       logSystemEvent("ESPNOW", "file receive FAILED (timeout — sender stopped) from %s msgId=%lu",
                      toMacStr.c_str(), (unsigned long)expiredSlots[i].msgId);
     }
@@ -10318,11 +10280,10 @@ void processMeshHeartbeats() {
                    (uint32_t)(nowMs2 - sc->rekeyInitiatedAtMs) < kRekeyMinIntervalMs)) {
         // One line per attempt: espnowRekeyInitiate refuses inside kRekeyMinIntervalMs of
         // the last key change or the last attempt (a refused send keeps the session ACTIVE).
-        INFO_ESPNOWF("REKEY auto-trigger for sessionId=%u peer=%02X:%02X:%02X:%02X:%02X:%02X "
+        INFO_ESPNOWF("REKEY auto-trigger for sessionId=%u peer=" MAC_FMT " "
                      "(reason=%s txSeq=%lu ageMs=%lu)",
                      (unsigned)sc->sessionId,
-                     sc->peerMac[0], sc->peerMac[1], sc->peerMac[2],
-                     sc->peerMac[3], sc->peerMac[4], sc->peerMac[5],
+                     MAC_ARGS(sc->peerMac),
                      txTrigger ? (ageTrigger ? "tx+age" : "tx") : "age",
                      (unsigned long)sc->txSeqNext,
                      (unsigned long)(nowMs2 - sc->establishedAtMs));
@@ -10390,7 +10351,7 @@ void processMeshHeartbeats() {
     }
     if (t.outTimedOut) {
       char macStr[18];
-      formatMacAddressBuf(t.timedOut.mac, macStr, sizeof(macStr));
+      macToDisplay(t.timedOut.mac, macStr, sizeof(macStr));
       BROADCAST_PRINTF("[PAIR] request to '%s' timed out (no answer). Open discovery on both and run "
                        "'espnowpairrequest %s' again; if '%s' already lists this device as paired, "
                        "'espnowpairsecure %s %s' here finishes the pair.",
@@ -10579,20 +10540,20 @@ void processMeshHeartbeats() {
       if (isMeshPeerAlive(&p)) {
         if (!p.onlineLogged) {
           p.onlineLogged = true;
-          logSystemEvent("MESH", "peer %02X:%02X:%02X:%02X:%02X:%02X online",
-                         pm[0], pm[1], pm[2], pm[3], pm[4], pm[5]);
+          logSystemEvent("MESH", "peer " MAC_FMT " online",
+                         MAC_ARGS(pm));
           char macStr[18];
-          formatMacAddressBuf(pm, macStr, sizeof(macStr));
+          macToDisplay(pm, macStr, sizeof(macStr));
           String peerName = getEspNowDeviceName(pm);
           systemEventPost(SYSEVT_PEER_ONLINE, peerName.length() ? peerName.c_str() : macStr, macStr);
         }
       } else {
         if (p.onlineLogged) {
           p.onlineLogged = false;
-          logSystemEvent("MESH", "peer %02X:%02X:%02X:%02X:%02X:%02X offline (heartbeat timeout)",
-                         pm[0], pm[1], pm[2], pm[3], pm[4], pm[5]);
+          logSystemEvent("MESH", "peer " MAC_FMT " offline (heartbeat timeout)",
+                         MAC_ARGS(pm));
           char macStr[18];
-          formatMacAddressBuf(pm, macStr, sizeof(macStr));
+          macToDisplay(pm, macStr, sizeof(macStr));
           String peerName = getEspNowDeviceName(pm);
           systemEventPost(SYSEVT_PEER_OFFLINE, peerName.length() ? peerName.c_str() : macStr, macStr);
         }
@@ -10636,7 +10597,7 @@ void processMeshHeartbeats() {
       auto& entry = gEspNow->streamQueue[tail];
       if (entry.used) {
         String devName = String(entry.deviceName);
-        if (devName.length() == 0) devName = formatMacAddress(entry.srcMac);
+        if (devName.length() == 0) devName = macToDisplayStr(entry.srcMac);
         // Treat a paired peer as a separate trust domain. Mixed-version peers
         // may not redact streamed command output before transmission.
         const String safeStreamContent =
@@ -10663,7 +10624,7 @@ void processMeshHeartbeats() {
   if (gEspNow->deferredCmdRespPending) {
     gEspNow->deferredCmdRespPending = false;
     String deviceName = String(gEspNow->deferredCmdRespDeviceName);
-    if (deviceName.length() == 0) deviceName = formatMacAddress(gEspNow->deferredCmdRespSrcMac);
+    if (deviceName.length() == 0) deviceName = macToDisplayStr(gEspNow->deferredCmdRespSrcMac);
     // Re-redact at the receiving trust boundary. This protects mixed-version
     // meshes (or a compromised paired peer) whose response may still echo a
     // credential-bearing unknown command.
@@ -10982,11 +10943,9 @@ void processMeshHeartbeats() {
     if (gEspNow->bondUnpairedRejectCount > sLastReportedRejectCount) {
       uint32_t newRejects = gEspNow->bondUnpairedRejectCount - sLastReportedRejectCount;
       sLastReportedRejectCount = gEspNow->bondUnpairedRejectCount;
-      BROADCAST_PRINTF("[BOND] REJECTED %lu bond msg(s) from UNPAIRED %02X:%02X:%02X:%02X:%02X:%02X (type=%d, total=%lu) — run 'bondconnect' or 'espnowpair'!",
+      BROADCAST_PRINTF("[BOND] REJECTED %lu bond msg(s) from UNPAIRED " MAC_FMT " (type=%d, total=%lu) — run 'bondconnect' or 'espnowpair'!",
                        (unsigned long)newRejects,
-                       gEspNow->bondUnpairedRejectMac[0], gEspNow->bondUnpairedRejectMac[1],
-                       gEspNow->bondUnpairedRejectMac[2], gEspNow->bondUnpairedRejectMac[3],
-                       gEspNow->bondUnpairedRejectMac[4], gEspNow->bondUnpairedRejectMac[5],
+                       MAC_ARGS(gEspNow->bondUnpairedRejectMac),
                        (int)gEspNow->bondUnpairedRejectType,
                        (unsigned long)gEspNow->bondUnpairedRejectCount);
       // Also surface in failed_login.log: an unpaired peer trying to drive the
@@ -10999,7 +10958,7 @@ void processMeshHeartbeats() {
       if (now - sLastRejectEventMs >= 30000) {
         sLastRejectEventMs = now;
         char macStr[18], det[32];
-        formatMacAddressBuf(gEspNow->bondUnpairedRejectMac, macStr, sizeof(macStr));
+        macToDisplay(gEspNow->bondUnpairedRejectMac, macStr, sizeof(macStr));
         snprintf(det, sizeof(det), "%lu msgs, type=%d",
                  (unsigned long)gEspNow->bondUnpairedRejectCount,
                  (int)gEspNow->bondUnpairedRejectType);
@@ -11108,7 +11067,7 @@ void processMeshHeartbeats() {
              meta->tags, (int)meta->stationary);
     
     String devName = String(meta->deviceName);
-    if (devName.length() == 0) devName = formatMacAddress(gEspNow->deferredMetadataSrcMac);
+    if (devName.length() == 0) devName = macToDisplayStr(gEspNow->deferredMetadataSrcMac);
     storeMessageInPeerHistory(gEspNow->deferredMetadataSrcMac, devName.c_str(), 
                               metaMsg, false, MSG_SYSTEM_EVENT);  // peer-metadata snapshot, not chat
   }
@@ -11121,7 +11080,7 @@ void processMeshHeartbeats() {
       auto& entry = gEspNow->textQueue[tail];
       if (entry.used) {
         String devName = String(entry.deviceName);
-        if (devName.length() == 0) devName = formatMacAddress(entry.srcMac);
+        if (devName.length() == 0) devName = macToDisplayStr(entry.srcMac);
         // Store this piece as its own record. Group = msgId; piece = fragIndex+1
         // of fragCount. Single-frame text is just piece 1/1. The client groups
         // by reqId and stitches — the device never holds the whole message.
@@ -11346,8 +11305,8 @@ bool espnowAppPingStart(const uint8_t* mac) {
     // Pending — that would let a stale ACK from an unrelated send win.
     gEspNowAppPing.state = EspNowAppPingState::Idle;
   }
-  DEBUGF(DEBUG_ESPNOW_CORE, "[ESPNOW_APP_PING] start msgId=%lu peer=%02X:%02X:%02X:%02X:%02X:%02X ok=%d",
-         (unsigned long)msgId, mac[0],mac[1],mac[2],mac[3],mac[4],mac[5], (int)ok);
+  DEBUGF(DEBUG_ESPNOW_CORE, "[ESPNOW_APP_PING] start msgId=%lu peer=" MAC_FMT " ok=%d",
+         (unsigned long)msgId, MAC_ARGS(mac), (int)ok);
   return ok;
 }
 
@@ -11898,8 +11857,8 @@ static bool initEspNow() {
   if (gSettings.bondModeEnabled && gSettings.bondPeerMac.length() > 0) {
     uint8_t testMac[6];
     bool parseOk = parseMacAddress(gSettings.bondPeerMac, testMac);
-    BROADCAST_PRINTF("[BOND_INIT] peerMac parse=%d -> %02X:%02X:%02X:%02X:%02X:%02X",
-                     (int)parseOk, testMac[0], testMac[1], testMac[2], testMac[3], testMac[4], testMac[5]);
+    BROADCAST_PRINTF("[BOND_INIT] peerMac parse=%d -> " MAC_FMT,
+                     (int)parseOk, MAC_ARGS(testMac));
     // Check if peer is in our device list (required for isPaired check)
     bool peerInDevList = false;
     for (int i = 0; i < gEspNow->deviceCount; i++) {
@@ -12291,8 +12250,7 @@ const char* cmd_espnow_status(const String& argsInput) {
       if (gEspNow->initialized) {
         uint8_t mac[6]; espnowSelfStaMac(mac);
         char macStr[18];
-        snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
-                 mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+        macToDisplay(mac, macStr, sizeof(macStr));
         doc["mac"]           = String(macStr);
         doc["pairedDevices"] = (gEspNow->deviceCount > 0) ? (gEspNow->deviceCount - 1) : 0;
       }
@@ -12442,7 +12400,7 @@ const char* cmd_espnow_relayblock(const String& argsInput) {
     }
     if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
     char macBuf[18];
-    formatMacAddressBuf(gRelayBlockMac, macBuf, sizeof(macBuf));
+    macToDisplay(gRelayBlockMac, macBuf, sizeof(macBuf));
     snprintf(getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE,
              "Relay block ACTIVE for %s — %lu frame(s) dropped so far. "
              "'espnowrelayblock clear' (or reboot) lifts it.",
@@ -12648,9 +12606,9 @@ const char* cmd_espnow_identity(const String& argsInput) {
     uint8_t jm[6]; espnowSelfStaMac(jm);
     char jpub[65]; espnowIdentityFormatPubHex(id.pub, jpub, sizeof(jpub));
     snprintf(getDebugBuffer(), 1024,
-      "{\"schema\":1,\"valid\":true,\"mac\":\"%02X:%02X:%02X:%02X:%02X:%02X\","
+      "{\"schema\":1,\"valid\":true,\"mac\":\"" MAC_FMT "\","
       "\"pub\":\"%s\",\"createdAtSec\":%u,\"regenCount\":%u}",
-      jm[0],jm[1],jm[2],jm[3],jm[4],jm[5], jpub,
+      MAC_ARGS(jm), jpub,
       (unsigned)id.createdAtSec, (unsigned)id.regenCount);
     return getDebugBuffer();
   }
@@ -12668,11 +12626,11 @@ const char* cmd_espnow_identity(const String& argsInput) {
   char* p = getDebugBuffer();
   snprintf(p, 1024,
            "ESP-NOW Long-Term Identity:\n"
-           "  MAC:          %02X:%02X:%02X:%02X:%02X:%02X\n"
+           "  MAC:          " MAC_FMT "\n"
            "  Ed25519 pub:  %s\n"
            "  createdAtSec: %u\n"
            "  regenCount:   %u",
-           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+           MAC_ARGS(mac),
            pubHex,
            (unsigned)id.createdAtSec,
            (unsigned)id.regenCount);
@@ -12714,13 +12672,13 @@ const char* cmd_espnow_keyex(const String& argsInput) {
   cliHint("the handshake completes asynchronously - check progress with 'espnowsessions'");
   if (!ensureDebugBuffer()) return "KEY_EX_HELLO sent. Watch logs for REPLY/CONFIRM.";
   snprintf(getDebugBuffer(), 1024,
-           "KEY_EX_HELLO sent to %02X:%02X:%02X:%02X:%02X:%02X (mesh '%s').\n"
+           "KEY_EX_HELLO sent to " MAC_FMT " (mesh '%s').\n"
            "Handshake completes asynchronously — watch for "
            "'KEY_EX with ... complete' log line. Peer identity will appear at "
-           "/system/espnow/peers/%02X%02X%02X%02X%02X%02X/identity.json on success.",
-           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+           "/system/espnow/peers/" MAC_TOKEN_FMT "/identity.json on success.",
+           MAC_ARGS(mac),
            meshLabel.length() > 0 ? meshLabel.c_str() : "default",
-           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+           MAC_ARGS(mac));
   return getDebugBuffer();
 }
 
@@ -12750,10 +12708,10 @@ const char* cmd_espnow_sessionopen(const String& argsInput) {
   }
   if (!ensureDebugBuffer()) return "SESSION_OPEN sent.";
   snprintf(getDebugBuffer(), 1024,
-           "SESSION_OPEN sent to %02X:%02X:%02X:%02X:%02X:%02X. Handshake completes "
+           "SESSION_OPEN sent to " MAC_FMT ". Handshake completes "
            "asynchronously — watch for 'SESSION established (initiator)' log line. "
            "Run 'espnowsessions' to inspect.",
-           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+           MAC_ARGS(mac));
   return getDebugBuffer();
 }
 
@@ -12835,12 +12793,12 @@ const char* cmd_espnow_probe(const String& argsInput) {
 
   if (stillInFlight) {
     snprintf(buf, 1024,
-             "no response within %ums from %02X:%02X:%02X:%02X:%02X:%02X — "
+             "no response within %ums from " MAC_FMT " — "
              "peer offline, out of range, or on a different mesh "
              "(indistinguishable from this side). KEY_EX will keep retrying in "
              "background; run 'espnowprobe' again later or check the log.",
              (unsigned)timeoutMs,
-             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+             MAC_ARGS(mac));
     return buf;
   }
 
@@ -12852,10 +12810,10 @@ const char* cmd_espnow_probe(const String& argsInput) {
       if (!mlabel || !mlabel[0]) mlabel = "(unnamed)";
     }
     snprintf(buf, 1024,
-             "alive on mesh '%s' (%ums RTT) — %02X:%02X:%02X:%02X:%02X:%02X "
+             "alive on mesh '%s' (%ums RTT) — " MAC_FMT " "
              "[%s]. Compatible firmware confirmed (KEY_EX REPLY parsed cleanly).",
              mlabel, (unsigned)elapsedMs,
-             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+             MAC_ARGS(mac),
              hadIdentityBefore ? "identity refreshed" : "new identity persisted");
     return buf;
   }
@@ -12864,10 +12822,10 @@ const char* cmd_espnow_probe(const String& argsInput) {
   // (e.g., pubkey conflict on responder side). Caller likely needs espnowforget
   // or espnowpairsecure to break the deadlock.
   snprintf(buf, 1024,
-           "rejected by %02X:%02X:%02X:%02X:%02X:%02X — peer refused our pubkey "
+           "rejected by " MAC_FMT " — peer refused our pubkey "
            "(typically a stale identity from a prior pairing). Try 'espnowforget' "
            "on both sides + re-pair.",
-           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+           MAC_ARGS(mac));
   return buf;
 }
 
@@ -12898,9 +12856,9 @@ const char* cmd_espnow_rekey(const String& argsInput) {
   cliHint("the rekey completes asynchronously - confirm the new keys with 'espnowsessions'");
   if (!ensureDebugBuffer()) return "REKEY sent.";
   snprintf(getDebugBuffer(), 1024,
-           "REKEY sent to %02X:%02X:%02X:%02X:%02X:%02X. Symmetric exchange completes "
+           "REKEY sent to " MAC_FMT ". Symmetric exchange completes "
            "asynchronously — watch for 'SESSION rekeyed' log line.",
-           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+           MAC_ARGS(mac));
   return getDebugBuffer();
 }
 
@@ -12944,9 +12902,8 @@ const char* cmd_espnow_subs(const String& argsInput) {
     if (!pid) continue;
     any = true;
     int n = snprintf(p + written, cap - written,
-                     "  %02X:%02X:%02X:%02X:%02X:%02X meshId=%u subs=0x%08lX\n",
-                     pid->mac[0], pid->mac[1], pid->mac[2],
-                     pid->mac[3], pid->mac[4], pid->mac[5],
+                     "  " MAC_FMT " meshId=%u subs=0x%08lX\n",
+                     MAC_ARGS(pid->mac),
                      (unsigned)pid->meshId,
                      (unsigned long)pid->subscribedEvents);
     if (n < 0 || (size_t)n >= cap - written) break;
@@ -13005,19 +12962,19 @@ const char* cmd_espnow_requestevents(const String& argsInput) {
                               reinterpret_cast<const uint8_t*>(&p), sizeof(p), 1)) {
     if (!ensureDebugBuffer()) return "Error: SUBSCRIBE_UPDATE send failed.";
     snprintf(getDebugBuffer(), 1024,
-             "Error: SUBSCRIBE_UPDATE send failed for %02X:%02X:%02X:%02X:%02X:%02X "
+             "Error: SUBSCRIBE_UPDATE send failed for " MAC_FMT " "
              "(peer may not be paired or session not ready).",
-             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+             MAC_ARGS(mac));
     return getDebugBuffer();
   }
   if (!ensureDebugBuffer()) return "OK: SUBSCRIBE_UPDATE sent.";
   snprintf(getDebugBuffer(), 1024,
-           "Asked %02X:%02X:%02X:%02X:%02X:%02X to send us only mask=0x%08lX "
+           "Asked " MAC_FMT " to send us only mask=0x%08lX "
            "(msgId=%lu). State updates ON THE PEER, not here — run 'espnowsubs' on "
            "the peer to verify (its row for our MAC should show the new mask). "
            "Skip counts will appear in the PEER's [V4_BROADCAST_GATED] logs, "
            "NOT in ours.",
-           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+           MAC_ARGS(mac),
            (unsigned long)mask, (unsigned long)msgId);
   return getDebugBuffer();
 }
@@ -13070,9 +13027,9 @@ const char* cmd_espnow_sessionsend(const String& argsInput) {
   cliHint("this delivers a chat message to the peer's inbox, not a command - to run a command on the peer, use 'espnowremote'");
   if (!ensureDebugBuffer()) return "Session-encrypted TEXT sent.";
   snprintf(getDebugBuffer(), 1024,
-           "Session-encrypted TEXT sent to %02X:%02X:%02X:%02X:%02X:%02X "
+           "Session-encrypted TEXT sent to " MAC_FMT " "
            "(sessionId=%u seq=%lu cipherLen=%u tagLen=16)",
-           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+           MAC_ARGS(mac),
            s ? (unsigned)s->sessionId : 0,
            s ? (unsigned long)(s->txSeqNext - 1) : 0,
            (unsigned)plaintextLen);
@@ -13124,11 +13081,10 @@ const char* cmd_espnow_sessions(const String& argsInput) {
     static const char* kStates[] = { "FREE", "ESTAB", "ACTIVE", "REKEY", "CLOSED" };
     const char* stateStr = (s->state < 5) ? kStates[s->state] : "?";
     int n = snprintf(p + written, cap - written,
-                     "  [%u] peer=%02X:%02X:%02X:%02X:%02X:%02X meshId=%u sessionId=%u "
+                     "  [%u] peer=" MAC_FMT " meshId=%u sessionId=%u "
                      "dir=%c state=%s ageMs=%lu txSeq=%lu rxHWM=%lu\n",
                      (unsigned)i,
-                     s->peerMac[0], s->peerMac[1], s->peerMac[2],
-                     s->peerMac[3], s->peerMac[4], s->peerMac[5],
+                     MAC_ARGS(s->peerMac),
                      (unsigned)s->meshId, (unsigned)s->sessionId,
                      s->myDirection == 0 ? 'A' : 'B',
                      stateStr,
@@ -13386,8 +13342,8 @@ const char* cmd_espnow_meshroutes(const String& argsInput) {
       const MeshRoute* r = meshRouterAt(i);
       if (!r) continue;
       char dstStr[18], viaStr[18];
-      formatMacAddressBuf(r->dst, dstStr, sizeof(dstStr));
-      formatMacAddressBuf(r->nextHop, viaStr, sizeof(viaStr));
+      macToDisplay(r->dst, dstStr, sizeof(dstStr));
+      macToDisplay(r->nextHop, viaStr, sizeof(viaStr));
       // metric is null, not 0, when unmeasured — 0 dBm is a real (excellent)
       // reading and must not be how "no sample yet" renders.
       char metricJson[8];
@@ -13416,8 +13372,8 @@ const char* cmd_espnow_meshroutes(const String& argsInput) {
                       "%-18s %-18s %5s %7s %6s\n", "DESTINATION", "VIA", "HOPS", "METRIC", "AGE");
     }
     char dstStr[18], viaStr[18];
-    formatMacAddressBuf(r->dst, dstStr, sizeof(dstStr));
-    formatMacAddressBuf(r->nextHop, viaStr, sizeof(viaStr));
+    macToDisplay(r->dst, dstStr, sizeof(dstStr));
+    macToDisplay(r->nextHop, viaStr, sizeof(viaStr));
     char metricStr[10];
     if (r->metric == MESH_ROUTE_METRIC_UNKNOWN) snprintf(metricStr, sizeof(metricStr), "  --");
     else                                        snprintf(metricStr, sizeof(metricStr), "%4ddBm", (int)r->metric);
@@ -14101,7 +14057,7 @@ const char* cmd_espnow_roomcmd(const String& argsInput) {
 
     // Send remote command directly — no String concat, no re-parse
     char macStrBuf[18];
-    formatMacAddressBuf(gMeshPeerMeta[i].mac, macStrBuf, sizeof(macStrBuf));
+    macToDisplay(gMeshPeerMeta[i].mac, macStrBuf, sizeof(macStrBuf));
     char roomCmdPayload[ESPNOW_V4_MAX_PLAINTEXT];
     if (user.length() + pass.length() + command.length() + 2 >= sizeof(roomCmdPayload)) {
       return "Error: command too long for one encrypted ESP-NOW frame (credentials and command must fit 201 bytes)";
@@ -14173,7 +14129,7 @@ const char* cmd_espnow_tagcmd(const String& argsInput) {
 
     // Send remote command directly — no String concat, no re-parse
     char tagMacStrBuf[18];
-    formatMacAddressBuf(gMeshPeerMeta[i].mac, tagMacStrBuf, sizeof(tagMacStrBuf));
+    macToDisplay(gMeshPeerMeta[i].mac, tagMacStrBuf, sizeof(tagMacStrBuf));
     char tagCmdPayload[ESPNOW_V4_MAX_PLAINTEXT];
     if (user.length() + pass.length() + command.length() + 2 >= sizeof(tagCmdPayload)) {
       return "Error: command too long for one encrypted ESP-NOW frame (credentials and command must fit 201 bytes)";
@@ -14398,7 +14354,7 @@ const char* cmd_espnow_meshmaster(const String& argsInput) {
 
   uint8_t myMac[6];
   espnowSelfStaMac(myMac);
-  String myMacStr = macToHexString(myMac);
+  String myMacStr = macToDisplayStr(myMac);
   if (mac.equalsIgnoreCase(myMacStr)) {
     return "Error: Cannot set your own MAC as master MAC";
   }
@@ -14430,7 +14386,7 @@ const char* cmd_espnow_meshbackup(const String& argsInput) {
 
   uint8_t myMac[6];
   espnowSelfStaMac(myMac);
-  String myMacStr = macToHexString(myMac);
+  String myMacStr = macToDisplayStr(myMac);
   if (mac.equalsIgnoreCase(myMacStr)) {
     return "Error: Cannot set your own MAC as backup MAC";
   }
@@ -14683,7 +14639,7 @@ const char* cmd_espnow_toporesults(const String& argsInput) {
     if (matchingStream++ < firstStream) continue;
     if (renderedStreams >= TOPO_STREAMS_PER_PAGE) break;
     char senderMac[18];
-    formatMacAddressBuf(stream.senderMac, senderMac, sizeof(senderMac));
+    macToDisplay(stream.senderMac, senderMac, sizeof(senderMac));
     completeOutput = appendTopologyOutput(
         p, remaining, "%s (%s):%s\n", stream.senderName[0] ? stream.senderName : "Unknown",
         senderMac, stream.receivedPeers < stream.totalPeers ? " [partial]" : "");
@@ -14699,7 +14655,7 @@ const char* cmd_espnow_toporesults(const String& argsInput) {
         continue;
       }
       char peerMac[18];
-      formatMacAddressBuf(peer.mac, peerMac, sizeof(peerMac));
+      macToDisplay(peer.mac, peerMac, sizeof(peerMac));
       completeOutput = appendTopologyOutput(
           p, remaining, "  \xe2\x86\x92 %s (%s)\n    RSSI: %d dBm\n",
           peer.name[0] ? peer.name : "Unknown", peerMac, (int)peer.rssi);
@@ -14930,11 +14886,10 @@ const char* cmd_test_filelock(const String& argsInput) {
       if (!fileSlotsSnapshot(i, &info)) continue;
       static const char* kStates[] = { "FREE", "RECEIVING", "COMPLETING", "FAILED" };
       const char* stateStr = (info.state < 4) ? kStates[info.state] : "?";
-      BROADCAST_PRINTF("  [%u] %s '%s' from %02X:%02X:%02X:%02X:%02X:%02X "
+      BROADCAST_PRINTF("  [%u] %s '%s' from " MAC_FMT " "
                        "msgId=%lu %lu/%lu bytes %u/%u chunks ageMs=%lu",
                        (unsigned)i, stateStr, info.filename,
-                       info.peerMac[0], info.peerMac[1], info.peerMac[2],
-                       info.peerMac[3], info.peerMac[4], info.peerMac[5],
+                       MAC_ARGS(info.peerMac),
                        (unsigned long)info.msgId,
                        (unsigned long)info.receivedBytes,
                        (unsigned long)info.totalSize,
@@ -14970,7 +14925,7 @@ const char* cmd_espnow_list(const String& argsInput) {
     if (isSelfMac(gEspNow->devices[i].mac)) continue;  // Don't list self
     JsonObject d = devices.add<JsonObject>();
     char listMacBuf[18];
-    formatMacAddressBuf(gEspNow->devices[i].mac, listMacBuf, sizeof(listMacBuf));
+    macToDisplay(gEspNow->devices[i].mac, listMacBuf, sizeof(listMacBuf));
     // Wrap in String() — same dangling-stack-buffer fix as meshesCmd_listjson.
     d["mac"]       = String(listMacBuf);
     d["name"]      = gEspNow->devices[i].name.c_str();
@@ -15026,10 +14981,7 @@ const char* cmd_espnow_meshstatus(const String& argsInput) {
     JsonObject dev = unpaired.add<JsonObject>();
     uint32_t elapsed = now - gEspNow->unpairedDevices[i].lastSeenMs;
     char unpairedMacBuf[18];
-    snprintf(unpairedMacBuf, sizeof(unpairedMacBuf), "%02X:%02X:%02X:%02X:%02X:%02X",
-             gEspNow->unpairedDevices[i].mac[0], gEspNow->unpairedDevices[i].mac[1],
-             gEspNow->unpairedDevices[i].mac[2], gEspNow->unpairedDevices[i].mac[3],
-             gEspNow->unpairedDevices[i].mac[4], gEspNow->unpairedDevices[i].mac[5]);
+    macToDisplay(gEspNow->unpairedDevices[i].mac, unpairedMacBuf, sizeof(unpairedMacBuf));
     // String() wrap forces deep-copy into the doc pool (task #14 pattern).
     dev["mac"] = String(unpairedMacBuf);
     dev["name"] = gEspNow->unpairedDevices[i].name.length() > 0
@@ -15515,7 +15467,7 @@ const char* cmd_espnow_unpair(const String& argsInput) {
   espnowForgetPeerCrypto(mac);
 
   // Peer + crypto identity are gone — announce the unpair.
-  systemEventPost(SYSEVT_PEER_UNPAIRED, deviceName.c_str(), formatMacAddress(mac).c_str());
+  systemEventPost(SYSEVT_PEER_UNPAIRED, deviceName.c_str(), macToDisplayStr(mac).c_str());
 
   // Clear the peer's mesh-liveness slot regardless of mode. gMeshPeers slots are
   // bootstrapped for paired devices even in DIRECT mode (and the OLED/G2 "online"
@@ -15523,7 +15475,7 @@ const char* cmd_espnow_unpair(const String& argsInput) {
   // after a direct-mode unpair.
   if (gMeshPeers) {
     for (int i = 0; i < gMeshPeerSlots; i++) {
-      if (gMeshPeers[i].isActive && macEqual6(gMeshPeers[i].mac, mac)) {
+      if (gMeshPeers[i].isActive && macEquals(gMeshPeers[i].mac, mac)) {
         gMeshPeers[i].isActive = false;
         DEBUG_ESPNOWF("[MESH] Removed peer from mesh list: %s", MAC_STR(mac));
         break;
@@ -15542,10 +15494,10 @@ const char* cmd_espnow_unpair(const String& argsInput) {
   }
   if (deviceName.length() > 0) {
     snprintf(getDebugBuffer(), 1024, "Unpaired device: %s (%s)",
-             deviceName.c_str(), formatMacAddress(mac).c_str());
+             deviceName.c_str(), macToDisplayStr(mac).c_str());
   } else {
     snprintf(getDebugBuffer(), 1024, "Unpaired device: %s",
-             formatMacAddress(mac).c_str());
+             macToDisplayStr(mac).c_str());
   }
   return getDebugBuffer();
 }
@@ -15577,7 +15529,7 @@ const char* cmd_espnow_forget(const String& argsInput) {
   // Only a real identity teardown is an unpair edge — a no-op stale-file sweep
   // (had == false) changed no bond state, so don't emit a spurious event.
   if (had) {
-    systemEventPost(SYSEVT_PEER_UNPAIRED, getEspNowDeviceName(mac).c_str(), formatMacAddress(mac).c_str());
+    systemEventPost(SYSEVT_PEER_UNPAIRED, getEspNowDeviceName(mac).c_str(), macToDisplayStr(mac).c_str());
   }
 
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
@@ -15585,7 +15537,7 @@ const char* cmd_espnow_forget(const String& argsInput) {
            "%s %s. Re-pair with 'espnowpairsecure %s <name>' on BOTH devices.",
            had ? "Forgot crypto identity + closed session for"
                : "No stored identity (swept any stale file) for",
-           formatMacAddress(mac).c_str(), formatMacAddress(mac).c_str());
+           macToDisplayStr(mac).c_str(), macToDisplayStr(mac).c_str());
   return getDebugBuffer();
 }
 
@@ -15786,8 +15738,8 @@ bool sendFileToMac(const uint8_t* mac, const String& localPath) {
   }
   
   DEBUG_ESPNOWF("[V4_FILE_TX] START: %s (%lu bytes, %u chunks, chunkSize=%u) to %s, transferId=%lu",
-         filename.c_str(), (unsigned long)fileSize, totalChunks, v4ChunkSize, formatMacAddress(mac).c_str(), (unsigned long)transferId);
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FILE_TX] Transfer initiated: %s -> %s", filename.c_str(), formatMacAddress(mac).c_str());
+         filename.c_str(), (unsigned long)fileSize, totalChunks, v4ChunkSize, macToDisplayStr(mac).c_str(), (unsigned long)transferId);
+  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FILE_TX] Transfer initiated: %s -> %s", filename.c_str(), macToDisplayStr(mac).c_str());
   
   vTaskDelay(pdMS_TO_TICKS(100));  // Give receiver more time to set up
   
@@ -15886,7 +15838,7 @@ bool sendFileToMac(const uint8_t* mac, const String& localPath) {
   if (aborted) {
     ERROR_ESPNOWF("[V4_FILE_TX] ABORTED at chunk %u/%u: %s (%s to %s)",
                   chunkIdx, totalChunks, abortWhy ? abortWhy : "(unknown)",
-                  filename.c_str(), formatMacAddress(mac).c_str());
+                  filename.c_str(), macToDisplayStr(mac).c_str());
   }
 
   // Send FILE_END with retries for reliability. success=0 on a self-detected
@@ -15917,7 +15869,7 @@ bool sendFileToMac(const uint8_t* mac, const String& localPath) {
   DEBUG_ESPNOWF("[V4_FILE_TX] %s: %s (%u/%u chunks, crc=%08lx) to %s, END_sent=%d%s",
          aborted ? "ABORTED" : "COMPLETE",
          filename.c_str(), chunkIdx, totalChunks, (unsigned long)runningCrc,
-         formatMacAddress(mac).c_str(), endSent,
+         macToDisplayStr(mac).c_str(), endSent,
          receiverKilled ? " (FILE_END skipped — receiver cancelled)" : "");
   // Honest result: false when the transfer aborted OR FILE_END could not even
   // be queued. Still sender-side truth only — "true" means every frame was
@@ -16061,18 +16013,18 @@ const char* cmd_espnow_sendfile(const String& argsInput) {
 
   String deviceName = getEspNowDeviceName(mac);
   if (deviceName.length() == 0) {
-    deviceName = formatMacAddress(mac);
+    deviceName = macToDisplayStr(mac);
   }
 
   EXT_RAM_BSS_ATTR static char sendfileBuffer[512];
 
   if (isMeshMode()) {
     if (!espnowPeerExists(mac)) {
-      BROADCAST_PRINTF("[ESP-NOW][mesh] file send rejected: no peer entry MAC=%s", formatMacAddress(mac).c_str());
+      BROADCAST_PRINTF("[ESP-NOW][mesh] file send rejected: no peer entry MAC=%s", macToDisplayStr(mac).c_str());
       snprintf(sendfileBuffer, sizeof(sendfileBuffer), "Error: Rejected (mesh): destination not in ESP-NOW peer table.");
       return sendfileBuffer;
     }
-    BROADCAST_PRINTF("[ESP-NOW][mesh] file send accepted MAC=%s", formatMacAddress(mac).c_str());
+    BROADCAST_PRINTF("[ESP-NOW][mesh] file send accepted MAC=%s", macToDisplayStr(mac).c_str());
   }
 
   if (!VFS::existsGuarded(filepath, currentAuthContext())) {
@@ -16582,11 +16534,11 @@ const char* cmd_espnow_browse(const String& argsInput) {
 
   if (isMeshMode()) {
     if (!isPairedDevice(targetMac)) {
-      BROADCAST_PRINTF("[ESP-NOW][mesh] browse send rejected: not paired MAC=%s", formatMacAddress(targetMac).c_str());
+      BROADCAST_PRINTF("[ESP-NOW][mesh] browse send rejected: not paired MAC=%s", macToDisplayStr(targetMac).c_str());
       return espnowAckErr(wantJson, "Rejected (mesh): device not paired. Use 'espnowpair' first.", "{\"schema\":1,\"ok\":false,\"error\":\"not paired (mesh)\"}");
     }
     if (!espnowPeerExists(targetMac)) {
-      BROADCAST_PRINTF("[ESP-NOW][mesh] browse send rejected: no peer entry MAC=%s", formatMacAddress(targetMac).c_str());
+      BROADCAST_PRINTF("[ESP-NOW][mesh] browse send rejected: no peer entry MAC=%s", macToDisplayStr(targetMac).c_str());
       return espnowAckErr(wantJson, "Error: Rejected (mesh): destination not in ESP-NOW peer table.", "{\"schema\":1,\"ok\":false,\"error\":\"no peer entry\"}");
     }
   }
@@ -16666,11 +16618,11 @@ const char* cmd_espnow_fetch(const String& argsInput) {
 
   if (isMeshMode()) {
     if (!isPairedDevice(targetMac)) {
-      BROADCAST_PRINTF("[ESP-NOW][mesh] fetch send rejected: not paired MAC=%s", formatMacAddress(targetMac).c_str());
+      BROADCAST_PRINTF("[ESP-NOW][mesh] fetch send rejected: not paired MAC=%s", macToDisplayStr(targetMac).c_str());
       return espnowAckErr(wantJson, "Rejected (mesh): device not paired. Use 'espnowpair' first.", "{\"schema\":1,\"ok\":false,\"error\":\"not paired (mesh)\"}");
     }
     if (!espnowPeerExists(targetMac)) {
-      BROADCAST_PRINTF("[ESP-NOW][mesh] fetch send rejected: no peer entry MAC=%s", formatMacAddress(targetMac).c_str());
+      BROADCAST_PRINTF("[ESP-NOW][mesh] fetch send rejected: no peer entry MAC=%s", macToDisplayStr(targetMac).c_str());
       return espnowAckErr(wantJson, "Error: Rejected (mesh): destination not in ESP-NOW peer table.", "{\"schema\":1,\"ok\":false,\"error\":\"no peer entry\"}");
     }
   }
@@ -16803,9 +16755,9 @@ const char* cmd_espnow_remote(const String& argsInput) {
     return remoteBuffer;
   }
   snprintf(remoteBuffer, sizeof(remoteBuffer),
-           "Sent '%s' to %s. Output is ASYNC - read it with:  espnowmessages json 0 %02X:%02X:%02X:%02X:%02X:%02X  (match reqId %lu)",
+           "Sent '%s' to %s. Output is ASYNC - read it with:  espnowmessages json 0 " MAC_FMT "  (match reqId %lu)",
            safeCommand.c_str(), target.c_str(),
-           targetMac[0], targetMac[1], targetMac[2], targetMac[3], targetMac[4], targetMac[5],
+           MAC_ARGS(targetMac),
            (unsigned long)msgId);
   return remoteBuffer;
 }
@@ -16830,11 +16782,11 @@ const char* cmd_espnow_startstream(const String& argsInput) {
 
   String senderName = getEspNowDeviceName(senderMac);
   if (senderName.length() == 0) {
-    senderName = formatMacAddress(senderMac);
+    senderName = macToDisplayStr(senderMac);
   }
 
   DEBUGF(DEBUG_ESPNOW_STREAM, "[STREAM] Activated: target=%s name=%s active=%d counters_reset=YES",
-         formatMacAddress(gEspNow->streamTarget).c_str(), senderName.c_str(), gEspNow->streamActive);
+         macToDisplayStr(gEspNow->streamTarget).c_str(), senderName.c_str(), gEspNow->streamActive);
 
   // Bus event: this device is now streaming all output to the requesting peer.
   systemEventPost(SYSEVT_REMOTE_STREAM_STARTED, senderName.c_str());
@@ -16862,7 +16814,7 @@ const char* cmd_espnow_stopstream(const String& argsInput) {
   String targetName = "unknown";
   targetName = getEspNowDeviceName(gEspNow->streamTarget);
   if (targetName.length() == 0) {
-    targetName = formatMacAddress(gEspNow->streamTarget);
+    targetName = macToDisplayStr(gEspNow->streamTarget);
   }
 
   // Report statistics before stopping
@@ -17100,8 +17052,7 @@ const char* cmd_bond_showcap(const String& argsInput) {
     doc["schema"] = 1;
     doc["device"] = jc.deviceName;
     char macStr[18];
-    snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
-             jc.mac[0], jc.mac[1], jc.mac[2], jc.mac[3], jc.mac[4], jc.mac[5]);
+    macToDisplay(jc.mac, macStr, sizeof(macStr));
     doc["mac"]  = String(macStr);
     doc["role"] = jc.role == 1 ? "master" : "worker";
     char fwStr[9];
@@ -17129,8 +17080,8 @@ const char* cmd_bond_showcap(const String& argsInput) {
   
   pos += snprintf(buf + pos, 1024 - pos, "=== Capability Summary ===\n");
   pos += snprintf(buf + pos, 1024 - pos, "Device: %s\n", cap.deviceName);
-  pos += snprintf(buf + pos, 1024 - pos, "MAC: %02X:%02X:%02X:%02X:%02X:%02X\n",
-                  cap.mac[0], cap.mac[1], cap.mac[2], cap.mac[3], cap.mac[4], cap.mac[5]);
+  pos += snprintf(buf + pos, 1024 - pos, "MAC: " MAC_FMT "\n",
+                  MAC_ARGS(cap.mac));
   pos += snprintf(buf + pos, 1024 - pos, "Role: %s\n", cap.role == 1 ? "master" : "worker");
   pos += snprintf(buf + pos, 1024 - pos, "FW Hash: %02X%02X%02X%02X...\n",
                   cap.fwHash[0], cap.fwHash[1], cap.fwHash[2], cap.fwHash[3]);
@@ -17489,7 +17440,7 @@ const char* cmd_bond_connect(const String& argsInput) {
   
   // Check if already connected
   if (gSettings.bondModeEnabled && 
-      gSettings.bondPeerMac == formatMacAddress(peerMac)) {
+      gSettings.bondPeerMac == macToDisplayStr(peerMac)) {
     return "Already connected to this device in bond mode.";
   }
   
@@ -17501,7 +17452,7 @@ const char* cmd_bond_connect(const String& argsInput) {
   // - Worker (role=0) sends data first when entering each exchange state
   // Set peer MAC and role BEFORE enabling bond mode to avoid race window
   // where espnow task sees bondModeEnabled=true with empty peerMac
-  setSetting(gSettings.bondPeerMac, formatMacAddress(peerMac));
+  setSetting(gSettings.bondPeerMac, macToDisplayStr(peerMac));
   
   // Determine role by comparing our MAC with peer MAC (higher MAC = master)
   uint8_t ourMac[6];
@@ -17511,16 +17462,16 @@ const char* cmd_bond_connect(const String& argsInput) {
   
   // Enable bond mode last — peerMac and role are already set
   setSetting(gSettings.bondModeEnabled, true);
-  INFO_ESPNOWF("[PAIR] Role assigned by MAC comparison: %s (our=%02X:%02X:%02X:%02X:%02X:%02X, peer=%02X:%02X:%02X:%02X:%02X:%02X)",
+  INFO_ESPNOWF("[PAIR] Role assigned by MAC comparison: %s (our=" MAC_FMT ", peer=" MAC_FMT ")",
                 isBondMaster() ? "MASTER" : "WORKER",
-                ourMac[0], ourMac[1], ourMac[2], ourMac[3], ourMac[4], ourMac[5],
-                peerMac[0], peerMac[1], peerMac[2], peerMac[3], peerMac[4], peerMac[5]);
+                MAC_ARGS(ourMac),
+                MAC_ARGS(peerMac));
   gEspNow->bondPeerOnline = false;  // Will be set true when heartbeat received
   gEspNow->lastBondHeartbeatReceivedMs = 0;
   resetBondSync();  // Reset handshake state for fresh start
   
   String deviceName = getEspNowDeviceName(peerMac);
-  if (deviceName.length() == 0) deviceName = formatMacAddress(peerMac);
+  if (deviceName.length() == 0) deviceName = macToDisplayStr(peerMac);
   
   // Don't request capabilities/manifest here - wait for peer to come online via heartbeat
   // The heartbeat handler will trigger capability/manifest exchange when peer is detected
@@ -17528,7 +17479,7 @@ const char* cmd_bond_connect(const String& argsInput) {
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   snprintf(getDebugBuffer(), 1024, 
            "Bond mode enabled. Waiting for peer: %s (%s)\nRole: %s\nCapabilities + manifest will be requested when peer comes online.",
-           deviceName.c_str(), formatMacAddress(peerMac).c_str(),
+           deviceName.c_str(), macToDisplayStr(peerMac).c_str(),
            isBondMaster() ? "master" : "worker");
   return getDebugBuffer();
 }
@@ -18007,7 +17958,7 @@ const char* cmd_espnow_messages(const String& argsInput) {
     for (int i = 0; i < n; i++) {
       JsonObject o = arr.add<JsonObject>();
       char macStr[18];
-      formatMacAddressBuf(msgs[i].senderMac, macStr, sizeof(macStr));
+      macToDisplay(msgs[i].senderMac, macStr, sizeof(macStr));
       o["seq"]   = (unsigned long)msgs[i].seqNum;
       o["reqId"] = (unsigned long)msgs[i].reqId;
       o["piece"] = msgs[i].piece;
@@ -18032,7 +17983,7 @@ const char* cmd_espnow_messages(const String& argsInput) {
   if (n == 0) return "No ESP-NOW messages";
   for (int i = 0; i < n; i++) {
     char macStr[18];
-    formatMacAddressBuf(msgs[i].senderMac, macStr, sizeof(macStr));
+    macToDisplay(msgs[i].senderMac, macStr, sizeof(macStr));
     BROADCAST_PRINTF("[#%lu] %s%s: %s",
                      (unsigned long)msgs[i].seqNum,
                      msgs[i].senderName[0] ? msgs[i].senderName : macStr,
@@ -18079,7 +18030,7 @@ const char* cmd_espnow_discovered(const String& argsInput) {
   for (int i = 0; i < gEspNow->unpairedDeviceCount && n < cap - 96; i++) {
     UnpairedDevice& d = gEspNow->unpairedDevices[i];
     char macStr[18];
-    formatMacAddressBuf(d.mac, macStr, sizeof(macStr));
+    macToDisplay(d.mac, macStr, sizeof(macStr));
     n += snprintf(p + n, cap - n, "  %s  %s  rssi=%d  age=%lus\n",
                   macStr, d.name.c_str(), d.rssi,
                   (unsigned long)((now - d.lastSeenMs) / 1000));
@@ -18140,7 +18091,7 @@ static bool pendingInMatchesArg(const String& argsInput, const espnowpair::Reque
   if (a.count() == 0) return true;  // no arg → the sole pending request
   String t = a.arg(0);
   uint8_t m[6];
-  if (parseMacAddress(t, m)) return macEqual6(m, in.mac);
+  if (parseMacAddress(t, m)) return macEquals(m, in.mac);
   return t.equalsIgnoreCase(in.name);
 }
 
@@ -18156,7 +18107,7 @@ static const char* takePendingIn(const String& argsInput, espnowpair::Answer ans
   if (!pendingInMatchesArg(argsInput, in)) return "Error: that name/MAC doesn't match the pending request.";
   portENTER_CRITICAL(&gPairLock);
   // Answer the request that was matched, not a newer one that replaced it meanwhile.
-  const bool same = gPair.in.active && gPair.in.atMs == in.atMs && macEqual6(gPair.in.mac, in.mac);
+  const bool same = gPair.in.active && gPair.in.atMs == in.atMs && macEquals(gPair.in.mac, in.mac);
   const bool took = same && espnowpair::answerIncoming(gPair, answer, (uint32_t)millis(), &taken);
   portEXIT_CRITICAL(&gPairLock);
   return took ? nullptr : "Error: the pending request changed; check 'espnowpairmode status'.";
@@ -18173,7 +18124,7 @@ const char* cmd_espnow_accept(const String& argsInput) {
   if (err) return err;
 
   sendPairCtrl(req.mac, ESPNOW_V4_TYPE_PAIR_ACCEPT);   // re-sent by the heartbeat sweep (PairCore)
-  char macStr[18]; formatMacAddressBuf(req.mac, macStr, sizeof(macStr));
+  char macStr[18]; macToDisplay(req.mac, macStr, sizeof(macStr));
   String pairArgs = String(macStr) + " " + req.name;
   String resCopy = cmd_espnow_pairsecure(pairArgs);  // copy: pairsecure may reuse the debug buffer
   if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
@@ -18731,8 +18682,8 @@ static size_t peerHistoryStoreInit() {
 // Log what a store did (lock released) and return whether it stored.
 static bool peerHistoryStoreReport(const PeerHistoryStoreOutcome& o, const uint8_t* peerMac) {
   if (o.busy) {
-    ERROR_ESPNOWF("[ESP-NOW] peer history busy; dropped record from %02X:%02X:%02X:%02X:%02X:%02X",
-                  peerMac[0], peerMac[1], peerMac[2], peerMac[3], peerMac[4], peerMac[5]);
+    ERROR_ESPNOWF("[ESP-NOW] peer history busy; dropped record from " MAC_FMT,
+                  MAC_ARGS(peerMac));
     return false;
   }
   if (o.blockFailed) {
@@ -18744,9 +18695,9 @@ static bool peerHistoryStoreReport(const PeerHistoryStoreOutcome& o, const uint8
     return false;
   }
   if (o.newSlot >= 0) {
-    DEBUG_ESPNOWF("[ESP-NOW] Created peer history slot %d/%d for %02X:%02X:%02X:%02X:%02X:%02X",
+    DEBUG_ESPNOWF("[ESP-NOW] Created peer history slot %d/%d for " MAC_FMT,
                   o.activeCount, o.capacity,
-                  peerMac[0], peerMac[1], peerMac[2], peerMac[3], peerMac[4], peerMac[5]);
+                  MAC_ARGS(peerMac));
     if (o.newBlock) {
       BROADCAST_PRINTF("[ESP-NOW] Peer history slot %d/%d allocated (~%u KB)",
                        o.newSlot + 1, o.capacity, (unsigned)(sizeof(PeerMessageHistory) / 1024));
@@ -18935,7 +18886,7 @@ void logFileTransferEvent(
   // Also broadcast to serial/web for immediate visibility
   String deviceName = String(peerName);
   if (deviceName.length() == 0) {
-    deviceName = formatMacAddress(peerMac);
+    deviceName = macToDisplayStr(peerMac);
   }
   BROADCAST_PRINTF("[ESP-NOW] %s: %s", deviceName.c_str(), message);
 

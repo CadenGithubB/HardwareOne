@@ -66,7 +66,7 @@ import shutil
 import subprocess
 import tempfile
 
-from test_web_batch_handlers import extract_block, require, JSON_INCLUDE
+from test_web_batch_handlers import extract_block, mac_text, require, JSON_INCLUDE
 import ble_pipe_console_host as pipe_host
 
 HERE = Path(__file__).resolve().parent
@@ -128,7 +128,8 @@ def generated(component: Path) -> str:
     stop = "bool deinitBluetooth(" if "bool deinitBluetooth(" in owner else "void deinitBluetooth("
     if stop.startswith("void"):
         print("deinitBluetooth returns void (pre-fix source)")
-    definitions = [extract_block(owner, "class BleRoleTransitionClaim") + ";",
+    definitions = [mac_text(),
+                   extract_block(owner, "class BleRoleTransitionClaim") + ";",
                    extract_block(owner, "class BleLifecycleGuard") + ";"]
     # The console's state flags and the GATT registration tap, as shipped.
     for pattern in (r"^static std::atomic<bool> sBleServerUp\{[^}]*\};",

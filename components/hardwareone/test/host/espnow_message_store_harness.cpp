@@ -22,6 +22,7 @@
 #include <new>
 #include <string>
 #include <thread>
+#include "System_MacText.h"  // production MAC text helpers (copied beside this unit)
 
 #ifndef HW1_HISTORY_COPY_API
 #define HW1_HISTORY_COPY_API 1

@@ -33,7 +33,7 @@ import shutil
 import subprocess
 import tempfile
 
-from test_web_batch_handlers import extract_block, require, JSON_INCLUDE
+from test_web_batch_handlers import extract_block, mac_text, require, JSON_INCLUDE
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
@@ -46,7 +46,6 @@ def optional(source: str, marker: str) -> list[str]:
 def generated(component: Path) -> str:
     owner = (component / "Bluetooth.cpp").read_text()
     peers = (COMPONENT / "BLE_Peers.h").read_text()
-    utils = (COMPONENT / "System_Utils.h").read_text()
 
     constants = re.findall(r"^constexpr (?:size_t|uint8_t) BLE_PEER_(?:ADDRESS_TEXT_CAPACITY|"
                            r"DEFAULT_ADDRESS_TYPE) = [^;]+;", peers, re.MULTILINE)
@@ -57,13 +56,12 @@ def generated(component: Path) -> str:
              extract_block(peers, "struct BlePeerSavedTarget ") + ";",
              extract_block(peers, "struct BlePeerSavedTargetSnapshot") + ";"]
 
-    definitions = [extract_block(utils, "inline void macToDisplay(")]
+    definitions = [mac_text()]
     cache = re.search(r"static struct \{[^}]*\} gBLEMACCache = [^;]*;", owner)
     if cache:
         print("Bluetooth.cpp keeps a MAC classification cache (pre-fix source)")
         definitions.append(cache.group())
-    definitions += [extract_block(owner, "static void macToStackBuf("),
-                    extract_block(owner, "static void copyMacUpper(")]
+    definitions += [extract_block(owner, "static void copyMacUpper(")]
     definitions += optional(owner, "static bool bleSavedMacMatches(")
     definitions += optional(owner, "static void bleUpdateMACCache(")
     definitions += [extract_block(owner, "const char* bleDeviceTypeToString("),

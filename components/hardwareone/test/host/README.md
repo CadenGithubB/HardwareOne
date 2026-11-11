@@ -962,7 +962,7 @@ httpd. Run with
 `test_mqtt_json_bounds.py` extracts the shipping `publishDiscoveryConfig`,
 `publishPeerDiscoveryConfig`, their shared 1 KB discovery buffer and bounded
 `MqttJsonWriter`, `updateExternalSensor` with its sensor-table state
-(`System_MQTT.cpp`) and `macToPathToken` (`System_Utils.h`), and compiles them
+(`System_MQTT.cpp`) and `macToPathToken` (`System_MacText.h`), and compiles them
 against a recording `esp_mqtt_client_publish`. Cases: a short base topic
 publishes the same retained discovery document byte for byte (local and mesh
 peer); a 400-character base topic skips the publish with one warning instead

@@ -88,11 +88,6 @@ MeshRoute* worstLearnedRoute() {
   return worst;
 }
 
-void formatMac(const uint8_t mac[6], char* out, size_t cap) {
-  snprintf(out, cap, "%02X:%02X:%02X:%02X:%02X:%02X",
-           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-}
-
 // Install or refresh a hops == 1 entry for a neighbour we just heard from.
 void noteDirect(const uint8_t mac[6], int8_t metric, uint32_t nowMs) {
   MeshRoute* r = findRoute(mac);
@@ -101,8 +96,8 @@ void noteDirect(const uint8_t mac[6], int8_t metric, uint32_t nowMs) {
     // been relaying to this node a moment ago and it just came back in range.
     if (r->hops != 1) {
       gMetrics.routesReplaced++;
-      DEBUGF(DEBUG_ESPNOW_MESH, "[MESH_ROUTE] %02X:%02X:%02X:%02X:%02X:%02X now DIRECT (was %u hops)",
-             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], (unsigned)r->hops);
+      DEBUGF(DEBUG_ESPNOW_MESH, "[MESH_ROUTE] " MAC_FMT " now DIRECT (was %u hops)",
+             MAC_ARGS(mac), (unsigned)r->hops);
     }
     memcpy(r->nextHop, mac, 6);
     r->hops         = 1;
@@ -165,7 +160,7 @@ void meshRouterSyncDirect(uint32_t nowMs) {
     MeshRoute& r = gRoutes[i];
     if (!r.active || r.hops != 1) continue;
     if (neighbourAlive(r.dst, nowMs)) continue;
-    char macStr[18]; formatMac(r.dst, macStr, sizeof(macStr));
+    char macStr[18]; macToDisplay(r.dst, macStr, sizeof(macStr));
     DEBUGF(DEBUG_ESPNOW_MESH, "[MESH_ROUTE] direct route to %s withdrawn (peer silent)", macStr);
     r.active = false;
     gMetrics.routesExpired++;
@@ -179,7 +174,7 @@ void meshRouterSyncDirect(uint32_t nowMs) {
     if (!r.active || r.hops <= 1) continue;
     const MeshRoute* via = findRoute(r.nextHop);
     if (via && via->active && via->hops == 1) continue;
-    char macStr[18]; formatMac(r.dst, macStr, sizeof(macStr));
+    char macStr[18]; macToDisplay(r.dst, macStr, sizeof(macStr));
     DEBUGF(DEBUG_ESPNOW_MESH, "[MESH_ROUTE] route to %s withdrawn (next hop gone)", macStr);
     r.active = false;
     gMetrics.routesExpired++;
@@ -194,7 +189,7 @@ void meshRouterExpire(uint32_t nowMs) {
     // their lifetime); ageing them here too would double-count the withdrawal.
     if (!r.active || r.hops <= 1) continue;
     if ((uint32_t)(nowMs - r.lastUpdateMs) < MESH_ROUTE_EXPIRY_MS) continue;
-    char macStr[18]; formatMac(r.dst, macStr, sizeof(macStr));
+    char macStr[18]; macToDisplay(r.dst, macStr, sizeof(macStr));
     DEBUGF(DEBUG_ESPNOW_MESH, "[MESH_ROUTE] route to %s expired (%lu ms stale)",
            macStr, (unsigned long)(nowMs - r.lastUpdateMs));
     r.active = false;
@@ -253,8 +248,8 @@ void meshRouterIngestAdvert(const uint8_t* fromMac, int8_t linkMetric,
       if (!shorter && !sameButBetter) continue;
 
       char dstStr[18], viaStr[18];
-      formatMac(e.mac, dstStr, sizeof(dstStr));
-      formatMac(fromMac, viaStr, sizeof(viaStr));
+      macToDisplay(e.mac, dstStr, sizeof(dstStr));
+      macToDisplay(fromMac, viaStr, sizeof(viaStr));
       DEBUGF(DEBUG_ESPNOW_MESH, "[MESH_ROUTE] %s: %u hops -> %u hops via %s (metric %d)",
              dstStr, (unsigned)r->hops, (unsigned)newHops, viaStr, (int)newMetric);
       memcpy(r->nextHop, fromMac, 6);
@@ -284,8 +279,8 @@ void meshRouterIngestAdvert(const uint8_t* fromMac, int8_t linkMetric,
     gMetrics.routesInstalled++;
 
     char dstStr[18], viaStr[18];
-    formatMac(e.mac, dstStr, sizeof(dstStr));
-    formatMac(fromMac, viaStr, sizeof(viaStr));
+    macToDisplay(e.mac, dstStr, sizeof(dstStr));
+    macToDisplay(fromMac, viaStr, sizeof(viaStr));
     DEBUGF(DEBUG_ESPNOW_MESH, "[MESH_ROUTE] learned %s via %s (%u hops, metric %d)",
            dstStr, viaStr, (unsigned)newHops, (int)newMetric);
   }

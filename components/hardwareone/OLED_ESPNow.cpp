@@ -658,8 +658,8 @@ static void oledEspNowAnswerPairRequest(const char* verb, const char* failToast)
   sPairPromptAnswered = sPairPromptShown;
   const uint8_t* m = sPairPromptShown.mac;
   char cmd[40];   // "espnowaccept " (13) + 17-char MAC + NUL
-  snprintf(cmd, sizeof(cmd), "%s %02X:%02X:%02X:%02X:%02X:%02X",
-           verb, m[0], m[1], m[2], m[3], m[4], m[5]);
+  snprintf(cmd, sizeof(cmd), "%s " MAC_FMT,
+           verb, MAC_ARGS(m));
   oledEspNowRunOwnerCommand(cmd, failToast);
 }
 static void onPairReqAccept(void* /*ud*/) { oledEspNowAnswerPairRequest("espnowaccept", "Accept failed"); }
@@ -1054,8 +1054,8 @@ bool oledEspNowHandleInput(int deltaX, int deltaY, uint32_t newlyPressed) {
           uint8_t mac[6]; char nm[24]; int rssi = 0;
           if (n > 0 && espnowGetPairCandidate(sPairingSel, nm, sizeof(nm), mac, &rssi)) {
             char cmd[48];
-            snprintf(cmd, sizeof(cmd), "espnowpairrequest %02X:%02X:%02X:%02X:%02X:%02X",
-                     mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+            snprintf(cmd, sizeof(cmd), "espnowpairrequest " MAC_FMT,
+                     MAC_ARGS(mac));
             executeOLEDCommand(cmd);   // waits for the other device to Accept
           }
           oledMarkDirty();
@@ -1444,10 +1444,8 @@ void oledEspNowSelectMode() {
 // edits devices[] itself.
 void oledEspNowUnpairDevice() {
   char cmd[32];   // "espnowunpair " (13) + 17-char MAC + NUL
-  snprintf(cmd, sizeof(cmd), "espnowunpair %02X:%02X:%02X:%02X:%02X:%02X",
-           gOledEspNowState.selectedDeviceMac[0], gOledEspNowState.selectedDeviceMac[1],
-           gOledEspNowState.selectedDeviceMac[2], gOledEspNowState.selectedDeviceMac[3],
-           gOledEspNowState.selectedDeviceMac[4], gOledEspNowState.selectedDeviceMac[5]);
+  snprintf(cmd, sizeof(cmd), "espnowunpair " MAC_FMT,
+           MAC_ARGS(gOledEspNowState.selectedDeviceMac));
   if (!oledEspNowRunOwnerCommand(cmd, "Unpair failed")) return;   // refused: stay on the config view
   oledEspNowBackToList();   // peer is gone: the detail view has no target
 }
@@ -1731,11 +1729,6 @@ void oledEspNowRefreshMessages() {
   }
 }
 
-String oledEspNowFormatMac(const uint8_t* mac) {
-  if (!mac) return "00:00:00:00:00:00";
-  return macToDisplayStr(mac);  // canonical DISPLAY form (System_Utils.h)
-}
-
 void oledEspNowDrawStatusIcon(Adafruit_SSD1306* display, int x, int y, bool delivered) {
   if (!display) return;
   
@@ -1925,13 +1918,7 @@ void oledEspNowSendTextMessage() {
   
   // Format MAC address
   char macStr[18];
-  snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
-           gOledEspNowState.selectedDeviceMac[0],
-           gOledEspNowState.selectedDeviceMac[1],
-           gOledEspNowState.selectedDeviceMac[2],
-           gOledEspNowState.selectedDeviceMac[3],
-           gOledEspNowState.selectedDeviceMac[4],
-           gOledEspNowState.selectedDeviceMac[5]);
+  macToDisplay(gOledEspNowState.selectedDeviceMac, macStr, sizeof(macStr));
   
   // Build command: espnowsend json <mac> <message>. The "json" flag makes the
   // handler return {"ok":true,"msgId":N}. cmd_espnow_send records the sent text
@@ -1969,13 +1956,7 @@ void oledEspNowSendRemoteCommand() {
   
   // Format MAC address
   char macStr[18];
-  snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
-           gOledEspNowState.selectedDeviceMac[0],
-           gOledEspNowState.selectedDeviceMac[1],
-           gOledEspNowState.selectedDeviceMac[2],
-           gOledEspNowState.selectedDeviceMac[3],
-           gOledEspNowState.selectedDeviceMac[4],
-           gOledEspNowState.selectedDeviceMac[5]);
+  macToDisplay(gOledEspNowState.selectedDeviceMac, macStr, sizeof(macStr));
   
   // Build command: espnow remote <mac> <username> <password> <command>
   char cmdBuf[384];
@@ -2343,13 +2324,7 @@ bool oledEspNowHandleDeviceConfigInput(int deltaX, int deltaY, uint32_t newlyPre
   // A button: Execute selected action
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
     char macStr[18];
-    snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
-             gOledEspNowState.selectedDeviceMac[0],
-             gOledEspNowState.selectedDeviceMac[1],
-             gOledEspNowState.selectedDeviceMac[2],
-             gOledEspNowState.selectedDeviceMac[3],
-             gOledEspNowState.selectedDeviceMac[4],
-             gOledEspNowState.selectedDeviceMac[5]);
+    macToDisplay(gOledEspNowState.selectedDeviceMac, macStr, sizeof(macStr));
     
     switch (gOledEspNowState.deviceConfigMenuIndex) {
       case 0: // Restart Device
@@ -2422,13 +2397,7 @@ void oledEspNowApplyDeviceConfigEdit(const String& value) {
   }
   
   char macStr[18];
-  snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
-           gOledEspNowState.selectedDeviceMac[0],
-           gOledEspNowState.selectedDeviceMac[1],
-           gOledEspNowState.selectedDeviceMac[2],
-           gOledEspNowState.selectedDeviceMac[3],
-           gOledEspNowState.selectedDeviceMac[4],
-           gOledEspNowState.selectedDeviceMac[5]);
+  macToDisplay(gOledEspNowState.selectedDeviceMac, macStr, sizeof(macStr));
   
   switch (gOledEspNowState.deviceConfigEditField) {
     case 1: // Set Role

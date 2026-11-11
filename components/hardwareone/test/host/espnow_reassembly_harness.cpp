@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <vector>
+#include "System_MacText.h"  // production MAC text helpers (copied beside this unit)
 
 static constexpr size_t CMD_RESULT_MAX = 4096;  // production value; V4_FRAG_MAX evaluates to 21
 // INSERT_OPCODES
@@ -32,9 +33,6 @@ static unsigned warnings = 0;
 
 static uint32_t clockMs = 1000;
 static uint32_t millis() { return clockMs; }
-void formatMacAddressBuf(const uint8_t* mac, char* buf, size_t n) {
-  std::snprintf(buf, n, "%02X:%02X:%02X:%02X:%02X:%02X", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-}
 struct RouterMetrics { uint32_t v4FragRx = 0, v4FragRxCompleted = 0, v4FragRxGc = 0; };
 struct EspNowState { RouterMetrics routerMetrics; };
 static EspNowState gState;

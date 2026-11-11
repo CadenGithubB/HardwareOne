@@ -45,7 +45,7 @@ import shutil
 import subprocess
 import tempfile
 
-from test_web_batch_handlers import extract_block, require
+from test_web_batch_handlers import extract_block, mac_text, require
 import ble_pipe_console_host as pipe_host
 
 HERE = Path(__file__).resolve().parent
@@ -66,7 +66,6 @@ def generated(component: Path) -> str:
     types_h = (COMPONENT / "System_CommandTypes.h").read_text()
     identity_h = (COMPONENT / "System_AuthIdentity.h").read_text()
     debug_h = (COMPONENT / "System_Debug.h").read_text()
-    utils_h = (COMPONENT / "System_Utils.h").read_text()
 
     types = [
         extract_block(user_h, "enum CommandSource") + ";",
@@ -104,7 +103,7 @@ def generated(component: Path) -> str:
         "#define PIPE_HOST_LIFECYCLE_HELD() (gLifecycle.depth != 0)",
         pipe_host.PIPE_DOUBLES,
         pipe_host.declarations(owner, pipe_host.ROW_MARKERS + pipe_host.ROUTER_MARKERS),
-        extract_block(utils_h, "inline void macToDisplay("),
+        mac_text(),
     ]
     definitions += [extract_block(owner, marker) for marker in (
         "int findConnectionSlotByConnIdLocked(",

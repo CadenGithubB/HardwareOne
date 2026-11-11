@@ -267,9 +267,7 @@ static esp_err_t handleEspNowMessages(httpd_req_t* req) {
     ReceivedTextMessage& msg = messages[i];
 
     char macStr[18];
-    snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
-             msg.senderMac[0], msg.senderMac[1], msg.senderMac[2],
-             msg.senderMac[3], msg.senderMac[4], msg.senderMac[5]);
+    macToDisplay(msg.senderMac, macStr, sizeof(macStr));
 
     if (i > 0) err = webEspnowSendChunk(req, ",");
     if (err != ESP_OK) break;
@@ -338,9 +336,7 @@ static esp_err_t handleEspNowMessages(httpd_req_t* req) {
       static const char* kStateNames[] = { "pending", "delivered", "timeout", "failed" };
       const char* stateName = (s->state < 4) ? kStateNames[s->state] : "unknown";
       char macStr[18];
-      snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
-               s->peerMac[0], s->peerMac[1], s->peerMac[2],
-               s->peerMac[3], s->peerMac[4], s->peerMac[5]);
+      macToDisplay(s->peerMac, macStr, sizeof(macStr));
       if (!firstDelivery) {
         err = webEspnowSendChunk(req, ",");
         if (err != ESP_OK) break;
@@ -386,9 +382,7 @@ static esp_err_t handleEspNowRemoteCap(httpd_req_t* req) {
   
   // Build MAC string
   char macStr[18];
-  snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
-           cap.mac[0], cap.mac[1], cap.mac[2],
-           cap.mac[3], cap.mac[4], cap.mac[5]);
+  macToDisplay(cap.mac, macStr, sizeof(macStr));
   
   // Stream JSON response (larger due to human-readable strings)
   esp_err_t err = webEspnowSendChunk(req, "{\"valid\":true,");

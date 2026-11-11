@@ -631,8 +631,8 @@ static bool fsRpcRequesterIdentity(const uint8_t srcMac[6], AuthContext& out) {
   out.user      = kBondAdminUser;
   out.path      = "/espnow/fs";
   char ip[28];
-  snprintf(ip, sizeof(ip), "espnow:%02X:%02X:%02X:%02X:%02X:%02X",
-           srcMac[0], srcMac[1], srcMac[2], srcMac[3], srcMac[4], srcMac[5]);
+  snprintf(ip, sizeof(ip), "espnow:" MAC_FMT,
+           MAC_ARGS(srcMac));
   out.ip     = ip;        // same stamp as the bonded CMD path (v4_handle_cmd)
   out.sid    = "";
   out.opaque = nullptr;

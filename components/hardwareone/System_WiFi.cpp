@@ -1437,8 +1437,7 @@ const char* cmd_wifidrop(const String& argsInput) {
 namespace {
 
 static void formatWifiBssid(const uint8_t bssid[6], char out[18]) {
-  snprintf(out, 18, "%02X:%02X:%02X:%02X:%02X:%02X",
-           bssid[0], bssid[1], bssid[2], bssid[3], bssid[4], bssid[5]);
+  macToDisplay(bssid, out, 18);
 }
 
 struct WifiScanJsonContext {

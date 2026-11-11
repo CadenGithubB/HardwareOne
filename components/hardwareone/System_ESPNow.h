@@ -6,6 +6,7 @@
 #include <esp_err.h>
 
 #include "System_BuildConfig.h"
+#include "System_MacText.h"   // MAC_FMT, MAC_ARGS, macToDisplay, macEquals, macParse
 
 // ESP-NOW type definitions (always available for type-safe references)
 enum MeshRole {
@@ -1213,7 +1214,6 @@ const char* cmd_espnow_timesync(const String& originalCmd);
 const char* cmd_espnow_timestatus(const String& argsInput);
 
 // Helper functions
-String formatMacAddress(const uint8_t* mac);
 const char* getMeshRoleString(uint8_t role);
 uint32_t generateMessageId();
 bool shouldChunk(size_t size);
@@ -1233,8 +1233,6 @@ const char* cmd_espnowenabled(const String& argsInput);
 // Global state (defined in espnow_system.cpp)
 extern EspNowState* gEspNow;
 
-// Helper functions (exported for other modules)
-bool macEqual6(const uint8_t a[6], const uint8_t b[6]);
 
 // Bond schema sync — sends ESPNOW_V4_TYPE_SCHEMA_REQ to the bonded peer. The
 // worker responds with the schema as a file (_schema_out.json) which is
@@ -1303,10 +1301,9 @@ MeshPeerHealth* getMeshPeerHealth(const uint8_t mac[6], bool createIfMissing = f
 // While stopped, a checked driver query preserves the existing helper behavior.
 bool isSelfMac(const uint8_t* mac);
 void macFromHexString(const String& s, uint8_t out[6]);
-String macToHexString(const uint8_t mac[6]);
 // Zero-allocation MAC formatter for debug log call sites.
 // Uses a GCC statement expression + a function-static char[18] — no heap, no
-// String. Usage: DEBUGF(..., "%s", MAC_STR(mac))  instead of  macToHexString(mac).c_str()
+// String. Usage: DEBUGF(..., "%s", MAC_STR(mac))  instead of  macToDisplayStr(mac).c_str()
 //
 // The static lives in PSRAM (EXT_RAM_BSS_ATTR). Each expansion site mints its
 // own 18-byte static, so the ~37 sites in this build cost ~666 B of internal
@@ -1323,8 +1320,7 @@ String macToHexString(const uint8_t mac[6]);
 // tasks expanding the same site concurrently can tear the string.)
 #define MAC_STR(mac) \
   ({ EXT_RAM_BSS_ATTR static char _macbuf[18]; \
-     snprintf(_macbuf, sizeof(_macbuf), "%02X:%02X:%02X:%02X:%02X:%02X", \
-       (mac)[0],(mac)[1],(mac)[2],(mac)[3],(mac)[4],(mac)[5]); \
+     snprintf(_macbuf, sizeof(_macbuf), MAC_FMT, MAC_ARGS(mac)); \
      (const char*)_macbuf; })
 
 // Topology helpers (moved from .ino)

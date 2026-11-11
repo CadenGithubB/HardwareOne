@@ -38,7 +38,7 @@ import shutil
 import subprocess
 import tempfile
 
-from test_web_batch_handlers import extract_block, require
+from test_web_batch_handlers import extract_block, mac_text, require
 import ble_pipe_console_host as pipe_host
 
 HERE = Path(__file__).resolve().parent
@@ -114,7 +114,7 @@ def generated(component: Path) -> str:
     types.append(extract_block(owner, "static inline bool bleConsoleClientHost() "))
     # The phone link's console row (phone link v2): its types and holder bits.
     types += [pipe_host.pipe_types(component), pipe_host.holder_state(owner)]
-    definitions = []
+    definitions = [mac_text()]
     definitions.append(extract_block(owner, "class BleLifecycleGuard") + ";")
     # The console driver's doubles, and every console-row and router function
     # declared up front (their definitions come last).
@@ -160,8 +160,7 @@ def generated(component: Path) -> str:
         "int bleDisconnectAppClients(",
         "static const char* bleConsoleSwitchHint(")]
     # The audit identity a phone-link command carries (no address).
-    definitions += [extract_block(utils, "inline void macToDisplay("),
-                    extract_block(owner, "static String blePeerIpTag(")]
+    definitions += [extract_block(owner, "static String blePeerIpTag(")]
     definitions.append(extract_block(link, "BleLinkStatus bleLinkStatus()"))
     definitions.append(extract_block(utils, "inline int parseBoolArg("))
     definitions += re.findall(r"(?ms)^static const char kBlePhoneLink\w+\[\] =.*?;$", owner)

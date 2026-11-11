@@ -71,6 +71,7 @@ def main() -> None:
         flags += ["-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-g"]
     with tempfile.TemporaryDirectory(prefix="hw1-oled-espnow-own-") as directory:
         unit, executable = Path(directory) / "test.cpp", Path(directory) / "test"
+        (unit.parent / 'System_MacText.h').write_text((HERE.parents[1] / 'System_MacText.h').read_text())
         unit.write_text(generated(args.component))
         subprocess.run([args.cxx, *flags, str(unit), "-o", str(executable)],
                        check=True, timeout=120)

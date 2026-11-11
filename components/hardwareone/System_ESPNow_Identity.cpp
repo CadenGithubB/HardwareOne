@@ -319,27 +319,10 @@ constexpr const char* kPeersDir = "/system/espnow/peers";
 //       the next write rewrites them as v2.
 constexpr uint8_t  kPeerFileVersion = 2;
 
-// Format MAC as 12-char uppercase hex without separators, matching the
-// existing directory convention at /system/espnow/peers/AABBCCDDEEFF/.
-void formatMacNoSep(const uint8_t mac[6], char* out13) {
-  macToPathToken(mac, out13);  // canonical PATH TOKEN form (System_Utils.h)
-}
-
+// Strict PATH TOKEN parser for peer directory names: exactly the 12 hex
+// digits macToPathToken() writes, nothing else.
 bool parseMacNoSep(const char* in, uint8_t mac[6]) {
-  if (!in || strlen(in) != 12) return false;
-  auto nyb = [](char c) -> int {
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-    return -1;
-  };
-  for (int i = 0; i < 6; i++) {
-    int hi = nyb(in[i * 2]);
-    int lo = nyb(in[i * 2 + 1]);
-    if (hi < 0 || lo < 0) return false;
-    mac[i] = (uint8_t)((hi << 4) | lo);
-  }
-  return true;
+  return in && strlen(in) == 12 && macParse(in, mac);
 }
 
 int findSlotByMac(const uint8_t mac[6]) {
@@ -361,7 +344,7 @@ int findFreeSlot() {
 bool buildPeerPath(const uint8_t mac[6], const char* leaf,
                    char* out, size_t outLen) {
   char macHex[13];
-  formatMacNoSep(mac, macHex);
+  macToPathToken(mac, macHex);
   int n = snprintf(out, outLen, "%s/%s/%s", kPeersDir, macHex, leaf);
   return n > 0 && (size_t)n < outLen;
 }
@@ -374,7 +357,7 @@ bool ensurePeerDir(const uint8_t mac[6]) {
 
   char dir[64];
   char macHex[13];
-  formatMacNoSep(mac, macHex);
+  macToPathToken(mac, macHex);
   snprintf(dir, sizeof(dir), "%s/%s", kPeersDir, macHex);
   if (!VFS::existsGuarded(dir, auth) && !VFS::mkdirGuarded(dir, auth)) return false;
   return true;
@@ -392,7 +375,7 @@ bool writePeerIdentityFile(const PeerIdentity& p) {
   if (!buildPeerPath(p.mac, "identity.tmp",  tmp,  sizeof(tmp)))  return false;
 
   char macHex[13];
-  formatMacNoSep(p.mac, macHex);
+  macToPathToken(p.mac, macHex);
   char macColons[18];
   macToDisplay(p.mac, macColons, sizeof(macColons));  // canonical DISPLAY form
   char pubHex[65];
@@ -487,12 +470,12 @@ bool peerIdentityPersist(const uint8_t mac[6], uint8_t meshId,
   p.valid = true;
 
   if (!writePeerIdentityFile(p)) {
-    ERROR_ESPNOWF("peer identity persist: disk write failed for %02X:%02X:%02X:%02X:%02X:%02X",
-                  mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    ERROR_ESPNOWF("peer identity persist: disk write failed for " MAC_FMT,
+                  MAC_ARGS(mac));
     return false;
   }
-  INFO_ESPNOWF("peer identity stored: %02X:%02X:%02X:%02X:%02X:%02X meshId=%u",
-               mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], (unsigned)meshId);
+  INFO_ESPNOWF("peer identity stored: " MAC_FMT " meshId=%u",
+               MAC_ARGS(mac), (unsigned)meshId);
   return true;
 }
 
@@ -501,14 +484,14 @@ bool peerIdentitySetSubscriptions(const uint8_t mac[6], uint32_t subscribedEvent
   int idx = findSlotByMac(mac);
   if (idx < 0) {
     DEBUG_ESPNOWF("peer subscriptions: ignoring SUBSCRIBE_UPDATE from unknown peer "
-                  "%02X:%02X:%02X:%02X:%02X:%02X",
-                  mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+                  MAC_FMT,
+                  MAC_ARGS(mac));
     return false;
   }
   uint32_t prev = gPeerIdentities[idx].subscribedEvents;
   if (prev == subscribedEvents) {
-    DEBUG_ESPNOWF("peer subscriptions: no change for %02X:%02X:%02X:%02X:%02X:%02X (0x%08lX)",
-                  mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+    DEBUG_ESPNOWF("peer subscriptions: no change for " MAC_FMT " (0x%08lX)",
+                  MAC_ARGS(mac),
                   (unsigned long)subscribedEvents);
     return true;  // no-op success
   }
@@ -516,12 +499,12 @@ bool peerIdentitySetSubscriptions(const uint8_t mac[6], uint32_t subscribedEvent
   if (!writePeerIdentityFile(gPeerIdentities[idx])) {
     // Roll back in-memory state so persistence + cache stay consistent.
     gPeerIdentities[idx].subscribedEvents = prev;
-    ERROR_ESPNOWF("peer subscriptions: persist failed for %02X:%02X:%02X:%02X:%02X:%02X",
-                  mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    ERROR_ESPNOWF("peer subscriptions: persist failed for " MAC_FMT,
+                  MAC_ARGS(mac));
     return false;
   }
-  INFO_ESPNOWF("peer subscriptions: %02X:%02X:%02X:%02X:%02X:%02X now 0x%08lX (was 0x%08lX)",
-               mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+  INFO_ESPNOWF("peer subscriptions: " MAC_FMT " now 0x%08lX (was 0x%08lX)",
+               MAC_ARGS(mac),
                (unsigned long)subscribedEvents, (unsigned long)prev);
   return true;
 }
@@ -550,7 +533,7 @@ bool peerIdentityForget(const uint8_t mac[6]) {
   }
   // Remove the now-empty per-peer directory so it doesn't linger in `files` listings.
   char dir[64], macHex[13];
-  formatMacNoSep(mac, macHex);
+  macToPathToken(mac, macHex);
   snprintf(dir, sizeof(dir), "%s/%s", kPeersDir, macHex);
   if (VFS::existsGuarded(dir, auth)) {
     VFS::rmdirGuarded(dir, auth);

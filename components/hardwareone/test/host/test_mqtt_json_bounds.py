@@ -3,7 +3,7 @@
 
 publishDiscoveryConfig, publishPeerDiscoveryConfig (with their shared PSRAM
 buffer and bounded writer), updateExternalSensor (with its table state) and
-macToPathToken are extracted intact from the production sources on every run.
+macToPathToken are taken intact from the production sources on every run.
 A 400-character base topic must skip the discovery publish instead of writing
 past the 1 KB buffer, a sweep across the capacity checks that every document
 that fits is sent byte-exact, and esp-mqtt's length-delimited topic/payload
@@ -30,7 +30,7 @@ def require(condition, message):
         raise SystemExit(f"FAIL: {message}")
 
 
-def definitions(mqtt: str, utils: str) -> str:
+def definitions(mqtt: str, mac_helpers: str) -> str:
     buffer_lines = re.search(
         r"(?m)^static constexpr size_t kMqttDiscoveryJsonCap = \d+;\n"
         r"EXT_RAM_BSS_ATTR static char sMqttDiscoveryConfigJson\[kMqttDiscoveryJsonCap\];",
@@ -38,7 +38,7 @@ def definitions(mqtt: str, utils: str) -> str:
     require(buffer_lines is not None, "discovery buffer declaration not found")
     sensor_state = mqtt[mqtt.index("struct ExternalSensor {"):
                         mqtt.index("static bool initExternalSensorStorage()")]
-    parts = [extract_block(utils, "inline void macToPathToken("),
+    parts = [mac_helpers,
              buffer_lines[0], sensor_state]
     # The bounded writer is part of the fix; the pre-fix builders do not use it.
     if "class MqttJsonWriter final" in mqtt:
@@ -70,13 +70,18 @@ def main():
     require(bool(args.cxx), "a host C++17 compiler is required")
     source_dir = args.baseline or COMPONENT
     mqtt = (source_dir / "System_MQTT.cpp").read_text()
-    utils = (source_dir / "System_Utils.h").read_text()
+    mac_header = source_dir / "System_MacText.h"
+    if mac_header.exists():
+        mac_helpers = mac_header.read_text().replace("#pragma once\n", "", 1)
+    else:  # a baseline tree from before the header existed
+        mac_helpers = extract_block((source_dir / "System_Utils.h").read_text(),
+                                    "inline void macToPathToken(")
     harness = (HERE / "mqtt_json_bounds_harness.cpp").read_text()
     marker = "// INSERT_PRODUCTION_DEFINITIONS"
     require(harness.count(marker) == 1, "harness insertion marker")
     with tempfile.TemporaryDirectory(prefix="hw1-mqtt-json-bounds-") as temp:
         unit = Path(temp) / "mqtt_json_bounds.cpp"
-        unit.write_text(harness.replace(marker, definitions(mqtt, utils)))
+        unit.write_text(harness.replace(marker, definitions(mqtt, mac_helpers)))
         executable = Path(temp) / "mqtt_json_bounds"
         command = [args.cxx, "-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic",
                    str(unit), "-o", str(executable)]

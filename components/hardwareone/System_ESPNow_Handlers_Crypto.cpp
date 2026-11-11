@@ -92,16 +92,16 @@ bool ensureUnencryptedPeer(const uint8_t mac[6]) {
   info.encrypt = false;
   esp_err_t rc = esp_now_add_peer(&info);
   if (rc != ESP_OK) {
-    WARN_ESPNOWF("KEY_EX: esp_now_add_peer failed for %02X:%02X:%02X:%02X:%02X:%02X (rc=%d)",
-                 mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], (int)rc);
+    WARN_ESPNOWF("KEY_EX: esp_now_add_peer failed for " MAC_FMT " (rc=%d)",
+                 MAC_ARGS(mac), (int)rc);
     return false;
   }
   return true;
 }
 
 void logMac(const char* tag, const uint8_t mac[6]) {
-  INFO_ESPNOWF("%s %02X:%02X:%02X:%02X:%02X:%02X",
-               tag, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+  INFO_ESPNOWF("%s " MAC_FMT,
+               tag, MAC_ARGS(mac));
 }
 
 // Constant-time 32-byte compare. Avoids leaking how many leading bytes matched
@@ -229,9 +229,8 @@ void v4hKeyExHello(const V4RxCtx& ctx) {
                     : (meshSlot == -3) ? "HMAC FAIL = PASSPHRASE MISMATCH - the two devices do NOT share the same mesh passphrase"
                     : (meshSlot == -4) ? "sender MAC mismatch (frame header vs payload)"
                     : "invalid payload";
-    WARN_ESPNOWF("KEY_EX_HELLO from %02X:%02X:%02X:%02X:%02X:%02X rejected: reason=%d (%s) meshFp=0x%04X",
-                 msg->senderMac[0], msg->senderMac[1], msg->senderMac[2],
-                 msg->senderMac[3], msg->senderMac[4], msg->senderMac[5],
+    WARN_ESPNOWF("KEY_EX_HELLO from " MAC_FMT " rejected: reason=%d (%s) meshFp=0x%04X",
+                 MAC_ARGS(msg->senderMac),
                  meshSlot, why, (unsigned)msg->meshFingerprint);
     return;
   }
@@ -247,27 +246,24 @@ void v4hKeyExHello(const V4RxCtx& ctx) {
     // A deliberate local `espnowpairsecure` opens a one-shot re-key window for
     // this MAC — honor it (peer's key rotated). Otherwise refuse the overwrite.
     if (espnowConsumePairingWindow(msg->senderMac)) {
-      WARN_ESPNOWF("KEY_EX_HELLO: peer %02X:%02X:%02X:%02X:%02X:%02X presented new pubkey; "
+      WARN_ESPNOWF("KEY_EX_HELLO: peer " MAC_FMT " presented new pubkey; "
                    "re-pair window open — replacing stored identity",
-                   msg->senderMac[0], msg->senderMac[1], msg->senderMac[2],
-                   msg->senderMac[3], msg->senderMac[4], msg->senderMac[5]);
+                   MAC_ARGS(msg->senderMac));
       conflict = false;  // operator-authorized re-key
     }
   }
   if (conflict) {
-    WARN_ESPNOWF("KEY_EX_HELLO: peer %02X:%02X:%02X:%02X:%02X:%02X presented new pubkey, "
+    WARN_ESPNOWF("KEY_EX_HELLO: peer " MAC_FMT " presented new pubkey, "
                  "refusing overwrite — run 'espnowforget' or re-run 'espnowpairsecure'",
-                 msg->senderMac[0], msg->senderMac[1], msg->senderMac[2],
-                 msg->senderMac[3], msg->senderMac[4], msg->senderMac[5]);
+                 MAC_ARGS(msg->senderMac));
     // Event log is min-interval gated: repeated HELLOs from the same rogue
     // sender must not flood the event stream.
     static uint32_t sHelloConflictEventMs = 0;
     uint32_t nowMs = millis();
     if (sHelloConflictEventMs == 0 || (uint32_t)(nowMs - sHelloConflictEventMs) >= 60000UL) {
       sHelloConflictEventMs = nowMs ? nowMs : 1;
-      logSystemEvent("ESPNOW", "SECURITY: peer %02X:%02X:%02X:%02X:%02X:%02X presented a DIFFERENT pubkey — identity overwrite refused",
-                     msg->senderMac[0], msg->senderMac[1], msg->senderMac[2],
-                     msg->senderMac[3], msg->senderMac[4], msg->senderMac[5]);
+      logSystemEvent("ESPNOW", "SECURITY: peer " MAC_FMT " presented a DIFFERENT pubkey — identity overwrite refused",
+                     MAC_ARGS(msg->senderMac));
     }
     confirmStatus = 2;
   } else {
@@ -286,9 +282,8 @@ void v4hKeyExHello(const V4RxCtx& ctx) {
       return;
     }
     if (identityNewOrReplaced) {
-      logSystemEvent("ESPNOW", "paired: new peer identity persisted %02X:%02X:%02X:%02X:%02X:%02X",
-                     msg->senderMac[0], msg->senderMac[1], msg->senderMac[2],
-                     msg->senderMac[3], msg->senderMac[4], msg->senderMac[5]);
+      logSystemEvent("ESPNOW", "paired: new peer identity persisted " MAC_FMT,
+                     MAC_ARGS(msg->senderMac));
     }
     logMac("KEY_EX_HELLO accepted from", msg->senderMac);
   }
@@ -336,10 +331,9 @@ void v4hKeyExReply(const V4RxCtx& ctx) {
                                     msg->responderMac, msg->responderPubEd25519,
                                     msg->hmac, &bootKey);
   if (meshSlot < 0) {
-    WARN_ESPNOWF("KEY_EX_REPLY rejected (reason=%d) from %02X:%02X:%02X:%02X:%02X:%02X",
+    WARN_ESPNOWF("KEY_EX_REPLY rejected (reason=%d) from " MAC_FMT,
                  meshSlot,
-                 msg->responderMac[0], msg->responderMac[1], msg->responderMac[2],
-                 msg->responderMac[3], msg->responderMac[4], msg->responderMac[5]);
+                 MAC_ARGS(msg->responderMac));
     return;
   }
 
@@ -362,9 +356,8 @@ void v4hKeyExReply(const V4RxCtx& ctx) {
     uint32_t nowMs = millis();
     if (sReplyConflictEventMs == 0 || (uint32_t)(nowMs - sReplyConflictEventMs) >= 60000UL) {
       sReplyConflictEventMs = nowMs ? nowMs : 1;
-      logSystemEvent("ESPNOW", "SECURITY: peer %02X:%02X:%02X:%02X:%02X:%02X presented a DIFFERENT pubkey — identity overwrite refused",
-                     msg->responderMac[0], msg->responderMac[1], msg->responderMac[2],
-                     msg->responderMac[3], msg->responderMac[4], msg->responderMac[5]);
+      logSystemEvent("ESPNOW", "SECURITY: peer " MAC_FMT " presented a DIFFERENT pubkey — identity overwrite refused",
+                     MAC_ARGS(msg->responderMac));
     }
     // Tell the responder we rejected them — symmetric with the HELLO-side
     // conflict path. The peer is already in our hw table (we sent the HELLO
@@ -389,9 +382,8 @@ void v4hKeyExReply(const V4RxCtx& ctx) {
     return;
   }
   if (identityNewOrReplaced) {
-    logSystemEvent("ESPNOW", "paired: new peer identity persisted %02X:%02X:%02X:%02X:%02X:%02X",
-                   msg->responderMac[0], msg->responderMac[1], msg->responderMac[2],
-                   msg->responderMac[3], msg->responderMac[4], msg->responderMac[5]);
+    logSystemEvent("ESPNOW", "paired: new peer identity persisted " MAC_FMT,
+                   MAC_ARGS(msg->responderMac));
   }
   logMac("KEY_EX_REPLY accepted from", msg->responderMac);
 
@@ -447,18 +439,16 @@ void v4hKeyExConfirm(const V4RxCtx& ctx) {
   keyExClearInFlight(msg->confirmerMac);
 
   if (msg->status == 0) {
-    INFO_ESPNOWF("KEY_EX with %02X:%02X:%02X:%02X:%02X:%02X complete "
+    INFO_ESPNOWF("KEY_EX with " MAC_FMT " complete "
                  "(remote pub fp: %02X%02X%02X%02X%02X%02X%02X%02X)",
-                 msg->confirmerMac[0], msg->confirmerMac[1], msg->confirmerMac[2],
-                 msg->confirmerMac[3], msg->confirmerMac[4], msg->confirmerMac[5],
+                 MAC_ARGS(msg->confirmerMac),
                  msg->pubFingerprint[0], msg->pubFingerprint[1], msg->pubFingerprint[2],
                  msg->pubFingerprint[3], msg->pubFingerprint[4], msg->pubFingerprint[5],
                  msg->pubFingerprint[6], msg->pubFingerprint[7]);
   } else {
-    WARN_ESPNOWF("KEY_EX with %02X:%02X:%02X:%02X:%02X:%02X reported status=%u "
+    WARN_ESPNOWF("KEY_EX with " MAC_FMT " reported status=%u "
                  "(0=ok, 1=hmac-fail, 2=pub-conflict)",
-                 msg->confirmerMac[0], msg->confirmerMac[1], msg->confirmerMac[2],
-                 msg->confirmerMac[3], msg->confirmerMac[4], msg->confirmerMac[5],
+                 MAC_ARGS(msg->confirmerMac),
                  (unsigned)msg->status);
   }
 }
@@ -518,8 +508,8 @@ static bool keyExSendHello(const uint8_t peerMac[6], int slot) {
                           generateMessageId(),
                           reinterpret_cast<const uint8_t*>(&hello), sizeof(hello), 1);
   if (ok) {
-    INFO_ESPNOWF("KEY_EX_HELLO sent to %02X:%02X:%02X:%02X:%02X:%02X (mesh '%s', fp=0x%04X)",
-                 peerMac[0], peerMac[1], peerMac[2], peerMac[3], peerMac[4], peerMac[5],
+    INFO_ESPNOWF("KEY_EX_HELLO sent to " MAC_FMT " (mesh '%s', fp=0x%04X)",
+                 MAC_ARGS(peerMac),
                  gSettings.meshes[slot].label.c_str(),
                  (unsigned)hello.meshFingerprint);
   } else {
@@ -587,16 +577,16 @@ void keyExRetrySweep(uint32_t nowMs) {
     if (!k.inUse) continue;
     if ((uint32_t)(nowMs - k.lastSentMs) < kKeyExRetryMs) continue;
     if (k.retriesLeft == 0) {
-      WARN_ESPNOWF("KEY_EX: no REPLY from %02X:%02X:%02X:%02X:%02X:%02X after %u attempts — "
+      WARN_ESPNOWF("KEY_EX: no REPLY from " MAC_FMT " after %u attempts — "
                    "giving up (run espnowkeyex to retry)",
-                   k.peerMac[0], k.peerMac[1], k.peerMac[2], k.peerMac[3], k.peerMac[4], k.peerMac[5],
+                   MAC_ARGS(k.peerMac),
                    (unsigned)(kKeyExMaxRetries + 1));
       k.inUse = false;
       continue;
     }
     k.retriesLeft--;
-    INFO_ESPNOWF("KEY_EX: no REPLY from %02X:%02X:%02X:%02X:%02X:%02X yet — retrying HELLO (%u left)",
-                 k.peerMac[0], k.peerMac[1], k.peerMac[2], k.peerMac[3], k.peerMac[4], k.peerMac[5],
+    INFO_ESPNOWF("KEY_EX: no REPLY from " MAC_FMT " yet — retrying HELLO (%u left)",
+                 MAC_ARGS(k.peerMac),
                  (unsigned)k.retriesLeft);
     keyExSendHello(k.peerMac, k.meshSlot);   // failure just retries next tick / eventually gives up
     k.lastSentMs = nowMs;
@@ -748,11 +738,10 @@ void runDeferredSessionOpen(void* arg) {
     if (n) {
       // Split across two queued lines so the actionable fix isn't lost to the
       // 256-byte DEBUG_MSG_SIZE [CUT] truncation.
-      WARN_ESPNOWF("SESSION_OPEN from %02X:%02X:%02X:%02X:%02X:%02X rejected (x%u in 30s): no stored "
+      WARN_ESPNOWF("SESSION_OPEN from " MAC_FMT " rejected (x%u in 30s): no stored "
                    "identity for this peer - it was re-flashed/factory-erased (identity key rotated) "
                    "or KEY_EX never completed.",
-                   msg->initiatorMac[0], msg->initiatorMac[1], msg->initiatorMac[2],
-                   msg->initiatorMac[3], msg->initiatorMac[4], msg->initiatorMac[5], (unsigned)n);
+                   MAC_ARGS(msg->initiatorMac), (unsigned)n);
       WARN_ESPNOWF("  -> IDENTITY problem, NOT a passphrase one (passphrase isn't checked here). "
                    "Fix: run 'espnowforget' then 'espnowpairsecure' on BOTH devices to re-pair.");
     }
@@ -769,11 +758,10 @@ void runDeferredSessionOpen(void* arg) {
     uint16_t n = sessionRejectLogCount(msg->initiatorMac);
     if (n) {
       // Split across two queued lines (see 256-byte DEBUG_MSG_SIZE note above).
-      WARN_ESPNOWF("SESSION_OPEN from %02X:%02X:%02X:%02X:%02X:%02X rejected (x%u in 30s): signature "
+      WARN_ESPNOWF("SESSION_OPEN from " MAC_FMT " rejected (x%u in 30s): signature "
                    "does NOT match the identity key we stored - the peer's key CHANGED "
                    "(re-flash/factory-erase/re-setup).",
-                   msg->initiatorMac[0], msg->initiatorMac[1], msg->initiatorMac[2],
-                   msg->initiatorMac[3], msg->initiatorMac[4], msg->initiatorMac[5], (unsigned)n);
+                   MAC_ARGS(msg->initiatorMac), (unsigned)n);
       WARN_ESPNOWF("  -> Not a passphrase issue; we won't auto-accept a changed key "
                    "(anti-key-substitution). Authorize it: 'espnowpairsecure' on THIS device, then "
                    "re-handshake from the peer.");
@@ -795,10 +783,9 @@ void runDeferredSessionOpen(void* arg) {
       sessionOpenIdStale(existing, msg->sessionId)) {
     uint16_t n = sessionRejectLogCount(msg->initiatorMac);
     if (n) {
-      WARN_ESPNOWF("SESSION_OPEN from %02X:%02X:%02X:%02X:%02X:%02X ignored (x%u in 30s): sessionId=%u "
+      WARN_ESPNOWF("SESSION_OPEN from " MAC_FMT " ignored (x%u in 30s): sessionId=%u "
                    "is this peer's live or a recent session - re-delivered OPEN; live session kept",
-                   msg->initiatorMac[0], msg->initiatorMac[1], msg->initiatorMac[2],
-                   msg->initiatorMac[3], msg->initiatorMac[4], msg->initiatorMac[5],
+                   MAC_ARGS(msg->initiatorMac),
                    (unsigned)n, (unsigned)msg->sessionId);
     }
     free(w);
@@ -819,10 +806,9 @@ void runDeferredSessionOpen(void* arg) {
   // accepting the peer's OPEN. Both then converge on the A-initiated session.
   if (existing && existing->state == SESSION_ESTABLISHING &&
       sessionIsASide(selfMac, msg->initiatorMac)) {
-    WARN_ESPNOWF("SESSION_OPEN glare with %02X:%02X:%02X:%02X:%02X:%02X — we are A-side, "
+    WARN_ESPNOWF("SESSION_OPEN glare with " MAC_FMT " — we are A-side, "
                  "keeping our initiation (ignoring peer sessionId=%u)",
-                 msg->initiatorMac[0], msg->initiatorMac[1], msg->initiatorMac[2],
-                 msg->initiatorMac[3], msg->initiatorMac[4], msg->initiatorMac[5],
+                 MAC_ARGS(msg->initiatorMac),
                  (unsigned)msg->sessionId);
     free(w);
     return;
@@ -886,9 +872,8 @@ void runDeferredSessionOpen(void* arg) {
   s->state           = SESSION_ACTIVE;
   s->establishedAtMs = (uint32_t)millis();
   s->lastUseMs       = s->establishedAtMs;
-  INFO_ESPNOWF("SESSION established (responder) with %02X:%02X:%02X:%02X:%02X:%02X sessionId=%u dir=%c",
-               msg->initiatorMac[0], msg->initiatorMac[1], msg->initiatorMac[2],
-               msg->initiatorMac[3], msg->initiatorMac[4], msg->initiatorMac[5],
+  INFO_ESPNOWF("SESSION established (responder) with " MAC_FMT " sessionId=%u dir=%c",
+               MAC_ARGS(msg->initiatorMac),
                (unsigned)msg->sessionId, s->myDirection == 0 ? 'A' : 'B');
 
   v4_send_frame(msg->initiatorMac, ESPNOW_V4_TYPE_SESSION_CONFIRM,
@@ -920,10 +905,9 @@ void runDeferredSessionConfirm(void* arg) {
 
   SessionState* s = sessionFindBySessionId(msg->sessionId, msg->responderMac);
   if (!s || s->state != SESSION_ESTABLISHING) {
-    WARN_ESPNOWF("SESSION_CONFIRM: no in-flight session for sessionId=%u peer=%02X:%02X:%02X:%02X:%02X:%02X",
+    WARN_ESPNOWF("SESSION_CONFIRM: no in-flight session for sessionId=%u peer=" MAC_FMT,
                  (unsigned)msg->sessionId,
-                 msg->responderMac[0], msg->responderMac[1], msg->responderMac[2],
-                 msg->responderMac[3], msg->responderMac[4], msg->responderMac[5]);
+                 MAC_ARGS(msg->responderMac));
     free(w);
     return;
   }
@@ -979,9 +963,8 @@ void runDeferredSessionConfirm(void* arg) {
   s->state           = SESSION_ACTIVE;
   s->establishedAtMs = (uint32_t)millis();
   s->lastUseMs       = s->establishedAtMs;
-  INFO_ESPNOWF("SESSION established (initiator) with %02X:%02X:%02X:%02X:%02X:%02X sessionId=%u dir=%c",
-               msg->responderMac[0], msg->responderMac[1], msg->responderMac[2],
-               msg->responderMac[3], msg->responderMac[4], msg->responderMac[5],
+  INFO_ESPNOWF("SESSION established (initiator) with " MAC_FMT " sessionId=%u dir=%c",
+               MAC_ARGS(msg->responderMac),
                (unsigned)msg->sessionId, s->myDirection == 0 ? 'A' : 'B');
   // Phase 3.5 step 3 — drain any frames the app queued while we were handshaking.
   // Runs on cmd_exec (same task that handled the heavy crypto above), so
@@ -1045,9 +1028,9 @@ bool espnowSessionOpenInitiate(const uint8_t peerMac[6], const char* meshLabel) 
   // Peer must already have an identity record from KEY_EX (3.3).
   const PeerIdentity* peer = peerIdentityFindByMac(peerMac);
   if (!peer) {
-    ERROR_ESPNOWF("SESSION_OPEN initiate: no peer identity for %02X:%02X:%02X:%02X:%02X:%02X "
+    ERROR_ESPNOWF("SESSION_OPEN initiate: no peer identity for " MAC_FMT " "
                   "— run 'espnowkeyex' first",
-                  peerMac[0], peerMac[1], peerMac[2], peerMac[3], peerMac[4], peerMac[5]);
+                  MAC_ARGS(peerMac));
     return false;
   }
 
@@ -1108,9 +1091,9 @@ bool espnowSessionOpenInitiate(const uint8_t peerMac[6], const char* meshLabel) 
                           generateMessageId(),
                           reinterpret_cast<const uint8_t*>(&open), sizeof(open), 1);
   if (ok) {
-    INFO_ESPNOWF("SESSION_OPEN sent to %02X:%02X:%02X:%02X:%02X:%02X sessionId=%u dir=%c "
+    INFO_ESPNOWF("SESSION_OPEN sent to " MAC_FMT " sessionId=%u dir=%c "
                  "(awaiting CONFIRM)",
-                 peerMac[0], peerMac[1], peerMac[2], peerMac[3], peerMac[4], peerMac[5],
+                 MAC_ARGS(peerMac),
                  (unsigned)sessionId, s->myDirection == 0 ? 'A' : 'B');
   } else {
     ERROR_ESPNOWF("SESSION_OPEN send failed");
@@ -1219,8 +1202,8 @@ void rekeyInFlightArm(const uint8_t peerMac[6], uint16_t sessionId, uint32_t msg
     }
   }
   if (!e) {
-    WARN_ESPNOWF("REKEY: in-flight table full — no retry coverage for %02X:%02X:%02X:%02X:%02X:%02X",
-                 peerMac[0], peerMac[1], peerMac[2], peerMac[3], peerMac[4], peerMac[5]);
+    WARN_ESPNOWF("REKEY: in-flight table full — no retry coverage for " MAC_FMT,
+                 MAC_ARGS(peerMac));
     return;
   }
   memcpy(e->peerMac, peerMac, 6);
@@ -1301,9 +1284,9 @@ bool sendRekey(SessionState* s, const uint8_t peerMac[6], bool armRetry) {
                           msgId,
                           reinterpret_cast<const uint8_t*>(&rk), sizeof(rk), 1);
   if (ok) {
-    INFO_ESPNOWF("REKEY sent to %02X:%02X:%02X:%02X:%02X:%02X sessionId=%u "
+    INFO_ESPNOWF("REKEY sent to " MAC_FMT " sessionId=%u "
                  "(txSeqAtSign=%lu)",
-                 peerMac[0], peerMac[1], peerMac[2], peerMac[3], peerMac[4], peerMac[5],
+                 MAC_ARGS(peerMac),
                  (unsigned)s->sessionId, (unsigned long)txSeqAtSign);
     if (armRetry) rekeyInFlightArm(peerMac, s->sessionId, msgId, &rk);
   } else {
@@ -1327,9 +1310,9 @@ void runDeferredRekey(void* arg) {
   // Locate the session being rekeyed.
   SessionState* s = sessionFindBySessionId(msg->sessionId, w->srcMac);
   if (!s || (s->state != SESSION_ACTIVE && s->state != SESSION_REKEYING)) {
-    WARN_ESPNOWF("REKEY rx: no ACTIVE session for sessionId=%u from %02X:%02X:%02X:%02X:%02X:%02X — dropping",
+    WARN_ESPNOWF("REKEY rx: no ACTIVE session for sessionId=%u from " MAC_FMT " — dropping",
                  (unsigned)msg->sessionId,
-                 w->srcMac[0], w->srcMac[1], w->srcMac[2], w->srcMac[3], w->srcMac[4], w->srcMac[5]);
+                 MAC_ARGS(w->srcMac));
     free(w);
     return;
   }
@@ -1379,11 +1362,11 @@ void runDeferredRekey(void* arg) {
   if (verdict != SESSION_REKEY_COUNTERPART && verdict != SESSION_REKEY_INITIATION) {
     static uint32_t sRekeyIgnoredWarnMs = 0;  // one line per 5 s however many copies arrive
     if (logCooldownOk(sRekeyIgnoredWarnMs, 5000)) {
-      WARN_ESPNOWF("REKEY rx: ignored (%s) from %02X:%02X:%02X:%02X:%02X:%02X sessionId=%u "
+      WARN_ESPNOWF("REKEY rx: ignored (%s) from " MAC_FMT " sessionId=%u "
                    "prevTxSeq=%lu rxHwm=%lu keyedAgeMs=%lu - keys unchanged, no reply",
                    verdict == SESSION_REKEY_NONCE_SEEN ? "nonce already seen" :
                    verdict == SESSION_REKEY_TOO_SOON   ? "session keyed <30s ago" : "stale sequence",
-                   w->srcMac[0], w->srcMac[1], w->srcMac[2], w->srcMac[3], w->srcMac[4], w->srcMac[5],
+                   MAC_ARGS(w->srcMac),
                    (unsigned)s->sessionId, (unsigned long)msg->prevTxSeqAtRekey,
                    (unsigned long)s->rxSeqHighWater, (unsigned long)(nowMs - s->establishedAtMs));
     }
@@ -1441,9 +1424,9 @@ void runDeferredRekey(void* arg) {
   sodium_memzero(newKeyTx, sizeof(newKeyTx));
   sodium_memzero(newKeyRx, sizeof(newKeyRx));
 
-  INFO_ESPNOWF("SESSION rekeyed with %02X:%02X:%02X:%02X:%02X:%02X sessionId=%u "
+  INFO_ESPNOWF("SESSION rekeyed with " MAC_FMT " sessionId=%u "
                "(role=%s) — new keys active, prev keys valid %ums",
-               w->srcMac[0], w->srcMac[1], w->srcMac[2], w->srcMac[3], w->srcMac[4], w->srcMac[5],
+               MAC_ARGS(w->srcMac),
                (unsigned)s->sessionId,
                weInitiated ? "initiator" : counterpart ? "responder, peer answered our reply" : "responder",
                (unsigned)kRekeyPrevKeysWindowMs);
@@ -1525,9 +1508,9 @@ void rekeyRetrySweep(uint32_t nowMs) {
       }
       if ((uint32_t)(nowMs - r.lastSentMs) < kRekeyRetryMs) continue;
       if (r.retriesLeft == 0) {
-        WARN_ESPNOWF("REKEY: no reply from %02X:%02X:%02X:%02X:%02X:%02X (sessionId=%u) after %u attempts — "
+        WARN_ESPNOWF("REKEY: no reply from " MAC_FMT " (sessionId=%u) after %u attempts — "
                      "dropping the session; the next send re-handshakes",
-                     r.peerMac[0], r.peerMac[1], r.peerMac[2], r.peerMac[3], r.peerMac[4], r.peerMac[5],
+                     MAC_ARGS(r.peerMac),
                      (unsigned)r.sessionId, (unsigned)(kRekeyMaxRetries + 1));
         sessionClear(s);
         memset(&r, 0, sizeof(r));
@@ -1540,9 +1523,8 @@ void rekeyRetrySweep(uint32_t nowMs) {
     // Sent from the stack copy after the lock is released. Same bytes, same
     // msgId: a peer that already holds the first copy dedups it. A refused
     // retransmit just waits for the next interval.
-    INFO_ESPNOWF("REKEY: no reply from %02X:%02X:%02X:%02X:%02X:%02X yet — re-sending (%u left)",
-                 resend.peerMac[0], resend.peerMac[1], resend.peerMac[2],
-                 resend.peerMac[3], resend.peerMac[4], resend.peerMac[5],
+    INFO_ESPNOWF("REKEY: no reply from " MAC_FMT " yet — re-sending (%u left)",
+                 MAC_ARGS(resend.peerMac),
                  (unsigned)resend.retriesLeft);
     v4_send_frame(resend.peerMac, ESPNOW_V4_TYPE_SESSION_REKEY,
                   ESPNOW_V4_FLAG_HANDSHAKE | ESPNOW_V4_FLAG_ACK_REQ, resend.msgId,

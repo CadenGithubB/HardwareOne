@@ -11,6 +11,7 @@
 #include <cstring>
 #include <string>
 #include <vector>
+#include "System_MacText.h"  // production MAC text helpers (copied beside this unit)
 
 class String : public std::string {
  public:

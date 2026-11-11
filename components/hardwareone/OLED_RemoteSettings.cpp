@@ -472,7 +472,7 @@ RemoteSettingsOutcome remoteSettingsPollOutcome(String& textOut) {
   EspNowCmdResult r;
   if (espnowCmdResultGet(r) && r.seq != gPending.seqBefore) {
     uint8_t peer[6];
-    if (r.reqId == gPending.reqId && BondedPeer::peerMacBytes(peer) && macEqual6(r.srcMac, peer)) {
+    if (r.reqId == gPending.reqId && BondedPeer::peerMacBytes(peer) && macEquals(r.srcMac, peer)) {
       gPending.active = false;
       textOut = r.text;
       // The peer may run older firmware whose executor reported success for

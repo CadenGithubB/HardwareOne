@@ -80,9 +80,9 @@ inline void* ps_alloc(size_t size, AllocPref, const char*) {return malloc(size);
 
         # advStart temple identity: live temples first, the saved G2 pair for
         # a temple that is down. Resolver and parser are spliced from production.
-        utils = (component/'System_Utils.h').read_text()
+        mac_text = (component/'System_MacText.h').read_text().replace('#pragma once\n', '', 1)
         identity = (here/'ring_adv_identity_harness.cpp').read_text()
-        for marker, body in (('// INSERT_MACPARSE', extract_block(utils, 'inline bool macParse(')),
+        for marker, body in (('// INSERT_MACPARSE', mac_text),
                              ('// INSERT_RESOLVE', extract_block(ring, 'static bool ringResolveAdvIdentity('))):
             assert identity.count(marker) == 1
             identity = identity.replace(marker, body)

@@ -21,6 +21,7 @@
 #include <set>
 #include <string>
 #include <vector>
+#include "System_MacText.h"  // production MAC text helpers (copied beside this unit)
 
 using String = std::string;
 
@@ -43,12 +44,6 @@ static bool logHas(const char* needle) {
 // ---- Production dependencies ----------------------------------------------
 static bool filesystemReady = true;
 static String encryptString(const String& plain) { return "AES:00112233:" + plain; }
-static void macToPathToken(const uint8_t mac[6], char* out13) {
-  std::snprintf(out13, 13, "%02X%02X%02X%02X%02X%02X", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-}
-static void macToDisplay(const uint8_t mac[6], char* out, size_t outLen) {
-  std::snprintf(out, outLen, "%02X:%02X:%02X:%02X:%02X:%02X", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-}
 
 // ---- Filesystem lock -------------------------------------------------------
 static int gFsLockDepth = 0;

@@ -1075,7 +1075,7 @@ void prepareMeshStatusData() {
     esp_wifi_get_mac(WIFI_IF_STA, myMac);
     String myName = getEspNowDeviceName(myMac);
     if (myName.length() == 0) {
-      myName = macToHexString(myMac).substring(8);
+      myName = macToDisplayStr(myMac).substring(8);
     }
     if (myName.length() > 11) {
       myName = myName.substring(0, 11);

@@ -253,8 +253,7 @@ static void formatDeviceLabel(char* buf, int bufLen, const EspNowDevice& dev) {
   if (dev.name.length() > 0) {
     snprintf(buf, bufLen, "%s", dev.name.c_str());
   } else {
-    snprintf(buf, bufLen, "%02X:%02X:%02X:%02X:%02X:%02X",
-             dev.mac[0], dev.mac[1], dev.mac[2], dev.mac[3], dev.mac[4], dev.mac[5]);
+    macToDisplay(dev.mac, buf, bufLen);
   }
 }
 
@@ -391,8 +390,8 @@ static void handlePickerInput(uint32_t newlyPressed) {
       if (dev.name.length() > 0) {
         snprintf(cmd, sizeof(cmd), "bondconnect %s", dev.name.c_str());
       } else {
-        snprintf(cmd, sizeof(cmd), "bondconnect %02X:%02X:%02X:%02X:%02X:%02X",
-                 dev.mac[0], dev.mac[1], dev.mac[2], dev.mac[3], dev.mac[4], dev.mac[5]);
+        snprintf(cmd, sizeof(cmd), "bondconnect " MAC_FMT,
+                 MAC_ARGS(dev.mac));
       }
       executeOLEDCommand(cmd);
     }

@@ -200,6 +200,7 @@ def main():
         harness = harness.replace(tag, value)
     with tempfile.TemporaryDirectory(prefix='hw1-espnow-session-rekey-') as tmp:
         unit, exe = Path(tmp) / 'test.cpp', Path(tmp) / 'test'
+        (unit.parent / 'System_MacText.h').write_text((HERE.parents[1] / 'System_MacText.h').read_text())
         unit.write_text(harness)
         # The pasted header and source slices carry constants and helpers that
         # this harness does not exercise, and espnowSessionOpenInitiate keeps a

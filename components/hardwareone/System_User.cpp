@@ -4882,15 +4882,8 @@ void loadAndIncrementBootSeq() {
 
 // Helper to parse MAC address or device name
 static bool userSyncParseMacAddress(const String& s, uint8_t out[6]) {
-  if (s.length() == 17 && s[2] == ':' && s[5] == ':') {
-    // MAC format: XX:XX:XX:XX:XX:XX
-    for (int i = 0; i < 6; i++) {
-      char hex[3] = {s[i*3], s[i*3+1], '\0'};
-      out[i] = strtol(hex, NULL, 16);
-    }
-    return true;
-  }
-  return false;
+  // The full 17-character DISPLAY form only; anything else is a device name.
+  return s.length() == 17 && macParse(s.c_str(), out);
 }
 
 static bool userSyncResolveDeviceNameOrMac(const String& deviceStr, uint8_t outMac[6]) {

@@ -1,5 +1,5 @@
 // Production ringResolveAdvIdentity (G2_Ring.cpp) and macParse
-// (System_Utils.h) feeding the real advStart encoder. test_r1_protocol.py
+// (System_MacText.h) feeding the real advStart encoder. test_r1_protocol.py
 // inserts both functions; the addresses are synthetic.
 #include "System_R1_Protocol.h"
 #include <cassert>

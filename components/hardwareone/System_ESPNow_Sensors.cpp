@@ -1145,7 +1145,7 @@ String getRemoteDevicesListJSON() {
     bool fresh = e.valid && (now - e.lastUpdate <= REMOTE_SENSOR_TTL_MS);
 
     // Find or create device entry
-    String macStr = macToHexString(e.deviceMac);
+    String macStr = macToDisplayStr(e.deviceMac);
     JsonObject deviceObj;
     bool found = false;
     for (JsonObject dev : devices) {

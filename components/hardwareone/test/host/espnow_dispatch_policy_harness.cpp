@@ -12,6 +12,7 @@
 #include <cstring>
 #include <string>
 #include <vector>
+#include "System_MacText.h"  // production MAC text helpers (copied beside this unit)
 
 #ifndef ENABLE_BONDED_MODE
 #error "ENABLE_BONDED_MODE must be defined by the runner"
@@ -78,12 +79,9 @@ enum class EspNowMeshRxKind : uint8_t { RxActivity, MeshHeartbeat };
 static bool meshEnabled() { return false; }
 static void noteMeshPeerRxActivity(const uint8_t*, EspNowMeshRxKind, int8_t, int8_t) {}
 static bool meshRouterLookup(const uint8_t*, uint8_t*, uint8_t*) { return false; }
-static void formatMacAddressBuf(const uint8_t* mac, char* buf, size_t n) {
-  std::snprintf(buf, n, "%02X:%02X:%02X:%02X:%02X:%02X", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-}
-static String formatMacAddress(const uint8_t* mac) {
+static String macToDisplayStr(const uint8_t* mac) {  // System_Utils.h
   char b[18];
-  formatMacAddressBuf(mac, b, sizeof b);
+  macToDisplay(mac, b, sizeof b);
   return String(b);
 }
 // Registry double: the paired name for a MAC in devices[] (the production
@@ -99,7 +97,7 @@ static std::vector<StoredMessage> gStored;
 static bool storeMessageInPeerHistory(uint8_t* mac, const char* name, const char* message, bool encrypted,
                                       LogMessageType type, uint32_t reqId = 0, uint8_t piece = 1,
                                       uint8_t pieceTotal = 1) {
-  gStored.push_back({formatMacAddress(mac).c_str(), name ? name : "", message ? message : "",
+  gStored.push_back({macToDisplayStr(mac).c_str(), name ? name : "", message ? message : "",
                      encrypted, (int)type, reqId, piece, pieceTotal});
   return true;
 }
@@ -183,7 +181,7 @@ static bool run(uint8_t type, bool paired, bool authed, bool enc, bool keyed) {
 static uint8_t gPeerA[6] = {0x02, 0x11, 0x22, 0x33, 0x44, 0x01};
 static uint8_t gStranger[6] = {0x02, 0x11, 0x22, 0x33, 0x44, 0x99};
 
-static std::string macText(const uint8_t* mac) { return formatMacAddress(mac).c_str(); }
+static std::string macText(const uint8_t* mac) { return macToDisplayStr(mac).c_str(); }
 
 static void resetText(bool keyed) {
   gState = EspNowState{};

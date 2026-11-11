@@ -96,6 +96,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix='hw1-fsrpc-transcript-') as tmp:
         for label, defines in (('bond mode on', []), ('bond mode off', ['-DENABLE_BONDED_MODE=0'])):
             unit, exe = Path(tmp)/f'test_{label[-2:].strip()}.cpp', Path(tmp)/f'test_{label[-2:].strip()}'
+            (unit.parent / 'System_MacText.h').write_text((HERE.parents[1] / 'System_MacText.h').read_text())
             unit.write_text(harness)
             cmd = [a.cxx,'-std=c++17','-Wall','-Wextra','-Werror',*defines,str(unit),'-o',str(exe)]
             if a.sanitize:

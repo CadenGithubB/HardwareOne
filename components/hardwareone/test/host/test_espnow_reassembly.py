@@ -112,6 +112,7 @@ def main():
     failures = []
     with tempfile.TemporaryDirectory(prefix='hw1-espnow-reasm-') as tmp:
         unit, exe = Path(tmp) / 'test.cpp', Path(tmp) / 'test'
+        (unit.parent / 'System_MacText.h').write_text((HERE.parents[1] / 'System_MacText.h').read_text())
         unit.write_text(harness)
         cmd = [a.cxx, '-std=c++17', '-Wall', '-Wextra', '-Werror', '-Wno-unused-function', str(unit), '-o', str(exe)]
         if a.sanitize:

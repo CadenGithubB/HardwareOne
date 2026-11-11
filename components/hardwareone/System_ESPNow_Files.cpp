@@ -461,10 +461,10 @@ FileTransferSlot* fileSlotsAllocate(const uint8_t peerMac[6],
   s.lastFrameMs    = s.startedMs;
   s.state          = FILE_SLOT_RECEIVING;
 
-  INFO_ESPNOWF("[FileSlots] slot %u allocated for '%.63s' from %02X:%02X:%02X:%02X:%02X:%02X "
+  INFO_ESPNOWF("[FileSlots] slot %u allocated for '%.63s' from " MAC_FMT " "
                "(msgId=%lu, %lu bytes, %u chunks)",
                (unsigned)freeIdx, filename,
-               peerMac[0], peerMac[1], peerMac[2], peerMac[3], peerMac[4], peerMac[5],
+               MAC_ARGS(peerMac),
                (unsigned long)msgId, (unsigned long)fileSize, (unsigned)chunkCount);
   return reinterpret_cast<FileTransferSlot*>(&s);
 }
@@ -837,10 +837,10 @@ uint8_t fileSlotsTimeoutSweep(uint32_t nowMs, FileSlotExpiry* out, uint8_t outCa
     }
     if (s.state != FILE_SLOT_RECEIVING) continue;  // FREE, or COMPLETING (already tearing down)
     if ((nowMs - s.lastFrameMs) < kFileSlotTimeoutMs) continue;
-    WARN_ESPNOWF("[FileSlots] slot %u TIMEOUT: '%s' from %02X:%02X:%02X:%02X:%02X:%02X "
+    WARN_ESPNOWF("[FileSlots] slot %u TIMEOUT: '%s' from " MAC_FMT " "
                  "(msgId=%lu, %u/%u chunks, no frame in %ums)",
                  (unsigned)i, s.filename,
-                 s.peerMac[0], s.peerMac[1], s.peerMac[2], s.peerMac[3], s.peerMac[4], s.peerMac[5],
+                 MAC_ARGS(s.peerMac),
                  (unsigned long)s.msgId,
                  (unsigned)s.receivedChunks, (unsigned)s.totalChunks,
                  (unsigned)(nowMs - s.lastFrameMs));

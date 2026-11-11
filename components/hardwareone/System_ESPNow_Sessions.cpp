@@ -470,9 +470,9 @@ bool pendingFrameQueue(const uint8_t peerMac[6], uint8_t type, uint16_t flags,
   for (uint8_t i = 0; i < kPendingFrameSlots; i++) {
     PendingFrame& p = gPending[i];
     if (p.inUse && memcmp(p.peerMac, peerMac, 6) == 0) {
-      WARN_ESPNOWF("pending: evicting older pending frame for %02X:%02X:%02X:%02X:%02X:%02X "
+      WARN_ESPNOWF("pending: evicting older pending frame for " MAC_FMT " "
                    "(msgId=%lu→%lu)",
-                   peerMac[0], peerMac[1], peerMac[2], peerMac[3], peerMac[4], peerMac[5],
+                   MAC_ARGS(peerMac),
                    (unsigned long)p.msgId, (unsigned long)msgId);
       slot = &p;
       break;
@@ -516,13 +516,13 @@ void pendingFrameDrainForPeer(const uint8_t peerMac[6]) {
                                       p.plaintext, p.plaintextLen, p.ttl,
                                       err, sizeof(err));
     if (ok) {
-      INFO_ESPNOWF("pending: drained msgId=%lu to %02X:%02X:%02X:%02X:%02X:%02X",
+      INFO_ESPNOWF("pending: drained msgId=%lu to " MAC_FMT,
                    (unsigned long)p.msgId,
-                   p.peerMac[0], p.peerMac[1], p.peerMac[2], p.peerMac[3], p.peerMac[4], p.peerMac[5]);
+                   MAC_ARGS(p.peerMac));
     } else {
-      ERROR_ESPNOWF("pending: drain failed for msgId=%lu to %02X:%02X:%02X:%02X:%02X:%02X — %s",
+      ERROR_ESPNOWF("pending: drain failed for msgId=%lu to " MAC_FMT " — %s",
                     (unsigned long)p.msgId,
-                    p.peerMac[0], p.peerMac[1], p.peerMac[2], p.peerMac[3], p.peerMac[4], p.peerMac[5],
+                    MAC_ARGS(p.peerMac),
                     err[0] ? err : "(no detail)");
       sendStatusMarkFailed(p.msgId, p.peerMac);
     }
@@ -542,10 +542,10 @@ uint8_t pendingFrameTimeoutSweep(uint32_t nowMs) {
     PendingFrame& p = gPending[i];
     if (!p.inUse) continue;
     if ((nowMs - p.queuedAtMs) < kPendingFrameTimeoutMs) continue;
-    WARN_ESPNOWF("pending: timeout msgId=%lu to %02X:%02X:%02X:%02X:%02X:%02X "
+    WARN_ESPNOWF("pending: timeout msgId=%lu to " MAC_FMT " "
                  "(no SESSION_CONFIRM in %ums) — dropping",
                  (unsigned long)p.msgId,
-                 p.peerMac[0], p.peerMac[1], p.peerMac[2], p.peerMac[3], p.peerMac[4], p.peerMac[5],
+                 MAC_ARGS(p.peerMac),
                  (unsigned)kPendingFrameTimeoutMs);
     // Phase 3.5 task #49 — propagate the drop into the tracked-send table
     // so the web UI flips the bubble to ✗ Failed instead of hanging at ✓ Sent.
@@ -578,9 +578,9 @@ uint8_t sessionEstablishingTimeoutSweep(uint32_t nowMs) {
     if (s.state != SESSION_ESTABLISHING) continue;
     if ((nowMs - s.lastUseMs) < kSessionEstablishTimeoutMs) continue;
     if (logCooldownOk(sLastEstabWarnMs, 30000)) {
-      WARN_ESPNOWF("session: ESTABLISHING timeout for %02X:%02X:%02X:%02X:%02X:%02X "
+      WARN_ESPNOWF("session: ESTABLISHING timeout for " MAC_FMT " "
                    "(no SESSION_CONFIRM in %ums) — resetting so the next send re-kicks SESSION_OPEN",
-                   s.peerMac[0], s.peerMac[1], s.peerMac[2], s.peerMac[3], s.peerMac[4], s.peerMac[5],
+                   MAC_ARGS(s.peerMac),
                    (unsigned)kSessionEstablishTimeoutMs);
     }
     sessionClear(&s);

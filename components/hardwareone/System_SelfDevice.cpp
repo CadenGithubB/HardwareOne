@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstring>
 
+#include "System_MacText.h"   // macToDisplay
 #include "System_Settings.h"  // gSettings.espnowDeviceName
 
 namespace SelfDevice {
@@ -62,8 +63,7 @@ String macString() {
   // empty string — callers can format without NULL-checking.
   macBytes(m);
   char buf[18];
-  snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X",
-           m[0], m[1], m[2], m[3], m[4], m[5]);
+  macToDisplay(m, buf, sizeof(buf));
   return String(buf);
 }
 

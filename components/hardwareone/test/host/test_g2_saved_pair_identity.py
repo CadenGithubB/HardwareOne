@@ -11,7 +11,7 @@ from pathlib import Path
 import re
 import subprocess
 import tempfile
-from test_web_batch_handlers import extract_block
+from test_web_batch_handlers import extract_block, mac_text
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
@@ -23,15 +23,14 @@ def generate(registry_source=None):
     peers = (COMPONENT / 'BLE_Peers.h').read_text()
     registry = registry_source if registry_source is not None else (COMPONENT / 'BLE_Peers.cpp').read_text()
     header = (COMPONENT / 'G2_Glasses.h').read_text()
-    utils = (COMPONENT / 'System_Utils.h').read_text()
     types = '\n'.join(extract_block(source, marker) + ';' for source, marker in (
         (header, 'enum G2Eye'), (g2, 'struct G2LinkSnapshot'),
         (peers, 'enum BlePeerKind'), (peers, 'struct BlePeerSavedTarget'),
         (registry, 'struct BlePeerData'), (registry, 'struct PeerReconnectRuntime')))
     constants = '\n'.join(re.search(r'^constexpr .* ' + name + r' = [^;\n]*;', peers, re.M)[0]
                           for name in ('BLE_PEER_ADDRESS_TEXT_CAPACITY', 'BLE_PEER_DEFAULT_ADDRESS_TYPE'))
-    functions = '\n\n'.join(extract_block(source, marker) for source, marker in (
-        (utils, 'inline bool macParse('), (g2, 'static bool macEqualsIgnoreCase('),
+    functions = mac_text() + '\n\n' + '\n\n'.join(extract_block(source, marker) for source, marker in (
+        (g2, 'static bool macEqualsIgnoreCase('),
         (g2, 'static bool templeMatchesSavedTarget('),
         (g2, 'static uint8_t g2LearnedTargetReplaceMask('),
         (ring, 'static bool ringResolveAdvIdentity('),

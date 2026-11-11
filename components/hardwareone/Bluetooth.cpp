@@ -640,11 +640,6 @@ static void bleSendAuthRequired(uint16_t connId,
 // DEVICE TYPE IDENTIFICATION
 // =============================================================================
 
-// Convert MAC address to stack buffer (zero heap allocations)
-static void macToStackBuf(const uint8_t* mac, char* buf) {
-  macToDisplay(mac, buf, 18);  // canonical DISPLAY form (System_Utils.h)
-}
-
 // Upper-cased copy of a saved peer MAC text into a caller buffer (no heap).
 static void copyMacUpper(char* dst, size_t dstCap, const char* src) {
   if (!dst || dstCap == 0) return;
@@ -696,7 +691,7 @@ static bool bleAdvertiseIfRoomLocked() {
 BLEDeviceType bleIdentifyDeviceByMAC(const uint8_t* mac) {
   if (!mac) return BLE_DEVICE_UNKNOWN;
   char macStr[18];
-  macToStackBuf(mac, macStr);
+  macToDisplay(mac, macStr, sizeof(macStr));
 
   BlePeerSavedTargetSnapshot peer{};
   (void)blePeerSavedTargetSnapshot(BLE_PEER_G2_GLASSES, peer);
@@ -937,8 +932,7 @@ class ServerCallbacks : public BLEServerCallbacks {
     {
       const uint8_t* a = param->connect.remote_bda;
       char macStr[18];
-      snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
-               a[0], a[1], a[2], a[3], a[4], a[5]);
+      macToDisplay(a, macStr, sizeof(macStr));
       systemEventPost(SYSEVT_BLE_CONNECTED,
                       bleDeviceTypeToString(gBLEState->connections[slot].deviceType), macStr);
     }
@@ -3628,7 +3622,7 @@ static bool bleCaptureStatusSnapshot(BleStatusSnapshot& out) {
     o.connId = c.connId;
     o.authed = c.authed;
     o.user = c.user;
-    macToStackBuf(c.deviceAddr, o.mac);
+    macToDisplay(c.deviceAddr, o.mac, sizeof(o.mac));
     o.sinceSec = (uint32_t)((now - c.connectedSince) / 1000);
     o.commands = c.commandsReceived;
   }

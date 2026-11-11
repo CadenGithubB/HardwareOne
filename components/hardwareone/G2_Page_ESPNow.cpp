@@ -318,9 +318,7 @@ static void showPeersMenu() {
       if (label) {
         snprintf(rows[1 + i], sizeof(rows[1 + i]), "%s", label);
       } else {
-        snprintf(rows[1 + i], sizeof(rows[1 + i]),
-                 "%02X:%02X:%02X:%02X:%02X:%02X",
-                 d.mac[0], d.mac[1], d.mac[2], d.mac[3], d.mac[4], d.mac[5]);
+        macToDisplay(d.mac, rows[1 + i], sizeof(rows[1 + i]));
       }
       ptrs[n++] = rows[1 + i];
     }
@@ -395,9 +393,7 @@ static void showPeerDetail() {
       (d.friendlyName.length() > 0) ? d.friendlyName.c_str() :
       (d.name.length()         > 0) ? d.name.c_str()         : "(no name)";
   snprintf(nameLine, sizeof(nameLine), "%s", nm);
-  snprintf(macLine,  sizeof(macLine),
-           "%02X:%02X:%02X:%02X:%02X:%02X",
-           d.mac[0], d.mac[1], d.mac[2], d.mac[3], d.mac[4], d.mac[5]);
+  macToDisplay(d.mac, macLine, sizeof(macLine));
   formatPingRow(pingLine, sizeof(pingLine), d.mac);
   snprintf(msgsLine, sizeof(msgsLine), "Messages (%d) >>",
            countInboxForPeer(d.mac));
@@ -885,8 +881,8 @@ static bool submitSendToSelectedPeer(const char* text) {
   const EspNowDevice& d = gEspNow->devices[gSelectedPeer];
   char line[16 + 18 + 200];   // "espnowsend " + MAC + space + text
   snprintf(line, sizeof(line),
-           "espnowsend %02X:%02X:%02X:%02X:%02X:%02X %s",
-           d.mac[0], d.mac[1], d.mac[2], d.mac[3], d.mac[4], d.mac[5],
+           "espnowsend " MAC_FMT " %s",
+           MAC_ARGS(d.mac),
            text);
   G2CmdCookie cookie = buildCookie();
   if (!g2SubmitHijackCommand(line, cookie, onPeerDetailRedrawDone, nullptr)) {
@@ -925,8 +921,8 @@ static bool submitForgetSelectedPeer() {
   const EspNowDevice& d = gEspNow->devices[gSelectedPeer];
   char line[16 + 18];   // "espnowunpair " + MAC
   snprintf(line, sizeof(line),
-           "espnowunpair %02X:%02X:%02X:%02X:%02X:%02X",
-           d.mac[0], d.mac[1], d.mac[2], d.mac[3], d.mac[4], d.mac[5]);
+           "espnowunpair " MAC_FMT,
+           MAC_ARGS(d.mac));
   // Named for the log now (the device list changes once the unpair lands);
   // the always-on line never carries the address.
   char who[40];

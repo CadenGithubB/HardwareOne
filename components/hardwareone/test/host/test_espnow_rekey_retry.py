@@ -206,6 +206,7 @@ def main():
         harness = harness.replace(tag, value)
     with tempfile.TemporaryDirectory(prefix='hw1-espnow-rekey-retry-') as tmp:
         unit, exe = Path(tmp) / 'test.cpp', Path(tmp) / 'test'
+        (unit.parent / 'System_MacText.h').write_text((HERE.parents[1] / 'System_MacText.h').read_text())
         unit.write_text(harness)
         cmd = [a.cxx, '-std=c++17', '-Wall', '-Wextra', '-Werror', '-pedantic', str(unit), '-o', str(exe)]
         if a.sanitize:

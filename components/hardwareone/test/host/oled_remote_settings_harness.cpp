@@ -143,7 +143,7 @@ String loadSettingsFromCache(const uint8_t*) { return String(gSettingsText); }
 struct EspNowState { bool bondSchemaReceived = false; };
 static EspNowState gEspNowState;
 static EspNowState* gEspNow = &gEspNowState;
-bool macEqual6(const uint8_t a[6], const uint8_t b[6]) { return std::memcmp(a, b, 6) == 0; }
+static bool macEquals(const uint8_t* a, const uint8_t* b) { return std::memcmp(a, b, 6) == 0; }
 bool requestBondSchema(const uint8_t*) { ++gSchemaRequests; return gSendSchemaOk; }
 
 // ---- ESP-NOW command-result record (production or stand-in) -------------------

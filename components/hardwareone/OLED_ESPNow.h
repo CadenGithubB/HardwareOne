@@ -153,7 +153,6 @@ void oledEspNowUnpairDevice();
 // Helper functions
 void oledEspNowRefreshDeviceList();
 void oledEspNowRefreshMessages();
-String oledEspNowFormatMac(const uint8_t* mac);
 void oledEspNowDrawStatusIcon(Adafruit_SSD1306* display, int x, int y, bool delivered);
 void oledEspNowShowInitPrompt();
 void oledEspNowShowNameKeyboard();

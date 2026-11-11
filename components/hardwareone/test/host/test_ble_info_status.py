@@ -43,7 +43,7 @@ import shutil
 import subprocess
 import tempfile
 
-from test_web_batch_handlers import extract_block, require, JSON_INCLUDE
+from test_web_batch_handlers import extract_block, mac_text, require, JSON_INCLUDE
 import ble_pipe_console_host as pipe_host
 
 HERE = Path(__file__).resolve().parent
@@ -156,9 +156,7 @@ def generated(component: Path, baseline: bool) -> str:
                             extract_block((component / "BLE_PhonePipe.h").read_text(),
                                           "struct PhonePipeLinkSummary") + ";"])
     definitions = [extract_block(owner, "class BleLifecycleGuard") + ";",
-                   extract_block((COMPONENT / "System_Utils.h").read_text(),
-                                 "inline void macToDisplay("),
-                   extract_block(owner, "static void macToStackBuf(")]
+                   mac_text()]
     # The host word behind blestatus's "Bluetooth:" line, its JSON `host` and
     # /api/ble/status `host` (fault / on / idle / off / parked).
     definitions.append(extract_block(owner, "const char* bleHostStateWord("))

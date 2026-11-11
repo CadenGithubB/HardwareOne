@@ -17,6 +17,7 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include "System_MacText.h"  // production MAC text helpers (copied beside this unit)
 
 // ---- Deadline owner (System_ESPNow_Deadline.h, when the tree has it) ---------
 // INSERT_DEADLINE

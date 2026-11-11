@@ -64,15 +64,15 @@ esp_err_t handleEspNowMetadata(httpd_req_t* req) {
   }
   
   // Try to find metadata in gMeshPeerMeta (mesh/pairing mode)
-  DEBUG_ESPNOW_METADATAF("[METADATA] API: query for %02X:%02X:%02X:%02X:%02X:%02X gMeshPeerMeta=%p slots=%d",
-    targetMac[0], targetMac[1], targetMac[2], targetMac[3], targetMac[4], targetMac[5],
+  DEBUG_ESPNOW_METADATAF("[METADATA] API: query for " MAC_FMT " gMeshPeerMeta=%p slots=%d",
+    MAC_ARGS(targetMac),
     gMeshPeerMeta, gMeshPeerSlots);
   MeshPeerMeta* meta = getMeshPeerMeta(targetMac, false);
   if (meta) {
     DEBUG_ESPNOW_METADATAF("[METADATA] API: HIT name='%s' room='%s'", meta->name, meta->room);
   } else {
-    DEBUG_ESPNOW_METADATAF("[METADATA] API: miss — no active slot matches %02X:%02X:%02X:%02X:%02X:%02X",
-      targetMac[0], targetMac[1], targetMac[2], targetMac[3], targetMac[4], targetMac[5]);
+    DEBUG_ESPNOW_METADATAF("[METADATA] API: miss — no active slot matches " MAC_FMT,
+      MAC_ARGS(targetMac));
   }
   
   // If found in mesh metadata, return it. Built via the shared core serializer

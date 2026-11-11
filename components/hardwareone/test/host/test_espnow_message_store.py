@@ -166,6 +166,7 @@ def main():
         env.update(MallocScribble='1', MALLOC_PERTURB_='85')
     with tempfile.TemporaryDirectory(prefix='hw1-espnow-msgstore-') as tmp:
         unit, exe = Path(tmp) / 'message_store.cpp', Path(tmp) / 'message_store'
+        (unit.parent / 'System_MacText.h').write_text((HERE.parents[1] / 'System_MacText.h').read_text())
         unit.write_text(unit_text)
         cmd = [a.cxx, '-std=c++17', '-Wall', '-Wextra', '-Werror', '-pthread', '-g',
                f'-DHW1_HISTORY_COPY_API={int(copy_api)}', str(unit), '-o', str(exe)]
