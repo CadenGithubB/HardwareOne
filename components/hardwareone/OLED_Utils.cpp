@@ -3092,7 +3092,7 @@ void drawOledFooter() {
 #if ENABLE_LLM_BACKEND
         // The LLM screen's hint changes with its state (home, chat, pickers)
         // and carries its status lines; it sets it while rendering.
-        hints = oledLLMFooterHint();
+        hints = oledLlmFooterHint();
 #else
         hints = "B:Back";
 #endif
@@ -3894,7 +3894,7 @@ void printRegisteredOledModes() {
   oledRemoteSettingsModeInit();   // keep OLED_Mode_RemoteSettings.cpp from being GC'd
 #endif
 #if ENABLE_LLM_BACKEND
-  oledLLMModeInit();
+  oledLlmModeInit();
   oledUserManagerModeInit();   // keep OLED_Mode_UserManager.cpp from being GC'd
 #endif
   

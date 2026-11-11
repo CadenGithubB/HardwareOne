@@ -208,7 +208,7 @@ static bool isEdgeImpulseCompiled() {
 // working assistant with no on-device engine. Anything that needs "is there a
 // local inference engine" must test ENABLE_LLM_SOURCE_ONBOARD instead; reading
 // this as "on-device" is what mislabelled the wizard's feature row.
-static bool isLLMCompiled() {
+static bool isLlmCompiled() {
 #if ENABLE_LLM_BACKEND
   return true;
 #else
@@ -526,12 +526,12 @@ static constexpr FeatureEntry featureRegistry[] = {
 #if ENABLE_LLM_SOURCE_ONBOARD
   { "llm", "On-Device LLM", FEATURE_CAT_SYSTEM, 24,
     FEATURE_FLAG_RUNTIME_TOGGLE,
-    &gSettings.llmAutoStart, isLLMCompiled,
+    &gSettings.llmAutoStart, isLlmCompiled,
     "Tiny transformer text generation (ESP32-S3 + PSRAM)" },
 #else
   { "llm", "LLM Assistant", FEATURE_CAT_SYSTEM, 0,
     FEATURE_FLAG_RUNTIME_TOGGLE,
-    &gSettings.llmAutoStart, isLLMCompiled,
+    &gSettings.llmAutoStart, isLlmCompiled,
     "Text generation via the CM5 co-processor (no on-device engine)" },
 #endif
 

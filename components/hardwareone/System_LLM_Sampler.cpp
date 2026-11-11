@@ -3,7 +3,7 @@
  *
  * Sampling primitives: argmax (greedy), top-p (nucleus), min-p, and the
  * temperature/categorical dispatcher. Operates in place on the logits buffer
- * and reuses gLLM.sampleIndices to avoid per-token allocation.
+ * and reuses gLlm.sampleIndices to avoid per-token allocation.
  */
 #include "System_BuildConfig.h"
 #if ENABLE_LLM_SOURCE_ONBOARD
@@ -38,11 +38,11 @@ static int sample_topp(float* probabilities, int n, float topp, float* outChosen
   // cumulative probability exceeds topp.  This prunes the long tail of low-
   // probability tokens that cause garbled / random output.
   //
-  // Uses pre-allocated gLLM.sampleIndices buffer (allocated once at model load)
+  // Uses pre-allocated gLlm.sampleIndices buffer (allocated once at model load)
   // to avoid malloc/free churn every token, which fragments the heap.
 
-  int* indices = gLLM.sampleIndices;
-  if (!indices || gLLM.sampleIndicesSize < n) {
+  int* indices = gLlm.sampleIndices;
+  if (!indices || gLlm.sampleIndicesSize < n) {
     // Fallback: plain categorical sampling (no allocation needed)
     DEBUG_LLM_GENERATEF("[LLM] sample_topp: no index buffer, falling back to categorical");
     float r = (float)esp_random() / (float)UINT32_MAX;

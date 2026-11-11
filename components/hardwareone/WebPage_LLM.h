@@ -12,14 +12,14 @@
 #endif
 
 #if ENABLE_LLM_BACKEND && ENABLE_HTTP_SERVER
-void registerLLMHandlers(httpd_handle_t server);
+void registerLlmHandlers(httpd_handle_t server);
 #else
-inline void registerLLMHandlers(httpd_handle_t) {}
+inline void registerLlmHandlers(httpd_handle_t) {}
 #endif
 
 #if ENABLE_LLM_BACKEND && ENABLE_HTTP_SERVER
 
-inline void streamLLMInner(httpd_req_t* req, const String& username) {
+inline void streamLlmInner(httpd_req_t* req, const String& username) {
 
   // ── CSS ──────────────────────────────────────────────────────────────────
   httpd_resp_send_chunk(req, R"CSS(

@@ -81,7 +81,7 @@
 //
 //  1. Constants
 //  2. Data Structures (TransformerWeights, RunState, Tokenizer types)
-//  3. Module State (gLLM)
+//  3. Module State (gLlm)
 //  4. PSRAM Allocation Helpers
 //  5. Math Primitives (rmsnorm, layernorm, softmax, matmul variants)
 //  6. Forward Pass Debug Utilities (VecStats, FORWARD_DBG_POS)
@@ -122,35 +122,35 @@ static constexpr int HEALTH_LOG_INTERVAL = 16;   // log generation health every 
 
 // ============================================================================
 // 2. Data Structures — moved to System_LLM_Internal.h
-//    TransformerWeights, RunState, the tokenizer structs, and the LLMRuntime
+//    TransformerWeights, RunState, the tokenizer structs, and the LlmRuntime
 //    singleton type now live in the shared internal header so the kernels,
-//    sampler, tokenizer, and model-loader TUs operate on the same `gLLM`.
+//    sampler, tokenizer, and model-loader TUs operate on the same `gLlm`.
 // ============================================================================
 
 // ============================================================================
-// 3. Module State — LLMRuntime type defined in System_LLM_Internal.h
+// 3. Module State — LlmRuntime type defined in System_LLM_Internal.h
 // ============================================================================
 
 // PSRAM-resident: the runtime struct's always-on inline footprint (~2 KB —
 // metadata strings, the 1 KB tokenizer byte_to_token table, path/error buffers)
 // stays off scarce internal DRAM. Hot paths dereference the buffer pointers it
 // holds (which keep their own allocations), not the struct fields, so PSRAM
-// placement is negligible for the memory-bound engine. Mirrors gLLMAsyncCtx.
-EXT_RAM_BSS_ATTR LLMRuntime gLLM = {};
+// placement is negligible for the memory-bound engine. Mirrors gLlmAsyncCtx.
+EXT_RAM_BSS_ATTR LlmRuntime gLlm = {};
 
 // The runtime lock is process-lifetime state. Build it from static storage so
 // llmInit() can be safely repeated (or raced) without leaking a second mutex or
 // using a destructive whole-runtime reset as its initialization mechanism.
-static StaticSemaphore_t gLLMMutexStorage;
-static portMUX_TYPE gLLMMutexInitMux = portMUX_INITIALIZER_UNLOCKED;
+static StaticSemaphore_t gLlmMutexStorage;
+static portMUX_TYPE gLlmMutexInitMux = portMUX_INITIALIZER_UNLOCKED;
 
 static SemaphoreHandle_t llmRuntimeMutex() {
-  portENTER_CRITICAL(&gLLMMutexInitMux);
-  if (!gLLM.mutex) {
-    gLLM.mutex = xSemaphoreCreateMutexStatic(&gLLMMutexStorage);
+  portENTER_CRITICAL(&gLlmMutexInitMux);
+  if (!gLlm.mutex) {
+    gLlm.mutex = xSemaphoreCreateMutexStatic(&gLlmMutexStorage);
   }
-  SemaphoreHandle_t mutex = gLLM.mutex;
-  portEXIT_CRITICAL(&gLLMMutexInitMux);
+  SemaphoreHandle_t mutex = gLlm.mutex;
+  portEXIT_CRITICAL(&gLlmMutexInitMux);
   return mutex;
 }
 
@@ -160,12 +160,12 @@ static SemaphoreHandle_t llmRuntimeMutex() {
 
 #define LLM_RESULT_BUF_SIZE (8 * 1024)
 
-static char*          gLLMResultBuf  = nullptr;  // PSRAM, allocated on first use
-static volatile int   gLLMResultLen  = 0;         // bytes written (written by task, read by HTTP)
-static volatile bool  gLLMResultDone = true;      // true = idle / finished
-static volatile int   gLLMSessionId  = 0;         // bumped per llmStartAsync call
+static char*          gLlmResultBuf  = nullptr;  // PSRAM, allocated on first use
+static volatile int   gLlmResultLen  = 0;         // bytes written (written by task, read by HTTP)
+static volatile bool  gLlmResultDone = true;      // true = idle / finished
+static volatile int   gLlmSessionId  = 0;         // bumped per llmStartAsync call
 // The generation worker's handle and llmReleaseWorker's request. Both are
-// written under gLLM.mutex only: by llmEnsureWorker (create), by the worker
+// written under gLlm.mutex only: by llmEnsureWorker (create), by the worker
 // itself as it leaves, and by llmReleaseWorker (the request, raised and
 // withdrawn). The worker lives from model load to model unload: its 12 KB
 // internal stack and TCB (xTaskCreateLogged, so a device that never loads a
@@ -176,59 +176,59 @@ static volatile int   gLLMSessionId  = 0;         // bumped per llmStartAsync ca
 // claimed again at the next load. Its exit is its own (llmWorkerTask): the
 // handle nulled under the mutex every wake takes first, then
 // vTaskDelete(nullptr), so no wake can ever name a task that is gone.
-static TaskHandle_t   gLLMTask       = nullptr;
-static bool           gLLMWorkerExit = false;
+static TaskHandle_t   gLlmTask       = nullptr;
+static bool           gLlmWorkerExit = false;
 
-struct LLMAsyncContext {
+struct LlmAsyncContext {
   char         prompt[1024];  // callers cap the prompt at 1024 (see llmStartAsync sites)
-  LLMGenParams params;
+  LlmGenParams params;
 };
 // PSRAM-resident: this ~1.6 KB context was sitting in scarce internal DRAM for no
 // reason — the async task reads it off the LLM (PSRAM-bound) path anyway.
-EXT_RAM_BSS_ATTR static LLMAsyncContext gLLMAsyncCtx;
+EXT_RAM_BSS_ATTR static LlmAsyncContext gLlmAsyncCtx;
 
 // The generation worker. Created at model load (llmEnsureWorker, on a clean
 // heap) and reused for every generation while the model is loaded — it parks
 // on a task notification between requests instead of being re-spawned per
 // generation, so generation never re-acquires its 12 KB stack against a
-// fragmented heap. llmStartAsync stages gLLMAsyncCtx + resets the result
-// buffer, then xTaskNotifyGive()s us under gLLM.mutex. llmReleaseWorker (model
+// fragmented heap. llmStartAsync stages gLlmAsyncCtx + resets the result
+// buffer, then xTaskNotifyGive()s us under gLlm.mutex. llmReleaseWorker (model
 // unloaded) wakes us with nothing staged: we leave.
 static void llmWorkerTask(void* /*pv*/) {
   for (;;) {
     // Park until a request arrives. pdTRUE clears the notification count on
     // exit, so two coalesced gives still yield exactly one generation (no
     // stale-context replay). The give/take pair is a full memory barrier, so
-    // the gLLMAsyncCtx writes llmStartAsync made before its give are visible
+    // the gLlmAsyncCtx writes llmStartAsync made before its give are visible
     // here after the take — the same publish edge the old per-gen xTaskCreate
     // provided.
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
-    // The exit, decided and published in one hold of gLLM.mutex: with a
+    // The exit, decided and published in one hold of gLlm.mutex: with a
     // release asked and nothing staged (done is cleared by llmStartAsync
     // before its give, so a staged generation always runs first and the
     // request stays up for the wake after it), the handle goes and the task
     // deletes itself. llmStartAsync takes the mutex before it wakes a worker,
     // so it finds this one here or none and creates a new one.
     bool leave = false;
-    if (gLLM.mutex) xSemaphoreTake(gLLM.mutex, portMAX_DELAY);
-    leave = gLLMWorkerExit && gLLMResultDone;
+    if (gLlm.mutex) xSemaphoreTake(gLlm.mutex, portMAX_DELAY);
+    leave = gLlmWorkerExit && gLlmResultDone;
     if (leave) {
-      gLLMTask = nullptr;
-      gLLMWorkerExit = false;
+      gLlmTask = nullptr;
+      gLlmWorkerExit = false;
     }
-    if (gLLM.mutex) xSemaphoreGive(gLLM.mutex);
+    if (gLlm.mutex) xSemaphoreGive(gLlm.mutex);
     if (leave) vTaskDelete(nullptr);
 
-    const LLMAsyncContext* ac = &gLLMAsyncCtx;
+    const LlmAsyncContext* ac = &gLlmAsyncCtx;
     llmGenerate(ac->prompt, [](const char* token) -> bool {
-      if (!gLLMResultBuf) return false;
+      if (!gLlmResultBuf) return false;
       int tlen = (int)strlen(token);
-      int cur  = gLLMResultLen;
+      int cur  = gLlmResultLen;
       if (cur + tlen >= LLM_RESULT_BUF_SIZE - 1) return false;  // buffer full
-      memcpy(gLLMResultBuf + cur, token, tlen);
-      gLLMResultBuf[cur + tlen] = '\0';
-      gLLMResultLen = cur + tlen;  // publish after write
+      memcpy(gLlmResultBuf + cur, token, tlen);
+      gLlmResultBuf[cur + tlen] = '\0';
+      gLlmResultLen = cur + tlen;  // publish after write
       return true;
     },
     ac->params.maxTokens,    ac->params.temperature,  ac->params.topp,
@@ -239,7 +239,7 @@ static void llmWorkerTask(void* /*pv*/) {
 
     // The chat layer's drainEngineLocked finalizes on this flag, so publish it
     // before the epilogue below and then loop back to park.
-    gLLMResultDone = true;
+    gLlmResultDone = true;
 
     // One-shot: report the deepest this task's stack got during a real
     // generation, so the static LLM_TASK_STACK_SIZE can be trusted/trimmed with
@@ -258,13 +258,13 @@ static void llmWorkerTask(void* /*pv*/) {
   }
 }
 
-// Create the worker on demand. Idempotent + serialized under gLLM.mutex so a
+// Create the worker on demand. Idempotent + serialized under gLlm.mutex so a
 // model-load and a lazy fallback can't both create it (which would leak a
 // 12 KB task and double-consume the shared context).
 static bool llmEnsureWorker() {
   bool ok = true;
-  if (gLLM.mutex) xSemaphoreTake(gLLM.mutex, portMAX_DELAY);
-  if (!gLLMTask) {
+  if (gLlm.mutex) xSemaphoreTake(gLlm.mutex, portMAX_DELAY);
+  if (!gLlmTask) {
     // Claim the stack + TCB HERE — at model load, on the cleanest heap this
     // device will see (the G2 viewer / map stacks are usually not up yet) — and
     // then keep them for every generation while the model stays loaded. Timing
@@ -277,21 +277,21 @@ static bool llmEnsureWorker() {
     // A failure here is benign: both callers treat it as "retry later" —
     // llmLoadModel logs and loads anyway, llmStartAsync bails and re-enters on
     // the next generation, by which point the heap may have recovered.
-    gLLMWorkerExit = false;
+    gLlmWorkerExit = false;
     TaskHandle_t created = nullptr;
     if (xTaskCreateLogged(llmWorkerTask, "llm_gen", LLM_TASK_STACK_SIZE, nullptr,
                           LLM_TASK_PRIORITY, &created, "llm.gen", 1) == pdPASS) {
-      gLLMTask = created;
+      gLlmTask = created;
     } else {
       ok = false;
     }
   }
-  if (gLLM.mutex) xSemaphoreGive(gLLM.mutex);
+  if (gLlm.mutex) xSemaphoreGive(gLlm.mutex);
   return ok;
 }
 
 // Lets the worker go once no model is loaded (the tail of llmUnload): the
-// request is raised and the worker woken under gLLM.mutex, and it leaves from
+// request is raised and the worker woken under gLlm.mutex, and it leaves from
 // its own park (llmWorkerTask), nulling the handle there. Waits up to
 // kLlmWorkerReleaseMs; a worker that did not leave (a generation still
 // draining) keeps running with the request withdrawn — withdrawn and read in
@@ -299,24 +299,24 @@ static bool llmEnsureWorker() {
 // the next unload asks again. Never from the worker itself.
 static constexpr uint32_t kLlmWorkerReleaseMs = 500;
 static void llmReleaseWorker() {
-  if (!gLLM.mutex) return;
-  xSemaphoreTake(gLLM.mutex, portMAX_DELAY);
-  TaskHandle_t task = gLLMTask;
+  if (!gLlm.mutex) return;
+  xSemaphoreTake(gLlm.mutex, portMAX_DELAY);
+  TaskHandle_t task = gLlmTask;
   if (task && task != xTaskGetCurrentTaskHandle()) {
-    gLLMWorkerExit = true;
+    gLlmWorkerExit = true;
     xTaskNotifyGive(task);
   } else {
     task = nullptr;
   }
-  xSemaphoreGive(gLLM.mutex);
+  xSemaphoreGive(gLlm.mutex);
   if (!task) return;
   const uint32_t started = millis();
   for (;;) {
-    xSemaphoreTake(gLLM.mutex, portMAX_DELAY);
-    const bool gone = gLLMTask == nullptr;
+    xSemaphoreTake(gLlm.mutex, portMAX_DELAY);
+    const bool gone = gLlmTask == nullptr;
     const bool expired = !gone && millis() - started >= kLlmWorkerReleaseMs;
-    if (expired) gLLMWorkerExit = false;
-    xSemaphoreGive(gLLM.mutex);
+    if (expired) gLlmWorkerExit = false;
+    xSemaphoreGive(gLlm.mutex);
     if (gone) {
       DEBUG_LLM_LOADF("[LLM] gen worker released (stack and TCB returned)");
       return;
@@ -349,13 +349,13 @@ void llmPsramFree(void** ptr) {
   }
 }
 
-// printf-style setter for gLLM.errorMsg — replaces the repeated
+// printf-style setter for gLlm.errorMsg — replaces the repeated
 // setLlmError( ...) boilerplate. Message only;
 // runState transitions stay explicit at the call sites that need them.
 void setLlmError(const char* fmt, ...) {
   va_list ap;
   va_start(ap, fmt);
-  vsnprintf(gLLM.errorMsg, sizeof(gLLM.errorMsg), fmt, ap);
+  vsnprintf(gLlm.errorMsg, sizeof(gLlm.errorMsg), fmt, ap);
   va_end(ap);
 }
 
@@ -426,11 +426,11 @@ static PromptPrefillState gPromptPrefill = {};
 // esp_timer read is ~0.2µs, negligible vs the ~ms sections it brackets. Run
 // with the other debugllm* flags OFF for clean numbers.
 // ============================================================================
-struct LLMProfile {
+struct LlmProfile {
   int64_t embed, norm, qkv, kvpack, attn, attnOut, ffnUp, ffnDown, act, cls;
   int32_t tokens;
 };
-static LLMProfile gProf = {};
+static LlmProfile gProf = {};
 static bool gProfActive = false;
 
 static inline int64_t profNow() { return gProfActive ? esp_timer_get_time() : 0; }
@@ -446,10 +446,10 @@ struct ForwardDebugLatch {
 };
 
 static float* forward(int token, int pos, const ForwardDebugLatch& debug) {
-  LLMConfig* p = &gLLM.config;
-  TransformerWeights* w = &gLLM.weights;
-  RunState* s = &gLLM.state;
-  const int S = gLLM.seq_ctx;
+  LlmConfig* p = &gLlm.config;
+  TransformerWeights* w = &gLlm.weights;
+  RunState* s = &gLlm.state;
+  const int S = gLlm.seq_ctx;
   const bool isGPT2 = (p->arch_type == 1);
   const bool forwardDebug = debug.forward;
 
@@ -457,8 +457,8 @@ static float* forward(int token, int pos, const ForwardDebugLatch& debug) {
   // (observed: s->x → null mid-generation → LoadProhibited panic in
   // vecAddInPlace). Detect it here and return nullptr so the generation loop
   // can attempt a soft recovery (llmBindRunState) instead of dereferencing null.
-  const bool kvOk = (gLLM.kvPrecision == KV_FP16) ? (s->key_cache_f16 && s->value_cache_f16)
-                  : (gLLM.kvPrecision == KV_INT8) ? (s->key_cache_q8  && s->value_cache_q8)
+  const bool kvOk = (gLlm.kvPrecision == KV_FP16) ? (s->key_cache_f16 && s->value_cache_f16)
+                  : (gLlm.kvPrecision == KV_INT8) ? (s->key_cache_q8  && s->value_cache_q8)
                   :                                 (s->key_cache     && s->value_cache);
   if (!s->x || !s->xb || !s->xb2 || !s->q || !s->logits || !kvOk || !s->att) {
     DEBUG_LLM_GENERATEF("[LLM] forward: RunState corrupted at pos=%d (x=%p logits=%p kvOk=%d) — bailing",
@@ -539,7 +539,7 @@ static float* forward(int token, int pos, const ForwardDebugLatch& debug) {
 
     // Key and value point to the KV cache
     int loff = l * S * kv_dim;
-    const uint8_t kvPrec = gLLM.kvPrecision;
+    const uint8_t kvPrec = gLlm.kvPrecision;
     const bool kvPacked = (kvPrec != KV_FP32);  // FP16/INT8 produce into temps, then pack
     // K/V are produced in FP32 working buffers. FP32 mode points these straight
     // at the cache row (zero-copy, identical to before); FP16/INT8 use hot temps
@@ -827,7 +827,7 @@ static float* forward(int token, int pos, const ForwardDebugLatch& debug) {
 // 11. Public API
 
 void llmInit() {
-  // gLLM is zero-initialized in static storage, including UNLOADED == 0. Never
+  // gLlm is zero-initialized in static storage, including UNLOADED == 0. Never
   // clear it here: a repeated init may arrive while it owns model allocations,
   // and wiping those pointers would leak them and destroy the live mutex.
   SemaphoreHandle_t mutex = llmRuntimeMutex();
@@ -845,60 +845,60 @@ bool llmLoadModel(const char* modelPath, int maxCtx) {
 
   if (!filesystemReady) {
     setLlmError("Filesystem not ready");
-    gLLM.runState = LLMState::ERROR;
-    systemEventPost(SYSEVT_LLM_LOAD_FAILED, gLLM.errorMsg, modelPath);
+    gLlm.runState = LlmState::ERROR;
+    systemEventPost(SYSEVT_LLM_LOAD_FAILED, gLlm.errorMsg, modelPath);
     return false;
   }
 
   // Unload any existing model
   llmUnload();
-  if (gLLM.runState != LLMState::UNLOADED) {
+  if (gLlm.runState != LlmState::UNLOADED) {
     setLlmError("Previous generation did not quiesce; model reload deferred");
-    systemEventPost(SYSEVT_LLM_LOAD_FAILED, gLLM.errorMsg, modelPath);
+    systemEventPost(SYSEVT_LLM_LOAD_FAILED, gLlm.errorMsg, modelPath);
     return false;
   }
 
   // Store the requested context cap (0 = auto-fit to available PSRAM). Any
   // per-model context policy lives in the llmmaxcontext setting, not a
   // filename sniff — a caller that needs to spare PSRAM passes an explicit cap.
-  gLLM.requestedMaxCtx = maxCtx;
+  gLlm.requestedMaxCtx = maxCtx;
 
   // KV-cache precision is a load-time choice (the buffers are sized/typed now and
   // immutable until reload). 0=FP32, 1=FP16, 2=INT8.
-  gLLM.kvPrecision = (uint8_t)gSettings.llmKvPrecision;
-  if (gLLM.kvPrecision > KV_INT8) gLLM.kvPrecision = KV_FP32;  // clamp unknown values
+  gLlm.kvPrecision = (uint8_t)gSettings.llmKvPrecision;
+  if (gLlm.kvPrecision > KV_INT8) gLlm.kvPrecision = KV_FP32;  // clamp unknown values
   DEBUG_LLM_LOADF("[LLM] KV cache precision: %s",
-                  gLLM.kvPrecision == KV_FP16 ? "FP16 (half PSRAM)" :
-                  gLLM.kvPrecision == KV_INT8 ? "INT8 (quarter PSRAM, per-head scales)" : "FP32");
+                  gLlm.kvPrecision == KV_FP16 ? "FP16 (half PSRAM)" :
+                  gLlm.kvPrecision == KV_INT8 ? "INT8 (quarter PSRAM, per-head scales)" : "FP32");
 
-  gLLM.runState = LLMState::LOADING;
-  strlcpy(gLLM.modelPath, modelPath, sizeof(gLLM.modelPath));
+  gLlm.runState = LlmState::LOADING;
+  strlcpy(gLlm.modelPath, modelPath, sizeof(gLlm.modelPath));
 
-  DEBUG_LLM_LOADF("[LLM] Loading model: %s (maxCtx=%d)", modelPath, gLLM.requestedMaxCtx);
+  DEBUG_LLM_LOADF("[LLM] Loading model: %s (maxCtx=%d)", modelPath, gLlm.requestedMaxCtx);
 
   // loadWeights() handles header, tokenizer, and weights (all in one file)
   if (!loadWeights(modelPath)) {
     // A loader can fail after acquiring only some of its PSRAM blocks. Preserve
     // the useful error, release every partial allocation through the normal
     // teardown path, then publish the failed state.
-    char loadError[sizeof(gLLM.errorMsg)];
-    strlcpy(loadError, gLLM.errorMsg, sizeof(loadError));
+    char loadError[sizeof(gLlm.errorMsg)];
+    strlcpy(loadError, gLlm.errorMsg, sizeof(loadError));
     llmUnload();
-    strlcpy(gLLM.errorMsg, loadError[0] ? loadError : "Model load failed",
-            sizeof(gLLM.errorMsg));
-    gLLM.runState = LLMState::ERROR;
-    systemEventPost(SYSEVT_LLM_LOAD_FAILED, gLLM.errorMsg, modelPath);
+    strlcpy(gLlm.errorMsg, loadError[0] ? loadError : "Model load failed",
+            sizeof(gLlm.errorMsg));
+    gLlm.runState = LlmState::ERROR;
+    systemEventPost(SYSEVT_LLM_LOAD_FAILED, gLlm.errorMsg, modelPath);
     return false;
   }
 
-  gLLM.runState = LLMState::READY;
-  gLLM.lastContextMax = gLLM.seq_ctx;  // expose active ctx window immediately (before first generation)
+  gLlm.runState = LlmState::READY;
+  gLlm.lastContextMax = gLlm.seq_ctx;  // expose active ctx window immediately (before first generation)
   {
     const char* base = modelPath;
     const char* slash = strrchr(modelPath, '/');
     if (slash) base = slash + 1;
     char det[24];
-    snprintf(det, sizeof(det), "ctx %d", gLLM.seq_ctx);
+    snprintf(det, sizeof(det), "ctx %d", gLlm.seq_ctx);
     systemEventPost(SYSEVT_LLM_MODEL_LOADED, base, det);
   }
   // Reserve the persistent generation worker now, while the heap is at its
@@ -909,10 +909,10 @@ bool llmLoadModel(const char* modelPath, int maxCtx) {
     DEBUG_LLM_LOADF("[LLM] gen worker create deferred (heap fragmented); will retry at first generate");
   }
   DEBUG_LLM_LOADF("[LLM] Model ready. PSRAM used: %uKB (weights=%uKB state=%uKB) ctx=%d/%d",
-                  (unsigned)((gLLM.weightsSize + gLLM.weightsQ8Size + gLLM.stateSize) / 1024),
-                  (unsigned)((gLLM.weightsSize + gLLM.weightsQ8Size) / 1024),
-                  (unsigned)(gLLM.stateSize / 1024),
-                  gLLM.seq_ctx, gLLM.config.seq_len);
+                  (unsigned)((gLlm.weightsSize + gLlm.weightsQ8Size + gLlm.stateSize) / 1024),
+                  (unsigned)((gLlm.weightsSize + gLlm.weightsQ8Size) / 1024),
+                  (unsigned)(gLlm.stateSize / 1024),
+                  gLlm.seq_ctx, gLlm.config.seq_len);
   // Load-time guard: if PSRAM auto-fit shrank the context below usable, this was
   // previously silent — the model loaded and then produced 0-1 tokens with no
   // explanation. Flag it loudly at the source (ERROR_LLMF is always-on, unlike
@@ -932,8 +932,8 @@ bool llmLoadModel(const char* modelPath, int maxCtx) {
   // Post-load budgeting line: KV precision + headroom left for fact tables /
   // bigger models. Compare kvPrec=FP16 vs FP32 across two loads to see the win.
   DEBUG_LLM_LOADF("[LLM] Model ready. kvPrec=%s  PSRAM free after load: %uKB (largest block %uKB)",
-                  (gLLM.kvPrecision == KV_FP16) ? "FP16" :
-                  (gLLM.kvPrecision == KV_INT8) ? "INT8" : "FP32",
+                  (gLlm.kvPrecision == KV_FP16) ? "FP16" :
+                  (gLlm.kvPrecision == KV_INT8) ? "INT8" : "FP32",
                   (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024),
                   (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM) / 1024));
   return true;
@@ -942,28 +942,28 @@ bool llmLoadModel(const char* modelPath, int maxCtx) {
 void llmUnload() {
   // Edge: only a real teardown (model present -> no-model) should post. A bare
   // unload with nothing loaded (pre-load cleanup, double-unload) must stay quiet.
-  const bool hadModel = (gLLM.runState == LLMState::READY ||
-                         gLLM.runState == LLMState::GENERATING);
+  const bool hadModel = (gLlm.runState == LlmState::READY ||
+                         gLlm.runState == LlmState::GENERATING);
   // Quiesce any LIVE generation before freeing the weights it reads. A gen is
-  // live from llmStartAsync accepting it (gLLMResultDone=false) through the
-  // worker's epilogue (gLLMResultDone=true) — a window that includes an async
+  // live from llmStartAsync accepting it (gLlmResultDone=false) through the
+  // worker's epilogue (gLlmResultDone=true) — a window that includes an async
   // gen ACCEPTED but not yet inside llmGenerate, where runState is still READY.
   // The old runState==GENERATING-only wait missed that window and could free
   // weights out from under a generation about to start (use-after-free). Cover
   // both the synchronous path (runState) and the async accept window (done).
-  if (gLLM.runState == LLMState::GENERATING || !gLLMResultDone) {
+  if (gLlm.runState == LlmState::GENERATING || !gLlmResultDone) {
     // Let an accepted-but-not-started async gen actually enter llmGenerate
     // first; otherwise its entry reset of stopRequested (llmGenerate ~:1049)
     // clears the stop we set and it runs to completion under us.
-    for (int i = 0; i < 50 && gLLM.runState != LLMState::GENERATING && !gLLMResultDone; i++) {
+    for (int i = 0; i < 50 && gLlm.runState != LlmState::GENERATING && !gLlmResultDone; i++) {
       vTaskDelay(pdMS_TO_TICKS(2));
     }
     vTaskDelay(pdMS_TO_TICKS(2));  // let that entry reset land before we set stop
-    gLLM.stopRequested = true;     // observed per-token, breaks the gen loop
-    for (int i = 0; i < 100 && (gLLM.runState == LLMState::GENERATING || !gLLMResultDone); i++) {
+    gLlm.stopRequested = true;     // observed per-token, breaks the gen loop
+    for (int i = 0; i < 100 && (gLlm.runState == LlmState::GENERATING || !gLlmResultDone); i++) {
       vTaskDelay(pdMS_TO_TICKS(10));
     }
-    if (gLLM.runState == LLMState::GENERATING || !gLLMResultDone) {
+    if (gLlm.runState == LlmState::GENERATING || !gLlmResultDone) {
       // Never trade a bounded command wait for a use-after-free. The worker
       // still owns the model; retain all allocations and let a later unload or
       // load retry after it observes the stop request.
@@ -973,53 +973,53 @@ void llmUnload() {
   }
 
   freeTokenizer();
-  llmPsramFree((void**)&gLLM.weightsData);
-  llmPsramFree((void**)&gLLM.weightsQ8Data);
+  llmPsramFree((void**)&gLlm.weightsData);
+  llmPsramFree((void**)&gLlm.weightsQ8Data);
   // Free mixed-mode Q4 allocations
-  llmPsramFree((void**)&gLLM.weights.q4_data);
-  llmPsramFree((void**)&gLLM.weights.q4_scales);
-  llmPsramFree((void**)&gLLM.weights.layer_quant);
-  llmPsramFree((void**)&gLLM.weights.q4_offsets);
-  llmPsramFree((void**)&gLLM.weights.layerT);
-  llmPsramFree((void**)&gLLM.stateData);
-  if (gLLM.stateHotData) {
-    heap_caps_free(gLLM.stateHotData);
-    gLLM.stateHotData = nullptr;
+  llmPsramFree((void**)&gLlm.weights.q4_data);
+  llmPsramFree((void**)&gLlm.weights.q4_scales);
+  llmPsramFree((void**)&gLlm.weights.layer_quant);
+  llmPsramFree((void**)&gLlm.weights.q4_offsets);
+  llmPsramFree((void**)&gLlm.weights.layerT);
+  llmPsramFree((void**)&gLlm.stateData);
+  if (gLlm.stateHotData) {
+    heap_caps_free(gLlm.stateHotData);
+    gLlm.stateHotData = nullptr;
   }
-  if (gLLM.repBuf) {
-    free(gLLM.repBuf);
-    gLLM.repBuf = nullptr;
-    gLLM.repBufSize = 0;
+  if (gLlm.repBuf) {
+    free(gLlm.repBuf);
+    gLlm.repBuf = nullptr;
+    gLlm.repBufSize = 0;
   }
-  if (gLLM.sampleIndices) {
-    llmPsramFree((void**)&gLLM.sampleIndices);  // PSRAM-allocated (nulls the ptr)
-    gLLM.sampleIndicesSize = 0;
+  if (gLlm.sampleIndices) {
+    llmPsramFree((void**)&gLlm.sampleIndices);  // PSRAM-allocated (nulls the ptr)
+    gLlm.sampleIndicesSize = 0;
   }
-  if (gLLM.genHist) {
-    llmPsramFree((void**)&gLLM.genHist);        // PSRAM-allocated (nulls the ptr)
-    gLLM.genHistSize = 0;
+  if (gLlm.genHist) {
+    llmPsramFree((void**)&gLlm.genHist);        // PSRAM-allocated (nulls the ptr)
+    gLlm.genHistSize = 0;
   }
 
-  memset(&gLLM.weights, 0, sizeof(gLLM.weights));
-  memset(&gLLM.state, 0, sizeof(gLLM.state));
-  gLLM.weightsSize = 0;
-  gLLM.weightsQ8Size = 0;
-  gLLM.stateSize = 0;
-  gLLM.stateHotSize = 0;
-  gLLM.seq_ctx = 0;
-  gLLM.runState = LLMState::UNLOADED;
+  memset(&gLlm.weights, 0, sizeof(gLlm.weights));
+  memset(&gLlm.state, 0, sizeof(gLlm.state));
+  gLlm.weightsSize = 0;
+  gLlm.weightsQ8Size = 0;
+  gLlm.stateSize = 0;
+  gLlm.stateHotSize = 0;
+  gLlm.seq_ctx = 0;
+  gLlm.runState = LlmState::UNLOADED;
 
   // Drop any info-block metadata so a failed/early-aborted next load can't show
   // the previous model's description or icon.
-  gLLM.modelDesc[0] = '\0';
-  gLLM.modelCaps    = 0;      // never let the previous model's trust survive
-  gLLM.modelHasIcon = false;
-  gLLM.modelIconW   = 0;
-  gLLM.modelIconH   = 0;
-  gLLM.modelRefusal[0] = '\0';
-  if (gLLM.domainVocab) llmPsramFree((void**)&gLLM.domainVocab);
-  gLLM.domainVocabCount = 0;
-  gLLM.domainVocabBytes = 0;
+  gLlm.modelDesc[0] = '\0';
+  gLlm.modelCaps    = 0;      // never let the previous model's trust survive
+  gLlm.modelHasIcon = false;
+  gLlm.modelIconW   = 0;
+  gLlm.modelIconH   = 0;
+  gLlm.modelRefusal[0] = '\0';
+  if (gLlm.domainVocab) llmPsramFree((void**)&gLlm.domainVocab);
+  gLlm.domainVocabCount = 0;
+  gLlm.domainVocabBytes = 0;
 
   // Drop the guided-input menu (frees the PSRAM blob + bumps menuGeneration under
   // sMenuLock so a reader on another task can't touch a freed blob). See
@@ -1027,8 +1027,8 @@ void llmUnload() {
   llmMenuClear();
 
   if (hadModel) {
-    const char* base = gLLM.modelPath;
-    const char* slash = strrchr(gLLM.modelPath, '/');
+    const char* base = gLlm.modelPath;
+    const char* slash = strrchr(gLlm.modelPath, '/');
     if (slash) base = slash + 1;
     systemEventPost(SYSEVT_LLM_MODEL_UNLOADED, base, nullptr);
   }
@@ -1039,12 +1039,12 @@ void llmUnload() {
 }
 
 bool llmIsReady() {
-  return gLLM.runState == LLMState::READY;
+  return gLlm.runState == LlmState::READY;
 }
 
 bool llmContextDegraded(int* outCtx, int* outModelSeq) {
-  const int ctx      = gLLM.seq_ctx;          // 0 when no model is loaded
-  const int modelSeq = gLLM.config.seq_len;
+  const int ctx      = gLlm.seq_ctx;          // 0 when no model is loaded
+  const int modelSeq = gLlm.config.seq_len;
   if (outCtx)      *outCtx = ctx;
   if (outModelSeq) *outModelSeq = modelSeq;
   if (ctx <= 0) return false;                 // no model → nothing to warn about
@@ -1053,7 +1053,7 @@ bool llmContextDegraded(int* outCtx, int* outModelSeq) {
   // equals that, PSRAM did NOT cut it — a small value is then intentional, not a
   // fault, so we stay quiet. Only warn when auto-fit shrank it below both the
   // request AND the usable floor.
-  const int requested = (gLLM.requestedMaxCtx > 0) ? gLLM.requestedMaxCtx : modelSeq;
+  const int requested = (gLlm.requestedMaxCtx > 0) ? gLlm.requestedMaxCtx : modelSeq;
   const bool shrunk   = ctx < requested;
   const bool unusable = ctx < LLM_MIN_USABLE_CONTEXT;
   return shrunk && unusable;
@@ -1070,34 +1070,34 @@ size_t llmContextWarning(char* buf, size_t cap) {
   return (len < 0) ? 0 : ((size_t)len < cap ? (size_t)len : cap - 1);
 }
 
-LLMStatus llmGetStatus() {
-  LLMStatus status = {};
-  status.state = gLLM.runState;
-  strlcpy(status.modelPath, gLLM.modelPath, sizeof(status.modelPath));
-  status.config = gLLM.config;
-  size_t q4Total = gLLM.weights.q4_data_size + gLLM.weights.q4_scales_size;
-  status.modelSizeBytes = gLLM.weightsSize + gLLM.weightsQ8Size + q4Total;
-  status.runtimeSizeBytes = gLLM.stateSize + gLLM.stateHotSize;
-  status.totalPsramUsed = gLLM.weightsSize + gLLM.weightsQ8Size + q4Total + gLLM.stateSize;
-  status.lastTokensPerSec = gLLM.lastTokPerSec;
-  status.lastTokenCount = gLLM.lastTokCount;
-  status.lastContextUsed = gLLM.lastContextUsed;
-  status.lastContextMax = gLLM.lastContextMax;
-  status.lastMeanLogprob = gLLM.lastMeanLogprob;
-  status.lastConfTokens = gLLM.lastConfTokens;
-  strlcpy(status.errorMsg, gLLM.errorMsg, sizeof(status.errorMsg));
+LlmStatus llmGetStatus() {
+  LlmStatus status = {};
+  status.state = gLlm.runState;
+  strlcpy(status.modelPath, gLlm.modelPath, sizeof(status.modelPath));
+  status.config = gLlm.config;
+  size_t q4Total = gLlm.weights.q4_data_size + gLlm.weights.q4_scales_size;
+  status.modelSizeBytes = gLlm.weightsSize + gLlm.weightsQ8Size + q4Total;
+  status.runtimeSizeBytes = gLlm.stateSize + gLlm.stateHotSize;
+  status.totalPsramUsed = gLlm.weightsSize + gLlm.weightsQ8Size + q4Total + gLlm.stateSize;
+  status.lastTokensPerSec = gLlm.lastTokPerSec;
+  status.lastTokenCount = gLlm.lastTokCount;
+  status.lastContextUsed = gLlm.lastContextUsed;
+  status.lastContextMax = gLlm.lastContextMax;
+  status.lastMeanLogprob = gLlm.lastMeanLogprob;
+  status.lastConfTokens = gLlm.lastConfTokens;
+  strlcpy(status.errorMsg, gLlm.errorMsg, sizeof(status.errorMsg));
   return status;
 }
 
 const char* llmModelDescription() {
-  return gLLM.modelDesc;  // always NUL-terminated; "" when the model has no info block
+  return gLlm.modelDesc;  // always NUL-terminated; "" when the model has no info block
 }
 
 bool llmModelIcon(const uint8_t** bits, uint8_t* width, uint8_t* height) {
-  if (!gLLM.modelHasIcon) return false;
-  if (bits)   *bits   = gLLM.modelIcon;
-  if (width)  *width  = gLLM.modelIconW;
-  if (height) *height = gLLM.modelIconH;
+  if (!gLlm.modelHasIcon) return false;
+  if (bits)   *bits   = gLlm.modelIcon;
+  if (width)  *width  = gLlm.modelIconW;
+  if (height) *height = gLlm.modelIconH;
   return true;
 }
 
@@ -1106,7 +1106,7 @@ bool llmModelIcon(const uint8_t** bits, uint8_t* width, uint8_t* height) {
 // carries no domain vocab, so a plain model is never gated. Cold path — runs once
 // per prompt over a packed [u8 len][lowercase word] blob (PSRAM).
 static bool llmPromptInDomain(const char* prompt) {
-  if (gLLM.domainVocabCount == 0 || !gLLM.domainVocab || gLLM.domainVocabBytes == 0)
+  if (gLlm.domainVocabCount == 0 || !gLlm.domainVocab || gLlm.domainVocabBytes == 0)
     return true;
   char lw[256];
   for (const char* p = prompt; *p; ) {
@@ -1119,8 +1119,8 @@ static bool llmPromptInDomain(const char* prompt) {
       char c = ws[i];
       lw[i] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
     }
-    const uint8_t* v = gLLM.domainVocab;
-    const uint8_t* vend = v + gLLM.domainVocabBytes;
+    const uint8_t* v = gLlm.domainVocab;
+    const uint8_t* vend = v + gLlm.domainVocabBytes;
     while (v < vend) {
       uint8_t vl = *v++;
       if (v + vl > vend) break;
@@ -1162,7 +1162,7 @@ static bool llmIsMetaPrompt(const char* prompt) {
 // intake flattens newlines to spaces, so an already-framed prompt can arrive as
 // "Q: ... A:" and must not be wrapped twice — the normalization below restores
 // that newline itself.
-uint16_t llmModelCaps() { return gLLM.modelCaps; }
+uint16_t llmModelCaps() { return gLlm.modelCaps; }
 
 const char* llmFramePrompt(const char* userText, char* out, size_t outSize) {
   if (!userText || !out || outSize < 8) return userText;
@@ -1179,7 +1179,7 @@ const char* llmFramePrompt(const char* userText, char* out, size_t outSize) {
   }
 
   // Truncate the question, never the tail. Prompts are capped at
-  // sizeof(gLLMAsyncCtx.prompt), so letting a long question push the A: off the
+  // sizeof(gLlmAsyncCtx.prompt), so letting a long question push the A: off the
   // end would silently un-frame it — the exact failure this exists to prevent,
   // and an invisible one.
   const size_t tailLen = strlen(tail);
@@ -1194,19 +1194,19 @@ const char* llmFramePrompt(const char* userText, char* out, size_t outSize) {
   return out;
 }
 
-int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
+int llmGenerate(const char* prompt, LlmTokenCallback tokenCb,
                 int maxTokens, float temperature, float topp,
                 float repPenalty, int repWindow, int sentenceLimit, int hardCap,
                 const int* suppressTokens, int suppressTokenCount,
                 float minP) {
-  if (gLLM.runState != LLMState::READY) {
+  if (gLlm.runState != LlmState::READY) {
     return -1;
   }
 
   // ── Setup ──────────────────────────────────────────────────────────────────
-  gLLM.runState = LLMState::GENERATING;
-  gLLM.stopRequested = false;
-  gLLM.errorMsg[0] = '\0';
+  gLlm.runState = LlmState::GENERATING;
+  gLlm.stopRequested = false;
+  gLlm.errorMsg[0] = '\0';
 
   // ── Domain refusal gate ──────────────────────────────────────────────────
   // If the loaded .bin carries a domain allow-list and the setting is on, refuse
@@ -1215,7 +1215,7 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
   // questions (what-are-you, help, ...) that any model should answer despite
   // carrying no domain word. Nothing allocated yet, so the early return only has
   // to restore runState + emit the text.
-  if (gSettings.llmDomainGate && gLLM.domainVocabCount > 0) {
+  if (gSettings.llmDomainGate && gLlm.domainVocabCount > 0) {
     // Do:-mode prompts (natural-language → device command) are machine-parsed and
     // must bypass the gate. The app frames them "...\nDo:", but BLE intake
     // (Bluetooth.cpp) normalizes \n→space, so over BLE it arrives as "... Do:";
@@ -1226,18 +1226,18 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
     const bool doMode = strstr(prompt, "\nDo:") != nullptr ||
                         (promptLen >= 4 && strcmp(prompt + promptLen - 4, " Do:") == 0);
     if (!doMode && !llmIsMetaPrompt(prompt) && !llmPromptInDomain(prompt)) {
-      const char* msg = gLLM.modelRefusal[0]
-                          ? gLLM.modelRefusal
+      const char* msg = gLlm.modelRefusal[0]
+                          ? gLlm.modelRefusal
                           : "I can only answer questions about this model's topic.";
       if (tokenCb) tokenCb(msg);
-      gLLM.lastTokCount  = 0;
-      gLLM.lastTokPerSec = 0.0f;
-      gLLM.runState = LLMState::READY;
+      gLlm.lastTokCount  = 0;
+      gLlm.lastTokPerSec = 0.0f;
+      gLlm.runState = LlmState::READY;
       return 0;
     }
   }
 
-  LLMConfig* p = &gLLM.config;
+  LlmConfig* p = &gLlm.config;
 
   // ── Prompt normalization: strip filler phrases ────────────────────────────
   // Users type things like "I want to add a wifi network" or "Can you tell me
@@ -1445,7 +1445,7 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
   if (!prompt_tokens) {
     setLlmError("OOM: prompt_tokens alloc");
     if (norm_prompt) free(norm_prompt);
-    gLLM.runState = LLMState::ERROR;
+    gLlm.runState = LlmState::ERROR;
     return -1;
   }
   int num_prompt_tokens = encode(prompt, prompt_tokens, prompt_buf_n - 1);
@@ -1462,8 +1462,8 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
     int show = (num_prompt_tokens < 20) ? num_prompt_tokens : 20;
     for (int ti = 0; ti < show; ti++) {
       int tok = prompt_tokens[ti];
-      const char* piece = (tok >= 0 && tok < gLLM.tokenizer.vocab_size) ?
-                           gLLM.tokenizer.vocab[tok] : "?";
+      const char* piece = (tok >= 0 && tok < gLlm.tokenizer.vocab_size) ?
+                           gLlm.tokenizer.vocab[tok] : "?";
       DEBUG_LLM_TOKENIZERF("[LLM]   tok[%d]=%d '%s'", ti, tok, piece);
     }
     if (num_prompt_tokens > 20) {
@@ -1499,7 +1499,7 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
       if (tok <= 4) continue;
       if (tok < 10) continue;  // single-char punctuation/digits
       // Skip common function words by checking token string length and stop word list
-      const char* piece = (tok < gLLM.tokenizer.vocab_size) ? gLLM.tokenizer.vocab[tok] : nullptr;
+      const char* piece = (tok < gLlm.tokenizer.vocab_size) ? gLlm.tokenizer.vocab[tok] : nullptr;
       if (!piece) continue;
       int plen = strlen(piece);
       // Skip very short tokens (single chars, spaces) — keep 3+ char words
@@ -1533,8 +1533,8 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
         DEBUG_LLM_GENERATEF("[LLM] CONTENT TOKENS for logit boost (early=%.1f late=%.1f window=%d):",
                             CONTENT_LOGIT_BOOST, CONTENT_LOGIT_BOOST_LATE, CONTENT_BOOST_WINDOW);
         for (int ci = 0; ci < content_token_count; ci++) {
-          const char* cname = (content_tokens[ci] < gLLM.tokenizer.vocab_size) ?
-                               gLLM.tokenizer.vocab[content_tokens[ci]] : "?";
+          const char* cname = (content_tokens[ci] < gLlm.tokenizer.vocab_size) ?
+                               gLlm.tokenizer.vocab[content_tokens[ci]] : "?";
           DEBUG_LLM_GENERATEF("[LLM]   content[%d]=%d('%s')", ci, content_tokens[ci], cname);
         }
       } else {
@@ -1545,18 +1545,18 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
 
   // Clear KV cache for fresh generation (zero bits == 0.0 for both float and half)
   int kv_dim = (p->dim * p->n_kv_heads) / p->n_heads;
-  const int S = gLLM.seq_ctx;
+  const int S = gLlm.seq_ctx;
   size_t kvCount = (size_t)p->n_layers * S * kv_dim;
-  if (gLLM.kvPrecision == KV_FP16) {
-    memset(gLLM.state.key_cache_f16,   0, kvCount * sizeof(uint16_t));
-    memset(gLLM.state.value_cache_f16, 0, kvCount * sizeof(uint16_t));
-  } else if (gLLM.kvPrecision == KV_INT8) {
+  if (gLlm.kvPrecision == KV_FP16) {
+    memset(gLlm.state.key_cache_f16,   0, kvCount * sizeof(uint16_t));
+    memset(gLlm.state.value_cache_f16, 0, kvCount * sizeof(uint16_t));
+  } else if (gLlm.kvPrecision == KV_INT8) {
     // Only the int8 data needs clearing; scales are written before any read.
-    memset(gLLM.state.key_cache_q8,   0, kvCount);
-    memset(gLLM.state.value_cache_q8, 0, kvCount);
+    memset(gLlm.state.key_cache_q8,   0, kvCount);
+    memset(gLlm.state.value_cache_q8, 0, kvCount);
   } else {
-    memset(gLLM.state.key_cache,   0, kvCount * sizeof(float));
-    memset(gLLM.state.value_cache, 0, kvCount * sizeof(float));
+    memset(gLlm.state.key_cache,   0, kvCount * sizeof(float));
+    memset(gLlm.state.value_cache, 0, kvCount * sizeof(float));
   }
 
   // Let forward() skip prompt-phase classifier work while prompt tokens are
@@ -1586,9 +1586,9 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
   // ── Repetition penalty ring buffer ────────────────────────────────────────
   // Penalises tokens seen in the last repWindow positions to reduce loops.
   // repPenalty=1.0 disables it entirely; repWindow clamped to pre-allocated size.
-  const int   REP_WINDOW  = (repWindow > 0) ? (repWindow < gLLM.repBufSize ? repWindow : gLLM.repBufSize) : 0;
+  const int   REP_WINDOW  = (repWindow > 0) ? (repWindow < gLlm.repBufSize ? repWindow : gLlm.repBufSize) : 0;
   const float REP_PENALTY = (repPenalty > 1.0f) ? repPenalty : 1.0f;
-  int* rep_buf = (REP_WINDOW > 0) ? gLLM.repBuf : nullptr;
+  int* rep_buf = (REP_WINDOW > 0) ? gLlm.repBuf : nullptr;
   if (rep_buf) memset(rep_buf, -1, REP_WINDOW * sizeof(int));
   int rep_head = 0;   // next write position (circular)
   int rep_fill = 0;   // how many valid entries (caps at REP_WINDOW)
@@ -1616,8 +1616,8 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
   //   guard   → "[LLM] forward: RunState corrupted" / "rebound RunState" on trigger
   DEBUG_LLM_GENERATEF("[LLM] feat: casing=on minP=%.2f%s confidence=on kvPrec=%s corruptGuard=armed",
                       minP, (minP > 0.0f) ? "(active)" : "(off)",
-                      (gLLM.kvPrecision == KV_FP16) ? "FP16" :
-                      (gLLM.kvPrecision == KV_INT8) ? "INT8" : "FP32");
+                      (gLlm.kvPrecision == KV_FP16) ? "FP16" :
+                      (gLlm.kvPrecision == KV_INT8) ? "INT8" : "FP32");
   //   ngram    → "[LLM] ngram_block:" fires when a loop is broken
   //   confGate → "[LLM] conf_gate:" fires when an answer is hedged
   //   prefill  → classifier skipped during prompt (no line; prompt just gets faster)
@@ -1685,10 +1685,10 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
   // Per-section profiler (llmprofile): latch on and zero the accumulators for
   // this run. Off = forward()'s brackets compile to a single predicted branch.
   gProfActive = gSettings.llmProfile;
-  if (gProfActive) gProf = LLMProfile{};
+  if (gProfActive) gProf = LlmProfile{};
 
   while (pos < steps) {
-    if (gLLM.stopRequested) break;
+    if (gLlm.stopRequested) break;
 
     // Snapshot both diagnostic modes once for this position and use that same
     // decision in forward() and in every post-forward scan below. Commands can
@@ -1701,9 +1701,9 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
 
     // Debug hook (llmcorrupttest): force one RunState-pointer corruption to prove
     // the guard + rebind + retry path end-to-end. Fires once, then self-clears.
-    if (gLLM.injectCorruptOnce) {
-      gLLM.injectCorruptOnce = false;
-      gLLM.state.x = nullptr;
+    if (gLlm.injectCorruptOnce) {
+      gLlm.injectCorruptOnce = false;
+      gLlm.state.x = nullptr;
       DEBUG_LLM_GENERATEF("[LLM] TEST: injected RunState corruption (s->x=null) at pos=%d — expect guard+rebound below", pos);
     }
 
@@ -1725,7 +1725,7 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
         // errorMsg above is RAM-only; record durably. corruptionFatal breaks the
         // generation loop right after, so this fires once per failed generation.
         logSystemEvent("LLM", "state corruption at pos=%d — recovery failed after %d tries; ERROR state until reload", pos, corruptionRetries);
-        systemEventPost(SYSEVT_LLM_STATE_CORRUPT, "run-state corruption", gLLM.errorMsg);
+        systemEventPost(SYSEVT_LLM_STATE_CORRUPT, "run-state corruption", gLlm.errorMsg);
         corruptionFatal = true;
         break;
       }
@@ -1762,10 +1762,10 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
         for (int vi = 1; vi < p->vocab_size; vi++) {
           if (logits[vi] > top_logit) { top_logit = logits[vi]; top_tok = vi; }
         }
-        const char* actual_name = (actual_next >= 0 && actual_next < gLLM.tokenizer.vocab_size) ?
-                                   gLLM.tokenizer.vocab[actual_next] : "?";
-        const char* top_name = (top_tok >= 0 && top_tok < gLLM.tokenizer.vocab_size) ?
-                                gLLM.tokenizer.vocab[top_tok] : "?";
+        const char* actual_name = (actual_next >= 0 && actual_next < gLlm.tokenizer.vocab_size) ?
+                                   gLlm.tokenizer.vocab[actual_next] : "?";
+        const char* top_name = (top_tok >= 0 && top_tok < gLlm.tokenizer.vocab_size) ?
+                                gLlm.tokenizer.vocab[top_tok] : "?";
         DEBUG_LLM_GENERATEF("[LLM] PROMPT_PRED pos=%d: actual_next=%d('%s') rank=%d/%d logit=%.1f | "
                             "model_top=%d('%s') logit=%.1f %s",
                             pos, actual_next, actual_name, rank, p->vocab_size, actual_logit,
@@ -1802,15 +1802,15 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
         }
         actual_rank = rank;
 
-        const char* next_name = (actual_next >= 0 && actual_next < gLLM.tokenizer.vocab_size) ?
-                                 gLLM.tokenizer.vocab[actual_next] : "?";
+        const char* next_name = (actual_next >= 0 && actual_next < gLlm.tokenizer.vocab_size) ?
+                                 gLlm.tokenizer.vocab[actual_next] : "?";
         DEBUG_LLM_GENERATEF("[LLM] PROMPT_TRACK pos=%d: model predicts top5=[%d(%s:%.1f) %d(%s:%.1f) %d(%s:%.1f) %d(%s:%.1f) %d(%s:%.1f)]",
                             pos,
-                            top5i[0], (top5i[0]<gLLM.tokenizer.vocab_size?gLLM.tokenizer.vocab[top5i[0]]:"?"), top5v[0],
-                            top5i[1], (top5i[1]<gLLM.tokenizer.vocab_size?gLLM.tokenizer.vocab[top5i[1]]:"?"), top5v[1],
-                            top5i[2], (top5i[2]<gLLM.tokenizer.vocab_size?gLLM.tokenizer.vocab[top5i[2]]:"?"), top5v[2],
-                            top5i[3], (top5i[3]<gLLM.tokenizer.vocab_size?gLLM.tokenizer.vocab[top5i[3]]:"?"), top5v[3],
-                            top5i[4], (top5i[4]<gLLM.tokenizer.vocab_size?gLLM.tokenizer.vocab[top5i[4]]:"?"), top5v[4]);
+                            top5i[0], (top5i[0]<gLlm.tokenizer.vocab_size?gLlm.tokenizer.vocab[top5i[0]]:"?"), top5v[0],
+                            top5i[1], (top5i[1]<gLlm.tokenizer.vocab_size?gLlm.tokenizer.vocab[top5i[1]]:"?"), top5v[1],
+                            top5i[2], (top5i[2]<gLlm.tokenizer.vocab_size?gLlm.tokenizer.vocab[top5i[2]]:"?"), top5v[2],
+                            top5i[3], (top5i[3]<gLlm.tokenizer.vocab_size?gLlm.tokenizer.vocab[top5i[3]]:"?"), top5v[3],
+                            top5i[4], (top5i[4]<gLlm.tokenizer.vocab_size?gLlm.tokenizer.vocab[top5i[4]]:"?"), top5v[4]);
         DEBUG_LLM_GENERATEF("[LLM] PROMPT_TRACK actual_next=%d('%s') logit=%.2f rank=%d/%d %s",
                             actual_next, next_name, actual_logit, actual_rank, p->vocab_size,
                             actual_rank < 5 ? "IN_TOP5" : (actual_rank < 20 ? "IN_TOP20" : "LOW_RANK"));
@@ -1828,22 +1828,22 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
         // FP32-only diagnostic — in FP16 mode key_cache is null (half-float store).
         int kv_d = (p->dim * p->n_kv_heads) / p->n_heads;
         int check_layers[] = {0, p->n_layers/2, p->n_layers-1};
-        if (gLLM.kvPrecision == KV_FP32)
+        if (gLlm.kvPrecision == KV_FP32)
         for (int cli = 0; cli < 3; cli++) {
           int cl = check_layers[cli];
           int cloff = cl * S * kv_d;
           for (int t = 0; t < num_prompt_tokens; t++) {
             float k_l2 = 0.f, v_l2 = 0.f;
-            float* krow = gLLM.state.key_cache + cloff + t * kv_d;
-            float* vrow = gLLM.state.value_cache + cloff + t * kv_d;
+            float* krow = gLlm.state.key_cache + cloff + t * kv_d;
+            float* vrow = gLlm.state.value_cache + cloff + t * kv_d;
             for (int i = 0; i < kv_d; i++) {
               k_l2 += krow[i] * krow[i];
               v_l2 += vrow[i] * vrow[i];
             }
             k_l2 = sqrtf(k_l2 / kv_d);
             v_l2 = sqrtf(v_l2 / kv_d);
-            const char* tname = (prompt_tokens[t] >= 0 && prompt_tokens[t] < gLLM.tokenizer.vocab_size) ?
-                                 gLLM.tokenizer.vocab[prompt_tokens[t]] : "?";
+            const char* tname = (prompt_tokens[t] >= 0 && prompt_tokens[t] < gLlm.tokenizer.vocab_size) ?
+                                 gLlm.tokenizer.vocab[prompt_tokens[t]] : "?";
             (void)tname;
             if (k_l2 < 0.001f || v_l2 < 0.001f) {
               DEBUG_LLM_GENERATEF("[LLM] WARNING KV_CACHE L%d pos=%d '%s': K_L2=%.4f V_L2=%.4f NEARLY_ZERO!",
@@ -1864,8 +1864,8 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
             for (int vi = 0; vi < p->vocab_size; vi++) {
               if (logits[vi] > ptok_logit) rank++;
             }
-            const char* pname = (ptok < gLLM.tokenizer.vocab_size) ?
-                                 gLLM.tokenizer.vocab[ptok] : "?";
+            const char* pname = (ptok < gLlm.tokenizer.vocab_size) ?
+                                 gLlm.tokenizer.vocab[ptok] : "?";
             DEBUG_LLM_GENERATEF("[LLM]   prompt_tok[%d]=%d('%s') logit=%.2f rank=%d/%d",
                                 ti, ptok, pname, ptok_logit, rank, p->vocab_size);
             (void)ptok_logit; (void)rank; (void)pname;
@@ -1947,8 +1947,8 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
             float old_logit = logBoost ? logits[ctok] : 0.f;
             logits[ctok] += boost;
             if (logBoost) {
-              const char* cname = (ctok < gLLM.tokenizer.vocab_size) ?
-                                   gLLM.tokenizer.vocab[ctok] : "?";
+              const char* cname = (ctok < gLlm.tokenizer.vocab_size) ?
+                                   gLlm.tokenizer.vocab[ctok] : "?";
               DEBUG_LLM_GENERATEF("[LLM] CONTENT_BOOST pos=%d gen=%d tok=%d('%s') %.2f -> %.2f (+%.1f)",
                                   pos, gen_pos, ctok, cname,
                                   old_logit, logits[ctok], boost);
@@ -1965,16 +1965,16 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
       // rep penalty structurally cannot break them, a hard ban can. EOS and
       // the "Q:" stop token are never banned so generation can always end.
       const int NGRAM_N = gSettings.llmNoRepeatNgram;  // 0/1 = off
-      if (NGRAM_N >= 2 && gLLM.genHist && hist_len >= NGRAM_N - 1) {
-        const int* ctxTail = &gLLM.genHist[hist_len - (NGRAM_N - 1)];
+      if (NGRAM_N >= 2 && gLlm.genHist && hist_len >= NGRAM_N - 1) {
+        const int* ctxTail = &gLlm.genHist[hist_len - (NGRAM_N - 1)];
         int nbanned = 0;
         for (int hi = 0; hi <= hist_len - NGRAM_N; hi++) {
           bool ngMatch = true;
           for (int k = 0; k < NGRAM_N - 1; k++) {
-            if (gLLM.genHist[hi + k] != ctxTail[k]) { ngMatch = false; break; }
+            if (gLlm.genHist[hi + k] != ctxTail[k]) { ngMatch = false; break; }
           }
           if (!ngMatch) continue;
-          int banTok = gLLM.genHist[hi + NGRAM_N - 1];
+          int banTok = gLlm.genHist[hi + NGRAM_N - 1];
           if (banTok == eos_id || banTok == 3) continue;  // never ban stop tokens
           if (banTok >= 0 && banTok < p->vocab_size && logits[banTok] > -1e8f) {
             logits[banTok] = -1e9f;
@@ -2037,8 +2037,8 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
 
       // Record for the no-repeat n-gram blocker (sampled tokens only — prompt
       // tokens never enter, so the model may still quote a prompt phrase once).
-      if (gLLM.genHist && hist_len < gLLM.genHistSize) {
-        gLLM.genHist[hist_len++] = next;
+      if (gLlm.genHist && hist_len < gLlm.genHistSize) {
+        gLlm.genHist[hist_len++] = next;
       }
 
       if (sampleDebug) {
@@ -2070,8 +2070,8 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
     // explanation words — these signal the model is explaining, not commanding.
     if (isDoMode && pos >= num_prompt_tokens && generated > 0) {
       bool doStop = false;
-      const char* dp = (next >= 0 && next < gLLM.tokenizer.vocab_size)
-                        ? gLLM.tokenizer.vocab[next] : nullptr;
+      const char* dp = (next >= 0 && next < gLlm.tokenizer.vocab_size)
+                        ? gLlm.tokenizer.vocab[next] : nullptr;
       if (dp) {
         // Normalize: skip leading space
         const char* dw = dp;
@@ -2214,30 +2214,30 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
 
   unsigned long elapsed = millis() - startMs;
   if (elapsed > 0 && generated > 0) {
-    gLLM.lastTokPerSec = (float)generated / ((float)elapsed / 1000.0f);
+    gLlm.lastTokPerSec = (float)generated / ((float)elapsed / 1000.0f);
   } else {
-    gLLM.lastTokPerSec = 0;
+    gLlm.lastTokPerSec = 0;
   }
-  gLLM.lastTokCount = generated;
-  gLLM.lastContextUsed = pos;      // total positions consumed (prompt + generated)
-  gLLM.lastContextMax = S;         // KV cache capacity for this run
+  gLlm.lastTokCount = generated;
+  gLlm.lastContextUsed = pos;      // total positions consumed (prompt + generated)
+  gLlm.lastContextMax = S;         // KV cache capacity for this run
 
   // Phase 2: finalize the confidence signal for this run.
-  gLLM.lastConfTokens = confCount;
-  gLLM.lastMeanLogprob = (confCount > 0) ? (confSumLogprob / (float)confCount) : 0.0f;
+  gLlm.lastConfTokens = confCount;
+  gLlm.lastMeanLogprob = (confCount > 0) ? (confSumLogprob / (float)confCount) : 0.0f;
 
   DEBUG_LLM_GENERATEF("[LLM] Generated %d tokens in %lums (%.1f tok/s) ctx=%d/%d stopped=%s conf=%.3f(n=%d)",
-                      generated, elapsed, gLLM.lastTokPerSec, pos, S,
-                      gLLM.stopRequested ? "user" : (generated == 0 ? "eos/empty" : "maxlen"),
-                      gLLM.lastMeanLogprob, gLLM.lastConfTokens);
+                      generated, elapsed, gLlm.lastTokPerSec, pos, S,
+                      gLlm.stopRequested ? "user" : (generated == 0 ? "eos/empty" : "maxlen"),
+                      gLlm.lastMeanLogprob, gLlm.lastConfTokens);
   // Caution for rule authors: an automation that runs an LLM command on
   // llm_gen_done will chain generations back-to-back (bounded by generation
   // latency, but still a loop).
   {
     char det[32];
-    snprintf(det, sizeof(det), "%d tok, %.1f tok/s", generated, (double)gLLM.lastTokPerSec);
+    snprintf(det, sizeof(det), "%d tok, %.1f tok/s", generated, (double)gLlm.lastTokPerSec);
     systemEventPost(SYSEVT_LLM_GEN_DONE,
-                    gLLM.stopRequested ? "user" : (generated == 0 ? "eos" : "maxlen"), det);
+                    gLlm.stopRequested ? "user" : (generated == 0 ? "eos" : "maxlen"), det);
   }
 
   // Per-section profiler dump (llmprofile). Unconditional print (own toggle);
@@ -2277,17 +2277,17 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
 
   // If state corruption could not be recovered, surface ERROR rather than
   // masking it as a normal (truncated) completion.
-  gLLM.runState = corruptionFatal ? LLMState::ERROR : LLMState::READY;
+  gLlm.runState = corruptionFatal ? LlmState::ERROR : LlmState::READY;
   return generated;
 }
 
 void llmStop() {
-  gLLM.stopRequested = true;
+  gLlm.stopRequested = true;
 }
 
 int llmTokenize(const char* text, int* outTokens, int maxTokens) {
   if (!text || !outTokens || maxTokens <= 0) return 0;
-  if (gLLM.tokenizer.vocab_size == 0) return 0;  // no model loaded
+  if (gLlm.tokenizer.vocab_size == 0) return 0;  // no model loaded
   return encode(text, outTokens, maxTokens);
 }
 
@@ -2296,7 +2296,7 @@ int llmTokenize(const char* text, int* outTokens, int maxTokens) {
 // 11b. Async Public API
 // ============================================================================
 
-int llmStartAsync(const char* prompt, const LLMGenParams& params) {
+int llmStartAsync(const char* prompt, const LlmGenParams& params) {
   if (!llmIsReady()) return 0;
 
   // The generation worker is now PERSISTENT — created once at model load and
@@ -2307,41 +2307,41 @@ int llmStartAsync(const char* prompt, const LLMGenParams& params) {
 
   // Stop any in-progress generation and wait for it to finish. The worker is
   // always alive now, so "busy" is the done flag — not a live task handle.
-  if (!gLLMResultDone) {
+  if (!gLlmResultDone) {
     llmStop();
-    for (int i = 0; i < 50 && !gLLMResultDone; i++) {
+    for (int i = 0; i < 50 && !gLlmResultDone; i++) {
       vTaskDelay(pdMS_TO_TICKS(10));
     }
-    if (!gLLMResultDone) return 0;  // previous generation didn't stop in time
+    if (!gLlmResultDone) return 0;  // previous generation didn't stop in time
   }
 
   // Allocate PSRAM result buffer on first call
-  if (!gLLMResultBuf) {
-    gLLMResultBuf = (char*)ps_alloc(LLM_RESULT_BUF_SIZE, AllocPref::RequirePSRAM,
+  if (!gLlmResultBuf) {
+    gLlmResultBuf = (char*)ps_alloc(LLM_RESULT_BUF_SIZE, AllocPref::RequirePSRAM,
                                     "llm.result.buf");
-    if (!gLLMResultBuf) return 0;
+    if (!gLlmResultBuf) return 0;
   }
 
   // MANDATORY publish order (do not reorder): we observed the prior gen's
-  // gLLMResultDone==true above; now reset the buffer, clear done, bump session,
+  // gLlmResultDone==true above; now reset the buffer, clear done, bump session,
   // and stage the context — then, and only then, wake the worker. xTaskNotifyGive
   // is a memory barrier, so the parked worker sees a zeroed length and the fresh
   // context; and because 'done' is set false HERE (before the give) and true only
   // in the worker epilogue, done=true(N) strictly happens-before done=false(N+1).
-  gLLMResultLen    = 0;
-  gLLMResultDone   = false;
-  gLLMResultBuf[0] = '\0';
-  int newSession   = (int)gLLMSessionId + 1;
-  gLLMSessionId    = newSession;
-  strlcpy(gLLMAsyncCtx.prompt, prompt, sizeof(gLLMAsyncCtx.prompt));
-  gLLMAsyncCtx.params = params;
+  gLlmResultLen    = 0;
+  gLlmResultDone   = false;
+  gLlmResultBuf[0] = '\0';
+  int newSession   = (int)gLlmSessionId + 1;
+  gLlmSessionId    = newSession;
+  strlcpy(gLlmAsyncCtx.prompt, prompt, sizeof(gLlmAsyncCtx.prompt));
+  gLlmAsyncCtx.params = params;
 
   // Wake the worker, under the mutex its exit and creation take: the handle
   // read here is a task that is still parked (a worker leaves only under this
   // mutex, with nothing staged — done was cleared above).
-  if (gLLM.mutex) xSemaphoreTake(gLLM.mutex, portMAX_DELAY);
-  if (gLLMTask) xTaskNotifyGive(gLLMTask);
-  if (gLLM.mutex) xSemaphoreGive(gLLM.mutex);
+  if (gLlm.mutex) xSemaphoreTake(gLlm.mutex, portMAX_DELAY);
+  if (gLlmTask) xTaskNotifyGive(gLlmTask);
+  if (gLlm.mutex) xSemaphoreGive(gLlm.mutex);
 
   DEBUG_HTTPF("[LLM] Async gen started: session=%d prompt='%.40s%s'",
               newSession, prompt, strlen(prompt) > 40 ? "..." : "");
@@ -2349,18 +2349,18 @@ int llmStartAsync(const char* prompt, const LLMGenParams& params) {
 }
 
 int llmGetResultChunk(int offset, char* buf, int maxLen) {
-  if (!gLLMResultBuf || offset < 0 || maxLen <= 0) return 0;
-  int avail = (int)gLLMResultLen - offset;
+  if (!gLlmResultBuf || offset < 0 || maxLen <= 0) return 0;
+  int avail = (int)gLlmResultLen - offset;
   if (avail <= 0) return 0;
   if (avail > maxLen - 1) avail = maxLen - 1;
-  memcpy(buf, gLLMResultBuf + offset, avail);
+  memcpy(buf, gLlmResultBuf + offset, avail);
   buf[avail] = '\0';
   return avail;
 }
 
-int  llmGetResultLen()     { return (int)gLLMResultLen; }
-bool llmIsGenerationDone() { return (bool)gLLMResultDone; }
-int  llmGetSessionId()     { return (int)gLLMSessionId; }
+int  llmGetResultLen()     { return (int)gLlmResultLen; }
+bool llmIsGenerationDone() { return (bool)gLlmResultDone; }
+int  llmGetSessionId()     { return (int)gLlmSessionId; }
 
 // ============================================================================
 // 12. CLI Commands

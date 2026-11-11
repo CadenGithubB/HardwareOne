@@ -5739,7 +5739,7 @@ register_handlers:
   registerDarkRoomHandlers(server);
  #endif
  #if ENABLE_LLM_BACKEND
-  registerLLMHandlers(server);
+  registerLlmHandlers(server);
  #endif
   
   // SSE events endpoint for server-driven notices

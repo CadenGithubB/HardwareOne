@@ -495,8 +495,8 @@ void oledBluetoothModeInit();
 #endif
 
 #if ENABLE_OLED_DISPLAY && ENABLE_LLM_BACKEND
-const char* oledLLMFooterHint();
-void oledLLMModeInit();
+const char* oledLlmFooterHint();
+void oledLlmModeInit();
 #endif
 
 #if ENABLE_OLED_DISPLAY && ENABLE_MAPS

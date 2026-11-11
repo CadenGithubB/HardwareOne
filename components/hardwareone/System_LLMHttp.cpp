@@ -453,21 +453,21 @@ bool httpLlmIsReady() {
   return lock && sConfigAdmitted.load(std::memory_order_acquire) && sSelected &&
          sConfig.enabled && sConfig.valid && !sWorker && llmHttpPathAvailable(!strncasecmp(sConfig.url, "https://", 8));
 }
-LLMStatus httpLlmStatus() {
-  LLMStatus st{}; Lock lock;
-  if (!lock) { st.state = LLMState::ERROR; strlcpy(st.errorMsg, "HTTP agent busy", sizeof(st.errorMsg)); return st; }
+LlmStatus httpLlmStatus() {
+  LlmStatus st{}; Lock lock;
+  if (!lock) { st.state = LlmState::ERROR; strlcpy(st.errorMsg, "HTTP agent busy", sizeof(st.errorMsg)); return st; }
   strlcpy(st.modelPath, "http:openclaw", sizeof(st.modelPath));
   if (!sConfigAdmitted.load(std::memory_order_acquire)) {
-    st.state = LLMState::ERROR;
+    st.state = LlmState::ERROR;
     strlcpy(st.errorMsg, kConfigPublicationError, sizeof(st.errorMsg)); return st;
   }
-  st.state = !sSelected ? LLMState::UNLOADED : sWorker ? LLMState::GENERATING :
-             sError[0] || !sConfig.valid || !sConfig.enabled || !llmHttpPathAvailable(!strncasecmp(sConfig.url, "https://", 8)) ? LLMState::ERROR : LLMState::READY;
+  st.state = !sSelected ? LlmState::UNLOADED : sWorker ? LlmState::GENERATING :
+             sError[0] || !sConfig.valid || !sConfig.enabled || !llmHttpPathAvailable(!strncasecmp(sConfig.url, "https://", 8)) ? LlmState::ERROR : LlmState::READY;
   const char* reason = sError[0] ? sError : !sConfig.enabled ? "HTTP agent disabled" :
                        !sConfig.valid ? sConfigError : !llmHttpPathAvailable(!strncasecmp(sConfig.url, "https://", 8)) ? "No relay transport ready" : "";
   strlcpy(st.errorMsg, reason, sizeof(st.errorMsg)); return st;
 }
-int httpLlmStartAsync(const char* prompt, const LLMGenParams& /*params*/) {
+int httpLlmStartAsync(const char* prompt, const LlmGenParams& /*params*/) {
   if (!prompt || !*prompt || strlen(prompt) > kPromptMax) return 0;
   auto* run = static_cast<Run*>(ps_calloc(1, sizeof(Run), AllocPref::PreferPSRAM, "llm.http.run"));
   if (!run) return 0;

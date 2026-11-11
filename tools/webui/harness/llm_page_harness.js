@@ -626,7 +626,7 @@ function scenario() {
     check("loading: selection survived a rebuild",
           els["qa-model"].value === "cm5:LFM2-8B-A1B-UD-Q3_K_XL", els["qa-model"].value);
 
-    // 5. The host finishes and reports ready. A remote model leaves LLMConfig
+    // 5. The host finishes and reports ready. A remote model leaves LlmConfig
     //    ZEROED, which is what used to render as the fabricated "(Llama - FP32)".
     DEV.status = {
         state: "READY", model: "cm5:LFM2-8B-A1B-UD-Q3_K_XL", arch: "", quant: "",

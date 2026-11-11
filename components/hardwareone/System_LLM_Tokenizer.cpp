@@ -70,10 +70,10 @@ static constexpr size_t kMergeRecordBytes = 12;
 // model with no info block, or 64 + info_len when loadInfoBlockFromFile consumed
 // an info block first. The caller (loadWeights) guarantees this.
 // Every count and id is checked against the blob length and the model's
-// vocab_size (gLLM.config, parsed before this); any mismatch fails the load and
+// vocab_size (gLlm.config, parsed before this); any mismatch fails the load and
 // the caller unwinds partial allocations through llmUnload().
 bool loadTokenizerFromFile(File& f) {
-  TokenizerState* t = &gLLM.tokenizer;
+  TokenizerState* t = &gLlm.tokenizer;
 
   // Read blob size
   uint32_t tok_byte_len = 0;
@@ -91,7 +91,7 @@ bool loadTokenizerFromFile(File& f) {
   uint32_t tok_vocab_size = 0, merge_count = 0;
   if (!tokReadExact(f, &tok_vocab_size, 4) || !tokReadExact(f, &merge_count, 4)) return false;
 
-  const uint32_t modelVocab = gLLM.config.vocab_size > 0 ? (uint32_t)gLLM.config.vocab_size : 0;
+  const uint32_t modelVocab = gLlm.config.vocab_size > 0 ? (uint32_t)gLlm.config.vocab_size : 0;
   if (tok_vocab_size == 0 || tok_vocab_size > kTokenizerMaxVocab || tok_vocab_size > modelVocab) {
     ERROR_LLMF("Bad tokenizer vocab_size: %u (model vocab_size %u, limit %u)",
                (unsigned)tok_vocab_size, (unsigned)modelVocab, (unsigned)kTokenizerMaxVocab);
@@ -138,7 +138,7 @@ bool loadTokenizerFromFile(File& f) {
   // Allocate string pool
   char* stringPool = (char*)llmPsramAlloc(totalStringBytes, "tok.strings");
   if (!stringPool) return false;
-  gLLM.tokenizerData = stringPool;
+  gLlm.tokenizerData = stringPool;
 
   // Second pass: read vocab strings
   if (!f.seek(vocabStart)) return false;
@@ -303,19 +303,19 @@ bool loadTokenizerFromFile(File& f) {
 }
 
 void freeTokenizer() {
-  TokenizerState* t = &gLLM.tokenizer;
+  TokenizerState* t = &gLlm.tokenizer;
   // vocab is PSRAM; presplit PSRAM-first (free() reaches either heap)
   llmPsramFree((void**)&t->vocab);
   llmPsramFree((void**)&t->merges);
   llmPsramFree((void**)&t->merge_map);
   if (t->presplit) { free(t->presplit); t->presplit = nullptr; }
-  llmPsramFree((void**)&gLLM.tokenizerData);
+  llmPsramFree((void**)&gLlm.tokenizerData);
   memset(t, 0, sizeof(TokenizerState));
 }
 
 // Encode a string into tokens using merge-based BPE
 int encode(const char* text, int* tokens, int maxTokens) {
-  TokenizerState* t = &gLLM.tokenizer;
+  TokenizerState* t = &gLlm.tokenizer;
   int n_tokens = 0;
   const bool tokenizerDebug = isDebugOutputEnabled(DEBUG_LLM | DEBUG_LLM_TOKENIZER);
 
@@ -442,7 +442,7 @@ int encode(const char* text, int* tokens, int maxTokens) {
 }
 
 const char* decode(int prev_token, int token) {
-  TokenizerState* t = &gLLM.tokenizer;
+  TokenizerState* t = &gLlm.tokenizer;
   if (token < 0 || token >= t->vocab_size) return "";
   const char* piece = t->vocab[token];
   // Handle raw byte tokens like <0x0A>

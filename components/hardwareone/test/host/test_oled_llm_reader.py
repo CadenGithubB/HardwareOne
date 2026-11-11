@@ -37,18 +37,18 @@ def main() -> None:
     args = parser.parse_args()
     require(bool(args.cxx), "a host C++17 compiler is required")
     oled = (COMPONENT / "OLED_Mode_LLM.cpp").read_text()
-    # The screen redraws only when marked dirty: displayLLM must ask for the
+    # The screen redraws only when marked dirty: displayLlm must ask for the
     # next frame whenever llmScreenIsLive() says something is still changing.
-    display = extract_block(oled, "static void displayLLM() ")
+    display = extract_block(oled, "static void displayLlm() ")
     require("if (llmScreenIsLive()) oledMarkDirty();" in display,
-            "displayLLM must request the next frame while the screen is live")
+            "displayLlm must request the next frame while the screen is live")
     cmd_enum = re.search(r"^enum : uint8_t \{ LLM_CMD_NONE[^\n]*$", oled, re.M)
     cmd_flight = re.search(r"^static uint8_t sCmdInFlight[^\n]*$", oled, re.M)
-    ui_state = re.search(r"^static LLMUIState sUIState[^\n]*$", oled, re.M)
+    ui_state = re.search(r"^static LlmUIState sUIState[^\n]*$", oled, re.M)
     require(bool(cmd_enum and cmd_flight and ui_state), "missing LLM screen state declarations")
     definitions = [
         region(oled, "static const int LLM_CHARS", "static const int LLM_READER_COLS"),
-        extract_block(oled, "enum class LLMUIState") + ";",
+        extract_block(oled, "enum class LlmUIState") + ";",
         ui_state.group(), cmd_enum.group(), cmd_flight.group(),
         region(oled, "#define LLM_READER_MAX_LINES", "static int          sReaderTop"),
     ] + [extract_block(oled, marker) for marker in (

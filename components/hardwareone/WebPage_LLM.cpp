@@ -49,25 +49,25 @@ static bool readPostBody(httpd_req_t* req, char* buf, size_t bufSize) {
 // ============================================================================
 // GET /api/llm/status
 // ============================================================================
-static esp_err_t handleLLMStatus(httpd_req_t* req) {
+static esp_err_t handleLlmStatus(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);
   DEBUG_HTTPF("[LLM-API] GET /api/llm/status from user=%s", ctx.user.c_str());
 
-  LLMStatus st = llmBackendStatus();
+  LlmStatus st = llmBackendStatus();
   // Guided-menu presence + generation so the chat page can show/hide the guided
   // strip and refetch it when a model swap changes the menu (LLM_GUIDED_MENU_SPEC §7).
   uint8_t  menuGroups = llmMenuGroupCount();
   uint16_t menuGen    = llmMenuGeneration();
   const char* stateStr = "UNLOADED";
   switch (st.state) {
-    case LLMState::LOADING:    stateStr = "LOADING"; break;
-    case LLMState::READY:      stateStr = "READY"; break;
-    case LLMState::GENERATING: stateStr = "GENERATING"; break;
-    case LLMState::ERROR:      stateStr = "ERROR"; break;
+    case LlmState::LOADING:    stateStr = "LOADING"; break;
+    case LlmState::READY:      stateStr = "READY"; break;
+    case LlmState::GENERATING: stateStr = "GENERATING"; break;
+    case LlmState::ERROR:      stateStr = "ERROR"; break;
     default: break;
   }
 
-  // LLMConfig describes a LOCAL checkpoint and is ZEROED for a remote source,
+  // LlmConfig describes a LOCAL checkpoint and is ZEROED for a remote source,
   // where arch_type 0 / quant_type 0 would render as the plausible-looking lie
   // "Llama · FP32" for a model this device has never seen the weights of. Emit
   // empty strings instead — the page already skips falsy detail fields.
@@ -153,7 +153,7 @@ static esp_err_t handleLLMStatus(httpd_req_t* req) {
 // ============================================================================
 // GET /api/llm/models
 // ============================================================================
-static esp_err_t handleLLMModels(httpd_req_t* req) {
+static esp_err_t handleLlmModels(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);
   DEBUG_HTTPF("[LLM-API] GET /api/llm/models from user=%s", ctx.user.c_str());
 
@@ -172,7 +172,7 @@ static esp_err_t handleLLMModels(httpd_req_t* req) {
 // All accessors copy out under sMenuLock; the page pages with `off` until
 // off+items.length >= total.
 // ============================================================================
-static esp_err_t handleLLMMenu(httpd_req_t* req) {
+static esp_err_t handleLlmMenu(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);
 
   size_t qlen = httpd_req_get_url_query_len(req);
@@ -197,7 +197,7 @@ static esp_err_t handleLLMMenu(httpd_req_t* req) {
   if (strcmp(kind, "groups") == 0) {
     JsonArray groups = doc["groups"].to<JsonArray>();
     for (uint8_t i = 0; i < gc; i++) {
-      LLMMenuGroupInfo gi;
+      LlmMenuGroupInfo gi;
       if (!llmMenuGroupInfo(i, &gi)) continue;
       JsonObject o = groups.add<JsonObject>();
       o["i"]         = i;
@@ -208,7 +208,7 @@ static esp_err_t handleLLMMenu(httpd_req_t* req) {
     }
   } else {
     const bool wantTpl = (strcmp(kind, "tpl") == 0);
-    LLMMenuGroupInfo gi;
+    LlmMenuGroupInfo gi;
     if (g < 0 || off < 0 || gc == 0 || g >= (int)gc || !llmMenuGroupInfo((uint8_t)g, &gi))
       return sendJsonResponse(req, "{\"schema\":1,\"error\":\"bad group\"}");
     const int total = wantTpl ? (int)gi.tplCount : (int)gi.entCount;
@@ -237,7 +237,7 @@ static esp_err_t handleLLMMenu(httpd_req_t* req) {
 // JSON object ({"schema":1,"ok":...}) goes back as is; anything else (the
 // executor's admin refusal, a timeout) becomes {"ok":false,"error":...}.
 // ============================================================================
-static esp_err_t sendLLMCommandReply(httpd_req_t* req, const String& out,
+static esp_err_t sendLlmCommandReply(httpd_req_t* req, const String& out,
                                      const char* fallback) {
   if (out.startsWith("{")) return sendJsonResponse(req, out.c_str());
   const char* why = out.length() ? out.c_str() : fallback;
@@ -255,7 +255,7 @@ static esp_err_t sendLLMCommandReply(httpd_req_t* req, const String& out,
 // ============================================================================
 // POST /api/llm/load  { "model": "model.bin" }
 // ============================================================================
-static esp_err_t handleLLMLoad(httpd_req_t* req) {
+static esp_err_t handleLlmLoad(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);
 
   char body[256];
@@ -290,24 +290,24 @@ static esp_err_t handleLLMLoad(httpd_req_t* req) {
   DEBUG_HTTPF("[LLM-API] POST /api/llm/load: model='%s' max_ctx=%d", modelName, maxCtx);
   String out;
   (void)executeUnifiedWebCommand(req, ctx, String(cmd), out);
-  return sendLLMCommandReply(req, out, "load failed");
+  return sendLlmCommandReply(req, out, "load failed");
 }
 
 // ============================================================================
 // POST /api/llm/unload
 // ============================================================================
-static esp_err_t handleLLMUnload(httpd_req_t* req) {
+static esp_err_t handleLlmUnload(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);
   DEBUG_HTTPF("[LLM-API] POST /api/llm/unload from user=%s", ctx.user.c_str());
   String out;
   (void)executeUnifiedWebCommand(req, ctx, String("llmunload"), out);
-  return sendLLMCommandReply(req, out, "unload failed");
+  return sendLlmCommandReply(req, out, "unload failed");
 }
 
 // ============================================================================
 // POST /api/llm/stop
 // ============================================================================
-static esp_err_t handleLLMStop(httpd_req_t* req) {
+static esp_err_t handleLlmStop(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);
   DEBUG_HTTPF("[LLM-API] POST /api/llm/stop from user=%s", ctx.user.c_str());
   llmBackendStop();
@@ -320,7 +320,7 @@ static esp_err_t handleLLMStop(httpd_req_t* req) {
 // Client polls GET /api/llm/result?session=N&offset=N for streamed output.
 // ============================================================================
 
-static esp_err_t handleLLMGenerate(httpd_req_t* req) {
+static esp_err_t handleLlmGenerate(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);
 
   if (!llmBackendIsReady()) {
@@ -387,7 +387,7 @@ static esp_err_t handleLLMGenerate(httpd_req_t* req) {
 // use it rather than measuring the decoded text. `len` is the TOTAL buffered
 // length and is NOT a cursor; never compare the two to decide completion.
 // ============================================================================
-static esp_err_t handleLLMPoll(httpd_req_t* req) {
+static esp_err_t handleLlmPoll(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);
 
   // Parse query string: ?session=N&offset=N
@@ -476,7 +476,7 @@ static esp_err_t handleLLMPoll(httpd_req_t* req) {
   // cm5LlmStartAsync clears the error string at the top of every generation, so
   // anything set here belongs to the turn that just ended.
   if (done) {
-    const LLMStatus est = llmBackendStatus();
+    const LlmStatus est = llmBackendStatus();
     if (est.errorMsg[0] != '\0') jdoc["error"] = (const char*)est.errorMsg;
   }
 
@@ -490,7 +490,7 @@ static esp_err_t handleLLMPoll(httpd_req_t* req) {
 // Used by the web UI on page load to render any prior turns (which now live
 // in firmware, not browser JS). Each entry: {role, text, tokens, tokPerSec, streaming}.
 // ============================================================================
-static esp_err_t handleLLMChatTurns(httpd_req_t* req) {
+static esp_err_t handleLlmChatTurns(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);
 
   int count = chatGetTurnCount();
@@ -552,7 +552,7 @@ static esp_err_t handleLLMChatTurns(httpd_req_t* req) {
 // Replaces the legacy "browser POSTs /api/llm/generate with suppress=[prior]"
 // path. The firmware now owns retry semantics + suppress tokenization.
 // ============================================================================
-static esp_err_t handleLLMChatRetry(httpd_req_t* req) {
+static esp_err_t handleLlmChatRetry(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);
 
   // Optional per-call param overrides (same shape as /api/llm/generate).
@@ -585,7 +585,7 @@ static esp_err_t handleLLMChatRetry(httpd_req_t* req) {
 // ============================================================================
 // POST /api/llm/chat/clear — wipe conversation history
 // ============================================================================
-static esp_err_t handleLLMChatClear(httpd_req_t* req) {
+static esp_err_t handleLlmChatClear(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);
   if (!chatClear()) {
     return sendJsonResponse(req, "{\"ok\":false,\"error\":\"busy — stop first\"}");
@@ -596,33 +596,33 @@ static esp_err_t handleLLMChatClear(httpd_req_t* req) {
 // ============================================================================
 // GET /llm - Chat page
 // ============================================================================
-static void streamLLMContent(httpd_req_t* req, const String& username) {
-  streamCardPage(req, "LLM", username, "llm", [&] { streamLLMInner(req, username); });
+static void streamLlmContent(httpd_req_t* req, const String& username) {
+  streamCardPage(req, "LLM", username, "llm", [&] { streamLlmInner(req, username); });
 }
 
-static esp_err_t handleLLMPage(httpd_req_t* req) {
+static esp_err_t handleLlmPage(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);
   DEBUG_HTTPF("[LLM-API] GET /llm page for user=%s", ctx.user.c_str());
-  streamPageWithContent(req, "llm", ctx.user, streamLLMContent);
+  streamPageWithContent(req, "llm", ctx.user, streamLlmContent);
   return ESP_OK;
 }
 
 // ============================================================================
 // Handler Registration
 // ============================================================================
-void registerLLMHandlers(httpd_handle_t server) {
-  static const httpd_uri_t llmPage = { .uri = "/llm", .method = HTTP_GET, .handler = handleLLMPage, .user_ctx = NULL };
-  static const httpd_uri_t llmStatus = { .uri = "/api/llm/status", .method = HTTP_GET, .handler = handleLLMStatus, .user_ctx = NULL };
-  static const httpd_uri_t llmModels = { .uri = "/api/llm/models", .method = HTTP_GET, .handler = handleLLMModels, .user_ctx = NULL };
-  static const httpd_uri_t llmMenu = { .uri = "/api/llm/menu", .method = HTTP_GET, .handler = handleLLMMenu, .user_ctx = NULL };
-  static const httpd_uri_t llmLoad = { .uri = "/api/llm/load", .method = HTTP_POST, .handler = handleLLMLoad, .user_ctx = NULL };
-  static const httpd_uri_t llmUnload = { .uri = "/api/llm/unload", .method = HTTP_POST, .handler = handleLLMUnload, .user_ctx = NULL };
-  static const httpd_uri_t llmGenerate = { .uri = "/api/llm/generate", .method = HTTP_POST, .handler = handleLLMGenerate, .user_ctx = NULL };
-  static const httpd_uri_t llmStop    = { .uri = "/api/llm/stop",     .method = HTTP_POST, .handler = handleLLMStop,     .user_ctx = NULL };
-  static const httpd_uri_t llmPoll    = { .uri = "/api/llm/result",   .method = HTTP_GET,  .handler = handleLLMPoll,     .user_ctx = NULL };
-  static const httpd_uri_t llmChatTurns = { .uri = "/api/llm/chat/turns", .method = HTTP_GET,  .handler = handleLLMChatTurns, .user_ctx = NULL };
-  static const httpd_uri_t llmChatRetry = { .uri = "/api/llm/chat/retry", .method = HTTP_POST, .handler = handleLLMChatRetry, .user_ctx = NULL };
-  static const httpd_uri_t llmChatClear = { .uri = "/api/llm/chat/clear", .method = HTTP_POST, .handler = handleLLMChatClear, .user_ctx = NULL };
+void registerLlmHandlers(httpd_handle_t server) {
+  static const httpd_uri_t llmPage = { .uri = "/llm", .method = HTTP_GET, .handler = handleLlmPage, .user_ctx = NULL };
+  static const httpd_uri_t llmStatus = { .uri = "/api/llm/status", .method = HTTP_GET, .handler = handleLlmStatus, .user_ctx = NULL };
+  static const httpd_uri_t llmModels = { .uri = "/api/llm/models", .method = HTTP_GET, .handler = handleLlmModels, .user_ctx = NULL };
+  static const httpd_uri_t llmMenu = { .uri = "/api/llm/menu", .method = HTTP_GET, .handler = handleLlmMenu, .user_ctx = NULL };
+  static const httpd_uri_t llmLoad = { .uri = "/api/llm/load", .method = HTTP_POST, .handler = handleLlmLoad, .user_ctx = NULL };
+  static const httpd_uri_t llmUnload = { .uri = "/api/llm/unload", .method = HTTP_POST, .handler = handleLlmUnload, .user_ctx = NULL };
+  static const httpd_uri_t llmGenerate = { .uri = "/api/llm/generate", .method = HTTP_POST, .handler = handleLlmGenerate, .user_ctx = NULL };
+  static const httpd_uri_t llmStop    = { .uri = "/api/llm/stop",     .method = HTTP_POST, .handler = handleLlmStop,     .user_ctx = NULL };
+  static const httpd_uri_t llmPoll    = { .uri = "/api/llm/result",   .method = HTTP_GET,  .handler = handleLlmPoll,     .user_ctx = NULL };
+  static const httpd_uri_t llmChatTurns = { .uri = "/api/llm/chat/turns", .method = HTTP_GET,  .handler = handleLlmChatTurns, .user_ctx = NULL };
+  static const httpd_uri_t llmChatRetry = { .uri = "/api/llm/chat/retry", .method = HTTP_POST, .handler = handleLlmChatRetry, .user_ctx = NULL };
+  static const httpd_uri_t llmChatClear = { .uri = "/api/llm/chat/clear", .method = HTTP_POST, .handler = handleLlmChatClear, .user_ctx = NULL };
 
   httpd_register_uri_handler(server, &llmPage);
   httpd_register_uri_handler(server, &llmStatus);

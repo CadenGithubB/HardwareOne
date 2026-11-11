@@ -179,7 +179,7 @@ static bool contains(const std::string& text, const char* part) {
 static void caseUserLoadRefused() {
   reset();
   httpd_req_t req = request("bob", false, "{\"model\":\"onboard:tiny.bin\"}");
-  CHECK(handleLLMLoad(&req) == ESP_OK);
+  CHECK(handleLlmLoad(&req) == ESP_OK);
   CHECK(gLoadCtx.empty());
   CHECK(gSubmitted.size() == 1);
   CHECK(gSubmitted[0] == "llmload \"onboard:tiny.bin\"");
@@ -194,7 +194,7 @@ static void caseUserUnloadRefused() {
   sActiveKind = LlmBackendKind::Onboard;
   gReady = true;
   httpd_req_t req = request("bob", false, "{}");
-  CHECK(handleLLMUnload(&req) == ESP_OK);
+  CHECK(handleLlmUnload(&req) == ESP_OK);
   CHECK(gUnloads == 0);
   CHECK(sActiveKind == LlmBackendKind::Onboard);
   CHECK(gSubmitted.size() == 1 && gSubmitted[0] == "llmunload");
@@ -210,22 +210,22 @@ static void caseAdminLoadThroughCommand() {
   reset();
   gSettings.llmMaxContext = 1024;
   httpd_req_t req = request("root", true, "{\"model\":\"onboard:tiny.bin\"}");
-  CHECK(handleLLMLoad(&req) == ESP_OK);
+  CHECK(handleLlmLoad(&req) == ESP_OK);
   CHECK(gSubmitted.size() == 1 && gSubmitted[0] == "llmload \"onboard:tiny.bin\"");
   CHECK(gLoadCtx.size() == 1 && gLoadCtx[0] == 1024);
   CHECK(contains(req.reply, "\"ok\":true"));
 
   req = request("root", true, "{\"model\":\"onboard:tiny.bin\",\"max_ctx\":4096}");
-  CHECK(handleLLMLoad(&req) == ESP_OK);
+  CHECK(handleLlmLoad(&req) == ESP_OK);
   CHECK(gSubmitted.back() == "llmload \"onboard:tiny.bin\" 4096");
   CHECK(gLoadCtx.back() == 1024);          // clamped to the setting
 
   req = request("root", true, "{\"model\":\"onboard:tiny.bin\",\"max_ctx\":256}");
-  CHECK(handleLLMLoad(&req) == ESP_OK);
+  CHECK(handleLlmLoad(&req) == ESP_OK);
   CHECK(gLoadCtx.back() == 256);           // lowering is allowed
 
   req = request("root", true, "{\"model\":\"onboard:missing.bin\"}");
-  CHECK(handleLLMLoad(&req) == ESP_OK);
+  CHECK(handleLlmLoad(&req) == ESP_OK);
   JsonDocument doc;
   CHECK(!deserializeJson(doc, req.reply));
   CHECK(doc["ok"] == false);
@@ -237,7 +237,7 @@ static void caseAdminUnloadThroughCommand() {
   sActiveKind = LlmBackendKind::Onboard;
   gReady = true;
   httpd_req_t req = request("root", true, "{}");
-  CHECK(handleLLMUnload(&req) == ESP_OK);
+  CHECK(handleLlmUnload(&req) == ESP_OK);
   CHECK(gSubmitted.size() == 1 && gSubmitted[0] == "llmunload");
   CHECK(gUnloads == 1);
   CHECK(sActiveKind == LlmBackendKind::None);
@@ -249,7 +249,7 @@ static void caseAdminUnloadThroughCommand() {
 static void caseBadIdRejected() {
   reset();
   httpd_req_t req = request("root", true, "{\"model\":\"onboard:a\\\" b\"}");
-  CHECK(handleLLMLoad(&req) == ESP_OK);
+  CHECK(handleLlmLoad(&req) == ESP_OK);
   CHECK(gSubmitted.empty());
   CHECK(gLoadCtx.empty());
   CHECK(contains(req.reply, "Invalid model id"));

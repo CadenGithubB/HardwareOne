@@ -3663,9 +3663,9 @@ bool evaluateCondition(const char* condition) {
     // On-device model state -> READY / BUSY / NONE
     isNumeric = false;
  #if ENABLE_LLM_BACKEND
-    LLMState st = llmBackendStatus().state;
-    const char* v = (st == LLMState::READY) ? "READY"
-                  : (st == LLMState::GENERATING || st == LLMState::LOADING) ? "BUSY" : "NONE";
+    LlmState st = llmBackendStatus().state;
+    const char* v = (st == LlmState::READY) ? "READY"
+                  : (st == LlmState::GENERATING || st == LlmState::LOADING) ? "BUSY" : "NONE";
     strlcpy(currentStringValue, v, sizeof(currentStringValue));
  #else
     return false;

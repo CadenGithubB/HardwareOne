@@ -17,7 +17,7 @@
 //
 // The model picker lists every source's models through the backend registry,
 // with "Unload model" first, as on the glasses. Footer hints go through the
-// shared footer (oledLLMFooterHint), which owns the bottom of the screen.
+// shared footer (oledLlmFooterHint), which owns the bottom of the screen.
 //
 //   - The reader re-reads the latest run (chatReadRun) only when it changes and
 //     wraps it with the shared System_TextPager core; turns stay in the chat
@@ -62,7 +62,7 @@ static const int LLM_READER_COLS   = LLM_CHARS - 1;
 // UI state
 // ============================================================================
 
-enum class LLMUIState : uint8_t {
+enum class LlmUIState : uint8_t {
   NO_MODEL = 0,
   LOADING,
   READY,
@@ -81,9 +81,9 @@ enum class LLMUIState : uint8_t {
   PICK_ENTITY,
 };
 
-static LLMUIState sUIState = LLMUIState::HOME;
+static LlmUIState sUIState = LlmUIState::HOME;
 static bool       sKeyboardActive = false;
-static LLMUIState sKeyboardReturn = LLMUIState::HOME;  // where a cancelled or empty prompt goes
+static LlmUIState sKeyboardReturn = LlmUIState::HOME;  // where a cancelled or empty prompt goes
 static bool       sLoadReturnsHome = false; // a picker load settles on HOME, not the chat view
 
 // The shared footer (drawOledFooter) clears and draws the bottom strip after
@@ -278,8 +278,8 @@ static void pollLlmCommandReply() {
     return;
   }
   if (!status) return;
-  if (op == LLM_CMD_LOAD && sUIState == LLMUIState::LOADING) {
-    sUIState = LLMUIState::PICK_MODEL;
+  if (op == LLM_CMD_LOAD && sUIState == LlmUIState::LOADING) {
+    sUIState = LlmUIState::PICK_MODEL;
     sLoadReturnsHome = false;
     if (reason[0]) {
       strlcpy(sMenuStatusBuffer, reason, sizeof(sMenuStatusBuffer));
@@ -296,19 +296,19 @@ static void pollLlmCommandReply() {
 
 // True for every sub-state that owns the screen until the user leaves it.
 // Keep in sync with the switch inside syncStateFromEngine().
-static bool stateOwnsUI(LLMUIState s) {
-  return s == LLMUIState::HOME        || s == LLMUIState::PICK_MODEL ||
-         s == LLMUIState::PICK_GROUP  || s == LLMUIState::PICK_TEMPLATE ||
-         s == LLMUIState::PICK_ENTITY;
+static bool stateOwnsUI(LlmUIState s) {
+  return s == LlmUIState::HOME        || s == LlmUIState::PICK_MODEL ||
+         s == LlmUIState::PICK_GROUP  || s == LlmUIState::PICK_TEMPLATE ||
+         s == LlmUIState::PICK_ENTITY;
 }
 
 // Refresh state from the engine + chat module. Called at the top of
-// displayLLM() each frame so transitions land within one render tick.
+// displayLlm() each frame so transitions land within one render tick.
 static void syncStateFromEngine() {
   pollLlmCommandReply();
   if (sKeyboardActive) return;  // keyboard owns the UI
 
-  LLMStatus st = llmBackendStatus();
+  LlmStatus st = llmBackendStatus();
 
   // Sub-states that OWN the UI. This function is a fully-enumerated dispatcher
   // with no leave-alone default — anything that falls through to the
@@ -323,8 +323,8 @@ static void syncStateFromEngine() {
   // loaded and the guided levels require one.
   if (stateOwnsUI(sUIState)) {
     switch (sUIState) {
-      case LLMUIState::HOME:
-      case LLMUIState::PICK_MODEL:
+      case LlmUIState::HOME:
+      case LlmUIState::PICK_MODEL:
         // No engine precondition: HOME's rows are rebuilt from the engine every
         // frame, and the picker is how a model gets chosen in the first place.
         // Both leave only on a selection or back.
@@ -333,10 +333,10 @@ static void syncStateFromEngine() {
         // Guided levels (spec §8): an unload/swap bumps menuGeneration and an
         // unload drops the engine out of READY, either of which invalidates the
         // indices the user is picking with.
-        if (st.state != LLMState::READY ||
+        if (st.state != LlmState::READY ||
             llmMenuGroupCount() == 0 ||
             llmMenuGeneration() != sPickGen) {
-          sUIState = LLMUIState::HOME;
+          sUIState = LlmUIState::HOME;
           sPickStatus = nullptr;
         }
         break;
@@ -346,15 +346,15 @@ static void syncStateFromEngine() {
 
   // Generation overrides everything else
   if (chatIsGenerating()) {
-    if (sUIState != LLMUIState::GENERATING) {
-      sUIState = LLMUIState::GENERATING;
+    if (sUIState != LlmUIState::GENERATING) {
+      sUIState = LlmUIState::GENERATING;
     }
     return;
   }
 
   // From GENERATING → settle to READY when chat says it's done
-  if (sUIState == LLMUIState::GENERATING) {
-    sUIState = LLMUIState::READY;
+  if (sUIState == LlmUIState::GENERATING) {
+    sUIState = LlmUIState::READY;
     return;
   }
 
@@ -364,27 +364,27 @@ static void syncStateFromEngine() {
   // A load started from the picker settles on HOME, as on the glasses, where
   // the Model row now names it. A load the chat view only watched (another
   // surface started it) settles back on the chat view.
-  if (sUIState == LLMUIState::LOADING) {
+  if (sUIState == LlmUIState::LOADING) {
     if (sCmdInFlight == LLM_CMD_LOAD) return;
-    if (st.state == LLMState::READY ||
-        st.state == LLMState::ERROR || st.state == LLMState::UNLOADED) {
+    if (st.state == LlmState::READY ||
+        st.state == LlmState::ERROR || st.state == LlmState::UNLOADED) {
       if (sLoadReturnsHome) {
-        sUIState = LLMUIState::HOME;
+        sUIState = LlmUIState::HOME;
         sLoadReturnsHome = false;
       } else {
-        sUIState = (st.state == LLMState::READY) ? LLMUIState::READY : LLMUIState::NO_MODEL;
+        sUIState = (st.state == LlmState::READY) ? LlmUIState::READY : LlmUIState::NO_MODEL;
       }
     }
     return;
   }
 
   // Otherwise reflect whatever the engine reports.
-  if (st.state == LLMState::READY) {
-    sUIState = LLMUIState::READY;
-  } else if (st.state == LLMState::LOADING) {
-    sUIState = LLMUIState::LOADING;
+  if (st.state == LlmState::READY) {
+    sUIState = LlmUIState::READY;
+  } else if (st.state == LlmState::LOADING) {
+    sUIState = LlmUIState::LOADING;
   } else {
-    sUIState = LLMUIState::NO_MODEL;
+    sUIState = LlmUIState::NO_MODEL;
   }
 }
 
@@ -446,7 +446,7 @@ static void enterPickModel() {
   sModelScroll.scrollOffset  = 0;
   sMenuStatus = nullptr;
   populateModelPicker();
-  sUIState = LLMUIState::PICK_MODEL;
+  sUIState = LlmUIState::PICK_MODEL;
 }
 
 // Commit the highlighted row. Selection is BY INDEX into sModelDescs, so a
@@ -458,7 +458,7 @@ static void commitModelPick() {
     if (sCmdInFlight != LLM_CMD_NONE) { sMenuStatus = "busy"; return; }
     if (!submitLlmCommand("llmunload", LLM_CMD_UNLOAD)) { sMenuStatus = "unload failed"; return; }
     sMenuStatus = "Unloading...";   // pollLlmCommandReply replaces it with the outcome
-    sUIState = LLMUIState::HOME;
+    sUIState = LlmUIState::HOME;
     return;
   }
   const int idx = (int)((uintptr_t)sel->userData) - 1;
@@ -477,7 +477,7 @@ static void commitModelPick() {
   }
   sMenuStatus = nullptr;
   sLoadReturnsHome = true;
-  sUIState = LLMUIState::LOADING;
+  sUIState = LlmUIState::LOADING;
 }
 
 // ============================================================================
@@ -501,7 +501,7 @@ static void populateHomeMenu() {
 static void enterHome() {
   ensurePickScrollInit();
   sPickStatus = nullptr;
-  sUIState = LLMUIState::HOME;
+  sUIState = LlmUIState::HOME;
 }
 
 // ============================================================================
@@ -550,7 +550,7 @@ static void populateGroupPicker() {
   uint8_t n = llmMenuGroupCount();
   if (n > 8) n = 8;                    // format cap; sGroupRows is sized to match
   for (uint8_t i = 0; i < n; i++) {
-    LLMMenuGroupInfo gi;
+    LlmMenuGroupInfo gi;
     if (llmMenuGroupInfo(i, &gi)) {
       strlcpy(sGroupRows[i], gi.name, sizeof(sGroupRows[i]));   // 21-char truncation
     } else {
@@ -564,7 +564,7 @@ static void populateGroupPicker() {
 static void populateTemplatePicker() {
   ensurePickScrollInit();
   oledScrollClearKeepSelection(&sTplScroll);
-  LLMMenuGroupInfo gi;
+  LlmMenuGroupInfo gi;
   uint16_t n = llmMenuGroupInfo(sPickGroup, &gi) ? gi.tplCount : 0;
   // Curation targets 5-15 templates/group; the format allows up to 64. One
   // OledScrollState scrolls up to OLED_SCROLL_MAX_ITEMS, which comfortably covers
@@ -610,7 +610,7 @@ static void enterPickGroup() {
   sPickStatus = nullptr;
   sGroupScroll.selectedIndex = 0;
   sGroupScroll.scrollOffset  = 0;
-  sUIState = LLMUIState::PICK_GROUP;
+  sUIState = LlmUIState::PICK_GROUP;
 }
 
 static void enterPickTemplate(uint8_t g) {
@@ -618,18 +618,18 @@ static void enterPickTemplate(uint8_t g) {
   sPickStatus = nullptr;
   sTplScroll.selectedIndex = 0;
   sTplScroll.scrollOffset  = 0;
-  sUIState = LLMUIState::PICK_TEMPLATE;
+  sUIState = LlmUIState::PICK_TEMPLATE;
 }
 
 static void enterPickEntity(uint16_t t) {
   sPickTpl    = t;
   sPickStatus = nullptr;
-  LLMMenuGroupInfo gi;
+  LlmMenuGroupInfo gi;
   sEntTotal   = llmMenuGroupInfo(sPickGroup, &gi) ? gi.entCount : 0;
   sEntWindow  = 0;
   sEntScroll.selectedIndex = 0;
   sEntScroll.scrollOffset  = 0;
-  sUIState = LLMUIState::PICK_ENTITY;
+  sUIState = LlmUIState::PICK_ENTITY;
 }
 
 // Compose + submit the chosen (group, template, entity). e = -1 for a slotless
@@ -640,7 +640,7 @@ static void submitGuided(int entityIndex) {
     sLastTurnGuided   = true;
     sGuidedAskSession = rc;
     sPickStatus       = nullptr;
-    sUIState          = LLMUIState::GENERATING;   // stream the answer (existing view)
+    sUIState          = LlmUIState::GENERATING;   // stream the answer (existing view)
   } else if (rc == 0) {
     // Busy — a generation is already in flight. Stay in the picker; show status.
     sPickStatus = "Busy: answer in progress";
@@ -648,7 +648,7 @@ static void submitGuided(int entityIndex) {
     // -1 stale gen (model swapped) / -2 bad index / -3 no menu — back to HOME,
     // whose rows show what the engine has now.
     sPickStatus = nullptr;
-    sUIState    = LLMUIState::HOME;
+    sUIState    = LlmUIState::HOME;
   }
 }
 
@@ -760,11 +760,11 @@ static void drawFooter(const char* line) {
 }
 
 // The hint drawOledFooter() shows for this mode: whatever the last frame set.
-const char* oledLLMFooterHint() {
+const char* oledLlmFooterHint() {
   return sFooterHint;
 }
 
-static void displayLLM_noModel() {
+static void displayLlm_noModel() {
   oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
   oledDisplay->println("No model loaded.");
   oledDisplay->setCursor(0, OLED_CONTENT_START_Y + LLM_LINE_H);
@@ -774,7 +774,7 @@ static void displayLLM_noModel() {
   drawFooter("A:pick  B:menu");
 }
 
-static void displayLLM_loading() {
+static void displayLlm_loading() {
   oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
   oledDisplay->println("Loading model...");
   static const char* spin[] = {".  ", ".. ", "..."};
@@ -832,7 +832,7 @@ static bool drawModelCard() {
   return true;
 }
 
-static void displayLLM_chat(bool generating) {
+static void displayLlm_chat(bool generating) {
   syncReader();
 
   if (sReplyLines == 0) {
@@ -881,13 +881,13 @@ static void displayLLM_chat(bool generating) {
   }
 }
 
-static void displayLLM_home() {
+static void displayLlm_home() {
   populateHomeMenu();
   oledScrollRenderSimple(oledDisplay, &sHomeScroll);
   drawFooter(sMenuStatus ? sMenuStatus : "A:pick  B:back");
 }
 
-static void displayLLM_pickModel() {
+static void displayLlm_pickModel() {
   populateModelPicker();
   oledScrollRenderSimple(oledDisplay, &sModelScroll);
   drawFooter(sMenuStatus ? sMenuStatus : "A:load Y:new B:back");
@@ -895,19 +895,19 @@ static void displayLLM_pickModel() {
 
 // Guided-menu picker views — refill the level's list, render it single-line, and
 // footer the standard picker hints (or a transient busy status).
-static void displayLLM_pickGroup() {
+static void displayLlm_pickGroup() {
   populateGroupPicker();
   oledScrollRenderSimple(oledDisplay, &sGroupScroll);
   drawFooter(sPickStatus ? sPickStatus : "A: pick  B: back");
 }
 
-static void displayLLM_pickTemplate() {
+static void displayLlm_pickTemplate() {
   populateTemplatePicker();
   oledScrollRenderSimple(oledDisplay, &sTplScroll);
   drawFooter(sPickStatus ? sPickStatus : "A: pick  B: back");
 }
 
-static void displayLLM_pickEntity() {
+static void displayLlm_pickEntity() {
   populateEntityPicker();
   oledScrollRenderSimple(oledDisplay, &sEntScroll);
   drawFooter(sPickStatus ? sPickStatus : "A: pick  B: back");
@@ -918,11 +918,11 @@ static void displayLLM_pickEntity() {
 // the screen asks for its next frame, as the Speech screen does; without that a
 // reply was never drawn until a key was pressed. Idle, it waits for input.
 static bool llmScreenIsLive() {
-  return sUIState == LLMUIState::GENERATING || sUIState == LLMUIState::LOADING ||
+  return sUIState == LlmUIState::GENERATING || sUIState == LlmUIState::LOADING ||
          sCmdInFlight != LLM_CMD_NONE || (sReplyRun != 0 && !sReplyDone);
 }
 
-static void displayLLM() {
+static void displayLlm() {
   if (!oledDisplay) return;
   oledDisplay->setTextSize(1);
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
@@ -936,15 +936,15 @@ static void displayLLM() {
   syncStateFromEngine();
 
   switch (sUIState) {
-    case LLMUIState::NO_MODEL:      displayLLM_noModel();      break;
-    case LLMUIState::LOADING:       displayLLM_loading();      break;
-    case LLMUIState::READY:         displayLLM_chat(false);    break;
-    case LLMUIState::GENERATING:    displayLLM_chat(true);     break;
-    case LLMUIState::HOME:          displayLLM_home();         break;
-    case LLMUIState::PICK_MODEL:    displayLLM_pickModel();    break;
-    case LLMUIState::PICK_GROUP:    displayLLM_pickGroup();    break;
-    case LLMUIState::PICK_TEMPLATE: displayLLM_pickTemplate(); break;
-    case LLMUIState::PICK_ENTITY:   displayLLM_pickEntity();   break;
+    case LlmUIState::NO_MODEL:      displayLlm_noModel();      break;
+    case LlmUIState::LOADING:       displayLlm_loading();      break;
+    case LlmUIState::READY:         displayLlm_chat(false);    break;
+    case LlmUIState::GENERATING:    displayLlm_chat(true);     break;
+    case LlmUIState::HOME:          displayLlm_home();         break;
+    case LlmUIState::PICK_MODEL:    displayLlm_pickModel();    break;
+    case LlmUIState::PICK_GROUP:    displayLlm_pickGroup();    break;
+    case LlmUIState::PICK_TEMPLATE: displayLlm_pickTemplate(); break;
+    case LlmUIState::PICK_ENTITY:   displayLlm_pickEntity();   break;
   }
   if (llmScreenIsLive()) oledMarkDirty();
 }
@@ -955,7 +955,7 @@ static void displayLLM() {
 
 // Opens the prompt keyboard (it can also dictate); a cancelled or empty prompt
 // returns to `from`, a submitted one to the chat view to watch the answer.
-static void openPrompt(LLMUIState from) {
+static void openPrompt(LlmUIState from) {
   oledKeyboardInit("Prompt:", nullptr, OLED_KEYBOARD_MAX_LENGTH,
                    OledKeyboardDictationPolicy::ALLOW_PLAINTEXT);
   sKeyboardActive = true;
@@ -999,10 +999,10 @@ static void openChatView() {
   sReplyStale = true;   // reread, and open at the first line as the glasses do
   sReaderTop = 0;
   sMenuStatus = nullptr;
-  sUIState = LLMUIState::READY;
+  sUIState = LlmUIState::READY;
 }
 
-static bool handleLLMInput(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed) {
+static bool handleLlmInput(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed) {
   if (oledGuestBlocksMutate()) return true;
   // Keyboard active: confirm/cancel are routed here; navigation handled internally.
   if (sKeyboardActive) {
@@ -1030,7 +1030,7 @@ static bool handleLLMInput(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed
   }
 
   switch (sUIState) {
-    case LLMUIState::NO_MODEL: {
+    case LlmUIState::NO_MODEL: {
       if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
         // A real list over every source, not a file browser: a remote model has
         // no file on this device and cannot be represented as one.
@@ -1041,7 +1041,7 @@ static bool handleLLMInput(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed
       return false;
     }
 
-    case LLMUIState::LOADING:
+    case LlmUIState::LOADING:
       // A CM5-routed select returns immediately and the host may take tens of
       // seconds to restart llama-server, so this is a long-lived state. B goes
       // home while the load carries on; HOME's Model row shows when it lands.
@@ -1051,7 +1051,7 @@ static bool handleLLMInput(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed
       }
       return true;
 
-    case LLMUIState::GENERATING: {
+    case LlmUIState::GENERATING: {
       if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
         chatStop();
         return true;
@@ -1062,9 +1062,9 @@ static bool handleLLMInput(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed
       return false;
     }
 
-    case LLMUIState::READY: {
+    case LlmUIState::READY: {
       if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
-        openPrompt(LLMUIState::READY);
+        openPrompt(LlmUIState::READY);
         return true;
       }
       if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_Y)) {
@@ -1081,7 +1081,7 @@ static bool handleLLMInput(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed
       return false;
     }
 
-    case LLMUIState::HOME: {
+    case LlmUIState::HOME: {
       if (oledScrollHandleNav(&sHomeScroll)) { sMenuStatus = nullptr; return true; }
       if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A) || INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
         OledScrollItem* sel = oledScrollGetSelected(&sHomeScroll);
@@ -1092,7 +1092,7 @@ static bool handleLLMInput(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed
             openChatView();
             break;
           case LlmHomeAction::Ask:
-            if (llmBackendIsReady()) openPrompt(LLMUIState::HOME);
+            if (llmBackendIsReady()) openPrompt(LlmUIState::HOME);
             else sMenuStatus = "No model loaded";
             break;
           case LlmHomeAction::Guided:
@@ -1117,7 +1117,7 @@ static bool handleLLMInput(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed
       return false;   // B falls through to the global back-handler: leave the app
     }
 
-    case LLMUIState::PICK_MODEL: {
+    case LlmUIState::PICK_MODEL: {
       if (oledScrollHandleNav(&sModelScroll)) { sMenuStatus = nullptr; return true; }
       if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_Y)) {
         clearChatForOled();
@@ -1135,7 +1135,7 @@ static bool handleLLMInput(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed
       return true;
     }
 
-    case LLMUIState::PICK_GROUP: {
+    case LlmUIState::PICK_GROUP: {
       if (oledScrollHandleNav(&sGroupScroll)) { sPickStatus = nullptr; return true; }
       if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A) || INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
         enterPickTemplate((uint8_t)sGroupScroll.selectedIndex);
@@ -1148,7 +1148,7 @@ static bool handleLLMInput(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed
       return true;  // picker is modal — don't leak other keys to global handlers
     }
 
-    case LLMUIState::PICK_TEMPLATE: {
+    case LlmUIState::PICK_TEMPLATE: {
       if (oledScrollHandleNav(&sTplScroll)) { sPickStatus = nullptr; return true; }
       if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A) || INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
         uint16_t t = (uint16_t)sTplScroll.selectedIndex;
@@ -1158,21 +1158,21 @@ static bool handleLLMInput(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed
         bool hasSlot = false;
         char probe[8];
         llmMenuTemplate(sPickGroup, t, probe, sizeof(probe), &hasSlot);
-        LLMMenuGroupInfo gi;
+        LlmMenuGroupInfo gi;
         uint16_t entCount = llmMenuGroupInfo(sPickGroup, &gi) ? gi.entCount : 0;
         if (hasSlot && entCount > 0) enterPickEntity(t);
         else                        submitGuided(-1);
         return true;
       }
       if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
-        sUIState = LLMUIState::PICK_GROUP;   // back one level
+        sUIState = LlmUIState::PICK_GROUP;   // back one level
         sPickStatus = nullptr;
         return true;
       }
       return true;
     }
 
-    case LLMUIState::PICK_ENTITY: {
+    case LlmUIState::PICK_ENTITY: {
       if (oledScrollHandleNav(&sEntScroll)) { sPickStatus = nullptr; return true; }
       if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A) || INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
         OledScrollItem* sel = oledScrollGetSelected(&sEntScroll);
@@ -1197,7 +1197,7 @@ static bool handleLLMInput(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed
         return true;
       }
       if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
-        sUIState = LLMUIState::PICK_TEMPLATE;   // back one level
+        sUIState = LlmUIState::PICK_TEMPLATE;   // back one level
         sPickStatus = nullptr;
         return true;
       }
@@ -1211,14 +1211,14 @@ static bool handleLLMInput(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed
 // Availability / reset
 // ============================================================================
 
-static bool isLLMAvailable(String* /*outReason*/) {
+static bool isLlmAvailable(String* /*outReason*/) {
   // Always available when compiled in — the surface itself shows the model
   // picker when no model is loaded, so the menu entry should stay visible
   // even on a freshly-booted device with no model selected yet.
   return true;
 }
 
-void resetLLMOledState() {
+void resetLlmOledState() {
   chatInit();
   if (sKeyboardActive) {
     oledKeyboardReset();
@@ -1231,7 +1231,7 @@ void resetLLMOledState() {
   ensurePickScrollInit();
   sHomeScroll.selectedIndex = 0;
   sHomeScroll.scrollOffset  = 0;
-  sUIState = LLMUIState::HOME;
+  sUIState = LlmUIState::HOME;
   sReplyStale = true;
   sReaderTop = 0;
 }
@@ -1243,24 +1243,24 @@ void resetLLMOledState() {
 // Entry hook (was an inline reset inside requestOledMode, guarded by
 // ENABLE_LLM_SOURCE_ONBOARD — now owned here, where the whole file is already gated).
 static void llmOnEnter(bool /*isForward*/) {
-  resetLLMOledState();
+  resetLlmOledState();
 }
 
-static const OledModeEntry sLLMModeEntry = {
+static const OledModeEntry sLlmModeEntry = {
   OLED_LLM,
   "LLM Chat",
   "terminal",
-  displayLLM,
-  isLLMAvailable,
-  handleLLMInput,
+  displayLlm,
+  isLlmAvailable,
+  handleLlmInput,
   true,   // show in main menu
   95,     // menu order
   nullptr,
   llmOnEnter
 };
 
-REGISTER_OLED_MODE_MODULE(&sLLMModeEntry, 1, "LLM");
+REGISTER_OLED_MODE_MODULE(&sLlmModeEntry, 1, "LLM");
 
-void oledLLMModeInit() {}
+void oledLlmModeInit() {}
 
 #endif // ENABLE_OLED_DISPLAY && ENABLE_LLM_BACKEND

@@ -532,8 +532,8 @@ bool cm5LlmIsReady() {
          (pres.mode == Cm5PresenceMode::Ready || pres.mode == Cm5PresenceMode::Busy);
 }
 
-LLMStatus cm5LlmStatus() {
-  LLMStatus st;
+LlmStatus cm5LlmStatus() {
+  LlmStatus st;
   memset(&st, 0, sizeof(st));
   bool sel, ready, done;
   portENTER_CRITICAL(&sMux);
@@ -544,10 +544,10 @@ LLMStatus cm5LlmStatus() {
   strlcpy(st.errorMsg, sLastError, sizeof(st.errorMsg));
   portEXIT_CRITICAL(&sMux);
 
-  if (!sel)                st.state = LLMState::UNLOADED;
-  else if (!ready)         st.state = LLMState::LOADING;   // host is switching
-  else if (!done)          st.state = LLMState::GENERATING;
-  else                     st.state = LLMState::READY;
+  if (!sel)                st.state = LlmState::UNLOADED;
+  else if (!ready)         st.state = LlmState::LOADING;   // host is switching
+  else if (!done)          st.state = LlmState::GENERATING;
+  else                     st.state = LlmState::READY;
 
   // The presence lease is part of the truth. cm5LlmIsReady() already consults
   // it and cm5LlmStartAsync() already refuses without it, but status() did not
@@ -558,7 +558,7 @@ LLMStatus cm5LlmStatus() {
   if (sel) {
     const Cm5PresenceSnapshot pres = cm5PresenceSnapshot();
     if (!pres.fresh || !pres.seenForSession) {
-      st.state = LLMState::ERROR;
+      st.state = LlmState::ERROR;
       strlcpy(st.errorMsg, "the CM5 is not reachable", sizeof(st.errorMsg));
     }
   }
@@ -567,7 +567,7 @@ LLMStatus cm5LlmStatus() {
   return st;
 }
 
-int cm5LlmStartAsync(const char* prompt, const LLMGenParams& params) {
+int cm5LlmStartAsync(const char* prompt, const LlmGenParams& params) {
   if (!prompt || !*prompt) return 0;
   if (!cm5LlmIsReady())    return 0;
 

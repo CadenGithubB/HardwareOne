@@ -1633,13 +1633,13 @@ void buildSystemInfoJson(JsonDocument& doc, bool includeDeviceList) {
 
 #if ENABLE_LLM_BACKEND
   {
-    LLMStatus llmSt = llmBackendStatus();
+    LlmStatus llmSt = llmBackendStatus();
     const char* llmStateStr = "UNLOADED";
     switch (llmSt.state) {
-      case LLMState::LOADING:    llmStateStr = "LOADING"; break;
-      case LLMState::READY:      llmStateStr = "READY"; break;
-      case LLMState::GENERATING: llmStateStr = "GENERATING"; break;
-      case LLMState::ERROR:      llmStateStr = "ERROR"; break;
+      case LlmState::LOADING:    llmStateStr = "LOADING"; break;
+      case LlmState::READY:      llmStateStr = "READY"; break;
+      case LlmState::GENERATING: llmStateStr = "GENERATING"; break;
+      case LlmState::ERROR:      llmStateStr = "ERROR"; break;
       default: break;
     }
     JsonObject llm = conn["llm"].to<JsonObject>();

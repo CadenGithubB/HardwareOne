@@ -92,9 +92,9 @@ struct Wifi { bool connected = true; bool isConnected() { return connected; } } 
 enum class LlmBackendKind { None, Onboard, Cm5, Http };
 constexpr unsigned LLM_STORAGE_REMOTE = 2;
 struct LlmModelDesc { char id[48], name[32]; LlmBackendKind backend; char path[64]; uint32_t sizeKB; uint8_t storage; bool available; };
-enum class LLMState { UNLOADED, LOADING, READY, GENERATING, ERROR };
-struct LLMStatus { LLMState state; char modelPath[64]; char errorMsg[128]; };
-struct LLMGenParams {};
+enum class LlmState { UNLOADED, LOADING, READY, GENERATING, ERROR };
+struct LlmStatus { LlmState state; char modelPath[64]; char errorMsg[128]; };
+struct LlmGenParams {};
 using esp_err_t = int;
 constexpr int ESP_LOG_WARN = 2, ESP_LOG_DEBUG = 4;
 static int httpLogLevel = ESP_LOG_DEBUG;
@@ -260,7 +260,7 @@ int main() {
   assert(!httpLlmIsReady() && !httpLlmStartAsync("must not reach old target", {}));
   LlmModelDesc unavailable{}; assert(httpLlmEnumerate(&unavailable, 1) == 1 && !unavailable.available);
   assert(httpLlmConfigure(true, "http://other/v1", "openclaw/default", "different", true, ""));
-  assert(httpLlmIsReady() && httpLlmStatus().state == LLMState::READY);
+  assert(httpLlmIsReady() && httpLlmStatus().state == LlmState::READY);
   // A successful identical publication during a request does not cancel it or
   // rotate the conversation, including the common settings-reload path.
   resetServer(); readHook = [] { if (readOffset == 12) {

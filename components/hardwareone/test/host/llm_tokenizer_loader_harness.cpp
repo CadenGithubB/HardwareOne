@@ -39,7 +39,7 @@ static struct {
   TokenizerState tokenizer;
   char* tokenizerData;
   struct { int vocab_size; } config;
-} gLLM;
+} gLlm;
 
 static int errors = 0;
 // Log macros consume their arguments, as the device's formatters do.
@@ -114,34 +114,34 @@ Blob sample() {
 
 void clean() {
   freeTokenizer();
-  assert(!gLLM.tokenizerData && !gLLM.tokenizer.vocab && !gLLM.tokenizer.merges &&
-         !gLLM.tokenizer.merge_map && !gLLM.tokenizer.presplit);
+  assert(!gLlm.tokenizerData && !gLlm.tokenizer.vocab && !gLlm.tokenizer.merges &&
+         !gLlm.tokenizer.merge_map && !gLlm.tokenizer.presplit);
   assert(psramLive.empty());
 }
 
 void expectRejected(const Blob& b, int modelVocab = 8) {
-  gLLM.config.vocab_size = modelVocab;
+  gLlm.config.vocab_size = modelVocab;
   errors = 0;
   File f = build(b);
   assert(!loadTokenizerFromFile(f));  // a malformed blob must fail the load
-  assert(gLLM.tokenizer.vocab_size == 0 || gLLM.tokenizer.vocab_size <= modelVocab);
+  assert(gLlm.tokenizer.vocab_size == 0 || gLlm.tokenizer.vocab_size <= modelVocab);
   clean();  // llmUnload releases every partial allocation
 }
 
 void caseValid() {
   Blob b = sample();
-  gLLM.config.vocab_size = 8;
+  gLlm.config.vocab_size = 8;
   File f = build(b);
   const size_t end = f.data.size() - b.trailing;
   assert(loadTokenizerFromFile(f));
   assert(f.position() == end);
-  assert(gLLM.tokenizer.vocab_size == 6 && gLLM.tokenizer.merge_count == 2);
+  assert(gLlm.tokenizer.vocab_size == 6 && gLlm.tokenizer.merge_count == 2);
   int tokens[8] = {};
   assert(encode("abcab", tokens, 8) == 2 && tokens[0] == 4 && tokens[1] == 3);
   assert(std::string(decode(0, 4)) == "abc" && std::string(decode(0, 6)) == "");
   clean();
   // The tokenizer may be smaller than the model's embedding table.
-  gLLM.config.vocab_size = 6;
+  gLlm.config.vocab_size = 6;
   f = build(b);
   assert(loadTokenizerFromFile(f));
   clean();
@@ -189,7 +189,7 @@ void caseVocabPast16BitKeys() {
   b.vocab.assign(65536, std::string());
   b.vocab[0] = "a"; b.vocab[1] = "b"; b.vocab[65535] = "ab";
   b.merges = {{0, 1, 65535}};
-  gLLM.config.vocab_size = 131072;
+  gLlm.config.vocab_size = 131072;
   File f = build(b);
   assert(loadTokenizerFromFile(f));
   int tokens[4] = {};

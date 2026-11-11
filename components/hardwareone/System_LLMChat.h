@@ -176,7 +176,7 @@ int  chatGetSessionId();
 // All values are clamped to valid ranges. Suppress tokens are NOT touched
 // here — those come from the retry path. After clamping, `out` is ready to
 // hand to llmStartAsync().
-void chatResolveParams(const ChatParamOverride& override, LLMGenParams* out);
+void chatResolveParams(const ChatParamOverride& override, LlmGenParams* out);
 
 #endif // ENABLE_LLM_BACKEND
 #endif // SYSTEM_LLM_CHAT_H

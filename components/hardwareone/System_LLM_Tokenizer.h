@@ -2,14 +2,14 @@
  * System_LLM_Tokenizer.h - merge-based BPE tokenizer (LLM1 embedded format).
  *
  * Extracted from System_LLM.cpp with no behavioral change. Operates on the
- * gLLM.tokenizer state (see System_LLM_Internal.h).
+ * gLlm.tokenizer state (see System_LLM_Internal.h).
  */
 #pragma once
 
 #include <FS.h>   // File
 
 // Load the tokenizer blob (vocab + merges + presplit) from an open model file
-// into gLLM.tokenizer. Returns false on malformed/short data.
+// into gLlm.tokenizer. Returns false on malformed/short data.
 bool loadTokenizerFromFile(File& f);
 
 // Free all tokenizer allocations (vocab, merges, merge map, string pool).

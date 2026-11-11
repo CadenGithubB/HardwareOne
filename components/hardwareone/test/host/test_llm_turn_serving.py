@@ -92,14 +92,14 @@ int main() {
   assert(!deserializeJson(end, cmd_llm_turns("json 99")) && end["end"] == true);
 
   httpd_req_t request;
-  assert(handleLLMChatTurns(&request) == ESP_OK && request.terminated);
+  assert(handleLlmChatTurns(&request) == ESP_OK && request.terminated);
   JsonDocument history;
   assert(!deserializeJson(history, request.output));
   assert(history.size() == turns.size());
   for (size_t i = 0; i < turns.size(); ++i) assert(history[i]["text"].as<std::string>() == turns[i]);
   // A broken streaming connection is reported, never followed by fake success.
   httpd_req_t broken; broken.failAt = 5;
-  assert(handleLLMChatTurns(&broken) == ESP_FAIL && !broken.terminated);
+  assert(handleLlmChatTurns(&broken) == ESP_FAIL && !broken.terminated);
   assert(broken.sends == 6);
   std::puts("Long LLM turns: CLI pagination, escaped/UTF-8 text, web streaming and send failure passed");
 }
@@ -119,7 +119,7 @@ def main():
         'CommandArgs::CommandArgs(', 'void CommandArgs::parse(', 'const String& CommandArgs::arg('))
     code += block((COMPONENT / 'System_Utils.cpp').read_text(), 'bool argLeadingTokenIsJson(')
     code += block(commands, 'static const char* cmd_llm_turns(')
-    code += block((COMPONENT / 'WebPage_LLM.cpp').read_text(), 'static esp_err_t handleLLMChatTurns(')
+    code += block((COMPONENT / 'WebPage_LLM.cpp').read_text(), 'static esp_err_t handleLlmChatTurns(')
     arduino = (HERE / 'web_batch_stubs/Arduino.h').read_text().replace(' private:\n',
         '  long toInt() const { return std::strtol(text_.c_str(), nullptr, 10); }\n private:\n')
     with tempfile.TemporaryDirectory(prefix='hw1-llm-turn-serving-') as directory:

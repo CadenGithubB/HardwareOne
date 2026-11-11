@@ -35,7 +35,7 @@ static bool llmValidationErr(char* err, size_t errLen, const char* msg) {
   return false;
 }
 
-static bool validateLlmConfig(const LLMConfig* p, char* err, size_t errLen) {
+static bool validateLlmConfig(const LlmConfig* p, char* err, size_t errLen) {
   if (p->dim < 32 || p->dim > 4096) {
     return llmValidationErr(err, errLen, "Invalid model: dim out of range");
   }
@@ -185,7 +185,7 @@ struct LoadContext {
 };
 
 // Parse the 64-byte LLM1 header and validate the config.
-// On success, gLLM.config is populated and ctx derived fields are set.
+// On success, gLlm.config is populated and ctx derived fields are set.
 static bool parseModelHeader(File& f, LoadContext& ctx) {
   uint8_t hdr[64];
   if (f.read(hdr, 64) != 64) {
@@ -207,7 +207,7 @@ static bool parseModelHeader(File& f, LoadContext& ctx) {
     return false;
   }
 
-  LLMConfig* p = &gLLM.config;
+  LlmConfig* p = &gLlm.config;
   p->file_version = version;
   p->quant_type = hdr[5];
   memcpy(&p->group_size, &hdr[6], 2);
@@ -228,7 +228,7 @@ static bool parseModelHeader(File& f, LoadContext& ctx) {
   // Existing files zero-fill this region, so they parse as "no info block".
   memcpy(&ctx.infoLen, &hdr[24], 4);
 
-  if (!validateLlmConfig(p, gLLM.errorMsg, sizeof(gLLM.errorMsg)))
+  if (!validateLlmConfig(p, gLlm.errorMsg, sizeof(gLlm.errorMsg)))
     return false;
 
   // Populate derived context fields
@@ -246,7 +246,7 @@ static bool parseModelHeader(File& f, LoadContext& ctx) {
 // Pre-scan past all tensor data to read the tied-weights flag, then seek back.
 // Sets ctx.shared_weights and returns the tensor data start position.
 static bool prescanTiedWeights(File& f, LoadContext& ctx) {
-  LLMConfig* p = &gLLM.config;
+  LlmConfig* p = &gLlm.config;
   const int D = ctx.D, H = ctx.H, L = ctx.L, V = ctx.V;
   const uint8_t qt = ctx.qt;
   const uint16_t gs = ctx.gs;
@@ -320,7 +320,7 @@ static bool prescanTiedWeights(File& f, LoadContext& ctx) {
 // Compute PSRAM memory requirements for all weight blocks and run state.
 // Populates ctx size fields and checks PSRAM budget. Returns false if OOM.
 static bool computeMemoryLayout(LoadContext& ctx) {
-  LLMConfig* p = &gLLM.config;
+  LlmConfig* p = &gLlm.config;
   const int D = ctx.D, H = ctx.H, L = ctx.L, V = ctx.V;
   const uint8_t qt = ctx.qt;
   const uint16_t gs = ctx.gs;
@@ -328,7 +328,7 @@ static bool computeMemoryLayout(LoadContext& ctx) {
 
   // Start with model's seq_len, capped by user request if given
   int seq_ctx = p->seq_len;
-  if (gLLM.requestedMaxCtx > 0 && seq_ctx > gLLM.requestedMaxCtx) seq_ctx = gLLM.requestedMaxCtx;
+  if (gLlm.requestedMaxCtx > 0 && seq_ctx > gLlm.requestedMaxCtx) seq_ctx = gLlm.requestedMaxCtx;
 
   ctx.weightsBytes = 0;
   ctx.weightsQ8Bytes = 0;
@@ -434,7 +434,7 @@ static bool computeMemoryLayout(LoadContext& ctx) {
   int headSize = (p->n_heads > 0) ? D / p->n_heads : D;
   ctx.hotSize = (4 * D + 2 * H) * sizeof(float) + ((size_t)D + headSize) * sizeof(float);
   // Non-FP32 KV needs hot scratch: k_tmp[kv_dim] + v_tmp[kv_dim] + kv_deq[headSize].
-  if (gLLM.kvPrecision != KV_FP32)
+  if (gLlm.kvPrecision != KV_FP32)
     ctx.hotSize += ((size_t)2 * kv_dim + headSize) * sizeof(float);
   fixedBytes += ctx.hotSize;
 
@@ -462,7 +462,7 @@ static bool computeMemoryLayout(LoadContext& ctx) {
 
   // Auto-fit: reduce context until total fits in PSRAM
   // Per-context-slot cost: KV cache + attention scores
-  size_t perCtxSlot = llmKvCacheBytes(gLLM.kvPrecision, L, 1, kv_dim, p->n_kv_heads)  // KV per position
+  size_t perCtxSlot = llmKvCacheBytes(gLlm.kvPrecision, L, 1, kv_dim, p->n_kv_heads)  // KV per position
                     + p->n_heads * sizeof(float);        // attention scores per position
   size_t remaining = budget - fixedBytes - fixedCold;
   int maxFitCtx = (int)(remaining / perCtxSlot);
@@ -474,12 +474,12 @@ static bool computeMemoryLayout(LoadContext& ctx) {
     seq_ctx = maxFitCtx;
   }
 
-  gLLM.seq_ctx = seq_ctx;
+  gLlm.seq_ctx = seq_ctx;
   if (seq_ctx < p->seq_len) {
     DEBUG_LLM_MEMORYF("[LLM] Context: model seq_len=%d -> runtime ctx=%d", p->seq_len, seq_ctx);
   }
 
-  ctx.kvCacheSize = llmKvCacheBytes(gLLM.kvPrecision, L, seq_ctx, kv_dim, p->n_kv_heads);
+  ctx.kvCacheSize = llmKvCacheBytes(gLlm.kvPrecision, L, seq_ctx, kv_dim, p->n_kv_heads);
   ctx.coldSize = (p->n_heads * seq_ctx + V) * sizeof(float);
   size_t totalNeeded = fixedBytes + ctx.kvCacheSize + ctx.coldSize;
 
@@ -516,8 +516,8 @@ static bool computeMemoryLayout(LoadContext& ctx) {
 
 // Log min/max/mean for key tensors — cross-reference with converter PACK_SUMMARY.
 static void spotCheckWeights(const LoadContext& ctx) {
-  const TransformerWeights* w = &gLLM.weights;
-  const LLMConfig* p = &gLLM.config;
+  const TransformerWeights* w = &gLlm.weights;
+  const LlmConfig* p = &gLlm.config;
   const int D = ctx.D, V = ctx.V;
   const uint16_t gs = ctx.gs;
   const bool isQ8  = (ctx.qt == 1);
@@ -586,23 +586,23 @@ static void spotCheckWeights(const LoadContext& ctx) {
 
 // Re-derive every RunState pointer from the two surviving base blocks
 // (stateHotData = internal-RAM hot scratch, stateData = PSRAM KV/logits) using
-// only gLLM.config + gLLM.seq_ctx. Idempotent: the loader calls it to bind
+// only gLlm.config + gLlm.seq_ctx. Idempotent: the loader calls it to bind
 // pointers after allocation, and forward()'s corruption guard calls it again to
 // recover a zeroed RunState pointer without a full reload. Returns false only if
 // a base block is gone or the config is unusable (then a reload is the only fix).
 bool llmBindRunState() {
-  if (!gLLM.stateHotData || !gLLM.stateData) return false;
-  const LLMConfig* p = &gLLM.config;
+  if (!gLlm.stateHotData || !gLlm.stateData) return false;
+  const LlmConfig* p = &gLlm.config;
   const int D = p->dim, H = p->hidden_dim, L = p->n_layers, V = p->vocab_size;
   const int n_heads = p->n_heads;
-  const int seq_ctx = gLLM.seq_ctx;
+  const int seq_ctx = gLlm.seq_ctx;
   if (D <= 0 || H <= 0 || L <= 0 || V <= 0 || n_heads <= 0 || p->n_kv_heads <= 0 || seq_ctx <= 0)
     return false;
   const int kv_dim   = (p->dim * p->n_kv_heads) / p->n_heads;
   const int headSize = D / n_heads;
 
-  RunState* s = &gLLM.state;
-  float* hp = gLLM.stateHotData;
+  RunState* s = &gLlm.state;
+  float* hp = gLlm.stateHotData;
   s->x   = hp;  hp += D;
   s->xb  = hp;  hp += D;
   s->xb2 = hp;  hp += D;
@@ -622,7 +622,7 @@ bool llmBindRunState() {
   // Non-FP32 KV scratch (hot block): linear() emits FP32 into k_tmp/v_tmp before
   // packing, kv_deq dequantizes a head-slice on read. Only carved when needed, so
   // FP32 mode keeps its exact prior DRAM footprint (these stay null there).
-  if (gLLM.kvPrecision != KV_FP32) {
+  if (gLlm.kvPrecision != KV_FP32) {
     s->k_tmp  = hp;  hp += kv_dim;
     s->v_tmp  = hp;  hp += kv_dim;
     s->kv_deq = hp;  hp += headSize;
@@ -640,16 +640,16 @@ bool llmBindRunState() {
   s->key_cache_f16 = nullptr; s->value_cache_f16 = nullptr;
   s->key_cache_q8 = nullptr;  s->value_cache_q8 = nullptr;
   s->key_scales = nullptr;    s->value_scales = nullptr;
-  if (gLLM.kvPrecision == KV_FP16) {
-    uint16_t* kp = (uint16_t*)gLLM.stateData;
+  if (gLlm.kvPrecision == KV_FP16) {
+    uint16_t* kp = (uint16_t*)gLlm.stateData;
     s->key_cache_f16   = kp;  kp += kvCount;
     s->value_cache_f16 = kp;  kp += kvCount;
     float* cp = (float*)kp;
     s->att    = cp;  cp += n_heads * seq_ctx;
     s->logits = cp;  cp += V;
-  } else if (gLLM.kvPrecision == KV_INT8) {
+  } else if (gLlm.kvPrecision == KV_INT8) {
     const int nkv = p->n_kv_heads;
-    int8_t* bp = (int8_t*)gLLM.stateData;
+    int8_t* bp = (int8_t*)gLlm.stateData;
     s->key_cache_q8   = bp;  bp += kvCount;
     s->value_cache_q8 = bp;  bp += kvCount;
     uintptr_t a = ((uintptr_t)bp + 3u) & ~(uintptr_t)3u;  // align to FP32 scales
@@ -660,7 +660,7 @@ bool llmBindRunState() {
     s->att    = cp;  cp += n_heads * seq_ctx;
     s->logits = cp;  cp += V;
   } else {
-    float* cp = gLLM.stateData;
+    float* cp = gLlm.stateData;
     s->key_cache   = cp;  cp += kvCount;
     s->value_cache = cp;  cp += kvCount;
     s->att    = cp;  cp += n_heads * seq_ctx;
@@ -672,26 +672,26 @@ bool llmBindRunState() {
 // Allocate hot (internal RAM) and cold (PSRAM) activation buffers.
 // ctx is non-const: fragmentation recovery may reduce kvCacheSize/coldSize.
 static bool allocateRunState(LoadContext& ctx) {
-  const LLMConfig* p = &gLLM.config;
+  const LlmConfig* p = &gLlm.config;
   const int L = ctx.L, V = ctx.V;   // D/H/seq_ctx now bound inside llmBindRunState()
   const int kv_dim = ctx.kv_dim;
-  int seq_ctx = gLLM.seq_ctx;
+  int seq_ctx = gLlm.seq_ctx;
 
-  gLLM.stateHotData = (float*)ps_calloc(1, ctx.hotSize, AllocPref::RequireInternal,
+  gLlm.stateHotData = (float*)ps_calloc(1, ctx.hotSize, AllocPref::RequireInternal,
                                         "llm.state.hot.internal");
-  if (!gLLM.stateHotData) {
+  if (!gLlm.stateHotData) {
     DEBUG_LLM_MEMORYF("[LLM] Internal RAM alloc failed (%uB), falling back to PSRAM for hot state", (unsigned)ctx.hotSize);
-    gLLM.stateHotData = (float*)llmPsramAlloc(ctx.hotSize, "llm.state.hot");
-    if (!gLLM.stateHotData) return false;
+    gLlm.stateHotData = (float*)llmPsramAlloc(ctx.hotSize, "llm.state.hot");
+    if (!gLlm.stateHotData) return false;
   }
-  gLLM.stateHotSize = ctx.hotSize;
+  gLlm.stateHotSize = ctx.hotSize;
 
   // Cold state (KV cache + att + logits) is one large contiguous PSRAM allocation.
   // After weight loading fragments PSRAM, the largest free block may be smaller
   // than total free bytes. Retry with reduced context if allocation fails.
   size_t coldStateBytes = ctx.kvCacheSize + ctx.coldSize;
-  gLLM.stateData = (float*)llmPsramAlloc(coldStateBytes, "llm.state.cold");
-  if (!gLLM.stateData) {
+  gLlm.stateData = (float*)llmPsramAlloc(coldStateBytes, "llm.state.cold");
+  if (!gLlm.stateData) {
     // Fragmentation: largest contiguous block is too small. Shrink context to fit.
     size_t largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
     size_t freePSRAM = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
@@ -702,34 +702,34 @@ static bool allocateRunState(LoadContext& ctx) {
     if (largestBlock <= fixedCold) {
       ERROR_LLMF("Cannot fit even logits in PSRAM (need %uKB, largest=%uKB)",
                  (unsigned)(fixedCold/1024), (unsigned)(largestBlock/1024));
-      heap_caps_free(gLLM.stateHotData);
-      gLLM.stateHotData = nullptr;
+      heap_caps_free(gLlm.stateHotData);
+      gLlm.stateHotData = nullptr;
       return false;
     }
-    size_t perCtxSlot = llmKvCacheBytes(gLLM.kvPrecision, L, 1, kv_dim, p->n_kv_heads) + p->n_heads * sizeof(float);
+    size_t perCtxSlot = llmKvCacheBytes(gLlm.kvPrecision, L, 1, kv_dim, p->n_kv_heads) + p->n_heads * sizeof(float);
     int newCtx = (int)((largestBlock - fixedCold) / perCtxSlot);
     if (newCtx < 1) newCtx = 1;
     if (newCtx >= seq_ctx) newCtx = seq_ctx - 1;  // must shrink at least 1
     if (newCtx < 1) {
-      heap_caps_free(gLLM.stateHotData);
-      gLLM.stateHotData = nullptr;
+      heap_caps_free(gLlm.stateHotData);
+      gLlm.stateHotData = nullptr;
       return false;
     }
     DEBUG_LLM_MEMORYF("[LLM] Fragmentation recovery: ctx %d -> %d", seq_ctx, newCtx);
     seq_ctx = newCtx;
-    gLLM.seq_ctx = seq_ctx;
-    ctx.kvCacheSize = llmKvCacheBytes(gLLM.kvPrecision, L, seq_ctx, kv_dim, p->n_kv_heads);
+    gLlm.seq_ctx = seq_ctx;
+    ctx.kvCacheSize = llmKvCacheBytes(gLlm.kvPrecision, L, seq_ctx, kv_dim, p->n_kv_heads);
     ctx.coldSize = (p->n_heads * seq_ctx + V) * sizeof(float);
     coldStateBytes = ctx.kvCacheSize + ctx.coldSize;
-    gLLM.stateData = (float*)llmPsramAlloc(coldStateBytes, "llm.state.cold.retry");
-    if (!gLLM.stateData) {
+    gLlm.stateData = (float*)llmPsramAlloc(coldStateBytes, "llm.state.cold.retry");
+    if (!gLlm.stateData) {
       ERROR_LLMF("Cold state retry also failed (%uKB)", (unsigned)(coldStateBytes/1024));
-      heap_caps_free(gLLM.stateHotData);
-      gLLM.stateHotData = nullptr;
+      heap_caps_free(gLlm.stateHotData);
+      gLlm.stateHotData = nullptr;
       return false;
     }
   }
-  gLLM.stateSize = coldStateBytes;
+  gLlm.stateSize = coldStateBytes;
 
   // Bind RunState pointers into the freshly allocated base blocks. Shared with
   // the corruption-recovery path (llmBindRunState is the single source of truth).
@@ -739,8 +739,8 @@ static bool allocateRunState(LoadContext& ctx) {
   int repSize = LLM_DEFAULT_REP_WINDOW;
   if (repSize > 256) repSize = 256;
   if (repSize > 0) {
-    gLLM.repBuf = (int*)malloc(repSize * sizeof(int));
-    gLLM.repBufSize = gLLM.repBuf ? repSize : 0;
+    gLlm.repBuf = (int*)malloc(repSize * sizeof(int));
+    gLlm.repBufSize = gLlm.repBuf ? repSize : 0;
   }
 
   // Pre-allocate the top-p sampling index buffer in PSRAM (reused every token
@@ -748,14 +748,14 @@ static bool allocateRunState(LoadContext& ctx) {
   // partial sort — a tiny fraction of per-token time, and the nucleus is usually
   // 1 token on this model — so keeping ~V*4 bytes (~13KB) out of internal DRAM
   // relieves heap pressure during generation at no measurable speed cost.
-  gLLM.sampleIndices = (int*)llmPsramAlloc((size_t)V * sizeof(int), "llm.sampleidx");
-  gLLM.sampleIndicesSize = gLLM.sampleIndices ? V : 0;
+  gLlm.sampleIndices = (int*)llmPsramAlloc((size_t)V * sizeof(int), "llm.sampleidx");
+  gLlm.sampleIndicesSize = gLlm.sampleIndices ? V : 0;
 
   // Pre-allocate the no-repeat n-gram history (every sampled token of one
   // generation; generation is bounded by seq_ctx). PSRAM — zero DRAM cost.
   // On alloc failure the blocker silently disables (llmGenerate null-checks).
-  gLLM.genHist = (int*)llmPsramAlloc((size_t)seq_ctx * sizeof(int), "llm.ngramhist");
-  gLLM.genHistSize = gLLM.genHist ? seq_ctx : 0;
+  gLlm.genHist = (int*)llmPsramAlloc((size_t)seq_ctx * sizeof(int), "llm.ngramhist");
+  gLlm.genHistSize = gLlm.genHist ? seq_ctx : 0;
 
   return true;
 }
@@ -773,8 +773,8 @@ static inline QuantTensor mkTensor(const float* fp, const int8_t* i8, const floa
 // forward() used to do inline — stored pointer values are identical, so output
 // is byte-for-byte unchanged. Call after all raw weight pointers are set.
 static bool buildLayerTensors() {
-  const LLMConfig* p   = &gLLM.config;
-  TransformerWeights* w = &gLLM.weights;
+  const LlmConfig* p   = &gLlm.config;
+  TransformerWeights* w = &gLlm.weights;
   const int dim        = p->dim;
   const int kv_dim     = (p->dim * p->n_kv_heads) / p->n_heads;
   const int hidden_dim = p->hidden_dim;
@@ -857,7 +857,7 @@ static bool buildLayerTensors() {
 // is a first-class "no menu" state, not a load error). Descriptor offsets are
 // byte offsets from the start of `b`.
 static bool validateMenuBlob(const uint8_t* b, size_t n,
-                             LLMMenuGroupDesc* outGroups, uint8_t* outCount) {
+                             LlmMenuGroupDesc* outGroups, uint8_t* outCount) {
   if (n < 4) return false;                        // menu_ver + group_count + reserved
   if (b[0] != 1) return false;                    // menu_ver != 1 → skip section
   uint8_t groupCount = b[1];
@@ -931,7 +931,7 @@ static void parseMenuSection(File& f, size_t payloadStart, uint32_t slen) {
     llmPsramFree((void**)&blob);
     return;
   }
-  LLMMenuGroupDesc groups[8];
+  LlmMenuGroupDesc groups[8];
   uint8_t count = 0;
   if (!validateMenuBlob(blob, slen, groups, &count)) {
     DEBUG_LLM_LOADF("[LLM] menu: malformed MENU section — guided input disabled");
@@ -954,14 +954,14 @@ static void parseMenuSection(File& f, size_t payloadStart, uint32_t slen) {
 // parser — its metadata is wiped and the cursor seeks past (the model still
 // loads). See LLM_GUIDED_MENU_SPEC §3.
 static void loadInfoBlockFromFile(File& f, uint32_t infoLen) {
-  gLLM.modelDesc[0]  = '\0';
-  gLLM.modelHasIcon  = false;
-  gLLM.modelIconW    = 0;
-  gLLM.modelIconH    = 0;
-  gLLM.modelRefusal[0] = '\0';
-  if (gLLM.domainVocab) llmPsramFree((void**)&gLLM.domainVocab);
-  gLLM.domainVocabCount = 0;
-  gLLM.domainVocabBytes = 0;
+  gLlm.modelDesc[0]  = '\0';
+  gLlm.modelHasIcon  = false;
+  gLlm.modelIconW    = 0;
+  gLlm.modelIconH    = 0;
+  gLlm.modelRefusal[0] = '\0';
+  if (gLlm.domainVocab) llmPsramFree((void**)&gLlm.domainVocab);
+  gLlm.domainVocabCount = 0;
+  gLlm.domainVocabBytes = 0;
   // Menu is published/cleared through the locked helpers so a reader on another
   // task never observes a torn state. Clear first; a valid MENU section republishes.
   llmMenuClear();
@@ -995,9 +995,9 @@ static void loadInfoBlockFromFile(File& f, uint32_t infoLen) {
 
     switch (sid) {
       case 1: {  // DESC — raw UTF-8, whole payload (converter caps at 255 B)
-        size_t copyLen = (slen < sizeof(gLLM.modelDesc)) ? slen : sizeof(gLLM.modelDesc) - 1;
-        if (copyLen > 0) f.read((uint8_t*)gLLM.modelDesc, copyLen);
-        gLLM.modelDesc[copyLen] = '\0';
+        size_t copyLen = (slen < sizeof(gLlm.modelDesc)) ? slen : sizeof(gLlm.modelDesc) - 1;
+        if (copyLen > 0) f.read((uint8_t*)gLlm.modelDesc, copyLen);
+        gLlm.modelDesc[copyLen] = '\0';
         break;
       }
       case 2: {  // ICON — fmt(u8)+w(u8)+h(u8)+u16 len+packed 1bpp bitmap (MSB-first)
@@ -1007,12 +1007,12 @@ static void loadInfoBlockFromFile(File& f, uint32_t infoLen) {
             f.read(&iconH, 1) == 1 && f.read((uint8_t*)&iconLen, 2) == 2) {
           const size_t expect = (size_t)((iconW + 7) / 8) * iconH;
           if (iconFmt == 1 && iconW > 0 && iconW <= 32 && iconH > 0 && iconH <= 32 &&
-              iconLen == expect && iconLen <= sizeof(gLLM.modelIcon) &&
+              iconLen == expect && iconLen <= sizeof(gLlm.modelIcon) &&
               (size_t)f.position() + iconLen <= payloadStart + slen) {
-            if (f.read(gLLM.modelIcon, iconLen) == (int)iconLen) {
-              gLLM.modelIconW   = iconW;
-              gLLM.modelIconH   = iconH;
-              gLLM.modelHasIcon = true;
+            if (f.read(gLlm.modelIcon, iconLen) == (int)iconLen) {
+              gLlm.modelIconW   = iconW;
+              gLlm.modelIconH   = iconH;
+              gLlm.modelHasIcon = true;
             }
           }
         }
@@ -1023,10 +1023,10 @@ static void loadInfoBlockFromFile(File& f, uint32_t infoLen) {
         uint16_t refLen = 0;
         if (f.read((uint8_t*)&refLen, 2) == 2 && refLen > 0 &&
             f.position() + refLen <= domEnd) {
-          size_t copyLen = (refLen < sizeof(gLLM.modelRefusal)) ? refLen
-                                                                : sizeof(gLLM.modelRefusal) - 1;
-          if (copyLen > 0) f.read((uint8_t*)gLLM.modelRefusal, copyLen);
-          gLLM.modelRefusal[copyLen] = '\0';
+          size_t copyLen = (refLen < sizeof(gLlm.modelRefusal)) ? refLen
+                                                                : sizeof(gLlm.modelRefusal) - 1;
+          if (copyLen > 0) f.read((uint8_t*)gLlm.modelRefusal, copyLen);
+          gLlm.modelRefusal[copyLen] = '\0';
           f.seek(payloadStart + 2 + refLen);   // realign past any truncated refusal tail
         }
         if (f.position() + 2 <= domEnd) {
@@ -1034,14 +1034,14 @@ static void loadInfoBlockFromFile(File& f, uint32_t infoLen) {
           if (f.read((uint8_t*)&vcount, 2) == 2 && vcount > 0) {
             const size_t blobLen = domEnd - f.position();
             if (blobLen > 0) {
-              gLLM.domainVocab = (uint8_t*)llmPsramAlloc(blobLen, "llm.domainvocab");
-              if (gLLM.domainVocab && f.read(gLLM.domainVocab, blobLen) == (int)blobLen) {
-                gLLM.domainVocabCount = vcount;
-                gLLM.domainVocabBytes = blobLen;
+              gLlm.domainVocab = (uint8_t*)llmPsramAlloc(blobLen, "llm.domainvocab");
+              if (gLlm.domainVocab && f.read(gLlm.domainVocab, blobLen) == (int)blobLen) {
+                gLlm.domainVocabCount = vcount;
+                gLlm.domainVocabBytes = blobLen;
               } else {
-                if (gLLM.domainVocab) llmPsramFree((void**)&gLLM.domainVocab);
-                gLLM.domainVocabCount = 0;
-                gLLM.domainVocabBytes = 0;
+                if (gLlm.domainVocab) llmPsramFree((void**)&gLlm.domainVocab);
+                gLlm.domainVocabCount = 0;
+                gLlm.domainVocabBytes = 0;
               }
             }
           }
@@ -1056,7 +1056,7 @@ static void loadInfoBlockFromFile(File& f, uint32_t infoLen) {
         uint16_t flags   = 0;
         if (slen >= 3 && f.read(&capsVer, 1) == 1 &&
             f.read((uint8_t*)&flags, 2) == 2 && capsVer == LLM_CAPS_VERSION) {
-          gLLM.modelCaps = flags;
+          gLlm.modelCaps = flags;
         }
         // Any failure -- short payload, short read, unknown version -- leaves
         // modelCaps at 0. A model that cannot be understood does not get trusted.
@@ -1090,7 +1090,7 @@ bool loadWeights(const char* path) {
   LoadContext ctx = {};
   if (!parseModelHeader(f, ctx)) { f.close(); return false; }
 
-  LLMConfig* p = &gLLM.config;
+  LlmConfig* p = &gLlm.config;
   int kv_dim = ctx.kv_dim;
 
   // ---- Read optional info block (description + icon), leaving the cursor at the
@@ -1121,15 +1121,15 @@ bool loadWeights(const char* path) {
   const size_t weightsQ4ScBytes = ctx.weightsQ4ScBytes;
 
   // ---- Allocate weight blocks and map pointers ----
-  gLLM.weightsData = (float*)llmPsramAlloc(weightsBytes, "llm.weights");
-  if (!gLLM.weightsData) { f.close(); return false; }
-  gLLM.weightsSize = weightsBytes;
+  gLlm.weightsData = (float*)llmPsramAlloc(weightsBytes, "llm.weights");
+  if (!gLlm.weightsData) { f.close(); return false; }
+  gLlm.weightsSize = weightsBytes;
 
-  TransformerWeights* w = &gLLM.weights;
+  TransformerWeights* w = &gLlm.weights;
 
   if (qt == 0) {
     // FP32 mode: single float block, same layout as before
-    float* ptr = gLLM.weightsData;
+    float* ptr = gLlm.weightsData;
     w->token_embedding_table = ptr; ptr += V * D;
     if (isGPT2) {
       w->pos_embedding_table = ptr; ptr += p->seq_len * D;
@@ -1156,12 +1156,12 @@ bool loadWeights(const char* path) {
     if (!shared_weights) w->wcls = ptr;
   } else if (qt == 1) {
     // INT8 mode: float block = norms + scales; separate int8 data block
-    gLLM.weightsQ8Data = (int8_t*)llmPsramAlloc(weightsQ8Bytes, "llm.q8");
-    if (!gLLM.weightsQ8Data) { f.close(); return false; }
-    gLLM.weightsQ8Size = weightsQ8Bytes;
+    gLlm.weightsQ8Data = (int8_t*)llmPsramAlloc(weightsQ8Bytes, "llm.q8");
+    if (!gLlm.weightsQ8Data) { f.close(); return false; }
+    gLlm.weightsQ8Size = weightsQ8Bytes;
 
     // -- FP32 pointer: norms first --
-    float* fp = gLLM.weightsData;
+    float* fp = gLlm.weightsData;
     w->token_embedding_table = nullptr;         // INT8 — use emb_i8/emb_sc
     w->rms_att_weight  = fp; fp += L * D;
     w->rms_ffn_weight  = fp; fp += L * D;
@@ -1202,7 +1202,7 @@ bool loadWeights(const char* path) {
     }
 
     // -- INT8 data pointers --
-    int8_t* q8 = gLLM.weightsQ8Data;
+    int8_t* q8 = gLlm.weightsQ8Data;
     w->emb_i8  = q8; q8 += (size_t)V * D;
     w->wq_i8   = q8; q8 += (size_t)L * D * D;
     w->wk_i8   = q8; q8 += (size_t)L * D * kv_dim;
@@ -1221,9 +1221,9 @@ bool loadWeights(const char* path) {
   } else {
     // ── INT4_MIXED mode (qt==2) ──
     // Allocate Q8 data block (embedding + INT8 layers)
-    gLLM.weightsQ8Data = (int8_t*)llmPsramAlloc(weightsQ8Bytes, "llm.q8");
-    if (!gLLM.weightsQ8Data) { f.close(); return false; }
-    gLLM.weightsQ8Size = weightsQ8Bytes;
+    gLlm.weightsQ8Data = (int8_t*)llmPsramAlloc(weightsQ8Bytes, "llm.q8");
+    if (!gLlm.weightsQ8Data) { f.close(); return false; }
+    gLlm.weightsQ8Size = weightsQ8Bytes;
 
     // Allocate Q4 packed data block
     w->q4_data = (uint8_t*)llmPsramAlloc(weightsQ4Bytes, "llm.q4");
@@ -1251,7 +1251,7 @@ bool loadWeights(const char* path) {
     }
 
     // -- FP32 block: norms + Q8 scales --
-    float* fp = gLLM.weightsData;
+    float* fp = gLlm.weightsData;
     w->token_embedding_table = nullptr;
     w->rms_att_weight  = fp; fp += L * D;
     w->rms_ffn_weight  = fp; fp += L * D;
@@ -1292,7 +1292,7 @@ bool loadWeights(const char* path) {
     }
 
     // Q8 data block: embedding first, then INT8-layer weights (contiguous by tensor type)
-    int8_t* q8 = gLLM.weightsQ8Data;
+    int8_t* q8 = gLlm.weightsQ8Data;
     w->emb_i8 = q8; q8 += (size_t)V * D;
     w->wq_i8  = q8; q8 += (size_t)nQ8 * D * D;
     w->wk_i8  = q8; q8 += (size_t)nQ8 * D * kv_dim;

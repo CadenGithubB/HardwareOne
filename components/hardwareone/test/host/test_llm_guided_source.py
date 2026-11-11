@@ -51,14 +51,14 @@ struct MenuRuntime {
   size_t menuBytes = 0;
   uint8_t menuGroupCount = 0;
   uint16_t menuGeneration = 0;
-  LLMMenuGroupDesc menuGroups[8]{};
-} gLLM;
+  LlmMenuGroupDesc menuGroups[8]{};
+} gLlm;
 // INSERT_IMPLEMENTATION
 int main() {
   const uint8_t data[] = {'H', 'e', 'l', 'p', 3, 'A', 's', 'k', 4, 't', 'e', 's', 't'};
   auto* blob = static_cast<uint8_t*>(malloc(sizeof(data)));
   memcpy(blob, data, sizeof(data));
-  LLMMenuGroupDesc group{};
+  LlmMenuGroupDesc group{};
   group.nameOff = 0; group.nameLen = 4; group.tplOff = 4; group.entOff = 8;
   group.tplCount = 1; group.entCount = 1;
   llmMenuPublish(blob, sizeof(data), &group, 1);
@@ -73,7 +73,7 @@ int main() {
   // that previous guided question or expose its controls to the agent route.
   active = LlmBackendKind::Http;
   char text[32] = "stale";
-  LLMMenuGroupInfo info{};
+  LlmMenuGroupInfo info{};
   assert(llmMenuGeneration() == 0 && llmMenuGroupCount() == 0);
   assert(!llmMenuGroupInfo(0, &info));
   assert(llmMenuTemplate(0, 0, text, sizeof(text), nullptr) < 0 && text[0] == 0);
@@ -105,8 +105,8 @@ def main():
     # formatting section needs Arduino String but is downstream of these APIs.
     source = source.split('// Commands (registered NON-admin', 1)[0] + '\n#endif\n'
     source = re.sub(r'^#include.*\n', '', source, flags=re.M)
-    types = structure((component / 'System_LLM_Internal.h').read_text(), 'LLMMenuGroupDesc')
-    types += '\n' + structure((component / 'System_LLMTypes.h').read_text(), 'LLMMenuGroupInfo')
+    types = structure((component / 'System_LLM_Internal.h').read_text(), 'LlmMenuGroupDesc')
+    types += '\n' + structure((component / 'System_LLMTypes.h').read_text(), 'LlmMenuGroupInfo')
     unit = HARNESS.replace('// INSERT_TYPES', types).replace('// INSERT_IMPLEMENTATION', source)
     with tempfile.TemporaryDirectory(prefix='hw1-guided-source-') as tmp:
         cpp, exe = Path(tmp) / 'test.cpp', Path(tmp) / 'test'

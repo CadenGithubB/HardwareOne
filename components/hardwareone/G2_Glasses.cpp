@@ -9244,7 +9244,7 @@ static void llmMenuFillItem(LlmMenuLevel lvl, size_t globalIdx, char* out, size_
   out[0] = '\0';
   switch (lvl) {
     case LLM_MENU_GROUP: {
-      LLMMenuGroupInfo gi;
+      LlmMenuGroupInfo gi;
       if (llmMenuGroupInfo((uint8_t)globalIdx, &gi)) snprintf(out, cap, "%s", gi.name);
       break;
     }
@@ -9320,7 +9320,7 @@ static void llmMenuShowGroups() {
 }
 
 static void llmMenuShowTemplates() {
-  LLMMenuGroupInfo gi;
+  LlmMenuGroupInfo gi;
   const size_t n = llmMenuGroupInfo(sLlmGroup, &gi) ? gi.tplCount : 0;
   llmMenuRenderList(LLM_MENU_TEMPLATE, n, "<- Groups");
 }
@@ -9336,7 +9336,7 @@ static void llmMenuShowEntities() {
     count = sLlmEntIdxCount;
     back  = "<- Buckets";
   } else {                             // direct: entity indices 0..entCount-1
-    LLMMenuGroupInfo gi;
+    LlmMenuGroupInfo gi;
     count = llmMenuGroupInfo(sLlmGroup, &gi) ? gi.entCount : 0;
     back  = "<- Templates";
   }
@@ -9616,7 +9616,7 @@ static void llmMenuTemplateTap(uint32_t idx) {
 
   if (!slot) { llmMenuSubmit(-1); return; }           // slotless / canned → ask now
 
-  LLMMenuGroupInfo gi;
+  LlmMenuGroupInfo gi;
   if (!llmMenuGroupInfo(sLlmGroup, &gi) || gi.entCount == 0) {
     llmMenuShowMsg("No entities for this group");      // slotted but empty (shouldn't happen)
     return;
@@ -9646,7 +9646,7 @@ static void llmMenuBucketTap(uint32_t idx) {
   if (b < 0 || b >= (int)sLlmBucketCount) return;
   sLlmBucket = (uint8_t)b;
   sLlmPage   = 0;
-  LLMMenuGroupInfo gi;
+  LlmMenuGroupInfo gi;
   if (!llmMenuGroupInfo(sLlmGroup, &gi)) { llmMenuShowTemplates(); return; }
   llmMenuBuildFilter(sLlmGroup, gi.entCount);
   llmMenuShowEntities();

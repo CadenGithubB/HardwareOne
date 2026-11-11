@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Model load/unload goes through the admin command, and the backend owns the context cap.
 
-The harness compiles the shipping handleLLMLoad/handleLLMUnload (and their
+The harness compiles the shipping handleLlmLoad/handleLlmUnload (and their
 reply helper) from WebPage_LLM.cpp, cmd_llm_load/cmd_llm_unload from
 System_LLMCommands.cpp, CommandArgs from System_Command.cpp, and
 llmBackendSelect/llmBackendUnload with the context policy and command builder
@@ -128,10 +128,10 @@ def generated() -> str:
     command_parts = [unique_block(commands, "static const char* cmd_llm_load("),
                      unique_block(commands, "static const char* cmd_llm_unload(")]
     web_parts = []
-    if "static esp_err_t sendLLMCommandReply(" in web:
-        web_parts.append(unique_block(web, "static esp_err_t sendLLMCommandReply("))
-    web_parts += [unique_block(web, "static esp_err_t handleLLMLoad("),
-                  unique_block(web, "static esp_err_t handleLLMUnload(")]
+    if "static esp_err_t sendLlmCommandReply(" in web:
+        web_parts.append(unique_block(web, "static esp_err_t sendLlmCommandReply("))
+    web_parts += [unique_block(web, "static esp_err_t handleLlmLoad("),
+                  unique_block(web, "static esp_err_t handleLlmUnload(")]
 
     harness = (HERE / "llm_load_policy_harness.cpp").read_text()
     for marker, body in (("// INSERT_TYPES", "\n\n".join(types)),
@@ -150,12 +150,12 @@ def source_guard() -> None:
     for name, text in (("WebPage_LLM.cpp", web), ("OLED_Mode_LLM.cpp", oled)):
         for call in ("llmBackendSelect(", "llmBackendUnload(", "llmLoadModel(", "llmUnload("):
             require(call not in text, f"{name} calls {call} directly")
-    load = unique_block(web, "static esp_err_t handleLLMLoad(")
-    unload = unique_block(web, "static esp_err_t handleLLMUnload(")
+    load = unique_block(web, "static esp_err_t handleLlmLoad(")
+    unload = unique_block(web, "static esp_err_t handleLlmUnload(")
     require("executeUnifiedWebCommand(" in load and "llmBuildLoadCommand(" in load,
-            "handleLLMLoad must submit llmload through the web command executor")
+            "handleLlmLoad must submit llmload through the web command executor")
     require("executeUnifiedWebCommand(" in unload and '"llmunload"' in unload,
-            "handleLLMUnload must submit llmunload through the web command executor")
+            "handleLlmUnload must submit llmunload through the web command executor")
     require("gSettings.llmMaxContext" not in load, "the context cap belongs to the backend")
     require("submitOledCommandForSession(" in oled, "the OLED must submit through the display executor")
     require("llmBuildLoadCommand(" in oled and '"llmunload"' in oled,

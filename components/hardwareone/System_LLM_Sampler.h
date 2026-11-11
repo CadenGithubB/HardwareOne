@@ -3,7 +3,7 @@
  *
  * Extracted from System_LLM.cpp with no behavioral change. Operates in-place on
  * a logits buffer (temperature scaling + softmax applied internally) and uses
- * the shared gLLM.sampleIndices scratch for top-p. Pure given that scratch.
+ * the shared gLlm.sampleIndices scratch for top-p. Pure given that scratch.
  */
 #pragma once
 

@@ -3,12 +3,12 @@
  *
  * These were file-local in System_LLM.cpp. They are lifted here so the engine
  * can be split into cooperating translation units (kernels, sampler, tokenizer,
- * model loader) that all operate on the single `gLLM` runtime singleton — which
+ * model loader) that all operate on the single `gLlm` runtime singleton — which
  * matches the codebase's "module = free functions over a file-static singleton"
  * idiom, just spread across files now.
  *
  * NOT a public header — only the System_LLM*.cpp TUs include it. Public API and
- * the LLMConfig/LLMState/LLMGenParams types live in System_LLM.h.
+ * the LlmConfig/LlmState/LlmGenParams types live in System_LLM.h.
  */
 #pragma once
 
@@ -192,11 +192,11 @@ struct TokenizerState {
 // Module State — the single engine runtime singleton (defined in System_LLM.cpp)
 // ============================================================================
 
-// One guided-menu group's location inside gLLM.menuBlob. Offsets are byte
+// One guided-menu group's location inside gLlm.menuBlob. Offsets are byte
 // offsets into the blob; the template/entity lists are consecutive
 // length-prefixed items ([u8 len][UTF-8]) walked on demand. See
 // LLM_GUIDED_MENU_SPEC §5 and System_LLM_Menu.cpp.
-struct LLMMenuGroupDesc {
+struct LlmMenuGroupDesc {
   uint32_t nameOff;   // offset of the group name bytes (nameLen bytes)
   uint32_t tplOff;    // offset of the first template item
   uint32_t entOff;    // offset of the first entity item
@@ -206,8 +206,8 @@ struct LLMMenuGroupDesc {
   uint8_t  nameLen;   // group name length (<=32)
 };
 
-struct LLMRuntime {
-  LLMConfig config;
+struct LlmRuntime {
+  LlmConfig config;
   TransformerWeights weights;
   RunState state;
   TokenizerState tokenizer;
@@ -224,7 +224,7 @@ struct LLMRuntime {
   size_t stateSize;
   size_t stateHotSize;
 
-  LLMState runState;
+  LlmState runState;
   volatile bool stopRequested;
   float lastTokPerSec;
   int lastTokCount;
@@ -269,7 +269,7 @@ struct LLMRuntime {
   uint8_t*         menuBlob;        // PSRAM via llmPsramAlloc("llm.menu"); nullptr if none
   size_t           menuBytes;       // valid length of menuBlob
   uint8_t          menuGroupCount;  // 0 = no guided input
-  LLMMenuGroupDesc menuGroups[8];
+  LlmMenuGroupDesc menuGroups[8];
   uint16_t         menuGeneration;  // bumped on EVERY llmLoadModel AND llmUnload
 
   // Effective context for KV cache (<= config.seq_len); may be capped by requestedMaxCtx
@@ -295,7 +295,7 @@ struct LLMRuntime {
   SemaphoreHandle_t mutex;
 };
 
-extern LLMRuntime gLLM;
+extern LlmRuntime gLlm;
 
 // ============================================================================
 // Shared PSRAM allocation helpers (defined in System_LLM.cpp)
@@ -304,12 +304,12 @@ extern LLMRuntime gLLM;
 void* llmPsramAlloc(size_t size, const char* tag);
 void  llmPsramFree(void** ptr);
 
-// Set gLLM.errorMsg (printf-style). Does NOT change runState — callers that
+// Set gLlm.errorMsg (printf-style). Does NOT change runState — callers that
 // also transition to ERROR keep doing that explicitly.
 void  setLlmError(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 
 // Re-derive all RunState pointers (s->x .. s->logits) from the two surviving
-// base blocks (gLLM.stateHotData / gLLM.stateData) using gLLM.config + seq_ctx.
+// base blocks (gLlm.stateHotData / gLlm.stateData) using gLlm.config + seq_ctx.
 // Single source of truth for state-pointer binding: called once at model load
 // and again as a recovery step if forward() detects a zeroed RunState pointer
 // (memory-corruption soft-recovery). Returns false if a base block is gone or
@@ -331,7 +331,7 @@ void llmMenuInit(void);
 // of `blob` (PSRAM). Frees any previous blob, bumps menuGeneration. count==0 with
 // blob==nullptr is equivalent to llmMenuClear().
 void llmMenuPublish(uint8_t* blob, size_t bytes,
-                    const LLMMenuGroupDesc* groups, uint8_t count);
+                    const LlmMenuGroupDesc* groups, uint8_t count);
 
 // Free the menu blob, zero the descriptors/count, bump menuGeneration.
 void llmMenuClear(void);

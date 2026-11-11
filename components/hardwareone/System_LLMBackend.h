@@ -139,10 +139,10 @@ bool           llmBackendActiveModel(LlmModelDesc* out);   // false when none se
 // ============================================================================
 
 bool     llmBackendIsReady();
-LLMStatus llmBackendStatus();
+LlmStatus llmBackendStatus();
 
 // Start generation. Returns a session id (>0), or 0 if not ready / busy.
-int      llmBackendStartAsync(const char* prompt, const LLMGenParams& params);
+int      llmBackendStartAsync(const char* prompt, const LlmGenParams& params);
 void     llmBackendStop();
 
 int      llmBackendSessionId();                                  // bumped per start

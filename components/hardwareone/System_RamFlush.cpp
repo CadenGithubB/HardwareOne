@@ -173,8 +173,8 @@ static bool ramFlushReadLive(RamFlushFeatureId f) {
     // READY alone is insufficient: GENERATING is a distinct state, so a capture
     // taken mid-generation would read a loaded model as unloaded.
     case RF_LLM: {
-      LLMState s = llmBackendStatus().state;   // llmBackendStatus() returns LLMStatus{ state, ... }
-      return (s == LLMState::READY || s == LLMState::GENERATING);
+      LlmState s = llmBackendStatus().state;   // llmBackendStatus() returns LlmStatus{ state, ... }
+      return (s == LlmState::READY || s == LlmState::GENERATING);
     }
 #else
     case RF_LLM:        return false;

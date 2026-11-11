@@ -86,10 +86,10 @@ bool mockSelect(MockTransport& transport) {
   transport.error.clear();
   return true;
 }
-LLMStatus mockStatus(MockTransport& transport, const char* name) {
-  LLMStatus status{};
-  status.state = !transport.selected ? LLMState::UNLOADED :
-                 !transport.done ? LLMState::GENERATING : LLMState::READY;
+LlmStatus mockStatus(MockTransport& transport, const char* name) {
+  LlmStatus status{};
+  status.state = !transport.selected ? LlmState::UNLOADED :
+                 !transport.done ? LlmState::GENERATING : LlmState::READY;
   std::snprintf(status.modelPath, sizeof(status.modelPath), "%s", name);
   std::snprintf(status.errorMsg, sizeof(status.errorMsg), "%s", transport.error.c_str());
   return status;
@@ -121,8 +121,8 @@ size_t httpLlmEnumerate(LlmModelDesc* out, size_t cap) {
 bool httpLlmSelectByName(const char*, char*, size_t) { return mockSelect(httpTransport); }
 void httpLlmUnload() { httpTransport.selected = false; }
 bool httpLlmIsReady() { return httpTransport.selected && httpTransport.done; }
-LLMStatus httpLlmStatus() { return mockStatus(httpTransport, "http:openclaw"); }
-int httpLlmStartAsync(const char* prompt, const LLMGenParams&) { return mockStart(httpTransport, prompt); }
+LlmStatus httpLlmStatus() { return mockStatus(httpTransport, "http:openclaw"); }
+int httpLlmStartAsync(const char* prompt, const LlmGenParams&) { return mockStart(httpTransport, prompt); }
 void httpLlmStop() { httpTransport.stops++; }
 int httpLlmSessionId() { return httpTransport.session; }
 int httpLlmResultLen() { return int(httpTransport.output.size()); }
@@ -145,8 +145,8 @@ size_t cm5LlmEnumerate(LlmModelDesc* out, size_t cap) {
 bool cm5LlmSelectByName(const char*, char*, size_t) { return mockSelect(cm5Transport); }
 void cm5LlmUnload() { cm5Transport.selected = false; }
 bool cm5LlmIsReady() { return cm5Transport.selected && cm5Transport.done; }
-LLMStatus cm5LlmStatus() { return mockStatus(cm5Transport, "cm5:local"); }
-int cm5LlmStartAsync(const char* prompt, const LLMGenParams&) { return mockStart(cm5Transport, prompt); }
+LlmStatus cm5LlmStatus() { return mockStatus(cm5Transport, "cm5:local"); }
+int cm5LlmStartAsync(const char* prompt, const LlmGenParams&) { return mockStart(cm5Transport, prompt); }
 void cm5LlmStop() { cm5Transport.stops++; cm5Transport.done = true; }
 int cm5LlmSessionId() { return cm5Transport.session; }
 int cm5LlmResultLen() { return int(cm5Transport.output.size()); }

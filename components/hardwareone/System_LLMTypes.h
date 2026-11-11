@@ -55,7 +55,7 @@
 // source leaves the whole struct zeroed; surfaces must branch on the backend
 // kind rather than rendering these unconditionally.
 
-struct LLMConfig {
+struct LlmConfig {
   int dim;            // transformer dimension
   int hidden_dim;     // ffn hidden dimension
   int n_layers;       // number of transformer layers
@@ -75,7 +75,7 @@ struct LLMConfig {
 // Runtime state
 // ============================================================================
 
-enum class LLMState : uint8_t {
+enum class LlmState : uint8_t {
   UNLOADED = 0,     // No model selected
   LOADING,          // Selection in progress (local: reading weights; remote: host switching)
   READY,            // Selected and idle
@@ -83,10 +83,10 @@ enum class LLMState : uint8_t {
   ERROR             // Load or runtime error
 };
 
-struct LLMStatus {
-  LLMState state;
+struct LlmStatus {
+  LlmState state;
   char modelPath[64];
-  LLMConfig config;           // zeroed for a remote source
+  LlmConfig config;           // zeroed for a remote source
   size_t modelSizeBytes;      // Size of weight data in PSRAM (0 remote)
   size_t runtimeSizeBytes;    // KV cache + activations (0 remote)
   size_t totalPsramUsed;      // Total PSRAM consumed locally (0 remote)
@@ -107,7 +107,7 @@ struct LLMStatus {
 // implements and ignores the rest — notably suppressTokens, which are token IDs
 // from THIS device's tokenizer and are meaningless anywhere else.
 
-struct LLMGenParams {
+struct LlmGenParams {
   int   maxTokens;
   float temperature;
   float topp;
@@ -160,7 +160,7 @@ size_t llmContextWarning(char* buf, size_t cap);
 // Optional per-model metadata from the LLM1 "info block" (a description + icon
 // baked into the .bin by the converter), populated at load time. Zero-copy: the
 // returned pointers reference fixed engine storage that stays valid until the
-// next llmLoadModel/llmUnload. Kept out of LLMStatus so the by-value status
+// next llmLoadModel/llmUnload. Kept out of LlmStatus so the by-value status
 // snapshot (copied every OLED frame) does not grow.
 const char* llmModelDescription();   // "" when the model carries no description
 // Returns the loaded model's icon (1bpp, MSB-first, row-major) or false if none.
@@ -186,13 +186,13 @@ uint16_t llmMenuGeneration(void);
 uint8_t  llmMenuGroupCount(void);
 
 // Copied-out snapshot of one group's header (name + counts + flags).
-struct LLMMenuGroupInfo {
+struct LlmMenuGroupInfo {
   char     name[33];   // NUL-terminated (<=32 chars)
   uint8_t  flags;      // bit0 = Do-mode
   uint16_t tplCount;
   uint16_t entCount;
 };
-bool llmMenuGroupInfo(uint8_t g, LLMMenuGroupInfo* out);
+bool llmMenuGroupInfo(uint8_t g, LlmMenuGroupInfo* out);
 
 // Copy the display form of template t in group g into buf (NUL-terminated). The
 // slot marker (0x1F) is rendered as "{}". *hasSlot (if non-null) reports whether

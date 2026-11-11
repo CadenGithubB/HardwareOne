@@ -344,7 +344,7 @@ bool llmBackendActiveModel(LlmModelDesc* out) {
   // accessor kept reporting the ghost forever. Nothing consumes it yet, so it
   // was a trap set for whichever surface used it first rather than a live bug.
   if (sActiveKind == LlmBackendKind::Cm5) {
-    const LLMStatus st = cm5LlmStatus();
+    const LlmStatus st = cm5LlmStatus();
     const char* colon = strchr(st.modelPath, ':');
     if (colon && colon[1]) {
       strlcpy(out->id, st.modelPath, sizeof(out->id));
@@ -411,20 +411,20 @@ bool llmBackendIsReady() {
   }
 }
 
-LLMStatus llmBackendStatus() {
+LlmStatus llmBackendStatus() {
   switch (sActiveKind) {
     LLM_ONBOARD_CASE(llmGetStatus())
     LLM_CM5_CASE(cm5LlmStatus())
     LLM_HTTP_CASE(httpLlmStatus())
     default: break;
   }
-  LLMStatus st;
+  LlmStatus st;
   memset(&st, 0, sizeof(st));
-  st.state = LLMState::UNLOADED;
+  st.state = LlmState::UNLOADED;
   return st;
 }
 
-int llmBackendStartAsync(const char* prompt, const LLMGenParams& params) {
+int llmBackendStartAsync(const char* prompt, const LlmGenParams& params) {
   switch (sActiveKind) {
     LLM_ONBOARD_CASE(llmStartAsync(prompt, params))
     LLM_CM5_CASE(cm5LlmStartAsync(prompt, params))
@@ -644,7 +644,7 @@ bool llmModelIcon(const uint8_t** bits, uint8_t* width, uint8_t* height) {
 
 uint16_t llmMenuGeneration(void) { return 0; }
 uint8_t  llmMenuGroupCount(void) { return 0; }   // 0 ⇒ every surface hides guided UI
-bool     llmMenuGroupInfo(uint8_t, LLMMenuGroupInfo*) { return false; }
+bool     llmMenuGroupInfo(uint8_t, LlmMenuGroupInfo*) { return false; }
 int      llmMenuTemplate(uint8_t, uint16_t, char* buf, size_t cap, bool* hasSlot) {
   if (buf && cap) buf[0] = '\0';
   if (hasSlot) *hasSlot = false;

@@ -116,7 +116,7 @@ static const char* cmdLlmCorruptRow(const String& a) {
 static const char* cmd_llm_corrupt_test(const String& /*args*/) {
   if (!llmBackendIsReady()) return "Error: LLM not loaded — load a model first";
 #if ENABLE_LLM_SOURCE_ONBOARD
-  gLLM.injectCorruptOnce = true;
+  gLlm.injectCorruptOnce = true;
 #else
   return "Error: no on-board engine in this build";
 #endif
@@ -125,13 +125,13 @@ static const char* cmd_llm_corrupt_test(const String& /*args*/) {
 }
 
 static const char* cmd_llm_status(const String& argsInput) {
-  LLMStatus st = llmBackendStatus();
+  LlmStatus st = llmBackendStatus();
   const char* stateStr = "UNLOADED";
   switch (st.state) {
-    case LLMState::LOADING:    stateStr = "LOADING"; break;
-    case LLMState::READY:      stateStr = "READY"; break;
-    case LLMState::GENERATING: stateStr = "GENERATING"; break;
-    case LLMState::ERROR:      stateStr = "ERROR"; break;
+    case LlmState::LOADING:    stateStr = "LOADING"; break;
+    case LlmState::READY:      stateStr = "READY"; break;
+    case LlmState::GENERATING: stateStr = "GENERATING"; break;
+    case LlmState::ERROR:      stateStr = "ERROR"; break;
     default: break;
   }
 

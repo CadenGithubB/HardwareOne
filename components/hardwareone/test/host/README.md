@@ -782,7 +782,7 @@ not compiled. Run with
 
 ## LLM load policy
 
-`llm_load_policy` compiles `handleLLMLoad`, `handleLLMUnload` and their reply
+`llm_load_policy` compiles `handleLlmLoad`, `handleLlmUnload` and their reply
 helper from `WebPage_LLM.cpp`, `cmd_llm_load`/`cmd_llm_unload` from
 `System_LLMCommands.cpp`, `CommandArgs` from `System_Command.cpp`, and
 `llmBackendSelect`, `llmBackendUnload`, the context policy and

@@ -131,7 +131,7 @@ bool      cm5LlmFindByName(const char* name, LlmModelDesc* out);
 bool      cm5LlmSelectByName(const char* name, char* errOut, size_t errCap);
 void      cm5LlmUnload();
 bool      cm5LlmIsReady();
-LLMStatus cm5LlmStatus();
+LlmStatus cm5LlmStatus();
 
 // Milliseconds since a model select was armed, or 0 when none is pending.
 //
@@ -148,7 +148,7 @@ uint32_t cm5LlmSelectPendingMs();
 // answers /health, and nothing observes that tail. Display only — no decision
 // anywhere reads this.
 uint8_t cm5LlmLoadPercent();
-int       cm5LlmStartAsync(const char* prompt, const LLMGenParams& params);
+int       cm5LlmStartAsync(const char* prompt, const LlmGenParams& params);
 void      cm5LlmStop();
 int       cm5LlmSessionId();
 int       cm5LlmResultLen();

@@ -75,7 +75,7 @@
 // windows to answer BLE/serial polls promptly (see in-forward yields).
 #define LLM_TASK_PRIORITY         2
 
-// LLMConfig / LLMState / LLMStatus / LLMGenParams now live in
+// LlmConfig / LlmState / LlmStatus / LlmGenParams now live in
 // System_LLMTypes.h (included above), so a build whose only source is the
 // CM5 co-processor still has them without compiling the engine.
 
@@ -113,7 +113,7 @@ uint16_t llmModelCaps();
 
 // Token callback: called for each generated token string.
 // Return false to stop generation early.
-using LLMTokenCallback = std::function<bool(const char* token)>;
+using LlmTokenCallback = std::function<bool(const char* token)>;
 
 // ============================================================================
 // Public API
@@ -136,7 +136,7 @@ void llmUnload();
 bool llmIsReady();
 
 // Get current status (thread-safe snapshot)
-LLMStatus llmGetStatus();
+LlmStatus llmGetStatus();
 
 // Generate text from a prompt. Calls tokenCb for each output token.
 // Runs synchronously on the calling task — caller is responsible for
@@ -160,7 +160,7 @@ const char* llmFramePrompt(const char* userText, char* out, size_t outSize);
 // topp:        nucleus sampling threshold
 // suppressTokens/suppressTokenCount: token IDs from previous answers to penalize
 //   throughout generation (retry mechanism — steers model away from prior answers)
-int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
+int llmGenerate(const char* prompt, LlmTokenCallback tokenCb,
                 int maxTokens = LLM_DEFAULT_MAX_TOKENS,
                 float temperature = LLM_DEFAULT_TEMPERATURE,
                 float topp = LLM_DEFAULT_TOPP,
@@ -182,7 +182,7 @@ void llmStop();
 // Start generation in a background FreeRTOS task (returns immediately).
 // Returns new session ID (> 0) on success, 0 if model not ready or task
 // could not be created.  Poll llmGetResultChunk / llmIsGenerationDone for output.
-int llmStartAsync(const char* prompt, const LLMGenParams& params);
+int llmStartAsync(const char* prompt, const LlmGenParams& params);
 
 // Copy up to (maxLen-1) bytes starting at byte 'offset' into buf (NUL-terminated).
 // Returns bytes copied.  0 = no new data at that offset or buffer not ready.

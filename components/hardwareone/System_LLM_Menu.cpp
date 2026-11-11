@@ -3,8 +3,8 @@
  * MENU section parsed from a model's info block, plus the llmmenu/llmask commands.
  *
  * The menu (curated corpus-exact question templates + entity rosters) is parsed at
- * model load into ONE PSRAM blob (gLLM.menuBlob) with per-group descriptors
- * (gLLM.menuGroups). Surfaces pick integer indices; this module composes the final
+ * model load into ONE PSRAM blob (gLlm.menuBlob) with per-group descriptors
+ * (gLlm.menuGroups). Surfaces pick integer indices; this module composes the final
  * question once, on-device, and hands it to the existing chat pipeline.
  *
  * Locking (mandatory — verified race). Menu readers run on the OLED loop task,
@@ -72,30 +72,30 @@ static void menuEnsureLock() {
 void llmMenuInit(void) { menuEnsureLock(); }
 
 void llmMenuPublish(uint8_t* blob, size_t bytes,
-                    const LLMMenuGroupDesc* groups, uint8_t count) {
+                    const LlmMenuGroupDesc* groups, uint8_t count) {
   menuEnsureLock();
   MenuLock lk;
-  if (gLLM.menuBlob) llmPsramFree((void**)&gLLM.menuBlob);   // nulls the pointer
+  if (gLlm.menuBlob) llmPsramFree((void**)&gLlm.menuBlob);   // nulls the pointer
   const bool have = (blob != nullptr && count > 0 && groups != nullptr);
-  gLLM.menuBlob       = have ? blob : nullptr;
-  gLLM.menuBytes      = have ? bytes : 0;
-  gLLM.menuGroupCount = have ? count : 0;
-  if (have) memcpy(gLLM.menuGroups, groups, (size_t)count * sizeof(LLMMenuGroupDesc));
-  else      memset(gLLM.menuGroups, 0, sizeof(gLLM.menuGroups));
-  gLLM.menuGeneration++;
+  gLlm.menuBlob       = have ? blob : nullptr;
+  gLlm.menuBytes      = have ? bytes : 0;
+  gLlm.menuGroupCount = have ? count : 0;
+  if (have) memcpy(gLlm.menuGroups, groups, (size_t)count * sizeof(LlmMenuGroupDesc));
+  else      memset(gLlm.menuGroups, 0, sizeof(gLlm.menuGroups));
+  gLlm.menuGeneration++;
 }
 
 void llmMenuClear(void) {
   menuEnsureLock();
   MenuLock lk;
-  if (gLLM.menuBlob) llmPsramFree((void**)&gLLM.menuBlob);
-  gLLM.menuBytes      = 0;
-  gLLM.menuGroupCount = 0;
-  memset(gLLM.menuGroups, 0, sizeof(gLLM.menuGroups));
+  if (gLlm.menuBlob) llmPsramFree((void**)&gLlm.menuBlob);
+  gLlm.menuBytes      = 0;
+  gLlm.menuGroupCount = 0;
+  memset(gLlm.menuGroups, 0, sizeof(gLlm.menuGroups));
   sLastComposed[0] = '\0';
   sLastAskSession  = 0;
   sLastAskIsDo     = false;
-  gLLM.menuGeneration++;
+  gLlm.menuGeneration++;
 }
 
 // ============================================================================
@@ -107,8 +107,8 @@ void llmMenuClear(void) {
 // item's bytes — an INTERIOR pointer valid only while the lock is held; the
 // caller copies out before releasing. Returns -1 if idx runs off the blob.
 static int menuItemAt(uint32_t startOff, uint16_t idx, const uint8_t** outPtr) {
-  const uint8_t* b = gLLM.menuBlob;
-  const size_t   n = gLLM.menuBytes;
+  const uint8_t* b = gLlm.menuBlob;
+  const size_t   n = gLlm.menuBytes;
   if (!b) return -1;
   size_t pos = startOff;
   for (uint16_t i = 0; ; i++) {
@@ -125,9 +125,9 @@ static int menuItemAt(uint32_t startOff, uint16_t idx, const uint8_t** outPtr) {
 // composed length, or <0 on error (-2 bad index, -3 no menu). Assumes lock held.
 static int composeLocked(uint8_t g, uint16_t t, int e, char* buf, size_t cap, bool* isDoOut) {
   if (!buf || cap == 0) return -2;
-  if (gLLM.menuGroupCount == 0) return -3;
-  if (g >= gLLM.menuGroupCount) return -2;
-  const LLMMenuGroupDesc& d = gLLM.menuGroups[g];
+  if (gLlm.menuGroupCount == 0) return -3;
+  if (g >= gLlm.menuGroupCount) return -2;
+  const LlmMenuGroupDesc& d = gLlm.menuGroups[g];
   if (t >= d.tplCount) return -2;
   const uint8_t* tpl = nullptr;
   int tlen = menuItemAt(d.tplOff, t, &tpl);
@@ -165,23 +165,23 @@ static int composeLocked(uint8_t g, uint16_t t, int e, char* buf, size_t cap, bo
 uint16_t llmMenuGeneration(void) {
   if (llmBackendActiveKind() == LlmBackendKind::Http) return 0;
   MenuLock lk;
-  return gLLM.menuGeneration;
+  return gLlm.menuGeneration;
 }
 
 uint8_t llmMenuGroupCount(void) {
   if (llmBackendActiveKind() == LlmBackendKind::Http) return 0;
   MenuLock lk;
-  return gLLM.menuGroupCount;
+  return gLlm.menuGroupCount;
 }
 
-bool llmMenuGroupInfo(uint8_t g, LLMMenuGroupInfo* out) {
+bool llmMenuGroupInfo(uint8_t g, LlmMenuGroupInfo* out) {
   if (!out || llmBackendActiveKind() == LlmBackendKind::Http) return false;
   MenuLock lk;
-  if (gLLM.menuGroupCount == 0 || g >= gLLM.menuGroupCount) return false;
-  const LLMMenuGroupDesc& d = gLLM.menuGroups[g];
+  if (gLlm.menuGroupCount == 0 || g >= gLlm.menuGroupCount) return false;
+  const LlmMenuGroupDesc& d = gLlm.menuGroups[g];
   uint8_t nl = d.nameLen; if (nl > 32) nl = 32;
-  if (nl > 0 && gLLM.menuBlob && (size_t)d.nameOff + nl <= gLLM.menuBytes)
-    memcpy(out->name, gLLM.menuBlob + d.nameOff, nl);
+  if (nl > 0 && gLlm.menuBlob && (size_t)d.nameOff + nl <= gLlm.menuBytes)
+    memcpy(out->name, gLlm.menuBlob + d.nameOff, nl);
   else
     nl = 0;
   out->name[nl]  = '\0';
@@ -196,8 +196,8 @@ int llmMenuTemplate(uint8_t g, uint16_t t, char* buf, size_t cap, bool* hasSlot)
   buf[0] = '\0';
   if (llmBackendActiveKind() == LlmBackendKind::Http) return -1;
   MenuLock lk;
-  if (gLLM.menuGroupCount == 0 || g >= gLLM.menuGroupCount) return -1;
-  const LLMMenuGroupDesc& d = gLLM.menuGroups[g];
+  if (gLlm.menuGroupCount == 0 || g >= gLlm.menuGroupCount) return -1;
+  const LlmMenuGroupDesc& d = gLlm.menuGroups[g];
   if (t >= d.tplCount) return -1;
   const uint8_t* tpl = nullptr;
   int tlen = menuItemAt(d.tplOff, t, &tpl);
@@ -222,8 +222,8 @@ int llmMenuEntity(uint8_t g, uint16_t e, char* buf, size_t cap) {
   buf[0] = '\0';
   if (llmBackendActiveKind() == LlmBackendKind::Http) return -1;
   MenuLock lk;
-  if (gLLM.menuGroupCount == 0 || g >= gLLM.menuGroupCount) return -1;
-  const LLMMenuGroupDesc& d = gLLM.menuGroups[g];
+  if (gLlm.menuGroupCount == 0 || g >= gLlm.menuGroupCount) return -1;
+  const LlmMenuGroupDesc& d = gLlm.menuGroups[g];
   if (e >= d.entCount) return -1;
   const uint8_t* ent = nullptr;
   int elen = menuItemAt(d.entOff, e, &ent);
@@ -252,8 +252,8 @@ int llmMenuAsk(uint16_t gen, uint8_t g, uint16_t t, int e, const ChatParamOverri
   bool isDo = false;
   {
     MenuLock lk;
-    if (gLLM.menuGroupCount == 0) return -3;
-    if (gen != gLLM.menuGeneration) return -1;     // stale — model swapped under the caller
+    if (gLlm.menuGroupCount == 0) return -3;
+    if (gen != gLlm.menuGeneration) return -1;     // stale — model swapped under the caller
     int r = composeLocked(g, t, e, composed, sizeof(composed), &isDo);
     if (r < 0) return (r == -3) ? -3 : -2;
   }
@@ -347,7 +347,7 @@ const char* cmd_llm_menu(const String& args) {
       int off = ca.argInt(3, 0);
       if (g < 0 || off < 0)
         return "Error: invalid arguments — Usage: llmmenu json tpl|ent <group> <offset>";
-      LLMMenuGroupInfo gi;
+      LlmMenuGroupInfo gi;
       if (gc == 0 || g >= (int)gc || !llmMenuGroupInfo((uint8_t)g, &gi))
         return "Error: no such group (llmmenu json)";
       const int total = wantTpl ? (int)gi.tplCount : (int)gi.entCount;
@@ -383,7 +383,7 @@ const char* cmd_llm_menu(const String& args) {
     doc["gen"]    = gen;
     JsonArray groups = doc["groups"].to<JsonArray>();
     for (uint8_t i = 0; i < gc; i++) {
-      LLMMenuGroupInfo gi;
+      LlmMenuGroupInfo gi;
       if (!llmMenuGroupInfo(i, &gi)) continue;
       JsonObject o = groups.add<JsonObject>();
       o["i"]         = i;
@@ -411,7 +411,7 @@ const char* cmd_llm_menu(const String& args) {
   if (w > 0) o = (size_t)w;
   if (o >= sizeof(menuCmdBuf)) o = sizeof(menuCmdBuf) - 1;
   for (uint8_t i = 0; i < gc && o < sizeof(menuCmdBuf) - 1; i++) {
-    LLMMenuGroupInfo gi;
+    LlmMenuGroupInfo gi;
     if (!llmMenuGroupInfo(i, &gi)) continue;
     w = snprintf(menuCmdBuf + o, sizeof(menuCmdBuf) - o,
                  "  [%u] %s  (%s, %u templates, %u entities)\n",

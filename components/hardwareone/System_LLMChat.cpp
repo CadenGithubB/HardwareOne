@@ -216,7 +216,7 @@ static void drainEngineLocked() {
 
   // If engine reports done, finalize the turn's metrics.
   if (llmBackendIsDone()) {
-    LLMStatus st = llmBackendStatus();
+    LlmStatus st = llmBackendStatus();
     t.tokenCount      = st.lastTokenCount;
     t.tokensPerSecX10 = (uint16_t)(st.lastTokensPerSec * 10.0f);
     // Snapshot the finished turn so a client that hasn't polled yet can still
@@ -268,7 +268,7 @@ void chatParamOverrideFromJson(JsonObjectConst d, ChatParamOverride& ov) {
   if (d["hard_cap"].is<int>())       ov.hardCap       = d["hard_cap"].as<int>();
 }
 
-void chatResolveParams(const ChatParamOverride& o, LLMGenParams* out) {
+void chatResolveParams(const ChatParamOverride& o, LlmGenParams* out) {
   if (!out) return;
 
   // Resolve from override → settings → engine default
@@ -304,7 +304,7 @@ void chatResolveParams(const ChatParamOverride& o, LLMGenParams* out) {
 
 // Scratch for llmFramePrompt (System_LLM.cpp). Both users below hold ChatLock
 // across their llmStartAsync call, which serializes it. PSRAM to match the
-// engine's own prompt staging (gLLMAsyncCtx) rather than spend another KB of
+// engine's own prompt staging (gLlmAsyncCtx) rather than spend another KB of
 // internal heap.
 EXT_RAM_BSS_ATTR static char sFramedPrompt[1024];
 
@@ -350,7 +350,7 @@ int chatBeginTurn(const char* userPrompt, const ChatParamOverride* opt, ChatRunT
   int assistantSlot = appendTurnLocked(ChatTurnRole::ASSISTANT, nullptr, 0);
 
   // Resolve params
-  LLMGenParams params;
+  LlmGenParams params;
   chatResolveParams(opt ? *opt : ChatParamOverride{}, &params);
 
   // Hand off to the engine. The turn above deliberately stores what the user
@@ -412,7 +412,7 @@ int chatRetryLast(const ChatParamOverride* opt) {
   promptBuf[plen] = '\0';
 
   // Resolve params, then tokenize the prior assistant answer for suppress.
-  LLMGenParams params;
+  LlmGenParams params;
   chatResolveParams(opt ? *opt : ChatParamOverride{}, &params);
 
   if (lastAssistantSlot >= 0 && sTurns[lastAssistantSlot].text &&
