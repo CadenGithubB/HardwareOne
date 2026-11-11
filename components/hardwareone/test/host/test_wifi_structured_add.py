@@ -28,7 +28,7 @@ import shutil
 import subprocess
 import tempfile
 
-from test_web_batch_handlers import extract_block, require
+from test_web_batch_handlers import extract_block, require, with_arg_text
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
@@ -200,7 +200,7 @@ def main() -> None:
                   "-fno-omit-frame-pointer", "-g"]
     with tempfile.TemporaryDirectory(prefix="hw1-wifi-structured-add-") as temporary:
         unit, binary = Path(temporary) / "test.cpp", Path(temporary) / "test"
-        unit.write_text(unit_text)
+        unit.write_text(with_arg_text(unit_text))
         subprocess.run([args.cxx, *flags, str(unit), "-o", str(binary)], check=True, timeout=120)
         subprocess.run([str(binary)], check=True, timeout=60)
 

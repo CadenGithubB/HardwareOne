@@ -1185,7 +1185,8 @@ const char* cmd_cpufreq(const String& argsInput) {
         return "Error: Enter one CPU frequency in MHz; run cpufreq for supported values";
       }
     }
-    uint32_t newFreq = args.toInt();
+    uint32_t newFreq = 0;
+    if (!parseIntArg(args, newFreq)) return kCommandReplyNotANumber;
     if (!isPowerCpuFrequencySupported(newFreq)) {
       return "Error: Unsupported CPU frequency; run cpufreq for supported values";
     }
@@ -1235,7 +1236,8 @@ const char* cmd_lightsleep(const String& argsInput) {
   String arg = argsInput;
   arg.trim();
   if (arg.length() > 0) {
-    int val = arg.toInt();
+    int val = 0;
+    if (!parseIntArg(arg, val)) return kCommandReplyNotANumber;
     if (val > 0 && val <= 3600) {
       seconds = val;
     }
@@ -2417,7 +2419,8 @@ const char* cmd_wait(const String& argsInput) {
   String val = argsInput;
   val.trim();
   if (val.length() == 0) return "Error: invalid arguments — Usage: wait <ms>";
-  int ms = val.toInt();
+  int ms = 0;
+  if (!parseIntArg(val, ms)) return kCommandReplyNotANumber;
   if (ms > 0 && ms <= 60000) delay(ms);
   return "[System] Wait complete";
 }

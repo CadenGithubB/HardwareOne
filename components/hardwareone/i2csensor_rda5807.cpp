@@ -807,10 +807,10 @@ const char* cmd_fmradioautostart(const String& argsInput) {
     return gSettings.fmRadioAutoStart ? "[FM Radio] Auto-start: enabled" : "[FM Radio] Auto-start: disabled";
   }
   arg.toLowerCase();
-  if (arg == "on" || arg == "true" || arg == "1") {
+  if (argIsOn(arg)) {
     setSetting(gSettings.fmRadioAutoStart, true);
     return "[FM Radio] Auto-start enabled";
-  } else if (arg == "off" || arg == "false" || arg == "0") {
+  } else if (argIsOff(arg)) {
     setSetting(gSettings.fmRadioAutoStart, false);
     return "[FM Radio] Auto-start disabled";
   }

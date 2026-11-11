@@ -54,6 +54,7 @@ public:
     value=value.substr(first,value.find_last_not_of(" \t\r\n")-first+1);
   }
   size_t length()const{return value.size();}
+  const char* c_str()const{return value.c_str();}
   long toInt()const{return strtol(value.c_str(),nullptr,10);}
 };
 struct {bool i2cEnabled=false,i2c2Enabled=false;} gSettings;
@@ -119,7 +120,7 @@ int main() {
       if(hardware==EXPECTED_RESERVED_PORT && !CAMERA_SCCB_SHARED) {
         assert(strstr(reply,"reserved"));
         assert(*slots[logical]==initial && settingCalls==0);
-        reply=commands[logical]("-1");
+        reply=commands[logical]("on");
         assert(strstr(reply,"reserved") && settingCalls==0 && *slots[logical]==initial);
       } else {
         assert(strstr(reply,"set to 1") && *slots[logical] && settingCalls==1);
@@ -132,6 +133,11 @@ int main() {
     settingCalls=0;*slots[logical]=true;
     assert(strstr(commands[logical](" \t"),"invalid arguments"));
     assert(*slots[logical] && settingCalls==0);
+    // A value that is neither on nor off is refused, not read as "on".
+    for(const char* junk : {"-1","2","yes please"}) {
+      assert(!strcmp(commands[logical](junk),kCommandReplyNotOnOff));
+      assert(*slots[logical] && settingCalls==0);
+    }
     validateOnly=true;
     assert(!strcmp(commands[logical]("0"),"valid"));
     assert(*slots[logical] && settingCalls==0);

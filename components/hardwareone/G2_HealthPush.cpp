@@ -433,8 +433,8 @@ const char* cmd_ringpanelfeed(const String& args) {
   a.toLowerCase();
   if (!a.length())
     return feedOn() ? "Glasses Health panel feed: on" : "Glasses Health panel feed: off";
-  if (a == "on" || a == "1" || a == "true") return setFeed(true);
-  if (a == "off" || a == "0" || a == "false") return setFeed(false);
+  if (argIsOn(a)) return setFeed(true);
+  if (argIsOff(a)) return setFeed(false);
   return "Error: invalid arguments — Usage: ring panel feed [on|off]";
 }
 
@@ -451,7 +451,8 @@ const char* cmd_ringpanelhistory(const String& args) {
   for (size_t i = 0; i < a.length(); i++)
     if (a[i] < '0' || a[i] > '9')
       return "Error: invalid arguments — Usage: ring panel history [minutes 10-1440]";
-  const long m = a.length() <= 4 ? a.toInt() : -1;
+  long m = -1;
+  if (a.length() <= 4) parseIntArg(a, m);
   if (m < kHistoryMinMinutes || m > kHistoryMaxMinutes)
     return "Error: invalid arguments — Usage: ring panel history [minutes 10-1440]";
   setSetting(gSettings.g2HealthPanelHistoryMin, (int)m);

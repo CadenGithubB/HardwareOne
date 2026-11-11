@@ -1593,7 +1593,7 @@ const char* cmd_automation_add(const String& argsInput) {
   String eventOn = a.value("on");
   String eventMatch = a.value("match");
   
-  bool enabled = (enabledStr.equalsIgnoreCase("1") || enabledStr.equalsIgnoreCase("true") || enabledStr.equalsIgnoreCase("yes"));
+  bool enabled = (argIsOn(enabledStr) || enabledStr.equalsIgnoreCase("yes"));
   
   String typeNorm = type;
   typeNorm.trim();
@@ -1721,7 +1721,7 @@ const char* cmd_automation_add(const String& argsInput) {
     return "Error: bootdelayms must be numeric (milliseconds)";
   }
   
-  bool runAtBoot = (runAtBootStr.equalsIgnoreCase("1") || runAtBootStr.equalsIgnoreCase("true") || runAtBootStr.equalsIgnoreCase("yes"));
+  bool runAtBoot = (argIsOn(runAtBootStr) || runAtBootStr.equalsIgnoreCase("yes"));
   
   String json;
   if (!loadAutomationsStoreForEdit(json, !validateOnly)) {
@@ -2444,7 +2444,8 @@ const char* cmd_automation_trigger(const String& argsInput) {
     return "Error: automations.json missing automations array";
   }
 
-  long id = idStr.toInt();
+  long id = 0;
+  if (!parseIntArg(idStr, id)) return kCommandReplyNotANumber;
   JsonObject target;
   for (JsonObject obj : automations) {
     if (obj["id"].as<long>() == id) { target = obj; break; }

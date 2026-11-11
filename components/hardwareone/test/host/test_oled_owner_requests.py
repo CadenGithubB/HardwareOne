@@ -31,7 +31,7 @@ import shutil
 import subprocess
 import tempfile
 
-from test_web_batch_handlers import extract_block, require
+from test_web_batch_handlers import extract_block, require, with_arg_text
 
 HERE = Path(__file__).resolve().parent
 
@@ -149,7 +149,7 @@ def main() -> None:
         work = Path(directory)
         unit = work / "oled_owner_requests_unit.cpp"
         binary = work / "oled_owner_requests"
-        unit.write_text(unit_text, encoding="utf-8")
+        unit.write_text(with_arg_text(unit_text), encoding="utf-8")
         command = [args.cxx, "-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic",
                    "-Wno-unused-function", str(unit), "-o", str(binary)]
         if args.sanitize:

@@ -432,7 +432,7 @@ const char* cmd_ledeffect(const String& argsInput) {
     firstArg.trim();
 
     if (firstArg.length() > 0 && isdigit(firstArg.charAt(0))) {
-      duration = firstArg.toInt();
+      if (!parseIntArg(firstArg, duration)) return kCommandReplyNotANumber;
       if (duration < 100) duration = 100;
       if (duration > 60000) duration = 60000;
     } else {
@@ -458,12 +458,12 @@ const char* cmd_ledeffect(const String& argsInput) {
 
           if (thirdSpace >= 0) {
             String durationStr = rest.substring(thirdSpace + 1);
-            duration = durationStr.toInt();
+            if (!parseIntArg(durationStr, duration)) return kCommandReplyNotANumber;
             if (duration < 100) duration = 100;
             if (duration > 60000) duration = 60000;
           }
         } else if (secondArg.length() > 0) {
-          duration = secondArg.toInt();
+          if (!parseIntArg(secondArg, duration)) return kCommandReplyNotANumber;
           if (duration < 100) duration = 100;
           if (duration > 60000) duration = 60000;
         }
@@ -511,7 +511,8 @@ static const char* cmd_hardwareled_brightness(const String& argsInput) {
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   String arg = argsInput; arg.trim();
   if (arg.length() == 0) return "Error: invalid arguments — Usage: ledbrightness <0..100>";
-  int v = arg.toInt();
+  int v = 0;
+  if (!parseIntArg(arg, v)) return kCommandReplyNotANumber;
   if (v < 0 || v > 100) return "Error: LED brightness must be 0..100";
   setSetting(gSettings.ledBrightness, v);
   // Apply immediately to hardware (0-100% -> 0-255)
@@ -526,7 +527,9 @@ static const char* cmd_hardwareled_startupenabled(const String& argsInput) {
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   String arg = argsInput; arg.trim();
   if (arg.length() == 0) return "Error: invalid arguments — Usage: ledstartupenabled <0|1>";
-  bool enabled = (arg == "1" || arg.equalsIgnoreCase("true"));
+  const int parsed = parseBoolArg(arg);
+  if (parsed < 0) return kCommandReplyNotOnOff;
+  const bool enabled = (parsed == 1);
   setSetting(gSettings.ledStartupEnabled, enabled);
   snprintf(getDebugBuffer(), 1024, "LED startup effect %s", enabled ? "enabled" : "disabled");
   return getDebugBuffer();
@@ -572,7 +575,8 @@ static const char* cmd_hardwareled_startupduration(const String& argsInput) {
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   String arg = argsInput; arg.trim();
   if (arg.length() == 0) return "Error: invalid arguments — Usage: ledstartupduration <100..10000>";
-  int v = arg.toInt();
+  int v = 0;
+  if (!parseIntArg(arg, v)) return kCommandReplyNotANumber;
   if (v < 100 || v > 10000) return "Error: LED duration must be 100..10000 ms";
   setSetting(gSettings.ledStartupDuration, v);
   snprintf(getDebugBuffer(), 1024, "LED startup duration set to %dms", v);

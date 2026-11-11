@@ -21,6 +21,7 @@ class String {
   String(const char* text = "") : value(text) {}
   String(const std::string& text) : value(text) {}
   size_t length() const { return value.size(); }
+  const char* c_str() const { return value.c_str(); }
   char operator[](size_t i) const { return value[i]; }
   void trim() {
     const auto first = value.find_first_not_of(" \t\r\n");

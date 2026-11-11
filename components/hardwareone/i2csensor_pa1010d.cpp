@@ -622,10 +622,10 @@ const char* cmd_gpsautostart(const String& argsInput) {
     return gSettings.gpsAutoStart ? "[GPS] Auto-start: enabled" : "[GPS] Auto-start: disabled";
   }
   arg.toLowerCase();
-  if (arg == "on" || arg == "true" || arg == "1") {
+  if (argIsOn(arg)) {
     setSetting(gSettings.gpsAutoStart, true);
     return "[GPS] Auto-start enabled";
-  } else if (arg == "off" || arg == "false" || arg == "0") {
+  } else if (argIsOff(arg)) {
     setSetting(gSettings.gpsAutoStart, false);
     return "[GPS] Auto-start disabled";
   }

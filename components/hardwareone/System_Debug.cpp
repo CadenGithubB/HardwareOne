@@ -1277,8 +1277,7 @@ const char* cmd_outg2(const String& argsInput) {
   a.trim();
   int v = -1;
   if (a.length()) {
-    v = a.toInt();
-    if (a != "0" && v == 0) v = -1;  // Invalid input
+    v = parseBoolArg(a);  // anything else shows the status
   }
   if (v < 0) {
     // Show current status
@@ -1308,8 +1307,7 @@ const char* cmd_outble(const String& argsInput) {
   a.trim();
   int v = -1;
   if (a.length()) {
-    v = a.toInt();
-    if (a != "0" && v == 0) v = -1;
+    v = parseBoolArg(a);  // anything else shows the status
   }
   if (v < 0) {
     bool enabled = (gOutputFlags & MSG_ROUTE_BLE) != 0;
@@ -1376,8 +1374,9 @@ const char* cmd_webconsole(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String valStr = argsInput;
   valStr.trim();
-  int v = valStr.toInt();
-  setDebugSetting(gSettings.webConsoleDebug, (bool)(v != 0));
+  const int v = parseBoolArg(valStr);
+  if (v < 0) return kCommandReplyNotOnOff;
+  setDebugSetting(gSettings.webConsoleDebug, v == 1);
   return gSettings.webConsoleDebug ? "webConsole enabled (persistent)" : "webConsole disabled (persistent)";
 }
 
@@ -1390,7 +1389,8 @@ const char* cmd_memorysampleintervalsec(const String& argsInput) {
     snprintf(gDebugBuffer, 1024, "Memory sample interval: %d sec (0=disabled)", gSettings.memorySampleIntervalSec);
     return gDebugBuffer;
   }
-  int v = valStr.toInt();
+  int v = 0;
+  if (!parseIntArg(valStr, v)) return kCommandReplyNotANumber;
   if (v < 0 || v > 300) return "Interval must be 0-300 seconds (0=disabled)";
   setDebugSetting(gSettings.memorySampleIntervalSec, v);
   snprintf(gDebugBuffer, 1024, "Memory sample interval set to %d sec%s", v, v == 0 ? " (disabled)" : "");
@@ -1485,8 +1485,8 @@ const char* cmd_loglink(const String& argsInput) {
       ? "loglink: ON — ESP-IDF logs routed through the unified output queue"
       : "loglink: OFF — ESP-IDF logs write the UART directly (default)";
   }
-  bool on  = (a == "1" || a.equalsIgnoreCase("on")  || a.equalsIgnoreCase("true"));
-  bool off = (a == "0" || a.equalsIgnoreCase("off") || a.equalsIgnoreCase("false"));
+  bool on  = argIsOn(a);
+  bool off = argIsOff(a);
   if (!on && !off) return "Error: invalid arguments — Usage: loglink <0|1|on|off>";
   setIdfLogBridge(on);
   return on
@@ -2045,7 +2045,7 @@ const char* cmd_log(const String& argsInput) {
         flagsSet = true;
       } else if (token.startsWith("tags=")) {
         String tagsStr = token.substring(5);
-        categoryTags = tagsStr.toInt();
+        if (!parseIntArg(tagsStr, categoryTags)) return kCommandReplyNotANumber;
       } else if (token.length() > 0 && !hasFilepath) {
         // The log path must be a quoted token (uniform quoted-path rule); a bare
         // token here is almost certainly an unquoted path.
@@ -2153,9 +2153,9 @@ const char* cmd_log(const String& argsInput) {
     bool newValue;
     if (mode.length() == 0) {
       newValue = !gSettings.systemLogAutoStart;  // bare = toggle
-    } else if (mode == "on" || mode == "1" || mode == "true" || mode == "enable") {
+    } else if (argIsOn(mode)) {
       newValue = true;
-    } else if (mode == "off" || mode == "0" || mode == "false" || mode == "disable") {
+    } else if (argIsOff(mode)) {
       newValue = false;
     } else {
       return "Error: invalid arguments — Usage: log autostart [on|off]  (bare = toggle)";
@@ -2205,13 +2205,12 @@ const char* cmd_log(const String& argsInput) {
 const char* cmd_debugstack(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   CommandArgs ca(argsInput);
-  int v = ca.argInt(0, -1);
   String s = ca.arg(0);
-  if (s.equalsIgnoreCase("on") || s.equalsIgnoreCase("true") || v == 1) {
+  if (argIsOn(s)) {
     gDebugStackTraceEnabled = true;
     return "debugstack ON — STACK_TRACEF messages will print directly to Serial";
   }
-  if (s.equalsIgnoreCase("off") || s.equalsIgnoreCase("false") || v == 0) {
+  if (argIsOff(s)) {
     gDebugStackTraceEnabled = false;
     return "debugstack OFF";
   }

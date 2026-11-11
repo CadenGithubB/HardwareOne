@@ -15,7 +15,7 @@ import shutil
 import subprocess
 import tempfile
 
-from test_web_batch_handlers import extract_block, require
+from test_web_batch_handlers import extract_block, require, with_arg_text
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
@@ -100,7 +100,7 @@ def main() -> None:
             "#define portEXIT_CRITICAL(mux) ((void)(mux))\n")
         (work / "freertos/task.h").write_text("#pragma once\n")
         source = work / "test.cpp"
-        source.write_text(generate())
+        source.write_text(with_arg_text(generate()))
         for profile, flags in PROFILES:
             for i2c in (0, 1):
                 executable = work / f"test-{profile}-i2c-{i2c}"

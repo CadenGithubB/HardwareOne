@@ -7,7 +7,7 @@ import re
 import shutil
 import subprocess
 import tempfile
-from test_web_batch_handlers import extract_block
+from test_web_batch_handlers import extract_block, with_arg_text
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
@@ -46,7 +46,7 @@ def main():
         source = source.replace(marker, definition)
     with tempfile.TemporaryDirectory(prefix='hw1-camera-i2c-') as directory:
         work=Path(directory)
-        generated=work/'test.cpp';generated.write_text(source)
+        generated=work/'test.cpp';generated.write_text(with_arg_text(source, on_off="double"))
         runtime_variants = 0
         rejected_variants = 0
         boards=(('p4',('HW_BOARD_P4X_EYE=1','CONFIG_IDF_TARGET_ESP32P4=1')),

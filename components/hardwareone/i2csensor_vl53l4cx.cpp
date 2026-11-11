@@ -227,7 +227,8 @@ const char* cmd_toftransitionms(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String _arg = argsInput; _arg.trim();
   if (_arg.length() == 0) return "Error: invalid arguments — Usage: toftransitionms <0..5000>";
-  int v = _arg.toInt();
+  int v = 0;
+  if (!parseIntArg(_arg, v)) return kCommandReplyNotANumber;
   if (v < 0 || v > 5000) return "Error: [ToF] Transition time must be 0-5000ms";
   setSetting(gSettings.tofTransitionMs, v);
   BROADCAST_PRINTF("tofTransitionMs set to %d", v);
@@ -238,7 +239,8 @@ const char* cmd_tofmaxdistancemm(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String _arg = argsInput; _arg.trim();
   if (_arg.length() == 0) return "Error: invalid arguments — Usage: tofmaxdistancemm <100..10000>";
-  int v = _arg.toInt();
+  int v = 0;
+  if (!parseIntArg(_arg, v)) return kCommandReplyNotANumber;
   if (v < 100 || v > 10000) return "Error: [ToF] Max distance must be 100-10000mm";
   setSetting(gSettings.tofUiMaxDistanceMm, v);
   BROADCAST_PRINTF("tofUiMaxDistanceMm set to %d", v);
@@ -553,7 +555,8 @@ const char* cmd_tofpollingms(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String _arg = argsInput; _arg.trim();
   if (_arg.length() == 0) return "Error: invalid arguments — Usage: tofpollingms <50..5000>";
-  int v = _arg.toInt();
+  int v = 0;
+  if (!parseIntArg(_arg, v)) return kCommandReplyNotANumber;
   if (v < 50 || v > 5000) return "Error: [ToF] Polling interval must be 50-5000ms";
   setSetting(gSettings.tofPollingMs, v);
   BROADCAST_PRINTF("tofPollingMs set to %d", v);
@@ -564,7 +567,8 @@ const char* cmd_tofstabilitythreshold(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String _arg = argsInput; _arg.trim();
   if (_arg.length() == 0) return "Error: invalid arguments — Usage: tofstabilitythreshold <0..50>";
-  int v = _arg.toInt();
+  int v = 0;
+  if (!parseIntArg(_arg, v)) return kCommandReplyNotANumber;
   if (v < 0 || v > 50) return "Error: [ToF] Stability threshold must be 0-50";
   setSetting(gSettings.tofStabilityThreshold, v);
   BROADCAST_PRINTF("tofStabilityThreshold set to %d", v);
@@ -580,7 +584,8 @@ const char* cmd_tofdevicepollms(const String& argsInput) {
   String valStr = argsInput;
   valStr.trim();
   if (valStr.length() == 0) return "Error: invalid arguments — Usage: tofDevicePollMs <100..2000>";
-  int v = valStr.toInt();
+  int v = 0;
+  if (!parseIntArg(valStr, v)) return kCommandReplyNotANumber;
   if (v < 100) v = 100;
   if (v > 2000) v = 2000;
   setSetting(gSettings.tofDevicePollMs, v);
@@ -598,10 +603,10 @@ const char* cmd_tofautostart(const String& argsInput) {
     return gSettings.tofAutoStart ? "[ToF] Auto-start: enabled" : "[ToF] Auto-start: disabled";
   }
   arg.toLowerCase();
-  if (arg == "on" || arg == "true" || arg == "1") {
+  if (argIsOn(arg)) {
     setSetting(gSettings.tofAutoStart, true);
     return "[ToF] Auto-start enabled";
-  } else if (arg == "off" || arg == "false" || arg == "0") {
+  } else if (argIsOff(arg)) {
     setSetting(gSettings.tofAutoStart, false);
     return "[ToF] Auto-start disabled";
   }

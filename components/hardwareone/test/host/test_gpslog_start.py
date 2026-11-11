@@ -17,7 +17,7 @@ import subprocess
 import tempfile
 
 from test_mqtt_boolean_commands import extract_macro
-from test_web_batch_handlers import extract_block, require
+from test_web_batch_handlers import extract_block, require, with_arg_text
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
@@ -122,7 +122,7 @@ def main() -> None:
             source = Path(directory) / f"test-{int(gps)}.cpp"
             executable = source.with_suffix("")
             (Path(directory) / "System_CommandReply.h").write_text((COMPONENT / "System_CommandReply.h").read_text())
-            source.write_text('#include "System_CommandReply.h"\n' + generated(gps, args.baseline))
+            source.write_text(with_arg_text('#include "System_CommandReply.h"\n' + generated(gps, args.baseline), on_off=True))
             subprocess.run([args.cxx, *flags, f"-DTEST_GPS={int(gps)}", "-I", directory,
                             str(source), "-o", str(executable)], check=True, timeout=120)
             results.append(subprocess.run([str(executable)], timeout=60).returncode)

@@ -1789,7 +1789,8 @@ const char* cmd_mqttport(const String& argsInput) {
     snprintf(getDebugBuffer(), 1024, "MQTT port: %d", gSettings.mqttPort);
     return getDebugBuffer();
   }
-  int port = arg.toInt();
+  int port = 0;
+  if (!parseIntArg(arg, port)) return kCommandReplyNotANumber;
   if (port < 1 || port > 65535) {
     return "Error: Port must be 1-65535";
   }
@@ -1976,7 +1977,8 @@ const char* cmd_mqttpublishinterval(const String& argsInput) {
     snprintf(getDebugBuffer(), 1024, "MQTT publish interval: %d ms", gSettings.mqttPublishIntervalMs);
     return getDebugBuffer();
   }
-  int interval = arg.toInt();
+  int interval = 0;
+  if (!parseIntArg(arg, interval)) return kCommandReplyNotANumber;
   if (interval < 1000 || interval > 300000) {
     return "Error: Interval must be 1000-300000 ms";
   }

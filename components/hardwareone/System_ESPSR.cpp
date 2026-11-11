@@ -3278,7 +3278,8 @@ static const char* cmd_sr_cmds_del(const String& argsInput) {
   const char* phrase = nullptr;
   String tmp;
   if (isAllDigits(arg)) {
-    int id = arg.toInt();
+    int id = 0;
+    if (!parseIntArg(arg, id)) return kCommandReplyNotANumber;
     char* s = esp_mn_commands_get_string(id);
     if (s) {
       tmp = String(s);
@@ -3450,7 +3451,8 @@ static const char* cmd_sr_debug_level(const String& argsInput) {
     snprintf(buf, sizeof(buf), "Current debug level: %u (0=off, 1-4=verbose)", gSrDebugLevel);
     return buf;
   }
-  int lvl = arg.toInt();
+  int lvl = 0;
+  if (!parseIntArg(arg, lvl)) return kCommandReplyNotANumber;
   if (lvl < 0) lvl = 0;
   if (lvl > 4) lvl = 4;
   gSrDebugLevel = (uint8_t)lvl;
@@ -3468,7 +3470,8 @@ static const char* cmd_sr_debug_telem(const String& argsInput) {
     snprintf(buf, sizeof(buf), "Telemetry period: %u ms (0=off)", (unsigned)gSrTelemetryPeriodMs);
     return buf;
   }
-  int ms = arg.toInt();
+  int ms = 0;
+  if (!parseIntArg(arg, ms)) return kCommandReplyNotANumber;
   if (ms < 0) ms = 0;
   gSrTelemetryPeriodMs = (uint32_t)ms;
   gSrLastTelemetryMs = millis();
@@ -3586,8 +3589,9 @@ static const char* cmd_sr_accept(const String& argsInput) {
   }
   if (key == "speech" || key == "require_speech") {
     if (val.length() == 0) return "Error: missing speech value (0/1)";
-    int v = val.toInt();
-    gSrTargetRequireSpeech = (v != 0);
+    const int v = parseBoolArg(val);
+    if (v < 0) return kCommandReplyNotOnOff;
+    gSrTargetRequireSpeech = (v == 1);
     return gSrTargetRequireSpeech ? "OK (require_speech=1)" : "OK (require_speech=0)";
   }
 
@@ -3695,11 +3699,11 @@ static const char* cmd_sr_raw(const String& argsInput) {
     return buf;
   }
   
-  if (args == "on" || args == "1") {
+  if (argIsOn(args)) {
     gSrRawOutputEnabled = true;
     return "OK (raw output enabled - all detections will be shown)";
   }
-  if (args == "off" || args == "0") {
+  if (argIsOff(args)) {
     gSrRawOutputEnabled = false;
     return "OK (raw output disabled)";
   }
@@ -3781,7 +3785,8 @@ static const char* cmd_sr_timeout(const String& argsInput) {
     return buf;
   }
   
-  int val = args.toInt();
+  int val = 0;
+  if (!parseIntArg(args, val)) return kCommandReplyNotANumber;
   if (val < 1000 || val > 30000) {
     return "Error: timeout must be 1000-30000 ms";
   }
@@ -3908,7 +3913,8 @@ static const char* cmd_sr_tuning_agc(const String& argsInput) {
     return buf;
   }
   
-  int val = args.toInt();
+  int val = 0;
+  if (!parseIntArg(args, val)) return kCommandReplyNotANumber;
   if (val < 0 || val > 3) {
     return "Error: agc must be 0-3";
   }
@@ -3931,7 +3937,8 @@ static const char* cmd_sr_tuning_vad(const String& argsInput) {
     return buf;
   }
   
-  int val = args.toInt();
+  int val = 0;
+  if (!parseIntArg(args, val)) return kCommandReplyNotANumber;
   if (val < 0 || val > 4) {
     return "Error: vad must be 0-4";
   }
@@ -3957,10 +3964,10 @@ static const char* cmd_sr_tuning_filters(const String& argsInput) {
     return buf;
   }
   
-  if (args.equalsIgnoreCase("on") || args == "1") {
+  if (argIsOn(args)) {
     gSrFiltersEnabled = true;
     return "Audio filters ENABLED (high-pass + pre-emphasis)";
-  } else if (args.equalsIgnoreCase("off") || args == "0") {
+  } else if (argIsOff(args)) {
     gSrFiltersEnabled = false;
     return "Audio filters DISABLED (DC offset + gain only)";
   }
@@ -4068,7 +4075,8 @@ static const char* cmd_sr_snip_config(const String& argsInput) {
   key.toLowerCase();
   String val = a.arg(1);
   if (key == "pre_ms") {
-    int v = val.toInt();
+    int v = 0;
+    if (!parseIntArg(val, v)) return kCommandReplyNotANumber;
     if (v < 100) v = 100;
     if (v > 5000) v = 5000;
     gSrSnipPreMs = (uint32_t)v;
@@ -4078,7 +4086,8 @@ static const char* cmd_sr_snip_config(const String& argsInput) {
     snprintf(buf, sizeof(buf), "pre_ms set to %u", (unsigned)gSrSnipPreMs);
     return buf;
   } else if (key == "max_ms") {
-    int v = val.toInt();
+    int v = 0;
+    if (!parseIntArg(val, v)) return kCommandReplyNotANumber;
     if (v < 1000) v = 1000;
     if (v > 30000) v = 30000;
     gSrSnipMaxMs = (uint32_t)v;

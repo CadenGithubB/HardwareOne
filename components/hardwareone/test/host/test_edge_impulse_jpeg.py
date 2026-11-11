@@ -28,7 +28,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from test_web_batch_handlers import extract_block
+from test_web_batch_handlers import extract_block, with_arg_text
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
@@ -63,7 +63,7 @@ def module_text(component=COMPONENT):
 def compile_unit(args, workdir, name, text, defines):
     """Compile one harness unit; returns (binary or None, compiler output)."""
     unit, binary = workdir / f'{name}.cpp', workdir / name
-    unit.write_text(text)
+    unit.write_text(with_arg_text(text, on_off="double"))
     command = [args.cxx, '-std=c++17', '-Wall', '-Wextra', '-Werror', '-pedantic',
                # Firmware style, not test concerns: CLI handlers ignore their
                # argument string, command rows omit the trailing flag, and

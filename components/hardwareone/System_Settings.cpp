@@ -582,7 +582,8 @@ const char* cmd_webclihistorysize(const String& argsInput) {
   String valStr = argsInput;
   valStr.trim();
   if (valStr.length() == 0) return "Error: invalid arguments — Usage: webclihistorysize <1..100>";
-  int v = valStr.toInt();
+  int v = 0;
+  if (!parseIntArg(valStr, v)) return kCommandReplyNotANumber;
   if (v < 1) v = 1;
   if (v > 100) v = 100;
   setSetting(gSettings.webCliHistorySize, v);
@@ -597,7 +598,8 @@ const char* cmd_oledclihistorysize(const String& argsInput) {
   String valStr = argsInput;
   valStr.trim();
   if (valStr.length() == 0) return "Error: invalid arguments — Usage: oledclihistorysize <10..100>";
-  int v = valStr.toInt();
+  int v = 0;
+  if (!parseIntArg(valStr, v)) return kCommandReplyNotANumber;
   if (v < 10) v = 10;  // Minimum 10 lines for OLED
   if (v > 100) v = 100;
   setSetting(gSettings.oledCliHistorySize, v);
@@ -611,11 +613,8 @@ const char* cmd_outserial(const String& argsInput) {
   String t1 = ca.arg(0);
   String t2 = ca.arg(1);
   bool modeTemp = false;
-  // "0" -> 0, any other integer -> 1, non-numeric/missing -> -1 (error)
-  auto parseBit = [](const String& s) -> int {
-    if (s == "0") return 0;
-    return s.toInt() != 0 ? 1 : -1;
-  };
+  // 0/off -> 0, 1/on -> 1, anything else or missing -> -1 (error)
+  auto parseBit = [](const String& s) -> int { return parseBoolArg(s); };
   int v = -1;
   if (t1.length() && (t1 == "temp" || t1 == "persist")) {
     modeTemp = (t1 == "temp");
@@ -2167,7 +2166,8 @@ const char* cmd_tzoffsetminutes(const String& argsInput) {
   String valStr = argsInput;
   valStr.trim();
   if (valStr.length() == 0) return "Error: invalid arguments — Usage: tzoffsetminutes <-720..840>";
-  int offset = atoi(valStr.c_str());
+  int offset = 0;
+  if (!parseIntArg(valStr, offset)) return kCommandReplyNotANumber;
   // -720..+840 = UTC-12 .. UTC+14, the real-world timezone span (e.g. Kiribati
   // Line Islands at +14). Matches the tzOffsetMinutes setting's min/max.
   if (offset < -720 || offset > 840) return "Error: timezone offset must be between -720 and 840 minutes";
@@ -2760,12 +2760,12 @@ const char* cmd_uartlink(const String& argsInput) {
   // cmd_exec while the drain runs on the loop task, and tearing the port
   // (and its line accumulator) down from another task while bytes are in
   // flight is heap corruption. uartLinkTick applies the request.
-  if (t == "on" || t == "1") {
+  if (argIsOn(t)) {
     (void)handleSettingCommand(findOutputEntry("uartLinkEnabled"), "1");
     uartLinkRequestStart();
     return "OK: UART link starting";
   }
-  if (t == "off" || t == "0") {
+  if (argIsOff(t)) {
     (void)handleSettingCommand(findOutputEntry("uartLinkEnabled"), "0");
     uartLinkRequestStop();
     // Note: a host that issued this over the link itself gets this reply only

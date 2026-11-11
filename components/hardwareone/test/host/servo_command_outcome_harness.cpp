@@ -117,7 +117,9 @@ static void invalid(Handler handler, const char* args) {
 int main() {
   for (const char* input : {"", "0", "0 90 extra", "16 90", "-1 90", "0 181", "0 -1",
        "a 90", "1junk 90", "0 90junk", "0 90.0", "0 1e2", "0 999999999999999999999999999999",
-       "0 \"90", "\"0\" \"90", "\" 0\" 90", "0 \"90 \""}) invalid(cmd_servo, input);
+       "0 \"90", "\"0\" \"90"}) invalid(cmd_servo, input);
+  // Spaces around a quoted number are trimmed by the shared parser (System_ArgParse.h).
+  for (const char* input : {"\" 0\" 90", "0 \"90 \""}) { reset(); ready(); assert(!failed(cmd_servo(input))); }
   for (const char* input : {"", "0", "0 100 50 extra", "16 100", "0 4096", "0 -1",
        "0 100 23", "0 100 1527", "0 100 -24", "0 100 bad", "0 100 50Hz", "0 100 50.0",
        "0 100 999999999999999999999999999", "0 100 \"50", "0junk 100", "0 100junk"}) invalid(cmd_pwm, input);

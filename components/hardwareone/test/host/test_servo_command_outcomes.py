@@ -10,7 +10,7 @@ import shutil
 import subprocess
 import tempfile
 
-from test_web_batch_handlers import extract_block, require
+from test_web_batch_handlers import extract_block, require, with_arg_text
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
@@ -32,7 +32,7 @@ def main() -> None:
         "CommandArgs::CommandArgs(", "void CommandArgs::parse()", "const String& CommandArgs::arg(",
         "String CommandArgs::remaining(",
     )] + [extract_block(owner, marker) for marker in (
-        "bool servoInit()", "static bool parseServoNumber(", "const char* cmd_servo(",
+        "bool servoInit()", "const char* cmd_servo(",
         "const char* cmd_servoprofile(", "const char* cmd_servocalibrate(", "const char* cmd_pwm(",
     )]
     harness = (HERE / "servo_command_outcome_harness.cpp").read_text()
@@ -42,7 +42,7 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="hw1-servo-commands-") as directory:
         source = Path(directory) / "test.cpp"
         binary = Path(directory) / "test"
-        source.write_text(harness)
+        source.write_text(with_arg_text(harness))
         flags = ["-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic"]
         if args.sanitize:
             flags += ["-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-g"]

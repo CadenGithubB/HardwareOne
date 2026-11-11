@@ -28316,9 +28316,9 @@ static const char* cmd_g2listrebuild(const String& argsInput) {
   EXT_RAM_BSS_ATTR static char out[120];
   CommandArgs ca(argsInput);
   String v = ca.arg(0); v.toLowerCase();
-  if (v == "on" || v == "1" || v == "true") {
+  if (argIsOn(v)) {
     gG2ListRebuildEnabled = true;
-  } else if (v == "off" || v == "0" || v == "false") {
+  } else if (argIsOff(v)) {
     gG2ListRebuildEnabled = false;
   } else if (v.length() == 0) {
     // No arg — show current state.
@@ -28344,7 +28344,8 @@ static const char* cmd_g2liverate(const String& argsInput) {
              (unsigned)gG2LiveRateMs);
     return out;
   }
-  long n = v.toInt();
+  long n = 0;
+  if (!parseIntArg(v, n)) return kCommandReplyNotANumber;
   if (n < 100) {
     return "Error: invalid arguments — Usage: g2liverate [ms>=100]";
   }
@@ -28367,9 +28368,9 @@ static const char* cmd_g2liveloop(const String& argsInput) {
   String sub = ca.arg(0); sub.toLowerCase();
   String val = ca.arg(1); val.toLowerCase();
   if (sub == "keep") {
-    if (val == "on" || val == "1" || val == "true") {
+    if (argIsOn(val)) {
       gG2LiveLoopKeepAlive = true;
-    } else if (val == "off" || val == "0" || val == "false") {
+    } else if (argIsOff(val)) {
       gG2LiveLoopKeepAlive = false;
     } else if (val.length() != 0) {
       return "Error: invalid arguments — Usage: g2liveloop keep [on|off]";
@@ -29245,8 +29246,8 @@ static const char* cmd_g2glasses(const String& argsInput) {
   uint32_t value = 0;
   String raw = ca.arg(1); raw.toLowerCase();
   if (knob->isBool) {
-    if (raw == "on" || raw == "1" || raw == "true")        value = 1;
-    else if (raw == "off" || raw == "0" || raw == "false") value = 0;
+    if (argIsOn(raw))        value = 1;
+    else if (argIsOff(raw)) value = 0;
     else {
       snprintf(ret, sizeof(ret),
                "Error: G2 glasses: %s takes on|off (got '%s')", knob->name, raw.c_str());
@@ -30175,18 +30176,17 @@ static const char* cmd_g2aiconfig(const String& argsInput) {
   uint64_t streamSpeed = 80;
   uint64_t duplexMode  = 0;
 
-  if (ca.count() >= 1) {
-    String a = ca.arg(0);
-    voiceSwitch = (a == "-") ? UINT64_MAX : (uint64_t)a.toInt();
-  }
-  if (ca.count() >= 2) {
-    String a = ca.arg(1);
-    streamSpeed = (a == "-") ? UINT64_MAX : (uint64_t)a.toInt();
-  }
-  if (ca.count() >= 3) {
-    String a = ca.arg(2);
-    duplexMode = (a == "-") ? UINT64_MAX : (uint64_t)a.toInt();
-  }
+  // "-" leaves the field out of the message.
+  auto field = [](const String& a, uint64_t& out) {
+    if (a == "-") { out = UINT64_MAX; return true; }
+    uint32_t v = 0;
+    if (!parseIntArg(a, v)) return false;
+    out = v;
+    return true;
+  };
+  if (ca.count() >= 1 && !field(ca.arg(0), voiceSwitch)) return kCommandReplyNotANumber;
+  if (ca.count() >= 2 && !field(ca.arg(1), streamSpeed)) return kCommandReplyNotANumber;
+  if (ca.count() >= 3 && !field(ca.arg(2), duplexMode)) return kCommandReplyNotANumber;
 
   const uint32_t magic = g2EvenAiNextMagic();
   uint8_t env[128];
@@ -30476,8 +30476,10 @@ static const char* cmd_g2streamres(const String& argsInput) {
   if (xi <= 0) {
     return "Error: invalid arguments — Usage: g2streamres <W>x<H>  (examples: 96x96, 160x120, 288x144)";
   }
-  int w = s.substring(0, xi).toInt();
-  int h = s.substring(xi + 1).toInt();
+  int w = 0;  // text that is not a number stays 0 and is refused below
+  int h = 0;
+  parseIntArg(s.substring(0, xi), w);
+  parseIntArg(s.substring(xi + 1), h);
   if (w < 16 || w > 288 || h < 16 || h > 144) {
     snprintf(ret, sizeof(ret),
              "Bad dims %dx%d (allowed 16..288 x 16..144)", w, h);
@@ -30513,7 +30515,8 @@ static const char* cmd_g2packrate(const String& argsInput) {
              gSettings.g2PackRateMs > 0 ? (1000 / gSettings.g2PackRateMs) : 0);
     return ret;
   }
-  int v = s.toInt();
+  int v = 0;
+  if (!parseIntArg(s, v)) return kCommandReplyNotANumber;
   if (v < 20 || v > 2000) {
     return "Error: invalid arguments — Usage: g2packrate <ms>  (range 20..2000)";
   }
@@ -31144,7 +31147,8 @@ static const char* cmd_g2envgap(const String& argsInput) {
     gImgEnvGapOverrideMs = 0;
     return "OK: g2envgap = auto (size/ring table)";
   }
-  const long ms = a.toInt();
+  long ms = 0;
+  if (!parseIntArg(a, ms)) return kCommandReplyNotANumber;
   if (ms < 5 || ms > 500) {
     return "Error: invalid arguments - Usage: g2envgap [<5..500>|auto]";
   }
@@ -31234,8 +31238,10 @@ static const char* cmd_g2connpri(const String& argsInput) {
     if (sp < 0) {
       return "Error: invalid arguments - Usage: g2connpri [<min> <max>|default]";
     }
-    const long mn = a.substring(0, sp).toInt();
-    const long mx = a.substring(sp + 1).toInt();
+    long mn = 0;  // text that is not a number stays 0 and is refused below
+    long mx = 0;
+    parseIntArg(a.substring(0, sp), mn);
+    parseIntArg(a.substring(sp + 1), mx);
     // 6..3200 is the BLE spec range for a connection interval (7.5 ms .. 4 s).
     if (mn < 6 || mn > 3200 || mx < 6 || mx > 3200 || mn > mx) {
       return "Error: invalid arguments - min/max are 6..3200 ticks and min <= max";
@@ -33450,9 +33456,9 @@ static const char* cmd_g2bmp(const String& argsInput) {
   int brightness = 0;
   int contrast = 0;
   int holdSeconds = 3;
-  if (ca.count() >= 2) brightness = atoi(ca.arg(1).c_str());
-  if (ca.count() >= 3) contrast = atoi(ca.arg(2).c_str());
-  if (ca.count() >= 4) holdSeconds = atoi(ca.arg(3).c_str());
+  if (ca.count() >= 2 && !parseIntArg(ca.arg(1), brightness)) return kCommandReplyNotANumber;
+  if (ca.count() >= 3 && !parseIntArg(ca.arg(2), contrast)) return kCommandReplyNotANumber;
+  if (ca.count() >= 4 && !parseIntArg(ca.arg(3), holdSeconds)) return kCommandReplyNotANumber;
   if (brightness < -100) brightness = -100;
   if (brightness > 100)  brightness = 100;
   if (contrast < -100)   contrast = -100;

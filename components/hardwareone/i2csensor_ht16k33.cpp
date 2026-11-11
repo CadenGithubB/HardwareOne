@@ -55,16 +55,6 @@ const SettingEntry settings[] = {
     "8x8 square (next matrix command)", "0|First square,1|Second square", false, nullptr, "matrixpanel" },
 };
 
-bool parseNumber(const String& text, int low, int high, int& value) {
-  if (text.isEmpty()) return false;
-  errno = 0;
-  char* end = nullptr;
-  const long n = strtol(text.c_str(), &end, text.startsWith("0x") ? 16 : 10);
-  if (errno || !end || *end || n < low || n > high) return false;
-  value = static_cast<int>(n);
-  return true;
-}
-
 // Caller owns the bus mutex. Never nest manager transactions here.
 bool writeBytes(TwoWire& wire, const uint8_t* bytes, size_t count) {
   wire.beginTransmission(matrixDeviceAddress());
@@ -110,11 +100,11 @@ const char* cmdMatrix(const String& input) {
   if (simple) {
     if (args.count() > 1) return "Error: unexpected matrix arguments";
   } else if (op == "pixel") {
-    if (args.count() != 4 || !parseNumber(args.arg(1), 0, width - 1, x) ||
-        !parseNumber(args.arg(2), 0, height - 1, y))
+    if (args.count() != 4 || !parseIntArg(args.arg(1), 0, width - 1, x) ||
+        !parseIntArg(args.arg(2), 0, height - 1, y))
       return "Error: matrix pixel <x> <y> <on|off>; coordinates must fit the selected rotation";
-    if (args.arg(3) == "on" || args.arg(3) == "1") value = 1;
-    else if (args.arg(3) != "off" && args.arg(3) != "0")
+    if (argIsOn(args.arg(3))) value = 1;
+    else if (!argIsOff(args.arg(3)))
       return "Error: pixel state must be on or off";
   } else if (op == "size") {
     if (args.count() != 2 || (args.arg(1) != "8x8" && args.arg(1) != "16x8"))
@@ -122,7 +112,7 @@ const char* cmdMatrix(const String& input) {
     value = args.arg(1) == "8x8";
   } else if (op == "brightness" || op == "rotation" || op == "blink" || op == "panel") {
     const int maxValue = op == "brightness" ? 15 : (op == "panel" ? 1 : 3);
-    if (args.count() != 2 || !parseNumber(args.arg(1), 0, maxValue, value))
+    if (args.count() != 2 || !parseIntArg(args.arg(1), 0, maxValue, value))
       return "Error: brightness 0..15; rotation/blink 0..3; panel 0..1";
   } else if (op == "text") {
     if (args.count() != 2 || args.arg(1).length() > 64)
@@ -211,7 +201,7 @@ const char* cmdMatrixAddress(const String& args) {
   text.trim();
   if (text.isEmpty()) return handleSettingCommand(&settings[1], text);
   int address;
-  if (!parseNumber(text, 0x70, 0x77, address)) return "Error: matrixaddress <0x70..0x77>";
+  if (!parseIntArg(text, 0x70, 0x77, address)) return "Error: matrixaddress <0x70..0x77>";
   setSetting(gSettings.matrixAddress, address);
   return "[Matrix] Address saved; match the solder jumpers and reboot";
 }

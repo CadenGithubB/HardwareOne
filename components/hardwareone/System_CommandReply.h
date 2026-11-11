@@ -20,6 +20,14 @@
 constexpr char kCommandReplyOutOfMemory[] =
     "Error: Out of memory. Free memory and retry the command.";
 
+// Replies for an argument that does not parse: a number that is not one
+// (parseIntArg() in System_ArgParse.h) and an on/off value that is neither
+// (parseBoolArg() in System_Utils.h).
+constexpr char kCommandReplyNotANumber[] =
+    "Error: Not a whole number. Give the value in digits, for example 250.";
+constexpr char kCommandReplyNotOnOff[] =
+    "Error: Not an on/off value. Use on or off.";
+
 inline bool commandReplyIsFailure(const char* reply) {
   if (!reply) return false;
   return strncmp(reply, "Error", 5) == 0 ||   // the reply contract

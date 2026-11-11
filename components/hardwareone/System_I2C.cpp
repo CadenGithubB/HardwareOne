@@ -895,7 +895,9 @@ const char* cmd_i2cbusenabled(const String& argsInput) {
   String valStr = argsInput;
   valStr.trim();
   if (valStr.length() == 0) return "Error: invalid arguments — Usage: i2cBusEnabled <0|1> (reboot required)";
-  bool v = (valStr.toInt() != 0);
+  const int parsed = parseBoolArg(valStr);
+  if (parsed < 0) return kCommandReplyNotOnOff;
+  const bool v = (parsed == 1);
   if (v && CAMERA_SCCB_I2C_PORT == 1 && !CAMERA_SCCB_SHARED)
     return "Error: I2C1/Wire1 controller is reserved for the camera in this build; select camera SCCB I2C0 to use the primary sensor bus.";
   setSetting(gSettings.i2cEnabled, v);
@@ -908,7 +910,8 @@ const char* cmd_i2csdapin(const String& argsInput) {
   String valStr = argsInput;
   valStr.trim();
   if (valStr.length() == 0) return "Error: invalid arguments — Usage: i2cSdaPin <0.." HW_GPIO_MAX_STR "> (max GPIO for this board; reboot required)";
-  int v = valStr.toInt();
+  int v = 0;
+  if (!parseIntArg(valStr, v)) return kCommandReplyNotANumber;
   if (v < 0) v = 0;
   if (v > HW_GPIO_MAX) v = HW_GPIO_MAX;
   setSetting(gSettings.i2cSdaPin, v);
@@ -921,7 +924,8 @@ const char* cmd_i2csclpin(const String& argsInput) {
   String valStr = argsInput;
   valStr.trim();
   if (valStr.length() == 0) return "Error: invalid arguments — Usage: i2cSclPin <0.." HW_GPIO_MAX_STR "> (max GPIO for this board; reboot required)";
-  int v = valStr.toInt();
+  int v = 0;
+  if (!parseIntArg(valStr, v)) return kCommandReplyNotANumber;
   if (v < 0) v = 0;
   if (v > HW_GPIO_MAX) v = HW_GPIO_MAX;
   setSetting(gSettings.i2cSclPin, v);
@@ -941,7 +945,9 @@ const char* cmd_i2c2busenabled(const String& argsInput) {
   String valStr = argsInput;
   valStr.trim();
   if (valStr.length() == 0) return "Error: invalid arguments — Usage: i2c2BusEnabled <0|1> (reboot required)";
-  bool v = (valStr.toInt() != 0);
+  const int parsed = parseBoolArg(valStr);
+  if (parsed < 0) return kCommandReplyNotOnOff;
+  const bool v = (parsed == 1);
   if (v && CAMERA_SCCB_I2C_PORT == 0 && !CAMERA_SCCB_SHARED)
     return "Error: I2C2/Wire controller is reserved for the camera in this build; use I2C1/Wire1.";
   setSetting(gSettings.i2c2Enabled, v);
@@ -954,7 +960,8 @@ const char* cmd_i2c2sdapin(const String& argsInput) {
   String valStr = argsInput;
   valStr.trim();
   if (valStr.length() == 0) return "Error: invalid arguments — Usage: i2c2SdaPin <-1.." HW_GPIO_MAX_STR "> (-1=unavailable; max GPIO for this board; reboot required)";
-  int v = valStr.toInt();
+  int v = 0;
+  if (!parseIntArg(valStr, v)) return kCommandReplyNotANumber;
   if (v < -1) v = -1;
   if (v > HW_GPIO_MAX) v = HW_GPIO_MAX;
   setSetting(gSettings.i2c2SdaPin, v);
@@ -967,7 +974,8 @@ const char* cmd_i2c2sclpin(const String& argsInput) {
   String valStr = argsInput;
   valStr.trim();
   if (valStr.length() == 0) return "Error: invalid arguments — Usage: i2c2SclPin <-1.." HW_GPIO_MAX_STR "> (-1=unavailable; max GPIO for this board; reboot required)";
-  int v = valStr.toInt();
+  int v = 0;
+  if (!parseIntArg(valStr, v)) return kCommandReplyNotANumber;
   if (v < -1) v = -1;
   if (v > HW_GPIO_MAX) v = HW_GPIO_MAX;
   setSetting(gSettings.i2c2SclPin, v);
@@ -995,7 +1003,8 @@ const char* i2cSetDeviceBusAndReport(int& target, const String& argsInput, const
     }
     return "Error: invalid arguments — Usage: <bus> (reboot required)";
   }
-  int v = valStr.toInt();
+  int v = 0;
+  if (!parseIntArg(valStr, v)) return kCommandReplyNotANumber;
   if (v < 0) v = 0;
   if (v >= (int)I2CDeviceManager::NUM_BUSES) v = I2CDeviceManager::NUM_BUSES - 1;
   setSetting(target, v);
@@ -2053,8 +2062,8 @@ static const char* cmd_sensorautostart(const String& argsInput) {
   sensor.toLowerCase();
   value.toLowerCase();
   
-  bool enable = (value == "on" || value == "true" || value == "1");
-  bool disable = (value == "off" || value == "false" || value == "0");
+  bool enable = argIsOn(value);
+  bool disable = argIsOff(value);
   
   if (!enable && !disable) {
     return "Error: Value must be on/off, true/false, or 1/0";
@@ -2185,12 +2194,8 @@ const char* cmd_i2crecover(const String& argsInput) {
   }
   
   // Parse address (hex or decimal)
-  uint8_t address = 0;
-  if (args.startsWith("0x") || args.startsWith("0X")) {
-    address = (uint8_t)strtol(args.c_str(), nullptr, 16);
-  } else {
-    address = (uint8_t)args.toInt();
-  }
+  uint8_t address = 0;  // text that is not an address stays 0 and is refused below
+  parseIntArg(args, address);
   
   if (address == 0 || address > 127) {
     return "Error: Invalid I2C address (must be 1-127 or 0x01-0x7F)";

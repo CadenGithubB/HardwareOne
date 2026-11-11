@@ -43,7 +43,7 @@ import shutil
 import subprocess
 import tempfile
 
-from test_web_batch_handlers import extract_block, json_text, mac_text, require, JSON_INCLUDE
+from test_web_batch_handlers import extract_block, JSON_INCLUDE, json_text, mac_text, require, with_arg_text
 import ble_pipe_console_host as pipe_host
 
 HERE = Path(__file__).resolve().parent
@@ -298,7 +298,7 @@ def main() -> None:
 
         def run(name: str, source: str, extra: list[str]) -> str:
             path = work / (name + ".cpp")
-            path.write_text(source)
+            path.write_text(with_arg_text(source))
             subprocess.run([args.cxx, *flags, "-I", str(work), "-I", str(JSON_INCLUDE),
                             *extra, str(path), "-o", str(work / name)], check=True, timeout=120)
             return subprocess.check_output([str(work / name)], text=True, timeout=60)

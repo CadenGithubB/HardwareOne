@@ -480,10 +480,10 @@ const char* cmd_presenceautostart(const String& argsInput) {
     return gSettings.presenceAutoStart ? "[Presence] Auto-start: enabled" : "[Presence] Auto-start: disabled";
   }
   arg.toLowerCase();
-  if (arg == "on" || arg == "true" || arg == "1") {
+  if (argIsOn(arg)) {
     setSetting(gSettings.presenceAutoStart, true);
     return "[Presence] Auto-start enabled";
-  } else if (arg == "off" || arg == "false" || arg == "0") {
+  } else if (argIsOff(arg)) {
     setSetting(gSettings.presenceAutoStart, false);
     return "[Presence] Auto-start disabled";
   }

@@ -113,7 +113,8 @@ def main():
     commands = (COMPONENT / 'System_LLMCommands.cpp').read_text()
     header = (COMPONENT / 'System_Command.h').read_text()
     source = (COMPONENT / 'System_Command.cpp').read_text()
-    code = block(header, 'class CommandArgs') + ';\nconst String CommandArgs::empty_;\n'
+    code = '#include "System_ArgParse.h"\n#include "System_CommandReply.h"\n'
+    code += block(header, 'class CommandArgs') + ';\nconst String CommandArgs::empty_;\n'
     code += '\n'.join(block(source, name) for name in (
         'CommandArgs::CommandArgs(', 'void CommandArgs::parse(', 'const String& CommandArgs::arg('))
     code += block((COMPONENT / 'System_Utils.cpp').read_text(), 'bool argLeadingTokenIsJson(')

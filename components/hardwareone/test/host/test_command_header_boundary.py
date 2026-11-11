@@ -135,7 +135,7 @@ int main() {
   assert(resolution.registryOrdinal == static_cast<size_t>(-1));
 }
 ''', {"System_Command.h", "System_CommandRegistry.h", "System_CommandReply.h",
-      "../arduino/cores/esp32/WString.h", "../arduino/cores/esp32/pgmspace.h"},
+      "System_ArgParse.h", "../arduino/cores/esp32/WString.h", "../arduino/cores/esp32/pgmspace.h"},
              string_header=True)
 
     print("command header boundary: passed (registry, OTA, parser)")

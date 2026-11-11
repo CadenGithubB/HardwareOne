@@ -383,11 +383,11 @@ const char* cmd_anoencoderinvert(const String& argsInput) {
   if (arg.length() == 0) {
     return gSettings.anoEncoderInvert ? "[ANO] Rotation: inverted" : "[ANO] Rotation: normal";
   }
-  if (arg == "on" || arg == "true" || arg == "1") {
+  if (argIsOn(arg)) {
     setSetting(gSettings.anoEncoderInvert, true);
     return "[ANO] Rotation inverted";
   }
-  if (arg == "off" || arg == "false" || arg == "0") {
+  if (argIsOff(arg)) {
     setSetting(gSettings.anoEncoderInvert, false);
     return "[ANO] Rotation normal";
   }
@@ -401,8 +401,8 @@ static bool parseOnOffToggleArg(const String& argsInput, bool currentValue,
                                 bool* outNewValue) {
   String arg = argsInput; arg.trim(); arg.toLowerCase();
   if (arg.length() == 0) { *outNewValue = currentValue; return true; }  // status query
-  if (arg == "on"  || arg == "true"  || arg == "1") { *outNewValue = true;  return true; }
-  if (arg == "off" || arg == "false" || arg == "0") { *outNewValue = false; return true; }
+  if (argIsOn(arg)) { *outNewValue = true;  return true; }
+  if (argIsOff(arg)) { *outNewValue = false; return true; }
   if (arg == "toggle")                              { *outNewValue = !currentValue; return true; }
   return false;
 }

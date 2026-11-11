@@ -1,4 +1,6 @@
 #include "OLED_MessageText.h"
+#include "System_ArgParse.h"
+#include "System_CommandReply.h"
 // Host harness for test_oled_power_settings.py. The driver splices production
 // code in at the INSERT_* markers: the Power > Sleep Settings row action and its
 // input handler (OLED_Mode_Power.cpp), the OLED action helper (OLED_Utils.cpp

@@ -489,10 +489,10 @@ static const char* cmd_inputautostart(const String& argsInput) {
     return gSettings.inputAutoStart ? "[Input] Auto-start: enabled" : "[Input] Auto-start: disabled";
   }
   arg.toLowerCase();
-  if (arg == "on" || arg == "true" || arg == "1") {
+  if (argIsOn(arg)) {
     setSetting(gSettings.inputAutoStart, true);
     return "[Input] Auto-start enabled";
-  } else if (arg == "off" || arg == "false" || arg == "0") {
+  } else if (argIsOff(arg)) {
     setSetting(gSettings.inputAutoStart, false);
     return "[Input] Auto-start disabled";
   }

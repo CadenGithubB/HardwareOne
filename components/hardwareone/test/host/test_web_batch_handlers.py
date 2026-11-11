@@ -41,6 +41,59 @@ def json_text(component: Path = COMPONENT) -> str:
     return (component / "System_JsonText.h").read_text().replace("#pragma once\n", "", 1)
 
 
+# parseBoolArg for a test String that has c_str() only (same words, no trimming).
+ON_OFF_DOUBLE = r'''
+#include <strings.h>
+inline int parseBoolArg(const String& arg) {
+  for (const char* word : {"on", "true", "1", "enable"}) if (strcasecmp(arg.c_str(), word) == 0) return 1;
+  for (const char* word : {"off", "false", "0", "disable"}) if (strcasecmp(arg.c_str(), word) == 0) return 0;
+  return -1;
+}
+[[maybe_unused]] inline bool argIsOn(const String& arg) { return parseBoolArg(arg) == 1; }
+[[maybe_unused]] inline bool argIsOff(const String& arg) { return parseBoolArg(arg) == 0; }
+'''
+
+
+def arg_text(component: Path = COMPONENT, replies: bool = True, on_off=True) -> str:
+    """The command-argument parsers as text to place in a generated translation
+    unit: System_ArgParse.h (parseIntArg); with `replies` the two shared
+    refusals from System_CommandReply.h (leave them out when the unit includes
+    that header); with `on_off` parseBoolArg, argIsOn and argIsOff from
+    System_Utils.h, which need a String type declared before this text
+    (`on_off="double"` gives ON_OFF_DOUBLE instead)."""
+    parts = [(component / "System_ArgParse.h").read_text().replace("#pragma once\n", "", 1)]
+    if replies:
+        reply_h = (component / "System_CommandReply.h").read_text()
+        for name in ("kCommandReplyNotANumber", "kCommandReplyNotOnOff"):
+            start = reply_h.index(f"constexpr char {name}[]")
+            parts.append("[[maybe_unused]] " + reply_h[start:reply_h.index(";", start) + 1])
+    if on_off == "double":
+        parts.append(ON_OFF_DOUBLE)
+    elif on_off:
+        utils_h = (component / "System_Utils.h").read_text()
+        parts.append(extract_block(utils_h, "inline int parseBoolArg(const String& arg)"))
+        for name in ("argIsOn", "argIsOff"):
+            parts.append(extract_block(utils_h, f"inline bool {name}(const String& arg)"))
+    return "\n".join(parts) + "\n"
+
+
+def with_arg_text(unit: str, component: Path = COMPONENT, on_off=False) -> str:
+    """A generated translation unit with arg_text() placed where it compiles:
+    after the unit's own String class when it defines one, otherwise after the
+    #include lines that precede its first definition. The shared refusals are
+    left out when the unit includes System_CommandReply.h itself."""
+    text = arg_text(component, replies='#include "System_CommandReply.h"' not in unit, on_off=on_off)
+    own_string = re.search(r"(?m)^(?:class|struct) String\b[^;{]*\{", unit)
+    if own_string:
+        end = own_string.start() + len(extract_block(unit[own_string.start():], own_string.group(0)[:-1].rstrip()))
+        end = unit.index(";", end) + 1
+    else:
+        first_body = unit.find("{")
+        includes = [m.end() for m in re.finditer(r"(?m)^#include[^\n]*\n", unit[:first_body if first_body >= 0 else len(unit)])]
+        end = includes[-1] if includes else 0
+    return unit[:end] + "\n" + text + unit[end:]
+
+
 def extract_block(source: str, marker: str) -> str:
     """Extract an actual C++ definition, ignoring braces in comments/literals."""
     start = source.index(marker)

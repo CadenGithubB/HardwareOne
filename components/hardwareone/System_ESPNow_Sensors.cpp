@@ -1357,11 +1357,11 @@ const char* cmd_espnow_sensorbroadcast(const String& argsInput) {
     return enabled ? "Sensor broadcast: on" : "Sensor broadcast: off";
   }
   
-  if (args == "on" || args == "1" || args == "true" || args == "enable") {
+  if (argIsOn(args)) {
     setSensorBroadcastEnabled(true);
     broadcastOutput("[ESP-NOW] Sensor broadcast ENABLED - status and data will be sent to master");
     return "OK: Sensor broadcast enabled";
-  } else if (args == "off" || args == "0" || args == "false" || args == "disable") {
+  } else if (argIsOff(args)) {
     setSensorBroadcastEnabled(false);
     broadcastOutput("[ESP-NOW] Sensor broadcast DISABLED - no sensor data will be sent");
     return "OK: Sensor broadcast disabled";

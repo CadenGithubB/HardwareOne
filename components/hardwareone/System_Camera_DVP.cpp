@@ -1156,7 +1156,8 @@ const char* cmd_camerafps(const String& argsInput) {
     return buf;
   }
 
-  int val = valStr.toInt();
+  int val = 0;
+  if (!parseIntArg(valStr, val)) return kCommandReplyNotANumber;
   if (val < 1 || val > 20) return "Error: cameraStreamFps must be 1-20";
   setSetting(gSettings.cameraStreamFps, val);
   EXT_RAM_BSS_ATTR static char buf[64];
@@ -1176,10 +1177,10 @@ const char* cmd_cameraautostart(const String& argsInput) {
     return gSettings.cameraAutoStart ? "[Camera] Auto-start: enabled" : "[Camera] Auto-start: disabled";
   }
   arg.toLowerCase();
-  if (arg == "on" || arg == "true" || arg == "1") {
+  if (argIsOn(arg)) {
     setSetting(gSettings.cameraAutoStart, true);
     return "[Camera] Auto-start enabled";
-  } else if (arg == "off" || arg == "false" || arg == "0") {
+  } else if (argIsOff(arg)) {
     setSetting(gSettings.cameraAutoStart, false);
     return "[Camera] Auto-start disabled";
   }
@@ -1196,7 +1197,8 @@ const char* cmd_camerastoragelocation(const String& argsInput) {
     snprintf(buf, sizeof(buf), "cameraStorageLocation = %d (0=LittleFS, 1=SD, 2=Both)", gSettings.cameraStorageLocation);
     return buf;
   }
-  int val = valStr.toInt();
+  int val = 0;
+  if (!parseIntArg(valStr, val)) return kCommandReplyNotANumber;
   if (val < 0 || val > 2) return "Error: cameraStorageLocation must be 0-2";
   setSetting(gSettings.cameraStorageLocation, val);
   EXT_RAM_BSS_ATTR static char buf[48];
@@ -1231,7 +1233,8 @@ const char* cmd_cameramaxstoredimages(const String& argsInput) {
     snprintf(buf, sizeof(buf), "cameraMaxStoredImages = %d", gSettings.cameraMaxStoredImages);
     return buf;
   }
-  int val = valStr.toInt();
+  int val = 0;
+  if (!parseIntArg(valStr, val)) return kCommandReplyNotANumber;
   if (val < 0 || val > 1000) return "Error: cameraMaxStoredImages must be 0-1200";
   setSetting(gSettings.cameraMaxStoredImages, val);
   EXT_RAM_BSS_ATTR static char buf[48];

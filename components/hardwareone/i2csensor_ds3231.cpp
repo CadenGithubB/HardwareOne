@@ -713,7 +713,8 @@ const char* cmd_rtcset(const String& argsInput) {
   }
   
   if (isUnix) {
-    uint32_t unixTime = arg.toInt();
+    uint32_t unixTime = 0;
+    if (!parseIntArg(arg, unixTime)) return kCommandReplyNotANumber;
     unixTimeToRTC(unixTime, &dt);
   } else {
     // Parse YYYY-MM-DD HH:MM:SS
@@ -884,10 +885,10 @@ const char* cmd_rtcautostart(const String& argsInput) {
   if (arg.length() == 0) {
     return gSettings.rtcAutoStart ? "[RTC] Auto-start: enabled" : "[RTC] Auto-start: disabled";
   }
-  if (arg == "on" || arg == "true" || arg == "1") {
+  if (argIsOn(arg)) {
     setSetting(gSettings.rtcAutoStart, true);
     return "[RTC] Auto-start enabled";
-  } else if (arg == "off" || arg == "false" || arg == "0") {
+  } else if (argIsOff(arg)) {
     setSetting(gSettings.rtcAutoStart, false);
     return "[RTC] Auto-start disabled";
   }

@@ -4533,8 +4533,8 @@ const char* cmd_oled_bootduration(const String& argsInput) {
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   String _arg = argsInput; _arg.trim();
   if (_arg.length() == 0) return "Error: invalid arguments — Usage: oledbootduration <500..10000>";
-  const char* p = _arg.c_str();
-  int v = atoi(p);
+  int v = 0;
+  if (!parseIntArg(_arg, v)) return kCommandReplyNotANumber;
   if (v < 500 || v > 10000) return "Error: OLED boot duration must be 500..10000 ms (0.5s..10s)";
   setSetting(gSettings.oledBootDuration, v);
   snprintf(getDebugBuffer(), 1024, "OLED boot duration set to %dms", v);
@@ -4546,8 +4546,8 @@ const char* cmd_oled_updateinterval(const String& argsInput) {
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   String _arg = argsInput; _arg.trim();
   if (_arg.length() == 0) return "Error: invalid arguments — Usage: oledupdateinterval <10..1000>";
-  const char* p = _arg.c_str();
-  int v = atoi(p);
+  int v = 0;
+  if (!parseIntArg(_arg, v)) return kCommandReplyNotANumber;
   if (v < 10 || v > 1000) return "Error: OLED update interval must be 10..1000 ms";
   setSetting(gSettings.oledUpdateInterval, v);
   snprintf(getDebugBuffer(), 1024, "OLED update interval set to %dms (applies on next update)", v);
@@ -4559,8 +4559,8 @@ const char* cmd_oled_brightness(const String& argsInput) {
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   String _arg = argsInput; _arg.trim();
   if (_arg.length() == 0) return "Error: invalid arguments — Usage: oledbrightness <0..255>";
-  const char* p = _arg.c_str();
-  int v = atoi(p);
+  int v = 0;
+  if (!parseIntArg(_arg, v)) return kCommandReplyNotANumber;
   if (v < 0 || v > 255) return "Error: OLED brightness must be 0..255";
   setSetting(gSettings.oledBrightness, (int)v);
   applyOLEDBrightness();   // same live-apply oledflip does; the setting alone
@@ -4580,8 +4580,8 @@ const char* cmd_oled_flip(const String& argsInput) {
     return getDebugBuffer();
   }
   bool target;
-  if (arg == "on" || arg == "true" || arg == "1")       target = true;
-  else if (arg == "off" || arg == "false" || arg == "0") target = false;
+  if (argIsOn(arg))       target = true;
+  else if (argIsOff(arg)) target = false;
   else if (arg == "toggle")                              target = !gSettings.oledFlipped;
   else return "Error: invalid arguments — Usage: oledflip [on|off|toggle]";
   setSetting(gSettings.oledFlipped, target);
@@ -5049,7 +5049,8 @@ const char* cmd_oledanim(const String& argsInput) {
   arg.toLowerCase();
 
   if (arg.startsWith("fps ")) {
-    int fps = arg.substring(4).toInt();
+    int fps = 0;
+    if (!parseIntArg(arg.substring(4), fps)) return kCommandReplyNotANumber;
     if (fps < 1 || fps > 60) {
       return "Error: FPS must be between 1 and 60";
     }

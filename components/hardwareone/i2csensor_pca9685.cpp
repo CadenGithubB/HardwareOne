@@ -81,18 +81,7 @@ bool servoInit() {
 // PCA9685/Servo Command Handlers
 // ============================================================================
 
-// CommandArgs owns tokenization; reject partial numbers and overflow before any
-// driver initialization or output. Its legacy argInt() accepts numeric prefixes.
-static bool parseServoNumber(const String& text, int low, int high, int& value) {
-  const char* start = text.c_str();
-  if (!*start || isspace(static_cast<unsigned char>(*start))) return false;
-  errno = 0;
-  char* end = nullptr;
-  const long parsed = strtol(start, &end, 10);
-  if (errno || end == start || end != start + text.length() || parsed < low || parsed > high) return false;
-  value = static_cast<int>(parsed);
-  return true;
-}
+// Numbers are checked (parseIntArg) before any driver initialization or output.
 
 const char* cmd_servo(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
@@ -103,8 +92,8 @@ const char* cmd_servo(const String& argsInput) {
   if (a.count() != 2 || a.unterminatedQuote()) return "Error: invalid arguments — Usage: servo <channel> <angle>";
 
   int channel, angle;
-  if (!parseServoNumber(a.arg(0), 0, 15, channel)) return "Error: [Servo] Channel must be an integer from 0-15";
-  if (!parseServoNumber(a.arg(1), 0, 180, angle)) return "Error: [Servo] Angle must be an integer from 0-180";
+  if (!parseIntArg(a.arg(0), 0, 15, channel)) return "Error: [Servo] Channel must be an integer from 0-15";
+  if (!parseIntArg(a.arg(1), 0, 180, angle)) return "Error: [Servo] Angle must be an integer from 0-180";
   if (!servoInit()) return "Error: [Servo] PCA9685 initialization failed - check bus and wiring";
   
   // Use profile if configured, otherwise use default range
@@ -146,10 +135,10 @@ const char* cmd_servoprofile(const String& argsInput) {
   int channel, minPulse, maxPulse, centerPulse;
   String name = a.remaining(3);
   
-  if (!parseServoNumber(a.arg(0), 0, 15, channel)) return "Error: [Servo] Channel must be an integer from 0-15";
-  if (!parseServoNumber(a.arg(1), 500, 2500, minPulse)) return "Error: [Servo] Min pulse must be an integer from 500-2500µs";
-  if (!parseServoNumber(a.arg(2), 500, 2500, maxPulse)) return "Error: [Servo] Max pulse must be an integer from 500-2500µs";
-  if (!parseServoNumber(a.arg(3), minPulse, maxPulse, centerPulse)) return "Error: [Servo] Center pulse must be an integer between min and max";
+  if (!parseIntArg(a.arg(0), 0, 15, channel)) return "Error: [Servo] Channel must be an integer from 0-15";
+  if (!parseIntArg(a.arg(1), 500, 2500, minPulse)) return "Error: [Servo] Min pulse must be an integer from 500-2500µs";
+  if (!parseIntArg(a.arg(2), 500, 2500, maxPulse)) return "Error: [Servo] Max pulse must be an integer from 500-2500µs";
+  if (!parseIntArg(a.arg(3), minPulse, maxPulse, centerPulse)) return "Error: [Servo] Center pulse must be an integer between min and max";
   if (name.length() == 0 || name.length() > 31) return "Error: [Servo] Name must be 1-31 characters";
   
   servoProfiles[channel].configured = true;
@@ -217,7 +206,7 @@ const char* cmd_servocalibrate(const String& argsInput) {
   CommandArgs a(argsInput);
   if (a.count() != 1 || a.unterminatedQuote()) return "Error: invalid arguments — Usage: servocalibrate <channel>";
   int channel;
-  if (!parseServoNumber(a.arg(0), 0, 15, channel)) return "Error: [Servo] Channel must be an integer from 0-15";
+  if (!parseIntArg(a.arg(0), 0, 15, channel)) return "Error: [Servo] Channel must be an integer from 0-15";
   
   if (!gPwmDriverConnected) {
     return "Error: [Servo] PCA9685 not initialized - run 'servo' command first";
@@ -260,9 +249,9 @@ const char* cmd_pwm(const String& argsInput) {
   if (a.count() < 2 || a.count() > 3 || a.unterminatedQuote()) return "Error: invalid arguments — Usage: pwm <channel> <value> [freq]";
 
   int channel, value, freq = 0;
-  if (!parseServoNumber(a.arg(0), 0, 15, channel)) return "Error: [Servo] Channel must be an integer from 0-15";
-  if (!parseServoNumber(a.arg(1), 0, 4095, value)) return "Error: [Servo] Value must be an integer from 0-4095";
-  if (a.has(2) && !parseServoNumber(a.arg(2), 24, 1526, freq)) return "Error: [Servo] Frequency must be an integer from 24-1526Hz";
+  if (!parseIntArg(a.arg(0), 0, 15, channel)) return "Error: [Servo] Channel must be an integer from 0-15";
+  if (!parseIntArg(a.arg(1), 0, 4095, value)) return "Error: [Servo] Value must be an integer from 0-4095";
+  if (a.has(2) && !parseIntArg(a.arg(2), 24, 1526, freq)) return "Error: [Servo] Frequency must be an integer from 24-1526Hz";
   if (!servoInit()) return "Error: [Servo] PCA9685 initialization failed - check bus and wiring";
 
   // Frequency is chip-wide. Keep it and this channel's update under one lock.

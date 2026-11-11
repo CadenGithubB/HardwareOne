@@ -957,8 +957,8 @@ const char* cmd_wificonnect(const String& originalCmd) {
     }
   } else {
     // Legacy: numeric positional index
-    int sel = firstArg.toInt();
-    if (sel > 0) index1 = sel;
+    int sel = 0;
+    if (parseIntArg(firstArg, sel) && sel > 0) index1 = sel;
     else {
       if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
       snprintf(getDebugBuffer(), 1024, "Usage: openwifi [--best | --index <1..%d> | --saved-id <id>]", wifiNetworkCount());
@@ -1606,8 +1606,9 @@ const char* cmd_wifiautoreconnect(const String& argsInput) {
   
   String valStr = argsInput;
   valStr.trim();
-  int v = valStr.toInt();
-  setSetting(gSettings.wifiAutoReconnect, (bool)(v != 0));
+  const int v = parseBoolArg(valStr);
+  if (v < 0) return kCommandReplyNotOnOff;
+  setSetting(gSettings.wifiAutoReconnect, v == 1);
 
   // Push into the driver when STA is live or the hunt is already armed.
   // After closewifi (disconnected + hunt off) we only persist — openwifi /

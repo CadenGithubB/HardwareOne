@@ -29,7 +29,7 @@ import subprocess
 import tempfile
 
 from test_mqtt_boolean_commands import extract_macro
-from test_web_batch_handlers import extract_block, require
+from test_web_batch_handlers import extract_block, require, with_arg_text
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
@@ -185,7 +185,7 @@ def main() -> None:
             label = " ".join([name, *defines])
             unit = Path(directory) / f"{name}.cpp"
             binary = Path(directory) / name
-            unit.write_text(source)
+            unit.write_text(with_arg_text(source))
             subprocess.run([args.cxx, *flags, *defines, str(unit), "-o", str(binary)],
                            check=True, timeout=180)
             print(f"== {label}", flush=True)

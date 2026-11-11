@@ -482,7 +482,8 @@ const char* cmd_thermaltransitionms(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String _arg = argsInput; _arg.trim();
   if (_arg.length() == 0) return "Error: invalid arguments — Usage: thermaltransitionms <0..5000>";
-  int v = _arg.toInt();
+  int v = 0;
+  if (!parseIntArg(_arg, v)) return kCommandReplyNotANumber;
   if (v < 0 || v > 5000) return "Error: [Thermal] Transition time must be 0-5000ms";
   setSetting(gSettings.thermalTransitionMs, v);
   BROADCAST_PRINTF("thermalTransitionMs set to %d", v);
@@ -493,7 +494,8 @@ const char* cmd_thermalwebmaxfps(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String _arg = argsInput; _arg.trim();
   if (_arg.length() == 0) return "Error: invalid arguments — Usage: thermalwebmaxfps <1..30>";
-  int v = _arg.toInt();
+  int v = 0;
+  if (!parseIntArg(_arg, v)) return kCommandReplyNotANumber;
   if (v < 1 || v > 30) return "Error: [Thermal] Web max FPS must be 1-30";
   setSetting(gSettings.thermalWebMaxFps, v);
   BROADCAST_PRINTF("thermalWebMaxFps set to %d", v);
@@ -504,7 +506,8 @@ const char* cmd_thermali2cclockhz(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String _arg = argsInput; _arg.trim();
   if (_arg.length() == 0) return "Error: invalid arguments — Usage: thermali2cclockhz <100000..1000000>";
-  int v = _arg.toInt();
+  int v = 0;
+  if (!parseIntArg(_arg, v)) return kCommandReplyNotANumber;
   if (v < 100000 || v > 1000000) return "Error: [Thermal] I2C clock must be 100000-1000000 Hz";
   setSetting(gSettings.i2cClockThermalHz, v);
   BROADCAST_PRINTF("thermalI2cClockHz set to %d", v);
@@ -515,7 +518,8 @@ const char* cmd_thermalupscalefactor(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String _arg = argsInput; _arg.trim();
   if (_arg.length() == 0) return "Error: invalid arguments — Usage: thermalupscalefactor <1..4>";
-  int v = _arg.toInt();
+  int v = 0;
+  if (!parseIntArg(_arg, v)) return kCommandReplyNotANumber;
   if (v < 1 || v > 4) return "Error: [Thermal] Upscale factor must be 1-4";
   setSetting(gSettings.thermalUpscaleFactor, v);
   BROADCAST_PRINTF("thermalUpscaleFactor set to %d", v);
@@ -570,7 +574,8 @@ const char* cmd_thermalrotation(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String _arg = argsInput; _arg.trim();
   if (_arg.length() == 0) return "Error: invalid arguments — Usage: thermalrotation <0|1|2|3> (0=0°, 1=90°, 2=180°, 3=270°)";
-  int v = _arg.toInt();
+  int v = 0;
+  if (!parseIntArg(_arg, v)) return kCommandReplyNotANumber;
   if (v < 0 || v > 3) return "Error: [Thermal] Rotation must be 0-3 (0=0°, 1=90°, 2=180°, 3=270°)";
 
   int oldRotation = gSettings.thermalRotation;
@@ -1180,7 +1185,8 @@ const char* cmd_thermalpollingms(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String _arg = argsInput; _arg.trim();
   if (_arg.length() == 0) return "Error: invalid arguments — Usage: thermalpollingms <50..5000>";
-  int v = _arg.toInt();
+  int v = 0;
+  if (!parseIntArg(_arg, v)) return kCommandReplyNotANumber;
   if (v < 50 || v > 5000) return "Error: [Thermal] Polling interval must be 50-5000ms";
   setSetting(gSettings.thermalPollingMs, v);
   BROADCAST_PRINTF("thermalPollingMs set to %d", v);
@@ -1203,7 +1209,8 @@ const char* cmd_thermalinterpolationsteps(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String _arg = argsInput; _arg.trim();
   if (_arg.length() == 0) return "Error: invalid arguments — Usage: thermalinterpolationsteps <1..8>";
-  int v = _arg.toInt();
+  int v = 0;
+  if (!parseIntArg(_arg, v)) return kCommandReplyNotANumber;
   if (v < 1 || v > 8) return "Error: [Thermal] Interpolation steps must be 1-8";
   setSetting(gSettings.thermalInterpolationSteps, v);
   BROADCAST_PRINTF("thermalInterpolationSteps set to %d", v);
@@ -1214,7 +1221,8 @@ const char* cmd_thermalinterpolationbuffersize(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String _arg = argsInput; _arg.trim();
   if (_arg.length() == 0) return "Error: invalid arguments — Usage: thermalinterpolationbuffersize <1..10>";
-  int v = _arg.toInt();
+  int v = 0;
+  if (!parseIntArg(_arg, v)) return kCommandReplyNotANumber;
   if (v < 1 || v > 10) return "Error: [Thermal] Interpolation buffer size must be 1-10";
   setSetting(gSettings.thermalInterpolationBufferSize, v);
   BROADCAST_PRINTF("thermalInterpolationBufferSize set to %d", v);
@@ -1346,10 +1354,10 @@ const char* cmd_thermalautostart(const String& argsInput) {
     return gSettings.thermalAutoStart ? "[Thermal] Auto-start: enabled" : "[Thermal] Auto-start: disabled";
   }
   arg.toLowerCase();
-  if (arg == "on" || arg == "true" || arg == "1") {
+  if (argIsOn(arg)) {
     setSetting(gSettings.thermalAutoStart, true);
     return "[Thermal] Auto-start enabled";
-  } else if (arg == "off" || arg == "false" || arg == "0") {
+  } else if (argIsOff(arg)) {
     setSetting(gSettings.thermalAutoStart, false);
     return "[Thermal] Auto-start disabled";
   }
@@ -1551,7 +1559,8 @@ const char* cmd_thermaltargetfps(const String& argsInput) {
   String valStr = argsInput;
   valStr.trim();
   if (valStr.length() == 0) return "Error: invalid arguments — Usage: thermalTargetFps <1..8>";
-  int v = valStr.toInt();
+  int v = 0;
+  if (!parseIntArg(valStr, v)) return kCommandReplyNotANumber;
   if (v < 1) v = 1;
   if (v > 8) v = 8;
   setSetting(gSettings.thermalTargetFps, v);
@@ -1564,7 +1573,8 @@ const char* cmd_thermaldevicepollms(const String& argsInput) {
   String valStr = argsInput;
   valStr.trim();
   if (valStr.length() == 0) return "Error: invalid arguments — Usage: thermalDevicePollMs <100..2000>";
-  int v = valStr.toInt();
+  int v = 0;
+  if (!parseIntArg(valStr, v)) return kCommandReplyNotANumber;
   if (v < 100) v = 100;
   if (v > 2000) v = 2000;
   setSetting(gSettings.thermalDevicePollMs, v);

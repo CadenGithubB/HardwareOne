@@ -3944,8 +3944,8 @@ static const char* cmd_blesecure(const String& argsInput) {
     return gSettings.bleRequireSecureChannel ? "BLE secure channel: REQUIRED"
                                              : "BLE secure channel: optional (plaintext allowed)";
   }
-  bool on  = (a == "on"  || a == "1" || a == "true"  || a == "yes");
-  bool off = (a == "off" || a == "0" || a == "false" || a == "no");
+  bool on  = (argIsOn(a) || a == "yes");
+  bool off = (argIsOff(a) || a == "no");
   if (!on && !off) return "Error: invalid arguments — Usage: blesecure [on|off]";
   if (on && gSettings.bleSecureChannelSecret.length() == 0)
     return "Error: Set a secret first: blesecret <passphrase>";
@@ -4252,7 +4252,8 @@ static const char* cmd_bletxpower(const String& argsInput) {
   while (*args == ' ') args++;  // Skip spaces
   
   if (*args != '\0') {
-    int level = atoi(args);
+    int level = 0;
+    if (!parseIntArg(args, level)) return kCommandReplyNotANumber;
     
     if (level < 0 || level > 7) {
       return "Error: TX power must be 0-7 (0=min/-12dBm, 7=max/+9dBm)";

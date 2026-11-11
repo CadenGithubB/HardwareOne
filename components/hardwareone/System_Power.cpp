@@ -536,10 +536,8 @@ const char* cmd_power(const String& argsInput) {
       newMode = POWER_MODE_LOCKED;
     } else {
       // Try parsing as number
-      int modeNum = subArgs.toInt();
-      if (modeNum >= 0 && modeNum < POWER_MODE_COUNT) {
-        newMode = modeNum;
-      }
+      // A name that is not a mode stays 255 and is refused below.
+      parseIntArg(subArgs, 0, POWER_MODE_COUNT - 1, newMode);
     }
     
     if (newMode >= POWER_MODE_COUNT) {
@@ -559,8 +557,7 @@ const char* cmd_power(const String& argsInput) {
   } else if (subCmd.equalsIgnoreCase("auto") || subCmd.equalsIgnoreCase("threshold")) {
     // Nothing switches the mode on battery level in this firmware, so neither
     // auto mode nor its threshold is stored or reported as active.
-    if (subCmd.equalsIgnoreCase("auto") &&
-        (subArgs.equalsIgnoreCase("off") || subArgs.equalsIgnoreCase("false") || subArgs == "0")) {
+    if (subCmd.equalsIgnoreCase("auto") && argIsOff(subArgs)) {
       return "[Power] Auto mode is off (not available in this firmware)";
     }
     return "Error: auto power mode is not available in this firmware; choose a mode with 'power mode'";
@@ -795,7 +792,8 @@ static const char* cmd_powercooldown(const String& argsInput) {
              gSettings.powerTransitionCooldownMs == 0 ? "disabled" : "active");
     return getDebugBuffer();
   }
-  long v = arg.toInt();
+  long v = 0;
+  if (!parseIntArg(arg, v)) return kCommandReplyNotANumber;
   if (v < 0 || v > 60000) return "Error: invalid arguments — Usage: powercooldown <0..60000>  (ms; 0 disables)";
   setSetting(gSettings.powerTransitionCooldownMs, (uint32_t)v);
   snprintf(getDebugBuffer(), 1024,
@@ -821,7 +819,8 @@ static const char* cmd_powersave(const String& argsInput) {
                                                     : "blanks OLED; CPU downclock is mode-dependent");
     return getDebugBuffer();
   }
-  long v = arg.toInt();
+  long v = 0;
+  if (!parseIntArg(arg, v)) return kCommandReplyNotANumber;
   if (v < 0 || v > 1440) return "Error: invalid arguments — Usage: powersave <0..1440>  (minutes; 0 disables)";
   setSetting(gSettings.powerSaveTimeoutMinutes, (uint32_t)v);
   snprintf(getDebugBuffer(), 1024,

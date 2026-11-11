@@ -205,8 +205,17 @@ extern bool gCLIValidateOnly;
     if (::gCLIValidateOnly) return "VALID"; \
   } while(0)
 
-// Parse common boolean argument patterns used across CLI command handlers.
+// Command arguments are parsed in one place each:
+//   numbers  parseIntArg()  (System_ArgParse.h), failing with kCommandReplyNotANumber
+//   on/off   parseBoolArg() below, or argIsOn()/argIsOff() for a single test,
+//            failing with kCommandReplyNotOnOff
+// A handler does not compare against "on"/"true"/"1" itself and does not call
+// String::toInt() or atoi() on an argument (CONTRIBUTING.md, "Small text jobs have one owner each").
+#include "System_ArgParse.h"
+#include "System_CommandReply.h"
+
 // Returns 1 for true (on/true/1/enable), 0 for false (off/false/0/disable), -1 if unrecognized.
+// Case and surrounding spaces do not matter.
 inline int parseBoolArg(const String& arg) {
   String a = arg;
   a.trim();
@@ -215,6 +224,8 @@ inline int parseBoolArg(const String& arg) {
   if (a == "off" || a == "false" || a == "0" || a == "disable") return 0;
   return -1;
 }
+inline bool argIsOn(const String& arg) { return parseBoolArg(arg) == 1; }
+inline bool argIsOff(const String& arg) { return parseBoolArg(arg) == 0; }
 
 // Generic on/off CLI handler for a persisted bool setting. Collapses the
 // 12-line on/off/true/false/1/0/setSetting/return-string template that

@@ -12753,7 +12753,8 @@ const char* cmd_espnow_probe(const String& argsInput) {
 
   uint32_t timeoutMs = 500;
   if (a.count() >= 2) {
-    long parsed = a.arg(1).toInt();
+    long parsed = 0;
+    if (!parseIntArg(a.arg(1), parsed)) return kCommandReplyNotANumber;
     if (parsed >= 50 && parsed <= 5000) {
       timeoutMs = (uint32_t)parsed;
     } else {
@@ -14275,11 +14276,11 @@ const char* cmd_espnow_worker(const String& argsInput) {
   }
   
   // Enable/disable worker status
-  if (subcmd == "on" || subcmd == "enable") {
+  if (argIsOn(subcmd)) {
     gWorkerStatusConfig.enabled = true;
     return "Worker status reporting enabled";
   }
-  if (subcmd == "off" || subcmd == "disable") {
+  if (argIsOff(subcmd)) {
     gWorkerStatusConfig.enabled = false;
     return "Worker status reporting disabled";
   }
@@ -14410,8 +14411,8 @@ const char* cmd_espnow_backupenable(const String& argsInput) {
     return getDebugBuffer();
   }
 
-  bool enable = (args == "on" || args == "1" || args == "true" || args == "enable");
-  bool disable = (args == "off" || args == "0" || args == "false" || args == "disable");
+  bool enable = argIsOn(args);
+  bool disable = argIsOff(args);
   if (!enable && !disable) {
     return "Error: invalid arguments — Usage: espnow backupenable [on|off]";
   }
@@ -14576,7 +14577,7 @@ const char* cmd_espnow_toporesults(const String& argsInput) {
         return "Error: topology page must be a positive number";
       }
     }
-    requestedPage = pageText.toInt();
+    if (!parseIntArg(pageText, requestedPage)) return "Error: topology page must be a positive number";
   }
 
   if (pageArgs.count() == 2) {
@@ -17803,9 +17804,9 @@ const char* cmd_bond_stream(const String& argsInput) {
   
   // Parse action
   bool enable = false;
-  if (action == "on" || action == "1" || action == "start") {
+  if (argIsOn(action) || action == "start") {
     enable = true;
-  } else if (action == "off" || action == "0" || action == "stop") {
+  } else if (argIsOff(action) || action == "stop") {
     enable = false;
   } else {
     return "Error: invalid arguments — Usage: bondstream <sensor> <on|off>";
@@ -18193,7 +18194,8 @@ const char* cmd_espnow_pairmode(const String& argsInput) {
   }
   uint32_t secs = 120;
   if (sub.length() > 0) {
-    long v = sub.toInt();
+    long v = 0;
+    if (!parseIntArg(sub, v)) return kCommandReplyNotANumber;
     if (v > 0) secs = (uint32_t)v;
   }
   if (secs > 600) secs = 600;
@@ -18465,10 +18467,15 @@ const char* cmd_espnow_sensorreq(const String& argsInput) {
   }
   V4PayloadSensorReq rq;
   rq.reqId      = (uint8_t)(generateMessageId() & 0xFF);
-  rq.mode       = (uint8_t)a.arg(2).toInt();
+  uint8_t mode = 0;
+  uint32_t intervalMs = 0;
+  uint32_t leaseMs = 0;
+  if (!parseIntArg(a.arg(2), mode) || !parseIntArg(a.arg(3), intervalMs) ||
+      !parseIntArg(a.arg(4), leaseMs)) return kCommandReplyNotANumber;
+  rq.mode       = mode;
   rq.sensorMask = (uint32_t)strtoul(a.arg(1).c_str(), nullptr, 0);  // accepts 0x.. or decimal
-  rq.intervalMs = (uint32_t)a.arg(3).toInt();
-  rq.leaseMs    = (uint32_t)a.arg(4).toInt();
+  rq.intervalMs = intervalMs;
+  rq.leaseMs    = leaseMs;
   uint32_t msgId = generateMessageId();
   // cmd_exec task (NOT espnow_task) — sendAeadSync is safe here. encrypt-or-fail.
   bool sent = espnowtx::sendAeadSync(mac, ESPNOW_V4_TYPE_SENSOR_REQ, 0, msgId,
@@ -18527,11 +18534,11 @@ const char* cmd_espnow_usersync(const String& argsInput) {
     return getDebugBuffer();
   }
   
-  if (args == "on" || args == "1" || args == "true" || args == "enable") {
+  if (argIsOn(args)) {
     setSetting(gSettings.espnowUserSyncEnabled, true);
     INFO_ESPNOWF("[USER_SYNC] User sync ENABLED");
     return "User sync ENABLED - admins can now sync users across devices";
-  } else if (args == "off" || args == "0" || args == "false" || args == "disable") {
+  } else if (argIsOff(args)) {
     setSetting(gSettings.espnowUserSyncEnabled, false);
     INFO_ESPNOWF("[USER_SYNC] User sync DISABLED");
     return "User sync DISABLED - credential propagation blocked";

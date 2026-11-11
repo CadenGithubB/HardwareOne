@@ -433,7 +433,7 @@ static const char* cmd_llm_result(const String& args) {
   int offset = 0;
   if (a.startsWith("json ")) {
     String rest = a.substring(5); rest.trim();
-    offset = rest.toInt();
+    if (rest.length() && !parseIntArg(rest, offset)) return kCommandReplyNotANumber;
     if (offset < 0) offset = 0;
   }
 
@@ -530,8 +530,10 @@ static const char* cmd_llm_turns(const String& args) {
     return "Error: invalid arguments — Usage: llmturns json <index> [offset]";
 
   CommandArgs ca(a);
-  int index = ca.arg(1).toInt();
-  int offset = ca.arg(2).toInt();
+  int index = 0;
+  int offset = 0;
+  if (ca.has(1) && !parseIntArg(ca.arg(1), index)) return kCommandReplyNotANumber;
+  if (ca.has(2) && !parseIntArg(ca.arg(2), offset)) return kCommandReplyNotANumber;
   if (index < 0) index = 0;
   if (offset < 0) offset = 0;
 

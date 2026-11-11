@@ -3022,7 +3022,8 @@ const char* cmd_micsamplerate(const String& argsInput) {
     return gMicCmdBuffer;
   }
 
-  int rate = arg.toInt();
+  int rate = 0;
+  if (!parseIntArg(arg, rate)) return kCommandReplyNotANumber;
   if (rate < 8000 || rate > 48000) {
     return "Error: Sample rate must be 8000-48000 Hz";
   }
@@ -3068,7 +3069,8 @@ const char* cmd_micgain(const String& argsInput) {
     return gMicCmdBuffer;
   }
 
-  int gain = arg.toInt();
+  int gain = 0;
+  if (!parseIntArg(arg, gain)) return kCommandReplyNotANumber;
   if (gain < 0 || gain > 100) {
     return "Error: Gain must be 0-100%";
   }
@@ -3094,8 +3096,8 @@ static const char* setIntKnob(const String& argsInput, int& field, int minVal, i
     snprintf(gMicCmdBuffer, sizeof(gMicCmdBuffer), "%s: %d%s", name, field, unit);
     return gMicCmdBuffer;
   }
-  int v = arg.toInt();
-  if (v < minVal || v > maxVal || (v == 0 && arg != "0")) {
+  int v = 0;
+  if (!parseIntArg(arg, minVal, maxVal, v)) {
     snprintf(gMicCmdBuffer, sizeof(gMicCmdBuffer), "Error: %s must be %d-%d", name, minVal, maxVal);
     return gMicCmdBuffer;
   }
@@ -3114,7 +3116,8 @@ const char* cmd_pdmhpf(const String& a) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String arg = a;
   arg.trim();
-  int v = arg.toInt();
+  int v = 0;
+  if (arg.length() && !parseIntArg(arg, v)) return kCommandReplyNotANumber;
   if (arg.length() && v != 0 && (v < 23 || v > 185)) return "Error: PDM high-pass must be 0 (off) or 23-185 Hz";
   return setIntKnob(a, gSettings.pdmHpfHz, 0, 185, "PDM high-pass", " Hz", applyPdmTuningFromSettings);
 }
@@ -3130,7 +3133,8 @@ const char* cmd_micbitdepth(const String& argsInput) {
     return gMicCmdBuffer;
   }
 
-  int depth = arg.toInt();
+  int depth = 0;
+  if (!parseIntArg(arg, depth)) return kCommandReplyNotANumber;
   if (depth != 16 && depth != 32) {
     return "Error: Bit depth must be 16 or 32";
   }
@@ -3270,10 +3274,10 @@ const char* cmd_micautostart(const String& argsInput) {
     return gSettings.micAutoStart ? "[Mic] Auto-start: enabled" : "[Mic] Auto-start: disabled";
   }
   arg.toLowerCase();
-  if (arg == "on" || arg == "true" || arg == "1") {
+  if (argIsOn(arg)) {
     setSetting(gSettings.micAutoStart, true);
     return "[Mic] Auto-start enabled";
-  } else if (arg == "off" || arg == "false" || arg == "0") {
+  } else if (argIsOff(arg)) {
     setSetting(gSettings.micAutoStart, false);
     return "[Mic] Auto-start disabled";
   }

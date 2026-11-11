@@ -471,10 +471,10 @@ const char* cmd_apdsautostart(const String& argsInput) {
     return gSettings.apdsAutoStart ? "[APDS] Auto-start: enabled" : "[APDS] Auto-start: disabled";
   }
   arg.toLowerCase();
-  if (arg == "on" || arg == "true" || arg == "1") {
+  if (argIsOn(arg)) {
     setSetting(gSettings.apdsAutoStart, true);
     return "[APDS] Auto-start enabled";
-  } else if (arg == "off" || arg == "false" || arg == "0") {
+  } else if (argIsOff(arg)) {
     setSetting(gSettings.apdsAutoStart, false);
     return "[APDS] Auto-start disabled";
   }

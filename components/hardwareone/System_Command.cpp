@@ -395,11 +395,8 @@ const String& CommandArgs::arg(int index) const {
 
 int CommandArgs::argInt(int index, int defaultVal) const {
   if (!has(index)) return defaultVal;
-  const String& a = args_[index];
-  if (a.length() == 0) return defaultVal;
-  if (a == "0") return 0;
-  int v = a.toInt();
-  return (v == 0) ? defaultVal : v;  // toInt returns 0 on failure
+  int v = 0;
+  return parseIntArg(args_[index], v) ? v : defaultVal;  // not a whole number -> default
 }
 
 float CommandArgs::argFloat(int index, float defaultVal) const {

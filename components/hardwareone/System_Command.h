@@ -3,6 +3,7 @@
 
 #include "System_CommandRegistry.h"
 #include "System_CommandReply.h"  // the reply contract every handler returns by
+#include "System_ArgParse.h"      // the checked number parser for arguments
 #include <WString.h>
 
 // ============================================================================

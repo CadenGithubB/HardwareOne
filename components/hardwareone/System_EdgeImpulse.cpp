@@ -1727,8 +1727,9 @@ const char* cmd_ei_enable(const String& argsInput) {
     return gEICmdBuffer;
   }
   
-  int val = trimmed.toInt();
-  setSetting(gSettings.eiEnabled, (bool)(val != 0));
+  const int val = parseBoolArg(trimmed);
+  if (val < 0) return kCommandReplyNotOnOff;
+  setSetting(gSettings.eiEnabled, val == 1);
 
   if (gSettings.eiEnabled && !gEIInitialized) {
     initEdgeImpulse();
@@ -1816,7 +1817,8 @@ const char* cmd_ei_continuous(const String& argsInput) {
     return gEICmdBuffer;
   }
   
-  int val = trimmed.toInt();
+  const int val = parseBoolArg(trimmed);
+  if (val < 0) return kCommandReplyNotOnOff;
   if (val) {
     if (startContinuousInference()) {
       return "Continuous inference started";
@@ -2055,8 +2057,9 @@ const char* cmd_ei_track_enable(const String& argsInput) {
     return gEICmdBuffer;
   }
   
-  int val = trimmed.toInt();
-  setStateTrackingEnabled(val != 0);
+  const int val = parseBoolArg(trimmed);
+  if (val < 0) return kCommandReplyNotOnOff;
+  setStateTrackingEnabled(val == 1);
   
   snprintf(gEICmdBuffer, sizeof(gEICmdBuffer), "State tracking %s",
            gStateTrackingEnabled ? "enabled" : "disabled");

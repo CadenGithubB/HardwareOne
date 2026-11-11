@@ -4284,7 +4284,8 @@ static const char* cmd_maplayers(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String v = argsInput; v.trim();
   if (v.length() == 0) return "Error: invalid arguments — Usage: maplayers <bitmask 0..1023>";
-  int n = v.toInt();
+  int n = 0;
+  if (!parseIntArg(v, n)) return kCommandReplyNotANumber;
   if (n < 0) n = 0;
   if (n > 0x3FF) n = 0x3FF;
   setSetting(gSettings.mapVisibleLayers, n);
@@ -4297,7 +4298,8 @@ static const char* cmd_mapcachekb(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String v = argsInput; v.trim();
   if (v.length() == 0) return "Error: invalid arguments — Usage: mapcachekb <256..4096>";
-  int n = v.toInt();
+  int n = 0;
+  if (!parseIntArg(v, n)) return kCommandReplyNotANumber;
   if (n < 256) n = 256;
   if (n > 4096) n = 4096;
   setSetting(gSettings.mapCacheSizeKB, n);

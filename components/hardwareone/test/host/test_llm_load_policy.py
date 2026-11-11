@@ -30,7 +30,7 @@ import shutil
 import subprocess
 import tempfile
 
-from test_web_batch_handlers import extract_block, require
+from test_web_batch_handlers import extract_block, require, with_arg_text
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
@@ -172,7 +172,7 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="hw1-llm-load-policy-") as temporary:
         directory = Path(temporary)
         unit, binary = directory / "llm_load_policy.cpp", directory / "llm_load_policy"
-        unit.write_text(generated())
+        unit.write_text(with_arg_text(generated()))
         command = [args.cxx, "-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic",
                    "-Wno-unused-parameter",
                    "-DARDUINOJSON_ENABLE_ARDUINO_STRING=0", "-DARDUINOJSON_ENABLE_ARDUINO_STREAM=0",

@@ -1043,8 +1043,8 @@ const char* setBoolSetting(const String& argsInput, bool& field, const char* lab
     return getDebugBuffer();
   }
   bool value;
-  if (arg == "on" || arg == "1" || arg == "true") value = true;
-  else if (arg == "off" || arg == "0" || arg == "false") value = false;
+  if (argIsOn(arg)) value = true;
+  else if (argIsOff(arg)) value = false;
   else return "Usage: [on|off]";
   setSetting(field, value);
   applyPolicyFromSettings();
@@ -1092,8 +1092,8 @@ const char* cmd_c6heartbeat(const String& argsInput) {
     snprintf(getDebugBuffer(), 1024, "Companion heartbeat: %d s (0 = off)", gSettings.c6HeartbeatSec);
     return getDebugBuffer();
   }
-  const int seconds = arg.toInt();
-  if (seconds < 0 || seconds > 60 || (seconds == 0 && arg != "0")) return "Usage: c6heartbeat <0..60>";
+  int seconds = 0;
+  if (!parseIntArg(arg, 0, 60, seconds)) return "Usage: c6heartbeat <0..60>";
   setSetting(gSettings.c6HeartbeatSec, seconds);
   applyPolicyFromSettings();
   snprintf(getDebugBuffer(), 1024, "Companion heartbeat: %d s%s", seconds,

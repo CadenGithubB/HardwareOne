@@ -953,7 +953,8 @@ const char* cmd_imupollingms(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String _arg = argsInput; _arg.trim();
   if (_arg.length() == 0) return "Error: invalid arguments — Usage: imupollingms <50..2000>";
-  int v = _arg.toInt();
+  int v = 0;
+  if (!parseIntArg(_arg, v)) return kCommandReplyNotANumber;
   if (v < 50 || v > 2000) return "Error: imuPollingMs must be 50..2000";
   setSetting(gSettings.imuPollingMs, v);
   BROADCAST_PRINTF("imuPollingMs set to %d", v);
@@ -975,7 +976,8 @@ const char* cmd_imutransitionms(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String _arg = argsInput; _arg.trim();
   if (_arg.length() == 0) return "Error: invalid arguments — Usage: imutransitionms <0..1000>";
-  int v = _arg.toInt();
+  int v = 0;
+  if (!parseIntArg(_arg, v)) return kCommandReplyNotANumber;
   if (v < 0 || v > 1000) return "Error: imuTransitionMs must be 0..1000";
   setSetting(gSettings.imuTransitionMs, v);
   BROADCAST_PRINTF("imuTransitionMs set to %d", v);
@@ -986,7 +988,8 @@ const char* cmd_imuwebmaxfps(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String _arg = argsInput; _arg.trim();
   if (_arg.length() == 0) return "Error: invalid arguments — Usage: imuwebmaxfps <1..30>";
-  int v = _arg.toInt();
+  int v = 0;
+  if (!parseIntArg(_arg, v)) return kCommandReplyNotANumber;
   if (v < 1 || v > 30) return "Error: imuWebMaxFps must be 1..30";
   setSetting(gSettings.imuWebMaxFps, v);
   BROADCAST_PRINTF("imuWebMaxRefreshRate set to %d", v);
@@ -1002,7 +1005,8 @@ const char* cmd_imudevicepollms(const String& argsInput) {
   String valStr = argsInput;
   valStr.trim();
   if (valStr.length() == 0) return "Error: invalid arguments — Usage: imuDevicePollMs <50..1000>";
-  int v = valStr.toInt();
+  int v = 0;
+  if (!parseIntArg(valStr, v)) return kCommandReplyNotANumber;
   if (v < 50) v = 50;
   if (v > 1000) v = 1000;
   setSetting(gSettings.imuDevicePollMs, v);
@@ -1018,7 +1022,8 @@ const char* cmd_imuorientationmode(const String& argsInput) {
     snprintf(getDebugBuffer(), 1024, "Current imuOrientationMode: %d (0=normal, 1=flip_pitch, 2=flip_roll, 3=flip_yaw, 4=flip_pitch_roll, 5=roll_180_fix, 6=rotate_90ccw, 7=alt_extreme_pitch, 8=upside_down)", gSettings.imuOrientationMode);
     return getDebugBuffer();
   }
-  int v = valStr.toInt();
+  int v = 0;
+  if (!parseIntArg(valStr, v)) return kCommandReplyNotANumber;
   if (v < 0 || v > 8) return "Error: mode must be 0-8";
   setSetting(gSettings.imuOrientationMode, v);
   snprintf(getDebugBuffer(), 1024, "imuOrientationMode set to %d", v);
@@ -1032,8 +1037,9 @@ const char* cmd_imuorientationcorrection(const String& argsInput) {
   if (valStr.length() == 0) {
     return gSettings.imuOrientationCorrectionEnabled ? "Current imuOrientationCorrectionEnabled: 1" : "Current imuOrientationCorrectionEnabled: 0";
   }
-  int v = valStr.toInt();
-  setSetting(gSettings.imuOrientationCorrectionEnabled, (bool)(v != 0));
+  const int v = parseBoolArg(valStr);
+  if (v < 0) return kCommandReplyNotOnOff;
+  setSetting(gSettings.imuOrientationCorrectionEnabled, v == 1);
   return gSettings.imuOrientationCorrectionEnabled ? "imuOrientationCorrectionEnabled set to 1" : "imuOrientationCorrectionEnabled set to 0";
 }
 
@@ -1087,10 +1093,10 @@ const char* cmd_imuautostart(const String& argsInput) {
   if (arg.length() == 0) {
     return gSettings.imuAutoStart ? "[IMU] Auto-start: enabled" : "[IMU] Auto-start: disabled";
   }
-  if (arg == "on" || arg == "true" || arg == "1") {
+  if (argIsOn(arg)) {
     setSetting(gSettings.imuAutoStart, true);
     return "[IMU] Auto-start enabled";
-  } else if (arg == "off" || arg == "false" || arg == "0") {
+  } else if (argIsOff(arg)) {
     setSetting(gSettings.imuAutoStart, false);
     return "[IMU] Auto-start disabled";
   }

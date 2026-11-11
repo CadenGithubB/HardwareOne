@@ -2330,8 +2330,8 @@ const char* cmd_healthlogging(const String& argsInput) {
              sec, sec / 60);
     return getDebugBuffer();
   }
-  if (sub == "on" || sub == "1" || sub == "true")  return healthLoggingSet(true);
-  if (sub == "off" || sub == "0" || sub == "false") return healthLoggingSet(false);
+  if (argIsOn(sub))  return healthLoggingSet(true);
+  if (argIsOff(sub)) return healthLoggingSet(false);
   if (sub == "toggle") return healthLoggingSet(!gSettings.healthLoggingEnabled);
   return "Error: Usage: healthlogging <on|off|toggle|status|interval [sec]>";
 }
