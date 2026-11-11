@@ -118,22 +118,22 @@ void trackedFree(void* p) { assert(allocations.erase(p) == 1); std::free(p); }
 static bool modelAvailable = true, engineOK = true, engineOverlong = false;
 static size_t engineSamples = 0;
 static unsigned engineCalls = 0;
-static std::function<void(const STTLocalControl&)> engineHook;
+static std::function<void(const SttLocalControl&)> engineHook;
 bool sttLocalAvailable(char* error, size_t cap, const char** reason) {
   if(reason)*reason=modelAvailable ? nullptr : "Model missing";
   if (!modelAvailable) snprintf(error, cap, "Model missing");
   return modelAvailable;
 }
 bool sttLocalTranscribe(const int16_t* pcm, size_t count, char* text, size_t cap,
-                        const STTLocalControl& control, STTLocalStats& stats,
-                        char* error, size_t errorCap, STTLocalSession* session,
-                        const STTFeaturePrefix* prefix) {
+                        const SttLocalControl& control, SttLocalStats& stats,
+                        char* error, size_t errorCap, SttLocalSession* session,
+                        const SttFeaturePrefix* prefix) {
   assert(!session); // One-shot callers must retain the self-contained backend path.
   assert(!prefix);  // Capture-time features belong to continuous sessions only.
   assert(halOwner == "stt" && allocations.size() == 1);
   ++engineCalls; engineSamples = count;
   for (size_t i = 0; i < count; ++i) assert(pcm[i] == static_cast<int16_t>((i % 101) - 50));
-  control.progress(control.context, STTLocalPhase::Inference);
+  control.progress(control.context, SttLocalPhase::Inference);
   if (engineHook) engineHook(control);
   stats.samples = count; stats.inferenceMs = 123;
   if (!engineOK) snprintf(error, errorCap, "Inference failed");
@@ -141,12 +141,12 @@ bool sttLocalTranscribe(const int16_t* pcm, size_t count, char* text, size_t cap
   else snprintf(text, cap, "quote \" secret \\ transcript");
   return engineOK;
 }
-STTLocalSession::~STTLocalSession() { reset(); }
-void STTLocalSession::reset() { assert(!backendState_); }
+SttLocalSession::~SttLocalSession() { reset(); }
+void SttLocalSession::reset() { assert(!backendState_); }
 // Keep-warm is never engaged here (stt_continuous_harness.cpp covers it).
-bool STTLocalSession::warm() const { return false; }
-void STTLocalSession::moveTo(STTLocalSession&) { assert(false); }
-void STTLocalSession::dropCallState() { assert(false); }
+bool SttLocalSession::warm() const { return false; }
+void SttLocalSession::moveTo(SttLocalSession&) { assert(false); }
+void SttLocalSession::dropCallState() { assert(false); }
 size_t sttPsramFree() { return SIZE_MAX; }
 #define free trackedFree
 // INSERT_BROKER
@@ -162,11 +162,11 @@ TranscriptOptions transcriptCaptureOptions(CommandSource source, TransportSessio
   strcpy(o.user, "alice"); return o;
 }
 void TranscriptSession::begin(const TranscriptOptions& options, const char*, uint64_t id) {
-  assert(gSTT.snapshot.workerActive); options_ = capturedOptions = options; id_ = id;
+  assert(gStt.snapshot.workerActive); options_ = capturedOptions = options; id_ = id;
   status_ = {}; status_.enabled = options.enabled; transcriptFinished = false;
 }
 bool TranscriptSession::append(uint32_t sequence, const char* text, size_t length) {
-  assert(gSTT.snapshot.workerActive && !audioCaptureOwnedBy("stt") && sequence == 1 && !sequence_);
+  assert(gStt.snapshot.workerActive && !audioCaptureOwnedBy("stt") && sequence == 1 && !sequence_);
   sequence_ = sequence;
   if (saveHook) saveHook();
   if (!options_.enabled) return true;
@@ -175,16 +175,16 @@ bool TranscriptSession::append(uint32_t sequence, const char* text, size_t lengt
   status_.bytes += length; return true;
 }
 void TranscriptSession::finish(const char* outcome) {
-  assert(gSTT.snapshot.workerActive && !audioCaptureOwnedBy("stt") && !finished_);
+  assert(gStt.snapshot.workerActive && !audioCaptureOwnedBy("stt") && !finished_);
   finished_ = true; transcriptFinished = true; savedOutcome = outcome; status_.complete = !status_.error[0];
   if (finishHook) finishHook();
 }
 
-static STTOwner owner{SOURCE_SERIAL, 5};
-static STTOwner other{SOURCE_WEB, 5}; // Same number, different transport.
+static SttOwner owner{SOURCE_SERIAL, 5};
+static SttOwner other{SOURCE_WEB, 5}; // Same number, different transport.
 static void reset() {
   assert(allocations.empty() && !pendingTask);
-  gSTT = STTRun{};
+  gStt = SttRun{};
   nowMs = 1; nextSample = 0; readLimit = 137;
   sessions = {{SOURCE_SERIAL, 5}, {SOURCE_WEB, 5}, {SOURCE_SERIAL, 6}};
   audioSource = AUDIO_SRC_LOCAL_PDM; halOwner.clear(); active = false;
@@ -196,8 +196,8 @@ static void reset() {
   savePreference = saveFailure = transcriptFinished = false; savedWords.clear(); savedOutcome.clear();
   gSettings.micSource = "auto";
 }
-static STTToken begin() {
-  STTToken token = 0; char error[96];
+static SttToken begin() {
+  SttToken token = 0; char error[96];
   assert(sttBegin(owner, 1000, &token, error, sizeof(error)) && token);
   return token;
 }
@@ -207,26 +207,26 @@ static void run() {
   assert(allocations.empty());
   assert(!audioCaptureOwnedBy("stt") && transcriptFinished);
 }
-static STTSnapshot snapshot(STTToken token) {
-  STTSnapshot out;
+static SttSnapshot snapshot(SttToken token) {
+  SttSnapshot out;
   assert(sttSnapshot(owner, token, &out)); return out;
 }
 static void rejectsBegin() {
-  STTToken token = 7; char error[96];
+  SttToken token = 7; char error[96];
   assert(!sttBegin(owner, 1000, &token, error, sizeof(error)) && error[0]);
 }
 int main() {
   reset();
-  STTToken token = begin();
+  SttToken token = begin();
   assert(sttRunActive(token) && !sttRunActive(token + 1));
   assert(!sttCancel(other, token));
   assert(!sttCancel({SOURCE_SERIAL, 6}, token));
   assert(!sttRequestFinish(owner, token + 1));
-  STTSnapshot denied;
+  SttSnapshot denied;
   assert(!sttSnapshot(other, token, &denied));
   assert(!sttSnapshot({SOURCE_SERIAL, 6}, 0, &denied));
   run();
-  assert(snapshot(token).state == STTState::Done);
+  assert(snapshot(token).state == SttState::Done);
   assert(snapshot(token).workerStackFreeBytes == 4096); // Includes transcript finalization depth.
   assert(!sttRunActive(token));
   assert(engineSamples == 16000 && starts == 1 && stops == 1 && captureRate == 16000);
@@ -241,24 +241,24 @@ int main() {
   auto second = begin(); assert(second != token && !sttCancel(owner, token)); run();
 
   reset(); token = begin(); assert(sttCancel(owner, token)); run();
-  assert(starts == 0 && engineCalls == 0 && snapshot(token).state == STTState::Cancelled);
+  assert(starts == 0 && engineCalls == 0 && snapshot(token).state == SttState::Cancelled);
 
   reset(); token = begin();
   readHook = [&] { sttCancel(owner, token); rejectsBegin(); };
-  run(); assert(engineCalls == 0 && snapshot(token).state == STTState::Cancelled);
+  run(); assert(engineCalls == 0 && snapshot(token).state == SttState::Cancelled);
 
   reset(); token = begin();
-  engineHook = [&](const STTLocalControl& ctl) {
+  engineHook = [&](const SttLocalControl& ctl) {
     assert(!ctl.cancelled(ctl.context));
     assert(sttCancel(owner, token)); assert(ctl.cancelled(ctl.context));
     rejectsBegin(); assert(allocations.size() == 1 && halOwner == "stt");
   };
-  run(); assert(snapshot(token).state == STTState::Cancelled);
+  run(); assert(snapshot(token).state == SttState::Cancelled);
   assert(!sttResult(owner, token, text, sizeof(text)));
 
   reset(); token = begin();
   readHook = [&] { sessions.erase({SOURCE_SERIAL, 5}); };
-  run(); assert(gSTT.snapshot.state == STTState::Cancelled && engineCalls == 0);
+  run(); assert(gStt.snapshot.state == SttState::Cancelled && engineCalls == 0);
   assert(!sttRunActive(token));
   assert(!sttResult(owner, token, text, sizeof(text)));
 
@@ -267,33 +267,33 @@ int main() {
   assert(!sttSnapshot({SOURCE_SERIAL, 6}, token, &denied));
 
   reset(); token = begin(); readHook = [&] { if (nextSample >= 1700) sttRequestFinish(owner, token); };
-  run(); assert(engineSamples >= 1700 && engineSamples < 2000 && snapshot(token).state == STTState::Done);
+  run(); assert(engineSamples >= 1700 && engineSamples < 2000 && snapshot(token).state == SttState::Done);
 
   reset(); token = begin(); sttRequestFinish(owner, token); run();
-  assert(engineCalls == 0 && snapshot(token).state == STTState::Failed);
+  assert(engineCalls == 0 && snapshot(token).state == SttState::Failed);
 
   reset(); token = begin(); readLimit = 0; run();
-  assert(engineCalls == 0 && snapshot(token).state == STTState::Failed);
+  assert(engineCalls == 0 && snapshot(token).state == SttState::Failed);
   assert(strstr(snapshot(token).error, "timed out"));
 
   reset(); token = begin(); readHook = [&] { sourceAvailable = false; }; run();
-  assert(engineCalls == 0 && snapshot(token).state == STTState::Failed);
+  assert(engineCalls == 0 && snapshot(token).state == SttState::Failed);
 
   reset(); allocationFails = true; token = begin(); run();
-  assert(starts == 0 && snapshot(token).state == STTState::Failed);
+  assert(starts == 0 && snapshot(token).state == SttState::Failed);
   reset(); startFails = true; token = begin(); run();
-  assert(starts == 0 && snapshot(token).state == STTState::Failed);
+  assert(starts == 0 && snapshot(token).state == SttState::Failed);
   reset(); engineOK = false; token = begin(); run();
-  assert(snapshot(token).state == STTState::Failed && stops == 1);
+  assert(snapshot(token).state == SttState::Failed && stops == 1);
   reset(); engineOverlong = true; token = begin(); run();
-  assert(snapshot(token).state == STTState::Failed);
+  assert(snapshot(token).state == SttState::Failed);
 
   reset(); token = begin(); gSettings.micSource = "g2"; run();
   assert(snapshot(token).audioSource == AUDIO_SRC_LOCAL_PDM); // Latched at admission.
   assert(gSettings.micSource == "g2"); // Later user preference survives.
 
   reset(); gSettings.micSource = "g2"; fallbackOnStart = true; token = begin(); run();
-  assert(snapshot(token).state == STTState::Failed && starts == 1 && stops == 1);
+  assert(snapshot(token).state == SttState::Failed && starts == 1 && stops == 1);
   assert(nextSample == 0 && engineCalls == 0); // Never drain the wrong source.
   assert(strstr(snapshot(token).error, "changed during startup"));
 
@@ -302,14 +302,14 @@ int main() {
   reset(); gMicRunning = true; rejectsBegin();
   reset(); recordingBusy = true; rejectsBegin();
   reset(); halOwner = "native"; rejectsBegin(); assert(stops == 0);
-  reset(); taskFails = true; rejectsBegin(); assert(!gSTT.snapshot.workerActive);
+  reset(); taskFails = true; rejectsBegin(); assert(!gStt.snapshot.workerActive);
   reset(); token = begin(); halOwner = "mic"; active = true; run();
-  assert(halOwner == "mic" && stops == 0 && snapshot(token).state == STTState::Failed);
+  assert(halOwner == "mic" && stops == 0 && snapshot(token).state == SttState::Failed);
   halOwner.clear();
 
   reset(); token = begin(); run(); nowMs += kResultRetentionMs;
   assert(!sttResult(owner, token, text, sizeof(text)));
-  STTToken third; char error[96];
+  SttToken third; char error[96];
   assert(sttBegin(other, 1000, &third, error, sizeof(error)));
   assert(!sttResult(owner, token, text, sizeof(text))); run();
   reset(); savePreference = true; token = begin(); savePreference = false;
@@ -321,12 +321,12 @@ int main() {
   reset(); token = begin(); savePreference = true; run();
   assert(!capturedOptions.enabled && savedWords.empty());
   reset(); savePreference = saveFailure = true; token = begin(); run();
-  assert(snapshot(token).state == STTState::Done && snapshot(token).transcript.error[0]);
+  assert(snapshot(token).state == SttState::Done && snapshot(token).transcript.error[0]);
   assert(sttResult(owner, token, text, sizeof(text)) && !snapshot(token).error[0]);
   reset(); savePreference = true; token = begin(); assert(sttCancel(owner, token)); run();
   assert(savedWords.empty() && savedOutcome == "cancelled");
   reset(); savePreference = true; token = begin();
   finishHook = [&] { assert(sttRunActive(token)); assert(sttCancel(owner, token)); };
-  run(); assert(snapshot(token).state == STTState::Cancelled && savedOutcome == "done" && savedWords.size() == 1);
+  run(); assert(snapshot(token).state == SttState::Cancelled && savedOutcome == "done" && savedWords.size() == 1);
   puts("STT production broker: ownership, cancellation, short reads, limits, failures and cleanup passed");
 }

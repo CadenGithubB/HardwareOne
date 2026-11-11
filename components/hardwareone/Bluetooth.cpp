@@ -1110,7 +1110,7 @@ bool bleDataDebugEnabled() { return isDebugFlagSet(DEBUG_BLE_DATA); }
 // Inspect the complete bounded payload before previews/trace fragmentation.
 // Raw notify also carries non-NUL-terminated encrypted frames, so never use
 // strstr/String construction here or read beyond the caller's byte count.
-static bool bleOutputHasPrivateSTT(const char* data, size_t len) {
+static bool bleOutputHasPrivateStt(const char* data, size_t len) {
   static constexpr char textMarker[] = "\"sttText\"";
   static constexpr char pathMarker[] = "\"transcriptPath\"";
   constexpr size_t textLen = sizeof(textMarker) - 1;
@@ -1125,7 +1125,7 @@ static bool bleOutputHasPrivateSTT(const char* data, size_t len) {
 
 static void bleTxTrace(const char* tag, uint16_t connId, const char* data, size_t len) {
   if (!bleDataDebugEnabled()) return;
-  if (bleOutputHasPrivateSTT(data, len)) {
+  if (bleOutputHasPrivateStt(data, len)) {
     data = "[private STT result]";
     len = strlen(data);
   }
@@ -2782,7 +2782,7 @@ int bleDisconnectAppClients() {
 #if ENABLE_OLED_DISPLAY
 static void bleRememberOutput(const char* data, size_t len) {
   if (!data || !len) return;
-  if (bleOutputHasPrivateSTT(data, len)) {
+  if (bleOutputHasPrivateStt(data, len)) {
     data = "[private STT result]";
     len = strlen(data);
   }

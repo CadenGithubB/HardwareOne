@@ -62,8 +62,8 @@ uint32_t millis() { return uint32_t(esp_timer_get_time()/1000); }
 // Do not reconfigure the global watchdog around inference. Both cores retain
 // their subscriptions; the bounded stage loop blocks periodically after the
 // multicore kernel has joined, letting idle tasks run without unsubscribe races.
-bool cancelled(const STTLocalControl& c) { return c.cancelled && c.cancelled(c.context); }
-void progress(const STTLocalControl& c, STTLocalPhase phase) { if(c.progress)c.progress(c.context,phase); }
+bool cancelled(const SttLocalControl& c) { return c.cancelled && c.cancelled(c.context); }
+void progress(const SttLocalControl& c, SttLocalPhase phase) { if(c.progress)c.progress(c.context,phase); }
 struct Buffer {
     void* p = nullptr;
     size_t bytes = 0;
@@ -97,7 +97,7 @@ bool timedRead(ModelReader& r, void* dest, size_t size) {
 // Stored (codec 0) graph: read straight into the final buffer in large blocks.
 // A 20 MB graph in 4 KB reads spends most of its time in per-call file-system
 // and SDMMC overhead; 256 KB transfers let the driver stream multi-block DMA.
-bool readStoredModel(ModelReader& r, uint8_t* raw, const STTLocalControl& control) {
+bool readStoredModel(ModelReader& r, uint8_t* raw, const SttLocalControl& control) {
     constexpr size_t kBlock=256*1024;
     for(size_t done=0;done<identity::kRawBytes;) {
         if(cancelled(control))return false;
@@ -108,7 +108,7 @@ bool readStoredModel(ModelReader& r, uint8_t* raw, const STTLocalControl& contro
     }
     return true;
 }
-bool inflateModel(ModelReader& r, uint8_t* raw, const STTLocalControl& control) {
+bool inflateModel(ModelReader& r, uint8_t* raw, const SttLocalControl& control) {
     Buffer workspace(sizeof(tinfl_decompressor)+4096);
     if(!workspace.p)return false;
     auto dec=static_cast<tinfl_decompressor*>(workspace.p);
@@ -241,7 +241,7 @@ ModelCache::~ModelCache() { reset(); }
 // The resident model references the weights zero-copy: destroy it first.
 void ModelCache::reset() { dropResident(); heap_caps_free(raw_); raw_=nullptr; }
 // Its arena still holds the last call's activations and quantized input:
-// freed whenever the session changes hands (STTLocalSession::moveTo), and the
+// freed whenever the session changes hands (SttLocalSession::moveTo), and the
 // next owner's first call may build a fresh one.
 void ModelCache::dropResident() { delete resident_; resident_=nullptr; residentTried_=false; }
 #else
@@ -276,10 +276,10 @@ size_t callBudget(size_t samples, const ModelCache* cache, size_t* contiguous) {
 }
 
 bool transcribe(ModelReader reader, const int16_t* pcm, size_t samples,
-                char* text, size_t capacity, const STTLocalControl& control,
-                STTLocalStats& stats, char* error, size_t errorCapacity,
+                char* text, size_t capacity, const SttLocalControl& control,
+                SttLocalStats& stats, char* error, size_t errorCapacity,
                 Diagnostics* diagnostics, ModelCache* cache, const Decoder* decoder,
-                const STTFeaturePrefix* prefix) {
+                const SttFeaturePrefix* prefix) {
     InternalMemoryScope internalMemory;
     stats={}; if(text && capacity)text[0]=0;if(error && errorCapacity)error[0]=0;
 #if HW1_STT_RUNTIME_DIAGNOSTICS
@@ -300,7 +300,7 @@ bool transcribe(ModelReader reader, const int16_t* pcm, size_t samples,
     const size_t frames=feature_frames(samples), outputs=(frames+1)/2;
     stats.samples=samples;stats.featureFrames=frames;stats.outputFrames=outputs;
     if(!container::valid_size(reader.bytes))return fail("STT model size does not match this firmware");
-    progress(control,STTLocalPhase::Loading);uint32_t start=millis();
+    progress(control,SttLocalPhase::Loading);uint32_t start=millis();
     if(!container::read_header(reader.context,reader.bytes,reader.read))return fail("STT model identity mismatch");
     // This pinned graph's 16-byte greedy arena is 2048*ceil(T/2), including
     // residual lifetimes/fragmentation. Keep extra alignment and metadata/
@@ -470,7 +470,7 @@ bool transcribe(ModelReader reader, const int16_t* pcm, size_t samples,
 #endif
     stats.loadMs=millis()-start;
     if(cancelled(control))return fail("Cancelled");
-    progress(control,STTLocalPhase::Frontend);start=millis();
+    progress(control,SttLocalPhase::Frontend);start=millis();
     {
         Buffer features(frames*64*sizeof(float),true), workspace(sizeof(FrontendWorkspace),true);
         if(!features.p || !workspace.p)return fail("Cannot allocate STT frontend");
@@ -521,7 +521,7 @@ bool transcribe(ModelReader reader, const int16_t* pcm, size_t samples,
     }
 #endif
     if(cancelled(control))return fail("Cancelled");
-    progress(control,STTLocalPhase::Inference);start=millis();
+    progress(control,SttLocalPhase::Inference);start=millis();
     // Blocking with vTaskDelay(1) every 5 stages cost 41 ticks per 15x5 run
     // (each up to 1 ms: 32-54 ms per phrase). The 5-stage points now only
     // taskYIELD() (round-robin with other priority-2 tasks; the capture task
@@ -576,7 +576,7 @@ bool transcribe(ModelReader reader, const int16_t* pcm, size_t samples,
     ++gStageSegments;
     stats.inferenceMs=millis()-start;
     if(cancelled(control))return fail("Cancelled");
-    progress(control,STTLocalPhase::Decoding);start=millis();
+    progress(control,SttLocalPhase::Decoding);start=millis();
 #if HW1_STT_RUNTIME_DIAGNOSTICS
     if(diagnostics)digest(output->data,output->get_bytes(),diagnostics->outputSha);
 #endif

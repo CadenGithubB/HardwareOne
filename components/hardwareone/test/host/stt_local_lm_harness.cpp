@@ -140,8 +140,8 @@ size_t callBudget(size_t, const ModelCache*, size_t* contiguous) { if(contiguous
 static int fakeWeights=0;  // stands in for the verified raw weights a call leaves cached
 // Mirrors quartznet_runtime.cpp's hook contract around a fixed logit tensor.
 bool transcribe(ModelReader reader, const int16_t*, size_t, char* text, size_t capacity,
-                const STTLocalControl& control, STTLocalStats&, char* error, size_t errorCapacity,
-                Diagnostics*, ModelCache* cache, const Decoder* decoder, const STTFeaturePrefix* prefix) {
+                const SttLocalControl& control, SttLocalStats&, char* error, size_t errorCapacity,
+                Diagnostics*, ModelCache* cache, const Decoder* decoder, const SttFeaturePrefix* prefix) {
     assert(!prefix);  // no capture-time rows in these calls
     assert(reader.read && reader.bytes==fake::state.files.at(HW1_STT_MODEL_PATH).size());
     fake::state.lastCache=cache;
@@ -181,9 +181,9 @@ void reset() {
     Logits ck; ck.frame({{'c',30},{'k',31}}); ck.pattern("_a_t__");   // greedy "kat", LM "cat"
     fake::state.logits=ck.q;
 }
-std::string run(STTLocalSession* session, bool* ok=nullptr) {
-    char text[64]="unset", error[64]; STTLocalStats stats;
-    const STTLocalControl control{nullptr,fake::cancelled,nullptr};
+std::string run(SttLocalSession* session, bool* ok=nullptr) {
+    char text[64]="unset", error[64]; SttLocalStats stats;
+    const SttLocalControl control{nullptr,fake::cancelled,nullptr};
     const int16_t pcm[320]={};
     const bool result=sttLocalTranscribe(pcm,320,text,sizeof(text),control,stats,error,sizeof(error),session);
     if(ok)*ok=result; else assert(result);
@@ -195,8 +195,8 @@ size_t logged(const char* needle) {
 #if ENABLE_STT_LM
 void missing() {
     reset();
-    { STTLocalSession session; assert(run(&session)=="greedy" && run(&session)=="greedy"); }
-    { STTLocalSession session; assert(run(&session)=="greedy"); }
+    { SttLocalSession session; assert(run(&session)=="greedy" && run(&session)=="greedy"); }
+    { SttLocalSession session; assert(run(&session)=="greedy"); }
     assert(run(nullptr)=="greedy");
     // One existence probe per session/one-shot, never an open; logged once per boot.
     assert(fake::state.exists[kLm]==3 && fake::state.opens[kLm]==0 && fake::state.exists[kWords]==0);
@@ -206,7 +206,7 @@ void missing() {
 }
 void crossPhraseMetadata() {
     reset(); fake::state.files[kLm]=meetingLm();
-    STTLocalSession session;
+    SttLocalSession session;
     assert(run(&session)=="cat" && run(&session)=="cat");
     assert(fake::state.lmDecodeLogs.size()==2);
     assert(fake::state.lmDecodeLogs[0].find("call=1 ")!=std::string::npos);
@@ -233,7 +233,7 @@ void configuredStrengthReachesDecoder() {
     assert(hw1::stt::lm::decode(logits.q.data(),1,-2,view,nullptr,reduced,sizeof(reduced),{},0,nullptr,0.75f)==hw1::stt::lm::DecodeStatus::Ok);
     assert(!std::strcmp(original,"a") && !std::strcmp(reduced,"b")); // fixture distinguishes the two policies
     assert(hw1::stt::lm::decode(logits.q.data(),1,-2,view,nullptr,configured,sizeof(configured),{},0,nullptr,HW1_STT_LM_STRENGTH)==hw1::stt::lm::DecodeStatus::Ok);
-    STTLocalSession session;
+    SttLocalSession session;
     assert(run(&session)==configured); // actual backend must forward the configured scalar
     char strengthLog[48]; std::snprintf(strengthLog,sizeof(strengthLog),"strength=%.3f",double(HW1_STT_LM_STRENGTH));
     assert(fake::state.lmDecodeLogs.size()==1 && fake::state.lmDecodeLogs[0].find(strengthLog)!=std::string::npos);
@@ -242,7 +242,7 @@ void loadedOncePerSession() {
     reset(); fake::state.files[kLm]=meetingLm();
     const size_t bytes=fake::state.files[kLm].size();
     {
-        STTLocalSession session;
+        SttLocalSession session;
         assert(run(&session)=="cat");
         assert(fake::used()==bytes); // blob resident between calls; no word list
         assert(run(&session)=="cat" && run(&session)=="cat");
@@ -271,7 +271,7 @@ void customWords() {
     reset(); fake::state.files[kLm]=meetingLm();
     fakevocab::text="kat\nnot a word\n";   // the vocabulary's spoken forms (one line each)
     {
-        STTLocalSession session;
+        SttLocalSession session;
         assert(run(&session)=="kat" && run(&session)=="kat" && fakevocab::snapshots==1);
         // An edit (new generation) is taken once, between phrases, by the same session.
         fakevocab::text.clear(); ++fakevocab::generation;
@@ -283,13 +283,13 @@ void customWords() {
     // The retired fixed list beside the LM is noted once and never read.
     reset(); fake::state.files[kLm]=meetingLm();
     fake::state.files[kWords]={'k','a','t','\n'};
-    { STTLocalSession session; assert(run(&session)=="cat" && run(&session)=="cat"); }
-    { STTLocalSession session; assert(run(&session)=="cat"); }
+    { SttLocalSession session; assert(run(&session)=="cat" && run(&session)=="cat"); }
+    { SttLocalSession session; assert(run(&session)=="cat"); }
     assert(logged("W [STT] /STT Models/custom_words.txt is no longer read")==1 && fake::state.opens[kWords]==0);
     assert(logged("0 custom words")==1);
     // An empty vocabulary: no hotword table, no warning.
     reset(); fake::state.files[kLm]=meetingLm();
-    { STTLocalSession session; assert(run(&session)=="cat"); }
+    { SttLocalSession session; assert(run(&session)=="cat"); }
     assert(fake::state.logs.size()==1 && logged("0 custom words")==1);
 }
 void invalid() {
@@ -300,8 +300,8 @@ void invalid() {
         if(scenario==1)blob.resize(blob.size()-1);          // truncated
         if(scenario==2)blob.resize(10);                     // implausible size
         if(scenario==3)blob.clear();
-        { STTLocalSession session; assert(run(&session)=="greedy" && run(&session)=="greedy"); }
-        { STTLocalSession session; assert(run(&session)=="greedy"); }
+        { SttLocalSession session; assert(run(&session)=="greedy" && run(&session)=="greedy"); }
+        { SttLocalSession session; assert(run(&session)=="greedy"); }
         assert(fake::state.opens[kLm]==2 && fake::state.logs.size()==1 && logged("W [STT]")==1);
         if(scenario==0)assert(logged("SHA-256 mismatch"));
         if(scenario==1)assert(logged("file size does not match header"));
@@ -312,23 +312,23 @@ void memory() {
     reset(); fake::state.files[kLm]=meetingLm();
     const size_t bytes=fake::state.files[kLm].size();
     fake::state.psram=bytes+(6u<<20)-1; // below LM + reserve: never allocated
-    { STTLocalSession session; assert(run(&session)=="greedy" && run(&session)=="greedy"); }
+    { SttLocalSession session; assert(run(&session)=="greedy" && run(&session)=="greedy"); }
     assert(fake::state.logs.size()==1 && logged("W [STT] Not enough PSRAM"));
     // Allocation failure despite the budget: same fallback, same single note.
     fake::state.psram=64u<<20; fake::state.failAllocationAbove=bytes-1;
-    { STTLocalSession session; assert(run(&session)=="greedy"); }
+    { SttLocalSession session; assert(run(&session)=="greedy"); }
     assert(fake::state.logs.size()==1);
     reset(); fake::state.files[kLm]=meetingLm();
-    { STTLocalSession session; assert(run(&session)=="cat"); }
+    { SttLocalSession session; assert(run(&session)=="cat"); }
     // Decode failure other than cancellation (here: over kMaxFrames): greedy.
     fake::state.logits.assign((hw1::stt::lm::kMaxFrames+1)*29,0);
-    { STTLocalSession session; assert(run(&session)=="greedy" && run(&session)=="greedy"); }
+    { SttLocalSession session; assert(run(&session)=="greedy" && run(&session)=="greedy"); }
     assert(logged("W [STT] Language-model decode failed")==1);
 }
 void released() {
     reset(); fake::state.files[kLm]=meetingLm();
     {
-        STTLocalSession session;
+        SttLocalSession session;
         fake::state.releaseBeforeDecode=true;
         assert(run(&session)=="cat" && !fake::state.released); // nothing resident yet
         assert(run(&session)=="greedy" && fake::state.released && fake::state.heap.empty());
@@ -336,7 +336,7 @@ void released() {
         assert(run(&session)=="greedy" && fake::state.opens[kLm]==1); // no reload thrash
     }
     assert(logged("W [STT] Released language model")==1);
-    { STTLocalSession session; assert(run(&session)=="cat" && fake::state.opens[kLm]==2); }
+    { SttLocalSession session; assert(run(&session)=="cat" && fake::state.opens[kLm]==2); }
 }
 // The broker hands an idle session to its next run (sttKeepWarm): weights and
 // a loaded LM move whole; an LM shed under memory pressure gets one load
@@ -344,7 +344,7 @@ void released() {
 void handOff() {
     reset(); fake::state.files[kLm]=meetingLm();
     const size_t bytes=fake::state.files[kLm].size();
-    STTLocalSession first, next;
+    SttLocalSession first, next;
     assert(!first.warm() && !next.warm());
     assert(run(&first)=="cat" && first.warm() && fake::used()==bytes);
     const int drops=fake::state.residentDrops;
@@ -365,7 +365,7 @@ void handOff() {
     assert(first.warm() && !next.warm());
     assert(run(&first)=="cat" && fake::state.opens[kLm]==2);
     // Moving over a session that holds something frees what it held.
-    STTLocalSession other;
+    SttLocalSession other;
     assert(run(&other)=="cat" && fake::state.opens[kLm]==3 && fake::used()==2*bytes);
     first.moveTo(other);
     assert(other.warm() && !first.warm() && fake::used()==bytes);
@@ -374,7 +374,7 @@ void handOff() {
 void cancellation() {
     reset(); fake::state.files[kLm]=meetingLm();
     fake::state.maxRead=16; fake::state.cancelAfterReads=3; // mid-read (file is ~150 bytes)
-    STTLocalSession session;
+    SttLocalSession session;
     bool ok=true;
     assert(run(&session,&ok)=="!Cancelled" && !ok && fake::state.heap.empty());
     assert(fake::state.lmDecodeLogs.size()==1 && fake::state.lmDecodeLogs[0].find("status=load_cancelled history_start=-1 history_end=-1")!=std::string::npos);
@@ -411,9 +411,9 @@ int main() {
 #else
     // Flag off: no decoder, no LM file access, greedy text unchanged.
     reset(); fake::state.files[kLm]=meetingLm();
-    { STTLocalSession session; assert(run(&session)=="greedy" && run(nullptr)=="greedy"); }
+    { SttLocalSession session; assert(run(&session)=="greedy" && run(nullptr)=="greedy"); }
     assert(fake::state.exists.empty() && !fake::state.opens.count(kLm) && !fake::state.opens.count(kWords) && fake::state.logs.empty() && fake::state.lmDecodeLogs.empty());
-    { STTLocalSession session, next; run(&session); assert(session.warm()); session.moveTo(next); assert(next.warm() && !session.warm()); }
+    { SttLocalSession session, next; run(&session); assert(session.warm()); session.moveTo(next); assert(next.warm() && !session.warm()); }
 #endif
     reset();
     std::printf("System_STTLocal language-model integration tests passed (ENABLE_STT_LM=%d, strength=%.2f)\n",ENABLE_STT_LM,double(HW1_STT_LM_STRENGTH));

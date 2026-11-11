@@ -119,45 +119,45 @@ static int readyChecks=0;
 bool sttLocalAvailable(char*,size_t,const char** reason){++readyChecks;if(reason)*reason=modelReady?nullptr:"Speech model SD card unavailable. Insert the model card and mount SD.";return modelReady;}
 static int beginCalls=0,cancelCalls=0,finishCalls=0,ackCalls=0;
 static bool beginOK=true,ackOK=true;
-static STTOwner brokerOwner;
+static SttOwner brokerOwner;
 static TranscriptOptions brokerTranscriptOptions;
 static AudioSource brokerRequestedSource=AUDIO_SRC_NONE;
-static STTSnapshot broker;
-static STTSpeakerSnapshot brokerSpeakers;
-static std::deque<STTTextChunk> chunks;
+static SttSnapshot broker;
+static SttSpeakerSnapshot brokerSpeakers;
+static std::deque<SttTextChunk> chunks;
 static std::function<void()> beginHook,ackHook,runActiveHook;
-bool sttBeginContinuous(STTOwner owner,STTToken* token,char* error,size_t cap,const TranscriptOptions* options,AudioSource requested){
+bool sttBeginContinuous(SttOwner owner,SttToken* token,char* error,size_t cap,const TranscriptOptions* options,AudioSource requested){
  assert(options);brokerTranscriptOptions=*options;brokerRequestedSource=requested;
  ++beginCalls;if(beginHook)beginHook();
  if(!beginOK){snprintf(error,cap,"run closemic first");return false;}
- brokerOwner=owner;broker=STTSnapshot{};broker.token=42;broker.continuous=true;
- broker.state=STTState::Preparing;broker.workerActive=true;broker.transcript.enabled=options->enabled;*token=42;return true;
+ brokerOwner=owner;broker=SttSnapshot{};broker.token=42;broker.continuous=true;
+ broker.state=SttState::Preparing;broker.workerActive=true;broker.transcript.enabled=options->enabled;*token=42;return true;
 }
-bool sttRunActive(STTToken t){
+bool sttRunActive(SttToken t){
  if(runActiveHook){auto hook=runActiveHook;runActiveHook=nullptr;hook();}
  return broker.token==t&&broker.workerActive;
 }
-bool same(STTOwner a,STTOwner b){return a.source==b.source&&a.epoch==b.epoch;}
-bool sttCancel(STTOwner o,STTToken t){
+bool same(SttOwner a,SttOwner b){return a.source==b.source&&a.epoch==b.epoch;}
+bool sttCancel(SttOwner o,SttToken t){
  if(!same(o,brokerOwner)||t!=broker.token||!displaySessionStillLive(o.source,o.epoch))return false;
  ++cancelCalls;chunks.clear();return true;
 }
-bool sttRequestFinish(STTOwner o,STTToken t){
+bool sttRequestFinish(SttOwner o,SttToken t){
  if(!same(o,brokerOwner)||t!=broker.token)return false;++finishCalls;return true;
 }
-bool sttSnapshot(STTOwner o,STTToken t,STTSnapshot* out){
+bool sttSnapshot(SttOwner o,SttToken t,SttSnapshot* out){
  if(!same(o,brokerOwner)||t!=broker.token||!displaySessionStillLive(o.source,o.epoch))return false;
  *out=broker;out->pendingTexts=chunks.size();return true;
 }
-bool sttReadSpeakers(STTOwner o,STTToken t,STTSpeakerSnapshot* out){
+bool sttReadSpeakers(SttOwner o,SttToken t,SttSpeakerSnapshot* out){
  *out={};if(!same(o,brokerOwner)||t!=broker.token||!displaySessionStillLive(o.source,o.epoch))return false;
  *out=brokerSpeakers;return true;
 }
-bool sttReadChunk(STTOwner o,STTToken t,STTTextChunk* out){
+bool sttReadChunk(SttOwner o,SttToken t,SttTextChunk* out){
  if(!same(o,brokerOwner)||t!=broker.token||chunks.empty()||!displaySessionStillLive(o.source,o.epoch))return false;
  *out=chunks.front();return true;
 }
-bool sttAcknowledgeChunk(STTOwner o,STTToken t,uint32_t seq){
+bool sttAcknowledgeChunk(SttOwner o,SttToken t,uint32_t seq){
  if(ackHook){auto hook=ackHook;ackHook=nullptr;hook();}
  if(!ackOK||!same(o,brokerOwner)||t!=broker.token||chunks.empty()||chunks.front().sequence!=seq||!displaySessionStillLive(o.source,o.epoch))return false;
  ++ackCalls;chunks.pop_front();return true;
@@ -185,7 +185,7 @@ static bool uartLinkIsRunning(){return hostRunning;}
 static bool dictationHostReadyForEpoch(uint32_t epoch,const char**){return hostReady&&epoch==hostEpoch;}
 // INSERT_SAVE
 static void runSaveWorker(){assert(!inTranscriptWorker);inTranscriptWorker=true;dictationProcessSave();inTranscriptWorker=false;}
-static STTOwner glasses{SOURCE_G2_GLASSES,3};
+static SttOwner glasses{SOURCE_G2_GLASSES,3};
 static void reset(){
  gDict=DictationControl{};gDict.state=DictationState::IDLE;gDictSave=DictationSaveJob{};brokerTranscriptOptions={};
  brokerRequestedSource=micInitSource=recorderSource=AUDIO_SRC_NONE;micInitCalls=recorderStarts=0;recorderSilenceMs=0;
@@ -199,7 +199,7 @@ static void reset(){
  nowMs=1;wakeCount=readyChecks=beginCalls=cancelCalls=finishCalls=ackCalls=0;
  sessions={{SOURCE_G2_GLASSES,3},{SOURCE_LOCAL_DISPLAY,4}};
  workerOK=modelReady=beginOK=ackOK=true;micBusy=srBusy=gMicRunning=false;halOwner.clear();
- beginHook=ackHook=runActiveHook=sessionHook=nullptr;brokerSpeakers={};broker=STTSnapshot{};chunks.clear();cleanup.clear();stops.clear();cancelEvents.clear();
+ beginHook=ackHook=runActiveHook=sessionHook=nullptr;brokerSpeakers={};broker=SttSnapshot{};chunks.clear();cleanup.clear();stops.clear();cancelEvents.clear();
 }
 static void stagePi(uint64_t id,const std::string& text){
  gDict.state=DictationState::WAITING;gDict.owner=id;gDict.requestHostEpoch=9;
@@ -314,9 +314,9 @@ static void testPiSaving(){
 #endif
 #if ENABLE_LOCAL_STT
 static void ready(){const char* why=nullptr;assert(!dictationAvailable(&why));assert(readyChecks==0);dictationProcessLocal();assert(dictationAvailable(&why));assert(readyChecks==1);}
-static void begin(){assert(dictationBeginLocal(glasses.source,glasses.epoch));assert(beginCalls==0);dictationProcessLocal();assert(beginCalls==1&&gLocalDict.token==42);broker.state=STTState::Recording;broker.captureActive=true;}
-static void produce(uint32_t seq,const std::string& text){STTTextChunk chunk;chunk.sequence=seq;snprintf(chunk.text,sizeof(chunk.text),"%s",text.c_str());chunks.push_back(chunk);}
-static void terminal(){broker.workerActive=broker.captureActive=broker.inferenceActive=false;broker.state=STTState::Done;}
+static void begin(){assert(dictationBeginLocal(glasses.source,glasses.epoch));assert(beginCalls==0);dictationProcessLocal();assert(beginCalls==1&&gLocalDict.token==42);broker.state=SttState::Recording;broker.captureActive=true;}
+static void produce(uint32_t seq,const std::string& text){SttTextChunk chunk;chunk.sequence=seq;snprintf(chunk.text,sizeof(chunk.text),"%s",text.c_str());chunks.push_back(chunk);}
+static void terminal(){broker.workerActive=broker.captureActive=broker.inferenceActive=false;broker.state=SttState::Done;}
 static void testLocalSaving(){
  reset();ready();savePreference=true;
  assert(dictationBeginFor(glasses.source,glasses.epoch));
@@ -324,7 +324,7 @@ static void testLocalSaving(){
  savePreference=false;dictationProcessLocal();
  assert(beginCalls==1&&brokerTranscriptOptions.enabled&&brokerTranscriptOptions.source==glasses.source);
  assert(brokerTranscriptOptions.epoch==glasses.epoch&&std::string(brokerTranscriptOptions.user)=="wearer");
- broker.state=STTState::Recording;broker.captureActive=true;produce(1,"broker already saved this");
+ broker.state=SttState::Recording;broker.captureActive=true;produce(1,"broker already saved this");
  broker.transcript.saved=true;broker.transcript.chunks=1;broker.transcript.bytes=24;
  snprintf(broker.transcript.path,sizeof(broker.transcript.path),"/private/broker-path");
  dictationProcessLocal();char text[257];assert(dictationTakeTextFor(glasses.source,text,sizeof(text)));
@@ -366,7 +366,7 @@ static void testLocal(){
  dictationProcessLocal();assert(dictationTakeTextFor(glasses.source,text,sizeof(text))&&std::string(text)=="late final text");
  dictationProcessLocal();assert(ackCalls==1&&chunks.empty()&&!gLocalDict.exchange&&gDict.state==DictationState::IDLE);
  // A terminal failure at the same boundary must not be reported as normal completion.
- reset();ready();begin();runActiveHook=[] {terminal();broker.state=STTState::Failed;snprintf(broker.error,sizeof(broker.error),"late inference failure");};
+ reset();ready();begin();runActiveHook=[] {terminal();broker.state=SttState::Failed;snprintf(broker.error,sizeof(broker.error),"late inference failure");};
  dictationProcessLocal();assert(gDict.state==DictationState::FAILED&&strstr(gDict.failure,"late inference failure"));
  reset();ready();assert(dictationBeginLocal(glasses.source,glasses.epoch));dictationCancelLocal(glasses.source,false);assert(!dictationBeginLocal(glasses.source,glasses.epoch));dictationProcessLocal();assert(beginCalls==0&&!gLocalDict.exchange&&gDict.state==DictationState::IDLE);
  reset();ready();beginHook=[] {dictationCancelLocal(SOURCE_G2_GLASSES,false);};begin();assert(cancelCalls==1&&gLocalDict.exchange&&broker.workerActive);terminal();dictationProcessLocal();assert(!gLocalDict.exchange&&!gDict.textPending);
@@ -511,7 +511,7 @@ static void testAppLocalLifecycle() {
   reset();sessions.insert({SOURCE_WEB,7});ready();
   const uint32_t epoch=source==SOURCE_LOCAL_DISPLAY?4:source==SOURCE_G2_GLASSES?3:7;
   DictationAppLease app;assert(dictationAppBegin(source,epoch,&app));
-  dictationProcessLocal();broker.state=STTState::Recording;broker.captureActive=true;
+  dictationProcessLocal();broker.state=SttState::Recording;broker.captureActive=true;
   dictationCancelImpl(source,false);dictationFieldFullFor(source);dictationRequestStopFor(source);
   assert(gDict.owner==app.exchange&&!gDict.stopRequested);
   produce(1,std::string(512,'a'));dictationProcessLocal();
@@ -646,7 +646,7 @@ static void testAppOptions() {
  assert(gLocalDict.requestedSource==AUDIO_SRC_G2_LEFT&&!gLocalDict.transcriptOptions.enabled);
  dictationProcessLocal();assert(beginCalls==1&&brokerRequestedSource==AUDIO_SRC_G2_LEFT);
  assert(!brokerTranscriptOptions.enabled&&!brokerTranscriptOptions.user[0]);
- broker.state=STTState::Recording;broker.captureActive=true;produce(1,"note text");dictationProcessLocal();
+ broker.state=SttState::Recording;broker.captureActive=true;produce(1,"note text");dictationProcessLocal();
 #else
  assert(micInitCalls==1&&micInitSource==AUDIO_SRC_G2_LEFT);
  assert(recorderStarts==1&&recorderSilenceMs==6000&&recorderSource==AUDIO_SRC_G2_LEFT);
@@ -680,7 +680,7 @@ static void testAppSpeakers() {
  ready();
 #endif
  DictationAppLease app;assert(dictationAppBegin(SOURCE_WEB,7,&app));
- STTSpeakerSnapshot out;assert(dictationAppReadSpeakers(app,&out)&&!out.available&&!out.count);
+ SttSpeakerSnapshot out;assert(dictationAppReadSpeakers(app,&out)&&!out.available&&!out.count);
 #if ENABLE_LOCAL_STT
  dictationProcessLocal();
  brokerSpeakers.available=true;brokerSpeakers.version=1;brokerSpeakers.count=1;

@@ -104,15 +104,15 @@ void g2EvenAiLogHostFailure(uint64_t, const char*, const G2EvenAiHostObservation
 bool g2EvenAiTakeEnterPending(uint64_t) { assert(false); return false; }
 
 #if ENABLE_LOCAL_STT && ENABLE_LLM_BACKEND
-using STTToken = uint64_t;
+using SttToken = uint64_t;
 using ChatRunToken = uint64_t;
-struct STTOwner { CommandSource source = SOURCE_G2_GLASSES; uint32_t epoch = 0; };
-enum class STTState { Preparing, Recording, Done, Failed, Cancelled };
-struct STTSnapshot { STTState state = STTState::Recording; bool workerActive = true; } speech;
-struct STTTextChunk { uint32_t sequence = 0; char text[513] = {}; };
+struct SttOwner { CommandSource source = SOURCE_G2_GLASSES; uint32_t epoch = 0; };
+enum class SttState { Preparing, Recording, Done, Failed, Cancelled };
+struct SttSnapshot { SttState state = SttState::Recording; bool workerActive = true; } speech;
+struct SttTextChunk { uint32_t sequence = 0; char text[513] = {}; };
 std::vector<std::string> transcripts;
 unsigned sttStarts = 0, sttCancels = 0, acks = 0, chatStarts = 0, chatStops = 0;
-STTToken nextToken = 20, activeToken = 0;
+SttToken nextToken = 20, activeToken = 0;
 uint32_t speechEpoch = 0;
 bool startSpeech = true, snapshotOK = true, ready = true, busy = false, modelOK = true;
 std::string modelName = "http:openclaw", submitted, chatText;
@@ -123,25 +123,25 @@ bool llmBackendActiveModel(LlmModelDesc* m) {
 }
 bool llmBackendIsReady() { return ready; }
 bool chatIsGenerating() { return busy; }
-bool sttBeginUtteranceG2Native(STTOwner owner, uint32_t gen, STTToken* token, char* err, size_t cap, void(*)()) {
+bool sttBeginUtteranceG2Native(SttOwner owner, uint32_t gen, SttToken* token, char* err, size_t cap, void(*)()) {
   assert(gen == gL.connectionGeneration && owner.epoch == liveEpoch);
   ++sttStarts;
   if (!startSpeech) { snprintf(err, cap, "Microphone is busy"); return false; }
   *token = activeToken = ++nextToken; speechEpoch = owner.epoch; return true;
 }
-bool sttCancel(STTOwner owner, STTToken token) {
+bool sttCancel(SttOwner owner, SttToken token) {
   if (token == activeToken && owner.epoch == speechEpoch) { ++sttCancels; return true; }
   return false;
 }
-bool sttSnapshot(STTOwner owner, STTToken token, STTSnapshot* out) {
+bool sttSnapshot(SttOwner owner, SttToken token, SttSnapshot* out) {
   *out = speech; return snapshotOK && token == activeToken && owner.epoch == speechEpoch;
 }
-bool sttReadChunk(STTOwner, STTToken, STTTextChunk* out) {
+bool sttReadChunk(SttOwner, SttToken, SttTextChunk* out) {
   if (transcripts.empty()) return false;
   out->sequence = acks + 1;
   std::snprintf(out->text, sizeof(out->text), "%s", transcripts.front().c_str()); return true;
 }
-bool sttAcknowledgeChunk(STTOwner, STTToken, uint32_t seq) {
+bool sttAcknowledgeChunk(SttOwner, SttToken, uint32_t seq) {
   assert(seq == acks + 1); ++acks; transcripts.erase(transcripts.begin()); return true;
 }
 int chatBeginTurn(const char* text, const void*, ChatRunToken* run) {
@@ -182,7 +182,7 @@ void wake(uint64_t id = 1) {
   g2EvenAiLocalTick();
 }
 void recognized(std::vector<std::string> text = {"hello Mingus"}) {
-  transcripts = text; speech.workerActive = false; speech.state = STTState::Done;
+  transcripts = text; speech.workerActive = false; speech.state = SttState::Done;
   for (size_t i = 0; i <= text.size(); ++i) g2EvenAiLocalTick();
 }
 void success() {
@@ -244,9 +244,9 @@ void failures() {
   reset(); liveEpoch = 0; wake(); assert(sttStarts == 0 && enters == 0 && !gEvenAiSession.active);
   reset(); ready = false; wake(); assert(sttStarts == 0 && gEvenAiLocal.done);
   reset(); startSpeech = false; wake(); assert(replies.back() == "Microphone is busy");
-  reset(); wake(); speech.state = STTState::Failed; g2EvenAiLocalTick(); assert(chatStarts == 0 && gEvenAiLocal.done);
+  reset(); wake(); speech.state = SttState::Failed; g2EvenAiLocalTick(); assert(chatStarts == 0 && gEvenAiLocal.done);
   reset(); wake(); transcripts = {"partial question"}; g2EvenAiLocalTick();
-  speech.state = STTState::Failed; g2EvenAiLocalTick(); assert(chatStarts == 0 && gEvenAiLocal.done);
+  speech.state = SttState::Failed; g2EvenAiLocalTick(); assert(chatStarts == 0 && gEvenAiLocal.done);
   reset(); wake(); recognized({}); assert(chatStarts == 0 && gEvenAiLocal.done);
   reset(); wake(); modelName = "http:different"; recognized(); assert(chatStarts == 0);
   reset(); wake(); recognized({std::string(512, 'a'), std::string(512, 'b')}); assert(chatStarts == 0 && gEvenAiLocal.done);

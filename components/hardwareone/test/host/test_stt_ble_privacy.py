@@ -30,7 +30,7 @@ def main():
         parser.error('a host C++17 compiler is required')
     source=(args.component/'Bluetooth.cpp').read_text()
     harness=(HERE/'stt_ble_privacy_harness.cpp').read_text()
-    names=[('CLASSIFY','static bool bleOutputHasPrivateSTT('),
+    names=[('CLASSIFY','static bool bleOutputHasPrivateStt('),
            ('TRACE','static void bleTxTrace('),
            ('HISTORY','static void bleRememberOutput('),
            ('RAW_SESSION','bool bleRawNotifyToSession('),

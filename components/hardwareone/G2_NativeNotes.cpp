@@ -31,7 +31,7 @@ static std::atomic<bool> active{false}, overflow{false}, stopWanted{false};
 // Single worker owns all private text and filesystem work. STT owns audio.
 struct State {
   G2NoteContext context{};
-  STTOwner owner{}; STTToken token=0;
+  SttOwner owner{}; SttToken token=0;
   DraftState draft{};
   uint32_t magic=0, session=0, started=0, stopped=0, touched=0, duration=0;
   uint32_t lastDraftMagic=0, lastVoiceMagic=0;
@@ -48,7 +48,7 @@ struct State {
   unsigned draftActionCount=0, voiceActionCount=0;
   size_t textLength=0;
   uint8_t body[WireLimit]={}, wire[WireLimit]={}, item[512]={};
-  STTSnapshot speech{}; STTTextChunk chunk{};
+  SttSnapshot speech{}; SttTextChunk chunk{};
 };
 EXT_RAM_BSS_ATTR static State s;
 
@@ -289,7 +289,7 @@ void speech() {
     if(!sttAcknowledgeChunk(s.owner,s.token,s.chunk.sequence)) {fail("speech delivery expired");return;}
     s.chunk={};if(!asr(false))fail("transcript display failed");
   } else if(!s.speech.workerActive) {
-    if(s.speech.state!=STTState::Done) {fail("transcription failed");return;}
+    if(s.speech.state!=SttState::Done) {fail("transcription failed");return;}
     s.duration+=millis()-s.started;s.token=0;s.draft.done();
     if(!asr(true)) {fail("final transcript display failed");return;}
     if(s.draft.saveWanted)save();

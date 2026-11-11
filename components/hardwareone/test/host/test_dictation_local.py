@@ -40,7 +40,7 @@ int main(){
  assert(!dictationAppSnapshot(lease,&snap)&&!snap.valid&&!snap.busy);
  assert(!dictationAppPeekText(lease,text,sizeof(text),&receipt)&&!text[0]&&!receipt.exchange);
  assert(!dictationAppCommitText(lease,receipt,1));
- STTSpeakerSnapshot speakers; speakers.available=true; speakers.count=1;
+ SttSpeakerSnapshot speakers; speakers.available=true; speakers.count=1;
  assert(!dictationAppReadSpeakers(lease,&speakers)&&!speakers.available&&!speakers.count);
  assert(!dictationAppRequestStop(lease)&&!dictationAppCancel(lease));
  puts("Dictation feature-off App stubs passed");

@@ -13,21 +13,21 @@
 constexpr size_t STT_MAX_TEXT = 512;
 constexpr uint32_t STT_SAMPLE_RATE = 16000;
 constexpr uint32_t STT_MAX_CAPTURE_MS = 20000;
-using STTToken = uint64_t;
+using SttToken = uint64_t;
 
-struct STTOwner {
+struct SttOwner {
   CommandSource source = SOURCE_INTERNAL;
   TransportSessionEpoch epoch = 0;
 };
 
-enum class STTState : uint8_t {
+enum class SttState : uint8_t {
   Idle, Preparing, Recording, Transcribing, Stopping, Done, Cancelled, Failed
 };
 
-struct STTSnapshot {
-  STTToken token = 0;
-  STTState state = STTState::Idle;
-  STTLocalPhase phase = STTLocalPhase::Loading;
+struct SttSnapshot {
+  SttToken token = 0;
+  SttState state = SttState::Idle;
+  SttLocalPhase phase = SttLocalPhase::Loading;
   uint32_t elapsedMs = 0;
   uint64_t recordedSamples = 0;
   uint32_t captureLimitMs = 0;
@@ -50,14 +50,14 @@ struct STTSnapshot {
   uint32_t pendingTexts = 0;
   uint32_t audioOverruns = 0;
   uint64_t sessionMs = 0;
-  STTLocalStats stats;
+  SttLocalStats stats;
   TranscriptStatus transcript;
   char error[96] = {};
 };
 
 // Each result carries its place in the session, independent of its backend.
 // Offsets count raw 16 kHz samples since capture began, including idle gaps.
-struct STTTextChunk {
+struct SttTextChunk {
   uint32_t sequence = 0;
   uint64_t startSample = 0;
   uint64_t endSample = 0;
@@ -70,7 +70,7 @@ struct STTTextChunk {
 // authenticated BLE and future OLED/G2 callers use the same session fence.
 // Start requires SR, microphone sensor and recorder already stopped. It never
 // changes saved audio settings, writes a WAV, or implicitly re-arms voice.
-bool sttBegin(STTOwner owner, uint32_t captureMs, STTToken* token,
+bool sttBegin(SttOwner owner, uint32_t captureMs, SttToken* token,
               char* error, size_t errorCap);
 // Continuous sessions have no duration cap. Natural pauses produce bounded
 // segments; capture proceeds while the previous segment is transcribed. Stop
@@ -79,30 +79,30 @@ bool sttBegin(STTOwner owner, uint32_t captureMs, STTToken* token,
 // requestedSource replaces the micsource setting for this session only
 // (NONE keeps it); like an explicit setting, an unavailable source fails the
 // session rather than record from another microphone.
-bool sttBeginContinuous(STTOwner owner, STTToken* token,
+bool sttBeginContinuous(SttOwner owner, SttToken* token,
                         char* error, size_t errorCap,
                         const TranscriptOptions* transcriptOptions = nullptr,
                         AudioSource requestedSource = AUDIO_SRC_NONE);
 // Retry-safe oldest-result peek. Acknowledge only after a consumer accepts the
 // text; an ack can remove only the exact oldest chunk (or repeat an earlier ack).
 // Both APIs enforce the same live owner/epoch/token fence as one-shot results.
-bool sttReadChunk(STTOwner owner, STTToken token, STTTextChunk* out);
+bool sttReadChunk(SttOwner owner, SttToken token, SttTextChunk* out);
 // Live mode: provisional text for the utterance still being spoken. `sequence`
 // is the chunk sequence it will become; `version` changes on every update and
 // when the draft is cleared (its final chunk was published or the run ended).
-struct STTDraft {
+struct SttDraft {
   uint32_t sequence = 0;
   uint32_t version = 0;
   char text[STT_MAX_TEXT + 1] = {};
 };
-bool sttReadDraft(STTOwner owner, STTToken token, STTDraft* out);
+bool sttReadDraft(SttOwner owner, SttToken token, SttDraft* out);
 // Non-consuming labels for recent final chunks, retained independently of text
 // ACKs and transcript saving. Enforces the same owner/epoch/token lifetime.
-bool sttReadSpeakers(STTOwner owner, STTToken token, STTSpeakerSnapshot* out);
-bool sttAcknowledgeChunk(STTOwner owner, STTToken token, uint32_t sequence);
+bool sttReadSpeakers(SttOwner owner, SttToken token, SttSpeakerSnapshot* out);
+bool sttAcknowledgeChunk(SttOwner owner, SttToken token, uint32_t sequence);
 // Internal join predicate: contains no transcript/session data and remains
 // usable after revocation. Unknown or terminal tokens are inactive.
-bool sttRunActive(STTToken token);
+bool sttRunActive(SttToken token);
 // Continuous transcription on the native Conversate microphone stream of the
 // exact left-temple connection `leftGeneration` (see audioCaptureStartG2Native).
 // publishWake (optional) is called on the STT worker, outside the broker's
@@ -111,7 +111,7 @@ bool sttRunActive(STTToken token);
 // semaphore).
 // Consumers that do not use speaker identities can opt out for this session;
 // this skips loading/submitting to the optional speaker model, not recognition.
-bool sttBeginContinuousG2Native(STTOwner owner, uint32_t leftGeneration, STTToken* token,
+bool sttBeginContinuousG2Native(SttOwner owner, uint32_t leftGeneration, SttToken* token,
                                 char* error, size_t errorCap,
                                 const TranscriptOptions* transcriptOptions = nullptr,
                                 void (*publishWake)() = nullptr,
@@ -120,12 +120,12 @@ bool sttBeginContinuousG2Native(STTOwner owner, uint32_t leftGeneration, STTToke
 // but capture ends on the first 1.5 s speech pause. Hard segment cuts continue
 // the question; a 30 s limit fails it rather than submitting a truncated request.
 // No transcript file is saved. The native caller owns ENTER/heartbeat/EXIT.
-bool sttBeginUtteranceG2Native(STTOwner owner, uint32_t leftGeneration, STTToken* token,
+bool sttBeginUtteranceG2Native(SttOwner owner, uint32_t leftGeneration, SttToken* token,
                               char* error, size_t errorCap,
                               void (*publishWake)() = nullptr);
 // Wearer pause/resume of a native session: no PCM arrives while paused, which
 // must not be mistaken for a failed microphone; the open phrase is closed.
-bool sttSetPaused(STTOwner owner, STTToken token, bool paused);
+bool sttSetPaused(SttOwner owner, SttToken token, bool paused);
 // True while any STT worker (capture or transcription tail) is running.
 // Owner-free and read-only: lets UI keep-alives follow device activity.
 bool sttAnySessionActive();
@@ -149,12 +149,12 @@ void sttDetectorProfileInUse(int* speechFloor, int* silenceFloor, int* noisePerc
 void sttWarmTick();
 // The model is resident between runs now (status only).
 bool sttWarmResident();
-bool sttRequestFinish(STTOwner owner, STTToken token);
-bool sttCancel(STTOwner owner, STTToken token);
+bool sttRequestFinish(SttOwner owner, SttToken token);
+bool sttCancel(SttOwner owner, SttToken token);
 // token=0 means this owner's current run. No other session's data is exposed.
-bool sttSnapshot(STTOwner owner, STTToken token, STTSnapshot* out);
+bool sttSnapshot(SttOwner owner, SttToken token, SttSnapshot* out);
 // Idempotent exact-owner result read; retained until next same-owner run,
 // logout/revocation or five-minute expiry. UI consumers append once per token.
-bool sttResult(STTOwner owner, STTToken token, char* text, size_t textCap);
-const char* sttStateName(STTState state);
+bool sttResult(SttOwner owner, SttToken token, char* text, size_t textCap);
+const char* sttStateName(SttState state);
 #endif

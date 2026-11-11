@@ -175,7 +175,7 @@ struct LoadContext {
   int D, H, L, V, kv_dim;
   uint8_t qt;
   uint16_t gs;
-  bool isGPT2, hasNormBias, v3;
+  bool isGpt2, hasNormBias, v3;
   bool shared_weights;  // set by prescanTiedWeights
   int pfx;  // per-tensor prefix byte count (1 for v3, 0 otherwise)
   uint32_t infoLen;  // header offset 24: byte length of the optional info block (0 = none)
@@ -235,8 +235,8 @@ static bool parseModelHeader(File& f, LoadContext& ctx) {
   ctx.D = p->dim;  ctx.H = p->hidden_dim;  ctx.L = p->n_layers;  ctx.V = p->vocab_size;
   ctx.kv_dim = (p->dim * p->n_kv_heads) / p->n_heads;
   ctx.qt = p->quant_type;  ctx.gs = p->group_size;
-  ctx.isGPT2 = (p->arch_type == 1);
-  ctx.hasNormBias = (version >= 2 && ctx.isGPT2);  // GPT-2 LayerNorm biases present in all v2+ models
+  ctx.isGpt2 = (p->arch_type == 1);
+  ctx.hasNormBias = (version >= 2 && ctx.isGpt2);  // GPT-2 LayerNorm biases present in all v2+ models
   ctx.v3 = (version >= 3);
   ctx.pfx = ctx.v3 ? 1 : 0;
 
@@ -268,10 +268,10 @@ static bool prescanTiedWeights(File& f, LoadContext& ctx) {
   if (qt == 2) {
     const int nQ8s = p->n_q8_start, nQ8e = p->n_q8_end;
     tensorDataSize += pfx + tensorFileSize(V * D, 1, gs, false);
-    if (ctx.isGPT2) tensorDataSize += pfx + tensorFileSize(p->seq_len * D, 0, gs, true);
+    if (ctx.isGpt2) tensorDataSize += pfx + tensorFileSize(p->seq_len * D, 0, gs, true);
     for (int l = 0; l < L; l++) {
       uint8_t layerQt = (l < nQ8s || l >= L - nQ8e) ? 1 : 2;
-      int gateElements = ctx.isGPT2 ? 1 : H * D;
+      int gateElements = ctx.isGpt2 ? 1 : H * D;
       tensorDataSize += pfx + tensorFileSize(D, 0, gs, true);
       if (ctx.hasNormBias) tensorDataSize += pfx + tensorFileSize(D, 0, gs, true);
       tensorDataSize += pfx + tensorFileSize(D * D, layerQt, gs, false);
@@ -280,7 +280,7 @@ static bool prescanTiedWeights(File& f, LoadContext& ctx) {
       tensorDataSize += pfx + tensorFileSize(D * D, layerQt, gs, false);
       tensorDataSize += pfx + tensorFileSize(D, 0, gs, true);
       if (ctx.hasNormBias) tensorDataSize += pfx + tensorFileSize(D, 0, gs, true);
-      tensorDataSize += pfx + tensorFileSize(gateElements, ctx.isGPT2 ? 0 : layerQt, gs, ctx.isGPT2);
+      tensorDataSize += pfx + tensorFileSize(gateElements, ctx.isGpt2 ? 0 : layerQt, gs, ctx.isGpt2);
       tensorDataSize += pfx + tensorFileSize(H * D, layerQt, gs, false);
       tensorDataSize += pfx + tensorFileSize(D * H, layerQt, gs, false);
     }
@@ -288,8 +288,8 @@ static bool prescanTiedWeights(File& f, LoadContext& ctx) {
     if (ctx.hasNormBias) tensorDataSize += pfx + tensorFileSize(D, 0, gs, true);
   } else {
     tensorDataSize += tensorFileSize(V * D, qt, gs, false);
-    if (ctx.isGPT2) tensorDataSize += tensorFileSize(p->seq_len * D, qt, gs, true);
-    int gateElements = ctx.isGPT2 ? 1 : H * D;
+    if (ctx.isGpt2) tensorDataSize += tensorFileSize(p->seq_len * D, qt, gs, true);
+    int gateElements = ctx.isGpt2 ? 1 : H * D;
     for (int l = 0; l < L; l++) {
       tensorDataSize += tensorFileSize(D, qt, gs, true);
       if (ctx.hasNormBias) tensorDataSize += tensorFileSize(D, qt, gs, true);
@@ -299,7 +299,7 @@ static bool prescanTiedWeights(File& f, LoadContext& ctx) {
       tensorDataSize += tensorFileSize(D * D, qt, gs, false);
       tensorDataSize += tensorFileSize(D, qt, gs, true);
       if (ctx.hasNormBias) tensorDataSize += tensorFileSize(D, qt, gs, true);
-      tensorDataSize += tensorFileSize(gateElements, qt, gs, ctx.isGPT2);
+      tensorDataSize += tensorFileSize(gateElements, qt, gs, ctx.isGpt2);
       tensorDataSize += tensorFileSize(H * D, qt, gs, false);
       tensorDataSize += tensorFileSize(D * H, qt, gs, false);
     }
@@ -337,9 +337,9 @@ static bool computeMemoryLayout(LoadContext& ctx) {
   ctx.mixedMetaBytes = 0;
 
   if (qt == 0) {
-    size_t w1Floats = ctx.isGPT2 ? (size_t)L : (size_t)L * H * D;
+    size_t w1Floats = ctx.isGpt2 ? (size_t)L : (size_t)L * H * D;
     size_t weightsFloats = (size_t)V * D
-      + (ctx.isGPT2 ? (size_t)p->seq_len * D : 0)
+      + (ctx.isGpt2 ? (size_t)p->seq_len * D : 0)
       + (size_t)L * D
       + (size_t)L * D * D
       + (size_t)L * D * kv_dim
@@ -355,14 +355,14 @@ static bool computeMemoryLayout(LoadContext& ctx) {
     ctx.weightsBytes = weightsFloats * sizeof(float);
   } else if (qt == 1) {
     size_t normsFloats = (size_t)L * D + (size_t)L * D + D
-      + (ctx.isGPT2 ? (size_t)p->seq_len * D + L : 0)
+      + (ctx.isGpt2 ? (size_t)p->seq_len * D + L : 0)
       + (ctx.hasNormBias ? (size_t)L * D * 2 + D : 0);
     size_t scalesFloats = scaleCount((size_t)V * D, gs)
       + (size_t)L * scaleCount((size_t)D * D, gs)
       + (size_t)L * scaleCount((size_t)D * kv_dim, gs)
       + (size_t)L * scaleCount((size_t)D * kv_dim, gs)
       + (size_t)L * scaleCount((size_t)D * D, gs)
-      + (ctx.isGPT2 ? 0 : (size_t)L * scaleCount((size_t)H * D, gs))
+      + (ctx.isGpt2 ? 0 : (size_t)L * scaleCount((size_t)H * D, gs))
       + (size_t)L * scaleCount((size_t)D * H, gs)
       + (size_t)L * scaleCount((size_t)H * D, gs);
     if (!ctx.shared_weights) scalesFloats += scaleCount((size_t)V * D, gs);
@@ -372,7 +372,7 @@ static bool computeMemoryLayout(LoadContext& ctx) {
       + (size_t)L * D * kv_dim
       + (size_t)L * D * kv_dim
       + (size_t)L * D * D
-      + (ctx.isGPT2 ? 0 : (size_t)L * H * D)
+      + (ctx.isGpt2 ? 0 : (size_t)L * H * D)
       + (size_t)L * D * H
       + (size_t)L * H * D;
     if (!ctx.shared_weights) ctx.weightsQ8Bytes += (size_t)V * D;
@@ -383,7 +383,7 @@ static bool computeMemoryLayout(LoadContext& ctx) {
     const int nQ8 = nQ8s + nQ8e, nQ4 = L - nQ8;
 
     size_t normsFloats = (size_t)L * D + (size_t)L * D + D
-      + (ctx.isGPT2 ? (size_t)p->seq_len * D + L : 0)
+      + (ctx.isGpt2 ? (size_t)p->seq_len * D + L : 0)
       + (ctx.hasNormBias ? (size_t)L * D * 2 + D : 0);
 
     size_t scalesFloats = scaleCount((size_t)V * D, gs)
@@ -391,7 +391,7 @@ static bool computeMemoryLayout(LoadContext& ctx) {
       + (size_t)L * scaleCount((size_t)D * kv_dim, gs)
       + (size_t)L * scaleCount((size_t)D * kv_dim, gs)
       + (size_t)L * scaleCount((size_t)D * D, gs)
-      + (ctx.isGPT2 ? 0 : (size_t)L * scaleCount((size_t)H * D, gs))
+      + (ctx.isGpt2 ? 0 : (size_t)L * scaleCount((size_t)H * D, gs))
       + (size_t)L * scaleCount((size_t)D * H, gs)
       + (size_t)L * scaleCount((size_t)H * D, gs);
     if (!ctx.shared_weights) scalesFloats += scaleCount((size_t)V * D, gs);
@@ -401,7 +401,7 @@ static bool computeMemoryLayout(LoadContext& ctx) {
       + (size_t)nQ8 * scaleCount((size_t)D * kv_dim, gs)
       + (size_t)nQ8 * scaleCount((size_t)D * kv_dim, gs)
       + (size_t)nQ8 * scaleCount((size_t)D * D, gs)
-      + (ctx.isGPT2 ? 0 : (size_t)nQ8 * scaleCount((size_t)H * D, gs))
+      + (ctx.isGpt2 ? 0 : (size_t)nQ8 * scaleCount((size_t)H * D, gs))
       + (size_t)nQ8 * scaleCount((size_t)D * H, gs)
       + (size_t)nQ8 * scaleCount((size_t)H * D, gs);
     if (!ctx.shared_weights) q8ScalesFloats += scaleCount((size_t)V * D, gs);
@@ -411,13 +411,13 @@ static bool computeMemoryLayout(LoadContext& ctx) {
     ctx.weightsBytes = (normsFloats + q8ScalesFloats) * sizeof(float);
 
     size_t perLayerQ8Data = (size_t)D * D + (size_t)D * kv_dim + (size_t)D * kv_dim + (size_t)D * D
-      + (ctx.isGPT2 ? 0 : (size_t)H * D) + (size_t)D * H + (size_t)H * D;
+      + (ctx.isGpt2 ? 0 : (size_t)H * D) + (size_t)D * H + (size_t)H * D;
     ctx.weightsQ8Bytes = (size_t)V * D + (size_t)nQ8 * perLayerQ8Data;
     if (!ctx.shared_weights) ctx.weightsQ8Bytes += (size_t)V * D;
 
     size_t perLayerQ4Packed = ((size_t)D * D + 1) / 2 + ((size_t)D * kv_dim + 1) / 2
       + ((size_t)D * kv_dim + 1) / 2 + ((size_t)D * D + 1) / 2
-      + (ctx.isGPT2 ? 0 : ((size_t)H * D + 1) / 2)
+      + (ctx.isGpt2 ? 0 : ((size_t)H * D + 1) / 2)
       + ((size_t)D * H + 1) / 2 + ((size_t)H * D + 1) / 2;
     ctx.weightsQ4Bytes = (size_t)nQ4 * perLayerQ4Packed;
     ctx.weightsQ4ScBytes = q4ScalesFloats * sizeof(float);
@@ -564,7 +564,7 @@ static void spotCheckWeights(const LoadContext& ctx) {
   if (isQ8 || isMix) spotCheckQ8(w->emb_i8, w->emb_sc, V * D, gs, "embedding");
   else               spotCheck(w->token_embedding_table, V * D, "embedding");
 
-  if (ctx.isGPT2 && w->pos_embedding_table)
+  if (ctx.isGpt2 && w->pos_embedding_table)
     spotCheck(w->pos_embedding_table, p->seq_len * D, "pos_embedding");
 
   spotCheck(w->rms_att_weight, D, "L0_attn_norm");
@@ -1111,7 +1111,7 @@ bool loadWeights(const char* path) {
   const int D = ctx.D, H = ctx.H, L = ctx.L, V = ctx.V;
   const uint8_t qt = ctx.qt;
   const uint16_t gs = ctx.gs;
-  const bool isGPT2 = ctx.isGPT2;
+  const bool isGpt2 = ctx.isGpt2;
   const bool hasNormBias = ctx.hasNormBias;
   const bool shared_weights = ctx.shared_weights;
   const bool v3 = ctx.v3;
@@ -1131,7 +1131,7 @@ bool loadWeights(const char* path) {
     // FP32 mode: single float block, same layout as before
     float* ptr = gLlm.weightsData;
     w->token_embedding_table = ptr; ptr += V * D;
-    if (isGPT2) {
+    if (isGpt2) {
       w->pos_embedding_table = ptr; ptr += p->seq_len * D;
     } else {
       w->pos_embedding_table = nullptr;
@@ -1142,7 +1142,7 @@ bool loadWeights(const char* path) {
     w->wv = ptr;             ptr += L * D * kv_dim;
     w->wo = ptr;             ptr += L * D * D;
     w->rms_ffn_weight = ptr; ptr += L * D;
-    w->w1 = ptr;             ptr += isGPT2 ? L : L * H * D;
+    w->w1 = ptr;             ptr += isGpt2 ? L : L * H * D;
     w->w2 = ptr;             ptr += L * D * H;
     w->w3 = ptr;             ptr += L * H * D;
     w->rms_final_weight = ptr; ptr += D;
@@ -1166,7 +1166,7 @@ bool loadWeights(const char* path) {
     w->rms_att_weight  = fp; fp += L * D;
     w->rms_ffn_weight  = fp; fp += L * D;
     w->rms_final_weight = fp; fp += D;
-    if (isGPT2) {
+    if (isGpt2) {
       w->pos_embedding_table = fp; fp += p->seq_len * D;
       w->w1 = fp; fp += L;           // dummy FP32 per layer (not used in fwd; must be read)
     } else {
@@ -1190,7 +1190,7 @@ bool loadWeights(const char* path) {
     w->wk_sc   = fp; fp += L * scaleCount((size_t)D * kv_dim, gs);
     w->wv_sc   = fp; fp += L * scaleCount((size_t)D * kv_dim, gs);
     w->wo_sc   = fp; fp += L * scaleCount((size_t)D * D, gs);
-    if (!isGPT2) {
+    if (!isGpt2) {
       w->w1_sc = fp; fp += L * scaleCount((size_t)H * D, gs);
     } else {
       w->w1_sc = nullptr;
@@ -1208,7 +1208,7 @@ bool loadWeights(const char* path) {
     w->wk_i8   = q8; q8 += (size_t)L * D * kv_dim;
     w->wv_i8   = q8; q8 += (size_t)L * D * kv_dim;
     w->wo_i8   = q8; q8 += (size_t)L * D * D;
-    if (!isGPT2) {
+    if (!isGpt2) {
       w->w1_i8 = q8; q8 += (size_t)L * H * D;
     } else {
       w->w1_i8 = nullptr;
@@ -1256,7 +1256,7 @@ bool loadWeights(const char* path) {
     w->rms_att_weight  = fp; fp += L * D;
     w->rms_ffn_weight  = fp; fp += L * D;
     w->rms_final_weight = fp; fp += D;
-    if (isGPT2) {
+    if (isGpt2) {
       w->pos_embedding_table = fp; fp += p->seq_len * D;
       w->w1 = fp; fp += L;
     } else {
@@ -1280,7 +1280,7 @@ bool loadWeights(const char* path) {
     w->wk_sc   = fp; fp += nQ8 * scaleCount((size_t)D * kv_dim, gs);
     w->wv_sc   = fp; fp += nQ8 * scaleCount((size_t)D * kv_dim, gs);
     w->wo_sc   = fp; fp += nQ8 * scaleCount((size_t)D * D, gs);
-    if (!isGPT2) {
+    if (!isGpt2) {
       w->w1_sc = fp; fp += nQ8 * scaleCount((size_t)H * D, gs);
     } else {
       w->w1_sc = nullptr;
@@ -1298,7 +1298,7 @@ bool loadWeights(const char* path) {
     w->wk_i8  = q8; q8 += (size_t)nQ8 * D * kv_dim;
     w->wv_i8  = q8; q8 += (size_t)nQ8 * D * kv_dim;
     w->wo_i8  = q8; q8 += (size_t)nQ8 * D * D;
-    if (!isGPT2) {
+    if (!isGpt2) {
       w->w1_i8 = q8; q8 += (size_t)nQ8 * H * D;
     } else {
       w->w1_i8 = nullptr;
@@ -1352,7 +1352,7 @@ bool loadWeights(const char* path) {
   }
 
   // 1b. Positional embedding (GPT-2 only, always FP32)
-  if (isGPT2) {
+  if (isGpt2) {
     if (v3) readPrefix(f);
     if (!readTensor(f, w->pos_embedding_table, p->seq_len * D, qt, gs, true)) {
       setLlmError("Failed reading positional embedding");
@@ -1454,7 +1454,7 @@ bool loadWeights(const char* path) {
     }
 
     // Gate (w1): GPT-2 always FP32 dummy; Llama FP32/Q8/Q4
-    if (isGPT2) {
+    if (isGpt2) {
       if (v3) readPrefix(f);
       if (!readTensor(f, w->w1 + l, 1, qt, gs, true)) {
         setLlmError("Failed reading GPT-2 gate layer %d", l);

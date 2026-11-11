@@ -52,7 +52,7 @@ struct State {
     bool modelAllocationError=false, tensorError=false, decodeError=false, truncate=false;
     bool cancel=false, cancelAfterHash=false, cancelAfterStage=false;
     int cancelAtPhase=-1;
-    STTLocalPhase phase=STTLocalPhase::Loading;
+    SttLocalPhase phase=SttLocalPhase::Loading;
     bool mutateInDestructor=false;
     uint8_t* lastRaw=nullptr;
     int greedyFeeds=0;
@@ -100,11 +100,11 @@ void settled(size_t expectedRaw) {
     assert(state.allocations.size()==expectedRaw); // no temporary/workspace leak
 }
 bool cancelled(void*) { return state.cancel; }
-void progress(void*,STTLocalPhase phase) {
+void progress(void*,SttLocalPhase phase) {
     state.phase=phase;
     if(state.cancelAtPhase==int(phase))state.cancel=true;
 }
-STTLocalControl control() { return {nullptr,cancelled,progress}; }
+SttLocalControl control() { return {nullptr,cancelled,progress}; }
 }
 constexpr unsigned MALLOC_CAP_SPIRAM=1, MALLOC_CAP_8BIT=2, MALLOC_CAP_INTERNAL=4;
 void* heap_caps_aligned_alloc(size_t alignment,size_t bytes,unsigned caps) {
@@ -114,7 +114,7 @@ void* heap_caps_aligned_alloc(size_t alignment,size_t bytes,unsigned caps) {
     void* p=nullptr;
     if(posix_memalign(&p,alignment,bytes))return nullptr;
     std::memset(p,0xcd,bytes);
-    fake::state.allocations.emplace(p,fake::Allocation{bytes,fake::state.phase==STTLocalPhase::Frontend});
+    fake::state.allocations.emplace(p,fake::Allocation{bytes,fake::state.phase==SttLocalPhase::Frontend});
     fake::state.allocated+=bytes;
     if(bytes==hw1::stt::identity::kRawBytes) {
         ++fake::state.rawAllocations;fake::state.lastRaw=static_cast<uint8_t*>(p);
@@ -544,9 +544,9 @@ struct Reader {
     }
     ModelReader model() {return {this,data.size(),read};}
 };
-struct Result { bool ok;STTLocalStats stats;std::string text,error; };
+struct Result { bool ok;SttLocalStats stats;std::string text,error; };
 Result call(ModelCache* cache,Reader& reader,size_t samples=320) {
-    std::vector<int16_t> pcm(samples,42);char text[64],error[128];STTLocalStats stats;
+    std::vector<int16_t> pcm(samples,42);char text[64],error[128];SttLocalStats stats;
     Diagnostics diagnostics;
     const bool ok=transcribe(reader.model(),pcm.data(),samples,text,sizeof(text),fake::control(),stats,error,sizeof(error),&diagnostics,cache);
     if(ok) {assert(std::string(text)=="ok");assert(!error[0]);assert(stats.samples==samples);}
@@ -625,9 +625,9 @@ void failuresAfterPublish() {
             case 5:fake::state.frontendError=true;break;
             case 6:fake::state.decodeError=true;break;
             case 7:fake::state.truncate=true;break;
-            case 8:fake::state.cancelAtPhase=int(STTLocalPhase::Frontend);break;
+            case 8:fake::state.cancelAtPhase=int(SttLocalPhase::Frontend);break;
             case 9:fake::state.cancelAfterStage=true;break;
-            case 10:fake::state.cancelAtPhase=int(STTLocalPhase::Decoding);break;
+            case 10:fake::state.cancelAtPhase=int(SttLocalPhase::Decoding);break;
         }
         auto result=call(&cache,reader);assert(!result.ok);fake::settled(1);
         assert(fake::state.rawHashes==1 && fake::state.rawFrees==0);
@@ -752,9 +752,9 @@ struct FakeDecoder {
     int decodes=0, releases=0;
     size_t frames=0, capacity=0; int exponent=0; const int8_t* logits=nullptr;
     void* lm=nullptr; size_t lmBytes=0;   // PSRAM a real LM would keep resident
-    static DecodeResult decode(void* c,const int8_t* logits,size_t frames,int exponent,char* text,size_t cap,const STTLocalControl& control) {
+    static DecodeResult decode(void* c,const int8_t* logits,size_t frames,int exponent,char* text,size_t cap,const SttLocalControl& control) {
         auto& d=*static_cast<FakeDecoder*>(c);++d.decodes;
-        assert(fake::state.phase==STTLocalPhase::Decoding && !control.cancelled(control.context));
+        assert(fake::state.phase==SttLocalPhase::Decoding && !control.cancelled(control.context));
         d.frames=frames;d.exponent=exponent;d.capacity=cap;d.logits=logits;
         if(d.unterminated)std::memset(text,'x',cap); else std::snprintf(text,cap,"%s","language model");
         return d.result;
@@ -767,7 +767,7 @@ struct FakeDecoder {
     Decoder hook() {return {this,decode,release};}
 };
 Result callWith(ModelCache* cache,const Decoder* decoder,size_t samples=320) {
-    Reader reader;std::vector<int16_t> pcm(samples,42);char text[64],error[128];STTLocalStats stats;
+    Reader reader;std::vector<int16_t> pcm(samples,42);char text[64],error[128];SttLocalStats stats;
     const bool ok=transcribe(reader.model(),pcm.data(),samples,text,sizeof(text),fake::control(),stats,error,sizeof(error),nullptr,cache,decoder);
     if(!ok) {assert(!text[0]);assert(error[0]);}
     return {ok,stats,text,error};
@@ -829,10 +829,10 @@ void decoderReleasesMemory() {
 }
 namespace test {
 Result callPrefix(ModelCache* cache,size_t samples,size_t cached) {
-    Reader reader;std::vector<int16_t> pcm(samples,42);char text[64],error[128];STTLocalStats stats;
+    Reader reader;std::vector<int16_t> pcm(samples,42);char text[64],error[128];SttLocalStats stats;
     std::vector<float> rows(std::max<size_t>(cached,1)*kMelBins);
     for(size_t r=0;r<cached;++r)for(size_t m=0;m<kMelBins;++m)rows[r*kMelBins+m]=fakeRow(r,m);
-    const STTFeaturePrefix prefix{rows.data(),cached};
+    const SttFeaturePrefix prefix{rows.data(),cached};
     const bool ok=transcribe(reader.model(),pcm.data(),samples,text,sizeof(text),fake::control(),stats,error,sizeof(error),
                              nullptr,cache,nullptr,cached?&prefix:nullptr);
     if(!ok) {assert(!text[0]);assert(error[0]);}
@@ -995,7 +995,7 @@ void refusals() {
     fake::clean();
     {
         struct Squeeze {
-            static DecodeResult decode(void*,const int8_t*,size_t,int,char* text,size_t cap,const STTLocalControl&) {
+            static DecodeResult decode(void*,const int8_t*,size_t,int,char* text,size_t cap,const SttLocalControl&) {
                 fake::state.internalFree=150*1024-1;std::snprintf(text,cap,"%s","lm");return DecodeResult::Decoded;
             }
         };
@@ -1010,7 +1010,7 @@ void refusals() {
     fake::clean();
     {
         ModelCache cache;
-        fake::state.cancelAtPhase=int(STTLocalPhase::Decoding);
+        fake::state.cancelAtPhase=int(SttLocalPhase::Decoding);
         Reader a;assert(!call(&cache,a,320).ok);
         assert(fake::state.models==0);
         fake::state.cancelAtPhase=-1;fake::state.cancel=false;
@@ -1049,7 +1049,7 @@ void internalFloor() {
 }
 
 void handOver() {
-    // A session that changes hands (STTLocalSession::moveTo, keep-warm park
+    // A session that changes hands (SttLocalSession::moveTo, keep-warm park
     // and adopt) drops its resident model: the arena with the last call's
     // activations is freed, the verified weights stay, and the next owner's
     // first call builds a fresh resident model (the attempt is not spent).
@@ -1150,7 +1150,7 @@ void placement() {
 }
 void restarts() {
     // Ten sessions back to back, each with its own ModelCache (as each Conversate restart
-    // gets a new STTLocalSession): one resident model per session, all of it (weights,
+    // gets a new SttLocalSession): one resident model per session, all of it (weights,
     // arena, metadata, bookkeeping) returned at each session end. Nothing accumulates.
     fake::clean();
     const size_t internal=fake::state.internalFree;
@@ -1162,7 +1162,7 @@ void restarts() {
             Reader c;assert(call(&cache,c,160000).ok);
             assert(fake::state.models==1 && fake::state.meta.size()==5 && fake::state.ps.size()==2);
             assert(fake::state.metaPsram==kMeta+sizeof(dl::Model));
-        }   // ~ModelCache: as STTLocalSession::reset() at the worker's end
+        }   // ~ModelCache: as SttLocalSession::reset() at the worker's end
         assert(fake::state.models==0 && fake::state.meta.empty() && fake::state.ps.empty());
         assert(fake::state.internalFree==internal && !fake::state.metaPsram && !fake::state.psPsram);
         fake::settled(0);

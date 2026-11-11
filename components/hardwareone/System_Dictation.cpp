@@ -90,7 +90,7 @@ struct DictationControl {
   DictationAppLease appLease; // Retained until the next admission.
   DictationTextReceipt appLastReceipt;
   uint16_t appLastAccepted = 0;
-  STTSpeakerSnapshot appSpeakers;
+  SttSpeakerSnapshot appSpeakers;
 
 };
 
@@ -132,7 +132,7 @@ static void dictationAdmitConsumerLocked(CommandSource source,
                        : DictationAppLease{};
   gDict.appLastReceipt = DictationTextReceipt{};
   gDict.appLastAccepted = 0;
-  gDict.appSpeakers = STTSpeakerSnapshot{};
+  gDict.appSpeakers = SttSpeakerSnapshot{};
   if (app) *app = gDict.appLease;
 }
 
@@ -652,8 +652,8 @@ static TranscriptOptions dictationTranscriptOptions(CommandSource source,
 // cancellation until a late begin/worker has acknowledged the exact token.
 struct LocalDictation {
   uint64_t exchange = 0;
-  STTOwner actor;
-  STTToken token = 0;
+  SttOwner actor;
+  SttToken token = 0;
   bool beginPending = false;
   bool beginInFlight = false;
   TranscriptOptions transcriptOptions;
@@ -731,7 +731,7 @@ static bool dictationBeginLocal(CommandSource source, TransportSessionEpoch epoc
     const uint64_t id = (static_cast<uint64_t>(gDictBootNonce) << 32) | gDictCounter;
     gLocalDict = LocalDictation{};
     gLocalDict.exchange = id;
-    gLocalDict.actor = STTOwner{source, epoch};
+    gLocalDict.actor = SttOwner{source, epoch};
     gLocalDict.transcriptOptions = transcriptOptions;
     gLocalDict.requestedSource = requestedSource;
     gDict.transcriptOptions = transcriptOptions;
@@ -767,7 +767,7 @@ static bool dictationCancelLocal(CommandSource source, bool force,
   mine = force || dictationConsumerMatchesLocked(source, app);
   if (mine) {
     gDict.owner = 0; // Retained job identity below observes this and joins cancel.
-    gDict.appSpeakers = STTSpeakerSnapshot{};
+    gDict.appSpeakers = SttSpeakerSnapshot{};
     gDict.state = failure ? DictationState::FAILED : DictationState::IDLE;
     gDict.stateEnteredMs = millis();
     if (!failure) {
@@ -790,7 +790,7 @@ static bool dictationLocalCurrentLocked(const LocalDictation& run) {
 static void dictationFailLocal(const LocalDictation& run, const char* reason) {
   portENTER_CRITICAL(&gDictMux);
   if (dictationLocalCurrentLocked(run)) {
-    gDict.appSpeakers = STTSpeakerSnapshot{};
+    gDict.appSpeakers = SttSpeakerSnapshot{};
     gDict.owner = 0;
     dictationClearDeliveryLocked();
     gDict.state = DictationState::FAILED;
@@ -816,7 +816,7 @@ static void dictationProcessLocal() {
   if (!run.exchange) return;
 
   if (run.beginPending) {
-    STTToken token = 0;
+    SttToken token = 0;
     char error[192] = {};
     const bool accepted = current &&
         displaySessionStillLive(run.actor.source, run.actor.epoch) &&
@@ -854,7 +854,7 @@ static void dictationProcessLocal() {
     (void)sttCancel(run.actor, run.token);
     if (!live && current) dictationFailLocal(run, "session changed");
     if (!sttRunActive(run.token)) {
-      STTSnapshot terminalSnapshot;
+      SttSnapshot terminalSnapshot;
       const bool haveStatus = sttSnapshot(run.actor, run.token, &terminalSnapshot);
       portENTER_CRITICAL(&gDictMux);
       if (haveStatus && gDict.transcriptExchange == run.exchange)
@@ -882,17 +882,17 @@ static void dictationProcessLocal() {
     portEXIT_CRITICAL(&gDictMux);
   }
 
-  STTSnapshot snap;
+  SttSnapshot snap;
   if (!sttSnapshot(run.actor, run.token, &snap)) {
     dictationFailLocal(run, "session changed");
     return;
   }
-  if (snap.state == STTState::Failed || snap.state == STTState::Cancelled) {
+  if (snap.state == SttState::Failed || snap.state == SttState::Cancelled) {
     dictationFailLocal(run, snap.error[0] ? snap.error : "local transcription failed");
     return;
   }
 
-  STTSpeakerSnapshot speakers;
+  SttSpeakerSnapshot speakers;
   (void)sttReadSpeakers(run.actor, run.token, &speakers);
   uint16_t offset = 0;
   uint32_t sequence = 0;
@@ -902,7 +902,7 @@ static void dictationProcessLocal() {
     gDict.transcriptStatus = snap.transcript;
     gDict.appSpeakers = speakers;
     const DictationState state = !gDict.stopRequested &&
-        (snap.captureActive || snap.state == STTState::Preparing)
+        (snap.captureActive || snap.state == SttState::Preparing)
             ? DictationState::RECORDING : DictationState::WAITING;
     if (gDict.state != state) { gDict.state = state; gDict.stateEnteredMs = millis(); }
     canStage = !gDict.textPending && !gDict.deliveryAckPending;
@@ -911,7 +911,7 @@ static void dictationProcessLocal() {
   }
   portEXIT_CRITICAL(&gDictMux);
   if (canStage) {
-    STTTextChunk chunk;
+    SttTextChunk chunk;
     if (sttReadChunk(run.actor, run.token, &chunk)) {
       const size_t length = strnlen(chunk.text, sizeof(chunk.text));
       const bool valid = length <= STT_MAX_TEXT &&
@@ -940,7 +940,7 @@ static void dictationProcessLocal() {
     dictationFailLocal(run, "session changed");
     return;
   }
-  if (snap.state == STTState::Failed || snap.state == STTState::Cancelled) {
+  if (snap.state == SttState::Failed || snap.state == SttState::Cancelled) {
     dictationFailLocal(run, snap.error[0] ? snap.error : "local transcription failed");
     return;
   }
@@ -1429,13 +1429,13 @@ DictationSnapshot dictationSnapshotNow() {
   portENTER_CRITICAL(&gDictMux);
   local = gLocalDict;
   portEXIT_CRITICAL(&gDictMux);
-  STTSnapshot snap;
+  SttSnapshot snap;
   if (local.token && sttSnapshot(local.actor, local.token, &snap)) {
     out.sourceName = sourceLabel(static_cast<AudioSource>(snap.audioSource));
     out.level = snap.level;
     out.transcript = snap.transcript;
     out.transcript.path[0] = '\0';
-    out.preparing = snap.state == STTState::Preparing;
+    out.preparing = snap.state == SttState::Preparing;
     out.captureActive = snap.captureActive;
     out.inferenceActive = snap.inferenceActive;
     out.elapsedMs = static_cast<uint32_t>(std::min<uint64_t>(snap.sessionMs, UINT32_MAX));
@@ -1691,9 +1691,9 @@ bool dictationAppCommitText(const DictationAppLease& lease,
   return dictationCommitTextImpl(lease.source, receipt, accepted, &lease);
 }
 
-bool dictationAppReadSpeakers(const DictationAppLease& lease, STTSpeakerSnapshot* out) {
+bool dictationAppReadSpeakers(const DictationAppLease& lease, SttSpeakerSnapshot* out) {
   if (!out) return false;
-  *out = STTSpeakerSnapshot{};
+  *out = SttSpeakerSnapshot{};
   if (!displaySessionStillLive(lease.source, lease.epoch)) return false;
   portENTER_CRITICAL(&gDictMux);
   const bool mine = dictationConsumerMatchesLocked(lease.source, &lease);
@@ -1703,7 +1703,7 @@ bool dictationAppReadSpeakers(const DictationAppLease& lease, STTSpeakerSnapshot
   portENTER_CRITICAL(&gDictMux);
   const bool stillMine = dictationConsumerMatchesLocked(lease.source, &lease);
   portEXIT_CRITICAL(&gDictMux);
-  if (!live || !stillMine) { *out = STTSpeakerSnapshot{}; return false; }
+  if (!live || !stillMine) { *out = SttSpeakerSnapshot{}; return false; }
   return mine;
 }
 
@@ -1714,8 +1714,8 @@ bool dictationAppPeekDraft(const DictationAppLease& lease, char* out, size_t out
   if (!out || !outSize) return false;
   out[0] = '\0';
 #if ENABLE_LOCAL_STT
-  STTOwner actor;
-  STTToken token = 0;
+  SttOwner actor;
+  SttToken token = 0;
   portENTER_CRITICAL(&gDictMux);
   if (dictationConsumerMatchesLocked(lease.source, &lease) && gLocalDict.exchange == lease.exchange) {
     actor = gLocalDict.actor;
@@ -1723,7 +1723,7 @@ bool dictationAppPeekDraft(const DictationAppLease& lease, char* out, size_t out
   }
   portEXIT_CRITICAL(&gDictMux);
   if (!token) return false;
-  STTDraft draft;
+  SttDraft draft;
   if (!sttReadDraft(actor, token, &draft)) return false;
   snprintf(out, outSize, "%s", draft.text);
   if (version) *version = draft.version;

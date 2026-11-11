@@ -15296,8 +15296,8 @@ static constexpr size_t kEvenAiLocalTextBytes = 212;
 struct G2EvenAiLocalState {
   uint64_t exchange = 0;
   // No authority until epoch is bound; keep the PSRAM BSS initializer zero.
-  STTOwner owner{static_cast<CommandSource>(0), 0};
-  STTToken token = 0;
+  SttOwner owner{static_cast<CommandSource>(0), 0};
+  SttToken token = 0;
   uint32_t leftGeneration = 0;
   uint32_t startedMs = 0;
   ChatRunToken chatRun = 0;
@@ -15414,10 +15414,10 @@ static void g2EvenAiLocalTick() {
   g2EvenAiMarkActivity(s.exchangeId);
   if (!gEvenAiLocal.chatRun) {
     // These large snapshots are control-worker-only scratch, not stack frames.
-    static STTSnapshot speech;
-    EXT_RAM_BSS_ATTR static STTTextChunk chunk;
+    static SttSnapshot speech;
+    EXT_RAM_BSS_ATTR static SttTextChunk chunk;
     if (!sttSnapshot(gEvenAiLocal.owner, gEvenAiLocal.token, &speech) ||
-        speech.state == STTState::Failed || speech.state == STTState::Cancelled) {
+        speech.state == SttState::Failed || speech.state == SttState::Cancelled) {
       g2EvenAiLocalFail("Speech recognition failed. Please try again.");
       return;
     }
@@ -15425,7 +15425,7 @@ static void g2EvenAiLocalTick() {
       const size_t length = strlen(chunk.text);
       const size_t separator = length && gEvenAiLocal.promptLen ? 1 : 0;
       if (length + separator >= sizeof(gEvenAiLocal.prompt) - gEvenAiLocal.promptLen) {
-        chunk = STTTextChunk{};
+        chunk = SttTextChunk{};
         g2EvenAiLocalFail("Question too long. Please ask a shorter question.");
         return;
       }
@@ -15433,12 +15433,12 @@ static void g2EvenAiLocalTick() {
       memcpy(gEvenAiLocal.prompt + gEvenAiLocal.promptLen, chunk.text, length + 1);
       gEvenAiLocal.promptLen += length;
       const bool accepted = sttAcknowledgeChunk(gEvenAiLocal.owner, gEvenAiLocal.token, chunk.sequence);
-      chunk = STTTextChunk{};
+      chunk = SttTextChunk{};
       if (!accepted) g2EvenAiLocalFail("Speech session changed. Please try again.");
       return;  // drain every final before submitting exactly once
     }
     if (speech.workerActive) return;
-    if (speech.state != STTState::Done || !gEvenAiLocal.promptLen) {
+    if (speech.state != SttState::Done || !gEvenAiLocal.promptLen) {
       g2EvenAiLocalFail("No speech recognized. Please try again.");
       return;
     }
@@ -16076,8 +16076,8 @@ namespace {
 // and transcript saving; this only drives it and forwards its text.
 struct ConversateLocal {
   bool attached = false;
-  STTOwner owner;
-  STTToken token = 0;
+  SttOwner owner;
+  SttToken token = 0;
   uint32_t draftVersion = 0, lastFinalSequence = 0;
   bool finishing = false;  // the wearer closed Conversate; an end is expected
 };
@@ -16150,10 +16150,10 @@ static bool g2ConversateLocalBegin(uint32_t leftGeneration) {
     WARN_SYSTEMF("[G2-CONVERSATE] local transcription needs a login on the glasses");
     return false;
   }
-  const STTOwner owner{SOURCE_G2_GLASSES, epoch};
+  const SttOwner owner{SOURCE_G2_GLASSES, epoch};
   const TranscriptOptions options = transcriptCaptureOptions(SOURCE_G2_GLASSES, epoch);
   char error[96] = {};
-  STTToken token = 0;
+  SttToken token = 0;
   // The broker wakes this owner (g2ControlWake, a semaphore give from the STT
   // worker) as soon as a final or a draft is published (HW1_STT_PUBLISH_WAKE);
   // the 200 ms conv-stt timer below stays as the fallback, and is what
@@ -16216,9 +16216,9 @@ static void g2ConversateLocalArm() {
 // off the stack: g2_owner has 8 KB and the tick already holds a chunk
 // and a draft (a stack frame here overflowed it, 2026-10-01).
 static __attribute__((noinline)) void g2ConversateLocalEnded() {
-  static STTSnapshot end;
+  static SttSnapshot end;
   static char note[160];
-  end = STTSnapshot{};
+  end = SttSnapshot{};
   const bool haveEnd = sttSnapshot(gConvLocal.owner, gConvLocal.token, &end);
   const bool expected = gConvLocal.finishing;
   ESP_LOGW("G2CONV", "local transcription ended (%s): %s; control stack min free %u B", expected ? "closed" : "unexpected",
@@ -16256,7 +16256,7 @@ static __attribute__((noinline)) bool g2ConversateLocalPump() {
   const bool show = s.phase == G2ConversateSession::Phase::Running && s.transcribeVisible &&
                     g2ConversateConnections(s);
   // Finished phrases first: full text as a final caption, then acknowledge.
-  STTTextChunk chunk;
+  SttTextChunk chunk;
   while (sttReadChunk(gConvLocal.owner, gConvLocal.token, &chunk)) {
     const size_t length = strnlen(chunk.text, sizeof(chunk.text));
     if (show && length) {
@@ -16268,7 +16268,7 @@ static __attribute__((noinline)) bool g2ConversateLocalPump() {
     memset(chunk.text, 0, sizeof(chunk.text));
   }
   // The phrase in progress: send only its visible tail, cut at a word.
-  STTDraft draft;
+  SttDraft draft;
   if (sttReadDraft(gConvLocal.owner, gConvLocal.token, &draft) &&
       draft.version != gConvLocal.draftVersion) {
     gConvLocal.draftVersion = draft.version;
@@ -16524,7 +16524,7 @@ struct G2NativeTerminalState {
   uint32_t displaySessionId = 0;
   uint8_t displayState = G2_TERMINAL_DISPLAY_NONE;
   uint32_t listOffset = 0; int32_t nextOffset = -1;
-  STTOwner owner{}; STTToken speechToken = 0;
+  SttOwner owner{}; SttToken speechToken = 0;
   HttpTerminalToken rpcToken = 0;
   NativeRpc rpc = NativeRpc::None, nextRpc = NativeRpc::None;
   JsonDocument* batch = nullptr; size_t batchIndex = 0;
@@ -16550,7 +16550,7 @@ struct G2NativeTerminalState {
   char admissionNotice[96] = {};
   char json[HTTP_TERMINAL_JSON_CAP + 1] = {};
   uint8_t pb[G2_TERMINAL_PB_MAX_BYTES] = {};
-  STTTextChunk chunk{}; STTSnapshot speech{};
+  SttTextChunk chunk{}; SttSnapshot speech{};
 };
 EXT_RAM_BSS_ATTR static G2NativeTerminalState gNativeTerminal;
 static std::atomic<uint8_t> gNativeTerminalPhase{uint8_t(NativeTerm::Phase::Closed)};
@@ -17550,8 +17550,8 @@ static void g2NativeTerminalTick() {
       if (!sttAcknowledgeChunk(s.owner,s.speechToken,s.chunk.sequence)) g2NativeTerminalFail("speech-session-changed");
       s.chunk = {};
     } else if (!s.speech.workerActive) {
-      const bool failed = s.speech.state == STTState::Failed;
-      if (!failed && (s.policy.phase != NativeTerm::Phase::Finishing || s.speech.state != STTState::Done)) {
+      const bool failed = s.speech.state == SttState::Failed;
+      if (!failed && (s.policy.phase != NativeTerm::Phase::Finishing || s.speech.state != SttState::Done)) {
         g2NativeTerminalFail("no-complete-speech"); return;
       }
       if (failed || !s.promptLen) {

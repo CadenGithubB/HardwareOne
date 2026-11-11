@@ -84,8 +84,8 @@ struct LanguageModel {
     ~LanguageModel() { reset(); }
     void reset() { view=lm::Lm{}; heap_caps_free(words); words=nullptr; wordsGeneration=0; heap_caps_free(blob); blob=nullptr; }
 };
-bool stopRequested(const STTLocalControl& c) { return c.cancelled && c.cancelled(c.context); }
-bool readAll(File& file,uint8_t* dest,size_t bytes,const STTLocalControl& control) {
+bool stopRequested(const SttLocalControl& c) { return c.cancelled && c.cancelled(c.context); }
+bool readAll(File& file,uint8_t* dest,size_t bytes,const SttLocalControl& control) {
     for(size_t done=0;done<bytes;) {
         if(stopRequested(control))return false;
         const size_t n=file.read(dest+done,std::min(bytes-done,size_t(64*1024)));
@@ -120,7 +120,7 @@ void loadCustomWords(LanguageModel& model) {
 }
 // One attempt per LanguageModel lifetime (state Ready or Unavailable after);
 // only cancellation returns false and leaves it Unloaded for a later retry.
-bool loadLanguageModel(LanguageModel& model,const STTLocalControl& control) {
+bool loadLanguageModel(LanguageModel& model,const SttLocalControl& control) {
     model.state=LmState::Unavailable;
     model.files=nullptr;
     // trusted: fixed LM path beside the pinned model; content is SHA-checked.
@@ -174,7 +174,7 @@ bool loadLanguageModel(LanguageModel& model,const STTLocalControl& control) {
     return true;
 }
 hw1::stt::DecodeResult decodeWithLanguageModel(void* context,const int8_t* logits,size_t frames,int exponent,
-                                               char* text,size_t capacity,const STTLocalControl& control) {
+                                               char* text,size_t capacity,const SttLocalControl& control) {
     using hw1::stt::DecodeResult;
     auto& model=*static_cast<LanguageModel*>(context);
     const uint32_t call=++model.decodeCalls;
@@ -312,9 +312,9 @@ bool sttLocalAvailable(char* error,size_t cap,const char** reason) {
     return !problem;
 }
 bool sttLocalTranscribe(const int16_t* pcm,size_t samples,char* text,size_t textCap,
-                       const STTLocalControl& control,STTLocalStats& stats,
-                       char* error,size_t errorCap,STTLocalSession* session,
-                       const STTFeaturePrefix* prefix) {
+                       const SttLocalControl& control,SttLocalStats& stats,
+                       char* error,size_t errorCap,SttLocalSession* session,
+                       const SttFeaturePrefix* prefix) {
     stats={};
     File file=openModel();
     if(!file||file.isDirectory()) {
@@ -506,10 +506,10 @@ void speakerTask(void* arg) {
     xSemaphoreGive(s->stopped);
     vTaskSuspend(nullptr);   // deleted by stopTask() (vTaskDeleteWithCaps)
 }
-bool sttSpeakerBegin(STTLocalSession* session,size_t maxSamples,STTSpeakerStatus* status) {
-    STTSpeakerStatus local;
-    STTSpeakerStatus& st=status ? *status : local;
-    st=STTSpeakerStatus{};
+bool sttSpeakerBegin(SttLocalSession* session,size_t maxSamples,SttSpeakerStatus* status) {
+    SttSpeakerStatus local;
+    SttSpeakerStatus& st=status ? *status : local;
+    st=SttSpeakerStatus{};
     Backend* b=session ? static_cast<Backend*>(session->backendState_) : nullptr;
     auto why=[&](const char* w) { snprintf(st.why,sizeof(st.why),"%s",w); return false; };
     if(!b)return why("no session");
@@ -616,7 +616,7 @@ bool sttSpeakerBegin(STTLocalSession* session,size_t maxSamples,STTSpeakerStatus
     st.internalUsed=long(int0)-long(heap_caps_get_free_size(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT));
     return true;
 }
-bool sttSpeakerLabel(STTLocalSession* session,const int16_t* pcm,size_t samples,STTSpeakerLabel* out) {
+bool sttSpeakerLabel(SttLocalSession* session,const int16_t* pcm,size_t samples,SttSpeakerLabel* out) {
     Backend* b=session ? static_cast<Backend*>(session->backendState_) : nullptr;
     if(!b || !b->speaker || !b->speaker->model.ready() || !out)return false;
     SpeakerState& s=*b->speaker;
@@ -634,8 +634,8 @@ bool sttSpeakerLabel(STTLocalSession* session,const int16_t* pcm,size_t samples,
     out->totalUs=uint32_t(esp_timer_get_time()-t0);
     return a.speaker>=0;
 }
-bool sttSpeakerSubmit(STTLocalSession* session,uint32_t seq,const int16_t* pcm,size_t samples,
-                      const STTLocalControl& control,bool (*canWait)(void*)) {
+bool sttSpeakerSubmit(SttLocalSession* session,uint32_t seq,const int16_t* pcm,size_t samples,
+                      const SttLocalControl& control,bool (*canWait)(void*)) {
     Backend* b=session ? static_cast<Backend*>(session->backendState_) : nullptr;
     if(!b || !b->speaker || !b->speaker->task)return false;
     SpeakerState& s=*b->speaker;
@@ -682,11 +682,11 @@ bool sttSpeakerSubmit(STTLocalSession* session,uint32_t seq,const int16_t* pcm,s
              unsigned(kSpeakerJobs-uxQueueMessagesWaiting(s.free)));
     return true;
 }
-bool sttSpeakerBackground(STTLocalSession* session) {
+bool sttSpeakerBackground(SttLocalSession* session) {
     Backend* b=session ? static_cast<Backend*>(session->backendState_) : nullptr;
     return b && b->speaker && b->speaker->task && b->speaker->labels;
 }
-bool sttSpeakerTakeLabel(STTLocalSession* session,uint32_t* seq,int8_t* speaker) {
+bool sttSpeakerTakeLabel(SttLocalSession* session,uint32_t* seq,int8_t* speaker) {
     Backend* b=session ? static_cast<Backend*>(session->backendState_) : nullptr;
     if(!b || !b->speaker || !b->speaker->labels || !seq || !speaker)return false;
     SpeakerLabelMsg m;
@@ -694,7 +694,7 @@ bool sttSpeakerTakeLabel(STTLocalSession* session,uint32_t* seq,int8_t* speaker)
     *seq=m.seq; *speaker=m.speaker;
     return true;
 }
-void sttSpeakerDrain(STTLocalSession* session,uint32_t timeoutMs,const STTLocalControl& control) {
+void sttSpeakerDrain(SttLocalSession* session,uint32_t timeoutMs,const SttLocalControl& control) {
     Backend* b=session ? static_cast<Backend*>(session->backendState_) : nullptr;
     if(!b || !b->speaker || !b->speaker->task)return;
     const int64_t start=esp_timer_get_time(), end=start+int64_t(timeoutMs)*1000;
@@ -710,7 +710,7 @@ void sttSpeakerDrain(STTLocalSession* session,uint32_t timeoutMs,const STTLocalC
              (unsigned long)((esp_timer_get_time()-start)/1000),outcome,
              unsigned(kSpeakerJobs-uxQueueMessagesWaiting(b->speaker->free)));
 }
-void sttSpeakerEnd(STTLocalSession* session) {
+void sttSpeakerEnd(SttLocalSession* session) {
     Backend* b=session ? static_cast<Backend*>(session->backendState_) : nullptr;
     if(!b)return;
     if(b->speaker) {
@@ -739,40 +739,40 @@ void sttSpeakerProfileLog() {
     s->model.resetProfile();
 }
 #endif
-STTLocalCallBudget sttLocalCallBudget(size_t samples,const STTLocalSession* session) {
+SttLocalCallBudget sttLocalCallBudget(size_t samples,const SttLocalSession* session) {
     const Backend* backend=session ? static_cast<const Backend*>(session->backendState_) : nullptr;
-    STTLocalCallBudget out;
+    SttLocalCallBudget out;
     out.total=hw1::stt::callBudget(samples,backend ? &backend->weights : nullptr,&out.contiguous);
     return out;
 }
 #else
-STTLocalCallBudget sttLocalCallBudget(size_t,const STTLocalSession*) { return {}; }
+SttLocalCallBudget sttLocalCallBudget(size_t,const SttLocalSession*) { return {}; }
 bool sttLocalAvailable(char* error,size_t cap,const char** reason) {
     const char* problem="Local transcription is unsupported on this target. Use a supported build.";
     if(reason)*reason=problem;
     if(error&&cap)snprintf(error,cap,"%s",problem);
     return false;
 }
-bool sttLocalTranscribe(const int16_t*,size_t,char* text,size_t cap,const STTLocalControl&,
-                       STTLocalStats& stats,char* error,size_t errorCap,STTLocalSession*,const STTFeaturePrefix*) {
+bool sttLocalTranscribe(const int16_t*,size_t,char* text,size_t cap,const SttLocalControl&,
+                       SttLocalStats& stats,char* error,size_t errorCap,SttLocalSession*,const SttFeaturePrefix*) {
     if(text&&cap)text[0]=0;stats={};return sttLocalAvailable(error,errorCap);
 }
 #endif
-STTLocalSession::~STTLocalSession() { reset(); }
-void STTLocalSession::reset() {
+SttLocalSession::~SttLocalSession() { reset(); }
+void SttLocalSession::reset() {
 #if defined(CONFIG_IDF_TARGET_ESP32P4)
     delete static_cast<Backend*>(backendState_);
 #endif
     backendState_=nullptr;
 }
-bool STTLocalSession::warm() const {
+bool SttLocalSession::warm() const {
 #if defined(CONFIG_IDF_TARGET_ESP32P4)
     return backendState_ && static_cast<const Backend*>(backendState_)->weights.loaded();
 #else
     return false;
 #endif
 }
-void STTLocalSession::moveTo(STTLocalSession& to) {
+void SttLocalSession::moveTo(SttLocalSession& to) {
     if(&to==this)return;
     to.reset();
 #if defined(CONFIG_IDF_TARGET_ESP32P4) && ENABLE_STT_LM
@@ -787,7 +787,7 @@ void STTLocalSession::moveTo(STTLocalSession& to) {
     to.backendState_=backendState_;
     backendState_=nullptr;
 }
-void STTLocalSession::dropCallState() {
+void SttLocalSession::dropCallState() {
 #if defined(CONFIG_IDF_TARGET_ESP32P4) && HW1_STT_RESIDENT_MODEL
     if(backendState_)static_cast<Backend*>(backendState_)->weights.dropResident();
 #endif

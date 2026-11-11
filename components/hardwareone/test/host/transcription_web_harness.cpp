@@ -61,8 +61,8 @@ static bool dictationAppSnapshot(const DictationAppLease& l,DictationAppSnapshot
 static bool dictationAppPeekText(const DictationAppLease& l,char* out,size_t size,DictationTextReceipt* r){assert(owns(l));scenario.calls++;if(!scenario.text)return false;std::snprintf(out,size,"private \"text\"");*r={l.exchange,9,0,14};if(scenario.revokeOnPeek)scenario.live=false;return true;}
 static std::string draftText; static uint32_t draftVersion=0;
 static bool dictationAppPeekDraft(const DictationAppLease& l,char* out,size_t size,uint32_t* version){if(out&&size)out[0]=0;if(version)*version=0;if(!owns(l)||draftText.empty())return false;std::snprintf(out,size,"%s",draftText.c_str());if(version)*version=draftVersion;return true;}
-static STTSpeakerSnapshot speakerSnapshot; static bool haveSpeakers=false;
-static bool dictationAppReadSpeakers(const DictationAppLease& l,STTSpeakerSnapshot* out){*out=STTSpeakerSnapshot{};if(!owns(l)||!haveSpeakers)return false;*out=speakerSnapshot;return true;}
+static SttSpeakerSnapshot speakerSnapshot; static bool haveSpeakers=false;
+static bool dictationAppReadSpeakers(const DictationAppLease& l,SttSpeakerSnapshot* out){*out=SttSpeakerSnapshot{};if(!owns(l)||!haveSpeakers)return false;*out=speakerSnapshot;return true;}
 // System_STTVocabulary fake: the display copy capitalizes "private" and the session's first words.
 static bool formatBusy=false;
 static bool sttFormatDisplay(const char* raw,bool paragraphStart,char* out,size_t cap){if(out&&cap)out[0]=0;if(formatBusy||!raw||!out||!cap)return false;std::string s(raw);size_t at=s.find("private");if(at!=std::string::npos)s[at]='P';if(paragraphStart&&!s.empty())s[0]=char(toupper(s[0]));if(s.size()>=cap)return false;std::snprintf(out,cap,"%s",s.c_str());return true;}

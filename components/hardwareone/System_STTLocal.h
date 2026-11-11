@@ -8,15 +8,15 @@
 // per-segment model/frontend allocations remain temporary.
 // Input is 16 kHz mono signed int16 BEFORE recorder DSP (no pre-emphasis/gain).
 // Cancellation is cooperative: return only after all engine work has stopped.
-enum class STTLocalPhase : uint8_t { Loading, Frontend, Inference, Decoding };
+enum class SttLocalPhase : uint8_t { Loading, Frontend, Inference, Decoding };
 
-struct STTLocalControl {
+struct SttLocalControl {
   void* context = nullptr;
   bool (*cancelled)(void*) = nullptr;
-  void (*progress)(void*, STTLocalPhase) = nullptr;
+  void (*progress)(void*, SttLocalPhase) = nullptr;
 };
 
-struct STTLocalStats {
+struct SttLocalStats {
   uint32_t samples = 0;
   uint32_t featureFrames = 0;
   uint32_t outputFrames = 0;
@@ -40,7 +40,7 @@ struct STTLocalStats {
 // frames of this exact PCM (hw1::stt::log_mel_frame, before CMVN). The
 // runtime computes only the remaining rows. Ignored when count is 0 or
 // exceeds the call's frames.
-struct STTFeaturePrefix {
+struct SttFeaturePrefix {
   const float* rows = nullptr;
   size_t count = 0;
 };
@@ -50,12 +50,12 @@ struct STTFeaturePrefix {
 // that must be one contiguous block (hw1::stt::callBudget). All zero when no
 // backend is built in. The broker sizes its capture-time feature pool
 // against it (HW1_STT_CAPTURE_FEATURES).
-struct STTLocalCallBudget {
+struct SttLocalCallBudget {
   size_t total = 0;
   size_t contiguous = 0;
 };
-class STTLocalSession;
-STTLocalCallBudget sttLocalCallBudget(size_t samples, const STTLocalSession* session = nullptr);
+class SttLocalSession;
+SttLocalCallBudget sttLocalCallBudget(size_t samples, const SttLocalSession* session = nullptr);
 
 // Speaker labels: an optional speaker-embedding model beside the STT model,
 // "/sd/STT Models/speaker.spk" (format and contract: stt/speaker_model.h), loaded
@@ -75,7 +75,7 @@ STTLocalCallBudget sttLocalCallBudget(size_t samples, const STTLocalSession* ses
 #ifndef HW1_STT_SPEAKER_DIAGNOSTICS
 #define HW1_STT_SPEAKER_DIAGNOSTICS 0
 #endif
-struct STTSpeakerStatus {
+struct SttSpeakerStatus {
   bool ready = false;
   size_t bytes = 0;            // speaker.spk size
   size_t psramUsed = 0;        // PSRAM the loaded model, its arena and workspace hold
@@ -90,7 +90,7 @@ struct STTSpeakerStatus {
   size_t arenaPsram = 0, arenaInternal = 0, workspaceBytes = 0;
   unsigned modules = 0;        // trunk execution-plan modules (layers)
 };
-struct STTSpeakerLabel {
+struct SttSpeakerLabel {
   int8_t speaker = -1;         // 0-based session label; -1 none
   float similarity = 0;
   bool created = false, tentative = false;
@@ -103,7 +103,7 @@ struct STTSpeakerLabel {
 // Per-layer trunk profile of the loaded speaker model, summed over the session
 // (TL spkstg lines), then reset. No-op without a model.
 void sttSpeakerProfileLog();
-bool sttSpeakerBegin(STTLocalSession* session, size_t maxSamples, STTSpeakerStatus* status);
+bool sttSpeakerBegin(SttLocalSession* session, size_t maxSamples, SttSpeakerStatus* status);
 // Background labelling: a priority-1 task on core 1 owns the speaker model.
 // Text is published before submission. Submit waits for one of four fixed PCM
 // slots in cancellation-aware slices, for at most 30 s, then copies the centre
@@ -115,18 +115,18 @@ bool sttSpeakerBegin(STTLocalSession* session, size_t maxSamples, STTSpeakerStat
 // End requests cooperative stop and joins the current embed before freeing any
 // queues/model; queued jobs are discarded. It may wait longer than the admission
 // deadline because an active ESP-DL embed cannot safely be force-deleted.
-bool sttSpeakerSubmit(STTLocalSession* session, uint32_t seq, const int16_t* pcm, size_t samples,
-                      const STTLocalControl& control = {}, bool (*canWait)(void*) = nullptr);
-void sttSpeakerEnd(STTLocalSession* session);
+bool sttSpeakerSubmit(SttLocalSession* session, uint32_t seq, const int16_t* pcm, size_t samples,
+                      const SttLocalControl& control = {}, bool (*canWait)(void*) = nullptr);
+void sttSpeakerEnd(SttLocalSession* session);
 // Labels for the transcript writer (the STT worker): true while a background task labels phrases.
-bool sttSpeakerBackground(STTLocalSession* session);
+bool sttSpeakerBackground(SttLocalSession* session);
 // One finished label (non-blocking): speaker -1 = phrase skipped/failed (write it unlabelled).
-bool sttSpeakerTakeLabel(STTLocalSession* session, uint32_t* seq, int8_t* speaker);
+bool sttSpeakerTakeLabel(SttLocalSession* session, uint32_t* seq, int8_t* speaker);
 // Wait for submitted work, bounded by timeoutMs and cancellation. This does not
 // free/cancel a live worker; consume available results, then call End to join it.
-void sttSpeakerDrain(STTLocalSession* session, uint32_t timeoutMs,
-                     const STTLocalControl& control = {});
-bool sttSpeakerLabel(STTLocalSession* session, const int16_t* pcm, size_t samples, STTSpeakerLabel* out);
+void sttSpeakerDrain(SttLocalSession* session, uint32_t timeoutMs,
+                     const SttLocalControl& control = {});
+bool sttSpeakerLabel(SttLocalSession* session, const int16_t* pcm, size_t samples, SttSpeakerLabel* out);
 
 // Single-worker backend lifetime: one task uses a session at a time. Reset
 // after the final call has returned, including failure/cancellation.
@@ -137,10 +137,10 @@ bool sttSpeakerLabel(STTLocalSession* session, const int16_t* pcm, size_t sample
 // overwrites them. moveTo frees the resident model first, so an idle session
 // the broker hands to its next run (sttKeepWarm) carries only weights and LM:
 // PCM, features, activations and text never pass from one run to the next.
-class STTLocalSession {
+class SttLocalSession {
  public:
-  STTLocalSession() = default;
-  ~STTLocalSession();
+  SttLocalSession() = default;
+  ~SttLocalSession();
   void reset();
   // Verified weights are resident (the next call skips the model load).
   bool warm() const;
@@ -149,26 +149,26 @@ class STTLocalSession {
   // gets one load attempt again, as in a new session.
   // A resident model is freed, never handed over (dropCallState); the new
   // owner's first call builds its own.
-  void moveTo(STTLocalSession& to);
+  void moveTo(SttLocalSession& to);
   // Frees what calls left for this session's later calls, i.e. the resident
   // model and its activation arena (HW1_STT_RESIDENT_MODEL; otherwise
   // nothing); verified weights and the LM stay.
   void dropCallState();
-  STTLocalSession(const STTLocalSession&) = delete;
-  STTLocalSession& operator=(const STTLocalSession&) = delete;
+  SttLocalSession(const SttLocalSession&) = delete;
+  SttLocalSession& operator=(const SttLocalSession&) = delete;
  private:
   void* backendState_ = nullptr;
   friend bool sttLocalTranscribe(const int16_t*, size_t, char*, size_t,
-                                const STTLocalControl&, STTLocalStats&,
-                                char*, size_t, STTLocalSession*, const STTFeaturePrefix*);
-  friend STTLocalCallBudget sttLocalCallBudget(size_t, const STTLocalSession*);
-  friend bool sttSpeakerBegin(STTLocalSession*, size_t, STTSpeakerStatus*);
-  friend bool sttSpeakerLabel(STTLocalSession*, const int16_t*, size_t, STTSpeakerLabel*);
-  friend bool sttSpeakerSubmit(STTLocalSession*, uint32_t, const int16_t*, size_t, const STTLocalControl&, bool (*)(void*));
-  friend void sttSpeakerEnd(STTLocalSession*);
-  friend bool sttSpeakerBackground(STTLocalSession*);
-  friend bool sttSpeakerTakeLabel(STTLocalSession*, uint32_t*, int8_t*);
-  friend void sttSpeakerDrain(STTLocalSession*, uint32_t, const STTLocalControl&);
+                                const SttLocalControl&, SttLocalStats&,
+                                char*, size_t, SttLocalSession*, const SttFeaturePrefix*);
+  friend SttLocalCallBudget sttLocalCallBudget(size_t, const SttLocalSession*);
+  friend bool sttSpeakerBegin(SttLocalSession*, size_t, SttSpeakerStatus*);
+  friend bool sttSpeakerLabel(SttLocalSession*, const int16_t*, size_t, SttSpeakerLabel*);
+  friend bool sttSpeakerSubmit(SttLocalSession*, uint32_t, const int16_t*, size_t, const SttLocalControl&, bool (*)(void*));
+  friend void sttSpeakerEnd(SttLocalSession*);
+  friend bool sttSpeakerBackground(SttLocalSession*);
+  friend bool sttSpeakerTakeLabel(SttLocalSession*, uint32_t*, int8_t*);
+  friend void sttSpeakerDrain(SttLocalSession*, uint32_t, const SttLocalControl&);
 };
 
 // Cheap availability check for the configured, fixed model path; does not load
@@ -177,7 +177,7 @@ class STTLocalSession {
 bool sttLocalAvailable(char* error, size_t cap, const char** reason = nullptr);
 bool sttLocalTranscribe(const int16_t* pcm, size_t samples,
                         char* text, size_t textCap,
-                        const STTLocalControl& control, STTLocalStats& stats,
+                        const SttLocalControl& control, SttLocalStats& stats,
                         char* error, size_t errorCap,
-                        STTLocalSession* session = nullptr,
-                        const STTFeaturePrefix* prefix = nullptr);
+                        SttLocalSession* session = nullptr,
+                        const SttFeaturePrefix* prefix = nullptr);

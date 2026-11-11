@@ -142,7 +142,7 @@ const char* commandSession(const String& input) {
       TranscriptionUI::clear(display, sizeof(display));
 #endif
       TranscriptionUI::clear(text, sizeof(text));
-      STTSpeakerSnapshot speakers;
+      SttSpeakerSnapshot speakers;
       if (dictationAppReadSpeakers(lease, &speakers)) {
         doc["speakerVersion"] = speakers.version;
         doc["speakersAvailable"] = speakers.available;

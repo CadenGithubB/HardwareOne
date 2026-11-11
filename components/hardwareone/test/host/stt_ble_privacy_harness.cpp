@@ -253,13 +253,13 @@ int main(){
  const std::string latePath=std::string(195,'p')+status;
  reset();callback(latePath);assert(delivered==latePath&&history[0]=="TX:[private STT result]");
  const char shortPathMarker[]={'"','t','r','a','n','s','c','r','i','p','t','P','a','t','h'};
- assert(!bleOutputHasPrivateSTT(shortPathMarker,sizeof(shortPathMarker)));
+ assert(!bleOutputHasPrivateStt(shortPathMarker,sizeof(shortPathMarker)));
  // Encrypted binary buffers need not contain a NUL or even a full marker.
  const char shortBinary[2]={'x','y'};
  reset();bleRawNotifyToSession(0,7,shortBinary,sizeof(shortBinary),true);assert(delivered=="xy"&&history[0]=="TX:xy");
- assert(!bleOutputHasPrivateSTT(shortBinary,sizeof(shortBinary)));
+ assert(!bleOutputHasPrivateStt(shortBinary,sizeof(shortBinary)));
  const char truncatedMarker[]={'"','s','t','t','T','e','x','t'};
- assert(!bleOutputHasPrivateSTT(truncatedMarker,sizeof(truncatedMarker)));
+ assert(!bleOutputHasPrivateStt(truncatedMarker,sizeof(truncatedMarker)));
  const std::string late=std::string(195,'p')+secret;
  reset();callback(late);assert(delivered==late);privateMirrors();
  assert(traces.size()==3&&history[0]=="TX:[private STT result]");

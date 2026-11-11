@@ -68,7 +68,7 @@ static File openGuarded(const String& path,const char* mode,const AuthContext& c
 static DictationAppLease current{SOURCE_WEB,7,0x1122334455667788ULL};
 static bool haveLease=true,active=true,haveText=true;
 static DictationTextReceipt committed{};
-static STTSpeakerSnapshot speakerSnapshot;
+static SttSpeakerSnapshot speakerSnapshot;
 static bool owns(const DictationAppLease& l){return haveLease&&l.source==current.source&&l.epoch==current.epoch&&l.exchange==current.exchange&&l.purpose==current.purpose&&transportSessionEpochIsLive(l.source,l.epoch);}
 static unsigned currentLookups=0;
 static bool dictationAppCurrent(CommandSource source,uint32_t epoch,DictationAppLease* out,DictationAppPurpose purpose=DictationAppPurpose::Transcription){++currentLookups;assert(purpose==DictationAppPurpose::Transcription);*out={};if(!haveLease||source!=current.source||epoch!=current.epoch||purpose!=current.purpose||!epochLive)return false;*out=current;return true;}
@@ -83,7 +83,7 @@ static bool dictationAppPeekDraft(const DictationAppLease&,char* out,size_t size
 // System_STTVocabulary fake: the display copy uppercases a configured word; a raw copy is never changed.
 static bool formatBusy=false; static bool lastParagraphStart=false;
 static bool sttFormatDisplay(const char* raw,bool paragraphStart,char* out,size_t cap){if(out&&cap)out[0]=0;if(formatBusy||!raw||!out||!cap)return false;lastParagraphStart=paragraphStart;std::string s(raw);size_t at=s.find("private");if(at!=std::string::npos)s.replace(at,7,"Private");if(paragraphStart&&!s.empty())s[0]=char(toupper(s[0]));if(s.size()>=cap)return false;snprintf(out,cap,"%s",s.c_str());return true;}
-static bool dictationAppReadSpeakers(const DictationAppLease& lease,STTSpeakerSnapshot* out){*out={};if(!owns(lease))return false;*out=speakerSnapshot;return true;}
+static bool dictationAppReadSpeakers(const DictationAppLease& lease,SttSpeakerSnapshot* out){*out={};if(!owns(lease))return false;*out=speakerSnapshot;return true;}
 static bool dictationAppCommitText(const DictationAppLease& lease,const DictationTextReceipt& receipt,size_t accepted){++commitCalls;committed=receipt;return owns(lease)&&receipt.sequence==9&&receipt.offset==0&&accepted==13;}
 // INSERT_ADAPTER
 static std::shared_ptr<Node> add(const std::string& path,const std::string& data,bool dir=false){auto node=std::make_shared<Node>();node->path=path;node->data=data;node->directory=dir;nodes[path]=node;return node;}

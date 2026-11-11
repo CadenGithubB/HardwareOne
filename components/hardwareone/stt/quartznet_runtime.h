@@ -49,7 +49,7 @@ enum class DecodeResult : uint8_t { Decoded, Fallback, Cancelled };
 struct Decoder {
     void* context = nullptr;
     DecodeResult (*decode)(void* context, const int8_t* logits, size_t frames, int exponent,
-                           char* text, size_t capacity, const STTLocalControl& control) = nullptr;
+                           char* text, size_t capacity, const SttLocalControl& control) = nullptr;
     bool (*release)(void* context) = nullptr;
 };
 // Retains the pinned, verified raw weights and, with HW1_STT_RESIDENT_MODEL,
@@ -94,8 +94,8 @@ class ModelCache {
     bool residentTried_ = false;  // one build attempt per session
 #endif
     friend bool transcribe(ModelReader, const int16_t*, size_t, char*, size_t,
-                           const STTLocalControl&, STTLocalStats&, char*, size_t,
-                           Diagnostics*, ModelCache*, const Decoder*, const STTFeaturePrefix*);
+                           const SttLocalControl&, SttLocalStats&, char*, size_t,
+                           Diagnostics*, ModelCache*, const Decoder*, const SttFeaturePrefix*);
     friend size_t callBudget(size_t, const ModelCache*, size_t*);
 };
 // Per-stage inference time summed over segments since the last reset
@@ -103,8 +103,8 @@ class ModelCache {
 size_t stageProfile(uint32_t* totalUs, size_t cap, uint32_t* segments);
 void stageProfileReset();
 bool transcribe(ModelReader reader, const int16_t* pcm, size_t samples,
-                char* text, size_t capacity, const STTLocalControl& control,
-                STTLocalStats& stats, char* error, size_t errorCapacity,
+                char* text, size_t capacity, const SttLocalControl& control,
+                SttLocalStats& stats, char* error, size_t errorCapacity,
                 Diagnostics* diagnostics = nullptr, ModelCache* cache = nullptr,
-                const Decoder* decoder = nullptr, const STTFeaturePrefix* prefix = nullptr);
+                const Decoder* decoder = nullptr, const SttFeaturePrefix* prefix = nullptr);
 }

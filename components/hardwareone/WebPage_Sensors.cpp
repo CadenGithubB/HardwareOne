@@ -967,7 +967,7 @@ static esp_err_t handleTranscriptionGet(httpd_req_t* req) {
       doc["draft"] = text.value;
       doc["draftVersion"] = draftVersion;
     }
-    STTSpeakerSnapshot speakers;
+    SttSpeakerSnapshot speakers;
     if (dictationAppReadSpeakers(lease, &speakers)) {
       doc["speakerVersion"] = speakers.version;
       doc["speakersAvailable"] = speakers.available;

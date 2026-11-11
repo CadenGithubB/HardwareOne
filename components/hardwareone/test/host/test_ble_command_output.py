@@ -166,7 +166,7 @@ def generated(component: Path) -> tuple[str, bool]:
     if has_batch:
         definitions.append("static void bleCommandOutputFlush(BleCommandReplyContext* reply);")
     definitions += [extract_block(owner, marker) for marker in (
-        "static bool bleOutputHasPrivateSTT(",
+        "static bool bleOutputHasPrivateStt(",
         "static void bleTxTrace(",
         "static void bleCommandResultCallback(")]
     if has_batch:

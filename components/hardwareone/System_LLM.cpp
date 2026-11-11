@@ -450,7 +450,7 @@ static float* forward(int token, int pos, const ForwardDebugLatch& debug) {
   TransformerWeights* w = &gLlm.weights;
   RunState* s = &gLlm.state;
   const int S = gLlm.seq_ctx;
-  const bool isGPT2 = (p->arch_type == 1);
+  const bool isGpt2 = (p->arch_type == 1);
   const bool forwardDebug = debug.forward;
 
   // Corruption guard: a memory overrun elsewhere can zero RunState pointers
@@ -475,7 +475,7 @@ static float* forward(int token, int pos, const ForwardDebugLatch& debug) {
 
   if (pos == 0) {
     DEBUG_LLM_FORWARDF("[LLM] forward pos=0 token=%d arch=%s dim=%d gs=%d",
-                       token, isGPT2 ? "GPT2" : "Llama", dim, gs);
+                       token, isGpt2 ? "GPT2" : "Llama", dim, gs);
   }
 
   // Copy (or dequantize) token embedding row into activation
@@ -505,7 +505,7 @@ static float* forward(int token, int pos, const ForwardDebugLatch& debug) {
   }
 
   // GPT-2: add learned positional embedding
-  if (isGPT2 && w->pos_embedding_table) {
+  if (isGpt2 && w->pos_embedding_table) {
     float* pe = w->pos_embedding_table + pos * dim;
     vecAddInPlace(s->x, pe, dim);
   }
@@ -515,7 +515,7 @@ static float* forward(int token, int pos, const ForwardDebugLatch& debug) {
 
   // Precompute this token's RoPE cos/sin once (identical across all layers).
   // Llama only — GPT-2 uses absolute positional embeddings added above.
-  if (!isGPT2) {
+  if (!isGpt2) {
     for (int i = 0; i < dim; i += 2) {
       int head_dim = i % head_size;
       float val = pos * s->rope_inv[head_dim];
@@ -530,7 +530,7 @@ static float* forward(int token, int pos, const ForwardDebugLatch& debug) {
 
     // Attention norm (LayerNorm for GPT-2, RMSNorm for Llama)
     int64_t _pnorm = profNow();
-    if (isGPT2) {
+    if (isGpt2) {
       layernorm(s->xb, s->x, w->rms_att_weight + l * dim, w->rms_att_bias ? w->rms_att_bias + l * dim : nullptr, dim);
     } else {
       rmsnorm(s->xb, s->x, w->rms_att_weight + l * dim, dim);
@@ -562,7 +562,7 @@ static float* forward(int token, int pos, const ForwardDebugLatch& debug) {
     // RoPE relative positional encoding (Llama only — GPT-2 uses absolute pos
     // embeddings). cos/sin were precomputed once per token above.
     int64_t _pkv = profNow();
-    if (!isGPT2) {
+    if (!isGpt2) {
       for (int i = 0; i < dim; i += 2) {
         float fcr = s->rope_cos[i >> 1];
         float fci = s->rope_sin[i >> 1];
@@ -680,14 +680,14 @@ static float* forward(int token, int pos, const ForwardDebugLatch& debug) {
 
     // FFN norm (LayerNorm for GPT-2, RMSNorm for Llama)
     int64_t _pfnorm = profNow();
-    if (isGPT2) {
+    if (isGpt2) {
       layernorm(s->xb, s->x, w->rms_ffn_weight + l * dim, w->rms_ffn_bias ? w->rms_ffn_bias + l * dim : nullptr, dim);
     } else {
       rmsnorm(s->xb, s->x, w->rms_ffn_weight + l * dim, dim);
     }
     PROF_ADD(norm, _pfnorm);
 
-    if (isGPT2) {
+    if (isGpt2) {
       // GPT-2 FFN: up projection → GELU → down projection (no gate)
       int64_t _pup = profNow();
       linear(s->hb, s->xb, T.w3);
@@ -739,7 +739,7 @@ static float* forward(int token, int pos, const ForwardDebugLatch& debug) {
 
   // Final norm (LayerNorm for GPT-2, RMSNorm for Llama)
   int64_t _pfinal = profNow();
-  if (isGPT2) {
+  if (isGpt2) {
     layernorm(s->x, s->x, w->rms_final_weight, w->rms_final_bias, dim);
   } else {
     rmsnorm(s->x, s->x, w->rms_final_weight, dim);
@@ -1568,8 +1568,8 @@ int llmGenerate(const char* prompt, LlmTokenCallback tokenCb,
   int pos = 0;
   int generated = 0;
 
-  const bool isGPT2gen = (p->arch_type == 1);
-  const int eos_id = isGPT2gen ? EOS_TOKEN_GPT2 : EOS_TOKEN_LLAMA;
+  const bool isGpt2gen = (p->arch_type == 1);
+  const int eos_id = isGpt2gen ? EOS_TOKEN_GPT2 : EOS_TOKEN_LLAMA;
 
   // ── Do: command mode detection ────────────────────────────────────────────
   // When the prompt ends with the Do: token (id=5), the model should output
@@ -1605,7 +1605,7 @@ int llmGenerate(const char* prompt, LlmTokenCallback tokenCb,
   DEBUG_LLM_GENERATEF("[LLM]   rep_penalty=%.2f rep_window=%d sentence_limit=%d hard_cap=%d suppress=%d",
                       REP_PENALTY, REP_WINDOW, sentenceLimit, hardCap, suppressTokenCount);
   DEBUG_LLM_GENERATEF("[LLM]   arch=%s dim=%d layers=%d heads=%d vocab=%d seq=%d quant=%s",
-                      isGPT2gen ? "GPT2" : "Llama",
+                      isGpt2gen ? "GPT2" : "Llama",
                       p->dim, p->n_layers, p->n_heads, p->vocab_size, p->seq_len,
                       (p->quant_type == 1) ? "INT8" : "FP32");
   // One-shot verification line for this session's new features. Grep "[LLM] feat:".

@@ -213,7 +213,7 @@ bool dictationAppPeekDraft(const DictationAppLease& lease, char* out, size_t out
 // Non-consuming recent speaker labels for this exact lease. Words may already
 // be ACKed when a label arrives. A completed lease retains its last snapshot;
 // cancellation/new admission clears it. CM5 reports available=false.
-bool dictationAppReadSpeakers(const DictationAppLease& lease, STTSpeakerSnapshot* out);
+bool dictationAppReadSpeakers(const DictationAppLease& lease, SttSpeakerSnapshot* out);
 
 // Post-publication hook. The mic layer invokes this only AFTER it has published
 // the owner-scoped completion result and IDLE. It copies the stable local result
@@ -291,8 +291,8 @@ inline bool dictationAppPeekDraft(const DictationAppLease&, char* out, size_t si
   if (version) *version = 0;
   return false;
 }
-inline bool dictationAppReadSpeakers(const DictationAppLease&, STTSpeakerSnapshot* out) {
-  if (out) *out = STTSpeakerSnapshot{};
+inline bool dictationAppReadSpeakers(const DictationAppLease&, SttSpeakerSnapshot* out) {
+  if (out) *out = SttSpeakerSnapshot{};
   return false;
 }
 inline void dictationOnCapturePublished(uint64_t, const char*, bool,

@@ -116,10 +116,10 @@ static uint32_t sttSourceTimeoutMs(AudioSource source) {
 }
 constexpr size_t kTextQueueDepth = 8;
 
-struct STTRun {
-  STTOwner owner;
+struct SttRun {
+  SttOwner owner;
   TranscriptOptions transcriptOptions;
-  STTSnapshot snapshot;
+  SttSnapshot snapshot;
   uint32_t startedMs = 0;
   uint32_t completedMs = 0;
   // When continuous capture stopped (0 while recording). The session clock
@@ -136,7 +136,7 @@ struct STTRun {
   bool speakerLabels = true;
   bool paused = false;
   // The consumer's wake (Conversate: g2ControlWake), called by the worker
-  // right after a final or a draft is published, outside gSTTMux, when
+  // right after a final or a draft is published, outside gSttMux, when
   // HW1_STT_PUBLISH_WAKE. The consumer keeps its own periodic poll as a
   // fallback.
   void (*publishWake)() = nullptr;
@@ -146,17 +146,17 @@ struct STTRun {
   char text[STT_MAX_TEXT + 1] = {};
   uint8_t textHead = 0;
   uint32_t acknowledgedSequence = 0;
-  STTSpeakerSnapshot speakers;
-  STTDraft draft;  // live mode: provisional text of the utterance in progress
+  SttSpeakerSnapshot speakers;
+  SttDraft draft;  // live mode: provisional text of the utterance in progress
 };
-static portMUX_TYPE gSTTMux = portMUX_INITIALIZER_UNLOCKED;
-static STTRun gSTT;
-STT_PSRAM_BSS static STTTextChunk gSTTChunks[kTextQueueDepth];
+static portMUX_TYPE gSttMux = portMUX_INITIALIZER_UNLOCKED;
+static SttRun gStt;
+STT_PSRAM_BSS static SttTextChunk gSttChunks[kTextQueueDepth];
 static void sttContinuousWorker(void*);
-static uint32_t gSTTNonce = 0;
-static uint32_t gSTTCounter = 0;
+static uint32_t gSttNonce = 0;
+static uint32_t gSttCounter = 0;
 
-static bool sttOwnerLive(STTOwner owner) {
+static bool sttOwnerLive(SttOwner owner) {
   switch (owner.source) {
     case SOURCE_SERIAL: case SOURCE_WEB: case SOURCE_BLUETOOTH:
     case SOURCE_LOCAL_DISPLAY: case SOURCE_G2_GLASSES:
@@ -165,12 +165,12 @@ static bool sttOwnerLive(STTOwner owner) {
   }
 }
 
-static bool sttSameOwner(STTOwner a, STTOwner b) {
+static bool sttSameOwner(SttOwner a, SttOwner b) {
   return a.epoch != 0 && a.source == b.source && a.epoch == b.epoch;
 }
 
-static bool sttMatchesLocked(STTOwner owner, STTToken token) {
-  return token && gSTT.snapshot.token == token && sttSameOwner(owner, gSTT.owner);
+static bool sttMatchesLocked(SttOwner owner, SttToken token) {
+  return token && gStt.snapshot.token == token && sttSameOwner(owner, gStt.owner);
 }
 
 static bool sttError(char* error, size_t cap, const char* reason) {
@@ -180,67 +180,67 @@ static bool sttError(char* error, size_t cap, const char* reason) {
 
 static void sttClearTextLocked() {
   // Volatile clear keeps a discarded private transcript out of retained RAM.
-  volatile char* p = gSTT.text;
-  for (size_t i = 0; i < sizeof(gSTT.text); ++i) p[i] = 0;
-  volatile uint8_t* q = reinterpret_cast<volatile uint8_t*>(gSTTChunks);
-  for (size_t i = 0; i < sizeof(gSTTChunks); ++i) q[i] = 0;
-  gSTT.textHead = 0;
-  gSTT.snapshot.pendingTexts = 0;
-  gSTT.snapshot.textReady = false;
-  volatile char* d = gSTT.draft.text;
-  for (size_t i = 0; i < sizeof(gSTT.draft.text); ++i) d[i] = 0;
-  gSTT.draft.sequence = 0;
-  ++gSTT.draft.version;
-  gSTT.speakers = STTSpeakerSnapshot{};
+  volatile char* p = gStt.text;
+  for (size_t i = 0; i < sizeof(gStt.text); ++i) p[i] = 0;
+  volatile uint8_t* q = reinterpret_cast<volatile uint8_t*>(gSttChunks);
+  for (size_t i = 0; i < sizeof(gSttChunks); ++i) q[i] = 0;
+  gStt.textHead = 0;
+  gStt.snapshot.pendingTexts = 0;
+  gStt.snapshot.textReady = false;
+  volatile char* d = gStt.draft.text;
+  for (size_t i = 0; i < sizeof(gStt.draft.text); ++i) d[i] = 0;
+  gStt.draft.sequence = 0;
+  ++gStt.draft.version;
+  gStt.speakers = SttSpeakerSnapshot{};
 }
 
 // Terminal results have bounded retention. Re-check the original session at
 // every broker access; revocation can never transfer a mailbox to a successor.
 static void sttReapTerminal() {
-  STTOwner owner;
-  STTToken token;
-  portENTER_CRITICAL(&gSTTMux);
-  owner = gSTT.owner;
-  token = gSTT.snapshot.token;
-  portEXIT_CRITICAL(&gSTTMux);
+  SttOwner owner;
+  SttToken token;
+  portENTER_CRITICAL(&gSttMux);
+  owner = gStt.owner;
+  token = gStt.snapshot.token;
+  portEXIT_CRITICAL(&gSttMux);
   const bool live = sttOwnerLive(owner);
-  portENTER_CRITICAL(&gSTTMux);
-  if (gSTT.snapshot.token == token && !gSTT.snapshot.workerActive &&
-      (!live || millis() - gSTT.completedMs >= kResultRetentionMs)) {
+  portENTER_CRITICAL(&gSttMux);
+  if (gStt.snapshot.token == token && !gStt.snapshot.workerActive &&
+      (!live || millis() - gStt.completedMs >= kResultRetentionMs)) {
     sttClearTextLocked();
   }
-  portEXIT_CRITICAL(&gSTTMux);
+  portEXIT_CRITICAL(&gSttMux);
 }
 
 static bool sttCancelled(void* context) {
-  const STTToken token = *static_cast<const STTToken*>(context);
-  STTOwner owner;
+  const SttToken token = *static_cast<const SttToken*>(context);
+  SttOwner owner;
   bool cancelled;
-  portENTER_CRITICAL(&gSTTMux);
-  owner = gSTT.owner;
-  cancelled = token != gSTT.snapshot.token || gSTT.cancelRequested;
-  portEXIT_CRITICAL(&gSTTMux);
+  portENTER_CRITICAL(&gSttMux);
+  owner = gStt.owner;
+  cancelled = token != gStt.snapshot.token || gStt.cancelRequested;
+  portEXIT_CRITICAL(&gSttMux);
   return cancelled || !sttOwnerLive(owner);
 }
 
-static void sttProgress(void* context, STTLocalPhase phase) {
-  const STTToken token = *static_cast<const STTToken*>(context);
-  portENTER_CRITICAL(&gSTTMux);
-  if (gSTT.snapshot.token == token && gSTT.snapshot.workerActive) {
-    gSTT.snapshot.phase = phase;
-    gSTT.snapshot.workerStackFreeBytes = uxTaskGetStackHighWaterMark(nullptr);
+static void sttProgress(void* context, SttLocalPhase phase) {
+  const SttToken token = *static_cast<const SttToken*>(context);
+  portENTER_CRITICAL(&gSttMux);
+  if (gStt.snapshot.token == token && gStt.snapshot.workerActive) {
+    gStt.snapshot.phase = phase;
+    gStt.snapshot.workerStackFreeBytes = uxTaskGetStackHighWaterMark(nullptr);
   }
-  portEXIT_CRITICAL(&gSTTMux);
+  portEXIT_CRITICAL(&gSttMux);
 }
 
-static void sttPublishTranscript(STTToken token, const TranscriptStatus& status) {
+static void sttPublishTranscript(SttToken token, const TranscriptStatus& status) {
   bool newError = false;
-  portENTER_CRITICAL(&gSTTMux);
-  if (gSTT.snapshot.token == token) {
-    newError = status.error[0] && !gSTT.snapshot.transcript.error[0];
-    gSTT.snapshot.transcript = status;
+  portENTER_CRITICAL(&gSttMux);
+  if (gStt.snapshot.token == token) {
+    newError = status.error[0] && !gStt.snapshot.transcript.error[0];
+    gStt.snapshot.transcript = status;
   }
-  portEXIT_CRITICAL(&gSTTMux);
+  portEXIT_CRITICAL(&gSttMux);
   if (newError) INFO_SYSTEMF("[STT] Transcript saving failed: %s", status.error);
 }
 
@@ -273,7 +273,7 @@ constexpr uint16_t kSttAutoHpfHz = 120;
 #else
 [[maybe_unused]] constexpr bool kSttPdmTunable = true;
 #endif
-static hw1::stt::AutoGainHistory gSttAutoGain;  // gSTTMux
+static hw1::stt::AutoGainHistory gSttAutoGain;  // gSttMux
 static uint8_t sttApplyMicTuning() {
 #if defined(MIC_BACKEND_ES7210) && MIC_BACKEND_ES7210
   return 0;  // ES7210 codec boards: no PDM channel to tune, so no automatic gain
@@ -281,9 +281,9 @@ static uint8_t sttApplyMicTuning() {
   uint8_t amp;
   uint16_t hpf;
   if (gSettings.sttAutoGain) {
-    portENTER_CRITICAL(&gSTTMux);
+    portENTER_CRITICAL(&gSttMux);
     amp = gSttAutoGain.gain();
-    portEXIT_CRITICAL(&gSTTMux);
+    portEXIT_CRITICAL(&gSttMux);
     hpf = kSttAutoHpfHz;
   } else {
     amp = static_cast<uint8_t>(gSettings.pdmAmplify);
@@ -314,14 +314,14 @@ static SttDetectorProfile sttDetectorProfileFor(bool glasses) {
   p.decisionPre = glasses ? gSettings.sttG2DecisionPre : gSettings.sttDecisionPre;
   return p;
 }
-static SttDetectorProfile gSttActiveProfile;  // gSTTMux: the profile of the running (or last) session
+static SttDetectorProfile gSttActiveProfile;  // gSttMux: the profile of the running (or last) session
 
 // ---- Keep-warm (sttKeepWarm) -------------------------------------------------
 // Between runs the verified model may stay parked in gWarmSession while a
 // caller holds it warm. A session carries only the pinned, SHA-verified
 // weights and the system LM (System_STTLocal.h), never call data, so any next
 // run may take it. gWarmSession belongs to whoever holds the claim (taken
-// under gSTTMux): the warm loader while it loads, a worker while it adopts or
+// under gSttMux): the warm loader while it loads, a worker while it adopts or
 // parks, the releaser while it frees. Admission runs one worker at a time and
 // a worker parks before it publishes workerActive=false, so the weights are
 // only ever in one place and a run never loads a second copy beside them.
@@ -333,22 +333,22 @@ constexpr uint32_t kWarmMaxHoldMs = 600000;    // the longest hold a caller may 
 constexpr uint32_t kWarmRetryMs = 60000;       // no new warm load this soon after a failure
 constexpr uint32_t kWarmAdoptWaitMs = 20000;   // a run's longest wait on a claim other than a load
 constexpr size_t kWarmMinFreePsram = 4u << 20; // less free PSRAM releases the parked model
-struct STTWarm {
+struct SttWarm {
   uint32_t untilMs = 0;    // hold deadline (millis), while `wanted`
   uint32_t failedMs = 0;   // last failed load (or low-PSRAM release), while `failed`
   size_t loadBytes = 0;    // PSRAM the last successful warm load took (0: none yet)
   bool wanted = false, parked = false, claimed = false, loading = false, failed = false;
 };
-static STTWarm gWarm;
-static STTLocalSession gWarmSession;
+static SttWarm gWarm;
+static SttLocalSession gWarmSession;
 static bool sttWarmHeldLocked(uint32_t now) {
   return gWarm.wanted && static_cast<int32_t>(gWarm.untilMs - now) > 0;
 }
 // The warm load stops early once nobody holds it any more.
 static bool sttWarmLoadCancelled(void*) {
-  portENTER_CRITICAL(&gSTTMux);
+  portENTER_CRITICAL(&gSttMux);
   const bool stop = !sttWarmHeldLocked(millis());
-  portEXIT_CRITICAL(&gSTTMux);
+  portEXIT_CRITICAL(&gSttMux);
   return stop;
 }
 // Short-lived task: load and verify the model into gWarmSession (its claim
@@ -359,12 +359,12 @@ static void sttWarmLoader(void*) {
   constexpr size_t kSamples = STT_SAMPLE_RATE / 2;
   auto* silence = static_cast<int16_t*>(ps_alloc(kSamples * sizeof(int16_t), AllocPref::RequirePsram, "stt.warm"));
   bool ok = false;
-  STTLocalStats stats;
+  SttLocalStats stats;
   if (silence) {
     memset(silence, 0, kSamples * sizeof(int16_t));
     char text[STT_MAX_TEXT + 1] = {};
     char error[96] = {};
-    const STTLocalControl control{nullptr, sttWarmLoadCancelled, nullptr};
+    const SttLocalControl control{nullptr, sttWarmLoadCancelled, nullptr};
     ok = sttLocalTranscribe(silence, kSamples, text, sizeof(text), control, stats, error,
                             sizeof(error), &gWarmSession) && gWarmSession.warm();
     // Parked, the session holds only weights and the LM (a resident model the
@@ -375,14 +375,14 @@ static void sttWarmLoader(void*) {
   if (!ok) gWarmSession.reset();
   const size_t freeAfter = sttPsramFree();
   const uint32_t now = millis();
-  portENTER_CRITICAL(&gSTTMux);
+  portENTER_CRITICAL(&gSttMux);
   gWarm.parked = ok;
   if (ok) gWarm.loadBytes = freeBefore > freeAfter ? freeBefore - freeAfter : 0;
   gWarm.claimed = gWarm.loading = false;
   // A load stopped because the hold ended is no failure (no back-off).
   gWarm.failed = !ok && sttWarmHeldLocked(now);
   gWarm.failedMs = now;
-  portEXIT_CRITICAL(&gSTTMux);
+  portEXIT_CRITICAL(&gSttMux);
   // The PSRAM left beside the resident model is what kWarmMinFreePsram guards.
   INFO_SYSTEMF("[STT] Warm model %s (load %lu ms, %u KB PSRAM free)", ok ? "resident" : "not loaded",
                static_cast<unsigned long>(stats.loadMs), static_cast<unsigned>(sttPsramFree() / 1024));
@@ -393,21 +393,21 @@ static void sttWarmLoader(void*) {
 // lapses; `cancelled` ends the wait) rather than raced with a second copy;
 // the caller's capture keeps running meanwhile. Any other claim (a release
 // under way) is awaited at most kWarmAdoptWaitMs.
-static void sttWarmAdopt(STTLocalSession& session, bool (*cancelled)(void*), void* context) {
+static void sttWarmAdopt(SttLocalSession& session, bool (*cancelled)(void*), void* context) {
   const uint32_t start = millis();
   for (;;) {
     bool take = false, busy = false, loading = false;
-    portENTER_CRITICAL(&gSTTMux);
+    portENTER_CRITICAL(&gSttMux);
     take = gWarm.parked && !gWarm.claimed;
     if (take) gWarm.claimed = true;
     busy = gWarm.claimed && !take;
     loading = gWarm.loading;
-    portEXIT_CRITICAL(&gSTTMux);
+    portEXIT_CRITICAL(&gSttMux);
     if (take) {
       gWarmSession.moveTo(session);
-      portENTER_CRITICAL(&gSTTMux);
+      portENTER_CRITICAL(&gSttMux);
       gWarm.parked = gWarm.claimed = false;
-      portEXIT_CRITICAL(&gSTTMux);
+      portEXIT_CRITICAL(&gSttMux);
       return;
     }
     if (!busy || (!loading && millis() - start >= kWarmAdoptWaitMs) || cancelled(context)) return;
@@ -417,25 +417,25 @@ static void sttWarmAdopt(STTLocalSession& session, bool (*cancelled)(void*), voi
 // A one-shot run makes room instead: it takes the parked model (awaiting a
 // warm load in progress, like a continuous run) and frees it.
 static void sttWarmYield(bool (*cancelled)(void*), void* context) {
-  STTLocalSession parked;
+  SttLocalSession parked;
   sttWarmAdopt(parked, cancelled, context);
   parked.reset();
 }
 // A run's end, before workerActive=false: while a hold lasts its model stays
 // parked for the next run, otherwise the session is closed as before.
-static void sttWarmPark(STTLocalSession& session) {
+static void sttWarmPark(SttLocalSession& session) {
   const bool warm = session.warm();
   bool park = false;
-  portENTER_CRITICAL(&gSTTMux);
+  portENTER_CRITICAL(&gSttMux);
   park = warm && sttWarmHeldLocked(millis()) && !gWarm.parked && !gWarm.claimed;
   if (park) gWarm.claimed = true;
-  portEXIT_CRITICAL(&gSTTMux);
+  portEXIT_CRITICAL(&gSttMux);
   if (park) {
     session.moveTo(gWarmSession);
-    portENTER_CRITICAL(&gSTTMux);
+    portENTER_CRITICAL(&gSttMux);
     gWarm.parked = true;
     gWarm.claimed = false;
-    portEXIT_CRITICAL(&gSTTMux);
+    portEXIT_CRITICAL(&gSttMux);
   }
   session.reset();
 }
@@ -444,34 +444,34 @@ static void sttWarmPark(STTLocalSession& session) {
 static void sttWarmRelease(bool lowMemory) {
   const uint32_t now = millis();
   bool release = false;
-  portENTER_CRITICAL(&gSTTMux);
+  portENTER_CRITICAL(&gSttMux);
   if (!sttWarmHeldLocked(now)) gWarm.wanted = false;
   release = gWarm.parked && !gWarm.claimed && (lowMemory || !gWarm.wanted);
   if (release) gWarm.claimed = true;
-  portEXIT_CRITICAL(&gSTTMux);
+  portEXIT_CRITICAL(&gSttMux);
   if (!release) return;
   gWarmSession.reset();
-  portENTER_CRITICAL(&gSTTMux);
+  portENTER_CRITICAL(&gSttMux);
   gWarm.parked = gWarm.claimed = false;
   if (lowMemory) {
     gWarm.failed = true;
     gWarm.failedMs = now;
   }
-  portEXIT_CRITICAL(&gSTTMux);
+  portEXIT_CRITICAL(&gSttMux);
   INFO_SYSTEMF("[STT] Warm model released (%s)", lowMemory ? "low PSRAM" : "idle");
 }
 
 static void sttWorker(void*) {
-  STTToken token;
+  SttToken token;
   uint32_t captureMs;
   AudioSource requestedSource;
   TranscriptOptions transcriptOptions;
-  portENTER_CRITICAL(&gSTTMux);
-  token = gSTT.snapshot.token;
-  captureMs = gSTT.snapshot.captureLimitMs;
-  requestedSource = gSTT.requestedSource;
-  transcriptOptions = gSTT.transcriptOptions;
-  portEXIT_CRITICAL(&gSTTMux);
+  portENTER_CRITICAL(&gSttMux);
+  token = gStt.snapshot.token;
+  captureMs = gStt.snapshot.captureLimitMs;
+  requestedSource = gStt.requestedSource;
+  transcriptOptions = gStt.transcriptOptions;
+  portEXIT_CRITICAL(&gSttMux);
   TranscriptSession transcript;
   transcript.begin(transcriptOptions, "local", token);
   sttPublishTranscript(token, transcript.snapshot());
@@ -481,7 +481,7 @@ static void sttWorker(void*) {
   const size_t capacity = static_cast<size_t>(captureMs) * STT_SAMPLE_RATE / 1000;
   char text[STT_MAX_TEXT + 1] = {};
   char error[96] = {};
-  STTLocalStats stats;
+  SttLocalStats stats;
   bool ok = false;
   bool claimed = false;
   bool selected = false;
@@ -529,18 +529,18 @@ static void sttWorker(void*) {
     if (source == AUDIO_SRC_G2_LEFT) g2Held = sttG2CaptureBegin();
     // G2 discards the preceding owner's tail; PDM already flushes on start.
     audioTrimBufferedPcm("stt", 0);
-    portENTER_CRITICAL(&gSTTMux);
-    gSTT.snapshot.state = STTState::Recording;
-    gSTT.snapshot.audioSource = static_cast<uint8_t>(source);
-    portEXIT_CRITICAL(&gSTTMux);
+    portENTER_CRITICAL(&gSttMux);
+    gStt.snapshot.state = SttState::Recording;
+    gStt.snapshot.audioSource = static_cast<uint8_t>(source);
+    portEXIT_CRITICAL(&gSttMux);
 
     const uint32_t captureStartedMs = millis();
     uint32_t lastAudioMs = captureStartedMs;
     while (samples < capacity && !sttCancelled(&token)) {
       bool finish;
-      portENTER_CRITICAL(&gSTTMux);
-      finish = gSTT.finishRequested;
-      portEXIT_CRITICAL(&gSTTMux);
+      portENTER_CRITICAL(&gSttMux);
+      finish = gStt.finishRequested;
+      portEXIT_CRITICAL(&gSttMux);
       if (finish) break;
       if (!audioCaptureOwnedBy("stt") || !audioCaptureActive() ||
           !audioSourceAvailable(source)) {
@@ -565,10 +565,10 @@ static void sttWorker(void*) {
         lastAudioMs = millis();
         const int level = std::min(100, static_cast<int>(
             std::sqrt(sum / count) * 100.0 / 32768.0));
-        portENTER_CRITICAL(&gSTTMux);
-        gSTT.snapshot.recordedSamples = samples;
-        gSTT.snapshot.level = level;
-        portEXIT_CRITICAL(&gSTTMux);
+        portENTER_CRITICAL(&gSttMux);
+        gStt.snapshot.recordedSamples = samples;
+        gStt.snapshot.level = level;
+        portEXIT_CRITICAL(&gSttMux);
       } else {
         vTaskDelay(pdMS_TO_TICKS(1));
       }
@@ -583,11 +583,11 @@ static void sttWorker(void*) {
       sttError(error, sizeof(error), "Capture too short (minimum 100 ms)");
       break;
     }
-    portENTER_CRITICAL(&gSTTMux);
-    gSTT.snapshot.state = STTState::Transcribing;
-    gSTT.snapshot.level = 0;
-    portEXIT_CRITICAL(&gSTTMux);
-    STTLocalControl control{&token, sttCancelled, sttProgress};
+    portENTER_CRITICAL(&gSttMux);
+    gStt.snapshot.state = SttState::Transcribing;
+    gStt.snapshot.level = 0;
+    portEXIT_CRITICAL(&gSttMux);
+    SttLocalControl control{&token, sttCancelled, sttProgress};
     // One-shot runs keep the self-contained backend path: a kept-warm model
     // is freed first rather than loaded a second time beside this call's.
     sttWarmYield(sttCancelled, &token);
@@ -599,10 +599,10 @@ static void sttWorker(void*) {
     }
   } while (false);
 
-  portENTER_CRITICAL(&gSTTMux);
-  gSTT.snapshot.state = STTState::Stopping;
-  gSTT.snapshot.level = 0;
-  portEXIT_CRITICAL(&gSTTMux);
+  portENTER_CRITICAL(&gSttMux);
+  gStt.snapshot.state = SttState::Stopping;
+  gStt.snapshot.level = 0;
+  portEXIT_CRITICAL(&gSttMux);
   // Keep admission closed until our exact HAL lease is actually released.
   // If a backend stop is still unwinding, stay Stopping rather than publishing
   // a false terminal state or allowing a new run to reuse its owner tag.
@@ -618,29 +618,29 @@ static void sttWorker(void*) {
   if (pcm) {
     // Raw audio is private and not persisted. The buffer is freed only after
     // synchronous inference and HAL teardown have both finished.
-    volatile int16_t* privatePCM = pcm;
-    for (size_t i = 0; i < capacity; ++i) privatePCM[i] = 0;
+    volatile int16_t* privatePcm = pcm;
+    for (size_t i = 0; i < capacity; ++i) privatePcm[i] = 0;
     free(pcm);
   }
   const bool cancelled = sttCancelled(&token);
   bool acceptedText = false;
-  portENTER_CRITICAL(&gSTTMux);
-  if (gSTT.snapshot.token == token) {
+  portENTER_CRITICAL(&gSttMux);
+  if (gStt.snapshot.token == token) {
     sttClearTextLocked();
-    gSTT.snapshot.stats = stats;
-    gSTT.snapshot.recordedSamples = samples;
-    gSTT.snapshot.state = (cancelled || gSTT.cancelRequested) ? STTState::Cancelled
-                              : ok ? STTState::Done : STTState::Failed;
-    if (gSTT.snapshot.state == STTState::Done) {
-      memcpy(gSTT.text, text, sizeof(gSTT.text));
-      gSTT.snapshot.textReady = true;
+    gStt.snapshot.stats = stats;
+    gStt.snapshot.recordedSamples = samples;
+    gStt.snapshot.state = (cancelled || gStt.cancelRequested) ? SttState::Cancelled
+                              : ok ? SttState::Done : SttState::Failed;
+    if (gStt.snapshot.state == SttState::Done) {
+      memcpy(gStt.text, text, sizeof(gStt.text));
+      gStt.snapshot.textReady = true;
       acceptedText = true;
-    } else if (gSTT.snapshot.state == STTState::Failed) {
-      snprintf(gSTT.snapshot.error, sizeof(gSTT.snapshot.error), "%s",
+    } else if (gStt.snapshot.state == SttState::Failed) {
+      snprintf(gStt.snapshot.error, sizeof(gStt.snapshot.error), "%s",
                error[0] ? error : "Local transcription failed");
     }
   }
-  portEXIT_CRITICAL(&gSTTMux);
+  portEXIT_CRITICAL(&gSttMux);
   // Recognition and saving have separate outcomes. Admission remains closed
   // through filesystem work; a late mailbox retirement never reopens the file.
   if (acceptedText) (void)transcript.append(1, text, strlen(text));
@@ -654,17 +654,17 @@ static void sttWorker(void*) {
 #endif
   // Include the optional writer/VFS call depth in this worker's final margin.
   const uint32_t stackFree = uxTaskGetStackHighWaterMark(nullptr);
-  portENTER_CRITICAL(&gSTTMux);
-  if (gSTT.snapshot.token == token) {
-    gSTT.snapshot.workerStackFreeBytes = stackFree;
-    if (finallyCancelled || gSTT.cancelRequested) {
+  portENTER_CRITICAL(&gSttMux);
+  if (gStt.snapshot.token == token) {
+    gStt.snapshot.workerStackFreeBytes = stackFree;
+    if (finallyCancelled || gStt.cancelRequested) {
       sttClearTextLocked();
-      gSTT.snapshot.state = STTState::Cancelled;
+      gStt.snapshot.state = SttState::Cancelled;
     }
-    gSTT.completedMs = millis();
-    gSTT.snapshot.workerActive = false;
+    gStt.completedMs = millis();
+    gStt.snapshot.workerActive = false;
   }
-  portEXIT_CRITICAL(&gSTTMux);
+  portEXIT_CRITICAL(&gSttMux);
   volatile char* privateText = text;
   for (size_t i = 0; i < sizeof(text); ++i) privateText[i] = 0;
   vTaskDelete(nullptr);
@@ -770,7 +770,7 @@ struct StreamSlot {
 };
 struct StreamRun {
   bool speakerLabels = true;
-  STTToken token = 0;
+  SttToken token = 0;
   AudioSource requested = AUDIO_SRC_NONE;
   int16_t* working = nullptr;
   StreamSlot slots[kAudioQueueDepth];
@@ -792,17 +792,17 @@ struct StreamRun {
   bool captureDone = false;
   bool failed = false;
   uint32_t clockMs = 0;
-  uint32_t nativeGeneration = 0;  // see STTRun::nativeG2Generation
+  uint32_t nativeGeneration = 0;  // see SttRun::nativeG2Generation
   bool singleUtterance = false;
-  void (*publishWake)() = nullptr;  // see STTRun::publishWake (worker only)
+  void (*publishWake)() = nullptr;  // see SttRun::publishWake (worker only)
   // Glasses-mic faults survived instead of ending the session (capture task
-  // counts under gSTTMux; the worker logs changes). Conversate owns the
+  // counts under gSttMux; the worker logs changes). Conversate owns the
   // session's lifetime, and a few lost 10 ms frames or one dropped phrase
   // must not end the captions or split the saved transcript.
   uint32_t lossEvents = 0, droppedSegments = 0, stalls = 0;
   uint32_t loggedFaults = 0;  // worker-side: sum already logged
 #if HW1_STT_CAPTURE_FEATURES
-  // Capture-time features (under gSTTMux, except the contents of
+  // Capture-time features (under gSttMux, except the contents of
   // rows/ring/workspace).
   FeCache fe[kFeCaches];
   int16_t* feRing = nullptr;
@@ -820,7 +820,7 @@ struct StreamRun {
   uint32_t feCachedRows = 0, feDraftRows = 0;
 #endif
 #if HW1_STT_SPECULATIVE_FINAL
-  // Speculative final (all under gSTTMux). Capture task: the live request
+  // Speculative final (all under gSttMux). Capture task: the live request
   // (id, segment start, voiced end, input length) and its snapshot state.
   uint32_t specNextId = 0, specLiveId = 0, specSequence = 0;
   uint64_t specStart = 0;
@@ -832,7 +832,7 @@ struct StreamRun {
   uint64_t specReadyStart = 0;
   size_t specReadySamples = 0, specDoneSamples = 0;
   uint32_t specDoneStartMs = 0;
-  STTLocalStats specDoneStats;
+  SttLocalStats specDoneStats;
 #if HW1_STT_CAPTURE_FEATURES
   // Feature cache of the phrase the snapshot was taken from.
   int specReadyFe = -1;
@@ -840,7 +840,7 @@ struct StreamRun {
 #endif
 #endif
 };
-// Timeline level samples: written by the capture task under gSTTMux, printed
+// Timeline level samples: written by the capture task under gSttMux, printed
 // by the STT worker (never by the real-time capture task).
 #ifdef ESP_PLATFORM
 struct TLLevel { uint32_t t; uint16_t rms, noise, thr; bool open; };
@@ -850,10 +850,10 @@ static uint32_t gTLLevelHead = 0, gTLLevelTail = 0;
 #endif
 static void sttDrainLevelLog(StreamRun& run) {
 #ifdef ESP_PLATFORM
-  portENTER_CRITICAL(&gSTTMux);
+  portENTER_CRITICAL(&gSttMux);
   const uint32_t loss = run.lossEvents, dropped = run.droppedSegments, stalls = run.stalls;
-  const uint32_t overruns = gSTT.snapshot.audioOverruns;
-  portEXIT_CRITICAL(&gSTTMux);
+  const uint32_t overruns = gStt.snapshot.audioOverruns;
+  portEXIT_CRITICAL(&gSttMux);
   if (loss + dropped + stalls != run.loggedFaults) {
     run.loggedFaults = loss + dropped + stalls;
     ESP_LOGW("STT", "TL fault audio_loss=%lu (frames %lu) dropped_phrases=%lu mic_stalls=%lu; session continues",
@@ -862,10 +862,10 @@ static void sttDrainLevelLog(StreamRun& run) {
   for (;;) {
     TLLevel e{};
     bool have = false;
-    portENTER_CRITICAL(&gSTTMux);
+    portENTER_CRITICAL(&gSttMux);
     if (gTLLevelHead - gTLLevelTail > kTLLevels) gTLLevelTail = gTLLevelHead - kTLLevels;
     if (gTLLevelTail != gTLLevelHead) { e = gTLLevels[gTLLevelTail++ % kTLLevels]; have = true; }
-    portEXIT_CRITICAL(&gSTTMux);
+    portEXIT_CRITICAL(&gSttMux);
     if (!have) break;
     ESP_LOGI("STT", "TL level t=%lu rms=%u noise=%u thr=%u open=%d", (unsigned long)e.t,
              unsigned(e.rms), unsigned(e.noise), unsigned(e.thr), e.open ? 1 : 0);
@@ -875,23 +875,23 @@ static void sttDrainLevelLog(StreamRun& run) {
 #endif
 }
 static void sttStreamTick(StreamRun& run) {
-  portENTER_CRITICAL(&gSTTMux);
+  portENTER_CRITICAL(&gSttMux);
   const uint32_t now = millis();
-  gSTT.snapshot.sessionMs += static_cast<uint32_t>(now - run.clockMs);
+  gStt.snapshot.sessionMs += static_cast<uint32_t>(now - run.clockMs);
   run.clockMs = now;
-  portEXIT_CRITICAL(&gSTTMux);
+  portEXIT_CRITICAL(&gSttMux);
 }
 static void sttStreamFail(StreamRun& run, const char* message) {
-  portENTER_CRITICAL(&gSTTMux);
-  if (!run.failed) snprintf(gSTT.snapshot.error, sizeof(gSTT.snapshot.error), "%s", message);
+  portENTER_CRITICAL(&gSttMux);
+  if (!run.failed) snprintf(gStt.snapshot.error, sizeof(gStt.snapshot.error), "%s", message);
   run.failed = true;
-  portEXIT_CRITICAL(&gSTTMux);
+  portEXIT_CRITICAL(&gSttMux);
 }
 static bool sttStreamCancelled(void* context) {
   auto& run = *static_cast<StreamRun*>(context);
-  portENTER_CRITICAL(&gSTTMux);
+  portENTER_CRITICAL(&gSttMux);
   const bool failed = run.failed;
-  portEXIT_CRITICAL(&gSTTMux);
+  portEXIT_CRITICAL(&gSttMux);
   return failed || sttCancelled(&run.token);
 }
 #if HW1_STT_SPEAKER_LABELS
@@ -902,11 +902,11 @@ static bool sttStreamCancelled(void* context) {
 static bool sttSpeakerCanWait(void* context) {
   auto& run = *static_cast<StreamRun*>(context);
   bool canWait = true;
-  portENTER_CRITICAL(&gSTTMux);
+  portENTER_CRITICAL(&gSttMux);
   for (const auto& slot : run.slots) {
     if (slot.state == StreamSlotState::Ready) { canWait = false; break; }
   }
-  portEXIT_CRITICAL(&gSTTMux);
+  portEXIT_CRITICAL(&gSttMux);
   return canWait;
 }
 #endif
@@ -916,7 +916,7 @@ static bool sttSpeakerCanWait(void* context) {
 static bool sttDraftPreempted(void* context) {
   auto& run = *static_cast<StreamRun*>(context);
   bool finalWaiting = false;
-  portENTER_CRITICAL(&gSTTMux);
+  portENTER_CRITICAL(&gSttMux);
   for (const auto& candidate : run.slots) {
     if (candidate.state == StreamSlotState::Ready) { finalWaiting = true; break; }
   }
@@ -925,12 +925,12 @@ static bool sttDraftPreempted(void* context) {
   // over it after the draft's frontend and outranks the draft (specReady).
   if (run.specWanted || run.specReady) finalWaiting = true;
 #endif
-  portEXIT_CRITICAL(&gSTTMux);
+  portEXIT_CRITICAL(&gSttMux);
   return finalWaiting || sttStreamCancelled(context);
 }
 #if HW1_STT_SPECULATIVE_FINAL
 // A speculative request id is still worth something while it is the live
-// request or a queued/processing phrase matched it. Caller holds gSTTMux.
+// request or a queued/processing phrase matched it. Caller holds gSttMux.
 static bool sttSpecReferencedLocked(const StreamRun& run, uint32_t id) {
   if (!id) return false;
   if (id == run.specLiveId) return true;
@@ -946,17 +946,17 @@ static bool sttSpecReferencedLocked(const StreamRun& run, uint32_t id) {
 static bool sttSpecPreempted(void* context) {
   auto& run = *static_cast<StreamRun*>(context);
   bool stop;
-  portENTER_CRITICAL(&gSTTMux);
+  portENTER_CRITICAL(&gSttMux);
   const StreamSlot* oldest = nullptr;
   for (const auto& candidate : run.slots)
     if (candidate.state == StreamSlotState::Ready && (!oldest || candidate.sequence < oldest->sequence))
       oldest = &candidate;
   stop = oldest ? oldest->specId != run.specRunId : run.specRunId != run.specLiveId;
-  portEXIT_CRITICAL(&gSTTMux);
+  portEXIT_CRITICAL(&gSttMux);
   return stop || sttStreamCancelled(context);
 }
 #endif
-static void sttStreamProgress(void* context, STTLocalPhase phase) {
+static void sttStreamProgress(void* context, SttLocalPhase phase) {
   auto& run = *static_cast<StreamRun*>(context);
   sttProgress(&run.token, phase);
   sttStreamTick(run);
@@ -964,12 +964,12 @@ static void sttStreamProgress(void* context, STTLocalPhase phase) {
 // A draft reports Inference once its features are quantized; from then on it never
 // reads draftPcm again (the runtime reads PCM only in its frontend), so sttSpecCapture may
 // copy a speculative snapshot over the buffer at once instead of at the next capture block.
-static void sttDraftProgress(void* context, STTLocalPhase phase) {
+static void sttDraftProgress(void* context, SttLocalPhase phase) {
   auto& run = *static_cast<StreamRun*>(context);
-  if (phase == STTLocalPhase::Inference || phase == STTLocalPhase::Decoding) {
-    portENTER_CRITICAL(&gSTTMux);
+  if (phase == SttLocalPhase::Inference || phase == SttLocalPhase::Decoding) {
+    portENTER_CRITICAL(&gSttMux);
     run.draftPastPcm = true;
-    portEXIT_CRITICAL(&gSTTMux);
+    portEXIT_CRITICAL(&gSttMux);
   }
   sttStreamProgress(context, phase);
 }
@@ -979,24 +979,24 @@ static void sttWipe(void* memory, size_t bytes) {
   while (bytes--) *p++ = 0;
 }
 // ---- sttperf: per-segment pacing and profiling (never transcript text) ----
-struct STTPerfTask { char name[12]; uint8_t pct; };
-struct STTPerfRecord {
+struct SttPerfTask { char name[12]; uint8_t pct; };
+struct SttPerfRecord {
   uint32_t sequence = 0, audioMs = 0, queuedMs = 0, startMs = 0, doneMs = 0, deliveredMs = 0;
   uint8_t backlog = 0, idle0 = 255, idle1 = 255;
-  STTLocalStats stats;
-  STTPerfTask tasks[4] = {};
+  SttLocalStats stats;
+  SttPerfTask tasks[4] = {};
 };
 constexpr size_t kPerfRecords = 16;
 #if defined(ESP_PLATFORM) && CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY
 // Preserve nonzero idle/slow-stage sentinels: external BSS starts zeroed.
-struct STTPerfRecords { STTPerfRecord records[kPerfRecords]; };
-alignas(STTPerfRecords) STT_PSRAM_BSS static uint8_t gSTTPerfStorage[sizeof(STTPerfRecords)];
-static auto& gSTTPerf = (*new (gSTTPerfStorage) STTPerfRecords).records;
+struct SttPerfRecords { SttPerfRecord records[kPerfRecords]; };
+alignas(SttPerfRecords) STT_PSRAM_BSS static uint8_t gSttPerfStorage[sizeof(SttPerfRecords)];
+static auto& gSttPerf = (*new (gSttPerfStorage) SttPerfRecords).records;
 #else
-static STTPerfRecord gSTTPerf[kPerfRecords];
+static SttPerfRecord gSttPerf[kPerfRecords];
 #endif
-static uint32_t gSTTPerfCount = 0;
-static volatile bool gSTTPerfLog = false;
+static uint32_t gSttPerfCount = 0;
+static volatile bool gSttPerfLog = false;
 
 #ifdef ESP_PLATFORM
 #include "esp_attr.h"
@@ -1009,13 +1009,13 @@ static volatile bool gSTTPerfLog = false;
 #ifdef ESP_PLATFORM
 // CPU share per task over one segment's processing, from FreeRTOS run-time
 // counters (percent of one core; IDLE0/IDLE1 show each core's headroom).
-struct STTTaskSample {
+struct SttTaskSample {
   TaskStatus_t* tasks = nullptr;
   UBaseType_t count = 0;
   configRUN_TIME_COUNTER_TYPE total = 0;
 };
 constexpr UBaseType_t kPerfMaxTasks = 72;
-static bool sttTaskSample(STTTaskSample& s) {
+static bool sttTaskSample(SttTaskSample& s) {
   if (!s.tasks)
     s.tasks = static_cast<TaskStatus_t*>(heap_caps_malloc(kPerfMaxTasks * sizeof(TaskStatus_t), MALLOC_CAP_SPIRAM));
   s.count = 0;
@@ -1023,8 +1023,8 @@ static bool sttTaskSample(STTTaskSample& s) {
   s.count = uxTaskGetSystemState(s.tasks, kPerfMaxTasks, &s.total);
   return s.count > 0;
 }
-static STTTaskSample gPerfBefore, gPerfAfter;
-static void sttTaskShares(STTPerfRecord& r) {
+static SttTaskSample gPerfBefore, gPerfAfter;
+static void sttTaskShares(SttPerfRecord& r) {
   const auto span = gPerfAfter.total - gPerfBefore.total;
   if (!gPerfBefore.count || !gPerfAfter.count || !span) return;
   for (UBaseType_t i = 0; i < gPerfAfter.count; ++i) {
@@ -1053,8 +1053,8 @@ static void sttTaskShares(STTPerfRecord& r) {
 }
 #endif
 
-static int sttPerfFormat(const STTPerfRecord& r, char* out, size_t cap) {
-  const STTLocalStats& s = r.stats;
+static int sttPerfFormat(const SttPerfRecord& r, char* out, size_t cap) {
+  const SttLocalStats& s = r.stats;
   const uint32_t total = r.doneMs - r.startMs;
   int n = snprintf(out, cap,
       "seg %lu audio %.1fs wait %.1fs | load %lu fe %lu (cond %lu fft %lu mel %lu norm %lu q %lu) "
@@ -1085,16 +1085,16 @@ static bool sttQueueSegment(StreamRun& run) {
   const auto* segment = run.segmenter.segment();
   if (!segment) return true;
   StreamSlot* slot = nullptr;
-  portENTER_CRITICAL(&gSTTMux);
+  portENTER_CRITICAL(&gSttMux);
   for (auto& candidate : run.slots) {
     if (candidate.state == StreamSlotState::Free) { slot = &candidate; break; }
   }
-  const bool exhausted = gSTT.snapshot.segmentsCaptured == UINT32_MAX;
-  portEXIT_CRITICAL(&gSTTMux);
+  const bool exhausted = gStt.snapshot.segmentsCaptured == UINT32_MAX;
+  portEXIT_CRITICAL(&gSttMux);
   if (!slot && !exhausted && run.nativeGeneration && !run.singleUtterance) {
     // Conversate: drop this phrase (it is never shown or saved) and keep the
     // session; the backlog drains and later phrases continue in order.
-    portENTER_CRITICAL(&gSTTMux);
+    portENTER_CRITICAL(&gSttMux);
     ++run.droppedSegments;
 #if HW1_STT_CAPTURE_FEATURES
     if (run.feLive >= 0) { run.fe[run.feLive].state = FeState::Orphan; run.feLive = -1; }
@@ -1102,7 +1102,7 @@ static bool sttQueueSegment(StreamRun& run) {
 #if HW1_STT_SPECULATIVE_FINAL
     run.specLiveId = 0; run.specWanted = false;  // that phrase is gone
 #endif
-    portEXIT_CRITICAL(&gSTTMux);
+    portEXIT_CRITICAL(&gSttMux);
     // Release it, or the segmenter stays Ready and capture stalls until a slot
     // frees (then queues the "dropped" phrase late after all).
     return run.segmenter.release();
@@ -1130,7 +1130,7 @@ static bool sttQueueSegment(StreamRun& run) {
   slot->pauseEnd = segment->end == hw1::stt::SegmentEnd::Pause;
 #endif
   slot->queuedMs = millis();
-  portENTER_CRITICAL(&gSTTMux);
+  portENTER_CRITICAL(&gSttMux);
 #if HW1_STT_CAPTURE_FEATURES
   // The phrase's feature cache goes with it; rows that read past its
   // published end (or a sub-320-sample phrase, which inference pads) are not
@@ -1158,10 +1158,10 @@ static bool sttQueueSegment(StreamRun& run) {
       run.specVoiced + kTrimTailSamples <= segment->samples ? run.specLiveId : 0;
   run.specLiveId = 0; run.specWanted = false;
 #endif
-  slot->sequence = ++gSTT.snapshot.segmentsCaptured;
+  slot->sequence = ++gStt.snapshot.segmentsCaptured;
   slot->state = StreamSlotState::Ready;
-  ++gSTT.snapshot.pendingAudio;
-  portEXIT_CRITICAL(&gSTTMux);
+  ++gStt.snapshot.pendingAudio;
+  portEXIT_CRITICAL(&gSttMux);
   return run.segmenter.release();
 }
 #if HW1_STT_CAPTURE_FEATURES
@@ -1178,7 +1178,7 @@ static void sttFeatureWorker(void* context) {
       uint32_t gen = 0;
       uint64_t start = 0, head = 0;
       size_t done = 0, len = 0;
-      portENTER_CRITICAL(&gSTTMux);
+      portENTER_CRITICAL(&gSttMux);
       stop = run.feStop;
       if (run.feLive >= 0 && run.fe[run.feLive].state == FeState::Live && !run.fe[run.feLive].overrun) {
         idx = run.feLive;
@@ -1186,7 +1186,7 @@ static void sttFeatureWorker(void* context) {
         len = run.feLiveLen;
       }
       head = run.feRingHead;
-      portEXIT_CRITICAL(&gSTTMux);
+      portEXIT_CRITICAL(&gSttMux);
       if (stop || idx < 0) break;
       const size_t stable = len >= 320 ? std::min(len / 160, kFeMaxRows) : 0;
       if (done >= stable) break;
@@ -1198,7 +1198,7 @@ static void sttFeatureWorker(void* context) {
         for (size_t r = done; r < end; ++r)
           (void)hw1::stt::log_mel_frame_ring(run.feRing, kFeRingSamples - 1, start, len, r,
                                              run.fe[idx].rows + r * kFeRowFloats, run.feWork);
-      portENTER_CRITICAL(&gSTTMux);
+      portENTER_CRITICAL(&gSttMux);
       FeCache& c = run.fe[idx];
       if (c.gen == gen && c.state == FeState::Live) {
         // The capture task writes at most one block past the published head.
@@ -1210,12 +1210,12 @@ static void sttFeatureWorker(void* context) {
           ++run.feOverruns;
         }
       }
-      portEXIT_CRITICAL(&gSTTMux);
+      portEXIT_CRITICAL(&gSttMux);
     }
   }
-  portENTER_CRITICAL(&gSTTMux);
+  portENTER_CRITICAL(&gSttMux);
   run.feRunning = false;
-  portEXIT_CRITICAL(&gSTTMux);
+  portEXIT_CRITICAL(&gSttMux);
   vTaskDelete(nullptr);
 }
 // Capture task, per block: copy PCM into the stream ring (before the
@@ -1226,10 +1226,10 @@ static void sttFeatureRingWrite(StreamRun& run, int16_t* ring, const int16_t* bl
   const size_t first = std::min(count, kFeRingSamples - at);
   memcpy(ring + at, block, first * sizeof(int16_t));
   if (count > first) memcpy(ring, block + first, (count - first) * sizeof(int16_t));
-  portENTER_CRITICAL(&gSTTMux);
+  portENTER_CRITICAL(&gSttMux);
   if (!run.feRingStarted) { run.feRingStarted = true; run.feRingStart = base; }
   run.feRingHead = base + count;
-  portEXIT_CRITICAL(&gSTTMux);
+  portEXIT_CRITICAL(&gSttMux);
 }
 // ... and after it: give the phrase in progress a cache (one that started
 // inside the ring), publish its length, retire one whose phrase vanished.
@@ -1237,7 +1237,7 @@ static void sttFeatureTrack(StreamRun& run) {
   uint64_t liveStart = 0;
   size_t liveLen = 0;
   const bool active = run.segmenter.live_view(&liveStart, &liveLen);
-  portENTER_CRITICAL(&gSTTMux);
+  portENTER_CRITICAL(&gSttMux);
   if (run.feLive >= 0 && (!active || run.fe[run.feLive].start != liveStart)) {
     run.fe[run.feLive].state = FeState::Orphan;  // discarded candidate
     run.feLive = -1;
@@ -1253,7 +1253,7 @@ static void sttFeatureTrack(StreamRun& run) {
   }
   if (run.feLive >= 0) run.feLiveLen = liveLen;
   const TaskHandle_t task = run.feLive >= 0 ? run.feTask : nullptr;
-  portEXIT_CRITICAL(&gSTTMux);
+  portEXIT_CRITICAL(&gSttMux);
   if (task) xTaskNotifyGive(task);
 }
 #endif
@@ -1269,7 +1269,7 @@ static void sttSpecCapture(StreamRun& run) {
   const bool want = run.segmenter.speculation(kTrimTailSamples, &start, &voiced, &samples) &&
                     run.segmenter.in_progress(&live, &liveSamples) && samples <= liveSamples;
   bool copy = false;
-  portENTER_CRITICAL(&gSTTMux);
+  portENTER_CRITICAL(&gSttMux);
   if (!want) {
     run.specLiveId = 0; run.specWanted = false;
   } else {
@@ -1277,7 +1277,7 @@ static void sttSpecCapture(StreamRun& run) {
       if (!++run.specNextId) ++run.specNextId;
       run.specLiveId = run.specNextId;
       run.specStart = start; run.specVoiced = voiced; run.specSamples = samples;
-      run.specSequence = gSTT.snapshot.segmentsCaptured + 1;
+      run.specSequence = gStt.snapshot.segmentsCaptured + 1;
       run.specCopied = false;
     }
     if (!run.specCopied) {
@@ -1291,10 +1291,10 @@ static void sttSpecCapture(StreamRun& run) {
       }
     }
   }
-  portEXIT_CRITICAL(&gSTTMux);
+  portEXIT_CRITICAL(&gSttMux);
   if (!copy) return;
   memcpy(run.draftPcm, live, samples * sizeof(int16_t));
-  portENTER_CRITICAL(&gSTTMux);
+  portENTER_CRITICAL(&gSttMux);
   run.specReady = true; run.specReadyId = run.specLiveId; run.specReadySamples = samples;
   run.specReadyStart = run.specStart; run.specReadySequence = run.specSequence;
   run.specCopied = true; run.specWanted = false;
@@ -1309,7 +1309,7 @@ static void sttSpecCapture(StreamRun& run) {
     run.specReadyFe = run.feLive; run.specReadyFeGen = run.fe[run.feLive].gen;
   }
 #endif
-  portEXIT_CRITICAL(&gSTTMux);
+  portEXIT_CRITICAL(&gSttMux);
 }
 #endif
 static void sttCaptureWorker(void* context) {
@@ -1349,9 +1349,9 @@ static void sttCaptureWorker(void* context) {
     if (source == AUDIO_SRC_G2_LEFT && !run.nativeGeneration) g2Held = sttG2CaptureBegin();
 #ifdef ESP_PLATFORM
     {
-      portENTER_CRITICAL(&gSTTMux);
+      portENTER_CRITICAL(&gSttMux);
       const bool profiledGlasses = gSttActiveProfile.glasses;
-      portEXIT_CRITICAL(&gSTTMux);
+      portEXIT_CRITICAL(&gSttMux);
       if (profiledGlasses != (source == AUDIO_SRC_G2_LEFT))
         ESP_LOGW("STT", "TL detector_profile_mismatch profile=%s source=%u", profiledGlasses ? "g2" : "onboard",
                  unsigned(source));
@@ -1363,20 +1363,20 @@ static void sttCaptureWorker(void* context) {
       sttStreamFail(run, "Continuous capture integrity monitoring unavailable"); break;
     }
     if (initialOverruns) {
-      portENTER_CRITICAL(&gSTTMux);
-      gSTT.snapshot.audioOverruns = initialOverruns;
-      portEXIT_CRITICAL(&gSTTMux);
+      portENTER_CRITICAL(&gSttMux);
+      gStt.snapshot.audioOverruns = initialOverruns;
+      portEXIT_CRITICAL(&gSttMux);
       sttStreamFail(run, "Microphone audio loss during capture startup"); break;
     }
-    portENTER_CRITICAL(&gSTTMux);
+    portENTER_CRITICAL(&gSttMux);
     // Measure the ambient floor before prompting for speech. Capture remains
     // owned during this short calibration; the UI still shows Preparing.
-    gSTT.snapshot.state = STTState::Preparing;
-    gSTT.snapshot.captureActive = true;
-    gSTT.snapshot.audioSource = static_cast<uint8_t>(source);
-    gSTT.captureStartedMs = millis();
-    gSTT.captureSource = static_cast<uint8_t>(source);
-    portEXIT_CRITICAL(&gSTTMux);
+    gStt.snapshot.state = SttState::Preparing;
+    gStt.snapshot.captureActive = true;
+    gStt.snapshot.audioSource = static_cast<uint8_t>(source);
+    gStt.captureStartedMs = millis();
+    gStt.captureSource = static_cast<uint8_t>(source);
+    portEXIT_CRITICAL(&gSttMux);
 #ifdef ESP_PLATFORM
     // Bench tap (`sttraw on`, admin): saves exactly what the segmenter is fed
     // below. Off unless armed; a failure here never affects the session.
@@ -1408,10 +1408,10 @@ static void sttCaptureWorker(void* context) {
     size_t pauseSilence = 0;  // zero samples still to feed after a pause edge
     while (!sttStreamCancelled(&run)) {
       bool finish, paused;
-      portENTER_CRITICAL(&gSTTMux);
-      finish = gSTT.finishRequested;
-      paused = gSTT.paused;
-      portEXIT_CRITICAL(&gSTTMux);
+      portENTER_CRITICAL(&gSttMux);
+      finish = gStt.finishRequested;
+      paused = gStt.paused;
+      portEXIT_CRITICAL(&gSttMux);
       if (finish) break;
       if (run.singleUtterance && millis() - captureStartMs >= 30000) {
         sttStreamFail(run, "Question timed out; please try again"); break;
@@ -1448,10 +1448,10 @@ static void sttCaptureWorker(void* context) {
         sttStreamFail(run, "Microphone integrity monitor lost"); break;
       }
       if (overruns != initialOverruns) {
-        portENTER_CRITICAL(&gSTTMux);
-        gSTT.snapshot.audioOverruns = overruns;  // startup required a zero baseline
+        portENTER_CRITICAL(&gSttMux);
+        gStt.snapshot.audioOverruns = overruns;  // startup required a zero baseline
         if (source == AUDIO_SRC_G2_LEFT) ++run.lossEvents;
-        portEXIT_CRITICAL(&gSTTMux);
+        portEXIT_CRITICAL(&gSttMux);
         // Glasses mic: lost LC3 frames are already concealed (PLC) and a short
         // gap only nudges a caption; count it and continue. The onboard mic
         // keeps the strict rule (a gap there means the device is overloaded).
@@ -1475,9 +1475,9 @@ static void sttCaptureWorker(void* context) {
                                 static_cast<double>(sum) * sum / count / count;
         const int level = std::min(100, static_cast<int>(std::sqrt(std::max(0.0, variance)) * 100.0 / 32768));
 #if HW1_STT_CAPTURE_FEATURES
-        portENTER_CRITICAL(&gSTTMux);
+        portENTER_CRITICAL(&gSttMux);
         int16_t* const feRing = run.feRing;  // published by the worker after warm-up
-        portEXIT_CRITICAL(&gSTTMux);
+        portEXIT_CRITICAL(&gSttMux);
         if (feRing) sttFeatureRingWrite(run, feRing, block, count);
 #endif
         size_t offset = 0;
@@ -1505,8 +1505,8 @@ static void sttCaptureWorker(void* context) {
         const int16_t* live = nullptr;
         size_t liveSamples = 0;
         if (run.draftPcm && run.segmenter.in_progress(&live, &liveSamples)) {
-          portENTER_CRITICAL(&gSTTMux);
-          const uint32_t nextSequence = gSTT.snapshot.segmentsCaptured + 1;
+          portENTER_CRITICAL(&gSttMux);
+          const uint32_t nextSequence = gStt.snapshot.segmentsCaptured + 1;
 #if HW1_STT_SPECULATIVE_FINAL
           const bool idle = !run.draftReady && !run.draftBusy &&
                             !run.specLiveId && !run.specReady && !run.specBusy;
@@ -1518,10 +1518,10 @@ static void sttCaptureWorker(void* context) {
                                                       size_t(run.lastDraftMs) * (STT_SAMPLE_RATE / 1000));
           const bool grown = liveSamples >= STT_SAMPLE_RATE &&
                              liveSamples >= run.draftTakenSamples + paceSamples;
-          portEXIT_CRITICAL(&gSTTMux);
+          portEXIT_CRITICAL(&gSttMux);
           if (idle && grown) {
             memcpy(run.draftPcm, live, liveSamples * sizeof(int16_t));
-            portENTER_CRITICAL(&gSTTMux);
+            portENTER_CRITICAL(&gSttMux);
             run.draftSamples = liveSamples;
             run.draftSequence = nextSequence;
             run.draftTakenSamples = liveSamples;
@@ -1534,15 +1534,15 @@ static void sttCaptureWorker(void* context) {
               run.draftFeRows = std::min(run.fe[run.feLive].frames, liveSamples / 160);
             }
 #endif
-            portEXIT_CRITICAL(&gSTTMux);
+            portEXIT_CRITICAL(&gSttMux);
           }
         }
-        portENTER_CRITICAL(&gSTTMux);
-        gSTT.snapshot.recordedSamples = run.segmenter.samples_seen();
-        if (run.segmenter.calibrated()) gSTT.snapshot.state = STTState::Recording;
-        gSTT.snapshot.rms = run.segmenter.current_rms();
-        gSTT.snapshot.noiseRms = run.segmenter.noise_rms();
-        gSTT.snapshot.thresholdRms = run.segmenter.threshold_rms();
+        portENTER_CRITICAL(&gSttMux);
+        gStt.snapshot.recordedSamples = run.segmenter.samples_seen();
+        if (run.segmenter.calibrated()) gStt.snapshot.state = SttState::Recording;
+        gStt.snapshot.rms = run.segmenter.current_rms();
+        gStt.snapshot.noiseRms = run.segmenter.noise_rms();
+        gStt.snapshot.thresholdRms = run.segmenter.threshold_rms();
 #ifdef ESP_PLATFORM
         {
           // Timeline: once a second, the endpointing inputs (is a phrase open?).
@@ -1554,16 +1554,16 @@ static void sttCaptureWorker(void* context) {
             lastLevelLogMs = nowMs;
             const int16_t* openPcm = nullptr; size_t openSamples = 0;
             TLLevel& e = gTLLevels[gTLLevelHead++ % kTLLevels];
-            e.t = nowMs; e.rms = gSTT.snapshot.rms; e.noise = gSTT.snapshot.noiseRms;
-            e.thr = gSTT.snapshot.thresholdRms;
+            e.t = nowMs; e.rms = gStt.snapshot.rms; e.noise = gStt.snapshot.noiseRms;
+            e.thr = gStt.snapshot.thresholdRms;
             e.open = run.segmenter.in_progress(&openPcm, &openSamples);
           }
         }
 #endif
-        gSTT.snapshot.peakRms = run.segmenter.peak_rms();
-        gSTT.snapshot.level = level;
-        gSTT.snapshot.captureStackFreeBytes = uxTaskGetStackHighWaterMark(nullptr);
-        portEXIT_CRITICAL(&gSTTMux);
+        gStt.snapshot.peakRms = run.segmenter.peak_rms();
+        gStt.snapshot.level = level;
+        gStt.snapshot.captureStackFreeBytes = uxTaskGetStackHighWaterMark(nullptr);
+        portEXIT_CRITICAL(&gSttMux);
       } else vTaskDelay(pdMS_TO_TICKS(1));
       if (utteranceEnded) break;
       sttStreamTick(run);
@@ -1573,9 +1573,9 @@ static void sttCaptureWorker(void* context) {
         }
         // Conversate decides when the session ends (CLOSE, or the temple's
         // disconnect, which "source lost" above catches); keep waiting.
-        portENTER_CRITICAL(&gSTTMux);
+        portENTER_CRITICAL(&gSttMux);
         ++run.stalls;
-        portEXIT_CRITICAL(&gSTTMux);
+        portEXIT_CRITICAL(&gSttMux);
         lastAudioMs = millis();
       }
     }
@@ -1583,12 +1583,12 @@ static void sttCaptureWorker(void* context) {
     // several sessions to agree; see stt/stt_auto_gain.h).
     if (source == AUDIO_SRC_LOCAL_PDM && sessionGain && gSettings.sttAutoGain) {
       const auto& g = gainMeter.stats();
-      portENTER_CRITICAL(&gSTTMux);
-      const bool heard = gSTT.snapshot.segmentsCaptured > 0;
+      portENTER_CRITICAL(&gSttMux);
+      const bool heard = gStt.snapshot.segmentsCaptured > 0;
       const uint8_t wanted = heard ? hw1::stt::wantedAutoGain(sessionGain, g) : 0;
       const uint8_t next = gSttAutoGain.record(sessionGain, g, heard);
       const size_t kept = gSttAutoGain.size();
-      portEXIT_CRITICAL(&gSTTMux);
+      portEXIT_CRITICAL(&gSttMux);
 #ifdef ESP_PLATFORM
       ESP_LOGI("STT", "TL autogain used=%u wanted=%u next=%u history=%u loud3=%u clipped=%lu samples=%llu",
                unsigned(sessionGain), unsigned(wanted), unsigned(next), unsigned(kept), unsigned(g.loud[2]),
@@ -1609,9 +1609,9 @@ static void sttCaptureWorker(void* context) {
         // drop a concealed (PLC) mic frame. Record it, but still seal and
         // transcribe the tail instead of failing the whole session and
         // discarding it. Loss during recording is still a hard failure above.
-        portENTER_CRITICAL(&gSTTMux);
-        gSTT.snapshot.audioOverruns = finalOverruns;
-        portEXIT_CRITICAL(&gSTTMux);
+        portENTER_CRITICAL(&gSttMux);
+        gStt.snapshot.audioOverruns = finalOverruns;
+        portEXIT_CRITICAL(&gSttMux);
 #ifdef ESP_PLATFORM
         ESP_LOGW("STT", "audio integrity count %lu at stop; tail kept", (unsigned long)finalOverruns);
 #endif
@@ -1624,12 +1624,12 @@ static void sttCaptureWorker(void* context) {
         sttStreamFail(run, "Could not finish continuous audio segment");
     }
   } while (false);
-  portENTER_CRITICAL(&gSTTMux);
-  gSTT.snapshot.captureActive = false;
-  if (!gSTT.captureEndedMs) gSTT.captureEndedMs = millis();
-  gSTT.snapshot.state = STTState::Stopping;
-  gSTT.snapshot.level = 0;
-  portEXIT_CRITICAL(&gSTTMux);
+  portENTER_CRITICAL(&gSttMux);
+  gStt.snapshot.captureActive = false;
+  if (!gStt.captureEndedMs) gStt.captureEndedMs = millis();
+  gStt.snapshot.state = SttState::Stopping;
+  gStt.snapshot.level = 0;
+  portEXIT_CRITICAL(&gSttMux);
   if (claimed || audioCaptureOwnedBy("stt")) {
     audioCaptureStop("stt");
     while (audioCaptureOwnedBy("stt")) vTaskDelay(pdMS_TO_TICKS(10));
@@ -1642,10 +1642,10 @@ static void sttCaptureWorker(void* context) {
 #endif
   sttWipe(block, sizeof(block));
   // Publish join last: the parent may now free run.working and its own stack.
-  portENTER_CRITICAL(&gSTTMux);
-  gSTT.snapshot.captureStackFreeBytes = uxTaskGetStackHighWaterMark(nullptr);
+  portENTER_CRITICAL(&gSttMux);
+  gStt.snapshot.captureStackFreeBytes = uxTaskGetStackHighWaterMark(nullptr);
   run.captureDone = true;
-  portEXIT_CRITICAL(&gSTTMux);
+  portEXIT_CRITICAL(&gSttMux);
   vTaskDelete(nullptr);
 }
 #if HW1_STT_CAPTURE_FEATURES
@@ -1655,29 +1655,29 @@ static void sttCaptureWorker(void* context) {
 static void sttFeatureRetireOrphans(StreamRun& run) {
   for (int i = 0; i < kFeCaches; ++i) {
     size_t used = 0;
-    portENTER_CRITICAL(&gSTTMux);
+    portENTER_CRITICAL(&gSttMux);
     const bool orphan = run.fe[i].state == FeState::Orphan;
     if (orphan) used = run.fe[i].frames;
-    portEXIT_CRITICAL(&gSTTMux);
+    portEXIT_CRITICAL(&gSttMux);
     if (!orphan) continue;
     sttWipe(run.fe[i].rows, std::min(used + kFeBatchRows, kFeMaxRows) * kFeRowFloats * sizeof(float));
-    portENTER_CRITICAL(&gSTTMux);
+    portENTER_CRITICAL(&gSttMux);
     run.fe[i].state = FeState::Free; ++run.fe[i].gen;
-    portEXIT_CRITICAL(&gSTTMux);
+    portEXIT_CRITICAL(&gSttMux);
   }
 }
 static void sttFeatureRelease(StreamRun& run, int idx, uint32_t gen) {
   if (idx < 0) return;
   size_t used = 0;
-  portENTER_CRITICAL(&gSTTMux);
+  portENTER_CRITICAL(&gSttMux);
   const bool mine = run.fe[idx].gen == gen && run.fe[idx].state == FeState::Attached;
   if (mine) used = run.fe[idx].frames;
-  portEXIT_CRITICAL(&gSTTMux);
+  portEXIT_CRITICAL(&gSttMux);
   if (!mine) return;
   sttWipe(run.fe[idx].rows, std::min(used + kFeBatchRows, kFeMaxRows) * kFeRowFloats * sizeof(float));
-  portENTER_CRITICAL(&gSTTMux);
+  portENTER_CRITICAL(&gSttMux);
   run.fe[idx].state = FeState::Free; ++run.fe[idx].gen;
-  portEXIT_CRITICAL(&gSTTMux);
+  portEXIT_CRITICAL(&gSttMux);
 }
 // After the warm-up (weights and LM loaded): allocate the pool and start the
 // feature task, or leave capture-time features off for this session. The pool
@@ -1687,12 +1687,12 @@ static void sttFeatureRelease(StreamRun& run, int idx, uint32_t gen) {
 // call's frontend; with per-call models its arena, frontend and metadata
 // margin, ~3.7 MB, ~3.1 MB of it contiguous), plus 1 MiB for LM beams, and
 // never less than 2 MiB. Freed again at session end (sttFeatureStop).
-static void sttFeatureStart(StreamRun& run, const STTLocalSession& session) {
+static void sttFeatureStart(StreamRun& run, const SttLocalSession& session) {
   constexpr size_t kRowsBytes = kFeMaxRows * kFeRowFloats * sizeof(float);
   constexpr size_t kPoolBytes = kFeCaches * kRowsBytes + kFeRingSamples * sizeof(int16_t) +
                                 sizeof(hw1::stt::FrontendWorkspace);
   const char* why = nullptr;
-  const STTLocalCallBudget call = sttLocalCallBudget(kStreamSamples, &session);
+  const SttLocalCallBudget call = sttLocalCallBudget(kStreamSamples, &session);
   const size_t keepFree = std::max<size_t>(2u << 20, call.total + (1u << 20));
 #ifdef ESP_PLATFORM
   if (heap_caps_get_free_size(MALLOC_CAP_SPIRAM) < kPoolBytes + keepFree) why = "psram";
@@ -1715,25 +1715,25 @@ static void sttFeatureStart(StreamRun& run, const STTLocalSession& session) {
     why = "contiguous";
 #endif
   if (!why) {
-    portENTER_CRITICAL(&gSTTMux);
+    portENTER_CRITICAL(&gSttMux);
     for (int i = 0; i < kFeCaches; ++i) run.fe[i].rows = rows[i];
     run.feWork = work;
     run.feRunning = true;
-    portEXIT_CRITICAL(&gSTTMux);
+    portEXIT_CRITICAL(&gSttMux);
     TaskHandle_t task = nullptr;
     taskStackRecord("stt_fe", kFeStackBytes);
     if (xTaskCreatePinnedToCore(sttFeatureWorker, "stt_fe", kFeStackBytes, &run, 1, &task, 0) != pdPASS) {
-      portENTER_CRITICAL(&gSTTMux);
+      portENTER_CRITICAL(&gSttMux);
       run.feRunning = false;
       for (auto& c : run.fe) c.rows = nullptr;
       run.feWork = nullptr;
-      portEXIT_CRITICAL(&gSTTMux);
+      portEXIT_CRITICAL(&gSttMux);
       why = "task";
     } else {
-      portENTER_CRITICAL(&gSTTMux);
+      portENTER_CRITICAL(&gSttMux);
       run.feTask = task;
       run.feRing = ring;  // last: the capture task starts feeding it now
-      portEXIT_CRITICAL(&gSTTMux);
+      portEXIT_CRITICAL(&gSttMux);
     }
   }
   if (why) {
@@ -1754,13 +1754,13 @@ static void sttFeatureStop(StreamRun& run) {
   // No notification here: the task may already be deleting itself. It wakes
   // at least every 20 ms, sees feStop, clears feRunning as its last access
   // to `run`, and deletes itself.
-  portENTER_CRITICAL(&gSTTMux);
+  portENTER_CRITICAL(&gSttMux);
   run.feStop = true;
-  portEXIT_CRITICAL(&gSTTMux);
+  portEXIT_CRITICAL(&gSttMux);
   for (;;) {
-    portENTER_CRITICAL(&gSTTMux);
+    portENTER_CRITICAL(&gSttMux);
     const bool running = run.feRunning;
-    portEXIT_CRITICAL(&gSTTMux);
+    portEXIT_CRITICAL(&gSttMux);
     if (!running) break;
     vTaskDelay(pdMS_TO_TICKS(2));
   }
@@ -1772,17 +1772,17 @@ static void sttFeatureStop(StreamRun& run) {
 }
 #endif
 #if HW1_STT_SPEAKER_LABELS
-static void sttStartSpeakers(STTLocalSession& backendSession, STTToken token,
+static void sttStartSpeakers(SttLocalSession& backendSession, SttToken token,
                              bool primaryReady, bool requested) {
   if (!primaryReady || !requested) return;
-  STTSpeakerStatus sp;
+  SttSpeakerStatus sp;
   (void)sttSpeakerBegin(&backendSession, kStreamSamples, &sp);
-  portENTER_CRITICAL(&gSTTMux);
-  if (gSTT.snapshot.token == token && !gSTT.cancelRequested) {
-    gSTT.speakers.available = sp.ready;
-    ++gSTT.speakers.version;
+  portENTER_CRITICAL(&gSttMux);
+  if (gStt.snapshot.token == token && !gStt.cancelRequested) {
+    gStt.speakers.available = sp.ready;
+    ++gStt.speakers.version;
   }
-  portEXIT_CRITICAL(&gSTTMux);
+  portEXIT_CRITICAL(&gSttMux);
 #ifdef ESP_PLATFORM
   ESP_LOGI("STT", "TL spk_load ok=%d why=%s bytes=%u psram_used=%u int_used=%ld ms=%lu th=%.2f fixture_cos=%.4f psram_free=%u",
            sp.ready ? 1 : 0, sp.why[0] ? sp.why : "none", unsigned(sp.bytes), unsigned(sp.psramUsed),
@@ -1801,21 +1801,21 @@ static void sttStartSpeakers(STTLocalSession& backendSession, STTToken token,
 // broker lock. A late result may update a retained phrase, never resurrect one
 // dropped from the bounded history, cancelled, or owned by another run.
 static void sttSpeakerPendingLocked(uint32_t sequence) {
-  auto& history = gSTT.speakers;
+  auto& history = gStt.speakers;
   if (!history.available) return;
   if (history.count == STT_SPEAKER_HISTORY) {
     memmove(history.entries, history.entries + 1,
             (STT_SPEAKER_HISTORY - 1) * sizeof(history.entries[0]));
     --history.count;
   }
-  history.entries[history.count++] = STTSpeakerEntry{sequence, -1, false};
+  history.entries[history.count++] = SttSpeakerEntry{sequence, -1, false};
   ++history.version;
 }
-static void sttPublishSpeaker(STTToken token, uint32_t sequence, int8_t speaker) {
+static void sttPublishSpeaker(SttToken token, uint32_t sequence, int8_t speaker) {
   bool attributed = false;
-  portENTER_CRITICAL(&gSTTMux);
-  if (gSTT.snapshot.token == token && !gSTT.cancelRequested) {
-    auto& history = gSTT.speakers;
+  portENTER_CRITICAL(&gSttMux);
+  if (gStt.snapshot.token == token && !gStt.cancelRequested) {
+    auto& history = gStt.speakers;
     for (size_t i = 0; i < history.count; ++i) {
       auto& entry = history.entries[i];
       if (entry.sequence != sequence) continue;
@@ -1828,7 +1828,7 @@ static void sttPublishSpeaker(STTToken token, uint32_t sequence, int8_t speaker)
       break;
     }
   }
-  portEXIT_CRITICAL(&gSTTMux);
+  portEXIT_CRITICAL(&gSttMux);
 #ifdef ESP_PLATFORM
   if (attributed) {
     char spk[8], seg[16];
@@ -1840,10 +1840,10 @@ static void sttPublishSpeaker(STTToken token, uint32_t sequence, int8_t speaker)
   (void)attributed;
 #endif
 }
-static void sttFinishSpeakers(STTToken token) {
-  portENTER_CRITICAL(&gSTTMux);
-  if (gSTT.snapshot.token == token && !gSTT.cancelRequested) {
-    auto& history = gSTT.speakers;
+static void sttFinishSpeakers(SttToken token) {
+  portENTER_CRITICAL(&gSttMux);
+  if (gStt.snapshot.token == token && !gStt.cancelRequested) {
+    auto& history = gStt.speakers;
     for (size_t i = 0; i < history.count; ++i) {
       if (!history.entries[i].ready) {
         history.entries[i].ready = true; // Bounded drain expired: unknown.
@@ -1851,7 +1851,7 @@ static void sttFinishSpeakers(STTToken token) {
       }
     }
   }
-  portEXIT_CRITICAL(&gSTTMux);
+  portEXIT_CRITICAL(&gSttMux);
 }
 // Speaker labels: saved transcript lines wait (up to kLabelWaitMs) for their phrase's speaker label from the background
 // task, then go out strictly in sequence as "[Person N] text" (plain text when the phrase was skipped, the label
@@ -1877,8 +1877,8 @@ struct LabelledTranscript {
     if (lines) { sttWipe(lines, kLabelledLines * sizeof(LabelledLine)); heap_caps_free(lines); }
   }
 };
-void sttLabelledPump(LabelledTranscript& lt, STTLocalSession& session, TranscriptSession& transcript,
-                     STTToken token, bool flushAll) {
+void sttLabelledPump(LabelledTranscript& lt, SttLocalSession& session, TranscriptSession& transcript,
+                     SttToken token, bool flushAll) {
   uint32_t seq = 0;
   int8_t speaker = -1;
   while (sttSpeakerTakeLabel(&session, &seq, &speaker)) {
@@ -1913,7 +1913,7 @@ void sttLabelledPump(LabelledTranscript& lt, STTLocalSession& session, Transcrip
   if (wrote) sttPublishTranscript(token, transcript.snapshot());
 }
 // False: no ring (allocation failed) - the caller appends directly, keeping the sequence order.
-bool sttLabelledQueue(LabelledTranscript& lt, STTLocalSession& session, TranscriptSession& transcript, STTToken token,
+bool sttLabelledQueue(LabelledTranscript& lt, SttLocalSession& session, TranscriptSession& transcript, SttToken token,
                       uint32_t seq, const char* text) {
   if (!lt.lines && !lt.tried) {
     lt.tried = true;
@@ -1942,18 +1942,18 @@ bool sttLabelledQueue(LabelledTranscript& lt, STTLocalSession& session, Transcri
 #endif
 static void sttContinuousWorker(void*) {
   StreamRun run;
-  STTLocalSession backendSession;
+  SttLocalSession backendSession;
   TranscriptOptions transcriptOptions;
-  portENTER_CRITICAL(&gSTTMux);
-  run.token = gSTT.snapshot.token;
-  run.requested = gSTT.requestedSource;
-  run.nativeGeneration = gSTT.nativeG2Generation;
-  run.singleUtterance = gSTT.singleUtterance;
-  run.speakerLabels = gSTT.speakerLabels;
-  run.publishWake = gSTT.publishWake;
+  portENTER_CRITICAL(&gSttMux);
+  run.token = gStt.snapshot.token;
+  run.requested = gStt.requestedSource;
+  run.nativeGeneration = gStt.nativeG2Generation;
+  run.singleUtterance = gStt.singleUtterance;
+  run.speakerLabels = gStt.speakerLabels;
+  run.publishWake = gStt.publishWake;
   run.clockMs = millis();
-  transcriptOptions = gSTT.transcriptOptions;
-  portEXIT_CRITICAL(&gSTTMux);
+  transcriptOptions = gStt.transcriptOptions;
+  portEXIT_CRITICAL(&gSttMux);
   TranscriptSession transcript;
   transcript.begin(transcriptOptions, "local", run.token);
   sttPublishTranscript(run.token, transcript.snapshot());
@@ -1976,9 +1976,9 @@ static void sttContinuousWorker(void*) {
         (run.requested == AUDIO_SRC_NONE && !audioSourceAvailable(AUDIO_SRC_LOCAL_PDM) &&
          audioSourceAvailable(AUDIO_SRC_G2_LEFT));
     const SttDetectorProfile profile = sttDetectorProfileFor(onGlasses);
-    portENTER_CRITICAL(&gSTTMux);
+    portENTER_CRITICAL(&gSttMux);
     gSttActiveProfile = profile;
-    portEXIT_CRITICAL(&gSTTMux);
+    portEXIT_CRITICAL(&gSttMux);
     // Settings shared with host replay (stt/stt_continuous_config.h).
     const hw1::stt::SegmenterConfig segmentConfig = hw1::stt::continuousSegmenterConfig(
         STT_SAMPLE_RATE, kStreamSamples, HW1_STT_SHORT_CLOSE != 0, run.singleUtterance,
@@ -2006,14 +2006,14 @@ static void sttContinuousWorker(void*) {
       if (silence) {
         char warmText[STT_MAX_TEXT + 1] = {};
         char warmError[96] = {};
-        STTLocalStats warmStats;
-        const STTLocalControl warmControl{&run, sttStreamCancelled, sttStreamProgress};
+        SttLocalStats warmStats;
+        const SttLocalControl warmControl{&run, sttStreamCancelled, sttStreamProgress};
         const uint32_t warmStart = millis();
         const bool warmed = sttLocalTranscribe(silence, kWarmSamples, warmText, sizeof(warmText), warmControl,
                                                warmStats, warmError, sizeof(warmError), &backendSession);
         heap_caps_free(silence);
-        ESP_LOGI("STT", "TL capture_start t=%lu source=%u", (unsigned long)gSTT.captureStartedMs,
-                 unsigned(gSTT.captureSource));
+        ESP_LOGI("STT", "TL capture_start t=%lu source=%u", (unsigned long)gStt.captureStartedMs,
+                 unsigned(gStt.captureSource));
         // PSRAM after the model and LM are resident: the room a larger LM has.
         ESP_LOGI("STT", "TL warm s=%lu e=%lu load=%lu ok=%d lm=%d cpu=%luMHz psram_free=%u psram_largest=%u",
                  (unsigned long)warmStart, (unsigned long)millis(), (unsigned long)warmStats.loadMs,
@@ -2025,7 +2025,7 @@ static void sttContinuousWorker(void*) {
 #endif
         if (!warmed)
           ESP_LOGW("STT", "warm-up failed: %s", warmError[0] ? warmError : "unknown error");
-        if (gSTTPerfLog)
+        if (gSttPerfLog)
           INFO_SYSTEMF("[STTPERF] warm-up %s in %lu ms (load %lu, lm %s)", warmed ? "ok" : warmError,
                        (unsigned long)(millis() - warmStart), (unsigned long)warmStats.loadMs,
                        warmStats.lmUsed ? "ready" : "not used");
@@ -2050,7 +2050,7 @@ static void sttContinuousWorker(void*) {
 #if HW1_STT_SPEAKER_DIAGNOSTICS
       // Per-layer speaker trunk profile (TL spkstg), 240 s after capture start: the
       // conversation playlists end by ~233 s and the harness reads 20 s past the end.
-      if (run.speakerLabels && !speakerProfileDumped && gSTT.captureStartedMs && millis() - gSTT.captureStartedMs > 240000) {
+      if (run.speakerLabels && !speakerProfileDumped && gStt.captureStartedMs && millis() - gStt.captureStartedMs > 240000) {
         speakerProfileDumped = true;
         sttSpeakerProfileLog();
       }
@@ -2058,7 +2058,7 @@ static void sttContinuousWorker(void*) {
 #endif
       StreamSlot* slot = nullptr;
       bool captureDone;
-      portENTER_CRITICAL(&gSTTMux);
+      portENTER_CRITICAL(&gSttMux);
       captureDone = run.captureDone;
       for (auto& candidate : run.slots) {
         if (candidate.state == StreamSlotState::Ready &&
@@ -2066,10 +2066,10 @@ static void sttContinuousWorker(void*) {
       }
       if (slot) {
         slot->state = StreamSlotState::Processing;
-        --gSTT.snapshot.pendingAudio;
-        gSTT.snapshot.inferenceActive = true;
+        --gStt.snapshot.pendingAudio;
+        gStt.snapshot.inferenceActive = true;
       }
-      portEXIT_CRITICAL(&gSTTMux);
+      portEXIT_CRITICAL(&gSttMux);
       if (sttStreamCancelled(&run)) break;
       if (!slot) {
         if (captureDone) break;
@@ -2085,12 +2085,12 @@ static void sttContinuousWorker(void*) {
         size_t specSamples = 0;
         uint32_t specId = 0, specSeq = 0, staleDone = 0, staleSnapshot = 0;
         uint64_t specA0 = 0;
-        STTFeaturePrefix specPrefix;  // capture-time rows (HW1_STT_CAPTURE_FEATURES)
-        portENTER_CRITICAL(&gSTTMux);
+        SttFeaturePrefix specPrefix;  // capture-time rows (HW1_STT_CAPTURE_FEATURES)
+        portENTER_CRITICAL(&gSttMux);
         if (run.specDoneId && !sttSpecReferencedLocked(run, run.specDoneId)) {
           staleDone = run.specDoneId; run.specDoneId = 0;
         }
-        if (run.specReady && !run.failed && !gSTT.cancelRequested) {
+        if (run.specReady && !run.failed && !gStt.cancelRequested) {
           run.specReady = false;
           if (sttSpecReferencedLocked(run, run.specReadyId)) {
             speculating = run.specBusy = true;
@@ -2116,7 +2116,7 @@ static void sttContinuousWorker(void*) {
             staleSnapshot = run.specReadyId;
           }
         }
-        portEXIT_CRITICAL(&gSTTMux);
+        portEXIT_CRITICAL(&gSttMux);
         if (staleDone) sttWipe(gSpecText, sizeof(gSpecText));
 #ifdef ESP_PLATFORM
         if (staleDone)
@@ -2128,13 +2128,13 @@ static void sttContinuousWorker(void*) {
 #endif
         if (speculating) {
           char specError[96] = {};
-          STTLocalStats specStats;
-          const STTLocalControl specControl{&run, sttSpecPreempted, sttStreamProgress};
+          SttLocalStats specStats;
+          const SttLocalControl specControl{&run, sttSpecPreempted, sttStreamProgress};
           const uint32_t specStart = millis();
 #ifdef ESP_PLATFORM
           // a0: phrase start on the TL seg clock (capture start + samples).
           ESP_LOGI("STT", "TL spec_start seq=%lu id=%lu a0=%lu samples=%u t=%lu", (unsigned long)specSeq,
-                   (unsigned long)specId, (unsigned long)(gSTT.captureStartedMs + specA0 / (STT_SAMPLE_RATE / 1000)),
+                   (unsigned long)specId, (unsigned long)(gStt.captureStartedMs + specA0 / (STT_SAMPLE_RATE / 1000)),
                    unsigned(specSamples), (unsigned long)specStart);
 #else
           (void)specA0; (void)specSeq;
@@ -2143,15 +2143,15 @@ static void sttContinuousWorker(void*) {
                                              specStats, specError, sizeof(specError), &backendSession,
                                              specPrefix.count ? &specPrefix : nullptr);
           bool kept = false;
-          portENTER_CRITICAL(&gSTTMux);
+          portENTER_CRITICAL(&gSttMux);
           run.specBusy = false;
-          if (ok && memchr(gSpecText, '\0', sizeof(gSpecText)) && !run.failed && !gSTT.cancelRequested &&
+          if (ok && memchr(gSpecText, '\0', sizeof(gSpecText)) && !run.failed && !gStt.cancelRequested &&
               sttSpecReferencedLocked(run, specId)) {
             run.specDoneId = specId; run.specDoneSamples = specSamples;
             run.specDoneStartMs = specStart; run.specDoneStats = specStats;
             kept = true;
           }
-          portEXIT_CRITICAL(&gSTTMux);
+          portEXIT_CRITICAL(&gSttMux);
           if (!kept) sttWipe(gSpecText, sizeof(gSpecText));
 #ifdef ESP_PLATFORM
           // cached = feature rows this run took from the capture-time cache.
@@ -2172,9 +2172,9 @@ static void sttContinuousWorker(void*) {
         bool drafting = false;
         size_t draftSamples = 0;
         uint32_t draftSequence = 0;
-        STTFeaturePrefix draftPrefix;  // capture-time rows (HW1_STT_CAPTURE_FEATURES)
-        portENTER_CRITICAL(&gSTTMux);
-        if (run.draftReady && !run.failed && !gSTT.cancelRequested) {
+        SttFeaturePrefix draftPrefix;  // capture-time rows (HW1_STT_CAPTURE_FEATURES)
+        portENTER_CRITICAL(&gSttMux);
+        if (run.draftReady && !run.failed && !gStt.cancelRequested) {
           run.draftReady = false; run.draftBusy = drafting = true; run.draftPastPcm = false;
           draftSamples = std::max(run.draftSamples, size_t(320));
           draftSequence = run.draftSequence;
@@ -2187,38 +2187,38 @@ static void sttContinuousWorker(void*) {
           run.draftFe = -1;
 #endif
         }
-        portEXIT_CRITICAL(&gSTTMux);
+        portEXIT_CRITICAL(&gSttMux);
         if (drafting) {
           if (draftSamples > run.draftSamples)
             memset(run.draftPcm + run.draftSamples, 0, (draftSamples - run.draftSamples) * sizeof(int16_t));
           char draftText[STT_MAX_TEXT + 1] = {};
           char draftError[96] = {};
-          STTLocalStats draftStats;
-          const STTLocalControl draftControl{&run, sttDraftPreempted, sttDraftProgress};
+          SttLocalStats draftStats;
+          const SttLocalControl draftControl{&run, sttDraftPreempted, sttDraftProgress};
           const uint32_t draftStart = millis();
           const bool ok = sttLocalTranscribe(run.draftPcm, draftSamples, draftText, sizeof(draftText), draftControl,
                                              draftStats, draftError, sizeof(draftError), &backendSession,
                                              draftPrefix.count ? &draftPrefix : nullptr);
 #if HW1_STT_CAPTURE_FEATURES
-          portENTER_CRITICAL(&gSTTMux);
+          portENTER_CRITICAL(&gSttMux);
           run.feDraftRows += draftStats.featureCachedFrames;
-          portEXIT_CRITICAL(&gSTTMux);
+          portEXIT_CRITICAL(&gSttMux);
 #endif
           bool draftPublished = false;
-          portENTER_CRITICAL(&gSTTMux);
+          portENTER_CRITICAL(&gSttMux);
           // Publish only while its final chunk has not been produced yet.
-          if (ok && memchr(draftText, '\0', sizeof(draftText)) && !gSTT.cancelRequested && !run.failed &&
-              gSTT.snapshot.segmentsCompleted < draftSequence) {
-            memcpy(gSTT.draft.text, draftText, sizeof(draftText));
-            gSTT.draft.sequence = draftSequence;
-            ++gSTT.draft.version;
+          if (ok && memchr(draftText, '\0', sizeof(draftText)) && !gStt.cancelRequested && !run.failed &&
+              gStt.snapshot.segmentsCompleted < draftSequence) {
+            memcpy(gStt.draft.text, draftText, sizeof(draftText));
+            gStt.draft.sequence = draftSequence;
+            ++gStt.draft.version;
             draftPublished = true;
           }
           run.draftBusy = false; run.draftPastPcm = false;
           if (ok) run.lastDraftMs = millis() - draftStart;
-          portEXIT_CRITICAL(&gSTTMux);
+          portEXIT_CRITICAL(&gSttMux);
 #if HW1_STT_PUBLISH_WAKE
-          // Wake the consumer now (never inside gSTTMux) rather than at its
+          // Wake the consumer now (never inside gSttMux) rather than at its
           // next poll; the console write below then follows its read.
           if (draftPublished && run.publishWake) run.publishWake();
 #else
@@ -2230,7 +2230,7 @@ static void sttContinuousWorker(void*) {
                    (unsigned long)draftStart, (unsigned long)millis(), ok ? 1 : 0);
 #endif
           sttWipe(draftText, sizeof(draftText));
-          if (gSTTPerfLog)
+          if (gSttPerfLog)
             INFO_SYSTEMF("[STTPERF] draft seq %lu audio %.1fs in %lu ms (%s)", (unsigned long)draftSequence,
                          draftSamples / (double)STT_SAMPLE_RATE,
                          (unsigned long)(draftStats.loadMs + draftStats.frontendMs + draftStats.inferenceMs + draftStats.decodeMs),
@@ -2246,16 +2246,16 @@ static void sttContinuousWorker(void*) {
       }
       char text[STT_MAX_TEXT + 1] = {};
       char error[96] = {};
-      STTLocalStats stats;
-      const STTLocalControl control{&run, sttStreamCancelled, sttStreamProgress};
-      STTPerfRecord perf;
+      SttLocalStats stats;
+      const SttLocalControl control{&run, sttStreamCancelled, sttStreamProgress};
+      SttPerfRecord perf;
       perf.sequence = slot->sequence;
       perf.audioMs = static_cast<uint32_t>(slot->samples / (STT_SAMPLE_RATE / 1000));
       perf.queuedMs = slot->queuedMs;
       perf.startMs = millis();
-      portENTER_CRITICAL(&gSTTMux);
-      perf.backlog = static_cast<uint8_t>(gSTT.snapshot.pendingAudio);
-      portEXIT_CRITICAL(&gSTTMux);
+      portENTER_CRITICAL(&gSttMux);
+      perf.backlog = static_cast<uint8_t>(gStt.snapshot.pendingAudio);
+      portEXIT_CRITICAL(&gSttMux);
 #ifdef ESP_PLATFORM
       sttTaskSample(gPerfBefore);
 #endif
@@ -2282,14 +2282,14 @@ static void sttContinuousWorker(void*) {
       // Promote a finished speculative run on exactly this input.
       bool promoted = false;
       uint32_t promotedId = 0;
-      portENTER_CRITICAL(&gSTTMux);
+      portENTER_CRITICAL(&gSttMux);
       if (slot->specId && slot->specId == run.specDoneId) {
         promotedId = run.specDoneId;
         promoted = run.specDoneSamples == inferenceSamples;
         if (promoted) { stats = run.specDoneStats; perf.startMs = run.specDoneStartMs; }
         run.specDoneId = 0;
       }
-      portEXIT_CRITICAL(&gSTTMux);
+      portEXIT_CRITICAL(&gSttMux);
       bool ok = promoted;
       if (promoted) memcpy(text, gSpecText, sizeof(text));
 #else
@@ -2297,7 +2297,7 @@ static void sttContinuousWorker(void*) {
       bool ok = false;
 #endif
       if (!promoted) {
-        STTFeaturePrefix prefix;
+        SttFeaturePrefix prefix;
 #if HW1_STT_CAPTURE_FEATURES
         // Rows computed during capture for this phrase. The trim may infer
         // only a prefix (voiced end + 500 ms); then only the cached rows whose
@@ -2306,13 +2306,13 @@ static void sttContinuousWorker(void*) {
         // end, so it equals the batch frontend's row of the trimmed input; the
         // runtime computes the rest on the trimmed PCM. A zero-padded input
         // (< 320 samples captured) has no cache (none is attached).
-        portENTER_CRITICAL(&gSTTMux);
+        portENTER_CRITICAL(&gSttMux);
         if (slot->fe >= 0 && slot->feRows && run.fe[slot->fe].gen == slot->feGen &&
             run.fe[slot->fe].state == FeState::Attached && inferenceSamples <= slot->samples) {
           prefix.rows = run.fe[slot->fe].rows;
           prefix.count = std::min(slot->feRows, inferenceSamples / 160);
         }
-        portEXIT_CRITICAL(&gSTTMux);
+        portEXIT_CRITICAL(&gSttMux);
 #endif
         ok = sttLocalTranscribe(slot->pcm, inferenceSamples, text, sizeof(text), control,
                                 stats, error, sizeof(error), &backendSession,
@@ -2323,10 +2323,10 @@ static void sttContinuousWorker(void*) {
 #endif
 #if HW1_STT_CAPTURE_FEATURES
       // Feature counters; a promoted final counts with its speculative run's rows.
-      portENTER_CRITICAL(&gSTTMux);
+      portENTER_CRITICAL(&gSttMux);
       ++run.feFinals;
       if (stats.featureCachedFrames) { ++run.feCachedFinals; run.feCachedRows += stats.featureCachedFrames; }
-      portEXIT_CRITICAL(&gSTTMux);
+      portEXIT_CRITICAL(&gSttMux);
 #endif
       bool acceptedFinal = false;
       bool acceptedText = false;
@@ -2339,13 +2339,13 @@ static void sttContinuousWorker(void*) {
           // a text turn. Preserve only its ordered transcript sequence marker;
           // do not write a line or let its audio seed speaker clusters.
           const bool hasText = text[strspn(text, " \t\r\n")] != '\0';
-          portENTER_CRITICAL(&gSTTMux);
-          if (!gSTT.cancelRequested && !run.failed &&
-              (!hasText || gSTT.snapshot.pendingTexts < kTextQueueDepth)) {
-            ++gSTT.snapshot.segmentsCompleted;
+          portENTER_CRITICAL(&gSttMux);
+          if (!gStt.cancelRequested && !run.failed &&
+              (!hasText || gStt.snapshot.pendingTexts < kTextQueueDepth)) {
+            ++gStt.snapshot.segmentsCompleted;
             acceptedFinal = true;
             if (hasText) {
-              auto& chunk = gSTTChunks[(gSTT.textHead + gSTT.snapshot.pendingTexts) % kTextQueueDepth];
+              auto& chunk = gSttChunks[(gStt.textHead + gStt.snapshot.pendingTexts) % kTextQueueDepth];
               chunk.sequence = slot->sequence;
 #if HW1_STT_SPEAKER_LABELS
               sttSpeakerPendingLocked(slot->sequence);
@@ -2354,29 +2354,29 @@ static void sttContinuousWorker(void*) {
               chunk.endSample = slot->end;
               chunk.forcedBoundary = slot->forced;
               memcpy(chunk.text, text, sizeof(chunk.text));
-              ++gSTT.snapshot.pendingTexts;
-              gSTT.snapshot.textReady = true;
+              ++gStt.snapshot.pendingTexts;
+              gStt.snapshot.textReady = true;
               acceptedText = true;
               tlPubMs = millis();
             }
-            if (gSTT.draft.sequence && gSTT.draft.sequence <= slot->sequence) {
+            if (gStt.draft.sequence && gStt.draft.sequence <= slot->sequence) {
               // The final text supersedes the draft for this utterance.
-              volatile char* d = gSTT.draft.text;
-              for (size_t i = 0; i < sizeof(gSTT.draft.text); ++i) d[i] = 0;
-              gSTT.draft.sequence = 0;
-              ++gSTT.draft.version;
+              volatile char* d = gStt.draft.text;
+              for (size_t i = 0; i < sizeof(gStt.draft.text); ++i) d[i] = 0;
+              gStt.draft.sequence = 0;
+              ++gStt.draft.version;
             }
-          } else if (!gSTT.cancelRequested && !run.failed) {
+          } else if (!gStt.cancelRequested && !run.failed) {
             run.failed = true;
-            snprintf(gSTT.snapshot.error, sizeof(gSTT.snapshot.error), "%s", "STT text queue full; receiver must acknowledge results");
+            snprintf(gStt.snapshot.error, sizeof(gStt.snapshot.error), "%s", "STT text queue full; receiver must acknowledge results");
           }
-          portEXIT_CRITICAL(&gSTTMux);
+          portEXIT_CRITICAL(&gSttMux);
           if (acceptedFinal) {
 #if HW1_STT_PUBLISH_WAKE
             // Empty finals also wake readers so superseded drafts disappear.
             // Wake the consumer first (Conversate's caption pump) so the
             // console write below is not part of its publish-to-read time.
-            // Outside gSTTMux: the woken task may preempt this one.
+            // Outside gSttMux: the woken task may preempt this one.
             if (run.publishWake) run.publishWake();
 #endif
 #ifdef ESP_PLATFORM
@@ -2419,7 +2419,7 @@ static void sttContinuousWorker(void*) {
         // another audio final queues, preserving capture headroom. Use recognition's audio,
         // excluding the minimum-length zero padding used by its frontend.
         // Hand the phrase to the background labelling task; inline only if it has none.
-        STTSpeakerLabel spk;
+        SttSpeakerLabel spk;
         if (sttSpeakerSubmit(&backendSession, slot->sequence, slot->pcm, retainedSamples, control, sttSpeakerCanWait)) {
         } else if (sttSpeakerLabel(&backendSession, slot->pcm, retainedSamples, &spk)) {
           sttPublishSpeaker(run.token, slot->sequence, spk.speaker);
@@ -2454,7 +2454,7 @@ static void sttContinuousWorker(void*) {
         // One timeline record per finished phrase, all times ms since boot:
         // audio a0..a1, closed q, inference start s (after model build m,
         // frontend f, network n, decode d), saved sv0..sv1, done e.
-        const uint32_t base = gSTT.captureStartedMs;
+        const uint32_t base = gStt.captureStartedMs;
         // lm: this phrase was LM-decoded; psram_min: PSRAM low-water mark since
         // boot (includes this phrase's inference arena and LM workspace).
         // int_free/int_min: internal RAM now and its low-water mark since
@@ -2532,17 +2532,17 @@ static void sttContinuousWorker(void*) {
 #ifdef ESP_PLATFORM
       if (sttTaskSample(gPerfAfter)) sttTaskShares(perf);
 #endif
-      if (gSTTPerfLog) {
+      if (gSttPerfLog) {
         char line[512];
         sttPerfFormat(perf, line, sizeof(line));
         INFO_SYSTEMF("[STTPERF] %s", line);
       }
-      portENTER_CRITICAL(&gSTTMux);
-      gSTTPerf[gSTTPerfCount++ % kPerfRecords] = perf;
-      gSTT.snapshot.stats = stats;
-      gSTT.snapshot.inferenceActive = false;
+      portENTER_CRITICAL(&gSttMux);
+      gSttPerf[gSttPerfCount++ % kPerfRecords] = perf;
+      gStt.snapshot.stats = stats;
+      gStt.snapshot.inferenceActive = false;
       slot->state = StreamSlotState::Free;
-      portEXIT_CRITICAL(&gSTTMux);
+      portEXIT_CRITICAL(&gSttMux);
       sttStreamTick(run);
       sttDrainLevelLog(run);
     }
@@ -2558,9 +2558,9 @@ static void sttContinuousWorker(void*) {
   // callback sees the same fence. Never free buffers while either task uses them.
   if (captureStarted) {
     for (;;) {
-      portENTER_CRITICAL(&gSTTMux);
+      portENTER_CRITICAL(&gSttMux);
       const bool done = run.captureDone;
-      portEXIT_CRITICAL(&gSTTMux);
+      portEXIT_CRITICAL(&gSttMux);
       if (done) break;
       vTaskDelay(pdMS_TO_TICKS(10));
     }
@@ -2610,24 +2610,24 @@ static void sttContinuousWorker(void*) {
   // mailbox, but cannot rewrite this already-admitted final outcome.
   transcript.finish(cancelled ? "cancelled" : run.failed ? "failed" : "done");
   sttPublishTranscript(run.token, transcript.snapshot());
-  portENTER_CRITICAL(&gSTTMux);
+  portENTER_CRITICAL(&gSttMux);
   // A failed one-question run must not retain an actionable partial prefix.
   // Ordinary continuous captions keep completed text available after failure.
-  if (cancelled || gSTT.cancelRequested || (run.singleUtterance && run.failed))
+  if (cancelled || gStt.cancelRequested || (run.singleUtterance && run.failed))
     sttClearTextLocked();
-  gSTT.snapshot.state = (cancelled || gSTT.cancelRequested) ? STTState::Cancelled
-                           : run.failed ? STTState::Failed : STTState::Done;
-  gSTT.snapshot.captureActive = false;
-  gSTT.snapshot.inferenceActive = false;
-  gSTT.snapshot.pendingAudio = 0;
-  gSTT.snapshot.workerStackFreeBytes = uxTaskGetStackHighWaterMark(nullptr);
-  gSTT.completedMs = millis();
-  gSTT.snapshot.workerActive = false;
-  const STTState endState = gSTT.snapshot.state;
-  portEXIT_CRITICAL(&gSTTMux);
+  gStt.snapshot.state = (cancelled || gStt.cancelRequested) ? SttState::Cancelled
+                           : run.failed ? SttState::Failed : SttState::Done;
+  gStt.snapshot.captureActive = false;
+  gStt.snapshot.inferenceActive = false;
+  gStt.snapshot.pendingAudio = 0;
+  gStt.snapshot.workerStackFreeBytes = uxTaskGetStackHighWaterMark(nullptr);
+  gStt.completedMs = millis();
+  gStt.snapshot.workerActive = false;
+  const SttState endState = gStt.snapshot.state;
+  portEXIT_CRITICAL(&gSttMux);
 #ifdef ESP_PLATFORM
-  systemEventPost(SYSEVT_STT_STOPPED, endState == STTState::Cancelled ? "cancelled"
-                                      : endState == STTState::Failed ? "failed" : "done");
+  systemEventPost(SYSEVT_STT_STOPPED, endState == SttState::Cancelled ? "cancelled"
+                                      : endState == SttState::Failed ? "failed" : "done");
 #else
   (void)endState;
 #endif
@@ -2636,8 +2636,8 @@ static void sttContinuousWorker(void*) {
 
 } // namespace
 
-static bool sttBeginMode(STTOwner owner, uint32_t captureMs, bool continuous,
-                         STTToken* token, char* error, size_t errorCap,
+static bool sttBeginMode(SttOwner owner, uint32_t captureMs, bool continuous,
+                         SttToken* token, char* error, size_t errorCap,
                          const TranscriptOptions* suppliedOptions = nullptr,
                          uint32_t nativeG2Generation = 0,
                          AudioSource preferredSource = AUDIO_SRC_NONE,
@@ -2658,10 +2658,10 @@ static bool sttBeginMode(STTOwner owner, uint32_t captureMs, bool continuous,
   if (!audioAnySourceAvailable()) return sttError(error, errorCap, "No microphone is available");
   if (!sttLocalAvailable(error, errorCap)) return false;
 
-  STTOwner previousOwner;
-  portENTER_CRITICAL(&gSTTMux);
-  previousOwner = gSTT.owner;
-  portEXIT_CRITICAL(&gSTTMux);
+  SttOwner previousOwner;
+  portENTER_CRITICAL(&gSttMux);
+  previousOwner = gStt.owner;
+  portEXIT_CRITICAL(&gSttMux);
   const bool previousLive = sttOwnerLive(previousOwner);
   const uint32_t nonce = esp_random();
   // A caller's per-session source wins over the setting; both are strict.
@@ -2679,34 +2679,34 @@ static bool sttBeginMode(STTOwner owner, uint32_t captureMs, bool continuous,
     transcriptOptions.epoch = owner.epoch;
   }
   bool admitted = false;
-  portENTER_CRITICAL(&gSTTMux);
-  if (!gSTT.snapshot.workerActive &&
-      (!gSTT.snapshot.textReady || sttSameOwner(owner, gSTT.owner) ||
-       (sttSameOwner(previousOwner, gSTT.owner) && !previousLive) ||
-       millis() - gSTT.completedMs >= kResultRetentionMs)) {
+  portENTER_CRITICAL(&gSttMux);
+  if (!gStt.snapshot.workerActive &&
+      (!gStt.snapshot.textReady || sttSameOwner(owner, gStt.owner) ||
+       (sttSameOwner(previousOwner, gStt.owner) && !previousLive) ||
+       millis() - gStt.completedMs >= kResultRetentionMs)) {
     sttClearTextLocked();
-    gSTT = STTRun{};
-    if (!gSTTNonce) gSTTNonce = nonce ? nonce : 1;
-    if (++gSTTCounter == 0) ++gSTTCounter;
-    gSTT.owner = owner;
-    gSTT.transcriptOptions = transcriptOptions;
-    gSTT.snapshot.transcript.enabled = transcriptOptions.enabled;
-    gSTT.requestedSource = nativeG2Generation ? AUDIO_SRC_G2_LEFT : requestedSource;
-    gSTT.nativeG2Generation = nativeG2Generation;
-    gSTT.singleUtterance = singleUtterance;
-    gSTT.speakerLabels = speakerLabels;
-    gSTT.publishWake = publishWake;
-    gSTT.snapshot.token = (static_cast<uint64_t>(gSTTNonce) << 32) | gSTTCounter;
-    gSTT.snapshot.state = STTState::Preparing;
-    gSTT.snapshot.captureLimitMs = singleUtterance ? 30000 : continuous ? 0 : captureMs;
-    gSTT.snapshot.continuous = continuous;
-    gSTT.snapshot.workerActive = true;
-    gSTT.startedMs = millis();
-    gSTT.captureEndedMs = 0;
-    *token = gSTT.snapshot.token;
+    gStt = SttRun{};
+    if (!gSttNonce) gSttNonce = nonce ? nonce : 1;
+    if (++gSttCounter == 0) ++gSttCounter;
+    gStt.owner = owner;
+    gStt.transcriptOptions = transcriptOptions;
+    gStt.snapshot.transcript.enabled = transcriptOptions.enabled;
+    gStt.requestedSource = nativeG2Generation ? AUDIO_SRC_G2_LEFT : requestedSource;
+    gStt.nativeG2Generation = nativeG2Generation;
+    gStt.singleUtterance = singleUtterance;
+    gStt.speakerLabels = speakerLabels;
+    gStt.publishWake = publishWake;
+    gStt.snapshot.token = (static_cast<uint64_t>(gSttNonce) << 32) | gSttCounter;
+    gStt.snapshot.state = SttState::Preparing;
+    gStt.snapshot.captureLimitMs = singleUtterance ? 30000 : continuous ? 0 : captureMs;
+    gStt.snapshot.continuous = continuous;
+    gStt.snapshot.workerActive = true;
+    gStt.startedMs = millis();
+    gStt.captureEndedMs = 0;
+    *token = gStt.snapshot.token;
     admitted = true;
   }
-  portEXIT_CRITICAL(&gSTTMux);
+  portEXIT_CRITICAL(&gSttMux);
   if (!admitted) return sttError(error, errorCap, "STT is busy or a result belongs to another session");
   taskStackRecord("stt", kWorkerStackBytes);
   // Core 1 avoids putting the frontend/capture worker on the radio/ISR core;
@@ -2715,12 +2715,12 @@ static bool sttBeginMode(STTOwner owner, uint32_t captureMs, bool continuous,
   // 20-30% of core 1, still below the capture producer (3) so audio never starves.
   if (xTaskCreatePinnedToCore(continuous ? sttContinuousWorker : sttWorker, "stt", kWorkerStackBytes, nullptr,
                               2, nullptr, 1) != pdPASS) {
-    portENTER_CRITICAL(&gSTTMux);
-    gSTT.snapshot.workerActive = false;
-    gSTT.snapshot.state = STTState::Failed;
-    gSTT.completedMs = millis();
-    snprintf(gSTT.snapshot.error, sizeof(gSTT.snapshot.error), "%s", "Could not create STT worker");
-    portEXIT_CRITICAL(&gSTTMux);
+    portENTER_CRITICAL(&gSttMux);
+    gStt.snapshot.workerActive = false;
+    gStt.snapshot.state = SttState::Failed;
+    gStt.completedMs = millis();
+    snprintf(gStt.snapshot.error, sizeof(gStt.snapshot.error), "%s", "Could not create STT worker");
+    portEXIT_CRITICAL(&gSttMux);
     return sttError(error, errorCap, "Could not create STT worker");
   }
   if (error && errorCap) error[0] = '\0';
@@ -2730,11 +2730,11 @@ static bool sttBeginMode(STTOwner owner, uint32_t captureMs, bool continuous,
   return true;
 }
 
-bool sttBegin(STTOwner owner, uint32_t captureMs, STTToken* token,
+bool sttBegin(SttOwner owner, uint32_t captureMs, SttToken* token,
               char* error, size_t errorCap) {
   return sttBeginMode(owner, captureMs, false, token, error, errorCap);
 }
-bool sttBeginContinuous(STTOwner owner, STTToken* token,
+bool sttBeginContinuous(SttOwner owner, SttToken* token,
                         char* error, size_t errorCap,
                         const TranscriptOptions* transcriptOptions,
                         AudioSource requestedSource) {
@@ -2742,7 +2742,7 @@ bool sttBeginContinuous(STTOwner owner, STTToken* token,
                       /*nativeG2Generation=*/0, requestedSource);
 }
 
-bool sttBeginContinuousG2Native(STTOwner owner, uint32_t leftGeneration, STTToken* token,
+bool sttBeginContinuousG2Native(SttOwner owner, uint32_t leftGeneration, SttToken* token,
                                 char* error, size_t errorCap,
                                 const TranscriptOptions* transcriptOptions,
                                 void (*publishWake)(), bool speakerLabels) {
@@ -2755,7 +2755,7 @@ bool sttBeginContinuousG2Native(STTOwner owner, uint32_t leftGeneration, STTToke
                       AUDIO_SRC_NONE, publishWake, false, speakerLabels);
 }
 
-bool sttBeginUtteranceG2Native(STTOwner owner, uint32_t leftGeneration, STTToken* token,
+bool sttBeginUtteranceG2Native(SttOwner owner, uint32_t leftGeneration, SttToken* token,
                               char* error, size_t errorCap, void (*publishWake)()) {
   if (!leftGeneration || owner.source != SOURCE_G2_GLASSES) {
     if (token) *token = 0;
@@ -2766,28 +2766,28 @@ bool sttBeginUtteranceG2Native(STTOwner owner, uint32_t leftGeneration, STTToken
                       AUDIO_SRC_NONE, publishWake, true);
 }
 
-bool sttSetPaused(STTOwner owner, STTToken token, bool paused) {
+bool sttSetPaused(SttOwner owner, SttToken token, bool paused) {
   bool ok = false;
-  portENTER_CRITICAL(&gSTTMux);
-  if (sttMatchesLocked(owner, token) && gSTT.snapshot.continuous && gSTT.snapshot.workerActive) {
-    gSTT.paused = paused;
+  portENTER_CRITICAL(&gSttMux);
+  if (sttMatchesLocked(owner, token) && gStt.snapshot.continuous && gStt.snapshot.workerActive) {
+    gStt.paused = paused;
     ok = true;
   }
-  portEXIT_CRITICAL(&gSTTMux);
+  portEXIT_CRITICAL(&gSttMux);
   return ok;
 }
 
 bool sttAnySessionActive() {
-  portENTER_CRITICAL(&gSTTMux);
-  const bool active = gSTT.snapshot.workerActive;
-  portEXIT_CRITICAL(&gSTTMux);
+  portENTER_CRITICAL(&gSttMux);
+  const bool active = gStt.snapshot.workerActive;
+  portEXIT_CRITICAL(&gSttMux);
   return active;
 }
 
 void sttDetectorProfileInUse(int* speechFloor, int* silenceFloor, int* noisePercentile, int* decisionPre) {
-  portENTER_CRITICAL(&gSTTMux);
+  portENTER_CRITICAL(&gSttMux);
   const SttDetectorProfile p = gSttActiveProfile;
-  portEXIT_CRITICAL(&gSTTMux);
+  portEXIT_CRITICAL(&gSttMux);
   if (speechFloor) *speechFloor = p.speechFloor;
   if (silenceFloor) *silenceFloor = p.silenceFloor;
   if (noisePercentile) *noisePercentile = p.noisePercentile;
@@ -2804,7 +2804,7 @@ void sttKeepWarm(uint32_t holdMs, bool load) {
 #endif
   const size_t freePsram = load ? sttPsramFree() : 0;
   bool spawn = false;
-  portENTER_CRITICAL(&gSTTMux);
+  portENTER_CRITICAL(&gSttMux);
   if (!holdMs) {
     gWarm.wanted = false;
   } else {
@@ -2813,21 +2813,21 @@ void sttKeepWarm(uint32_t holdMs, bool load) {
     gWarm.wanted = true;
     // A run loads (or adopts) its own model; only an idle broker warms one.
     spawn = load && freePsram >= gWarm.loadBytes + kWarmMinFreePsram && !gWarm.parked &&
-            !gWarm.claimed && !gSTT.snapshot.workerActive &&
+            !gWarm.claimed && !gStt.snapshot.workerActive &&
             (!gWarm.failed || now - gWarm.failedMs >= kWarmRetryMs);
     if (spawn) gWarm.claimed = gWarm.loading = true;
   }
-  portEXIT_CRITICAL(&gSTTMux);
+  portEXIT_CRITICAL(&gSttMux);
   if (spawn) {
     taskStackRecord("stt_warm", kWorkerStackBytes);
     // Priority 1, core 1: background work beside the loop, below a run (2).
     if (xTaskCreatePinnedToCore(sttWarmLoader, "stt_warm", kWorkerStackBytes, nullptr, 1,
                                 nullptr, 1) != pdPASS) {
-      portENTER_CRITICAL(&gSTTMux);
+      portENTER_CRITICAL(&gSttMux);
       gWarm.claimed = gWarm.loading = false;
       gWarm.failed = true;
       gWarm.failedMs = now;
-      portEXIT_CRITICAL(&gSTTMux);
+      portEXIT_CRITICAL(&gSttMux);
     }
   }
   if (!holdMs) sttWarmRelease(false);
@@ -2842,47 +2842,47 @@ void sttWarmTick() {
   // freed load, a run that took the model past the hold): a stale deadline
   // would read as held again once millis has wrapped half way (~24.9 days).
   // millis is read under the lock, so no stamp it compares with is newer.
-  portENTER_CRITICAL(&gSTTMux);
+  portENTER_CRITICAL(&gSttMux);
   const uint32_t lockedMs = millis();
   if (!sttWarmHeldLocked(lockedMs)) gWarm.wanted = false;
   if (gWarm.failed && lockedMs - gWarm.failedMs >= kWarmRetryMs) gWarm.failed = false;
-  portEXIT_CRITICAL(&gSTTMux);
+  portEXIT_CRITICAL(&gSttMux);
   if (sttWarmResident()) sttWarmRelease(sttPsramFree() < kWarmMinFreePsram);
 }
 
 bool sttWarmResident() {
-  portENTER_CRITICAL(&gSTTMux);
+  portENTER_CRITICAL(&gSttMux);
   const bool parked = gWarm.parked;
-  portEXIT_CRITICAL(&gSTTMux);
+  portEXIT_CRITICAL(&gSttMux);
   return parked;
 }
 
-bool sttReadChunk(STTOwner owner, STTToken token, STTTextChunk* out) {
+bool sttReadChunk(SttOwner owner, SttToken token, SttTextChunk* out) {
   uint32_t tlReadSeq = 0, tlReadMs = 0;  // logged after the critical section
   if (out) *out = {};
   sttReapTerminal();
   if (!out || !sttOwnerLive(owner)) return false;
-  portENTER_CRITICAL(&gSTTMux);
+  portENTER_CRITICAL(&gSttMux);
   const bool ready = sttMatchesLocked(owner, token) &&
-      gSTT.snapshot.continuous && !gSTT.cancelRequested && gSTT.snapshot.pendingTexts;
+      gStt.snapshot.continuous && !gStt.cancelRequested && gStt.snapshot.pendingTexts;
   if (ready) {
-    *out = gSTTChunks[gSTT.textHead];
+    *out = gSttChunks[gStt.textHead];
     // First read of a chunk by its consumer (lens, UI, CLI) closes its pacing record.
-    for (auto& r : gSTTPerf)
+    for (auto& r : gSttPerf)
       if (r.sequence == out->sequence && r.doneMs && !r.deliveredMs) { r.deliveredMs = millis(); break; }
     // The perf record is stored after the text is published, so log the first
     // read of each sequence here regardless of it.
     static uint32_t lastReadLogged = 0;
     // Sequences restart at 1 per session (e.g. a Conversate restart): forget
     // the previous session's last.
-    static STTToken lastReadToken = 0;
+    static SttToken lastReadToken = 0;
     if (token != lastReadToken) { lastReadToken = token; lastReadLogged = 0; }
     if (out->sequence != lastReadLogged) {
       lastReadLogged = out->sequence;
       tlReadSeq = out->sequence; tlReadMs = millis();
     }
   }
-  portEXIT_CRITICAL(&gSTTMux);
+  portEXIT_CRITICAL(&gSttMux);
 #ifdef ESP_PLATFORM
   if (tlReadSeq) ESP_LOGI("STT", "TL read seg=%lu t=%lu", (unsigned long)tlReadSeq, (unsigned long)tlReadMs);
 #else
@@ -2892,111 +2892,111 @@ bool sttReadChunk(STTOwner owner, STTToken token, STTTextChunk* out) {
   return ready;
 }
 
-bool sttReadDraft(STTOwner owner, STTToken token, STTDraft* out) {
+bool sttReadDraft(SttOwner owner, SttToken token, SttDraft* out) {
   if (out) *out = {};
   if (!out || !sttOwnerLive(owner)) return false;
-  portENTER_CRITICAL(&gSTTMux);
-  const bool ok = sttMatchesLocked(owner, token) && gSTT.snapshot.continuous && !gSTT.cancelRequested;
-  if (ok) *out = gSTT.draft;
-  portEXIT_CRITICAL(&gSTTMux);
+  portENTER_CRITICAL(&gSttMux);
+  const bool ok = sttMatchesLocked(owner, token) && gStt.snapshot.continuous && !gStt.cancelRequested;
+  if (ok) *out = gStt.draft;
+  portEXIT_CRITICAL(&gSttMux);
   if (!sttOwnerLive(owner)) { sttWipe(out, sizeof(*out)); return false; }
   return ok;
 }
 
-bool sttReadSpeakers(STTOwner owner, STTToken token, STTSpeakerSnapshot* out) {
-  if (out) *out = STTSpeakerSnapshot{};
+bool sttReadSpeakers(SttOwner owner, SttToken token, SttSpeakerSnapshot* out) {
+  if (out) *out = SttSpeakerSnapshot{};
   sttReapTerminal();
   if (!out || !sttOwnerLive(owner)) return false;
-  portENTER_CRITICAL(&gSTTMux);
+  portENTER_CRITICAL(&gSttMux);
   const bool ok = sttMatchesLocked(owner, token) &&
-      gSTT.snapshot.continuous && !gSTT.cancelRequested;
-  if (ok) *out = gSTT.speakers;
-  portEXIT_CRITICAL(&gSTTMux);
-  if (!sttOwnerLive(owner)) { *out = STTSpeakerSnapshot{}; return false; }
+      gStt.snapshot.continuous && !gStt.cancelRequested;
+  if (ok) *out = gStt.speakers;
+  portEXIT_CRITICAL(&gSttMux);
+  if (!sttOwnerLive(owner)) { *out = SttSpeakerSnapshot{}; return false; }
   return ok;
 }
 
-bool sttAcknowledgeChunk(STTOwner owner, STTToken token, uint32_t sequence) {
+bool sttAcknowledgeChunk(SttOwner owner, SttToken token, uint32_t sequence) {
   if (!sequence || !sttOwnerLive(owner)) return false;
   bool accepted = false;
-  portENTER_CRITICAL(&gSTTMux);
-  if (sttMatchesLocked(owner, token) && gSTT.snapshot.continuous && !gSTT.cancelRequested) {
-    accepted = sequence <= gSTT.acknowledgedSequence;
-    if (gSTT.snapshot.pendingTexts && gSTTChunks[gSTT.textHead].sequence == sequence) {
-      volatile uint8_t* bytes = reinterpret_cast<volatile uint8_t*>(&gSTTChunks[gSTT.textHead]);
-      for (size_t i = 0; i < sizeof(STTTextChunk); ++i) bytes[i] = 0;
-      gSTT.textHead = (gSTT.textHead + 1) % kTextQueueDepth;
-      --gSTT.snapshot.pendingTexts;
-      gSTT.snapshot.textReady = gSTT.snapshot.pendingTexts != 0;
-      gSTT.acknowledgedSequence = sequence;
+  portENTER_CRITICAL(&gSttMux);
+  if (sttMatchesLocked(owner, token) && gStt.snapshot.continuous && !gStt.cancelRequested) {
+    accepted = sequence <= gStt.acknowledgedSequence;
+    if (gStt.snapshot.pendingTexts && gSttChunks[gStt.textHead].sequence == sequence) {
+      volatile uint8_t* bytes = reinterpret_cast<volatile uint8_t*>(&gSttChunks[gStt.textHead]);
+      for (size_t i = 0; i < sizeof(SttTextChunk); ++i) bytes[i] = 0;
+      gStt.textHead = (gStt.textHead + 1) % kTextQueueDepth;
+      --gStt.snapshot.pendingTexts;
+      gStt.snapshot.textReady = gStt.snapshot.pendingTexts != 0;
+      gStt.acknowledgedSequence = sequence;
       accepted = true;
     }
   }
-  portEXIT_CRITICAL(&gSTTMux);
+  portEXIT_CRITICAL(&gSttMux);
   return accepted && sttOwnerLive(owner);
 }
 
-bool sttRunActive(STTToken token) {
-  portENTER_CRITICAL(&gSTTMux);
-  const bool active = token && gSTT.snapshot.token == token && gSTT.snapshot.workerActive;
-  portEXIT_CRITICAL(&gSTTMux);
+bool sttRunActive(SttToken token) {
+  portENTER_CRITICAL(&gSttMux);
+  const bool active = token && gStt.snapshot.token == token && gStt.snapshot.workerActive;
+  portEXIT_CRITICAL(&gSttMux);
   return active;
 }
 
-bool sttRequestFinish(STTOwner owner, STTToken token) {
+bool sttRequestFinish(SttOwner owner, SttToken token) {
   if (!sttOwnerLive(owner)) return false;
-  portENTER_CRITICAL(&gSTTMux);
+  portENTER_CRITICAL(&gSttMux);
   const bool accepted = sttMatchesLocked(owner, token) &&
-      (gSTT.snapshot.state == STTState::Preparing || gSTT.snapshot.state == STTState::Recording ||
-       (gSTT.snapshot.continuous && gSTT.snapshot.workerActive));
-  if (accepted) gSTT.finishRequested = true;
-  portEXIT_CRITICAL(&gSTTMux);
+      (gStt.snapshot.state == SttState::Preparing || gStt.snapshot.state == SttState::Recording ||
+       (gStt.snapshot.continuous && gStt.snapshot.workerActive));
+  if (accepted) gStt.finishRequested = true;
+  portEXIT_CRITICAL(&gSttMux);
   return accepted;
 }
 
-bool sttCancel(STTOwner owner, STTToken token) {
+bool sttCancel(SttOwner owner, SttToken token) {
   if (!sttOwnerLive(owner)) return false;
-  portENTER_CRITICAL(&gSTTMux);
+  portENTER_CRITICAL(&gSttMux);
   const bool accepted = sttMatchesLocked(owner, token);
   if (accepted) {
-    gSTT.cancelRequested = true;
+    gStt.cancelRequested = true;
     sttClearTextLocked();
-    if (!gSTT.snapshot.workerActive) gSTT.snapshot.state = STTState::Cancelled;
+    if (!gStt.snapshot.workerActive) gStt.snapshot.state = SttState::Cancelled;
   }
-  portEXIT_CRITICAL(&gSTTMux);
+  portEXIT_CRITICAL(&gSttMux);
   return accepted;
 }
 
-bool sttSnapshot(STTOwner owner, STTToken token, STTSnapshot* out) {
+bool sttSnapshot(SttOwner owner, SttToken token, SttSnapshot* out) {
   sttReapTerminal();
   if (!out || !sttOwnerLive(owner)) return false;
-  portENTER_CRITICAL(&gSTTMux);
-  const bool matched = sttSameOwner(owner, gSTT.owner) && gSTT.snapshot.token &&
-                       (!token || token == gSTT.snapshot.token);
+  portENTER_CRITICAL(&gSttMux);
+  const bool matched = sttSameOwner(owner, gStt.owner) && gStt.snapshot.token &&
+                       (!token || token == gStt.snapshot.token);
   if (matched) {
-    *out = gSTT.snapshot;
-    const uint32_t clockEnd = gSTT.captureEndedMs ? gSTT.captureEndedMs
-                              : gSTT.snapshot.workerActive ? millis() : gSTT.completedMs;
-    out->elapsedMs = clockEnd - gSTT.startedMs;
+    *out = gStt.snapshot;
+    const uint32_t clockEnd = gStt.captureEndedMs ? gStt.captureEndedMs
+                              : gStt.snapshot.workerActive ? millis() : gStt.completedMs;
+    out->elapsedMs = clockEnd - gStt.startedMs;
   }
-  portEXIT_CRITICAL(&gSTTMux);
+  portEXIT_CRITICAL(&gSttMux);
   return matched && sttOwnerLive(owner);
 }
 
-bool sttResult(STTOwner owner, STTToken token, char* text, size_t textCap) {
+bool sttResult(SttOwner owner, SttToken token, char* text, size_t textCap) {
   sttReapTerminal();
   if (text && textCap) text[0] = '\0';
   if (!text || textCap == 0 || !sttOwnerLive(owner)) return false;
   bool ready = false;
-  portENTER_CRITICAL(&gSTTMux);
-  if (sttMatchesLocked(owner, token) && !gSTT.snapshot.workerActive &&
-      millis() - gSTT.completedMs < kResultRetentionMs &&
-      !gSTT.snapshot.continuous && gSTT.snapshot.state == STTState::Done && gSTT.snapshot.textReady &&
-      strlen(gSTT.text) < textCap) {
-    memcpy(text, gSTT.text, strlen(gSTT.text) + 1);
+  portENTER_CRITICAL(&gSttMux);
+  if (sttMatchesLocked(owner, token) && !gStt.snapshot.workerActive &&
+      millis() - gStt.completedMs < kResultRetentionMs &&
+      !gStt.snapshot.continuous && gStt.snapshot.state == SttState::Done && gStt.snapshot.textReady &&
+      strlen(gStt.text) < textCap) {
+    memcpy(text, gStt.text, strlen(gStt.text) + 1);
     ready = true;
   }
-  portEXIT_CRITICAL(&gSTTMux);
+  portEXIT_CRITICAL(&gSttMux);
   if (!sttOwnerLive(owner)) {
     memset(text, 0, textCap);
     return false;
@@ -3004,22 +3004,22 @@ bool sttResult(STTOwner owner, STTToken token, char* text, size_t textCap) {
   return ready;
 }
 
-const char* sttStateName(STTState state) {
+const char* sttStateName(SttState state) {
   switch (state) {
-    case STTState::Idle: return "idle";
-    case STTState::Preparing: return "preparing";
-    case STTState::Recording: return "recording";
-    case STTState::Transcribing: return "transcribing";
-    case STTState::Stopping: return "stopping";
-    case STTState::Done: return "done";
-    case STTState::Cancelled: return "cancelled";
-    case STTState::Failed: return "failed";
+    case SttState::Idle: return "idle";
+    case SttState::Preparing: return "preparing";
+    case SttState::Recording: return "recording";
+    case SttState::Transcribing: return "transcribing";
+    case SttState::Stopping: return "stopping";
+    case SttState::Done: return "done";
+    case SttState::Cancelled: return "cancelled";
+    case SttState::Failed: return "failed";
   }
   return "unknown";
 }
 
 // CLI_ADAPTER_BEGIN — host tests compile the broker above with fake HAL/tasks.
-static bool sttParseToken(const String& value, STTToken& token) {
+static bool sttParseToken(const String& value, SttToken& token) {
   token = 0;
   if (value.length() != 16) return false;
   for (size_t i = 0; i < value.length(); ++i) {
@@ -3033,12 +3033,12 @@ static bool sttParseToken(const String& value, STTToken& token) {
   return token != 0;
 }
 
-static const char* sttPhaseName(STTLocalPhase phase) {
+static const char* sttPhaseName(SttLocalPhase phase) {
   switch (phase) {
-    case STTLocalPhase::Loading: return "loading";
-    case STTLocalPhase::Frontend: return "frontend";
-    case STTLocalPhase::Inference: return "inference";
-    case STTLocalPhase::Decoding: return "decoding";
+    case SttLocalPhase::Loading: return "loading";
+    case SttLocalPhase::Frontend: return "frontend";
+    case SttLocalPhase::Inference: return "inference";
+    case SttLocalPhase::Decoding: return "decoding";
   }
   return "unknown";
 }
@@ -3048,7 +3048,7 @@ static const char* cmd_stt(const String& argsInput) {
   static String reply;
   secureClearString(reply);
   const AuthContext& ctx = currentAuthContext();
-  STTOwner owner{ctx.transport, captureTransportSessionEpoch(ctx)};
+  SttOwner owner{ctx.transport, captureTransportSessionEpoch(ctx)};
   if (ctx.user.length() == 0 || ctx.user == "AuthBypass" || !sttOwnerLive(owner))
     return "Error: STT requires a live authenticated serial, web, BLE, OLED or G2 session";
   CommandArgs args(argsInput);
@@ -3067,7 +3067,7 @@ static const char* cmd_stt(const String& argsInput) {
         seconds = seconds * 10 + value[i] - '0';
       }
     }
-    STTToken token = 0;
+    SttToken token = 0;
     char error[96] = {};
     if (!(continuous ? sttBeginContinuous(owner, &token, error, sizeof(error))
                      : sttBegin(owner, seconds * 1000, &token, error, sizeof(error)))) {
@@ -3080,7 +3080,7 @@ static const char* cmd_stt(const String& argsInput) {
     reply = String("{\"accepted\":true,\"id\":\"") + id + "\",\"state\":\"preparing\"}";
     return reply.c_str();
   }
-  STTToken token = 0;
+  SttToken token = 0;
   if (op == "ack") {
     if (args.count() != 3 || !sttParseToken(args.arg(1), token))
       return "Error: Usage: stt ack <id> <sequence>";
@@ -3104,10 +3104,10 @@ static const char* cmd_stt(const String& argsInput) {
     return accepted ? "OK: STT request accepted; poll status until terminal"
                     : "Error: no matching STT run accepts that operation";
   }
-  STTSnapshot snap;
+  SttSnapshot snap;
   if (op == "draft") {
     if (args.count() != 2 || !token) return "Error: Usage: stt draft <id>";
-    STTDraft draft;
+    SttDraft draft;
     if (!sttReadDraft(owner, token, &draft)) return "Error: no STT run belongs to this session";
     JsonDocument doc;
     doc["sequence"] = draft.sequence;
@@ -3129,7 +3129,7 @@ static const char* cmd_stt(const String& argsInput) {
   doc["state"] = sttStateName(snap.state);
   if (op == "next") {
     if (!snap.continuous) return "Error: use stt result for a bounded recording";
-    STTTextChunk chunk;
+    SttTextChunk chunk;
     const bool ready = sttReadChunk(owner, token, &chunk);
     doc["available"] = ready;
     if (ready) {
@@ -3176,9 +3176,9 @@ static const char* cmd_stt(const String& argsInput) {
       doc["pdmAmplify"] = amp;
       doc["pdmHpfHz"] = hpf;
       {
-        portENTER_CRITICAL(&gSTTMux);
+        portENTER_CRITICAL(&gSttMux);
         const SttDetectorProfile p = gSttActiveProfile;
-        portEXIT_CRITICAL(&gSTTMux);
+        portEXIT_CRITICAL(&gSttMux);
         doc["detectorProfile"] = p.glasses ? "g2" : "onboard";
         doc["speechFloor"] = p.speechFloor;
         doc["silenceFloor"] = p.silenceFloor;
@@ -3258,10 +3258,10 @@ static const char* cmd_sttperf(const String& argsInput) {
   const String op = args.count() ? args.arg(0) : "show";
   if (op == "log") {
     const String v = args.count() > 1 ? args.arg(1) : "";
-    if (v == "on") gSTTPerfLog = true;
-    else if (v == "off") gSTTPerfLog = false;
+    if (v == "on") gSttPerfLog = true;
+    else if (v == "off") gSttPerfLog = false;
     else if (v.length()) return "Error: Usage: sttperf log on|off";
-    snprintf(out, sizeof(out), "STT perf live log: %s", gSTTPerfLog ? "ON" : "OFF");
+    snprintf(out, sizeof(out), "STT perf live log: %s", gSttPerfLog ? "ON" : "OFF");
     return out;
   }
 #if defined(CONFIG_IDF_TARGET_ESP32P4)
@@ -3272,19 +3272,19 @@ static const char* cmd_sttperf(const String& argsInput) {
   }
 #endif
   if (op == "clear") {
-    portENTER_CRITICAL(&gSTTMux);
-    for (auto& r : gSTTPerf) r = STTPerfRecord{};
-    gSTTPerfCount = 0;
-    portEXIT_CRITICAL(&gSTTMux);
+    portENTER_CRITICAL(&gSttMux);
+    for (auto& r : gSttPerf) r = SttPerfRecord{};
+    gSttPerfCount = 0;
+    portEXIT_CRITICAL(&gSttMux);
     return "OK: STT perf records cleared";
   }
   if (op != "show") return "Error: Usage: sttperf [show|clear|log on|off|stages [all|clear]]";
-  STTPerfRecord copy[kPerfRecords];
+  SttPerfRecord copy[kPerfRecords];
   uint32_t count;
-  portENTER_CRITICAL(&gSTTMux);
-  memcpy(copy, gSTTPerf, sizeof(copy));
-  count = gSTTPerfCount;
-  portEXIT_CRITICAL(&gSTTMux);
+  portENTER_CRITICAL(&gSttMux);
+  memcpy(copy, gSttPerf, sizeof(copy));
+  count = gSttPerfCount;
+  portEXIT_CRITICAL(&gSttMux);
   const uint32_t shown = std::min<uint32_t>(count, kPerfRecords);
   int n = snprintf(out, sizeof(out),
       "STT perf: %lu segment(s) recorded, newest %lu shown (ms unless noted; rtf=processing/audio; "
@@ -3292,7 +3292,7 @@ static const char* cmd_sttperf(const String& argsInput) {
       (unsigned long)count, (unsigned long)shown);
   uint64_t audio = 0, busy = 0;
   for (uint32_t i = count - shown; i < count && n > 0 && (size_t)n < sizeof(out); ++i) {
-    const STTPerfRecord& r = copy[i % kPerfRecords];
+    const SttPerfRecord& r = copy[i % kPerfRecords];
     n += sttPerfFormat(r, out + n, sizeof(out) - n);
     if ((size_t)n < sizeof(out)) out[n++] = '\n', out[n] = '\0';
     audio += r.audioMs; busy += r.doneMs - r.startMs;
@@ -3366,10 +3366,10 @@ static const char* cmd_sttdetector(const String&) {
   unsigned kept = 0;
   const bool autoGain = gSettings.sttAutoGain && kSttPdmTunable;
   if (autoGain) {
-    portENTER_CRITICAL(&gSTTMux);
+    portENTER_CRITICAL(&gSttMux);
     amp = gSttAutoGain.gain();
     kept = static_cast<unsigned>(gSttAutoGain.size());
-    portEXIT_CRITICAL(&gSTTMux);
+    portEXIT_CRITICAL(&gSttMux);
     hpf = kSttAutoHpfHz;
   }
   snprintf(out, sizeof(out),

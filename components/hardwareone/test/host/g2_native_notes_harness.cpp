@@ -51,11 +51,11 @@ static int xQueueSend(QueueHandle_t q,const void* data,uint32_t){assert(!critica
 static int xQueueReceive(QueueHandle_t q,void* out,uint32_t wait){assert(!criticalDepth);if(q->items.empty()){clockMs+=wait;return 0;}memcpy(out,q->items.front().data(),q->size);q->items.pop_front();return 1;}
 static int xQueueReset(QueueHandle_t q){assert(!criticalDepth);q->items.clear();return pdPASS;}
 static int xTaskCreateLogged(void(*)(void*),const char*,unsigned,void*,int,TaskHandle_t* t,const char*,int){assert(!criticalDepth);*t=workerHandle;return 1;}
-struct STTOwner {CommandSource source=SOURCE_INTERNAL;uint32_t epoch=0;};
-using STTToken=uint64_t;
-enum class STTState {Recording,Done,Failed};
-struct STTSnapshot {bool workerActive=false;STTState state=STTState::Done;};
-struct STTTextChunk {uint32_t sequence=1;char text[513]={};};
+struct SttOwner {CommandSource source=SOURCE_INTERNAL;uint32_t epoch=0;};
+using SttToken=uint64_t;
+enum class SttState {Recording,Done,Failed};
+struct SttSnapshot {bool workerActive=false;SttState state=SttState::Done;};
+struct SttTextChunk {uint32_t sequence=1;char text[513]={};};
 struct TranscriptOptions {};
 static bool brokerActive=false, chunkReady=false, liveContext=true, sdPresent=false;
 static unsigned starts=0,writes=0,attempts=0,folderChecks=0;
@@ -67,14 +67,14 @@ static QuickNotePolicy::NoteHeader savedHeader{};
 static std::vector<std::vector<uint8_t>> transmissions;
 static bool quickNoteActive(){return false;}
 static uint32_t quickNoteMaxMs(){return 120000;}
-static bool sttCancel(STTOwner,STTToken){brokerActive=false;return true;}
+static bool sttCancel(SttOwner,SttToken){brokerActive=false;return true;}
 static bool sttAnySessionActive(){return brokerActive;}
 static void sttKeepWarm(uint32_t,bool){}
-static bool sttBeginContinuousG2Native(STTOwner,uint32_t,STTToken* t,char*,size_t,const TranscriptOptions*){*t=++starts;brokerActive=true;return true;}
-static bool sttRequestFinish(STTOwner,STTToken){brokerActive=false;return true;}
-static bool sttReadChunk(STTOwner,STTToken,STTTextChunk* c){if(!chunkReady)return false;snprintf(c->text,sizeof(c->text),"A synthetic test note.");return true;}
-static bool sttAcknowledgeChunk(STTOwner,STTToken,uint32_t){chunkReady=false;return true;}
-static bool sttSnapshot(STTOwner,STTToken,STTSnapshot* p){p->workerActive=brokerActive;p->state=brokerActive?STTState::Recording:STTState::Done;return true;}
+static bool sttBeginContinuousG2Native(SttOwner,uint32_t,SttToken* t,char*,size_t,const TranscriptOptions*){*t=++starts;brokerActive=true;return true;}
+static bool sttRequestFinish(SttOwner,SttToken){brokerActive=false;return true;}
+static bool sttReadChunk(SttOwner,SttToken,SttTextChunk* c){if(!chunkReady)return false;snprintf(c->text,sizeof(c->text),"A synthetic test note.");return true;}
+static bool sttAcknowledgeChunk(SttOwner,SttToken,uint32_t){chunkReady=false;return true;}
+static bool sttSnapshot(SttOwner,SttToken,SttSnapshot* p){p->workerActive=brokerActive;p->state=brokerActive?SttState::Recording:SttState::Done;return true;}
 namespace VFS {
 static bool isSDWritable(){return sdPresent;}
 static uint32_t sdMountGeneration(){return mountGeneration;}

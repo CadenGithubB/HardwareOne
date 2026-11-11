@@ -34,14 +34,14 @@ uint32_t millis();
 // INSERT_GLOBALS
 uint32_t clockMs = 1;
 uint32_t millis() { return clockMs; }
-using STTToken = uint64_t;
+using SttToken = uint64_t;
 enum CommandSource { SOURCE_INTERNAL, SOURCE_G2_GLASSES };
-struct STTOwner { CommandSource source = SOURCE_INTERNAL; uint32_t epoch = 0; };
+struct SttOwner { CommandSource source = SOURCE_INTERNAL; uint32_t epoch = 0; };
 struct TranscriptOptions { bool enabled = false; };
-enum class STTState { Preparing, Recording, Done, Cancelled, Failed };
-struct STTSnapshot { bool workerActive = false; STTState state = STTState::Done; char error[96] = {}; };
-struct STTTextChunk { uint32_t sequence = 0; char text[2049] = {}; };
-STTState stoppedSpeechState = STTState::Done;
+enum class SttState { Preparing, Recording, Done, Cancelled, Failed };
+struct SttSnapshot { bool workerActive = false; SttState state = SttState::Done; char error[96] = {}; };
+struct SttTextChunk { uint32_t sequence = 0; char text[2049] = {}; };
+SttState stoppedSpeechState = SttState::Done;
 uint32_t liveOwner = 7;
 bool sttLive = false, textReady = false, pausedAtTeardown = false;
 std::string transcript;
@@ -51,17 +51,17 @@ struct G2Temple { char side; uint32_t connectionGeneration; bool ready = true, a
 bool g2TempleReadyAtGeneration(const G2Temple& t, uint32_t generation = 0) { return t.ready && (!generation || generation == t.connectionGeneration); }
 bool transportSessionEpochIsLive(CommandSource, uint32_t epoch) { return epoch && epoch == liveOwner; }
 bool sttAnySessionActive() { return sttLive; }
-bool sttBeginContinuousG2Native(STTOwner owner, uint32_t gen, STTToken* token, char*, size_t,
+bool sttBeginContinuousG2Native(SttOwner owner, uint32_t gen, SttToken* token, char*, size_t,
                                 const TranscriptOptions* options, void (*)(), bool speakerLabels) {
   assert(!speakerLabels);
   assert(owner.epoch == liveOwner && gen == gL.connectionGeneration && options && !options->enabled);
   ++speechBegins; sttLive = true; *token = speechBegins; return true;
 }
-bool sttCancel(STTOwner, STTToken) { sttLive = false; textReady = false; return true; }
-bool sttRequestFinish(STTOwner, STTToken) { ++finishRequests; sttLive = false; textReady = !transcript.empty(); return true; }
-bool sttSnapshot(STTOwner, STTToken, STTSnapshot* s) { s->workerActive = sttLive; s->state = sttLive ? STTState::Recording : stoppedSpeechState; snprintf(s->error,sizeof(s->error),"%s",s->state==STTState::Failed?"Not enough free memory":""); return true; }
-bool sttReadChunk(STTOwner, STTToken, STTTextChunk* c) { if (!textReady) return false; c->sequence = 1; snprintf(c->text, sizeof(c->text), "%s", transcript.c_str()); return true; }
-bool sttAcknowledgeChunk(STTOwner, STTToken, uint32_t) { textReady = false; return true; }
+bool sttCancel(SttOwner, SttToken) { sttLive = false; textReady = false; return true; }
+bool sttRequestFinish(SttOwner, SttToken) { ++finishRequests; sttLive = false; textReady = !transcript.empty(); return true; }
+bool sttSnapshot(SttOwner, SttToken, SttSnapshot* s) { s->workerActive = sttLive; s->state = sttLive ? SttState::Recording : stoppedSpeechState; snprintf(s->error,sizeof(s->error),"%s",s->state==SttState::Failed?"Not enough free memory":""); return true; }
+bool sttReadChunk(SttOwner, SttToken, SttTextChunk* c) { if (!textReady) return false; c->sequence = 1; snprintf(c->text, sizeof(c->text), "%s", transcript.c_str()); return true; }
+bool sttAcknowledgeChunk(SttOwner, SttToken, uint32_t) { textReady = false; return true; }
 bool g2EvenAiSessionIsActive() { return false; }
 bool g2ConversateActive() { return false; }
 bool quickNoteActive() { return false; }
@@ -665,7 +665,7 @@ int main(){
   hostClearQuery(emptyOtherPending);untilIdle();
   // Failed recognition discards only this draft, reports the cause, and keeps
   // the host view. A late confirmation must never send partial recognition.
-  stoppedSpeechState=STTState::Failed;transcript.clear();const size_t failedSpeechBegin=sent.size();
+  stoppedSpeechState=SttState::Failed;transcript.clear();const size_t failedSpeechBegin=sent.size();
   const std::string failedView=gNativeTerminal.view;
   event(G2_TERMINAL_CMD_VOICE,1);tick(2);ack();event(G2_TERMINAL_CMD_VOICE,2);settle(20);
   assert(g2NativeTerminalActive()&&!sttLive&&!gNativeTerminal.speechToken);
@@ -683,7 +683,7 @@ int main(){
   assert(std::string(gNativeTerminal.view)==failedView);
   event(G2_TERMINAL_CMD_VOICE,2);event(G2_TERMINAL_CMD_VOICE,4);settle(20);
   assert(g2NativeTerminalActive()&&submissions==beforeEmptyPrompts+1);
-  stoppedSpeechState=STTState::Done;
+  stoppedSpeechState=SttState::Done;
   close();
   // R8: a confirmation with no path is dropped at that instant. A ready
   // phone twenty seconds later cannot resurrect it or erase the transcript.
