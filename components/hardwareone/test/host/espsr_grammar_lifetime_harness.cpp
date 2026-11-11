@@ -9,7 +9,7 @@
 #include <sstream>
 #include <string>
 using esp_err_t = int;
-constexpr int ESP_MN_MAX_PHRASE_NUM = 400, I2S_SR_SAMPLE_RATE = 16000, kSRMaxCommandId = 1023;
+constexpr int ESP_MN_MAX_PHRASE_NUM = 400, I2S_SR_SAMPLE_RATE = 16000, kSrMaxCommandId = 1023;
 struct esp_mn_phrase_t { char* string; char* phonemes; int16_t command_id; float threshold; int16_t* wave; };
 struct esp_mn_error_t { int16_t num; esp_mn_phrase_t** phrases; };
 struct Phrase {
@@ -26,7 +26,7 @@ static char* names[] = {fstName}; static char* files[] = {fileName};
 static char* data[] = {stock}; static int sizes[] = {sizeof(stock) - 1};
 static srmodel_data_t fst{1, files, data, sizes}; static srmodel_data_t* tables[] = {&fst};
 static srmodel_list_t models{1, names, tables};
-static srmodel_list_t* gSRModels = &models;
+static srmodel_list_t* gSrModels = &models;
 static std::deque<Phrase> phrases;
 static unsigned created = 0, destroyed = 0, updateCalls = 0, createAttempts = 0, emptyCreateAttempts = 0;
 static size_t vendorLiveBytes = 0;
@@ -42,7 +42,7 @@ static size_t tableBufferBytes() {
 model_iface_data_t* createModel(const char* name, int duration) {
   assert(!strcmp(name, "mn7_en") && duration == 6000); ++createAttempts;
   if (createFails) return nullptr; // public-return cleanup only, not vendor internal OOM safety
-  assert(gSRModels == &models && fst.num == 1 && data[0] && sizes[0] > 0);
+  assert(gSrModels == &models && fst.num == 1 && data[0] && sizes[0] > 0);
   if (!data[0][0]) { ++emptyCreateAttempts; return nullptr; } // real vendor wrapper PANICS here
   phrases.clear(); // create allocates and fills the global command list
   std::istringstream input(std::string(data[0], sizes[0]));
@@ -74,12 +74,12 @@ struct Interface {
   int (*get_samp_rate)(model_iface_data_t*); int (*get_samp_chunksize)(model_iface_data_t*);
 };
 static Interface iface{createModel, destroyModel, modelRate, modelChunk};
-static Interface* gMNModel = &iface;
-static model_iface_data_t* gMNData = nullptr;
-static bool gMNCommandsAllocated = false, gMNGrammarPublished = false, gMnTableTrusted = true;
-static std::atomic<bool> gSRFeedShouldRun{true}, gESPSRRunning{true};
+static Interface* gMnModel = &iface;
+static model_iface_data_t* gMnData = nullptr;
+static bool gMnCommandsAllocated = false, gMnGrammarPublished = false, gMnTableTrusted = true;
+static std::atomic<bool> gSrFeedShouldRun{true}, gEspSrRunning{true};
 static char gMnModelName[64] = "mn7_en";
-static size_t gSRFetchSamples = 512;
+static size_t gSrFetchSamples = 512;
 static struct { int srCommandTimeout = 6000; } gSettings;
 static std::string lastError;
 void srSetError(const char* value) { lastError = value; }
@@ -94,13 +94,13 @@ esp_mn_phrase_t* esp_mn_commands_get_from_index(int index) {
 }
 esp_mn_error_t* esp_mn_commands_update() {
   // Simulate the real replacement leak: overwrites the previous buffer pair.
-  assert(gMNData && !phrases.empty()); ++updateCalls;
-  gMNData->currentBuffers = tableBufferBytes(); vendorLiveBytes += gMNData->currentBuffers;
+  assert(gMnData && !phrases.empty()); ++updateCalls;
+  gMnData->currentBuffers = tableBufferBytes(); vendorLiveBytes += gMnData->currentBuffers;
   static esp_mn_error_t error{1, nullptr}; return updateFails ? &error : nullptr;
 }
 static unsigned lockCalls = 0;
-bool lockMN(uint32_t) { ++lockCalls; return gMNData != nullptr; }
-void unlockMN() {}
+bool lockMn(uint32_t) { ++lockCalls; return gMnData != nullptr; }
+void unlockMn() {}
 #define free snapshotFree
 // INSERT_FUNCTIONS
 #undef free
@@ -121,33 +121,33 @@ static void assertTable() {
 }
 static void assertMetadataRestored() { assert(data[0] == stock && sizes[0] == sizeof(stock) - 1); }
 static void start() {
-  assert(!gMNData && vendorLiveBytes == 0 && snapshotBlocks.empty());
-  gMNModel = &iface; gSRModels = &models; data[0] = stock; sizes[0] = sizeof(stock) - 1;
-  gMnTableTrusted = true; gSRFeedShouldRun = gESPSRRunning = true; lastError.clear();
+  assert(!gMnData && vendorLiveBytes == 0 && snapshotBlocks.empty());
+  gMnModel = &iface; gSrModels = &models; data[0] = stock; sizes[0] = sizeof(stock) - 1;
+  gMnTableTrusted = true; gSrFeedShouldRun = gEspSrRunning = true; lastError.clear();
   const char bootstrap[] = "1,TELL ME A JOKE,TfL Mm c qbK\n";
-  gMNData = createMNWithCommandFile(bootstrap, sizeof(bootstrap) - 1);
-  assert(gMNData && vendorLiveBytes == 8); assertMetadataRestored();
-  gMNCommandsAllocated = true; gMNGrammarPublished = false;
+  gMnData = createMnWithCommandFile(bootstrap, sizeof(bootstrap) - 1);
+  assert(gMnData && vendorLiveBytes == 8); assertMetadataRestored();
+  gMnCommandsAllocated = true; gMnGrammarPublished = false;
   seed(); assert(mnUpdateLocked()); assertTable();
-  assert(vendorLiveBytes == 7936 && gMNGrammarPublished && gMNCommandsAllocated); assertMetadataRestored();
+  assert(vendorLiveBytes == 7936 && gMnGrammarPublished && gMnCommandsAllocated); assertMetadataRestored();
 }
 static void stop() {
-  const unsigned previousLocks = lockCalls; const bool hadModel = gMNData != nullptr;
-  assert(deinitMultiNet()); assert(!gMNData && !gMNModel && !gMNGrammarPublished);
+  const unsigned previousLocks = lockCalls; const bool hadModel = gMnData != nullptr;
+  assert(deinitMultiNet()); assert(!gMnData && !gMnModel && !gMnGrammarPublished);
   assert(lockCalls == previousLocks + (hadModel ? 1 : 0));
   assert(vendorLiveBytes == 0 && snapshotBlocks.empty());
 }
 static void testVendorDefects() {
   // A stock graph followed by a direct update leaks the graph created at startup.
-  gMNModel = &iface; gMNData = createModel(gMnModelName, 6000); assert(vendorLiveBytes == 352);
-  seed(); esp_mn_commands_update(); destroyModel(gMNData); gMNData = nullptr;
+  gMnModel = &iface; gMnData = createModel(gMnModelName, 6000); assert(vendorLiveBytes == 352);
+  seed(); esp_mn_commands_update(); destroyModel(gMnData); gMnData = nullptr;
   assert(vendorLiveBytes == 352); vendorLiveBytes = 0; updateCalls = 0; // simulated byte ledger
   data[0] = emptyPack; sizes[0] = 1;
   assert(!createModel(gMnModelName, 6000) && emptyCreateAttempts == 1);
   // Runtime override must tolerate either stock OR the installed empty bundle.
   const char bootstrap[] = "1,TELL ME A JOKE,TfL Mm c qbK\n";
-  gMNData = createMNWithCommandFile(bootstrap, sizeof(bootstrap) - 1);
-  assert(gMNData && emptyCreateAttempts == 1 && data[0] == emptyPack && sizes[0] == 1);
+  gMnData = createMnWithCommandFile(bootstrap, sizeof(bootstrap) - 1);
+  assert(gMnData && emptyCreateAttempts == 1 && data[0] == emptyPack && sizes[0] == 1);
   stop(); data[0] = stock; sizes[0] = sizeof(stock) - 1; emptyCreateAttempts = 0;
 }
 static void testRepeatedReplacement() {
@@ -158,9 +158,9 @@ static void testRepeatedReplacement() {
     assert(updateCalls == 0 && emptyCreateAttempts == 0);
   }
   phrases.clear(); const unsigned attempts = createAttempts;
-  assert(mnUpdateLocked()); assert(!gMNGrammarPublished && vendorLiveBytes == 7936 && createAttempts == attempts);
+  assert(mnUpdateLocked()); assert(!gMnGrammarPublished && vendorLiveBytes == 7936 && createAttempts == attempts);
   assert(mnUpdateLocked() && createAttempts == attempts); // no unsafe empty create/update
-  seed(); assert(mnUpdateLocked()); assert(gMNGrammarPublished && vendorLiveBytes == 7936);
+  seed(); assert(mnUpdateLocked()); assert(gMnGrammarPublished && vendorLiveBytes == 7936);
   stop();
 }
 static void testCSVLineBoundary() {
@@ -176,18 +176,18 @@ static void testCSVLineBoundary() {
   assertMetadataRestored(); stop();
 }
 static void assertFailedClosed() {
-  assert(!gSRFeedShouldRun && !gESPSRRunning && !gMnTableTrusted && !lastError.empty());
+  assert(!gSrFeedShouldRun && !gEspSrRunning && !gMnTableTrusted && !lastError.empty());
   assert(snapshotBlocks.empty()); assertMetadataRestored();
 }
 static void testFailures() {
-  start(); auto* original = gMNData; const unsigned oldDestroyed = destroyed;
+  start(); auto* original = gMnData; const unsigned oldDestroyed = destroyed;
   snapshotFails = true; assert(!mnUpdateLocked()); snapshotFails = false;
-  assertFailedClosed(); assert(gMNData == original && destroyed == oldDestroyed); stop();
+  assertFailedClosed(); assert(gMnData == original && destroyed == oldDestroyed); stop();
   start(); createFails = true; assert(!mnUpdateLocked()); createFails = false;
-  assertFailedClosed(); assert(!gMNData && !gMNCommandsAllocated && !gMNGrammarPublished); stop();
+  assertFailedClosed(); assert(!gMnData && !gMnCommandsAllocated && !gMnGrammarPublished); stop();
   for (bool* fail : {&mismatchedTable, &extraPhrase, &badRate, &badChunk}) {
     start(); *fail = true; assert(!mnUpdateLocked()); *fail = false;
-    assertFailedClosed(); assert(gMNData && !gMNGrammarPublished); stop();
+    assertFailedClosed(); assert(gMnData && !gMnGrammarPublished); stop();
   }
   for (const char* invalid : {"bad,phrase", "bad\nphrase", "bad\rphrase", ""}) {
     start(); const unsigned before = destroyed; phrases.emplace_back(3, invalid, nullptr);
@@ -207,10 +207,10 @@ static void testFailures() {
   assert(!mnUpdateLocked() && destroyed == originalDestroyed); fst.num = 1;
   assertFailedClosed(); stop();
   // Bad metadata and empty caller input must be rejected BEFORE vendor create.
-  gMNModel = &iface; const unsigned originalAttempts = createAttempts;
-  assert(!createMNWithCommandFile("", 0)); gSRModels = nullptr;
-  assert(!createMNWithCommandFile("1,test\n", 7)); gSRModels = &models;
-  assert(createAttempts == originalAttempts && !gMNData); stop();
+  gMnModel = &iface; const unsigned originalAttempts = createAttempts;
+  assert(!createMnWithCommandFile("", 0)); gSrModels = nullptr;
+  assert(!createMnWithCommandFile("1,test\n", 7)); gSrModels = &models;
+  assert(createAttempts == originalAttempts && !gMnData); stop();
 }
 int main() {
   testVendorDefects(); testRepeatedReplacement(); testCSVLineBoundary(); testFailures();

@@ -53,8 +53,8 @@ inline void checkNativeWire(const char* text, bool reply, bool end) {
   uint8_t frame[256] = {};
   constexpr uint8_t seq = 71;
   const size_t count = reply
-      ? g2BuildEvenAIReply(seq, 207, 0, text, end, frame, sizeof(frame))
-      : g2BuildEvenAIAsk(seq, 207, 0, text, frame, sizeof(frame));
+      ? g2BuildEvenAiReply(seq, 207, 0, text, end, frame, sizeof(frame))
+      : g2BuildEvenAiAsk(seq, 207, 0, text, frame, sizeof(frame));
   assert(count > G2_ENVELOPE_HDR_LEN + G2_ENVELOPE_CRC_LEN && count <= 241);
   assert(frame[0] == G2_PREAMBLE_0 && frame[1] == G2_PREAMBLE_TX && frame[2] == seq);
   assert(size_t(frame[3]) + G2_ENVELOPE_HDR_LEN == count);

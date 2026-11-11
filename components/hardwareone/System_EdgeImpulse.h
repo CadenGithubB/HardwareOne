@@ -40,7 +40,7 @@
 
 // Detection result structure. Each detection owns a copy of its label, so it
 // stays valid after the next inference or a model change.
-struct EIDetection {
+struct EiDetection {
   char label[EI_LABEL_MAX];
   float confidence;
   int x;
@@ -53,10 +53,10 @@ struct EIDetection {
 #define EI_MAX_DETECTIONS 10
 
 // Detection results structure
-struct EIResults {
+struct EiResults {
   bool success;
   int detectionCount;
-  EIDetection detections[EI_MAX_DETECTIONS];
+  EiDetection detections[EI_MAX_DETECTIONS];
   uint32_t inferenceTimeMs;
   const char* errorMessage;
 };
@@ -71,13 +71,13 @@ void initEdgeImpulse();
 // Run single inference on current camera frame and update tracked objects.
 // Returns a "busy" error instead of waiting when another inference, a model
 // load or an unload is in progress.
-EIResults runEdgeImpulseInference();
+EiResults runEdgeImpulseInference();
 
 // Run single inference on a stored JPEG file (same pipeline as the camera;
 // does not update tracked objects). Busy rule as above.
 struct AuthContext;
 // Reads `imagePath` as `ctx`: the identity that named the file, never the system.
-EIResults runInferenceFromFile(const char* imagePath, const AuthContext& ctx);
+EiResults runInferenceFromFile(const char* imagePath, const AuthContext& ctx);
 
 // Start/stop continuous inference mode. Stop returns once the continuous task
 // has finished its current frame and exited.
@@ -86,7 +86,7 @@ void stopContinuousInference();
 bool isContinuousInferenceRunning();
 
 // Build JSON from detection results
-void buildDetectionJson(const EIResults& results, String& output);
+void buildDetectionJson(const EiResults& results, String& output);
 
 // Check if Edge Impulse model is loaded
 bool isEdgeImpulseModelLoaded();

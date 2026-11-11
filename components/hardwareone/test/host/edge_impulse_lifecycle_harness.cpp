@@ -156,13 +156,13 @@ static void scenarioDetectDuringContinuous() {
   startWithBlockedFrame();
   const int invokes = gFakeInvokes.load();
 
-  const EIResults camera = runEdgeImpulseInference();
+  const EiResults camera = runEdgeImpulseInference();
   eiCheck(!gFakeConcurrentInvoke, "detect does not Invoke beside the continuous frame");
   eiCheck(!camera.success && camera.errorMessage && std::strstr(camera.errorMessage, "busy"),
           "camera detect reports busy");
   const std::string cli = cmd_ei_detect(String(""));
   eiCheck(cli.find("busy") != std::string::npos, "eidetect reports busy");
-  const EIResults file = runInferenceFromFile("/images/frame.jpg", VFS::systemAuth("test.caller"));
+  const EiResults file = runInferenceFromFile("/images/frame.jpg", VFS::systemAuth("test.caller"));
   eiCheck(!file.success && file.errorMessage && std::strstr(file.errorMessage, "busy"),
           "file inference reports busy");
   httpd_req_t req;

@@ -51,7 +51,7 @@ bool transportSessionEpochIsLive(CommandSource source, uint32_t epoch) {
   return sessions.count({source, epoch});
 }
 static bool srRunning = false;
-bool isESPSRRunning() { return srRunning; }
+bool isEspSrRunning() { return srRunning; }
 bool gMicRunning = false;
 static bool recordingBusy = false;
 bool micRecordingBusy() { return recordingBusy; }

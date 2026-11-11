@@ -38,15 +38,15 @@ void displaySpeechStatus() {
 
   oledDisplay->setTextSize(1);
 
-  bool running = isESPSRRunning();
-  bool wakeActive = isESPSRWakeActive();
+  bool running = isEspSrRunning();
+  bool wakeActive = isEspSrWakeActive();
 
   // Line 1: Status
   oledDisplay->print("SR: ");
   if (running) {
     oledDisplay->print("ON ");
     // Show voice state
-    const char* state = getESPSRVoiceState();
+    const char* state = getEspSrVoiceState();
     if (strcmp(state, "idle") == 0) {
       oledDisplay->println("(idle)");
     } else if (strcmp(state, "category") == 0) {
@@ -64,8 +64,8 @@ void displaySpeechStatus() {
 
   // Line 2: Current context (if in multi-stage)
   if (running && wakeActive) {
-    const char* cat = getESPSRCurrentCategory();
-    const char* sub = getESPSRCurrentSubCategory();
+    const char* cat = getEspSrCurrentCategory();
+    const char* sub = getEspSrCurrentSubCategory();
     if (cat && cat[0]) {
       oledDisplay->print(">");
       oledDisplay->print(cat);
@@ -91,9 +91,9 @@ void displaySpeechStatus() {
   }
 
   // Line 3: Last command + confidence
-  const char* lastCmd = getESPSRLastCommand();
+  const char* lastCmd = getEspSrLastCommand();
   if (lastCmd && lastCmd[0]) {
-    float conf = getESPSRLastConfidence();
+    float conf = getEspSrLastConfidence();
     oledDisplay->print("Last: ");
     String cmdStr = lastCmd;
     if (cmdStr.length() > 10) {
@@ -109,9 +109,9 @@ void displaySpeechStatus() {
 
   // Line 4: Stats
   oledDisplay->print("W:");
-  oledDisplay->print(getESPSRWakeCount());
+  oledDisplay->print(getEspSrWakeCount());
   oledDisplay->print(" C:");
-  oledDisplay->println(getESPSRCommandCount());
+  oledDisplay->println(getEspSrCommandCount());
 
   // This screen animates (listening indicator) and has no input handler, so
   // keep it re-rendering while it's the active mode.
@@ -129,7 +129,7 @@ static void populateSpeechMenu() {
   }
   oledScrollClearKeepSelection(&sSpeechMenuScroll);
   oledScrollAddItem(&sSpeechMenuScroll, "View Status");
-  oledScrollAddItem(&sSpeechMenuScroll, isESPSRRunning() ? "Stop SR" : "Start SR");
+  oledScrollAddItem(&sSpeechMenuScroll, isEspSrRunning() ? "Stop SR" : "Start SR");
   oledScrollAddItem(&sSpeechMenuScroll, "Models");
   oledScrollAddItem(&sSpeechMenuScroll, "Settings");
   oledScrollClampSelection(&sSpeechMenuScroll);
@@ -142,9 +142,9 @@ void displaySpeechInfo() {
 
   // Header with running status
   oledDisplay->print("SPEECH ");
-  bool running = isESPSRRunning();
+  bool running = isEspSrRunning();
   if (running) {
-    oledDisplay->println(isESPSRWakeActive() ? "(wake!)" : "(on)");
+    oledDisplay->println(isEspSrWakeActive() ? "(wake!)" : "(on)");
   } else {
     oledDisplay->println("(off)");
   }
@@ -184,7 +184,7 @@ bool speechInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed) {
         requestOledMode(OLED_SPEECH_STATUS, "speech.status");
         break;
       case 1:  // Start / Stop SR
-        if (isESPSRRunning()) stopESPSR(); else startESPSR();
+        if (isEspSrRunning()) stopEspSr(); else startEspSr();
         break;
       case 2:  // Models (placeholder — shows status for now, as before)
         requestOledMode(OLED_SPEECH_STATUS, "speech.models");

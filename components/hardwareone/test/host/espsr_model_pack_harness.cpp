@@ -17,13 +17,13 @@ static Bytes fixture() {
   memcpy(b.data()+120, "testdata", 8);
   return b;
 }
-static void valid(const Bytes& b) { const char* e="stale"; assert(ESPSRModelPack::validate(b.data(), b.size(), &e)); assert(!e); }
-static void invalid(const Bytes& b) { const char* e=nullptr; assert(!ESPSRModelPack::validate(b.data(), b.size(), &e)); assert(e); }
+static void valid(const Bytes& b) { const char* e="stale"; assert(EspSrModelPack::validate(b.data(), b.size(), &e)); assert(!e); }
+static void invalid(const Bytes& b) { const char* e=nullptr; assert(!EspSrModelPack::validate(b.data(), b.size(), &e)); assert(e); }
 int main(int argc, char** argv) {
   Bytes b=fixture(); valid(b);
   for(size_t n=0;n<b.size();++n) invalid(Bytes(b.begin(), b.begin()+n));
-  assert(!ESPSRModelPack::validate(nullptr,128));
-  assert(!ESPSRModelPack::validate(b.data(),ESPSRModelPack::kMaxFileBytes+1));
+  assert(!EspSrModelPack::validate(nullptr,128));
+  assert(!EspSrModelPack::validate(b.data(),EspSrModelPack::kMaxFileBytes+1));
   for(auto v: {0u, 17u, 0xffffffffu}) { auto t=b;put(t,0,v);invalid(t); }
   for(auto v: {0u, 33u, 0xffffffffu}) { auto t=b;put(t,36,v);invalid(t); }
   for(auto at: {4u,40u,80u}) {
@@ -42,7 +42,7 @@ int main(int argc, char** argv) {
   // One-bit mutations exercise bounds and string handling under sanitizers;
   // changes in the coefficient payload are deliberately not rejected.
   for(size_t n=0;n<b.size();++n) for(int bit=0;bit<8;++bit) {
-    t=b;t[n]^=uint8_t(1u<<bit);ESPSRModelPack::validate(t.data(),t.size());
+    t=b;t[n]^=uint8_t(1u<<bit);EspSrModelPack::validate(t.data(),t.size());
   }
   for(int i=1;i<argc;++i) {
     std::ifstream f(argv[i],std::ios::binary);assert(f);

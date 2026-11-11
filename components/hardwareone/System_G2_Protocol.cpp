@@ -1302,7 +1302,7 @@ size_t g2BuildAudioCtrl(uint8_t seq, uint32_t magic, bool enable,
                          payload, pos, out, outCap);
 }
 
-size_t g2BuildEvenAICtrl(uint8_t seq, uint32_t magic, uint32_t status,
+size_t g2BuildEvenAiCtrl(uint8_t seq, uint32_t magic, uint32_t status,
                          uint8_t* out, size_t outCap) {
   uint8_t payload[32];
   size_t pos = 0;
@@ -1316,7 +1316,7 @@ size_t g2BuildEvenAICtrl(uint8_t seq, uint32_t magic, uint32_t status,
                          payload, pos, out, outCap);
 }
 
-size_t g2BuildEvenAIHeartbeat(uint8_t seq, uint32_t magic, uint32_t hbCnt,
+size_t g2BuildEvenAiHeartbeat(uint8_t seq, uint32_t magic, uint32_t hbCnt,
                               uint8_t* out, size_t outCap) {
   // EvenAIDataPackage{ cmd=HEARTBEAT, magicRandom, heartbeat{ hbCnt } }.
   // Field numbers per even_ai.proto: wrapper heartbeat=11, hbCnt=1.
@@ -1332,7 +1332,7 @@ size_t g2BuildEvenAIHeartbeat(uint8_t seq, uint32_t magic, uint32_t hbCnt,
                          payload, pos, out, outCap);
 }
 
-size_t g2BuildEvenAIAsk(uint8_t seq, uint32_t magic, uint32_t cmdCnt,
+size_t g2BuildEvenAiAsk(uint8_t seq, uint32_t magic, uint32_t cmdCnt,
                         const char* text,
                         uint8_t* out, size_t outCap) {
   // EvenAIAskInfo shares wire shape with EvenAIReplyInfo (cmdCnt, streamEnable,
@@ -1357,7 +1357,7 @@ size_t g2BuildEvenAIAsk(uint8_t seq, uint32_t magic, uint32_t cmdCnt,
                          payload, pos, out, outCap);
 }
 
-size_t g2BuildEvenAIAnalyse(uint8_t seq, uint32_t magic,
+size_t g2BuildEvenAiAnalyse(uint8_t seq, uint32_t magic,
                             uint8_t* out, size_t outCap) {
   // EvenAIAnalyseInfo carries only an errorCode; we always send 0 (Success)
   // since this is the "I'm processing" transition and any non-zero would
@@ -1376,7 +1376,7 @@ size_t g2BuildEvenAIAnalyse(uint8_t seq, uint32_t magic,
                          payload, pos, out, outCap);
 }
 
-size_t g2BuildEvenAIReply(uint8_t seq, uint32_t magic, uint32_t cmdCnt,
+size_t g2BuildEvenAiReply(uint8_t seq, uint32_t magic, uint32_t cmdCnt,
                           const char* text, bool isLast,
                           uint8_t* out, size_t outCap) {
   // Cap text at ~250 B so the whole pb fits inside one fragment (max
@@ -1402,7 +1402,7 @@ size_t g2BuildEvenAIReply(uint8_t seq, uint32_t magic, uint32_t cmdCnt,
                          payload, pos, out, outCap);
 }
 
-size_t g2BuildEvenAIConfig(uint8_t seq, uint32_t magic,
+size_t g2BuildEvenAiConfig(uint8_t seq, uint32_t magic,
                            uint64_t voiceSwitch, uint64_t streamSpeed,
                            uint64_t duplexMode,
                            uint8_t* out, size_t outCap) {
@@ -3266,13 +3266,13 @@ bool g2ProtocolGoldenSelfTest() {
   // Payload from the accepted stock-shape CONFIG probe on G2 2.2.7. The
   // response echoed CONFIG with f13=[10 50], confirming the wrapper slot and
   // streamSpeed=80. Keep the explicit zero fields in the request.
-  static const uint8_t kEvenAIConfigPb[] = {
+  static const uint8_t kEvenAiConfigPb[] = {
     0x08,0x0a,0x10,0xfa,0x01,0x6a,0x06,0x08,0x00,0x10,
     0x50,0x20,0x00
   };
   // Observed rejection response: COMM_RSP=161, magic=250, f12.errorCode=7.
   // This locks the multi-byte command varint that the old logger misparsed.
-  static const uint8_t kEvenAICommRspPb[] = {
+  static const uint8_t kEvenAiCommRspPb[] = {
     0x08,0xa1,0x01,0x10,0xfa,0x01,0x62,0x02,0x08,0x07
   };
 
@@ -3463,17 +3463,17 @@ bool g2ProtocolGoldenSelfTest() {
   n = g2BuildMenuMembership(0x7e, 0x81, menu5, 5, out, sizeof(out));
   if (!g2GoldenEquals(out, n, kMenu5, sizeof(kMenu5))) return false;
 
-  n = g2BuildEvenAIConfig(0xeb, 250, 0, 80, 0, out, sizeof(out));
+  n = g2BuildEvenAiConfig(0xeb, 250, 0, 80, 0, out, sizeof(out));
   G2EnvelopeView configView;
   if (!g2ParseEnvelope(out, n, &configView)) return false;
   if (!configView.isTx || configView.seq != 0xeb ||
       configView.sid != G2_SID_EVEN_AI ||
       configView.flag != G2_FLAG_REQUEST ||
       !g2GoldenEquals(configView.payload, configView.payloadLen,
-                      kEvenAIConfigPb, sizeof(kEvenAIConfigPb))) return false;
+                      kEvenAiConfigPb, sizeof(kEvenAiConfigPb))) return false;
 
   uint32_t evenAiCmd = 0, evenAiMagic = 0;
-  if (!g2ParseCommandMagic(kEvenAICommRspPb, sizeof(kEvenAICommRspPb),
+  if (!g2ParseCommandMagic(kEvenAiCommRspPb, sizeof(kEvenAiCommRspPb),
                            &evenAiCmd, &evenAiMagic) ||
       evenAiCmd != G2_AI_CMD_COMM_RSP || evenAiMagic != 250) return false;
   size_t rspPos = 0;
@@ -3481,21 +3481,21 @@ bool g2ProtocolGoldenSelfTest() {
   uint64_t rspValue;
   // Walk f1 command and f2 magic, then validate f12={f1=errorCode 7}.
   for (int i = 0; i < 2; i++) {
-    if (!g2PbReadTag(kEvenAICommRspPb, sizeof(kEvenAICommRspPb),
+    if (!g2PbReadTag(kEvenAiCommRspPb, sizeof(kEvenAiCommRspPb),
                      &rspPos, &rspField, &rspWire) ||
         rspWire != G2_PB_WIRE_VARINT ||
-        !g2PbReadVarint(kEvenAICommRspPb, sizeof(kEvenAICommRspPb),
+        !g2PbReadVarint(kEvenAiCommRspPb, sizeof(kEvenAiCommRspPb),
                         &rspPos, &rspValue)) return false;
   }
-  if (!g2PbReadTag(kEvenAICommRspPb, sizeof(kEvenAICommRspPb),
+  if (!g2PbReadTag(kEvenAiCommRspPb, sizeof(kEvenAiCommRspPb),
                    &rspPos, &rspField, &rspWire) ||
       rspField != G2_AI_F_COMM_RSP || rspWire != G2_PB_WIRE_LEN_DELIM ||
-      !g2PbReadVarint(kEvenAICommRspPb, sizeof(kEvenAICommRspPb),
+      !g2PbReadVarint(kEvenAiCommRspPb, sizeof(kEvenAiCommRspPb),
                       &rspPos, &rspValue) || rspValue != 2 ||
-      !g2PbReadTag(kEvenAICommRspPb, sizeof(kEvenAICommRspPb),
+      !g2PbReadTag(kEvenAiCommRspPb, sizeof(kEvenAiCommRspPb),
                    &rspPos, &rspField, &rspWire) ||
       rspField != 1 || rspWire != G2_PB_WIRE_VARINT ||
-      !g2PbReadVarint(kEvenAICommRspPb, sizeof(kEvenAICommRspPb),
+      !g2PbReadVarint(kEvenAiCommRspPb, sizeof(kEvenAiCommRspPb),
                       &rspPos, &rspValue) || rspValue != 7) return false;
 
   G2EnvelopeView view;

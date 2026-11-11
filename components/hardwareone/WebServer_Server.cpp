@@ -5698,7 +5698,7 @@ register_handlers:
   registerMapsHandlers(server);
  #endif
   registerEdgeImpulseHandlers(server);
-  registerESPSRHandlers(server);
+  registerEspSrHandlers(server);
   httpd_register_uri_handler(server, &cliPage);
   httpd_register_uri_handler(server, &cliCmd);
   httpd_register_uri_handler(server, &logsGet);

@@ -25,9 +25,9 @@ unit = r"""
 using String=std::string;
 using UBaseType_t=uint32_t;
 #define RETURN_VALID_IF_VALIDATE_CSTR() ((void)0)
-static void* gSRTaskHandle=reinterpret_cast<void*>(1);
-static bool gESPSRRunning=true;
-static std::atomic<uint32_t> gSRStackHwm{6144};
+static void* gSrTaskHandle=reinterpret_cast<void*>(1);
+static bool gEspSrRunning=true;
+static std::atomic<uint32_t> gSrStackHwm{6144};
 struct Field {
  uint32_t number=0;
  template<class T, std::enable_if_t<std::is_arithmetic<T>::value, int> = 0>
@@ -47,8 +47,8 @@ int main() {
  assert(result.find("alloc=8192B")!=String::npos);
  assert(result.find("est_peak_used=2048B")!=String::npos);
  assert(result.find("hwm_free=6144B")!=String::npos);
- gSRStackHwm=9000;stackStatus(doc);assert(doc["srTaskStackPeakUsedBytesEst"].number==0);
- gESPSRRunning=false;stackStatus(doc);assert(doc["srTaskStackHwmBytes"].number==0);
+ gSrStackHwm=9000;stackStatus(doc);assert(doc["srTaskStackPeakUsedBytesEst"].number==0);
+ gEspSrRunning=false;stackStatus(doc);assert(doc["srTaskStackHwmBytes"].number==0);
  assert(String(cmd_sr_stack("")).find("not running")!=String::npos);
  puts("ESP-SR status/CLI stack byte-unit tests passed");
 }

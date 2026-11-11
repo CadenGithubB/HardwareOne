@@ -2649,7 +2649,7 @@ static bool sttBeginMode(SttOwner owner, uint32_t captureMs, bool continuous,
   if (!continuous && (captureMs < 1000 || captureMs > STT_MAX_CAPTURE_MS))
     return sttError(error, errorCap, "Capture duration must be 1 to 20 seconds");
 #if ENABLE_ESP_SR
-  if (isESPSRRunning() || audioCaptureOwnedBy("sr"))
+  if (isEspSrRunning() || audioCaptureOwnedBy("sr"))
     return sttError(error, errorCap, "Stop command recognition with closesr first");
 #endif
   if (gMicRunning || micRecordingBusy() || audioCaptureOwnedBy("mic"))
@@ -2800,7 +2800,7 @@ void sttKeepWarm(uint32_t holdMs, bool load) {
   // room for the model, as the last warm load took, above the floor that
   // would free it again at once (sttWarmTick): no load/release loop.
 #if ENABLE_ESP_SR
-  if (isESPSRRunning()) load = false;
+  if (isEspSrRunning()) load = false;
 #endif
   const size_t freePsram = load ? sttPsramFree() : 0;
   bool spawn = false;

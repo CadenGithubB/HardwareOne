@@ -23,26 +23,26 @@ void vTaskDelay(uint32_t ms) { nowMs += ms; if (delayHook) delayHook(); }
 static int deletedTasks = 0;
 void vTaskDelete(void*) { ++deletedTasks; }
 
-static std::atomic<bool> gESPSRRunning{false}, gSRFeedShouldRun{false}, gSRTaskShouldRun{false};
-static std::atomic<bool> gSRFeedExited{true}, gSRTaskExited{true};
-static void *gSRFeedTaskHandle = nullptr, *gSRTaskHandle = nullptr;
-static int16_t *gSRFeedBuffer = nullptr, *gSRMNBuffer = nullptr;
-static size_t gSRFeedSamples = 0, gSRFetchSamples = 0;
+static std::atomic<bool> gEspSrRunning{false}, gSrFeedShouldRun{false}, gSrTaskShouldRun{false};
+static std::atomic<bool> gSrFeedExited{true}, gSrTaskExited{true};
+static void *gSrFeedTaskHandle = nullptr, *gSrTaskHandle = nullptr;
+static int16_t *gSrFeedBuffer = nullptr, *gSrMnBuffer = nullptr;
+static size_t gSrFeedSamples = 0, gSrFetchSamples = 0;
 static char gWnModelName[64] = {}, gMnModelName[64] = {};
-static bool gESPSRWakeDetected = false;
+static bool gEspSrWakeDetected = false;
 enum class VoiceState { IDLE };
 static VoiceState gVoiceState = VoiceState::IDLE;
 static String gCurrentCategory, gCurrentSubCategory;
 static std::vector<String> destroyed;
 static String error;
-static std::atomic<const char*> gSRError{nullptr};
-void srSetError(const char* message) { error = message; gSRError.store(message); }
+static std::atomic<const char*> gSrError{nullptr};
+void srSetError(const char* message) { error = message; gSrError.store(message); }
 static bool mnCanDestroy = true;
 bool deinitMultiNet() { if (!mnCanDestroy) return false; destroyed.push_back("mn"); return true; }
-void deinitAFE() { destroyed.push_back("afe"); }
-void deinitSRModels() { destroyed.push_back("models"); }
+void deinitAfe() { destroyed.push_back("afe"); }
+void deinitSrModels() { destroyed.push_back("models"); }
 void deinitI2sMicrophone() { destroyed.push_back("hal"); }
-void restoreMicrophoneAfterSRIfNeeded() { destroyed.push_back("restore"); }
+void restoreMicrophoneAfterSrIfNeeded() { destroyed.push_back("restore"); }
 // INSERT_LIFECYCLE
 
 static uint32_t gSrI2sReadZero=0, gSrG2ReadZero=0, gSrI2sReadOk=0, gSrAfeFeedOk=0;
@@ -50,7 +50,7 @@ static uint64_t gSrI2sBytesOk=0, gSrG2BytesOk=0;
 static int16_t gSrLastPcmMin=0, gSrLastPcmMax=0;
 static float gSrLastPcmAbsAvg=0;
 static bool gSrSnipEnabled = true, gSrFiltersEnabled = true;
-struct SRSnipGuard { explicit operator bool() const { return true; } };
+struct SrSnipGuard { explicit operator bool() const { return true; } };
 constexpr int AUDIO_SRC_LOCAL_PDM = 1, AUDIO_SRC_G2_LEFT = 2;
 static int source = AUDIO_SRC_LOCAL_PDM;
 int audioGetSource() { return source; }
@@ -63,7 +63,7 @@ static std::vector<int16_t> snippets;
 size_t audioReadPcm(int16_t* out, size_t capacity, uint32_t timeout) {
   assert(timeout == 100);
   nowMs += 100;
-  if (readAt == readSizes.size()) { gSRFeedShouldRun=false; return 0; }
+  if (readAt == readSizes.size()) { gSrFeedShouldRun=false; return 0; }
   size_t got = readSizes[readAt++];
   assert(got <= capacity);
   for (size_t i=0; i<got; ++i) out[i]=nextSample++;
@@ -79,11 +79,11 @@ void applyMicAudioProcessing(int16_t* pcm,size_t count,float gain,bool filters) 
 }
 static std::vector<std::vector<int16_t>> fed;
 static int feedResult = 1;
-static int mockFeed(void*,const int16_t* pcm) { fed.emplace_back(pcm,pcm+gSRFeedSamples); return feedResult; }
+static int mockFeed(void*,const int16_t* pcm) { fed.emplace_back(pcm,pcm+gSrFeedSamples); return feedResult; }
 struct AFE { int (*feed)(void*,const int16_t*); };
 static AFE afe{mockFeed};
-static AFE* gAFE = &afe;
-static void* gAFEData = nullptr;
+static AFE* gAfe = &afe;
+static void* gAfeData = nullptr;
 // INSERT_FEED
 
 enum CommandSource { SOURCE_INTERNAL, SOURCE_SERIAL, SOURCE_WEB, SOURCE_LOCAL_DISPLAY,
@@ -142,15 +142,15 @@ bool submitDeferredToCmdExec(ExecReq::DeferredFn fn,void* arg) {
  if(!queueAvailable) return false;
  assert(!queuedFn); queuedFn=fn; queuedArg=arg; return true;
 }
-static SemaphoreHandle_t gMNCommandMutex=nullptr;
-static void* gMNModel=nullptr;
-static void* gMNData=nullptr;
-static bool gMNCommandsAllocated=false;
+static SemaphoreHandle_t gMnCommandMutex=nullptr;
+static void* gMnModel=nullptr;
+static void* gMnData=nullptr;
+static bool gMnCommandsAllocated=false;
 static int commandAllocCalls=0;
 static int commandAllocResult=0;
 constexpr int ESP_OK=0;
 using esp_err_t=int;
-bool ensureSRMutex(SemaphoreHandle_t& slot) {
+bool ensureSrMutex(SemaphoreHandle_t& slot) {
  if(!slot && !allocFails) slot=reinterpret_cast<void*>(1);
  return slot!=nullptr;
 }
@@ -158,14 +158,14 @@ int esp_mn_commands_alloc(void*,void*) { ++commandAllocCalls; return commandAllo
 // INSERT_MN_LOCK
 struct srmodel_list_t { int num; };
 static srmodel_list_t modelList{2};
-static srmodel_list_t* gSRModels=nullptr;
+static srmodel_list_t* gSrModels=nullptr;
 static srmodel_list_t* existingModels=nullptr;
-static const char* gSRModelSource="none";
+static const char* gSrModelSource="none";
 static bool fileLoads=false,partitionPresent=true;
 static std::string requestedModelPath;
 constexpr int ESP_PARTITION_TYPE_DATA=1,ESP_PARTITION_SUBTYPE_ANY=255;
 srmodel_list_t* get_static_srmodels() { return existingModels; }
-bool loadSRModelFile(const char* path) {
+bool loadSrModelFile(const char* path) {
  requestedModelPath=path;
  if(!fileLoads) srSetError("file missing");
  return fileLoads;
@@ -183,29 +183,29 @@ static void runQueued() { auto fn=queuedFn; auto arg=queuedArg; queuedFn=nullptr
 
 static void setupPipeline() {
  destroyed.clear(); error.clear(); nowMs=0; delayHook=nullptr; mnCanDestroy=true;
- gSRFeedExited=false; gSRTaskExited=false; gSRFeedShouldRun=true; gSRTaskShouldRun=true;
- gSRFeedTaskHandle=reinterpret_cast<void*>(1); gSRTaskHandle=reinterpret_cast<void*>(2);
- gSRFeedBuffer=static_cast<int16_t*>(malloc(32)); gSRMNBuffer=static_cast<int16_t*>(malloc(32));
- gSRFeedSamples=gSRFetchSamples=16; gESPSRRunning=true;
+ gSrFeedExited=false; gSrTaskExited=false; gSrFeedShouldRun=true; gSrTaskShouldRun=true;
+ gSrFeedTaskHandle=reinterpret_cast<void*>(1); gSrTaskHandle=reinterpret_cast<void*>(2);
+ gSrFeedBuffer=static_cast<int16_t*>(malloc(32)); gSrMnBuffer=static_cast<int16_t*>(malloc(32));
+ gSrFeedSamples=gSrFetchSamples=16; gEspSrRunning=true;
 }
 static void testTeardown() {
- setupPipeline(); auto* feed=gSRFeedBuffer;
- assert(!stopESPSRLocked()); // feed blocked: detector must remain available to drain
- assert(!gSRFeedShouldRun && gSRTaskShouldRun && destroyed.empty());
- assert(gSRFeedBuffer==feed && gSRFeedTaskHandle && gSRTaskHandle);
- gSRFeedExited=true;
- assert(!stopESPSRLocked()); // detector stuck: retain every resource again
- assert(!gSRTaskShouldRun && destroyed.empty() && gSRFeedBuffer==feed);
- gSRTaskExited=true; mnCanDestroy=false;
- assert(!stopESPSRLocked() && destroyed.empty() && gSRFeedBuffer==feed);
+ setupPipeline(); auto* feed=gSrFeedBuffer;
+ assert(!stopEspSrLocked()); // feed blocked: detector must remain available to drain
+ assert(!gSrFeedShouldRun && gSrTaskShouldRun && destroyed.empty());
+ assert(gSrFeedBuffer==feed && gSrFeedTaskHandle && gSrTaskHandle);
+ gSrFeedExited=true;
+ assert(!stopEspSrLocked()); // detector stuck: retain every resource again
+ assert(!gSrTaskShouldRun && destroyed.empty() && gSrFeedBuffer==feed);
+ gSrTaskExited=true; mnCanDestroy=false;
+ assert(!stopEspSrLocked() && destroyed.empty() && gSrFeedBuffer==feed);
  mnCanDestroy=true;
- assert(stopESPSRLocked());
+ assert(stopEspSrLocked());
  assert((destroyed==std::vector<String>{"mn","afe","models","hal","restore"}));
- assert(!gSRFeedBuffer && !gSRMNBuffer && !gSRTaskHandle && !gSRFeedTaskHandle);
+ assert(!gSrFeedBuffer && !gSrMnBuffer && !gSrTaskHandle && !gSrFeedTaskHandle);
  // Concurrent worker acknowledgements are observed before any destruction.
  setupPipeline();
- delayHook=[] { if(nowMs==20) gSRFeedExited=true; if(nowMs==40) gSRTaskExited=true; };
- assert(stopESPSRLocked() && nowMs==40); delayHook=nullptr;
+ delayHook=[] { if(nowMs==20) gSrFeedExited=true; if(nowMs==40) gSrTaskExited=true; };
+ assert(stopEspSrLocked() && nowMs==40); delayHook=nullptr;
  // Deadline arithmetic survives millis wrap.
  std::atomic<bool> done{false}; nowMs=UINT32_MAX-4;
  assert(!srWaitForWorker(done,20)); assert(nowMs==15);
@@ -214,58 +214,58 @@ static void testFeed() {
  for(int src: {AUDIO_SRC_LOCAL_PDM,AUDIO_SRC_G2_LEFT}) {
   source=src; nextSample=1; readAt=0; nowMs=0; processCalls=0; fed.clear(); snippets.clear();
   readSizes={1,0,2,1,4,2}; feedResult=1; owner="sr";
-  int16_t buffer[4]={}; gSRFeedBuffer=buffer; gSRFeedSamples=4; gSRFeedExited=false; gSRFeedShouldRun=true;
+  int16_t buffer[4]={}; gSrFeedBuffer=buffer; gSrFeedSamples=4; gSrFeedExited=false; gSrFeedShouldRun=true;
   srFeedTask(nullptr);
   const int scale=src==AUDIO_SRC_LOCAL_PDM?2:1;
   assert(fed.size()==2);
   for(int chunk=0;chunk<2;++chunk) for(int i=0;i<4;++i) assert(fed[chunk][i]==(chunk*4+i+1)*scale);
   assert(snippets.size()==10 && snippets[0]==1 && snippets[9]==10);
   assert(processCalls==(src==AUDIO_SRC_LOCAL_PDM?2u:0u));
-  assert(gSRFeedExited && !gSRFeedShouldRun);
+  assert(gSrFeedExited && !gSrFeedShouldRun);
  }
- int16_t buffer[4]={}; gSRFeedBuffer=buffer; gSRFeedSamples=4;
- readSizes={0}; readAt=0; owner=""; error.clear(); gESPSRRunning=true; gSRFeedShouldRun=true;
- srFeedTask(nullptr); assert(!gESPSRRunning && !error.empty() && gSRFeedExited);
- readSizes={4}; readAt=0; owner="sr"; feedResult=0; error.clear(); gESPSRRunning=true; gSRFeedShouldRun=true;
- srFeedTask(nullptr); assert(!gESPSRRunning && !error.empty() && gSRFeedExited);
- gSRFeedBuffer=nullptr;
+ int16_t buffer[4]={}; gSrFeedBuffer=buffer; gSrFeedSamples=4;
+ readSizes={0}; readAt=0; owner=""; error.clear(); gEspSrRunning=true; gSrFeedShouldRun=true;
+ srFeedTask(nullptr); assert(!gEspSrRunning && !error.empty() && gSrFeedExited);
+ readSizes={4}; readAt=0; owner="sr"; feedResult=0; error.clear(); gEspSrRunning=true; gSrFeedShouldRun=true;
+ srFeedTask(nullptr); assert(!gEspSrRunning && !error.empty() && gSrFeedExited);
+ gSrFeedBuffer=nullptr;
 }
 static void testMNLock() {
- assert(!lockMN(10)); // A mutex is insufficient after the model was destroyed.
- gMNModel=reinterpret_cast<void*>(1); gMNData=reinterpret_cast<void*>(2);
- gMNCommandMutex=nullptr; allocFails=true;
- assert(!lockMN(10) && !mnCommandsReady()); // No fail-open mutex path.
+ assert(!lockMn(10)); // A mutex is insufficient after the model was destroyed.
+ gMnModel=reinterpret_cast<void*>(1); gMnData=reinterpret_cast<void*>(2);
+ gMnCommandMutex=nullptr; allocFails=true;
+ assert(!lockMn(10) && !mnCommandsReady()); // No fail-open mutex path.
  allocFails=false; mutexAvailable=false;
- assert(!lockMN(10)); mutexAvailable=true;
+ assert(!lockMn(10)); mutexAvailable=true;
  commandAllocResult=-1;
- assert(!mnCommandsReady() && !gMNCommandsAllocated);
+ assert(!mnCommandsReady() && !gMnCommandsAllocated);
  commandAllocResult=ESP_OK;
- assert(mnCommandsReady() && gMNCommandsAllocated && commandAllocCalls==2);
+ assert(mnCommandsReady() && gMnCommandsAllocated && commandAllocCalls==2);
  assert(mnCommandsReady() && commandAllocCalls==2);
- gMNData=nullptr;
- assert(!lockMN(10) && !mnCommandsReady());
+ gMnData=nullptr;
+ assert(!lockMn(10) && !mnCommandsReady());
 }
 static void testModelSelection() {
- gSettings.srModelSource=2; fileLoads=false; partitionPresent=true; gSRError=nullptr;
- assert(initSRModels());
+ gSettings.srModelSource=2; fileLoads=false; partitionPresent=true; gSrError=nullptr;
+ assert(initSrModels());
  assert(requestedModelPath=="/ESP-SR Models/srmodels.bin");
- assert(gSRModels==&modelList && !strcmp(gSRModelSource,"partition:model"));
- assert(gSRError.load()==nullptr); // A successful fallback must not abort startup.
- gSettings.srModelSource=1; partitionPresent=false; gSRError=nullptr;
- assert(!initSRModels() && gSRError.load());
+ assert(gSrModels==&modelList && !strcmp(gSrModelSource,"partition:model"));
+ assert(gSrError.load()==nullptr); // A successful fallback must not abort startup.
+ gSettings.srModelSource=1; partitionPresent=false; gSrError=nullptr;
+ assert(!initSrModels() && gSrError.load());
  assert(requestedModelPath=="/sd/ESP-SR Models/srmodels.bin");
- fileLoads=true; gSRError=nullptr; assert(initSRModels());
- gSettings.srModelSource=0; assert(!initSRModels());
- partitionPresent=true; modelList.num=0; assert(!initSRModels()); modelList.num=2;
- existingModels=&modelList; assert(!initSRModels()); existingModels=nullptr;
+ fileLoads=true; gSrError=nullptr; assert(initSrModels());
+ gSettings.srModelSource=0; assert(!initSrModels());
+ partitionPresent=true; modelList.num=0; assert(!initSrModels()); modelList.num=2;
+ existingModels=&modelList; assert(!initSrModels()); existingModels=nullptr;
 }
 static void testDSPSettings() {
- micGain=50; gSettings.microphoneGain=70; prepareSRAudioProcessing();
+ micGain=50; gSettings.microphoneGain=70; prepareSrAudioProcessing();
  assert(micGain==70 && dspResetCalls==1);
- gSettings.microphoneGain=0; prepareSRAudioProcessing(); assert(micGain==0);
- gSettings.microphoneGain=100; prepareSRAudioProcessing(); assert(micGain==100);
- gSettings.microphoneGain=-1; prepareSRAudioProcessing(); assert(micGain==100);
- gSettings.microphoneGain=101; prepareSRAudioProcessing(); assert(micGain==100);
+ gSettings.microphoneGain=0; prepareSrAudioProcessing(); assert(micGain==0);
+ gSettings.microphoneGain=100; prepareSrAudioProcessing(); assert(micGain==100);
+ gSettings.microphoneGain=-1; prepareSrAudioProcessing(); assert(micGain==100);
+ gSettings.microphoneGain=101; prepareSrAudioProcessing(); assert(micGain==100);
  assert(dspResetCalls==5);
 }
 static void testVoice() {

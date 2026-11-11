@@ -187,7 +187,7 @@ static bool isAutomationCompiled() {
 #endif
 }
 
-static bool isESPSRCompiled() {
+static bool isEspSrCompiled() {
 #if ENABLE_ESP_SR
   return true;
 #else
@@ -496,7 +496,7 @@ static constexpr FeatureEntry featureRegistry[] = {
 
   { "espsr", "Speech Recognition", FEATURE_CAT_SENSOR, 48,
     FEATURE_FLAG_RUNTIME_TOGGLE,
-    &gSettings.srAutoStart, isESPSRCompiled,
+    &gSettings.srAutoStart, isEspSrCompiled,
     "ESP-SR voice commands (requires microphone)" },
 
   { "edgeimpulse", "Edge Impulse ML", FEATURE_CAT_SENSOR, 32,

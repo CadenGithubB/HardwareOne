@@ -156,7 +156,7 @@ static bool ramFlushReadLive(RamFlushFeatureId f) {
 #endif
 
 #if ENABLE_ESP_SR
-    case RF_SR:         return isESPSRRunning();
+    case RF_SR:         return isEspSrRunning();
 #else
     case RF_SR:         return false;
 #endif

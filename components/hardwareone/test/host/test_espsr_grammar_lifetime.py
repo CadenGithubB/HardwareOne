@@ -34,7 +34,7 @@ def main():
     source = (HERE.parents[1] / 'System_ESPSR.cpp').read_text()
     harness = (HERE / 'espsr_grammar_lifetime_harness.cpp').read_text()
     parts = []
-    for signature in ['static bool mnTableUpdateFailed(', 'struct MNCommandSnapshot', 'static bool mnUsesCommandFileGrammar()', 'static srmodel_data_t* findMNCommandFile(', 'static model_iface_data_t* createMNWithCommandFile(', 'static bool mnUpdateLocked()', 'static bool deinitMultiNet()']:
+    for signature in ['static bool mnTableUpdateFailed(', 'struct MnCommandSnapshot', 'static bool mnUsesCommandFileGrammar()', 'static srmodel_data_t* findMnCommandFile(', 'static model_iface_data_t* createMnWithCommandFile(', 'static bool mnUpdateLocked()', 'static bool deinitMultiNet()']:
         parts.append(function(source, signature) + (';' if signature.startswith('struct ') else ''))
     harness = harness.replace('// INSERT_FUNCTIONS', '\n\n'.join(parts))
     with tempfile.TemporaryDirectory(prefix='hw1-sr-grammar-lifetime-') as tmp:

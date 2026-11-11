@@ -79,7 +79,7 @@ bool transportSessionEpochIsLive(CommandSource source, uint32_t epoch) {
   return false;
 }
 static bool srRunning = false;
-bool isESPSRRunning() { return srRunning; }
+bool isEspSrRunning() { return srRunning; }
 bool gMicRunning = false;
 static bool recordingBusy = false;
 bool micRecordingBusy() { return recordingBusy; }

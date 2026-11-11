@@ -90,7 +90,7 @@ void TranscriptSession::finish(const char*){
 static bool micBusy=false,srBusy=false;
 bool gMicRunning=false;
 bool micRecordingBusy(){return micBusy;}
-bool isESPSRRunning(){return srBusy;}
+bool isEspSrRunning(){return srBusy;}
 static std::string halOwner;
 bool audioCaptureOwnedBy(const char* o){return halOwner==o;}
 bool audioCaptureBusy(){return !halOwner.empty();}

@@ -555,7 +555,7 @@ static void showWifiStatusPage() {
 
 // Fallback while the coordinated WiFi scan runs: back-pane list when the Even-AI
 // front card could not be opened (e.g. CTRL ENTER error 7). Primary path
-// is g2ShowEvenAIReplyNoAsk("Scanning networks...") in runNetworkScanFlow,
+// is g2ShowEvenAiReplyNoAsk("Scanning networks...") in runNetworkScanFlow,
 // which empties the scan cache before queueing this view. Returns the menu
 // generation of the scan view it draws.
 static uint32_t showWifiScanningPlaceholder() {
@@ -1064,10 +1064,10 @@ static void runNetworkScanFlow() {
   portEXIT_CRITICAL(&s_netScanMux);
   const bool cardAttempted = startView.menuGen == g2CurrentMenuGen();
   if (cardAttempted) {
-    g2HideEvenAICard();
+    g2HideEvenAiCard();
     vTaskDelay(pdMS_TO_TICKS(120));
 
-    if (!g2ShowEvenAIReplyNoAsk("Scanning networks...")) {
+    if (!g2ShowEvenAiReplyNoAsk("Scanning networks...")) {
       DEBUG_G2F("[G2] WiFi: Even-AI scanning card failed — back-pane "
                 "placeholder");
       (void)g2EnqueueRedraw(startView, &showScanPlaceholderForFlow,
@@ -1101,7 +1101,7 @@ static void runNetworkScanFlow() {
   // 4. Dismiss the front-pane card explicitly so it disappears the
   //    moment the back-pane swap happens, rather than lingering for
   //    its full firmware auto-dismiss window.
-  if (cardAttempted) g2HideEvenAICard();
+  if (cardAttempted) g2HideEvenAiCard();
 
   // 5. Publish the results, then queue the back-pane swap to the results list
   //    on the view the flow last drew (see showScanPlaceholderForFlow).

@@ -462,20 +462,20 @@ bool g2ShowText(const char* text);
 // Verified on hardware 2026-04-26 — the full pipeline (CTRL{ENTER} →
 // ASK{heading} → ANALYSE → REPLY{body}) renders both panels and ends
 // with a STREAM_COMPLETE event.
-bool g2ShowEvenAIReply(const char* heading, const char* body);
+bool g2ShowEvenAiReply(const char* heading, const char* body);
 
 // Convenience: single-string variant uses "(host)" as the heading,
 // matching the original prototype behaviour. Existing callers keep
 // working without changes.
-bool g2ShowEvenAIReply(const char* body);
+bool g2ShowEvenAiReply(const char* body);
 
 // Pipeline variants for A/B testing — same surface (front-pane card),
 // different state-machine paths into it. Useful for empirically pinning
 // down which transitions the firmware actually requires.
-bool g2ShowEvenAIReplyNoAsk(const char* heading, const char* body);   // CTRL → ANALYSE → REPLY (no ASK; heading ignored)
-bool g2ShowEvenAIReplyDirect(const char* heading, const char* body);  // CTRL → REPLY (heading ignored; original failing path)
-bool g2ShowEvenAIReplyNoAsk(const char* body);
-bool g2ShowEvenAIReplyDirect(const char* body);
+bool g2ShowEvenAiReplyNoAsk(const char* heading, const char* body);   // CTRL → ANALYSE → REPLY (no ASK; heading ignored)
+bool g2ShowEvenAiReplyDirect(const char* heading, const char* body);  // CTRL → REPLY (heading ignored; original failing path)
+bool g2ShowEvenAiReplyNoAsk(const char* body);
+bool g2ShowEvenAiReplyDirect(const char* body);
 
 // Dismiss the front-pane EvenAI card immediately. Sends CTRL with
 // status=EXIT (3) which closes the card without waiting for the ~10 s
@@ -483,10 +483,10 @@ bool g2ShowEvenAIReplyDirect(const char* body);
 // even if no card is showing — the firmware silently ignores EXIT
 // without an active card.
 //
-// Use cases: pair this with g2ShowEvenAIReplyNoAsk to show a temporary
+// Use cases: pair this with g2ShowEvenAiReplyNoAsk to show a temporary
 // progress message ("Scanning..." / "Connecting...") and dismiss when
 // the underlying op completes.
-bool g2HideEvenAICard();
+bool g2HideEvenAiCard();
 
 // Exact native EvenAI identity fence used by recorder-shadow provenance.
 // True only while this exchange is active and bound to this UART login epoch.
@@ -1529,13 +1529,13 @@ inline const char* getG2StateString() { return "disabled"; }
 inline bool g2StartScan(uint32_t durationMs = 10000) { return false; }
 inline void g2StopScan() {}
 inline bool g2ShowText(const char* text) { return false; }
-inline bool g2ShowEvenAIReply(const char*, const char*) { return false; }
-inline bool g2ShowEvenAIReply(const char*) { return false; }
-inline bool g2ShowEvenAIReplyNoAsk(const char*, const char*) { return false; }
-inline bool g2ShowEvenAIReplyDirect(const char*, const char*) { return false; }
-inline bool g2ShowEvenAIReplyNoAsk(const char*) { return false; }
-inline bool g2ShowEvenAIReplyDirect(const char*) { return false; }
-inline bool g2HideEvenAICard() { return false; }
+inline bool g2ShowEvenAiReply(const char*, const char*) { return false; }
+inline bool g2ShowEvenAiReply(const char*) { return false; }
+inline bool g2ShowEvenAiReplyNoAsk(const char*, const char*) { return false; }
+inline bool g2ShowEvenAiReplyDirect(const char*, const char*) { return false; }
+inline bool g2ShowEvenAiReplyNoAsk(const char*) { return false; }
+inline bool g2ShowEvenAiReplyDirect(const char*) { return false; }
+inline bool g2HideEvenAiCard() { return false; }
 inline bool g2EvenAiExchangeBoundToUartSession(uint64_t, uint32_t) {
   return false;
 }

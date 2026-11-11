@@ -47,7 +47,7 @@ constexpr int kMaxModelClasses = 1024;
 // How long a stop waits for the continuous task to finish its current frame.
 constexpr uint32_t kContinuousJoinTimeoutMs = 15000;
 
-static const char* const kEIBusyMessage = "Edge Impulse busy";
+static const char* const kEiBusyMessage = "Edge Impulse busy";
 
 // Model storage path (relative to LittleFS mount point)
 static const char* MODEL_DIR = "/EI Models";
@@ -57,10 +57,10 @@ static const char* DEFAULT_MODEL = "/EI Models/default.tflite";
 // Edge Impulse Module State
 // ============================================================================
 
-static bool gEIInitialized = false;
-static bool gEIModelLoaded = false;
-static std::atomic<bool> gEIContinuousRunning{false};
-static TaskHandle_t gEIContinuousTask = nullptr;  // owned under the lifecycle lock
+static bool gEiInitialized = false;
+static bool gEiModelLoaded = false;
+static std::atomic<bool> gEiContinuousRunning{false};
+static TaskHandle_t gEiContinuousTask = nullptr;  // owned under the lifecycle lock
 
 // Model-input resize buffer: RGB888 at the model's input width x height,
 // allocated by the model load and freed with the model.
@@ -96,15 +96,15 @@ static SemaphoreHandle_t eiInferenceMutex() {
   return handle;
 }
 
-struct EIInferenceLock {
+struct EiInferenceLock {
   bool held;
-  explicit EIInferenceLock(TickType_t wait)
+  explicit EiInferenceLock(TickType_t wait)
       : held(xSemaphoreTake(eiInferenceMutex(), wait) == pdTRUE) {}
-  ~EIInferenceLock() {
+  ~EiInferenceLock() {
     if (held) xSemaphoreGive(eiInferenceMutex());
   }
-  EIInferenceLock(const EIInferenceLock&) = delete;
-  EIInferenceLock& operator=(const EIInferenceLock&) = delete;
+  EiInferenceLock(const EiInferenceLock&) = delete;
+  EiInferenceLock& operator=(const EiInferenceLock&) = delete;
 };
 
 // Lifecycle lock: serializes start, stop, load and unload (and so the
@@ -115,11 +115,11 @@ static SemaphoreHandle_t eiLifecycleMutex() {
   return handle;
 }
 
-struct EILifecycleLock {
-  EILifecycleLock() { xSemaphoreTake(eiLifecycleMutex(), portMAX_DELAY); }
-  ~EILifecycleLock() { xSemaphoreGive(eiLifecycleMutex()); }
-  EILifecycleLock(const EILifecycleLock&) = delete;
-  EILifecycleLock& operator=(const EILifecycleLock&) = delete;
+struct EiLifecycleLock {
+  EiLifecycleLock() { xSemaphoreTake(eiLifecycleMutex(), portMAX_DELAY); }
+  ~EiLifecycleLock() { xSemaphoreGive(eiLifecycleMutex()); }
+  EiLifecycleLock(const EiLifecycleLock&) = delete;
+  EiLifecycleLock& operator=(const EiLifecycleLock&) = delete;
 };
 
 // Continuous-task handshake: a stop gives "wake" to cut the interval sleep
@@ -273,7 +273,7 @@ static TrackedObject* findTrackedObject(int x, int y, int tolerance = 20) {
 }
 
 // Update tracked objects with new detections. Holds: inference lock.
-static void updateTrackedObjects(const EIResults& results) {
+static void updateTrackedObjects(const EiResults& results) {
   uint32_t now = millis();
   
   // Mark all as potentially stale
@@ -283,7 +283,7 @@ static void updateTrackedObjects(const EIResults& results) {
   
   // Process new detections
   for (int d = 0; d < results.detectionCount; d++) {
-    const EIDetection& det = results.detections[d];
+    const EiDetection& det = results.detections[d];
     
     // Find existing tracked object at this location
     TrackedObject* tracked = findTrackedObject(det.x, det.y);
@@ -384,7 +384,7 @@ static void updateTrackedObjects(const EIResults& results) {
 
 // Public: Enable/disable state tracking
 void setStateTrackingEnabled(bool enabled) {
-  EIInferenceLock lock(portMAX_DELAY);
+  EiInferenceLock lock(portMAX_DELAY);
   gStateTrackingEnabled = enabled;
   if (!enabled) {
     gTrackedObjectCount = 0;
@@ -568,7 +568,7 @@ static void freeModelResources() {
   gModelInputHeight = 0;
   gModelInputChannels = 0;
   gModelClassCount = 0;
-  gEIModelLoaded = false;
+  gEiModelLoaded = false;
 
   // Free label memory
   freeLabels();
@@ -783,7 +783,7 @@ static bool loadModelLocked(const char* path) {
   }
 
   gLoadedModelPath = path;
-  gEIModelLoaded = true;
+  gEiModelLoaded = true;
 
   // Try to load labels from labels.txt, one slot per output class
   bool haveLabels = loadLabelsFromFile(path, gModelClassCount);
@@ -813,16 +813,16 @@ static bool joinContinuousTaskLocked();
 static bool spawnContinuousTaskLocked();
 
 bool loadModelFromFile(const char* path) {
-  EILifecycleLock lifecycle;
+  EiLifecycleLock lifecycle;
   // Continuous mode pauses for the swap and resumes on the new model.
-  const bool resume = gEIContinuousTask != nullptr && gEIContinuousRunning;
+  const bool resume = gEiContinuousTask != nullptr && gEiContinuousRunning;
   if (!joinContinuousTaskLocked()) {
     ERROR_SYSTEMF("[EdgeImpulse] Model not loaded: continuous inference did not stop");
     return false;
   }
   bool loaded = false;
   {
-    EIInferenceLock inference(portMAX_DELAY);
+    EiInferenceLock inference(portMAX_DELAY);
     loaded = loadModelLocked(path);
   }
   if (resume) {
@@ -836,19 +836,19 @@ bool loadModelFromFile(const char* path) {
 
 void unloadModel() {
   DEBUG_SYSTEMF("[EI_DEBUG] unloadModel() called");
-  EILifecycleLock lifecycle;
+  EiLifecycleLock lifecycle;
   DEBUG_SYSTEMF("[EI_DEBUG]   Current model: %s",
                 gLoadedModelPath.length() > 0 ? gLoadedModelPath.c_str() : "(none)");
 
   // Stop continuous inference and wait for its task to exit
-  if (gEIContinuousTask) {
+  if (gEiContinuousTask) {
     DEBUG_SYSTEMF("[EI_DEBUG]   Stopping continuous inference first...");
     joinContinuousTaskLocked();
     setSetting(gSettings.edgeImpulseContinuous, false);
   }
 
   // Waits for any inference still holding the model.
-  EIInferenceLock inference(portMAX_DELAY);
+  EiInferenceLock inference(portMAX_DELAY);
   freeModelResources();
   DEBUG_SYSTEMF("[EI_DEBUG]   Model unloaded successfully");
 }
@@ -997,18 +997,18 @@ static void fillInputTensor(TfLiteTensor* input, const uint8_t* rgb,
 // Mark the module ready for inference (the model directory exists). Model
 // buffers belong to the model and are allocated by the model load.
 static void markEdgeImpulseReady() {
-  if (gEIInitialized) return;
+  if (gEiInitialized) return;
   DEBUG_SYSTEMF("[EI_DEBUG] Ensuring model directory exists...");
   ensureModelDirectory();
-  gEIInitialized = true;
+  gEiInitialized = true;
   DEBUG_SYSTEMF("[EI_DEBUG] Edge Impulse initialized successfully");
 }
 
 void initEdgeImpulse() {
   DEBUG_SYSTEMF("[EI_DEBUG] ========== initEdgeImpulse() START ==========");
-  DEBUG_SYSTEMF("[EI_DEBUG] Already initialized: %s", gEIInitialized ? "YES" : "NO");
+  DEBUG_SYSTEMF("[EI_DEBUG] Already initialized: %s", gEiInitialized ? "YES" : "NO");
 
-  if (gEIInitialized) {
+  if (gEiInitialized) {
     DEBUG_SYSTEMF("[EI_DEBUG] Skipping - already initialized");
     return;
   }
@@ -1055,7 +1055,7 @@ void initEdgeImpulse() {
 }
 
 bool isEdgeImpulseModelLoaded() {
-  return gEIModelLoaded;
+  return gEiModelLoaded;
 }
 
 // ============================================================================
@@ -1094,9 +1094,9 @@ static float outputConfidence(const TfLiteTensor* output, int index) {
   }
 }
 
-static void addDetection(EIResults& results, int classIndex, float confidence,
+static void addDetection(EiResults& results, int classIndex, float confidence,
                          int x, int y, int width, int height) {
-  EIDetection& det = results.detections[results.detectionCount++];
+  EiDetection& det = results.detections[results.detectionCount++];
   copyLabelForIndex(classIndex, det.label, sizeof(det.label));
   det.confidence = confidence;
   det.x = x;
@@ -1109,7 +1109,7 @@ static void addDetection(EIResults& results, int classIndex, float confidence,
 // seen. FOMO grids ([1, gridH, gridW, classes], class 0 = background) give one
 // box per grid cell above the threshold; any other shape is per-class scores
 // over the whole input. Holds: inference lock.
-static float parseOutputTensor(EIResults& results) {
+static float parseOutputTensor(EiResults& results) {
   results.detectionCount = 0;
   int maxDetections = gSettings.edgeImpulseMaxDetections;
   if (maxDetections < 1) maxDetections = 1;
@@ -1169,8 +1169,8 @@ static float parseOutputTensor(EIResults& results) {
 // points: resize a decoded RGB888 frame to the model's input geometry, fill
 // the input tensor, run the interpreter and parse the output. inferenceTimeMs
 // covers these steps. Holds: inference lock.
-static void inferRgb(const uint8_t* rgb, int width, int height, EIResults& results) {
-  if (!gEIModelLoaded || !gInterpreter || !gInputTensor || !gOutputTensor || !gResizedBuffer) {
+static void inferRgb(const uint8_t* rgb, int width, int height, EiResults& results) {
+  if (!gEiModelLoaded || !gInterpreter || !gInputTensor || !gOutputTensor || !gResizedBuffer) {
     results.errorMessage = "Interpreter not ready";
     return;
   }
@@ -1203,15 +1203,15 @@ static void inferRgb(const uint8_t* rgb, int width, int height, EIResults& resul
 
 // Checks every entry point applies before it acquires a frame.
 static const char* inferencePreflight() {
-  if (!gEIInitialized) return "Edge Impulse not initialized";
+  if (!gEiInitialized) return "Edge Impulse not initialized";
   if (!gSettings.eiEnabled) return "Edge Impulse disabled";
-  if (!gEIModelLoaded) return "No model loaded";
+  if (!gEiModelLoaded) return "No model loaded";
   return nullptr;
 }
 
 // Camera entry point. Holds: inference lock, from capture to results.
-static EIResults runCameraInferenceLocked() {
-  EIResults results = {};
+static EiResults runCameraInferenceLocked() {
+  EiResults results = {};
   if (const char* reason = inferencePreflight()) {
     results.errorMessage = reason;
     return results;
@@ -1256,11 +1256,11 @@ static EIResults runCameraInferenceLocked() {
   return results;
 }
 
-EIResults runEdgeImpulseInference() {
-  EIInferenceLock lock(0);
+EiResults runEdgeImpulseInference() {
+  EiInferenceLock lock(0);
   if (!lock.held) {
-    EIResults busy = {};
-    busy.errorMessage = kEIBusyMessage;
+    EiResults busy = {};
+    busy.errorMessage = kEiBusyMessage;
     return busy;
   }
   return runCameraInferenceLocked();
@@ -1270,11 +1270,11 @@ EIResults runEdgeImpulseInference() {
 // Inference from Stored Image File
 // ============================================================================
 
-EIResults runInferenceFromFile(const char* imagePath, const AuthContext& ctx) {
-  EIResults results = {};
-  EIInferenceLock lock(0);
+EiResults runInferenceFromFile(const char* imagePath, const AuthContext& ctx) {
+  EiResults results = {};
+  EiInferenceLock lock(0);
   if (!lock.held) {
-    results.errorMessage = kEIBusyMessage;
+    results.errorMessage = kEiBusyMessage;
     return results;
   }
   if (const char* reason = inferencePreflight()) {
@@ -1338,7 +1338,7 @@ EIResults runInferenceFromFile(const char* imagePath, const AuthContext& ctx) {
 // Continuous Inference Task
 // ============================================================================
 
-// Runs until a stop clears gEIContinuousRunning; its last action gives the
+// Runs until a stop clears gEiContinuousRunning; its last action gives the
 // "done" semaphore that the stop waits for.
 static void continuousInferenceTask(void* param) {
   (void)param;
@@ -1351,13 +1351,13 @@ static void continuousInferenceTask(void* param) {
   uint32_t detectionCount = 0;
   uint32_t taskStartTime = millis();
   
-  while (gEIContinuousRunning) {
+  while (gEiContinuousRunning) {
     // Held for one frame, capture to results. A detect command may hold it
     // for one frame too; load and unload stop this task before taking it.
     xSemaphoreTake(eiInferenceMutex(), portMAX_DELAY);
-    if (gEIContinuousRunning && gSettings.eiEnabled && gEIModelLoaded) {
+    if (gEiContinuousRunning && gSettings.eiEnabled && gEiModelLoaded) {
       inferenceCount++;
-      const EIResults results = runCameraInferenceLocked();
+      const EiResults results = runCameraInferenceLocked();
 
       if (results.success) {
         successCount++;
@@ -1381,9 +1381,9 @@ static void continuousInferenceTask(void* param) {
                       (unsigned long)ESP.getFreeHeap(),
                       (unsigned long)(psramFound() ? ESP.getFreePsram() : 0));
       }
-    } else if (gEIContinuousRunning) {
+    } else if (gEiContinuousRunning) {
       DEBUG_SYSTEMF("[EI_DEBUG] [Continuous] Skipping - enabled=%d modelLoaded=%d",
-                    gSettings.eiEnabled, gEIModelLoaded);
+                    gSettings.eiEnabled, gEiModelLoaded);
     }
     xSemaphoreGive(eiInferenceMutex());
 
@@ -1408,26 +1408,26 @@ static void continuousInferenceTask(void* param) {
 // beside it and the model can be freed or replaced. On a timeout the handle is
 // kept, start refuses, and a later stop joins the task again.
 static bool joinContinuousTaskLocked() {
-  gEIContinuousRunning = false;
-  if (!gEIContinuousTask) return true;
+  gEiContinuousRunning = false;
+  if (!gEiContinuousTask) return true;
   xSemaphoreGive(eiContinuousWake());
   if (xSemaphoreTake(eiContinuousDone(), pdMS_TO_TICKS(kContinuousJoinTimeoutMs)) != pdTRUE) {
     ERROR_SYSTEMF("[EdgeImpulse] Continuous task did not stop within %lu ms",
                   (unsigned long)kContinuousJoinTimeoutMs);
     return false;
   }
-  gEIContinuousTask = nullptr;
+  gEiContinuousTask = nullptr;
   DEBUG_SYSTEMF("[EI_DEBUG]   Continuous task joined");
   return true;
 }
 
 // Holds: lifecycle lock, with no continuous task left (joined).
 static bool spawnContinuousTaskLocked() {
-  if (gEIContinuousTask) return false;
+  if (gEiContinuousTask) return false;
   // Drop a wake left over from a stop that raced the task's own exit.
   while (xSemaphoreTake(eiContinuousWake(), 0) == pdTRUE) {
   }
-  gEIContinuousRunning = true;
+  gEiContinuousRunning = true;
 
   // No core affinity: prio 1 on Core 0 was getting starved by WiFi (prio ~23)
   // and BT — continuous inference would stall whenever the radios were busy.
@@ -1439,24 +1439,24 @@ static bool spawnContinuousTaskLocked() {
     EI_CONTINUOUS_STACK_WORDS,
     nullptr,
     1,
-    &gEIContinuousTask,
+    &gEiContinuousTask,
     APP_CORE   // inference compute — keep off the Wi-Fi/BLE core
   );
   if (result != pdPASS) {
     ERROR_SYSTEMF("[EdgeImpulse] Failed to create continuous task (result=%d)", result);
-    gEIContinuousRunning = false;
-    gEIContinuousTask = nullptr;
+    gEiContinuousRunning = false;
+    gEiContinuousTask = nullptr;
     return false;
   }
-  DEBUG_SYSTEMF("[EI_DEBUG]   Continuous inference started, task handle=%p", gEIContinuousTask);
+  DEBUG_SYSTEMF("[EI_DEBUG]   Continuous inference started, task handle=%p", gEiContinuousTask);
   return true;
 }
 
 bool startContinuousInference() {
   DEBUG_SYSTEMF("[EI_DEBUG] startContinuousInference() called");
-  EILifecycleLock lifecycle;
-  if (gEIContinuousTask) {
-    if (gEIContinuousRunning) {
+  EiLifecycleLock lifecycle;
+  if (gEiContinuousTask) {
+    if (gEiContinuousRunning) {
       DEBUG_SYSTEMF("[EI_DEBUG]   Skipping - already running");
       return true;
     }
@@ -1464,7 +1464,7 @@ bool startContinuousInference() {
     if (!joinContinuousTaskLocked()) return false;
   }
 
-  if (!gEIModelLoaded) {
+  if (!gEiModelLoaded) {
     ERROR_SYSTEMF("[EdgeImpulse] Cannot start continuous - no model loaded");
     return false;
   }
@@ -1483,13 +1483,13 @@ bool startContinuousInference() {
 
 void stopContinuousInference() {
   DEBUG_SYSTEMF("[EI_DEBUG] stopContinuousInference() called");
-  EILifecycleLock lifecycle;
+  EiLifecycleLock lifecycle;
   joinContinuousTaskLocked();
   setSetting(gSettings.edgeImpulseContinuous, false);
 }
 
 bool isContinuousInferenceRunning() {
-  return gEIContinuousRunning;
+  return gEiContinuousRunning;
 }
 
 // ============================================================================
@@ -1497,7 +1497,7 @@ bool isContinuousInferenceRunning() {
 // ============================================================================
 
 // Detection fields shared by every detection reply (CLI and web).
-static void appendDetectionJson(const EIResults& results, JsonDocument& doc) {
+static void appendDetectionJson(const EiResults& results, JsonDocument& doc) {
   doc["success"] = results.success;
   doc["inferenceTimeMs"] = results.inferenceTimeMs;
   // Reported model geometry. The web overlay reads modelInputWidth and
@@ -1525,7 +1525,7 @@ static void appendDetectionJson(const EIResults& results, JsonDocument& doc) {
   }
 }
 
-void buildDetectionJson(const EIResults& results, String& output) {
+void buildDetectionJson(const EiResults& results, String& output) {
   PSRAM_JSON_DOC(doc);
   appendDetectionJson(results, doc);
   serializeJson(doc, output);
@@ -1561,7 +1561,7 @@ static void appendTrackedObjectsJson(JsonDocument& doc) {
 }
 
 // Organize EI model files: move loose .tflite and .labels.txt into proper /EI Models/<name>/ folders
-static esp_err_t handleEIOrganize(httpd_req_t* req) {
+static esp_err_t handleEiOrganize(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);
 
   if (!filesystemReady) {
@@ -1668,13 +1668,13 @@ esp_err_t handleEdgeImpulseDetect(httpd_req_t* req) {
   // module answers at once with the shared detection fields and its error.
   PSRAM_JSON_DOC(doc);
   {
-    EIInferenceLock lock(0);
+    EiInferenceLock lock(0);
     if (!lock.held) {
-      EIResults busy = {};
-      busy.errorMessage = kEIBusyMessage;
+      EiResults busy = {};
+      busy.errorMessage = kEiBusyMessage;
       appendDetectionJson(busy, doc);
     } else {
-      const EIResults results = runCameraInferenceLocked();
+      const EiResults results = runCameraInferenceLocked();
       appendDetectionJson(results, doc);
       appendTrackedObjectsJson(doc);
     }
@@ -1696,12 +1696,12 @@ esp_err_t handleEdgeImpulseDetect(httpd_req_t* req) {
 // CLI Command Handlers (no web server dependency)
 // ============================================================================
 
-EXT_RAM_BSS_ATTR static char gEICmdBuffer[512];
+EXT_RAM_BSS_ATTR static char gEiCmdBuffer[512];
 
 const char* cmd_ei(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  snprintf(gEICmdBuffer, sizeof(gEICmdBuffer),
+  snprintf(gEiCmdBuffer, sizeof(gEiCmdBuffer),
     "Edge Impulse Commands:\n"
     "  ei enable <0|1>     - Enable/disable inference\n"
     "  ei detect           - Run single inference (from camera)\n"
@@ -1712,7 +1712,7 @@ const char* cmd_ei(const String& argsInput) {
     "  ei model ...        - Model management (list/load/info/unload)\n"
     "  ei track ...        - State change tracking (status/enable/clear)\n"
   );
-  return gEICmdBuffer;
+  return gEiCmdBuffer;
 }
 
 const char* cmd_ei_enable(const String& argsInput) {
@@ -1722,52 +1722,52 @@ const char* cmd_ei_enable(const String& argsInput) {
   trimmed.trim();
   
   if (trimmed.length() == 0) {
-    snprintf(gEICmdBuffer, sizeof(gEICmdBuffer), "Edge Impulse: %s", 
+    snprintf(gEiCmdBuffer, sizeof(gEiCmdBuffer), "Edge Impulse: %s", 
       gSettings.eiEnabled ? "enabled" : "disabled");
-    return gEICmdBuffer;
+    return gEiCmdBuffer;
   }
   
   const int val = parseBoolArg(trimmed);
   if (val < 0) return kCommandReplyNotOnOff;
   setSetting(gSettings.eiEnabled, val == 1);
 
-  if (gSettings.eiEnabled && !gEIInitialized) {
+  if (gSettings.eiEnabled && !gEiInitialized) {
     initEdgeImpulse();
   } else if (!gSettings.eiEnabled) {
     // Stop live inference + unload model so Enabled off frees the subsystem.
     // Both wait for an inference in progress to finish before freeing.
     stopContinuousInference();
-    if (gEIModelLoaded) unloadModel();
+    if (gEiModelLoaded) unloadModel();
   }
 
   sensorStatusBumpWith(gSettings.eiEnabled ? "ei_enable" : "ei_disable");
   
-  snprintf(gEICmdBuffer, sizeof(gEICmdBuffer), "Edge Impulse %s", 
+  snprintf(gEiCmdBuffer, sizeof(gEiCmdBuffer), "Edge Impulse %s", 
     gSettings.eiEnabled ? "enabled" : "disabled");
-  return gEICmdBuffer;
+  return gEiCmdBuffer;
 }
 
 const char* cmd_ei_detect(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  EIResults results = runEdgeImpulseInference();
+  EiResults results = runEdgeImpulseInference();
   
   if (!results.success) {
-    snprintf(gEICmdBuffer, sizeof(gEICmdBuffer), "Error: Detection failed: %s",
+    snprintf(gEiCmdBuffer, sizeof(gEiCmdBuffer), "Error: Detection failed: %s",
       results.errorMessage ? results.errorMessage : "unknown error");
-    return gEICmdBuffer;
+    return gEiCmdBuffer;
   }
   
   if (results.detectionCount == 0) {
-    snprintf(gEICmdBuffer, sizeof(gEICmdBuffer), 
+    snprintf(gEiCmdBuffer, sizeof(gEiCmdBuffer), 
       "No objects detected (inference: %lums)", results.inferenceTimeMs);
-    return gEICmdBuffer;
+    return gEiCmdBuffer;
   }
   
   String output;
   buildDetectionJson(results, output);
-  snprintf(gEICmdBuffer, sizeof(gEICmdBuffer), "%s", output.c_str());
-  return gEICmdBuffer;
+  snprintf(gEiCmdBuffer, sizeof(gEiCmdBuffer), "%s", output.c_str());
+  return gEiCmdBuffer;
 }
 
 const char* cmd_ei_file(const String& argsInput) {
@@ -1781,28 +1781,28 @@ const char* cmd_ei_file(const String& argsInput) {
 
   // Check file exists
   if (!VFS::existsGuarded(path, currentAuthContext())) {
-    snprintf(gEICmdBuffer, sizeof(gEICmdBuffer), "Error: File not found: %s", path.c_str());
-    return gEICmdBuffer;
+    snprintf(gEiCmdBuffer, sizeof(gEiCmdBuffer), "Error: File not found: %s", path.c_str());
+    return gEiCmdBuffer;
   }
 
-  EIResults results = runInferenceFromFile(path.c_str(), currentAuthContext());
+  EiResults results = runInferenceFromFile(path.c_str(), currentAuthContext());
   
   if (!results.success) {
-    snprintf(gEICmdBuffer, sizeof(gEICmdBuffer), "Error: Inference failed: %s",
+    snprintf(gEiCmdBuffer, sizeof(gEiCmdBuffer), "Error: Inference failed: %s",
       results.errorMessage ? results.errorMessage : "unknown error");
-    return gEICmdBuffer;
+    return gEiCmdBuffer;
   }
   
   if (results.detectionCount == 0) {
-    snprintf(gEICmdBuffer, sizeof(gEICmdBuffer), 
+    snprintf(gEiCmdBuffer, sizeof(gEiCmdBuffer), 
       "No objects detected in %s (inference: %lums)", path.c_str(), results.inferenceTimeMs);
-    return gEICmdBuffer;
+    return gEiCmdBuffer;
   }
   
   String output;
   buildDetectionJson(results, output);
-  snprintf(gEICmdBuffer, sizeof(gEICmdBuffer), "%s", output.c_str());
-  return gEICmdBuffer;
+  snprintf(gEiCmdBuffer, sizeof(gEiCmdBuffer), "%s", output.c_str());
+  return gEiCmdBuffer;
 }
 
 const char* cmd_ei_continuous(const String& argsInput) {
@@ -1812,9 +1812,9 @@ const char* cmd_ei_continuous(const String& argsInput) {
   trimmed.trim();
   
   if (trimmed.length() == 0) {
-    snprintf(gEICmdBuffer, sizeof(gEICmdBuffer), "Continuous mode: %s", 
-      gEIContinuousRunning ? "running" : "stopped");
-    return gEICmdBuffer;
+    snprintf(gEiCmdBuffer, sizeof(gEiCmdBuffer), "Continuous mode: %s", 
+      gEiContinuousRunning ? "running" : "stopped");
+    return gEiCmdBuffer;
   }
   
   const int val = parseBoolArg(trimmed);
@@ -1837,9 +1837,9 @@ const char* cmd_ei_confidence(const String& argsInput) {
   trimmed.trim();
   
   if (trimmed.length() == 0) {
-    snprintf(gEICmdBuffer, sizeof(gEICmdBuffer), "Min confidence: %.2f", 
+    snprintf(gEiCmdBuffer, sizeof(gEiCmdBuffer), "Min confidence: %.2f", 
       gSettings.edgeImpulseMinConfidence);
-    return gEICmdBuffer;
+    return gEiCmdBuffer;
   }
   
   float val = trimmed.toFloat();
@@ -1847,14 +1847,14 @@ const char* cmd_ei_confidence(const String& argsInput) {
   if (val > 1.0f) val = 1.0f;
   
   setSetting(gSettings.edgeImpulseMinConfidence, val);
-  snprintf(gEICmdBuffer, sizeof(gEICmdBuffer), "Min confidence set to %.2f", val);
-  return gEICmdBuffer;
+  snprintf(gEiCmdBuffer, sizeof(gEiCmdBuffer), "Min confidence set to %.2f", val);
+  return gEiCmdBuffer;
 }
 
 const char* cmd_ei_status(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  snprintf(gEICmdBuffer, sizeof(gEICmdBuffer),
+  snprintf(gEiCmdBuffer, sizeof(gEiCmdBuffer),
     "Edge Impulse Status:\n"
     "  Initialized: %s\n"
     "  Model loaded: %s\n"
@@ -1864,23 +1864,23 @@ const char* cmd_ei_status(const String& argsInput) {
     "  Min confidence: %.2f\n"
     "  Input size: %dx%d\n"
     "  Interval: %dms",
-    gEIInitialized ? "yes" : "no",
-    gEIModelLoaded ? "yes" : "no",
+    gEiInitialized ? "yes" : "no",
+    gEiModelLoaded ? "yes" : "no",
     gLoadedModelPath.length() > 0 ? gLoadedModelPath.c_str() : "(none)",
     gSettings.eiEnabled ? "yes" : "no",
-    gEIContinuousRunning ? "running" : "stopped",
+    gEiContinuousRunning ? "running" : "stopped",
     gSettings.edgeImpulseMinConfidence,
     gModelInputWidth, gModelInputHeight,
     gSettings.edgeImpulseIntervalMs
   );
-  return gEICmdBuffer;
+  return gEiCmdBuffer;
 }
 
 // Model management commands
 const char* cmd_ei_model(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  snprintf(gEICmdBuffer, sizeof(gEICmdBuffer),
+  snprintf(gEiCmdBuffer, sizeof(gEiCmdBuffer),
     "Model Commands:\n"
     "  ei model list       - List available models in %s\n"
     "  ei model load <name>- Load a .tflite model\n"
@@ -1888,7 +1888,7 @@ const char* cmd_ei_model(const String& argsInput) {
     "  ei model unload     - Unload current model",
     MODEL_DIR
   );
-  return gEICmdBuffer;
+  return gEiCmdBuffer;
 }
 
 const char* cmd_ei_model_list(const String& argsInput) {
@@ -1896,8 +1896,8 @@ const char* cmd_ei_model_list(const String& argsInput) {
   
   String output;
   listAvailableModels(output);
-  snprintf(gEICmdBuffer, sizeof(gEICmdBuffer), "%s", output.c_str());
-  return gEICmdBuffer;
+  snprintf(gEiCmdBuffer, sizeof(gEiCmdBuffer), "%s", output.c_str());
+  return gEiCmdBuffer;
 }
 
 const char* cmd_ei_model_load(const String& argsInput) {
@@ -1918,8 +1918,8 @@ const char* cmd_ei_model_load(const String& argsInput) {
   }
   
   if (!VFS::existsGuarded(path, currentAuthContext())) {
-    snprintf(gEICmdBuffer, sizeof(gEICmdBuffer), "Error: Model not found: %s", path.c_str());
-    return gEICmdBuffer;
+    snprintf(gEiCmdBuffer, sizeof(gEiCmdBuffer), "Error: Model not found: %s", path.c_str());
+    return gEiCmdBuffer;
   }
   
   // Try to load model first - only mark the module ready if model is valid
@@ -1927,22 +1927,22 @@ const char* cmd_ei_model_load(const String& argsInput) {
     // The load allocated the model's buffers; readiness only needs the model
     // directory (initEdgeImpulse would also load default.tflite over it).
     markEdgeImpulseReady();
-    EIInferenceLock inference(portMAX_DELAY);
-    snprintf(gEICmdBuffer, sizeof(gEICmdBuffer),
+    EiInferenceLock inference(portMAX_DELAY);
+    snprintf(gEiCmdBuffer, sizeof(gEiCmdBuffer),
       "Model loaded: %s\nInput: %dx%dx%d\nArena: %zu bytes",
       path.c_str(), gModelInputWidth, gModelInputHeight, gModelInputChannels,
       gInterpreter ? gInterpreter->arena_used_bytes() : 0);
   } else {
-    snprintf(gEICmdBuffer, sizeof(gEICmdBuffer), "Error: Failed to load model: %s", path.c_str());
+    snprintf(gEiCmdBuffer, sizeof(gEiCmdBuffer), "Error: Failed to load model: %s", path.c_str());
   }
-  return gEICmdBuffer;
+  return gEiCmdBuffer;
 }
 
 const char* cmd_ei_model_info(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
-  EIInferenceLock inference(portMAX_DELAY);  // the model cannot be freed while read
-  if (!gEIModelLoaded || !gInterpreter) {
+  EiInferenceLock inference(portMAX_DELAY);  // the model cannot be freed while read
+  if (!gEiModelLoaded || !gInterpreter) {
     return "Error: No model loaded. Use 'ei model load <filename>' to load one.";
   }
   
@@ -1966,7 +1966,7 @@ const char* cmd_ei_model_info(const String& argsInput) {
     }
   }
   
-  snprintf(gEICmdBuffer, sizeof(gEICmdBuffer),
+  snprintf(gEiCmdBuffer, sizeof(gEiCmdBuffer),
     "Loaded Model Info:\n"
     "  Path: %s\n"
     "  Size: %zu bytes\n"
@@ -1979,39 +1979,39 @@ const char* cmd_ei_model_info(const String& argsInput) {
     gOutputTensor ? gOutputTensor->dims->data[gOutputTensor->dims->size - 1] : 0, outputType,
     gInterpreter->arena_used_bytes()
   );
-  return gEICmdBuffer;
+  return gEiCmdBuffer;
 }
 
 const char* cmd_ei_model_unload(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  if (!gEIModelLoaded) {
+  if (!gEiModelLoaded) {
     return "Error: No model is currently loaded.";
   }
   
   String oldPath = gLoadedModelPath;
   unloadModel();
-  snprintf(gEICmdBuffer, sizeof(gEICmdBuffer), "Model unloaded: %s", oldPath.c_str());
-  return gEICmdBuffer;
+  snprintf(gEiCmdBuffer, sizeof(gEiCmdBuffer), "Model unloaded: %s", oldPath.c_str());
+  return gEiCmdBuffer;
 }
 
 // State tracking commands
 const char* cmd_ei_track(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  snprintf(gEICmdBuffer, sizeof(gEICmdBuffer),
+  snprintf(gEiCmdBuffer, sizeof(gEiCmdBuffer),
     "State Tracking Commands:\n"
     "  ei track status     - Show tracked objects\n"
     "  ei track enable <0|1> - Enable/disable tracking\n"
     "  ei track clear      - Clear tracked objects"
   );
-  return gEICmdBuffer;
+  return gEiCmdBuffer;
 }
 
 const char* cmd_ei_track_status(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  EIInferenceLock inference(portMAX_DELAY);  // tracking table is updated per frame
+  EiInferenceLock inference(portMAX_DELAY);  // tracking table is updated per frame
   if (!gStateTrackingEnabled) {
     return "Error: State tracking is disabled. Use 'ei track enable 1' to enable.";
   }
@@ -2041,8 +2041,8 @@ const char* cmd_ei_track_status(const String& argsInput) {
     output += "\n";
   }
   
-  snprintf(gEICmdBuffer, sizeof(gEICmdBuffer), "%s", output.c_str());
-  return gEICmdBuffer;
+  snprintf(gEiCmdBuffer, sizeof(gEiCmdBuffer), "%s", output.c_str());
+  return gEiCmdBuffer;
 }
 
 const char* cmd_ei_track_enable(const String& argsInput) {
@@ -2052,18 +2052,18 @@ const char* cmd_ei_track_enable(const String& argsInput) {
   trimmed.trim();
   
   if (trimmed.length() == 0) {
-    snprintf(gEICmdBuffer, sizeof(gEICmdBuffer), "State tracking: %s",
+    snprintf(gEiCmdBuffer, sizeof(gEiCmdBuffer), "State tracking: %s",
              gStateTrackingEnabled ? "enabled" : "disabled");
-    return gEICmdBuffer;
+    return gEiCmdBuffer;
   }
   
   const int val = parseBoolArg(trimmed);
   if (val < 0) return kCommandReplyNotOnOff;
   setStateTrackingEnabled(val == 1);
   
-  snprintf(gEICmdBuffer, sizeof(gEICmdBuffer), "State tracking %s",
+  snprintf(gEiCmdBuffer, sizeof(gEiCmdBuffer), "State tracking %s",
            gStateTrackingEnabled ? "enabled" : "disabled");
-  return gEICmdBuffer;
+  return gEiCmdBuffer;
 }
 
 const char* cmd_ei_track_clear(const String& argsInput) {
@@ -2071,13 +2071,13 @@ const char* cmd_ei_track_clear(const String& argsInput) {
   
   int count = 0;
   {
-    EIInferenceLock inference(portMAX_DELAY);
+    EiInferenceLock inference(portMAX_DELAY);
     count = gTrackedObjectCount;
     gTrackedObjectCount = 0;
   }
 
-  snprintf(gEICmdBuffer, sizeof(gEICmdBuffer), "Cleared %d tracked objects", count);
-  return gEICmdBuffer;
+  snprintf(gEiCmdBuffer, sizeof(gEiCmdBuffer), "Cleared %d tracked objects", count);
+  return gEiCmdBuffer;
 }
 
 // ---------------------------------------------------------------------------
@@ -2122,7 +2122,7 @@ const size_t edgeImpulseCommandsCount = sizeof(edgeImpulseCommands) / sizeof(edg
 // =============================================================================
 
 void registerEdgeImpulseHandlers(httpd_handle_t server) {
-  static const httpd_uri_t eiOrganizePost = { .uri = "/api/ei/organize", .method = HTTP_POST, .handler = handleEIOrganize, .user_ctx = NULL };
+  static const httpd_uri_t eiOrganizePost = { .uri = "/api/ei/organize", .method = HTTP_POST, .handler = handleEiOrganize, .user_ctx = NULL };
   static const httpd_uri_t edgeImpulseDetect = { .uri = "/api/edgeimpulse/detect", .method = HTTP_GET, .handler = handleEdgeImpulseDetect, .user_ctx = NULL };
   httpd_register_uri_handler(server, &eiOrganizePost);
   httpd_register_uri_handler(server, &edgeImpulseDetect);

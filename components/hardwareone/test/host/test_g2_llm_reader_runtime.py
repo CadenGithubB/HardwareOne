@@ -111,7 +111,7 @@ static bool g2LensTxFenceCurrent(const G2Temple& arm, uint32_t gen, uint32_t lif
   return linked && gen == arm.connectionGeneration && g2WidgetLifecycleOpen(life);
 }
 static bool firmwareOverlayActive() { return overlay; }
-static G2Temple* pickEvenAIArm(const char*) { return linked ? &temple : nullptr; }
+static G2Temple* pickEvenAiArm(const char*) { return linked ? &temple : nullptr; }
 static constexpr uint32_t BLOCKS_WIDGET_ID = 3;
 static bool tearDownActiveContainerAtGeneration(G2Temple& arm, uint32_t gen,
                                                bool, uint32_t life) {

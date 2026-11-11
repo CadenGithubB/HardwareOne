@@ -31,12 +31,12 @@ def main():
     source = SOURCE.read_text()
     harness = (HERE / 'espsr_runtime_harness.cpp').read_text()
     for marker, signatures in {
-        'LIFECYCLE': ['static bool srWaitForWorker(', 'static bool stopESPSRLocked()'],
+        'LIFECYCLE': ['static bool srWaitForWorker(', 'static bool stopEspSrLocked()'],
         'FEED': ['static void srFeedTask(void*)'],
-        'DSP_SETTINGS': ['static void prepareSRAudioProcessing()'],
-        'MODEL_SELECTION': ['static bool initSRModels()'],
-        'MN_LOCK': ['static bool ensureMNCommandMutex()', 'static bool lockMN(',
-                    'static void unlockMN()', 'static bool mnCommandsReady()'],
+        'DSP_SETTINGS': ['static void prepareSrAudioProcessing()'],
+        'MODEL_SELECTION': ['static bool initSrModels()'],
+        'MN_LOCK': ['static bool ensureMnCommandMutex()', 'static bool lockMn(',
+                    'static void unlockMn()', 'static bool mnCommandsReady()'],
         'VOICE': ['static void voiceDisarmInternal()', 'static bool voiceArmFromContextInternal(',
                   'struct VoiceCommandJob', 'static void runVoiceCommandJob(',
                   'static bool executeVoiceCommandAsArmedUser('],

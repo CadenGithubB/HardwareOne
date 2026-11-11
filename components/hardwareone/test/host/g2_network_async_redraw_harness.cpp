@@ -143,12 +143,12 @@ bool g2ShowListPage(const char* const* rows, size_t count) {
 }
 static bool cardSucceeds = true;
 static unsigned cardShows = 0, cardHides = 0;
-bool g2ShowEvenAIReplyNoAsk(const char*) {
+bool g2ShowEvenAiReplyNoAsk(const char*) {
   CHECK(criticalDepth == 0);
   ++cardShows;
   return cardSucceeds;
 }
-bool g2HideEvenAICard() { ++cardHides; return true; }
+bool g2HideEvenAiCard() { ++cardHides; return true; }
 
 // ---- Commands, lens queue and tasks -------------------------------------------
 using Callback = void (*)(bool, const char*, const G2CmdCookie&, void*);

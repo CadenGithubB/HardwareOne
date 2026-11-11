@@ -224,7 +224,7 @@ struct TestAction {
   const char* (*dynLabel)();
 };
 
-static void actionHideAICard();
+static void actionHideAiCard();
 static void actionToggleMicFeed();
 static void actionHeapSnapshot();
 static void actionLensStateDump();
@@ -235,7 +235,7 @@ static const TestAction kActions[] = {
   // Front-pane card cleanup. AI card normally auto-dismisses after ~10 s
   // but a stuck card (firmware-side) blocks subsequent CTRL ENTER calls
   // with errorCode=7. Force-EXIT clears it.
-  { "Hide AI Card",          actionHideAICard,            nullptr },
+  { "Hide AI Card",          actionHideAiCard,            nullptr },
   // Toggle the G2 → ESP-SR mic feed without going through the Settings
   // page. Logs new state + AFE ring depth + overrun count.
   { "Toggle Mic Feed",       actionToggleMicFeed,         nullptr },
@@ -251,7 +251,7 @@ static constexpr size_t kActionCount =
 // AI panel variants
 // -----------------------------------------------------------------------------
 // Each entry fires a named pipeline against a fixed sample. The pipelines
-// inside g2ShowEvenAIReply* do four sequential BLE sends with vTaskDelays
+// inside g2ShowEvenAiReply* do four sequential BLE sends with vTaskDelays
 // between them. Tap handlers now run on g2_taps, not the BLE callback,
 // but holding that serialized input lane for the whole exchange would still
 // stall every other lens gesture. Mirror the page-swap-worker pattern: the tap
@@ -269,12 +269,12 @@ static void aiDirect();
 static void aiCustomHeading();
 static void aiLoadingMock();
 
-struct AIVariant {
+struct AiVariant {
   const char* label;
   void (*handler)();
 };
 
-static const AIVariant kAIVariants[] = {
+static const AiVariant kAiVariants[] = {
   { "Full pipeline",   aiFullPipeline   },
   { "No ASK",          aiNoAsk          },
   { "Direct (CTRL+REPLY)", aiDirect    },
@@ -289,10 +289,10 @@ static const AIVariant kAIVariants[] = {
   // what context matters.
   { "Loading mock (5s)", aiLoadingMock  },
 };
-static constexpr size_t kAIVariantCount =
-  sizeof(kAIVariants) / sizeof(kAIVariants[0]);
+static constexpr size_t kAiVariantCount =
+  sizeof(kAiVariants) / sizeof(kAiVariants[0]);
 
-static const char kAISampleBody[] =
+static const char kAiSampleBody[] =
   "Sample reply: front-pane card test from the on-glasses suite.";
 
 // -----------------------------------------------------------------------------
@@ -461,34 +461,34 @@ static constexpr size_t kUnicodeCategoryCount =
 // per category.
 static size_t gUnicodeCategoryIdx = 0;
 
-enum AIWorkerKind : uint8_t {
+enum AiWorkerKind : uint8_t {
   AIWK_FULL    = 0,
   AIWK_NOASK   = 1,
   AIWK_DIRECT  = 2,
   AIWK_LOADING = 3,   // open card, hold ~5 s, dismiss via CTRL EXIT
 };
 
-struct AIWorkerArgs {
-  AIWorkerKind kind;
+struct AiWorkerArgs {
+  AiWorkerKind kind;
   char heading[64];
   char body[256];
 };
 
 static void aiWorker(void* arg) {
-  AIWorkerArgs* a = (AIWorkerArgs*)arg;
+  AiWorkerArgs* a = (AiWorkerArgs*)arg;
   if (!a) { vTaskDelete(nullptr); return; }
   switch (a->kind) {
-    case AIWK_FULL:    g2ShowEvenAIReply(a->heading, a->body); break;
-    case AIWK_NOASK:   g2ShowEvenAIReplyNoAsk(a->body); break;
-    case AIWK_DIRECT:  g2ShowEvenAIReplyDirect(a->body); break;
+    case AIWK_FULL:    g2ShowEvenAiReply(a->heading, a->body); break;
+    case AIWK_NOASK:   g2ShowEvenAiReplyNoAsk(a->body); break;
+    case AIWK_DIRECT:  g2ShowEvenAiReplyDirect(a->body); break;
     case AIWK_LOADING:
       // Open the card, hold for the same ~5 s a real WiFi scan would
       // take, then explicitly dismiss. The hold mimics what the
       // network-scan worker would do — useful to A/B against the
       // production flow if/when CTRL ENTER errorCode=7 gets resolved.
-      g2ShowEvenAIReplyNoAsk(a->body);
+      g2ShowEvenAiReplyNoAsk(a->body);
       vTaskDelay(pdMS_TO_TICKS(5000));
-      g2HideEvenAICard();
+      g2HideEvenAiCard();
       break;
   }
   free(a);
@@ -497,10 +497,10 @@ static void aiWorker(void* arg) {
 
 // Spawn the worker so g2_taps can return immediately. Heap-allocates args;
 // the worker frees them.
-static void spawnAIWorker(AIWorkerKind kind, const char* heading, const char* body) {
+static void spawnAiWorker(AiWorkerKind kind, const char* heading, const char* body) {
   // Worker args (~340 B) — short-lived, freed by the worker. PSRAM is fine
   // here: the worker reads them once at task entry, no DMA / ISR.
-  AIWorkerArgs* a = (AIWorkerArgs*)ps_alloc(sizeof(AIWorkerArgs),
+  AiWorkerArgs* a = (AiWorkerArgs*)ps_alloc(sizeof(AiWorkerArgs),
                                             AllocPref::PreferPsram, "g2.test.aiArgs");
   if (!a) {
     DEBUG_G2F("[G2] AI test: ps_alloc failed (kind=%u)", (unsigned)kind);
@@ -533,11 +533,11 @@ static void spawnAIWorker(AIWorkerKind kind, const char* heading, const char* bo
 typedef const char* (*ImgProbeFn)();
 static bool spawnImgProbeWorker(ImgProbeFn fn);
 
-static void aiFullPipeline()  { spawnAIWorker(AIWK_FULL,    "(host)", kAISampleBody); }
-static void aiLoadingMock()   { spawnAIWorker(AIWK_LOADING, nullptr,  "Scanning networks..."); }
-static void aiNoAsk()         { spawnAIWorker(AIWK_NOASK,  nullptr,  kAISampleBody); }
-static void aiDirect()        { spawnAIWorker(AIWK_DIRECT, nullptr,  kAISampleBody); }
-static void aiCustomHeading() { spawnAIWorker(AIWK_FULL,   "Weather", "72 °F sunny — heading test"); }
+static void aiFullPipeline()  { spawnAiWorker(AIWK_FULL,    "(host)", kAiSampleBody); }
+static void aiLoadingMock()   { spawnAiWorker(AIWK_LOADING, nullptr,  "Scanning networks..."); }
+static void aiNoAsk()         { spawnAiWorker(AIWK_NOASK,  nullptr,  kAiSampleBody); }
+static void aiDirect()        { spawnAiWorker(AIWK_DIRECT, nullptr,  kAiSampleBody); }
+static void aiCustomHeading() { spawnAiWorker(AIWK_FULL,   "Weather", "72 °F sunny — heading test"); }
 
 // -----------------------------------------------------------------------------
 // Display container tests — exercise the geometry presets visually
@@ -955,7 +955,7 @@ static size_t buildSelectionEdgesRows();
 // live) blocks the notify pipeline so the firmware's response acks can't
 // be processed — which manifests on lens as "Connection lost" because
 // the firmware's plugin task gives up waiting for our ack flow. Same
-// reason the existing AI tests use spawnAIWorker. Mirror that pattern:
+// reason the existing AI tests use spawnAiWorker. Mirror that pattern:
 // the worker runs the probe AND rebuilds the picker afterward, so the
 // dispatcher returns immediately and the notify thread stays live.
 
@@ -1788,11 +1788,11 @@ static size_t buildCharsUnicodePayloadRows(size_t idx) {
 }
 
 // AI: list of front-pane AI panel pipeline variants
-static size_t buildAIRows() {
+static size_t buildAiRows() {
   writeBackRow("<- Tests");
   size_t row = 1;
-  for (size_t i = 0; i < kAIVariantCount && row < TEST_MAX_ROWS; i++) {
-    strlcpy(gRows[row], kAIVariants[i].label, TEST_ROW_LEN);
+  for (size_t i = 0; i < kAiVariantCount && row < TEST_MAX_ROWS; i++) {
+    strlcpy(gRows[row], kAiVariants[i].label, TEST_ROW_LEN);
     gRowPtrs[row] = gRows[row];
     row++;
   }
@@ -1943,9 +1943,9 @@ void g2BuildTestSuiteInfo(char* out, size_t cap) {
     if (s.length() > cap - 32) break;
   }
   s += "AI Panel Tests:\n";
-  for (size_t i = 0; i < kAIVariantCount; i++) {
+  for (size_t i = 0; i < kAiVariantCount; i++) {
     char line[48];
-    snprintf(line, sizeof(line), " %s\n", kAIVariants[i].label);
+    snprintf(line, sizeof(line), " %s\n", kAiVariants[i].label);
     s += line;
     if (s.length() > cap - 32) break;
   }
@@ -2044,7 +2044,7 @@ void g2TestSuiteHandleTap(uint32_t idx) {
       }
       if (idx == 3) {
         gTestLevel = TEST_LEVEL_AI;
-        size_t n = buildAIRows();
+        size_t n = buildAiRows();
         g2ShowListPage(gRowPtrs, n);
         DEBUG_G2F("[G2] Test suite: AI Panel Tests sub-menu (rows=%u)",
                   (unsigned)n);
@@ -2849,13 +2849,13 @@ void g2TestSuiteHandleTap(uint32_t idx) {
         return;
       }
       const size_t pos = idx - 1;
-      if (pos >= kAIVariantCount) {
+      if (pos >= kAiVariantCount) {
         DEBUG_G2F("[G2] Test suite AI: tap idx=%u out of range",
                   (unsigned)idx);
         return;
       }
-      DEBUG_G2F("[G2] Test suite: AI variant '%s'", kAIVariants[pos].label);
-      if (kAIVariants[pos].handler) kAIVariants[pos].handler();
+      DEBUG_G2F("[G2] Test suite: AI variant '%s'", kAiVariants[pos].label);
+      if (kAiVariants[pos].handler) kAiVariants[pos].handler();
       return;
     }
 
@@ -2992,8 +2992,8 @@ void g2TestSuiteHandleTap(uint32_t idx) {
 // subsequent CTRL ENTER calls with errorCode=7. Sends CTRL EXIT,
 // which is a no-op if no card is active. Single envelope — runs directly on
 // g2_taps without a worker.
-static void actionHideAICard() {
-  const bool ok = g2HideEvenAICard();
+static void actionHideAiCard() {
+  const bool ok = g2HideEvenAiCard();
   DEBUG_G2F("[G2] Hide AI Card: %s", ok ? "sent CTRL EXIT" : "send failed");
 }
 

@@ -7,7 +7,7 @@
 // ESP-SR 2.5.5's srmodel_load() takes no length and trusts packed offsets.
 // Validate file metadata before calling it. This is structural validation, not
 // authentication or validation of the neural-network coefficients themselves.
-namespace ESPSRModelPack {
+namespace EspSrModelPack {
 constexpr size_t kMaxFileBytes = 16u * 1024u * 1024u;
 constexpr uint32_t kMaxModels = 16;
 constexpr uint32_t kMaxFilesPerModel = 32;
@@ -93,4 +93,4 @@ inline bool validate(const void* buffer, size_t bytes, const char** error = null
     return reject(error, "model bundle has trailing data");
   return true;
 }
-}  // namespace ESPSRModelPack
+}  // namespace EspSrModelPack

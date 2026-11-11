@@ -33,8 +33,8 @@ String normalizePhrase(const char* text) {
  return value;
 }
 bool mnCommandsReady() { return ready; }
-bool lockMN(uint32_t) { return lockAvailable; }
-void unlockMN() {}
+bool lockMn(uint32_t) { return lockAvailable; }
+void unlockMn() {}
 void srReportDeadVoiceRoutes() {}
 int esp_mn_commands_clear() { if(clearFails)return -1; phrases.clear();return ESP_OK; }
 esp_mn_phrase_t* esp_mn_commands_get_from_index(int index) {

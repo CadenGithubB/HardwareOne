@@ -22,12 +22,12 @@ esp_err_t handleSpeechPage(httpd_req_t* req) {
   return ESP_OK;
 }
 
-// GET /api/speech/status — same JSON as CLI `srstatus` (buildESPSRStatusJson).
+// GET /api/speech/status — same JSON as CLI `srstatus` (buildEspSrStatusJson).
 static esp_err_t handleSpeechStatus(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);
 #if ENABLE_ESP_SR
   String json;
-  buildESPSRStatusJson(json);
+  buildEspSrStatusJson(json);
   httpd_resp_set_type(req, "application/json");
   httpd_resp_send(req, json.c_str(), json.length());
 #else

@@ -701,7 +701,7 @@ static bool dictationLocalAvailable(const char** whyNot) {
   dictationWakeWorker();
   const char* why = nullptr;
 #if ENABLE_ESP_SR
-  if (isESPSRRunning() || audioCaptureOwnedBy("sr")) why = "Speech commands are using the mic. Stop speech recognition first.";
+  if (isEspSrRunning() || audioCaptureOwnedBy("sr")) why = "Speech commands are using the mic. Stop speech recognition first.";
 #endif
   if (!why && (gMicRunning || micRecordingBusy() || audioCaptureOwnedBy("mic")))
     why = "Mic recording is active. Stop recording before transcription.";

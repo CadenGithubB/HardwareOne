@@ -14927,7 +14927,7 @@ static bool g2EvenAiSendGuardedEnvelope(uint64_t exchangeId,
 
 static bool g2EvenAiSendCtrl(uint64_t exchangeId, uint32_t status) {
   uint8_t buf[64];
-  size_t n = g2BuildEvenAICtrl(allocSeq(), g2EvenAiNextMagic(), status, buf, sizeof(buf));
+  size_t n = g2BuildEvenAiCtrl(allocSeq(), g2EvenAiNextMagic(), status, buf, sizeof(buf));
   return n && g2EvenAiSendGuardedEnvelope(exchangeId, buf, n);
 }
 
@@ -14940,7 +14940,7 @@ static bool g2EvenAiSendHeartbeat(uint64_t exchangeId) {
   portEXIT_CRITICAL(&gEvenAiSessionMux);
   if (!hbCnt) return false;
   uint8_t buf[48];
-  size_t n = g2BuildEvenAIHeartbeat(allocSeq(), g2EvenAiNextMagic(),
+  size_t n = g2BuildEvenAiHeartbeat(allocSeq(), g2EvenAiNextMagic(),
                                     hbCnt, buf, sizeof(buf));
   return n && g2EvenAiSendGuardedEnvelope(exchangeId, buf, n);
 }
@@ -14948,7 +14948,7 @@ static bool g2EvenAiSendHeartbeat(uint64_t exchangeId) {
 // ASK fills the listening popup with the (host-recognized) prompt.
 static bool g2EvenAiSendAsk(uint64_t exchangeId, const char* text) {
   uint8_t buf[320];
-  size_t n = g2BuildEvenAIAsk(allocSeq(), g2EvenAiNextMagic(), /*cmdCnt*/ 0,
+  size_t n = g2BuildEvenAiAsk(allocSeq(), g2EvenAiNextMagic(), /*cmdCnt*/ 0,
                               text, buf, sizeof(buf));
   const bool ok = n && g2EvenAiSendGuardedEnvelope(exchangeId, buf, n);
   if (ok) g2EvenAiMarkActivity(exchangeId);
@@ -14958,14 +14958,14 @@ static bool g2EvenAiSendAsk(uint64_t exchangeId, const char* text) {
 // ANALYSE ("thinking") then REPLY paints the answer window. Mirrors the
 // host-reply pipeline that was HW-verified 2026-04-26 (ANALYSE transitions the
 // FSM out of LISTEN so REPLY renders); ENTER is ensured above (wake or manual).
-// Per-message text is capped ~250 B by g2BuildEvenAIReply (single-fragment pb
+// Per-message text is capped ~250 B by g2BuildEvenAiReply (single-fragment pb
 // limit) — long answers stream as multiple fTextEnd=0 parts + an END marker,
 // the shape the stock app uses (REPLY chunks then fTextEnd=1).
 static bool g2EvenAiSendReplyRaw(uint64_t exchangeId, const char* text, bool isLast,
                                  bool withAnalyse) {
   uint8_t buf[320];
   if (withAnalyse) {
-    size_t n = g2BuildEvenAIAnalyse(allocSeq(), g2EvenAiNextMagic(),
+    size_t n = g2BuildEvenAiAnalyse(allocSeq(), g2EvenAiNextMagic(),
                                     buf, sizeof(buf));
     if (!n || !g2EvenAiSendGuardedEnvelope(exchangeId, buf, n)) return false;
     vTaskDelay(pdMS_TO_TICKS(150));
@@ -14973,7 +14973,7 @@ static bool g2EvenAiSendReplyRaw(uint64_t exchangeId, const char* text, bool isL
     // Re-resolve the bound arm before building/sending any REPLY bytes.
     if (!g2EvenAiBoundArm(exchangeId)) return false;
   }
-  size_t n = g2BuildEvenAIReply(allocSeq(), g2EvenAiNextMagic(), /*cmdCnt*/ 0,
+  size_t n = g2BuildEvenAiReply(allocSeq(), g2EvenAiNextMagic(), /*cmdCnt*/ 0,
                                 text, isLast, buf, sizeof(buf));
   const bool ok = n && g2EvenAiSendGuardedEnvelope(exchangeId, buf, n);
   if (ok) g2EvenAiMarkActivity(exchangeId);
@@ -14993,7 +14993,7 @@ static bool g2EvenAiSendReply(uint64_t exchangeId,
 static void g2EvenAiOnWakeUp(G2Temple& temple, uint32_t rxGeneration) {
   if (g2NativeTerminalActive()) {
     uint8_t frame[64];
-    const size_t n = g2BuildEvenAICtrl(allocSeq(), g2EvenAiNextMagic(), G2_AI_STATUS_EXIT, frame, sizeof(frame));
+    const size_t n = g2BuildEvenAiCtrl(allocSeq(), g2EvenAiNextMagic(), G2_AI_STATUS_EXIT, frame, sizeof(frame));
     if (n && rxGeneration) (void)sendEnvelopeAtGeneration(temple, frame, n, rxGeneration);
     return;
   }
@@ -15807,7 +15807,7 @@ static bool g2ConversateDeclineEvenAi(G2Temple& temple, uint32_t generation) {
     return true;
   }
   uint8_t frame[64];
-  const size_t n = g2BuildEvenAICtrl(allocSeq(), g2EvenAiNextMagic(),
+  const size_t n = g2BuildEvenAiCtrl(allocSeq(), g2EvenAiNextMagic(),
                                     G2_AI_STATUS_EXIT, frame, sizeof(frame));
   if (!n || !sendEnvelopeAtGeneration(temple, frame, n, generation)) {
     g2ConversateStop(G2ConversateSession::Stop::TxFailed);
@@ -28363,7 +28363,7 @@ static const char* cmd_g2liveloop(const String& argsInput) {
 // Pick a temple for AI-subsystem TX. Right is preferred (verified
 // receiver of all Even-AI traffic in our captures); left is a fallback
 // for the rare R-down-L-up case.
-static G2Temple* pickEvenAIArm(const char* tag) {
+static G2Temple* pickEvenAiArm(const char* tag) {
   G2Temple* arm = nullptr;
   if (gR.connected && !gR.pluginDead)      arm = &gR;
   else if (gL.connected && !gL.pluginDead) arm = &gL;
@@ -28377,7 +28377,7 @@ static G2Temple* pickEvenAIArm(const char* tag) {
 // the build-side failure, otherwise we forward to sendEnvelope and log
 // the TX-side failure. Returns false on any failure so the caller can
 // abort the pipeline.
-static bool sendEvenAIStep(G2Temple& arm, size_t n, const uint8_t* buf,
+static bool sendEvenAiStep(G2Temple& arm, size_t n, const uint8_t* buf,
                            const char* tag, const char* step) {
   if (n == 0) {
     DEBUG_G2F("[G2] %s: %s build failed", tag, step);
@@ -28404,81 +28404,81 @@ static bool sendEvenAIStep(G2Temple& arm, size_t n, const uint8_t* buf,
 // The 200 ms settles between sends mirror SHUTDOWN_PAGE's settle in the
 // back-pane teardown path. Each step uses a distinct magicRandom so the
 // firmware's ack-correlation logic doesn't collapse them.
-bool g2ShowEvenAIReply(const char* heading, const char* body) {
+bool g2ShowEvenAiReply(const char* heading, const char* body) {
   if (!body) return false;
-  G2Temple* arm = pickEvenAIArm("g2ShowEvenAIReply");
+  G2Temple* arm = pickEvenAiArm("g2ShowEvenAIReply");
   if (!arm) return false;
 
   uint8_t buf[320];
   size_t n;
 
-  n = g2BuildEvenAICtrl(allocSeq(), G2_MAGIC_EVEN_AI_CTRL,
+  n = g2BuildEvenAiCtrl(allocSeq(), G2_MAGIC_EVEN_AI_CTRL,
                         G2_AI_STATUS_ENTER, buf, sizeof(buf));
-  if (!sendEvenAIStep(*arm, n, buf, "g2ShowEvenAIReply", "CTRL ENTER")) return false;
+  if (!sendEvenAiStep(*arm, n, buf, "g2ShowEvenAIReply", "CTRL ENTER")) return false;
   vTaskDelay(pdMS_TO_TICKS(200));
 
   // ASK populates the heading panel. Empty/null → "(host)" so the FSM
   // still transitions out of LISTEN; passing literal "" might be parsed
   // as a missing field by the firmware.
   const char* askText = (heading && *heading) ? heading : "(host)";
-  n = g2BuildEvenAIAsk(allocSeq(), G2_MAGIC_EVEN_AI_ASK,
+  n = g2BuildEvenAiAsk(allocSeq(), G2_MAGIC_EVEN_AI_ASK,
                        /*cmdCnt*/ 0, askText, buf, sizeof(buf));
-  if (!sendEvenAIStep(*arm, n, buf, "g2ShowEvenAIReply", "ASK")) return false;
+  if (!sendEvenAiStep(*arm, n, buf, "g2ShowEvenAIReply", "ASK")) return false;
   vTaskDelay(pdMS_TO_TICKS(200));
 
-  n = g2BuildEvenAIAnalyse(allocSeq(), G2_MAGIC_EVEN_AI_ANALYSE,
+  n = g2BuildEvenAiAnalyse(allocSeq(), G2_MAGIC_EVEN_AI_ANALYSE,
                            buf, sizeof(buf));
-  if (!sendEvenAIStep(*arm, n, buf, "g2ShowEvenAIReply", "ANALYSE")) return false;
+  if (!sendEvenAiStep(*arm, n, buf, "g2ShowEvenAIReply", "ANALYSE")) return false;
   vTaskDelay(pdMS_TO_TICKS(200));
 
-  n = g2BuildEvenAIReply(allocSeq(), G2_MAGIC_EVEN_AI_REPLY,
+  n = g2BuildEvenAiReply(allocSeq(), G2_MAGIC_EVEN_AI_REPLY,
                          /*cmdCnt*/ 0, body, /*isLast*/ true,
                          buf, sizeof(buf));
-  return sendEvenAIStep(*arm, n, buf, "g2ShowEvenAIReply", "REPLY");
+  return sendEvenAiStep(*arm, n, buf, "g2ShowEvenAIReply", "REPLY");
 }
 
-bool g2ShowEvenAIReply(const char* body) {
-  return g2ShowEvenAIReply("(host)", body);
+bool g2ShowEvenAiReply(const char* body) {
+  return g2ShowEvenAiReply("(host)", body);
 }
 
 // Variant: skip ASK. Hypothesis — ANALYSE alone may transition the
 // firmware FSM out of LISTEN, hiding the brief heading panel that the
 // full pipeline shows. Heading parameter is unused (ASK is what carries
 // it) but kept in the signature for API uniformity.
-bool g2ShowEvenAIReplyNoAsk(const char* heading, const char* body) {
+bool g2ShowEvenAiReplyNoAsk(const char* heading, const char* body) {
   (void)heading;
   if (!body) return false;
-  G2Temple* arm = pickEvenAIArm("g2ShowEvenAIReplyNoAsk");
+  G2Temple* arm = pickEvenAiArm("g2ShowEvenAIReplyNoAsk");
   if (!arm) return false;
 
   uint8_t buf[320];
   size_t n;
 
-  n = g2BuildEvenAICtrl(allocSeq(), G2_MAGIC_EVEN_AI_CTRL,
+  n = g2BuildEvenAiCtrl(allocSeq(), G2_MAGIC_EVEN_AI_CTRL,
                         G2_AI_STATUS_ENTER, buf, sizeof(buf));
-  if (!sendEvenAIStep(*arm, n, buf, "g2ShowEvenAIReplyNoAsk", "CTRL ENTER")) return false;
+  if (!sendEvenAiStep(*arm, n, buf, "g2ShowEvenAIReplyNoAsk", "CTRL ENTER")) return false;
   vTaskDelay(pdMS_TO_TICKS(200));
 
-  n = g2BuildEvenAIAnalyse(allocSeq(), G2_MAGIC_EVEN_AI_ANALYSE,
+  n = g2BuildEvenAiAnalyse(allocSeq(), G2_MAGIC_EVEN_AI_ANALYSE,
                            buf, sizeof(buf));
-  if (!sendEvenAIStep(*arm, n, buf, "g2ShowEvenAIReplyNoAsk", "ANALYSE")) return false;
+  if (!sendEvenAiStep(*arm, n, buf, "g2ShowEvenAIReplyNoAsk", "ANALYSE")) return false;
   vTaskDelay(pdMS_TO_TICKS(200));
 
-  n = g2BuildEvenAIReply(allocSeq(), G2_MAGIC_EVEN_AI_REPLY,
+  n = g2BuildEvenAiReply(allocSeq(), G2_MAGIC_EVEN_AI_REPLY,
                          /*cmdCnt*/ 0, body, /*isLast*/ true,
                          buf, sizeof(buf));
-  return sendEvenAIStep(*arm, n, buf, "g2ShowEvenAIReplyNoAsk", "REPLY");
+  return sendEvenAiStep(*arm, n, buf, "g2ShowEvenAIReplyNoAsk", "REPLY");
 }
 
-bool g2ShowEvenAIReplyNoAsk(const char* body) {
-  return g2ShowEvenAIReplyNoAsk(nullptr, body);
+bool g2ShowEvenAiReplyNoAsk(const char* body) {
+  return g2ShowEvenAiReplyNoAsk(nullptr, body);
 }
 
-bool g2HideEvenAICard() {
-  G2Temple* arm = pickEvenAIArm("g2HideEvenAICard");
+bool g2HideEvenAiCard() {
+  G2Temple* arm = pickEvenAiArm("g2HideEvenAICard");
   if (!arm) return false;
   uint8_t buf[64];
-  size_t n = g2BuildEvenAICtrl(allocSeq(), G2_MAGIC_EVEN_AI_CTRL,
+  size_t n = g2BuildEvenAiCtrl(allocSeq(), G2_MAGIC_EVEN_AI_CTRL,
                                G2_AI_STATUS_EXIT, buf, sizeof(buf));
   if (n == 0) return false;
   return sendEnvelope(*arm, buf, n);
@@ -28488,28 +28488,28 @@ bool g2HideEvenAICard() {
 // that left the firmware stuck in LISTEN. Kept as a control so we can
 // confirm on a fresh test that the longer pipelines really are required.
 // Expect this to render the listening UI and ignore the body content.
-bool g2ShowEvenAIReplyDirect(const char* heading, const char* body) {
+bool g2ShowEvenAiReplyDirect(const char* heading, const char* body) {
   (void)heading;
   if (!body) return false;
-  G2Temple* arm = pickEvenAIArm("g2ShowEvenAIReplyDirect");
+  G2Temple* arm = pickEvenAiArm("g2ShowEvenAIReplyDirect");
   if (!arm) return false;
 
   uint8_t buf[320];
   size_t n;
 
-  n = g2BuildEvenAICtrl(allocSeq(), G2_MAGIC_EVEN_AI_CTRL,
+  n = g2BuildEvenAiCtrl(allocSeq(), G2_MAGIC_EVEN_AI_CTRL,
                         G2_AI_STATUS_ENTER, buf, sizeof(buf));
-  if (!sendEvenAIStep(*arm, n, buf, "g2ShowEvenAIReplyDirect", "CTRL ENTER")) return false;
+  if (!sendEvenAiStep(*arm, n, buf, "g2ShowEvenAIReplyDirect", "CTRL ENTER")) return false;
   vTaskDelay(pdMS_TO_TICKS(200));
 
-  n = g2BuildEvenAIReply(allocSeq(), G2_MAGIC_EVEN_AI_REPLY,
+  n = g2BuildEvenAiReply(allocSeq(), G2_MAGIC_EVEN_AI_REPLY,
                          /*cmdCnt*/ 0, body, /*isLast*/ true,
                          buf, sizeof(buf));
-  return sendEvenAIStep(*arm, n, buf, "g2ShowEvenAIReplyDirect", "REPLY");
+  return sendEvenAiStep(*arm, n, buf, "g2ShowEvenAIReplyDirect", "REPLY");
 }
 
-bool g2ShowEvenAIReplyDirect(const char* body) {
-  return g2ShowEvenAIReplyDirect(nullptr, body);
+bool g2ShowEvenAiReplyDirect(const char* body) {
+  return g2ShowEvenAiReplyDirect(nullptr, body);
 }
 
 static const char* cmd_g2ai(const String& argsInput) {
@@ -28519,21 +28519,21 @@ static const char* cmd_g2ai(const String& argsInput) {
   // 2026-04-26 — ANALYSE alone transitions the FSM out of LISTEN so REPLY
   // renders cleanly. Use `g2aih <heading>|<body>` if you want a labeled
   // card with a separate heading panel.
-  return g2ShowEvenAIReplyNoAsk(argsInput.c_str())
+  return g2ShowEvenAiReplyNoAsk(argsInput.c_str())
          ? "G2: AI reply sent (CTRL+ANALYSE+REPLY — no question panel)"
          : "Error: G2: AI reply failed";
 }
 
 static const char* cmd_g2ai_noask(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  return g2ShowEvenAIReplyNoAsk(argsInput.c_str())
+  return g2ShowEvenAiReplyNoAsk(argsInput.c_str())
          ? "G2: AI reply sent (CTRL+ANALYSE+REPLY — skip ASK)"
          : "Error: G2: AI reply failed";
 }
 
 static const char* cmd_g2ai_direct(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  return g2ShowEvenAIReplyDirect(argsInput.c_str())
+  return g2ShowEvenAiReplyDirect(argsInput.c_str())
          ? "G2: AI reply sent (CTRL+REPLY — original failing path)"
          : "Error: G2: AI reply failed";
 }
@@ -28864,7 +28864,7 @@ static const char* cmd_g2probe(const String& argsInput) {
   size_t n = g2BuildEnvelope(allocSeq(), sid, G2_FLAG_REQUEST, pb, pos, env, sizeof(env));
   if (n == 0) return "Error: G2: probe — envelope build failed";
 
-  G2Temple* arm = pickEvenAIArm("g2probe");
+  G2Temple* arm = pickEvenAiArm("g2probe");
   if (!arm) return "Error: G2: probe — no reachable temple";
   if (!sendEnvelope(*arm, env, n)) return "Error: G2: probe — send failed (mutex timeout?)";
 
@@ -29589,7 +29589,7 @@ static const char* cmd_g2imgprobe(const String& argsInput) {
     return "Error: G2: imgprobe — body build failed";
   }
 
-  G2Temple* arm = pickEvenAIArm("g2imgprobe");
+  G2Temple* arm = pickEvenAiArm("g2imgprobe");
   if (!arm) {
     free(body);
     return "Error: G2: imgprobe — no reachable temple";
@@ -30163,12 +30163,12 @@ static const char* cmd_g2aiconfig(const String& argsInput) {
 
   const uint32_t magic = g2EvenAiNextMagic();
   uint8_t env[128];
-  size_t n = g2BuildEvenAIConfig(allocSeq(), magic,
+  size_t n = g2BuildEvenAiConfig(allocSeq(), magic,
                                  voiceSwitch, streamSpeed, duplexMode,
                                  env, sizeof(env));
   if (n == 0) return "Error: G2: aiconfig — envelope build failed";
 
-  G2Temple* arm = pickEvenAIArm("g2aiconfig");
+  G2Temple* arm = pickEvenAiArm("g2aiconfig");
   if (!arm) return "Error: G2: aiconfig — no reachable temple";
   if (!sendEnvelope(*arm, env, n)) return "Error: G2: aiconfig — send failed (mutex timeout?)";
 
@@ -30197,7 +30197,7 @@ static const char* cmd_g2aih(const String& argsInput) {
   int sep = argsInput.indexOf('|');
   if (sep < 0) {
     // No separator: treat the whole input as the body, default heading.
-    return g2ShowEvenAIReply(argsInput.c_str())
+    return g2ShowEvenAiReply(argsInput.c_str())
            ? "G2: AI reply sent"
            : "Error: G2: AI reply failed";
   }
@@ -30205,7 +30205,7 @@ static const char* cmd_g2aih(const String& argsInput) {
   String body    = argsInput.substring(sep + 1);
   heading.trim();
   body.trim();
-  return g2ShowEvenAIReply(heading.c_str(), body.c_str())
+  return g2ShowEvenAiReply(heading.c_str(), body.c_str())
          ? "G2: AI reply sent (custom heading)"
          : "Error: G2: AI reply failed";
 }
@@ -32009,7 +32009,7 @@ static void probeFooter(const char* probe, unsigned okCount, unsigned total) {
 const char* g2ProbeImageQ4Lifecycle() {
   EXT_RAM_BSS_ATTR static char ret[200];
 
-  G2Temple* arm = pickEvenAIArm("imgQ4");
+  G2Temple* arm = pickEvenAiArm("imgQ4");
   if (!arm) return "Img Q4: no reachable temple";
   G2ImageCreateFence cleanupFence = {};
 
@@ -32538,7 +32538,7 @@ static bool sendImageBmpMultiFragment(G2Temple& arm,
 const char* g2ProbeImageQ6BmpMultiFragment() {
   EXT_RAM_BSS_ATTR static char ret[220];
 
-  G2Temple* arm = pickEvenAIArm("imgQ6");
+  G2Temple* arm = pickEvenAiArm("imgQ6");
   if (!arm) return "Img Q6: no reachable temple";
   G2ImageCreateFence cleanupFence = {};
 
@@ -32611,7 +32611,7 @@ const char* g2ProbeImageQ6BmpMultiFragment() {
 const char* g2ProbeImageQ6bBmpTapDismiss() {
   EXT_RAM_BSS_ATTR static char ret[220];
 
-  G2Temple* arm = pickEvenAIArm("imgQ6b");
+  G2Temple* arm = pickEvenAiArm("imgQ6b");
   if (!arm) return "Img Q6b: no reachable temple";
   G2ImageCreateFence cleanupFence = {};
 
@@ -32716,7 +32716,7 @@ static void bmpDrawRect4bpp(uint8_t* pixelRows, int32_t imgW, int32_t imgH,
 const char* g2ProbeImageQ9FrameBuilder() {
   EXT_RAM_BSS_ATTR static char ret[220];
 
-  G2Temple* arm = pickEvenAIArm("imgQ9");
+  G2Temple* arm = pickEvenAiArm("imgQ9");
   if (!arm) return "Img Q9: no reachable temple";
   G2ImageCreateFence cleanupFence = {};
 
@@ -33003,7 +33003,7 @@ static bool sendImageBmpFragmentsNoCreate(G2Temple& arm,
 const char* g2ProbeImageQ11SimpleSwap() {
   EXT_RAM_BSS_ATTR static char ret[240];
 
-  G2Temple* arm = pickEvenAIArm("imgQ11");
+  G2Temple* arm = pickEvenAiArm("imgQ11");
   if (!arm) return "Img Q11: no reachable temple";
   G2ImageCreateFence cleanupFence = {};
 
@@ -33096,7 +33096,7 @@ const char* g2ProbeImageQ11SimpleSwap() {
 const char* g2ProbeImageQ10ClearThenPush() {
   EXT_RAM_BSS_ATTR static char ret[260];
 
-  G2Temple* arm = pickEvenAIArm("imgQ10");
+  G2Temple* arm = pickEvenAiArm("imgQ10");
   if (!arm) return "Img Q10: no reachable temple";
   G2ImageCreateFence cleanupFence = {};
 
@@ -33438,7 +33438,7 @@ static const char* cmd_g2bmp(const String& argsInput) {
   if (holdSeconds < 0)   holdSeconds = 0;
   if (holdSeconds > 120) holdSeconds = 120;
 
-  G2Temple* arm = pickEvenAIArm("g2bmp");
+  G2Temple* arm = pickEvenAiArm("g2bmp");
   if (!arm) return "Error: G2 BMP: no reachable temple";
   G2ImageCreateFence cleanupFence = {};
 
@@ -33515,7 +33515,7 @@ static void g2BmpViewerWorker(void* arg) {
   auto* a = (BmpViewerArgs*)arg;
 
   do {
-    G2Temple* arm = pickEvenAIArm("bmpView");
+    G2Temple* arm = pickEvenAiArm("bmpView");
     if (!arm) {
       DEBUG_G2F("[G2] BMP viewer: no eligible arm");
       break;
@@ -35655,7 +35655,7 @@ static void kbdAbWorker(void* arg) {
       DEBUG_G2F("[KbdAB] refused: production text entry is active");
       break;
     }
-    s.arm = pickEvenAIArm("kbdAB");
+    s.arm = pickEvenAiArm("kbdAB");
     if (!s.arm) { DEBUG_G2F("[KbdAB] no eligible temple"); break; }
     s.connectionGeneration = s.arm->connectionGeneration;
     const uint32_t pickerEpoch = g2PresentationEpochCurrent();
@@ -36088,7 +36088,7 @@ static void g2MapPageWorker(void* arg) {
   uint32_t drainedPanCount = 0;
 
   do {
-    G2Temple* arm = pickEvenAIArm("mapPage");
+    G2Temple* arm = pickEvenAiArm("mapPage");
     if (!arm) { DEBUG_G2F("[G2] map page: no eligible arm"); break; }
 
     // Ensure a map is loaded; auto-load the first available.
@@ -36674,7 +36674,7 @@ static void g2HealthPageWorker(void* arg) {
   };
 
   do {
-    G2Temple* arm = pickEvenAIArm("healthPage");
+    G2Temple* arm = pickEvenAiArm("healthPage");
     if (!arm) { DEBUG_G2F("[G2] health page: no eligible arm"); break; }
 
     if (!probeTearDownActiveContainer(*arm, &cleanupFence)) {
@@ -37091,7 +37091,7 @@ static void g2LlmPageWorker(void* arg) {
       DEBUG_G2F("[G2] LLM reader: allocation failed");
       break;
     }
-    arm = pickEvenAIArm("llmReader");
+    arm = pickEvenAiArm("llmReader");
     if (!arm) break;
     generation = arm->connectionGeneration;
     if (!g2LensTxFenceCurrent(*arm, generation, life) ||
@@ -37591,7 +37591,7 @@ static void g2CameraViewerWorker(void* arg) {
       DEBUG_G2F("[G2] Camera viewer: camera not enabled — abort");
       break;
     }
-    G2Temple* arm = pickEvenAIArm("camView");
+    G2Temple* arm = pickEvenAiArm("camView");
     if (!arm) {
       DEBUG_G2F("[G2] Camera viewer: no eligible arm");
       break;
@@ -37740,7 +37740,7 @@ static void g2CameraStreamWorker(void* arg) {
       DEBUG_G2F("[G2] Camera stream: camera not enabled — abort");
       break;
     }
-    G2Temple* arm = pickEvenAIArm("camStream");
+    G2Temple* arm = pickEvenAiArm("camStream");
     if (!arm) {
       DEBUG_G2F("[G2] Camera stream: no eligible arm");
       break;
@@ -38307,7 +38307,7 @@ static void g2BmpFullViewerWorker(void* arg) {
   auto* a = (BmpFullViewerArgs*)arg;
 
   do {
-    G2Temple* arm = pickEvenAIArm("bmpFullView");
+    G2Temple* arm = pickEvenAiArm("bmpFullView");
     if (!arm) {
       DEBUG_G2F("[G2] BMP full-viewer: no eligible arm");
       break;
@@ -38629,7 +38629,7 @@ static void g2JpgViewerWorker(void* arg) {
   auto* a = (JpgViewerArgs*)arg;
 
   do {
-    G2Temple* arm = pickEvenAIArm("jpgView");
+    G2Temple* arm = pickEvenAiArm("jpgView");
     if (!arm) {
       DEBUG_G2F("[G2] JPG viewer: no eligible arm");
       break;
@@ -38728,7 +38728,7 @@ static void g2JpgFullViewerWorker(void* arg) {
   auto* a = (JpgFullViewerArgs*)arg;
 
   do {
-    G2Temple* arm = pickEvenAIArm("jpgFullView");
+    G2Temple* arm = pickEvenAiArm("jpgFullView");
     if (!arm) {
       DEBUG_G2F("[G2] JPG full-viewer: no eligible arm");
       break;
@@ -38847,7 +38847,7 @@ bool g2ShowJpgFileFullScreen(const char* path, void (*onDone)()) {
 const char* g2ProbeImageQGlizzy() {
   EXT_RAM_BSS_ATTR static char ret[220];
 
-  G2Temple* arm = pickEvenAIArm("imgQGlizzy");
+  G2Temple* arm = pickEvenAiArm("imgQGlizzy");
   if (!arm) return "Img QGlizzy: no reachable temple";
   G2ImageCreateFence cleanupFence = {};
 
@@ -38915,7 +38915,7 @@ const char* g2ProbeImageQGlizzy() {
 const char* g2ProbeImageQ12FullScreen() {
   EXT_RAM_BSS_ATTR static char ret[260];
 
-  G2Temple* arm = pickEvenAIArm("imgQ12");
+  G2Temple* arm = pickEvenAiArm("imgQ12");
   if (!arm) return "Img Q12: no reachable temple";
   G2ImageCreateFence cleanupFence = {};
 
@@ -39076,7 +39076,7 @@ const char* g2ProbeImageQ12FullScreen() {
 const char* g2ProbeImageQ13LiveTile() {
   EXT_RAM_BSS_ATTR static char ret[260];
 
-  G2Temple* arm = pickEvenAIArm("imgQ13");
+  G2Temple* arm = pickEvenAiArm("imgQ13");
   if (!arm) return "Img Q13: no reachable temple";
   G2ImageCreateFence cleanupFence = {};
 
@@ -39278,7 +39278,7 @@ const char* g2ProbeImageQ14LiveText() {
   // every frame — visible flicker. Tearing down here lets the first
   // g2ShowText below CREATE a fresh TEXT widget; subsequent calls then
   // hit the Cmd=7 REBUILD_PAGE fast path with no visible teardown.
-  G2Temple* armPre = pickEvenAIArm("imgQ14");
+  G2Temple* armPre = pickEvenAiArm("imgQ14");
   if (!armPre) return "Img Q14: no reachable temple";
   G2ImageCreateFence cleanupFence = {};
   if (!probeTearDownActiveContainer(*armPre, &cleanupFence)) {
@@ -39310,7 +39310,7 @@ const char* g2ProbeImageQ14LiveText() {
     // clears containerReady; the next g2ShowText auto-CREATEs a fresh
     // widget. With keep-alive off, we break here so the loop stops cleanly
     // instead of letting g2ShowText churn through the recreate cycle.
-    G2Temple* armCheck = pickEvenAIArm("imgQ14");
+    G2Temple* armCheck = pickEvenAiArm("imgQ14");
     if (framesAttempted > 0 && armCheck && !armCheck->containerReady) {
       if (gG2LiveLoopKeepAlive) {
         recreateCount++;
@@ -39375,7 +39375,7 @@ const char* g2ProbeImageQ14LiveText() {
 // ─────────────────────────────────────────────────────────────────────
 // Q15 — left-arm image push test. Same BMP and transport as Q6 (single
 // 288×144 tile, 7-fragment burst), but explicitly targets the LEFT
-// temple instead of letting pickEvenAIArm pick the RIGHT default.
+// temple instead of letting pickEvenAiArm pick the RIGHT default.
 //
 // Motivation: 2026-04-28 third-party report (jimrandomh on Discord)
 // claimed "significant performance improvement if you send image
@@ -39486,7 +39486,7 @@ static const char* runMixedListImageProbe(const char* tag,
                                           int32_t imgX, int32_t imgY,
                                           int32_t imgW, int32_t imgH,
                                           char* retBuf, size_t retCap) {
-  G2Temple* arm = pickEvenAIArm(tag);
+  G2Temple* arm = pickEvenAiArm(tag);
   if (!arm) {
     snprintf(retBuf, retCap, "%s: no reachable temple", tag);
     return retBuf;
@@ -39653,7 +39653,7 @@ const char* g2ProbeImageQ16MixedSideBySide() {
 const char* g2ProbeImageQ16dMixedLz4Block() {
   EXT_RAM_BSS_ATTR static char ret[280];
   const char* tag = "Q16d";
-  G2Temple* arm = pickEvenAIArm(tag);
+  G2Temple* arm = pickEvenAiArm(tag);
   if (!arm) {
     snprintf(ret, sizeof(ret), "%s: no reachable temple", tag);
     return ret;
@@ -39870,7 +39870,7 @@ const char* g2ProbeImageQ18MixedIcon() {
 const char* g2ProbeImageQ19SmallSolo() {
   EXT_RAM_BSS_ATTR static char ret[220];
 
-  G2Temple* arm = pickEvenAIArm("imgQ19");
+  G2Temple* arm = pickEvenAiArm("imgQ19");
   if (!arm) return "Img Q19: no reachable temple";
   G2ImageCreateFence cleanupFence = {};
 
@@ -39947,7 +39947,7 @@ static const char* probeLiveScrollingBarSolo(
     uint32_t framePaceMs,
     const char* bannerTitle,
     const char* bannerSub) {
-  G2Temple* arm = pickEvenAIArm(pickTag);
+  G2Temple* arm = pickEvenAiArm(pickTag);
   if (!arm) {
     snprintf(ret, retCap, "Img %s: no reachable temple", probeId);
     return ret;
@@ -40233,7 +40233,7 @@ static size_t buildMoveSpriteBmp(uint8_t* bmp, size_t cap, int32_t phase) {
 // to animate with. Produces the ms/step number that decides it.
 const char* g2ProbeImageQ31bRecreateMove() {
   EXT_RAM_BSS_ATTR static char ret[300];
-  G2Temple* arm = pickEvenAIArm("imgQ31b");
+  G2Temple* arm = pickEvenAiArm("imgQ31b");
   if (!arm) { snprintf(ret, sizeof(ret), "Img Q31b: no reachable temple"); return ret; }
   G2ImageCreateFence cleanupFence = {};
 
@@ -40592,7 +40592,7 @@ static G2Lz4Wrap gQ32Wrap = G2_LZ4_WRAP_BLOCK;
 // Q32 — the A/B. Answers "what does LZ4 actually buy on this link?"
 const char* g2ProbeImageQ32Lz4Benchmark() {
   EXT_RAM_BSS_ATTR static char ret[320];
-  G2Temple* arm = pickEvenAIArm("imgQ32");
+  G2Temple* arm = pickEvenAiArm("imgQ32");
   if (!arm) { snprintf(ret, sizeof(ret), "Img Q32: no reachable temple"); return ret; }
   G2ImageCreateFence cleanupFence = {};
 
@@ -40732,7 +40732,7 @@ const char* g2ProbeImageQ25SdFrameAnimation() {
   EXT_RAM_BSS_ATTR static char ret[320];
   EXT_RAM_BSS_ATTR static char pathBuf[192];
 
-  G2Temple* arm = pickEvenAIArm("imgQ25");
+  G2Temple* arm = pickEvenAiArm("imgQ25");
   if (!arm) {
     snprintf(ret, sizeof(ret), "Img Q25: no reachable temple");
     g2ProbeImageQ25SetPackPath(nullptr);
@@ -40985,7 +40985,7 @@ const char* g2ProbeImageQ25SdFrameAnimation() {
 // ─────────────────────────────────────────────────────────────────────
 const char* g2ProbeImageQ28MixedImageTextLive() {
   EXT_RAM_BSS_ATTR static char ret[300];
-  G2Temple* arm = pickEvenAIArm("imgQ28");
+  G2Temple* arm = pickEvenAiArm("imgQ28");
   if (!arm) {
     snprintf(ret, sizeof(ret), "Img Q28: no reachable temple");
     return ret;
@@ -41205,7 +41205,7 @@ const char* g2ProbeImageQ28MixedImageTextLive() {
 // ─────────────────────────────────────────────────────────────────────
 const char* g2ProbeImageQ28LMixedListImageLive() {
   EXT_RAM_BSS_ATTR static char ret[300];
-  G2Temple* arm = pickEvenAIArm("imgQ28L");
+  G2Temple* arm = pickEvenAiArm("imgQ28L");
   if (!arm) {
     snprintf(ret, sizeof(ret), "Img Q28L: no reachable temple");
     return ret;
@@ -41402,7 +41402,7 @@ struct Q30GeomSpec {
 
 static const char* runQ30ListTextImageProbe(const Q30GeomSpec& g) {
   EXT_RAM_BSS_ATTR static char ret[320];
-  G2Temple* arm = pickEvenAIArm(g.tag);
+  G2Temple* arm = pickEvenAiArm(g.tag);
   if (!arm) {
     snprintf(ret, sizeof(ret), "Img %s: no reachable temple", g.tag);
     return ret;
@@ -41663,7 +41663,7 @@ const char* g2ProbeImageQ30cListTextSmallImage() {
 const char* g2ProbeImageQ21LiveFullScreenBurst() {
   EXT_RAM_BSS_ATTR static char ret[280];
 
-  G2Temple* arm = pickEvenAIArm("imgQ21");
+  G2Temple* arm = pickEvenAiArm("imgQ21");
   if (!arm) return "Img Q21: no reachable temple";
   G2ImageCreateFence cleanupFence = {};
 

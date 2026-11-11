@@ -624,27 +624,27 @@ size_t g2BuildAudioCtrl(uint8_t seq, uint32_t magic, bool enable,
 // Caveat: the reference defines this schema but never exercises a
 // host-driven REPLY flow. First-time use should be a one-shot — confirm
 // the card actually appears before assuming streaming works.
-size_t g2BuildEvenAICtrl(uint8_t seq, uint32_t magic, uint32_t status,
+size_t g2BuildEvenAiCtrl(uint8_t seq, uint32_t magic, uint32_t status,
                          uint8_t* out, size_t outCap);
-size_t g2BuildEvenAIAsk(uint8_t seq, uint32_t magic, uint32_t cmdCnt,
+size_t g2BuildEvenAiAsk(uint8_t seq, uint32_t magic, uint32_t cmdCnt,
                         const char* text,
                         uint8_t* out, size_t outCap);
-size_t g2BuildEvenAIAnalyse(uint8_t seq, uint32_t magic,
+size_t g2BuildEvenAiAnalyse(uint8_t seq, uint32_t magic,
                             uint8_t* out, size_t outCap);
-size_t g2BuildEvenAIReply(uint8_t seq, uint32_t magic, uint32_t cmdCnt,
+size_t g2BuildEvenAiReply(uint8_t seq, uint32_t magic, uint32_t cmdCnt,
                           const char* text, bool isLast,
                           uint8_t* out, size_t outCap);
 // EvenAIHeartbeat (Cmd=9). Sent ~every 3 s by the phone role while an EvenAI
 // session is entered; without it the glasses time the session out and show
 // the native "trouble understanding" prompt. hbCnt is a monotonic counter.
-size_t g2BuildEvenAIHeartbeat(uint8_t seq, uint32_t magic, uint32_t hbCnt,
+size_t g2BuildEvenAiHeartbeat(uint8_t seq, uint32_t magic, uint32_t hbCnt,
                               uint8_t* out, size_t outCap);
 
 // Even-AI CONFIG (Cmd=10). The wrapper field and body were verified against
 // the stock-phone wire shape accepted by G2 firmware 2.2.7. Pass uint64_t max
 // for "don't include this field" so diagnostic callers can still isolate a
 // field. Returns 0 on overflow.
-size_t g2BuildEvenAIConfig(uint8_t seq, uint32_t magic,
+size_t g2BuildEvenAiConfig(uint8_t seq, uint32_t magic,
                            uint64_t voiceSwitch, uint64_t streamSpeed,
                            uint64_t duplexMode,
                            uint8_t* out, size_t outCap);

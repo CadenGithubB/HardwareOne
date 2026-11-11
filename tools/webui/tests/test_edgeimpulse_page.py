@@ -142,9 +142,9 @@ else { __out('EI_PAGE PASS'); }
 
 
 def busy_message() -> str:
-    m = re.search(r'kEIBusyMessage\s*=\s*"([^"]+)"', OWNER.read_text())
+    m = re.search(r'kEiBusyMessage\s*=\s*"([^"]+)"', OWNER.read_text())
     if not m:
-        raise AssertionError("kEIBusyMessage not found in System_EdgeImpulse.cpp")
+        raise AssertionError("kEiBusyMessage not found in System_EdgeImpulse.cpp")
     return m.group(1)
 
 

@@ -55,7 +55,7 @@ def module_text(component=COMPONENT):
     # Registration uses C++20 designated initializers for httpd_uri_t; the
     # host build only needs both handlers referenced.
     source = source.replace(extract_block(source, REGISTER), REGISTER + ' {\n'
-                            '  (void)server;\n  (void)&handleEIOrganize;\n'
+                            '  (void)server;\n  (void)&handleEiOrganize;\n'
                             '  (void)&handleEdgeImpulseDetect;\n}')
     return strip_includes(header) + strip_includes(source)
 
@@ -119,7 +119,7 @@ def static_checks(report, component=COMPONENT):
     report.check('static: one Invoke call site', source.count('->Invoke()') == 1)
     try:
         bodies = [extract_block(source, marker) for marker in
-                  ('static EIResults runCameraInferenceLocked()', 'EIResults runInferenceFromFile(')]
+                  ('static EiResults runCameraInferenceLocked()', 'EiResults runInferenceFromFile(')]
         shared = all(b.count('inferRgb(') == 1 and b.count('decodeEdgeImpulseJpeg(') == 1 and
                      'resizeRgb888(' not in b for b in bodies)
     except ValueError:

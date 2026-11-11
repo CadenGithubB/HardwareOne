@@ -140,9 +140,9 @@ static std::vector<uint8_t> currentInputBytes() {
   return gInterpreter->inputBytes();
 }
 
-static std::string label(const EIResults& r, int i) { return std::string(r.detections[i].label); }
+static std::string label(const EiResults& r, int i) { return std::string(r.detections[i].label); }
 
-static void expectBox(const EIResults& r, int i, int x, int y, int w, int h, const char* what) {
+static void expectBox(const EiResults& r, int i, int x, int y, int w, int h, const char* what) {
   eiCheck(r.detections[i].x == x && r.detections[i].y == y &&
           r.detections[i].width == w && r.detections[i].height == h, what);
 }
@@ -154,7 +154,7 @@ static void scenarioGray96() {
   setFomoCell(3, 4, 1, 0.9f);
   loadFakeModel("/EI Models/gray/gray.tflite", {"background", "object"});
   gFakeCameraJpeg = readFixture(gFixtures + "/solid_640x480.jpg");
-  const EIResults r = runEdgeImpulseInference();
+  const EiResults r = runEdgeImpulseInference();
   eiCheck(!gFakeGuardBroken, "input fill stays inside the 96x96x1 tensor");
   eiCheck(r.success, "grayscale detect succeeds");
   const auto input = currentInputBytes();
@@ -174,7 +174,7 @@ static void scenarioChangedSetting() {
   loadFakeModel("/EI Models/rgb/rgb.tflite", {"a", "b", "c", "d"});
   gSettings.edgeImpulseInputSize = 320;  // what `eiinputsize 320` used to set
   gFakeCameraJpeg = readFixture(gFixtures + "/solid_640x480.jpg");
-  const EIResults r = runEdgeImpulseInference();
+  const EiResults r = runEdgeImpulseInference();
   eiCheck(!gFakeGuardBroken, "input fill stays inside the 96x96x3 tensor");
   eiCheck(r.success && r.detectionCount == 1 && label(r, 0) == "b", "classification still works");
   expectBox(r, 0, 0, 0, 96, 96, "classification box is the model input");
@@ -196,7 +196,7 @@ static void scenarioNonSquare() {
   setFomoCell(2, 5, 2, 0.95f);
   loadFakeModel("/EI Models/wide/wide.tflite", {"bg", "one", "two"});
   gFakeCameraJpeg = readFixture(gFixtures + "/rgb420_320x240.jpg");
-  const EIResults r = runEdgeImpulseInference();
+  const EiResults r = runEdgeImpulseInference();
   eiCheck(!gFakeGuardBroken, "input fill stays inside the 64x48x3 tensor");
   eiCheck(r.success && r.detectionCount == 1 && label(r, 0) == "two", "non-square detect succeeds");
   expectBox(r, 0, 40, 16, 8, 8, "cell size per axis");
@@ -209,7 +209,7 @@ static void scenarioFillTypes() {
   setModel(kTfLiteFloat32, {1, 8, 8, 3}, kTfLiteFloat32, {1, 2});
   loadFakeModel("/EI Models/f32/f32.tflite", {"x", "y"});
   gFakeCameraJpeg = readFixture(gFixtures + "/rgb420_24x24.jpg");
-  EIResults r = runEdgeImpulseInference();
+  EiResults r = runEdgeImpulseInference();
   eiCheck(r.success && !gFakeGuardBroken, "float32 detect stays inside the tensor");
   auto bytes = currentInputBytes();
   eiCheck(bytes.size() == 8u * 8u * 3u * 4u, "float tensor size");
@@ -244,7 +244,7 @@ static void scenarioTwelveLabels() {
   gFakeModel.outputValues[10] = 0.9f;
   gFakeModel.outputValues[11] = 0.8f;
   loadFakeModel("/EI Models/c12/c12.tflite", names);
-  EIResults r = runEdgeImpulseInference();
+  EiResults r = runEdgeImpulseInference();
   eiCheck(r.success && r.detectionCount == 2, "two classes above threshold");
   eiCheck(label(r, 0) == "label10", "class 10 keeps its name");
   eiCheck(label(r, 1) == "label11", "class 11 keeps its name");
@@ -271,7 +271,7 @@ static void scenarioTwelveLabels() {
   r = runEdgeImpulseInference();
   eiCheck(r.success && r.detectionCount == 2, "two unnamed classes above threshold");
   eiCheck(label(r, 0) == "class_10" && label(r, 1) == "class_11", "generic names stay distinct");
-  const EIResults kept = r;
+  const EiResults kept = r;
   r = runEdgeImpulseInference();
   eiCheck(label(kept, 0) == "class_10", "a result keeps its labels after the next inference");
 
@@ -284,7 +284,7 @@ static void scenarioTwelveLabels() {
   unloadModel();
 }
 
-static void expectSameResults(const EIResults& a, const EIResults& b) {
+static void expectSameResults(const EiResults& a, const EiResults& b) {
   eiCheck(a.success == b.success && a.detectionCount == b.detectionCount, "same outcome and count");
   for (int i = 0; i < a.detectionCount; ++i) {
     eiCheck(label(a, i) == label(b, i), "same label");
@@ -305,9 +305,9 @@ static void scenarioParity() {
   gFakeCameraJpeg = readFixture(gFixtures + "/rgb420_320x240.jpg");
   fakePutFile("/images/frame.jpg", std::string(gFakeCameraJpeg.begin(), gFakeCameraJpeg.end()));
 
-  const EIResults camera = runEdgeImpulseInference();
+  const EiResults camera = runEdgeImpulseInference();
   const int trackedAfterCamera = gTrackedObjectCount;
-  const EIResults file = runInferenceFromFile("/images/frame.jpg", VFS::systemAuth("test.caller"));
+  const EiResults file = runInferenceFromFile("/images/frame.jpg", VFS::systemAuth("test.caller"));
   eiCheck(camera.success && camera.detectionCount == 2, "camera detect");
   expectSameResults(camera, file);
   eiCheck(gFakeInvokeInputHashes.size() == 2 && gFakeInvokeInputHashes[0] == gFakeInvokeInputHashes[1],
@@ -315,16 +315,16 @@ static void scenarioParity() {
   eiCheck(trackedAfterCamera == 2 && gTrackedObjectCount == 2, "only the camera path tracks objects");
 
   gSettings.eiEnabled = false;
-  const EIResults cameraOff = runEdgeImpulseInference();
-  const EIResults fileOff = runInferenceFromFile("/images/frame.jpg", VFS::systemAuth("test.caller"));
+  const EiResults cameraOff = runEdgeImpulseInference();
+  const EiResults fileOff = runInferenceFromFile("/images/frame.jpg", VFS::systemAuth("test.caller"));
   eiCheck(!cameraOff.success && !fileOff.success, "disabled refuses both paths");
   eiCheck(cameraOff.errorMessage && fileOff.errorMessage &&
           std::strcmp(cameraOff.errorMessage, fileOff.errorMessage) == 0, "same disabled error");
   gSettings.eiEnabled = true;
 
   unloadModel();
-  const EIResults cameraNone = runEdgeImpulseInference();
-  const EIResults fileNone = runInferenceFromFile("/images/frame.jpg", VFS::systemAuth("test.caller"));
+  const EiResults cameraNone = runEdgeImpulseInference();
+  const EiResults fileNone = runInferenceFromFile("/images/frame.jpg", VFS::systemAuth("test.caller"));
   eiCheck(!cameraNone.success && !fileNone.success, "no model refuses both paths");
   eiCheck(cameraNone.errorMessage && fileNone.errorMessage &&
           std::strcmp(cameraNone.errorMessage, fileNone.errorMessage) == 0, "same no-model error");
