@@ -161,7 +161,7 @@ assert nested_rejection < remote_resolution < remote_authorize
 # presentation stamping, not lookup or handler execution.
 assert execute.index("cliModeDispatchInput(command") < execute.index("if (found)")
 assert "const char* result = found->handler(args);" in execute
-assert "gCLIValidateOnly" not in execute
+assert "gCliValidateOnly" not in execute
 
 # Dynamic registration semantics remain live: appends immediately affect the
 # resolver, and pointer identity/lifetime are unchanged.
@@ -319,16 +319,16 @@ debug_code = sources["System_Debug.cpp"]
 core_start, core_end = body_span(debug_code, "static void broadcastOutputCore(")
 broadcast_core = debug_code[core_start:core_end]
 assert "currentCommandValidateOnly()" in broadcast_core
-assert "gCLIValidateOnly" not in broadcast_core
+assert "gCliValidateOnly" not in broadcast_core
 accessor_start, accessor_end = body_span(utils_code, "bool currentCommandValidateOnly()")
 accessor = utils_code[accessor_start:accessor_end]
 assert "currentCommandContext()" in accessor and "->validateOnly" in accessor
-assert "gCLIValidateOnly" not in accessor
+assert "gCliValidateOnly" not in accessor
 for signature in ("static bool commandExecutionLogSuppressed(",
                   "static void stampOkStatus("):
     start, end = body_span(utils_code, signature)
     assert "currentCommandValidateOnly()" in utils_code[start:end], signature
-    assert "gCLIValidateOnly" not in utils_code[start:end], signature
+    assert "gCliValidateOnly" not in utils_code[start:end], signature
 writer = re.compile(r"\bgCLIValidateOnly\s*=(?!=)")
 VALIDATE_WRITERS = {
     "HardwareOne.cpp": ("static void commandExecTask(",),
@@ -341,7 +341,7 @@ for name, code in sorted(sources.items()):
             continue  # the definition
         line = code.count("\n", 0, match.start()) + 1
         assert any(start <= match.start() < end for start, end in allowed), (
-            f"{name}:{line} writes gCLIValidateOnly outside the executor")
+            f"{name}:{line} writes gCliValidateOnly outside the executor")
 
 # The shared password helper reports a status and writes its message into the
 # caller's buffer; the web handler (still on httpd) reads only that buffer.

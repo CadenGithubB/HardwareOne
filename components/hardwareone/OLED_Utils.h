@@ -464,11 +464,11 @@ extern int loggingMenuSelection;
 struct FileBrowserRenderData;  // System_FileManager.h
 void enterUnavailablePage(const String& title, const String& reason);
 extern FileBrowserRenderData fileBrowserRenderData;
-int getCLIViewerSelectedIndex();
+int getCliViewerSelectedIndex();
 void oledAuthModeInit();
 void oledAuthModeResetSessionState();
-void oledCLIInputModeInit();
-void oledCLIInputResetSessionState();
+void oledCliInputModeInit();
+void oledCliInputResetSessionState();
 void oledChangePasswordModeInit();
 void oledChangePasswordModeResetSessionState();
 int oledFileBrowserActiveLevel();

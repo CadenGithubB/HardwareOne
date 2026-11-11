@@ -116,7 +116,7 @@ static JoystickNav readWizardJoystickNav() {
 enum { INPUT_BUTTON_A, INPUT_BUTTON_B };
 #define INPUT_MASK(button) (1u << (button))
 static uint32_t inputConsumeButtonPresses(uint32_t&, bool&) { unchanged(); return nextButtons; }
-static CLIModeInputResult unrelatedPage(const String&, char*, size_t) {
+static CliModeInputResult unrelatedPage(const String&, char*, size_t) {
   assert(false && "test unexpectedly left ESP-NOW input routing"); return CLI_MODE_HANDLED;
 }
 static auto dispatchTopLevelPage = unrelatedPage;
@@ -153,7 +153,7 @@ static void patch(const char* name, const char* room = "", const char* zone = ""
   if (staged[0].espnowStationary != stationary) std::fprintf(stderr, "stationary mismatch name=%s actual=%d expected=%d\n", name, staged[0].espnowStationary, stationary);
   assert(staged[0].espnowStationary == stationary);
 }
-static CLIModeInputResult cli(const char* line) {
+static CliModeInputResult cli(const char* line) {
   char output[128] = {}; return wizardMode_onInput(line, nullptr, output, sizeof(output));
 }
 

@@ -1582,7 +1582,7 @@ static String redactWebCommandResult(const String& output,
   if (lineEnd >= 0) rebuilt += safe.substring(lineEnd);
   return rebuilt;
 }
-void streamCLIContent(httpd_req_t* req, const String& username);
+void streamCliContent(httpd_req_t* req, const String& username);
 void streamAutomationsContent(httpd_req_t* req, const String& username);
 void streamFilesContent(httpd_req_t* req, const String& username);
 void streamLoggingContent(httpd_req_t* req, const String& username);
@@ -1825,8 +1825,8 @@ void streamAutomationsContent(httpd_req_t* req, const String& username) {
   streamCardPage(req, "Automations", username, "automations", [&] { streamAutomationsInner(req); });
 }
 
-void streamCLIContent(httpd_req_t* req, const String& username) {
-  streamCardPage(req, "CLI", username, "cli", [&] { streamCLIInner(req, username); });
+void streamCliContent(httpd_req_t* req, const String& username) {
+  streamCardPage(req, "CLI", username, "cli", [&] { streamCliInner(req, username); });
 }
 
 static void streamPasswordChangeInner(httpd_req_t* req, const String& username, const String& errorMsg) {
@@ -3339,7 +3339,7 @@ static esp_err_t handleLoggingStatus(httpd_req_t* req) {
   return ESP_OK;
 }
 
-esp_err_t handleCLICommand(httpd_req_t* req) {
+esp_err_t handleCliCommand(httpd_req_t* req) {
   AuthContext ctx = makeWebAuthCtx(req);
   DEBUG_CMD_FLOWF("[web.cli] enter ip=%s content_len=%d", ctx.ip.c_str(), (int)req->content_len);
   if (!tgRequireAuth(ctx)) {
@@ -3511,7 +3511,7 @@ esp_err_t handleCLICommand(httpd_req_t* req) {
   return ESP_OK;
 }
 
-esp_err_t handleCLIPage(httpd_req_t* req) {
+esp_err_t handleCliPage(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);
 
   // Guests are view-only — the free CLI page is not part of that surface.
@@ -3530,7 +3530,7 @@ esp_err_t handleCLIPage(httpd_req_t* req) {
   }
 
   DEBUG_HTTPF("handler enter uri=%s user=%s page=%s", ctx.path.c_str(), ctx.user.c_str(), "cli");
-  streamPageWithContent(req, "cli", ctx.user, streamCLIContent);
+  streamPageWithContent(req, "cli", ctx.user, streamCliContent);
   return ESP_OK;
 }
 
@@ -5258,7 +5258,7 @@ esp_err_t handleCliBatch(httpd_req_t* req) {
     // /api/cli/batch is normally a passive machine endpoint. This narrowly
     // classified two-command form is a deliberate human interaction and must
     // refresh the exact cookie session's idle clock before the prompt begins.
-    // Stateless Basic Auth cannot own an interactive CLIMode.
+    // Stateless Basic Auth cannot own an interactive CliMode.
     if (!ctx.sid.length() || batchSessionEpoch == 0 ||
         !webNoteSessionInteraction(ctx.sid, batchSessionEpoch)) {
       httpd_resp_set_status(req, "401 Unauthorized");
@@ -5631,8 +5631,8 @@ register_handlers:
   static const httpd_uri_t iconGet = { .uri = "/api/icon", .method = HTTP_GET, .handler = handleIconGet, .user_ctx = NULL };
   static const httpd_uri_t iconTestPage = { .uri = "/icons/test", .method = HTTP_GET, .handler = handleIconTestPage, .user_ctx = NULL };
   static const httpd_uri_t loggingPage = { .uri = "/logging", .method = HTTP_GET, .handler = handleLoggingPage, .user_ctx = NULL };
-  static const httpd_uri_t cliPage = { .uri = "/cli", .method = HTTP_GET, .handler = handleCLIPage, .user_ctx = NULL };
-  static const httpd_uri_t cliCmd = { .uri = "/api/cli", .method = HTTP_POST, .handler = handleCLICommand, .user_ctx = NULL };
+  static const httpd_uri_t cliPage = { .uri = "/cli", .method = HTTP_GET, .handler = handleCliPage, .user_ctx = NULL };
+  static const httpd_uri_t cliCmd = { .uri = "/api/cli", .method = HTTP_POST, .handler = handleCliCommand, .user_ctx = NULL };
   static const httpd_uri_t cliBatch = { .uri = "/api/cli/batch", .method = HTTP_POST, .handler = handleCliBatch, .user_ctx = NULL };
   static const httpd_uri_t logsGet = { .uri = "/api/cli/logs", .method = HTTP_GET, .handler = handleLogs, .user_ctx = NULL };
 #if ENABLE_AUTOMATION

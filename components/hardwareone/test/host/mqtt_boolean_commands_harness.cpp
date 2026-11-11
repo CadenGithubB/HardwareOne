@@ -33,7 +33,7 @@ struct SettingsBoundary {
   bool mqttPublishRtc, mqttPublishInput;
 } gSettings;
 
-bool gCLIValidateOnly;
+bool gCliValidateOnly;
 static bool stopResult, persistResult;
 static int stopCalls, persistCalls, notifyCalls;
 static const void* notifiedField;
@@ -114,7 +114,7 @@ static void reset(const Command& command, bool initial, const char* category,
     gSettings.*commands[i].field = (i % 2) != 0;
   }
   gSettings.*command.field = initial;
-  gCLIValidateOnly = false; stopResult = persistResult = true;
+  gCliValidateOnly = false; stopResult = persistResult = true;
   stopCalls = persistCalls = notifyCalls = 0;
   notifiedField = nullptr; events.clear();
 }
@@ -157,7 +157,7 @@ static void queryAndInvalid() {
       }
       for (const char* input : {"", "on", "off", "disable", "nonsense"}) {
         reset(command, initial, "validate only", input);
-        gCLIValidateOnly = true;
+        gCliValidateOnly = true;
         const auto before = gSettings;
         check(std::string(command.handler(input)) == "VALID", "validation-only response changed");
         noEffects(command, before);

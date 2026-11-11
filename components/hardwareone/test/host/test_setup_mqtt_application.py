@@ -29,7 +29,7 @@ def main():
     assert "bool wizardStageMqttSettings(const SetupWizardResult& result);" in (
         COMPONENT / "System_SetupWizard.h").read_text()
     mode_header = (COMPONENT / "System_CLIMode.h").read_text()
-    cli_result = extract_block(mode_header, "enum CLIModeInputResult") + ";"
+    cli_result = extract_block(mode_header, "enum CliModeInputResult") + ";"
     harness = (HERE / "setup_mqtt_application_harness.cpp").read_text()
 
     with tempfile.TemporaryDirectory(prefix="hw1-setup-mqtt-") as temp:
@@ -40,8 +40,8 @@ def main():
             header = (source_dir / "System_SetupWizard.h").read_text()
             handlers = [extract_block(setup, "static void handleSerialMqttPage("),
                         extract_block(oled, "void handleOledMqttPage("),
-                        extract_block(mode[mode.rindex("static CLIModeInputResult dispatchMqtt("):],
-                                      "static CLIModeInputResult dispatchMqtt(")]
+                        extract_block(mode[mode.rindex("static CliModeInputResult dispatchMqtt("):],
+                                      "static CliModeInputResult dispatchMqtt(")]
             if label == "current":
                 for handler in handlers:
                     assert handler.count("wizardStageMqttSettings(") == 1
@@ -62,7 +62,7 @@ def main():
                 helper,
                 extract_block(mode, "static WizardSubMode subModeForPage("),
                 *handlers,
-                extract_block(mode, "static CLIModeInputResult wizardMode_onInput("),
+                extract_block(mode, "static CliModeInputResult wizardMode_onInput("),
             ])
             unit = Path(temp) / f"{label}.cpp"
             unit.write_text(harness.replace("// INSERT_PRODUCTION_TYPES", definitions)

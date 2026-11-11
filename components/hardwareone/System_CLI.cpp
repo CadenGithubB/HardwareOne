@@ -30,7 +30,7 @@ static size_t renderModuleHelpPage(const CommandModule* module,
 // Global CLI State
 // ============================================================================
 
-CLIState gCLIState = CLI_NORMAL;
+CliState gCliState = CLI_NORMAL;
 bool gShowAllCommands = false;
 volatile bool gInHelpRender = false;
 
@@ -95,27 +95,27 @@ static HelpRenderSnapshot captureHelpRenderSnapshot(
 }  // namespace
 
 // ============================================================================
-// Help mode — CLIMode adapter
+// Help mode — CliMode adapter
 // ============================================================================
-// The help system is the canonical example of a CLIMode: short, non-blocking
-// per-input handlers + persistent state in a side global (gCLIState). This
+// The help system is the canonical example of a CliMode: short, non-blocking
+// per-input handlers + persistent state in a side global (gCliState). This
 // adapter routes the dispatcher's per-line callbacks through the new
-// CLIMode framework so the SAME machinery can host the upcoming wizard
+// CliMode framework so the SAME machinery can host the upcoming wizard
 // migration and confirm prompts.
 //
 // Implementation strategy for THIS phase: keep the existing
 // handleHelpNavigation() logic unchanged underneath; the adapter just maps
-// its true/false return into a CLIModeInputResult. The longer-term goal
+// its true/false return into a CliModeInputResult. The longer-term goal
 // is to fold handleHelpNavigation INTO the onInput callback once other
 // modes are stable; for now we minimize risk by delegating.
 
 static void helpMode_onEnter(void* /*userData*/) {
   // cmd_help sets the requested page immediately after entry. Keeping this
   // callback side-effect free also makes prepared mode publication safe.
-  DEBUGF(DEBUG_CLI, "[climode/help] entered (gCLIState=%d)", (int)gCLIState);
+  DEBUGF(DEBUG_CLI, "[climode/help] entered (gCLIState=%d)", (int)gCliState);
 }
 
-static CLIModeInputResult helpMode_onInput(const String& line, void* /*userData*/,
+static CliModeInputResult helpMode_onInput(const String& line, void* /*userData*/,
                                            char* out, size_t outSize) {
   // Delegate to the existing help-navigation handler. It writes "OK" into
   // out and returns true if it consumed the input ("back"/"exit"/"clear"/
@@ -123,11 +123,11 @@ static CLIModeInputResult helpMode_onInput(const String& line, void* /*userData*
   // and should be dispatched as a normal command.
   if (handleHelpNavigation(line, out, outSize)) {
     // handleHelpNavigation already called exitToNormalBanner() for the
-    // back/exit cases, which set gCLIState back to CLI_NORMAL. Detect that
+    // back/exit cases, which set gCliState back to CLI_NORMAL. Detect that
     // and propagate as HANDLED_AND_EXIT so the framework also clears its
     // own active-mode pointer; otherwise we'd be stuck with sActiveMode
     // pointing at us even though help is logically over.
-    if (gCLIState == CLI_NORMAL) {
+    if (gCliState == CLI_NORMAL) {
       return CLI_MODE_HANDLED_AND_EXIT;
     }
     return CLI_MODE_HANDLED;
@@ -158,24 +158,24 @@ static CLIModeInputResult helpMode_onInput(const String& line, void* /*userData*
 static void helpMode_onExit(void* /*userData*/) {
   // If we exit via PASSTHROUGH_AND_EXIT or external cliExitMode(), the
   // dispatcher may not have called exitToNormalBanner() yet. Make sure
-  // gCLIState is back to CLI_NORMAL so the rest of the codebase (debug
+  // gCliState is back to CLI_NORMAL so the rest of the codebase (debug
   // suppression, prompt rendering, web-mirror capture) returns to its
   // default state.
-  if (gCLIState != CLI_NORMAL) {
-    gCLIState = CLI_NORMAL;
+  if (gCliState != CLI_NORMAL) {
+    gCliState = CLI_NORMAL;
     gShowAllCommands = false;
   }
   resetHelpSession();
   DEBUGF(DEBUG_CLI, "[climode/help] exited");
 }
 
-static const CLIMode kHelpMode = {
+static const CliMode kHelpMode = {
   "help",
   helpMode_onEnter,
   helpMode_onInput,
   helpMode_onExit,
   nullptr,  // onTick — help is purely input-driven
-  nullptr,  // userData — help keeps state in gCLIState/gShowAllCommands
+  nullptr,  // userData — help keeps state in gCliState/gShowAllCommands
   10u * 60u * 1000u,
 };
 
@@ -318,8 +318,8 @@ const char* renderHelpSensors() {
 
 bool handleHelpNavigation(const String& cmd, char* out, size_t outSize) {
   const String safeCmdForTrace = redactCmdForAudit(cmd);
-  DEBUGF(DEBUG_CLI, "[handleHelpNavigation] cmd='%s', gCLIState=%d", safeCmdForTrace.c_str(), (int)gCLIState);
-  if (gCLIState == CLI_NORMAL) return false;
+  DEBUGF(DEBUG_CLI, "[handleHelpNavigation] cmd='%s', gCLIState=%d", safeCmdForTrace.c_str(), (int)gCliState);
+  if (gCliState == CLI_NORMAL) return false;
 
   gInHelpRender = true;
 
@@ -354,7 +354,7 @@ bool handleHelpNavigation(const String& cmd, char* out, size_t outSize) {
     return true;
   }
   if (lc == "back") {
-    if (gCLIState == CLI_HELP_MAIN) {
+    if (gCliState == CLI_HELP_MAIN) {
       // Already at the top of the help hierarchy -- nowhere to go up to.
       // Treat as "exit" so a second `back` at the main menu still leaves
       // help mode (matches the legacy behavior at this level).
@@ -363,7 +363,7 @@ bool handleHelpNavigation(const String& cmd, char* out, size_t outSize) {
       return true;
     }
     // Inside a module page (CLI_HELP_MODULE) -- go back to main menu.
-    gCLIState = CLI_HELP_MAIN;
+    gCliState = CLI_HELP_MAIN;
     resetHelpSession();
     renderHelpMain(gShowAllCommands);
     respond();
@@ -382,7 +382,7 @@ bool handleHelpNavigation(const String& cmd, char* out, size_t outSize) {
 
   // ── Sensors: special aggregate view (all sensor modules by flag) ──────────
   if (lc == "sensors") {
-    gCLIState = CLI_HELP_MODULE;
+    gCliState = CLI_HELP_MODULE;
     resetHelpSession();
     renderHelpSensors();
     respond();
@@ -426,7 +426,7 @@ bool handleHelpNavigation(const String& cmd, char* out, size_t outSize) {
 
         const HelpRenderSnapshot snapshot =
             captureHelpRenderSnapshot(&modules[i]);
-        gCLIState = CLI_HELP_MODULE;
+        gCliState = CLI_HELP_MODULE;
         const size_t pageCount = renderModuleHelpPage(
             &modules[i], nullptr, snapshot, 1, true);
         sHelpSession = HelpSessionState{&modules[i], 1, pageCount, snapshot};
@@ -482,7 +482,7 @@ bool handleHelpNavigation(const String& cmd, char* out, size_t outSize) {
 }
 
 String exitToNormalBanner() {
-  gCLIState = CLI_NORMAL;
+  gCliState = CLI_NORMAL;
   gShowAllCommands = false;  // Reset show all flag
   // Restore hidden history when leaving help
   String banner = "Returned to normal CLI mode.";
@@ -975,14 +975,14 @@ static size_t renderModuleHelpPage(const CommandModule* module,
 }
 
 struct HelpModeEntryState {
-  CLIState cliState;
+  CliState cliState;
   bool showAll;
   HelpSessionState session;
 };
 
 static void commitHelpModeEntry(void* data) {
   const auto* entry = static_cast<const HelpModeEntryState*>(data);
-  gCLIState = entry->cliState;
+  gCliState = entry->cliState;
   gShowAllCommands = entry->showAll;
   sHelpSession = entry->session;
 }
@@ -1128,7 +1128,7 @@ static const char* cmd_back(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   if (cliModeCurrentCommandOwns(&kHelpMode)) {
-    gCLIState = CLI_HELP_MAIN;
+    gCliState = CLI_HELP_MAIN;
     resetHelpSession();
     gInHelpRender = true;
     renderHelpMain(gShowAllCommands);

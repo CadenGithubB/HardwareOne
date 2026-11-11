@@ -170,7 +170,7 @@ static void verifyPresentation() {
   check(wizardFormatMenuItem(group, index, label, sizeof(label), value, sizeof(value)));
   check(std::string(value).find("UTC-") == 0);
 }
-static CLIModeInputResult cli(const String& text) {
+static CliModeInputResult cli(const String& text) {
   char response[160]{}; return wizardMode_onInput(text, nullptr, response, sizeof(response));
 }
 static void verifyCliActions() {

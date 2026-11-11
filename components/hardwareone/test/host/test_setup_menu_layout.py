@@ -52,12 +52,12 @@ def generate() -> str:
         extract_block(mode, "static struct") + " sWizard;",
         "volatile bool gInHelpRender = false;",
         extract_block(mode, "struct WizardRender") + ";",
-        extract_block(cli_header, "enum CLIModeInputResult") + ";",
+        extract_block(cli_header, "enum CliModeInputResult") + ";",
     ])
     adapter_boundaries = """
 static void appendPromptTo(char*, size_t) {}
 static void clearWizardWifiChoices() {}
-static CLIModeInputResult unexpectedDispatch(const String&, char*, size_t) {
+static CliModeInputResult unexpectedDispatch(const String&, char*, size_t) {
   assert(false && "unexpected optional page dispatch"); return CLI_MODE_HANDLED;
 }
 static auto dispatchEspNow = unexpectedDispatch;
@@ -67,11 +67,11 @@ static auto dispatchWifi = unexpectedDispatch;
     adapter_code = "\n\n".join([
         extract_block(setup, "void printSerialPageStatus("),
         extract_block(mode, "static WizardSubMode subModeForPage("),
-        extract_block(mode[mode.rindex("static CLIModeInputResult dispatchTopLevelPage("):],
-                      "static CLIModeInputResult dispatchTopLevelPage("),
-        extract_block(mode[mode.rindex("static CLIModeInputResult dispatchModePage("):],
-                      "static CLIModeInputResult dispatchModePage("),
-        extract_block(mode, "static CLIModeInputResult wizardMode_onInput("),
+        extract_block(mode[mode.rindex("static CliModeInputResult dispatchTopLevelPage("):],
+                      "static CliModeInputResult dispatchTopLevelPage("),
+        extract_block(mode[mode.rindex("static CliModeInputResult dispatchModePage("):],
+                      "static CliModeInputResult dispatchModePage("),
+        extract_block(mode, "static CliModeInputResult wizardMode_onInput("),
     ])
     return ('#include "System_BuildConfig.h"\n' + unit + adapter_types + adapter_boundaries + adapter_code +
             (HERE / "setup_menu_layout_harness.cpp").read_text())

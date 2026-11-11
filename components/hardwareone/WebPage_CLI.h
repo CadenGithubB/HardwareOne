@@ -5,7 +5,7 @@
 #include "System_Settings.h"  // gSettings.webCliHistorySize
 
 // Streamed inner content for the CLI page
-inline void streamCLIInner(httpd_req_t* req, const String& username) {
+inline void streamCliInner(httpd_req_t* req, const String& username) {
   // CSS
   httpd_resp_send_chunk(req, R"CSS(
 <style>

@@ -207,7 +207,7 @@ def main() -> None:
         *([] if args.baseline else [extract_block(utils, "CommandContext makeWebCommandContext(")]),
         extract_block(utils, "String redactOutputForLog("),
         extract_block(local, "static String redactWebCommandResult("),
-        extract_block(local, "esp_err_t handleCLICommand("),
+        extract_block(local, "esp_err_t handleCliCommand("),
         extract_block(local, "static bool cliBatchCommandEquals("),
         extract_block(local, "static bool settingsSaveOutputConfirmed("),
         extract_block(local, "class SettingsBatchRequestCleanup") + ";",

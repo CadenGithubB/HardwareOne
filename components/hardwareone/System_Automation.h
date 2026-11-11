@@ -19,7 +19,7 @@ constexpr uint32_t kAutomationsFileVersion = 2;
 struct Settings;
 
 // Forward declarations from main system
-extern bool gCLIValidateOnly;
+extern bool gCliValidateOnly;
 void fsLock(const char* reason);
 void fsUnlock();
 

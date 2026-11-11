@@ -7,14 +7,14 @@
 // CLI Confirm — yes/no prompt for destructive commands
 // ============================================================================
 //
-// First concrete user of the CLIMode framework after help. Pattern:
+// First concrete user of the CliMode framework after help. Pattern:
 //
 //   1. A "destructive" CLI command (filedelete, userdelete, factoryreset)
 //      validates its arguments, but instead of executing the action it stages
 //      the payload locally and calls cliRequestConfirm() with a callback plus
 //      an accepted-payload publisher. Shared pending state is committed only
 //      when mode entry succeeds.
-//   2. cliRequestConfirm enters a CLIMode that:
+//   2. cliRequestConfirm enters a CliMode that:
 //        a. prints the prompt + a yes/no hint
 //        b. captures the user's NEXT command line as the response
 //        c. on "yes"/"y"/"true"/"1" -> schedules the onConfirm callback
@@ -60,7 +60,7 @@
 // ----------------------------------------------------------------------------
 // Why a single-slot static (not per-instance):
 //
-//   Only ONE CLIMode is active at a time. The confirm mode is no exception
+//   Only ONE CliMode is active at a time. The confirm mode is no exception
 //   -- there's at most one outstanding confirm prompt. So the framework
 //   keeps the callbacks + userData in file-static state in
 //   System_CLIConfirm.cpp. Callers store their own per-confirm state
@@ -85,14 +85,14 @@
 // submitted the yes/no line. The pointer must remain valid until the
 // next CLI command returns -- the dispatcher copies the string out
 // before that. File-static char buffers are the simplest choice.
-typedef const char* (*CLIConfirmCallback)(void* userData);
-typedef void (*CLIConfirmAcceptedCallback)(void* acceptedData);
+typedef const char* (*CliConfirmCallback)(void* userData);
+typedef void (*CliConfirmAcceptedCallback)(void* acceptedData);
 
 // Request a yes/no confirmation. See header comment for the typical
 // caller pattern.
 //
 // Returns true if the confirm mode was entered. Returns false if another
-// CLIMode is already active (help, wizard, or a prior outstanding
+// CliMode is already active (help, wizard, or a prior outstanding
 // confirm) -- caller must NOT execute the destructive action and should
 // surface an error to the user.
 //
@@ -118,10 +118,10 @@ typedef void (*CLIConfirmAcceptedCallback)(void* acceptedData);
 //                    framework never dereferences it.
 bool cliRequestConfirm(const String& prompt,
                        const String& originatingCmd,
-                       CLIConfirmCallback onConfirm,
-                       CLIConfirmCallback onCancel,
+                       CliConfirmCallback onConfirm,
+                       CliConfirmCallback onCancel,
                        void* userData,
-                       CLIConfirmAcceptedCallback onAccepted = nullptr,
+                       CliConfirmAcceptedCallback onAccepted = nullptr,
                        void* acceptedData = nullptr);
 
 // Addressed response prepared by the last successful cliRequestConfirm().

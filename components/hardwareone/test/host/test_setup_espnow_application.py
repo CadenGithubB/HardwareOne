@@ -31,8 +31,8 @@ def main():
     assert "bool wizardStageEspNowSettings(const SetupWizardResult& result);" in header
     handlers = [extract_block(setup, "static void handleSerialEspNowPage("),
                 extract_block(oled, "void handleOledEspNowPage("),
-                extract_block(mode[mode.rindex("static CLIModeInputResult dispatchEspNow("):],
-                              "static CLIModeInputResult dispatchEspNow(")]
+                extract_block(mode[mode.rindex("static CliModeInputResult dispatchEspNow("):],
+                              "static CliModeInputResult dispatchEspNow(")]
     for handler in handlers:
         assert handler.count("wizardStageEspNowSettings(") == 1
         for field in ("bleDeviceName", "espnowDeviceName", "espnowFriendlyName", "espnowRoom", "espnowZone", "espnowStationary"):
@@ -41,7 +41,7 @@ def main():
         extract_block(header, "enum SetupWizardPage") + ";",
         extract_block(header, "struct SetupWizardResult") + ";",
         extract_block(mode, "enum class WizardSubMode") + ";",
-        extract_block((COMPONENT / "System_CLIMode.h").read_text(), "enum CLIModeInputResult") + ";",
+        extract_block((COMPONENT / "System_CLIMode.h").read_text(), "enum CliModeInputResult") + ";",
         extract_block(mode, "static struct") + " sWizard;",
         extract_block(mode, "struct WizardRender") + ";",
     ])
@@ -51,7 +51,7 @@ def main():
         extract_block(setup, "bool wizardHandleCancelInput("),
         extract_block(setup, "static String waitForWizardInput("),
         extract_block(mode, "static WizardSubMode subModeForPage("),
-        *handlers, extract_block(mode, "static CLIModeInputResult wizardMode_onInput("),
+        *handlers, extract_block(mode, "static CliModeInputResult wizardMode_onInput("),
     ])
     harness = (HERE / "setup_espnow_application_harness.cpp").read_text()
     with tempfile.TemporaryDirectory(prefix="hw1-setup-espnow-") as temp:

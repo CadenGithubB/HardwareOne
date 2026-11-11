@@ -21,7 +21,7 @@ static unsigned checks;
 #define EXPECT(condition, what) do { ++checks; if (!(condition)) { ++failures; \
   std::fprintf(stderr, "FAIL: %s\n      %s:%d: %s\n", what, __FILE__, __LINE__, #condition); } } while (0)
 
-bool gCLIValidateOnly = false;
+bool gCliValidateOnly = false;
 static char gDebugBuffer[1024];
 static bool ensureDebugBuffer() { return true; }
 static char* getDebugBuffer() { return gDebugBuffer; }

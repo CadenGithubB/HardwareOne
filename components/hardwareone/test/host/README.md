@@ -278,7 +278,7 @@ and that the reply helper maps empty to 400, over-cap and no-memory to 413 and
 a failed receive to 400 (text or the JSON `success`/`error` contract), returning
 `ESP_FAIL` where unread bytes remain so httpd closes the socket. The LLM wrapper
 must go through the shared reader and give up after two timeouts. The
-`web_batch_handlers` suite covers the same reader inside `handleCLICommand`
+`web_batch_handlers` suite covers the same reader inside `handleCliCommand`
 (forged Content-Length, failed allocation, short and stalled bodies, the
 `CMD_INPUT_MAX`-derived cap). Neither runs ESP-IDF's httpd or touches a device.
 
@@ -1099,7 +1099,7 @@ on other tasks. The broadcast case compiles `broadcastOutputCore`
 (System_Debug.cpp) and `currentCommandValidateOnly` (System_Utils.cpp): one
 thread runs a validate pass the way `commandExecTask` does (its own
 CommandContext with `validateOnly`, plus the handler mirror
-`gCLIValidateOnly`), while a second thread broadcasts, once with no command
+`gCliValidateOnly`), while a second thread broadcasts, once with no command
 context and once inside its own command. The validating thread's lines are
 dropped; the other thread's lines are delivered, and the executor's own
 output resumes after the pass. The password case compiles
@@ -1117,7 +1117,7 @@ checks that every executeCommand call is on the executor or early boot, the
 web logging and ESP-NOW status endpoints submit through
 `executeInternalStatusCommand`, and command_executor_admission runs
 executeCommand's own refusal of other tasks, and who writes
-`gCLIValidateOnly`). Run with
+`gCliValidateOnly`). Run with
 `ctest --test-dir build -R '^command_task_isolation$' --output-on-failure` (or
 the runner with `--sanitize`).
 

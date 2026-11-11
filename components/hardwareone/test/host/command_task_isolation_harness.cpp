@@ -43,7 +43,7 @@ typedef void* TaskHandle_t;
 
 // The executor's handler mirror (HardwareOne.cpp). Set by the validating
 // thread exactly as commandExecTask does.
-bool gCLIValidateOnly = false;
+bool gCliValidateOnly = false;
 bool gInHelpRender = false;
 bool gThermalRunning = true, gImuRunning = true, gTofRunning = true;
 TaskHandle_t gThermalTaskHandle = nullptr, gImuTaskHandle = nullptr, gTofTaskHandle = nullptr;
@@ -83,13 +83,13 @@ int main() {
     dryRun.validateOnly = true;
     dryRun.outputMask = MSG_ROUTE_WEB;
     tTaskContext = &dryRun;
-    const bool previous = gCLIValidateOnly;
-    gCLIValidateOnly = dryRun.validateOnly;
+    const bool previous = gCliValidateOnly;
+    gCliValidateOnly = dryRun.validateOnly;
     say("executor: dry-run output");
     validating.set_value();
     otherTaskDoneFuture.wait();
     say("executor: still validating");
-    gCLIValidateOnly = previous;
+    gCliValidateOnly = previous;
     tTaskContext = nullptr;
     say("executor: after the validate pass");
   });
@@ -126,7 +126,7 @@ enum { SYSEVT_PASSWORD_CHANGED = 1 };
 
 // INSERT_CONSTANTS
 
-bool gCLIValidateOnly = false;
+bool gCliValidateOnly = false;
 bool filesystemReady = true;
 static AuthContext installed;
 static std::string storedPassword;
@@ -264,10 +264,10 @@ int main() {
   CHECK(std::strcmp(reply, "Error: New passwords do not match") == 0);
   reset("alice");
   CHECK(std::strncmp(cmd_user_changepassword("oldpass1"), "Error: invalid arguments", 24) == 0);
-  gCLIValidateOnly = true;
+  gCliValidateOnly = true;
   CHECK(std::strcmp(cmd_user_changepassword("oldpass1 newpass1 newpass1"), "VALID") == 0);
   CHECK(storedPassword == "oldpass1");
-  gCLIValidateOnly = false;
+  gCliValidateOnly = false;
 
   std::printf("command task isolation: password ok\n");
   std::fprintf(stderr, "checks=%d\n", checks);

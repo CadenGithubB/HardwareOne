@@ -1512,7 +1512,7 @@ static esp_err_t handleBondCliBatch(httpd_req_t* req) {
   int count = 0;
 
   if (interactive) {
-    // A CLIMode is deliberately local to one transport-session generation;
+    // A CliMode is deliberately local to one transport-session generation;
     // it cannot span web -> ESP-NOW -> peer. The browser has already obtained
     // an explicit human confirmation, so translate only the destructive verbs
     // with supported one-shot forms. Preserve the two-result shape expected by

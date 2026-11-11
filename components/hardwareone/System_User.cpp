@@ -3398,7 +3398,7 @@ const char* cmd_user_demote(const String& argsInput) {
 }
 
 // userdelete is two-step like filedelete: prompt + yes/no confirm via the
-// CLIMode framework. Static state survives the gap between the prompting
+// CliMode framework. Static state survives the gap between the prompting
 // command and the user's yes/no reply (cmd_exec runs both, sequentially,
 // with the framework holding sActiveMode in between).
 static String s_pendingUserDeleteName;

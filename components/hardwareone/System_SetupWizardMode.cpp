@@ -1,7 +1,7 @@
 #include "OLED_Touch.h"
 // System_SetupWizardMode.cpp
 //
-// CLIMode-based setup wizard. See System_SetupWizardMode.h for the
+// CliMode-based setup wizard. See System_SetupWizardMode.h for the
 // design rationale and how it differs from the legacy synchronous
 // runSetupWizard() (which is still used by FTS-at-boot).
 //
@@ -41,7 +41,7 @@
 #include <Arduino.h>
 
 // ============================================================================
-// Wizard mode state (single instance — only one CLIMode active at a time)
+// Wizard mode state (single instance — only one CliMode active at a time)
 // ============================================================================
 
 enum class WizardSubMode : uint8_t {
@@ -313,15 +313,15 @@ static const char* paintAfterTransition() {
 // onInput dispatch -- one user line per state transition
 // ============================================================================
 
-static CLIModeInputResult dispatchTopLevelPage(const String& line,
+static CliModeInputResult dispatchTopLevelPage(const String& line,
                                                char* out, size_t outSize);
-static CLIModeInputResult dispatchEspNow(const String& line,
+static CliModeInputResult dispatchEspNow(const String& line,
                                          char* out, size_t outSize);
-static CLIModeInputResult dispatchMqtt(const String& line,
+static CliModeInputResult dispatchMqtt(const String& line,
                                        char* out, size_t outSize);
-static CLIModeInputResult dispatchWifi(const String& line,
+static CliModeInputResult dispatchWifi(const String& line,
                                        char* out, size_t outSize);
-static CLIModeInputResult dispatchModePage(const String& line,
+static CliModeInputResult dispatchModePage(const String& line,
                                            char* out, size_t outSize);
 
 // Tail-paint helper: after a state transition, render the prompt for the
@@ -341,7 +341,7 @@ static void appendPromptTo(char* out, size_t outSize) {
   }
 }
 
-static CLIModeInputResult wizardMode_onInput(const String& line, void* /*ud*/,
+static CliModeInputResult wizardMode_onInput(const String& line, void* /*ud*/,
                                              char* out, size_t outSize) {
   WizardRender render;
   if (out && outSize > 0) out[0] = '\0';
@@ -409,7 +409,7 @@ static CLIModeInputResult wizardMode_onInput(const String& line, void* /*ud*/,
 }
 
 // ---------- Shared settings group dispatch
-static CLIModeInputResult dispatchTopLevelPage(const String& line,
+static CliModeInputResult dispatchTopLevelPage(const String& line,
                                                char* out, size_t outSize) {
   String lc = line;
   lc.toLowerCase();
@@ -455,7 +455,7 @@ static CLIModeInputResult dispatchTopLevelPage(const String& line,
 }
 
 // ---------- Web / Bluetooth mode-picker page (one numbered choice) ----------
-static CLIModeInputResult dispatchModePage(const String& line,
+static CliModeInputResult dispatchModePage(const String& line,
                                            char* out, size_t outSize) {
   String lc = line; lc.toLowerCase(); lc.trim();
   const WizardModeMenu* m = wizardModeMenuForPage(getWizardCurrentPage());
@@ -494,7 +494,7 @@ static CLIModeInputResult dispatchModePage(const String& line,
 }
 
 // ---------- ESP-NOW identity sub-page (NAME -> ROOM -> ZONE -> STATIONARY)
-static CLIModeInputResult dispatchEspNow(const String& line,
+static CliModeInputResult dispatchEspNow(const String& line,
                                          char* out, size_t outSize) {
   String raw = line; raw.trim();
   String lc = raw; lc.toLowerCase();
@@ -614,7 +614,7 @@ static CLIModeInputResult dispatchEspNow(const String& line,
 }
 
 // ---------- MQTT broker sub-page (HOST -> PORT -> USER -> PASS)
-static CLIModeInputResult dispatchMqtt(const String& line,
+static CliModeInputResult dispatchMqtt(const String& line,
                                        char* out, size_t outSize) {
   String raw = line; raw.trim();
   String lc = raw; lc.toLowerCase();
@@ -715,7 +715,7 @@ static CLIModeInputResult dispatchMqtt(const String& line,
 }
 
 // ---------- WiFi credentials sub-page (SSID -> PASSWORD)
-static CLIModeInputResult dispatchWifi(const String& line,
+static CliModeInputResult dispatchWifi(const String& line,
                                        char* out, size_t outSize) {
   String raw = line; raw.trim();
   String lc = raw; lc.toLowerCase();
@@ -812,7 +812,7 @@ static CLIModeInputResult dispatchWifi(const String& line,
 
 static void wizardMode_onEnter(void* /*ud*/) {
   WizardRender render;
-  // CLIMode owns inactivity/session expiry; reset the blocking input escape.
+  // CliMode owns inactivity/session expiry; reset the blocking input escape.
   setSerialWaitTimeout(0);
   // Reset the wizard's state (existing initSetupWizard rebuilds the
   // features list etc.).
@@ -948,7 +948,7 @@ static void wizardMode_onTick(void* /*ud*/) {
 #endif  // ENABLE_OLED_DISPLAY
 }
 
-static const CLIMode kWizardMode = {
+static const CliMode kWizardMode = {
   "wizard",
   wizardMode_onEnter,
   wizardMode_onInput,

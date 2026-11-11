@@ -35,7 +35,7 @@ static String   sLastResult      = "";
 static TransportSessionEpoch sResultEpoch = kNoTransportSessionEpoch;
 static TransportSessionEpoch sInputEpoch = kNoTransportSessionEpoch;
 
-void resetCLIInputState();
+void resetCliInputState();
 
 enum class OledCliNativeTransition : uint8_t {
   None,
@@ -75,7 +75,7 @@ static void startInputKeyboard() {
 // user always gets visible pass/fail feedback without leaving this page. The
 // keyboard is inactive here, so the system draws the header ("CLI Input") and
 // the footer ("A:New B:Back", from the mode's registered hints).
-static void displayCLIResult() {
+static void displayCliResult() {
   int y = OLED_CONTENT_START_Y;
 
   // Echoed command for context (truncated to one line).
@@ -116,7 +116,7 @@ static void displayCLIResult() {
   }
 }
 
-static void displayCLIInput() {
+static void displayCliInput() {
   if (!oledDisplay) return;
 
   // After a command runs, show the result screen until the user dismisses it.
@@ -126,9 +126,9 @@ static void displayCLIInput() {
     // framebuffer commit fence prevents these pixels reaching its successor.
     if (transportSessionEpochIsLive(
             SOURCE_LOCAL_DISPLAY, sResultEpoch)) {
-      displayCLIResult();
+      displayCliResult();
     } else {
-      resetCLIInputState();
+      resetCliInputState();
     }
     return;
   }
@@ -152,7 +152,7 @@ static void displayCLIInput() {
 // Input
 // ============================================================================
 
-static bool handleCLIInputInput(int deltaX, int deltaY, uint32_t newlyPressed) {
+static bool handleCliInputInput(int deltaX, int deltaY, uint32_t newlyPressed) {
   if (oledGuestBlocksMutate()) return true;
   // Result screen: A/X/START runs another command; B falls through to the
   // global handler, which turns it into oledMenuBack().
@@ -162,7 +162,7 @@ static bool handleCLIInputInput(int deltaX, int deltaY, uint32_t newlyPressed) {
         INPUT_CHECK(newlyPressed, INPUT_BUTTON_START)) {
       if (!transportSessionEpochIsLive(
               SOURCE_LOCAL_DISPLAY, sResultEpoch)) {
-        resetCLIInputState();
+        resetCliInputState();
         return true;
       }
       sShowingResult = false;
@@ -179,7 +179,7 @@ static bool handleCLIInputInput(int deltaX, int deltaY, uint32_t newlyPressed) {
     if (sessionEpoch == kNoTransportSessionEpoch ||
         !transportSessionEpochIsLive(
             SOURCE_LOCAL_DISPLAY, sessionEpoch)) {
-      resetCLIInputState();
+      resetCliInputState();
       return true;
     }
 
@@ -245,7 +245,7 @@ static bool handleCLIInputInput(int deltaX, int deltaY, uint32_t newlyPressed) {
             SOURCE_LOCAL_DISPLAY, sessionEpoch)) {
       volatile char* wipe = reinterpret_cast<volatile char*>(out);
       for (size_t i = 0; i < sizeof(out); ++i) wipe[i] = '\0';
-      resetCLIInputState();
+      resetCliInputState();
       return true;
     }
 
@@ -273,7 +273,7 @@ static bool handleCLIInputInput(int deltaX, int deltaY, uint32_t newlyPressed) {
   if (oledKeyboardIsCancelled()) {
     if (!transportSessionEpochIsLive(
             SOURCE_LOCAL_DISPLAY, sInputEpoch)) {
-      resetCLIInputState();
+      resetCliInputState();
       return true;
     }
     oledKeyboardReset();
@@ -291,7 +291,7 @@ static bool handleCLIInputInput(int deltaX, int deltaY, uint32_t newlyPressed) {
 // Availability
 // ============================================================================
 
-static bool isCLIInputAvailable(String* outReason) {
+static bool isCliInputAvailable(String* outReason) {
   if (!isTransportAuthenticated(SOURCE_LOCAL_DISPLAY)) {
     if (outReason) *outReason = "Login required";
     return false;
@@ -303,7 +303,7 @@ static bool isCLIInputAvailable(String* outReason) {
 // Mode entry reset
 // ============================================================================
 
-void resetCLIInputState() {
+void resetCliInputState() {
   if (sKeyboardActive) {
     oledKeyboardReset();
     sKeyboardActive = false;
@@ -317,8 +317,8 @@ void resetCLIInputState() {
   sPreSubmitCount = 0;
 }
 
-void oledCLIInputResetSessionState() {
-  resetCLIInputState();
+void oledCliInputResetSessionState() {
+  resetCliInputState();
 }
 
 // ============================================================================
@@ -328,25 +328,25 @@ void oledCLIInputResetSessionState() {
 // Entry hook (was an inline reset inside requestOledMode): clear the input
 // buffer on every entry, forward or back.
 static void cliInputOnEnter(bool /*isForward*/) {
-  resetCLIInputState();
+  resetCliInputState();
 }
 
-static const OledModeEntry sCLIInputMode = {
+static const OledModeEntry sCliInputMode = {
   OLED_CLI_INPUT,
   "CLI Input",
   "terminal",
-  displayCLIInput,
-  isCLIInputAvailable,
-  handleCLIInputInput,
+  displayCliInput,
+  isCliInputAvailable,
+  handleCliInputInput,
   true,
   93,   // Just after CLI Output (92)
   "A:New B:Back",   // shown on the result screen (keyboard supplies its own hints)
   cliInputOnEnter
 };
 
-REGISTER_OLED_MODE_MODULE(&sCLIInputMode, 1, "CLIInput");
+REGISTER_OLED_MODE_MODULE(&sCliInputMode, 1, "CLIInput");
 
 // Force linker to include this file - called from OLED_Utils.cpp
-void oledCLIInputModeInit() {}
+void oledCliInputModeInit() {}
 
 #endif // ENABLE_OLED_DISPLAY

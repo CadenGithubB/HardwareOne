@@ -138,9 +138,9 @@ static void* ps_alloc(size_t size, AllocPref, const char*) { return std::calloc(
 static char gDebugBuffer[1024];
 static bool ensureDebugBuffer() { return true; }
 static char* getDebugBuffer() { return gDebugBuffer; }
-static bool gCLIValidateOnly = false;
+static bool gCliValidateOnly = false;
 #define RETURN_VALID_IF_VALIDATE_CSTR() \
-  do { if (::gCLIValidateOnly) return "VALID"; } while (0)
+  do { if (::gCliValidateOnly) return "VALID"; } while (0)
 
 static struct Settings {
   int bleMode = BLE_MODE_SERVER;
@@ -1436,9 +1436,9 @@ int main() {
          "blemode query for the glasses without the pipe changed");
 #endif
   EXPECT(boundary.settingWrites == 0 && roleDepth == 0, "the blemode query changed state");
-  gCLIValidateOnly = true;
+  gCliValidateOnly = true;
   EXPECT(same(cmd_blemode("phone"), "VALID"), "validate-only blemode ran the handler");
-  gCLIValidateOnly = false;
+  gCliValidateOnly = false;
 #if ENABLE_BLE_PHONE_PIPE
   clientHostCases();
   pipeHolderCases();

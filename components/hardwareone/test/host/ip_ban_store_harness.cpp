@@ -106,10 +106,10 @@ class WebSessionFenceGuard {
 static unsigned revokedUnfenced = 0;
 
 // Command-layer doubles for the ban/unban adapters (System_User.cpp).
-static bool gCLIValidateOnly = false;
+static bool gCliValidateOnly = false;
 #define RETURN_VALID_IF_VALIDATE_CSTR() \
   do { \
-    if (::gCLIValidateOnly) return "VALID"; \
+    if (::gCliValidateOnly) return "VALID"; \
   } while (0)
 
 // INSERT_FS_GUARD

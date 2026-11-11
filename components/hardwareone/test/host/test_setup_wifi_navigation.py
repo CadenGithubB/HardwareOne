@@ -30,7 +30,7 @@ def generate() -> str:
         extract_block(mode, "enum class WizardSubMode") + ";",
         extract_block(mode, "static struct") + " sWizard;",
         extract_block(mode, "struct WizardRender") + ";",
-        extract_block((COMPONENT / "System_CLIMode.h").read_text(), "enum CLIModeInputResult") + ";",
+        extract_block((COMPONENT / "System_CLIMode.h").read_text(), "enum CliModeInputResult") + ";",
     ])
     functions = "\n\n".join([
         extract_block(setup, "bool wizardHandleCancelInput("),
@@ -39,9 +39,9 @@ def generate() -> str:
         extract_block(setup, "static void handleSerialWifiPage("),
         extract_block(oled, "bool renderWifiPage("),
         extract_block(mode, "static WizardSubMode subModeForPage("),
-        extract_block(mode[mode.rindex("static CLIModeInputResult dispatchWifi("):],
-                      "static CLIModeInputResult dispatchWifi("),
-        extract_block(mode, "static CLIModeInputResult wizardMode_onInput("),
+        extract_block(mode[mode.rindex("static CliModeInputResult dispatchWifi("):],
+                      "static CliModeInputResult dispatchWifi("),
+        extract_block(mode, "static CliModeInputResult wizardMode_onInput("),
     ])
     # This existing String shim contains no setup policy.
     string = extract_block((HERE / "setup_mqtt_application_harness.cpp").read_text(), "class String") + ";"

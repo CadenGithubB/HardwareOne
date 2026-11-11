@@ -97,7 +97,7 @@ static void clearWizardWifiChoices() { ++clearCalls; }
 static char* getWizardDeviceNameBuf() { return deviceName; }
 static bool writeSettingsJson() { ++saveCalls; return true; }
 static bool startMqtt() { ++startCalls; return true; }
-static CLIModeInputResult unrelatedPage(const String&, char*, size_t) {
+static CliModeInputResult unrelatedPage(const String&, char*, size_t) {
   assert(false && "test unexpectedly left MQTT input routing");
   return CLI_MODE_HANDLED;
 }
@@ -128,7 +128,7 @@ static void broker(const char* host = "old.host", int port = 8883,
   assert(gSettings.mqttUser == user && gSettings.mqttPassword == password);
   assert(gSettings.mqttEnabled && saveCalls == 0 && startCalls == 0);
 }
-static CLIModeInputResult cli(const char* line) {
+static CliModeInputResult cli(const char* line) {
   char output[128] = {};
   return wizardMode_onInput(line, nullptr, output, sizeof(output));
 }

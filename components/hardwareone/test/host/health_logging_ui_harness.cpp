@@ -218,7 +218,7 @@ static bool g2RingSetLowPowerDesired(G2RingDesiredState d) {
 }
 
 // Command-layer doubles for the ring/health command handlers.
-static bool gCLIValidateOnly;
+static bool gCliValidateOnly;
 static AuthContext execIdentity;  // identity installed for the running command
 // Read by the 0.99.97.4-era in-handler force-history check only.
 [[maybe_unused]] static bool currentExecIsAdmin() { return isAdminUser(execIdentity.user); }
@@ -343,8 +343,8 @@ static bool registryExecute(const AuthContext& who, const String& lineIn, String
   std::string result = entry->handler(String(matched < line.size() ? line.substr(matched + 1) : ""));
   execIdentity = AuthContext{};
   const bool ok = result.rfind("Error", 0) != 0;
-  if (!gCLIValidateOnly) audit.push_back({actor, line, ok});
-  if (ok && !gCLIValidateOnly && result.rfind("SUCCESS", 0) != 0 && result.rfind("OK", 0) != 0)
+  if (!gCliValidateOnly) audit.push_back({actor, line, ok});
+  if (ok && !gCliValidateOnly && result.rfind("SUCCESS", 0) != 0 && result.rfind("OK", 0) != 0)
     result = "OK: " + result;
   out = result;
   return ok;
@@ -511,9 +511,9 @@ int main() {
   CHECK(oledRequests.back() == "ring control lowpower on" && lastOledResult == refusal);
   String out;
   CHECK(!registryExecute(serial, "ring control collection on", out) && out == refusal);
-  gCLIValidateOnly = true;  // the validate pass is refused at the same row
+  gCliValidateOnly = true;  // the validate pass is refused at the same row
   CHECK(!registryExecute(serial, "ring control lowpower on", out) && out == refusal);
-  gCLIValidateOnly = false;
+  gCliValidateOnly = false;
   CHECK((deniedCommands == std::vector<std::string>{
       "alice@web ring control collection on", "alice@web ring control lowpower off",
       "bob@display ring control collection on", "bob@display ring control lowpower on",
@@ -535,9 +535,9 @@ int main() {
   CHECK(oledRequests.back() == "ring history force" && lastOledResult == forceRefusal);
   CHECK(sHealthDeniedUntilMs != 0);
   CHECK(!registryExecute(serial, "ring history force", out) && out == forceRefusal);
-  gCLIValidateOnly = true;  // the validate pass is refused at the same row
+  gCliValidateOnly = true;  // the validate pass is refused at the same row
   CHECK(!registryExecute(serial, "ring history force", out) && out == forceRefusal);
-  gCLIValidateOnly = false;
+  gCliValidateOnly = false;
   CHECK(ringChanges.empty() && audit.empty());
   CHECK(deniedCommands.size() == 10 &&
         deniedCommands[6] == "alice@web ring history force" &&
@@ -584,9 +584,9 @@ int main() {
   CHECK(!registryExecute(serial, "ring control collection", out) && out.startsWith("Error: invalid arguments"));
   CHECK(!registryExecute(serial, "ring control collection on extra", out) && out.startsWith("Error: invalid arguments"));
   CHECK(ringChanges.empty() && audit.size() == 4);
-  gCLIValidateOnly = true;
+  gCliValidateOnly = true;
   CHECK(registryExecute(serial, "ring control collection on", out) && out == "VALID" && ringChanges.empty());
-  gCLIValidateOnly = false;
+  gCliValidateOnly = false;
 
   // Admin: every transport's change reaches the owner and is audited.
   audit.clear();

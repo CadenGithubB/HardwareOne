@@ -173,8 +173,8 @@ static unsigned armQueries=0;
 static bool g2BothConnected(){++armQueries;return false;}
 // The `phone` command surface (start/stop are not under test here). The
 // validate pass returns before any handler acts, as RETURN_VALID_IF_VALIDATE_CSTR does.
-static bool gCLIValidateOnly=false;
-#define RETURN_VALID_IF_VALIDATE_CSTR() do{if(::gCLIValidateOnly)return "VALID";}while(0)
+static bool gCliValidateOnly=false;
+#define RETURN_VALID_IF_VALIDATE_CSTR() do{if(::gCliValidateOnly)return "VALID";}while(0)
 struct Settings{int bleMode=0;bool bleEnabled=true;String phonePipeSecret;};static Settings gSettings;constexpr int BLE_MODE_PHONE_CLIENT=3;
 template<class T,class V> static void setSetting(T& field,V value){field=value;}
 enum class BleRoleTransition:uint8_t{PHONE_START,PHONE_STOP};
@@ -1323,11 +1323,11 @@ static void admissionTests() {
   assert(manualLearns==1&&intent==authorityIntent&&enrollmentEpoch==5&&jobAt==clockMs&&!atClaim.job);}
  // The validate pass (automation checks) answers VALID before any handler
  // acts, and never starts a stopped link.
- {reset();active=false;gCLIValidateOnly=true;
+ {reset();active=false;gCliValidateOnly=true;
   for(auto* handler:{phonePairCommand,cmd_openphone,phoneForgetCommand,cmd_closephone})
    assert(!std::strcmp(handler(""),"VALID"));
   assert(!std::strcmp(phoneScanCommand("legacy"),"VALID")&&hw1scan::same(scanProfile,hw1scan::kDefault));
-  gCLIValidateOnly=false;assert(!job&&!enrolling&&!claimCalls&&!manualLearns&&!userDisconnects&&!pipeStarts&&step==Step::Idle);}
+  gCliValidateOnly=false;assert(!job&&!enrolling&&!claimCalls&&!manualLearns&&!userDisconnects&&!pipeStarts&&step==Step::Idle);}
  // The row wrappers take the local-admin rule from the caller's identity.
  {reset();authContext.transport=SOURCE_WEB;
   assert(!std::strcmp(phonePairCommand(""),"Error: phone pairing requires an authenticated local admin"));
@@ -2034,7 +2034,7 @@ static void v2Tests() {
   tickFlush(clockMs+=10);PhonePipeLinkSummary sum;mutex=&handle;assert(phonePipeLinkSummary(&sum));mutex=nullptr;
   assert(sum.versionLatched && sum.strikes==3 && sum.versionMismatches==3 && !sum.ended);
   // The validate pass lifts nothing.
-  gCLIValidateOnly=true;assert(!std::strcmp(cmd_openphone(""),"VALID") && versionLatched);gCLIValidateOnly=false;
+  gCliValidateOnly=true;assert(!std::strcmp(cmd_openphone(""),"VALID") && versionLatched);gCliValidateOnly=false;
   // `openphone` lifts it and connects now (its own job: no reseek).
   assert(!std::strcmp(cmd_openphone(""),"Phone: open; connecting to the paired phone"));
   assert(!versionLatched && versionStrikes==0 && pipeAdmissionEnabled && job && reseeks==0);}
@@ -2111,7 +2111,7 @@ static void pairNewTests() {
  // step, no link start, no window, no sink, the version hold as it was.
  struct Refusal{const char* reply;const char* args;std::function<void()> arrange;};
  const Refusal refusals[]={
-  {"VALID","",[]{gCLIValidateOnly=true;}},
+  {"VALID","",[]{gCliValidateOnly=true;}},
   {"Error: invalid arguments — Usage: phone pair new","now",[]{}},
   {"Error: phone pair new requires an authenticated local admin on serial or the OLED","",[]{execAdmin=false;}},
   {"Error: phone pair new requires an authenticated local admin on serial or the OLED","",[]{authContext.transport=SOURCE_WEB;}},
@@ -2127,7 +2127,7 @@ static void pairNewTests() {
  for(const auto& r:refusals){
   pairNewReset();versionLatched=true;versionStrikes=3;r.arrange();
   const std::string reply=phonePairNewCommand(r.args);
-  gCLIValidateOnly=false;lockRefused=false;
+  gCliValidateOnly=false;lockRefused=false;
   assert(reply==r.reply);
   assert(!randomCalls && replaceCalls.empty() && serialWrites.empty() && !displayShows && !pipeStarts && !claimCalls);
   assert(pairState==PhonePairWindow::None && !phonePipeEnrolling() && versionLatched && versionStrikes==3);

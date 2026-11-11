@@ -156,10 +156,10 @@ static const CommandEntry kUserRequestEntry = {"userrequest", false, false};
 static const CommandEntry kLoginEntry = {"login", false, false};
 
 // Validate-only flag and reply buffer used by the command adapter.
-static bool gCLIValidateOnly = false;
+static bool gCliValidateOnly = false;
 #define RETURN_VALID_IF_VALIDATE_CSTR() \
   do { \
-    if (::gCLIValidateOnly) return "VALID"; \
+    if (::gCliValidateOnly) return "VALID"; \
   } while (0)
 static char debugBuffer[1024];
 static bool ensureDebugBuffer() { return true; }
@@ -224,7 +224,7 @@ static void reset() {
   ownerReply = AccountRequestResult::Submitted;
   failedLogins = 0;
   ipBanned = ipLocked = false;
-  gCLIValidateOnly = false;
+  gCliValidateOnly = false;
   deniedAudits = 0;
   deniedEvents = 0;
   mustChangeUser.clear();
@@ -444,7 +444,7 @@ static void mustChangeGatesCommandTransports() {
 // list read or write, no event.
 static void commandValidateOnlyHasNoEffect() {
   reset();
-  gCLIValidateOnly = true;
+  gCliValidateOnly = true;
   check(std::string(cmd_user_request("alice alice-secret1 alice-secret1")) == "VALID");
   check(std::string(cmd_user_request("alice \"two words\"")) == "VALID");
   check(ownerCalls.empty());

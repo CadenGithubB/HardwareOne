@@ -51,7 +51,7 @@ using namespace hw1http;
 #define EXT_RAM_BSS_ATTR
 #define LLM_DEFAULT_REP_WINDOW 32
 #define LLM_SETTING_MAX_CONTEXT 4096
-bool gCLIValidateOnly = false;
+bool gCliValidateOnly = false;
 // INSERT_VALIDATION
 std::vector<std::string> broadcasts, events;
 void logBroadcast(const char* format, ...) {
@@ -173,11 +173,11 @@ int main() {
   assert(gSettings.llmHttpToken == secret && publications == 1);
   assert(std::string(cmd_llm_httptoken(String(std::string(1025, 'a')))).find("Error:") == 0);
   assert(gSettings.llmHttpToken == secret && publications == 1);
-  gCLIValidateOnly = true;
+  gCliValidateOnly = true;
   cmd_llm_httptoken("replacement");
   cmd_llm_httptoken("-");
   assert(gSettings.llmHttpToken == secret && publications == 1 && persists == 1);
-  gCLIValidateOnly = false;
+  gCliValidateOnly = false;
   cmd_llm_httptoken("-");
   assert(gSettings.llmHttpToken.length() == 0 && publishedToken.empty());
   assert(events.size() == 2 && persists == 2 && publications == 2);

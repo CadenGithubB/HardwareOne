@@ -11,7 +11,7 @@
 // ============================================================================
 
 // CLI State enum - tracks current help/normal mode
-enum CLIState {
+enum CliState {
   CLI_NORMAL,
   CLI_HELP_MAIN,    // main help menu
   CLI_HELP_MODULE,  // any specific module or sensor help page
@@ -25,12 +25,12 @@ enum CLIState {
 };
 
 // Global CLI state variables
-extern CLIState gCLIState;
+extern CliState gCliState;
 extern bool gShowAllCommands;
 extern volatile bool gInHelpRender;
 
 // Exact-owner query used by HTTP response metadata. This deliberately exposes
-// only whether the named session owns help, not the generic CLIMode pointer or
+// only whether the named session owns help, not the generic CliMode pointer or
 // pagination state.
 bool cliHelpModeOwnedBySession(CommandSource source,
                                TransportSessionEpoch epoch);

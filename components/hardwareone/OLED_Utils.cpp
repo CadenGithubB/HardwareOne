@@ -3076,7 +3076,7 @@ void drawOledFooter() {
       {
         // Show selected/total in footer
         int lineCount = gOledConsole.getLineCount();
-        int selected = getCLIViewerSelectedIndex();
+        int selected = getCliViewerSelectedIndex();
         static char cliHints[32];
         snprintf(cliHints, sizeof(cliHints), "A:Info B:Back [%d/%d]", selected, lineCount);
         hints = cliHints;
@@ -3882,7 +3882,7 @@ void printRegisteredOledModes() {
 #if ENABLE_NEOPIXEL
   oledLedModeInit();   // keep OLED_Mode_LED.cpp from being GC'd
 #endif
-  oledCLIInputModeInit();
+  oledCliInputModeInit();
   oledMenuModeInit();   // keep OLED_Mode_Menu.cpp (Menu/Logo/Sensor-menu) from being GC'd
 #if ENABLE_BLUETOOTH
   oledBluetoothModeInit();   // keep OLED_Mode_Bluetooth.cpp from being GC'd
@@ -7006,7 +7006,7 @@ static void oledResetLocalDisplaySessionTransients() {
   // `active` flag cannot resurrect text after the new identity revisits it.
   oledAuthModeResetSessionState();
   oledChangePasswordModeResetSessionState();
-  oledCLIInputResetSessionState();
+  oledCliInputResetSessionState();
   oledSetPatternModeResetSessionState();
   oledNetworkModeResetSessionState();
   oledUserManagerModeResetSessionState();

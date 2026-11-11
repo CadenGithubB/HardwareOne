@@ -31,8 +31,8 @@ struct HostSettings { int logLevel = 2; } gSettings;
 bool requestDebugSettingsPersist() { events.push_back("persist"); return true; }
 // INSERT_SET_DEBUG_SETTING
 
-bool gCLIValidateOnly = false;
-#define RETURN_VALID_IF_VALIDATE_CSTR() do { if (::gCLIValidateOnly) return "VALID"; } while (0)
+bool gCliValidateOnly = false;
+#define RETURN_VALID_IF_VALIDATE_CSTR() do { if (::gCliValidateOnly) return "VALID"; } while (0)
 static bool bufferAvailable = true;
 static char* gDebugBuffer = nullptr;
 static bool ensureDebugBuffer() {
@@ -118,10 +118,10 @@ int main() {
   CHECK(std::string(run("debug")) == "Error: Debug buffer unavailable");
   CHECK(events.empty() && gSettings.logLevel == 2);
   bufferAvailable = true;
-  gCLIValidateOnly = true;
+  gCliValidateOnly = true;
   CHECK(std::string(run("debug")) == "VALID");
   CHECK(events.empty() && gSettings.logLevel == 2);
-  gCLIValidateOnly = false;
+  gCliValidateOnly = false;
 
   // Boot: the saved level is clamped into range, stored back without a
   // persistence request, and applied through the same owner.

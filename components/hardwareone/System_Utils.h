@@ -190,8 +190,8 @@ String redactOutputForLog(const String& output);
 // the command audit or a lens trace. redactCmdForAudit applies it to every line.
 String maskMacTokens(const String& text);
 
-// CLI validation macro - returns "VALID" early when gCLIValidateOnly is set.
-// gCLIValidateOnly mirrors the validateOnly flag of the command the executor
+// CLI validation macro - returns "VALID" early when gCliValidateOnly is set.
+// gCliValidateOnly mirrors the validateOnly flag of the command the executor
 // is running (written only by HardwareOne.cpp commandExecTask and the
 // early-boot path of submitAndExecuteSync); handlers run there, so it is
 // their own task's state. Code that can run on any task reads
@@ -199,10 +199,10 @@ String maskMacTokens(const String& text);
 // Keep the declaration at global namespace and qualify the reference: a
 // block-scope `extern` expanded inside an anonymous-namespace command handler
 // otherwise declares a different internal-linkage symbol and fails at link.
-extern bool gCLIValidateOnly;
+extern bool gCliValidateOnly;
 #define RETURN_VALID_IF_VALIDATE_CSTR() \
   do { \
-    if (::gCLIValidateOnly) return "VALID"; \
+    if (::gCliValidateOnly) return "VALID"; \
   } while(0)
 
 // Command arguments are parsed in one place each:

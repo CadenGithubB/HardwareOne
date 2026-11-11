@@ -9,11 +9,11 @@
 // ============================================================================
 //
 // Generalizes the "help mode" pattern that lives today in System_CLI.cpp
-// (gCLIState + handleHelpNavigation) so other interactive flows -- the
+// (gCliState + handleHelpNavigation) so other interactive flows -- the
 // first-time-setup / featuresetup wizards, confirm-this-destructive-command
 // prompts, paginated output viewers -- can use the same machinery.
 //
-// The core invariant a CLIMode preserves: each user input is processed by a
+// The core invariant a CliMode preserves: each user input is processed by a
 // SHORT, NON-BLOCKING handler call. State that needs to persist between
 // user inputs (current page, current selection, partially-entered fields)
 // lives in the mode's `userData` struct, not on a task's stack. The cmd_exec
@@ -36,7 +36,7 @@
 // ----------------------------------------------------------------------------
 // Lifecycle
 //
-//   const CLIMode helpMode = { ... };
+//   const CliMode helpMode = { ... };
 //   cliEnterMode(&helpMode);   // dispatcher now routes input through helpMode.onInput first
 //   ...user types things...
 //   cliExitMode();             // ends the mode; onExit fires
@@ -71,14 +71,14 @@
 //
 // ----------------------------------------------------------------------------
 
-enum CLIModeInputResult {
+enum CliModeInputResult {
   CLI_MODE_HANDLED               = 0,
   CLI_MODE_HANDLED_AND_EXIT      = 1,
   CLI_MODE_PASSTHROUGH           = 2,
   CLI_MODE_PASSTHROUGH_AND_EXIT  = 3,
 };
 
-struct CLIMode {
+struct CliMode {
   // Short human-readable identifier ("help", "wizard", "confirm").
   // Used in debug logs and could surface in a future "what mode am I in"
   // prompt prefix.
@@ -86,16 +86,16 @@ struct CLIMode {
 
   // Called once when this mode becomes active. Use this to render the
   // initial screen (broadcastOutput(...)), allocate state inside userData,
-  // set legacy globals like gCLIState if other code still reads them, etc.
+  // set legacy globals like gCliState if other code still reads them, etc.
   //
   // `userData` is the same pointer you passed to cliEnterMode (which was
-  // copied from the CLIMode struct itself).
+  // copied from the CliMode struct itself).
   void (*onEnter)(void* userData);
 
   // Called for each owning-session command line while this mode is active.
   // The slot remains reserved, but the global mode mutex is NOT held across
   // this callback, so filesystem/network work cannot invert lifecycle locks.
-  // See the CLIModeInputResult comments above for what to return.
+  // See the CliModeInputResult comments above for what to return.
   //
   // `line`   -- the raw command line as typed (with the command name still
   //             attached). Already trimmed; not lowercased.
@@ -103,7 +103,7 @@ struct CLIMode {
   //             the user. Mode should `snprintf` or `strncpy` into it. Leaving
   //             it empty is fine.
   // `outSize`-- capacity of out, including the null terminator.
-  CLIModeInputResult (*onInput)(const String& line, void* userData,
+  CliModeInputResult (*onInput)(const String& line, void* userData,
                                 char* out, size_t outSize);
 
   // Called when the mode is about to be deactivated (either voluntarily via
@@ -146,7 +146,7 @@ struct CLIMode {
 // caller-owned payload must become visible atomically. It runs only after the
 // exact owner was validated and the global slot was proven empty, while the
 // mode mutex is held. The hook must be short, cannot fail, and must not block.
-using CLIModeEntryCommit = void (*)(void* data);
+using CliModeEntryCommit = void (*)(void* data);
 
 // ----------------------------------------------------------------------------
 // Public API
@@ -156,12 +156,12 @@ using CLIModeEntryCommit = void (*)(void* data);
 // stateless/stale session or a MODE_INDEPENDENT machine invocation.
 //
 // The pointer must remain valid for the lifetime of the mode -- pass a
-// pointer to a file-static or globally-allocated CLIMode, not a stack
+// pointer to a file-static or globally-allocated CliMode, not a stack
 // instance.
-bool cliEnterMode(const CLIMode* mode);
+bool cliEnterMode(const CliMode* mode);
 
-bool cliEnterModePrepared(const CLIMode* mode,
-                          CLIModeEntryCommit commit,
+bool cliEnterModePrepared(const CliMode* mode,
+                          CliModeEntryCommit commit,
                           void* commitData);
 
 // Request deactivation only when the current command owns the mode. A
@@ -174,18 +174,18 @@ bool cliExitMode();
 bool cliInModeActive();
 
 // The currently-active mode (read-only), or nullptr if none.
-const CLIMode* cliCurrentMode();
+const CliMode* cliCurrentMode();
 
 // True only when the current queued command owns the active mode. `expected`
 // optionally narrows the check to one mode (e.g. help).
-bool cliModeCurrentCommandOwns(const CLIMode* expected = nullptr);
+bool cliModeCurrentCommandOwns(const CliMode* expected = nullptr);
 
 // Cross-task delivery check for the command submitter after cmd_exec returns.
 // Used to keep an interactive prompt's result off shared mirror/log lanes
 // while still returning it directly to the owning serial/web/OLED session.
 bool cliModeOwnedBySession(CommandSource source,
                            TransportSessionEpoch epoch,
-                           const CLIMode* expected = nullptr);
+                           const CliMode* expected = nullptr);
 
 // True when the current command is allowed to participate in an interactive
 // mode. Validation and MODE_INDEPENDENT machine contexts return false. Output

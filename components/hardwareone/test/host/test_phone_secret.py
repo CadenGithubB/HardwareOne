@@ -55,13 +55,13 @@ static bool phonePipeInvalidateSecret(){++invalidations;if(!roleDepth)++outsideR
 static bool blePeerClearPhonePipeEnrollment(){++clears;return enrollOk;}
 static unsigned persists=0;
 static bool requestSettingsPersist(){++persists;return persistOk;}
-static bool gCLIValidateOnly=false;
-#define RETURN_VALID_IF_VALIDATE_CSTR() do{if(::gCLIValidateOnly)return "VALID";}while(0)
+static bool gCliValidateOnly=false;
+#define RETURN_VALID_IF_VALIDATE_CSTR() do{if(::gCliValidateOnly)return "VALID";}while(0)
 // PRODUCTION
 int main(){
   const String secret("SyntheticPipe!123LongEnoughToRequireAnAllocation");
   // The validate pass (automation checks) never stops the pipe or stores the secret.
-  gCLIValidateOnly=true;assert(!strcmp(phoneSecretCommand(secret),"VALID")&&!stops&&!saves&&!gSettings.phonePipeSecret.length());gCLIValidateOnly=false;
+  gCliValidateOnly=true;assert(!strcmp(phoneSecretCommand(secret),"VALID")&&!stops&&!saves&&!gSettings.phonePipeSecret.length());gCliValidateOnly=false;
   for(int source:{SOURCE_BLUETOOTH,SOURCE_G2_GLASSES}){auth.transport=source;assert(strstr(phoneSecretCommand(secret),"Error:"));assert(!stops&&!saves);}
   auth.transport=SOURCE_SERIAL;assert(!strcmp(phoneSecretCommand("weak"),"Error: pipe passphrase must be at least 10 characters"));assert(!stops);
   assert(!strncmp(phoneSecretCommand("synthetic!pipe123"),"Error: ",7));assert(!stops);

@@ -72,7 +72,7 @@ static String getOledTextInput(const char*, bool masked, const char*, int, bool*
   *cancelled = passwordBack || cancelRequested;
   passwordBack = false; return value;
 }
-static CLIModeInputResult unexpectedDispatch(const String&, char*, size_t) {
+static CliModeInputResult unexpectedDispatch(const String&, char*, size_t) {
   assert(false && "unexpected non-WiFi input"); return CLI_MODE_HANDLED;
 }
 static auto dispatchTopLevelPage = unexpectedDispatch;
@@ -102,10 +102,10 @@ static void advanced(const SetupWizardResult& result) {
 static void preserved(const SetupWizardResult& result) {
   check(result.wifiConfigured && result.wifiSSID == "old-network" && result.wifiPassword == "old-secret");
 }
-static CLIModeInputResult cli(const char* line) {
+static CliModeInputResult cli(const char* line) {
   char response[160]{};
   const int ambientBefore = ambientOutput;
-  const CLIModeInputResult result = wizardMode_onInput(line, nullptr, response, sizeof(response));
+  const CliModeInputResult result = wizardMode_onInput(line, nullptr, response, sizeof(response));
   // Every line the mode printed was an explicit render (K4); the marker is restored.
   check(ambientOutput == ambientBefore && !gInHelpRender);
   return result;

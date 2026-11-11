@@ -71,7 +71,7 @@ class String {
 // The production argument parser, quoted-token rule and validate-only macro,
 // so the imagedelete command runs unchanged.
 // INSERT_COMMAND_PARSER
-bool gCLIValidateOnly = false;
+bool gCliValidateOnly = false;
 
 using TickType_t = uint32_t;
 using SemaphoreHandle_t = int*;
@@ -378,9 +378,9 @@ static void commandPath() {
   // The command stays a parser: quoting, argument count and validate-only are unchanged.
   check(std::strncmp(cmd_imagedelete("/photos/b.jpg"), "Error: name must be in quotes", 29) == 0, "unquoted path is refused by the parser");
   check(std::strncmp(cmd_imagedelete("\"/photos/b.jpg\" extra"), "Error: unexpected argument", 26) == 0, "extra argument is refused by the parser");
-  gCLIValidateOnly = true;
+  gCliValidateOnly = true;
   check(std::strcmp(cmd_imagedelete("\"/photos/b.jpg\""), "VALID") == 0, "validate-only returns VALID");
-  gCLIValidateOnly = false;
+  gCliValidateOnly = false;
   check(accesses.empty() && nodes.count("/photos/b.jpg"), "parser refusals and validate-only touch no file"); balanced();
 }
 static void listLock() {

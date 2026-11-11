@@ -1173,7 +1173,7 @@ static bool sRestoreUsedHttps = false;
 // What would break it: stopRestoreOnlyHttpServer() checks `if (server)` — "is
 // *a* server running" — not "is *my* server running". It cannot distinguish its
 // own instance from the user's. So if first-time setup ever stops blocking boot
-// (i.e. the async CLIMode migration considered and rejected in
+// (i.e. the async CliMode migration considered and rejected in
 // docs/FTS_WIZARD_OUTPUT_PLAN.md §4 row 6), or if this is ever invoked after the
 // real server is up, the Import "go back" path would stop and NULL the user's
 // live web server.

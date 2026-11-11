@@ -985,7 +985,7 @@ static const char* cmd_featuresetup(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   (void)argsInput;
 
-  // Phase 5: the wizard now runs as a CLIMode state machine. Each user
+  // Phase 5: the wizard now runs as a CliMode state machine. Each user
   // input is one short handler call that mutates persistent state and
   // returns; cmd_exec is free between keystrokes. The transport guard
   // and blocking-read timeout from the prior implementation are replaced by

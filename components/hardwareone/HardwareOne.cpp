@@ -166,7 +166,7 @@ bool gamepadInit();
 // by commandExecTask below (and the early-boot path of submitAndExecuteSync),
 // read by handlers through RETURN_VALID_IF_VALIDATE_CSTR, which run there.
 // Code that can run on any task reads currentCommandValidateOnly() instead.
-bool gCLIValidateOnly = false;
+bool gCliValidateOnly = false;
 
 // Forward declarations for debug output sink used in macros
 void broadcastOutput(const String& s);
@@ -338,9 +338,9 @@ volatile unsigned long gWebMirrorSeq = 0;
 #include "System_MemDiag.h"
 Settings gSettings;
 
-String gSerialCLI = "";
-static bool gSerialCLIOverflow = false;  // the line being assembled exceeded CMD_INPUT_MAX; discarded whole at newline
-static TransportSessionEpoch gSerialCLIEpoch = 0;
+String gSerialCli = "";
+static bool gSerialCliOverflow = false;  // the line being assembled exceeded CMD_INPUT_MAX; discarded whole at newline
+static TransportSessionEpoch gSerialCliEpoch = 0;
 
 
 extern "C" void __attribute__((weak)) memAllocDebug(const char* op, void* ptr, size_t size,
@@ -566,8 +566,8 @@ static void commandExecTask(void* pv) {
       // The per-task context carries validateOnly for broadcastOutput and the
       // audit (currentCommandValidateOnly); the global mirror is for handlers.
       setCurrentCommandContext(&r->ctx);
-      bool prevValidate = gCLIValidateOnly;
-      gCLIValidateOnly = r->ctx.validateOnly;
+      bool prevValidate = gCliValidateOnly;
+      gCliValidateOnly = r->ctx.validateOnly;
 
       // Set up output capture if requested (for HTTP responses that need
       // the actual broadcast output, not just the return code).
@@ -617,7 +617,7 @@ static void commandExecTask(void* pv) {
         free(captureBuf);
       }
 
-      gCLIValidateOnly = prevValidate;
+      gCliValidateOnly = prevValidate;
       clearCurrentCommandContext();
       (void)cliModeExecutorDrainPending();
       DEBUG_CMD_FLOWF("[cmd_exec] done ok=%d out_len=%zu heap=%lu",
@@ -1514,7 +1514,7 @@ void hardwareone_setup() {
   Serial.setRxBufferSize(CMD_RESULT_MAX);
   Serial.setTxBufferSize(CMD_RESULT_MAX);
   Serial.begin(115200);
-  gSerialCLI.reserve(CMD_INPUT_MAX + 1);  // one allocation for the longest accepted line
+  gSerialCli.reserve(CMD_INPUT_MAX + 1);  // one allocation for the longest accepted line
   delay(500);  // Longer delay for serial connection
 
   // Filesystem and settings code below already uses FsLockGuard. Create the
@@ -2720,7 +2720,7 @@ void hardwareone_loop() {
   // recording.
   powerPolicyTick();
 
-  // Periodic tick for an active CLIMode (no-op when no mode is active or
+  // Periodic tick for an active CliMode (no-op when no mode is active or
   // when the mode doesn't define onTick). Used by the Phase 5 wizard's
   // future OLED-joystick polling; help and confirm modes don't define
   // onTick so this is a branch-and-return for them.
@@ -2748,32 +2748,32 @@ void hardwareone_loop() {
     if (c == '\r') continue;
     const TransportSessionEpoch liveSerialInputEpoch =
         serialTransportInputEpoch();
-    if (gSerialCLIEpoch != 0 &&
-        gSerialCLIEpoch != liveSerialInputEpoch) {
+    if (gSerialCliEpoch != 0 &&
+        gSerialCliEpoch != liveSerialInputEpoch) {
       // A remote login/logout replaced the identity while this line was only
       // partially typed. Drop it instead of completing it as the successor.
-      gSerialCLI = "";
-      gSerialCLIEpoch = 0;
+      gSerialCli = "";
+      gSerialCliEpoch = 0;
     }
     if (c == '\n') {
-      if (gSerialCLIOverflow) {
+      if (gSerialCliOverflow) {
         // Over-limit lines are rejected whole, never run as a prefix (the
         // UART host link applies the same rule).
-        gSerialCLIOverflow = false;
-        gSerialCLI = "";
-        gSerialCLIEpoch = 0;
+        gSerialCliOverflow = false;
+        gSerialCli = "";
+        gSerialCliEpoch = 0;
         Serial.printf("Serial - line too long (limit %u bytes), discarded\n", (unsigned)CMD_INPUT_MAX);
         Serial.print("$ ");
         break;
       }
-      if (gSerialCLIEpoch == 0 ||
-          gSerialCLIEpoch != liveSerialInputEpoch) {
-        gSerialCLI = "";
-        gSerialCLIEpoch = 0;
+      if (gSerialCliEpoch == 0 ||
+          gSerialCliEpoch != liveSerialInputEpoch) {
+        gSerialCli = "";
+        gSerialCliEpoch = 0;
         continue;
       }
-      const TransportSessionEpoch admittedSerialEpoch = gSerialCLIEpoch;
-      String cmd = gSerialCLI;
+      const TransportSessionEpoch admittedSerialEpoch = gSerialCliEpoch;
+      String cmd = gSerialCli;
       cmd.trim();
       String admittedSerialUser;
       bool admittedSerialAuthed = false;
@@ -2782,8 +2782,8 @@ void hardwareone_loop() {
           admittedSerialEpoch) {
         // The identity changed after newline admission but before parsing.
         // Treat the whole line as belonging to the old incarnation.
-        gSerialCLI = "";
-        gSerialCLIEpoch = 0;
+        gSerialCli = "";
+        gSerialCliEpoch = 0;
         continue;
       }
 
@@ -2800,8 +2800,8 @@ void hardwareone_loop() {
           Serial.println(
               "[serial] Signed out due to inactivity. Please log in again.");
         }
-        gSerialCLI = "";
-        gSerialCLIEpoch = 0;
+        gSerialCli = "";
+        gSerialCliEpoch = 0;
         Serial.print("$ ");
         break;
       }
@@ -2970,14 +2970,14 @@ void hardwareone_loop() {
         gSerialLastInteractionMs.store(sessionStampNow(),
                                        std::memory_order_release);
 
-      gSerialCLI = "";
-      gSerialCLIEpoch = 0;
+      gSerialCli = "";
+      gSerialCliEpoch = 0;
       Serial.print("$ ");
       break;  // Process at most one command per loop() iteration to avoid starving WDT
     } else {
-      if (gSerialCLIEpoch == 0) gSerialCLIEpoch = liveSerialInputEpoch;
-      if (gSerialCLI.length() < CMD_INPUT_MAX) gSerialCLI += c;
-      else gSerialCLIOverflow = true;
+      if (gSerialCliEpoch == 0) gSerialCliEpoch = liveSerialInputEpoch;
+      if (gSerialCli.length() < CMD_INPUT_MAX) gSerialCli += c;
+      else gSerialCliOverflow = true;
     }
   }
 

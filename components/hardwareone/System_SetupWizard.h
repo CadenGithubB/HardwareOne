@@ -254,7 +254,7 @@ extern volatile bool gWizardOwnsSerial;
 // Render the standard "SETUP n/N: <page>" banner + entries + nav hint
 // for the current page via broadcastOutput. Defined in
 // System_SetupWizard.cpp; consumed by the legacy runSetupWizard loop
-// AND the new CLIMode-based wizard (System_SetupWizardMode.cpp) so they
+// AND the new CliMode-based wizard (System_SetupWizardMode.cpp) so they
 // share identical paint output.
 void printSerialPageStatus();
 

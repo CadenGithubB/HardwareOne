@@ -15,7 +15,7 @@
 
 void webBatchTestStringAppend() {}
 #define EXT_RAM_BSS_ATTR
-bool gCLIValidateOnly = false;
+bool gCliValidateOnly = false;
 
 // INSERT_TYPES
 
@@ -139,7 +139,7 @@ static void reset(uint8_t mask = LOG_TOF, SensorLogFormat format = SENSOR_LOG_TE
   gSettings.healthLoggingEnabled = false;
   gSettings.sensorLogAutoStart = false;
   gSettings.sensorLogPath = "/logs/old.txt";
-  gCLIValidateOnly = false;
+  gCliValidateOnly = false;
   lookupAvailable = bufferAvailable = true;
   persistCalls = disableCalls = 0;
   changedFields.clear();
@@ -222,7 +222,7 @@ static void queriesAndErrors() {
     const auto command = mask ? cmd_sensorlogmask : cmd_sensorlogformat;
     check(std::string(command("2")) == "Error: setting not found for this command", "missing entry not reported");
     noEffects(LOG_TOF, LOG_TOF, SENSOR_LOG_TEXT, SENSOR_LOG_TEXT, false);
-    gCLIValidateOnly = true;
+    gCliValidateOnly = true;
     check(std::string(command("nonsense")) == "VALID", "validation no longer short circuits");
     noEffects(LOG_TOF, LOG_TOF, SENSOR_LOG_TEXT, SENSOR_LOG_TEXT, false);
   }

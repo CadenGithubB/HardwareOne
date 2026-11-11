@@ -88,7 +88,7 @@ static uint32_t publishedOwnerStack() { return sRingOwnerStackFreeMin.load(); }
   check(((mux) == &gRingConnectMux || (mux) == &sRingIdentityMux) && criticalDepth == 1, "reader releases critical section"); \
   --criticalDepth; \
 } while (0)
-bool gCLIValidateOnly = false;
+bool gCliValidateOnly = false;
 
 // INSERT_PRODUCTION
 
@@ -173,12 +173,12 @@ static void characterize() {
   gRingDeviceName = std::string("R1\0hidden", 9); syncIdentity(); emit("ESCAPE");
   populate();
   const unsigned beforeStack = stackCalls, beforeTime = timeCalls, beforeCritical = criticalCalls;
-  allocator.reset(); gCLIValidateOnly = true;
+  allocator.reset(); gCliValidateOnly = true;
   check(std::strcmp(cmd_ringstatus("json"), "VALID") == 0 &&
         std::strcmp(cmd_ringstatus(""), "VALID") == 0, "validation-only returns original response");
   check(stackCalls == beforeStack && timeCalls == beforeTime && criticalCalls == beforeCritical &&
         allocator.calls == 0, "validation returns before sampling or allocations");
-  gCLIValidateOnly = false;
+  gCliValidateOnly = false;
 }
 
 #if !TEST_BASELINE

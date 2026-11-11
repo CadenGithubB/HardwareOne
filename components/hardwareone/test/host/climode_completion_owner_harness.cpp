@@ -66,7 +66,7 @@ static void closeOwner() {
   liveSessions.erase(std::remove(liveSessions.begin(), liveSessions.end(), owner), liveSessions.end());
 }
 static void onEnter(void*) { assert(!cliModeExitCanComplete()); }
-static CLIModeInputResult onInput(const String&, void*, char*, size_t) {
+static CliModeInputResult onInput(const String&, void*, char*, size_t) {
   ++inputCalls;
   assert(!cliModeExitCanComplete()); // HandlingInput is not the commit boundary.
   if (loseOwnerInInput) closeOwner();
@@ -91,7 +91,7 @@ static void onTick(void*) {
   assert(!cliModeExitCanComplete());
   if (completeOnTick) assert(cliExitMode());
 }
-static const CLIMode mode{"completion-test", onEnter, onInput, onExit, onTick, nullptr, 25};
+static const CliMode mode{"completion-test", onEnter, onInput, onExit, onTick, nullptr, 25};
 
 static void reset() {
   assert(!cliInModeActive());

@@ -52,8 +52,8 @@ class String {
   void toLowerCase() { for (auto& c : s_) c = char(std::tolower(static_cast<unsigned char>(c))); }
   bool operator==(const char* other) const { return s_ == other; }
 };
-static bool gCLIValidateOnly = false;
-#define RETURN_VALID_IF_VALIDATE_CSTR() do { if (gCLIValidateOnly) return "VALID"; } while (0)
+static bool gCliValidateOnly = false;
+#define RETURN_VALID_IF_VALIDATE_CSTR() do { if (gCliValidateOnly) return "VALID"; } while (0)
 static struct { bool cameraEnabled = true; } gSettings;
 
 // cam_power admission doubles: what reached the owner's power requests.
@@ -74,7 +74,7 @@ static void unlockCameraMutex(){}
 // INSERT_PRODUCTION
 
 static void reset() {
-  gCLIValidateOnly = false;
+  gCliValidateOnly = false;
   gSettings.cameraEnabled = true;
   queueAccepts = syncResult = true;
   startAsync = stopAsync = startSync = stopSync = 0;
@@ -115,7 +115,7 @@ int main() {
   CHECK(stopAsync == 1 && startsWith(reply, "Error"));
   // The validate pass requests nothing.
   reset();
-  gCLIValidateOnly = true;
+  gCliValidateOnly = true;
   CHECK(std::strcmp(cmd_camerastart("async"), "VALID") == 0 &&
         std::strcmp(cmd_camerastop("async"), "VALID") == 0 && requests() == 0);
   // The synchronous forms are unchanged.

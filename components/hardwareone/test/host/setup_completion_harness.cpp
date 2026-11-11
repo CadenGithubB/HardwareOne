@@ -87,7 +87,7 @@ static SetupWizardResult runSetupWizard() {
 #define DEBUGF(...) do {} while (0)
 static void appendPromptTo(char*, size_t) { assert(false && "unexpected navigation"); }
 static char* getWizardDeviceNameBuf() { static char buffer[21]; return buffer; }
-static CLIModeInputResult unexpectedDispatch(const String&, char*, size_t) {
+static CliModeInputResult unexpectedDispatch(const String&, char*, size_t) {
   assert(false && "completion test unexpectedly entered another page"); return CLI_MODE_HANDLED;
 }
 static auto dispatchTopLevelPage = unexpectedDispatch;

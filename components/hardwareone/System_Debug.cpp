@@ -1635,8 +1635,8 @@ static void dbgApplyHook(DbgFlagIdx idx, bool modeTemp, int v, bool* settingPtr)
     case DBG_HTTPS: {
       // Drive ESP-IDF TLS/HTTPS tag verbosity. Skipped during the CLI
       // validation pass (dbgFlagCmd short-circuits before the hook, so
-      // gCLIValidateOnly is false here — guarded anyway to match pre-C3).
-      if (!gCLIValidateOnly) applyHttpsLogLevels(isDebugFlagSet(DEBUG_HTTPS));
+      // gCliValidateOnly is false here — guarded anyway to match pre-C3).
+      if (!gCliValidateOnly) applyHttpsLogLevels(isDebugFlagSet(DEBUG_HTTPS));
       break;
     }
     case DBG_SR:

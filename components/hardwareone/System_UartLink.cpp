@@ -407,7 +407,7 @@ bool uartLinkSessionRestrictCm5PresenceIfUser(
 #endif
 
 static std::atomic<bool> sStarted{false};    // publishes port/mutex lifecycle
-static String sUartCLI;                     // line accumulator
+static String sUartCli;                     // line accumulator
 static uint32_t sUartLineTransportEpoch = 0; // incarnation owning first byte
 static unsigned long sLastNagMs = 0;         // rate limiter for unauth/garbage replies
 static bool sDiscardingLine = false;         // true = swallow bytes until the next '\n'
@@ -635,7 +635,7 @@ static bool uartLinkStopPhysical() {
   sStarted.store(false, std::memory_order_release);
   UART_LINK_PORT.end();
   if (sTxMutex != nullptr) xSemaphoreGive(sTxMutex);
-  sUartCLI = "";
+  sUartCli = "";
   sUartLineTransportEpoch = 0;
   sDiscardingLine = false;
   sLastInteractionMs.store(0, std::memory_order_release);
@@ -1170,7 +1170,7 @@ void uartLinkTick() {
         sUartLineTransportEpoch != liveTransportEpoch) {
       // Never splice bytes received under two physical command-session
       // incarnations. This also scrubs a partially typed password.
-      sUartCLI = "";
+      sUartCli = "";
       sDiscardingLine = false;
       sUartLineTransportEpoch = 0;
     }
@@ -1179,18 +1179,18 @@ void uartLinkTick() {
         // Tail of an over-long line — drop it whole. Executing the residue
         // would run an arbitrary fragment as a command under the live session.
         sDiscardingLine = false;
-        sUartCLI = "";
+        sUartCli = "";
         sUartLineTransportEpoch = 0;
         continue;
       }
       if (sUartLineTransportEpoch == 0 ||
           sUartLineTransportEpoch != liveTransportEpoch) {
-        sUartCLI = "";
+        sUartCli = "";
         sUartLineTransportEpoch = 0;
         continue;
       }
-      String cmd = sUartCLI;
-      sUartCLI = "";
+      String cmd = sUartCli;
+      sUartCli = "";
       const uint32_t admittedTransportEpoch = sUartLineTransportEpoch;
       sUartLineTransportEpoch = 0;
       cmd.trim();
@@ -1203,8 +1203,8 @@ void uartLinkTick() {
       break;  // at most one command per loop() lap, same as the serial drain
     } else {
       if (sDiscardingLine) continue;
-      if (sUartCLI.length() >= kUartLineCap) {
-        sUartCLI = "";
+      if (sUartCli.length() >= kUartLineCap) {
+        sUartCli = "";
         sUartLineTransportEpoch = 0;
         sDiscardingLine = true;   // swallow the rest, including the newline
         uartWriteLineNagLimited("Error: line too long — discarded");
@@ -1212,7 +1212,7 @@ void uartLinkTick() {
       }
       if (sUartLineTransportEpoch == 0)
         sUartLineTransportEpoch = liveTransportEpoch;
-      sUartCLI += c;
+      sUartCli += c;
     }
   }
 }

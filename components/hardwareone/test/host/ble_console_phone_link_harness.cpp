@@ -118,9 +118,9 @@ static bool gDebugBufferReady = true;
 static bool ensureDebugBuffer() { return gDebugBufferReady; }
 static char* getDebugBuffer() { return gDebugBufferReady ? gDebugBuffer : nullptr; }
 static void cliHint(const char* text) { w.hints.emplace_back(text ? text : ""); }
-static bool gCLIValidateOnly = false;
+static bool gCliValidateOnly = false;
 #define RETURN_VALID_IF_VALIDATE_CSTR() \
-  do { if (::gCLIValidateOnly) return "VALID"; } while (0)
+  do { if (::gCliValidateOnly) return "VALID"; } while (0)
 
 static struct Settings {
   bool bleEnabled = true, bleAutoStart = false, bleRequireAuth = true;
@@ -383,7 +383,7 @@ static void clientHost(const std::string& name) {
   gSettings = Settings{};
   gLifecycle = HostMutex{};
   lifecycleBusy = false;
-  gCLIValidateOnly = false;
+  gCliValidateOnly = false;
   gDebugBufferReady = true;
   backoffs = 0;
   landingAfterDelays = -1;
@@ -874,10 +874,10 @@ static void consoleCommand() {
   EXPECT(std::strcmp(cmd_bleconsole("maybe"), "Error: invalid arguments — Usage: bleconsole [on|off|status]") == 0 &&
              w.settingWrites == 2,
          "an invalid argument was not a usage error");
-  gCLIValidateOnly = true;
+  gCliValidateOnly = true;
   EXPECT(std::strcmp(cmd_bleconsole("off"), "VALID") == 0 && gSettings.bleConsoleOnPipe,
          "validate-only bleconsole changed the setting");
-  gCLIValidateOnly = false;
+  gCliValidateOnly = false;
   pipeEnds();
   mainLoop();
   EXPECT(std::strcmp(cmd_bleconsole(""), "App console on the phone link: on (waiting for the phone link)") == 0,

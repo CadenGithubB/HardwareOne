@@ -153,13 +153,13 @@ static void* currentCommandContext() { return haveCommandContext ? &commandConte
 
 // The confirm framework: captures the prompt, the audit command line and the
 // mode token handed to the callbacks.
-typedef const char* (*CLIConfirmCallback)(void* userData);
-typedef void (*CLIConfirmAcceptedCallback)(void* acceptedData);
+typedef const char* (*CliConfirmCallback)(void* userData);
+typedef void (*CliConfirmAcceptedCallback)(void* acceptedData);
 static std::string capturedPrompt, capturedCommand;
 static void* capturedUserData = nullptr;
 static unsigned confirmRequests = 0;
-static bool cliRequestConfirm(const String& prompt, const String& command, CLIConfirmCallback, CLIConfirmCallback,
-                              void* userData, CLIConfirmAcceptedCallback = nullptr, void* = nullptr) {
+static bool cliRequestConfirm(const String& prompt, const String& command, CliConfirmCallback, CliConfirmCallback,
+                              void* userData, CliConfirmAcceptedCallback = nullptr, void* = nullptr) {
   ++confirmRequests;
   capturedPrompt = prompt.c_str();
   capturedCommand = command.c_str();

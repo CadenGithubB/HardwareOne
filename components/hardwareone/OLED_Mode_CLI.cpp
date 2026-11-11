@@ -33,13 +33,13 @@ static int findIndexByTimestamp(uint32_t ts) {
 }
 
 // Get current CLI viewer selection (1-indexed for display, 0 if none)
-int getCLIViewerSelectedIndex() {
+int getCliViewerSelectedIndex() {
   int idx = findIndexByTimestamp(cliSelectedTimestamp);
   return (idx >= 0) ? idx + 1 : 0;  // 1-indexed for user display
 }
 
 // Reset transient viewer state on mode entry (clears stuck detail view, resets scroll)
-void resetCLIViewerState() {
+void resetCliViewerState() {
   DEBUG_CLIF("[CLI_VIEWER] resetState: detail=%d scroll=%d", cliShowingDetail, cliScrollOffset);
   cliShowingDetail = false;
   cliDetailLockedTimestamp = 0;
@@ -48,7 +48,7 @@ void resetCLIViewerState() {
 }
 
 // CLI display function
-static void displayCLIViewer() {
+static void displayCliViewer() {
   if (!oledDisplay) {
     ERROR_SYSTEMF("[CLI_VIEWER] oledDisplay is NULL!");
     return;
@@ -192,7 +192,7 @@ static void displayCLIViewer() {
 }
 
 // CLI Viewer input handler
-static bool handleCLIViewerInput(int deltaX, int deltaY, uint32_t newlyPressed) {
+static bool handleCliViewerInput(int deltaX, int deltaY, uint32_t newlyPressed) {
   bool handled = false;
   
   // Acquire mutex for thread-safe buffer access
@@ -309,7 +309,7 @@ static bool handleCLIViewerInput(int deltaX, int deltaY, uint32_t newlyPressed) 
 }
 
 // CLI availability check
-static bool isCLIViewerAvailable(String* outReason) {
+static bool isCliViewerAvailable(String* outReason) {
   // Both halves are needed, and they fail independently: the ring allocation can
   // come up short on internal DRAM while the much smaller mutex still succeeds.
   // Checking only the mutex would advertise the viewer and then show an empty
@@ -326,16 +326,16 @@ static bool isCLIViewerAvailable(String* outReason) {
 // the CLI output always re-renders fresh, so reset on every entry regardless of
 // forward/back navigation.
 static void cliViewerOnEnter(bool /*isForward*/) {
-  resetCLIViewerState();
+  resetCliViewerState();
 }
 
 static const OledModeEntry cliViewerEntry = {
   OLED_CLI_VIEWER,
   "CLI Output",
   "notify_system",
-  displayCLIViewer,
-  isCLIViewerAvailable,
-  handleCLIViewerInput,
+  displayCliViewer,
+  isCliViewerAvailable,
+  handleCliViewerInput,
   true,
   92,
   nullptr,  // dynamic hints (shows line count)

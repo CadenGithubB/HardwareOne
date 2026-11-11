@@ -1310,7 +1310,7 @@ const char* cmd_filewrite(const String& argsInput) {
   return respBuf;
 }
 
-// filedelete is now a two-step interactive flow built on the CLIMode
+// filedelete is now a two-step interactive flow built on the CliMode
 // framework's confirm mode. The flow:
 //   1. cmd_filedelete validates the path and stages the path + caller
 //      AuthContext in a stack candidate.

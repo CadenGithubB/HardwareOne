@@ -6,7 +6,7 @@ Two cases, each compiled from command_task_isolation_harness.cpp:
 - broadcast: broadcastOutputCore (System_Debug.cpp) and the validate-state
   accessor currentCommandValidateOnly (System_Utils.cpp). One thread runs a
   validate pass the way cmd_exec does (per-task CommandContext plus the
-  handler mirror gCLIValidateOnly); another task broadcasts meanwhile. Only
+  handler mirror gCliValidateOnly); another task broadcasts meanwhile. Only
   the validating task's output may be dropped.
 - password: userChangePasswordCore and cmd_user_changepassword
   (System_User.cpp) with RETURN_VALID_IF_VALIDATE_CSTR (System_Utils.h) and

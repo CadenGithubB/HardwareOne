@@ -1569,7 +1569,7 @@ const char* cmd_automation_list(const String& argsInput) {
 
 const char* cmd_automation_add(const String& argsInput) {
   // Do not early-return on validate; we want to perform full argument checks
-  bool validateOnly = gCLIValidateOnly;
+  bool validateOnly = gCliValidateOnly;
   
   CommandArgs a(argsInput);
 
@@ -4338,7 +4338,7 @@ const char* cmd_validate_conditions(const String& argsInput) {
   const char* validationResult = validateConditionalHierarchy(conditions.c_str());
   // If we're in validation mode and validation passes, return "VALID"
   // Otherwise return the actual validation result (which could be an error)
-  if (gCLIValidateOnly && validationResult && strcmp(validationResult, "VALID") == 0) {
+  if (gCliValidateOnly && validationResult && strcmp(validationResult, "VALID") == 0) {
     return "VALID";
   }
   broadcastOutput(validationResult);

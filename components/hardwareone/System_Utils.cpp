@@ -331,7 +331,7 @@ int serializeJsonArrayWithRepair(JsonArray& arr, char* buf, size_t bufSize, cons
 // short-circuit out of the wizard cleanly.
 //
 // FTS uses timeout=0 so a new owner has time to read instructions. Blocking
-// wizard callers may opt into an idle timeout. The interactive CLIMode uses
+// wizard callers may opt into an idle timeout. The interactive CliMode uses
 // its own session/inactivity policy and leaves this timer disabled.
 // Wizard input loops refresh activity and poll cancellation, including local
 // display loops that do not call the blocking serial reader.
@@ -2038,7 +2038,7 @@ const char* cmd_reboot(const String& originalCmd) {
 // factoryreset -- wipe the accounts and their data + reboot to first-time setup
 // ============================================================================
 //
-// Phase 4 of the CLIMode framework rollout: a real user-facing destructive
+// Phase 4 of the CliMode framework rollout: a real user-facing destructive
 // command that runs through the same yes/no confirm flow as filedelete and
 // userdelete (Phase 3). What it does:
 //
@@ -4017,7 +4017,7 @@ static bool authorizeRemoteCommand(const AuthContext& ctx, const String& line,
 // Prepend "OK: " to a successful, human-facing result in place. No-op for
 // failures (success==false), empty results, JSON/structured payloads ({,[),
 // results that already lead with a status word (OK / OK: / SUCCESS), and
-// validate-pass sentinels (gCLIValidateOnly -> "VALID"). Machine-readable
+// validate-pass sentinels (gCliValidateOnly -> "VALID"). Machine-readable
 // results are protected STRUCTURALLY by the JSON ({,[) rule — there is no
 // per-command allowlist to maintain.
 static void stampOkStatus(char* out, size_t outSize, bool success) {
@@ -4087,7 +4087,7 @@ bool parseRemoteCommandSentReqId(const char* reply, uint32_t* msgIdOut) {
 #endif  // ENABLE_ESPNOW && ENABLE_BONDED_MODE
 
 // Handlers share the executor's task state: the validate mirror
-// gCLIValidateOnly, the debug and capture buffers and their static result
+// gCliValidateOnly, the debug and capture buffers and their static result
 // buffers. Only cmd_exec runs them, plus the early-boot direct path in
 // submitAndExecuteSync before the executor queue exists. Every other task
 // submits instead (submitAndExecuteSync, submitCommandAsync,
@@ -4387,7 +4387,7 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
     DEBUG_CMD_FLOWF("[registry_exec] executing: %s", found->name);
     DEBUGF(DEBUG_CLI, "[registry_exec] executing: %s", found->name);
 
-    // Capture CLIMode state BEFORE the handler runs. If the handler enters
+    // Capture CliMode state BEFORE the handler runs. If the handler enters
     // a mode (e.g. cmd_filedelete -> cliRequestConfirm) the command hasn't
     // actually completed -- it just prompted the user. The real completion
     // (and the right moment to audit) is when the user resolves the prompt
@@ -4540,10 +4540,10 @@ bool submitAndExecuteSync(const Command& cmd, String& out,
     // executor exists this task is the executor, so it also sets the handler
     // validate mirror the way commandExecTask does.
     setCurrentCommandContext((void*)&cmd.ctx);
-    const bool prevValidate = gCLIValidateOnly;
-    gCLIValidateOnly = cmd.ctx.validateOnly;
+    const bool prevValidate = gCliValidateOnly;
+    gCliValidateOnly = cmd.ctx.validateOnly;
     bool ok = executeCommand((AuthContext&)cmd.ctx.auth, cmd.line.c_str(), outBuf, CMD_RESULT_MAX);
-    gCLIValidateOnly = prevValidate;
+    gCliValidateOnly = prevValidate;
     clearCurrentCommandContext();
     out = outBuf;
     free(outBuf);

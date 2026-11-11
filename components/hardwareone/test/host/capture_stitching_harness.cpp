@@ -32,7 +32,7 @@ static bool printError = false, sizeError = false, removeFail = false, failLineR
 static int renameCalls = 0;
 static std::set<int> renameFailures;
 static std::set<std::string> directories;
-bool gCLIValidateOnly = false;
+bool gCliValidateOnly = false;
 static char debugBuffer[1024];
 static std::map<std::string, std::string> disk;
 static std::set<std::string> unreadable, refuseOpen;
@@ -219,7 +219,7 @@ static void reset() {
   bodyWrites = separatorWrites = failBody = failSeparator = failReadAt = 0;
   partialBody = 0; failReadPath.clear(); failedReadResult = 0;
   printError = sizeError = removeFail = failLineRead = false; renameCalls = 0; renameFailures.clear(); directories.clear();
-  bufferReady = true; denyWrite = gCLIValidateOnly = false;
+  bufferReady = true; denyWrite = gCliValidateOnly = false;
   std::memset(debugBuffer, 0x55, sizeof(debugBuffer));
 }
 static bool seen(const std::string& event) {
@@ -309,7 +309,7 @@ static void errorCases() {
     check(HAS_STAGED ? !disk.count(outputPath()) : disk.at(outputPath()) == (path == "/one" ? "" : "first\n"), "failed output is unpublished");
   }
   for (bool validate : {false, true}) {
-    reset(); bufferReady = false; gCLIValidateOnly = validate;
+    reset(); bufferReady = false; gCliValidateOnly = validate;
     check(invoke("early-" + std::to_string(validate), "nonsense") == (validate ? "VALID" : "Error: Debug buffer unavailable"), "early return contract");
     check(events.size() == (validate ? 0U : 1U), "validation and buffer failure perform no I/O");
   }

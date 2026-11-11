@@ -332,7 +332,7 @@ static void testContextContracts() {
     resetScenario(); scenario.stateful = stateful;
     httpd_req_t req; req.input = std::string("cmd=status") + option.form;
     req.content_len = req.input.size(); scenario.expectedReq = &req;
-    check(handleCLICommand(&req) == ESP_OK, "single command contract request completes");
+    check(handleCliCommand(&req) == ESP_OK, "single command contract request completes");
     check(scenario.executed.size() == 1 && scenario.captures == 1,
           "single command captures once and executes once");
     checkWebContext(scenario.executed[0].ctx, stateful, stateful ? 42 : 0,
@@ -344,7 +344,7 @@ static void testContextContracts() {
   resetScenario(); scenario.epoch = 0;
   httpd_req_t expired; expired.input = "cmd=status"; expired.content_len = expired.input.size();
   scenario.expectedReq = &expired;
-  handleCLICommand(&expired);
+  handleCliCommand(&expired);
   check(scenario.executed.size() == 1 && scenario.captures == 1, "failed epoch capture still submitted to executor guard");
   checkWebContext(scenario.executed[0].ctx, true, 0, true);
   check(expired.status == "401 Unauthorized" && scenario.broadcasts.empty(),
@@ -545,7 +545,7 @@ static void testPrivateSTTDirectReplies() {
   const std::string transcript=R"({"id":"abcdef0100000001","state":"done","sttText":"quoted \"word\" and \\ slash"})";
   resetScenario(); scenario.steps={{transcript}};
   httpd_req_t single; single.input="cmd=stt result abcdef0100000001";
-  single.content_len=single.input.size(); handleCLICommand(&single);
+  single.content_len=single.input.size(); handleCliCommand(&single);
   check(single.output==transcript,"single direct HTTP preserves owner transcript");
   check(scenario.broadcasts.size()==1 && scenario.broadcasts[0]=="[private STT result]",
         "single shared output hides transcript");
@@ -556,7 +556,7 @@ static void testPrivateSTTDirectReplies() {
         "batch shared output hides transcript");
   resetScenario(); scenario.steps={{transcript,true,true,true}};
   httpd_req_t revoked; revoked.input="cmd=stt result abcdef0100000001";
-  revoked.content_len=revoked.input.size(); handleCLICommand(&revoked);
+  revoked.content_len=revoked.input.size(); handleCliCommand(&revoked);
   check(revoked.status.rfind("401",0)==0 && revoked.output.find("sttText")==std::string::npos,
         "single revoked session cannot receive transcript");
   resetScenario(); scenario.steps={{transcript},{"session gone",true,true,true}};
@@ -574,7 +574,7 @@ static void testSingleCommandBodyLimits() {
   // allocated or received: 413, the socket is closed, nothing reaches the executor.
   resetScenario();
   httpd_req_t huge; huge.content_len = 100000000; scenario.allocLimit = 0;
-  check(handleCLICommand(&huge) == ESP_FAIL, "oversize body closes the connection");
+  check(handleCliCommand(&huge) == ESP_FAIL, "oversize body closes the connection");
   check(huge.status.rfind("413", 0) == 0 && huge.sends == 1 && huge.contentType == "text/plain",
         "oversize body answers 413 as text");
   check(scenario.executed.empty() && scenario.feedEntries == 0 && scenario.recvCalls == 0,
@@ -582,34 +582,34 @@ static void testSingleCommandBodyLimits() {
   // Within the cap but the allocation fails: 413 and no receive into a null buffer.
   resetScenario(); scenario.allocLimit = 0;
   httpd_req_t oom; oom.input = "cmd=reboot"; oom.content_len = oom.input.size();
-  check(handleCLICommand(&oom) == ESP_FAIL && oom.status.rfind("413", 0) == 0 && oom.sends == 1,
+  check(handleCliCommand(&oom) == ESP_FAIL && oom.status.rfind("413", 0) == 0 && oom.sends == 1,
         "failed allocation answers 413");
   check(scenario.executed.empty() && scenario.recvCalls == 0, "failed allocation never submits or receives");
   // Just over the cap is refused, exactly at the cap still executes.
   resetScenario();
   httpd_req_t over; over.input = "cmd=" + std::string(cap - 3, 'a'); over.content_len = over.input.size();
-  check(handleCLICommand(&over) == ESP_FAIL && over.status.rfind("413", 0) == 0 && scenario.executed.empty(),
+  check(handleCliCommand(&over) == ESP_FAIL && over.status.rfind("413", 0) == 0 && scenario.executed.empty(),
         "one byte over the cap is refused");
   resetScenario();
   httpd_req_t atCap; atCap.input = "cmd=" + std::string(cap - 4, 'a'); atCap.content_len = atCap.input.size();
-  check(handleCLICommand(&atCap) == ESP_OK && scenario.executed.size() == 1 &&
+  check(handleCliCommand(&atCap) == ESP_OK && scenario.executed.size() == 1 &&
         scenario.executed[0].line.length() == cap - 4, "a body exactly at the cap executes whole");
   // A short body (peer closed early) is a 400 and the truncated line is not executed.
   resetScenario();
   httpd_req_t shortBody; shortBody.input = "cmd=reb"; shortBody.content_len = 20;
-  check(handleCLICommand(&shortBody) == ESP_FAIL && shortBody.status.rfind("400", 0) == 0 && shortBody.sends == 1,
+  check(handleCliCommand(&shortBody) == ESP_FAIL && shortBody.status.rfind("400", 0) == 0 && shortBody.sends == 1,
         "short body answers 400");
   check(scenario.executed.empty() && scenario.feedEntries == 0, "short body never executes the truncated command");
   // A peer that sends headers and then nothing: two idle timeouts end the read.
   resetScenario(); scenario.recvTimeoutForever = true;
   httpd_req_t stalled; stalled.content_len = 20;
-  check(handleCLICommand(&stalled) == ESP_FAIL && stalled.status.rfind("400", 0) == 0 && stalled.sends == 1,
+  check(handleCliCommand(&stalled) == ESP_FAIL && stalled.status.rfind("400", 0) == 0 && stalled.sends == 1,
         "stalled body answers 400");
   check(scenario.recvCalls == 2 && scenario.executed.empty(), "stalled body ends after two idle timeouts");
   // An empty body still reaches the executor's own "Empty command" reply.
   resetScenario();
   httpd_req_t empty;
-  check(handleCLICommand(&empty) == ESP_OK && scenario.executed.size() == 1 && scenario.recvCalls == 0,
+  check(handleCliCommand(&empty) == ESP_OK && scenario.executed.size() == 1 && scenario.recvCalls == 0,
         "empty body keeps the previous executor path");
 }
 

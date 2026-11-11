@@ -7,7 +7,7 @@ Extracts from the production tree and compiles with oled_mode_availability_harne
   * OLED_Utils.cpp: the mode registry (statics, registerOledMode,
     registerOledModes, findOledMode) and getMenuAvailability, with
     oledModeFeatureState and oledModeRuleAllows where the tree has them;
-  * the real availFuncs: isCLIInputAvailable (OLED_Mode_CLIInput.cpp),
+  * the real availFuncs: isCliInputAvailable (OLED_Mode_CLIInput.cpp),
     isSetPatternAvailable (OLED_Mode_SetPattern.cpp), isLogoutModeAvailable
     (OLED_Mode_Auth.cpp), gpsOledModeAvailable (i2csensor_pa1010d_oled.h) and
     thermalOledModeAvailable (i2csensor_mlx90640_oled.h).
@@ -50,7 +50,7 @@ AVAILABILITY_HELPERS = (
     "bool oledModeRuleAllows(",
 )
 RULES = (
-    ("OLED_Mode_CLIInput.cpp", "static bool isCLIInputAvailable("),
+    ("OLED_Mode_CLIInput.cpp", "static bool isCliInputAvailable("),
     ("OLED_Mode_SetPattern.cpp", "static bool isSetPatternAvailable("),
     ("OLED_Mode_Auth.cpp", "static bool isLogoutModeAvailable("),
     ("i2csensor_pa1010d_oled.h", "static bool gpsOledModeAvailable("),

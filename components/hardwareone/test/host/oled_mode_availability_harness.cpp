@@ -166,7 +166,7 @@ static void addEntry(OledMode mode, const char* name, OledAvailabilityFunc rule)
 }
 
 static void registerModules() {
-  addEntry(OLED_CLI_INPUT, "CLI Input", isCLIInputAvailable);
+  addEntry(OLED_CLI_INPUT, "CLI Input", isCliInputAvailable);
   addEntry(OLED_SET_PATTERN, "Gamepad Password", isSetPatternAvailable);
   addEntry(OLED_LOGOUT, "Logout", isLogoutModeAvailable);
   addEntry(OLED_GPS_DATA, "GPS", gpsOledModeAvailable);

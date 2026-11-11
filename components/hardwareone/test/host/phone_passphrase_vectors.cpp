@@ -41,8 +41,8 @@ static bool phonePipeStop(){return true;}
 static bool phonePipeInvalidateSecret(){return true;}
 static bool blePeerClearPhonePipeEnrollment(){return true;}
 static bool requestSettingsPersist(){return true;}
-static bool gCLIValidateOnly=false;
-#define RETURN_VALID_IF_VALIDATE_CSTR() do{if(::gCLIValidateOnly)return "VALID";}while(0)
+static bool gCliValidateOnly=false;
+#define RETURN_VALID_IF_VALIDATE_CSTR() do{if(::gCliValidateOnly)return "VALID";}while(0)
 // PRODUCTION
 
 static std::string hex(const std::string& s) {

@@ -130,7 +130,7 @@ assert help_navigation.index("findCommand(lc)") < help_navigation.index(
     "parsePageToken("
 )
 
-mode_input_start = cli.index("static CLIModeInputResult helpMode_onInput(")
+mode_input_start = cli.index("static CliModeInputResult helpMode_onInput(")
 mode_input_open = cli.index("{", mode_input_start)
 help_mode_input = brace_block(cli, mode_input_open)
 assert "addressedHelp" in help_mode_input

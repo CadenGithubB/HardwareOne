@@ -1,6 +1,6 @@
 // System_CLIConfirm.cpp
 //
-// Implementation of the yes/no confirm mode built on the CLIMode
+// Implementation of the yes/no confirm mode built on the CliMode
 // framework. See System_CLIConfirm.h for the caller pattern + design
 // notes.
 
@@ -15,10 +15,10 @@
 #include "System_User.h"
 
 // Single-slot state for the pending confirm. Publication is committed under
-// the CLIMode mutex only after the exact owner and empty slot are validated.
+// the CliMode mutex only after the exact owner and empty slot are validated.
 // A losing foreign request therefore cannot overwrite the winning payload.
 // PSRAM-resident. Touched only by confirm_onEnter/confirm_onInput on the
-// cmd_exec/loop tasks under the CLIMode mutex: no ISR, no DMA, no spinlock
+// cmd_exec/loop tasks under the CliMode mutex: no ISR, no DMA, no spinlock
 // (this file has zero portENTER_CRITICAL), not reached during a flash op.
 // Credential audit 2026-08-19: wifiadd/useradd/login never route through
 // cliRequestConfirm, so no password/PSK/token lands here. The one residue is
@@ -36,8 +36,8 @@ EXT_RAM_BSS_ATTR static struct {
     Cancelled,
     PrivilegeLost,
   } resolution;
-  CLIConfirmCallback onConfirm;
-  CLIConfirmCallback onCancel;
+  CliConfirmCallback onConfirm;
+  CliConfirmCallback onCancel;
   void* userData;
   char* responseOut;
   size_t responseOutSize;
@@ -71,7 +71,7 @@ static void confirm_onEnter(void* /*userData*/) {
   }
 }
 
-static CLIModeInputResult confirm_onInput(const String& line, void* /*userData*/,
+static CliModeInputResult confirm_onInput(const String& line, void* /*userData*/,
                                           char* out, size_t outSize) {
   String lc = line;
   lc.trim();
@@ -159,7 +159,7 @@ static void confirm_onExit(void* /*userData*/) {
   DEBUGF(DEBUG_CLI, "[climode/confirm] exited");
 }
 
-static const CLIMode kConfirmMode = {
+static const CliMode kConfirmMode = {
   "confirm",
   confirm_onEnter,
   confirm_onInput,
@@ -172,10 +172,10 @@ static const CLIMode kConfirmMode = {
 struct ConfirmPrepare {
   const String* prompt;
   const String* originatingCmd;
-  CLIConfirmCallback onConfirm;
-  CLIConfirmCallback onCancel;
+  CliConfirmCallback onConfirm;
+  CliConfirmCallback onCancel;
   void* userData;
-  CLIConfirmAcceptedCallback onAccepted;
+  CliConfirmAcceptedCallback onAccepted;
   void* acceptedData;
   int requiredRoleRank;
 };
@@ -199,10 +199,10 @@ static void confirmCommit(void* opaque) {
 
 bool cliRequestConfirm(const String& prompt,
                        const String& originatingCmd,
-                       CLIConfirmCallback onConfirm,
-                       CLIConfirmCallback onCancel,
+                       CliConfirmCallback onConfirm,
+                       CliConfirmCallback onCancel,
                        void* userData,
-                       CLIConfirmAcceptedCallback onAccepted,
+                       CliConfirmAcceptedCallback onAccepted,
                        void* acceptedData) {
   ConfirmPrepare prepare{
       &prompt,

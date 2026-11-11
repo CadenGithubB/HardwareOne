@@ -4,7 +4,7 @@
 #include <Arduino.h>
 
 // ============================================================================
-// Setup Wizard — CLIMode-based, exact-session-owned
+// Setup Wizard — CliMode-based, exact-session-owned
 // ============================================================================
 //
 // Each input edits the shared wizard draft and returns, leaving cmd_exec free
@@ -31,13 +31,13 @@
 //
 // ----------------------------------------------------------------------------
 
-// Enter the wizard CLIMode. Resets all wizard state, renders the first
+// Enter the wizard CliMode. Resets all wizard state, renders the first
 // page, and registers the mode with the framework. Returns false if
 // another mode is already active (caller should surface the error to
 // the user and abort).
 bool setupWizardMode_start();
 
-// True if the wizard mode is currently the active CLIMode. Diagnostic
+// True if the wizard mode is currently the active CliMode. Diagnostic
 // helper; the framework itself uses cliCurrentMode() for the check.
 bool setupWizardMode_isActive();
 

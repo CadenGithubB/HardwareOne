@@ -27,7 +27,7 @@ static void check(bool ok, const char* message) {
 static void boundary(const char* name);
 class MapRenderer;
 // INSERT_TYPES
-static bool gCLIValidateOnly, debugAvailable = true, allocationOk = true;
+static bool gCliValidateOnly, debugAvailable = true, allocationOk = true;
 static const char* failedAllocationName;
 static bool gSensorLoggingRunning;
 static String gSensorLogPath;
@@ -344,7 +344,7 @@ static void reset() {
   GpsTrackManager::stopLiveTracking();
   check(GpsTrackManager::clearTrack(), "idle track cleared for test");
   gSettings = {}; sSensorLogSessionId = 0;
-  gCLIValidateOnly = false; debugAvailable = allocationOk = true;
+  gCliValidateOnly = false; debugAvailable = allocationOk = true;
   allocations = fsOperations = stopEvents = restores = 0; now = 1000;
   actions.clear(); messages.clear();
   gpsReply = "[GPS] Start queued; initialization is pending";
@@ -377,10 +377,10 @@ int main() {
     check(actions.empty() && GpsTrackManager::readStatus().pointCount == 2,
           "malformed command has no owner effects");
   }
-  gCLIValidateOnly = true;
+  gCliValidateOnly = true;
   check(std::string(cmd_gpstrack("live start")) == "VALID" && actions.empty(),
         "validation-only does not initialize services");
-  gCLIValidateOnly = false;
+  gCliValidateOnly = false;
 #if ENABLE_GPS_SENSOR
   for (unsigned guard = 0; guard < 4; ++guard) {
     reset(); imported(); const auto before = GpsTrackManager::readStatus();

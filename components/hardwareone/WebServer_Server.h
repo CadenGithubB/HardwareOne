@@ -282,9 +282,9 @@ esp_err_t handleSessionsList(httpd_req_t* req);  // /api/sessions and /api/admin
 esp_err_t handleLogs(httpd_req_t* req);
 esp_err_t handleSensorsStatusWithUpdates(httpd_req_t* req);
 esp_err_t handleSystemStatus(httpd_req_t* req);
-esp_err_t handleCLICommand(httpd_req_t* req);
+esp_err_t handleCliCommand(httpd_req_t* req);
 esp_err_t handleCliBatch(httpd_req_t* req);
-esp_err_t handleCLIPage(httpd_req_t* req);
+esp_err_t handleCliPage(httpd_req_t* req);
 esp_err_t handleAutomationsPage(httpd_req_t* req);
 esp_err_t handleAutomationsGet(httpd_req_t* req);
 esp_err_t handleFilesPage(httpd_req_t* req);

@@ -107,8 +107,8 @@ assert "line too long" in uart and "discarded" in uart
 # discarded whole, the same rule the UART link applies.
 assert "Serial.setRxBufferSize(CMD_RESULT_MAX)" in hardwareone
 assert "Serial.setTxBufferSize(CMD_RESULT_MAX)" in hardwareone
-assert "gSerialCLI.reserve(CMD_INPUT_MAX + 1)" in hardwareone
-assert "gSerialCLIOverflow = true" in hardwareone
+assert "gSerialCli.reserve(CMD_INPUT_MAX + 1)" in hardwareone
+assert "gSerialCliOverflow = true" in hardwareone
 assert "line too long" in hardwareone and "discarded" in hardwareone
 
 ble_line = function_body(bluetooth, "static void processBleCommandLine(")

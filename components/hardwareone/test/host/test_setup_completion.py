@@ -44,7 +44,7 @@ def generate() -> str:
              extract_block(mode, "enum class WizardSubMode") + ";",
              extract_block(mode, "static struct") + " sWizard;",
              extract_block(mode, "struct WizardRender") + ";",
-             extract_block((COMPONENT / "System_CLIMode.h").read_text(), "enum CLIModeInputResult") + ";"]
+             extract_block((COMPONENT / "System_CLIMode.h").read_text(), "enum CliModeInputResult") + ";"]
     state = [re.search(r"(?m)^static volatile[^\n]*\b" + name + r"\b[^\n]*;", utils)[0]
              for name in ("sSerialWaitTimeoutMs", "sSerialWaitLastActivityMs", "sWizardCancelRequested")]
     state.append(re.search(r"(?m)^volatile bool gWizardOwnsSerial[^\n]*;", setup)[0])
@@ -58,7 +58,7 @@ def generate() -> str:
                  extract_block(setup, "static String waitForWizardInput("),
                  extract_block(setup, "static String waitForWizardSecret("),
                  wrapper, on_exit,
-                 extract_block(mode, "static CLIModeInputResult wizardMode_onInput(")]
+                 extract_block(mode, "static CliModeInputResult wizardMode_onInput(")]
     harness = (HERE / "setup_completion_harness.cpp").read_text()
     for marker, text in {"// INSERT_PRODUCTION_TYPES": "\n\n".join(types),
                          "// INSERT_PRODUCTION_STATE": "\n".join(state),

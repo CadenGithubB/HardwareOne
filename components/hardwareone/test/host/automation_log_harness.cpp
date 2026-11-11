@@ -128,11 +128,11 @@ static void* ps_alloc(size_t bytes, AllocPref, const char*) {
 }
 
 static std::atomic<bool> filesystemReady{true};
-static thread_local bool gCLIValidateOnly = false, debugAvailable = true;
+static thread_local bool gCliValidateOnly = false, debugAvailable = true;
 static thread_local char debugBuffer[1024];
 static bool ensureDebugBuffer() { return debugAvailable; }
 static char* getDebugBuffer() { return debugBuffer; }
-#define RETURN_VALID_IF_VALIDATE_CSTR() do { if (gCLIValidateOnly) return "VALID"; } while (false)
+#define RETURN_VALID_IF_VALIDATE_CSTR() do { if (gCliValidateOnly) return "VALID"; } while (false)
 static bool withTimestamp = true;
 static void getTimestampPrefixMsCached(char* out, size_t size) {
   std::snprintf(out, size, "%s", withTimestamp ? "[2026-01-02 03:04:05.006] | " : "");
@@ -253,9 +253,9 @@ static void basicLifecycle() {
   CHECK(command("status") == "Automation logging INACTIVE");
   CHECK(command("stop").rfind("Error:", 0) == 0);
   CHECK(command("start").rfind("Error:", 0) == 0);
-  gCLIValidateOnly = true;
+  gCliValidateOnly = true;
   CHECK(command("start /logs/unused.log") == "VALID" && !automationLogActive() && files.empty());
-  gCLIValidateOnly = false;
+  gCliValidateOnly = false;
   debugAvailable = false;
   CHECK(command("start /logs/unused.log").rfind("Error:", 0) == 0 && !automationLogActive());
   debugAvailable = true;

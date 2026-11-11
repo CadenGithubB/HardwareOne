@@ -31,7 +31,7 @@ bool settingsTestStringCopyAllowed() {
   return allowed;
 }
 bool settingsTestStringReserveAllowed() { return !failStringReserve; }
-bool gCLIValidateOnly = false;
+bool gCliValidateOnly = false;
 // INSERT_TYPES
 
 template<class T> struct Field {
@@ -208,7 +208,7 @@ static void reset() {
   signedField = {}; byteField = {}; shortField = {}; wideField = {}; floatField = {};
   boolField = featureField = disabledFeatureField = false;
   stringField = ""; secretField = "";
-  gCLIValidateOnly = false;
+  gCliValidateOnly = false;
   failNextStringCopy = failStringReserve = false;
   writerSucceeds = writeGuardAvailable = true;
   currentOwner = {};
@@ -371,7 +371,7 @@ static void stringsPrivacyAndPreflight() {
     check(!error(handleSettingCommand(&readOnly, "")), "read-only query rejected");
     check(error(handleSettingCommand(&readOnly, "1")), "read-only mutation accepted");
     noMutationEffects();
-    gCLIValidateOnly = true;
+    gCliValidateOnly = true;
     check(command(index, "invalid") == "VALID", "validation-only contract changed");
     noMutationEffects(); check(stopRequests.empty(), "validation-only invoked service stop");
   }
@@ -409,7 +409,7 @@ static void featureCommands() {
     check(!error(cmd_features(input)), "feature query failed"); noMutationEffects();
   }
   check(std::string(cmd_features("reboot on")).find("reboot required") != std::string::npos, "reboot note lost");
-  clearEffects(); gCLIValidateOnly = true;
+  clearEffects(); gCliValidateOnly = true;
   check(std::string(cmd_features("runtime off")) == "VALID" && featureField, "feature validation changed setting");
   noMutationEffects();
 
@@ -507,7 +507,7 @@ static void oledEnabledCommand() {
         "connected panel did not resume in the default mode");
   check(effectOrder == Effects{"persist", "display mode", "display update"}, "resume effects changed");
   for (const char* input : {"on", "foo"}) {
-    prepareOled(input, true, true, true); gCLIValidateOnly = true;
+    prepareOled(input, true, true, true); gCliValidateOnly = true;
     check(cmd_oled_enabled(input) == std::string("VALID") && effectOrder.empty() && writeCalls == 0,
           "validation-only contract changed");
   }

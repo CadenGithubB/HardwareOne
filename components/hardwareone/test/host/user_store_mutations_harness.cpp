@@ -203,10 +203,10 @@ bool bootStateRaiseAccountIdHighWater(uint32_t id) {
 
 // The command adapter's validate-only guard (cmd_user_request restores it on
 // a tree with the self-registration owner); never set by these scenarios.
-[[maybe_unused]] static bool gCLIValidateOnly = false;
+[[maybe_unused]] static bool gCliValidateOnly = false;
 #define RETURN_VALID_IF_VALIDATE_CSTR() \
   do { \
-    if (::gCLIValidateOnly) return "VALID"; \
+    if (::gCliValidateOnly) return "VALID"; \
   } while (0)
 // INSERT_TYPES
 // INSERT_PRODUCTION

@@ -16,7 +16,7 @@ void webBatchTestStringAppend() {}
 #ifndef CAPTURE_DIR
 #define CAPTURE_DIR "/logging_captures"
 #endif
-bool gCLIValidateOnly = false;
+bool gCliValidateOnly = false;
 
 // INSERT_TYPES
 
@@ -230,7 +230,7 @@ static void reset() {
   gSensorLogMaxSize = 10240;
   gSensorLogMaxRotations = 1;
   gSensorLogPath = "/logging_captures/logs/previous.csv";
-  gSensorLoggingRunning = gCLIValidateOnly = false;
+  gSensorLoggingRunning = gCliValidateOnly = false;
   persistCalls = 0;
   actions.clear();
   hints.clear();
@@ -297,7 +297,7 @@ static void invalidAndGuards() {
   }
   context = "validation-only";
   reset();
-  gCLIValidateOnly = true;
+  gCliValidateOnly = true;
   check(std::string(cmd_gpslog("nonsense")) == "VALID", "validation-only response changed");
   untouched();
 }

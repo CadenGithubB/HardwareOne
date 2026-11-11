@@ -23,9 +23,9 @@
 #define ENABLE_ANO_ENCODER 0
 #define EXT_RAM_BSS_ATTR
 // Production commands ignore argsInput in validate-only mode, as here.
-static bool gCLIValidateOnly = false;
+static bool gCliValidateOnly = false;
 #define RETURN_VALID_IF_VALIDATE_CSTR() \
-  do { if (gCLIValidateOnly) { (void)argsInput; return "VALID"; } } while (0)
+  do { if (gCliValidateOnly) { (void)argsInput; return "VALID"; } } while (0)
 
 static void harnessDebugf(const char*, ...) {}
 #define DEBUG_DISPLAYF(...) harnessDebugf(__VA_ARGS__)
