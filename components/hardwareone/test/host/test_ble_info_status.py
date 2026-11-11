@@ -43,7 +43,7 @@ import shutil
 import subprocess
 import tempfile
 
-from test_web_batch_handlers import extract_block, mac_text, require, JSON_INCLUDE
+from test_web_batch_handlers import extract_block, json_text, mac_text, require, JSON_INCLUDE
 import ble_pipe_console_host as pipe_host
 
 HERE = Path(__file__).resolve().parent
@@ -61,8 +61,8 @@ def stream_definitions(owner: str) -> list[str]:
              "const String& CommandArgs::arg(", "int CommandArgs::argInt(")]
     out += [extract_block(owner, marker) for marker in
             ("bool isBLEConnected(", "void bleEnableStream(", "void bleDisableStream(",
-             "void bleSetStreamInterval(", "bool bleIsStreamEnabled(",
-             "static size_t jsonEscapeInto(")]
+             "void bleSetStreamInterval(", "bool bleIsStreamEnabled(")]
+    out.append(json_text())
     # Present only once the streams use directed per-session delivery.
     if "static bool bleStreamNotifyDirected(" in owner:
         out.append(extract_block(owner, "static bool bleStreamNotifyDirected("))

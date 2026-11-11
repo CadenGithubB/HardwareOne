@@ -23726,26 +23726,6 @@ static constexpr uint8_t G2_EFS_FLAG = 0x00;
 // notification pushes but it must be present + zero-padded to 64 bytes.
 static const char kEfsNotifyPath[] = "user/notify_whitelist.json";
 
-// Append `s` to `out` with minimal JSON string escaping. Bytes >= 0x20
-// (including UTF-8 continuation bytes) pass through unchanged, so plain text
-// is byte-identical to the reference encoder.
-static void g2JsonAppendEscaped(String& out, const char* s) {
-  if (!s) return;
-  for (const char* p = s; *p; ++p) {
-    unsigned char c = (unsigned char)*p;
-    switch (c) {
-      case '"':  out += "\\\""; break;
-      case '\\': out += "\\\\"; break;
-      case '\n': out += "\\n";  break;
-      case '\r': out += "\\r";  break;
-      case '\t': out += "\\t";  break;
-      default:
-        if (c < 0x20) { char b[8]; snprintf(b, sizeof(b), "\\u%04x", c); out += b; }
-        else          { out += (char)c; }
-    }
-  }
-}
-
 // Build the exact `android_notification` JSON the firmware's EFS notification
 // parser expects. Field order/format is byte-stable (the START frame's
 // fileDataCrc32 is computed over these exact bytes). `date` is LOCAL time in
@@ -23766,19 +23746,19 @@ static String g2BuildNotifyJson(uint32_t msgId, const char* appId,
   s  = "{\"android_notification\":{\"msg_id\":";
   s += msgId;
   s += ",\"action\":0,\"app_identifier\":\"";
-  g2JsonAppendEscaped(s, appId);
+  jsonAppendEscaped(s, appId);
   s += "\",\"title\":\"";
-  g2JsonAppendEscaped(s, title);
+  jsonAppendEscaped(s, title);
   s += "\",\"subtitle\":\"";
-  g2JsonAppendEscaped(s, subtitle);
+  jsonAppendEscaped(s, subtitle);
   s += "\",\"message\":\"";
-  g2JsonAppendEscaped(s, body);
+  jsonAppendEscaped(s, body);
   s += "\",\"time_s\":";
   s += (uint32_t)epoch;
   s += ",\"date\":\"";
   s += dateBuf;
   s += "\",\"display_name\":\"";
-  g2JsonAppendEscaped(s, displayName);
+  jsonAppendEscaped(s, displayName);
   s += "\"}}";
   return s;
 }

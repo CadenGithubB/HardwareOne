@@ -64,7 +64,7 @@ esp_err_t handleMapFeaturesAPI(httpd_req_t* req) {
   // Names come from the map file: every string is JSON-escaped.
   String json = "{";
   json += "\"mapName\":";
-  json += webJsonString(map.filename);
+  json += jsonQuote(map.filename);
   json += ",\"hasNames\":";
   json += map.nameCount > 0 ? "true" : "false";
   json += ",\"featureCount\":";
@@ -80,7 +80,7 @@ esp_err_t handleMapFeaturesAPI(httpd_req_t* req) {
     for (int i = 0; i < map.nameCount; i++) {
       if (!firstName) json += ",";
       firstName = false;
-      json += webJsonString(map.names[i].name);
+      json += jsonQuote(map.names[i].name);
     }
     json += "]";
   } else {
@@ -214,7 +214,7 @@ esp_err_t handleGPSTracksAPI(httpd_req_t* req) {
         httpd_resp_set_type(req, "application/json");
         // The message can carry the requested path: escape it.
         String errJson = "{\"error\":";
-        errJson += webJsonString(errorMsg);
+        errJson += jsonQuote(errorMsg);
         errJson += "}";
         httpd_resp_sendstr(req, errJson.c_str());
         return ESP_OK;
@@ -251,7 +251,7 @@ esp_err_t handleGPSTracksAPI(httpd_req_t* req) {
       char footer[64];
       snprintf(footer, sizeof(footer), "],\"count\":%d,\"message\":", track.pointCount);
       String tail = footer;
-      tail += webJsonString(validMsg);
+      tail += jsonQuote(validMsg);
       tail += "}";
       httpd_resp_sendstr_chunk(req, tail.c_str());
       httpd_resp_sendstr_chunk(req, NULL);
@@ -291,7 +291,7 @@ esp_err_t handleGPSTracksAPI(httpd_req_t* req) {
     if (hasGPS) {
       // A file name may hold a backslash: the path is JSON-escaped.
       String fileJson = first ? "{\"path\":" : ",{\"path\":";
-      fileJson += webJsonString(file.path());
+      fileJson += jsonQuote(file.path());
       char sizeJson[32];
       snprintf(sizeJson, sizeof(sizeJson), ",\"size\":%lu}", (unsigned long)file.size());
       fileJson += sizeJson;

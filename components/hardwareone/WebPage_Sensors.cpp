@@ -621,7 +621,7 @@ static String buildRecordingsListJson(const String& list) {
     if (sized) {
       if (count) files += ",";
       files += "{\"name\":";
-      files += webJsonString(item.substring(0, colon));
+      files += jsonQuote(item.substring(0, colon));
       files += ",\"size\":";
       files += item.substring(colon + 1);
       files += "}";

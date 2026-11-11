@@ -3,7 +3,7 @@
 
 Compiles the production handleAutomationsExport, handleIconGet,
 handleFilesCreate and handleMicRecordingsList bodies (plus the
-shared webJsonString / sendJsonError and the recordings-list builder where the
+shared jsonQuote / sendJsonError and the recordings-list builder where the
 tree has them) into web_json_replies_harness.cpp with real ArduinoJson and a
 local Arduino String stub. The fake httpd keeps header pointers and reads them
 at httpd_resp_send, so a header value that dies first is an ASan
@@ -25,7 +25,7 @@ import subprocess
 import sys
 import tempfile
 
-from test_web_batch_handlers import extract_block, request_body_readers, require
+from test_web_batch_handlers import extract_block, json_text, request_body_readers, require
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
@@ -94,14 +94,16 @@ def required(source: str, marker: str) -> str:
 
 
 def production() -> str:
-    utils_h = (COMPONENT / "WebServer_Utils.h").read_text()
     utils_cpp = (COMPONENT / "WebServer_Utils.cpp").read_text()
     server = (COMPONENT / "WebServer_Server.cpp").read_text()
     sensors = (COMPONENT / "WebPage_Sensors.cpp").read_text()
     filesystem = (COMPONENT / "System_Filesystem.cpp").read_text()
     pieces: list[str] = []
-    pieces += optional(utils_h, "inline String webJsonString(const String& text)")
-    pieces += optional(utils_cpp, "String webJsonString(const char* text)")
+    system_utils = (COMPONENT / "System_Utils.cpp").read_text()
+    pieces.append(json_text())
+    pieces.append(required(system_utils, "void jsonAppendEscaped("))
+    pieces.append(required(system_utils, "String jsonQuote(const char* text)"))
+    pieces.append("inline String jsonQuote(const String& text) { return jsonQuote(text.c_str()); }")
     pieces += optional(utils_cpp, "esp_err_t sendJsonError(")
     pieces.append(required(filesystem, "String quotePath("))
     pieces += optional(server, "static void automationExportDisposition(")

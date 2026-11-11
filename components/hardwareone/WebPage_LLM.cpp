@@ -115,8 +115,8 @@ static esp_err_t handleLLMStatus(httpd_req_t* req) {
 
   // The model id and the error text (a remote host's message, a path) are
   // escaped JSON strings; the reply buffer is sized to fit them.
-  const String modelJson = webJsonString(st.modelPath);
-  const String errorJson = webJsonString(st.errorMsg);
+  const String modelJson = jsonQuote(st.modelPath);
+  const String errorJson = jsonQuote(st.errorMsg);
   auto render = [&](char* out, size_t outSize) {
     return snprintf(out, outSize,
       "{\"state\":\"%s\",\"model\":%s,\"params\":\"%dx%dx%d\","

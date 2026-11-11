@@ -169,11 +169,8 @@ WebBodyBuffer webReadRequestBody(httpd_req_t* req, size_t maxLen, const char* al
 esp_err_t webSendBodyReadError(httpd_req_t* req, WebBodyStatus status, bool json = false);
 
 // Text spliced into a hand-built JSON reply (file names, command errors,
-// status strings) goes through these. webJsonString returns the value as a
-// quoted JSON string; ArduinoJson escapes quotes, backslashes and every
-// control character. sendJsonError sends {"success":false,"error":<message>}.
-String webJsonString(const char* text);
-inline String webJsonString(const String& text) { return webJsonString(text.c_str()); }
+// status strings) goes through jsonQuote() from System_Utils.h.
+// sendJsonError sends {"success":false,"error":<message>}.
 esp_err_t sendJsonError(httpd_req_t* req, const String& message);
 
 #if ENABLE_HTTPS

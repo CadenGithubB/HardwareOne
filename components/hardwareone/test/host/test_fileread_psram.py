@@ -58,11 +58,12 @@ def main() -> None:
             "complete checked raw metadata must precede binary body delivery")
     require("bleScSendEncrypted" not in handler and "bleScEstablished" not in handler,
             "the raw body is fenced on the command's epoch (never the connection's current one)")
-    definitions = [extract_block(source, "bool normalizeFsPath("),
+    definitions = [read("System_JsonText.h").replace("#pragma once", ""),
+                   extract_block(source, "bool normalizeFsPath("),
                    extract_block(source, "static bool filePathIsPrivateTranscript("),
                    extract_block(source, "const char* cmd_fileview(")]
     definitions += [extract_block(source, f"static {signature}(") for signature in (
-        "bool bytesNeedBase64", "size_t fileReadJsonStringLength",
+        "bool bytesNeedBase64",
         "bool fileReadAppendJsonString", "bool fileReadAppendBase64",
         "size_t fileReadUnsignedLength", "bool fileReadAppendUnsigned",
         "size_t fileReadEnvelopeLength", "bool fileReadBuildReply",

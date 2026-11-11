@@ -311,10 +311,10 @@ static void checkPayload(const std::string& reply, const std::string& expected,
       ",\"enc\":\"" + encoding + "\"" + (privateTranscript ? ",\"transcriptPath\":true" : "") +
       ",\"data\":\"" + referenceEscape(data) + "\"}";
   check(reply == expectedWire, "wire field order, types, escaping and formatting match the old contract");
-  const size_t measured = fileReadEnvelopeLength(fileReadJsonStringLength(
-      (const uint8_t*)path.data(), path.size()), reportedSize, offset, expected.size(), eof,
+  const size_t measured = fileReadEnvelopeLength(jsonEscapedLength(
+      path.data(), path.size()), reportedSize, offset, expected.size(), eof,
       encoding.c_str(), true, privateTranscript) + (encoding == "b64" ? ((expected.size() + 2) / 3) * 4 :
-                                  fileReadJsonStringLength((const uint8_t*)expected.data(), expected.size()));
+                                  jsonEscapedLength(expected.data(), expected.size()));
   check(measured == reply.size(), "budget calculation exactly matches serialized output");
 }
 

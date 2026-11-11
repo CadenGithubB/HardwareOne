@@ -4748,42 +4748,6 @@ bool blePushSystemStatus(const char* jsonData, size_t len) {
   return true;
 }
 
-// Escape `src` as JSON string CONTENT into a fixed buffer, never emitting a
-// partial escape sequence. Returns bytes written (excluding the NUL).
-//
-// Deliberately not System_Utils.cpp's jsonEscape(): that one takes and returns a
-// String (heap churn on a BLE notify path) and gives the caller no way to bound
-// the result. Here the whole point is a hard bound. If the next character's
-// escape would not fit we stop on a character boundary, so the output is always
-// valid JSON string content — the failure mode is a shortened message, never a
-// dangling backslash that corrupts the document.
-static size_t jsonEscapeInto(char* dst, size_t dstCap, const char* src) {
-  if (!dst || dstCap == 0) return 0;
-  size_t o = 0;
-  for (size_t i = 0; src && src[i]; i++) {
-    const unsigned char c = (unsigned char)src[i];
-    char        u[7];
-    const char* esc = nullptr;
-    switch (c) {
-      case '"':  esc = "\\\""; break;
-      case '\\': esc = "\\\\"; break;
-      case '\n': esc = "\\n";  break;
-      case '\r': esc = "\\r";  break;
-      case '\t': esc = "\\t";  break;
-      default:
-        // Other C0 controls are illegal raw in a JSON string; \u-escape them.
-        if (c < 0x20) { snprintf(u, sizeof(u), "\\u%04X", (unsigned)c); esc = u; }
-        break;
-    }
-    const size_t need = esc ? strlen(esc) : 1;
-    if (o + need >= dstCap) break;          // clean stop, never mid-sequence
-    if (esc) { memcpy(dst + o, esc, need); o += need; }
-    else     { dst[o++] = (char)c; }
-  }
-  dst[o] = '\0';
-  return o;
-}
-
 bool blePushEvent(BLEEventType eventType, const char* message, const char* details) {
   if (!isBLEConnected() || !pEventNotifyChar) {
     return false;

@@ -993,39 +993,14 @@ const char* cmd_filerename(const String& argsInput) {
   return getDebugBuffer();
 }
 
-// These writers are deliberately private to fileread: its byte encoding and
-// 4096-byte command envelope are not the contract of HTTP's streaming reader.
-static size_t fileReadJsonStringLength(const uint8_t* data, size_t len) {
-  size_t result = 0;
-  for (size_t i = 0; i < len; ++i) {
-    const uint8_t c = data[i];
-    if (c == '"' || c == '\\' || c == '\b' || c == '\f' ||
-        c == '\n' || c == '\r' || c == '\t') result += 2;
-    else result += (c < 0x20) ? 6 : 1;
-  }
-  return result;
-}
-
+// These writers are deliberately private to fileread: its 4096-byte command
+// envelope is not the contract of HTTP's streaming reader. The escaping rule
+// is the shared one (System_JsonText.h).
 static bool fileReadAppendJsonString(PsramBuffer& out, const uint8_t* data, size_t len) {
-  static const char hex[] = "0123456789abcdef";
+  char seq[7];
   for (size_t i = 0; i < len; ++i) {
-    const uint8_t c = data[i];
-    const char* escape = nullptr;
-    switch (c) {
-      case '"': escape = "\\\""; break;
-      case '\\': escape = "\\\\"; break;
-      case '\b': escape = "\\b"; break;
-      case '\f': escape = "\\f"; break;
-      case '\n': escape = "\\n"; break;
-      case '\r': escape = "\\r"; break;
-      case '\t': escape = "\\t"; break;
-    }
-    if (escape) {
-      if (!out.append(escape)) return false;
-    } else if (c < 0x20) {
-      const char encoded[] = {'\\', 'u', '0', '0', hex[c >> 4], hex[c & 0xf]};
-      if (!out.append(encoded, sizeof(encoded))) return false;
-    } else if (!out.append((char)c)) return false;
+    const size_t n = jsonEscapeChar(data[i], seq);
+    if (!out.append(seq, n)) return false;
   }
   return out.ok();
 }
@@ -1131,7 +1106,7 @@ const char* cmd_fileread(const String& argsInput) {
   const size_t OUT_CAP   = CMD_RESULT_MAX;  // includes the terminating NUL
   const AuthContext& ctx = currentAuthContext();
   const size_t escapedPathLength =
-      fileReadJsonStringLength((const uint8_t*)path.c_str(), path.length());
+      jsonEscapedLength(path.c_str(), path.length());
 
   // Hold the FS lock ONLY for the open/seek/read/close below — release it before building the
   // reply or (in `bin` mode) doing the paced multi-frame BLE send, so a minutes-long map download
@@ -1243,7 +1218,7 @@ const char* cmd_fileread(const String& argsInput) {
   // an oversized first reply or keeps its high-water allocation alive.
   if (!useB64 &&
       fileReadEnvelopeLength(escapedPathLength, total, (size_t)offset, got, eof,
-                             "utf8", true, privateTranscript) + fileReadJsonStringLength(buf, got) >= OUT_CAP - 1)
+                             "utf8", true, privateTranscript) + jsonEscapedLength((const char*)buf, got) >= OUT_CAP - 1)
     useB64 = true;
   const bool built = fileReadBuildReply(s_readJson, path, total, (size_t)offset,
                                         buf, got, eof, useB64 ? "b64" : "utf8", true);

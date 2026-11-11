@@ -10,6 +10,7 @@
 #include "WebPage_ESPNow.h"
 #include "WebServer_Server.h"
 #include "WebServer_Utils.h"
+#include "System_JsonText.h"
 #if ENABLE_ESPNOW
 #include "System_Filesystem.h"
 #endif
@@ -63,41 +64,8 @@ static esp_err_t webEspnowSendJsonEscapedString(httpd_req_t* req, const char* s)
   };
 
   for (const char* p = s; p && *p; ++p) {
-    const unsigned char c = (unsigned char)(*p);
-    const char* seq = nullptr;
-    char tmp[8];
-    size_t seqLen = 0;
-
-    switch (c) {
-      case '\\': seq = "\\\\"; seqLen = 2; break;
-      case '"': seq = "\\\""; seqLen = 2; break;
-      case '\b': seq = "\\b"; seqLen = 2; break;
-      case '\f': seq = "\\f"; seqLen = 2; break;
-      case '\n': seq = "\\n"; seqLen = 2; break;
-      case '\r': seq = "\\r"; seqLen = 2; break;
-      case '\t': seq = "\\t"; seqLen = 2; break;
-      default:
-        if (c < 0x20) {
-          snprintf(tmp, sizeof(tmp), "\\u%04X", (unsigned)c);
-          seq = tmp;
-          seqLen = 6;
-        } else {
-          tmp[0] = (char)c;
-          tmp[1] = '\0';
-          seq = tmp;
-          seqLen = 1;
-        }
-        break;
-    }
-
-    if (seqLen >= sizeof(out)) {
-      err = flush();
-      if (err != ESP_OK) return err;
-      err = httpd_resp_send_chunk(req, seq, seqLen);
-      if (err != ESP_OK) return err;
-      continue;
-    }
-
+    char seq[7];
+    const size_t seqLen = jsonEscapeChar((unsigned char)*p, seq);
     if (outLen + seqLen > (sizeof(out) - 1)) {
       err = flush();
       if (err != ESP_OK) return err;

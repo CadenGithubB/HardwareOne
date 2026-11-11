@@ -276,20 +276,28 @@ String extractFormField(const String& body, const String& key) {
   return String("");
 }
 
+void jsonAppendEscaped(String& out, const char* s) {
+  if (!s) return;
+  char seq[7];
+  for (const char* p = s; *p; ++p) {
+    if (jsonEscapeChar((unsigned char)*p, seq) == 1) out += seq[0];
+    else out += seq;
+  }
+}
+
 String jsonEscape(const String& in) {
   String out;
   out.reserve(in.length() + 8);
-  for (size_t i = 0; i < in.length(); ++i) {
-    char c = in.charAt(i);
-    switch (c) {
-      case '"': out += "\\\""; break;
-      case '\\': out += "\\\\"; break;
-      case '\n': out += "\\n"; break;
-      case '\r': out += "\\r"; break;
-      case '\t': out += "\\t"; break;
-      default: out += c; break;
-    }
-  }
+  jsonAppendEscaped(out, in.c_str());
+  return out;
+}
+
+String jsonQuote(const char* text) {
+  String out;
+  out.reserve((text ? strlen(text) : 0) + 10);
+  out += '"';
+  jsonAppendEscaped(out, text);
+  out += '"';
   return out;
 }
 

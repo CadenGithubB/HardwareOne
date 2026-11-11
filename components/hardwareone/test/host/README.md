@@ -1055,7 +1055,7 @@ arguments (`c++`, no sanitizers).
 
 `web_json_replies` compiles the production `handleAutomationsExport`,
 `handleIconGet`, `handleFilesCreate` and `handleMicRecordingsList`
-(plus `webJsonString`, `sendJsonError` and the recordings-list
+(plus `jsonQuote`, `sendJsonError` and the recordings-list
 builder) against a fake httpd that keeps header pointers and reads them at
 `httpd_resp_send`, with real ArduinoJson. Under `--sanitize` a header value
 that dies before the send is an ASan error (the `?id=` export disposition, the

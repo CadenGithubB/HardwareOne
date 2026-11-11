@@ -257,7 +257,14 @@ String base64Decode(const String& input);
 
 String urlDecode(const String& s);
 String extractFormField(const String& body, const String& key);
-String jsonEscape(const String& in);
+
+// JSON string text. The escaping rule and the fixed-buffer forms are in
+// System_JsonText.h; these are the String forms built on it.
+#include "System_JsonText.h"
+String jsonEscape(const String& in);                   // escaped text, no quotes
+void jsonAppendEscaped(String& out, const char* s);    // appends escaped text
+String jsonQuote(const char* text);                    // the text as a quoted JSON string
+inline String jsonQuote(const String& text) { return jsonQuote(text.c_str()); }
 
 // Serialize JsonArray to buffer with self-repair: removes oldest entries if overflow
 // Returns number of entries removed (0 if no overflow)

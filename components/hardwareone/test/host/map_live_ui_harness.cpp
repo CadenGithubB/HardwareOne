@@ -87,8 +87,8 @@ static bool webGuestMutationAllowed(httpd_req_t* req, const AuthContext&) {
   return false;
 }
 static String urlDecode(const String& value) { return value; }
-// WebServer_Utils.cpp's webJsonString: the same ArduinoJson escaping.
-static String webJsonString(const String& text) {
+// System_Utils.cpp's jsonQuote: a quoted JSON string (ArduinoJson writes the double here).
+static String jsonQuote(const String& text) {
   JsonDocument doc;
   doc.set(text.c_str());
   String out;

@@ -10,6 +10,7 @@
 #include "System_MemUtil.h"
 #include "System_Mutex.h"
 #include "System_User.h"
+#include "System_Utils.h"
 #include "System_UserSettings.h"
 #include "System_Settings.h"
 #include "System_VFS.h"
@@ -417,17 +418,9 @@ esp_err_t webSendBodyReadError(httpd_req_t* req, WebBodyStatus status, bool json
 // JSON text values
 // ============================================================================
 
-String webJsonString(const char* text) {
-  PSRAM_JSON_DOC(doc);
-  doc.set(text ? text : "");
-  String out;
-  serializeJson(doc, out);
-  return out;
-}
-
 esp_err_t sendJsonError(httpd_req_t* req, const String& message) {
   String body = "{\"success\":false,\"error\":";
-  body += webJsonString(message);
+  body += jsonQuote(message);
   body += "}";
   return sendJsonResponse(req, body.c_str(), body.length());
 }

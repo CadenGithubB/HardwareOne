@@ -282,8 +282,8 @@ String urlDecode(const String& s) {
   }
   return String(out);
 }
-// WebServer_Utils.cpp's webJsonString (ArduinoJson there): a quoted JSON string.
-String webJsonString(const String& text) {
+// System_Utils.cpp's jsonQuote: a quoted JSON string.
+String jsonQuote(const String& text) {
   std::string out = "\"";
   for (const char* p = text.c_str(); *p; ++p) {
     const unsigned char c = static_cast<unsigned char>(*p);

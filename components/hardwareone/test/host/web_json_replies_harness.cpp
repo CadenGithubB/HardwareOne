@@ -2,7 +2,7 @@
 // handler bodies that test_web_json_replies.py inserts:
 //   handleAutomationsExport (?id= and bulk), handleIconGet (?debug=1),
 //   handleFilesCreate, handleMicRecordingsList, and the shared
-//   webJsonString / sendJsonError helpers where the tree has them.
+//   jsonQuote / sendJsonError helpers.
 // httpd_resp_set_hdr keeps the caller's pointer and httpd_resp_send reads it,
 // as ESP-IDF does, so a header value that died before the send is a
 // use-after-free under ASan. JSON payloads are printed as "<tag>\t<payload>"
@@ -101,7 +101,6 @@ bool webGuestAccessAllowed(httpd_req_t*, const AuthContext&) { return true; }
   if (!tgRequireAuth(ctx)) return ESP_OK; \
   if (!webGuestAccessAllowed(req, ctx)) return ESP_OK
 
-String webJsonString(const char* text);
 esp_err_t sendJsonError(httpd_req_t* req, const String& message);
 
 // ---- automation export fixtures ----

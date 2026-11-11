@@ -45,7 +45,7 @@ import shutil
 import subprocess
 import tempfile
 
-from test_web_batch_handlers import extract_block, mac_text, require
+from test_web_batch_handlers import extract_block, json_text, mac_text, require
 import ble_pipe_console_host as pipe_host
 
 HERE = Path(__file__).resolve().parent
@@ -104,6 +104,7 @@ def generated(component: Path) -> str:
         pipe_host.PIPE_DOUBLES,
         pipe_host.declarations(owner, pipe_host.ROW_MARKERS + pipe_host.ROUTER_MARKERS),
         mac_text(),
+        json_text(),
     ]
     definitions += [extract_block(owner, marker) for marker in (
         "int findConnectionSlotByConnIdLocked(",
@@ -172,7 +173,6 @@ def generated(component: Path) -> str:
         "bool sendBLEResponseToSession(",
         "static int bleCollectMirrorSessions(",
         "bool sendBLEResponse(",
-        "static size_t jsonEscapeInto(",
         "bool blePushNotification(")]
     definitions.append(extract_block(ota, "bool currentSecureBleConnection("))
     harness = (HERE / "ble_pipe_console_row_harness.cpp").read_text()

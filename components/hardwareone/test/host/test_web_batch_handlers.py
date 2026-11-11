@@ -35,6 +35,12 @@ def mac_text(component: Path = COMPONENT) -> str:
     return (component / "System_MacText.h").read_text().replace("#pragma once\n", "", 1)
 
 
+def json_text(component: Path = COMPONENT) -> str:
+    """System_JsonText.h (jsonEscapeChar, jsonEscapedLength, jsonEscapeInto) as
+    text to place in a generated translation unit."""
+    return (component / "System_JsonText.h").read_text().replace("#pragma once\n", "", 1)
+
+
 def extract_block(source: str, marker: str) -> str:
     """Extract an actual C++ definition, ignoring braces in comments/literals."""
     start = source.index(marker)
