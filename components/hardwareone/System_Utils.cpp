@@ -4236,8 +4236,7 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
   }
 
   if (command.length() == 0) {
-    strncpy(out, "Empty command", outSize - 1);
-    out[outSize - 1] = '\0';
+    strlcpy(out, "Empty command", outSize);
     return false;
   }
 
@@ -4267,8 +4266,7 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
     {
       String inner = actualCommand; inner.trim();
       if (inner.startsWith("remote:") || inner.startsWith("remote ") || inner.startsWith("@")) {
-        strncpy(out, "Error: nested remote commands are not allowed.", outSize - 1);
-        out[outSize - 1] = '\0';
+        strlcpy(out, "Error: nested remote commands are not allowed.", outSize);
         return false;
       }
     }
@@ -4297,23 +4295,20 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
     // Gate on valid session token — this is the actual auth credential needed
     // to send remote commands. Implies bond is synced on both roles.
     if (!isBondSessionTokenValid()) {
-      strncpy(out, "Error: No session token - bond not ready or passphrase mismatch", outSize - 1);
-      out[outSize - 1] = '\0';
+      strlcpy(out, "Error: No session token - bond not ready or passphrase mismatch", outSize);
       return false;
     }
     
     uint8_t peerMac[6];
     if (!parseMacAddress(gSettings.bondPeerMac, peerMac)) {
-      strncpy(out, "Error: Invalid bonded peer MAC", outSize - 1);
-      out[outSize - 1] = '\0';
+      strlcpy(out, "Error: Invalid bonded peer MAC", outSize);
       return false;
     }
     
     // Build authenticated command payload: @BOND:<token>:<command>
     String payload = buildBondedCommandPayload(actualCommand);
     if (payload.length() == 0) {
-      strncpy(out, "Error: Failed to build command payload", outSize - 1);
-      out[outSize - 1] = '\0';
+      strlcpy(out, "Error: Failed to build command payload", outSize);
       return false;
     }
     
@@ -4347,13 +4342,11 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
       broadcastOutput("[REMOTE] Sent to bonded device: " + safeRemoteCommand);
       return true;
     } else {
-      strncpy(out, "Error: Failed to send remote command", outSize - 1);
-      out[outSize - 1] = '\0';
+      strlcpy(out, "Error: Failed to send remote command", outSize);
       return false;
     }
     #else
-    strncpy(out, "Error: Bond mode not available", outSize - 1);
-    out[outSize - 1] = '\0';
+    strlcpy(out, "Error: Bond mode not available", outSize);
     return false;
     #endif // ENABLE_ESPNOW && ENABLE_BONDED_MODE
   }

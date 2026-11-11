@@ -346,8 +346,7 @@ static void finishCommit(uint32_t serial) {
   }
   if (gTE.padMode) { g2KbdPadEnd(); gTE.padMode = false; }
   char snap[sizeof(gTE.buf)];
-  strncpy(snap, gTE.buf, sizeof(snap) - 1);
-  snap[sizeof(snap) - 1] = '\0';
+  strlcpy(snap, gTE.buf, sizeof(snap));
   const bool secret = gTE.isSecret;
   TextEntryCommitFn cb = gTE.onCommit;
   __atomic_store_n(&gTE.active, false, __ATOMIC_RELEASE);

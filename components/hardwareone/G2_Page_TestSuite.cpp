@@ -716,8 +716,7 @@ static size_t gTsPageStartIdx    = 0;
 // "<- Tests" at level-1 submenus, "<- Image" inside Image/Static).
 static void writeBackRow(const char* label) {
   const char* lbl = (label && label[0]) ? label : "<- Back";
-  strncpy(gRows[0], lbl, TEST_ROW_LEN);
-  gRows[0][TEST_ROW_LEN - 1] = '\0';
+  strlcpy(gRows[0], lbl, TEST_ROW_LEN);
   gRowPtrs[0] = gRows[0];
 }
 
@@ -1583,8 +1582,7 @@ static size_t buildGeomVariantRows() {
   writeBackRow("<- Display");
   size_t row = 1;
   for (size_t i = 0; i < kGeomVariantCount && row < TEST_MAX_ROWS; i++) {
-    strncpy(gRows[row], kGeomVariants[i].label, TEST_ROW_LEN);
-    gRows[row][TEST_ROW_LEN - 1] = '\0';
+    strlcpy(gRows[row], kGeomVariants[i].label, TEST_ROW_LEN);
     gRowPtrs[row] = gRows[row];
     row++;
   }
@@ -1596,8 +1594,7 @@ static size_t buildDisplayComboRows() {
   writeBackRow("<- Display");
   size_t row = 1;
   for (size_t i = 0; i < kComboTestCount && row < TEST_MAX_ROWS; i++) {
-    strncpy(gRows[row], kComboTests[i].label, TEST_ROW_LEN);
-    gRows[row][TEST_ROW_LEN - 1] = '\0';
+    strlcpy(gRows[row], kComboTests[i].label, TEST_ROW_LEN);
     gRowPtrs[row] = gRows[row];
     row++;
   }
@@ -1689,8 +1686,7 @@ static size_t buildActionsRows() {
     const char* lbl = kActions[i].dynLabel ? kActions[i].dynLabel()
                                            : kActions[i].label;
     if (!lbl) lbl = kActions[i].label;
-    strncpy(gRows[row], lbl, TEST_ROW_LEN);
-    gRows[row][TEST_ROW_LEN - 1] = '\0';
+    strlcpy(gRows[row], lbl, TEST_ROW_LEN);
     gRowPtrs[row] = gRows[row];
     row++;
   }
@@ -1721,8 +1717,7 @@ static size_t buildCharTestList(const CharTest* tests, size_t count,
 
   size_t row = 1;
   for (size_t i = p.startIdx; i < p.endIdx && row < TEST_MAX_ROWS; i++) {
-    strncpy(gRows[row], tests[i].label, TEST_ROW_LEN);
-    gRows[row][TEST_ROW_LEN - 1] = '\0';
+    strlcpy(gRows[row], tests[i].label, TEST_ROW_LEN);
     gRowPtrs[row] = gRows[row];
     row++;
   }
@@ -1773,8 +1768,7 @@ static size_t buildCharsPayloadRowsFrom(const CharTest* tests, size_t count,
   if (idx >= count) return row;
   snprintf(gRows[row], TEST_ROW_LEN, "[%s]", tests[idx].label);
   gRowPtrs[row] = gRows[row]; row++;
-  strncpy(gRows[row], tests[idx].sample, TEST_ROW_LEN);
-  gRows[row][TEST_ROW_LEN - 1] = '\0';
+  strlcpy(gRows[row], tests[idx].sample, TEST_ROW_LEN);
   gRowPtrs[row] = gRows[row]; row++;
   return row;
 }
@@ -1798,8 +1792,7 @@ static size_t buildAIRows() {
   writeBackRow("<- Tests");
   size_t row = 1;
   for (size_t i = 0; i < kAIVariantCount && row < TEST_MAX_ROWS; i++) {
-    strncpy(gRows[row], kAIVariants[i].label, TEST_ROW_LEN);
-    gRows[row][TEST_ROW_LEN - 1] = '\0';
+    strlcpy(gRows[row], kAIVariants[i].label, TEST_ROW_LEN);
     gRowPtrs[row] = gRows[row];
     row++;
   }
@@ -1811,8 +1804,7 @@ static size_t buildBracketsRows() {
   writeBackRow("<- Tests");
   size_t row = 1;
   for (size_t i = 0; i < kBracketCount && row < TEST_MAX_ROWS; i++) {
-    strncpy(gRows[row], kBrackets[i].label, TEST_ROW_LEN);
-    gRows[row][TEST_ROW_LEN - 1] = '\0';
+    strlcpy(gRows[row], kBrackets[i].label, TEST_ROW_LEN);
     gRowPtrs[row] = gRows[row];
     row++;
   }
@@ -1993,8 +1985,7 @@ void g2BuildTestSuiteInfo(char* out, size_t cap) {
     if (s.length() > cap - 32) break;
   }
   s += "Display Tests (Keyboard): Q33 keyboard 4-band / 1-tile A/B\n";
-  strncpy(out, s.c_str(), cap - 1);
-  out[cap - 1] = '\0';
+  strlcpy(out, s.c_str(), cap);
 }
 
 // -----------------------------------------------------------------------------

@@ -162,6 +162,22 @@ attachment should report unavailable without breaking unrelated services.
   success and publish related events only after the operation runs; check a
   driver's result when available. A void driver call establishes that a
   request was issued, not that the hardware accepted it.
+- Small text jobs have one owner each; a handler does not carry its own copy.
+  A number argument is read with `parseIntArg` (`System_ArgParse.h`): the whole
+  token has to be a number in range, otherwise the command answers
+  `kCommandReplyNotANumber` or its own range message. `String::toInt`, `atoi`
+  and `atol` read junk as 0 and are not used for command arguments. An on/off
+  argument is read with `parseBoolArg`, `argIsOn` or `argIsOff`
+  (`System_Utils.h`), so every command accepts the same spellings; text that
+  is neither answers `kCommandReplyNotOnOff`. A MAC address is formatted and
+  parsed by `System_MacText.h`. JSON string escaping is `jsonEscape`,
+  `jsonAppendEscaped` or `jsonQuote` (`System_JsonText.h`, `System_Utils.h`).
+  Text is copied into a buffer with `strlcpy` or `snprintf`; `strcpy`,
+  `strcat` and `sprintf` are not used. `strncpy` stays only for a fixed-width
+  record or packet field that needs its zero fill. The host test
+  `shared_text_helpers` checks this; its tables count the remaining uses per
+  file (stored files, web form fields, menu values, fixed-width fields) and
+  only go down.
 - Atomic file saves must check the complete temporary write before promotion.
   Keep the filesystem lock through writing, renaming and failed-temp cleanup;
   a failed replacement must not delete or truncate the previous destination.

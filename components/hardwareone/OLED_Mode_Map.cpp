@@ -1860,8 +1860,7 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
     
     // Keyboard completed or cancelled
     if (oledKeyboardIsCompleted()) {
-      strncpy(gSearchResult, oledKeyboardGetText(), sizeof(gSearchResult) - 1);
-      gSearchResult[sizeof(gSearchResult) - 1] = '\0';
+      strlcpy(gSearchResult, oledKeyboardGetText(), sizeof(gSearchResult));
       DEBUG_MAPSF("[MAP_SEARCH] Selected: '%s'", gSearchResult);
       
       // Find ALL matching features (iterate through tiles)

@@ -242,8 +242,7 @@ void g2BuildESPNowAppInfo(char* out, size_t cap) {
   s += WiFi.macAddress();
 #endif
 
-  strncpy(out, s.c_str(), cap - 1);
-  out[cap - 1] = '\0';
+  strlcpy(out, s.c_str(), cap);
 }
 
 // -----------------------------------------------------------------------------
@@ -301,7 +300,7 @@ static void showPeersMenu() {
   // buffer never needs to be internal (frees ~680 B internal DRAM).
   static EXT_RAM_BSS_ATTR char rows[1 + 16][40];
   const char* ptrs[1 + 16];
-  strcpy(rows[0], "<- Back");
+  strlcpy(rows[0], "<- Back", sizeof(rows[0]));
   ptrs[0] = rows[0];
   size_t n = 1;
 
@@ -447,7 +446,7 @@ static void showStatsMenu() {
   static EXT_RAM_BSS_ATTR char rows[10][40];  // PSRAM: deep-copied by g2ShowListPage
   const char* ptrs[10];
   size_t n = 0;
-  strcpy(rows[n], "<- Back"); ptrs[n] = rows[n]; n++;
+  strlcpy(rows[n], "<- Back", sizeof(rows[n])); ptrs[n] = rows[n]; n++;
 
   snprintf(rows[n], sizeof(rows[n]), "%s", phaseLabel(currentPhase()));
   ptrs[n] = rows[n]; n++;
@@ -541,7 +540,7 @@ static void showBondSensorsMenu() {
 #if ENABLE_ESPNOW
   static EXT_RAM_BSS_ATTR char rows[1 + kBondSensorDisplayMax][40];  // PSRAM: deep-copied by g2ShowListPage
   const char* ptrs[1 + kBondSensorDisplayMax];
-  strcpy(rows[0], "<- Back");
+  strlcpy(rows[0], "<- Back", sizeof(rows[0]));
   ptrs[0] = rows[0];
   size_t n = 1;
 

@@ -921,8 +921,7 @@ void prepareFileBrowserData() {
             // Delete). Replaces the old silent no-op. Snapshot the name for
             // display; the actual ops act on the current selection, which
             // can't move while a menu/overlay owns input.
-            strncpy(sFbActionName, entry.name, sizeof(sFbActionName) - 1);
-            sFbActionName[sizeof(sFbActionName) - 1] = '\0';
+            strlcpy(sFbActionName, entry.name, sizeof(sFbActionName));
             // "View" for text, Pretty/JSON View for JSON, from the classifier
             // the G2 lens shares (images and binaries get Rename/Delete only).
             sFbActionViewable = fileKindIsReadableText(fileKindForName(entry.name));

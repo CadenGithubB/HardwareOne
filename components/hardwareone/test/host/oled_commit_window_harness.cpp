@@ -186,18 +186,23 @@ static bool submitAndExecuteSync(Command& command, String& out) {
 // The result copy into the caller's buffer.
 static int gCopies = 0;
 static int gCopiesUnderWriter = 0;
-static char* harness_strncpy(char* dst, const char* src, size_t n) {
+static size_t harness_strlcpy(char* dst, const char* src, size_t n) {
   ++gCopies;
   if (gWriterHeld) ++gCopiesUnderWriter;
-  char* result = std::strncpy(dst, src, n);
+  const size_t length = std::strlen(src);
+  if (n) {
+    const size_t take = length < n - 1 ? length : n - 1;
+    std::memcpy(dst, src, take);
+    dst[take] = '\0';
+  }
   publish(gPublishAtCopy);
-  return result;
+  return length;
 }
-#define strncpy harness_strncpy
+#define strlcpy harness_strlcpy
 
 // INSERT_OLED_UTILS
 
-#undef strncpy
+#undef strlcpy
 
 // --- Scenarios ----------------------------------------------------------------
 // A logged-in display whose owner mirror matches the authority.

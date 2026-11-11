@@ -1071,14 +1071,14 @@ String getRemoteSensorDataJSON(const uint8_t* deviceMac, RemoteSensorType sensor
 int formatRemoteSensorReadable(const char* json, char* out, size_t outSize, int maxLines) {
   if (!out || outSize == 0) return 0;
   out[0] = '\0';
-  if (!json || !json[0]) { strncpy(out, "(no data)", outSize - 1); out[outSize - 1] = '\0'; return 1; }
+  if (!json || !json[0]) { strlcpy(out, "(no data)", outSize); return 1; }
 
   PSRAM_JSON_DOC(doc);
   if (deserializeJson(doc, json) != DeserializationError::Ok) {
-    strncpy(out, "(unreadable)", outSize - 1); out[outSize - 1] = '\0'; return 1;
+    strlcpy(out, "(unreadable)", outSize); return 1;
   }
   JsonObjectConst root = doc.as<JsonObjectConst>();
-  if (root.isNull()) { strncpy(out, "(no fields)", outSize - 1); out[outSize - 1] = '\0'; return 1; }
+  if (root.isNull()) { strlcpy(out, "(no fields)", outSize); return 1; }
 
   size_t pos = 0;
   int lines = 0;
@@ -1114,7 +1114,7 @@ int formatRemoteSensorReadable(const char* json, char* out, size_t outSize, int 
     pos += (size_t)n;
     lines++;
   }
-  if (lines == 0) { strncpy(out, "(no fields)", outSize - 1); out[outSize - 1] = '\0'; return 1; }
+  if (lines == 0) { strlcpy(out, "(no fields)", outSize); return 1; }
   return lines;
 }
 

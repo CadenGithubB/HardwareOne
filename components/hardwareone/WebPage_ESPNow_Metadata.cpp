@@ -50,8 +50,7 @@ esp_err_t handleEspNowMetadata(httpd_req_t* req) {
   // URL-decode: browser sends E8%3A6B%3A... (encodeURIComponent encodes ':' as '%3A')
   // httpd_query_key_value does not percent-decode, so we must do it here
   String macDecoded = urlDecode(String(macParam));
-  strncpy(macParam, macDecoded.c_str(), sizeof(macParam) - 1);
-  macParam[sizeof(macParam) - 1] = '\0';
+  strlcpy(macParam, macDecoded.c_str(), sizeof(macParam));
   
   // Parse MAC address
   uint8_t targetMac[6];

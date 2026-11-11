@@ -337,8 +337,7 @@ static void appendPromptTo(char* out, size_t outSize) {
       out[cur] = '\n';
       cur++;
     }
-    strncpy(out + cur, prompt, outSize - cur - 1);
-    out[outSize - 1] = '\0';
+    strlcpy(out + cur, prompt, outSize - cur);
   }
 }
 

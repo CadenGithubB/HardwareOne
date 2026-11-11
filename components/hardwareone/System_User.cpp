@@ -4351,16 +4351,16 @@ static void buildOrdinal(uint32_t n, char* buf, size_t bufSize) {
 static bool formatEpochAsISO8601(time_t epoch, char* buf, size_t bufSize) {
   if (!buf || bufSize < 21) return false;
   if (epoch <= 0) {
-    strncpy(buf, "null", bufSize);
+    strlcpy(buf, "null", bufSize);
     return false;
   }
   if (!Clock::isValidEpoch(epoch)) {
-    strncpy(buf, "null", bufSize);
+    strlcpy(buf, "null", bufSize);
     return false;
   }
   struct tm tminfo;
   if (!gmtime_r(&epoch, &tminfo)) {
-    strncpy(buf, "null", bufSize);
+    strlcpy(buf, "null", bufSize);
     return false;
   }
   strftime(buf, bufSize, "%Y-%m-%dT%H:%M:%SZ", &tminfo);

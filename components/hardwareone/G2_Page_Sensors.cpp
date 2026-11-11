@@ -480,8 +480,7 @@ void g2BuildSensorList(char* out, size_t cap) {
   }
 
   // Truncate cleanly into caller's buffer. snprintf-style guarantee.
-  strncpy(out, s.c_str(), cap - 1);
-  out[cap - 1] = '\0';
+  strlcpy(out, s.c_str(), cap);
 }
 
 // -----------------------------------------------------------------------------
@@ -552,8 +551,7 @@ void g2ShowSensorsMenu() {
   buildRows(rows, SENSORS_MAX_ROWS, &count, /*includeStubs=*/ false);
 
   size_t out = 0;
-  strncpy(gSensorsRows[out], "<- Main Menu", SENSORS_ROW_LEN - 1);
-  gSensorsRows[out][SENSORS_ROW_LEN - 1] = '\0';
+  strlcpy(gSensorsRows[out], "<- Main Menu", SENSORS_ROW_LEN);
   gSensorsRowPtrs[out] = gSensorsRows[out];
   out++;
 
@@ -613,8 +611,7 @@ static bool showSensorDetail(const G2SensorRow& r) {
               r.label);
   }
   size_t out = 0;
-  strncpy(gSensorsRows[out], "<- Hardware", SENSORS_ROW_LEN - 1);
-  gSensorsRows[out][SENSORS_ROW_LEN - 1] = '\0';
+  strlcpy(gSensorsRows[out], "<- Hardware", SENSORS_ROW_LEN);
   gSensorsRowPtrs[out] = gSensorsRows[out];
   out++;
 
@@ -688,13 +685,11 @@ static bool showSensorDetail(const G2SensorRow& r) {
     //   3: Stream           (continuous, ~0.4 fps)
     //   4: HW: <chip>
     //   5: Settings >
-    strncpy(gSensorsRows[out], "Capture", SENSORS_ROW_LEN - 1);
-    gSensorsRows[out][SENSORS_ROW_LEN - 1] = '\0';
+    strlcpy(gSensorsRows[out], "Capture", SENSORS_ROW_LEN);
     gSensorsRowPtrs[out] = gSensorsRows[out];
     out++;
 
-    strncpy(gSensorsRows[out], "Stream", SENSORS_ROW_LEN - 1);
-    gSensorsRows[out][SENSORS_ROW_LEN - 1] = '\0';
+    strlcpy(gSensorsRows[out], "Stream", SENSORS_ROW_LEN);
     gSensorsRowPtrs[out] = gSensorsRows[out];
     out++;
 
@@ -702,8 +697,7 @@ static bool showSensorDetail(const G2SensorRow& r) {
     gSensorsRowPtrs[out] = gSensorsRows[out];
     out++;
 
-    strncpy(gSensorsRows[out], "Settings >", SENSORS_ROW_LEN - 1);
-    gSensorsRows[out][SENSORS_ROW_LEN - 1] = '\0';
+    strlcpy(gSensorsRows[out], "Settings >", SENSORS_ROW_LEN);
     gSensorsRowPtrs[out] = gSensorsRows[out];
     out++;
   } else {
@@ -1162,8 +1156,7 @@ size_t g2BuildSensorLiveList(const char** outRows, size_t maxRows) {
   const G2SensorRow* r = (gSensorsDetailIdx < count) ? &rows[gSensorsDetailIdx]
                                                      : nullptr;
 
-  strncpy(gSensorsRows[0], "<- Hardware", SENSORS_ROW_LEN - 1);
-  gSensorsRows[0][SENSORS_ROW_LEN - 1] = '\0';
+  strlcpy(gSensorsRows[0], "<- Hardware", SENSORS_ROW_LEN);
   outRows[n++] = gSensorsRows[0];
 
   if (n < maxRows) {  // idx 1 — runtime Start/Stop (live enabled state)

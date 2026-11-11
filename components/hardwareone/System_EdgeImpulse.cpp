@@ -184,7 +184,7 @@ static bool loadLabelsFromExplicitPath(const String& labelsPath, int classCount)
     line.trim();
     if (line.length() > 0) {
       char* slot = gModelLabels + static_cast<size_t>(gModelLabelCount) * EI_LABEL_MAX;
-      strncpy(slot, line.c_str(), EI_LABEL_MAX - 1);
+      strlcpy(slot, line.c_str(), EI_LABEL_MAX);
       DEBUG_SYSTEMF("[EI_DEBUG] Label[%d] = '%s'", gModelLabelCount, slot);
       gModelLabelCount++;
     }

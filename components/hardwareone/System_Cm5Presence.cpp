@@ -414,8 +414,7 @@ static Cm5PresenceSnapshot snapshotForSessionImpl(uint32_t activeSessionEpoch,
   record = sPresence;
   task = sPresenceWorker.handle;
   if (reasonOut && reasonCap > 0) {
-    strncpy(reasonOut, sPresenceReason, reasonCap - 1);
-    reasonOut[reasonCap - 1] = '\0';
+    strlcpy(reasonOut, sPresenceReason, reasonCap);
   }
   portEXIT_CRITICAL(&sPresenceMux);
   return snapshotFromRecord(record, task, activeSessionEpoch, nowMs);

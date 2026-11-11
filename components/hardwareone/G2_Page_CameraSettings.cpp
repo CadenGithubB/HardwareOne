@@ -362,8 +362,7 @@ static size_t kSettingsIndexForSubRow(CamCategory cat, size_t displayRow) {
 
 static size_t buildTopRows() {
   size_t row = 0;
-  strncpy(gRows[row], "<- Camera", CAM_SETTINGS_ROW_LEN - 1);
-  gRows[row][CAM_SETTINGS_ROW_LEN - 1] = '\0';
+  strlcpy(gRows[row], "<- Camera", CAM_SETTINGS_ROW_LEN);
   gRowPtrs[row] = gRows[row];
   row++;
 
@@ -383,16 +382,13 @@ static size_t buildTopRows() {
   }
 
   // Three category openers. Order is: most-touched first.
-  strncpy(gRows[row], "Camera >", CAM_SETTINGS_ROW_LEN - 1);
-  gRows[row][CAM_SETTINGS_ROW_LEN - 1] = '\0';
+  strlcpy(gRows[row], "Camera >", CAM_SETTINGS_ROW_LEN);
   gRowPtrs[row] = gRows[row]; row++;
 
-  strncpy(gRows[row], "Transform >", CAM_SETTINGS_ROW_LEN - 1);
-  gRows[row][CAM_SETTINGS_ROW_LEN - 1] = '\0';
+  strlcpy(gRows[row], "Transform >", CAM_SETTINGS_ROW_LEN);
   gRowPtrs[row] = gRows[row]; row++;
 
-  strncpy(gRows[row], "Post Processing >", CAM_SETTINGS_ROW_LEN - 1);
-  gRows[row][CAM_SETTINGS_ROW_LEN - 1] = '\0';
+  strlcpy(gRows[row], "Post Processing >", CAM_SETTINGS_ROW_LEN);
   gRowPtrs[row] = gRows[row]; row++;
 
   return row;
@@ -408,8 +404,7 @@ static size_t buildSubRows(CamCategory cat) {
   gPendingCategory = cat;
   for (auto& index : gPendingSettingRowMap) index = SIZE_MAX;
   size_t row = 0;
-  strncpy(gRows[row], "<- Settings", CAM_SETTINGS_ROW_LEN - 1);
-  gRows[row][CAM_SETTINGS_ROW_LEN - 1] = '\0';
+  strlcpy(gRows[row], "<- Settings", CAM_SETTINGS_ROW_LEN);
   gRowPtrs[row] = gRows[row];
   row++;
 
@@ -455,8 +450,7 @@ static size_t buildResolutionPickerRows() {
   const int current = (int)gSettings.cameraFramesize;
 
   size_t row = 0;
-  strncpy(gRows[row], "<- Camera", CAM_SETTINGS_ROW_LEN - 1);
-  gRows[row][CAM_SETTINGS_ROW_LEN - 1] = '\0';
+  strlcpy(gRows[row], "<- Camera", CAM_SETTINGS_ROW_LEN);
   gRowPtrs[row] = gRows[row];
   row++;
 
@@ -517,8 +511,7 @@ static size_t buildStreamPickerRows() {
   const int curH = gSettings.g2StreamHeight;
 
   size_t row = 0;
-  strncpy(gRows[row], "<- Settings", CAM_SETTINGS_ROW_LEN - 1);
-  gRows[row][CAM_SETTINGS_ROW_LEN - 1] = '\0';
+  strlcpy(gRows[row], "<- Settings", CAM_SETTINGS_ROW_LEN);
   gRowPtrs[row] = gRows[row];
   row++;
 

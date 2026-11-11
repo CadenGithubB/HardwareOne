@@ -3298,13 +3298,13 @@ String GPSTrackManager::getValidationMessage(TrackValidation result, float cover
       snprintf(msg, sizeof(msg), "Error: Track outside map bounds (%.0f%% visible)", coverage);
       break;
     case TRACK_NO_MAP_LOADED:
-      strcpy(msg, "Error: No map loaded for validation");
+      strlcpy(msg, "Error: No map loaded for validation", sizeof(msg));
       break;
     case TRACK_EMPTY:
-      strcpy(msg, "Error: No track loaded");
+      strlcpy(msg, "Error: No track loaded", sizeof(msg));
       break;
     default:
-      strcpy(msg, "Unknown validation status");
+      strlcpy(msg, "Unknown validation status", sizeof(msg));
   }
   
   return msg;

@@ -2087,6 +2087,10 @@ add_test(
   NAME extern_declarations
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_extern_declarations.py)
+add_test(
+  NAME shared_text_helpers
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_shared_text_helpers.py)
 
 # OLED display-session writer windows (README "OLED display-session writer windows"):
 # the frame commit and the command-result path validate under the display lifecycle

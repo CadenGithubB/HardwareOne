@@ -264,8 +264,7 @@ static void notifViewRebuild() {
   sNotifViewAtRead = sNotifReadSeq;
   sNotifViewAtCleared = sNotifClearedSeq;
   sNotifViewAtGen = notifPrefsGeneration();
-  strncpy(sNotifViewAtUser, viewerName, sizeof(sNotifViewAtUser) - 1);
-  sNotifViewAtUser[sizeof(sNotifViewAtUser) - 1] = '\0';
+  strlcpy(sNotifViewAtUser, viewerName, sizeof(sNotifViewAtUser));
 }
 
 int oledNotificationCount() {
@@ -3406,8 +3405,7 @@ static bool executeOLEDCommandWithResultImpl(
   // replacement that landed during the copy, and the copy is wiped.
   const TransportSessionEpoch epoch = uc.ctx.transportSessionEpoch;
   if (!oledDisplayEpochLiveUnderWriter(epoch)) return false;
-  strncpy(out, outStr.c_str(), outSize - 1);
-  out[outSize - 1] = '\0';
+  strlcpy(out, outStr.c_str(), outSize);
   if (!transportSessionEpochIsLive(SOURCE_LOCAL_DISPLAY, epoch)) {
     memset(out, 0, outSize);
     return false;

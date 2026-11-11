@@ -186,8 +186,7 @@ static void settingsResetPendingMap() {
 
 static void writeBackRow(const char* label) {
   const char* lbl = (label && label[0]) ? label : "<- Back";
-  strncpy(gRows[0], lbl, SET_ROW_LEN);
-  gRows[0][SET_ROW_LEN - 1] = '\0';
+  strlcpy(gRows[0], lbl, SET_ROW_LEN);
   gRowPtrs[0] = gRows[0];
 }
 
@@ -300,8 +299,7 @@ static size_t buildModuleRows() {
   gPageModuleCount = shown;
 
   if (shown == 0) {
-    strncpy(gRows[row], "(no modules)", SET_ROW_LEN);
-    gRows[row][SET_ROW_LEN - 1] = '\0';
+    strlcpy(gRows[row], "(no modules)", SET_ROW_LEN);
     gRowPtrs[row] = gRows[row];
     row++;
   }
@@ -1055,8 +1053,7 @@ void g2BuildSettingsInfo(char* out, size_t cap) {
     if (s.length() > cap - 64) break;
   }
 
-  strncpy(out, s.c_str(), cap - 1);
-  out[cap - 1] = '\0';
+  strlcpy(out, s.c_str(), cap);
 }
 
 // -----------------------------------------------------------------------------

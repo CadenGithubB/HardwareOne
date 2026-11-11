@@ -3386,14 +3386,12 @@ bool evaluateCondition(const char* condition) {
       while (sEnd > sensor && (*sEnd == ' ' || *sEnd == '\t')) *sEnd-- = '\0';
       
       // Copy operator
-      strncpy(op, operators[i], sizeof(op) - 1);
-      op[sizeof(op) - 1] = '\0';
+      strlcpy(op, operators[i], sizeof(op));
       
       // Extract value
       const char* valStart = pos + strlen(operators[i]);
       while (*valStart == ' ' || *valStart == '\t') valStart++;
-      strncpy(value, valStart, sizeof(value) - 1);
-      value[sizeof(value) - 1] = '\0';
+      strlcpy(value, valStart, sizeof(value));
       // Trim value
       char* vEnd = value + strlen(value) - 1;
       while (vEnd > value && (*vEnd == ' ' || *vEnd == '\t')) *vEnd-- = '\0';
@@ -3480,7 +3478,7 @@ bool evaluateCondition(const char* condition) {
  #if ENABLE_APDS_SENSOR
     APDSCache apds{};
     if (!apdsCacheSnapshot(apds, 50) || !apds.apdsDataValid) return false;
-    strncpy(currentStringValue, (apds.apdsProximity > 50) ? "DETECTED" : "NONE", sizeof(currentStringValue) - 1);
+    strlcpy(currentStringValue, (apds.apdsProximity > 50) ? "DETECTED" : "NONE", sizeof(currentStringValue));
  #else
     return false;
  #endif
@@ -3489,22 +3487,21 @@ bool evaluateCondition(const char* condition) {
     time_t now = time(nullptr);
     struct tm* timeinfo = localtime(&now);
     int hour = timeinfo->tm_hour;
-    if (hour >= 6 && hour < 12) strncpy(currentStringValue, "MORNING", sizeof(currentStringValue) - 1);
-    else if (hour >= 12 && hour < 18) strncpy(currentStringValue, "AFTERNOON", sizeof(currentStringValue) - 1);
-    else if (hour >= 18 && hour < 24) strncpy(currentStringValue, "EVENING", sizeof(currentStringValue) - 1);
-    else strncpy(currentStringValue, "NIGHT", sizeof(currentStringValue) - 1);
+    if (hour >= 6 && hour < 12) strlcpy(currentStringValue, "MORNING", sizeof(currentStringValue));
+    else if (hour >= 12 && hour < 18) strlcpy(currentStringValue, "AFTERNOON", sizeof(currentStringValue));
+    else if (hour >= 18 && hour < 24) strlcpy(currentStringValue, "EVENING", sizeof(currentStringValue));
+    else strlcpy(currentStringValue, "NIGHT", sizeof(currentStringValue));
   } else if (strcmp(sensor, "ROOM") == 0) {
     // ESP-NOW metadata: room assignment
     isNumeric = false;
     if (gSettings.espnowRoom.length() > 0) {
-      strncpy(currentStringValue, gSettings.espnowRoom.c_str(), sizeof(currentStringValue) - 1);
-      currentStringValue[sizeof(currentStringValue) - 1] = '\0';
+      strlcpy(currentStringValue, gSettings.espnowRoom.c_str(), sizeof(currentStringValue));
       // Uppercase for comparison
       for (char* p = currentStringValue; *p; p++) {
         if (*p >= 'a' && *p <= 'z') *p -= 32;
       }
     } else {
-      strncpy(currentStringValue, "NONE", sizeof(currentStringValue) - 1);
+      strlcpy(currentStringValue, "NONE", sizeof(currentStringValue));
     }
     DEBUGF(DEBUG_AUTOMATIONS, "[eval] ROOM: current='%s' (from setting='%s')", 
            currentStringValue, gSettings.espnowRoom.c_str());
@@ -3512,14 +3509,13 @@ bool evaluateCondition(const char* condition) {
     // ESP-NOW metadata: zone assignment
     isNumeric = false;
     if (gSettings.espnowZone.length() > 0) {
-      strncpy(currentStringValue, gSettings.espnowZone.c_str(), sizeof(currentStringValue) - 1);
-      currentStringValue[sizeof(currentStringValue) - 1] = '\0';
+      strlcpy(currentStringValue, gSettings.espnowZone.c_str(), sizeof(currentStringValue));
       // Uppercase for comparison
       for (char* p = currentStringValue; *p; p++) {
         if (*p >= 'a' && *p <= 'z') *p -= 32;
       }
     } else {
-      strncpy(currentStringValue, "NONE", sizeof(currentStringValue) - 1);
+      strlcpy(currentStringValue, "NONE", sizeof(currentStringValue));
     }
     DEBUGF(DEBUG_AUTOMATIONS, "[eval] ZONE: current='%s' (from setting='%s')", 
            currentStringValue, gSettings.espnowZone.c_str());
@@ -3527,14 +3523,13 @@ bool evaluateCondition(const char* condition) {
     // ESP-NOW metadata: tags (supports CONTAINS operator)
     isNumeric = false;
     if (gSettings.espnowTags.length() > 0) {
-      strncpy(currentStringValue, gSettings.espnowTags.c_str(), sizeof(currentStringValue) - 1);
-      currentStringValue[sizeof(currentStringValue) - 1] = '\0';
+      strlcpy(currentStringValue, gSettings.espnowTags.c_str(), sizeof(currentStringValue));
       // Uppercase for comparison
       for (char* p = currentStringValue; *p; p++) {
         if (*p >= 'a' && *p <= 'z') *p -= 32;
       }
     } else {
-      strncpy(currentStringValue, "NONE", sizeof(currentStringValue) - 1);
+      strlcpy(currentStringValue, "NONE", sizeof(currentStringValue));
     }
     DEBUGF(DEBUG_AUTOMATIONS, "[eval] TAGS: current='%s' (from setting='%s')",
            currentStringValue, gSettings.espnowTags.c_str());
@@ -3633,21 +3628,18 @@ bool evaluateCondition(const char* condition) {
     // STA association + IP -> CONNECTED / NONE
     isNumeric = false;
  #if ENABLE_WIFI
-    strncpy(currentStringValue, WiFi.isConnected() ? "CONNECTED" : "NONE", sizeof(currentStringValue) - 1);
-    currentStringValue[sizeof(currentStringValue) - 1] = '\0';
+    strlcpy(currentStringValue, WiFi.isConnected() ? "CONNECTED" : "NONE", sizeof(currentStringValue));
  #else
     return false;
  #endif
   } else if (strcmp(sensor, "BLE") == 0) {
     // BLE GATT client connected -> CONNECTED / NONE (NONE when Bluetooth disabled)
     isNumeric = false;
-    strncpy(currentStringValue, isBLEConnected() ? "CONNECTED" : "NONE", sizeof(currentStringValue) - 1);
-    currentStringValue[sizeof(currentStringValue) - 1] = '\0';
+    strlcpy(currentStringValue, isBLEConnected() ? "CONNECTED" : "NONE", sizeof(currentStringValue));
   } else if (strcmp(sensor, "NTP") == 0) {
     // Wall clock holds a real date (RTC or NTP source) -> SYNCED / NONE
     isNumeric = false;
-    strncpy(currentStringValue, Clock::isSynced() ? "SYNCED" : "NONE", sizeof(currentStringValue) - 1);
-    currentStringValue[sizeof(currentStringValue) - 1] = '\0';
+    strlcpy(currentStringValue, Clock::isSynced() ? "SYNCED" : "NONE", sizeof(currentStringValue));
   } else if (strcmp(sensor, "DAY") == 0) {
     // Day of week -> SUN..SAT (tm_wday is 0=Sunday)
     isNumeric = false;
@@ -3656,16 +3648,14 @@ bool evaluateCondition(const char* condition) {
     static const char* const kDays[] = { "SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT" };
     int wd = ti->tm_wday;
     if (wd < 0 || wd > 6) wd = 0;
-    strncpy(currentStringValue, kDays[wd], sizeof(currentStringValue) - 1);
-    currentStringValue[sizeof(currentStringValue) - 1] = '\0';
+    strlcpy(currentStringValue, kDays[wd], sizeof(currentStringValue));
   } else if (strcmp(sensor, "GPS") == 0) {
     // GPS fix status -> FIX / NOFIX
     isNumeric = false;
  #if ENABLE_GPS_SENSOR
     GPSCache gps;
     if (!gpsCacheSnapshot(gps)) return false;
-    strncpy(currentStringValue, gps.hasFix ? "FIX" : "NOFIX", sizeof(currentStringValue) - 1);
-    currentStringValue[sizeof(currentStringValue) - 1] = '\0';
+    strlcpy(currentStringValue, gps.hasFix ? "FIX" : "NOFIX", sizeof(currentStringValue));
  #else
     return false;
  #endif
@@ -3676,8 +3666,7 @@ bool evaluateCondition(const char* condition) {
     LLMState st = llmBackendStatus().state;
     const char* v = (st == LLMState::READY) ? "READY"
                   : (st == LLMState::GENERATING || st == LLMState::LOADING) ? "BUSY" : "NONE";
-    strncpy(currentStringValue, v, sizeof(currentStringValue) - 1);
-    currentStringValue[sizeof(currentStringValue) - 1] = '\0';
+    strlcpy(currentStringValue, v, sizeof(currentStringValue));
  #else
     return false;
  #endif
@@ -3686,8 +3675,7 @@ bool evaluateCondition(const char* condition) {
     // ESP-NOW radio stack initialized -> ACTIVE / NONE
     isNumeric = false;
  #if ENABLE_ESPNOW
-    strncpy(currentStringValue, (gEspNow && gEspNow->initialized) ? "ACTIVE" : "NONE", sizeof(currentStringValue) - 1);
-    currentStringValue[sizeof(currentStringValue) - 1] = '\0';
+    strlcpy(currentStringValue, (gEspNow && gEspNow->initialized) ? "ACTIVE" : "NONE", sizeof(currentStringValue));
  #else
     return false;
  #endif
@@ -3695,8 +3683,7 @@ bool evaluateCondition(const char* condition) {
     // Bond mode enabled in config -> ACTIVE / NONE
     isNumeric = false;
  #if ENABLE_BONDED_MODE
-    strncpy(currentStringValue, gSettings.bondModeEnabled ? "ACTIVE" : "NONE", sizeof(currentStringValue) - 1);
-    currentStringValue[sizeof(currentStringValue) - 1] = '\0';
+    strlcpy(currentStringValue, gSettings.bondModeEnabled ? "ACTIVE" : "NONE", sizeof(currentStringValue));
  #else
     return false;
  #endif
@@ -3704,8 +3691,7 @@ bool evaluateCondition(const char* condition) {
     // This device's bond role -> MASTER / WORKER
     isNumeric = false;
  #if ENABLE_BONDED_MODE
-    strncpy(currentStringValue, isBondMaster() ? "MASTER" : "WORKER", sizeof(currentStringValue) - 1);
-    currentStringValue[sizeof(currentStringValue) - 1] = '\0';
+    strlcpy(currentStringValue, isBondMaster() ? "MASTER" : "WORKER", sizeof(currentStringValue));
  #else
     return false;
  #endif
@@ -3713,8 +3699,7 @@ bool evaluateCondition(const char* condition) {
     // A bonded partner is configured -> PAIRED / NONE
     isNumeric = false;
  #if ENABLE_BONDED_MODE
-    strncpy(currentStringValue, BondedPeer::isPaired() ? "PAIRED" : "NONE", sizeof(currentStringValue) - 1);
-    currentStringValue[sizeof(currentStringValue) - 1] = '\0';
+    strlcpy(currentStringValue, BondedPeer::isPaired() ? "PAIRED" : "NONE", sizeof(currentStringValue));
  #else
     return false;
  #endif
@@ -3722,8 +3707,7 @@ bool evaluateCondition(const char* condition) {
     // Bonded peer currently reachable -> ONLINE / OFFLINE
     isNumeric = false;
  #if ENABLE_BONDED_MODE
-    strncpy(currentStringValue, isBondModeOnline() ? "ONLINE" : "OFFLINE", sizeof(currentStringValue) - 1);
-    currentStringValue[sizeof(currentStringValue) - 1] = '\0';
+    strlcpy(currentStringValue, isBondModeOnline() ? "ONLINE" : "OFFLINE", sizeof(currentStringValue));
  #else
     return false;
  #endif
@@ -3731,8 +3715,7 @@ bool evaluateCondition(const char* condition) {
     // Bonded peer online AND config-synced -> SYNCED / NONE
     isNumeric = false;
  #if ENABLE_BONDED_MODE
-    strncpy(currentStringValue, isBondSynced() ? "SYNCED" : "NONE", sizeof(currentStringValue) - 1);
-    currentStringValue[sizeof(currentStringValue) - 1] = '\0';
+    strlcpy(currentStringValue, isBondSynced() ? "SYNCED" : "NONE", sizeof(currentStringValue));
  #else
     return false;
  #endif
@@ -3740,8 +3723,7 @@ bool evaluateCondition(const char* condition) {
     // WPS-style pairing window open -> ACTIVE / NONE
     isNumeric = false;
  #if ENABLE_ESPNOW
-    strncpy(currentStringValue, espnowPairModeActive() ? "ACTIVE" : "NONE", sizeof(currentStringValue) - 1);
-    currentStringValue[sizeof(currentStringValue) - 1] = '\0';
+    strlcpy(currentStringValue, espnowPairModeActive() ? "ACTIVE" : "NONE", sizeof(currentStringValue));
  #else
     return false;
  #endif
@@ -4068,8 +4050,7 @@ const char* executeConditionalCommand(const char* command, const char* owner, co
         broadcastOutput(msg);
         return "Message printed";
       } else {
-        strncpy(errorBuf, "Error: PRINT requires a message", sizeof(errorBuf) - 1);
-        errorBuf[sizeof(errorBuf) - 1] = '\0';
+        strlcpy(errorBuf, "Error: PRINT requires a message", sizeof(errorBuf));
         return errorBuf;
       }
     }
@@ -4085,13 +4066,11 @@ const char* executeConditionalCommand(const char* command, const char* owner, co
     prefix[7] = '\0';
     
     if (strncmp(prefix, "ELSE IF", 7) == 0) {
-      strncpy(errorBuf, "Error: 'ELSE IF' cannot be used as a standalone command", sizeof(errorBuf) - 1);
-      errorBuf[sizeof(errorBuf) - 1] = '\0';
+      strlcpy(errorBuf, "Error: 'ELSE IF' cannot be used as a standalone command", sizeof(errorBuf));
       return errorBuf;
     }
     if (cmdLen >= 5 && strncmp(prefix, "ELSE ", 5) == 0) {
-      strncpy(errorBuf, "Error: 'ELSE' cannot be used as a standalone command", sizeof(errorBuf) - 1);
-      errorBuf[sizeof(errorBuf) - 1] = '\0';
+      strlcpy(errorBuf, "Error: 'ELSE' cannot be used as a standalone command", sizeof(errorBuf));
       return errorBuf;
     }
   }
@@ -4121,8 +4100,7 @@ const char* executeConditionalCommand(const char* command, const char* owner, co
       }
       
       if (thenPos < 0) {
-        strncpy(errorBuf, "Error: Conditional command missing THEN", sizeof(errorBuf) - 1);
-        errorBuf[sizeof(errorBuf) - 1] = '\0';
+        strlcpy(errorBuf, "Error: Conditional command missing THEN", sizeof(errorBuf));
         return errorBuf;
       }
 
@@ -4144,8 +4122,7 @@ const char* executeConditionalCommand(const char* command, const char* owner, co
       char conditionBuf[128];
       size_t condLen = thenPos - 3;
       if (condLen >= sizeof(conditionBuf)) {
-        strncpy(errorBuf, "Error: IF condition too long (max 127 characters)", sizeof(errorBuf) - 1);
-        errorBuf[sizeof(errorBuf) - 1] = '\0';
+        strlcpy(errorBuf, "Error: IF condition too long (max 127 characters)", sizeof(errorBuf));
         return errorBuf;
       }
       strncpy(conditionBuf, cmdStr + 3, condLen);
@@ -4162,8 +4139,7 @@ const char* executeConditionalCommand(const char* command, const char* owner, co
       size_t thenEnd = (elsePos > thenPos) ? elsePos : cmdLen;
       size_t thenLen = thenEnd - thenStart;
       if (thenLen >= sizeof(thenBuf)) {
-        strncpy(errorBuf, "Error: THEN command too long (max 127 characters)", sizeof(errorBuf) - 1);
-        errorBuf[sizeof(errorBuf) - 1] = '\0';
+        strlcpy(errorBuf, "Error: THEN command too long (max 127 characters)", sizeof(errorBuf));
         return errorBuf;
       }
       strncpy(thenBuf, cmdStr + thenStart, thenLen);
@@ -4181,8 +4157,7 @@ const char* executeConditionalCommand(const char* command, const char* owner, co
         size_t elseStart = elsePos + 5;
         size_t elseLen = cmdLen - elseStart;
         if (elseLen >= sizeof(elseBuf)) {
-          strncpy(errorBuf, "Error: ELSE command too long (max 127 characters)", sizeof(errorBuf) - 1);
-          errorBuf[sizeof(errorBuf) - 1] = '\0';
+          strlcpy(errorBuf, "Error: ELSE command too long (max 127 characters)", sizeof(errorBuf));
           return errorBuf;
         }
         strncpy(elseBuf, cmdStr + elseStart, elseLen);

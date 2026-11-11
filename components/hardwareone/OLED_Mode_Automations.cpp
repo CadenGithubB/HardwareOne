@@ -378,8 +378,7 @@ static void wizKeyboardDone(const String& textIn) {
         wizStartKeyboard(AW_DAILY, "Time HH:MM", true);
         return;
       }
-      strncpy(sWizTime, text.c_str(), sizeof(sWizTime) - 1);
-      sWizTime[sizeof(sWizTime) - 1] = '\0';
+      strlcpy(sWizTime, text.c_str(), sizeof(sWizTime));
       wizStartKeyboard(AW_COMMAND, "Command:", false);
       return;
     }
@@ -899,8 +898,7 @@ static bool automationsInputHandler(int deltaX, int deltaY, uint32_t newlyPresse
         autoRenderData.selectedIdx < autoRenderData.count) {
       const AutomationSummary& sel = autoRenderData.items[autoRenderData.selectedIdx];
       sPendingDeleteId = sel.id;
-      strncpy(sPendingDeleteName, sel.name, sizeof(sPendingDeleteName) - 1);
-      sPendingDeleteName[sizeof(sPendingDeleteName) - 1] = '\0';
+      strlcpy(sPendingDeleteName, sel.name, sizeof(sPendingDeleteName));
       oledConfirmRequest("Delete automation?", sPendingDeleteName, autoDeleteConfirmed, nullptr);
     }
     return true;

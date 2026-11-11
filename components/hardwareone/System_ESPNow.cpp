@@ -1077,7 +1077,7 @@ static const char* formatSessionToken() {
   SessionState* s = bondPeerActiveSession();
   if (!s) return "";
   for (int i = 0; i < 16; i++) {
-    sprintf(tokenStr + i*2, "%02X", s->bondToken[i]);
+    snprintf(tokenStr + i*2, sizeof(tokenStr) - i*2, "%02X", s->bondToken[i]);
   }
   tokenStr[32] = '\0';
   return tokenStr;
@@ -2189,7 +2189,7 @@ bool v4_send_session_wrapped(const uint8_t dst[6], uint8_t type, uint16_t baseFl
     return false;
   }
   auto setErr = [&](const char* msg) {
-    if (errOut && errOutLen) { strncpy(errOut, msg, errOutLen - 1); errOut[errOutLen - 1] = 0; }
+    if (errOut && errOutLen) { strlcpy(errOut, msg, errOutLen); }
   };
   if (!dst || (plaintextLen > 0 && !plaintext)) {
     setErr("invalid args");
@@ -2295,7 +2295,7 @@ bool v4_send_encrypted_or_queue(const uint8_t dst[6], uint8_t type, uint16_t bas
     return false;
   }
   auto setStatus = [&](const char* msg) {
-    if (outStatus && outStatusLen) { strncpy(outStatus, msg, outStatusLen - 1); outStatus[outStatusLen - 1] = 0; }
+    if (outStatus && outStatusLen) { strlcpy(outStatus, msg, outStatusLen); }
   };
   if (!dst || (plaintextLen > 0 && !plaintext)) {
     setStatus("invalid args");
@@ -4870,8 +4870,7 @@ static void fileWriterFinalizeJob(void* arg) {
   uint8_t  sndMac[6];
   memcpy(sndMac, fileSlotsGetSenderMac(slot), 6);
   char filename[64];
-  strncpy(filename, fileSlotsGetFilename(slot), sizeof(filename) - 1);
-  filename[sizeof(filename) - 1] = '\0';
+  strlcpy(filename, fileSlotsGetFilename(slot), sizeof(filename));
   uint32_t recvBytes = fileSlotsGetReceivedBytes(slot);
   uint32_t msgId     = fileSlotsGetMsgId(slot);
   String   senderMacStr = macToDisplayStr(sndMac);
@@ -6033,7 +6032,7 @@ int espnowGetPairCandidateCount() {
 bool espnowGetPairCandidate(int idx, char* name, size_t nameCap, uint8_t mac[6], int* rssi) {
   if (!gEspNow || idx < 0 || idx >= gEspNow->unpairedDeviceCount) return false;
   const UnpairedDevice& d = gEspNow->unpairedDevices[idx];
-  if (name && nameCap) { strncpy(name, d.name.c_str(), nameCap - 1); name[nameCap - 1] = '\0'; }
+  if (name && nameCap) { strlcpy(name, d.name.c_str(), nameCap); }
   if (mac) memcpy(mac, d.mac, 6);
   if (rssi) *rssi = d.rssi;
   return true;
@@ -6048,7 +6047,7 @@ bool espnowGetIncomingPairRequest(char* name, size_t nameCap, uint8_t* mac, uint
   const espnowpair::Request in = gPair.in;
   portEXIT_CRITICAL(&gPairLock);
   if (!in.active) return false;
-  if (name && nameCap) { strncpy(name, in.name, nameCap - 1); name[nameCap - 1] = '\0'; }
+  if (name && nameCap) { strlcpy(name, in.name, nameCap); }
   if (mac) memcpy(mac, in.mac, 6);
   if (atMs) *atMs = in.atMs;
   return true;
@@ -7064,8 +7063,7 @@ static void v4_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_
           // are authorized — isAdminUser(kBondAdminUser) is true only while this
           // live session exists. Replaces the old non-admin "espnow" identity that
           // silently failed admin commands.
-          strncpy(username, kBondAdminUser, sizeof(username) - 1);
-          username[sizeof(username) - 1] = '\0';
+          strlcpy(username, kBondAdminUser, sizeof(username));
           BROADCAST_PRINTF("[ESP-NOW] Bonded command from %s (session token): %s",
                            deviceName, safeActualCmd.c_str());
         } else {
@@ -7356,7 +7354,7 @@ static void captureEspNowFrame(const char* direction, const uint8_t* peerMac,
   if (peerMac) {
     macToDisplay(peerMac, macStr, sizeof(macStr));  // canonical DISPLAY form
   } else {
-    strcpy(macStr, "??:??:??:??:??:??");
+    strlcpy(macStr, "??:??:??:??:??:??", sizeof(macStr));
   }
 
   // Base64-encode the full frame (header + payload). Per-frame scratch when
@@ -14774,7 +14772,7 @@ const char* cmd_test_concurrent(const String& argsInput) {
   
   BROADCAST_PRINTF("\nDevice 1 (2 peers):");
   TopologyStream* s1 = findOrCreateTopoStreamLocked(mac1, 12345);
-  strcpy(s1->senderName, "TestDevice1");
+  strlcpy(s1->senderName, "TestDevice1", sizeof(s1->senderName));
   s1->started = true;
   s1->totalPeers = 2;
   s1->receivedPeers = 2;
@@ -14794,7 +14792,7 @@ const char* cmd_test_concurrent(const String& argsInput) {
   
   BROADCAST_PRINTF("\nDevice 2 (1 peer):");
   TopologyStream* s2 = findOrCreateTopoStreamLocked(mac2, 12345);
-  strcpy(s2->senderName, "TestDevice2");
+  strlcpy(s2->senderName, "TestDevice2", sizeof(s2->senderName));
   s2->started = true;
   s2->totalPeers = 1;
   s2->receivedPeers = 1;
@@ -14809,7 +14807,7 @@ const char* cmd_test_concurrent(const String& argsInput) {
   
   BROADCAST_PRINTF("\nDevice 3 (0 peers):");
   TopologyStream* s3 = findOrCreateTopoStreamLocked(mac3, 12345);
-  strcpy(s3->senderName, "TestDevice3");
+  strlcpy(s3->senderName, "TestDevice3", sizeof(s3->senderName));
   s3->started = true;
   s3->totalPeers = 0;
   s3->receivedPeers = 0;

@@ -459,8 +459,7 @@ void debugOutputTask(void* parameter) {
           STACK_TRACEF("log_out.before_appendLineWithCap");
           appendLineWithCap(LOG_ERROR_FILE, line, LOG_ERROR_CAP);
           STACK_TRACEF("log_out.after_appendLineWithCap");
-          strncpy(lastErrText, msg->text, sizeof(lastErrText) - 1);
-          lastErrText[sizeof(lastErrText) - 1] = '\0';
+          strlcpy(lastErrText, msg->text, sizeof(lastErrText));
           lastErrTimeMs = now;
         }
       }

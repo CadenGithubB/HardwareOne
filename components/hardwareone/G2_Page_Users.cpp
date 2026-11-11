@@ -180,8 +180,7 @@ static bool selectedIsHigherRank() {
 static bool reloadSelectedUser() {
   if (!selectedUserValid()) return false;
   char wanted[kPublicUsernameMaxLen + 1];
-  strncpy(wanted, gUsers[gSelected].username, sizeof(wanted) - 1);
-  wanted[sizeof(wanted) - 1] = '\0';
+  strlcpy(wanted, gUsers[gSelected].username, sizeof(wanted));
   loadUsers();
   for (size_t i = 0; i < gUserCount; ++i) {
     if (strcmp(gUsers[i].username, wanted) == 0) {
@@ -275,8 +274,8 @@ static void showListMenu() {
 
   EXT_RAM_BSS_ATTR static char rows[2 + G2_USERS_MAX][72];
   const char* ptrs[2 + G2_USERS_MAX];
-  strcpy(rows[0], "<- Config");  ptrs[0] = rows[0];
-  strcpy(rows[1], "+ Add User"); ptrs[1] = rows[1];
+  strlcpy(rows[0], "<- Config", sizeof(rows[0]));  ptrs[0] = rows[0];
+  strlcpy(rows[1], "+ Add User", sizeof(rows[1])); ptrs[1] = rows[1];
   size_t n = 2;
   for (size_t i = 0; i < gUserCount; i++) {
     snprintf(rows[n], sizeof(rows[n]), "%.48s (%.10s)%s", gUsers[i].username,
@@ -352,7 +351,7 @@ static void showRoleMenu() {
   const int maxRank = pairerMaxRank();
   EXT_RAM_BSS_ATTR static char rows[5][28];
   const char* ptrs[5];
-  strcpy(rows[0], "<- Back"); ptrs[0] = rows[0];
+  strlcpy(rows[0], "<- Back", sizeof(rows[0])); ptrs[0] = rows[0];
   size_t n = 1;
   for (int rank = 0; rank <= maxRank && n < 5; rank++) {   // rows 1..N = ranks 0..maxRank
     snprintf(rows[n], 28, "[%c] %s", (rank == curRank) ? 'X' : ' ', kRoleNames[rank]);
@@ -376,19 +375,19 @@ static void showConfirmMenu(ConfirmAction action) {
   switch (action) {
     case CONFIRM_ACTION_KICK:
       snprintf(warning, sizeof(warning), "Sign out %.55s?", gUsers[gSelected].username);
-      strcpy(confirm, "Confirm Kick Sessions");
+      strlcpy(confirm, "Confirm Kick Sessions", sizeof(confirm));
       break;
     case CONFIRM_ACTION_BAN:
       snprintf(warning, sizeof(warning), "Ban %.60s?", gUsers[gSelected].username);
-      strcpy(confirm, "Confirm Ban + Kick");
+      strlcpy(confirm, "Confirm Ban + Kick", sizeof(confirm));
       break;
     case CONFIRM_ACTION_UNBAN:
       snprintf(warning, sizeof(warning), "Unban %.58s?", gUsers[gSelected].username);
-      strcpy(confirm, "Confirm Unban");
+      strlcpy(confirm, "Confirm Unban", sizeof(confirm));
       break;
     case CONFIRM_ACTION_DELETE:
       snprintf(warning, sizeof(warning), "Delete %.57s?", gUsers[gSelected].username);
-      strcpy(confirm, "Confirm Delete");
+      strlcpy(confirm, "Confirm Delete", sizeof(confirm));
       break;
     default:
       showDetailMenu();
@@ -427,7 +426,7 @@ static void showResultMenu() {
   if (selectedUserValid())
     snprintf(back, sizeof(back), "<- %.60s", gUsers[gSelected].username);
   else
-    strcpy(back, "<- Users");
+    strlcpy(back, "<- Users", sizeof(back));
   const char* items[] = {
     back,
     gResultFailed ? "Action Failed" : "Done",
@@ -480,8 +479,7 @@ static void newPasswordCommit(const char* text) {
     showPasswordError("Password must be 6-64 characters");
     return;
   }
-  strncpy(gPasswordNew, text, sizeof(gPasswordNew) - 1);
-  gPasswordNew[sizeof(gPasswordNew) - 1] = '\0';
+  strlcpy(gPasswordNew, text, sizeof(gPasswordNew));
   if (!beginSecretEntry("Confirm Password", passwordConfirmCommit)) {
     DEBUG_G2F("[G2-USERS] password confirmation entry failed");
     passwordFlowCancel();
@@ -490,8 +488,7 @@ static void newPasswordCommit(const char* text) {
 
 static void currentPasswordCommit(const char* text) {
   if (!text || !text[0]) { passwordFlowCancel(); return; }
-  strncpy(gPasswordCurrent, text, sizeof(gPasswordCurrent) - 1);
-  gPasswordCurrent[sizeof(gPasswordCurrent) - 1] = '\0';
+  strlcpy(gPasswordCurrent, text, sizeof(gPasswordCurrent));
   if (!beginSecretEntry("New Password", newPasswordCommit)) {
     DEBUG_G2F("[G2-USERS] new-password entry failed");
     passwordFlowCancel();
@@ -500,8 +497,7 @@ static void currentPasswordCommit(const char* text) {
 
 static void passwordConfirmCommit(const char* text) {
   if (!text || !text[0]) { passwordFlowCancel(); return; }
-  strncpy(gPasswordConfirm, text, sizeof(gPasswordConfirm) - 1);
-  gPasswordConfirm[sizeof(gPasswordConfirm) - 1] = '\0';
+  strlcpy(gPasswordConfirm, text, sizeof(gPasswordConfirm));
   if (strcmp(gPasswordNew, gPasswordConfirm) != 0) {
     showPasswordError("Passwords do not match");
     return;
@@ -588,8 +584,7 @@ static void addPassCommit(const char* text) {
     showPasswordError("Password must be 6-64 characters");
     return;
   }
-  strncpy(gAddPass, text, sizeof(gAddPass) - 1);
-  gAddPass[sizeof(gAddPass) - 1] = '\0';
+  strlcpy(gAddPass, text, sizeof(gAddPass));
   if (!beginSecretEntry("Confirm Password", addPassConfirmCommit)) {
     DEBUG_G2F("[G2-USERS] add-password confirmation entry failed");
     addUserCancel();
@@ -598,8 +593,7 @@ static void addPassCommit(const char* text) {
 
 static void addUserCommit(const char* text) {
   if (!text || text[0] == '\0') { showListMenu(); return; }
-  strncpy(gAddUser, text, sizeof(gAddUser) - 1);
-  gAddUser[sizeof(gAddUser) - 1] = '\0';
+  strlcpy(gAddUser, text, sizeof(gAddUser));
   showAddRoleMenu();
 }
 
@@ -621,7 +615,7 @@ static void showAddRoleMenu() {
   const int maxRank = pairerMaxRank();
   EXT_RAM_BSS_ATTR static char rows[5][24];
   const char* ptrs[5];
-  strcpy(rows[0], "<- Cancel"); ptrs[0] = rows[0];
+  strlcpy(rows[0], "<- Cancel", sizeof(rows[0])); ptrs[0] = rows[0];
   size_t n = 1;
   for (int rank = 0; rank <= maxRank && n < 5; rank++) {   // rows 1..N = ranks 0..maxRank
     snprintf(rows[n], 24, "%s", kRoleNames[rank]);

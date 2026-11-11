@@ -802,8 +802,7 @@ bool isAuthed(httpd_req_t* req, String& outUser) {
       BROADCAST_PRINTF("[auth] unknown SID for uri=%.*s", 120, uri);
       DEBUG_AUTHF("No session found for SID from IP %s (stale cookie after reboot)", ipBuf);
 
-      strncpy(lastDebugIP, ipBuf, sizeof(lastDebugIP) - 1);
-      lastDebugIP[sizeof(lastDebugIP) - 1] = '\0';
+      strlcpy(lastDebugIP, ipBuf, sizeof(lastDebugIP));
       lastDebugTime = now;
     }
 
@@ -830,8 +829,7 @@ bool isAuthed(httpd_req_t* req, String& outUser) {
   if (strcmp(ipBuf, lastBootDebugIP) != 0 || (bootNow - lastBootDebugTime) > 5000) {
     DEBUG_AUTHF("Validating session: user='%s', sessionBootId='%s', currentBootId='%s'",
                 gSessions[idx].user.c_str(), gSessions[idx].bootId.c_str(), gBootId.c_str());
-    strncpy(lastBootDebugIP, ipBuf, sizeof(lastBootDebugIP) - 1);
-    lastBootDebugIP[sizeof(lastBootDebugIP) - 1] = '\0';
+    strlcpy(lastBootDebugIP, ipBuf, sizeof(lastBootDebugIP));
     lastBootDebugTime = bootNow;
   }
 

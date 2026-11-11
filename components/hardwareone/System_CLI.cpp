@@ -326,8 +326,7 @@ bool handleHelpNavigation(const String& cmd, char* out, size_t outSize) {
   // Helper lambda to write OK to out and clear the render flag
   auto respond = [&]() {
     if (out && outSize) {
-      strncpy(out, "OK", outSize - 1);
-      out[outSize - 1] = '\0';
+      strlcpy(out, "OK", outSize);
     }
     gInHelpRender = false;
   };
@@ -533,8 +532,7 @@ static void broadcastHelpUsageIndented(const char* usage) {
 #if ENABLE_WIFI
         snprintf(formatted, sizeof(formatted), line, wifiNetworkCount());
 #else
-        strncpy(formatted, line, sizeof(formatted) - 1);
-        formatted[sizeof(formatted) - 1] = '\0';
+        strlcpy(formatted, line, sizeof(formatted));
 #endif
 
         BROADCAST_PRINTF("  %-28s   %s", "", formatted);

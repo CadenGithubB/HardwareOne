@@ -104,8 +104,7 @@ static void displayBondStatus() {
   // BondedPeer::peerName() does the parse + name resolution and falls back
   // to the raw MAC string when no friendly name is known. Truncate to fit.
   String displayName = BondedPeer::peerName();
-  strncpy(peerName, displayName.c_str(), sizeof(peerName) - 1);
-  peerName[sizeof(peerName) - 1] = '\0';
+  strlcpy(peerName, displayName.c_str(), sizeof(peerName));
   
   char buf[32];
   oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
@@ -344,8 +343,7 @@ void displayRemoteMode() {
   // BondedPeer::peerName() does the parse + name resolution and falls back
   // to the raw MAC string when no friendly name is known. Truncate to fit.
   String displayName = BondedPeer::peerName();
-  strncpy(peerName, displayName.c_str(), sizeof(peerName) - 1);
-  peerName[sizeof(peerName) - 1] = '\0';
+  strlcpy(peerName, displayName.c_str(), sizeof(peerName));
   peerName[14] = '\0';  // Truncate for display
   oledDisplay->print(peerName);
   oledDisplay->println(online ? " [ON]" : " [OFF]");

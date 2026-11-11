@@ -881,13 +881,13 @@ String encryptString(const String& password) {
     return "";
   }
 
-  int pos = sprintf(result, "AES:");
+  int pos = snprintf(result, resultLen, "AES:");
   for (int i = 0; i < 16; i++) {
-    pos += sprintf(result + pos, "%02X", iv[i]);
+    pos += snprintf(result + pos, resultLen - pos, "%02X", iv[i]);
   }
-  pos += sprintf(result + pos, ":");
+  pos += snprintf(result + pos, resultLen - pos, ":");
   for (int i = 0; i < paddedLen; i++) {
-    pos += sprintf(result + pos, "%02X", ciphertext[i]);
+    pos += snprintf(result + pos, resultLen - pos, "%02X", ciphertext[i]);
   }
 
   String output = String(result);

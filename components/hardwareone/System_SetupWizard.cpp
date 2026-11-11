@@ -622,8 +622,7 @@ void initSetupWizard() {
   const char* curName = draft.deviceName.length() > 0 ? draft.deviceName.c_str()
                       : draft.bleDeviceName.length() > 0 ? draft.bleDeviceName.c_str()
                       : "HardwareOne";
-  strncpy(wizardDeviceName, curName, sizeof(wizardDeviceName) - 1);
-  wizardDeviceName[sizeof(wizardDeviceName) - 1] = '\0';
+  strlcpy(wizardDeviceName, curName, sizeof(wizardDeviceName));
   memcpy(sWizardDraft.deviceNameBaseline, wizardDeviceName, sizeof(wizardDeviceName));
 
   sWizardBaselineKB = 0;
@@ -729,8 +728,7 @@ bool wizardStageESPNowSettings(const SetupWizardResult& result) {
   if (result.espnowRoom.length()) copyWizardString(draft.espnowRoom, result.espnowRoom);
   if (result.espnowZone.length()) copyWizardString(draft.espnowZone, result.espnowZone);
   draft.espnowStationary = result.espnowStationary;
-  strncpy(wizardDeviceName, draft.deviceName.c_str(), sizeof(wizardDeviceName) - 1);
-  wizardDeviceName[sizeof(wizardDeviceName) - 1] = '\0';
+  strlcpy(wizardDeviceName, draft.deviceName.c_str(), sizeof(wizardDeviceName));
   memcpy(sWizardDraft.deviceNameBaseline, wizardDeviceName, sizeof(wizardDeviceName));
   return sWizardDraft.valid;
 }
@@ -1673,8 +1671,7 @@ SetupWizardResult runSetupWizard() {
             String newName = waitForWizardInput();
             newName.trim();
             if (!isWizardCancelRequested() && newName.length() > 0) {
-              strncpy(wizardDeviceName, newName.c_str(), sizeof(wizardDeviceName) - 1);
-              wizardDeviceName[sizeof(wizardDeviceName) - 1] = '\0';
+              strlcpy(wizardDeviceName, newName.c_str(), sizeof(wizardDeviceName));
             }
           } else {
             wizardActivateCurrentItem();

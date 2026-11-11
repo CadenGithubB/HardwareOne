@@ -240,14 +240,12 @@ bool userManagerInput(int /*dx*/, int /*dy*/, uint32_t newlyPressed) {
     if (oledKeyboardIsCompleted()) {
       const char* text = oledKeyboardGetText();
       if (gUmKbStage == 0) {           // username → password
-        strncpy(gAddUser, text ? text : "", sizeof(gAddUser) - 1);
-        gAddUser[sizeof(gAddUser) - 1] = '\0';
+        strlcpy(gAddUser, text ? text : "", sizeof(gAddUser));
         oledKeyboardReset();
         if (gAddUser[0] == '\0') { gUmKbActive = false; gUmLevel = UM_LIST; return true; }
         umStartKeyboard(1, "Password", 64);
       } else {                          // password → role picker
-        strncpy(gAddPass, text ? text : "", sizeof(gAddPass) - 1);
-        gAddPass[sizeof(gAddPass) - 1] = '\0';
+        strlcpy(gAddPass, text ? text : "", sizeof(gAddPass));
         oledKeyboardReset();
         gUmKbActive = false;
         if (gAddPass[0] == '\0') { gUmLevel = UM_LIST; return true; }
@@ -297,8 +295,7 @@ bool userManagerInput(int /*dx*/, int /*dy*/, uint32_t newlyPressed) {
         if (gUmRoleSel > umMaxRank()) gUmRoleSel = umMaxRank();
         gUmLevel = UM_ROLE;
       } else {                            // Delete
-        strncpy(gUmDelName, gUsers[gUmTarget].username, sizeof(gUmDelName) - 1);
-        gUmDelName[sizeof(gUmDelName) - 1] = '\0';
+        strlcpy(gUmDelName, gUsers[gUmTarget].username, sizeof(gUmDelName));
         oledConfirmRequest("Delete user?", gUmDelName, umDeleteConfirmed, nullptr, false);
       }
       return true;

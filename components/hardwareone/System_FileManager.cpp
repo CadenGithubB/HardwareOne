@@ -118,7 +118,7 @@ bool FileManager::navigateUp() {
   // Truncate at last slash
   *lastSlash = '\0';
   if (strlen(state.currentPath) == 0) {
-    strcpy(state.currentPath, "/");
+    strlcpy(state.currentPath, "/", sizeof(state.currentPath));
   }
   
   state.selectedIndex = 0;

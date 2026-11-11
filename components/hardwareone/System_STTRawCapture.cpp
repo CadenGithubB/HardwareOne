@@ -122,7 +122,8 @@ bool writeSidecar(const char* pcmPath, uint32_t endedMs, bool drained) {
   snprintf(jsonPath, sizeof(jsonPath), "%s", pcmPath);
   char* dot = strrchr(jsonPath, '.');
   if (!dot) return false;
-  strcpy(dot, ".json");
+  const size_t room = sizeof(jsonPath) - static_cast<size_t>(dot - jsonPath);
+  if (strlcpy(dot, ".json", room) >= room) return false;
   constexpr size_t kCap = 1536;
   char* text = static_cast<char*>(ps_alloc(kCap, AllocPref::PreferPSRAM, "stt.raw_json"));
   if (!text) return false;

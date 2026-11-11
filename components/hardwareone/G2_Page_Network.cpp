@@ -354,8 +354,7 @@ void g2BuildNetworkInfo(char* out, size_t cap) {
   s += macLine;
 #endif
 
-  strncpy(out, s.c_str(), cap - 1);
-  out[cap - 1] = '\0';
+  strlcpy(out, s.c_str(), cap);
 }
 
 // -----------------------------------------------------------------------------
@@ -508,7 +507,7 @@ static void showWiFiStatusPage() {
   const char* ptrs[12];
   size_t n = 0;
 
-  strcpy(rows[n], "<- WiFi"); ptrs[n] = rows[n]; n++;
+  strlcpy(rows[n], "<- WiFi", sizeof(rows[n])); ptrs[n] = rows[n]; n++;
   // Two separate axes: RADIO power, then WiFi connection State.
   snprintf(rows[n], sizeof(rows[n]), "Radio: %s", wifiRadioOn() ? "ON" : "OFF");
   ptrs[n] = rows[n]; n++;
@@ -577,7 +576,7 @@ static uint32_t showWiFiScanningPlaceholder() {
 static void showScanResults() {
   setNetSub(NET_SUB_WIFI_SCAN);
   static EXT_RAM_BSS_ATTR char rows[1 + 8][48];  // PSRAM: deep-copied by g2ShowListPage
-  strcpy(rows[0], "<- WiFi");
+  strlcpy(rows[0], "<- WiFi", sizeof(rows[0]));
   const char* ptrs[1 + 8];
   ptrs[0] = rows[0];
   size_t n = 1;
@@ -609,7 +608,7 @@ static void showWiFiSavedList() {
   WifiNetworkSnapshot snapshot;
   const bool available = wifiNetworkSnapshot(snapshot);
   static EXT_RAM_BSS_ATTR char rows[1 + MAX_WIFI_NETWORKS][48];  // PSRAM: deep-copied by g2ShowListPage
-  strcpy(rows[0], "<- WiFi");
+  strlcpy(rows[0], "<- WiFi", sizeof(rows[0]));
   const char* ptrs[1 + MAX_WIFI_NETWORKS];
   ptrs[0] = rows[0];
   size_t n = 1;
@@ -653,7 +652,7 @@ static void showWiFiSavedActionMenu() {
   if (gWifiSavedSel >= 0 && gWifiSavedSel < gWifiSavedSnapshot.count) {
     snprintf(back, sizeof(back), "<- %s", gWifiSavedSnapshot.entries[gWifiSavedSel].ssid.c_str());
   } else {
-    strcpy(back, "<- Saved");
+    strlcpy(back, "<- Saved", sizeof(back));
   }
   const char* items[] = { back, "Connect", "Forget" };
   if (g2ShowListPage(items, sizeof(items) / sizeof(items[0])))
@@ -715,7 +714,7 @@ static void showEspNowDevices() {
   setNetSub(NET_SUB_ESPNOW_DEVS);
 #if ENABLE_ESPNOW
   static EXT_RAM_BSS_ATTR char rows[1 + 8][48];  // PSRAM: deep-copied by g2ShowListPage
-  strcpy(rows[0], "<- ESP-NOW");
+  strlcpy(rows[0], "<- ESP-NOW", sizeof(rows[0]));
   const char* ptrs[1 + 8];
   ptrs[0] = rows[0];
   size_t n = 1;
@@ -1704,8 +1703,7 @@ static void handleWiFiScanTap(uint32_t idx) {
   // Snapshot at tap time: the keyboard overlay blocks page taps but NOT the
   // scan worker, so this gScanCache entry can be rewritten while the
   // keyboard is open.
-  strncpy(sWifiAddSsid, ap.ssid, sizeof(sWifiAddSsid) - 1);
-  sWifiAddSsid[sizeof(sWifiAddSsid) - 1] = '\0';
+  strlcpy(sWifiAddSsid, ap.ssid, sizeof(sWifiAddSsid));
   if (!ap.secured) {
     DEBUG_G2F("[G2] WiFi: open AP '%s' — saving without password", sWifiAddSsid);
     wifiAddSubmit("");

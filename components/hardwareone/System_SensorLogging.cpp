@@ -586,15 +586,15 @@ void sensorLogTick() {
     // R1 ring vitals
     if ((gSensorLogMask & LOG_R1) && s.r1Connected && remaining > 0) {
       char hr[12], hrv[12], spo2[12], temp[12], bat[12], wear[8];
-      if (s.r1HrValid)      snprintf(hr, sizeof(hr), "%u", (unsigned)s.r1Hr); else strcpy(hr, "--");
-      if (s.r1HrvValid)     snprintf(hrv, sizeof(hrv), "%d", (int)s.r1Hrv); else strcpy(hrv, "--");
-      if (s.r1Spo2Valid)    snprintf(spo2, sizeof(spo2), "%u", (unsigned)s.r1Spo2); else strcpy(spo2, "--");
+      if (s.r1HrValid)      snprintf(hr, sizeof(hr), "%u", (unsigned)s.r1Hr); else strlcpy(hr, "--", sizeof(hr));
+      if (s.r1HrvValid)     snprintf(hrv, sizeof(hrv), "%d", (int)s.r1Hrv); else strlcpy(hrv, "--", sizeof(hrv));
+      if (s.r1Spo2Valid)    snprintf(spo2, sizeof(spo2), "%u", (unsigned)s.r1Spo2); else strlcpy(spo2, "--", sizeof(spo2));
       if (s.r1TempValid)    snprintf(temp, sizeof(temp), "%d.%d",
                                     (int)(s.r1TempTenths / 10),
                                     (int)(s.r1TempTenths < 0 ? -(s.r1TempTenths % 10)
                                                              : (s.r1TempTenths % 10)));
-      else strcpy(temp, "--");
-      if (s.r1BatteryValid) snprintf(bat, sizeof(bat), "%u", (unsigned)s.r1Battery); else strcpy(bat, "--");
+      else strlcpy(temp, "--", sizeof(temp));
+      if (s.r1BatteryValid) snprintf(bat, sizeof(bat), "%u", (unsigned)s.r1Battery); else strlcpy(bat, "--", sizeof(bat));
       snprintf(wear, sizeof(wear), "%s", g2RingWearName(s.r1WearValid, s.r1Wear));
       written = snprintf(pos, remaining,
                          "r1: hr=%s hrv=%s spo2=%s temp=%s bat=%s wear=%s | ",

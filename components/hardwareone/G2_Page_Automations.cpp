@@ -70,7 +70,7 @@ static void showListMenu() {
   char rows[1 + G2_AUTO_MAX][40];
   const char* ptrs[1 + G2_AUTO_MAX];
   long ids[G2_AUTO_MAX] = {};
-  strcpy(rows[0], "<- Apps");
+  strlcpy(rows[0], "<- Apps", sizeof(rows[0]));
   ptrs[0] = rows[0];
   size_t n = 1;
 

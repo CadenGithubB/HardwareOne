@@ -125,8 +125,7 @@ CompanionStats monitorStats() {
 
 void setLastResult(const char* text) {
   portENTER_CRITICAL(&sLock);
-  strncpy(sLastResult, text, sizeof(sLastResult) - 1);
-  sLastResult[sizeof(sLastResult) - 1] = '\0';
+  strlcpy(sLastResult, text, sizeof(sLastResult));
   portEXIT_CRITICAL(&sLock);
 }
 

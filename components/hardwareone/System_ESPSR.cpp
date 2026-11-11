@@ -1519,10 +1519,8 @@ static void srSnipStartSession(const char* reason, int cmdId, const char* phrase
   gSrSnipSessionDeadlineMs = gSrSnipSessionStartMs + gSrSnipMaxMs;
   gSrSnipSessionId++;
   gSrSnipSessionCmdId = cmdId;
-  strncpy(gSrSnipSessionPhrase, phrase ? phrase : "", sizeof(gSrSnipSessionPhrase) - 1);
-  gSrSnipSessionPhrase[sizeof(gSrSnipSessionPhrase) - 1] = '\0';
-  strncpy(gSrSnipSessionReason, reason ? reason : "snip", sizeof(gSrSnipSessionReason) - 1);
-  gSrSnipSessionReason[sizeof(gSrSnipSessionReason) - 1] = '\0';
+  strlcpy(gSrSnipSessionPhrase, phrase ? phrase : "", sizeof(gSrSnipSessionPhrase));
+  strlcpy(gSrSnipSessionReason, reason ? reason : "snip", sizeof(gSrSnipSessionReason));
   if (gSrSnipRing && gSrSnipRingSamples > 0) {
     size_t copyCount = (gSrSnipRingSamples < maxSamples) ? gSrSnipRingSamples : maxSamples;
     size_t startIdx = (gSrSnipRingHead + gSrSnipRingSamples - copyCount) % gSrSnipRingSamples;

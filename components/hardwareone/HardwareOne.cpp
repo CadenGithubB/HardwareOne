@@ -1161,11 +1161,9 @@ static const uint32_t REBOOT_REASON_MAGIC = 0x5245424F;  // 'REBO'
 
 void rebootStashReason(const char* reason, const char* who, uint8_t source) {
   if (!reason) reason = "";
-  strncpy(rtcRebootReason, reason, sizeof(rtcRebootReason) - 1);
-  rtcRebootReason[sizeof(rtcRebootReason) - 1] = '\0';
+  strlcpy(rtcRebootReason, reason, sizeof(rtcRebootReason));
   if (!who) who = "";
-  strncpy(rtcRebootWho, who, sizeof(rtcRebootWho) - 1);
-  rtcRebootWho[sizeof(rtcRebootWho) - 1] = '\0';
+  strlcpy(rtcRebootWho, who, sizeof(rtcRebootWho));
   rtcRebootSource = source;
   rtcRebootReasonMagic = REBOOT_REASON_MAGIC;
 }

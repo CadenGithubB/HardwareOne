@@ -483,7 +483,7 @@ static esp_err_t handleBackup(httpd_req_t* req) {
   {
     char catBuf[48];
     if (wantSettings && wantUsers && wantAutomations && wantEspnow && wantMaps && wantCerts) {
-      strcpy(catBuf, "all");
+      strlcpy(catBuf, "all", sizeof(catBuf));
     } else {
       snprintf(catBuf, sizeof(catBuf), "%s%s%s%s%s%s",
                wantSettings ? "settings," : "",

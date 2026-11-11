@@ -476,9 +476,9 @@ static size_t buildRows() {
 
   FileManager* fm = ensureFm();
   if (!fm) {
-    strncpy(gFilesRows[0], "<- Main Menu", FILES_ROW_LEN);
+    strlcpy(gFilesRows[0], "<- Main Menu", FILES_ROW_LEN);
     gFilesRowPtrs[0] = gFilesRows[0];
-    strncpy(gFilesRows[1], "(file mgr init failed)", FILES_ROW_LEN);
+    strlcpy(gFilesRows[1], "(file mgr init failed)", FILES_ROW_LEN);
     gFilesRowPtrs[1] = gFilesRows[1];
     gFilesRowCount = 2;
     return 2;
@@ -492,8 +492,7 @@ static size_t buildRows() {
   // Row 0: back. At root we exit Files entirely; in a subdir we'd go up
   // one level — but ".. (up)" is a separate row that handles parent
   // navigation, so the "Back" tap consistently exits Files for now.
-  strncpy(gFilesRows[row], "<- Main Menu", FILES_ROW_LEN);
-  gFilesRows[row][FILES_ROW_LEN - 1] = '\0';
+  strlcpy(gFilesRows[row], "<- Main Menu", FILES_ROW_LEN);
   gFilesRowPtrs[row] = gFilesRows[row];
   row++;
 
@@ -1012,8 +1011,7 @@ void g2BuildFilesInfo(char* out, size_t cap) {
   FileManager* fm = ensureFm();
   if (!fm) {
     s += "fm init failed";
-    strncpy(out, s.c_str(), cap - 1);
-    out[cap - 1] = '\0';
+    strlcpy(out, s.c_str(), cap);
     return;
   }
 
@@ -1035,8 +1033,7 @@ void g2BuildFilesInfo(char* out, size_t cap) {
     if (s.length() > cap - 64) break;
   }
 
-  strncpy(out, s.c_str(), cap - 1);
-  out[cap - 1] = '\0';
+  strlcpy(out, s.c_str(), cap);
 }
 
 // The directory list; `backResult` (a rename/delete result) replaces the
@@ -1254,8 +1251,7 @@ void g2FilesHandleTap(uint32_t idx) {
         // Snapshot the target NOW — the chooser slot is cleared by list
         // redraws and the keyboard doesn't block the scan worker.
         const bool resolved = buildChooserPath(gFilesActionPath, sizeof(gFilesActionPath));
-        strncpy(gFilesActionName, cached.name, sizeof(gFilesActionName) - 1);
-        gFilesActionName[sizeof(gFilesActionName) - 1] = '\0';
+        strlcpy(gFilesActionName, cached.name, sizeof(gFilesActionName));
         gFilesChooserActive = false;
         if (!resolved) {
           g2ShowTextAsList("File path unavailable - rename on web", "<- Back");
@@ -1286,8 +1282,7 @@ void g2FilesHandleTap(uint32_t idx) {
       }
 
       case FACT_DELETE:
-        strncpy(gFilesActionName, cached.name, sizeof(gFilesActionName) - 1);
-        gFilesActionName[sizeof(gFilesActionName) - 1] = '\0';
+        strlcpy(gFilesActionName, cached.name, sizeof(gFilesActionName));
         if (!buildChooserPath(gFilesActionPath, sizeof(gFilesActionPath))) {
           gFilesChooserActive = false;
           g2ShowTextAsList("File path unavailable - delete on web", "<- Back");

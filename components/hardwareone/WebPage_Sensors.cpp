@@ -487,8 +487,7 @@ esp_err_t handleRemoteSensors(httpd_req_t* req) {
         httpd_query_key_value(query, "sensor", sensorType, sizeof(sensorType)) == ESP_OK) {
       // URL-decode the MAC (browser sends E8%3A9F%3A... instead of E8:9F:...)
       String decodedMac = urlDecode(String(deviceMac));
-      strncpy(deviceMac, decodedMac.c_str(), sizeof(deviceMac) - 1);
-      deviceMac[sizeof(deviceMac) - 1] = '\0';
+      strlcpy(deviceMac, decodedMac.c_str(), sizeof(deviceMac));
       
       // Return specific sensor data
       uint8_t mac[6];

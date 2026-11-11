@@ -584,8 +584,7 @@ void streamDrainPending(FileTransferSlotImpl& s) {
       buf      = s.streamPendQ[s.streamPendHead];
       len      = s.streamBufLen[buf];
       needOpen = !s.streamOpened;
-      strncpy(partPathCopy, s.partPath, sizeof(partPathCopy) - 1);
-      partPathCopy[sizeof(partPathCopy) - 1] = '\0';
+      strlcpy(partPathCopy, s.partPath, sizeof(partPathCopy));
     }
     // --- flash work, NO slot mutex held (a PENDING buffer is never touched by
     //     espnow_task, so reading streamBuf[buf] here is race-free) ---

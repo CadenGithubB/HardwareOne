@@ -7185,8 +7185,7 @@ buildG2StatusSnapshot(char* out, size_t cap) {
     s.remove(s.length() - 1);
   }
 
-  strncpy(out, s.c_str(), cap - 1);
-  out[cap - 1] = '\0';
+  strlcpy(out, s.c_str(), cap);
 }
 
 // Top-right corner battery widget content. Renders the G2 lens battery
@@ -8249,8 +8248,7 @@ static bool renderMicDetailLive() {
                         createLifecycleEpoch, presentationEpoch)) {
       return false;
     }
-    strncpy(gMicDetailLastReadout, readout, sizeof(gMicDetailLastReadout) - 1);
-    gMicDetailLastReadout[sizeof(gMicDetailLastReadout) - 1] = '\0';
+    strlcpy(gMicDetailLastReadout, readout, sizeof(gMicDetailLastReadout));
     DEBUG_G2F("[G2] mic-detail: initial CREATE acked (1 list + 1 text)");
     return true;
   }
@@ -8264,8 +8262,7 @@ static bool renderMicDetailLive() {
                                 kMicDetailReadoutName, kMicDetailReadoutCid,
                                 readout);
   if (ok) {
-    strncpy(gMicDetailLastReadout, readout, sizeof(gMicDetailLastReadout) - 1);
-    gMicDetailLastReadout[sizeof(gMicDetailLastReadout) - 1] = '\0';
+    strlcpy(gMicDetailLastReadout, readout, sizeof(gMicDetailLastReadout));
   }
   return ok;
 }
@@ -8935,8 +8932,7 @@ static bool renderFmTunerLive() {
                              createLifecycleEpoch)) {
       return false;
     }
-    strncpy(gFmLastReadout, readout, sizeof(gFmLastReadout) - 1);
-    gFmLastReadout[sizeof(gFmLastReadout) - 1] = '\0';
+    strlcpy(gFmLastReadout, readout, sizeof(gFmLastReadout));
     return true;
   }
 
@@ -8945,8 +8941,7 @@ static bool renderFmTunerLive() {
   }
   bool ok = sendUpdateTextNamed(*arm, kFmReadoutName, kFmReadoutCid, readout);
   if (ok) {
-    strncpy(gFmLastReadout, readout, sizeof(gFmLastReadout) - 1);
-    gFmLastReadout[sizeof(gFmLastReadout) - 1] = '\0';
+    strlcpy(gFmLastReadout, readout, sizeof(gFmLastReadout));
   }
   return ok;
 }
@@ -9856,8 +9851,7 @@ static bool renderSensorDetailLive() {
                              createLifecycleEpoch)) {
       return false;
     }
-    strncpy(gSensorLiveLastReadout, readout, sizeof(gSensorLiveLastReadout) - 1);
-    gSensorLiveLastReadout[sizeof(gSensorLiveLastReadout) - 1] = '\0';
+    strlcpy(gSensorLiveLastReadout, readout, sizeof(gSensorLiveLastReadout));
     DEBUG_G2F("[G2] sensor-live: initial CREATE acked (1 list + 1 text)");
     return true;
   }
@@ -9868,8 +9862,7 @@ static bool renderSensorDetailLive() {
   bool ok = sendUpdateTextNamed(*arm, kSensorLiveReadoutName,
                                 kSensorLiveReadoutCid, readout);
   if (ok) {
-    strncpy(gSensorLiveLastReadout, readout, sizeof(gSensorLiveLastReadout) - 1);
-    gSensorLiveLastReadout[sizeof(gSensorLiveLastReadout) - 1] = '\0';
+    strlcpy(gSensorLiveLastReadout, readout, sizeof(gSensorLiveLastReadout));
   }
   return ok;
 }
@@ -10966,8 +10959,7 @@ static void tapLabelCacheStore(const char* const* items, size_t n) {
                     : (n < kTapLabelRows) ? n : kTapLabelRows;
   for (size_t i = 0; i < take; i++) {
     const char* s = items[i] ? items[i] : "";
-    strncpy(gTapLabels[i], s, kTapLabelWidth - 1);
-    gTapLabels[i][kTapLabelWidth - 1] = '\0';
+    strlcpy(gTapLabels[i], s, kTapLabelWidth);
   }
   // Publish the count after the labels so a concurrent peek never indexes
   // a slot that has never been written.
@@ -10980,12 +10972,10 @@ static void tapLabelCachePeek(uint32_t idx, char* out, size_t cap) {
   if (!out || cap == 0) return;
   out[0] = '\0';
   if (idx < gTapLabelCount) {
-    strncpy(out, gTapLabels[idx], cap - 1);
-    out[cap - 1] = '\0';
+    strlcpy(out, gTapLabels[idx], cap);
   }
   if (!out[0]) {
-    strncpy(out, "?", cap - 1);
-    out[cap - 1] = '\0';
+    strlcpy(out, "?", cap);
   }
 }
 
@@ -11030,8 +11020,7 @@ static void handleHijackMenuTap(uint32_t idx, const char* wireName,
   if (g2HijackRowsPrivate()) {
     snprintf(lbl, sizeof(lbl), "private");
   } else if (wireName && wireName[0]) {
-    strncpy(lbl, wireName, sizeof(lbl) - 1);
-    lbl[sizeof(lbl) - 1] = '\0';
+    strlcpy(lbl, wireName, sizeof(lbl));
   } else {
     tapLabelCachePeek(idx, lbl, sizeof(lbl));
   }
@@ -11039,8 +11028,7 @@ static void handleHijackMenuTap(uint32_t idx, const char* wireName,
   // lines below are always on, so the label never carries one.
   {
     const String masked = maskMacTokens(String(lbl));
-    strncpy(lbl, masked.c_str(), sizeof(lbl) - 1);
-    lbl[sizeof(lbl) - 1] = '\0';
+    strlcpy(lbl, masked.c_str(), sizeof(lbl));
   }
 
   // Text-entry overlay: when active, the live-page renders the keyboard
@@ -12101,8 +12089,7 @@ static void handleEnvelope(G2Temple& t, const G2EnvelopeView& env,
               (versions.hasRight && gR.connected) ? versions.right :
               ((versions.hasLeft && gL.connected) ? versions.left : nullptr);
           if (aggregate) {
-            strncpy(gFwVersion, aggregate, sizeof(gFwVersion) - 1);
-            gFwVersion[sizeof(gFwVersion) - 1] = '\0';
+            strlcpy(gFwVersion, aggregate, sizeof(gFwVersion));
           }
         }
         portEXIT_CRITICAL(&gTopologyMux);
@@ -26045,8 +26032,7 @@ bool g2ShowTextAsList(const char* text, const char* backLabel) {
 
   // Row 0: back affordance.
   const char* lbl = (backLabel && backLabel[0]) ? backLabel : "<- Back";
-  strncpy(gRows[0], lbl, sizeof(gRows[0]));
-  gRows[0][sizeof(gRows[0]) - 1] = '\0';
+  strlcpy(gRows[0], lbl, sizeof(gRows[0]));
   gPtrs[0] = gRows[0];
   size_t n = 1;
 
@@ -26154,8 +26140,7 @@ static size_t splitTextIntoRows(const char* text,
                                 const char* backLabel) {
   if (!text || maxRows == 0) return 0;
   const char* lbl = (backLabel && backLabel[0]) ? backLabel : "<- Back";
-  strncpy(rows[0], lbl, sizeof(rows[0]));
-  rows[0][sizeof(rows[0]) - 1] = '\0';
+  strlcpy(rows[0], lbl, sizeof(rows[0]));
   ptrs[0] = rows[0];
   size_t n = 1;
   const char* p = text;
@@ -27097,18 +27082,12 @@ static bool renderStatusCompound() {
     }
     // Seed the "last rendered" cache with what we just sent so the
     // first REBUILD tick can short-circuit if nothing changed.
-    strncpy(gStatusLastBattStr,  battStr,  sizeof(gStatusLastBattStr)  - 1);
-    gStatusLastBattStr[sizeof(gStatusLastBattStr) - 1]   = '\0';
-    strncpy(gStatusLastBodyStr,  bodyBuf,  sizeof(gStatusLastBodyStr)  - 1);
-    gStatusLastBodyStr[sizeof(gStatusLastBodyStr) - 1]   = '\0';
-    strncpy(gStatusLastMeterStr, meterStr, sizeof(gStatusLastMeterStr) - 1);
-    gStatusLastMeterStr[sizeof(gStatusLastMeterStr) - 1] = '\0';
-    strncpy(gStatusLastR1Str,    r1Str,    sizeof(gStatusLastR1Str)    - 1);
-    gStatusLastR1Str[sizeof(gStatusLastR1Str) - 1]       = '\0';
-    strncpy(gStatusLastEspStr,   espStr,   sizeof(gStatusLastEspStr)   - 1);
-    gStatusLastEspStr[sizeof(gStatusLastEspStr) - 1]     = '\0';
-    strncpy(gStatusLastPhoneStr, phoneStr, sizeof(gStatusLastPhoneStr) - 1);
-    gStatusLastPhoneStr[sizeof(gStatusLastPhoneStr) - 1] = '\0';
+    strlcpy(gStatusLastBattStr, battStr, sizeof(gStatusLastBattStr));
+    strlcpy(gStatusLastBodyStr, bodyBuf, sizeof(gStatusLastBodyStr));
+    strlcpy(gStatusLastMeterStr, meterStr, sizeof(gStatusLastMeterStr));
+    strlcpy(gStatusLastR1Str, r1Str, sizeof(gStatusLastR1Str));
+    strlcpy(gStatusLastEspStr, espStr, sizeof(gStatusLastEspStr));
+    strlcpy(gStatusLastPhoneStr, phoneStr, sizeof(gStatusLastPhoneStr));
     free(bodyBuf);
     DEBUG_G2F("[G2] status-compound: initial CREATE acked "
               "(1 list + 5 text children)");
@@ -27171,18 +27150,12 @@ static bool renderStatusCompound() {
   // Update all cache entries on success — even if only one of the
   // five children changed, the wire-shipped strings now match what's
   // on the lens, so caching the current values is still correct.
-  strncpy(gStatusLastBodyStr,  bodyBuf,  sizeof(gStatusLastBodyStr)  - 1);
-  gStatusLastBodyStr[sizeof(gStatusLastBodyStr) - 1]   = '\0';
-  strncpy(gStatusLastBattStr,  battStr,  sizeof(gStatusLastBattStr)  - 1);
-  gStatusLastBattStr[sizeof(gStatusLastBattStr) - 1]   = '\0';
-  strncpy(gStatusLastMeterStr, meterStr, sizeof(gStatusLastMeterStr) - 1);
-  gStatusLastMeterStr[sizeof(gStatusLastMeterStr) - 1] = '\0';
-  strncpy(gStatusLastR1Str,    r1Str,    sizeof(gStatusLastR1Str)    - 1);
-  gStatusLastR1Str[sizeof(gStatusLastR1Str) - 1]       = '\0';
-  strncpy(gStatusLastEspStr,   espStr,   sizeof(gStatusLastEspStr)   - 1);
-  gStatusLastEspStr[sizeof(gStatusLastEspStr) - 1]     = '\0';
-  strncpy(gStatusLastPhoneStr, phoneStr, sizeof(gStatusLastPhoneStr) - 1);
-  gStatusLastPhoneStr[sizeof(gStatusLastPhoneStr) - 1] = '\0';
+  strlcpy(gStatusLastBodyStr, bodyBuf, sizeof(gStatusLastBodyStr));
+  strlcpy(gStatusLastBattStr, battStr, sizeof(gStatusLastBattStr));
+  strlcpy(gStatusLastMeterStr, meterStr, sizeof(gStatusLastMeterStr));
+  strlcpy(gStatusLastR1Str, r1Str, sizeof(gStatusLastR1Str));
+  strlcpy(gStatusLastEspStr, espStr, sizeof(gStatusLastEspStr));
+  strlcpy(gStatusLastPhoneStr, phoneStr, sizeof(gStatusLastPhoneStr));
   free(bodyBuf);
 
   DEBUG_G2F("[G2] status-compound: tick (multi-rebuilt: "
@@ -33405,8 +33378,7 @@ void g2ProbeImageQ25SetPackPath(const char* dirPath) {
     DEBUG_G2F("[G2] Q25 pack path rejected (must be subdirectory of %s/)", root);
     return;
   }
-  strncpy(s_q25PackDir, dirPath, sizeof(s_q25PackDir) - 1);
-  s_q25PackDir[sizeof(s_q25PackDir) - 1] = '\0';
+  strlcpy(s_q25PackDir, dirPath, sizeof(s_q25PackDir));
   size_t n = strlen(s_q25PackDir);
   while (n > 0 && (s_q25PackDir[n - 1] == '/' || s_q25PackDir[n - 1] == '\\')) {
     s_q25PackDir[--n] = '\0';
@@ -36727,8 +36699,7 @@ static void g2HealthPageWorker(void* arg) {
       probePostProbeShutdown(cleanupFence);
       break;
     }
-    strncpy(lastReadout, readout, sizeof(lastReadout) - 1);
-    lastReadout[sizeof(lastReadout) - 1] = '\0';
+    strlcpy(lastReadout, readout, sizeof(lastReadout));
     DEBUG_G2F("[G2] health page: created Overview (list@'lstHealth' + text@'%s')",
               kTxtName);
     // Leave ImageProbing once Overview is live — staying in that state
@@ -36873,8 +36844,7 @@ static void g2HealthPageWorker(void* arg) {
           if (!createHealthOverview(*arm, readout)) {
             BROADCAST_PRINTF("[G2] health page: Overview re-CREATE failed — retrying");
           } else {
-            strncpy(lastReadout, readout, sizeof(lastReadout) - 1);
-            lastReadout[sizeof(lastReadout) - 1] = '\0';
+            strlcpy(lastReadout, readout, sizeof(lastReadout));
             shapeOverview = true;
             menuGen = curMenuGen;
             g2HealthClearGraphPush();
@@ -36895,16 +36865,14 @@ static void g2HealthPageWorker(void* arg) {
             else                      g2HealthAction(1);  // MAIN Overview
             buildHealthText(readout, sizeof(readout));
             if (createHealthOverview(*arm, readout)) {
-              strncpy(lastReadout, readout, sizeof(lastReadout) - 1);
-              lastReadout[sizeof(lastReadout) - 1] = '\0';
+              strlcpy(lastReadout, readout, sizeof(lastReadout));
               shapeOverview = true;
               menuGen = g2HealthMenuGeneration();
               gHealthTextDead = false;
             }
             imageProbeEnd();
           } else {
-            strncpy(lastReadout, readout, sizeof(lastReadout) - 1);
-            lastReadout[sizeof(lastReadout) - 1] = '\0';
+            strlcpy(lastReadout, readout, sizeof(lastReadout));
             shapeOverview = false;
             menuGen = curMenuGen;
             gHealthTextDead = false;
@@ -36921,8 +36889,7 @@ static void g2HealthPageWorker(void* arg) {
         buildHealthText(readout, sizeof(readout));
         if (!gHealthTextDead && strcmp(readout, lastReadout) != 0) {
           if (sendUpdateTextNamed(*arm, kTxtName, kTxtCid, readout)) {
-            strncpy(lastReadout, readout, sizeof(lastReadout) - 1);
-            lastReadout[sizeof(lastReadout) - 1] = '\0';
+            strlcpy(lastReadout, readout, sizeof(lastReadout));
             // Live vitals refresh = page is healthy (same idea as camera
             // frame pushes). Tap-only refresh kicked users out ~60 s into
             // a passive graph watch.
@@ -36935,8 +36902,7 @@ static void g2HealthPageWorker(void* arg) {
         buildHealthText(readout, sizeof(readout));
         if (!gHealthTextDead && strcmp(readout, lastReadout) != 0) {
           if (sendUpdateTextNamed(*arm, kTxtName, kTxtCid, readout)) {
-            strncpy(lastReadout, readout, sizeof(lastReadout) - 1);
-            lastReadout[sizeof(lastReadout) - 1] = '\0';
+            strlcpy(lastReadout, readout, sizeof(lastReadout));
             if (g2FsmHijackActive()) gHijackStartedMs = millis();
           }
         }
