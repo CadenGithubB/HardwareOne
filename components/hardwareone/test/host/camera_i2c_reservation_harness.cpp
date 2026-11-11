@@ -35,8 +35,8 @@ unsigned pdMS_TO_TICKS(unsigned ms){return ms;}
 int xSemaphoreTake(void* mutex,unsigned){return mutex?pdTRUE:0;}
 void xSemaphoreGive(void* mutex){assert(mutex);}
 
-struct I2CDevice {};
-struct I2CBusMetrics {uint32_t unused;};
+struct I2cDevice {};
+struct I2cBusMetrics {uint32_t unused;};
 // INSERT_PRODUCTION_REQUEST_TYPES
 
 // INSERT_PRODUCTION_MANAGER_DECLARATION
@@ -66,7 +66,7 @@ char* getDebugBuffer(){static char output[1024];return output;}
 // INSERT_PRODUCTION_ENABLE_COMMAND
 
 int main() {
-  I2CDeviceManager manager;
+  I2cDeviceManager manager;
   int semaphore;for(auto& mutex:manager.busMutexes)mutex=&semaphore;
   assert(!manager.retainBus(0)&&!manager.retainBus(2));
   assert(manager.wires[0]==&Wire1 && manager.wires[1]==&Wire);

@@ -44,7 +44,7 @@ void initMutexes() {
   }
 }
 
-// Bridge is now handled in initI2CManager() in System_I2C.cpp
+// Bridge is now handled in initI2cManager() in System_I2C.cpp
 
 // ============================================================================
 // Helper: Check if current task holds a mutex
@@ -65,7 +65,7 @@ bool isFsLockedByCurrentTask() {
 }
 
 bool isI2cLockedByCurrentTask() {
-  I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
+  I2cDeviceManager* mgr = I2cDeviceManager::getInstance();
   return mgr ? isHeldByCurrentTask(mgr->getBusMutex()) : false;
 }
 

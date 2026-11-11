@@ -43,19 +43,19 @@ helpers_h = (COMPONENT / "System_I2C.h").read_text(encoding="utf-8")
 system_cpp = (COMPONENT / "System_I2C.cpp").read_text(encoding="utf-8")
 hardware_cpp = (COMPONENT / "HardwareOne.cpp").read_text(encoding="utf-8")
 
-options = block_after(manager_h, "struct I2CTransactionOptions")
+options = block_after(manager_h, "struct I2cTransactionOptions")
 for declaration in ("uint32_t clockHz;", "uint32_t lockWaitMs;"):
     if declaration not in options:
-        fail(f"I2CTransactionOptions lost {declaration}")
+        fail(f"I2cTransactionOptions lost {declaration}")
 
 device_identity = manager_h[
-    manager_h.index("class I2CDevice {") : manager_h.index("// Health tracking")
+    manager_h.index("class I2cDevice {") : manager_h.index("// Health tracking")
 ]
 for stale_field in ("baseTimeoutMs", "adaptiveTimeoutMs"):
     if stale_field in device_identity:
         fail(f"registry identity again owns transaction policy: {stale_field}")
 
-execute = block_after(manager_h, "auto I2CDeviceManager::executeTransaction")
+execute = block_after(manager_h, "auto I2cDeviceManager::executeTransaction")
 if "options.lockWaitMs" not in execute:
     fail("executeTransaction does not take its mutex wait from this call")
 if "options.clockHz" not in execute:
@@ -68,15 +68,15 @@ for stale_read in (
     if stale_read in execute:
         fail(f"executeTransaction reads stale registry policy: {stale_read}")
 
-device_forwarder = block_after(manager_h, "auto I2CDevice::transaction")
+device_forwarder = block_after(manager_h, "auto I2cDevice::transaction")
 if not re.search(
     r"executeTransaction\s*\(\s*this\s*,[\s\S]*?options\s*,\s*mode\s*\)",
     device_forwarder,
 ):
-    fail("I2CDevice::transaction does not forward per-call options")
+    fail("I2cDevice::transaction does not forward per-call options")
 
 registration = block_after(
-    manager_cpp, "I2CDevice* I2CDeviceManager::registerDevice"
+    manager_cpp, "I2cDevice* I2cDeviceManager::registerDevice"
 )
 if "devices[i].address == addr && devices[i].bus == busIdx" not in registration:
     fail("duplicate registration is no longer keyed by the physical (bus, address)")
@@ -96,7 +96,7 @@ helper_family = helpers_h[
     )
 ]
 option_builds = helper_family.count(
-    "const I2CTransactionOptions options{clockHz, lockWaitMs};"
+    "const I2cTransactionOptions options{clockHz, lockWaitMs};"
 )
 if option_builds != 6:
     fail(f"expected six standard/NACK helper option builds, found {option_builds}")
@@ -123,7 +123,7 @@ if not re.search(
 ):
     fail("boot pre-registration does not record identity on the configured bus")
 
-discovery = block_after(system_cpp, "void discoverI2CDevices()")
+discovery = block_after(system_cpp, "void discoverI2cDevices()")
 if "if (!isSensorCompiled(i2cSensors[i])) continue;" not in discovery:
     fail("smart discovery no longer filters its scan list with isSensorCompiled()")
 

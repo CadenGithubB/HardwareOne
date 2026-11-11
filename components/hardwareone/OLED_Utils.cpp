@@ -5330,7 +5330,7 @@ int oledMenuCategoryItemIndex = 0;  // Selected item within category
 bool earlyOledInit() {
 #if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306
   // Early exit if I2C bus is disabled
-  if (!gI2CBusRunning) {
+  if (!gI2cBusRunning) {
     DEBUG_DISPLAYF("OLED init skipped - I2C bus disabled");
     oledConnected = false;
     gOledRunning = false;

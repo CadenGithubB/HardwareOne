@@ -41,12 +41,12 @@ static bool mnCanDestroy = true;
 bool deinitMultiNet() { if (!mnCanDestroy) return false; destroyed.push_back("mn"); return true; }
 void deinitAFE() { destroyed.push_back("afe"); }
 void deinitSRModels() { destroyed.push_back("models"); }
-void deinitI2SMicrophone() { destroyed.push_back("hal"); }
+void deinitI2sMicrophone() { destroyed.push_back("hal"); }
 void restoreMicrophoneAfterSRIfNeeded() { destroyed.push_back("restore"); }
 // INSERT_LIFECYCLE
 
-static uint32_t gSrI2SReadZero=0, gSrG2ReadZero=0, gSrI2SReadOk=0, gSrAfeFeedOk=0;
-static uint64_t gSrI2SBytesOk=0, gSrG2BytesOk=0;
+static uint32_t gSrI2sReadZero=0, gSrG2ReadZero=0, gSrI2sReadOk=0, gSrAfeFeedOk=0;
+static uint64_t gSrI2sBytesOk=0, gSrG2BytesOk=0;
 static int16_t gSrLastPcmMin=0, gSrLastPcmMax=0;
 static float gSrLastPcmAbsAvg=0;
 static bool gSrSnipEnabled = true, gSrFiltersEnabled = true;

@@ -1603,7 +1603,7 @@ void buildSystemInfoJson(JsonDocument& doc, bool includeDeviceList) {
   {
     JsonObject i2c = conn["i2c"].to<JsonObject>();
     i2c["compiled"] = true;
-    i2c["enabled"]  = gI2CBusRunning;
+    i2c["enabled"]  = gI2cBusRunning;
     // Honest, contradiction-proof counts (NOT the manager registry, which
     // drifts via phantom bus-0 pre-registrations + ever-talked accounting):
     //   devices       = compiled sensor TYPES (capability)
@@ -3181,7 +3181,7 @@ void printMemoryReport() {
   // I2C System
   broadcastOutput(
     "  I2C System:\n"
-    "    Clock Stack:        32 bytes\n"     // Fixed 8-slot array inside I2CDeviceManager
+    "    Clock Stack:        32 bytes\n"     // Fixed 8-slot array inside I2cDeviceManager
     "    Mutex Objects:     ~64 bytes");
   static_vars_total += 32 + 64;
   

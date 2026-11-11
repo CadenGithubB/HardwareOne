@@ -50,8 +50,8 @@ template<class T> static void ps_delete(T* value) {
   assert(!transactionHeld);
   if (value) { value->~T(); std::free(value); ++frees; }
 }
-struct I2CDeviceManager {
-  static I2CDeviceManager* getInstance() { static I2CDeviceManager manager; return &manager; }
+struct I2cDeviceManager {
+  static I2cDeviceManager* getInstance() { static I2cDeviceManager manager; return &manager; }
   TwoWire* getWire(uint8_t bus) { ++getWireCalls; assert(bus == gSettings.servoBus); return wireAvailable ? &wire : nullptr; }
 };
 template<class Operation>

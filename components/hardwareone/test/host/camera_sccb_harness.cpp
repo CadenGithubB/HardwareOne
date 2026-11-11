@@ -28,16 +28,16 @@ struct TwoWire {
  int read(){assert(held&&left);--left;return 0x56;}
  int available(){return left;}
 };static TwoWire wire;
-struct I2CTransactionOptions {uint32_t clockHz,lockWaitMs;};
-struct I2CDevice {
+struct I2cTransactionOptions {uint32_t clockHz,lockWaitMs;};
+struct I2cDevice {
  enum class Mode{NACK_TOLERANT};
- template<class F>bool transaction(F f,I2CTransactionOptions o,Mode){++transactions;lastClock=o.clockHz;lastWait=o.lockWaitMs;if(!lockOK)return false;assert(!held);held=true;bool ok=f();held=false;return ok;}
-};static I2CDevice device;
-struct I2CDeviceManager {
- static I2CDeviceManager* existingInstance(){static I2CDeviceManager m;return &m;}
+ template<class F>bool transaction(F f,I2cTransactionOptions o,Mode){++transactions;lastClock=o.clockHz;lastWait=o.lockWaitMs;if(!lockOK)return false;assert(!held);held=true;bool ok=f();held=false;return ok;}
+};static I2cDevice device;
+struct I2cDeviceManager {
+ static I2cDeviceManager* existingInstance(){static I2cDeviceManager m;return &m;}
  bool retainBus(uint8_t b){assert(b==0);if(!busReady)return false;++retains;return true;}
  void releaseBus(uint8_t b){assert(b==0);++releases;}
- I2CDevice* registerDevice(unsigned address,const char*,uint8_t b){assert(address==0x36&&b==0);return &device;}
+ I2cDevice* registerDevice(unsigned address,const char*,uint8_t b){assert(address==0x36&&b==0);return &device;}
  TwoWire* getWire(uint8_t b){assert(b==0);return &wire;}
 };
 esp_err_t i2c_master_get_bus_handle(i2c_port_num_t port,void** out){assert(port==1);*out=reinterpret_cast<void*>(1);return ESP_OK;}

@@ -27,11 +27,11 @@ def main() -> None:
     constant = re.search(r"^#define I2C_WIRE1_DEFAULT_FREQ[^\n]+", manager, re.M)
     require(constant is not None, "missing production default bus clock")
     definitions = [constant.group()] + [extract_block(manager, marker) for marker in (
-        "I2CDeviceManager::I2CDeviceManager()", "I2CDevice::I2CDevice()",
-        "void I2CDevice::init(", "static void postDeviceHealthEvent(",
-        "static void announceUnresponsive(", "void I2CDevice::recordSuccess(",
-        "void I2CDevice::recordError(", "bool I2CDevice::isDegraded(",
-        "void I2CDevice::attemptRecovery(",
+        "I2cDeviceManager::I2cDeviceManager()", "I2cDevice::I2cDevice()",
+        "void I2cDevice::init(", "static void postDeviceHealthEvent(",
+        "static void announceUnresponsive(", "void I2cDevice::recordSuccess(",
+        "void I2cDevice::recordError(", "bool I2cDevice::isDegraded(",
+        "void I2cDevice::attemptRecovery(",
     )] + [extract_block(notifications, marker) for marker in (
         "static NotifRule notifDefaultRuleFor(", "void notifFormatEvent(",
     )]

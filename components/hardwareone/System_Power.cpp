@@ -166,12 +166,12 @@ bool powerSetCpuFrequencyMhz(uint32_t mhz, bool* outClockChanged) {
     PollPauseGuard pause;
     // Settings may apply before I2C startup. Changing the clock must not create
     // the manager or initialize buses as a side effect.
-    I2CDeviceManager* mgr = I2CDeviceManager::existingInstance();
-    SemaphoreHandle_t held[I2CDeviceManager::NUM_BUSES] = {};
+    I2cDeviceManager* mgr = I2cDeviceManager::existingInstance();
+    SemaphoreHandle_t held[I2cDeviceManager::NUM_BUSES] = {};
     if (mgr) {
       // Bus locks are non-recursive. Reject a transaction's own request before
       // taking another bus, rather than waiting with the buses in reverse order.
-      for (uint8_t b = 0; b < I2CDeviceManager::NUM_BUSES; ++b) {
+      for (uint8_t b = 0; b < I2cDeviceManager::NUM_BUSES; ++b) {
         SemaphoreHandle_t mutex = mgr->getBusMutex(b);
         if (mutex && xSemaphoreGetMutexHolder(mutex) == xTaskGetCurrentTaskHandle()) {
           applied = false;
@@ -181,7 +181,7 @@ bool powerSetCpuFrequencyMhz(uint32_t mhz, bool* outClockChanged) {
       if (applied) {
         // Pausing stops new polls; the locks also drain in-flight transfers and
         // exclude command-driven I2C work until the clock transition completes.
-        for (uint8_t b = 0; b < I2CDeviceManager::NUM_BUSES; ++b) {
+        for (uint8_t b = 0; b < I2cDeviceManager::NUM_BUSES; ++b) {
           SemaphoreHandle_t mutex = mgr->getBusMutex(b);
           if (!mutex) continue;
           if (xSemaphoreTake(mutex, pdMS_TO_TICKS(2000)) != pdTRUE) {
@@ -210,7 +210,7 @@ bool powerSetCpuFrequencyMhz(uint32_t mhz, bool* outClockChanged) {
       applied = accepted && actual == mhz;
     }
 #if ENABLE_I2C_SYSTEM
-    for (uint8_t b = I2CDeviceManager::NUM_BUSES; b > 0; --b) {
+    for (uint8_t b = I2cDeviceManager::NUM_BUSES; b > 0; --b) {
       if (held[b - 1]) xSemaphoreGive(held[b - 1]);
     }
 #endif

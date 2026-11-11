@@ -598,7 +598,7 @@ bool thermalInit() {
   }
   
   const uint8_t thermalBus = (uint8_t)gSettings.thermalBus;
-  I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
+  I2cDeviceManager* mgr = I2cDeviceManager::getInstance();
   TwoWire* thermalWire = mgr ? mgr->getWire(thermalBus) : nullptr;
   if (!thermalWire) return false;
 
@@ -733,11 +733,11 @@ bool thermalPoll() {
                    result, errDesc, (unsigned long)captureTime, (unsigned long)ESP.getFreeHeap());
     
     // Check I2C health for this device
-    I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
-    I2CDevice* dev = mgr ? mgr->getDevice(I2C_ADDR_THERMAL,
+    I2cDeviceManager* mgr = I2cDeviceManager::getInstance();
+    I2cDevice* dev = mgr ? mgr->getDevice(I2C_ADDR_THERMAL,
                                           (uint8_t)gSettings.thermalBus) : nullptr;
     if (dev) {
-      const I2CDevice::Health& h = dev->getHealth();
+      const I2cDevice::Health& h = dev->getHealth();
       ERROR_THERMALF("  I2C Health: degraded=%d consec=%d total=%d NACK=%d TIMEOUT=%d",
                      dev->isDegraded() ? 1 : 0, h.consecutiveErrors, h.totalErrors,
                      h.nackCount, h.timeoutCount);
@@ -1248,12 +1248,12 @@ const char* cmd_thermaldiag(const String& argsInput) {
   buf += n; remaining -= n;
   
   // Check I2C device health
-  I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
+  I2cDeviceManager* mgr = I2cDeviceManager::getInstance();
   const uint8_t thermalBus = (uint8_t)gSettings.thermalBus;
-  I2CDevice* dev = mgr ? mgr->getDevice(I2C_ADDR_THERMAL, thermalBus) : nullptr;
+  I2cDevice* dev = mgr ? mgr->getDevice(I2C_ADDR_THERMAL, thermalBus) : nullptr;
   
   if (dev) {
-    const I2CDevice::Health& h = dev->getHealth();
+    const I2cDevice::Health& h = dev->getHealth();
     n = snprintf(buf, remaining, "I2C Health: addr=0x%02X degraded=%d consec=%d total=%d\n",
                  dev->address, dev->isDegraded() ? 1 : 0, h.consecutiveErrors, h.totalErrors);
     buf += n; remaining -= n;
@@ -1430,7 +1430,7 @@ const size_t thermalCommandsCount = sizeof(thermalCommands) / sizeof(thermalComm
 //
 // Cleanup Strategy:
 //   1. Check gThermalRunning flag at loop start
-//   2. Acquire bus mutex via I2CDeviceManager to prevent race conditions during cleanup
+//   2. Acquire bus mutex via I2cDeviceManager to prevent race conditions during cleanup
 //   3. Delete sensor object and invalidate cache
 //   4. Release mutex and delete task
 // ============================================================================

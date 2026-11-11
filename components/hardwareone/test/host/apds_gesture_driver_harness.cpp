@@ -37,7 +37,7 @@ static unsigned long millis() { return scenario.now; }
   throw std::runtime_error("incremental gesture reader must not sleep with the shared bus held");
 }
 
-struct I2CDevice {
+struct I2cDevice {
   bool write_then_read(const uint8_t* prefix, size_t prefixLength,
                        uint8_t* buffer, size_t count) {
     check(prefixLength == 1 && *prefix == APDS9960_GFIFO_U, "read helper selects gesture FIFO");
@@ -61,7 +61,7 @@ struct I2CDevice {
 class Adafruit_APDS9960 {
  public:
   // INSERT_COUNTERS
-  I2CDevice* i2c_dev = &i2cDevice;
+  I2cDevice* i2c_dev = &i2cDevice;
   struct GestureStatus { uint8_t GVALID = 0, GFOV = 0; } _gstatus;
   uint8_t readGesture();
   uint8_t read(uint8_t reg, uint8_t* buffer, uint8_t count);

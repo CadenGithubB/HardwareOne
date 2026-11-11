@@ -88,7 +88,7 @@ static bool isThermalCompiled() {
 #endif
 }
 
-static bool isI2CCompiled() {
+static bool isI2cCompiled() {
 #if ENABLE_I2C_SYSTEM
   return true;
 #else
@@ -538,7 +538,7 @@ static constexpr FeatureEntry featureRegistry[] = {
   // === CORE HARDWARE FEATURES ===
   { "i2c", "I2C Bus", FEATURE_CAT_CORE, 4,
     FEATURE_FLAG_RUNTIME_TOGGLE | FEATURE_FLAG_REQUIRES_REBOOT,
-    &gSettings.i2cEnabled, isI2CCompiled,
+    &gSettings.i2cEnabled, isI2cCompiled,
     "I2C hardware bus (required for OLED and sensors)" },
     
   // Unconditional (was #if ENABLE_AUTOMATION): an #if'd row vanishes on a

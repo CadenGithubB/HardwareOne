@@ -33,7 +33,7 @@
 // This pauses only the periodic *sensor poll loops*; it does not abort in-flight
 // transactions and does not touch BLE/WiFi.
 
-// Number of independent I2C buses tracked. Mirrors I2CDeviceManager's NUM_BUSES
+// Number of independent I2C buses tracked. Mirrors I2cDeviceManager's NUM_BUSES
 // (bus 0 = Wire1 / I2C_NUM_1 / gamepad; bus 1 = Wire / I2C_NUM_0 / OLED). Kept
 // as its own constant so this module needn't depend on the I2C manager header —
 // if NUM_BUSES ever grows, bump this to match.

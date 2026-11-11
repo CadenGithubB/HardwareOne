@@ -381,12 +381,12 @@ bool imuInit() {
   INFO_IMU_LIFECYCLEF("Starting BNO055 IMU initialization (STEMMA QT)...");
 
   const uint8_t imuBus = (uint8_t)gSettings.imuBus;
-  I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
+  I2cDeviceManager* mgr = I2cDeviceManager::getInstance();
   TwoWire* imuWire = mgr ? mgr->getWire(imuBus) : nullptr;
   if (!imuWire) return false;
 
   // Reset the health record on the same bus this driver will use.
-  if (I2CDevice* dev = mgr->getDevice(I2C_ADDR_IMU, imuBus)) {
+  if (I2cDevice* dev = mgr->getDevice(I2C_ADDR_IMU, imuBus)) {
     dev->resetGracePeriod();
   }
 
@@ -420,7 +420,7 @@ bool imuInit() {
     for (int attempt = 1; attempt <= maxAttempts; ++attempt) {
       DEBUG_IMU_LIFECYCLEF("Error: [IMU] Init attempt %d/%d at I2C %lu Hz", attempt, maxAttempts, clocks[attempt - 1]);
 
-      // Clock management now handled by I2CDeviceManager
+      // Clock management now handled by I2cDeviceManager
       delay(150);
 
       // If we previously created an object, clean it up before retrying
@@ -1163,7 +1163,7 @@ const size_t imuCommandsCount = sizeof(imuCommands) / sizeof(imuCommands[0]);
 //
 // Cleanup Strategy:
 //   1. Check gImuRunning flag at loop start
-//   2. Acquire bus mutex via I2CDeviceManager to prevent race conditions during cleanup
+//   2. Acquire bus mutex via I2cDeviceManager to prevent race conditions during cleanup
 //   3. Delete sensor object and invalidate cache
 //   4. Release mutex and delete task
 // ============================================================================
@@ -1235,7 +1235,7 @@ void imuTask(void* parameter) {
       unsigned long nowMs = millis();
       if (nowMs - lastIMURead >= imuPollMs) {
         // IMU reads ~5ms at 100kHz; fail fast and retry next poll rather than blocking 1000ms
-        I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
+        I2cDeviceManager* mgr = I2cDeviceManager::getInstance();
         TwoWire* imuWire = mgr ? mgr->getWire(imuBus) : nullptr;
         auto result = imuWire && i2cTaskWithTimeout(imuBus, I2C_ADDR_IMU, 100000, 100, [&]() -> bool {
           // Probe device presence so health system can track failures

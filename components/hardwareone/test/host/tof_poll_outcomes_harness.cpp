@@ -27,7 +27,7 @@ struct FakeSemaphore {
   std::function<void()> onTake;
 };
 TwoWire Wire, Wire1;
-bool gI2CBusRunning = true;
+bool gI2cBusRunning = true;
 static uint32_t nowUs = 1000000;
 uint32_t micros() { nowUs += 10; return nowUs; }
 uint32_t millis() { return nowUs / 1000; }
@@ -52,18 +52,18 @@ BaseType_t xSemaphoreGive(SemaphoreHandle_t mutex) {
   assert(mutex && mutex->held); mutex->held = false; ++mutex->gives; return pdTRUE;
 }
 
-I2CDeviceManager* I2CDeviceManager::instance = nullptr;
-I2CDeviceManager* I2CDeviceManager::getInstance() { return instance; }
+I2cDeviceManager* I2cDeviceManager::instance = nullptr;
+I2cDeviceManager* I2cDeviceManager::getInstance() { return instance; }
 static unsigned recoveries = 0;
 static void assertBusesReleased() {
-  auto* manager = I2CDeviceManager::instance;
+  auto* manager = I2cDeviceManager::instance;
   for (auto* mutex : manager->busMutexes) assert(!mutex || !mutex->held);
 }
-void I2CDeviceManager::checkBusRecoveryNeeded() { assertBusesReleased(); ++recoveries; }
-bool I2CDeviceManager::busRecoveryThrottled(uint8_t) const { assertBusesReleased(); return false; }
-void I2CDeviceManager::performBusRecovery(uint8_t) { assertBusesReleased(); ++recoveries; }
-static void logI2CRecovery(uint8_t, const char*, uint16_t) { assertBusesReleased(); }
-static void logI2CError(uint8_t, const char*, uint8_t, uint16_t, bool) { assertBusesReleased(); }
+void I2cDeviceManager::checkBusRecoveryNeeded() { assertBusesReleased(); ++recoveries; }
+bool I2cDeviceManager::busRecoveryThrottled(uint8_t) const { assertBusesReleased(); return false; }
+void I2cDeviceManager::performBusRecovery(uint8_t) { assertBusesReleased(); ++recoveries; }
+static void logI2cRecovery(uint8_t, const char*, uint16_t) { assertBusesReleased(); }
+static void logI2cError(uint8_t, const char*, uint8_t, uint16_t, bool) { assertBusesReleased(); }
 
 #define INFO_TOF_LIFECYCLEF(...) ((void)0)
 #define DEBUG_PERFORMANCEF(...) ((void)0)
@@ -115,7 +115,7 @@ static int readyStatus, readStatus, rearmStatus;
 static uint8_t readyValue = 1;
 static std::vector<std::string> driverTrace;
 static void hardwareCall(const char* label) {
-  assert(I2CDeviceManager::instance->busMutexes[gSettings.tofBus]->held);
+  assert(I2cDeviceManager::instance->busMutexes[gSettings.tofBus]->held);
   assert(!sTofCacheMutex->held);
   driverTrace.push_back(label);
 }
@@ -151,16 +151,16 @@ static void vTaskDelay(unsigned) {
 // INSERT_PRODUCTION
 
 struct Fixture {
-  I2CDeviceManager manager;
+  I2cDeviceManager manager;
   FakeSemaphore mutexes[2], cacheMutex, registryMutex;
-  I2CDevice::Health checkpoint{};
+  I2cDevice::Health checkpoint{};
   TofCache published{};
   unsigned checkpointProbes = 0;
   std::vector<std::string> checkpointEvents;
 
   explicit Fixture(uint8_t bus) {
     assert(!gVL53L4CX);
-    I2CDeviceManager::instance = &manager;
+    I2cDeviceManager::instance = &manager;
     Wire = {}; Wire1 = {};
     manager.managerMutex = &registryMutex;
     for (uint8_t i = 0; i < 2; ++i) {
@@ -198,7 +198,7 @@ struct Fixture {
     assert(manager.currentClockHz[gSettings.tofBus] == 100000);
     assert(manager.clockStackDepths[gSettings.tofBus] == 0);
   }
-  ~Fixture() { assert(!gVL53L4CX); I2CDeviceManager::instance = nullptr; afterPoll = {}; }
+  ~Fixture() { assert(!gVL53L4CX); I2cDeviceManager::instance = nullptr; afterPoll = {}; }
 };
 
 int main() {
@@ -289,7 +289,7 @@ int main() {
       Fixture f(bus);
       auto* device = f.manager.getDevice(I2C_ADDR_TOF, bus);
       for (unsigned error = 0; error < 4; ++error) {
-        device->recordError(I2CErrorType::NACK, 2);
+        device->recordError(I2cErrorType::NACK, 2);
       }
       assert(device->isDegraded() && device->health.consecutiveErrors == 4);
       // The real manager admits a retry after its 30-second recovery timeout.

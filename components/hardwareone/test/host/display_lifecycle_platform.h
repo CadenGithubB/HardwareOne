@@ -45,10 +45,10 @@ inline void digitalWrite(int pin, int value) {
 inline void delay(unsigned value) { platform.events.push_back("delay:" + std::to_string(value)); }
 inline void analogWrite(int, int) {}
 
-class I2CDeviceManager {
+class I2cDeviceManager {
  public:
-  static I2CDeviceManager* getInstance() {
-    static I2CDeviceManager manager;
+  static I2cDeviceManager* getInstance() {
+    static I2cDeviceManager manager;
     return platform.managerAvailable ? &manager : nullptr;
   }
   TwoWire* getWire(uint8_t bus) {
@@ -61,7 +61,7 @@ class I2CDeviceManager {
     platform.events.push_back("recover:" + std::to_string(bus));
   }
 };
-inline I2CDeviceManager* i2c() { return I2CDeviceManager::getInstance(); }
+inline I2cDeviceManager* i2c() { return I2cDeviceManager::getInstance(); }
 inline bool pollPaused(uint8_t bus) { assert(bus < 2); return platform.paused[bus]; }
 inline uint8_t i2cProbeAddress(uint8_t address, uint32_t, uint32_t, uint8_t bus) {
   platform.probes.emplace_back(bus, address);

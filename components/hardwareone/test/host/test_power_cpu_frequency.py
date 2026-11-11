@@ -38,7 +38,7 @@ def generate() -> str:
     manager = (COMPONENT / "System_I2C_Manager.h").read_text()
     require("bool powerSetCpuFrequencyMhz(uint32_t mhz, bool* outClockChanged = nullptr);" in header,
             "CPU owner must expose optional actual-change output")
-    accessor = extract_block(manager, "static I2CDeviceManager* existingInstance(")
+    accessor = extract_block(manager, "static I2cDeviceManager* existingInstance(")
     require(re.sub(r"\s+", " ", accessor).endswith("{ return instance; }"),
             "existing manager lookup must be nonallocating")
     command = extract_block(utils, "const char* cmd_cpufreq(")

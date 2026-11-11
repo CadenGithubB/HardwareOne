@@ -23,7 +23,7 @@ def main():
     command = (COMPONENT / 'System_I2C.cpp').read_text()
     # Compile real data layout declarations and constructor mapping; hide only
     # unrelated manager methods. Public visibility lets the test inspect state.
-    start = header.index('class I2CDeviceManager {')
+    start = header.index('class I2cDeviceManager {')
     end = header.index('  // Internal helpers', start)
     declaration = header[start:end].replace('private:', 'public:')
     declaration += '\nvoid initBus(uint8_t,int,int,uint32_t);\nbool retainBus(uint8_t);\nvoid releaseBus(uint8_t);\n'+extract_block(header,'  bool busHasClients(')+'\n};\n'
@@ -34,11 +34,11 @@ def main():
     insertions = {
         '// INSERT_PRODUCTION_REQUEST_TYPES': '\n'.join(
             extract_block(header, marker) + ';' for marker in (
-                'enum I2CDeviceType', 'enum class I2CDeviceRequestAction', 'struct I2CDeviceRequest')),
+                'enum I2cDeviceType', 'enum class I2cDeviceRequestAction', 'struct I2cDeviceRequest')),
         '// INSERT_PRODUCTION_MANAGER_DECLARATION': declaration,
         '// INSERT_PRODUCTION_MANAGER_CONSTANTS': constants,
-        '// INSERT_PRODUCTION_MANAGER_CONSTRUCTOR': extract_block(manager, 'I2CDeviceManager::I2CDeviceManager()'),
-        '// INSERT_PRODUCTION_INIT_BUS': '\n'.join(extract_block(manager, sig) for sig in ['void I2CDeviceManager::initBus(', 'bool I2CDeviceManager::retainBus(', 'void I2CDeviceManager::releaseBus(']),
+        '// INSERT_PRODUCTION_MANAGER_CONSTRUCTOR': extract_block(manager, 'I2cDeviceManager::I2cDeviceManager()'),
+        '// INSERT_PRODUCTION_INIT_BUS': '\n'.join(extract_block(manager, sig) for sig in ['void I2cDeviceManager::initBus(', 'bool I2cDeviceManager::retainBus(', 'void I2cDeviceManager::releaseBus(']),
         '// INSERT_PRODUCTION_ENABLE_COMMAND': extract_block(command, 'const char* cmd_i2cbusenabled(') + '\n' + extract_block(command, 'const char* cmd_i2c2busenabled('),
     }
     for marker, definition in insertions.items():

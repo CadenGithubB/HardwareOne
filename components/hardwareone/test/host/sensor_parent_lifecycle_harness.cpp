@@ -179,12 +179,12 @@ static void ps_free(void* object) {
 
 // INSERT_PRODUCTION_PS_DELETE_HERE
 
-struct I2CDevice { void resetGracePeriod() {} };
-class I2CDeviceManager {
+struct I2cDevice { void resetGracePeriod() {} };
+class I2cDeviceManager {
  public:
-  static I2CDeviceManager* getInstance() { static I2CDeviceManager manager; return &manager; }
+  static I2cDeviceManager* getInstance() { static I2cDeviceManager manager; return &manager; }
   TwoWire* getWire(uint8_t bus) { scenario.resolvedBus = bus; return scenario.bus ? &wire : nullptr; }
-  I2CDevice* getDevice(uint8_t, uint8_t) { static I2CDevice device; return &device; }
+  I2cDevice* getDevice(uint8_t, uint8_t) { static I2cDevice device; return &device; }
 };
 static bool resolveBus(uint8_t* bus, TwoWire** output) {
   *bus = static_cast<uint8_t>(gSettings.inputBus); *output = scenario.bus ? &wire : nullptr;

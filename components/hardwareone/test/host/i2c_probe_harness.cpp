@@ -22,7 +22,7 @@ struct FakeSemaphore {
 
 TwoWire Wire;
 TwoWire Wire1;
-bool gI2CBusRunning = true;
+bool gI2cBusRunning = true;
 static unsigned managerLookups = 0;
 
 BaseType_t xSemaphoreTake(SemaphoreHandle_t mutex, TickType_t wait) {
@@ -42,8 +42,8 @@ void delayMicroseconds(unsigned) {}
 void broadcastOutput(const char*) {}
 uint32_t millis() { return 123; }
 
-I2CDeviceManager* I2CDeviceManager::instance = nullptr;
-I2CDeviceManager* I2CDeviceManager::getInstance() {
+I2cDeviceManager* I2cDeviceManager::instance = nullptr;
+I2cDeviceManager* I2cDeviceManager::getInstance() {
   ++managerLookups;
   return instance;
 }
@@ -51,7 +51,7 @@ I2CDeviceManager* I2CDeviceManager::getInstance() {
 // INSERT_PRODUCTION_DEFINITIONS
 
 struct Fixture {
-  I2CDeviceManager manager;
+  I2cDeviceManager manager;
   FakeSemaphore mutexes[2];
   std::array<unsigned char, sizeof(manager.devices)> registry;
   std::array<unsigned char, sizeof(manager.busMetrics)> metrics;
@@ -59,8 +59,8 @@ struct Fixture {
   Fixture() {
     Wire = TwoWire{};
     Wire1 = TwoWire{};
-    I2CDeviceManager::instance = &manager;
-    gI2CBusRunning = true;
+    I2cDeviceManager::instance = &manager;
+    gI2cBusRunning = true;
     managerLookups = 0;
     // The production constructor supplies bus 0 -> Wire1, bus 1 -> Wire.
     for (uint8_t bus = 0; bus < 2; ++bus) {
@@ -91,7 +91,7 @@ struct Fixture {
     assert(!mutexes[0].held && !mutexes[1].held);
     assert(Wire.reads == 0 && Wire.writes == 0);
     assert(Wire1.reads == 0 && Wire1.writes == 0);
-    I2CDeviceManager::instance = nullptr;
+    I2cDeviceManager::instance = nullptr;
   }
 
   void noTransport() const {
@@ -167,10 +167,10 @@ int main() {
   }
   {
     Fixture f;
-    f.manager.clockStackDepths[0] = I2CDeviceManager::CLOCK_STACK_MAX;
+    f.manager.clockStackDepths[0] = I2cDeviceManager::CLOCK_STACK_MAX;
     assert(i2cProbeAddress(0x50, 100000, 9) == 4);
     assert(f.mutexes[0].takes == 1 && f.mutexes[0].gives == 1);
-    assert(f.manager.clockStackDepths[0] == I2CDeviceManager::CLOCK_STACK_MAX);
+    assert(f.manager.clockStackDepths[0] == I2cDeviceManager::CLOCK_STACK_MAX);
     f.noTransport();
   }
   {
@@ -186,14 +186,14 @@ int main() {
   }
   {
     Fixture f;
-    gI2CBusRunning = false;
+    gI2cBusRunning = false;
     assert(i2cProbeAddress(0x50, 100000, 9) == 4);
     assert(!i2cPingAddress(0x50, 100000, 9));
     assert(managerLookups == 0);
     assert(f.mutexes[0].takes == 0 && f.mutexes[1].takes == 0);
     f.noTransport();
-    gI2CBusRunning = true;
-    I2CDeviceManager::instance = nullptr;
+    gI2cBusRunning = true;
+    I2cDeviceManager::instance = nullptr;
     assert(i2cProbeAddress(0x50, 100000, 9) == 4);
     assert(!i2cPingAddress(0x50, 100000, 9));
     f.noTransport();

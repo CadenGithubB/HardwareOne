@@ -43,14 +43,14 @@ uint32_t micros() { return gNow * 1000u; }
 static unsigned logErrors = 0;
 static unsigned logRecoveries = 0;
 static unsigned recoveryChecks = 0;
-void logI2CError(uint8_t, const char*, int, int, bool) { ++logErrors; }
-void logI2CRecovery(uint8_t, const char*, int) { ++logRecoveries; }
+void logI2cError(uint8_t, const char*, int, int, bool) { ++logErrors; }
+void logI2cRecovery(uint8_t, const char*, int) { ++logRecoveries; }
 
-I2CDeviceManager* I2CDeviceManager::instance = nullptr;
-I2CDeviceManager* I2CDeviceManager::getInstance() { return instance; }
-void I2CDeviceManager::checkBusRecoveryNeeded() { ++recoveryChecks; }
-bool I2CDeviceManager::busRecoveryThrottled(uint8_t) const { return true; }
-void I2CDeviceManager::performBusRecovery(uint8_t) { assert(!"throttled in this harness"); }
+I2cDeviceManager* I2cDeviceManager::instance = nullptr;
+I2cDeviceManager* I2cDeviceManager::getInstance() { return instance; }
+void I2cDeviceManager::checkBusRecoveryNeeded() { ++recoveryChecks; }
+bool I2cDeviceManager::busRecoveryThrottled(uint8_t) const { return true; }
+void I2cDeviceManager::performBusRecovery(uint8_t) { assert(!"throttled in this harness"); }
 
 struct Posted {
   uint8_t kind;
@@ -96,19 +96,19 @@ static void expectShown(const Posted& p, uint8_t kind, const char* name,
   assert(rule.cooldownMs == 0);
 }
 
-static void failTimes(I2CDevice& d, I2CErrorType type, int times) {
-  for (int i = 0; i < times; ++i) d.recordError(type, type == I2CErrorType::TIMEOUT ? 3 : 2);
+static void failTimes(I2cDevice& d, I2cErrorType type, int times) {
+  for (int i = 0; i < times; ++i) d.recordError(type, type == I2cErrorType::TIMEOUT ? 3 : 2);
 }
 
 int main() {
-  static I2CDeviceManager manager;
-  I2CDeviceManager::instance = &manager;
+  static I2cDeviceManager manager;
+  I2cDeviceManager::instance = &manager;
 
   {  // never_answered
     reset();
-    I2CDevice d;
+    I2cDevice d;
     d.init(0x28, "BNO055", 0);
-    failTimes(d, I2CErrorType::NACK, 6);
+    failTimes(d, I2cErrorType::NACK, 6);
     assert(d.health.degraded && !d.health.reportedLost);
     assert(posted.empty());
     assert(logErrors == 4 && recoveryChecks == 4);  // existing log/recovery path unchanged
@@ -116,19 +116,19 @@ int main() {
 
   {  // outage
     reset();
-    I2CDevice d;
+    I2cDevice d;
     d.init(0x28, "BNO055", 0);
     d.recordSuccess();
-    failTimes(d, I2CErrorType::NACK, 2);
+    failTimes(d, I2cErrorType::NACK, 2);
     assert(posted.empty() && !d.health.degraded);
-    failTimes(d, I2CErrorType::NACK, 1);
+    failTimes(d, I2cErrorType::NACK, 1);
     assert(d.health.degraded && posted.size() == 1);
     expectShown(posted[0], SYSEVT_SENSOR_UNRESPONSIVE, "sensor_unresponsive",
                 "BNO055", "0x28 bus 0 nack", "BNO055 not responding", 2);
     for (int i = 0; i < 5; ++i) {
       gNow += 31000;
       assert(!d.isDegraded());  // the transaction path lets one retry through
-      failTimes(d, I2CErrorType::NACK, 1);
+      failTimes(d, I2cErrorType::NACK, 1);
     }
     assert(posted.size() == 1);
     assert(logErrors == 6 && recoveryChecks == 6);
@@ -139,22 +139,22 @@ int main() {
                 "BNO055", "0x28 bus 0", "BNO055 reconnected", 1);
     d.recordSuccess();
     assert(posted.size() == 2);
-    failTimes(d, I2CErrorType::NACK, 3);  // a later outage is announced again
+    failTimes(d, I2cErrorType::NACK, 3);  // a later outage is announced again
     assert(posted.size() == 3 && posted[2].kind == SYSEVT_SENSOR_UNRESPONSIVE);
   }
 
   {  // manual_recover
     reset();
-    I2CDevice d;
+    I2cDevice d;
     d.init(0x5A, "STHS34PF80", 1);
     d.recordSuccess();
-    failTimes(d, I2CErrorType::TIMEOUT, 3);
+    failTimes(d, I2cErrorType::TIMEOUT, 3);
     assert(posted.size() == 1);
     expectShown(posted[0], SYSEVT_SENSOR_UNRESPONSIVE, "sensor_unresponsive",
                 "STHS34PF80", "0x5A bus 1 timeout", "STHS34PF80 not responding", 2);
     d.attemptRecovery();
     assert(!d.health.degraded && d.health.reportedLost);
-    failTimes(d, I2CErrorType::TIMEOUT, 3);
+    failTimes(d, I2cErrorType::TIMEOUT, 3);
     assert(d.health.degraded && posted.size() == 1);
     d.recordSuccess();
     assert(posted.size() == 2);
@@ -164,15 +164,15 @@ int main() {
 
   {  // naming
     reset();
-    I2CDevice d;
+    I2cDevice d;
     d.init(0x50, "Auto", 1);
     d.recordSuccess();
-    failTimes(d, I2CErrorType::BUS_ERROR, 4);
-    failTimes(d, I2CErrorType::BUFFER_OVERFLOW, 4);
+    failTimes(d, I2cErrorType::BUS_ERROR, 4);
+    failTimes(d, I2cErrorType::BUFFER_OVERFLOW, 4);
     assert(!d.health.degraded && posted.empty());
     d.recordSuccess();
     assert(posted.empty());
-    failTimes(d, I2CErrorType::NACK, 3);
+    failTimes(d, I2cErrorType::NACK, 3);
     assert(posted.size() == 1);
     expectShown(posted[0], SYSEVT_SENSOR_UNRESPONSIVE, "sensor_unresponsive",
                 "I2C 0x50", "0x50 bus 1 nack", "I2C 0x50 not responding", 2);
@@ -180,15 +180,15 @@ int main() {
 
   {  // two_devices
     reset();
-    I2CDevice imu;
-    I2CDevice tof;
+    I2cDevice imu;
+    I2cDevice tof;
     imu.init(0x28, "BNO055", 0);
     tof.init(0x29, "VL53L4CX", 0);
     imu.recordSuccess();
     tof.recordSuccess();
     for (int i = 0; i < 3; ++i) {
-      failTimes(imu, I2CErrorType::NACK, 1);
-      failTimes(tof, I2CErrorType::NACK, 1);
+      failTimes(imu, I2cErrorType::NACK, 1);
+      failTimes(tof, I2cErrorType::NACK, 1);
     }
     assert(posted.size() == 2);
     assert(posted[0].subject == "BNO055" && posted[1].subject == "VL53L4CX");

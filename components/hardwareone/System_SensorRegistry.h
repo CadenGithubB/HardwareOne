@@ -37,13 +37,13 @@
 // Non-I2C Sensor Entry
 // ============================================================================
 // For sensors that don't use I2C (camera, microphone, etc.)
-// I2C sensors use I2CSensorEntry in System_I2C.h
+// I2C sensors use I2cSensorEntry in System_I2C.h
 
 typedef bool (*SensorConnectedFunc)();
 typedef bool (*SensorEnabledFunc)();
 typedef const char* (*SensorTaskFunc)();
 
-struct NonI2CSensorEntry {
+struct NonI2cSensorEntry {
   const char* id;               // Unique identifier: "camera", "microphone"
   const char* displayName;      // Human-readable: "Camera (OV2640/OV3660)"
   const char* category;         // SENSOR_CATEGORY_* constant
@@ -58,15 +58,15 @@ struct NonI2CSensorEntry {
 // Non-I2C Sensor Registry
 // ============================================================================
 
-extern const NonI2CSensorEntry nonI2CSensors[];
-extern const size_t nonI2CSensorsCount;
+extern const NonI2cSensorEntry nonI2cSensors[];
+extern const size_t nonI2cSensorsCount;
 
 // ============================================================================
 // Registry Access Functions
 // ============================================================================
 
 // Find a non-I2C sensor by ID, returns nullptr if not found
-const NonI2CSensorEntry* findNonI2CSensor(const char* id);
+const NonI2cSensorEntry* findNonI2cSensor(const char* id);
 
 // Initialize the sensor registry (call during setup)
 void initSensorRegistry();

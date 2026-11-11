@@ -1075,7 +1075,7 @@ const char* cmd_wifidisconnect(const String& argsInput) {
     //
     // A WiFi mode change also disables Core-0 interrupts, so pause I2C polling
     // first (same discipline as radioPowerOff and initEspNow).
-    I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
+    I2cDeviceManager* mgr = I2cDeviceManager::getInstance();
     if (mgr) mgr->pausePolling();
     vTaskDelay(pdMS_TO_TICKS(50));  // let in-flight I2C transactions complete
 
@@ -1252,7 +1252,7 @@ static RadioPowerOffResult radioPowerOff() {
   // memory. ESP-NOW is torn down above, so its channel-parking AP is exactly
   // the AP at risk here. A WiFi mode change disables Core-0 interrupts, so
   // pause I2C polling exactly like initEspNow does.
-  I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
+  I2cDeviceManager* mgr = I2cDeviceManager::getInstance();
   if (mgr) mgr->pausePolling();
   vTaskDelay(pdMS_TO_TICKS(50));  // let in-flight I2C transactions complete
 

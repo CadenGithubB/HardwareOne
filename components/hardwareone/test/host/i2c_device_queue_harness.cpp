@@ -23,7 +23,7 @@ struct FakeSemaphore {
 static constexpr TickType_t portMAX_DELAY = UINT32_MAX;
 TwoWire Wire;
 TwoWire Wire1;
-bool gI2CBusRunning = true;
+bool gI2cBusRunning = true;
 static uint32_t now = 100;
 
 BaseType_t xSemaphoreTake(SemaphoreHandle_t mutex, TickType_t wait) {
@@ -43,32 +43,32 @@ uint32_t millis() { return now; }
 // INSERT_PRODUCTION_DEFINITIONS
 
 struct Fixture {
-  I2CDeviceManager manager;
+  I2cDeviceManager manager;
   FakeSemaphore mutex;
 
   Fixture() {
-    gI2CBusRunning = true;
+    gI2cBusRunning = true;
     now = 100;
     manager.queueMutex = &mutex;
     assert(manager.getQueueDepth() == 0);
     for (int i = 0; i < I2C_DEVICE_COUNT; ++i) {
-      assert(!manager.hasPendingDeviceStop(static_cast<I2CDeviceType>(i)));
+      assert(!manager.hasPendingDeviceStop(static_cast<I2cDeviceType>(i)));
     }
   }
   ~Fixture() { assert(!mutex.held); }
 
-  I2CDeviceRequest take(I2CDeviceRequestAction action, I2CDeviceType device) {
-    I2CDeviceRequest request{};
+  I2cDeviceRequest take(I2cDeviceRequestAction action, I2cDeviceType device) {
+    I2cDeviceRequest request{};
     assert(manager.dequeueDeviceRequest(&request));
     assert(request.action == action && request.device == device);
     return request;
   }
 
   void empty() {
-    I2CDeviceRequest request{I2C_DEVICE_RTC, 1234, I2CDeviceRequestAction::Stop};
+    I2cDeviceRequest request{I2C_DEVICE_RTC, 1234, I2cDeviceRequestAction::Stop};
     assert(!manager.dequeueDeviceRequest(&request));
     assert(request.device == I2C_DEVICE_RTC && request.queuedAt == 1234);
-    assert(request.action == I2CDeviceRequestAction::Stop);
+    assert(request.action == I2cDeviceRequestAction::Stop);
     assert(manager.getQueueDepth() == 0);
   }
 };
@@ -80,12 +80,12 @@ static void testAdmissionAndUnavailableQueue() {
   assert(f.manager.enqueueDeviceStart(I2C_DEVICE_GPS));
   assert(f.manager.getQueueDepth() == 1);
   assert(f.manager.getQueuePosition(I2C_DEVICE_GPS) == 1);
-  assert(f.take(I2CDeviceRequestAction::Start, I2C_DEVICE_GPS).queuedAt == 100);
+  assert(f.take(I2cDeviceRequestAction::Start, I2C_DEVICE_GPS).queuedAt == 100);
   f.empty();
 
   const unsigned before = f.mutex.takes;
   for (int invalid : {-1, int(I2C_DEVICE_COUNT), 999}) {
-    const auto device = static_cast<I2CDeviceType>(invalid);
+    const auto device = static_cast<I2cDeviceType>(invalid);
     assert(!f.manager.enqueueDeviceStart(device));
     assert(!f.manager.enqueueDeviceStop(device));
     assert(!f.manager.hasPendingDeviceStop(device));
@@ -119,29 +119,29 @@ static void testCancellationAndStopPriority() {
   assert(!f.manager.enqueueDeviceStart(I2C_DEVICE_GPS));
   now = 300;
   assert(f.manager.enqueueDeviceStop(I2C_DEVICE_GPS));
-  assert(f.take(I2CDeviceRequestAction::Stop, I2C_DEVICE_GPS).queuedAt == 200);
+  assert(f.take(I2cDeviceRequestAction::Stop, I2C_DEVICE_GPS).queuedAt == 200);
   assert(!f.manager.hasPendingDeviceStop(I2C_DEVICE_GPS));
-  f.take(I2CDeviceRequestAction::Start, I2C_DEVICE_TOF);
-  f.take(I2CDeviceRequestAction::Start, I2C_DEVICE_IMU);
+  f.take(I2cDeviceRequestAction::Start, I2C_DEVICE_TOF);
+  f.take(I2cDeviceRequestAction::Start, I2C_DEVICE_IMU);
   f.empty();
 
   // A close arriving after dequeue remains visible to the worker before init.
   assert(f.manager.enqueueDeviceStart(I2C_DEVICE_PRESENCE));
-  f.take(I2CDeviceRequestAction::Start, I2C_DEVICE_PRESENCE);
+  f.take(I2cDeviceRequestAction::Start, I2C_DEVICE_PRESENCE);
   assert(f.manager.enqueueDeviceStop(I2C_DEVICE_PRESENCE));
   assert(f.manager.hasPendingDeviceStop(I2C_DEVICE_PRESENCE));
   assert(!f.manager.enqueueDeviceStart(I2C_DEVICE_PRESENCE));
-  f.take(I2CDeviceRequestAction::Stop, I2C_DEVICE_PRESENCE);
+  f.take(I2cDeviceRequestAction::Stop, I2C_DEVICE_PRESENCE);
   assert(f.manager.enqueueDeviceStart(I2C_DEVICE_PRESENCE));
-  f.take(I2CDeviceRequestAction::Start, I2C_DEVICE_PRESENCE);
+  f.take(I2cDeviceRequestAction::Start, I2C_DEVICE_PRESENCE);
   f.empty();
 }
 
 static void testFullRingAndDisabledBus() {
   Fixture f;
-  const int capacity = I2CDeviceManager::DEVICE_QUEUE_SIZE - 1;
+  const int capacity = I2cDeviceManager::DEVICE_QUEUE_SIZE - 1;
   for (int i = 0; i < capacity; ++i) {
-    assert(f.manager.enqueueDeviceStart(static_cast<I2CDeviceType>(i)));
+    assert(f.manager.enqueueDeviceStart(static_cast<I2cDeviceType>(i)));
   }
   assert(f.manager.getQueueDepth() == capacity);
   assert(!f.manager.enqueueDeviceStart(I2C_DEVICE_RTC));
@@ -149,17 +149,17 @@ static void testFullRingAndDisabledBus() {
   assert(f.manager.getQueueDepth() == capacity);
 
   // Neither a full start ring nor a disabled bus can discard a stop.
-  gI2CBusRunning = false;
+  gI2cBusRunning = false;
   assert(!f.manager.enqueueDeviceStart(I2C_DEVICE_RTC));
   assert(f.manager.enqueueDeviceStop(I2C_DEVICE_RTC));
   assert(f.manager.enqueueDeviceStop(I2C_DEVICE_PRESENCE));
   assert(f.manager.enqueueDeviceStop(I2C_DEVICE_IMU));
   assert(f.manager.getQueueDepth() == capacity - 1);
-  f.take(I2CDeviceRequestAction::Stop, I2C_DEVICE_IMU);
-  f.take(I2CDeviceRequestAction::Stop, I2C_DEVICE_RTC);
-  f.take(I2CDeviceRequestAction::Stop, I2C_DEVICE_PRESENCE);
+  f.take(I2cDeviceRequestAction::Stop, I2C_DEVICE_IMU);
+  f.take(I2cDeviceRequestAction::Stop, I2C_DEVICE_RTC);
+  f.take(I2cDeviceRequestAction::Stop, I2C_DEVICE_PRESENCE);
   for (int i = 0; i < capacity; ++i) {
-    if (i != I2C_DEVICE_IMU) f.take(I2CDeviceRequestAction::Start, static_cast<I2CDeviceType>(i));
+    if (i != I2C_DEVICE_IMU) f.take(I2cDeviceRequestAction::Start, static_cast<I2cDeviceType>(i));
   }
   f.empty();
 }
@@ -167,9 +167,9 @@ static void testFullRingAndDisabledBus() {
 static void testWrappedCancellation() {
   Fixture f;
   // Move both cursors near the ring end using production enqueue/dequeue.
-  for (int i = 0; i < I2CDeviceManager::DEVICE_QUEUE_SIZE - 2; ++i) {
+  for (int i = 0; i < I2cDeviceManager::DEVICE_QUEUE_SIZE - 2; ++i) {
     assert(f.manager.enqueueDeviceStart(I2C_DEVICE_THERMAL));
-    f.take(I2CDeviceRequestAction::Start, I2C_DEVICE_THERMAL);
+    f.take(I2cDeviceRequestAction::Start, I2C_DEVICE_THERMAL);
   }
   for (auto device : {I2C_DEVICE_TOF, I2C_DEVICE_GPS, I2C_DEVICE_IMU, I2C_DEVICE_INPUT}) {
     assert(f.manager.enqueueDeviceStart(device));
@@ -180,9 +180,9 @@ static void testWrappedCancellation() {
   assert(f.manager.getQueuePosition(I2C_DEVICE_TOF) == 1);
   assert(f.manager.getQueuePosition(I2C_DEVICE_IMU) == 2);
   assert(f.manager.getQueuePosition(I2C_DEVICE_INPUT) == 3);
-  f.take(I2CDeviceRequestAction::Stop, I2C_DEVICE_GPS);
+  f.take(I2cDeviceRequestAction::Stop, I2C_DEVICE_GPS);
   for (auto device : {I2C_DEVICE_TOF, I2C_DEVICE_IMU, I2C_DEVICE_INPUT}) {
-    f.take(I2CDeviceRequestAction::Start, device);
+    f.take(I2cDeviceRequestAction::Start, device);
   }
   f.empty();
 
@@ -190,18 +190,18 @@ static void testWrappedCancellation() {
   // removes all occurrences without disturbing the other device's order.
   f.manager.queueHead = 6;
   f.manager.queueTail = 3;
-  const std::array<I2CDeviceType, 5> devices = {
+  const std::array<I2cDeviceType, 5> devices = {
     I2C_DEVICE_GPS, I2C_DEVICE_TOF, I2C_DEVICE_GPS, I2C_DEVICE_IMU, I2C_DEVICE_GPS
   };
   for (size_t i = 0; i < devices.size(); ++i) {
-    f.manager.deviceQueue[(6 + i) % I2CDeviceManager::DEVICE_QUEUE_SIZE] =
-      {devices[i], now, I2CDeviceRequestAction::Start};
+    f.manager.deviceQueue[(6 + i) % I2cDeviceManager::DEVICE_QUEUE_SIZE] =
+      {devices[i], now, I2cDeviceRequestAction::Start};
   }
   assert(f.manager.enqueueDeviceStop(I2C_DEVICE_GPS));
   assert(f.manager.getQueueDepth() == 2);
-  f.take(I2CDeviceRequestAction::Stop, I2C_DEVICE_GPS);
-  f.take(I2CDeviceRequestAction::Start, I2C_DEVICE_TOF);
-  f.take(I2CDeviceRequestAction::Start, I2C_DEVICE_IMU);
+  f.take(I2cDeviceRequestAction::Stop, I2C_DEVICE_GPS);
+  f.take(I2cDeviceRequestAction::Start, I2C_DEVICE_TOF);
+  f.take(I2cDeviceRequestAction::Start, I2C_DEVICE_IMU);
   f.empty();
 }
 
@@ -217,15 +217,15 @@ static void testMutexRefusalPreservesRequests() {
   assert(!f.manager.hasPendingDeviceStop(I2C_DEVICE_RTC));
   assert(!f.manager.isInQueue(I2C_DEVICE_GPS));
   assert(f.manager.getQueuePosition(I2C_DEVICE_GPS) == -1);
-  I2CDeviceRequest request{};
+  I2cDeviceRequest request{};
   assert(!f.manager.dequeueDeviceRequest(&request));
   assert(f.manager.getQueueDepth() == 0);
   assert(f.manager.queueHead == head && f.manager.queueTail == tail);
   assert(f.manager.deviceQueue[head].device == queued.device);
   assert(f.manager.pendingDeviceStops[I2C_DEVICE_RTC]);
   f.mutex.available = true;
-  f.take(I2CDeviceRequestAction::Stop, I2C_DEVICE_RTC);
-  f.take(I2CDeviceRequestAction::Start, I2C_DEVICE_GPS);
+  f.take(I2cDeviceRequestAction::Stop, I2C_DEVICE_RTC);
+  f.take(I2cDeviceRequestAction::Start, I2C_DEVICE_GPS);
   f.empty();
 }
 

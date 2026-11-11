@@ -333,7 +333,7 @@ static uint8_t sI2cDiagPhase  = 0;
 
 static void i2cDiagRunScan() {
   sI2cDiagCount = 0;
-  I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
+  I2cDeviceManager* mgr = I2cDeviceManager::getInstance();
   if (!mgr) return;
   for (uint8_t bus = 0; bus < 2; bus++) {
     if (!mgr->isBusInitialized(bus)) continue;

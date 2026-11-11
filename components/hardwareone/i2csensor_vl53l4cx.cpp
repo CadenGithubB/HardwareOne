@@ -271,7 +271,7 @@ bool tofInit() {
   if (tofHz > 400000) tofHz = 400000;
 
   const uint8_t tofBus = (uint8_t)gSettings.tofBus;
-  I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
+  I2cDeviceManager* mgr = I2cDeviceManager::getInstance();
   TwoWire* tofWire = mgr ? mgr->getWire(tofBus) : nullptr;
   if (!tofWire) return false;
 
@@ -663,7 +663,7 @@ const size_t tofCommandsCount = sizeof(tofCommands) / sizeof(tofCommands[0]);
 //
 // Cleanup Strategy:
 //   1. Check gTofRunning flag at loop start
-//   2. Acquire bus mutex via I2CDeviceManager to prevent race conditions during cleanup
+//   2. Acquire bus mutex via I2cDeviceManager to prevent race conditions during cleanup
 //   3. Stop measurement under the bus lock, release it, then delete the object
 //   4. Clear connected state and delete the task
 // ============================================================================

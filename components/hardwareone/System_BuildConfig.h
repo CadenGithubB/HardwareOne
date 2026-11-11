@@ -731,7 +731,7 @@
 
 // The device-start queue is only used by optional sensors that initialize in
 // their own tasks. Infrastructure-only I2C builds (for example FeatherS3[D]'s
-// MAX17048 battery gauge) transact directly through I2CDeviceManager and must
+// MAX17048 battery gauge) transact directly through I2cDeviceManager and must
 // not pay for an idle 4 KB task that wakes every 100 ms.
 #define ENABLE_I2C_SENSOR_QUEUE \
   (ENABLE_THERMAL_SENSOR || ENABLE_TOF_SENSOR || ENABLE_IMU_SENSOR || \

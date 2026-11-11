@@ -52,10 +52,10 @@ def main() -> None:
     constant = re.search(r"^#define I2C_WIRE1_DEFAULT_FREQ[^\n]+", manager, re.M)
     require(constant is not None, "missing production default bus clock")
     definitions = [constant.group()] + [extract_block(manager, marker) for marker in (
-        "I2CDeviceManager::I2CDeviceManager()", "I2CDevice::I2CDevice()",
-        "void I2CDevice::init(", "uint8_t I2CDeviceManager::probeAddress(",
-        "bool I2CDeviceManager::clockStackPush(", "void I2CDeviceManager::clockStackPop(",
-        "uint32_t I2CDeviceManager::clockStackTopOrDefault(", "void I2CDeviceManager::setBusClock(",
+        "I2cDeviceManager::I2cDeviceManager()", "I2cDevice::I2cDevice()",
+        "void I2cDevice::init(", "uint8_t I2cDeviceManager::probeAddress(",
+        "bool I2cDeviceManager::clockStackPush(", "void I2cDeviceManager::clockStackPop(",
+        "uint32_t I2cDeviceManager::clockStackTopOrDefault(", "void I2cDeviceManager::setBusClock(",
     )] + [extract_block(header, marker) for marker in (
         "inline uint8_t i2cProbeAddress(", "inline bool i2cPingAddress(",
     )]

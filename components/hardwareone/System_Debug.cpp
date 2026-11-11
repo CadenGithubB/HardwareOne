@@ -2654,7 +2654,7 @@ static String buildTimestampPrefix() {
   return String(msBuf);
 }
 
-void logI2CError(uint8_t address, const char* deviceName, int consecutiveErrors, int totalErrors, bool nowDegraded) {
+void logI2cError(uint8_t address, const char* deviceName, int consecutiveErrors, int totalErrors, bool nowDegraded) {
   String line = buildTimestampPrefix();
   line += "I2C ERROR | addr=0x";
   if (address < 0x10) line += "0";
@@ -2697,7 +2697,7 @@ void logBootAnchorToLogs(const char* resetReason, const char* detail) {
   appendLineWithCap(LOG_ERROR_FILE, line, LOG_ERROR_CAP);
 }
 
-void logI2CRecovery(uint8_t address, const char* deviceName, int totalErrors) {
+void logI2cRecovery(uint8_t address, const char* deviceName, int totalErrors) {
   String line = buildTimestampPrefix();
   line += "I2C RECOVERED | addr=0x";
   if (address < 0x10) line += "0";

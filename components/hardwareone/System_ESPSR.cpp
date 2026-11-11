@@ -134,7 +134,7 @@ static char gMnModelName[64] = {0};
 // Mic source is UNIFIED in HAL_Audio — there is no separate SR-local source of
 // truth. The device-wide `micsource` command sets the preference (audioSetSource);
 // the SR feed loop pulls through audioReadPcm(), which dispatches PDM vs the G2
-// LC3→PCM ring internally, and initI2SMicrophone() leases capture via
+// LC3→PCM ring internally, and initI2sMicrophone() leases capture via
 // audioCaptureStart("sr") which arms whichever source resolves + (for G2) enables
 // the glasses stream. Kept only for telemetry on the G2 path:
 static uint64_t gSrG2BytesOk = 0;
@@ -348,10 +348,10 @@ static uint32_t gCategoryTimeoutMs = 0; // Timeout for next stage detection
 static uint8_t gSrDebugLevel = 0;
 static uint32_t gSrTelemetryPeriodMs = 0;
 static uint32_t gSrLastTelemetryMs = 0;
-static uint64_t gSrI2SBytesOk = 0;
-static uint32_t gSrI2SReadOk = 0;
-static uint32_t gSrI2SReadErr = 0;
-static uint32_t gSrI2SReadZero = 0;
+static uint64_t gSrI2sBytesOk = 0;
+static uint32_t gSrI2sReadOk = 0;
+static uint32_t gSrI2sReadErr = 0;
+static uint32_t gSrI2sReadZero = 0;
 static uint32_t gSrAfeFeedOk = 0;
 static uint32_t gSrAfeFetchOk = 0;
 static uint32_t gSrMnDetectCalls = 0;
@@ -1374,8 +1374,8 @@ static void onVoiceCommandDetected(int commandId, const char* phrase) {
 }
 
 // Forward declarations
-static bool initI2SMicrophone();
-static void deinitI2SMicrophone();
+static bool initI2sMicrophone();
+static void deinitI2sMicrophone();
 static bool initAFE();
 static void deinitAFE();
 static bool initMultiNet();
@@ -1716,7 +1716,7 @@ static void srDebugPrintTelemetry() {
                  gSrAutoTuneStep + 1, (int)kAutoTuneConfigCount);
   }
   WARN_SRF("I2S: reads_ok=%u, reads_err=%u, reads_zero=%u, bytes_ok=%llu",
-           (unsigned)gSrI2SReadOk, (unsigned)gSrI2SReadErr, (unsigned)gSrI2SReadZero, (unsigned long long)gSrI2SBytesOk);
+           (unsigned)gSrI2sReadOk, (unsigned)gSrI2sReadErr, (unsigned)gSrI2sReadZero, (unsigned long long)gSrI2sBytesOk);
   WARN_SRF("I2S: est_rate=%.1f Hz", gSrEstSampleRateHz);
   WARN_SRF("PCM: min=%d, max=%d, abs_avg=%.1f",
            (int)gSrLastPcmMin, (int)gSrLastPcmMax, gSrLastPcmAbsAvg);
@@ -1739,10 +1739,10 @@ static void srDebugPrintTelemetry() {
 }
 
 static void srDebugResetCounters() {
-  gSrI2SBytesOk = 0;
-  gSrI2SReadOk = 0;
-  gSrI2SReadErr = 0;
-  gSrI2SReadZero = 0;
+  gSrI2sBytesOk = 0;
+  gSrI2sReadOk = 0;
+  gSrI2sReadErr = 0;
+  gSrI2sReadZero = 0;
   gSrAfeFeedOk = 0;
   gSrAfeFetchOk = 0;
   gSrMnDetectCalls = 0;
@@ -2071,7 +2071,7 @@ static bool saveCommandsFileLocked(size_t& outSaved) {
 // I2S Microphone Setup
 // ============================================================================
 
-static bool initI2SMicrophone() {
+static bool initI2sMicrophone() {
 #if ENABLE_MICROPHONE
   // Honor the device-wide source preference (same one the mic sensor uses), then
   // lease capture for SR. audioCaptureStart resolves the source (PDM-first if the
@@ -2092,7 +2092,7 @@ static bool initI2SMicrophone() {
 #endif  // ENABLE_MICROPHONE
 }
 
-static void deinitI2SMicrophone() {
+static void deinitI2sMicrophone() {
 #if ENABLE_MICROPHONE
   audioCaptureStop("sr");          // release SR's capture lease (PDM or G2)
 #endif  // ENABLE_MICROPHONE
@@ -2301,7 +2301,7 @@ static void srFeedTask(void*) {
     const size_t got = audioReadPcm(gSRFeedBuffer + filled, gSRFeedSamples - filled, 100);
     if (!gSRFeedShouldRun.load(std::memory_order_acquire)) break;
     if (got == 0) {
-      ++gSrI2SReadZero;
+      ++gSrI2sReadZero;
       if (audioGetSource() == AUDIO_SRC_G2_LEFT) ++gSrG2ReadZero;
       if (strcmp(audioCaptureOwner(), "sr") != 0 || millis() - lastAudioMs >= 5000) {
         srSetError("Microphone stream stopped; stop and restart speech recognition");
@@ -2318,8 +2318,8 @@ static void srFeedTask(void*) {
       break;
     }
     lastAudioMs = millis();
-    ++gSrI2SReadOk;
-    gSrI2SBytesOk += got * sizeof(int16_t);
+    ++gSrI2sReadOk;
+    gSrI2sBytesOk += got * sizeof(int16_t);
     if (audioGetSource() == AUDIO_SRC_G2_LEFT) gSrG2BytesOk += got * sizeof(int16_t);
     {
       SRSnipGuard guard;
@@ -2381,12 +2381,12 @@ static void srTask(void*) {
       uint32_t now = millis();
       if (now - gSrLastTelemetryMs >= gSrTelemetryPeriodMs) {
         uint32_t dt = now - gSrLastTelemetryMs;
-        uint64_t dbytes = gSrI2SBytesOk - gSrLastTelemetryBytesOk;
+        uint64_t dbytes = gSrI2sBytesOk - gSrLastTelemetryBytesOk;
         if (dt > 0) {
           gSrEstSampleRateHz = (float)((double)dbytes * 1000.0 / (double)dt / (double)(sizeof(int16_t) * I2S_SR_CHANNELS));
         }
         gSrLastTelemetryMs = now;
-        gSrLastTelemetryBytesOk = gSrI2SBytesOk;
+        gSrLastTelemetryBytesOk = gSrI2sBytesOk;
         srDebugPrintTelemetry();
       }
     }
@@ -2813,7 +2813,7 @@ static bool stopESPSRLocked() {
   free(gSRMNBuffer);
   gSRFeedBuffer = gSRMNBuffer = nullptr;
   gSRFeedSamples = gSRFetchSamples = 0;
-  deinitI2SMicrophone();
+  deinitI2sMicrophone();
   gWnModelName[0] = gMnModelName[0] = '\0';
   gESPSRWakeDetected = false;
   gVoiceState = VoiceState::IDLE;
@@ -2852,7 +2852,7 @@ bool startESPSR() {
     }
   }
 #endif
-  if (!initI2SMicrophone() || !initAFE() || !initMultiNet()) {
+  if (!initI2sMicrophone() || !initAFE() || !initMultiNet()) {
     if (!gSRError.load()) srSetError("Failed to claim microphone for speech");
     stopESPSRLocked();
     return false;

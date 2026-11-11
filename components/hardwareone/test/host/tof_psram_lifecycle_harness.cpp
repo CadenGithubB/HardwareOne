@@ -130,10 +130,10 @@ static void ps_free(void* ptr) {
 
 // INSERT_PRODUCTION_PS_DELETE_HERE
 
-class I2CDeviceManager {
+class I2cDeviceManager {
  public:
-  static I2CDeviceManager* getInstance() {
-    static I2CDeviceManager manager;
+  static I2cDeviceManager* getInstance() {
+    static I2cDeviceManager manager;
     return scenario.managerPresent ? &manager : nullptr;
   }
   TwoWire* getWire(uint8_t bus) {

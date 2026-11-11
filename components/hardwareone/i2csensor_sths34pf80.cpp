@@ -350,7 +350,7 @@ bool presenceInit() {
   // Promote the lazily-created health record to the sensor's real name on the
   // same configured bus. Timing policy belongs to each transaction, not here.
   if (initialized) {
-    I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
+    I2cDeviceManager* mgr = I2cDeviceManager::getInstance();
     if (mgr) mgr->registerDevice(I2C_ADDR_PRESENCE, "STHS34PF80", bus);
   }
   return initialized;

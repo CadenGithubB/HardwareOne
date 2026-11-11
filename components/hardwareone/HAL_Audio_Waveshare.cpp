@@ -47,7 +47,7 @@ struct Register { uint8_t address,value; };
 // register reads during discovery, or delays while holding the I2C lock.
 bool registers(const Register* values,size_t count) {
   return i2cDeviceTransaction(WS_MIC_I2C_BUS,WS_MIC_I2C_ADDRESS,100000,500,[&]() {
-    auto* manager=I2CDeviceManager::getInstance();
+    auto* manager=I2cDeviceManager::getInstance();
     TwoWire* wire=manager?manager->getWire(WS_MIC_I2C_BUS):nullptr;
     if(!wire)return false;
     for(size_t i=0;i<count;++i) {

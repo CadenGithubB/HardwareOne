@@ -11,14 +11,14 @@ extern "C" esp_err_t __real_sccb_new_i2c_io(
 #include <algorithm>
 namespace {
 i2c_master_bus_handle_t borrowed = nullptr;
-I2CDeviceManager* owner = nullptr;
+I2cDeviceManager* owner = nullptr;
 uint8_t managerBus = 0;
 // The SDK serializes its sensor operations through the camera service/ISP.
 // The manager additionally serializes every transfer with touch and audio.
 struct ManagedSccb {
   esp_sccb_io_t base{};
-  I2CDeviceManager* manager;
-  I2CDevice* device;
+  I2cDeviceManager* manager;
+  I2cDevice* device;
   uint8_t bus, address;
   uint32_t clock;
 };
@@ -54,7 +54,7 @@ esp_err_t transfer(esp_sccb_io_t* base, const uint8_t* tx, size_t txSize,
     }
     result = ESP_OK;
     return true;
-  }, I2CTransactionOptions{io->clock, wait}, I2CDevice::Mode::NACK_TOLERANT);
+  }, I2cTransactionOptions{io->clock, wait}, I2cDevice::Mode::NACK_TOLERANT);
   return ok ? ESP_OK : result;
 }
 esp_err_t write(esp_sccb_io_t* io, const uint8_t* tx, size_t size, int timeout) {
@@ -72,7 +72,7 @@ esp_err_t destroy(esp_sccb_io_t* io) {
 bool cameraSharedSccbAcquire(uint8_t bus, int port, i2c_master_bus_handle_t* out) {
   if (!out || borrowed) return false;
   *out = nullptr;
-  auto* manager = I2CDeviceManager::existingInstance();
+  auto* manager = I2cDeviceManager::existingInstance();
   if (!manager || !manager->retainBus(bus)) return false;
   if (i2c_master_get_bus_handle(static_cast<i2c_port_num_t>(port), out) != ESP_OK || !*out) {
     manager->releaseBus(bus);

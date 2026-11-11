@@ -34,7 +34,7 @@ using TaskHandle_t = void*;
 using UBaseType_t = uint32_t;
 static constexpr uint32_t SENSOR_QUEUE_STACK_WORDS = 4096;
 TwoWire Wire, Wire1;
-bool gI2CBusRunning = true;
+bool gI2cBusRunning = true;
 static uint32_t now = 100;
 static std::function<void()> afterUnlock, duringDelay, duringInit, duringProbe;
 static unsigned takes, gives, probeCalls, pauseCalls, resumeCalls, pauseDepth, taskDeletes;
@@ -102,8 +102,8 @@ BaseType_t xSemaphoreGive(SemaphoreHandle_t mutex) {
   return pdTRUE;
 }
 uint32_t millis() { return now; }
-I2CDeviceManager* I2CDeviceManager::instance = nullptr;
-void I2CDeviceManager::initialize() { ++managerInits; }  // Allocation is a controlled platform boundary.
+I2cDeviceManager* I2cDeviceManager::instance = nullptr;
+void I2cDeviceManager::initialize() { ++managerInits; }  // Allocation is a controlled platform boundary.
 
 // INSERT_MANAGER_DEFINITIONS
 
@@ -150,7 +150,7 @@ static void vTaskDelay(TickType_t duration) {
 }
 static void vTaskDelete(void*) { ++taskDeletes; }
 static void i2cResetGracePeriod(uint8_t address, uint8_t bus) { graceResets.emplace_back(address, bus); }
-static bool startOwner(I2CDeviceType sensor) {
+static bool startOwner(I2cDeviceType sensor) {
   assert(pauseDepth > 0); ++starts[sensor];
   running[sensor] = runningAfterStart[sensor];
   if (running[sensor]) handles[sensor] = &handles[sensor];
@@ -178,12 +178,12 @@ static void rtcStop() {
 // INSERT_CONTROLLER_DEFINITIONS
 
 struct Fixture {
-  I2CDeviceManager manager;
+  I2cDeviceManager manager;
   FakeSemaphore mutex;
   Fixture() {
     now += 10000;  // Prior worker static timestamps remain valid between cases.
-    manager.queueMutex = &mutex; I2CDeviceManager::instance = &manager;
-    gI2CBusRunning = bufferAvailable = true; debugEnabled = false; gSettings = {};
+    manager.queueMutex = &mutex; I2cDeviceManager::instance = &manager;
+    gI2cBusRunning = bufferAvailable = true; debugEnabled = false; gSettings = {};
     running.fill(false); handles.fill(nullptr); stopTimes.fill(0); starts.fill(0);
     startResult.fill(true); runningAfterStart.fill(true);
     gApdsColorRunning = gApdsProximityRunning = gApdsGestureRunning = false;
@@ -198,8 +198,8 @@ struct Fixture {
     afterUnlock = duringDelay = duringInit = duringProbe = {};
     statuses.clear(); broadcasts.clear(); events.clear(); logs.clear(); meshStatuses.clear(); graceResets.clear();
   }
-  ~Fixture() { assert(!mutex.held && takes == gives && pauseCalls == resumeCalls); I2CDeviceManager::instance = nullptr; }
-  std::string open(I2CDeviceType sensor = I2C_DEVICE_GPS, const char* hint = "test hint") {
+  ~Fixture() { assert(!mutex.held && takes == gives && pauseCalls == resumeCalls); I2cDeviceManager::instance = nullptr; }
+  std::string open(I2cDeviceType sensor = I2C_DEVICE_GPS, const char* hint = "test hint") {
 #if HAS_START_HINT
     return cmd_sensorstart_queued(sensor, deviceTypeDisplayName(sensor), "test@enqueue", hint);
 #else
@@ -228,14 +228,14 @@ static void admissionCases() {
     assert(requestSensorStart(I2C_DEVICE_GPS, "menu@auto", &why) && why == SensorStartRefusal::None);
     assert(statuses.size() == 1 && statuses.back() == "menu@auto" && f.manager.getQueueDepth() == 1);
     assert(debugBuffer[0] == '\0'); }
-  { Fixture f; gI2CBusRunning = false; SensorStartRefusal why = SensorStartRefusal::None;
+  { Fixture f; gI2cBusRunning = false; SensorStartRefusal why = SensorStartRefusal::None;
     assert(!requestSensorStart(I2C_DEVICE_GPS, "menu@auto", &why) && why == SensorStartRefusal::BusDisabled);
     assert(probeCalls == 0 && statuses.empty() && contains(sensorStartRefusalText(why), "disabled")); }
   { Fixture f; probeResult = 2; SensorStartRefusal why = SensorStartRefusal::None;
     assert(!requestSensorStart(I2C_DEVICE_GPS, "menu@auto", &why) && why == SensorStartRefusal::NoAck);
     assert(probeCalls == 1 && f.manager.getQueueDepth() == 0 && statuses.empty()); }
-  { Fixture f; gI2CBusRunning = false; assert(contains(f.open(), "disabled")); assert(probeCalls == 0 && f.manager.getQueueDepth() == 0); }
-  { Fixture f; I2CDeviceManager::instance = nullptr; assert(contains(f.open(), "queue is unavailable")); assert(probeCalls == 0); }
+  { Fixture f; gI2cBusRunning = false; assert(contains(f.open(), "disabled")); assert(probeCalls == 0 && f.manager.getQueueDepth() == 0); }
+  { Fixture f; I2cDeviceManager::instance = nullptr; assert(contains(f.open(), "queue is unavailable")); assert(probeCalls == 0); }
   { Fixture f; handles[I2C_DEVICE_GPS] = &f; assert(contains(f.open(), "cleanup is still pending")); assert(probeCalls == 0); }
   { Fixture f; running[I2C_DEVICE_GPS] = true; assert(contains(f.open(), "already running")); assert(probeCalls == 0); }
   { Fixture f; assert(enqueueDeviceStart(I2C_DEVICE_GPS)); assert(contains(f.open(), "already queued")); assert(probeCalls == 0); }
@@ -265,7 +265,7 @@ static void hintCases() {
   { Fixture f; assert(contains(f.open(), "queued for start"));
     assert((hints == std::vector<std::string>{"test hint"})); }
   { Fixture f; assert(contains(f.open(I2C_DEVICE_GPS, nullptr), "queued for start") && hints.empty()); }
-  { Fixture f; gI2CBusRunning = false; assert(contains(f.open(), "disabled") && hints.empty()); }
+  { Fixture f; gI2cBusRunning = false; assert(contains(f.open(), "disabled") && hints.empty()); }
   { Fixture f; running[I2C_DEVICE_GPS] = true; assert(contains(f.open(), "already running") && hints.empty()); }
   { Fixture f; probeResult = 2; assert(contains(f.open(), "No acknowledgement") && hints.empty()); }
   { Fixture f; handles[I2C_DEVICE_GPS] = &f; assert(contains(f.open(), "cleanup is still pending") && hints.empty()); }
@@ -279,7 +279,7 @@ static void hintCases() {
 
 static void workerOutcomeCases() {
   for (int index = 0; index < I2C_DEVICE_COUNT; ++index) {
-    Fixture f; const auto sensor = static_cast<I2CDeviceType>(index);
+    Fixture f; const auto sensor = static_cast<I2cDeviceType>(index);
     debugEnabled = true; pauseDepth = 1;  // An unrelated pause survives the batch.
     assert(enqueueDeviceStart(sensor)); f.worker();
     assert(starts[sensor] == 1 && running[sensor]);
@@ -306,7 +306,7 @@ static void workerOutcomeCases() {
     assert(enqueueDeviceStart(I2C_DEVICE_GPS)); f.worker();
     assert(starts[I2C_DEVICE_GPS] == 0 && eventCount(SYSEVT_SENSOR_START_FAILED) == 1);
     assert(broadcasts.size() == 1 && graceResets.empty()); }
-  { Fixture f; I2CDeviceManager::instance = nullptr; f.worker(); assert(taskDeletes == 1 && pauseCalls == 0); }
+  { Fixture f; I2cDeviceManager::instance = nullptr; f.worker(); assert(taskDeletes == 1 && pauseCalls == 0); }
 }
 
 static void closeOrderingCases() {
@@ -351,7 +351,7 @@ static void closeOrderingCases() {
 
 static void cleanupCases() {
   for (int index = 0; index < I2C_DEVICE_COUNT; ++index) {
-    Fixture f; const auto sensor = static_cast<I2CDeviceType>(index);
+    Fixture f; const auto sensor = static_cast<I2cDeviceType>(index);
     running[sensor] = true; handles[sensor] = &f;
     if (sensor == I2C_DEVICE_APDS) gApdsColorRunning = gApdsProximityRunning = gApdsGestureRunning = true;
     assert(requestSensorStop(sensor)); assert(running[sensor]); f.worker();
@@ -367,14 +367,14 @@ static void cleanupCases() {
   }
   // The bus-running flag is fixed at boot. With the bus disabled a stop is
   // refused like a start: nothing is queued and no manager is allocated.
-  { Fixture f; gI2CBusRunning = false;
+  { Fixture f; gI2cBusRunning = false;
     assert(!requestSensorStop(I2C_DEVICE_GPS) && !f.manager.hasPendingDeviceStop(I2C_DEVICE_GPS));
-    I2CDeviceManager::instance = nullptr;
+    I2cDeviceManager::instance = nullptr;
     assert(!requestSensorStop(I2C_DEVICE_GPS) && managerInits == 0); }
   // Stopping an idle sensor (nothing running, starting or queued) publishes
   // nothing: no cleanup latch, no status bump, no stop event.
   for (int index = 0; index < I2C_DEVICE_COUNT; ++index) {
-    Fixture f; const auto sensor = static_cast<I2CDeviceType>(index);
+    Fixture f; const auto sensor = static_cast<I2cDeviceType>(index);
     assert(requestSensorStop(sensor)); f.worker(); f.worker();
     assert(!sSensorStopAwaitingCleanup[sensor] && statuses.empty() && events.empty() && meshStatuses.empty());
   }

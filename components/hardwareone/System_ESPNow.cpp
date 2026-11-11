@@ -11552,7 +11552,7 @@ static bool initEspNow() {
   // Pause I2C sensor polling during WiFi mode change.
   // WiFi.mode(WIFI_AP_STA) temporarily disables interrupts on Core 0;
   // if an I2C transaction's ISR is pending, the interrupt watchdog fires.
-  I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
+  I2cDeviceManager* mgr = I2cDeviceManager::getInstance();
   if (mgr) mgr->pausePolling();
   vTaskDelay(pdMS_TO_TICKS(50));  // Let in-flight I2C transactions complete
 

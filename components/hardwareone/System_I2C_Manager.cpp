@@ -32,13 +32,13 @@ static constexpr uint32_t I2C_WIRE_IO_TIMEOUT_MS = 100;
 // i2cInit(). The old legacy-driver call would conflict with the master driver.)
 
 // Singleton instance
-I2CDeviceManager* I2CDeviceManager::instance = nullptr;
+I2cDeviceManager* I2cDeviceManager::instance = nullptr;
 
 // ============================================================================
 // Singleton Management
 // ============================================================================
 
-I2CDeviceManager::I2CDeviceManager()
+I2cDeviceManager::I2cDeviceManager()
   : deviceCount(0), managerMutex(nullptr),
     queueHead(0), queueTail(0), queueMutex(nullptr), pollingPaused(false) {
   // Per-bus arrays — zero everything, wire up Arduino TwoWire pointers.
@@ -62,10 +62,10 @@ I2CDeviceManager::I2CDeviceManager()
   memset(deviceStopQueuedAt, 0, sizeof(deviceStopQueuedAt));
 }
 
-void I2CDeviceManager::initialize() {
+void I2cDeviceManager::initialize() {
   if (instance) return;
 
-  instance = new I2CDeviceManager();
+  instance = new I2cDeviceManager();
   if (!instance) {
     Serial.println("[I2C_MGR] FATAL: Failed to allocate manager");
     while(1) delay(1000);
@@ -91,7 +91,7 @@ void I2CDeviceManager::initialize() {
   INFO_I2CF("Manager initialized successfully (NUM_BUSES=%u)", NUM_BUSES);
 }
 
-I2CDeviceManager* I2CDeviceManager::getInstance() {
+I2cDeviceManager* I2cDeviceManager::getInstance() {
   if (!instance) {
     initialize();
   }
@@ -102,7 +102,7 @@ I2CDeviceManager* I2CDeviceManager::getInstance() {
 // Device Registration
 // ============================================================================
 
-I2CDevice* I2CDeviceManager::registerDevice(uint8_t addr, const char* name,
+I2cDevice* I2cDeviceManager::registerDevice(uint8_t addr, const char* name,
                                              uint8_t busIdx) {
   if (!managerMutex) return nullptr;
   if (busIdx >= NUM_BUSES) busIdx = 0;  // clamp invalid bus to primary
@@ -110,7 +110,7 @@ I2CDevice* I2CDeviceManager::registerDevice(uint8_t addr, const char* name,
   if (xSemaphoreTake(managerMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
     // Devices are now keyed on (address, bus). Same physical address can
     // legitimately live on both buses (e.g., two DS3231 RTCs, one per bus)
-    // and each gets its own I2CDevice slot with independent health tracking.
+    // and each gets its own I2cDevice slot with independent health tracking.
     for (int i = 0; i < deviceCount; i++) {
       if (devices[i].address == addr && devices[i].bus == busIdx) {
         // Update name if upgrading from "Auto" to a real name. Transaction
@@ -131,7 +131,7 @@ I2CDevice* I2CDeviceManager::registerDevice(uint8_t addr, const char* name,
       return nullptr;
     }
 
-    I2CDevice* dev = &devices[deviceCount++];
+    I2cDevice* dev = &devices[deviceCount++];
     dev->init(addr, name, busIdx);
 
     INFO_I2CF("Registered device 0x%02X (%s) bus=%u", addr, name, busIdx);
@@ -143,7 +143,7 @@ I2CDevice* I2CDeviceManager::registerDevice(uint8_t addr, const char* name,
   return nullptr;
 }
 
-I2CDevice* I2CDeviceManager::getDevice(uint8_t addr, uint8_t busIdx) {
+I2cDevice* I2cDeviceManager::getDevice(uint8_t addr, uint8_t busIdx) {
   if (busIdx >= NUM_BUSES) busIdx = 0;
   for (int i = 0; i < deviceCount; i++) {
     if (devices[i].address == addr && devices[i].bus == busIdx) {
@@ -153,7 +153,7 @@ I2CDevice* I2CDeviceManager::getDevice(uint8_t addr, uint8_t busIdx) {
   return nullptr;
 }
 
-I2CDevice* I2CDeviceManager::getDeviceAnyBus(uint8_t addr) {
+I2cDevice* I2cDeviceManager::getDeviceAnyBus(uint8_t addr) {
   // Buses in ascending order so a dual-registered address resolves to bus 0
   // deterministically (registration order in devices[] is not bus-ordered).
   for (uint8_t b = 0; b < NUM_BUSES; b++) {
@@ -166,7 +166,7 @@ I2CDevice* I2CDeviceManager::getDeviceAnyBus(uint8_t addr) {
   return nullptr;
 }
 
-I2CDevice* I2CDeviceManager::getDeviceByName(const char* name) {
+I2cDevice* I2cDeviceManager::getDeviceByName(const char* name) {
   if (!name) return nullptr;
   
   for (int i = 0; i < deviceCount; i++) {
@@ -251,7 +251,7 @@ static void beginBusOnCpu1(TwoWire* wire, int sda, int scl) {
   vSemaphoreDelete(done);
 }
 
-void I2CDeviceManager::initBus(uint8_t busIdx, int sdaPin, int sclPin, uint32_t hz) {
+void I2cDeviceManager::initBus(uint8_t busIdx, int sdaPin, int sclPin, uint32_t hz) {
   if (busIdx >= NUM_BUSES) return;
   const int hardwarePort = busIdx == 0 ? 1 : 0;
   if (hardwarePort == CAMERA_SCCB_I2C_PORT && !CAMERA_SCCB_SHARED) {
@@ -315,9 +315,9 @@ void I2CDeviceManager::initBus(uint8_t busIdx, int sdaPin, int sclPin, uint32_t 
                  sdaPin, sclPin, (unsigned long)hz);
 }
 
-void I2CDeviceManager::initBuses() {
+void I2cDeviceManager::initBuses() {
   // Bus 0 (primary) — always initialized when I2C is enabled. The caller
-  // (initI2CBuses in System_I2C.cpp) already gated on gI2CBusRunning.
+  // (initI2cBuses in System_I2C.cpp) already gated on gI2cBusRunning.
   int sda0, scl0;
   if (busPinsFromSettings(0, &sda0, &scl0)) {
     initBus(0, sda0, scl0, I2C_WIRE1_DEFAULT_FREQ);
@@ -348,7 +348,7 @@ void I2CDeviceManager::initBuses() {
   delay(100);
 }
 
-bool I2CDeviceManager::retainBus(uint8_t busIdx) {
+bool I2cDeviceManager::retainBus(uint8_t busIdx) {
   if (busIdx >= NUM_BUSES) return false;
   auto mutex = busMutexes[busIdx];
   if (!mutex || xSemaphoreTake(mutex, pdMS_TO_TICKS(500)) != pdTRUE) return false;
@@ -357,7 +357,7 @@ bool I2CDeviceManager::retainBus(uint8_t busIdx) {
   xSemaphoreGive(mutex);
   return ready;
 }
-void I2CDeviceManager::releaseBus(uint8_t busIdx) {
+void I2cDeviceManager::releaseBus(uint8_t busIdx) {
   if (busIdx >= NUM_BUSES) return;
   auto mutex = busMutexes[busIdx];
   if (!mutex || xSemaphoreTake(mutex, portMAX_DELAY) != pdTRUE) return;
@@ -365,7 +365,7 @@ void I2CDeviceManager::releaseBus(uint8_t busIdx) {
   xSemaphoreGive(mutex);
 }
 
-void I2CDeviceManager::performBusRecovery(uint8_t busIdx) {
+void I2cDeviceManager::performBusRecovery(uint8_t busIdx) {
   if (busIdx >= NUM_BUSES) busIdx = 0;
   if (!busInitialized[busIdx]) {
     WARN_I2CF("Bus recovery skipped: bus %u not initialized", busIdx);
@@ -471,13 +471,13 @@ void I2CDeviceManager::performBusRecovery(uint8_t busIdx) {
 // pausing polling, tearing down Wire, and bit-banging 9 clock pulses.
 static const uint32_t BUS_RECOVERY_COOLDOWN_MS = 5000;
 
-bool I2CDeviceManager::busRecoveryThrottled(uint8_t busIdx) const {
+bool I2cDeviceManager::busRecoveryThrottled(uint8_t busIdx) const {
   if (busIdx >= NUM_BUSES) return false;
   if (lastRecoveryMs[busIdx] == 0) return false;   // never recovered yet
   return (millis() - lastRecoveryMs[busIdx]) < BUS_RECOVERY_COOLDOWN_MS;
 }
 
-uint8_t I2CDeviceManager::probeDeviceStatus(uint8_t bus, uint8_t addr) {
+uint8_t I2cDeviceManager::probeDeviceStatus(uint8_t bus, uint8_t addr) {
   if (bus >= NUM_BUSES || !wires[bus] || !busInitialized[bus]) return 4;
   // Address-only transaction: 9 clock bits, no payload. Cheap enough to run on
   // the failure path, and it answers exactly the question the classifier needs
@@ -486,8 +486,8 @@ uint8_t I2CDeviceManager::probeDeviceStatus(uint8_t bus, uint8_t addr) {
   return wires[bus]->endTransmission(true);
 }
 
-uint8_t I2CDeviceManager::probeAddress(uint8_t busIdx, uint8_t address,
-                                       const I2CTransactionOptions& options) {
+uint8_t I2cDeviceManager::probeAddress(uint8_t busIdx, uint8_t address,
+                                       const I2cTransactionOptions& options) {
   if (busIdx >= NUM_BUSES || !busInitialized[busIdx] || !wires[busIdx] ||
       !busMutexes[busIdx]) {
     return 4;
@@ -521,7 +521,7 @@ uint8_t I2CDeviceManager::probeAddress(uint8_t busIdx, uint8_t address,
   return status;
 }
 
-void I2CDeviceManager::checkBusRecoveryNeeded() {
+void I2cDeviceManager::checkBusRecoveryNeeded() {
   // Evaluate each bus independently. Each has its own mutex, Wire instance and
   // clock stack, so a degradation cascade on one says nothing about the other.
   // Before this was made bus-aware it counted every device in the registry and
@@ -570,7 +570,7 @@ void I2CDeviceManager::checkBusRecoveryNeeded() {
 // Clock Management
 // ============================================================================
 
-bool I2CDeviceManager::clockStackPush(uint8_t bus, uint32_t hz) {
+bool I2cDeviceManager::clockStackPush(uint8_t bus, uint32_t hz) {
   if (bus >= NUM_BUSES) return false;
   if (clockStackDepths[bus] >= CLOCK_STACK_MAX) {
     // IMPORTANT: do NOT use snprintf+char buffer here. clockStackPush is on
@@ -585,21 +585,21 @@ bool I2CDeviceManager::clockStackPush(uint8_t bus, uint32_t hz) {
   return true;
 }
 
-void I2CDeviceManager::clockStackPop(uint8_t bus) {
+void I2cDeviceManager::clockStackPop(uint8_t bus) {
   if (bus >= NUM_BUSES) return;
   if (clockStackDepths[bus] > 0) {
     clockStackDepths[bus]--;
   }
 }
 
-uint32_t I2CDeviceManager::clockStackTopOrDefault(uint8_t bus) {
+uint32_t I2cDeviceManager::clockStackTopOrDefault(uint8_t bus) {
   if (bus >= NUM_BUSES) return I2C_WIRE1_DEFAULT_FREQ;
   return (clockStackDepths[bus] > 0)
            ? clockStacks[bus][clockStackDepths[bus] - 1]
            : defaultClockHz[bus];
 }
 
-void I2CDeviceManager::setBusClock(uint8_t bus, uint32_t hz) {
+void I2cDeviceManager::setBusClock(uint8_t bus, uint32_t hz) {
   if (bus >= NUM_BUSES || !wires[bus]) return;
   if (currentClockHz[bus] != hz) {
     wires[bus]->setClock(hz);
@@ -612,9 +612,9 @@ void I2CDeviceManager::setBusClock(uint8_t bus, uint32_t hz) {
 // Metrics Tracking
 // ============================================================================
 
-void I2CDeviceManager::updateMetrics(uint8_t bus, uint32_t waitUs, uint32_t txDurationUs, uint32_t clockHz) {
+void I2cDeviceManager::updateMetrics(uint8_t bus, uint32_t waitUs, uint32_t txDurationUs, uint32_t clockHz) {
   if (bus >= NUM_BUSES) return;
-  I2CBusMetrics& m = busMetrics[bus];
+  I2cBusMetrics& m = busMetrics[bus];
 
   // Mutex wait metrics
   if (waitUs > 0) m.mutexContentions++;
@@ -636,9 +636,9 @@ void I2CDeviceManager::updateMetrics(uint8_t bus, uint32_t waitUs, uint32_t txDu
   updateHistogram(bus, txDurationUs);
 }
 
-void I2CDeviceManager::updateHistogram(uint8_t bus, uint32_t txDurationUs) {
+void I2cDeviceManager::updateHistogram(uint8_t bus, uint32_t txDurationUs) {
   if (bus >= NUM_BUSES) return;
-  I2CBusMetrics& m = busMetrics[bus];
+  I2cBusMetrics& m = busMetrics[bus];
   if (txDurationUs < 100) {
     m.txDuration_0_100us++;
   } else if (txDurationUs < 500) {
@@ -655,9 +655,9 @@ void I2CDeviceManager::updateHistogram(uint8_t bus, uint32_t txDurationUs) {
 // I2C Device Lifecycle Management
 // ============================================================================
 
-bool I2CDeviceManager::enqueueDeviceStart(I2CDeviceType sensor) {
+bool I2cDeviceManager::enqueueDeviceStart(I2cDeviceType sensor) {
   // Refuse to enqueue if the bus is disabled — nothing will drain the queue
-  if (!gI2CBusRunning || sensor < 0 || sensor >= I2C_DEVICE_COUNT || !queueMutex) return false;
+  if (!gI2cBusRunning || sensor < 0 || sensor >= I2C_DEVICE_COUNT || !queueMutex) return false;
   
   if (xSemaphoreTake(queueMutex, portMAX_DELAY) == pdTRUE) {
     if (pendingDeviceStops[sensor]) {
@@ -680,7 +680,7 @@ bool I2CDeviceManager::enqueueDeviceStart(I2CDeviceType sensor) {
     
     deviceQueue[queueTail].device = sensor;
     deviceQueue[queueTail].queuedAt = millis();
-    deviceQueue[queueTail].action = I2CDeviceRequestAction::Start;
+    deviceQueue[queueTail].action = I2cDeviceRequestAction::Start;
     queueTail = nextTail;
     
     xSemaphoreGive(queueMutex);
@@ -690,7 +690,7 @@ bool I2CDeviceManager::enqueueDeviceStart(I2CDeviceType sensor) {
   return false;
 }
 
-bool I2CDeviceManager::enqueueDeviceStop(I2CDeviceType sensor) {
+bool I2cDeviceManager::enqueueDeviceStop(I2cDeviceType sensor) {
   if (sensor < 0 || sensor >= I2C_DEVICE_COUNT || !queueMutex) return false;
 
   if (xSemaphoreTake(queueMutex, portMAX_DELAY) != pdTRUE) return false;
@@ -711,15 +711,15 @@ bool I2CDeviceManager::enqueueDeviceStop(I2CDeviceType sensor) {
   return true;
 }
 
-bool I2CDeviceManager::dequeueDeviceRequest(I2CDeviceRequest* req) {
+bool I2cDeviceManager::dequeueDeviceRequest(I2cDeviceRequest* req) {
   if (!queueMutex || !req) return false;
   
   if (xSemaphoreTake(queueMutex, portMAX_DELAY) == pdTRUE) {
     for (int sensor = 0; sensor < I2C_DEVICE_COUNT; ++sensor) {
       if (!pendingDeviceStops[sensor]) continue;
-      req->device = static_cast<I2CDeviceType>(sensor);
+      req->device = static_cast<I2cDeviceType>(sensor);
       req->queuedAt = deviceStopQueuedAt[sensor];
-      req->action = I2CDeviceRequestAction::Stop;
+      req->action = I2cDeviceRequestAction::Stop;
       pendingDeviceStops[sensor] = false;
       xSemaphoreGive(queueMutex);
       return true;
@@ -739,7 +739,7 @@ bool I2CDeviceManager::dequeueDeviceRequest(I2CDeviceRequest* req) {
   return false;
 }
 
-bool I2CDeviceManager::hasPendingDeviceStop(I2CDeviceType sensor) {
+bool I2cDeviceManager::hasPendingDeviceStop(I2cDeviceType sensor) {
   if (sensor < 0 || sensor >= I2C_DEVICE_COUNT || !queueMutex) return false;
   if (xSemaphoreTake(queueMutex, portMAX_DELAY) != pdTRUE) return false;
   const bool pending = pendingDeviceStops[sensor];
@@ -747,7 +747,7 @@ bool I2CDeviceManager::hasPendingDeviceStop(I2CDeviceType sensor) {
   return pending;
 }
 
-bool I2CDeviceManager::isInQueue(I2CDeviceType sensor) {
+bool I2cDeviceManager::isInQueue(I2cDeviceType sensor) {
   if (sensor < 0 || sensor >= I2C_DEVICE_COUNT || !queueMutex) return false;
   
   bool found = false;
@@ -764,7 +764,7 @@ bool I2CDeviceManager::isInQueue(I2CDeviceType sensor) {
   return found;
 }
 
-int I2CDeviceManager::getQueuePosition(I2CDeviceType sensor) {
+int I2cDeviceManager::getQueuePosition(I2cDeviceType sensor) {
   if (sensor < 0 || sensor >= I2C_DEVICE_COUNT || !queueMutex) return -1;
   
   int pos = -1;
@@ -783,7 +783,7 @@ int I2CDeviceManager::getQueuePosition(I2CDeviceType sensor) {
   return pos;
 }
 
-int I2CDeviceManager::getQueueDepth() {
+int I2cDeviceManager::getQueueDepth() {
   if (!queueMutex || xSemaphoreTake(queueMutex, portMAX_DELAY) != pdTRUE) return 0;
   const int depth = (queueTail - queueHead + DEVICE_QUEUE_SIZE) % DEVICE_QUEUE_SIZE;
   xSemaphoreGive(queueMutex);
@@ -794,13 +794,13 @@ int I2CDeviceManager::getQueueDepth() {
 // also track the manager's own `pollingPaused` latch, which isPollingPaused()
 // exposes so the i2cpause/i2cresume CLI commands stay idempotent (a double
 // i2cpause must not push the global depth counter out of balance).
-void I2CDeviceManager::pausePolling() {
+void I2cDeviceManager::pausePolling() {
   pollingPaused = true;
   pollPause();
   INFO_I2CF("Sensor polling paused");
 }
 
-void I2CDeviceManager::resumePolling() {
+void I2cDeviceManager::resumePolling() {
   pollingPaused = false;
   pollResume();
   INFO_I2CF("Sensor polling resumed");
@@ -810,11 +810,11 @@ void I2CDeviceManager::resumePolling() {
 // Device Discovery
 // ============================================================================
 
-void I2CDeviceManager::discoverDevices() {
+void I2cDeviceManager::discoverDevices() {
   INFO_I2CF("Starting device discovery");
   
   // Discovery implementation will scan registered device addresses
-  // For now, devices are pre-registered from database in initI2CManager()
+  // For now, devices are pre-registered from database in initI2cManager()
   // Future: Add runtime scanning capability
   
   INFO_I2CF("Discovery complete - %d devices registered", deviceCount);
@@ -826,7 +826,7 @@ void I2CDeviceManager::discoverDevices() {
 
 
 // ============================================================================
-// I2CDevice Implementation (merged from System_I2C_Device.cpp)
+// I2cDevice Implementation (merged from System_I2C_Device.cpp)
 // ============================================================================
 
 // Maps a TwoWire::endTransmission() status to an error class.
@@ -845,35 +845,35 @@ void I2CDeviceManager::discoverDevices() {
 // compiler flagged both as unreachable. The practical consequence was that 5,
 // the only timeout this core emits, fell through to `default` and a plain
 // timeout was escalated to BUS_ERROR, which forces an immediate bus recovery.
-I2CErrorType classifyI2CError(uint8_t wireStatus) {
+I2cErrorType classifyI2cError(uint8_t wireStatus) {
   switch (wireStatus) {
     case 0:
-      return I2CErrorType::NONE;
+      return I2cErrorType::NONE;
     case 1:
       // "Data too long for buffer" in the Arduino contract. This core never
       // returns it, but the value is kept mapped for any caller handing us a
       // status from a stock Arduino Wire implementation.
-      return I2CErrorType::BUFFER_OVERFLOW;
+      return I2cErrorType::BUFFER_OVERFLOW;
     case 2:
-      return I2CErrorType::NACK;
+      return I2cErrorType::NACK;
     case 5:
-      return I2CErrorType::TIMEOUT;
+      return I2cErrorType::TIMEOUT;
     case 4:
     default:
       // Driver-level failure (bus in a bad state, slave mode, null buffer) —
       // not a simple device NACK, so treat it as a bus-level problem.
-      return I2CErrorType::BUS_ERROR;
+      return I2cErrorType::BUS_ERROR;
   }
 }
 
-I2CDevice::I2CDevice()
+I2cDevice::I2cDevice()
   : address(0), bus(0), name(nullptr) {
   memset(&health, 0, sizeof(health));
 }
 
-void I2CDevice::init(uint8_t addr, const char* deviceName, uint8_t busIdx) {
+void I2cDevice::init(uint8_t addr, const char* deviceName, uint8_t busIdx) {
   address = addr;
-  bus = (busIdx < I2CDeviceManager::NUM_BUSES) ? busIdx : 0;
+  bus = (busIdx < I2cDeviceManager::NUM_BUSES) ? busIdx : 0;
   name = deviceName;
   
   // Initialize health
@@ -887,7 +887,7 @@ void I2CDevice::init(uint8_t addr, const char* deviceName, uint8_t busIdx) {
   health.nackCount = 0;
   health.timeoutCount = 0;
   health.busErrorCount = 0;
-  health.lastErrorType = I2CErrorType::NONE;
+  health.lastErrorType = I2cErrorType::NONE;
 }
 
 // User-facing edges of device health. `degraded` cannot be the edge: it is set
@@ -896,7 +896,7 @@ void I2CDevice::init(uint8_t addr, const char* deviceName, uint8_t busIdx) {
 // keeps its own latch: one sensor_unresponsive per outage, and only for a
 // device that has answered since boot, because every compiled-in sensor is
 // pre-registered whether or not it is plugged in.
-static void postDeviceHealthEvent(uint8_t kind, const I2CDevice& dev, const char* cause) {
+static void postDeviceHealthEvent(uint8_t kind, const I2cDevice& dev, const char* cause) {
   char subject[24];
   if (dev.name && dev.name[0] && strcmp(dev.name, "Auto") != 0) {
     snprintf(subject, sizeof(subject), "%s", dev.name);
@@ -912,20 +912,20 @@ static void postDeviceHealthEvent(uint8_t kind, const I2CDevice& dev, const char
   systemEventPost(kind, subject, detail);
 }
 
-static void announceUnresponsive(I2CDevice& dev, const char* cause) {
+static void announceUnresponsive(I2cDevice& dev, const char* cause) {
   if (dev.health.reportedLost || dev.health.lastSuccessTime == 0) return;
   dev.health.reportedLost = true;
   postDeviceHealthEvent(SYSEVT_SENSOR_UNRESPONSIVE, dev, cause);
 }
 
-void I2CDevice::recordSuccess() {
+void I2cDevice::recordSuccess() {
   health.consecutiveErrors = 0;
   health.lastSuccessTime = millis();
 
   if (health.degraded) {
     health.degraded = false;
     INFO_I2CF("Device 0x%02X (%s) recovered", address, name);
-    logI2CRecovery(address, name, health.totalErrors);
+    logI2cRecovery(address, name, health.totalErrors);
   }
   if (health.reportedLost) {
     health.reportedLost = false;
@@ -933,7 +933,7 @@ void I2CDevice::recordSuccess() {
   }
 }
 
-void I2CDevice::recordError(I2CErrorType errorType, uint8_t espError) {
+void I2cDevice::recordError(I2cErrorType errorType, uint8_t espError) {
   health.consecutiveErrors++;
   health.totalErrors++;
   health.lastErrorTime = millis();
@@ -941,7 +941,7 @@ void I2CDevice::recordError(I2CErrorType errorType, uint8_t espError) {
   
   // Type-specific error tracking and recovery
   switch (errorType) {
-    case I2CErrorType::NACK:
+    case I2cErrorType::NACK:
       health.nackCount++;
       WARN_I2CF("Device 0x%02X (%s) NACK (count=%d, consecutive=%d)",
                 address, name, health.nackCount, health.consecutiveErrors);
@@ -950,7 +950,7 @@ void I2CDevice::recordError(I2CErrorType errorType, uint8_t espError) {
         health.degraded = true;
         ERROR_I2CF("Device 0x%02X (%s) marked DEGRADED after %d NACKs",
                    address, name, health.nackCount);
-        logI2CError(address, name, health.consecutiveErrors, health.totalErrors, true);
+        logI2cError(address, name, health.consecutiveErrors, health.totalErrors, true);
         announceUnresponsive(*this, "nack");
 
         // Check if bus recovery is needed (decentralized check).
@@ -958,11 +958,11 @@ void I2CDevice::recordError(I2CErrorType errorType, uint8_t espError) {
         // table; with dual-bus it may decide to recover, defaulting to
         // bus 0. If only this device's bus is sick, the BUS_ERROR branch
         // below routes recovery to the right bus directly.
-        I2CDeviceManager::getInstance()->checkBusRecoveryNeeded();
+        I2cDeviceManager::getInstance()->checkBusRecoveryNeeded();
       }
       break;
       
-    case I2CErrorType::TIMEOUT:
+    case I2cErrorType::TIMEOUT:
       health.timeoutCount++;
       WARN_I2CF("Device 0x%02X (%s) TIMEOUT (count=%d, consecutive=%d)",
                 address, name, health.timeoutCount, health.consecutiveErrors);
@@ -971,7 +971,7 @@ void I2CDevice::recordError(I2CErrorType errorType, uint8_t espError) {
         health.degraded = true;
         ERROR_I2CF("Device 0x%02X (%s) marked DEGRADED after %d timeouts",
                    address, name, health.timeoutCount);
-        logI2CError(address, name, health.consecutiveErrors, health.totalErrors, true);
+        logI2cError(address, name, health.consecutiveErrors, health.totalErrors, true);
         announceUnresponsive(*this, "timeout");
 
         // Check if bus recovery is needed (decentralized check).
@@ -979,16 +979,16 @@ void I2CDevice::recordError(I2CErrorType errorType, uint8_t espError) {
         // table; with dual-bus it may decide to recover, defaulting to
         // bus 0. If only this device's bus is sick, the BUS_ERROR branch
         // below routes recovery to the right bus directly.
-        I2CDeviceManager::getInstance()->checkBusRecoveryNeeded();
+        I2cDeviceManager::getInstance()->checkBusRecoveryNeeded();
       }
       break;
       
-    case I2CErrorType::BUS_ERROR:
+    case I2cErrorType::BUS_ERROR:
       health.busErrorCount++;
       ERROR_I2CF("Device 0x%02X (%s) bus=%u BUS_ERROR (count=%d, espErr=0x%02X)",
                  address, name, bus, health.busErrorCount, espError);
 
-      logI2CError(address, name, health.consecutiveErrors, health.totalErrors, false);
+      logI2cError(address, name, health.consecutiveErrors, health.totalErrors, false);
 
       // Trigger immediate bus recovery on THIS device's bus (was hardcoded
       // to bus 0 before dual-bus). A bus 1 device with a BUS_ERROR now
@@ -999,7 +999,7 @@ void I2CDevice::recordError(I2CErrorType errorType, uint8_t espError) {
       // recover on every poll. Suppressed attempts are logged rather than
       // dropped silently, so the pattern is still visible in the log.
       {
-        I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
+        I2cDeviceManager* mgr = I2cDeviceManager::getInstance();
         if (mgr->busRecoveryThrottled(bus)) {
           WARN_I2CF("Device 0x%02X (%s) BUS_ERROR on bus %u - recovery suppressed (cooldown)",
                     address, name, bus);
@@ -1009,18 +1009,18 @@ void I2CDevice::recordError(I2CErrorType errorType, uint8_t espError) {
       }
       break;
       
-    case I2CErrorType::BUFFER_OVERFLOW:
+    case I2cErrorType::BUFFER_OVERFLOW:
       ERROR_I2CF("Device 0x%02X (%s) BUFFER_OVERFLOW (espErr=0x%02X)",
                  address, name, espError);
-      logI2CError(address, name, 0, health.totalErrors, false);
+      logI2cError(address, name, 0, health.totalErrors, false);
       break;
       
-    case I2CErrorType::NONE:
+    case I2cErrorType::NONE:
       break;
   }
 }
 
-bool I2CDevice::isDegraded() const {
+bool I2cDevice::isDegraded() const {
   if (!health.degraded) return false;
   
   // Auto-recovery after timeout
@@ -1032,7 +1032,7 @@ bool I2CDevice::isDegraded() const {
   return true;
 }
 
-void I2CDevice::attemptRecovery() {
+void I2cDevice::attemptRecovery() {
   if (!health.degraded) return;
   
   INFO_I2CF("Device 0x%02X (%s) attempting recovery", address, name);
@@ -1040,7 +1040,7 @@ void I2CDevice::attemptRecovery() {
   health.consecutiveErrors = 0;
 }
 
-void I2CDevice::resetGracePeriod() {
+void I2cDevice::resetGracePeriod() {
   health.registrationTime = millis();
   health.consecutiveErrors = 0;
   health.degraded = false;

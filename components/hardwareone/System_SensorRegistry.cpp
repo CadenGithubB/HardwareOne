@@ -62,7 +62,7 @@ static const char* micValidTasks[] = { SENSOR_TASK_RECORDING, nullptr };
 // Non-I2C Sensor Registry
 // ============================================================================
 
-const NonI2CSensorEntry nonI2CSensors[] = {
+const NonI2cSensorEntry nonI2cSensors[] = {
 #if ENABLE_CAMERA_SENSOR
   {
     "camera",
@@ -89,17 +89,17 @@ const NonI2CSensorEntry nonI2CSensors[] = {
 #endif
 };
 
-const size_t nonI2CSensorsCount = sizeof(nonI2CSensors) / sizeof(nonI2CSensors[0]);
+const size_t nonI2cSensorsCount = sizeof(nonI2cSensors) / sizeof(nonI2cSensors[0]);
 
 // ============================================================================
 // Registry Access Functions
 // ============================================================================
 
-const NonI2CSensorEntry* findNonI2CSensor(const char* id) {
+const NonI2cSensorEntry* findNonI2cSensor(const char* id) {
   if (!id) return nullptr;
-  for (size_t i = 0; i < nonI2CSensorsCount; i++) {
-    if (strcmp(nonI2CSensors[i].id, id) == 0) {
-      return &nonI2CSensors[i];
+  for (size_t i = 0; i < nonI2cSensorsCount; i++) {
+    if (strcmp(nonI2cSensors[i].id, id) == 0) {
+      return &nonI2cSensors[i];
     }
   }
   return nullptr;

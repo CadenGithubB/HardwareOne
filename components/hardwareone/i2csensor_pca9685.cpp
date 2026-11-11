@@ -42,7 +42,7 @@ bool servoInit() {
   if (gPwmDriverConnected) return true;
 
   const uint8_t servoBus = (uint8_t)gSettings.servoBus;
-  I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
+  I2cDeviceManager* mgr = I2cDeviceManager::getInstance();
   TwoWire* servoWire = mgr ? mgr->getWire(servoBus) : nullptr;
   if (!servoWire) return false;
 

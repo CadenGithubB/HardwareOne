@@ -437,7 +437,7 @@ bool apdsInit() {
   }
 
   const uint8_t apdsBus = (uint8_t)gSettings.apdsBus;
-  I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
+  I2cDeviceManager* mgr = I2cDeviceManager::getInstance();
   TwoWire* apdsWire = mgr ? mgr->getWire(apdsBus) : nullptr;
   if (!apdsWire) return false;
   
@@ -572,7 +572,7 @@ static bool apdsPollDevice(unsigned long nowMs, unsigned long pollMs,
   });
 
   if (result) {
-    // Note: I2CDevice::recordSuccess() called automatically by transaction
+    // Note: I2cDevice::recordSuccess() called automatically by transaction
     // which resets consecutiveErrors - no local counter needed
     {
       SensorCacheGuard g(sApdsCacheMutex, pdMS_TO_TICKS(50), "apds.pollWrite");
@@ -631,7 +631,7 @@ static bool apdsPollDevice(unsigned long nowMs, unsigned long pollMs,
       }
     }
   } else if (i2cShouldAutoDisable(I2C_ADDR_APDS, apdsBus)) {
-    // Note: I2CDevice::recordError() called automatically by transaction;
+    // Note: I2cDevice::recordError() called automatically by transaction;
     // the centralized health tracking decides on auto-disable.
     uint8_t errors = i2cGetConsecutiveErrors(I2C_ADDR_APDS, apdsBus);
     gApdsColorRunning = false;
@@ -659,7 +659,7 @@ void apdsTask(void* parameter) {
   unsigned long lastApdsRead = 0;
   unsigned long lastGestureRead = 0;
   unsigned long lastStackLog = 0;
-  // Note: Failure tracking now handled by centralized I2CDevice health system
+  // Note: Failure tracking now handled by centralized I2cDevice health system
   // Use i2cShouldAutoDisable() instead of local counters
 
   while (true) {

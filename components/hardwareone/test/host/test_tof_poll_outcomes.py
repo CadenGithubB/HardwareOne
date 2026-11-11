@@ -33,19 +33,19 @@ def generate(component: Path) -> str:
     mutex = read("System_Mutex.h")
     task = read("System_TaskUtils.h")
     definitions = [extract_block(manager, marker) for marker in (
-        "I2CDeviceManager::I2CDeviceManager()", "I2CDevice::I2CDevice()",
-        "void I2CDevice::init(", "I2CDevice* I2CDeviceManager::getDevice(",
-        "I2CDevice* I2CDeviceManager::registerDevice(",
-        "uint8_t I2CDeviceManager::probeDeviceStatus(",
-        "bool I2CDeviceManager::clockStackPush(", "void I2CDeviceManager::clockStackPop(",
-        "uint32_t I2CDeviceManager::clockStackTopOrDefault(", "void I2CDeviceManager::setBusClock(",
-        "void I2CDeviceManager::updateMetrics(", "void I2CDeviceManager::updateHistogram(",
-        "I2CErrorType classifyI2CError(",
+        "I2cDeviceManager::I2cDeviceManager()", "I2cDevice::I2cDevice()",
+        "void I2cDevice::init(", "I2cDevice* I2cDeviceManager::getDevice(",
+        "I2cDevice* I2cDeviceManager::registerDevice(",
+        "uint8_t I2cDeviceManager::probeDeviceStatus(",
+        "bool I2cDeviceManager::clockStackPush(", "void I2cDeviceManager::clockStackPop(",
+        "uint32_t I2cDeviceManager::clockStackTopOrDefault(", "void I2cDeviceManager::setBusClock(",
+        "void I2cDeviceManager::updateMetrics(", "void I2cDeviceManager::updateHistogram(",
+        "I2cErrorType classifyI2cError(",
         # Outage/recovery events (v0.99.99); a pre-change --baseline lacks them.
         *[marker for marker in ("static void postDeviceHealthEvent(",
                                 "static void announceUnresponsive(") if marker in manager],
-        "void I2CDevice::recordSuccess(",
-        "void I2CDevice::recordError(", "bool I2CDevice::isDegraded(")]
+        "void I2cDevice::recordSuccess(",
+        "void I2cDevice::recordError(", "bool I2cDevice::isDegraded(")]
     definitions += [extract_block(helpers, marker) for marker in (
         "template<typename Func>\nauto i2cDeviceTransaction(uint8_t bus",
         "template<typename Func>\nvoid i2cDeviceTransactionVoid(uint8_t bus",

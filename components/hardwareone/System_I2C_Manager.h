@@ -2,7 +2,7 @@
  * I2C Device Manager - Unified I2C subsystem controller
  * Single entry point for all I2C operations, device lifecycle, and bus management
  * 
- * Now includes I2CDevice class (merged from System_I2C_Device.h)
+ * Now includes I2cDevice class (merged from System_I2C_Device.h)
  */
 
 #ifndef SYSTEM_I2C_MANAGER_H
@@ -23,7 +23,7 @@
 // I2C Error Classification (merged from System_I2C_Device.h)
 // ============================================================================
 
-enum class I2CErrorType : uint8_t {
+enum class I2cErrorType : uint8_t {
   NONE = 0,
   NACK,           // Device not responding
   TIMEOUT,        // Bus hung or device too slow
@@ -31,7 +31,7 @@ enum class I2CErrorType : uint8_t {
   BUFFER_OVERFLOW // ESP-IDF internal buffer issue
 };
 
-I2CErrorType classifyI2CError(uint8_t espError);
+I2cErrorType classifyI2cError(uint8_t espError);
 
 // Execution policy belongs to an individual transaction, not to the device
 // registry.  A single device can legitimately use a conservative clock during
@@ -41,19 +41,19 @@ I2CErrorType classifyI2CError(uint8_t espError);
 // a Wire I/O deadline; TwoWire's hardware timeout is configured separately by
 // initBus().  Keeping those two concepts separate prevents an I/O timeout from
 // silently changing how long unrelated tasks queue for a busy bus.
-struct I2CTransactionOptions {
+struct I2cTransactionOptions {
   uint32_t clockHz;
   uint32_t lockWaitMs;
 };
 
 // ============================================================================
-// I2CDevice Class (merged from System_I2C_Device.h)
+// I2cDevice Class (merged from System_I2C_Device.h)
 // ============================================================================
 
 // Forward declaration of manager for transaction template
-class I2CDeviceManager;
+class I2cDeviceManager;
 
-class I2CDevice {
+class I2cDevice {
 public:
   // Device state
   uint8_t address;
@@ -75,7 +75,7 @@ public:
     uint8_t nackCount;
     uint8_t timeoutCount;
     uint8_t busErrorCount;
-    I2CErrorType lastErrorType;
+    I2cErrorType lastErrorType;
   } health;
   
   // Transaction modes
@@ -86,19 +86,19 @@ public:
   };
   
   // Constructor
-  I2CDevice();
+  I2cDevice();
   // Initialize registry identity. Timing is deliberately absent: it is
-  // supplied through I2CTransactionOptions for every operation.
+  // supplied through I2cTransactionOptions for every operation.
   void init(uint8_t addr, const char* deviceName, uint8_t busIdx = 0);
   
   // Transaction interface - unified entry point
   template<typename Func>
-  auto transaction(Func&& operation, const I2CTransactionOptions& options,
+  auto transaction(Func&& operation, const I2cTransactionOptions& options,
                    Mode mode = Mode::STANDARD) -> decltype(operation());
   
   // Health management
   void recordSuccess();
-  void recordError(I2CErrorType errorType, uint8_t espError);
+  void recordError(I2cErrorType errorType, uint8_t espError);
   bool isDegraded() const;
   void attemptRecovery();
   void resetGracePeriod();
@@ -112,7 +112,7 @@ public:
 // I2C Bus Metrics - Global bus performance tracking
 // ============================================================================
 
-struct I2CBusMetrics {
+struct I2cBusMetrics {
   uint32_t totalTransactions;
   uint32_t mutexTimeouts;
   uint32_t mutexContentions;
@@ -136,7 +136,7 @@ struct I2CBusMetrics {
 // I2C Device Lifecycle Management
 // ============================================================================
 
-enum I2CDeviceType : int {
+enum I2cDeviceType : int {
   I2C_DEVICE_THERMAL = 0,
   I2C_DEVICE_TOF = 1,
   I2C_DEVICE_IMU = 2,
@@ -149,23 +149,23 @@ enum I2CDeviceType : int {
   I2C_DEVICE_COUNT
 };
 
-enum class I2CDeviceRequestAction { Start, Stop };
+enum class I2cDeviceRequestAction { Start, Stop };
 
-struct I2CDeviceRequest {
-  I2CDeviceType device;
+struct I2cDeviceRequest {
+  I2cDeviceType device;
   unsigned long queuedAt;
-  I2CDeviceRequestAction action;
+  I2cDeviceRequestAction action;
 };
 
 // ============================================================================
 // I2C Device Manager - Singleton
 // ============================================================================
 
-class I2CDeviceManager {
+class I2cDeviceManager {
 public:
   // Device registry (public for direct access by commands)
   static const int MAX_DEVICES = 16;
-  I2CDevice devices[MAX_DEVICES];
+  I2cDevice devices[MAX_DEVICES];
 
   // Number of physical I2C buses we can manage. Bus 0 = Wire1 (primary STEMMA
   // QT / "I2C1" in the UI), bus 1 = Wire (secondary STEMMA QT / "I2C2").
@@ -178,7 +178,7 @@ private:
 
   // ---- Per-bus state -------------------------------------------------------
   // All hot-path I2C state is indexed by bus id (0 or 1). Bus 0 is always
-  // assumed initialized when gI2CBusRunning is true; bus 1 only when
+  // assumed initialized when gI2cBusRunning is true; bus 1 only when
   // gSettings.i2c2Enabled and its pins are valid.
   SemaphoreHandle_t busMutexes[NUM_BUSES];   // one mutex per bus → true parallel ops
   TwoWire*          wires[NUM_BUSES];        // pointers into Arduino's Wire1/Wire
@@ -186,7 +186,7 @@ private:
   uint32_t          defaultClockHz[NUM_BUSES];
   bool              busInitialized[NUM_BUSES];
   std::atomic<unsigned> busClients[NUM_BUSES]{};
-  I2CBusMetrics     busMetrics[NUM_BUSES];
+  I2cBusMetrics     busMetrics[NUM_BUSES];
   uint32_t          lastRecoveryMs[NUM_BUSES];  // throttles error-driven recovery
 
   // Per-bus clock restoration bookkeeping. Bus mutexes are intentionally
@@ -200,7 +200,7 @@ private:
   // Shared (cross-bus) state — device registry mutex, request queue, etc.
   SemaphoreHandle_t managerMutex;
   static const int DEVICE_QUEUE_SIZE = 8;
-  I2CDeviceRequest deviceQueue[DEVICE_QUEUE_SIZE];
+  I2cDeviceRequest deviceQueue[DEVICE_QUEUE_SIZE];
   int queueHead;
   int queueTail;
   // Stops cannot be refused because the start ring is full. Each device has
@@ -211,10 +211,10 @@ private:
   volatile bool pollingPaused;
 
   // Singleton instance
-  static I2CDeviceManager* instance;
+  static I2cDeviceManager* instance;
 
   // Private constructor (singleton)
-  I2CDeviceManager();
+  I2cDeviceManager();
 
   // Internal helpers — all per-bus.
   bool clockStackPush(uint8_t bus, uint32_t hz);
@@ -226,31 +226,31 @@ private:
 
   // Zero-length address probe used to classify a failed transaction. Must be
   // called with the bus mutex already held (executeTransaction does). Returns
-  // a TwoWire::endTransmission() status for classifyI2CError().
+  // a TwoWire::endTransmission() status for classifyI2cError().
   uint8_t probeDeviceStatus(uint8_t bus, uint8_t addr);
 
 public:
   // Singleton access
-  static I2CDeviceManager* getInstance();
+  static I2cDeviceManager* getInstance();
   static void initialize();
   // Inspect already-created buses without allocating the manager during early
   // settings application or another operation that does not start I2C.
-  static I2CDeviceManager* existingInstance() { return instance; }
+  static I2cDeviceManager* existingInstance() { return instance; }
 
   // Device registration records identity and health only. Clock rate and
   // mutex-wait policy are per-transaction options and never live here.
   // `busIdx` defaults to bus 0 for legacy callers.
-  I2CDevice* registerDevice(uint8_t addr, const char* name, uint8_t busIdx = 0);
+  I2cDevice* registerDevice(uint8_t addr, const char* name, uint8_t busIdx = 0);
   // Lookup by (address, bus). Same address on different buses → two distinct
   // devices (e.g., two DS3231s, one per bus). Default bus=0 preserves legacy
   // single-bus lookup semantics.
-  I2CDevice* getDevice(uint8_t addr, uint8_t busIdx = 0);
+  I2cDevice* getDevice(uint8_t addr, uint8_t busIdx = 0);
   // Address-only lookup across every bus, lowest bus first. Retained for CLI
   // commands whose syntax genuinely supplies only an address (i2crecover).
   // Runtime health and driver paths must use getDevice(addr, bus). If the same
   // address exists on both buses this returns bus 0 deterministically.
-  I2CDevice* getDeviceAnyBus(uint8_t addr);
-  I2CDevice* getDeviceByName(const char* name);
+  I2cDevice* getDeviceAnyBus(uint8_t addr);
+  I2cDevice* getDeviceByName(const char* name);
   int getDeviceCount() const { return deviceCount; }
   int getActiveDeviceCount() const {
     int count = 0;
@@ -261,7 +261,7 @@ public:
   }
 
   // Bus operations
-  // initBuses() initializes bus 0 unconditionally (assuming gI2CBusRunning)
+  // initBuses() initializes bus 0 unconditionally (assuming gI2cBusRunning)
   // and bus 1 only when gSettings.i2c2Enabled is set + its pins are valid.
   void initBuses();
   // Initialize a specific bus. Idempotent — safe to call repeatedly; later
@@ -289,28 +289,28 @@ public:
   // clock cache but deliberately do not create device-health records or alter
   // the normal device-transaction metrics.
   uint8_t probeAddress(uint8_t busIdx, uint8_t address,
-                       const I2CTransactionOptions& options);
+                       const I2cTransactionOptions& options);
 
   // I2C device lifecycle. The existing sensor worker is the sole consumer:
   // it applies a dequeued stop before dispatching another start. Pending stops
   // cancel queued starts, take priority and remain visible during initialization.
-  bool enqueueDeviceStart(I2CDeviceType sensor);
-  bool enqueueDeviceStop(I2CDeviceType sensor);
-  bool dequeueDeviceRequest(I2CDeviceRequest* req);
-  bool hasPendingDeviceStop(I2CDeviceType sensor);
+  bool enqueueDeviceStart(I2cDeviceType sensor);
+  bool enqueueDeviceStop(I2cDeviceType sensor);
+  bool dequeueDeviceRequest(I2cDeviceRequest* req);
+  bool hasPendingDeviceStop(I2cDeviceType sensor);
   // Queue status describes pending starts only; stops take dispatch priority.
-  bool isInQueue(I2CDeviceType sensor);
-  int getQueuePosition(I2CDeviceType sensor);
+  bool isInQueue(I2cDeviceType sensor);
+  int getQueuePosition(I2cDeviceType sensor);
   int getQueueDepth();
   void pausePolling();
   void resumePolling();
   bool isPollingPaused() const { return pollingPaused; }
 
   // Metrics access — per-bus.
-  const I2CBusMetrics& getMetrics(uint8_t busIdx = 0) const { return busMetrics[busIdx < NUM_BUSES ? busIdx : 0]; }
+  const I2cBusMetrics& getMetrics(uint8_t busIdx = 0) const { return busMetrics[busIdx < NUM_BUSES ? busIdx : 0]; }
   void resetMetrics();
 
-  // Transaction execution (called by I2CDevice). Picks the right mutex /
+  // Transaction execution (called by I2cDevice). Picks the right mutex /
   // wire / clock stack from `device->bus`, runs the operation under the
   // bus's mutex with this call's clock and lock-wait policy, and tracks
   // per-bus metrics + health. The lambda is nullary; sensors that need to talk
@@ -319,9 +319,9 @@ public:
   // the pre-dual-bus version — no migration cost for lambdas that stay
   // on bus 0 (their `Wire1` references already match bus 0's wire).
   template<typename Func>
-  auto executeTransaction(I2CDevice* device, Func&& operation,
-                         const I2CTransactionOptions& options,
-                         I2CDevice::Mode mode) -> decltype(operation());
+  auto executeTransaction(I2cDevice* device, Func&& operation,
+                         const I2cTransactionOptions& options,
+                         I2cDevice::Mode mode) -> decltype(operation());
 
   // Mutex access for external use (legacy compatibility during migration).
   // The default bus=0 keeps every existing getBusMutex() call working.
@@ -340,8 +340,8 @@ public:
 };
 
 // Global accessor
-inline I2CDeviceManager* i2c() {
-  return I2CDeviceManager::getInstance();
+inline I2cDeviceManager* i2c() {
+  return I2cDeviceManager::getInstance();
 }
 
 // ============================================================================
@@ -349,9 +349,9 @@ inline I2CDeviceManager* i2c() {
 // ============================================================================
 
 template<typename Func>
-auto I2CDeviceManager::executeTransaction(I2CDevice* device, Func&& operation,
-                                          const I2CTransactionOptions& options,
-                                          I2CDevice::Mode mode)
+auto I2cDeviceManager::executeTransaction(I2cDevice* device, Func&& operation,
+                                          const I2cTransactionOptions& options,
+                                          I2cDevice::Mode mode)
     -> decltype(operation()) {
   using ReturnType = decltype(operation());
 
@@ -424,7 +424,7 @@ auto I2CDeviceManager::executeTransaction(I2CDevice* device, Func&& operation,
 
     updateMetrics(bus, waitUs, txDurationUs, transactionClockHz);
 
-    if (mode != I2CDevice::Mode::NACK_TOLERANT) {
+    if (mode != I2cDevice::Mode::NACK_TOLERANT) {
       device->recordSuccess();
     }
     return;
@@ -446,20 +446,20 @@ auto I2CDeviceManager::executeTransaction(I2CDevice* device, Func&& operation,
     // (BUS_ERROR). This runs only on the failure path, which is rare by
     // definition, and it deliberately bypasses the metrics counters since it
     // is diagnostic traffic rather than real work.
-    I2CErrorType errType = I2CErrorType::NONE;
+    I2cErrorType errType = I2cErrorType::NONE;
     uint8_t wireStatus = 0;
     if constexpr (std::is_same<ReturnType, bool>::value) {
-      if (!result && mode != I2CDevice::Mode::NACK_TOLERANT) {
+      if (!result && mode != I2cDevice::Mode::NACK_TOLERANT) {
         wireStatus = probeDeviceStatus(bus, device->address);
-        errType = classifyI2CError(wireStatus);
-        if (errType == I2CErrorType::NONE) {
+        errType = classifyI2cError(wireStatus);
+        if (errType == I2cErrorType::NONE) {
           // The device ACKs its address, so it is present and the bus is
           // healthy — the operation failed for a reason neither can report
           // (bad register, short read, sensor-level rejection). Fall back to
           // NACK, matching the pre-classification behavior, so that repeated
           // failures still accumulate toward degraded instead of being
           // recorded as a non-event.
-          errType = I2CErrorType::NACK;
+          errType = I2cErrorType::NACK;
           wireStatus = 2;
         }
       }
@@ -471,7 +471,7 @@ auto I2CDeviceManager::executeTransaction(I2CDevice* device, Func&& operation,
 
     updateMetrics(bus, waitUs, txDurationUs, transactionClockHz);
 
-    if (mode != I2CDevice::Mode::NACK_TOLERANT) {
+    if (mode != I2cDevice::Mode::NACK_TOLERANT) {
       if constexpr (std::is_same<ReturnType, bool>::value) {
         if (result) {
           device->recordSuccess();
@@ -489,18 +489,18 @@ auto I2CDeviceManager::executeTransaction(I2CDevice* device, Func&& operation,
 }
 
 // ============================================================================
-// I2CDevice Transaction Template Implementation
+// I2cDevice Transaction Template Implementation
 // ============================================================================
 
-// Global accessor for I2CDevice::transaction to call manager
-inline I2CDeviceManager* I2CDeviceManager_getInstance() {
-  return I2CDeviceManager::getInstance();
+// Global accessor for I2cDevice::transaction to call manager
+inline I2cDeviceManager* I2cDeviceManager_getInstance() {
+  return I2cDeviceManager::getInstance();
 }
 
 template<typename Func>
-auto I2CDevice::transaction(Func&& operation, const I2CTransactionOptions& options,
+auto I2cDevice::transaction(Func&& operation, const I2cTransactionOptions& options,
                             Mode mode) -> decltype(operation()) {
-  I2CDeviceManager* mgr = I2CDeviceManager_getInstance();
+  I2cDeviceManager* mgr = I2cDeviceManager_getInstance();
   if (!mgr) return decltype(operation())();
   return mgr->executeTransaction(this, std::forward<Func>(operation), options, mode);
 }

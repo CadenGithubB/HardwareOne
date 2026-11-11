@@ -32,12 +32,12 @@ def main() -> None:
     header = (COMPONENT / "System_I2C.h").read_text()
     manager_definitions = [re.search(r"^#define I2C_WIRE1_DEFAULT_FREQ[^\n]+", manager, re.M)[0]]
     manager_definitions += [extract_block(manager, marker) for marker in (
-        "I2CDeviceManager::I2CDeviceManager()", "I2CDevice::I2CDevice()",
-        "I2CDeviceManager* I2CDeviceManager::getInstance()",
-        "bool I2CDeviceManager::enqueueDeviceStart(", "bool I2CDeviceManager::enqueueDeviceStop(",
-        "bool I2CDeviceManager::dequeueDeviceRequest(", "bool I2CDeviceManager::hasPendingDeviceStop(",
-        "bool I2CDeviceManager::isInQueue(", "int I2CDeviceManager::getQueuePosition(",
-        "int I2CDeviceManager::getQueueDepth(",
+        "I2cDeviceManager::I2cDeviceManager()", "I2cDevice::I2cDevice()",
+        "I2cDeviceManager* I2cDeviceManager::getInstance()",
+        "bool I2cDeviceManager::enqueueDeviceStart(", "bool I2cDeviceManager::enqueueDeviceStop(",
+        "bool I2cDeviceManager::dequeueDeviceRequest(", "bool I2cDeviceManager::hasPendingDeviceStop(",
+        "bool I2cDeviceManager::isInQueue(", "int I2cDeviceManager::getQueuePosition(",
+        "int I2cDeviceManager::getQueueDepth(",
     )]
     controller_definitions = re.findall(r"^#define I2C_ADDR_[^\n]+", header, re.M)
     # The start helper marks admitted starts outstanding (out of line); older
@@ -45,7 +45,7 @@ def main() -> None:
     outstanding = re.search(r"^static std::atomic<bool> sSensorStartOutstanding[^\n]+", controller, re.M)
     if outstanding:
         controller_definitions += ["#define HAS_START_OUTSTANDING 1", outstanding[0],
-                                   extract_block(controller, "bool enqueueDeviceStart(I2CDeviceType device)")]
+                                   extract_block(controller, "bool enqueueDeviceStart(I2cDeviceType device)")]
     else:
         controller_definitions += [extract_block(header, "inline bool enqueueDeviceStart(")]
     if re.search(r"const char\* eventTag,\s*const char\* hint", header):

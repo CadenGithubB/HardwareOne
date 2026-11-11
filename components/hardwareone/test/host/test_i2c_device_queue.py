@@ -26,14 +26,14 @@ def main() -> None:
     constant = re.search(r"^#define I2C_WIRE1_DEFAULT_FREQ[^\n]+", source, re.M)
     require(constant is not None, "missing production default bus clock")
     definitions = [constant.group()] + [extract_block(source, marker) for marker in (
-        "I2CDeviceManager::I2CDeviceManager()", "I2CDevice::I2CDevice()",
-        "bool I2CDeviceManager::enqueueDeviceStart(",
-        "bool I2CDeviceManager::enqueueDeviceStop(",
-        "bool I2CDeviceManager::dequeueDeviceRequest(",
-        "bool I2CDeviceManager::hasPendingDeviceStop(",
-        "bool I2CDeviceManager::isInQueue(",
-        "int I2CDeviceManager::getQueuePosition(",
-        "int I2CDeviceManager::getQueueDepth(",
+        "I2cDeviceManager::I2cDeviceManager()", "I2cDevice::I2cDevice()",
+        "bool I2cDeviceManager::enqueueDeviceStart(",
+        "bool I2cDeviceManager::enqueueDeviceStop(",
+        "bool I2cDeviceManager::dequeueDeviceRequest(",
+        "bool I2cDeviceManager::hasPendingDeviceStop(",
+        "bool I2cDeviceManager::isInQueue(",
+        "int I2cDeviceManager::getQueuePosition(",
+        "int I2cDeviceManager::getQueueDepth(",
     )]
     harness = (HERE / "i2c_device_queue_harness.cpp").read_text()
     marker = "// INSERT_PRODUCTION_DEFINITIONS"

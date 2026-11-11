@@ -70,7 +70,7 @@ void logTimeSyncedMarkerIfReady(const char* source);
 void logBootAnchorToLogs(const char* resetReason, const char* detail = nullptr);
 
 // I2C-specific logging
-void logI2CError(uint8_t address, const char* deviceName, int consecutiveErrors, int totalErrors, bool nowDegraded);
-void logI2CRecovery(uint8_t address, const char* deviceName, int totalErrors);
+void logI2cError(uint8_t address, const char* deviceName, int consecutiveErrors, int totalErrors, bool nowDegraded);
+void logI2cRecovery(uint8_t address, const char* deviceName, int totalErrors);
 
 #endif // SYSTEM_LOGGING_H

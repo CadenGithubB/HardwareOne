@@ -74,19 +74,19 @@ static void xSemaphoreGive(SemaphoreHandle_t lock) {
 }
 #if ENABLE_I2C_SYSTEM
 static StaticSemaphore_t buses[2];
-class I2CDeviceManager {
+class I2cDeviceManager {
  public:
   static constexpr uint8_t NUM_BUSES = 2;
-  static I2CDeviceManager* available;
+  static I2cDeviceManager* available;
   static int lookups;
   SemaphoreHandle_t mutexes[2] = {&buses[0], &buses[1]};
-  static I2CDeviceManager* existingInstance() { ++lookups; return available; }
+  static I2cDeviceManager* existingInstance() { ++lookups; return available; }
   SemaphoreHandle_t getBusMutex(uint8_t i) { assert(i < NUM_BUSES); return mutexes[i]; }
   // Deliberately no lazy getInstance(): clock changes must never construct it.
 };
-I2CDeviceManager* I2CDeviceManager::available = nullptr;
-int I2CDeviceManager::lookups = 0;
-static I2CDeviceManager manager;
+I2cDeviceManager* I2cDeviceManager::available = nullptr;
+int I2cDeviceManager::lookups = 0;
+static I2cDeviceManager manager;
 #endif
 
 static uint32_t current = POWER_CPU_PERFORMANCE_MHZ;
@@ -156,7 +156,7 @@ static bool setCpuFrequencyMhz(uint32_t mhz) {
   assert(sCpuFrequencyMutex->holder == currentTask);
 #if ENABLE_I2C_SYSTEM
   assert(pollPaused(0) && pollPaused(1));
-  if (I2CDeviceManager::available) {
+  if (I2cDeviceManager::available) {
     for (auto* lock : manager.mutexes) if (lock) assert(lock->holder == currentTask);
   }
 #endif
@@ -190,7 +190,7 @@ static void reset() {
     assert(!buses[i].holder); buses[i] = {}; buses[i].id = i + 1;
     manager.mutexes[i] = &buses[i];
   }
-  I2CDeviceManager::available = &manager; I2CDeviceManager::lookups = 0;
+  I2cDeviceManager::available = &manager; I2cDeviceManager::lookups = 0;
 #endif
 }
 static void released() {
@@ -208,7 +208,7 @@ static void basicOutcomes() {
   reset(); bool changed = true; assert(powerSetCpuFrequencyMhz(current, &changed)); assert(!changed);
   assert(halCalls == 0 && trace == std::vector<std::string>({"take:gate", "give:gate"}));
 #if ENABLE_I2C_SYSTEM
-  assert(I2CDeviceManager::lookups == 0);
+  assert(I2cDeviceManager::lookups == 0);
 #endif
   noPresentation(); released();
 
@@ -239,7 +239,7 @@ static void basicOutcomes() {
   for (int callbackTask : {1, 2}) {
     reset();
 #if ENABLE_I2C_SYSTEM
-    I2CDeviceManager::available = nullptr; // Serialization also exists without buses.
+    I2cDeviceManager::available = nullptr; // Serialization also exists without buses.
 #endif
     halCallback = [callbackTask]() {
       currentTask = callbackTask;
@@ -255,7 +255,7 @@ static void basicOutcomes() {
 }
 #if ENABLE_I2C_SYSTEM
 static void busOutcomes() {
-  reset(); I2CDeviceManager::available = nullptr;
+  reset(); I2cDeviceManager::available = nullptr;
   assert(powerSetCpuFrequencyMhz(40)); assert(!buses[0].takes && !buses[1].takes); released();
   for (int absent = 0; absent < 3; ++absent) {
     reset();

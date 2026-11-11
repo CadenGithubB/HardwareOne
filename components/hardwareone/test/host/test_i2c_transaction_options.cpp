@@ -56,9 +56,9 @@ BaseType_t xSemaphoreGive(SemaphoreHandle_t semaphore) {
   return pdTRUE;
 }
 
-I2CDeviceManager* I2CDeviceManager::instance = nullptr;
+I2cDeviceManager* I2cDeviceManager::instance = nullptr;
 
-I2CDeviceManager::I2CDeviceManager()
+I2cDeviceManager::I2cDeviceManager()
     : deviceCount(0), managerMutex(nullptr), queueHead(0), queueTail(0),
       queueMutex(nullptr), pollingPaused(false) {
   for (uint8_t bus = 0; bus < NUM_BUSES; ++bus) {
@@ -75,62 +75,62 @@ I2CDeviceManager::I2CDeviceManager()
   std::memset(deviceQueue, 0, sizeof(deviceQueue));
 }
 
-I2CDeviceManager* I2CDeviceManager::getInstance() {
+I2cDeviceManager* I2cDeviceManager::getInstance() {
   return instance;
 }
 
-bool I2CDeviceManager::clockStackPush(uint8_t bus, uint32_t hz) {
+bool I2cDeviceManager::clockStackPush(uint8_t bus, uint32_t hz) {
   if (clockStackDepths[bus] >= CLOCK_STACK_MAX) return false;
   clockStacks[bus][clockStackDepths[bus]++] = hz;
   return true;
 }
 
-void I2CDeviceManager::clockStackPop(uint8_t bus) {
+void I2cDeviceManager::clockStackPop(uint8_t bus) {
   assert(clockStackDepths[bus] > 0);
   --clockStackDepths[bus];
 }
 
-uint32_t I2CDeviceManager::clockStackTopOrDefault(uint8_t bus) {
+uint32_t I2cDeviceManager::clockStackTopOrDefault(uint8_t bus) {
   if (clockStackDepths[bus] == 0) return defaultClockHz[bus];
   return clockStacks[bus][clockStackDepths[bus] - 1];
 }
 
-void I2CDeviceManager::setBusClock(uint8_t bus, uint32_t hz) {
+void I2cDeviceManager::setBusClock(uint8_t bus, uint32_t hz) {
   assert(bus < NUM_BUSES);
   assert(requestedClockCount < (sizeof(requestedClocks) / sizeof(requestedClocks[0])));
   requestedClocks[requestedClockCount++] = hz;
   currentClockHz[bus] = hz;
 }
 
-void I2CDeviceManager::updateMetrics(uint8_t, uint32_t, uint32_t,
+void I2cDeviceManager::updateMetrics(uint8_t, uint32_t, uint32_t,
                                      uint32_t clockHz) {
   metricsClockHz = clockHz;
 }
 
-uint8_t I2CDeviceManager::probeDeviceStatus(uint8_t, uint8_t) {
+uint8_t I2cDeviceManager::probeDeviceStatus(uint8_t, uint8_t) {
   return 0;
 }
 
-I2CDevice::I2CDevice()
+I2cDevice::I2cDevice()
     : address(0), bus(0), name(nullptr), health{} {}
 
-void I2CDevice::init(uint8_t addr, const char* deviceName, uint8_t busIdx) {
+void I2cDevice::init(uint8_t addr, const char* deviceName, uint8_t busIdx) {
   address = addr;
   bus = busIdx;
   name = deviceName;
   health = {};
 }
 
-void I2CDevice::recordSuccess() {
+void I2cDevice::recordSuccess() {
   health.lastSuccessTime++;
 }
 
-void I2CDevice::recordError(I2CErrorType errorType, uint8_t) {
+void I2cDevice::recordError(I2cErrorType errorType, uint8_t) {
   health.lastErrorType = errorType;
   health.totalErrors++;
 }
 
-bool I2CDevice::isDegraded() const {
+bool I2cDevice::isDegraded() const {
   return health.degraded;
 }
 
@@ -143,8 +143,8 @@ static void resetObservations(FakeSemaphore& semaphore) {
 }
 
 int main() {
-  I2CDeviceManager manager;
-  I2CDeviceManager::instance = &manager;
+  I2cDeviceManager manager;
+  I2cDeviceManager::instance = &manager;
 
   FakeSemaphore busMutex;
   manager.busMutexes[0] = &busMutex;
@@ -154,7 +154,7 @@ int main() {
 
   // Model the real boot-time duplicate-registration case: this address is
   // already present before a helper executes its first transaction.
-  I2CDevice& registered = manager.devices[0];
+  I2cDevice& registered = manager.devices[0];
   manager.deviceCount = 1;
   registered.init(0x50, "SeesawGamepad", 0);
 
@@ -165,7 +165,7 @@ int main() {
         operationRan = true;
         return 37;
       },
-      I2CTransactionOptions{100000, 80}, I2CDevice::Mode::STANDARD);
+      I2cTransactionOptions{100000, 80}, I2cDevice::Mode::STANDARD);
 
   assert(result == 37);
   assert(operationRan);
@@ -181,7 +181,7 @@ int main() {
   // not the first call's values and not the registry's stale profile.
   resetObservations(busMutex);
   registered.transaction(
-      []() {}, I2CTransactionOptions{400000, 15}, I2CDevice::Mode::STANDARD);
+      []() {}, I2cTransactionOptions{400000, 15}, I2cDevice::Mode::STANDARD);
 
   assert(busMutex.takeCount == 1);
   assert(busMutex.lastWaitTicks == 15);

@@ -1,6 +1,6 @@
 /**
  * System_I2C.h - Unified I2C System Interface
- * Clean interface that delegates to I2CDevice/Manager architecture
+ * Clean interface that delegates to I2cDevice/Manager architecture
  *
  * This header provides: enqueueDeviceStart(), isInQueue(), getQueuePosition(),
  * requestSensorStop(), sensorStatusBumpWith(), drainDebugRing(),
@@ -57,36 +57,36 @@
 template<typename Func>
 auto i2cDeviceTransaction(uint8_t address, uint32_t clockHz, uint32_t lockWaitMs, Func&& operation)
     -> decltype(operation()) {
-  extern bool gI2CBusRunning;
-  if (!gI2CBusRunning) return decltype(operation())();
+  extern bool gI2cBusRunning;
+  if (!gI2cBusRunning) return decltype(operation())();
 
-  I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
+  I2cDeviceManager* mgr = I2cDeviceManager::getInstance();
   if (!mgr) return decltype(operation())();
 
   // getDevice / registerDevice default busIdx=0 — legacy lookups still hit
   // the primary bus's device table slot, unchanged from before.
-  I2CDevice* dev = mgr->getDevice(address);
+  I2cDevice* dev = mgr->getDevice(address);
   if (!dev) dev = mgr->registerDevice(address, "Auto");
   if (!dev) return decltype(operation())();
 
-  const I2CTransactionOptions options{clockHz, lockWaitMs};
-  return dev->transaction(std::forward<Func>(operation), options, I2CDevice::Mode::STANDARD);
+  const I2cTransactionOptions options{clockHz, lockWaitMs};
+  return dev->transaction(std::forward<Func>(operation), options, I2cDevice::Mode::STANDARD);
 }
 
 template<typename Func>
 void i2cDeviceTransactionVoid(uint8_t address, uint32_t clockHz, uint32_t lockWaitMs, Func&& operation) {
-  extern bool gI2CBusRunning;
-  if (!gI2CBusRunning) return;
+  extern bool gI2cBusRunning;
+  if (!gI2cBusRunning) return;
 
-  I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
+  I2cDeviceManager* mgr = I2cDeviceManager::getInstance();
   if (!mgr) return;
 
-  I2CDevice* dev = mgr->getDevice(address);
+  I2cDevice* dev = mgr->getDevice(address);
   if (!dev) dev = mgr->registerDevice(address, "Auto");
   if (!dev) return;
 
-  const I2CTransactionOptions options{clockHz, lockWaitMs};
-  dev->transaction(std::forward<Func>(operation), options, I2CDevice::Mode::STANDARD);
+  const I2cTransactionOptions options{clockHz, lockWaitMs};
+  dev->transaction(std::forward<Func>(operation), options, I2cDevice::Mode::STANDARD);
 }
 
 // New dual-bus helpers — explicit `bus` (0 or 1). Lambda is nullary, exactly
@@ -99,35 +99,35 @@ template<typename Func>
 auto i2cDeviceTransaction(uint8_t bus, uint8_t address, uint32_t clockHz,
                           uint32_t lockWaitMs, Func&& operation)
     -> decltype(operation()) {
-  extern bool gI2CBusRunning;
-  if (!gI2CBusRunning) return decltype(operation())();
+  extern bool gI2cBusRunning;
+  if (!gI2cBusRunning) return decltype(operation())();
 
-  I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
+  I2cDeviceManager* mgr = I2cDeviceManager::getInstance();
   if (!mgr) return decltype(operation())();
 
-  I2CDevice* dev = mgr->getDevice(address, bus);
+  I2cDevice* dev = mgr->getDevice(address, bus);
   if (!dev) dev = mgr->registerDevice(address, "Auto", bus);
   if (!dev) return decltype(operation())();
 
-  const I2CTransactionOptions options{clockHz, lockWaitMs};
-  return dev->transaction(std::forward<Func>(operation), options, I2CDevice::Mode::STANDARD);
+  const I2cTransactionOptions options{clockHz, lockWaitMs};
+  return dev->transaction(std::forward<Func>(operation), options, I2cDevice::Mode::STANDARD);
 }
 
 template<typename Func>
 void i2cDeviceTransactionVoid(uint8_t bus, uint8_t address, uint32_t clockHz,
                               uint32_t lockWaitMs, Func&& operation) {
-  extern bool gI2CBusRunning;
-  if (!gI2CBusRunning) return;
+  extern bool gI2cBusRunning;
+  if (!gI2cBusRunning) return;
 
-  I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
+  I2cDeviceManager* mgr = I2cDeviceManager::getInstance();
   if (!mgr) return;
 
-  I2CDevice* dev = mgr->getDevice(address, bus);
+  I2cDevice* dev = mgr->getDevice(address, bus);
   if (!dev) dev = mgr->registerDevice(address, "Auto", bus);
   if (!dev) return;
 
-  const I2CTransactionOptions options{clockHz, lockWaitMs};
-  dev->transaction(std::forward<Func>(operation), options, I2CDevice::Mode::STANDARD);
+  const I2cTransactionOptions options{clockHz, lockWaitMs};
+  dev->transaction(std::forward<Func>(operation), options, I2cDevice::Mode::STANDARD);
 }
 
 template<typename Func>
@@ -166,18 +166,18 @@ auto i2cTaskWithTimeout(uint8_t bus, uint8_t address, uint32_t clockHz,
 
 template<typename Func>
 void i2cTransactionNACKTolerant(uint8_t address, uint32_t clockHz, uint32_t lockWaitMs, Func&& operation) {
-  extern bool gI2CBusRunning;
-  if (!gI2CBusRunning) return;
+  extern bool gI2cBusRunning;
+  if (!gI2cBusRunning) return;
 
-  I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
+  I2cDeviceManager* mgr = I2cDeviceManager::getInstance();
   if (!mgr) return;
 
-  I2CDevice* dev = mgr->getDevice(address);
+  I2cDevice* dev = mgr->getDevice(address);
   if (!dev) dev = mgr->registerDevice(address, "Auto");
   if (!dev) return;
 
-  const I2CTransactionOptions options{clockHz, lockWaitMs};
-  dev->transaction(std::forward<Func>(operation), options, I2CDevice::Mode::NACK_TOLERANT);
+  const I2cTransactionOptions options{clockHz, lockWaitMs};
+  dev->transaction(std::forward<Func>(operation), options, I2cDevice::Mode::NACK_TOLERANT);
 }
 
 // Dual-bus NACK-tolerant variant (FM radio path uses NACK-tolerant for
@@ -185,18 +185,18 @@ void i2cTransactionNACKTolerant(uint8_t address, uint32_t clockHz, uint32_t lock
 template<typename Func>
 void i2cTransactionNACKTolerant(uint8_t bus, uint8_t address, uint32_t clockHz,
                                 uint32_t lockWaitMs, Func&& operation) {
-  extern bool gI2CBusRunning;
-  if (!gI2CBusRunning) return;
+  extern bool gI2cBusRunning;
+  if (!gI2cBusRunning) return;
 
-  I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
+  I2cDeviceManager* mgr = I2cDeviceManager::getInstance();
   if (!mgr) return;
 
-  I2CDevice* dev = mgr->getDevice(address, bus);
+  I2cDevice* dev = mgr->getDevice(address, bus);
   if (!dev) dev = mgr->registerDevice(address, "Auto", bus);
   if (!dev) return;
 
-  const I2CTransactionOptions options{clockHz, lockWaitMs};
-  dev->transaction(std::forward<Func>(operation), options, I2CDevice::Mode::NACK_TOLERANT);
+  const I2cTransactionOptions options{clockHz, lockWaitMs};
+  dev->transaction(std::forward<Func>(operation), options, I2cDevice::Mode::NACK_TOLERANT);
 }
 
 // ============================================================================
@@ -234,13 +234,13 @@ inline bool checkTaskStackSafety(const char* sensorName, uint32_t totalStackWord
 // (probes are used by the scanner / wizards to check existence, not to set
 // devices up for ongoing use). `bus` defaults to 0 so legacy callers work.
 inline uint8_t i2cProbeAddress(uint8_t address, uint32_t clockHz, uint32_t lockWaitMs, uint8_t bus = 0) {
-  extern bool gI2CBusRunning;
-  if (!gI2CBusRunning) return 4;
+  extern bool gI2cBusRunning;
+  if (!gI2cBusRunning) return 4;
 
-  I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
+  I2cDeviceManager* mgr = I2cDeviceManager::getInstance();
   if (!mgr) return 4;
   return mgr->probeAddress(bus, address,
-                           I2CTransactionOptions{clockHz, lockWaitMs});
+                           I2cTransactionOptions{clockHz, lockWaitMs});
 }
 
 inline bool i2cPingAddress(uint8_t address, uint32_t clockHz, uint32_t lockWaitMs, uint8_t bus = 0) {
@@ -249,7 +249,7 @@ inline bool i2cPingAddress(uint8_t address, uint32_t clockHz, uint32_t lockWaitM
 
 // Queue a stop, cancelling pending starts. The worker applies it after any
 // active initialization; the sensor task then owns resource cleanup.
-bool requestSensorStop(I2CDeviceType device);
+bool requestSensorStop(I2cDeviceType device);
 
 // Admission for a queued sensor start, shared by the start commands and the
 // main loop's menu input auto-start. Formats nothing: the command wrapper
@@ -267,38 +267,38 @@ enum class SensorStartRefusal : uint8_t {
   ProbeFailed,
   NotQueued,
 };
-bool requestSensorStart(I2CDeviceType sensor, const char* eventTag, SensorStartRefusal* why);
+bool requestSensorStart(I2cDeviceType sensor, const char* eventTag, SensorStartRefusal* why);
 const char* sensorStartRefusalText(SensorStartRefusal why);
 
 // `hint` is a next-step line printed only when the start was queued.
-const char* cmd_sensorstart_queued(I2CDeviceType sensor, const char* displayName,
+const char* cmd_sensorstart_queued(I2cDeviceType sensor, const char* displayName,
                                    const char* eventTag, const char* hint = nullptr);
 
-// Display name for I2CDeviceType (e.g., I2C_DEVICE_IMU → "IMU")
-const char* deviceTypeDisplayName(I2CDeviceType device);
+// Display name for I2cDeviceType (e.g., I2C_DEVICE_IMU → "IMU")
+const char* deviceTypeDisplayName(I2cDeviceType device);
 
 // Queue functions
 // Queues a start and marks it outstanding until the queue worker settles it
 // (started, failed, or closed by a stop).
-bool enqueueDeviceStart(I2CDeviceType device);
+bool enqueueDeviceStart(I2cDeviceType device);
 
-inline bool dequeueDeviceRequest(I2CDeviceRequest* req) {
-  I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
+inline bool dequeueDeviceRequest(I2cDeviceRequest* req) {
+  I2cDeviceManager* mgr = I2cDeviceManager::getInstance();
   return mgr ? mgr->dequeueDeviceRequest(req) : false;
 }
 
-inline bool isInQueue(I2CDeviceType device) {
-  I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
+inline bool isInQueue(I2cDeviceType device) {
+  I2cDeviceManager* mgr = I2cDeviceManager::getInstance();
   return mgr ? mgr->isInQueue(device) : false;
 }
 
-inline int getQueuePosition(I2CDeviceType device) {
-  I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
+inline int getQueuePosition(I2cDeviceType device) {
+  I2cDeviceManager* mgr = I2cDeviceManager::getInstance();
   return mgr ? mgr->getQueuePosition(device) : -1;
 }
 
 inline int getQueueDepth() {
-  I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
+  I2cDeviceManager* mgr = I2cDeviceManager::getInstance();
   return mgr ? mgr->getQueueDepth() : 0;
 }
 
@@ -306,48 +306,48 @@ inline int getQueueDepth() {
 // registry. Address-only lookup is ambiguous when identical devices exist on
 // both buses and used to let a boot-created bus-0 ghost mask the real device.
 inline bool i2cDeviceIsDegraded(uint8_t address, uint8_t bus) {
-  I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
+  I2cDeviceManager* mgr = I2cDeviceManager::getInstance();
   if (!mgr) return false;
-  I2CDevice* dev = mgr->getDevice(address, bus);
+  I2cDevice* dev = mgr->getDevice(address, bus);
   return dev ? dev->isDegraded() : false;
 }
 
 inline void i2cDeviceSuccess(uint8_t address, uint8_t bus) {
-  I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
+  I2cDeviceManager* mgr = I2cDeviceManager::getInstance();
   if (!mgr) return;
-  I2CDevice* dev = mgr->getDevice(address, bus);
+  I2cDevice* dev = mgr->getDevice(address, bus);
   if (dev) dev->recordSuccess();
 }
 
 inline void i2cDeviceError(uint8_t address, uint8_t bus) {
-  I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
+  I2cDeviceManager* mgr = I2cDeviceManager::getInstance();
   if (!mgr) return;
-  I2CDevice* dev = mgr->getDevice(address, bus);
-  if (dev) dev->recordError(I2CErrorType::NACK, 0x02);
+  I2cDevice* dev = mgr->getDevice(address, bus);
+  if (dev) dev->recordError(I2cErrorType::NACK, 0x02);
 }
 
 // Check if sensor should auto-disable based on consecutive I2C failures
-// Uses existing I2CDevice health tracking - no local counters needed in sensor tasks
+// Uses existing I2cDevice health tracking - no local counters needed in sensor tasks
 inline bool i2cShouldAutoDisable(uint8_t address, uint8_t bus,
                                  uint8_t maxConsecutiveErrors = 5) {
-  I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
+  I2cDeviceManager* mgr = I2cDeviceManager::getInstance();
   if (!mgr) return false;
-  I2CDevice* dev = mgr->getDevice(address, bus);
+  I2cDevice* dev = mgr->getDevice(address, bus);
   if (!dev) return false;
   return dev->getHealth().consecutiveErrors >= maxConsecutiveErrors;
 }
 
 // Get current consecutive error count for a device (for logging)
 inline uint8_t i2cGetConsecutiveErrors(uint8_t address, uint8_t bus) {
-  I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
+  I2cDeviceManager* mgr = I2cDeviceManager::getInstance();
   if (!mgr) return 0;
-  I2CDevice* dev = mgr->getDevice(address, bus);
+  I2cDevice* dev = mgr->getDevice(address, bus);
   return dev ? dev->getHealth().consecutiveErrors : 0;
 }
 
 // Recover a specific bus, or bus 0 when the caller has no bus context.
 inline bool i2cBusRecovery(uint8_t busIdx = 0) {
-  I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
+  I2cDeviceManager* mgr = I2cDeviceManager::getInstance();
   if (!mgr) return false;
   mgr->performBusRecovery(busIdx);
   return true;
@@ -376,7 +376,7 @@ inline bool i2cBusRecovery(uint8_t busIdx = 0) {
 // ============================================================================
 // Global Flags and Configuration
 // ============================================================================
-extern bool gI2CBusRunning;
+extern bool gI2cBusRunning;
 
 // The reference-counted "pause sensor polling" primitive (pollPause/pollResume/
 // PollPauseGuard, the legacy sensorPolling* aliases, and the gSensorPollingPaused
@@ -388,7 +388,7 @@ extern bool gI2CBusRunning;
 // ============================================================================
 // I2C Sensor Database
 // ============================================================================
-struct I2CSensorEntry {
+struct I2cSensorEntry {
   uint8_t address;
   const char* name;
   const char* description;
@@ -403,7 +403,7 @@ struct I2CSensorEntry {
   uint32_t i2cTimeoutMs;
 };
 
-extern const I2CSensorEntry i2cSensors[];
+extern const I2cSensorEntry i2cSensors[];
 extern const size_t i2cSensorsCount;
 
 // ============================================================================
@@ -479,14 +479,14 @@ extern int connectedDeviceCount;
 // ============================================================================
 // Initialization Functions
 // ============================================================================
-void initI2CBuses();
-void initI2CManager();
+void initI2cBuses();
+void initI2cManager();
 void initSensorQueue();
 
 // ============================================================================
 // Discovery and Helper Functions
 // ============================================================================
-void discoverI2CDevices();
+void discoverI2cDevices();
 bool isSensorConnected(const char* name);
 // Address-table label only; driver initialization validates the actual hardware.
 String identifySensor(uint8_t address);

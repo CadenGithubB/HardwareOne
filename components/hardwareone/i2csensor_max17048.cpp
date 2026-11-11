@@ -88,7 +88,7 @@ bool fuelGaugeProbe() {
 
   // Register for I2C health tracking so i2cmetrics/i2cscan see the device.
   // Idempotent — the manager dedupes by (bus, address).
-  I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
+  I2cDeviceManager* mgr = I2cDeviceManager::getInstance();
   if (mgr) mgr->registerDevice(I2C_ADDR_FUEL_GAUGE, "MAX17048",
                                (uint8_t)gSettings.fuelGaugeBus);
 

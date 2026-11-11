@@ -5,7 +5,7 @@
 // Lifecycle: this is NOT a user-toggleable sensor — it's the battery backend
 // for boards that select BATTERY_BACKEND_FUEL_GAUGE. System_Battery.cpp owns
 // the polling cadence (10s tick from the main loop) and writes results into
-// the battery snapshot. No CLI start/stop, no I2CSensorEntry, no task.
+// the battery snapshot. No CLI start/stop, no I2cSensorEntry, no task.
 //
 // Why no task: a single read pass (~5ms of I2C) at 0.1 Hz can ride the
 // existing main-loop tick without spinning up a dedicated task. Saves ~2 KB

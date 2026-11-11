@@ -38,7 +38,7 @@ struct TwoWire {
  size_t write(uint8_t v){if(reg<0)reg=v;else value=v;return 1;}
  int endTransmission(){if(failStage==5)return 1;writes.push_back({reg,value});return 0;}
 };static TwoWire wire;
-struct I2CDeviceManager {static I2CDeviceManager* getInstance(){static I2CDeviceManager m;return &m;}TwoWire* getWire(int bus){assert(bus==0);return &wire;}};
+struct I2cDeviceManager {static I2cDeviceManager* getInstance(){static I2cDeviceManager m;return &m;}TwoWire* getWire(int bus){assert(bus==0);return &wire;}};
 template<class F>bool i2cDeviceTransaction(int bus,int address,int hz,int wait,F f){assert(bus==0&&(address==0x40||address==0x18)&&hz==100000&&wait==500);++lockDepth;++transactions;bool result=f();--lockDepth;return result;}
 bool i2cPingAddress(int,int,int,int){assert(!lockDepth);return present;}
 void pinMode(int,int){}void digitalWrite(int,int value){amp=value;}void delay(int){assert(!lockDepth);}

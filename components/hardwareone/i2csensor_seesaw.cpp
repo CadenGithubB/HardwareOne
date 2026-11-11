@@ -397,7 +397,7 @@ const size_t gamepadCommandsCount = sizeof(gamepadCommands) / sizeof(gamepadComm
 //
 // Cleanup Strategy:
 //   1. Check gInputRunning flag at loop start
-//   2. Acquire bus mutex via I2CDeviceManager to prevent race conditions during cleanup
+//   2. Acquire bus mutex via I2cDeviceManager to prevent race conditions during cleanup
 //   3. Invalidate cache (no sensor object to delete)
 //   4. Release mutex and delete task
 // ============================================================================
@@ -437,7 +437,7 @@ void inputTask(void* parameter) {
   unsigned long lastGamepadRead = 0;
   unsigned long lastStackLog = 0;
   unsigned long lastStateLog = 0;
-  // Note: I2C transaction failure tracking handled by centralized I2CDevice health system.
+  // Note: I2C transaction failure tracking handled by centralized I2cDevice health system.
   // Invalid-data tracking (I2C succeeds but returns garbage) needs a local counter
   // because the health system only tracks transport-level failures.
   uint8_t consecutiveInvalidReads = 0;
@@ -536,7 +536,7 @@ void inputTask(void* parameter) {
 
         if (readSuccess && dataValid) {
           consecutiveInvalidReads = 0;  // Reset invalid-data counter on good read
-          // Note: I2CDevice::recordSuccess() called automatically by transaction
+          // Note: I2cDevice::recordSuccess() called automatically by transaction
           // which resets consecutiveErrors - no local counter needed
           
           // Track previous buttons for debounce / edge detection
@@ -616,7 +616,7 @@ void inputTask(void* parameter) {
           // (paced per-sensor in gSensorSpecs — 100ms for snappy button-press response).
         } else if (!readSuccess) {
           // Actual I2C transaction failure
-          // Note: I2CDevice::recordError() called automatically by transaction
+          // Note: I2cDevice::recordError() called automatically by transaction
           uint8_t errors = i2cGetConsecutiveErrors(I2C_ADDR_GAMEPAD,
                                                    (uint8_t)gSettings.inputBus);
           WARN_INPUTF("[GAMEPAD_TASK] I2C read failure (consecutive: %u)", errors);

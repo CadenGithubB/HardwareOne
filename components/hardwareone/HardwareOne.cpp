@@ -1831,7 +1831,7 @@ void hardwareone_setup() {
   initNeoPixelLED();     // no-op stub when ENABLE_NEOPIXEL=0
 
 #if ENABLE_I2C_SYSTEM
-  initI2CBuses();
+  initI2cBuses();
   esp_log_level_set("i2c.master", ESP_LOG_WARN);  // Suppress routine NACK spam from FM radio RDS polling
 
   // Early silent RTC sync (zero-alloc I2C read + settimeofday) — verbose sync happens later
@@ -2084,7 +2084,7 @@ void hardwareone_setup() {
   }
   
  #if ENABLE_I2C_SYSTEM
-  discoverI2CDevices();
+  discoverI2cDevices();
   DEBUG_SYSTEMF("Device discovery completed");
  #else
   DEBUG_SYSTEMF("I2C system disabled at compile time - skipping I2C device discovery");
