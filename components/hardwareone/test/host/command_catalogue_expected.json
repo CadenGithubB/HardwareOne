@@ -33,7 +33,7 @@
     "camera|cameraCommands|1|camera",
     "microphone|micCommands|1|audio",
     "edgeimpulse|edgeImpulseCommands|1|-",
-    "transcription|transcriptionUICommands|1|-",
+    "transcription|transcriptionUiCommands|1|-",
     "note|noteCommands|1|-",
     "stt|sttCommands|1|-",
     "espsr|espsrCommands|1|-",

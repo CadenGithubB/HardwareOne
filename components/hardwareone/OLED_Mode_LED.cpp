@@ -78,10 +78,10 @@ static void populateLedRootMenu() {
 static void populateLedColorMenu() {
   initLedScrollStates();
   oledScrollClearKeepSelection(&sLedColorScroll);
-  // "off" first (getRGBFromName alias), then the PROGMEM palette. On ESP32 the
+  // "off" first (getRgbFromName alias), then the PROGMEM palette. On ESP32 the
   // ColorEntry.name pointers reference flash-resident string literals, so they
   // are valid program-lifetime char*s once copied out of the PROGMEM struct —
-  // same memcpy_P idiom getRGBFromName uses.
+  // same memcpy_P idiom getRgbFromName uses.
   oledScrollAddItem(&sLedColorScroll, "off");
   for (int i = 0; i < numColors; i++) {
     ColorEntry entry;

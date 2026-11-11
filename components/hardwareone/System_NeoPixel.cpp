@@ -157,7 +157,7 @@ void setLedColor(RGB color) {
 }
 #endif  // ENABLE_NEOPIXEL
 
-bool getRGBFromName(const String& colorName, RGB& color) {
+bool getRgbFromName(const String& colorName, RGB& color) {
   String name = colorName;
   name.toLowerCase();
   
@@ -220,7 +220,7 @@ RGB rainbowColor(int step, int maxSteps) {
   return result;
 }
 
-String getClosestColorName(uint16_t r, uint16_t g, uint16_t b, RGB& closestRGB) {
+String getClosestColorName(uint16_t r, uint16_t g, uint16_t b, RGB& closestRgb) {
   // Find closest color in table using Euclidean distance
   int minDist = INT_MAX;
   String closestName = "unknown";
@@ -237,7 +237,7 @@ String getClosestColorName(uint16_t r, uint16_t g, uint16_t b, RGB& closestRGB) 
     if (dist < minDist) {
       minDist = dist;
       closestName = entry.name;
-      closestRGB = entry.rgb;
+      closestRgb = entry.rgb;
     }
   }
   
@@ -381,7 +381,7 @@ const char* cmd_ledcolor(const String& argsInput) {
   }
   
   RGB color;
-  if (!getRGBFromName(colorName, color)) {
+  if (!getRgbFromName(colorName, color)) {
     snprintf(getDebugBuffer(), 1024, "Error: Unknown color: %s", colorName.c_str());
     return getDebugBuffer();
   }
@@ -436,7 +436,7 @@ const char* cmd_ledeffect(const String& argsInput) {
       if (duration < 100) duration = 100;
       if (duration > 60000) duration = 60000;
     } else {
-      if (!getRGBFromName(firstArg, color1)) {
+      if (!getRgbFromName(firstArg, color1)) {
         if (!ensureDebugBuffer()) return "Error: Unknown color";
         snprintf(getDebugBuffer(), 1024, "Error: Unknown color '%s'", firstArg.c_str());
         return getDebugBuffer();
@@ -450,7 +450,7 @@ const char* cmd_ledeffect(const String& argsInput) {
         String secondArg = (thirdSpace >= 0) ? rest.substring(0, thirdSpace) : rest;
 
         if (secondArg.length() > 0 && !isdigit(secondArg.charAt(0))) {
-          if (!getRGBFromName(secondArg, color2)) {
+          if (!getRgbFromName(secondArg, color2)) {
             if (!ensureDebugBuffer()) return "Error: Unknown color";
             snprintf(getDebugBuffer(), 1024, "Error: Unknown color '%s'", secondArg.c_str());
             return getDebugBuffer();

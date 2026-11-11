@@ -44,11 +44,11 @@ def main() -> None:
             "displayLlm must request the next frame while the screen is live")
     cmd_enum = re.search(r"^enum : uint8_t \{ LLM_CMD_NONE[^\n]*$", oled, re.M)
     cmd_flight = re.search(r"^static uint8_t sCmdInFlight[^\n]*$", oled, re.M)
-    ui_state = re.search(r"^static LlmUIState sUIState[^\n]*$", oled, re.M)
+    ui_state = re.search(r"^static LlmUiState sUiState[^\n]*$", oled, re.M)
     require(bool(cmd_enum and cmd_flight and ui_state), "missing LLM screen state declarations")
     definitions = [
         region(oled, "static const int LLM_CHARS", "static const int LLM_READER_COLS"),
-        extract_block(oled, "enum class LlmUIState") + ";",
+        extract_block(oled, "enum class LlmUiState") + ";",
         ui_state.group(), cmd_enum.group(), cmd_flight.group(),
         region(oled, "#define LLM_READER_MAX_LINES", "static int          sReaderTop"),
     ] + [extract_block(oled, marker) for marker in (

@@ -124,11 +124,11 @@ static CameraConfig cameraConfigFromSettings() {
   put(CameraControl::Saturation, gSettings.cameraSaturation);
   put(CameraControl::Sharpness, gSettings.cameraSharpness);
   put(CameraControl::Denoise, gSettings.cameraDenoise);
-  put(CameraControl::WhiteBalanceMode, gSettings.cameraWBMode);
+  put(CameraControl::WhiteBalanceMode, gSettings.cameraWbMode);
   put(CameraControl::Effect, gSettings.cameraSpecialEffect);
   put(CameraControl::HMirror, gSettings.cameraHMirror);
   put(CameraControl::VFlip, gSettings.cameraVFlip);
-  put(CameraControl::ExposureLevel, gSettings.cameraAELevel);
+  put(CameraControl::ExposureLevel, gSettings.cameraAeLevel);
   put(CameraControl::AutoExposure, 1);
   put(CameraControl::AutoGain, 1);
   put(CameraControl::GainCeiling, 6);
@@ -1024,11 +1024,11 @@ const char* fn(const String& argsInput) { \
 CAMERA_INT_COMMAND(cmd_camerabrightness, Brightness, -2, 2, cameraBrightness)
 CAMERA_INT_COMMAND(cmd_cameracontrast, Contrast, -2, 2, cameraContrast)
 CAMERA_INT_COMMAND(cmd_camerasaturation, Saturation, -2, 2, cameraSaturation)
-CAMERA_INT_COMMAND(cmd_camerawb, WhiteBalanceMode, 0, 4, cameraWBMode)
+CAMERA_INT_COMMAND(cmd_camerawb, WhiteBalanceMode, 0, 4, cameraWbMode)
 CAMERA_INT_COMMAND(cmd_camerasharpness, Sharpness, -2, 2, cameraSharpness)
 CAMERA_INT_COMMAND(cmd_cameradenoise, Denoise, 0, 8, cameraDenoise)
 CAMERA_INT_COMMAND(cmd_cameraeffect, Effect, 0, 6, cameraSpecialEffect)
-CAMERA_INT_COMMAND(cmd_cameraexposure, ExposureLevel, -2, 2, cameraAELevel)
+CAMERA_INT_COMMAND(cmd_cameraexposure, ExposureLevel, -2, 2, cameraAeLevel)
 #undef CAMERA_INT_COMMAND
 #define CAMERA_BOOL_COMMAND(fn, control) \
 const char* fn(const String& argsInput) { \
@@ -1485,8 +1485,8 @@ static const SettingEntry cameraSettingEntries[] = {
   { "cameraBrightness", SETTING_INT, &gSettings.cameraBrightness, 2, 0, nullptr, -2, 2, "Brightness (-2 to 2)", nullptr, false, "tuning", "camerabrightness", false, false, cameraSettingAvailable<CameraControl::Brightness>, nullptr },
   { "cameraContrast", SETTING_INT, &gSettings.cameraContrast, 2, 0, nullptr, -2, 2, "Contrast (-2 to 2)", nullptr, false, "tuning", "cameracontrast", false, false, cameraSettingAvailable<CameraControl::Contrast>, nullptr },
   { "cameraSaturation", SETTING_INT, &gSettings.cameraSaturation, 2, 0, nullptr, -2, 2, "Saturation (-2 to 2)", nullptr, false, "tuning", "camerasaturation", false, false, cameraSettingAvailable<CameraControl::Saturation>, nullptr },
-  { "cameraAELevel", SETTING_INT, &gSettings.cameraAELevel, 0, 0, nullptr, -2, 2, "Exposure Compensation (-2 to 2)", nullptr, false, "tuning", "cameraexposure", false, false, cameraSettingAvailable<CameraControl::ExposureLevel>, nullptr },
-  { "cameraWBMode", SETTING_INT, &gSettings.cameraWBMode, 0, 0, nullptr, 0, 4, "White Balance", "0:Auto,1:Sunny,2:Cloudy,3:Office,4:Home", false, "tuning", "camerawb", false, false, cameraSettingAvailable<CameraControl::WhiteBalanceMode>, nullptr },
+  { "cameraAELevel", SETTING_INT, &gSettings.cameraAeLevel, 0, 0, nullptr, -2, 2, "Exposure Compensation (-2 to 2)", nullptr, false, "tuning", "cameraexposure", false, false, cameraSettingAvailable<CameraControl::ExposureLevel>, nullptr },
+  { "cameraWBMode", SETTING_INT, &gSettings.cameraWbMode, 0, 0, nullptr, 0, 4, "White Balance", "0:Auto,1:Sunny,2:Cloudy,3:Office,4:Home", false, "tuning", "camerawb", false, false, cameraSettingAvailable<CameraControl::WhiteBalanceMode>, nullptr },
   { "cameraSharpness", SETTING_INT, &gSettings.cameraSharpness, 0, 0, nullptr, -2, 2, "Sharpness (-2 to 2, OV3660)", nullptr, false, "tuning", "camerasharpness", false, false, cameraSettingAvailable<CameraControl::Sharpness>, nullptr },
   { "cameraDenoise", SETTING_INT, &gSettings.cameraDenoise, 0, 0, nullptr, 0, 8, "Denoise (0-8)", nullptr, false, "tuning", "cameradenoise", false, false, cameraSettingAvailable<CameraControl::Denoise>, nullptr },
   { "cameraSpecialEffect", SETTING_INT, &gSettings.cameraSpecialEffect, 0, 0, nullptr, 0, 6, "Special Effect", "0:None,1:Negative,2:Grayscale,3:Red Tint,4:Green Tint,5:Blue Tint,6:Sepia", false, "tuning", "cameraeffect", false, false, cameraSettingAvailable<CameraControl::Effect>, nullptr },

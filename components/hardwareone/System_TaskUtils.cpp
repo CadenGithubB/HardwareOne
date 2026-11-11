@@ -657,7 +657,7 @@ void reportAllTaskStacks() {
 
   uint32_t totalStackAllocated = 0;
   uint32_t totalStackUsed = 0;
-  uint32_t totalTCBOverhead = 0;
+  uint32_t totalTcbOverhead = 0;
   unsigned tcbMeasured = 0;
   unsigned stackUnmeasured = 0;
 
@@ -788,7 +788,7 @@ void reportAllTaskStacks() {
     else          snprintf(dc, sizeof(dc), "%4d%%", dCpu);
     char tcb[12];
     fmtTcb(tcb, sizeof(tcb), measuredTcb);
-    if (measuredTcb) { totalTCBOverhead += measuredTcb; tcbMeasured++; }
+    if (measuredTcb) { totalTcbOverhead += measuredTcb; tcbMeasured++; }
 
     // Same rule as every other row and as the boot memory report: the stack
     // size is the MEASURED allocator block or it is '?'. The compile-time
@@ -852,7 +852,7 @@ void reportAllTaskStacks() {
     else          snprintf(dc, sizeof(dc), "%4d%%", dCpu);
     char tcb[12];
     fmtTcb(tcb, sizeof(tcb), taskMeasure[i].tcbBytes);
-    if (taskMeasure[i].tcbBytes) { totalTCBOverhead += taskMeasure[i].tcbBytes; tcbMeasured++; }
+    if (taskMeasure[i].tcbBytes) { totalTcbOverhead += taskMeasure[i].tcbBytes; tcbMeasured++; }
 
     // Allocated stack is the MEASURED block behind pxStackBase — BYTES
     // throughout (the watermark is bytes on this port, see System_TaskUtils.h).
@@ -894,7 +894,7 @@ void reportAllTaskStacks() {
     (unsigned)(totalStackAllocated/1024),
     (unsigned)(totalStackUsed/1024),
     (unsigned)((totalStackAllocated - totalStackUsed)/1024),
-    (unsigned)totalTCBOverhead);
+    (unsigned)totalTcbOverhead);
   if (stackUnmeasured > 0) {
     BROADCAST_PRINTF("  (%u task stack(s) not a live internal-heap block - not in the totals)",
       stackUnmeasured);
@@ -933,8 +933,8 @@ void reportAllTaskStacks() {
     "  Task Control Blocks:  %6u B   (%u of %u tasks measured)\n"
     "  Total Task Overhead:  %6u KB",
     (unsigned)(totalStackAllocated/1024),
-    (unsigned)totalTCBOverhead, tcbMeasured, (unsigned)numTasks,
-    (unsigned)((totalStackAllocated + totalTCBOverhead)/1024));
+    (unsigned)totalTcbOverhead, tcbMeasured, (unsigned)numTasks,
+    (unsigned)((totalStackAllocated + totalTcbOverhead)/1024));
   unsigned fragPercent = 0;
   if (heapFree > 0) {
     fragPercent = (unsigned)((largestFreeBlock * 100) / heapFree);

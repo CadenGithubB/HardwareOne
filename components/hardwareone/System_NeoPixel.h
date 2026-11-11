@@ -87,12 +87,12 @@ inline void ledEffectTick() {}
 
 #endif  // ENABLE_NEOPIXEL
 
-bool getRGBFromName(const String& colorName, RGB& color);
+bool getRgbFromName(const String& colorName, RGB& color);
 
 // Color utility functions
 RGB blendColors(RGB a, RGB b, float ratio);
 RGB adjustBrightness(RGB color, float brightness);
 RGB rainbowColor(int step, int maxSteps);
-String getClosestColorName(uint16_t r, uint16_t g, uint16_t b, RGB& closestRGB);
+String getClosestColorName(uint16_t r, uint16_t g, uint16_t b, RGB& closestRgb);
 
 #endif // SYSTEM_NEOPIXEL_H

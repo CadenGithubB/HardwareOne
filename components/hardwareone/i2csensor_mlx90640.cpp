@@ -36,7 +36,7 @@ static const SettingEntry thermalSettingEntries[] = {
   { "thermalAutoStart", SETTING_BOOL, &gSettings.thermalAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr, false, nullptr, "thermalautostart" },
   { "thermalPollingMs", SETTING_INT, &gSettings.thermalPollingMs, 250, 0, nullptr, 50, 5000, "Polling (ms)", nullptr, false, "timing", "thermalpollingms" },
   { "thermalPaletteDefault", SETTING_STRING, &gSettings.thermalPaletteDefault, 0, 0, "grayscale", 0, 0, "Default Palette", "grayscale,iron,rainbow,hot,coolwarm", false, "display", "thermalpalettedefault" },
-  { "thermalEWMAFactor", SETTING_FLOAT, &gSettings.thermalEWMAFactor, 0, 0.2f, nullptr, 0, 1, "EWMA Factor", nullptr, false, "filtering", "thermalewmafactor" },
+  { "thermalEWMAFactor", SETTING_FLOAT, &gSettings.thermalEwmaFactor, 0, 0.2f, nullptr, 0, 1, "EWMA Factor", nullptr, false, "filtering", "thermalewmafactor" },
   { "thermalTransitionMs", SETTING_INT, &gSettings.thermalTransitionMs, 80, 0, nullptr, 0, 5000, "Transition (ms)", nullptr, false, "timing", "thermaltransitionms" },
   { "thermalWebMaxFps", SETTING_INT, &gSettings.thermalWebMaxFps, 10, 0, nullptr, 1, 30, "Web Max FPS", nullptr, false, "timing", "thermalwebmaxfps" },
   { "thermalUpscaleFactor", SETTING_INT, &gSettings.thermalUpscaleFactor, 1, 0, nullptr, 1, 4, "Upscale Factor", nullptr, false, "display", "thermalupscalefactor" },
@@ -473,7 +473,7 @@ const char* cmd_thermalewmafactor(const String& argsInput) {
   if (_arg.length() == 0) return "Error: invalid arguments — Usage: thermalewmafactor <0.0..1.0>";
   float f = strtof(_arg.c_str(), nullptr);
   if (f < 0.0f || f > 1.0f) return "Error: [Thermal] EWMA factor must be 0.0-1.0";
-  setSetting(gSettings.thermalEWMAFactor, f);
+  setSetting(gSettings.thermalEwmaFactor, f);
   BROADCAST_PRINTF("thermalEWMAFactor set to %.3f", f);
   return "[Thermal] Setting updated";
 }

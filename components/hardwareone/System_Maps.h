@@ -199,7 +199,7 @@ struct MapFeatureStyle {
 // =============================================================================
 
 // Map header structure (40 bytes)
-struct HWMapHeader {
+struct HwMapHeader {
   char magic[4];           // "HWMP"
   uint16_t version;        // 6
   uint16_t flags;          // Tiling params bitfield
@@ -237,13 +237,13 @@ struct HWMapHeader {
 
 // Tile directory entry (8 bytes per tile)
 // Note: featureCount is stored at the START of each tile's payload, not here
-struct HWMapTileDirEntry {
+struct HwMapTileDirEntry {
   uint32_t offset;         // File offset to tile's payload data
   uint32_t payloadSize;    // Size of tile's payload in bytes (0 = empty tile)
 } __attribute__((packed));
 
 // Feature header (6 bytes - points follow as quantized pairs)
-struct HWMapFeatureHeader {
+struct HwMapFeatureHeader {
   uint8_t type;
   uint8_t subtype;         // Subtype for granular classification
   uint16_t nameIndex;      // Index into name table, 0xFFFF = unnamed
@@ -371,7 +371,7 @@ struct TileCacheSlot {
 // Loaded map state - v6 tiled architecture
 struct LoadedMap {
   bool valid;
-  HWMapHeader header;
+  HwMapHeader header;
   char filename[32];
   char filepath[128];       // Full path for reopening file
   size_t fileSize;         // Total file size
@@ -386,7 +386,7 @@ struct LoadedMap {
   uint8_t quantBits;       // Quantization bits (usually 0 = full 16-bit)
   
   // Tile directory (always in RAM - small: 6 bytes per tile)
-  HWMapTileDirEntry* tileDir;  // Array of tile offsets/counts
+  HwMapTileDirEntry* tileDir;  // Array of tile offsets/counts
   uint16_t tileCount;      // tileGridSize * tileGridSize
   
   // Precomputed tile geometry (for fast dequantization)

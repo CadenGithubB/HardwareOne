@@ -105,7 +105,7 @@ bool list(const AuthContext&,uint32_t,bool sd,uint32_t offset,Page* page,const c
 bool read(const AuthContext&,const char* path,uint32_t offset,char* out,size_t cap,size_t* got,uint32_t* total,const char**){
   if(savedPath!=path||offset>savedFile.size())return false;
   *total=savedFile.size();*got=std::min({kReadWindow,cap-1,savedFile.size()-offset});
-  if(offset+*got<savedFile.size())*got=TranscriptionUI::completePrefix(savedFile.data()+offset,*got);
+  if(offset+*got<savedFile.size())*got=TranscriptionUi::completePrefix(savedFile.data()+offset,*got);
   memcpy(out,savedFile.data()+offset,*got);out[*got]=0;return true;
 }
 bool create(CommandSource,uint32_t epoch,const char*,QuickNotePolicy::NoteHeader& header,const char* text,size_t length,char* path,size_t cap,const char**,bool native){

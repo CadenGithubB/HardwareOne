@@ -56,7 +56,7 @@ static void wipeString(String& text) {
 }
 static void cancelId(TransportSessionEpoch epoch,const char* id) {
   DictationAppLease lease{SOURCE_LOCAL_DISPLAY,epoch,0};
-  if (TranscriptionUI::parseId(id,lease.exchange)) (void)dictationAppCancel(lease);
+  if (TranscriptionUi::parseId(id,lease.exchange)) (void)dictationAppCancel(lease);
 }
 static void completed(bool ok,const char* result,void* context) {
   const auto ticket=*static_cast<Ticket*>(context);
@@ -109,7 +109,7 @@ static void acceptReply(const Ticket& ticket,bool ok) {
     // Polling failures stay in the status line; explicit actions show the full
     // actionable refusal once through the shared, auto-dismiss error toast.
     if (ticket.op==Op::Start || ticket.op==Op::Stop || ticket.op==Op::List || ticket.op==Op::Read)
-      oledToastShow(v.message,oled_message::kErrorDurationMs,OledUIIcon::ERROR);
+      oledToastShow(v.message,oled_message::kErrorDurationMs,OledUiIcon::ERROR);
     v.pollAt=millis()+1000;
     return; // Keep an unacknowledged receipt for retry, without copying twice.
   }
@@ -128,7 +128,7 @@ static void acceptReply(const Ticket& ticket,bool ok) {
     if (!*problem) problem=doc["failure"]|"";
     if (!*problem && !(doc["available"]|false)) problem=doc["reason"]|"";
     copy(v.message,sizeof(v.message),problem);
-    if (ticket.op==Op::Start) { TranscriptionUI::clear(v.recent,sizeof(v.recent)); v.line=0; }
+    if (ticket.op==Op::Start) { TranscriptionUi::clear(v.recent,sizeof(v.recent)); v.line=0; }
     v.nextPoll=v.exchange[0];
   } else if (ticket.op==Op::Next) {
     if (doc["available"]|false) {
@@ -136,11 +136,11 @@ static void acceptReply(const Ticket& ticket,bool ok) {
       const unsigned length=doc["length"]|0U;
       if (length==strlen(text) && length) {
         if ((doc["offset"]|0U)==0 && v.recent[0])
-          TranscriptionUI::appendRecent(v.recent,sizeof(v.recent),"\n",1);
+          TranscriptionUi::appendRecent(v.recent,sizeof(v.recent),"\n",1);
         // The receipt below names the raw bytes; the screen shows the display
         // copy (vocabulary spellings) when the adapter supplied one.
         const char* display=doc["display"]|text;
-        TranscriptionUI::appendRecent(v.recent,sizeof(v.recent),display,strlen(display));
+        TranscriptionUi::appendRecent(v.recent,sizeof(v.recent),display,strlen(display));
         pendingAck=command("ack")+" "+String(doc["sequence"]|0U)+" "+
             String(doc["offset"]|0U)+" "+String(length);
       }
@@ -172,7 +172,7 @@ static void acceptReply(const Ticket& ticket,bool ok) {
 static size_t nextGlyph(const char* text,size_t at,char& glyph) {
   const unsigned char ch=text[at]; glyph=ch<128?char(ch):'?';
   ++at;
-  while (text[at] && TranscriptionUI::continuation(static_cast<unsigned char>(text[at]))) ++at;
+  while (text[at] && TranscriptionUi::continuation(static_cast<unsigned char>(text[at]))) ++at;
   return at;
 }
 static unsigned lines(const char* text) {
@@ -206,7 +206,7 @@ static void populateMenu() {
   oledScrollAddItem(&v.menu,"Saved: internal");
   oledScrollAddItem(&v.menu,"Saved: SD card");
   static char mic[22];
-  snprintf(mic,sizeof(mic),"Mic: %s",TranscriptionUI::micLabel(v.micSource));
+  snprintf(mic,sizeof(mic),"Mic: %s",TranscriptionUi::micLabel(v.micSource));
   oledScrollAddItem(&v.menu,mic);
   oledScrollClampSelection(&v.menu);
 }
@@ -263,7 +263,7 @@ static bool menuInput(int,int,uint32_t buttons) {
     case 5:
       // The source is claimed at session start; a change applies next session.
       if(v.active) oledToastShow("Stop session first",1200);
-      else queue(String("micsource ")+TranscriptionUI::nextMicSource(v.micSource,v.micPdm,v.micG2),Op::Toggle);
+      else queue(String("micsource ")+TranscriptionUi::nextMicSource(v.micSource,v.micPdm,v.micG2),Op::Toggle);
       break;
   }
   return true;
@@ -312,7 +312,7 @@ static bool fileInput(int,int,uint32_t buttons) {
 void resetOledTranscription() {
   cancelId(v.epoch,v.exchange);
   const uint32_t generation=v.generation+1;
-  TranscriptionUI::clear(reinterpret_cast<char*>(&v),sizeof(v));
+  TranscriptionUi::clear(reinterpret_cast<char*>(&v),sizeof(v));
   v.generation=generation?generation:1;
   wipeString(pending); wipeString(pendingAck);
 }
@@ -336,7 +336,7 @@ void prepareTranscriptionData() {
   portENTER_CRITICAL(&mailboxMux);
   if(ready) {
     memcpy(received,mailbox,sizeof(received));
-    TranscriptionUI::clear(mailbox,sizeof(mailbox));
+    TranscriptionUi::clear(mailbox,sizeof(mailbox));
     ticket=delivered; ok=deliveredOk; ready=false; got=true;
   }
   portEXIT_CRITICAL(&mailboxMux);
@@ -346,10 +346,10 @@ void prepareTranscriptionData() {
       const bool changed=ok && received[0] && !oled_message::isError(received);
       copy(v.message,sizeof(v.message),changed?"Setting updated":
            (received[0]?received:"Setting could not be updated. Retry; check logs if it persists."));
-      if(!changed) oledToastShow(v.message,oled_message::kErrorDurationMs,OledUIIcon::ERROR);
+      if(!changed) oledToastShow(v.message,oled_message::kErrorDurationMs,OledUiIcon::ERROR);
       v.nextPoll=false; v.pollAt=0;
     } else acceptReply(ticket,ok);
-    TranscriptionUI::clear(received,sizeof(received)); oledMarkDirty();
+    TranscriptionUi::clear(received,sizeof(received)); oledMarkDirty();
   }
   if(!v.entered || inFlight) return;
   if(pendingAck.length()) {

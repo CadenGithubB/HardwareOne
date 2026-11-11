@@ -61,7 +61,7 @@ int parseBoolArg(const String& a) {
 struct Settings {
   int cameraFramesize = 1, cameraQuality = 12;
   int cameraBrightness = 0, cameraContrast = 0, cameraSaturation = 0;
-  int cameraSharpness = 0, cameraDenoise = 0, cameraWBMode = 0, cameraSpecialEffect = 0, cameraAELevel = 0;
+  int cameraSharpness = 0, cameraDenoise = 0, cameraWbMode = 0, cameraSpecialEffect = 0, cameraAeLevel = 0;
   bool cameraHMirror = false, cameraVFlip = false;
   bool cameraAutoStart = true;
 } gSettings;

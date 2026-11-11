@@ -843,10 +843,10 @@ struct StreamRun {
 // Timeline level samples: written by the capture task under gSttMux, printed
 // by the STT worker (never by the real-time capture task).
 #ifdef ESP_PLATFORM
-struct TLLevel { uint32_t t; uint16_t rms, noise, thr; bool open; };
-static constexpr uint32_t kTLLevels = 64;
-STT_PSRAM_BSS static TLLevel gTLLevels[kTLLevels];
-static uint32_t gTLLevelHead = 0, gTLLevelTail = 0;
+struct TlLevel { uint32_t t; uint16_t rms, noise, thr; bool open; };
+static constexpr uint32_t kTlLevels = 64;
+STT_PSRAM_BSS static TlLevel gTlLevels[kTlLevels];
+static uint32_t gTlLevelHead = 0, gTlLevelTail = 0;
 #endif
 static void sttDrainLevelLog(StreamRun& run) {
 #ifdef ESP_PLATFORM
@@ -860,11 +860,11 @@ static void sttDrainLevelLog(StreamRun& run) {
              (unsigned long)loss, (unsigned long)overruns, (unsigned long)dropped, (unsigned long)stalls);
   }
   for (;;) {
-    TLLevel e{};
+    TlLevel e{};
     bool have = false;
     portENTER_CRITICAL(&gSttMux);
-    if (gTLLevelHead - gTLLevelTail > kTLLevels) gTLLevelTail = gTLLevelHead - kTLLevels;
-    if (gTLLevelTail != gTLLevelHead) { e = gTLLevels[gTLLevelTail++ % kTLLevels]; have = true; }
+    if (gTlLevelHead - gTlLevelTail > kTlLevels) gTlLevelTail = gTlLevelHead - kTlLevels;
+    if (gTlLevelTail != gTlLevelHead) { e = gTlLevels[gTlLevelTail++ % kTlLevels]; have = true; }
     portEXIT_CRITICAL(&gSttMux);
     if (!have) break;
     ESP_LOGI("STT", "TL level t=%lu rms=%u noise=%u thr=%u open=%d", (unsigned long)e.t,
@@ -1553,7 +1553,7 @@ static void sttCaptureWorker(void* context) {
             // drop audio); queue the sample for the worker to print.
             lastLevelLogMs = nowMs;
             const int16_t* openPcm = nullptr; size_t openSamples = 0;
-            TLLevel& e = gTLLevels[gTLLevelHead++ % kTLLevels];
+            TlLevel& e = gTlLevels[gTlLevelHead++ % kTlLevels];
             e.t = nowMs; e.rms = gStt.snapshot.rms; e.noise = gStt.snapshot.noiseRms;
             e.thr = gStt.snapshot.thresholdRms;
             e.open = run.segmenter.in_progress(&openPcm, &openSamples);

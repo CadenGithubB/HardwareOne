@@ -33,7 +33,7 @@
 #endif
 
 // Draw FTS footer at the standard position (matching drawOledFooter in the normal program)
-static void drawFTSFooter(const char* text) {
+static void drawFtsFooter(const char* text) {
   const int footerY = OLED_HEADER_HEIGHT + OLED_CONTENT_HEIGHT;
   oledDisplay->drawFastHLine(0, footerY, 128, SSD1306_WHITE);
   oledDisplay->setCursor(0, footerY + 2);
@@ -335,9 +335,9 @@ bool getOledYesNoPrompt(const char* prompt, bool defaultYes) {
       // Footer at standard position
       oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
 #if ENABLE_GPIO_ENCODER
-      drawFTSFooter("Wheel:Move A:OK");
+      drawFtsFooter("Wheel:Move A:OK");
 #else
-      drawFTSFooter("L/R:Move A:OK");
+      drawFtsFooter("L/R:Move A:OK");
 #endif
       
       oledDisplay->display();
@@ -771,7 +771,7 @@ void showOledMessage(const char* message, bool waitForButton) {
     }
     
     if (waitForButton) {
-      drawFTSFooter("A:Continue");
+      drawFtsFooter("A:Continue");
     }
     
     oledDisplay->display();

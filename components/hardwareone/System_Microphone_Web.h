@@ -90,7 +90,7 @@ inline void streamMicrophoneSensorBindButtons(httpd_req_t* req) {
 }
 
 // Stream microphone-specific JavaScript
-inline void streamMicrophoneSensorJS(httpd_req_t* req) {
+inline void streamMicrophoneSensorJs(httpd_req_t* req) {
   httpd_resp_send_chunk(req, "<script>", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, "try{console.log('[SENSORS] Loading microphone sensor module JS...');}catch(_){ }", HTTPD_RESP_USE_STRLEN);
 
@@ -261,7 +261,7 @@ inline void streamMicrophoneSensorJS(httpd_req_t* req) {
   httpd_resp_send_chunk(req, "try{console.log('[SENSORS] Microphone sensor module ready');}catch(_){ }", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, "</script>", HTTPD_RESP_USE_STRLEN);
 #if ENABLE_DICTATION
-  streamTranscriptionJS(req);
+  streamTranscriptionJs(req);
 #endif
 }
 
@@ -271,7 +271,7 @@ inline void streamMicrophoneDashboardDef(httpd_req_t* req) {
 }
 
 // Stream microphone CSS
-inline void streamMicrophoneSensorCSS(httpd_req_t* req) {
+inline void streamMicrophoneSensorCss(httpd_req_t* req) {
   httpd_resp_send_chunk(req, R"rawliteral(
 <style>
 .vu-meter-container {

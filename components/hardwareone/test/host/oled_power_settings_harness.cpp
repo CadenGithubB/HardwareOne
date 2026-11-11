@@ -107,10 +107,10 @@ bool executeOledCommandWithResult(const String& line, char* out, size_t outSize)
 void executeOledCommand(const String& line) { gFireAndForget.emplace_back(line.c_str()); }
 
 // ---- global toast (OLED_UI.h) -------------------------------------------------------
-enum class OledUIIcon : uint8_t { NONE, INFO, SUCCESS, WARNING, ERROR, QUESTION };
+enum class OledUiIcon : uint8_t { NONE, INFO, SUCCESS, WARNING, ERROR, QUESTION };
 static std::string gToast;
 static int gToastCount = 0;
-static void oledToastShow(const char* message, uint32_t = 3000, OledUIIcon = OledUIIcon::NONE) {
+static void oledToastShow(const char* message, uint32_t = 3000, OledUiIcon = OledUiIcon::NONE) {
   gToast = message ? message : "";
   ++gToastCount;
 }

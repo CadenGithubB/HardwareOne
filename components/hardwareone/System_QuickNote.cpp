@@ -147,7 +147,7 @@ uint32_t maxNoteMs() {
 }
 
 void wipeText() {
-  TranscriptionUI::clear(gQnText, sizeof(gQnText));
+  TranscriptionUi::clear(gQnText, sizeof(gQnText));
   gQnTextLen = 0;
 }
 
@@ -228,7 +228,7 @@ bool drain(const DictationAppLease& lease) {
     if (take < receipt.length) full = true;
     if (!dictationAppCommitText(lease, receipt, receipt.length)) break;
   }
-  TranscriptionUI::clear(piece, sizeof(piece));
+  TranscriptionUi::clear(piece, sizeof(piece));
   gQnText[gQnTextLen] = '\0';
   return full || gQnTextLen >= kMaxNoteBytes;
 }
@@ -339,7 +339,7 @@ void complete(const Note& n, const char* failure, uint32_t now) {
   } else {
     finish(n, QuickNoteOutcome::Failed, why ? why : "Cannot save note", nullptr, 0, durationMs);
   }
-  TranscriptionUI::clear(header.title, sizeof(header.title));
+  TranscriptionUi::clear(header.title, sizeof(header.title));
 }
 
 // One worker pass over the live note. Every dictation call for a note runs
@@ -878,12 +878,12 @@ const char* commandList(JsonDocument& doc, const CommandArgs& args) {
   else
     sd = VFS::isSdWritable();
   if (i < args.count() && args.arg(i)[0] != 'u' &&
-      !TranscriptionUI::parseUnsigned(args.arg(i++).c_str(), offset))
+      !TranscriptionUi::parseUnsigned(args.arg(i++).c_str(), offset))
     return error(doc, "Invalid offset");
   if (i < args.count()) {
     const String& who = args.arg(i++);
     if (who.length() < 2 || who[0] != 'u' ||
-        !TranscriptionUI::parseUnsigned(who.c_str() + 1, owner) || !owner)
+        !TranscriptionUi::parseUnsigned(who.c_str() + 1, owner) || !owner)
       return error(doc, "Invalid account");
   }
   if (i != args.count()) return error(doc, "Usage: note list [internal|sd] [offset] [u<id>]");
@@ -920,14 +920,14 @@ const char* commandList(JsonDocument& doc, const CommandArgs& args) {
     putFlag(root, "sdAvailable", sd || VFS::isSdAvailable());
   }
   // Titles are the start of the text: clear them once serialized.
-  TranscriptionUI::clear(reinterpret_cast<char*>(gPageStorage), sizeof(gPageStorage));
+  TranscriptionUi::clear(reinterpret_cast<char*>(gPageStorage), sizeof(gPageStorage));
   return listed ? nullptr : error(doc, why ? why : "Notes unavailable");
 }
 
 const char* commandRead(JsonDocument& doc, const CommandArgs& args) {
   uint32_t offset = 0;
   if (args.count() < 2 || args.count() > 3 ||
-      (args.count() == 3 && !TranscriptionUI::parseUnsigned(args.arg(2).c_str(), offset)))
+      (args.count() == 3 && !TranscriptionUi::parseUnsigned(args.arg(2).c_str(), offset)))
     return error(doc, "Usage: note read \"<path>\" [offset]");
   char text[QuickNoteStore::kReadWindow + 1];
   size_t got = 0;
@@ -943,7 +943,7 @@ const char* commandRead(JsonDocument& doc, const CommandArgs& args) {
   put(root, "nextOffset", static_cast<uint32_t>(offset + got));
   put(root, "total", total);
   putFlag(root, "eof", offset + got >= total);
-  TranscriptionUI::clear(text, sizeof(text));
+  TranscriptionUi::clear(text, sizeof(text));
   return nullptr;
 }
 

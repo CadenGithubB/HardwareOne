@@ -9,7 +9,7 @@ def main():
     source=(COMPONENT/'OLED_UI.cpp').read_text()
     header=(COMPONENT/'OLED_UI.h').read_text()
     methods='\n'.join(extract_block(source,m) for m in ('void oledToastShow(', 'void oledToastClear()', 'bool oledToastActive()', 'void oledToastRender()'))
-    types=extract_block(header,'enum class OledUIIcon')+';\n'+extract_block(header,'struct OledToast')+';'
+    types=extract_block(header,'enum class OledUiIcon')+';\n'+extract_block(header,'struct OledToast')+';'
     harness=(HERE/'oled_toast_harness.cpp').read_text().replace('// INSERT_TYPES',types).replace('// INSERT_METHODS',methods)
     assert 'oledToastActive()' in extract_block((COMPONENT/'OLED_Utils.cpp').read_text(),'bool oledIsDirty()')
     with tempfile.TemporaryDirectory(prefix='hw1-oled-toast-') as tmp:

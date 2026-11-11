@@ -828,7 +828,7 @@ static esp_err_t transcriptionWebError(httpd_req_t* req, const char* status,
 }
 
 static bool transcriptionWebNumber(const char* input, uint32_t maximum, uint32_t& out) {
-  return TranscriptionUI::parseUnsigned(input, out) && out <= maximum;
+  return TranscriptionUi::parseUnsigned(input, out) && out <= maximum;
 }
 
 static esp_err_t transcriptionWebReply(httpd_req_t* req, TransportSessionEpoch epoch,
@@ -875,7 +875,7 @@ static esp_err_t handleTranscriptionGet(httpd_req_t* req) {
   if (requested) {
     if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK ||
         httpd_query_key_value(query, "id", id, sizeof(id)) != ESP_OK ||
-        !TranscriptionUI::parseId(id, lease.exchange))
+        !TranscriptionUi::parseId(id, lease.exchange))
       return transcriptionWebError(req, "400 Bad Request", "Invalid session id");
   } else {
     // Current clears its output when another consumer owns Dictation. Preserve
@@ -920,7 +920,7 @@ static esp_err_t handleTranscriptionGet(httpd_req_t* req) {
   }
   struct PrivateText {
     char value[DICTATION_MAX_TEXT + 1]{};
-    ~PrivateText() { TranscriptionUI::clear(value, sizeof(value)); }
+    ~PrivateText() { TranscriptionUi::clear(value, sizeof(value)); }
   } text;
   if (valid) {
     snprintf(id, sizeof(id), "%08lx%08lx", static_cast<unsigned long>(lease.exchange >> 32),
@@ -951,7 +951,7 @@ static esp_err_t handleTranscriptionGet(httpd_req_t* req) {
     // receipt above still names the raw bytes the page acknowledges.
     struct PrivateDisplay {
       char value[2 * DICTATION_MAX_TEXT + 1]{};
-      ~PrivateDisplay() { TranscriptionUI::clear(value, sizeof(value)); }
+      ~PrivateDisplay() { TranscriptionUi::clear(value, sizeof(value)); }
     } display;
 #if ENABLE_LOCAL_STT
     if (hasText && sttFormatDisplay(text.value, receipt.sequence == 1 && receipt.offset == 0,
@@ -1010,7 +1010,7 @@ static esp_err_t handleTranscriptionPost(httpd_req_t* req) {
     accepted = dictationAppBegin(SOURCE_WEB, epoch, &lease);
   } else {
     if (httpd_query_key_value(body, "id", id, sizeof(id)) != ESP_OK ||
-        !TranscriptionUI::parseId(id, lease.exchange))
+        !TranscriptionUi::parseId(id, lease.exchange))
       return transcriptionWebError(req, "400 Bad Request", "Invalid session id");
     if (ack) {
       char number[12];

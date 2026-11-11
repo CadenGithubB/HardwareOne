@@ -967,7 +967,7 @@ const char* cmd_imuewmafactor(const String& argsInput) {
   if (_arg.length() == 0) return "Error: invalid arguments — Usage: imuewmafactor <0.0..1.0>";
   float f = strtof(_arg.c_str(), nullptr);
   if (f < 0.0f || f > 1.0f) return "Error: imuEWMAFactor must be 0..1";
-  setSetting(gSettings.imuEWMAFactor, f);
+  setSetting(gSettings.imuEwmaFactor, f);
   BROADCAST_PRINTF("imuEWMAFactor set to %.3f", f);
   return "OK";
 }
@@ -1282,7 +1282,7 @@ static const SettingEntry imuSettingEntries[] = {
   { "imuEnabled", SETTING_BOOL, &gSettings.imuEnabled, 1, 0, nullptr, 0, 1, "Enabled", nullptr, false, nullptr, "imuenabled" },
   { "imuAutoStart", SETTING_BOOL, &gSettings.imuAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr, false, nullptr, "imuautostart" },
   { "imuPollingMs", SETTING_INT, &gSettings.imuPollingMs, 200, 0, nullptr, 50, 2000, "Polling (ms)", nullptr, false, "timing", "imupollingms" },
-  { "imuEWMAFactor", SETTING_FLOAT, &gSettings.imuEWMAFactor, 0, 0.1f, nullptr, 0, 1, "EWMA Factor", nullptr, false, "timing", "imuewmafactor" },
+  { "imuEWMAFactor", SETTING_FLOAT, &gSettings.imuEwmaFactor, 0, 0.1f, nullptr, 0, 1, "EWMA Factor", nullptr, false, "timing", "imuewmafactor" },
   { "imuTransitionMs", SETTING_INT, &gSettings.imuTransitionMs, 100, 0, nullptr, 0, 1000, "Transition (ms)", nullptr, false, "timing", "imutransitionms" },
   { "imuWebMaxFps", SETTING_INT, &gSettings.imuWebMaxFps, 15, 0, nullptr, 1, 30, "Web Max FPS", nullptr, false, "timing", "imuwebmaxfps" },
   { "imuDevicePollMs", SETTING_INT, &gSettings.imuDevicePollMs, 200, 0, nullptr, 50, 1000, "Poll Interval (ms)", nullptr, false, "timing", "imudevicepollms" },

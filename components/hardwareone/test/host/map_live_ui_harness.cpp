@@ -152,7 +152,7 @@ static String redactOutputForLog(const String& value) { return value; }
 static void broadcastOutput(const String&, const CommandContext&) { ++broadcasts; }
 
 enum { MENU_CAT_WAYPOINTS = 3, MENU_CAT_TRACKS = 4, MENU_CAT_GPS = 5 };
-enum class OledUIIcon { ERROR };
+enum class OledUiIcon { ERROR };
 static bool oledGuest, oledExecuted = true, sForceRender, gShowTrackStatus;
 static String oledResult = "SUCCESS: Live tracking started";
 static std::vector<std::string> oledRequests, toasts;
@@ -162,8 +162,8 @@ static bool executeOledCommandWithResult(const char* command, char* out, size_t 
   oledRequests.emplace_back(command); std::snprintf(out, length, "%s", oledResult.c_str());
   return oledExecuted;
 }
-static void oledToastShow(const char* text, unsigned duration, OledUIIcon icon) {
-  CHECK(duration == 3000 && icon == OledUIIcon::ERROR); toasts.emplace_back(text);
+static void oledToastShow(const char* text, unsigned duration, OledUiIcon icon) {
+  CHECK(duration == 3000 && icon == OledUiIcon::ERROR); toasts.emplace_back(text);
 }
 static void scanTrackFiles() {}
 static void goBackToMainMenu() {}

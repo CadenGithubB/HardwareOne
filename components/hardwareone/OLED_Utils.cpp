@@ -3460,7 +3460,7 @@ static bool oledReportCommandReply(bool executed, const char* reply) {
   }
   char text[oled_message::kMessageBytes];
   oledCommandReplyText(false, reply, nullptr, "Command failed. Check logs.", text, sizeof(text));
-  oledToastShow(text, oled_message::kErrorDurationMs, OledUIIcon::ERROR);
+  oledToastShow(text, oled_message::kErrorDurationMs, OledUiIcon::ERROR);
   return false;
 }
 
@@ -3765,7 +3765,7 @@ String customOledText = "";
 unsigned long oledLastUpdate = 0;
 unsigned long animationFrame = 0;
 unsigned long animationLastUpdate = 0;
-int animationFPS = 10;
+int animationFps = 10;
 // Define current animation state (extern in header)
 OledAnimationType currentAnimation = ANIM_BOOT_PROGRESS;
 
@@ -4202,8 +4202,8 @@ void updateOledDisplay() {
                          currentOledMode == OLED_BOOT_SENSORS);
   
   if (isAnimatedMode) {
-    // Animated modes use animationFPS (default 10 FPS, configurable via 'animation fps' command)
-    unsigned long animInterval = 1000 / animationFPS;
+    // Animated modes use animationFps (default 10 FPS, configurable via 'animation fps' command)
+    unsigned long animInterval = 1000 / animationFps;
     if (now - animationLastUpdate >= animInterval) {
       animationLastUpdate = now;
       if (currentOledMode == OLED_ANIMATION) animationFrame++;
@@ -4412,7 +4412,7 @@ void updateOledDisplay() {
     drawOledFooter();
     
     // Draw UI overlays (toast, dialog, progress, list) on top of everything
-    oledUIRender();
+    oledUiRender();
 
     // Mark mode as clean after successful render
     oledClearDirty();
@@ -5009,7 +5009,7 @@ const char* cmd_oledstatus(const String& argsInput) {
         if (gAnimationRegistry[i].type == currentAnimation) {
           snprintf(getDebugBuffer(), 1024, "Current Animation: %s", gAnimationRegistry[i].name);
           broadcastOutput(getDebugBuffer());
-          snprintf(getDebugBuffer(), 1024, "Animation FPS: %d", animationFPS);
+          snprintf(getDebugBuffer(), 1024, "Animation FPS: %d", animationFps);
           broadcastOutput(getDebugBuffer());
           break;
         }
@@ -5052,9 +5052,9 @@ const char* cmd_oledanim(const String& argsInput) {
     if (fps < 1 || fps > 60) {
       return "Error: FPS must be between 1 and 60";
     }
-    animationFPS = fps;
+    animationFps = fps;
     if (ensureDebugBuffer()) {
-      snprintf(getDebugBuffer(), 1024, "Animation FPS set to %d", animationFPS);
+      snprintf(getDebugBuffer(), 1024, "Animation FPS set to %d", animationFps);
       broadcastOutput(getDebugBuffer());
     }
     return "OK";

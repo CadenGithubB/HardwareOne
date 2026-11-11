@@ -470,7 +470,7 @@ static const char* wifiAddFieldRefusal(WifiFieldProblem problem) {
 static void startWifiAddFromScan(const char* ssid) {
   const char* refusal = wifiAddFieldRefusal(wifiNetworkFieldProblem(ssid));
   if (refusal) {
-    oledToastShow(refusal, oled_message::kErrorDurationMs, OledUIIcon::ERROR);
+    oledToastShow(refusal, oled_message::kErrorDurationMs, OledUiIcon::ERROR);
     return;
   }
   String sessionUser;
@@ -508,7 +508,7 @@ static bool wifiAddKeyboardTick(bool* handled) {
       const char* refusal = wifiAddFieldRefusal(wifiNetworkFieldProblem(text.c_str()));
       if (refusal) {
         wifiAddReset();
-        oledToastShow(refusal, oled_message::kErrorDurationMs, OledUIIcon::ERROR);
+        oledToastShow(refusal, oled_message::kErrorDurationMs, OledUiIcon::ERROR);
       } else {
         sWifiAddSsid = text;
         startWifiAddPass();
@@ -553,7 +553,7 @@ static bool wifiAddKeyboardTick(bool* handled) {
               SOURCE_LOCAL_DISPLAY, sessionEpoch)) {
         wifiAddReset();
         oledToastShow(toast, outcomeOk ? 2500 : oled_message::kErrorDurationMs,
-                      outcomeOk ? OledUIIcon::SUCCESS : OledUIIcon::ERROR);
+                      outcomeOk ? OledUiIcon::SUCCESS : OledUiIcon::ERROR);
       }
     } else {
       secureClearString(text);

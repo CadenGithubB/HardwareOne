@@ -34,7 +34,7 @@ void dictationCancel(){dictationCancelFor(SOURCE_LOCAL_DISPLAY);}
 void dictationTick(){}
 DictationSnapshot dictationSnapshotNow(){return snap;}
 struct TextEntry {uint32_t serial=1;bool padMode=true,isSecret=false;size_t len=0,maxLen=256;char buf[257]={};};
-static TextEntry gTE;
+static TextEntry gTe;
 struct TextEntryExecGuard {TextEntryExecGuard(uint32_t,bool){} explicit operator bool() const{return live;}};
 bool sessionCurrent(){return live;}
 void pushBuffer(){++paints;}
@@ -65,18 +65,18 @@ struct OledKeyboardState{bool active=true;OledKeyboardDictationPolicy dictationP
 static OledKeyboardState gOledKeyboardState;
 void oledMarkDirty(){++paints;}
 // INSERT_OLED
-static void reset(){pending.clear();offset=0;sequence=1;owner=SOURCE_G2_GLASSES;live=commitOK=true;commits.clear();fullCalls=cancelCalls=returnCalls=beginCalls=paints=0;gTE=TextEntry{};gOledKeyboardState=OledKeyboardState{};gKbdPad=KbdPadState{};gKbdPad.active=true;gKbdPad.page=kKbdPageMic;gKbdPad.micSessionStarted=true;snap=DictationSnapshot{};snap.state=DictationState::RECORDING;}
+static void reset(){pending.clear();offset=0;sequence=1;owner=SOURCE_G2_GLASSES;live=commitOK=true;commits.clear();fullCalls=cancelCalls=returnCalls=beginCalls=paints=0;gTe=TextEntry{};gOledKeyboardState=OledKeyboardState{};gKbdPad=KbdPadState{};gKbdPad.active=true;gKbdPad.page=kKbdPageMic;gKbdPad.micSessionStarted=true;snap=DictationSnapshot{};snap.state=DictationState::RECORDING;}
 int main(){
- reset();pending="first";kbdPadDictationServiceOnTap(7);assert(std::string(gTE.buf)=="first"&&commits==std::vector<size_t>{5}&&!returnCalls);
- pending=" second piece";offset=5;kbdPadDictationServiceOnTap(7);assert(std::string(gTE.buf)=="first second piece"&&!returnCalls); // no artificial space inside chunk
- pending="next";offset=0;sequence=2;kbdPadDictationServiceOnTap(7);assert(std::string(gTE.buf)=="first second piece next");
+ reset();pending="first";kbdPadDictationServiceOnTap(7);assert(std::string(gTe.buf)=="first"&&commits==std::vector<size_t>{5}&&!returnCalls);
+ pending=" second piece";offset=5;kbdPadDictationServiceOnTap(7);assert(std::string(gTe.buf)=="first second piece"&&!returnCalls); // no artificial space inside chunk
+ pending="next";offset=0;sequence=2;kbdPadDictationServiceOnTap(7);assert(std::string(gTe.buf)=="first second piece next");
  snap.state=DictationState::WAITING;kbdPadDictationServiceOnTap(7);assert(!returnCalls);snap.state=DictationState::IDLE;kbdPadDictationServiceOnTap(7);assert(returnCalls==1);
- reset();pending="abcde";gTE.maxLen=3;kbdPadDictationServiceOnTap(7);assert(std::string(gTE.buf)=="abc"&&commits==std::vector<size_t>{3}&&fullCalls==1&&!returnCalls);
- reset();strcpy(gTE.buf,"a");gTE.len=1;gTE.maxLen=2;pending="word";assert(kbdPadConsumeDictationText());assert(std::string(gTE.buf)=="a"&&commits.empty()&&fullCalls==1);
- reset();pending="a\"b";assert(kbdPadConsumeDictationText());assert(std::string(gTE.buf)=="ab"&&commits==std::vector<size_t>{3});
- reset();gTE.isSecret=true;pending="private";kbdPadDictationServiceOnTap(7);assert(!gTE.len&&commits.empty());
- reset();live=false;pending="revoked";kbdPadDictationServiceOnTap(7);assert(!gTE.len&&commits.empty());
- reset();gKbdPad.micCountdown=1;gTE.maxLen=0;kbdPadDictationServiceOnTap(7);assert(!beginCalls&&!gKbdPad.micSessionStarted);
+ reset();pending="abcde";gTe.maxLen=3;kbdPadDictationServiceOnTap(7);assert(std::string(gTe.buf)=="abc"&&commits==std::vector<size_t>{3}&&fullCalls==1&&!returnCalls);
+ reset();strcpy(gTe.buf,"a");gTe.len=1;gTe.maxLen=2;pending="word";assert(kbdPadConsumeDictationText());assert(std::string(gTe.buf)=="a"&&commits.empty()&&fullCalls==1);
+ reset();pending="a\"b";assert(kbdPadConsumeDictationText());assert(std::string(gTe.buf)=="ab"&&commits==std::vector<size_t>{3});
+ reset();gTe.isSecret=true;pending="private";kbdPadDictationServiceOnTap(7);assert(!gTe.len&&commits.empty());
+ reset();live=false;pending="revoked";kbdPadDictationServiceOnTap(7);assert(!gTe.len&&commits.empty());
+ reset();gKbdPad.micCountdown=1;gTe.maxLen=0;kbdPadDictationServiceOnTap(7);assert(!beginCalls&&!gKbdPad.micSessionStarted);
  reset();gKbdPad.micCountdown=1;kbdPadDictationServiceOnTap(7);assert(beginCalls==1&&gKbdPad.micSessionStarted);
  reset();commitOK=false;pending="accepted before cancellation";assert(kbdPadConsumeDictationText());assert(cancelCalls==1&&commits.empty());
  reset();owner=SOURCE_LOCAL_DISPLAY;pending="first";oledKeyboardDictationTick();assert(std::string(gOledKeyboardState.text)=="first"&&commits==std::vector<size_t>{5});

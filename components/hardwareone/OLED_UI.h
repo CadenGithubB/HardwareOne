@@ -26,7 +26,7 @@
 // ----------------------------------------------------------------------------
 
 // Icon types for toasts
-enum class OledUIIcon : uint8_t {
+enum class OledUiIcon : uint8_t {
   NONE = 0,
   INFO,
   WARNING,
@@ -44,14 +44,14 @@ enum class OledUIIcon : uint8_t {
 struct OledToast {
   char message[oled_message::kMessageBytes];
   uint32_t expireMs;
-  OledUIIcon icon;
+  OledUiIcon icon;
   bool active;
 };
 
 extern OledToast gOledToast;
 
 // Show a toast message (auto-dismisses after durationMs)
-void oledToastShow(const char* message, uint32_t durationMs = 3000, OledUIIcon icon = OledUIIcon::NONE);
+void oledToastShow(const char* message, uint32_t durationMs = 3000, OledUiIcon icon = OledUiIcon::NONE);
 
 // Clear any active toast immediately
 void oledToastClear();
@@ -144,18 +144,18 @@ void oledNotificationBannerUpdate(const char* message, PairingRibbonIcon icon,
 // ----------------------------------------------------------------------------
 
 // Initialize UI system (call once at startup)
-void oledUIInit();
+void oledUiInit();
 
 // Render all active UI overlays (call after main content, before display())
 // Renders in order: pairing ribbon, then toast on top
-void oledUIRender();
+void oledUiRender();
 
 // ----------------------------------------------------------------------------
 // Drawing Helpers - Reusable primitives
 // ----------------------------------------------------------------------------
 
 // Draw an icon at position (simple 8x8 built-in shapes)
-void oledDrawIcon(int x, int y, OledUIIcon icon, uint16_t color = DISPLAY_FG);
+void oledDrawIcon(int x, int y, OledUiIcon icon, uint16_t color = DISPLAY_FG);
 
 // Draw an embedded icon by name, scaled to targetSize pixels (e.g. 12, 16, 32)
 void oledDrawIcon(int x, int y, const char* iconName, int targetSize);

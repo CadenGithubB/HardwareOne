@@ -61,7 +61,7 @@ inline void streamTranscriptionPanel(httpd_req_t* req) {
 )STTHTML2", HTTPD_RESP_USE_STRLEN);
 }
 
-inline void streamTranscriptionJS(httpd_req_t* req) {
+inline void streamTranscriptionJs(httpd_req_t* req) {
   httpd_resp_send_chunk(req, R"STTJS(
 <script>
 (function(){

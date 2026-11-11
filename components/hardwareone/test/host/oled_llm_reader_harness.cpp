@@ -197,7 +197,7 @@ int main() {
   }
 
   {  // live
-    sUIState = LlmUIState::HOME;
+    sUiState = LlmUiState::HOME;
     sCmdInFlight = LLM_CMD_NONE;
     gRun = 0;
     syncReader();
@@ -214,11 +214,11 @@ int main() {
     gDone = true;
     syncReader();
     assert(!llmScreenIsLive());          // finished and drawn
-    sUIState = LlmUIState::LOADING;
+    sUiState = LlmUiState::LOADING;
     assert(llmScreenIsLive());
-    sUIState = LlmUIState::GENERATING;
+    sUiState = LlmUiState::GENERATING;
     assert(llmScreenIsLive());
-    sUIState = LlmUIState::READY;
+    sUiState = LlmUiState::READY;
     sCmdInFlight = LLM_CMD_UNLOAD;
     assert(llmScreenIsLive());
     sCmdInFlight = LLM_CMD_NONE;

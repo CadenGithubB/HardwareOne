@@ -122,7 +122,7 @@ static bool noteBusyLocked() {
 static void beginNoteLocked(bool hold) {
   state.rec = Rec::Recording; state.hold = hold; state.live = state.capture = false;
   state.stopAfterStart = false; state.id[0] = '\0'; state.message[0] = '\0'; state.elapsedMs = 0;
-  TranscriptionUI::clear(state.preview, sizeof(state.preview));
+  TranscriptionUi::clear(state.preview, sizeof(state.preview));
   state.queued = Op::Start; state.dirty = true;
 }
 // Ends this page's note: an unsent start is dropped, a start in flight is
@@ -192,10 +192,10 @@ static void render() {
   if (g2GetHijackPage() != G2_HIJACK_PAGE_NOTES || !g2LensGetState().hijackActive) { renderState = State{}; return; }
   if (!ownerLive(s.epoch) || !identity.stillCurrent()) {
     renderState = State{}; renderedCount = 0; renderedEpoch = 0;
-    TranscriptionUI::clear(renderedText, sizeof(renderedText));
-    TranscriptionUI::clear(renderedBody, sizeof(renderedBody));
-    TranscriptionUI::clear(textBody, sizeof(textBody));
-    TranscriptionUI::clear(textPage, sizeof(textPage));
+    TranscriptionUi::clear(renderedText, sizeof(renderedText));
+    TranscriptionUi::clear(renderedBody, sizeof(renderedBody));
+    TranscriptionUi::clear(textBody, sizeof(textBody));
+    TranscriptionUi::clear(textPage, sizeof(textPage));
     const char* locked[] = {"<- Apps", "Sign in and pair the glasses"};
     (void)g2ShowListPage(locked, 2);
     return;
@@ -303,7 +303,7 @@ __attribute__((noinline)) bool flag(JsonVariantConst at, const char* key, bool f
 static void applyNoteLocked(JsonVariantConst doc, uint32_t now) {
   uint64_t parsedId = 0;
   const char* id = str(doc, "id");
-  if (flag(doc, "active") && TranscriptionUI::parseId(id, parsedId)) {
+  if (flag(doc, "active") && TranscriptionUi::parseId(id, parsedId)) {
     snprintf(state.id, sizeof(state.id), "%s", id);
     state.live = true; state.capture = flag(doc, "captureActive");
     state.hold = flag(doc, "hold"); state.elapsedMs = num(doc, "elapsedMs");
@@ -398,7 +398,7 @@ static void complete(bool ok, const char* result, const G2CmdCookie&, void* opaq
         state.eof = flag(doc, "eof", true); state.page = 0;
       } else {
         size_t n = strlen(window);
-        if (n > kPreviewMax) n = TranscriptionUI::completePrefix(window, kPreviewMax);
+        if (n > kPreviewMax) n = TranscriptionUi::completePrefix(window, kPreviewMax);
         memcpy(state.preview, window, n); state.preview[n] = '\0';
       }
     }
@@ -406,7 +406,7 @@ static void complete(bool ok, const char* result, const G2CmdCookie&, void* opaq
   }
   portEXIT_CRITICAL(&stateMux);
   // Titles are the start of each note's text.
-  TranscriptionUI::clear(reinterpret_cast<char*>(listed), sizeof(listed));
+  TranscriptionUi::clear(reinterpret_cast<char*>(listed), sizeof(listed));
 }
 
 // A hold may start a note only for the paired wearer, while the service can
@@ -493,7 +493,7 @@ void g2NotesHandleTap(uint32_t index) {
     else if (!busy && index - 2 < state.count) {
       const Entry& e = state.entries[index - 2];
       memcpy(state.label, e.label, sizeof(state.label)); memcpy(state.path, e.path, sizeof(state.path));
-      TranscriptionUI::clear(state.preview, sizeof(state.preview));
+      TranscriptionUi::clear(state.preview, sizeof(state.preview));
       state.rec = Rec::Idle; state.message[0] = '\0';   // dismisses a Saved banner
       changeViewLocked(View::Note); state.confirm = false; state.queued = Op::Read; viewChanged = true;
     } else if (!busy && index == 2 + state.count && (state.more || state.listOffset)) {
@@ -541,7 +541,7 @@ void g2NotesTick() {
   }
   if (state.rec == Rec::Done && now - state.doneAt >= kDoneMs) {
     state.rec = Rec::Idle; state.message[0] = '\0'; state.dirty = true;
-    TranscriptionUI::clear(state.preview, sizeof(state.preview));
+    TranscriptionUi::clear(state.preview, sizeof(state.preview));
   }
   if (state.confirm && now - state.confirmAt >= kConfirmMs) { state.confirm = false; state.dirty = true; }
   if (state.pending == Op::None) {

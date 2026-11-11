@@ -22,38 +22,38 @@ static portMUX_TYPE sToastMux = portMUX_INITIALIZER_UNLOCKED;
 // Global State
 // ============================================================================
 
-OledToast gOledToast = {{0}, 0, OledUIIcon::NONE, false};
+OledToast gOledToast = {{0}, 0, OledUiIcon::NONE, false};
 
 // ============================================================================
 // Drawing Helpers
 // ============================================================================
 
-void oledDrawIcon(int x, int y, OledUIIcon icon, uint16_t color) {
-  if (!gDisplay || icon == OledUIIcon::NONE) return;
+void oledDrawIcon(int x, int y, OledUiIcon icon, uint16_t color) {
+  if (!gDisplay || icon == OledUiIcon::NONE) return;
   
   // Simple 8x8 icons using basic shapes
   switch (icon) {
-    case OledUIIcon::INFO:
+    case OledUiIcon::INFO:
       gDisplay->drawCircle(x + 4, y + 4, 4, color);
       gDisplay->fillRect(x + 3, y + 3, 2, 2, color);
       gDisplay->fillRect(x + 3, y + 5, 2, 3, color);
       break;
-    case OledUIIcon::WARNING:
+    case OledUiIcon::WARNING:
       gDisplay->drawTriangle(x + 4, y, x, y + 8, x + 8, y + 8, color);
       gDisplay->fillRect(x + 3, y + 3, 2, 3, color);
       gDisplay->fillRect(x + 3, y + 7, 2, 1, color);
       break;
-    case OledUIIcon::ERROR:
+    case OledUiIcon::ERROR:
       gDisplay->drawCircle(x + 4, y + 4, 4, color);
       gDisplay->drawLine(x + 2, y + 2, x + 6, y + 6, color);
       gDisplay->drawLine(x + 6, y + 2, x + 2, y + 6, color);
       break;
-    case OledUIIcon::SUCCESS:
+    case OledUiIcon::SUCCESS:
       gDisplay->drawCircle(x + 4, y + 4, 4, color);
       gDisplay->drawLine(x + 2, y + 4, x + 4, y + 6, color);
       gDisplay->drawLine(x + 4, y + 6, x + 7, y + 2, color);
       break;
-    case OledUIIcon::QUESTION:
+    case OledUiIcon::QUESTION:
       gDisplay->drawCircle(x + 4, y + 4, 4, color);
       gDisplay->setCursor(x + 2, y + 1);
       gDisplay->print("?");
@@ -162,9 +162,9 @@ void oledDrawLevelBars(int x, int y, int level, int maxBars, int barHeight) {
 // Toast Component
 // ============================================================================
 
-void oledToastShow(const char* message, uint32_t durationMs, OledUIIcon icon) {
-  if (icon == OledUIIcon::NONE && oled_message::isError(message)) icon = OledUIIcon::ERROR;
-  if (icon == OledUIIcon::ERROR) {
+void oledToastShow(const char* message, uint32_t durationMs, OledUiIcon icon) {
+  if (icon == OledUiIcon::NONE && oled_message::isError(message)) icon = OledUiIcon::ERROR;
+  if (icon == OledUiIcon::ERROR) {
     if (durationMs < oled_message::kErrorDurationMs) durationMs = oled_message::kErrorDurationMs;
     message = oled_message::reason(message);
     if (!message[0]) message = "Command failed. Check logs.";
@@ -211,7 +211,7 @@ void oledToastRender() {
   if (!toast.active) return;
 
   const int boxW = SCREEN_WIDTH - 16, boxX = 8;
-  const int iconSpace = toast.icon == OledUIIcon::NONE ? 0 : 10;
+  const int iconSpace = toast.icon == OledUiIcon::NONE ? 0 : 10;
   const int textX = boxX + 4 + iconSpace;
   const int columns = (boxW - 8 - iconSpace) / 6;
   const int maxLines = (OLED_CONTENT_HEIGHT - 10) / 8;
@@ -220,7 +220,7 @@ void oledToastRender() {
   const int boxY = SCREEN_HEIGHT - boxH - 12;
   gDisplay->fillRect(boxX, boxY, boxW, boxH, DISPLAY_FG);
   gDisplay->drawRect(boxX, boxY, boxW, boxH, DISPLAY_BG);
-  if (toast.icon != OledUIIcon::NONE)
+  if (toast.icon != OledUiIcon::NONE)
     oledDrawIcon(boxX + 4, boxY + 5, toast.icon, DISPLAY_BG);
   gDisplay->setTextSize(1);
   gDisplay->setTextColor(DISPLAY_BG);
@@ -604,14 +604,14 @@ void oledPairingRibbonRender() {
 // Unified UI System
 // ============================================================================
 
-void oledUIInit() {
+void oledUiInit() {
   memset(&gOledToast, 0, sizeof(gOledToast));
   memset(&gOledPairingRibbon, 0, sizeof(gOledPairingRibbon));
   gOledPairingRibbon.state = PairingRibbonState::HIDDEN;
   gOledPairingRibbon.animY = -RIBBON_HEIGHT;
 }
 
-void oledUIRender() {
+void oledUiRender() {
   // Update pairing ribbon animation state
   oledPairingRibbonUpdate();
   

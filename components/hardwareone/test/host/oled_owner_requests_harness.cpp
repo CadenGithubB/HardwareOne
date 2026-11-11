@@ -138,7 +138,7 @@ OledMode currentOledMode = OLED_SYSTEM_STATUS;
 String customOledText;
 OledAnimationType currentAnimation = ANIM_BOOT_PROGRESS;
 unsigned long animationFrame = 0;
-int animationFPS = 10;
+int animationFps = 10;
 bool oledConnected = true;
 bool gOledRunning = true;
 bool oledBootModeActive = false;
@@ -659,7 +659,7 @@ int main() {
   oledBindOwnerTask();
   (void)sOledUiSessionEpoch;
   (void)sOledUiSessionAuthed;
-  (void)animationFPS;
+  (void)animationFps;
   (void)userOverrodeBootMode;
 
   caseCustomText();

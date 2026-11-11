@@ -292,7 +292,7 @@ static const CamSetting kSettings[] = {
   { "Resolution", CV_INT,  &gSettings.cameraFramesize,  cycleFramesize,  fmtFramesize,   applyFramesize,  CAM_CAT_CAMERA    },
   { "Brightness", CV_INT,  &gSettings.cameraBrightness, cycleRangeM2P2,  fmtSignedInt,   applyBrightness, CAM_CAT_CAMERA, static_cast<int>(CameraControl::Brightness) },
   { "Contrast",   CV_INT,  &gSettings.cameraContrast,   cycleRangeM2P2,  fmtSignedInt,   applyContrast,   CAM_CAT_CAMERA, static_cast<int>(CameraControl::Contrast) },
-  { "Exposure",   CV_INT,  &gSettings.cameraAELevel,    cycleRangeM2P2,  fmtSignedInt,   applyExposure,   CAM_CAT_CAMERA, static_cast<int>(CameraControl::ExposureLevel) },
+  { "Exposure",   CV_INT,  &gSettings.cameraAeLevel,    cycleRangeM2P2,  fmtSignedInt,   applyExposure,   CAM_CAT_CAMERA, static_cast<int>(CameraControl::ExposureLevel) },
   { "Sharpness",  CV_INT,  &gSettings.cameraSharpness,  cycleRangeM2P2,  fmtSignedInt,   applySharpness,  CAM_CAT_CAMERA, static_cast<int>(CameraControl::Sharpness) },
   // Transform sub-list — geometric flips
   { "H Mirror",   CV_BOOL, &gSettings.cameraHMirror,    cycleBool,       fmtBool,        applyHMirror,    CAM_CAT_TRANSFORM, static_cast<int>(CameraControl::HMirror) },

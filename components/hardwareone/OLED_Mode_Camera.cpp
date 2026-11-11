@@ -291,7 +291,7 @@ void prepareCameraPreviewData() {
   }
   if (state.error[0] && !state.busy && strcmp(lastError, state.error)) {
     snprintf(lastError, sizeof(lastError), "%s", state.error);
-    oledToastShow(state.error, oled_message::kErrorDurationMs, OledUIIcon::ERROR);
+    oledToastShow(state.error, oled_message::kErrorDurationMs, OledUiIcon::ERROR);
   }
   if (!state.error[0]) lastError[0] = 0;
   if (state.worker || int32_t(millis() - retryAt) < 0) return;

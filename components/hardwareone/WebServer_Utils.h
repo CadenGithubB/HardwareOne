@@ -198,7 +198,7 @@ String generatePublicNavigation();
 // ============================================================================
 
 // Forward declarations
-void streamCommonCSS(httpd_req_t* req);     // Streaming CSS - no String allocation
+void streamCommonCss(httpd_req_t* req);     // Streaming CSS - no String allocation
 void streamCommonDialogs(httpd_req_t* req); // Streaming dialog HTML+JS - no String allocation
 
 // Generic File Explorer Utility
@@ -1324,7 +1324,7 @@ void streamCardPage(httpd_req_t* req, const char* title, const String& username,
 // ============================================================================
 
 // Stream common CSS styles directly to response (no String allocation)
-inline void streamCommonCSS(httpd_req_t* req) {
+inline void streamCommonCss(httpd_req_t* req) {
   if (!req) return;
   
   // Stream CSS in chunks to avoid large String allocation

@@ -10,7 +10,7 @@
    unused helpers, the four helpers those deletions left without a caller
    (hasRemoteSettings and the oledDrawBox/oledDrawButton/oledDrawTextCentered
    primitives), LOG_MENU_VIEWER, and the unified actions mode). The live
-   replacements (oledUIRender, the *Rendered displays, the mode registry and
+   replacements (oledUiRender, the *Rendered displays, the mode registry and
    back-navigation) and the live drawing helpers (oledDrawIcon,
    oledDrawLevelBars) must still be defined, so the contract cannot pass
    vacuously.
@@ -73,7 +73,7 @@ REMOVED = {
 }
 
 KEPT = (
-    "oledUIRender", "oledToastRender", "oledPairingRibbonRender", "displaySystemStatusRendered",
+    "oledUiRender", "oledToastRender", "oledPairingRibbonRender", "displaySystemStatusRendered",
     "displayMemoryStatsRendered", "displayWebStatsRendered", "displayConnectedSensorsRendered",
     "findOledMode", "popOledMode", "oledMenuBack", "modeFromSlug", "slugFromMode",
     "oledDrawIcon", "oledDrawLevelBars",

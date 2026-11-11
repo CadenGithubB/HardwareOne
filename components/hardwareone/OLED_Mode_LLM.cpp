@@ -62,7 +62,7 @@ static const int LLM_READER_COLS   = LLM_CHARS - 1;
 // UI state
 // ============================================================================
 
-enum class LlmUIState : uint8_t {
+enum class LlmUiState : uint8_t {
   NO_MODEL = 0,
   LOADING,
   READY,
@@ -81,9 +81,9 @@ enum class LlmUIState : uint8_t {
   PICK_ENTITY,
 };
 
-static LlmUIState sUIState = LlmUIState::HOME;
+static LlmUiState sUiState = LlmUiState::HOME;
 static bool       sKeyboardActive = false;
-static LlmUIState sKeyboardReturn = LlmUIState::HOME;  // where a cancelled or empty prompt goes
+static LlmUiState sKeyboardReturn = LlmUiState::HOME;  // where a cancelled or empty prompt goes
 static bool       sLoadReturnsHome = false; // a picker load settles on HOME, not the chat view
 
 // The shared footer (drawOledFooter) clears and draws the bottom strip after
@@ -278,8 +278,8 @@ static void pollLlmCommandReply() {
     return;
   }
   if (!status) return;
-  if (op == LLM_CMD_LOAD && sUIState == LlmUIState::LOADING) {
-    sUIState = LlmUIState::PICK_MODEL;
+  if (op == LLM_CMD_LOAD && sUiState == LlmUiState::LOADING) {
+    sUiState = LlmUiState::PICK_MODEL;
     sLoadReturnsHome = false;
     if (reason[0]) {
       strlcpy(sMenuStatusBuffer, reason, sizeof(sMenuStatusBuffer));
@@ -296,10 +296,10 @@ static void pollLlmCommandReply() {
 
 // True for every sub-state that owns the screen until the user leaves it.
 // Keep in sync with the switch inside syncStateFromEngine().
-static bool stateOwnsUI(LlmUIState s) {
-  return s == LlmUIState::HOME        || s == LlmUIState::PICK_MODEL ||
-         s == LlmUIState::PICK_GROUP  || s == LlmUIState::PICK_TEMPLATE ||
-         s == LlmUIState::PICK_ENTITY;
+static bool stateOwnsUi(LlmUiState s) {
+  return s == LlmUiState::HOME        || s == LlmUiState::PICK_MODEL ||
+         s == LlmUiState::PICK_GROUP  || s == LlmUiState::PICK_TEMPLATE ||
+         s == LlmUiState::PICK_ENTITY;
 }
 
 // Refresh state from the engine + chat module. Called at the top of
@@ -321,10 +321,10 @@ static void syncStateFromEngine() {
   // Each owning state carries its OWN exit condition; they are deliberately not
   // one shared test, because PICK_MODEL is entered precisely when NO model is
   // loaded and the guided levels require one.
-  if (stateOwnsUI(sUIState)) {
-    switch (sUIState) {
-      case LlmUIState::HOME:
-      case LlmUIState::PICK_MODEL:
+  if (stateOwnsUi(sUiState)) {
+    switch (sUiState) {
+      case LlmUiState::HOME:
+      case LlmUiState::PICK_MODEL:
         // No engine precondition: HOME's rows are rebuilt from the engine every
         // frame, and the picker is how a model gets chosen in the first place.
         // Both leave only on a selection or back.
@@ -336,7 +336,7 @@ static void syncStateFromEngine() {
         if (st.state != LlmState::READY ||
             llmMenuGroupCount() == 0 ||
             llmMenuGeneration() != sPickGen) {
-          sUIState = LlmUIState::HOME;
+          sUiState = LlmUiState::HOME;
           sPickStatus = nullptr;
         }
         break;
@@ -346,15 +346,15 @@ static void syncStateFromEngine() {
 
   // Generation overrides everything else
   if (chatIsGenerating()) {
-    if (sUIState != LlmUIState::GENERATING) {
-      sUIState = LlmUIState::GENERATING;
+    if (sUiState != LlmUiState::GENERATING) {
+      sUiState = LlmUiState::GENERATING;
     }
     return;
   }
 
   // From GENERATING → settle to READY when chat says it's done
-  if (sUIState == LlmUIState::GENERATING) {
-    sUIState = LlmUIState::READY;
+  if (sUiState == LlmUiState::GENERATING) {
+    sUiState = LlmUiState::READY;
     return;
   }
 
@@ -364,15 +364,15 @@ static void syncStateFromEngine() {
   // A load started from the picker settles on HOME, as on the glasses, where
   // the Model row now names it. A load the chat view only watched (another
   // surface started it) settles back on the chat view.
-  if (sUIState == LlmUIState::LOADING) {
+  if (sUiState == LlmUiState::LOADING) {
     if (sCmdInFlight == LLM_CMD_LOAD) return;
     if (st.state == LlmState::READY ||
         st.state == LlmState::ERROR || st.state == LlmState::UNLOADED) {
       if (sLoadReturnsHome) {
-        sUIState = LlmUIState::HOME;
+        sUiState = LlmUiState::HOME;
         sLoadReturnsHome = false;
       } else {
-        sUIState = (st.state == LlmState::READY) ? LlmUIState::READY : LlmUIState::NO_MODEL;
+        sUiState = (st.state == LlmState::READY) ? LlmUiState::READY : LlmUiState::NO_MODEL;
       }
     }
     return;
@@ -380,11 +380,11 @@ static void syncStateFromEngine() {
 
   // Otherwise reflect whatever the engine reports.
   if (st.state == LlmState::READY) {
-    sUIState = LlmUIState::READY;
+    sUiState = LlmUiState::READY;
   } else if (st.state == LlmState::LOADING) {
-    sUIState = LlmUIState::LOADING;
+    sUiState = LlmUiState::LOADING;
   } else {
-    sUIState = LlmUIState::NO_MODEL;
+    sUiState = LlmUiState::NO_MODEL;
   }
 }
 
@@ -446,7 +446,7 @@ static void enterPickModel() {
   sModelScroll.scrollOffset  = 0;
   sMenuStatus = nullptr;
   populateModelPicker();
-  sUIState = LlmUIState::PICK_MODEL;
+  sUiState = LlmUiState::PICK_MODEL;
 }
 
 // Commit the highlighted row. Selection is BY INDEX into sModelDescs, so a
@@ -458,7 +458,7 @@ static void commitModelPick() {
     if (sCmdInFlight != LLM_CMD_NONE) { sMenuStatus = "busy"; return; }
     if (!submitLlmCommand("llmunload", LLM_CMD_UNLOAD)) { sMenuStatus = "unload failed"; return; }
     sMenuStatus = "Unloading...";   // pollLlmCommandReply replaces it with the outcome
-    sUIState = LlmUIState::HOME;
+    sUiState = LlmUiState::HOME;
     return;
   }
   const int idx = (int)((uintptr_t)sel->userData) - 1;
@@ -477,7 +477,7 @@ static void commitModelPick() {
   }
   sMenuStatus = nullptr;
   sLoadReturnsHome = true;
-  sUIState = LlmUIState::LOADING;
+  sUiState = LlmUiState::LOADING;
 }
 
 // ============================================================================
@@ -501,7 +501,7 @@ static void populateHomeMenu() {
 static void enterHome() {
   ensurePickScrollInit();
   sPickStatus = nullptr;
-  sUIState = LlmUIState::HOME;
+  sUiState = LlmUiState::HOME;
 }
 
 // ============================================================================
@@ -610,7 +610,7 @@ static void enterPickGroup() {
   sPickStatus = nullptr;
   sGroupScroll.selectedIndex = 0;
   sGroupScroll.scrollOffset  = 0;
-  sUIState = LlmUIState::PICK_GROUP;
+  sUiState = LlmUiState::PICK_GROUP;
 }
 
 static void enterPickTemplate(uint8_t g) {
@@ -618,7 +618,7 @@ static void enterPickTemplate(uint8_t g) {
   sPickStatus = nullptr;
   sTplScroll.selectedIndex = 0;
   sTplScroll.scrollOffset  = 0;
-  sUIState = LlmUIState::PICK_TEMPLATE;
+  sUiState = LlmUiState::PICK_TEMPLATE;
 }
 
 static void enterPickEntity(uint16_t t) {
@@ -629,7 +629,7 @@ static void enterPickEntity(uint16_t t) {
   sEntWindow  = 0;
   sEntScroll.selectedIndex = 0;
   sEntScroll.scrollOffset  = 0;
-  sUIState = LlmUIState::PICK_ENTITY;
+  sUiState = LlmUiState::PICK_ENTITY;
 }
 
 // Compose + submit the chosen (group, template, entity). e = -1 for a slotless
@@ -640,7 +640,7 @@ static void submitGuided(int entityIndex) {
     sLastTurnGuided   = true;
     sGuidedAskSession = rc;
     sPickStatus       = nullptr;
-    sUIState          = LlmUIState::GENERATING;   // stream the answer (existing view)
+    sUiState          = LlmUiState::GENERATING;   // stream the answer (existing view)
   } else if (rc == 0) {
     // Busy — a generation is already in flight. Stay in the picker; show status.
     sPickStatus = "Busy: answer in progress";
@@ -648,7 +648,7 @@ static void submitGuided(int entityIndex) {
     // -1 stale gen (model swapped) / -2 bad index / -3 no menu — back to HOME,
     // whose rows show what the engine has now.
     sPickStatus = nullptr;
-    sUIState    = LlmUIState::HOME;
+    sUiState    = LlmUiState::HOME;
   }
 }
 
@@ -918,7 +918,7 @@ static void displayLlm_pickEntity() {
 // the screen asks for its next frame, as the Speech screen does; without that a
 // reply was never drawn until a key was pressed. Idle, it waits for input.
 static bool llmScreenIsLive() {
-  return sUIState == LlmUIState::GENERATING || sUIState == LlmUIState::LOADING ||
+  return sUiState == LlmUiState::GENERATING || sUiState == LlmUiState::LOADING ||
          sCmdInFlight != LLM_CMD_NONE || (sReplyRun != 0 && !sReplyDone);
 }
 
@@ -935,16 +935,16 @@ static void displayLlm() {
 
   syncStateFromEngine();
 
-  switch (sUIState) {
-    case LlmUIState::NO_MODEL:      displayLlm_noModel();      break;
-    case LlmUIState::LOADING:       displayLlm_loading();      break;
-    case LlmUIState::READY:         displayLlm_chat(false);    break;
-    case LlmUIState::GENERATING:    displayLlm_chat(true);     break;
-    case LlmUIState::HOME:          displayLlm_home();         break;
-    case LlmUIState::PICK_MODEL:    displayLlm_pickModel();    break;
-    case LlmUIState::PICK_GROUP:    displayLlm_pickGroup();    break;
-    case LlmUIState::PICK_TEMPLATE: displayLlm_pickTemplate(); break;
-    case LlmUIState::PICK_ENTITY:   displayLlm_pickEntity();   break;
+  switch (sUiState) {
+    case LlmUiState::NO_MODEL:      displayLlm_noModel();      break;
+    case LlmUiState::LOADING:       displayLlm_loading();      break;
+    case LlmUiState::READY:         displayLlm_chat(false);    break;
+    case LlmUiState::GENERATING:    displayLlm_chat(true);     break;
+    case LlmUiState::HOME:          displayLlm_home();         break;
+    case LlmUiState::PICK_MODEL:    displayLlm_pickModel();    break;
+    case LlmUiState::PICK_GROUP:    displayLlm_pickGroup();    break;
+    case LlmUiState::PICK_TEMPLATE: displayLlm_pickTemplate(); break;
+    case LlmUiState::PICK_ENTITY:   displayLlm_pickEntity();   break;
   }
   if (llmScreenIsLive()) oledMarkDirty();
 }
@@ -955,7 +955,7 @@ static void displayLlm() {
 
 // Opens the prompt keyboard (it can also dictate); a cancelled or empty prompt
 // returns to `from`, a submitted one to the chat view to watch the answer.
-static void openPrompt(LlmUIState from) {
+static void openPrompt(LlmUiState from) {
   oledKeyboardInit("Prompt:", nullptr, OLED_KEYBOARD_MAX_LENGTH,
                    OledKeyboardDictationPolicy::ALLOW_PLAINTEXT);
   sKeyboardActive = true;
@@ -999,7 +999,7 @@ static void openChatView() {
   sReplyStale = true;   // reread, and open at the first line as the glasses do
   sReaderTop = 0;
   sMenuStatus = nullptr;
-  sUIState = LlmUIState::READY;
+  sUiState = LlmUiState::READY;
 }
 
 static bool handleLlmInput(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed) {
@@ -1016,21 +1016,21 @@ static bool handleLlmInput(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed
         sLastTurnGuided = false;   // free-text turn — Y retry uses chatRetryLast
         openChatView();
       } else {
-        sUIState = sKeyboardReturn;
+        sUiState = sKeyboardReturn;
       }
       return true;
     }
     if (oledKeyboardIsCancelled()) {
       oledKeyboardReset();
       sKeyboardActive = false;
-      sUIState = sKeyboardReturn;
+      sUiState = sKeyboardReturn;
       return true;
     }
     return false;
   }
 
-  switch (sUIState) {
-    case LlmUIState::NO_MODEL: {
+  switch (sUiState) {
+    case LlmUiState::NO_MODEL: {
       if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
         // A real list over every source, not a file browser: a remote model has
         // no file on this device and cannot be represented as one.
@@ -1041,7 +1041,7 @@ static bool handleLlmInput(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed
       return false;
     }
 
-    case LlmUIState::LOADING:
+    case LlmUiState::LOADING:
       // A CM5-routed select returns immediately and the host may take tens of
       // seconds to restart llama-server, so this is a long-lived state. B goes
       // home while the load carries on; HOME's Model row shows when it lands.
@@ -1051,7 +1051,7 @@ static bool handleLlmInput(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed
       }
       return true;
 
-    case LlmUIState::GENERATING: {
+    case LlmUiState::GENERATING: {
       if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
         chatStop();
         return true;
@@ -1062,9 +1062,9 @@ static bool handleLlmInput(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed
       return false;
     }
 
-    case LlmUIState::READY: {
+    case LlmUiState::READY: {
       if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
-        openPrompt(LlmUIState::READY);
+        openPrompt(LlmUiState::READY);
         return true;
       }
       if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_Y)) {
@@ -1081,7 +1081,7 @@ static bool handleLlmInput(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed
       return false;
     }
 
-    case LlmUIState::HOME: {
+    case LlmUiState::HOME: {
       if (oledScrollHandleNav(&sHomeScroll)) { sMenuStatus = nullptr; return true; }
       if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A) || INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
         OledScrollItem* sel = oledScrollGetSelected(&sHomeScroll);
@@ -1092,7 +1092,7 @@ static bool handleLlmInput(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed
             openChatView();
             break;
           case LlmHomeAction::Ask:
-            if (llmBackendIsReady()) openPrompt(LlmUIState::HOME);
+            if (llmBackendIsReady()) openPrompt(LlmUiState::HOME);
             else sMenuStatus = "No model loaded";
             break;
           case LlmHomeAction::Guided:
@@ -1117,7 +1117,7 @@ static bool handleLlmInput(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed
       return false;   // B falls through to the global back-handler: leave the app
     }
 
-    case LlmUIState::PICK_MODEL: {
+    case LlmUiState::PICK_MODEL: {
       if (oledScrollHandleNav(&sModelScroll)) { sMenuStatus = nullptr; return true; }
       if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_Y)) {
         clearChatForOled();
@@ -1135,7 +1135,7 @@ static bool handleLlmInput(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed
       return true;
     }
 
-    case LlmUIState::PICK_GROUP: {
+    case LlmUiState::PICK_GROUP: {
       if (oledScrollHandleNav(&sGroupScroll)) { sPickStatus = nullptr; return true; }
       if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A) || INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
         enterPickTemplate((uint8_t)sGroupScroll.selectedIndex);
@@ -1148,7 +1148,7 @@ static bool handleLlmInput(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed
       return true;  // picker is modal — don't leak other keys to global handlers
     }
 
-    case LlmUIState::PICK_TEMPLATE: {
+    case LlmUiState::PICK_TEMPLATE: {
       if (oledScrollHandleNav(&sTplScroll)) { sPickStatus = nullptr; return true; }
       if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A) || INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
         uint16_t t = (uint16_t)sTplScroll.selectedIndex;
@@ -1165,14 +1165,14 @@ static bool handleLlmInput(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed
         return true;
       }
       if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
-        sUIState = LlmUIState::PICK_GROUP;   // back one level
+        sUiState = LlmUiState::PICK_GROUP;   // back one level
         sPickStatus = nullptr;
         return true;
       }
       return true;
     }
 
-    case LlmUIState::PICK_ENTITY: {
+    case LlmUiState::PICK_ENTITY: {
       if (oledScrollHandleNav(&sEntScroll)) { sPickStatus = nullptr; return true; }
       if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A) || INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
         OledScrollItem* sel = oledScrollGetSelected(&sEntScroll);
@@ -1197,7 +1197,7 @@ static bool handleLlmInput(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed
         return true;
       }
       if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
-        sUIState = LlmUIState::PICK_TEMPLATE;   // back one level
+        sUiState = LlmUiState::PICK_TEMPLATE;   // back one level
         sPickStatus = nullptr;
         return true;
       }
@@ -1231,7 +1231,7 @@ void resetLlmOledState() {
   ensurePickScrollInit();
   sHomeScroll.selectedIndex = 0;
   sHomeScroll.scrollOffset  = 0;
-  sUIState = LlmUIState::HOME;
+  sUiState = LlmUiState::HOME;
   sReplyStale = true;
   sReaderTop = 0;
 }

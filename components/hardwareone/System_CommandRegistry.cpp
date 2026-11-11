@@ -439,7 +439,7 @@ static constexpr CommandModule gCommandModules[] = {
 #endif
 
 #if ENABLE_DICTATION
-  { "transcription", "Transcription interfaces", "Session controls and private transcript pages shared by display and web interfaces.", transcriptionUICommands, &transcriptionUICommandsCount, CMD_MODULE_SENSOR, nullptr },
+  { "transcription", "Transcription interfaces", "Session controls and private transcript pages shared by display and web interfaces.", transcriptionUiCommands, &transcriptionUiCommandsCount, CMD_MODULE_SENSOR, nullptr },
 #endif
 #if ENABLE_QUICKNOTE
   { "note", "QuickNote private notes", "Private spoken notes saved under your own /stt/u<id>/notes/. "

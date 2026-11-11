@@ -134,7 +134,7 @@ static bool ownerLive(uint32_t epoch) {
 }
 static bool exchangeValid(const char* id) {
   uint64_t value = 0;
-  return TranscriptionUI::parseId(id, value);
+  return TranscriptionUi::parseId(id, value);
 }
 static void resetLocked(uint32_t epoch) {
   const uint32_t request = state.request + 1;
@@ -149,8 +149,8 @@ static void appendTailLocked(const char* text, size_t length, bool separator) {
   // in a later utterance. Known committed anchors remain exact across reflow.
   if (!state.followTail && state.liveAnchor.valid && state.liveAnchor.draft)
     state.liveAnchor = {state.tailOrigin + uint32_t(oldLength + space), false, true};
-  if (space) TranscriptionUI::appendRecent(state.tail, sizeof(state.tail), " ", 1);
-  TranscriptionUI::appendRecent(state.tail, sizeof(state.tail), text, length);
+  if (space) TranscriptionUi::appendRecent(state.tail, sizeof(state.tail), " ", 1);
+  TranscriptionUi::appendRecent(state.tail, sizeof(state.tail), text, length);
   const size_t newLength = strlen(state.tail);
   const size_t trimmed = oldLength + space + length - newLength;
   state.tailOrigin += trimmed;
@@ -181,7 +181,7 @@ static void buildLabelledText(const State& s) {
   labelledText[0] = '\0'; liveSourceCount = 0;
   auto append = [&](const char* text, size_t length) {
     length = std::min(length, sizeof(labelledText) - used - 1);
-    length = TranscriptionUI::completePrefix(text, length);
+    length = TranscriptionUi::completePrefix(text, length);
     memcpy(labelledText + used, text, length); used += length; labelledText[used] = '\0';
   };
   auto source = [&](size_t begin, size_t end, bool draft) {
@@ -288,7 +288,7 @@ static size_t splitLiveLines(const char* text) {
       size_t width = lead < 0x80 ? 1 : (lead & 0xe0) == 0xc0 ? 2 :
           (lead & 0xf0) == 0xe0 ? 3 : (lead & 0xf8) == 0xf0 ? 4 : 1;
       for (size_t i = 1; i < width; ++i) {
-        if (!p[i] || !TranscriptionUI::continuation(static_cast<unsigned char>(p[i]))) { width = 1; break; }
+        if (!p[i] || !TranscriptionUi::continuation(static_cast<unsigned char>(p[i]))) { width = 1; break; }
       }
       const size_t cells = width >= 3 ? 2 : 1;
       if (cols + cells > G2_TEXT_DEFAULT_COLS || bytes + width > kLiveLineBytes) {
@@ -384,17 +384,17 @@ static void render() {
   if (g2GetHijackPage() != G2_HIJACK_PAGE_TRANSCRIPTION || !g2LensGetState().hijackActive) { renderState = State{}; return; }
   if (!ownerLive(renderState.epoch) || !identity.stillCurrent()) {
     renderState = State{}; renderedCount = 0; renderedEpoch = 0;
-    TranscriptionUI::clear(renderedText, sizeof(renderedText));
-    TranscriptionUI::clear(labelledText, sizeof(labelledText));
+    TranscriptionUi::clear(renderedText, sizeof(renderedText));
+    TranscriptionUi::clear(labelledText, sizeof(labelledText));
     for (auto& span : liveSources) span = LiveSourceSpan{};
     liveSourceCount = 0;
     memset(liveLineOffsets, 0, sizeof(liveLineOffsets));
-    TranscriptionUI::clear(reinterpret_cast<char*>(layoutLines), sizeof(layoutLines));
-    TranscriptionUI::clear(reinterpret_cast<char*>(liveChildren), sizeof(liveChildren));
-    TranscriptionUI::clear(reinterpret_cast<char*>(renderedLive), sizeof(renderedLive));
-    TranscriptionUI::clear(textBody, sizeof(textBody));
-    TranscriptionUI::clear(textPage, sizeof(textPage));
-    TranscriptionUI::clear(sidebar, sizeof(sidebar));
+    TranscriptionUi::clear(reinterpret_cast<char*>(layoutLines), sizeof(layoutLines));
+    TranscriptionUi::clear(reinterpret_cast<char*>(liveChildren), sizeof(liveChildren));
+    TranscriptionUi::clear(reinterpret_cast<char*>(renderedLive), sizeof(renderedLive));
+    TranscriptionUi::clear(textBody, sizeof(textBody));
+    TranscriptionUi::clear(textPage, sizeof(textPage));
+    TranscriptionUi::clear(sidebar, sizeof(sidebar));
     const char* locked[] = {"<- Apps", "Sign in and pair the glasses"};
     (void)g2ShowListPage(locked, 2);
     return;
@@ -518,7 +518,7 @@ static void render() {
       add(s.saveDefault ? "Save next session: On" : "Save next session: Off");
       add("Saved: Internal"); add("Saved: SD card");
       char mic[32];
-      snprintf(mic, sizeof(mic), "Mic: %s", TranscriptionUI::micLabel(s.micSource));
+      snprintf(mic, sizeof(mic), "Mic: %s", TranscriptionUi::micLabel(s.micSource));
       add(mic);
       const char* phase = s.preparing ? "Getting ready" : s.captureActive ? "Listening" :
                           s.inferenceActive ? "Transcribing" : s.active ? "Stopping" : s.done ? "Finished" : "Ready";
@@ -830,7 +830,7 @@ void g2TranscriptionTick() {
       case Op::Read: snprintf(command, sizeof(command), "transcripts read \"%s\" %lu", state.path, (unsigned long)state.fileOffset); break;
       case Op::Save: snprintf(command, sizeof(command), "sttsavetranscripts %u", state.saveDefault ? 0 : 1); break;
       case Op::Mic: snprintf(command, sizeof(command), "micsource %s",
-          TranscriptionUI::nextMicSource(state.micSource, state.micPdm, state.micG2)); break;
+          TranscriptionUi::nextMicSource(state.micSource, state.micPdm, state.micG2)); break;
       default: break;
     }
     if (op != Op::None) {

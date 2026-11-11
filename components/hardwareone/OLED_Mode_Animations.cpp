@@ -316,7 +316,7 @@ static void renderScrollTestAnimation() {
   oledDisplay->setTextSize(1);
   oledDisplay->setCursor(2, 2);
   oledDisplay->print("FPS: ");
-  oledDisplay->print(animationFPS);
+  oledDisplay->print(animationFps);
   
   // Show frame count
   oledDisplay->setCursor(2, 12);

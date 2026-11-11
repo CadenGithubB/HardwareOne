@@ -382,7 +382,7 @@ extern unsigned long animationFrame;
 // (Network menu state flags removed — OLED_NETWORK_STATUS and the saved/scan
 //  pickers are real pushed sub-modes; footer hints come from OledModeEntry::hints.)
 extern unsigned long animationLastUpdate;
-extern int animationFPS;
+extern int animationFps;
 
 // Boot sequence state (defined in oled_display.cpp)
 extern bool oledBootModeActive;
@@ -422,7 +422,7 @@ void displayLogo();
 // Navigation, actions, and input handling are now registered via REGISTER_OLED_MODE_MODULE.
 // Display functions still declared for the render switch in updateOledDisplay().
 void displayPower();
-void displayPowerCPU();
+void displayPowerCpu();
 void displayPowerSleep();
 
 // Network mode functions (OLED_Mode_Network.cpp)

@@ -3,7 +3,7 @@
 #include <cstdint>
 #include <cstring>
 
-namespace TranscriptionUI {
+namespace TranscriptionUi {
 inline bool parseId(const char* text, uint64_t& out) {
   out = 0;
   if (!text || std::strlen(text) != 16) return false;

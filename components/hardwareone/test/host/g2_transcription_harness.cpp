@@ -270,11 +270,11 @@ int main(){
     // Valid UTF-8 stays intact at line/byte boundaries, including unbroken words.
     std::string unicode;for(int i=0;i<100;++i)unicode+=u8"界é🙂";
     size_t lines=splitLiveLines(unicode.c_str());std::string joined;
-    for(size_t i=0;i<lines;++i){size_t n=std::strlen(layoutLines[i]);assert(n<=kLiveLineBytes);assert(TranscriptionUI::completePrefix(layoutLines[i],n)==n);joined+=layoutLines[i];}
+    for(size_t i=0;i<lines;++i){size_t n=std::strlen(layoutLines[i]);assert(n<=kLiveLineBytes);assert(TranscriptionUi::completePrefix(layoutLines[i],n)==n);joined+=layoutLines[i];}
     assert(joined==unicode);
-    std::string boundedUnicode=unicode.substr(0,450);assert(TranscriptionUI::completePrefix(boundedUnicode.c_str(),boundedUnicode.size())==boundedUnicode.size());
+    std::string boundedUnicode=unicode.substr(0,450);assert(TranscriptionUi::completePrefix(boundedUnicode.c_str(),boundedUnicode.size())==boundedUnicode.size());
     std::strcpy(state.draft,boundedUnicode.c_str());state.page=255;state.followTail=true;enqueueRender();drainUi();
-    for(size_t i=1;i<lineText.size();++i){assert(lineText[i].size()<=180);assert(TranscriptionUI::completePrefix(lineText[i].c_str(),lineText[i].size())==lineText[i].size());}
+    for(size_t i=1;i<lineText.size();++i){assert(lineText[i].size()<=180);assert(TranscriptionUi::completePrefix(lineText[i].c_str(),lineText[i].size())==lineText[i].size());}
     // New text follows the most recent eight lines; paging back stays put.
     std::strcpy(state.draft,"one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine");state.page=255;state.followTail=true;enqueueRender();drainUi();
     assert(state.pages==2&&state.page==1&&lineText[1]=="two\nthree\nfour"&&lineText[3]=="eight\nnine");
@@ -365,7 +365,7 @@ int main(){
         std::string shownWords=std::string(labelledText).substr(10);
         if(!shownWords.empty()&&shownWords[0]>='A'&&shownWords[0]<='Z')shownWords[0]=char(shownWords[0]+('a'-'A'));  // display casing of the turn start only
         assert(tokens(shownWords)==tokens(retained));
-        for(const auto& line:lineText)assert(line.size()<=180&&TranscriptionUI::completePrefix(line.c_str(),line.size())==line.size());
+        for(const auto& line:lineText)assert(line.size()<=180&&TranscriptionUi::completePrefix(line.c_str(),line.size())==line.size());
         assert(creates==1);
     }
     // Metadata-only grouping changes preserve follow-tail, and reading older

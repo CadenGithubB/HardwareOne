@@ -362,7 +362,7 @@ bool MapCore::loadMapFile(const char* path) {
   }
   
   size_t fileSize = f.size();
-  if (fileSize < sizeof(HWMapHeader)) {
+  if (fileSize < sizeof(HwMapHeader)) {
     ERROR_MAPSF("Map file too small: %zu bytes", fileSize);
     f.close();
     pollResume();
@@ -370,7 +370,7 @@ bool MapCore::loadMapFile(const char* path) {
   }
   
   // Read header first
-  HWMapHeader header;
+  HwMapHeader header;
   if (f.read((uint8_t*)&header, sizeof(header)) != sizeof(header)) {
     ERROR_MAPSF("Failed to read map header");
     f.close();
@@ -450,10 +450,10 @@ bool MapCore::loadMapFile(const char* path) {
                _currentMap.tileGridSize, _currentMap.tileGridSize);
   
   // === PARSE NAME TABLE (small, keep in RAM) ===
-  size_t nameTableEnd = sizeof(HWMapHeader);
+  size_t nameTableEnd = sizeof(HwMapHeader);
   bool nameTableScanOk = true;
   if (header.nameCount > 0) {
-    f.seek(sizeof(HWMapHeader));
+    f.seek(sizeof(HwMapHeader));
     for (uint16_t i = 0; i < header.nameCount; i++) {
       int c = f.read();
       if (c < 0) {
@@ -481,7 +481,7 @@ bool MapCore::loadMapFile(const char* path) {
     MapNameEntry* names = (MapNameEntry*)ps_alloc(sizeof(MapNameEntry) * header.nameCount,
                                                   AllocPref::RequirePsram, "maps.names");
     if (names) {
-      f.seek(sizeof(HWMapHeader));
+      f.seek(sizeof(HwMapHeader));
       uint16_t parsed = 0;
       for (uint16_t i = 0; i < header.nameCount; i++) {
         int c = f.read();
@@ -510,8 +510,8 @@ bool MapCore::loadMapFile(const char* path) {
     ERROR_MAPSF("Tile count %u exceeds max %u (gridSize=%u)", _currentMap.tileCount, HWMAP_MAX_TILES, _currentMap.tileGridSize);
   }
   if (_currentMap.tileCount > 0 && _currentMap.tileCount <= HWMAP_MAX_TILES) {
-    size_t tileDirSize = sizeof(HWMapTileDirEntry) * _currentMap.tileCount;
-    HWMapTileDirEntry* tileDir = (HWMapTileDirEntry*)ps_alloc(tileDirSize,
+    size_t tileDirSize = sizeof(HwMapTileDirEntry) * _currentMap.tileCount;
+    HwMapTileDirEntry* tileDir = (HwMapTileDirEntry*)ps_alloc(tileDirSize,
                                                               AllocPref::RequirePsram,
                                                               "maps.tiledir");
     
@@ -879,7 +879,7 @@ const uint8_t* MapCore::loadTileData(uint16_t tileIdx, size_t* outSize) {
     return nullptr;
   }
 
-  HWMapTileDirEntry& tile = _currentMap.tileDir[tileIdx];
+  HwMapTileDirEntry& tile = _currentMap.tileDir[tileIdx];
   if (tile.payloadSize == 0) {
     if (outSize) *outSize = 0;
     return nullptr;
@@ -1279,7 +1279,7 @@ void MapCore::renderMap(MapRenderer* renderer, float centerLat, float centerLon,
       // Bail early if map was unloaded mid-render (async safety)
       if (!_currentMap.valid) return;
       
-      HWMapTileDirEntry& tile = _currentMap.tileDir[tileIdx];
+      HwMapTileDirEntry& tile = _currentMap.tileDir[tileIdx];
       if (tile.payloadSize == 0) { tilesEmpty++; continue; }
       
       // Calculate tile halo bounds for dequantization
@@ -4096,7 +4096,7 @@ void LocationContextManager::updateContext(float lat, float lon) {
       uint16_t tileIdx = ty * map.tileGridSize + tx;
       if (tileIdx >= map.tileCount) continue;
       
-      HWMapTileDirEntry& tile = map.tileDir[tileIdx];
+      HwMapTileDirEntry& tile = map.tileDir[tileIdx];
       if (tile.payloadSize == 0) continue;
       
       // Calculate tile halo bounds for dequantization

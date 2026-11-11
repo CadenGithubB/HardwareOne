@@ -350,9 +350,9 @@ static void keyboardFinish(const char* typed, bool complete) {
   gOledKeyboardState.active = false;
 }
 
-enum class OledUIIcon : uint8_t { NONE = 0, INFO, WARNING, ERROR, SUCCESS, QUESTION };
+enum class OledUiIcon : uint8_t { NONE = 0, INFO, WARNING, ERROR, SUCCESS, QUESTION };
 static std::vector<std::string> toasts;
-static void oledToastShow(const char* message, uint32_t, OledUIIcon) { toasts.emplace_back(message); }
+static void oledToastShow(const char* message, uint32_t, OledUiIcon) { toasts.emplace_back(message); }
 static bool gGuest;
 static bool oledGuestBlocksMutate() { return gGuest; }
 static std::vector<OledMode> modeRequests;

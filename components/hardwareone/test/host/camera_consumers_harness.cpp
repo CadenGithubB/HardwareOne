@@ -17,7 +17,7 @@
 #define DEBUG_G2F(...) do {} while (0)
 #define BROADCAST_PRINTF(...) do {} while (0)
 struct {
-  int cameraFramesize=0, cameraBrightness=0, cameraContrast=0, cameraAELevel=0;
+  int cameraFramesize=0, cameraBrightness=0, cameraContrast=0, cameraAeLevel=0;
   int cameraSharpness=0, cameraQuality=12, cameraDenoise=0, g2StreamToneMap=1;
   int cameraStreamFps=5, g2StreamWidth=192, g2StreamHeight=144;
   bool cameraHMirror=false, cameraVFlip=false;

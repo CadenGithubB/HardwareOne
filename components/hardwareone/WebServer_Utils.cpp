@@ -57,9 +57,9 @@ void WebMirrorBuf::append(const String& s, bool needNewline) {
   if (!buf || cap == 0) return;
   if (!mutex || xSemaphoreTake(mutex, pdMS_TO_TICKS(10)) != pdTRUE) return;
   
-  size_t addNL = (needNewline && len > 0) ? 1 : 0;
+  size_t addNl = (needNewline && len > 0) ? 1 : 0;
   size_t slen = s.length();
-  size_t need = addNL + slen;
+  size_t need = addNl + slen;
   
   // If overflow, drop oldest to keep only last cap bytes
   if (need >= cap) {
@@ -94,7 +94,7 @@ void WebMirrorBuf::append(const String& s, bool needNewline) {
     buf[len] = '\0';
   }
 
-  if (addNL) { buf[len++] = '\n'; }
+  if (addNl) { buf[len++] = '\n'; }
   memcpy(buf + len, s.c_str(), slen);
   len += slen;
   buf[len] = '\0';
@@ -113,8 +113,8 @@ void WebMirrorBuf::appendDirect(const char* s, size_t slen, bool needNewline) {
   if (!buf || cap == 0 || !s) return;
   if (!mutex || xSemaphoreTake(mutex, pdMS_TO_TICKS(10)) != pdTRUE) return;
   
-  size_t addNL = (needNewline && len > 0) ? 1 : 0;
-  size_t need = addNL + slen;
+  size_t addNl = (needNewline && len > 0) ? 1 : 0;
+  size_t need = addNl + slen;
   
   // If overflow, drop oldest to keep only last cap bytes
   if (need >= cap) {
@@ -145,7 +145,7 @@ void WebMirrorBuf::appendDirect(const char* s, size_t slen, bool needNewline) {
     buf[len] = '\0';
   }
 
-  if (addNL) { buf[len++] = '\n'; }
+  if (addNl) { buf[len++] = '\n'; }
   memcpy(buf + len, s, slen);
   len += slen;
   buf[len] = '\0';
@@ -842,7 +842,7 @@ void streamBeginHtml(httpd_req_t* req,
 
   // Stream CSS directly - no String allocation
   streamChunkC(req, "<style>");
-  streamCommonCSS(req);
+  streamCommonCss(req);
   streamChunkC(req, "</style>");
 
   // Add inline background style to prevent flash of unstyled content (FOUC)

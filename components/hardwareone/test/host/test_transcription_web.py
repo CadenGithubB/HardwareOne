@@ -31,8 +31,8 @@ def main():
     header=(COMPONENT/'System_Transcription_Web.h').read_text()
     js=header.split('R"STTJS(\n<script>\n',1)[1].split('\n</script>\n)STTJS"',1)[0]
     mic=(COMPONENT/'System_Microphone_Web.h').read_text()
-    actual_js_function=extract_block(mic,'inline void streamMicrophoneSensorJS(')
-    assert 'streamTranscriptionJS(req)' in actual_js_function, 'Panel JS must load on Sensors, not just Dashboard'
+    actual_js_function=extract_block(mic,'inline void streamMicrophoneSensorJs(')
+    assert 'streamTranscriptionJs(req)' in actual_js_function, 'Panel JS must load on Sensors, not just Dashboard'
     assert 'streamTranscriptionPanel(req)' in extract_block(mic,'inline void streamMicrophoneSensorCard(')
     with tempfile.TemporaryDirectory(prefix='hw1-transcription-web-') as temp:
         temp=Path(temp); unit=temp/'test.cpp'; exe=temp/'test'; script=temp/'panel.js'

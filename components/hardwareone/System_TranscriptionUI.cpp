@@ -99,7 +99,7 @@ const char* commandSession(const String& input) {
     }
     putStatus(doc, lease);
   } else {
-    if (args.count() < 2 || !TranscriptionUI::parseId(args.arg(1).c_str(), lease.exchange))
+    if (args.count() < 2 || !TranscriptionUi::parseId(args.arg(1).c_str(), lease.exchange))
       return error(doc, "A valid session ID is required");
     DictationAppSnapshot state{};
     if (!dictationAppSnapshot(lease, &state)) return error(doc, "Session unavailable");
@@ -124,9 +124,9 @@ const char* commandSession(const String& input) {
       char display[2 * DICTATION_MAX_TEXT + 1]{};
       if (available && sttFormatDisplay(text, receipt.sequence == 1 && receipt.offset == 0, display, sizeof(display)))
         doc["display"] = display;
-      TranscriptionUI::clear(display, sizeof(display));
+      TranscriptionUi::clear(display, sizeof(display));
 #endif
-      TranscriptionUI::clear(text, sizeof(text));
+      TranscriptionUi::clear(text, sizeof(text));
       // Live mode: provisional words still being spoken (same private reply).
       uint32_t draftVersion = 0;
       if (dictationAppPeekDraft(lease, text, sizeof(text), &draftVersion)) {
@@ -139,9 +139,9 @@ const char* commandSession(const String& input) {
         doc["draftVersion"] = draftVersion;
       }
 #if ENABLE_LOCAL_STT
-      TranscriptionUI::clear(display, sizeof(display));
+      TranscriptionUi::clear(display, sizeof(display));
 #endif
-      TranscriptionUI::clear(text, sizeof(text));
+      TranscriptionUi::clear(text, sizeof(text));
       SttSpeakerSnapshot speakers;
       if (dictationAppReadSpeakers(lease, &speakers)) {
         doc["speakerVersion"] = speakers.version;
@@ -157,9 +157,9 @@ const char* commandSession(const String& input) {
       }
     } else if (op == "ack" && args.count() == 5) {
       uint32_t seq, offset, length;
-      if (!TranscriptionUI::parseUnsigned(args.arg(2).c_str(), seq) ||
-          !TranscriptionUI::parseUnsigned(args.arg(3).c_str(), offset) ||
-          !TranscriptionUI::parseUnsigned(args.arg(4).c_str(), length) ||
+      if (!TranscriptionUi::parseUnsigned(args.arg(2).c_str(), seq) ||
+          !TranscriptionUi::parseUnsigned(args.arg(3).c_str(), offset) ||
+          !TranscriptionUi::parseUnsigned(args.arg(4).c_str(), length) ||
           offset > UINT16_MAX || length > DICTATION_MAX_TEXT || !length)
         return error(doc, "Invalid receipt");
       const DictationTextReceipt receipt{lease.exchange, seq, (uint16_t)offset, (uint16_t)length};
@@ -186,7 +186,7 @@ const char* commandFiles(const String& input) {
   if (args.arg(0) == "list" && args.count() == 3 &&
       (args.arg(1) == "internal" || args.arg(1) == "sd")) {
     uint32_t offset;
-    if (!TranscriptionUI::parseUnsigned(args.arg(2).c_str(), offset)) return error(doc, "Invalid offset");
+    if (!TranscriptionUi::parseUnsigned(args.arg(2).c_str(), offset)) return error(doc, "Invalid offset");
     const bool sd = args.arg(1) == "sd";
     if (sd && !VFS::isSdAvailable()) return error(doc, "No SD card");
     char folder[32];
@@ -200,7 +200,7 @@ const char* commandFiles(const String& input) {
       for (File file = dir.openNextFile(); file; file = dir.openNextFile()) {
         const char* name = strrchr(file.name(), '/'); name = name ? name + 1 : file.name();
         String lower(name); lower.toLowerCase();
-        if (!file.isDirectory() && TranscriptionUI::safeFilename(name) && lower.endsWith(".txt")) {
+        if (!file.isDirectory() && TranscriptionUi::safeFilename(name) && lower.endsWith(".txt")) {
           char path[128]; snprintf(path, sizeof(path), "%s/%s", folder, name);
           if (canRead(path, ctx) && found++ >= offset) {
             if (shown == 8) { more = true; file.close(); break; }
@@ -215,7 +215,7 @@ const char* commandFiles(const String& input) {
     doc["offset"] = offset; doc["nextOffset"] = offset + shown; doc["more"] = more;
   } else if (args.arg(0) == "read" && args.count() == 3 && args.argWasQuoted(1)) {
     uint32_t offset;
-    if (!TranscriptionUI::parseUnsigned(args.arg(2).c_str(), offset)) return error(doc, "Invalid offset");
+    if (!TranscriptionUi::parseUnsigned(args.arg(2).c_str(), offset)) return error(doc, "Invalid offset");
     String path;
     if (!normalizeFsPath(args.arg(1), path) || path.length() >= 128) return error(doc, "Invalid path");
     char internal[32], sd[32];
@@ -231,21 +231,21 @@ const char* commandFiles(const String& input) {
     size_t got = wanted ? file.read(reinterpret_cast<uint8_t*>(text), wanted) : 0;
     file.close();
     if (got != wanted) return error(doc, "Transcript read incomplete");
-    if (offset + got < total) got = TranscriptionUI::completePrefix(text, got);
+    if (offset + got < total) got = TranscriptionUi::completePrefix(text, got);
     text[got] = 0;
     doc["sttText"] = text; doc["offset"] = offset; doc["nextOffset"] = offset + got;
     doc["eof"] = offset + got >= total; doc["total"] = total; doc["transcriptPath"] = path;
-    TranscriptionUI::clear(text, sizeof(text));
+    TranscriptionUi::clear(text, sizeof(text));
   } else return error(doc, "Invalid transcript request");
   if (!live(owner)) return error(doc, "Session expired");
   return reply(doc);
 }
 }
-const CommandEntry transcriptionUICommands[] = {
+const CommandEntry transcriptionUiCommands[] = {
   { "transcription", "Transcription interface controls", false, commandSession,
     "transcription start|status [id]|stop <id>|cancel <id>|next <id>|ack <id> <sequence> <offset> <length>" },
   { "transcripts", "Browse your saved transcripts", false, commandFiles,
     "transcripts list internal|sd <offset> | transcripts read \"<path>\" <offset>" },
 };
-const size_t transcriptionUICommandsCount = sizeof(transcriptionUICommands) / sizeof(transcriptionUICommands[0]);
+const size_t transcriptionUiCommandsCount = sizeof(transcriptionUiCommands) / sizeof(transcriptionUiCommands[0]);
 #endif

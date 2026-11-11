@@ -137,7 +137,7 @@ void displayPower() {
   renderPowerMainList();
 }
 
-void displayPowerCPU() {
+void displayPowerCpu() {
   if (!oledDisplay || !oledConnected) return;
   populatePowerCpuMenu();
   oledScrollRenderSimple(oledDisplay, &sPowerCpuScroll);
@@ -279,7 +279,7 @@ static bool powerSleepInputHandler(int deltaX, int deltaY, uint32_t newlyPressed
 // Columns: mode, name, iconName, displayFunc, availFunc, inputFunc, showInMenu, menuOrder, hints
 static const OledModeEntry sPowerModes[] = {
   { OLED_POWER,       "Power",    "power", displayPower,      nullptr, powerMainInputHandler,  false, -1, "A:Select B:Back" },
-  { OLED_POWER_CPU,   "CPU Power","power", displayPowerCPU,   nullptr, powerCpuInputHandler,   false, -1, "A:Execute B:Back" },
+  { OLED_POWER_CPU,   "CPU Power","power", displayPowerCpu,   nullptr, powerCpuInputHandler,   false, -1, "A:Execute B:Back" },
   { OLED_POWER_SLEEP, "Sleep",    "power", displayPowerSleep, nullptr, powerSleepInputHandler, false, -1, "A:Execute B:Back" },
 };
 

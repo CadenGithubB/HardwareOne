@@ -2271,10 +2271,10 @@ void hardwareone_setup() {
 #if ENABLE_NEOPIXEL
   if (gSettings.ledStartupEnabled && gSettings.ledStartupEffect.length() > 0 && gSettings.ledStartupEffect != "none") {
     RGB color1, color2;
-    if (!getRGBFromName(gSettings.ledStartupColor, color1)) {
+    if (!getRgbFromName(gSettings.ledStartupColor, color1)) {
       color1 = { 0, 255, 255 };  // Default cyan
     }
-    if (!getRGBFromName(gSettings.ledStartupColor2, color2)) {
+    if (!getRgbFromName(gSettings.ledStartupColor2, color2)) {
       color2 = { 255, 0, 255 };  // Default magenta
     }
 

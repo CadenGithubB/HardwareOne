@@ -57,10 +57,10 @@ static struct{bool up=false,down=false;}gNavEvents;
 constexpr uint32_t INPUT_BUTTON_A=1,INPUT_BUTTON_B=2,INPUT_BUTTON_X=4;
 #define INPUT_CHECK(buttons,mask) ((buttons)&(mask))
 static std::string toast;
-enum class OledUIIcon {NONE,ERROR};
+enum class OledUiIcon {NONE,ERROR};
 static unsigned toastDuration;
-static OledUIIcon toastIcon;
-void oledToastShow(const char* text,unsigned duration,OledUIIcon icon=OledUIIcon::NONE){toast=text;toastDuration=duration;toastIcon=icon;}
+static OledUiIcon toastIcon;
+void oledToastShow(const char* text,unsigned duration,OledUiIcon icon=OledUiIcon::NONE){toast=text;toastDuration=duration;toastIcon=icon;}
 void oledMarkDirty(){}
 void requestOledMode(OledMode mode,const char*){currentOledMode=mode;}
 #include "OLED_Layout.h"
@@ -102,7 +102,7 @@ int main(){
   const char* refusal="Speech model cannot be opened. Install the matching model at /sd/STT Models/quartznet15x5-gen2-25397.p4.stt.";
   const std::string failure=std::string("{\"success\":false,\"error\":\"")+refusal+"\"}";
   answer(failure);tick(1);
-  assert(std::string(v.message)==refusal&&toast==refusal&&toastDuration==8000&&toastIcon==OledUIIcon::ERROR);
+  assert(std::string(v.message)==refusal&&toast==refusal&&toastDuration==8000&&toastIcon==OledUiIcon::ERROR);
 
   reset();home();start();tick();assert(request()==std::string("transcription next ")+id);
   answer("{\"success\":true,\"available\":true,\"sequence\":1,\"offset\":0,\"length\":6,\"sttText\":\"hello \"}");assert(v.recent[0]==0);tick(1);assert(std::string(v.recent)=="hello ");
@@ -118,7 +118,7 @@ int main(){
   // Exact bridge epoch fence is independent of a caller's command contents.
   assert(!submitOledCommandForSession("transcription start",99,nullptr,nullptr));
   // Numeric toggle reports ordinary command failure and refreshes state.
-  v.menu.selectedIndex=2;menuInput(0,0,INPUT_BUTTON_A);tick(1);assert(request()=="sttsavetranscripts 1");answer("Error: Admin required",true);tick(1);assert(std::string(v.message)=="Error: Admin required");assert(toast=="Error: Admin required"&&toastDuration==8000&&toastIcon==OledUIIcon::ERROR);assert(request()=="transcription status");answer(status(false,""));tick(1);
+  v.menu.selectedIndex=2;menuInput(0,0,INPUT_BUTTON_A);tick(1);assert(request()=="sttsavetranscripts 1");answer("Error: Admin required",true);tick(1);assert(std::string(v.message)=="Error: Admin required");assert(toast=="Error: Admin required"&&toastDuration==8000&&toastIcon==OledUiIcon::ERROR);assert(request()=="transcription status");answer(status(false,""));tick(1);
   // List and file reads cannot publish after Back or selecting another file.
   // Mic row cycles reachable sources through micsource, then refreshes status.
   v.micPdm=true;v.micG2=false;std::strcpy(v.micSource,"auto");populateMenu();assert(std::string(v.menu.items[5])=="Mic: Auto");

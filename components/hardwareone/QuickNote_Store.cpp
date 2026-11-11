@@ -32,7 +32,7 @@ bool fail(const char** why, const char* reason) {
 struct Wipe {
   char* data;
   size_t size;
-  ~Wipe() { TranscriptionUI::clear(data, size); }
+  ~Wipe() { TranscriptionUi::clear(data, size); }
 };
 
 struct PsBlock {
@@ -367,7 +367,7 @@ bool restamp(CommandSource source, const char* user, const char* path, const cha
       !strcmp(header.created, "boot") && size - body <= kMaxNoteBytes;
   memcpy(header.created, stamp, kStampMax + 1);
   const size_t headLength = parsed ? noteFormatHeader(header, head, sizeof(head)) : 0;
-  TranscriptionUI::clear(header.title, sizeof(header.title));
+  TranscriptionUi::clear(header.title, sizeof(header.title));
   const size_t bytes = headLength + (size - body);
   bool ok = headLength != 0;
   if (!ok) {
@@ -500,10 +500,10 @@ bool read(const AuthContext& ctx, const char* path, uint32_t offset, char* out,
   size_t n = wanted ? file.read(reinterpret_cast<uint8_t*>(out), wanted) : 0;
   file.close();
   if (n != wanted) {
-    TranscriptionUI::clear(out, cap);
+    TranscriptionUi::clear(out, cap);
     return fail(why, "Note read incomplete");
   }
-  if (offset + n < size) n = TranscriptionUI::completePrefix(out, n);
+  if (offset + n < size) n = TranscriptionUi::completePrefix(out, n);
   out[n] = '\0';
   if (got) *got = n;
   if (total) *total = static_cast<uint32_t>(size);

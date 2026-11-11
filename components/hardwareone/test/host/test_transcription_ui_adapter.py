@@ -18,7 +18,7 @@ def main():
     parser=extract_block((COMPONENT/'System_Command.h').read_text(),'class CommandArgs')+';\nconst String CommandArgs::empty_;\n'
     args=(COMPONENT/'System_Command.cpp').read_text()
     parser+='\n'.join(function(args,s) for s in ('CommandArgs::CommandArgs(', 'void CommandArgs::parse(', 'const String& CommandArgs::arg('))
-    adapter=source[source.index('namespace {'):source.index('const CommandEntry transcriptionUICommands')]
+    adapter=source[source.index('namespace {'):source.index('const CommandEntry transcriptionUiCommands')]
     unit=(HERE/'transcription_ui_adapter_harness.cpp').read_text().replace('// INSERT_TYPES',types).replace('// INSERT_PARSER',parser).replace('// INSERT_NORMALIZER',function((COMPONENT/'System_Filesystem.cpp').read_text(),'bool normalizeFsPath(')).replace('// INSERT_ADAPTER',adapter)
     with tempfile.TemporaryDirectory(prefix='hw1-transcription-adapter-') as t:
         t=Path(t);cpp=t/'test.cpp';exe=t/'test';cpp.write_text(unit)

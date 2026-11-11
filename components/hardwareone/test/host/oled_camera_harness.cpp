@@ -76,10 +76,10 @@ bool decode(const uint8_t*,size_t,Image& image,const DecodeOptions&,const char**
   return true;
 }
 }
-enum class OledUIIcon{ERROR};
+enum class OledUiIcon{ERROR};
 namespace oled_message{constexpr unsigned kErrorDurationMs=8000;}
 void oledToastShow(const char*,unsigned){++toasts;}
-void oledToastShow(const char*,unsigned,OledUIIcon){++toasts;}
+void oledToastShow(const char*,unsigned,OledUiIcon){++toasts;}
 void oledMarkDirty(){}
 struct {bool up=false,down=false,left=false,right=false;} gNavEvents;
 enum {INPUT_BUTTON_A=1,INPUT_BUTTON_B=2,INPUT_BUTTON_X=4,INPUT_BUTTON_Y=8};

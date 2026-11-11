@@ -63,12 +63,12 @@ bool executeOledCommandWithResult(const String& cmd, char* out, size_t outSize) 
 void executeOledCommand(const String& cmd) { gFireAndForget.emplace_back(cmd.c_str()); }
 
 // ---- global toast (OLED_UI.h) -------------------------------------------------------
-enum class OledUIIcon : uint8_t { NONE, INFO, SUCCESS, WARNING, ERROR, QUESTION };
+enum class OledUiIcon : uint8_t { NONE, INFO, SUCCESS, WARNING, ERROR, QUESTION };
 static std::string gToast;
 static int gToastCount = 0;
 static uint32_t gToastDuration = 0;
-static OledUIIcon gToastIcon = OledUIIcon::NONE;
-static void oledToastShow(const char* message, uint32_t duration = 3000, OledUIIcon icon = OledUIIcon::NONE) {
+static OledUiIcon gToastIcon = OledUiIcon::NONE;
+static void oledToastShow(const char* message, uint32_t duration = 3000, OledUiIcon icon = OledUiIcon::NONE) {
   gToastDuration = duration; gToastIcon = icon;
   gToast = message ? message : "";
   ++gToastCount;
@@ -276,7 +276,7 @@ static void case_helper_error_replies() {
            std::string("reply '") + c.reply + "' toasts '" + c.toast + "', got '" + gToast + "'");
   }
 
-  EXPECT(gToastDuration == 8000 && gToastIcon == OledUIIcon::ERROR,
+  EXPECT(gToastDuration == 8000 && gToastIcon == OledUiIcon::ERROR,
          "command failures share the longer error toast style");
   for (const char* prefix : {"[ERROR]", "error:", "Usage:", "Unknown command:"}) {
     resetWorld(); gExecOk = true; gExecText = std::string(prefix) + " refused";

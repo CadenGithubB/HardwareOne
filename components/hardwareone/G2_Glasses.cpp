@@ -3306,7 +3306,7 @@ static void g2ConversateLocalPause(bool paused);
 static void g2ConversateLocalFinish();
 static bool g2ConversateLocalOwnsCapture();
 static void g2ConversateLocalTick();
-static void g2ConvTLNoteAck(uint32_t magic, uint32_t error);
+static void g2ConvTlNoteAck(uint32_t magic, uint32_t error);
 #endif
 static void g2ConversateOnRx(G2Temple& temple, uint32_t generation,
                             const uint8_t* pb, size_t len);
@@ -15892,7 +15892,7 @@ static void g2ConversateOnRx(G2Temple& temple, uint32_t generation,
     if (!matched) (void)g2CaptionTestNoteAck(event.magic, event.value);
 #endif
 #if HW1_CONVERSATE_LOCAL_STT
-    if (!matched) g2ConvTLNoteAck(event.magic, event.value);  // TL send: a caption's COMM_RSP
+    if (!matched) g2ConvTlNoteAck(event.magic, event.value);  // TL send: a caption's COMM_RSP
 #endif
     return;
   }
@@ -16003,42 +16003,42 @@ static void g2ConversateOnRx(G2Temple& temple, uint32_t generation,
 #if HW1_CONVERSATE_LOCAL_STT
 namespace {
 // Live timing (TL send), all on g2_owner: g2ConversateSendCaption notes
-// each final caption the pump flags (gConvTLSendSeq), the RX path notes the
-// glasses' COMM_RSP for it, and g2ConvTLFlush prints both from
+// each final caption the pump flags (gConvTlSendSeq), the RX path notes the
+// glasses' COMM_RSP for it, and g2ConvTlFlush prints both from
 // g2ConversateLocalTick, outside the pump's and the RX chain's frames (the
 // ~6 KB stack keeps ~1.2 KB spare; none of their frames grow for this).
 // Printed as  TL send seq=<final> t=<write start> ack_ms=-1 tx_ms=<write> ok=<0|1>
 // and         TL send seq=<final> t=<write start> ack_ms=<ack - t> err=<rsp error>.
-struct ConvTLPending { uint32_t magic = 0, seq = 0, sentMs = 0; };
-struct ConvTLEvent { uint32_t seq, sentMs, txMs, ackMs, err; bool ack, ok; };
-constexpr uint8_t kConvTLPending = 8, kConvTLEvents = 16;
-constexpr uint32_t kConvTLAckWindowMs = 10000;  // magics wrap at 250: ignore stale echoes
+struct ConvTlPending { uint32_t magic = 0, seq = 0, sentMs = 0; };
+struct ConvTlEvent { uint32_t seq, sentMs, txMs, ackMs, err; bool ack, ok; };
+constexpr uint8_t kConvTlPending = 8, kConvTlEvents = 16;
+constexpr uint32_t kConvTlAckWindowMs = 10000;  // magics wrap at 250: ignore stale echoes
 // PSRAM (like the caption frame buffer): ~0.5 KB that internal RAM need not hold.
-EXT_RAM_BSS_ATTR ConvTLPending gConvTLPending[kConvTLPending];
-EXT_RAM_BSS_ATTR ConvTLEvent gConvTLEvents[kConvTLEvents];
-uint8_t gConvTLPendingNext = 0, gConvTLHead = 0, gConvTLTail = 0;
-uint32_t gConvTLLost = 0;
-uint32_t gConvTLSendSeq = 0;      // pump: the final the next caption write is (0: not a final)
-uint32_t gConvTLSendStartMs = 0;  // start of that write
-void g2ConvTLPush(const ConvTLEvent& e) {
-  if (uint8_t(gConvTLHead - gConvTLTail) >= kConvTLEvents) { ++gConvTLLost; return; }
-  gConvTLEvents[gConvTLHead++ % kConvTLEvents] = e;
+EXT_RAM_BSS_ATTR ConvTlPending gConvTlPending[kConvTlPending];
+EXT_RAM_BSS_ATTR ConvTlEvent gConvTlEvents[kConvTlEvents];
+uint8_t gConvTlPendingNext = 0, gConvTlHead = 0, gConvTlTail = 0;
+uint32_t gConvTlLost = 0;
+uint32_t gConvTlSendSeq = 0;      // pump: the final the next caption write is (0: not a final)
+uint32_t gConvTlSendStartMs = 0;  // start of that write
+void g2ConvTlPush(const ConvTlEvent& e) {
+  if (uint8_t(gConvTlHead - gConvTlTail) >= kConvTlEvents) { ++gConvTlLost; return; }
+  gConvTlEvents[gConvTlHead++ % kConvTlEvents] = e;
 }
 // After the write returned (magic 0: not sent); out of line.
-__attribute__((noinline)) void g2ConvTLNoteSendDone(uint32_t magic) {
-  const uint32_t seq = gConvTLSendSeq, sentMs = gConvTLSendStartMs;
-  gConvTLSendSeq = 0;
-  g2ConvTLPush({seq, sentMs, millis() - sentMs, 0, 0, false, magic != 0});
+__attribute__((noinline)) void g2ConvTlNoteSendDone(uint32_t magic) {
+  const uint32_t seq = gConvTlSendSeq, sentMs = gConvTlSendStartMs;
+  gConvTlSendSeq = 0;
+  g2ConvTlPush({seq, sentMs, millis() - sentMs, 0, 0, false, magic != 0});
   if (!magic) return;
-  gConvTLPending[gConvTLPendingNext] = {magic, seq, sentMs};
-  gConvTLPendingNext = (gConvTLPendingNext + 1) % kConvTLPending;
+  gConvTlPending[gConvTlPendingNext] = {magic, seq, sentMs};
+  gConvTlPendingNext = (gConvTlPendingNext + 1) % kConvTlPending;
 }
 }  // namespace
 #endif
 // TL send hook around a caption write; a no-op unless the pump flagged a final.
-static inline uint32_t g2ConvTLSent(uint32_t sent) {
+static inline uint32_t g2ConvTlSent(uint32_t sent) {
 #if HW1_CONVERSATE_LOCAL_STT
-  if (gConvTLSendSeq) g2ConvTLNoteSendDone(sent);
+  if (gConvTlSendSeq) g2ConvTlNoteSendDone(sent);
 #endif
   return sent;
 }
@@ -16054,18 +16054,18 @@ static uint32_t g2ConversateSendCaption(const char* text, size_t length, bool fi
   size_t n = 0, body = 0;
   const uint32_t magic = g2ConversateNextMagic();
 #if HW1_CONVERSATE_LOCAL_STT
-  if (gConvTLSendSeq) gConvTLSendStartMs = millis();  // TL send: a final from the pump
+  if (gConvTlSendSeq) gConvTlSendStartMs = millis();  // TL send: a final from the pump
 #endif
   if (!g2PbWriteUint32(pb, sizeof(pb), &n, 1, 6) ||
       !g2PbWriteUint32(pb, sizeof(pb), &n, 2, magic) ||
       !g2PbBeginNested(pb, sizeof(pb), &n, 8, &body) ||
       !g2PbWriteBytes(pb, sizeof(pb), &n, 1, reinterpret_cast<const uint8_t*>(text), length) ||
       !g2PbWriteUint32(pb, sizeof(pb), &n, 2, final ? 1 : 0) ||
-      !g2PbEndNested(pb, sizeof(pb), &n, body)) return g2ConvTLSent(0);
+      !g2PbEndNested(pb, sizeof(pb), &n, body)) return g2ConvTlSent(0);
   portENTER_CRITICAL(&gConversateMux);
   gConversate.reserveReply(magic);  // never let this ACK pass for a heartbeat's
   portEXIT_CRITICAL(&gConversateMux);
-  return g2ConvTLSent(sendPbFragmented(gR, allocSeq(), G2_SID_CONVERSATE, G2_FLAG_REQUEST,
+  return g2ConvTlSent(sendPbFragmented(gR, allocSeq(), G2_SID_CONVERSATE, G2_FLAG_REQUEST,
                                        pb, n, s.rightGeneration) ? magic : 0);
 }
 #endif
@@ -16111,22 +16111,22 @@ static bool g2ConversateLocalOwnsCapture() {
 
 // RX path (g2ConversateOnRx, COMM_RSP not matched by a heartbeat): note only,
 // out of line so the RX chain's frames stay as they were.
-static __attribute__((noinline)) void g2ConvTLNoteAck(uint32_t magic, uint32_t error) {
+static __attribute__((noinline)) void g2ConvTlNoteAck(uint32_t magic, uint32_t error) {
   if (!magic) return;
   const uint32_t now = millis();
-  for (auto& p : gConvTLPending) {
+  for (auto& p : gConvTlPending) {
     if (p.magic != magic) continue;
-    const bool fresh = now - p.sentMs < kConvTLAckWindowMs;
-    if (fresh) g2ConvTLPush({p.seq, p.sentMs, 0, now - p.sentMs, error, true, true});
-    p = ConvTLPending{};
+    const bool fresh = now - p.sentMs < kConvTlAckWindowMs;
+    if (fresh) g2ConvTlPush({p.seq, p.sentMs, 0, now - p.sentMs, error, true, true});
+    p = ConvTlPending{};
     if (fresh) return;
   }
 }
 
 // Prints the noted TL send lines; small frame, static data only.
-static __attribute__((noinline)) void g2ConvTLFlush() {
-  while (gConvTLTail != gConvTLHead) {
-    const ConvTLEvent e = gConvTLEvents[gConvTLTail++ % kConvTLEvents];
+static __attribute__((noinline)) void g2ConvTlFlush() {
+  while (gConvTlTail != gConvTlHead) {
+    const ConvTlEvent e = gConvTlEvents[gConvTlTail++ % kConvTlEvents];
     if (e.ack)
       ESP_LOGI("STT", "TL send seq=%lu t=%lu ack_ms=%lu err=%lu", (unsigned long)e.seq, (unsigned long)e.sentMs,
                (unsigned long)e.ackMs, (unsigned long)e.err);
@@ -16134,9 +16134,9 @@ static __attribute__((noinline)) void g2ConvTLFlush() {
       ESP_LOGI("STT", "TL send seq=%lu t=%lu ack_ms=-1 tx_ms=%lu ok=%d", (unsigned long)e.seq,
                (unsigned long)e.sentMs, (unsigned long)e.txMs, e.ok ? 1 : 0);
   }
-  if (gConvTLLost) {
-    ESP_LOGW("STT", "TL send_lost n=%lu", (unsigned long)gConvTLLost);
-    gConvTLLost = 0;
+  if (gConvTlLost) {
+    ESP_LOGW("STT", "TL send_lost n=%lu", (unsigned long)gConvTlLost);
+    gConvTlLost = 0;
   }
 }
 
@@ -16260,7 +16260,7 @@ static __attribute__((noinline)) bool g2ConversateLocalPump() {
   while (sttReadChunk(gConvLocal.owner, gConvLocal.token, &chunk)) {
     const size_t length = strnlen(chunk.text, sizeof(chunk.text));
     if (show && length) {
-      gConvTLSendSeq = chunk.sequence;  // TL send: the write below is this final (g2ConvTLFlush prints it)
+      gConvTlSendSeq = chunk.sequence;  // TL send: the write below is this final (g2ConvTlFlush prints it)
       (void)g2ConversateSendCaption(chunk.text, length, true, s);
     }
     gConvLocal.lastFinalSequence = chunk.sequence;
@@ -16292,7 +16292,7 @@ static void g2ConversateLocalTick() {
   g2ConversateLocalArm();
 #endif
   if (gConvLocal.attached && !g2ConversateLocalPump()) g2ConversateLocalEnded();
-  g2ConvTLFlush();  // after the pump returned: its chunk/draft frame is gone
+  g2ConvTlFlush();  // after the pump returned: its chunk/draft frame is gone
 }
 #endif  // HW1_CONVERSATE_LOCAL_STT
 
@@ -32016,7 +32016,7 @@ const char* g2ProbeImageQ4Lifecycle() {
   const uint32_t kCreateMagic = allocCreateMagic();
   const uint32_t kImageW      = 288;
   const uint32_t kImageH      = 144;   // full single tile (per doc)
-  const uint32_t kCID         = 2;     // distinct from picker list/text
+  const uint32_t kCid         = 2;     // distinct from picker list/text
 
   probeBanner("Q4: CREATE-image (full tile, CID=2)",
               kCreateMagic, 0, 0,
@@ -32034,7 +32034,7 @@ const char* g2ProbeImageQ4Lifecycle() {
   uint8_t buf[128];
   size_t envLen = g2BuildCreateImage(
       allocSeq(), kCreateMagic,
-      /*containerName*/ "imgQ4", /*containerId*/ kCID,
+      /*containerName*/ "imgQ4", /*containerId*/ kCid,
       /*x*/ 0, /*y*/ 0, /*w*/ kImageW, /*h*/ kImageH,
       /*widgetId*/ BLOCKS_WIDGET_ID,
       buf, sizeof(buf));
@@ -32045,7 +32045,7 @@ const char* g2ProbeImageQ4Lifecycle() {
             "name='imgQ4', widgetId=%u)",
             (unsigned)kCreateMagic,
             (unsigned)kImageW, (unsigned)kImageH,
-            (unsigned)kCID, (unsigned)BLOCKS_WIDGET_ID);
+            (unsigned)kCid, (unsigned)BLOCKS_WIDGET_ID);
   logPbHex("Q4 env", buf, envLen);
 
   bool ok = sendEnvelope(*arm, buf, envLen);
@@ -32295,7 +32295,7 @@ static bool sendImageBmpMultiFragment(G2Temple& arm,
     return false;
   }
 
-  const uint32_t kCID        = 2;
+  const uint32_t kCid        = 2;
   const char*    kCName      = "imgQ4";
   const int32_t  kImgW       = imgW;
   const int32_t  kImgH       = imgH;
@@ -32317,7 +32317,7 @@ static bool sendImageBmpMultiFragment(G2Temple& arm,
 
   uint8_t createBuf[128];
   size_t createLen = g2BuildCreateImage(
-      allocSeq(), createMagic, kCName, kCID, 0, 0, (uint32_t)kImgW, (uint32_t)kImgH,
+      allocSeq(), createMagic, kCName, kCid, 0, 0, (uint32_t)kImgW, (uint32_t)kImgH,
       BLOCKS_WIDGET_ID, createBuf, sizeof(createBuf));
   if (createLen == 0) {
     free(ownedCompress);
@@ -32326,7 +32326,7 @@ static bool sendImageBmpMultiFragment(G2Temple& arm,
 
   noteOurShutdownSent();
   DEBUG_G2F("[ImgProbe] %s CREATE-image magic=%u (%dx%d CID=%u name='%s')",
-            tag, (unsigned)createMagic, kImgW, kImgH, (unsigned)kCID, kCName);
+            tag, (unsigned)createMagic, kImgW, kImgH, (unsigned)kCid, kCName);
   if (!probePrepImageCreateAck(createMagic, &arm)) {
     clearOurShutdownStamp();
     free(ownedCompress);
@@ -32433,7 +32433,7 @@ static bool sendImageBmpMultiFragment(G2Temple& arm,
     const size_t chunk = (off + kChunkBytes <= wireLen) ? kChunkBytes : (wireLen - off);
     const uint32_t magic = pushMagicBase + i;
     const size_t pbLen = g2BuildImageRawBody(
-        magic, kCID, kCName,
+        magic, kCid, kCName,
         /*sessionId*/ mapSessionId, /*totalSize*/ (uint32_t)wireLen,
         /*fragIndex*/ i, wirePtr + off, chunk,
         pbBuf, kChunkBytes + 96, wireMode);
@@ -32549,7 +32549,7 @@ const char* g2ProbeImageQ6BmpMultiFragment() {
   // Container parameters — match Q4's known-good shape exactly. CID=2
   // and name="imgQ4" are the values empirically observed to ack
   // (2026-04-26); other CID/name combos silently dropped CREATE.
-  const uint32_t kCID            = 2;
+  const uint32_t kCid            = 2;
   const char*    kCName          = "imgQ4";
   const int32_t  kImgW           = 288;
   const int32_t  kImgH           = 144;
@@ -32834,7 +32834,7 @@ static bool sendImageBmpFragmentsNoCreate(G2Temple& arm,
   }
   if (outWireBytes) *outWireBytes = wireLen;
 
-  const uint32_t kCID    = cid;
+  const uint32_t kCid    = cid;
   const char*    kCName  = cname;
   const size_t   kChunkBytes = G2_IMG_MAPRAW_CHUNK_BYTES;
   const unsigned kFrags = (unsigned)((wireLen + kChunkBytes - 1) / kChunkBytes);
@@ -32929,7 +32929,7 @@ static bool sendImageBmpFragmentsNoCreate(G2Temple& arm,
     const size_t chunk = (off + kChunkBytes <= wireLen) ? kChunkBytes : (wireLen - off);
     const uint32_t magic = pushMagicBase + i;
     const size_t pbLen = g2BuildImageRawBody(
-        magic, kCID, kCName,
+        magic, kCid, kCName,
         /*sessionId*/ mapSessionId, /*totalSize*/ (uint32_t)wireLen,
         /*fragIndex*/ i, wirePtr + off, chunk,
         pbBuf, kChunkBytes + 96, wireMode);
@@ -39495,9 +39495,9 @@ static const char* runMixedListImageProbe(const char* tag,
 
   const uint32_t kCreateMagic    = allocCreateMagic();
   const uint32_t kPushMagicBase  = G2_MAGIC_IMAGE_BASE + 0x11;  // 227..233
-  const uint32_t kListCID        = 1;
+  const uint32_t kListCid        = 1;
   const char*    kListName       = "mixL";
-  const uint32_t kImageCID       = 2;
+  const uint32_t kImageCid       = 2;
   const char*    kImageName      = "mixI";
 
   // Concise list payload — keep it short so the CREATE envelope stays
@@ -39523,7 +39523,7 @@ static const char* runMixedListImageProbe(const char* tag,
   imgTile.y = (uint32_t)imgY;
   imgTile.w = (uint32_t)imgW;
   imgTile.h = (uint32_t)imgH;
-  imgTile.containerId = kImageCID;
+  imgTile.containerId = kImageCid;
   imgTile.containerName = kImageName;
 
   uint8_t createBuf[1024];
@@ -39571,7 +39571,7 @@ static const char* runMixedListImageProbe(const char* tag,
   }
   DEBUG_G2F("[ImgProbe] %s CREATE-mixed acked — pushing image to '%s' "
             "(CID=%u, %dx%d)",
-            tag, kImageName, (unsigned)kImageCID, (int)imgW, (int)imgH);
+            tag, kImageName, (unsigned)kImageCid, (int)imgW, (int)imgH);
 
   // Build and push the BMP. Negative height = top-down for intuitive
   // pattern testing.
@@ -39599,7 +39599,7 @@ static const char* runMixedListImageProbe(const char* tag,
   {
     G2ImgLz4AutoOffGuard forceRaw;
     (void)sendImageBmpFragmentsNoCreate(*arm, tag, kPushMagicBase,
-                                         /*cid*/ kImageCID,
+                                         /*cid*/ kImageCid,
                                          /*cname*/ kImageName,
                                          bmp, bmpLen, &okFrags, &totalFrags,
                                          /*tolerateMissedAcks*/ 0,
@@ -39662,9 +39662,9 @@ const char* g2ProbeImageQ16dMixedLz4Block() {
 
   const uint32_t kCreateMagic   = allocCreateMagic();
   const uint32_t kPushMagicBase = G2_MAGIC_IMAGE_BASE + 0x11;  // 227..
-  const uint32_t kListCID       = 1;
+  const uint32_t kListCid       = 1;
   const char*    kListName      = "mixL";
-  const uint32_t kImageCID      = 2;
+  const uint32_t kImageCid      = 2;
   const char*    kImageName     = "mixI";
   const int32_t  kImgW          = 288;
   const int32_t  kImgH          = 144;
@@ -39696,7 +39696,7 @@ const char* g2ProbeImageQ16dMixedLz4Block() {
   imgTile.y = 144;
   imgTile.w = (uint32_t)kImgW;
   imgTile.h = (uint32_t)kImgH;
-  imgTile.containerId = kImageCID;
+  imgTile.containerId = kImageCid;
   imgTile.containerName = kImageName;
 
   uint8_t createBuf[1024];
@@ -39784,7 +39784,7 @@ const char* g2ProbeImageQ16dMixedLz4Block() {
   {
     G2ImgLz4AutoOffGuard forceNoAuto;
     (void)sendImageBmpFragmentsNoCreate(*arm, tag, kPushMagicBase,
-                                         kImageCID, kImageName,
+                                         kImageCid, kImageName,
                                          comp, compLen, &okFrags, &totalFrags,
                                          /*tolerateMissedAcks*/ 0,
                                          /*inFlightCapOverride*/ 0,

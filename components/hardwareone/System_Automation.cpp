@@ -3858,8 +3858,8 @@ const char* validateConditionalChain(const char* chainStr) {
   }
 
   // State machine to track chain structure
-  bool sawIF = false;
-  bool sawELSE = false;
+  bool sawIf = false;
+  bool sawElse = false;
   size_t position = 0;
 
   while (position < len) {
@@ -3868,15 +3868,15 @@ const char* validateConditionalChain(const char* chainStr) {
     if (position >= len) break;
 
     // Check for keywords
-    bool isIF = (strncmp(input + position, "IF ", 3) == 0);
-    bool isELSEIF = (position + 8 <= len && strncmp(input + position, "ELSE IF ", 8) == 0);
-    bool isELSE = (strncmp(input + position, "ELSE ", 5) == 0);
+    bool isIf = (strncmp(input + position, "IF ", 3) == 0);
+    bool isElseIf = (position + 8 <= len && strncmp(input + position, "ELSE IF ", 8) == 0);
+    bool isElse = (strncmp(input + position, "ELSE ", 5) == 0);
 
-    if (isIF) {
+    if (isIf) {
       if (position > 0) {
         return "Error: 'IF' can only appear at the beginning of a conditional chain";
       }
-      sawIF = true;
+      sawIf = true;
 
       // Check for THEN
       const char* thenPos = strstr(input + position + 3, " THEN ");
@@ -3886,11 +3886,11 @@ const char* validateConditionalChain(const char* chainStr) {
 
       position = (thenPos - input) + 6;
 
-    } else if (isELSEIF) {
-      if (!sawIF) {
+    } else if (isElseIf) {
+      if (!sawIf) {
         return "Error: 'ELSE IF' must follow 'IF' statement";
       }
-      if (sawELSE) {
+      if (sawElse) {
         return "Error: Cannot use 'ELSE IF' after 'ELSE' (ELSE must be terminal)";
       }
 
@@ -3902,14 +3902,14 @@ const char* validateConditionalChain(const char* chainStr) {
 
       position = (thenPos - input) + 6;
 
-    } else if (isELSE) {
-      if (!sawIF) {
+    } else if (isElse) {
+      if (!sawIf) {
         return "Error: 'ELSE' must follow 'IF' statement";
       }
-      if (sawELSE) {
+      if (sawElse) {
         return "Error: Multiple 'ELSE' clauses not allowed";
       }
-      sawELSE = true;
+      sawElse = true;
 
       position += 5;
       position = len;  // ELSE is terminal
@@ -3919,7 +3919,7 @@ const char* validateConditionalChain(const char* chainStr) {
     }
   }
 
-  if (!sawIF) {
+  if (!sawIf) {
     return "Error: No valid 'IF' statement found";
   }
 
@@ -3952,13 +3952,13 @@ const char* evaluateConditionalChain(const char* chainStr, char* outBuf, size_t 
     if (position >= len) break;
 
     // Check for keywords
-    bool isIF = (strncmp(input + position, "IF ", 3) == 0);
-    bool isELSEIF = (position + 8 <= len && strncmp(input + position, "ELSE IF ", 8) == 0);
-    bool isELSE = (strncmp(input + position, "ELSE ", 5) == 0);
+    bool isIf = (strncmp(input + position, "IF ", 3) == 0);
+    bool isElseIf = (position + 8 <= len && strncmp(input + position, "ELSE IF ", 8) == 0);
+    bool isElse = (strncmp(input + position, "ELSE ", 5) == 0);
 
-    if (isIF || isELSEIF) {
+    if (isIf || isElseIf) {
       // Extract condition and action
-      size_t condStart = position + (isELSEIF ? 8 : 3);
+      size_t condStart = position + (isElseIf ? 8 : 3);
       const char* thenPos = strstr(input + condStart, " THEN ");
       if (!thenPos) {
         outBuf[0] = '\0';
@@ -4002,7 +4002,7 @@ const char* evaluateConditionalChain(const char* chainStr, char* outBuf, size_t 
       }
 
       position = actionEnd;
-    } else if (isELSE) {
+    } else if (isElse) {
       // ELSE - always execute
       size_t actionStart = position + 5;
       size_t actionLen = len - actionStart;
@@ -4232,13 +4232,13 @@ const char* validateConditionalHierarchy(const char* conditions) {
     while (position < len && input[position] == ' ') position++;
     if (position >= len) break;
 
-    bool foundIF = (strncmp(input + position, "IF ", 3) == 0);
-    bool foundELSEIF = (position + 8 <= len && strncmp(input + position, "ELSE IF ", 8) == 0);
-    bool foundELSE = (strncmp(input + position, "ELSE ", 5) == 0);
+    bool foundIf = (strncmp(input + position, "IF ", 3) == 0);
+    bool foundElseIf = (position + 8 <= len && strncmp(input + position, "ELSE IF ", 8) == 0);
+    bool foundElse = (strncmp(input + position, "ELSE ", 5) == 0);
 
     switch (state) {
       case EXPECTING_IF:
-        if (!foundIF) {
+        if (!foundIf) {
           return "Error: Expected IF statement at beginning";
         }
         state = EXPECTING_ELSE_OR_END;
@@ -4246,10 +4246,10 @@ const char* validateConditionalHierarchy(const char* conditions) {
         break;
 
       case EXPECTING_ELSE_OR_END:
-        if (foundELSEIF) {
+        if (foundElseIf) {
           state = EXPECTING_ELSE_OR_END;
           position += 8;
-        } else if (foundELSE) {
+        } else if (foundElse) {
           state = EXPECTING_END;
           position += 5;
         } else {
@@ -4268,7 +4268,7 @@ const char* validateConditionalHierarchy(const char* conditions) {
         break;
 
       case EXPECTING_END:
-        if (foundIF || foundELSEIF || foundELSE) {
+        if (foundIf || foundElseIf || foundElse) {
           return "Error: No additional conditions allowed after ELSE";
         }
         position++;

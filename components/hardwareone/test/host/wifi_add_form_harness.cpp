@@ -124,10 +124,10 @@ static bool executeOledCommandWithResultForSession(const String& line, Transport
   return reply.ok;
 }
 
-enum class OledUIIcon : uint8_t { NONE, INFO, WARNING, ERROR, SUCCESS, QUESTION };
+enum class OledUiIcon : uint8_t { NONE, INFO, WARNING, ERROR, SUCCESS, QUESTION };
 static std::string gToast;
 static int gToastCount = 0;
-static void oledToastShow(const char* message, uint32_t = 3000, OledUIIcon = OledUIIcon::NONE) {
+static void oledToastShow(const char* message, uint32_t = 3000, OledUiIcon = OledUiIcon::NONE) {
   gToast = message ? message : "";
   ++gToastCount;
 }

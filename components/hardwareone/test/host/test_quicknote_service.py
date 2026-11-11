@@ -113,7 +113,7 @@ def check_wiring():
 
     registry = (c / 'System_CommandRegistry.cpp').read_text()
     table = registry[registry.index('static constexpr CommandModule gCommandModules[] = {'):]
-    ordered(table, 'transcriptionUICommands, &transcriptionUICommandsCount, CMD_MODULE_SENSOR, nullptr },',
+    ordered(table, 'transcriptionUiCommands, &transcriptionUiCommandsCount, CMD_MODULE_SENSOR, nullptr },',
             '#endif', '#if ENABLE_QUICKNOTE', '{ "note", ',
             'noteCommands, &noteCommandsCount, CMD_MODULE_SENSOR, nullptr },', '#endif')
     entry = source[source.index('const CommandEntry noteCommands[] = {'):]

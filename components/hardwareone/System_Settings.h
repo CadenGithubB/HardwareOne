@@ -43,7 +43,7 @@ struct Settings {
       thermalInterpolationSteps(5),
       thermalInterpolationBufferSize(2),
       thermalUpscaleFactor(1),
-      thermalEWMAFactor(0.2f),
+      thermalEwmaFactor(0.2f),
       thermalTransitionMs(80),
       tofTransitionMs(200),
       tofUiMaxDistanceMm(3400),
@@ -64,7 +64,7 @@ struct Settings {
       inputDevicePollMs(90),
       fmRadioDevicePollMs(250),
       imuPollingMs(200),
-      imuEWMAFactor(0.1f),
+      imuEwmaFactor(0.1f),
       imuTransitionMs(100),
       imuWebMaxFps(15),
       imuOrientationCorrectionEnabled(true),
@@ -367,8 +367,8 @@ struct Settings {
       cameraContrast(2),
       cameraSaturation(2),
       cameraSharpness(0),
-      cameraAELevel(0),
-      cameraWBMode(0),
+      cameraAeLevel(0),
+      cameraWbMode(0),
       cameraDenoise(0),
       cameraSpecialEffect(0),
       cameraHMirror(false),
@@ -521,7 +521,7 @@ struct Settings {
   int thermalInterpolationBufferSize;
   int thermalUpscaleFactor;     // 1x, 2x, 4x upscaling on-device
   // Advanced UI + firmware-affecting
-  float thermalEWMAFactor;
+  float thermalEwmaFactor;
   int thermalTransitionMs;
   int tofTransitionMs;
   int tofUiMaxDistanceMm;
@@ -547,7 +547,7 @@ struct Settings {
   int fmRadioDevicePollMs;
   // IMU UI settings (client-side visualization)
   int imuPollingMs;
-  float imuEWMAFactor;
+  float imuEwmaFactor;
   int imuTransitionMs;
   int imuWebMaxFps;
   // IMU orientation correction settings (device-side)
@@ -1076,8 +1076,8 @@ struct Settings {
   int cameraContrast;           // -2 to 2 (default +2)
   int cameraSaturation;         // -2 to 2 (default +2)
   int cameraSharpness;          // -2 to 2 (default 0, OV3660 only)
-  int cameraAELevel;            // Auto-exposure level/compensation -2 to 2 (default 0)
-  int cameraWBMode;             // White balance mode 0=Auto,1=Sunny,2=Cloudy,3=Office,4=Home (default 0)
+  int cameraAeLevel;            // Auto-exposure level/compensation -2 to 2 (default 0)
+  int cameraWbMode;             // White balance mode 0=Auto,1=Sunny,2=Cloudy,3=Office,4=Home (default 0)
   int cameraDenoise;            // Denoise level 0-8 (default 0)
   int cameraSpecialEffect;      // Special effect 0=None,1=Neg,2=Gray,3=Red,4=Green,5=Blue,6=Sepia (default 0)
   bool cameraHMirror;           // Horizontal mirror

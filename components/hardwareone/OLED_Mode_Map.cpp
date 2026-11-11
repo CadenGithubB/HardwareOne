@@ -1465,7 +1465,7 @@ static void mapPickerOnPicked(const char* fullPath, bool cancelled) {
     gMapCenterSet = false;
     gMapManuallyPanned = false;
   } else {
-    oledToastShow("Map load failed", 3000, OledUIIcon::ERROR);
+    oledToastShow("Map load failed", 3000, OledUiIcon::ERROR);
   }
 }
 
@@ -1477,7 +1477,7 @@ static void openMapPicker() {
   req.onPicked = mapPickerOnPicked;
   req.requesterMode = OLED_GPS_MAP;
   if (!oledFilePickerPush(req)) {
-    oledToastShow("File picker busy", 3000, OledUIIcon::ERROR);
+    oledToastShow("File picker busy", 3000, OledUiIcon::ERROR);
     return;
   }
   requestOledMode(OLED_FILE_BROWSER, "map.browse.maps");  // pushes currentOledMode so the pick returns here
@@ -1492,7 +1492,7 @@ static void markWaypointAtCenter(const char* name) {
     INFO_MAPSF("Marked waypoint %d: %s at %.5f, %.5f", idx, name, gMapCenterLat, gMapCenterLon);
   } else {
     oledToastShow(idx == WaypointManager::kNotSaved ? "Waypoint not saved" : "No free waypoint slots",
-                  3000, OledUIIcon::ERROR);
+                  3000, OledUiIcon::ERROR);
   }
 }
 
@@ -1664,7 +1664,7 @@ static void executeSubmenuAction(int submenuType, int action) {
             const char* message = strncmp(result, "OK: ", 4) == 0 ? result + 4 : result;
             if (!executed || strcmp(message, "GPS track cleared") != 0) {
               oledToastShow(result[0] ? result : "Clear track failed", 3000,
-                            OledUIIcon::ERROR);
+                            OledUiIcon::ERROR);
             } else {
               sForceRender = true;
             }
@@ -1689,7 +1689,7 @@ static void executeSubmenuAction(int submenuType, int action) {
                 "gpstrack live toggle", result, sizeof(result));
             if (!executed || strncmp(result, "SUCCESS:", 8) != 0) {
               oledToastShow(result[0] ? result : "Live track failed", 3000,
-                            OledUIIcon::ERROR);
+                            OledUiIcon::ERROR);
             } else {
               sForceRender = true;
             }
@@ -1702,7 +1702,7 @@ static void executeSubmenuAction(int submenuType, int action) {
               // Show brief confirmation via track status overlay
               gShowTrackStatus = true;
             } else {
-              oledToastShow("Save track failed", 3000, OledUIIcon::ERROR);
+              oledToastShow("Save track failed", 3000, OledUiIcon::ERROR);
             }
           }
           break;
@@ -2162,14 +2162,14 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
             sForceRender = true;
           } else {
             oledToastShow(errorMsg.length() ? errorMsg.c_str() : "Load track failed",
-                          3000, OledUIIcon::ERROR);
+                          3000, OledUiIcon::ERROR);
           }
         } else if (gTrackSelectMode == 2) {
           // Delete track
           if (GpsTrackManager::deleteTrackFile(gTrackFiles[gTrackFileIdx])) {
             sForceRender = true;
           } else {
-            oledToastShow("Delete track failed", 3000, OledUIIcon::ERROR);
+            oledToastShow("Delete track failed", 3000, OledUiIcon::ERROR);
           }
         }
       }
@@ -2217,7 +2217,7 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
             } else if (gWaypointSelectMode == 2) {
               // i is an active slot, so false means the file write failed.
               if (!WaypointManager::deleteWaypoint(i)) {
-                oledToastShow("Delete not saved", 3000, OledUIIcon::ERROR);
+                oledToastShow("Delete not saved", 3000, OledUiIcon::ERROR);
               }
             }
             break;

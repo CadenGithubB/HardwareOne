@@ -730,7 +730,7 @@ inline void streamSensorsInner(httpd_req_t* req, const String& username) {
   streamCameraSensorJs(req);
 #endif
 #if ENABLE_MICROPHONE
-  streamMicrophoneSensorJS(req);
+  streamMicrophoneSensorJs(req);
 #endif
 #if ENABLE_EDGE_IMPULSE
   streamEdgeImpulseSensorJs(req);
