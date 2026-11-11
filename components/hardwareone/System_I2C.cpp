@@ -2195,7 +2195,7 @@ const char* cmd_i2crecover(const String& argsInput) {
   
   // Parse address (hex or decimal)
   uint8_t address = 0;  // text that is not an address stays 0 and is refused below
-  parseIntArg(args, address);
+  parseAddressArg(args, 1, 127, address);
   
   if (address == 0 || address > 127) {
     return "Error: Invalid I2C address (must be 1-127 or 0x01-0x7F)";

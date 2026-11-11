@@ -7,8 +7,11 @@
 // (System_CommandReply.h).
 //
 // Accepted: optional spaces around the token, an optional sign, decimal
-// digits, or hexadecimal digits after 0x. Refused: empty text, any other
-// character, a value outside the target type or outside the given range.
+// digits. Refused: empty text, any other character (so also 0x10 and 12.5), a
+// value outside the target type or outside the given range.
+//
+// A bus address is the one kind of argument people write in hexadecimal.
+// parseAddressArg reads it: decimal as above, or hexadecimal digits after 0x.
 //
 // Pure header: no Arduino or ESP-IDF dependency, so host tests include it.
 // The text overloads take anything with c_str() and length() (String, std::string).
@@ -20,13 +23,17 @@
 #include <stdlib.h>
 #include <string.h>
 
-inline bool parseWholeNumber(const char* text, long long& value) {
+enum class NumberText { Decimal, DecimalOrHex };
+
+inline bool parseWholeNumber(const char* text, long long& value,
+                             NumberText form = NumberText::Decimal) {
   if (!text) return false;
   while (*text == ' ' || *text == '\t') ++text;
   const char* digits = text;
   if (*digits == '+' || *digits == '-') ++digits;
   int base = 10;
-  if (digits[0] == '0' && (digits[1] == 'x' || digits[1] == 'X')) {
+  if (form == NumberText::DecimalOrHex && digits[0] == '0' &&
+      (digits[1] == 'x' || digits[1] == 'X')) {
     base = 16;
     digits += 2;
   }
@@ -57,9 +64,10 @@ constexpr long long parseIntArgMax() {
 
 // Whole number inside [low, high]. `value` is written only on success.
 template <typename T>
-inline bool parseIntArg(const char* text, long long low, long long high, T& value) {
+inline bool parseIntArg(const char* text, long long low, long long high, T& value,
+                        NumberText form = NumberText::Decimal) {
   long long parsed = 0;
-  if (!parseWholeNumber(text, parsed)) return false;
+  if (!parseWholeNumber(text, parsed, form)) return false;
   if (parsed < low || parsed > high) return false;
   if (parsed < static_cast<long long>(std::numeric_limits<T>::min()) ||
       parsed > parseIntArgMax<T>()) return false;
@@ -90,4 +98,17 @@ template <typename Text, typename T>
 inline auto parseIntArg(const Text& text, long long low, long long high, T& value)
     -> decltype(argTextIsWhole(text)) {
   return argTextIsWhole(text) && parseIntArg(text.c_str(), low, high, value);
+}
+
+// A bus address inside [low, high], written in decimal or as 0x and
+// hexadecimal digits (i2crecover 0x5A).
+template <typename T>
+inline bool parseAddressArg(const char* text, long long low, long long high, T& value) {
+  return parseIntArg(text, low, high, value, NumberText::DecimalOrHex);
+}
+
+template <typename Text, typename T>
+inline auto parseAddressArg(const Text& text, long long low, long long high, T& value)
+    -> decltype(argTextIsWhole(text)) {
+  return argTextIsWhole(text) && parseAddressArg(text.c_str(), low, high, value);
 }

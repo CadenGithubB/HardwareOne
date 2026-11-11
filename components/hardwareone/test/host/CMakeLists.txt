@@ -40,6 +40,14 @@ set_target_properties(clock_confirm_policy_tests PROPERTIES
 target_include_directories(clock_confirm_policy_tests PRIVATE ../..)
 target_compile_options(clock_confirm_policy_tests PRIVATE -Wall -Wextra -Werror -pedantic)
 
+# The one checked number parser for command arguments (System_ArgParse.h):
+# decimal whole tokens; only a bus address may be written in hexadecimal.
+add_executable(arg_parse_tests test_arg_parse.cpp)
+set_target_properties(arg_parse_tests PROPERTIES
+  CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+target_include_directories(arg_parse_tests PRIVATE ../..)
+target_compile_options(arg_parse_tests PRIVATE -Wall -Wextra -Werror -pedantic)
+
 # The load state that gates every config-file saver (System_ConfigLoad.h): the
 # production dependency-free header, with the vendored ArduinoJson supplying
 # real parse errors.
@@ -1227,6 +1235,7 @@ add_test(NAME llm_utf8_tests COMMAND llm_utf8_tests)
 add_test(NAME dictation_policy_tests COMMAND dictation_policy_tests)
 add_test(NAME factory_wipe_policy_tests COMMAND factory_wipe_policy_tests)
 add_test(NAME clock_confirm_policy_tests COMMAND clock_confirm_policy_tests)
+add_test(NAME arg_parse_tests COMMAND arg_parse_tests)
 add_test(NAME config_load_tests COMMAND config_load_tests)
 add_test(NAME g2_hold_gesture_tests COMMAND g2_hold_gesture_tests)
 add_test(NAME stt_raw_ring_tests COMMAND stt_raw_ring_tests)

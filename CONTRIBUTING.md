@@ -164,9 +164,11 @@ attachment should report unavailable without breaking unrelated services.
   request was issued, not that the hardware accepted it.
 - Small text jobs have one owner each; a handler does not carry its own copy.
   A number argument is read with `parseIntArg` (`System_ArgParse.h`): the whole
-  token has to be a number in range, otherwise the command answers
-  `kCommandReplyNotANumber` or its own range message. `String::toInt`, `atoi`
-  and `atol` read junk as 0 and are not used for command arguments. An on/off
+  token has to be a decimal number in range, otherwise the command answers
+  `kCommandReplyNotANumber` or its own range message. Only a bus address may
+  also be written in hexadecimal (`parseAddressArg`, as in `i2crecover 0x5A`).
+  `String::toInt`, `atoi` and `atol` read junk as 0 and are not used for
+  command arguments. An on/off
   argument is read with `parseBoolArg`, `argIsOn` or `argIsOff`
   (`System_Utils.h`), so every command accepts the same spellings; text that
   is neither answers `kCommandReplyNotOnOff`. A MAC address is formatted and

@@ -201,7 +201,7 @@ const char* cmdMatrixAddress(const String& args) {
   text.trim();
   if (text.isEmpty()) return handleSettingCommand(&settings[1], text);
   int address;
-  if (!parseIntArg(text, 0x70, 0x77, address)) return "Error: matrixaddress <0x70..0x77>";
+  if (!parseAddressArg(text, 0x70, 0x77, address)) return "Error: matrixaddress <0x70..0x77>";
   setSetting(gSettings.matrixAddress, address);
   return "[Matrix] Address saved; match the solder jumpers and reboot";
 }
