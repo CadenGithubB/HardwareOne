@@ -7549,9 +7549,9 @@ static const G2PageModule kPowerPage = {
 static const G2PageModule kEspNowAppPage = {
   "espnowapp", nullptr,   // hidden from the main menu — reached via the Apps submenu
   "Show ESP-NOW App page (send/broadcast/ping/peers) on the lens",
-  g2BuildESPNowAppInfo,
-  g2ShowESPNowAppMenu,
-  g2ESPNowAppHandleTap,
+  g2BuildEspNowAppInfo,
+  g2ShowEspNowAppMenu,
+  g2EspNowAppHandleTap,
   G2_HIJACK_PAGE_ESPNOW_APP,
   // No live tick — pages with their own showMenu don't get the live
   // worker (see invokePageFromMain). The renderers re-read gEspNow / WiFi
@@ -7751,7 +7751,7 @@ static void g2AppsHandleTap(uint32_t idx) {
       g2RedrawHijackMainMenu();
       return;
     }
-    case APP_ROW_ESPNOW: g2ShowESPNowAppMenu(); return;  // callee sets gHijackPage
+    case APP_ROW_ESPNOW: g2ShowEspNowAppMenu(); return;  // callee sets gHijackPage
     case APP_ROW_FILES:  g2ShowFilesMenu();     return;  // callee sets gHijackPage
 #if ENABLE_DICTATION
     case APP_ROW_TRANSCRIPTION: g2ShowTranscriptionMenu(); return;
@@ -24411,7 +24411,7 @@ static bool tapRuntimeSnapshot(QueueHandle_t* queueOut) {
 //
 // The 4944 B this comment used to claim was not wrong so much as
 // hand-composed: root frame + handleHijackMenuTap + the deepest hook's
-// direct-only depth (g2ESPNowAppHandleTap, 4272 B), summed by hand rather than
+// direct-only depth (g2EspNowAppHandleTap, 4272 B), summed by hand rather than
 // walked. A real walk finds a different, deeper hook chain, and pricing the
 // newlib tail adds the rest. Expanding the page-hook set at EVERY indirect
 // site instead of once per dispatch is the trap that makes this measurement

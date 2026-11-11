@@ -103,7 +103,7 @@ static CLIModeInputResult unrelatedPage(const String&, char*, size_t) {
 }
 static auto dispatchTopLevelPage = unrelatedPage;
 static auto dispatchModePage = unrelatedPage;
-static auto dispatchESPNow = unrelatedPage;
+static auto dispatchEspNow = unrelatedPage;
 static auto dispatchWiFi = unrelatedPage;
 
 static bool wizardIsGroupPage(SetupWizardPage page) {

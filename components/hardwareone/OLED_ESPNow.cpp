@@ -1264,10 +1264,10 @@ bool oledEspNowHandleInput(int deltaX, int deltaY, uint32_t newlyPressed) {
         }
         if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
           if (gOledEspNowState.fileChooserIndex == 1) {
-            oledFileBrowserStartEspnowReceive(gOledEspNowState.selectedDeviceMac);
+            oledFileBrowserStartEspNowReceive(gOledEspNowState.selectedDeviceMac);
             requestOLEDMode(OLED_FILE_BROWSER, "espnow.receive");  // B returns here
           } else {
-            oledFileBrowserStartEspnowSend(gOledEspNowState.selectedDeviceMac);
+            oledFileBrowserStartEspNowSend(gOledEspNowState.selectedDeviceMac);
             requestOLEDMode(OLED_FILE_BROWSER, "espnow.send");
           }
           return true;

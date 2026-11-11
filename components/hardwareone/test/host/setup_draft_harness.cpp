@@ -223,12 +223,12 @@ static void cancellationAndRestart() {
 
 static void navigationAndModes() {
   reset(); const auto original = liveValues(); initSetupWizard();
-  check(!wizardShouldShowWiFi() && !wizardShouldShowESPNow() && !wizardShouldShowMQTT());
+  check(!wizardShouldShowWiFi() && !wizardShouldShowEspNow() && !wizardShouldShowMQTT());
 #if ENABLE_WIFI
   wizardSetFeatureEnabled("wifi", true); check(wizardShouldShowWiFi());
 #endif
 #if ENABLE_ESPNOW
-  wizardSetFeatureEnabled("espnow", true); check(wizardShouldShowESPNow());
+  wizardSetFeatureEnabled("espnow", true); check(wizardShouldShowEspNow());
 #endif
 #if ENABLE_MQTT
   wizardSetFeatureEnabled("mqtt", true); wizardSetMQTTAutoStart(true);
@@ -290,7 +290,7 @@ static void stagingAndPortValidation() {
   patch = {}; check(wizardStageMQTTSettings(patch));
   check(getWizardDraftValues().mqttHost == "new.host" && getWizardDraftValues().mqttPassword == "new-secret");
   patch.espnowFriendlyName = "new-name"; patch.espnowRoom = "new-room"; patch.espnowStationary = false;
-  check(wizardStageESPNowSettings(patch));
+  check(wizardStageEspNowSettings(patch));
   check(getWizardDraftValues().deviceName == "new-name" && getWizardDraftValues().bleDeviceName == "new-name");
   check(getWizardDraftValues().espnowRoom == "new-room" && getWizardDraftValues().espnowZone == "old-zone");
   noLiveEffects(original);
@@ -381,7 +381,7 @@ static void deviceNameESPNowRevisit() {
   setWizardCurrentPage(WIZARD_PAGE_ESPNOW);
   SetupWizardResult patch;
   patch.espnowFriendlyName = "radio-first"; patch.espnowStationary = true;
-  check(wizardStageESPNowSettings(patch));
+  check(wizardStageEspNowSettings(patch));
   check(std::strcmp(getWizardDeviceName(), "radio-first") == 0);
   SetupWizardResult result;
   for (int step = 0; getWizardCurrentPage() != WIZARD_PAGE_SYSTEM && step < WIZARD_PAGE_COUNT; ++step) {
@@ -395,13 +395,13 @@ static void deviceNameESPNowRevisit() {
   check(getWizardCurrentPage() == WIZARD_PAGE_ESPNOW);
   check(getWizardDraftValues().deviceName == "system-last");
   patch = {}; patch.espnowStationary = true;
-  check(wizardStageESPNowSettings(patch)); // Empty revisited name keeps the System edit.
+  check(wizardStageEspNowSettings(patch)); // Empty revisited name keeps the System edit.
   check(getWizardDraftValues().deviceName == "system-last" &&
         getWizardDraftValues().bleDeviceName == "system-last");
   check(std::strcmp(getWizardDeviceName(), "system-last") == 0);
 
   patch.espnowFriendlyName = "radio-latest";
-  check(wizardStageESPNowSettings(patch));
+  check(wizardStageEspNowSettings(patch));
   check(std::strcmp(getWizardDeviceName(), "radio-latest") == 0);
   for (int step = 0; getWizardCurrentPage() != WIZARD_PAGE_SYSTEM && step < WIZARD_PAGE_COUNT; ++step) {
     check(wizardNextPage(result) && !result.completed);

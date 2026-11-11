@@ -120,8 +120,8 @@ const char* oledEspNowHeaderTitle();
 // ESP-NOW peer. Receive → browse + FS_GET download the peer's files; Send →
 // pick a local file and send it to the peer. Defined in OLED_Mode_FileBrowser.cpp.
 // Caller transitions to OLED_FILE_BROWSER via requestOLEDMode() afterward.
-void oledFileBrowserStartEspnowReceive(const uint8_t mac[6]);
-void oledFileBrowserStartEspnowSend(const uint8_t mac[6]);
+void oledFileBrowserStartEspNowReceive(const uint8_t mac[6]);
+void oledFileBrowserStartEspNowSend(const uint8_t mac[6]);
 
 // Gamepad input handler
 bool oledEspNowHandleInput(int deltaX, int deltaY, uint32_t newlyPressed);

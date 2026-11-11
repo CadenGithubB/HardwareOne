@@ -35,7 +35,7 @@
 #include "HAL_Input.h"
 #include "OLED_Display.h"
 // OLED page handlers for ESP-NOW and MQTT (defined in OLED_SetupWizard.cpp)
-void handleOLEDESPNowPage(SetupWizardResult& result, bool& running);
+void handleOLEDEspNowPage(SetupWizardResult& result, bool& running);
 void handleOLEDMQTTPage(SetupWizardResult& result, bool& running);
 #endif
 
@@ -698,7 +698,7 @@ void initSetupWizard() {
 // Page Visibility & Dynamic Navigation
 // ============================================================================
 
-bool wizardShouldShowESPNow() {
+bool wizardShouldShowEspNow() {
 #if ENABLE_ESPNOW
   const FeatureEntry* f = getFeatureById("espnow");
   return f && wizardFeatureEnabled(f->id);
@@ -717,7 +717,7 @@ bool wizardShouldShowMQTT() {
 #endif
 }
 
-bool wizardStageESPNowSettings(const SetupWizardResult& result) {
+bool wizardStageEspNowSettings(const SetupWizardResult& result) {
   if (!sWizardDraft.active) return false;
   auto& draft = sWizardDraft.values;
   const String& name = result.espnowFriendlyName.length() > 0
@@ -854,7 +854,7 @@ bool wizardIsPageVisible(SetupWizardPage page) {
     case WIZARD_PAGE_BTMODE:
       return wizardShouldShowBtMode();
     case WIZARD_PAGE_ESPNOW:
-      return wizardShouldShowESPNow();
+      return wizardShouldShowEspNow();
     case WIZARD_PAGE_MQTT:
       return wizardShouldShowMQTT();
     case WIZARD_PAGE_WIFI:
@@ -1082,7 +1082,7 @@ static String waitForWizardSecret() {
 }
 
 // Serial ESP-NOW identity page
-static void handleSerialESPNowPage(SetupWizardResult& result, bool& running) {
+static void handleSerialEspNowPage(SetupWizardResult& result, bool& running) {
   result.espnowFriendlyName = "";
   result.espnowRoom = "";
   result.espnowZone = "";
@@ -1177,7 +1177,7 @@ espnow_done:
     return;
   }
 
-  if (!wizardStageESPNowSettings(result)) {
+  if (!wizardStageEspNowSettings(result)) {
     Serial.println("Error: could not stage ESP-NOW choices.");
     return;
   }
@@ -1585,12 +1585,12 @@ SetupWizardResult runSetupWizard() {
     if (currentPage == WIZARD_PAGE_ESPNOW) {
 #if ENABLE_OLED_DISPLAY
       if (oledDisplay && oledConnected) {
-        handleOLEDESPNowPage(result, running);
+        handleOLEDEspNowPage(result, running);
         lastPrintedPage = WIZARD_PAGE_COUNT;
         continue;
       }
 #endif
-      handleSerialESPNowPage(result, running);
+      handleSerialEspNowPage(result, running);
       lastPrintedPage = WIZARD_PAGE_COUNT;
       continue;
     }

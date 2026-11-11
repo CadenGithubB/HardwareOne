@@ -60,7 +60,7 @@ static void clearWizardWifiChoices() {}
 static CLIModeInputResult unexpectedDispatch(const String&, char*, size_t) {
   assert(false && "unexpected optional page dispatch"); return CLI_MODE_HANDLED;
 }
-static auto dispatchESPNow = unexpectedDispatch;
+static auto dispatchEspNow = unexpectedDispatch;
 static auto dispatchMQTT = unexpectedDispatch;
 static auto dispatchWiFi = unexpectedDispatch;
 """

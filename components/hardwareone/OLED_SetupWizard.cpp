@@ -397,7 +397,7 @@ static int showWizardOptionalPageIntro(SetupWizardPage page, const char* title,
 // OLED ESP-NOW Identity Page (text input for each field)
 // ============================================================================
 
-void handleOLEDESPNowPage(SetupWizardResult& result, bool& running) {
+void handleOLEDEspNowPage(SetupWizardResult& result, bool& running) {
   // Show intro screen: Configure or Skip?
   int choice = showWizardOptionalPageIntro(WIZARD_PAGE_ESPNOW, "ESP-NOW",
       "Optional: ESP-NOW ID");
@@ -496,7 +496,7 @@ void handleOLEDESPNowPage(SetupWizardResult& result, bool& running) {
     }
   }
 
-  if (!wizardStageESPNowSettings(result)) {
+  if (!wizardStageEspNowSettings(result)) {
     broadcastOutput("Error: ESP-NOW choices could not be staged. Try again or cancel.");
     return;
   }

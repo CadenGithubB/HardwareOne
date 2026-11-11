@@ -184,12 +184,12 @@ SetupWizardPage wizardRetreatFrom(SetupWizardPage current);
 int getWizardTotalPages();
 int getWizardPageNumber(SetupWizardPage page);
 bool wizardShouldShowWiFi();
-bool wizardShouldShowESPNow();
+bool wizardShouldShowEspNow();
 bool wizardShouldShowMQTT();
 
 // Accept a page patch into the draft. Empty strings retain the accepted draft;
 // ESP-NOW stationary is always set. False means staging failed; do not advance.
-bool wizardStageESPNowSettings(const SetupWizardResult& result);
+bool wizardStageEspNowSettings(const SetupWizardResult& result);
 bool wizardStageMQTTSettings(const SetupWizardResult& result);
 // Empty = keep existing port; otherwise require a complete decimal in 1..65535.
 bool wizardParseMQTTPort(const String& input, int& port);

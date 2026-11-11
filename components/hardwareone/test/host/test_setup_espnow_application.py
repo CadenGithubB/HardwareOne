@@ -28,13 +28,13 @@ def main():
     header = (COMPONENT / "System_SetupWizard.h").read_text()
     oled = (COMPONENT / "OLED_SetupWizard.cpp").read_text()
     mode = (COMPONENT / "System_SetupWizardMode.cpp").read_text()
-    assert "bool wizardStageESPNowSettings(const SetupWizardResult& result);" in header
-    handlers = [extract_block(setup, "static void handleSerialESPNowPage("),
-                extract_block(oled, "void handleOLEDESPNowPage("),
-                extract_block(mode[mode.rindex("static CLIModeInputResult dispatchESPNow("):],
-                              "static CLIModeInputResult dispatchESPNow(")]
+    assert "bool wizardStageEspNowSettings(const SetupWizardResult& result);" in header
+    handlers = [extract_block(setup, "static void handleSerialEspNowPage("),
+                extract_block(oled, "void handleOLEDEspNowPage("),
+                extract_block(mode[mode.rindex("static CLIModeInputResult dispatchEspNow("):],
+                              "static CLIModeInputResult dispatchEspNow(")]
     for handler in handlers:
-        assert handler.count("wizardStageESPNowSettings(") == 1
+        assert handler.count("wizardStageEspNowSettings(") == 1
         for field in ("bleDeviceName", "espnowDeviceName", "espnowFriendlyName", "espnowRoom", "espnowZone", "espnowStationary"):
             assert f"gSettings.{field} =" not in handler, f"duplicate {field} application"
     definitions = "\n\n".join([

@@ -315,7 +315,7 @@ static const char* paintAfterTransition() {
 
 static CLIModeInputResult dispatchTopLevelPage(const String& line,
                                                char* out, size_t outSize);
-static CLIModeInputResult dispatchESPNow(const String& line,
+static CLIModeInputResult dispatchEspNow(const String& line,
                                          char* out, size_t outSize);
 static CLIModeInputResult dispatchMQTT(const String& line,
                                        char* out, size_t outSize);
@@ -384,7 +384,7 @@ static CLIModeInputResult wizardMode_onInput(const String& line, void* /*ud*/,
     case WizardSubMode::ESPNOW_ROOM:
     case WizardSubMode::ESPNOW_ZONE:
     case WizardSubMode::ESPNOW_STATIONARY:
-      return dispatchESPNow(line, out, outSize);
+      return dispatchEspNow(line, out, outSize);
 
     case WizardSubMode::MQTT_INTRO:
     case WizardSubMode::MQTT_HOST:
@@ -494,7 +494,7 @@ static CLIModeInputResult dispatchModePage(const String& line,
 }
 
 // ---------- ESP-NOW identity sub-page (NAME -> ROOM -> ZONE -> STATIONARY)
-static CLIModeInputResult dispatchESPNow(const String& line,
+static CLIModeInputResult dispatchEspNow(const String& line,
                                          char* out, size_t outSize) {
   String raw = line; raw.trim();
   String lc = raw; lc.toLowerCase();
@@ -513,7 +513,7 @@ static CLIModeInputResult dispatchESPNow(const String& line,
     }
   };
   auto stageAndAdvance = [&]() {
-    if (!wizardStageESPNowSettings(sWizard.result)) {
+    if (!wizardStageEspNowSettings(sWizard.result)) {
       snprintf(out, outSize, "Error: ESP-NOW choices could not be staged. Try again or cancel.");
       return;
     }
@@ -547,7 +547,7 @@ static CLIModeInputResult dispatchESPNow(const String& line,
       }
       // Anything else looks like the user typed their device name directly
       // instead of picking from the c/n/b menu — treat it as the name and
-      // continue into the configure flow (matches handleSerialESPNowPage)
+      // continue into the configure flow (matches handleSerialEspNowPage)
       // rather than silently skipping (which used to also disable ESP-NOW)
       // on what's very likely a menu mix-up, not an intentional skip.
       sWizard.result.espnowRoom = "";

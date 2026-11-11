@@ -11101,7 +11101,7 @@ void processMeshHeartbeats() {
         // from this task (the lens applier queue is thread-safe). When
         // BT/G2 are compiled out the header provides an inline no-op.
         if (stored) {
-          g2ESPNowAppOnRxText(entry.srcMac);
+          g2EspNowAppOnRxText(entry.srcMac);
           // Bus event once per message (last fragment), not per fragment —
           // the device never assembles the full text, so the event carries
           // the final fragment's content as its (truncated) preview. Chat
@@ -18421,7 +18421,7 @@ static const SettingEntry espnowSettingEntries[] = {
 };
 
 // Helper: find an ESP-NOW setting entry by jsonKey
-static const SettingEntry* findEspnowEntry(const char* key) {
+static const SettingEntry* findEspNowEntry(const char* key) {
   for (size_t i = 0; i < sizeof(espnowSettingEntries)/sizeof(espnowSettingEntries[0]); i++) {
     if (strcmp(espnowSettingEntries[i].jsonKey, key) == 0) return &espnowSettingEntries[i];
   }
@@ -18432,7 +18432,7 @@ static const SettingEntry* findEspnowEntry(const char* key) {
 #define ESPNOW_SETTING_CMD(func, jsonKey) \
   const char* func(const String& a) { \
     RETURN_VALID_IF_VALIDATE_CSTR(); \
-    return handleSettingCommand(findEspnowEntry(jsonKey), a); \
+    return handleSettingCommand(findEspNowEntry(jsonKey), a); \
   }
 
 ESPNOW_SETTING_CMD(cmd_espnow_firsttimesetup, "firstTimeSetup")

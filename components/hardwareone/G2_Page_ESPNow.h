@@ -37,15 +37,15 @@
 // CLI direct invocation: dumps a one-screen status snapshot (mode, peers,
 // TX/RX counts, MAC, channel) into `out`. Same shape as other pages'
 // buildText hooks so the page registry can wire it as the no-hijack render.
-void g2BuildESPNowAppInfo(char* out, size_t cap);
+void g2BuildEspNowAppInfo(char* out, size_t cap);
 
 // Render the top-level chooser. Called from the hijack tap dispatcher when
 // the user lands on the ESP-NOW App page from the main menu.
-void g2ShowESPNowAppMenu();
+void g2ShowEspNowAppMenu();
 
 // Tap dispatch from handleHijackMenuTap when gHijackPage == ESPNOW_APP.
 // Caller passes the index of the tapped row in the current list.
-void g2ESPNowAppHandleTap(uint32_t idx);
+void g2EspNowAppHandleTap(uint32_t idx);
 
 // Push-kick: called from the espnow_task RX drain after a new TEXT message
 // is stored in PeerMessageHistory. No-op unless the user is currently on
@@ -56,16 +56,16 @@ void g2ESPNowAppHandleTap(uint32_t idx);
 //
 // Safe to call from any task — only touches read-only globals and the lens
 // job queue (which is itself thread-safe).
-void g2ESPNowAppOnRxText(const uint8_t* senderMac);
+void g2EspNowAppOnRxText(const uint8_t* senderMac);
 
 #else  // stubs when BLE / G2 disabled
 
-inline void g2BuildESPNowAppInfo(char* out, size_t cap) {
+inline void g2BuildEspNowAppInfo(char* out, size_t cap) {
   if (out && cap > 0) out[0] = '\0';
 }
-inline void g2ShowESPNowAppMenu() {}
-inline void g2ESPNowAppHandleTap(uint32_t /*idx*/) {}
-inline void g2ESPNowAppOnRxText(const uint8_t* /*senderMac*/) {}
+inline void g2ShowEspNowAppMenu() {}
+inline void g2EspNowAppHandleTap(uint32_t /*idx*/) {}
+inline void g2EspNowAppOnRxText(const uint8_t* /*senderMac*/) {}
 
 #endif  // ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
 

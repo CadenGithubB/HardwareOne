@@ -375,7 +375,7 @@ static esp_err_t handleBackup(httpd_req_t* req) {
 
   // Parse categories from body: { "categories": ["settings", "users", ...] }
   bool wantSettings = false, wantUsers = false, wantAutomations = false;
-  bool wantEspnow = false, wantMaps = false, wantCerts = false;
+  bool wantEspNow = false, wantMaps = false, wantCerts = false;
 
   if (received > 0) {
     PSRAM_JSON_DOC(reqDoc);
@@ -387,7 +387,7 @@ static esp_err_t handleBackup(httpd_req_t* req) {
         if (strcmp(c, "settings") == 0) wantSettings = true;
         else if (strcmp(c, "users") == 0) wantUsers = true;
         else if (strcmp(c, "automations") == 0) wantAutomations = true;
-        else if (strcmp(c, "espnow") == 0) wantEspnow = true;
+        else if (strcmp(c, "espnow") == 0) wantEspNow = true;
         else if (strcmp(c, "maps") == 0) wantMaps = true;
         else if (strcmp(c, "certs") == 0) wantCerts = true;
       }
@@ -395,8 +395,8 @@ static esp_err_t handleBackup(httpd_req_t* req) {
   }
 
   // If no categories specified, include all
-  if (!wantSettings && !wantUsers && !wantAutomations && !wantEspnow && !wantMaps && !wantCerts) {
-    wantSettings = wantUsers = wantAutomations = wantEspnow = wantMaps = wantCerts = true;
+  if (!wantSettings && !wantUsers && !wantAutomations && !wantEspNow && !wantMaps && !wantCerts) {
+    wantSettings = wantUsers = wantAutomations = wantEspNow = wantMaps = wantCerts = true;
   }
 
   // Build backup JSON document
@@ -441,7 +441,7 @@ static esp_err_t handleBackup(httpd_req_t* req) {
     addDirectoryToBackup(files, warnings, USER_SETTINGS_DIR, ctx);
   }
   if (wantAutomations) addFileToBackup(files, warnings, AUTOMATIONS_FILE);
-  if (wantEspnow) {
+  if (wantEspNow) {
     addFileToBackup(files, warnings, ESPNOW_DEVICES);
   }
   if (wantCerts) addDirectoryToBackup(files, warnings, "/system/certs", ctx);
@@ -482,14 +482,14 @@ static esp_err_t handleBackup(httpd_req_t* req) {
   // Bundle built and sent — record which categories went out.
   {
     char catBuf[48];
-    if (wantSettings && wantUsers && wantAutomations && wantEspnow && wantMaps && wantCerts) {
+    if (wantSettings && wantUsers && wantAutomations && wantEspNow && wantMaps && wantCerts) {
       strlcpy(catBuf, "all", sizeof(catBuf));
     } else {
       snprintf(catBuf, sizeof(catBuf), "%s%s%s%s%s%s",
                wantSettings ? "settings," : "",
                wantUsers ? "users," : "",
                wantAutomations ? "automations," : "",
-               wantEspnow ? "espnow," : "",
+               wantEspNow ? "espnow," : "",
                wantMaps ? "maps," : "",
                wantCerts ? "certs," : "");
       size_t l = strlen(catBuf);

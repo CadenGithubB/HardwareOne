@@ -43,7 +43,7 @@ static SetupWizardResult draftValues;
 static std::vector<SetupWizardResult> staged;
 static bool draftEnabled, stageSucceeds;
 static const SetupWizardResult& getWizardDraftValues() { return draftValues; }
-static bool wizardStageESPNowSettings(const SetupWizardResult& result) {
+static bool wizardStageEspNowSettings(const SetupWizardResult& result) {
   staged.push_back(result); return stageSucceeds;
 }
 static void wizardSetFeatureEnabled(const char* id, bool enabled) {
@@ -160,75 +160,75 @@ static CLIModeInputResult cli(const char* line) {
 static void serialCases() {
   SetupWizardResult result{}; bool running = true;
   reset(); inputs = {"c", " new-device ", " new-room ", " new-zone ", "stationary"};
-  handleSerialESPNowPage(result, running);
+  handleSerialEspNowPage(result, running);
   patch("new-device", "new-room", "new-zone", true);
   assert(nextCalls == 1 && running && inputIndex == 5);
   reset(); result = {}; inputs = {"direct-name", "", "", ""}; hasNextPage = false;
-  handleSerialESPNowPage(result, running);
+  handleSerialEspNowPage(result, running);
   patch("direct-name"); assert(!running && nextCalls == 1 && result.completed);
   reset(); result = {}; running = true; inputs = {"c", "", "", "", ""};
-  handleSerialESPNowPage(result, running); patch("old-device");
+  handleSerialEspNowPage(result, running); patch("old-device");
 
   // Early finish at each field keeps unsubmitted room/zone values. Name-stage
   // finish uses the current device name even when an earlier draft exists.
   for (int finish = 1; finish <= 3; ++finish) {
     reset(); result = {}; running = true; result.espnowFriendlyName = "stale-name";
     inputs = {"c", "new-device", "new-room", "new-zone", "s"}; inputs[finish] = "n";
-    handleSerialESPNowPage(result, running);
+    handleSerialEspNowPage(result, running);
     patch(finish == 1 ? "" : "new-device", finish == 3 ? "new-room" : "", "", true);
     assert(nextCalls == 1 && inputIndex == static_cast<size_t>(finish + 1));
   }
   for (int back = 0; back < 5; ++back) {
     reset(); result = {}; running = true;
     inputs = {"c", "new-device", "new-room", "new-zone", "s"}; inputs[back] = "back";
-    handleSerialESPNowPage(result, running);
+    handleSerialEspNowPage(result, running);
     unchanged(); assert(gSettings.espnowEnabled && previousCalls == 1 && nextCalls == 0 && running);
   }
   for (int timeout = 1; timeout < 5; ++timeout) {
     reset(); result = {}; running = true;
     inputs = {"c", "new-device", "new-room", "new-zone", "s"}; cancelInput = timeout;
-    handleSerialESPNowPage(result, running);
+    handleSerialEspNowPage(result, running);
     unchanged(); assert(!running && nextCalls == 0 && gSettings.espnowEnabled);
   }
   for (const char* skip : {"", "n", "next"}) {
     reset(); result = {}; running = true; inputs = {skip};
-    handleSerialESPNowPage(result, running);
+    handleSerialEspNowPage(result, running);
     unchanged(); assert(!draftEnabled && gSettings.espnowEnabled && nextCalls == 1);
   }
   reset(); result = {}; running = true; stageSucceeds = false;
-  inputs = {"c", "new-device", "", "", "s"}; handleSerialESPNowPage(result, running);
+  inputs = {"c", "new-device", "", "", "s"}; handleSerialEspNowPage(result, running);
   patch("new-device"); assert(nextCalls == 0 && running);
 }
 
 static void oledCases() {
   SetupWizardResult result{}; bool running = true;
   reset(); inputs = {"new-device", "new-room", "new-zone", "s"};
-  handleOLEDESPNowPage(result, running); patch("new-device", "new-room", "new-zone", true);
+  handleOLEDEspNowPage(result, running); patch("new-device", "new-room", "new-zone", true);
   assert(nextCalls == 1 && running && inputIndex == 4);
   reset(); result = {}; inputs = {"", "", "", ""}; hasNextPage = false;
-  handleOLEDESPNowPage(result, running); patch("old-device");
+  handleOLEDEspNowPage(result, running); patch("old-device");
   assert(!running && nextCalls == 1 && result.completed);
   for (int cancel = 0; cancel < 3; ++cancel) {
     reset(); result = {}; running = true; inputs = {"new-device", "new-room", "new-zone", "s"};
-    cancelInput = cancel; handleOLEDESPNowPage(result, running);
+    cancelInput = cancel; handleOLEDEspNowPage(result, running);
     unchanged(); assert(previousCalls == 0 && nextCalls == 0 && !running && gSettings.espnowEnabled);
   }
   reset(); result = {}; running = true; inputs = {"new-device", "new-room", "new-zone", "back"};
-  handleOLEDESPNowPage(result, running);
+  handleOLEDEspNowPage(result, running);
   unchanged(); assert(previousCalls == 1 && nextCalls == 0 && running);
   reset(); result = {}; running = true; stationarySerial = false;
   inputs = {"new-device", "new-room", "new-zone"}; nextButtons = INPUT_MASK(INPUT_BUTTON_B);
-  handleOLEDESPNowPage(result, running);
+  handleOLEDEspNowPage(result, running);
   unchanged(); assert(previousCalls == 1 && nextCalls == 0 && running);
   for (bool toggle : {false, true}) {
     reset(); result = {}; running = true; stationarySerial = false; nextDown = toggle;
     inputs = {"new-device", "", ""}; nextButtons = INPUT_MASK(INPUT_BUTTON_A);
-    handleOLEDESPNowPage(result, running);
+    handleOLEDEspNowPage(result, running);
     patch("new-device", "", "", !toggle);
   }
   for (int intro : {-1, 0}) {
     reset(); result = {}; running = true; introChoice = intro;
-    handleOLEDESPNowPage(result, running); unchanged();
+    handleOLEDEspNowPage(result, running); unchanged();
     assert(inputIndex == 0 && running && nextCalls == (intro == 0));
     assert(gSettings.espnowEnabled && draftEnabled == (intro == -1));
   }

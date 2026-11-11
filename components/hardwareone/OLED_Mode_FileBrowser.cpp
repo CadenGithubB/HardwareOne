@@ -441,7 +441,7 @@ enum class PeerListStatus : uint8_t {
 };
 
 // Zero-init BSS in PSRAM. "/" is established at BOTH PEER-entry sites (the
-// X-cycle in the input handler and oledFileBrowserStartEspnowReceive) before
+// X-cycle in the input handler and oledFileBrowserStartEspNowReceive) before
 // any PEER-gated reader can run; initFileBrowser() re-roots it per entry as
 // before. Do NOT rely on init alone: the input pump runs every
 // updateOLEDDisplay pass while prepare/init sits behind the render throttle.
@@ -467,15 +467,15 @@ static uint8_t        sPeerLastMac[6] = {0};       // remembered for callback va
 //   SEND    — drive the FilePickerRequest and, on pick, sendFileToMac to this MAC.
 // NONE = ordinary local browsing (X-cycle), bond-mode PEER source uses BondedPeer.
 // Cleared on browser reset / receive-exit / send-pick (see context lifecycle).
-enum class EspnowFileCtx : uint8_t { NONE = 0, SEND = 1, RECEIVE = 2 };
-static EspnowFileCtx sEspnowCtx = EspnowFileCtx::NONE;
-static uint8_t       sEspnowCtxMac[6] = {0};
+enum class EspNowFileCtx : uint8_t { NONE = 0, SEND = 1, RECEIVE = 2 };
+static EspNowFileCtx sEspNowCtx = EspNowFileCtx::NONE;
+static uint8_t       sEspNowCtxMac[6] = {0};
 // Pending context set by the entry funcs and consumed once by initFileBrowser on
 // the next (forward) entry. This makes a plain Tools->Files entry — which has NO
 // pending — reliably reset the context to NONE, so a stale ESP-NOW target can't
 // leak in if the user escaped a previous browse via the global Home button.
-static EspnowFileCtx sEspnowCtxPending = EspnowFileCtx::NONE;
-static uint8_t       sEspnowCtxPendingMac[6] = {0};
+static EspNowFileCtx sEspNowCtxPending = EspNowFileCtx::NONE;
+static uint8_t       sEspNowCtxPendingMac[6] = {0};
 
 // Transient FS_GET (download) feedback shown in the PEER list view. Set on the
 // render task (REQUESTING) and on BTC_TASK from the ack callback (terminal) —
@@ -563,10 +563,10 @@ static void peerStartRequest() {
     return;
   }
   uint8_t mac[6];
-  if (sEspnowCtx != EspnowFileCtx::NONE) {
+  if (sEspNowCtx != EspNowFileCtx::NONE) {
     // Driven by the ESP-NOW device-detail view: target the selected peer
     // directly (works without bond mode — FsList is base ESP-NOW now).
-    memcpy(mac, sEspnowCtxMac, 6);
+    memcpy(mac, sEspNowCtxMac, 6);
 #if ENABLE_BONDED_MODE
   } else if (BondedPeer::isPaired() && BondedPeer::peerMacBytes(mac)) {
     // Legacy bond-mode PEER source reachable by X-cycling the sources.
@@ -605,7 +605,7 @@ static void peerNavigateTo(const char* newPath) {
 
 // FS_GET ack — BTC_TASK context. Record terminal feedback only (no VFS/display).
 // On OK the peer begins a FILE_* transfer that lands via the normal inbound path.
-static void onEspnowGetAck(const uint8_t /*peerMac*/[6], const V4PayloadFsGetAck* ack) {
+static void onEspNowGetAck(const uint8_t /*peerMac*/[6], const V4PayloadFsGetAck* ack) {
   // Toast the outcome (overlays any screen; the actual "Received" confirmation is
   // toasted from the inbound file-complete path once the bytes land). oledToastShow
   // is thread-safe + self-marks dirty, so it's safe from this BTC_TASK callback.
@@ -654,14 +654,14 @@ static void peerActivate() {
     return;
   }
   // File selected.
-  if (sEspnowCtx == EspnowFileCtx::RECEIVE) {
+  if (sEspNowCtx == EspNowFileCtx::RECEIVE) {
     if (!peerBrowseAuthorized()) {
       sGetUi = FsGetUi::DENIED;
       oledToastShow("Permission denied");
       return;
     }
     sGetUi = FsGetUi::REQUESTING;
-    if (fsGetSendRequest(sEspnowCtxMac, joined, onEspnowGetAck) == 0) {
+    if (fsGetSendRequest(sEspNowCtxMac, joined, onEspNowGetAck) == 0) {
       sGetUi = FsGetUi::FAILED;
     }
   }
@@ -670,9 +670,9 @@ static void peerActivate() {
 // ----------------------------------------------------------------------------
 // ESP-NOW Send: defer sendFileToMac onto cmd_exec so the multi-second
 // FILE_START/DATA/END pump never blocks the OLED render/input task.
-struct EspnowSendFileJob { uint8_t mac[6]; char path[FILE_MANAGER_MAX_PATH]; };
-static void runEspnowSendFile(void* arg) {
-  EspnowSendFileJob* j = (EspnowSendFileJob*)arg;
+struct EspNowSendFileJob { uint8_t mac[6]; char path[FILE_MANAGER_MAX_PATH]; };
+static void runEspNowSendFile(void* arg) {
+  EspNowSendFileJob* j = (EspNowSendFileJob*)arg;
   if (!j) return;
   bool ok;
   {
@@ -686,24 +686,24 @@ static void runEspnowSendFile(void* arg) {
 // Picker callback (fires after pop back to OLED_ESPNOW). Send the picked local
 // file to the context peer; clear the context either way.
 static void espnowSendOnPicked(const char* fullPath, bool cancelled) {
-  EspnowFileCtx ctx = sEspnowCtx;
-  uint8_t mac[6]; memcpy(mac, sEspnowCtxMac, 6);
-  sEspnowCtx = EspnowFileCtx::NONE;
-  if (cancelled || !fullPath || ctx != EspnowFileCtx::SEND) return;
-  EspnowSendFileJob* j = (EspnowSendFileJob*)ps_alloc(
-      sizeof(EspnowSendFileJob), AllocPref::DefaultHeap, "oled.espnow.sendfile.job");
+  EspNowFileCtx ctx = sEspNowCtx;
+  uint8_t mac[6]; memcpy(mac, sEspNowCtxMac, 6);
+  sEspNowCtx = EspNowFileCtx::NONE;
+  if (cancelled || !fullPath || ctx != EspNowFileCtx::SEND) return;
+  EspNowSendFileJob* j = (EspNowSendFileJob*)ps_alloc(
+      sizeof(EspNowSendFileJob), AllocPref::DefaultHeap, "oled.espnow.sendfile.job");
   if (!j) { oledToastShow("Send failed"); return; }
   memcpy(j->mac, mac, 6);
   strlcpy(j->path, fullPath, sizeof(j->path));
-  if (!submitDeferredToCmdExec(runEspnowSendFile, j)) { free(j); oledToastShow("Send failed"); return; }
+  if (!submitDeferredToCmdExec(runEspNowSendFile, j)) { free(j); oledToastShow("Send failed"); return; }
   oledToastShow("Sending file...");  // instant feedback; "File sent" follows on completion
 }
 
 // ----------------------------------------------------------------------------
 // Public entry points used by the ESP-NOW device-detail "Send / Receive" chooser.
-void oledFileBrowserStartEspnowReceive(const uint8_t mac[6]) {
-  memcpy(sEspnowCtxPendingMac, mac, 6);
-  sEspnowCtxPending = EspnowFileCtx::RECEIVE;  // consumed by initFileBrowser
+void oledFileBrowserStartEspNowReceive(const uint8_t mac[6]) {
+  memcpy(sEspNowCtxPendingMac, mac, 6);
+  sEspNowCtxPending = EspNowFileCtx::RECEIVE;  // consumed by initFileBrowser
   sGetUi = FsGetUi::NONE;
   sCurrentSource = FsSource::PEER;     // browse the remote peer
   sSourceChangePending = true;         // make initFileBrowser issue the root FS_LIST_REQ
@@ -712,9 +712,9 @@ void oledFileBrowserStartEspnowReceive(const uint8_t mac[6]) {
   // Caller transitions: requestOLEDMode(OLED_FILE_BROWSER, "espnow.receive").
 }
 
-void oledFileBrowserStartEspnowSend(const uint8_t mac[6]) {
-  memcpy(sEspnowCtxPendingMac, mac, 6);
-  sEspnowCtxPending = EspnowFileCtx::SEND;  // consumed by initFileBrowser
+void oledFileBrowserStartEspNowSend(const uint8_t mac[6]) {
+  memcpy(sEspNowCtxPendingMac, mac, 6);
+  sEspNowCtxPending = EspNowFileCtx::SEND;  // consumed by initFileBrowser
   sCurrentSource = FsSource::LOCAL;         // pick from local FS (picker)
   FilePickerRequest req = {};
   strlcpy(req.title, "Send to peer", sizeof(req.title));
@@ -754,9 +754,9 @@ static bool initFileBrowser() {
   // Consume any pending ESP-NOW context exactly once. A normal Tools->Files
   // entry has no pending, so this reliably clears a stale context (and target
   // MAC) from a previous send/receive that the user may have escaped via Home.
-  sEspnowCtx = sEspnowCtxPending;
-  if (sEspnowCtxPending != EspnowFileCtx::NONE) memcpy(sEspnowCtxMac, sEspnowCtxPendingMac, 6);
-  sEspnowCtxPending = EspnowFileCtx::NONE;
+  sEspNowCtx = sEspNowCtxPending;
+  if (sEspNowCtxPending != EspNowFileCtx::NONE) memcpy(sEspNowCtxMac, sEspNowCtxPendingMac, 6);
+  sEspNowCtxPending = EspNowFileCtx::NONE;
 #endif
 
   if (sPickerActive) {
@@ -1375,7 +1375,7 @@ static bool fileBrowserInputHandler(int deltaX, int deltaY, uint32_t newlyPresse
       // In an ESP-NOW receive context the user chose "Receive from peer X" —
       // don't let X yank them to a different source. Plain bond-mode browse
       // (ctx==NONE) keeps the source-cycle behavior.
-      if (sEspnowCtx == EspnowFileCtx::NONE) cycleSourceForward();
+      if (sEspNowCtx == EspNowFileCtx::NONE) cycleSourceForward();
       return true;
     }
     if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
@@ -1387,8 +1387,8 @@ static bool fileBrowserInputHandler(int deltaX, int deltaY, uint32_t newlyPresse
         }
         // Leaving an ESP-NOW receive: restore LOCAL so the next plain Tools->Files
         // entry isn't stuck in the PEER source (X-cycle choices are preserved).
-        if (sEspnowCtx == EspnowFileCtx::RECEIVE) sCurrentSource = FsSource::LOCAL;
-        sEspnowCtx = EspnowFileCtx::NONE;
+        if (sEspNowCtx == EspNowFileCtx::RECEIVE) sCurrentSource = FsSource::LOCAL;
+        sEspNowCtx = EspNowFileCtx::NONE;
         oledMenuBack();
       }
       return true;
@@ -1522,7 +1522,7 @@ static void fileBrowserOnEnter(bool isForward) {
   if (isForward) {
     oledFileBrowserNeedsInit = true;
     // A Home-button escape mid-view/menu must not leak the level into the
-    // next entry (same stale-context class the sEspnowCtxPending dance
+    // next entry (same stale-context class the sEspNowCtxPending dance
     // guards against).
     sFbLevel = FbLevel::LIST;
     sFbRenameActive = false;

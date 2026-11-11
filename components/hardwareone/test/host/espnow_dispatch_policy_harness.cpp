@@ -102,7 +102,7 @@ static bool storeMessageInPeerHistory(uint8_t* mac, const char* name, const char
   return true;
 }
 static unsigned gPushKicks = 0;
-static void g2ESPNowAppOnRxText(const uint8_t*) { ++gPushKicks; }
+static void g2EspNowAppOnRxText(const uint8_t*) { ++gPushKicks; }
 static constexpr uint8_t SYSEVT_TEXT_RX = 7;
 struct PostedEvent { uint8_t kind; std::string subject, detail; };
 static std::vector<PostedEvent> gEvents;

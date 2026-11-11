@@ -34,7 +34,7 @@
 // Local sub-mode state
 // -----------------------------------------------------------------------------
 
-enum ESPNowAppSub : uint8_t {
+enum EspNowAppSub : uint8_t {
   ESPN_APP_SUB_MAIN        = 0,  // top-level chooser
   ESPN_APP_SUB_PEERS       = 1,  // peer list
   ESPN_APP_SUB_PEER_DETAIL = 2,  // per-peer actions (selected by gSelectedPeer)
@@ -45,13 +45,13 @@ enum ESPNowAppSub : uint8_t {
   ESPN_APP_SUB_BOND_SENSORS = 7, // list of remote sensors across the bond/mesh
   ESPN_APP_SUB_BOND_DETAIL  = 8, // one remote sensor's live data (gSelSensor*)
 };
-static ESPNowAppSub gSub = ESPN_APP_SUB_MAIN;
+static EspNowAppSub gSub = ESPN_APP_SUB_MAIN;
 
 // Mirror Network's setNetSub — every transition bumps the menu generation
 // so in-flight cmd_exec callbacks compare against this value and drop
-// stale redraws. The cookie's targetNetSub slot carries our ESPNowAppSub
+// stale redraws. The cookie's targetNetSub slot carries our EspNowAppSub
 // value for the same reason (round-tripped through g2SubmitHijackCommand).
-static inline void setSub(ESPNowAppSub s) {
+static inline void setSub(EspNowAppSub s) {
   if (gSub == s) return;
   gSub = s;
   g2BumpMenuGen();
@@ -211,7 +211,7 @@ static G2CmdCookie buildCookie() {
 // One-screen status snapshot — same shape as other pages' buildText hooks.
 // The page registry wires this as the CLI render for `g2espnowapp`.
 
-void g2BuildESPNowAppInfo(char* out, size_t cap) {
+void g2BuildEspNowAppInfo(char* out, size_t cap) {
   if (!out || cap == 0) return;
   out[0] = '\0';
 
@@ -282,7 +282,7 @@ static void showMainMenu() {
             (int)currentPhase(), nPeers, nInbox);
 }
 
-void g2ShowESPNowAppMenu() {
+void g2ShowEspNowAppMenu() {
   showMainMenu();
   g2SetHijackPage(G2_HIJACK_PAGE_ESPNOW_APP);
 }
@@ -1262,7 +1262,7 @@ static void handlePeerInboxTap(uint32_t idx) {
 // Public tap entry
 // -----------------------------------------------------------------------------
 
-void g2ESPNowAppHandleTap(uint32_t idx) {
+void g2EspNowAppHandleTap(uint32_t idx) {
   switch (gSub) {
     case ESPN_APP_SUB_MAIN:        handleMainTap(idx);       break;
     case ESPN_APP_SUB_PEERS:       handlePeersTap(idx);      break;
@@ -1291,7 +1291,7 @@ void g2ESPNowAppHandleTap(uint32_t idx) {
 // next tap-driven render will pick it up. Keeping the kick tight to the
 // pages that actually change visually keeps redraw bandwidth honest.
 
-void g2ESPNowAppOnRxText(const uint8_t* senderMac) {
+void g2EspNowAppOnRxText(const uint8_t* senderMac) {
   if (g2GetHijackPage() != G2_HIJACK_PAGE_ESPNOW_APP) return;
 
   void (*renderFn)() = nullptr;

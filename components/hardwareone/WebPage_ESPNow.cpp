@@ -35,11 +35,11 @@ static esp_err_t handleEspNowPage(httpd_req_t* req) {
 #include "System_ESPNow_Sessions.h"  // SendStatus snapshot for delivery-tracking JSON
 #include "System_MemUtil.h"
 
-static inline esp_err_t webEspnowSendChunk(httpd_req_t* req, const char* s) {
+static inline esp_err_t webEspNowSendChunk(httpd_req_t* req, const char* s) {
   return httpd_resp_send_chunk(req, s, HTTPD_RESP_USE_STRLEN);
 }
 
-static inline esp_err_t webEspnowSendChunkf(httpd_req_t* req, const char* fmt, ...) {
+static inline esp_err_t webEspNowSendChunkf(httpd_req_t* req, const char* fmt, ...) {
   char buf[192];
   va_list args;
   va_start(args, fmt);
@@ -48,8 +48,8 @@ static inline esp_err_t webEspnowSendChunkf(httpd_req_t* req, const char* fmt, .
   return httpd_resp_send_chunk(req, buf, HTTPD_RESP_USE_STRLEN);
 }
 
-static esp_err_t webEspnowSendJsonEscapedString(httpd_req_t* req, const char* s) {
-  esp_err_t err = webEspnowSendChunk(req, "\"");
+static esp_err_t webEspNowSendJsonEscapedString(httpd_req_t* req, const char* s) {
+  esp_err_t err = webEspNowSendChunk(req, "\"");
   if (err != ESP_OK) return err;
 
   char out[128];
@@ -76,7 +76,7 @@ static esp_err_t webEspnowSendJsonEscapedString(httpd_req_t* req, const char* s)
 
   err = flush();
   if (err != ESP_OK) return err;
-  return webEspnowSendChunk(req, "\"");
+  return webEspNowSendChunk(req, "\"");
 }
 
 // Persistent staging buffer for handleEspNowMessages. Lazy-initialized on first
@@ -230,56 +230,56 @@ static esp_err_t handleEspNowMessages(httpd_req_t* req) {
     msgCount = getAllMessages(messages, kWebMessagesBufCount, sinceSeq);
   }
 
-  esp_err_t err = webEspnowSendChunk(req, "{\"messages\":[");
+  esp_err_t err = webEspNowSendChunk(req, "{\"messages\":[");
   for (int i = 0; i < msgCount && err == ESP_OK; i++) {
     ReceivedTextMessage& msg = messages[i];
 
     char macStr[18];
     macToDisplay(msg.senderMac, macStr, sizeof(macStr));
 
-    if (i > 0) err = webEspnowSendChunk(req, ",");
+    if (i > 0) err = webEspNowSendChunk(req, ",");
     if (err != ESP_OK) break;
 
-    err = webEspnowSendChunk(req, "{");
+    err = webEspNowSendChunk(req, "{");
     if (err != ESP_OK) break;
 
-    err = webEspnowSendChunkf(req, "\"seq\":%lu,", (unsigned long)msg.seqNum);
+    err = webEspNowSendChunkf(req, "\"seq\":%lu,", (unsigned long)msg.seqNum);
     if (err != ESP_OK) break;
-    err = webEspnowSendChunkf(req, "\"reqId\":%lu,", (unsigned long)msg.reqId);
+    err = webEspNowSendChunkf(req, "\"reqId\":%lu,", (unsigned long)msg.reqId);
     if (err != ESP_OK) break;
-    err = webEspnowSendChunkf(req, "\"piece\":%u,\"of\":%u,", msg.piece, msg.pieceTotal);
+    err = webEspNowSendChunkf(req, "\"piece\":%u,\"of\":%u,", msg.piece, msg.pieceTotal);
     if (err != ESP_OK) break;
-    err = webEspnowSendChunkf(req, "\"mac\":\"%s\",", macStr);
-    if (err != ESP_OK) break;
-
-    err = webEspnowSendChunk(req, "\"name\":");
-    if (err != ESP_OK) break;
-    err = webEspnowSendJsonEscapedString(req, msg.senderName);
-    if (err != ESP_OK) break;
-    err = webEspnowSendChunk(req, ",\"msg\":");
-    if (err != ESP_OK) break;
-    err = webEspnowSendJsonEscapedString(req, msg.message);
+    err = webEspNowSendChunkf(req, "\"mac\":\"%s\",", macStr);
     if (err != ESP_OK) break;
 
-    err = webEspnowSendChunkf(req, ",\"enc\":%s", msg.encrypted ? "true" : "false");
+    err = webEspNowSendChunk(req, "\"name\":");
     if (err != ESP_OK) break;
-    err = webEspnowSendChunkf(req, ",\"ts\":%lu", (unsigned long)msg.timestamp);
+    err = webEspNowSendJsonEscapedString(req, msg.senderName);
     if (err != ESP_OK) break;
-    err = webEspnowSendChunkf(req, ",\"type\":%d", (int)msg.msgType);
+    err = webEspNowSendChunk(req, ",\"msg\":");
+    if (err != ESP_OK) break;
+    err = webEspNowSendJsonEscapedString(req, msg.message);
+    if (err != ESP_OK) break;
+
+    err = webEspNowSendChunkf(req, ",\"enc\":%s", msg.encrypted ? "true" : "false");
+    if (err != ESP_OK) break;
+    err = webEspNowSendChunkf(req, ",\"ts\":%lu", (unsigned long)msg.timestamp);
+    if (err != ESP_OK) break;
+    err = webEspNowSendChunkf(req, ",\"type\":%d", (int)msg.msgType);
     if (err != ESP_OK) break;
     // Direction: true = we sent it (now in the shared sent[] history), false =
     // received. The client renders sent on the right and de-dupes its own
     // optimistic bubble by reqId; without this flag a sent echo would wrongly
     // render as a received message.
-    err = webEspnowSendChunkf(req, ",\"sent\":%s", msg.isSent ? "true" : "false");
+    err = webEspNowSendChunkf(req, ",\"sent\":%s", msg.isSent ? "true" : "false");
     if (err != ESP_OK) break;
     // Durable per-message delivery state (0 pending,1 delivered,2 timeout,3 failed)
     // so sent rows render Delivered even for messages sent from another interface
     // or after a reload — not only freshly-sent web bubbles via the deliveries[] flip.
-    err = webEspnowSendChunkf(req, ",\"sendState\":%u", msg.sendState);
+    err = webEspNowSendChunkf(req, ",\"sendState\":%u", msg.sendState);
     if (err != ESP_OK) break;
 
-    err = webEspnowSendChunk(req, "}");
+    err = webEspNowSendChunk(req, "}");
   }
 
   // NOTE: `messages` points at gWebMessagesBuf (the persistent buffer above).
@@ -294,7 +294,7 @@ static esp_err_t handleEspNowMessages(httpd_req_t* req) {
   // alone is 26 B of that, and the key names dominate the rest — so a fully
   // populated ring is ~1.0-1.4 KB per poll.
   if (err == ESP_OK) {
-    err = webEspnowSendChunk(req, "],\"deliveries\":[");
+    err = webEspNowSendChunk(req, "],\"deliveries\":[");
     bool firstDelivery = true;
     uint8_t ssSlots = sendStatusSlotCount();
     uint32_t nowMs = (uint32_t)millis();
@@ -306,16 +306,16 @@ static esp_err_t handleEspNowMessages(httpd_req_t* req) {
       char macStr[18];
       macToDisplay(s->peerMac, macStr, sizeof(macStr));
       if (!firstDelivery) {
-        err = webEspnowSendChunk(req, ",");
+        err = webEspNowSendChunk(req, ",");
         if (err != ESP_OK) break;
       }
       firstDelivery = false;
       uint32_t ageMs = nowMs - s->registeredAtMs;
-      err = webEspnowSendChunkf(req,
+      err = webEspNowSendChunkf(req,
         "{\"msgId\":%lu,\"state\":\"%s\",\"mac\":\"%s\",\"ageMs\":%lu}",
         (unsigned long)s->msgId, stateName, macStr, (unsigned long)ageMs);
     }
-    if (err == ESP_OK) err = webEspnowSendChunk(req, "]}");
+    if (err == ESP_OK) err = webEspNowSendChunk(req, "]}");
   }
   httpd_resp_send_chunk(req, NULL, 0);
   return err;
@@ -353,52 +353,52 @@ static esp_err_t handleEspNowRemoteCap(httpd_req_t* req) {
   macToDisplay(cap.mac, macStr, sizeof(macStr));
   
   // Stream JSON response (larger due to human-readable strings)
-  esp_err_t err = webEspnowSendChunk(req, "{\"valid\":true,");
+  esp_err_t err = webEspNowSendChunk(req, "{\"valid\":true,");
   if (err != ESP_OK) goto done;
   
-  err = webEspnowSendChunkf(req, "\"deviceName\":\"%s\",", cap.deviceName);
+  err = webEspNowSendChunkf(req, "\"deviceName\":\"%s\",", cap.deviceName);
   if (err != ESP_OK) goto done;
-  err = webEspnowSendChunkf(req, "\"mac\":\"%s\",", macStr);
+  err = webEspNowSendChunkf(req, "\"mac\":\"%s\",", macStr);
   if (err != ESP_OK) goto done;
-  err = webEspnowSendChunkf(req, "\"role\":%d,", (int)cap.role);
+  err = webEspNowSendChunkf(req, "\"role\":%d,", (int)cap.role);
   if (err != ESP_OK) goto done;
-  err = webEspnowSendChunkf(req, "\"roleName\":\"%s\",", cap.role == 1 ? "master" : "worker");
+  err = webEspNowSendChunkf(req, "\"roleName\":\"%s\",", cap.role == 1 ? "master" : "worker");
   if (err != ESP_OK) goto done;
-  err = webEspnowSendChunkf(req, "\"fwHash\":\"%s\",", fwHashHex);
+  err = webEspNowSendChunkf(req, "\"fwHash\":\"%s\",", fwHashHex);
   if (err != ESP_OK) goto done;
   
   // Raw masks
-  err = webEspnowSendChunkf(req, "\"featureMask\":%lu,", (unsigned long)cap.featureMask);
+  err = webEspNowSendChunkf(req, "\"featureMask\":%lu,", (unsigned long)cap.featureMask);
   if (err != ESP_OK) goto done;
-  err = webEspnowSendChunkf(req, "\"serviceMask\":%lu,", (unsigned long)cap.serviceMask);
+  err = webEspNowSendChunkf(req, "\"serviceMask\":%lu,", (unsigned long)cap.serviceMask);
   if (err != ESP_OK) goto done;
-  err = webEspnowSendChunkf(req, "\"sensorMask\":%lu,", (unsigned long)cap.sensorMask);
+  err = webEspNowSendChunkf(req, "\"sensorMask\":%lu,", (unsigned long)cap.sensorMask);
   if (err != ESP_OK) goto done;
   
   // Human-readable lists
-  err = webEspnowSendChunk(req, "\"features\":");
+  err = webEspNowSendChunk(req, "\"features\":");
   if (err != ESP_OK) goto done;
-  err = webEspnowSendJsonEscapedString(req, featureList.c_str());
+  err = webEspNowSendJsonEscapedString(req, featureList.c_str());
   if (err != ESP_OK) goto done;
-  err = webEspnowSendChunk(req, ",\"services\":");
+  err = webEspNowSendChunk(req, ",\"services\":");
   if (err != ESP_OK) goto done;
-  err = webEspnowSendJsonEscapedString(req, serviceList.c_str());
+  err = webEspNowSendJsonEscapedString(req, serviceList.c_str());
   if (err != ESP_OK) goto done;
-  err = webEspnowSendChunk(req, ",\"sensors\":");
+  err = webEspNowSendChunk(req, ",\"sensors\":");
   if (err != ESP_OK) goto done;
-  err = webEspnowSendJsonEscapedString(req, sensorList.c_str());
+  err = webEspNowSendJsonEscapedString(req, sensorList.c_str());
   if (err != ESP_OK) goto done;
   
   // Hardware info
-  err = webEspnowSendChunkf(req, ",\"flashSizeMB\":%lu,", (unsigned long)cap.flashSizeMB);
+  err = webEspNowSendChunkf(req, ",\"flashSizeMB\":%lu,", (unsigned long)cap.flashSizeMB);
   if (err != ESP_OK) goto done;
-  err = webEspnowSendChunkf(req, "\"psramSizeMB\":%lu,", (unsigned long)cap.psramSizeMB);
+  err = webEspNowSendChunkf(req, "\"psramSizeMB\":%lu,", (unsigned long)cap.psramSizeMB);
   if (err != ESP_OK) goto done;
-  err = webEspnowSendChunkf(req, "\"wifiChannel\":%d,", (int)cap.wifiChannel);
+  err = webEspNowSendChunkf(req, "\"wifiChannel\":%d,", (int)cap.wifiChannel);
   if (err != ESP_OK) goto done;
-  err = webEspnowSendChunkf(req, "\"uptimeSeconds\":%lu,", (unsigned long)cap.uptimeSeconds);
+  err = webEspNowSendChunkf(req, "\"uptimeSeconds\":%lu,", (unsigned long)cap.uptimeSeconds);
   if (err != ESP_OK) goto done;
-  err = webEspnowSendChunkf(req, "\"ageMs\":%lu}", (unsigned long)(millis() - gEspNow->lastRemoteCapTime));
+  err = webEspNowSendChunkf(req, "\"ageMs\":%lu}", (unsigned long)(millis() - gEspNow->lastRemoteCapTime));
   
 done:
   httpd_resp_send_chunk(req, NULL, 0);
@@ -441,13 +441,13 @@ static esp_err_t handleEspNowRemoteManifest(httpd_req_t* req) {
       return ESP_OK;
     }
     
-    webEspnowSendChunk(req, "{\"fwHash\":\"");
-    webEspnowSendChunk(req, fwHashParam);
-    webEspnowSendChunk(req, "\",\"manifest\":");
+    webEspNowSendChunk(req, "{\"fwHash\":\"");
+    webEspNowSendChunk(req, fwHashParam);
+    webEspNowSendChunk(req, "\",\"manifest\":");
     httpd_resp_send_chunk(req, manifest, len);
     ps_free(manifest);
     
-    webEspnowSendChunk(req, "}");
+    webEspNowSendChunk(req, "}");
     httpd_resp_send_chunk(req, NULL, 0);
     return ESP_OK;
   }
