@@ -190,11 +190,11 @@ void setStatusError(R1HealthHistoryStoreError error) {
   StoreLock lock;
   if (!lock.locked()) return;
   sStatus.error = error;
-  sStatus.available = VFS::isLittleFSReady();
+  sStatus.available = VFS::isLittleFsReady();
 }
 
 bool ensureHistoryDir(const AuthContext& auth) {
-  if (!VFS::isLittleFSReady()) return false;
+  if (!VFS::isLittleFsReady()) return false;
   if (!VFS::existsGuarded("/logging_captures", auth) &&
       !VFS::mkdirGuarded("/logging_captures", auth)) return false;
   if (!VFS::existsGuarded(kHistoryDir, auth) &&

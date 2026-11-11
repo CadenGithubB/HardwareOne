@@ -819,7 +819,7 @@ static void processStatDeferred(const uint8_t srcMac[6], const V4PayloadFsStatRe
     // itself is not identity-guarded).
     ExecIdentityGuard identity(peerCtx);
     VFS::StorageType tier = VFS::getStorageType(req.path);
-    if (tier == VFS::SDCARD && !VFS::isSDAvailable()) {
+    if (tier == VFS::SDCARD && !VFS::isSdAvailable()) {
       reply.status = FS_LIST_STATUS_NOT_FOUND;
       goto send_stat;
     }

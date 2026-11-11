@@ -194,7 +194,7 @@ static constexpr CommandModule gCommandModules[] = {
     "reports backend-specific diagnostics to troubleshoot a card that will not mount. "
     "sdformat erases the entire card and reformats it as FAT32 and therefore requires "
     "sdformat confirm to proceed. Once mounted, file commands address the card through "
-    "its /sd/... path prefix.", sdCommands,           &sdCommandsCount, 0, []() { return VFS::isSDAvailable(); } },
+    "its /sd/... path prefix.", sdCommands,           &sdCommandsCount, 0, []() { return VFS::isSdAvailable(); } },
 #endif
   { "oled",       "Local display control and graphics", "Drives the selected local display backend: its lifecycle, the live screen contents, "
     "and persistent appearance settings. oledstart/oledstop (aliases "

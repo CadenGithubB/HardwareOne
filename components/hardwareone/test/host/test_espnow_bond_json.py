@@ -90,7 +90,7 @@ def main():
         return 1
 
     markers = ('static inline bool bondJsonEnvelopeOk(', 'static char* serializeBondJson(',
-               'static bool writeBondJsonFileLocked(', 'static bool cacheManifestToLittleFS(',
+               'static bool writeBondJsonFileLocked(', 'static bool cacheManifestToLittleFs(',
                'static void processBondModeManifestResp(', 'static void processBondSchema(',
                'static bool manifestCachedFor(', 'size_t espnowReadCachedManifest(',
                'static void broadcastBondJsonChunks(')

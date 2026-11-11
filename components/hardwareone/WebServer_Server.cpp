@@ -2196,7 +2196,7 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
   }
 
   // If the destination is SD but it isn't mounted, reject early with a clear message.
-  if (uploadStorage == VFS::SDCARD && !VFS::isSDAvailable()) {
+  if (uploadStorage == VFS::SDCARD && !VFS::isSdAvailable()) {
     sendJsonResponse(req, "{\"success\":false,\"error\":\"SD card not available\"}");
     return ESP_OK;
   }

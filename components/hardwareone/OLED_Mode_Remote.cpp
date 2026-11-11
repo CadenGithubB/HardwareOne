@@ -156,7 +156,7 @@ static void displayBondStatus() {
     oledDisplay->print("S:");
     oledDisplay->println(sensorBuf);
     snprintf(buf, sizeof(buf), "%luMB/%luMB Ch%d",
-             (unsigned long)cap.flashSizeMB, (unsigned long)cap.psramSizeMB, cap.wifiChannel);
+             (unsigned long)cap.flashSizeMb, (unsigned long)cap.psramSizeMb, cap.wifiChannel);
     oledDisplay->println(buf);
   } else {
     oledDisplay->println();

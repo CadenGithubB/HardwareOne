@@ -43,7 +43,7 @@ def generate(baseline: Path | None) -> str:
         header.index("bool getStats(StorageType type")]
     reader += vfs[vfs.index("DirectoryReader::DirectoryReader("):vfs.index("static FS* fsForPath(")] + "\n}\n"
     markers = ["ImageManager::ImageManager()", "ImageManager::~ImageManager()",
-               "bool ImageManager::init()", "bool ImageManager::initSD()",
+               "bool ImageManager::init()", "bool ImageManager::initSd()",
                "String ImageManager::getMountPrefix(", "String ImageManager::getCaptureFolder(",
                "bool ImageManager::ensureCaptureFolder(", "std::vector<ImageInfo> ImageManager::listImages(",
                "int ImageManager::getImageCount(", "uint8_t* ImageManager::getImage(",
@@ -54,7 +54,7 @@ def generate(baseline: Path | None) -> str:
         markers.append("void ImageManager::sweepStaleTemporaries(")
     # SD availability asked of VFS per operation rather than latched at init.
     if "bool ImageManager::tierAvailable(" in source:
-        markers += ["bool ImageManager::isSDAvailable() const", "bool ImageManager::tierAvailable("]
+        markers += ["bool ImageManager::isSdAvailable() const", "bool ImageManager::tierAvailable("]
     # The owner's managed-photo rule, shared by the reader and the deleter.
     if "bool ImageManager::managedImagePath(" in source:
         markers.append("bool ImageManager::managedImagePath(")

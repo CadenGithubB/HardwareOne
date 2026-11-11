@@ -51,11 +51,11 @@ void drawWizardHeader(int pageNum, int totalPages, const char* title) {
   oledDisplay->print(position);
   oledDisplay->setTextWrap(true);
 
-  uint32_t enabledKB = 0, maxKB = 1;
+  uint32_t enabledKb = 0, maxKb = 1;
   int percentage = 0;
-  getHeapBarData(&enabledKB, &maxKB, &percentage);
+  getHeapBarData(&enabledKb, &maxKb, &percentage);
   char heapLabel[12];
-  snprintf(heapLabel, sizeof(heapLabel), "%lu/%luKB", (unsigned long)enabledKB, (unsigned long)maxKB);
+  snprintf(heapLabel, sizeof(heapLabel), "%lu/%luKB", (unsigned long)enabledKb, (unsigned long)maxKb);
   oledDrawBar(oledDisplay, 0, 10, 70, 6, percentage, 100, heapLabel);
   oledDisplay->drawFastHLine(0, 18, 128, SSD1306_WHITE);
 }

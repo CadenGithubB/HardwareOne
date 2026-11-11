@@ -121,7 +121,7 @@ static std::vector<StorageType> requestedTiers;
 bool existsGuarded(const String& path,const AuthContext&){assert(scopeDepth);++fsCalls;return identityMayRead()&&nodes.count(path.c_str());}
 File openGuarded(const String& path,const char*,const AuthContext&){assert(scopeDepth);++fsCalls;return (openFails||!identityMayRead())?File():File(path);}
 size_t listVirtualEntries(const String&,VirtualEntry*,size_t){assert(scopeDepth);++fsCalls;return 0;}
-bool isSDAvailable(){assert(scopeDepth);++fsCalls;++sdChecks;return sdAvailable;}
+bool isSdAvailable(){assert(scopeDepth);++fsCalls;++sdChecks;return sdAvailable;}
 bool getStats(StorageType tier,uint64_t& total,uint64_t& used,uint64_t& free){assert(scopeDepth);++fsCalls;++statsCalls;requestedTiers.push_back(tier);total=tier==INTERNAL?1000:2000;used=tier==INTERNAL?400:1400;free=600;return statsOkay;}
 // INSERT_VFS
 }

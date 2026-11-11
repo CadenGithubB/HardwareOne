@@ -61,7 +61,7 @@ String llmListModels() {
     json += "{\"id\":\"";      json += rows[k].id;
     json += "\",\"name\":\""; json += rows[k].name;
     json += "\",\"backend\":\""; json += llmBackendKindName(rows[k].backend);
-    json += "\",\"size\":";   json += (unsigned long)rows[k].sizeKB * 1024UL;
+    json += "\",\"size\":";   json += (unsigned long)rows[k].sizeKb * 1024UL;
     json += ",\"path\":\"";   json += rows[k].path;
     json += "\",\"storage\":\"";
     json += (rows[k].storage == LLM_STORAGE_SD)     ? "sd"
@@ -283,7 +283,7 @@ static const char* cmd_llm_models(const String& argsInput) {
       o["id"]        = rows[k].id;         // char[] → copied into the doc pool
       o["name"]      = rows[k].name;
       o["backend"]   = llmBackendKindName(rows[k].backend);
-      o["sizeKB"]    = rows[k].sizeKB;
+      o["sizeKB"]    = rows[k].sizeKb;
       o["storage"]   = (rows[k].storage == LLM_STORAGE_SD)     ? "sd"
                      : (rows[k].storage == LLM_STORAGE_REMOTE) ? "remote" : "internal";
       o["available"] = rows[k].available;

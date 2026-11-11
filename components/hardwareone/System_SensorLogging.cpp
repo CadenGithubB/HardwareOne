@@ -217,7 +217,7 @@ static String stripSessionShaping(String path);   // its inverse (defined below)
 
 // CSV header for `mask` — the single source for file creation, the append-
 // side header-on-create, and the day-file compatibility compare. NO trailing
-// newline (callers append it). Must track buildCSVFromSnap's column order.
+// newline (callers append it). Must track buildCsvFromSnap's column order.
 static String buildCsvHeader(uint8_t mask) {
   String h = "timestamp_ms";
   if (mask & LOG_THERMAL) h += ",thermal_min,thermal_max,thermal_avg";
@@ -237,7 +237,7 @@ static String buildCsvHeader(uint8_t mask) {
   if (mask & LOG_APDS) h += ",apds_red,apds_green,apds_blue,apds_clear,apds_proximity,apds_gesture";
   if (mask & LOG_GPS) h += ",gps_fix,gps_lat,gps_lon,gps_alt,gps_speed,gps_sats,gps_quality";
   if (mask & LOG_PRESENCE) h += ",presence_ambient,presence_value,presence_detected,motion_value,motion_detected";
-  // Order must track the row builder in buildCSVFromSnap: connected, hr,
+  // Order must track the row builder in buildCsvFromSnap: connected, hr,
   // hrv, spo2, temp, battery, wear. r1_temp sits BETWEEN spo2 and battery
   // — appending the two missing names at the end would keep the count
   // right and silently mislabel the columns. r1_wear is the raw code
@@ -611,7 +611,7 @@ void sensorLogTick() {
   };
 
   // CSV builder for structured data logging
-  auto buildCSVFromSnap = [](const SensorCacheSnapshot& s) -> const char* {
+  auto buildCsvFromSnap = [](const SensorCacheSnapshot& s) -> const char* {
     static char* buf = nullptr;
     if (!buf) {
       buf = (char*)ps_alloc(1024, AllocPref::PreferPsram, "sensor.log.csv");
@@ -1003,7 +1003,7 @@ void sensorLogTick() {
     if (gSensorLogFormat == SENSOR_LOG_TRACK) {
       line = buildTrackFromSnap(snap);
     } else if (gSensorLogFormat == SENSOR_LOG_CSV) {
-      line = buildCSVFromSnap(snap);
+      line = buildCsvFromSnap(snap);
     } else {
       line = buildFromSnap(snap);
     }
@@ -1453,7 +1453,7 @@ static const char* sensorLogStart(String filepath, uint32_t interval, bool persi
     (void)VFS::getStats(VFS::INTERNAL, lfsTotal, lfsUsed, freeBytes);
     bool littleFsOk = (freeBytes >= (uint64_t)gSensorLogMaxSize);
     bool sdOk = false;
-    if (!littleFsOk && VFS::isSDAvailable()) {
+    if (!littleFsOk && VFS::isSdAvailable()) {
       uint64_t sdTotal = 0, sdUsed = 0, sdFree = 0;
       if (VFS::getStats(VFS::SDCARD, sdTotal, sdUsed, sdFree)) {
         sdOk = (sdFree >= (uint64_t)gSensorLogMaxSize);

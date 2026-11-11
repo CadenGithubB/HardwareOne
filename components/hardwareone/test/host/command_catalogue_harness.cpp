@@ -31,7 +31,7 @@ bool gInputConnected = false;
 bool gAnoEncoderConnected = false;
 bool cameraConnected = false;
 bool radioCompanionOnline() { return active == RADIO; }
-namespace VFS { bool isSDAvailable() { return active == SD; } }
+namespace VFS { bool isSdAvailable() { return active == SD; } }
 bool audioAnySourceAvailable() { return active == AUDIO; }
 bool isSensorConnected(const char* name) {
   assert(name && name[0]);

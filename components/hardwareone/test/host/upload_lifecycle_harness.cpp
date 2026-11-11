@@ -186,7 +186,7 @@ class File {
 namespace VFS {
 enum StorageType { INTERNAL, SDCARD };
 static StorageType getStorageType(const String& path) { return path == "/sd" || path.startsWith("/sd/") ? SDCARD : INTERNAL; }
-static bool isSDAvailable() { return control.sd; }
+static bool isSdAvailable() { return control.sd; }
 static bool getStats(StorageType, uint64_t& total, uint64_t& used, uint64_t& free) { io(); free = control.freeBytes; total = free * 2; used = free; return true; }
 static bool existsGuarded(const String&, const AuthContext&) { io(); return control.parentExists; }
 static bool mkdirGuarded(const String&, const AuthContext&) { io(); ++metrics.mkdirs; return true; }

@@ -623,9 +623,9 @@ bool MapCore::loadMapFile(const char* path) {
     numTiers = 1;
   }
 
-  // Allocate pool — size driven by gSettings.mapCacheSizeKB (default 1280 KB).
+  // Allocate pool — size driven by gSettings.mapCacheSizeKb (default 1280 KB).
   // Halves on alloc failure so the cache still comes up on tight PSRAM.
-  size_t poolSize = (size_t)gSettings.mapCacheSizeKB * 1024;
+  size_t poolSize = (size_t)gSettings.mapCacheSizeKb * 1024;
   if (poolSize < 64 * 1024) poolSize = 64 * 1024;          // sanity floor
   if (poolSize > 8 * 1024 * 1024) poolSize = 8 * 1024 * 1024; // sanity cap
   uint8_t* pool = nullptr;
@@ -1292,9 +1292,9 @@ void MapCore::renderMap(MapRenderer* renderer, float centerLat, float centerLon,
       
       // Load tile data
       size_t tileDataSize;
-      uint32_t tileIOStart = micros();
+      uint32_t tileIoStart = micros();
       const uint8_t* tileData = loadTileData(tileIdx, &tileDataSize);
-      perfTileIOus += (uint32_t)(micros() - tileIOStart);
+      perfTileIOus += (uint32_t)(micros() - tileIoStart);
       if (!tileData || tileDataSize == 0) {
         DEBUG_MAPS_RENDERINGF("[MAPS] tile(%d,%d) idx=%u: loadTileData failed (ptr=%p size=%zu offset=%u payloadSize=%u)",
                               tx, ty, tileIdx, tileData, tileDataSize, tile.offset, tile.payloadSize);
@@ -4262,7 +4262,7 @@ float LocationContextManager::haversineDistance(float lat1, float lon1, float la
 // Wired into the schema-driven settings registry. Field semantics:
 //   mapZoom            — initial zoom applied to gMapZoom at boot
 //   mapVisibleLayers   — initial visibility mask applied to gVisibleLayers
-//   mapCacheSizeKB     — pool size for the tile LRU cache; takes effect at next
+//   mapCacheSizeKb     — pool size for the tile LRU cache; takes effect at next
 //                        map load (re-init of the pool happens per-map)
 // CLI setters mirror the gSettings field into the matching live runtime
 // variable so changes apply without a reboot (cache size aside).
@@ -4302,7 +4302,7 @@ static const char* cmd_mapcachekb(const String& argsInput) {
   if (!parseIntArg(v, n)) return kCommandReplyNotANumber;
   if (n < 256) n = 256;
   if (n > 4096) n = 4096;
-  setSetting(gSettings.mapCacheSizeKB, n);
+  setSetting(gSettings.mapCacheSizeKb, n);
   snprintf(getDebugBuffer(), 1024, "mapCacheSizeKB set to %d (effective on next map load)", n);
   return getDebugBuffer();
 }
@@ -4311,7 +4311,7 @@ static const char* cmd_mapcachekb(const String& argsInput) {
 static const SettingEntry mapsSettingEntries[] = {
   { "zoom",        SETTING_FLOAT, &gSettings.mapZoom,           0,    1.0f, nullptr, 0, 0,    "Default zoom (0.5-20.0)",            nullptr, false, nullptr, "mapzoom" },
   { "layers",      SETTING_INT,   &gSettings.mapVisibleLayers,  0x3FF, 0,   nullptr, 0, 0x3FF, "Visible layers (bitmask, 0-0x3FF)", nullptr, false, nullptr, "maplayers" },
-  { "cacheSizeKB", SETTING_INT,   &gSettings.mapCacheSizeKB,    1280, 0,    nullptr, 256, 4096, "Tile cache size (KB, effective on next map load)", nullptr, false, nullptr, "mapcachekb" },
+  { "cacheSizeKB", SETTING_INT,   &gSettings.mapCacheSizeKb,    1280, 0,    nullptr, 256, 4096, "Tile cache size (KB, effective on next map load)", nullptr, false, nullptr, "mapcachekb" },
 };
 
 // Columns: name, jsonSection, entries, count, isConnected, description

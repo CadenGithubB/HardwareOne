@@ -161,7 +161,7 @@ class File {
 namespace VFS {
 enum StorageType { INTERNAL = 0, SDCARD = 1, AUTO = 2 };
 struct VirtualEntry { const char* name; bool isFolder; };
-static bool isSDAvailable() { return sdMounted; }
+static bool isSdAvailable() { return sdMounted; }
 // Advanced by every successful mount, as VFS does for boot, remount and format.
 static uint32_t sdGeneration = 0;
 static uint32_t sdMountGeneration() { return sdGeneration; }
@@ -419,7 +419,7 @@ static void inventory(ImageStorageLocation location, const char* capture = "/pho
   const auto images = owner.listImages(location);
   check(images.size() == 3 && images[0].filename == "z.jpg" && images[1].filename == "b.jpeg" && images[2].filename == ".hidden.jpg", "only direct lowercase JPEG files retain backend order and dotfile visibility; virtual mounts/directories excluded");
   check(images[0].fullPath == String((join + "z.jpg").c_str()) && images[1].fullPath == String((join + "b.jpeg").c_str()), "listed paths use canonical VFS folder join");
-  check(images[0].size == 12 && images[1].size == 12 && images[0].isOnSD == sd && images[0].location == (sd ? IMAGE_STORAGE_SD : IMAGE_STORAGE_LITTLEFS), "listing retains image metadata and tier");
+  check(images[0].size == 12 && images[1].size == 12 && images[0].isOnSd == sd && images[0].location == (sd ? IMAGE_STORAGE_SD : IMAGE_STORAGE_LITTLEFS), "listing retains image metadata and tier");
   check(images[0].timestamp == (sd ? 11 : 0) && images[1].timestamp == (sd ? 22 : 0) && images[2].timestamp == (sd ? 33 : 0), "only SD exposes native timestamps");
   if (!sd) check(mtimeCalls == 0, "internal listing avoids unnecessary backend timestamp queries");
   expectIdentity("open", sd ? "imgmgr.list_sd" : "imgmgr.list_images");
@@ -438,18 +438,18 @@ static void availability() {
 // listed, counted and deletable at once, and an unmounted card is refused.
 static void sdFollowsVfs() {
   reset(false); auto owner = manager();
-  check(owner.listImages(IMAGE_STORAGE_SD).empty() && !owner.getStorageStats(IMAGE_STORAGE_SD).available && !owner.isSDAvailable(),
+  check(owner.listImages(IMAGE_STORAGE_SD).empty() && !owner.getStorageStats(IMAGE_STORAGE_SD).available && !owner.isSdAvailable(),
         "no card at init: SD is unavailable");
   sdMounted = true; ++VFS::sdGeneration;
   add("/sd", true); add("/sd/photos", true); add("/sd/photos/a.jpg"); add("/sd/photos/b.jpg");
-  check(owner.isSDAvailable(), "a card mounted after init is reported available");
+  check(owner.isSdAvailable(), "a card mounted after init is reported available");
   check(owner.listImages(IMAGE_STORAGE_SD).size() == 2, "a card mounted after init is listed");
   const auto stats = owner.getStorageStats(IMAGE_STORAGE_SD);
   check(stats.available && stats.imageCount == 2, "a card mounted after init has storage stats");
   check(owner.ensureCaptureFolder(IMAGE_STORAGE_SD), "a card mounted after init can prepare the capture folder");
   check(deleteAs(owner, "/sd/photos/a.jpg", caller) && !nodes.count("/sd/photos/a.jpg"), "a photo on a card mounted after init can be deleted");
   sdMounted = false; accesses.clear(); statCalls = 0;
-  check(!owner.isSDAvailable() && owner.listImages(IMAGE_STORAGE_SD).empty() && !owner.getStorageStats(IMAGE_STORAGE_SD).available,
+  check(!owner.isSdAvailable() && owner.listImages(IMAGE_STORAGE_SD).empty() && !owner.getStorageStats(IMAGE_STORAGE_SD).available,
         "after unmount SD is unavailable, unlisted and has no stats");
   check(!owner.ensureCaptureFolder(IMAGE_STORAGE_SD) && !deleteAs(owner, "/sd/photos/b.jpg", caller) && nodes.count("/sd/photos/b.jpg"),
         "after unmount SD folder preparation and deletes are refused");

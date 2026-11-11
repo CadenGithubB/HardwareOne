@@ -3266,7 +3266,7 @@ static void            addTopoDeviceName(const uint8_t* mac, const char* name);
 static bool            getTopoDeviceName(const uint8_t* mac, char* outBuf, size_t outLen);
 static void            finalizeTopologyStreamLocked(TopologyStream* stream);
 #if ENABLE_BONDED_MODE
-static bool            cacheManifestToLittleFS(const uint8_t fwHash[16], const char* manifest, size_t len);
+static bool            cacheManifestToLittleFs(const uint8_t fwHash[16], const char* manifest, size_t len);
 #endif
 #if ENABLE_BONDED_MODE
 static void            processBondSettings(const uint8_t* srcMac, const String& deviceName, const String& settingsStr);
@@ -3307,7 +3307,7 @@ static void processBondModeManifestResp(const uint8_t* srcMac, const String& dev
   gEspNow->bondSyncRetryCount = 0;
 
   if (gEspNow->lastRemoteCapValid) {
-    cacheManifestToLittleFS(gEspNow->lastRemoteCap.fwHash, manifest, len);
+    cacheManifestToLittleFs(gEspNow->lastRemoteCap.fwHash, manifest, len);
   }
   // Sync tick will pick up the next missing item (settings) on next iteration
 }
@@ -7327,7 +7327,7 @@ static bool ensureCaptureFile(time_t now) {
 static void captureEspNowFrame(const char* direction, const uint8_t* peerMac,
                                int rssi, const uint8_t* data, int len) {
   if (!gSettings.espnowCaptureToSd) return;
-  if (!VFS::isSDAvailable()) return;
+  if (!VFS::isSdAvailable()) return;
   if (!data || len < (int)sizeof(EspNowV4Header)) return;
 
   const EspNowV4Header* h = (const EspNowV4Header*)data;
@@ -7663,10 +7663,10 @@ static void buildCapabilitySummary(CapabilitySummary& cap) {
   
   uint32_t flashSize = 0;
   esp_flash_get_size(NULL, &flashSize);
-  cap.flashSizeMB = flashSize / (1024 * 1024);
+  cap.flashSizeMb = flashSize / (1024 * 1024);
   // ESP.getPsramSize() returns bytes, convert to MB
   uint32_t psramBytes = ESP.getPsramSize();
-  cap.psramSizeMB = (psramBytes + 512 * 1024) / (1024 * 1024);  // Round to nearest MB
+  cap.psramSizeMb = (psramBytes + 512 * 1024) / (1024 * 1024);  // Round to nearest MB
   
   if (gEspNow && gEspNow->initialized) {
     cap.wifiChannel = gEspNow->channel;
@@ -7701,8 +7701,8 @@ static void buildDeviceManifest(JsonDocument& doc) {
   capObj["featureMask"] = cap.featureMask;
   capObj["serviceMask"] = cap.serviceMask;
   capObj["sensorMask"] = cap.sensorMask;
-  capObj["flashMB"] = cap.flashSizeMB;
-  capObj["psramMB"] = cap.psramSizeMB;
+  capObj["flashMB"] = cap.flashSizeMb;
+  capObj["psramMB"] = cap.psramSizeMb;
   capObj["wifiChannel"] = cap.wifiChannel;
   
   // Add sensor connectivity status (which sensors are actually connected vs compiled)
@@ -7853,7 +7853,7 @@ static bool writeBondJsonFileLocked(const char* path, const char* data, size_t l
 /**
  * Cache manifest to LittleFS keyed by firmware hash
  */
-static bool cacheManifestToLittleFS(const uint8_t fwHash[16], const char* manifest, size_t len) {
+static bool cacheManifestToLittleFs(const uint8_t fwHash[16], const char* manifest, size_t len) {
   if (!filesystemReady) return false;
   
   // Build filename from hash
@@ -7939,7 +7939,7 @@ static String generateDeviceSettings() {
 /**
  * Cache settings to LittleFS for a specific peer MAC
  */
-static bool cacheSettingsToLittleFS(const uint8_t* peerMac, const String& settings) {
+static bool cacheSettingsToLittleFs(const uint8_t* peerMac, const String& settings) {
   DEBUG_ESPNOWF("[SETTINGS_CACHE] cacheSettingsToLittleFS: fsReady=%d len=%d",
                 filesystemReady ? 1 : 0, settings.length());
   if (!filesystemReady || !peerMac) {
@@ -8490,7 +8490,7 @@ static void processBondSchema(const uint8_t* srcMac, const String& deviceName, c
   }
 
   // Cache to peers/<MAC>/schema.json — same directory layout the settings
-  // cache uses (cacheSettingsToLittleFS), just a different filename.
+  // cache uses (cacheSettingsToLittleFs), just a different filename.
   char dirPath[48];
   peerCacheDir(srcMac, dirPath, sizeof(dirPath));
   char filePath[64];
@@ -8584,7 +8584,7 @@ static void processBondSettings(const uint8_t* srcMac, const String& deviceName,
   
   // Cache the settings
   DEBUG_ESPNOWF("[SETTINGS_PROC] Calling cacheSettingsToLittleFS...");
-  bool cached = cacheSettingsToLittleFS(srcMac, settingsStr);
+  bool cached = cacheSettingsToLittleFs(srcMac, settingsStr);
   if (cached) {
     DEBUG_ESPNOWF("[SETTINGS_PROC] SUCCESS: Settings cached");
     broadcastOutput("[SETTINGS] Cached settings from " + deviceName);
@@ -17061,8 +17061,8 @@ const char* cmd_bond_showcap(const String& argsInput) {
     doc["featureMask"] = (unsigned long)jc.featureMask;   // decode with CAP_FEATURE_* bits
     doc["serviceMask"] = (unsigned long)jc.serviceMask;   // decode with CAP_SERVICE_* bits
     doc["sensorMask"]  = (unsigned long)jc.sensorMask;    // decode with CAP_SENSOR_*  bits
-    doc["flashMB"]     = (unsigned long)jc.flashSizeMB;
-    doc["psramMB"]     = (unsigned long)jc.psramSizeMB;
+    doc["flashMB"]     = (unsigned long)jc.flashSizeMb;
+    doc["psramMB"]     = (unsigned long)jc.psramSizeMb;
     doc["wifiChannel"] = jc.wifiChannel;
     doc["uptimeSec"]   = (unsigned long)jc.uptimeSeconds;
     serializeJson(doc, getDebugBuffer(), 1024);
@@ -17088,7 +17088,7 @@ const char* cmd_bond_showcap(const String& argsInput) {
   pos += snprintf(buf + pos, 1024 - pos, "Services: 0x%08lX\n", (unsigned long)cap.serviceMask);
   pos += snprintf(buf + pos, 1024 - pos, "Sensors: 0x%08lX\n", (unsigned long)cap.sensorMask);
   pos += snprintf(buf + pos, 1024 - pos, "Flash: %lu MB, PSRAM: %lu MB\n",
-                  (unsigned long)cap.flashSizeMB, (unsigned long)cap.psramSizeMB);
+                  (unsigned long)cap.flashSizeMb, (unsigned long)cap.psramSizeMb);
   pos += snprintf(buf + pos, 1024 - pos, "WiFi Ch: %u\n", cap.wifiChannel);
   pos += snprintf(buf + pos, 1024 - pos, "Uptime: %lu sec\n", (unsigned long)cap.uptimeSeconds);
   

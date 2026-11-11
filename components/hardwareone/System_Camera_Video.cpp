@@ -15,11 +15,11 @@
 // status JSON always carries `sdAvailable` and `sdWritable`, even when
 // camera is not compiled.
 bool sdCardIsMountedForStatus() {
-  return VFS::isSDAvailable();
+  return VFS::isSdAvailable();
 }
 
 bool sdCardIsWritableForStatus() {
-  return VFS::isSDWritable();
+  return VFS::isSdWritable();
 }
 
 // ── Video folder ─────────────────────────────────────────────────────────────
@@ -240,7 +240,7 @@ static bool probeJpegDims(const uint8_t* jpeg, size_t len, uint32_t* outW, uint3
 
 // ── File helpers ────────────────────────────────────────────────────────────
 static bool ensureVideosFolder() {
-  if (!VFS::isSDAvailable()) return false;
+  if (!VFS::isSdAvailable()) return false;
   // Route through VFS (shared FsLockGuard + permission guard) using the
   // "/sd/..." path form; VFS dispatches /sd to the SD backend internally.
   AuthContext sys = VFS::systemAuth(VFS::Scopes::VIDEOS, "video.ensure_folder");
@@ -330,7 +330,7 @@ static bool finalizeAndClose(bool recordedOk, uint32_t elapsedMs) {
   char det[24];
   snprintf(det, sizeof(det), "%u frames", (unsigned)s_frameCount);
   if (!s_file) {
-    VFS::noteSDWriteFailure("video recording finalize");
+    VFS::noteSdWriteFailure("video recording finalize");
     systemEventPost(SYSEVT_VIDEO_RECORD_FAILED, name, det);
     return false;
   }
@@ -391,7 +391,7 @@ static bool finalizeAndClose(bool recordedOk, uint32_t elapsedMs) {
   if (!ok) {
     ERROR_CAMERAF("[Video] Recording not saved: %s (%u frames, %u bytes expected)",
                   s_path, (unsigned)s_frameCount, (unsigned)fileSize);
-    VFS::noteSDWriteFailure("video recording finalize");
+    VFS::noteSdWriteFailure("video recording finalize");
     systemEventPost(SYSEVT_VIDEO_RECORD_FAILED, name, det);
     return false;
   }
@@ -437,7 +437,7 @@ static void recordingTask(void* /*arg*/) {
       }
       free(jpeg);
       if (!recordedOk) {
-        VFS::noteSDWriteFailure("video recording frame write");
+        VFS::noteSdWriteFailure("video recording frame write");
         videoRecording = false;
         break;
       }
@@ -487,11 +487,11 @@ bool startVideoRecording() {
   }
   // Gate on WRITABLE not just mounted — a card can be mounted but have
   // the underlying SD write fail on the actual file create (flaky card,
-  // bad sector, write-protect). isSDWritable() has a lazy re-probe so if the card
+  // bad sector, write-protect). isSdWritable() has a lazy re-probe so if the card
   // was briefly glitchy and has since recovered, we'll pick it up.
-  const bool sdWritable = VFS::isSDWritable();
+  const bool sdWritable = VFS::isSdWritable();
   STACK_TRACEF("startVideoRecording.sd_writable=%d (mounted=%d)",
-               sdWritable ? 1 : 0, VFS::isSDAvailable() ? 1 : 0);
+               sdWritable ? 1 : 0, VFS::isSdAvailable() ? 1 : 0);
   if (!sdWritable) {
     INFO_CAMERA_VIDEOF("Cannot record — SD card not writable");
     unlock();
@@ -528,9 +528,9 @@ bool startVideoRecording() {
   if (!s_file) {
     ERROR_STORAGEF("[Video] Failed to create file: %s", s_path);
     STACK_TRACEF("startVideoRecording.sd_open_failed_returning_false");
-    // Flag the card as not-writable — next isSDWritable() call will
+    // Flag the card as not-writable — next isSdWritable() call will
     // re-probe, giving the UI accurate state without needing a remount.
-    VFS::noteSDWriteFailure("video recording file create");
+    VFS::noteSdWriteFailure("video recording file create");
     VFS::sdInUseEnd(VIDEO_SD_OWNER);
     unlock();
     return false;
@@ -558,7 +558,7 @@ bool startVideoRecording() {
       ERROR_STORAGEF("[Video] Short AVI header write: %u/%u", (unsigned)wrote,
                      (unsigned)AVI_HEADER_SIZE);
       discardFailedStart();
-      VFS::noteSDWriteFailure("video header write");
+      VFS::noteSdWriteFailure("video header write");
       unlock();
       return false;
     }
@@ -643,7 +643,7 @@ uint32_t    videoLastRecordingFrames() { return s_frameCount; }
 // camera status/frame endpoints.
 String getVideoRecordingsList() {
   String out;
-  if (!VFS::isSDAvailable()) return out;
+  if (!VFS::isSdAvailable()) return out;
   File root = VFS::openGuarded(VIDEO_FOLDER_SD, FILE_READ, VFS::systemAuth(VFS::Scopes::VIDEOS, "video.list"));
   if (!root || !root.isDirectory()) return out;
   File f = root.openNextFile();
@@ -665,7 +665,7 @@ String getVideoRecordingsList() {
 }
 
 bool deleteVideoRecording(const String& filename) {
-  if (!VFS::isSDAvailable()) return false;
+  if (!VFS::isSdAvailable()) return false;
   // Reject paths that try to escape the folder.
   if (filename.indexOf('/') >= 0 || filename.indexOf("..") >= 0) return false;
   String path = String(VIDEO_FOLDER_SD) + "/" + filename;
@@ -714,7 +714,7 @@ esp_err_t handleVideoRecordingsList(httpd_req_t* req) {
   String json = "{\"count\":";
   json += count;
   json += ",\"sdAvailable\":";
-  json += VFS::isSDAvailable() ? "true" : "false";
+  json += VFS::isSdAvailable() ? "true" : "false";
   json += ",\"files\":[";
   json += files;
   json += "]}";
@@ -727,7 +727,7 @@ esp_err_t handleVideoRecordingsList(httpd_req_t* req) {
 esp_err_t handleVideoRecordingFile(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);
 
-  if (!VFS::isSDAvailable()) {
+  if (!VFS::isSdAvailable()) {
     httpd_resp_set_status(req, "503 Service Unavailable");
     httpd_resp_send(req, "SD card unavailable", HTTPD_RESP_USE_STRLEN);
     return ESP_OK;

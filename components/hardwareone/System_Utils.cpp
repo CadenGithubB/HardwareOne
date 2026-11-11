@@ -1503,7 +1503,7 @@ void buildSystemInfoJson(JsonDocument& doc, bool includeDeviceList) {
     storage["used_kb"] = (int)(stats.usedBytes / 1024);
     storage["free_kb"] = (int)(stats.freeBytes / 1024);
   }
-  if (VFS::isSDAvailable()) {
+  if (VFS::isSdAvailable()) {
     VFS::CapacitySnapshot stats = {};
     if (VFS::getStatsSnapshot(VFS::SDCARD, stats,
                               kSystemInfoStatsMaxAgeMs)) {
@@ -2262,7 +2262,7 @@ static const char* factoryreset_confirmed(void* userData) {
       (void)factoryResetClearDirectory("/stt", factoryResetIsAccountFolder, sysCtx, 0, failed);
     }
     if (failed.length() == 0) {
-      if (VFS::isSDAvailable()) {
+      if (VFS::isSdAvailable()) {
         (void)factoryResetClearDirectory("/sd/stt", factoryResetIsAccountFolder, sysCtx, 0, failed);
       } else {
         sdSkipped = true;

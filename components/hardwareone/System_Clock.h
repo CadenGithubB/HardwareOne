@@ -120,10 +120,10 @@ inline uint32_t ageMs(uint32_t pastMs) {
 // of bytes written (excluding NUL). Returns 0 and writes "" if `t` is not a
 // valid epoch — caller can detect with the return value rather than
 // checking isValidEpoch up front.
-size_t formatISO8601Local(time_t t, char* out, size_t outSize);
+size_t formatIso8601Local(time_t t, char* out, size_t outSize);
 
 // Format epoch `t` as filename-safe "YYYYMMDD_HHMMSS" into `out`. Same
-// local-time + invalid-handling behavior as formatISO8601Local. Used for
+// local-time + invalid-handling behavior as formatIso8601Local. Used for
 // log filenames, capture filenames, etc. where colons aren't allowed.
 size_t formatFilenameLocal(time_t t, char* out, size_t outSize);
 

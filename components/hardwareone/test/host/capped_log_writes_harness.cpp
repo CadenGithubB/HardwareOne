@@ -122,7 +122,7 @@ using fs::File;
 namespace VFS {
 enum StorageType { INTERNAL, SDCARD };
 static StorageType getStorageType(const String& path) { return text(path).rfind("/sd/", 0) == 0 ? SDCARD : INTERNAL; }
-static bool isSDAvailable() { return sdAvailable; }
+static bool isSdAvailable() { return sdAvailable; }
 // The pre-G-39 resolver (still used by orphan recovery): latched and mounted
 // means the mirror, anything else the primary path.
 static void resolveOverflowPath(const char* path, size_t need, char* dest, size_t capacity) {

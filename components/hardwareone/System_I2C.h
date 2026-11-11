@@ -427,7 +427,7 @@ struct DetectedEntry {
   uint8_t      bus;         // bus found on (0..POLL_NUM_BUSES-1), or 0xFF if MISSING
   const char*  name;        // device name from the sensor DB
   const char*  moduleName;  // feature id, or nullptr for infrastructure
-  uint16_t     heapCostKB;  // feature heap estimate (0 for infrastructure)
+  uint16_t     heapCostKb;  // feature heap estimate (0 for infrastructure)
   DetectStatus status;
 };
 

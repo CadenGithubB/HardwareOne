@@ -110,7 +110,7 @@ bool TranscriptSession::write(const char* text, size_t length, bool first) {
     return fail("Transcript session expired before saving");
   if (first) {
     userId_ = currentId;
-    sd_ = VFS::isSDWritable();
+    sd_ = VFS::isSdWritable();
     snprintf(status_.path, sizeof(status_.path), "%s/u%lu/%s-%s-%08lx%08lx.txt",
              sd_ ? "/sd/stt" : "/stt", static_cast<unsigned long>(userId_), start_, provider_,
              static_cast<unsigned long>(id_ >> 32), static_cast<unsigned long>(id_ & 0xffffffffu));
@@ -167,7 +167,7 @@ bool TranscriptSession::write(const char* text, size_t length, bool first) {
     written = file.write(reinterpret_cast<const uint8_t*>(header), n);
     if (written != static_cast<size_t>(n)) {
       file.close();
-      if (sd_) VFS::noteSDWriteFailure("transcript header");
+      if (sd_) VFS::noteSdWriteFailure("transcript header");
       else VFS::noteLittleFsBytesWritten(written);
       status_.bytes += written;
       return fail("Transcript write incomplete");
@@ -179,7 +179,7 @@ bool TranscriptSession::write(const char* text, size_t length, bool first) {
       file.size() == status_.bytes + written;
   file.close();
   status_.bytes += written;
-  if (sd_ && !ok) VFS::noteSDWriteFailure("transcript append");
+  if (sd_ && !ok) VFS::noteSdWriteFailure("transcript append");
   if (!sd_) VFS::noteLittleFsBytesWritten(written);
   return ok || fail("Transcript write incomplete");
 }

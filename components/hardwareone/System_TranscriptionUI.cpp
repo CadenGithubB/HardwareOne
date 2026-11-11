@@ -188,7 +188,7 @@ const char* commandFiles(const String& input) {
     uint32_t offset;
     if (!TranscriptionUI::parseUnsigned(args.arg(2).c_str(), offset)) return error(doc, "Invalid offset");
     const bool sd = args.arg(1) == "sd";
-    if (sd && !VFS::isSDAvailable()) return error(doc, "No SD card");
+    if (sd && !VFS::isSdAvailable()) return error(doc, "No SD card");
     char folder[32];
     snprintf(folder, sizeof(folder), "%s/u%lu", sd ? "/sd/stt" : "/stt", (unsigned long)account);
     doc["transcriptPath"] = folder;

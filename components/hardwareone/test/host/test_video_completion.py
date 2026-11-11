@@ -9,7 +9,7 @@ header patch, a flush error or an earlier frame-write failure post no saved
 event; the header carries the measured timing, the largest frame as the buffer
 size and the real geometry; a failed start removes its half-made file.
 
-Part two compiles the real SD-in-use registration, unmountSD/remountSD/formatSD
+Part two compiles the real SD-in-use registration, unmountSd/remountSd/formatSd
 and the sdunmount/sdmount/sdformat commands from System_VFS.cpp against a fake
 SD driver and checks that every lifecycle call is refused, with a message,
 while a registration is held, and works again after it ends.
@@ -90,7 +90,7 @@ def sd_unit() -> str:
     registration =source[source.index("static constexpr size_t kSdInUseSlots"):
                           source.index("static bool sdLifecycleRefusedLocked(")]
     vfs = [registration, unique_block(source, "static bool sdLifecycleRefusedLocked(")]
-    vfs += [unique_block(source, marker) for marker in ("bool unmountSD()", "bool remountSD()", "bool formatSD()")]
+    vfs += [unique_block(source, marker) for marker in ("bool unmountSd()", "bool remountSd()", "bool formatSd()")]
     commands = [unique_block(source, marker) for marker in (
         "static const char* cmd_sdmount(", "static const char* cmd_sdunmount(", "static const char* cmd_sdformat(")]
     harness = (HERE / "sd_in_use_harness.cpp").read_text()

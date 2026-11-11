@@ -34,7 +34,7 @@ portMUX_TYPE sMux = portMUX_INITIALIZER_UNLOCKED;
 
 struct Cm5Model {
   char     name[LLM_MODEL_NAME_LEN];
-  uint32_t sizeKB;
+  uint32_t sizeKb;
 };
 
 Cm5Model sCatalog[CM5_LLM_MAX_MODELS];
@@ -199,11 +199,11 @@ Cm5LlmCallbackResult cm5LlmHandleCallbackIntrinsic(
     const char* pGen = nextTok(verb);
     const char* pIdx = nextTok(pGen);
     const char* pCnt = nextTok(pIdx);
-    const char* pMB  = nextTok(pCnt);
-    const char* pNm  = nextTok(pMB);
+    const char* pMb  = nextTok(pCnt);
+    const char* pNm  = nextTok(pMb);
     uint32_t gen = 0, idx = 0, cnt = 0, mb = 0;
     if (!tokU32(pGen, &gen) || !tokU32(pIdx, &idx) ||
-        !tokU32(pCnt, &cnt) || !tokU32(pMB, &mb) || !pNm) {
+        !tokU32(pCnt, &cnt) || !tokU32(pMb, &mb) || !pNm) {
       return fail("usage: cm5 llm models <gen> <idx> <count> <sizeMB> <name>");
     }
     if (cnt > CM5_LLM_MAX_MODELS) cnt = CM5_LLM_MAX_MODELS;
@@ -221,7 +221,7 @@ Cm5LlmCallbackResult cm5LlmHandleCallbackIntrinsic(
     // stale rows behind.
     if (gen != sCatalogGen) { sCatalogGen = gen; sCatalogCount = 0; }
     strlcpy(sCatalog[idx].name, nameBuf, sizeof(sCatalog[idx].name));
-    sCatalog[idx].sizeKB = mb * 1024u;
+    sCatalog[idx].sizeKb = mb * 1024u;
     if (idx + 1 > sCatalogCount) sCatalogCount = (uint8_t)(idx + 1);
     if (sCatalogCount > cnt && cnt > 0) sCatalogCount = (uint8_t)cnt;
     portEXIT_CRITICAL(&sMux);
@@ -412,7 +412,7 @@ size_t cm5LlmEnumerate(LlmModelDesc* out, size_t cap) {
     strlcpy(d.name, snap[i].name, sizeof(d.name));
     d.backend   = LlmBackendKind::Cm5;
     d.path[0]   = '\0';
-    d.sizeKB    = snap[i].sizeKB;
+    d.sizeKb    = snap[i].sizeKb;
     d.storage   = LLM_STORAGE_REMOTE;
     d.available = usable;
     w++;
@@ -424,12 +424,12 @@ bool cm5LlmFindByName(const char* name, LlmModelDesc* out) {
   if (!name || !*name || !out) return false;
 
   char found[LLM_MODEL_NAME_LEN] = {0};
-  uint32_t sizeKB = 0;
+  uint32_t sizeKb = 0;
   portENTER_CRITICAL(&sMux);
   for (uint8_t i = 0; i < sCatalogCount && i < CM5_LLM_MAX_MODELS; i++) {
     if (sCatalog[i].name[0] && strcasecmp(sCatalog[i].name, name) == 0) {
       strlcpy(found, sCatalog[i].name, sizeof(found));
-      sizeKB = sCatalog[i].sizeKB;
+      sizeKb = sCatalog[i].sizeKb;
       break;
     }
   }
@@ -442,7 +442,7 @@ bool cm5LlmFindByName(const char* name, LlmModelDesc* out) {
   strlcpy(out->name, found, sizeof(out->name));
   out->backend   = LlmBackendKind::Cm5;
   out->path[0]   = '\0';
-  out->sizeKB    = sizeKB;
+  out->sizeKb    = sizeKb;
   out->storage   = LLM_STORAGE_REMOTE;
   out->available = pres.seenForSession && pres.fresh &&
                    (pres.mode == Cm5PresenceMode::Ready ||

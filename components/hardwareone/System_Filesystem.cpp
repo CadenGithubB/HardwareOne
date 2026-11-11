@@ -171,7 +171,7 @@ bool initFilesystem() {
   VFS::init();
 
 #if ENABLE_G2_GLASSES
-  if (VFS::isSDAvailable()) {
+  if (VFS::isSdAvailable()) {
     (void)VFS::mkdirGuarded(String(G2_ICON_ANIMATIONS_VFS_PATH), VFS::systemAuth(G2_ICON_ANIMATIONS_VFS_PATH, "filesystem.g2_icon_anim_init"));
   }
 #endif
@@ -515,7 +515,7 @@ static bool bytesNeedBase64(const uint8_t* data, size_t len) {
 // `files stats json` CLI command so both report identical numbers.
 void buildFilesStatsJson(const String& path, char* out, size_t outSize) {
   VFS::StorageType st = VFS::getStorageType(path);
-  if (st == VFS::SDCARD && !VFS::isSDAvailable()) {
+  if (st == VFS::SDCARD && !VFS::isSdAvailable()) {
     snprintf(out, outSize, "{\"success\":false,\"error\":\"SD card not available\"}");
     return;
   }
@@ -1446,7 +1446,7 @@ static const char* cmd_logtier(const String& argsInput) {
 
   if (argWantsJson(argsInput)) {
     bool overflow = VFS::isLogOverflowActive();
-    bool sdOk = VFS::isSDAvailable();
+    bool sdOk = VFS::isSdAvailable();
     uint64_t st = 0, su = 0, sf = 0;
     if (sdOk) VFS::getStats(VFS::SDCARD, st, su, sf);
     const char* tier = !overflow ? "littlefs" : (sdOk ? "sd-overflow" : "sd-overflow-unmounted");
@@ -1466,7 +1466,7 @@ static const char* cmd_logtier(const String& argsInput) {
   size_t flashTotal = (size_t)lt;
   size_t flashUsed = (size_t)lu;
   bool overflow = VFS::isLogOverflowActive();
-  bool sdOk = VFS::isSDAvailable();
+  bool sdOk = VFS::isSdAvailable();
   uint64_t sdTotal = 0, sdUsed = 0, sdFree = 0;
   if (sdOk) VFS::getStats(VFS::SDCARD, sdTotal, sdUsed, sdFree);
 
@@ -2454,8 +2454,8 @@ bool appendLineWithCap(const char* path, const String& line, size_t capBytes) {
   // 6. LittleFS can replace the original directly, preserving it on rename
   // failure. SD's FAT backend requires an absent destination; retain its
   // existing recovery protocol, now only with a checked complete temp file.
-  const bool onSD = VFS::getStorageType(String(dest)) == VFS::SDCARD;
-  if (onSD) {
+  const bool onSd = VFS::getStorageType(String(dest)) == VFS::SDCARD;
+  if (onSd) {
     if (!VFS::removeGuarded(String(dest), ctx)) {
       VFS::removeGuarded(String(tmpPath), ctx);
       STACK_TRACEF("appendLineWithCap.remove_orig_failed");
@@ -2463,7 +2463,7 @@ bool appendLineWithCap(const char* path, const String& line, size_t capBytes) {
     }
   }
   if (!VFS::renameGuarded(String(tmpPath), String(dest), ctx)) {
-    if (!onSD) VFS::removeGuarded(String(tmpPath), ctx);
+    if (!onSd) VFS::removeGuarded(String(tmpPath), ctx);
     STACK_TRACEF("appendLineWithCap.rename_failed");
     return false;
   }
@@ -2519,7 +2519,7 @@ void cleanupLogOrphan(const char* path) {
   // leave its orphan on the SD mirror, which the resolution above names only
   // while the latch is tripped again. Check the mirror whenever the card is
   // mounted, independent of the current latch.
-  if (VFS::isSDAvailable()) {
+  if (VFS::isSdAvailable()) {
     char mirror[140];
     snprintf(mirror, sizeof(mirror), "/sd%s", path);
     if (strcmp(mirror, dest) != 0) recoverLogOrphanAt(mirror);

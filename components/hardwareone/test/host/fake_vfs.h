@@ -30,7 +30,7 @@
 //   2. #define FAKE_VFS_PROVIDE_VFS_NAMESPACE before the include to get the
 //      production `VFS::` signatures (openGuarded, existsGuarded,
 //      removeGuarded, renameGuarded, replaceFileGuarded, mkdirGuarded,
-//      rmdirGuarded, isSDAvailable, isSDWritable, isLittleFSReady, getStats,
+//      rmdirGuarded, isSdAvailable, isSdWritable, isLittleFsReady, getStats,
 //      getStorageType, normalize, stripSdPrefix, isStagingName, systemAuth) as
 //      thin forwarders onto fake_vfs::fs(). Leave it out when the harness
 //      extracts the real VFS helpers and only needs the File class.
@@ -218,7 +218,7 @@ class Fs {
   // writer on another task landing inside a read-modify-write. Cleared by reset().
   std::function<void(const Call&)> onCall;
   std::vector<Call> log;
-  // Reported by isSDAvailable/isLittleFSReady; all /sd operations fail when SD
+  // Reported by isSdAvailable/isLittleFsReady; all /sd operations fail when SD
   // is unavailable and all LittleFS operations when it is not ready.
   bool& sdAvailable() { return capacity[1].available; }
   bool& littlefsReady() { return capacity[0].available; }
@@ -851,10 +851,10 @@ inline fake_vfs::Backend backendOf(StorageType type) {
   return type == SDCARD ? fake_vfs::Backend::SD : fake_vfs::Backend::LittleFS;
 }
 
-inline bool isLittleFSReady() { return fake_vfs::fs().littlefsReady(); }
-inline bool isSDAvailable() { return fake_vfs::fs().sdAvailable(); }
-inline bool isSDWritable() { return fake_vfs::fs().sdAvailable() && fake_vfs::fs().capacity[1].writable; }
-inline void noteSDWriteFailure(const char*) { ++fake_vfs::fs().sdWriteFailureNotes; }
+inline bool isLittleFsReady() { return fake_vfs::fs().littlefsReady(); }
+inline bool isSdAvailable() { return fake_vfs::fs().sdAvailable(); }
+inline bool isSdWritable() { return fake_vfs::fs().sdAvailable() && fake_vfs::fs().capacity[1].writable; }
+inline void noteSdWriteFailure(const char*) { ++fake_vfs::fs().sdWriteFailureNotes; }
 inline void noteLittleFsBytesWritten(size_t bytes) { fake_vfs::fs().littlefsBytesNoted += bytes; }
 inline void invalidateLittleFsFreeCache() { ++fake_vfs::fs().freeCacheInvalidations; }
 

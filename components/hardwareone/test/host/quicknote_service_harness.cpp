@@ -328,8 +328,8 @@ struct Created {
 static std::vector<Created> creates;
 static bool roomOk = true, createFails = false, listOk = true, sdWritable = false, sdPresent = false;
 namespace VFS {
-bool isSDWritable() { return sdWritable; }  // the tier a save would use now
-bool isSDAvailable() { return sdPresent; }  // a card is in (perhaps read-only)
+bool isSdWritable() { return sdWritable; }  // the tier a save would use now
+bool isSdAvailable() { return sdPresent; }  // a card is in (perhaps read-only)
 }  // namespace VFS
 static std::string listUser, readPath, removedPath;
 static uint32_t listOwner = 0;

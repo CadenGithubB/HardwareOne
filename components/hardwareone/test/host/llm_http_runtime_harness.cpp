@@ -91,7 +91,7 @@ static void esp_fill_random(void* p, size_t n) {
 struct Wifi { bool connected = true; bool isConnected() { return connected; } } WiFi;
 enum class LlmBackendKind { None, Onboard, Cm5, Http };
 constexpr unsigned LLM_STORAGE_REMOTE = 2;
-struct LlmModelDesc { char id[48], name[32]; LlmBackendKind backend; char path[64]; uint32_t sizeKB; uint8_t storage; bool available; };
+struct LlmModelDesc { char id[48], name[32]; LlmBackendKind backend; char path[64]; uint32_t sizeKb; uint8_t storage; bool available; };
 enum class LlmState { UNLOADED, LOADING, READY, GENERATING, ERROR };
 struct LlmStatus { LlmState state; char modelPath[64]; char errorMsg[128]; };
 struct LlmGenParams {};

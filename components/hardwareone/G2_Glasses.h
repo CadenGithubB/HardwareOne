@@ -1300,7 +1300,7 @@ void formatG2Status(const G2ConnectionStatus& status, char* buffer, size_t buffe
 void getG2Status(char* buffer, size_t bufferSize);
 
 // Low-level packet functions (for advanced use)
-uint16_t g2CalcCRC16(const uint8_t* data, size_t len);
+uint16_t g2CalcCrc16(const uint8_t* data, size_t len);
 bool g2SendPacket(uint8_t serviceHi, uint8_t serviceLo, const uint8_t* payload, size_t payloadLen);
 size_t g2EncodeVarint(uint32_t value, uint8_t* buffer);
 

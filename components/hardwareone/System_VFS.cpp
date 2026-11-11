@@ -18,7 +18,7 @@
 #include "HAL_SDCard.h"
 // Preserve one filesystem access path; permissions and /sd routing below are
 // independent of the physical transport.
-static SdMmcCardFS& SD = gSdMmcCard;
+static SdMmcCardFs& SD = gSdMmcCard;
 #else
 #include <SD.h>
 #endif
@@ -194,19 +194,19 @@ static void publishCapacitySnapshot(StorageType type,
 //   physically yanked since last success. Arduino SD.begin only checks card
 //   IDENT; it doesn't prove file ops will succeed. Callers that care about
 //   "can I actually write a file here" (the video recorder, log overflow,
-//   image saves) should check isSDWritable() and gate their UI on that.
+//   image saves) should check isSdWritable() and gate their UI on that.
 //   Everything that just cares about "driver says it's there" (file browser
-//   listing, diagnostics) can stay on isSDAvailable().
+//   listing, diagnostics) can stay on isSdAvailable().
 //
 // Lifecycle:
-//   tryMountSD succeeds     → gSdMounted=true, probe runs → gSdWritable=?
+//   tryMountSd succeeds     → gSdMounted=true, probe runs → gSdWritable=?
 //   probe succeeds          → gSdWritable=true
-//   any caller's write      → if it fails, noteSDWriteFailure() → gSdWritable=false
-//   next isSDWritable() call → re-probe if gSdMounted but !gSdWritable
+//   any caller's write      → if it fails, noteSdWriteFailure() → gSdWritable=false
+//   next isSdWritable() call → re-probe if gSdMounted but !gSdWritable
 //   unmount / mount failure → both false
-static bool probeSDWriteInternal();  // fwd decl
+static bool probeSdWriteInternal();  // fwd decl
 
-// Fully tear down SPI + SD so tryMountSD() can start from a clean slate.
+// Fully tear down SPI + SD so tryMountSd() can start from a clean slate.
 static void spiTeardown() {
 #if ENABLE_SD_CARD && !ENABLE_SDMMC_CARD && defined(SD_CS_PIN)
   SD.end();
@@ -232,7 +232,7 @@ static void sdPowerUpClocks() {
 #endif
 }
 
-static bool tryMountSD() {
+static bool tryMountSd() {
   // Mount/probe/teardown changes the same SD driver state used by open files.
   // Hold the global FS mutex for the complete transition so no task can enter
   // VFS::open/read/write while SPI and the FAT volume are being rebuilt.
@@ -242,7 +242,7 @@ static bool tryMountSD() {
   if (SD.begin()) {
     gSdMounted = true;
     ++gSdMountGeneration;
-    gSdWritable = probeSDWriteInternal();
+    gSdWritable = probeSdWriteInternal();
     char freeMb[16];
     const uint64_t total = SD.totalBytes(), used = SD.usedBytes();
     snprintf(freeMb, sizeof(freeMb), "%llu",
@@ -281,7 +281,7 @@ static bool tryMountSD() {
   // it and still corrupt data under sustained reads — and the ladder only
   // falls back at MOUNT time, so a card that mounts at 16 MHz and corrupts
   // under load stays at 16 MHz. The real test is sustained voicefetch traffic
-  // with hash comparison — see the note in tryMountSD's caller docs.
+  // with hash comparison — see the note in tryMountSd's caller docs.
   uint32_t frequencies[] = {16000000, 10000000, 4000000, 400000};
   const int FULL_ATTEMPTS = 3;
 
@@ -316,7 +316,7 @@ static bool tryMountSD() {
         // present but e.g. write-protected or has a bad sector where
         // SD.open lands, we want to know now, not the first time the
         // video recorder tries to create a file.
-        gSdWritable = probeSDWriteInternal();
+        gSdWritable = probeSdWriteInternal();
         INFO_STORAGEF("[SD] Write probe: %s", gSdWritable ? "PASS" : "FAIL");
         {
           char freeMb[16];
@@ -345,10 +345,10 @@ static bool tryMountSD() {
 
 bool init() {
   // LittleFS is initialized in initFilesystem(). We only mount SD here.
-  return tryMountSD();
+  return tryMountSd();
 }
 
-bool isLittleFSReady() {
+bool isLittleFsReady() {
   return filesystemReady;
 }
 
@@ -361,9 +361,9 @@ bool isLittleFSReady() {
 // Filename choice matters: some FAT drivers handle leading-dot filenames
 // oddly (no 8.3 basename). The temporary names are 8.3-safe and all-caps so
 // they round-trip cleanly on any FAT implementation.
-static bool probeSDWriteInternal() {
+static bool probeSdWriteInternal() {
 #if ENABLE_SD_CARD
-  if (!isSDAvailable()) return false;
+  if (!isSdAvailable()) return false;
   // A user may already have a similarly named file on a removable card.
   // Pick a vacant 8.3 name; never truncate or delete existing card contents.
   char kProbePath[16];
@@ -426,7 +426,7 @@ static bool probeSDWriteInternal() {
 #endif
 }
 
-bool isSDAvailable() {
+bool isSdAvailable() {
   FsLockGuard guard("VFS.sdAvailable");
 #if ENABLE_SD_CARD && ENABLE_SDMMC_CARD
   if (gSdMounted && !SD.available()) {
@@ -439,15 +439,15 @@ bool isSDAvailable() {
 }
 
 // Writable check — re-probes lazily if the state was invalidated via
-// noteSDWriteFailure(). This gives us "auto-recover" behaviour: if a card
+// noteSdWriteFailure(). This gives us "auto-recover" behaviour: if a card
 // was yanked and re-inserted and a later probe succeeds, we flip back to
 // writable without needing an explicit remount.
-bool isSDWritable() {
+bool isSdWritable() {
   FsLockGuard guard("VFS.sdWritable");
-  if (!isSDAvailable()) return false;
+  if (!isSdAvailable()) return false;
   if (gSdWritable) return true;
   // Not currently writable — maybe it was, maybe it is again. Try once.
-  if (probeSDWriteInternal()) {
+  if (probeSdWriteInternal()) {
     INFO_STORAGEF("[SD] Write probe now succeeding — card is writable again");
     gSdWritable = true;
     // Edge from failed->ok: recovery counterpart to SYSEVT_SD_WRITE_FAILED.
@@ -459,9 +459,9 @@ bool isSDWritable() {
 }
 
 // Callers that attempt an SD write and see it fail should call this to
-// invalidate the cached writable flag. Next isSDWritable() query will
+// invalidate the cached writable flag. Next isSdWritable() query will
 // re-probe. Cheap — single bool write.
-void noteSDWriteFailure(const char* hint) {
+void noteSdWriteFailure(const char* hint) {
   FsLockGuard guard("VFS.sdWriteFailure");
   if (gSdWritable) {
     WARN_STORAGEF("[SD] Write failure reported (%s); marking card not writable",
@@ -526,7 +526,7 @@ size_t listVirtualEntries(const String& parentPath, VirtualEntry* out, size_t ca
   // Today's only virtual entry: /sd, surfaced at the LittleFS root when
   // the card is mounted. New mount points get added here — keep entries
   // alphabetised by name so consumer ordering is stable.
-  if (p == "/" && isSDAvailable()) {
+  if (p == "/" && isSdAvailable()) {
     if (n < cap) {
       out[n].name = "sd";
       out[n].isFolder = true;
@@ -591,7 +591,7 @@ static bool exists(const String& path) {
   FsLockGuard guard("VFS.exists");
 
   if (getStorageType(p) == SDCARD) {
-    if (!isSDAvailable()) return false;
+    if (!isSdAvailable()) return false;
     if (p == "/sd") return true;
     return SD.exists(p.c_str() + 3);
   }
@@ -614,7 +614,7 @@ static File open(const String& path, const char* mode = FILE_READ, bool create =
   // audit line. Open without it first; the directory walk runs only when the
   // plain open fails, which is the one case (a missing directory) it is for.
   if (getStorageType(p) == SDCARD) {
-    if (!isSDAvailable()) return File();
+    if (!isSdAvailable()) return File();
     const char* sdPath = (p == "/sd") ? "/" : p.c_str() + 3;
     File f = SD.open(sdPath, mode, false);
     if (!f && create && mode && mode[0] != 'r') f = SD.open(sdPath, mode, true);
@@ -633,7 +633,7 @@ static bool mkdir(const String& path) {
   FsLockGuard guard("VFS.mkdir");
 
   if (getStorageType(p) == SDCARD) {
-    if (!isSDAvailable()) return false;
+    if (!isSdAvailable()) return false;
     if (p == "/sd") return false;
     return SD.mkdir(p.c_str() + 3);
   }
@@ -659,7 +659,7 @@ static bool remove(const String& path) {
   FsLockGuard guard("VFS.remove");
 
   if (getStorageType(p) == SDCARD) {
-    if (!isSDAvailable()) return false;
+    if (!isSdAvailable()) return false;
     if (p == "/sd") return false;
     return SD.remove(p.c_str() + 3);
   }
@@ -684,7 +684,7 @@ static bool rename(const String& pathFrom, const String& pathTo) {
   FsLockGuard guard("VFS.rename");
 
   if (tf == SDCARD) {
-    if (!isSDAvailable()) return false;
+    if (!isSdAvailable()) return false;
     if (from == "/sd" || to == "/sd") return false;
     return SD.rename(from.c_str() + 3, to.c_str() + 3);
   }
@@ -701,7 +701,7 @@ static bool rmdir(const String& path) {
   FsLockGuard guard("VFS.rmdir");
 
   if (getStorageType(p) == SDCARD) {
-    if (!isSDAvailable()) return false;
+    if (!isSdAvailable()) return false;
     if (p == "/sd") return false;
     return SD.rmdir(p.c_str() + 3);
   }
@@ -721,7 +721,7 @@ static FreshCapacitySample sampleCapacityFreshLocked(StorageType type) {
   FreshCapacitySample result;
 
   if (type == SDCARD) {
-    if (!isSDAvailable()) return result;
+    if (!isSdAvailable()) return result;
     result.snapshot.totalBytes = SD.totalBytes();
     // Arduino SD reports zero on failure. A mounted volume with zero total
     // capacity is unusable; zero used bytes alone can also mean an empty card.
@@ -827,7 +827,7 @@ static uint32_t       gLogReserveDrops     = 0;
 static constexpr uint32_t LOG_OVERFLOW_REARM_CHECK_MS = 30000;
 
 // A card the latch routed logs to can vanish (SPI and detect-less SDMMC slots
-// only notice on the next failed write). isSDWritable() re-probes with a real
+// only notice on the next failed write). isSdWritable() re-probes with a real
 // write every time it is false, which on a yanked SPI card is an SD.open per
 // logged line, so after a failed answer the overflow path waits this long
 // before asking again.
@@ -923,11 +923,11 @@ void noteLogReserveDrop() { ++gLogReserveDrops; }
 uint32_t logReserveDrops() { return gLogReserveDrops; }
 
 // G-39: overflow needs a card that takes writes, not just one that was
-// mounted. isSDAvailable() alone kept routing to a yanked SPI or detect-less
+// mounted. isSdAvailable() alone kept routing to a yanked SPI or detect-less
 // SDMMC card until reboot, so every log line failed on /sd.
 static bool overflowSdWritable() {
   if (gLogOverflowSdFailed && (millis() - gLogOverflowSdFailedAtMs) < gLogOverflowSdBackoffMs) return false;
-  const bool ok = isSDWritable();
+  const bool ok = isSdWritable();
   gLogOverflowSdFailed = !ok;
   if (!ok) {
     gLogOverflowSdFailedAtMs = millis();
@@ -940,7 +940,7 @@ void noteLogOverflowSdFailure(const char* hint) {
   gLogOverflowSdFailed = true;
   gLogOverflowSdFailedAtMs = millis();
   gLogOverflowSdBackoffMs = LOG_OVERFLOW_SD_APPEND_FAIL_MS;
-  noteSDWriteFailure(hint);
+  noteSdWriteFailure(hint);
 }
 
 LogTier resolveLogPath(const char* primaryPath, size_t reserveBytes,
@@ -965,7 +965,7 @@ LogTier resolveLogPath(const char* primaryPath, size_t reserveBytes,
       // so this level only picks the tier, it never silences a log.
       gLogOverflowRearmFree = want + LOG_OVERFLOW_DEFAULT_RESERVE;
       gLogOverflowRearmCheckMs = millis();
-      const bool sd = isSDAvailable();
+      const bool sd = isSdAvailable();
       logSystemEvent("FS", "LittleFS free below reserve (%u < %u bytes) — log writes latched to SD overflow (SD mounted: %s%s)",
                      (unsigned)gLogFreeCheckCached, (unsigned)want,
                      sd ? "yes" : "no",
@@ -1034,7 +1034,7 @@ bool resolveOverflowPath(const char* primaryPath, size_t reserveBytes,
   return resolveLogPath(primaryPath, reserveBytes, outPath, outPathLen) == LogTier::Overflow;
 }
 
-bool unmountSD() {
+bool unmountSd() {
   FsLockGuard guard("VFS.sdUnmount");
   if (sdLifecycleRefusedLocked("Unmount")) return false;
   invalidateStatsSnapshot(SDCARD);
@@ -1057,7 +1057,7 @@ bool unmountSD() {
   return false;
 }
 
-bool remountSD() {
+bool remountSd() {
   FsLockGuard guard("VFS.sdRemount");
   if (sdLifecycleRefusedLocked("Remount")) return false;
   invalidateStatsSnapshot(SDCARD);
@@ -1066,21 +1066,21 @@ bool remountSD() {
   gSdMounted = false;
   gSdWritable = false;
   if (!ended) return false;
-  return tryMountSD();
+  return tryMountSd();
 #elif ENABLE_SD_CARD && defined(SD_CS_PIN)
   // Full teardown regardless of current mount state — guarantees a clean bus.
   spiTeardown();
   gSdMounted = false;
   gSdWritable = false;
   delay(100);
-  return tryMountSD();
+  return tryMountSd();
 #else
   return false;
 #endif
 }
 
 // Format SD card as FAT32 using ESP-IDF low-level API
-bool formatSD() {
+bool formatSd() {
   FsLockGuard guard("VFS.sdFormat");
   if (sdLifecycleRefusedLocked("Format")) return false;
   invalidateStatsSnapshot(SDCARD);
@@ -1091,7 +1091,7 @@ bool formatSD() {
   if (!SD.format()) return false;
   gSdMounted = true;
   ++gSdMountGeneration;
-  gSdWritable = probeSDWriteInternal();
+  gSdWritable = probeSdWriteInternal();
   return true;
 #elif ENABLE_SD_CARD && defined(SD_CS_PIN)
   INFO_STORAGEF("[SD FORMAT] Starting format process...");
@@ -1186,7 +1186,7 @@ bool formatSD() {
   delay(500);       // 500 ms is enough for all tested cards
 
   DEBUG_STORAGEF("[SD FORMAT] Remounting with Arduino SD...");
-  return tryMountSD();
+  return tryMountSd();
 #else
   return false;
 #endif
@@ -1539,7 +1539,7 @@ static const char* cmd_sdmount(const String& argsInput) {
   snprintf(buf, sizeof(buf), "Error: SD card support is disabled or unavailable on this board");
   return buf;
 #else
-  if (VFS::isSDAvailable()) {
+  if (VFS::isSdAvailable()) {
     snprintf(buf, sizeof(buf), "SD card already mounted at /sd");
     return buf;
   }
@@ -1548,7 +1548,7 @@ static const char* cmd_sdmount(const String& argsInput) {
     return buf;
   }
   
-  if (VFS::remountSD()) {
+  if (VFS::remountSd()) {
     uint64_t total, used, free;
     if (VFS::getStats(VFS::SDCARD, total, used, free)) {
       snprintf(buf, sizeof(buf), "SD card mounted successfully at /sd\nSize: %llu MB, Used: %llu MB, Free: %llu MB",
@@ -1575,7 +1575,7 @@ static const char* cmd_sdunmount(const String& argsInput) {
     return buf;
   }
   // Release a stale mount too (e.g. an accidentally removed SDMMC card).
-  if (VFS::unmountSD()) {
+  if (VFS::unmountSd()) {
     snprintf(buf, sizeof(buf), "SD card unmounted successfully");
   } else {
     snprintf(buf, sizeof(buf), "Error: Failed to unmount SD card");
@@ -1608,7 +1608,7 @@ static const char* cmd_sdformat(const String& argsInput) {
   snprintf(buf, sizeof(buf), "Formatting SD card as FAT32... (this may take a moment)");
   INFO_STORAGEF("%s", buf);
   
-  if (VFS::formatSD()) {
+  if (VFS::formatSd()) {
     snprintf(buf, sizeof(buf), "SD card formatted successfully as FAT32 and mounted at /sd");
     logSystemEvent("SD", "SD card formatted by '%s' — ALL card data erased", currentExecUser().c_str());
     systemEventPost(SYSEVT_STORAGE_FORMATTED, "sd", "FAT32 — all card data erased");
@@ -1628,7 +1628,7 @@ static const char* cmd_sdinfo(const String& argsInput) {
   snprintf(buf, sizeof(buf), "Error: SD card not supported on this board");
   return buf;
 #else
-  if (!VFS::isSDAvailable()) {
+  if (!VFS::isSdAvailable()) {
     if (wantJson) return "{\"schema\":1,\"supported\":true,\"mounted\":false}";
     snprintf(buf, sizeof(buf), "Error: SD card not mounted. Use 'sdmount' to mount.");
     return buf;
@@ -1678,7 +1678,7 @@ static const char* cmd_sdinfo(const String& argsInput) {
 
 #if ENABLE_SD_CARD && !ENABLE_SDMMC_CARD && defined(SD_CS_PIN)
 // Helper to test SD card with specific pins
-static uint8_t testSDPins(int cs, int sck, int miso, int mosi, char* buf, int* pos, int maxLen) {
+static uint8_t testSdPins(int cs, int sck, int miso, int mosi, char* buf, int* pos, int maxLen) {
   *pos = appendf(buf, maxLen, *pos, "\n--- Testing CS=%d, SCK=%d, MISO=%d, MOSI=%d ---\n", cs, sck, miso, mosi);
   
   SPI.end();
@@ -1758,7 +1758,7 @@ static const char* cmd_sddiag(const String& argsInput) {
       SD_MMC_POWER_ACTIVE_LEVEL, SD_MMC_LDO_CHANNEL, SD_MMC_DETECT_PIN,
       SD_MMC_DETECT_PIN < 0 ? "no detect switch (presence determined at mount)" :
           (SD.cardPresent() ? "inserted" : "absent"),
-      VFS::isSDAvailable() ? "mounted" : "not mounted", SD.lastError());
+      VFS::isSdAvailable() ? "mounted" : "not mounted", SD.lastError());
   return buf;
 #elif !ENABLE_SD_CARD
   snprintf(buf, buf_SIZE, "Error: SD card not supported on this board");
@@ -1791,23 +1791,23 @@ static const char* cmd_sddiag(const String& argsInput) {
   
   // Test with CONFIGURED pins first
   pos = appendf(buf, buf_SIZE, pos, "\n=== Testing CONFIGURED pins ===");
-  uint8_t r1 = testSDPins(SD_CS_PIN, SD_SCK_PIN, SD_MISO_PIN, SD_MOSI_PIN, buf, &pos, buf_SIZE);
+  uint8_t r1 = testSdPins(SD_CS_PIN, SD_SCK_PIN, SD_MISO_PIN, SD_MOSI_PIN, buf, &pos, buf_SIZE);
   
   // If that failed, try alternative pin configs from Seeed docs
   if (r1 == 0xFF) {
     pos = appendf(buf, buf_SIZE, pos, "\n=== Trying ALTERNATIVE pin configs ===");
     
     // Alt 1: CS=21, SCK=7, MISO=8, MOSI=9 (some Seeed docs)
-    uint8_t r2 = testSDPins(21, 7, 8, 9, buf, &pos, buf_SIZE);
+    uint8_t r2 = testSdPins(21, 7, 8, 9, buf, &pos, buf_SIZE);
     
     if (r2 == 0xFF) {
       // Alt 2: CS=21, SCK=7, MISO=8, MOSI=10
-      testSDPins(21, 7, 8, 10, buf, &pos, buf_SIZE);
+      testSdPins(21, 7, 8, 10, buf, &pos, buf_SIZE);
     }
   }
   
   pos = appendf(buf, buf_SIZE, pos, "\n\n=== Summary ===\n");
-  pos = appendf(buf, buf_SIZE, pos, "SD Mount Status: %s\n", VFS::isSDAvailable() ? "Mounted" : "Not mounted");
+  pos = appendf(buf, buf_SIZE, pos, "SD Mount Status: %s\n", VFS::isSdAvailable() ? "Mounted" : "Not mounted");
   
   if (r1 == 0xFF) {
     pos = appendf(buf, buf_SIZE, pos, "\nTROUBLESHOOTING:\n");

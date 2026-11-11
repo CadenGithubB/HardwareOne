@@ -377,7 +377,7 @@ A suite opts in by including the header after the `web_batch_stubs` String
 double, defining `FAKE_VFS_PROVIDE_VFS_NAMESPACE` for the production `VFS::`
 signatures as thin forwarders (`openGuarded`, `open`, `exists[Guarded]`,
 `remove[Guarded]`, `rename[Guarded]`, `replaceFileGuarded`, `mkdir[Guarded]`,
-`rmdir[Guarded]`, `isSDAvailable`, `getStats`, `normalize`, `systemAuth` and the
+`rmdir[Guarded]`, `isSdAvailable`, `getStats`, `normalize`, `systemAuth` and the
 rest) and `FAKE_VFS_LOCK_DOUBLE` for the semaphore double the real `FsLockGuard`
 compiles against. `FAKE_VFS_EXTERNAL_AUTH_CONTEXT` keeps the suite's extracted
 real `AuthContext`; `#define stat FakeVfsStat` around an extracted block supplies
@@ -1023,7 +1023,7 @@ an earlier frame-write failure and a failed geometry seek or write post no
 saved event, post one `VIDEO_RECORD_FAILED` carrying the clip name and report
 an SD write failure; a failed start removes its file and
 releases the SD registration. A second harness compiles the real SD-in-use
-registration, `unmountSD`/`remountSD`/`formatSD` and the
+registration, `unmountSd`/`remountSd`/`formatSd` and the
 `sdunmount`/`sdmount`/`sdformat` commands from `System_VFS.cpp` against a fake
 SD driver: each refuses (the command names the holder) while a registration is
 held, decided under the filesystem lock, and works after it ends; the table
@@ -4492,7 +4492,7 @@ without PSRAM support in the core. Source contracts: `sendBondManifest`,
 `String` copy; `cmd_bond_showremotemanifest` and the fwHash branch of
 `handleEspNowRemoteManifest` read through `espnowReadCachedManifest` and the web branch
 takes no filesystem lock itself. It then compiles the production `bondJsonEnvelopeOk`,
-`serializeBondJson`, `writeBondJsonFileLocked`, `cacheManifestToLittleFS`,
+`serializeBondJson`, `writeBondJsonFileLocked`, `cacheManifestToLittleFs`,
 `processBondModeManifestResp`, `processBondSchema`, `manifestCachedFor` and
 `espnowReadCachedManifest` with the vendored ArduinoJson and a harness-local in-memory
 filesystem whose reads and writes assert the filesystem lock. A ~110 KB manifest is

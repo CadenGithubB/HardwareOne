@@ -80,7 +80,7 @@ struct LlmModelDesc {
   char           name[LLM_MODEL_NAME_LEN];   // display text, may be truncated
   LlmBackendKind backend;
   char           path[LLM_MODEL_PATH_LEN];   // local only; "" for remote
-  uint32_t       sizeKB;                     // 0 = unknown (remote often is)
+  uint32_t       sizeKb;                     // 0 = unknown (remote often is)
   uint8_t        storage;                    // LLM_STORAGE_*
   bool           available;                  // false = listed but not selectable right now
 };

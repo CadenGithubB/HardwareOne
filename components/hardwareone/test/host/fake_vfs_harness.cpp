@@ -305,19 +305,19 @@ static void availability() {
   auto& fs = reset();
   fs.put("/sd/x", "x");
   fs.put("/y", "y");
-  check(VFS::isSDAvailable() && VFS::isSDWritable() && VFS::isLittleFSReady(), "both tiers up by default");
+  check(VFS::isSdAvailable() && VFS::isSdWritable() && VFS::isLittleFsReady(), "both tiers up by default");
   fs.sdAvailable() = false;
-  check(!VFS::isSDAvailable() && !VFS::isSDWritable(), "SD reported unavailable");
+  check(!VFS::isSdAvailable() && !VFS::isSdWritable(), "SD reported unavailable");
   check(!unguardedExists("/sd/x") && !unguardedOpen("/sd/x", "r") && !unguardedMkdir("/sd/d") && !unguardedRemove("/sd/x") &&
         !unguardedRename("/sd/x", "/sd/z"), "every /sd operation fails");
   check(unguardedExists("/y"), "LittleFS unaffected");
   fs.sdAvailable() = true;
   fs.capacity[1].writable = false;
-  check(VFS::isSDAvailable() && !VFS::isSDWritable() && unguardedExists("/sd/x"), "read-only SD stays mounted");
+  check(VFS::isSdAvailable() && !VFS::isSdWritable() && unguardedExists("/sd/x"), "read-only SD stays mounted");
   fs.littlefsReady() = false;
-  check(!VFS::isLittleFSReady() && !unguardedExists("/y") && !unguardedOpen("/y", "r"), "LittleFS not ready fails its operations");
+  check(!VFS::isLittleFsReady() && !unguardedExists("/y") && !unguardedOpen("/y", "r"), "LittleFS not ready fails its operations");
   fs.littlefsReady() = true;
-  VFS::noteSDWriteFailure("probe");
+  VFS::noteSdWriteFailure("probe");
   VFS::noteLittleFsBytesWritten(10);
   VFS::invalidateLittleFsFreeCache();
   check(fs.sdWriteFailureNotes == 1 && fs.littlefsBytesNoted == 10 && fs.freeCacheInvalidations == 1, "hint forwarders count");

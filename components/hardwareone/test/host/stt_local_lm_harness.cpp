@@ -82,7 +82,7 @@ class File {
 };
 namespace VFS {
 static bool sdAvailable=true;
-bool isSDAvailable() { return sdAvailable; }
+bool isSdAvailable() { return sdAvailable; }
 AuthContext systemAuth(const char* reason) { return {reason}; }
 namespace Scopes {  // the production Scopes (System_VFS.h); keep in step
   inline constexpr const char* VIDEOS = "/sd/VIDEOS"; inline constexpr const char* CERTS = "/system/certs";

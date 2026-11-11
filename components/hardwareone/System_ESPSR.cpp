@@ -1409,7 +1409,7 @@ static void writeWavHeader(File& f, uint32_t dataSize, uint32_t sampleRate, uint
 }
 
 static String srSnipGetFolder() {
-  if (gSrSnipDest == SrSnipDest::SD || (gSrSnipDest == SrSnipDest::Auto && VFS::isSDAvailable())) {
+  if (gSrSnipDest == SrSnipDest::SD || (gSrSnipDest == SrSnipDest::Auto && VFS::isSdAvailable())) {
     return String(kSrSnipFolderSd);
   }
   return String(kSrSnipFolderInternal);
@@ -2001,7 +2001,7 @@ static bool loadCommandsFileLocked(size_t& outAdded, size_t& outErrors) {
   outAdded = 0;
   outErrors = 0;
 
-  if (!VFS::isSDAvailable()) {
+  if (!VFS::isSdAvailable()) {
     return false;
   }
 
@@ -2044,7 +2044,7 @@ static bool saveCommandsFileLocked(size_t& outSaved) {
 
   FsLockGuard fsGuard("espsr.commands.save");
 
-  if (!VFS::isSDAvailable()) {
+  if (!VFS::isSdAvailable()) {
     return false;
   }
 
@@ -2760,7 +2760,7 @@ void initEspSr() {
   // Try SD card first, fall back to LittleFS if SD not available
   bool folderCreated = false;
   
-  if (VFS::isSDAvailable()) {
+  if (VFS::isSdAvailable()) {
     if (VFS::mkdirGuarded("/sd/ESPSR", VFS::systemAuth(VFS::Scopes::ESPSR_SD, "espsr.init_mkdir"))) {
       INFO_SRF("Created /sd/ESPSR folder on SD card");
       folderCreated = true;

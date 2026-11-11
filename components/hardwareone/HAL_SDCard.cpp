@@ -23,11 +23,11 @@ constexpr char kTag[] = "SDMMC";
 static_assert(SD_MMC_SLOT == 0, "Slot 1 is reserved for ESP-Hosted");
 }
 
-SdMmcCardFS gSdMmcCard;
+SdMmcCardFs gSdMmcCard;
 
-SdMmcCardFS::SdMmcCardFS() : FS(fs::FSImplPtr(new VFSImpl())) {}
+SdMmcCardFs::SdMmcCardFs() : FS(fs::FSImplPtr(new VFSImpl())) {}
 
-bool SdMmcCardFS::configurePower() {
+bool SdMmcCardFs::configurePower() {
   gpio_config_t pins = {};
   pins.pin_bit_mask = 1ULL << SD_MMC_POWER_PIN;
   pins.mode = GPIO_MODE_OUTPUT;
@@ -61,7 +61,7 @@ bool SdMmcCardFS::configurePower() {
   return true;
 }
 
-void SdMmcCardFS::releasePower() {
+void SdMmcCardFs::releasePower() {
   if (pinsConfigured_) {
     gpio_set_level(static_cast<gpio_num_t>(SD_MMC_POWER_PIN),
                    !SD_MMC_POWER_ACTIVE_LEVEL);
@@ -72,7 +72,7 @@ void SdMmcCardFS::releasePower() {
   }
 }
 
-bool SdMmcCardFS::cardPresent() const {
+bool SdMmcCardFs::cardPresent() const {
 #if SD_MMC_DETECT_PIN >= 0
   return pinsConfigured_ &&
       gpio_get_level(static_cast<gpio_num_t>(SD_MMC_DETECT_PIN)) == 0;
@@ -83,18 +83,18 @@ bool SdMmcCardFS::cardPresent() const {
 #endif
 }
 
-bool SdMmcCardFS::available() {
+bool SdMmcCardFs::available() {
 #if SD_MMC_DETECT_PIN >= 0
   if (card_ && !cardPresent()) removed_ = true;
 #endif
   return card_ && !removed_;
 }
 
-bool SdMmcCardFS::begin() {
+bool SdMmcCardFs::begin() {
   return mount(false);
 }
 
-bool SdMmcCardFS::mount(bool allowFormat) {
+bool SdMmcCardFs::mount(bool allowFormat) {
   if (card_) return available();
   error_ = ESP_OK;
   removed_ = false;
@@ -158,7 +158,7 @@ bool SdMmcCardFS::mount(bool allowFormat) {
   return true;
 }
 
-bool SdMmcCardFS::end() {
+bool SdMmcCardFs::end() {
   bool ok = true;
   if (card_) {
     {
@@ -176,7 +176,7 @@ bool SdMmcCardFS::end() {
   return ok;
 }
 
-bool SdMmcCardFS::format() {
+bool SdMmcCardFs::format() {
   if (!end() || !mount(true)) return false;
   // mount(true) repairs an unformatted card; this explicit operation must
   // also erase an already valid volume. Normal begin() never reaches here.
@@ -208,24 +208,24 @@ bool SdMmcCardFS::format() {
   return true;
 }
 
-uint8_t SdMmcCardFS::cardType() const {
+uint8_t SdMmcCardFs::cardType() const {
   if (!card_) return CARD_NONE;
   return (card_->ocr & SD_OCR_SDHC_CAP) ? CARD_SDHC : CARD_SD;
 }
 
-uint64_t SdMmcCardFS::totalBytes() const {
+uint64_t SdMmcCardFs::totalBytes() const {
   uint64_t total = 0, free = 0;
   if (!card_ || esp_vfs_fat_info(kMountPoint, &total, &free) != ESP_OK) return 0;
   return total;
 }
 
-uint64_t SdMmcCardFS::usedBytes() const {
+uint64_t SdMmcCardFs::usedBytes() const {
   uint64_t total = 0, free = 0;
   if (!card_ || esp_vfs_fat_info(kMountPoint, &total, &free) != ESP_OK) return 0;
   return total >= free ? total - free : 0;
 }
 
-const char* SdMmcCardFS::lastError() const {
+const char* SdMmcCardFs::lastError() const {
   return esp_err_to_name(error_);
 }
 #endif

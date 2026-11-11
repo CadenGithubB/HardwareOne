@@ -875,7 +875,7 @@ static size_t buildImageAnimatedChooseRows() {
 
   gAnimIconPickCount = 0;
   static constexpr const char* kRoot = G2_ICON_ANIMATIONS_VFS_PATH;
-  if (!VFS::isSDAvailable()) {
+  if (!VFS::isSdAvailable()) {
     snprintf(gRows[row], TEST_ROW_LEN, "SD not mounted");
     gRows[row][TEST_ROW_LEN - 1] = '\0';
     gRowPtrs[row] = gRows[row];
@@ -886,7 +886,7 @@ static size_t buildImageAnimatedChooseRows() {
     row++;
     return row;
   }
-  if (VFS::isLittleFSReady() && VFS::existsGuarded(String(kRoot), currentAuthContext())) {
+  if (VFS::isLittleFsReady() && VFS::existsGuarded(String(kRoot), currentAuthContext())) {
     FsLockGuard fsGuard("g2.testsuite.anim_scan");
     File dir = VFS::openGuarded(kRoot, FILE_READ, currentAuthContext());
     if (dir && dir.isDirectory()) {

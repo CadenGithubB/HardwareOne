@@ -60,10 +60,10 @@ assert "portEXIT_CRITICAL(&gCapacitySnapshotMux)" in invalidate
 # Every SD driver lifecycle transition invalidates the shared SD tier while it
 # owns the filesystem transition lock.
 for signature in (
-    "static bool tryMountSD()",
-    "bool unmountSD()",
-    "bool remountSD()",
-    "bool formatSD()",
+    "static bool tryMountSd()",
+    "bool unmountSd()",
+    "bool remountSd()",
+    "bool formatSd()",
 ):
     body = function_body(vfs_cpp, signature)
     assert "FsLockGuard guard(" in body
@@ -130,7 +130,7 @@ for path in COMPONENT.glob("*.cpp"):
 # The specialized overflow cache remains separate from presentation snapshots.
 overflow = vfs_cpp[
     vfs_cpp.index("static bool           gLogOverflowActive") :
-    vfs_cpp.index("bool unmountSD()")
+    vfs_cpp.index("bool unmountSd()")
 ]
 assert "gLogFreeCheckCached" in overflow
 assert "getStatsSnapshot" not in overflow

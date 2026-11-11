@@ -53,14 +53,14 @@
 static constexpr uint32_t kRecCheckpointIntervalMs = 5000;
 
 // Defaults: new recordings go to SD when writable; legacy/internal copies may remain on LittleFS.
-static const char kMicRecLittleFS[] = "/recordings";
-static const char kMicRecSD[]       = "/sd/recordings";
+static const char kMicRecLittleFs[] = "/recordings";
+static const char kMicRecSd[]       = "/sd/recordings";
 
 static String micPrimaryRecordingsFolder() {
-  if (VFS::isSDWritable()) {
-    return String(kMicRecSD);
+  if (VFS::isSdWritable()) {
+    return String(kMicRecSd);
   }
-  return String(kMicRecLittleFS);
+  return String(kMicRecLittleFs);
 }
 
 // Microphone state
@@ -982,8 +982,8 @@ static void micRecordingRepairFolder(const char* folder, int& repaired, int& rem
 
 void micRecordingRepairInterrupted() {
   int repaired = 0, removed = 0;
-  micRecordingRepairFolder(kMicRecLittleFS, repaired, removed);
-  if (VFS::isSDWritable()) micRecordingRepairFolder(kMicRecSD, repaired, removed);
+  micRecordingRepairFolder(kMicRecLittleFs, repaired, removed);
+  if (VFS::isSdWritable()) micRecordingRepairFolder(kMicRecSd, repaired, removed);
   if (repaired || removed) {
     INFO_MIC_LIFECYCLEF("Interrupted recordings: %d repaired, %d empty removed",
                         repaired, removed);
@@ -2095,14 +2095,14 @@ String getRecordingsList() {
       list += entryBuf;
     }
   };
-  walk(String(kMicRecSD));
-  walk(String(kMicRecLittleFS));
+  walk(String(kMicRecSd));
+  walk(String(kMicRecLittleFs));
   return list;
 }
 
 bool deleteRecording(const char* filename) {
-  String sdPath = String(kMicRecSD) + "/" + filename;
-  String lfPath = String(kMicRecLittleFS) + "/" + filename;
+  String sdPath = String(kMicRecSd) + "/" + filename;
+  String lfPath = String(kMicRecLittleFs) + "/" + filename;
   FsLockGuard fsGuard("mic.record.delete");
   if (VFS::existsGuarded(sdPath, currentAuthContext())) return VFS::removeGuarded(sdPath, currentAuthContext());
   if (VFS::existsGuarded(lfPath, currentAuthContext())) return VFS::removeGuarded(lfPath, currentAuthContext());
@@ -2970,7 +2970,7 @@ const char* cmd_micdelete(const String& argsInput) {
       }
       return deleted;
     };
-    int deleted = wipeWavs(kMicRecSD) + wipeWavs(kMicRecLittleFS);
+    int deleted = wipeWavs(kMicRecSd) + wipeWavs(kMicRecLittleFs);
     if (deleted == 0) {
       return "No recordings found";
     }

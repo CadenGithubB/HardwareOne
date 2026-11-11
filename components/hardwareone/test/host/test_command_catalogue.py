@@ -24,7 +24,7 @@ STUBS = {
     "System_BuildConfig.h": "",
     "System_RadioCompanion.h": "#define HW1_RADIO_COMPANION FIXTURE_RADIO_COMPANION\nbool radioCompanionOnline();",
     "System_I2C.h": "bool isSensorConnected(const char* name);",
-    "System_VFS.h": "namespace VFS { bool isSDAvailable(); }",
+    "System_VFS.h": "namespace VFS { bool isSdAvailable(); }",
     "HAL_Input.h": "extern bool gInputConnected;",
     "i2csensor_ano_encoder.h": "extern bool gAnoEncoderConnected;",
     "System_Camera_DVP.h": "extern bool cameraConnected;",

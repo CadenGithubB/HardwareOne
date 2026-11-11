@@ -76,7 +76,7 @@ static bool sttReadChunk(SttOwner,SttToken,SttTextChunk* c){if(!chunkReady)retur
 static bool sttAcknowledgeChunk(SttOwner,SttToken,uint32_t){chunkReady=false;return true;}
 static bool sttSnapshot(SttOwner,SttToken,SttSnapshot* p){p->workerActive=brokerActive;p->state=brokerActive?SttState::Recording:SttState::Done;return true;}
 namespace VFS {
-static bool isSDWritable(){return sdPresent;}
+static bool isSdWritable(){return sdPresent;}
 static uint32_t sdMountGeneration(){return mountGeneration;}
 }
 // INSERT_RUNTIME

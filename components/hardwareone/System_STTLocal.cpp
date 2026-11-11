@@ -301,7 +301,7 @@ struct Backend {
 bool sttLocalAvailable(char* error,size_t cap,const char** reason) {
     File file=openModel();
     const char* problem=nullptr;
-    if(strncmp(kModelPath,"/sd/",4)==0 && !VFS::isSDAvailable())
+    if(strncmp(kModelPath,"/sd/",4)==0 && !VFS::isSdAvailable())
         problem="Speech model SD card unavailable. Insert the model card and mount SD.";
     else if(!file || file.isDirectory())
         problem="Speech model cannot be opened. Install the matching model at " HW1_STT_MODEL_PATH ".";

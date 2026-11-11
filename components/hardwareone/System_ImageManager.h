@@ -21,7 +21,7 @@ struct ImageInfo {
   size_t size;              // File size in bytes
   time_t timestamp;         // Capture timestamp (0 if unknown)
   ImageStorageLocation location;  // Where the image is stored
-  bool isOnSD;              // True if on SD card
+  bool isOnSd;              // True if on SD card
 };
 
 // Storage stats
@@ -42,9 +42,9 @@ public:
   bool init();
   // VFS owns the SD mount: these ask it on every call, so a card mounted
   // (sdmount, sdformat) or removed after boot is seen without a reboot.
-  bool initSD();  // logs the card VFS has mounted; true when one is
-  bool isSDAvailable() const;
-  bool isLittleFSAvailable() const { return littleFSAvailable; }
+  bool initSd();  // logs the card VFS has mounted; true when one is
+  bool isSdAvailable() const;
+  bool isLittleFsAvailable() const { return littleFsAvailable; }
   
   // Capture and save
   // Returns the saved image's full path, or empty string on failure.
@@ -90,20 +90,20 @@ public:
   String getCaptureFolder(ImageStorageLocation location = IMAGE_STORAGE_LITTLEFS);
   
 private:
-  bool littleFSAvailable;
+  bool littleFsAvailable;
   int imageCounter;  // For unique filenames
   // One stale-temporary sweep per tier per mount: a reset mid-save leaves
   // `<image>.jpg.tmp`, which no listing or retention would otherwise reclaim.
   // LittleFS is swept once per init(); SD once per VFS::sdMountGeneration().
   bool lfsStaleSwept = false;
   uint32_t sdSweptGeneration = 0;
-  bool tierAvailable(bool isSD) const;
+  bool tierAvailable(bool isSd) const;
   void sweepStaleTemporaries(ImageStorageLocation location, const String& folder);
 
   // ImageManager owns "this is a managed photo": a .jpg/.jpeg file inside the
   // capture folder of the tier the path names. Reports the normalized path and
   // its tier when `path` qualifies; readers and deleters refuse anything else.
-  bool managedImagePath(const String& path, String& normalizedPath, bool& isSD);
+  bool managedImagePath(const String& path, String& normalizedPath, bool& isSd);
 
   // Helper to get mount prefix for location
   String getMountPrefix(ImageStorageLocation location);

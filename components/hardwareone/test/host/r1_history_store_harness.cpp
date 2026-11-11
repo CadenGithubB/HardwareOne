@@ -138,7 +138,7 @@ struct AuthContext { std::string scope, reason; };
 namespace VFS {
 namespace Scopes { static const char* CAPTURES = "captures"; }
 static AuthContext systemAuth(const char* scope, const char* reason) { return {scope, reason}; }
-static bool isLittleFSReady() { return ready; }
+static bool isLittleFsReady() { return ready; }
 static void authorized(const String& path, const AuthContext& auth) {
   check(auth.scope == Scopes::CAPTURES && auth.reason.rfind("R1 history ", 0) == 0, "confined system capture authorization");
   check(str(path) == "/logging_captures" || str(path).rfind("/logging_captures/r1-health-history", 0) == 0,

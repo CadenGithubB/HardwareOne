@@ -876,7 +876,7 @@ const char* commandList(JsonDocument& doc, const CommandArgs& args) {
   if (i < args.count() && (args.arg(i) == "internal" || args.arg(i) == "sd"))
     sd = args.arg(i++) == "sd";
   else
-    sd = VFS::isSDWritable();
+    sd = VFS::isSdWritable();
   if (i < args.count() && args.arg(i)[0] != 'u' &&
       !TranscriptionUI::parseUnsigned(args.arg(i++).c_str(), offset))
     return error(doc, "Invalid offset");
@@ -917,7 +917,7 @@ const char* commandList(JsonDocument& doc, const CommandArgs& args) {
     putFlag(root, "more", page.more);
     putFlag(root, "capped", page.capped);
     put(root, "tier", sd ? "sd" : "internal");
-    putFlag(root, "sdAvailable", sd || VFS::isSDAvailable());
+    putFlag(root, "sdAvailable", sd || VFS::isSdAvailable());
   }
   // Titles are the start of the text: clear them once serialized.
   TranscriptionUI::clear(reinterpret_cast<char*>(gPageStorage), sizeof(gPageStorage));

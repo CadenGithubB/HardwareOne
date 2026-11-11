@@ -50,13 +50,13 @@ def generate(baseline: Path | None) -> str:
                                               vfs_header.index("bool getStats(StorageType type")]
     reader += vfs[vfs.index("DirectoryReader::DirectoryReader("):vfs.index("static FS* fsForPath(")] + "\n}\n"
     markers = ["ImageManager::ImageManager()", "ImageManager::~ImageManager()",
-               "bool ImageManager::init()", "bool ImageManager::initSD()",
+               "bool ImageManager::init()", "bool ImageManager::initSd()",
                "String ImageManager::getMountPrefix(", "String ImageManager::getCaptureFolder(",
                "bool ImageManager::ensureCaptureFolder(", "String ImageManager::generateFilename(",
                "String ImageManager::saveImage("]
     # SD availability asked of VFS per operation rather than latched at init.
     if "bool ImageManager::tierAvailable(" in source:
-        markers += ["bool ImageManager::isSDAvailable() const", "bool ImageManager::tierAvailable("]
+        markers += ["bool ImageManager::isSdAvailable() const", "bool ImageManager::tierAvailable("]
     validator = "const char* ImageManager::captureFolderRejectReason(" in source
     if validator:
         markers.append("const char* ImageManager::captureFolderRejectReason(")

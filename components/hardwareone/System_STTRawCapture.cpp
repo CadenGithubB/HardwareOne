@@ -160,7 +160,7 @@ bool writeSidecar(const char* pcmPath, uint32_t endedMs, bool drained) {
 
 bool sttRawCaptureArm(bool on, char* reason, size_t reasonCap) {
   if (reason && reasonCap) reason[0] = '\0';
-  if (on && !VFS::isSDWritable()) {
+  if (on && !VFS::isSdWritable()) {
     if (reason) snprintf(reason, reasonCap, "the SD card is not writable");
     return false;
   }
@@ -198,7 +198,7 @@ void sttRawCaptureSessionBegin(uint8_t audioSource, uint32_t sampleRate) {
     setResult("not recorded: the previous recording is still being written");
     return;
   }
-  if (!VFS::isSDWritable()) { setResult("not recorded: the SD card is not writable"); return; }
+  if (!VFS::isSdWritable()) { setResult("not recorded: the SD card is not writable"); return; }
   auto* memory = static_cast<int16_t*>(ps_alloc(kRingSamples * sizeof(int16_t), AllocPref::RequirePsram, "stt.raw_ring"));
   if (!memory) { setResult("not recorded: no PSRAM for the 256 KiB ring"); return; }
   char path[sizeof(gRaw.path)];

@@ -12,9 +12,9 @@
 // do for the SPI card. All methods below require the VFS filesystem lock.
 // Keeping this separate from Arduino SD_MMC lets slot 0 coexist with the
 // ESP-Hosted C6 on slot 1 without relying on Arduino variant-global settings.
-class SdMmcCardFS final : public fs::FS {
+class SdMmcCardFs final : public fs::FS {
  public:
-  SdMmcCardFS();
+  SdMmcCardFs();
   bool begin();                     // mount existing FAT; never auto-format
   bool end();                       // release slot, then card power / LDO
   bool format();                    // destructive, explicit VFS command only
@@ -36,5 +36,5 @@ class SdMmcCardFS final : public fs::FS {
   bool removed_ = false;
 };
 
-extern SdMmcCardFS gSdMmcCard;
+extern SdMmcCardFs gSdMmcCard;
 #endif

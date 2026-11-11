@@ -1148,8 +1148,8 @@ static esp_err_t handleBondStatus(httpd_req_t* req) {
     webBondSendChunkf(req, "\"features\":\"%s\",", features.c_str());
     webBondSendChunkf(req, "\"sensors\":\"%s\",", sensors.c_str());
     webBondSendChunkf(req, "\"services\":\"%s\",", services.c_str());
-    webBondSendChunkf(req, "\"flashMB\":%lu,", (unsigned long)cap.flashSizeMB);
-    webBondSendChunkf(req, "\"psramMB\":%lu,", (unsigned long)cap.psramSizeMB);
+    webBondSendChunkf(req, "\"flashMB\":%lu,", (unsigned long)cap.flashSizeMb);
+    webBondSendChunkf(req, "\"psramMB\":%lu,", (unsigned long)cap.psramSizeMb);
     
     // Add individual sensor/feature masks for UI logic
     webBondSendChunkf(req, "\"featureMask\":%lu,", (unsigned long)cap.featureMask);

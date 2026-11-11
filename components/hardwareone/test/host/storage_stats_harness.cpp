@@ -96,7 +96,7 @@ struct SDBackend {
 } SD;
 namespace VFS {
 // INSERT_STORAGE_TYPE
-static bool isSDAvailable() { return sdMounted; }
+static bool isSdAvailable() { return sdMounted; }
 // INSERT_VFS
 }
 // INSERT_JSON_BUILDER

@@ -31,7 +31,7 @@
 // "/sd/logging_captures/foo.csv".
 //
 // What is latched is the DECISION to overflow, not the tier: once the latch
-// fires, every call still re-tests isSDWritable() and falls back to the
+// fires, every call still re-tests isSdWritable() and falls back to the
 // primary path when the card cannot take writes. So a card pulled (or
 // re-inserted) mid-run flips the active tier back and forth and one logical
 // day CAN split across tiers with nothing on disk marking the boundary.
@@ -61,7 +61,7 @@ enum StorageType {
 
 bool init();
 
-bool isLittleFSReady();
+bool isLittleFsReady();
 
 /**
  * SD availability: true iff the selected SD transport mount has succeeded and the
@@ -69,9 +69,9 @@ bool isLittleFSReady();
  * written — a card can mount but fail writes (bad sector where the next
  * file happens to land, card yanked since, write-protect tab, filesystem
  * errors). SDMMC also checks the card-detect switch and latches observed
- * removal until remount. For "can we record to SD" use isSDWritable().
+ * removal until remount. For "can we record to SD" use isSdWritable().
  */
-bool isSDAvailable();
+bool isSdAvailable();
 
 /**
  * Round-trip-verified writability. Returns true only if a write+read+delete
@@ -81,21 +81,21 @@ bool isSDAvailable();
  * ~a few ms when re-probing. Use this for anything that's about to do a
  * real write (video recording, log overflow, image save).
  */
-bool isSDWritable();
+bool isSdWritable();
 
 /**
  * Callers that attempt an SD write and see it fail should call this with
  * a short reason string. It invalidates the cached writable flag so the
- * next isSDWritable() query re-probes. Cheap.
+ * next isSdWritable() query re-probes. Cheap.
  */
-void noteSDWriteFailure(const char* hint);
+void noteSdWriteFailure(const char* hint);
 
 // SD card management. Stop active writers and close their files before
-// unmount/format; card insertion is mounted explicitly with remountSD().
+// unmount/format; card insertion is mounted explicitly with remountSd().
 // All three refuse (return false) while an SD-in-use registration is held.
-bool remountSD();
-bool unmountSD();
-bool formatSD();
+bool remountSd();
+bool unmountSd();
+bool formatSd();
 
 // SD-in-use registration. An owner that keeps an SD file open across calls
 // (the video recorder) registers before it opens the file and ends the
@@ -109,7 +109,7 @@ const char* sdInUseOwner();
 
 // Counts successful SD mounts (boot, remount, format); it only increases.
 // Owners with once-per-mount work compare it with the value they last acted
-// on instead of caching availability, which they ask isSDAvailable() for.
+// on instead of caching availability, which they ask isSdAvailable() for.
 uint32_t sdMountGeneration();
 
 StorageType getStorageType(const String& path);
@@ -501,7 +501,7 @@ void noteLogReserveDrop();
 uint32_t logReserveDrops();
 
 /** A log append on the SD overflow mirror failed: report the card unwritable
- *  (noteSDWriteFailure) and keep the overflow path off the card for a minute
+ *  (noteSdWriteFailure) and keep the overflow path off the card for a minute
  *  even if its write probe still passes, so a damaged log tree on a card that
  *  probes fine is not retried, and re-announced, on every line (G-39). */
 void noteLogOverflowSdFailure(const char* hint);

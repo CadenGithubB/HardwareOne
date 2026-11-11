@@ -27948,7 +27948,7 @@ static void g2PushStatusEvent(const char* reason) {
 // external callers. These wrap the new primitives.
 // =============================================================================
 
-uint16_t g2CalcCRC16(const uint8_t* data, size_t len) {
+uint16_t g2CalcCrc16(const uint8_t* data, size_t len) {
   return g2CrcCcittFalse(data, len);
 }
 
@@ -29871,7 +29871,7 @@ static const char* cmd_g2micrec(const String& argsInput) {
   // block here briefly behind a heartbeat drain lap — bounded by its 250 ms
   // FS wait.
   if (sub == "start") {
-    if (!VFS::isSDAvailable()) return "Error: G2 mic rec: SD card not available";
+    if (!VFS::isSdAvailable()) return "Error: G2 mic rec: SD card not available";
     String path;
     if (ca.count() > 1) {
       const char* qerr = requireQuotedToken(ca, 1, path);
@@ -30006,7 +30006,7 @@ static const char* cmd_g2micwav(const String& argsInput) {
   if (!gMicWavMutex) return "Error: G2 mic wav: mutex alloc failed";
 
   if (sub == "start") {
-    if (!VFS::isSDAvailable()) return "Error: G2 mic wav: SD card not available";
+    if (!VFS::isSdAvailable()) return "Error: G2 mic wav: SD card not available";
     xSemaphoreTake(gMicWavMutex, portMAX_DELAY);
     if (gMicWavFile) {
       xSemaphoreGive(gMicWavMutex);
@@ -37971,7 +37971,7 @@ static void g2CameraStreamWorker(void* arg) {
           DEBUG_G2F("[G2] Camera stream: recording stopped (%s, %u frames)",
                     videoLastRecordingPath(),
                     (unsigned)videoLastRecordingFrames());
-        } else if (!VFS::isSDWritable()) {
+        } else if (!VFS::isSdWritable()) {
           DEBUG_G2F("[G2] Camera stream: record ignored — SD not writable");
         } else if (startVideoRecording()) {
           DEBUG_G2F("[G2] Camera stream: recording started");

@@ -26,16 +26,16 @@ static void displayTofData() {
   if (tofCacheSnapshot(reading)) {
     if (reading.tofDataValid && reading.tofTotalObjects > 0) {
       // Show first detected object distance
-      int distMM = reading.tofObjects[0].distance_mm;
+      int distMm = reading.tofObjects[0].distance_mm;
       oledDisplay->setCursor(0, y);
       oledDisplay->setTextSize(2);
-      oledDisplay->print(distMM);
+      oledDisplay->print(distMm);
       oledDisplay->println(" mm");
       oledDisplay->setTextSize(1);
       y += 20;
       
       // Visual bar representation (0-2000mm range)
-      int barWidth = map(constrain(distMM, 0, 2000), 0, 2000, 0, 120);
+      int barWidth = map(constrain(distMm, 0, 2000), 0, 2000, 0, 120);
       oledDisplay->drawRect(0, y, 124, 10, DISPLAY_COLOR_WHITE);
       oledDisplay->fillRect(2, y + 2, barWidth, 6, DISPLAY_COLOR_WHITE);
       

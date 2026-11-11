@@ -72,7 +72,7 @@ void choosePathLocked() {
       gStore.sd = sd; memcpy(gStore.path, candidate, sizeof(candidate)); return;
     }
   }
-  gStore.sd = VFS::isSDAvailable();
+  gStore.sd = VFS::isSdAvailable();
   pathFor(gStore.sd, gStore.path, sizeof(gStore.path));
 }
 // Parses the whole file into `into`. False (with error) rejects the file as a
@@ -127,7 +127,7 @@ bool writeFile(const Vocabulary& list, char* error, size_t cap) {
   if (!lock.held && !isFsLockedByCurrentTask()) return fail(error, cap, "Storage busy");
   const AuthContext ctx = auth(gStore.sd, "stt.vocab_write");
   const char* folder = gStore.sd ? VFS::Scopes::STT_MODELS_SD : VFS::Scopes::STT_MODELS;
-  if (gStore.sd && !VFS::isSDWritable()) return fail(error, cap, "SD card not writable");
+  if (gStore.sd && !VFS::isSdWritable()) return fail(error, cap, "SD card not writable");
   if (!VFS::existsGuarded(folder, ctx) && !VFS::mkdirGuarded(folder, ctx))
     return fail(error, cap, "Cannot create the STT Models folder");
   if (!VFS::canWriteGuarded(gStore.path, ctx)) return fail(error, cap, "Vocabulary file not writable");

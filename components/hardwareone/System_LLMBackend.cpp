@@ -87,7 +87,7 @@ static size_t onboardEnumerate(LlmModelDesc* out, size_t cap) {
         strlcpy(d.name, base, sizeof(d.name));
         d.backend = LlmBackendKind::Onboard;
         snprintf(d.path, sizeof(d.path), "%s/%s", dirPath, base);
-        d.sizeKB  = (uint32_t)(entry.size() / 1024);
+        d.sizeKb  = (uint32_t)(entry.size() / 1024);
         d.storage = storage;
         d.available = true;    // a file on disk is always selectable
         w++;
@@ -98,7 +98,7 @@ static size_t onboardEnumerate(LlmModelDesc* out, size_t cap) {
   };
 
   scanDir("/system/llm", LLM_STORAGE_INTERNAL);
-  if (VFS::isSDAvailable()) scanDir("/sd/llm", LLM_STORAGE_SD);
+  if (VFS::isSdAvailable()) scanDir("/sd/llm", LLM_STORAGE_SD);
   return w;
 }
 #endif  // ENABLE_LLM_SOURCE_ONBOARD
@@ -135,7 +135,7 @@ static bool onboardFindByName(const char* name, LlmModelDesc* out) {
   FsLockGuard fsGuard("llm.resolve");
   const char* dirs[2] = { "/system/llm", nullptr };
   uint8_t     stor[2] = { LLM_STORAGE_INTERNAL, LLM_STORAGE_SD };
-  if (VFS::isSDAvailable()) dirs[1] = "/sd/llm";
+  if (VFS::isSdAvailable()) dirs[1] = "/sd/llm";
 
   for (int i = 0; i < 2; i++) {
     if (!dirs[i]) continue;
@@ -148,7 +148,7 @@ static bool onboardFindByName(const char* name, LlmModelDesc* out) {
     strlcpy(out->name, name, sizeof(out->name));
     out->backend   = LlmBackendKind::Onboard;
     strlcpy(out->path, full, sizeof(out->path));
-    out->sizeKB    = (uint32_t)(f.size() / 1024);
+    out->sizeKb    = (uint32_t)(f.size() / 1024);
     out->storage   = stor[i];
     out->available = true;
     f.close();

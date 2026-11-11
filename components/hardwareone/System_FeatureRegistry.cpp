@@ -653,7 +653,7 @@ uint32_t getEnabledFeaturesHeapEstimate() {
   uint32_t total = 0;
   for (size_t i = 0; i < featureRegistryCount; i++) {
     if (isFeatureEnabled(&featureRegistry[i])) {
-      total += featureRegistry[i].heapCostKB;
+      total += featureRegistry[i].heapCostKb;
     }
   }
   return total;
@@ -663,7 +663,7 @@ uint32_t getTotalPossibleHeapCost() {
   uint32_t total = 0;
   for (size_t i = 0; i < featureRegistryCount; i++) {
     if (isFeatureCompiled(&featureRegistry[i])) {
-      total += featureRegistry[i].heapCostKB;
+      total += featureRegistry[i].heapCostKb;
     }
   }
   return total;
@@ -673,7 +673,7 @@ uint32_t getCategoryHeapEstimate(FeatureCategory cat) {
   uint32_t total = 0;
   for (size_t i = 0; i < featureRegistryCount; i++) {
     if (featureRegistry[i].category == cat && isFeatureEnabled(&featureRegistry[i])) {
-      total += featureRegistry[i].heapCostKB;
+      total += featureRegistry[i].heapCostKb;
     }
   }
   return total;
@@ -699,8 +699,8 @@ static constexpr const char* getCategoryName(FeatureCategory cat) {
 // ambiguous — and every functional reader in the firmware already gates on
 // compiled before spending this number. Before this, summing the per-row column
 // counted features that are not in the binary.
-static inline uint16_t reportedHeapKB(const FeatureEntry* f) {
-  return (f && isFeatureCompiled(f)) ? f->heapCostKB : 0;
+static inline uint16_t reportedHeapKb(const FeatureEntry* f) {
+  return (f && isFeatureCompiled(f)) ? f->heapCostKb : 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -726,12 +726,12 @@ constexpr size_t kFeaturesJsonWorstCase() {
        + ceSlen(featureRegistry[i].name)
        + ceSlen(getCategoryName(featureRegistry[i].category));
     // Take the max of both shapes: `false` is a byte longer than `true`, but a
-    // compiled row spends digits(heapKB) where a compiled-out row spends "0".
-    // Today the not-compiled shape wins; a 5-digit heapCostKB would flip it.
+    // compiled row spends digits(heapKb) where a compiled-out row spends "0".
+    // Today the not-compiled shape wins; a 5-digit heapCostKb would flip it.
     const bool tog = (featureRegistry[i].flags & FEATURE_FLAG_RUNTIME_TOGGLE) != 0;
     const size_t notCompiled = 5 + 5 + 5 + 1;                       // false,false,false,"0"
     const size_t compiled    = 4 + 5 + (tog ? 4 : 5)
-                             + ceDigits(featureRegistry[i].heapCostKB);
+                             + ceDigits(featureRegistry[i].heapCostKb);
     n += (notCompiled > compiled) ? notCompiled : compiled;
   }
   return n;
@@ -766,7 +766,7 @@ const char* cmd_features(const String& argsInput) {
   // Structured path: full capability list (what this build supports + runtime
   // state), one verbatim JSON blob via the return value. No broadcastOutput.
   // Lets the app gate UI on what the device actually has.
-  // Schema: {"schema":1,"features":[{"id","name","category","heapKB","compiled",
+  // Schema: {"schema":1,"features":[{"id","name","category","heapKb","compiled",
   //          "enabled","toggleable"}, ...]}
   //
   // No "hint" field here on purpose. It used to carry 161 B of agent-facing
@@ -787,7 +787,7 @@ const char* cmd_features(const String& argsInput) {
       o["id"]         = f->id;
       o["name"]       = f->name;
       o["category"]   = getCategoryName(f->category);
-      o["heapKB"]     = reportedHeapKB(f);
+      o["heapKB"]     = reportedHeapKb(f);
       o["compiled"]   = isFeatureCompiled(f);
       o["enabled"]    = isFeatureEnabled(f);
       // Same expression the text detail path uses, so the two can never drift.
@@ -833,7 +833,7 @@ const char* cmd_features(const String& argsInput) {
   // No args - show all features with heap estimates
   if (a.count() == 0) {
     PSRAM_STATIC_BUF(buf, 2048);
-    uint32_t freeHeapKB = hw1InternalFreeBytes() / 1024;
+    uint32_t freeHeapKb = hw1InternalFreeBytes() / 1024;
     uint32_t enabledCost = getEnabledFeaturesHeapEstimate();
     
     int pos = snprintf(buf, buf_SIZE,
@@ -865,7 +865,7 @@ const char* cmd_features(const String& argsInput) {
 
       pos += snprintf(buf + pos, buf_SIZE - pos,
         " %-12s ~%2dKB  %s\n",
-        f->id, reportedHeapKB(f), status);
+        f->id, reportedHeapKb(f), status);
     }
     
     pos += snprintf(buf + pos, buf_SIZE - pos,
@@ -873,7 +873,7 @@ const char* cmd_features(const String& argsInput) {
       "═══════════════════════════════════════════\n"
       "Enabled: ~%luKB | Free: %luKB | Max: ~%luKB\n"
       "Usage: features <id> <on|off>",
-      (unsigned long)enabledCost, (unsigned long)freeHeapKB,
+      (unsigned long)enabledCost, (unsigned long)freeHeapKb,
       (unsigned long)getTotalPossibleHeapCost());
 
     emitListingTrailer("compiled-in features and their on/off state",
@@ -897,7 +897,7 @@ const char* cmd_features(const String& argsInput) {
     // build-planning number is still useful — keep it as prose, not as the field.
     char heapNote[40];
     if (compiled) heapNote[0] = '\0';
-    else snprintf(heapNote, sizeof(heapNote), " (~%dKB if built in)", f->heapCostKB);
+    else snprintf(heapNote, sizeof(heapNote), " (~%dKB if built in)", f->heapCostKb);
 
     snprintf(buf, sizeof(buf),
       "[%s] %s\n"
@@ -909,7 +909,7 @@ const char* cmd_features(const String& argsInput) {
       "%s",
       f->id, f->name,
       getCategoryName(f->category),
-      reportedHeapKB(f), heapNote,
+      reportedHeapKb(f), heapNote,
       compiled ? "yes" : "no",
       enabled ? "yes" : "no",
       canToggleFeature(f) ? "yes" : "no",
@@ -962,12 +962,12 @@ const char* cmd_features(const String& argsInput) {
     const char* rebootNote = (f->flags & FEATURE_FLAG_REQUIRES_REBOOT) ? " (reboot required)" : "";
     snprintf(result, sizeof(result), 
       "[Feature] %s enabled (~%dKB)%s",
-      f->name, f->heapCostKB, rebootNote);
+      f->name, f->heapCostKb, rebootNote);
   } else if (!enable && wasEnabled) {
     const char* rebootNote = (f->flags & FEATURE_FLAG_REQUIRES_REBOOT) ? " (reboot required)" : "";
     snprintf(result, sizeof(result), 
       "[Feature] %s disabled (+%dKB freed)%s",
-      f->name, f->heapCostKB, rebootNote);
+      f->name, f->heapCostKb, rebootNote);
   } else {
     snprintf(result, sizeof(result), 
       "[Feature] %s already %s",

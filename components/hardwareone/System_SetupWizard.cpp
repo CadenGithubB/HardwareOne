@@ -506,46 +506,46 @@ char* getWizardDeviceNameBuf() { return wizardDeviceName; }
 // Heap Bar Helper
 // ============================================================================
  
- static uint32_t sWizardBaselineKB = 0;
+ static uint32_t sWizardBaselineKb = 0;
  static bool sWizardBaselineCalibrated = false;
  
- static uint32_t getWizardInfrastructureCostKB() {
-   uint32_t infraKB = 0;
+ static uint32_t getWizardInfrastructureCostKb() {
+   uint32_t infraKb = 0;
  #if ENABLE_OLED_DISPLAY
    const FeatureEntry* i2cFeature = getFeatureById("i2c");
-   if (i2cFeature && isFeatureCompiled(i2cFeature)) infraKB += i2cFeature->heapCostKB;
+   if (i2cFeature && isFeatureCompiled(i2cFeature)) infraKb += i2cFeature->heapCostKb;
  
    const FeatureEntry* oledFeature = getFeatureById("oled");
-   if (oledFeature && isFeatureCompiled(oledFeature)) infraKB += oledFeature->heapCostKB;
+   if (oledFeature && isFeatureCompiled(oledFeature)) infraKb += oledFeature->heapCostKb;
  
    const FeatureEntry* inputFeature = getFeatureById("input");
-   if (inputFeature && isFeatureCompiled(inputFeature)) infraKB += inputFeature->heapCostKB;
+   if (inputFeature && isFeatureCompiled(inputFeature)) infraKb += inputFeature->heapCostKb;
  #endif
-   return infraKB;
+   return infraKb;
  }
  
  static void calibrateWizardBaseline() {
    // Internal 8-bit only (see hw1InternalFreeBytes, System_MemUtil.h) — the
    // old ESP.* calls overstated total by ~59 KB and free by ~26 KB, which
    // skewed every wizard heap bar.
-   uint32_t totalHeapKB = (uint32_t)(hw1InternalTotalBytes() / 1024);
-   if (totalHeapKB == 0) totalHeapKB = 1;
+   uint32_t totalHeapKb = (uint32_t)(hw1InternalTotalBytes() / 1024);
+   if (totalHeapKb == 0) totalHeapKb = 1;
  
    const size_t wizTotal = hw1InternalTotalBytes();
    const size_t wizFree  = hw1InternalFreeBytes();
-   uint32_t usedNowKB = (uint32_t)((wizTotal > wizFree ? wizTotal - wizFree : 0) / 1024);
-   uint32_t infraKB = getWizardInfrastructureCostKB();
+   uint32_t usedNowKb = (uint32_t)((wizTotal > wizFree ? wizTotal - wizFree : 0) / 1024);
+   uint32_t infraKb = getWizardInfrastructureCostKb();
  
-   sWizardBaselineKB = (usedNowKB > infraKB) ? (usedNowKB - infraKB) : 0;
-   if (sWizardBaselineKB > totalHeapKB) sWizardBaselineKB = totalHeapKB;
+   sWizardBaselineKb = (usedNowKb > infraKb) ? (usedNowKb - infraKb) : 0;
+   if (sWizardBaselineKb > totalHeapKb) sWizardBaselineKb = totalHeapKb;
    sWizardBaselineCalibrated = true;
  }
 
-uint32_t wizardEnabledModeExtraHeapKB();  // defined with the mode-menu table below
+uint32_t wizardEnabledModeExtraHeapKb();  // defined with the mode-menu table below
 
-void getHeapBarData(uint32_t* enabledKB, uint32_t* maxKB, int* percentage) {
-  uint32_t totalHeapKB = (uint32_t)(hw1InternalTotalBytes() / 1024);
-  if (totalHeapKB == 0) totalHeapKB = 1;
+void getHeapBarData(uint32_t* enabledKb, uint32_t* maxKb, int* percentage) {
+  uint32_t totalHeapKb = (uint32_t)(hw1InternalTotalBytes() / 1024);
+  if (totalHeapKb == 0) totalHeapKb = 1;
 
    if (!sWizardBaselineCalibrated) {
      calibrateWizardBaseline();
@@ -553,17 +553,17 @@ void getHeapBarData(uint32_t* enabledKB, uint32_t* maxKB, int* percentage) {
 
   // Feature-granular base + the selected sub-mode's extra (HTTPS/G2) so the bar
   // reflects mode choices, not just which features are on.
-  uint32_t enabledCostKB = wizardEnabledModeExtraHeapKB();
+  uint32_t enabledCostKb = wizardEnabledModeExtraHeapKb();
   for (size_t i = 0; i < getFeatureCount(); ++i) {
     const FeatureEntry* feature = getFeatureByIndex(i);
-    if (feature && wizardFeatureEnabled(feature->id)) enabledCostKB += feature->heapCostKB;
+    if (feature && wizardFeatureEnabled(feature->id)) enabledCostKb += feature->heapCostKb;
   }
-  uint32_t estimatedUsedKB = sWizardBaselineKB + enabledCostKB;
-  if (estimatedUsedKB > totalHeapKB) estimatedUsedKB = totalHeapKB;
+  uint32_t estimatedUsedKb = sWizardBaselineKb + enabledCostKb;
+  if (estimatedUsedKb > totalHeapKb) estimatedUsedKb = totalHeapKb;
 
-  *enabledKB = estimatedUsedKB;
-  *maxKB = totalHeapKB;
-  *percentage = (estimatedUsedKB * 100) / totalHeapKB;
+  *enabledKb = estimatedUsedKb;
+  *maxKb = totalHeapKb;
+  *percentage = (estimatedUsedKb * 100) / totalHeapKb;
 }
 
 // ============================================================================
@@ -625,7 +625,7 @@ void initSetupWizard() {
   strlcpy(wizardDeviceName, curName, sizeof(wizardDeviceName));
   memcpy(sWizardDraft.deviceNameBaseline, wizardDeviceName, sizeof(wizardDeviceName));
 
-  sWizardBaselineKB = 0;
+  sWizardBaselineKb = 0;
   sWizardBaselineCalibrated = false;
   calibrateWizardBaseline();
 
@@ -637,7 +637,7 @@ void initSetupWizard() {
     const SetupWizardPage page = wizardFeaturePage(*feature);
     const char* label = strcmp(feature->id, "http") == 0 ? "Web Interface" : feature->name;
     const WizardMenuItem item = {feature->id, label, wizardFeatureItemType(*feature),
-                                 wizardBoolDraft(feature->enabledSetting), feature->heapCostKB};
+                                 wizardBoolDraft(feature->enabledSetting), feature->heapCostKb};
     size_t index = 0;
     while (index < getWizardMenuItemCount(page) &&
            strcasecmp(getWizardMenuItem(page, (int)index)->label, label) <= 0) ++index;
@@ -748,7 +748,7 @@ bool wizardStageMqttSettings(const SetupWizardResult& result) {
 // console/Glasses/Phone pipe (bound to bleMode). The blocking FTS wizard and the
 // CLI-mode `featuresetup` command both read this same table so their behaviour
 // is identical.
-// Per-mode extraHeapKB: estimated RAM the mode adds over the feature's base.
+// Per-mode extraHeapKb: estimated RAM the mode adds over the feature's base.
 // HTTPS +20KB (mbedTLS session buffers, ~20KB each per HEAP_OPTIMIZATION_FINDINGS);
 // G2 +10KB (glasses protocol state + persistent heartbeat worker over a plain
 // BLE server). Baseline modes (HTTP, App console) add 0.
@@ -809,17 +809,17 @@ void wizardModeApply(const WizardModeMenu* m, int idx) {
   else if (m->intSetting) *m->intSetting  = v;
 }
 
-// Sum the extraHeapKB of the currently-selected mode for every enabled feature
+// Sum the extraHeapKb of the currently-selected mode for every enabled feature
 // that has a mode menu (HTTPS over HTTP, G2 over BLE server). Feature-granular
 // getEnabledFeaturesHeapEstimate() can't see this, so the wizard heap bar folds
 // it in to reflect the mode choice. Returns 0 when no moded feature is enabled.
-uint32_t wizardEnabledModeExtraHeapKB() {
+uint32_t wizardEnabledModeExtraHeapKb() {
   uint32_t extra = 0;
   for (size_t i = 0; i < kModeMenuCount; i++) {
     const WizardModeMenu* m = &kModeMenus[i];
     const FeatureEntry* f = getFeatureById(m->featureId);
     if (!f || !wizardFeatureEnabled(f->id)) continue;
-    extra += m->modes[wizardModeCurrentIndex(m)].extraHeapKB;
+    extra += m->modes[wizardModeCurrentIndex(m)].extraHeapKb;
   }
   return extra;
 }
@@ -1846,17 +1846,17 @@ SetupWizardResult runAndApplyFeatureWizard(unsigned long idleTimeoutMs) {
     return result;
   }
 
-  uint32_t usedKB = 0, totalKB = 1;
+  uint32_t usedKb = 0, totalKb = 1;
   int pct = 0;
-  getHeapBarData(&usedKB, &totalKB, &pct);
+  getHeapBarData(&usedKb, &totalKb, &pct);
   if (!wizardSaveAndApplySettings(result)) return result;
 
   broadcastOutput("Feature configuration complete.");
   broadcastOutput("Timezone: " + result.timezoneAbbrev);
   {
-    uint32_t estFreeKB = (usedKB >= totalKB) ? 0 : (totalKB - usedKB);
+    uint32_t estFreeKb = (usedKb >= totalKb) ? 0 : (totalKb - usedKb);
     char buf[64];
-    snprintf(buf, sizeof(buf), "Heap estimate: ~%lu KB", (unsigned long)estFreeKB);
+    snprintf(buf, sizeof(buf), "Heap estimate: ~%lu KB", (unsigned long)estFreeKb);
     broadcastOutput(buf);
   }
 

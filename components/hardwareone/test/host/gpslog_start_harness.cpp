@@ -188,7 +188,7 @@ bool getStats(Storage storage, uint64_t& total, uint64_t& used, uint64_t& free) 
   used = total - free;
   return true;
 }
-bool isSDAvailable() { return sdAvailable; }
+bool isSdAvailable() { return sdAvailable; }
 }
 struct { unsigned getFreeHeap() { return freeHeap; } } ESP;
 String resolveSessionTarget(const String& path) {

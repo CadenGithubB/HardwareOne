@@ -4326,7 +4326,7 @@ struct BootAnchor {
 static int parseBootAnchors(const String& usersJson, BootAnchor* anchors, int maxCount);
 static BootAnchor* findMatchingAnchor(BootAnchor* anchors, int count, uint32_t ntpAnchorId);
 static void buildOrdinal(uint32_t n, char* buf, size_t bufSize);
-static bool formatEpochAsISO8601(time_t epoch, char* buf, size_t bufSize);
+static bool formatEpochAsIso8601(time_t epoch, char* buf, size_t bufSize);
 
 // Build ordinal string (1st, 2nd, 3rd, etc.)
 static void buildOrdinal(uint32_t n, char* buf, size_t bufSize) {
@@ -4348,7 +4348,7 @@ static void buildOrdinal(uint32_t n, char* buf, size_t bufSize) {
 }
 
 // Format epoch as ISO 8601 string
-static bool formatEpochAsISO8601(time_t epoch, char* buf, size_t bufSize) {
+static bool formatEpochAsIso8601(time_t epoch, char* buf, size_t bufSize) {
   if (!buf || bufSize < 21) return false;
   if (epoch <= 0) {
     strlcpy(buf, "null", bufSize);
@@ -4462,7 +4462,7 @@ static bool resolveUserTimestamp(JsonObject user, unsigned long createdMs,
   if (now > 0 && createdAtUtc > now + 60) return false;  // sanity: not in the future
 
   char isoTimestamp[24];
-  if (!formatEpochAsISO8601(createdAtUtc, isoTimestamp, sizeof(isoTimestamp))) {
+  if (!formatEpochAsIso8601(createdAtUtc, isoTimestamp, sizeof(isoTimestamp))) {
     return false;
   }
 

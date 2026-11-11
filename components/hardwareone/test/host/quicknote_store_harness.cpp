@@ -209,8 +209,8 @@ static bool allowed(const String& path, const AuthContext& ctx, uint8_t need) {
   ++denials;
   return false;
 }
-static bool isSDWritable() { assert(locks); return sdWritable && sdPresent; }
-static bool isSDAvailable() { assert(locks); return sdPresent; }
+static bool isSdWritable() { assert(locks); return sdWritable && sdPresent; }
+static bool isSdAvailable() { assert(locks); return sdPresent; }
 static bool exists(const String& path) { assert(locks); return tree.count(path.c_str()) != 0; }
 static bool existsGuarded(const String& path, const AuthContext& ctx) {
   return allowed(path, ctx, PERM_READ) && exists(path);
@@ -272,7 +272,7 @@ static bool getStats(StorageType type, uint64_t& total, uint64_t& used, uint64_t
   free = freeBytes;
   return statsOk && (type != SDCARD || sdPresent);
 }
-static void noteSDWriteFailure(const char*) { ++sdFailures; }
+static void noteSdWriteFailure(const char*) { ++sdFailures; }
 static void noteLittleFsBytesWritten(size_t n) { notedBytes += static_cast<unsigned>(n); }
 }  // namespace VFS
 static bool canRead(const String& path, const AuthContext& ctx) {

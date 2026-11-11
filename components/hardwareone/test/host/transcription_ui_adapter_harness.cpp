@@ -61,7 +61,7 @@ public:
  void close(){node_.reset();}
 };
 namespace VFS {
-static bool isSDAvailable(){return sdAvailable;}
+static bool isSdAvailable(){return sdAvailable;}
 static bool existsGuarded(const char* path,const AuthContext& ctx){return canRead(path,ctx);}
 static File openGuarded(const String& path,const char* mode,const AuthContext& ctx){assert(fsDepth&&std::string(mode)=="r");openedPaths.emplace_back(path.c_str());return canRead(path.c_str(),ctx)?File(nodes.at(path.c_str())):File();}
 }

@@ -390,9 +390,9 @@ static esp_err_t handleEspNowRemoteCap(httpd_req_t* req) {
   if (err != ESP_OK) goto done;
   
   // Hardware info
-  err = webEspNowSendChunkf(req, ",\"flashSizeMB\":%lu,", (unsigned long)cap.flashSizeMB);
+  err = webEspNowSendChunkf(req, ",\"flashSizeMB\":%lu,", (unsigned long)cap.flashSizeMb);
   if (err != ESP_OK) goto done;
-  err = webEspNowSendChunkf(req, "\"psramSizeMB\":%lu,", (unsigned long)cap.psramSizeMB);
+  err = webEspNowSendChunkf(req, "\"psramSizeMB\":%lu,", (unsigned long)cap.psramSizeMb);
   if (err != ESP_OK) goto done;
   err = webEspNowSendChunkf(req, "\"wifiChannel\":%d,", (int)cap.wifiChannel);
   if (err != ESP_OK) goto done;

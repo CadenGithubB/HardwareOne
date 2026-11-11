@@ -112,7 +112,7 @@ class File {
 namespace VFS {
 enum StorageType { INTERNAL = 0, SDCARD = 1, AUTO = 2 };
 struct VirtualEntry { const char* name; bool isFolder; };
-static bool isSDAvailable() { return sdMounted; }
+static bool isSdAvailable() { return sdMounted; }
 // Advanced by every successful mount, as VFS does for boot, remount and format.
 static uint32_t sdGeneration = 0;
 static uint32_t sdMountGeneration() { return sdGeneration; }
@@ -223,7 +223,7 @@ static void noteLittleFsBytesWritten(size_t bytes) {
   io(); check(activeFiles == 0 && bytes > 0, "internal write accounting follows close and counts actual positive bytes");
   internalBytesNoted += bytes;
 }
-static void noteSDWriteFailure(const char* reason) {
+static void noteSdWriteFailure(const char* reason) {
   io(); check(activeFiles == 0 && std::strcmp(reason, "image save") == 0, "SD write health records closed incomplete image attempt");
   ++sdFailureNotes;
 }

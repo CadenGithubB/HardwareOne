@@ -1,4 +1,4 @@
-// Drives the production SD-in-use registration, unmountSD/remountSD/formatSD
+// Drives the production SD-in-use registration, unmountSd/remountSd/formatSd
 // and the sdmount/sdunmount/sdformat commands from System_VFS.cpp against a
 // fake SD driver. The lifecycle refusal must happen under the filesystem lock
 // and before the driver is touched.
@@ -56,9 +56,9 @@ static bool gSdWritable = true;
 static uint32_t gSdMountGeneration = 0;
 static unsigned mounts = 0;
 static void invalidateStatsSnapshot(StorageType) {}
-static bool probeSDWriteInternal() { return true; }
-static bool tryMountSD() { ++mounts; gSdMounted = true; ++gSdMountGeneration; return true; }
-bool isSDAvailable() { return gSdMounted; }
+static bool probeSdWriteInternal() { return true; }
+static bool tryMountSd() { ++mounts; gSdMounted = true; ++gSdMountGeneration; return true; }
+bool isSdAvailable() { return gSdMounted; }
 bool getStats(StorageType, uint64_t& total, uint64_t& used, uint64_t& free) {
   total = used = free = 0;
   return false;
@@ -78,7 +78,7 @@ static int run(const std::string& name) {
   if (name == "unmount") {
     CHECK(VFS::sdInUseBegin(kRecorder), "recorder registers");
     CHECK(std::strstr(cmd_sdunmount(String("")), "in use by video recording"), "sdunmount names the holder");
-    CHECK(!VFS::unmountSD(), "unmountSD refuses while registered");
+    CHECK(!VFS::unmountSd(), "unmountSD refuses while registered");
     CHECK(SD.ends == 0 && VFS::gSdMounted && unmountedEvents == 0, "the card stays mounted");
     CHECK(refusals == 1 && refusalsUnlocked == 0, "the refusal is decided under the filesystem lock");
     VFS::sdInUseEnd(kRecorder);
@@ -89,7 +89,7 @@ static int run(const std::string& name) {
     VFS::gSdMounted = false;
     CHECK(VFS::sdInUseBegin(kRecorder), "recorder registers");
     CHECK(std::strstr(cmd_sdmount(String("")), "in use by video recording"), "sdmount names the holder");
-    CHECK(!VFS::remountSD() && SD.ends == 0 && VFS::mounts == 0, "remountSD refuses while registered");
+    CHECK(!VFS::remountSd() && SD.ends == 0 && VFS::mounts == 0, "remountSD refuses while registered");
     VFS::sdInUseEnd(kRecorder);
     CHECK(std::strstr(cmd_sdmount(String("")), "mounted successfully"), "sdmount works after release");
     CHECK(VFS::mounts == 1 && VFS::gSdMounted, "the card is mounted");
@@ -97,7 +97,7 @@ static int run(const std::string& name) {
     CHECK(VFS::sdInUseBegin(kRecorder), "recorder registers");
     CHECK(std::strstr(cmd_sdformat(String("")), "sdformat confirm"), "the confirmation prompt is unchanged");
     CHECK(std::strstr(cmd_sdformat(String("confirm")), "in use by video recording"), "sdformat names the holder");
-    CHECK(!VFS::formatSD() && SD.formats == 0, "formatSD refuses while registered");
+    CHECK(!VFS::formatSd() && SD.formats == 0, "formatSD refuses while registered");
     VFS::sdInUseEnd(kRecorder);
     CHECK(std::strstr(cmd_sdformat(String("confirm")), "formatted successfully"), "sdformat works after release");
     CHECK(SD.formats == 1, "the card is formatted");
@@ -108,10 +108,10 @@ static int run(const std::string& name) {
     CHECK(!VFS::sdInUseBegin("e"), "a full table refuses a fifth registration");
     VFS::sdInUseEnd("a");
     CHECK(VFS::sdInUseOwner() && std::strcmp(VFS::sdInUseOwner(), "a") != 0, "other holders remain");
-    CHECK(!VFS::unmountSD(), "any remaining holder keeps the card mounted");
+    CHECK(!VFS::unmountSd(), "any remaining holder keeps the card mounted");
     VFS::sdInUseEnd("zz");  // not registered: no effect
     for (const char* owner : owners) VFS::sdInUseEnd(owner);
-    CHECK(VFS::sdInUseOwner() == nullptr && VFS::unmountSD(), "all released: unmount proceeds");
+    CHECK(VFS::sdInUseOwner() == nullptr && VFS::unmountSd(), "all released: unmount proceeds");
   } else {
     CHECK(false, "known scenario");
   }

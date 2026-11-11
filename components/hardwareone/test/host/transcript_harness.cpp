@@ -53,13 +53,13 @@ namespace VFS {
  static uint64_t available=1000000;
  static bool sd=false,sdPresent=true,statsOk=true,denyMkdir=false;
  static unsigned sdFailures=0,notedBytes=0;
- bool isSDWritable(){assert(locks);return sd&&sdPresent;}
+ bool isSdWritable(){assert(locks);return sd&&sdPresent;}
  bool exists(const String& p){assert(locks);return files.count(p)||folders.count(p);}
  bool existsGuarded(const String& p,const AuthContext&){return exists(p);}
  bool mkdirGuarded(const String& p,const AuthContext& ctx){assert(locks);if(denyMkdir)return false;assert(ctx.user=="alice"||ctx.user=="system");folders.insert(p);return true;}
  AuthContext systemAuth(const char* scope,const char*){AuthContext c;c.user="system";c.scope=scope;return c;}
  bool getStats(StorageType type,uint64_t& total,uint64_t& used,uint64_t& free){assert(locks);total=1000000;used=0;free=available;return statsOk&&(type!=SDCARD||sdPresent);}
- void noteSDWriteFailure(const char*){++sdFailures;}
+ void noteSdWriteFailure(const char*){++sdFailures;}
  void noteLittleFsBytesWritten(size_t n){notedBytes+=n;}
 }
 struct File {

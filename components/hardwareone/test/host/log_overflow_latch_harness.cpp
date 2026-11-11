@@ -38,9 +38,9 @@ static void logSystemEvent(const char*, const char* fmt, ...) {
 
 namespace VFS {
 enum class LogTier : uint8_t { Primary, Overflow, Refused };
-static bool isSDAvailable() { return sdMounted; }
-static bool isSDWritable() { ++writableProbes; return sdMounted && sdWritableNow; }
-static void noteSDWriteFailure(const char*) { ++sdFailureNotes; }
+static bool isSdAvailable() { return sdMounted; }
+static bool isSdWritable() { ++writableProbes; return sdMounted && sdWritableNow; }
+static void noteSdWriteFailure(const char*) { ++sdFailureNotes; }
 // INSERT_PRODUCTION
 }  // namespace VFS
 

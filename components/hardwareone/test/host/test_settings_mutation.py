@@ -73,7 +73,7 @@ def generated(component: Path = COMPONENT) -> str:
                      "uint32_t getEnabledFeaturesHeapEstimate(",
                      "uint32_t getTotalPossibleHeapCost(",
                      "static constexpr const char* getCategoryName(",
-                     "static inline uint16_t reportedHeapKB(")]
+                     "static inline uint16_t reportedHeapKb(")]
     # Owner-applied toggles (Automations) go through the owner's transition.
     owner_toggle = re.search(r"(?m)^using FeatureOwnerToggle[^\n]+", feature_cpp)
     if owner_toggle:

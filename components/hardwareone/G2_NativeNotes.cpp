@@ -68,11 +68,11 @@ bool checkStorage(bool force=false) {
   const uint32_t gap=(s.token||s.draft.open) ? 1000 : 10000;
   if(!force && uint32_t(now-s.storageChecked)<gap)return true;
   s.storageChecked=now;
-  const bool onSD=VFS::isSDWritable();
+  const bool onSd=VFS::isSdWritable();
   const uint32_t mount=VFS::sdMountGeneration();
-  const bool changed=onSD!=s.sd || (onSD && mount!=s.sdMount);
+  const bool changed=onSd!=s.sd || (onSd && mount!=s.sdMount);
   if(changed) {
-    s.sd=onSD;s.storageDirty=true;s.listing={};s.id[0]=s.path[0]=0;
+    s.sd=onSd;s.storageDirty=true;s.listing={};s.id[0]=s.path[0]=0;
     memset(s.text,0,sizeof(s.text));s.textLength=0;
     s.storageReady=false;
   }
@@ -229,12 +229,12 @@ void save() {
   h.trigger=QuickNotePolicy::Trigger::Lens;h.mic=QuickNotePolicy::Mic::G2;h.durationMs=s.duration;
   const char* why=nullptr;
   if(!live()) return;
-  const bool startedOnSD=VFS::isSDWritable();
+  const bool startedOnSd=VFS::isSdWritable();
   bool saved=QuickNoteStore::create(SOURCE_G2_GLASSES,s.context.epoch,s.context.user,h,
        s.draft.text,s.draft.length,s.path,sizeof(s.path),&why,true);
   // A card removed during the atomic write may fail after admission. Retry
   // only on the now-selected internal tier, retaining the exact draft/id.
-  if(!saved && startedOnSD && !VFS::isSDWritable() && live())
+  if(!saved && startedOnSd && !VFS::isSdWritable() && live())
     saved=QuickNoteStore::create(SOURCE_G2_GLASSES,s.context.epoch,s.context.user,h,
         s.draft.text,s.draft.length,s.path,sizeof(s.path),&why,true);
   if(!saved) {
@@ -244,7 +244,7 @@ void save() {
     s.draft.saveWanted=false;
     return;
   }
-  clearDraft();s.sd=VFS::isSDWritable();
+  clearDraft();s.sd=VFS::isSdWritable();
   s.id[0]=0;s.textLength=0;memset(s.text,0,sizeof(s.text));
   if(!control(4)||!listAt(0,Event{}))fail("saved; list refresh failed");
 }
@@ -319,7 +319,7 @@ void worker(void*) {
     G2NoteContext current{};
     if(!g2NativeNotesContext(&current)) {reset();vTaskDelay(pdMS_TO_TICKS(500));continue;}
     if(!same(current,s.context)) {
-      reset();s.context=current;s.owner={SOURCE_G2_GLASSES,current.epoch};s.connected=true;s.sd=VFS::isSDWritable();
+      reset();s.context=current;s.owner={SOURCE_G2_GLASSES,current.epoch};s.connected=true;s.sd=VFS::isSdWritable();
       s.touched=millis();
       if(!checkStorage(true) ||
          !control(4)||!listAt(0,Event{}))fail("initial list unavailable");

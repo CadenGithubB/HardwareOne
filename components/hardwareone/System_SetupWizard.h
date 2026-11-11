@@ -74,7 +74,7 @@ struct WizardMenuItem {
   const char* label;
   WizardMenuItemType type;
   bool* setting;              // points into the wizard draft, never live settings
-  uint16_t heapKB;
+  uint16_t heapKb;
 };
 
 // Timezone entry
@@ -89,10 +89,10 @@ struct TimezoneEntry {
 // `featuresetup` command) so the behaviour is identical. The table + accessors
 // live in System_SetupWizard.cpp; each engine just renders/handles them in its
 // own I/O style. Add a "toggle -> mode" feature with one row in kModeMenus[].
-// extraHeapKB = RAM this mode costs *on top of* the feature's base heapCostKB
+// extraHeapKb = RAM this mode costs *on top of* the feature's base heapCostKb
 // (e.g. HTTPS adds TLS buffers over plain HTTP). 0 for the baseline mode. The
 // wizard heap bar adds the selected mode's extra so it reflects the choice.
-struct WizardModeOption { const char* label; int value; uint16_t extraHeapKB; };
+struct WizardModeOption { const char* label; int value; uint16_t extraHeapKb; };
 struct WizardModeMenu {
   const char* featureId;          // matches the Connections-page item id
   const char* title;              // e.g. "Web Mode"
@@ -280,7 +280,7 @@ void wifiScanClearNamed();
 // ============================================================================
 
 // Get heap bar data
-void getHeapBarData(uint32_t* enabledKB, uint32_t* maxKB, int* percentage);
+void getHeapBarData(uint32_t* enabledKb, uint32_t* maxKb, int* percentage);
 
 // ============================================================================
 // Setup Archetypes (deployment presets)

@@ -46,7 +46,7 @@ struct FeatureEntry {
   const char* id;              // Short identifier (e.g., "wifi", "thermal")
   const char* name;            // Human-readable name
   FeatureCategory category;    // Category for grouping
-  uint16_t heapCostKB;         // Estimated heap usage in KB
+  uint16_t heapCostKb;         // Estimated heap usage in KB
   uint8_t flags;               // FeatureFlags
   bool* enabledSetting;        // Pointer to gSettings.xxxEnabled/AutoStart (nullptr if compile-time only)
   bool (*isCompileEnabled)();  // Function to check if compiled in (nullptr = always compiled)

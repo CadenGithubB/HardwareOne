@@ -103,7 +103,7 @@ void applyTimezone() {
   tzset();
 }
 
-size_t formatISO8601Local(time_t t, char* out, size_t outSize) {
+size_t formatIso8601Local(time_t t, char* out, size_t outSize) {
   if (!out || outSize == 0) return 0;
   if (!isValidEpoch(t)) { out[0] = '\0'; return 0; }
   struct tm tminfo;

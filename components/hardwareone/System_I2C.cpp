@@ -1251,7 +1251,7 @@ void detectHardware(DetectionResult& out) {
     if (out.count >= DetectionResult::MAX) return;
     DetectedEntry& e = out.entries[out.count++];
     e.address = addr; e.bus = bus; e.name = name;
-    e.moduleName = mod; e.heapCostKB = kb; e.status = st;
+    e.moduleName = mod; e.heapCostKb = kb; e.status = st;
     switch (st) {
       case DetectStatus::PRESENT_ENABLED:  out.nPresentEnabled++;  break;
       case DetectStatus::PRESENT_DISABLED: out.nPresentDisabled++; break;
@@ -1285,7 +1285,7 @@ void detectHardware(DetectionResult& out) {
       }
     }
     bool     enabled = f ? isFeatureEnabled(f) : false;
-    uint16_t kb      = f ? f->heapCostKB : 0;
+    uint16_t kb      = f ? f->heapCostKb : 0;
 
     if (present && enabled)        addEntry(s.address, pbus,  s.name, s.moduleName, kb, DetectStatus::PRESENT_ENABLED);
     else if (present && !enabled)  addEntry(s.address, pbus,  s.name, s.moduleName, kb, DetectStatus::PRESENT_DISABLED);
@@ -1364,7 +1364,7 @@ const char* cmd_detect(const String& argsInput) {
     for (uint8_t i = 0; i < r.count; i++) {
       const DetectedEntry& e = r.entries[i];
       if (e.status == DetectStatus::PRESENT_DISABLED)
-        BROADCAST_PRINTF("    %-10s (%s)  I2C%d  0x%02X  ~%uKB", e.name, e.moduleName, e.bus + 1, e.address, (unsigned)e.heapCostKB);
+        BROADCAST_PRINTF("    %-10s (%s)  I2C%d  0x%02X  ~%uKB", e.name, e.moduleName, e.bus + 1, e.address, (unsigned)e.heapCostKb);
     }
   }
   if (r.nMissing) {
@@ -1984,10 +1984,10 @@ struct SensorHeapCost {
   const char* name;
   const char* shortName;
   bool* autoStartFlag;
-  uint16_t heapCostKB;  // Estimated heap usage in KB
+  uint16_t heapCostKb;  // Estimated heap usage in KB
 };
 
-// Columns: name, shortName, autoStartFlag, heapCostKB
+// Columns: name, shortName, autoStartFlag, heapCostKb
 static const SensorHeapCost sensorHeapCosts[] = {
   { "Thermal Camera", "thermal", &gSettings.thermalAutoStart, 32 },  // MLX90640: large frame buffer
   { "ToF Distance",   "tof",     &gSettings.tofAutoStart,      8 },  // VL53L4CX: moderate
@@ -2012,7 +2012,7 @@ static uint32_t getEnabledSensorHeapEstimate() {
   uint32_t total = 0;
   for (size_t i = 0; i < sensorHeapCostCount; i++) {
     if (*sensorHeapCosts[i].autoStartFlag) {
-      total += sensorHeapCosts[i].heapCostKB;
+      total += sensorHeapCosts[i].heapCostKb;
     }
   }
   return total;
@@ -2026,7 +2026,7 @@ static const char* cmd_sensorautostart(const String& argsInput) {
   // No args - show current settings with heap estimates
   if (a.count() == 0) {
     PSRAM_STATIC_BUF(buf, 1024);
-    uint32_t freeHeapKB = ESP.getFreeHeap() / 1024;
+    uint32_t freeHeapKb = ESP.getFreeHeap() / 1024;
     uint32_t enabledCost = getEnabledSensorHeapEstimate();
     
     int pos = snprintf(buf, buf_SIZE,
@@ -2040,7 +2040,7 @@ static const char* cmd_sensorautostart(const String& argsInput) {
       pos += snprintf(buf + pos, buf_SIZE - pos,
         "%-12s ~%2dKB  %s\n",
         sensorHeapCosts[i].shortName,
-        sensorHeapCosts[i].heapCostKB,
+        sensorHeapCosts[i].heapCostKb,
         enabled ? "[ON]" : "off");
     }
     
@@ -2048,7 +2048,7 @@ static const char* cmd_sensorautostart(const String& argsInput) {
       "─────────────────────────────────\n"
       "Enabled total: ~%luKB | Free heap: %luKB\n"
       "Usage: sensorautostart <sensor> <on|off>",
-      (unsigned long)enabledCost, (unsigned long)freeHeapKB);
+      (unsigned long)enabledCost, (unsigned long)freeHeapKb);
     
     return buf;
   }
@@ -2084,16 +2084,16 @@ static const char* cmd_sensorautostart(const String& argsInput) {
     uint32_t totalCost = 0;
     for (size_t i = 0; i < sensorHeapCostCount; i++) {
       *sensorHeapCosts[i].autoStartFlag = enable;
-      if (enable) totalCost += sensorHeapCosts[i].heapCostKB;
+      if (enable) totalCost += sensorHeapCosts[i].heapCostKb;
     }
     (void)requestSettingsPersist();
     
     EXT_RAM_BSS_ATTR static char result[128];
-    uint32_t freeHeapKB = ESP.getFreeHeap() / 1024;
+    uint32_t freeHeapKb = ESP.getFreeHeap() / 1024;
     if (enable) {
       snprintf(result, sizeof(result), 
         "[AutoStart] All sensors enabled (~%luKB total, %luKB free)",
-        (unsigned long)totalCost, (unsigned long)freeHeapKB);
+        (unsigned long)totalCost, (unsigned long)freeHeapKb);
     } else {
       snprintf(result, sizeof(result), "[AutoStart] All sensors disabled");
     }
@@ -2109,16 +2109,16 @@ static const char* cmd_sensorautostart(const String& argsInput) {
   (void)requestSettingsPersist();
   
   EXT_RAM_BSS_ATTR static char result[128];
-  uint32_t freeHeapKB = ESP.getFreeHeap() / 1024;
+  uint32_t freeHeapKb = ESP.getFreeHeap() / 1024;
   
   if (enable && !wasEnabled) {
     snprintf(result, sizeof(result), 
       "[AutoStart] %s enabled (~%dKB, %luKB free after boot)",
-      found->name, found->heapCostKB, (unsigned long)(freeHeapKB - found->heapCostKB));
+      found->name, found->heapCostKb, (unsigned long)(freeHeapKb - found->heapCostKb));
   } else if (!enable && wasEnabled) {
     snprintf(result, sizeof(result), 
       "[AutoStart] %s disabled (+%dKB freed after reboot)",
-      found->name, found->heapCostKB);
+      found->name, found->heapCostKb);
   } else {
     snprintf(result, sizeof(result), 
       "[AutoStart] %s already %s",

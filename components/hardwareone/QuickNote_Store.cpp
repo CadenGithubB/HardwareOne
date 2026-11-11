@@ -138,7 +138,7 @@ bool writeNote(const AuthContext& ctx, bool sd, const String& tmp, const String&
   file.flush();
   const bool ok = written == bytes && !file.getWriteError() && file.size() == bytes;
   file.close();
-  if (sd && !ok) VFS::noteSDWriteFailure("note write");
+  if (sd && !ok) VFS::noteSdWriteFailure("note write");
   if (!sd) VFS::noteLittleFsBytesWritten(written);
   if (!ok) {
     VFS::removeGuarded(tmp, ctx);
@@ -230,7 +230,7 @@ bool hasRoom(const char** why) {
   if (why) *why = nullptr;
   FsLockGuard lock("qnote.store", pdMS_TO_TICKS(kLockMs));
   if (!lock.held && !isFsLockedByCurrentTask()) return fail(why, "Note storage busy");
-  const bool sd = VFS::isSDWritable();
+  const bool sd = VFS::isSdWritable();
   uint64_t total = 0, used = 0, free = 0;
   if (!VFS::getStats(sd ? VFS::SDCARD : VFS::INTERNAL, total, used, free) ||
       free < kReserveBytes + kHeaderMax + kMaxNoteBytes + 256)
@@ -242,7 +242,7 @@ bool ensureG2Folders(const AuthContext& ctx, bool sd, const char** why, bool cle
   if (why) *why = nullptr;
   FsLockGuard lock("g2.notes.folders", pdMS_TO_TICKS(kLockMs));
   if (!lock.held && !isFsLockedByCurrentTask()) return fail(why, "Note storage busy");
-  if (sd && !VFS::isSDWritable()) return fail(why, "SD card unavailable");
+  if (sd && !VFS::isSdWritable()) return fail(why, "SD card unavailable");
   const char* root = sd ? "/sd/g2" : "/g2";
   char folder[kPathMax];
   if (!g2NoteFolder(sd, folder, sizeof(folder))) return fail(why, "Invalid note folder");
@@ -288,7 +288,7 @@ bool create(CommandSource source, TransportSessionEpoch epoch, const char* user,
   if (!getUserIdByUsername(user, account) || !account) return fail(why, "Note account unavailable");
   if (!transportSessionEpochIsLive(source, epoch))
     return fail(why, "Note session expired before saving");
-  const bool sd = VFS::isSDWritable();
+  const bool sd = VFS::isSdWritable();
   const char* root = nativeG2 ? (sd ? "/sd/g2" : "/g2") : (sd ? "/sd/stt" : "/stt");
   char owner[32], folder[kPathMax], path[kPathMax], tmp[kPathMax];
   if (nativeG2) snprintf(owner, sizeof(owner), "%s", root);
@@ -411,7 +411,7 @@ bool list(const AuthContext& ctx, uint32_t owner, bool sd, uint32_t offset,
   if (!lock.held && !isFsLockedByCurrentTask()) return fail(why, "Note storage busy");
   if (!nativeG2 && !owner && (!getUserIdByUsername(ctx.user, owner) || !owner))
     return fail(why, "Note account unavailable");
-  if (sd && !VFS::isSDAvailable()) return fail(why, "No SD card");
+  if (sd && !VFS::isSdAvailable()) return fail(why, "No SD card");
   char folder[kPathMax];
   if (!(nativeG2 ? g2NoteFolder(sd, folder, sizeof(folder)) : noteFolder(sd, owner, folder, sizeof(folder))))
     return fail(why, "Invalid request");
@@ -533,7 +533,7 @@ bool sweep(uint32_t* removed, const char** why) {
       continue;
     }
     // A card that cannot be written now keeps its files for a later sweep.
-    if (sd && !VFS::isSDWritable()) continue;
+    if (sd && !VFS::isSdWritable()) continue;
     // Native G2 notes share the same atomic writer and temporary-file rules.
     // The lock serializes this sweep with both note workers' entire writes.
     char nativeFolder[kPathMax];

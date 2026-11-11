@@ -482,8 +482,8 @@ struct CapabilitySummary {
   uint8_t chipModel;           // ESP32 chip model
   uint8_t reserved2;
   
-  uint32_t flashSizeMB;        // Flash size in MB
-  uint32_t psramSizeMB;        // PSRAM size in MB
+  uint32_t flashSizeMb;        // Flash size in MB
+  uint32_t psramSizeMb;        // PSRAM size in MB
   uint8_t wifiChannel;         // Current WiFi channel
   uint8_t reserved3[3];
   

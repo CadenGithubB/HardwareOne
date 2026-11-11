@@ -7,7 +7,7 @@
  *
  * Recording targets SD card only — MJPEG bitrate at even QVGA/10fps exceeds
  * sustained LittleFS write throughput, so onboard flash would drop frames.
- * The UI is expected to gate the Record button on VFS::isSDAvailable().
+ * The UI is expected to gate the Record button on VFS::isSdAvailable().
  */
 
 #ifndef SYSTEM_CAMERA_VIDEO_H

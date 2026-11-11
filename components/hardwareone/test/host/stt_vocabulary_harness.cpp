@@ -99,8 +99,8 @@ File openGuarded(const String& path, const char* mode, const AuthContext& ctx, b
 }
 bool mkdirGuarded(const String& path, const AuthContext& ctx) { assert(within(path,ctx)); fake::state.folders.insert(path); return true; }
 bool canWriteGuarded(const String& path, const AuthContext& ctx) { assert(within(path,ctx)); return !fake::state.denyWrite; }
-bool isSDAvailable() { return fake::state.sdAvailable; }
-bool isSDWritable() { return fake::state.sdAvailable && fake::state.sdWritable; }
+bool isSdAvailable() { return fake::state.sdAvailable; }
+bool isSdWritable() { return fake::state.sdAvailable && fake::state.sdWritable; }
 // The staged writer: the destination changes only at commit, all or nothing.
 class StagedWrite {
  public:

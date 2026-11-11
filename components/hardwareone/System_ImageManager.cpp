@@ -36,31 +36,31 @@ ImageManager gImageManager;
 // ============================================================================
 
 ImageManager::ImageManager()
-  : littleFSAvailable(false), imageCounter(0) {
+  : littleFsAvailable(false), imageCounter(0) {
 }
 
 ImageManager::~ImageManager() {
 }
 
 bool ImageManager::init() {
-  littleFSAvailable = filesystemReady;
+  littleFsAvailable = filesystemReady;
   lfsStaleSwept = false;  // a fresh mount gets one stale-temporary sweep
 
-  if (littleFSAvailable) {
+  if (littleFsAvailable) {
     ensureCaptureFolder(IMAGE_STORAGE_LITTLEFS);
     INFO_STORAGEF("[ImageManager] LittleFS available");
   }
   
   // Report the boot card; SD availability is asked of VFS per operation.
-  const bool sd = initSD();
+  const bool sd = initSd();
 
-  return littleFSAvailable || sd;
+  return littleFsAvailable || sd;
 }
 
-bool ImageManager::initSD() {
+bool ImageManager::initSd() {
   // VFS owns the SD mount; this only reports it. The capture folder is made,
   // and swept once per mount, when a save first prepares it.
-  if (VFS::isSDAvailable()) {
+  if (VFS::isSdAvailable()) {
     uint64_t totalBytes, usedBytes, freeBytes;
     if (VFS::getStats(VFS::SDCARD, totalBytes, usedBytes, freeBytes)) {
       INFO_STORAGEF("[ImageManager] SD card available via VFS, size: %lluMB", totalBytes / (1024 * 1024));
@@ -74,10 +74,10 @@ bool ImageManager::initSD() {
   }
 }
 
-bool ImageManager::isSDAvailable() const { return VFS::isSDAvailable(); }
+bool ImageManager::isSdAvailable() const { return VFS::isSdAvailable(); }
 
-bool ImageManager::tierAvailable(bool isSD) const {
-  return isSD ? VFS::isSDAvailable() : littleFSAvailable;
+bool ImageManager::tierAvailable(bool isSd) const {
+  return isSd ? VFS::isSdAvailable() : littleFsAvailable;
 }
 
 String ImageManager::getMountPrefix(ImageStorageLocation location) {
@@ -115,13 +115,13 @@ const char* ImageManager::captureFolderRejectReason(const String& folder) {
 
 
 bool ImageManager::ensureCaptureFolder(ImageStorageLocation location) {
-  const bool isSD = location == IMAGE_STORAGE_SD;
-  if (!tierAvailable(isSD)) return false;
+  const bool isSd = location == IMAGE_STORAGE_SD;
+  if (!tierAvailable(isSd)) return false;
 
   String folder = getCaptureFolder(location);
-  const char* storageName = isSD ? "SD" : "LittleFS";
+  const char* storageName = isSd ? "SD" : "LittleFS";
   // trusted: confined to the configured capture folder of this tier.
-  AuthContext sys = VFS::systemAuth(folder.c_str(), isSD ? "imgmgr.ensure_capture_folder.sd"
+  AuthContext sys = VFS::systemAuth(folder.c_str(), isSd ? "imgmgr.ensure_capture_folder.sd"
                                                         : "imgmgr.ensure_capture_folder");
   FsLockGuard guard("ImageManager.ensureCaptureFolder");
   if (!VFS::existsGuarded(folder, sys)) {
@@ -135,7 +135,7 @@ bool ImageManager::ensureCaptureFolder(ImageStorageLocation location) {
   // `.jpg.tmp` a reset mid-save leaves behind, which listings skip and
   // retention never sees. A card mounted after boot, or remounted, carries a
   // new VFS mount generation and gets its own sweep.
-  if (isSD) {
+  if (isSd) {
     const uint32_t mount = VFS::sdMountGeneration();
     if (sdSweptGeneration != mount) {
       sdSweptGeneration = mount;
@@ -153,8 +153,8 @@ bool ImageManager::ensureCaptureFolder(ImageStorageLocation location) {
 // Entries are collected first; the directory is closed before anything is
 // removed.
 void ImageManager::sweepStaleTemporaries(ImageStorageLocation location, const String& folder) {
-  const bool isSD = location == IMAGE_STORAGE_SD;
-  const AuthContext sys = VFS::systemAuth(folder.c_str(), isSD ? "imgmgr.sweep_stale.sd" : "imgmgr.sweep_stale");
+  const bool isSd = location == IMAGE_STORAGE_SD;
+  const AuthContext sys = VFS::systemAuth(folder.c_str(), isSd ? "imgmgr.sweep_stale.sd" : "imgmgr.sweep_stale");
   File dir = VFS::openGuarded(folder, "r", sys);
   if (!dir || !dir.isDirectory()) {
     if (dir) dir.close();
@@ -175,7 +175,7 @@ void ImageManager::sweepStaleTemporaries(ImageStorageLocation location, const St
   }
   if (removed) {
     INFO_STORAGEF("[ImageManager] Removed %u stale photo temporar%s on %s", removed,
-                  removed == 1 ? "y" : "ies", isSD ? "SD" : "LittleFS");
+                  removed == 1 ? "y" : "ies", isSd ? "SD" : "LittleFS");
   }
 }
 
@@ -231,9 +231,9 @@ String ImageManager::saveImage(const uint8_t* data, size_t len, ImageStorageLoca
   const size_t requiredSpace = len + MIN_FREE_SPACE_BYTES;
   const String filename = generateFilename();
   auto saveTo = [&](ImageStorageLocation target) -> String {
-    const bool isSD = target == IMAGE_STORAGE_SD;
-    const char* storageName = isSD ? "SD" : "LittleFS";
-    if (!tierAvailable(isSD)) {
+    const bool isSd = target == IMAGE_STORAGE_SD;
+    const char* storageName = isSd ? "SD" : "LittleFS";
+    if (!tierAvailable(isSd)) {
       ERROR_STORAGEF("[ImageManager] %s not available", storageName);
       return "";
     }
@@ -241,7 +241,7 @@ String ImageManager::saveImage(const uint8_t* data, size_t len, ImageStorageLoca
     String path = getCaptureFolder(target);
     if (!path.concat("/") || !path.concat(filename)) return "";
     String normalizedPath;
-    const VFS::StorageType storage = isSD ? VFS::SDCARD : VFS::INTERNAL;
+    const VFS::StorageType storage = isSd ? VFS::SDCARD : VFS::INTERNAL;
     if (!normalizeFsPath(path, normalizedPath) || VFS::getStorageType(normalizedPath) != storage) {
       ERROR_STORAGEF("[ImageManager] Invalid capture path for %s: %s (cameraCaptureFolder=\"%s\" must be a "
                      "folder inside the tier cameraStorageLocation selects)",
@@ -253,7 +253,7 @@ String ImageManager::saveImage(const uint8_t* data, size_t len, ImageStorageLoca
     if (temporary.length() != path.length() || !temporary.concat(".tmp")) return "";
     // trusted: the file and its ".tmp" sibling sit in this tier's capture folder.
     AuthContext sys = VFS::systemAuth(getCaptureFolder(target).c_str(),
-                                      isSD ? "imgmgr.save_sd" : "imgmgr.save_image_lfs");
+                                      isSd ? "imgmgr.save_sd" : "imgmgr.save_image_lfs");
     FsLockGuard guard("ImageManager.saveImage");
     uint64_t total = 0, used = 0, free = 0;
     if (!VFS::getStats(storage, total, used, free)) {
@@ -279,16 +279,16 @@ String ImageManager::saveImage(const uint8_t* data, size_t len, ImageStorageLoca
     // require every available completion signal before publishing success.
     const bool complete = written == len && !f.getWriteError() && f.size() == len;
     f.close();
-    if (!isSD && written) VFS::noteLittleFsBytesWritten(written);
+    if (!isSd && written) VFS::noteLittleFsBytesWritten(written);
     if (!complete || !VFS::replaceFileGuarded(temporary, path, sys)) {
       if (!complete) {
         ERROR_STORAGEF("[ImageManager] Incomplete image write: %s (%u/%u bytes)",
                        temporary.c_str(), (unsigned)written, (unsigned)len);
       } else {
         ERROR_STORAGEF("[ImageManager] Failed to replace image: %s%s", path.c_str(),
-                       isSD ? " (a recovery .bak may remain)" : "");
+                       isSd ? " (a recovery .bak may remain)" : "");
       }
-      if (isSD) VFS::noteSDWriteFailure("image save");
+      if (isSd) VFS::noteSdWriteFailure("image save");
       // This attempt owns only its temporary; preserve the previous image and
       // any recovery backup retained by a failed SD promotion.
       if (!VFS::removeGuarded(temporary, sys)) {
@@ -319,18 +319,18 @@ String ImageManager::saveImage(const uint8_t* data, size_t len, ImageStorageLoca
 
 std::vector<ImageInfo> ImageManager::listImages(ImageStorageLocation location) {
   std::vector<ImageInfo> images;
-  const bool isSD = location == IMAGE_STORAGE_SD;
-  if (!tierAvailable(isSD)) return images;
+  const bool isSd = location == IMAGE_STORAGE_SD;
+  if (!tierAvailable(isSd)) return images;
 
   String folder = getCaptureFolder(location);
   FsLockGuard guard("ImageManager.listImages");
   File dir = VFS::openGuarded(folder, "r",
-                            VFS::systemAuth(folder.c_str(), isSD ? "imgmgr.list_sd" : "imgmgr.list_images"));
+                            VFS::systemAuth(folder.c_str(), isSd ? "imgmgr.list_sd" : "imgmgr.list_images"));
   if (!dir || !dir.isDirectory()) return images;
 
   // SD modification times determine retention order. LittleFS retains its
   // filename-based ordering and does not need the extra timestamp stat.
-  VFS::DirectoryReader reader(dir, folder, /*includeModifiedTime=*/isSD);
+  VFS::DirectoryReader reader(dir, folder, /*includeModifiedTime=*/isSd);
   VFS::DirectoryEntry entry;
   while (reader.next(entry)) {
     if (entry.isFolder ||
@@ -339,9 +339,9 @@ std::vector<ImageInfo> ImageManager::listImages(ImageStorageLocation location) {
     info.filename = entry.name;
     info.fullPath = entry.path;
     info.size = entry.size;
-    info.timestamp = isSD ? entry.modifiedAt : 0;
-    info.location = isSD ? IMAGE_STORAGE_SD : IMAGE_STORAGE_LITTLEFS;
-    info.isOnSD = isSD;
+    info.timestamp = isSd ? entry.modifiedAt : 0;
+    info.location = isSd ? IMAGE_STORAGE_SD : IMAGE_STORAGE_LITTLEFS;
+    info.isOnSd = isSd;
     images.push_back(info);
   }
   dir.close();
@@ -353,15 +353,15 @@ int ImageManager::getImageCount(ImageStorageLocation location) {
 }
 
 bool ImageManager::managedImagePath(const String& path, String& normalizedPath,
-                                    bool& isSD) {
+                                    bool& isSd) {
   if (!normalizeFsPath(path, normalizedPath)) {
     WARN_STORAGEF("[ImageManager] Rejected invalid image path: %s", path.c_str());
     return false;
   }
 
-  isSD = VFS::getStorageType(normalizedPath) == VFS::SDCARD;
+  isSd = VFS::getStorageType(normalizedPath) == VFS::SDCARD;
   const ImageStorageLocation location =
-      isSD ? IMAGE_STORAGE_SD : IMAGE_STORAGE_LITTLEFS;
+      isSd ? IMAGE_STORAGE_SD : IMAGE_STORAGE_LITTLEFS;
   String normalizedRoot;
   if (!normalizeFsPath(getCaptureFolder(location), normalizedRoot)) {
     ERROR_STORAGEF("[ImageManager] Invalid configured capture folder");
@@ -386,16 +386,16 @@ uint8_t* ImageManager::getImage(const String& path, size_t* outLen) {
   if (outLen) *outLen = 0;
 
   String normalizedPath;
-  bool isSD = false;
-  if (!managedImagePath(path, normalizedPath, isSD)) return nullptr;
+  bool isSd = false;
+  if (!managedImagePath(path, normalizedPath, isSd)) return nullptr;
 
   File f;
   size_t len = 0;
   {
     FsLockGuard guard("ImageManager.getImage.open");
-    if (!tierAvailable(isSD)) return nullptr;
+    if (!tierAvailable(isSd)) return nullptr;
     f = VFS::openGuarded(normalizedPath, "r",
-                         VFS::systemAuth(getCaptureFolder(isSD ? IMAGE_STORAGE_SD : IMAGE_STORAGE_LITTLEFS).c_str(),
+                         VFS::systemAuth(getCaptureFolder(isSd ? IMAGE_STORAGE_SD : IMAGE_STORAGE_LITTLEFS).c_str(),
                                          "imgmgr.get_image"));
     if (f) len = f.size();
   }
@@ -446,9 +446,9 @@ uint8_t* ImageManager::getImage(const String& path, size_t* outLen) {
 
 bool ImageManager::deleteImage(const String& path, const AuthContext& ctx) {
   String normalizedPath;
-  bool isSD = false;
-  if (!managedImagePath(path, normalizedPath, isSD)) return false;
-  if (!tierAvailable(isSD)) return false;
+  bool isSd = false;
+  if (!managedImagePath(path, normalizedPath, isSd)) return false;
+  if (!tierAvailable(isSd)) return false;
 
   FsLockGuard guard("ImageManager.deleteImage");
   return VFS::removeGuarded(normalizedPath, ctx);
@@ -498,15 +498,15 @@ bool ImageManager::enforceMaxImages(ImageStorageLocation location) {
 
 StorageStats ImageManager::getStorageStats(ImageStorageLocation location) {
   StorageStats stats = {0, 0, 0, 0, false};
-  const bool isSD = location == IMAGE_STORAGE_SD;
-  if (!tierAvailable(isSD)) return stats;
+  const bool isSd = location == IMAGE_STORAGE_SD;
+  if (!tierAvailable(isSd)) return stats;
 
   uint64_t total = 0, used = 0, free = 0;
-  if (!VFS::getStats(isSD ? VFS::SDCARD : VFS::INTERNAL, total, used, free)) return stats;
+  if (!VFS::getStats(isSd ? VFS::SDCARD : VFS::INTERNAL, total, used, free)) return stats;
   stats.totalBytes = total;
   stats.usedBytes = used;
   stats.freeBytes = free;
-  stats.imageCount = getImageCount(isSD ? IMAGE_STORAGE_SD : IMAGE_STORAGE_LITTLEFS);
+  stats.imageCount = getImageCount(isSd ? IMAGE_STORAGE_SD : IMAGE_STORAGE_LITTLEFS);
   stats.available = true;
   return stats;
 }
