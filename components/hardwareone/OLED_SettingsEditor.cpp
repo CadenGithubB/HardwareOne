@@ -1107,10 +1107,10 @@ static void toggleQuickRadio() {
 #if ENABLE_WIFI
 // State reflects the CONNECTION, not the radio mode: ESP-NOW holds the radio in
 // WIFI_AP_STA (mode never NULL), so keying on getMode() left this stuck ON.
-static bool getQuickWiFiState() {
+static bool getQuickWifiState() {
   return WiFi.isConnected();
 }
-static void toggleQuickWiFi() {
+static void toggleQuickWifi() {
   // Can't connect a network with the radio powered down — mirror the HTTP row's
   // "Need WiFi first!" refusal instead of firing openwifi against a dead radio.
   if (!wifiRadioOn()) {
@@ -1181,7 +1181,7 @@ static void initQuickItems() {
   quickItemCount = 0;
 #if ENABLE_WIFI
   addQuickItem("Radio", getQuickRadioState, toggleQuickRadio);  // radio power (airplane mode) — above WiFi
-  addQuickItem("WiFi", getQuickWiFiState, toggleQuickWiFi);      // network connection
+  addQuickItem("WiFi", getQuickWifiState, toggleQuickWifi);      // network connection
 #endif
 #if ENABLE_BLUETOOTH
   addQuickItem("Bluetooth", getQuickBluetoothState, toggleQuickBluetooth);

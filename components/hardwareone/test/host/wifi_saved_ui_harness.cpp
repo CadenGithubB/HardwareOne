@@ -122,11 +122,11 @@ static int xTaskCreatePinnedToCore(void (*)(void*), const char*, int, void*, int
   return pdPASS;
 }
 static void vTaskDelay(int) {}
-static void showWiFiMenu();
+static void showWifiMenu();
 
 // INSERT_PRODUCTION_FUNCTIONS
 
-static void showWiFiMenu() { setNetSub(NET_SUB_WIFI); }
+static void showWifiMenu() { setNetSub(NET_SUB_WIFI); }
 
 static void setOwner(uint32_t first, const char* name, uint32_t second = 0) {
   ownerSnapshot = {};
@@ -196,48 +196,48 @@ int main() {
   // G2: selection uses the admitted snapshot, not the live array position.
   snapshotAvailable = true;
   setOwner(101, "Long SSID with spaces", 202);
-  showWiFiSavedList();
+  showWifiSavedList();
   assert(gNetSub == NET_SUB_WIFI_SAVED && gWifiSavedSnapshot.entries[0].id == 101);
   assert(menuGeneration > enqueuedGeneration);  // commit occurs after admission
   const int beforeTapSnapshots = snapshotsTaken;
   setOwner(202, "Other", 303);
-  handleWiFiSavedTap(1);
+  handleWifiSavedTap(1);
   assert(gNetSub == NET_SUB_WIFI_SAVED_ACT);
   assert(rendered[0] == "<- Long SSID with spaces");
   assert(snapshotsTaken == beforeTapSnapshots);
-  handleWiFiSavedActionTap(1);
+  handleWifiSavedActionTap(1);
   assert(commands.back() == "openwifi --saved-id 101");
 
   // A failed list admission preserves both selection and prior page routing.
   setOwner(401, "Original");
-  showWiFiSavedList();
-  handleWiFiSavedTap(1);
+  showWifiSavedList();
+  handleWifiSavedTap(1);
   const uint32_t previousGeneration = menuGeneration;
   pageAdmission = false;
   setOwner(501, "Replacement");
-  showWiFiSavedList();
+  showWifiSavedList();
   assert(gWifiSavedSnapshot.entries[0].id == 401 && gWifiSavedSel == 0);
   assert(gNetSub == NET_SUB_WIFI_SAVED_ACT && menuGeneration == previousGeneration);
-  handleWiFiSavedActionTap(2);
+  handleWifiSavedActionTap(2);
   assert(commands.back() == "wifirmid 401");
 
   // Rejection of an action page keeps the list as the active input surface.
   pageAdmission = true;
-  showWiFiSavedList();
+  showWifiSavedList();
   pageAdmission = false;
-  handleWiFiSavedTap(1);
+  handleWifiSavedTap(1);
   assert(gNetSub == NET_SUB_WIFI_SAVED);
   const size_t beforeInvalid = commands.size();
-  handleWiFiSavedTap(UINT32_MAX);
-  handleWiFiSavedActionTap(99);
+  handleWifiSavedTap(UINT32_MAX);
+  handleWifiSavedActionTap(99);
   assert(commands.size() == beforeInvalid);
 
   // An unavailable source admits an inert error row, not an old selectable ID.
   pageAdmission = true;
   snapshotAvailable = false;
-  showWiFiSavedList();
+  showWifiSavedList();
   assert(gWifiSavedSnapshot.count == 0 && rendered[1] == "(saved list unavailable)");
-  handleWiFiSavedTap(1);
+  handleWifiSavedTap(1);
   assert(gNetSub == NET_SUB_WIFI_SAVED && commands.size() == beforeInvalid);
   std::puts("OLED/G2 saved-network selection checks passed");
 }

@@ -22,7 +22,7 @@
 // External settings
 
 // Compile-time feature checks
-static bool isWiFiCompiled() {
+static bool isWifiCompiled() {
 #if ENABLE_WIFI
   return true;
 #else
@@ -294,7 +294,7 @@ static constexpr FeatureEntry featureRegistry[] = {
   // === NETWORK FEATURES ===
   { "wifi", "WiFi", FEATURE_CAT_NETWORK, 24,
     FEATURE_FLAG_RUNTIME_TOGGLE | FEATURE_FLAG_REQUIRES_REBOOT,
-    &gSettings.wifiEnabled, isWiFiCompiled,
+    &gSettings.wifiEnabled, isWifiCompiled,
     "WiFi connectivity and network stack" },
     
   { "http", "HTTP Server", FEATURE_CAT_NETWORK, 18,

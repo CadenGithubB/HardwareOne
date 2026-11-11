@@ -114,7 +114,7 @@ const char* cmd_wifigettxpower(const String& argsInput);
 const char* cmd_wifiautoreconnect(const String& originalCmd);
 
 // WiFi Helper Functions
-bool ensureWiFiInitialized();
+bool ensureWifiInitialized();
 
 // Who asked for a connect. It decides whether a keystroke on the serial console
 // cancels the hunt: at boot the main task is blocked inside the connect, so the
@@ -143,11 +143,11 @@ constexpr uint32_t kWifiSupersedeWaitMs = 5000;
 bool wifiSupersedeBackgroundConnect(uint32_t waitMs = kWifiSupersedeWaitMs);
 
 // The boot task reserves its BACKGROUND connect before the task is created, so
-// a command that arrives before the task reaches setupWiFi still supersedes it.
-// setupWiFi(..., BACKGROUND) ends the reservation when it returns; pass false
+// a command that arrives before the task reaches setupWifi still supersedes it.
+// setupWifi(..., BACKGROUND) ends the reservation when it returns; pass false
 // to drop one whose task never started.
 void wifiBackgroundConnectReserve(bool reserve);
-// True from that reservation until setupWiFi(..., BACKGROUND) returns.
+// True from that reservation until setupWifi(..., BACKGROUND) returns.
 bool wifiBackgroundConnectActive();
 // True once the BACKGROUND connect has been superseded (sticky for the boot).
 bool wifiBackgroundConnectSuperseded();
@@ -165,8 +165,8 @@ constexpr uint32_t kWifiConnectHuntBudgetMs = 150000;
 // when setup has to wait for the connect (WifiConnectOrigin::BOOT).
 uint32_t wifiBootConnectBudgetMs();
 
-void setupWiFi();
-void setupWiFi(uint32_t budgetMs, WifiConnectOrigin origin);
+void setupWifi();
+void setupWifi(uint32_t budgetMs, WifiConnectOrigin origin);
 
 // Single source of truth for WiFi radio state, so every surface reports the same
 // thing. CONNECTED = associated to an AP; UP_FOR_ESPNOW = radio on but STA
@@ -189,7 +189,7 @@ bool wifiRadioOn();
 // and commands use wifiRadioState()/wifiRadioOn().
 WifiRadioState wifiRadioDisplayState();
 bool wifiRadioDisplayOn();
-bool connectToBestWiFiNetwork(uint32_t budgetMs = kWifiConnectHuntBudgetMs,
+bool connectToBestWifiNetwork(uint32_t budgetMs = kWifiConnectHuntBudgetMs,
                               WifiConnectOrigin origin = WifiConnectOrigin::COMMAND);
 // Main-loop drain for the disconnect snapshot captured on the arduino_events
 // task (wifiEventLogger keeps its stack frame tiny; the logging happens here).

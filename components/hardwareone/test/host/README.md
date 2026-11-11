@@ -432,8 +432,8 @@ Run with `ctest --test-dir build -R '^web_file_streaming$' --output-on-failure`.
 python3 components/hardwareone/test/host/test_wifi_connect_budget.py --sanitize
 ```
 
-`wifi_connect_budget` runs the shipping `connectToBestWiFiNetwork`,
-`connectWiFiId`, `connectWiFiTarget` and the bounded attempt function from
+`wifi_connect_budget` runs the shipping `connectToBestWifiNetwork`,
+`connectWifiId`, `connectWifiTarget` and the bounded attempt function from
 `System_WiFi.cpp`, plus the hunt's bounds helpers and `wifiBootConnectBudgetMs`,
 against a scripted driver and a virtual clock (`millis()` reads a counter that
 `delay()` advances). Each saved network is scripted as missing (the driver
@@ -459,7 +459,7 @@ still restarts the driver in STA. `--component <dir>` reads another tree; the
 pre-fix sources fail the pending-close case.
 
 The background boot connect (`WifiConnectOrigin::BACKGROUND`, run by the boot
-network task while setup carries on) is covered too, with `setupWiFi` itself
+network task while setup carries on) is covered too, with `setupWifi` itself
 compiled in. It never reads the console and leaves NTP to the boot sequence
 (a command-origin hunt still syncs). A superseding radio command stops it
 within one status poll, during a retry backoff or in the pause between saved
@@ -467,7 +467,7 @@ networks, with no later network tried and no connect failure reported; a
 command's own hunt ignores the request. The reservation made before the boot
 task starts stays active for the whole hunt and is released on every way out,
 including the driver-init early return; a request made between the
-reservation and the task reaching `setupWiFi` stops the connect before
+reservation and the task reaching `setupWifi` stops the connect before
 anything is initialized, and a superseded connect is reported as stopped, not
 timed out. `wifiSupersedeBackgroundConnect` returns at once when nothing runs,
 waits for the release, and gives up after its bound. Source checks confirm

@@ -94,7 +94,7 @@ static auto dispatchTopLevelPage = unexpectedDispatch;
 static auto dispatchModePage = unexpectedDispatch;
 static auto dispatchEspNow = unexpectedDispatch;
 static auto dispatchMQTT = unexpectedDispatch;
-static auto dispatchWiFi = unexpectedDispatch;
+static auto dispatchWifi = unexpectedDispatch;
 
 static SetupWizardPage getWizardCurrentPage() { return WIZARD_PAGE_SYSTEM; }
 static WizardSubMode subModeForPage(SetupWizardPage) { return WizardSubMode::PAGE_GROUP; }

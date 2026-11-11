@@ -139,7 +139,7 @@ static bool netRowAt(NetworkSubMode sub, uint32_t idx, NetRowBinding* out) {
   return true;
 }
 
-// Row actions per submenu (WiFi's WifiMenuAction sits with showWiFiMenu).
+// Row actions per submenu (WiFi's WifiMenuAction sits with showWifiMenu).
 // `on` in the binding gives a toggle's direction.
 enum EspNowRowAction : uint8_t {
   ESPNOW_ROW_BACK = 0,    // -> WiFi submenu
@@ -217,7 +217,7 @@ static char     gScanFailure[32] = {};
 // overlay, the user sees the prior state until that command completes, which
 // feels like the tap was ignored.
 //
-// While `millis() < gWifiPendingDeadlineMs`, showWiFiMenu() renders
+// While `millis() < gWifiPendingDeadlineMs`, showWifiMenu() renders
 // the toggle row as "WiFi: Pending..." regardless of the live
 // WiFi.isConnected() value, so the user gets immediate visual feedback.
 // A short watchdog task polls WiFi.isConnected() every 500 ms and queues a
@@ -274,7 +274,7 @@ static volatile bool     gRingPendingTaskActive = false;
 static constexpr uint32_t RING_PENDING_HARD_TIMEOUT_MS = 230000;
 
 // Menu generation of the last view drawn with the WiFi "Pending..." or the R1
-// "connecting..." overlay. showWiFiMenu / showBluetoothR1Menu publish it, so it
+// "connecting..." overlay. showWifiMenu / showBluetoothR1Menu publish it, so it
 // is the view the tap drew before arming the watchdog, or the same menu drawn
 // again after the user came back to it while still pending.
 static uint32_t gWifiPendingViewGen = 0;
@@ -402,7 +402,7 @@ enum WifiMenuAction : uint8_t {
   WIFI_MENU_ESPNOW,
 };
 
-static void showWiFiMenu() {
+static void showWifiMenu() {
   setNetSub(NET_SUB_WIFI);
   const uint32_t viewGen = g2CurrentMenuGen();  // this view, before drawing
   EXT_RAM_BSS_ATTR static char radioLine[24];  // "Radio: ON/OFF" — whole-radio power (airplane mode)
@@ -499,7 +499,7 @@ static void showWiFiMenu() {
 // submenu. List-style page so the rows are individually visible without
 // the firmware's TEXT-view pagination juggling. All info, no actions —
 // every tap returns to the WiFi submenu.
-static void showWiFiStatusPage() {
+static void showWifiStatusPage() {
   setNetSub(NET_SUB_WIFI_STATUS);
 #if ENABLE_WIFI
   // 12 row buffers is comfortable headroom — current layout uses up to 10.
@@ -558,7 +558,7 @@ static void showWiFiStatusPage() {
 // is g2ShowEvenAIReplyNoAsk("Scanning networks...") in runNetworkScanFlow,
 // which empties the scan cache before queueing this view. Returns the menu
 // generation of the scan view it draws.
-static uint32_t showWiFiScanningPlaceholder() {
+static uint32_t showWifiScanningPlaceholder() {
   setNetSub(NET_SUB_WIFI_SCAN);
   const uint32_t viewGen = g2CurrentMenuGen();
   static const char* rows[] = {
@@ -603,7 +603,7 @@ static void showScanResults() {
 
 // Saved-network list. Retain the exact identities used for these rows until the
 // next admitted list; store changes cannot retarget a later Connect/Forget tap.
-static void showWiFiSavedList() {
+static void showWifiSavedList() {
 #if ENABLE_WIFI
   WifiNetworkSnapshot snapshot;
   const bool available = wifiNetworkSnapshot(snapshot);
@@ -646,7 +646,7 @@ static void showWiFiSavedList() {
 // list. gWifiSavedSel holds its index into the retained snapshot. Lets the user CONNECT
 // to that saved network (password already stored) or FORGET it, instead of the
 // old behaviour where a tap immediately forgot it.
-static void showWiFiSavedActionMenu() {
+static void showWifiSavedActionMenu() {
 #if ENABLE_WIFI
   EXT_RAM_BSS_ATTR static char back[48];  // PSRAM: deep-copied by g2ShowListPage
   if (gWifiSavedSel >= 0 && gWifiSavedSel < gWifiSavedSnapshot.count) {
@@ -1026,7 +1026,7 @@ static bool cacheG2ScanRecord(const WifiScanRecord& record,
 // view instead. It cannot draw them in this lens job: the placeholder's page
 // swap is still queued behind it, so a second list render here is refused.
 static void showScanPlaceholderForFlow() {
-  const uint32_t viewGen = showWiFiScanningPlaceholder();
+  const uint32_t viewGen = showWifiScanningPlaceholder();
   portENTER_CRITICAL(&s_netScanMux);
   s_netScanView.menuGen      = viewGen;
   s_netScanView.targetNetSub = (uint8_t)NET_SUB_WIFI_SCAN;
@@ -1159,13 +1159,13 @@ static void backToHijackMain() {
 }
 
 // Forward decl — defined below alongside other section show fns. Kept
-// here so handleWiFiTap can dispatch to it without reordering the file.
+// here so handleWifiTap can dispatch to it without reordering the file.
 static void showHttpMenu();
 
 static void handleMainTap(uint32_t idx) {
   switch (idx) {
     case 0: backToHijackMain(); break;        // <- Back
-    case 1: showWiFiMenu();      break;       // WiFi >>
+    case 1: showWifiMenu();      break;       // WiFi >>
     case 2: showBluetoothMenu(); break;       // Bluetooth >>
     default:
       DEBUG_G2F("[G2] Network MAIN: unknown idx=%u", (unsigned)idx);
@@ -1198,7 +1198,7 @@ static void wifiPendingWatchdogTask(void* /*arg*/) {
       if ((int32_t)(millis() - watchedDeadline) >= 0) {
         if (!clearWifiPendingOverlayIfOwned(watchedDeadline)) continue;
         queuePendingViewRedraw(&gWifiPendingViewGen, NET_SUB_WIFI,
-                               &showWiFiMenu, "WiFi pending");
+                               &showWifiMenu, "WiFi pending");
         break;
       }
 
@@ -1208,7 +1208,7 @@ static void wifiPendingWatchdogTask(void* /*arg*/) {
       // Applied only while the WiFi menu that showed "Pending..." is still
       // the current view; otherwise it would clobber the user's next page.
       queuePendingViewRedraw(&gWifiPendingViewGen, NET_SUB_WIFI,
-                             &showWiFiMenu, "WiFi pending");
+                             &showWifiMenu, "WiFi pending");
       break;
     }
 
@@ -1235,7 +1235,7 @@ static void onWifiMenuRefreshDone(bool ok,
   DEBUG_G2F("[G2] WiFi-menu refresh cmd done: ok=%d seq=%llu menuGen=%u result='%s'",
             (int)ok, (unsigned long long)cookie.seq,
             (unsigned)cookie.menuGen, result ? result : "");
-  (void)g2EnqueueRedraw(cookie, &showWiFiMenu, "WiFi-menu refresh");
+  (void)g2EnqueueRedraw(cookie, &showWifiMenu, "WiFi-menu refresh");
 }
 
 // openwifi is a synchronous command on cmd_exec: by callback time it has
@@ -1251,7 +1251,7 @@ static void onWifiConnectRefreshDone(bool ok,
   DEBUG_G2F("[G2] WiFi-connect refresh cmd done: ok=%d pending=%d seq=%llu menuGen=%u result='%s'",
             (int)ok, (int)ownedPending, (unsigned long long)cookie.seq,
             (unsigned)cookie.menuGen, result ? result : "");
-  (void)g2EnqueueRedraw(cookie, &showWiFiMenu, "WiFi-connect refresh");
+  (void)g2EnqueueRedraw(cookie, &showWifiMenu, "WiFi-connect refresh");
 }
 
 static void onWifiSavedListRefreshDone(bool ok,
@@ -1261,7 +1261,7 @@ static void onWifiSavedListRefreshDone(bool ok,
   DEBUG_G2F("[G2] WiFi-saved refresh cmd done: ok=%d seq=%llu menuGen=%u result='%s'",
             (int)ok, (unsigned long long)cookie.seq,
             (unsigned)cookie.menuGen, result ? result : "");
-  (void)g2EnqueueRedraw(cookie, &showWiFiSavedList, "WiFi-saved refresh");
+  (void)g2EnqueueRedraw(cookie, &showWifiSavedList, "WiFi-saved refresh");
 }
 
 // ESP-NOW / Bluetooth submenu refresh callbacks use the same redraw bridge.
@@ -1425,7 +1425,7 @@ static void onBluetoothPhoneMenuRefreshDone(bool ok,
 }
 #endif
 
-static void handleWiFiTap(uint32_t idx) {
+static void handleWifiTap(uint32_t idx) {
   NetRowBinding row;
   if (!netRowAt(NET_SUB_WIFI, idx, &row)) return;
   const WifiMenuAction action = (WifiMenuAction)row.action;
@@ -1461,12 +1461,12 @@ static void handleWiFiTap(uint32_t idx) {
 
       // The persisted master switch is intentionally stronger than the
       // runtime radio toggle. Do not promise/animate a connection attempt that
-      // ensureWiFiInitialized() must reject; the row already directs the user
+      // ensureWifiInitialized() must reject; the row already directs the user
       // to Settings in this state.
       if (connect && !gSettings.wifiEnabled) {
         DEBUG_G2F("[G2] WiFi toggle ignored: WiFi disabled in Settings");
         cancelWifiPendingOverlay();
-        showWiFiMenu();
+        showWifiMenu();
         break;
       }
 
@@ -1494,7 +1494,7 @@ static void handleWiFiTap(uint32_t idx) {
         // completion callback ends the overlay on final success or failure.
         DEBUG_G2F("[G2] WiFi toggle: openwifi via cmd_exec (Pending overlay armed)");
         const uint32_t pendingDeadline = armWifiPendingOverlay();
-        showWiFiMenu();   // immediate "WiFi: Pending..." render
+        showWifiMenu();   // immediate "WiFi: Pending..." render
         vTaskDelay(pdMS_TO_TICKS(150));
 
         if (!g2SubmitHijackCommand("openwifi", cookie,
@@ -1502,7 +1502,7 @@ static void handleWiFiTap(uint32_t idx) {
                                    (void*)(uintptr_t)pendingDeadline)) {
           DEBUG_G2F("[G2] WiFi toggle: openwifi submit FAILED — no inline mutate");
           clearWifiPendingOverlayIfOwned(pendingDeadline);
-          showWiFiMenu();
+          showWifiMenu();
         } else if (claimWifiPendingWatchdog()) {
           // Watchdog only when the kick actually queued — only one alive
           // at a time; subsequent taps re-arm gWifiPendingDeadlineMs.
@@ -1513,7 +1513,7 @@ static void handleWiFiTap(uint32_t idx) {
                       "menu won't auto-refresh on connect");
             __atomic_store_n(&gWifiPendingTaskActive, false, __ATOMIC_RELEASE);
             clearWifiPendingOverlayIfOwned(pendingDeadline);
-            showWiFiMenu();
+            showWifiMenu();
           }
         }
       }
@@ -1539,7 +1539,7 @@ static void handleWiFiTap(uint32_t idx) {
     }
 
     case WIFI_MENU_STATUS:  // Drill into detailed info.
-      showWiFiStatusPage();
+      showWifiStatusPage();
       break;
 
     case WIFI_MENU_SCAN: {
@@ -1551,7 +1551,7 @@ static void handleWiFiTap(uint32_t idx) {
     }
 
     case WIFI_MENU_SAVED: {
-      showWiFiSavedList();
+      showWifiSavedList();
       break;
     }
 
@@ -1559,7 +1559,7 @@ static void handleWiFiTap(uint32_t idx) {
                // Submits the existing `wifiautostart <0|1>` CLI command
                // via g2SubmitHijackCommand. The completion callback enqueues
                // a Redraw job that the lens applier guards by menuGen and
-               // dispatches into showWiFiMenu(). See proposal §5.4 + step 4.
+               // dispatches into showWifiMenu(). See proposal §5.4 + step 4.
                //
                // This row reads and displays gSettings.wifiAutoStart, so it
                // must write that same setting. It used to submit
@@ -1604,8 +1604,8 @@ static void handleWiFiTap(uint32_t idx) {
 }
 
 // Status page is info-only — every tap returns to the WiFi submenu.
-static void handleWiFiStatusTap(uint32_t /*idx*/) {
-  showWiFiMenu();
+static void handleWifiStatusTap(uint32_t /*idx*/) {
+  showWifiMenu();
 }
 
 // --- Join-a-scanned-AP flow -------------------------------------------------
@@ -1683,8 +1683,8 @@ static void wifiAddPassCancel() {
   showScanResults();
 }
 
-static void handleWiFiScanTap(uint32_t idx) {
-  if (idx == 0) { showWiFiMenu(); return; }
+static void handleWifiScanTap(uint32_t idx) {
+  if (idx == 0) { showWifiMenu(); return; }
   size_t apIdx = idx - 1;
   if (apIdx >= gScanCacheCount) return;
   const CachedAp& ap = gScanCache[apIdx];
@@ -1724,23 +1724,23 @@ static void handleWiFiScanTap(uint32_t idx) {
 
 // Tapping a saved network now opens an action menu (Connect / Forget) instead
 // of immediately forgetting it.
-static void handleWiFiSavedTap(uint32_t idx) {
-  if (idx == 0) { showWiFiMenu(); return; }
+static void handleWifiSavedTap(uint32_t idx) {
+  if (idx == 0) { showWifiMenu(); return; }
 #if ENABLE_WIFI
   size_t savedIdx = idx - 1;
   if (savedIdx < static_cast<size_t>(gWifiSavedSnapshot.count)) {
     gWifiSavedSel = (int)savedIdx;
-    showWiFiSavedActionMenu();
+    showWifiSavedActionMenu();
   }
 #endif
 }
 
 // Action menu for one saved network: 0 = back, 1 = Connect, 2 = Forget.
-static void handleWiFiSavedActionTap(uint32_t idx) {
-  if (idx == 0) { showWiFiSavedList(); return; }   // <- back to the saved list
+static void handleWifiSavedActionTap(uint32_t idx) {
+  if (idx == 0) { showWifiSavedList(); return; }   // <- back to the saved list
 #if ENABLE_WIFI
   if (gWifiSavedSel < 0 || gWifiSavedSel >= gWifiSavedSnapshot.count) {
-    showWiFiSavedList();
+    showWifiSavedList();
     return;
   }
   const SavedWifiNetwork& selected = gWifiSavedSnapshot.entries[gWifiSavedSel];
@@ -1755,21 +1755,21 @@ static void handleWiFiSavedActionTap(uint32_t idx) {
     cookie.targetNetSub   = NET_SUB_WIFI;     // land back on the WiFi menu
     const uint32_t pendingDeadline = armWifiPendingOverlay();
     setNetSub(NET_SUB_WIFI);
-    showWiFiMenu();                            // immediate "Pending..." feedback
+    showWifiMenu();                            // immediate "Pending..." feedback
     vTaskDelay(pdMS_TO_TICKS(150));
     if (!g2SubmitHijackCommand(line, cookie,
                                onWifiConnectRefreshDone,
                                (void*)(uintptr_t)pendingDeadline)) {
       DEBUG_G2F("[G2] WiFi: Connect saved submit FAILED");
       clearWifiPendingOverlayIfOwned(pendingDeadline);
-      showWiFiMenu();
+      showWifiMenu();
     } else if (claimWifiPendingWatchdog()) {
       taskStackRecord("g2_wifi_pending", 4096);
       if (xTaskCreatePinnedToCore(wifiPendingWatchdogTask, "g2_wifi_pending",
                       4096, nullptr, /*prio*/ 5, nullptr, APP_CORE) != pdPASS) {
         __atomic_store_n(&gWifiPendingTaskActive, false, __ATOMIC_RELEASE);
         clearWifiPendingOverlayIfOwned(pendingDeadline);
-        showWiFiMenu();
+        showWifiMenu();
       }
     }
   } else if (idx == 2) {  // Forget the same displayed entry, return to the list.
@@ -1864,7 +1864,7 @@ static void handleEspNowTap(uint32_t idx) {
     case ESPNOW_ROW_BACK:
       // Back goes to the WiFi submenu now — ESP-NOW is nested under WiFi
       // since both ride the WiFi radio.
-      showWiFiMenu();
+      showWifiMenu();
       return;
 
     case ESPNOW_ROW_POWER: {  // ESP-NOW state line — toggle via cmd_exec
@@ -2367,7 +2367,7 @@ static void handleHttpTap(uint32_t idx) {
   if (!netRowAt(NET_SUB_HTTP, idx, &row)) return;
   // Back goes to the WiFi submenu now — HTTP(S) is nested under WiFi
   // since the server can only run with a WiFi connection.
-  if (row.action == HTTP_ROW_BACK) { showWiFiMenu(); return; }
+  if (row.action == HTTP_ROW_BACK) { showWifiMenu(); return; }
 
 #if ENABLE_HTTP_SERVER
   G2CmdCookie cookie{};
@@ -2425,11 +2425,11 @@ static void handleHttpTap(uint32_t idx) {
 void g2NetworkHandleTap(uint32_t idx) {
   switch (gNetSub) {
     case NET_SUB_MAIN:        handleMainTap(idx);        break;
-    case NET_SUB_WIFI:        handleWiFiTap(idx);        break;
-    case NET_SUB_WIFI_SCAN:   handleWiFiScanTap(idx);    break;
-    case NET_SUB_WIFI_SAVED:  handleWiFiSavedTap(idx);   break;
-    case NET_SUB_WIFI_SAVED_ACT: handleWiFiSavedActionTap(idx); break;
-    case NET_SUB_WIFI_STATUS: handleWiFiStatusTap(idx);  break;
+    case NET_SUB_WIFI:        handleWifiTap(idx);        break;
+    case NET_SUB_WIFI_SCAN:   handleWifiScanTap(idx);    break;
+    case NET_SUB_WIFI_SAVED:  handleWifiSavedTap(idx);   break;
+    case NET_SUB_WIFI_SAVED_ACT: handleWifiSavedActionTap(idx); break;
+    case NET_SUB_WIFI_STATUS: handleWifiStatusTap(idx);  break;
     case NET_SUB_ESPNOW:      handleEspNowTap(idx);      break;
     case NET_SUB_ESPNOW_DEVS: handleEspNowDevsTap(idx);  break;
     case NET_SUB_BLUETOOTH:   handleBluetoothTap(idx);   break;

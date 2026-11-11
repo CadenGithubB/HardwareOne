@@ -305,30 +305,30 @@ static void testRetryOrSkipWait() {
 static void testWifiPickerCancel() {
   reset(); serialInputs.push_back({0, "cancel"});
   String selected = "old scratch";
-  assert(!getOLEDWiFiSelection(selected) && isWizardCancelRequested());
+  assert(!getOLEDWifiSelection(selected) && isWizardCancelRequested());
 #if ENABLE_WIFI
   assert(selected.empty() && sFtsWifiStoredCount == 0);
   reset(); setSerialWaitTimeout(75); selected = "old scratch";
-  assert(!getOLEDWiFiSelection(selected) && isWizardCancelRequested() && nowMs == 100);
+  assert(!getOLEDWifiSelection(selected) && isWizardCancelRequested() && nowMs == 100);
   assert(selected.empty() && sFtsWifiStoredCount == 0);
 
   for (bool failedScan : {false, true}) {
     reset(); scanAccepted = !failedScan; scannedNetworks.clear();
     serialInputs.push_back({0, "cancel"});
-    assert(!getOLEDWiFiSelection(selected) && isWizardCancelRequested());
+    assert(!getOLEDWifiSelection(selected) && isWizardCancelRequested());
     assert(scanCalls == 1 && sFtsWifiStoredCount == 0);
     // Serial 'skip' and 'rescan' act like the B and A the display offers.
     reset(); scanAccepted = !failedScan; scannedNetworks.clear();
     serialInputs.push_back({0, "skip"});
-    assert(!getOLEDWiFiSelection(selected) && !isWizardCancelRequested() && scanCalls == 1);
+    assert(!getOLEDWifiSelection(selected) && !isWizardCancelRequested() && scanCalls == 1);
     reset(); scanAccepted = !failedScan; scannedNetworks.clear();
     serialInputs.push_back({0, "rescan"}); serialInputs.push_back({10, "skip"});
-    assert(!getOLEDWiFiSelection(selected) && !isWizardCancelRequested() && scanCalls == 2);
+    assert(!getOLEDWifiSelection(selected) && !isWizardCancelRequested() && scanCalls == 2);
   }
 
   reset(); requestWizardCancel(); gWizardOwnsSerial = false;
   serialInputs.push_back({0, "cancel"});
-  assert(getOLEDWiFiSelection(selected) && selected == "cancel");
+  assert(getOLEDWifiSelection(selected) && selected == "cancel");
   assert(sFtsWifiStoredCount == 0); // Ordinary callers still accept this SSID.
 #endif
 }

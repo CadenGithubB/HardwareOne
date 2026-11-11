@@ -217,7 +217,7 @@ static void noteNtpStateBeforeSetupReboot() {
 
 #if ENABLE_WIFI
 // Serial WiFi scan + pick for "Import from Backup" when ENABLE_OLED_DISPLAY is off
-// (getOLEDWiFiSelection lives in OLED_FirstTimeSetup.cpp and is not built).
+// (getOLEDWifiSelection lives in OLED_FirstTimeSetup.cpp and is not built).
 static bool serialWifiSelectionForRestore(String& outSSID) {
   outSSID = "";
   while (true) {
@@ -647,7 +647,7 @@ void firstTimeSetupIfNeeded() {
     while (!wifiSelected) {
       // Network selection (scan + pick from list)
 #if ENABLE_OLED_DISPLAY
-      if (!getOLEDWiFiSelection(restoreSSID)) {
+      if (!getOLEDWifiSelection(restoreSSID)) {
         // User pressed B / cancelled — go back to setup mode selection
         goBack = true;
         break;
@@ -700,7 +700,7 @@ void firstTimeSetupIfNeeded() {
 #endif
 
     const WifiNetworkSaveResult wifiSaved =
-        saveSetupWiFiNetwork(restoreSSID, restorePass);
+        saveSetupWifiNetwork(restoreSSID, restorePass);
     broadcastOutput(wifiNetworkSaveResultMessage(wifiSaved));
     if (wifiSaved != WifiNetworkSaveResult::Accepted) {
       broadcastOutput("Returning to setup mode selection.");
@@ -713,7 +713,7 @@ void firstTimeSetupIfNeeded() {
 
     // Use the project's standard WiFi connection (ESP-IDF API internally).
     // The wizard runs on the boot task, so a console keystroke may skip it.
-    setupWiFi(kWifiConnectHuntBudgetMs, WifiConnectOrigin::BOOT);
+    setupWifi(kWifiConnectHuntBudgetMs, WifiConnectOrigin::BOOT);
 
     if (WiFi.status() != WL_CONNECTED) {
       broadcastOutput("Error: Failed to connect to WiFi. Cannot use Import from Backup.");
@@ -1116,9 +1116,9 @@ void firstTimeSetupIfNeeded() {
     // Handles WiFi connect + NTP sync + timestamp resolution. The wizard runs
     // on the boot task, so a console keystroke may skip the connect.
 #if ENABLE_WIFI
-    connectToBestWiFiNetwork(kWifiConnectHuntBudgetMs, WifiConnectOrigin::BOOT);
+    connectToBestWifiNetwork(kWifiConnectHuntBudgetMs, WifiConnectOrigin::BOOT);
 #else
-    connectToBestWiFiNetwork();
+    connectToBestWifiNetwork();
 #endif
   }
 

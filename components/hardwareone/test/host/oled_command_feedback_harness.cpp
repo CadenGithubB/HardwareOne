@@ -404,7 +404,7 @@ static void case_quick_radio_wifi() {
 
   resetWorld();
   refuse(kAdminRefusal);
-  toggleQuickWiFi();
+  toggleQuickWifi();
   land();
   EXPECT(ran() == "closewifi" && quickStatusMsg[0] == '\0' && gToast == "Admin required",
          "a refused Wi-Fi toggle shows the refusal, ran: " + ran() + ", status: '" +
@@ -412,14 +412,14 @@ static void case_quick_radio_wifi() {
 
   resetWorld();
   WiFi.connected = false;
-  toggleQuickWiFi();
+  toggleQuickWifi();
   land();
   EXPECT(ran() == "openwifi --best" && std::string(quickStatusMsg) == "WiFi ON",
          "an accepted Wi-Fi connect shows 'WiFi ON', status: '" + std::string(quickStatusMsg) + "'");
 
   resetWorld();
   gRadioOn = false;
-  toggleQuickWiFi();
+  toggleQuickWifi();
   land();
   EXPECT(ran() == "(none)" && std::string(quickStatusMsg) == "Radio off!",
          "with the radio off the Wi-Fi row refuses locally without a command");
@@ -506,7 +506,7 @@ static void case_quick_async() {
          "a frame before the command finishes changes nothing");
 
   // One request at a time: another row is refused locally and queues nothing.
-  toggleQuickWiFi();
+  toggleQuickWifi();
   EXPECT(gQueued.size() == 1 && gChecked.size() == 1 && gToast == "Please wait",
          "a second row while one runs toasts 'Please wait', ran: " + ran() + ", toast: '" + gToast + "'");
 
@@ -522,7 +522,7 @@ static void case_quick_async() {
 
   // After it lands the next row runs.
   WiFi.connected = false;
-  toggleQuickWiFi();
+  toggleQuickWifi();
   EXPECT(gQueued.size() == 1 && gQueued[0].line == "openwifi --best",
          "the next row runs after the first finished, ran: " + ran());
   land();

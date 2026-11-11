@@ -29,7 +29,7 @@ char debugBuffer[1024];
 bool ensureDebugBuffer(){return true;}
 char* getDebugBuffer(){return debugBuffer;}
 bool radioCompanionBlocksRadio(const char** reason){*reason=companionReason;return companionReason!=nullptr;}
-bool ensureWiFiInitialized(){++initCalls;return initOk;}
+bool ensureWifiInitialized(){++initCalls;return initOk;}
 void clearRadioRestoreSnapshot(){}
 void broadcastOutput(const char*){}
 struct {void setAutoReconnect(bool){} bool isConnected(){return false;} String SSID(){return String();}} WiFi;
@@ -40,10 +40,10 @@ bool wifiNetworkConnectionById(uint32_t,WifiConnectionTarget&){return savedCount
 int wifiNetworkCount(){return savedCount;}
 bool wifiNetworkSnapshot(WifiNetworkSnapshot& value){value.count=savedCount;return snapshotOk;}
 bool wifiSupersedeBackgroundConnect(){return supersedeOk;}
-bool connectToBestWiFiNetwork(){++connectCalls;return connectOk;}
-bool connectWiFiTarget(const WifiConnectionTarget&,int,bool){return connectOk;}
-bool connectWiFiIndex(int,int){return connectOk;}
-bool connectWiFiSSID(const String&,int){return false;}
+bool connectToBestWifiNetwork(){++connectCalls;return connectOk;}
+bool connectWifiTarget(const WifiConnectionTarget&,int,bool){return connectOk;}
+bool connectWifiIndex(int,int){return connectOk;}
+bool connectWifiSSID(const String&,int){return false;}
 // INSERT_COMMANDS
 int main(){
  gSettings.wifiEnabled=false;initOk=false;

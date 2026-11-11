@@ -442,7 +442,7 @@ struct Settings {
       mqttBaseTopic(""),
       mqttDiscoveryPrefix("homeassistant"),
       mqttPublishIntervalMs(10000),
-      mqttPublishWiFi(false),
+      mqttPublishWifi(false),
       mqttPublishSystem(false),
       mqttPublishThermal(false),
       mqttPublishToF(false),
@@ -1202,7 +1202,7 @@ struct Settings {
   String mqttDiscoveryPrefix;   // HA discovery prefix (default: "homeassistant")
   int mqttPublishIntervalMs;    // Sensor data publish interval in ms (default: 10000)
   // MQTT publish data configuration
-  bool mqttPublishWiFi;         // Include WiFi info in published data (default: false)
+  bool mqttPublishWifi;         // Include WiFi info in published data (default: false)
   bool mqttPublishSystem;       // Include system info (uptime, heap, etc.) (default: false)
   bool mqttPublishThermal;      // Include thermal sensor data (default: false)
   bool mqttPublishToF;          // Include ToF sensor data (default: false)

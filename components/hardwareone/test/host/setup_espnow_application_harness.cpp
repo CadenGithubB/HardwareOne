@@ -122,7 +122,7 @@ static CLIModeInputResult unrelatedPage(const String&, char*, size_t) {
 static auto dispatchTopLevelPage = unrelatedPage;
 static auto dispatchModePage = unrelatedPage;
 static auto dispatchMQTT = unrelatedPage;
-static auto dispatchWiFi = unrelatedPage;
+static auto dispatchWifi = unrelatedPage;
 
 static bool wizardIsGroupPage(SetupWizardPage page) {
   return page == WIZARD_PAGE_CONNECTIONS || page == WIZARD_PAGE_DISPLAY ||

@@ -184,7 +184,7 @@ void streamMqttInner(httpd_req_t* req) {
   
   // WiFi info toggle
   httpd_resp_send_chunk(req, "</td></tr><tr><td>WiFi Info</td><td>", HTTPD_RESP_USE_STRLEN);
-  httpd_resp_send_chunk(req, gSettings.mqttPublishWiFi ? 
+  httpd_resp_send_chunk(req, gSettings.mqttPublishWifi ? 
     "<span style=\"color:var(--success);\">✓ Enabled</span>" : 
     "<span style=\"color:var(--panel-fg);\">Disabled</span>", HTTPD_RESP_USE_STRLEN);
   

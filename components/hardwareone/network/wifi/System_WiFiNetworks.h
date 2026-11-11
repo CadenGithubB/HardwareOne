@@ -27,7 +27,7 @@ enum class WifiNetworkSaveResult { Rejected, PersistFailed, Accepted };
 // What an interactively added SSID or password cannot contain: a `"` (the
 // quoted `wifiadd` field has no escape, so it would end the field early and
 // shift the rest into the next argument) or a control character (0x00-0x1F,
-// 0x7F). Reports the first such byte. upsertWiFiNetwork refuses both.
+// 0x7F). Reports the first such byte. upsertWifiNetwork refuses both.
 enum class WifiFieldProblem : uint8_t { None, Quote, ControlCharacter };
 WifiFieldProblem wifiNetworkFieldProblem(const char* text);
 
@@ -46,25 +46,25 @@ WifiFieldProblem wifiAddCommandLine(const String& ssid, const String& password,
 #if ENABLE_WIFI
 // Boot only: construct internal-RAM storage before settings are loaded and
 // before other tasks can use this service. False is a fatal boot allocation error.
-bool initWiFiNetworks();
+bool initWifiNetworks();
 int wifiNetworkCount();
 bool wifiNetworkSnapshot(WifiNetworkSnapshot& out);
 
 // These operations own synchronization. Callers never retain storage pointers.
-// Mutation does not persist until saveWiFiNetworks() is called.
-bool upsertWiFiNetwork(const String& ssid, const String& password, int priority, bool hidden);
-bool removeWiFiNetwork(const String& ssid);
-bool removeWiFiNetworkById(uint32_t id, String* removedSsid = nullptr);
-bool setWiFiNetworkPriority(const String& ssid, int priority);
-void sortWiFiByPriority();
+// Mutation does not persist until saveWifiNetworks() is called.
+bool upsertWifiNetwork(const String& ssid, const String& password, int priority, bool hidden);
+bool removeWifiNetwork(const String& ssid);
+bool removeWifiNetworkById(uint32_t id, String* removedSsid = nullptr);
+bool setWifiNetworkPriority(const String& ssid, int priority);
+void sortWifiByPriority();
 // False leaves RAM changes intact. True means the settings writer accepted the
 // request; an owner-scoped batch's finalizer reports eventual durable completion.
-bool saveWiFiNetworks();
+bool saveWifiNetworks();
 
 // Shared setup application: priority 1, visible network, auto-start on acceptance.
 // Rejected input changes nothing. Failed persistence keeps the list edit in RAM
 // and restores the prior auto-start value. Uses the existing settings writer.
-WifiNetworkSaveResult saveSetupWiFiNetwork(const String& ssid, const String& password);
+WifiNetworkSaveResult saveSetupWifiNetwork(const String& ssid, const String& password);
 
 // Settings owns crypto policy, key selection, load readiness and file writes.
 // Restore preserves legacy records without applying interactive input validation.
@@ -72,16 +72,16 @@ WifiNetworkSaveResult saveSetupWiFiNetwork(const String& ssid, const String& pas
 bool wifiNetworksWriteJson(JsonDocument& doc, bool excludePasswords);
 unsigned wifiNetworksReadJson(const JsonDocument& doc);
 #else
-inline bool initWiFiNetworks() { return false; }
+inline bool initWifiNetworks() { return false; }
 inline int wifiNetworkCount() { return 0; }
 inline bool wifiNetworkSnapshot(WifiNetworkSnapshot& out) { out = {}; return false; }
-inline bool upsertWiFiNetwork(const String&, const String&, int, bool) { return false; }
-inline bool removeWiFiNetwork(const String&) { return false; }
-inline bool removeWiFiNetworkById(uint32_t, String* = nullptr) { return false; }
-inline bool setWiFiNetworkPriority(const String&, int) { return false; }
-inline void sortWiFiByPriority() {}
-inline bool saveWiFiNetworks() { return false; }
-inline WifiNetworkSaveResult saveSetupWiFiNetwork(const String&, const String&) {
+inline bool upsertWifiNetwork(const String&, const String&, int, bool) { return false; }
+inline bool removeWifiNetwork(const String&) { return false; }
+inline bool removeWifiNetworkById(uint32_t, String* = nullptr) { return false; }
+inline bool setWifiNetworkPriority(const String&, int) { return false; }
+inline void sortWifiByPriority() {}
+inline bool saveWifiNetworks() { return false; }
+inline WifiNetworkSaveResult saveSetupWifiNetwork(const String&, const String&) {
   return WifiNetworkSaveResult::Rejected;
 }
 // A disabled feature preserves its existing section in the merged settings file.

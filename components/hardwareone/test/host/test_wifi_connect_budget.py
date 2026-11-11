@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run the shipping Wi-Fi connect hunt against a scripted driver and clock.
 
-connectToBestWiFiNetwork, connectWiFiId, connectWiFiTarget and the attempt
+connectToBestWifiNetwork, connectWifiId, connectWifiTarget and the attempt
 function come from System_WiFi.cpp unchanged, with the hunt's bounds helpers
 and the boot budget derivation when the tree has them. The driver (status
 sequence per saved network), millis()/delay() (a virtual clock), the serial
@@ -29,7 +29,7 @@ HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
 
 FORWARD_DECLARATIONS = re.compile(
-    r"static bool connectWiFi(?:TargetWithin|Target|Id)\([^;{]*\);")
+    r"static bool connectWifi(?:TargetWithin|Target|Id)\([^;{]*\);")
 
 
 def generate(component: Path = COMPONENT) -> str:
@@ -63,17 +63,17 @@ def generate(component: Path = COMPONENT) -> str:
             support.append(extract_block(source, "bool wifiBackgroundConnectSuperseded("))
             support.append(extract_block(source, "bool wifiSupersedeBackgroundConnect("))
         support.append(f"#define HW1_WIFI_SUPERSEDE_API {1 if supersede else 0}")
-        support.append("bool connectToBestWiFiNetwork(uint32_t budgetMs, WifiConnectOrigin origin);")
+        support.append("bool connectToBestWifiNetwork(uint32_t budgetMs, WifiConnectOrigin origin);")
         support.append("static bool huntBest(uint32_t budgetMs, WifiConnectOrigin origin) "
-                       "{ return connectToBestWiFiNetwork(budgetMs, origin); }")
+                       "{ return connectToBestWifiNetwork(budgetMs, origin); }")
     else:
         support.append("enum class WifiConnectOrigin : uint8_t { COMMAND = 0, BOOT };")
         support.append("constexpr uint32_t kWifiConnectHuntBudgetMs = 150000;")
         support.append("#define HW1_WIFI_CONNECT_BUDGET_API 0")
         support.append("#define HW1_WIFI_SUPERSEDE_API 0")
-        support.append("bool connectToBestWiFiNetwork();")
+        support.append("bool connectToBestWifiNetwork();")
         support.append("static bool huntBest(uint32_t, WifiConnectOrigin) "
-                       "{ return connectToBestWiFiNetwork(); }")
+                       "{ return connectToBestWifiNetwork(); }")
     # The coexistence mirror counts every attempt as "connecting" while it runs.
     # Only the records-on branch: the records-off branch keeps its own depth counter.
     coex_start = source.index("#if ENABLE_BLE_COEX_RECORDS\nnamespace {\n")
@@ -84,16 +84,16 @@ def generate(component: Path = COMPONENT) -> str:
     require(len(declarations) >= 2, "System_WiFi.cpp forward-declares the connect helpers")
     support.extend(declarations)
 
-    hunt = extract_block(source, "bool connectToBestWiFiNetwork(")
+    hunt = extract_block(source, "bool connectToBestWifiNetwork(")
     attempt = [extract_block(tail, "static const char* wifiStatusToString("),
                extract_block(tail, "static void wifiEnsureIdle("),
-               extract_block(tail, "static bool connectWiFiId("),
-               extract_block(tail, "static bool connectWiFiTarget(const WifiConnectionTarget& nw")]
+               extract_block(tail, "static bool connectWifiId("),
+               extract_block(tail, "static bool connectWifiTarget(const WifiConnectionTarget& nw")]
     if bounded:
-        attempt.append(extract_block(tail, "static bool connectWiFiTargetWithin(const WifiConnectionTarget& nw"))
+        attempt.append(extract_block(tail, "static bool connectWifiTargetWithin(const WifiConnectionTarget& nw"))
     if bounded and "static bool wifiConnectSuperseded(" in source:
         # The boot connect's entry point owns the background connect's lifetime.
-        attempt.append(extract_block(source, "void setupWiFi(uint32_t budgetMs, WifiConnectOrigin origin)"))
+        attempt.append(extract_block(source, "void setupWifi(uint32_t budgetMs, WifiConnectOrigin origin)"))
 
     harness = (HERE / "wifi_connect_budget_harness.cpp").read_text()
     for marker in ("// INSERT_PRODUCTION_SUPPORT", "// INSERT_PRODUCTION_HUNT", "// INSERT_PRODUCTION_ATTEMPT"):
@@ -110,11 +110,11 @@ def check_boot_callers(component: Path = COMPONENT) -> None:
     its own task passes BACKGROUND instead, and the radio commands that can
     arrive while it hunts supersede it first."""
     boot = (component / "HardwareOne.cpp").read_text()
-    require("setupWiFi(wifiBootConnectBudgetMs(), WifiConnectOrigin::BOOT);" in boot,
+    require("setupWifi(wifiBootConnectBudgetMs(), WifiConnectOrigin::BOOT);" in boot,
             "the boot connect passes the trial-aware budget and the BOOT origin")
     wifi = (component / "System_WiFi.cpp").read_text()
     if "bool wifiSupersedeBackgroundConnect(" in wifi:
-        require("setupWiFi(wifiBootConnectBudgetMs(), WifiConnectOrigin::BACKGROUND);" in boot,
+        require("setupWifi(wifiBootConnectBudgetMs(), WifiConnectOrigin::BACKGROUND);" in boot,
                 "the background boot connect passes the trial-aware budget and the BACKGROUND origin")
         for handler in ("const char* cmd_wificonnect(", "const char* cmd_wifidisconnect(",
                         "const char* cmd_wifidrop(", "const char* cmd_radiopower("):
@@ -141,7 +141,7 @@ def check_boot_callers(component: Path = COMPONENT) -> None:
     setup = (component / "System_FirstTimeSetup.cpp").read_text()
     require(setup.count("WifiConnectOrigin::BOOT") == 2,
             "both first-time-setup connects (restore and final) pass the BOOT origin")
-    require("    setupWiFi();\n" not in setup and "    connectToBestWiFiNetwork();  //" not in setup,
+    require("    setupWifi();\n" not in setup and "    connectToBestWifiNetwork();  //" not in setup,
             "no first-time-setup connect falls back to the command origin")
 
 

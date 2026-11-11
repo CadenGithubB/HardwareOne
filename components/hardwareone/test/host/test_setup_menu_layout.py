@@ -30,7 +30,7 @@ def generate() -> str:
     # draft suite owns persistence failure/touched-only coverage.
     unit = unit[:unit.index("static void toggleFeature(")]
     source = (COMPONENT / "System_FeatureRegistry.cpp").read_text()
-    begin = source.index("static bool isWiFiCompiled()")
+    begin = source.index("static bool isWifiCompiled()")
     end = source.index(";", source.index("static const size_t featureRegistryCount", begin)) + 1
     registry = source[begin:end]
     fixture_begin = unit.index("static bool compiledWifi()")
@@ -62,7 +62,7 @@ static CLIModeInputResult unexpectedDispatch(const String&, char*, size_t) {
 }
 static auto dispatchEspNow = unexpectedDispatch;
 static auto dispatchMQTT = unexpectedDispatch;
-static auto dispatchWiFi = unexpectedDispatch;
+static auto dispatchWifi = unexpectedDispatch;
 """
     adapter_code = "\n\n".join([
         extract_block(setup, "void printSerialPageStatus("),

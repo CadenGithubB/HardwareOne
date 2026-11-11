@@ -32,7 +32,7 @@ def generate() -> str:
             "shared setup completion declaration missing")
     for adapter in (wrapper, on_exit):
         require(adapter.count("wizardSaveAndApplySettings(") == 1, "adapter must call shared completion once")
-        for obsolete in ("saveSetupWiFiNetwork(", "writeSettingsJson(", "writeDebugJson(",
+        for obsolete in ("saveSetupWifiNetwork(", "writeSettingsJson(", "writeDebugJson(",
                          "applySettings(", "setupNTP("):
             require(obsolete not in adapter, f"adapter duplicates completion operation: {obsolete}")
     require("wizardFinalize(" not in setup + mode, "obsolete live finalization remains")

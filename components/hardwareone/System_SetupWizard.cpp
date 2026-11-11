@@ -858,7 +858,7 @@ bool wizardIsPageVisible(SetupWizardPage page) {
     case WIZARD_PAGE_MQTT:
       return wizardShouldShowMQTT();
     case WIZARD_PAGE_WIFI:
-      return wizardShouldShowWiFi();
+      return wizardShouldShowWifi();
     default:
       return false;
   }
@@ -957,7 +957,7 @@ bool wizardMoveDown() {
 
 bool wizardIsFirstPage() { return wizardRetreatFrom(currentPage) == currentPage; }
 
-bool wizardShouldShowWiFi() {
+bool wizardShouldShowWifi() {
 #if ENABLE_WIFI
   const FeatureEntry* wifiFeature = getFeatureById("wifi");
   return wifiFeature && wizardFeatureEnabled(wifiFeature->id);
@@ -992,7 +992,7 @@ static void wizardCollectSystemChoices(SetupWizardResult& result) {
 bool wizardNextPage(SetupWizardResult& result) {
   if (!sWizardDraft.active) { result.completed = false; return false; }
   if (currentPage == WIZARD_PAGE_SYSTEM) wizardCollectSystemChoices(result);
-  result.wifiEnabled = wizardShouldShowWiFi();
+  result.wifiEnabled = wizardShouldShowWifi();
 
   const SetupWizardPage next = wizardAdvanceFrom(currentPage);
   if (next == WIZARD_PAGE_COUNT) {
@@ -1385,7 +1385,7 @@ int wifiScanPrintNamed(int namedCap) {
 #endif
 
 // Serial WiFi page helper - full scan + numbered list
-static void handleSerialWiFiPage(SetupWizardResult& result, bool& running) {
+static void handleSerialWifiPage(SetupWizardResult& result, bool& running) {
   int pageNum = getWizardPageNumber(WIZARD_PAGE_WIFI);
   int totalPages = getWizardTotalPages();
   Serial.println();
@@ -1611,13 +1611,13 @@ SetupWizardResult runSetupWizard() {
     if (currentPage == WIZARD_PAGE_WIFI) {
 #if ENABLE_OLED_DISPLAY
       if (oledDisplay && oledConnected) {
-        renderWiFiPage(result); // Accept/Skip/Back all use shared page navigation.
+        renderWifiPage(result); // Accept/Skip/Back all use shared page navigation.
         if (result.completed || isWizardCancelRequested()) running = false;
         lastPrintedPage = WIZARD_PAGE_COUNT;  // Force reprint on return
         continue;
       }
 #endif
-      handleSerialWiFiPage(result, running);
+      handleSerialWifiPage(result, running);
       lastPrintedPage = WIZARD_PAGE_COUNT;
       continue;
     }
@@ -1765,10 +1765,10 @@ bool wizardSaveAndApplySettings(SetupWizardResult& result) {
   // A network is saved only while the final draft still shows the Wi-Fi page:
   // Wi-Fi switched off on a later Back drops credentials entered earlier, and
   // the caller reads the same answer back from the result.
-  const bool saveWifi = wizardShouldShowWiFi() && result.wifiConfigured && result.wifiSSID.length() > 0;
+  const bool saveWifi = wizardShouldShowWifi() && result.wifiConfigured && result.wifiSSID.length() > 0;
 #if ENABLE_WIFI
   if (saveWifi) {
-    const WifiNetworkSaveResult wifiSaved = saveSetupWiFiNetwork(result.wifiSSID, result.wifiPassword);
+    const WifiNetworkSaveResult wifiSaved = saveSetupWifiNetwork(result.wifiSSID, result.wifiPassword);
     broadcastOutput(wifiNetworkSaveResultMessage(wifiSaved));
     if (wifiSaved == WifiNetworkSaveResult::Accepted) broadcastOutput("WiFi network: " + result.wifiSSID);
   }

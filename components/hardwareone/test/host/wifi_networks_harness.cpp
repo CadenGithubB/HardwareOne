@@ -122,12 +122,12 @@ static void ownerCases(const std::string& scenario) {
     };
     for (const auto& value : refused) {
       messages.clear();
-      assert(!upsertWiFiNetwork(value.first, value.second, 1, false));
+      assert(!upsertWifiNetwork(value.first, value.second, 1, false));
       assert(wifiNetworkCount() == 0 && persistCalls == 0);
       assert(!messages.empty() && messages.back().startsWith("Error: WiFi name and password cannot contain"));
     }
     // Spaces, punctuation and non-ASCII bytes are ordinary name bytes.
-    assert(upsertWiFiNetwork(" Caf\xc3\xa9 & Co ", "p a\\ss", 1, false) && wifiNetworkCount() == 1);
+    assert(upsertWifiNetwork(" Caf\xc3\xa9 & Co ", "p a\\ss", 1, false) && wifiNetworkCount() == 1);
 #if HAVE_WIFI_FIELD_OWNER
     assert(wifiNetworkFieldProblem("Lab\tNet") == WifiFieldProblem::ControlCharacter);
     assert(wifiNetworkFieldProblem("a\"b\x01") == WifiFieldProblem::Quote);  // first offending byte
@@ -158,17 +158,17 @@ static void ownerCases(const std::string& scenario) {
     }
     assert(parseSavedNetworkId("4294967295") == UINT32_MAX);
     assert(parseSavedNetworkId("0001") == 1);
-    assert(upsertWiFiNetwork("plain name", "p", 1, false));
-    assert(upsertWiFiNetwork("quoted name", "p", 2, false));
-    assert(upsertWiFiNetwork("--saved-id 7", "p", 3, false));
+    assert(upsertWifiNetwork("plain name", "p", 1, false));
+    assert(upsertWifiNetwork("quoted name", "p", 2, false));
+    assert(upsertWifiNetwork("--saved-id 7", "p", 3, false));
     assert(String(cmd_wifirm(" plain name ")).startsWith("Removed network"));
     assert(String(cmd_wifirm("\"quoted name\"")).startsWith("Removed network"));
     assert(String(cmd_wifirm("--saved-id 7")).startsWith("Removed network"));
     assert(networkCount() == 0 && persistCalls == 3);
-    assert(upsertWiFiNetwork("selected", "p", 1, false));
+    assert(upsertWifiNetwork("selected", "p", 1, false));
     const uint32_t removed = networkId("selected");
-    assert(removeWiFiNetworkById(removed));
-    assert(upsertWiFiNetwork("replacement", "p", 1, false));
+    assert(removeWifiNetworkById(removed));
+    assert(upsertWifiNetwork("replacement", "p", 1, false));
     assert(String(cmd_wifirmid(std::to_string(removed))).indexOf("no longer exists") >= 0);
     assert(networkCount() == 1 && persistCalls == 3);
     persistResult = false;
@@ -176,7 +176,7 @@ static void ownerCases(const std::string& scenario) {
     assert(networkCount() == 0 && persistCalls == 4);
     // The removed name is moved out, so a removal never fails on a copy.
     persistResult = true;
-    assert(upsertWiFiNetwork("moved", "p", 1, false));
+    assert(upsertWifiNetwork("moved", "p", 1, false));
     const std::string movedId = std::to_string(networkId("moved"));
     wifiTestFailureValue = "moved"; wifiTestCopiesBeforeFailure = 0;
     assert(String(cmd_wifirmid(movedId)).startsWith("Removed network 'moved'"));
@@ -186,8 +186,8 @@ static void ownerCases(const std::string& scenario) {
     // Every plaintext copy the owner makes is zeroed before its buffer goes:
     // connection targets, the JSON writer's and loader's working arrays,
     // removed records and the records a reload replaces.
-    assert(upsertWiFiNetwork("home", "home-secret", 1, false));
-    assert(upsertWiFiNetwork("cafe", "cafe-secret", 2, false));
+    assert(upsertWifiNetwork("home", "home-secret", 1, false));
+    assert(upsertWifiNetwork("cafe", "cafe-secret", 2, false));
     scrubbed.clear();
     {
       WifiConnectionTarget target;
@@ -209,7 +209,7 @@ static void ownerCases(const std::string& scenario) {
     assert(wifiNetworksReadJson(doc) == 0 && wifiNetworkCount() == 2);
     assert(scrubCount("home-secret") == 1 && scrubCount("cafe-secret") == 1);  // replaced records
     scrubbed.clear();
-    assert(removeWiFiNetwork("home"));
+    assert(removeWifiNetwork("home"));
     assert(scrubCount("home-secret") == 1 && scrubbed.size() == 1);
     // A failed copy zeroes what it did copy before the target is reset.
     scrubbed.clear();
@@ -220,21 +220,21 @@ static void ownerCases(const std::string& scenario) {
     wifiTestFailureValue = nullptr; wifiTestCopiesBeforeFailure = -1;
     assert(scrubCount("cafe-secret") == 1);
   } else if (scenario == "stable_ids") {
-    assert(upsertWiFiNetwork("A", "a", 1, false));
-    assert(upsertWiFiNetwork("B", "b", 2, false));
+    assert(upsertWifiNetwork("A", "a", 1, false));
+    assert(upsertWifiNetwork("B", "b", 2, false));
     const uint32_t a = networkId("A"), b = networkId("B");
     WifiNetworkSnapshot before;
     assert(wifiNetworkSnapshot(before));
-    assert(setWiFiNetworkPriority("A", 9));
-    sortWiFiByPriority();
+    assert(setWifiNetworkPriority("A", 9));
+    sortWifiByPriority();
     assert(networkId("A") == a && networkId("B") == b);
     assert(before.entries[0].ssid == "A" && before.entries[0].priority == 1);
     WifiConnectionTarget target;
     assert(wifiNetworkConnectionById(a, target) && target.ssid == "A" && target.password == "a");
-    assert(removeWiFiNetworkById(a));
-    assert(upsertWiFiNetwork("A", "new", 1, false));
+    assert(removeWifiNetworkById(a));
+    assert(upsertWifiNetwork("A", "new", 1, false));
     assert(networkId("A") != a);
-    assert(!wifiNetworkConnectionById(a, target) && !removeWiFiNetworkById(a));
+    assert(!wifiNetworkConnectionById(a, target) && !removeWifiNetworkById(a));
     assert(wifiNetworkCount() == 2 && findNetwork("B") >= 0);
     wifiNetworkMarkConnected(a, 900); // A removed identity cannot stamp its replacement.
     assert(wifiNetworkSnapshot(before));
@@ -244,23 +244,23 @@ static void ownerCases(const std::string& scenario) {
     for (int i = 0; i < before.count; ++i) if (before.entries[i].id == b) assert(before.entries[i].lastConnected == 123);
     assert(!wifiNetworkConnectionByIndex(-1, target) && !wifiNetworkConnectionByIndex(2, target));
   } else if (scenario == "setup_result") {
-    assert(saveSetupWiFiNetwork("", "p") == WifiNetworkSaveResult::Rejected);
+    assert(saveSetupWifiNetwork("", "p") == WifiNetworkSaveResult::Rejected);
     assert(!gSettings.wifiAutoStart && persistCalls == 0 && settingNotifications == 0);
     persistResult = false;
-    assert(saveSetupWiFiNetwork("home", "p") == WifiNetworkSaveResult::PersistFailed);
+    assert(saveSetupWifiNetwork("home", "p") == WifiNetworkSaveResult::PersistFailed);
     assert(!gSettings.wifiAutoStart && persistCalls == 1 && settingNotifications == 0);
     assert(wifiNetworkCount() == 1); // Existing RAM-before-persistence behavior remains explicit.
     persistResult = true;
-    assert(saveSetupWiFiNetwork("home", "") == WifiNetworkSaveResult::Accepted);
+    assert(saveSetupWifiNetwork("home", "") == WifiNetworkSaveResult::Accepted);
     assert(gSettings.wifiAutoStart && persistCalls == 2 && settingNotifications == 1);
-    assert(saveSetupWiFiNetwork("home", "p") == WifiNetworkSaveResult::Accepted);
+    assert(saveSetupWifiNetwork("home", "p") == WifiNetworkSaveResult::Accepted);
     assert(settingNotifications == 1 && persistCalls == 3);
     persistResult = false;
-    assert(saveSetupWiFiNetwork("home", "p") == WifiNetworkSaveResult::PersistFailed);
+    assert(saveSetupWifiNetwork("home", "p") == WifiNetworkSaveResult::PersistFailed);
     assert(gSettings.wifiAutoStart && settingNotifications == 1); // Restore a prior true value too.
     for (int i = 1; i < MAX_WIFI_NETWORKS; ++i)
-      assert(upsertWiFiNetwork(std::string("full-") + std::to_string(i), "p", i, false));
-    assert(saveSetupWiFiNetwork("extra", "p") == WifiNetworkSaveResult::Rejected);
+      assert(upsertWifiNetwork(std::string("full-") + std::to_string(i), "p", i, false));
+    assert(saveSetupWifiNetwork("extra", "p") == WifiNetworkSaveResult::Rejected);
     assert(persistCalls == 4 && settingNotifications == 1 && gSettings.wifiAutoStart);
   } else if (scenario == "json_roundtrip") {
     JsonDocument doc;
@@ -271,23 +271,23 @@ static void ownerCases(const std::string& scenario) {
     gSecretLoadFailures += wifiNetworksReadJson(doc);
     assert(gSecretLoadFailures == 1 && cryptoEvents.size() == 1);
     expect(0, "A", "", 9); expect(1, "B", "b", 1);
-    sortWiFiByPriority();
+    sortWifiByPriority();
     assert(wifiNetworksWriteJson(doc, false));
     auto saved = doc["network"]["wifi"]["networks"].as<JsonArray>();
     assert(saved[0]["ssid"] == "B" && saved[0]["password"] == "AES:b");
     assert(saved[1]["ssid"] == "A" && saved[1]["password"] == "AES:damaged");
-    assert(upsertWiFiNetwork("B", "changed", 0, false));
+    assert(upsertWifiNetwork("B", "changed", 0, false));
     encryptionFails = true;
     assert(wifiNetworksWriteJson(doc, false));
     assert(doc["network"]["wifi"]["networks"][0]["password"] == "AES:b");
     assert(wifiNetworksWriteJson(doc, true));
     for (JsonObject net : doc["network"]["wifi"]["networks"].as<JsonArray>()) assert(net["password"].isNull());
     assert(doc["orphan"]["keep"] == 42);
-    assert(removeWiFiNetwork("A") && removeWiFiNetwork("B"));
+    assert(removeWifiNetwork("A") && removeWifiNetwork("B"));
     assert(wifiNetworksWriteJson(doc, false));
     assert(doc["network"]["wifi"]["networks"].as<JsonArray>().size() == 0);
   } else if (scenario == "json_load_contract") {
-    assert(upsertWiFiNetwork("old", "p", 1, false));
+    assert(upsertWifiNetwork("old", "p", 1, false));
     const uint32_t oldId = networkId("old");
     JsonDocument missing;
     assert(wifiNetworksReadJson(missing) == 0 && wifiNetworkCount() == 1);
@@ -307,7 +307,7 @@ static void ownerCases(const std::string& scenario) {
     doc["network"]["wifi"]["networks"].to<JsonArray>();
     assert(wifiNetworksReadJson(doc) == 0 && wifiNetworkCount() == 0);
   } else if (scenario == "copy_failure") {
-    assert(upsertWiFiNetwork("home", "secret", 1, false));
+    assert(upsertWifiNetwork("home", "secret", 1, false));
     const uint32_t id = networkId("home");
     WifiNetworkSnapshot snapshot;
     wifiTestCopiesBeforeFailure = 0;
@@ -351,15 +351,15 @@ static void ownerCases(const std::string& scenario) {
       void deallocate(void*) override {}
       void* reallocate(void*, size_t) override { return nullptr; }
     } allocator;
-    assert(upsertWiFiNetwork("home", "secret", 1, false));
+    assert(upsertWifiNetwork("home", "secret", 1, false));
     JsonDocument doc(&allocator);
     assert(!wifiNetworksWriteJson(doc, false) && doc.overflowed());
   } else {
     assert(scenario == "coherent_connection_copy");
-    assert(upsertWiFiNetwork("same", "1", 1, false));
+    assert(upsertWifiNetwork("same", "1", 1, false));
     const uint32_t id = networkId("same");
     std::thread writer([] {
-      for (int i = 1; i <= 1000; ++i) assert(upsertWiFiNetwork("same", std::to_string(i), i, false));
+      for (int i = 1; i <= 1000; ++i) assert(upsertWifiNetwork("same", std::to_string(i), i, false));
     });
     for (int i = 0; i < 1000; ++i) {
       WifiConnectionTarget target;
@@ -384,8 +384,8 @@ int main(int argc, char** argv) {
 #if WIFI_NETWORKS_OWNER
   if (scenario == "init_failure") {
     failNetworkAllocation = true;
-    assert(!initWiFiNetworks() && wifiNetworkCount() == 0);
-    assert(!upsertWiFiNetwork("home", "p", 1, false));
+    assert(!initWifiNetworks() && wifiNetworkCount() == 0);
+    assert(!upsertWifiNetwork("home", "p", 1, false));
     WifiNetworkSnapshot snapshot;
     assert(!wifiNetworkSnapshot(snapshot));
     JsonDocument doc;
@@ -415,70 +415,70 @@ int main(int argc, char** argv) {
       {"valid", std::string(65, 'p')}, {"bad\"ssid", "pass"}, {"valid", "bad\"pass"},
     };
     for (const auto& value : invalid) {
-      assert(!upsertWiFiNetwork(value.first, value.second, 1, false));
+      assert(!upsertWifiNetwork(value.first, value.second, 1, false));
       assert(networkCount() == 0 && persistCalls == 0);
     }
     const String ssid(std::string(32, 's')), password(std::string(64, 'p'));
-    assert(upsertWiFiNetwork(ssid, password, -1, false));
+    assert(upsertWifiNetwork(ssid, password, -1, false));
     expect(0, ssid.c_str(), password.c_str(), 1);
-    assert(upsertWiFiNetwork(" spaced ", "", 0, true));
+    assert(upsertWifiNetwork(" spaced ", "", 0, true));
     expect(1, " spaced ", "", 1, true); // Trim validates blankness; it does not rename.
     assert(findNetwork("spaced") == -1 && findNetwork(" spaced ") == 1);
   } else if (scenario == "password_update") {
-    assert(upsertWiFiNetwork("home", "original-secret", 7, false));
-    assert(upsertWiFiNetwork("home", "", 0, true));
+    assert(upsertWifiNetwork("home", "original-secret", 7, false));
+    assert(upsertWifiNetwork("home", "", 0, true));
     assert(networkCount() == 1);
     expect(0, "home", "original-secret", 7, true);
     for (const auto& message : messages) assert(message.indexOf("original-secret") < 0);
-    assert(!upsertWiFiNetwork("home", std::string(65, 'p'), 9, false));
+    assert(!upsertWifiNetwork("home", std::string(65, 'p'), 9, false));
     expect(0, "home", "original-secret", 7, true);
-    assert(upsertWiFiNetwork("home", "replacement", 3, false));
+    assert(upsertWifiNetwork("home", "replacement", 3, false));
     expect(0, "home", "replacement", 3);
-    assert(removeWiFiNetwork("home"));
-    assert(upsertWiFiNetwork("home", "", 0, false));
+    assert(removeWifiNetwork("home"));
+    assert(upsertWifiNetwork("home", "", 0, false));
     expect(0, "home", "", 1);
   } else if (scenario == "capacity") {
     for (int i = 0; i < MAX_WIFI_NETWORKS; ++i) {
-      assert(upsertWiFiNetwork(std::string("network-") + std::to_string(i), "p", i + 10, false));
+      assert(upsertWifiNetwork(std::string("network-") + std::to_string(i), "p", i + 10, false));
     }
     assert(MAX_WIFI_NETWORKS == 8 && networkCount() == 8);
-    assert(!upsertWiFiNetwork("overflow", "p", 1, false));
-    assert(upsertWiFiNetwork("network-3", "changed", 0, true));
+    assert(!upsertWifiNetwork("overflow", "p", 1, false));
+    assert(upsertWifiNetwork("network-3", "changed", 0, true));
     expect(3, "network-3", "changed", 13, true);
-    assert(removeWiFiNetwork("network-3") && networkCount() == 7);
+    assert(removeWifiNetwork("network-3") && networkCount() == 7);
     expect(3, "network-4", "p", 14);
-    assert(upsertWiFiNetwork("replacement", "", 99, false) && networkCount() == 8);
+    assert(upsertWifiNetwork("replacement", "", 99, false) && networkCount() == 8);
   } else if (scenario == "ordering") {
-    assert(upsertWiFiNetwork("A", "a", 2, false));
-    assert(upsertWiFiNetwork("B", "b", 2, false));
-    assert(upsertWiFiNetwork("C", "c", 1, false));
-    sortWiFiByPriority();
+    assert(upsertWifiNetwork("A", "a", 2, false));
+    assert(upsertWifiNetwork("B", "b", 2, false));
+    assert(upsertWifiNetwork("C", "c", 1, false));
+    sortWifiByPriority();
     // Preserve the existing selection-sort tie behavior, including indices.
     expect(0, "C", "c", 1); expect(1, "B", "b", 2); expect(2, "A", "a", 2);
-    assert(findNetwork("A") == 2 && saveWiFiNetworks());
+    assert(findNetwork("A") == 2 && saveWifiNetworks());
     expect(0, "C", "c", 1); expect(1, "B", "b", 2); expect(2, "A", "a", 3);
     assert(persistCalls == 1 && persisted.size() == 3 && persisted[2].priority == 3);
   } else if (scenario == "persistence_failure") {
-    assert(upsertWiFiNetwork("A", "a", 90, false));
-    assert(upsertWiFiNetwork("B", "b", 50, false));
+    assert(upsertWifiNetwork("A", "a", 90, false));
+    assert(upsertWifiNetwork("B", "b", 50, false));
     filesystemReady = false;
-    assert(!saveWiFiNetworks() && persistCalls == 0);
+    assert(!saveWifiNetworks() && persistCalls == 0);
     expect(0, "A", "a", 90); expect(1, "B", "b", 50);
     filesystemReady = true;
     persistResult = false;
-    assert(!saveWiFiNetworks() && persistCalls == 1);
+    assert(!saveWifiNetworks() && persistCalls == 1);
     expect(0, "B", "b", 1); expect(1, "A", "a", 2);
     assert(persisted.size() == 2 && persisted[0].ssid == "B");
-    assert(removeWiFiNetwork("B") && !saveWiFiNetworks());
+    assert(removeWifiNetwork("B") && !saveWifiNetworks());
     assert(networkCount() == 1 && findNetwork("B") == -1);
     expect(0, "A", "a", 1); // Failure reports durability; it does not roll RAM back.
   } else {
     assert(scenario == "remove_final");
-    assert(upsertWiFiNetwork("only", "p", 1, false) && saveWiFiNetworks());
-    assert(!removeWiFiNetwork("absent") && networkCount() == 1);
-    assert(removeWiFiNetwork("only") && networkCount() == 0);
-    assert(saveWiFiNetworks() && persistCalls == 2 && persisted.empty());
-    assert(!removeWiFiNetwork("only"));
+    assert(upsertWifiNetwork("only", "p", 1, false) && saveWifiNetworks());
+    assert(!removeWifiNetwork("absent") && networkCount() == 1);
+    assert(removeWifiNetwork("only") && networkCount() == 0);
+    assert(saveWifiNetworks() && persistCalls == 2 && persisted.empty());
+    assert(!removeWifiNetwork("only"));
   }
   std::printf("saved WiFi: %s passed\n", argv[1]);
 }

@@ -73,11 +73,11 @@ int main() {
 
 # System_WiFi.cpp radio decisions that must ask the owner's predicate.
 WIFI_DECISIONS = (
-    "bool connectToBestWiFiNetwork(",
+    "bool connectToBestWifiNetwork(",
     "const char* cmd_wifidisconnect(",
     "static RadioPowerOffResult radioPowerOff(",
-    "static bool connectWiFiTargetWithin(const WifiConnectionTarget& nw",
-    "bool ensureWiFiInitialized(",
+    "static bool connectWifiTargetWithin(const WifiConnectionTarget& nw",
+    "bool ensureWifiInitialized(",
 )
 # radiopower off records whether ESP-NOW was RUNNING, to restore exactly that
 # on power-on; a pending close is not something to restart.

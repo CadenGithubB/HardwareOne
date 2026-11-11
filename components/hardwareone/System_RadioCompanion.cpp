@@ -323,7 +323,7 @@ void bringUpConfiguredUsers() {
 #endif
   const RadioUsers running = snapshotUsers();
 #if ENABLE_WIFI
-  if (wanted.wifi && !running.wifi) setupWiFi();
+  if (wanted.wifi && !running.wifi) setupWifi();
 #endif
 #if ENABLE_ESPNOW
   if (wanted.espnow && !running.espnow) cmd_espnow_init("");

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Characterize the production saved-WiFi list helpers with host boundaries.
 
-The interactive_fields case covers the interactive field rule: upsertWiFiNetwork
+The interactive_fields case covers the interactive field rule: upsertWifiNetwork
 refuses a double-quote or a control character in the name or password, and
 the structured Add-WiFi line (wifiAddCommandLine) refuses the same fields.
 --component reads the production sources from another tree.
@@ -27,9 +27,9 @@ JSON_INCLUDE = COMPONENT.parent / "hardwareone_libs" / "ArduinoJson" / "src"
 
 READ_ADAPTER = '''
 static void initializeNetworks() {
-  assert(initWiFiNetworks());
+  assert(initWifiNetworks());
   const auto allocations = networkAllocationCount;
-  assert(initWiFiNetworks() && networkAllocationCount == allocations);
+  assert(initWifiNetworks() && networkAllocationCount == allocations);
 }
 static int networkCount() { return wifiNetworkCount(); }
 static int findNetwork(const String& ssid) {
@@ -86,8 +86,8 @@ def original_helpers(source_dir):
     source = (source_dir / "System_WiFi.cpp").read_text()
     source = source[source.index("int findWiFiNetwork(const String& ssid) {"):]
     functions = [extract_block(source, signature) for signature in (
-        "int findWiFiNetwork(", "void sortWiFiByPriority(", "bool upsertWiFiNetwork(",
-        "bool removeWiFiNetwork(", "static void normalizeWiFiPriorities(", "bool saveWiFiNetworks(")]
+        "int findWiFiNetwork(", "void sortWifiByPriority(", "bool upsertWifiNetwork(",
+        "bool removeWifiNetwork(", "static void normalizeWiFiPriorities(", "bool saveWifiNetworks(")]
     header = (source_dir / "System_WiFi.h").read_text()
     types = extract_block(header, "struct WifiNetwork") + ";"
     capacity = re.search(r'^#define MAX_WIFI_NETWORKS \d+', header, re.MULTILINE).group()
@@ -145,12 +145,12 @@ def main():
 #include <cassert>
 void webBatchTestStringAppend() {}
 int main() {
-  assert(!initWiFiNetworks() && wifiNetworkCount() == 0);
-  assert(!upsertWiFiNetwork("n", "p", 1, false));
-  assert(!removeWiFiNetwork("n") && !removeWiFiNetworkById(1));
-  assert(!setWiFiNetworkPriority("n", 1) && !saveWiFiNetworks());
-  assert(saveSetupWiFiNetwork("n", "p") == WifiNetworkSaveResult::Rejected);
-  sortWiFiByPriority();
+  assert(!initWifiNetworks() && wifiNetworkCount() == 0);
+  assert(!upsertWifiNetwork("n", "p", 1, false));
+  assert(!removeWifiNetwork("n") && !removeWifiNetworkById(1));
+  assert(!setWifiNetworkPriority("n", 1) && !saveWifiNetworks());
+  assert(saveSetupWifiNetwork("n", "p") == WifiNetworkSaveResult::Rejected);
+  sortWifiByPriority();
   WifiNetworkSnapshot snapshot; snapshot.count = 7;
   assert(!wifiNetworkSnapshot(snapshot) && snapshot.count == 0);
   JsonDocument doc;
@@ -174,7 +174,7 @@ int main() {
             "void putSecretPreserving(", "void putSecret(", "String getSecret("))
         wifi = (component / "System_WiFi.cpp").read_text()
         removal = '\n'.join(extract_block(wifi, signature) for signature in (
-            "static uint32_t parseSavedNetworkId(", "static const char* finishWiFiRemoval(",
+            "static uint32_t parseSavedNetworkId(", "static const char* finishWifiRemoval(",
             "const char* cmd_wifirm(", "static const char* cmd_wifirmid("))
         source.write_text(harness.replace("// INSERT_PRODUCTION_AND_READ_ADAPTER", READ_ADAPTER)
                           .replace("// INSERT_PRODUCTION_SECRET_HELPERS", secrets)

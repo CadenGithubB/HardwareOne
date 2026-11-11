@@ -31,13 +31,13 @@ COMPONENT = HERE.parents[1]
 # Production functions, in source order, located by name so a changed return
 # type still matches; forward declarations are skipped.
 FUNCTIONS = (
-    "showWiFiMenu", "showWiFiScanningPlaceholder", "showScanResults",
+    "showWifiMenu", "showWifiScanningPlaceholder", "showScanResults",
     "showBluetoothR1Menu", "showBluetoothPhoneMenu",
     None,  # the WiFi scan block goes here
     "wifiPendingWatchdogTask", "onWifiMenuRefreshDone", "onWifiConnectRefreshDone",
     "ringPendingWatchdogTask", "onBluetoothR1MenuRefreshDone",
     "onBluetoothPhoneMenuRefreshDone",
-    "handleWiFiTap", "handleBluetoothR1Tap", "handleBluetoothPhoneTap",
+    "handleWifiTap", "handleBluetoothR1Tap", "handleBluetoothPhoneTap",
 )
 
 
@@ -84,7 +84,7 @@ def generated(component: Path) -> str:
     types.append(link_types)
 
     state = region(page, "enum NetworkSubMode", "// Info text")
-    state += "\n" + region(page, "enum WifiMenuAction", "static void showWiFiMenu() {")
+    state += "\n" + region(page, "enum WifiMenuAction", "static void showWifiMenu() {")
     functions = []
     for name in FUNCTIONS:
         if name is None:

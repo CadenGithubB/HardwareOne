@@ -52,7 +52,7 @@ TOGGLE_COMMAND = "const char* oledBluetoothToggleCommand("
 AUTOMATIONS = ("static void autoShowToast(", "static void autoToggleSelected(",
                "static void autoDeleteConfirmed(")
 QUICK_SETTINGS = ("static void setQuickStatus(", "static void toggleQuickRadio(",
-                  "static void toggleQuickWiFi(", "static void bluetoothToggleConfirmedQuick(",
+                  "static void toggleQuickWifi(", "static void bluetoothToggleConfirmedQuick(",
                   "static void httpToggleConfirmedQuick(")
 NETWORK = ("static void webServerStartConfirmed(", "static void webServerStopConfirmed(")
 

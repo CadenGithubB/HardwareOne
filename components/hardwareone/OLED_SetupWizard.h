@@ -38,7 +38,7 @@ void drawSetupInfoPage(const char* title, const char* body, const char* footer,
                        int pageNum = 0, int pageCount = 0);
 void renderWizardPage();
 // True means this optional page advanced; only result.completed means Finish.
-bool renderWiFiPage(SetupWizardResult& result);
+bool renderWifiPage(SetupWizardResult& result);
 
 // OLED handlers for text-input pages (own event loops)
 void handleOLEDEspNowPage(SetupWizardResult& result, bool& running);

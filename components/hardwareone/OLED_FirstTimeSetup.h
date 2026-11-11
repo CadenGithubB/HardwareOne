@@ -52,7 +52,7 @@ bool getOLEDYesNoPrompt(const char* prompt, bool defaultYes = true);
  * @param outSSID Selected network SSID (output parameter)
  * @return true if network selected, false if skipped/cancelled
  */
-bool getOLEDWiFiSelection(String& outSSID);
+bool getOLEDWifiSelection(String& outSSID);
 
 /**
  * Display a message on OLED and wait for user acknowledgment

@@ -326,7 +326,7 @@ static const SettingEntry mqttSettingEntries[] = {
   { "mqttBaseTopic", SETTING_STRING, &gSettings.mqttBaseTopic, 0, 0, "", 0, 0, "Base Topic", nullptr, false, "topics", "mqttBaseTopic" },
   { "mqttDiscoveryPrefix", SETTING_STRING, &gSettings.mqttDiscoveryPrefix, 0, 0, "homeassistant", 0, 0, "Discovery Prefix", nullptr, false, "topics", "mqttDiscoveryPrefix" },
   { "mqttPublishIntervalMs", SETTING_INT, &gSettings.mqttPublishIntervalMs, 10000, 0, nullptr, 1000, 300000, "Publish Interval (ms)", nullptr, false, "publish", "mqttPublishIntervalMs" },
-  { "mqttPublishWiFi", SETTING_BOOL, &gSettings.mqttPublishWiFi, false, 0, nullptr, 0, 1, "Publish WiFi info", nullptr, false, "publish", "mqttPublishWiFi" },
+  { "mqttPublishWiFi", SETTING_BOOL, &gSettings.mqttPublishWifi, false, 0, nullptr, 0, 1, "Publish WiFi info", nullptr, false, "publish", "mqttPublishWiFi" },
   { "mqttPublishSystem", SETTING_BOOL, &gSettings.mqttPublishSystem, false, 0, nullptr, 0, 1, "Publish system info", nullptr, false, "publish", "mqttPublishSystem" },
   { "mqttPublishThermal", SETTING_BOOL, &gSettings.mqttPublishThermal, false, 0, nullptr, 0, 1, "Publish thermal data", nullptr, false, "publish", "mqttPublishThermal" },
   { "mqttPublishToF", SETTING_BOOL, &gSettings.mqttPublishToF, false, 0, nullptr, 0, 1, "Publish ToF data", nullptr, false, "publish", "mqttPublishToF" },
@@ -807,7 +807,7 @@ static void publishMQTTDiscovery() {
   }
   
   // WiFi sensors
-  if (gSettings.mqttPublishWiFi) {
+  if (gSettings.mqttPublishWifi) {
     publishDiscoveryConfig("sensor", "wifi_rssi", "WiFi RSSI", "{{ value_json.wifi.rssi }}", "dBm", "signal_strength", nullptr);
     publishDiscoveryConfig("sensor", "wifi_ssid", "WiFi SSID", "{{ value_json.wifi.ssid }}", nullptr, nullptr, "mdi:wifi");
     publishDiscoveryConfig("sensor", "wifi_ip", "WiFi IP", "{{ value_json.wifi.ip }}", nullptr, nullptr, "mdi:ip-network");
@@ -1482,7 +1482,7 @@ void publishMQTTSensorData() {
   }
   
   // Add WiFi info
-  if (gSettings.mqttPublishWiFi && WiFi.isConnected()) {
+  if (gSettings.mqttPublishWifi && WiFi.isConnected()) {
     pos += snprintf(jsonBuf + pos, 16384 - pos, ",\"wifi\":{\"ssid\":\"%s\",\"rssi\":%d,\"ip\":\"%s\"}",
                     WiFi.SSID().c_str(), WiFi.RSSI(), WiFi.localIP().toString().c_str());
   }
@@ -2103,7 +2103,7 @@ const char* cmd_mqttpublish##name(const String& argsInput) { \
   return gSettings.setting ? "MQTT publish " label " enabled" : "MQTT publish " label " disabled"; \
 }
 
-MQTT_PUBLISH_CMD(wifi, mqttPublishWiFi, "WiFi")
+MQTT_PUBLISH_CMD(wifi, mqttPublishWifi, "WiFi")
 MQTT_PUBLISH_CMD(system, mqttPublishSystem, "System")
 MQTT_PUBLISH_CMD(thermal, mqttPublishThermal, "Thermal")
 MQTT_PUBLISH_CMD(tof, mqttPublishToF, "ToF")

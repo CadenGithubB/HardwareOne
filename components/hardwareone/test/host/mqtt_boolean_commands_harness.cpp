@@ -28,7 +28,7 @@ class String : public std::string {
 
 struct SettingsBoundary {
   bool mqttEnabled, mqttAutoStart, mqttSubscribeExternal;
-  bool mqttPublishWiFi, mqttPublishSystem, mqttPublishThermal, mqttPublishToF;
+  bool mqttPublishWifi, mqttPublishSystem, mqttPublishThermal, mqttPublishToF;
   bool mqttPublishIMU, mqttPublishPresence, mqttPublishGPS, mqttPublishAPDS;
   bool mqttPublishRTC, mqttPublishInput;
 } gSettings;
@@ -79,7 +79,7 @@ static const Command commands[] = {
   {"subscribe", cmd_mqttsubscribe, &SettingsBoundary::mqttSubscribeExternal,
    "MQTT external subscriptions: enabled", "MQTT external subscriptions: disabled",
    "MQTT external subscriptions enabled - restart MQTT to apply", "MQTT external subscriptions disabled"},
-  PUBLISH_CASE(wifi, mqttPublishWiFi, "WiFi"),
+  PUBLISH_CASE(wifi, mqttPublishWifi, "WiFi"),
   PUBLISH_CASE(system, mqttPublishSystem, "System"),
   PUBLISH_CASE(thermal, mqttPublishThermal, "Thermal"),
   PUBLISH_CASE(tof, mqttPublishToF, "ToF"),

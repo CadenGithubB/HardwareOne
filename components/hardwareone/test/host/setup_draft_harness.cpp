@@ -105,7 +105,7 @@ static bool writeDebugJson() { ++debugWrites; operations.emplace_back("debug.wri
 static void applySettings() { ++applyCalls; operations.emplace_back("settings.apply"); }
 namespace Clock { static void applyTimezone() { ++timezoneCalls; } }
 const char* cmd_certgen(const String&) { ++certCalls; operations.emplace_back("certificate"); return "fixture certificate generated"; }
-static WifiNetworkSaveResult saveSetupWiFiNetwork(const String& ssid, const String& password) {
+static WifiNetworkSaveResult saveSetupWifiNetwork(const String& ssid, const String& password) {
   assert(ssid == "fixture-network" && password == "fixture-secret");
   assert(scopeActive || !scopeAvailable); ++wifiSaveCalls; operations.emplace_back("wifi.save"); return wifiResult;
 }
@@ -223,9 +223,9 @@ static void cancellationAndRestart() {
 
 static void navigationAndModes() {
   reset(); const auto original = liveValues(); initSetupWizard();
-  check(!wizardShouldShowWiFi() && !wizardShouldShowEspNow() && !wizardShouldShowMQTT());
+  check(!wizardShouldShowWifi() && !wizardShouldShowEspNow() && !wizardShouldShowMQTT());
 #if ENABLE_WIFI
-  wizardSetFeatureEnabled("wifi", true); check(wizardShouldShowWiFi());
+  wizardSetFeatureEnabled("wifi", true); check(wizardShouldShowWifi());
 #endif
 #if ENABLE_ESPNOW
   wizardSetFeatureEnabled("espnow", true); check(wizardShouldShowEspNow());

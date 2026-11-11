@@ -62,7 +62,7 @@ static int showWizardOptionalPageIntro(SetupWizardPage page, const char*, const 
   if (value == -2) requestWizardCancel();
   return value;
 }
-static bool getOLEDWiFiSelection(String& ssid) {
+static bool getOLEDWifiSelection(String& ssid) {
   assert(!pickedNetworks.empty()); ssid = pickedNetworks.front(); pickedNetworks.pop_front();
   return !ssid.empty();
 }
@@ -114,57 +114,57 @@ static void serialCases() {
 #if ENABLE_WIFI
   for (const char* name : {"typed-network", "1", "2WIRE123"}) {
     reset(); auto result = acceptedBefore(); bool running = true; inputs = {name, "new-secret"};
-    handleSerialWiFiPage(result, running); advanced(result);
+    handleSerialWifiPage(result, running); advanced(result);
     check(running && result.wifiConfigured && result.wifiPassword == "new-secret");
     check(result.wifiSSID == (std::string(name) == "1" ? "scan-network" : name));
   }
   for (const char* skip : {"skip", ""}) {
     reset(); auto result = acceptedBefore(); bool running = true; inputs = {skip};
-    handleSerialWiFiPage(result, running); advanced(result);
+    handleSerialWifiPage(result, running); advanced(result);
     check(running && !result.wifiConfigured && result.wifiSSID.empty() && result.wifiPassword.empty());
   }
   for (bool password : {false, true}) {
     reset(); auto result = acceptedBefore(); bool running = true;
     inputs = password ? std::deque<String>{"new-network", "back", "back"} : std::deque<String>{"back"};
-    handleSerialWiFiPage(result, running); preserved(result);
+    handleSerialWifiPage(result, running); preserved(result);
     check(running && !result.completed && previousCalls == 1 && nextCalls == 0);
   }
   reset(); auto result = acceptedBefore(); bool running = true; inputs = {"rescan", "skip"};
-  handleSerialWiFiPage(result, running); advanced(result); check(scans == 2);
+  handleSerialWifiPage(result, running); advanced(result); check(scans == 2);
   reset(); result = acceptedBefore(); running = true; inputs = {"cancel"};
-  handleSerialWiFiPage(result, running); preserved(result);
+  handleSerialWifiPage(result, running); preserved(result);
   check(!running && !result.completed && cancelRequested && nextCalls == 0);
   // The password prompt takes the cancel word literally; only the idle timeout cancels there.
   reset(); result = acceptedBefore(); running = true; inputs = {"new-network", "cancel"};
-  handleSerialWiFiPage(result, running); advanced(result);
+  handleSerialWifiPage(result, running); advanced(result);
   check(running && !cancelRequested && result.wifiSSID == "new-network" && result.wifiPassword == "cancel");
   reset(); result = acceptedBefore(); running = true; inputs = {"new-network", "<timeout>"};
-  handleSerialWiFiPage(result, running); preserved(result);
+  handleSerialWifiPage(result, running); preserved(result);
   check(!running && !result.completed && cancelRequested && nextCalls == 0);
 #else
   reset(); auto result = acceptedBefore(); bool running = true;
-  handleSerialWiFiPage(result, running); advanced(result); check(running);
+  handleSerialWifiPage(result, running); advanced(result); check(running);
 #endif
 }
 static void oledCases() {
   reset(); auto result = acceptedBefore(); introChoices = {1}; pickedNetworks = {"new-network"}; inputs = {"new-secret"};
-  check(renderWiFiPage(result)); advanced(result);
+  check(renderWifiPage(result)); advanced(result);
   check(result.wifiConfigured && result.wifiSSID == "new-network" && result.wifiPassword == "new-secret");
   reset(); result = acceptedBefore(); introChoices = {0};
-  check(renderWiFiPage(result)); advanced(result);
+  check(renderWifiPage(result)); advanced(result);
   check(!result.wifiConfigured && result.wifiSSID.empty() && result.wifiPassword.empty());
   reset(); result = acceptedBefore(); introChoices = {-1};
-  check(!renderWiFiPage(result)); preserved(result); check(previousCalls == 1 && !nextCalls);
+  check(!renderWifiPage(result)); preserved(result); check(previousCalls == 1 && !nextCalls);
   reset(); result = acceptedBefore(); introChoices = {1, -1}; pickedNetworks = {"new-network", ""};
   inputs = {"abandoned-secret"}; passwordBack = true;
-  check(!renderWiFiPage(result)); preserved(result); check(previousCalls == 1 && !nextCalls);
+  check(!renderWifiPage(result)); preserved(result); check(previousCalls == 1 && !nextCalls);
   reset(); result = acceptedBefore(); introChoices = {1, 0}; pickedNetworks = {""};
-  check(renderWiFiPage(result)); advanced(result); check(!result.wifiConfigured);
+  check(renderWifiPage(result)); advanced(result); check(!result.wifiConfigured);
   reset(); result = acceptedBefore(); introChoices = {1}; pickedNetworks = {"new-network"}; inputs = {"<timeout>"};
-  check(!renderWiFiPage(result)); preserved(result); check(cancelRequested && !nextCalls);
+  check(!renderWifiPage(result)); preserved(result); check(cancelRequested && !nextCalls);
   // The masked keyboard prompt takes the cancel word as the password.
   reset(); result = acceptedBefore(); introChoices = {1}; pickedNetworks = {"new-network"}; inputs = {"cancel"};
-  check(renderWiFiPage(result)); advanced(result);
+  check(renderWifiPage(result)); advanced(result);
   check(!cancelRequested && result.wifiConfigured && result.wifiSSID == "new-network" && result.wifiPassword == "cancel");
 }
 static void cliCases() {

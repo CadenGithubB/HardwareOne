@@ -183,7 +183,7 @@ SetupWizardPage wizardAdvanceFrom(SetupWizardPage current);
 SetupWizardPage wizardRetreatFrom(SetupWizardPage current);
 int getWizardTotalPages();
 int getWizardPageNumber(SetupWizardPage page);
-bool wizardShouldShowWiFi();
+bool wizardShouldShowWifi();
 bool wizardShouldShowEspNow();
 bool wizardShouldShowMQTT();
 

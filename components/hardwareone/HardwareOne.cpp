@@ -229,7 +229,7 @@ void buildAllSessionsJson(const String& currentSid, JsonArray& sessions);
 
 // NOTE: Debug macros (DEBUGF_RING, DEBUGF_BROADCAST, DEBUG_*F) now defined in debug_system.h
 // All debug functionality moved to debug_system.cpp for proper encapsulation
-void setupWiFi();
+void setupWifi();
 
 // Output/logging used widely before definition
 
@@ -1219,13 +1219,13 @@ static void bootNetConnectAndSync(bool background) {
   if (background) {
     // No console reads (the main loop owns Serial) and no NTP inside the hunt;
     // the sync below follows it.
-    setupWiFi(wifiBootConnectBudgetMs(), WifiConnectOrigin::BACKGROUND);
+    setupWifi(wifiBootConnectBudgetMs(), WifiConnectOrigin::BACKGROUND);
   } else {
     // Skip NTP sync in wificonnect so we can show it separately in boot progress
     gSkipNTPInWifiConnect = true;
     // The hunt budget shrinks on a trial OTA boot so setup still reaches
     // RUNNING inside the probation window; BOOT lets a console keystroke skip it.
-    setupWiFi(wifiBootConnectBudgetMs(), WifiConnectOrigin::BOOT);
+    setupWifi(wifiBootConnectBudgetMs(), WifiConnectOrigin::BOOT);
     gSkipNTPInWifiConnect = false;  // Reset for future manual connections
   }
   const bool wifiConnected = WiFi.isConnected();
@@ -1557,7 +1557,7 @@ void hardwareone_setup() {
 
 #if ENABLE_WIFI
   // The saved-network owner constructs its storage before settings restore.
-  if (!initWiFiNetworks()) {
+  if (!initWifiNetworks()) {
     Serial.println("FATAL: Failed to allocate WiFi networks array");
     while (1) delay(1000);
   }

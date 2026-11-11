@@ -164,8 +164,8 @@ static void leafPage(NetworkSubMode sub, const char* name) {
   g2ShowListPage(rows, 2);
 }
 static void g2ShowNetworkMenu() { leafPage(NET_SUB_MAIN, "Network"); }
-static void showWiFiStatusPage() { leafPage(NET_SUB_WIFI_STATUS, "Status"); }
-static void showWiFiSavedList() { leafPage(NET_SUB_WIFI_SAVED, "Saved"); }
+static void showWifiStatusPage() { leafPage(NET_SUB_WIFI_STATUS, "Status"); }
+static void showWifiSavedList() { leafPage(NET_SUB_WIFI_SAVED, "Saved"); }
 static void showEspNowDevices() { leafPage(NET_SUB_ESPNOW_DEVS, "Devices"); }
 static void spawnNetworkScanWorker() { lastLeaf = "Scan"; }
 
@@ -388,10 +388,10 @@ static void http_rows_unchanged_state() {
 // ---- WiFi --------------------------------------------------------------------------
 static void wifi_pending_row_after_link_up() {
   armWifiPendingOverlay();
-  showWiFiMenu();
+  showWifiMenu();
   const size_t row = rowOf("WiFi: Pending...");
   linkUp = true;                             // the link comes up just before the tap
-  handleWiFiTap(tapRow(row));
+  handleWifiTap(tapRow(row));
   EXPECT(std::strcmp(lastCommand, "closewifi") != 0,
          "a tap on 'WiFi: Pending...' sent closewifi once the link came up");
   EXPECT(sent("openwifi"), "a tap on 'WiFi: Pending...' did not re-run openwifi");
@@ -399,70 +399,70 @@ static void wifi_pending_row_after_link_up() {
 
 static void wifi_connected_row_after_drop() {
   linkUp = true;
-  showWiFiMenu();
+  showWifiMenu();
   const size_t row = rowOf("WiFi: HomeNet");
   linkUp = false;
-  handleWiFiTap(tapRow(row));
+  handleWifiTap(tapRow(row));
   EXPECT(sent("closewifi"), "'WiFi: <SSID>' started a connect after the link dropped");
 }
 
 static void wifi_radio_and_auto_start_follow_label() {
-  showWiFiMenu();
+  showWifiMenu();
   size_t row = rowOf("Radio: ON");
   radioOn = false;                           // radiopower off from the web meanwhile
-  handleWiFiTap(tapRow(row));
+  handleWifiTap(tapRow(row));
   EXPECT(sent("radiopower off"), "'Radio: ON' sent radiopower on after the radio went off");
 
-  showWiFiMenu();
+  showWifiMenu();
   row = rowOf("Auto Start: OFF");
   gSettings.wifiAutoStart = true;
-  handleWiFiTap(tapRow(row));
+  handleWifiTap(tapRow(row));
   EXPECT(sent("wifiautostart 1"), "'Auto Start: OFF' sent wifiautostart 0 after the setting changed");
 }
 
 static void wifi_rows_unchanged_state() {
   linkUp = true;
-  showWiFiMenu();
+  showWifiMenu();
   const char* rows[] = {"<- Connect", "Radio: ON", "WiFi: HomeNet", "Disconnect", "Status",
                         "Scan Networks", "List Saved", "Auto Start: OFF", "HTTP(S) >>",
                         "ESP-NOW >>"};
   CHECK(shownCount == 10);
   for (size_t i = 0; i < 10; ++i) CHECK(std::strcmp(shownRows[i], rows[i]) == 0);
-  handleWiFiTap(tapRow(1));
+  handleWifiTap(tapRow(1));
   CHECK(sent("radiopower off"));
-  handleWiFiTap(tapRow(2));
+  handleWifiTap(tapRow(2));
   CHECK(sent("closewifi"));
-  handleWiFiTap(tapRow(3));
+  handleWifiTap(tapRow(3));
   CHECK(sent("wifidisconnect"));
-  handleWiFiTap(tapRow(5));
+  handleWifiTap(tapRow(5));
   CHECK(std::strcmp(lastLeaf, "Scan") == 0 && submits == 0);
-  handleWiFiTap(tapRow(7));
+  handleWifiTap(tapRow(7));
   CHECK(sent("wifiautostart 1"));
-  handleWiFiTap(tapRow(8));
+  handleWifiTap(tapRow(8));
   CHECK(gNetSub == NET_SUB_HTTP);
-  showWiFiMenu();
-  handleWiFiTap(tapRow(9));
+  showWifiMenu();
+  handleWifiTap(tapRow(9));
   CHECK(gNetSub == NET_SUB_ESPNOW);
-  showWiFiMenu();
-  handleWiFiTap(tapRow(6));
+  showWifiMenu();
+  handleWifiTap(tapRow(6));
   CHECK(gNetSub == NET_SUB_WIFI_SAVED);
-  showWiFiMenu();
-  handleWiFiTap(tapRow(4));
+  showWifiMenu();
+  handleWifiTap(tapRow(4));
   CHECK(gNetSub == NET_SUB_WIFI_STATUS);
 
   linkUp = false;
   gSettings.wifiEnabled = false;
-  showWiFiMenu();
+  showWifiMenu();
   const size_t disabled = rowOf("WiFi: Disabled in Settings");
-  handleWiFiTap(tapRow(disabled));
+  handleWifiTap(tapRow(disabled));
   CHECK(submits == 0 && gNetSub == NET_SUB_WIFI);
   gSettings.wifiEnabled = true;
-  showWiFiMenu();
-  handleWiFiTap(tapRow(rowOf("WiFi: Disconnected")));
+  showWifiMenu();
+  handleWifiTap(tapRow(rowOf("WiFi: Disconnected")));
   CHECK(sent("openwifi") && lastCallback == &onWifiConnectRefreshDone);
   CHECK(rowOf("WiFi: Pending...") == 2);
-  showWiFiMenu();
-  handleWiFiTap(tapRow(0));
+  showWifiMenu();
+  handleWifiTap(tapRow(0));
   CHECK(gNetSub == NET_SUB_MAIN && submits == 0);
 }
 

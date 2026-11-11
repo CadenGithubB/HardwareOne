@@ -184,7 +184,7 @@ void renderWizardPage() {
 static int showWizardOptionalPageIntro(SetupWizardPage page, const char* title,
                                        const char* description);
 
-bool renderWiFiPage(SetupWizardResult& result) {
+bool renderWifiPage(SetupWizardResult& result) {
   while (true) {
     if (isWizardCancelRequested()) { result.completed = false; return false; }
     const int choice = showWizardOptionalPageIntro(WIZARD_PAGE_WIFI, "WiFi", "Optional: network");
@@ -201,7 +201,7 @@ bool renderWiFiPage(SetupWizardResult& result) {
     // returns to Configure/Skip; only the intro's Back leaves this page.
     while (true) {
       String selectedSSID;
-      if (!getOLEDWiFiSelection(selectedSSID)) break;
+      if (!getOLEDWifiSelection(selectedSSID)) break;
       bool passwordCancelled = false;
       String password = getOLEDTextInput("WiFi Password:", true, "", 64, &passwordCancelled);
       if (isWizardCancelRequested()) { result.completed = false; return false; }

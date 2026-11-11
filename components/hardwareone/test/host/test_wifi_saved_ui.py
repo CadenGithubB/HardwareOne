@@ -40,9 +40,9 @@ COMPONENT = HERE.parents[1]
 # G2 Network functions under test, in source order; located by name so a
 # changed signature still matches, skipping forward declarations.
 NETWORK_ROW_FUNCTIONS = (
-    "bluetoothClientRoleForUi", "showWiFiMenu", "showEspNowMenu",
+    "bluetoothClientRoleForUi", "showWifiMenu", "showEspNowMenu",
     "showBluetoothG2Menu", "showBluetoothR1Menu", "showBluetoothPhoneMenu", "showBluetoothMenu",
-    "handleWiFiTap", "espnowNameCommit", "espnowNameCancel",
+    "handleWifiTap", "espnowNameCommit", "espnowNameCancel",
     "beginEspNowNameEntry", "espnowNameThenOpenCommit", "handleEspNowTap",
     "bluetoothToggleAutoStart", "handleBluetoothG2Tap", "handleBluetoothR1Tap",
     "handleBluetoothPhoneTap", "handleBluetoothTap", "showHttpMenu", "handleHttpTap",
@@ -55,7 +55,7 @@ OLED_ADD_HELPERS = ("wifiAddFieldRefusal",)
 # The shared reply-to-toast mapping the OLED flow toasts the owner's reply with.
 OLED_REPLY_TEXT = "void oledCommandReplyText("
 G2_ADD_FUNCTIONS = ("showWifiAddMsg", "onWifiAddDone", "wifiAddSubmit",
-                    "wifiAddPassCommit", "wifiAddPassCancel", "handleWiFiScanTap")
+                    "wifiAddPassCommit", "wifiAddPassCancel", "handleWifiScanTap")
 G2_ADD_HELPERS = ("wifiAddTextQuotable", "showWifiAddRefusal")
 DISABLED_VARIANTS = (
     ["-DENABLE_ESPNOW=0"],
@@ -132,7 +132,7 @@ def network_rows_unit(component):
     types = g2_bridge_types(component) + [link_types]
     # Local state (sub-mode, overlays, row bindings) and WiFi's action enum.
     state = (region(page, "enum NetworkSubMode", "// Info text") + "\n" +
-             region(page, "enum WifiMenuAction", "static void showWiFiMenu() {"))
+             region(page, "enum WifiMenuAction", "static void showWifiMenu() {"))
     functions = "\n\n".join([link_status] +
                             [definition(page, name) for name in NETWORK_ROW_FUNCTIONS])
     harness = (HERE / "g2_network_rows_harness.cpp").read_text()
@@ -276,10 +276,10 @@ def main():
         "void oledNetworkModeResetSessionState(",
     ]) + "\n\n" + "\n\n".join(extract_block(g2, marker) for marker in [
         "static inline void setNetSub(",
-        "static void showWiFiSavedList(",
-        "static void showWiFiSavedActionMenu(",
-        "static void handleWiFiSavedTap(",
-        "static void handleWiFiSavedActionTap(",
+        "static void showWifiSavedList(",
+        "static void showWifiSavedActionMenu(",
+        "static void handleWifiSavedTap(",
+        "static void handleWifiSavedActionTap(",
     ])
     # Actual entry hooks ensure direct OLED navigation captures the same model
     # as selecting the submenu; the tests invoke these production hooks below.

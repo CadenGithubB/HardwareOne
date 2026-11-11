@@ -260,8 +260,8 @@ static void showRow(NetworkSubMode sub, const char* title) {
   g2ShowListPage(rows, 2);
 }
 static void g2ShowNetworkMenu() { showRow(NET_SUB_MAIN, "Network"); }
-static void showWiFiStatusPage() { showRow(NET_SUB_WIFI_STATUS, "Status"); }
-static void showWiFiSavedList() { showRow(NET_SUB_WIFI_SAVED, "Saved"); }
+static void showWifiStatusPage() { showRow(NET_SUB_WIFI_STATUS, "Status"); }
+static void showWifiSavedList() { showRow(NET_SUB_WIFI_SAVED, "Saved"); }
 static void showHttpMenu() { showRow(NET_SUB_HTTP, "HTTP"); }
 static void showEspNowMenu() { showRow(NET_SUB_ESPNOW, "ESP-NOW"); }
 static void showBluetoothMenu() { showRow(NET_SUB_BLUETOOTH, "Bluetooth"); }
@@ -326,13 +326,13 @@ static void enterNetwork() {
 
 static void enterWifiMenu() {
   enterNetwork();
-  showWiFiMenu();
+  showWifiMenu();
   CHECK(gNetSub == NET_SUB_WIFI && rowHas(rowOf("WiFi:"), "Disconnected"));
 }
 
 static void tapWifiConnect() {
   enterWifiMenu();
-  handleWiFiTap((uint32_t)rowOf("WiFi:"));
+  handleWifiTap((uint32_t)rowOf("WiFi:"));
   CHECK(std::strcmp(lastCommand, "openwifi") == 0);
   CHECK(rowHas(rowOf("WiFi:"), "Pending..."));
   CHECK(spawnedTask("g2_wifi_pending"));
@@ -361,7 +361,7 @@ static void tapPhoneOpen() {
 
 static void tapScan() {
   enterWifiMenu();
-  handleWiFiTap((uint32_t)rowOf("Scan Networks"));
+  handleWifiTap((uint32_t)rowOf("Scan Networks"));
 }
 
 static void finish() {
@@ -490,9 +490,9 @@ static void wifiWatchdogExpiryOnMenu() {
 
 static void wifiWatchdogReentry() {
   tapWifiConnect();
-  handleWiFiTap((uint32_t)rowOf("Status"));     // leave the WiFi menu ...
+  handleWifiTap((uint32_t)rowOf("Status"));     // leave the WiFi menu ...
   CHECK(gNetSub == NET_SUB_WIFI_STATUS);
-  showWiFiMenu();                               // ... and come back, still pending
+  showWifiMenu();                               // ... and come back, still pending
   CHECK(rowHas(rowOf("WiFi:"), "Pending..."));
   wifiConnectsAt(now + 1500);
   const unsigned before = listsShown;
@@ -505,7 +505,7 @@ static void wifiWatchdogReentry() {
 
 static void wifiWatchdogOtherNetworkView() {
   tapWifiConnect();
-  handleWiFiTap((uint32_t)rowOf("Status"));
+  handleWifiTap((uint32_t)rowOf("Status"));
   wifiConnectsAt(now + 1500);
   const unsigned before = listsShown;
   runSpawned();

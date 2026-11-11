@@ -123,7 +123,7 @@ void removeLocked(int index) {
 
 } // namespace
 
-bool initWiFiNetworks() {
+bool initWifiNetworks() {
   if (sNetworks) return true;
   if (!sNetworkMutex) sNetworkMutex = xSemaphoreCreateMutexStatic(&sNetworkMutexStorage);
   if (!sNetworkMutex) return false;
@@ -159,12 +159,12 @@ bool wifiNetworkSnapshot(WifiNetworkSnapshot& out) {
   return true;
 }
 
-void sortWiFiByPriority() {
+void sortWifiByPriority() {
   NetworkGuard guard;
   if (guard) sortLocked();
 }
 
-bool upsertWiFiNetwork(const String& ssid, const String& password, int priority, bool hidden) {
+bool upsertWifiNetwork(const String& ssid, const String& password, int priority, bool hidden) {
   // Block blank SSIDs at the source: a network with no name can only fail to
   // connect (and previously crashed the connect path), so never store one. This
   // validates interactive additions and setup; restore keeps its legacy policy.
@@ -250,7 +250,7 @@ bool upsertWiFiNetwork(const String& ssid, const String& password, int priority,
   return true;
 }
 
-bool removeWiFiNetwork(const String& ssid) {
+bool removeWifiNetwork(const String& ssid) {
   NetworkGuard guard;
   const int index = guard ? findBySsidLocked(ssid) : -1;
   if (index < 0) return false;
@@ -258,7 +258,7 @@ bool removeWiFiNetwork(const String& ssid) {
   return true;
 }
 
-bool removeWiFiNetworkById(uint32_t id, String* removedSsid) {
+bool removeWifiNetworkById(uint32_t id, String* removedSsid) {
   NetworkGuard guard;
   const int index = guard ? findByIdLocked(id) : -1;
   if (index < 0) return false;
@@ -269,7 +269,7 @@ bool removeWiFiNetworkById(uint32_t id, String* removedSsid) {
   return true;
 }
 
-bool setWiFiNetworkPriority(const String& ssid, int priority) {
+bool setWifiNetworkPriority(const String& ssid, int priority) {
   NetworkGuard guard;
   const int index = guard ? findBySsidLocked(ssid) : -1;
   if (index < 0) return false;
@@ -277,7 +277,7 @@ bool setWiFiNetworkPriority(const String& ssid, int priority) {
   return true;
 }
 
-bool saveWiFiNetworks() {
+bool saveWifiNetworks() {
   if (!filesystemReady) return false;
   {
     NetworkGuard guard;
@@ -288,13 +288,13 @@ bool saveWiFiNetworks() {
   return requestSettingsPersist();
 }
 
-WifiNetworkSaveResult saveSetupWiFiNetwork(const String& ssid, const String& password) {
-  if (!upsertWiFiNetwork(ssid, password, 1, false)) return WifiNetworkSaveResult::Rejected;
+WifiNetworkSaveResult saveSetupWifiNetwork(const String& ssid, const String& password) {
+  if (!upsertWifiNetwork(ssid, password, 1, false)) return WifiNetworkSaveResult::Rejected;
   const bool previousAutoStart = gSettings.wifiAutoStart;
   // One compound update, one persistence request. Calling setSetting here would
   // perform an independent write before the saved-list result is known.
   gSettings.wifiAutoStart = true;
-  if (!saveWiFiNetworks()) {
+  if (!saveWifiNetworks()) {
     gSettings.wifiAutoStart = previousAutoStart;
     return WifiNetworkSaveResult::PersistFailed;
   }

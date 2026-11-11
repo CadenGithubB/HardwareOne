@@ -232,14 +232,14 @@ bool wifiNetworkConnectionById(uint32_t id, WifiConnectionTarget& out) {
   return true;
 }
 int wifiNetworkCount() { return static_cast<int>(std::min<size_t>(gScript.size(), MAX_WIFI_NETWORKS)); }
-// setupWiFi's lazy driver init and the auto-reconnect setting it applies.
+// setupWifi's lazy driver init and the auto-reconnect setting it applies.
 static bool gWifiInitOk = true;
 static int gEnsureInitCalls = 0;
-bool ensureWiFiInitialized() { ++gEnsureInitCalls; return gWifiInitOk; }
+bool ensureWifiInitialized() { ++gEnsureInitCalls; return gWifiInitOk; }
 struct FakeSettings { bool wifiAutoReconnect = true; };
 static FakeSettings gSettings;
-void sortWiFiByPriority() {}
-bool saveWiFiNetworks() { return true; }
+void sortWifiByPriority() {}
+bool saveWifiNetworks() { return true; }
 void wifiNetworkMarkConnected(uint32_t, uint32_t) {}
 // ESP-NOW radio ownership (System_ESPNow): initialized, or a timed-out
 // closeespnow that still retains its runtime and the driver.
@@ -371,7 +371,7 @@ int main() {
     WifiConnectionTarget target;
     require(wifiNetworkConnectionById(1, target), "single target: lookup");
     const unsigned long t0 = millis();
-    require(!connectWiFiTarget(target, 35000, false), "single missing target: no connection");
+    require(!connectWifiTarget(target, 35000, false), "single missing target: no connection");
     require(millis() - t0 < 20000, "single missing target: finishes long before three 35 s windows");
     require(connectCalls("missing-1") == 3, "single missing target: still three attempts");
   }
@@ -480,7 +480,7 @@ int main() {
     WifiConnectionTarget target;
     require(wifiNetworkConnectionById(1, target), "radio owner: lookup");
     std::snprintf(label, sizeof(label), "%s: targeted connect joins", what);
-    require(connectWiFiTarget(target, 35000, false), label);
+    require(connectWifiTarget(target, 35000, false), label);
     std::snprintf(label, sizeof(label), "%s: the driver is not stopped or switched to STA", what);
     require(gDriverStops == 0 && !modeRequested(gDriverModes, WIFI_MODE_STA), label);
     reset({{"home", Behaviour::Connects, 2000}}, &gWebContext, 0);
@@ -497,7 +497,7 @@ int main() {
     reset({{"home", Behaviour::Connects, 2000}}, &gWebContext, 0);
     WifiConnectionTarget target;
     require(wifiNetworkConnectionById(1, target), "no radio owner: lookup");
-    require(connectWiFiTarget(target, 35000, false), "no radio owner: targeted connect joins");
+    require(connectWifiTarget(target, 35000, false), "no radio owner: targeted connect joins");
     require(gDriverStops == 1 && modeRequested(gDriverModes, WIFI_MODE_STA),
             "no radio owner: the driver restarts in STA");
   }
@@ -585,7 +585,7 @@ int main() {
             "superseded between networks: the next network is not tried");
   }
 
-  // setupWiFi owns the background connect's lifetime. Reserved before the boot
+  // setupWifi owns the background connect's lifetime. Reserved before the boot
   // task starts, active for the whole hunt, released on every way out.
   {
     static bool sSawInactive = false;
@@ -594,7 +594,7 @@ int main() {
     require(wifiBackgroundConnectActive(), "reserve: active before the task runs");
     sSawInactive = false;
     gDelayHook = [] { if (!wifiBackgroundConnectActive()) sSawInactive = true; };
-    setupWiFi(budget, WifiConnectOrigin::BACKGROUND);
+    setupWifi(budget, WifiConnectOrigin::BACKGROUND);
     require(!sSawInactive, "setupWiFi: active throughout the hunt");
     require(!wifiBackgroundConnectActive(), "setupWiFi: released when the hunt returns");
     require(!wifiBackgroundConnectSuperseded(), "setupWiFi: a natural failure is not a supersede");
@@ -605,7 +605,7 @@ int main() {
     reset(missing(1), nullptr, 0);
     gWifiInitOk = false;
     wifiBackgroundConnectReserve(true);
-    setupWiFi(budget, WifiConnectOrigin::BACKGROUND);
+    setupWifi(budget, WifiConnectOrigin::BACKGROUND);
     require(!wifiBackgroundConnectActive(), "setupWiFi: released on the driver-init early return");
   }
   {
@@ -615,26 +615,26 @@ int main() {
     require(!wifiBackgroundConnectActive(), "reserve(false): drops a reservation whose task never ran");
   }
   // A command that arrives after the reservation but before the task reaches
-  // setupWiFi still supersedes it: nothing is initialized or tried.
+  // setupWifi still supersedes it: nothing is initialized or tried.
   {
     reset(missing(1), nullptr, 0);
     wifiBackgroundConnectReserve(true);
     require(!wifiSupersedeBackgroundConnect(0), "early supersede: the reserved connect has not let go yet");
-    setupWiFi(budget, WifiConnectOrigin::BACKGROUND);
+    setupWifi(budget, WifiConnectOrigin::BACKGROUND);
     require(gEnsureInitCalls == 0 && connectCalls("missing-1") == 0,
             "early supersede: the boot connect never starts");
     require(wifiBackgroundConnectSuperseded() && !wifiBackgroundConnectActive(),
             "early supersede: reported as superseded and released");
     require(!sawMessage("WiFi connect timed out"), "early supersede: not reported as a timeout");
   }
-  // Superseded mid-hunt through setupWiFi: says why, not "timed out".
+  // Superseded mid-hunt through setupWifi: says why, not "timed out".
   {
     static unsigned long sSupersedeAtMs = 0;
     reset({{"hs-1", Behaviour::Handshaking, 0}}, nullptr, 0);
     wifiBackgroundConnectReserve(true);
     sSupersedeAtMs = millis() + 10000;
     gDelayHook = [] { if (gNowMs >= sSupersedeAtMs) sBackgroundConnectSuperseded.store(true); };
-    setupWiFi(budget, WifiConnectOrigin::BACKGROUND);
+    setupWifi(budget, WifiConnectOrigin::BACKGROUND);
     require(sawMessage("stopped by a WiFi command") && !sawMessage("WiFi connect timed out"),
             "setupWiFi superseded mid-hunt: reported as stopped, not timed out");
     require(wifiBackgroundConnectSuperseded() && !wifiBackgroundConnectActive(),
@@ -654,7 +654,7 @@ int main() {
     WifiConnectionTarget target;
     require(wifiNetworkConnectionById(1, target), "coex scope: lookup");
     const uint16_t attemptsBefore = sCoexConnects.load();
-    require(!connectWiFiTarget(target, 35000, false), "coex scope: missing target fails");
+    require(!connectWifiTarget(target, 35000, false), "coex scope: missing target fails");
     require(sDepthSeen == 1, "coex scope: the attempt counts as connecting while it runs");
     require(sCoexConnectDepth.load() == 0, "coex scope: released when the attempt returns");
     require(uint16_t(sCoexConnects.load() - attemptsBefore) == 1,

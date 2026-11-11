@@ -81,12 +81,12 @@ struct Added { std::string ssid, pass; int priority; bool hidden; };
 static std::vector<Added> added;
 static bool storeAccepts = true;
 // INSERT_OWNER_TYPES
-bool upsertWiFiNetwork(const String& ssid, const String& pass, int priority, bool hidden) {
+bool upsertWifiNetwork(const String& ssid, const String& pass, int priority, bool hidden) {
   added.push_back({ssid.c_str(), pass.c_str(), priority, hidden});
   return storeAccepts;
 }
-void sortWiFiByPriority() {}
-bool saveWiFiNetworks() { return true; }
+void sortWifiByPriority() {}
+bool saveWifiNetworks() { return true; }
 enum { SYSEVT_WIFI_NET_ADDED = 1 };
 void systemEventPost(int, const char*, const char* = nullptr) {}
 static char debugBuffer[1024];

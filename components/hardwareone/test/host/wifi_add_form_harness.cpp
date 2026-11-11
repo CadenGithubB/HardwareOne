@@ -176,7 +176,7 @@ static bool g2EnqueueRedraw(const G2CmdCookie&, void (*render)(), const char*) {
 }
 static int gScanResultsShown = 0;
 static void showScanResults() { ++gScanResultsShown; }
-static void showWiFiMenu() {}
+static void showWifiMenu() {}
 
 // ---- production: G2 join-a-scanned-AP flow --------------------------------------------
 // INSERT_G2_STATE
@@ -368,11 +368,11 @@ static void g2ScanSsidQuote() {
   g2Begin("g2_scan_ssid_quote");
   g2Scanned("x\" \"y", true);
   g2Scanned("a\"b", false);
-  handleWiFiScanTap(1);
+  handleWifiScanTap(1);
   EXPECT(gTextEntries == 0, "a scanned SSID with a double-quote opens no keyboard");
   EXPECT(lensRefusesQuote(), "the refusal is shown on the lens, lens: '" + shown(gLens) + "'");
   gLens.clear();
-  handleWiFiScanTap(2);
+  handleWifiScanTap(2);
   EXPECT(gG2Lines.empty(), "an open AP with a double-quote submits nothing, ran: " + joined(gG2Lines));
   EXPECT(lensRefusesQuote(), "the open-AP refusal is shown, lens: '" + shown(gLens) + "'");
 }
@@ -381,11 +381,11 @@ static void g2ScanSsidControl() {
   g2Begin("g2_scan_ssid_control");
   g2Scanned("Lab\tNet", true);
   g2Scanned("Cafe\nNet", false);
-  handleWiFiScanTap(1);
+  handleWifiScanTap(1);
   EXPECT(gTextEntries == 0, "a scanned SSID with a TAB opens no password keyboard");
   EXPECT(lensRefusesQuote(), "the refusal is shown on the lens, lens: '" + shown(gLens) + "'");
   gLens.clear();
-  handleWiFiScanTap(2);
+  handleWifiScanTap(2);
   EXPECT(gG2Lines.empty(),
          "an open AP with a line feed in its SSID submits nothing, ran: " + joined(gG2Lines));
   EXPECT(lensRefusesQuote(), "the open-AP refusal is shown, lens: '" + shown(gLens) + "'");
@@ -394,7 +394,7 @@ static void g2ScanSsidControl() {
 static void g2PasswordQuote() {
   g2Begin("g2_password_quote");
   g2Scanned("HomeNet", true);
-  handleWiFiScanTap(1);
+  handleWifiScanTap(1);
   EXPECT(gTextEntries == 1 && gCommit, "a secured AP opens the password keyboard");
   if (gCommit) gCommit("pa\"ss");
   EXPECT(gG2Lines.empty(),
@@ -407,7 +407,7 @@ static void g2ReplyShown() {
   g2Scanned("HomeNet", true);
   g2Scanned("Guest", false);
   g2Scanned("", true);
-  handleWiFiScanTap(1);
+  handleWifiScanTap(1);
   if (gCommit) gCommit("secret12");
   EXPECT(gG2Lines == std::vector<std::string>{"wifiadd \"HomeNet\" \"secret12\" 1 0"},
          "a valid password submits the quoted line, ran: " + joined(gG2Lines));
@@ -416,14 +416,14 @@ static void g2ReplyShown() {
   EXPECT(gLens == denial, "the owner's reply is shown on the lens, lens: '" + gLens + "'");
 
   gG2Lines.clear();
-  handleWiFiScanTap(2);
+  handleWifiScanTap(2);
   EXPECT(gG2Lines == std::vector<std::string>{"wifiadd \"Guest\" \"\" 1 0"},
          "an open AP saves with a quoted empty password, ran: " + joined(gG2Lines));
 
   gG2Lines.clear();
   gLens.clear();
   const int entries = gTextEntries;
-  handleWiFiScanTap(3);
+  handleWifiScanTap(3);
   EXPECT(gG2Lines.empty() && gTextEntries == entries && gLens.empty(),
          "a hidden AP stays ignored");
 }

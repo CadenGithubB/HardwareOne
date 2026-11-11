@@ -183,7 +183,7 @@ static bool writeAutomationsJsonAtomic(const String&) {
 static bool settingsSaveSucceeds = true;
 static bool writeSettingsJson() { ++settingsWriteCalls; operations.emplace_back("settings.save"); return settingsSaveSucceeds; }
 static void applySettings() { ++runtimeApplyCalls; operations.emplace_back("settings.apply"); }
-static void connectToBestWiFiNetwork() { ++wifiCalls; operations.emplace_back("wifi.connect"); }
+static void connectToBestWifiNetwork() { ++wifiCalls; operations.emplace_back("wifi.connect"); }
 static void noteNtpStateBeforeSetupReboot() { operations.emplace_back("ntp.note"); }
 struct Reboot {};
 static void rebootWithMessage(const char*) {

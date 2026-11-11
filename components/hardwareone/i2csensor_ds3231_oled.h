@@ -143,7 +143,7 @@ static bool rtcInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
   
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_Y)) {
 #if ENABLE_WIFI
-    extern bool WiFi_isConnected();
+    extern bool Wifi_isConnected();
     if (WiFi.isConnected()) {
       oledConfirmRequest("Sync NTP?", nullptr, rtcNTPSyncConfirmed, nullptr);
     } else {

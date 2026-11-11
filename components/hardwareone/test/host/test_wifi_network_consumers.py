@@ -52,23 +52,23 @@ assert legacy.index("if (!result.completed)") < legacy.index("wizardSaveAndApply
 assert "wizardSaveAndApplySettings(" in extract_block(mode, "if (sWizard.result.completed)")
 for adapter in (legacy, mode):
     assert adapter.count("wizardSaveAndApplySettings(") == 1
-    assert "saveSetupWiFiNetwork(" not in adapter
+    assert "saveSetupWifiNetwork(" not in adapter
 apply = extract_block(source("System_SetupWizard.cpp"), "bool wizardSaveAndApplySettings(")
-assert apply.index("!result.completed") < apply.index("saveSetupWiFiNetwork(")
-assert apply.count("saveSetupWiFiNetwork(") == 1
+assert apply.index("!result.completed") < apply.index("saveSetupWifiNetwork(")
+assert apply.count("saveSetupWifiNetwork(") == 1
 assert "wifiNetworkSaveResultMessage(wifiSaved)" in apply
 accepted = extract_block(apply, "if (wifiSaved == WifiNetworkSaveResult::Accepted)")
 assert 'broadcastOutput("WiFi network: "' in accepted
 for consumer in (apply, legacy, mode):
     assert "wifiAutoStart" not in consumer
-    for obsolete in ("upsertWiFiNetwork(", "sortWiFiByPriority(", "saveWiFiNetworks("):
+    for obsolete in ("upsertWifiNetwork(", "sortWifiByPriority(", "saveWifiNetworks("):
         assert obsolete not in consumer
 
 restore = extract_block(source("System_FirstTimeSetup.cpp"), "void firstTimeSetupIfNeeded(")
 failure = extract_block(restore, "if (wifiSaved != WifiNetworkSaveResult::Accepted)")
-restore_connect = "setupWiFi(kWifiConnectHuntBudgetMs, WifiConnectOrigin::BOOT);"
-assert "continue;" in failure and "setupWiFi(" not in failure
-assert restore.index("saveSetupWiFiNetwork(") < restore.index(restore_connect)
+restore_connect = "setupWifi(kWifiConnectHuntBudgetMs, WifiConnectOrigin::BOOT);"
+assert "continue;" in failure and "setupWifi(" not in failure
+assert restore.index("saveSetupWifiNetwork(") < restore.index(restore_connect)
 assert restore.index(failure) < restore.index(restore_connect)
 
 for name in ("System_Settings.cpp", "System_SetupWizard.cpp",
@@ -88,7 +88,7 @@ saved_id = extract_block(connect, 'else if (firstArg == "--saved-id")')
 assert "parseSavedNetworkId(a.arg(1))" in saved_id
 assert 'if (a.count() != 2 || !id) return "Usage:' in saved_id
 assert 'if (!wifiNetworkConnectionById(id, selected)) return "Error:' in saved_id
-assert connect.index(saved_id) < connect.index("connected = connectToBestWiFiNetwork()")
-assert "useSavedId ? connectWiFiTarget(selected, 35000, false)" in connect
+assert connect.index(saved_id) < connect.index("connected = connectToBestWifiNetwork()")
+assert "useSavedId ? connectWifiTarget(selected, 35000, false)" in connect
 
 print("saved WiFi consumer contracts: OK")

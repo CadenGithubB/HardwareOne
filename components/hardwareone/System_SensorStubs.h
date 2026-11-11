@@ -237,8 +237,8 @@
   // Wi-Fi APIs and saved-network disabled operations have their own headers.
   #include "System_WiFi.h"
   // WiFi stub functions
-  inline void setupWiFi() {}
-  inline bool connectToBestWiFiNetwork() { return false; }
+  inline void setupWifi() {}
+  inline bool connectToBestWifiNetwork() { return false; }
   inline void wifiEventLogDrain() {}
   inline const char* cmd_wifitxpower(const String& argsInput) { return "WiFi disabled"; }
   inline const char* cmd_wifiautoreconnect(const String& argsInput) { return "WiFi disabled"; }

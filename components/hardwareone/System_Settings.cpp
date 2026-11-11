@@ -1599,7 +1599,7 @@ static bool writeSettingsJsonImpl(bool clearPipeCredentials) {
   // espnowMeshesWriteJson() both .to<>() their objects, and every registered
   // scalar is stamped from gSettings - so the merge-read cannot recover any of
   // it. On a WiFi device the trigger fires ~2 s into boot without anyone asking
-  // for it: a successful association calls saveWiFiNetworks(), which lands
+  // for it: a successful association calls saveWifiNetworks(), which lands
   // here. Bluetooth pairings and the whole ESP-NOW mesh/bond config are gone
   // before an operator could notice the file was damaged.
   //
@@ -1677,7 +1677,7 @@ static bool writeSettingsJsonImpl(bool clearPipeCredentials) {
         //
         // Observed 2026-08-07: an intentionally truncated settings.json
         // survived three reboots untouched, then one `wifiadd` triggered
-        // saveWiFiNetworks() -> here, and the file was gutted.
+        // saveWifiNetworks() -> here, and the file was gutted.
         //
         // Refusing is strictly better. A file we cannot parse is a file whose
         // contents we cannot preserve, so replacing it can only lose data.

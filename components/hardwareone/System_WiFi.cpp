@@ -147,13 +147,13 @@ static bool wifiConnectWait(unsigned long ms, const WifiConnectBounds& bounds) {
 // Helper functions defined later in this file
 static const char* wifiStatusToString(wl_status_t status);
 static void wifiEnsureIdle(unsigned long waitMs);
-static bool connectWiFiTarget(const WifiConnectionTarget& network, unsigned long timeoutMs, bool showPriority);
-static bool connectWiFiTargetWithin(const WifiConnectionTarget& network, unsigned long timeoutMs,
+static bool connectWifiTarget(const WifiConnectionTarget& network, unsigned long timeoutMs, bool showPriority);
+static bool connectWifiTargetWithin(const WifiConnectionTarget& network, unsigned long timeoutMs,
                                     bool showPriority, const WifiConnectBounds& bounds);
-bool connectWiFiIndex(int index0based, unsigned long timeoutMs, bool showPriority = false);
-static bool connectWiFiId(uint32_t id, unsigned long timeoutMs, bool showPriority,
+bool connectWifiIndex(int index0based, unsigned long timeoutMs, bool showPriority = false);
+static bool connectWifiId(uint32_t id, unsigned long timeoutMs, bool showPriority,
                           const WifiConnectBounds& bounds);
-bool connectWiFiSSID(const String& ssid, unsigned long timeoutMs);
+bool connectWifiSSID(const String& ssid, unsigned long timeoutMs);
 
 // Global flags
 volatile bool gWifiUserCancelled = false;
@@ -588,9 +588,9 @@ const char* cmd_wifiadd(const String& originalCmd) {
   // distinct reasons — distinguish them, or a full list shows the blank-SSID text
   // (the real "list full" line only went to broadcastOutput, which G2/web
   // callers reading the return value never see).
-  if (!upsertWiFiNetwork(ssid, pass, pri, hid)) {
+  if (!upsertWifiNetwork(ssid, pass, pri, hid)) {
     if (ssid.length() == 0) return "Error: cannot add a WiFi network with a blank SSID";
-    // Mirror upsertWiFiNetwork's length guards. Without these the caller would
+    // Mirror upsertWifiNetwork's length guards. Without these the caller would
     // fall through to the list-full text and report the wrong reason.
     if (ssid.length() > 32) {
       snprintf(getDebugBuffer(), 1024,
@@ -615,8 +615,8 @@ const char* cmd_wifiadd(const String& originalCmd) {
              "Error: saved-network list is full (%d) — remove one with wifirm first", MAX_WIFI_NETWORKS);
     return getDebugBuffer();
   }
-  sortWiFiByPriority();
-  if (!saveWiFiNetworks()) {
+  sortWifiByPriority();
+  if (!saveWifiNetworks()) {
     snprintf(getDebugBuffer(), 1024,
              "Error: '%s' added in memory but saving settings.json FAILED — it will be lost on reboot",
              ssid.c_str());
@@ -640,9 +640,9 @@ static uint32_t parseSavedNetworkId(const String& text) {
   return value;
 }
 
-static const char* finishWiFiRemoval(bool ok, const String& ssid) {
+static const char* finishWifiRemoval(bool ok, const String& ssid) {
   if (ok) {
-    if (!saveWiFiNetworks()) {
+    if (!saveWifiNetworks()) {
       // RAM is already mutated; without the file write the network resurrects
       // on reboot — say so instead of lying with an OK.
       snprintf(getDebugBuffer(), 1024,
@@ -668,7 +668,7 @@ const char* cmd_wifirm(const String& originalCmd) {
     ssid = ssid.substring(1, ssid.length() - 1);
   }
   if (ssid.length() == 0) return "Error: invalid arguments — Usage: wifirm <ssid>";
-  return finishWiFiRemoval(removeWiFiNetwork(ssid), ssid);
+  return finishWifiRemoval(removeWifiNetwork(ssid), ssid);
 }
 
 // Separate command preserves wifirm's raw-SSID syntax, including flag-like names.
@@ -679,8 +679,8 @@ static const char* cmd_wifirmid(const String& originalCmd) {
   const uint32_t id = parseSavedNetworkId(argument);
   if (!id) return "Error: invalid arguments — Usage: wifirmid <saved-id>";
   String ssid;
-  if (!removeWiFiNetworkById(id, &ssid)) return "Error: selected WiFi network no longer exists; refresh the list";
-  return finishWiFiRemoval(true, ssid);
+  if (!removeWifiNetworkById(id, &ssid)) return "Error: selected WiFi network no longer exists; refresh the list";
+  return finishWifiRemoval(true, ssid);
 }
 
 const char* cmd_wifipromote(const String& originalCmd) {
@@ -694,12 +694,12 @@ const char* cmd_wifipromote(const String& originalCmd) {
   int newPri = a.argInt(1, 1);
   if (newPri <= 0) newPri = 1;
   // Networks already in memory from settings.json
-  if (!setWiFiNetworkPriority(ssid, newPri)) {
+  if (!setWifiNetworkPriority(ssid, newPri)) {
     snprintf(getDebugBuffer(), 1024, "Error: Network not found: '%s'", ssid.c_str());
     return getDebugBuffer();
   }
-  sortWiFiByPriority();
-  if (!saveWiFiNetworks()) {
+  sortWifiByPriority();
+  if (!saveWifiNetworks()) {
     snprintf(getDebugBuffer(), 1024,
              "Error: priority updated in memory but saving settings.json FAILED — it will revert on reboot");
     return getDebugBuffer();
@@ -711,7 +711,7 @@ const char* cmd_wifipromote(const String& originalCmd) {
 // Core WiFi connection logic - shared by command and boot sequence
 // Returns true if connected, false otherwise. The whole hunt stops at budgetMs
 // even when saved networks remain untried; origin decides console cancellation.
-bool connectToBestWiFiNetwork(uint32_t budgetMs, WifiConnectOrigin origin) {
+bool connectToBestWifiNetwork(uint32_t budgetMs, WifiConnectOrigin origin) {
   const WifiConnectBounds bounds = wifiConnectBounds(budgetMs, origin);
   // Defensively re-arm the STA interface. If a caller previously did
   // WiFi.disconnect(true) / WIFI_OFF, WiFi.status() would report WL_STOPPED for
@@ -732,7 +732,7 @@ bool connectToBestWiFiNetwork(uint32_t budgetMs, WifiConnectOrigin origin) {
     }
   }
 
-  sortWiFiByPriority();
+  sortWifiByPriority();
   WifiNetworkSnapshot saved;
   // A failed copy is transient heap pressure, not "no networks": retry once.
   if (!wifiNetworkSnapshot(saved)) {
@@ -772,7 +772,7 @@ bool connectToBestWiFiNetwork(uint32_t budgetMs, WifiConnectOrigin origin) {
     // this timeout disconnected it 2.4 s later — logged as "run -> init (0x0)",
     // reason 0 meaning WE dropped it, not the AP. A fresh attempt then joined
     // in 40 ms. 25 s gives the driver room for two full cycles.
-    connected = connectWiFiId(saved.entries[i].id, 35000, true, bounds);
+    connected = connectWifiId(saved.entries[i].id, 35000, true, bounds);
 
     if (gWifiUserCancelled) {
       WifiRadioMutationGuard radioGuard;
@@ -915,7 +915,7 @@ const char* cmd_wificonnect(const String& originalCmd) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   // Ensure WiFi is initialized (lazy init)
-  if (!ensureWiFiInitialized()) {
+  if (!ensureWifiInitialized()) {
     return wifiStartFailure(true, "Error: Wi-Fi radio could not start. Retry shortly.");
   }
 
@@ -974,7 +974,7 @@ const char* cmd_wificonnect(const String& originalCmd) {
 
   if (useBest) {
     // Use shared connection logic
-    connected = connectToBestWiFiNetwork();
+    connected = connectToBestWifiNetwork();
   } else if (useSavedId || index1 > 0) {
     // 25 s, not 12 s. The driver's own 4-way-handshake timeout is 10 s and it
     // retries internally; a 12 s budget (12.5 s from esp_wifi_connect() — the
@@ -984,10 +984,10 @@ const char* cmd_wificonnect(const String& originalCmd) {
     // this timeout disconnected it 2.4 s later — logged as "run -> init (0x0)",
     // reason 0 meaning WE dropped it, not the AP. A fresh attempt then joined
     // in 40 ms. 25 s gives the driver room for two full cycles.
-    connected = useSavedId ? connectWiFiTarget(selected, 35000, false)
-                           : connectWiFiIndex(index1 - 1, 35000);
+    connected = useSavedId ? connectWifiTarget(selected, 35000, false)
+                           : connectWifiIndex(index1 - 1, 35000);
     if (!connected && prevSSID.length() > 0) {
-      connectWiFiSSID(prevSSID, 15000);
+      connectWifiSSID(prevSSID, 15000);
     }
   }
 
@@ -1279,7 +1279,7 @@ static RadioPowerOffResult radioPowerOff() {
 }
 
 // Power an unassociated STA back up without starting a connection attempt. This
-// is intentionally separate from ensureWiFiInitialized(): after radiopower off,
+// is intentionally separate from ensureWifiInitialized(): after radiopower off,
 // the application-level initialization latch can still be true while the live
 // driver mode is WIFI_OFF. The master WiFi switch remains authoritative.
 static bool ensureStaRadioMode() {
@@ -1334,7 +1334,7 @@ static bool radioPowerOn() {
     }
     if (restoreWifi && gSettings.wifiEnabled) {
       WiFi.setAutoReconnect(gSettings.wifiAutoReconnect);  // honour the user's hunt preference
-      setupWiFi();                  // sets mode (AP_STA if ESP-NOW up, else STA), re-associates
+      setupWifi();                  // sets mode (AP_STA if ESP-NOW up, else STA), re-associates
     }
     const bool restored = wifiRadioOn();
     if (restored) clearRadioRestoreSnapshot();
@@ -1352,7 +1352,7 @@ static bool radioPowerOn() {
   if (!ensureStaRadioMode()) return false;
   if (gSettings.wifiAutoStart) {
     WiFi.setAutoReconnect(gSettings.wifiAutoReconnect);
-    setupWiFi();
+    setupWifi();
   }
   const bool enabled = wifiRadioOn();
   if (enabled) clearRadioRestoreSnapshot();
@@ -1494,7 +1494,7 @@ const char* cmd_wifiscan(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   // Ensure WiFi is initialized (lazy init) before scanning
-  if (!ensureWiFiInitialized()) {
+  if (!ensureWifiInitialized()) {
     return "Error: Failed to initialize WiFi";
   }
   
@@ -1612,7 +1612,7 @@ const char* cmd_wifiautoreconnect(const String& argsInput) {
 
   // Push into the driver when STA is live or the hunt is already armed.
   // After closewifi (disconnected + hunt off) we only persist — openwifi /
-  // setupWiFi re-arm from the setting. Re-arming here would undo closewifi.
+  // setupWifi re-arm from the setting. Re-arming here would undo closewifi.
   if (wifiInitialized && (WiFi.isConnected() || WiFi.getAutoReconnect())) {
     WiFi.setAutoReconnect(gSettings.wifiAutoReconnect);
   }
@@ -1683,28 +1683,28 @@ static wifi_init_config_t makeArduinoCompatibleWifiInitConfig() {
 // Connect to a saved network by index (0-based). Update lastConnected on success.
 // If showPriority is true, displays priority in connection message (for --best mode)
 // Returns: true if connected, false if failed or user cancelled
-bool connectWiFiIndex(int index0based, unsigned long timeoutMs, bool showPriority) {
+bool connectWifiIndex(int index0based, unsigned long timeoutMs, bool showPriority) {
   WifiConnectionTarget network;
   if (!wifiNetworkConnectionByIndex(index0based, network)) return false;
-  return connectWiFiTarget(network, timeoutMs, showPriority);
+  return connectWifiTarget(network, timeoutMs, showPriority);
 }
 
-static bool connectWiFiId(uint32_t id, unsigned long timeoutMs, bool showPriority,
+static bool connectWifiId(uint32_t id, unsigned long timeoutMs, bool showPriority,
                           const WifiConnectBounds& bounds) {
   WifiConnectionTarget network;
   if (!wifiNetworkConnectionById(id, network)) return false;
-  return connectWiFiTargetWithin(network, timeoutMs, showPriority, bounds);
+  return connectWifiTargetWithin(network, timeoutMs, showPriority, bounds);
 }
 
 // A single-target connect (openwifi --index/--saved-id, the rollback to the
 // previous SSID) is its own request: it gets the default budget and resolves
 // console cancellation from the command that asked for it.
-static bool connectWiFiTarget(const WifiConnectionTarget& nw, unsigned long timeoutMs, bool showPriority) {
-  return connectWiFiTargetWithin(nw, timeoutMs, showPriority,
+static bool connectWifiTarget(const WifiConnectionTarget& nw, unsigned long timeoutMs, bool showPriority) {
+  return connectWifiTargetWithin(nw, timeoutMs, showPriority,
                                  wifiConnectBounds(kWifiConnectHuntBudgetMs, WifiConnectOrigin::COMMAND));
 }
 
-static bool connectWiFiTargetWithin(const WifiConnectionTarget& nw, unsigned long timeoutMs,
+static bool connectWifiTargetWithin(const WifiConnectionTarget& nw, unsigned long timeoutMs,
                                     bool showPriority, const WifiConnectBounds& bounds) {
   const int index0based = nw.index;
   DEBUG_WIFIF("[connectWiFiIndex] Attempting connection to [%d] SSID='%s'", index0based + 1, nw.ssid.c_str());
@@ -1735,7 +1735,7 @@ static bool connectWiFiTargetWithin(const WifiConnectionTarget& nw, unsigned lon
   // Debug: Show SSID and password details
   DEBUG_WIFIF("[connectWiFiIndex] SSID: '%s' (length=%d)", nw.ssid.c_str(), nw.ssid.length());
   DEBUG_WIFIF("[connectWiFiIndex] Password length: %d", nw.password.length());
-  // DEBUG_WIFIF("[connectWiFiIndex] Password (VISIBLE): '%s'", nw.password.c_str());  // SECURITY: Uncomment only for troubleshooting
+  // DEBUG_WIFIF("[connectWifiIndex] Password (VISIBLE): '%s'", nw.password.c_str());  // SECURITY: Uncomment only for troubleshooting
 
   // Validate credentials are not empty
   if (nw.ssid.length() == 0) {
@@ -2108,7 +2108,7 @@ static bool connectWiFiTargetWithin(const WifiConnectionTarget& nw, unsigned lon
       // this join also raised; posting here too would double it.
       wifiNetworkMarkConnected(nw.id, millis());
       radioGuard.release();
-      saveWiFiNetworks();
+      saveWifiNetworks();
       return true;
     }
 
@@ -2197,10 +2197,10 @@ static bool connectWiFiTargetWithin(const WifiConnectionTarget& nw, unsigned lon
 }
 
 // Connect to a saved network by SSID.
-bool connectWiFiSSID(const String& ssid, unsigned long timeoutMs) {
+bool connectWifiSSID(const String& ssid, unsigned long timeoutMs) {
   WifiConnectionTarget network;
   if (!wifiNetworkConnectionBySSID(ssid, network)) return false;
-  return connectWiFiTarget(network, timeoutMs, false);
+  return connectWifiTarget(network, timeoutMs, false);
 }
 
 // ============================================================================
@@ -2760,7 +2760,7 @@ static void wifiEventLogger(arduino_event_id_t event, arduino_event_info_t info)
     sConnectedAtMs = millis();
     espnowNoteWifiChannelMayHaveChanged();  // radio just moved to the AP's channel
     // Every join lands here, commanded or the driver's own auto-reconnect, so
-    // this edge (not connectWiFiTarget) is where wifi_connected is posted.
+    // this edge (not connectWifiTarget) is where wifi_connected is posted.
     const String ip = IPAddress(info.got_ip.ip_info.ip.addr).toString();
     portENTER_CRITICAL(&sWifiDiscMux);
     snprintf(sWifiConnIp, sizeof(sWifiConnIp), "%s", ip.c_str());
@@ -2861,7 +2861,7 @@ static void wifiRehuntTask(void*) {
     bool hunted = false;
     if (!connected && !wifiBackgroundConnectSuperseded()) {
       hunted = true;
-      connected = connectToBestWiFiNetwork(WifiRehuntPolicy::kHuntBudgetMs,
+      connected = connectToBestWifiNetwork(WifiRehuntPolicy::kHuntBudgetMs,
                                            WifiConnectOrigin::BACKGROUND);
     }
     const bool superseded = wifiBackgroundConnectSuperseded();
@@ -2936,7 +2936,7 @@ void wifiRehuntPoll() {
 }
 
 // Ensure WiFi is initialized (lazy initialization to save ~32KB at boot)
-bool ensureWiFiInitialized() {
+bool ensureWifiInitialized() {
   // Master switch. This is the single chokepoint for every STA entry path
   // (cmd_wificonnect, cmd_wifiscan, the OLED network page), so one check here
   // covers them all. Deliberately does NOT affect ESP-NOW: it shares the radio
@@ -3014,8 +3014,8 @@ uint32_t wifiBootConnectBudgetMs() {
 
 // Runtime re-connects (radiopower on, the radio companion's restore) use the
 // default budget and resolve console cancellation from the calling command.
-void setupWiFi() {
-  setupWiFi(kWifiConnectHuntBudgetMs, WifiConnectOrigin::COMMAND);
+void setupWifi() {
+  setupWifi(kWifiConnectHuntBudgetMs, WifiConnectOrigin::COMMAND);
 }
 
 void wifiBackgroundConnectReserve(bool reserve) {
@@ -3046,7 +3046,7 @@ bool wifiSupersedeBackgroundConnect(uint32_t waitMs) {
   return true;
 }
 
-void setupWiFi(uint32_t budgetMs, WifiConnectOrigin origin) {
+void setupWifi(uint32_t budgetMs, WifiConnectOrigin origin) {
   // A BACKGROUND connect stays visible to superseding commands until this call
   // returns, including every early return below. Its reservation began before
   // the boot task started (wifiBackgroundConnectReserve); a request made since
@@ -3067,7 +3067,7 @@ void setupWiFi(uint32_t budgetMs, WifiConnectOrigin origin) {
   }
 
   // Ensure WiFi is initialized before attempting connection
-  if (!ensureWiFiInitialized()) {
+  if (!ensureWifiInitialized()) {
     broadcastOutput("Error: Failed to initialize WiFi");
     return;
   }
@@ -3114,7 +3114,7 @@ void setupWiFi(uint32_t budgetMs, WifiConnectOrigin origin) {
     DEBUG_WIFIF("[DEBUG] About to call connectToBestWiFiNetwork");
     // Call WiFi connection function directly instead of going through command system
     // This avoids potential deadlock with command executor task during boot
-    connected = connectToBestWiFiNetwork(budgetMs, origin);
+    connected = connectToBestWifiNetwork(budgetMs, origin);
     DEBUG_WIFIF("[DEBUG] connectToBestWiFiNetwork returned");
     DEBUG_WIFIF("[WiFi Setup] Connection result: %s (status=%d)",
                 connected ? "SUCCESS" : "FAILED", WiFi.status());
@@ -3128,7 +3128,7 @@ void setupWiFi(uint32_t budgetMs, WifiConnectOrigin origin) {
     DEBUG_WIFIF("[WiFi Setup] Background connect superseded");
   } else if (!connected) {
     broadcastOutput("WiFi connect timed out; continuing without network");
-    // Once-per-boot latch: setupWiFi can also run via first-time setup.
+    // Once-per-boot latch: setupWifi can also run via first-time setup.
     static bool sBootConnectFailLogged = false;
     if (!sBootConnectFailLogged) {
       sBootConnectFailLogged = true;

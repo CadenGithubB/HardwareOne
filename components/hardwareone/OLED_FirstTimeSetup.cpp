@@ -446,7 +446,7 @@ struct FtsWifiScanCacheGuard {
 };
 #endif
 
-bool getOLEDWiFiSelection(String& outSSID) {
+bool getOLEDWifiSelection(String& outSSID) {
   // Fallback to serial if OLED not available
   if (!isOLEDAvailable()) {
     Serial.println("Enter WiFi SSID (or press Enter to skip): ");

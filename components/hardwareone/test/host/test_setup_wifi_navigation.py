@@ -36,11 +36,11 @@ def generate() -> str:
         extract_block(setup, "bool wizardHandleCancelInput("),
         extract_block(setup, "static String waitForWizardInput("),
         extract_block(setup, "static String waitForWizardSecret("),
-        extract_block(setup, "static void handleSerialWiFiPage("),
-        extract_block(oled, "bool renderWiFiPage("),
+        extract_block(setup, "static void handleSerialWifiPage("),
+        extract_block(oled, "bool renderWifiPage("),
         extract_block(mode, "static WizardSubMode subModeForPage("),
-        extract_block(mode[mode.rindex("static CLIModeInputResult dispatchWiFi("):],
-                      "static CLIModeInputResult dispatchWiFi("),
+        extract_block(mode[mode.rindex("static CLIModeInputResult dispatchWifi("):],
+                      "static CLIModeInputResult dispatchWifi("),
         extract_block(mode, "static CLIModeInputResult wizardMode_onInput("),
     ])
     # This existing String shim contains no setup policy.

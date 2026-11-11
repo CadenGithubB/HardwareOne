@@ -119,7 +119,7 @@ void prepareNetworkData() {
 // ============================================================================
 // OLED_NETWORK_INFO — WiFi menu (Power-style OLEDScrollState)
 // ============================================================================
-// The glasses' WiFi page in the same order (G2_Page_Network.cpp showWiFiMenu):
+// The glasses' WiFi page in the same order (G2_Page_Network.cpp showWifiMenu):
 // radio, connect or disconnect, status, scan, saved networks, Auto Start; plus
 // the add and remove pickers and the module settings. The web server moved to
 // the Web menu. Rows rebuild every frame from current state; each carries a
@@ -725,7 +725,7 @@ static bool cacheOledWifiScanRecord(const WifiScanRecord& record,
 // Blocking WiFi scan, then push the scan sub-mode showing the results.
 static void startWifiScan() {
   // Immediate "Scanning..." feedback before the blocking scan (mirrors the
-  // first-time-setup wizard's getOLEDWiFiSelection()).
+  // first-time-setup wizard's getOLEDWifiSelection()).
   if (oledDisplay) {
     OLED_TRANSACTION(
       oledDisplay->fillRect(0, 0, oledDisplay->width(), oledDisplay->height(), DISPLAY_COLOR_BLACK);
@@ -740,7 +740,7 @@ static void startWifiScan() {
   sWifiScanCount = 0;
   sWifiScanFailure[0] = '\0';
 #if ENABLE_WIFI
-  if (!ensureWiFiInitialized()) {
+  if (!ensureWifiInitialized()) {
     snprintf(sWifiScanFailure, sizeof(sWifiScanFailure),
              "WiFi unavailable");
   } else {

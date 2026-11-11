@@ -319,7 +319,7 @@ static CLIModeInputResult dispatchEspNow(const String& line,
                                          char* out, size_t outSize);
 static CLIModeInputResult dispatchMQTT(const String& line,
                                        char* out, size_t outSize);
-static CLIModeInputResult dispatchWiFi(const String& line,
+static CLIModeInputResult dispatchWifi(const String& line,
                                        char* out, size_t outSize);
 static CLIModeInputResult dispatchModePage(const String& line,
                                            char* out, size_t outSize);
@@ -395,7 +395,7 @@ static CLIModeInputResult wizardMode_onInput(const String& line, void* /*ud*/,
 
     case WizardSubMode::WIFI_SSID:
     case WizardSubMode::WIFI_PASSWORD:
-      return dispatchWiFi(line, out, outSize);
+      return dispatchWifi(line, out, outSize);
 
     case WizardSubMode::DONE:
       // Shouldn't happen — the previous transition should have returned
@@ -715,7 +715,7 @@ static CLIModeInputResult dispatchMQTT(const String& line,
 }
 
 // ---------- WiFi credentials sub-page (SSID -> PASSWORD)
-static CLIModeInputResult dispatchWiFi(const String& line,
+static CLIModeInputResult dispatchWifi(const String& line,
                                        char* out, size_t outSize) {
   String raw = line; raw.trim();
   String lc = raw; lc.toLowerCase();
