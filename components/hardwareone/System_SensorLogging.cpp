@@ -492,7 +492,7 @@ void sensorLogTick() {
   auto buildFromSnap = [](const SensorCacheSnapshot& s) -> const char* {
     static char* buf = nullptr;
     if (!buf) {
-      buf = (char*)ps_alloc(512, AllocPref::PreferPSRAM, "sensor.log.buf.snap");
+      buf = (char*)ps_alloc(512, AllocPref::PreferPsram, "sensor.log.buf.snap");
       if (!buf) return "";
     }
     char* pos = buf;
@@ -614,7 +614,7 @@ void sensorLogTick() {
   auto buildCSVFromSnap = [](const SensorCacheSnapshot& s) -> const char* {
     static char* buf = nullptr;
     if (!buf) {
-      buf = (char*)ps_alloc(1024, AllocPref::PreferPSRAM, "sensor.log.csv");
+      buf = (char*)ps_alloc(1024, AllocPref::PreferPsram, "sensor.log.csv");
       if (!buf) return "";
     }
 
@@ -1080,7 +1080,7 @@ void sensorLogTick() {
           // fail closed, matching the session-start key check.
           if (!gSealBuf)
             gSealBuf = (char*)ps_alloc(CAPCRYPT_MAX_SEALED,
-                                       AllocPref::PreferPSRAM, "sensor.log.seal");
+                                       AllocPref::PreferPsram, "sensor.log.seal");
           int sl = gSealBuf ? captureCryptoSealLine(line, len, gSealBuf,
                                                     CAPCRYPT_MAX_SEALED)
                             : -1;

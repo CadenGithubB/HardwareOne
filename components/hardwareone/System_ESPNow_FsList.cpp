@@ -660,7 +660,7 @@ static void processListDeferred(const uint8_t srcMac[6], const V4PayloadFsListRe
   // is ~140 B, no entry array needed for an error reply).
   const size_t kReplyBufSize = sizeof(V4PayloadFsListReplyHeader)
                              + FS_LIST_ENTRIES_PER_REPLY * sizeof(V4PayloadFsEntry);
-  uint8_t* replyBuf = (uint8_t*)ps_alloc(kReplyBufSize, AllocPref::PreferPSRAM,
+  uint8_t* replyBuf = (uint8_t*)ps_alloc(kReplyBufSize, AllocPref::PreferPsram,
                                          "fslist.reply");
   if (!replyBuf) {
     ERROR_MEMORYF("[FSLIST] ps_alloc(%zu) failed — sending NOT_READY for reqId=%u",

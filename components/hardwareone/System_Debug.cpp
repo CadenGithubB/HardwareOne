@@ -588,7 +588,7 @@ static bool growDebugPoolIfNeeded(bool force) {
   // DRAM if PSRAM is fragmented. In that case retain the 96-slot pool and let
   // the existing drop accounting surface any later saturation.
   DebugMessage* extra = (DebugMessage*)ps_alloc(
-      (size_t)addCount * sizeof(DebugMessage), AllocPref::RequirePSRAM, "debug.pool.growth");
+      (size_t)addCount * sizeof(DebugMessage), AllocPref::RequirePsram, "debug.pool.growth");
   if (!extra) {
     taskENTER_CRITICAL(&gDebugPoolMux);
     gDebugPoolGrowthState = DEBUG_POOL_GROW_FAILED;
@@ -735,7 +735,7 @@ void initDebugSystem() {
 
   // Allocate debug buffer in PSRAM
   if (!gDebugBuffer) {
-    gDebugBuffer = (char*)ps_alloc(GLOBAL_DEBUG_BUFFER_SIZE, AllocPref::PreferPSRAM, "debug.buf");
+    gDebugBuffer = (char*)ps_alloc(GLOBAL_DEBUG_BUFFER_SIZE, AllocPref::PreferPsram, "debug.buf");
     if (!gDebugBuffer) {
       if (gOutputFlags & MSG_ROUTE_SERIAL) {
         Serial.println("FATAL: Failed to allocate debug buffer");
@@ -755,7 +755,7 @@ void initDebugSystem() {
     }
 
     // Pre-allocate the pool itself (prefer PSRAM if available)
-    AllocPref allocPref = hasPsram ? AllocPref::PreferPSRAM : AllocPref::DefaultHeap;
+    AllocPref allocPref = hasPsram ? AllocPref::PreferPsram : AllocPref::DefaultHeap;
     gDebugPoolPrimary = (DebugMessage*)ps_alloc(
         (size_t)initialPoolSize * sizeof(DebugMessage), allocPref, "debug.pool");
     if (!gDebugPoolPrimary) {
@@ -834,7 +834,7 @@ void initDebugSystem() {
 
 bool ensureDebugBuffer() {
   if (!gDebugBuffer) {
-    gDebugBuffer = (char*)ps_alloc(GLOBAL_DEBUG_BUFFER_SIZE, AllocPref::PreferPSRAM, "debug.buf");
+    gDebugBuffer = (char*)ps_alloc(GLOBAL_DEBUG_BUFFER_SIZE, AllocPref::PreferPsram, "debug.buf");
     if (!gDebugBuffer) {
       if (gOutputFlags & MSG_ROUTE_SERIAL) {
         Serial.println("Error: Failed to allocate debug buffer");
@@ -2614,7 +2614,7 @@ void logTimeSyncedMarkerIfReady(const char* source) {
 
   static char* bootTsPrefix = nullptr;
   if (!bootTsPrefix) {
-    bootTsPrefix = (char*)ps_alloc(48, AllocPref::PreferPSRAM, "boot.ts");
+    bootTsPrefix = (char*)ps_alloc(48, AllocPref::PreferPsram, "boot.ts");
     if (!bootTsPrefix) return;
   }
   

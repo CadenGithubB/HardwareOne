@@ -120,7 +120,7 @@ esp_err_t handleSensorData(httpd_req_t* req) {
         }
         if (gJsonResponseMutex && xSemaphoreTake(gJsonResponseMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
           if (!gJsonResponseBuffer) {
-            gJsonResponseBuffer = (char*)ps_alloc(JSON_RESPONSE_SIZE, AllocPref::PreferPSRAM, "json.resp.buf");
+            gJsonResponseBuffer = (char*)ps_alloc(JSON_RESPONSE_SIZE, AllocPref::PreferPsram, "json.resp.buf");
           }
           if (gJsonResponseBuffer) {
             char* buf = gJsonResponseBuffer;
@@ -725,7 +725,7 @@ esp_err_t handleMicRecordingFile(httpd_req_t* req) {
     // heap to satisfy a recording-sized fallback; PSRAM pressure falls through
     // to the bounded chunk pump below.
     if (fileSize > 0) {
-      buf = (char*)ps_alloc(fileSize, AllocPref::RequirePSRAM,
+      buf = (char*)ps_alloc(fileSize, AllocPref::RequirePsram,
                             "http.recording.wav.whole");
       if (buf) {
         bytesRead = f.read((uint8_t*)buf, fileSize);

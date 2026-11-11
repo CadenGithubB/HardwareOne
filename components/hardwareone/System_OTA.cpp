@@ -608,7 +608,7 @@ bool hashAndDescribeImage(const char* path, CandidateInfo& candidate,
   // staging attempt that ever survived long enough to reach this code.
   constexpr size_t kHashChunk = 4096;
   uint8_t* buffer = static_cast<uint8_t*>(
-      ps_alloc(kHashChunk, AllocPref::PreferPSRAM, "ota.hash.buf"));
+      ps_alloc(kHashChunk, AllocPref::PreferPsram, "ota.hash.buf"));
   if (!buffer) {
     mbedtls_sha256_free(&sha);
     file.close();

@@ -369,7 +369,7 @@ bool writeAutomationLogEntry(const AutomationLogSession& session,
   // truncating it into a different destination.
   const size_t pathSize = session.filename.length() + 5;
   std::unique_ptr<char, decltype(&free)> dest(
-      static_cast<char*>(ps_alloc(pathSize, AllocPref::PreferPSRAM, "automation.log.path")), &free);
+      static_cast<char*>(ps_alloc(pathSize, AllocPref::PreferPsram, "automation.log.path")), &free);
   if (!dest) return false;
   if (VFS::resolveLogPath(session.filename.c_str(), line.length() + 512, dest.get(), pathSize) ==
       VFS::LogTier::Refused) {
@@ -595,7 +595,7 @@ bool sanitizeAutomationsJson(String& jsonRef) {
   // without external RAM.
   const int kMax = 512;
   unsigned long* seen = static_cast<unsigned long*>(
-      ps_alloc(kMax * sizeof(unsigned long), AllocPref::PreferPSRAM,
+      ps_alloc(kMax * sizeof(unsigned long), AllocPref::PreferPsram,
                "auto.sanitize.seen"));
   if (!seen) {
     ERROR_SYSTEMF("[sanitize] Failed to allocate duplicate-ID scratch (%u bytes)",
@@ -843,7 +843,7 @@ static bool ensureAutomationsCache() {
   if (gAutomationsCache) return true;
   gAutomationsCache = (AutomationsCacheEntry*)ps_calloc(
       AUTOMATIONS_CACHE_MAX, sizeof(AutomationsCacheEntry),
-      AllocPref::PreferPSRAM, "auto.cache");  // main task only, under a FreeRTOS mutex: PSRAM is fine
+      AllocPref::PreferPsram, "auto.cache");  // main task only, under a FreeRTOS mutex: PSRAM is fine
   if (!gAutomationsCache) {
     ERROR_SYSTEMF("[automations] Failed to allocate scheduler cache (%u bytes)",
                   (unsigned)(AUTOMATIONS_CACHE_MAX * sizeof(AutomationsCacheEntry)));
@@ -4418,7 +4418,7 @@ static void schedulerTickMinute() {
   if (!sEventBuf) {
     sEventBuf = static_cast<SystemEvent*>(
         ps_calloc(SYSEVT_RING_SIZE, sizeof(SystemEvent),
-                  AllocPref::PreferPSRAM, "auto.eventDrain"));
+                  AllocPref::PreferPsram, "auto.eventDrain"));
     if (!sEventBuf) {
       static uint32_t sAllocWarnMs = 0;
       if (everyMs(&sAllocWarnMs, 10000)) {

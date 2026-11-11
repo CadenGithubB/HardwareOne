@@ -25,7 +25,7 @@ bool gCLIValidateOnly = false;
 static char gDebugBuffer[1024];
 static bool ensureDebugBuffer() { return true; }
 static char* getDebugBuffer() { return gDebugBuffer; }
-enum class AllocPref { RequirePSRAM, PreferPSRAM };
+enum class AllocPref { RequirePsram, PreferPsram };
 static void* ps_alloc(size_t size, AllocPref, const char*) { return std::calloc(1, size); }
 struct AuthContext {};
 static const AuthContext& currentAuthContext() { static const AuthContext ctx; return ctx; }

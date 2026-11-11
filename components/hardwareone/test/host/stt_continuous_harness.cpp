@@ -217,7 +217,7 @@ size_t audioReadPcm(int16_t* pcm, size_t requested, uint32_t timeout) {
   deliveredSamples = first + n;
   return n;
 }
-enum class AllocPref { RequirePSRAM };
+enum class AllocPref { RequirePsram };
 static std::mutex allocationMutex;
 static std::map<void*, size_t> allocations;
 static unsigned allocationAttempt = 0, failAllocation = 0;
@@ -245,7 +245,7 @@ static bool speakerRingFail=false;
 static std::atomic<unsigned> speakerRingAllocations{0};
 void* heap_caps_calloc(size_t n,size_t bytes,int){
  if(speakerRingFail)return nullptr;
- auto* p=ps_alloc(n*bytes,AllocPref::RequirePSRAM,"stt.labels");if(p){memset(p,0,n*bytes);++speakerRingAllocations;}return p;
+ auto* p=ps_alloc(n*bytes,AllocPref::RequirePsram,"stt.labels");if(p){memset(p,0,n*bytes);++speakerRingAllocations;}return p;
 }
 void heap_caps_free(void* p){trackedFree(p);assert(speakerRingAllocations.fetch_sub(1)==1);}
 static std::atomic<bool> speakerEnabled{false},speakerDrainProduces{false};

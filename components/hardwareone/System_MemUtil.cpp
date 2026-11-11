@@ -11,15 +11,15 @@ constexpr uint32_t kPsram8BitCaps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
 constexpr const char* kJsonPoolTag = "json.pool";
 constexpr uint32_t kFallbackLogsBeforeRateLimit = 8;
 
-bool policyRequestsPSRAM(AllocPolicy policy) {
-  return policy == AllocPolicy::PreferPSRAM ||
-         policy == AllocPolicy::RequirePSRAM;
+bool policyRequestsPsram(AllocPolicy policy) {
+  return policy == AllocPolicy::PreferPsram ||
+         policy == AllocPolicy::RequirePsram;
 }
 
-bool policyMayUsePSRAM(AllocPolicy policy) {
-  return policy == AllocPolicy::PreferPSRAM ||
+bool policyMayUsePsram(AllocPolicy policy) {
+  return policy == AllocPolicy::PreferPsram ||
          policy == AllocPolicy::PreferInternal ||
-         policy == AllocPolicy::RequirePSRAM;
+         policy == AllocPolicy::RequirePsram;
 }
 
 bool shouldLogFallback(uint32_t occurrence) {
@@ -43,13 +43,13 @@ void reportPsramFallback(size_t size, const char* tag) {
 void reportAllocation(const char* op, void* ptr, size_t size,
                       AllocPolicy policy, const char* tag,
                       bool attemptedPsramFirst) {
-  const bool usedPSRAM = ptr != nullptr && esp_ptr_external_ram(ptr);
+  const bool usedPsram = ptr != nullptr && esp_ptr_external_ram(ptr);
   const bool fellBack =
-      attemptedPsramFirst && ptr != nullptr && !usedPSRAM;
+      attemptedPsramFirst && ptr != nullptr && !usedPsram;
   if (fellBack) {
     reportPsramFallback(size, tag);
   }
-  memAllocDebug(op, ptr, size, policyRequestsPSRAM(policy), usedPSRAM,
+  memAllocDebug(op, ptr, size, policyRequestsPsram(policy), usedPsram,
                 fellBack, tag);
 }
 
@@ -59,7 +59,7 @@ void* allocateRaw(size_t size, AllocPolicy policy, bool bypass,
     case AllocPolicy::DefaultHeap:
       return bypass ? heap_caps_malloc(size, kInternal8BitCaps) : ::malloc(size);
 
-    case AllocPolicy::PreferPSRAM:
+    case AllocPolicy::PreferPsram:
       if (!psramRegistered) {
         return heap_caps_malloc(size, kInternal8BitCaps);
       }
@@ -73,7 +73,7 @@ void* allocateRaw(size_t size, AllocPolicy policy, bool bypass,
       return heap_caps_malloc_prefer(size, 2,
                                      kInternal8BitCaps, kPsram8BitCaps);
 
-    case AllocPolicy::RequirePSRAM:
+    case AllocPolicy::RequirePsram:
       return psramRegistered ? heap_caps_malloc(size, kPsram8BitCaps) : nullptr;
 
     case AllocPolicy::RequireInternal:
@@ -89,7 +89,7 @@ void* callocateRaw(size_t n, size_t size, AllocPolicy policy, bool bypass,
       return bypass ? heap_caps_calloc(n, size, kInternal8BitCaps)
                     : ::calloc(n, size);
 
-    case AllocPolicy::PreferPSRAM:
+    case AllocPolicy::PreferPsram:
       if (!psramRegistered) {
         return heap_caps_calloc(n, size, kInternal8BitCaps);
       }
@@ -103,7 +103,7 @@ void* callocateRaw(size_t n, size_t size, AllocPolicy policy, bool bypass,
       return heap_caps_calloc_prefer(n, size, 2,
                                      kInternal8BitCaps, kPsram8BitCaps);
 
-    case AllocPolicy::RequirePSRAM:
+    case AllocPolicy::RequirePsram:
       return psramRegistered
                  ? heap_caps_calloc(n, size, kPsram8BitCaps)
                  : nullptr;
@@ -121,7 +121,7 @@ void* reallocateRaw(void* ptr, size_t size, AllocPolicy policy, bool bypass,
       return bypass ? heap_caps_realloc(ptr, size, kInternal8BitCaps)
                     : ::realloc(ptr, size);
 
-    case AllocPolicy::PreferPSRAM:
+    case AllocPolicy::PreferPsram:
       if (!psramRegistered) {
         return heap_caps_realloc(ptr, size, kInternal8BitCaps);
       }
@@ -135,7 +135,7 @@ void* reallocateRaw(void* ptr, size_t size, AllocPolicy policy, bool bypass,
       return heap_caps_realloc_prefer(ptr, size, 2,
                                       kInternal8BitCaps, kPsram8BitCaps);
 
-    case AllocPolicy::RequirePSRAM:
+    case AllocPolicy::RequirePsram:
       return psramRegistered
                  ? heap_caps_realloc(ptr, size, kPsram8BitCaps)
                  : nullptr;
@@ -158,7 +158,7 @@ uint32_t psAllocFallbackCount() {
 }
 
 bool psramAvailableRuntime() {
-  if (!hasPSRAMAvail()) return false;
+  if (!hasPsramAvail()) return false;
   return heap_caps_get_total_size(kPsram8BitCaps) > 0;
 }
 
@@ -166,11 +166,11 @@ void* ps_alloc(size_t size, AllocPolicy policy, const char* tag) {
   if (size == 0) return nullptr;
 
   const bool bypass = psramBypassEnabled();
-  const bool psramRegistered = !bypass && policyMayUsePSRAM(policy) &&
+  const bool psramRegistered = !bypass && policyMayUsePsram(policy) &&
                                psramAvailableRuntime();
   void* ptr = allocateRaw(size, policy, bypass, psramRegistered);
   reportAllocation("malloc", ptr, size, policy, tag,
-                   policy == AllocPolicy::PreferPSRAM && psramRegistered);
+                   policy == AllocPolicy::PreferPsram && psramRegistered);
   return ptr;
 }
 
@@ -181,11 +181,11 @@ void* ps_calloc(size_t n, size_t size, AllocPolicy policy, const char* tag) {
   if (__builtin_mul_overflow(n, size, &total)) return nullptr;
 
   const bool bypass = psramBypassEnabled();
-  const bool psramRegistered = !bypass && policyMayUsePSRAM(policy) &&
+  const bool psramRegistered = !bypass && policyMayUsePsram(policy) &&
                                psramAvailableRuntime();
   void* ptr = callocateRaw(n, size, policy, bypass, psramRegistered);
   reportAllocation("calloc", ptr, total, policy, tag,
-                   policy == AllocPolicy::PreferPSRAM && psramRegistered);
+                   policy == AllocPolicy::PreferPsram && psramRegistered);
   return ptr;
 }
 
@@ -198,13 +198,13 @@ void* ps_realloc(void* ptr, size_t size, AllocPolicy policy, const char* tag) {
   }
 
   const bool bypass = psramBypassEnabled();
-  const bool psramRegistered = !bypass && policyMayUsePSRAM(policy) &&
+  const bool psramRegistered = !bypass && policyMayUsePsram(policy) &&
                                psramAvailableRuntime();
   void* result = reallocateRaw(ptr, size, policy, bypass, psramRegistered);
   // For size > 0, both libc realloc and heap_caps_realloc preserve ptr when
   // they return nullptr. The wrapper never frees ptr on this failure path.
   reportAllocation("realloc", result, size, policy, tag,
-                   policy == AllocPolicy::PreferPSRAM && psramRegistered);
+                   policy == AllocPolicy::PreferPsram && psramRegistered);
   return result;
 }
 
@@ -215,7 +215,7 @@ void ps_free(void* ptr) {
 }
 
 void* PsramJsonAllocator::allocate(size_t size) {
-  return ps_alloc(size, AllocPolicy::PreferPSRAM, kJsonPoolTag);
+  return ps_alloc(size, AllocPolicy::PreferPsram, kJsonPoolTag);
 }
 
 void PsramJsonAllocator::deallocate(void* ptr) {
@@ -223,7 +223,7 @@ void PsramJsonAllocator::deallocate(void* ptr) {
 }
 
 void* PsramJsonAllocator::reallocate(void* ptr, size_t newSize) {
-  return ps_realloc(ptr, newSize, AllocPolicy::PreferPSRAM, kJsonPoolTag);
+  return ps_realloc(ptr, newSize, AllocPolicy::PreferPsram, kJsonPoolTag);
 }
 
 PsramJsonAllocator* PsramJsonAllocator::instance() {

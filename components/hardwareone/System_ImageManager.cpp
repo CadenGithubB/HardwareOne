@@ -418,7 +418,7 @@ uint8_t* ImageManager::getImage(const String& path, size_t* outLen) {
     return nullptr;
   }
 
-  uint8_t* buf = (uint8_t*)ps_alloc(len, AllocPref::RequirePSRAM,
+  uint8_t* buf = (uint8_t*)ps_alloc(len, AllocPref::RequirePsram,
                                     "image.manager.jpeg");
   if (!buf) {
     FsLockGuard guard("ImageManager.getImage.close_psram_oom");

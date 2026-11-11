@@ -577,7 +577,7 @@ static void commandExecTask(void* pv) {
       static constexpr size_t CAPTURE_BUF_SIZE = 4096;
       char* captureBuf = nullptr;
       if (r->ctx.captureOutput) {
-        captureBuf = (char*)ps_alloc(CAPTURE_BUF_SIZE, AllocPref::PreferPSRAM,
+        captureBuf = (char*)ps_alloc(CAPTURE_BUF_SIZE, AllocPref::PreferPsram,
                                      "cmd.capture");
         if (captureBuf) {
           captureBuf[0] = '\0';
@@ -878,10 +878,10 @@ extern const size_t kFileOutBufSize = 2048;
 
 bool ensureFileViewBuffers() {
   if (!gFileReadBuf) {
-    gFileReadBuf = (char*)ps_alloc(kFileReadBufSize, AllocPref::PreferPSRAM, "http.file.read");
+    gFileReadBuf = (char*)ps_alloc(kFileReadBufSize, AllocPref::PreferPsram, "http.file.read");
   }
   if (!gFileOutBuf) {
-    gFileOutBuf = (char*)ps_alloc(kFileOutBufSize, AllocPref::PreferPSRAM, "http.file.out");
+    gFileOutBuf = (char*)ps_alloc(kFileOutBufSize, AllocPref::PreferPsram, "http.file.out");
   }
   return gFileReadBuf && gFileOutBuf;
 }
@@ -1927,7 +1927,7 @@ void hardwareone_setup() {
 
 #if ENABLE_HTTP_SERVER
     if (!gSessions) {
-      gSessions = (SessionEntry*)ps_alloc(MAX_SESSIONS * sizeof(SessionEntry), AllocPref::PreferPSRAM, "sessions");
+      gSessions = (SessionEntry*)ps_alloc(MAX_SESSIONS * sizeof(SessionEntry), AllocPref::PreferPsram, "sessions");
       if (!gSessions) {
         ERROR_SYSTEMF("FATAL: Failed to allocate sessions array");
         while (1) delay(1000);
@@ -1940,7 +1940,7 @@ void hardwareone_setup() {
 
   // Initialize logout reasons array
     if (!gLogoutReasons) {
-      gLogoutReasons = (LogoutReason*)ps_alloc(MAX_LOGOUT_REASONS * sizeof(LogoutReason), AllocPref::PreferPSRAM, "logout.reasons");
+      gLogoutReasons = (LogoutReason*)ps_alloc(MAX_LOGOUT_REASONS * sizeof(LogoutReason), AllocPref::PreferPsram, "logout.reasons");
       if (!gLogoutReasons) {
         ERROR_SYSTEMF("FATAL: Failed to allocate logout reasons array");
         while (1) delay(1000);

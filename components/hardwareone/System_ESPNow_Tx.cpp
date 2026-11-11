@@ -396,7 +396,7 @@ bool init() {
       1, sizeof(LifecycleControl), AllocPref::RequireInternal, "espnow.tx.lifecycle");
   SyncCompletion* completionPool = (SyncCompletion*)ps_alloc(
       sizeof(SyncCompletion) * kSyncCompletionSlots,
-      AllocPref::PreferPSRAM, "espnow.tx.completions");
+      AllocPref::PreferPsram, "espnow.tx.completions");
   if (!control || !completionPool) {
     DEBUGF(DEBUG_ESPNOW_CORE, "[ESPNOW_TX] FAIL: lifecycle control allocation");
     if (control) heap_caps_free(control);
@@ -672,7 +672,7 @@ bool sendAead(const uint8_t mac[6], uint8_t type, uint16_t flags,
               uint8_t ttl) {
   uint8_t* psBuf = nullptr;
   if (payloadLen > 0) {
-    psBuf = (uint8_t*)ps_alloc(payloadLen, AllocPref::PreferPSRAM, "espnow.tx.aead");
+    psBuf = (uint8_t*)ps_alloc(payloadLen, AllocPref::PreferPsram, "espnow.tx.aead");
     if (!psBuf) {
       DEBUGF(DEBUG_ESPNOW_CORE, "[ESPNOW_TX] sendAead ps_alloc failed type=%u len=%u",
              (unsigned)type, (unsigned)payloadLen);
@@ -702,7 +702,7 @@ bool sendAeadSync(const uint8_t mac[6], uint8_t type, uint16_t flags,
                   uint8_t ttl, uint32_t timeoutMs) {
   uint8_t* psBuf = nullptr;
   if (payloadLen > 0) {
-    psBuf = (uint8_t*)ps_alloc(payloadLen, AllocPref::PreferPSRAM, "espnow.tx.aead.sync");
+    psBuf = (uint8_t*)ps_alloc(payloadLen, AllocPref::PreferPsram, "espnow.tx.aead.sync");
     if (!psBuf) {
       DEBUGF(DEBUG_ESPNOW_CORE, "[ESPNOW_TX] sendAeadSync ps_alloc failed type=%u len=%u",
              (unsigned)type, (unsigned)payloadLen);

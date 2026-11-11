@@ -63,7 +63,7 @@ static void llmPsramFree(void** p) {
 }
 // System_MemUtil's PSRAM-first zeroed allocation (the reachability scratch and
 // the presplit table); the device frees both with free(), as here.
-enum class AllocPref { PreferPSRAM, RequirePSRAM, RequireInternal };
+enum class AllocPref { PreferPsram, RequirePsram, RequireInternal };
 static void* ps_calloc(size_t n, size_t size, AllocPref, const char*) { return calloc(n ? n : 1, size ? size : 1); }
 
 // INSERT_PRODUCTION

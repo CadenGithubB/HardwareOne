@@ -45,7 +45,7 @@ def main() -> None:
         require(not re.search(rf"\bdelete\s+{pointer}\s*;", source),
                 f"{name} mixes ordinary delete with PSRAM placement new")
         require(len(re.findall(rf"ps_alloc\s*\(\s*sizeof\s*\(\s*{driver}\s*\)\s*,\s*"
-                               rf"AllocPref::PreferPSRAM\s*,\s*\"{re.escape(tag)}\"\s*\)", source)) == allocations,
+                               rf"AllocPref::PreferPsram\s*,\s*\"{re.escape(tag)}\"\s*\)", source)) == allocations,
                 f"{name} parent allocations must use sizeof/type, PSRAM preference, and the tag")
         require(len(re.findall(rf"ps_delete\s*\(\s*{pointer}\s*\)\s*;\s*"
                                rf"{pointer}\s*=\s*nullptr\s*;", source)) == releases,

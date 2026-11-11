@@ -73,7 +73,7 @@ static constexpr int ESP_OK = 0, ESP_FAIL = -1;
 static constexpr int HTTPD_500_INTERNAL_SERVER_ERROR = 500;
 static constexpr int HTTPD_RESP_USE_STRLEN = -1;
 static constexpr int HTTPD_SOCK_ERR_TIMEOUT = -3;
-enum class AllocPref { PreferPSRAM };
+enum class AllocPref { PreferPsram };
 // INSERT_COMMAND_TYPES
 struct httpd_req_t {
   std::string input, output, status = "200 OK", contentType;

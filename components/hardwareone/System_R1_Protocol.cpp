@@ -1776,7 +1776,7 @@ bool r1ProtocolSelfTest() {
   // PSRAM is fine; fall back to internal on a PSRAM-less config.
   R1ActivityDailyResult* activityScratchP =
       (R1ActivityDailyResult*)ps_alloc(sizeof(R1ActivityDailyResult),
-                                       AllocPref::PreferPSRAM,
+                                       AllocPref::PreferPsram,
                                        "r1.selftest.activity");
   if (!activityScratchP) {
     DEBUG_RING_SETUPF("[R1-selftest] FAIL activity scratch alloc (%u B)",

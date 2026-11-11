@@ -58,7 +58,7 @@ struct camera_fb_t {
   uint16_t width, height;
   int format;
 };
-enum class AllocPref { PreferPSRAM };
+enum class AllocPref { PreferPsram };
 namespace Fake {
 bool psram = true, busyBus = false, nullSensor = false, failInit = false;
 bool failFrameSetter = false, failQualitySetter = false, failAllocation = false;

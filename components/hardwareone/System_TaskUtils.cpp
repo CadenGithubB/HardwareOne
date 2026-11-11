@@ -605,8 +605,8 @@ void reportAllTaskStacks() {
       if (taskArray)   { free(taskArray);   taskArray   = nullptr; }
       if (taskMeasure) { free(taskMeasure); taskMeasure = nullptr; }
       taskCap = 0;
-      taskArray   = (TaskStatus_t*)ps_alloc(needed * sizeof(TaskStatus_t), AllocPref::PreferPSRAM, "task.pressure");
-      taskMeasure = (TaskHeapMeasure*)ps_alloc(needed * sizeof(TaskHeapMeasure), AllocPref::PreferPSRAM, "task.measure");
+      taskArray   = (TaskStatus_t*)ps_alloc(needed * sizeof(TaskStatus_t), AllocPref::PreferPsram, "task.pressure");
+      taskMeasure = (TaskHeapMeasure*)ps_alloc(needed * sizeof(TaskHeapMeasure), AllocPref::PreferPsram, "task.measure");
       if (taskArray && taskMeasure) {
         taskCap = needed;
       } else {                       // partial failure must not leave a half-armed pair
@@ -990,7 +990,7 @@ void reportAllTaskStacks() {
     UBaseType_t need = numTasks + 4;
     if (need > sRunPrevCap) {
       if (sRunPrev) { free(sRunPrev); sRunPrev = nullptr; sRunPrevCap = 0; }
-      sRunPrev = (RunSample*)ps_alloc(need * sizeof(RunSample), AllocPref::PreferPSRAM, "task.runprev");
+      sRunPrev = (RunSample*)ps_alloc(need * sizeof(RunSample), AllocPref::PreferPsram, "task.runprev");
       if (sRunPrev) sRunPrevCap = need;
     }
     if (sRunPrev) {
@@ -1030,11 +1030,11 @@ struct TaskCpuSampler {
   bool grow(UBaseType_t need) {
     if (buf && need <= cap) return true;
     const UBaseType_t next = need + 4;  // >= 4 even if the count read 0 mid-shutdown
-    TaskStatus_t* b = (TaskStatus_t*)ps_alloc(next * sizeof(TaskStatus_t), AllocPref::PreferPSRAM, "taskcpu.snap");
-    TaskHandle_t* ph = (TaskHandle_t*)ps_alloc(next * sizeof(TaskHandle_t), AllocPref::PreferPSRAM, "taskcpu.prevh");
-    uint32_t* pr = (uint32_t*)ps_alloc(next * sizeof(uint32_t), AllocPref::PreferPSRAM, "taskcpu.prevr");
-    TaskCpuShare* st = (TaskCpuShare*)ps_alloc(next * sizeof(TaskCpuShare), AllocPref::PreferPSRAM, "taskcpu.stage");
-    TaskCpuShare* pb = (TaskCpuShare*)ps_alloc(next * sizeof(TaskCpuShare), AllocPref::PreferPSRAM, "taskcpu.pub");
+    TaskStatus_t* b = (TaskStatus_t*)ps_alloc(next * sizeof(TaskStatus_t), AllocPref::PreferPsram, "taskcpu.snap");
+    TaskHandle_t* ph = (TaskHandle_t*)ps_alloc(next * sizeof(TaskHandle_t), AllocPref::PreferPsram, "taskcpu.prevh");
+    uint32_t* pr = (uint32_t*)ps_alloc(next * sizeof(uint32_t), AllocPref::PreferPsram, "taskcpu.prevr");
+    TaskCpuShare* st = (TaskCpuShare*)ps_alloc(next * sizeof(TaskCpuShare), AllocPref::PreferPsram, "taskcpu.stage");
+    TaskCpuShare* pb = (TaskCpuShare*)ps_alloc(next * sizeof(TaskCpuShare), AllocPref::PreferPsram, "taskcpu.pub");
     if (!b || !ph || !pr || !st || !pb) {  // keep the old buffers; retry next tick
       if (b) free(b);
       if (ph) free(ph);

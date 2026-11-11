@@ -132,7 +132,7 @@ static HostHalStatus bluetoothHalStatus() { return {}; }
 static void bleScInit() { ++boundary.scInits; boundary.events.emplace_back("sc-init"); }
 static void bleScWarmPsk() { ++boundary.scWarms; boundary.events.emplace_back("sc-warm"); }
 static void bleScReset(uint16_t) {}
-enum class AllocPref { PreferPSRAM };
+enum class AllocPref { PreferPsram };
 static void* ps_alloc(size_t size, AllocPref, const char*) { return std::calloc(1, size); }
 
 static char gDebugBuffer[1024];

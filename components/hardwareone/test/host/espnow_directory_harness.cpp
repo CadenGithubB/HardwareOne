@@ -24,7 +24,7 @@ static constexpr uint8_t ESPNOW_V4_TYPE_FS_LIST_REPLY = 123;
 #define WARN_ESPNOWF(...) debugStub(__VA_ARGS__)
 static bool allocationFails = false, pathAllowed = true, existenceDenied = false;
 static unsigned identityDepth = 0, allocations = 0, releases = 0;
-enum class AllocPref { PreferPSRAM };
+enum class AllocPref { PreferPsram };
 static void* ps_alloc(size_t size, AllocPref, const char*) {
   if (allocationFails) return nullptr;
   void* result = std::malloc(size);

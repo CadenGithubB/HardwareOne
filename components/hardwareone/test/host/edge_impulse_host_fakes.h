@@ -77,7 +77,7 @@ inline std::atomic<uint32_t> gFakeMillis{1000};
 inline uint32_t millis() { return gFakeMillis.load(); }
 
 enum class AllocPref : uint8_t {
-  PreferPSRAM = 0, PreferInternal = 1, RequirePSRAM = 2, RequireInternal = 3, DefaultHeap = 4
+  PreferPsram = 0, PreferInternal = 1, RequirePsram = 2, RequireInternal = 3, DefaultHeap = 4
 };
 inline std::atomic<int> gFakePsAllocs{0};
 inline void* ps_alloc(size_t size, AllocPref, const char*) {

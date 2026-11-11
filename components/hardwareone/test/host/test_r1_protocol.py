@@ -46,7 +46,7 @@ if __name__ == '__main__':
         (root/'System_BuildConfig.h').write_text('#define ENABLE_BLUETOOTH 1\n#define ENABLE_G2_GLASSES 1\n')
         (root/'Arduino.h').write_text('#include <stdint.h>\n#include <stddef.h>\n')
         (root/'System_MemUtil.h').write_text('''#include <cstdlib>
-enum class AllocPref {RequireInternal, PreferPSRAM};
+enum class AllocPref {RequireInternal, PreferPsram};
 inline void* ps_alloc(size_t size, AllocPref, const char*) {return malloc(size);}
 ''')
         (root/'esp_heap_caps.h').write_text('#include <cstdlib>\n#define heap_caps_free free\n')

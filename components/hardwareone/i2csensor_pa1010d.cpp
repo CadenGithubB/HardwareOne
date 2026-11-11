@@ -124,7 +124,7 @@ bool gpsStartInternal() {
 
     DEBUG_GPS_LIFECYCLEF("[GPS_INIT] Allocating Adafruit_GPS object on bus %u...", gpsBus);
     // PSRAM + placement-new (see gpsDestroyObject for why, and for teardown).
-    void* gpsObjBuf = ps_alloc(sizeof(Adafruit_GPS), AllocPref::PreferPSRAM, "gps.obj");
+    void* gpsObjBuf = ps_alloc(sizeof(Adafruit_GPS), AllocPref::PreferPsram, "gps.obj");
     if (!gpsObjBuf) {
       ERROR_GPSF("Failed to allocate GPS module");
       return false;

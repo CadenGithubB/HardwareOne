@@ -101,7 +101,7 @@ static std::set<void*> buffers;
 static bool filesystemReady = true;
 static bool outerLock = false;
 static void io() { if (!ownsFs || (control.requirePause && !pauseDepth)) metrics.badIoScope = true; }
-namespace AllocPref { enum Kind { PreferPSRAM }; }
+namespace AllocPref { enum Kind { PreferPsram }; }
 static void* ps_alloc(size_t size, AllocPref::Kind) {
   if (++metrics.allocations == control.failAllocation) return nullptr;
   void* result = std::malloc(size); check(result != nullptr, "host allocation failed"); buffers.insert(result); return result;

@@ -24,7 +24,7 @@ HARNESS = r'''
 #include "System_LLMUtf8.h"
 void webBatchTestStringAppend() {}
 #define PSRAM_JSON_DOC(name) JsonDocument name
-enum class AllocPref { PreferPSRAM };
+enum class AllocPref { PreferPsram };
 void* ps_alloc(size_t n, AllocPref, const char*) { return std::malloc(n); }
 enum class ChatTurnRole { USER, ASSISTANT };
 struct ChatTurnInfo {

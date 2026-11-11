@@ -37,7 +37,7 @@ struct TaskStatus_t {
 };
 struct Snapshot { std::vector<TaskStatus_t> rows; uint32_t total; };
 struct Allocation { size_t bytes; std::string tag; };
-enum class AllocPref { PreferPSRAM };
+enum class AllocPref { PreferPsram };
 static std::map<void*, Allocation> live;
 static std::vector<std::string> output, events;
 static std::vector<Snapshot> snapshots;
@@ -60,7 +60,7 @@ static void checkAt(bool good, int line) {
 static bool argWantsJson(const String& value) { return value.indexOf("json") >= 0; }
 static char* getDebugBuffer() { return debugBuffer; }
 static void* ps_alloc(size_t bytes, AllocPref pref, const char* tag) {
-  CHECK(pref == AllocPref::PreferPSRAM && bytes > 0);
+  CHECK(pref == AllocPref::PreferPsram && bytes > 0);
   ++allocCalls; events.emplace_back("allocate");
   // The shared sampler grows five arrays per attempt, in this order; a failed
   // attempt is retried on the next tick, so the failure index is per attempt.

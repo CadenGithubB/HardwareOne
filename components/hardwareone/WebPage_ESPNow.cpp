@@ -97,7 +97,7 @@ static esp_err_t webEspNowSendJsonEscapedString(httpd_req_t* req, const char* s)
 //                   losslessly in the single-peer case — see the caveat below.
 //   No-PSRAM build: MESSAGES_PER_DEVICE = 16, so one peer holds up to 32
 //                   records and the cap of 15 sits BELOW even a single ring's
-//                   depth. Cap at 15 → ~4.7 KB. PreferPSRAM falls back to DRAM
+//                   depth. Cap at 15 → ~4.7 KB. PreferPsram falls back to DRAM
 //                   here; smaller cap keeps DRAM commitment modest (~1.5% of
 //                   326 KB internal heap).
 //
@@ -209,7 +209,7 @@ static esp_err_t handleEspNowMessages(httpd_req_t* req) {
   // tag; the new tag should show (1x) cumulatively, not climbing.
   if (!gWebMessagesBuf) {
     gWebMessagesBuf = (ReceivedTextMessage*)ps_alloc(sizeof(ReceivedTextMessage) * kWebMessagesBufCount,
-                                                     AllocPref::PreferPSRAM,
+                                                     AllocPref::PreferPsram,
                                                      "web.esnow.msgs.static");
     if (!gWebMessagesBuf) {
       // PSRAM alloc failed — send empty response, next request will retry.

@@ -342,7 +342,7 @@ static void testViewer() {
   check(showTextFileViaWidget(false), "raw viewer succeeds on short reads");
   check(std::string(gFilesTextBody) == wrapped(fileContents), "raw output unchanged without display copy");
   check(inputCalls == 1 && jsonCalls == 0 && reads > 1, "raw has one input allocation and no JSON work");
-  check(inputWasExternal == hasPSRAMAvail(), "input uses PSRAM only on capable build");
+  check(inputWasExternal == hasPsramAvail(), "input uses PSRAM only on capable build");
   check(gFilesPager.pageCount > 0 && !gFilesPager.truncated, "small file page contract");
   check(!strcmp(gFilesTextTitle, "test.json"), "raw title unchanged");
   reset();
@@ -440,5 +440,5 @@ int main() {
   testWrap();
   testViewer();
   printf("G2 Files PSRAM + capture reveal: %zu checks passed (%s)\n", checks,
-         hasPSRAMAvail() ? "PSRAM capable" : "no PSRAM build");
+         hasPsramAvail() ? "PSRAM capable" : "no PSRAM build");
 }

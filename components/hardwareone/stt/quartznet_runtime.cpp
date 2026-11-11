@@ -161,7 +161,7 @@ constexpr size_t kResidentKeepFree=2u<<20;         // PSRAM left free after the 
 // explicitly from PSRAM where it is allocated. The vendor model's own objects
 // and containers come from ESP-DL's metadata allocator, which transcribe()
 // points at PSRAM before the first model is built (installDlMetadataAllocator,
-// stt_dl_metadata.h: ps_alloc PreferPSRAM). The model object itself is one of
+// stt_dl_metadata.h: ps_alloc PreferPsram). The model object itself is one of
 // those blocks (dl::Model's class operator new/delete, so unique_ptr's delete
 // returns it), and this bookkeeping is ps_alloc'd too (class operator
 // new/delete below, PsramStlAllocator for the tensor list). No malloc

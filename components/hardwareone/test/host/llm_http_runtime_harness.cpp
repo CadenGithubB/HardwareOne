@@ -46,7 +46,7 @@ static int xTaskCreate(void (*fn)(void*), const char*, int, void* ctx, int, void
   assert(!pendingTask); pendingTask = fn; pendingArg = ctx; return 1;
 }
 static void vTaskDelete(void*) {}
-enum class AllocPref { PreferPSRAM };
+enum class AllocPref { PreferPsram };
 static size_t allocations = 0;
 static bool failConfigAllocation = false;
 static std::unordered_map<void*, size_t> sensitiveAllocations;

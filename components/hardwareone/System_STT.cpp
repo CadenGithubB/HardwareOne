@@ -357,7 +357,7 @@ static bool sttWarmLoadCancelled(void*) {
 static void sttWarmLoader(void*) {
   const size_t freeBefore = sttPsramFree();
   constexpr size_t kSamples = STT_SAMPLE_RATE / 2;
-  auto* silence = static_cast<int16_t*>(ps_alloc(kSamples * sizeof(int16_t), AllocPref::RequirePSRAM, "stt.warm"));
+  auto* silence = static_cast<int16_t*>(ps_alloc(kSamples * sizeof(int16_t), AllocPref::RequirePsram, "stt.warm"));
   bool ok = false;
   STTLocalStats stats;
   if (silence) {
@@ -498,7 +498,7 @@ static void sttWorker(void*) {
       break;
     }
     pcm = static_cast<int16_t*>(ps_alloc(capacity * sizeof(int16_t),
-                                        AllocPref::RequirePSRAM, "stt.pcm"));
+                                        AllocPref::RequirePsram, "stt.pcm"));
     if (!pcm) {
       sttError(error, sizeof(error), "Insufficient PSRAM for bounded capture");
       break;
@@ -1703,9 +1703,9 @@ static void sttFeatureStart(StreamRun& run, const STTLocalSession& session) {
   hw1::stt::FrontendWorkspace* work = nullptr;
   float* rows[kFeCaches] = {};
   if (!why) {
-    ring = static_cast<int16_t*>(ps_alloc(kFeRingSamples * sizeof(int16_t), AllocPref::RequirePSRAM, "stt.fe_ring"));
-    work = static_cast<hw1::stt::FrontendWorkspace*>(ps_alloc(sizeof(hw1::stt::FrontendWorkspace), AllocPref::RequirePSRAM, "stt.fe_work"));
-    for (auto& r : rows) r = static_cast<float*>(ps_alloc(kRowsBytes, AllocPref::RequirePSRAM, "stt.fe_rows"));
+    ring = static_cast<int16_t*>(ps_alloc(kFeRingSamples * sizeof(int16_t), AllocPref::RequirePsram, "stt.fe_ring"));
+    work = static_cast<hw1::stt::FrontendWorkspace*>(ps_alloc(sizeof(hw1::stt::FrontendWorkspace), AllocPref::RequirePsram, "stt.fe_work"));
+    for (auto& r : rows) r = static_cast<float*>(ps_alloc(kRowsBytes, AllocPref::RequirePsram, "stt.fe_rows"));
     if (!ring || !work || !rows[0] || !rows[1]) why = "alloc";
   }
 #ifdef ESP_PLATFORM
@@ -1960,14 +1960,14 @@ static void sttContinuousWorker(void*) {
   bool captureStarted = false;
   do {
     if (sttCancelled(&run.token)) break;
-    run.working = static_cast<int16_t*>(ps_alloc(kStreamSamples * sizeof(int16_t), AllocPref::RequirePSRAM, "stt.segment"));
+    run.working = static_cast<int16_t*>(ps_alloc(kStreamSamples * sizeof(int16_t), AllocPref::RequirePsram, "stt.segment"));
     if (!run.working) { sttStreamFail(run, "Insufficient PSRAM for continuous audio"); break; }
     for (auto& slot : run.slots) {
-      slot.pcm = static_cast<int16_t*>(ps_alloc(kStreamSamples * sizeof(int16_t), AllocPref::RequirePSRAM, "stt.queue"));
+      slot.pcm = static_cast<int16_t*>(ps_alloc(kStreamSamples * sizeof(int16_t), AllocPref::RequirePsram, "stt.queue"));
       if (!slot.pcm) { sttStreamFail(run, "Insufficient PSRAM for continuous queue"); break; }
     }
     // Draft buffer is optional: without PSRAM for it, live mode just stays off.
-    run.draftPcm = static_cast<int16_t*>(ps_alloc(kStreamSamples * sizeof(int16_t), AllocPref::RequirePSRAM, "stt.draft"));
+    run.draftPcm = static_cast<int16_t*>(ps_alloc(kStreamSamples * sizeof(int16_t), AllocPref::RequirePsram, "stt.draft"));
     if (sttStreamCancelled(&run)) break;
     // Detector profile for the mic this session will use, resolved as the
     // capture worker resolves it: the native glasses stream or an explicit

@@ -120,7 +120,7 @@ static void xSemaphoreGive(SemaphoreHandle_t sem) {
 #define configASSERT(condition) CHECK(condition)
 // INSERT_FS_GUARD
 
-enum class AllocPref { PreferPSRAM };
+enum class AllocPref { PreferPsram };
 static thread_local bool failNextAllocation = false;
 static void* ps_alloc(size_t bytes, AllocPref, const char*) {
   if (failNextAllocation) { failNextAllocation = false; return nullptr; }

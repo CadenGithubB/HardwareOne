@@ -105,7 +105,7 @@ size_t audioReadPcm(int16_t* pcm, size_t requested, uint32_t timeout) {
   if (readHook) readHook();
   return n;
 }
-enum class AllocPref { RequirePSRAM };
+enum class AllocPref { RequirePsram };
 static bool allocationFails = false;
 static std::set<void*> allocations;
 void* ps_alloc(size_t n, AllocPref, const char*) {

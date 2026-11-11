@@ -79,7 +79,7 @@ inline BaseType_t xSemaphoreGive(SemaphoreHandle_t handle) {
 }
 
 // ---- Allocation, clock and logging doubles ----------------------------------
-enum class AllocPref { PreferPSRAM, PreferInternal };
+enum class AllocPref { PreferPsram, PreferInternal };
 
 static std::atomic<int> gAllocCalls{0};
 static std::atomic<bool> gAllocFail{false};

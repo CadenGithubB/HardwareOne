@@ -159,7 +159,7 @@ void vTaskSuspend(TaskHandle_t) {}
 UBaseType_t uxTaskGetStackHighWaterMark(TaskHandle_t) { return 0; }
 int xPortGetCoreID() { return 0; }
 
-enum class AllocPref { PreferPSRAM, RequireInternal };
+enum class AllocPref { PreferPsram, RequireInternal };
 void* ps_alloc(size_t n, AllocPref, const char*) { return std::malloc(n); }
 void* ps_calloc(size_t c, size_t n, AllocPref, const char*) { return std::calloc(c, n); }
 void heap_caps_free(void* p) { std::free(p); }

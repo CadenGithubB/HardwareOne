@@ -201,7 +201,7 @@ class EspNowInlineText {
 };
 
 // ESP-NOW device name mapping. These fields are embedded in EspNowState, whose
-// storage is allocated with PreferPSRAM, so none of this bounded metadata uses
+// storage is allocated with PreferPsram, so none of this bounded metadata uses
 // Arduino String's internal-heap realloc path.
 struct EspNowDevice {
   uint8_t mac[6];

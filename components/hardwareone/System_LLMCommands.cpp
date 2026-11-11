@@ -182,7 +182,7 @@ static const char* cmd_llm_status(const String& argsInput) {
     menu["gen"]    = 0;
 #endif
     static char* jbuf = nullptr;
-    if (!jbuf) jbuf = (char*)ps_alloc(640, AllocPref::PreferPSRAM, "llmstatus.json");
+    if (!jbuf) jbuf = (char*)ps_alloc(640, AllocPref::PreferPsram, "llmstatus.json");
     if (!jbuf) return "{\"error\":\"oom\"}";
     serializeJson(doc, jbuf, 640);
     return jbuf;
@@ -289,7 +289,7 @@ static const char* cmd_llm_models(const String& argsInput) {
       o["available"] = rows[k].available;
     }
     static char* jbuf = nullptr;
-    if (!jbuf) jbuf = (char*)ps_alloc(1536, AllocPref::PreferPSRAM, "llmmodels.json");
+    if (!jbuf) jbuf = (char*)ps_alloc(1536, AllocPref::PreferPsram, "llmmodels.json");
     if (!jbuf) return "{\"error\":\"oom\"}";
     serializeJson(out, jbuf, 1536);
     return jbuf;
@@ -473,7 +473,7 @@ static const char* cmd_llm_result(const String& args) {
   // \uXXXX escaping (512×6) + envelope, still inside the 4 KB command-return
   // cap. Real LLM text escapes to ~1.1× so the typical blob is ~550 B.
   static char* jbuf = nullptr;
-  if (!jbuf) jbuf = (char*)ps_alloc(3200, AllocPref::PreferPSRAM, "llmresult.json");
+  if (!jbuf) jbuf = (char*)ps_alloc(3200, AllocPref::PreferPsram, "llmresult.json");
   if (!jbuf) return "{\"error\":\"oom\"}";
   serializeJson(doc, jbuf, 3200);
   return jbuf;
@@ -547,7 +547,7 @@ static const char* cmd_llm_turns(const String& args) {
   if (index >= count || !chatGetTurnInfo(index, &info)) {
     doc["end"] = true;
     static char* ebuf = nullptr;
-    if (!ebuf) ebuf = (char*)ps_alloc(96, AllocPref::PreferPSRAM, "llmturns_end.json");
+    if (!ebuf) ebuf = (char*)ps_alloc(96, AllocPref::PreferPsram, "llmturns_end.json");
     if (!ebuf) return "{\"error\":\"oom\"}";
     serializeJson(doc, ebuf, 96);
     return ebuf;
@@ -557,7 +557,7 @@ static const char* cmd_llm_turns(const String& args) {
   // Do not allocate a complete 16 KiB turn or grow the BLE reply envelope.
   constexpr size_t kTurnWindow = 2048;
   static char* turnBuf = nullptr;
-  if (!turnBuf) turnBuf = (char*)ps_alloc(kTurnWindow, AllocPref::PreferPSRAM, "llmturn.txt");
+  if (!turnBuf) turnBuf = (char*)ps_alloc(kTurnWindow, AllocPref::PreferPsram, "llmturn.txt");
   if (!turnBuf) return "{\"error\":\"oom\"}";
   int n = chatReadTurn(index, offset, turnBuf, kTurnWindow);
   n = utf8TrimPartialTail(turnBuf, n);
@@ -586,7 +586,7 @@ static const char* cmd_llm_turns(const String& args) {
   }
   if (doc.overflowed() || measureJson(doc) >= 4096) return "{\"error\":\"oom\"}";
   static char* jbuf = nullptr;
-  if (!jbuf) jbuf = (char*)ps_alloc(4096, AllocPref::PreferPSRAM, "llmturns.json");
+  if (!jbuf) jbuf = (char*)ps_alloc(4096, AllocPref::PreferPsram, "llmturns.json");
   if (!jbuf) return "{\"error\":\"oom\"}";
   serializeJson(doc, jbuf, 4096);
   return jbuf;

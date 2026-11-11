@@ -138,7 +138,7 @@ static esp_err_t handleLlmStatus(httpd_req_t* req) {
   };
   const int needed = render(nullptr, 0);
   char* json = needed > 0
-      ? (char*)ps_alloc((size_t)needed + 1, AllocPolicy::PreferPSRAM, "llm.status")
+      ? (char*)ps_alloc((size_t)needed + 1, AllocPolicy::PreferPsram, "llm.status")
       : nullptr;
   if (!json) {
     httpd_resp_set_status(req, "503 Service Unavailable");

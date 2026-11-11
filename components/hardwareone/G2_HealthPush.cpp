@@ -161,7 +161,7 @@ hp::Input buildInput() {
   if (today) {
     if (!sDay)
       sDay = static_cast<R1HealthHistoryDay*>(
-          ps_alloc(sizeof(R1HealthHistoryDay), AllocPolicy::PreferPSRAM, "g2.healthpush.day"));
+          ps_alloc(sizeof(R1HealthHistoryDay), AllocPolicy::PreferPsram, "g2.healthpush.day"));
     haveDay = sDay && g2HealthHistorySnapshot(*sDay) && sDay->dayStart == sum.dayStart;
   }
   Measured hr, spo2;

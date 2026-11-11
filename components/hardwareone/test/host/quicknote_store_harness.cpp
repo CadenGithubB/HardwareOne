@@ -69,7 +69,7 @@ static bool isPlausibleEpoch(time_t t) { return t >= 1577836800 && t < 410244480
 static int64_t uptimeUs = 5400000;
 static int64_t esp_timer_get_time() { return uptimeUs; }
 uint32_t gBootCounter = 76;
-enum class AllocPolicy { PreferPSRAM };
+enum class AllocPolicy { PreferPsram };
 static size_t lastAlloc = 0;
 static unsigned allocs = 0, frees = 0;
 static bool allocFails = false;

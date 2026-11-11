@@ -3006,7 +3006,7 @@ static bool bondSendEncryptedAsync(const uint8_t* mac, uint8_t type, uint16_t fl
   // queue carries only the pointer; espnow_tx frees after send.
   uint8_t* psBuf = nullptr;
   if (len > 0) {
-    psBuf = (uint8_t*)ps_alloc((size_t)len, AllocPref::PreferPSRAM, "espnow.tx.payload");
+    psBuf = (uint8_t*)ps_alloc((size_t)len, AllocPref::PreferPsram, "espnow.tx.payload");
     if (!psBuf) {
       DEBUGF(DEBUG_ESPNOW_CORE, "[BOND_TX_ASYNC] ps_alloc failed len=%u", (unsigned)len);
       return false;
@@ -3229,7 +3229,7 @@ bool v4_send_command_response(const uint8_t* dst, uint32_t cmdMsgId, bool succes
   // PSRAM: CPU-filled staging only — the AEAD seal copies this into a stack
   // frame and esp_now_send copies again into the WiFi TX path, so nothing DMAs
   // from here. Keeps a multi-KB command response off the internal heap.
-  uint8_t* buffer = (uint8_t*)ps_alloc(totalLen, AllocPref::PreferPSRAM, "espnow.tx.cmdresp");
+  uint8_t* buffer = (uint8_t*)ps_alloc(totalLen, AllocPref::PreferPsram, "espnow.tx.cmdresp");
   if (!buffer) return false;
   buffer[0] = success ? 1 : 0;
   memcpy(buffer + 1, resultText, textLen);
@@ -4190,7 +4190,7 @@ static void logBondAuthFailure(const uint8_t* mac, const char* reason) {
   if (sLastFailLogMs != 0 && (now - sLastFailLogMs) < 5000) return;  // throttle: 1 / 5s
   sLastFailLogMs = now;
   auto* w = static_cast<BondAuthFailLog*>(
-      ps_alloc(sizeof(BondAuthFailLog), AllocPref::PreferPSRAM, "espnow.bondfail.log"));
+      ps_alloc(sizeof(BondAuthFailLog), AllocPref::PreferPsram, "espnow.bondfail.log"));
   if (!w) return;
   String who = mac ? getEspNowDeviceName(mac) : String("");
   if (who.length() == 0 && mac) who = macToDisplayStr(mac);
@@ -4394,7 +4394,7 @@ static void runDeferredUserSync(void* arg) {
 static void v4h_user_sync(const V4RxCtx& ctx) {
   const size_t need = sizeof(DeferredUserSyncWork) + ctx.payloadLen;
   auto* w = static_cast<DeferredUserSyncWork*>(
-      ps_alloc(need, AllocPref::PreferPSRAM, "espnow.usersync.defer"));
+      ps_alloc(need, AllocPref::PreferPsram, "espnow.usersync.defer"));
   if (!w) {
     ERROR_ESPNOWF("[USER_SYNC] PSRAM alloc failed (defer drop) from %s", ctx.deviceName);
     return;
@@ -5986,7 +5986,7 @@ static void pairAnswerReceived(const uint8_t mac[6], espnowpair::Answer answer) 
   if (!waiting) return;   // repeats end here, before any allocation
   PairCompleteJob* w = nullptr;
   if (answer == espnowpair::Answer::Accept) {
-    w = (PairCompleteJob*)ps_alloc(sizeof(PairCompleteJob), AllocPref::PreferPSRAM, "espnow.paircomplete");
+    w = (PairCompleteJob*)ps_alloc(sizeof(PairCompleteJob), AllocPref::PreferPsram, "espnow.paircomplete");
     if (!w) return;
   }
   espnowpair::Request ended = {};
@@ -6956,7 +6956,7 @@ static void v4CmdResultCallback(bool ok, const char* result, void* userData) {
   size_t payloadLen = 1 + textLen + 1;
   // PSRAM: CPU-filled staging on cmd_exec; sendAeadSync seals into a stack
   // frame and esp_now_send copies the payload, so nothing DMAs from here.
-  uint8_t* respPayload = (uint8_t*)ps_alloc(payloadLen, AllocPref::PreferPSRAM, "espnow.tx.cmdresp2");
+  uint8_t* respPayload = (uint8_t*)ps_alloc(payloadLen, AllocPref::PreferPsram, "espnow.tx.cmdresp2");
   if (respPayload) {
     respPayload[0] = ok ? 1 : 0;
     memcpy(respPayload + 1, resultText, textLen);
@@ -7815,7 +7815,7 @@ static char* serializeBondJson(JsonDocument& doc, size_t* outLen, const char* ta
                   tag, (unsigned)n, (unsigned long)kFileSlotMaxFileSize);
     return nullptr;
   }
-  char* buf = (char*)ps_alloc(n + 1, AllocPref::PreferPSRAM, tag);
+  char* buf = (char*)ps_alloc(n + 1, AllocPref::PreferPsram, tag);
   if (!buf) {
     ERROR_ESPNOWF("[BOND] %s: no memory for %u bytes", tag, (unsigned)(n + 1));
     return nullptr;
@@ -8426,7 +8426,7 @@ static void runDeferredBondFileSend(void* arg) {
 // gEspNow->bondPendingResponseMac can change between submit and run.
 static bool submitBondFileSend(const uint8_t destMac[6], uint8_t kind) {
   auto* w = (BondFileSendWork*)ps_alloc(sizeof(BondFileSendWork),
-                                        AllocPref::PreferPSRAM,
+                                        AllocPref::PreferPsram,
                                         "espnow.bond.file.send");
   if (!w) {
     BROADCAST_PRINTF("[BOND] file-send: ps_alloc failed kind=%u", (unsigned)kind);
@@ -8712,7 +8712,7 @@ size_t espnowReadCachedManifest(const char* fwHashHex, const AuthContext& auth, 
     *err = "unexpected size";
     return 0;
   }
-  char* buf = (char*)ps_alloc(size + 1, AllocPref::PreferPSRAM, "espnow.manifest_read");
+  char* buf = (char*)ps_alloc(size + 1, AllocPref::PreferPsram, "espnow.manifest_read");
   if (!buf) {
     f.close();
     *err = "out of memory";
@@ -11383,7 +11383,7 @@ static bool initEspNow() {
   // Allocate mesh peer arrays (dynamic based on meshPeerMax setting)
   if (!gMeshPeers) {
     size_t healthSize = sizeof(MeshPeerHealth) * slots;
-    gMeshPeers = (MeshPeerHealth*)ps_alloc(healthSize, AllocPref::PreferPSRAM, "mesh.peers");
+    gMeshPeers = (MeshPeerHealth*)ps_alloc(healthSize, AllocPref::PreferPsram, "mesh.peers");
     if (gMeshPeers) {
       memset(gMeshPeers, 0, healthSize);
     } else {
@@ -11395,7 +11395,7 @@ static bool initEspNow() {
   }
   if (!gMeshPeerMeta) {
     size_t metaSize = sizeof(MeshPeerMeta) * slots;
-    gMeshPeerMeta = (MeshPeerMeta*)ps_alloc(metaSize, AllocPref::PreferPSRAM, "mesh.meta");
+    gMeshPeerMeta = (MeshPeerMeta*)ps_alloc(metaSize, AllocPref::PreferPsram, "mesh.meta");
     if (gMeshPeerMeta) {
       for (int i = 0; i < slots; i++) gMeshPeerMeta[i].clear();
     } else {
@@ -11419,7 +11419,7 @@ static bool initEspNow() {
   recomputeAllMeshFingerprints();
 
   if (!gEspNow) {
-    void* stateStorage = ps_alloc(sizeof(EspNowState), AllocPref::PreferPSRAM, "espnow.state");
+    void* stateStorage = ps_alloc(sizeof(EspNowState), AllocPref::PreferPsram, "espnow.state");
     if (!stateStorage) {
       snprintf(gLastInitErrorReason, sizeof(gLastInitErrorReason),
                "out of PSRAM (state structure)");
@@ -11434,7 +11434,7 @@ static bool initEspNow() {
     gEspNow = new (stateStorage) EspNowState();
 
     // Allocate small PSRAM buffers pulled out of the EspNowState struct
-    gEspNow->listBuffer = (char*)ps_alloc(1024, AllocPref::PreferPSRAM, "espnow.listBuf");
+    gEspNow->listBuffer = (char*)ps_alloc(1024, AllocPref::PreferPsram, "espnow.listBuf");
     if (gEspNow->listBuffer) {
       memset(gEspNow->listBuffer, 0, 1024);
     } else {
@@ -11442,7 +11442,7 @@ static bool initEspNow() {
     }
     // +1 for the NUL v4h_cmd_resp writes at [resultLen]. Sized from the wire
     // budget, not from CMD_RESULT_MAX — see V4_REASM_MAX_MSG.
-    gEspNow->deferredCmdRespResult = (char*)ps_alloc(V4_REASM_MAX_MSG + 1, AllocPref::PreferPSRAM, "espnow.cmdResp");
+    gEspNow->deferredCmdRespResult = (char*)ps_alloc(V4_REASM_MAX_MSG + 1, AllocPref::PreferPsram, "espnow.cmdResp");
     if (gEspNow->deferredCmdRespResult) {
       memset(gEspNow->deferredCmdRespResult, 0, V4_REASM_MAX_MSG + 1);
     } else {
@@ -11458,7 +11458,7 @@ static bool initEspNow() {
     if (psramAvailableRuntime()) {
       size_t sqBytes = sizeof(EspNowState::StreamQueueEntry) * EspNowState::STREAM_QUEUE_SIZE_PSRAM;
       gEspNow->streamQueue = (EspNowState::StreamQueueEntry*)ps_alloc(
-          sqBytes, AllocPref::RequirePSRAM, "espnow.streamQueue.psram");
+          sqBytes, AllocPref::RequirePsram, "espnow.streamQueue.psram");
       if (gEspNow->streamQueue) {
         memset(gEspNow->streamQueue, 0, sqBytes);
         gEspNow->streamQueueCap = EspNowState::STREAM_QUEUE_SIZE_PSRAM;
@@ -11502,7 +11502,7 @@ static bool initEspNow() {
   // V4_REASM_MAX entries at ~6.4 KB each)
   if (!gV4Reasm) {
     size_t reasmSize = sizeof(V4ReasmEntry) * V4_REASM_MAX;
-    gV4Reasm = (V4ReasmEntry*)ps_alloc(reasmSize, AllocPref::PreferPSRAM, "espnow.reasm");
+    gV4Reasm = (V4ReasmEntry*)ps_alloc(reasmSize, AllocPref::PreferPsram, "espnow.reasm");
     if (gV4Reasm) {
       memset(gV4Reasm, 0, reasmSize);
     } else {
@@ -11690,7 +11690,7 @@ static bool initEspNow() {
   // which is worse than refusing to start.
   if (!gEspNowRxRing) {
     gEspNowRxRing = (InboundRxItem*)ps_calloc(ESPNOW_RX_RING_SLOTS, sizeof(InboundRxItem),
-                                              AllocPref::PreferPSRAM, "espnow.rx.ring");
+                                              AllocPref::PreferPsram, "espnow.rx.ring");
     if (!gEspNowRxRing) {
       snprintf(gLastInitErrorReason, sizeof(gLastInitErrorReason),
                "out of internal DRAM (RX ring)");
@@ -11780,7 +11780,7 @@ static bool initEspNow() {
   size_t trackerBytes = sizeof(BroadcastTracker) * BROADCAST_TRACKER_SLOTS;
   if (!gBroadcastTrackers) {
     gBroadcastTrackers = (BroadcastTracker*)ps_calloc(BROADCAST_TRACKER_SLOTS, sizeof(BroadcastTracker),
-                                                      AllocPref::PreferPSRAM,  // task context only, no critical section
+                                                      AllocPref::PreferPsram,  // task context only, no critical section
                                                       "espnow.broadcast.trackers");
   }
   if (gBroadcastTrackers) {
@@ -14614,7 +14614,7 @@ const char* cmd_espnow_toporesults(const String& argsInput) {
   // the buffer; opening the topology page before discovery allocates nothing.
   if (!gTopoOutputBuffer) {
     gTopoOutputBuffer = (char*)ps_alloc(TOPO_OUTPUT_CAPACITY,
-                                        AllocPref::RequirePSRAM, "topo.output");
+                                        AllocPref::RequirePsram, "topo.output");
     if (!gTopoOutputBuffer) {
       return "Error: PSRAM allocation failed for topology output.";
     }
@@ -17945,7 +17945,7 @@ const char* cmd_espnow_messages(const String& argsInput) {
   const int MAXM = 8;
   static ReceivedTextMessage* msgs = nullptr;
   if (!msgs) msgs = (ReceivedTextMessage*)ps_alloc(sizeof(ReceivedTextMessage) * MAXM,
-                                                   AllocPref::PreferPSRAM, "espnow.msgs.cli");
+                                                   AllocPref::PreferPsram, "espnow.msgs.cli");
   if (!msgs) return argWantsJson(argsInput) ? "{\"schema\":1,\"ok\":false,\"error\":\"oom\"}" : "OOM";
   int n = hasMac ? getPeerMessages(mac, msgs, MAXM, since)
                  : getAllMessages(msgs, MAXM, since);
@@ -17972,7 +17972,7 @@ const char* cmd_espnow_messages(const String& argsInput) {
       o["sendState"] = msgs[i].sendState;  // sent rows: 0 pending,1 delivered,2 timeout,3 failed
     }
     static char* jbuf = nullptr;
-    if (!jbuf) jbuf = (char*)ps_alloc(32768, AllocPref::PreferPSRAM, "espnow.messages.json");
+    if (!jbuf) jbuf = (char*)ps_alloc(32768, AllocPref::PreferPsram, "espnow.messages.json");
     if (!jbuf) return "{\"schema\":1,\"ok\":false,\"error\":\"oom\"}";
     serializeJson(doc, jbuf, 32768);
     return jbuf;
@@ -18585,7 +18585,7 @@ struct PeerHistoryStoreOutcome {
 // Allocate and construct the block for table entry `slot`. Called with the
 // lock held. No logging: the caller reports a failure after unlocking.
 static PeerMessageHistory* peerHistoryAllocateBlock(int slot) {
-  void* mem = ps_alloc(sizeof(PeerMessageHistory), AllocPref::PreferPSRAM, "espnow.msgHist");
+  void* mem = ps_alloc(sizeof(PeerMessageHistory), AllocPref::PreferPsram, "espnow.msgHist");
   if (!mem) return nullptr;
   PeerMessageHistory* block = new (mem) PeerMessageHistory();
   gEspNow->peerMessageHistories[slot] = block;
@@ -18661,7 +18661,7 @@ static size_t peerHistoryStoreInit() {
   {
     PeerHistoryGuard g;
     if (g.held && !gEspNow->peerMessageHistories && capacity > 0) {
-      PeerMessageHistory** table = (PeerMessageHistory**)ps_alloc(tableBytes, AllocPref::PreferPSRAM,
+      PeerMessageHistory** table = (PeerMessageHistory**)ps_alloc(tableBytes, AllocPref::PreferPsram,
                                                                   "espnow.msgHist.table");
       if (table) {
         memset(table, 0, tableBytes);

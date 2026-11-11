@@ -79,7 +79,7 @@ struct AuthPerfScope { explicit AuthPerfScope(const char*) {} };
 enum : int { SYSEVT_AUTH_DB_FAULT = 1 };
 static unsigned dbFaultEvents = 0;
 static void systemEventPost(int, const char* = nullptr, const char* = nullptr) { ++dbFaultEvents; }
-enum class AllocPref { PreferPSRAM };
+enum class AllocPref { PreferPsram };
 // Reply buffers are tracked so a case can tell whether a returned pointer is
 // one of them and how large it is.
 static std::map<const void*, size_t> allocations;

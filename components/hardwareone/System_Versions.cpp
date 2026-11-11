@@ -149,7 +149,7 @@ namespace {
 // The list is about 2.5 KB: on the heap (PSRAM first), never on a command
 // handler's stack.
 hw1versions::List* newList() {
-  void* memory = ps_alloc(sizeof(hw1versions::List), AllocPolicy::PreferPSRAM, "versions.list");
+  void* memory = ps_alloc(sizeof(hw1versions::List), AllocPolicy::PreferPsram, "versions.list");
   return memory ? new (memory) hw1versions::List() : nullptr;
 }
 

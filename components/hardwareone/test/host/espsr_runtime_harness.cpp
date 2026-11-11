@@ -96,7 +96,7 @@ struct Command { String line; CommandContext ctx; };
 struct ExecReq { using DeferredFn=void(*)(void*); };
 constexpr int ORIGIN_VOICE=7, MSG_ROUTE_FILE=4, COMMAND_CONTEXT_MODE_INDEPENDENT=1;
 constexpr size_t CMD_RESULT_MAX=4096;
-enum class AllocPref { PreferPSRAM };
+enum class AllocPref { PreferPsram };
 static bool allocFails=false, mutexAvailable=true, queueAvailable=true;
 void* ps_alloc(size_t n,AllocPref,const char*) { return allocFails ? nullptr : malloc(n); }
 static SemaphoreHandle_t gVoiceArmMutex = reinterpret_cast<void*>(1);

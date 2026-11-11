@@ -444,7 +444,7 @@ bool apdsInit() {
   // Use i2cTransaction wrapper for safe mutex + clock management
   return i2cDeviceTransaction(apdsBus, I2C_ADDR_APDS, 100000, 500, [&]() -> bool {
     // Only the task-context wrapper moves; the library owns its I2C transport.
-    void* apdsObjBuf = ps_alloc(sizeof(Adafruit_APDS9960), AllocPref::PreferPSRAM, "apds.obj");
+    void* apdsObjBuf = ps_alloc(sizeof(Adafruit_APDS9960), AllocPref::PreferPsram, "apds.obj");
     if (!apdsObjBuf) return false;
     gAPDS9960 = new (apdsObjBuf) Adafruit_APDS9960();
     

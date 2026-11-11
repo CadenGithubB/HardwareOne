@@ -305,7 +305,7 @@ static BLECharacteristic* pCmdStatusChar = nullptr;
 static BleDeviceType bleIdentifyDeviceByMAC(const uint8_t*) { return BLE_DEVICE_UNKNOWN; }
 
 // Allocation (System_MemUtil.h).
-enum class AllocPref { PreferPSRAM };
+enum class AllocPref { PreferPsram };
 static void* ps_alloc(size_t size, AllocPref, const char*) { return std::calloc(1, size); }
 template <typename T>
 static void ps_delete(T* object) {

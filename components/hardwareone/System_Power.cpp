@@ -460,7 +460,7 @@ const char* cmd_power(const String& argsInput) {
     // failing loudly. test_power_save_tick.py measures the worst case and
     // fails below 64 B of headroom.
     static char* jbuf = nullptr;
-    if (!jbuf) jbuf = (char*)ps_alloc(1024, AllocPref::PreferPSRAM, "power.json");
+    if (!jbuf) jbuf = (char*)ps_alloc(1024, AllocPref::PreferPsram, "power.json");
     if (!jbuf) return "{\"error\":\"oom\"}";
     serializeJson(doc, jbuf, 1024);
     return jbuf;

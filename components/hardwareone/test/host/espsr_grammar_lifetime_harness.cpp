@@ -83,7 +83,7 @@ static size_t gSRFetchSamples = 512;
 static struct { int srCommandTimeout = 6000; } gSettings;
 static std::string lastError;
 void srSetError(const char* value) { lastError = value; }
-enum class AllocPref { PreferPSRAM };
+enum class AllocPref { PreferPsram };
 void* ps_alloc(size_t size, AllocPref, const char*) {
   if (snapshotFails) return nullptr;
   void* block = malloc(size); assert(block); snapshotBlocks.insert(block); return block;

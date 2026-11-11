@@ -538,7 +538,7 @@ bool startVideoRecording() {
 
   // Allocate index buffer in PSRAM.
   if (!s_idx) {
-    s_idx = (IdxEntry*)ps_alloc(MAX_FRAMES * sizeof(IdxEntry), AllocPref::PreferPSRAM, "video.idx");
+    s_idx = (IdxEntry*)ps_alloc(MAX_FRAMES * sizeof(IdxEntry), AllocPref::PreferPsram, "video.idx");
     s_idxCap = s_idx ? MAX_FRAMES : 0;
   }
 
@@ -775,7 +775,7 @@ esp_err_t handleVideoRecordingFile(httpd_req_t* req) {
   // this staging allocation can prefer PSRAM without changing its lifetime.
   const size_t CHUNK = 8192;
   uint8_t* buf = static_cast<uint8_t*>(
-      ps_alloc(CHUNK, AllocPref::PreferPSRAM, "video.http.chunk"));
+      ps_alloc(CHUNK, AllocPref::PreferPsram, "video.http.chunk"));
   if (!buf) {
     f.close();
     httpd_resp_set_status(req, "500 Internal Server Error");

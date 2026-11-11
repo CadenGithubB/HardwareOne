@@ -1497,7 +1497,7 @@ static void processBleCommandLine(uint16_t connId, TransportSessionEpoch ingress
 
   BleCommandReplyContext* reply =
       static_cast<BleCommandReplyContext*>(ps_alloc(
-          sizeof(BleCommandReplyContext), AllocPref::PreferPSRAM,
+          sizeof(BleCommandReplyContext), AllocPref::PreferPsram,
           "ble.commandReply"));
   if (!reply) {
     const char* msg = "Error: out of memory";
@@ -1575,7 +1575,7 @@ static portMUX_TYPE gBleScPoolMux = portMUX_INITIALIZER_UNLOCKED;
 static BleScDeferred* bleScPoolClaim() {
   if (!gBleScPool) {
     gBleScPool = (BleScDeferred*)ps_alloc(sizeof(BleScDeferred) * kBleScPoolSlots,
-                                          AllocPref::PreferPSRAM, "ble.sc.pool");
+                                          AllocPref::PreferPsram, "ble.sc.pool");
     if (!gBleScPool) return nullptr;
     gBleScPoolInUse = 0;
   }
@@ -1806,7 +1806,7 @@ static void processIncomingBleCommand(uint16_t connId, const char* data, size_t 
 // would leave invalid String representations and free() would skip their
 // destructors.
 static BleSystemState* bleNewState() {
-  void* stateStorage = ps_alloc(sizeof(BleSystemState), AllocPref::PreferPSRAM, "ble.state");
+  void* stateStorage = ps_alloc(sizeof(BleSystemState), AllocPref::PreferPsram, "ble.state");
   if (!stateStorage) return nullptr;
   BleSystemState* state = new (stateStorage) BleSystemState{};
 
@@ -4335,7 +4335,7 @@ static const char* cmd_bleinfo(const String& argsInput) {
     if (!available) return "{\"error\":\"unavailable\"}";
     if (measureJson(doc) >= 2048) return "{\"error\":\"status too large\"}";
     static char* jbuf = nullptr;
-    if (!jbuf) jbuf = (char*)ps_alloc(2048, AllocPref::PreferPSRAM, "bleinfo.json");
+    if (!jbuf) jbuf = (char*)ps_alloc(2048, AllocPref::PreferPsram, "bleinfo.json");
     if (!jbuf) return "{\"error\":\"oom\"}";
     serializeJson(doc, jbuf, 2048);
     return jbuf;
@@ -4991,14 +4991,14 @@ static void buildSensorDataJSON(char* buf, size_t bufSize) {
 static void buildSystemStatusJSON(char* buf, size_t bufSize) {
   uint32_t freeHeap = ESP.getFreeHeap();
   uint32_t minHeap = ESP.getMinFreeHeap();
-  uint32_t freePSRAM = ESP.getFreePsram();
+  uint32_t freePsram = ESP.getFreePsram();
   uint32_t uptime = millis() / 1000;
   
   snprintf(buf, bufSize,
            "{\"system\":{\"heap_free\":%lu,\"heap_min\":%lu,\"psram_free\":%lu,\"uptime\":%lu},\"ts\":%lu}",
            (unsigned long)freeHeap,
            (unsigned long)minHeap,
-           (unsigned long)freePSRAM,
+           (unsigned long)freePsram,
            (unsigned long)uptime,
            (unsigned long)millis());
 }

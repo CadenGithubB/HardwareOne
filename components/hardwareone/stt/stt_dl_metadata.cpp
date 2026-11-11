@@ -40,7 +40,7 @@ size_t kindIndex(dl::tool::MetadataKind kind) {
 }
 
 // Aligned blocks (8 or 16 bytes): an explicit PSRAM request with the same
-// policy as ps_alloc(PreferPSRAM): PSRAM, then internal RAM; internal only
+// policy as ps_alloc(PreferPsram): PSRAM, then internal RAM; internal only
 // while the PSRAM bypass is on. Reported to the same fallback counter and
 // allocation tracker as ps_alloc.
 void* alignedPreferPsram(size_t align, size_t size, const char* tag) {
@@ -56,7 +56,7 @@ void* alignedPreferPsram(size_t align, size_t size, const char* tag) {
 
 void* allocate(size_t size, size_t align, dl::tool::MetadataKind kind) {
   const size_t k = kindIndex(kind);
-  void* p = align <= kHeapAlign ? ps_alloc(size, AllocPolicy::PreferPSRAM, kTags[k])
+  void* p = align <= kHeapAlign ? ps_alloc(size, AllocPolicy::PreferPsram, kTags[k])
                                 : alignedPreferPsram(align, size, kTags[k]);
   Counters& c = gKinds[k];
   if (!p) {
@@ -133,7 +133,7 @@ DlMetadataStats dlMetadataDelta(const DlMetadataStats& before, const DlMetadataS
   return d;
 }
 
-void* sttPsramAlloc(size_t size, const char* tag) { return ps_alloc(size, AllocPolicy::PreferPSRAM, tag); }
+void* sttPsramAlloc(size_t size, const char* tag) { return ps_alloc(size, AllocPolicy::PreferPsram, tag); }
 
 void sttPsramFree(void* ptr) { ps_free(ptr); }
 

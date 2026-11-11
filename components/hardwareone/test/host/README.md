@@ -2368,10 +2368,10 @@ require device testing.
 
 ## Optional PSRAM for sensor objects
 
-Application-owned heap driver objects use `AllocPref::PreferPSRAM`: external
+Application-owned heap driver objects use `AllocPref::PreferPsram`: external
 RAM is preferred, but an absent/exhausted external heap or the PSRAM bypass
 routes them to byte-addressable internal RAM. No sensor parent allocation uses
-`RequirePSRAM`. Genuine exhaustion of available internal/external memory still
+`RequirePsram`. Genuine exhaustion of available internal/external memory still
 returns allocation failure; this policy is not a guarantee that every feature
 configuration fits a board without PSRAM.
 

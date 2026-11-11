@@ -435,7 +435,7 @@ bool imuInit() {
         uint8_t addr = (foundIndex >= 0) ? candidateAddrs[foundIndex] : candidateAddrs[i];
         INFO_IMU_LIFECYCLEF("Trying BNO055 address 0x%02X", addr);
         // Only the task-context wrapper moves; the library owns its I2C transport.
-        void* imuObjBuf = ps_alloc(sizeof(Adafruit_BNO055), AllocPref::PreferPSRAM, "imu.obj");
+        void* imuObjBuf = ps_alloc(sizeof(Adafruit_BNO055), AllocPref::PreferPsram, "imu.obj");
         if (!imuObjBuf) {
           ERROR_IMUF("Error: Failed to allocate memory for BNO055 object");
           return false;

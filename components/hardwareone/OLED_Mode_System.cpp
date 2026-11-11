@@ -107,13 +107,13 @@ struct MemoryRenderData {
   size_t totalHeap;
   size_t usedHeap;
   int heapPercent;
-  size_t freePSRAM;
-  size_t totalPSRAM;
-  size_t usedPSRAM;
+  size_t freePsram;
+  size_t totalPsram;
+  size_t usedPsram;
   int psramPercent;
   size_t minFreeHeap;
   size_t largestBlock;
-  bool hasPSRAM;
+  bool hasPsram;
   bool valid;
 };
 static MemoryRenderData memoryRenderData = {0};
@@ -128,13 +128,13 @@ void prepareMemoryData() {
   memoryRenderData.heapPercent = (memoryRenderData.usedHeap * 100) / memoryRenderData.totalHeap;
   
   // Get PSRAM data
-  memoryRenderData.freePSRAM = ESP.getFreePsram();
-  memoryRenderData.totalPSRAM = ESP.getPsramSize();
-  memoryRenderData.hasPSRAM = (memoryRenderData.totalPSRAM > 0);
+  memoryRenderData.freePsram = ESP.getFreePsram();
+  memoryRenderData.totalPsram = ESP.getPsramSize();
+  memoryRenderData.hasPsram = (memoryRenderData.totalPsram > 0);
   
-  if (memoryRenderData.hasPSRAM) {
-    memoryRenderData.usedPSRAM = memoryRenderData.totalPSRAM - memoryRenderData.freePSRAM;
-    memoryRenderData.psramPercent = (memoryRenderData.usedPSRAM * 100) / memoryRenderData.totalPSRAM;
+  if (memoryRenderData.hasPsram) {
+    memoryRenderData.usedPsram = memoryRenderData.totalPsram - memoryRenderData.freePsram;
+    memoryRenderData.psramPercent = (memoryRenderData.usedPsram * 100) / memoryRenderData.totalPsram;
   }
   
   // Get additional stats
@@ -188,12 +188,12 @@ void displayMemoryStatsRendered() {
   y += barHeight + 3;
   
   // --- PSRAM ---
-  if (memoryRenderData.hasPSRAM) {
+  if (memoryRenderData.hasPsram) {
     oledDisplay->setCursor(0, y);
     oledDisplay->print("PSRAM ");
-    oledDisplay->print(memoryRenderData.freePSRAM / 1024);
+    oledDisplay->print(memoryRenderData.freePsram / 1024);
     oledDisplay->print("/");
-    oledDisplay->print(memoryRenderData.totalPSRAM / 1024);
+    oledDisplay->print(memoryRenderData.totalPsram / 1024);
     oledDisplay->print("KB");
     y += 9;
     

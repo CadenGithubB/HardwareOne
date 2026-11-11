@@ -50,7 +50,7 @@ def main() -> None:
     require(task.count("ps_delete(gVL53L4CX)") == 1,
             "task shutdown must release its driver ownership")
     require(re.search(r"ps_alloc\s*\(\s*sizeof\s*\(\s*VL53L4CX\s*\)\s*,\s*"
-                      r"AllocPref::PreferPSRAM\s*,\s*\"tof\.obj\"\s*\)", init) is not None,
+                      r"AllocPref::PreferPsram\s*,\s*\"tof\.obj\"\s*\)", init) is not None,
             "ToF object must request its exact sizeof with tagged PSRAM preference")
     require(re.search(r"new\s*\(\s*\w+\s*\)\s*VL53L4CX\s*\(", init) is not None,
             "ToF object must be placement-constructed in allocated storage")

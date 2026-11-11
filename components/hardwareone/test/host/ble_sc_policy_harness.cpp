@@ -332,7 +332,7 @@ static bool bleFillCommandAuth(uint16_t connId, AuthContext& auth, bool,
   return true;
 }
 
-enum class AllocPref { PreferPSRAM, RequireInternal };
+enum class AllocPref { PreferPsram, RequireInternal };
 static void* ps_alloc(size_t size, AllocPref, const char*) { return malloc(size); }
 
 static int drops = 0;

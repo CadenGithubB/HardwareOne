@@ -6,7 +6,7 @@
 
 // Task-context, caller-owned text storage. Capacity includes the terminating
 // NUL; an allocation/limit failure is sticky until clear(). No partial output
-// may be published unless ok() is true. PreferPSRAM always retains the shared
+// may be published unless ok() is true. PreferPsram always retains the shared
 // allocator's internal fallback and bypass policy.
 class PsramBuffer final {
 public:
@@ -42,7 +42,7 @@ public:
       if (next > limit_ / 2) { next = limit_; break; }
       next *= 2;
     }
-    void* grown = ps_realloc(data_, next, AllocPref::PreferPSRAM, tag_);
+    void* grown = ps_realloc(data_, next, AllocPref::PreferPsram, tag_);
     if (!grown) return fail(Failure::Allocation);
     data_ = static_cast<char*>(grown);
     capacity_ = next;

@@ -58,7 +58,7 @@ struct ScratchGuard {
 
 bool ensureScratchLocked() {
   if (!sScratch) {
-    sScratch = (char*)ps_alloc(kScratchCap, AllocPref::PreferPSRAM, "capcrypt.scratch");
+    sScratch = (char*)ps_alloc(kScratchCap, AllocPref::PreferPsram, "capcrypt.scratch");
   }
   return sScratch != nullptr;
 }

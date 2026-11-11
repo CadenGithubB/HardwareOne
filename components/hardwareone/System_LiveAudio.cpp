@@ -801,7 +801,7 @@ bool ensureTxTask() {
 
 bool ensureShadowQueue() {
   if (sShadowStorage) return true;
-  void* allocation = ps_alloc(kShadowBytes, AllocPref::RequirePSRAM,
+  void* allocation = ps_alloc(kShadowBytes, AllocPref::RequirePsram,
                               "liveaudio.shadow");
   if (!allocation) {
     portENTER_CRITICAL(&sStateMux);

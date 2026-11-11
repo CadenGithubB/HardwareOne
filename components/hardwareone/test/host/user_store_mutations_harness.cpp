@@ -115,7 +115,7 @@ static time_t epochSeconds() { return wallTime; }
 static AuthContext gAuth;
 static const AuthContext& currentAuthContext() { return gAuth; }
 struct AuthPerfScope { explicit AuthPerfScope(const char*) {} };
-enum class AllocPref { PreferPSRAM };
+enum class AllocPref { PreferPsram };
 static void* ps_alloc(size_t size, AllocPref, const char*) { return std::malloc(size); }
 
 // The hash double never contains its input, so a plaintext found in any file

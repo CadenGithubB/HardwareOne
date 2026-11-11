@@ -378,7 +378,7 @@ class FileManager {
   std::vector<FileEntry> cache_;
 };
 
-enum class AllocPref { PreferPSRAM };
+enum class AllocPref { PreferPsram };
 alignas(FileManager) static unsigned char fileManagerStorage[sizeof(FileManager)];
 static FileManager* fileManagerInstance = nullptr;
 inline void* ps_alloc(size_t size, AllocPref, const char*) {

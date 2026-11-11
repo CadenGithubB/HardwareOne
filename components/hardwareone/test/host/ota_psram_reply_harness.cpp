@@ -22,7 +22,7 @@ static void check(bool condition, const char* description) {
   if (!condition) throw std::runtime_error(description);
 }
 void webBatchTestStringAppend() {}
-enum class AllocPref { PreferPSRAM, PreferInternal };
+enum class AllocPref { PreferPsram, PreferInternal };
 using AllocPolicy = AllocPref;
 struct BufferAllocation { unsigned char* base; size_t size; std::string tag; };
 static std::unordered_map<void*, BufferAllocation> buffers;
@@ -30,7 +30,7 @@ static unsigned bufferAttempts = 0;
 static bool failNextBuffer = false;
 static void* ps_alloc(size_t size, AllocPolicy policy, const char* tag) {
   ++bufferAttempts;
-  check(policy == AllocPolicy::PreferPSRAM, "real buffer macro requests PSRAM preference");
+  check(policy == AllocPolicy::PreferPsram, "real buffer macro requests PSRAM preference");
   if (failNextBuffer) { failNextBuffer = false; return nullptr; }
   auto* base = static_cast<unsigned char*>(std::malloc(size + 32));
   check(base != nullptr, "host fixture allocation succeeds");

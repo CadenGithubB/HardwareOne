@@ -986,7 +986,7 @@ void v4hSessionOpen(const V4RxCtx& ctx) {
     return;
   }
   auto* w = static_cast<DeferredSessionOpenWork*>(
-      ps_alloc(sizeof(DeferredSessionOpenWork), AllocPref::PreferPSRAM, "espnow.sopen.defer"));
+      ps_alloc(sizeof(DeferredSessionOpenWork), AllocPref::PreferPsram, "espnow.sopen.defer"));
   if (!w) {
     ERROR_ESPNOWF("SESSION_OPEN: PSRAM alloc failed (defer drop)");
     return;
@@ -1005,7 +1005,7 @@ void v4hSessionConfirm(const V4RxCtx& ctx) {
     return;
   }
   auto* w = static_cast<DeferredSessionConfirmWork*>(
-      ps_alloc(sizeof(DeferredSessionConfirmWork), AllocPref::PreferPSRAM, "espnow.sconf.defer"));
+      ps_alloc(sizeof(DeferredSessionConfirmWork), AllocPref::PreferPsram, "espnow.sconf.defer"));
   if (!w) {
     ERROR_ESPNOWF("SESSION_CONFIRM: PSRAM alloc failed (defer drop)");
     return;
@@ -1177,7 +1177,7 @@ RekeyInFlight* gRekeyInFlight = nullptr;
 bool ensureRekeyInFlightAllocated() {
   if (gRekeyInFlight) return true;
   gRekeyInFlight = (RekeyInFlight*)ps_alloc(sizeof(RekeyInFlight) * kRekeyInFlightSlots,
-                                            AllocPref::PreferPSRAM, "espnow.rekey.inflight");
+                                            AllocPref::PreferPsram, "espnow.rekey.inflight");
   if (!gRekeyInFlight) {
     ERROR_ESPNOWF("REKEY: failed to allocate %u-slot in-flight table — no retry coverage",
                   (unsigned)kRekeyInFlightSlots);
@@ -1445,7 +1445,7 @@ void v4hSessionRekey(const V4RxCtx& ctx) {
   // is the same crypto profile as SESSION_OPEN/CONFIRM, so the same defer
   // architecture applies — keeps it off espnow_task's 6656 B stack).
   auto* w = (DeferredRekeyWork*)ps_alloc(sizeof(DeferredRekeyWork),
-                                         AllocPref::PreferPSRAM, "espnow.rekey.defer");
+                                         AllocPref::PreferPsram, "espnow.rekey.defer");
   if (!w) {
     ERROR_ESPNOWF("REKEY: PSRAM alloc failed");
     return;

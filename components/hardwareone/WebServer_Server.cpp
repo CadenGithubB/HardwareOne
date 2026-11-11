@@ -1082,7 +1082,7 @@ class IpBanLock {
 };
 
 static IpBanEntry* allocIpBanTable() {
-  return (IpBanEntry*)ps_calloc(MAX_IP_BANS, sizeof(IpBanEntry), AllocPref::PreferPSRAM, "ipbans.stage");
+  return (IpBanEntry*)ps_calloc(MAX_IP_BANS, sizeof(IpBanEntry), AllocPref::PreferPsram, "ipbans.stage");
 }
 
 // Forward declaration — defined below after session helpers
@@ -2250,7 +2250,7 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
   // Output buffer for writes - use PSRAM for larger buffer (better throughput)
   const size_t OUT_BUF_SIZE = 4096;  // 4KB instead of 256 bytes
   std::unique_ptr<uint8_t[], void (*)(void*)> uploadOutBuf(
-      (uint8_t*)ps_alloc(OUT_BUF_SIZE, AllocPref::PreferPSRAM), free);
+      (uint8_t*)ps_alloc(OUT_BUF_SIZE, AllocPref::PreferPsram), free);
   if (!uploadOutBuf) {
     DEBUG_STORAGEF("[handleFileUpload] ERROR: Failed to allocate output buffer");
     sendJsonResponse(req, "{\"success\":false, \"error\":\"Memory allocation failed\"}");
@@ -2376,7 +2376,7 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
   // Stream receive and parse - use PSRAM for larger buffer (better throughput)
   const size_t RECV_BUF_SIZE = 4096;  // 4KB instead of 512 bytes
   std::unique_ptr<char[], void (*)(void*)> uploadRecvBuf(
-      (char*)ps_alloc(RECV_BUF_SIZE, AllocPref::PreferPSRAM), free);
+      (char*)ps_alloc(RECV_BUF_SIZE, AllocPref::PreferPsram), free);
   if (!uploadRecvBuf) {
     DEBUG_STORAGEF("[handleFileUpload] ERROR: Failed to allocate recv buffer");
     sendJsonResponse(req, "{\"success\":false, \"error\":\"Memory allocation failed\"}");
@@ -2976,7 +2976,7 @@ esp_err_t handleDeviceRegistryGet(httpd_req_t* req) {
   // so /api/devices and devicefile can never diverge. Byte-compatible schema.
   static char* buf = nullptr;
   static const size_t kBufSize = 4096;
-  if (!buf) buf = (char*)ps_alloc(kBufSize, AllocPref::PreferPSRAM, "api.devices.json");
+  if (!buf) buf = (char*)ps_alloc(kBufSize, AllocPref::PreferPsram, "api.devices.json");
   if (!buf) { httpd_resp_send(req, "{}", HTTPD_RESP_USE_STRLEN); return ESP_OK; }
   PSRAM_JSON_DOC(doc);
   buildDeviceRegistryJson(doc);
@@ -3075,7 +3075,7 @@ esp_err_t handleLogs(httpd_req_t* req) {
   }
   // Use zero-copy snapshotTo() to avoid String allocation on every poll (500ms)
   // Allocate response buffer from PSRAM to avoid heap fragmentation
-  char* responseBuf = (char*)ps_alloc(gWebMirrorCap, AllocPref::PreferPSRAM, "handleLogs.resp");
+  char* responseBuf = (char*)ps_alloc(gWebMirrorCap, AllocPref::PreferPsram, "handleLogs.resp");
   if (!responseBuf) {
     ERROR_WEBF("Failed to allocate response buffer for logs");
     httpd_resp_sendstr(req, "[ERROR] Memory allocation failed");
@@ -4507,7 +4507,7 @@ esp_err_t handleFileView(httpd_req_t* req) {
   // Allocate streaming buffer from PSRAM for better throughput
   const size_t VIEW_BUF_SIZE = 4096;  // 4KB instead of 512 bytes
   char* viewBuf = (char*)ps_alloc(
-      VIEW_BUF_SIZE, AllocPref::PreferPSRAM, "http.file.view.chunk");
+      VIEW_BUF_SIZE, AllocPref::PreferPsram, "http.file.view.chunk");
   if (!viewBuf) {
     {
       FsLockGuard fsGuard("handleFileView");
@@ -4576,7 +4576,7 @@ esp_err_t handleFileView(httpd_req_t* req) {
     }
 
     if (fileSize <= kSinglePassMax) {
-      char* buf = (char*)ps_alloc(fileSize, AllocPref::RequirePSRAM,
+      char* buf = (char*)ps_alloc(fileSize, AllocPref::RequirePsram,
                                   "http.file.audio.whole");
       if (buf) {
         size_t bytesRead = 0;
@@ -5441,7 +5441,7 @@ static bool ensureWebRuntimeBuffers() {
 
   if (!gJsonResponseBuffer) {
     gJsonResponseBuffer =
-        (char*)ps_alloc(JSON_RESPONSE_SIZE, AllocPref::PreferPSRAM, "json.resp.buf");
+        (char*)ps_alloc(JSON_RESPONSE_SIZE, AllocPref::PreferPsram, "json.resp.buf");
   }
   if (!gJsonResponseBuffer) {
     ERROR_WEBF("Cannot start HTTP server: %u-byte JSON response buffer allocation failed",

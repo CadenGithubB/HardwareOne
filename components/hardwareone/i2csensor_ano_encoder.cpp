@@ -170,7 +170,7 @@ bool anoEncoderInit() {
   }
 
   if (!gAnoSeesaw) {
-    void* anoObjBuf = ps_alloc(sizeof(Adafruit_seesaw), AllocPref::PreferPSRAM,
+    void* anoObjBuf = ps_alloc(sizeof(Adafruit_seesaw), AllocPref::PreferPsram,
                               "input.ano.obj");
     if (!anoObjBuf) {
       ERROR_ANO_ENCODERF("Failed to allocate Adafruit_seesaw for ANO");

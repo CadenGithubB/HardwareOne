@@ -1482,7 +1482,7 @@ const char* cmd_voicefetch(const String& argsInput) {
       return "Error: file too large to stream within the link's time budget "
              "at this baud — raise uartlinkbaud or split the recording";
     }
-    buf = (uint8_t*)ps_alloc(total, AllocPref::PreferPSRAM, "voicefetch.buf");
+    buf = (uint8_t*)ps_alloc(total, AllocPref::PreferPsram, "voicefetch.buf");
     if (!buf) {
       f.close();
       return "Error: out of memory for file buffer";

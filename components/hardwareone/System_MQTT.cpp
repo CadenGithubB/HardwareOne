@@ -160,7 +160,7 @@ static bool initExternalSensorStorage() {
   if (externalSensors) return true;
 
   void* storage = ps_alloc(sizeof(ExternalSensor) * MAX_EXTERNAL_SENSORS,
-                           AllocPref::RequirePSRAM, "mqtt.sensor.table");
+                           AllocPref::RequirePsram, "mqtt.sensor.table");
   if (!storage) {
     ERROR_MQTTF("Failed to allocate external sensor table (%u bytes)",
                 (unsigned)(sizeof(ExternalSensor) * MAX_EXTERNAL_SENSORS));
@@ -595,7 +595,7 @@ static void submitMqttCommand(MqttAdmission&& use, const String& line,
                               const String& responseTopic,
                               const String& safeCommand,
                               const char* routedKind) {
-  void* storage = ps_alloc(sizeof(MqttCommandReply), AllocPref::PreferPSRAM,
+  void* storage = ps_alloc(sizeof(MqttCommandReply), AllocPref::PreferPsram,
                            "mqtt.cmd.reply");
   if (!storage) {
     esp_mqtt_client_publish(mqttClient, responseTopic.c_str(),
@@ -1460,7 +1460,7 @@ void publishMQTTSensorData() {
   }
   
   // Build sensor data JSON blob from caches
-  char* jsonBuf = (char*)ps_alloc(16384, AllocPref::PreferPSRAM, "mqtt.json");
+  char* jsonBuf = (char*)ps_alloc(16384, AllocPref::PreferPsram, "mqtt.json");
   if (!jsonBuf) {
     WARN_MQTTF("Failed to allocate JSON buffer");
     return;

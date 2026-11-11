@@ -35,7 +35,7 @@ void WebMirrorBuf::init(size_t capacity) {
   if (buf || capacity == 0) return;
   cap = capacity;
   len = 0;
-  buf = (char*)ps_alloc(cap, AllocPref::PreferPSRAM, "gWebMirror.buf");
+  buf = (char*)ps_alloc(cap, AllocPref::PreferPsram, "gWebMirror.buf");
   if (buf) buf[0] = '\0';
   // Create mutex for thread-safe access
   if (!mutex) {
@@ -258,7 +258,7 @@ String getCookieSID(httpd_req_t* req) {
   // Read into a PSRAM buffer to avoid heap allocations and also avoid large stack usage
   static char* cookieBuf = nullptr;
   if (!cookieBuf) {
-    cookieBuf = (char*)ps_alloc(COOKIE_BUF_SIZE, AllocPref::PreferPSRAM, "cookie.buf");
+    cookieBuf = (char*)ps_alloc(COOKIE_BUF_SIZE, AllocPref::PreferPsram, "cookie.buf");
     if (!cookieBuf) return "";
   }
 
@@ -364,7 +364,7 @@ WebBodyBuffer webReadRequestBody(httpd_req_t* req, size_t maxLen, const char* al
     body.status = WebBodyStatus::TooLarge;
     return body;
   }
-  char* raw = (char*)ps_alloc(contentLen + 1, AllocPref::PreferPSRAM, allocTag);
+  char* raw = (char*)ps_alloc(contentLen + 1, AllocPref::PreferPsram, allocTag);
   if (!raw) {
     ERROR_MEMORYF("request body of %u bytes not allocated (%s)", (unsigned)(contentLen + 1), allocTag ? allocTag : "");
     body.status = WebBodyStatus::NoMemory;

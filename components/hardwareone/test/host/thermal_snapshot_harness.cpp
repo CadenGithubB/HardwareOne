@@ -39,7 +39,7 @@ static struct { int thermalRotation = 0; float oledThermalScale = 2.5f; int ther
 static bool gThermalRunning = true, gThermalConnected = true;
 static unsigned long millis() { return 12345; }
 static std::vector<void*> allocations;
-enum class AllocPref { PreferPSRAM };
+enum class AllocPref { PreferPsram };
 static void* ps_alloc(size_t size, AllocPref, const char*) {
   assert(!semaphore.held);
   if (!allocationAvailable || allocationsBeforeFailure == 0) return nullptr;
@@ -114,12 +114,12 @@ static void reset(bool interpolation = false) {
   waits.clear(); gSettings = {}; gSettings.oledThermalScale = 2.5f; display = {};
   gMLX90640 = reinterpret_cast<void*>(0x1234);
   driverDestroyed = scratchReset = exited = delays = 0; stopAfterDelay = false;
-  DATA.thermalFrame = static_cast<int16_t*>(ps_alloc(768 * sizeof(int16_t), AllocPref::PreferPSRAM, "fixture"));
+  DATA.thermalFrame = static_cast<int16_t*>(ps_alloc(768 * sizeof(int16_t), AllocPref::PreferPsram, "fixture"));
   for (int i = 0; i < 768; ++i) DATA.thermalFrame[i] = static_cast<int16_t>((i % 257 - 128) * 13);
   DATA.thermalMinTemp = 2.5f; DATA.thermalMaxTemp = 9.5f; DATA.thermalAvgTemp = 5.5f;
   DATA.thermalLastUpdate = 98765; DATA.thermalSeq = 27; DATA.thermalDataValid = true;
   if (interpolation) {
-    DATA.thermalInterpolated = static_cast<float*>(ps_alloc(3072 * sizeof(float), AllocPref::PreferPSRAM, "fixture"));
+    DATA.thermalInterpolated = static_cast<float*>(ps_alloc(3072 * sizeof(float), AllocPref::PreferPsram, "fixture"));
     DATA.thermalInterpolatedWidth = 64; DATA.thermalInterpolatedHeight = 48;
     for (int i = 0; i < 3072; ++i) DATA.thermalInterpolated[i] = (i % 157 - 78) / 4.0f;
   }

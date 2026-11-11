@@ -16,7 +16,7 @@ class TestJsonAllocator : public ArduinoJson::Allocator {
  void* reallocate(void* p,size_t n) override { return realloc(p,n); }
 };
 static ArduinoJson::Allocator* psramJsonAllocator() { static TestJsonAllocator allocator; return &allocator; }
-enum class AllocPref { PreferPSRAM };
+enum class AllocPref { PreferPsram };
 static void* ps_alloc(size_t n, AllocPref, const char*) { return malloc(n); }
 template<typename T> static void ps_delete(T* p) { if (p) { p->~T(); free(p); } }
 static uint32_t esp_random() { static uint32_t n = 100; return ++n; }

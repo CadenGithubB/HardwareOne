@@ -113,7 +113,7 @@ static bool ensureTurnCapacity(InternalTurn& t, uint32_t needed) {
     if (t.textCap >= LLM_CHAT_TURN_MAX_BYTES) return false;
     uint32_t newCap = LLM_CHAT_TURN_MAX_BYTES;
     char* newBuf = (char*)ps_realloc(t.text, newCap,
-                                     AllocPref::PreferPSRAM);
+                                     AllocPref::PreferPsram);
     if (!newBuf) return false;
     t.text = newBuf;
     t.textCap = newCap;
@@ -122,7 +122,7 @@ static bool ensureTurnCapacity(InternalTurn& t, uint32_t needed) {
   uint32_t newCap = t.textCap > 0 ? t.textCap : LLM_CHAT_TURN_INIT_BYTES;
   while (newCap < needed + 1) newCap *= 2;
   if (newCap > LLM_CHAT_TURN_MAX_BYTES) newCap = LLM_CHAT_TURN_MAX_BYTES;
-  char* newBuf = (char*)ps_realloc(t.text, newCap, AllocPref::PreferPSRAM);
+  char* newBuf = (char*)ps_realloc(t.text, newCap, AllocPref::PreferPsram);
   if (!newBuf) return false;
   t.text = newBuf;
   t.textCap = newCap;

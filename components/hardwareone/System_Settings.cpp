@@ -846,7 +846,7 @@ String encryptString(const String& password) {
   mbedtls_aes_init(&aes);
   mbedtls_aes_setkey_enc(&aes, key, 128);
 
-  uint8_t* ciphertext = (uint8_t*)ps_alloc(paddedLen, AllocPref::PreferPSRAM, "aes.enc.cipher");
+  uint8_t* ciphertext = (uint8_t*)ps_alloc(paddedLen, AllocPref::PreferPsram, "aes.enc.cipher");
   if (!ciphertext) {
     mbedtls_platform_zeroize(plaintext, paddedLen);
     free(plaintext);
@@ -874,7 +874,7 @@ String encryptString(const String& password) {
 
   // Encode: AES:<hex-iv>:<hex-ciphertext>
   int resultLen = 4 + 32 + 1 + (paddedLen * 2) + 1;  // "AES:" + IV + ":" + ciphertext + null
-  char* result = (char*)ps_alloc(resultLen, AllocPref::PreferPSRAM, "aes.enc.result");
+  char* result = (char*)ps_alloc(resultLen, AllocPref::PreferPsram, "aes.enc.result");
   if (!result) {
     free(ciphertext);
     ERROR_MEMORYF("[AES] Failed to allocate result buffer");
@@ -940,7 +940,7 @@ String decryptString(const String& encryptedPassword, bool internalResult) {
 
   // Decode ciphertext
   int ciphertextLen = ciphertextHex.length() / 2;
-  uint8_t* ciphertext = (uint8_t*)ps_alloc(ciphertextLen, AllocPref::PreferPSRAM, "aes.dec.cipher");
+  uint8_t* ciphertext = (uint8_t*)ps_alloc(ciphertextLen, AllocPref::PreferPsram, "aes.dec.cipher");
   if (!ciphertext) {
     ERROR_MEMORYF("[AES] Failed to allocate ciphertext buffer");
     return "";
@@ -1117,7 +1117,7 @@ static bool aesBlobDecryptsWith(const String& keyMaterial, const char* blob) {
   int ctLen = (int)strlen(ctHex) / 2;
   if (ctLen <= 0 || (ctLen % 16) != 0) return false;
 
-  uint8_t* ct = (uint8_t*)ps_alloc(ctLen, AllocPref::PreferPSRAM, "aes.epoch.ct");
+  uint8_t* ct = (uint8_t*)ps_alloc(ctLen, AllocPref::PreferPsram, "aes.epoch.ct");
   // pt is decrypted-secret scratch; ciphertext may remain in PSRAM.
   uint8_t* pt = (uint8_t*)ps_alloc(ctLen, AllocPref::RequireInternal, "aes.epoch.pt");
   if (!ct || !pt) {
@@ -3957,7 +3957,7 @@ const char* cmd_controls(const String& argsInput) {
   }
 
   static char* controlsJsonBuf = nullptr;
-  if (!controlsJsonBuf) controlsJsonBuf = (char*)ps_alloc(4096, AllocPref::PreferPSRAM, "controls.json");
+  if (!controlsJsonBuf) controlsJsonBuf = (char*)ps_alloc(4096, AllocPref::PreferPsram, "controls.json");
   if (!controlsJsonBuf) return "{\"error\":\"oom\"}";
   serializeJson(doc, controlsJsonBuf, 4096);
   return controlsJsonBuf;

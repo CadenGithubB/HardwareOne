@@ -285,7 +285,7 @@ bool tofInit() {
     // Wire copies I2C bytes through its own buffers, not DMA from this object.
     // Prefer PSRAM, retaining the standard internal fallback/bypass policy.
     // Pair placement-new with ps_delete on every teardown path below.
-    void* tofObjBuf = ps_alloc(sizeof(VL53L4CX), AllocPref::PreferPSRAM, "tof.obj");
+    void* tofObjBuf = ps_alloc(sizeof(VL53L4CX), AllocPref::PreferPsram, "tof.obj");
     if (!tofObjBuf) return false;
     gVL53L4CX = new (tofObjBuf) VL53L4CX();
     

@@ -48,7 +48,7 @@ bool readText(const char* path, String& out, int) {
 bool readAutomationsJson(String& out) {
   return readText(AUTOMATIONS_JSON_FILE, out, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "automation.state"));
 }
-enum class AllocPref : uint8_t { PreferPSRAM = 0 };
+enum class AllocPref : uint8_t { PreferPsram = 0 };
 static int liveAllocations = 0;
 void* ps_alloc(size_t size, AllocPref, const char*) { ++liveAllocations; return std::malloc(size); }
 void ps_free(void* memory) { if (memory) --liveAllocations; std::free(memory); }

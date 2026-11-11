@@ -220,7 +220,7 @@ bool initRemoteSensorSystem() {
   const size_t cacheBytes = kCacheEntries * sizeof(RemoteSensorData);
   if (!gRemoteSensorCache) {
     gRemoteSensorCache = (RemoteSensorData*)ps_alloc(
-        cacheBytes, AllocPref::PreferPSRAM, "espnow.remoteSensors");
+        cacheBytes, AllocPref::PreferPsram, "espnow.remoteSensors");
     if (!gRemoteSensorCache) {
       ERROR_SYSTEMF("[REMOTE_SENSORS] Failed to allocate %u-byte cache",
                     (unsigned)cacheBytes);
@@ -933,7 +933,7 @@ static bool startSensorBroadcasterLocked() {
       if (gSensorSpecs[i].bufBytes > maxBuf) maxBuf = gSensorSpecs[i].bufBytes;
     }
     if (maxBuf == 0) maxBuf = 256;  // defensive; should not happen if any sensor is enabled
-    gBroadcasterBuf = (char*)ps_alloc(maxBuf, AllocPref::RequirePSRAM,
+    gBroadcasterBuf = (char*)ps_alloc(maxBuf, AllocPref::RequirePsram,
                                       "espnow.sensor.broadcast");
     if (!gBroadcasterBuf) {
       DEBUGF(DEBUG_ESPNOW_CORE, "[SENSOR_BROADCASTER] Failed to alloc %u-byte PSRAM buffer", (unsigned)maxBuf);
@@ -1181,7 +1181,7 @@ int buildThermalDataJSONInteger(char* buf, size_t bufSize) {
   if (!buf || bufSize == 0) return 0;
   std::unique_ptr<int16_t, decltype(&ps_free)> frame(
       static_cast<int16_t*>(ps_alloc(THERMAL_RAW_FRAME_PIXELS * sizeof(int16_t),
-                                    AllocPref::PreferPSRAM, "thermal.espnow.snapshot")), ps_free);
+                                    AllocPref::PreferPsram, "thermal.espnow.snapshot")), ps_free);
   ThermalCache reading;
   if (!frame || !thermalFrameSnapshot(reading, frame.get(), THERMAL_RAW_FRAME_PIXELS, false, 100)) {
     int n = snprintf(buf, bufSize, "{\"error\":\"Sensor data temporarily unavailable\"}");

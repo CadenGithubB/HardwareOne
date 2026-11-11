@@ -169,7 +169,7 @@ static bool loadLabelsFromExplicitPath(const String& labelsPath, int classCount)
   }
 
   const size_t tableBytes = static_cast<size_t>(classCount) * EI_LABEL_MAX;
-  gModelLabels = static_cast<char*>(ps_alloc(tableBytes, AllocPref::PreferPSRAM, "ei.labels"));
+  gModelLabels = static_cast<char*>(ps_alloc(tableBytes, AllocPref::PreferPsram, "ei.labels"));
   if (!gModelLabels) {
     labelsFile.close();
     ERROR_SYSTEMF("[EdgeImpulse] Failed to allocate %d label slots", classCount);
@@ -613,7 +613,7 @@ static bool loadModelLocked(const char* path) {
     }
 
     DEBUG_SYSTEMF("[EI_DEBUG] Allocating model buffer: %zu bytes", fileSize);
-    gModelBuffer = (uint8_t*)ps_alloc(fileSize, AllocPref::PreferPSRAM, "ei.model");
+    gModelBuffer = (uint8_t*)ps_alloc(fileSize, AllocPref::PreferPsram, "ei.model");
     if (!gModelBuffer) {
       ERROR_SYSTEMF("[EdgeImpulse] Failed to allocate model buffer (%zu bytes)", fileSize);
       DEBUG_SYSTEMF("[EI_DEBUG] Allocation FAILED! Heap: %lu, PSRAM: %lu",
@@ -681,7 +681,7 @@ static bool loadModelLocked(const char* path) {
   
   // Allocate tensor arena in PSRAM
   DEBUG_SYSTEMF("[EI_DEBUG] Allocating tensor arena: %zu KB", kTensorArenaSize / 1024);
-  gTensorArena = (uint8_t*)ps_alloc(kTensorArenaSize, AllocPref::PreferPSRAM, "ei.arena");
+  gTensorArena = (uint8_t*)ps_alloc(kTensorArenaSize, AllocPref::PreferPsram, "ei.arena");
   
   if (!gTensorArena) {
     ERROR_SYSTEMF("[EdgeImpulse] Failed to allocate tensor arena (%zu bytes)", kTensorArenaSize);
@@ -775,7 +775,7 @@ static bool loadModelLocked(const char* path) {
 
   // The resize buffer holds one RGB888 frame at the model's input geometry.
   gResizedBufferSize = static_cast<size_t>(gModelInputWidth) * gModelInputHeight * 3;
-  gResizedBuffer = static_cast<uint8_t*>(ps_alloc(gResizedBufferSize, AllocPref::PreferPSRAM, "ei.resized"));
+  gResizedBuffer = static_cast<uint8_t*>(ps_alloc(gResizedBufferSize, AllocPref::PreferPsram, "ei.resized"));
   if (!gResizedBuffer) {
     ERROR_SYSTEMF("[EdgeImpulse] Failed to allocate %zu-byte resize buffer", gResizedBufferSize);
     freeModelResources();
@@ -1064,7 +1064,7 @@ bool isEdgeImpulseModelLoaded() {
 
 // Decoded pixels go to PSRAM; hwjpeg::Image releases them with free().
 static uint8_t* allocateEdgeImpulseRgb(size_t bytes) {
-  return static_cast<uint8_t*>(ps_alloc(bytes, AllocPref::PreferPSRAM, "ei.rgb"));
+  return static_cast<uint8_t*>(ps_alloc(bytes, AllocPref::PreferPsram, "ei.rgb"));
 }
 
 // Decode a JPEG through the HAL_JPEG owner, capped at VGA. On success `image`
@@ -1302,7 +1302,7 @@ EIResults runInferenceFromFile(const char* imagePath, const AuthContext& ctx) {
       return results;
     }
 
-    imgBuffer = (uint8_t*)ps_alloc(fileSize, AllocPref::PreferPSRAM, "ei.img");
+    imgBuffer = (uint8_t*)ps_alloc(fileSize, AllocPref::PreferPsram, "ei.img");
     if (!imgBuffer) {
       imgFile.close();
       results.errorMessage = "Failed to allocate image buffer";

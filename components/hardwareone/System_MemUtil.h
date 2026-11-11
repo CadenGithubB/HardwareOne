@@ -50,15 +50,15 @@ inline size_t hw1InternalTotalBytes() {
 // Keep the historical AllocPref type and the first two numeric values intact.
 // AllocPolicy is the clearer spelling for new code.
 enum class AllocPref : uint8_t {
-  PreferPSRAM     = 0,  // SPIRAM|8BIT, then INTERNAL|8BIT
+  PreferPsram     = 0,  // SPIRAM|8BIT, then INTERNAL|8BIT
   PreferInternal  = 1,  // INTERNAL|8BIT, then SPIRAM|8BIT
-  RequirePSRAM    = 2,  // SPIRAM|8BIT only
+  RequirePsram    = 2,  // SPIRAM|8BIT only
   RequireInternal = 3,  // INTERNAL|8BIT only
   DefaultHeap     = 4   // libc allocator, unless the global bypass is enabled
 };
 using AllocPolicy = AllocPref;
 
-inline bool hasPSRAMAvail() {
+inline bool hasPsramAvail() {
 #if defined(BOARD_HAS_PSRAM) || (defined(CONFIG_SPIRAM) && CONFIG_SPIRAM)
   return true;
 #else
@@ -81,7 +81,7 @@ inline void setPsramBypass(bool enabled) {
   psramBypassGlobal().store(enabled, std::memory_order_relaxed);
 }
 
-// Counts successful PreferPSRAM allocations that had to use internal DRAM.
+// Counts successful PreferPsram allocations that had to use internal DRAM.
 // Updates are atomic; logging is rate-limited in System_MemUtil.cpp.
 extern std::atomic<uint32_t> gPsAllocFallbacks;
 uint32_t psAllocFallbackCount();
@@ -89,7 +89,7 @@ uint32_t psAllocFallbackCount();
 // Optional allocation debug hook, defined weakly in HardwareOne.cpp. The
 // requestedPS records caller policy, usedPS comes from the returned pointer's
 // actual memory region, and fellBack is true only when an attempted
-// PreferPSRAM allocation succeeds from internal DRAM.
+// PreferPsram allocation succeeds from internal DRAM.
 extern "C" void memAllocDebug(const char* op, void* ptr, size_t size,
                               bool requestedPS, bool usedPS, bool fellBack,
                               const char* tag);
@@ -108,7 +108,7 @@ inline void* ps_alloc(size_t size, AllocPref pref) {
   return ps_alloc(size, static_cast<AllocPolicy>(pref), nullptr);
 }
 inline void* ps_alloc(size_t size) {
-  return ps_alloc(size, AllocPolicy::PreferPSRAM, nullptr);
+  return ps_alloc(size, AllocPolicy::PreferPsram, nullptr);
 }
 inline void* ps_calloc(size_t n, size_t size, AllocPref pref) {
   return ps_calloc(n, size, static_cast<AllocPolicy>(pref), nullptr);
@@ -158,7 +158,7 @@ inline ArduinoJson::Allocator* psramJsonAllocator() {
   static char* name = nullptr; \
   static constexpr size_t name##_SIZE = size; \
   if (!name) { \
-    name = (char*)ps_alloc(size, AllocPolicy::PreferPSRAM, #name); \
+    name = (char*)ps_alloc(size, AllocPolicy::PreferPsram, #name); \
     if (name) name[0] = '\0'; \
   } \
   if (!name) return "Error: Failed to allocate buffer"

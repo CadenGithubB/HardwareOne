@@ -30,7 +30,7 @@ class String {
 };
 
 // ---- Allocation ------------------------------------------------------------
-enum class AllocPref { PreferPSRAM, PreferInternal };
+enum class AllocPref { PreferPsram, PreferInternal };
 static bool gAllocFail = false;
 static int gLiveAllocs = 0;
 static size_t gLastAllocSize = 0;

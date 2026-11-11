@@ -3,7 +3,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
-enum class AllocPref : uint8_t { PreferPSRAM = 0, PreferInternal = 1, RequirePSRAM = 2, RequireInternal = 3, DefaultHeap = 4 };
+enum class AllocPref : uint8_t { PreferPsram = 0, PreferInternal = 1, RequirePsram = 2, RequireInternal = 3, DefaultHeap = 4 };
 using AllocPolicy = AllocPref;
 bool psramAvailableRuntime();
 bool psramBypassEnabled();

@@ -425,7 +425,7 @@ bool list(const AuthContext& ctx, uint32_t owner, bool sd, uint32_t offset,
   uint16_t* heap = nullptr;
   if (keep) {
     block.data = ps_alloc(keep * (sizeof(NameSlot) + sizeof(uint16_t)),
-                          AllocPolicy::PreferPSRAM, "qnote.list");
+                          AllocPolicy::PreferPsram, "qnote.list");
     if (!block.data) return fail(why, "Out of memory");
     names = static_cast<NameSlot*>(block.data);
     heap = reinterpret_cast<uint16_t*>(static_cast<char*>(block.data) + keep * sizeof(NameSlot));

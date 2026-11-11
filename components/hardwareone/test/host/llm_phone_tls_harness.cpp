@@ -34,7 +34,7 @@ struct esp_tls_t{};
 static void esp_tls_conn_destroy(esp_tls_t*){assert(false);}
 static int esp_tls_conn_read(esp_tls_t*,void*,size_t){assert(false);return -1;}
 static int esp_tls_conn_write(esp_tls_t*,const void*,size_t){assert(false);return -1;}
-enum class AllocPref{PreferPSRAM,RequireInternal};
+enum class AllocPref{PreferPsram,RequireInternal};
 static void* ps_alloc(size_t n,AllocPref pref,const char*){assert(pref==AllocPref::RequireInternal);return std::malloc(n);}
 static void ps_free(void* p){std::free(p);}
 static uint32_t clockMs=0;

@@ -479,7 +479,7 @@ bool MapCore::loadMapFile(const char* path) {
   }
   if (header.nameCount > 0 && header.nameCount <= MAX_MAP_NAMES) {
     MapNameEntry* names = (MapNameEntry*)ps_alloc(sizeof(MapNameEntry) * header.nameCount,
-                                                  AllocPref::RequirePSRAM, "maps.names");
+                                                  AllocPref::RequirePsram, "maps.names");
     if (names) {
       f.seek(sizeof(HWMapHeader));
       uint16_t parsed = 0;
@@ -512,7 +512,7 @@ bool MapCore::loadMapFile(const char* path) {
   if (_currentMap.tileCount > 0 && _currentMap.tileCount <= HWMAP_MAX_TILES) {
     size_t tileDirSize = sizeof(HWMapTileDirEntry) * _currentMap.tileCount;
     HWMapTileDirEntry* tileDir = (HWMapTileDirEntry*)ps_alloc(tileDirSize,
-                                                              AllocPref::RequirePSRAM,
+                                                              AllocPref::RequirePsram,
                                                               "maps.tiledir");
     
     if (tileDir) {
@@ -630,7 +630,7 @@ bool MapCore::loadMapFile(const char* path) {
   if (poolSize > 8 * 1024 * 1024) poolSize = 8 * 1024 * 1024; // sanity cap
   uint8_t* pool = nullptr;
   while (poolSize >= tierSpecs[0].slotSize && !pool) {
-    pool = (uint8_t*)ps_alloc(poolSize, AllocPref::RequirePSRAM, "maps.tilecache.pool");
+    pool = (uint8_t*)ps_alloc(poolSize, AllocPref::RequirePsram, "maps.tilecache.pool");
     if (!pool) {
       poolSize /= 2;
     }
@@ -695,7 +695,7 @@ bool MapCore::loadMapFile(const char* path) {
 
   // Allocate slot metadata array
   TileCacheSlot* slots = (TileCacheSlot*)ps_alloc(sizeof(TileCacheSlot) * totalSlots,
-                                                  AllocPref::RequirePSRAM, "maps.tilecache.slots");
+                                                  AllocPref::RequirePsram, "maps.tilecache.slots");
   if (!slots) {
     free(pool);
     ERROR_MAPSF("Failed to allocate %u tile cache slot entries", totalSlots);
@@ -2256,7 +2256,7 @@ ConfigLoad::Status WaypointManager::_waypointsLoad = ConfigLoad::Status::NotLoad
 bool WaypointManager::ensureStorage() {
   if (_waypoints) return true;
   _waypoints = (Waypoint*)ps_alloc(MAX_WAYPOINTS * sizeof(Waypoint),
-                                   AllocPref::RequirePSRAM, "maps.waypoints");
+                                   AllocPref::RequirePsram, "maps.waypoints");
   if (!_waypoints) {
     ERROR_MAPSF("[WAYPOINTS] Failed to allocate %u-byte waypoint table",
                 (unsigned)(MAX_WAYPOINTS * sizeof(Waypoint)));
@@ -2776,7 +2776,7 @@ bool copyTrackSnapshot(GPSTrackSnapshot& out, const GPSTrackPoint* points,
   const int count = status.pointCount < maxPoints ? status.pointCount : maxPoints;
   if (count) {
     out.points.reset(static_cast<GPSTrackPoint*>(ps_alloc(
-        count * sizeof(GPSTrackPoint), AllocPref::PreferPSRAM, "gps.snapshot")));
+        count * sizeof(GPSTrackPoint), AllocPref::PreferPsram, "gps.snapshot")));
     if (!out.points) return false;
     memcpy(out.points.get(), points + status.pointCount - count, count * sizeof(GPSTrackPoint));
   }
@@ -2960,7 +2960,7 @@ bool GPSTrackManager::loadTrackImpl(const char* filepath, String& errorMsg,
       return false;
     }
     pending.reset(static_cast<GPSTrackPoint*>(ps_alloc(
-        MAX_TRACK_POINTS * sizeof(GPSTrackPoint), AllocPref::PreferPSRAM, "gps.track")));
+        MAX_TRACK_POINTS * sizeof(GPSTrackPoint), AllocPref::PreferPsram, "gps.track")));
     if (!pending) {
       errorMsg = "Memory allocation failed";
       return false;
@@ -3185,7 +3185,7 @@ const char* GPSTrackManager::startLiveTracking() {
   }
   if (needsBuffer) {
     pending.reset((GPSTrackPoint*)ps_alloc(
-        MAX_TRACK_POINTS * sizeof(GPSTrackPoint), AllocPref::PreferPSRAM, "gps.live"));
+        MAX_TRACK_POINTS * sizeof(GPSTrackPoint), AllocPref::PreferPsram, "gps.live"));
     if (!pending) return "Error: Cannot allocate live track buffer";
   }
 
@@ -3329,7 +3329,7 @@ void GPSTrackManager::renderTrack(MapRenderer* renderer,
   static GPSTrackPoint* points = nullptr;
   if (!points) {
     points = static_cast<GPSTrackPoint*>(ps_alloc(
-        MAX_TRACK_POINTS * sizeof(GPSTrackPoint), AllocPref::PreferPSRAM, "gps.render"));
+        MAX_TRACK_POINTS * sizeof(GPSTrackPoint), AllocPref::PreferPsram, "gps.render"));
     if (!points) {
       ERROR_MAPSF("Track render buffer unavailable (%u bytes)",
                   (unsigned)(MAX_TRACK_POINTS * sizeof(GPSTrackPoint)));

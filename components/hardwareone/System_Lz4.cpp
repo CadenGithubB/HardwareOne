@@ -134,7 +134,7 @@ size_t lz4CompressBlock(const uint8_t* src, size_t srcLen,
   // and the table needs no sentinel pass beyond the zeroing calloc gives
   // us. uint16 is sufficient because of the input ceiling above.
   uint16_t* table = (uint16_t*)ps_calloc(LZ4_HASHSIZE, sizeof(uint16_t),
-                                         AllocPref::PreferPSRAM, "lz4.table");
+                                         AllocPref::PreferPsram, "lz4.table");
   if (!table) return 0;
 
   const uint8_t* ip     = src;

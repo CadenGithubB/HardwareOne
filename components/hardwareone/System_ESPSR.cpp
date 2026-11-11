@@ -260,7 +260,7 @@ static void runVoiceCommandJob(void* opaque) {
     }
     xSemaphoreGive(gVoiceArmMutex);
   }
-  char* result = static_cast<char*>(ps_alloc(CMD_RESULT_MAX, AllocPref::PreferPSRAM, "sr.command.result"));
+  char* result = static_cast<char*>(ps_alloc(CMD_RESULT_MAX, AllocPref::PreferPsram, "sr.command.result"));
   bool ok = false;
   if (result) {
     if (authorized) {
@@ -292,7 +292,7 @@ static bool executeVoiceCommandAsArmedUser(const char* cliCmd, char* out, size_t
   }
   VoiceCommandJob* job = nullptr;
   if (gVoiceArmed && gVoiceArmedUser.length() != 0) {
-    void* memory = ps_alloc(sizeof(VoiceCommandJob), AllocPref::PreferPSRAM, "sr.command.job");
+    void* memory = ps_alloc(sizeof(VoiceCommandJob), AllocPref::PreferPsram, "sr.command.job");
     if (memory) {
       job = new (memory) VoiceCommandJob();
       job->armGeneration = gVoiceArmGeneration;
@@ -1462,7 +1462,7 @@ static bool srSnipInitRingBuffer() {
   size_t preSamples = (I2S_SR_SAMPLE_RATE * gSrSnipPreMs) / 1000;
   gSrSnipRingSamples = preSamples;
   gSrSnipRing = (int16_t*)ps_alloc(gSrSnipRingSamples * sizeof(int16_t),
-                                   AllocPref::RequirePSRAM, "sr.snip.ring");
+                                   AllocPref::RequirePsram, "sr.snip.ring");
   if (!gSrSnipRing) {
     ERROR_SRF("Failed to allocate PSRAM snippet ring buffer (%u samples); snippet capture disabled",
               (unsigned)gSrSnipRingSamples);
@@ -1506,7 +1506,7 @@ static void srSnipStartSession(const char* reason, int cmdId, const char* phrase
   }
   size_t maxSamples = (I2S_SR_SAMPLE_RATE * gSrSnipMaxMs) / 1000;
   gSrSnipSessionBuf = (int16_t*)ps_alloc(maxSamples * sizeof(int16_t),
-                                         AllocPref::RequirePSRAM,
+                                         AllocPref::RequirePsram,
                                          "sr.snip.session");
   if (!gSrSnipSessionBuf) {
     ERROR_SRF("SnipSession: failed to allocate PSRAM session buffer (%u samples); speech remains active",
@@ -1909,7 +1909,7 @@ static bool mnUpdateLocked() {
   }
 
   const size_t bytes = count * sizeof(MNCommandSnapshot) + stringBytes + csvBytes;
-  void* storage = ps_alloc(bytes, AllocPref::PreferPSRAM, "sr.mn.commands");
+  void* storage = ps_alloc(bytes, AllocPref::PreferPsram, "sr.mn.commands");
   if (!storage) return mnTableUpdateFailed("Not enough memory to replace speech commands; restart SR");
   auto* commands = static_cast<MNCommandSnapshot*>(storage);
   char* cursor = reinterpret_cast<char*>(commands + count);
@@ -2873,8 +2873,8 @@ bool startESPSR() {
   gSRFetchSamples = fetch;
   gSrAfeFeedChunk = feed;
   gSrAfeFetchChunk = fetch;
-  gSRFeedBuffer = static_cast<int16_t*>(ps_alloc(feed * sizeof(int16_t), AllocPref::PreferPSRAM, "sr.afe.feed"));
-  gSRMNBuffer = static_cast<int16_t*>(ps_alloc(fetch * sizeof(int16_t), AllocPref::PreferPSRAM, "sr.mn.input"));
+  gSRFeedBuffer = static_cast<int16_t*>(ps_alloc(feed * sizeof(int16_t), AllocPref::PreferPsram, "sr.afe.feed"));
+  gSRMNBuffer = static_cast<int16_t*>(ps_alloc(fetch * sizeof(int16_t), AllocPref::PreferPsram, "sr.mn.input"));
   if (!gSRFeedBuffer || !gSRMNBuffer) {
     srSetError("Failed to allocate speech PCM buffers");
     stopESPSRLocked();

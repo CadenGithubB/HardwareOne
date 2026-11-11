@@ -690,7 +690,7 @@ static size_t chatEstBytes(const CollapsedMsgRef& ref, const ReceivedTextMessage
 // since the collapse is skipped.
 static void chatBuildPages(int rc) {
   if (!gChatHead) {
-    void* mem = ps_alloc(sizeof(ReceivedTextMessage), AllocPref::PreferPSRAM, "g2.espnow.chatHead");
+    void* mem = ps_alloc(sizeof(ReceivedTextMessage), AllocPref::PreferPsram, "g2.espnow.chatHead");
     if (mem) gChatHead = new (mem) ReceivedTextMessage();
   }
   size_t budget = CHAT_BUF_SIZE - 256, acc = 0;

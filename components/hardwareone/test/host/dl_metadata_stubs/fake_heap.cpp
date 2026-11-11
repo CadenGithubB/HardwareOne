@@ -153,9 +153,9 @@ extern "C" void memAllocDebug(const char* op, void* ptr, size_t size, bool reque
                               const char* tag) {
   if (gDebugHook) gDebugHook(op, ptr, size, requestedPS, usedPS, fellBack, tag);
 }
-// As System_MemUtil.cpp: PreferPSRAM = PSRAM, then internal; a fallback is counted.
+// As System_MemUtil.cpp: PreferPsram = PSRAM, then internal; a fallback is counted.
 void* ps_alloc(size_t size, AllocPolicy policy, const char* tag) {
-  assert(policy == AllocPolicy::PreferPSRAM && tag && !std::strncmp(tag, "stt.", 4));
+  assert(policy == AllocPolicy::PreferPsram && tag && !std::strncmp(tag, "stt.", 4));
   if (size == 0) return nullptr;
   const bool bypass = psramBypassEnabled();
   void* p = bypass ? nullptr : fake::take(4, size, true, fake::Origin::PsAlloc);

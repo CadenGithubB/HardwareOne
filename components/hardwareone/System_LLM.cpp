@@ -335,7 +335,7 @@ static void llmReleaseWorker() {
 // ============================================================================
 
 void* llmPsramAlloc(size_t size, const char* tag) {
-  void* p = ps_calloc(1, size, AllocPref::RequirePSRAM, tag);
+  void* p = ps_calloc(1, size, AllocPref::RequirePsram, tag);
   if (!p) {
     ERROR_LLMF("PSRAM alloc failed: %s (%u bytes)", tag, (unsigned)size);
   }
@@ -1322,7 +1322,7 @@ int llmGenerate(const char* prompt, LlmTokenCallback tokenCb,
   // Work on a mutable copy for normalization (PSRAM first: a transient the
   // internal heap's stacks and DMA buffers need not fight for).
   const size_t promptBytes = strlen(prompt) + 1;
-  char* norm_prompt = (char*)ps_alloc(promptBytes, AllocPref::PreferPSRAM, "llm.prompt.norm");
+  char* norm_prompt = (char*)ps_alloc(promptBytes, AllocPref::PreferPsram, "llm.prompt.norm");
   if (norm_prompt) memcpy(norm_prompt, prompt, promptBytes);
   if (norm_prompt) {
     // BLE intake (Bluetooth.cpp processBleCommandLine) normalizes \r\n\t → space,
@@ -1440,7 +1440,7 @@ int llmGenerate(const char* prompt, LlmTokenCallback tokenCb,
 
   // Encode prompt — heap-allocated to avoid stack overflow on long prompts
   size_t prompt_buf_n = strlen(prompt) + 3;
-  int* prompt_tokens = (int*)ps_alloc(prompt_buf_n * sizeof(int), AllocPref::PreferPSRAM,
+  int* prompt_tokens = (int*)ps_alloc(prompt_buf_n * sizeof(int), AllocPref::PreferPsram,
                                       "llm.prompt.tokens");
   if (!prompt_tokens) {
     setLlmError("OOM: prompt_tokens alloc");
@@ -2317,7 +2317,7 @@ int llmStartAsync(const char* prompt, const LlmGenParams& params) {
 
   // Allocate PSRAM result buffer on first call
   if (!gLlmResultBuf) {
-    gLlmResultBuf = (char*)ps_alloc(LLM_RESULT_BUF_SIZE, AllocPref::RequirePSRAM,
+    gLlmResultBuf = (char*)ps_alloc(LLM_RESULT_BUF_SIZE, AllocPref::RequirePsram,
                                     "llm.result.buf");
     if (!gLlmResultBuf) return 0;
   }

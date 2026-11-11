@@ -75,7 +75,7 @@ static SessionEntry sessionStorage[MAX_SESSIONS];
 static SessionEntry* gSessions = sessionStorage;
 static std::vector<int> revoked;
 
-enum class AllocPref : uint8_t { PreferPSRAM };
+enum class AllocPref : uint8_t { PreferPsram };
 static void* ps_calloc(size_t n, size_t size, AllocPref, const char*) { return std::calloc(n, size); }
 
 constexpr size_t GLOBAL_DEBUG_BUFFER_SIZE = 4096;

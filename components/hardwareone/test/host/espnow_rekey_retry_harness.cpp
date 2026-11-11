@@ -50,7 +50,7 @@ static void noteLog(const char* level, const char* fmt, ...) {
 // No file transfer in flight: the auto-trigger's mid-transfer deferral stays off.
 static bool espnowFileTransferActiveWithPeer(const uint8_t*) { return false; }
 
-enum class AllocPref { PreferPSRAM };
+enum class AllocPref { PreferPsram };
 static const char* gFailAllocTag = nullptr;   // ps_alloc returns null for this tag
 static void* ps_alloc(size_t n, AllocPref, const char* tag) {
   if (gFailAllocTag && tag && std::strcmp(tag, gFailAllocTag) == 0) return nullptr;
@@ -231,7 +231,7 @@ static V4PayloadSessionRekey peerReply(PeerSide& b, const V4PayloadSessionRekey&
 
 // Deliver a peer REKEY the way v4hSessionRekey hands it to cmd_exec.
 static void deliver(const PeerSide& b, const V4PayloadSessionRekey& rk) {
-  auto* w = (DeferredRekeyWork*)ps_alloc(sizeof(DeferredRekeyWork), AllocPref::PreferPSRAM, "test");
+  auto* w = (DeferredRekeyWork*)ps_alloc(sizeof(DeferredRekeyWork), AllocPref::PreferPsram, "test");
   w->msg = rk;
   std::memcpy(w->srcMac, b.mac, 6);
   runDeferredRekey(w);  // frees w

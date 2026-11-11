@@ -535,7 +535,7 @@ static bool ensurePeerCache() {
   if (sPeerEntries) return true;
   sPeerEntries = (V4PayloadFsEntry*)ps_alloc(
       FS_LIST_ENTRIES_PER_REPLY * sizeof(V4PayloadFsEntry),
-      AllocPref::PreferPSRAM, "filebrowser.peer.entries");
+      AllocPref::PreferPsram, "filebrowser.peer.entries");
   return sPeerEntries != nullptr;
 }
 
@@ -743,7 +743,7 @@ static bool initFileBrowser() {
     // PSRAM placement-new: FileManager's ~5 KB is an inline cachedEntries[64] POD
     // array (FileEntry has no String), so the whole object moves off internal DRAM.
     // Allocated once and kept; release only with ps_delete, never `delete`.
-    void* fmBuf = ps_alloc(sizeof(FileManager), AllocPref::PreferPSRAM, "oled.filemgr");
+    void* fmBuf = ps_alloc(sizeof(FileManager), AllocPref::PreferPsram, "oled.filemgr");
     if (fmBuf == nullptr) {
       return false;
     }

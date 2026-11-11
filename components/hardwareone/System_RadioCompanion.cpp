@@ -502,7 +502,7 @@ bool validateImage(File& file, size_t size, char* why, size_t whyCap) {
   }
   const char* marker = ESP_NOW_HOSTED_BRIDGE_MARKER;
   const size_t markerLen = strlen(marker);
-  uint8_t* buf = static_cast<uint8_t*>(ps_alloc(kUpdateChunk + markerLen, AllocPref::PreferPSRAM, "c6.scan"));
+  uint8_t* buf = static_cast<uint8_t*>(ps_alloc(kUpdateChunk + markerLen, AllocPref::PreferPsram, "c6.scan"));
   if (!buf) {
     snprintf(why, whyCap, "out of memory for the image scan");
     return false;
@@ -564,7 +564,7 @@ void updateProc(void* arg) {
     esp_err_t err = radioHalTransportUp() ? ESP_OK : radioHalStartUpdateTransport();
     BROADCAST_PRINTF("[C6] Updating companion firmware from %s (%u bytes)", job->path.c_str(),
                      static_cast<unsigned>(size));
-    uint8_t* buf = static_cast<uint8_t*>(ps_alloc(kUpdateChunk, AllocPref::PreferPSRAM, "c6.update"));
+    uint8_t* buf = static_cast<uint8_t*>(ps_alloc(kUpdateChunk, AllocPref::PreferPsram, "c6.update"));
     if (err == ESP_OK) err = buf ? radioHalUpdateBegin() : ESP_ERR_NO_MEM;
     size_t sent = 0;
     uint8_t lastPercent = 0;
@@ -881,7 +881,7 @@ const char* cmd_c6status(const String& argsInput) {
     root["schema"] = 1;
     fillStatus(root, true);
     static char* buf = nullptr;
-    if (!buf) buf = static_cast<char*>(ps_alloc(2048, AllocPref::PreferPSRAM, "c6status.json"));
+    if (!buf) buf = static_cast<char*>(ps_alloc(2048, AllocPref::PreferPsram, "c6status.json"));
     if (!buf) return "{\"error\":\"oom\"}";
     serializeJson(doc, buf, 2048);
     return buf;

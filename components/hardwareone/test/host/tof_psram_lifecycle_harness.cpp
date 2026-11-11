@@ -17,7 +17,7 @@ static void check(bool condition, const char* description) {
   ++assertions;
   if (!condition) throw std::runtime_error(description);
 }
-enum class AllocPref { PreferPSRAM, PreferInternal };
+enum class AllocPref { PreferPsram, PreferInternal };
 using VL53L4CX_Error = int;
 using UBaseType_t = unsigned;
 static constexpr int VL53L4CX_ERROR_NONE = 0;
@@ -112,7 +112,7 @@ static unsigned pdMS_TO_TICKS(unsigned value);
 static void* ps_alloc(size_t size, AllocPref preference, const char* tag) {
   check(scenario.inTransaction, "object allocation remains inside I2C transaction");
   check(size == sizeof(VL53L4CX), "allocation uses sizeof driver, not stale constant");
-  check(preference == AllocPref::PreferPSRAM && std::strcmp(tag, "tof.obj") == 0,
+  check(preference == AllocPref::PreferPsram && std::strcmp(tag, "tof.obj") == 0,
         "object allocation preserves PSRAM preference and tracking tag");
   check(scenario.storage == nullptr, "previous raw storage released before allocation");
   ++scenario.allocations; scenario.events.push_back("allocate");

@@ -39,9 +39,9 @@ static void broadcastOutput(const char* text) {
   output.emplace_back(text);
 }
 #define BROADCAST_PRINTF(...) do { char text[256]; std::snprintf(text, sizeof(text), __VA_ARGS__); broadcastOutput(text); } while (0)
-enum class AllocPref { PreferPSRAM };
+enum class AllocPref { PreferPsram };
 static void* ps_alloc(size_t size, AllocPref pref, const char* tag) {
-  assert(!transactionHeld && pref == AllocPref::PreferPSRAM && std::strcmp(tag, "servo.obj") == 0);
+  assert(!transactionHeld && pref == AllocPref::PreferPsram && std::strcmp(tag, "servo.obj") == 0);
   if (!allocate) return nullptr;
   ++allocations;
   return std::malloc(size);

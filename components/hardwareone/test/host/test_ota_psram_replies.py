@@ -4,7 +4,7 @@
 Extracts both production memory macros, cmdOtaStatus (with its factory-updater
 descriptor reader), cmdOtaResetJournal, and bleUploadJson. Other OTA commands
 have capacity/ordering source guards, not a test-local OTA state machine.
-Hardware/NVS/status data and allocation backends are mocks; real PreferPSRAM
+Hardware/NVS/status data and allocation backends are mocks; real PreferPsram
 fallback policy is covered by MemUtil host tests.
 """
 from __future__ import annotations

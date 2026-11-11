@@ -276,13 +276,13 @@ void displayRemoteMode() {
 
     // Init scroll state and label buffer on first use (heap to save ~800 bytes DRAM BSS)
     if (!bondPickerScroll) {
-      bondPickerScroll = (OledScrollState*)ps_alloc(sizeof(OledScrollState), AllocPref::PreferPSRAM, "oled.bondpicker");
+      bondPickerScroll = (OledScrollState*)ps_alloc(sizeof(OledScrollState), AllocPref::PreferPsram, "oled.bondpicker");
       if (!bondPickerScroll) return;
       oledScrollInit(bondPickerScroll, nullptr, oledVisibleRows(10, 1, 4));
       oledScrollSetSplitPane(bondPickerScroll, 128, 0, 0);
     }
     if (!pickerLabels) {
-      pickerLabels = (char (*)[24])ps_alloc(16 * 24, AllocPref::PreferPSRAM, "oled.pickerlabels");
+      pickerLabels = (char (*)[24])ps_alloc(16 * 24, AllocPref::PreferPsram, "oled.pickerlabels");
     }
     if (!pickerLabels) return;
 

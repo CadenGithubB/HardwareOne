@@ -162,7 +162,7 @@ static esp_err_t esp_ble_gatts_send_indicate(esp_gatt_if_t, uint16_t connId, uin
                                              size_t len, uint8_t* value, bool needConfirm);
 
 // Allocation: never zeroed, as on the device.
-enum class AllocPref { PreferPSRAM, RequireInternal };
+enum class AllocPref { PreferPsram, RequireInternal };
 static void* ps_alloc(size_t size, AllocPref, const char*) {
   void* p = std::malloc(size);
   if (p) std::memset(p, 0xA5, size);

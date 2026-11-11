@@ -469,7 +469,7 @@ static esp_err_t handleBackup(httpd_req_t* req) {
                     HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
   }
-  char* buf = (char*)ps_alloc(jsonLen + 1, AllocPref::PreferPSRAM, "migrate.backup");
+  char* buf = (char*)ps_alloc(jsonLen + 1, AllocPref::PreferPsram, "migrate.backup");
   if (!buf) {
     httpd_resp_set_status(req, "500 Internal Server Error");
     httpd_resp_send(req, "{\"error\":\"Out of memory\"}", HTTPD_RESP_USE_STRLEN);
@@ -919,9 +919,9 @@ static esp_err_t handleRestore(httpd_req_t* req) {
   }
 
   // Allocate buffer for the payload (prefer PSRAM) — kept until confirm/discard.
-  // PreferPSRAM already falls back to internal DRAM, and routes that fallback
+  // PreferPsram already falls back to internal DRAM, and routes that fallback
   // through the shared counter instead of dropping it silently.
-  char* buf = (char*)ps_calloc(req->content_len + 1, 1, AllocPref::PreferPSRAM,
+  char* buf = (char*)ps_calloc(req->content_len + 1, 1, AllocPref::PreferPsram,
                                "migrate.payload");
   if (!buf) {
     sendJsonStatus(req, "500 Internal Server Error", "{\"error\":\"Out of memory\"}");

@@ -125,7 +125,7 @@ bool writeSidecar(const char* pcmPath, uint32_t endedMs, bool drained) {
   const size_t room = sizeof(jsonPath) - static_cast<size_t>(dot - jsonPath);
   if (strlcpy(dot, ".json", room) >= room) return false;
   constexpr size_t kCap = 1536;
-  char* text = static_cast<char*>(ps_alloc(kCap, AllocPref::PreferPSRAM, "stt.raw_json"));
+  char* text = static_cast<char*>(ps_alloc(kCap, AllocPref::PreferPsram, "stt.raw_json"));
   if (!text) return false;
   const auto& ring = gRaw.ring;
   const esp_app_desc_t* app = esp_app_get_description();
@@ -199,7 +199,7 @@ void sttRawCaptureSessionBegin(uint8_t audioSource, uint32_t sampleRate) {
     return;
   }
   if (!VFS::isSDWritable()) { setResult("not recorded: the SD card is not writable"); return; }
-  auto* memory = static_cast<int16_t*>(ps_alloc(kRingSamples * sizeof(int16_t), AllocPref::RequirePSRAM, "stt.raw_ring"));
+  auto* memory = static_cast<int16_t*>(ps_alloc(kRingSamples * sizeof(int16_t), AllocPref::RequirePsram, "stt.raw_ring"));
   if (!memory) { setResult("not recorded: no PSRAM for the 256 KiB ring"); return; }
   char path[sizeof(gRaw.path)];
   snprintf(path, sizeof(path), "%s/raw_%08" PRIx32 ".pcm", VFS::Scopes::STT_RAW_SD, esp_random());

@@ -49,7 +49,7 @@ class String {
 // INSERT_POLICY_HERE
 // INSERT_PAGER_HERE
 
-enum class AllocPref { PreferPSRAM };
+enum class AllocPref { PreferPsram };
 struct Allocation { size_t size; std::string tag; bool external; };
 static std::unordered_map<void*, Allocation> allocations;
 static bool externalAvailable = true;
@@ -60,7 +60,7 @@ static std::unordered_map<std::string, size_t> lastAllocationSize;  // by tag
 
 static bool allocationFails(AllocPref policy, const char* tag) {
   ++allocationAttempts;
-  check(policy == AllocPref::PreferPSRAM, "all production allocations prefer PSRAM");
+  check(policy == AllocPref::PreferPsram, "all production allocations prefer PSRAM");
   if (failAllocationCount && failAllocationTag == tag) {
     --failAllocationCount;
     return true;

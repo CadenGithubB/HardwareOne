@@ -29,7 +29,7 @@ HARNESS = r'''
 #define LLM_CHAT_TURN_MAX_BYTES kLlmReplyCapacityBytes
 #define DEBUG_G2F(...) ((void)0)
 #define pdMS_TO_TICKS(x) (x)
-enum class AllocPref { PreferPSRAM };
+enum class AllocPref { PreferPsram };
 static bool allocationFails = false;
 static void* ps_realloc(void* p, size_t n, AllocPref, const char*) {
   return allocationFails ? nullptr : realloc(p, n);

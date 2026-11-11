@@ -63,7 +63,7 @@ static BaseType_t xSemaphoreGiveRecursive(SemaphoreHandle_t mutex) {
   return pdTRUE;
 }
 
-enum class AllocPref { PreferPSRAM };
+enum class AllocPref { PreferPsram };
 static void* ps_alloc(size_t bytes, AllocPref, const char*) { return std::malloc(bytes); }
 
 #define DEBUG_BLE_CORE 1

@@ -185,7 +185,7 @@ bool gamepadInit() {
   // Allocate the seesaw library object on the heap if we haven't yet.
   // Kept across re-init attempts so the library's internal state survives.
   if (!gGamepadSeesaw) {
-    void* gamepadObjBuf = ps_alloc(sizeof(Adafruit_seesaw), AllocPref::PreferPSRAM,
+    void* gamepadObjBuf = ps_alloc(sizeof(Adafruit_seesaw), AllocPref::PreferPsram,
                                   "input.gamepad.obj");
     if (!gamepadObjBuf) {
       ERROR_INPUTF("Failed to allocate Adafruit_seesaw");
@@ -273,7 +273,7 @@ bool gamepadInitConnection() {
     return false;
   }
   if (!gGamepadSeesaw) {
-    void* gamepadObjBuf = ps_alloc(sizeof(Adafruit_seesaw), AllocPref::PreferPSRAM,
+    void* gamepadObjBuf = ps_alloc(sizeof(Adafruit_seesaw), AllocPref::PreferPsram,
                                   "input.gamepad.obj");
     if (!gamepadObjBuf) {
       WARN_INPUTF("Gamepad: failed to alloc Adafruit_seesaw");

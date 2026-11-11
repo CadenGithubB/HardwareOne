@@ -174,7 +174,7 @@ bool fileSlotsInit() {
   if (!gFileSlots) {
     gFileSlots = (FileTransferSlotImpl*)ps_alloc(
       sizeof(FileTransferSlotImpl) * kFileSlots,
-      AllocPref::PreferPSRAM, "espnow.fileslots");
+      AllocPref::PreferPsram, "espnow.fileslots");
     if (!gFileSlots) {
       ERROR_ESPNOWF("[FileSlots] failed to allocate %u-slot table", (unsigned)kFileSlots);
       return false;
@@ -384,7 +384,7 @@ FileTransferSlot* fileSlotsAllocate(const uint8_t peerMac[6],
     // ZERO flash here. Bond config files never reach here (< 128 KB → RAM path).
     bool allocOk = true;
     for (uint8_t b = 0; b < kFileStreamBufs; b++) {
-      s.streamBuf[b] = (uint8_t*)ps_alloc(kFileStreamBufSize, AllocPref::RequirePSRAM,
+      s.streamBuf[b] = (uint8_t*)ps_alloc(kFileStreamBufSize, AllocPref::RequirePsram,
                                           "espnow.file.streambuf");
       if (!s.streamBuf[b]) { allocOk = false; break; }
     }
@@ -424,7 +424,7 @@ FileTransferSlot* fileSlotsAllocate(const uint8_t peerMac[6],
                  (unsigned)freeIdx, filename, s.partPath, (unsigned long)fileSize);
   } else {
     uint32_t allocSize = fileSize > 0 ? fileSize : 1;
-    s.dataBuffer = (uint8_t*)ps_alloc(allocSize, AllocPref::RequirePSRAM,
+    s.dataBuffer = (uint8_t*)ps_alloc(allocSize, AllocPref::RequirePsram,
                                       "espnow.file.data");
     if (!s.dataBuffer) {
       ERROR_ESPNOWF("[FileSlots] PSRAM alloc failed (%lu bytes)", (unsigned long)allocSize);
@@ -435,7 +435,7 @@ FileTransferSlot* fileSlotsAllocate(const uint8_t peerMac[6],
 
     s.chunkMapBytes = (uint16_t)((chunkCount + 7) / 8);
     if (s.chunkMapBytes == 0) s.chunkMapBytes = 1;
-    s.chunkMap = (uint8_t*)ps_alloc(s.chunkMapBytes, AllocPref::RequirePSRAM,
+    s.chunkMap = (uint8_t*)ps_alloc(s.chunkMapBytes, AllocPref::RequirePsram,
                                     "espnow.file.chunkmap");  // PSRAM, matches dataBuffer
     if (!s.chunkMap) {
       ERROR_ESPNOWF("[FileSlots] chunkMap alloc failed (%u bytes)", (unsigned)s.chunkMapBytes);

@@ -929,7 +929,7 @@ static void micRecordingRepairFolder(const char* folder, int& repaired, int& rem
       if (!jobs) {
         jobs = static_cast<MicWavRepairJob*>(ps_calloc(
             kMicRepairMaxPerFolder, sizeof(MicWavRepairJob),
-            AllocPolicy::PreferPSRAM, "mic.rec.repair"));
+            AllocPolicy::PreferPsram, "mic.rec.repair"));
         if (!jobs) break;
       }
       MicWavRepairJob& job = jobs[jobCount];
@@ -1024,14 +1024,14 @@ static void recordingTask(void* param) {
                        (unsigned)allocBytes, (unsigned)gRecRingSlots);
   int16_t* buffer = nullptr;
   if (!micRecordingStopRequested()) {
-    buffer = (int16_t*)ps_alloc(allocBytes, AllocPref::PreferPSRAM, "mic.rec.buf");
+    buffer = (int16_t*)ps_alloc(allocBytes, AllocPref::PreferPsram, "mic.rec.buf");
   }
   if (!buffer && gRecRingSlots && !micRecordingStopRequested()) {
     // Degrade, don't fail: drop the ring and record untrimmed.
     INFO_MIC_LIFECYCLEF("Trim ring alloc failed (%u B) — recording untrimmed", (unsigned)allocBytes);
     gRecRingSlots = 0; gRecTrimEnabled = false;
     allocBytes = RECORDING_CHUNK_SIZE;
-    buffer = (int16_t*)ps_alloc(allocBytes, AllocPref::PreferPSRAM, "mic.rec.buf");
+    buffer = (int16_t*)ps_alloc(allocBytes, AllocPref::PreferPsram, "mic.rec.buf");
   }
   DEBUG_MIC_LIFECYCLEF("[MIC_REC_TASK] ps_alloc returned: %p", buffer);
 
@@ -2316,7 +2316,7 @@ int16_t* captureAudioSamples(size_t sampleCount, size_t* outLen) {
                (unsigned)esp_get_free_heap_size(), 
                (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
   
-  int16_t* buffer = (int16_t*)ps_alloc(bufferSize, AllocPref::PreferPSRAM, "mic.samples");
+  int16_t* buffer = (int16_t*)ps_alloc(bufferSize, AllocPref::PreferPsram, "mic.samples");
   WARN_SYSTEMF("[MIC_CAPTURE] ps_alloc returned: %p", buffer);
   
   if (!buffer) {
@@ -3176,7 +3176,7 @@ static TaskHandle_t gMicVisualizerTask = nullptr;
 static void micVisualizerTaskFunc(void* param) {
   const size_t bufSize = 512;
   int16_t* samples = (int16_t*)ps_alloc(bufSize * sizeof(int16_t),
-                                        AllocPref::RequirePSRAM, "mic.visualizer");
+                                        AllocPref::RequirePsram, "mic.visualizer");
   if (!samples) {
     gMicVisualizerRunning = false;
     gMicVisualizerTask = nullptr;

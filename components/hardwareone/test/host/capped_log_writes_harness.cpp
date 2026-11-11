@@ -43,10 +43,10 @@ struct FsLockGuard {
   explicit FsLockGuard(const char*) { check(lockDepth == 0, "one filesystem lock"); ++lockDepth; events.push_back("lock"); }
   ~FsLockGuard() { check(liveFiles == 0, "files closed before unlock"); --lockDepth; events.push_back("unlock"); }
 };
-enum class AllocPref { PreferPSRAM };
+enum class AllocPref { PreferPsram };
 static void* ps_alloc(size_t size, AllocPref pref, const char* tag) {
   ++allocCalls; io("alloc");
-  check(size == 1024 && pref == AllocPref::PreferPSRAM && std::string(tag) == "logrot.buf", "retained 1 KB PSRAM buffer policy");
+  check(size == 1024 && pref == AllocPref::PreferPsram && std::string(tag) == "logrot.buf", "retained 1 KB PSRAM buffer policy");
   if (failAlloc) return nullptr;
   allocations.push_back(std::make_unique<uint8_t[]>(size));
   return allocations.back().get();

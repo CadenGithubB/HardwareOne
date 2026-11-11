@@ -24,7 +24,7 @@ static constexpr int ESP_OK = 0, ESP_FAIL = -1;
 static constexpr int HTTPD_RESP_USE_STRLEN = -1;
 static constexpr int HTTPD_SOCK_ERR_FAIL = -1;
 static constexpr int HTTPD_SOCK_ERR_TIMEOUT = -3;
-enum class AllocPref { PreferPSRAM };
+enum class AllocPref { PreferPsram };
 #define DEBUG_HTTPF(...) ((void)0)
 #define ERROR_MEMORYF(...) ((void)0)
 

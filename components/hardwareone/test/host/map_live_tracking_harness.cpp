@@ -98,7 +98,7 @@ static bool ensureDebugBuffer() { return debugAvailable; }
 static char* getDebugBuffer() { return debugBuffer; }
 static void cliHint(const char*) {}
 static unsigned long millis() { return now.load(); }
-enum class AllocPref { PreferPSRAM };
+enum class AllocPref { PreferPsram };
 static void* ps_alloc(size_t size, AllocPref, const char* name) {
   ++allocations;
   if (std::strcmp(name, "gps.snapshot") == 0) lastSnapshotBytes = size;

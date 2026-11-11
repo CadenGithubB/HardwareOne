@@ -439,5 +439,5 @@ int main() {
   testTransports();
   testFailureAndFallback();
   printf("Filesystem PSRAM listings: %zu checks passed (%s)\n", checks,
-         hasPSRAMAvail() ? "PSRAM capable" : "no PSRAM build");
+         hasPsramAvail() ? "PSRAM capable" : "no PSRAM build");
 }

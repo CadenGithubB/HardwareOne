@@ -22,7 +22,7 @@ esp_err_t handleR1HealthStatus(httpd_req_t* req) {
   httpd_resp_set_type(req, "application/json");
   static char* buf = nullptr;
   static const size_t kBufSize = 4096;
-  if (!buf) buf = (char*)ps_alloc(kBufSize, AllocPref::PreferPSRAM, "health.status.json");
+  if (!buf) buf = (char*)ps_alloc(kBufSize, AllocPref::PreferPsram, "health.status.json");
   if (!buf) { httpd_resp_send(req, "{}", HTTPD_RESP_USE_STRLEN); return ESP_OK; }
   buildHealthStatusJson(buf, kBufSize);
   httpd_resp_send(req, buf, HTTPD_RESP_USE_STRLEN);

@@ -73,7 +73,7 @@ const RadioCompanionIdentity& radioHalIdentity() {
 
 // The list's allocator: plain heap, so the sanitizer sees versionsAddJson free
 // the list after copying its strings into the document.
-enum class AllocPolicy { PreferPSRAM };
+enum class AllocPolicy { PreferPsram };
 void* ps_alloc(size_t size, AllocPolicy, const char*) { return std::malloc(size); }
 void ps_free(void* memory) { std::free(memory); }
 

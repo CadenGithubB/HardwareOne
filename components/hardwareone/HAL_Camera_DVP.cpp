@@ -288,7 +288,7 @@ bool capture(CameraFrame& out, size_t maxBytes) {
     // Validation scratch (decoder workspace, marker-normalized copy) in PSRAM
     // first, as the G2 decode path does; internal DRAM only as the fallback.
     limits.softwareAllocator = [](size_t size) -> uint8_t* {
-      return static_cast<uint8_t*>(ps_alloc(size, AllocPref::PreferPSRAM, "camera.jpeg.scratch"));
+      return static_cast<uint8_t*>(ps_alloc(size, AllocPref::PreferPsram, "camera.jpeg.scratch"));
     };
     const bool valid = fb->format == PIXFORMAT_JPEG && fb->buf && fb->len >= 4 &&
       fb->len <= maxBytes && hwjpeg::inspect(fb->buf, fb->len, jpeg, limits);
@@ -307,7 +307,7 @@ bool capture(CameraFrame& out, size_t maxBytes) {
       continue;
     }
     if (valid) {
-      out.data = static_cast<uint8_t*>(ps_alloc(fb->len, AllocPref::PreferPSRAM, "camera.frame"));
+      out.data = static_cast<uint8_t*>(ps_alloc(fb->len, AllocPref::PreferPsram, "camera.frame"));
       if (out.data) {
         memcpy(out.data, fb->buf, fb->len);
         out.length = fb->len; out.width = jpeg.width; out.height = jpeg.height;

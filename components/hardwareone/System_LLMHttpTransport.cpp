@@ -613,7 +613,7 @@ void record(const LlmHttpIo& io) {
 LlmHttpIo* llmHttpIoCreate(const char* ca,bool secure,const std::atomic<bool>& cancel,
                          uint32_t started,uint32_t total,uint32_t revision,LlmHttpRequestKind kind) {
   if(!ca || !total)return nullptr;
-  auto* memory=ps_alloc(sizeof(LlmHttpIo),AllocPref::PreferPSRAM,"llm.http.io");
+  auto* memory=ps_alloc(sizeof(LlmHttpIo),AllocPref::PreferPsram,"llm.http.io");
   if(!memory)return nullptr;
   auto* io=new(memory)LlmHttpIo;
   io->kind=kind;io->ca=ca;io->secure=secure;io->cancelled=&cancel;io->started=started;io->total=total;io->revision=revision;

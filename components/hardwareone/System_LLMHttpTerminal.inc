@@ -177,7 +177,7 @@ HttpTerminalStartResult httpTerminalStart(const char* json, size_t length, HttpT
   if (!token || !json || !length || length > HTTP_TERMINAL_JSON_CAP ||
       memchr(json, 0, length)) return HttpTerminalStartResult::Unavailable;
   if (!httpTerminalPathAvailable()) return HttpTerminalStartResult::Unavailable;
-  auto* memory = ps_calloc(1, sizeof(TerminalRun), AllocPref::PreferPSRAM, "llm.terminal.run");
+  auto* memory = ps_calloc(1, sizeof(TerminalRun), AllocPref::PreferPsram, "llm.terminal.run");
   if (!memory) return HttpTerminalStartResult::Busy;
   auto* run = new (memory) TerminalRun;
   Lock lock;

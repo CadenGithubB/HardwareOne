@@ -2473,10 +2473,10 @@ const char* cmd_certgen(const String& argsInput) {
   // mbedtls_entropy_context alone is ~1KB, plus ctr_drbg + x509write_cert + internal call depth
   // Use PSRAM instead of DRAM to preserve precious internal RAM
   int ret = 0;
-  mbedtls_pk_context* key = (mbedtls_pk_context*)ps_alloc(sizeof(mbedtls_pk_context), AllocPref::RequirePSRAM, "wifi.cert.key");
-  mbedtls_x509write_cert* crt = (mbedtls_x509write_cert*)ps_alloc(sizeof(mbedtls_x509write_cert), AllocPref::RequirePSRAM, "wifi.cert.crt");
-  mbedtls_entropy_context* entropy = (mbedtls_entropy_context*)ps_alloc(sizeof(mbedtls_entropy_context), AllocPref::RequirePSRAM, "wifi.cert.entropy");
-  mbedtls_ctr_drbg_context* ctr_drbg = (mbedtls_ctr_drbg_context*)ps_alloc(sizeof(mbedtls_ctr_drbg_context), AllocPref::RequirePSRAM, "wifi.cert.drbg");
+  mbedtls_pk_context* key = (mbedtls_pk_context*)ps_alloc(sizeof(mbedtls_pk_context), AllocPref::RequirePsram, "wifi.cert.key");
+  mbedtls_x509write_cert* crt = (mbedtls_x509write_cert*)ps_alloc(sizeof(mbedtls_x509write_cert), AllocPref::RequirePsram, "wifi.cert.crt");
+  mbedtls_entropy_context* entropy = (mbedtls_entropy_context*)ps_alloc(sizeof(mbedtls_entropy_context), AllocPref::RequirePsram, "wifi.cert.entropy");
+  mbedtls_ctr_drbg_context* ctr_drbg = (mbedtls_ctr_drbg_context*)ps_alloc(sizeof(mbedtls_ctr_drbg_context), AllocPref::RequirePsram, "wifi.cert.drbg");
   unsigned char* certPem = NULL;
   unsigned char* keyPem = NULL;
 
@@ -2581,8 +2581,8 @@ const char* cmd_certgen(const String& argsInput) {
   mbedtls_x509write_crt_set_authority_key_identifier(crt);
 
   // Write certificate and key to PEM format (PSRAM-allocated)
-  certPem = (unsigned char*)ps_alloc(4096, AllocPref::RequirePSRAM, "wifi.cert.pem");
-  keyPem = (unsigned char*)ps_alloc(4096, AllocPref::RequirePSRAM, "wifi.key.pem");
+  certPem = (unsigned char*)ps_alloc(4096, AllocPref::RequirePsram, "wifi.cert.pem");
+  keyPem = (unsigned char*)ps_alloc(4096, AllocPref::RequirePsram, "wifi.key.pem");
   if (!certPem || !keyPem) {
     snprintf(gDebugBuffer, 1024, "Error: Failed to allocate PEM buffers in PSRAM");
     goto cleanup;

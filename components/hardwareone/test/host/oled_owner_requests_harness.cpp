@@ -104,7 +104,7 @@ static void harnessExitCritical(portMUX_TYPE* mux) {
 #define portEXIT_CRITICAL(mux) harnessExitCritical(mux)
 
 // ---- ps_alloc double: counts live text copies ----
-enum class AllocPolicy { PreferPSRAM, PreferInternal, PSRAMOnly, InternalOnly };
+enum class AllocPolicy { PreferPsram, PreferInternal, PSRAMOnly, InternalOnly };
 static int gLiveAllocs = 0;
 static void* ps_alloc(size_t size, AllocPolicy, const char*) {
   if (gInCritical) gCriticalViolations++;

@@ -111,7 +111,7 @@ class JsonBudget : public ArduinoJson::Allocator {
  public:
   void* allocate(size_t size) override {
     if (size > limit_ - used_) return nullptr;
-    auto* p = static_cast<Header*>(ps_alloc(sizeof(Header) + size, AllocPref::PreferPSRAM, "llm.http.json"));
+    auto* p = static_cast<Header*>(ps_alloc(sizeof(Header) + size, AllocPref::PreferPsram, "llm.http.json"));
     if (!p) return nullptr;
     p->size = size; used_ += size; return p + 1;
   }
@@ -124,7 +124,7 @@ class JsonBudget : public ArduinoJson::Allocator {
     auto* p = static_cast<Header*>(ptr) - 1;
     if (size > limit_ - (used_ - p->size)) return nullptr;
     const size_t old = p->size;
-    auto* next = static_cast<Header*>(ps_realloc(p, sizeof(Header) + size, AllocPref::PreferPSRAM, "llm.http.json"));
+    auto* next = static_cast<Header*>(ps_realloc(p, sizeof(Header) + size, AllocPref::PreferPsram, "llm.http.json"));
     if (!next) return nullptr;
     next->size = size; used_ = used_ - old + size; return next + 1;
   }
@@ -216,9 +216,9 @@ void worker(void* context) {
       "HTTP debug logging exposes credentials; lower log verbosity" : nullptr;
   char errorBuffer[96]{};
   JsonBudget allocator;
-  auto* parserMemory = ps_alloc(sizeof(hw1http::Stream), AllocPref::PreferPSRAM, "llm.http.stream");
+  auto* parserMemory = ps_alloc(sizeof(hw1http::Stream), AllocPref::PreferPsram, "llm.http.stream");
   auto* stream = parserMemory ? new (parserMemory) hw1http::Stream(&allocator) : nullptr;
-  auto* body = static_cast<char*>(ps_alloc(kBodyCap, AllocPref::PreferPSRAM, "llm.http.body"));
+  auto* body = static_cast<char*>(ps_alloc(kBodyCap, AllocPref::PreferPsram, "llm.http.body"));
   esp_http_client_handle_t client = nullptr;
   LlmHttpIo* io = nullptr;
   size_t bodyLen = 0;
@@ -365,7 +365,7 @@ bool httpLlmValidateBaseUrl(const char* baseUrl) {
 bool httpLlmConfigure(bool enabled, const char* baseUrl, const char* model,
                       const char* token, bool allowPlaintext, const char* caPem) {
   // Heap rather than a 6KB config on the caller's small command/UI stack.
-  auto* next = static_cast<Config*>(ps_calloc(1, sizeof(Config), AllocPref::PreferPSRAM, "llm.http.config"));
+  auto* next = static_cast<Config*>(ps_calloc(1, sizeof(Config), AllocPref::PreferPsram, "llm.http.config"));
   if (!next) {
     failConfigurationPublication();
     Lock lock;
@@ -469,7 +469,7 @@ LlmStatus httpLlmStatus() {
 }
 int httpLlmStartAsync(const char* prompt, const LlmGenParams& /*params*/) {
   if (!prompt || !*prompt || strlen(prompt) > kPromptMax) return 0;
-  auto* run = static_cast<Run*>(ps_calloc(1, sizeof(Run), AllocPref::PreferPSRAM, "llm.http.run"));
+  auto* run = static_cast<Run*>(ps_calloc(1, sizeof(Run), AllocPref::PreferPsram, "llm.http.run"));
   if (!run) return 0;
   new (run) Run;
   Lock lock;

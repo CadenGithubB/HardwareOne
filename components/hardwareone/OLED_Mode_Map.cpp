@@ -961,9 +961,9 @@ static void initAsyncMapRenderer() {
   if (sMapBufA) return;  // Already initialized
   
   // Allocate double buffers + shade scratch in PSRAM
-  sMapBufA = (uint8_t*)ps_alloc(SSD1306_BUF_SIZE, AllocPref::RequirePSRAM, "oled.map.bufA");
-  sMapBufB = (uint8_t*)ps_alloc(SSD1306_BUF_SIZE, AllocPref::RequirePSRAM, "oled.map.bufB");
-  sMapShadeBuf = (uint8_t*)ps_alloc(MAP_SHADE_BUF_SIZE, AllocPref::RequirePSRAM,
+  sMapBufA = (uint8_t*)ps_alloc(SSD1306_BUF_SIZE, AllocPref::RequirePsram, "oled.map.bufA");
+  sMapBufB = (uint8_t*)ps_alloc(SSD1306_BUF_SIZE, AllocPref::RequirePsram, "oled.map.bufB");
+  sMapShadeBuf = (uint8_t*)ps_alloc(MAP_SHADE_BUF_SIZE, AllocPref::RequirePsram,
                                     "oled.map.shade");
   if (!sMapBufA || !sMapBufB || !sMapShadeBuf) {
     DEBUG_MAPSF("[MAP_ASYNC] PSRAM alloc failed for double buffers!");

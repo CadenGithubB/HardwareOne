@@ -81,7 +81,7 @@ template<class... T>void logMessage(const char*,T...){ }
 #define DEBUG_ESPNOWF(...) logMessage(__VA_ARGS__)
 #define WARN_ESPNOWF(...) logMessage(__VA_ARGS__)
 #define ERROR_MEMORYF(...) logMessage(__VA_ARGS__)
-enum class AllocPref{PreferPSRAM};
+enum class AllocPref{PreferPsram};
 void* ps_alloc(size_t n,AllocPref,const char*){return allocFails?nullptr:std::malloc(n);}
 size_t strlcpy(char* dst,const char* src,size_t cap){size_t n=std::strlen(src);if(cap){size_t copy=std::min(n,cap-1);std::memcpy(dst,src,copy);dst[copy]=0;}return n;}
 uint32_t generateMessageId(){return 1;}

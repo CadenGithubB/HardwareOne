@@ -3839,7 +3839,7 @@ bool readUserRoster(UserRosterEntry* out, size_t capacity, size_t& countOut,
 static const char* listJsonReply(const JsonDocument& doc, char*& buffer,
                                  const char* tag, const char* tooLarge) {
   if (!buffer) {
-    buffer = (char*)ps_alloc(CMD_RESULT_MAX, AllocPref::PreferPSRAM, tag);
+    buffer = (char*)ps_alloc(CMD_RESULT_MAX, AllocPref::PreferPsram, tag);
     if (!buffer) return "Error: out of memory for the list reply";
   }
   if (doc.overflowed()) return tooLarge;

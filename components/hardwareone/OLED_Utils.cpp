@@ -4882,7 +4882,7 @@ const char* cmd_oledtext(const String& argsInput) {
   // customOledText is printed by the owner's render; the owner assigns it from
   // this copy when it applies the request.
   const size_t textLength = text.length();
-  char* textCopy = (char*)ps_alloc(textLength + 1, AllocPolicy::PreferPSRAM, "oled.text");
+  char* textCopy = (char*)ps_alloc(textLength + 1, AllocPolicy::PreferPsram, "oled.text");
   if (!textCopy) {
     return "Error: out of memory for the OLED text";
   }

@@ -92,7 +92,7 @@ static bool publish(const View& ticket, const char* error, bool running, bool bu
 }
 
 static void worker(void*) {
-  auto* scratch = static_cast<Scratch*>(ps_alloc(sizeof(Scratch), AllocPref::PreferPSRAM, "oled.camera.scratch"));
+  auto* scratch = static_cast<Scratch*>(ps_alloc(sizeof(Scratch), AllocPref::PreferPsram, "oled.camera.scratch"));
   camera_mono::Tone tone;
   uint32_t toneGeneration = 0, toneRevision = 0;
   bool streaming = false;

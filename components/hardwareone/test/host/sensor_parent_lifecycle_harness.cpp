@@ -17,7 +17,7 @@ static void check(bool condition, const char* message) {
   ++assertions;
   if (!condition) throw std::runtime_error(message);
 }
-enum class AllocPref { PreferPSRAM, PreferInternal };
+enum class AllocPref { PreferPsram, PreferInternal };
 struct Stats { unsigned allocations = 0, constructions = 0, destructions = 0, frees = 0, begins = 0; };
 struct Allocation { std::string tag; bool alive = false; };
 static std::map<std::string, Stats> stats;
@@ -156,7 +156,7 @@ static Adafruit_PWMServoDriver* gPwmDriver = nullptr;
 static Adafruit_seesaw* gGamepadSeesaw = nullptr;
 static Adafruit_seesaw* gAnoSeesaw = nullptr;
 static void* ps_alloc(size_t size, AllocPref preference, const char* tag) {
-  check(preference == AllocPref::PreferPSRAM, "parent allocation requests PSRAM preference");
+  check(preference == AllocPref::PreferPsram, "parent allocation requests PSRAM preference");
   const std::map<std::string, size_t> expected = {
     {"imu.obj", sizeof(Adafruit_BNO055)}, {"apds.obj", sizeof(Adafruit_APDS9960)},
     {"servo.obj", sizeof(Adafruit_PWMServoDriver)}, {"input.gamepad.obj", sizeof(Adafruit_seesaw)},

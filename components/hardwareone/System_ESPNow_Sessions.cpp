@@ -26,7 +26,7 @@ SessionState* gSessions = nullptr;
 bool sessionsInit() {
   if (gSessions) return true;
   gSessions = (SessionState*)ps_alloc(sizeof(SessionState) * kSessionSlots,
-                                      AllocPref::PreferPSRAM, "espnow.sessions");
+                                      AllocPref::PreferPsram, "espnow.sessions");
   if (!gSessions) {
     ERROR_ESPNOWF("sessions: failed to allocate %u-slot table",
                   (unsigned)kSessionSlots);
@@ -436,7 +436,7 @@ PendingFrame* gPending = nullptr;
 bool ensurePendingAllocated() {
   if (gPending) return true;
   gPending = (PendingFrame*)ps_alloc(sizeof(PendingFrame) * kPendingFrameSlots,
-                                     AllocPref::PreferPSRAM, "espnow.pendframes");
+                                     AllocPref::PreferPsram, "espnow.pendframes");
   if (!gPending) {
     ERROR_ESPNOWF("pending: failed to allocate %u-slot table", (unsigned)kPendingFrameSlots);
     return false;
@@ -618,7 +618,7 @@ SendStatus* gSendStatus = nullptr;
 bool ensureSendStatusAllocated() {
   if (gSendStatus) return true;
   gSendStatus = (SendStatus*)ps_alloc(sizeof(SendStatus) * kSendStatusSlots,
-                                      AllocPref::PreferPSRAM, "espnow.sendstatus");
+                                      AllocPref::PreferPsram, "espnow.sendstatus");
   if (!gSendStatus) {
     ERROR_ESPNOWF("sendstatus: failed to allocate %u-slot table", (unsigned)kSendStatusSlots);
     return false;

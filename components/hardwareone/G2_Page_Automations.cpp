@@ -76,7 +76,7 @@ static void showListMenu() {
 
   // 16 summaries are ~1.3 KB: a transient PSRAM copy, released before the render.
   AutomationSummary* list = (AutomationSummary*)ps_alloc(
-      G2_AUTO_MAX * sizeof(AutomationSummary), AllocPref::PreferPSRAM, "g2.autolist");
+      G2_AUTO_MAX * sizeof(AutomationSummary), AllocPref::PreferPsram, "g2.autolist");
   size_t count = 0;
   if (list && automationCopySummaries(list, G2_AUTO_MAX, &count)) {
     for (size_t i = 0; i < count; i++) {

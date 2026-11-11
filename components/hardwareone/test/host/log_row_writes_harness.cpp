@@ -162,7 +162,7 @@ static int gSensorLogMaxRotations = 2;
 static unsigned long gSensorLogLastWrite = 25, lastTruncateMs = 0;
 static const unsigned long truncateCooldownMs = 5000;
 static uint32_t log_writes = 0, log_open_fail = 0, log_trunc = 0;
-enum class AllocPref { PreferPSRAM };
+enum class AllocPref { PreferPsram };
 static char sealStorage[CAPCRYPT_MAX_SEALED];
 static void* ps_alloc(size_t count, AllocPref, const char* tag) {
   check(count == sizeof(sealStorage) && std::string(tag) == "sensor.log.seal", "seal keeps original buffer policy");

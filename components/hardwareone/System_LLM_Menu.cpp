@@ -371,7 +371,7 @@ const char* cmd_llm_menu(const String& args) {
         items.add(item);                     // char[] → copied into the doc pool
       }
       static char* jbuf = nullptr;
-      if (!jbuf) jbuf = (char*)ps_alloc(3200, AllocPref::PreferPSRAM, "llmmenu_list.json");
+      if (!jbuf) jbuf = (char*)ps_alloc(3200, AllocPref::PreferPsram, "llmmenu_list.json");
       if (!jbuf) return "{\"error\":\"oom\"}";
       serializeJson(doc, jbuf, 3200);
       return jbuf;
@@ -393,7 +393,7 @@ const char* cmd_llm_menu(const String& args) {
       o["entities"]  = gi.entCount;
     }
     static char* gbuf = nullptr;
-    if (!gbuf) gbuf = (char*)ps_alloc(1536, AllocPref::PreferPSRAM, "llmmenu_groups.json");
+    if (!gbuf) gbuf = (char*)ps_alloc(1536, AllocPref::PreferPsram, "llmmenu_groups.json");
     if (!gbuf) return "{\"error\":\"oom\"}";
     serializeJson(doc, gbuf, 1536);
     return gbuf;
@@ -513,7 +513,7 @@ const char* cmd_llm_ask(const String& args) {
     doc["q"]       = (qn >= 0) ? q : "";      // char[] → copied; JSON-escaped
     doc["hint"]    = "the reply streams in asynchronously - read it with 'llmresult json 0'";
     static char* abuf = nullptr;
-    if (!abuf) abuf = (char*)ps_alloc(768, AllocPref::PreferPSRAM, "llmask.json");
+    if (!abuf) abuf = (char*)ps_alloc(768, AllocPref::PreferPsram, "llmask.json");
     if (!abuf) return "{\"error\":\"oom\"}";
     serializeJson(doc, abuf, 768);
     return abuf;

@@ -301,12 +301,12 @@ bool loadRemoteSettingsModules() {
     }
 
     gRemoteModules = (SettingsModule*)ps_calloc(moduleCount, sizeof(SettingsModule),
-                                                AllocPolicy::PreferPSRAM, "oled.remote.modules");
+                                                AllocPolicy::PreferPsram, "oled.remote.modules");
     gRemoteEntries = (SettingEntry*)ps_calloc(entryCount, sizeof(SettingEntry),
-                                              AllocPolicy::PreferPSRAM, "oled.remote.entries");
+                                              AllocPolicy::PreferPsram, "oled.remote.entries");
     gRemoteSlots = (RemoteValueSlot*)ps_calloc(entryCount, sizeof(RemoteValueSlot),
-                                               AllocPolicy::PreferPSRAM, "oled.remote.values");
-    gRemoteStrings = (char*)ps_alloc(stringBytes, AllocPolicy::PreferPSRAM, "oled.remote.strings");
+                                               AllocPolicy::PreferPsram, "oled.remote.values");
+    gRemoteStrings = (char*)ps_alloc(stringBytes, AllocPolicy::PreferPsram, "oled.remote.strings");
     if (!gRemoteModules || !gRemoteEntries || !gRemoteSlots || !gRemoteStrings) {
       releaseRemoteModules();
       DEBUGF(DEBUG_ESPNOW_ROUTER, "[RemoteSettings] alloc failed (%zu mods, %zu entries)",

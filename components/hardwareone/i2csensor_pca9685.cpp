@@ -48,7 +48,7 @@ bool servoInit() {
 
   if (!gPwmDriver) {
     // Only the task-context wrapper moves; the library owns its I2C transport.
-    void* servoObjBuf = ps_alloc(sizeof(Adafruit_PWMServoDriver), AllocPref::PreferPSRAM, "servo.obj");
+    void* servoObjBuf = ps_alloc(sizeof(Adafruit_PWMServoDriver), AllocPref::PreferPsram, "servo.obj");
     if (!servoObjBuf) return false;
     gPwmDriver = new (servoObjBuf) Adafruit_PWMServoDriver(PCA9685_I2C_ADDRESS, *servoWire);
   }

@@ -62,7 +62,7 @@ template <typename F> void i2cDeviceTransactionVoid(uint8_t, uint8_t, unsigned, 
   ++scenario.effects;
   if (scenario.transaction) op();
 }
-enum class AllocPref { PreferPSRAM };
+enum class AllocPref { PreferPsram };
 void* ps_alloc(size_t bytes, AllocPref, const char*) { ++scenario.effects; return std::malloc(bytes); }
 struct Adafruit_GPS {
   explicit Adafruit_GPS(TwoWire*) {}

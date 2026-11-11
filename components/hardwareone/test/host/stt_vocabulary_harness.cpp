@@ -53,7 +53,7 @@ int xSemaphoreTake(SemaphoreHandle_t, TickType_t) { if(fake::state.mutexBusy)ret
 void xSemaphoreGive(SemaphoreHandle_t) { --fake::state.mutexHeld; }
 void vSemaphoreDelete(SemaphoreHandle_t h) { delete static_cast<int*>(h); }
 // allocator (System_MemUtil)
-enum class AllocPref : uint8_t { PreferPSRAM, RequirePSRAM };
+enum class AllocPref : uint8_t { PreferPsram, RequirePsram };
 void* ps_alloc(size_t n, AllocPref, const char*) {
     if(fake::state.allocations++>=fake::state.failAllocAfter)return nullptr;
     return std::malloc(n);

@@ -144,7 +144,7 @@ static char debugBuffer[GLOBAL_DEBUG_BUFFER_SIZE];
 static bool debugAvailable = true;
 static bool ensureDebugBuffer() { return debugAvailable; }
 static char* getDebugBuffer() { return debugBuffer; }
-enum class AllocPref { PreferPSRAM };
+enum class AllocPref { PreferPsram };
 static bool psAllocAllowed = true;
 static char cliStorage[2048];
 static void* ps_alloc(size_t size, AllocPref, const char*) {

@@ -281,7 +281,7 @@ static FileManager* ensureFm() {
     // array, so the whole object moves off internal DRAM. This lens FileManager is
     // create-once-keep (no delete site anywhere) → no ps_delete pair; it persists
     // for the session. The `if (gFilesFm)` guards below handle an alloc failure.
-    void* fmBuf = ps_alloc(sizeof(FileManager), AllocPref::PreferPSRAM, "g2.filemgr");
+    void* fmBuf = ps_alloc(sizeof(FileManager), AllocPref::PreferPsram, "g2.filemgr");
     gFilesFm = fmBuf ? new (fmBuf) FileManager() : nullptr;
     // Show a "[#]" item-count badge on folder rows (opt-in so only this lens
     // explorer pays the per-folder count; the OLED browser stays untouched).

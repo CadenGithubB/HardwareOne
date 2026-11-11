@@ -1678,7 +1678,7 @@ const char* cmd_status(const String& argsInput) {
     if (measureJson(doc) >= kStatusJsonCap) return "{\"error\":\"status too large\"}";
     static char* statusJsonBuf = nullptr;
     if (!statusJsonBuf) {
-      statusJsonBuf = (char*)ps_alloc(kStatusJsonCap, AllocPref::PreferPSRAM, "status.json");
+      statusJsonBuf = (char*)ps_alloc(kStatusJsonCap, AllocPref::PreferPsram, "status.json");
     }
     if (!statusJsonBuf) return "{\"error\":\"oom\"}";
     serializeJson(doc, statusJsonBuf, kStatusJsonCap);
@@ -1718,7 +1718,7 @@ const char* cmd_uptime(const String& argsInput) {
   // returned verbatim via a small PSRAM buffer. No broadcastOutput.
   if (argWantsJson(argsInput)) {
     static char* buf = nullptr;
-    if (!buf) buf = (char*)ps_alloc(192, AllocPref::PreferPSRAM, "uptime.json");
+    if (!buf) buf = (char*)ps_alloc(192, AllocPref::PreferPsram, "uptime.json");
     if (!buf) return "{\"error\":\"oom\"}";
     snprintf(buf, 192,
       "{\"schema\":1,\"uptime_s\":%lu,\"uptime_ms\":%lu,\"uptime_hms\":\"%luh %lum %lus\"}",
@@ -1770,7 +1770,7 @@ const char* cmd_time(const String& argsInput) {
     // clock THIS boot (rtc/ntp/manual/ring). synced:true + source:"none"
     // means the time was carried across a soft reboot in the RTC domain.
     static char* buf = nullptr;
-    if (!buf) buf = (char*)ps_alloc(256, AllocPref::PreferPSRAM, "time.json");
+    if (!buf) buf = (char*)ps_alloc(256, AllocPref::PreferPsram, "time.json");
     if (!buf) return "{\"error\":\"oom\"}";
     int p = snprintf(buf, 256,
       "{\"schema\":1,\"synced\":%s,\"source\":\"%s\",\"time\":\"%s\",\"uptime_ms\":%lu",
@@ -2469,7 +2469,7 @@ const char* cmd_bootcount(const String& argsInput) {
     doc["reset_reason"]      = reasonLabel;
     doc["reset_reason_code"] = (unsigned long)reason;
     static char* buf = nullptr;
-    if (!buf) buf = (char*)ps_alloc(256, AllocPref::PreferPSRAM, "bootcount.json");
+    if (!buf) buf = (char*)ps_alloc(256, AllocPref::PreferPsram, "bootcount.json");
     if (!buf) return "{\"error\":\"oom\"}";
     serializeJson(doc, buf, 256);
     return buf;
@@ -2510,7 +2510,7 @@ const char* cmd_crashlog(const String& argsInput) {
     for (uint8_t i = 0; i < crashRecordBacktraceLen(); ++i)
       pcs.add(crashRecordBacktrace()[i]);
     static char* buf = nullptr;
-    if (!buf) buf = (char*)ps_alloc(1024, AllocPref::PreferPSRAM, "crashlog.json");
+    if (!buf) buf = (char*)ps_alloc(1024, AllocPref::PreferPsram, "crashlog.json");
     if (!buf) return "{\"error\":\"oom\"}";
     serializeJson(doc, buf, 1024);
     return buf;
@@ -2520,7 +2520,7 @@ const char* cmd_crashlog(const String& argsInput) {
   // cmd_exec and stack figures in this codebase are BYTES, so a 512 B frame
   // is not free.
   static char* text = nullptr;
-  if (!text) text = (char*)ps_alloc(1024, AllocPref::PreferPSRAM, "crashlog.text");
+  if (!text) text = (char*)ps_alloc(1024, AllocPref::PreferPsram, "crashlog.text");
   if (!text) return "Error: out of memory";
 
   BROADCAST_PRINTF("Last crash");
@@ -2963,9 +2963,9 @@ void printMemoryReport() {
     if (taskMeasure)     { free(taskMeasure);     taskMeasure     = nullptr; }
     taskStatusCap = 0;
     taskStatusArray = (TaskStatus_t*)ps_alloc(taskCount * sizeof(TaskStatus_t),
-                                              AllocPref::PreferPSRAM, "memreport.tasks");
+                                              AllocPref::PreferPsram, "memreport.tasks");
     taskMeasure     = (TaskHeapMeasure*)ps_alloc(taskCount * sizeof(TaskHeapMeasure),
-                                                 AllocPref::PreferPSRAM, "memreport.taskmeas");
+                                                 AllocPref::PreferPsram, "memreport.taskmeas");
     if (taskStatusArray && taskMeasure) {
       taskStatusCap = taskCount;
     } else {                       // partial failure must not leave a half-armed pair
@@ -3478,7 +3478,7 @@ const char* cmd_taskstats(const String& originalCmd) {
       taskCap = 0;
     }
     taskArray = (TaskStatus_t*)ps_alloc(taskCount * sizeof(TaskStatus_t),
-                                        AllocPref::PreferPSRAM, "taskstats");
+                                        AllocPref::PreferPsram, "taskstats");
     if (taskArray) taskCap = taskCount;
   }
   if (!taskArray) {
@@ -4528,7 +4528,7 @@ bool submitAndExecuteSync(const Command& cmd, String& out,
     // ExecReq.out size" — it never did (ExecReq::out is CMD_RESULT_MAX), so an
     // early-boot command silently got half the budget of the same command run
     // a moment later. Transient PSRAM, freed below.
-    char* outBuf = (char*)ps_alloc(CMD_RESULT_MAX, AllocPref::PreferPSRAM, "cmd.out.direct");
+    char* outBuf = (char*)ps_alloc(CMD_RESULT_MAX, AllocPref::PreferPsram, "cmd.out.direct");
     if (!outBuf) {
       out = "Error: Out of memory for command output";
       return false;
@@ -4552,7 +4552,7 @@ bool submitAndExecuteSync(const Command& cmd, String& out,
   }
 
   // Allocate ExecReq from PSRAM since it's large (8KB+)
-  ExecReq* r = (ExecReq*)ps_alloc(sizeof(ExecReq), AllocPref::PreferPSRAM, "cmd.exec.req");
+  ExecReq* r = (ExecReq*)ps_alloc(sizeof(ExecReq), AllocPref::PreferPsram, "cmd.exec.req");
   if (!r) {
     DEBUG_CMD_FLOWF("[submitSync] FAILED alloc ExecReq heap=%lu psram=%lu",
                     (unsigned long)ESP.getFreeHeap(), (unsigned long)ESP.getFreePsram());
@@ -4674,7 +4674,7 @@ bool submitCommandAsync(const Command& cmd, ExecAsyncCallback callback, void* us
   }
   
   // Allocate ExecReq from PSRAM
-  ExecReq* r = (ExecReq*)ps_alloc(sizeof(ExecReq), AllocPref::PreferPSRAM, "cmd.exec.async");
+  ExecReq* r = (ExecReq*)ps_alloc(sizeof(ExecReq), AllocPref::PreferPsram, "cmd.exec.async");
   if (!r) {
     DEBUG_CMD_FLOWF("[submitAsync] FAILED to allocate ExecReq");
     return false;

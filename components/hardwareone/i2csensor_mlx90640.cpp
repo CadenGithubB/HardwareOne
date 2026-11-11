@@ -129,7 +129,7 @@ size_t thermalCacheStorageBytes() { return sizeof(sThermalCache) + sizeof(sTherm
 using ThermalFrameBuffer = std::unique_ptr<int16_t, decltype(&ps_free)>;
 static ThermalFrameBuffer thermalSnapshotBuffer(size_t count) {
   return ThermalFrameBuffer(static_cast<int16_t*>(ps_alloc(count * sizeof(int16_t),
-                            AllocPref::PreferPSRAM, "thermal.snapshot")), ps_free);
+                            AllocPref::PreferPsram, "thermal.snapshot")), ps_free);
 }
 
 // Runs on the queue worker before the task exists: retires the previous run's
@@ -157,13 +157,13 @@ static bool thermalResetCacheForStart() {
   // Zeroed: until the first frame, readers see an invalid all-zero frame (the
   // same shape as after a stop), never uninitialized memory.
   int16_t* frame = static_cast<int16_t*>(
-      ps_alloc(768 * sizeof(int16_t), AllocPref::PreferPSRAM, "cache.thermal"));
+      ps_alloc(768 * sizeof(int16_t), AllocPref::PreferPsram, "cache.thermal"));
   if (!frame) return false;
   memset(frame, 0, 768 * sizeof(int16_t));
   float* interpolated = nullptr;
   if (gSettings.thermalUpscaleFactor == 2) {
     interpolated = static_cast<float*>(
-        ps_alloc(64 * 48 * sizeof(float), AllocPref::PreferPSRAM, "cache.thermal.interp"));
+        ps_alloc(64 * 48 * sizeof(float), AllocPref::PreferPsram, "cache.thermal.interp"));
     if (interpolated) memset(interpolated, 0, 64 * 48 * sizeof(float));
     else DEBUG_THERMAL_LIFECYCLEF("[THERMAL_MEM] Interpolated buffer unavailable; running at 1x");
   }
@@ -610,7 +610,7 @@ bool thermalInit() {
     // whole shell moves off scarce internal DRAM. MUST be torn down with ps_delete
     // (both sites below) — a plain `delete` would free a ps_alloc block via the
     // wrong allocator.
-    void* mlxBuf = ps_alloc(sizeof(Adafruit_MLX90640), AllocPref::PreferPSRAM, "thermal.obj");
+    void* mlxBuf = ps_alloc(sizeof(Adafruit_MLX90640), AllocPref::PreferPsram, "thermal.obj");
     if (!mlxBuf) return false;
     gMLX90640 = new (mlxBuf) Adafruit_MLX90640();
 
@@ -689,7 +689,7 @@ bool thermalPoll() {
 
   // Allocate frame buffers in PSRAM (not on stack) to reduce task stack usage
   if (!g_tempFrame) {
-    g_tempFrame = (float*)ps_alloc(768 * sizeof(float), AllocPref::PreferPSRAM, "thermal.temp");
+    g_tempFrame = (float*)ps_alloc(768 * sizeof(float), AllocPref::PreferPsram, "thermal.temp");
     if (!g_tempFrame) {
       ERROR_THERMALF("Failed to allocate tempFrame buffer (3KB)");
       return false;
@@ -698,7 +698,7 @@ bool thermalPoll() {
   }
   
   if (!g_localFrame) {
-    g_localFrame = (int16_t*)ps_alloc(768 * sizeof(int16_t), AllocPref::PreferPSRAM, "thermal.local");
+    g_localFrame = (int16_t*)ps_alloc(768 * sizeof(int16_t), AllocPref::PreferPsram, "thermal.local");
     if (!g_localFrame) {
       ERROR_THERMALF("Failed to allocate localFrame buffer (1.5KB)");
       return false;
@@ -792,7 +792,7 @@ bool thermalPoll() {
   
   if (gSettings.thermalTemporalAlpha > 0.0f) {
     if (!previousFrame) {
-      previousFrame = (int16_t*)ps_alloc(768 * sizeof(int16_t), AllocPref::PreferPSRAM, "thermal.prev");
+      previousFrame = (int16_t*)ps_alloc(768 * sizeof(int16_t), AllocPref::PreferPsram, "thermal.prev");
       if (!previousFrame) {
         ERROR_THERMALF("Failed to allocate previousFrame buffer");
       } else {
@@ -949,7 +949,7 @@ bool thermalPoll() {
       uint32_t interpStart = millis();
       static float* floatFrame = nullptr;
       if (!floatFrame) {
-        floatFrame = (float*)ps_alloc(768 * sizeof(float), AllocPref::PreferPSRAM, "thermal.float");
+        floatFrame = (float*)ps_alloc(768 * sizeof(float), AllocPref::PreferPsram, "thermal.float");
         if (!floatFrame) {
           ERROR_THERMALF("Failed to allocate floatFrame buffer");
           unlockThermalCache();
@@ -981,7 +981,7 @@ bool thermalPoll() {
     if (gSettings.thermalRotation != 0) {
       static int16_t* rotatedFrame = nullptr;
       if (!rotatedFrame) {
-        rotatedFrame = (int16_t*)ps_alloc(768 * sizeof(int16_t), AllocPref::PreferPSRAM, "thermal.rotate");
+        rotatedFrame = (int16_t*)ps_alloc(768 * sizeof(int16_t), AllocPref::PreferPsram, "thermal.rotate");
         if (!rotatedFrame) {
           ERROR_THERMALF("Failed to allocate rotation buffer, skipping rotation");
           unlockThermalCache();

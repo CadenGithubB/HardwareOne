@@ -877,7 +877,7 @@ const char* cmd_fileview(const String& argsInput) {
   const size_t kBodyMax = 65535;
   size_t bodyCap = shownLen + (shownLen / kCols) + 16;
   if (bodyCap > kBodyMax) bodyCap = kBodyMax;
-  char* body = (char*)ps_alloc(bodyCap, AllocPref::PreferPSRAM, "fs.fileview.body");
+  char* body = (char*)ps_alloc(bodyCap, AllocPref::PreferPsram, "fs.fileview.body");
   if (!body) return "Error: fileview: buffer alloc failed";
   TextWrapStream wrap(body, bodyCap, kCols, /*continuationIndent=*/0,
                       /*stripControl=*/true);
@@ -1157,7 +1157,7 @@ const char* cmd_fileread(const String& argsInput) {
     }
 
     if (want > 0) {
-      buf = (uint8_t*)ps_alloc(want, AllocPref::PreferPSRAM, "fileread.chunk");
+      buf = (uint8_t*)ps_alloc(want, AllocPref::PreferPsram, "fileread.chunk");
       if (!buf) {
         f.close();
         return "{\"success\":false,\"error\":\"OOM\"}";
@@ -2203,7 +2203,7 @@ bool readTextLimited(const char* path, String& out, size_t maxBytes, const AuthC
   const size_t chunk = 512;
   static char* buf = nullptr;
   if (!buf) {
-    buf = (char*)ps_alloc(chunk, AllocPref::PreferPSRAM, "file.read");
+    buf = (char*)ps_alloc(chunk, AllocPref::PreferPsram, "file.read");
     if (!buf) return false;
   }
   size_t total = 0;
@@ -2411,7 +2411,7 @@ bool appendLineWithCap(const char* path, const String& line, size_t capBytes) {
   static uint8_t* sRotateBuf = nullptr;
   static const size_t ROTATE_BUF_SIZE = 1024;
   if (!sRotateBuf) {
-    sRotateBuf = (uint8_t*)ps_alloc(ROTATE_BUF_SIZE, AllocPref::PreferPSRAM, "logrot.buf");
+    sRotateBuf = (uint8_t*)ps_alloc(ROTATE_BUF_SIZE, AllocPref::PreferPsram, "logrot.buf");
     if (!sRotateBuf) {
       r.close();
       STACK_TRACEF("appendLineWithCap.rotatebuf_alloc_failed");

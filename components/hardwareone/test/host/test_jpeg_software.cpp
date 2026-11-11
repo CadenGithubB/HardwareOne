@@ -56,9 +56,9 @@ extern "C" JRESULT jd_decomp(JDEC*, int (*)(JDEC*, void*, JRECT*), uint8_t) { re
 namespace hwjpeg { namespace detail {
 bool decodeHardware(const uint8_t*, size_t, const Info&, Image&, const char**) { ++hardwareCalls; return false; }
 }}
-enum class AllocPref { PreferPSRAM };
+enum class AllocPref { PreferPsram };
 void* ps_alloc(size_t size, AllocPref preference, const char* tag) {
- assert(preference == AllocPref::PreferPSRAM);
+ assert(preference == AllocPref::PreferPsram);
  assert(std::strcmp(tag, "g2.jpeg.rgb") == 0);
  return customAllocate(size);
 }

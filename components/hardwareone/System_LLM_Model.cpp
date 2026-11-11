@@ -438,16 +438,16 @@ static bool computeMemoryLayout(LoadContext& ctx) {
     ctx.hotSize += ((size_t)2 * kv_dim + headSize) * sizeof(float);
   fixedBytes += ctx.hotSize;
 
-  size_t freePSRAM = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+  size_t freePsram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
   size_t largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
   // Use largest contiguous block as budget basis — total free can be misleading
   // because the cold state (KV cache + logits) is one big contiguous allocation.
   // After weights fragment PSRAM, the largest block shrinks significantly.
   // We use the smaller of (total free) and (weights + largest_block) to be safe:
   // weights can be multiple smaller allocs, but cold state must be contiguous.
-  size_t budget = (freePSRAM > LLM_PSRAM_RESERVE_BYTES) ? freePSRAM - LLM_PSRAM_RESERVE_BYTES : 0;
+  size_t budget = (freePsram > LLM_PSRAM_RESERVE_BYTES) ? freePsram - LLM_PSRAM_RESERVE_BYTES : 0;
   DEBUG_LLM_MEMORYF("[LLM] PSRAM: total_free=%uKB largest_block=%uKB",
-                    (unsigned)(freePSRAM/1024), (unsigned)(largestBlock/1024));
+                    (unsigned)(freePsram/1024), (unsigned)(largestBlock/1024));
 
   // Check if even weights alone exceed budget (ctx-independent)
   // coldSize has a fixed V component too
@@ -488,27 +488,27 @@ static bool computeMemoryLayout(LoadContext& ctx) {
                       (unsigned)(ctx.weightsBytes/1024), (unsigned)(ctx.weightsQ8Bytes/1024),
                       (unsigned)(ctx.weightsQ4Bytes/1024), (unsigned)(ctx.weightsQ4ScBytes/1024),
                       (unsigned)(ctx.kvCacheSize/1024), (unsigned)((ctx.hotSize + ctx.coldSize)/1024),
-                      (unsigned)(totalNeeded/1024), (unsigned)(freePSRAM/1024));
+                      (unsigned)(totalNeeded/1024), (unsigned)(freePsram/1024));
   } else if (qt == 1) {
     DEBUG_LLM_MEMORYF("[LLM] Memory (INT8): fp_block=%uKB q8_block=%uKB kv=%uKB act=%uKB total=%uKB free=%uKB ctx=%d",
                       (unsigned)(ctx.weightsBytes/1024), (unsigned)(ctx.weightsQ8Bytes/1024),
                       (unsigned)(ctx.kvCacheSize/1024), (unsigned)((ctx.hotSize + ctx.coldSize)/1024),
-                      (unsigned)(totalNeeded/1024), (unsigned)(freePSRAM/1024), seq_ctx);
+                      (unsigned)(totalNeeded/1024), (unsigned)(freePsram/1024), seq_ctx);
   } else {
     DEBUG_LLM_MEMORYF("[LLM] Memory (FP32): weights=%uKB kv=%uKB act=%uKB total=%uKB free=%uKB ctx=%d",
                       (unsigned)(ctx.weightsBytes/1024), (unsigned)(ctx.kvCacheSize/1024),
                       (unsigned)((ctx.hotSize + ctx.coldSize)/1024), (unsigned)(totalNeeded/1024),
-                      (unsigned)(freePSRAM/1024), seq_ctx);
+                      (unsigned)(freePsram/1024), seq_ctx);
   }
 
   // Final sanity check (should not fail after auto-fit, but be safe)
-  if (totalNeeded + LLM_PSRAM_RESERVE_BYTES > freePSRAM) {
+  if (totalNeeded + LLM_PSRAM_RESERVE_BYTES > freePsram) {
     setLlmError(
              "Not enough PSRAM: need %uKB + %uKB reserve = %uKB, have %uKB (short %uKB)",
              (unsigned)(totalNeeded/1024), (unsigned)(LLM_PSRAM_RESERVE_BYTES/1024),
              (unsigned)((totalNeeded + LLM_PSRAM_RESERVE_BYTES)/1024),
-             (unsigned)(freePSRAM/1024),
-             (unsigned)((totalNeeded + LLM_PSRAM_RESERVE_BYTES - freePSRAM)/1024));
+             (unsigned)(freePsram/1024),
+             (unsigned)((totalNeeded + LLM_PSRAM_RESERVE_BYTES - freePsram)/1024));
     return false;
   }
   return true;
@@ -694,9 +694,9 @@ static bool allocateRunState(LoadContext& ctx) {
   if (!gLlm.stateData) {
     // Fragmentation: largest contiguous block is too small. Shrink context to fit.
     size_t largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
-    size_t freePSRAM = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    size_t freePsram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
     DEBUG_LLM_MEMORYF("[LLM] Cold state alloc failed: need %uKB, PSRAM free=%uKB largest=%uKB — retrying with reduced ctx",
-                      (unsigned)(coldStateBytes/1024), (unsigned)(freePSRAM/1024), (unsigned)(largestBlock/1024));
+                      (unsigned)(coldStateBytes/1024), (unsigned)(freePsram/1024), (unsigned)(largestBlock/1024));
     // Recompute: how many context slots fit in largest contiguous block?
     size_t fixedCold = (size_t)V * sizeof(float);  // logits array (always needed)
     if (largestBlock <= fixedCold) {

@@ -63,7 +63,7 @@ static uint32_t millis(){return now;}
 static void vTaskDelay(unsigned amount){now+=amount;if(delayHook)delayHook();}
 static size_t hw1Strlcpy(char* out,const char* in,size_t cap){size_t n=std::strlen(in);if(cap){size_t take=std::min(n,cap-1);std::memcpy(out,in,take);out[take]=0;}return n;}
 #define strlcpy hw1Strlcpy
-enum class AllocPref{PreferPSRAM,RequireInternal};
+enum class AllocPref{PreferPsram,RequireInternal};
 static bool refuseInternal=false;
 static unsigned internalAllocations=0;
 static unsigned allocations=0;

@@ -45,7 +45,7 @@ bool ensure() {
   // Build both outside the critical section (the table is 24 KiB of PSRAM to
   // zero); only the pointer swap is protected, and a loser frees its copy.
   SemaphoreHandle_t mutex = xSemaphoreCreateMutex();
-  void* storage = ps_alloc(sizeof(Vocabulary), AllocPref::PreferPSRAM, "stt.vocab");
+  void* storage = ps_alloc(sizeof(Vocabulary), AllocPref::PreferPsram, "stt.vocab");
   Vocabulary* table = storage ? new (storage) Vocabulary : nullptr;
   portENTER_CRITICAL(&gInitMux);
   if (!gStore.mutex && mutex) { gStore.mutex = mutex; mutex = nullptr; }
@@ -85,7 +85,7 @@ bool parseFile(Vocabulary& into, char* error, size_t cap) {
   if (!file || file.isDirectory()) return fail(error, cap, "Vocabulary file unreadable");
   const size_t bytes = file.size();
   if (bytes > kMaxFileBytes) { file.close(); return fail(error, cap, "Vocabulary file too large"); }
-  char* text = static_cast<char*>(ps_alloc(bytes + 1, AllocPref::PreferPSRAM, "stt.vocab_file"));
+  char* text = static_cast<char*>(ps_alloc(bytes + 1, AllocPref::PreferPsram, "stt.vocab_file"));
   if (!text) { file.close(); return fail(error, cap, "No memory to read the vocabulary"); }
   size_t got = 0;
   while (got < bytes) {
@@ -158,7 +158,7 @@ bool edit(bool (*change)(Vocabulary&, const char*, const char*, char*, size_t),
   if (!lock.held) return fail(error, cap, "Vocabulary busy");
   if (!gStore.path[0]) choosePathLocked();
   // Stage a copy; the active list is untouched until the file is replaced.
-  void* storage = ps_alloc(sizeof(Vocabulary), AllocPref::PreferPSRAM, "stt.vocab_edit");
+  void* storage = ps_alloc(sizeof(Vocabulary), AllocPref::PreferPsram, "stt.vocab_edit");
   if (!storage) return fail(error, cap, "No memory to edit the vocabulary");
   Vocabulary* staged = new (storage) Vocabulary(*gStore.active);
   const bool ok = change(*staged, a, b, error, cap) && writeFile(*staged, error, cap);
@@ -175,7 +175,7 @@ bool removeChange(Vocabulary& v, const char* spoken, const char*, char* error, s
 }
 bool reloadLocked(char* error, size_t cap) {
   choosePathLocked();
-  void* storage = ps_alloc(sizeof(Vocabulary), AllocPref::PreferPSRAM, "stt.vocab_load");
+  void* storage = ps_alloc(sizeof(Vocabulary), AllocPref::PreferPsram, "stt.vocab_load");
   if (!storage) return fail(error, cap, "No memory to load the vocabulary");
   Vocabulary* staged = new (storage) Vocabulary;
   const bool ok = parseFile(*staged, error, cap);

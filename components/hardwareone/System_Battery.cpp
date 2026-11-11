@@ -444,7 +444,7 @@ const char* cmd_battery_status(const String& argsInput) {
     buildBatteryJson(doc);
     static char* jbuf = nullptr;
     constexpr size_t size = 1536;
-    if (!jbuf) jbuf = (char*)ps_alloc(size, AllocPref::PreferPSRAM, "battery.json");
+    if (!jbuf) jbuf = (char*)ps_alloc(size, AllocPref::PreferPsram, "battery.json");
     if (!jbuf) return "{\"error\":\"oom\"}";
     if (measureJson(doc) >= size) return "{\"error\":\"battery_json_too_large\"}";
     serializeJson(doc, jbuf, size);

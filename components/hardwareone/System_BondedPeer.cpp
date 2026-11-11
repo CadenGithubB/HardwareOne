@@ -223,7 +223,7 @@ bool readRemoteEditableSchemaJson(char** out, size_t* outLen) {
   }
   filterSchemaForRemoteEdit(doc);
   const size_t len = measureJson(doc);
-  char* buf = (char*)ps_alloc(len + 1, AllocPref::PreferPSRAM, "bond.schema.editable");
+  char* buf = (char*)ps_alloc(len + 1, AllocPref::PreferPsram, "bond.schema.editable");
   if (!buf) return fail("Out of memory for the schema");
   serializeJson(doc, buf, len + 1);
   *out = buf;

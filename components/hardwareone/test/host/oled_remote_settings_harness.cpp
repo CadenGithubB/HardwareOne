@@ -97,7 +97,7 @@ static void delay(uint32_t) { ++gDelayCalls; }
 
 // PSRAM allocation doubles: every block is tracked; gFailAllocAt makes the N-th
 // allocation (1-based, counted from the last reset) fail.
-enum class AllocPref : uint8_t { PreferPSRAM, PreferInternal };
+enum class AllocPref : uint8_t { PreferPsram, PreferInternal };
 using AllocPolicy = AllocPref;
 static std::set<void*> gLiveAllocs;
 static int gAllocCalls = 0;

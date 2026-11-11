@@ -107,7 +107,7 @@ static void streamBeginHtml(httpd_req_t* req, const char* title, bool, const cha
 }
 static void streamEndHtml(httpd_req_t*) {}
 
-enum class AllocPref { PreferPSRAM };
+enum class AllocPref { PreferPsram };
 static void* ps_alloc(size_t size, AllocPref, const char*) { return std::malloc(size); }
 
 // Client and lockout adapters (WebServer_Server.cpp keys them by IP).

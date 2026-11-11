@@ -78,7 +78,7 @@ static void noteLog(const char* level, const char* fmt, ...) {
 #define DEBUG_ESPNOW_CORE 0
 #define DEBUGF(flag, ...)  noteLog("DEBUG", __VA_ARGS__)
 
-enum class AllocPref { PreferPSRAM };
+enum class AllocPref { PreferPsram };
 static void* ps_alloc(size_t n, AllocPref, const char*) { return std::calloc(1, n); }
 static void sodium_memzero(void* p, size_t n) { std::memset(p, 0, n); }
 static int sodium_is_zero(const unsigned char* p, size_t n) {

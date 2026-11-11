@@ -48,7 +48,7 @@ static std::set<void*> allocations;
 static bool refuseScratch=false;
 void* trackedAlloc(size_t n){void* p=std::malloc(n);assert(p);allocations.insert(p);return p;}
 void trackedFree(void* p){if(p){assert(allocations.erase(p)==1);std::free(p);}}
-enum class AllocPref{PreferPSRAM};
+enum class AllocPref{PreferPsram};
 void* ps_alloc(size_t n,AllocPref,const char*){return refuseScratch?nullptr:trackedAlloc(n);}
 static bool authed=true,awake=true,guest=false,sourceRunning=true,snapshotBusy=false,decodeFail=false;
 static uint64_t liveEpoch=1;

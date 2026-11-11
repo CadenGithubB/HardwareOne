@@ -282,7 +282,7 @@ uint8_t* captureTinyFrame(size_t* outLen) { return captureFrameAtResolution(Came
 
 const char* buildCameraStatusJson() {
   if (!lockCameraMutex(15000)) return "{\"error\":\"Camera busy\"}";
-  if (!cameraStatusBuffer) cameraStatusBuffer = static_cast<char*>(ps_alloc(kStatusBufSize, AllocPref::PreferPSRAM, "camera.status.json"));
+  if (!cameraStatusBuffer) cameraStatusBuffer = static_cast<char*>(ps_alloc(kStatusBufSize, AllocPref::PreferPsram, "camera.status.json"));
   if (!cameraStatusBuffer) { unlockCameraMutex(); return "{}"; }
   const auto caps = cameraBackend().capabilities();
   const auto state = cameraBackend().info();
@@ -1447,7 +1447,7 @@ static const char* cameraResolutionOptions() {
   portEXIT_CRITICAL(&sCachedLock);
   if (found) return found;
 
-  char* options = static_cast<char*>(ps_alloc(kOptionsSize, AllocPref::PreferPSRAM, "camera.res.options"));
+  char* options = static_cast<char*>(ps_alloc(kOptionsSize, AllocPref::PreferPsram, "camera.res.options"));
   if (!options) return "";
   size_t used = 0;
   options[0] = 0;

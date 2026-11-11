@@ -501,7 +501,7 @@ static void spawnAIWorker(AIWorkerKind kind, const char* heading, const char* bo
   // Worker args (~340 B) — short-lived, freed by the worker. PSRAM is fine
   // here: the worker reads them once at task entry, no DMA / ISR.
   AIWorkerArgs* a = (AIWorkerArgs*)ps_alloc(sizeof(AIWorkerArgs),
-                                            AllocPref::PreferPSRAM, "g2.test.aiArgs");
+                                            AllocPref::PreferPsram, "g2.test.aiArgs");
   if (!a) {
     DEBUG_G2F("[G2] AI test: ps_alloc failed (kind=%u)", (unsigned)kind);
     return;

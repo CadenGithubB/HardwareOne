@@ -55,7 +55,7 @@ static int lockDepth = 0;
 #define portENTER_CRITICAL(m) do { (void)(m); CHECK(lockDepth == 0); ++lockDepth; } while (0)
 #define portEXIT_CRITICAL(m) do { (void)(m); CHECK(lockDepth == 1); --lockDepth; } while (0)
 
-enum class AllocPref : uint8_t { PreferPSRAM = 0 };
+enum class AllocPref : uint8_t { PreferPsram = 0 };
 static int live = 0, allocs = 0;
 static bool failAlloc = false;
 static void* ps_alloc(size_t size, AllocPref, const char*) {

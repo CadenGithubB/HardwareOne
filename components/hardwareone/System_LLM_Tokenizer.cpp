@@ -216,7 +216,7 @@ bool loadTokenizerFromFile(File& f) {
     // Build a set of token IDs that BPE merges can produce
     // Use a simple boolean array (vocab is small enough)
     bool* bpeReachable = (bool*)ps_calloc(tok_vocab_size, sizeof(bool),
-                                          AllocPref::PreferPSRAM, "tok.reach");
+                                          AllocPref::PreferPsram, "tok.reach");
     if (bpeReachable) {
       for (uint32_t i = 0; i < merge_count; i++) {
         int mid = t->merges[i].merged_id;
@@ -248,7 +248,7 @@ bool loadTokenizerFromFile(File& f) {
       if (unreachableCount > 0) {
         // Presplit (1-2 KB for the shipped models): PSRAM first, like the vocab.
         t->presplit = (PreSplitToken*)ps_calloc(unreachableCount, sizeof(PreSplitToken),
-                                                AllocPref::PreferPSRAM, "tok.presplit");
+                                                AllocPref::PreferPsram, "tok.presplit");
         if (t->presplit) {
           int idx = 0;
           for (uint32_t i = 0; i < tok_vocab_size; i++) {

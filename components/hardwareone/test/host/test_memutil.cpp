@@ -125,7 +125,7 @@ void testPolicyRouting() {
   ps_free(defaultPtr);
 
   resetMocks();
-  void* psramPtr = ps_alloc(64, AllocPolicy::PreferPSRAM, "test.prefer_ps");
+  void* psramPtr = ps_alloc(64, AllocPolicy::PreferPsram, "test.prefer_ps");
   assert(psramPtr != nullptr && esp_ptr_external_ram(psramPtr));
   assertCaps(gPreferCaps, {kPsramCaps, kInternalCaps});
   assert(gLastDebug.requestedPS && gLastDebug.usedPS && !gLastDebug.fellBack);
@@ -134,7 +134,7 @@ void testPolicyRouting() {
 
   resetMocks();
   gFailPsram = true;
-  void* fallbackPtr = ps_alloc(96, AllocPolicy::PreferPSRAM, "test.fallback");
+  void* fallbackPtr = ps_alloc(96, AllocPolicy::PreferPsram, "test.fallback");
   assert(fallbackPtr != nullptr && !esp_ptr_external_ram(fallbackPtr));
   assertCaps(gPreferCaps, {kPsramCaps, kInternalCaps});
   assert(gLastDebug.requestedPS && !gLastDebug.usedPS && gLastDebug.fellBack);
@@ -152,7 +152,7 @@ void testPolicyRouting() {
 
   resetMocks();
   gFailPsram = true;
-  assert(ps_alloc(48, AllocPolicy::RequirePSRAM, "test.require_ps") == nullptr);
+  assert(ps_alloc(48, AllocPolicy::RequirePsram, "test.require_ps") == nullptr);
   assertCaps(gCapsCalls, {kPsramCaps});
   assert(gDebugCalls == 1 && gLastDebug.ptr == nullptr && !gLastDebug.fellBack);
 
@@ -170,7 +170,7 @@ void testBypassAndRuntimePresence() {
   assert(psramAvailableRuntime());
 
   setPsramBypass(true);
-  void* ptr = ps_alloc(32, AllocPolicy::PreferPSRAM, "test.bypass");
+  void* ptr = ps_alloc(32, AllocPolicy::PreferPsram, "test.bypass");
   assert(ptr != nullptr && !esp_ptr_external_ram(ptr));
   assert(gPreferCaps.empty());
   assertCaps(gCapsCalls, {kInternalCaps});
@@ -180,7 +180,7 @@ void testBypassAndRuntimePresence() {
 
   gCapsCalls.clear();
   gDebugCalls = 0;
-  assert(ps_alloc(32, AllocPolicy::RequirePSRAM, "test.bypass.strict") == nullptr);
+  assert(ps_alloc(32, AllocPolicy::RequirePsram, "test.bypass.strict") == nullptr);
   assert(gCapsCalls.empty());
   assert(gDebugCalls == 1 && gLastDebug.ptr == nullptr);
 }
@@ -190,7 +190,7 @@ void testNoRegisteredPsram() {
   gPsramTotal = 0;
   gPsramFree = 0;
   assert(!psramAvailableRuntime());
-  void* ptr = ps_alloc(48, AllocPolicy::PreferPSRAM, "test.no_registered_psram");
+  void* ptr = ps_alloc(48, AllocPolicy::PreferPsram, "test.no_registered_psram");
   assert(ptr != nullptr && !esp_ptr_external_ram(ptr));
   assert(gPreferCaps.empty());
   assertCaps(gCapsCalls, {kInternalCaps});
@@ -198,35 +198,35 @@ void testNoRegisteredPsram() {
   assert(psAllocFallbackCount() == 0);
   memset(ptr, 0x6c, 48);
   gCapsCalls.clear();
-  void* grown = ps_realloc(ptr, 80, AllocPolicy::PreferPSRAM, "test.no_psram_realloc");
+  void* grown = ps_realloc(ptr, 80, AllocPolicy::PreferPsram, "test.no_psram_realloc");
   assert(grown != nullptr && static_cast<unsigned char*>(grown)[0] == 0x6c);
   assertCaps(gCapsCalls, {kInternalCaps});
   ps_free(grown);
 
   gCapsCalls.clear();
   auto* zeroed = static_cast<unsigned char*>(
-      ps_calloc(8, 1, AllocPolicy::PreferPSRAM, "test.no_psram_calloc"));
+      ps_calloc(8, 1, AllocPolicy::PreferPsram, "test.no_psram_calloc"));
   assert(zeroed != nullptr);
   for (size_t i = 0; i < 8; ++i) assert(zeroed[i] == 0);
   assertCaps(gCapsCalls, {kInternalCaps});
   ps_free(zeroed);
 
   gCapsCalls.clear();
-  assert(ps_alloc(48, AllocPolicy::RequirePSRAM, "test.no_psram_strict") == nullptr);
+  assert(ps_alloc(48, AllocPolicy::RequirePsram, "test.no_psram_strict") == nullptr);
   assert(gCapsCalls.empty());
   gFailInternal = true;
   gFailPsram = true;
-  assert(ps_alloc(48, AllocPolicy::PreferPSRAM, "test.no_psram_real_oom") == nullptr);
+  assert(ps_alloc(48, AllocPolicy::PreferPsram, "test.no_psram_real_oom") == nullptr);
   assertCaps(gCapsCalls, {kInternalCaps});
 }
 
 void testNoCompileTimePsram() {
   resetMocks();
-  assert(!hasPSRAMAvail());
+  assert(!hasPsramAvail());
   // Even an inconsistent mock reporting external capacity must not make a
   // no-PSRAM build request it: the compile-time guard precedes the heap query.
   assert(gPsramTotal > 0 && !psramAvailableRuntime());
-  void* ptr = ps_alloc(64, AllocPolicy::PreferPSRAM, "test.no_compile_psram");
+  void* ptr = ps_alloc(64, AllocPolicy::PreferPsram, "test.no_compile_psram");
   assert(ptr != nullptr && !esp_ptr_external_ram(ptr));
   assert(gPreferCaps.empty());
   assertCaps(gCapsCalls, {kInternalCaps});
@@ -235,7 +235,7 @@ void testNoCompileTimePsram() {
   gCapsCalls.clear();
   gFailInternal = true;
   gFailPsram = true;
-  assert(ps_alloc(64, AllocPolicy::PreferPSRAM, "test.no_compile_psram_oom") == nullptr);
+  assert(ps_alloc(64, AllocPolicy::PreferPsram, "test.no_compile_psram_oom") == nullptr);
   assertCaps(gCapsCalls, {kInternalCaps});
 }
 
@@ -258,7 +258,7 @@ void testPlacementParentOwnership() {
     if (mode == 3) { gPsramTotal = 0; gPsramFree = 0; }
     if (mode == 4) { gFailPsram = true; gFailInternal = true; }
     unsigned destroyed = 0;
-    void* storage = ps_alloc(sizeof(ParentLifetimeProbe), AllocPolicy::PreferPSRAM,
+    void* storage = ps_alloc(sizeof(ParentLifetimeProbe), AllocPolicy::PreferPsram,
                             "test.sensor_parent");
     if (mode == 4) {
       assert(storage == nullptr && destroyed == 0);
@@ -266,7 +266,7 @@ void testPlacementParentOwnership() {
       continue;
     }
     assert(storage != nullptr);
-    const bool expectExternal = hasPSRAMAvail() && mode == 0;
+    const bool expectExternal = hasPsramAvail() && mode == 0;
     assert(esp_ptr_external_ram(storage) == expectExternal);
     auto* parent = new (storage) ParentLifetimeProbe(&destroyed);
     assert(parent->value == 0x5a5a5a5a && destroyed == 0);
@@ -279,13 +279,13 @@ void testPlacementParentOwnership() {
 
 void testCallocAndZeroContracts() {
   resetMocks();
-  assert(ps_alloc(0, AllocPolicy::PreferPSRAM, "test.zero") == nullptr);
-  assert(ps_calloc(0, 4, AllocPolicy::PreferPSRAM, "test.zero") == nullptr);
-  assert(ps_calloc(4, 0, AllocPolicy::PreferPSRAM, "test.zero") == nullptr);
+  assert(ps_alloc(0, AllocPolicy::PreferPsram, "test.zero") == nullptr);
+  assert(ps_calloc(0, 4, AllocPolicy::PreferPsram, "test.zero") == nullptr);
+  assert(ps_calloc(4, 0, AllocPolicy::PreferPsram, "test.zero") == nullptr);
   assert(gCapsCalls.empty() && gDebugCalls == 0);
 
   assert(ps_calloc(std::numeric_limits<size_t>::max(), 2,
-                   AllocPolicy::PreferPSRAM, "test.overflow") == nullptr);
+                   AllocPolicy::PreferPsram, "test.overflow") == nullptr);
   assert(gCapsCalls.empty());
 
   uint32_t* values = static_cast<uint32_t*>(
@@ -303,7 +303,7 @@ void testReallocContracts() {
   assert(ptr != nullptr);
   memset(ptr, 0x5a, 32);
   gDebugCalls = 0;
-  assert(ps_realloc(ptr, 0, AllocPolicy::PreferPSRAM, "test.realloc.zero") ==
+  assert(ps_realloc(ptr, 0, AllocPolicy::PreferPsram, "test.realloc.zero") ==
          nullptr);
   assert(gBackendReallocZeroCalls == 0);
   assert(gDebugCalls == 0);
@@ -325,7 +325,7 @@ void testReallocContracts() {
   assert(ptr != nullptr);
   gFailPsram = true;
   gDebugCalls = 0;
-  void* fallback = ps_realloc(ptr, 64, AllocPolicy::PreferPSRAM,
+  void* fallback = ps_realloc(ptr, 64, AllocPolicy::PreferPsram,
                               "test.realloc.fallback");
   assert(fallback != nullptr && !esp_ptr_external_ram(fallback));
   assert(gDebugCalls == 1 && gLastDebug.fellBack);
@@ -334,7 +334,7 @@ void testReallocContracts() {
 
   resetMocks();
   void* allocated =
-      ps_realloc(nullptr, 24, AllocPolicy::RequirePSRAM, "test.realloc.null");
+      ps_realloc(nullptr, 24, AllocPolicy::RequirePsram, "test.realloc.null");
   assert(allocated != nullptr && esp_ptr_external_ram(allocated));
   ps_free(allocated);
 
@@ -356,7 +356,7 @@ void testPsramBuffer() {
     assert(strcmp(out.c_str(), "") == 0);
     assert(out.reserve(0) && out.capacity() == 0);
     assert(out.append("abc"));
-    assert(esp_ptr_external_ram(out.data()) == (hasPSRAMAvail() && mode == 0));
+    assert(esp_ptr_external_ram(out.data()) == (hasPsramAvail() && mode == 0));
     const std::string prefix(200, 'x');
     assert(out.append(prefix.c_str(), prefix.size()));
     const std::string original = out.c_str();
@@ -497,7 +497,7 @@ extern "C" void memAllocDebug(const char* op, void* ptr, size_t size,
 }
 
 int main() {
-  if (hasPSRAMAvail()) {
+  if (hasPsramAvail()) {
     testPolicyRouting();
     testBypassAndRuntimePresence();
     testReallocContracts();

@@ -55,7 +55,7 @@ uint32_t ulTaskNotifyTake(uint32_t, uint32_t delay) {
 void xTaskNotifyGive(void*) {}
 int xTaskCreateLogged(void (*)(void*), const char*, uint32_t, void*, int,
                      void** out, const char*, int) { *out = reinterpret_cast<void*>(1); return pdPASS; }
-enum class AllocPref { RequirePSRAM };
+enum class AllocPref { RequirePsram };
 void* ps_alloc(size_t size, AllocPref, const char*) { return malloc(size); }
 void heap_caps_free(void* p) { free(p); }
 uint32_t esp_random() { return 0x12345678; }

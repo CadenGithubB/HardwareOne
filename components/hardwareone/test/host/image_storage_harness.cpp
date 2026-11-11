@@ -235,7 +235,7 @@ static bool getStats(StorageType type, uint64_t& total, uint64_t& used, uint64_t
 }
 }
 static constexpr uint32_t MALLOC_CAP_SPIRAM = 1, MALLOC_CAP_8BIT = 2;
-enum class AllocPref { RequirePSRAM };
+enum class AllocPref { RequirePsram };
 static size_t largestBlock = 4096;
 static bool failAlloc = false;
 static size_t heap_caps_get_largest_free_block(uint32_t) { return largestBlock; }

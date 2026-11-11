@@ -37,7 +37,7 @@ esp_err_t handlePowerStatus(httpd_req_t* req) {
   // invalid JSON the page cannot parse — keep the headroom.
   static char* buf = nullptr;
   static const size_t kBufSize = 1024;
-  if (!buf) buf = (char*)ps_alloc(kBufSize, AllocPref::PreferPSRAM, "power.status.json");
+  if (!buf) buf = (char*)ps_alloc(kBufSize, AllocPref::PreferPsram, "power.status.json");
   if (!buf) { httpd_resp_send(req, "{}", HTTPD_RESP_USE_STRLEN); return ESP_OK; }
   PSRAM_JSON_DOC(doc);
   buildPowerJson(doc);

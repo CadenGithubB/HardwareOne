@@ -4415,7 +4415,7 @@ bool g2MicSetAfeFeedActive(bool on, uint32_t nativeLeftGeneration) {
     if (!gMicAfeRing) {
       gMicAfeRing = (int16_t*)ps_alloc(
           kMicAfeRingCapSamples * sizeof(int16_t),
-          AllocPref::RequirePSRAM, "g2.mic.afe.ring");
+          AllocPref::RequirePsram, "g2.mic.afe.ring");
       if (!gMicAfeRing) {
         xSemaphoreGive(gMicAfeMutex);
         DEBUG_G2F("[G2-MIC-AFE] ring alloc failed (%u B)",
@@ -4427,7 +4427,7 @@ bool g2MicSetAfeFeedActive(bool on, uint32_t nativeLeftGeneration) {
     if (!gMicAfeDecoder) {
       unsigned sz = lc3_decoder_size(kMicLc3FrameUs, kMicLc3SampleHz);
       // Decoder workspace is CPU-only — prefer PSRAM to preserve internal DRAM for stacks/BLE.
-      gMicAfeDecMem = ps_alloc(sz, AllocPref::PreferPSRAM, "g2.mic.afe.lc3dec");
+      gMicAfeDecMem = ps_alloc(sz, AllocPref::PreferPsram, "g2.mic.afe.lc3dec");
       if (gMicAfeDecMem) {
         gMicAfeDecoder = lc3_setup_decoder(kMicLc3FrameUs, kMicLc3SampleHz,
                                            /*sr_pcm_hz*/ 0, gMicAfeDecMem);
@@ -17037,7 +17037,7 @@ static void g2NativeTerminalRpcRead() {
     memset(s.json, 0, sizeof(s.json)); g2NativeTerminalFail("host-request-failed-no-retry"); return;
   }
   if (completed == NativeRpc::Poll) { s.pollFailures = 0; s.pollRetryDelay = 0; }
-  auto* memory = ps_alloc(sizeof(JsonDocument), AllocPref::PreferPSRAM, "g2.terminal.json");
+  auto* memory = ps_alloc(sizeof(JsonDocument), AllocPref::PreferPsram, "g2.terminal.json");
   JsonDocument* doc = memory ? new (memory) JsonDocument(psramJsonAllocator()) : nullptr;
   if (!doc) { g2NativeTerminalFail("host-response-memory"); return; }
   const auto error = deserializeJson(*doc, static_cast<const char*>(s.json), result.length,
@@ -17969,7 +17969,7 @@ static bool g2ControlWorkerEnsure() {
   }
   if (!gRxPackets) {
     gRxPackets = (G2RxPacket*)ps_alloc(sizeof(G2RxPacket) * G2_RX_PACKET_DEPTH,
-                                      AllocPref::PreferPSRAM,
+                                      AllocPref::PreferPsram,
                                       "g2.rx-packet-ring");
     if (!gRxPackets) {
       DEBUG_G2F("[G2] control owner: RX packet ring allocation failed");
@@ -17983,7 +17983,7 @@ static bool g2ControlWorkerEnsure() {
   if (!gRxEvenAiCtrlPackets) {
     gRxEvenAiCtrlPackets = (G2RxPacket*)ps_alloc(
         sizeof(G2RxPacket) * G2_RX_EVENAI_CTRL_DEPTH,
-        AllocPref::PreferPSRAM, "g2.rx-evenai-control");
+        AllocPref::PreferPsram, "g2.rx-evenai-control");
     if (!gRxEvenAiCtrlPackets) {
       DEBUG_G2F("[G2] control owner: EvenAI control RX ring allocation failed");
       g2ControlStartingDone();
@@ -18517,7 +18517,7 @@ static bool ensureTempleRuntime(G2Temple& t) {
     return false;
   }
   if (!t.rxBuf) {
-    t.rxBuf = (uint8_t*)ps_alloc(t.rxCap, AllocPref::PreferPSRAM, "g2.rxbuf");
+    t.rxBuf = (uint8_t*)ps_alloc(t.rxCap, AllocPref::PreferPsram, "g2.rxbuf");
     if (!t.rxBuf) {
       DEBUG_G2F("[G2-%c] Failed to allocate %u-byte RX buffer",
                 t.side, (unsigned)t.rxCap);
@@ -22182,7 +22182,7 @@ static bool sendCreateListAndWait(G2Temple& arm,
   // (page-swap worker), no DMA / ISR access. Falls back to internal
   // heap if PSRAM is exhausted.
   constexpr size_t kPbCap = 8192;
-  uint8_t* pb = (uint8_t*)ps_alloc(kPbCap, AllocPref::PreferPSRAM, "g2.pb.create-list");
+  uint8_t* pb = (uint8_t*)ps_alloc(kPbCap, AllocPref::PreferPsram, "g2.pb.create-list");
   if (!pb) {
     DEBUG_G2F("[G2] CREATE-list: ps_alloc(%u) failed", (unsigned)kPbCap);
     g2CreateTxnRelease();
@@ -22239,7 +22239,7 @@ static bool sendRebuildListAndWait(G2Temple& arm,
   if (!armRebuildSlot("REBUILD-list")) return false;
 
   constexpr size_t kPbCap = 8192;
-  uint8_t* pb = (uint8_t*)ps_alloc(kPbCap, AllocPref::PreferPSRAM, "g2.pb.rebuild-list");
+  uint8_t* pb = (uint8_t*)ps_alloc(kPbCap, AllocPref::PreferPsram, "g2.pb.rebuild-list");
   if (!pb) {
     DEBUG_G2F("[G2] REBUILD-list: ps_alloc(%u) failed", (unsigned)kPbCap);
     return false;
@@ -22330,7 +22330,7 @@ static bool sendRebuildListNamedAndWait(G2Temple& arm,
   if (!armRebuildSlot("REBUILD-list-named")) return false;
 
   constexpr size_t kPbCap = 8192;
-  uint8_t* pb = (uint8_t*)ps_alloc(kPbCap, AllocPref::PreferPSRAM, "g2.pb.rebuild-list-named");
+  uint8_t* pb = (uint8_t*)ps_alloc(kPbCap, AllocPref::PreferPsram, "g2.pb.rebuild-list-named");
   if (!pb) {
     DEBUG_G2F("[G2] REBUILD-list(name=%s): ps_alloc(%u) failed",
               listName, (unsigned)kPbCap);
@@ -22386,7 +22386,7 @@ static bool sendCreateTextAndWait(G2Temple& arm,
   // before the multi-fragment send refuses. Per-module JSON typically
   // sits well under 1 KB, so this is mostly headroom.
   constexpr size_t kPbCap = 8192;
-  uint8_t* pb = (uint8_t*)ps_alloc(kPbCap, AllocPref::PreferPSRAM, "g2.pb.create-text");
+  uint8_t* pb = (uint8_t*)ps_alloc(kPbCap, AllocPref::PreferPsram, "g2.pb.create-text");
   if (!pb) {
     DEBUG_G2F("[G2] CREATE-text: ps_alloc(%u) failed", (unsigned)kPbCap);
     g2CreateTxnRelease();
@@ -22438,7 +22438,7 @@ static bool sendRebuildTextAndWait(G2Temple& arm,
   if (!armRebuildSlot("REBUILD-text")) return false;
 
   constexpr size_t kPbCap = 8192;
-  uint8_t* pb = (uint8_t*)ps_alloc(kPbCap, AllocPref::PreferPSRAM, "g2.pb.rebuild-text");
+  uint8_t* pb = (uint8_t*)ps_alloc(kPbCap, AllocPref::PreferPsram, "g2.pb.rebuild-text");
   if (!pb) {
     DEBUG_G2F("[G2] REBUILD-text: ps_alloc(%u) failed", (unsigned)kPbCap);
     return false;
@@ -22490,7 +22490,7 @@ static bool sendRebuildTextNamedAndWait(G2Temple& arm,
   if (!armRebuildSlot("REBUILD-text(named)")) return false;
 
   constexpr size_t kPbCap = 8192;
-  uint8_t* pb = (uint8_t*)ps_alloc(kPbCap, AllocPref::PreferPSRAM, "g2.pb.rebuild-text-named");
+  uint8_t* pb = (uint8_t*)ps_alloc(kPbCap, AllocPref::PreferPsram, "g2.pb.rebuild-text-named");
   if (!pb) {
     DEBUG_G2F("[G2] REBUILD-text(name=%s): ps_alloc(%u) failed",
               containerName, (unsigned)kPbCap);
@@ -22604,7 +22604,7 @@ static bool sendRebuildMultiTextAndWait(G2Temple& arm,
   if (!armRebuildSlot("REBUILD-multitext")) return false;
 
   constexpr size_t kPbCap = 8192;
-  uint8_t* pb = (uint8_t*)ps_alloc(kPbCap, AllocPref::PreferPSRAM,
+  uint8_t* pb = (uint8_t*)ps_alloc(kPbCap, AllocPref::PreferPsram,
                                    "g2.pb.rebuild-multitext");
   if (!pb) {
     DEBUG_G2F("[G2] REBUILD-multitext: ps_alloc(%u) failed", (unsigned)kPbCap);
@@ -22659,7 +22659,7 @@ bool sendCreateMultiTextAndWait(G2Temple& arm,
   // doesn't reassemble for compound containers (verified empirically
   // with Q12). Cap explicitly here so we error before the wire.
   constexpr size_t kPbCap = 1024;
-  uint8_t* pb = (uint8_t*)ps_alloc(kPbCap, AllocPref::PreferPSRAM, "g2.pb.create-multitext");
+  uint8_t* pb = (uint8_t*)ps_alloc(kPbCap, AllocPref::PreferPsram, "g2.pb.create-multitext");
   if (!pb) {
     DEBUG_G2F("[G2] CREATE-multitext: ps_alloc(%u) failed", (unsigned)kPbCap);
     g2CreateTxnRelease();
@@ -22707,7 +22707,7 @@ static bool sendRebuildMixedListMultiTextAndWait(
   if (!armRebuildSlot("REBUILD-list+multitext")) return false;
 
   constexpr size_t kPbCap = 8192;
-  uint8_t* pb = (uint8_t*)ps_alloc(kPbCap, AllocPref::PreferPSRAM,
+  uint8_t* pb = (uint8_t*)ps_alloc(kPbCap, AllocPref::PreferPsram,
                                     "g2.pb.rebuild-list-multitext");
   if (!pb) {
     DEBUG_G2F("[G2] REBUILD-list+multitext: ps_alloc(%u) failed",
@@ -22780,7 +22780,7 @@ bool sendCreateMixedListMultiTextAndWait(
   // (1 list with one short item + 3 text panes ~250 B total content)
   // fits comfortably.
   constexpr size_t kPbCap = 1024;
-  uint8_t* pb = (uint8_t*)ps_alloc(kPbCap, AllocPref::PreferPSRAM,
+  uint8_t* pb = (uint8_t*)ps_alloc(kPbCap, AllocPref::PreferPsram,
                                     "g2.pb.create-list-multitext");
   if (!pb) {
     DEBUG_G2F("[G2] CREATE-list+multitext: ps_alloc(%u) failed",
@@ -22835,7 +22835,7 @@ bool sendCreateMixedListTextAndWait(G2Temple& arm,
   const uint32_t createMagic = gExpectMagic;
 
   constexpr size_t kPbCap = 1024;
-  uint8_t* pb = (uint8_t*)ps_alloc(kPbCap, AllocPref::PreferPSRAM, "g2.pb.create-list+text");
+  uint8_t* pb = (uint8_t*)ps_alloc(kPbCap, AllocPref::PreferPsram, "g2.pb.create-list+text");
   if (!pb) {
     DEBUG_G2F("[G2] CREATE-list+text: ps_alloc(%u) failed", (unsigned)kPbCap);
     g2CreateTxnRelease();
@@ -23153,12 +23153,12 @@ struct PageSwapArgs {
 // the strings and the outer array via freePageSwapItems().
 static char** dupPageSwapItems(const char* const* src, size_t n) {
   if (n == 0) return nullptr;
-  char** out = (char**)ps_calloc(n, sizeof(char*), AllocPref::PreferPSRAM, "g2.pageSwap.itemArr");
+  char** out = (char**)ps_calloc(n, sizeof(char*), AllocPref::PreferPsram, "g2.pageSwap.itemArr");
   if (!out) return nullptr;
   for (size_t i = 0; i < n; i++) {
     const char* s = src[i] ? src[i] : "";
     size_t len = strlen(s);
-    char* dst = (char*)ps_alloc(len + 1, AllocPref::PreferPSRAM, "g2.pageSwap.itemDup");
+    char* dst = (char*)ps_alloc(len + 1, AllocPref::PreferPsram, "g2.pageSwap.itemDup");
     if (!dst) {
       // Roll back partial allocations.
       for (size_t j = 0; j < i; j++) free(out[j]);
@@ -25393,7 +25393,7 @@ bool g2ShowTextPage(const char* content, const G2ContainerGeom& geom,
   // Heap-copy the content so the caller's buffer can be reused while
   // the worker is still running. Same lifetime model as the list path.
   const size_t len = strlen(content);
-  char* copy = (char*)ps_alloc(len + 1, AllocPref::PreferPSRAM, "g2.showTextPage.copy");
+  char* copy = (char*)ps_alloc(len + 1, AllocPref::PreferPsram, "g2.showTextPage.copy");
   if (!copy) {
     DEBUG_G2F("[G2] g2ShowTextPage: copy alloc failed (%u B)", (unsigned)len);
     return false;
@@ -25512,9 +25512,9 @@ bool g2ShowTextPageRebuildProbe(const char* placeholder,
 
   const size_t plen = strlen(placeholder);
   const size_t clen = strlen(content);
-  char* placeholderCopy = (char*)ps_alloc(plen + 1, AllocPref::PreferPSRAM,
+  char* placeholderCopy = (char*)ps_alloc(plen + 1, AllocPref::PreferPsram,
                                           "g2.txtRebuild.placeholder");
-  char* contentCopy     = (char*)ps_alloc(clen + 1, AllocPref::PreferPSRAM,
+  char* contentCopy     = (char*)ps_alloc(clen + 1, AllocPref::PreferPsram,
                                           "g2.txtRebuild.content");
   if (!placeholderCopy || !contentCopy) {
     if (placeholderCopy) free(placeholderCopy);
@@ -25595,7 +25595,7 @@ bool g2ShowMultiTextPage(const G2TextChildSpec* children, size_t childCount,
   // pointer null if a later per-child string allocation fails.
   G2TextChildSpec* specCopy =
       (G2TextChildSpec*)ps_calloc(childCount, sizeof(G2TextChildSpec),
-                                  AllocPref::PreferPSRAM,
+                                  AllocPref::PreferPsram,
                                   "g2.showMultiText.specs");
   if (!specCopy) {
     DEBUG_G2F("[G2] g2ShowMultiTextPage: spec-array alloc failed (%u)",
@@ -25608,14 +25608,14 @@ bool g2ShowMultiTextPage(const G2TextChildSpec* children, size_t childCount,
     specCopy[i].content       = nullptr;
     if (children[i].containerName) {
       const size_t n = strlen(children[i].containerName);
-      char* dup = (char*)ps_alloc(n + 1, AllocPref::PreferPSRAM, "g2.showMultiText.name");
+      char* dup = (char*)ps_alloc(n + 1, AllocPref::PreferPsram, "g2.showMultiText.name");
       if (!dup) goto fail_partial;
       memcpy(dup, children[i].containerName, n + 1);
       specCopy[i].containerName = dup;
     }
     if (children[i].content) {
       const size_t n = strlen(children[i].content);
-      char* dup = (char*)ps_alloc(n + 1, AllocPref::PreferPSRAM, "g2.showMultiText.content");
+      char* dup = (char*)ps_alloc(n + 1, AllocPref::PreferPsram, "g2.showMultiText.content");
       if (!dup) goto fail_partial;
       memcpy(dup, children[i].content, n + 1);
       specCopy[i].content = dup;
@@ -25708,8 +25708,8 @@ bool g2ShowMixedListText(const char* const* items, size_t itemCount,
   const char* contSrc = title.content       ? title.content       : "";
   size_t nameLen = strlen(nameSrc);
   size_t contLen = strlen(contSrc);
-  char* nameDup = (char*)ps_alloc(nameLen + 1, AllocPref::PreferPSRAM, "g2.listText.titleName");
-  char* contDup = (char*)ps_alloc(contLen + 1, AllocPref::PreferPSRAM, "g2.listText.titleContent");
+  char* nameDup = (char*)ps_alloc(nameLen + 1, AllocPref::PreferPsram, "g2.listText.titleName");
+  char* contDup = (char*)ps_alloc(contLen + 1, AllocPref::PreferPsram, "g2.listText.titleContent");
   if (!nameDup || !contDup) {
     DEBUG_G2F("[G2] g2ShowMixedListText: title-string alloc failed");
     free(nameDup);
@@ -25772,7 +25772,7 @@ bool g2ShowMixedListText2(const char* const* items, size_t itemCount,
   auto dup = [](const char* src, const char* tag) -> char* {
     const char* s = src ? src : "";
     const size_t n = strlen(s);
-    char* d = (char*)ps_alloc(n + 1, AllocPref::PreferPSRAM, tag);
+    char* d = (char*)ps_alloc(n + 1, AllocPref::PreferPsram, tag);
     if (d) memcpy(d, s, n + 1);
     return d;
   };
@@ -26181,10 +26181,10 @@ static void livePageWorker(void* /*arg*/) {
   // safe — and ps_alloc falls back to internal heap if PSRAM is full.
   constexpr size_t kMaxRows = 32;
   char (*rows)[64]  = (char(*)[64])ps_alloc(sizeof(char[kMaxRows][64]),
-                                            AllocPref::PreferPSRAM, "g2.livePage.rows");
+                                            AllocPref::PreferPsram, "g2.livePage.rows");
   const char** ptrs = (const char**)ps_alloc(sizeof(const char*) * kMaxRows,
-                                             AllocPref::PreferPSRAM, "g2.livePage.ptrs");
-  char* textBuf     = (char*)ps_alloc(2048, AllocPref::PreferPSRAM, "g2.livePage.text");
+                                             AllocPref::PreferPsram, "g2.livePage.ptrs");
+  char* textBuf     = (char*)ps_alloc(2048, AllocPref::PreferPsram, "g2.livePage.text");
   if (!rows || !ptrs || !textBuf) {
     DEBUG_G2F("[G2] live-page: worker heap alloc failed");
     if (rows)    free(rows);
@@ -26505,7 +26505,7 @@ static uint8_t* g2SessionScratchAcquire(size_t need) {
     gSessionScratch = nullptr;
     gSessionScratchCap = 0;
   }
-  gSessionScratch = (uint8_t*)ps_alloc(need, AllocPref::PreferPSRAM, "g2.session.scratch");
+  gSessionScratch = (uint8_t*)ps_alloc(need, AllocPref::PreferPsram, "g2.session.scratch");
   gSessionScratchCap = gSessionScratch ? need : 0;
   return gSessionScratch;
 }
@@ -27019,7 +27019,7 @@ static bool renderStatusCompound() {
   // Body buffer — heap'd to keep the worker stack small. 2 KB matches
   // the single-text path's textBuf; Status currently produces well
   // under 1 KB so headroom is generous.
-  char* bodyBuf = (char*)ps_alloc(2048, AllocPref::PreferPSRAM,
+  char* bodyBuf = (char*)ps_alloc(2048, AllocPref::PreferPsram,
                                   "g2.statusCompound.body");
   if (!bodyBuf) {
     DEBUG_G2F("[G2] status-compound: body alloc failed");
@@ -27185,7 +27185,7 @@ static void liveTextWorker(void* /*arg*/) {
   const bool useRenderFn = (gLiveTextRenderFn != nullptr);
   char* textBuf = nullptr;
   if (!useRenderFn) {
-    textBuf = (char*)ps_alloc(2048, AllocPref::PreferPSRAM, "g2.liveText.buf");
+    textBuf = (char*)ps_alloc(2048, AllocPref::PreferPsram, "g2.liveText.buf");
     if (!textBuf) {
       DEBUG_G2F("[G2] live-text: worker heap alloc failed");
       gLiveTextActive   = false;
@@ -29554,7 +29554,7 @@ static const char* cmd_g2imgprobe(const String& argsInput) {
 
   // Build the test pattern on the heap; 4 KB on stack would crowd the
   // BTC task's budget. Free at the end of this function.
-  uint8_t* pattern = (uint8_t*)ps_alloc(sizeBytes, AllocPref::PreferPSRAM, "g2.imgprobe.pattern");
+  uint8_t* pattern = (uint8_t*)ps_alloc(sizeBytes, AllocPref::PreferPsram, "g2.imgprobe.pattern");
   if (!pattern) return "Error: G2: imgprobe — pattern alloc failed";
   for (size_t i = 0; i < sizeBytes; i++) {
     pattern[i] = (i & 1) ? 0x0F : 0xF0;
@@ -29565,7 +29565,7 @@ static const char* cmd_g2imgprobe(const String& argsInput) {
   // chunk it. Size budget: pb wrapper overhead (~10 B) + nested
   // ImgRawMsg overhead (~6 B) + dataLen.
   const size_t bodyCap = sizeBytes + 64;
-  uint8_t* body = (uint8_t*)ps_alloc(bodyCap, AllocPref::PreferPSRAM, "g2.imgprobe.body");
+  uint8_t* body = (uint8_t*)ps_alloc(bodyCap, AllocPref::PreferPsram, "g2.imgprobe.body");
   if (!body) {
     free(pattern);
     return "Error: G2: imgprobe — body alloc failed";
@@ -30026,7 +30026,7 @@ static const char* cmd_g2micwav(const String& argsInput) {
     // notify task at the same packet rate, and this path additionally writes
     // each packet to SD, which dominates any PSRAM access cost. Falls back to
     // the internal heap on PSRAM-less boards. free() handles either.
-    void* mem = ps_alloc(decSize, AllocPref::PreferPSRAM, "g2.mic.wav.lc3dec");
+    void* mem = ps_alloc(decSize, AllocPref::PreferPsram, "g2.mic.wav.lc3dec");
     if (!mem) {
       xSemaphoreGive(gMicWavMutex);
       snprintf(ret, sizeof(ret), "G2 mic wav: decoder alloc %u B failed", decSize);
@@ -32211,7 +32211,7 @@ static bool g2ImgPrepareWirePayload(const uint8_t* bmp, size_t bmpLen,
   }
 
   const size_t bound = lz4BlockBound(bmpLen);
-  uint8_t* comp = (uint8_t*)ps_alloc(bound, AllocPref::PreferPSRAM, "g2.img.lz4");
+  uint8_t* comp = (uint8_t*)ps_alloc(bound, AllocPref::PreferPsram, "g2.img.lz4");
   if (!comp) {
     DEBUG_G2F("[ImgPush] wire: LZ4 alloc failed (bound=%u) — raw %u B",
               (unsigned)bound, (unsigned)bmpLen);
@@ -32363,7 +32363,7 @@ static bool sendImageBmpMultiFragment(G2Temple& arm,
                          kFrags, arm, mapSessionId,
                          createFence.generation);
 
-  uint8_t* pbBuf = (uint8_t*)ps_alloc(kChunkBytes + 96, AllocPref::PreferPSRAM, "g2.imgpush.pbBuf");
+  uint8_t* pbBuf = (uint8_t*)ps_alloc(kChunkBytes + 96, AllocPref::PreferPsram, "g2.imgpush.pbBuf");
   if (!pbBuf) {
     (void)imagePushDisarm();
     free(ownedCompress);
@@ -32567,7 +32567,7 @@ const char* g2ProbeImageQ6BmpMultiFragment() {
   // Step 1: build the full-tile BMP into the heap. ~21 KB so we can't
   // stack-allocate it.
   const size_t kBmpCap = 24 * 1024;
-  uint8_t* bmp = (uint8_t*)ps_alloc(kBmpCap, AllocPref::PreferPSRAM, "g2.img.bmp");
+  uint8_t* bmp = (uint8_t*)ps_alloc(kBmpCap, AllocPref::PreferPsram, "g2.img.bmp");
   if (!bmp) {
     probePostProbeShutdown(cleanupFence);
     return "Img Q6: BMP heap alloc failed";
@@ -32633,7 +32633,7 @@ const char* g2ProbeImageQ6bBmpTapDismiss() {
     return "Img Q6b: pre-burst SHUTDOWN failed";
 
   const size_t kBmpCap = 24 * 1024;
-  uint8_t* bmp = (uint8_t*)ps_alloc(kBmpCap, AllocPref::PreferPSRAM, "g2.img.bmp");
+  uint8_t* bmp = (uint8_t*)ps_alloc(kBmpCap, AllocPref::PreferPsram, "g2.img.bmp");
   if (!bmp) {
     probePostProbeShutdown(cleanupFence);
     return "Img Q6b: BMP heap alloc failed";
@@ -32734,7 +32734,7 @@ const char* g2ProbeImageQ9FrameBuilder() {
     return "Img Q9: pre-burst SHUTDOWN failed";
 
   const size_t kBmpCap = 24 * 1024;
-  uint8_t* bmp = (uint8_t*)ps_alloc(kBmpCap, AllocPref::PreferPSRAM, "g2.img.bmp");
+  uint8_t* bmp = (uint8_t*)ps_alloc(kBmpCap, AllocPref::PreferPsram, "g2.img.bmp");
   if (!bmp) {
     probePostProbeShutdown(cleanupFence);
     return "Img Q9: BMP heap alloc failed";
@@ -32861,7 +32861,7 @@ static bool sendImageBmpFragmentsNoCreate(G2Temple& arm,
   probePrepImagePushAcks(pushMagicBase, pushMagicBase + kFrags - 1,
                          kFrags, arm, mapSessionId, expectedGeneration);
 
-  uint8_t* pbBuf = (uint8_t*)ps_alloc(kChunkBytes + 96, AllocPref::PreferPSRAM, "g2.imgpush.pbBuf");
+  uint8_t* pbBuf = (uint8_t*)ps_alloc(kChunkBytes + 96, AllocPref::PreferPsram, "g2.imgpush.pbBuf");
   if (!pbBuf) {
     (void)imagePushDisarm();
     free(ownedCompress);
@@ -33025,8 +33025,8 @@ const char* g2ProbeImageQ11SimpleSwap() {
     return "Img Q11: pre-burst SHUTDOWN failed";
 
   const size_t kBmpCap = 24 * 1024;
-  uint8_t* bmpA = (uint8_t*)ps_alloc(kBmpCap, AllocPref::PreferPSRAM, "g2.img.bmpA");
-  uint8_t* bmpB = (uint8_t*)ps_alloc(kBmpCap, AllocPref::PreferPSRAM, "g2.img.bmpB");
+  uint8_t* bmpA = (uint8_t*)ps_alloc(kBmpCap, AllocPref::PreferPsram, "g2.img.bmpA");
+  uint8_t* bmpB = (uint8_t*)ps_alloc(kBmpCap, AllocPref::PreferPsram, "g2.img.bmpB");
   if (!bmpA || !bmpB) {
     if (bmpA) free(bmpA);
     if (bmpB) free(bmpB);
@@ -33122,9 +33122,9 @@ const char* g2ProbeImageQ10ClearThenPush() {
     return "Img Q10: pre-burst SHUTDOWN failed";
 
   const size_t kBmpCap = 24 * 1024;
-  uint8_t* bmpA = (uint8_t*)ps_alloc(kBmpCap, AllocPref::PreferPSRAM, "g2.img.bmpA");
-  uint8_t* bmpBlack = (uint8_t*)ps_alloc(kBmpCap, AllocPref::PreferPSRAM, "g2.img.bmpBlack");
-  uint8_t* bmpB = (uint8_t*)ps_alloc(kBmpCap, AllocPref::PreferPSRAM, "g2.img.bmpB");
+  uint8_t* bmpA = (uint8_t*)ps_alloc(kBmpCap, AllocPref::PreferPsram, "g2.img.bmpA");
+  uint8_t* bmpBlack = (uint8_t*)ps_alloc(kBmpCap, AllocPref::PreferPsram, "g2.img.bmpBlack");
+  uint8_t* bmpB = (uint8_t*)ps_alloc(kBmpCap, AllocPref::PreferPsram, "g2.img.bmpB");
   if (!bmpA || !bmpBlack || !bmpB) {
     if (bmpA) free(bmpA);
     if (bmpBlack) free(bmpBlack);
@@ -33218,7 +33218,7 @@ static bool readBmpFromVfs(const String& rawPath,
   if (len < 70) { f.close(); if (outErr) *outErr = "file too small for BMP"; return false; }
   if (len > kMaxBmpBytes) { f.close(); if (outErr) *outErr = "BMP too large (>64KB)"; return false; }
 
-  uint8_t* buf = (uint8_t*)ps_alloc(len, AllocPref::PreferPSRAM, "g2.bmp.fileLoad");
+  uint8_t* buf = (uint8_t*)ps_alloc(len, AllocPref::PreferPsram, "g2.bmp.fileLoad");
   if (!buf) { f.close(); if (outErr) *outErr = "out of memory reading BMP"; return false; }
   const size_t rd = f.read(buf, len);
   f.close();
@@ -33298,7 +33298,7 @@ bool g2ReadBmp4bppFromVfs(const char* vfsPath, uint8_t** outData, size_t* outLen
     return false;
   }
 
-  uint8_t* buf = (uint8_t*)ps_alloc(len, AllocPref::PreferPSRAM, "g2.bmp.anyTile");
+  uint8_t* buf = (uint8_t*)ps_alloc(len, AllocPref::PreferPsram, "g2.bmp.anyTile");
   if (!buf) {
     f.close();
     if (outErr) *outErr = "out of memory reading BMP";
@@ -34237,7 +34237,7 @@ static bool kbdPadCreateSurface(bool fourBands) {
   buf.eventCapture  = false;
 
   const uint32_t magic = allocCreateMagic();
-  uint8_t* pb = (uint8_t*)ps_alloc(1400, AllocPref::PreferPSRAM,
+  uint8_t* pb = (uint8_t*)ps_alloc(1400, AllocPref::PreferPsram,
                                    "g2.pb.kbd");
   if (!pb) return false;
   const size_t pbLen = g2BuildCreateMixedListTextImagesPb(
@@ -34787,10 +34787,10 @@ bool g2KbdPadBegin(const char* bufText) {
            bufText ? bufText : "");
 
   gKbdPad.shades = (uint8_t*)ps_alloc(kKbdShadeBytes,
-                                      AllocPref::PreferPSRAM,
+                                      AllocPref::PreferPsram,
                                       "g2.kbd.shades");
   gKbdPad.bmp    = (uint8_t*)ps_alloc(kKbdBmpCap,
-                                      AllocPref::PreferPSRAM,
+                                      AllocPref::PreferPsram,
                                       "g2.kbd.bmp");
   if (!gKbdPad.shades || !gKbdPad.bmp) {
     DEBUG_G2F("[G2] kbd-pad: buffer alloc failed");
@@ -35206,7 +35206,7 @@ static bool kbdAbCreate(KbdAbState& s, bool fourTiles) {
   text.eventCapture  = false;
 
   constexpr size_t kPbCap = 1400;
-  uint8_t* pb = (uint8_t*)ps_alloc(kPbCap, AllocPref::PreferPSRAM,
+  uint8_t* pb = (uint8_t*)ps_alloc(kPbCap, AllocPref::PreferPsram,
                                    "g2.pb.kbd-ab");
   if (!pb) return false;
   const uint32_t magic = allocCreateMagic();
@@ -35691,7 +35691,7 @@ static void kbdAbWorker(void* arg) {
     // This is a pixel-truth A/B harness, not a production memory profile.
     // Require real SPIRAM so a 104 KB diagnostic allocation can never eat the
     // internal heap whose floor we are also trying to observe.
-    s.storage = (uint8_t*)ps_alloc(storageBytes, AllocPref::RequirePSRAM,
+    s.storage = (uint8_t*)ps_alloc(storageBytes, AllocPref::RequirePsram,
                                    "g2.kbdab.storage");
     if (!s.storage) {
       DEBUG_G2F("[KbdAB] PSRAM alloc failed (%u B)",
@@ -36106,7 +36106,7 @@ static void g2MapPageWorker(void* arg) {
     // re-allocating and fragmenting PSRAM on every frame.
     for (uint32_t attempt = 0; attempt < 3 && !mapShades; ++attempt) {
       mapShades = (uint8_t*)ps_alloc(kG2MapShadeBytes,
-                                     AllocPref::PreferPSRAM, "g2.map.shade");
+                                     AllocPref::PreferPsram, "g2.map.shade");
       if (!mapShades && attempt < 2) {
         vTaskDelay(pdMS_TO_TICKS(50u << attempt));
       }
@@ -36170,7 +36170,7 @@ static void g2MapPageWorker(void* arg) {
 
       // Search-result rows can make this CREATE exceed one BLE envelope, so
       // use the same fragmented protobuf path as Health's proven 3-pane page.
-      uint8_t* pb = (uint8_t*)ps_alloc(1400, AllocPref::PreferPSRAM,
+      uint8_t* pb = (uint8_t*)ps_alloc(1400, AllocPref::PreferPsram,
                                        "g2.pb.map-3pane");
       if (!pb) {
         DEBUG_G2F("[G2] map page: CREATE-3pane alloc failed");
@@ -36585,7 +36585,7 @@ static void g2HealthPageWorker(void* arg) {
     text.eventCapture  = false;
     if (!armCreateSlot("CREATE-health-ov", arm)) return false;
     const uint32_t createMagic = gExpectMagic;
-    uint8_t* pb = (uint8_t*)ps_alloc(1024, AllocPref::PreferPSRAM, "g2.pb.health-ov");
+    uint8_t* pb = (uint8_t*)ps_alloc(1024, AllocPref::PreferPsram, "g2.pb.health-ov");
     if (!pb) {
       g2CreateTxnRelease();
       return false;
@@ -36626,7 +36626,7 @@ static void g2HealthPageWorker(void* arg) {
     text.containerId   = kTxtCid;
     text.geom          = kMetricTextGeom;
     text.eventCapture  = false;
-    uint8_t* pb = (uint8_t*)ps_alloc(1400, AllocPref::PreferPSRAM, "g2.pb.health-m");
+    uint8_t* pb = (uint8_t*)ps_alloc(1400, AllocPref::PreferPsram, "g2.pb.health-m");
     if (!pb) {
       BROADCAST_PRINTF("[G2] health page: CREATE-3pane alloc failed");
       return false;
@@ -37251,7 +37251,7 @@ static bool decodeJpegForG2(const uint8_t* bytes, size_t length,
                             hwjpeg::Image& image, const char** error) {
   hwjpeg::DecodeOptions options;
   options.softwareAllocator = [](size_t size) -> uint8_t* {
-    return static_cast<uint8_t*>(ps_alloc(size, AllocPref::PreferPSRAM, "g2.jpeg.rgb"));
+    return static_cast<uint8_t*>(ps_alloc(size, AllocPref::PreferPsram, "g2.jpeg.rgb"));
   };
   // Hardware DMA requires PSRAM. Honour the existing diagnostic bypass and
   // preserve the shared allocator's fallback/tracing policy on the software path.
@@ -37616,7 +37616,7 @@ static void g2CameraViewerWorker(void* arg) {
 
     // Build 288×144 4-bpp BMP. Header (118 B) + 144*144 px-bytes ≈ 21 KB.
     const size_t kBmpCap = 14 + 40 + 64 + (288 / 2) * 144 + 64;
-    bmpBuf = (uint8_t*)ps_alloc(kBmpCap, AllocPref::PreferPSRAM, "g2.cam.bmp");
+    bmpBuf = (uint8_t*)ps_alloc(kBmpCap, AllocPref::PreferPsram, "g2.cam.bmp");
     if (!bmpBuf) {
       DEBUG_G2F("[G2] Camera viewer: bmp alloc failed");
       break;
@@ -38047,7 +38047,7 @@ static void g2CameraStreamWorker(void* arg) {
       const int srcH = decoded.height;
 
       // Build BMP
-      uint8_t* bmpBuf = (uint8_t*)ps_alloc(kBmpCap, AllocPref::PreferPSRAM, "g2.camstr.bmp");
+      uint8_t* bmpBuf = (uint8_t*)ps_alloc(kBmpCap, AllocPref::PreferPsram, "g2.camstr.bmp");
       if (!bmpBuf) {
         DEBUG_G2F("[G2] Camera stream: bmp alloc failed");
         break;
@@ -38557,7 +38557,7 @@ static bool loadJpgAsBmp288x144(const String& rawPath,
     return false;
   }
 
-  uint8_t* jpg = (uint8_t*)ps_alloc(len, AllocPref::PreferPSRAM, "g2.jpg.fileLoad");
+  uint8_t* jpg = (uint8_t*)ps_alloc(len, AllocPref::PreferPsram, "g2.jpg.fileLoad");
   if (!jpg) {
     f.close();
     if (outErr) *outErr = "out of memory reading JPG";
@@ -38593,7 +38593,7 @@ static bool loadJpgAsBmp288x144(const String& rawPath,
   // requires for the BMP viewer / full-viewer transports. Header
   // (118 B) + 144 × 144 px-bytes ≈ 21 KB.
   const size_t kBmpCap = 14 + 40 + 64 + (288 / 2) * 144 + 64;
-  uint8_t* bmp = (uint8_t*)ps_alloc(kBmpCap, AllocPref::PreferPSRAM, "g2.jpg.bmp");
+  uint8_t* bmp = (uint8_t*)ps_alloc(kBmpCap, AllocPref::PreferPsram, "g2.jpg.bmp");
   if (!bmp) {
     if (outErr) *outErr = "out of memory for BMP build";
     return false;
@@ -38996,7 +38996,7 @@ const char* g2ProbeImageQ12FullScreen() {
 
   // Single repaint buffer reused across all 4 tile pushes.
   const size_t kBmpCap = 24 * 1024;
-  uint8_t* bmp = (uint8_t*)ps_alloc(kBmpCap, AllocPref::PreferPSRAM, "g2.img.bmp");
+  uint8_t* bmp = (uint8_t*)ps_alloc(kBmpCap, AllocPref::PreferPsram, "g2.img.bmp");
   if (!bmp) {
     probePostProbeShutdown(createFence);
     return "Img Q12: BMP heap alloc failed";
@@ -39104,7 +39104,7 @@ const char* g2ProbeImageQ13LiveTile() {
     return "Img Q13: pre-burst SHUTDOWN failed";
 
   const size_t kBmpCap = 24 * 1024;
-  uint8_t* bmp = (uint8_t*)ps_alloc(kBmpCap, AllocPref::PreferPSRAM, "g2.img.bmp");
+  uint8_t* bmp = (uint8_t*)ps_alloc(kBmpCap, AllocPref::PreferPsram, "g2.img.bmp");
   if (!bmp) {
     probePostProbeShutdown(cleanupFence);
     return "Img Q13: BMP heap alloc failed";
@@ -39424,7 +39424,7 @@ const char* g2ProbeImageQ15LeftArm() {
     return "Img Q15: pre-burst SHUTDOWN failed";
 
   const size_t kBmpCap = 24 * 1024;
-  uint8_t* bmp = (uint8_t*)ps_alloc(kBmpCap, AllocPref::PreferPSRAM, "g2.img.bmp");
+  uint8_t* bmp = (uint8_t*)ps_alloc(kBmpCap, AllocPref::PreferPsram, "g2.img.bmp");
   if (!bmp) {
     probePostProbeShutdown(cleanupFence);
     return "Img Q15: BMP heap alloc failed";
@@ -39576,7 +39576,7 @@ static const char* runMixedListImageProbe(const char* tag,
   // Build and push the BMP. Negative height = top-down for intuitive
   // pattern testing.
   const size_t kBmpCap = 24 * 1024;
-  uint8_t* bmp = (uint8_t*)ps_alloc(kBmpCap, AllocPref::PreferPSRAM, "g2.img.bmp");
+  uint8_t* bmp = (uint8_t*)ps_alloc(kBmpCap, AllocPref::PreferPsram, "g2.img.bmp");
   if (!bmp) {
     probePostProbeShutdown(createFence);
     snprintf(retBuf, retCap, "%s: BMP heap alloc failed", tag);
@@ -39742,7 +39742,7 @@ const char* g2ProbeImageQ16dMixedLz4Block() {
   DEBUG_G2F("[ImgProbe] %s CREATE-mixed acked — BMP + LZ4 bare block", tag);
 
   const size_t kBmpCap = 24 * 1024;
-  uint8_t* bmp = (uint8_t*)ps_alloc(kBmpCap, AllocPref::PreferPSRAM, "g2.img.q16d.bmp");
+  uint8_t* bmp = (uint8_t*)ps_alloc(kBmpCap, AllocPref::PreferPsram, "g2.img.q16d.bmp");
   if (!bmp) {
     probePostProbeShutdown(createFence);
     snprintf(ret, sizeof(ret), "%s: BMP alloc failed", tag);
@@ -39757,7 +39757,7 @@ const char* g2ProbeImageQ16dMixedLz4Block() {
   }
 
   const size_t compCap = lz4BlockBound(bmpLen);
-  uint8_t* comp = (uint8_t*)ps_alloc(compCap, AllocPref::PreferPSRAM, "g2.img.q16d.lz4");
+  uint8_t* comp = (uint8_t*)ps_alloc(compCap, AllocPref::PreferPsram, "g2.img.q16d.lz4");
   if (!comp) {
     free(bmp);
     probePostProbeShutdown(createFence);
@@ -39891,7 +39891,7 @@ const char* g2ProbeImageQ19SmallSolo() {
 
   // 96×96 4bpp BMP: ~4.7 KB. Allocate 8 KB for headroom.
   const size_t kBmpCap = 8 * 1024;
-  uint8_t* bmp = (uint8_t*)ps_alloc(kBmpCap, AllocPref::PreferPSRAM, "g2.img.q19.bmp");
+  uint8_t* bmp = (uint8_t*)ps_alloc(kBmpCap, AllocPref::PreferPsram, "g2.img.q19.bmp");
   if (!bmp) {
     probePostProbeShutdown(cleanupFence);
     return "Img Q19: BMP heap alloc failed";
@@ -39965,7 +39965,7 @@ static const char* probeLiveScrollingBarSolo(
 
   size_t kBmpCap = bmp4bppFileBytesU32((uint32_t)imgW, (uint32_t)imgH) + 256;
   if (kBmpCap < 4096) kBmpCap = 4096;
-  uint8_t* bmp = (uint8_t*)ps_alloc(kBmpCap, AllocPref::PreferPSRAM, "g2.img.liveBar");
+  uint8_t* bmp = (uint8_t*)ps_alloc(kBmpCap, AllocPref::PreferPsram, "g2.img.liveBar");
   if (!bmp) {
     probePostProbeShutdown(cleanupFence);
     snprintf(ret, retCap, "Img %s: BMP heap alloc failed", probeId);
@@ -40252,7 +40252,7 @@ const char* g2ProbeImageQ31bRecreateMove() {
   }
 
   const size_t kBmpCap = bmp4bppFileBytesU32(kMoveTileW, kMoveTileH) + 256;
-  uint8_t* bmp = (uint8_t*)ps_alloc(kBmpCap, AllocPref::PreferPSRAM, "g2.img.q31b");
+  uint8_t* bmp = (uint8_t*)ps_alloc(kBmpCap, AllocPref::PreferPsram, "g2.img.q31b");
   if (!bmp) {
     probePostProbeShutdown(cleanupFence);
     snprintf(ret, sizeof(ret), "Img Q31b: BMP alloc failed");
@@ -40622,8 +40622,8 @@ const char* g2ProbeImageQ32Lz4Benchmark() {
 
   const size_t kBmpCap  = bmp4bppFileBytesU32(kLz4TileW, kLz4TileH) + 256;
   const size_t kCompCap = lz4FrameBound(kBmpCap);
-  uint8_t* bmp  = (uint8_t*)ps_alloc(kBmpCap,  AllocPref::PreferPSRAM, "g2.img.q32.bmp");
-  uint8_t* comp = (uint8_t*)ps_alloc(kCompCap, AllocPref::PreferPSRAM, "g2.img.q32.lz4");
+  uint8_t* bmp  = (uint8_t*)ps_alloc(kBmpCap,  AllocPref::PreferPsram, "g2.img.q32.bmp");
+  uint8_t* comp = (uint8_t*)ps_alloc(kCompCap, AllocPref::PreferPsram, "g2.img.q32.lz4");
   if (!bmp || !comp) {
     free(bmp); free(comp);
     probePostProbeShutdown(cleanupFence);
@@ -41082,8 +41082,8 @@ const char* g2ProbeImageQ28MixedImageTextLive() {
   // dropped frames eye-visible. 96x96 4-bpp BMP is ~4.7 KB → 2 fragments
   // per push at G2_IMG_MAPRAW_CHUNK_BYTES.
   const size_t kBmpCap = 8 * 1024;
-  uint8_t* bmpA = (uint8_t*)ps_alloc(kBmpCap, AllocPref::PreferPSRAM, "g2.q28.bmpA");
-  uint8_t* bmpB = (uint8_t*)ps_alloc(kBmpCap, AllocPref::PreferPSRAM, "g2.q28.bmpB");
+  uint8_t* bmpA = (uint8_t*)ps_alloc(kBmpCap, AllocPref::PreferPsram, "g2.q28.bmpA");
+  uint8_t* bmpB = (uint8_t*)ps_alloc(kBmpCap, AllocPref::PreferPsram, "g2.q28.bmpB");
   if (!bmpA || !bmpB) {
     if (bmpA) free(bmpA);
     if (bmpB) free(bmpB);
@@ -41306,8 +41306,8 @@ const char* g2ProbeImageQ28LMixedListImageLive() {
   // dropped frame eye-visible and matches the Q28 baseline so visual
   // comparison is direct.
   const size_t kBmpCap = 8 * 1024;
-  uint8_t* bmpA = (uint8_t*)ps_alloc(kBmpCap, AllocPref::PreferPSRAM, "g2.q28l.bmpA");
-  uint8_t* bmpB = (uint8_t*)ps_alloc(kBmpCap, AllocPref::PreferPSRAM, "g2.q28l.bmpB");
+  uint8_t* bmpA = (uint8_t*)ps_alloc(kBmpCap, AllocPref::PreferPsram, "g2.q28l.bmpA");
+  uint8_t* bmpB = (uint8_t*)ps_alloc(kBmpCap, AllocPref::PreferPsram, "g2.q28l.bmpB");
   if (!bmpA || !bmpB) {
     if (bmpA) free(bmpA);
     if (bmpB) free(bmpB);
@@ -41519,7 +41519,7 @@ static const char* runQ30ListTextImageProbe(const Q30GeomSpec& g) {
   gImgProbeHoldActive     = true;
 
   const size_t kBmpCap = (size_t)bmpBytes + 256;
-  uint8_t* bmp = (uint8_t*)ps_alloc(kBmpCap, AllocPref::PreferPSRAM, "g2.q30.bmp");
+  uint8_t* bmp = (uint8_t*)ps_alloc(kBmpCap, AllocPref::PreferPsram, "g2.q30.bmp");
   if (!bmp) {
     gImgProbeHoldActive = false;
     probePostProbeShutdown(createFence);
@@ -41725,7 +41725,7 @@ const char* g2ProbeImageQ21LiveFullScreenBurst() {
   }
 
   const size_t kBmpCap = 24 * 1024;
-  uint8_t* bmp = (uint8_t*)ps_alloc(kBmpCap, AllocPref::PreferPSRAM, "g2.img.q21.bmp");
+  uint8_t* bmp = (uint8_t*)ps_alloc(kBmpCap, AllocPref::PreferPsram, "g2.img.q21.bmp");
   if (!bmp) {
     probePostProbeShutdown(createFence);
     return "Img Q21: BMP heap alloc failed";

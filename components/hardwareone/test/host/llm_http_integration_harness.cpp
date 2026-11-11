@@ -37,7 +37,7 @@ void testLog(const char*, ...) {}
 void webBatchTestStringAppend() {}
 [[maybe_unused]] constexpr int RF_LLM = 1;
 bool ramFlushResolve(int, bool requested) { return requested; }
-enum class AllocPref { PreferPSRAM };
+enum class AllocPref { PreferPsram };
 void* ps_realloc(void* memory, size_t size, AllocPref) { return std::realloc(memory, size); }
 
 // INSERT_PRODUCTION_HEADERS

@@ -40,7 +40,7 @@ static void xSemaphoreGive(SemaphoreHandle_t sem) {
 }
 #define configASSERT(condition) CHECK(condition)
 
-enum class AllocPref { RequireInternal, PreferPSRAM };
+enum class AllocPref { RequireInternal, PreferPsram };
 static thread_local bool failAllocation = false;
 static std::atomic<unsigned> allocations{0}, releases{0};
 static void* ps_calloc(size_t count, size_t size, AllocPref, const char*) {

@@ -189,7 +189,7 @@ static bool blePushSystemStatus(const char*, size_t) {
 }
 
 // Allocation.
-enum class AllocPref { PreferPSRAM, RequireInternal };
+enum class AllocPref { PreferPsram, RequireInternal };
 static void* ps_alloc(size_t size, AllocPref, const char*) { return std::calloc(1, size); }
 template <typename T>
 static void ps_delete(T* object) {

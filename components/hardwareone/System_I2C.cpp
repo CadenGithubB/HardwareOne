@@ -1597,7 +1597,7 @@ const char* cmd_devices(const String& originalCmd) {
     // hand-typed 2048s that had to agree.
     static const size_t kDevJsonSize = 2048;
     static char* devJsonBuf = nullptr;
-    if (!devJsonBuf) devJsonBuf = (char*)ps_alloc(kDevJsonSize, AllocPref::PreferPSRAM, "devices.json");
+    if (!devJsonBuf) devJsonBuf = (char*)ps_alloc(kDevJsonSize, AllocPref::PreferPsram, "devices.json");
     if (!devJsonBuf) return "{\"error\":\"oom\"}";
     size_t len = serializeJson(doc, devJsonBuf, kDevJsonSize);
     if (len == 0 || len >= kDevJsonSize - 1) return "Error: device list outgrew the response buffer";
@@ -1666,7 +1666,7 @@ const char* cmd_devicefile(const String& originalCmd) {
   buildDeviceRegistryJson(doc);
   static const size_t kRegBufSize = 4096;
   static char* regBuf = nullptr;
-  if (!regBuf) regBuf = (char*)ps_alloc(kRegBufSize, AllocPref::PreferPSRAM, "devicefile.json");
+  if (!regBuf) regBuf = (char*)ps_alloc(kRegBufSize, AllocPref::PreferPsram, "devicefile.json");
   if (!regBuf) return "Error: [I2C] Out of memory";
   size_t len = serializeJson(doc, regBuf, kRegBufSize);
   if (len == 0 || len >= kRegBufSize - 1) return "Error: device registry outgrew the response buffer";
@@ -1726,7 +1726,7 @@ static void addSensorEntry(JsonArray& arr, const char* id, const char* name,
   // but-absent sensor degrades honestly instead of vanishing.
   if (dataFn && enabled) {
     static char* dbuf = nullptr;
-    if (!dbuf) dbuf = (char*)ps_alloc(1024, AllocPref::PreferPSRAM, "sensor.data.scratch");
+    if (!dbuf) dbuf = (char*)ps_alloc(1024, AllocPref::PreferPsram, "sensor.data.scratch");
     if (dbuf) {
       int n = dataFn(dbuf, 1024);
       if (n > 0) {
@@ -1808,7 +1808,7 @@ const char* cmd_sensors(const String& argsInput) {
     doc["hint"] = "battery: run 'batterystatus'; a sensor: 'open<sensor>' then '<sensor>read'";
     static const size_t kSensorsJsonSize = 4096;
     static char* sensorsJsonBuf = nullptr;
-    if (!sensorsJsonBuf) sensorsJsonBuf = (char*)ps_alloc(kSensorsJsonSize, AllocPref::PreferPSRAM, "sensors.json");
+    if (!sensorsJsonBuf) sensorsJsonBuf = (char*)ps_alloc(kSensorsJsonSize, AllocPref::PreferPsram, "sensors.json");
     if (!sensorsJsonBuf) return "{\"error\":\"oom\"}";
     size_t len = serializeJson(doc, sensorsJsonBuf, kSensorsJsonSize);
     if (len == 0 || len >= kSensorsJsonSize - 1) return "Error: sensor list outgrew the response buffer";
@@ -2466,7 +2466,7 @@ const char* buildSensorStatusJson() {
   static const size_t kBufSize = 2048;
 
   if (!buf) {
-    buf = (char*)ps_alloc(kBufSize, AllocPref::PreferPSRAM, "sensor.status.json");
+    buf = (char*)ps_alloc(kBufSize, AllocPref::PreferPsram, "sensor.status.json");
     if (!buf) {
       // Fallback to empty JSON on allocation failure
       static const char* kEmptyJson = "{}";

@@ -9,7 +9,7 @@
 // tensor shapes, module index vectors and Conv attributes, the tensor lists and
 // execution plan, and the tensor-name map with its keys. installDlMetadataAllocator()
 // makes that allocator an explicit PSRAM request:
-//  - ps_alloc(size, AllocPolicy::PreferPSRAM, "stt.dl.<kind>") for blocks that
+//  - ps_alloc(size, AllocPolicy::PreferPsram, "stt.dl.<kind>") for blocks that
 //    need no more than the heap's own 4-byte alignment (System_MemUtil: falls
 //    back to internal RAM, counted in gPsAllocFallbacks and logged);
 //  - for the few kinds ESP-DL aligns to 8 or 16 bytes (Model; module, tensor and
@@ -54,7 +54,7 @@ DlMetadataStats dlMetadataStats(size_t kind);
 DlMetadataStats dlMetadataDelta(const DlMetadataStats& before, const DlMetadataStats& after);
 
 // The runtime's own long-lived blocks (the resident model's bookkeeping):
-// ps_alloc(size, AllocPolicy::PreferPSRAM, tag) / ps_free, counted in the
+// ps_alloc(size, AllocPolicy::PreferPsram, tag) / ps_free, counted in the
 // same System_MemUtil fallback counter. Heap alignment (4 bytes on the P4).
 void* sttPsramAlloc(size_t size, const char* tag);
 void sttPsramFree(void* ptr);

@@ -27,7 +27,7 @@ esp_err_t handleBatteryStatus(httpd_req_t* req) {
   httpd_resp_set_type(req, "application/json");
   static char* buf = nullptr;
   static const size_t kBufSize = 1536;
-  if (!buf) buf = (char*)ps_alloc(kBufSize, AllocPref::PreferPSRAM, "battery.status.json");
+  if (!buf) buf = (char*)ps_alloc(kBufSize, AllocPref::PreferPsram, "battery.status.json");
   if (!buf) { httpd_resp_send(req, "{}", HTTPD_RESP_USE_STRLEN); return ESP_OK; }
   PSRAM_JSON_DOC(doc);
   buildBatteryJson(doc);
