@@ -2032,7 +2032,7 @@ add_test(
           ${STT_PRIVACY_TEST_ARGS})
 
 # BLE console mirror recipients (README "BLE console mirror recipients"): the drain
-# buffers only while sendBLEResponse has a recipient; `outble` reports the count.
+# buffers only while sendBleResponse has a recipient; `outble` reports the count.
 set(BLE_MIRROR_RECIPIENTS_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
 if(HW1_SANITIZE)
   list(APPEND BLE_MIRROR_RECIPIENTS_TEST_ARGS --sanitize)

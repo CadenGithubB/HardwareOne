@@ -162,7 +162,7 @@ struct Reply {
   std::string text;
 };
 static std::vector<Reply> gReplies;
-bool sendBLEResponseToSession(uint16_t connId, TransportSessionEpoch epoch, const char* data,
+bool sendBleResponseToSession(uint16_t connId, TransportSessionEpoch epoch, const char* data,
                               size_t len, bool = true) {
   gReplies.push_back({connId, epoch, std::string(data, len)});
   return true;

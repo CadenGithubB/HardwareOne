@@ -197,14 +197,14 @@ static void ps_delete(T* object) {
   object->~T();
   std::free(object);
 }
-// gBLEState through one access point (K1): its last holder frees it on its own
+// gBleState through one access point (K1): its last holder frees it on its own
 // task (`phone stop` gives the pipe's hold back). Armed, that release runs at
 // the first read made without the lifecycle lock, as a preempting task would,
 // and the read gets the pointer it had loaded: freed (ASan reports the use). A
 // read under the lock is never preempted by it (the release waits for the lock).
-BLESystemState* gBLEStateStorage = nullptr;
-static BLESystemState*& bleStateAccess();
-#define gBLEState (bleStateAccess())
+BleSystemState* gBLEStateStorage = nullptr;
+static BleSystemState*& bleStateAccess();
+#define gBleState (bleStateAccess())
 
 // The command system around processBleCommandLine.
 static constexpr size_t kPublicUsernameMaxLen = 64;  // System_User.h
@@ -270,16 +270,16 @@ static BLEServer* pServer = nullptr;
 #define ENABLE_OLED_DISPLAY 0
 
 // The senders' public declarations (Bluetooth.h's defaults).
-bool sendBLEResponseToSession(uint16_t connId, TransportSessionEpoch expectedEpoch,
+bool sendBleResponseToSession(uint16_t connId, TransportSessionEpoch expectedEpoch,
                               const char* data, size_t len, bool blocking = true);
-bool sendBLEResponse(const char* data, size_t len, bool blocking = true);
+bool sendBleResponse(const char* data, size_t len, bool blocking = true);
 
 // INSERT_PRODUCTION
 
 static bool releaseArmed = false;
 static unsigned unlockedStateReads = 0;
-static BLESystemState* staleState = nullptr;
-static BLESystemState*& bleStateAccess() {
+static BleSystemState* staleState = nullptr;
+static BleSystemState*& bleStateAccess() {
   if (gLifecycle.depth == 0) {
     ++unlockedStateReads;
     // The reader keeps the pointer it loaded (a register copy) until the case
@@ -317,7 +317,7 @@ static constexpr uint16_t kRow = blePipeConsoleRowId(kGen);
 
 static uint32_t activityStampOf(uint16_t connId) {
   const int slot = findConnectionSlotByConnIdLocked(connId);
-  return slot >= 0 ? gBLEState->connections[slot].lastActivityMs : 0;
+  return slot >= 0 ? gBleState->connections[slot].lastActivityMs : 0;
 }
 
 // Pipe calls made under the lifecycle lock, over every case (the oracle).
@@ -325,8 +325,8 @@ static unsigned pipeCallsUnderLock = 0;
 static void resetWorld(const std::string& name, hw1console::Mode mode = hw1console::Mode::Off) {
   for (const PipeHostCall& call : gPipeHost.calls) pipeCallsUnderLock += call.underLifecycle;
   currentCase = name;
-  if (gBLEState) ps_delete(gBLEState);
-  gBLEState = nullptr;
+  if (gBleState) ps_delete(gBleState);
+  gBleState = nullptr;
   sBleStateHolders = 0;
   sBlePipeRowSlot = -1;
   sBlePipeIdentity = BlePipeConsoleIdentity{};
@@ -400,11 +400,11 @@ static void bindAndSnapshot() {
   EXPECT(id.bound && id.generation == kGen && id.streamId == 5 && id.rowConnId == kRow &&
              id.epoch == epochOf(kRow) && id.epoch != 0 && !id.authed,
          "the snapshot does not name the fresh signed-out row");
-  const BLEConnection& c = gBLEState->connections[findConnectionSlotByConnIdLocked(kRow)];
+  const BleConnection& c = gBleState->connections[findConnectionSlotByConnIdLocked(kRow)];
   EXPECT(c.pipeConsole && c.pipeLinkConnId == kLink && c.deviceType == BLE_DEVICE_PHONE &&
              !c.authed && c.user.length() == 0 && findConnectionSlotByConnIdLocked(kLink) < 0,
          "the row is not a signed-out phone row on its own id");
-  EXPECT(isBLEConnected() && gBLEState->activeConnectionCount == 1 && connectedEvents == 1,
+  EXPECT(isBleConnected() && gBleState->activeConnectionCount == 1 && connectedEvents == 1,
          "a bound row is not a connected app");
   login(kRow, "bob");
   id = identity();
@@ -415,7 +415,7 @@ static void bindAndSnapshot() {
   EXPECT(lastPipeText("[ble] Logged out."), "the logout notice did not reach the stream");
   blePipeConsoleEnd(kGen, 5);
   id = identity();
-  EXPECT(!id.bound && id.epoch == 0 && !isBLEConnected() && disconnectedEvents == 1 &&
+  EXPECT(!id.bound && id.epoch == 0 && !isBleConnected() && disconnectedEvents == 1 &&
              liveSessions.empty(),
          "End did not end the row, its session and its count");
   EXPECT(!bleSessionEpochIsLive(epochOf(kRow)) && findConnectionSlotByConnIdLocked(kRow) < 0,
@@ -426,7 +426,7 @@ static void bindAndSnapshot() {
   for (size_t i = 0; i < kTransportSlots; ++i) transportSessionOpen(SOURCE_BLUETOOTH);
   EXPECT(!blePipeConsoleBind(kGen, 5, kLink), "a bind without a transport session succeeded");
   EXPECT(!identity().bound && findConnectionSlotByConnIdLocked(kRow) < 0 &&
-             gBLEState->activeConnectionCount == 0 && connectedEvents == 0,
+             gBleState->activeConnectionCount == 0 && connectedEvents == 0,
          "a refused bind left a row, a count or an event");
 
   resetWorld("A3 no hold, no row");
@@ -464,7 +464,7 @@ static void loginAlwaysRequired() {
   // A server session (plaintext, server mode) with blerequireauth off.
   resetWorld("B2 server session, auth off", hw1console::Mode::Server);
   gSettings.bleRequireAuth = false;
-  gBLEState = bleNewState();
+  gBleState = bleNewState();
   {
     BleLifecycleGuard lifecycle;
     EXPECT(bleConsoleMakeSlotLocked(1), "test setup: a server session");
@@ -485,7 +485,7 @@ static void loginAlwaysRequired() {
 // different users, never authorise each other.
 static void noIdentityCrossing() {
   resetWorld("C coexisting", hw1console::Mode::ClientRegistered);
-  gBLEState = bleNewState();
+  gBleState = bleNewState();
   sBleStateHolders = kBleHoldClientConsole;
   {
     BleLifecycleGuard lifecycle;
@@ -560,7 +560,7 @@ static void noIdentityCrossing() {
 // slot and the row end separately; with no command service the row is the app.
 static void disconnects() {
   resetWorld("D1 bledisconnect by id", hw1console::Mode::ClientRegistered);
-  gBLEState = bleNewState();
+  gBleState = bleNewState();
   sBleStateHolders = kBleHoldClientConsole;
   {
     BleLifecycleGuard lifecycle;
@@ -613,7 +613,7 @@ static void recordIngress() {
   blePipeConsoleInbound(kRow, epoch, 0x81, reinterpret_cast<const uint8_t*>(kFile), sizeof(kFile) - 1);
   EXPECT(queued.size() == 1 && queued[0].line == kFile && queued[0].user == "bob",
          "a file verb from the console stream did not run as an encrypted line");
-  EXPECT(gBLEState->commandsReceived == 1, "the record was not counted");
+  EXPECT(gBleState->commandsReceived == 1, "the record was not counted");
   nowMs += 5000;
   const uint8_t frame[20] = {0x00, 'H', 'W', '1', 'O', 'T', 'A', 0x01};
   blePipeConsoleInbound(kRow, epoch, 0x82, frame, sizeof(frame));
@@ -628,7 +628,7 @@ static void recordIngress() {
   EXPECT(queued.size() == 1, "a record admitted before the logout ran after it");
 
   resetWorld("E2 another row's id", hw1console::Mode::ClientRegistered);
-  gBLEState = bleNewState();
+  gBleState = bleNewState();
   {
     BleLifecycleGuard lifecycle;
     bleConsoleReconcileLocked();
@@ -646,25 +646,25 @@ static void outputMapping() {
   boundRow("F1 TEXT");
   login(kRow, "bob");
   const TransportSessionEpoch epoch = epochOf(kRow);
-  EXPECT(sendBLEResponseToSession(kRow, epoch, "OK", 2), "a result send");
+  EXPECT(sendBleResponseToSession(kRow, epoch, "OK", 2), "a result send");
   gPipeHost.onCmdExec = false;
-  EXPECT(sendBLEResponseToSession(kRow, epoch, "late", 4), "a send off cmd_exec");
+  EXPECT(sendBleResponseToSession(kRow, epoch, "late", 4), "a send off cmd_exec");
   gPipeHost.onCmdExec = true;
-  EXPECT(sendBLEResponseToSession(kRow, epoch, "best effort", 11, /*blocking=*/false), "a best-effort send");
+  EXPECT(sendBleResponseToSession(kRow, epoch, "best effort", 11, /*blocking=*/false), "a best-effort send");
   std::vector<PipeHostCall> writes = pipeHostWrites();
   EXPECT(writes.size() == 3 && writes[0].kind == PipeConsoleKind::Text &&
              writes[0].mode == PipeConsoleMode::Reliable && writes[1].mode == PipeConsoleMode::TryNow &&
              writes[2].mode == PipeConsoleMode::TryNow && writes[0].epoch == epoch &&
              writes[0].generation == kGen && writes[0].streamId == 5,
          "TEXT is reliable only when blocking on cmd_exec");
-  EXPECT(!sendBLEResponseToSession(kRow, epoch + 1000, "stale", 5) && pipeHostWrites().size() == 3,
+  EXPECT(!sendBleResponseToSession(kRow, epoch + 1000, "stale", 5) && pipeHostWrites().size() == 3,
          "a stale epoch reached the stream");
   EXPECT(gattSends.empty(), "console row output went out on GATT");
 
   gPipeHost = PipeHost{};
   const std::string mirror(1200, 'm');
   gOutputFlags |= MSG_ROUTE_BLE;
-  EXPECT(sendBLEResponse(mirror.data(), mirror.size(), /*blocking=*/true), "a mirror buffer");
+  EXPECT(sendBleResponse(mirror.data(), mirror.size(), /*blocking=*/true), "a mirror buffer");
   writes = pipeHostWrites();
   EXPECT(writes.size() == 3 && writes[0].data.size() == 512 && writes[1].data.size() == 512 &&
              writes[2].data.size() == 176 && writes[0].kind == PipeConsoleKind::Mirror &&
@@ -673,7 +673,7 @@ static void outputMapping() {
          "a long mirror buffer did not go as TryNow MIRROR records of at most 512 bytes");
   gPipeHost = PipeHost{};
   gPipeHost.room = 1;
-  EXPECT(sendBLEResponse(mirror.data(), mirror.size()) && pipeHostWrites().size() == 2 &&
+  EXPECT(sendBleResponse(mirror.data(), mirror.size()) && pipeHostWrites().size() == 2 &&
              !pipeHostWrites()[1].sent,
          "a mirror that got its first record out is not delivered, or went on past a drop");
 
@@ -701,7 +701,7 @@ static void outputMapping() {
 
   // Design A's slot: a card keeps its framing; a binary body needs its channel.
   resetWorld("F2 design A's senders", hw1console::Mode::ClientRegistered);
-  gBLEState = bleNewState();
+  gBleState = bleNewState();
   {
     BleLifecycleGuard lifecycle;
     bleConsoleReconcileLocked();
@@ -750,12 +750,12 @@ static void cycles() {
     if (cycle % 3 == 0) blePipeHostTeardown();  // a host teardown (phone-client)
     blePipeConsoleStateRelease();
   }
-  EXPECT(!gBLEState && sBleStateHolders == 0 && liveSessions.empty() &&
+  EXPECT(!gBleState && sBleStateHolders == 0 && liveSessions.empty() &&
              sessionOpens == sessionCloses,
          "cycles leaked a transport session (%zu live)", liveSessions.size());
 }
 
-// K: every reader of gBLEState reads it under the lifecycle lock. The pipe holds
+// K: every reader of gBleState reads it under the lifecycle lock. The pipe holds
 // the state in phone-client mode and `phone stop` frees it on another task;
 // each reader runs with that release armed (it fires at an unlocked read).
 static bool noUnlockedRead(const char* what) {
@@ -769,11 +769,11 @@ static bool noUnlockedRead(const char* what) {
 #define ARMED(call) (releaseArmed = true, unlockedStateReads = 0, (call))
 static void stateReaders() {
   boundRow("K1 readers under the lock, phone-client mode");
-  EXPECT(ARMED(isBLEConnected()), "the bound console row is a connected app");
+  EXPECT(ARMED(isBleConnected()), "the bound console row is a connected app");
   noUnlockedRead("isBLEConnected");
   EXPECT(!ARMED(isBleServerInitialized()), "the pipe's state is not the server's");
   noUnlockedRead("isBleServerInitialized");
-  EXPECT(std::strcmp(ARMED(getBLEStateString()), "uninitialized") == 0, "no server state word");
+  EXPECT(std::strcmp(ARMED(getBleStateString()), "uninitialized") == 0, "no server state word");
   noUnlockedRead("getBLEStateString");
   ARMED(bleEnableStream(BLE_STREAM_SENSORS | BLE_STREAM_SYSTEM));
   noUnlockedRead("bleEnableStream");
@@ -795,7 +795,7 @@ static void stateReaders() {
   releaseArmed = false;
   // `phone stop` now runs: the state goes, and every reader sees none.
   blePipeConsoleStateRelease();
-  EXPECT(!gBLEStateStorage && !isBLEConnected() && !isBleServerInitialized() &&
+  EXPECT(!gBLEStateStorage && !isBleConnected() && !isBleServerInitialized() &&
              !bleIsStreamEnabled(BLE_STREAM_SENSORS),
          "the released state is still read");
   bleUpdateStreams();
@@ -805,16 +805,16 @@ static void stateReaders() {
   // sent with the lifecycle lock released, and the next one waits its interval.
   resetWorld("K2 the server's streams");
   sessionTicks = sensorPushes = systemPushes = pushesUnderLock = 0;
-  gBLEState = bleNewState();
+  gBleState = bleNewState();
   sBleStateHolders = kBleHoldServer;
-  gBLEState->initialized = true;
-  gBLEState->connectionState = BLE_STATE_CONNECTED;
+  gBleState->initialized = true;
+  gBleState->connectionState = BLE_STATE_CONNECTED;
   bleEnableStream(BLE_STREAM_SENSORS | BLE_STREAM_SYSTEM);
   nowMs = 6000;
   unlockedStateReads = 0;
   bleUpdateStreams();
   EXPECT(sensorPushes == 1 && systemPushes == 1 && pushesUnderLock == 0 && unlockedStateReads == 0 &&
-             gBLEState->lastSensorStream == 6000 && gBLEState->lastSystemStream == 6000,
+             gBleState->lastSensorStream == 6000 && gBleState->lastSystemStream == 6000,
          "server streams: %u+%u push(es), %u under the lock", sensorPushes, systemPushes,
          pushesUnderLock);
   nowMs = 7000;
@@ -855,7 +855,7 @@ int main() {
   lockOrder("cycles");
   stateReaders();
   lockOrder("state readers");
-  if (gBLEState) ps_delete(gBLEState);
+  if (gBleState) ps_delete(gBleState);
   std::printf("BLE console row: %u checks, %u failures\n", checks, failures);
   return failures ? 1 : 0;
 }

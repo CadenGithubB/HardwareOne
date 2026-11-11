@@ -46,7 +46,7 @@ ACTIVITY_WRITERS = (
     "static bool bleBindSession(",
     "static bool bleConsoleMakeSlotLocked(",
     "class ServerCallbacks",
-    "static BLESystemState* bleNewState(",
+    "static BleSystemState* bleNewState(",
     "bool blePipeConsoleBind(",
 )
 
@@ -63,8 +63,8 @@ def generated(component: Path) -> str:
     types = [
         (component / "BLE_Types.h").read_text(),
         extract_block(user_h, "enum CommandSource") + ";",
-        extract_block(header, "struct BLEConnection") + ";",
-        extract_block(header, "struct BLESystemState") + ";",
+        extract_block(header, "struct BleConnection") + ";",
+        extract_block(header, "struct BleSystemState") + ";",
         # The phone link's console row (phone link v2).
         pipe_host.pipe_types(component),
     ]
@@ -88,7 +88,7 @@ def generated(component: Path) -> str:
         "void bleInvalidateSessionSlotLocked(",
         "TransportSessionEpoch blePublishSessionSlotLocked(",
         "TransportSessionEpoch bleSessionEpochForConnection(",
-        "static BLESystemState* bleNewState(",
+        "static BleSystemState* bleNewState(",
         "const char* bleDeviceTypeToString(",
         "void bleClearConnectionByConnId(",
         "static bool bleConsoleMakeSlotLocked(",
@@ -132,7 +132,7 @@ def check_sources(component: Path) -> None:
     # now (TryNow), never a blocking send; the harness runs its retry.
     tick = code_only(extract_block(owner, "void bleSessionTick("))
     require("pipe = blePipeRow(conn);" in tick and
-            "sendBLEResponseToSession(connId, logoutEpoch, msg, strlen(msg),\n"
+            "sendBleResponseToSession(connId, logoutEpoch, msg, strlen(msg),\n"
             "                                                 /*blocking=*/false);" in
             extract_block(owner, "void bleSessionTick("),
             "the console row's idle notice is sent TryNow (blocking=false)")

@@ -1413,7 +1413,7 @@ python3 components/hardwareone/test/host/test_ble_mirror_recipients.py --sanitiz
 `ble_mirror_recipients` splices `bleMirrorRecipientCount`,
 `bleCollectMirrorSessions` and `BleSessionFence` from `Bluetooth.cpp` into a
 four-slot connection table. The count uses the same collector as
-`sendBLEResponse`. The checks:
+`sendBleResponse`. The checks:
 
 - Not counted: a peer that never logged in, a guest session, a slot whose
   session epoch was cleared, and a disconnected slot.
@@ -2937,7 +2937,7 @@ status and allocation errors, and accept ring JSON larger than the CLI
 buffer; the BLE-disabled public header is compiled and executed separately. `--baseline <component-dir>`
 compares successful CLI output against saved pre-change source. The phone link
 block (phone link v2): `bleinfo` ends its text with it and adds `phoneLink`
-beside buildBLEInfoJson's 13 keys in a pipe build only (the identical-output
+beside buildBleInfoJson's 13 keys in a pipe build only (the identical-output
 rule across the glasses x pipe builds compares the CLI without the block, and
 `/api/ble/status` `ble` keeps exactly 13 keys); `blestatus` puts it after the
 link lines, with `phoneLink` (full form, end reasons by name) beside `link` in
@@ -2991,7 +2991,7 @@ footer. The Phone screen shows `PIPE [OK]/[..]/[!!]/[--]/[off]`, the pipe's
 words and `Console:`, and its taps run what the drawn rows said. Beside the
 glasses `Console:` is the console on the pipe's link (`waiting`, `signed out`,
 `signed in`, `no secret`, `off`). The menu's Advertising/Disconnect rows come
-from bleConsoleView() with gBLEState freed; on the phone link the row reads
+from bleConsoleView() with gBleState freed; on the phone link the row reads
 `End console` (still `bledisconnect`) and Advertising is absent. The App console
 row's confirm says `Switch to server?`.
 No row wraps past 21 columns. The link watcher marks the display once per
@@ -3725,7 +3725,7 @@ python3 components/hardwareone/test/host/test_oled_remote_settings.py --sanitize
 
 ## BLE output privacy and console mirror
 
-`stt_ble_privacy` compiles the production BLE output seams from `Bluetooth.cpp` (the private-STT classifier, the trace/history redaction, the directed plaintext and secure per-session senders, the async command-result callback, and the console-mirror chokepoint `sendBLEResponse` with its recipient collector `bleCollectMirrorSessions`) against a four-slot fake GATT peer table. A directed send lands only in the addressed slot; the characteristic-wide notify lands in every connected slot, as the vendored Arduino wrapper sends it. The suite checks that private STT results never reach the trace or history mirrors, that command results reach exactly the originating session, and that the console mirror (`outble`, `blesend`) reaches only logged-in non-guest sessions. A connected peer that never logged in, a peer holding a Secure Channel without a login, a guest session, a logged-out slot and a disconnected slot receive nothing. No characteristic-wide notify is used, each recipient gets its own plaintext or encrypted copy, a congested recipient misses one flush without any recipient receiving a chunk twice, and secure-required mode still refuses plaintext. `--component <dir>` points the suite at another copy of the sources (the pre-fix tree fails the unauthenticated-peer, channel-only-peer and guest cases); `--cxx` selects the compiler; ASan/UBSan follow `--sanitize` / `HW1_SANITIZE`.
+`stt_ble_privacy` compiles the production BLE output seams from `Bluetooth.cpp` (the private-STT classifier, the trace/history redaction, the directed plaintext and secure per-session senders, the async command-result callback, and the console-mirror chokepoint `sendBleResponse` with its recipient collector `bleCollectMirrorSessions`) against a four-slot fake GATT peer table. A directed send lands only in the addressed slot; the characteristic-wide notify lands in every connected slot, as the vendored Arduino wrapper sends it. The suite checks that private STT results never reach the trace or history mirrors, that command results reach exactly the originating session, and that the console mirror (`outble`, `blesend`) reaches only logged-in non-guest sessions. A connected peer that never logged in, a peer holding a Secure Channel without a login, a guest session, a logged-out slot and a disconnected slot receive nothing. No characteristic-wide notify is used, each recipient gets its own plaintext or encrypted copy, a congested recipient misses one flush without any recipient receiving a chunk twice, and secure-required mode still refuses plaintext. `--component <dir>` points the suite at another copy of the sources (the pre-fix tree fails the unauthenticated-peer, channel-only-peer and guest cases); `--cxx` selects the compiler; ASan/UBSan follow `--sanitize` / `HW1_SANITIZE`.
 
 ```sh
 python3 components/hardwareone/test/host/test_stt_ble_privacy.py --sanitize
@@ -3733,7 +3733,7 @@ python3 components/hardwareone/test/host/test_stt_ble_privacy.py --sanitize
 
 ## BLE Secure Channel directed delivery
 
-`ble_sc_directed` compiles the production `System_BleSecureChannel.cpp` whole against harness-local libsodium, mbedTLS, FreeRTOS, settings and Arduino stand-ins (`ble_sc_stubs/`). It adds four pieces extracted from `Bluetooth.cpp`: the directed raw sender `bleRawNotifyToSession`, the session sender `sendBLEResponseToSession`, the console-mirror entry `sendBLEResponse` with its recipient collector, and the deferred inbound job `bleScDeferredInbound`. A two-peer fake GATT keeps one inbox per connection. A directed send lands only in the addressed connection; the characteristic-wide notify that pre-fix sources use lands in every connected one. On the G2 client host (the console on the phone pipe's link) it also splices `bleSecureChannelOnly` and the `BleConsoleTxGate` around the raw sender: every frame is one try of the shared central TX gate taken before the lifecycle guard, a reliable send skips the accessories' soft priority while a best-effort one yields to it, a busy gate gives the bounded six tries with nothing sent, each reliable frame counts as pipe activity (best-effort mirror and card frames do not), plaintext is refused although `blesecure` is off, and server mode never touches the gate.
+`ble_sc_directed` compiles the production `System_BleSecureChannel.cpp` whole against harness-local libsodium, mbedTLS, FreeRTOS, settings and Arduino stand-ins (`ble_sc_stubs/`). It adds four pieces extracted from `Bluetooth.cpp`: the directed raw sender `bleRawNotifyToSession`, the session sender `sendBleResponseToSession`, the console-mirror entry `sendBleResponse` with its recipient collector, and the deferred inbound job `bleScDeferredInbound`. A two-peer fake GATT keeps one inbox per connection. A directed send lands only in the addressed connection; the characteristic-wide notify that pre-fix sources use lands in every connected one. On the G2 client host (the console on the phone pipe's link) it also splices `bleSecureChannelOnly` and the `BleConsoleTxGate` around the raw sender: every frame is one try of the shared central TX gate taken before the lifecycle guard, a reliable send skips the accessories' soft priority while a best-effort one yields to it, a busy gate gives the bounded six tries with nothing sent, each reliable frame counts as pipe activity (best-effort mirror and card frames do not), plaintext is refused although `blesecure` is off, and server mode never touches the gate.
 
 The suite checks that HELLO_ACK, CONFIRM_ACK, both REJECT reasons and every DATA fragment (command results and `fileread ... bin` chunks) reach only the connection and session epoch they belong to, admitted under the BLE lifecycle guard (on the G2 client host the session is checked under it and the post made after it is released, counted in flight). It also checks these cases:
 - A stale session epoch sends nothing.
@@ -3749,7 +3749,7 @@ python3 components/hardwareone/test/host/test_ble_sc_directed.py --sanitize
 
 ## BLE Secure Channel policy
 
-`ble_sc_policy` compiles the production `System_BleSecureChannel.cpp` whole against the `ble_sc_stubs/` stand-ins it shares with `ble_sc_directed`. It splices the BLE command ingress from `Bluetooth.cpp`: the GATT write entry `processIncomingBLECommand`, the deferred secure-frame and plaintext jobs (`bleScDeferredInbound`, `blePlaintextDeferredInbound`), the command tail `processBleCommandLine` with its file-browser gate, and the directed and session senders. The fake GATT keeps one inbox per connection. A write runs the GATT entry as BTC_TASK; deferred jobs queue in submission order and run as cmd_exec after it returns, and the executor records which command would run for which session. On the G2 client host (R4) a plaintext write, login included, gets the fixed refusal on its own link although `blesecure` is off, and the same link's encrypted commands run. The FreeRTOS doubles count every tx-mutex take that may wait and every delay made on BTC_TASK.
+`ble_sc_policy` compiles the production `System_BleSecureChannel.cpp` whole against the `ble_sc_stubs/` stand-ins it shares with `ble_sc_directed`. It splices the BLE command ingress from `Bluetooth.cpp`: the GATT write entry `processIncomingBleCommand`, the deferred secure-frame and plaintext jobs (`bleScDeferredInbound`, `blePlaintextDeferredInbound`), the command tail `processBleCommandLine` with its file-browser gate, and the directed and session senders. The fake GATT keeps one inbox per connection. A write runs the GATT entry as BTC_TASK; deferred jobs queue in submission order and run as cmd_exec after it returns, and the executor records which command would run for which session. On the G2 client host (R4) a plaintext write, login included, gets the fixed refusal on its own link although `blesecure` is off, and the same link's encrypted commands run. The FreeRTOS doubles count every tx-mutex take that may wait and every delay made on BTC_TASK.
 
 The suite checks:
 - With the secure channel required, a plaintext write from a connection without a channel gets the fixed refusal on that connection only, in plaintext. A connection with a channel gets the refusal as one encrypted DATA frame, and its encrypted commands still run.
@@ -4036,7 +4036,7 @@ that the command matches the label that was shown (and that a refused render aft
 a submenu change runs nothing), plus the unchanged-state row maps. The Bluetooth
 menu's `Role:` (+ `Saved:`) rows use the link-status words; its server layout shows
 `Console:` in hw1link::consoleText's words (`waiting`, `hidden`, `signed out`,
-`signed in`) from the snapshot, never gBLEState, so a stray "connected" with no app
+`signed in`) from the snapshot, never gBleState, so a stray "connected" with no app
 client still reads `Console: hidden`. The Phone menu shows `Pipe:` (a failure names
 its reason, `Pipe: fail: not found`; a fault reads `Pipe: fault`), `Paired:` and
 `Console:` (the console on the pipe's link: `waiting`, `signed out`, `signed in`,
@@ -5200,7 +5200,7 @@ Path switching and the OPEN phases are covered as follows:
   registration and the teardown.
 - `ble_pipe_console_row` runs the phone link's console row (phone link v2: the
   app console as stream slot 2 of the phone pipe) from `Bluetooth.cpp`: the
-  session table and epoch helpers, the row's lifecycle (gBLEState holders,
+  session table and epoch helpers, the row's lifecycle (gBleState holders,
   bind, end, the leaf identity snapshot, the main loop's reconcile), the auth
   rule, revocation, the disconnect owner functions, the command tail, the
   record ingress (`blePipeConsoleInbound`), the output router (TEXT, MIRROR,
@@ -5453,7 +5453,7 @@ OPEN without it), an idle console stream keeping idle parameters, the console
 writer (`phonePipeConsolePush`), the status snapshot, version-mismatch strikes
 (the version RESET, a link loss within 1.5 s, the 3 s HELLO deadline), the hold
 after three (ROLE_BLOCKED, the ring's yield lifted) and its lift by `phone
-start|connect|pair` or READY, the gBLEState hold given back on stop and host
+start|connect|pair` or READY, the gBleState hold given back on stop and host
 reset, and 10 min of READY with RELAY_ON 0 (one link PING a minute, idle
 parameters). Native Terminal tests
 cover speech failure during capture and after release, retained view, discarded

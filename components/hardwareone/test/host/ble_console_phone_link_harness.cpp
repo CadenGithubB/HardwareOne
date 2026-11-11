@@ -49,7 +49,7 @@ struct World {
   std::vector<uint16_t> sentTo;
   std::vector<std::string> sentText;
   // Commands and the main loop.
-  std::vector<uint16_t> dispatched;  // processIncomingBLECommand
+  std::vector<uint16_t> dispatched;  // processIncomingBleCommand
   std::vector<std::string> ran;      // processBleCommandLine
   unsigned sessionTicks = 0, settingWrites = 0, poolReleases = 0;
   unsigned lockTakes = 0, recordReads = 0;
@@ -195,7 +195,7 @@ static bool bleScBind(uint16_t connId, TransportSessionEpoch epoch, BleScBinding
 }
 bool bleRawNotifyToSession(uint16_t connId, TransportSessionEpoch expectedEpoch,
                            const char* data, size_t len, bool blocking);
-bool sendBLEResponseToSession(uint16_t connId, TransportSessionEpoch expectedEpoch,
+bool sendBleResponseToSession(uint16_t connId, TransportSessionEpoch expectedEpoch,
                               const char* data, size_t len, bool blocking = true);
 static bool bleScSendEncryptedBound(const BleScBinding& binding, const char* text, size_t len,
                                     bool blocking, bool = false) {
@@ -302,7 +302,7 @@ static BLEService* pCommandService = nullptr;
 static BLECharacteristic* pCmdRequestChar = nullptr;
 static BLECharacteristic* pCmdResponseChar = nullptr;
 static BLECharacteristic* pCmdStatusChar = nullptr;
-static BLEDeviceType bleIdentifyDeviceByMAC(const uint8_t*) { return BLE_DEVICE_UNKNOWN; }
+static BleDeviceType bleIdentifyDeviceByMAC(const uint8_t*) { return BLE_DEVICE_UNKNOWN; }
 
 // Allocation (System_MemUtil.h).
 enum class AllocPref { PreferPSRAM };
@@ -313,10 +313,10 @@ static void ps_delete(T* object) {
   object->~T();
   std::free(object);
 }
-BLESystemState* gBLEState = nullptr;
+BleSystemState* gBleState = nullptr;
 
 // The command tail and the deferred jobs (cmd_exec): what would run.
-static void processIncomingBLECommand(uint16_t connId, const char*, size_t) {
+static void processIncomingBleCommand(uint16_t connId, const char*, size_t) {
   w.dispatched.push_back(connId);
   w.log.emplace_back(gLifecycle.depth ? "dispatch-under-lock" : "dispatch");
 }
@@ -327,8 +327,8 @@ static void processBleCommandLine(uint16_t, TransportSessionEpoch, const char* d
 static void bleScPoolRelease(BleScDeferred*) { ++w.poolReleases; }
 
 // Server-mode advertising behind `bleadv` and the main loop's stream work.
-static bool startBLEAdvertising() { ++w.advCommandStarts; return true; }
-static void stopBLEAdvertising() {}
+static bool startBleAdvertising() { ++w.advCommandStarts; return true; }
+static void stopBleAdvertising() {}
 static bool bleAdvertising() { return false; }
 static void otaBleUploadHousekeeping() {}
 static void bleSessionTick() { ++w.sessionTicks; }
@@ -369,8 +369,8 @@ static void landPostInFlight() {
 }
 
 static void dropState() {
-  if (gBLEState) ps_delete(gBLEState);
-  gBLEState = nullptr;
+  if (gBleState) ps_delete(gBleState);
+  gBleState = nullptr;
 }
 
 // The client host as bleConsoleRegisterOnClientHost leaves it (its own suite,
@@ -390,7 +390,7 @@ static void clientHost(const std::string& name) {
   landedPosts = postsUnderLock = 0;
   sBleConsoleSendsInFlight.store(0);
   for (auto& epoch : sBleSessionEpoch) epoch.store(0);
-  gBLEState = bleNewState();
+  gBleState = bleNewState();
   sBleConsoleMode.store(hw1console::Mode::ClientRegistered);
   sBleConsoleAdmissionOpen.store(true);
   sBleConsoleAttach = hw1console::Attach{};
@@ -451,12 +451,12 @@ static void pipeEnds() {
 
 static int slotsOn(uint16_t id) {
   int n = 0;
-  for (const auto& c : gBLEState->connections) n += c.active && c.connId == id;
+  for (const auto& c : gBleState->connections) n += c.active && c.connId == id;
   return n;
 }
 static int slots() {
   int n = 0;
-  for (const auto& c : gBLEState->connections) n += c.active;
+  for (const auto& c : gBleState->connections) n += c.active;
   return n;
 }
 static bool slotIs(uint32_t generation, uint16_t id) {
@@ -478,13 +478,13 @@ static void expectInvariants(const char* where) {
   // A slot counts as a connected app only once the app has joined it.
   const int joined = sBleConsoleAttach.slot.present && sBleConsoleAttach.slot.joined ? 1 : 0;
   if (n > 1) why += " more than one slot;";
-  if (joined != gBLEState->activeConnectionCount) why += " count is not the joined slot;";
-  if ((gBLEState->connectionState == BLE_STATE_CONNECTED) != (joined > 0)) why += " state is not the joined slot;";
+  if (joined != gBleState->activeConnectionCount) why += " count is not the joined slot;";
+  if ((gBleState->connectionState == BLE_STATE_CONNECTED) != (joined > 0)) why += " state is not the joined slot;";
   if ((n == 1) != sBleConsoleAttach.slot.present) why += " attach record is not the slot;";
   if (!sBleConsoleAttach.slot.present && sBleConsoleAttach.slot.joined) why += " joined without a slot;";
   if (sBleConsoleSendsInFlight.load() != 0) why += " a post left in flight;";
   for (int i = 0; i < BLE_MAX_CONNECTIONS; ++i) {
-    const BLEConnection& c = gBLEState->connections[i];
+    const BleConnection& c = gBleState->connections[i];
     if (!c.active) continue;
     if (c.deviceType != BLE_DEVICE_PHONE) why += " a slot is not typed Phone;";
     if (c.connId != sBleConsoleAttach.slot.connId) why += " a slot is off the attach record's link;";
@@ -520,15 +520,15 @@ static void linkTable() {
         if (order & 1) {
           // READY makes the slot; it is not an app until the app writes.
           mainLoop();
-          EXPECT(slotIs(7, phone) && w.connectedEvents == 0 && gBLEState->activeConnectionCount == 0 &&
-                     !isBLEConnected(),
+          EXPECT(slotIs(7, phone) && w.connectedEvents == 0 && gBleState->activeConnectionCount == 0 &&
+                     !isBleConnected(),
                  "a slot no app had joined counted as a connected app");
           EXPECT(write(phone), "the phone's first write was not admitted");
         } else {
           EXPECT(write(phone), "the phone's first write was not admitted by the fast path");
         }
         EXPECT(slotIs(7, phone) && w.connectedEvents == 1 && w.connectedSubject == "Phone" &&
-                   w.connectedDetail.empty() && isBLEConnected(),
+                   w.connectedDetail.empty() && isBleConnected(),
                "the app's first write did not join the one Phone slot (no address in the event)");
         const TransportSessionEpoch epoch = bleSessionEpochForConnection(phone);
         // The other link drops, comes back and writes, in either order. Its
@@ -564,7 +564,7 @@ static void reuseCases() {
   const TransportSessionEpoch old = bleSessionEpochForConnection(kPhone);
   EXPECT(slotIs(5, kPhone), "test setup: the slot");
   disconnect(kPhone);
-  EXPECT(slots() == 0 && w.disconnectedEvents == 1 && gBLEState->connectionState == BLE_STATE_IDLE,
+  EXPECT(slots() == 0 && w.disconnectedEvents == 1 && gBleState->connectionState == BLE_STATE_IDLE,
          "the phone link's drop did not end its slot");
   connect(kPhone);  // a temple reconnects on id 3
   mainLoop();
@@ -654,7 +654,7 @@ static void mainLoopAndFastPath() {
   clientHost("S2 the first write attaches (BTC fast path)");
   connect(kPhone);
   ready(5, kPhone);
-  EXPECT(write(kPhone) && slotIs(5, kPhone) && gBLEState->commandsReceived == 1 && w.activity == 1 &&
+  EXPECT(write(kPhone) && slotIs(5, kPhone) && gBleState->commandsReceived == 1 && w.activity == 1 &&
              w.connectedEvents == 1 && sBleConsoleAttach.slot.joined,
          "the first write did not attach, join, count and note activity");
   EXPECT(write(kPhone) && w.connectedEvents == 1, "a later write joined the slot again");
@@ -662,7 +662,7 @@ static void mainLoopAndFastPath() {
   EXPECT(std::count(w.debug.begin(), w.debug.end(),
                     std::string("App console attached to the phone pipe's link")) == 1,
          "a fast-path attach was not logged by the main loop");
-  EXPECT(!write(kLeft) && gBLEState->commandsReceived == 2, "a temple write was counted or dispatched");
+  EXPECT(!write(kLeft) && gBleState->commandsReceived == 2, "a temple write was counted or dispatched");
   // A command from the phone link names no address in its audit identity.
   EXPECT(std::strcmp(blePeerIpTag(kPhone).c_str(), "ble:pipe-link") == 0 &&
              std::strcmp(blePeerIpTag(kLeft).c_str(), "ble") == 0,
@@ -727,7 +727,7 @@ static void secureAndGate() {
   ready(5, kPhone);
   mainLoop();
   const TransportSessionEpoch epoch = bleSessionEpochForConnection(kPhone);
-  EXPECT(!w.scRequired && !sendBLEResponseToSession(kPhone, epoch, "result", 6) && w.sentTo.empty(),
+  EXPECT(!w.scRequired && !sendBleResponseToSession(kPhone, epoch, "result", 6) && w.sentTo.empty(),
          "plaintext output reached the phone link");
   BleScDeferred job{};
   job.connId = kPhone;
@@ -740,7 +740,7 @@ static void secureAndGate() {
          "a plaintext command ran, or the fixed refusal did not reach only the writer");
   w.scEstablished.insert(kPhone);
   w.log.clear();
-  EXPECT(sendBLEResponseToSession(kPhone, epoch, "result", 6) && w.sentText.back() == "\x10" "enc:result",
+  EXPECT(sendBleResponseToSession(kPhone, epoch, "result", 6) && w.sentText.back() == "\x10" "enc:result",
          "an encrypted result was not sent");
   const std::vector<std::string> order{"gate-try", "send", "activity", "gate-give"};
   EXPECT(w.log == order, "the frame did not go gate try, send under the lock, activity, gate give");
@@ -753,15 +753,15 @@ static void secureAndGate() {
   w.scEstablished.insert(kPhone);
   const TransportSessionEpoch e = bleSessionEpochForConnection(kPhone);
   w.accessoryPressure = true;
-  EXPECT(sendBLEResponseToSession(kPhone, e, "r", 1, true) && w.gateBypasses == 1,
+  EXPECT(sendBleResponseToSession(kPhone, e, "r", 1, true) && w.gateBypasses == 1,
          "a reliable reply did not pass a glasses burst");
-  EXPECT(!sendBLEResponseToSession(kPhone, e, "n", 1, false) && w.sentTo.size() == 1 &&
+  EXPECT(!sendBleResponseToSession(kPhone, e, "n", 1, false) && w.sentTo.size() == 1 &&
              w.gateTries == 2 && backoffs == 0,
          "a best-effort frame did not yield to the accessories, once, without a wait");
   w.accessoryPressure = false;
   w.gateBusy = true;
   const unsigned tries = w.gateTries;
-  EXPECT(!sendBLEResponseToSession(kPhone, e, "b", 1, true) && w.gateTries == tries + 6 &&
+  EXPECT(!sendBleResponseToSession(kPhone, e, "b", 1, true) && w.gateTries == tries + 6 &&
              w.sentTo.size() == 1 && w.activity == 1,
          "a busy gate must be six bounded tries and nothing sent");
   w.gateBusy = false;
@@ -770,12 +770,12 @@ static void secureAndGate() {
   // Server mode: no gate, no activity, plaintext as the operator chose.
   clientHost("S4b server mode is not gated");
   sBleConsoleMode.store(hw1console::Mode::Server);
-  gBLEState->initialized = true;
+  gBleState->initialized = true;
   connect(kPhone);  // the server path admits the app
   const TransportSessionEpoch se = bleSessionEpochForConnection(kPhone);
   EXPECT(se != 0 && w.advStarts == 0 && w.connectedEvents == 1, "test setup: a server-mode app");
   w.advStops = 0;  // the server path's own advertising re-arm (no advertising object here)
-  EXPECT(sendBLEResponseToSession(kPhone, se, "p", 1) && w.gateTries == 0 && w.activity == 0,
+  EXPECT(sendBleResponseToSession(kPhone, se, "p", 1) && w.gateTries == 0 && w.activity == 0,
          "a server-mode send was gated or counted as pipe activity");
 }
 
@@ -893,7 +893,7 @@ static void consoleCommand() {
   w.g2Client = false;
   w.pipeActive = false;
   dropState();
-  gBLEState = bleNewState();
+  gBleState = bleNewState();
   EXPECT(std::strcmp(cmd_bleconsole(""), "App console on the phone link: on (used while the phone link runs)") == 0,
          "bleconsole outside a client role changed");
   EXPECT(std::strcmp(cmd_bleconsole("off"), "App console on the phone link: off") == 0 &&
@@ -926,13 +926,13 @@ static void teardown() {
   bleConsoleHostTeardownBegin();
   EXPECT(slots() == 0 && w.sessionCloses == closes + 1 && !sBleConsoleAdmissionOpen.load() &&
              !sBleConsoleAttach.slot.present && !sBleConsoleAttach.closed && !pCmdResponseChar &&
-             !pServer && gBLEState != nullptr,
+             !pServer && gBleState != nullptr,
          "the teardown did not end the slot, reset the attach state and drop the pointers");
   EXPECT(!write(kPhone), "a write was admitted during the teardown");
   mainLoop();
   EXPECT(slots() == 0, "the main loop re-attached during the teardown");
   bleConsoleHostTeardownEnd(true);
-  EXPECT(!gBLEState && sBleConsoleMode.load() == hw1console::Mode::Off, "a terminal stop kept the state");
+  EXPECT(!gBleState && sBleConsoleMode.load() == hw1console::Mode::Off, "a terminal stop kept the state");
   mainLoop();  // no state, mode Off: nothing to reconcile
   EXPECT(gLifecycle.depth == 0 && w.gateHeld == 0, "the lock or the gate leaked");
 
@@ -961,8 +961,8 @@ static void joinAndStatusRead() {
   connect(kPhone);
   ready(5, kPhone);
   mainLoop();
-  EXPECT(slotIs(5, kPhone) && w.connectedEvents == 0 && gBLEState->activeConnectionCount == 0 &&
-             gBLEState->totalConnections == 0 && !isBLEConnected() &&
+  EXPECT(slotIs(5, kPhone) && w.connectedEvents == 0 && gBleState->activeConnectionCount == 0 &&
+             gBleState->totalConnections == 0 && !isBleConnected() &&
              bleLinkStatus().console == hw1link::Console::WaitingPhone,
          "a pipe READY with no app joined counted as a connected app");
   disconnect(kPhone);
@@ -992,7 +992,7 @@ static void joinAndStatusRead() {
 static void serverMode() {
   clientHost("S9 server mode unchanged");
   sBleConsoleMode.store(hw1console::Mode::Server);
-  gBLEState->initialized = true;
+  gBleState->initialized = true;
   pAdvertising = &gAdvertising;
   ready(5, kRing);  // a stale pipe record changes nothing in server mode
   connect(kRing);
@@ -1023,14 +1023,14 @@ static void statusWords() {
   mainLoop();
   BleLinkStatus s = bleLinkStatus();
   EXPECT(s.console == hw1link::Console::WaitingPhone && s.consoleView.clients == 0 &&
-             !s.consoleView.attached && !isBLEConnected() && w.connectedEvents == 0,
+             !s.consoleView.attached && !isBleConnected() && w.connectedEvents == 0,
          "a pipe READY with no app joined reads as an app (status, count, connection state, event)");
   EXPECT(write(kPhone), "test setup: the app joins");
   s = bleLinkStatus();
   EXPECT(s.console == hw1link::Console::Connected && s.consoleView.clients == 1 &&
              !s.consoleView.up && !s.consoleView.advertising && s.consoleView.attached,
          "a joined phone link is not one connected app");
-  for (auto& c : gBLEState->connections) {
+  for (auto& c : gBleState->connections) {
     if (c.active) { c.authed = true; c.user = "alice"; }
   }
   EXPECT(console() == hw1link::Console::SignedIn, "a signed-in phone link is not signed in");
@@ -1192,7 +1192,7 @@ static void pipeRowDisconnect() {
              closes[1].streamId == 3 && closes[1].reason == kBlePipeCloseRenewed && w.serverCloses == 0,
          "bare bledisconnect did not end the row's session the same way");
   blePipeConsoleStateRelease();
-  EXPECT(!gBLEState && sBleStateHolders == 0, "the pipe's release left the state");
+  EXPECT(!gBleState && sBleStateHolders == 0, "the pipe's release left the state");
   sBleConsoleMode.store(hw1console::Mode::ClientRegistered);
 }
 

@@ -134,7 +134,7 @@ def check_sources(phone: str) -> None:
         assert sink not in pair_new, sink
     run = extract_block(phone, 'void run(')
     assert run.index('passLocked(millis());}') < run.index('pipeConsoleAfterUnlock();'), 'row work outside the owner mutex'
-    # The gBLEState hold: taken once the host is up and before the owner lock,
+    # The gBleState hold: taken once the host is up and before the owner lock,
     # given back after it (the lifecycle lock is never taken under it).
     start = extract_block(phone, 'bool phoneLinkOpen(')
     assert start.index('bluetoothHalStatus().ready()') < start.index('blePipeConsoleStateAcquire()') < \

@@ -126,7 +126,7 @@ BaseType_t xSemaphoreGive(SemaphoreHandle_t) {
 }
 
 // ---- Bluetooth.cpp context: connection table, lifecycle guard, fake GATT ----
-struct BLEConnection {
+struct BleConnection {
   bool active = false;
   uint16_t connId = 0;
   bool authed = false;
@@ -138,12 +138,12 @@ struct BLEConnection {
   uint32_t pipeGeneration = 0;
   uint16_t pipeStream = 0;
 };
-struct BLESystemState {
-  BLEConnection connections[BLE_MAX_CONNECTIONS];
+struct BleSystemState {
+  BleConnection connections[BLE_MAX_CONNECTIONS];
   uint32_t responsesSent = 0;
 };
-static BLESystemState sState;
-static BLESystemState* gBLEState = &sState;
+static BleSystemState sState;
+static BleSystemState* gBleState = &sState;
 static std::atomic<TransportSessionEpoch> sBleSessionEpoch[BLE_MAX_CONNECTIONS];
 static std::atomic<int> sBleGattsIf{3};
 // Client-host posts made with the lifecycle guard released (Bluetooth.cpp).
@@ -179,7 +179,7 @@ TransportSessionEpoch bleSessionEpochForConnection(uint16_t connId) {
 bool bleSessionEpochMatches(uint16_t connId, TransportSessionEpoch epoch) {
   return epoch != 0 && bleSessionEpochForConnection(connId) == epoch;
 }
-bool isBLEConnected() {
+bool isBleConnected() {
   for (const auto& c : sState.connections) {
     if (c.active) return true;
   }
@@ -248,7 +248,7 @@ esp_err_t esp_ble_gatts_send_indicate(esp_gatt_if_t gattsIf, uint16_t connId, ui
 // bleRawNotify → Arduino BLECharacteristic::notify()): one shared value, sent
 // to every connected peer, with no session check. Fixed sources never call it.
 bool bleRawNotify(const char* data, size_t len) {
-  if (!isBLEConnected() || !pCmdResponseChar) return false;
+  if (!isBleConnected() || !pCmdResponseChar) return false;
   ++broadcastSends;
   for (int i = 0; i < BLE_MAX_CONNECTIONS; ++i) {
     if (sState.connections[i].active) inbox[i].emplace_back(data, len);
@@ -272,8 +272,8 @@ static void processBleCommandLine(uint16_t, TransportSessionEpoch, const char* d
 static void bleMarkActivity(uint16_t) {}
 bool otaBleHandleEncryptedFrame(uint16_t, const uint8_t*, size_t) { return true; }
 
-bool sendBLEResponse(const char* data, size_t len, bool blocking = true);
-bool sendBLEResponseToSession(uint16_t connId, TransportSessionEpoch expectedEpoch,
+bool sendBleResponse(const char* data, size_t len, bool blocking = true);
+bool sendBleResponseToSession(uint16_t connId, TransportSessionEpoch expectedEpoch,
                               const char* data, size_t len, bool blocking = true);
 
 // ---- production blocks from Bluetooth.cpp ----------------------------------
@@ -315,7 +315,7 @@ static std::vector<uint8_t> dataFrame(uint64_t ctr, const std::string& text) {
   f.insert(f.end(), 16, 0xAA);
   return f;
 }
-// What processIncomingBLECommand hands to cmd_exec: the frame plus the session
+// What processIncomingBleCommand hands to cmd_exec: the frame plus the session
 // epoch captured on BTC_TASK.
 static void deliver(uint16_t connId, TransportSessionEpoch epoch, const std::vector<uint8_t>& frame) {
   static BleScDeferred job;
@@ -327,8 +327,8 @@ static void deliver(uint16_t connId, TransportSessionEpoch epoch, const std::vec
   bleScDeferredInbound(&job);
 }
 static void peer(int slot, uint16_t connId, TransportSessionEpoch epoch, const char* user = nullptr) {
-  BLEConnection& c = sState.connections[slot];
-  c = BLEConnection{};
+  BleConnection& c = sState.connections[slot];
+  c = BleConnection{};
   c.active = true;
   c.connId = connId;
   c.authed = user != nullptr;
@@ -348,7 +348,7 @@ static void resetWorld(const char* name) {
   currentCase = name;
   for (int i = 0; i < BLE_MAX_CONNECTIONS; ++i) {
     bleScReset(static_cast<uint16_t>(i));
-    sState.connections[i] = BLEConnection{};
+    sState.connections[i] = BleConnection{};
     sBleSessionEpoch[i].store(0);
   }
   peer(0, 0, 7);
@@ -432,7 +432,7 @@ int main() {
   establish(1, 9);
   clearWire();
   const std::string big(500, 'x');
-  EXPECT(sendBLEResponseToSession(1, 9, big.data(), big.size(), true), "secure result not sent");
+  EXPECT(sendBleResponseToSession(1, 9, big.data(), big.size(), true), "secure result not sent");
   EXPECT(inbox[1].size() == 3, "conn 1 did not get exactly three fragments");
   if (inbox[1].size() == 3) {
     EXPECT(frameIs(inbox[1][0], kData, 225) && frameIs(inbox[1][1], kData, 225) &&
@@ -452,7 +452,7 @@ int main() {
   // C5: a stale session epoch sends nothing.
   currentCase = "C5 stale epoch";
   clearWire();
-  EXPECT(!sendBLEResponseToSession(1, 8, "q", 1, true), "stale-epoch send reported success");
+  EXPECT(!sendBleResponseToSession(1, 8, "q", 1, true), "stale-epoch send reported success");
   EXPECT(inbox[0].empty() && inbox[1].empty(), "stale-epoch send reached a peer");
 
   // C6: conn 1's session rotates after the first fragment leaves: the transfer
@@ -460,7 +460,7 @@ int main() {
   currentCase = "C6 epoch rotates mid-message";
   clearWire();
   afterWireHook = rotateConn1;
-  EXPECT(!sendBLEResponseToSession(1, 9, big.data(), big.size(), true), "transfer continued after rotation");
+  EXPECT(!sendBleResponseToSession(1, 9, big.data(), big.size(), true), "transfer continued after rotation");
   afterWireHook = nullptr;
   EXPECT(inbox[1].size() == 1, "conn 1 got more than the fragment sent before the rotation");
   EXPECT(inbox[0].empty(), "a fragment for conn 1 reached conn 0");
@@ -471,7 +471,7 @@ int main() {
   resetWorld("C7a plaintext mirror");
   peer(0, 0, 7, "alice");
   peer(1, 1, 9, "bob");
-  EXPECT(sendBLEResponse("line", 4, false), "mirror not delivered");
+  EXPECT(sendBleResponse("line", 4, false), "mirror not delivered");
   EXPECT(inbox[0] == std::vector<std::string>{"line"} && inbox[1] == std::vector<std::string>{"line"},
          "each logged-in session must get exactly one copy");
   EXPECT(broadcastSends == 0 && directedSends == 2, "plaintext mirror used the characteristic-wide notify");
@@ -482,7 +482,7 @@ int main() {
   establish(1, 9);
   peer(1, 1, 9, "bob");
   clearWire();
-  EXPECT(sendBLEResponse("x", 1, true), "secure mirror not delivered");
+  EXPECT(sendBleResponse("x", 1, true), "secure mirror not delivered");
   EXPECT(inbox[1].size() == 1 && frameIs(inbox[1][0], kData, 1 + 8 + 5 + 1 + 16), "conn 1 missing its encrypted mirror");
   EXPECT(inbox[0].empty(), "encrypted mirror frame for conn 1 reached conn 0");
   EXPECT(broadcastSends == 0, "secure mirror used the characteristic-wide notify");
@@ -498,7 +498,7 @@ int main() {
   // C9: secure channel required, conn 0 has none: plaintext refused, nothing sent.
   resetWorld("C9 secure required");
   gSettings.bleRequireSecureChannel = true;
-  EXPECT(!sendBLEResponseToSession(0, 7, "p", 1, true), "plaintext sent although the channel is required");
+  EXPECT(!sendBleResponseToSession(0, 7, "p", 1, true), "plaintext sent although the channel is required");
   EXPECT(inbox[0].empty() && inbox[1].empty(), "plaintext reached a peer in secure-required mode");
 
   // C10: the server stops (every epoch invalidated under the lifecycle guard)
@@ -515,7 +515,7 @@ int main() {
   establish(1, 9);
   clearWire();
   pCmdResponseChar = nullptr;
-  EXPECT(!sendBLEResponseToSession(1, 9, "z", 1, true), "send reported success without a characteristic");
+  EXPECT(!sendBleResponseToSession(1, 9, "z", 1, true), "send reported success without a characteristic");
   EXPECT(inbox[0].empty() && inbox[1].empty(), "a frame left without a characteristic");
   pCmdResponseChar = &sResponseChar;
 
@@ -525,7 +525,7 @@ int main() {
   resetWorld("C11 client host: gated, Secure Channel only");
   consoleMode = hw1console::Mode::ClientRegistered;
   EXPECT(!gSettings.bleRequireSecureChannel, "test setup: blesecure off");
-  EXPECT(!sendBLEResponseToSession(0, 7, "p", 1, true), "plaintext sent on the client host");
+  EXPECT(!sendBleResponseToSession(0, 7, "p", 1, true), "plaintext sent on the client host");
   EXPECT(inbox[0].empty() && gateTries == 0, "a refused plaintext send reached the gate or a peer");
   establish(1, 9);
   EXPECT(inbox[1].size() == 2 && frameIs(inbox[1][0], kHelloAck, 49) &&
@@ -533,23 +533,23 @@ int main() {
          "the handshake did not complete through the gate");
   clearWire();
   accessoryPressure = true;  // a glasses image burst: reliable sends still go
-  EXPECT(sendBLEResponseToSession(1, 9, big.data(), big.size(), true), "reliable secure result not sent");
+  EXPECT(sendBleResponseToSession(1, 9, big.data(), big.size(), true), "reliable secure result not sent");
   EXPECT(inbox[1].size() == 3 && inbox[0].empty() && directedSends == 3,
          "the reliable result did not reach conn 1 as three directed fragments");
   EXPECT(gateTries == 3 && gateBypasses == 3 && consoleActivity == 3 && gateHeld == 0,
          "each fragment must be one gate try past the soft priority, noted as pipe activity");
   // A best-effort send (mirror, notification card) yields to the accessories.
   clearWire();
-  EXPECT(!sendBLEResponseToSession(1, 9, "n", 1, false), "a best-effort send went out under accessory pressure");
+  EXPECT(!sendBleResponseToSession(1, 9, "n", 1, false), "a best-effort send went out under accessory pressure");
   EXPECT(inbox[1].empty() && gateTries == 1 && gateBypasses == 0 && consoleActivity == 0,
          "a best-effort send must try the gate once at the soft priority and send nothing");
   accessoryPressure = false;
-  EXPECT(sendBLEResponseToSession(1, 9, "n", 1, false) && inbox[1].size() == 1 && consoleActivity == 0,
+  EXPECT(sendBleResponseToSession(1, 9, "n", 1, false) && inbox[1].size() == 1 && consoleActivity == 0,
          "a best-effort send failed with the radio free, or was noted as pipe activity");
   // A gate held by another submission: the reliable sender retries, then fails.
   clearWire();
   gateBusy = true;
-  EXPECT(!sendBLEResponseToSession(1, 9, "r", 1, true), "a send went out with the gate held elsewhere");
+  EXPECT(!sendBleResponseToSession(1, 9, "r", 1, true), "a send went out with the gate held elsewhere");
   EXPECT(inbox[1].empty() && gateTries == 6 && consoleActivity == 0 && gateHeld == 0,
          "a busy gate must give the bounded six tries and send nothing");
   gateBusy = false;
@@ -557,7 +557,7 @@ int main() {
   // Server mode keeps its path: no gate (the send double checks every frame).
   consoleMode = hw1console::Mode::Server;
   clearWire();
-  EXPECT(sendBLEResponseToSession(1, 9, "s", 1, true) && inbox[1].size() == 1 && gateTries == 0 &&
+  EXPECT(sendBleResponseToSession(1, 9, "s", 1, true) && inbox[1].size() == 1 && gateTries == 0 &&
              consoleActivity == 0,
          "a server-mode send touched the gate or counted as pipe activity");
 

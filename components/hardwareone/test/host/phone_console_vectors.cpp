@@ -68,7 +68,7 @@ struct Writer {
     assert(e.check(type,flags,n)==Fault::None);
     s=cat(s,record(type,flags,Bytes(p,p+n)));assert(e.commit(type,flags,n));
   }
-  // One TEXT/BLOB chain (one sendBLEResponseToSession call); with cutAfter
+  // One TEXT/BLOB chain (one sendBleResponseToSession call); with cutAfter
   // records it ends with ABORT instead (the writer stalled).
   void chain(uint8_t type,const Bytes& data,size_t cutAfter=SIZE_MAX) {
     assert(hw1rec::chainFits(data.size()));

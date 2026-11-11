@@ -202,12 +202,12 @@ static void systemLogRotateLocked() {
 
 // BLE broadcast output buffer (accumulates messages for periodic send to authenticated BLE clients)
 #if ENABLE_BLUETOOTH
-static String gBLEOutputBuffer;
-static bool gBLEOutputBufferReserved = false;
-static unsigned long gBLELastFlush = 0;
-static const uint32_t BLE_OUTPUT_FLUSH_INTERVAL_MS = 150;   // Flush to BLE every 150ms (snappier; sendBLEResponse fragments)
+static String gBleOutputBuffer;
+static bool gBleOutputBufferReserved = false;
+static unsigned long gBleLastFlush = 0;
+static const uint32_t BLE_OUTPUT_FLUSH_INTERVAL_MS = 150;   // Flush to BLE every 150ms (snappier; sendBleResponse fragments)
 // MUST stay <= ESP_GATT_MAX_ATTR_LEN (512). A plaintext flush leaves as ONE
-// directed notification per session (sendBLEResponse -> bleRawNotifyToSession
+// directed notification per session (sendBleResponse -> bleRawNotifyToSession
 // -> esp_ble_gatts_send_indicate, never fragmented), and one ATT value cannot
 // be longer than that. The characteristic-wide sender this replaced
 // (BLECharacteristic::setValue + notify(), since deleted) did not even fail on
@@ -218,7 +218,7 @@ static const uint32_t BLE_OUTPUT_FLUSH_INTERVAL_MS = 150;   // Flush to BLE ever
 // threshold is MAX - DEBUG_MSG_SIZE) — i.e. ALL of them over the limit, so on the
 // plaintext path only the 150 ms timer flushes were getting through. 512 restores
 // the invariant the MTU setup is written against (Bluetooth.cpp: MTU 517 => 514
-// usable "fully covers the 512-byte gBLEOutputBuffer flush"). With 512 the append
+// usable "fully covers the 512-byte gBleOutputBuffer flush"). With 512 the append
 // guard caps length at 511 and flushes run 256..511 B — always deliverable.
 //
 // The Secure-Channel path (bleScSendEncryptedBound) fragments at 195 B and was
@@ -491,17 +491,17 @@ void debugOutputTask(void* parameter) {
       #endif
 
       // BLE broadcast output: buffered only while a session could receive a
-      // flush (sendBLEResponse's recipients: logged in, non-guest).
+      // flush (sendBleResponse's recipients: logged in, non-guest).
       #if ENABLE_BLUETOOTH
       if ((msg->routing & MSG_ROUTE_BLE) && (gOutputFlags & MSG_ROUTE_BLE) &&
-          isBLEConnected() && bleMirrorRecipientCount() > 0) {
-        if (!gBLEOutputBufferReserved) {
-          gBLEOutputBufferReserved = gBLEOutputBuffer.reserve(BLE_OUTPUT_BUFFER_MAX);
+          isBleConnected() && bleMirrorRecipientCount() > 0) {
+        if (!gBleOutputBufferReserved) {
+          gBleOutputBufferReserved = gBleOutputBuffer.reserve(BLE_OUTPUT_BUFFER_MAX);
         }
         size_t msgLen = strlen(msg->text);   // <= DEBUG_MSG_SIZE (256) < BLE_OUTPUT_BUFFER_MAX
-        if (gBLEOutputBuffer.length() + msgLen + 2 < BLE_OUTPUT_BUFFER_MAX) {
-          gBLEOutputBuffer += msg->text;
-          gBLEOutputBuffer += "\n";
+        if (gBleOutputBuffer.length() + msgLen + 2 < BLE_OUTPUT_BUFFER_MAX) {
+          gBleOutputBuffer += msg->text;
+          gBleOutputBuffer += "\n";
         }
         // NON-BLOCKING flush: never stall this single debugOutputTask on the secure-channel tx
         // mutex. A paced multi-fragment command result can hold that mutex for hundreds of ms;
@@ -510,15 +510,15 @@ void debugOutputTask(void* parameter) {
         // the buffer is also full do we drop (best-effort console mirror — history is
         // authoritative). The "[output] dropped" marker still surfaces any loss.
         unsigned long now = millis();
-        bool full = gBLEOutputBuffer.length() >= BLE_OUTPUT_BUFFER_MAX - DEBUG_MSG_SIZE;
-        bool due  = (now - gBLELastFlush >= BLE_OUTPUT_FLUSH_INTERVAL_MS);
-        if (gBLEOutputBuffer.length() > 0 && (full || due)) {
-          if (sendBLEResponse(gBLEOutputBuffer.c_str(), gBLEOutputBuffer.length(), /*blocking=*/false)) {
-            gBLEOutputBuffer = "";
-            gBLELastFlush = now;
+        bool full = gBleOutputBuffer.length() >= BLE_OUTPUT_BUFFER_MAX - DEBUG_MSG_SIZE;
+        bool due  = (now - gBleLastFlush >= BLE_OUTPUT_FLUSH_INTERVAL_MS);
+        if (gBleOutputBuffer.length() > 0 && (full || due)) {
+          if (sendBleResponse(gBleOutputBuffer.c_str(), gBleOutputBuffer.length(), /*blocking=*/false)) {
+            gBleOutputBuffer = "";
+            gBleLastFlush = now;
           } else if (full) {
-            gBLEOutputBuffer = "";   // tx busy and buffer full → drop to bound growth
-            gBLELastFlush = now;
+            gBleOutputBuffer = "";   // tx busy and buffer full → drop to bound growth
+            gBleLastFlush = now;
           }
         }
       }
@@ -1310,7 +1310,7 @@ const char* cmd_outble(const String& argsInput) {
   }
   if (v < 0) {
     bool enabled = (gOutputFlags & MSG_ROUTE_BLE) != 0;
-    bool connected = isBLEConnected();
+    bool connected = isBleConnected();
     bool authed = bleHasAuthenticatedSession();
     int recipients = bleMirrorRecipientCount();
     EXT_RAM_BSS_ATTR static char buf[160];

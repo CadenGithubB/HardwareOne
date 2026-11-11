@@ -505,7 +505,7 @@ static void pipeConsoleTickLocked(hw1pipe::Session& session,uint32_t generation,
 }
 static void pipeConsoleAfterUnlock(){assert(ownerDepth==0 && critDepth==0);++afterUnlocks;}
 static void pipeConsoleStatus(PipeConsoleStatus* out){assert(ownerDepth==0);*out=consoleStatus;}
-// The pipe's hold on gBLEState takes the lifecycle lock: never under the owner mutex.
+// The pipe's hold on gBleState takes the lifecycle lock: never under the owner mutex.
 static unsigned stateReleases=0;
 static void blePipeConsoleStateRelease(){assert(ownerDepth==0 && critDepth==0);++stateReleases;}
 static unsigned reseeks=0;
@@ -711,7 +711,7 @@ static void reset() {
  scanStopRefused=false;wifiNow=WifiCoexTag{};wifiNow.state=WifiCoex::Associated;
  linkRecord={};linkValid=false;consoleActivity=0;consoleSeen=0;phoneGatt.conn=2;
  // Phone link v2: a fresh Session (its HELLO latch and flags too), relay,
- // the version hold, the gBLEState hold, the snapshot and the console spies.
+ // the version hold, the gBleState hold, the snapshot and the console spies.
  phoneSession=hw1pipe::Session{};relayOn=false;versionStrikes=0;versionLatched=false;stateHeld=false;linkSummary={};
  consoleFlags=0;consoleTicks.clear();afterUnlocks=0;consoleStatus={};stateReleases=0;reseeks=0;lockRefused=false;
  localFlagReads=0;memzeroed.clear();pbkdf2Calls=0;pbkdf2Out=nullptr;onPbkdf2=nullptr;pskInvalidations=0;
@@ -1484,7 +1484,7 @@ static void workerReleaseTests() {
   assert(phonePipeWorkerRelease(kRelease) && !worker && phoneTaskGone && !exitWanted && !hostResetWanted);
   assert(phoneGatt.hostStops==1 && resetPass==1 && taskExits.size()==1 && taskExits[0].hostStops==1 && taskExits[0].pass>resetPass);}
  // The happy path: a stopped pipe on a torn-down host. The reset pass gives
- // gBLEState back and publishes the final "stopped" summary; the leave pass
+ // gBleState back and publishes the final "stopped" summary; the leave pass
  // follows it; the task nulls its own handle, so the worker's TurnEnv has
  // nothing to raise afterwards and nothing can queue a phone turn.
  {reset();static int handle;mutex=&handle;active=false;stateHeld=true;linkSummary.active=linkSummary.ready=true;
@@ -2062,7 +2062,7 @@ static void v2Tests() {
   // A PAUSED RESET after READY: an ordinary end (bucket 18), not a strike.
   assert(!phoneDeliver(hw1pipe::kVersion,Op::Reset,0,paused,2));tickFlush(clockMs+=10);
   assert(!ready && sessionStats.endReason[18]==1 && sessionStats.lastEnd==18 && sessionStats.peerReset==1 && !versionStrikes);}
- // The pipe's hold on gBLEState: given back once the pipe has stopped, outside
+ // The pipe's hold on gBleState: given back once the pipe has stopped, outside
  // the owner mutex; a stop that does not finish keeps it.
  {reset();active=false;stateHeld=true;assert(phonePipeStop() && stateReleases==1 && !stateHeld);
   assert(phonePipeStop() && stateReleases==1);

@@ -11,7 +11,7 @@ every ENABLE_G2_GLASSES x ENABLE_BLE_PHONE_PIPE build, on the 64 px OLED,
 - the Phone screen's "PIPE [OK]/[..]/[!!]/[--]/[off]" row, the pipe's words and
   the Console row; its taps run what the drawn rows said;
 - the main menu's Advertising/Disconnect rows come from bleConsoleView() with
-  gBLEState freed, and the Phone >> marker follows the pipe;
+  gBleState freed, and the Phone >> marker follows the pipe;
 - one main-menu row per role in the build (App console, Glasses, Phone pipe)
   where Start/Stop was, the running role marked " *" (Glasses+pipe marks
   Glasses); each tap opens its confirm (lines, default) and Yes runs the drawn

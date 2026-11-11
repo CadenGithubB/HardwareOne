@@ -174,7 +174,7 @@ static void ps_delete(T* object) {
   object->~T();
   std::free(object);
 }
-BLESystemState* gBLEState = nullptr;
+BleSystemState* gBleState = nullptr;
 
 // The phone pipe's link record and the lifecycle mutex the pipe's hold
 // creates (the phone link's console row, phone link v2); the leaf lock of its
@@ -259,7 +259,7 @@ static const CommandModule* getCommandModules(size_t& count) {
 
 void bleCommandOutputLine(const char* text, size_t len);
 void broadcastOutputCore_Routed(const char* text, size_t len, uint8_t route);
-bool sendBLEResponseToSession(uint16_t connId, TransportSessionEpoch expectedEpoch,
+bool sendBleResponseToSession(uint16_t connId, TransportSessionEpoch expectedEpoch,
                               const char* data, size_t len, bool blocking = true);
 TransportSessionEpoch bleSessionEpochForConnection(uint16_t connId);
 static bool bleIsAuthed(uint16_t connId, String& outUser);
@@ -407,11 +407,11 @@ static void makeModules() {
 }
 
 static void resetWorld(hw1console::Mode mode) {
-  if (gBLEState) {
-    gBLEState->~BLESystemState();
-    std::free(gBLEState);
+  if (gBleState) {
+    gBleState->~BleSystemState();
+    std::free(gBleState);
   }
-  gBLEState = bleNewState();
+  gBleState = bleNewState();
   for (auto& epoch : sBleSessionEpoch) epoch.store(0);
   sBleConsoleMode.store(mode);
   scRequired = false;
@@ -888,9 +888,9 @@ int main() {
   linesUnderTheLockAreNotSentUnderIt();
   tracesStayOffTheBatch();
   CHECK(gLifecycle.depth == 0, "every lifecycle lock was released");
-  if (gBLEState) {
-    gBLEState->~BLESystemState();
-    std::free(gBLEState);
+  if (gBleState) {
+    gBleState->~BleSystemState();
+    std::free(gBleState);
   }
   if (failures) {
     std::fprintf(stderr, "%d check(s) failed\n", failures);

@@ -3635,7 +3635,7 @@ bool evaluateCondition(const char* condition) {
   } else if (strcmp(sensor, "BLE") == 0) {
     // BLE GATT client connected -> CONNECTED / NONE (NONE when Bluetooth disabled)
     isNumeric = false;
-    strlcpy(currentStringValue, isBLEConnected() ? "CONNECTED" : "NONE", sizeof(currentStringValue));
+    strlcpy(currentStringValue, isBleConnected() ? "CONNECTED" : "NONE", sizeof(currentStringValue));
   } else if (strcmp(sensor, "NTP") == 0) {
     // Wall clock holds a real date (RTC or NTP source) -> SYNCED / NONE
     isNumeric = false;

@@ -4,7 +4,7 @@
 The harness models a four-slot GATT peer table: directed sends land in the
 addressed slot's inbox, the characteristic-wide notify lands in every connected
 slot's inbox (the vendored Arduino wrapper's semantics). Besides the private-STT
-and exact-session checks, the console-mirror chokepoint sendBLEResponse must
+and exact-session checks, the console-mirror chokepoint sendBleResponse must
 reach only logged-in non-guest sessions. --component points the suite at another
 copy of the sources (the pre-fix tree fails the unauthenticated-peer case).
 """
@@ -34,9 +34,9 @@ def main():
            ('TRACE','static void bleTxTrace('),
            ('HISTORY','static void bleRememberOutput('),
            ('RAW_SESSION','bool bleRawNotifyToSession('),
-           ('SEND','bool sendBLEResponseToSession('),
+           ('SEND','bool sendBleResponseToSession('),
            ('CALLBACK','static void bleCommandResultCallback('),
-           ('MIRROR_SEND','bool sendBLEResponse(')]
+           ('MIRROR_SEND','bool sendBleResponse(')]
     # The session router every sender goes through (phone link v2); empty in an older tree.
     harness=harness.replace('// INSERT_PIPE_ROUTER',pipe_host.router_block(args.component,source,'guardDepth!=0'))
     for marker,name in names:
@@ -52,7 +52,7 @@ def main():
     if collector in source:
         harness=harness.replace('// INSERT_MIRROR_COLLECT',function(source,collector))
     else:
-        print('collector absent (pre-fix source): sendBLEResponse runs without it',flush=True)
+        print('collector absent (pre-fix source): sendBleResponse runs without it',flush=True)
     with tempfile.TemporaryDirectory(prefix='hw1-stt-ble-privacy-') as tmp:
         unit=Path(tmp)/'test.cpp';exe=Path(tmp)/'test';unit.write_text(harness)
         command=[args.cxx,'-std=c++17','-Wall','-Wextra','-Werror',

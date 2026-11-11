@@ -2874,13 +2874,13 @@ uint32_t OledConsoleBuffer::getTimestamp(int index) const {
 // Get specific action text for Bluetooth X button based on current state
 static const char* getBluetoothActionText() {
 #if ENABLE_BLUETOOTH
-  if (!gBLEState || !gBLEState->initialized) {
+  if (!gBleState || !gBleState->initialized) {
     return "Start";  // Initialize Bluetooth
-  } else if (gBLEState->connectionState == BLE_STATE_ADVERTISING) {
+  } else if (gBleState->connectionState == BLE_STATE_ADVERTISING) {
     return "Stop Adv";  // Stop advertising
-  } else if (gBLEState->connectionState == BLE_STATE_IDLE) {
+  } else if (gBleState->connectionState == BLE_STATE_IDLE) {
     return "Advertise";  // Start advertising
-  } else if (gBLEState->connectionState == BLE_STATE_CONNECTED) {
+  } else if (gBleState->connectionState == BLE_STATE_CONNECTED) {
     return "Disconnect";  // Disconnect current client
   }
 #endif

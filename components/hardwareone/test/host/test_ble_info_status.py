@@ -22,7 +22,7 @@ have them. The bluetoothMode setting names each mode by the role it starts.
 
 The phone link block (phone link v2): bleinfo and blestatus end their link
 lines with it and carry `phoneLink` in JSON in pipe builds only (bleinfo's
-13 buildBLEInfoJson keys unchanged; the identical-output rule across builds
+13 buildBleInfoJson keys unchanged; the identical-output rule across builds
 compares the CLI without the block); /api/ble/status adds it from its one link
 reading; the console view counts the console stream's own row.
 
@@ -60,7 +60,7 @@ def stream_definitions(owner: str) -> list[str]:
             ("CommandArgs::CommandArgs(", "void CommandArgs::parse()",
              "const String& CommandArgs::arg(", "int CommandArgs::argInt(")]
     out += [extract_block(owner, marker) for marker in
-            ("bool isBLEConnected(", "void bleEnableStream(", "void bleDisableStream(",
+            ("bool isBleConnected(", "void bleEnableStream(", "void bleDisableStream(",
              "void bleSetStreamInterval(", "bool bleIsStreamEnabled(")]
     out.append(json_text())
     # Present only once the streams use directed per-session delivery.
@@ -73,10 +73,10 @@ def stream_definitions(owner: str) -> list[str]:
     # The header declares the default `details`; the event JSON prints millis()
     # with %lu (unsigned long on the target) while the host millis() stays
     # uint32_t for the 32-bit connection-age case.
-    out += ["bool blePushEvent(BLEEventType eventType, const char* message, "
+    out += ["bool blePushEvent(BleEventType eventType, const char* message, "
             "const char* details = nullptr);",
             '#pragma GCC diagnostic push', '#pragma GCC diagnostic ignored "-Wformat"',
-            extract_block(owner, "bool blePushEvent(BLEEventType"),
+            extract_block(owner, "bool blePushEvent(BleEventType"),
             '#pragma GCC diagnostic pop']
     if "static const char* bleStreamSelect(" in owner:
         out.append(extract_block(owner, "static const char* bleStreamSelect("))
@@ -87,7 +87,7 @@ def stream_definitions(owner: str) -> list[str]:
 
 
 def disconnect_definitions(owner: str) -> list[str]:
-    """The bledisconnect command with its owner functions (after isBLEConnected)."""
+    """The bledisconnect command with its owner functions (after isBleConnected)."""
     out = [extract_block(owner, "int findConnectionSlotByConnIdLocked(")]
     if "static inline bool blePipeRow(" in owner:
         # The phone link's console row (phone link v2) the disconnect owner ends
@@ -101,7 +101,7 @@ def disconnect_definitions(owner: str) -> list[str]:
     if "BleDisconnectResult bleDisconnectConnection(" in owner:
         out += [extract_block(owner, marker) for marker in
                 # The definition, not the forward declaration bleConsoleView needs.
-                ("static bool bleIsPeerLinkType(BLEDeviceType type) ",
+                ("static bool bleIsPeerLinkType(BleDeviceType type) ",
                  "BleDisconnectResult bleDisconnectConnection(",
                  "int bleDisconnectAppClients(")]
     else:
@@ -126,7 +126,7 @@ def generated(component: Path, baseline: bool) -> str:
     types += "\n" + extract_block((COMPONENT / "BLE_Peers.h").read_text(),
                                   "enum BlePeerKind") + ";"
     types += "\n" + "\n".join(extract_block(header, marker) + ";" for marker in
-                                ("struct BLEConnection", "struct BLESystemState"))
+                                ("struct BleConnection", "struct BleSystemState"))
     types += "\n" + extract_block(owner, "struct BleSessionFence") + ";"
     types += "\n" + "\n".join(re.findall(r"(?m)^#define BLE_MODE_\w+\s+\d+.*$", header))
     # The disconnect owner API exists once bledisconnect targets a connection id.
@@ -164,8 +164,8 @@ def generated(component: Path, baseline: bool) -> str:
     # reader that takes the lock itself.
     if "static const char* bleStateTextLocked(" in owner:
         definitions.append(extract_block(owner, "static const char* bleStateTextLocked("))
-    definitions.append(extract_block(owner, "const char* getBLEStateString("))
-    # blestatus/bleread and buildBLEInfoJson render one guarded snapshot.
+    definitions.append(extract_block(owner, "const char* getBleStateString("))
+    # blestatus/bleread and buildBleInfoJson render one guarded snapshot.
     if "struct BleStatusSnapshot" in owner:
         definitions += [extract_block(owner, "struct BleStatusSnapshot") + ";",
                         extract_block(owner, "static bool bleCaptureStatusSnapshot(")]
@@ -175,9 +175,9 @@ def generated(component: Path, baseline: bool) -> str:
         definitions.append(extract_block(owner, "class CmdRequestCallbacks") + ";")
         # Advertising re-arms below the maximum through one BTC-safe helper.
         definitions += [extract_block(owner, "static bool bleAdvertiseIfRoomLocked() "),
-                        extract_block(owner, "bool startBLEAdvertising("),
-                        extract_block(owner, "void stopBLEAdvertising(")]
-        definitions.append(extract_block(owner, "bool buildBLEInfoJson("))
+                        extract_block(owner, "bool startBleAdvertising("),
+                        extract_block(owner, "void stopBleAdvertising(")]
+        definitions.append(extract_block(owner, "bool buildBleInfoJson("))
         handler = extract_block(web, "static esp_err_t handleBleStatus(")
         require("bleRunInternal" not in web and "executeCommand" not in web,
                 "status HTTP must not execute BLE or ring CLI commands")
@@ -185,7 +185,7 @@ def generated(component: Path, baseline: bool) -> str:
                 "ring status must fill response directly without parse fallback")
         require('bleRaw' not in handler and 'PSRAM_JSON_DOC(ble)' not in handler,
                 "BLE status must fill its response directly without parse fallback")
-        require(handler.index("WEB_AUTH_OR_RETURN") < handler.index("buildBLEInfoJson"),
+        require(handler.index("WEB_AUTH_OR_RETURN") < handler.index("buildBleInfoJson"),
                 "authentication must precede BLE owner access")
         # The client host's refusals the stream commands give (multi-line literals).
         definitions += re.findall(r"(?ms)^static const char kBlePhoneLink\w+\[\] =.*?;$", owner)
@@ -340,9 +340,9 @@ int main() {
   JsonDocument doc;
   JsonObject object = doc.to<JsonObject>();
   object["sentinel"] = 9;
-  assert(!buildBLEInfoJson(object));
+  assert(!buildBleInfoJson(object));
   assert(object.size() == 1 && object["sentinel"] == 9);
-  assert(!buildBLEInfoJson(JsonObject()));
+  assert(!buildBleInfoJson(JsonObject()));
 ''' + disconnect_stubs + '''}
 ''', [])
     check_web_kick(args.component / "WebPage_Bluetooth.h")

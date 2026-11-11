@@ -69,9 +69,9 @@ def check_sources(component: Path) -> None:
             'a connect re-arms advertising while another app fits')
     disconnect = bt[bt.index('void onDisconnect('):]
     disconnect = disconnect[:disconnect.index('BLE_DEBUGF')]
-    require('bleAdvertiseIfRoomLocked()' in disconnect and 'startBLEAdvertising()' not in disconnect,
+    require('bleAdvertiseIfRoomLocked()' in disconnect and 'startBleAdvertising()' not in disconnect,
             'a disconnect re-arms without the logging start path')
-    start = extract_block(bt, 'bool startBLEAdvertising() ')
+    start = extract_block(bt, 'bool startBleAdvertising() ')
     require('BLE_STATE_CONNECTED' not in start, 'a connected app no longer blocks advertising')
     view = extract_block(bt, 'BleConsoleView bleConsoleView() ')
     require('BleLifecycleGuard lifecycle(0);' in view and 'bleIsPeerLinkType' in view,

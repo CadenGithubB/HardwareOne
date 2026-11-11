@@ -220,20 +220,20 @@ static World w;
 
 // Bluetooth.h
 #define BLE_MAX_CONNECTIONS 4
-enum BLEConnectionState { BLE_STATE_IDLE, BLE_STATE_ADVERTISING, BLE_STATE_SCANNING,
+enum BleConnectionState { BLE_STATE_IDLE, BLE_STATE_ADVERTISING, BLE_STATE_SCANNING,
                           BLE_STATE_CONNECTING, BLE_STATE_CONNECTED, BLE_STATE_DISCONNECTING };
 enum { BLE_STREAM_SENSORS = 1, BLE_STREAM_SYSTEM = 2, BLE_STREAM_EVENTS = 4 };
-struct BLEConnection { bool active; uint32_t connectedSince; String deviceName; };
-struct BLESystemState {
+struct BleConnection { bool active; uint32_t connectedSince; String deviceName; };
+struct BleSystemState {
   bool initialized;
-  BLEConnectionState connectionState;
-  BLEConnection connections[BLE_MAX_CONNECTIONS];
+  BleConnectionState connectionState;
+  BleConnection connections[BLE_MAX_CONNECTIONS];
   uint8_t activeConnectionCount;
   uint32_t totalConnections, commandsReceived, responsesSent;
   uint8_t streamFlags;
   uint32_t sensorStreamInterval, systemStreamInterval;
 };
-static BLESystemState* gBLEState = nullptr;  // freed (nullptr) unless a test hosts the console
+static BleSystemState* gBleState = nullptr;  // freed (nullptr) unless a test hosts the console
 static bool isBleServerInitialized() { return w.server; }
 static bool bleServerUp() { return w.server; }
 static bool bleSubsystemActive() { return w.pipeActive || w.server || w.glassesClient; }
@@ -400,11 +400,11 @@ static bool anyRowStarts(const Rows& rows, const char* prefix) {
   return false;
 }
 
-static BLESystemState gState;
+static BleSystemState gState;
 
 static void reset() {
   w = World();
-  gBLEState = nullptr;
+  gBleState = nullptr;
   gSettings = Settings();
   gCommands.clear();
   gToast.clear();
@@ -425,7 +425,7 @@ static void hostConsole() {
   w.console.up = true;
   w.console.clients = 1;
   w.console.signedIn = true;
-  gState = BLESystemState{};
+  gState = BleSystemState{};
   gState.initialized = true;
   gState.connectionState = BLE_STATE_CONNECTED;
   gState.connections[0].active = true;
@@ -438,7 +438,7 @@ static void hostConsole() {
   gState.streamFlags = BLE_STREAM_SENSORS;
   gState.sensorStreamInterval = 1000;
   gState.systemStreamInterval = 5000;
-  gBLEState = &gState;
+  gBleState = &gState;
 }
 
 // hw1link::PipeStep values, as BLE_PhonePipe.cpp's phonePipeStep() reports them.
@@ -600,11 +600,11 @@ static void statusConsole() {
   EXPECT_ROWS(render(OLED_BLUETOOTH_STATUS), "Role: App console",
               ENABLE_BLE_PHONE_PIPE ? "Saved: Glasses+pipe" : "Saved: Glasses", "Console: hidden");
 
-  // Freed since the snapshot: the axes rows only, gBLEState never read.
+  // Freed since the snapshot: the axes rows only, gBleState never read.
   gSettings.bleMode = 0;
   w.console.clients = 1;
   w.console.signedIn = true;
-  gBLEState = nullptr;
+  gBleState = nullptr;
   if (ENABLE_BLE_PHONE_PIPE) {
     EXPECT_EXACT(render(OLED_BLUETOOTH_STATUS), "Role: App console", "Console: signed in",
                  "Clients: 1/4 Adv: off", "Pipe: off");
@@ -684,7 +684,7 @@ static void mainMenu() {
   render(OLED_BLUETOOTH);
   CHECK(menuIndex("Glasses") == (ENABLE_G2_GLASSES ? 3 : -1));
   CHECK(menuIndex("Phone pipe") == (ENABLE_BLE_PHONE_PIPE ? 3 + ENABLE_G2_GLASSES : -1));
-  // The console's rows come from bleConsoleView(): gBLEState stays freed.
+  // The console's rows come from bleConsoleView(): gBleState stays freed.
   w.server = true;
   w.console.up = true;
   w.console.advertising = true;
@@ -840,7 +840,7 @@ static void roleRows() {
   // The app console runs: its row is marked and stops it; the others switch.
   reset();
   hostConsole();
-  gBLEState = nullptr;  // the rows read bleLinkStatus(), never gBLEState
+  gBleState = nullptr;  // the rows read bleLinkStatus(), never gBleState
   CHECK(menuRow("App console") == "> App console *");
   EXPECT_ROLE_TAP("App console", "Stop app console?", "", false, "closeconsole");
 #if ENABLE_G2_GLASSES

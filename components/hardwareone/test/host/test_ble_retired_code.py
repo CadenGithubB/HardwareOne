@@ -2,7 +2,7 @@
 """Dead BLE code stays retired: BLE_IDF and the debugringbridge debug flag.
 
 BLE_IDF.cpp/.h (an unbuilt ESP-IDF-native BLE stack behind
-ENABLE_BLE_IDF_EXPERIMENTAL=0, with a second `struct BLEConnection`) are gone
+ENABLE_BLE_IDF_EXPERIMENTAL=0, with a second `struct BleConnection`) are gone
 from the component and its source list, and no board or deployment feature
 header still sets the flag nothing reads. The `debugringbridge` flag lost its
 last producer with the R1->G2 bridge; its X-macro row, command row, settings

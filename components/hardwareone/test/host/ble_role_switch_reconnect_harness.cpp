@@ -257,7 +257,7 @@ bool initBluetooth() {
   world.server = true;
   return true;
 }
-static bool startBLEAdvertising() { return true; }
+static bool startBleAdvertising() { return true; }
 struct PollPauseGuard {};
 bool initG2Client() {
   ++world.clientStarts;

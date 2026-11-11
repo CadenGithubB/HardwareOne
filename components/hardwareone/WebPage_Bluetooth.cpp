@@ -95,7 +95,7 @@ static esp_err_t handleBleStatus(httpd_req_t* req) {
   PSRAM_JSON_DOC(doc);
   doc["schema"] = 1;
   doc["mode"] = mode;
-  const bool available = buildBLEInfoJson(doc["ble"].to<JsonObject>());
+  const bool available = buildBleInfoJson(doc["ble"].to<JsonObject>());
   if (doc.overflowed()) {
     httpd_resp_set_status(req, "500 Internal Server Error");
     return httpd_resp_send(req, "{\"error\":\"Out of memory\"}", HTTPD_RESP_USE_STRLEN);

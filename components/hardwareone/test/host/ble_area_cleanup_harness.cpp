@@ -57,11 +57,11 @@ static void parseMac(const char* text, uint8_t out[6]) {
   for (int i = 0; i < 6; ++i) out[i] = (uint8_t)v[i];
 }
 
-static void expectType(const char* name, const char* mac, BLEDeviceType expected,
+static void expectType(const char* name, const char* mac, BleDeviceType expected,
                        const char* why) {
   uint8_t bytes[6];
   parseMac(mac, bytes);
-  const BLEDeviceType got = bleIdentifyDeviceByMAC(bytes);
+  const BleDeviceType got = bleIdentifyDeviceByMAC(bytes);
   if (got != expected) {
     std::printf("FAIL [%s]: %s typed %s, expected %s (%s)\n", name, mac,
                 bleDeviceTypeToString(got), bleDeviceTypeToString(expected), why);

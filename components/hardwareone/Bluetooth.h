@@ -31,7 +31,7 @@ inline bool bleModeIsAvailable(int mode) {
 enum class BleDisconnectResult : uint8_t { REQUESTED, NOT_FOUND, PEER_LINK, UNAVAILABLE, SESSION_ENDED };
 
 // The app console as stream slot 2 of the phone pipe (phone link v2,
-// BLE_PhonePipeConsole.h). Its session is a gBLEState row with its own id,
+// BLE_PhonePipeConsole.h). Its session is a gBleState row with its own id,
 // 0x8000 | (generation & 0x7FFF), never a Bluedroid connection id, so design
 // A's slot on the same link keeps its identity. The lifecycle lock and the
 // pipe's locks are never nested: the pipe side reads the row only through
@@ -90,13 +90,13 @@ inline constexpr uint16_t blePipeConsoleRowId(uint32_t generation) {
 // BLE SYSTEM STATE STRUCTURE
 // =============================================================================
 
-struct BLEConnection {
+struct BleConnection {
   bool active;
   uint16_t connId;                  // Connection ID from BLE stack
   uint32_t connectedSince;          // millis() when connected
   String deviceName;                // Name of connected device (if available)
   uint8_t deviceAddr[6];            // MAC address of connected device
-  BLEDeviceType deviceType;         // Device type (identified by MAC)
+  BleDeviceType deviceType;         // Device type (identified by MAC)
   uint32_t commandsReceived;        // Commands from this device
 
   // Per-connection CLI authentication
@@ -125,10 +125,10 @@ struct BLEConnection {
   String noticeUser;
 };
 
-struct BLESystemState {
+struct BleSystemState {
   bool initialized;
-  BLEConnectionState connectionState;
-  BLEConnection connections[BLE_MAX_CONNECTIONS];
+  BleConnectionState connectionState;
+  BleConnection connections[BLE_MAX_CONNECTIONS];
   uint8_t activeConnectionCount;
   
   // Statistics
@@ -137,7 +137,7 @@ struct BLESystemState {
   uint32_t responsesSent;
   
   // Streaming state
-  uint8_t streamFlags;              // Active streams (BLEStreamFlags)
+  uint8_t streamFlags;              // Active streams (BleStreamFlags)
   uint32_t sensorStreamInterval;    // ms between sensor updates
   uint32_t systemStreamInterval;    // ms between system updates
   uint32_t lastSensorStream;        // millis() of last sensor stream
@@ -161,7 +161,7 @@ struct BLESystemState {
   size_t deferredCmdReceivedLen;
 };
 
-extern BLESystemState* gBLEState;
+extern BleSystemState* gBleState;
 
 // =============================================================================
 // DEBUG FLAGS
@@ -187,12 +187,12 @@ bool deinitBluetooth();
 void bleSecurityBootNotice();  // boot-time "set a passphrase" nudge when BLE is unencrypted
 
 // Device type management
-const char* bleDeviceTypeToString(BLEDeviceType type);
-BLEDeviceType bleIdentifyDeviceByMAC(const uint8_t* mac);
+const char* bleDeviceTypeToString(BleDeviceType type);
+BleDeviceType bleIdentifyDeviceByMAC(const uint8_t* mac);
 
 // Advertising control
-bool startBLEAdvertising();
-void stopBLEAdvertising();
+bool startBleAdvertising();
+void stopBleAdvertising();
 // Connectable advertising is running (re-armed while another app fits).
 bool bleAdvertising();
 // The console server is up; lock-free, for status surfaces.
@@ -236,7 +236,7 @@ void bleConsoleHostTeardownBegin();
 void bleConsoleHostTeardownEnd(bool stopped);
 
 // Connection management
-bool isBLEConnected();
+bool isBleConnected();
 // Close one app client by its BLE connection id. Peer links (G2 temples, R1 ring)
 // are refused; the slot is cleared later by onDisconnect. A console on the phone
 // link (the G2 client host's slot, or the pipe's console row, whose id is its
@@ -251,8 +251,8 @@ int bleDisconnectAppClients();
 // encrypted frames) to every logged-in non-guest session; never characteristic-wide.
 // Returns true when at least one session accepted it. blocking=false makes each send
 // best-effort (used by the debug console mirror so it never stalls the debug task).
-bool sendBLEResponse(const char* data, size_t len, bool blocking = true);
-// Number of sessions sendBLEResponse would reach right now (the same
+bool sendBleResponse(const char* data, size_t len, bool blocking = true);
+// Number of sessions sendBleResponse would reach right now (the same
 // logged-in, non-guest eligibility). The debug console mirror buffers only
 // while this is non-zero; `outble` reports it.
 int bleMirrorRecipientCount();
@@ -261,11 +261,11 @@ int bleMirrorRecipientCount();
 // the command (or the subscription) was admitted. A stale result is dropped if
 // the peer disconnected, logged out, or connId was reused by a new session.
 // blocking=false makes the secure-channel send try-lock, exactly like the
-// sendBLEResponse console-mirror path: a best-effort producer (the notification
+// sendBleResponse console-mirror path: a best-effort producer (the notification
 // sink, called from the main loop) must never stall behind a paced multi-frame
 // command result that currently holds the tx mutex. Command results keep the
 // default and must not drop.
-bool sendBLEResponseToSession(uint16_t connId,
+bool sendBleResponseToSession(uint16_t connId,
                               TransportSessionEpoch expectedEpoch,
                               const char* data, size_t len, bool blocking = true);
 
@@ -293,7 +293,7 @@ bool bleSessionConfidential(uint16_t connId, TransportSessionEpoch epoch);
 bool bleSendBinaryToSession(uint16_t connId, TransportSessionEpoch epoch,
                             const uint8_t* data, size_t len);
 #if ENABLE_BLE_PHONE_PIPE
-// Holder bit for gBLEState: the pipe takes it at start (before its owner lock)
+// Holder bit for gBleState: the pipe takes it at start (before its owner lock)
 // and gives it back at stop or host teardown. The state is freed when no
 // holder (server, client-host console, pipe) is left.
 bool blePipeConsoleStateAcquire();
@@ -344,7 +344,7 @@ void bleAuthPolicyChanged();
 // Data streaming pipeline API
 bool blePushSensorData(const char* jsonData, size_t len);
 bool blePushSystemStatus(const char* jsonData, size_t len);
-bool blePushEvent(BLEEventType eventType, const char* message, const char* details = nullptr);
+bool blePushEvent(BleEventType eventType, const char* message, const char* details = nullptr);
 
 // Stream control
 void bleEnableStream(uint8_t streamFlags);
@@ -393,12 +393,12 @@ bool bleStackLifecycleFaulted();
 // Main-loop recovery after bounded phone retirement fails; never from a BLE callback.
 void bleRecoverStuckPhone();
 void bleStackSetLifecycleFault(bool faulted);
-const char* getBLEStateString();
+const char* getBleStateString();
 // Shared bleinfo schema for CLI and web. Copies live connection fields into
 // caller-owned JSON under the lifecycle lock; settings retain their existing
 // read contract. False means unavailable: discard the partial object. Callers
 // also check their document's overflowed() before serializing.
-bool buildBLEInfoJson(JsonObject out);
+bool buildBleInfoJson(JsonObject out);
 // Recent BLE message history, newest first (used by the OLED status screen in
 // OLED_Mode_Bluetooth.cpp). Fills out[] with up to maxLines entries; returns count.
 int bleGetRecentMessages(const char* out[], int maxLines);
@@ -447,8 +447,8 @@ extern const size_t bluetoothSettingsCount;
 inline bool initBluetooth() { return false; }
 inline bool deinitBluetooth() { return true; }
 inline void bleSecurityBootNotice() {}
-inline bool startBLEAdvertising() { return false; }
-inline void stopBLEAdvertising() {}
+inline bool startBleAdvertising() { return false; }
+inline void stopBleAdvertising() {}
 inline bool bleAdvertising() { return false; }
 inline bool bleServerUp() { return false; }
 struct BleConsoleView {
@@ -462,12 +462,12 @@ inline hw1console::Mode bleConsoleMode() { return hw1console::Mode::Off; }
 inline bool bleConsoleRegisterOnClientHost() { return false; }
 inline void bleConsoleHostTeardownBegin() {}
 inline void bleConsoleHostTeardownEnd(bool) {}
-inline bool isBLEConnected() { return false; }
+inline bool isBleConnected() { return false; }
 inline BleDisconnectResult bleDisconnectConnection(uint16_t) { return BleDisconnectResult::UNAVAILABLE; }
 inline int bleDisconnectAppClients() { return 0; }
-inline bool sendBLEResponse(const char*, size_t, bool = true) { return false; }
+inline bool sendBleResponse(const char*, size_t, bool = true) { return false; }
 inline int bleMirrorRecipientCount() { return 0; }
-inline bool sendBLEResponseToSession(uint16_t, TransportSessionEpoch,
+inline bool sendBleResponseToSession(uint16_t, TransportSessionEpoch,
                                      const char*, size_t, bool = true) { return false; }
 inline void bleCommandOutputLine(const char*, size_t) {}
 inline bool blePushNotification(uint16_t, TransportSessionEpoch, const char*,
@@ -508,8 +508,8 @@ inline BleRoleTransition bleRoleTransitionState() { return BleRoleTransition::ID
 inline bool bleRoleTransitionHeldByCurrentTask() { return false; }
 inline bool bleStackLifecycleFaulted() { return false; }
 inline void bleStackSetLifecycleFault(bool) {}
-inline const char* getBLEStateString() { return "disabled"; }
-inline bool buildBLEInfoJson(JsonObject) { return false; }
+inline const char* getBleStateString() { return "disabled"; }
+inline bool buildBleInfoJson(JsonObject) { return false; }
 inline const char* getBleModeString() { return "disabled"; }
 inline bool bleSubsystemActive() { return false; }
 inline const char* bleSubsystemStateString() { return "disabled"; }

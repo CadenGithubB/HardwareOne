@@ -137,7 +137,7 @@ static bool isG2ClientInitialized() { return clientUp; }
 static bool bleSubsystemActive() { return serverUp || clientUp || linkIn.pipeActive; }
 static const char* bleSubsystemStateString() { return "running"; }
 static bool isG2Connected() { return clientUp; }
-static bool isBLEConnected() { return phoneConnected; }  // the Disconnect row's no-op check
+static bool isBleConnected() { return phoneConnected; }  // the Disconnect row's no-op check
 static bool blePeerAutoReconnectEnabled(int peer) { return peerAutoReconnect[peer]; }
 static bool g2RingIsConnected() { return ringUp; }
 static bool bleCentralRingShouldYield() { return false; }  // phone pipe off here
@@ -606,7 +606,7 @@ static void bluetooth_rows_unchanged_state() {
   CHECK(gNetSub == NET_SUB_BLUETOOTH_R1 && submits == 0);
 
   // Server role running, then stopped; client role stopped. The Console row
-  // reads the app console's own words (hw1link::consoleText), never gBLEState:
+  // reads the app console's own words (hw1link::consoleText), never gBleState:
   // advertising with no app yet reads "waiting".
   clientUp = false;
   serverUp = true;
@@ -626,7 +626,7 @@ static void bluetooth_rows_unchanged_state() {
   linkIn.console.signedIn = true;
   showBluetoothMenu();
   CHECK(std::strcmp(shownRows[3], "Console: signed in") == 0);
-  // A stray gBLEState "connected" with no app client never shows as one.
+  // A stray gBleState "connected" with no app client never shows as one.
   linkIn.console = BleConsoleView{};
   linkIn.console.up = true;
   phoneConnected = true;

@@ -40,14 +40,14 @@ STUBS = HERE / 'ble_sc_stubs'
 
 # (slot, marker, required). Markers start at the return type, so the same text
 # matches a static definition in an older tree; function() skips the forward
-# declarations of processIncomingBLECommand and bleRawNotifyToSession.
+# declarations of processIncomingBleCommand and bleRawNotifyToSession.
 BLOCKS = [
     ('FENCE_STRUCT', 'struct BleSessionFence', True),
     ('FENCE_LIVE', 'static bool bleSessionFenceLive(', False),  # pre-fix sources only
     ('SECURE_ONLY', 'static bool bleSecureChannelOnly(', False),  # the client host's rule
     ('TX_GATE', 'class BleConsoleTxGate', False),  # the client host's central TX gate
     ('RAW_SESSION', 'bool bleRawNotifyToSession(', True),
-    ('SEND', 'bool sendBLEResponseToSession(', True),
+    ('SEND', 'bool sendBleResponseToSession(', True),
     ('LOGIN_JOB', 'struct BleLoginAsyncJob', True),
     ('REPLY_CTX', 'struct BleCommandReplyContext', True),
     ('PIPE_ROW_ID', 'static bool bleIsPipeRowId(', False),  # the phone link's console row
@@ -59,7 +59,7 @@ BLOCKS = [
     ('NO_CHANNEL', 'static bool bleConsoleClaimNoChannelReject(', False),  # the client host's reject
     ('DEFERRED', 'static void bleScDeferredInbound(', True),
     ('PLAIN_DEFERRED', 'static void blePlaintextDeferredInbound(', False),  # fixed sources only
-    ('INGRESS', 'static void processIncomingBLECommand(', True),
+    ('INGRESS', 'static void processIncomingBleCommand(', True),
 ]
 
 # Commands that set the Bluetooth authentication and encryption posture.

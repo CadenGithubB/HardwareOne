@@ -65,7 +65,7 @@ def generated(component: Path) -> str:
     definitions += optional(owner, "static bool bleSavedMacMatches(")
     definitions += optional(owner, "static void bleUpdateMACCache(")
     definitions += [extract_block(owner, "const char* bleDeviceTypeToString("),
-                    extract_block(owner, "BLEDeviceType bleIdentifyDeviceByMAC(")]
+                    extract_block(owner, "BleDeviceType bleIdentifyDeviceByMAC(")]
 
     harness = (HERE / "ble_area_cleanup_harness.cpp").read_text()
     for marker, body in (("// INSERT_TYPES", types), ("// INSERT_PRODUCTION", definitions)):
@@ -133,7 +133,7 @@ DISABLED_CHECK = '''#define ARDUINOJSON_ENABLE_ARDUINO_STRING 1
 #include "Bluetooth.h"
 void webBatchTestStringAppend() {}
 int main() {
-  return !isBLEConnected() && !bleSubsystemActive() ? 0 : 1;
+  return !isBleConnected() && !bleSubsystemActive() ? 0 : 1;
 }
 '''
 

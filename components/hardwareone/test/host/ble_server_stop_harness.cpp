@@ -401,15 +401,15 @@ static BLECharacteristic* pFirmwareChar = nullptr;
 // own are not under test here).
 static struct HostCharCallbacks {} sCmdRequestCallbacks, sCmdStatusCallbacks;
 
-BLESystemState* gBLEState = nullptr;
+BleSystemState* gBleState = nullptr;
 template <typename T>
 static void ps_delete(T* object) {
   if (!object) return;
   object->~T();
   std::free(object);
 }
-static int sBLEToggleCount = 0;
-static size_t sBLEHeapBeforeInit = 0;
+static int sBleToggleCount = 0;
+static size_t sBleHeapBeforeInit = 0;
 static struct HostEsp { size_t getFreeHeap() const { return 200000; } } ESP;
 enum HostSystemEvent { SYSEVT_BLE_OFF = 1, SYSEVT_BLE_CONNECTED, SYSEVT_BLE_DISCONNECTED };
 static void systemEventPost(HostSystemEvent event, const char* = nullptr, const char* = nullptr) {
@@ -430,12 +430,12 @@ static TransportSessionEpoch transportSessionOpen(HostCommandSource) {
   ++boundary.sessionOpens;
   return 1000 + boundary.sessionOpens;
 }
-static BLEDeviceType bleIdentifyDeviceByMAC(const uint8_t*) { return BLE_DEVICE_UNKNOWN; }
+static BleDeviceType bleIdentifyDeviceByMAC(const uint8_t*) { return BLE_DEVICE_UNKNOWN; }
 
 // The console view (Bluetooth.cpp bleConsoleView) for bleLinkStatus().
 static BleConsoleView bleConsoleView() {
   BleConsoleView view;
-  view.up = gBLEState && gBLEState->initialized;
+  view.up = gBleState && gBleState->initialized;
   return view;
 }
 
@@ -445,7 +445,7 @@ static BleConsoleView bleConsoleView() {
 static void snapshotConsoleAtStop() {
   auto& at = boundary.atStop;
   at.seen = true;
-  at.stateAlive = gBLEState != nullptr;
+  at.stateAlive = gBleState != nullptr;
   at.admissionOpen = sBleConsoleAdmissionOpen.load();
   at.pointersNull = !pServer && !pCommandService && !pCmdRequestChar && !pCmdResponseChar &&
                     !pCmdStatusChar;
@@ -475,9 +475,9 @@ static bool deinitReported(void (*stop)()) { stop(); return true; }
 static bool deinitReported(bool (*stop)()) { return stop(); }
 
 static void dropServerState() {
-  if (gBLEState) {
-    ps_delete(gBLEState);
-    gBLEState = nullptr;
+  if (gBleState) {
+    ps_delete(gBleState);
+    gBleState = nullptr;
   }
   sBleStateHolders = 0;
   sBlePipeRowSlot = -1;
@@ -523,17 +523,17 @@ static void resetWorld(const char* name) {
 
 // A running server: advertising, two app clients with live session epochs.
 static void startServer() {
-  void* storage = std::malloc(sizeof(BLESystemState));
+  void* storage = std::malloc(sizeof(BleSystemState));
   if (!storage) std::abort();
-  gBLEState = new (storage) BLESystemState{};
+  gBleState = new (storage) BleSystemState{};
   sBleStateHolders = kBleHoldServer;  // as initBluetooth takes it
-  gBLEState->initialized = true;
-  gBLEState->connectionState = BLE_STATE_ADVERTISING;
-  gBLEState->connections[0].active = true;
-  gBLEState->connections[0].connId = 7;
-  gBLEState->connections[1].active = true;
-  gBLEState->connections[1].connId = 9;
-  gBLEState->activeConnectionCount = 2;
+  gBleState->initialized = true;
+  gBleState->connectionState = BLE_STATE_ADVERTISING;
+  gBleState->connections[0].active = true;
+  gBleState->connections[0].connId = 7;
+  gBleState->connections[1].active = true;
+  gBleState->connections[1].connId = 9;
+  gBleState->activeConnectionCount = 2;
   sBleSessionEpoch[0].store(41);
   sBleSessionEpoch[1].store(42);
   sBleGattsIf.store(3);
@@ -583,7 +583,7 @@ static void expectReleased() {
 }
 
 static void expectServerStoppedCleanly() {
-  EXPECT(gBLEState == nullptr, "server state was not freed");
+  EXPECT(gBleState == nullptr, "server state was not freed");
   EXPECT(bleConsoleMode() == hw1console::Mode::Off && !bleServerUp(),
          "a stopped server still reports the console mode or the server as up");
   EXPECT(pServer == nullptr && pAdvertising == nullptr && pCmdResponseChar == nullptr,
@@ -663,12 +663,12 @@ static void expectCommandServiceOnly() {
 static void expectRegistered() {
   EXPECT(bleConsoleMode() == hw1console::Mode::ClientRegistered && sBleConsoleAdmissionOpen.load(),
          "registration did not publish ClientRegistered with admission open");
-  EXPECT(gBLEState && !gBLEState->initialized && !isBleServerInitialized() && !bleServerUp() &&
+  EXPECT(gBleState && !gBleState->initialized && !isBleServerInitialized() && !bleServerUp() &&
          !bleConsoleView().up,
          "the client host claimed the server role (initialized means server mode owns the host)");
-  EXPECT(gBLEState && gBLEState->activeConnectionCount == 0 &&
-         gBLEState->connectionState == BLE_STATE_IDLE &&
-         gBLEState->sensorStreamInterval == 1000 && gBLEState->systemStreamInterval == 5000,
+  EXPECT(gBleState && gBleState->activeConnectionCount == 0 &&
+         gBleState->connectionState == BLE_STATE_IDLE &&
+         gBleState->sensorStreamInterval == 1000 && gBleState->systemStreamInterval == 5000,
          "the console state is not the shared fresh state");
   EXPECT(sBleGattsIf.load() == 4 && BLEDevice::gattsHandler == bleGattsEventTap,
          "the GATT interface tap is not installed with the registered interface");
@@ -686,7 +686,7 @@ static void expectRegistered() {
 
 // Nothing created, nothing left behind.
 static void expectNotRegistered(const char* why) {
-  EXPECT(!gBLEState && bleConsoleMode() == hw1console::Mode::Off &&
+  EXPECT(!gBleState && bleConsoleMode() == hw1console::Mode::Off &&
          !sBleConsoleAdmissionOpen.load() && !pServer && !pCommandService && !pCmdRequestChar &&
          !pCmdResponseChar && !pCmdStatusChar,
          "a refused registration left console state or pointers behind");
@@ -736,9 +736,9 @@ static void clientHostCases() {
     deliverEveryLink(true);
     deliverEveryLink(false);
     bool anySlot = false;
-    for (const auto& c : gBLEState->connections) anySlot = anySlot || c.active;
-    EXPECT(!anySlot && gBLEState->activeConnectionCount == 0 &&
-           gBLEState->totalConnections == 0 && gBLEState->connectionState == BLE_STATE_IDLE,
+    for (const auto& c : gBleState->connections) anySlot = anySlot || c.active;
+    EXPECT(!anySlot && gBleState->activeConnectionCount == 0 &&
+           gBleState->totalConnections == 0 && gBleState->connectionState == BLE_STATE_IDLE,
            "a temple, ring or phone link got a console slot, a count or a state");
     EXPECT(boundary.connectedEvents == 0 && boundary.disconnectedEvents == 0 &&
            boundary.sessionOpens == 0,
@@ -755,27 +755,27 @@ static void clientHostCases() {
     deliverEveryLink(true);
     gPipeRecord = PhonePipeLinkRecord{5, 3};
     gPipeRecordValid = true;
-    EXPECT(gBLEState->activeConnectionCount == 0 && boundary.sessionOpens == 0 &&
+    EXPECT(gBleState->activeConnectionCount == 0 && boundary.sessionOpens == 0 &&
            boundary.connectedEvents == 0, "a link event admitted a link before reconcile");
     {
       BleLifecycleGuard held;
       bleConsoleReconcileLocked();
     }
-    EXPECT(gBLEState->activeConnectionCount == 0 && boundary.connectedEvents == 0 &&
-           gBLEState->connectionState == BLE_STATE_IDLE,
+    EXPECT(gBleState->activeConnectionCount == 0 && boundary.connectedEvents == 0 &&
+           gBleState->connectionState == BLE_STATE_IDLE,
            "the slot counted as an app before the app joined it");
     {
       BleLifecycleGuard held;  // the app's first write (the write path's join)
       bleConsoleApplyLocked(hw1console::join(sBleConsoleAttach, 3));
     }
     int phoneSlots = 0, otherSlots = 0;
-    for (const auto& c : gBLEState->connections) {
+    for (const auto& c : gBleState->connections) {
       if (!c.active) continue;
       if (c.connId == 3 && c.deviceType == BLE_DEVICE_PHONE) ++phoneSlots;
       else ++otherSlots;
     }
-    EXPECT(phoneSlots == 1 && otherSlots == 0 && gBLEState->activeConnectionCount == 1 &&
-           gBLEState->connectionState == BLE_STATE_CONNECTED && bleSessionEpochForConnection(3) != 0,
+    EXPECT(phoneSlots == 1 && otherSlots == 0 && gBleState->activeConnectionCount == 1 &&
+           gBleState->connectionState == BLE_STATE_CONNECTED && bleSessionEpochForConnection(3) != 0,
            "the reconcile did not make exactly the pipe link's slot with a session");
     EXPECT(boundary.connectedEvents == 1 && boundary.sessionOpens == 1 && boundary.advStops == 0 &&
            boundary.advStarts == 0 && boundary.advGets == 0,
@@ -787,7 +787,7 @@ static void clientHostCases() {
       gServer.callbacks->onDisconnect(&gServer, &param);
     }
     EXPECT(bleSessionEpochForConnection(3) == phoneEpoch && boundary.disconnectedEvents == 0 &&
-           gBLEState->activeConnectionCount == 1,
+           gBleState->activeConnectionCount == 1,
            "a temple or ring drop touched the phone-link slot");
     {
       esp_ble_gatts_cb_param_t param{};
@@ -795,7 +795,7 @@ static void clientHostCases() {
       gServer.callbacks->onDisconnect(&gServer, &param);
     }
     EXPECT(bleSessionEpochForConnection(3) == 0 && boundary.disconnectedEvents == 1 &&
-           gBLEState->activeConnectionCount == 0 && gBLEState->connectionState == BLE_STATE_IDLE &&
+           gBleState->activeConnectionCount == 0 && gBleState->connectionState == BLE_STATE_IDLE &&
            boundary.advStarts == 0,
            "the phone link's drop did not end its slot (or touched advertising)");
     // The pipe's record is still set (it has not noticed): no slot comes back.
@@ -837,7 +837,7 @@ static void clientHostCases() {
            "the teardown did not end the phone-link slot and close every live epoch");
     EXPECT(!sBleConsoleAttach.slot.present && !sBleConsoleAttach.closed,
            "the teardown left the attach state for the next host");
-    EXPECT(!gBLEState && bleConsoleMode() == hw1console::Mode::Off &&
+    EXPECT(!gBleState && bleConsoleMode() == hw1console::Mode::Off &&
            !sBleConsoleAdmissionOpen.load(),
            "a terminal stop did not free the console state and turn the mode Off");
     expectReleased();
@@ -851,7 +851,7 @@ static void clientHostCases() {
   boundary.halStops = false;
   EXPECT(!bluetoothHalDeinit().success, "test setup: failed stop");
   expectClosedAtStop();
-  EXPECT(gBLEState && bleConsoleMode() == hw1console::Mode::ClientRegistered &&
+  EXPECT(gBleState && bleConsoleMode() == hw1console::Mode::ClientRegistered &&
          !sBleConsoleAdmissionOpen.load() && !pCmdResponseChar && !pServer,
          "an incomplete stop freed the state (Arduino keeps its callback targets) or reopened it");
   EXPECT(bleRoleTransitionBegin(BleRoleTransition::RECOVERING), "test setup: RECOVERING claim");
@@ -863,7 +863,7 @@ static void clientHostCases() {
   boundary.atStop = {};
   EXPECT(bluetoothHalDeinit().success, "test setup: retried stop");
   expectClosedAtStop();
-  EXPECT(!gBLEState && bleConsoleMode() == hw1console::Mode::Off,
+  EXPECT(!gBleState && bleConsoleMode() == hw1console::Mode::Off,
          "the retried terminal stop did not free the kept state");
   EXPECT(bleRoleTransitionBegin(BleRoleTransition::G2_START), "test setup: G2_START claim");
   boundary.messages.clear();
@@ -871,7 +871,7 @@ static void clientHostCases() {
          bleConsoleMode() == hw1console::Mode::ClientRegistered,
          "a fresh host after the completed stop could not register");
   endClaim();
-  EXPECT(bluetoothHalDeinit().success && !gBLEState, "test cleanup: stop");
+  EXPECT(bluetoothHalDeinit().success && !gBleState, "test cleanup: stop");
   expectReleased();
 
   // G1: the GATT registration failed, or its event never reached the tap.
@@ -884,7 +884,7 @@ static void clientHostCases() {
     expectNotRegistered("GATT registration status");
     EXPECT(hostNowMs - 1000 <= 250, "the registration wait is not bounded");
     endClaim();
-    EXPECT(bluetoothHalDeinit().success && !gBLEState, "a later host stop is unaffected");
+    EXPECT(bluetoothHalDeinit().success && !gBleState, "a later host stop is unaffected");
     expectReleased();
   }
 
@@ -901,7 +901,7 @@ static void clientHostCases() {
          BLEDevice::reserved[1] == 7 && BLEDevice::m_appId == 8,
          "the server registered an unmasked id or a client's reserved one");
   endClaim();
-  EXPECT(bluetoothHalDeinit().success && !gBLEState, "test cleanup: stop");
+  EXPECT(bluetoothHalDeinit().success && !gBleState, "test cleanup: stop");
   expectReleased();
 
   // P: each precondition refuses before anything is created.
@@ -958,18 +958,18 @@ static void clientHostCases() {
   // slot, a session, the event and re-armed advertising; its disconnect ends it.
   resetWorld("S0 server-mode connect and disconnect");
   startServer();
-  gBLEState->connectionState = BLE_STATE_CONNECTED;
+  gBleState->connectionState = BLE_STATE_CONNECTED;
   {
     BLEServerCallbacks* callbacks = &sServerCallbacks;
     esp_ble_gatts_cb_param_t param{};
     param.connect.conn_id = 5;
     param.disconnect.conn_id = 5;
     callbacks->onConnect(&gServer, &param);
-    EXPECT(gBLEState->activeConnectionCount == 3 && bleSessionEpochForConnection(5) != 0 &&
+    EXPECT(gBleState->activeConnectionCount == 3 && bleSessionEpochForConnection(5) != 0 &&
            boundary.connectedEvents == 1 && boundary.advStarts == 1,
            "server mode no longer admits an app connect (slot, session, event, advertising)");
     callbacks->onDisconnect(&gServer, &param);
-    EXPECT(gBLEState->activeConnectionCount == 2 && bleSessionEpochForConnection(5) == 0 &&
+    EXPECT(gBleState->activeConnectionCount == 2 && bleSessionEpochForConnection(5) == 0 &&
            boundary.disconnectedEvents == 1 && boundary.sessionCloses == 1 &&
            bleSessionEpochMatches(7, 41) && bleSessionEpochMatches(9, 42),
            "server mode no longer ends an app link on its disconnect");
@@ -978,7 +978,7 @@ static void clientHostCases() {
   // H: the hooks leave every other host alone: nothing registered, or the
   // server role (deinitBluetooth owns that state).
   resetWorld("H1 hooks with no console");
-  EXPECT(bluetoothHalDeinit().success && !gBLEState &&
+  EXPECT(bluetoothHalDeinit().success && !gBleState &&
          bleConsoleMode() == hw1console::Mode::Off && boundary.sessionCloses == 0,
          "the hooks acted on a host with no console");
   resetWorld("H2 hooks under the server role");
@@ -994,15 +994,15 @@ static void clientHostCases() {
   freshClientHost("D1 deinitBluetooth on the client host");
   EXPECT(bleConsoleRegisterOnClientHost(), "test setup: registration");
   endClaim();
-  EXPECT(deinitBluetooth() && boundary.halDeinits == 0 && gBLEState &&
+  EXPECT(deinitBluetooth() && boundary.halDeinits == 0 && gBleState &&
          bleConsoleMode() == hw1console::Mode::ClientRegistered && pCmdResponseChar,
          "deinitBluetooth tore down the client host or its console");
-  EXPECT(bluetoothHalDeinit().success && !gBLEState, "test cleanup: stop");
+  EXPECT(bluetoothHalDeinit().success && !gBleState, "test cleanup: stop");
   expectReleased();
 }
 
 #if ENABLE_BLE_PHONE_PIPE
-// The phone link's console row (phone link v2) and gBLEState's holders: the
+// The phone link's console row (phone link v2) and gBleState's holders: the
 // server role, the client host's command service and the pipe. The state is
 // freed when the last holder leaves. A host teardown ends the pipe's row and
 // closes every epoch before the host stops, with no CLOSE (the link goes with
@@ -1018,7 +1018,7 @@ static void pipeHolderCases() {
   // role); a bound row is a connected app; the host teardown ends it before
   // the stop; the pipe's release frees the state.
   freshClientHost("H1 phone-client hold, host teardown, release");
-  EXPECT(blePipeConsoleStateAcquire() && gBLEState && !gBLEState->initialized &&
+  EXPECT(blePipeConsoleStateAcquire() && gBleState && !gBleState->initialized &&
          !isBleServerInitialized() && bleConsoleMode() == hw1console::Mode::Off,
          "the pipe's hold did not allocate a state outside the server role");
   EXPECT(blePipeConsoleBind(5, 9, 3), "the console row did not bind");
@@ -1026,8 +1026,8 @@ static void pipeHolderCases() {
   EXPECT(id.bound && id.generation == 5 && id.streamId == 9 &&
          id.rowConnId == blePipeConsoleRowId(5) && id.epoch != 0 && !id.authed,
          "the snapshot does not name the fresh signed-out row");
-  EXPECT(gBLEState->activeConnectionCount == 1 && gBLEState->connectionState == BLE_STATE_CONNECTED &&
-         boundary.connectedEvents == 1 && gBLEState->deferredConnectPending,
+  EXPECT(gBleState->activeConnectionCount == 1 && gBleState->connectionState == BLE_STATE_CONNECTED &&
+         boundary.connectedEvents == 1 && gBleState->deferredConnectPending,
          "a bound row is not a connected app");
   EXPECT(bleSessionEpochMatches(blePipeConsoleRowId(5), id.epoch) &&
          findConnectionSlotByConnIdLocked(3) < 0,
@@ -1037,13 +1037,13 @@ static void pipeHolderCases() {
   EXPECT(boundary.atStop.seen && boundary.atStop.stateAlive && boundary.atStop.epochsClosed,
          "the console row's session outlived the start of the host stop");
   id = pipeIdentity();
-  EXPECT(!id.bound && gBLEState && gBLEState->activeConnectionCount == 0 &&
-         gBLEState->connectionState == BLE_STATE_IDLE && boundary.disconnectedEvents == 1 &&
+  EXPECT(!id.bound && gBleState && gBleState->activeConnectionCount == 0 &&
+         gBleState->connectionState == BLE_STATE_IDLE && boundary.disconnectedEvents == 1 &&
          boundary.sessionCloses == boundary.sessionOpens,
          "the host teardown did not end the console row");
   EXPECT(pipeHostCloses().empty(), "a host teardown asked the pipe for a CLOSE");
   blePipeConsoleStateRelease();
-  EXPECT(!gBLEState && sBleStateHolders == 0, "the pipe's release did not free the state");
+  EXPECT(!gBleState && sBleStateHolders == 0, "the pipe's release did not free the state");
   expectReleased();
 
   // H2: design A registers on a host whose pipe holds the state: the command
@@ -1051,8 +1051,8 @@ static void pipeHolderCases() {
   // whose release frees it.
   freshClientHost("H2 registration joins the pipe's state");
   EXPECT(blePipeConsoleStateAcquire(), "test setup: the pipe holds the state");
-  BLESystemState* held = gBLEState;
-  EXPECT(bleConsoleRegisterOnClientHost() && gBLEState == held &&
+  BleSystemState* held = gBleState;
+  EXPECT(bleConsoleRegisterOnClientHost() && gBleState == held &&
          sBleStateHolders == (kBleHoldPipe | kBleHoldClientConsole),
          "registration refused, or allocated a second state beside the pipe's");
   expectRegistered();
@@ -1060,11 +1060,11 @@ static void pipeHolderCases() {
   endClaim();
   EXPECT(bluetoothHalDeinit().success, "test setup: host stop");
   expectClosedAtStop();
-  EXPECT(gBLEState == held && bleConsoleMode() == hw1console::Mode::Off && !pipeIdentity().bound &&
+  EXPECT(gBleState == held && bleConsoleMode() == hw1console::Mode::Off && !pipeIdentity().bound &&
          sBleStateHolders == kBleHoldPipe,
          "the client host's stop freed the pipe's state or kept its row");
   blePipeConsoleStateRelease();
-  EXPECT(!gBLEState, "the pipe's release did not free the state");
+  EXPECT(!gBleState, "the pipe's release did not free the state");
   expectReleased();
 
   // H3: the G2 order: registration first, then the pipe joins; the pipe stops
@@ -1072,15 +1072,15 @@ static void pipeHolderCases() {
   // host's terminal stop frees it.
   freshClientHost("H3 the pipe joins the command service's state");
   EXPECT(bleConsoleRegisterOnClientHost(), "test setup: registration");
-  BLESystemState* registered = gBLEState;
-  EXPECT(blePipeConsoleStateAcquire() && gBLEState == registered, "the pipe did not join the state");
+  BleSystemState* registered = gBleState;
+  EXPECT(blePipeConsoleStateAcquire() && gBleState == registered, "the pipe did not join the state");
   EXPECT(blePipeConsoleBind(7, 1, 3), "the console row did not bind");
   blePipeConsoleStateRelease();
-  EXPECT(gBLEState == registered && !pipeIdentity().bound &&
+  EXPECT(gBleState == registered && !pipeIdentity().bound &&
          boundary.sessionCloses == boundary.sessionOpens && sBleStateHolders == kBleHoldClientConsole,
          "the pipe's release kept its row or freed the command service's state");
   endClaim();
-  EXPECT(bluetoothHalDeinit().success && !gBLEState, "the client host's stop did not free the state");
+  EXPECT(bluetoothHalDeinit().success && !gBleState, "the client host's stop did not free the state");
   expectReleased();
 
   // H4: the server role never shares its state with the pipe.
@@ -1098,10 +1098,10 @@ static void pipeHolderCases() {
   EXPECT(blePipeConsoleBind(8, 3, 2), "the console row did not bind");
   const TransportSessionEpoch first = pipeIdentity().epoch;
   EXPECT(blePipeConsoleBind(8, 3, 2) && pipeIdentity().epoch == first &&
-         gBLEState->activeConnectionCount == 1,
+         gBleState->activeConnectionCount == 1,
          "binding the same stream again renewed its session");
   EXPECT(blePipeConsoleBind(8, 5, 2) && pipeIdentity().streamId == 5 && pipeIdentity().epoch != first &&
-         gBLEState->activeConnectionCount == 1 && boundary.sessionCloses == 1,
+         gBleState->activeConnectionCount == 1 && boundary.sessionCloses == 1,
          "a new stream's row did not replace the old one");
   blePipeConsoleEnd(8, 3);
   EXPECT(pipeIdentity().bound, "End for another stream ended the row");
@@ -1109,7 +1109,7 @@ static void pipeHolderCases() {
   EXPECT(pipeIdentity().bound, "End for another generation ended the row");
   blePipeConsoleEnd(8, 5);
   blePipeConsoleEnd(8, 5);
-  EXPECT(!pipeIdentity().bound && gBLEState->activeConnectionCount == 0 &&
+  EXPECT(!pipeIdentity().bound && gBleState->activeConnectionCount == 0 &&
          boundary.sessionCloses == boundary.sessionOpens && boundary.disconnectedEvents == 2,
          "End did not end the row exactly once");
   blePipeConsoleStateRelease();
@@ -1127,7 +1127,7 @@ static void pipeHolderCases() {
     if (cycle % 2) EXPECT(bluetoothHalDeinit().success, "a cycle's host stop failed");
     blePipeConsoleStateRelease();
   }
-  EXPECT(!gBLEState && sBleStateHolders == 0 && boundary.sessionOpens == 24 &&
+  EXPECT(!gBleState && sBleStateHolders == 0 && boundary.sessionOpens == 24 &&
          boundary.sessionCloses == boundary.sessionOpens,
          "start/stop cycles leaked a transport session or the state");
   expectReleased();
@@ -1148,7 +1148,7 @@ int main() {
   EXPECT(sessionsLive(),
          "a deferred stop closed the connected clients' sessions (their commands are dropped "
          "until they reconnect)");
-  EXPECT(gBLEState && gBLEState->connectionState == BLE_STATE_ADVERTISING &&
+  EXPECT(gBleState && gBleState->connectionState == BLE_STATE_ADVERTISING &&
          boundary.advStops == 0, "a deferred stop stopped advertising");
   EXPECT(boundary.halDeinits == 0, "host torn down although the Ring owner did not quiesce");
   EXPECT(said("Ring owner did not quiesce"), "deferred reason was not broadcast");

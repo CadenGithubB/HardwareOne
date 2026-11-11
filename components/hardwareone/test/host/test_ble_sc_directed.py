@@ -41,9 +41,9 @@ BLOCKS = [
     ('SECURE_ONLY', 'static bool bleSecureChannelOnly(', False),  # the client host's rule
     ('TX_GATE', 'class BleConsoleTxGate', False),  # the client host's central TX gate
     ('RAW_SESSION', 'bool bleRawNotifyToSession(', True),
-    ('SEND', 'bool sendBLEResponseToSession(', True),
+    ('SEND', 'bool sendBleResponseToSession(', True),
     ('MIRROR_COLLECT', 'static int bleCollectMirrorSessions(', False),  # console-mirror collector
-    ('MIRROR_SEND', 'bool sendBLEResponse(', True),
+    ('MIRROR_SEND', 'bool sendBleResponse(', True),
     ('DEFERRED_STRUCT', 'struct BleScDeferred', True),
     ('NO_CHANNEL', 'static bool bleConsoleClaimNoChannelReject(', False),  # the client host's reject
     ('DEFERRED', 'static void bleScDeferredInbound(', True),

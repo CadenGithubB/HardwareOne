@@ -903,7 +903,7 @@ static void showBluetoothMenu() {
            gSettings.bleAutoStart ? "ON" : "OFF");
   // The server layout's Console row is the app console in the shared words
   // (hw1link::consoleText: "waiting", "hidden", "signed out", "signed in"),
-  // read from the snapshot, never from gBLEState. It replaced "Conn: yes/no".
+  // read from the snapshot, never from gBleState. It replaced "Conn: yes/no".
   // In the client layout the console rides the phone pipe's link, so its row
   // is under Phone >>. The lens offers no switch to server mode (openconsole):
   // starting it would drop the glasses the lens runs on.
@@ -2234,7 +2234,7 @@ static void handleBluetoothTap(uint32_t idx) {
     }
 
     case BT_ROW_DISCONNECT: {  // Disconnect — routed via cmd_exec (`bledisconnect`).
-      if (!isBLEConnected()) {
+      if (!isBleConnected()) {
         DEBUG_G2F("[G2] Bluetooth: not connected, no-op");
         showBluetoothMenu();
         break;

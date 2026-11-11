@@ -4,7 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "System_User.h"  // TransportSessionEpoch
-bool isBLEConnected();
+bool isBleConnected();
 TransportSessionEpoch bleSessionEpochForConnection(uint16_t connId);
 bool bleSessionEpochMatches(uint16_t connId, TransportSessionEpoch epoch);
 bool bleDataDebugEnabled();

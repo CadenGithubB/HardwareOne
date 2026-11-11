@@ -103,7 +103,7 @@ struct Sent {
 static std::vector<Sent> gSent;
 static std::function<void()> gDuringSend;
 static unsigned gFullSends = 0;
-bool sendBLEResponseToSession(uint16_t connId, TransportSessionEpoch expectedEpoch,
+bool sendBleResponseToSession(uint16_t connId, TransportSessionEpoch expectedEpoch,
                               const char* data, size_t len, bool blocking = true) {
   const bool accepted = blocking || gFullSends == 0;
   if (!accepted) --gFullSends;
@@ -124,7 +124,7 @@ using portMUX_TYPE = int;
 #define portENTER_CRITICAL(mux) ((void)(mux))
 #define portEXIT_CRITICAL(mux) ((void)(mux))
 
-BLESystemState* gBLEState = nullptr;
+BleSystemState* gBleState = nullptr;
 
 // INSERT_PRODUCTION
 
@@ -147,11 +147,11 @@ constexpr uint32_t kMinute = 60 * kSecond;
 constexpr uint32_t kWindow = 15 * kMinute;  // sessionIdleBle = 15 (minutes)
 
 static void resetWorld(uint32_t startMs) {
-  if (gBLEState) {
-    gBLEState->~BLESystemState();
-    std::free(gBLEState);
+  if (gBleState) {
+    gBleState->~BleSystemState();
+    std::free(gBleState);
   }
-  gBLEState = bleNewState();
+  gBleState = bleNewState();
   for (auto& epoch : sBleSessionEpoch) epoch.store(0);
   gClockMs = startMs;
   gContender = nullptr;
@@ -165,7 +165,7 @@ static void resetWorld(uint32_t startMs) {
 }
 
 static int slotOf(uint16_t connId) { return findConnectionSlotByConnIdLocked(connId); }
-static const BLEConnection& conn(uint16_t connId) { return gBLEState->connections[slotOf(connId)]; }
+static const BleConnection& conn(uint16_t connId) { return gBleState->connections[slotOf(connId)]; }
 static TransportSessionEpoch epochOf(uint16_t connId) { return bleSessionEpochForConnection(connId); }
 
 // Login as the BLE login job binds it: the credential check passed elsewhere.
@@ -349,7 +349,7 @@ static uint16_t bindPipeRow(uint32_t generation, uint16_t stream) {
   const uint16_t row = blePipeConsoleRowId(generation);
   BleLifecycleGuard lifecycle;
   CHECK(bleConsoleMakeSlotLocked(row), "the console row's slot is made");
-  BLEConnection& c = gBLEState->connections[findConnectionSlotByConnIdLocked(row)];
+  BleConnection& c = gBleState->connections[findConnectionSlotByConnIdLocked(row)];
   c.pipeConsole = true;
   c.pipeGeneration = generation;
   c.pipeStream = stream;

@@ -1181,7 +1181,7 @@ void systemEventsNotifyTick() {
   EXT_RAM_BSS_ATTR static AppSinkSession sAppSinks[BLE_MAX_CONNECTIONS];
   int  appSinkCount    = 0;
   bool appSinksResolved = false;
-  const bool appLinkUp = isBLEConnected() && bleHasAuthenticatedSession();
+  const bool appLinkUp = isBleConnected() && bleHasAuthenticatedSession();
 #endif
   // Diagnostics: timing starts lazily on the first non-empty fetch, so idle
   // main-loop laps (the overwhelmingly common case) pay nothing.

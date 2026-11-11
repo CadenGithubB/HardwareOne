@@ -103,8 +103,8 @@ def generated(component: Path) -> tuple[str, bool]:
         extract_block(registry_h, "struct CommandModule") + ";",
         (component / "BLE_ConsoleAttachCore.h").read_text().replace("#pragma once\n", "", 1),
         (component / "BLE_Types.h").read_text(),
-        extract_block(header, "struct BLEConnection") + ";",
-        extract_block(header, "struct BLESystemState") + ";",
+        extract_block(header, "struct BleConnection") + ";",
+        extract_block(header, "struct BleSystemState") + ";",
         found(r"^static std::atomic<hw1console::Mode> sBleConsoleMode\{[^}]*\};", owner,
               "Bluetooth.cpp keeps the console mode"),
         found(r"^static std::atomic<int> sBleConsoleSendsInFlight\{[^}]*\};", owner,
@@ -141,7 +141,7 @@ def generated(component: Path) -> tuple[str, bool]:
         "TransportSessionEpoch blePublishSessionSlotLocked(",
         "TransportSessionEpoch bleSessionEpochForConnection(",
         "bool bleSessionEpochMatches(",
-        "static BLESystemState* bleNewState(",
+        "static BleSystemState* bleNewState(",
         "const char* bleDeviceTypeToString(",
         "void bleClearConnectionByConnId(",
         "static bool bleConsoleMakeSlotLocked(",
@@ -150,14 +150,14 @@ def generated(component: Path) -> tuple[str, bool]:
         "static bool bleBindSession(",
         "static TransportSessionEpoch bleLogout(",
         "static bool bleIsAuthed(",
-        "bool isBLEConnected(",
+        "bool isBleConnected(",
         "static bool bleSecureChannelOnly(")]
     # The pipe side's probe of this task's lifecycle hold (phone link v2).
     definitions.append(extract_block(owner, "bool bleLifecycleHeldByCurrentTask("))
     definitions.append(extract_block(owner, "class BleConsoleTxGate") + ";")
     definitions += [extract_block(owner, marker) for marker in (
         "bool bleRawNotifyToSession(uint16_t connId,\n",
-        "bool sendBLEResponseToSession(",
+        "bool sendBleResponseToSession(",
         "static void bleSendAuthRequired(")]
     definitions.append(extract_block(owner, "struct BleSessionFence") + ";")
     definitions.append(extract_block(owner, "static int bleCollectMirrorSessions("))
@@ -202,15 +202,15 @@ def check_sources(component: Path) -> None:
                 "broadcastOutputCore hands only Bluetooth-routed lines to the batch, after queueing them")
     # The debug drain's mirror condition, which bleMirrorReachesSession mirrors.
     gate = ("(msg->routing & MSG_ROUTE_BLE) && (gOutputFlags & MSG_ROUTE_BLE) &&\n"
-            "          isBLEConnected() && bleMirrorRecipientCount() > 0")
+            "          isBleConnected() && bleMirrorRecipientCount() > 0")
     require(gate in debug, "the debug drain mirrors Bluetooth lines on outble, a connection "
                            "and a recipient (bleMirrorReachesSession checks the same)")
     reaches = code_only(extract_block(owner, "static bool bleMirrorReachesSession(")) \
         if "static bool bleMirrorReachesSession(" in owner else ""
     if reaches:
-        require("gOutputFlags & MSG_ROUTE_BLE" in reaches and "isBLEConnected()" in reaches and
+        require("gOutputFlags & MSG_ROUTE_BLE" in reaches and "isBleConnected()" in reaches and
                 "bleCollectMirrorSessions(" in reaches,
-                "bleMirrorReachesSession reads the drain's condition and sendBLEResponse's recipients")
+                "bleMirrorReachesSession reads the drain's condition and sendBleResponse's recipients")
 
 
 def main() -> None:

@@ -7,7 +7,7 @@
 // Single source of truth for BLE enums and constants shared by the BLE
 // server (Bluetooth.h), the Secure Channel and the notification sink.
 
-enum BLEConnectionState {
+enum BleConnectionState {
   BLE_STATE_IDLE = 0,
   BLE_STATE_ADVERTISING,
   BLE_STATE_SCANNING,
@@ -16,7 +16,7 @@ enum BLEConnectionState {
   BLE_STATE_DISCONNECTING
 };
 
-enum BLEDeviceType {
+enum BleDeviceType {
   BLE_DEVICE_UNKNOWN = 0,
   BLE_DEVICE_GLASSES_LEFT,
   BLE_DEVICE_GLASSES_RIGHT,
@@ -25,7 +25,7 @@ enum BLEDeviceType {
   BLE_DEVICE_CUSTOM
 };
 
-enum BLEEventType {
+enum BleEventType {
   BLE_EVENT_SENSOR_CONNECTED = 0,
   BLE_EVENT_SENSOR_DISCONNECTED,
   BLE_EVENT_LOW_BATTERY,
@@ -38,7 +38,7 @@ enum BLEEventType {
   BLE_EVENT_CUSTOM
 };
 
-enum BLEStreamFlags {
+enum BleStreamFlags {
   BLE_STREAM_NONE = 0,
   BLE_STREAM_SENSORS = (1 << 0),
   BLE_STREAM_SYSTEM = (1 << 1),

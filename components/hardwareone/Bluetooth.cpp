@@ -91,7 +91,7 @@
 // GLOBAL STATE
 // =============================================================================
 
-BLESystemState* gBLEState = nullptr;
+BleSystemState* gBleState = nullptr;
 
 // Application-role transaction token. This is intentionally a tiny task-owner
 // state machine rather than a mutex callbacks could block on: Bluedroid may
@@ -115,8 +115,8 @@ class BleRoleTransitionClaim {
 };
 
 // BLE toggle tracking - ESP32 Bluedroid leaks ~10KB DRAM per init/deinit cycle
-static int sBLEToggleCount = 0;
-static size_t sBLEHeapBeforeInit = 0;
+static int sBleToggleCount = 0;
+static size_t sBleHeapBeforeInit = 0;
 
 // ESP32 BLE objects
 static BLEServer* pServer = nullptr;
@@ -126,11 +126,11 @@ static BLEAdvertising* pAdvertising = nullptr;
 // below the maximum re-arms it. Before, one app link (or a stale one) left the
 // device invisible until every link was gone.
 static std::atomic<bool> sBleAdvertising{false};
-// The console server is up, for status reads that must not touch gBLEState
+// The console server is up, for status reads that must not touch gBleState
 // (deinit frees it). Set once init completes; cleared when teardown starts.
 static std::atomic<bool> sBleServerUp{false};
 // Where the command service lives (bleConsoleMode). Server is set with
-// gBLEState->initialized and cleared once deinitBluetooth frees the state;
+// gBleState->initialized and cleared once deinitBluetooth frees the state;
 // ClientRegistered lasts from bleConsoleRegisterOnClientHost to the host
 // teardown that frees its state.
 static std::atomic<hw1console::Mode> sBleConsoleMode{hw1console::Mode::Off};
@@ -156,14 +156,14 @@ static std::atomic<int> sBleConsoleSlotConnId{-1};
 // after it is released (bleRawNotifyToSession). The host teardown waits for
 // them to land before the host stops.
 static std::atomic<int> sBleConsoleSendsInFlight{0};
-// Who holds gBLEState (phone link v2): the server role, the client host's
+// Who holds gBleState (phone link v2): the server role, the client host's
 // command service and the phone pipe, whose console row lives there. Under the
 // lifecycle lock. The last holder out frees it (bleStateReleaseLocked); a host
 // teardown ends the pipe's row but leaves its hold, so a pipe that outlives
 // the host (recovery) binds into the same state on the next one.
 constexpr uint8_t kBleHoldServer = 0x01, kBleHoldClientConsole = 0x02, kBleHoldPipe = 0x04;
 static uint8_t sBleStateHolders = 0;
-// gBLEState->initialized (the server role's state is up), kept beside it under
+// gBleState->initialized (the server role's state is up), kept beside it under
 // the lifecycle lock for isBleServerInitialized() while that lock is busy.
 static std::atomic<bool> sBleServerStateInitialized{false};
 
@@ -188,7 +188,7 @@ static BLECharacteristic* pModelChar = nullptr;
 static BLECharacteristic* pFirmwareChar = nullptr;
 
 // Forward declarations
-static void processIncomingBLECommand(uint16_t connId, const char* data, size_t len);
+static void processIncomingBleCommand(uint16_t connId, const char* data, size_t len);
 bool bleRawNotifyToSession(uint16_t connId, TransportSessionEpoch expectedEpoch,
                            const char* data, size_t len, bool blocking);
 
@@ -247,9 +247,9 @@ void bleGattsEventTap(esp_gatts_cb_event_t event, esp_gatt_if_t gattsIf,
 std::atomic<TransportSessionEpoch> sBleSessionEpoch[BLE_MAX_CONNECTIONS];
 
 int findConnectionSlotByConnIdLocked(uint16_t connId) {
-  if (!gBLEState) return -1;
+  if (!gBleState) return -1;
   for (int i = 0; i < BLE_MAX_CONNECTIONS; i++) {
-    if (gBLEState->connections[i].active && gBLEState->connections[i].connId == connId) {
+    if (gBleState->connections[i].active && gBleState->connections[i].connId == connId) {
       return i;
     }
   }
@@ -276,9 +276,9 @@ BlePipeConsoleIdentity sBlePipeIdentity;
 void blePipeIdentitySyncLocked() {
   BlePipeConsoleIdentity id;
   const int slot = sBlePipeRowSlot;
-  if (gBLEState && slot >= 0 && slot < BLE_MAX_CONNECTIONS &&
-      gBLEState->connections[slot].active && gBLEState->connections[slot].pipeConsole) {
-    const BLEConnection& c = gBLEState->connections[slot];
+  if (gBleState && slot >= 0 && slot < BLE_MAX_CONNECTIONS &&
+      gBleState->connections[slot].active && gBleState->connections[slot].pipeConsole) {
+    const BleConnection& c = gBleState->connections[slot];
     id.bound = true;
     id.generation = c.pipeGeneration;
     id.streamId = c.pipeStream;
@@ -313,9 +313,9 @@ TransportSessionEpoch blePublishSessionSlotLocked(int slot) {
 }
 }  // namespace
 
-// The phone link's console row (BLEConnection::pipeConsole); none exist in a
+// The phone link's console row (BleConnection::pipeConsole); none exist in a
 // build without the pipe.
-static inline bool blePipeRow(const BLEConnection& c) {
+static inline bool blePipeRow(const BleConnection& c) {
   return ENABLE_BLE_PHONE_PIPE && c.pipeConsole;
 }
 // connId names the console row. An id never changes kind: Bluedroid's are
@@ -324,7 +324,7 @@ static bool bleIsPipeRowId(uint16_t connId) {
   BleLifecycleGuard guard;
   if (!guard) return false;
   const int slot = findConnectionSlotByConnIdLocked(connId);
-  return slot >= 0 && blePipeRow(gBLEState->connections[slot]);
+  return slot >= 0 && blePipeRow(gBleState->connections[slot]);
 }
 // Ends the phone link's console row (Bluetooth.cpp's console-row section).
 static bool blePipeRowEndLocked(bool match = false, uint32_t generation = 0,
@@ -347,7 +347,7 @@ bool bleSessionEpochIsLive(TransportSessionEpoch epoch) {
   BleLifecycleGuard guard;
   if (!guard) return false;
   for (int i = 0; i < BLE_MAX_CONNECTIONS; ++i) {
-    if (gBLEState && gBLEState->connections[i].active &&
+    if (gBleState && gBleState->connections[i].active &&
         sBleSessionEpoch[i].load(std::memory_order_acquire) == epoch) {
       return true;
     }
@@ -366,7 +366,7 @@ static void bleMarkActivity(uint16_t connId) {
   if (!guard) return;
   int slot = findConnectionSlotByConnIdLocked(connId);
   if (slot >= 0) {
-    gBLEState->connections[slot].lastActivityMs = millis();
+    gBleState->connections[slot].lastActivityMs = millis();
     BLE_DEBUGF(DEBUG_BLE_DATA, "Activity heartbeat conn=%u slot=%d", (unsigned)connId, slot);
   }
 }
@@ -385,25 +385,25 @@ void bleClearConnectionByConnId(uint16_t connId) {
   // Close the epoch before making this slot reusable.  Login/result jobs that
   // captured it can no longer bind or emit, even if connId is reused quickly.
   bleInvalidateSessionSlotLocked(slot);
-  gBLEState->connections[slot].active = false;
-  gBLEState->connections[slot].connId = 0;
-  gBLEState->connections[slot].connectedSince = 0;
-  gBLEState->connections[slot].deviceName = "";
-  memset(gBLEState->connections[slot].deviceAddr, 0, sizeof(gBLEState->connections[slot].deviceAddr));
-  gBLEState->connections[slot].deviceType = BLE_DEVICE_UNKNOWN;
-  gBLEState->connections[slot].commandsReceived = 0;
-  gBLEState->connections[slot].authed = false;
-  gBLEState->connections[slot].user = "";
-  gBLEState->connections[slot].mirrorEligible = false;
-  gBLEState->connections[slot].noChannelRejected = false;
-  gBLEState->connections[slot].lastActivityMs = 0;
-  gBLEState->connections[slot].pipeConsole = false;
-  gBLEState->connections[slot].pipeGeneration = 0;
-  gBLEState->connections[slot].pipeStream = 0;
-  gBLEState->connections[slot].pipeLinkConnId = 0;
-  gBLEState->connections[slot].noticePending = false;
-  gBLEState->connections[slot].noticeEpoch = 0;
-  gBLEState->connections[slot].noticeUser = "";
+  gBleState->connections[slot].active = false;
+  gBleState->connections[slot].connId = 0;
+  gBleState->connections[slot].connectedSince = 0;
+  gBleState->connections[slot].deviceName = "";
+  memset(gBleState->connections[slot].deviceAddr, 0, sizeof(gBleState->connections[slot].deviceAddr));
+  gBleState->connections[slot].deviceType = BLE_DEVICE_UNKNOWN;
+  gBleState->connections[slot].commandsReceived = 0;
+  gBleState->connections[slot].authed = false;
+  gBleState->connections[slot].user = "";
+  gBleState->connections[slot].mirrorEligible = false;
+  gBleState->connections[slot].noChannelRejected = false;
+  gBleState->connections[slot].lastActivityMs = 0;
+  gBleState->connections[slot].pipeConsole = false;
+  gBleState->connections[slot].pipeGeneration = 0;
+  gBleState->connections[slot].pipeStream = 0;
+  gBleState->connections[slot].pipeLinkConnId = 0;
+  gBleState->connections[slot].noticePending = false;
+  gBleState->connections[slot].noticeEpoch = 0;
+  gBleState->connections[slot].noticeUser = "";
   BLE_DEBUGF(DEBUG_BLE_CORE, "Cleared connection slot=%d for conn=%u", slot, (unsigned)connId);
 }
 
@@ -412,8 +412,8 @@ static bool bleIsAuthed(uint16_t connId, String& outUser) {
   if (!guard) return false;
   int slot = findConnectionSlotByConnIdLocked(connId);
   if (slot < 0) return false;
-  if (!gBLEState->connections[slot].authed) return false;
-  outUser = gBLEState->connections[slot].user;
+  if (!gBleState->connections[slot].authed) return false;
+  outUser = gBleState->connections[slot].user;
   BLE_DEBUGF(DEBUG_BLE_CORE, "Session authed lookup conn=%u user='%s'", (unsigned)connId, outUser.c_str());
   return outUser.length() > 0;
 }
@@ -428,14 +428,14 @@ static String blePeerIpTag(uint16_t connId) {
   BleLifecycleGuard guard;
   if (!guard) return String("ble");
   int slot = findConnectionSlotByConnIdLocked(connId);
-  if (slot < 0 || !gBLEState) return String("ble");
+  if (slot < 0 || !gBleState) return String("ble");
   // The console on the phone pipe's link stores no address (the pipe owns it):
   // design A's slot on the client host, and the console row in any mode.
-  if (bleConsoleClientHost() || blePipeRow(gBLEState->connections[slot])) {
+  if (bleConsoleClientHost() || blePipeRow(gBleState->connections[slot])) {
     return String("ble:pipe-link");
   }
   char macStr[18];
-  macToDisplay(gBLEState->connections[slot].deviceAddr, macStr, sizeof(macStr));
+  macToDisplay(gBleState->connections[slot].deviceAddr, macStr, sizeof(macStr));
   char ipBuf[28];
   snprintf(ipBuf, sizeof(ipBuf), "ble:%s", macStr);
   return String(ipBuf);
@@ -485,8 +485,8 @@ static TransportSessionEpoch bleLogout(uint16_t connId) {
   int slot = findConnectionSlotByConnIdLocked(connId);
   if (slot < 0) return 0;
   bleInvalidateSessionSlotLocked(slot);
-  gBLEState->connections[slot].authed = false;
-  gBLEState->connections[slot].user = "";
+  gBleState->connections[slot].authed = false;
+  gBleState->connections[slot].user = "";
   const TransportSessionEpoch epoch =
       blePublishSessionSlotLocked(slot);  // physical connection remains live
   BLE_DEBUGF(DEBUG_BLE_CORE, "Session logout conn=%u slot=%d", (unsigned)connId, slot);
@@ -496,11 +496,11 @@ static TransportSessionEpoch bleLogout(uint16_t connId) {
 bool bleHasAuthenticatedSession() {
   BleLifecycleGuard guard;
   if (!guard) return false;
-  if (!gBLEState) return false;
+  if (!gBleState) return false;
   for (int i = 0; i < BLE_MAX_CONNECTIONS; i++) {
-    if (!gBLEState->connections[i].active) continue;
-    if (!gBLEState->connections[i].authed) continue;
-    if (gBLEState->connections[i].user.length() == 0) continue;
+    if (!gBleState->connections[i].active) continue;
+    if (!gBleState->connections[i].authed) continue;
+    if (gBleState->connections[i].user.length() == 0) continue;
     return true;
   }
   return false;
@@ -509,15 +509,15 @@ bool bleHasAuthenticatedSession() {
 bool bleGetAuthenticatedSessionInfo(int authedIndex, uint16_t& outConnId, String& outUser) {
   BleLifecycleGuard guard;
   if (!guard) return false;
-  if (!gBLEState || authedIndex < 0) return false;
+  if (!gBleState || authedIndex < 0) return false;
   int seen = 0;
   for (int i = 0; i < BLE_MAX_CONNECTIONS; i++) {
-    if (!gBLEState->connections[i].active) continue;
-    if (!gBLEState->connections[i].authed) continue;
-    if (gBLEState->connections[i].user.length() == 0) continue;
+    if (!gBleState->connections[i].active) continue;
+    if (!gBleState->connections[i].authed) continue;
+    if (gBleState->connections[i].user.length() == 0) continue;
     if (seen == authedIndex) {
-      outConnId = gBLEState->connections[i].connId;
-      outUser = gBLEState->connections[i].user;
+      outConnId = gBleState->connections[i].connId;
+      outUser = gBleState->connections[i].user;
       return true;
     }
     seen++;
@@ -534,7 +534,7 @@ constexpr uint16_t kBlePipeCloseRenewed = 2, kBlePipeCloseRevoked = 5;
 // link's console row ends instead, and *renew names its stream for CLOSE 5,
 // which the caller requests with the lock released.
 static void bleRevokeSlotLocked(int i, PipeConsoleTarget* renew) {
-  BLEConnection& c = gBLEState->connections[i];
+  BleConnection& c = gBleState->connections[i];
   if (blePipeRow(c)) {
     (void)blePipeRowEndLocked(/*match=*/true, c.pipeGeneration, c.pipeStream, renew);
     return;
@@ -551,11 +551,11 @@ int bleRevokeUserSessions(const String& username) {
   {
     BleLifecycleGuard guard;
     if (!guard) return 0;
-    if (!gBLEState || username.length() == 0) return 0;
+    if (!gBleState || username.length() == 0) return 0;
     for (int i = 0; i < BLE_MAX_CONNECTIONS; i++) {
-      if (!gBLEState->connections[i].active) continue;
-      if (!gBLEState->connections[i].authed) continue;
-      if (!gBLEState->connections[i].user.equalsIgnoreCase(username)) continue;
+      if (!gBleState->connections[i].active) continue;
+      if (!gBleState->connections[i].authed) continue;
+      if (!gBleState->connections[i].user.equalsIgnoreCase(username)) continue;
       bleRevokeSlotLocked(i, &renew);
       revoked++;
     }
@@ -571,10 +571,10 @@ int bleRevokeAllSessions() {
   {
     BleLifecycleGuard guard;
     if (!guard) return 0;
-    if (!gBLEState) return 0;
+    if (!gBleState) return 0;
     for (int i = 0; i < BLE_MAX_CONNECTIONS; i++) {
-      if (!gBLEState->connections[i].active) continue;
-      if (!gBLEState->connections[i].authed) continue;
+      if (!gBleState->connections[i].active) continue;
+      if (!gBleState->connections[i].authed) continue;
       bleRevokeSlotLocked(i, &renew);
       revoked++;
     }
@@ -586,10 +586,10 @@ int bleRevokeAllSessions() {
 
 void bleAuthPolicyChanged() {
   BleLifecycleGuard guard;
-  if (!guard || !gBLEState) return;
+  if (!guard || !gBleState) return;
   for (int i = 0; i < BLE_MAX_CONNECTIONS; ++i) {
-    if (!gBLEState->connections[i].active ||
-        gBLEState->connections[i].authed) {
+    if (!gBleState->connections[i].active ||
+        gBleState->connections[i].authed) {
       continue;
     }
     // Named authenticated sessions already received a fresh epoch at login.
@@ -609,20 +609,20 @@ static bool bleBindSession(uint16_t connId, TransportSessionEpoch expectedEpoch,
   BleLifecycleGuard guard;
   if (!guard) return false;
   int slot = findConnectionSlotByConnIdLocked(connId);
-  if (slot < 0 || !gBLEState ||
+  if (slot < 0 || !gBleState ||
       sBleSessionEpoch[slot].load(std::memory_order_acquire) != expectedEpoch) {
     return false;
   }
   bleInvalidateSessionSlotLocked(slot);
-  gBLEState->connections[slot].authed = true;
-  gBLEState->connections[slot].user = user;
-  gBLEState->connections[slot].mirrorEligible = mirrorEligible;
-  gBLEState->connections[slot].lastActivityMs = millis();
+  gBleState->connections[slot].authed = true;
+  gBleState->connections[slot].user = user;
+  gBleState->connections[slot].mirrorEligible = mirrorEligible;
+  gBleState->connections[slot].lastActivityMs = millis();
   boundEpochOut = blePublishSessionSlotLocked(slot);
   if (boundEpochOut == 0) {
-    gBLEState->connections[slot].authed = false;
-    gBLEState->connections[slot].user = "";
-    gBLEState->connections[slot].mirrorEligible = false;
+    gBleState->connections[slot].authed = false;
+    gBleState->connections[slot].user = "";
+    gBleState->connections[slot].mirrorEligible = false;
     return false;
   }
   BLE_DEBUGF(DEBUG_BLE_CORE, "Session bound conn=%u slot=%d user='%s'", (unsigned)connId, slot, user.c_str());
@@ -633,7 +633,7 @@ static void bleSendAuthRequired(uint16_t connId,
                                 TransportSessionEpoch expectedEpoch) {
   static const char* msg = "Authentication required. Use: login <username> <password>";
   BLE_DEBUGF(DEBUG_BLE_CORE, "Auth required notice conn=%u", (unsigned)connId);
-  sendBLEResponseToSession(connId, expectedEpoch, msg, strlen(msg));
+  sendBleResponseToSession(connId, expectedEpoch, msg, strlen(msg));
 }
 
 // =============================================================================
@@ -660,7 +660,7 @@ static bool bleSavedMacMatches(const char* macStr, const char* saved) {
 }
 
 // Convert device type to human-readable string
-const char* bleDeviceTypeToString(BLEDeviceType type) {
+const char* bleDeviceTypeToString(BleDeviceType type) {
   switch (type) {
     case BLE_DEVICE_GLASSES_LEFT: return "Glasses (Left)";
     case BLE_DEVICE_GLASSES_RIGHT: return "Glasses (Right)";
@@ -674,12 +674,12 @@ const char* bleDeviceTypeToString(BLEDeviceType type) {
 // The lifecycle lock is held. No logging: the server callbacks call this on
 // BTC_TASK. False when the console is down or full.
 static bool bleAdvertiseIfRoomLocked() {
-  if (!gBLEState || !gBLEState->initialized || !pAdvertising) return false;
-  if (gBLEState->activeConnectionCount >= BLE_MAX_CONNECTIONS) return false;
+  if (!gBleState || !gBleState->initialized || !pAdvertising) return false;
+  if (gBleState->activeConnectionCount >= BLE_MAX_CONNECTIONS) return false;
   if (!pAdvertising->start()) return false;
   sBleAdvertising.store(true);
-  if (gBLEState->activeConnectionCount == 0) {
-    gBLEState->connectionState = BLE_STATE_ADVERTISING;
+  if (gBleState->activeConnectionCount == 0) {
+    gBleState->connectionState = BLE_STATE_ADVERTISING;
   }
   return true;
 }
@@ -688,7 +688,7 @@ static bool bleAdvertiseIfRoomLocked() {
 // the peer owner's current saved targets (BLE_Peers.h snapshot, a short
 // critical-section copy), so a re-paired glasses, ring or phone is typed by
 // its new address from the next connection on.
-BLEDeviceType bleIdentifyDeviceByMAC(const uint8_t* mac) {
+BleDeviceType bleIdentifyDeviceByMAC(const uint8_t* mac) {
   if (!mac) return BLE_DEVICE_UNKNOWN;
   char macStr[18];
   macToDisplay(mac, macStr, sizeof(macStr));
@@ -726,16 +726,16 @@ static hw1console::PipeLink bleConsolePipeLink() {
 // closed), Secure Channel keys and sign-in. The pipe keeps the link. A slot no
 // app had joined was never counted, so it ends without a count or event.
 static void bleConsoleEndSlotLocked(const hw1console::Slot& old) {
-  if (!gBLEState || findConnectionSlotByConnIdLocked(old.connId) < 0) return;
+  if (!gBleState || findConnectionSlotByConnIdLocked(old.connId) < 0) return;
   bleClearConnectionByConnId(old.connId);
   bleScReset(old.connId);
   if (!old.joined) return;
-  if (gBLEState->activeConnectionCount > 0) gBLEState->activeConnectionCount--;
-  gBLEState->deferredDisconnectActiveCount = gBLEState->activeConnectionCount;
-  gBLEState->deferredDisconnectPending = true;
-  if (gBLEState->activeConnectionCount == 0) gBLEState->connectionState = BLE_STATE_IDLE;
+  if (gBleState->activeConnectionCount > 0) gBleState->activeConnectionCount--;
+  gBleState->deferredDisconnectActiveCount = gBleState->activeConnectionCount;
+  gBleState->deferredDisconnectPending = true;
+  if (gBleState->activeConnectionCount == 0) gBleState->connectionState = BLE_STATE_IDLE;
   char remaining[8];
-  snprintf(remaining, sizeof(remaining), "%d", gBLEState->activeConnectionCount);
+  snprintf(remaining, sizeof(remaining), "%d", gBleState->activeConnectionCount);
   systemEventPost(SYSEVT_BLE_DISCONNECTED, remaining);
 }
 
@@ -743,13 +743,13 @@ static void bleConsoleEndSlotLocked(const hw1console::Slot& old) {
 // stored address: a session waiting for the app, not yet counted. False when
 // no slot or session is free; the next reconcile tries again.
 static bool bleConsoleMakeSlotLocked(uint16_t connId) {
-  if (!gBLEState) return false;
+  if (!gBleState) return false;
   int slot = -1;
   for (int i = 0; i < BLE_MAX_CONNECTIONS && slot < 0; i++) {
-    if (!gBLEState->connections[i].active) slot = i;
+    if (!gBleState->connections[i].active) slot = i;
   }
   if (slot < 0) return false;
-  BLEConnection& c = gBLEState->connections[slot];
+  BleConnection& c = gBleState->connections[slot];
   c.active = true;
   c.connId = connId;
   c.connectedSince = millis();
@@ -774,12 +774,12 @@ static bool bleConsoleMakeSlotLocked(uint16_t connId) {
 // connected app, for the connection state, the counts and the connect event.
 static void bleConsoleJoinLocked(uint16_t connId) {
   const int slot = findConnectionSlotByConnIdLocked(connId);
-  if (!gBLEState || slot < 0) return;
-  gBLEState->activeConnectionCount++;
-  gBLEState->totalConnections++;
-  gBLEState->connectionState = BLE_STATE_CONNECTED;
-  gBLEState->deferredConnectSlot = slot;
-  gBLEState->deferredConnectPending = true;
+  if (!gBleState || slot < 0) return;
+  gBleState->activeConnectionCount++;
+  gBleState->totalConnections++;
+  gBleState->connectionState = BLE_STATE_CONNECTED;
+  gBleState->deferredConnectSlot = slot;
+  gBleState->deferredConnectPending = true;
   systemEventPost(SYSEVT_BLE_CONNECTED, bleDeviceTypeToString(BLE_DEVICE_PHONE));
 }
 
@@ -855,7 +855,7 @@ static void bleConsoleReconcile() {
   const char* change = nullptr;
   {
     BleLifecycleGuard lifecycle;
-    if (!lifecycle || !gBLEState) return;
+    if (!lifecycle || !gBleState) return;
     bleConsoleReconcileLocked();
     if (!hw1console::sameSlot(sBleConsoleLogged, sBleConsoleAttach.slot)) {
       change = sBleConsoleAttach.slot.present ? "App console attached to the phone pipe's link"
@@ -881,13 +881,13 @@ class ServerCallbacks : public BLEServerCallbacks {
     // Server mode admits its apps below.
     if (!param || !bleConsoleLinkEventMayMatter(param->connect.conn_id)) return;
     BleLifecycleGuard lifecycle;
-    if (!lifecycle || !gBLEState) return;
+    if (!lifecycle || !gBleState) return;
     if (!bleConsoleLinkEventLocked(/*up=*/true, param->connect.conn_id)) return;
     
     // Find free connection slot
     int slot = -1;
     for (int i = 0; i < BLE_MAX_CONNECTIONS; i++) {
-      if (!gBLEState->connections[i].active) {
+      if (!gBleState->connections[i].active) {
         slot = i;
         break;
       }
@@ -899,31 +899,31 @@ class ServerCallbacks : public BLEServerCallbacks {
     }
     
     // Store connection info (minimal state updates - ISR-safe)
-    gBLEState->connections[slot].active = true;
-    gBLEState->connections[slot].connId = param->connect.conn_id;
-    gBLEState->connections[slot].connectedSince = millis();
-    memcpy(gBLEState->connections[slot].deviceAddr, param->connect.remote_bda, 6);
-    gBLEState->connections[slot].commandsReceived = 0;
-    gBLEState->connections[slot].authed = false;
-    gBLEState->connections[slot].user = "";
-    gBLEState->connections[slot].mirrorEligible = false;
-    gBLEState->connections[slot].lastActivityMs = millis();
+    gBleState->connections[slot].active = true;
+    gBleState->connections[slot].connId = param->connect.conn_id;
+    gBleState->connections[slot].connectedSince = millis();
+    memcpy(gBleState->connections[slot].deviceAddr, param->connect.remote_bda, 6);
+    gBleState->connections[slot].commandsReceived = 0;
+    gBleState->connections[slot].authed = false;
+    gBleState->connections[slot].user = "";
+    gBleState->connections[slot].mirrorEligible = false;
+    gBleState->connections[slot].lastActivityMs = millis();
     bleScReset(param->connect.conn_id);  // fresh secure-channel state for this connection
 
     // Type the link from the peer owner's saved targets (stack only, no heap)
-    gBLEState->connections[slot].deviceType = bleIdentifyDeviceByMAC(param->connect.remote_bda);
-    gBLEState->connections[slot].deviceName = bleDeviceTypeToString(gBLEState->connections[slot].deviceType);
+    gBleState->connections[slot].deviceType = bleIdentifyDeviceByMAC(param->connect.remote_bda);
+    gBleState->connections[slot].deviceName = bleDeviceTypeToString(gBleState->connections[slot].deviceType);
     // Publish only after the complete connection identity exists. This token
     // fences login jobs, queued commands and their replies from connId reuse.
     (void)blePublishSessionSlotLocked(slot);
     
-    gBLEState->activeConnectionCount++;
-    gBLEState->totalConnections++;
-    gBLEState->connectionState = BLE_STATE_CONNECTED;
+    gBleState->activeConnectionCount++;
+    gBleState->totalConnections++;
+    gBleState->connectionState = BLE_STATE_CONNECTED;
     
     // Defer logging to task context
-    gBLEState->deferredConnectSlot = slot;
-    gBLEState->deferredConnectPending = true;
+    gBleState->deferredConnectSlot = slot;
+    gBleState->deferredConnectPending = true;
 
     // Bus event inline (bounded spinlock copy, BTC-safe). Posted here rather
     // than the deferred drain because the drain is skipped once connection
@@ -934,7 +934,7 @@ class ServerCallbacks : public BLEServerCallbacks {
       char macStr[18];
       macToDisplay(a, macStr, sizeof(macStr));
       systemEventPost(SYSEVT_BLE_CONNECTED,
-                      bleDeviceTypeToString(gBLEState->connections[slot].deviceType), macStr);
+                      bleDeviceTypeToString(gBleState->connections[slot].deviceType), macStr);
     }
     
     // Bluedroid stopped advertising for this connection: re-arm it while
@@ -946,8 +946,8 @@ class ServerCallbacks : public BLEServerCallbacks {
                "ISR connect conn=%u slot=%d type=%d active=%d/%d",
                (unsigned)param->connect.conn_id,
                slot,
-               (int)gBLEState->connections[slot].deviceType,
-               gBLEState->activeConnectionCount,
+               (int)gBleState->connections[slot].deviceType,
+               gBleState->activeConnectionCount,
                BLE_MAX_CONNECTIONS);
   }
   
@@ -959,7 +959,7 @@ class ServerCallbacks : public BLEServerCallbacks {
     // and returns before the lock.
     if (param && !bleConsoleLinkEventMayMatter(param->disconnect.conn_id)) return;
     BleLifecycleGuard lifecycle;
-    if (!lifecycle || !gBLEState) return;
+    if (!lifecycle || !gBleState) return;
     const bool server = param ? bleConsoleLinkEventLocked(/*up=*/false, param->disconnect.conn_id)
                               : bleConsoleMode() == hw1console::Mode::Server;
     if (!server) return;
@@ -969,22 +969,22 @@ class ServerCallbacks : public BLEServerCallbacks {
       bleScReset(param->disconnect.conn_id);  // wipe secure-channel keys on disconnect
     }
     
-    if (gBLEState->activeConnectionCount > 0) {
-      gBLEState->activeConnectionCount--;
+    if (gBleState->activeConnectionCount > 0) {
+      gBleState->activeConnectionCount--;
     }
     
     // Defer logging to task context
-    gBLEState->deferredDisconnectActiveCount = gBLEState->activeConnectionCount;
-    gBLEState->deferredDisconnectPending = true;
+    gBleState->deferredDisconnectActiveCount = gBleState->activeConnectionCount;
+    gBleState->deferredDisconnectPending = true;
 
     {
       char remaining[8];
-      snprintf(remaining, sizeof(remaining), "%d", gBLEState->activeConnectionCount);
+      snprintf(remaining, sizeof(remaining), "%d", gBleState->activeConnectionCount);
       systemEventPost(SYSEVT_BLE_DISCONNECTED, remaining);
     }
     
-    if (gBLEState->activeConnectionCount == 0) {
-      gBLEState->connectionState = BLE_STATE_IDLE;
+    if (gBleState->activeConnectionCount == 0) {
+      gBleState->connectionState = BLE_STATE_IDLE;
     }
     
     // Re-arm advertising: there is room again (BTC-safe, no logging).
@@ -993,8 +993,8 @@ class ServerCallbacks : public BLEServerCallbacks {
     BLE_DEBUGF(DEBUG_BLE_CORE,
                "ISR disconnect conn=%u remaining=%d state=%d",
                param ? (unsigned)param->disconnect.conn_id : 0,
-               gBLEState->activeConnectionCount,
-               (int)gBLEState->connectionState);
+               gBleState->activeConnectionCount,
+               (int)gBleState->connectionState);
   }
 };
 
@@ -1004,7 +1004,7 @@ class ServerCallbacks : public BLEServerCallbacks {
 
 // Command Request Characteristic - receives commands from client
 // NOTE: This callback runs on BTC_TASK with limited stack (~3KB)
-// Every write is copied and processed on the central cmd_exec task (processIncomingBLECommand)
+// Every write is copied and processed on the central cmd_exec task (processIncomingBleCommand)
 class CmdRequestCallbacks : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic* pCharacteristic, esp_ble_gatts_cb_param_t* param) override {
     // NOTE: Callback runs on BTC_TASK - defer logging to task context (ISR-safe pattern)
@@ -1018,15 +1018,15 @@ class CmdRequestCallbacks : public BLECharacteristicCallbacks {
     if (len > 0) {
       {
         BleLifecycleGuard lifecycle;
-        if (!lifecycle || !gBLEState) return;
+        if (!lifecycle || !gBleState) return;
         // Client host: only the console slot's link takes commands.
         if (!bleConsoleAdmitWriteLocked(param->write.conn_id)) return;
-        gBLEState->commandsReceived++;
+        gBleState->commandsReceived++;
 
         // Defer logging to task context
-        gBLEState->deferredCmdReceivedConnId = param->write.conn_id;
-        gBLEState->deferredCmdReceivedLen = len;
-        gBLEState->deferredCmdReceivedPending = true;
+        gBleState->deferredCmdReceivedConnId = param->write.conn_id;
+        gBleState->deferredCmdReceivedLen = len;
+        gBleState->deferredCmdReceivedPending = true;
       }
 
       BLE_DEBUGF(DEBUG_BLE_GATT,
@@ -1034,9 +1034,9 @@ class CmdRequestCallbacks : public BLECharacteristicCallbacks {
                  (unsigned)param->write.conn_id,
                  (unsigned)len);
 
-      // processIncomingBLECommand copies the write into a pool slot and defers
+      // processIncomingBleCommand copies the write into a pool slot and defers
       // it to cmd_exec; nothing on this task waits for a reply to go out
-      processIncomingBLECommand(param->write.conn_id, (const char*)data, len);
+      processIncomingBleCommand(param->write.conn_id, (const char*)data, len);
     }
   }
 };
@@ -1048,7 +1048,7 @@ class CmdRequestCallbacks : public BLECharacteristicCallbacks {
 // {"state":"unavailable"}. The slot's id is the lock-free mirror (BTC).
 class CmdStatusCallbacks : public BLECharacteristicCallbacks {
   void onRead(BLECharacteristic* pCharacteristic, esp_ble_gatts_cb_param_t* param) override {
-    if (!gBLEState || (bleConsoleClientHost() &&
+    if (!gBleState || (bleConsoleClientHost() &&
                        (!param || sBleConsoleSlotConnId.load() != int(param->read.conn_id)))) {
       pCharacteristic->setValue("{\"state\":\"unavailable\"}");
       return;
@@ -1057,8 +1057,8 @@ class CmdStatusCallbacks : public BLECharacteristicCallbacks {
     snprintf(statusBuf, sizeof(statusBuf),
              "{\"state\":\"connected\",\"uptime\":%lu,\"rx\":%lu,\"tx\":%lu}",
              (unsigned long)(millis() / 1000),
-             (unsigned long)gBLEState->commandsReceived,
-             (unsigned long)gBLEState->responsesSent);
+             (unsigned long)gBleState->commandsReceived,
+             (unsigned long)gBleState->responsesSent);
     pCharacteristic->setValue(statusBuf);
     BLE_DEBUGF(DEBUG_BLE_GATT, "Status read: %s", statusBuf);
   }
@@ -1161,7 +1161,7 @@ static void bleCommandResultCallback(bool ok, const char* result, void* userData
     bleTxTrace("result", reply->connId, safeResult, resultLen);
     // Reliable even after a failed batch (results must not drop): on the
     // console row the driver's stall latch already makes it one try.
-    sendBLEResponseToSession(reply->connId, reply->sessionEpoch, safeResult, resultLen);
+    sendBleResponseToSession(reply->connId, reply->sessionEpoch, safeResult, resultLen);
   }
   free(reply);
 }
@@ -1198,7 +1198,7 @@ static void bleLoginDeferred(void* arg) {
     snprintf(locked, sizeof(locked),
              "[ble] Login locked out. Retry in %lu seconds.",
              (lockoutRetryMs + 999UL) / 1000UL);
-    sendBLEResponseToSession(job->connId, job->sessionEpoch,
+    sendBleResponseToSession(job->connId, job->sessionEpoch,
                              locked, strlen(locked));
     bleLoginJobFree(job);
     return;
@@ -1239,7 +1239,7 @@ static void bleLoginDeferred(void* arg) {
     char out[160];
     snprintf(out, sizeof(out), "[ble] Login successful. User: %s%s", job->user,
              isAdminUser(String(job->user)) ? " (admin)" : "");
-    sendBLEResponseToSession(job->connId, boundEpoch, out, strlen(out));
+    sendBleResponseToSession(job->connId, boundEpoch, out, strlen(out));
   } else {
     // Only a checked wrong password is a guess; an unavailable store is not.
     if (authStoreHeld) {
@@ -1251,7 +1251,7 @@ static void bleLoginDeferred(void* arg) {
     if (authStoreHeld) systemEventPost(SYSEVT_LOGIN_FAIL, job->user, "ble");
     BLE_DEBUGF(DEBUG_BLE_CORE, "Login FAILED conn=%u", (unsigned)job->connId);
     const char* msg = "[ble] Authentication failed.";
-    sendBLEResponseToSession(job->connId, job->sessionEpoch,
+    sendBleResponseToSession(job->connId, job->sessionEpoch,
                              msg, strlen(msg));
   }
   bleLoginJobFree(job);
@@ -1300,7 +1300,7 @@ static void processBleCommandLine(uint16_t connId, TransportSessionEpoch ingress
   char cmdBuf[512];
   if (len > sizeof(cmdBuf) - 1) {
     const char* msg = "Error: BLE command exceeds 511-byte input limit; discarded";
-    sendBLEResponseToSession(connId, ingressEpoch, msg, strlen(msg));
+    sendBleResponseToSession(connId, ingressEpoch, msg, strlen(msg));
     return;
   }
   size_t outIdx = 0;
@@ -1329,7 +1329,7 @@ static void processBleCommandLine(uint16_t connId, TransportSessionEpoch ingress
   // record and make the rejection visible to the exact admitted session.
   if (lineTooLong) {
     const char* msg = "Error: BLE command exceeds 511-byte input limit; discarded";
-    sendBLEResponseToSession(connId, ingressEpoch, msg, strlen(msg));
+    sendBleResponseToSession(connId, ingressEpoch, msg, strlen(msg));
     return;
   }
   
@@ -1386,7 +1386,7 @@ static void processBleCommandLine(uint16_t connId, TransportSessionEpoch ingress
       previewArgs.arg(0).equalsIgnoreCase("login")) {
     if (previewArgs.unterminatedQuote() || previewArgs.count() != 3) {
       const char* msg = "Usage: login <username> <password>";
-      sendBLEResponseToSession(connId, ingressEpoch, msg, strlen(msg));
+      sendBleResponseToSession(connId, ingressEpoch, msg, strlen(msg));
       return;
     }
 
@@ -1397,7 +1397,7 @@ static void processBleCommandLine(uint16_t connId, TransportSessionEpoch ingress
     if (ulen == 0 || ulen > kPublicUsernameMaxLen ||
         plen == 0 || plen > kPublicPasswordMaxLen) {
       const char* msg = "Usage: login <username> <password>";
-      sendBLEResponseToSession(connId, ingressEpoch, msg, strlen(msg));
+      sendBleResponseToSession(connId, ingressEpoch, msg, strlen(msg));
       return;
     }
     // The credential check runs as its own cmd_exec job (bleLoginDeferred).
@@ -1414,7 +1414,7 @@ static void processBleCommandLine(uint16_t connId, TransportSessionEpoch ingress
                                                        "ble.loginAsyncJob");
     if (!job) {
       const char* msg = "Error: out of memory";
-      sendBLEResponseToSession(connId, ingressEpoch, msg, strlen(msg));
+      sendBleResponseToSession(connId, ingressEpoch, msg, strlen(msg));
       return;
     }
     memset(job, 0, sizeof(*job));
@@ -1426,14 +1426,14 @@ static void processBleCommandLine(uint16_t connId, TransportSessionEpoch ingress
     if (!submitDeferredToCmdExec(bleLoginDeferred, job)) {
       bleLoginJobFree(job);
       const char* msg = "Error: Failed to queue command";
-      sendBLEResponseToSession(connId, ingressEpoch, msg, strlen(msg));
+      sendBleResponseToSession(connId, ingressEpoch, msg, strlen(msg));
     }
     return;
   }
   if (strcasecmp(cmdStart, "logout") == 0) {
     const TransportSessionEpoch logoutEpoch = bleLogout(connId);
     const char* msg = "[ble] Logged out.";
-    sendBLEResponseToSession(connId, logoutEpoch, msg, strlen(msg));
+    sendBleResponseToSession(connId, logoutEpoch, msg, strlen(msg));
     return;
   }
   if (strcasecmp(cmdStart, "whoami") == 0) {
@@ -1441,13 +1441,13 @@ static void processBleCommandLine(uint16_t connId, TransportSessionEpoch ingress
     if (bleIsAuthed(connId, u)) {
       char out[80];
       snprintf(out, sizeof(out), "You are %s%s", u.c_str(), isAdminUser(u) ? " (admin)" : "");
-      sendBLEResponseToSession(connId, ingressEpoch, out, strlen(out));
+      sendBleResponseToSession(connId, ingressEpoch, out, strlen(out));
     } else if (!bleRequiresLogin(connId)) {
       const char* msg = "You are AuthBypass";
-      sendBLEResponseToSession(connId, ingressEpoch, msg, strlen(msg));
+      sendBleResponseToSession(connId, ingressEpoch, msg, strlen(msg));
     } else {
       const char* msg = "You are (unknown)";
-      sendBLEResponseToSession(connId, ingressEpoch, msg, strlen(msg));
+      sendBleResponseToSession(connId, ingressEpoch, msg, strlen(msg));
     }
     return;
   }
@@ -1469,7 +1469,7 @@ static void processBleCommandLine(uint16_t connId, TransportSessionEpoch ingress
   // have set a `blesecret` for the app to be able to establish the channel.
   if (bleIsFileBrowserCommand(cmdStart) && !arrivedEncrypted) {
     const char* msg = "{\"success\":false,\"error\":\"secure_channel_required\"}";
-    sendBLEResponseToSession(connId, ingressEpoch, msg, strlen(msg));
+    sendBleResponseToSession(connId, ingressEpoch, msg, strlen(msg));
     return;
   }
 
@@ -1501,7 +1501,7 @@ static void processBleCommandLine(uint16_t connId, TransportSessionEpoch ingress
           "ble.commandReply"));
   if (!reply) {
     const char* msg = "Error: out of memory";
-    sendBLEResponseToSession(connId, commandEpoch, msg, strlen(msg));
+    sendBleResponseToSession(connId, commandEpoch, msg, strlen(msg));
     return;
   }
   reply->connId = connId;
@@ -1516,7 +1516,7 @@ static void processBleCommandLine(uint16_t connId, TransportSessionEpoch ingress
   if (!submitCommandAsync(ucmd, bleCommandResultCallback, reply)) {
     free(reply);
     const char* msg = "Error: Failed to queue command";
-    sendBLEResponseToSession(connId, commandEpoch, msg, strlen(msg));
+    sendBleResponseToSession(connId, commandEpoch, msg, strlen(msg));
   }
 }
 
@@ -1620,7 +1620,7 @@ static bool bleConsoleClaimNoChannelReject(uint16_t connId, TransportSessionEpoc
   if (!lifecycle || !bleConnectionEpochMatchesLocked(connId, epoch) || bleScEstablished(connId)) {
     return false;
   }
-  BLEConnection& c = gBLEState->connections[findConnectionSlotByConnIdLocked(connId)];
+  BleConnection& c = gBleState->connections[findConnectionSlotByConnIdLocked(connId)];
   if (c.noChannelRejected) return false;
   c.noChannelRejected = true;
   return true;
@@ -1671,7 +1671,7 @@ static bool bleSecureChannelOnly() {
 }
 
 // Runs on cmd_exec: a plaintext write copied off BTC_TASK by
-// processIncomingBLECommand. Wipes, then releases, its pool slot: the line may be
+// processIncomingBleCommand. Wipes, then releases, its pool slot: the line may be
 // `login <user> <password>` and the pool prefers PSRAM. When the secure channel
 // is required the write gets a fixed refusal that carries no command output or
 // user data: over the channel when this connection holds one, otherwise in
@@ -1683,7 +1683,7 @@ static void blePlaintextDeferredInbound(void* arg) {
     if (bleSecureChannelOnly()) {
       static const char kMsg[] = "Secure channel required — connect with the encrypted app.";
       if (bleScEstablished(d->connId)) {
-        sendBLEResponseToSession(d->connId, d->sessionEpoch, kMsg, sizeof(kMsg) - 1);
+        sendBleResponseToSession(d->connId, d->sessionEpoch, kMsg, sizeof(kMsg) - 1);
       } else {
         bleRawNotifyToSession(d->connId, d->sessionEpoch, kMsg, sizeof(kMsg) - 1,
                               /*blocking=*/true);
@@ -1717,10 +1717,10 @@ void blePipeConsoleInbound(uint16_t rowConnId, TransportSessionEpoch epoch, uint
   {
     BleLifecycleGuard lifecycle;
     if (!lifecycle || !bleConnectionEpochMatchesLocked(rowConnId, epoch) ||
-        !blePipeRow(gBLEState->connections[findConnectionSlotByConnIdLocked(rowConnId)])) {
+        !blePipeRow(gBleState->connections[findConnectionSlotByConnIdLocked(rowConnId)])) {
       return;
     }
-    gBLEState->commandsReceived++;
+    gBleState->commandsReceived++;
   }
   if (type == kBlePipeRecordCommand) {
     processBleCommandLine(rowConnId, epoch, reinterpret_cast<const char*>(bytes), len,
@@ -1738,7 +1738,7 @@ void blePipeConsoleInbound(uint16_t rowConnId, TransportSessionEpoch epoch, uint
 // handshake crypto runs), plaintext writes to blePlaintextDeferredInbound. Replies wait
 // for the secure-channel tx mutex while a paced reply holds it, so they are sent from
 // cmd_exec; the only notices sent from here are best-effort (blocking=false).
-static void processIncomingBLECommand(uint16_t connId, const char* data, size_t len) {
+static void processIncomingBleCommand(uint16_t connId, const char* data, size_t len) {
   const TransportSessionEpoch ingressEpoch =
       bleSessionEpochForConnection(connId);
   if (ingressEpoch == 0) return;
@@ -1747,7 +1747,7 @@ static void processIncomingBLECommand(uint16_t connId, const char* data, size_t 
   if (isFrame) {
     if (len > sizeof(((BleScDeferred*)0)->buf)) {
       const char* msg = "Error: BLE secure frame exceeds 517-byte input limit; discarded";
-      sendBLEResponseToSession(connId, ingressEpoch, msg, strlen(msg),
+      sendBleResponseToSession(connId, ingressEpoch, msg, strlen(msg),
                                /*blocking=*/false);
       return;
     }
@@ -1791,7 +1791,7 @@ static void processIncomingBLECommand(uint16_t connId, const char* data, size_t 
   // Not queued. One best-effort notice: blocking=false never waits for the
   // secure-channel tx mutex and makes one admission attempt.
   static const char kQueueFull[] = "Error: Failed to queue command";
-  sendBLEResponseToSession(connId, ingressEpoch, kQueueFull, sizeof(kQueueFull) - 1,
+  sendBleResponseToSession(connId, ingressEpoch, kQueueFull, sizeof(kQueueFull) - 1,
                            /*blocking=*/false);
 }
 
@@ -1801,14 +1801,14 @@ static void processIncomingBLECommand(uint16_t connId, const char* data, size_t 
 
 // The console state both console hosts allocate (initBluetooth, and
 // bleConsoleRegisterOnClientHost on the G2 client host); nullptr when out of
-// memory. BLESystemState owns Arduino String members. ps_alloc() supplies raw
+// memory. BleSystemState owns Arduino String members. ps_alloc() supplies raw
 // storage, so start their lifetimes explicitly; byte-zeroing the aggregate
 // would leave invalid String representations and free() would skip their
 // destructors.
-static BLESystemState* bleNewState() {
-  void* stateStorage = ps_alloc(sizeof(BLESystemState), AllocPref::PreferPSRAM, "ble.state");
+static BleSystemState* bleNewState() {
+  void* stateStorage = ps_alloc(sizeof(BleSystemState), AllocPref::PreferPSRAM, "ble.state");
   if (!stateStorage) return nullptr;
-  BLESystemState* state = new (stateStorage) BLESystemState{};
+  BleSystemState* state = new (stateStorage) BleSystemState{};
 
   // Initialize connection slots
   for (int i = 0; i < BLE_MAX_CONNECTIONS; i++) {
@@ -1838,7 +1838,7 @@ static BLESystemState* bleNewState() {
 // THE APP CONSOLE AS A PHONE PIPE STREAM (phone link v2)
 // =============================================================================
 // The console is stream slot 2 of the phone pipe (BLE_PhonePipeConsole.h). Its
-// session is one gBLEState row per stream: made signed out when the stream is
+// session is one gBleState row per stream: made signed out when the stream is
 // bound, ended when it closes, with its own id (blePipeConsoleRowId), so design
 // A's slot on the same link keeps its identity. The pipe calls in only with
 // its own locks released and reads the row through the leaf snapshot; this
@@ -1852,8 +1852,8 @@ static BLESystemState* bleNewState() {
 static void bleStateRetireLocked() {
   (void)blePipeRowEndLocked();
   for (int i = 0; i < BLE_MAX_CONNECTIONS; ++i) bleInvalidateSessionSlotLocked(i);
-  ps_delete(gBLEState);
-  gBLEState = nullptr;
+  ps_delete(gBleState);
+  gBleState = nullptr;
   sBleStateHolders = 0;
   sBleServerStateInitialized.store(false);
 }
@@ -1862,21 +1862,21 @@ static void bleStateRetireLocked() {
 // retires the state.
 static void bleStateReleaseLocked(uint8_t holder) {
   sBleStateHolders &= uint8_t(~holder);
-  if (!sBleStateHolders && gBLEState) bleStateRetireLocked();
+  if (!sBleStateHolders && gBleState) bleStateRetireLocked();
 }
 
 // A host role (the server, or a client host not yet torn down) holds the
 // state; a state only the pipe holds is one the client host's service joins.
 static bool bleStateHeldByHostRole() {
   BleLifecycleGuard lifecycle;
-  return lifecycle && gBLEState && (sBleStateHolders & uint8_t(~kBleHoldPipe)) != 0;
+  return lifecycle && gBleState && (sBleStateHolders & uint8_t(~kBleHoldPipe)) != 0;
 }
 
 static bool blePipeRowEndLocked(bool match, uint32_t generation, uint16_t streamId,
                                 PipeConsoleTarget* ended) {
   const int slot = sBlePipeRowSlot;
-  if (!gBLEState || slot < 0 || slot >= BLE_MAX_CONNECTIONS) return false;
-  const BLEConnection& c = gBLEState->connections[slot];
+  if (!gBleState || slot < 0 || slot >= BLE_MAX_CONNECTIONS) return false;
+  const BleConnection& c = gBleState->connections[slot];
   if (!c.active || !c.pipeConsole) {  // bookkeeping without its row: drop it
     sBlePipeRowSlot = -1;
     blePipeIdentitySyncLocked();
@@ -1887,14 +1887,14 @@ static bool blePipeRowEndLocked(bool match, uint32_t generation, uint16_t stream
   // The snapshot drops it first, then its epoch (queued replies and login jobs
   // fail closed) and sign-in.
   bleClearConnectionByConnId(c.connId);
-  if (gBLEState->activeConnectionCount > 0) gBLEState->activeConnectionCount--;
-  gBLEState->deferredDisconnectActiveCount = gBLEState->activeConnectionCount;
-  gBLEState->deferredDisconnectPending = true;
-  if (gBLEState->activeConnectionCount == 0) gBLEState->connectionState = BLE_STATE_IDLE;
+  if (gBleState->activeConnectionCount > 0) gBleState->activeConnectionCount--;
+  gBleState->deferredDisconnectActiveCount = gBleState->activeConnectionCount;
+  gBleState->deferredDisconnectPending = true;
+  if (gBleState->activeConnectionCount == 0) gBleState->connectionState = BLE_STATE_IDLE;
   // `outble` ends with the last signed-in session, as a disconnect's does.
   if (!bleHasAuthenticatedSession()) gOutputFlags &= ~MSG_ROUTE_BLE;
   char remaining[8];
-  snprintf(remaining, sizeof(remaining), "%d", gBLEState->activeConnectionCount);
+  snprintf(remaining, sizeof(remaining), "%d", gBleState->activeConnectionCount);
   systemEventPost(SYSEVT_BLE_DISCONNECTED, remaining);
   return true;
 }
@@ -1905,7 +1905,7 @@ static bool blePipeRowEndLocked(bool match, uint32_t generation, uint16_t stream
 // server role's state is deinitBluetooth's.
 static void blePipeHostTeardown() {
   BleLifecycleGuard lifecycle;
-  if (!lifecycle || !gBLEState || (sBleStateHolders & kBleHoldServer)) return;
+  if (!lifecycle || !gBleState || (sBleStateHolders & kBleHoldServer)) return;
   (void)blePipeRowEndLocked();
   for (int i = 0; i < BLE_MAX_CONNECTIONS; ++i) bleInvalidateSessionSlotLocked(i);
 }
@@ -1933,9 +1933,9 @@ bool blePipeConsoleStateAcquire() {
   BleLifecycleGuard lifecycle;
   // The server role never shares its host with the pipe.
   if (!lifecycle || (sBleStateHolders & kBleHoldServer)) return false;
-  if (!gBLEState) {
-    gBLEState = bleNewState();  // initialized stays false: the server role is not up
-    if (!gBLEState) return false;
+  if (!gBleState) {
+    gBleState = bleNewState();  // initialized stays false: the server role is not up
+    if (!gBleState) return false;
   }
   sBleStateHolders |= kBleHoldPipe;
   return true;
@@ -1951,12 +1951,12 @@ void blePipeConsoleStateRelease() {
 bool blePipeConsoleBind(uint32_t generation, uint16_t streamId, uint16_t linkConnId) {
   const uint16_t rowId = blePipeConsoleRowId(generation);
   BleLifecycleGuard lifecycle;
-  if (!lifecycle || !gBLEState || !(sBleStateHolders & kBleHoldPipe) || streamId == 0) return false;
+  if (!lifecycle || !gBleState || !(sBleStateHolders & kBleHoldPipe) || streamId == 0) return false;
   const int bound = sBlePipeRowSlot;
-  if (bound >= 0 && gBLEState->connections[bound].active &&
-      gBLEState->connections[bound].pipeConsole &&
-      gBLEState->connections[bound].pipeGeneration == generation &&
-      gBLEState->connections[bound].pipeStream == streamId) {
+  if (bound >= 0 && gBleState->connections[bound].active &&
+      gBleState->connections[bound].pipeConsole &&
+      gBleState->connections[bound].pipeGeneration == generation &&
+      gBleState->connections[bound].pipeStream == streamId) {
     return true;  // already this stream's row
   }
   // One console row at a time: one left from an earlier stream ends first.
@@ -1966,10 +1966,10 @@ bool blePipeConsoleBind(uint32_t generation, uint16_t streamId, uint16_t linkCon
   if (findConnectionSlotByConnIdLocked(rowId) >= 0) return false;
   int slot = -1;
   for (int i = 0; i < BLE_MAX_CONNECTIONS && slot < 0; i++) {
-    if (!gBLEState->connections[i].active) slot = i;
+    if (!gBleState->connections[i].active) slot = i;
   }
   if (slot < 0) return false;
-  BLEConnection& c = gBLEState->connections[slot];
+  BleConnection& c = gBleState->connections[slot];
   c.active = true;
   c.connId = rowId;
   c.connectedSince = millis();
@@ -1994,11 +1994,11 @@ bool blePipeConsoleBind(uint32_t generation, uint16_t streamId, uint16_t linkCon
     bleClearConnectionByConnId(rowId);
     return false;
   }
-  gBLEState->activeConnectionCount++;
-  gBLEState->totalConnections++;
-  gBLEState->connectionState = BLE_STATE_CONNECTED;
-  gBLEState->deferredConnectSlot = slot;
-  gBLEState->deferredConnectPending = true;
+  gBleState->activeConnectionCount++;
+  gBleState->totalConnections++;
+  gBleState->connectionState = BLE_STATE_CONNECTED;
+  gBleState->deferredConnectSlot = slot;
+  gBleState->deferredConnectPending = true;
   systemEventPost(SYSEVT_BLE_CONNECTED, bleDeviceTypeToString(BLE_DEVICE_PHONE));
   return true;
 }
@@ -2082,7 +2082,7 @@ bool initBluetooth() {
     broadcastOutput("[BLE] Failed to create lifecycle mutex");
     return false;
   }
-  if (gBLEState && gBLEState->initialized) {
+  if (gBleState && gBleState->initialized) {
     BLE_DEBUGF(DEBUG_BLE_CORE, "Already initialized");
     return true;
   }
@@ -2120,7 +2120,7 @@ bool initBluetooth() {
 
   // Check memory before initializing BLE stack (52KB floor; BLE init measured at ~43KB + headroom)
   if (!checkMemoryAvailable("bluetooth", nullptr)) {
-    if (sBLEToggleCount > 0) {
+    if (sBleToggleCount > 0) {
       broadcastOutput("[BLE] Insufficient memory for Bluetooth (need 52KB DRAM)");
       broadcastOutput("[BLE] Free internal DRAM before restarting Bluetooth.");
     } else {
@@ -2130,9 +2130,9 @@ bool initBluetooth() {
   }
   
   // Track total free-heap change; other subsystems can allocate in this interval.
-  sBLEHeapBeforeInit = ESP.getFreeHeap();
+  sBleHeapBeforeInit = ESP.getFreeHeap();
   
-  BLESystemState* state = bleNewState();
+  BleSystemState* state = bleNewState();
   if (!state) {
     broadcastOutput("[BLE] Failed to allocate state");
     return false;
@@ -2145,8 +2145,8 @@ bool initBluetooth() {
     }
     // The pipe stopped above and gave its hold back; a state still left
     // (its stop failed partway) ends its row and goes with the old host.
-    if (gBLEState) bleStateRetireLocked();
-    gBLEState = state;
+    if (gBleState) bleStateRetireLocked();
+    gBleState = state;
     sBleStateHolders = kBleHoldServer;
   }
 
@@ -2162,7 +2162,7 @@ bool initBluetooth() {
     if (rollback.success) bleCentralClientsTerminalTeardownAcknowledged();
     if (!rollback.success) bleStackSetLifecycleFault(true);
     BleLifecycleGuard lifecycle;
-    if (lifecycle && gBLEState) bleStateRetireLocked();
+    if (lifecycle && gBleState) bleStateRetireLocked();
     return false;
   }
 
@@ -2268,10 +2268,10 @@ bool initBluetooth() {
 
   {
     BleLifecycleGuard lifecycle;
-    if (!lifecycle || !gBLEState) return false;
-    gBLEState->initialized = true;
+    if (!lifecycle || !gBleState) return false;
+    gBleState->initialized = true;
     sBleServerStateInitialized.store(true);
-    gBLEState->connectionState = BLE_STATE_IDLE;
+    gBleState->connectionState = BLE_STATE_IDLE;
     sBleConsoleMode.store(hw1console::Mode::Server);
   }
   sBleServerUp.store(true);
@@ -2296,7 +2296,7 @@ bool deinitBluetooth() {
   }
   {
     BleLifecycleGuard lifecycle;
-    if (!lifecycle || !gBLEState || !gBLEState->initialized) return true;
+    if (!lifecycle || !gBleState || !gBleState->initialized) return true;
   }
 
   // Drop R1 GATT pointers before the stack dies. openg2 often deinit's
@@ -2326,13 +2326,13 @@ bool deinitBluetooth() {
         }
         sBleGattsIf.store(ESP_GATT_IF_NONE, std::memory_order_release);
       }
-      stopBLEAdvertising();
+      stopBleAdvertising();
     }
     return false;
   }
   {
     BleLifecycleGuard lifecycle;
-    if (!lifecycle || !gBLEState || !gBLEState->initialized) return true;
+    if (!lifecycle || !gBleState || !gBleState->initialized) return true;
     sBleServerUp.store(false);
     // Admission closes before the stack and characteristic objects are torn
     // down.  Any queued result carrying an old epoch now fails closed.
@@ -2343,7 +2343,7 @@ bool deinitBluetooth() {
   
   BLE_DEBUGF(DEBUG_BLE_CORE, "Deinitializing Bluetooth...");
   
-  stopBLEAdvertising();
+  stopBleAdvertising();
 
   // ESP32 BLE doesn't have a clean disconnect API like NimBLE
   // Just deinit the device
@@ -2389,19 +2389,19 @@ bool deinitBluetooth() {
   // Free and clear state (the pipe stopped above: no other holder shares it)
   {
     BleLifecycleGuard lifecycle;
-    if (lifecycle && gBLEState) {
+    if (lifecycle && gBleState) {
       bleStateRetireLocked();
       sBleConsoleMode.store(hw1console::Mode::Off);
     }
   }
 
-  sBLEToggleCount++;
+  sBleToggleCount++;
   size_t heapAfterDeinit = ESP.getFreeHeap();
-  int leaked = (int)sBLEHeapBeforeInit - (int)heapAfterDeinit;
+  int leaked = (int)sBleHeapBeforeInit - (int)heapAfterDeinit;
   if (leaked > 0) {
     char buf[96];
     snprintf(buf, sizeof(buf), "[BLE] Deinitialized (heap change since start: -%dKB, %d toggle%s total)",
-             leaked / 1024, sBLEToggleCount, sBLEToggleCount == 1 ? "" : "s");
+             leaked / 1024, sBleToggleCount, sBleToggleCount == 1 ? "" : "s");
     broadcastOutput(buf);
   } else {
     broadcastOutput("[BLE] Deinitialized");
@@ -2455,7 +2455,7 @@ bool bleConsoleRegisterOnClientHost() {
     return false;
   }
 
-  BLESystemState* state = bleNewState();
+  BleSystemState* state = bleNewState();
   if (!state) {
     broadcastOutput("[BLE] App console not registered: no memory for its state");
     return false;
@@ -2468,8 +2468,8 @@ bool bleConsoleRegisterOnClientHost() {
     }
     // The pipe may hold a state already (its console row lives there): the
     // command service joins it, and the new one goes unused.
-    if (!gBLEState) {
-      gBLEState = state;  // initialized stays false: the server role is not up
+    if (!gBleState) {
+      gBleState = state;  // initialized stays false: the server role is not up
       state = nullptr;
     }
     sBleStateHolders |= kBleHoldClientConsole;
@@ -2557,7 +2557,7 @@ void bleConsoleHostTeardownBegin() {
 
 void bleConsoleHostTeardownEnd(bool stopped) {
   // An incomplete stop keeps Arduino's callback targets, and the status read
-  // callback reads gBLEState: the state stays, closed, until a stop completes.
+  // callback reads gBleState: the state stays, closed, until a stop completes.
   // A pipe still holding it (its row ended at Begin) keeps it for its next host.
   if (!stopped || !bleConsoleClientHost()) return;
   {
@@ -2573,12 +2573,12 @@ void bleConsoleHostTeardownEnd(bool stopped) {
 // ADVERTISING CONTROL
 // =============================================================================
 
-bool startBLEAdvertising() {
-  // gBLEState is read under the lifecycle lock (isBLEConnected).
+bool startBleAdvertising() {
+  // gBleState is read under the lifecycle lock (isBleConnected).
   bool up = false, started = false;
   {
     BleLifecycleGuard lifecycle;
-    up = lifecycle && gBLEState && gBLEState->initialized;
+    up = lifecycle && gBleState && gBleState->initialized;
     started = up && bleAdvertiseIfRoomLocked();
   }
   if (!up) {
@@ -2594,13 +2594,13 @@ bool startBLEAdvertising() {
   return true;
 }
 
-void stopBLEAdvertising() {
+void stopBleAdvertising() {
   BleLifecycleGuard lifecycle;
-  if (!lifecycle || !gBLEState || !gBLEState->initialized) return;
+  if (!lifecycle || !gBleState || !gBleState->initialized) return;
   if (pAdvertising && sBleAdvertising.exchange(false)) {
     BLEDevice::stopAdvertising();
-    if (gBLEState->connectionState == BLE_STATE_ADVERTISING) {
-      gBLEState->connectionState = BLE_STATE_IDLE;
+    if (gBleState->connectionState == BLE_STATE_ADVERTISING) {
+      gBleState->connectionState = BLE_STATE_IDLE;
     }
     BLE_DEBUGF(DEBUG_BLE_CORE, "Advertising stopped");
   }
@@ -2609,7 +2609,7 @@ void stopBLEAdvertising() {
 bool bleAdvertising() { return sBleAdvertising.load(); }
 bool bleServerUp() { return sBleServerUp.load(); }
 
-static bool bleIsPeerLinkType(BLEDeviceType type);
+static bool bleIsPeerLinkType(BleDeviceType type);
 
 BleConsoleView bleConsoleView() {
   // Never blocks: read under the lifecycle lock when it is free, otherwise the
@@ -2620,10 +2620,10 @@ BleConsoleView bleConsoleView() {
   {
     BleLifecycleGuard lifecycle(0);
     if (lifecycle) {
-      const bool server = gBLEState && gBLEState->initialized;
+      const bool server = gBleState && gBleState->initialized;
       // The client host's console rides the phone pipe's link: one slot at
       // most, an app only once it has joined the slot.
-      const bool client = gBLEState && !server &&
+      const bool client = gBleState && !server &&
                           bleConsoleClientHost();
       if (server || client) {
         view.up = server;
@@ -2635,8 +2635,8 @@ BleConsoleView bleConsoleView() {
       }
       // The pipe's console stream has its own row on the client stack (the
       // pipe holds the state when the glasses are closed): it counts once bound.
-      for (int i = 0; gBLEState && i < BLE_MAX_CONNECTIONS; ++i) {
-        const BLEConnection& c = gBLEState->connections[i];
+      for (int i = 0; gBleState && i < BLE_MAX_CONNECTIONS; ++i) {
+        const BleConnection& c = gBleState->connections[i];
         if (!c.active || bleIsPeerLinkType(c.deviceType)) continue;
         if (!blePipeRow(c) && !server && !view.attached) continue;
         ++view.clients;
@@ -2659,18 +2659,18 @@ BleConsoleView bleConsoleView() {
 // CONNECTION MANAGEMENT
 // =============================================================================
 
-// Any task but one holding a pipe lock. gBLEState's last holder frees it on
+// Any task but one holding a pipe lock. gBleState's last holder frees it on
 // its own task (the pipe's on `closephone` when the glasses are closed), so it
 // is read under the lifecycle lock.
-bool isBLEConnected() {
+bool isBleConnected() {
   BleLifecycleGuard lifecycle;
-  return lifecycle && gBLEState && gBLEState->connectionState == BLE_STATE_CONNECTED;
+  return lifecycle && gBleState && gBleState->connectionState == BLE_STATE_CONNECTED;
 }
 
 // G2 temples and the R1 ring are links this device opened as central; the GATT
 // server still gives them a slot (typed by MAC in onConnect). bledisconnect
 // never closes them; their owners have their own disconnect commands.
-static bool bleIsPeerLinkType(BLEDeviceType type) {
+static bool bleIsPeerLinkType(BleDeviceType type) {
   return type == BLE_DEVICE_GLASSES_LEFT || type == BLE_DEVICE_GLASSES_RIGHT ||
          type == BLE_DEVICE_RING;
 }
@@ -2680,16 +2680,16 @@ BleDisconnectResult bleDisconnectConnection(uint16_t connId) {
   PipeConsoleTarget renew;
   {
     BleLifecycleGuard lifecycle;
-    if (!lifecycle || !gBLEState) return BleDisconnectResult::UNAVAILABLE;
+    if (!lifecycle || !gBleState) return BleDisconnectResult::UNAVAILABLE;
     const int slot = findConnectionSlotByConnIdLocked(connId);
     // The phone link's console row, in any mode: its session ends now and its
     // stream is renewed once it drains (CLOSE 2); the pipe keeps the link.
-    if (slot >= 0 && blePipeRow(gBLEState->connections[slot])) {
+    if (slot >= 0 && blePipeRow(gBleState->connections[slot])) {
       (void)blePipeRowEndLocked(/*match=*/false, 0, 0, &renew);
     } else {
       if (!pServer) return BleDisconnectResult::UNAVAILABLE;
       if (slot < 0) return BleDisconnectResult::NOT_FOUND;
-      if (bleIsPeerLinkType(gBLEState->connections[slot].deviceType)) {
+      if (bleIsPeerLinkType(gBleState->connections[slot].deviceType)) {
         return BleDisconnectResult::PEER_LINK;
       }
       // The client host's console: the pipe owns the link, so only the session
@@ -2723,7 +2723,7 @@ int bleDisconnectAppClients() {
   PipeConsoleTarget renew;
   {
     BleLifecycleGuard lifecycle;
-    if (!lifecycle || !gBLEState) return 0;
+    if (!lifecycle || !gBleState) return 0;
     // The phone link's console row ends at once, in any mode (bleDisconnectConnection).
     if (blePipeRowEndLocked(/*match=*/false, 0, 0, &renew)) ++ended;
     if (!pServer) {
@@ -2736,7 +2736,7 @@ int bleDisconnectAppClients() {
       if (plan.clear) ++ended;
     } else {
       for (int i = 0; i < BLE_MAX_CONNECTIONS; i++) {
-        const BLEConnection& c = gBLEState->connections[i];
+        const BleConnection& c = gBleState->connections[i];
         if (!c.active || bleIsPeerLinkType(c.deviceType)) continue;
         ids[count++] = c.connId;
       }
@@ -2764,7 +2764,7 @@ int bleDisconnectAppClients() {
 // every epoch under the same mutex before the GATT tree is deleted) cannot race a send.
 // The secure-channel encryptor and its handshake replies (System_BleSecureChannel.cpp)
 // emit through this; it does NOT encrypt. Everything that is *output* (results, streamed
-// CLI text) goes through sendBLEResponse()/sendBLEResponseToSession() instead, which
+// CLI text) goes through sendBleResponse()/sendBleResponseToSession() instead, which
 // encrypt when a channel is up.
 //
 // Bounded backpressure: an admission that fails (the controller's ACL tx buffers are
@@ -2877,7 +2877,7 @@ bool bleRawNotifyToSession(uint16_t connId,
             lastError = esp_ble_gatts_send_indicate(
                 gattsIf, connId, handle, len,
                 reinterpret_cast<uint8_t*>(const_cast<char*>(data)), false);
-            if (lastError == ESP_OK && gBLEState) gBLEState->responsesSent++;
+            if (lastError == ESP_OK && gBleState) gBleState->responsesSent++;
           }
         }
         if (unlocked) {
@@ -2886,7 +2886,7 @@ bool bleRawNotifyToSession(uint16_t connId,
               reinterpret_cast<uint8_t*>(const_cast<char*>(data)), false);
           if (lastError == ESP_OK) {
             BleLifecycleGuard lifecycle;
-            if (lifecycle && gBLEState) gBLEState->responsesSent++;
+            if (lifecycle && gBleState) gBleState->responsesSent++;
           }
           sBleConsoleSendsInFlight.fetch_sub(1);
         }
@@ -2941,7 +2941,7 @@ constexpr size_t kBlePipeMirrorMax = 512;
 // BLOB from cmd_exec wait for room within the driver's stall bounds; anything
 // else is offered once (TryNow) and dropped, counted by the driver, when the
 // stream has no room. A mirror whose first record went out counts as
-// delivered: sendBLEResponse never resends to a session that has part of it.
+// delivered: sendBleResponse never resends to a session that has part of it.
 static bool blePipeWrite(const PipeConsoleTarget& target, TransportSessionEpoch epoch,
                          PipeConsoleKind kind, const char* data, size_t len, bool blocking) {
   const bool chain = kind == PipeConsoleKind::Text || kind == PipeConsoleKind::Blob;
@@ -2980,7 +2980,7 @@ static bool bleSendToSession(uint16_t connId, TransportSessionEpoch expectedEpoc
         !bleConnectionEpochMatchesLocked(connId, expectedEpoch)) {
       return false;
     }
-    const BLEConnection& c = gBLEState->connections[findConnectionSlotByConnIdLocked(connId)];
+    const BleConnection& c = gBleState->connections[findConnectionSlotByConnIdLocked(connId)];
     pipe = blePipeRow(c);
     if (pipe) {
       target = PipeConsoleTarget{c.pipeGeneration, c.pipeStream};
@@ -3014,7 +3014,7 @@ static bool bleSendToSession(uint16_t connId, TransportSessionEpoch expectedEpoc
   return bleRawNotifyToSession(connId, expectedEpoch, data, len, blocking);
 }
 
-bool sendBLEResponseToSession(uint16_t connId,
+bool sendBleResponseToSession(uint16_t connId,
                               TransportSessionEpoch expectedEpoch,
                               const char* data, size_t len, bool blocking) {
   return bleSendToSession(connId, expectedEpoch, PipeConsoleKind::Text, data, len, blocking);
@@ -3029,7 +3029,7 @@ bool bleSendBinaryToSession(uint16_t connId, TransportSessionEpoch epoch,
 bool bleSessionConfidential(uint16_t connId, TransportSessionEpoch epoch) {
   BleLifecycleGuard lifecycle;
   if (!lifecycle || !bleConnectionEpochMatchesLocked(connId, epoch)) return false;
-  return blePipeRow(gBLEState->connections[findConnectionSlotByConnIdLocked(connId)]) ||
+  return blePipeRow(gBleState->connections[findConnectionSlotByConnIdLocked(connId)]) ||
          bleScEstablished(connId);
 }
 
@@ -3039,10 +3039,10 @@ bool bleSessionConfidential(uint16_t connId, TransportSessionEpoch epoch) {
 // like every other paced sender in this file.
 static int bleCollectMirrorSessions(BleSessionFence* out, int cap) {
   BleLifecycleGuard lifecycle;
-  if (!lifecycle || !gBLEState) return 0;
+  if (!lifecycle || !gBleState) return 0;
   int count = 0;
   for (int i = 0; i < BLE_MAX_CONNECTIONS && count < cap; ++i) {
-    const BLEConnection& c = gBLEState->connections[i];
+    const BleConnection& c = gBleState->connections[i];
     if (!c.active || !c.authed || !c.mirrorEligible || c.user.length() == 0) continue;
     const TransportSessionEpoch epoch =
         sBleSessionEpoch[i].load(std::memory_order_acquire);
@@ -3053,7 +3053,7 @@ static int bleCollectMirrorSessions(BleSessionFence* out, int cap) {
 }
 
 // The debug console mirror's "has a recipient" predicate and the `outble`
-// status count: the same collector sendBLEResponse uses, so the drain buffers
+// status count: the same collector sendBleResponse uses, so the drain buffers
 // exactly when a flush could reach somebody (with only guest sessions logged
 // in it used to fill and drop its buffer for nothing).
 int bleMirrorRecipientCount() {
@@ -3066,11 +3066,11 @@ int bleMirrorRecipientCount() {
 // gets its own directed notify, or its own encrypted frames when it holds a
 // Secure Channel; a peer that never logged in, a peer holding only a channel and
 // a guest session receive nothing, and the characteristic-wide notify is never
-// used.  sendBLEResponseToSession refuses plaintext for a session without a
+// used.  sendBleResponseToSession refuses plaintext for a session without a
 // channel when the channel is required.  Returns true when at least one session
 // accepted the buffer, false only when nobody received it, so a caller that
 // retries on false never resends to a session that already has the data.
-bool sendBLEResponse(const char* data, size_t len, bool blocking) {
+bool sendBleResponse(const char* data, size_t len, bool blocking) {
   if (!data || len == 0) return false;
   BleSessionFence sessions[BLE_MAX_CONNECTIONS];
   const int count = bleCollectMirrorSessions(sessions, BLE_MAX_CONNECTIONS);
@@ -3101,15 +3101,15 @@ bool sendBLEResponse(const char* data, size_t len, bool blocking) {
 // cmd_exec runs a command from a Bluetooth session (ORIGIN_BLUETOOTH, whose
 // replyHandle is its BleCommandReplyContext) the line joins that command's
 // batch. A full batch is sent at once and the rest just before the result,
-// through sendBLEResponseToSession like the result itself: reliable, on the
+// through sendBleResponseToSession like the result itself: reliable, on the
 // session's own channel and fenced on its epoch. A session the mirror already
 // streams to gets the lines from the mirror only, never twice. Only cmd_exec
 // holds a Bluetooth command context, so none of this runs on BTC_TASK.
 
 // The debug drain's mirror condition (System_Debug.cpp), for one session:
-// `outble` is on and the session is one of sendBLEResponse's recipients.
+// `outble` is on and the session is one of sendBleResponse's recipients.
 static bool bleMirrorReachesSession(TransportSessionEpoch epoch) {
-  if (!(gOutputFlags & MSG_ROUTE_BLE) || !isBLEConnected()) return false;
+  if (!(gOutputFlags & MSG_ROUTE_BLE) || !isBleConnected()) return false;
   BleSessionFence sessions[BLE_MAX_CONNECTIONS];
   const int count = bleCollectMirrorSessions(sessions, BLE_MAX_CONNECTIONS);
   for (int i = 0; i < count; ++i) {
@@ -3126,7 +3126,7 @@ static void bleCommandOutputFlush(BleCommandReplyContext* reply) {
   reply->outputLen = 0;
   if (len == 0 || reply->sendFailed || bleMirrorReachesSession(reply->sessionEpoch)) return;
   bleTxTrace("output", reply->connId, reply->output, len);
-  if (!sendBLEResponseToSession(reply->connId, reply->sessionEpoch, reply->output, len) &&
+  if (!sendBleResponseToSession(reply->connId, reply->sessionEpoch, reply->output, len) &&
       bleIsPipeRowId(reply->connId)) {
     reply->sendFailed = true;
   }
@@ -3141,7 +3141,7 @@ void bleCommandOutputLine(const char* text, size_t len) {
   const bool cut = len > kMax - 1;
   if (cut) len = kMax - 1;
   if (reply->outputLen + len + 1 > kMax) {
-    // A send needs the lifecycle lock free (sendBLEResponseToSession), so a
+    // A send needs the lifecycle lock free (sendBleResponseToSession), so a
     // line printed under it (BLE_DEBUGF in a locked helper) that would need
     // one is left to the other sinks. So is one printed while this task holds
     // the console chain or pipe owner mutex (an owner command's output): the
@@ -3162,35 +3162,35 @@ void bleCommandOutputLine(const char* text, size_t len) {
 void bleSessionTick() {
   {
     BleLifecycleGuard lifecycle;
-    if (!lifecycle || !gBLEState) return;
+    if (!lifecycle || !gBleState) return;
 
     // Handle deferred callback flags while the backing state cannot be freed or
     // reused underneath this task.
-    if (gBLEState->deferredConnectPending) {
-      gBLEState->deferredConnectPending = false;
-      int slot = gBLEState->deferredConnectSlot;
+    if (gBleState->deferredConnectPending) {
+      gBleState->deferredConnectPending = false;
+      int slot = gBleState->deferredConnectSlot;
       BLE_DEBUGF(DEBUG_BLE_CORE, "Client connected (slot %d, total active: %d/%d)",
-                 slot, gBLEState->activeConnectionCount, BLE_MAX_CONNECTIONS);
-      if (gBLEState->activeConnectionCount >= BLE_MAX_CONNECTIONS) {
+                 slot, gBleState->activeConnectionCount, BLE_MAX_CONNECTIONS);
+      if (gBleState->activeConnectionCount >= BLE_MAX_CONNECTIONS) {
         BLE_DEBUGF(DEBUG_BLE_CORE, "Max connections reached - stopped advertising");
       }
     }
 
-    if (gBLEState->deferredDisconnectPending) {
-      gBLEState->deferredDisconnectPending = false;
+    if (gBleState->deferredDisconnectPending) {
+      gBleState->deferredDisconnectPending = false;
       BLE_DEBUGF(DEBUG_BLE_CORE, "Client disconnected (active connections: %d)",
-                 gBLEState->deferredDisconnectActiveCount);
-      if (gBLEState->deferredDisconnectActiveCount < BLE_MAX_CONNECTIONS) {
+                 gBleState->deferredDisconnectActiveCount);
+      if (gBleState->deferredDisconnectActiveCount < BLE_MAX_CONNECTIONS) {
         BLE_DEBUGF(DEBUG_BLE_CORE, "Auto-restarted advertising (slots available)");
       }
       if (!bleHasAuthenticatedSession()) gOutputFlags &= ~MSG_ROUTE_BLE;
     }
 
-    if (gBLEState->deferredCmdReceivedPending) {
-      gBLEState->deferredCmdReceivedPending = false;
+    if (gBleState->deferredCmdReceivedPending) {
+      gBleState->deferredCmdReceivedPending = false;
       BLE_DEBUGF(DEBUG_BLE_GATT, "Command received (%d bytes) conn_id=%u",
-                 (int)gBLEState->deferredCmdReceivedLen,
-                 (unsigned)gBLEState->deferredCmdReceivedConnId);
+                 (int)gBleState->deferredCmdReceivedLen,
+                 (unsigned)gBleState->deferredCmdReceivedConnId);
     }
   }
 
@@ -3203,14 +3203,14 @@ void bleSessionTick() {
     bool retry = false;
     {
       BleLifecycleGuard lifecycle;
-      if (!lifecycle || !gBLEState) return;
+      if (!lifecycle || !gBleState) return;
       // Read the clock under the lock every lastActivityMs writer holds. A
       // clock read before it (while cmd_exec stamped a command, or while
       // an earlier slot's notice was sent) is older than that stamp, so the
       // idle time underflowed and a session that had just run a command was
       // logged out.
       const uint32_t now = millis();
-      BLEConnection& conn = gBLEState->connections[i];
+      BleConnection& conn = gBleState->connections[i];
       // A console row's notice that found its stream full is offered again
       // while that signed-out session lasts; a login, logout or end drops it.
       if (conn.active && conn.noticePending &&
@@ -3253,16 +3253,16 @@ void bleSessionTick() {
     snprintf(msg, sizeof(msg), "[ble] Session expired for user '%s'",
              expiredUser.c_str());
     if (!pipe) {
-      sendBLEResponseToSession(connId, logoutEpoch, msg, strlen(msg));
+      sendBleResponseToSession(connId, logoutEpoch, msg, strlen(msg));
     } else {
       // The console row's notice is one TEXT record offered now (this is the
       // main loop, which never waits for a stream); the app reads it as the
       // session's end, so a full stream keeps it for the next tick.
-      const bool sent = sendBLEResponseToSession(connId, logoutEpoch, msg, strlen(msg),
+      const bool sent = sendBleResponseToSession(connId, logoutEpoch, msg, strlen(msg),
                                                  /*blocking=*/false);
       BleLifecycleGuard lifecycle;
       if (lifecycle && bleConnectionEpochMatchesLocked(connId, logoutEpoch)) {
-        BLEConnection& conn = gBLEState->connections[findConnectionSlotByConnIdLocked(connId)];
+        BleConnection& conn = gBleState->connections[findConnectionSlotByConnIdLocked(connId)];
         conn.noticePending = !sent;
         conn.noticeEpoch = sent ? 0 : logoutEpoch;
         conn.noticeUser = sent ? String() : expiredUser;
@@ -3413,20 +3413,20 @@ bool isBluedroidHostEnabled() {
   return bluetoothHalStatus().hostEnabled;
 }
 
-// Any task, never blocks (display frames ask): gBLEState is read under the
+// Any task, never blocks (display frames ask): gBleState is read under the
 // lifecycle lock when that is free, otherwise its mirror. Its last holder
 // frees it on its own task (the pipe's on `closephone`).
 bool isBleServerInitialized() {
   BleLifecycleGuard lifecycle(0);
   if (!lifecycle) return sBleServerStateInitialized.load();
-  return gBLEState && gBLEState->initialized;
+  return gBleState && gBleState->initialized;
 }
 
 // The caller holds the lifecycle lock (one snapshot reads it with the rest).
 static const char* bleStateTextLocked() {
-  if (!gBLEState || !gBLEState->initialized) return "uninitialized";
+  if (!gBleState || !gBleState->initialized) return "uninitialized";
   
-  switch (gBLEState->connectionState) {
+  switch (gBleState->connectionState) {
     case BLE_STATE_IDLE:        return "idle";
     case BLE_STATE_ADVERTISING: return "advertising";
     case BLE_STATE_SCANNING:    return "scanning";
@@ -3437,8 +3437,8 @@ static const char* bleStateTextLocked() {
   }
 }
 
-const char* getBLEStateString() {
-  BleLifecycleGuard lifecycle;  // gBLEState is read under it (isBLEConnected)
+const char* getBleStateString() {
+  BleLifecycleGuard lifecycle;  // gBleState is read under it (isBleConnected)
   return lifecycle ? bleStateTextLocked() : "uninitialized";
 }
 
@@ -3475,7 +3475,7 @@ static const char* cmd_openconsole(const String& argsInput) {
   vTaskDelay(pdMS_TO_TICKS(50));  // Let pending I2C ops complete
 
   bool initOk = initBluetooth();   // closes the devices and the client stack first
-  bool advOk = initOk ? startBLEAdvertising() : false;
+  bool advOk = initOk ? startBleAdvertising() : false;
   // A failed start leaves the radio as it was: saved role back, and the client
   // stack back for the devices initBluetooth closed before its host start
   // failed (a refusal before any teardown left the stack up; bleStackUp is then
@@ -3574,7 +3574,7 @@ static const char* cmd_closeble(const String& /*argsInput*/) {
   return "Bluetooth off (devices closed, host stopped, workers released)";
 }
 
-// One guarded copy of the live BLE status. buildBLEInfoJson (bleinfo json and
+// One guarded copy of the live BLE status. buildBleInfoJson (bleinfo json and
 // the web status) and blestatus/bleread (text and json) all render from it, so
 // every view reports the same client set with the same identity facts.
 struct BleStatusSnapshot {
@@ -3599,23 +3599,23 @@ struct BleStatusSnapshot {
 
 // Copies the live status under the lifecycle guard (bounded 100 ms wait).
 // Before the first server start there is no mutex and no published state, so
-// the snapshot stays "uninitialized" without dereferencing gBLEState. Once
+// the snapshot stays "uninitialized" without dereferencing gBleState. Once
 // created, the mutex survives server stops and protects this copy against the
 // BTC_TASK callbacks and state deletion. Returns false only when the mutex
 // exists and stays busy past the wait.
 static bool bleCaptureStatusSnapshot(BleStatusSnapshot& out) {
   BleLifecycleGuard lifecycle(pdMS_TO_TICKS(100));
   if (sBleLifecycleMutex && !lifecycle) return false;
-  if (!lifecycle || !gBLEState || !gBLEState->initialized) return true;
+  if (!lifecycle || !gBleState || !gBleState->initialized) return true;
   out.initialized = true;
   out.state = bleStateTextLocked();
-  out.activeConnections = gBLEState->activeConnectionCount;
-  out.totalConnections = gBLEState->totalConnections;
-  out.commandsReceived = gBLEState->commandsReceived;
-  out.responsesSent = gBLEState->responsesSent;
+  out.activeConnections = gBleState->activeConnectionCount;
+  out.totalConnections = gBleState->totalConnections;
+  out.commandsReceived = gBleState->commandsReceived;
+  out.responsesSent = gBleState->responsesSent;
   const uint32_t now = millis();
   for (int i = 0; i < BLE_MAX_CONNECTIONS; i++) {
-    const BLEConnection& c = gBLEState->connections[i];
+    const BleConnection& c = gBleState->connections[i];
     if (!c.active) continue;
     BleStatusSnapshot::Client& o = out.clients[out.clientCount++];
     o.slot = i;
@@ -4047,11 +4047,11 @@ static const char* cmd_bleadv(const String& argsInput) {
   // Optional argument: start (default) / stop / toggle.
   String a = argsInput; a.trim(); a.toLowerCase();
   if (a == "stop" || (a == "toggle" && bleAdvertising())) {
-    stopBLEAdvertising();
+    stopBleAdvertising();
     BLE_DEBUGF(DEBUG_BLE_CORE, "bleadv stop");
     return "Advertising stopped";
   }
-  if (startBLEAdvertising()) {
+  if (startBleAdvertising()) {
     BLE_DEBUGF(DEBUG_BLE_CORE, "bleadv manual trigger success");
     return "Advertising started";
   }
@@ -4060,7 +4060,7 @@ static const char* cmd_bleadv(const String& argsInput) {
 }
 
 static const char* cmd_blesend(const String& argsInput) {
-  if (!isBLEConnected()) {
+  if (!isBleConnected()) {
     return "Error: No client connected";
   }
   
@@ -4072,7 +4072,7 @@ static const char* cmd_blesend(const String& argsInput) {
     return "Error: invalid arguments — Usage: blesend <message>";
   }
   
-  if (sendBLEResponse(msg, strlen(msg))) {
+  if (sendBleResponse(msg, strlen(msg))) {
     BLE_DEBUGF(DEBUG_BLE_DATA, "blesend transmitted len=%u", (unsigned)strlen(msg));
     cliHint("this pushes raw text to the client; it does not run a command - to check the connection, run 'blestatus'");
     return "Message sent via BLE";
@@ -4113,18 +4113,18 @@ static const char* cmd_blestream(const String& argsInput) {
   if (a.count() == 0) {
     // Show current status
     if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-    // One reading, under the lifecycle lock (isBLEConnected).
+    // One reading, under the lifecycle lock (isBleConnected).
     uint8_t flags = 0;
     uint32_t sensorMs = 0, systemMs = 0, sensors = 0, systems = 0, events = 0;
     {
       BleLifecycleGuard lifecycle;
-      if (!lifecycle || !gBLEState) return "Error: Bluetooth not initialized";
-      flags = gBLEState->streamFlags;
-      sensorMs = gBLEState->sensorStreamInterval;
-      systemMs = gBLEState->systemStreamInterval;
-      sensors = gBLEState->sensorStreamCount;
-      systems = gBLEState->systemStreamCount;
-      events = gBLEState->eventCount;
+      if (!lifecycle || !gBleState) return "Error: Bluetooth not initialized";
+      flags = gBleState->streamFlags;
+      sensorMs = gBleState->sensorStreamInterval;
+      systemMs = gBleState->systemStreamInterval;
+      sensors = gBleState->sensorStreamCount;
+      systems = gBleState->systemStreamCount;
+      events = gBleState->eventCount;
     }
     char* buf = getDebugBuffer();
     snprintf(buf, 1024, "Streaming: sensors=%s system=%s events=%s",
@@ -4191,7 +4191,7 @@ static const char* cmd_bleevent(const String& argsInput) {
   if (!isBleServerInitialized() && (bleConsoleClientHost() || phonePipeActive())) {
     return kBlePhoneLinkNoDataService;
   }
-  if (!isBLEConnected()) {
+  if (!isBleConnected()) {
     return "Error: No client connected";
   }
   
@@ -4285,7 +4285,7 @@ static const char* cmd_bletxpower(const String& argsInput) {
   return buf;
 }
 
-bool buildBLEInfoJson(JsonObject out) {
+bool buildBleInfoJson(JsonObject out) {
   if (out.isNull()) return false;
   out["schema"]              = 1;
   out["deviceName"]     = gSettings.bleDeviceName;
@@ -4323,11 +4323,11 @@ static const char* cmd_bleinfo(const String& argsInput) {
   // Structured path: BLE config + live state, one verbatim JSON blob via the
   // return value. No broadcastOutput. ArduinoJson escapes the user-settable
   // device name correctly. No secrets emitted. A pipe build adds the phone
-  // link block beside buildBLEInfoJson's keys (that object is also
+  // link block beside buildBleInfoJson's keys (that object is also
   // /api/ble/status `ble`, which carries the block as its own `phoneLink`).
   if (argWantsJson(argsInput)) {
     PSRAM_JSON_DOC(doc);
-    const bool available = buildBLEInfoJson(doc.to<JsonObject>());
+    const bool available = buildBleInfoJson(doc.to<JsonObject>());
     if (available && ENABLE_BLE_PHONE_PIPE) {
       bleLinkPhoneJson(doc["phoneLink"].to<JsonObject>(), bleLinkStatus(), true);
     }
@@ -4353,14 +4353,14 @@ static const char* cmd_bleinfo(const String& argsInput) {
   w = snprintf(buf + pos, rem, "Auto-Start:   %s\n", gSettings.bleAutoStart  ? "Yes" : "No");       if (w > 0) { pos += w; rem -= w; }
   w = snprintf(buf + pos, rem, "Require Auth: %s\n", gSettings.bleRequireAuth ? "Yes" : "No");      if (w > 0) { pos += w; rem -= w; }
 
-  // One reading under the lifecycle lock (isBLEConnected).
+  // One reading under the lifecycle lock (isBleConnected).
   const char* stateText = nullptr;
   int connections = 0;
   {
     BleLifecycleGuard lifecycle;
-    if (lifecycle && gBLEState && gBLEState->initialized) {
+    if (lifecycle && gBleState && gBleState->initialized) {
       stateText = bleStateTextLocked();
-      connections = gBLEState->activeConnectionCount;
+      connections = gBleState->activeConnectionCount;
     }
   }
   if (stateText) {
@@ -4465,7 +4465,7 @@ const char* bleSubsystemStateString() {
     return getG2StateString();
   }
 #endif
-  if (isBleServerInitialized()) return getBLEStateString();
+  if (isBleServerInitialized()) return getBleStateString();
 #if ENABLE_G2_GLASSES
   if (isG2ClientInitialized()) return getG2StateString();
 #endif
@@ -4684,7 +4684,7 @@ int bleGetRecentMessages(const char* out[], int maxLines) {
 // Data-service streams (sensor, system and event characteristics) are plaintext
 // and outside the Secure Channel; callers suppress them when a channel is
 // required. Otherwise they go to the console-mirror recipients (logged-in,
-// verified non-guest sessions, the rule sendBLEResponse uses) as one directed
+// verified non-guest sessions, the rule sendBleResponse uses) as one directed
 // notify per recipient, never the characteristic-wide notify(), which the
 // Arduino wrapper fans out to every connected peer. One attempt per recipient:
 // the streams are periodic best-effort, so a busy link misses one sample.
@@ -4716,7 +4716,7 @@ static bool bleStreamNotifyDirected(BLECharacteristic* ch, const char* data, siz
 }
 
 bool blePushSensorData(const char* jsonData, size_t len) {
-  if (!isBLEConnected() || !pSensorDataChar) {
+  if (!isBleConnected() || !pSensorDataChar) {
     return false;
   }
   // The Data-service streams are NOT part of the Secure Channel (separate chars).
@@ -4725,32 +4725,32 @@ bool blePushSensorData(const char* jsonData, size_t len) {
 
   if (!bleStreamNotifyDirected(pSensorDataChar, jsonData, len)) return false;
   
-  BleLifecycleGuard lifecycle;  // the count lives in gBLEState (isBLEConnected)
-  if (lifecycle && gBLEState) {
-    gBLEState->sensorStreamCount++;
+  BleLifecycleGuard lifecycle;  // the count lives in gBleState (isBleConnected)
+  if (lifecycle && gBleState) {
+    gBleState->sensorStreamCount++;
   }
   
   return true;
 }
 
 bool blePushSystemStatus(const char* jsonData, size_t len) {
-  if (!isBLEConnected() || !pSystemStatusChar) {
+  if (!isBleConnected() || !pSystemStatusChar) {
     return false;
   }
   if (bleScRequired()) return false;  // not on the Secure Channel — don't leak plaintext
 
   if (!bleStreamNotifyDirected(pSystemStatusChar, jsonData, len)) return false;
   
-  BleLifecycleGuard lifecycle;  // the count lives in gBLEState (isBLEConnected)
-  if (lifecycle && gBLEState) {
-    gBLEState->systemStreamCount++;
+  BleLifecycleGuard lifecycle;  // the count lives in gBleState (isBleConnected)
+  if (lifecycle && gBleState) {
+    gBleState->systemStreamCount++;
   }
   
   return true;
 }
 
-bool blePushEvent(BLEEventType eventType, const char* message, const char* details) {
-  if (!isBLEConnected() || !pEventNotifyChar) {
+bool blePushEvent(BleEventType eventType, const char* message, const char* details) {
+  if (!isBleConnected() || !pEventNotifyChar) {
     return false;
   }
   if (bleScRequired()) return false;  // not on the Secure Channel — don't leak plaintext
@@ -4800,9 +4800,9 @@ bool blePushEvent(BLEEventType eventType, const char* message, const char* detai
 
   if (!bleStreamNotifyDirected(pEventNotifyChar, eventJson, (size_t)pos)) return false;
   
-  BleLifecycleGuard lifecycle;  // the count lives in gBLEState (isBLEConnected)
-  if (lifecycle && gBLEState) {
-    gBLEState->eventCount++;
+  BleLifecycleGuard lifecycle;  // the count lives in gBleState (isBleConnected)
+  if (lifecycle && gBleState) {
+    gBleState->eventCount++;
   }
   
   return true;
@@ -4859,7 +4859,7 @@ bool blePushEvent(BLEEventType eventType, const char* message, const char* detai
 bool blePushNotification(uint16_t connId, TransportSessionEpoch expectedEpoch,
                          const char* kindName, const char* level,
                          const char* title, const char* msg, uint16_t durMs) {
-  if (!isBLEConnected()) return false;
+  if (!isBleConnected()) return false;
 
   char line[196];  // 195 usable + NUL == SC_MAX_PAY_FRAME, i.e. one frame exactly
   // Reserve the closing `","ms":65535}\n` + NUL so escaping can never consume
@@ -4892,7 +4892,7 @@ bool blePushNotification(uint16_t connId, TransportSessionEpoch expectedEpoch,
     return bleSendToSession(connId, expectedEpoch, PipeConsoleKind::Card, line + kPrefix,
                             (size_t)n - kPrefix - 1, /*blocking=*/false);
   }
-  return sendBLEResponseToSession(connId, expectedEpoch, line, (size_t)n,
+  return sendBleResponseToSession(connId, expectedEpoch, line, (size_t)n,
                                   /*blocking=*/false);
 }
 
@@ -4900,31 +4900,31 @@ bool blePushNotification(uint16_t connId, TransportSessionEpoch expectedEpoch,
 // STREAM CONTROL
 // =============================================================================
 
-// The stream settings live in gBLEState: read and written under the lifecycle
-// lock (isBLEConnected).
+// The stream settings live in gBleState: read and written under the lifecycle
+// lock (isBleConnected).
 void bleEnableStream(uint8_t streamFlags) {
   BleLifecycleGuard lifecycle;
-  if (!lifecycle || !gBLEState) return;
-  gBLEState->streamFlags |= streamFlags;
+  if (!lifecycle || !gBleState) return;
+  gBleState->streamFlags |= streamFlags;
 }
 
 void bleDisableStream(uint8_t streamFlags) {
   BleLifecycleGuard lifecycle;
-  if (!lifecycle || !gBLEState) return;
-  gBLEState->streamFlags &= ~streamFlags;
+  if (!lifecycle || !gBleState) return;
+  gBleState->streamFlags &= ~streamFlags;
 }
 
 void bleSetStreamInterval(uint32_t sensorMs, uint32_t systemMs) {
   BleLifecycleGuard lifecycle;
-  if (!lifecycle || !gBLEState) return;
-  gBLEState->sensorStreamInterval = sensorMs;
-  gBLEState->systemStreamInterval = systemMs;
+  if (!lifecycle || !gBleState) return;
+  gBleState->sensorStreamInterval = sensorMs;
+  gBleState->systemStreamInterval = systemMs;
 }
 
 bool bleIsStreamEnabled(uint8_t streamFlag) {
   BleLifecycleGuard lifecycle;
-  if (!lifecycle || !gBLEState) return false;
-  return (gBLEState->streamFlags & streamFlag) != 0;
+  if (!lifecycle || !gBleState) return false;
+  return (gBleState->streamFlags & streamFlag) != 0;
 }
 
 // =============================================================================
@@ -5013,9 +5013,9 @@ void bleUpdateStreams() {
   bleConsoleReconcile();
   // So does the phone link's console row (its session READY).
   blePipeConsoleReconcile();
-  // gBLEState's last holder frees it on its own task (the pipe's on `phone
+  // gBleState's last holder frees it on its own task (the pipe's on `phone
   // stop`): it is read only under the lifecycle lock, never across a send.
-  if (!isBLEConnected()) return;
+  if (!isBleConnected()) return;
 
   uint32_t now = millis();
 
@@ -5028,8 +5028,8 @@ void bleUpdateStreams() {
   bool sensorsDue = false, systemDue = false;
   {
     BleLifecycleGuard lifecycle;
-    if (!lifecycle || !gBLEState || !(sBleStateHolders & kBleHoldServer)) return;
-    BLESystemState& s = *gBLEState;
+    if (!lifecycle || !gBleState || !(sBleStateHolders & kBleHoldServer)) return;
+    BleSystemState& s = *gBleState;
     sensorsDue = (s.streamFlags & BLE_STREAM_SENSORS) &&
                  now - s.lastSensorStream >= s.sensorStreamInterval;
     if (sensorsDue) s.lastSensorStream = now;

@@ -86,8 +86,8 @@ def generated(component: Path) -> str:
         default[0],
         record[0],
         extract_block(header, "enum class BleDisconnectResult") + ";",
-        extract_block(header, "struct BLEConnection") + ";",
-        extract_block(header, "struct BLESystemState") + ";",
+        extract_block(header, "struct BleConnection") + ";",
+        extract_block(header, "struct BleSystemState") + ";",
         extract_block(header, "struct BleConsoleView") + ";",
         extract_block(peers, "enum BlePeerKind") + ";",
         extract_block(peers, "struct BlePeerReconnectSnapshot") + ";",
@@ -134,7 +134,7 @@ def generated(component: Path) -> str:
         "const char* bleDeviceTypeToString(",
         "static bool bleAdvertiseIfRoomLocked(",
         "hw1console::Mode bleConsoleMode(",
-        "static BLESystemState* bleNewState(",
+        "static BleSystemState* bleNewState(",
         *BTC_HELPERS,
         "static void bleConsoleReconcile(")]
     definitions.append(extract_block(owner, "class ServerCallbacks") + ";")
@@ -152,10 +152,10 @@ def generated(component: Path) -> str:
     definitions.append(extract_block(owner, "class BleConsoleTxGate") + ";")
     definitions += [extract_block(owner, marker) for marker in (
         "bool bleRawNotifyToSession(uint16_t connId,\n",
-        "bool sendBLEResponseToSession(",
-        "static bool bleIsPeerLinkType(BLEDeviceType type) ",
+        "bool sendBleResponseToSession(",
+        "static bool bleIsPeerLinkType(BleDeviceType type) ",
         "BleConsoleView bleConsoleView() ",
-        "bool isBLEConnected(",
+        "bool isBleConnected(",
         "BleDisconnectResult bleDisconnectConnection(",
         "int bleDisconnectAppClients(",
         "static const char* bleConsoleSwitchHint(")]
@@ -200,7 +200,7 @@ def check_sources(component: Path) -> None:
     # The main loop reconciles before its no-client return.
     streams = code_only(extract_block(owner, "void bleUpdateStreams("))
     require(streams.index("bleConsoleReconcile();") <
-            streams.index("if (!isBLEConnected()) return;"),
+            streams.index("if (!isBleConnected()) return;"),
             "bleUpdateStreams reconciles the phone-link console before its early return")
     # Both link callbacks take the plan under the lifecycle lock before the server path.
     callbacks = code_only(extract_block(owner, "class ServerCallbacks"))
@@ -208,7 +208,7 @@ def check_sources(component: Path) -> None:
     require(connect.index("bleConsoleLinkEventMayMatter(param->connect.conn_id)") <
             connect.index("BleLifecycleGuard lifecycle;") <
             connect.index("bleConsoleLinkEventLocked(/*up=*/true") <
-            connect.index("gBLEState->connections[slot].active = true;"),
+            connect.index("gBleState->connections[slot].active = true;"),
             "onConnect decides by the attach core under the lock before the server path")
     disconnect = callbacks[callbacks.index("void onDisconnect("):]
     require(disconnect.index("bleConsoleLinkEventMayMatter(param->disconnect.conn_id)") <
@@ -218,7 +218,7 @@ def check_sources(component: Path) -> None:
             "onDisconnect decides by the attach core under the lock before the server path")
     write = code_only(extract_block(owner, "class CmdRequestCallbacks"))
     require(write.index("bleConsoleAdmitWriteLocked(param->write.conn_id)") <
-            write.index("gBLEState->commandsReceived++;"),
+            write.index("gBleState->commandsReceived++;"),
             "the write callback admits a client-host write before counting it")
     # The raw sender tries the gate before its lifecycle lock, per attempt.
     raw = code_only(extract_block(owner, "bool bleRawNotifyToSession(uint16_t connId,\n"))

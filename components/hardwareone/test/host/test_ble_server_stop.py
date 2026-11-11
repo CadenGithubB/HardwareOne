@@ -47,7 +47,7 @@ closed and the phone-link slot ended before the stop, the attach state starts
 the next host empty, the state is freed only after a terminal one and kept
 (closed) after a failed one, and the server role's state is left to
 deinitBluetooth. The phone link's console row (phone link v2) runs with
-gBLEState's holders: the pipe's hold allocates the state in phone-client mode,
+gBleState's holders: the pipe's hold allocates the state in phone-client mode,
 registration joins a pipe-held state, each teardown releases only its own hold
 (the state goes with the last), a host teardown ends the row and closes its
 session before the stop with no CLOSE, the server's state is never the pipe's,
@@ -112,8 +112,8 @@ def generated(component: Path) -> str:
              extract_block(header, "enum class BleRoleTransition") + ";",
              extract_block(hal, "struct BluetoothHalShutdownResult") + ";",
              "using TransportSessionEpoch = uint32_t;",
-             extract_block(header, "struct BLEConnection") + ";",
-             extract_block(header, "struct BLESystemState") + ";"]
+             extract_block(header, "struct BleConnection") + ";",
+             extract_block(header, "struct BleSystemState") + ";"]
     pipe = (COMPONENT / "BLE_PhonePipe.h").read_text()
     record = re.search(r"^struct PhonePipeLinkRecord \{[^}]*\};", pipe, re.MULTILINE)
     require(record is not None, "BLE_PhonePipe.h declares PhonePipeLinkRecord")
@@ -181,9 +181,9 @@ def generated(component: Path) -> str:
     require(callbacks is not None, "Bluetooth.cpp owns the server callbacks object")
     definitions.append(callbacks[0])
     definitions += [extract_block(owner, marker) for marker in (
-        "static BLESystemState* bleNewState(",
+        "static BleSystemState* bleNewState(",
         "static void bleBuildCommandService(",
-        "void stopBLEAdvertising(",
+        "void stopBleAdvertising(",
         "bool isBleServerInitialized(",
         stop,
         "bool bleConsoleRegisterOnClientHost(",
@@ -260,7 +260,7 @@ def check_sources(component: Path) -> None:
     init = extract_block(owner, "bool initBluetooth(")
     require("bleBuildCommandService();" in init and "bleNewState()" in init,
             "initBluetooth builds its state and command service with the shared helpers")
-    published = init[init.index("gBLEState->initialized = true;"):]
+    published = init[init.index("gBleState->initialized = true;"):]
     require(published.index("sBleConsoleMode.store(hw1console::Mode::Server);") <
             published.index("}"),
             "initBluetooth publishes Mode::Server with initialized, under the same lock")

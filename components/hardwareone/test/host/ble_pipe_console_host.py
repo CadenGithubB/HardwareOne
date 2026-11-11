@@ -2,13 +2,13 @@
 console row (phone link v2) into their harnesses.
 
 The console is stream slot 2 of the phone pipe. Bluetooth.cpp keeps its
-session as a gBLEState row with its own id and writes its output through the
+session as a gBleState row with its own id and writes its output through the
 console driver (BLE_PhonePipeConsole.h), which other suites test. This module
 extracts, as shipped:
 
 - pipe_types(): the driver's kinds, modes, results and target, and Bluetooth.h's
   BlePipeConsoleIdentity / blePipeConsoleRowId;
-- holder_state(): gBLEState's holder bits and the server state's mirror;
+- holder_state(): gBleState's holder bits and the server state's mirror;
 - slot_state(): the row's slot, its leaf snapshot and blePipeIdentitySyncLocked
   (what the epoch helpers call);
 - row_helpers(): blePipeRow, bleIsPipeRowId, the close reasons and the

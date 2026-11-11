@@ -58,14 +58,14 @@ String originPrefix(const char*, const String&, const String&) { return ""; }
 void broadcastCommandResultQueued(const String&,const String& body,uint8_t) { shared.push_back(body.s); }
 // Bluetooth.cpp's session-fenced sender: delivers only while the connection
 // still holds the expected session epoch (0 is never a session).
-bool sendBLEResponseToSession(uint16_t conn,uint32_t epoch,const char* p,size_t n,bool=true) {
+bool sendBleResponseToSession(uint16_t conn,uint32_t epoch,const char* p,size_t n,bool=true) {
   if(epoch==0||epoch!=bleConnEpoch) return false;
   bleTarget=conn; ble.assign(p,n); ++bleSends; return true;
 }
 // The pre-fix sender: whichever session holds the connection now.
-bool sendBLEResponseToConn(uint16_t conn,const char* p,size_t n) { return sendBLEResponseToSession(conn,bleConnEpoch,p,n); }
+bool sendBLEResponseToConn(uint16_t conn,const char* p,size_t n) { return sendBleResponseToSession(conn,bleConnEpoch,p,n); }
 // The console mirror (every logged-in non-guest session).
-bool sendBLEResponse(const char* p,size_t n,bool=true) { mirror.append(p,n); return true; }
+bool sendBleResponse(const char* p,size_t n,bool=true) { mirror.append(p,n); return true; }
 // INSERT_REDACTOR
 // INSERT_BROADCAST
 // INSERT_DELIVER

@@ -117,7 +117,7 @@ std::atomic<bool> relayOn{false};
 // `openphone` / `phone pair` or a reboot. READY resets both. RAM only.
 std::atomic<uint8_t> versionStrikes{0};
 std::atomic<bool> versionLatched{false};
-// This pipe holds gBLEState for its console row (blePipeConsoleStateAcquire).
+// This pipe holds gBleState for its console row (blePipeConsoleStateAcquire).
 // Taken and given back outside the owner mutex: the lifecycle lock is never
 // taken under it.
 std::atomic<bool> stateHeld{false};
@@ -977,7 +977,7 @@ void disconnect() {
   (void)closePairWindowLocked(now);
   if(job)fail(now,Error::Cancelled,"disconnected",hw1coex::CauseDetail::Stopped);
 }
-// A stopped pipe gives its hold on gBLEState back, which ends its console row
+// A stopped pipe gives its hold on gBleState back, which ends its console row
 // (the lifecycle lock: never with the owner mutex held).
 void giveStateBack(){if(stateHeld.exchange(false))blePipeConsoleStateRelease();}
 // The pipe key for the stored secret, for phonePipeStart: 100k PBKDF2 rounds
@@ -1057,7 +1057,7 @@ bool phoneLinkOpen() {
     case PskLoad::Retry:return false;  // as the refusals above: no status of its own
   }
   if(!bleStackReady() || !bluetoothHalStatus().ready())return false;
-  // The console's row lives in gBLEState: hold it once the host is up and
+  // The console's row lives in gBleState: hold it once the host is up and
   // before the owner lock (the lifecycle lock is never taken under it). Without
   // it the link and relay still start; the console's binds fail and its driver
   // backs off.
@@ -1089,7 +1089,7 @@ bool phonePipeStop() {
     while(active.load() && !hw1pipe::expired(millis(),start,4500))vTaskDelay(pdMS_TO_TICKS(10));
     if(active.load())return false;
   }
-  // Stopped: the console row and the hold on gBLEState go with it (initBluetooth
+  // Stopped: the console row and the hold on gBleState go with it (initBluetooth
   // takes the state right after).
   giveStateBack();
   return true;

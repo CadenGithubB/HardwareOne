@@ -294,7 +294,7 @@ void restoreUsers(const RadioUsers& users) {
 #endif
 #if ENABLE_BLUETOOTH
   if (users.bleServer) {
-    if (initBluetooth()) startBLEAdvertising();
+    if (initBluetooth()) startBleAdvertising();
   } else if (users.g2Client) {
     // The shared client stack; the devices reopen through the boot reconnect
     // and their reseeks (each admission opens its device).
@@ -330,7 +330,7 @@ void bringUpConfiguredUsers() {
 #endif
 #if ENABLE_BLUETOOTH
   if (wanted.bleServer && !running.bleServer) {
-    if (initBluetooth()) startBLEAdvertising();
+    if (initBluetooth()) startBleAdvertising();
   } else if (wanted.g2Client && !running.g2Client) {
     // The shared stack, then each peer with auto-reconnect on opens its own
     // device, as at boot.

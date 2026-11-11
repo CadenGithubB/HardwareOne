@@ -710,7 +710,7 @@ void broadcastOutput(const String& s, const CommandContext& ctx) {
     if (haveConn) {
       String prefixed = prefix;
       prefixed += s;
-      sendBLEResponseToSession((uint16_t)targetConnId, ctx.transportSessionEpoch,
+      sendBleResponseToSession((uint16_t)targetConnId, ctx.transportSessionEpoch,
                                prefixed.c_str(), prefixed.length());
     }
   }
@@ -2157,7 +2157,7 @@ void hardwareone_setup() {
       // at boot, or when this boot is resuming the transport that just
       // delivered an OTA. We never coerce to server from auto-reconnect flags.
       if (initBluetooth()) {
-        if (startBLEAdvertising()) {
+        if (startBleAdvertising()) {
           broadcastOutput("Bluetooth initialized and advertising");
         } else {
           broadcastOutput("Bluetooth initialized but advertising failed");

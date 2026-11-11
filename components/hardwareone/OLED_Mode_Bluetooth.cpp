@@ -61,7 +61,7 @@ EXT_RAM_BSS_ATTR static OledScrollState sBtMenuScroll;
 static bool sBtMenuInit = false;
 EXT_RAM_BSS_ATTR static BtAction sBtActions[OLED_SCROLL_MAX_ITEMS];
 // The link the rows were built from: a tap does what its row said.
-// bleLinkStatus() never blocks and reads gBLEState only under its lifecycle
+// bleLinkStatus() never blocks and reads gBleState only under its lifecycle
 // lock: deinit frees it.
 static BleLinkStatus sBtShown;
 
@@ -280,7 +280,7 @@ static void displayBluetoothStatusDetail() {
   oledDisplay->println(line);  // app clients only: peer links are not the console's
   if (s.pipeBuilt) btRow("Pipe: ", hw1link::pipeLine(s.pipe, pipe, sizeof(pipe)));
 
-  if (!gBLEState || !gBLEState->initialized) return;  // stopped since the snapshot
+  if (!gBleState || !gBleState->initialized) return;  // stopped since the snapshot
   // Device name (truncate if needed)
   const char* name = gSettings.bleDeviceName.length() > 0 ? gSettings.bleDeviceName.c_str() : "HardwareOne";
   char truncated[13];
@@ -292,27 +292,27 @@ static void displayBluetoothStatusDetail() {
   }
   btDetail("Name: %s", name);
 
-  if (gBLEState->connectionState == BLE_STATE_CONNECTED) {
-    btDetail("Rx:%lu Tx:%lu", (unsigned long)gBLEState->commandsReceived,
-             (unsigned long)gBLEState->responsesSent);
+  if (gBleState->connectionState == BLE_STATE_CONNECTED) {
+    btDetail("Rx:%lu Tx:%lu", (unsigned long)gBleState->commandsReceived,
+             (unsigned long)gBleState->responsesSent);
     btDetail("Peers:");
     int shown = 0;
     for (int i = 0; i < BLE_MAX_CONNECTIONS && shown < 3; i++) {
-      if (!gBLEState->connections[i].active) continue;
-      uint32_t duration = (millis() - gBLEState->connections[i].connectedSince) / 1000;
-      btDetail("#%d %s %lus", i, gBLEState->connections[i].deviceName.c_str(), (unsigned long)duration);
+      if (!gBleState->connections[i].active) continue;
+      uint32_t duration = (millis() - gBleState->connections[i].connectedSince) / 1000;
+      btDetail("#%d %s %lus", i, gBleState->connections[i].deviceName.c_str(), (unsigned long)duration);
       shown++;
     }
   } else {
     btDetail("TX Power: %d", gSettings.bleTxPower);
-    btDetail("Total: %lu", (unsigned long)gBLEState->totalConnections);
+    btDetail("Total: %lu", (unsigned long)gBleState->totalConnections);
   }
 
-  const uint8_t streams = gBLEState->streamFlags;
+  const uint8_t streams = gBleState->streamFlags;
   btDetail("Streams: %s%s%s", (streams & BLE_STREAM_SENSORS) ? "S" : "s",
            (streams & BLE_STREAM_SYSTEM) ? " Sys" : " sys", (streams & BLE_STREAM_EVENTS) ? " Ev" : " ev");
-  btDetail("Int:%lu/%lu", (unsigned long)gBLEState->sensorStreamInterval,
-           (unsigned long)gBLEState->systemStreamInterval);
+  btDetail("Int:%lu/%lu", (unsigned long)gBleState->sensorStreamInterval,
+           (unsigned long)gBleState->systemStreamInterval);
 
   // Recent messages (newest first) via the Bluetooth.cpp accessor.
   const char* recent[2];

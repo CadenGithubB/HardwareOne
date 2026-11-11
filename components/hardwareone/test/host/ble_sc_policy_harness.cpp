@@ -4,7 +4,7 @@
 // against the ble_sc_stubs/ headers, so bleScRequired, bleScEstablished, the
 // handshake and DATA-frame decryption are the real ones. The driver splices the
 // production ingress from Bluetooth.cpp into the /*@NAME@*/ slots below: the
-// GATT write entry (processIncomingBLECommand), the deferred secure-frame and
+// GATT write entry (processIncomingBleCommand), the deferred secure-frame and
 // plaintext jobs, the command tail with its file-browser gate, and the directed
 // and session senders. The fake GATT keeps one inbox per connection. write()
 // runs the GATT entry as BTC_TASK; deferred jobs queue in submission order and
@@ -135,7 +135,7 @@ BaseType_t xSemaphoreGive(SemaphoreHandle_t) { return pdTRUE; }
 static uint32_t millis() { return 1000; }
 
 // ---- Bluetooth.cpp context: connection table, lifecycle guard, fake GATT ----
-struct BLEConnection {
+struct BleConnection {
   bool active = false;
   uint16_t connId = 0;
   bool authed = false;
@@ -147,12 +147,12 @@ struct BLEConnection {
   uint32_t pipeGeneration = 0;
   uint16_t pipeStream = 0;
 };
-struct BLESystemState {
-  BLEConnection connections[BLE_MAX_CONNECTIONS];
+struct BleSystemState {
+  BleConnection connections[BLE_MAX_CONNECTIONS];
   uint32_t responsesSent = 0;
 };
-static BLESystemState sState;
-static BLESystemState* gBLEState = &sState;
+static BleSystemState sState;
+static BleSystemState* gBleState = &sState;
 static std::atomic<TransportSessionEpoch> sBleSessionEpoch[BLE_MAX_CONNECTIONS];
 static std::atomic<int> sBleGattsIf{3};
 // Client-host posts made with the lifecycle guard released (Bluetooth.cpp).
@@ -188,7 +188,7 @@ TransportSessionEpoch bleSessionEpochForConnection(uint16_t connId) {
 bool bleSessionEpochMatches(uint16_t connId, TransportSessionEpoch epoch) {
   return epoch != 0 && bleSessionEpochForConnection(connId) == epoch;
 }
-bool isBLEConnected() {
+bool isBleConnected() {
   for (const auto& c : sState.connections) {
     if (c.active) return true;
   }
@@ -248,7 +248,7 @@ esp_err_t esp_ble_gatts_send_indicate(esp_gatt_if_t gattsIf, uint16_t connId, ui
 // The characteristic-wide primitive that pre-fix secure-channel sources call:
 // one shared value, sent to every connected peer. Fixed sources never call it.
 bool bleRawNotify(const char* data, size_t len) {
-  if (!isBLEConnected() || !pCmdResponseChar) return false;
+  if (!isBleConnected() || !pCmdResponseChar) return false;
   ++broadcastSends;
   for (int i = 0; i < BLE_MAX_CONNECTIONS; ++i) {
     if (sState.connections[i].active) inbox[i].emplace_back(data, len);
@@ -363,8 +363,8 @@ bool otaBleHandleEncryptedFrame(uint16_t, const uint8_t*, size_t) {
   return true;
 }
 
-bool sendBLEResponse(const char* data, size_t len, bool blocking = true);
-bool sendBLEResponseToSession(uint16_t connId, TransportSessionEpoch expectedEpoch,
+bool sendBleResponse(const char* data, size_t len, bool blocking = true);
+bool sendBleResponseToSession(uint16_t connId, TransportSessionEpoch expectedEpoch,
                               const char* data, size_t len, bool blocking = true);
 
 // ---- production blocks from Bluetooth.cpp ----------------------------------
@@ -439,7 +439,7 @@ static const char kFileRefusal[] = "{\"success\":false,\"error\":\"secure_channe
 // BTC_TASK; then cmd_exec runs whatever the entry deferred.
 static void write(uint16_t connId, const std::string& bytes) {
   onBtcTask = true;
-  processIncomingBLECommand(connId, bytes.data(), bytes.size());
+  processIncomingBleCommand(connId, bytes.data(), bytes.size());
   onBtcTask = false;
   drainCmdExec();
 }
@@ -467,8 +467,8 @@ static std::string dataFrame(uint16_t connId, const std::string& text) {
   return f;
 }
 static void peer(int slot, uint16_t connId, TransportSessionEpoch epoch) {
-  BLEConnection& c = sState.connections[slot];
-  c = BLEConnection{};
+  BleConnection& c = sState.connections[slot];
+  c = BleConnection{};
   c.active = true;
   c.connId = connId;
   sBleSessionEpoch[slot].store(epoch);
@@ -485,7 +485,7 @@ static void resetWorld(const char* name, bool required) {
   currentCase = name;
   for (int i = 0; i < BLE_MAX_CONNECTIONS; ++i) {
     bleScReset(static_cast<uint16_t>(i));
-    sState.connections[i] = BLEConnection{};
+    sState.connections[i] = BleConnection{};
     sBleSessionEpoch[i].store(0);
     nextCtr[i] = 0;
   }
@@ -809,7 +809,7 @@ int main() {
 
   startWipeCase("W3 plaintext login slot wiped when the session changed first");
   onBtcTask = true;
-  processIncomingBLECommand(0, kLogin.data(), kLogin.size());
+  processIncomingBleCommand(0, kLogin.data(), kLogin.size());
   onBtcTask = false;
   sBleSessionEpoch[0].store(8);  // conn 0 reconnected before cmd_exec ran the job
   drainCmdExec();
@@ -838,8 +838,8 @@ int main() {
   const auto pipeWorld = [&](const char* name) {
     resetWorld(name, false);
     gSettings.bleRequireAuth = false;
-    BLEConnection& c = sState.connections[2];
-    c = BLEConnection{};
+    BleConnection& c = sState.connections[2];
+    c = BleConnection{};
     c.active = true;
     c.connId = pipeRow;
     c.pipeConsole = true;

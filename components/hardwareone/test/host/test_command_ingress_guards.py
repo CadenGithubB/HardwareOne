@@ -127,7 +127,7 @@ assert ble_overflow < ble_line.index("submitCommandAsync(")
 
 ble_ingress = function_body(
     bluetooth,
-    "static void processIncomingBLECommand(uint16_t connId, const char* data, size_t len) {",
+    "static void processIncomingBleCommand(uint16_t connId, const char* data, size_t len) {",
 )
 frame_branch = ble_ingress.index("if (isFrame)")
 frame_length_guard = ble_ingress.index(
@@ -144,18 +144,18 @@ assert "BLE secure frame exceeds 517-byte input limit; discarded" in ble_ingress
 # mutex (held for a whole paced reply), so the entry only copies and defers:
 # both kinds of write run on cmd_exec, and every notice the entry itself sends is
 # best-effort (blocking=false never waits for that mutex).
-for sender in ("sendBLEResponseToSession(", "bleRawNotifyToSession("):
+for sender in ("sendBleResponseToSession(", "bleRawNotifyToSession("):
     pos = ble_ingress.find(sender)
     while pos >= 0:
         call = ble_ingress[pos : ble_ingress.index(";", pos)]
         assert "/*blocking=*/false)" in call, f"BTC_TASK reply may wait: {call}"
         pos = ble_ingress.find(sender, pos + 1)
 for forbidden in ("processBleCommandLine(", "bleSendAuthRequired(",
-                  "sendBLEResponse(", "bleScSendEncrypted"):
+                  "sendBleResponse(", "bleScSendEncrypted"):
     assert forbidden not in ble_ingress, f"BTC_TASK ingress calls {forbidden}"
 assert "submitDeferredToCmdExec(blePlaintextDeferredInbound, d)" in ble_ingress
 on_write = function_body(bluetooth, "void onWrite(BLECharacteristic* pCharacteristic,")
-for sender in ("sendBLEResponse", "bleRawNotifyToSession(", "bleScSendEncrypted",
+for sender in ("sendBleResponse", "bleRawNotifyToSession(", "bleScSendEncrypted",
                "processBleCommandLine("):
     assert sender not in on_write, f"the GATT write callback calls {sender}"
 
@@ -230,7 +230,7 @@ assert "bleScRequired()" in secure_only and "bleConsoleClientHost()" in secure_o
 # link's console row first (console records), then the channel and plaintext
 # rules below, unchanged for every other row; a binary body is never plaintext.
 assert "return bleSendToSession(connId, expectedEpoch, PipeConsoleKind::Text," in function_body(
-    bluetooth, "bool sendBLEResponseToSession(")
+    bluetooth, "bool sendBleResponseToSession(")
 ble_router = function_body(bluetooth, "static bool bleSendToSession(")
 assert "if (!secure && bleSecureChannelOnly()) return false;" in ble_router
 assert "if (!secure && kind == PipeConsoleKind::Blob) return false;" in ble_router
@@ -242,7 +242,7 @@ assert ble_router.index("pipe = blePipeRow(c);") < ble_router.index("secure = bl
 ble_pipe_inbound = function_body(bluetooth, "void blePipeConsoleInbound(")
 assert ble_pipe_inbound.count("processBleCommandLine(") == 1
 assert "/*arrivedEncrypted=*/true);" in ble_pipe_inbound
-assert "!blePipeRow(gBLEState->connections[findConnectionSlotByConnIdLocked(rowConnId)])" in ble_pipe_inbound
+assert "!blePipeRow(gBleState->connections[findConnectionSlotByConnIdLocked(rowConnId)])" in ble_pipe_inbound
 assert ble_pipe_inbound.index("bleConnectionEpochMatchesLocked(rowConnId, epoch)") < ble_pipe_inbound.index(
     "processBleCommandLine(")
 assert ble_pipe_inbound.index("bleMarkActivity(rowConnId);") < ble_pipe_inbound.index(

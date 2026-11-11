@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The BLE console mirror buffers only while a session could receive it.
 
-bleMirrorRecipientCount() (Bluetooth.cpp) counts the sessions sendBLEResponse
+bleMirrorRecipientCount() (Bluetooth.cpp) counts the sessions sendBleResponse
 would reach: it runs the same collector, bleCollectMirrorSessions. Both are
 spliced from Bluetooth.cpp into a harness with a four-slot connection table: a
 connected peer that never logged in, a guest session, a slot whose session
@@ -38,14 +38,14 @@ struct String {
   size_t length() const { return s.size(); }
 };
 constexpr int BLE_MAX_CONNECTIONS = 4;
-struct BLEConnection {
+struct BleConnection {
   uint16_t connId = 0;
   bool active = false, authed = false, mirrorEligible = false;
   String user;
 };
-struct BLEState { BLEConnection connections[BLE_MAX_CONNECTIONS]; };
+struct BLEState { BleConnection connections[BLE_MAX_CONNECTIONS]; };
 static BLEState sState;
-static BLEState* gBLEState = &sState;
+static BLEState* gBleState = &sState;
 static std::atomic<TransportSessionEpoch> sBleSessionEpoch[BLE_MAX_CONNECTIONS];
 static bool gLifecycleAvailable = true;
 struct BleLifecycleGuard { explicit operator bool() const { return gLifecycleAvailable; } };
@@ -55,15 +55,15 @@ struct BleLifecycleGuard { explicit operator bool() const { return gLifecycleAva
 @COUNT@
 
 static void slot(int i, uint16_t conn, bool authed, bool eligible, const char* user, TransportSessionEpoch epoch) {
-  BLEConnection& c = sState.connections[i];
-  c = BLEConnection{};
+  BleConnection& c = sState.connections[i];
+  c = BleConnection{};
   c.active = true; c.connId = conn; c.authed = authed; c.mirrorEligible = eligible; c.user = String(user);
   sBleSessionEpoch[i].store(epoch);
 }
 int main() {
   int bad = 0;
   auto expect = [&](bool ok, const char* what) { if (!ok) { std::printf("FAIL %s\n", what); ++bad; } };
-  for (int i = 0; i < BLE_MAX_CONNECTIONS; ++i) { sState.connections[i] = BLEConnection{}; sBleSessionEpoch[i].store(0); }
+  for (int i = 0; i < BLE_MAX_CONNECTIONS; ++i) { sState.connections[i] = BleConnection{}; sBleSessionEpoch[i].store(0); }
   expect(bleMirrorRecipientCount() == 0, "an empty table has recipients");
   slot(0, 0, false, false, "", 5);          // connected, never logged in
   slot(1, 1, true, false, "visitor", 6);    // guest session
@@ -100,7 +100,7 @@ def main():
     else:
         count = extract_block(bluetooth, count_marker)
         if 'bleCollectMirrorSessions(' not in count:
-            failures.append('bleMirrorRecipientCount() does not use the collector sendBLEResponse uses')
+            failures.append('bleMirrorRecipientCount() does not use the collector sendBleResponse uses')
         harness = (HARNESS.replace('@FENCE@', extract_block(bluetooth, 'struct BleSessionFence'))
                    .replace('@COLLECT@', extract_block(bluetooth, 'static int bleCollectMirrorSessions('))
                    .replace('@COUNT@', count))
@@ -131,7 +131,7 @@ def main():
         print('FAIL', message, file=sys.stderr)
     if failures:
         sys.exit(1)
-    print('BLE console mirror: the recipient count matches sendBLEResponse (logged-in non-guest sessions '
+    print('BLE console mirror: the recipient count matches sendBleResponse (logged-in non-guest sessions '
           'only); the drain buffers only with a recipient; outble reports the count')
 
 
