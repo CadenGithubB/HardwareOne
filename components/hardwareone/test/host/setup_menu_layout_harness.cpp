@@ -101,7 +101,7 @@ static void verifyNavigation() {
   // Enable available network features to expose every optional middle page.
   for (const char* id : {"wifi", "http", "bluetooth", "espnow", "mqtt"})
     if (isFeatureCompiled(getFeatureById(id))) wizardSetFeatureEnabled(id, true);
-  if (isFeatureCompiled(getFeatureById("mqtt"))) wizardSetMQTTAutoStart(true);
+  if (isFeatureCompiled(getFeatureById("mqtt"))) wizardSetMqttAutoStart(true);
   std::vector<SetupWizardPage> visible;
   for (int page = 0; page < WIZARD_PAGE_COUNT; ++page)
     if (wizardIsPageVisible(static_cast<SetupWizardPage>(page))) visible.push_back(static_cast<SetupWizardPage>(page));

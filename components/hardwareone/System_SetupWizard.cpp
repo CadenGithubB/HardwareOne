@@ -36,7 +36,7 @@
 #include "OLED_Display.h"
 // OLED page handlers for ESP-NOW and MQTT (defined in OLED_SetupWizard.cpp)
 void handleOledEspNowPage(SetupWizardResult& result, bool& running);
-void handleOledMQTTPage(SetupWizardResult& result, bool& running);
+void handleOledMqttPage(SetupWizardResult& result, bool& running);
 #endif
 
 // ============================================================================
@@ -355,18 +355,18 @@ void wizardSetFeatureEnabled(const char* featureId, bool enabled) {
   if (value) *value = enabled;
 }
 
-void wizardSetMQTTAutoStart(bool enabled) {
+void wizardSetMqttAutoStart(bool enabled) {
 #if ENABLE_MQTT
   bool* value = wizardBoolDraft(&gSettings.mqttAutoStart);
   if (value) *value = enabled;
 #endif
 }
 
-void wizardSkipMQTTPage() {
-  if (getWizardDraftValues().mqttHost.length() == 0) wizardSetMQTTAutoStart(false);
+void wizardSkipMqttPage() {
+  if (getWizardDraftValues().mqttHost.length() == 0) wizardSetMqttAutoStart(false);
 }
 
-bool wizardParseMQTTPort(const String& input, int& port) {
+bool wizardParseMqttPort(const String& input, int& port) {
   String value = input;
   if (value.length() != input.length()) return false;
   value.trim();
@@ -707,7 +707,7 @@ bool wizardShouldShowEspNow() {
 #endif
 }
 
-bool wizardShouldShowMQTT() {
+bool wizardShouldShowMqtt() {
 #if ENABLE_MQTT
   const FeatureEntry* f = getFeatureById("mqtt");
   const bool* autoStart = wizardBoolDraft(&gSettings.mqttAutoStart);
@@ -733,7 +733,7 @@ bool wizardStageEspNowSettings(const SetupWizardResult& result) {
   return sWizardDraft.valid;
 }
 
-bool wizardStageMQTTSettings(const SetupWizardResult& result) {
+bool wizardStageMqttSettings(const SetupWizardResult& result) {
   if (!sWizardDraft.active || result.mqttPort < 0 || result.mqttPort > 65535) return false;
   auto& draft = sWizardDraft.values;
   if (result.mqttHost.length()) copyWizardString(draft.mqttHost, result.mqttHost);
@@ -856,7 +856,7 @@ bool wizardIsPageVisible(SetupWizardPage page) {
     case WIZARD_PAGE_ESPNOW:
       return wizardShouldShowEspNow();
     case WIZARD_PAGE_MQTT:
-      return wizardShouldShowMQTT();
+      return wizardShouldShowMqtt();
     case WIZARD_PAGE_WIFI:
       return wizardShouldShowWifi();
     default:
@@ -1191,7 +1191,7 @@ espnow_done:
 }
 
 // Serial MQTT broker page
-static void handleSerialMQTTPage(SetupWizardResult& result, bool& running) {
+static void handleSerialMqttPage(SetupWizardResult& result, bool& running) {
   result.mqttHost = "";
   result.mqttUser = "";
   result.mqttPassword = "";
@@ -1217,7 +1217,7 @@ static void handleSerialMQTTPage(SetupWizardResult& result, bool& running) {
   if (!introChoice.equalsIgnoreCase("c") && !introChoice.equalsIgnoreCase("configure")) {
     // Skip: a configured broker stays as it is; a broker-less draft also loses
     // auto-start (the owner's rule, shared with the other engines).
-    wizardSkipMQTTPage();
+    wizardSkipMqttPage();
     if (!wizardNextPage(result)) running = false;
     return;
   }
@@ -1242,7 +1242,7 @@ static void handleSerialMQTTPage(SetupWizardResult& result, bool& running) {
     wizardPrevPage();
     return;
   }
-  if (!wizardParseMQTTPort(portStr, result.mqttPort)) {
+  if (!wizardParseMqttPort(portStr, result.mqttPort)) {
     Serial.println("Error: MQTT port must be a decimal number from 1 to 65535.");
     return;
   }
@@ -1274,7 +1274,7 @@ static void handleSerialMQTTPage(SetupWizardResult& result, bool& running) {
     return;
   }
 
-  if (!wizardStageMQTTSettings(result)) {
+  if (!wizardStageMqttSettings(result)) {
     Serial.println("Error: could not stage MQTT choices.");
     return;
   }
@@ -1598,12 +1598,12 @@ SetupWizardResult runSetupWizard() {
     if (currentPage == WIZARD_PAGE_MQTT) {
 #if ENABLE_OLED_DISPLAY
       if (oledDisplay && oledConnected) {
-        handleOledMQTTPage(result, running);
+        handleOledMqttPage(result, running);
         lastPrintedPage = WIZARD_PAGE_COUNT;
         continue;
       }
 #endif
-      handleSerialMQTTPage(result, running);
+      handleSerialMqttPage(result, running);
       lastPrintedPage = WIZARD_PAGE_COUNT;
       continue;
     }

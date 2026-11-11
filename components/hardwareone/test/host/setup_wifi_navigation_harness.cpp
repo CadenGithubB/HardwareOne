@@ -78,7 +78,7 @@ static CLIModeInputResult unexpectedDispatch(const String&, char*, size_t) {
 static auto dispatchTopLevelPage = unexpectedDispatch;
 static auto dispatchModePage = unexpectedDispatch;
 static auto dispatchEspNow = unexpectedDispatch;
-static auto dispatchMQTT = unexpectedDispatch;
+static auto dispatchMqtt = unexpectedDispatch;
 // INSERT_PRODUCTION
 
 static unsigned checks;

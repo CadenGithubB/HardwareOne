@@ -317,7 +317,7 @@ static CLIModeInputResult dispatchTopLevelPage(const String& line,
                                                char* out, size_t outSize);
 static CLIModeInputResult dispatchEspNow(const String& line,
                                          char* out, size_t outSize);
-static CLIModeInputResult dispatchMQTT(const String& line,
+static CLIModeInputResult dispatchMqtt(const String& line,
                                        char* out, size_t outSize);
 static CLIModeInputResult dispatchWifi(const String& line,
                                        char* out, size_t outSize);
@@ -391,7 +391,7 @@ static CLIModeInputResult wizardMode_onInput(const String& line, void* /*ud*/,
     case WizardSubMode::MQTT_PORT:
     case WizardSubMode::MQTT_USER:
     case WizardSubMode::MQTT_PASS:
-      return dispatchMQTT(line, out, outSize);
+      return dispatchMqtt(line, out, outSize);
 
     case WizardSubMode::WIFI_SSID:
     case WizardSubMode::WIFI_PASSWORD:
@@ -614,7 +614,7 @@ static CLIModeInputResult dispatchEspNow(const String& line,
 }
 
 // ---------- MQTT broker sub-page (HOST -> PORT -> USER -> PASS)
-static CLIModeInputResult dispatchMQTT(const String& line,
+static CLIModeInputResult dispatchMqtt(const String& line,
                                        char* out, size_t outSize) {
   String raw = line; raw.trim();
   String lc = raw; lc.toLowerCase();
@@ -633,7 +633,7 @@ static CLIModeInputResult dispatchMQTT(const String& line,
     }
   };
   auto stageAndAdvance = [&]() {
-    if (!wizardStageMQTTSettings(sWizard.result)) {
+    if (!wizardStageMqttSettings(sWizard.result)) {
       snprintf(out, outSize, "Error: MQTT choices could not be staged. Try again or cancel.");
       return;
     }
@@ -657,7 +657,7 @@ static CLIModeInputResult dispatchMQTT(const String& line,
       }
       // Skipping leaves a configured broker as it is; a broker-less draft also
       // loses auto-start (the owner's rule, shared with the other engines).
-      wizardSkipMQTTPage();
+      wizardSkipMqttPage();
       goNextPage();
       appendPromptTo(out, outSize);
       return (sWizard.subMode == WizardSubMode::DONE) ? CLI_MODE_HANDLED_AND_EXIT
@@ -681,7 +681,7 @@ static CLIModeInputResult dispatchMQTT(const String& line,
         appendPromptTo(out, outSize);
         return sWizard.subMode == WizardSubMode::DONE ? CLI_MODE_HANDLED_AND_EXIT : CLI_MODE_HANDLED;
       }
-      if (!wizardParseMQTTPort(raw, sWizard.result.mqttPort)) {
+      if (!wizardParseMqttPort(raw, sWizard.result.mqttPort)) {
         snprintf(out, outSize, "Error: MQTT port must be 1..65535, or blank to keep it.");
         appendPromptTo(out, outSize);
         return CLI_MODE_HANDLED;

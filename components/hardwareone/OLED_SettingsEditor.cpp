@@ -1147,7 +1147,7 @@ static void toggleQuickBluetooth() {
 
 // --- HTTP Server ---
 #if ENABLE_HTTP_SERVER
-static bool getQuickHTTPState() {
+static bool getQuickHttpState() {
   return (server != nullptr);
 }
 static void httpToggleConfirmedQuick(void* userData) {
@@ -1162,7 +1162,7 @@ static void httpToggleConfirmedQuick(void* userData) {
     runQuickCommand("openhttp", "HTTP ON");
   }
 }
-static void toggleQuickHTTP() {
+static void toggleQuickHttp() {
   if (server != nullptr) {
     oledConfirmRequest("Stop HTTP?", nullptr, httpToggleConfirmedQuick, nullptr, false);
   } else {
@@ -1187,7 +1187,7 @@ static void initQuickItems() {
   addQuickItem("Bluetooth", getQuickBluetoothState, toggleQuickBluetooth);
 #endif
 #if ENABLE_HTTP_SERVER
-  addQuickItem("HTTP Server", getQuickHTTPState, toggleQuickHTTP);
+  addQuickItem("HTTP Server", getQuickHttpState, toggleQuickHttp);
 #endif
 }
 

@@ -43,8 +43,8 @@ static SetupWizardResult draftValues;
 static std::vector<SetupWizardResult> staged;
 static bool draftAutoStart, stageSucceeds;
 static const SetupWizardResult& getWizardDraftValues() { return draftValues; }
-static void wizardSetMQTTAutoStart(bool enabled) { draftAutoStart = enabled; }
-static bool wizardStageMQTTSettings(const SetupWizardResult& value) {
+static void wizardSetMqttAutoStart(bool enabled) { draftAutoStart = enabled; }
+static bool wizardStageMqttSettings(const SetupWizardResult& value) {
   staged.push_back(value); return stageSucceeds;
 }
 
@@ -96,7 +96,7 @@ static void appendPromptTo(char*, size_t) {}
 static void clearWizardWifiChoices() { ++clearCalls; }
 static char* getWizardDeviceNameBuf() { return deviceName; }
 static bool writeSettingsJson() { ++saveCalls; return true; }
-static bool startMQTT() { ++startCalls; return true; }
+static bool startMqtt() { ++startCalls; return true; }
 static CLIModeInputResult unrelatedPage(const String&, char*, size_t) {
   assert(false && "test unexpectedly left MQTT input routing");
   return CLI_MODE_HANDLED;
@@ -142,54 +142,54 @@ static void submitted(const char* host, int port, const char* user, const char* 
 static void serialCases() {
   SetupWizardResult result{}; bool running = true;
   reset(); inputs = {"c", " new.host ", "65535", "new-user", "new-secret"};
-  handleSerialMQTTPage(result, running);
+  handleSerialMqttPage(result, running);
   submitted("new.host", 65535, "new-user", "new-secret");
   assert(nextCalls == 1 && running && draftAutoStart);
   for (const char* port : {"70000", "0", "-1", "1883junk", "bad"}) {
     reset(); result = {}; inputs = {"c", "new.host", port};
-    handleSerialMQTTPage(result, running);
+    handleSerialMqttPage(result, running);
     broker(); assert(staged.empty() && nextCalls == 0);
   }
   for (int back = 0; back < 5; ++back) {
     reset(); result = {}; running = true;
     inputs = {"c", "new.host", "2000", "new-user", "new-secret"}; inputs[back] = "back";
-    handleSerialMQTTPage(result, running);
+    handleSerialMqttPage(result, running);
     broker(); assert(staged.empty() && previousCalls == 1 && nextCalls == 0 && running);
   }
   reset(); result = {}; inputs = {"c", "new.host", "2000", "new-user", "new-secret"}; cancelInput = 2;
-  handleSerialMQTTPage(result, running);
+  handleSerialMqttPage(result, running);
   broker(); assert(staged.empty() && !running && nextCalls == 0 && draftAutoStart);
   // Skip keeps a configured broker's auto-start; only a broker-less draft loses it.
   reset(); result = {}; running = true; inputs = {"n"};
-  handleSerialMQTTPage(result, running);
+  handleSerialMqttPage(result, running);
   broker(); assert(draftAutoStart && nextCalls == 1 && staged.empty());
   reset(); result = {}; running = true; inputs = {"n"}; draftValues.mqttHost = "";
-  handleSerialMQTTPage(result, running);
+  handleSerialMqttPage(result, running);
   broker(); assert(!draftAutoStart && nextCalls == 1 && staged.empty());
   reset(); result = {}; inputs = {"c", "new.host", "2000", "user", "pass"}; stageSucceeds = false;
-  handleSerialMQTTPage(result, running); broker(); assert(nextCalls == 0 && staged.size() == 1);
+  handleSerialMqttPage(result, running); broker(); assert(nextCalls == 0 && staged.size() == 1);
 }
 static void oledCases() {
   SetupWizardResult result{}; bool running = true;
   reset(); inputs = {"new.host", "65535", "new-user", "new-secret"};
-  handleOledMQTTPage(result, running);
+  handleOledMqttPage(result, running);
   submitted("new.host", 65535, "new-user", "new-secret"); assert(nextCalls == 1 && running);
   reset(); result = {}; inputs = {"new.host", "70000", "1883", "user", "pass"};
-  handleOledMQTTPage(result, running);
+  handleOledMqttPage(result, running);
   submitted("new.host", 1883, "user", "pass"); assert(inputIndex == 5);
   for (int cancel = 0; cancel < 4; ++cancel) {
     reset(); result = {}; running = true; inputs = {"new.host", "2000", "new-user", "new-secret"}; cancelInput = cancel;
-    handleOledMQTTPage(result, running);
+    handleOledMqttPage(result, running);
     broker(); assert(staged.empty() && previousCalls == 0 && nextCalls == 0 && !running);
   }
   reset(); result = {}; introChoice = 0;
-  handleOledMQTTPage(result, running);
+  handleOledMqttPage(result, running);
   broker(); assert(draftAutoStart && staged.empty() && nextCalls == 1);
   reset(); result = {}; introChoice = 0; draftValues.mqttHost = "";
-  handleOledMQTTPage(result, running);
+  handleOledMqttPage(result, running);
   broker(); assert(!draftAutoStart && staged.empty() && nextCalls == 1);
   reset(); result = {}; inputs = {"new.host", "1883", "user", "pass"}; stageSucceeds = false;
-  handleOledMQTTPage(result, running); broker(); assert(nextCalls == 0 && staged.size() == 1);
+  handleOledMqttPage(result, running); broker(); assert(nextCalls == 0 && staged.size() == 1);
 }
 static void cliCases() {
   reset();

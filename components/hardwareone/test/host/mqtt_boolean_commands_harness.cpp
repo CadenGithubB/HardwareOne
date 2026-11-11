@@ -50,7 +50,7 @@ static void finishSettingChange(const void* field, const SettingEntry*) {
   (void)requestSettingsPersist();
   notifySettingChanged(field);
 }
-static bool stopMQTT() {
+static bool stopMqtt() {
   ++stopCalls; events.push_back("stop"); return stopResult;
 }
 

@@ -121,7 +121,7 @@ class MqttStartAttempt final {
   bool finished_ = false;
 };
 
-static String redactMQTTCommandResult(const String& output) {
+static String redactMqttCommandResult(const String& output) {
   String safe = redactOutputForLog(output);
   static const char kUnknownPrefix[] = "Unknown command: ";
   if (!safe.startsWith(kUnknownPrefix)) return safe;
@@ -317,8 +317,8 @@ static const SettingEntry mqttSettingEntries[] = {
   { "mqttAutoStart", SETTING_BOOL, &gSettings.mqttAutoStart, false, 0, nullptr, 0, 1, "Auto-start at boot", nullptr, false, "broker", "mqttautostart" },
   { "mqttHost", SETTING_STRING, &gSettings.mqttHost, 0, 0, "", 0, 0, "Broker Host", nullptr, false, "broker", "mqttHost" },
   { "mqttPort", SETTING_INT, &gSettings.mqttPort, 1883, 0, nullptr, 1, 65535, "Broker Port", nullptr, false, "broker", "mqttPort" },
-  { "mqttTLSMode", SETTING_INT, &gSettings.mqttTLSMode, 0, 0, nullptr, 0, 2, "TLS Mode (0=None, 1=TLS, 2=TLS+Verify)", "0:None,1:TLS,2:TLS+Verify", false, "broker", "mqttTLSMode" },
-  { "mqttCACertPath", SETTING_STRING, &gSettings.mqttCACertPath, 0, 0, "/system/certs/mqtt_ca.crt", 0, 0, "CA certificate path", nullptr, false, "broker", "mqttCACertPath" },
+  { "mqttTLSMode", SETTING_INT, &gSettings.mqttTlsMode, 0, 0, nullptr, 0, 2, "TLS Mode (0=None, 1=TLS, 2=TLS+Verify)", "0:None,1:TLS,2:TLS+Verify", false, "broker", "mqttTLSMode" },
+  { "mqttCACertPath", SETTING_STRING, &gSettings.mqttCaCertPath, 0, 0, "/system/certs/mqtt_ca.crt", 0, 0, "CA certificate path", nullptr, false, "broker", "mqttCACertPath" },
   { "mqttSubscribeExternal", SETTING_BOOL, &gSettings.mqttSubscribeExternal, false, 0, nullptr, 0, 1, "Subscribe to external topics", nullptr, false, "topics", "mqttSubscribeExternal" },
   { "mqttSubscribeTopics", SETTING_STRING, &gSettings.mqttSubscribeTopics, 0, 0, "", 0, 0, "Topics (comma-separated)", nullptr, false, "topics", "mqttSubscribeTopics" },
   { "mqttUser", SETTING_STRING, &gSettings.mqttUser, 0, 0, "", 0, 0, "Username", nullptr, false, "broker", "mqttUser" },
@@ -379,8 +379,8 @@ static String getDeviceId() {
 // publishPeerDiscoveryConfig(). ONE buffer serves both because they can never be
 // live at the same time:
 //
-//   MQTT_EVENT_CONNECTED (:817 — the ONLY caller of publishMQTTDiscovery)
-//     └─ publishMQTTDiscovery()
+//   MQTT_EVENT_CONNECTED (:817 — the ONLY caller of publishMqttDiscovery)
+//     └─ publishMqttDiscovery()
 //          ├─ publishDiscoveryConfig(...)      x~40, each frame opens and closes
 //          └─ publishMeshPeerDiscovery()       runs only AFTER all of the above returned
 //               └─ publishPeerDiscoveryConfig(...)  x(peers x sensors)
@@ -539,7 +539,7 @@ struct MqttCommandReply {
 // teardown waits for the admission this reply still holds.
 static void enqueueMqttCommandReply(const MqttCommandReply& reply, bool ok,
                                     const char* result) {
-  const String safeResult = redactMQTTCommandResult(String(result ? result : ""));
+  const String safeResult = redactMqttCommandResult(String(result ? result : ""));
   PSRAM_JSON_DOC(respDoc);
   respDoc["ok"] = ok;
   if (reply.routedKind) {
@@ -639,7 +639,7 @@ static void submitMqttCommand(MqttAdmission&& use, const String& line,
 
 // Handle incoming MQTT command
 // Expected JSON format: {"user":"username","pass":"password","cmd":"command"}
-static void handleMQTTCommand(const char* topic, int topicLen, const char* data, int dataLen) {
+static void handleMqttCommand(const char* topic, int topicLen, const char* data, int dataLen) {
   String commandTopic = gSettings.mqttBaseTopic + "/command";
   String responseTopic = gSettings.mqttBaseTopic + "/response";
   
@@ -793,7 +793,7 @@ static void publishMeshPeerDiscovery();
 #endif
 
 // Publish all discovery configs for enabled sensors
-static void publishMQTTDiscovery() {
+static void publishMqttDiscovery() {
   if (!mqttTofConnected.load(std::memory_order_acquire) ||
       gSettings.mqttDiscoveryPrefix.length() == 0) return;
   
@@ -1151,7 +1151,7 @@ static void mqtt_event_handler(void* handler_args, esp_event_base_t base, int32_
       }
       
       // Publish Home Assistant discovery configs
-      publishMQTTDiscovery();
+      publishMqttDiscovery();
       
       // Subscribe to command topic for HA commands
       subscribeToCommandTopic();
@@ -1187,7 +1187,7 @@ static void mqtt_event_handler(void* handler_args, esp_event_base_t base, int32_
       
     case MQTT_EVENT_DATA:
       // Check for command topic first
-      handleMQTTCommand(event->topic, event->topic_len, event->data, event->data_len);
+      handleMqttCommand(event->topic, event->topic_len, event->data, event->data_len);
       
       // Store incoming data as external sensor if subscriptions enabled
       if (gSettings.mqttSubscribeExternal && event->topic_len > 0) {
@@ -1209,7 +1209,7 @@ static void mqtt_event_handler(void* handler_args, esp_event_base_t base, int32_
 // MQTT Lifecycle Functions
 // ============================================================================
 
-bool startMQTT() {
+bool startMqtt() {
   if (sMqttLifecycle.stopPending()) {
     lastError = "MQTT client is stopping";
     return false;
@@ -1257,10 +1257,10 @@ bool startMQTT() {
   
   // Configure MQTT client - strings must persist until esp_mqtt_client_init() completes
   String brokerUri;
-  bool useTLS = (gSettings.mqttTLSMode > 0);
+  bool useTls = (gSettings.mqttTlsMode > 0);
   {
     char uriBuf[128];
-    snprintf(uriBuf, sizeof(uriBuf), "%s://%s:%d", useTLS ? "mqtts" : "mqtt", gSettings.mqttHost.c_str(), gSettings.mqttPort);
+    snprintf(uriBuf, sizeof(uriBuf), "%s://%s:%d", useTls ? "mqtts" : "mqtt", gSettings.mqttHost.c_str(), gSettings.mqttPort);
     brokerUri = uriBuf;
   }
   String availTopic = gSettings.mqttBaseTopic + "/availability";
@@ -1273,21 +1273,21 @@ bool startMQTT() {
   mqtt_cfg.buffer.size = CMD_RESULT_MAX;
   mqtt_cfg.buffer.out_size = CMD_RESULT_MAX;
   
-  // TLS configuration based on mqttTLSMode: 0=None, 1=TLS (no verify), 2=TLS+Verify
+  // TLS configuration based on mqttTlsMode: 0=None, 1=TLS (no verify), 2=TLS+Verify
   static String caCertData;  // Must persist for MQTT client lifetime
-  if (gSettings.mqttTLSMode == 2) {
+  if (gSettings.mqttTlsMode == 2) {
     // TLS + Certificate Verification
-    if (gSettings.mqttCACertPath.length() > 0) {
+    if (gSettings.mqttCaCertPath.length() > 0) {
       FsLockGuard fsGuard("mqtt.cert.load");
-      File certFile = VFS::openGuarded(gSettings.mqttCACertPath, "r", VFS::systemAuth(VFS::Scopes::CERTS, "mqtt.cert.load"));
+      File certFile = VFS::openGuarded(gSettings.mqttCaCertPath, "r", VFS::systemAuth(VFS::Scopes::CERTS, "mqtt.cert.load"));
       if (certFile) {
         caCertData = certFile.readString();
         certFile.close();
         mqtt_cfg.broker.verification.certificate = caCertData.c_str();
         mqtt_cfg.broker.verification.skip_cert_common_name_check = false;
-        INFO_MQTT_CONNECTIONF("TLS + Verify: using %s", gSettings.mqttCACertPath.c_str());
+        INFO_MQTT_CONNECTIONF("TLS + Verify: using %s", gSettings.mqttCaCertPath.c_str());
       } else {
-        lastError = "CA cert file not found: " + gSettings.mqttCACertPath;
+        lastError = "CA cert file not found: " + gSettings.mqttCaCertPath;
         ERROR_MQTTF("%s", lastError.c_str());
         systemEventPost(SYSEVT_MQTT_START_FAILED, "CA cert file not found");
         return false;
@@ -1298,7 +1298,7 @@ bool startMQTT() {
       systemEventPost(SYSEVT_MQTT_START_FAILED, "TLS+verify needs CA path");
       return false;
     }
-  } else if (gSettings.mqttTLSMode == 1) {
+  } else if (gSettings.mqttTlsMode == 1) {
     // TLS without certificate verification (encrypted but trusts any server)
     mqtt_cfg.broker.verification.skip_cert_common_name_check = true;
     mqtt_cfg.broker.verification.certificate = nullptr;
@@ -1366,7 +1366,7 @@ bool startMQTT() {
   }
   lastError = "";
   broadcastOutput("[MQTT] Client started");
-  INFO_MQTT_CONNECTIONF("Connecting to %s://%s:%d", (gSettings.mqttTLSMode > 0) ? "mqtts" : "mqtt", 
+  INFO_MQTT_CONNECTIONF("Connecting to %s://%s:%d", (gSettings.mqttTlsMode > 0) ? "mqtts" : "mqtt", 
                gSettings.mqttHost.c_str(), gSettings.mqttPort);
   
   return true;
@@ -1375,7 +1375,7 @@ bool startMQTT() {
 // Actual ESP-MQTT teardown is main-loop-affine.  Calling the blocking IDF stop
 // from cmd_exec can deadlock against an MQTT event callback that is itself
 // waiting for cmd_exec, even when the close command came from WEB or SERIAL.
-static bool stopMQTTNow() {
+static bool stopMqttNow() {
   // Main-loop only. The first failed stop before BEFORE_CONNECT is retried to
   // cover the small window after xTaskCreate but before the higher-priority
   // MQTT worker first runs. A second such failure means the pinned IDF worker
@@ -1437,7 +1437,7 @@ static bool stopMQTTNow() {
   return true;
 }
 
-bool stopMQTT() {
+bool stopMqtt() {
   const bool requested = sMqttLifecycle.requestStop();
   if (requested) {
     DEBUG_MQTT_CONNECTIONF(
@@ -1451,7 +1451,7 @@ bool stopMQTT() {
 // MQTT Publishing
 // ============================================================================
 
-void publishMQTTSensorData() {
+void publishMqttSensorData() {
   MqttClientUse publishUse;
   if (!publishUse.admitted()) return;
 
@@ -1615,7 +1615,7 @@ void mqttTick() {
     if (stopRetryScheduled &&
         (int32_t)(now - stopRetryAfterMs) < 0) return;
     if (sMqttLifecycle.tryBeginStop()) {
-      if (stopMQTTNow()) {
+      if (stopMqttNow()) {
         sMqttLifecycle.finishStop();
         stopRetryAfterMs = 0;
         stopRetryScheduled = false;
@@ -1636,7 +1636,7 @@ void mqttTick() {
   // Periodic publishing
   if (mqttTofConnected.load(std::memory_order_acquire) &&
       (now - lastPublishTime >= gSettings.mqttPublishIntervalMs)) {
-    publishMQTTSensorData();
+    publishMqttSensorData();
     lastPublishTime = now;
   }
 }
@@ -1656,7 +1656,7 @@ const char* cmd_openmqtt(const String& argsInput) {
     return "[MQTT] Already running";
   }
   
-  if (startMQTT()) {
+  if (startMqtt()) {
     // The broker connection completes asynchronously in the event handler, so
     // "started" is not yet "connected" — point the caller at where the live
     // connection state lands.
@@ -1672,7 +1672,7 @@ const char* cmd_openmqtt(const String& argsInput) {
 const char* cmd_closemqtt(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
-  if (!stopMQTT()) {
+  if (!stopMqtt()) {
     return "[MQTT] Not running";
   }
   return "[MQTT] Client stop scheduled";
@@ -1741,7 +1741,7 @@ const char* cmd_mqttclientenabled(const String& argsInput) {
   const bool enable = (parsed == 1);
   setSetting(gSettings.mqttEnabled, enable);
   if (!enable) {
-    return stopMQTT()
+    return stopMqtt()
                ? "MQTT client disabled; client stop scheduled"
                : "MQTT client disabled";
   }
@@ -1810,11 +1810,11 @@ const char* cmd_mqtttlsmode(const String& argsInput) {
   if (arg.length() == 0) {
     if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
     const char* modeStr = "None (unencrypted)";
-    if (gSettings.mqttTLSMode == 1) modeStr = "TLS (encrypted, no verification)";
-    else if (gSettings.mqttTLSMode == 2) modeStr = "TLS + Verify (encrypted + cert verification)";
+    if (gSettings.mqttTlsMode == 1) modeStr = "TLS (encrypted, no verification)";
+    else if (gSettings.mqttTlsMode == 2) modeStr = "TLS + Verify (encrypted + cert verification)";
     snprintf(getDebugBuffer(), 1024, "MQTT TLS Mode: %d - %s\nCA cert path: %s",
-             gSettings.mqttTLSMode, modeStr,
-             gSettings.mqttCACertPath.length() > 0 ? gSettings.mqttCACertPath.c_str() : "(not set)");
+             gSettings.mqttTlsMode, modeStr,
+             gSettings.mqttCaCertPath.length() > 0 ? gSettings.mqttCaCertPath.c_str() : "(not set)");
     return getDebugBuffer();
   }
   
@@ -1832,8 +1832,8 @@ const char* cmd_mqtttlsmode(const String& argsInput) {
     return "Error: invalid arguments — Usage: mqttTLSMode [0|1|2|none|tls|verify]\n  0/none = No TLS\n  1/tls = TLS (no verification)\n  2/verify = TLS + Certificate Verification";
   }
   
-  int oldMode = gSettings.mqttTLSMode;
-  setSetting(gSettings.mqttTLSMode, newMode);
+  int oldMode = gSettings.mqttTlsMode;
+  setSetting(gSettings.mqttTlsMode, newMode);
   
   // Create /system/certs/ folder for TLS modes
   if (newMode > 0 && !VFS::existsGuarded("/system/certs", VFS::systemAuth(VFS::Scopes::CERTS, "mqtt.cert.dir"))) {
@@ -1866,13 +1866,13 @@ const char* cmd_mqttcacertpath(const String& argsInput) {
   if (arg.length() == 0) {
     if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
     snprintf(getDebugBuffer(), 1024, "MQTT CA cert path: %s",
-             gSettings.mqttCACertPath.length() > 0 ? gSettings.mqttCACertPath.c_str() : "(not set)");
+             gSettings.mqttCaCertPath.length() > 0 ? gSettings.mqttCaCertPath.c_str() : "(not set)");
     return getDebugBuffer();
   }
   if (arg == "clear" || arg == "none") {
-    setSetting(gSettings.mqttCACertPath, String(""));
-    if (gSettings.mqttTLSMode == 2) {
-      setSetting(gSettings.mqttTLSMode, 1);  // Downgrade to TLS without verify
+    setSetting(gSettings.mqttCaCertPath, String(""));
+    if (gSettings.mqttTlsMode == 2) {
+      setSetting(gSettings.mqttTlsMode, 1);  // Downgrade to TLS without verify
     }
     return "MQTT CA cert path cleared";
   }
@@ -1883,10 +1883,10 @@ const char* cmd_mqttcacertpath(const String& argsInput) {
   if (!VFS::existsGuarded(arg, currentAuthContext())) {
     if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
     snprintf(getDebugBuffer(), 1024, "Warning: File not found: %s (setting anyway)", arg.c_str());
-    setSetting(gSettings.mqttCACertPath, arg);
+    setSetting(gSettings.mqttCaCertPath, arg);
     return getDebugBuffer();
   }
-  setSetting(gSettings.mqttCACertPath, arg);
+  setSetting(gSettings.mqttCaCertPath, arg);
   if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
   snprintf(getDebugBuffer(), 1024, "MQTT CA cert path set to: %s", arg.c_str());
   return getDebugBuffer();

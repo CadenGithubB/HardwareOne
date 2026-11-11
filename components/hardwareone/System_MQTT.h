@@ -12,10 +12,10 @@
 #include <Arduino.h>
 
 // MQTT lifecycle functions
-bool startMQTT();
+bool startMqtt();
 // Requests main-loop-affine teardown. Returns false only when already stopped;
 // true means shutdown is scheduled or already in progress.
-bool stopMQTT();
+bool stopMqtt();
 void mqttTick();
 bool isMqttConnected();
 
@@ -26,7 +26,7 @@ bool isMqttConnected();
 bool isMqttStarted();
 
 // MQTT publishing
-void publishMQTTSensorData();
+void publishMqttSensorData();
 
 // External sensor access (for web page)
 int getExternalSensorCount();
@@ -42,10 +42,10 @@ const char* cmd_mqttstatus(const String& args);
 #include <Arduino.h>
 
 // Stubs when MQTT is disabled
-inline bool startMQTT() { return false; }
-inline bool stopMQTT() { return false; }
+inline bool startMqtt() { return false; }
+inline bool stopMqtt() { return false; }
 inline void mqttTick() {}
-inline void publishMQTTSensorData() {}
+inline void publishMqttSensorData() {}
 inline bool isMqttConnected() { return false; }
 inline bool isMqttStarted() { return false; }
 inline int getExternalSensorCount() { return 0; }

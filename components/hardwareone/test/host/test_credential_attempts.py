@@ -222,7 +222,7 @@ def check_contracts() -> None:
     require_not_http_gated("System_UartLink.cpp", uart, "credentialAttemptAllowed(SOURCE_UART")
 
     mqtt = (COMPONENT / "System_MQTT.cpp").read_text()
-    command = extract_block(mqtt, "static void handleMQTTCommand(")
+    command = extract_block(mqtt, "static void handleMqttCommand(")
     require_before("MQTT command", command, "credentialAttemptAllowed(SOURCE_MQTT",
                    "isValidUser(")
     rejected = command[command.index("isValidUser("):command.index("Authentication failed")]

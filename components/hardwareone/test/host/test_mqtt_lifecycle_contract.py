@@ -64,8 +64,8 @@ assert "static MqttLifecycleGate sMqttLifecycle;" in mqtt
 assert "static std::atomic<bool> mqttClientRunning{false};" in mqtt
 assert "static std::atomic<bool> mqttTofConnected{false};" in mqtt
 assert "static std::atomic<bool> sMqttBeforeConnectSeen{false};" in mqtt
-assert "bool stopMQTT();" in mqtt_header
-assert "inline bool stopMQTT() { return false; }" in mqtt_header
+assert "bool stopMqtt();" in mqtt_header
+assert "inline bool stopMqtt() { return false; }" in mqtt_header
 
 # The production gate is one packed atomic word: admission increments it only
 # while OPEN, while stop closes admission and requests teardown in the same CAS.
@@ -79,9 +79,9 @@ assert "current + 1u" in admit
 assert "current | kClosed | kStopRequested" in request_stop
 assert "kClosed | kStopRequested" in begin_stop
 
-handle = function_body(mqtt, "static void handleMQTTCommand(")
+handle = function_body(mqtt, "static void handleMqttCommand(")
 event_handler = function_body(mqtt, "static void mqtt_event_handler(")
-assert "handleMQTTCommand(event->topic" in event_handler
+assert "handleMqttCommand(event->topic" in event_handler
 
 # The esp-mqtt task holds the client's API lock while it dispatches an event,
 # and esp_mqtt_client_publish() on the main loop takes the same lock. Nothing
@@ -145,8 +145,8 @@ assert (completion.index("enqueueMqttCommandReply(*reply, ok, result)")
 
 # Public stop is request-only. The only driver stop lives in the private helper
 # that mqttTick claims after responses reach zero, before normal publication.
-public_stop = function_body(mqtt, "bool stopMQTT()")
-stop_now = function_body(mqtt, "static bool stopMQTTNow()")
+public_stop = function_body(mqtt, "bool stopMqtt()")
+stop_now = function_body(mqtt, "static bool stopMqttNow()")
 tick = function_body(mqtt, "void mqttTick()")
 assert "requestStop()" in public_stop
 assert "esp_mqtt_client_stop" not in public_stop
@@ -160,11 +160,11 @@ assert "++failuresBeforeConnect" in stop_error
 assert "esp_mqtt_client_disconnect(mqttClient)" in stop_error
 assert "return false;" in stop_error
 assert mqtt.count("esp_mqtt_client_stop(mqttClient)") == 1
-assert mqtt.count("stopMQTTNow()") == 2  # definition plus main-loop caller
+assert mqtt.count("stopMqttNow()") == 2  # definition plus main-loop caller
 pending = tick.index("sMqttLifecycle.stopPending()")
 claim = tick.index("sMqttLifecycle.tryBeginStop()", pending)
-teardown = tick.index("stopMQTTNow()", claim)
-normal_publish = tick.index("publishMQTTSensorData()")
+teardown = tick.index("stopMqttNow()", claim)
+normal_publish = tick.index("publishMqttSensorData()")
 assert pending < claim < teardown < normal_publish
 pending_block = function_body(tick, "if (sMqttLifecycle.stopPending())")
 pending_lines = [line.strip() for line in pending_block.splitlines() if line.strip()]
@@ -177,7 +177,7 @@ assert "(int32_t)(now - stopRetryAfterMs) < 0" in tick
 
 # The historically public sensor publisher also owns a gate use, so a future
 # non-main caller cannot race main-loop teardown through the exposed API.
-sensor_publish = function_body(mqtt, "void publishMQTTSensorData()")
+sensor_publish = function_body(mqtt, "void publishMqttSensorData()")
 assert sensor_publish.index("MqttClientUse publishUse;") < sensor_publish.index(
     "mqttTofConnected.load(std::memory_order_acquire)"
 )
@@ -185,7 +185,7 @@ assert "if (!publishUse.admitted()) return;" in sensor_publish
 
 # Startup owns the CLOSED/STARTING transition, checks IDF errors, and opens the
 # gate only after the client task and running-state publication succeed.
-start = function_body(mqtt, "bool startMQTT()")
+start = function_body(mqtt, "bool startMqtt()")
 start_claim = start.index("sMqttLifecycle.beginStart()")
 start_attempt = start.index("MqttStartAttempt startAttempt;")
 driver_start = start.index("esp_mqtt_client_start(mqttClient)")
@@ -205,13 +205,13 @@ assert "sMqttBeforeConnectSeen.store(true" in mqtt
 # Both current shutdown routes go through the central request-only API.
 close_command = function_body(mqtt, "const char* cmd_closemqtt(")
 enabled_command = function_body(mqtt, "const char* cmd_mqttclientenabled(")
-not_running_branch = function_body(close_command, "if (!stopMQTT())")
+not_running_branch = function_body(close_command, "if (!stopMqtt())")
 assert 'return "[MQTT] Not running";' in not_running_branch
 assert close_command.index(not_running_branch) < close_command.index(
     'return "[MQTT] Client stop scheduled";'
 )
 disable_branch = function_body(enabled_command, "if (!enable)")
-assert "stopMQTT()" in disable_branch
+assert "stopMqtt()" in disable_branch
 assert "client stop scheduled" in disable_branch
 assert mqtt.count(
     '{ "closemqtt", "Stop MQTT client", true, cmd_closemqtt }'

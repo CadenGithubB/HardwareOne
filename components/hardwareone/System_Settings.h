@@ -433,8 +433,8 @@ struct Settings {
       mqttAutoStart(false),
       mqttHost(""),
       mqttPort(1883),
-      mqttTLSMode(0),  // 0=None, 1=TLS (no verify), 2=TLS+Verify
-      mqttCACertPath("/system/certs/mqtt_ca.crt"),
+      mqttTlsMode(0),  // 0=None, 1=TLS (no verify), 2=TLS+Verify
+      mqttCaCertPath("/system/certs/mqtt_ca.crt"),
       mqttSubscribeExternal(false),
       mqttSubscribeTopics(""),
       mqttUser(""),
@@ -1192,8 +1192,8 @@ struct Settings {
   bool mqttAutoStart;           // Auto-start MQTT client at boot if WiFi connected (default: false)
   String mqttHost;              // MQTT broker hostname or IP (default: "")
   int mqttPort;                 // MQTT broker port (default: 1883, 8883 for TLS)
-  int mqttTLSMode;              // 0=None, 1=TLS (no verify), 2=TLS+Verify (default: 0)
-  String mqttCACertPath;        // Path to CA certificate file for verification (default: "")
+  int mqttTlsMode;              // 0=None, 1=TLS (no verify), 2=TLS+Verify (default: 0)
+  String mqttCaCertPath;        // Path to CA certificate file for verification (default: "")
   bool mqttSubscribeExternal;   // Subscribe to external topics for sensor data (default: false)
   String mqttSubscribeTopics;   // Comma-separated list of topics to subscribe (default: "")
   String mqttUser;              // MQTT username (default: "")

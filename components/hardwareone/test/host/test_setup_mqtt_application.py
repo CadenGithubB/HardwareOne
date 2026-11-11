@@ -25,8 +25,8 @@ def main():
     if not args.cxx:
         raise SystemExit("a host C++17 compiler is required")
     current = (COMPONENT / "System_SetupWizard.cpp").read_text()
-    helper = extract_block(current, "bool wizardParseMQTTPort(")
-    assert "bool wizardStageMQTTSettings(const SetupWizardResult& result);" in (
+    helper = extract_block(current, "bool wizardParseMqttPort(")
+    assert "bool wizardStageMqttSettings(const SetupWizardResult& result);" in (
         COMPONENT / "System_SetupWizard.h").read_text()
     mode_header = (COMPONENT / "System_CLIMode.h").read_text()
     cli_result = extract_block(mode_header, "enum CLIModeInputResult") + ";"
@@ -38,13 +38,13 @@ def main():
             oled = (source_dir / "OLED_SetupWizard.cpp").read_text()
             mode = (source_dir / "System_SetupWizardMode.cpp").read_text()
             header = (source_dir / "System_SetupWizard.h").read_text()
-            handlers = [extract_block(setup, "static void handleSerialMQTTPage("),
-                        extract_block(oled, "void handleOledMQTTPage("),
-                        extract_block(mode[mode.rindex("static CLIModeInputResult dispatchMQTT("):],
-                                      "static CLIModeInputResult dispatchMQTT(")]
+            handlers = [extract_block(setup, "static void handleSerialMqttPage("),
+                        extract_block(oled, "void handleOledMqttPage("),
+                        extract_block(mode[mode.rindex("static CLIModeInputResult dispatchMqtt("):],
+                                      "static CLIModeInputResult dispatchMqtt(")]
             if label == "current":
                 for handler in handlers:
-                    assert handler.count("wizardStageMQTTSettings(") == 1
+                    assert handler.count("wizardStageMqttSettings(") == 1
                     assert "gSettings.mqtt" not in handler
             definitions = "\n\n".join([
                 extract_block(header, "enum SetupWizardPage") + ";",
@@ -58,7 +58,7 @@ def main():
                 extract_block(setup, "bool wizardHandleCancelInput("),
                 extract_block(setup, "static String waitForWizardInput("),
                 extract_block(setup, "static String waitForWizardSecret("),
-                extract_block(setup, "void wizardSkipMQTTPage("),
+                extract_block(setup, "void wizardSkipMqttPage("),
                 helper,
                 extract_block(mode, "static WizardSubMode subModeForPage("),
                 *handlers,

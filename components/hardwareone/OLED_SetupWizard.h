@@ -42,7 +42,7 @@ bool renderWifiPage(SetupWizardResult& result);
 
 // OLED handlers for text-input pages (own event loops)
 void handleOledEspNowPage(SetupWizardResult& result, bool& running);
-void handleOledMQTTPage(SetupWizardResult& result, bool& running);
+void handleOledMqttPage(SetupWizardResult& result, bool& running);
 
 // Input handlers (joystick/button - called from unified loop when OLED connected)
 // Returns whether input was handled; result.completed is the Finish signal.

@@ -511,14 +511,14 @@ void handleOledEspNowPage(SetupWizardResult& result, bool& running) {
 // OLED MQTT Broker Page (text input for each field)
 // ============================================================================
 
-void handleOledMQTTPage(SetupWizardResult& result, bool& running) {
+void handleOledMqttPage(SetupWizardResult& result, bool& running) {
   // Show intro screen: Configure or Skip?
   int choice = showWizardOptionalPageIntro(WIZARD_PAGE_MQTT, "MQTT",
       "Optional: MQTT broker");
   if (choice == -2) { result.completed = false; running = false; return; }
   if (choice == -1) return; // went back
   if (choice == 0) {        // skip: a configured broker stays as it is (owner rule)
-    wizardSkipMQTTPage();
+    wizardSkipMqttPage();
     if (!wizardNextPage(result)) running = false;
     return;
   }
@@ -542,7 +542,7 @@ void handleOledMQTTPage(SetupWizardResult& result, bool& running) {
     String portStr = getOledTextInput("MQTT Port:", false, currentPort.c_str(), 5, &cancelled);
     if (isWizardCancelRequested()) { result.completed = false; running = false; return; }
     if (cancelled) { wizardPrevPage(); return; }
-    if (wizardParseMQTTPort(portStr, result.mqttPort)) break;
+    if (wizardParseMqttPort(portStr, result.mqttPort)) break;
     broadcastOutput("Error: MQTT port must be 1..65535, or blank to keep it.");
   }
 
@@ -560,7 +560,7 @@ void handleOledMQTTPage(SetupWizardResult& result, bool& running) {
     result.mqttPassword = pass;
   }
 
-  if (!wizardStageMQTTSettings(result)) {
+  if (!wizardStageMqttSettings(result)) {
     broadcastOutput("Error: MQTT choices could not be staged. Try again or cancel.");
     return;
   }

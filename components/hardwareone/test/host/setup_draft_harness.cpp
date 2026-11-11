@@ -223,7 +223,7 @@ static void cancellationAndRestart() {
 
 static void navigationAndModes() {
   reset(); const auto original = liveValues(); initSetupWizard();
-  check(!wizardShouldShowWifi() && !wizardShouldShowEspNow() && !wizardShouldShowMQTT());
+  check(!wizardShouldShowWifi() && !wizardShouldShowEspNow() && !wizardShouldShowMqtt());
 #if ENABLE_WIFI
   wizardSetFeatureEnabled("wifi", true); check(wizardShouldShowWifi());
 #endif
@@ -231,9 +231,9 @@ static void navigationAndModes() {
   wizardSetFeatureEnabled("espnow", true); check(wizardShouldShowEspNow());
 #endif
 #if ENABLE_MQTT
-  wizardSetFeatureEnabled("mqtt", true); wizardSetMQTTAutoStart(true);
-  check(wizardShouldShowMQTT());
-  wizardSetMQTTAutoStart(false); check(!wizardShouldShowMQTT());
+  wizardSetFeatureEnabled("mqtt", true); wizardSetMqttAutoStart(true);
+  check(wizardShouldShowMqtt());
+  wizardSetMqttAutoStart(false); check(!wizardShouldShowMqtt());
 #endif
   uint32_t beforeCost, maxCost; int percentage;
   getHeapBarData(&beforeCost, &maxCost, &percentage);
@@ -285,9 +285,9 @@ static void stagingAndPortValidation() {
   SetupWizardResult patch;
   patch.mqttHost = "new.host"; patch.mqttPort = 65535;
   patch.mqttUser = "new-user"; patch.mqttPassword = "new-secret";
-  check(wizardStageMQTTSettings(patch));
+  check(wizardStageMqttSettings(patch));
   check(getWizardDraftValues().mqttHost == "new.host" && getWizardDraftValues().mqttPort == 65535);
-  patch = {}; check(wizardStageMQTTSettings(patch));
+  patch = {}; check(wizardStageMqttSettings(patch));
   check(getWizardDraftValues().mqttHost == "new.host" && getWizardDraftValues().mqttPassword == "new-secret");
   patch.espnowFriendlyName = "new-name"; patch.espnowRoom = "new-room"; patch.espnowStationary = false;
   check(wizardStageEspNowSettings(patch));
@@ -295,12 +295,12 @@ static void stagingAndPortValidation() {
   check(getWizardDraftValues().espnowRoom == "new-room" && getWizardDraftValues().espnowZone == "old-zone");
   noLiveEffects(original);
   for (const char* invalid : {"0", "-1", "65536", "70000", "1883junk", "one", "1.5", "1 2", "99999999999999999999999"}) {
-    int port = 99; check(!wizardParseMQTTPort(invalid, port)); check(port == 99);
+    int port = 99; check(!wizardParseMqttPort(invalid, port)); check(port == 99);
   }
   int port = 99;
-  check(wizardParseMQTTPort("", port) && port == 0);
-  check(wizardParseMQTTPort(" 1883 ", port) && port == 1883);
-  check(wizardParseMQTTPort("65535", port) && port == 65535);
+  check(wizardParseMqttPort("", port) && port == 0);
+  check(wizardParseMqttPort(" 1883 ", port) && port == 1883);
+  check(wizardParseMqttPort("65535", port) && port == 65535);
   discardSetupWizard(); noLiveEffects(original);
 }
 
@@ -438,7 +438,7 @@ static void touchedOnlyApply() {
   reset(); initSetupWizard();
   toggleFeature("automation");
   SetupWizardResult patch; patch.mqttHost = "edited.host";
-  check(wizardStageMQTTSettings(patch));
+  check(wizardStageMqttSettings(patch));
   // These settings change through another surface after the wizard starts.
   gSettings.unrelated = 777; gSettings.ntpServer = "external.ntp";
   gSettings.tzOffsetMinutes = 456; gSettings.mqttUser = "external-user";
@@ -506,7 +506,7 @@ static void completionFailuresAndNoop() {
   check(warning);
   reset(); initSetupWizard();
   SetupWizardResult patch; patch.mqttHost = "long changed broker value";
-  check(wizardStageMQTTSettings(patch));
+  check(wizardStageMqttSettings(patch));
   failReserve = true; result = completed();
   check(!wizardSaveAndApplySettings(result));
   check(gSettings.mqttHost == "old.host" && changed.empty() && applyCalls == 0);
@@ -569,7 +569,7 @@ static void invalidDraftFinish() {
   // error line, so every adapter leaves the same way.
   reset(); initSetupWizard();
   SetupWizardResult patch; patch.mqttHost = "unreserved broker";
-  failReserve = true; check(!wizardStageMQTTSettings(patch)); failReserve = false;
+  failReserve = true; check(!wizardStageMqttSettings(patch)); failReserve = false;
   SetupWizardResult result{}; int guard = 0;
   while (wizardNextPage(result) && ++guard < WIZARD_PAGE_COUNT) {}
   check(!result.completed && cancelRequested);

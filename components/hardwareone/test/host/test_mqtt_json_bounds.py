@@ -52,7 +52,7 @@ def definitions(mqtt: str, mac_helpers: str) -> str:
 def source_guards(mqtt: str) -> None:
     require("sizeof(configJson) - pos" not in mqtt,
             "discovery builders still advance an unchecked snprintf position")
-    state = extract_block(mqtt, "void publishMQTTSensorData(")
+    state = extract_block(mqtt, "void publishMqttSensorData(")
     guard = state.index("if (pos <= 0 || pos >= 16384)")
     require(guard < state.index("esp_mqtt_client_publish(mqttClient, stateTopic"),
             "the state document is checked before it is published")

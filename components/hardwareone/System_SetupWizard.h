@@ -163,11 +163,11 @@ const SetupWizardResult& getWizardDraftValues();
 void discardSetupWizard();
 bool wizardFeatureEnabled(const char* featureId);
 void wizardSetFeatureEnabled(const char* featureId, bool enabled);
-void wizardSetMQTTAutoStart(bool enabled);
+void wizardSetMqttAutoStart(bool enabled);
 // Skipping the broker page leaves a configured broker exactly as it is; only a
 // draft with no broker host has its auto-start cleared. Every adapter's
 // Next/Skip on the MQTT page goes through this.
-void wizardSkipMQTTPage();
+void wizardSkipMqttPage();
 
 // Handle input actions (returns true if state changed)
 bool wizardActivateCurrentItem();
@@ -185,14 +185,14 @@ int getWizardTotalPages();
 int getWizardPageNumber(SetupWizardPage page);
 bool wizardShouldShowWifi();
 bool wizardShouldShowEspNow();
-bool wizardShouldShowMQTT();
+bool wizardShouldShowMqtt();
 
 // Accept a page patch into the draft. Empty strings retain the accepted draft;
 // ESP-NOW stationary is always set. False means staging failed; do not advance.
 bool wizardStageEspNowSettings(const SetupWizardResult& result);
-bool wizardStageMQTTSettings(const SetupWizardResult& result);
+bool wizardStageMqttSettings(const SetupWizardResult& result);
 // Empty = keep existing port; otherwise require a complete decimal in 1..65535.
-bool wizardParseMQTTPort(const String& input, int& port);
+bool wizardParseMqttPort(const String& input, int& port);
 
 // The only commit boundary, shared by all interfaces. Collects final choices,
 // validates and applies edited fields, coalesces persistence, then applies live

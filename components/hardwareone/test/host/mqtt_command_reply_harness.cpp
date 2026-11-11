@@ -79,7 +79,7 @@ static bool mainLoopTeardown() {
   return true;
 }
 
-static String redactMQTTCommandResult(const String& output) { return output; }
+static String redactMqttCommandResult(const String& output) { return output; }
 
 // INSERT_PRODUCTION_DEFINITIONS
 

@@ -115,15 +115,15 @@ void streamMqttInner(httpd_req_t* req) {
   httpd_resp_send_chunk(req, "</td></tr><tr><td>Security</td><td id=\"cfg-tls\">", HTTPD_RESP_USE_STRLEN);
   
   // Display TLS mode as a clear status
-  if (gSettings.mqttTLSMode == 0) {
+  if (gSettings.mqttTlsMode == 0) {
     httpd_resp_send_chunk(req, "<span style=\"color:var(--warning);\">None</span> <span style=\"font-size:0.85em;color:var(--panel-fg);\">(unencrypted)</span>", HTTPD_RESP_USE_STRLEN);
-  } else if (gSettings.mqttTLSMode == 1) {
+  } else if (gSettings.mqttTlsMode == 1) {
     httpd_resp_send_chunk(req, "<span style=\"color:var(--success);\">TLS</span> <span style=\"font-size:0.85em;color:var(--panel-fg);\">(encrypted, trusts any server)</span>", HTTPD_RESP_USE_STRLEN);
-  } else if (gSettings.mqttTLSMode == 2) {
+  } else if (gSettings.mqttTlsMode == 2) {
     httpd_resp_send_chunk(req, "<span style=\"color:var(--success);\">TLS + Verify</span>", HTTPD_RESP_USE_STRLEN);
-    if (gSettings.mqttCACertPath.length() > 0) {
+    if (gSettings.mqttCaCertPath.length() > 0) {
       httpd_resp_send_chunk(req, " <span style=\"font-size:0.85em;color:var(--panel-fg);\">(", HTTPD_RESP_USE_STRLEN);
-      httpd_resp_send_chunk(req, gSettings.mqttCACertPath.c_str(), HTTPD_RESP_USE_STRLEN);
+      httpd_resp_send_chunk(req, gSettings.mqttCaCertPath.c_str(), HTTPD_RESP_USE_STRLEN);
       httpd_resp_send_chunk(req, ")</span>", HTTPD_RESP_USE_STRLEN);
     }
   }
