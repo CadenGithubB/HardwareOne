@@ -132,7 +132,7 @@ int main() {
     {"fmradio", createFMRadioTask, fmRadioTask, &gFmRadioTaskHandle},
     {"apds", createAPDSTask, apdsTask, &gApdsTaskHandle},
     {"presence", createPresenceTask, presenceTask, &gPresenceTaskHandle},
-    {"gps", createGPSTask, gpsTask, &gGpsTaskHandle},
+    {"gps", createGpsTask, gpsTask, &gGpsTaskHandle},
     {"rtc", createRTCTask, rtcTask, &gRtcTaskHandle},
   };
   for (const auto& test : cases) {

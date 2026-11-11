@@ -478,7 +478,7 @@ bool createPresenceTask() {
   return true;  // Task created successfully or already exists
 }
 
-bool createGPSTask() {
+bool createGpsTask() {
   if (gGpsTaskHandle == nullptr) {
     const uint32_t gpsStack = GPS_STACK_WORDS;  // words; ~12KB
     if (xTaskCreateLogged(gpsTask, "sensor_gps", gpsStack, nullptr, TASK_PRIORITY_LOW, &gGpsTaskHandle, "gps", I2C_SENSOR_CORE) != pdPASS) {

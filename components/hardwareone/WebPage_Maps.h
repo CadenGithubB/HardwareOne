@@ -2968,7 +2968,7 @@ setInterval(loadWaypoints, 5000);
 esp_err_t handleMapFeaturesAPI(httpd_req_t* req);
 
 // GPS tracks API - load tracks, list files, live tracking
-esp_err_t handleGPSTracksAPI(httpd_req_t* req);
+esp_err_t handleGpsTracksAPI(httpd_req_t* req);
 
 // Waypoints API handler (merged from WebPage_Waypoints)
 esp_err_t handleWaypointsAPI(httpd_req_t* req);

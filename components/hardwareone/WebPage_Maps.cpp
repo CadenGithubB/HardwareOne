@@ -97,7 +97,7 @@ esp_err_t handleMapFeaturesAPI(httpd_req_t* req) {
 // GPS Tracks API
 // =============================================================================
 
-static esp_err_t handleGPSLiveTrackAction(httpd_req_t* req, AuthContext& ctx,
+static esp_err_t handleGpsLiveTrackAction(httpd_req_t* req, AuthContext& ctx,
                                          bool start) {
   String result;
   const bool executed = executeUnifiedWebCommand(
@@ -116,9 +116,9 @@ static esp_err_t handleGPSLiveTrackAction(httpd_req_t* req, AuthContext& ctx,
   return ESP_OK;
 }
 
-esp_err_t handleGPSTracksAPI(httpd_req_t* req) {
+esp_err_t handleGpsTracksAPI(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);
-  // GPSTrackManager::loadTrack/saveTrack read+write the filesystem via
+  // GpsTrackManager::loadTrack/saveTrack read+write the filesystem via
   // currentAuthContext() (the per-task TLS identity), NOT the ctx above.
   // WEB_AUTH_OR_RETURN only makes a local ctx, so without installing it the FS
   // layer sees the anon sentinel and denies every read under /logging_captures/
@@ -143,15 +143,15 @@ esp_err_t handleGPSTracksAPI(httpd_req_t* req) {
 
       // Handle live tracking toggle: ?live=start or ?live=stop
       if (strcmp(liveParam, "start") == 0) {
-        return handleGPSLiveTrackAction(req, ctx, true);
+        return handleGpsLiveTrackAction(req, ctx, true);
       }
       if (strcmp(liveParam, "stop") == 0) {
-        return handleGPSLiveTrackAction(req, ctx, false);
+        return handleGpsLiveTrackAction(req, ctx, false);
       }
       if (strcmp(liveParam, "save") == 0) {
         char savedPath[96];
         int savedPointCount = 0;
-        bool ok = GPSTrackManager::saveTrack(savedPath, sizeof(savedPath), &savedPointCount);
+        bool ok = GpsTrackManager::saveTrack(savedPath, sizeof(savedPath), &savedPointCount);
         char resp[160];
         if (ok) {
           snprintf(resp, sizeof(resp), "{\"saved\":true,\"path\":\"%s\",\"points\":%d}",
@@ -164,14 +164,14 @@ esp_err_t handleGPSTracksAPI(httpd_req_t* req) {
       }
 
       // ?live=1 — return current live track data
-      GPSTrackSnapshot track;
-      if (!GPSTrackManager::readSnapshot(track, 500)) {
+      GpsTrackSnapshot track;
+      if (!GpsTrackManager::readSnapshot(track, 500)) {
         httpd_resp_set_status(req, "503 Service Unavailable");
         httpd_resp_sendstr(req, "{\"error\":\"Unable to copy track data\"}");
         return ESP_OK;
       }
-      const GPSTrackStatus& status = track.status;
-      const GPSTrackStats& stats = status.stats;
+      const GpsTrackStatus& status = track.status;
+      const GpsTrackStats& stats = status.stats;
       
       char header[384];
       snprintf(header, sizeof(header), 
@@ -209,8 +209,8 @@ esp_err_t handleGPSTracksAPI(httpd_req_t* req) {
       // reply copy, never three full tracks at once. The reply describes the
       // one snapshot it copied, status and points together.
       String errorMsg;
-      GPSTrackStatus loaded;
-      if (!GPSTrackManager::loadTrack(decodedPath.c_str(), errorMsg, loaded)) {
+      GpsTrackStatus loaded;
+      if (!GpsTrackManager::loadTrack(decodedPath.c_str(), errorMsg, loaded)) {
         httpd_resp_set_type(req, "application/json");
         // The message can carry the requested path: escape it.
         String errJson = "{\"error\":";
@@ -219,8 +219,8 @@ esp_err_t handleGPSTracksAPI(httpd_req_t* req) {
         httpd_resp_sendstr(req, errJson.c_str());
         return ESP_OK;
       }
-      GPSTrackSnapshot track;
-      if (!GPSTrackManager::readSnapshot(track)) {
+      GpsTrackSnapshot track;
+      if (!GpsTrackManager::readSnapshot(track)) {
         httpd_resp_set_type(req, "application/json");
         httpd_resp_set_status(req, "503 Service Unavailable");
         httpd_resp_sendstr(req, "{\"error\":\"Track loaded; unable to copy track data\"}");
@@ -229,7 +229,7 @@ esp_err_t handleGPSTracksAPI(httpd_req_t* req) {
 
       const TrackValidation validation = track.status.validation;
       const float coverage = track.status.coveragePercent;
-      const String validMsg = GPSTrackManager::getValidationMessage(validation, coverage);
+      const String validMsg = GpsTrackManager::getValidationMessage(validation, coverage);
 
       httpd_resp_set_type(req, "application/json");
       
@@ -274,7 +274,7 @@ esp_err_t handleGPSTracksAPI(httpd_req_t* req) {
   auto emitIfGps = [&](File& file, bool& first) {
     // Staging files of an interrupted merge/export are never loadable tracks.
     if (VFS::isStagingName(String(file.path()))) return;
-    bool hasGPS = false;
+    bool hasGps = false;
     File check = VFS::openGuarded(file.path(), "r", ctx);
     if (check) {
       for (int i = 0; i < 15 && check.available(); i++) {
@@ -282,13 +282,13 @@ esp_err_t handleGPSTracksAPI(httpd_req_t* req) {
         // Check for both sensor log format and CSV format
         if (line.indexOf("gps:") >= 0 ||
             (line.length() > 10 && line.charAt(0) != '#' && line.indexOf(',') > 0)) {
-          hasGPS = true;
+          hasGps = true;
           break;
         }
       }
       check.close();
     }
-    if (hasGPS) {
+    if (hasGps) {
       // A file name may hold a backslash: the path is JSON-escaped.
       String fileJson = first ? "{\"path\":" : ",{\"path\":";
       fileJson += jsonQuote(file.path());
@@ -372,7 +372,7 @@ void registerMapsHandlers(httpd_handle_t server) {
   static const httpd_uri_t mapFeaturesGet = { .uri = "/api/maps/features", .method = HTTP_GET, .handler = handleMapFeaturesAPI, .user_ctx = NULL };
   static const httpd_uri_t waypointsGet = { .uri = "/api/waypoints", .method = HTTP_GET, .handler = handleWaypointsAPI, .user_ctx = NULL };
   static const httpd_uri_t waypointsPost = { .uri = "/api/waypoints", .method = HTTP_POST, .handler = handleWaypointsAPI, .user_ctx = NULL };
-  static const httpd_uri_t gpsTracksGet = { .uri = "/api/gps/tracks", .method = HTTP_GET, .handler = handleGPSTracksAPI, .user_ctx = NULL };
+  static const httpd_uri_t gpsTracksGet = { .uri = "/api/gps/tracks", .method = HTTP_GET, .handler = handleGpsTracksAPI, .user_ctx = NULL };
   
   httpd_register_uri_handler(server, &mapsPage);
   httpd_register_uri_handler(server, &mapFeaturesGet);

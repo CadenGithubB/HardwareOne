@@ -448,7 +448,7 @@ struct Settings {
       mqttPublishToF(false),
       mqttPublishIMU(false),
       mqttPublishPresence(false),
-      mqttPublishGPS(false),
+      mqttPublishGps(false),
       mqttPublishAPDS(false),
       mqttPublishRTC(false),
       mqttPublishInput(false),
@@ -1208,7 +1208,7 @@ struct Settings {
   bool mqttPublishToF;          // Include ToF sensor data (default: false)
   bool mqttPublishIMU;          // Include IMU sensor data (default: false)
   bool mqttPublishPresence;     // Include presence/motion sensor data (default: false)
-  bool mqttPublishGPS;          // Include GPS location data (default: false)
+  bool mqttPublishGps;          // Include GPS location data (default: false)
   bool mqttPublishAPDS;         // Include gesture/proximity data (default: false)
   bool mqttPublishRTC;          // Include RTC time data (default: false)
   bool mqttPublishInput;      // Include input device data (default: false)

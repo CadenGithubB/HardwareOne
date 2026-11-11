@@ -2,7 +2,7 @@
 """Run the shipping OLED Map actions and the waypoint owner's save reporting.
 
 oled_map_actions_harness.cpp: the Map mode's state block, track scan, menu
-dispatch, gpsMapInputHandler and the head of displayGPSMap (through map
+dispatch, gpsMapInputHandler and the head of displayGpsMap (through map
 centering) are extracted unchanged. The Map owners, keyboard, file picker and
 VFS are doubles that record the identity installed at each call and refuse the
 anonymous identity, as checkPerm does. HAL_Input's real button mapping
@@ -82,12 +82,12 @@ def map_actions_unit(component: Path) -> str:
     if "class OledMapCtxGuard" in oled:
         guard = [extract_block(oled, "static AuthContext oledMapAuthContext("),
                  extract_block(oled, "class OledMapCtxGuard") + ";"]
-    display_head = extract_block(oled, "static void displayGPSMap(")
+    display_head = extract_block(oled, "static void displayGpsMap(")
     display_head = display_head[:display_head.index("  // Initialize async renderer on first call")] + "}\n"
     production = [
         between(oled, "// Map menu state (accessed by footer system)", "// Draw map info overlay"),
         extract_block(oled, "struct RouteInfo") + ";",
-        extract_block(oled, "static bool isGPSDataLine("),
+        extract_block(oled, "static bool isGpsDataLine("),
         extract_block(oled, "static void probeTrackFile("),
         extract_block(oled, "static void scanTrackFiles("),
         # goBackToMainMenu plus whatever helpers sit before the submenu dispatch.

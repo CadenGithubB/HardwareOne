@@ -1,6 +1,6 @@
 // OLED Map context bar. test_oled_map_context_bar.py inserts System_Maps.h's
 // LocationContext, OLED_Mode_Map.cpp's context-bar append helper (when the
-// tree has one) and the displayGPSMap block that builds the bar text, from
+// tree has one) and the displayGpsMap block that builds the bar text, from
 // "char contextBuf[128];" up to the scroll update, unchanged.
 // The libc double: inside the inserted code snprintf/vsnprintf follow the C
 // contract exactly (return the full length, store min(n, size - 1) bytes plus

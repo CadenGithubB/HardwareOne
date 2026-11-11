@@ -51,7 +51,7 @@ struct FakeGPS {
   uint8_t hour = 23, minute = 58, seconds = 59;
 } driver;
 static FakeGPS* gPA1010D = &driver;
-static struct { bool mqttPublishGPS = true; } gSettings;
+static struct { bool mqttPublishGps = true; } gSettings;
 static std::string response;
 static void sendJsonResponse(void*, const char* text, int len = -1) {
   assert(!semaphore.held);
@@ -72,7 +72,7 @@ static int destroyed = 0, exited = 0, delays = 0;
 static int trackPoints = 0, events = 0, redraws = 0;
 [[maybe_unused]] static constexpr int SYSEVT_GPS_FIX = 1, SYSEVT_GPS_LOST = 2, OLED_GPS_DATA = 3;
 [[maybe_unused]] static int currentOledMode = OLED_GPS_DATA;
-struct GPSTrackManager {
+struct GpsTrackManager {
   static bool isLiveTracking() { assert(!semaphore.held); return true; }
   static void appendPoint(float lat, float lon) {
     assert(!semaphore.held && lat == driver.latitudeDegrees && lon == driver.longitudeDegrees);
@@ -101,7 +101,7 @@ static void vTaskDelay(TickType_t ticks) {
 
 // INSERT_FUNCTIONS
 
-static auto fields(const GPSCache& s) {
+static auto fields(const GpsCache& s) {
   return std::make_tuple(s.latitude, s.longitude, s.altitude, s.speed, s.angle,
                         s.hasFix, s.fixQuality, s.satellites, s.year, s.month, s.day,
                         s.hour, s.minute, s.second, s.dataValid, s.lastUpdate);
@@ -117,7 +117,7 @@ static void reset() {
   DATA.hour = 19; DATA.minute = 5; DATA.second = 7;
   DATA.dataValid = true; DATA.lastUpdate = 12345;
   gGpsRunning = true; gGpsConnected = true; driver = {}; gPA1010D = &driver;
-  gSettings.mqttPublishGPS = true;
+  gSettings.mqttPublishGps = true;
   admit = memoryAvailable = createMutex = true;
   waits.clear(); response.clear();
   destroyed = exited = delays = 0; stopAfterDelay = false;
@@ -194,7 +194,7 @@ static void commonContracts() {
   assert(waits.empty()); emit(response);
   char mqtt[16384]{};
   assert(mqttGps(mqtt) == 0 && waits.empty());
-  reset(); gSettings.mqttPublishGPS = false;
+  reset(); gSettings.mqttPublishGps = false;
   assert(mqttGps(mqtt) == 0 && waits.empty());
   (void)loggingGps(0); assert(waits.empty());
 }
@@ -202,7 +202,7 @@ static void commonContracts() {
 #if !TEST_BASELINE
 static void ownerContracts() {
   reset();
-  GPSCache out{};
+  GpsCache out{};
   assert(gpsCacheSnapshot(out)); waited(10);
   assert(fields(out) == fields(DATA));
   out.latitude = 99; assert(DATA.latitude == -12.25f);
@@ -211,10 +211,10 @@ static void ownerContracts() {
     assert(gpsCacheSnapshot(out, timeout)); waited(timeout);
     admit = false;
     assert(!gpsCacheSnapshot(out, timeout)); waited(timeout);
-    assert(fields(out) == fields(GPSCache{}));
+    assert(fields(out) == fields(GpsCache{}));
   }
   reset(); MUTEX = nullptr; out.hasFix = true;
-  assert(!gpsCacheSnapshot(out) && fields(out) == fields(GPSCache{}));
+  assert(!gpsCacheSnapshot(out) && fields(out) == fields(GpsCache{}));
   assert(waits.empty());
   char jsonOut[512];
   assert(gpsBuildDataJSON(jsonOut, sizeof(jsonOut)) > 0 && waits.empty());
@@ -254,7 +254,7 @@ static void ownerContracts() {
   assert(DATA.hasFix && DATA.year == 2026 && !gGpsRunning);
   admit = true;
   assert(runStartReset()); waited(100);
-  assert(fields(DATA) == fields(GPSCache{}));
+  assert(fields(DATA) == fields(GpsCache{}));
   reset(); gGpsRunning = false; MUTEX = nullptr; createMutex = false;
   assert(!runStartReset() && waits.empty());
   reset(); gGpsRunning = false; memoryAvailable = false;

@@ -3,7 +3,7 @@
 
 oled_map_context_bar_harness.cpp: System_Maps.h's LocationContext, the
 context-bar append helper from OLED_Mode_Map.cpp (when the tree has one) and
-the displayGPSMap block from "char contextBuf[128];" up to the scroll update
+the displayGpsMap block from "char contextBuf[128];" up to the scroll update
 are extracted unchanged. Inside them snprintf/vsnprintf follow the C contract
 and write each byte from instrumented code, so --sanitize (ASan/UBSan) reports
 any write past contextBuf. Every case runs in its own process.
@@ -33,8 +33,8 @@ BLOCK_END = "    // Update scroll offset for animation"
 def context_bar_unit(component: Path) -> str:
     oled = (component / "OLED_Mode_Map.cpp").read_text()
     maps_h = (component / "System_Maps.h").read_text()
-    display = extract_block(oled, "static void displayGPSMap(")
-    require(display.count(BLOCK_START) == 1, "displayGPSMap must declare contextBuf once")
+    display = extract_block(oled, "static void displayGpsMap(")
+    require(display.count(BLOCK_START) == 1, "displayGpsMap must declare contextBuf once")
     begin = display.index(BLOCK_START)
     block = display[begin:display.index(BLOCK_END, begin)]
     types = [

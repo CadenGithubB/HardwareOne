@@ -29,7 +29,7 @@ class String : public std::string {
 struct SettingsBoundary {
   bool mqttEnabled, mqttAutoStart, mqttSubscribeExternal;
   bool mqttPublishWifi, mqttPublishSystem, mqttPublishThermal, mqttPublishToF;
-  bool mqttPublishIMU, mqttPublishPresence, mqttPublishGPS, mqttPublishAPDS;
+  bool mqttPublishIMU, mqttPublishPresence, mqttPublishGps, mqttPublishAPDS;
   bool mqttPublishRTC, mqttPublishInput;
 } gSettings;
 
@@ -85,7 +85,7 @@ static const Command commands[] = {
   PUBLISH_CASE(tof, mqttPublishToF, "ToF"),
   PUBLISH_CASE(imu, mqttPublishIMU, "IMU"),
   PUBLISH_CASE(presence, mqttPublishPresence, "Presence"),
-  PUBLISH_CASE(gps, mqttPublishGPS, "GPS"),
+  PUBLISH_CASE(gps, mqttPublishGps, "GPS"),
   PUBLISH_CASE(apds, mqttPublishAPDS, "APDS"),
   PUBLISH_CASE(rtc, mqttPublishRTC, "RTC"),
 #if ENABLE_ANO_ENCODER

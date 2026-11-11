@@ -46,7 +46,7 @@
 #endif
 
 // OLED identity for Map work. The Map owners (MapCore, WaypointManager,
-// GPSTrackManager) check file access against currentAuthContext(), and the
+// GpsTrackManager) check file access against currentAuthContext(), and the
 // main-loop input/render path that runs this mode installs no identity (an
 // empty user is refused). Every direct owner call below therefore runs inside
 // an OledMapCtxGuard: the composed identity + NOTIF_SOURCE_OLED scope, as
@@ -342,7 +342,7 @@ static void drawMapInfo() {
 // Draw track status overlay
 static void drawTrackStatus() {
   if (!oledDisplay) return;
-  const GPSTrackStatus status = GPSTrackManager::readStatus();
+  const GpsTrackStatus status = GpsTrackManager::readStatus();
   
   oledDisplay->setTextSize(1);
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
@@ -374,7 +374,7 @@ static void drawTrackStatus() {
   snprintf(buf, sizeof(buf), "Points: %d", status.pointCount);
   oledDisplay->print(buf);
   
-  const GPSTrackStats& stats = status.stats;
+  const GpsTrackStats& stats = status.stats;
   if (stats.valid) {
     oledDisplay->setCursor(0, 30);
     if (stats.totalDistanceM >= 1000.0f) {
@@ -607,7 +607,7 @@ static void drawWaypointSelect() {
 }
 
 // Check if a line looks like GPS track data
-static bool isGPSDataLine(const String& line) {
+static bool isGpsDataLine(const String& line) {
   // Format 1: General sensor log with "gps:" marker
   if (line.indexOf("gps:") >= 0 && line.indexOf("lat=") >= 0) {
     return true;
@@ -638,16 +638,16 @@ static void probeTrackFile(File& file, const AuthContext& auth) {
   FsLockGuard fsGuard("oled.map.probe_track");
   File check = VFS::openGuarded(file.path(), "r", auth);
   if (!check) return;
-  bool hasGPS = false;
+  bool hasGps = false;
   for (int i = 0; i < 15 && check.available(); i++) {
     String line = check.readStringUntil('\n');
-    if (isGPSDataLine(line)) {
-      hasGPS = true;
+    if (isGpsDataLine(line)) {
+      hasGps = true;
       break;
     }
   }
   check.close();
-  if (hasGPS) {
+  if (hasGps) {
     strlcpy(gTrackFiles[gTrackFileCount], file.path(), 64);
     gTrackFileCount++;
   }
@@ -947,7 +947,7 @@ static void drawMapMenu() {
 // Async Map Render Task
 // =============================================================================
 // Architecture:
-// - displayGPSMap() (UI path) writes sRenderSnapshot + xSemaphoreGive(sRenderSemaphore) when dirty.
+// - displayGpsMap() (UI path) writes sRenderSnapshot + xSemaphoreGive(sRenderSemaphore) when dirty.
 // - mapRenderTask (TASK_PRIORITY_LOW, core 0) blocks on the binary semaphore, renders MapCore::renderMap
 //   into sMapBackBuf, swaps sMapFrontBuf/sMapBackBuf, sets sFrontBufReady.
 // - Each UI frame memcpy's sMapFrontBuf to the SSD1306 buffer, then draws overlays (context bar, zoom).
@@ -1087,8 +1087,8 @@ static void mapRenderTask(void* param) {
     MapCore::renderMap(&localRenderer, lat, lon, renderParams);
 
     // Render GPS track if loaded
-    if (hasTrack && GPSTrackManager::hasTrack()) {
-      GPSTrackManager::renderTrack(&localRenderer, lat, lon, trackScaleX, trackScaleY);
+    if (hasTrack && GpsTrackManager::hasTrack()) {
+      GpsTrackManager::renderTrack(&localRenderer, lat, lon, trackScaleX, trackScaleY);
     }
 
     // Crush shades to 1-bit into the back buffer (fully overwrites it)
@@ -1124,7 +1124,7 @@ static int appendMapContextText(char* buf, size_t size, int pos, const char* fmt
 }
 
 // Display function for GPS Map mode
-static void displayGPSMap() {
+static void displayGpsMap() {
   if (!oledDisplay) return;
 
   // The keyboard (waypoint name or name search) owns the screen while it is
@@ -1146,22 +1146,22 @@ static void displayGPSMap() {
   static uint32_t sPerfCacheMisses = 0;
   
   float lat = 0.0f, lon = 0.0f;
-  bool hasGPSFix = false;
+  bool hasGpsFix = false;
   int satellites = 0;
-  bool usingRemoteGPS = false;
+  bool usingRemoteGps = false;
   
 #if ENABLE_GPS_SENSOR
   // Use cached GPS data (sensor_gps continuously polls and updates the cache).
   // Read the cache struct, never gPA1010D directly — the cache lat/lon are
   // already signed (S/W negative).
   if (gGpsConnected && gGpsRunning) {
-    GPSCache g;
+    GpsCache g;
     if (gpsCacheSnapshot(g)) {
       satellites = (int)g.satellites;
       if (g.hasFix) {
         lat = g.latitude;
         lon = g.longitude;
-        hasGPSFix = true;
+        hasGpsFix = true;
       }
     }
   }
@@ -1169,14 +1169,14 @@ static void displayGPSMap() {
 
 #if ENABLE_ESPNOW
   // Fall back to remote GPS data if local GPS is not available or has no fix
-  if (!hasGPSFix) {
-    RemoteGPSData remoteGPS;
-    if (getRemoteGPSData(&remoteGPS)) {
-      lat = remoteGPS.latitude;
-      lon = remoteGPS.longitude;
-      hasGPSFix = true;
-      satellites = remoteGPS.satellites;
-      usingRemoteGPS = true;
+  if (!hasGpsFix) {
+    RemoteGpsData remoteGps;
+    if (getRemoteGpsData(&remoteGps)) {
+      lat = remoteGps.latitude;
+      lon = remoteGps.longitude;
+      hasGpsFix = true;
+      satellites = remoteGps.satellites;
+      usingRemoteGps = true;
     }
   }
 #endif
@@ -1224,7 +1224,7 @@ static void displayGPSMap() {
     return;
   }
   
-  if (hasGPSFix && MapCore::isPositionInMap(lat, lon) && !gMapManuallyPanned) {
+  if (hasGpsFix && MapCore::isPositionInMap(lat, lon) && !gMapManuallyPanned) {
     gMapCenterLat = lat;
     gMapCenterLon = lon;
     gMapCenterSet = true;
@@ -1261,7 +1261,7 @@ static void displayGPSMap() {
   if (mapDirty && sRenderSemaphore && renderer) {
     // Precompute outside critical section
     MapRenderParams tmpParams = mapRenderParamsFromGlobals();
-    bool hasTrack = GPSTrackManager::hasTrack();
+    bool hasTrack = GpsTrackManager::hasTrack();
     int32_t mapWidth = map.header.maxLon - map.header.minLon;
     int32_t mapHeight = map.header.maxLat - map.header.minLat;
     int32_t trkScaleX = (mapWidth > 0) ? (int32_t)((DISPLAY_WIDTH * 1000L) / mapWidth * gMapZoom) : 1;
@@ -1308,13 +1308,13 @@ static void displayGPSMap() {
   }
   
   // Update location context if GPS has fix and enough time has passed
-  if (hasGPSFix && LocationContextManager::shouldUpdate(lat, lon)) {
+  if (hasGpsFix && LocationContextManager::shouldUpdate(lat, lon)) {
     LocationContextManager::updateContext(lat, lon);
   }
   
   // Draw context bar at top with location context
   const LocationContext& ctx = LocationContextManager::getContext();
-  if (ctx.valid && hasGPSFix) {
+  if (ctx.valid && hasGpsFix) {
     char contextBuf[128];
     int pos = 0;
     
@@ -1375,8 +1375,8 @@ static void displayGPSMap() {
   }
 
   // Show satellite count with source indicator
-  if (hasGPSFix) {
-    if (usingRemoteGPS) {
+  if (hasGpsFix) {
+    if (usingRemoteGps) {
       snprintf(overlayBuf, sizeof(overlayBuf), " R%dS ", satellites);  // "R" = Remote GPS
     } else {
       snprintf(overlayBuf, sizeof(overlayBuf), " %dS ", satellites);
@@ -1391,7 +1391,7 @@ static void displayGPSMap() {
   }
   
   // Show LIVE indicator when live tracking
-  if (GPSTrackManager::isLiveTracking()) {
+  if (GpsTrackManager::isLiveTracking()) {
     gOledMapRenderer->drawOverlayText(0, gOledMapRenderer->getHeight() - 8, " LIVE ", true);
   }
 #endif
@@ -1594,7 +1594,7 @@ static void executeSubmenuAction(int submenuType, int action) {
       switch (action) {
         case 0:  // Center on GPS
           {
-            GPSCache g;
+            GpsCache g;
             if (gGpsConnected && gpsCacheSnapshot(g) && g.hasFix) {
               gMapCenterLat = g.latitude;   // cache lat/lon already signed
               gMapCenterLon = g.longitude;
@@ -1698,7 +1698,7 @@ static void executeSubmenuAction(int submenuType, int action) {
         case 5:  // Save Track
           {
             char savedPath[96];
-            if (GPSTrackManager::saveTrack(savedPath, sizeof(savedPath))) {
+            if (GpsTrackManager::saveTrack(savedPath, sizeof(savedPath))) {
               // Show brief confirmation via track status overlay
               gShowTrackStatus = true;
             } else {
@@ -2157,8 +2157,8 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
         if (gTrackSelectMode == 1) {
           // Load track
           String errorMsg;
-          GPSTrackStatus track;
-          if (GPSTrackManager::loadTrack(gTrackFiles[gTrackFileIdx], errorMsg, track, true)) {
+          GpsTrackStatus track;
+          if (GpsTrackManager::loadTrack(gTrackFiles[gTrackFileIdx], errorMsg, track, true)) {
             sForceRender = true;
           } else {
             oledToastShow(errorMsg.length() ? errorMsg.c_str() : "Load track failed",
@@ -2166,7 +2166,7 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
           }
         } else if (gTrackSelectMode == 2) {
           // Delete track
-          if (GPSTrackManager::deleteTrackFile(gTrackFiles[gTrackFileIdx])) {
+          if (GpsTrackManager::deleteTrackFile(gTrackFiles[gTrackFileIdx])) {
             sForceRender = true;
           } else {
             oledToastShow("Delete track failed", 3000, OledUIIcon::ERROR);
@@ -2445,7 +2445,7 @@ static const OledModeEntry gpsMapOledModes[] = {
     OLED_GPS_MAP,
     "Map",
     "map",
-    displayGPSMap,
+    displayGpsMap,
     gpsMapAvailable,
     gpsMapInputHandler,
     true,

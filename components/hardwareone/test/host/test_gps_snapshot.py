@@ -31,12 +31,12 @@ def generated(component: Path, baseline: bool) -> str:
     logging = (component / "System_SensorLogging.cpp").read_text()
     mutex_header = (COMPONENT / "System_Mutex.h").read_text()
     mutex = (COMPONENT / "System_Mutex.cpp").read_text()
-    types = extract_block(header, "struct GPSCache") + ";\n"
+    types = extract_block(header, "struct GpsCache") + ";\n"
     types += extract_block((COMPONENT / "System_SensorLogging.h").read_text(),
                            "struct SensorCacheSnapshot") + ";\n"
     types += extract_block(mutex_header, "struct SensorCacheGuard") + ";\n"
     if baseline:
-        state = "GPSCache gGpsCache{};\n#define DATA gGpsCache\n#define MUTEX gGpsCache.mutex\n"
+        state = "GpsCache gGpsCache{};\n#define DATA gGpsCache\n#define MUTEX gGpsCache.mutex\n"
     else:
         state = "\n".join(re.search(r"(?m)^static[^\n]*\b" + name + r"\b[^\n]*;", owner)[0]
                           for name in ["sGpsCache", "sGpsCacheMutex", "sGpsEvtHasFix",
@@ -51,7 +51,7 @@ def generated(component: Path, baseline: bool) -> str:
                  extract_block(owner, "int gpsBuildDataJSON("),
                  extract_block(g2, "static void gpsG2FormatValue("),
                  extract_block(g2, "static void g2BuildGpsReadout(")]
-    mqtt_pos = mqtt.index("if (gSettings.mqttPublishGPS && gGpsRunning")
+    mqtt_pos = mqtt.index("if (gSettings.mqttPublishGps && gGpsRunning")
     mqtt_branch = mqtt[mqtt.rindex("#if ENABLE_GPS_SENSOR", 0, mqtt_pos):
                        mqtt.index("#endif", mqtt_pos) + len("#endif")]
     web_branch = extract_block(web, 'if (sensorType == "gps")')
@@ -83,7 +83,7 @@ def generated(component: Path, baseline: bool) -> str:
             require(not re.search(r"\bgGpsCache\b|\bgPA1010D\b", source),
                     f"{file} bypasses the GPS snapshot boundary")
         oled = extract_block((component / "i2csensor_pa1010d_oled.h").read_text(),
-                             "static void displayGPSData()")
+                             "static void displayGpsData()")
         require(re.search(r"gpsCacheSnapshot\(gps(?:,\s*10)?\)", oled) is not None,
                 "OLED must retain its 10 ms read budget")
     harness = (HERE / "gps_snapshot_harness.cpp").read_text()
@@ -128,7 +128,7 @@ def main() -> None:
         disabled = '''#include <cassert>
 #include "i2csensor_pa1010d.h"
 int main() {
-  GPSCache out{};
+  GpsCache out{};
   out.hasFix = true; out.latitude = 12.0f;
   assert(!gpsCacheSnapshot(out));
   assert(!out.hasFix && out.latitude == 0 && !out.dataValid);

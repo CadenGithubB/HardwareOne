@@ -4030,7 +4030,7 @@ void stopOledDisplay() {
 // displaySensorData() moved to OLED_Mode_Sensors.cpp
 // displayThermalVisual() moved to i2csensor_mlx90640.cpp (modular OLED mode)
 
-// displayGPSData() moved to i2csensor_pa1010d.cpp (modular OLED mode)
+// displayGpsData() moved to i2csensor_pa1010d.cpp (modular OLED mode)
 
 // displayFmRadio() moved to fm_radio.cpp (modular OLED mode)
 

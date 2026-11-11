@@ -195,7 +195,7 @@ static void rtcG2FormatValue(char* out, size_t cap) {
 
 #if ENABLE_GPS_SENSOR
 static void gpsG2FormatValue(char* out, size_t cap) {
-  GPSCache gps{};
+  GpsCache gps{};
   if (gpsCacheSnapshot(gps, 5)) {
     if (gps.dataValid) {
       if (gps.hasFix) {
@@ -1003,7 +1003,7 @@ static void g2BuildApdsReadout(char* out, size_t cap) {
 #if ENABLE_GPS_SENSOR
 // Fix status + satellites, and (when fixed) lat/lon/altitude/speed.
 static void g2BuildGpsReadout(char* out, size_t cap) {
-  GPSCache gps{};
+  GpsCache gps{};
   if (!(gpsCacheSnapshot(gps, 5) && gps.dataValid)) { snprintf(out, cap, "GPS\n(reading...)"); return; }
   if (!gps.hasFix) {
     snprintf(out, cap, "Fix: no\nSats: %u\n(acquiring...)", (unsigned)gps.satellites);

@@ -317,7 +317,7 @@ esp_err_t handleSensorData(httpd_req_t* req) {
         
         // Read one GPS snapshot (no I2C access).
         char buf[512];
-        GPSCache gps{};
+        GpsCache gps{};
         if (!gpsCacheSnapshot(gps, 50) || !gps.dataValid) {
           sendJsonResponse(req, "{\"error\":\"no_data\"}");
           return ESP_OK;

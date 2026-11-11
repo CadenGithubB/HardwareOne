@@ -666,13 +666,13 @@ private:
 
 #define MAX_TRACK_POINTS 10000  // Track point cap — buffer lives in PSRAM (ps_alloc PreferPsram, ~117 KB at 12 B/point)
 
-struct GPSTrackPoint {
+struct GpsTrackPoint {
   float lat;
   float lon;
   unsigned long timestamp;  // milliseconds since boot (if available)
 };
 
-struct GPSTrackBounds {
+struct GpsTrackBounds {
   float minLat;
   float minLon;
   float maxLat;
@@ -680,7 +680,7 @@ struct GPSTrackBounds {
   bool valid;
 };
 
-struct GPSTrackStats {
+struct GpsTrackStats {
   float totalDistanceM;    // Total distance in meters (point-to-point)
   float durationSec;       // Duration from first to last point
   float avgSpeedMps;       // Average speed in m/s
@@ -697,10 +697,10 @@ enum TrackValidation {
 };
 
 // A coherent value copy. No field borrows the manager's mutable storage.
-struct GPSTrackStatus {
+struct GpsTrackStatus {
   int pointCount = 0;
-  GPSTrackBounds bounds = {};
-  GPSTrackStats stats = {};
+  GpsTrackBounds bounds = {};
+  GpsTrackStats stats = {};
   char filename[256] = {};
   bool live = false;
   uint32_t lastUpdateMs = 0;
@@ -710,22 +710,22 @@ struct GPSTrackStatus {
 
 // Points are owned by this read and survive append, clear, or replacement.
 // pointCount is the copied tail length; status.pointCount is the total length.
-struct GPSTrackSnapshot {
-  GPSTrackStatus status;
-  std::unique_ptr<GPSTrackPoint, decltype(&free)> points{nullptr, &free};
+struct GpsTrackSnapshot {
+  GpsTrackStatus status;
+  std::unique_ptr<GpsTrackPoint, decltype(&free)> points{nullptr, &free};
   int pointCount = 0;
 };
 
 // GPS Track management
-class GPSTrackManager {
+class GpsTrackManager {
 public:
   // Publish a complete load and return that same track. Failed loads preserve
   // the previous track. UI callers can reject tracks outside the current map.
   static bool loadTrack(const char* filepath, String& errorMsg,
-                        GPSTrackSnapshot& loaded, bool rejectOutOfBounds = false);
+                        GpsTrackSnapshot& loaded, bool rejectOutOfBounds = false);
   // Status-only callers do not allocate an unused point copy.
   static bool loadTrack(const char* filepath, String& errorMsg,
-                        GPSTrackStatus& loaded, bool rejectOutOfBounds = false);
+                        GpsTrackStatus& loaded, bool rejectOutOfBounds = false);
 
   // Refuses during live recording or another lifecycle operation.
   static bool clearTrack();
@@ -733,10 +733,10 @@ public:
   // Check if track is loaded
   static bool hasTrack();
 
-  static GPSTrackStatus readStatus();
+  static GpsTrackStatus readStatus();
   // Copy the last maxPoints and their matching metadata. Failure empties out;
   // no owner lock is retained while callers render, send, or save the copy.
-  static bool readSnapshot(GPSTrackSnapshot& out, int maxPoints = MAX_TRACK_POINTS);
+  static bool readSnapshot(GpsTrackSnapshot& out, int maxPoints = MAX_TRACK_POINTS);
 
   // Save one snapshot through a checked temporary file, then replace the destination.
   // Success publishes its filepath/count; failure leaves outPath unchanged and count zero.
@@ -763,12 +763,12 @@ public:
 
 private:
   static bool loadTrackImpl(const char* filepath, String& errorMsg,
-                            GPSTrackStatus& loaded, GPSTrackSnapshot* snapshot,
+                            GpsTrackStatus& loaded, GpsTrackSnapshot* snapshot,
                             bool rejectOutOfBounds);
-  static GPSTrackPoint* _points;
+  static GpsTrackPoint* _points;
   static int _pointCount;
-  static GPSTrackBounds _bounds;
-  static GPSTrackStats _stats;
+  static GpsTrackBounds _bounds;
+  static GpsTrackStats _stats;
   static char _filename[256];
   static bool _liveTracking;
   static uint32_t _liveLogSessionId;
@@ -777,20 +777,20 @@ private:
   // These helpers require the private state lock; they never perform I/O.
   static bool isLiveTrackingLocked();
   static void clearTrackLocked();
-  static GPSTrackStatus readStatusLocked(const GPSTrackBounds& mapBounds);
+  static GpsTrackStatus readStatusLocked(const GpsTrackBounds& mapBounds);
 
   // Copy the newest min(cap, count) points into a caller-owned buffer under
   // the state lock, without allocating. Returns the number copied.
-  static int copyPoints(GPSTrackPoint* dst, int cap);
+  static int copyPoints(GpsTrackPoint* dst, int cap);
 
-  static GPSTrackBounds calculateBounds(const GPSTrackPoint* points, int count);
-  static GPSTrackStats calculateStats(const GPSTrackPoint* points, int count);
+  static GpsTrackBounds calculateBounds(const GpsTrackPoint* points, int count);
+  static GpsTrackStats calculateStats(const GpsTrackPoint* points, int count);
 
   // Haversine distance between two points (meters)
   static float haversineDistance(float lat1, float lon1, float lat2, float lon2);
 
   // Parse GPS coordinates from log line
-  static bool parseGPSLine(const char* line, float& lat, float& lon);
+  static bool parseGpsLine(const char* line, float& lat, float& lon);
 };
 
 // =============================================================================

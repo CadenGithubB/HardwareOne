@@ -50,7 +50,7 @@ def main() -> None:
     types = []
     for file, names in (
         ("vl53l4cx", ("TofCache",)), ("bno055", ("ImuCache",)),
-        ("pa1010d", ("GPSCache",)), ("apds9960", ("APDSCache",)),
+        ("pa1010d", ("GpsCache",)), ("apds9960", ("APDSCache",)),
         ("sths34pf80", ("PresenceCache",)), ("ds3231", ("RTCDateTime", "RTCCache")),
         ("ano_encoder", ("AnoEncoderCache",)),
     ):

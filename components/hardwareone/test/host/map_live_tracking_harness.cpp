@@ -289,14 +289,14 @@ static void boundary(const char* name) {
     insideHook = false;
   }
 }
-static GPSTrackSnapshot capture(int maxPoints = MAX_TRACK_POINTS) {
-  GPSTrackSnapshot value;
-  check(GPSTrackManager::readSnapshot(value, maxPoints), "snapshot succeeds");
+static GpsTrackSnapshot capture(int maxPoints = MAX_TRACK_POINTS) {
+  GpsTrackSnapshot value;
+  check(GpsTrackManager::readSnapshot(value, maxPoints), "snapshot succeeds");
   return value;
 }
 static bool load(const char* path, String& why, bool rejectOutOfBounds = false) {
-  GPSTrackSnapshot result;
-  return GPSTrackManager::loadTrack(path, why, result, rejectOutOfBounds);
+  GpsTrackSnapshot result;
+  return GpsTrackManager::loadTrack(path, why, result, rejectOutOfBounds);
 }
 
 static void snapshotTests();
@@ -341,8 +341,8 @@ static bool success(const char* result) {
 static void reset() {
   check(fsLockDepth == 0 && openHandles == 0, "previous operation releases file handles and FS lock");
   sensorLogMarkStopped();
-  GPSTrackManager::stopLiveTracking();
-  check(GPSTrackManager::clearTrack(), "idle track cleared for test");
+  GpsTrackManager::stopLiveTracking();
+  check(GpsTrackManager::clearTrack(), "idle track cleared for test");
   gSettings = {}; sSensorLogSessionId = 0;
   gCLIValidateOnly = false; debugAvailable = allocationOk = true;
   allocations = fsOperations = stopEvents = restores = 0; now = 1000;
@@ -362,7 +362,7 @@ static void reset() {
 static void imported() {
   String why;
   check(load("/logs/imported.csv", why), "offline imported track loads");
-  check(GPSTrackManager::readStatus().pointCount == 2 && GPSTrackManager::readStatus().stats.totalDistanceM > 100,
+  check(GpsTrackManager::readStatus().pointCount == 2 && GpsTrackManager::readStatus().stats.totalDistanceM > 100,
         "imported fixture has points and prior statistics");
 }
 static void unchangedPreferences(bool gps, bool logger) {
@@ -374,7 +374,7 @@ int main() {
   reset(); imported();
   for (const char* invalid : {"live", "live start extra", "live stop extra", "live unknown", "live \"start"}) {
     check(error(cmd_gpstrack(invalid)), "malformed live command rejected");
-    check(actions.empty() && GPSTrackManager::readStatus().pointCount == 2,
+    check(actions.empty() && GpsTrackManager::readStatus().pointCount == 2,
           "malformed command has no owner effects");
   }
   gCLIValidateOnly = true;
@@ -383,18 +383,18 @@ int main() {
   gCLIValidateOnly = false;
 #if ENABLE_GPS_SENSOR
   for (unsigned guard = 0; guard < 4; ++guard) {
-    reset(); imported(); const auto before = GPSTrackManager::readStatus();
+    reset(); imported(); const auto before = GpsTrackManager::readStatus();
     const unsigned allocated = allocations;
     if (guard == 0) gSettings.sensorLogEnabled = false;
     if (guard == 1) sensorLogPublishStarted();
     if (guard == 2) gSettings.healthLoggingEnabled = true;
     if (guard == 3) debugAvailable = false;
     check(error(cmd_gpstrack("live start")), "live startup guard refuses request");
-    check(actions.empty() && allocations == allocated && GPSTrackManager::readStatus().pointCount == before.pointCount &&
-          GPSTrackManager::readStatus().pointCount == 2, "preflight preserves imported track/services");
+    check(actions.empty() && allocations == allocated && GpsTrackManager::readStatus().pointCount == before.pointCount &&
+          GpsTrackManager::readStatus().pointCount == 2, "preflight preserves imported track/services");
   }
   reset(); allocationOk = false;
-  check(error(cmd_gpstrack("live start")) && actions.empty() && !GPSTrackManager::isLiveTracking(),
+  check(error(cmd_gpstrack("live start")) && actions.empty() && !GpsTrackManager::isLiveTracking(),
         "allocation failure happens before GPS/logger effects");
   struct StartFailure { std::function<void()> inject; size_t actionsRun; };
   const size_t loggerStep = kLiveStartActions.size();
@@ -412,12 +412,12 @@ int main() {
   };
   for (bool loaded : {false, true}) for (const auto& failure : startFailures) {
     reset(); if (loaded) imported();
-    const auto before = GPSTrackManager::readStatus();
-    const auto count = GPSTrackManager::readStatus().pointCount;
+    const auto before = GpsTrackManager::readStatus();
+    const auto count = GpsTrackManager::readStatus().pointCount;
     failure.inject();
     check(error(cmd_gpstrack("live start")), "startup failure propagated");
-    check(!GPSTrackManager::isLiveTracking() && GPSTrackManager::readStatus().pointCount == before.pointCount &&
-          GPSTrackManager::readStatus().pointCount == count, "failed start preserves imported track");
+    check(!GpsTrackManager::isLiveTracking() && GpsTrackManager::readStatus().pointCount == before.pointCount &&
+          GpsTrackManager::readStatus().pointCount == count, "failed start preserves imported track");
     check(actions.size() == failure.actionsRun, "startup stops immediately at failing step");
     unchangedPreferences(false, false);
   }
@@ -427,26 +427,26 @@ int main() {
     const std::string reply = cmd_gpstrack("live start");
     check(success(reply.c_str()) && reply.find(gpsReply) != std::string::npos,
           "successful startup preserves actual borrowed GPS request status");
-    check(GPSTrackManager::isLiveTracking() && allocations == allocated,
+    check(GpsTrackManager::isLiveTracking() && allocations == allocated,
           "live startup reuses existing point storage");
-    check(GPSTrackManager::readStatus().pointCount == 0 && !GPSTrackManager::readStatus().bounds.valid &&
-          !GPSTrackManager::readStatus().stats.valid && GPSTrackManager::readStatus().stats.totalDistanceM == 0 &&
-          GPSTrackManager::readStatus().stats.durationSec == 0 && GPSTrackManager::readStatus().stats.avgSpeedMps == 0 &&
-          GPSTrackManager::readStatus().lastUpdateMs == 0, "new live capture resets all prior statistics");
+    check(GpsTrackManager::readStatus().pointCount == 0 && !GpsTrackManager::readStatus().bounds.valid &&
+          !GpsTrackManager::readStatus().stats.valid && GpsTrackManager::readStatus().stats.totalDistanceM == 0 &&
+          GpsTrackManager::readStatus().stats.durationSec == 0 && GpsTrackManager::readStatus().stats.avgSpeedMps == 0 &&
+          GpsTrackManager::readStatus().lastUpdateMs == 0, "new live capture resets all prior statistics");
     check(actions == kLiveStartActions, "single owner startup has no redundant settings calls");
     check(std::string(cmd_gpstrack("status")).find("waiting for GPS fix") != std::string::npos,
           "live status before first indoor fix remains active");
     check(success(cmd_gpstrack("live start")) && actions.size() == kLiveStartActions.size(),
           "repeated start preserves active capture");
     String why;
-    check(!GPSTrackManager::clearTrack() && !load("/logs/another.csv", why),
+    check(!GpsTrackManager::clearTrack() && !load("/logs/another.csv", why),
           "clear/load cannot replace an active live track");
     check(error(cmd_gpstrack("clear")), "CLI reports live clear refusal");
-    check(GPSTrackManager::appendPoint(37, -122), "live point admitted");
+    check(GpsTrackManager::appendPoint(37, -122), "live point admitted");
     now += 1000;
-    check(GPSTrackManager::appendPoint(37.001f, -122), "second live point admitted");
+    check(GpsTrackManager::appendPoint(37.001f, -122), "second live point admitted");
     check(success(cmd_gpstrack("live toggle")) && !gSensorLoggingRunning &&
-          !GPSTrackManager::isLiveTracking() && GPSTrackManager::readStatus().pointCount == 2,
+          !GpsTrackManager::isLiveTracking() && GpsTrackManager::readStatus().pointCount == 2,
           "toggle stops owned capture and preserves points");
     const unsigned stops = stopEvents;
     check(success(cmd_gpstrack("live stop")) && stopEvents == stops,
@@ -460,26 +460,26 @@ int main() {
   const auto owned = sensorLogCurrentSessionId();
   sensorLogMarkStopped(); sensorLogPublishStarted();  // CLI/Health restarts the SAME path.
   const auto replacement = sensorLogCurrentSessionId();
-  check(replacement != owned && !GPSTrackManager::isLiveTracking(),
+  check(replacement != owned && !GpsTrackManager::isLiveTracking(),
         "replacement logger invalidates stale Map ownership even with same filename");
-  check(!GPSTrackManager::appendPoint(38, -123), "stale live capture no longer appends");
+  check(!GpsTrackManager::appendPoint(38, -123), "stale live capture no longer appends");
   check(success(cmd_gpstrack("live stop")) && sensorLogCurrentSessionId() == replacement,
         "stopping stale Map live state cannot stop unrelated replacement logger");
 #if !BASELINE
   check(restores == 1, "only the transient capture's own end restores the saved selection");
 #endif
   reset(); check(success(cmd_gpstrack("live start")), "first capture starts before external stop");
-  check(GPSTrackManager::appendPoint(37, -122), "old capture contains points before restart");
+  check(GpsTrackManager::appendPoint(37, -122), "old capture contains points before restart");
   sensorLogMarkStopped();
-  check(success(cmd_gpstrack("live start")) && GPSTrackManager::isLiveTracking() &&
-        GPSTrackManager::readStatus().pointCount == 0,
+  check(success(cmd_gpstrack("live start")) && GpsTrackManager::isLiveTracking() &&
+        GpsTrackManager::readStatus().pointCount == 0,
         "external stop followed by Map restart resets before publishing live state");
 #else
-  const auto before = GPSTrackManager::readStatus();
+  const auto before = GpsTrackManager::readStatus();
   const unsigned allocated = allocations;
   check(error(cmd_gpstrack("live start")) && error(cmd_gpstrack("live toggle")),
         "GPS-disabled build honestly refuses live startup");
-  check(actions.empty() && allocations == allocated && GPSTrackManager::readStatus().pointCount == before.pointCount,
+  check(actions.empty() && allocations == allocated && GpsTrackManager::readStatus().pointCount == before.pointCount,
         "GPS-disabled live requests preserve offline track with no effects");
   sensorLogPublishStarted();
   const auto unrelated = sensorLogCurrentSessionId();
@@ -503,7 +503,7 @@ static void snapshotTests() {
         retained.status.validation == TRACK_NO_MAP_LOADED,
         "one snapshot owns coherent imported metadata and points");
   const float initialLat = retained.points.get()[0].lat;
-  check(GPSTrackManager::clearTrack(), "clear succeeds with retained reader snapshot");
+  check(GpsTrackManager::clearTrack(), "clear succeeds with retained reader snapshot");
   check(retained.points.get()[0].lat == initialLat && retained.pointCount == 2 &&
         retained.status.stats.totalDistanceM > 100 && retained.status.bounds.valid,
         "retained snapshot remains valid after owner clear and buffer release");
@@ -521,10 +521,10 @@ static void snapshotTests() {
   check(!metadata.points && metadata.pointCount == 0 && metadata.status.pointCount == 2 &&
         allocations == beforeMetadata, "metadata-only snapshot does not allocate points");
   allocationOk = false;
-  check(!GPSTrackManager::readSnapshot(tail) && !tail.points && tail.pointCount == 0 &&
+  check(!GpsTrackManager::readSnapshot(tail) && !tail.points && tail.pointCount == 0 &&
         tail.status.pointCount == 0, "allocation failure resets reused snapshot and reports failure");
   allocationOk = true;
-  check(!GPSTrackManager::readSnapshot(metadata, -1) && metadata.status.pointCount == 0 &&
+  check(!GpsTrackManager::readSnapshot(metadata, -1) && metadata.status.pointCount == 0 &&
         !metadata.points && metadata.pointCount == 0, "negative copy bound fails and empties output");
   for (unsigned failure = 0; failure < 5; ++failure) {
     auto before = capture();
@@ -534,8 +534,8 @@ static void snapshotTests() {
     if (failure == 3) inputLines = {"# nothing valid", "gps: no_fix"};
     if (failure == 4) failedAllocationName = "gps.snapshot";
     String why;
-    GPSTrackSnapshot rejected;
-    check(!GPSTrackManager::loadTrack("/logs/failure.csv", why, rejected) && why.length() > 0,
+    GpsTrackSnapshot rejected;
+    check(!GpsTrackManager::loadTrack("/logs/failure.csv", why, rejected) && why.length() > 0,
           "failed load returns explicit error");
     fileExists = fileOpen = allocationOk = true; failedAllocationName = nullptr;
     inputLines = {"1000,37.000000,-122.000000", "2000,37.001000,-122.000000"};
@@ -545,26 +545,26 @@ static void snapshotTests() {
           after.points.get()[1].lat == before.points.get()[1].lat,
           "failed load leaves complete previous generation untouched");
   }
-  GPSTrackStatus loadedStatus;
+  GpsTrackStatus loadedStatus;
   const unsigned beforeLoad = allocations;
   failedAllocationName = "gps.snapshot";
   String metadataError;
-  check(GPSTrackManager::loadTrack("/logs/imported.csv", metadataError, loadedStatus) &&
+  check(GpsTrackManager::loadTrack("/logs/imported.csv", metadataError, loadedStatus) &&
         loadedStatus.pointCount == 2 && loadedStatus.stats.valid && allocations == beforeLoad + 1,
         "metadata-only load publishes without unnecessary point snapshot allocation");
   failedAllocationName = nullptr;
   mapAvailable = true;
-  auto visible = GPSTrackManager::readStatus();
+  auto visible = GpsTrackManager::readStatus();
   check(visible.validation == TRACK_VALID && visible.coveragePercent == 100,
         "status validates copied points against current map bounds");
   inputLines = {"1000,20.0,20.0", "2000,20.1,20.0"};
   String why;
-  GPSTrackSnapshot outOfBounds;
-  check(!GPSTrackManager::loadTrack("/logs/outside.csv", why, outOfBounds, true),
+  GpsTrackSnapshot outOfBounds;
+  check(!GpsTrackManager::loadTrack("/logs/outside.csv", why, outOfBounds, true),
         "owner rejects disallowed out-of-bounds generation before replacing track");
-  check(std::string(GPSTrackManager::readStatus().filename) == "/logs/imported.csv",
+  check(std::string(GpsTrackManager::readStatus().filename) == "/logs/imported.csv",
         "rejected bounds preserve prior track without consumer-side clear");
-  check(GPSTrackManager::loadTrack("/logs/outside.csv", why, outOfBounds),
+  check(GpsTrackManager::loadTrack("/logs/outside.csv", why, outOfBounds),
         "web-style load may publish outside track with explicit validation result");
   check(outOfBounds.status.validation == TRACK_OUT_OF_BOUNDS &&
         outOfBounds.status.coveragePercent == 0 && outOfBounds.points.get()[0].lat == 20,
@@ -581,8 +581,8 @@ static void snapshotTests() {
         "CLI non-validation failure keeps the load prefix");
   fileExists = true;
 #endif
-  const String firstMessage = GPSTrackManager::getValidationMessage(TRACK_VALID, 100);
-  const String secondMessage = GPSTrackManager::getValidationMessage(TRACK_PARTIAL, 60);
+  const String firstMessage = GpsTrackManager::getValidationMessage(TRACK_VALID, 100);
+  const String secondMessage = GpsTrackManager::getValidationMessage(TRACK_PARTIAL, 60);
   check(firstMessage.startsWith("Track valid") && secondMessage.startsWith("Warning") &&
         firstMessage != secondMessage, "validation messages have independent caller-owned lifetime");
 
@@ -593,16 +593,16 @@ static void snapshotTests() {
     auto during = capture();
     check(std::string(during.status.filename) == "/logs/imported.csv" && during.pointCount == 2,
           "readers retain previous complete generation during file parsing");
-    check(!GPSTrackManager::clearTrack(), "competing clear refuses while load owns lifecycle operation");
+    check(!GpsTrackManager::clearTrack(), "competing clear refuses while load owns lifecycle operation");
     readDuringLoad = true;
   };
-  GPSTrackSnapshot loaded;
-  check(GPSTrackManager::loadTrack("/logs/replaced.csv", why, loaded) && readDuringLoad,
+  GpsTrackSnapshot loaded;
+  check(GpsTrackManager::loadTrack("/logs/replaced.csv", why, loaded) && readDuringLoad,
         "load releases data mutex through parser and publishes at completion");
   boundaryHook = {};
   check(loaded.status.pointCount == 2 && std::string(loaded.status.filename) == "/logs/replaced.csv",
         "load result identifies committed generation");
-  check(GPSTrackManager::clearTrack() && loaded.points.get()[0].lat == 37,
+  check(GpsTrackManager::clearTrack() && loaded.points.get()[0].lat == 37,
         "load response survives immediate subsequent clear");
 
 #if !BASELINE
@@ -612,18 +612,18 @@ static void snapshotTests() {
     // nothing and is retried on the next frame; later frames allocate nothing.
     MapRenderer refused;
     failedAllocationName = "gps.render";
-    GPSTrackManager::renderTrack(&refused, 37, -122, 1, 1);
+    GpsTrackManager::renderTrack(&refused, 37, -122, 1, 1);
     check(refused.lines == 0, "render without its buffer draws nothing");
     failedAllocationName = nullptr;
     const unsigned beforeRender = allocations;
     MapRenderer first, second;
-    GPSTrackManager::renderTrack(&first, 37, -122, 1, 1);
-    GPSTrackManager::renderTrack(&second, 37, -122, 1, 1);
+    GpsTrackManager::renderTrack(&first, 37, -122, 1, 1);
+    GpsTrackManager::renderTrack(&second, 37, -122, 1, 1);
     check(first.lines >= 7 && second.lines == first.lines && allocations == beforeRender + 1,
           "repeated renders reuse one allocated copy");
-    check(GPSTrackManager::clearTrack(), "track cleared after render buffer checks");
+    check(GpsTrackManager::clearTrack(), "track cleared after render buffer checks");
     MapRenderer empty;
-    GPSTrackManager::renderTrack(&empty, 37, -122, 1, 1);
+    GpsTrackManager::renderTrack(&empty, 37, -122, 1, 1);
     check(empty.lines == 0 && allocations == beforeRender + 1, "empty track renders nothing without allocating");
   }
 #endif
@@ -633,30 +633,30 @@ static void snapshotTests() {
   boundaryHook = [&](const char* name) {
     if (std::string(name) != "render" || renderMutation) return;
     renderMutation = true;
-    check(GPSTrackManager::clearTrack(), "render callback can clear owner without deadlocking");
+    check(GpsTrackManager::clearTrack(), "render callback can clear owner without deadlocking");
   };
   MapRenderer renderer;
-  GPSTrackManager::renderTrack(&renderer, 37, -122, 1, 1);
+  GpsTrackManager::renderTrack(&renderer, 37, -122, 1, 1);
   boundaryHook = {};
-  check(renderMutation && renderer.lines >= 7 && !GPSTrackManager::hasTrack(),
+  check(renderMutation && renderer.lines >= 7 && !GpsTrackManager::hasTrack(),
         "render completes from owned snapshot after track is freed by another action");
   imported();
   bool saveMutation = false;
   boundaryHook = [&](const char* name) {
     if (std::string(name) != "file write" || saveMutation) return;
     saveMutation = true;
-    check(GPSTrackManager::clearTrack(), "save callback can clear owner without deadlocking");
+    check(GpsTrackManager::clearTrack(), "save callback can clear owner without deadlocking");
   };
   char path[256]; int savedPoints = -1;
-  check(GPSTrackManager::saveTrack(path, sizeof(path), &savedPoints), "snapshot saves through existing VFS boundary");
+  check(GpsTrackManager::saveTrack(path, sizeof(path), &savedPoints), "snapshot saves through existing VFS boundary");
   boundaryHook = {};
   check(saveMutation && savedPoints == 2 && written.find("37.000000,-122.000000") != std::string::npos &&
-        written.find("37.000999,-122.000000") != std::string::npos && !GPSTrackManager::hasTrack(),
+        written.find("37.000999,-122.000000") != std::string::npos && !GpsTrackManager::hasTrack(),
         "save writes original generation and reports original count after concurrent clear");
 
   imported();
   fileOpen = false; savedPoints = -1;
-  check(!GPSTrackManager::saveTrack(path, sizeof(path), &savedPoints) && savedPoints == 0,
+  check(!GpsTrackManager::saveTrack(path, sizeof(path), &savedPoints) && savedPoints == 0,
         "save-open failure never reports a successful point count");
   fileOpen = true;
 
@@ -667,23 +667,23 @@ static void snapshotTests() {
     std::snprintf(line, sizeof(line), "%d,%.6f,-122.000000", point * 1000, 10.0 + point / 1000.0);
     inputLines.emplace_back(line);
   }
-  GPSTrackSnapshot capacityLoad;
-  check(GPSTrackManager::loadTrack("/logs/capacity.csv", why, capacityLoad),
+  GpsTrackSnapshot capacityLoad;
+  check(GpsTrackManager::loadTrack("/logs/capacity.csv", why, capacityLoad),
         "maximum-capacity track loads from one-extra-point fixture");
   const float lastCapacityLat = static_cast<float>(10.0 + (MAX_TRACK_POINTS - 1) / 1000.0);
   check(capacityLoad.pointCount == MAX_TRACK_POINTS && capacityLoad.status.pointCount == MAX_TRACK_POINTS &&
         capacityLoad.points.get()[0].lat == 10 &&
         capacityLoad.points.get()[MAX_TRACK_POINTS - 1].lat == lastCapacityLat &&
         capacityLoad.status.bounds.maxLat == lastCapacityLat &&
-        lastSnapshotBytes == MAX_TRACK_POINTS * sizeof(GPSTrackPoint),
+        lastSnapshotBytes == MAX_TRACK_POINTS * sizeof(GpsTrackPoint),
         "load caps points and allocates an exact-size complete snapshot");
   auto capacityFull = capture();
   check(capacityFull.pointCount == MAX_TRACK_POINTS &&
-        lastSnapshotBytes == MAX_TRACK_POINTS * sizeof(GPSTrackPoint),
+        lastSnapshotBytes == MAX_TRACK_POINTS * sizeof(GpsTrackPoint),
         "full read snapshot preserves maximum capacity and allocation length");
   ++saveCases;
   char capacityPath[256] = "unchanged"; int capacitySaved = -1;
-  check(GPSTrackManager::saveTrack(capacityPath, sizeof(capacityPath), &capacitySaved) && capacitySaved == MAX_TRACK_POINTS,
+  check(GpsTrackManager::saveTrack(capacityPath, sizeof(capacityPath), &capacitySaved) && capacitySaved == MAX_TRACK_POINTS,
         "maximum 10000-point snapshot saves successfully");
   check(std::count(written.begin(), written.end(), '\n') == MAX_TRACK_POINTS + 2 && maxWriteRequest <= 64,
         "maximum save streams bounded header/rows instead of allocating a CSV-sized buffer");
@@ -692,13 +692,13 @@ static void snapshotTests() {
   saveParity("capacity", capacityPath);
   auto capacityTail = capture(500);
   check(capacityTail.pointCount == 500 && capacityTail.status.pointCount == MAX_TRACK_POINTS &&
-        lastSnapshotBytes == 500 * sizeof(GPSTrackPoint) &&
+        lastSnapshotBytes == 500 * sizeof(GpsTrackPoint) &&
         capacityTail.points.get()[0].lat == static_cast<float>(10.0 + (MAX_TRACK_POINTS - 500) / 1000.0) &&
         capacityTail.points.get()[499].lat == lastCapacityLat &&
         capacityTail.status.bounds.minLat == 10 && capacityTail.status.bounds.maxLat == lastCapacityLat &&
         capacityTail.status.stats.totalDistanceM == capacityFull.status.stats.totalDistanceM,
         "500-point tail uses bounded allocation with complete-track metadata");
-  check(GPSTrackManager::clearTrack() && capacityLoad.points.get()[MAX_TRACK_POINTS - 1].lat == lastCapacityLat &&
+  check(GpsTrackManager::clearTrack() && capacityLoad.points.get()[MAX_TRACK_POINTS - 1].lat == lastCapacityLat &&
         capacityFull.points.get()[0].lat == 10 && capacityFull.pointCount == MAX_TRACK_POINTS &&
         capacityTail.points.get()[499].lat == lastCapacityLat &&
         std::string(capacityTail.status.filename) == "/logs/capacity.csv",
@@ -731,15 +731,15 @@ static void snapshotTests() {
     } while (!writerDone);
   });
   for (unsigned pass = 0; pass < 150; ++pass) {
-    GPSTrackSnapshot loadedPass;
+    GpsTrackSnapshot loadedPass;
     const bool firstGeneration = pass % 2 == 0;
     inputLines = firstGeneration ?
         std::vector<std::string>{"1000,37.000000,-122.000000", "2000,37.001000,-122.000000"} :
         std::vector<std::string>{"1000,38.000000,-123.000000", "2000,38.001000,-123.000000"};
-    check(GPSTrackManager::loadTrack(firstGeneration ? "/logs/concurrent-a.csv" : "/logs/concurrent-b.csv",
+    check(GpsTrackManager::loadTrack(firstGeneration ? "/logs/concurrent-a.csv" : "/logs/concurrent-b.csv",
                                    why, loadedPass), "concurrent load publishes");
     if (pass == 0) while (nonemptyReads == 0) std::this_thread::yield();
-    check(GPSTrackManager::clearTrack(), "concurrent clear publishes");
+    check(GpsTrackManager::clearTrack(), "concurrent clear publishes");
   }
   writerDone = true; reader.join();
   check(reads > 0 && nonemptyReads > 0, "concurrent reader exercised replacing and clearing owner buffers");
@@ -752,14 +752,14 @@ static void snapshotTests() {
     auto during = capture();
     check(during.pointCount == 2 && std::string(during.status.filename) == "/logs/imported.csv" &&
           !during.status.live, "startup commands leave prior generation fully readable until publish");
-    check(error(GPSTrackManager::stopLiveTracking()) && !GPSTrackManager::clearTrack(),
+    check(error(GpsTrackManager::stopLiveTracking()) && !GpsTrackManager::clearTrack(),
           "reentrant lifecycle mutations refuse during startup without deadlock");
     startupRead = true;
   };
   check(success(cmd_gpstrack("live start")), "live snapshot test starts capture");
   boundaryHook = {};
   check(startupRead && beforeStart.pointCount == 2 && beforeStart.points.get()[0].lat == 37 &&
-        GPSTrackManager::readStatus().pointCount == 0,
+        GpsTrackManager::readStatus().pointCount == 0,
         "startup publication resets owner while retained imported snapshot remains valid");
   writerDone = false; reads = 0;
   std::thread liveReader([&] {
@@ -783,12 +783,12 @@ static void snapshotTests() {
   });
   for (unsigned point = 0; point < 200; ++point) {
     now = 1000 + point * 1000;
-    check(GPSTrackManager::appendPoint(37 + point * 0.001f, -122), "live writer appends unique point");
+    check(GpsTrackManager::appendPoint(37 + point * 0.001f, -122), "live writer appends unique point");
   }
   writerDone = true; liveReader.join();
   check(reads > 0, "concurrent reader exercised live appends");
   const auto liveView = capture();
-  check(success(cmd_gpstrack("live stop")) && GPSTrackManager::clearTrack() &&
+  check(success(cmd_gpstrack("live stop")) && GpsTrackManager::clearTrack() &&
         liveView.pointCount == 200 && liveView.status.live && liveView.points.get()[199].lat > 37.19f,
         "live snapshot survives stop, clear and owner buffer release");
 #endif
@@ -813,7 +813,7 @@ static bool fileActionSeen(const std::string& action) {
 }
 static void checkRejected(char* path, size_t length, bool destinationExists = true) {
   int count = 99;
-  check(!GPSTrackManager::saveTrack(path, length, &count), "detected save failure is reported");
+  check(!GpsTrackManager::saveTrack(path, length, &count), "detected save failure is reported");
   check(count == 0, "failed save publishes zero successful points");
   if (path) check(std::string(path) == "unchanged", "failed save leaves output path unchanged");
   if (destinationExists) check(savedFiles.at(saveDestination) == "previous saved track", "failure preserves previously saved destination");
@@ -826,7 +826,7 @@ static void saveTests() {
     check(std::string(path) == "unchanged" && count == 0,
           "path and successful count stay unpublished throughout filesystem work");
   };
-  check(GPSTrackManager::saveTrack(path, sizeof(path), &count) && count == 2,
+  check(GpsTrackManager::saveTrack(path, sizeof(path), &count) && count == 2,
         "ordinary save reports exactly its snapshot's point count");
   boundaryHook = {};
   check(std::string(path) == saveDestination && savedFiles.at(path) == normalCsv,
@@ -841,16 +841,16 @@ static void saveTests() {
           "promotion follows close and never removes the prior destination");
   }
   prepareSave(); savedFiles[saveDestination] = "previous saved track"; savedFiles[saveTemporary] = "stale";
-  check(GPSTrackManager::saveTrack(path, sizeof(path), nullptr), "same-name replacement accepts optional count output");
+  check(GpsTrackManager::saveTrack(path, sizeof(path), nullptr), "same-name replacement accepts optional count output");
   check(savedFiles.at(saveDestination) == normalCsv && (BASELINE || !savedFiles.count(saveTemporary)),
         "complete new generation replaces same-name destination");
   saveReleased(); saveParity("replace", path);
   prepareSave(); directoryExists = false;
-  check(GPSTrackManager::saveTrack(path, sizeof(path), &count) && directoryExists && count == 2,
+  check(GpsTrackManager::saveTrack(path, sizeof(path), &count) && directoryExists && count == 2,
         "missing export directory is created before saving");
   saveReleased(); saveParity("mkdir", path);
   prepareSave(); validEpoch = true;
-  check(GPSTrackManager::saveTrack(path, sizeof(path), &count) && count == 2 &&
+  check(GpsTrackManager::saveTrack(path, sizeof(path), &count) && count == 2 &&
         std::string(path) == "/logging_captures/tracks/track-2023-11-14T22-13-20.csv",
         "valid clock retains timestamped filename format");
   saveReleased(); saveParity("timestamp", path);
@@ -858,14 +858,14 @@ static void saveTests() {
   boundaryHook = [&](const char* event) {
     if (std::string(event) == "filesystem lock" && !clearedAtLock) {
       clearedAtLock = true;
-      check(GPSTrackManager::clearTrack(), "snapshot is owned before acquiring filesystem lock");
+      check(GpsTrackManager::clearTrack(), "snapshot is owned before acquiring filesystem lock");
     }
   };
-  check(GPSTrackManager::saveTrack(path, sizeof(path), &count) && clearedAtLock && count == 2 && written == normalCsv,
+  check(GpsTrackManager::saveTrack(path, sizeof(path), &count) && clearedAtLock && count == 2 && written == normalCsv,
         "save survives owner clear at filesystem lock boundary");
   boundaryHook = {}; saveReleased(); saveParity("clear-at-lock", path);
   prepareSave(); fsLock("outer");
-  check(GPSTrackManager::saveTrack(path, sizeof(path), &count), "save works under caller-owned filesystem lock");
+  check(GpsTrackManager::saveTrack(path, sizeof(path), &count), "save works under caller-owned filesystem lock");
   check(fsLockDepth == (BASELINE ? 0U : 1U), "new scoped guard retains caller-owned filesystem lock");
   if (!BASELINE) fsUnlock(); saveReleased();
 
@@ -874,7 +874,7 @@ static void saveTests() {
     for (size_t failed : {size_t(1), size_t(2)}) {
       prepareSave(); savedFiles[saveDestination] = "previous saved track";
       failWrite = failed; shortWrite = 1;
-      check(GPSTrackManager::saveTrack(path, sizeof(path), &count) && count == 2,
+      check(GpsTrackManager::saveTrack(path, sizeof(path), &count) && count == 2,
             "saved baseline reproduces short-write false success");
       check(savedFiles.at(saveDestination) != normalCsv && savedFiles.at(saveDestination) != "previous saved track",
             "saved baseline truncates prior destination before failed write");
@@ -926,7 +926,7 @@ static void saveTests() {
     if (argument == 3) checkRejected(path, std::strlen(saveDestination), false);
     if (argument == 4) {
       count = -1;
-      check(GPSTrackManager::saveTrack(path, std::strlen(saveDestination) + 1, &count) && count == 2 && std::string(path) == saveDestination,
+      check(GpsTrackManager::saveTrack(path, std::strlen(saveDestination) + 1, &count) && count == 2 && std::string(path) == saveDestination,
             "exact output buffer including terminator succeeds");
       saveReleased();
     } else check(fsOperations == 0 && savedFiles.empty(), "invalid output capacity fails before touching storage");

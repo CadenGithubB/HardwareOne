@@ -2741,10 +2741,10 @@ private:
   bool held;
 };
 
-GPSTrackBounds copyTrackMapBounds() {
+GpsTrackBounds copyTrackMapBounds() {
   // Copy before taking the track lock. MapCore's lock order remains Map -> FS.
   MapCacheGuard mapGuard("gpstrack.bounds");
-  GPSTrackBounds bounds = {};
+  GpsTrackBounds bounds = {};
   if (MapCore::hasValidMap()) {
     const auto& header = MapCore::getCurrentMap().header;
     bounds = {header.minLat / 1000000.0f, header.minLon / 1000000.0f,
@@ -2753,8 +2753,8 @@ GPSTrackBounds copyTrackMapBounds() {
   return bounds;
 }
 
-TrackValidation validateTrackPoints(const GPSTrackPoint* points, int count,
-                                    const GPSTrackBounds& mapBounds, float& coverage) {
+TrackValidation validateTrackPoints(const GpsTrackPoint* points, int count,
+                                    const GpsTrackBounds& mapBounds, float& coverage) {
   coverage = 0;
   if (!count) return TRACK_EMPTY;
   if (!mapBounds.valid) return TRACK_NO_MAP_LOADED;
@@ -2769,16 +2769,16 @@ TrackValidation validateTrackPoints(const GPSTrackPoint* points, int count,
   return TRACK_OUT_OF_BOUNDS;
 }
 
-bool copyTrackSnapshot(GPSTrackSnapshot& out, const GPSTrackPoint* points,
-                       const GPSTrackStatus& status, int maxPoints) {
-  out = GPSTrackSnapshot{};
+bool copyTrackSnapshot(GpsTrackSnapshot& out, const GpsTrackPoint* points,
+                       const GpsTrackStatus& status, int maxPoints) {
+  out = GpsTrackSnapshot{};
   if (maxPoints < 0) return false;
   const int count = status.pointCount < maxPoints ? status.pointCount : maxPoints;
   if (count) {
-    out.points.reset(static_cast<GPSTrackPoint*>(ps_alloc(
-        count * sizeof(GPSTrackPoint), AllocPref::PreferPsram, "gps.snapshot")));
+    out.points.reset(static_cast<GpsTrackPoint*>(ps_alloc(
+        count * sizeof(GpsTrackPoint), AllocPref::PreferPsram, "gps.snapshot")));
     if (!out.points) return false;
-    memcpy(out.points.get(), points + status.pointCount - count, count * sizeof(GPSTrackPoint));
+    memcpy(out.points.get(), points + status.pointCount - count, count * sizeof(GpsTrackPoint));
   }
   out.status = status;
   out.pointCount = count;
@@ -2786,17 +2786,17 @@ bool copyTrackSnapshot(GPSTrackSnapshot& out, const GPSTrackPoint* points,
 }
 }  // namespace
 
-GPSTrackPoint* GPSTrackManager::_points = nullptr;
-int GPSTrackManager::_pointCount = 0;
-GPSTrackBounds GPSTrackManager::_bounds = {0, 0, 0, 0, false};
-GPSTrackStats GPSTrackManager::_stats = {0, 0, 0, false};
-EXT_RAM_BSS_ATTR char GPSTrackManager::_filename[256];
-bool GPSTrackManager::_liveTracking = false;
-uint32_t GPSTrackManager::_liveLogSessionId = 0;
-uint32_t GPSTrackManager::_lastUpdateMs = 0;
+GpsTrackPoint* GpsTrackManager::_points = nullptr;
+int GpsTrackManager::_pointCount = 0;
+GpsTrackBounds GpsTrackManager::_bounds = {0, 0, 0, 0, false};
+GpsTrackStats GpsTrackManager::_stats = {0, 0, 0, false};
+EXT_RAM_BSS_ATTR char GpsTrackManager::_filename[256];
+bool GpsTrackManager::_liveTracking = false;
+uint32_t GpsTrackManager::_liveLogSessionId = 0;
+uint32_t GpsTrackManager::_lastUpdateMs = 0;
 
 // Haversine formula for distance between two GPS points (returns meters)
-float GPSTrackManager::haversineDistance(float lat1, float lon1, float lat2, float lon2) {
+float GpsTrackManager::haversineDistance(float lat1, float lon1, float lat2, float lon2) {
   const float R = 6371000.0f;  // Earth radius in meters
   float dLat = (lat2 - lat1) * M_PI / 180.0f;
   float dLon = (lon2 - lon1) * M_PI / 180.0f;
@@ -2811,8 +2811,8 @@ float GPSTrackManager::haversineDistance(float lat1, float lon1, float lat2, flo
 }
 
 // Calculate track statistics (total distance point-to-point, duration, avg speed)
-GPSTrackStats GPSTrackManager::calculateStats(const GPSTrackPoint* points, int count) {
-  GPSTrackStats stats = {};
+GpsTrackStats GpsTrackManager::calculateStats(const GpsTrackPoint* points, int count) {
+  GpsTrackStats stats = {};
   
   if (count < 2) return stats;
   
@@ -2842,7 +2842,7 @@ GPSTrackStats GPSTrackManager::calculateStats(const GPSTrackPoint* points, int c
   return stats;
 }
 
-bool GPSTrackManager::parseGPSLine(const char* line, float& lat, float& lon) {
+bool GpsTrackManager::parseGpsLine(const char* line, float& lat, float& lon) {
   // Skip comment lines
   if (line[0] == '#') return false;
   
@@ -2899,8 +2899,8 @@ bool GPSTrackManager::parseGPSLine(const char* line, float& lat, float& lon) {
   return true;
 }
 
-GPSTrackBounds GPSTrackManager::calculateBounds(const GPSTrackPoint* points, int count) {
-  GPSTrackBounds bounds = {};
+GpsTrackBounds GpsTrackManager::calculateBounds(const GpsTrackPoint* points, int count) {
+  GpsTrackBounds bounds = {};
   if (count == 0) {
     bounds.valid = false;
     return bounds;
@@ -2922,22 +2922,22 @@ GPSTrackBounds GPSTrackManager::calculateBounds(const GPSTrackPoint* points, int
   return bounds;
 }
 
-bool GPSTrackManager::loadTrack(const char* filepath, String& errorMsg,
-                                GPSTrackSnapshot& loaded, bool rejectOutOfBounds) {
-  loaded = GPSTrackSnapshot{};
-  GPSTrackStatus status;
+bool GpsTrackManager::loadTrack(const char* filepath, String& errorMsg,
+                                GpsTrackSnapshot& loaded, bool rejectOutOfBounds) {
+  loaded = GpsTrackSnapshot{};
+  GpsTrackStatus status;
   return loadTrackImpl(filepath, errorMsg, status, &loaded, rejectOutOfBounds);
 }
 
-bool GPSTrackManager::loadTrack(const char* filepath, String& errorMsg,
-                                GPSTrackStatus& loaded, bool rejectOutOfBounds) {
+bool GpsTrackManager::loadTrack(const char* filepath, String& errorMsg,
+                                GpsTrackStatus& loaded, bool rejectOutOfBounds) {
   return loadTrackImpl(filepath, errorMsg, loaded, nullptr, rejectOutOfBounds);
 }
 
-bool GPSTrackManager::loadTrackImpl(const char* filepath, String& errorMsg,
-                                    GPSTrackStatus& loaded, GPSTrackSnapshot* snapshot,
+bool GpsTrackManager::loadTrackImpl(const char* filepath, String& errorMsg,
+                                    GpsTrackStatus& loaded, GpsTrackSnapshot* snapshot,
                                     bool rejectOutOfBounds) {
-  loaded = GPSTrackStatus{};
+  loaded = GpsTrackStatus{};
   errorMsg = "";
   TrackOperationGuard operation;
   if (!operation) {
@@ -2951,7 +2951,7 @@ bool GPSTrackManager::loadTrackImpl(const char* filepath, String& errorMsg,
 
   // Parse privately. Readers keep seeing the previous complete track until
   // the new points, metadata and result copy are all ready to publish.
-  std::unique_ptr<GPSTrackPoint, decltype(&free)> pending(nullptr, &free);
+  std::unique_ptr<GpsTrackPoint, decltype(&free)> pending(nullptr, &free);
   int count = 0;
   {
     FsLockGuard fsGuard("GPSTrackManager.loadTrack");
@@ -2959,8 +2959,8 @@ bool GPSTrackManager::loadTrackImpl(const char* filepath, String& errorMsg,
       errorMsg = "File not found";
       return false;
     }
-    pending.reset(static_cast<GPSTrackPoint*>(ps_alloc(
-        MAX_TRACK_POINTS * sizeof(GPSTrackPoint), AllocPref::PreferPsram, "gps.track")));
+    pending.reset(static_cast<GpsTrackPoint*>(ps_alloc(
+        MAX_TRACK_POINTS * sizeof(GpsTrackPoint), AllocPref::PreferPsram, "gps.track")));
     if (!pending) {
       errorMsg = "Memory allocation failed";
       return false;
@@ -2975,7 +2975,7 @@ bool GPSTrackManager::loadTrackImpl(const char* filepath, String& errorMsg,
       line.trim();
       if (line.length() == 0) continue;
       float lat, lon;
-      if (!parseGPSLine(line.c_str(), lat, lon)) continue;
+      if (!parseGpsLine(line.c_str(), lat, lon)) continue;
       // GPS logs often repeat the same fix at sub-1Hz intervals.
       if (count && pending.get()[count - 1].lat == lat && pending.get()[count - 1].lon == lon) continue;
       pending.get()[count++] = {lat, lon, 0};
@@ -2987,7 +2987,7 @@ bool GPSTrackManager::loadTrackImpl(const char* filepath, String& errorMsg,
     return false;
   }
 
-  GPSTrackStatus status;
+  GpsTrackStatus status;
   status.pointCount = count;
   status.bounds = calculateBounds(pending.get(), count);
   status.stats = calculateStats(pending.get(), count);
@@ -3015,7 +3015,7 @@ bool GPSTrackManager::loadTrackImpl(const char* filepath, String& errorMsg,
   return true;
 }
 
-void GPSTrackManager::clearTrackLocked() {
+void GpsTrackManager::clearTrackLocked() {
   _liveTracking = false;
   _liveLogSessionId = 0;
   free(_points);
@@ -3027,7 +3027,7 @@ void GPSTrackManager::clearTrackLocked() {
   _lastUpdateMs = 0;
 }
 
-bool GPSTrackManager::clearTrack() {
+bool GpsTrackManager::clearTrack() {
   TrackOperationGuard operation;
   if (!operation) return false;
   TrackStateGuard state;
@@ -3036,7 +3036,7 @@ bool GPSTrackManager::clearTrack() {
   return true;
 }
 
-bool GPSTrackManager::deleteTrackFile(const char* filepath) {
+bool GpsTrackManager::deleteTrackFile(const char* filepath) {
   if (!filepath || filepath[0] != '/') return false;
   TrackOperationGuard operation;
   if (!operation) return false;
@@ -3051,13 +3051,13 @@ bool GPSTrackManager::deleteTrackFile(const char* filepath) {
   return VFS::removeGuarded(filepath, currentAuthContext());
 }
 
-bool GPSTrackManager::hasTrack() {
+bool GpsTrackManager::hasTrack() {
   TrackStateGuard state;
   return _pointCount > 0;
 }
 
-GPSTrackStatus GPSTrackManager::readStatusLocked(const GPSTrackBounds& mapBounds) {
-  GPSTrackStatus status;
+GpsTrackStatus GpsTrackManager::readStatusLocked(const GpsTrackBounds& mapBounds) {
+  GpsTrackStatus status;
   status.pointCount = _pointCount;
   status.bounds = _bounds;
   status.stats = _stats;
@@ -3068,22 +3068,22 @@ GPSTrackStatus GPSTrackManager::readStatusLocked(const GPSTrackBounds& mapBounds
   return status;
 }
 
-GPSTrackStatus GPSTrackManager::readStatus() {
+GpsTrackStatus GpsTrackManager::readStatus() {
   const auto mapBounds = copyTrackMapBounds();
   TrackStateGuard state;
   return readStatusLocked(mapBounds);
 }
 
-bool GPSTrackManager::readSnapshot(GPSTrackSnapshot& out, int maxPoints) {
+bool GpsTrackManager::readSnapshot(GpsTrackSnapshot& out, int maxPoints) {
   const auto mapBounds = copyTrackMapBounds();
   TrackStateGuard state;
   return copyTrackSnapshot(out, _points, readStatusLocked(mapBounds), maxPoints);
 }
 
-bool GPSTrackManager::saveTrack(char* outPath, size_t outPathSize, int* savedPointCount) {
+bool GpsTrackManager::saveTrack(char* outPath, size_t outPathSize, int* savedPointCount) {
   if (savedPointCount) *savedPointCount = 0;
   if (!outPath || outPathSize == 0) return false;
-  GPSTrackSnapshot snapshot;
+  GpsTrackSnapshot snapshot;
   if (!readSnapshot(snapshot) || snapshot.pointCount == 0) return false;
 
   const char* dir = "/logging_captures/tracks";
@@ -3153,17 +3153,17 @@ bool GPSTrackManager::saveTrack(char* outPath, size_t outPathSize, int* savedPoi
   return true;
 }
 
-bool GPSTrackManager::isLiveTrackingLocked() {
+bool GpsTrackManager::isLiveTrackingLocked() {
   return _liveTracking && _liveLogSessionId != 0 &&
          sensorLogCurrentSessionId() == _liveLogSessionId;
 }
 
-bool GPSTrackManager::isLiveTracking() {
+bool GpsTrackManager::isLiveTracking() {
   TrackStateGuard state;
   return isLiveTrackingLocked();
 }
 
-const char* GPSTrackManager::startLiveTracking() {
+const char* GpsTrackManager::startLiveTracking() {
 #if !ENABLE_GPS_SENSOR
   return "Error: GPS support is not enabled in this build";
 #else
@@ -3177,15 +3177,15 @@ const char* GPSTrackManager::startLiveTracking() {
 
   // Keep an imported/previous track intact if GPS or logger startup fails.
   // A newly allocated buffer is released automatically on every failure path.
-  std::unique_ptr<GPSTrackPoint, decltype(&free)> pending(nullptr, &free);
+  std::unique_ptr<GpsTrackPoint, decltype(&free)> pending(nullptr, &free);
   bool needsBuffer;
   {
     TrackStateGuard state;
     needsBuffer = !_points;
   }
   if (needsBuffer) {
-    pending.reset((GPSTrackPoint*)ps_alloc(
-        MAX_TRACK_POINTS * sizeof(GPSTrackPoint), AllocPref::PreferPsram, "gps.live"));
+    pending.reset((GpsTrackPoint*)ps_alloc(
+        MAX_TRACK_POINTS * sizeof(GpsTrackPoint), AllocPref::PreferPsram, "gps.live"));
     if (!pending) return "Error: Cannot allocate live track buffer";
   }
 
@@ -3223,7 +3223,7 @@ const char* GPSTrackManager::startLiveTracking() {
 #endif
 }
 
-const char* GPSTrackManager::stopLiveTracking() {
+const char* GpsTrackManager::stopLiveTracking() {
   TrackOperationGuard operation;
   if (!operation) return "Error: Another track operation is in progress";
   uint32_t sessionId;
@@ -3241,7 +3241,7 @@ const char* GPSTrackManager::stopLiveTracking() {
                  : "SUCCESS: Live tracking inactive; other logging left unchanged";
 }
 
-bool GPSTrackManager::appendPoint(float lat, float lon) {
+bool GpsTrackManager::appendPoint(float lat, float lon) {
   TrackStateGuard state;
   if (!isLiveTrackingLocked() || !_points) return false;
   if (_pointCount >= MAX_TRACK_POINTS) return false;
@@ -3284,7 +3284,7 @@ bool GPSTrackManager::appendPoint(float lat, float lon) {
   return true;
 }
 
-String GPSTrackManager::getValidationMessage(TrackValidation result, float coverage) {
+String GpsTrackManager::getValidationMessage(TrackValidation result, float coverage) {
   char msg[128];
   
   switch (result) {
@@ -3310,15 +3310,15 @@ String GPSTrackManager::getValidationMessage(TrackValidation result, float cover
   return msg;
 }
 
-int GPSTrackManager::copyPoints(GPSTrackPoint* dst, int cap) {
+int GpsTrackManager::copyPoints(GpsTrackPoint* dst, int cap) {
   if (!dst || cap <= 0) return 0;
   TrackStateGuard state;
   const int count = _pointCount < cap ? _pointCount : cap;
-  if (count) memcpy(dst, _points + _pointCount - count, count * sizeof(GPSTrackPoint));
+  if (count) memcpy(dst, _points + _pointCount - count, count * sizeof(GpsTrackPoint));
   return count;
 }
 
-void GPSTrackManager::renderTrack(MapRenderer* renderer,
+void GpsTrackManager::renderTrack(MapRenderer* renderer,
                                    float centerLat, float centerLon,
                                    int32_t scaleX, int32_t scaleY) {
   if (!renderer || !hasTrack()) return;
@@ -3326,13 +3326,13 @@ void GPSTrackManager::renderTrack(MapRenderer* renderer,
   // copy sized for the point cap replaces a full-track allocation per frame.
   // It is kept once a track has been drawn; a failed allocation is retried on
   // the next frame and reported instead of silently drawing nothing.
-  static GPSTrackPoint* points = nullptr;
+  static GpsTrackPoint* points = nullptr;
   if (!points) {
-    points = static_cast<GPSTrackPoint*>(ps_alloc(
-        MAX_TRACK_POINTS * sizeof(GPSTrackPoint), AllocPref::PreferPsram, "gps.render"));
+    points = static_cast<GpsTrackPoint*>(ps_alloc(
+        MAX_TRACK_POINTS * sizeof(GpsTrackPoint), AllocPref::PreferPsram, "gps.render"));
     if (!points) {
       ERROR_MAPSF("Track render buffer unavailable (%u bytes)",
-                  (unsigned)(MAX_TRACK_POINTS * sizeof(GPSTrackPoint)));
+                  (unsigned)(MAX_TRACK_POINTS * sizeof(GpsTrackPoint)));
       return;
     }
   }
@@ -3441,17 +3441,17 @@ const char* cmd_gpstrack(const String& argsInput) {
     if (a.unterminatedQuote() || a.count() != 2) return "Error: Usage: gpstrack live <start|stop|toggle>";
     String action = a.arg(1);
     action.toLowerCase();
-    if (action == "start") return GPSTrackManager::startLiveTracking();
-    if (action == "stop") return GPSTrackManager::stopLiveTracking();
+    if (action == "start") return GpsTrackManager::startLiveTracking();
+    if (action == "stop") return GpsTrackManager::stopLiveTracking();
     if (action == "toggle") {
-      return GPSTrackManager::isLiveTracking()
-          ? GPSTrackManager::stopLiveTracking() : GPSTrackManager::startLiveTracking();
+      return GpsTrackManager::isLiveTracking()
+          ? GpsTrackManager::stopLiveTracking() : GpsTrackManager::startLiveTracking();
     }
     return "Error: Usage: gpstrack live <start|stop|toggle>";
   }
 
   if (sub.length() == 0 || sub == "status") {
-    const auto status = GPSTrackManager::readStatus();
+    const auto status = GpsTrackManager::readStatus();
     if (status.live) {
       snprintf(buf, 1024, "Live GPS track recording active\nPoints: %d%s",
                status.pointCount, status.pointCount ? "" : " (waiting for GPS fix)");
@@ -3462,7 +3462,7 @@ const char* cmd_gpstrack(const String& argsInput) {
       return "No GPS track loaded";
     }
     const auto& bounds = status.bounds;
-    const String message = GPSTrackManager::getValidationMessage(status.validation, status.coveragePercent);
+    const String message = GpsTrackManager::getValidationMessage(status.validation, status.coveragePercent);
     snprintf(buf, 1024,
              "GPS Track: %s\nPoints: %d\nBounds: %.5f,%.5f to %.5f,%.5f\n%s",
              status.filename, status.pointCount, bounds.minLat, bounds.minLon,
@@ -3473,9 +3473,9 @@ const char* cmd_gpstrack(const String& argsInput) {
   if (sub == "load") {
     if (!a.hasMinArgs(2)) return "Error: invalid arguments — Usage: gpstrack load <filepath>";
     String errorMsg;
-    GPSTrackStatus loaded;
-    if (GPSTrackManager::loadTrack(a.arg(1).c_str(), errorMsg, loaded, true)) {
-      const String message = GPSTrackManager::getValidationMessage(
+    GpsTrackStatus loaded;
+    if (GpsTrackManager::loadTrack(a.arg(1).c_str(), errorMsg, loaded, true)) {
+      const String message = GpsTrackManager::getValidationMessage(
           loaded.validation, loaded.coveragePercent);
       snprintf(buf, 1024, "Loaded %d GPS points\n%s", loaded.pointCount, message.c_str());
     } else if (errorMsg.startsWith("Error:")) {
@@ -3489,7 +3489,7 @@ const char* cmd_gpstrack(const String& argsInput) {
   }
 
   if (sub == "clear") {
-    if (!GPSTrackManager::clearTrack()) return "Error: Track busy; stop live tracking or retry after the current operation";
+    if (!GpsTrackManager::clearTrack()) return "Error: Track busy; stop live tracking or retry after the current operation";
     return "GPS track cleared";
   }
 

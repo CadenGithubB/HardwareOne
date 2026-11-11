@@ -170,8 +170,8 @@ static void goBackToMainMenu() {}
 
 // INSERT_TRACK_TYPES
 
-static GPSTrackStatus currentTrack;
-static std::vector<GPSTrackPoint> suppliedPoints;
+static GpsTrackStatus currentTrack;
+static std::vector<GpsTrackPoint> suppliedPoints;
 static int snapshotCalls, statusCalls, loadCalls, statusLoadCalls, saveCalls, requestedMaxPoints;
 static bool snapshotOk = true, loadOk = true, saveOk = true;
 static String loadError = "File not found";
@@ -183,31 +183,31 @@ static TrackValidation messageValidation;
 static float messageCoverage;
 // Return a supplied owner snapshot. The owner suite tests how it is captured;
 // this suite verifies that a consumer retains it throughout callbacks/output.
-static void supplySnapshot(GPSTrackSnapshot& out) {
+static void supplySnapshot(GpsTrackSnapshot& out) {
   out = {};
   out.status = currentTrack;
   out.pointCount = static_cast<int>(suppliedPoints.size());
   if (!suppliedPoints.empty()) {
-    out.points.reset(static_cast<GPSTrackPoint*>(std::malloc(sizeof(GPSTrackPoint) * suppliedPoints.size())));
+    out.points.reset(static_cast<GpsTrackPoint*>(std::malloc(sizeof(GpsTrackPoint) * suppliedPoints.size())));
     CHECK(out.points != nullptr);
-    std::memcpy(out.points.get(), suppliedPoints.data(), sizeof(GPSTrackPoint) * suppliedPoints.size());
+    std::memcpy(out.points.get(), suppliedPoints.data(), sizeof(GpsTrackPoint) * suppliedPoints.size());
   }
 }
-struct GPSTrackManager {
+struct GpsTrackManager {
   static bool saveTrack(char* path, size_t length, int* count = nullptr) {
     ++saveCalls;
     if (count) *count = saveOk ? savedCount : 0;
     std::snprintf(path, length, "%s", saveOk ? "/logging_captures/tracks/saved.csv" : "");
     return saveOk;
   }
-  static GPSTrackStatus readStatus() { ++statusCalls; return currentTrack; }
-  static bool readSnapshot(GPSTrackSnapshot& out, int maxPoints = MAX_TRACK_POINTS) {
+  static GpsTrackStatus readStatus() { ++statusCalls; return currentTrack; }
+  static bool readSnapshot(GpsTrackSnapshot& out, int maxPoints = MAX_TRACK_POINTS) {
     CHECK(identityDepth == 1 && installedIdentity);
     ++snapshotCalls; requestedMaxPoints = maxPoints;
     if (!snapshotOk) { out = {}; return false; }
     supplySnapshot(out); return true;
   }
-  static bool loadTrack(const char* path, String& error, GPSTrackSnapshot& out,
+  static bool loadTrack(const char* path, String& error, GpsTrackSnapshot& out,
                         bool rejectOutOfBounds = false) {
     CHECK(identityDepth == 1 && installedIdentity);
     ++loadCalls; loadedPath = path; rejectOutside = rejectOutOfBounds;
@@ -217,7 +217,7 @@ struct GPSTrackManager {
     return true;
   }
   // Status-only load: publishes, returns the published status, allocates no copy.
-  static bool loadTrack(const char* path, String& error, GPSTrackStatus& out,
+  static bool loadTrack(const char* path, String& error, GpsTrackStatus& out,
                         bool rejectOutOfBounds = false) {
     CHECK(identityDepth == 1 && installedIdentity);
     ++loadCalls; ++statusLoadCalls; loadedPath = path; rejectOutside = rejectOutOfBounds;
@@ -253,7 +253,7 @@ static httpd_req_t request(const char* query) {
   httpd_req_t req; req.query = query;
   const unsigned beforeMillis = millisCalls, beforeCapture = captureCalls;
   const size_t beforeCommands = webRequests.size();
-  CHECK(handleGPSTracksAPI(&req) == ESP_OK);
+  CHECK(handleGpsTracksAPI(&req) == ESP_OK);
   if (webRequests.size() > beforeCommands) {
     CHECK(webRequests.size() == beforeCommands + 1);
     CHECK(millisCalls == beforeMillis + 2 && captureCalls == beforeCapture + 1);

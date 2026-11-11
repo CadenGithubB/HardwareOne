@@ -1634,7 +1634,7 @@ static const PathRule sPathRules[] = {
   // ---- Logging captures: admin gets full run of the tree; system full ----
   // This is user CAPTURE data, not system config: admins could already read and
   // DELETE here but not CREATE, which is an incoherent gap — it is why
-  // GPSTrackManager::saveTrack has to impersonate system just to write a track,
+  // GpsTrackManager::saveTrack has to impersonate system just to write a track,
   // and why an admin could not hand-make a folder to drop a file into.
   {"/logging_captures/",                0,         PERM_READ | PERM_WRITE | PERM_DELETE | PERM_RENAME | PERM_CREATE | PERM_IMPORT, PERM_ALL, false, false},
 

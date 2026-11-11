@@ -37,7 +37,7 @@ def generated(baseline: Path | None = None) -> str:
     maps = (COMPONENT / "System_Maps.h").read_text()
     auth_start = utils.index("#define WEB_AUTH_OR_RETURN(req, ctx)")
     auth_end = utils.index("\n\n", auth_start)
-    handler = extract_block(web, "esp_err_t handleGPSTracksAPI(")
+    handler = extract_block(web, "esp_err_t handleGpsTracksAPI(")
     # Keep every query operation verbatim, including stream output. The
     # unrelated directory traversal suffix remains outside this harness.
     handler = handler[:handler.index("  // No query params - list available GPS log files")]
@@ -48,7 +48,7 @@ def generated(baseline: Path | None = None) -> str:
     action = guard + "\n  switch (submenuType) {\n" + branch + "  }\n}"
     production = [utils[auth_start:auth_end],
                   *web_executor,
-                  extract_block(web, "static esp_err_t handleGPSLiveTrackAction("),
+                  extract_block(web, "static esp_err_t handleGpsLiveTrackAction("),
                   handler, action, extract_block(oled, "static void drawTrackStatus(")]
     harness = (HERE / "map_live_ui_harness.cpp").read_text()
     require(harness.count("// INSERT_PRODUCTION") == 1, "missing production marker")

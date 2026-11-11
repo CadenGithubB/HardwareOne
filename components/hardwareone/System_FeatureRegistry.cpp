@@ -112,7 +112,7 @@ static bool isIMUCompiled() {
 #endif
 }
 
-static bool isGPSCompiled() {
+static bool isGpsCompiled() {
 #if ENABLE_GPS_SENSOR
   return true;
 #else
@@ -409,7 +409,7 @@ static constexpr FeatureEntry featureRegistry[] = {
     
   { "gps", "GPS", FEATURE_CAT_SENSOR, 4,
     FEATURE_FLAG_RUNTIME_TOGGLE,
-    &gSettings.gpsAutoStart, isGPSCompiled,
+    &gSettings.gpsAutoStart, isGpsCompiled,
     "PA1010D GPS location tracking" },
     
   { "fmradio", "FM Radio", FEATURE_CAT_SENSOR, 2,

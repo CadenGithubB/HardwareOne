@@ -100,7 +100,7 @@ SemaphoreHandle_t sGpsCacheMutex = nullptr, sApdsCacheMutex = nullptr, sPresence
 SemaphoreHandle_t sRtcCacheMutex = nullptr, sAnoCacheMutex = nullptr;
 TofCache sTofCache{};
 ImuCache sImuCache{};
-GPSCache sGpsCache{};
+GpsCache sGpsCache{};
 APDSCache sApdsCache{};
 PresenceCache sPresenceCache{};
 RTCCache sRtcCache{};
@@ -136,7 +136,7 @@ bool createTask(bool running, TaskHandle_t& handle) {
 CREATE_OWNER(ToF, Tof)
 CREATE_OWNER(IMU, Imu)
 CREATE_OWNER(Thermal, Thermal)
-CREATE_OWNER(GPS, Gps)
+CREATE_OWNER(Gps, Gps)
 CREATE_OWNER(APDS, Apds)
 CREATE_OWNER(Presence, Presence)
 CREATE_OWNER(RTC, Rtc)

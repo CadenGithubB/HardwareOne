@@ -332,7 +332,7 @@ static const SettingEntry mqttSettingEntries[] = {
   { "mqttPublishToF", SETTING_BOOL, &gSettings.mqttPublishToF, false, 0, nullptr, 0, 1, "Publish ToF data", nullptr, false, "publish", "mqttPublishToF" },
   { "mqttPublishIMU", SETTING_BOOL, &gSettings.mqttPublishIMU, false, 0, nullptr, 0, 1, "Publish IMU data", nullptr, false, "publish", "mqttPublishIMU" },
   { "mqttPublishPresence", SETTING_BOOL, &gSettings.mqttPublishPresence, false, 0, nullptr, 0, 1, "Publish presence data", nullptr, false, "publish", "mqttPublishPresence" },
-  { "mqttPublishGPS", SETTING_BOOL, &gSettings.mqttPublishGPS, false, 0, nullptr, 0, 1, "Publish GPS data", nullptr, false, "publish", "mqttPublishGPS" },
+  { "mqttPublishGPS", SETTING_BOOL, &gSettings.mqttPublishGps, false, 0, nullptr, 0, 1, "Publish GPS data", nullptr, false, "publish", "mqttPublishGPS" },
   { "mqttPublishAPDS", SETTING_BOOL, &gSettings.mqttPublishAPDS, false, 0, nullptr, 0, 1, "Publish APDS data", nullptr, false, "publish", "mqttPublishAPDS" },
   { "mqttPublishRTC", SETTING_BOOL, &gSettings.mqttPublishRTC, false, 0, nullptr, 0, 1, "Publish RTC time", nullptr, false, "publish", "mqttPublishRTC" },
   { "mqttPublishInput", SETTING_BOOL, &gSettings.mqttPublishInput, false, 0, nullptr, 0, 1, "Publish input device data", nullptr, false, "publish", "mqttPublishInput" }
@@ -848,7 +848,7 @@ static void publishMQTTDiscovery() {
 #endif
 
 #if ENABLE_GPS_SENSOR
-  if (gSettings.mqttPublishGPS) {
+  if (gSettings.mqttPublishGps) {
     publishDiscoveryConfig("sensor", "gps_latitude", "GPS Latitude", "{{ value_json.gps.lat }}", "°", nullptr, "mdi:crosshairs-gps");
     publishDiscoveryConfig("sensor", "gps_longitude", "GPS Longitude", "{{ value_json.gps.lon }}", "°", nullptr, "mdi:crosshairs-gps");
     publishDiscoveryConfig("sensor", "gps_altitude", "GPS Altitude", "{{ value_json.gps.alt }}", "m", nullptr, "mdi:altimeter");
@@ -1532,8 +1532,8 @@ void publishMQTTSensorData() {
 #endif
 
 #if ENABLE_GPS_SENSOR
-  GPSCache gps{};
-  if (gSettings.mqttPublishGPS && gGpsRunning && gGpsConnected && gpsCacheSnapshot(gps)) {
+  GpsCache gps{};
+  if (gSettings.mqttPublishGps && gGpsRunning && gGpsConnected && gpsCacheSnapshot(gps)) {
     if (gps.hasFix) {
       pos += snprintf(jsonBuf + pos, 16384 - pos,
         ",\"gps\":{\"lat\":%.6f,\"lon\":%.6f,\"alt\":%.1f,\"speed\":%.1f,\"satellites\":%d}",
@@ -2109,7 +2109,7 @@ MQTT_PUBLISH_CMD(thermal, mqttPublishThermal, "Thermal")
 MQTT_PUBLISH_CMD(tof, mqttPublishToF, "ToF")
 MQTT_PUBLISH_CMD(imu, mqttPublishIMU, "IMU")
 MQTT_PUBLISH_CMD(presence, mqttPublishPresence, "Presence")
-MQTT_PUBLISH_CMD(gps, mqttPublishGPS, "GPS")
+MQTT_PUBLISH_CMD(gps, mqttPublishGps, "GPS")
 MQTT_PUBLISH_CMD(apds, mqttPublishAPDS, "APDS")
 MQTT_PUBLISH_CMD(rtc, mqttPublishRTC, "RTC")
 #if ENABLE_ANO_ENCODER

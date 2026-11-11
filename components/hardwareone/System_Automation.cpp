@@ -3573,7 +3573,7 @@ bool evaluateCondition(const char* condition) {
   } else if (strcmp(sensor, "SPEED") == 0) {
     // GPS ground speed in knots (requires a fix)
  #if ENABLE_GPS_SENSOR
-    GPSCache gps;
+    GpsCache gps;
     if (!gpsCacheSnapshot(gps) || !gps.hasFix) return false;
     currentValue = gps.speed;
  #else
@@ -3587,7 +3587,7 @@ bool evaluateCondition(const char* condition) {
     // "IF SATS < n" would fire continuously while the sensor is deliberately off.
     // Fail-closed matches SPEED / GPS / WP_DIST above.
  #if ENABLE_GPS_SENSOR
-    GPSCache gps;
+    GpsCache gps;
     if (!gpsCacheSnapshot(gps) || !gps.dataValid) return false;
     currentValue = (float)gps.satellites;
  #else
@@ -3599,7 +3599,7 @@ bool evaluateCondition(const char* condition) {
  #if ENABLE_MAPS && ENABLE_GPS_SENSOR
     const char* wpName = (strncmp(sensor, "WP_DIST:", 8) == 0) ? (sensor + 8) : "";
     if (!wpName[0]) return false;
-    GPSCache gps;
+    GpsCache gps;
     if (!gpsCacheSnapshot(gps) || !gps.hasFix) return false;
     float distM = 0, bearingDeg = 0;
     if (!WaypointManager::getDistanceBearingToName(wpName, gps.latitude, gps.longitude,
@@ -3653,7 +3653,7 @@ bool evaluateCondition(const char* condition) {
     // GPS fix status -> FIX / NOFIX
     isNumeric = false;
  #if ENABLE_GPS_SENSOR
-    GPSCache gps;
+    GpsCache gps;
     if (!gpsCacheSnapshot(gps)) return false;
     strlcpy(currentStringValue, gps.hasFix ? "FIX" : "NOFIX", sizeof(currentStringValue));
  #else

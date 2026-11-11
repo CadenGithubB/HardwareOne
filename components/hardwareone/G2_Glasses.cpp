@@ -35926,7 +35926,7 @@ static void g2MapBuildStatusText(char* out, size_t cap) {
   const LoadedMap& map = MapCore::getCurrentMap();
   const char* filename = map.valid && map.filename[0] ? map.filename : "No map";
 #if ENABLE_GPS_SENSOR
-  GPSCache gps = {};
+  GpsCache gps = {};
   const bool haveSnapshot = gpsCacheSnapshot(gps);
   const char* gpsState = gGpsRunning ? "[ON]" : "[OFF]";
   char fix[24];

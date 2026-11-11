@@ -757,7 +757,7 @@ void sensorLogTick() {
     }
     trackWasConnected = true;
 
-    // NOTE: Live track (GPSTrackManager::appendPoint) is fed directly by
+    // NOTE: Live track (GpsTrackManager::appendPoint) is fed directly by
     // gpsTask in i2csensor_pa1010d.cpp, independent of sensor logging.
 
     snprintf(buf, sizeof(buf), "%s,%.6f,%.6f,%.1f,%.1f,%d",
@@ -859,7 +859,7 @@ void sensorLogTick() {
     if (mask & LOG_GPS) {
       snap.gGpsRunning = gGpsRunning;
       snap.gGpsConnected = gGpsConnected;
-      GPSCache gps{};
+      GpsCache gps{};
       if (gpsCacheSnapshot(gps)) {
         if (gps.dataValid && gps.hasFix) {
           snap.gpsFix = true;

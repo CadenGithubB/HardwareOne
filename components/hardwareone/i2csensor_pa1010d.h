@@ -9,7 +9,7 @@
 
 // A copied GPS reading. The live cache, its lock and the driver belong to the
 // implementation; callers may retain or modify this value independently.
-struct GPSCache {
+struct GpsCache {
   float latitude;       // Signed decimal degrees (south is negative)
   float longitude;      // Signed decimal degrees (west is negative)
   float altitude;       // Metres above mean sea level
@@ -43,7 +43,7 @@ int gpsBuildDataJSON(char* buf, size_t bufSize);
 // Copy a consistent reading, waiting at most timeoutMs for the cache lock.
 // Success means the copy was available: check dataValid/hasFix before use.
 // Before initialization or on timeout, returns false and clears out.
-bool gpsCacheSnapshot(GPSCache& out, uint32_t timeoutMs = 10);
+bool gpsCacheSnapshot(GpsCache& out, uint32_t timeoutMs = 10);
 
 // GPS initialization (called by sensor queue processor)
 bool gpsStartInternal();
@@ -56,7 +56,7 @@ const char* cmd_gpsstop(const String& argsInput);
 #else
 
 // Keep reading APIs available when GPS is omitted from the build.
-inline bool gpsCacheSnapshot(GPSCache& out, uint32_t timeoutMs = 10) {
+inline bool gpsCacheSnapshot(GpsCache& out, uint32_t timeoutMs = 10) {
   (void)timeoutMs;
   out = {};
   return false;

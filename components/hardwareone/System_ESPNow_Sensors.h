@@ -169,7 +169,7 @@ int buildThermalDataJSONInteger(char* buf, size_t bufSize);
 // ==========================
 
 // Structure for accessing remote GPS data
-struct RemoteGPSData {
+struct RemoteGpsData {
   bool valid;           // Data is valid and not expired
   bool hasFix;          // GPS has valid fix
   int fixQuality;       // Fix quality (0=invalid, 1=GPS, 2=DGPS)
@@ -184,7 +184,7 @@ struct RemoteGPSData {
 
 // Get remote GPS data from bonded device or mesh workers
 // Returns true if valid GPS data is available from a remote source
-bool getRemoteGPSData(RemoteGPSData* outData);
+bool getRemoteGpsData(RemoteGpsData* outData);
 
 const char* cmd_espnow_sensorbroadcast(const String& argsInput);
 const char* cmd_espnow_sensorstatus(const String& argsInput);

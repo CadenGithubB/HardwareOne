@@ -58,7 +58,7 @@ unsigned long gGpsLastStopTime = 0;
 
 // Only this module accesses live readings. The mutex is created on first start
 // and retained across stops so readers can safely copy the invalidated cache.
-static GPSCache sGpsCache{};
+static GpsCache sGpsCache{};
 static SemaphoreHandle_t sGpsCacheMutex = nullptr;
 
 static bool gpsInvalidateCache() {
@@ -178,7 +178,7 @@ bool gpsStartInternal() {
   DEBUG_GPS_LIFECYCLEF("[GPS_INIT] gGpsRunning set to true");
   
   // Create GPS task using centralized helper
-  if (!createGPSTask()) {
+  if (!createGpsTask()) {
     ERROR_GPSF("Failed to create GPS task");
     gGpsRunning = false;
     gGpsConnected = false;
@@ -231,7 +231,7 @@ const char* cmd_gps(const String& argsInput) {
   
   // Read from the GPS cache — the sensor_gps is the sole reader of the device;
   // every consumer goes through the cache, like the other sensors.
-  GPSCache gps;
+  GpsCache gps;
   if (!gpsCacheSnapshot(gps)) {
     broadcastOutput("GPS Data:");
     broadcastOutput("=========");
@@ -299,7 +299,7 @@ const char* cmd_gps(const String& argsInput) {
 //   3. Destroy the GPS object and delete the task
 // ============================================================================
 
-bool gpsCacheSnapshot(GPSCache& out, uint32_t timeoutMs) {
+bool gpsCacheSnapshot(GpsCache& out, uint32_t timeoutMs) {
   out = {};
   SensorCacheGuard guard(sGpsCacheMutex, pdMS_TO_TICKS(timeoutMs), "gps.snapshot");
   if (!guard.held) return false;
@@ -311,7 +311,7 @@ bool gpsCacheSnapshot(GPSCache& out, uint32_t timeoutMs) {
 int gpsBuildDataJSON(char* buf, size_t bufSize) {
   if (!buf || bufSize == 0) return 0;
 
-  GPSCache gps;
+  GpsCache gps;
   // Failure clears the reading, preserving the existing not-ready envelope.
   (void)gpsCacheSnapshot(gps, 50);
 
@@ -366,7 +366,7 @@ void gpsTask(void* parameter) {
   INFO_GPS_LIFECYCLEF("[MODULAR] gpsTask() running from i2csensor_pa1010d.cpp");
   unsigned long lastStackLog = 0;
   unsigned long lastStatusLog = 0;
-  unsigned long lastGPSRead = 0;
+  unsigned long lastGpsRead = 0;
   bool wasPolling = false;
   
   while (true) {
@@ -421,8 +421,8 @@ void gpsTask(void* parameter) {
       // ── I2C health probe (rate-limited) ──────────────────────────────────
       // Separate from reading so the health/auto-disable system still works.
       // Bus-aware: probe whichever bus the GPS lives on (gpsBus setting).
-      if ((nowMs - lastGPSRead) >= gpsPollMs) {
-        lastGPSRead = nowMs;
+      if ((nowMs - lastGpsRead) >= gpsPollMs) {
+        lastGpsRead = nowMs;
         const uint8_t probeBus = (uint8_t)gSettings.gpsBus;
         TwoWire* probeWire = i2c() ? i2c()->getWire(probeBus) : nullptr;
         auto probeResult = probeWire && i2cDeviceTransaction(probeBus, I2C_ADDR_GPS, 100000, 100, [&]() -> bool {
@@ -455,7 +455,7 @@ void gpsTask(void* parameter) {
       // Previously dataValid was set unconditionally, causing the sensor logger to
       // write the same stale position repeatedly between real fixes.
       if (parsedNewSentence) {
-        GPSCache reading{};
+        GpsCache reading{};
         reading.latitude = gPA1010D->latitudeDegrees;
         reading.longitude = gPA1010D->longitudeDegrees;
         reading.altitude = gPA1010D->altitude;
@@ -484,8 +484,8 @@ void gpsTask(void* parameter) {
 
         // Track and UI/event callbacks run after releasing the reading lock.
 #if ENABLE_MAPS
-        if (published && reading.hasFix && GPSTrackManager::isLiveTracking()) {
-          GPSTrackManager::appendPoint(reading.latitude, reading.longitude);
+        if (published && reading.hasFix && GpsTrackManager::isLiveTracking()) {
+          GpsTrackManager::appendPoint(reading.latitude, reading.longitude);
         }
 #else
         (void)published;
@@ -548,37 +548,37 @@ void gpsTask(void* parameter) {
 // Accessors read the cache (never the device). Cache latitude/longitude are
 // already signed (S/W negative), so no sign fix-up here — doing so on top of
 // the already-signed value was a latent double-negation bug for S/W hemispheres.
-bool hasGPSFix() {
-  GPSCache g;
+bool hasGpsFix() {
+  GpsCache g;
   return gpsCacheSnapshot(g) && g.hasFix;
 }
 
-float getGPSLatitude() {
-  GPSCache g;
+float getGpsLatitude() {
+  GpsCache g;
   if (!gpsCacheSnapshot(g) || !g.hasFix) return 0.0f;
   return g.latitude;
 }
 
-float getGPSLongitude() {
-  GPSCache g;
+float getGpsLongitude() {
+  GpsCache g;
   if (!gpsCacheSnapshot(g) || !g.hasFix) return 0.0f;
   return g.longitude;
 }
 
-float getGPSAltitude() {
-  GPSCache g;
+float getGpsAltitude() {
+  GpsCache g;
   if (!gpsCacheSnapshot(g) || !g.hasFix) return 0.0f;
   return g.altitude;
 }
 
-float getGPSSpeed() {
-  GPSCache g;
+float getGpsSpeed() {
+  GpsCache g;
   if (!gpsCacheSnapshot(g) || !g.hasFix) return 0.0f;
   return g.speed * 1.852f;  // Convert knots to km/h
 }
 
-int getGPSSatellites() {
-  GPSCache g;
+int getGpsSatellites() {
+  GpsCache g;
   if (!gpsCacheSnapshot(g)) return 0;
   return (int)g.satellites;
 }
@@ -595,7 +595,7 @@ static const SettingEntry gpsSettingEntries[] = {
   { "gpsDevicePollMs", SETTING_INT, &gSettings.gpsDevicePollMs, 200, 0, nullptr, 50, 10000, "Poll Interval (ms)", nullptr, false, nullptr, "gpsdevicepollms" },
 };
 
-static bool isGPSConnected() {
+static bool isGpsConnected() {
   return gGpsConnected;
 }
 
@@ -605,7 +605,7 @@ extern const SettingsModule gpsSettingsModule = {
   "hardware.sensors.gps",
   gpsSettingEntries,
   sizeof(gpsSettingEntries) / sizeof(gpsSettingEntries[0]),
-  isGPSConnected,
+  isGpsConnected,
   "PA1010D GPS receiver"
 };
 

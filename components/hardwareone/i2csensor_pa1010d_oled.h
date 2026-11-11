@@ -9,32 +9,32 @@
 #include <Adafruit_SSD1306.h>
 
 // Persistent scroll state for the GPS view — survives between render frames
-static OledContentArea sGPSContent;
-static bool sGPSContentInited = false;
+static OledContentArea sGpsContent;
+static bool sGpsContentInited = false;
 
 // GPS OLED display function - shows GPS data using the shared content area system
-static void displayGPSData() {
-  if (!sGPSContentInited) {
-    oledContentInit(&sGPSContent, oledDisplay);
-    sGPSContentInited = true;
+static void displayGpsData() {
+  if (!sGpsContentInited) {
+    oledContentInit(&sGpsContent, oledDisplay);
+    sGpsContentInited = true;
   }
 
   oledDisplay->setTextSize(1);
-  oledContentBegin(&sGPSContent);
+  oledContentBegin(&sGpsContent);
 
   if (!gGpsConnected || !gGpsRunning) {
-    oledContentPrint(&sGPSContent, "GPS not active");
-    oledContentPrint(&sGPSContent, "");
-    oledContentPrint(&sGPSContent, "Press X to start");
-    oledContentEnd(&sGPSContent);
+    oledContentPrint(&sGpsContent, "GPS not active");
+    oledContentPrint(&sGpsContent, "");
+    oledContentPrint(&sGpsContent, "Press X to start");
+    oledContentEnd(&sGpsContent);
     return;
   }
 
   // Read one GPS snapshot (thread-safe, no I2C contention).
-  GPSCache gps{};
+  GpsCache gps{};
   if (!gpsCacheSnapshot(gps) || !gps.dataValid) {
-    oledContentPrint(&sGPSContent, "Reading GPS...");
-    oledContentEnd(&sGPSContent);
+    oledContentPrint(&sGpsContent, "Reading GPS...");
+    oledContentEnd(&sGpsContent);
     return;
   }
 
@@ -43,30 +43,30 @@ static void displayGPSData() {
   // Line 0: Fix status + satellites + quality
   snprintf(buf, sizeof(buf), "%s Sat:%d Q:%d",
            gps.hasFix ? "\x10FIX" : "\xDB---", (int)gps.satellites, (int)gps.fixQuality);
-  oledContentPrint(&sGPSContent, buf);
+  oledContentPrint(&sGpsContent, buf);
 
   if (gps.hasFix) {
     // Line 1: Latitude
     snprintf(buf, sizeof(buf), "Lat: %.4f%c", gps.latitude, gps.latitude >= 0 ? 'N' : 'S');
-    oledContentPrint(&sGPSContent, buf);
+    oledContentPrint(&sGpsContent, buf);
 
     // Line 2: Longitude
     snprintf(buf, sizeof(buf), "Lon: %.4f%c", gps.longitude, gps.longitude >= 0 ? 'E' : 'W');
-    oledContentPrint(&sGPSContent, buf);
+    oledContentPrint(&sGpsContent, buf);
 
     // Line 3: Altitude + Speed
     snprintf(buf, sizeof(buf), "Alt:%.0fm Spd:%.1fkn", gps.altitude, gps.speed);
-    oledContentPrint(&sGPSContent, buf);
+    oledContentPrint(&sGpsContent, buf);
 
     // Line 4: UTC time
     snprintf(buf, sizeof(buf), "%02d:%02d:%02d UTC", (int)gps.hour, (int)gps.minute, (int)gps.second);
-    oledContentPrint(&sGPSContent, buf);
+    oledContentPrint(&sGpsContent, buf);
   } else {
-    oledContentPrint(&sGPSContent, "Waiting for fix");
-    oledContentPrint(&sGPSContent, "Need open sky");
+    oledContentPrint(&sGpsContent, "Waiting for fix");
+    oledContentPrint(&sGpsContent, "Need open sky");
   }
 
-  oledContentEnd(&sGPSContent);
+  oledContentEnd(&sGpsContent);
 }
 
 // Availability check for GPS OLED mode
@@ -96,12 +96,12 @@ static void gpsToggleConfirmed(void* userData) {
 // Input handler: up/down scrolls content, X toggles sensor
 static bool gpsInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
   // Scroll: only consume the event if there is actually something to scroll to
-  if (gNavEvents.up && sGPSContentInited && !sGPSContent.scrollAtTop) {
-    oledContentScrollUp(&sGPSContent);
+  if (gNavEvents.up && sGpsContentInited && !sGpsContent.scrollAtTop) {
+    oledContentScrollUp(&sGpsContent);
     return true;
   }
-  if (gNavEvents.down && sGPSContentInited && !sGPSContent.scrollAtBottom) {
-    oledContentScrollDown(&sGPSContent);
+  if (gNavEvents.down && sGpsContentInited && !sGpsContent.scrollAtBottom) {
+    oledContentScrollDown(&sGpsContent);
     return true;
   }
 
@@ -122,7 +122,7 @@ static const OledModeEntry gpsOledModes[] = {
     OLED_GPS_DATA,           // mode enum
     "GPS",                   // menu name
     "compass",               // icon name
-    displayGPSData,          // displayFunc
+    displayGpsData,          // displayFunc
     gpsOledModeAvailable,    // availFunc
     gpsInputHandler,         // inputFunc
     true,                    // showInMenu

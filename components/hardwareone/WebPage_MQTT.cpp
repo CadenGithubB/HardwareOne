@@ -227,7 +227,7 @@ void streamMqttInner(httpd_req_t* req) {
 
 #if ENABLE_GPS_SENSOR
   httpd_resp_send_chunk(req, "</td></tr><tr><td>GPS Location</td><td>", HTTPD_RESP_USE_STRLEN);
-  httpd_resp_send_chunk(req, gSettings.mqttPublishGPS ?
+  httpd_resp_send_chunk(req, gSettings.mqttPublishGps ?
     "<span style=\"color:var(--success);\">✓ Enabled</span>" :
     "<span style=\"color:var(--panel-fg);\">Disabled</span>", HTTPD_RESP_USE_STRLEN);
 #else

@@ -1,6 +1,6 @@
 // OLED Map mode actions. test_oled_map_actions.py inserts the shipping Map
 // state block, track scan, menu dispatch, input handler and the head of
-// displayGPSMap (through the map-centering step) at the markers below.
+// displayGpsMap (through the map-centering step) at the markers below.
 // Everything defined here is a boundary double. The identity double mirrors
 // the firmware's per-task slot: CommandIdentityScope installs a context and
 // currentAuthContext() returns it, or the empty anonymous context when none is
@@ -216,10 +216,10 @@ struct WaypointManager {
   static void selectTarget(int index) { record("selectTarget", std::to_string(index)); }
 };
 
-struct GPSTrackStatus { int pointCount; };
+struct GpsTrackStatus { int pointCount; };
 static std::vector<std::string> gTrackFilesOnDisk;
-struct GPSTrackManager {
-  static bool loadTrack(const char* path, String& error, GPSTrackStatus& out, bool) {
+struct GpsTrackManager {
+  static bool loadTrack(const char* path, String& error, GpsTrackStatus& out, bool) {
     record("loadTrack", path);
     out = {};
     bool exists = false;
@@ -390,8 +390,8 @@ bool oledFileBrowserNeedsInit = false;
 volatile bool gSensorPollingPaused = false;
 bool gGpsConnected = false;
 bool gGpsRunning = false;
-struct GPSCache { bool hasFix; float latitude, longitude; uint8_t satellites; };
-static bool gpsCacheSnapshot(GPSCache& out) { out = {}; return false; }
+struct GpsCache { bool hasFix; float latitude, longitude; uint8_t satellites; };
+static bool gpsCacheSnapshot(GpsCache& out) { out = {}; return false; }
 static void mapLayerToggle(uint16_t) {}
 struct { bool active; char name[64]; } gMapHighlight;
 static void mapHighlightClear() {}
@@ -463,11 +463,11 @@ static void caseMarkWaypoint() {
   resetAll();
   pressMenuItem(MENU_CAT_WAYPOINTS, 0);
   EXPECT(oledKeyboardIsActive() && kbTitle == "Name Waypoint", "Mark Waypoint opens the name keyboard");
-  displayGPSMap();
+  displayGpsMap();
   EXPECT(kbDraws == 1 && calls.empty(), "the open keyboard is drawn and nothing else runs");
   keyboardFinish("Camp", true);           // central router: the keyboard completes
   gpsMapInputHandler(0, 0, 0);            // the release reaches the mode
-  displayGPSMap();
+  displayGpsMap();
   const OwnerCall* add = lastCall("addWaypoint");
   EXPECT(countCalls("addWaypoint") == 1, "Mark Waypoint adds the waypoint once the name is entered");
   EXPECT(add && add->arg == "Camp" && add->asOled, "Mark Waypoint adds the typed name as the OLED user");
@@ -481,7 +481,7 @@ static void caseMarkWaypoint() {
   pressMenuItem(MENU_CAT_WAYPOINTS, 0);
   keyboardFinish("Nope", false);
   gpsMapInputHandler(0, 0, 0);
-  displayGPSMap();
+  displayGpsMap();
   EXPECT(countCalls("addWaypoint") == 0 && !oledKeyboardIsCancelled(),
          "a cancelled name adds nothing and is consumed");
 
@@ -609,7 +609,7 @@ static void caseAutoLoad() {
   gMap = LoadedMap{};
   gMapFiles = {"alpha/alpha.hwmap"};
   gNowMs = 100000;
-  displayGPSMap();
+  displayGpsMap();
   const OwnerCall* load = lastCall("loadMapFile");
   EXPECT(load && load->arg == "/maps/alpha/alpha.hwmap" && load->asOled,
          "with no map loaded the first map auto-loads as the OLED user");
@@ -620,12 +620,12 @@ static void caseAutoLoad() {
   gLoadMapOk = false;
   calls.clear();
   gNowMs = 200000;
-  displayGPSMap();
+  displayGpsMap();
   gNowMs += 100;
-  displayGPSMap();
+  displayGpsMap();
   EXPECT(countCalls("getAvailableMaps") == 1, "a failed auto-load is not retried on the next frame");
   gNowMs += 5000;
-  displayGPSMap();
+  displayGpsMap();
   EXPECT(countCalls("getAvailableMaps") == 2 && countCalls("loadMapFile") == 2,
          "the auto-load is retried after 5 s");
 }

@@ -1377,10 +1377,10 @@ const char* cmd_espnow_sensorbroadcast(const String& argsInput) {
 #include <ArduinoJson.h>
 
 
-bool getRemoteGPSData(RemoteGPSData* outData) {
+bool getRemoteGpsData(RemoteGpsData* outData) {
   if (!outData) return false;
   
-  memset(outData, 0, sizeof(RemoteGPSData));
+  memset(outData, 0, sizeof(RemoteGpsData));
   outData->valid = false;
   if (!gRemoteSensorCache) return false;
   

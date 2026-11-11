@@ -449,7 +449,7 @@ bool createToFTask();
 bool createFMRadioTask();
 bool createAPDSTask();
 bool createPresenceTask();
-bool createGPSTask();
+bool createGpsTask();
 bool createRTCTask();
 
 // ============================================================================
