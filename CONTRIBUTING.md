@@ -188,6 +188,50 @@ attachment should report unavailable without breaking unrelated services.
   Give streaming writes one completion/cleanup path before success hooks; close
   and clean up failed partial files while the filesystem lock is still held.
 
+## Names
+
+- An acronym inside a code name is written as a word: `gBleClientState`,
+  `isImuConnected()`, `sendHttpRequest()`, `gI2cBusLocked`, `OledMode`,
+  `mqttPublishGps()`. This holds for every function, variable, type, enum
+  value and namespace of the firmware. Three terms that were spelled several
+  ways have one spelling: `Wifi`, `EspNow`, `Tof`. The host test
+  `code_name_spelling` reads every code name and fails on one that breaks the
+  rule; it prints the file, the line and the name it expects. Its tables hold
+  the acronyms, the library names that keep the library's spelling
+  (`WiFiClient`, `cJSON_Parse`) and four debug fields whose name is also their
+  saved setting key.
+- The rule is about code names only. These keep their spelling: macros and
+  build flags (`ENABLE_OLED_DISPLAY`), file names (`OLED_Mode_Network.cpp`,
+  `BLE_Server.cpp`), command names, setting keys, JSON keys, text on a screen
+  or a web page, log tags and part numbers.
+- A branch that was started before the rule is brought up to it before it
+  merges: `python3 components/hardwareone/test/host/test_code_name_spelling.py --rewrite`
+  renames the code names in the firmware and in the tests and tools that name
+  them. Names a test builds from pieces (a pattern, a pasted macro argument)
+  are fixed by hand; the host suite shows them.
+- A source file carries the prefix of its family: `System_`, `HAL_`, `OLED_`,
+  `G2_`, `R1_`, `BLE_`, `WebPage_`, `WebServer_`, `Input_`, `QuickNote_`,
+  `i2csensor_`. A file about one family's subject sits in that family
+  (`BLE_SecureChannel`, `G2_Protocol`), and a shared rule or policy without a
+  family is `System_` (`System_BatteryPolicy.h`). After the prefix the name is
+  one word group without a further underscore (`System_LLMModel`,
+  `System_DebugManager`); a second part is used only where the family already
+  has one (`OLED_Mode_X`, `G2_Page_X`, `System_ESPNow_X`, `HAL_Camera_X`).
+- New code, and code that is being changed anyway, follows these forms. They
+  are the most common form in the tree today; nothing is renamed in bulk for
+  them.
+
+  | Subject | Form |
+  |---|---|
+  | File-scope state | `gFoo` when another file uses it, `sFoo` when it is private to the file |
+  | Typed constants | `constexpr kFoo` |
+  | Preprocessor values | `ALL_CAPS`, only for macros and build flags |
+  | Enums | `enum class` |
+  | Time stamps and durations | `uint32_t`, name ends in `Ms` |
+  | Bytes | `uint8_t` |
+  | Header guard | `#pragma once` |
+  | A flag two tasks touch | `std::atomic` |
+
 ## Keep the setup tool thin
 
 The host configuration tool chooses what enters the firmware. The on-device

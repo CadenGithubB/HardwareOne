@@ -2101,6 +2101,12 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_shared_text_helpers.py)
 
+# Acronyms inside code names are written as words (CONTRIBUTING.md, "Names").
+add_test(
+  NAME code_name_spelling
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_code_name_spelling.py)
+
 # OLED display-session writer windows (README "OLED display-session writer windows"):
 # the frame commit and the command-result path validate under the display lifecycle
 # writer, release it, push or copy, then re-check without opening a session.
