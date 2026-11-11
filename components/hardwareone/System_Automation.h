@@ -15,10 +15,6 @@ constexpr uint32_t kAutomationsFileVersion = 2;
 
 #if ENABLE_AUTOMATION
 
-// Automation command registry
-extern const CommandEntry automationCommands[];
-extern const size_t automationCommandsCount;
-
 // Forward declarations
 struct Settings;
 

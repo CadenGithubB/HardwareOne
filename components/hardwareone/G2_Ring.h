@@ -562,12 +562,6 @@ extern volatile bool        gRingScanFound;
 void g2RingSetIdentity(const char* name);
 void g2RingCopyIdentity(char* name, size_t nameCap);
 
-// The `ring` command module (ring status, connect, health, ...), registered by
-// System_CommandRegistry.cpp beside the G2 glasses' g2Commands.
-struct CommandEntry;
-extern const CommandEntry g2RingCommands[];
-extern const size_t       g2RingCommandsCount;
-
 #else  // !(ENABLE_BLUETOOTH && ENABLE_G2_GLASSES)
 
 static constexpr uint8_t G2_RING_POLL_VITAL_COUNT = 5;

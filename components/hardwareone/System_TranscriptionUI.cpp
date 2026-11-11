@@ -16,6 +16,7 @@
 #include <ArduinoJson.h>
 #include <algorithm>
 #include <cstdio>
+#include "System_CommandRegistry.h"
 
 namespace {
 // Only cmd_exec uses this response. Never send transcript data via broadcast.

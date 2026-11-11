@@ -28,6 +28,7 @@
 #endif
 #include "System_UartLink.h"   // uartLinkIsRunning / uartLinkEffectiveBaud — idle-clock clamp
 #include "soc/soc_caps.h"      // SOC_UART_SUPPORT_REF_TICK
+#include "System_CommandRegistry.h"
 #if CONFIG_IDF_TARGET_ESP32P4 && CONFIG_SPIRAM && !CONFIG_APP_BUILD_TYPE_PURE_RAM_APP
 #include "soc/rtc.h"
 #include "esp_attr.h"

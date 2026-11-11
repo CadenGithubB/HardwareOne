@@ -22,8 +22,6 @@
 
 #include <ArduinoJson.h>
 class String;
-struct CommandEntry;
-struct SettingsModule;
 
 // Boot (from setup(), before any radio feature starts): subscribe to the
 // HAL's events, apply the persisted monitoring settings, record how the
@@ -49,10 +47,6 @@ void radioCompanionBeforeDeepSleep();
 
 // Status for /api/system and the dashboard.
 void radioCompanionJson(JsonObject out);
-
-extern const CommandEntry companionCommands[];
-extern const size_t companionCommandsCount;
-extern const SettingsModule companionSettingsModule;
 
 #else  // native radio
 

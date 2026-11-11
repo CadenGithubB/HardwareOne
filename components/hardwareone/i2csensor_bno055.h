@@ -78,11 +78,6 @@ int imuBuildDataJSON(char* buf, size_t bufSize);
 // IMU command registration (sensor-specific naming)
 void registerImuBno055Commands();
 
-// Command registry (for System_CommandRegistry.cpp module list)
-struct CommandEntry;
-extern const CommandEntry imuCommands[];
-extern const size_t imuCommandsCount;
-
 // Copy one reading; false clears out when uninitialized or the lock is busy.
 // Success only means a copy was available; check imuDataValid where required.
 bool imuCacheSnapshot(ImuCache& out, uint32_t timeoutMs = 10);

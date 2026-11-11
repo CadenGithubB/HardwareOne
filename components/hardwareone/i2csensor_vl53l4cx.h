@@ -28,8 +28,6 @@ struct TofCache {
 // Values only: callers own their copy; the live cache and lock stay in the driver.
 #if ENABLE_TOF_SENSOR
 
-struct CommandEntry;
-
 #ifndef VL53L4CX_MAX_NB_OF_OBJECTS_PER_ROI
 #define VL53L4CX_MAX_NB_OF_OBJECTS_PER_ROI 4
 #endif
@@ -69,10 +67,6 @@ bool tofPoll();
 
 // JSON building
 int tofBuildDataJSON(char* buf, size_t bufSize);
-
-// ToF command registry (for help system compatibility)
-extern const CommandEntry tofCommands[];
-extern const size_t tofCommandsCount;
 
 // ToF command registration (sensor-specific naming)
 void registerTofVl53l4cxCommands();

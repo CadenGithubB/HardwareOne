@@ -10,9 +10,6 @@ struct RouterMetrics;
 
 #include "System_Utils.h"
 
-extern const CommandEntry commands[];
-extern const size_t commandsCount;
-
 static String originPrefix(const char* source, const String& user, const String& ip,
                            const char* suffix = "");
 

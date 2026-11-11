@@ -68,13 +68,8 @@ bool buildFilesListJson(const String& path, const AuthContext& ctx, bool hideAdm
  */
 void runFileWritePostSaveHooks(const String& path);
 
-// Filesystem command registry (for System_CommandRegistry.cpp)
-struct CommandEntry;  // Forward declaration
-
 // Boot sequence management
 void loadAndIncrementBootSeq();
-extern const CommandEntry filesystemCommands[];
-extern const size_t filesystemCommandsCount;
 
 /**
  * Initialize the filesystem (LittleFS)

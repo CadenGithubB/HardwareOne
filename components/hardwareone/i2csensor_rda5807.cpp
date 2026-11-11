@@ -38,6 +38,7 @@
 #include "System_I2C.h"
 #include "System_MemoryMonitor.h"
 #include "System_Settings.h"
+#include "System_CommandRegistry.h"
 
 
 // The RDA5807 used to be hardcoded to Wire1; with dual-bus it lives on

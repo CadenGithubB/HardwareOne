@@ -61,11 +61,6 @@ uint16_t apdsGetColorB();
 uint16_t apdsGetColorC();
 extern bool gApdsRunning;
 
-// Command registry (for System_CommandRegistry.cpp module list)
-struct CommandEntry;
-extern const CommandEntry apdsCommands[];
-extern const size_t apdsCommandsCount;
-
 // Copy one reading; false clears out when uninitialized or the lock is busy.
 // Success only means a copy was available; check apdsDataValid where required.
 bool apdsCacheSnapshot(APDSCache& out, uint32_t timeoutMs = 10);

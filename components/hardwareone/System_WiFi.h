@@ -203,11 +203,6 @@ void wifiRehuntPoll();
 // Drop a pending rehunt: the device was asked to stay unassociated.
 void wifiRehuntCancel();
 
-// Command registry (for System_CommandRegistry.cpp)
-struct CommandEntry;
-extern const CommandEntry wifiCommands[];
-extern const size_t wifiCommandsCount;
-
 #endif // ENABLE_WIFI
 
 // The device's own Wi-Fi state for the BLE coexistence records (lever 1 of

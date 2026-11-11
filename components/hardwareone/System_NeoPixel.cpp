@@ -8,6 +8,7 @@
 #include "System_Settings.h"
 #include "System_Debug.h"
 #include "System_BuildConfig.h"  // For NEOPIXEL_PIN_DEFAULT
+#include "System_CommandRegistry.h"
 
 // Board power rail — asserted independently of ENABLE_NEOPIXEL because the
 // NeoPixel power pin doubles as peripheral power on some boards (Feather V2

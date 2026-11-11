@@ -21,6 +21,7 @@
 #include "System_UartLink.h"
 #include "System_User.h"
 #include "System_Utils.h"
+#include "System_CommandRegistry.h"
 
 namespace {
 

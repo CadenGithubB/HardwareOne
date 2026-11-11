@@ -22,6 +22,7 @@
 #include <ctype.h>
 #include <stdlib.h>
 #include <new>
+#include "System_CommandRegistry.h"
 
 // Note: BROADCAST_PRINTF is a macro defined in debug_system.h (included via system_utils.h)
 

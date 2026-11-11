@@ -529,9 +529,4 @@ void noteLittleFsBytesWritten(size_t bytes);
 
 }  // namespace VFS
 
-// SD card command registry (for gCommandModules in System_CommandRegistry.cpp)
-struct CommandEntry;  // Forward declaration
-extern const CommandEntry sdCommands[];
-extern const size_t sdCommandsCount;
-
 #endif // SYSTEM_VFS_H

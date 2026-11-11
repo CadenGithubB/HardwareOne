@@ -1447,10 +1447,6 @@ String getSecret(JsonObjectConst obj, const char* key);
 // One-way hash derived from device encryption key — safe to include in backups
 String getDeviceFingerprint();
 
-// Settings command registry
-extern const CommandEntry settingsCommands[];
-extern const size_t settingsCommandsCount;
-
 // ============================================================================
 // Settings Command Handlers (implemented in settings.cpp)
 // ============================================================================
@@ -1561,6 +1557,47 @@ struct SettingsModule {
                                      // Set only for modules split into their own file (debug → DEBUG_JSON_FILE).
 };
 
+// Settings modules. Each module defines its own; all of them are declared here
+// and nowhere else, for registerAllSettingsModules(). A file that defines one
+// must include this header (a namespace-scope `const` has internal linkage
+// without a prior extern declaration). A module that is compiled out needs no
+// definition.
+extern const SettingsModule i2cSettingsModule;
+extern const SettingsModule cliSettingsModule;
+extern const SettingsModule wifiSettingsModule;
+extern const SettingsModule httpSettingsModule;
+extern const SettingsModule espnowSettingsModule;
+extern const SettingsModule mqttSettingsModule;
+extern const SettingsModule automationSettingsModule;
+extern const SettingsModule powerSettingsModule;
+extern const SettingsModule ledSettingsModule;
+extern const SettingsModule oledSettingsModule;
+extern const SettingsModule bluetoothSettingsModule;
+extern const SettingsModule g2DeviceSettingsModule;
+extern const SettingsModule thermalSettingsModule;
+extern const SettingsModule tofSettingsModule;
+extern const SettingsModule imuSettingsModule;
+extern const SettingsModule inputSettingsModule;
+extern const SettingsModule anoEncoderSettingsModule;
+extern const SettingsModule apdsSettingsModule;
+extern const SettingsModule gpsSettingsModule;
+extern const SettingsModule fmRadioSettingsModule;
+extern const SettingsModule rtcSettingsModule;
+extern const SettingsModule presenceSettingsModule;
+extern const SettingsModule matrixSettingsModule;
+extern const SettingsModule cameraSettingsModule;
+extern const SettingsModule micSettingsModule;
+extern const SettingsModule edgeImpulseSettingsModule;
+extern const SettingsModule espsrSettingsModule;
+extern const SettingsModule clockSettingsModule;
+extern const SettingsModule sensorLogSettingsModule;
+extern const SettingsModule systemLogSettingsModule;
+extern const SettingsModule batteryLogSettingsModule;
+extern const SettingsModule notifSettingsModule;
+extern const SettingsModule llmSettingsModule;
+extern const SettingsModule mapsSettingsModule;
+extern const SettingsModule companionSettingsModule;
+
 // Maximum number of settings modules that can be registered.
 //
 // Must stay ahead of the registerSettingsModule() call count in
@@ -1609,11 +1646,6 @@ const char* handleSettingCommand(const SettingEntry* entry, const String& argsIn
 
 // Look up an editable setting by its (unique) editor cmdKey.
 const SettingEntry* findSettingByCmdKey(const char* cmdKey);
-
-// Static per-field settings-editor commands (one per editable setting that has
-// no dedicated module command). Registered via gCommandModules.
-extern const CommandEntry settingEditorCommands[];
-extern const size_t settingEditorCommandsCount;
 
 // Build the settings schema JSON into a JsonDocument. Shared by the local
 // /api/settings/schema web handler (in WebServer_Server.cpp) and the worker's

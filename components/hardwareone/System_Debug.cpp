@@ -26,6 +26,7 @@
 #include "System_AuthIdentity.h"  // currentCommandContext / currentCaptureState
 #include "WebServer_Utils.h"
 #include "System_ESPSR.h"  // srSyncDebugLevel()
+#include "System_CommandRegistry.h"
 
 // External dependencies from .ino
 

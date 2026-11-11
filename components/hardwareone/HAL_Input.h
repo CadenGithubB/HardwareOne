@@ -202,15 +202,6 @@ uint32_t  inputButtonsToLogical(uint32_t deviceCacheButtonsActiveLow);
 #define INPUT_MASK(btn) inputGetButtonMask(btn)
 
 // =============================================================================
-// Unified Input Device CLI + Settings (works under either driver)
-// =============================================================================
-struct CommandEntry;
-struct SettingsModule;
-extern const CommandEntry inputCommands[];
-extern const size_t inputCommandsCount;
-extern const SettingsModule inputSettingsModule;
-
-// =============================================================================
 // Joystick Configuration
 // =============================================================================
 // JOYSTICK_CENTER and JOYSTICK_DEADZONE are defined in i2csensor_seesaw.h

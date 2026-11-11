@@ -17,6 +17,7 @@
 #include "System_TaskUtils.h"
 #include "System_UartLink.h"
 #include "System_Utils.h"
+#include "System_CommandRegistry.h"
 
 // Keep the root usage line honest about what this build actually compiled in,
 // rather than advertising a verb that would answer "Unknown command".

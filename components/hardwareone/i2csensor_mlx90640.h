@@ -93,11 +93,6 @@ int thermalBuildSummaryJSON(char* buf, size_t bufSize);
 // Thermal interpolation (defined in thermal_sensor.cpp)
 void thermalInterpolateFrame(const float* src, float* dst, int targetWidth, int targetHeight);
 
-// Thermal command registry (for System_CommandRegistry.cpp module list)
-struct CommandEntry;
-extern const CommandEntry thermalCommands[];
-extern const size_t thermalCommandsCount;
-
 #else
 inline bool thermalCacheSnapshot(ThermalCache& out, uint32_t timeoutMs = 10) {
   (void)timeoutMs; out = {}; return false;

@@ -83,10 +83,5 @@ int gamepadGetX();
 int gamepadGetY();
 uint32_t gamepadGetButtons();
 
-// Command registry (for System_CommandRegistry.cpp module list)
-struct CommandEntry;
-extern const CommandEntry gamepadCommands[];
-extern const size_t gamepadCommandsCount;
-
 #endif // ENABLE_GAMEPAD_SENSOR
 #endif // GAMEPAD_SENSOR_H

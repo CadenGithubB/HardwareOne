@@ -31,6 +31,7 @@
 #include "OLED_Mode_Camera.h"
 
 #include <atomic>
+#include "System_CommandRegistry.h"
 
 #if ENABLE_OLED_DISPLAY
 // Auth/session changes may originate on cmd_exec. That task owns the

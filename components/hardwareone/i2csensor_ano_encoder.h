@@ -89,10 +89,6 @@ const char* cmd_anoencoder(const String& argsInput);
 const char* cmd_anoencoderi2caddr(const String& argsInput);
 const char* cmd_anoencoderinvert(const String& argsInput);
 
-struct CommandEntry;
-extern const CommandEntry anoEncoderCommands[];
-extern const size_t anoEncoderCommandsCount;
-
 #else
 inline bool anoEncoderCacheSnapshot(AnoEncoderCache& out, uint32_t timeoutMs = 10) {
   (void)timeoutMs;

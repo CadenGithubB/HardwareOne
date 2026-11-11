@@ -74,11 +74,6 @@ void fmRadioPoll();  // Called periodically to update RDS data
 // JSON data builder (for web API)
 int fmRadioBuildDataJSON(char* buf, size_t bufSize);
 
-// Command registry (for System_CommandRegistry.cpp module list)
-struct CommandEntry;
-extern const CommandEntry fmRadioCommands[];
-extern const size_t fmRadioCommandsCount;
-
 #else
 inline bool fmRadioCacheSnapshot(FMRadioCache& out, uint32_t timeoutMs = 10) {
   (void)timeoutMs;

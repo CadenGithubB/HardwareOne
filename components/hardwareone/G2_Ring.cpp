@@ -53,6 +53,7 @@
 #include <freertos/semphr.h>
 #include <string.h>
 #include <ctype.h>
+#include "System_CommandRegistry.h"
 
 static_assert(static_cast<uint8_t>(G2_RING_PROFILE_FW_2_2_7_0005) ==
                   static_cast<uint8_t>(R1_PROFILE_FW_2_2_7_0005),

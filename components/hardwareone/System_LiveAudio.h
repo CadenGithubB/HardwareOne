@@ -5,8 +5,6 @@
 #include <Arduino.h>
 #include "System_BuildConfig.h"
 
-struct CommandEntry;
-
 // UART control-plane fast path for the high-frequency `liveaudio ready`
 // renewal.  A healthy, already-created lease can be extended without
 // allocating, entering cmd_exec, or marking the CM5 application busy.
@@ -143,7 +141,5 @@ inline bool liveAudioRecorderCaptureEligible(
 // link and fails cleanly there (definition in System_SensorStubs.cpp when the
 // module is not built).
 const char* cmd_liveaudio(const String& argsInput);
-extern const CommandEntry liveAudioCommands[];
-extern const size_t liveAudioCommandsCount;
 
 #endif  // SYSTEM_LIVEAUDIO_H

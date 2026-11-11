@@ -581,12 +581,6 @@ const char* i2cSetDeviceBusAndReport(int& target, const String& argsInput,
                                      const char* settingName);
 
 // ============================================================================
-// I2C Command Registry
-// ============================================================================
-extern const CommandEntry i2cCommands[];
-extern const size_t i2cCommandsCount;
-
-// ============================================================================
 // Sensor State Variables
 // ============================================================================
 extern volatile UBaseType_t gTofWatermarkNow;

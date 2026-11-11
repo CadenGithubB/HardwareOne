@@ -36,6 +36,7 @@
 #include "System_Utils.h"
 #include "System_VFS.h"          // isSDWritable/isSDAvailable: `note list` tiers
 #include "Transcription_UI_Policy.h"
+#include "System_CommandRegistry.h"
 
 using namespace QuickNotePolicy;
 

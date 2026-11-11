@@ -19,6 +19,7 @@
 #include "System_I2C.h"
 #endif
 #include "System_Utils.h"
+#include "System_CommandRegistry.h"
 #endif
 
 // Shared input readings and edge ownership, independent of the selected driver.

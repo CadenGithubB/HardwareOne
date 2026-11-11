@@ -46,6 +46,8 @@
 #include "esp_wn_models.h"
 #include "model_path.h"
 #include "driver/i2s_pdm.h"
+#include "System_CommandRegistry.h"
+#include "System_Settings.h"
 
 // Debug tags - SR output gates on the DEBUG_SR bank, not DEBUG_MICROPHONE.
 // DEBUG_SR is the master ("all SR"); each gate ORs it with the one sub-flag

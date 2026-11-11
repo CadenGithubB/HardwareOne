@@ -22,6 +22,7 @@
 #include "System_Settings.h"
 #include "System_TaskUtils.h"
 #include "i2csensor_seesaw.h"  // For InputCache struct + gGamepad* extern declarations
+#include "System_CommandRegistry.h"
 
 // ============================================================================
 // Module state

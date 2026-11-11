@@ -19,6 +19,7 @@
 #include <new>                 // placement-new: gMLX90640 lives in PSRAM (ps_alloc)
 #include "System_Settings.h"
 #include "System_TaskUtils.h"
+#include "System_CommandRegistry.h"
 
 // External dependencies still needed
 // sensorStatusBumpWith, gSensorPollingPaused, drainDebugRing provided by System_I2C.h

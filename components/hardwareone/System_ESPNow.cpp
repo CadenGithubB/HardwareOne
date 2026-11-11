@@ -63,6 +63,7 @@
 #include "System_I2C.h"  // For ConnectedDevice struct
 #include "System_Filesystem.h"  // For canRead() security check
 #include "System_VFS.h"         // For SD-capture routing (captureEspNowFrame)
+#include "System_CommandRegistry.h"
 #if ENABLE_HTTP_SERVER
 #include "WebServer_Server.h"
 #endif

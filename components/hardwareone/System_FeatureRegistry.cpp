@@ -17,6 +17,7 @@
 #include "System_SetupWizardMode.h"  // Phase 5: new CLIMode-based wizard for cmd_featuresetup
 #include "System_Events.h"        // systemEventPost() — SYSEVT_FEATURE_TOGGLED
 #include "System_Automation.h"    // automationSetSystemEnabled() — owner-applied toggle
+#include "System_CommandRegistry.h"
 
 // External settings
 

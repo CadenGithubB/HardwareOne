@@ -10,6 +10,7 @@
 #include "System_Utils.h"
 #include "network/wifi/System_WiFiNetworks.h"
 #include "WebServer_Utils.h"
+#include "System_CommandRegistry.h"
 
 // External dependencies from main .ino
 extern bool gCLIValidateOnly;

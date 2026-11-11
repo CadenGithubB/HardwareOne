@@ -53,11 +53,6 @@ bool presenceCacheSnapshot(PresenceCache& out, uint32_t timeoutMs = 10);
 // Returns bytes written (excluding NUL), or 0 for an invalid/insufficient buffer.
 int presenceBuildDataJSON(char* buf, size_t bufSize);
 
-// Command registry (for System_CommandRegistry.cpp module list)
-struct CommandEntry;
-extern const CommandEntry presenceCommands[];
-extern const size_t presenceCommandsCount;
-
 #else
 
 inline bool presenceCacheSnapshot(PresenceCache& out, uint32_t timeoutMs = 10) {

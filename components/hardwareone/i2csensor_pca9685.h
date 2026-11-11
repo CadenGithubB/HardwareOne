@@ -36,10 +36,5 @@ bool servoInit();
 void servoSetAngle(uint8_t channel, int angle);
 void servoSetPWM(uint8_t channel, uint16_t value);
 
-// PCA9685/Servo command registry (for System_CommandRegistry.cpp)
-struct CommandEntry;
-extern const CommandEntry servoCommands[];
-extern const size_t servoCommandsCount;
-
 #endif // ENABLE_SERVO
 #endif // I2CSENSOR_PCA9685_H

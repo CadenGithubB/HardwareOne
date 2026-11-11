@@ -16,6 +16,7 @@
 #include "System_OTA.h"
 #include "System_Utils.h"  // RETURN_VALID_IF_VALIDATE_CSTR
 #include "hw1_ota_protocol.h"  // HW1_OTA_MANIFEST_FORMAT_VERSION
+#include "System_CommandRegistry.h"
 
 #if ENABLE_ESPNOW
 #include "System_ESPNow.h"

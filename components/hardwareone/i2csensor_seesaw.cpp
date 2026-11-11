@@ -20,6 +20,7 @@
 #include "System_I2C.h"
 #include "System_Settings.h"
 #include "System_TaskUtils.h"
+#include "System_CommandRegistry.h"
 
 // Task handle (owned by this module)
 TaskHandle_t gInputTaskHandle = nullptr;

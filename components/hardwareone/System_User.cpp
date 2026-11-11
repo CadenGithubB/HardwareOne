@@ -30,6 +30,7 @@
 #include "BLE_Peers.h"            // synchronized G2 paired-owner authority
 #include <esp_timer.h>            // AuthPerfScope — instrumentation, see below
 #include "System_PollPause.h"   // PollPauseGuard — readRosterJson, mirrors readText
+#include "System_CommandRegistry.h"
 
 // ============================================================================
 // TEMPORARY: auth-latency instrumentation

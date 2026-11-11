@@ -95,11 +95,4 @@ RGB adjustBrightness(RGB color, float brightness);
 RGB rainbowColor(int step, int maxSteps);
 String getClosestColorName(uint16_t r, uint16_t g, uint16_t b, RGB& closestRGB);
 
-#if ENABLE_NEOPIXEL
-// NeoPixel command registry (for System_CommandRegistry.cpp)
-struct CommandEntry;
-extern const CommandEntry neopixelCommands[];
-extern const size_t neopixelCommandsCount;
-#endif
-
 #endif // SYSTEM_NEOPIXEL_H

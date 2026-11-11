@@ -3,6 +3,7 @@
 #include "System_MapViewportCore.h"
 #include "System_Maps.h"
 #include "System_Clock.h"  // Clock::isValidEpoch — one epoch-validity vocabulary
+#include "System_CommandRegistry.h"
 
 #if ENABLE_MAPS
 

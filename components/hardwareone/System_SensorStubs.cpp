@@ -3,6 +3,7 @@
 #include "WebServer_Utils.h"
 #include "WebServer_Handle.h"
 #include "System_LiveAudio.h"
+#include "System_CommandRegistry.h"
 
 // Forward declarations for stubs
 class Adafruit_GPS;

@@ -37,13 +37,6 @@ const char* cmd_openmqtt(const String& args);
 const char* cmd_closemqtt(const String& args);
 const char* cmd_mqttstatus(const String& args);
 
-// Command table for registration
-extern const struct CommandEntry mqttCommands[];
-extern const size_t mqttCommandsCount;
-
-// Settings module for registration
-extern const struct SettingsModule mqttSettingsModule;
-
 #else
 
 #include <Arduino.h>

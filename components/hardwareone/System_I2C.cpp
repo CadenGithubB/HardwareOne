@@ -38,6 +38,7 @@
 #include "i2csensor_ht16k33.h"
 #include "System_TaskUtils.h"
 #include "System_Utils.h"
+#include "System_CommandRegistry.h"
 
 #if ENABLE_APDS_SENSOR
 #include "i2csensor_apds9960.h"

@@ -230,17 +230,4 @@ const char* cmd_sensorlog(const String& originalCmd);
 const char* cmd_sensorlogmask(const String& args);
 const char* cmd_sensorlogformat(const String& args);
 
-// Command registry
-struct CommandEntry;
-extern const CommandEntry sensorLoggingCommands[];
-extern const size_t sensorLoggingCommandsCount;
-#if ENABLE_R1_HEALTH
-extern const CommandEntry healthCommands[];
-extern const size_t healthCommandsCount;
-#endif
-
-// Settings module
-struct SettingsModule;
-extern const SettingsModule sensorLogSettingsModule;
-
 #endif // SENSOR_LOGGING_H

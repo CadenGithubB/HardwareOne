@@ -35,6 +35,7 @@
 #include <utility>
 #include "System_Utils.h"
 #include <ArduinoJson.h>
+#include "System_CommandRegistry.h"
 
 #if ENABLE_ESPNOW
 #include "System_ESPNow.h"

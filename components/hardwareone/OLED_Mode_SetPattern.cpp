@@ -18,6 +18,7 @@
 #include "System_User.h"
 #include "System_Utils.h"
 #include "i2csensor_seesaw.h"
+#include "System_CommandRegistry.h"
 
 
 // ============================================================================

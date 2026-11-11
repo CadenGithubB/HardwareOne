@@ -3,8 +3,6 @@
 
 #include <Arduino.h>
 
-struct CommandEntry;
-
 // Small, authenticated application-level lease for the CM5 AI service.  This
 // is deliberately not a UART owner: command execution, live audio, recording,
 // and host-power keep their existing scheduling/ownership boundaries.
@@ -193,11 +191,6 @@ Cm5HeartbeatIntrinsicResult cm5PresenceHandleHeartbeatIntrinsic(
 // they stay auditable. `cm5 time` is a mutation, but its provenance lives in
 // the Clock ledger / SYSEVT_TIME_SYNCED, not the command feed.
 bool cm5PresenceIsProtocolCommand(const char* line);
-
-// Setup-agnostic inspection through the central command registry. These are
-// intentionally available even when no G2 or physical UART link is compiled.
-extern const CommandEntry cm5PresenceCommands[];
-extern const size_t cm5PresenceCommandsCount;
 
 // Wake the monitor after a login-epoch transition.  Exact epoch comparison in
 // snapshots remains authoritative, so delayed notifications cannot revive an

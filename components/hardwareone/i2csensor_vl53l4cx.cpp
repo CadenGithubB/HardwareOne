@@ -20,6 +20,7 @@
 #include "System_Mutex.h"
 #include "System_Settings.h"
 #include "System_TaskUtils.h"
+#include "System_CommandRegistry.h"
 
 // VL53L4CX ToF sensor object (owned by this module)
 static VL53L4CX* gVL53L4CX = nullptr;

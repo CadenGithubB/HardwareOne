@@ -38,11 +38,6 @@ extern bool gRtcConnected;
 extern unsigned long gRtcLastStopTime;
 extern TaskHandle_t gRtcTaskHandle;
 
-// Command registry
-struct CommandEntry;
-extern const CommandEntry rtcCommands[];
-extern const size_t rtcCommandsCount;
-
 #include <Arduino.h>
 
 // DS3231 Register addresses

@@ -96,10 +96,6 @@ void quickNoteClockSet();
 // minutes after the last call or note (sttKeepWarm). Nothing on CM5 builds.
 // Any task; never blocks.
 void quickNoteWarm();
-
-struct CommandEntry;
-extern const CommandEntry noteCommands[];
-extern const size_t noteCommandsCount;
 #else
 inline bool quickNoteActive() { return false; }
 inline uint32_t quickNoteMaxMs() { return 120000; }

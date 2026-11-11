@@ -20,6 +20,7 @@
 #include "System_Mutex.h"
 #include "System_Settings.h"
 #include "System_TaskUtils.h"
+#include "System_CommandRegistry.h"
 
 // BNO055 sensor object (owned by this module)
 static Adafruit_BNO055* gBNO055 = nullptr;

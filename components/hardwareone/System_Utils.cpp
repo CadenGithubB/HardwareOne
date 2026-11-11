@@ -14,6 +14,7 @@
 #include <esp_heap_task_info.h>   // heap_task_totals_t, heap_caps_get_per_task_info
 #endif
 #include "System_BuildConfig.h"
+#include "System_CommandRegistry.h"
 
 // ---------------------------------------------------------------------------
 // ESP-NOW-off stub

@@ -927,11 +927,4 @@ public:
 
 #endif // ENABLE_MAPS
 
-// Command registry — always declared (stub definition in .cpp when disabled)
-struct CommandEntry;
-extern const CommandEntry mapCommands[];
-extern const size_t mapCommandsCount;
-extern const CommandEntry mapsSettingCommands[];
-extern const size_t mapsSettingCommandsCount;
-
 #endif // SYSTEM_MAPS_H

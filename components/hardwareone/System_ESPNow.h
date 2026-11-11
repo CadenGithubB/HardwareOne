@@ -53,10 +53,6 @@ esp_err_t espnowSelfApMac(uint8_t out[6]);
 #include "System_User.h"
 #include "System_CommandRegistry.h"
 
-// ESP-NOW command registry
-extern const CommandEntry espNowCommands[];
-extern const size_t espNowCommandsCount;
-
 // Settings persistence (broadcastOutput is provided by System_Debug.h).
 bool writeSettingsJson();
 
@@ -1601,8 +1597,6 @@ extern EspNowState* gEspNow;
 extern MeshPeerHealth gMeshPeers[MAX_MESH_PEERS];
 extern MeshTopoNode* gMeshTopology;
 extern bool gMeshActivitySuspended;
-extern const struct CommandEntry espNowCommands[];
-extern const size_t espNowCommandsCount;
 
 inline const char* checkEspNowFirstTimeSetup() { return "ESP-NOW disabled"; }
 inline const char* cmd_espnow_init(const String& argsInput) { return "ESP-NOW disabled"; }

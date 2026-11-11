@@ -412,11 +412,6 @@ void oledMarkDirtyUntil(unsigned long untilMs);  // Keep rendering until timesta
 bool earlyOLEDInit();  // Probe and init OLED for boot animation
 void processOLEDBootSequence();  // Handle boot phase transitions
 
-// OLED command registry (for System_CommandRegistry.cpp)
-struct CommandEntry;
-extern const CommandEntry oledCommands[];
-extern const size_t oledCommandsCount;
-
 // Display Mode Functions
 void displayMenu();
 void displayLogo();

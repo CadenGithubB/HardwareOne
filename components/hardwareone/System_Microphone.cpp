@@ -36,6 +36,7 @@
 #include "G2_Glasses.h"           // native EvenAI owner/login-epoch fence
 #include "Audio_VadPolicy.h"     // shared amplitude decisions; source DSP stays here
 #include "HAL_Audio.h"            // single PDM/I2S capture owner (audioCaptureStart/audioReadPcm)
+#include "System_CommandRegistry.h"
 
 // PDM I2S capture is owned by HAL_Audio — no local channel handle here.
 

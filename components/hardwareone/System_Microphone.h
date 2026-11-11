@@ -181,11 +181,6 @@ const char* cmd_micgain(const String& argsInput);
 const char* cmd_micbitdepth(const String& argsInput);
 const char* cmd_micsource(const String& argsInput);   // get/set source pref {auto,pdm,g2}
 
-// Command registry
-struct CommandEntry;
-extern const CommandEntry micCommands[];
-extern const size_t micCommandsCount;
-
 #endif // ENABLE_MICROPHONE
 
 #endif // SYSTEM_MICROPHONE_H

@@ -164,12 +164,4 @@ bool powerLocalDisplayAwake();
 // Declared at the call sites with a local `extern` (same pattern as
 // buildBatteryJson) so this header does not pull in ArduinoJson.
 
-// ============================================================================
-// Command Registry
-// ============================================================================
-
-struct CommandEntry;
-extern const CommandEntry powerCommands[];
-extern const size_t powerCommandsCount;
-
 #endif

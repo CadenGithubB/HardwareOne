@@ -121,17 +121,6 @@ struct LLMGenParams {
 };
 
 
-// Command table + settings module, defined in System_LLMCommands.cpp. These
-// declarations must be visible in that TU: `const` at namespace scope has
-// INTERNAL linkage in C++ unless a prior extern declaration says otherwise, so
-// without this the definitions silently become file-static and every registration
-// site fails to link.
-struct CommandEntry;
-struct SettingsModule;
-extern const CommandEntry llmCommands[];
-extern const size_t llmCommandsCount;
-extern const SettingsModule llmSettingsModule;
-
 // JSON array of every model the registry can see, across all sources. Declared
 // for the FEATURE because the web picker needs it in a build with no engine.
 // (Implementation lives in System_LLMCommands.cpp — it is a projection of

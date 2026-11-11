@@ -62,6 +62,7 @@
 #include "System_PollPause.h"   // PollPauseGuard — pause sensor polling during BLE connect/discovery
 #include "G2_HijackCmd.h"   // g2BumpMenuGen() — called from g2SetHijackPage
 #include "System_AuthIdentity.h"  // ExecIdentityGuard + currentAuthContext
+#include "System_CommandRegistry.h"
 
 extern "C" {
 #include "lc3.h"  // vendored Google liblc3 — Apache-2.0 (components/hardwareone_libs/liblc3)

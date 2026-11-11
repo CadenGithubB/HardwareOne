@@ -70,6 +70,7 @@
 #include "System_ESPNow.h"         // PEERS/bond/pairing: gMeshPeers, isBondModeOnline, espnowPairModeActive, gEspNow
 #include "System_BondedPeer.h"     // BOND_PAIRED: BondedPeer::isPaired()
 #include "System_LLMBackend.h"            // LLM: llmBackendStatus() (header self-guards on ENABLE_LLM_SOURCE_ONBOARD)
+#include "System_CommandRegistry.h"
 #if ENABLE_WIFI
 #include <WiFi.h>                  // WIFI / RSSI: WiFi.isConnected() / WiFi.RSSI()
 #endif

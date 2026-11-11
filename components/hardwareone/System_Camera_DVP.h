@@ -123,15 +123,6 @@ const char* cmd_cameravflip(const String& argsInput);
 const char* cmd_cameraexposure(const String& argsInput);
 const char* cmd_cameraframesize(const String& argsInput);
 
-// Command registry
-struct CommandEntry;
-extern const CommandEntry cameraCommands[];
-extern const size_t cameraCommandsCount;
-
-// Settings module
-struct SettingsModule;
-extern const SettingsModule cameraSettingsModule;
-
 #endif // ENABLE_CAMERA_SENSOR
 
 #endif // SYSTEM_CAMERA_DVP_H

@@ -55,6 +55,7 @@
 #include "mbedtls/ecp.h"
 #endif
 #include "System_MemDiag.h"
+#include "System_CommandRegistry.h"
 
 // External dependencies from main .ino
 extern bool wifiConnected;

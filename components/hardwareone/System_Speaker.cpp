@@ -4,6 +4,7 @@
 #include "System_Command.h"
 #include "System_Utils.h"
 #include <cstdlib>
+#include "System_CommandRegistry.h"
 
 namespace {
 const char *tone(const String &args) {

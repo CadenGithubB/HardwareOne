@@ -72,12 +72,4 @@ bool handleHelpNavigation(const String& cmd, char* out, size_t outSize);
  */
 String exitToNormalBanner();
 
-// ============================================================================
-// CLI Command Registry
-// ============================================================================
-
-// CLI command registry (help, clear, etc.)
-extern const CommandEntry cliCommands[];
-extern const size_t cliCommandsCount;
-
 #endif // SYSTEM_CLI_H

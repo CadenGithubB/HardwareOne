@@ -71,6 +71,7 @@
 #include "System_ESPSR.h"
 #include "System_VFS.h"
 #include "WebServer_MigrationTool.h"
+#include "System_CommandRegistry.h"
 #if ENABLE_ESPNOW
 #include "System_ESPNow.h"
 #endif

@@ -812,18 +812,6 @@ void streamDebugReset(const char* tag);
 void streamDebugFlush();
 
 // ============================================================================
-// Debug Command Registry
-// ============================================================================
-
-// CommandEntry is defined in System_CommandRegistry.h (included by files that need it)
-// Forward declare here for header-only usage
-struct CommandEntry;
-
-// Debug command registry
-extern const CommandEntry debugCommands[];
-extern const size_t debugCommandsCount;
-
-// ============================================================================
 // Debug Command Handlers (implemented in debug_system.cpp)
 // ============================================================================
 

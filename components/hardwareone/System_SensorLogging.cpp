@@ -60,6 +60,7 @@
 #endif
 #include "System_SensorStubs.h"  // Provides stubs for disabled sensors
 #include "System_CaptureCrypto.h"  // at-rest sealing of capture files
+#include "System_CommandRegistry.h"
 
 // Modular sensor caches (conditionally available based on enabled sensors)
 

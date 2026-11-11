@@ -60,6 +60,7 @@
 // External dependencies from main .ino
 // (filesystemReady is provided by System_Filesystem.h, included below)
 #include "System_Filesystem.h"
+#include "System_CommandRegistry.h"
 
 // ----------------------------------------------------------------------------
 // Dotted-path JSON helpers
@@ -2918,91 +2919,6 @@ void registerSettingsModule(const SettingsModule* module) {
 // Called once early in boot to ensure all modules are available for defaults
 // ============================================================================
 
-// Extern declarations for all settings modules
-extern const SettingsModule i2cSettingsModule;
-extern const SettingsModule cliSettingsModule;
-#if ENABLE_WIFI
-extern const SettingsModule wifiSettingsModule;
-#endif
-#if ENABLE_HTTP_SERVER
-extern const SettingsModule httpSettingsModule;
-#endif
-#if ENABLE_ESPNOW
-extern const SettingsModule espnowSettingsModule;
-#endif
-#if ENABLE_MQTT
-extern const SettingsModule mqttSettingsModule;
-#endif
-#if ENABLE_AUTOMATION
-extern const SettingsModule automationSettingsModule;
-#endif
-extern const SettingsModule powerSettingsModule;
-#if ENABLE_NEOPIXEL
-extern const SettingsModule ledSettingsModule;
-#endif
-#if ENABLE_OLED_DISPLAY
-extern const SettingsModule oledSettingsModule;
-#endif
-#if ENABLE_BLUETOOTH
-extern const SettingsModule bluetoothSettingsModule;
-#if ENABLE_G2_GLASSES
-extern const SettingsModule g2DeviceSettingsModule;
-#endif
-#endif
-#if ENABLE_THERMAL_SENSOR
-extern const SettingsModule thermalSettingsModule;
-#endif
-#if ENABLE_TOF_SENSOR
-extern const SettingsModule tofSettingsModule;
-#endif
-#if ENABLE_IMU_SENSOR
-extern const SettingsModule imuSettingsModule;
-#endif
-#if ENABLE_OLED_INPUT
-extern const SettingsModule inputSettingsModule;
-#endif
-#if ENABLE_ANO_ENCODER
-extern const SettingsModule anoEncoderSettingsModule;
-#endif
-#if ENABLE_APDS_SENSOR
-extern const SettingsModule apdsSettingsModule;
-#endif
-#if ENABLE_GPS_SENSOR
-extern const SettingsModule gpsSettingsModule;
-#endif
-#if ENABLE_FM_RADIO
-extern const SettingsModule fmRadioSettingsModule;
-#endif
-#if ENABLE_RTC_SENSOR
-extern const SettingsModule rtcSettingsModule;
-#endif
-
-#if ENABLE_PRESENCE_SENSOR
-extern const SettingsModule presenceSettingsModule;
-#endif
-
-#if ENABLE_LED_MATRIX
-extern const SettingsModule matrixSettingsModule;
-#endif
-
-#if ENABLE_CAMERA_SENSOR
-extern const SettingsModule cameraSettingsModule;
-#endif
-#if ENABLE_MICROPHONE
-extern const SettingsModule micSettingsModule;
-#endif
-#if ENABLE_EDGE_IMPULSE
-extern const SettingsModule edgeImpulseSettingsModule;
-#endif
-#if ENABLE_ESP_SR
-extern const SettingsModule espsrSettingsModule;
-#endif
-
-extern const SettingsModule clockSettingsModule;  // System_Clock.cpp - always registered
-extern const SettingsModule sensorLogSettingsModule;
-extern const SettingsModule systemLogSettingsModule;
-extern const SettingsModule batteryLogSettingsModule;
-
 void registerAllSettingsModules() {
   if (gSettingsModulesRegistered) return;  // Only register once
   gSettingsModulesRegistered = true;
@@ -3118,16 +3034,13 @@ void registerAllSettingsModules() {
   registerSettingsModule(&batteryLogSettingsModule);
 
   // Notification presentation (banners/toasts/queue + per-kind muting)
-  extern const SettingsModule notifSettingsModule;
   registerSettingsModule(&notifSettingsModule);
 
 #if ENABLE_LLM_BACKEND   // the FEATURE, not the engine: a CM5-only build still has these
-  extern const SettingsModule llmSettingsModule;
   registerSettingsModule(&llmSettingsModule);
 #endif
 
 #if ENABLE_MAPS
-  extern const SettingsModule mapsSettingsModule;
   registerSettingsModule(&mapsSettingsModule);
 #endif
 

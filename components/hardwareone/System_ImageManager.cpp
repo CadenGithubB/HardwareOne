@@ -17,6 +17,7 @@
 #include <esp_heap_caps.h>
 #include <stdint.h>
 #include <time.h>
+#include "System_CommandRegistry.h"
 
 #if ENABLE_CAMERA_SENSOR
 #include "System_Camera_DVP.h"

@@ -41,6 +41,7 @@
 #include "mbedtls/base64.h"
 #include "mbedtls/sha256.h"
 #include "nvs.h"
+#include "System_CommandRegistry.h"
 
 #if ENABLE_BLUETOOTH
 #include "Bluetooth.h"

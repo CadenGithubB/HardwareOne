@@ -13,6 +13,7 @@
 #include "System_Notifications.h"
 
 #include <LittleFS.h>
+#include "System_CommandRegistry.h"
 #if ENABLE_SD_CARD && ENABLE_SDMMC_CARD
 #include "HAL_SDCard.h"
 // Preserve one filesystem access path; permissions and /sd routing below are

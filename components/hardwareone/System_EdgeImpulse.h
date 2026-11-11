@@ -114,15 +114,8 @@ void listAvailableModels(String& output);
 void setStateTrackingEnabled(bool enabled);
 
 // ============================================================================
-// Settings Module (extern declaration)
-// ============================================================================
-extern const SettingsModule edgeImpulseSettingsModule;
-
-// ============================================================================
 // CLI Commands
 // ============================================================================
-extern const CommandEntry edgeImpulseCommands[];
-extern const size_t edgeImpulseCommandsCount;
 
 // Command handlers
 const char* cmd_ei(const String& argsInput);

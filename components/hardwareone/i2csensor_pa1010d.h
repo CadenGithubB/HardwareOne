@@ -53,11 +53,6 @@ const char* cmd_gps(const String& argsInput);
 const char* cmd_gpsstart(const String& argsInput);
 const char* cmd_gpsstop(const String& argsInput);
 
-// Command registry (for System_CommandRegistry.cpp module list)
-struct CommandEntry;
-extern const CommandEntry gpsCommands[];
-extern const size_t gpsCommandsCount;
-
 #else
 
 // Keep reading APIs available when GPS is omitted from the build.

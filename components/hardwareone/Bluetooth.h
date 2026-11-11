@@ -425,8 +425,6 @@ const char* bleHostStateWord(bool roleRunning);
 // COMMAND REGISTRY
 // =============================================================================
 
-extern const CommandEntry bluetoothCommands[];
-extern const size_t bluetoothCommandsCount;
 #if ENABLE_BLE_PHONE_PIPE
 // `phone secret <passphrase|clear>`, a row of BLE_PhonePipe.cpp's phoneCommands.
 const char* phoneSecretCommand(const String& argsInput);
@@ -440,7 +438,6 @@ const char* phonePipeReplaceSecret(const char* value, size_t len, bool generated
 // =============================================================================
 
 struct SettingEntry;
-struct SettingsModule;
 extern const SettingEntry bluetoothSettingsEntries[];
 extern const size_t bluetoothSettingsCount;
 

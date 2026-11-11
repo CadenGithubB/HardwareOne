@@ -11,6 +11,7 @@
 #include "System_Settings.h"
 #include "System_AuthIdentity.h"
 #include "HT16K33_Geometry.h"
+#include "System_CommandRegistry.h"
 
 namespace {
 // Use Adafruit's tested pixel mapping/font renderer, but own the transport:

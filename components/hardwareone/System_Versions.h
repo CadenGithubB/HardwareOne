@@ -22,7 +22,4 @@ void versionsCollect(hw1versions::List& out);
 // `status json` carries the same keys as its "versions" object.
 void versionsAddJson(JsonObject out);
 
-extern const CommandEntry versionsCommands[];
-extern const size_t versionsCommandsCount;
-
 #endif  // SYSTEM_VERSIONS_H

@@ -63,6 +63,3 @@ uint32_t otaDataSchemaVersion();
 // as soon as the authenticated session goes away, so `active` is itself bounded
 // by recent traffic.
 bool otaBleUploadActiveOnConnection(uint16_t connId);
-
-extern const CommandEntry otaCommands[];
-extern const size_t otaCommandsCount;

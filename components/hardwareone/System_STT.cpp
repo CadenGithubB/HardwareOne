@@ -35,6 +35,7 @@
 #include <cmath>
 #include <cstring>
 #include <new>
+#include "System_CommandRegistry.h"
 
 // Task-owned payload/diagnostic storage; locks and session control stay internal.
 // No DMA, ISR or cache-disabled path accesses these arrays.

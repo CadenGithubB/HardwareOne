@@ -23,6 +23,7 @@
 #include "System_Settings.h"
 #include "System_TaskUtils.h"
 #include "System_Utils.h"
+#include "System_CommandRegistry.h"
 
 extern TwoWire Wire1;
 

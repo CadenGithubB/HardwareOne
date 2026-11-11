@@ -24,6 +24,7 @@
 #include <ArduinoJson.h>
 #include "System_DebugJson.h"  // serializeJsonListToDebugBuffer (cameravideolist json)
 #include <atomic>
+#include "System_CommandRegistry.h"
 
 // Static storage prevents first-call races and never treats allocation failure
 // as permission to access a driver without the lifecycle lock.

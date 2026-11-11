@@ -26,6 +26,7 @@
 #include "System_ESPNow_FsList.h" // fsListSendRequest / fsListCancel — structured peer FS listing
 #include "System_FileManager.h"   // FILE_MANAGER_MAX_PATH (path buffer sizing)
 #include <freertos/semphr.h>
+#include "System_CommandRegistry.h"
 
 
 

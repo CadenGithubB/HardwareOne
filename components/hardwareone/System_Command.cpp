@@ -17,6 +17,7 @@
 #include "System_Debug.h"
 #include "System_Settings.h"
 #include "System_Utils.h"
+#include "System_CommandRegistry.h"
 
 // Forward declaration for exitToNormalBanner function (defined in cli_system.cpp)
 String exitToNormalBanner();

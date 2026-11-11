@@ -74,6 +74,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <esp_attr.h>  // EXT_RAM_BSS_ATTR
+#include "System_CommandRegistry.h"
 
 // Memory allocation
 

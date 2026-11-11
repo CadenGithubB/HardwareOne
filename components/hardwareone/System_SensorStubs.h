@@ -25,8 +25,6 @@
   extern TaskHandle_t gThermalTaskHandle;
   extern volatile UBaseType_t gThermalWatermarkNow;
   extern volatile UBaseType_t gThermalWatermarkMin;
-  extern const struct CommandEntry thermalCommands[];
-  extern const size_t thermalCommandsCount;
   // Thermal stub functions
   inline bool thermalStartInternal() { return false; }
 #endif
@@ -39,8 +37,6 @@
   extern TaskHandle_t gTofTaskHandle;
   extern volatile UBaseType_t gTofWatermarkNow;
   extern volatile UBaseType_t gTofWatermarkMin;
-  extern const struct CommandEntry tofCommands[];
-  extern const size_t tofCommandsCount;
   // ToF stub functions
   inline bool tofStartInternal() { return false; }
 #endif
@@ -53,8 +49,6 @@
   extern TaskHandle_t gImuTaskHandle;
   extern volatile UBaseType_t gImuWatermarkNow;
   extern volatile UBaseType_t gImuWatermarkMin;
-  extern const struct CommandEntry imuCommands[];
-  extern const size_t imuCommandsCount;
   // IMU stub functions
   inline bool imuStartInternal() { return false; }
   void imuUpdateActions();
@@ -68,8 +62,6 @@
   extern TaskHandle_t gInputTaskHandle;
   extern volatile UBaseType_t gGamepadWatermarkMin;
   extern volatile UBaseType_t gGamepadWatermarkNow;
-  extern const struct CommandEntry gamepadCommands[];
-  extern const size_t gamepadCommandsCount;
   // inputStartInternal() is provided by the ANO encoder driver when that is
   // the active input device; only stub it when NO input driver is compiled in.
 #if !ENABLE_ANO_ENCODER && !ENABLE_GPIO_ENCODER && !ENABLE_GT911_TOUCH
@@ -86,9 +78,6 @@
   inline bool earlyOLEDInit() { return false; }
   inline void processOLEDBootSequence() { }
   inline void updateOLEDDisplay() { }
-  // Command stubs for System_CommandRegistry.cpp command registry
-  extern const struct CommandEntry oledCommands[];
-  extern const size_t oledCommandsCount;
 #endif
 
 #if !ENABLE_APDS_SENSOR
@@ -99,8 +88,6 @@
   extern bool gApdsGestureRunning;
   extern unsigned long gApdsLastStopTime;
   extern TaskHandle_t gApdsTaskHandle;
-  extern const struct CommandEntry apdsCommands[];
-  extern const size_t apdsCommandsCount;
   // APDS stub functions
   inline bool apdsStartInternal() { return false; }
 #endif
@@ -111,8 +98,6 @@
   extern bool gGpsConnected;
   extern unsigned long gGpsLastStopTime;
   extern TaskHandle_t gGpsTaskHandle;
-  extern const struct CommandEntry gpsCommands[];
-  extern const size_t gpsCommandsCount;
   // GPS stub functions
   inline bool gpsStartInternal() { return false; }
 #endif
@@ -125,8 +110,6 @@
   extern unsigned long gFmRadioLastStopTime;
   extern bool gRadioInitialized;
   extern TaskHandle_t gFmRadioTaskHandle;
-  extern const struct CommandEntry fmRadioCommands[];
-  extern const size_t fmRadioCommandsCount;
   inline bool fmRadioInit() { return false; }
   inline void fmRadioDeinit() {}
   inline void fmRadioPoll() {}
@@ -139,8 +122,6 @@
   extern bool gPresenceConnected;
   extern unsigned long gPresenceLastStopTime;
   extern TaskHandle_t gPresenceTaskHandle;
-  extern const struct CommandEntry presenceCommands[];
-  extern const size_t presenceCommandsCount;
   // Presence stub functions
   inline bool presenceStartInternal() { return false; }
   inline bool presenceInit() { return false; }
@@ -155,26 +136,16 @@
   extern TaskHandle_t gRtcTaskHandle;
   extern volatile UBaseType_t gRtcWatermarkNow;
   extern volatile UBaseType_t gRtcWatermarkMin;
-  extern const struct CommandEntry rtcCommands[];
-  extern const size_t rtcCommandsCount;
   // RTC stub functions
   bool rtcStartInternal();
 #endif
 
 #if !ENABLE_SERVO
   #include "i2csensor_pca9685.h"  // Provides ServoProfile, PCA9685_I2C_ADDRESS, MAX_SERVO_CHANNELS
-  extern const struct CommandEntry servoCommands[];
-  extern const size_t servoCommandsCount;
   // Servo stub functions
   inline bool servoInit() { return false; }
   inline void servoSetAngle(uint8_t channel, int angle) {}
   inline void servoSetPWM(uint8_t channel, uint16_t value) {}
-#endif
-
-#if !ENABLE_BLUETOOTH
-  // Bluetooth stubs when disabled
-  extern const struct CommandEntry bluetoothCommands[];
-  extern const size_t bluetoothCommandsCount;
 #endif
 
 #if !ENABLE_CAMERA_SENSOR
@@ -186,8 +157,6 @@
   extern const char* cameraModel;
   extern int cameraWidth;
   extern int cameraHeight;
-  extern const struct CommandEntry cameraCommands[];
-  extern const size_t cameraCommandsCount;
   inline bool initCamera() { return false; }
   inline void stopCamera() {}
   inline uint8_t* captureFrame(size_t* outLen) { if (outLen) *outLen = 0; return nullptr; }
@@ -213,8 +182,6 @@
   extern int micBitDepth;
   extern int micChannels;
   extern int micGain;
-  extern const struct CommandEntry micCommands[];
-  extern const size_t micCommandsCount;
   // Microphone stub functions
   inline bool initMicrophone() { return false; }
   inline bool stopMicrophone() { return true; }
@@ -271,8 +238,6 @@
   // Wi-Fi APIs and saved-network disabled operations have their own headers.
   #include "System_WiFi.h"
   extern bool gSkipNTPInWifiConnect;
-  extern const struct CommandEntry wifiCommands[];
-  extern const size_t wifiCommandsCount;
   // WiFi stub functions
   inline void setupWiFi() {}
   inline bool connectToBestWiFiNetwork() { return false; }
@@ -367,12 +332,6 @@
 // ESP-NOW stubs now live in System_ESPNow.h (#else block) for grouping
 #if !ENABLE_ESPNOW
   #include "System_ESPNow.h"
-#endif
-
-#if !ENABLE_MQTT
-  // MQTT stub variables (global definitions)
-  extern const struct CommandEntry mqttCommands[];
-  extern const size_t mqttCommandsCount;
 #endif
 
 #endif // SYSTEM_SENSORSTUBS_H

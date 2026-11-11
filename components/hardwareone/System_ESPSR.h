@@ -32,9 +32,6 @@ float getESPSRLastConfidence();        // Returns last command confidence (0.0-1
 uint32_t getESPSRWakeCount();          // Returns total wake word detections
 uint32_t getESPSRCommandCount();       // Returns total commands executed
 
-extern const CommandEntry espsrCommands[];
-extern const size_t espsrCommandsCount;
-
 // Recompute the legacy gSrDebugLevel from the new bool-flag system
 // (gSettings.debugSr / debugSrWake / debugSrCommand / debugSrAfe /
 // debugSrLifecycle / debugSrTuning). Existing SR_DBG_L call sites use the

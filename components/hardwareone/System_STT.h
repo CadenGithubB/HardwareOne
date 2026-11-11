@@ -157,8 +157,4 @@ bool sttSnapshot(STTOwner owner, STTToken token, STTSnapshot* out);
 // logout/revocation or five-minute expiry. UI consumers append once per token.
 bool sttResult(STTOwner owner, STTToken token, char* text, size_t textCap);
 const char* sttStateName(STTState state);
-
-struct CommandEntry;
-extern const CommandEntry sttCommands[];
-extern const size_t sttCommandsCount;
 #endif
