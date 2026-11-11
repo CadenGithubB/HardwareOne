@@ -19,6 +19,7 @@ PLATFORM_HEADERS = (
     "Arduino.h", "WiFi.h", "esp_sntp.h", "esp_timer.h",
     "freertos/FreeRTOS.h", "freertos/portmacro.h", "System_Clock.h",
     "System_Debug.h", "System_Settings.h", "OLED_Display.h", "i2csensor_ds3231.h",
+    "System_Logging.h", "System_User.h",
 )
 CASES = (
     "setup", "disconnected", "cold_reply", "warm_reply", "deadline_reply",

@@ -11,25 +11,8 @@
 #include "System_Debug.h"
 #include "System_TaskUtils.h"
 #include "System_MemUtil.h"  // ps_alloc / AllocPref for sendAead{,Sync} helpers
-
-// External hooks into the existing send paths. Declared here rather than via
-// a header so this TU stays free of the System_ESPNow.cpp giant. Phase 2+
-// migrations only need the symbols, not the full ESP-NOW state surface.
-extern bool v4_send_payload_smart(const uint8_t* dst, uint8_t type, uint16_t flags,
-                                  uint32_t msgId,
-                                  const uint8_t* payload, uint16_t payloadLen,
-                                  uint8_t ttl);
-extern bool v4_send_frame(const uint8_t* dst, uint8_t type, uint16_t flags,
-                          uint32_t msgId,
-                          const uint8_t* payload, uint16_t payloadLen,
-                          uint8_t ttl);
-// Longest AEAD plaintext that still fits one frame to `dst` (a routed peer has
-// a smaller budget than a direct one). Owned by System_ESPNow.cpp beside the
-// fragmenting sender so the dispatcher and the sender never disagree.
-extern uint16_t v4_single_frame_cap(const uint8_t* dst);
-// cmd_exec (HardwareOne.cpp): the one task whose synchronous multi-frame
-// sends run their fragment loop on the submitting task (see submitSync).
-extern TaskHandle_t gCmdExecTaskHandle;
+#include "System_CommandTypes.h"
+#include "System_ESPNow.h"
 
 namespace espnowtx {
 

@@ -7,15 +7,11 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <freertos/task.h>
-
+#if ENABLE_BLE_PHONE_PIPE
+#include "BLE_PhonePipe.h"
+#endif
 #if ENABLE_G2_GLASSES
-extern const BleSetupOps g2SetupOps, g2RingSetupOps;
-#if ENABLE_BLE_PHONE_PIPE
-extern const BleSetupOps g2RingRetireSetupOps;
-#endif
-#endif
-#if ENABLE_BLE_PHONE_PIPE
-extern const BleSetupOps phonePipeSetupOps;
+#include "G2_Glasses.h"
 #endif
 
 namespace {

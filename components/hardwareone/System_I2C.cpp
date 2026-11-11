@@ -39,6 +39,19 @@
 #include "System_TaskUtils.h"
 #include "System_Utils.h"
 #include "System_CommandRegistry.h"
+#include "System_Camera_Video.h"
+#if ENABLE_CAMERA_SENSOR
+#include "System_Camera_DVP.h"
+#endif
+#if ENABLE_EDGE_IMPULSE
+#include "System_EdgeImpulse.h"
+#endif
+#if ENABLE_MICROPHONE
+#include "System_Microphone.h"
+#endif
+#if ENABLE_SERVO
+#include "i2csensor_pca9685.h"
+#endif
 
 #if ENABLE_APDS_SENSOR
 #include "i2csensor_apds9960.h"
@@ -235,15 +248,6 @@ TaskHandle_t queueProcessorTask = nullptr;
 // gImuTaskHandle and gImuLastStopTime are declared in i2csensor_bno055.h (included above)
 // Clock management is now unified through I2CDeviceManager
 // Legacy i2cSetWire1Clock() removed - all sensors use i2cDeviceTransaction wrapper
-
-// Sensor status system dependencies
-extern volatile unsigned long gSensorStatusSeq;
-extern const char* gLastStatusCause;
-extern void sensorStatusBump();
-// gApds{Color,Proximity,Gesture}Enabled provided by i2csensor_apds9960.h (included above)
-#if ENABLE_SERVO
-extern bool gPwmDriverConnected;
-#endif
 
 // BROADCAST_PRINTF now defined in debug_system.h with performance optimizations
 
@@ -1136,17 +1140,6 @@ const char* cmd_i2cstats(const String& originalCmd) {
 
 // SensorCache struct is now defined in i2c_system.h
 
-// Per-sensor state, handles, and driver-object pointers are declared in the
-// respective i2csensor_*.h headers (all already included at top of file).
-// Only sensor-side function declarations that aren't in their headers remain.
-#if ENABLE_IMU_SENSOR
-extern void imuPoll();        // i2csensor_bno055.cpp
-#endif
-#if ENABLE_THERMAL_SENSOR
-extern bool thermalInit();    // i2csensor_mlx90640.cpp
-extern bool thermalPoll();
-#endif
-
 // ============================================================================
 // Sensor Task Implementations
 // ============================================================================
@@ -1162,11 +1155,6 @@ extern bool thermalPoll();
 // ============================================================================
 // I2C Device Registry Helper Functions
 // ============================================================================
-
-// External dependencies for device registry
-// connectedDevices, connectedDeviceCount, discoveryCount defined above
-extern const I2CSensorEntry i2cSensors[];
-extern const size_t i2cSensorsCount;
 
 
 
@@ -1212,7 +1200,6 @@ static void addDiscoveredDevice(uint8_t address, uint8_t bus) {
 void detectHardware(DetectionResult& out) {
   out = DetectionResult();
 
-  extern bool gI2CBusRunning;
   if (!gI2CBusRunning) { out.busDisabled = true; return; }
 
   const size_t n = i2cSensorsCount;
@@ -1548,7 +1535,7 @@ int i2cConnectedDeviceCount() {
 //     (with isConnected as a field). Byte-compatible with the previous
 //     hand-rolled serialization — same keys + value types — so /api/devices'
 //     web page and the `devicefile` command keep working unchanged.
-void buildI2cDeviceListJson(JsonArray& arr, bool verbose = false) {
+void buildI2cDeviceListJson(JsonArray& arr, bool verbose) {
   for (int i = 0; i < connectedDeviceCount; i++) {
     const ConnectedDevice& d = connectedDevices[i];
     if (!verbose && !d.isConnected) continue;   // lean: connected devices only
@@ -1639,7 +1626,6 @@ const char* cmd_discover(const String& originalCmd) {
   if (fmRadioDetected) {
     DEBUG_SYSTEMF("FM radio detected, initializing to prevent I2C bus interference");
     // Initialize radio and keep it in stable low-power state
-    extern bool fmRadioInit();
     if (fmRadioInit()) {
       INFO_I2C_BUSF("FM radio initialized successfully - kept in low-power state");
     } else {
@@ -1690,37 +1676,6 @@ const char* cmd_devicefile(const String& originalCmd) {
 // readings, embedded verbatim) for active, non-stream sensors. Readings reuse
 // the same per-sensor builders ESP-NOW/MQTT use — no new data plumbing.
 typedef int (*SensorDataFn)(char*, size_t);
-// Forward-declare the per-sensor builders (also declared in their headers;
-// matching redeclarations are harmless). Guarded so only compiled ones link.
-#if ENABLE_PRESENCE_SENSOR
-extern int presenceBuildDataJSON(char* buf, size_t bufSize);
-#endif
-#if ENABLE_TOF_SENSOR
-extern int tofBuildDataJSON(char* buf, size_t bufSize);
-#endif
-#if ENABLE_IMU_SENSOR
-extern int imuBuildDataJSON(char* buf, size_t bufSize);
-#endif
-#if ENABLE_GPS_SENSOR
-extern int gpsBuildDataJSON(char* buf, size_t bufSize);
-#endif
-#if ENABLE_FM_RADIO
-extern int fmRadioBuildDataJSON(char* buf, size_t bufSize);
-#endif
-#if ENABLE_RTC_SENSOR
-extern int rtcBuildDataJSON(char* buf, size_t bufSize);
-#endif
-#if ENABLE_GAMEPAD_SENSOR
-extern int gamepadBuildDataJSON(char* buf, size_t bufSize);
-#endif
-#if ENABLE_APDS_SENSOR
-extern int apdsBuildDataJSON(char* buf, size_t bufSize);
-#endif
-#if ENABLE_THERMAL_SENSOR
-// Thermal registers its COMPACT summary builder (not the 768-px frame) so a
-// stream sensor can still surface a glanceable reading in `sensors json`.
-extern int thermalBuildSummaryJSON(char* buf, size_t bufSize);
-#endif
 
 // Shared sensor-reading envelope. See System_I2C.h for the contract. Writes the
 // common opening (no closing brace) so every per-sensor builder emits ONE shape;
@@ -2263,16 +2218,6 @@ const char* cmd_i2crecover(const String& argsInput) {
 }
 
 // ============================================================================
-// Sensor Command Registry
-// ============================================================================
-
-// Forward declarations for queued sensor start commands (from main .ino)
-extern const char* cmd_thermalstart_queued(const String& argsInput);
-extern const char* cmd_tofstart_queued(const String& argsInput);
-extern const char* cmd_imustart_queued(const String& argsInput);
-extern const char* cmd_apdsstart_queued(const String& argsInput);
-
-// ============================================================================
 // I2C Command Registry
 // ============================================================================
 
@@ -2550,7 +2495,6 @@ const char* buildSensorStatusJson() {
 #endif
   
 #if ENABLE_PRESENCE_SENSOR
-  extern bool gPresenceRunning;
   doc["presenceRunning"] = gPresenceRunning;
 #else
   doc["presenceRunning"] = false;
@@ -2618,9 +2562,6 @@ const char* buildSensorStatusJson() {
   doc["matrixCompiled"] = static_cast<bool>(ENABLE_LED_MATRIX);
 
 #if ENABLE_CAMERA_SENSOR
-  extern bool gCameraRunning;
-  extern bool cameraStreaming;
-  extern bool videoRecording;
   doc["cameraRunning"] = gCameraRunning;
   doc["cameraStreaming"] = cameraStreaming;
   doc["cameraRecording"] = videoRecording;
@@ -2639,14 +2580,11 @@ const char* buildSensorStatusJson() {
   // The UI should gate "requires SD write" features on sdWritable, while
   // diagnostics / file listing can use sdAvailable.
   {
-    extern bool sdCardIsMountedForStatus();
-    extern bool sdCardIsWritableForStatus();
     doc["sdAvailable"] = sdCardIsMountedForStatus();
     doc["sdWritable"]  = sdCardIsWritableForStatus();
   }
 
 #if ENABLE_MICROPHONE
-  extern bool gMicRunning;
   const MicRecordingState micRecState = getMicRecordingState();
   doc["micRunning"] = gMicRunning;
   doc["micRecording"] = micRecState != MicRecordingState::IDLE;
@@ -2660,7 +2598,6 @@ const char* buildSensorStatusJson() {
 #endif
 
 #if ENABLE_EDGE_IMPULSE
-  extern bool isEdgeImpulseModelLoaded();
   doc["eiEnabled"] = gSettings.eiEnabled;
   doc["eiModelLoaded"] = isEdgeImpulseModelLoaded();
   doc["eiCompiled"] = true;

@@ -637,4 +637,10 @@ void loadAndIncrementBootSeq();
 // User system command registration
 // User system command module is automatically registered
 
+bool approvePendingUserInternal(const String& username, String& errorOut);
+bool denyPendingUserInternal(const String& username, String& errorOut);
+extern bool gSerialAuthed;
+extern std::atomic<unsigned long> gSerialLastInteractionMs;
+extern String gSerialUser;
+
 #endif // SYSTEM_USER_H

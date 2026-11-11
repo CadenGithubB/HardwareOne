@@ -94,6 +94,10 @@ struct SessionEntry {
 // Session array (defined in main .ino)
 extern SessionEntry* gSessions;
 
+// Identifies this boot; a session that carries another value is stale
+// (WebServer_Server.cpp; System_SensorStubs.cpp without the web server).
+extern String gBootId;
+
 // Logout reason structure (defined in main .ino)
 struct LogoutReason {
   String ip;
@@ -166,8 +170,6 @@ void broadcastBanList();
 // Returns the whole document or a one-field {"error":...} object.
 const char* banListJson();
 
-extern volatile unsigned long gSensorStatusSeq;
-extern const char* gLastStatusCause;
 extern volatile int gBroadcastSkipSessionIdx;
 
 // Sensor status broadcast (SSE)

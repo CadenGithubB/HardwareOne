@@ -31,17 +31,6 @@
 #include "System_VFS.h"             // guarded storage access and directory traversal
 #include <esp_attr.h>  // EXT_RAM_BSS_ATTR
 
-// v4_send_payload_smart is the universal "send this payload to that MAC"
-// helper — picks encrypted-chunked under a session, plaintext-fragmented
-// otherwise. Lives in System_ESPNow.cpp (not exposed in the header — it's
-// considered an implementation detail of the protocol layer). Forward-decl
-// it here rather than promote it to the public surface; that decision can
-// be revisited if a third protocol module ends up needing it.
-extern bool v4_send_payload_smart(const uint8_t* dst, uint8_t type,
-                                  uint16_t flags, uint32_t msgId,
-                                  const uint8_t* payload, uint16_t payloadLen,
-                                  uint8_t ttl);
-
 // ============================================================================
 // Sender (client) side — pending request table
 // ============================================================================
@@ -625,10 +614,6 @@ static bool fsRpcPathAllowed(const char* rawPath) {
           == TranscriptPathPolicy::Kind::Outside;
 }
 
-// System_ESPNow.cpp; defined in both bond builds (returns false when bond mode
-// is compiled out).
-extern bool isBondSessionTokenValid();
-
 // FS RPC serves one requester: the bonded peer, while the bond session that
 // authenticates it is live. It runs under the reserved bond identity, which the
 // filesystem resolves to SUPER for the life of that session and to nobody
@@ -871,11 +856,6 @@ send_stat: ;
 // The ACK lets the caller surface NOT_FOUND/PERM_DENIED synchronously; the
 // FILE_* transfer that follows is async and lands the file via the existing
 // receive path (System_ESPNow_Files).
-
-// Forward declaration: defined in System_ESPNow.cpp. The function reads the
-// file under the calling task's identity (we install the bond identity here
-// before calling) and pumps FILE_START/DATA/END to the destination MAC.
-extern bool sendFileToMac(const uint8_t* mac, const String& localPath);
 
 static void processGetDeferred(const uint8_t srcMac[6], const V4PayloadFsGetReq& req) {
   V4PayloadFsGetAck ack = {};

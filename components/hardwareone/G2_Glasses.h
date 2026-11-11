@@ -1677,4 +1677,21 @@ inline const char* g2ProbeImageQ21LiveFullScreenBurst() { return "G2 disabled"; 
 
 #endif // ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
 
+// Menu entry points for the page modules and the setup worker's operations.
+#if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
+struct BleSetupOps;  // BLE_SetupWorker.h
+void g2RedrawHijackMainMenu();
+extern const BleSetupOps g2RingSetupOps;
+extern const BleSetupOps g2SetupOps;
+void g2ShowAppsMenu();
+void g2ShowConfigMenu();
+void g2ShowSystemMenu();
+extern bool gG2MenuNavEnabled;
+
+#if ENABLE_BLE_PHONE_PIPE
+extern const BleSetupOps g2RingRetireSetupOps;
+#endif
+
+#endif
+
 #endif // G2_GLASSES_H

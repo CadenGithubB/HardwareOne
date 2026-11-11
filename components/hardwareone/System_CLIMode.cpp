@@ -12,8 +12,6 @@
 #include "System_Debug.h"
 #include "System_User.h"
 
-extern TaskHandle_t gCmdExecTaskHandle;
-
 namespace {
 struct CLIModeOwner {
   CommandSource source = SOURCE_INTERNAL;

@@ -49,8 +49,6 @@
 #include <esp_attr.h>
 #include <freertos/FreeRTOS.h>
 
-extern void g2ShowAppsMenu();
-
 namespace {
 constexpr size_t kRows = 6, kPreviewMax = 150, kWindowBytes = 512, kHistory = 12;
 // Each right-column child is refreshed by a single-write UPDATE_TEXT; the G2

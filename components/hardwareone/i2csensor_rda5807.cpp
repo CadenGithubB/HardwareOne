@@ -41,13 +41,6 @@
 #include "System_CommandRegistry.h"
 
 
-// The RDA5807 used to be hardcoded to Wire1; with dual-bus it lives on
-// whatever gSettings.fmRadioBus selects (default bus 0 = Wire1). The
-// mathertel Radio library binds the TwoWire at initWire(port&), so we
-// pass *myWire at fmRadioInit. All transactions also pass fmRadioBus so
-// the bus-aware helpers acquire the right mutex/clock.
-extern TwoWire Wire1;
-
 // Resolve which bus the FM radio is on. Returns false if unavailable
 // (e.g., fmRadioBus=1 but i2c2Enabled=false).
 static bool fmRadioResolveBus(uint8_t* outBus, TwoWire** outWire) {
@@ -60,7 +53,6 @@ static bool fmRadioResolveBus(uint8_t* outBus, TwoWire** outWire) {
 }
 
 // Forward declarations
-extern bool createFMRadioTask();
 void updateFMRadio();
 
 // BROADCAST_PRINTF now defined in debug_system.h with performance optimizations

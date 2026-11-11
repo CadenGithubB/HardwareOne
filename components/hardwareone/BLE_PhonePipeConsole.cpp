@@ -25,9 +25,7 @@
 #include <freertos/task.h>
 #include <atomic>
 #include <cstring>
-
-extern QueueHandle_t gCmdExecQ;          // HardwareOne.cpp: the executor's queue
-extern TaskHandle_t gCmdExecTaskHandle;  // HardwareOne.cpp
+#include "System_CommandTypes.h"
 
 namespace {
 using hw1pipe::Session;

@@ -100,6 +100,7 @@ def fake_headers(component: Path) -> dict[str, str]:
     central = (component / 'BLE_CentralTx.h').read_text()
     utils = (component / 'System_Utils.h').read_text()
     self_device = (component / 'System_SelfDevice.h').read_text()
+    command_types = (component / 'System_CommandTypes.h').read_text()
 
     def decl(pattern: str, text: str, what: str) -> str:
         return found(r'^' + pattern + r'[^;{]*;', text, what)
@@ -135,6 +136,11 @@ def fake_headers(component: Path) -> dict[str, str]:
         'System_Utils.h': '#pragma once\nstruct ExecReq { typedef void (*DeferredFn)(void* arg); };\n' +
                           decl(r'bool submitDeferredToCmdExec\(', utils, 'System_Utils.h declares submitDeferredToCmdExec')
                           + '\n',
+        'System_CommandTypes.h': '#pragma once\n#include "freertos/FreeRTOS.h"\n' +
+                                decl(r'extern QueueHandle_t gCmdExecQ', command_types,
+                                     'System_CommandTypes.h declares gCmdExecQ') + '\n' +
+                                decl(r'extern TaskHandle_t gCmdExecTaskHandle', command_types,
+                                     'System_CommandTypes.h declares gCmdExecTaskHandle') + '\n',
         'System_SelfDevice.h': '#pragma once\nnamespace SelfDevice {\n' +
                                decl(r'const char\* firmwareVersion\(', self_device, 'SelfDevice::firmwareVersion') +
                                '\n}\n',

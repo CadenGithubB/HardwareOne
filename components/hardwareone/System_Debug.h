@@ -951,4 +951,7 @@ DebugFlagMask systemLogConfiguredFlags();
 // Helper: Get category name from debug flag
 const char* getDebugCategoryName(DebugFlagMask flag);
 
+// Output routes of the command that is running now (HardwareOne.cpp).
+uint32_t getCurrentCommandOutputMask();
+
 #endif // DEBUG_SYSTEM_H

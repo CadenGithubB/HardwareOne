@@ -81,9 +81,6 @@
 #include "System_Maps.h"           // WP_DIST:<name>: WaypointManager::getDistanceBearingToName()
 #endif
 
-// Validation state is shared with the command executor in HardwareOne.cpp.
-extern bool gCLIValidateOnly;
-
 // Command types from shared header
 #include "System_CommandTypes.h"
 
@@ -495,9 +492,6 @@ void findAutomationsArrayBounds(const String& json, int& arrStart, int& arrEnd);
 // DEBUG flags and RETURN_VALID_IF_VALIDATE_CSTR are defined centrally in debug_system.h
 // and system_utils.h to keep logging behavior consistent across modules.
 // BROADCAST_PRINTF is also provided by debug_system.h.
-
-// File paths
-extern const char* AUTOMATIONS_JSON_FILE;  // Defined in .ino as "/system/automations.json"
 
 // Filesystem lock helpers (defined in .ino) - now in automation_system.h
 

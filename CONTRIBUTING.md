@@ -115,6 +115,13 @@ attachment should report unavailable without breaking unrelated services.
   declarations use `System_CommandRegistry.h`; command parsing uses
   `System_Command.h`. Broad utility includes are compatibility paths to reduce
   incrementally, rather than the default for new code.
+- Declare a shared name once, in the header of the module that defines it, and
+  include that header where the name is used. A `.cpp` file does not write its
+  own `extern` copy of another module's function or variable: the compiler
+  cannot compare the copy with the definition. Command tables are declared in
+  `System_CommandRegistry.h` and settings modules in `System_Settings.h`. A name
+  used by one file only is `static`. The host test `extern_declarations` checks
+  this; its short exception list holds the linker script symbols.
 - UI and transport code collect input and present results. Reuse service methods
   and the existing authorized command executor for command requests. Preserve
   source/session identity and permission checks across every entry point.

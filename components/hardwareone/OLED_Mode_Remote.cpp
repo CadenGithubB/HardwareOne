@@ -10,16 +10,11 @@
 #include "System_BondedPeer.h"
 #include "HAL_Input.h"
 #include "System_MemUtil.h"   // ps_alloc — bond-picker scroll/labels live in PSRAM
+#if ENABLE_OLED_DISPLAY && ENABLE_ESPNOW && ENABLE_BONDED_MODE
+#include "System_SensorStubs.h"
+#endif
 
 #if ENABLE_OLED_DISPLAY && ENABLE_ESPNOW && ENABLE_BONDED_MODE
-
-extern DisplayDriver* oledDisplay;
-extern NavEvents gNavEvents;
-
-extern String getEspNowDeviceName(const uint8_t* mac);
-extern bool parseMacAddress(const String& macStr, uint8_t mac[6]);
-extern bool isBondSynced();
-extern bool isBondSessionTokenValid();
 
 // =============================================================================
 // Menu State

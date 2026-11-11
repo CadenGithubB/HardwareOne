@@ -20,6 +20,9 @@
 #include "System_Debug.h"
 #include "System_NTP.h"
 #include "network/wifi/System_WiFiNetworks.h"
+#if ENABLE_HTTPS
+#include "System_WiFi.h"
+#endif
 
 #if ENABLE_WIFI
 #include <WiFi.h>
@@ -30,7 +33,7 @@
 #include "OLED_SetupWizard.h"
 #include "HAL_Display.h"
 #include "HAL_Input.h"
-extern bool oledConnected;
+#include "OLED_Display.h"
 // OLED page handlers for ESP-NOW and MQTT (defined in OLED_SetupWizard.cpp)
 void handleOLEDESPNowPage(SetupWizardResult& result, bool& running);
 void handleOLEDMQTTPage(SetupWizardResult& result, bool& running);
@@ -1789,7 +1792,6 @@ bool wizardSaveAndApplySettings(SetupWizardResult& result) {
 #endif
 #if ENABLE_HTTPS
   if (gSettings.httpAutoStart && gSettings.httpsEnabled) {
-    extern const char* cmd_certgen(const String&);
     broadcastOutput("[Wizard] HTTPS selected - generating self-signed certificate (ECDSA, ~1s)...");
     broadcastOutput(cmd_certgen(String("")));
   }

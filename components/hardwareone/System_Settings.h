@@ -1660,4 +1660,6 @@ bool writeSettingsJson();
 // Apply persisted settings to runtime flags/state
 void applySettings();
 
+extern const char* SETTINGS_JSON_FILE;
+
 #endif // SYSTEM_SETTINGS_H

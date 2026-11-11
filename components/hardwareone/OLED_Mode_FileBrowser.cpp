@@ -28,6 +28,9 @@
 // the System_Utils.cpp G2_Glasses.h bug; found by tools/build_coverage.sh pass 2.
 #include "System_MemUtil.h"         // ps_alloc — PSRAM FileManager
 #include <new>                      // placement-new: gOledFileManager lives in PSRAM
+#if ENABLE_GPS_SENSOR && ENABLE_MAPS
+#include "System_Maps.h"
+#endif
 
 #if ENABLE_ESPNOW
 #include "System_ESPNow_Wire.h"     // V4PayloadFsListReplyHeader, V4PayloadFsEntry, FsListStatus
@@ -35,9 +38,7 @@
 #include "System_BondedPeer.h"      // BondedPeer::isPaired, peerMacBytes
 #include "System_CommandTypes.h"    // ExecReq::DeferredFn (submitDeferredToCmdExec)
 #include "System_Utils.h"  // submitDeferredToCmdExec
-// Pump a local file to a peer (multi-second), deferred through the shared
-// executor so the send never blocks the OLED render/input task.
-extern bool sendFileToMac(const uint8_t* mac, const String& localPath);
+#include "System_ESPNow.h"
 #endif
 
 // Thin wrapper over the shared oledAuthContext() builder — names the file-
@@ -69,13 +70,6 @@ class OLEDFileBrowserCtxGuard {
 #if ENABLE_GPS_SENSOR
 #include "System_Maps.h"
 #endif
-
-// External references
-extern FileManager* gOledFileManager;
-extern bool oledFileBrowserNeedsInit;
-extern bool oledMenuBack();
-
-extern String formatFileSize(size_t bytes);
 
 // ============================================================================
 // File Browser State
@@ -916,8 +910,6 @@ void prepareFileBrowserData() {
             // existed before the picker layer was added.
             if (fullPath.endsWith(".hwmap")) {
               if (MapCore::loadMapFile(fullPath.c_str())) {
-                extern bool gMapCenterSet;
-                extern bool gMapManuallyPanned;
                 requestOLEDMode(OLED_GPS_MAP, "filebrowser.loadmap", false);
                 gMapCenterSet = false;
                 gMapManuallyPanned = false;
@@ -1376,8 +1368,6 @@ void oledFileBrowserBack() {
 // ============================================================================
 
 static bool fileBrowserInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
-  extern NavEvents gNavEvents;
-
 #if ENABLE_ESPNOW
   // PEER source operates on its own state (sPeer*) — input goes through the
   // peerNavigateUp/peerActivate helpers rather than oledFileBrowserUp/etc.
@@ -1525,8 +1515,6 @@ static bool fileBrowserInputHandler(int deltaX, int deltaY, uint32_t newlyPresse
   }
   return false;
 }
-
-extern void displayFileBrowserRendered();
 
 // Entry hook. A forward entry sets the lazy oledFileBrowserNeedsInit flag
 // (reinit happens on the next render); back-navigation keeps your folder/scroll

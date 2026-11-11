@@ -6,15 +6,15 @@
 #include "System_SensorRegistry.h"
 #include "System_BuildConfig.h"
 #include <string.h>
+#if ENABLE_CAMERA_SENSOR
+#include "System_Camera_DVP.h"
+#endif
 
 // ============================================================================
 // Camera Sensor Callbacks
 // ============================================================================
 
 #if ENABLE_CAMERA_SENSOR
-extern bool gCameraRunning;
-extern bool cameraConnected;
-
 static bool getCameraConnected() {
   return cameraConnected;
 }
@@ -39,8 +39,6 @@ static const char* cameraValidTasks[] = { SENSOR_TASK_STREAMING, nullptr };
 #if ENABLE_MICROPHONE
 #include "HAL_Audio.h"   // audioAnySourceAvailable — "connected" = a mic source is reachable
 #include "System_Microphone.h"
-extern bool gMicRunning;
-extern bool micConnected;
 
 static bool getMicConnected() {
   // "Connected" = a source is actually available right now (PDM present OR G2

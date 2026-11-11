@@ -22,8 +22,7 @@
 #include "System_Clock.h"   // isValidEpoch — honest day labels on Trends
 
 #include <time.h>
-
-extern uint32_t gBootCounter;  // session id — bumps each boot (HardwareOne.cpp)
+#include "System_Utils.h"
 
 // =============================================================================
 // Health history + graph renderer. Portable aside from reading live telemetry

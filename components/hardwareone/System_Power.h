@@ -161,7 +161,6 @@ bool powerLocalDisplayAwake();
 // `power json` (CLI/BLE) and the web /api/power/status both call it, so every
 // interface returns one schema.
 //
-// Declared at the call sites with a local `extern` (same pattern as
-// buildBatteryJson) so this header does not pull in ArduinoJson.
+// Declared in System_PowerJson.h so this header does not pull in ArduinoJson.
 
 #endif

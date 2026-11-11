@@ -73,6 +73,10 @@ class CommandArgs {
   String arg(size_t n) const { return parts.at(n); }
 };
 struct CommandEntry { const char* name; const char* description; bool admin; const char* (*fn)(const String&); const char* help; };
+// The module's command table, as System_CommandRegistry.h declares it (the
+// test checks that header); without it the table has internal linkage here.
+extern const CommandEntry liveAudioCommands[];
+extern const size_t liveAudioCommandsCount;
 enum { SOURCE_UART, SOURCE_INTERNAL, SOURCE_WEB };
 struct AuthContext { int transport = SOURCE_UART; String user = "test"; String path; } auth;
 const AuthContext& currentAuthContext() { return auth; }

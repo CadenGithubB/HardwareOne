@@ -286,6 +286,8 @@ extern const OLEDMenuItem oledMenuCategory4[];
 extern const int oledMenuCategory4Count;
 extern const OLEDMenuItem oledMenuCategory5[];
 extern const int oledMenuCategory5Count;
+extern const OLEDMenuItem oledSensorMenuItems[];
+extern const int oledSensorMenuItemCount;
 
 // Menu availability enum for checking if menu items are accessible
 enum class MenuAvailability {

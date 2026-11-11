@@ -76,10 +76,6 @@ TaskHandle_t gTofTaskHandle = nullptr;
 volatile UBaseType_t gTofWatermarkMin = (UBaseType_t)0xFFFFFFFF;
 volatile UBaseType_t gTofWatermarkNow = (UBaseType_t)0;
 
-// Forward declarations (implementations in main .ino)
-extern bool tofInit();
-extern bool createToFTask();
-
 // Queue system functions now in System_I2C.h
 
 // ============================================================================

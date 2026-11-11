@@ -62,6 +62,13 @@
 #include "System_SensorStubs.h" // Stubs for disabled sensors
 #include "i2csensor_rda5807.h"             // fmRadioEnabled, radioInitialized, fmRadioBuildDataJSON
 #include "System_MemUtil.h"             // ps_alloc, AllocPref
+#include "System_Camera_Video.h"
+#if ENABLE_CAMERA_SENSOR
+#include "System_Camera_DVP.h"
+#endif
+#if ENABLE_MICROPHONE
+#include "System_Microphone.h"
+#endif
 
 
 // streamSensorsContent() is now defined as inline in web_sensors.h with I2C_SENSORS_ENABLED conditional
@@ -258,7 +265,6 @@ esp_err_t handleSensorData(httpd_req_t* req) {
 #endif
       } else if (sensorType == "camera") {
 #if ENABLE_CAMERA_SENSOR
-        extern const char* buildCameraStatusJson();
         const char* json = buildCameraStatusJson();
         sendJsonResponse(req, json);
         return ESP_OK;
@@ -268,7 +274,6 @@ esp_err_t handleSensorData(httpd_req_t* req) {
 #endif
       } else if (sensorType == "microphone") {
 #if ENABLE_MICROPHONE
-        extern const char* buildMicrophoneStatusJson();
         const char* json = buildMicrophoneStatusJson();
         sendJsonResponse(req, json);
         return ESP_OK;
@@ -332,9 +337,6 @@ esp_err_t handleSensorData(httpd_req_t* req) {
 #endif
       } else if (sensorType == "rtc") {
 #if ENABLE_RTC_SENSOR
-        extern bool gRtcRunning;
-        extern bool gRtcConnected;
-        
         if (!gRtcRunning || !gRtcConnected) {
           sendJsonResponse(req, "{\"error\":\"not_enabled\"}");
           return ESP_OK;
@@ -351,7 +353,6 @@ esp_err_t handleSensorData(httpd_req_t* req) {
 
         // RTC stores UTC time - convert to local time using gSettings.tzOffsetMinutes
         // Manual calculation to avoid unsafe setenv/tzset that causes watchdog timeout
-        extern Settings gSettings;
         int offsetMinutes = gSettings.tzOffsetMinutes;
         
         // Convert to minutes since midnight, apply offset, handle day rollover
@@ -540,7 +541,6 @@ esp_err_t handleCameraStatus(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);
 
 #if ENABLE_CAMERA_SENSOR
-  extern const char* buildCameraStatusJson();
   const char* j = buildCameraStatusJson();
   sendJsonResponse(req, j);
 #else
@@ -561,9 +561,6 @@ esp_err_t handleCameraFrame(httpd_req_t* req) {
   if (!webGuestAccessAllowed(req, ctx)) return ESP_OK;
 
 #if ENABLE_CAMERA_SENSOR
-  extern bool gCameraRunning;
-  extern uint8_t* captureFrame(size_t* outLen);
-
   if (!gCameraRunning) {
     DEBUG_CAMERAF("/api/camera/frame: camera not enabled, returning 503");
     httpd_resp_set_status(req, "503 Service Unavailable");
@@ -647,8 +644,6 @@ esp_err_t handleMicRecordingsList(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);
 
 #if ENABLE_MICROPHONE
-  extern String getRecordingsList();
-
   // getRecordingsList enumerates via currentAuthContext() (per-task TLS).
   // This is a direct HTTP handler with no identity installed, so the read of
   // /sd/recordings would otherwise be denied. Install the authenticated web
@@ -1093,8 +1088,6 @@ void registerSensorHandlers(httpd_handle_t server) {
   // SD-equipped board, independent of whether a camera is compiled in.
   // (Recording is camera-gated; these handlers degrade gracefully — they return
   // an empty list / "SD unavailable" when there's no SD card.)
-  extern esp_err_t handleVideoRecordingsList(httpd_req_t* req);
-  extern esp_err_t handleVideoRecordingFile(httpd_req_t* req);
   static const httpd_uri_t vidList = { .uri = "/api/videos", .method = HTTP_GET, .handler = handleVideoRecordingsList, .user_ctx = NULL };
   static const httpd_uri_t vidFile = { .uri = "/api/videos/file", .method = HTTP_GET, .handler = handleVideoRecordingFile, .user_ctx = NULL };
   httpd_register_uri_handler(server, &vidList);

@@ -15,13 +15,17 @@
 #endif
 #include "System_BuildConfig.h"
 #include "System_CommandRegistry.h"
+#include "System_Battery.h"
+#if ENABLE_ESPNOW && ENABLE_BONDED_MODE
+#include "System_ESPNow.h"
+#endif
 
 // ---------------------------------------------------------------------------
 // ESP-NOW-off stub
 // ---------------------------------------------------------------------------
 // isEspNowInitialized() is DEFINED in System_ESPNow.cpp, which CMake drops when
 // ENABLE_ESPNOW is 0 — but three always-compiled TUs call it unconditionally:
-// System_WiFi.cpp (radio-ownership decisions, via a local `extern` declaration),
+// System_WiFi.cpp (radio-ownership decisions),
 // System_RamFlush.cpp (RF_ESPNOW resume) and WebPage_Sensors.cpp. So the
 // ESPNOW=0 configuration has never actually linked; the flag existed but the
 // build was never tried.
@@ -147,9 +151,6 @@ void secureClearString(String& s) {
 #include "System_I2C.h"     // For I2CSensorEntry, ConnectedDevice, MAX_CONNECTED_DEVICES
 #include "System_MemUtil.h"       // For AllocPref
 #include "System_MemTracker.h"
-
-// Extern declarations for logging functions (implemented in .ino)
-extern bool appendLineWithCap(const char* path, const String& line, size_t capBytes);
 
 // Runtime subsystem interfaces used by the utilities and executor below
 #include "System_Filesystem.h"
@@ -493,8 +494,6 @@ bool writeTextAtomic(const char* path, const String& content, const AuthContext&
 // Command Audit Logging (Always-On)
 // ============================================================================
 
-extern bool gCLIValidateOnly;
-
 // Read-only status commands that the web UI polls on a tick. Both the
 // serial broadcast and the audit-file write are skipped for these —
 // the broadcast was filling the serial log with one line per poll
@@ -595,7 +594,6 @@ static void logCommandExecutionPrepared(const AuthContext& ctx,
   char auditLine[384];
   snprintf(auditLine, sizeof(auditLine), "[CMD] %s@%s: %s -> %s",
            ctx.user.c_str(), source, redactedCmd.c_str(), status);
-  extern void broadcastOutputCore_Routed(const char* text, size_t len, uint8_t route);
   // Exclude BLE: its notify characteristic is the command *response* channel
   // the app reads JSON replies from. Echoing the audit line onto it would
   // interleave with the reply. The echo still reaches serial / web / file /
@@ -1187,7 +1185,6 @@ const char* cmd_cpufreq(const String& argsInput) {
       return "Error: CPU frequency change failed";
     }
     {
-      extern void batteryLogEvent(const char* event);
       char ev[24];
       snprintf(ev, sizeof(ev), "cpufreq:%luMHz", (unsigned long)newFreq);
       batteryLogEvent(ev);
@@ -1252,7 +1249,6 @@ const char* cmd_lightsleep(const String& argsInput) {
   oledPrepareForSleep();
 
   // Annotate the battery log so the discharge curve shows the sleep window.
-  extern void batteryLogEvent(const char* event);
   {
     char ev[24];
     snprintf(ev, sizeof(ev), "sleep:light:%ds", seconds);
@@ -1306,7 +1302,6 @@ const char* cmd_deepsleep(const String& /*argsInput*/) {
   delay(700);
   oledPrepareForSleep();
   {
-    extern void batteryLogEvent(const char* event);
     batteryLogEvent("sleep:deep");
   }
   // The radio companion follows: stop what uses it and hold the C6 in reset
@@ -1604,8 +1599,6 @@ void buildSystemInfoJson(JsonDocument& doc, bool includeDeviceList) {
     //   devices       = compiled sensor TYPES (capability)
     //   activeDevices = devices physically connected NOW; same source as the
     //                   deviceList below, so it can never exceed/contradict it.
-    extern int i2cCompiledSensorCount();
-    extern int i2cConnectedDeviceCount();
     i2c["devices"]       = i2cCompiledSensorCount();
     i2c["activeDevices"] = i2cConnectedDeviceCount();
     i2c["sdaPin"]   = gSettings.i2cSdaPin;
@@ -1615,7 +1608,6 @@ void buildSystemInfoJson(JsonDocument& doc, bool includeDeviceList) {
     // unbounded section. Built by the SAME helper that backs `devices json`
     // (defined in System_I2C.cpp) so the two views never diverge.
     if (includeDeviceList) {
-      extern void buildI2cDeviceListJson(JsonArray& arr, bool verbose = false);
       JsonArray devs = i2c["deviceList"].to<JsonArray>();
       buildI2cDeviceListJson(devs);
     }
@@ -1935,11 +1927,6 @@ const char* cmd_fsusage(const String& argsInput) {
   return "[System] Filesystem usage displayed";
 }
 
-// Forward declarations for encryption/hashing functions (in settings.cpp and user_system.cpp)
-extern String encryptString(const String& plaintext);
-extern String hashUserPassword(const String& plaintext);
-extern bool verifyUserPassword(const String& plaintext, const String& hash);
-
 const char* cmd_testencryption(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
@@ -2079,8 +2066,6 @@ const char* cmd_reboot(const String& originalCmd) {
 #include "System_User.h"   // USERS_JSON_FILE
 #include "System_VFS.h"
 #include "System_MemDiag.h"
-
-extern const char* USERS_JSON_FILE;  // defined in System_User.cpp
 
 // One-shot timer callback: actually performs the reboot 1 second after
 // scheduling. Runs on the esp_timer task, not cmd_exec, so it can call
@@ -2629,10 +2614,6 @@ extern const size_t commandsCount = sizeof(commands) / sizeof(commands[0]);
 
 // Battery commands (from System_Battery.cpp)
 #if ENABLE_BATTERY_MONITOR
-extern const char* cmd_battery_status(const String& argsInput);
-extern const char* cmd_battery_calibrate(const String& argsInput);
-extern const char* cmd_batterylog(const String& argsInput);
-
 // Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
 extern const CommandEntry batteryCommands[] = {
   {"batterystatus", "Show battery voltage, charge level, and status", false, cmd_battery_status},
@@ -2649,12 +2630,6 @@ extern const size_t batteryCommandsCount = sizeof(batteryCommands) / sizeof(batt
 // ============================================================================
 // Memory Reporting Functions
 // ============================================================================
-
-// External dependencies for device registry
-extern int connectedDeviceCount;
-extern ConnectedDevice connectedDevices[];
-extern const I2CSensorEntry i2cSensors[];
-extern const size_t i2cSensorsCount;
 
 // Print detailed breakdown of sensor libraries from device registry
 // Returns total bytes via outTotal parameter
@@ -2763,14 +2738,6 @@ void printConnectedDevicesLibraries(size_t& outTotal) {
 // ============================================================================
 // System Diagnostic Commands
 // ============================================================================
-
-// External task watermark globals
-extern volatile UBaseType_t gTofWatermarkNow, gTofWatermarkMin;
-extern volatile UBaseType_t gImuWatermarkNow, gImuWatermarkMin;
-extern volatile UBaseType_t gThermalWatermarkNow, gThermalWatermarkMin;
-
-// External memory allocation function
-extern void* ps_alloc(size_t size, AllocPref pref, const char* tag);
 
 // Comprehensive memory report - shows what's consuming memory (like Task Manager)
 void printMemoryReport() {
@@ -3665,14 +3632,6 @@ const char* cmd_perftop(const String& originalCmd) {
 // Command Execution Functions - MIGRATED from main .ino
 // ============================================================================
 // External dependencies for command execution
-extern bool gCLIValidateOnly;
-extern QueueHandle_t gCmdExecQ;
-extern TaskHandle_t gCmdExecTaskHandle;
-
-// External functions
-extern bool handleHelpNavigation(const String& cmd, char* out, size_t outSize);
-extern String exitToNormalBanner();
-extern bool isAdminUser(const String& user);
 
 // Note: resolveRegistryCommandKey() is now defined in command_system.cpp
 
@@ -4324,23 +4283,6 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
     }
 
     #if ENABLE_ESPNOW && ENABLE_BONDED_MODE
-    extern bool isBondSynced();
-    extern bool isBondSessionTokenValid();
-    extern String buildBondedCommandPayload(const String& command);
-    extern bool v4_send_frame(const uint8_t* dstMac, uint8_t type, uint16_t flags,
-                              uint32_t msgId, const uint8_t* payload, uint16_t payloadLen, uint8_t ttl);
-    // Session-aware sender used by every other CMD send site (e.g. System_ESPNow.cpp
-    // lines 9175/11249). AEAD-wraps in a SESSION_FRAME when a session is active;
-    // otherwise queues the frame and kicks SESSION_OPEN (Phase 1 pending-frame path).
-    // Used here so the bonded command — which carries the static @BOND token — is
-    // never sent in cleartext on the air (a sniffed token = arbitrary RCE).
-    extern bool v4_send_encrypted_or_queue(const uint8_t dst[6], uint8_t type, uint16_t baseFlags,
-                                           uint32_t msgId, const uint8_t* plaintext, uint16_t plaintextLen,
-                                           uint8_t ttl, char* outStatus = nullptr, size_t outStatusLen = 0);
-    extern uint32_t generateMessageId();
-    extern bool parseMacAddress(const String& macStr, uint8_t mac[6]);
-    extern Settings gSettings;
-    
     // Gate on valid session token — this is the actual auth credential needed
     // to send remote commands. Implies bond is synced on both roles.
     if (!isBondSessionTokenValid()) {
@@ -4924,7 +4866,6 @@ static bool sessionCommandTargetAvailable(CommandSource source) {
   if (source == SOURCE_UART) return uartLinkIsRunning();
   if (source == SOURCE_LOCAL_DISPLAY) {
 #if ENABLE_OLED_DISPLAY
-    extern bool oledConnected;
     // gOledRunning is deliberately false while idle power-save has blanked a
     // still-connected panel.  Sleeping is not a transport teardown and must
     // not make its live session impossible to administer.

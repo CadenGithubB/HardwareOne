@@ -13,10 +13,6 @@
 #include "System_EventCatalog.h"  // shared indexed event picker
 #include "OLED_Utils.h"   // oledRunCommand, executeOLEDCommandWithResult
 
-// External references
-extern bool oledMenuBack();
-extern void broadcastOutput(const String& msg);
-
 // ============================================================================
 // Automation List Data Model
 // ============================================================================
@@ -528,7 +524,6 @@ static void wizDraw() {
 // active and the keyboard is NOT (keyboard input is centrally intercepted).
 // Returns true (input consumed).
 static bool wizHandleInput(uint32_t newlyPressed) {
-  extern NavEvents gNavEvents;
   if (sWizStep == AW_CONFIRM) {
     if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) { wizCreate(); return true; }
     if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) { wizAbort();  return true; }
@@ -843,7 +838,6 @@ static void autoBack() {
 
 static bool automationsInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
   if (oledGuestBlocksMutate()) return true;
-  extern NavEvents gNavEvents;
 
   // Create-wizard keyboard completion poll (CLIInput idiom). While a keyboard
   // step is active this handler is never called — the central pump owns input

@@ -19,8 +19,6 @@
 #include "System_Debug.h"
 #include "System_Utils.h"
 
-extern OLEDConsoleBuffer gOledConsole;
-
 static bool     sKeyboardActive  = false;
 static bool     sAwaitingResult  = false;
 // Snapshot of the console line count taken at command submit time,

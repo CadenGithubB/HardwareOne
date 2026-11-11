@@ -222,10 +222,6 @@ static int16_t* g_localFrame = nullptr;
 
 
 
-// Forward declarations (implementations in main .ino)
-extern bool thermalInit();
-extern bool thermalPoll();
-
 // MIN_RESTART_DELAY_MS defined in System_I2C.h
 
 // Queue system functions now in System_I2C.h
@@ -592,8 +588,6 @@ const char* cmd_thermalrotation(const String& argsInput) {
 // ============================================================================
 
 bool thermalInit() {
-  extern bool gMlx90640Initialized;
-  
   if (gMLX90640 != nullptr) {
     return true;
   }
@@ -645,7 +639,6 @@ bool thermalInit() {
 static bool gThermalHot = false;
 
 bool thermalPoll() {
-  extern bool gMlx90640Initialized;
   // interpolateThermalFrame is defined at the bottom of this file
   
   DEBUG_THERMAL_POLLINGF("thermalPoll() entry");
@@ -1343,8 +1336,8 @@ const char* cmd_thermaldiag(const String& argsInput) {
 // ============================================================================
 
 // External device-level command handlers (defined in i2c_system.cpp)
-extern const char* cmd_thermaltargetfps(const String& argsInput);
-extern const char* cmd_thermaldevicepollms(const String& argsInput);
+const char* cmd_thermaltargetfps(const String& argsInput);
+const char* cmd_thermaldevicepollms(const String& argsInput);
 
 const char* cmd_thermalautostart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
@@ -1456,7 +1449,6 @@ void thermalTask(void* parameter) {
         gMLX90640 = nullptr;
       }
       // Free static buffers in thermalPoll to prevent heap corruption on restart
-      extern void resetThermalFrameBuffers();
       resetThermalFrameBuffers();
       gThermalInitRequested = false;
       gThermalInitDone = false;

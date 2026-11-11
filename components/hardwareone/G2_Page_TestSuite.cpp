@@ -2032,7 +2032,6 @@ void g2TestSuiteHandleTap(uint32_t idx) {
       if (idx == 0) {
         // <- Back: out of Test Suite, back to the System launcher (menu reorg —
         // Tests now lives under System, not as a top-level hijack row).
-        extern void g2ShowSystemMenu();
         g2ShowSystemMenu();
         return;
       }

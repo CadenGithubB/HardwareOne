@@ -213,7 +213,7 @@ String buildBondedCommandPayload(const String& command) {
 }
 bool v4_send_encrypted_or_queue(const uint8_t dst[6], uint8_t type, uint16_t baseFlags, uint32_t msgId,
                                 const uint8_t* plaintext, uint16_t plaintextLen, uint8_t ttl,
-                                char* outStatus, size_t outStatusLen) {
+                                char* outStatus = nullptr, size_t outStatusLen = 0) {  // defaults as in System_ESPNow.h
   (void)dst; (void)outStatus; (void)outStatusLen;
   gFrames.push_back({type, baseFlags, msgId,
                      std::string(reinterpret_cast<const char*>(plaintext), plaintextLen), ttl});

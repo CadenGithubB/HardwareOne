@@ -3,7 +3,7 @@
 
 originPrefix (its forward declaration with the default suffix, and its
 definition) and appendCommandToFeed come from HardwareOne.cpp unchanged, in
-source order. The CM5/live-audio classifiers, redactCmdForAudit and the web
+source order; the feed writer's declaration comes from WebServer_Utils.h. The CM5/live-audio classifiers, redactCmdForAudit and the web
 mirror are recorded boundaries.
 """
 from __future__ import annotations
@@ -30,7 +30,11 @@ def generate() -> str:
     require(definition is not None, "HardwareOne.cpp defines originPrefix")
     require(source.count("originPrefix(source, ctx.auth.user, ctx.auth.ip)") == 1,
             "the command-reply caller uses the default (empty) suffix")
-    production = "\n\n".join((declaration[0],
+    # The feed writer's default user/ip arguments are in its one declaration.
+    feed = re.findall(r"^void appendCommandToFeed\([^;{]*\);",
+                      (COMPONENT / "WebServer_Utils.h").read_text(), re.M)
+    require(len(feed) == 1, "WebServer_Utils.h declares appendCommandToFeed once")
+    production = "\n\n".join((declaration[0], feed[0],
                               extract_block(source, "void appendCommandToFeed("),
                               extract_block(source[definition.start():], "static String originPrefix(")))
     harness = (HERE / "command_feed_harness.cpp").read_text()

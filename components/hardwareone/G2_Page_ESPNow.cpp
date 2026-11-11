@@ -1047,7 +1047,6 @@ static void handleMainTap(uint32_t idx) {
     gSelectedPeer = -1;
     setSub(ESPN_APP_SUB_MAIN);
     g2SetHijackPage(G2_HIJACK_PAGE_MAIN);
-    extern void g2RedrawHijackMainMenu();
     g2RedrawHijackMainMenu();
     return;
   }

@@ -32,6 +32,10 @@
 
 #include <atomic>
 #include "System_CommandRegistry.h"
+#if ENABLE_OLED_DISPLAY
+#include "i2csensor_ds3231.h"
+#include "i2csensor_sths34pf80.h"
+#endif
 
 #if ENABLE_OLED_DISPLAY
 // Auth/session changes may originate on cmd_exec. That task owns the
@@ -293,9 +297,6 @@ const OLEDNotification* oledNotificationGet(int index) {
   return &sNotifView[index];  // index 0 = newest
 }
 
-// Defined later in this file — header text when mode is OLED_UNAVAILABLE
-extern String unavailableOLEDTitle;
-
 // Get mode name from current OLED mode
 const char* oledGetCurrentModeName() {
   return getOLEDModeName(currentOLEDMode);
@@ -317,8 +318,6 @@ int oledRenderHeader(Adafruit_SSD1306* display, const OLEDHeaderInfo* info) {
   const char* title = headerInfo.title;
   if (!title) {
     // Build breadcrumb for menu category submenus
-    extern int oledMenuCategorySelected;
-    extern const OLEDMenuItem oledMenuCategories[];
     static char breadcrumbBuf[22];  // "Menu > " (7) + name (up to 14) + null
     
     if (currentOLEDMode == OLED_MENU && oledMenuCategorySelected >= 0) {
@@ -328,7 +327,6 @@ int oledRenderHeader(Adafruit_SSD1306* display, const OLEDHeaderInfo* info) {
       title = breadcrumbBuf;
     } else if (currentOLEDMode == OLED_SETTINGS) {
       // Settings breadcrumb - show "Set>ModuleName" when in a submenu
-      extern SettingsEditorContext gSettingsEditor;
       if (gSettingsEditor.currentModule && gSettingsEditor.state != SETTINGS_CATEGORY_SELECT) {
         snprintf(breadcrumbBuf, sizeof(breadcrumbBuf), "Set>%s", 
                  gSettingsEditor.currentModule->name);
@@ -341,13 +339,11 @@ int oledRenderHeader(Adafruit_SSD1306* display, const OLEDHeaderInfo* info) {
       // WHAT they're picking (e.g. "Pick model") and is more useful at a
       // glance than the current path. The path is visible in the file
       // listing itself when navigation matters.
-      extern const char* oledFilePickerTitle();
       const char* pickerTitle = oledFilePickerTitle();
       if (pickerTitle && pickerTitle[0]) {
         title = pickerTitle;
       } else {
         // Viewer mode: show "Files>folder/sub" breadcrumb.
-        extern FileManager* gOledFileManager;
         if (gOledFileManager) {
           const char* path = gOledFileManager->getCurrentPath();
           if (path && strcmp(path, "/") != 0) {
@@ -372,7 +368,6 @@ int oledRenderHeader(Adafruit_SSD1306* display, const OLEDHeaderInfo* info) {
       // The conversation (device-detail) view surfaces the interaction mode in
       // the header ("ESPNOW: Text/Remote/File") instead of a separate in-body
       // "Mode:" line; other ESP-NOW views return nullptr and keep "ESP-NOW".
-      extern const char* oledEspNowHeaderTitle();
       const char* espnowTitle = oledEspNowHeaderTitle();
       title = (espnowTitle && espnowTitle[0]) ? espnowTitle : oledGetCurrentModeName();
 #endif
@@ -932,9 +927,6 @@ bool handleNotificationsInput(int deltaX, int deltaY, uint32_t newlyPressed) {
   return false;
 }
 
-// Notifications mode registration
-extern void displayNotifications();
-
 static bool notificationsRegisteredInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
   return handleNotificationsInput(deltaX, deltaY, newlyPressed);
 }
@@ -1268,7 +1260,6 @@ OLEDScrollItem* oledScrollGetItem(OLEDScrollState* state, int index) {
 bool oledScrollHandleNav(OLEDScrollState* state, bool leftRightNav) {
   if (!state || state->itemCount == 0) return false;
   oledScrollClampSelection(state);  // fix a stale cursor after a keep-selection rebuild
-  extern NavEvents gNavEvents;
   bool handled = false;
   if (gNavEvents.up || (leftRightNav && gNavEvents.left)) {
     oledScrollUp(state);
@@ -2881,13 +2872,6 @@ uint32_t OLEDConsoleBuffer::getTimestamp(int index) const {
 #include "Bluetooth.h"
 #endif
 
-// External state variables needed for context-aware footer hints
-extern String unavailableOLEDTitle;
-extern String unavailableOLEDReason;
-
-// FileBrowserRenderData defined in System_FileManager.h (included above)
-extern FileBrowserRenderData fileBrowserRenderData;
-
 // Get specific action text for Bluetooth X button based on current state
 static const char* getBluetoothActionText() {
 #if ENABLE_BLUETOOTH
@@ -2960,7 +2944,6 @@ void drawOLEDFooter() {
   
   // Check if keyboard is active - override mode hints with keyboard hints
   if (oledKeyboardIsActive()) {
-    extern OLEDKeyboardState gOledKeyboardState;
     if (gOledKeyboardState.mode == KEYBOARD_MODE_PATTERN) {
       oledDisplay->print("A:Done Y:Undo B:");
       drawBackArrowIcon(oledDisplay, footerY);
@@ -3007,7 +2990,6 @@ void drawOLEDFooter() {
     case OLED_ESPNOW:
       #if ENABLE_ESPNOW
       {
-        extern OLEDEspNowState gOledEspNowState;
         switch (gOledEspNowState.currentView) {
           case ESPNOW_VIEW_INIT_PROMPT:
             hints = "Y:Setup B:Back";
@@ -3050,7 +3032,6 @@ void drawOLEDFooter() {
     case OLED_FILE_BROWSER: {
       // Per-level hints: 0=LIST, 1=ACTION_MENU, 2=VIEW (see FbLevel in
       // OLED_Mode_FileBrowser.cpp). Files now open an action menu on A.
-      extern int oledFileBrowserActiveLevel();
       const int fbLevel = oledFileBrowserActiveLevel();
       if (fbLevel == 1) {
         hints = "A:Sel B:Back";
@@ -3072,8 +3053,6 @@ void drawOLEDFooter() {
     case OLED_RTC_DATA:
 #if ENABLE_RTC_SENSOR
       {
-        extern bool gRtcRunning;
-        extern bool gRtcConnected;
         hints = (gRtcRunning && gRtcConnected) ? "X:Stop B:Back" : "X:Start B:Back";
       }
 #else
@@ -3084,8 +3063,6 @@ void drawOLEDFooter() {
     case OLED_PRESENCE_DATA:
 #if ENABLE_PRESENCE_SENSOR
       {
-        extern bool gPresenceRunning;
-        extern bool gPresenceConnected;
         hints = (gPresenceRunning && gPresenceConnected) ? "X:Stop B:Back" : "X:Start B:Back";
       }
 #else
@@ -3099,8 +3076,6 @@ void drawOLEDFooter() {
     case OLED_CLI_VIEWER:
       {
         // Show selected/total in footer
-        extern OLEDConsoleBuffer gOledConsole;
-        extern int getCLIViewerSelectedIndex();
         int lineCount = gOledConsole.getLineCount();
         int selected = getCLIViewerSelectedIndex();
         static char cliHints[32];
@@ -3118,7 +3093,6 @@ void drawOLEDFooter() {
 #if ENABLE_LLM_BACKEND
         // The LLM screen's hint changes with its state (home, chat, pickers)
         // and carries its status lines; it sets it while rendering.
-        extern const char* oledLLMFooterHint();
         hints = oledLLMFooterHint();
 #else
         hints = "B:Back";
@@ -3144,7 +3118,6 @@ void drawOLEDFooter() {
     case OLED_GPS_MAP:
       {
 #if ENABLE_MAPS
-        extern bool gMapMenuOpen;
         if (gMapMenuOpen) {
           hints = "A:Select B:Close";
         } else {
@@ -3640,7 +3613,6 @@ void oledMarkDirtyUntil(unsigned long untilMs) {
 
 bool oledIsDirty() {
   (void)oledToastActive(); // Expiry must invalidate even an otherwise static frame.
-  extern volatile unsigned long gSensorStatusSeq;
 
   if (oledDirtySeq.load(std::memory_order_acquire) !=
       oledConsumedDirtySeq) return true;
@@ -3655,8 +3627,6 @@ bool oledIsDirty() {
 // Called once per frame, at the moment updateOLEDDisplay() commits to rendering.
 // Anything that changes after this point stays pending for the next frame.
 static void oledSnapshotFrameSeqs() {
-  extern volatile unsigned long gSensorStatusSeq;
-
   oledFrameDirtySeq   = oledDirtySeq.load(std::memory_order_acquire);
   oledFrameGamepadSeq = oledLastRenderedGamepadSeq;
   inputActivitySequence(oledFrameGamepadSeq, 5);
@@ -3683,20 +3653,6 @@ void oledSetAlwaysDirty(bool always) {
 // The actual display object is managed by Display_HAL.cpp
 bool oledConnected = false;
 bool gOledRunning = false;
-
-// ESP-NOW mesh functions from .ino
-// gMeshPeers, gMeshPeerSlots declared in System_ESPNow.h (pointer, not array)
-extern String macToHexString(const uint8_t* mac);
-extern void macFromHexString(const String& s, uint8_t out[6]);
-extern bool isSelfMac(const uint8_t* mac);
-extern bool isMeshPeerAlive(const MeshPeerHealth* peer);
-
-// Display helper functions
-extern void displayAnimation();
-
-// Device registry (from i2c_system.cpp)
-extern ConnectedDevice connectedDevices[];
-extern int connectedDeviceCount;
 
 // Forward declarations for two-phase rendering functions
 void prepareFileBrowserData();
@@ -3899,10 +3855,6 @@ const OLEDModeEntry* getOLEDModeByIndex(size_t index) {
   return nullptr;
 }
 
-// Forward declarations for quick settings (defined in oled_quick_settings.cpp)
-extern void displayQuickSettings();
-extern bool quickSettingsInputHandler(int deltaX, int deltaY, uint32_t newlyPressed);
-
 static bool quickSettingsAvailability(String* outReason) {
   return true;
 }
@@ -3919,32 +3871,6 @@ static const OLEDModeEntry builtInQuickSettingsMode = {
   -1,
   "A:Toggle B:Back"
 };
-
-// Force linker to include OLED mode files that use static registration
-// Without these calls, the linker may drop object files with no external references
-extern void oledAuthModeInit();
-extern void oledLoggingModeInit();
-extern void oledSetPatternModeInit();
-extern void oledChangePasswordModeInit();
-extern void oledPowerModeInit();
-#if ENABLE_NEOPIXEL
-extern void oledLEDModeInit();    // OLED_Mode_LED.cpp (NeoPixel control)
-#endif
-extern void oledCLIInputModeInit();
-extern void oledMenuModeInit();   // Menu / Logo / Sensor-menu registrars (OLED_Mode_Menu.cpp)
-#if ENABLE_BLUETOOTH
-extern void oledBluetoothModeInit();   // OLED_Mode_Bluetooth.cpp
-#endif
-#if ENABLE_R1_HEALTH
-extern void oledR1HealthModeInit();    // OLED_Mode_R1_Health.cpp
-#endif
-#if ENABLE_ESPNOW && ENABLE_BONDED_MODE
-extern void oledRemoteSettingsModeInit();   // OLED_Mode_RemoteSettings.cpp
-#endif
-#if ENABLE_LLM_BACKEND
-extern void oledLLMModeInit();
-extern void oledUserManagerModeInit();   // OLED_Mode_UserManager.cpp
-#endif
 
 // Print summary of all registered OLED modes (call from setup() after static init)
 void printRegisteredOLEDModes() {
@@ -4016,33 +3942,9 @@ void enterUnavailablePage(const String& title, const String& reason) {
   requestOLEDMode(OLED_UNAVAILABLE, "unavail.enter", false);
 }
 
-extern OLEDAnimationType currentAnimation;
-extern const OLEDAnimation gAnimationRegistry[];
-extern const int gAnimationCount;
-
 // Sensor state (managed by I2C system)
 // (Sensor enabled/connected flags are provided by the per-sensor i2csensor_*.h
 // headers included above; no extern re-declarations needed here.)
-
-// Modular sensor caches (each sensor defines its own cache)
-// Includes are conditional based on sensor availability
-
-// Settings and EspNowState now come from espnow_system.h -> settings.h
-
-// ESP-NOW mesh state (defined in espnow_system.h or stubs)
-#if ENABLE_ESPNOW
-// gEspNow already declared in espnow_system.h
-extern size_t gMeshTopologySize;
-#else
-// ESP-NOW stubs provide gEspNow, gMeshTopology, gMeshPeers
-static size_t gMeshTopologySize = 0;
-#endif
-
-// Helper functions
-extern bool meshEnabled();
-extern String getEspNowDeviceName(const uint8_t* mac);
-// macToHexString, macFromHexString, and macEqual6 now in espnow_system.h
-extern void imuUpdateActions();
 
 // Debug flags from debug_system.h (gDebugFlags, DEBUG_SENSORS_FRAME, etc.)
 
@@ -4230,9 +4132,6 @@ static void oledCommitFrame() {
 }
 
 void updateOLEDDisplay() {
-  // animationLastUpdate, animationFrame, animationFPS are now defined at top of file
-  extern void displayAnimation();
-
   // The framebuffer, navigation tree, keyboards and legacy display-session
   // mirror are single-owner state. Command handlers may request a redraw from
   // cmd_exec, but they must never run the render/input pump themselves.
@@ -4269,7 +4168,6 @@ void updateOLEDDisplay() {
 #endif
 
   // Skip normal rendering during First-Time Setup - FTS screens render directly
-  extern volatile FirstTimeSetupState gFirstTimeSetupState;
   if (gFirstTimeSetupState == SETUP_IN_PROGRESS) {
     return;
   }
@@ -5417,11 +5315,6 @@ int oledMenuSelectedIndex = 0;
 int oledMenuCategorySelected = -1;  // -1 = showing categories, 0-5 = in category submenu
 int oledMenuCategoryItemIndex = 0;  // Selected item within category
 
-// External dependencies for boot logic
-extern const char* USERS_JSON_FILE;
-extern int connectedDeviceCount;
-extern ConnectedDevice connectedDevices[];
-
 // ============================================================================
 // OLED Animation System - moved to OLED_Mode_Animations.cpp
 // ============================================================================
@@ -6005,7 +5898,6 @@ static MenuAvailability oledModeFeatureState(OLEDMode mode, String* outReason) {
         return MenuAvailability::NOT_BUILT;
 #else
       {
-        extern bool gPresenceConnected;
         if (gPresenceConnected) {
           return MenuAvailability::AVAILABLE;
         }
@@ -6089,8 +5981,6 @@ bool oledMenuBack() {
   }
 
   // We're in OLED_MENU - handle category submenu back
-  extern int oledMenuCategorySelected;
-  extern int oledMenuCategoryItemIndex;
   if (oledMenuCategorySelected >= 0) {
     oledMenuCategorySelected = -1;
     oledMenuCategoryItemIndex = 0;
@@ -6758,7 +6648,6 @@ bool processOLEDInput() {
     uint32_t pressedLast = ~lastButtonState;
     uint32_t newlyPressed = (pressedNow & ~pressedLast) | latchedPresses;
     
-    extern bool bondModeInputHandler(int deltaX, int deltaY, uint32_t newlyPressed);
     if (bondModeInputHandler(deltaX, deltaY, newlyPressed)) {
       inputProcessed = true;
     }
@@ -7102,17 +6991,6 @@ void localDisplaySessionTick() {
 }
 
 #if ENABLE_OLED_DISPLAY
-extern void oledAuthModeResetSessionState();
-extern void oledChangePasswordModeResetSessionState();
-extern void oledCLIInputResetSessionState();
-extern void oledSetPatternModeResetSessionState();
-extern void oledNetworkModeResetSessionState();
-extern void oledUserManagerModeResetSessionState();
-extern void oledFileBrowserResetSessionState();
-#if ENABLE_AUTOMATION
-extern void oledAutomationsModeResetSessionState();
-#endif
-
 static void oledResetLocalDisplaySessionTransients() {
   // Drop action callbacks before clearing their backing buffers. These
   // callbacks were admitted by the previous identity and must never execute

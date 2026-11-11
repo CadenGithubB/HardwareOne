@@ -1564,7 +1564,6 @@ static void appendTrackedObjectsJson(JsonDocument& doc) {
 static esp_err_t handleEIOrganize(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);
 
-  extern bool filesystemReady;
   if (!filesystemReady) {
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, "{\"success\":false,\"error\":\"filesystem_not_ready\"}", HTTPD_RESP_USE_STRLEN);

@@ -43,10 +43,6 @@
 // External references
 // (Sensor enabled/connected flags are provided by the per-sensor headers above.)
 
-// Device registry
-extern ConnectedDevice connectedDevices[];
-extern int connectedDeviceCount;
-
 // OLED display constants are macros defined in OLED_Display.h:
 // SCREEN_WIDTH = 128, OLED_CONTENT_HEIGHT = SCREEN_HEIGHT - OLED_FOOTER_HEIGHT
 
@@ -250,7 +246,6 @@ void displaySensorData() {
   // APDS sensor status
 #if ENABLE_APDS_SENSOR
   {
-    extern bool gApdsColorRunning;
     totalCount++;
     oledDisplay->print("APDS:    ");
     if (gApdsColorRunning) {

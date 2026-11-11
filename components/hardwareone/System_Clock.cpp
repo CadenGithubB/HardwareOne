@@ -13,16 +13,11 @@
 #include "System_Debug.h"       // logSystemEvent, BROADCAST_PRINTF
 #include "System_Automation.h"  // notifyAutomationScheduler (inline no-op stub when automations disabled)
 #include "System_QuickNote.h"   // quickNoteClockSet (inline no-op stub without QuickNote)
-
-// Duty targets that always link (their TUs are unconditional):
-extern bool filesystemReady;
-extern void writeBootAnchor();                          // System_User.cpp — upserts by anchor id
-extern void resolvePendingUserCreationTimes();          // System_User.cpp
-extern void logTimeSyncedMarkerIfReady(const char*);    // System_Debug.cpp — one-shot forensic marker
+#include "System_Filesystem.h"
+#include "System_Logging.h"
+#include "System_User.h"
 #if ENABLE_RTC_SENSOR
-extern bool gRtcRunning;
-extern bool gRtcConnected;
-extern bool rtcSyncFromSystem();
+#include "i2csensor_ds3231.h"
 #endif
 
 namespace Clock {
@@ -403,4 +398,3 @@ extern const SettingsModule clockSettingsModule = {
   nullptr,  // always available — no connection precondition
   "System time: timezone and NTP server"
 };
-

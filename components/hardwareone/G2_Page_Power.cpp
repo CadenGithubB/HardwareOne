@@ -345,7 +345,6 @@ void g2PowerHandleTap(uint32_t idx) {
       if (idx == 0) {
         // <- Back to root hijack menu.
         g2SetHijackPage(G2_HIJACK_PAGE_MAIN);
-        extern void g2RedrawHijackMainMenu();
         g2RedrawHijackMainMenu();
         return;
       }

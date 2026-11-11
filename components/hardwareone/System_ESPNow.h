@@ -39,6 +39,24 @@ enum class EspNowMeshRxKind : uint8_t {
 esp_err_t espnowSelfStaMac(uint8_t out[6]);
 esp_err_t espnowSelfApMac(uint8_t out[6]);
 
+// Parses "AA:BB:CC:DD:EE:FF" (System_ESPNow.cpp). Declared for every build
+// because always-compiled code names it (CommandArgs::argMac); without ESP-NOW
+// no command calls that code and the linker drops it.
+bool parseMacAddress(const String& macStr, uint8_t mac[6]);
+
+// The send primitives the transmit dispatcher (System_ESPNow_Tx.cpp) forwards
+// to. Declared for every build because that file is always compiled; without
+// ESP-NOW nothing submits a job and the linker drops the dispatcher.
+// Flags are 16 bits wide so the high-byte bits (BROADCAST_AUTH, SESSION_FRAME,
+// HANDSHAKE) survive.
+bool v4_send_frame(const uint8_t* dst, uint8_t type, uint16_t flags, uint32_t msgId,
+                   const uint8_t* payload, uint16_t payloadLen, uint8_t ttl);
+bool v4_send_payload_smart(const uint8_t* dst, uint8_t type, uint16_t flags, uint32_t msgId,
+                           const uint8_t* payload, uint16_t payloadLen, uint8_t ttl);
+// Longest AEAD plaintext that still fits one frame to `dst` (a routed peer has
+// a smaller budget than a direct one).
+uint16_t v4_single_frame_cap(const uint8_t* dst);
+
 #if ENABLE_ESPNOW
 
 #include <ArduinoJson.h>
@@ -52,6 +70,7 @@ esp_err_t espnowSelfApMac(uint8_t out[6]);
 #include "System_Settings.h"
 #include "System_User.h"
 #include "System_CommandRegistry.h"
+#include "System_ESPNow_Sensors.h"  // RemoteSensorType
 
 // Settings persistence (broadcastOutput is provided by System_Debug.h).
 bool writeSettingsJson();
@@ -1508,13 +1527,6 @@ inline bool isBondModeOnline() { return false; }
 inline bool isBondSynced() { return false; }
 #endif // ENABLE_BONDED_MODE
 
-// V3 frame sending (for remote command execution from System_Utils).
-// Phase 3.5 task #32: flags widened uint8_t -> uint16_t so high-byte flag
-// bits (BROADCAST_AUTH/SESSION_FRAME/HANDSHAKE) survive instead of being
-// silently truncated.
-bool v4_send_frame(const uint8_t* dst, uint8_t type, uint16_t flags, uint32_t msgId,
-                   const uint8_t* payload, uint16_t payloadLen, uint8_t ttl);
-
 // =============================================================================
 // ESP-NOW App ping (used by the on-glasses ESP-NOW App page).
 // =============================================================================
@@ -1545,6 +1557,7 @@ EspNowAppPingState espnowAppPingPoll(uint32_t* outRttMs,
                                      uint8_t* outPeerMac /* may be null */,
                                      uint32_t timeoutMs = 2000);
 void espnowAppPingClear();
+void espnowAppPingNoteAck(const uint8_t* src, uint32_t msgId);
 
 #else // !ENABLE_ESPNOW
 
@@ -1636,7 +1649,33 @@ inline EspNowAppPingState espnowAppPingPoll(uint32_t* outRttMs,
   return EspNowAppPingState::Idle;
 }
 inline void espnowAppPingClear() {}
+// WiFi-only profiles have no channel follower.
+inline void espnowNoteWifiChannelMayHaveChanged() {}
 
 #endif // ENABLE_ESPNOW
+
+// Send paths, pairing and bond helpers used outside System_ESPNow.cpp.
+#if ENABLE_ESPNOW
+// Notifies bond logic the moment a session with
+// `peerMac` reaches ACTIVE so the bonded relationship can use the encrypted
+// session for discovery/sync (replaces plaintext-heartbeat discovery). No-op
+// when bond mode is off or the peer isn't our bonded peer.
+void bondNotifySessionEstablished(const uint8_t* peerMac);
+String buildBondedCommandPayload(const String& command);
+bool espnowConsumePairingWindow(const uint8_t mac[6]);
+bool isBondSessionTokenValid();
+bool v4_broadcast_sensor_status(RemoteSensorType sensorType, bool enabled);
+bool v4_send_encrypted_or_queue(const uint8_t dst[6], uint8_t type, uint16_t baseFlags, uint32_t msgId, const uint8_t* plaintext, uint16_t plaintextLen, uint8_t ttl, char* outStatus = nullptr, size_t outStatusLen = 0);
+bool v4_send_sensor_envelope(const uint8_t* dstMac, RemoteSensorType sensorType, const char* jsonData, uint16_t jsonLen);
+bool v4_send_session_wrapped(const uint8_t dst[6], uint8_t type, uint16_t baseFlags, uint32_t msgId, const uint8_t* plaintext, uint16_t plaintextLen, uint8_t ttl, char* errOut, size_t errOutLen);
+bool v4_send_user_sync(const uint8_t* dst, const char* jsonPayload, uint16_t jsonLen);
+
+#if ENABLE_BONDED_MODE
+void buildLocalBondStatus(BondPeerStatus& status);
+String loadSettingsFromCache(const uint8_t* peerMac);
+bool sendBondStreamCtrl(RemoteSensorType sensorType, bool enable);
+#endif
+
+#endif
 
 #endif // SYSTEM_ESPNOW_H

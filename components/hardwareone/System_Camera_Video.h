@@ -55,4 +55,13 @@ String getVideoRecordingsList();
 // Delete a specific recording by filename (no path). Returns true on success.
 bool deleteVideoRecording(const String& filename);
 
+bool sdCardIsMountedForStatus();
+bool sdCardIsWritableForStatus();
+
+#if ENABLE_HTTP_SERVER
+#include <esp_http_server.h>
+esp_err_t handleVideoRecordingFile(httpd_req_t* req);
+esp_err_t handleVideoRecordingsList(httpd_req_t* req);
+#endif
+
 #endif  // SYSTEM_CAMERA_VIDEO_H

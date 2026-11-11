@@ -10,6 +10,9 @@
 #include "WebPage_ESPNow.h"
 #include "WebServer_Server.h"
 #include "WebServer_Utils.h"
+#if ENABLE_ESPNOW
+#include "System_Filesystem.h"
+#endif
 
 static void streamEspNowContent(httpd_req_t* req, const String& username) {
   streamCardPage(req, "ESP-NOW", username, "espnow", [&] { streamEspNowInner(req); });
@@ -450,7 +453,6 @@ static esp_err_t handleEspNowRemoteManifest(httpd_req_t* req) {
   
   httpd_resp_set_type(req, "application/json");
   
-  extern bool filesystemReady;
   if (!filesystemReady) {
     httpd_resp_send(req, "{\"error\":\"Filesystem not ready\"}", HTTPD_RESP_USE_STRLEN);
     return ESP_OK;

@@ -36,5 +36,7 @@ bool servoInit();
 void servoSetAngle(uint8_t channel, int angle);
 void servoSetPWM(uint8_t channel, uint16_t value);
 
+extern bool gPwmDriverConnected;
+
 #endif // ENABLE_SERVO
 #endif // I2CSENSOR_PCA9685_H

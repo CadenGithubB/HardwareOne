@@ -56,8 +56,12 @@ def production() -> dict:
     text_io = "\n\n".join(unique_block(utils, marker) for marker in ("bool writeText(", "bool writeTextAtomic("))
 
     # The module body: its anonymous namespace (registry, sweep) and the tick.
-    head = "extern uint32_t gBootCounter;"
-    require(anchors.count(head) == 1, "one gBootCounter declaration ahead of the module body")
+    # The boot counter is declared in System_Utils.h; the module body follows
+    # the include block.
+    require(utils_header.count("extern uint32_t gBootCounter;") == 1,
+            "System_Utils.h declares gBootCounter once")
+    head = "#include <time.h>\n"
+    require(anchors.count(head) == 1, "one <time.h> include closes the include block")
     body = anchors[anchors.index(head) + len(head):]
     require(body.lstrip().startswith("namespace {"), "the module body opens with its anonymous namespace")
     module = extract_block(body, "namespace") + "  // namespace\n\n"

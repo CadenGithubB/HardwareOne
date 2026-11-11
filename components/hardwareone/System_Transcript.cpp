@@ -15,8 +15,6 @@
 #include <cstring>
 #include <ctime>
 
-extern uint32_t gBootCounter;  // HardwareOne.cpp: the NVS boot counter, "boot #N"
-
 static void transcriptStartTime(char* out, size_t size) {
   const time_t now = Clock::epochSeconds();
   struct tm utc{};

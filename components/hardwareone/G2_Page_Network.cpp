@@ -25,6 +25,9 @@
 #include "System_Debug.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#if ENABLE_HTTP_SERVER
+#include "WebServer_Server.h"
+#endif
 
 #if ENABLE_WIFI
 #include <WiFi.h>
@@ -34,10 +37,6 @@
 
 #if ENABLE_ESPNOW
 #include "System_ESPNow.h"
-#endif
-
-#if ENABLE_HTTP_SERVER
-extern bool gServerIsHttps;
 #endif
 
 // -----------------------------------------------------------------------------
@@ -1157,7 +1156,6 @@ static void spawnNetworkScanWorker() {
 
 static void backToHijackMain() {
   g2SetHijackPage(G2_HIJACK_PAGE_MAIN);
-  extern void g2RedrawHijackMainMenu();
   g2RedrawHijackMainMenu();
 }
 

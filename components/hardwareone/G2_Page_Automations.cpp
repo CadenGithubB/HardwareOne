@@ -24,11 +24,6 @@
 #include "System_MemUtil.h"    // ps_alloc for the list copy
 #include "System_Debug.h"      // DEBUG_G2F / BROADCAST_PRINTF
 
-// g2ShowAppsMenu is a non-static definition in G2_Glasses.cpp (exposed so the
-// Apps sub-pages can return to the launcher). Forward-declared here rather
-// than in a header since it has no other cross-TU callers.
-extern void g2ShowAppsMenu();
-
 // -----------------------------------------------------------------------------
 // Sub-mode + selected automation identity
 // -----------------------------------------------------------------------------

@@ -59,7 +59,6 @@
   extern bool gInputRunning;
   extern bool gInputConnected;
   extern unsigned long gGamepadLastStopTime;
-  extern TaskHandle_t gInputTaskHandle;
   extern volatile UBaseType_t gGamepadWatermarkMin;
   extern volatile UBaseType_t gGamepadWatermarkNow;
   // inputStartInternal() is provided by the ANO encoder driver when that is
@@ -237,7 +236,6 @@
 #if !ENABLE_WIFI
   // Wi-Fi APIs and saved-network disabled operations have their own headers.
   #include "System_WiFi.h"
-  extern bool gSkipNTPInWifiConnect;
   // WiFi stub functions
   inline void setupWiFi() {}
   inline bool connectToBestWiFiNetwork() { return false; }
@@ -317,7 +315,6 @@
   inline void enqueueTargetedRevokeForSessionIdx(int idx, const String& reason) {}
   // Auth and session stubs (gAuthUser/gAuthPass + rebuildExpectedAuthHeader
   // removed along with the Basic-Auth fast-path vestige in WebServer_Server.cpp)
-  extern String gBootId;
   inline void broadcastSensorStatusToAllSessions() {}
   inline void broadcastEventToAllSessions(const char* eventName, const char* jsonData) {}
   inline void broadcastEventToSessionsIf(const char* eventName, const char* jsonData,

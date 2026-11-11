@@ -12,9 +12,6 @@
 #include "WebServer_Utils.h"
 #include "System_CommandRegistry.h"
 
-// External dependencies from main .ino
-extern bool gCLIValidateOnly;
-
 namespace {
 struct HelpRenderSnapshot;
 }

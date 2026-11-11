@@ -12,6 +12,7 @@
 #define I2C_SYSTEM_H
 
 #include <Arduino.h>
+#include <ArduinoJson.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <Wire.h>
@@ -471,6 +472,10 @@ struct ConnectedDevice {
   unsigned long firstDiscovered;
 };
 
+// Devices found by the last bus scan (System_I2C.cpp).
+extern ConnectedDevice connectedDevices[];
+extern int connectedDeviceCount;
+
 // ============================================================================
 // Initialization Functions
 // ============================================================================
@@ -534,6 +539,9 @@ void thermalTask(void* parameter);
 void inputTask(void* parameter);
 void apdsTask(void* parameter);
 void gpsTask(void* parameter);
+void fmRadioTask(void* parameter);
+void presenceTask(void* parameter);
+void rtcTask(void* parameter);
 void sensorQueueProcessorTask(void* param);
 
 // Queue processor task handle (defined in System_I2C.cpp)
@@ -607,6 +615,10 @@ extern volatile bool gThermalInitDone;
 void drainDebugRing();
 void i2cSetDefaultWire1Clock();
 void sensorStatusBumpWith(const char* reason);
+// Sensor status change counter and the reason of the last change
+// (HardwareOne.cpp). Readers compare the counter to detect a change.
+extern volatile unsigned long gSensorStatusSeq;
+extern const char* gLastStatusCause;
 const char* buildSensorStatusJson();
 bool imuInit();
 bool fmRadioInit();
@@ -629,5 +641,11 @@ extern volatile bool thermalPendingFirstFrame;
 
 // Grace period reset (used during sensor re-init to clear stale error state)
 void i2cResetGracePeriod(uint8_t address, uint8_t bus);
+
+void buildDeviceRegistryJson(JsonDocument& doc);
+void buildI2cDeviceListJson(JsonArray& arr, bool verbose = false);
+int i2cCompiledSensorCount();
+int i2cConnectedDeviceCount();
+void sensorStatusBump();
 
 #endif // I2C_SYSTEM_H

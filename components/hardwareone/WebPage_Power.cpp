@@ -10,6 +10,8 @@
 #include "WebPage_Power.h"
 #include "WebServer_Server.h"     // streamBeginHtml/EndHtml, streamPageWithContent, WEB_AUTH_OR_RETURN
 #include "WebServer_Utils.h"
+#include "System_Power.h"
+#include "System_PowerJson.h"
 
 
 // ===========================================================================
@@ -38,7 +40,6 @@ esp_err_t handlePowerStatus(httpd_req_t* req) {
   if (!buf) buf = (char*)ps_alloc(kBufSize, AllocPref::PreferPSRAM, "power.status.json");
   if (!buf) { httpd_resp_send(req, "{}", HTTPD_RESP_USE_STRLEN); return ESP_OK; }
   PSRAM_JSON_DOC(doc);
-  extern void buildPowerJson(JsonDocument& doc);  // core: System_Power.cpp
   buildPowerJson(doc);
   serializeJson(doc, buf, kBufSize);
   httpd_resp_send(req, buf, HTTPD_RESP_USE_STRLEN);

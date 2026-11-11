@@ -538,4 +538,9 @@ extern bool gBluetoothShowingStatus;
 
 #endif // ENABLE_BLUETOOTH
 
+#if ENABLE_BLUETOOTH
+bool bleDataDebugEnabled();
+bool bleRawNotifyToSession(uint16_t connId, TransportSessionEpoch expectedEpoch, const char* data, size_t len, bool blocking);
+#endif
+
 #endif // BLUETOOTH_H

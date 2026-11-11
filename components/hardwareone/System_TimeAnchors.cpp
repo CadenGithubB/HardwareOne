@@ -22,8 +22,6 @@
 #include <stdlib.h>
 #include <time.h>
 
-extern uint32_t gBootCounter;
-
 namespace {
 
 constexpr const char* kAnchorsPath = CAPTURE_DIR_SENSORS "/.anchors.csv";

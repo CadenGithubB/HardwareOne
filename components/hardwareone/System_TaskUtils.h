@@ -482,6 +482,13 @@ bool createRTCTask();
 // the top of this header — the *_STACK_WORDS constants are byte counts).
 void reportTaskStack(TaskHandle_t handle, const char* name, uint32_t allocatedBytes);
 
+// The input device task. One slot for every input driver (Seesaw gamepad, ANO
+// encoder, GPIO encoder, GT911 touch): only one of them runs, and the task and
+// memory monitors read the slot without knowing which. Defined by the gamepad
+// driver (i2csensor_seesaw.cpp), or by System_SensorStubs.cpp when that driver
+// is compiled out.
+extern TaskHandle_t gInputTaskHandle;
+
 // Report all sensor task stacks plus system tasks
 void reportAllTaskStacks();
 

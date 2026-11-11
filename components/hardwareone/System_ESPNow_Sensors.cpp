@@ -18,6 +18,15 @@
 #include "System_Settings.h"
 #include "System_TaskUtils.h"
 #include "System_Utils.h"
+#include "System_SensorStubs.h"
+#include "i2csensor_bno055.h"
+#include "i2csensor_ds3231.h"
+#include "i2csensor_mlx90640.h"
+#include "i2csensor_pa1010d.h"
+#include "i2csensor_rda5807.h"
+#include "i2csensor_seesaw.h"
+#include "i2csensor_sths34pf80.h"
+#include "i2csensor_vl53l4cx.h"
 
 #if ENABLE_GAMEPAD_SENSOR
 #include "i2csensor_seesaw.h"
@@ -53,10 +62,6 @@
 #if ENABLE_MICROPHONE
 #include "System_Microphone.h"
 #endif
-
-// External functions
-extern void meshSendEnvelopeToPeers(const String& payload);
-extern String macToHexString(const uint8_t* mac);
 
 // ==========================
 // Remote Sensor Data Cache
@@ -378,7 +383,6 @@ void broadcastSensorStatus(RemoteSensorType sensorType, bool enabled) {
          sensorTypeToString(sensorType), enabled ? "enabled" : "disabled");
   
   // Send via V4 binary protocol
-  extern bool v4_broadcast_sensor_status(RemoteSensorType sensorType, bool enabled);
   bool sent = v4_broadcast_sensor_status(sensorType, enabled);
   
   if (sent) {
@@ -415,7 +419,6 @@ void startSensorDataStreaming(RemoteSensorType sensorType) {
 #if ENABLE_BONDED_MODE
   // Bond master: send STREAM_CTRL to worker — master doesn't have the sensors locally
   if (gSettings.bondModeEnabled && isBondMaster()) {
-    extern bool sendBondStreamCtrl(RemoteSensorType sensorType, bool enable);
     DEBUG_ESPNOW_STREAMF("[SENSOR_STREAM] Bond master: sending STREAM_CTRL %s ON to worker", sensorTypeToString(sensorType));
     bool sent = sendBondStreamCtrl(sensorType, true);
     if (sent) {
@@ -489,7 +492,6 @@ void stopSensorDataStreaming(RemoteSensorType sensorType) {
   // Bond master: send STREAM_CTRL OFF to worker. Lifecycle serialization keeps
   // the local UI flag from racing closeespnow's all-flags clear.
   if (gSettings.bondModeEnabled && isBondMaster()) {
-    extern bool sendBondStreamCtrl(RemoteSensorType sensorType, bool enable);
     DEBUG_ESPNOW_STREAMF("[SENSOR_STREAM] Bond master: sending STREAM_CTRL %s OFF to worker", sensorTypeToString(sensorType));
     sendBondStreamCtrl(sensorType, false);
     gSensorStreamingEnabled[sensorType] = false;
@@ -658,12 +660,6 @@ static void transmitSensorData(RemoteSensorType sensorType, const char* jsonData
   DEBUG_ESPNOW_STREAMF("[SENSOR_TX] type=%s len=%u", sensorTypeToString(sensorType), jsonLen);
   
   
-  // Send via V4 binary protocol (both bond and mesh modes).
-  // D2: mesh streaming is now an encrypted UNICAST (SENSOR_ENVELOPE) to the leasing
-  // controller — the plaintext broadcast path (v4_broadcast_sensor_data) is retired.
-  extern bool v4_send_sensor_envelope(const uint8_t* dstMac, RemoteSensorType sensorType,
-                                      const char* jsonData, uint16_t jsonLen);
-
 #if ENABLE_BONDED_MODE
   // Check for bond mode first
   if (gSettings.bondModeEnabled && isBondWorker()) {
@@ -737,14 +733,6 @@ static void transmitSensorData(RemoteSensorType sensorType, const char* jsonData
 // The connected/enabled globals resolve to real driver state or a `false` stub
 // (System_SensorStubs.cpp), so referencing them unconditionally is link-safe.
 static void announceConnectedSensors() {
-  extern bool gThermalConnected;
-  extern bool gTofConnected;
-  extern bool gImuConnected;
-  extern bool gGpsConnected;
-  extern bool gInputConnected;
-  extern bool gFmRadioConnected;
-  extern bool gRtcConnected;
-  extern bool gPresenceConnected;
   struct Item { bool connected; RemoteSensorType type; };
   const Item items[] = {
     { gThermalConnected,  REMOTE_SENSOR_THERMAL },

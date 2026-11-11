@@ -2081,6 +2081,13 @@ add_test(
           ${CMAKE_CURRENT_LIST_DIR}/test_command_reply_contract.py
           --cxx ${CMAKE_CXX_COMPILER})
 
+# Shared names are declared once, in the owning module's header: no `extern`
+# copies in .cpp files, command tables and settings modules in their registries.
+add_test(
+  NAME extern_declarations
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_extern_declarations.py)
+
 # OLED display-session writer windows (README "OLED display-session writer windows"):
 # the frame commit and the command-result path validate under the display lifecycle
 # writer, release it, push or copy, then re-check without opening a session.

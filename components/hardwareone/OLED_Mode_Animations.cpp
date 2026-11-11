@@ -10,16 +10,6 @@
 #include <Adafruit_SSD1306.h>
 #include "System_FirstTimeSetup.h"
 
-// External references
-extern OLEDAnimationType currentAnimation;
-extern unsigned long animationFrame;
-extern int animationFPS;
-
-// Boot progress state
-extern int bootProgressPercent;
-extern String bootProgressLabel;
-// gFirstTimeSetupState and gSetupProgressStage are declared in System_FirstTimeSetup.h
-
 // ============================================================================
 // Helper Functions
 // ============================================================================
@@ -501,7 +491,6 @@ void displayAnimation() {
 // the animation from frame 0 on a fresh visit. Back-navigation preserves the
 // current frame.
 static void animationOnEnter(bool isForward) {
-  extern unsigned long animationFrame;
   if (isForward) animationFrame = 0;
 }
 

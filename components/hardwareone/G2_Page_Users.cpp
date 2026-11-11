@@ -21,8 +21,6 @@
 #include "System_User.h"       // readUserRoster / isAdminUser / isSuperAdminUser / userRoleRank
 #include "System_Debug.h"      // DEBUG_G2F
 
-extern void g2ShowConfigMenu();  // return to the Config launcher on Back (menu reorg; non-static in G2_Glasses.cpp)
-
 // -----------------------------------------------------------------------------
 // State
 // -----------------------------------------------------------------------------

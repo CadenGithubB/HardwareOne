@@ -56,21 +56,10 @@
 #endif
 #include "System_MemDiag.h"
 #include "System_CommandRegistry.h"
-
-// External dependencies from main .ino
-extern bool wifiConnected;
+#include "System_ESPNow_Sensors.h"
+#include "System_Logging.h"
 #if ENABLE_HTTP_SERVER
-extern bool gServerIsHttps;  // Defined in WebServer_Server.cpp
-#endif
-extern volatile uint32_t gOutputFlags;
-
-// Defined in System_ESPNow.cpp when that transport is compiled. The
-// implementation is a cheap flag set; the actual channel re-derive/re-pin
-// stays on espnow_task. WiFi-only profiles need no channel follower.
-#if ENABLE_ESPNOW
-extern void espnowNoteWifiChannelMayHaveChanged();
-#else
-static inline void espnowNoteWifiChannelMayHaveChanged() {}
+#include "WebServer_Server.h"
 #endif
 
 // Debug system globals and macros from debug_system.h (gDebugFlags, gDebugOutputQueue, DEBUG_WIFIF, etc.)
@@ -166,9 +155,9 @@ static bool connectWiFiId(uint32_t id, unsigned long timeoutMs, bool showPriorit
                           const WifiConnectBounds& bounds);
 bool connectWiFiSSID(const String& ssid, unsigned long timeoutMs);
 
-// Global flags (defined later in this file)
-extern volatile bool gWifiUserCancelled;
-extern bool gSkipNTPInWifiConnect;
+// Global flags
+volatile bool gWifiUserCancelled = false;
+bool gSkipNTPInWifiConnect = false;
 
 // WiFi initialization state (lazy initialization like sensor tasks)
 static std::atomic<bool> wifiInitialized{false};
@@ -1136,7 +1125,6 @@ const char* cmd_wifidisconnect(const String& argsInput) {
 // init/start flags without a driver call once the radio is stopped. Every radio
 // start and stop in this firmware goes through WiFi.mode(), so those flags
 // follow the driver; only a started, unassociated radio asks it for the mode.
-extern bool isEspNowInitialized();
 static WifiRadioState unassociatedRadioState(bool driverUp) {
   if (!driverUp) return WIFI_RADIO_OFF;
   if (isEspNowInitialized()) return WIFI_RADIO_UP_FOR_ESPNOW;
@@ -1198,11 +1186,6 @@ bool wifiRadioOn() { return wifiRadioState() != WIFI_RADIO_OFF; }
 // latch, declared above near cmd_wificonnect); otherwise it brings up the
 // configured default without resurrecting a manually-stopped subsystem.
 // ---------------------------------------------------------------------------
-#if ENABLE_ESPNOW
-extern bool isEspNowInitialized();
-extern const char* cmd_espnow_init(const String&);
-extern const char* cmd_espnow_deinit(const String&);
-#endif
 
 enum class RadioPowerOffResult : uint8_t {
   OK,
@@ -1643,10 +1626,6 @@ const char* cmd_wifiautoreconnect(const String& argsInput) {
 
 // (filesystemReady is provided by System_Filesystem.h, included at top of file)
 
-// Global flags (exported for use in .ino and commands)
-// Declarations are at the top of the file, definitions here
-volatile bool gWifiUserCancelled = false;
-bool gSkipNTPInWifiConnect = false;
 
 // Helper to decode WiFi status codes for debugging
 static const char* wifiStatusToString(wl_status_t status) {
@@ -2256,10 +2235,6 @@ const char* cmd_ntpstatus(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
 
-  extern uint32_t gNTPAnchorId;
-  extern uint32_t gBootCounter;
-  extern bool gTimeSyncedMarkerWritten;
-
   const NtpRuntimeStatus runtime = getNtpRuntimeStatus();
 
   char backupServers[64];
@@ -2356,7 +2331,6 @@ const char* cmd_httpstart(const String& argsInput) {
     return "HTTP server is already running";
   }
 
-  extern void startHttpServer();
   startHttpServer();
   
   // Check if server started successfully

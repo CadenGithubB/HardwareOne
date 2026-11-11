@@ -14,6 +14,7 @@
 #include "System_ESPNow_Wire.h"  // EspNowV4Header, flag constants
 #include "System_MemUtil.h"      // ps_alloc, AllocPref
 #include "System_Mutex.h"        // EspNowTxGuard — serializes the session TX critical section
+#include "System_ESPNow.h"
 
 namespace {
 
@@ -413,13 +414,6 @@ bool sessionUnwrapFrame(SessionState* s,
 // ============================================================================
 // Phase 3.5 step 3 — pending-frame queue
 // ============================================================================
-
-// Forward decl into System_ESPNow.cpp. We call this to wrap+send a drained
-// frame; it does the session lookup, AEAD seal, and esp_now_send for us.
-extern bool v4_send_session_wrapped(const uint8_t dst[6], uint8_t type,
-                                    uint16_t baseFlags, uint32_t msgId,
-                                    const uint8_t* plaintext, uint16_t plaintextLen,
-                                    uint8_t ttl, char* errOut, size_t errOutLen);
 
 namespace {
 

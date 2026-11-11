@@ -2144,7 +2144,6 @@ static String shapeSessionPath(String path) {
 
   // Session subfolder + filename. Clock::isSynced replaces the old raw
   // "now > 1609459200" epoch compare (same year>=2020 heuristic, one home).
-  extern uint32_t gBootCounter;
   char sub[20];
   char stamp[32];
   if (Clock::isSynced()) {

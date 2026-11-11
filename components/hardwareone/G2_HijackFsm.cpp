@@ -26,14 +26,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
-
-// Phase 5 hooks. Provided by G2_Glasses.cpp. The FSM worker is the
-// only caller — these functions perform the raw gLens.* writes that
-// used to happen inline at the dispatch site. Forward-declared here
-// rather than including G2_Glasses.h to keep the FSM TU's include
-// surface minimal.
-extern void g2LensApplyHijackActive(bool active);
-extern void g2LensApplyContainer(bool ready, bool isList, uint32_t widgetId);
+#include "G2_Glasses.h"
 
 namespace {
 

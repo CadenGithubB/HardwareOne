@@ -56,6 +56,10 @@ inline void portEXIT_CRITICAL(portMUX_TYPE*) { assert(--fixture.criticalDepth ==
 void ntpTestBroadcastPrintf(const char* format, ...);
 void broadcastOutput(const char* message);
 void oledUpdate();
+// The duties after a clock step (System_User.h and System_Logging.h).
+void resolvePendingUserCreationTimes();
+void writeBootAnchor();
+void logTimeSyncedMarkerIfReady(const char* source);
 void delay(unsigned long milliseconds);
 int64_t esp_timer_get_time();
 bool esp_sntp_enabled();

@@ -8,7 +8,6 @@
 
 bool gInputRunning = false;
 bool gInputConnected = false;
-extern TaskHandle_t gInputTaskHandle;
 namespace {
 StaticSemaphore_t stateStorage;
 SemaphoreHandle_t stateLock = xSemaphoreCreateMutexStatic(&stateStorage);

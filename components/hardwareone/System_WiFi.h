@@ -224,4 +224,12 @@ inline WifiCoexTag wifiCoexTag() {
 inline bool wifiCoexMirrorInstall() { return true; }
 #endif
 
+#if ENABLE_WIFI
+const char* cmd_certgen(const String&);
+#endif
+
+// Set around the boot-time connection so it does not start its own NTP sync
+// (System_WiFi.cpp; System_SensorStubs.cpp when Wi-Fi is compiled out).
+extern bool gSkipNTPInWifiConnect;
+
 #endif // SYSTEM_WIFI_H

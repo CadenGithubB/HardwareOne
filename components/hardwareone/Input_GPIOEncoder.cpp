@@ -40,7 +40,6 @@ static int sPendingDetents = 0;   // UI consumes under cache mutex.
 static int32_t sPosition = 0;
 static uint32_t sUnpublishedPresses = 0;
 static bool sUnpublishedActivity = false;
-extern TaskHandle_t gInputTaskHandle;  // Shared slot used by task/memory monitors.
 static constexpr int kPendingLimit = 1024;
 static constexpr uint32_t kSampleMs = 5;
 

@@ -25,8 +25,6 @@
 #include "System_Utils.h"
 #include "System_CommandRegistry.h"
 
-extern TwoWire Wire1;
-
 // RTC Cache
 // The mutex is retained across stops; readers never own the live storage.
 static RTCCache sRtcCache{};

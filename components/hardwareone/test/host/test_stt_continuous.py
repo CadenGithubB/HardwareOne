@@ -38,7 +38,7 @@ def main():
     # self-contained load, freeing a resident model first instead of loading
     # a second copy beside it.
     main_loop = (SOURCE / 'HardwareOne.cpp').read_text()
-    assert re.search(r'#if ENABLE_LOCAL_STT\n\s*extern void sttWarmTick\(\);\n\s*sttWarmTick\(\);', main_loop)
+    assert re.search(r'#if ENABLE_LOCAL_STT\n\s*sttWarmTick\(\);', main_loop)
     stt = (SOURCE / 'System_STT.cpp').read_text()
     one_shot = stt[stt.index('static void sttWorker(void*) {'):stt.index('// Independent producer/consumer tasks')]
     assert one_shot.index('sttWarmYield(sttCancelled, &token);') < one_shot.index('ok = sttLocalTranscribe(')

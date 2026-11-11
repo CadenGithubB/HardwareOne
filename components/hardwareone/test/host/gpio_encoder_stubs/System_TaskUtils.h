@@ -5,6 +5,7 @@
 #define TASK_PRIORITY_LOW 1
 #define INPUT_TASK_TAG "input"
 #define tskNO_AFFINITY -1
+extern TaskHandle_t gInputTaskHandle;  // as System_TaskUtils.h declares it
 inline int xTaskCreateLogged(void (*task)(void*), const char* name, int words,
                              void* arg, int priority, TaskHandle_t* handle,
                              const char* tag, int affinity) {

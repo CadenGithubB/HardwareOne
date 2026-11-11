@@ -9,6 +9,7 @@
 #include <atomic>
 #include <ArduinoJson.h>
 #include "System_Power.h"
+#include "System_PowerJson.h"
 #include "HAL_Display.h"
 #include "System_BuildConfig.h"
 #include "System_Settings.h"
@@ -29,6 +30,19 @@
 #include "System_UartLink.h"   // uartLinkIsRunning / uartLinkEffectiveBaud — idle-clock clamp
 #include "soc/soc_caps.h"      // SOC_UART_SUPPORT_REF_TICK
 #include "System_CommandRegistry.h"
+#include "System_Battery.h"
+#if ENABLE_CAMERA_SENSOR
+#include "System_Camera_DVP.h"
+#endif
+#if ENABLE_LOCAL_STT
+#include "System_STT.h"
+#endif
+#if ENABLE_MICROPHONE
+#include "System_Microphone.h"
+#endif
+#if ENABLE_OLED_DISPLAY
+#include "OLED_Display.h"
+#endif
 #if CONFIG_IDF_TARGET_ESP32P4 && CONFIG_SPIRAM && !CONFIG_APP_BUILD_TYPE_PURE_RAM_APP
 #include "soc/rtc.h"
 #include "esp_attr.h"
@@ -332,7 +346,6 @@ bool applyPowerMode(uint8_t mode, bool setDisplayBrightness) {
     
     // Apply to hardware if OLED is enabled
     #if ENABLE_OLED_DISPLAY
-      extern void applyOLEDBrightness();
       applyOLEDBrightness();
     #endif
   }
@@ -344,7 +357,6 @@ bool applyPowerMode(uint8_t mode, bool setDisplayBrightness) {
 
   // Annotate the battery log with the power-mode change (carries the freq it set).
   {
-    extern void batteryLogEvent(const char* event);
     char ev[40];
     snprintf(ev, sizeof(ev), "powermode:%s:%luMHz", config.name, (unsigned long)targetFreq);
     batteryLogEvent(ev);
@@ -638,15 +650,12 @@ const char* powerWorkloadBoost() {
 #if ENABLE_LOCAL_STT
   // Real-time inference on this CPU: at the floor clock (100 MHz on the P4)
   // it runs ~3x slower than speech and falls behind (measured 2026-10-01).
-  extern bool sttAnySessionActive();
   if (sttAnySessionActive()) return "stt";
 #endif
 #if ENABLE_CAMERA_SENSOR
-  extern bool cameraCaptureBusy();   // open stream or recording session
   if (cameraCaptureBusy()) return "camera";
 #endif
 #if ENABLE_MICROPHONE
-  extern bool micRecordingBusy();    // STARTING through FINALIZING
   if (micRecordingBusy()) return "recording";
 #endif
   return nullptr;
@@ -767,7 +776,6 @@ void powerPolicyTick() {
   DEBUG_SYSTEMF("[POWER] clock %lu -> %lu MHz (%s)", (unsigned long)before,
                 (unsigned long)decision.mhz, decision.reason);
   {
-    extern void batteryLogEvent(const char* event);
     char ev[32];
     snprintf(ev, sizeof(ev), "cpu:%s:%luMHz", decision.reason, (unsigned long)decision.mhz);
     batteryLogEvent(ev);

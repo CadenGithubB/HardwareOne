@@ -27,11 +27,6 @@
 
 #include <sodium.h>  // sodium_memzero
 
-// Defined in System_ESPNow.cpp. Notifies bond logic the moment a session with
-// `peerMac` reaches ACTIVE so the bonded relationship can use the encrypted
-// session for discovery/sync (replaces plaintext-heartbeat discovery). No-op
-// when bond mode is off or the peer isn't our bonded peer.
-extern void bondNotifySessionEstablished(const uint8_t* peerMac);
 // NOTE: the bond auth token is derived inside sessionDeriveAeadKeys (for every
 // session, from the same X25519 shared secret) and stored in SessionState. The
 // handlers below no longer derive it explicitly — it's already in place by the
@@ -42,14 +37,6 @@ extern void bondNotifySessionEstablished(const uint8_t* peerMac);
 // ODR violation that made deviceName (and anything after isPaired) read
 // garbage here. With the single shared definition, every field is safe.
 #include "System_ESPNow_RxCtx.h"
-
-// v4_send_frame is a non-static, file-scope function in System_ESPNow.cpp.
-// Phase 3.5 task #32: flags widened uint8_t -> uint16_t to carry the
-// high-byte flag bits (BROADCAST_AUTH/SESSION_FRAME/HANDSHAKE).
-extern bool v4_send_frame(const uint8_t* dst, uint8_t type, uint16_t flags,
-                          uint32_t msgId, const uint8_t* payload,
-                          uint16_t payloadLen, uint8_t ttl);
-extern uint32_t generateMessageId();
 
 namespace {
 
@@ -259,7 +246,6 @@ void v4hKeyExHello(const V4RxCtx& ctx) {
   if (conflict) {
     // A deliberate local `espnowpairsecure` opens a one-shot re-key window for
     // this MAC — honor it (peer's key rotated). Otherwise refuse the overwrite.
-    extern bool espnowConsumePairingWindow(const uint8_t mac[6]);
     if (espnowConsumePairingWindow(msg->senderMac)) {
       WARN_ESPNOWF("KEY_EX_HELLO: peer %02X:%02X:%02X:%02X:%02X:%02X presented new pubkey; "
                    "re-pair window open — replacing stored identity",
@@ -362,7 +348,6 @@ void v4hKeyExReply(const V4RxCtx& ctx) {
   if (conflict) {
     // Operator-initiated re-pair window authorizes a one-shot key replacement
     // for this MAC; otherwise refuse (symmetric with the HELLO-side guard).
-    extern bool espnowConsumePairingWindow(const uint8_t mac[6]);
     if (espnowConsumePairingWindow(msg->responderMac)) {
       WARN_ESPNOWF("KEY_EX_REPLY: peer presented new pubkey; re-pair window open — "
                    "replacing stored identity");

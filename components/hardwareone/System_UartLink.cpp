@@ -11,6 +11,9 @@
 
 #include <atomic>
 #include <freertos/semphr.h>
+#if defined(UART_LINK_PORT)
+#include "WebServer_Utils.h"
+#endif
 
 // Session gate lives here.
 // Defined unconditionally so the auth plumbing (revocation sweeps, session
@@ -402,10 +405,6 @@ bool uartLinkSessionRestrictCm5PresenceIfUser(
 #if defined(CONFIG_ESP_CONSOLE_UART_NUM) && (CONFIG_ESP_CONSOLE_UART_NUM == UART_LINK_UART_NUM)
 #error "UART link is configured on the IDF console UART. Move the console (CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG) or change UART_LINK_UART_NUM for this board."
 #endif
-
-// Defined in HardwareOne.cpp (web-mirror command feed). Declared there with
-// defaulted trailing args; this TU passes all four explicitly.
-extern void appendCommandToFeed(const char* source, const String& cmd, const String& user, const String& ip);
 
 static std::atomic<bool> sStarted{false};    // publishes port/mutex lifecycle
 static String sUartCLI;                     // line accumulator

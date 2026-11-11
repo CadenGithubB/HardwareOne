@@ -64,6 +64,37 @@
 #include "System_Filesystem.h"  // For canRead() security check
 #include "System_VFS.h"         // For SD-capture routing (captureEspNowFrame)
 #include "System_CommandRegistry.h"
+#include "System_ESPNow_FsList.h"
+#if ENABLE_BONDED_MODE && ENABLE_APDS_SENSOR
+#include "i2csensor_apds9960.h"
+#endif
+#if ENABLE_BONDED_MODE && ENABLE_AUTOMATION
+#include "System_Automation.h"
+#endif
+#if ENABLE_BONDED_MODE && ENABLE_FM_RADIO
+#include "i2csensor_rda5807.h"
+#endif
+#if ENABLE_BONDED_MODE && ENABLE_GPS_SENSOR
+#include "i2csensor_pa1010d.h"
+#endif
+#if ENABLE_BONDED_MODE && ENABLE_IMU_SENSOR
+#include "i2csensor_bno055.h"
+#endif
+#if ENABLE_BONDED_MODE && ENABLE_OLED_INPUT
+#include "i2csensor_seesaw.h"
+#endif
+#if ENABLE_BONDED_MODE && ENABLE_PRESENCE_SENSOR
+#include "i2csensor_sths34pf80.h"
+#endif
+#if ENABLE_BONDED_MODE && ENABLE_RTC_SENSOR
+#include "i2csensor_ds3231.h"
+#endif
+#if ENABLE_BONDED_MODE && ENABLE_THERMAL_SENSOR
+#include "i2csensor_mlx90640.h"
+#endif
+#if ENABLE_BONDED_MODE && ENABLE_TOF_SENSOR
+#include "i2csensor_vl53l4cx.h"
+#endif
 #if ENABLE_HTTP_SERVER
 #include "WebServer_Server.h"
 #endif
@@ -74,11 +105,6 @@
 #if ENABLE_THERMAL_SENSOR
 #include "i2csensor_mlx90640.h"
 #endif
-
-// External dependencies from main .ino - now in espnow_system.h
-extern bool isValidUser(const String& username, const String& password);
-extern bool isAdminUser(const String& username);
-extern bool gCLIValidateOnly;
 
 // Forward declaration — definition is further down near onEspNowRawRecv. Used
 // by the send paths (v4_send_frame, fragmented tx) defined above that point.
@@ -594,10 +620,6 @@ static bool addEspNowPeerWithEncryption(const uint8_t* mac, bool useEncryption, 
 // Command types from shared header
 #include "System_CommandTypes.h"
 // ConnectedDevice is now defined in System_I2C.h (included above)
-
-// External globals for device tracking (defined in System_I2C.cpp)
-extern ConnectedDevice connectedDevices[];
-extern int connectedDeviceCount;
 
 // Memory allocation helpers
 
@@ -1293,7 +1315,6 @@ static bool trySendToStreamSession(uint32_t cmdMsgId, const char* data, size_t l
 // pushes) and run the STREAM send on small stacks: an `opengamepad` bonded
 // command's Seesaw init on sensor_queue (11 KB) once overflowed that way.
 static uint32_t streamCmdIdForCurrentTask() {
-  extern TaskHandle_t gCmdExecTaskHandle;
   if (gCmdExecTaskHandle == nullptr || xTaskGetCurrentTaskHandle() != gCmdExecTaskHandle) {
     return 0;
   }
@@ -3120,7 +3141,6 @@ bool v4_broadcast_sensor_status(RemoteSensorType sensorType, bool enabled) {
   memset(payload.reserved, 0, sizeof(payload.reserved));
   
   uint32_t msgId = generateMessageId();
-  extern const char* sensorTypeToString(RemoteSensorType type);
   DEBUGF(DEBUG_ESPNOW_MESH, "[V4_BROADCAST_SENSOR_STATUS] Broadcasting msgId=%lu", (unsigned long)msgId);
   DEBUGF(DEBUG_ESPNOW_MESH, "[V4_BROADCAST_SENSOR_STATUS] sensor=%s enabled=%s",
          sensorTypeToString(sensorType), enabled ? "YES" : "NO");
@@ -3708,7 +3728,6 @@ static void v4h_sensor_status(const V4RxCtx& ctx) {
            sensorTypeToString(sensorType), enabled ? "YES" : "NO");
 
     DEBUGF(DEBUG_ESPNOW_MESH, "[V4_RX_SENSOR_STATUS] Updating remote sensor status");
-    extern void updateRemoteSensorStatus(const uint8_t* mac, const char* name, RemoteSensorType type, bool enabled);
     updateRemoteSensorStatus(ctx.recv_info->src_addr, ctx.deviceName, sensorType, enabled);
     DEBUGF(DEBUG_ESPNOW_MESH, "[V4_RX_SENSOR_STATUS] Status update complete");
   } else {
@@ -4355,7 +4374,6 @@ static void doUserSyncWork(const DeferredUserSyncWork* w) {
 
   // The new account must be visible to the auth layer immediately: invalidate
   // auth caches the way adminCreateUser does.
-  extern void bumpIdentityGeneration(const char* reason);
   bumpIdentityGeneration("user.sync");
 
   // Account creation the LOCAL command audit never sees (it arrived over the
@@ -4537,18 +4555,6 @@ static void v4h_manifest_req(const V4RxCtx& ctx) {
 // System_ESPNow_FsList.cpp answers LIST/STAT/GET only for our bonded peer
 // while its bond session is live, under the bond identity
 // (fsRpcRequesterIdentity), and replies PERM_DENIED to every other peer.
-extern void fsListOnRequestReceived(const uint8_t srcMac[6],
-                                    const uint8_t* payload, uint16_t payloadLen);
-extern void fsListOnReplyReceived(const uint8_t srcMac[6],
-                                  const uint8_t* payload, uint16_t payloadLen);
-extern void fsStatOnRequestReceived(const uint8_t srcMac[6],
-                                    const uint8_t* payload, uint16_t payloadLen);
-extern void fsStatOnReplyReceived(const uint8_t srcMac[6],
-                                  const uint8_t* payload, uint16_t payloadLen);
-extern void fsGetOnRequestReceived(const uint8_t srcMac[6],
-                                   const uint8_t* payload, uint16_t payloadLen);
-extern void fsGetOnAckReceived(const uint8_t srcMac[6],
-                               const uint8_t* payload, uint16_t payloadLen);
 static void v4h_fs_list_req(const V4RxCtx& ctx) {
   fsListOnRequestReceived(ctx.recv_info->src_addr, ctx.payload, ctx.payloadLen);
 }
@@ -6752,7 +6758,6 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
     // Stays in this branch (no early return above) because the per-peer
     // health update + tracker recording above are still legitimate side
     // effects of an ACK regardless of whether anyone is pinging.
-    extern void espnowAppPingNoteAck(const uint8_t* src, uint32_t msgId);
     espnowAppPingNoteAck(recv_info->src_addr, h->msgId);
 
     if (!foundV3) {
@@ -7475,9 +7480,6 @@ void buildLocalBondStatus(BondPeerStatus& status) {
   status.minFreeHeap = (uint32_t)ESP.getMinFreeHeap();
   
   // Build sensor enabled mask from runtime booleans
-  extern bool gThermalRunning, gTofRunning, gImuRunning, gInputRunning;
-  extern bool gGpsRunning, gPresenceRunning;
-  extern bool gRtcRunning, gApdsRunning, gFmRadioRunning;
   uint16_t enabled = 0;
 #if ENABLE_THERMAL_SENSOR
   if (gThermalRunning)  enabled |= CAP_SENSOR_THERMAL;
@@ -7509,9 +7511,6 @@ void buildLocalBondStatus(BondPeerStatus& status) {
   status.sensorEnabledMask = enabled;
 
   // Build sensor connected mask
-  extern bool gThermalConnected, gTofConnected, gImuConnected, gInputConnected;
-  extern bool gGpsConnected, gPresenceConnected;
-  extern bool gRtcConnected, gApdsConnected, gFmRadioConnected;
   uint16_t connected = 0;
 #if ENABLE_THERMAL_SENSOR
   if (gThermalConnected)  connected |= CAP_SENSOR_THERMAL;
@@ -7776,10 +7775,6 @@ static void buildDeviceManifest(JsonDocument& doc) {
   JsonArray apps = doc["uiApps"].to<JsonArray>();
   
 #if ENABLE_OLED_DISPLAY
-  // Add OLED menu items as UI apps (from category arrays)
-  extern const OLEDMenuItem oledMenuCategory1[], oledMenuCategory2[], oledMenuCategory3[], oledMenuCategory4[], oledMenuCategory5[];
-  extern const int oledMenuCategory1Count, oledMenuCategory2Count, oledMenuCategory3Count, oledMenuCategory4Count, oledMenuCategory5Count;
-  
   const struct { const OLEDMenuItem* items; int count; } cats[] = {
     { oledMenuCategory1, oledMenuCategory1Count },
     { oledMenuCategory2, oledMenuCategory2Count },
@@ -8177,7 +8172,6 @@ static void sendBondSettings(const uint8_t* peerMac) {
   // file at it wastes the exact airtime the abort machinery is there to save —
   // the master's sync tick will re-request settings and we'll retry both.
   if (sent) {
-    extern const char* AUTOMATIONS_JSON_FILE;
     if (filesystemReady && VFS::existsGuarded(AUTOMATIONS_JSON_FILE, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "espnow.bond_automations_check"))) {
       vTaskDelay(pdMS_TO_TICKS(200));  // Brief gap between transfers
       bool autoSent = sendFileToMac(peerMac, String(AUTOMATIONS_JSON_FILE));
@@ -10288,7 +10282,6 @@ void processMeshHeartbeats() {
   }
   // 1d2. Phase 4b — drive the FS_LIST protocol: build deferred replies +
   // time out pending sender requests. Fast path when nothing's queued.
-  extern void fsListTick();
   fsListTick();
   // 1d. Phase 3.6 — zero expired prev-keys (held briefly after a REKEY so
   // in-flight frames sent under the old keys still decrypt).
@@ -10500,7 +10493,6 @@ void processMeshHeartbeats() {
         phb.uptimeSec = now / 1000;
         phb.freeHeap  = (uint32_t)ESP.getFreeHeap();
         phb.seqNum    = ++gBondHeartbeatSeqNum;
-        extern uint32_t gBootCounter;
         phb.bootCounter = gBootCounter;
         phb.settingsHash = gEspNow ? gEspNow->bondLocalSettingsHash : 0;
         wifi_ap_record_t ap2 = {};
@@ -10936,7 +10928,6 @@ void processMeshHeartbeats() {
     
     // Only master pushes streaming prefs to worker (after full sync)
     if (isBondMaster() && isBondSynced()) {
-      extern bool sendBondStreamCtrl(RemoteSensorType sensorType, bool enable);
       struct { const char* name; bool enabled; RemoteSensorType type; } streams[] = {
         { "thermal",  gSettings.bondStreamThermal,  REMOTE_SENSOR_THERMAL },
         { "tof",      gSettings.bondStreamTof,      REMOTE_SENSOR_TOF },
@@ -10963,7 +10954,6 @@ void processMeshHeartbeats() {
     RemoteSensorType sType = (RemoteSensorType)gEspNow->bondDeferredStreamCtrlSensor;
     bool enable = (gEspNow->bondDeferredStreamCtrlEnable != 0);
     
-    extern const char* sensorTypeToString(RemoteSensorType type);
     BROADCAST_PRINTF("[BOND] STREAM_CTRL: %s %s (from master)",
                      sensorTypeToString(sType), enable ? "ON" : "OFF");
     
@@ -11965,7 +11955,6 @@ static bool initEspNow() {
   // bounded deinit path closes the dispatcher/callbacks/driver again so a later
   // openespnow can retry instead of inheriting a half-initialized instance.
   {
-    extern uint32_t gBootCounter;
     time_t now = time(nullptr);
     uint32_t timestamp = Clock::isValidEpoch(now) ? (uint32_t)now : 0;
     String bootMsg = buildBootNotification(generateMessageId(), gEspNow->deviceName.c_str(), gBootCounter, timestamp);
@@ -15485,7 +15474,6 @@ static bool espnowForgetPeerCrypto(const uint8_t mac[6]) {
     SessionState* s = sessionFindByPeer(mac, pid->meshId);
     if (s) sessionClear(s);  // drop ephemeral AEAD keys for this peer
   }
-  extern bool peerIdentityForget(const uint8_t mac[6]);
   peerIdentityForget(mac);
   return had;
 }
@@ -16500,8 +16488,6 @@ const char* cmd_espnow_pairsecure(const String& argsInput) {
 // ============================================================================
 // ESP-NOW Metadata Request Command
 // ============================================================================
-
-extern void requestMetadata(const uint8_t* peerMac, bool force);
 
 const char* cmd_espnow_requestmeta(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
@@ -17950,23 +17936,7 @@ const char* cmd_bond_testsensor(const String& argsInput) {
 // ESP-NOW Command Registry
 // ============================================================================
 
-extern const char* cmd_espnow_sensorstream(const String& argsInput);
-extern const char* cmd_espnow_sensorstatus(const String& argsInput);
-extern const char* cmd_espnow_sensorbroadcast(const String& argsInput);
-extern const char* cmd_espnow_usersync(const String& argsInput);
-// Device metadata commands
-extern const char* cmd_espnow_room(const String& argsInput);
-extern const char* cmd_espnow_zone(const String& argsInput);
-extern const char* cmd_espnow_tags(const String& argsInput);
-extern const char* cmd_espnow_friendlyname(const String& argsInput);
-extern const char* cmd_espnow_stationary(const String& argsInput);
-extern const char* cmd_espnow_deviceinfo(const String& argsInput);
-// Master aggregation commands
-extern const char* cmd_espnow_devices(const String& argsInput);
-extern const char* cmd_espnow_rooms(const String& argsInput);
-extern const char* cmd_espnow_find(const String& argsInput);
-extern const char* cmd_espnow_roomcmd(const String& argsInput);
-extern const char* cmd_espnow_tagcmd(const String& argsInput);
+const char* cmd_espnow_usersync(const String& argsInput);
 
 // Forward declarations for schema-driven setting commands (defined below via ESPNOW_SETTING_CMD macro)
 const char* cmd_espnow_firsttimesetup(const String&);

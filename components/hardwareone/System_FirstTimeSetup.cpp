@@ -35,6 +35,9 @@
 #include "System_WiFi.h"
 #include "network/wifi/System_WiFiNetworks.h"
 #include "System_NTP.h"
+#if ENABLE_AUTOMATION
+#include "System_Automation.h"
+#endif
 #if ENABLE_WIFI
 #include <WiFi.h>
 #endif
@@ -52,23 +55,6 @@ volatile SetupProgressStage gSetupProgressStage = SETUP_PROMPT_USERNAME;
 volatile bool gAcceptingRestore = false;
 volatile bool gRestoreComplete = false;
 const char* PENDING_CRED_SETUP_FILE = "/system/.pending_credential_setup";
-
-// File paths (defined in HardwareOne.cpp / System_User.cpp)
-extern const char* SETTINGS_JSON_FILE;
-extern const char* USERS_JSON_FILE;
-extern const char* AUTOMATIONS_JSON_FILE;
-
-// Global variables
-extern uint32_t gNTPAnchorId;
-extern uint32_t gBootCounter;
-
-// Utility functions
-extern String hashUserPassword(const String& plaintext);
-#if ENABLE_AUTOMATION
-extern bool writeAutomationsJsonAtomic(const String& json);
-extern String automationsEmptyStoreJson();
-#endif
-extern void resolvePendingUserCreationTimes();
 
 // DEBUG_SYSTEMF now defined in debug_system.h with performance optimizations
 
@@ -228,12 +214,6 @@ static void noteNtpStateBeforeSetupReboot() {
 // ============================================================================
 // First-Time Setup Implementation
 // ============================================================================
-
-// Forward declaration for OLED setup mode selection
-#if ENABLE_OLED_DISPLAY
-extern bool getOLEDSetupModeSelection(int& setupMode);
-extern int getOLEDArchetypeSelection();  // Level-2 deployment picker; -1 = back
-#endif
 
 #if ENABLE_WIFI
 // Serial WiFi scan + pick for "Import from Backup" when ENABLE_OLED_DISPLAY is off
@@ -1050,7 +1030,6 @@ void firstTimeSetupIfNeeded() {
   broadcastOutput("Enter 1 or 2: ");
   String themeInput = "";
 #if ENABLE_OLED_DISPLAY
-  extern bool getOLEDThemeSelection(bool& darkMode);
   bool darkSelected = false;
   if (gOledRunning && oledConnected && getOLEDThemeSelection(darkSelected)) {
     themeInput = darkSelected ? "2" : "1";

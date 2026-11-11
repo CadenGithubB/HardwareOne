@@ -160,3 +160,8 @@ inline bool phonePipeEnrolling() {return false;}
 inline PhonePairView phonePipePairView(char code[20]) {if(code)for(int i=0;i<20;++i)code[i]=0;return {};}
 inline void phonePipePairClose(uint32_t) {}
 #endif
+
+#if ENABLE_BLUETOOTH && ENABLE_BLE_PHONE_PIPE
+struct BleSetupOps;  // BLE_SetupWorker.h
+extern const BleSetupOps phonePipeSetupOps;
+#endif

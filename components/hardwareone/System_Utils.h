@@ -433,4 +433,14 @@ inline String formatMacAddrStr(const uint8_t* mac) {
   return macToDisplayStr(mac);
 }
 
+bool ensureFileViewBuffers();
+extern uint32_t gBootCounter;
+extern char* gFileOutBuf;
+extern char* gFileReadBuf;
+extern uint32_t gNTPAnchorId;
+extern const size_t kFileOutBufSize;
+extern const size_t kFileReadBufSize;
+bool serialCommandSecretSinkReady();
+bool serialWriteCommandSecret(const char* text, size_t len);
+
 #endif // SYSTEM_UTILS_H

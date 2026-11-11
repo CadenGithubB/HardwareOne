@@ -1107,13 +1107,6 @@ struct BleCommandReplyContext {
 };
 static void bleCommandOutputFlush(BleCommandReplyContext* reply);
 
-// --- BLE TX trace (debugging) ------------------------------------------------
-// Dumps the EXACT device->app payload to serial/web/file but NOT back over BLE
-// (routing it over BLE would feed the very pipe we're tracing and recurse). Chunks
-// to < DEBUG_MSG_SIZE so the full content reaches serial untruncated — copy the
-// "[BLE-TX] === BEGIN ===" .. "=== END ===" block to see what the device actually sent.
-extern void broadcastOutputCore_Routed(const char* text, size_t len, uint8_t route);
-
 // Gate for the verbose BLE TX traces — on only when `debugbluetoothdata` is set
 // (DEBUG_BLE_DATA). Non-static so System_BleSecureChannel.cpp's per-frame [BLE-SC]
 // traces share the same flag. The traces themselves still route NOT-to-BLE (0x2F)
@@ -2940,7 +2933,6 @@ bool bleRawNotifyToSession(uint16_t connId,
 // for it (the console-mirror collector's recipient record).
 struct BleSessionFence { uint16_t connId; TransportSessionEpoch epoch; };
 
-extern TaskHandle_t gCmdExecTaskHandle;  // HardwareOne.cpp
 // cmd_exec is the only task a console chain may wait on (BLE_PhonePipeConsole.h).
 static bool bleOnCmdExecTask() {
   return gCmdExecTaskHandle && xTaskGetCurrentTaskHandle() == gCmdExecTaskHandle;

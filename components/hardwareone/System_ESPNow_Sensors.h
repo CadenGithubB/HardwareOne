@@ -3,6 +3,12 @@
 
 #include "System_BuildConfig.h"
 
+// True only when the ESP-NOW radio has been initialized at runtime (i.e. the
+// user clicked Initialize). ENABLE_ESPNOW merely means the feature is compiled
+// in. Lets the web sensors page tell "not initialized" apart from "active".
+// Always false when ESP-NOW is compiled out (System_Utils.cpp).
+bool isEspNowInitialized();
+
 #if ENABLE_ESPNOW
 
 #include <Arduino.h>
@@ -149,10 +155,6 @@ RemoteSensorData* findOrCreateCacheEntry(const uint8_t* deviceMac, const char* d
 void setSensorBroadcastEnabled(bool enabled);
 bool isSensorBroadcastEnabled();
 
-// True only when the ESP-NOW radio has been initialized at runtime (i.e. the
-// user clicked Initialize). ENABLE_ESPNOW merely means the feature is compiled
-// in. Lets the web sensors page tell "not initialized" apart from "active".
-bool isEspNowInitialized();
 
 // ==========================
 // Thermal Data Optimization
@@ -183,6 +185,11 @@ struct RemoteGPSData {
 // Get remote GPS data from bonded device or mesh workers
 // Returns true if valid GPS data is available from a remote source
 bool getRemoteGPSData(RemoteGPSData* outData);
+
+const char* cmd_espnow_sensorbroadcast(const String& argsInput);
+const char* cmd_espnow_sensorstatus(const String& argsInput);
+const char* cmd_espnow_sensorstream(const String& argsInput);
+void updateRemoteSensorStatus(const uint8_t* mac, const char* name, RemoteSensorType type, bool enabled);
 
 #endif // ENABLE_ESPNOW
 #endif // SYSTEM_ESPNOW_SENSORS_H

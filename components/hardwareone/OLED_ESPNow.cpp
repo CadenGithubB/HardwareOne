@@ -2604,7 +2604,6 @@ bool oledEspNowHandleRemoteFilesInput(int deltaX, int deltaY, uint32_t newlyPres
 void storeRemoteFileBrowseResult(const uint8_t* mac, const char* path, JsonArray& files) {
 #if ENABLE_OLED_DISPLAY
   // Store results in remote file browse state
-  extern RemoteFileBrowseState gRemoteFileBrowse;
   
   gRemoteFileBrowse.pending = false;
   gRemoteFileBrowse.hasData = true;

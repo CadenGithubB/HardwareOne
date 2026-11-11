@@ -12,17 +12,8 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>     // vTaskDelay — inter-fragment pacing
 #include <freertos/semphr.h>
-
-// Directed raw notify into the RESPONSE characteristic (binary-safe; defined in
-// Bluetooth.cpp): one connection, admitted under the BLE lifecycle mutex only while
-// `expectedEpoch` is that connection's live session epoch.
-extern bool bleRawNotifyToSession(uint16_t connId, TransportSessionEpoch expectedEpoch,
-                                  const char* data, size_t len, bool blocking);
-extern bool bleSessionEpochMatches(uint16_t connId, TransportSessionEpoch epoch);
-extern TransportSessionEpoch bleSessionEpochForConnection(uint16_t connId);
-extern bool isBLEConnected();
-extern Settings gSettings;
-extern void broadcastOutput(const String& s);  // queue-based, BTC_TASK-safe
+#include "Bluetooth.h"
+#include "System_Debug.h"
 
 // Handshake diagnostics — one line per transition so interop can be watched on
 // serial/web. Infrequent (per connection), so not gated behind a debug flag.
@@ -242,8 +233,6 @@ bool bleScSendEncryptedBound(const BleScBinding& binding, const char* plaintext,
   // BLE TX trace (debugging): gated behind `debugbluetoothdata` (bleDataDebugEnabled),
   // routed to serial/web/file but NOT BLE (0x2F = MSG_ROUTE_ALL & ~MSG_ROUTE_BLE) so the
   // trace can't feed back into the channel we're tracing.
-  extern void broadcastOutputCore_Routed(const char* text, size_t len, uint8_t route);
-  extern bool bleDataDebugEnabled();
   const bool scTrace = bleDataDebugEnabled();
   if (scTrace) { char b[100];
     int n = snprintf(b, sizeof(b), "[BLE-SC] send msgId=%u len=%zu frags=%zu", (unsigned)msgId, len, fragCount);

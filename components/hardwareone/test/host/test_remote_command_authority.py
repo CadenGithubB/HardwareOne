@@ -177,10 +177,11 @@ def single_bond_sender(component_files: dict[str, str]) -> list[str]:
         definitions = re.findall(r"\bString\s+buildBondedCommandPayload\s*\(", code)
         extra = len(calls) - len(definitions)
         if name == "System_Utils.cpp":
-            # The routing's block-scope declaration and its one call.
-            if extra != 1 or len(definitions) != 1:
+            # The routing's one call; the declaration is in System_ESPNow.h.
+            if extra != 1 or definitions:
                 failures.append(f"System_Utils.cpp builds bonded commands {extra} times "
-                                f"({len(definitions)} declarations); expected one call in the routing")
+                                f"({len(definitions)} declarations); expected one call in the routing "
+                                "and no declaration of its own")
         elif extra > 0:
             failures.append(f"{name} builds a bonded command outside executeCommand's routing")
     return failures

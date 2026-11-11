@@ -41,12 +41,11 @@
 #include "esp_now_hosted_companion.h"
 #include "esp_now_hosted_rpc.h"
 #include "System_CommandRegistry.h"
+#if ENABLE_ESPNOW
+#include "System_ESPNow_Sensors.h"
+#endif
 #if ENABLE_WIFI
 #include "System_WiFi.h"
-#endif
-
-#if ENABLE_ESPNOW
-extern bool isEspNowInitialized();
 #endif
 
 namespace {

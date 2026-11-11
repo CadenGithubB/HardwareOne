@@ -15,15 +15,6 @@
 #include <freertos/task.h>
 #include <cstring>
 
-// loadSettingsFromCache lives in System_ESPNow.cpp; it already does the
-// existsGuarded + FsLockGuard + open + readString dance. Forward-decl here so
-// readCachedSettingsJson() can stay a one-liner instead of duplicating it.
-extern String loadSettingsFromCache(const uint8_t* peerMac);
-
-// parseMacAddress lives in System_ESPNow.cpp without a public header. Use the
-// same extern pattern WebPage_Bond.cpp uses.
-extern bool parseMacAddress(const String& macStr, uint8_t mac[6]);
-
 // =============================================================================
 // BondedPeer — see header for rationale + threading notes
 // =============================================================================

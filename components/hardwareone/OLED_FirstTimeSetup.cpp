@@ -32,10 +32,6 @@
 #include "System_WiFi.h"
 #endif
 
-// External references
-extern bool gOledRunning;
-extern void updateOLEDDisplay();
-
 // Draw FTS footer at the standard position (matching drawOLEDFooter in the normal program)
 static void drawFTSFooter(const char* text) {
   const int footerY = OLED_HEADER_HEIGHT + OLED_CONTENT_HEIGHT;

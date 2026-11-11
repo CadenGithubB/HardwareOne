@@ -1239,8 +1239,6 @@ const char* cmd_cameramaxstoredimages(const String& argsInput) {
   return buf;
 }
 
-extern ImageManager gImageManager;
-
 const char* cmd_camerasave(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!gCameraRunning) {

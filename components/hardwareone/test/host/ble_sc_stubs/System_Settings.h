@@ -5,3 +5,4 @@ struct Settings {
   bool bleRequireSecureChannel = false;
   String bleSecureChannelSecret;
 };
+extern Settings gSettings;

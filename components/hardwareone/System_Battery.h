@@ -49,4 +49,8 @@ void batteryLogTick();
 // task. Tokens must be comma/newline-free.
 void batteryLogEvent(const char* event);
 
+// buildBatteryJson(JsonDocument&), the battery snapshot behind `battery json`
+// and /api/battery/status, is declared in System_PowerJson.h so this header
+// does not pull in ArduinoJson.
+
 #endif // SYSTEM_BATTERY_H

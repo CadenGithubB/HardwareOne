@@ -10,6 +10,7 @@
 #include "System_BuildConfig.h"  // ENABLE_HTTP_SERVER flag
 #if ENABLE_HTTP_SERVER
   #include "WebServer_Server.h"
+#include "WebServer_Utils.h"
 #endif
 #include "System_SensorStubs.h" // Network stubs when disabled
 #include "System_Utils.h"  // For CommandEntry
@@ -31,6 +32,7 @@
 #include <esp_timer.h>            // AuthPerfScope — instrumentation, see below
 #include "System_PollPause.h"   // PollPauseGuard — readRosterJson, mirrors readText
 #include "System_CommandRegistry.h"
+#include "System_ESPNow.h"
 
 // ============================================================================
 // TEMPORARY: auth-latency instrumentation
@@ -159,21 +161,6 @@ bool sessionIdleExpired(CommandSource transport, unsigned long lastInteractionMs
 
 // File paths
 #define PENDING_USERS_FILE "/system/users/pending_users.json"
-
-// External utility dependencies
-extern String getDeviceEncryptionKey();
-extern void fsLock(const char* reason);
-extern void fsUnlock();
-extern void resolvePendingUserCreationTimes();
-
-// Boot tracking globals
-extern uint32_t gNTPAnchorId;
-extern uint32_t gBootCounter;
-
-// Serial authentication globals
-extern bool gSerialAuthed;
-extern String gSerialUser;
-extern std::atomic<unsigned long> gSerialLastInteractionMs;
 
 // ============================================================================
 // Boot-local transport session generations
@@ -648,12 +635,6 @@ TransportSessionEpoch captureTransportSessionEpoch(const AuthContext& ctx) {
   }
 }
 
-// Web authentication functions (from web_server.h)
-extern bool isAuthed(httpd_req_t* req, String& outUser);
-extern esp_err_t sendAuthRequiredResponse(httpd_req_t* req);
-extern void getClientIP(httpd_req_t* req, String& ip);
-extern bool webPasswordChangeAllows(httpd_req_t* req, const String& user);
-
 // Debug macros now defined in debug_system.h with performance optimizations
 // DEBUG_USERS, DEBUG_USERSF, DEBUG_CMD_FLOW, DEBUG_CMD_FLOWF, DEBUG_SYSTEM, DEBUG_SYSTEMF
 
@@ -1117,7 +1098,6 @@ bool bondIdentityLive(const AuthContext& ctx) {
   // The bonded-command path (v4_handle_cmd) is the only producer of this
   // tuple, and only after validating the bond session token.
   if (ctx.transport != SOURCE_ESPNOW || ctx.user != kBondAdminUser) return false;
-  extern bool isBondSessionTokenValid();
   return isBondSessionTokenValid();
 #else
   (void)ctx;
@@ -4322,10 +4302,6 @@ const char* USERS_JSON_FILE = "/system/users/users.json";
 //   {"bootAnchors":[{"ntpAnchorId":N,"epochAtSync":E,"millisAtSync":M}, ...]}
 const char* BOOT_ANCHORS_FILE = "/system/boot_anchors.json";
 
-// External dependencies for timestamp resolution
-extern uint32_t gNTPAnchorId;
-extern uint32_t gBootCounter;
-
 // Boot anchor structure - represents an NTP sync point
 struct BootAnchor {
   uint32_t ntpAnchorId;
@@ -4904,9 +4880,6 @@ void loadAndIncrementBootSeq() {
 
 #include "System_ESPNow.h"
 
-extern uint32_t generateMessageId();
-extern String getEspNowDeviceName(const uint8_t* mac);
-
 // Helper to parse MAC address or device name
 static bool userSyncParseMacAddress(const String& s, uint8_t out[6]) {
   if (s.length() == 17 && s[2] == ':' && s[5] == ':') {
@@ -5058,7 +5031,6 @@ const char* cmd_user_sync(const String& argsInput) {
   serializeJson(doc, jsonStr);
   
   // Send via V4 binary protocol
-  extern bool v4_send_user_sync(const uint8_t* dst, const char* jsonPayload, uint16_t jsonLen);
   if (!v4_send_user_sync(targetMac, jsonStr.c_str(), jsonStr.length())) {
     ERROR_USERF("[USER_SYNC] Failed to send sync message to %s", deviceName.c_str());
     snprintf(getDebugBuffer(), 1024, "Error: Failed to send user sync to '%s'", deviceName.c_str());

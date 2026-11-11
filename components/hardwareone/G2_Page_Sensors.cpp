@@ -62,9 +62,6 @@
 #if ENABLE_PRESENCE_SENSOR
 #include "i2csensor_sths34pf80.h" // presenceCacheSnapshot + gPresenceRunning / gPresenceConnected
 #endif
-#if ENABLE_OLED_DISPLAY
-extern bool gOledRunning;
-#endif
 #if ENABLE_CAMERA_SENSOR
 #include "System_Camera_DVP.h"     // gCameraRunning, cameraPowerSetPostHook
 #include "G2_Page_CameraSettings.h" // g2ShowCameraSettingsMenu
@@ -75,6 +72,9 @@ extern bool gOledRunning;
 #include "HAL_Audio.h"             // audio source availability + selector (PDM/G2)
 #include "System_Settings.h"       // gSettings.micSource (source selector)
 #include "G2_Page_LED.h"           // g2ShowLedMenu — Sensors → LED drill-in
+#if ENABLE_OLED_DISPLAY
+#include "OLED_Display.h"
+#endif
 
 // -----------------------------------------------------------------------------
 // Per-sensor "current value" formatters
@@ -1282,7 +1282,6 @@ void g2SensorsHandleTap(uint32_t idx) {
     if (idx == 0) {
       // <- Main Menu
       g2SetHijackPage(G2_HIJACK_PAGE_MAIN);
-      extern void g2RedrawHijackMainMenu();
       g2RedrawHijackMainMenu();
       return;
     }

@@ -11,10 +11,9 @@
 #include <cstdio>
 #include <cstring>
 #include <ctime>
+#include "System_Utils.h"
 
 using namespace QuickNotePolicy;
-
-extern uint32_t gBootCounter;  // HardwareOne.cpp: the NVS boot counter, "boot #N"
 
 namespace {
 constexpr uint32_t kLockMs = 1000;

@@ -58,4 +58,7 @@ void httpTerminalCancel(HttpTerminalToken token);
 // Zero means configuration is unavailable. A change invalidates a native view.
 uint32_t httpTerminalConfigRevision();
 #endif
+
+void llmHttpApplySettings();
+
 #endif

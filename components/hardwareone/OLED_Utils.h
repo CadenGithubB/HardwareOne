@@ -460,6 +460,62 @@ enum LoggingMenuState {
 extern LoggingMenuState loggingCurrentState;
 extern int loggingMenuSelection;
 
+// Mode entry points and shared state defined across the OLED files.
+struct FileBrowserRenderData;  // System_FileManager.h
+void enterUnavailablePage(const String& title, const String& reason);
+extern FileBrowserRenderData fileBrowserRenderData;
+int getCLIViewerSelectedIndex();
+void oledAuthModeInit();
+void oledAuthModeResetSessionState();
+void oledCLIInputModeInit();
+void oledCLIInputResetSessionState();
+void oledChangePasswordModeInit();
+void oledChangePasswordModeResetSessionState();
+int oledFileBrowserActiveLevel();
+void oledFileBrowserResetSessionState();
+const char* oledFilePickerTitle();
+void oledLoggingModeInit();
+void oledMenuModeInit();
+void oledNetworkModeResetSessionState();
+void oledPowerModeInit();
+void oledSetPatternModeInit();
+void oledSetPatternModeResetSessionState();
+void oledUserManagerModeInit();
+void oledUserManagerModeResetSessionState();
+extern String unavailableOLEDReason;
+extern unsigned long unavailableOLEDStartTime;
+extern String unavailableOLEDTitle;
+
+#if ENABLE_OLED_DISPLAY && ENABLE_AUTOMATION
+void oledAutomationsModeResetSessionState();
+#endif
+
+#if ENABLE_OLED_DISPLAY && ENABLE_BLUETOOTH
+void oledBluetoothModeInit();
+#endif
+
+#if ENABLE_OLED_DISPLAY && ENABLE_LLM_BACKEND
+const char* oledLLMFooterHint();
+void oledLLMModeInit();
+#endif
+
+#if ENABLE_OLED_DISPLAY && ENABLE_MAPS
+extern bool gMapMenuOpen;
+#endif
+
+#if ENABLE_OLED_DISPLAY && ENABLE_NEOPIXEL
+void oledLEDModeInit();
+#endif
+
+#if ENABLE_OLED_DISPLAY && ENABLE_R1_HEALTH
+void oledR1HealthModeInit();
+#endif
+
+#if ENABLE_OLED_DISPLAY && ENABLE_ESPNOW && ENABLE_BONDED_MODE
+bool bondModeInputHandler(int deltaX, int deltaY, uint32_t newlyPressed);
+void oledRemoteSettingsModeInit();
+#endif
+
 #endif // ENABLE_OLED_DISPLAY
 
 #endif // OLED_UTILS_H

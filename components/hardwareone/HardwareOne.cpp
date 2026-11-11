@@ -13,9 +13,6 @@ struct RouterMetrics;
 static String originPrefix(const char* source, const String& user, const String& ip,
                            const char* suffix = "");
 
-extern uint32_t gLastHeartbeatSentMs;
-extern const uint32_t MESH_HEARTBEAT_INTERVAL_MS;
-
 // Web server functions (implemented in web_server.cpp) - declared here to prevent Arduino preprocessor from creating static versions
 void getClientIP(httpd_req_t* req, String& ipOut);
 void getClientIP(httpd_req_t* req, char* ipBuf, size_t bufSize);
@@ -87,6 +84,16 @@ void getClientIP(httpd_req_t* req, char* ipBuf, size_t bufSize);
 #endif
 #if ENABLE_MQTT
   #include "System_MQTT.h"
+#endif
+#if ENABLE_ESPNOW
+  #include "System_ESPNow_FsList.h"
+#endif
+#if ENABLE_LOCAL_STT
+  #include "System_STT.h"
+  #include "System_STTVocabulary.h"
+#endif
+#if ENABLE_CAMERA_SENSOR
+  #include "System_Camera_DVP.h"
 #endif
 #include "System_Command.h"
 #include "System_CrashRecord.h"
@@ -224,10 +231,6 @@ void buildAllSessionsJson(const String& currentSid, JsonArray& sessions);
 // All debug functionality moved to debug_system.cpp for proper encapsulation
 void setupWiFi();
 
-// WiFi global flags (defined in wifi_system.cpp)
-extern volatile bool gWifiUserCancelled;
-extern bool gSkipNTPInWifiConnect;
-
 // Output/logging used widely before definition
 
 // Global variables forward declarations
@@ -244,7 +247,6 @@ String resolveRegistryCommandKey(const String& line);
 void broadcastOutput(const String& s);
 void broadcastOutput(const char* s);
 void broadcastOutput(const String& s, const CommandContext& ctx);
-extern String gBootId;
 
 // ---------------------------------------------------------------------------
 // Serial auth globals
@@ -349,7 +351,7 @@ extern "C" void __attribute__((weak)) memAllocDebug(const char* op, void* ptr, s
 
 volatile uint32_t gOutputFlags = MSG_ROUTE_SERIAL;
 
-void appendCommandToFeed(const char* source, const String& cmd, const String& user = String(), const String& ip = String()) {
+void appendCommandToFeed(const char* source, const String& cmd, const String& user, const String& ip) {
 #if ENABLE_HTTP_SERVER
   // Machine CM5/live-audio inspection may be polled from UART, web, serial,
   // or a future interface. Keep this policy at the shared feed boundary so no
@@ -383,8 +385,6 @@ static String originPrefix(const char* source, const String& user, const String&
 }
 
 static void broadcastCommandResultQueued(const String& prefix, const String& body, uint8_t route) {
-  extern void broadcastOutputCore_Routed(const char* text, size_t len, uint8_t route);
-
   const size_t maxFrameLen = DEBUG_MSG_SIZE - 1;  // leave room for NUL in DebugMessage::text
   const size_t prefixLen = prefix.length();
   const size_t bodyLen = body.length();
@@ -461,8 +461,6 @@ static void broadcastCommandResultQueued(const String& prefix, const String& bod
 // Sensor JSON building functions moved to respective sensor files (thermal_sensor.cpp, tof_sensor.cpp, imu_sensor.cpp)
 
 // Note: handlePing moved to web_server.cpp
-
-extern bool isAdminUser(const String& who);
 
 bool hasAdminPrivilege(const AuthContext& ctx) {
   // When the ctx being asked about IS the identity installed on this task —
@@ -871,10 +869,10 @@ char* gFileOutBuf = nullptr;
 // and until 2026-08-19 they were DEFINED here as plain `size_t` — two
 // declarations of one variable with different types, which is an ODR/type
 // violation the compiler cannot diagnose across TUs. They are written exactly
-// once (here) and only read, so const is the truth. The explicit `extern` is
-// REQUIRED: a namespace-scope const has internal linkage by default, and
-// without it WebServer_Server.cpp would fail to link. Side benefit: both move
-// from .data (DRAM) to .rodata (flash).
+// once (here) and only read, so const is the truth. System_Utils.h declares
+// them; the `extern` here keeps the external linkage a namespace-scope const
+// would otherwise lose. Side benefit: both move from .data (DRAM) to .rodata
+// (flash).
 extern const size_t kFileReadBufSize = 2048;
 extern const size_t kFileOutBufSize = 2048;
 
@@ -1103,9 +1101,6 @@ bool perfGetLoopSnapshot(uint32_t& lapsPerSec, uint32_t& avgMs, uint32_t& maxMs,
   return true;
 }
 
-extern int connectedDeviceCount;
-extern struct ConnectedDevice connectedDevices[];
-
 static bool gDebugMemSummary = false;
 
 static void heapLogSummary(const char* tag) {
@@ -1137,8 +1132,6 @@ static void heapLogSummary(const char* tag) {
                    (unsigned)ps_largest,
                    (unsigned)main_hwm);
 }
-
-extern void discoverI2CDevices();
 
 #if ENABLE_AUTOMATION
 const char* cmd_downloadautomation(const String& argsInput) {
@@ -1555,7 +1548,6 @@ void hardwareone_setup() {
 #if ENABLE_LOCAL_STT
   // The speech vocabulary file lives beside the model (card or internal); it
   // loads once here and again on `sttvocab reload`.
-  extern void sttVocabularyInit();
   sttVocabularyInit();
 #endif
 #if DEBUG_MEM_SUMMARY
@@ -2166,8 +2158,6 @@ void hardwareone_setup() {
       // Server-mode path only runs when the user *explicitly* asked for BT
       // at boot, or when this boot is resuming the transport that just
       // delivered an OTA. We never coerce to server from auto-reconnect flags.
-      extern bool initBluetooth();
-      extern bool startBLEAdvertising();
       if (initBluetooth()) {
         if (startBLEAdvertising()) {
           broadcastOutput("Bluetooth initialized and advertising");
@@ -2387,7 +2377,6 @@ void hardwareone_setup() {
 
     // Phase 4b — remote-directory-listing protocol (FS_LIST_REQ/REPLY).
     // Allocates the pending-request table mutex; safe to call repeatedly.
-    extern void fsListInit();
     fsListInit();
   }
 
@@ -2462,7 +2451,6 @@ static bool powerSaveInhibited() {
   // a real peer command flows through executeCommand as remote activity.
   // The camera module owns its busy answer: open stream and recording sessions.
 #if ENABLE_CAMERA_SENSOR
-  extern bool cameraCaptureBusy();
   return micRecordingBusy() || cameraCaptureBusy();
 #else
   return micRecordingBusy();
@@ -2611,7 +2599,6 @@ void hardwareone_loop() {
   ntpSyncDrainTick();   // hand real SNTP replies to the clock-step chokepoint
   Clock::clockDutiesTick(); // drain filesystem-touching clock-step chores
 #if ENABLE_LOCAL_STT
-  extern void sttWarmTick();
   sttWarmTick();        // free a kept-warm STT model once idle or PSRAM runs short
 #endif
 #if ENABLE_BLUETOOTH

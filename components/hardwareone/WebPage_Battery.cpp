@@ -7,6 +7,7 @@
 
 #include "System_User.h"          // AuthContext
 #include "System_Battery.h"       // the battery snapshot, getBatteryStatusString()
+#include "System_PowerJson.h"     // buildBatteryJson
 #include "System_MemUtil.h"       // ps_alloc, AllocPref, PSRAM_JSON_DOC
 #include "WebPage_Battery.h"
 #include "WebServer_Server.h"     // streamBeginHtml/EndHtml, streamPageWithContent, WEB_AUTH_OR_RETURN
@@ -29,7 +30,6 @@ esp_err_t handleBatteryStatus(httpd_req_t* req) {
   if (!buf) buf = (char*)ps_alloc(kBufSize, AllocPref::PreferPSRAM, "battery.status.json");
   if (!buf) { httpd_resp_send(req, "{}", HTTPD_RESP_USE_STRLEN); return ESP_OK; }
   PSRAM_JSON_DOC(doc);
-  extern void buildBatteryJson(JsonDocument& doc);  // core: System_Battery.cpp
   buildBatteryJson(doc);
   if (measureJson(doc) >= kBufSize) {
     httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Battery status exceeds response buffer");

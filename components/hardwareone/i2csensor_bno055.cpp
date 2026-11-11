@@ -135,9 +135,6 @@ bool gImuConnected = false;
 unsigned long gImuLastStopTime = 0;
 TaskHandle_t gImuTaskHandle = nullptr;
 
-// Forward declarations
-extern bool createIMUTask();
-
 // ============================================================================
 // IMU Sensor Command Handlers
 // ============================================================================

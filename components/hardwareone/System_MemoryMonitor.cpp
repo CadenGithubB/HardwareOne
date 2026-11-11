@@ -17,6 +17,7 @@
 #include "System_ESPNow.h"
 #include "System_I2C.h"
 #include "HAL_Input.h"          // For INPUT_TASK_NAME (gamepad vs ANO)
+#include "System_CommandTypes.h"
 
 // Per-sensor enabled/connected flags + task handles come from the sensor
 // headers (which gate their own decls on ENABLE_*_SENSOR). System_SensorStubs.h
@@ -48,9 +49,6 @@
 #if ENABLE_RTC_SENSOR
 #include "i2csensor_ds3231.h"
 #endif
-
-// Command-exec task handle is NOT a sensor — declared separately.
-extern TaskHandle_t gCmdExecTaskHandle;
 
 // ============================================================================
 // Memory Threshold Registry
@@ -604,7 +602,6 @@ void periodicMemorySample() {
   }
 
   // Check if sampling is disabled (0 = disabled)
-  extern Settings gSettings;
   if (gSettings.memorySampleIntervalSec <= 0) {
     return;
   }

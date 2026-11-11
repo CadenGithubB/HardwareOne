@@ -98,8 +98,6 @@ static bool rtcOLEDModeAvailable(String* outReason) {
     return true;
   }
   // Check if hardware was detected during I2C scan (address 0x68)
-  extern ConnectedDevice connectedDevices[];
-  extern int connectedDeviceCount;
   for (int i = 0; i < connectedDeviceCount; i++) {
     if (connectedDevices[i].address == I2C_ADDR_DS3231 && connectedDevices[i].isConnected) {
       if (outReason) *outReason = "Disabled\nPress X to start";

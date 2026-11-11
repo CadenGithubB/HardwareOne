@@ -1093,7 +1093,6 @@ void g2SettingsHandleTap(uint32_t idx) {
         // Settings now lives under Config, not as a top-level hijack row).
         // Reset to page 0 so the next entry to Settings starts fresh.
         gModulePage = 0;
-        extern void g2ShowConfigMenu();
         g2ShowConfigMenu();
         return;
       }

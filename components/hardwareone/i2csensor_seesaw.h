@@ -65,7 +65,7 @@ const char* cmd_gamepadpoll(const String& argsInput);
 
 // Gamepad state and control
 extern unsigned long gGamepadLastStopTime;
-extern TaskHandle_t gInputTaskHandle;
+// gInputTaskHandle (shared by every input driver) is declared in System_TaskUtils.h.
 
 // Gamepad internal start (called by queue processor)
 bool inputStartInternal();

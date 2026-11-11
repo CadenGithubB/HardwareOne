@@ -63,6 +63,7 @@
 #include "G2_HijackCmd.h"   // g2BumpMenuGen() — called from g2SetHijackPage
 #include "System_AuthIdentity.h"  // ExecIdentityGuard + currentAuthContext
 #include "System_CommandRegistry.h"
+#include "System_R1_Protocol.h"
 
 extern "C" {
 #include "lc3.h"  // vendored Google liblc3 — Apache-2.0 (components/hardwareone_libs/liblc3)
@@ -132,14 +133,6 @@ extern "C" {
 #include <ctype.h>
 #include <string.h>
 #include <time.h>          // localtime_r for the native-notification 'date' field
-
-// r1Crc32 (System_R1_Protocol.cpp) is the EXACT Even File Service fileDataCrc32
-// — CRC-32C, poly 0x1EDC6F41, init 0, MSB-first, no final XOR (a byte-for-byte
-// port of docs/FlutterApp-main/lib/src/core/crc.dart). It shares this file's
-// compile gate, so it is always linked when G2 is. Declared locally to avoid
-// pulling the whole R1 header; the native-notification path is its second
-// consumer. See docs/G2_NATIVE_NOTIFICATION_PLAN.md §3.
-extern uint32_t r1Crc32(const uint8_t* data, size_t len);
 
 // Native Terminal owns its own lifecycle, independent of the custom renderer.
 static std::atomic<uint32_t> gNativeTerminalEpoch{0}, gNativeTerminalCounter{0};
@@ -1129,10 +1122,6 @@ static volatile bool  gScanFoundR = false;
 // needs its own handshake separate from the glasses' AppLaunch flow).
 // The ring's BLE layer lives in G2_Ring.cpp; here we just
 // stash the advertisedDevice pointer for it to claim.
-extern BLEAdvertisedDevice* gRingAdvertisedDevice;  // defined in _Ring.cpp
-extern String               gRingDeviceName;
-extern String               gRingDeviceAddress;
-extern volatile bool        gRingScanFound;
 void g2RingSetIdentity(const char* name);  // cross-task name copy, G2_Ring.cpp
 
 // Per-family in-flight flag for G2 connects. Set true by the public
@@ -1548,9 +1537,16 @@ static inline void clearOurShutdownStamp() {
   portEXIT_CRITICAL(&gSyncLifecycleMux);
 }
 
-// Forward decl — declared near the other image-probe state at file scope
-// further down, but referenced by imageProbeBegin() here.
-extern volatile bool gImgProbeAbort;
+// Generic abort-now signal for probe burst senders. Set alongside
+// gImgProbeHoldTapPending (with the other image-probe state further down)
+// whenever the user dismisses (CLICK/DOUBLE_CLICK on sid=0xE0 during a
+// hold). The image-burst senders (sendImageBmpMultiFragment,
+// sendImageBmpFragmentsNoCreate) poll this in their tight inner loops —
+// between BMP fragments and inside the in-flight throttle — so dismiss is
+// responsive mid-burst, not just at frame boundaries. Cleared by
+// imageProbeBegin() below at the start of every probe, which is why it is
+// defined here.
+static volatile bool gImgProbeAbort = false;
 
 // Image-probe lifecycle bookends. Call begin at the probe's pre-burst
 // SHUTDOWN site (probeTearDownActiveContainer) and end at the post-probe
@@ -2533,16 +2529,6 @@ static bool g2TerminalInvalidate(const char* reason, char side,
 // exit-callback (the probe worker reads the flag itself).
 static volatile bool     gImgProbeHoldActive     = false;
 static volatile bool     gImgProbeHoldTapPending = false;
-// Generic abort-now signal for probe burst senders. Set alongside
-// gImgProbeHoldTapPending whenever the user dismisses (CLICK/DOUBLE_CLICK
-// on sid=0xE0 during a hold). The image-burst senders
-// (sendImageBmpMultiFragment, sendImageBmpFragmentsNoCreate) poll this in
-// their tight inner loops — between BMP fragments and inside the
-// in-flight throttle — so dismiss is responsive mid-burst, not just at
-// frame boundaries. Cleared by imageProbeBegin() at the start of every
-// probe (forward-declared up by the FSM helpers because that's where
-// the cleanup is wired in).
-volatile bool            gImgProbeAbort          = false;
 
 // Fresh MenuStartUp events are terminal proof that the firmware discarded
 // the prior surface. The handler appears before the persistent session worker
@@ -2855,8 +2841,6 @@ static TaskHandle_t       gBleNotifyTaskHandle = nullptr;
 static bool livePageIsActive();
 static void livePageKickRefresh();
 static bool liveTextIsActive();
-extern void g2StopLiveTextPage();
-extern void g2StopLiveListPage();
 
 // Page-swap fast path toggle: when true, worker uses Cmd=7 REBUILD-list
 // to swap items in place on an existing list container instead of the
@@ -6524,7 +6508,6 @@ static void handleDevEvent(G2Temple& t, const uint8_t* devBody, size_t devLen,
       // signal. Stash the timestamp so the Status page can surface
       // "ring linked: yes (last seen Ns ago)". Distinct from the
       // direct-BLE-to-ring connection state (gRing.connected).
-      extern uint32_t gRingViaGlassesLastSeenMs;
       if (src == 2) gRingViaGlassesLastSeenMs = millis();
 
       // Long-press (hold) on our page: pair and record before any keyboard,
@@ -7659,7 +7642,7 @@ static void g2ShowLoggingMenu();               // sensor-logging control list, d
 
 // Menu-reorg category launchers (mirror the OLED's System/Config categories).
 // Non-static: sub-pages in their own TUs (Settings, Tests, Users) return to
-// these on Back via a local `extern` decl, exactly like g2ShowAppsMenu.
+// these on Back (declared in G2_Glasses.h), exactly like g2ShowAppsMenu.
 void g2ShowSystemMenu();                        // System launcher (Status/System Events/Logging/Tests), defined below
 void g2ShowConfigMenu();                        // Config launcher (Settings/Users), defined below
 // invokePageFromMain is defined much further down (with the tap dispatcher);
@@ -7766,7 +7749,6 @@ static void g2AppsHandleTap(uint32_t idx) {
   switch (ids[idx]) {
     case APP_ROW_BACK: {  // <- back to the root hijack menu
       g2SetHijackPage(G2_HIJACK_PAGE_MAIN);
-      extern void g2RedrawHijackMainMenu();
       g2RedrawHijackMainMenu();
       return;
     }
@@ -7876,7 +7858,6 @@ static void g2SystemHandleTap(uint32_t idx) {
   switch (ids[idx]) {
     case SYS_ROW_BACK: {  // <- back to the root hijack menu
       g2SetHijackPage(G2_HIJACK_PAGE_MAIN);
-      extern void g2RedrawHijackMainMenu();
       g2RedrawHijackMainMenu();
       return;
     }
@@ -7972,7 +7953,6 @@ static void g2ConfigHandleTap(uint32_t idx) {
   switch (ids[idx]) {
     case CFG_ROW_BACK: {  // <- back to the root hijack menu
       g2SetHijackPage(G2_HIJACK_PAGE_MAIN);
-      extern void g2RedrawHijackMainMenu();
       g2RedrawHijackMainMenu();
       return;
     }
@@ -8028,7 +8008,7 @@ static const G2PageModule kCameraSettingsPage = {
 // further down (after the live-text worker). Declared here so the
 // page module + render fn can reference them inline; same pattern
 // renderStatusCompound uses.
-extern "C++" bool sendCreateMixedListMultiTextAndWait(
+bool sendCreateMixedListMultiTextAndWait(
     G2Temple& arm,
     const char* const* listItems,
     size_t listItemCount,
@@ -8398,7 +8378,6 @@ void g2MicDetailHandleTap(uint32_t idx) {
     // Back to Sensors landing list. The live-text worker will see
     // gLiveTextStopFlag get tripped by the outgoing tear-down and
     // exit cleanly; g2ShowSensorsMenu re-CREATEs the sensor list.
-    extern void g2ShowSensorsMenu();
     g2ShowSensorsMenu();
     return;
   }
@@ -11099,7 +11078,6 @@ static void handleHijackMenuTap(uint32_t idx, const char* wireName,
     if (idx == 0) {
       BROADCAST_PRINTF("[G2] Hijack tap: item 0 (%s) → back to main menu", lbl);
       g2SetHijackPage(G2_HIJACK_PAGE_MAIN);
-      extern void g2RedrawHijackMainMenu();
       g2RedrawHijackMainMenu();
     } else {
       BROADCAST_PRINTF("[G2] Hijack tap: item %u (%s) → no action (text view)",
@@ -22678,7 +22656,7 @@ static bool sendRebuildMultiTextAndWait(G2Temple& arm,
 // accept compound containers in the list+image shape (Q16-Q18); if it
 // rejects this shape we'll see CreateResp res != 0 and the worker
 // auto-recovers back to the hijack root menu via the existing fallback.
-extern "C++" bool sendCreateMultiTextAndWait(G2Temple& arm,
+bool sendCreateMultiTextAndWait(G2Temple& arm,
                                              const G2TextChildSpec* children,
                                              size_t childCount,
                                              uint32_t widgetId) {
@@ -22792,7 +22770,7 @@ static bool sendRebuildMixedListMultiTextAndWait(
 // Used by Status to add a tappable "<- Main Menu" back-row at the top
 // alongside the existing body/batt/meter text panes. Mirrors the
 // existing list+text helper but extends to N text children.
-extern "C++" bool sendCreateMixedListMultiTextAndWait(
+bool sendCreateMixedListMultiTextAndWait(
     G2Temple& arm,
     const char* const* listItems,
     size_t listItemCount,
@@ -22856,7 +22834,7 @@ extern "C++" bool sendCreateMixedListMultiTextAndWait(
 // Same ack/timeout pattern as sendCreateMultiTextAndWait, but builds
 // the pb via g2BuildCreateMixedListText. Verified against firmware
 // 2.2.0.24 — see G2_PROTOCOL.md for the wire shape.
-extern "C++" bool sendCreateMixedListTextAndWait(G2Temple& arm,
+bool sendCreateMixedListTextAndWait(G2Temple& arm,
                                                   const char* const* items,
                                                   size_t itemCount,
                                                   const G2ContainerGeom& listGeom,
@@ -23474,10 +23452,6 @@ static bool pageSwapJobBody(PageSwapArgs* args) {
     // through the existing exit handler path. The container is not a
     // list (containerIsList=false) — gestures don't generate ListEvent
     // CLICKs unless eventCapture=1 on the child.
-    extern bool sendCreateMultiTextAndWait(G2Temple& arm,
-                                           const G2TextChildSpec* children,
-                                           size_t childCount,
-                                           uint32_t widgetId);
     createOk = sendCreateMultiTextAndWait(*arm, args->multiSpecs,
                                           args->multiCount, BLOCKS_WIDGET_ID);
     if (createOk) {
@@ -23498,20 +23472,7 @@ static bool pageSwapJobBody(PageSwapArgs* args) {
     // not tappable. gTextView is left disarmed because the page is
     // list-driven; tap events come through the normal ListEvent path,
     // not the gTextViewExitFn fallback.
-    extern bool sendCreateMixedListTextAndWait(G2Temple& arm,
-                                               const char* const* items,
-                                               size_t itemCount,
-                                               const G2ContainerGeom& listGeom,
-                                               const G2TextChildSpec& title,
-                                               uint32_t widgetId);
     if (args->hasTitle2) {
-      extern bool sendCreateMixedListMultiTextAndWait(G2Temple& arm,
-                                                      const char* const* listItems,
-                                                      size_t listItemCount,
-                                                      const G2ContainerGeom& listGeom,
-                                                      const G2TextChildSpec* textChildren,
-                                                      size_t textChildCount,
-                                                      uint32_t widgetId);
       const G2TextChildSpec children[2] = { args->titleSpec, args->title2Spec };
       createOk = sendCreateMixedListMultiTextAndWait(*arm,
                                                      (const char* const*)args->items,
@@ -35975,9 +35936,6 @@ static size_t g2RenderCurrentMapBmp(uint8_t* bmp, size_t cap,
     return 0;
   }
   const LoadedMap& m = MapCore::getCurrentMap();
-  extern float gMapCenterLat;
-  extern float gMapCenterLon;
-  extern bool  gMapCenterSet;
   if (!gMapCenterSet) {
     gMapCenterLat = (m.header.minLat + m.header.maxLat) / 2000000.0f;
     gMapCenterLon = (m.header.minLon + m.header.maxLon) / 2000000.0f;
@@ -36354,12 +36312,6 @@ static void g2MapPageWorker(void* arg) {
       drainedPanCount += (uint32_t)(panX < 0 ? -panX : panX) +
                          (uint32_t)(panY < 0 ? -panY : panY);
       if (taps || panX || panY) {
-        extern float gMapZoom;
-        extern float gMapRotation;
-        extern float gMapCenterLat;
-        extern float gMapCenterLon;
-        extern bool  gMapCenterSet;
-        extern bool  gMapManuallyPanned;
         if (menu == G2_MAP_MENU_MAIN) {
           if (taps & (1u << 0)) {
             DEBUG_G2F("[G2] map page: Back → exit");

@@ -17,6 +17,10 @@ def main():
     parser.add_argument('--sanitize', action='store_true')
     args = parser.parse_args()
     harness = (HERE / 'live_audio_harness.cpp').read_text()
+    registry = (COMPONENT / 'System_CommandRegistry.h').read_text()
+    for declaration in ('extern const CommandEntry liveAudioCommands[];',
+                        'extern const size_t liveAudioCommandsCount;'):
+        assert registry.count(declaration) == 1 and harness.count(declaration) == 1, declaration
     for marker, filename in (
         ('HAL_HEADER', 'HAL_Audio.h'), ('HAL_SOURCE', 'HAL_Audio.cpp'),
         ('LIVE_HEADER', 'System_LiveAudio.h'), ('LIVE_SOURCE', 'System_LiveAudio.cpp'),

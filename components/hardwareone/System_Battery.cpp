@@ -2,6 +2,7 @@
 // use one coherent, explicitly valid snapshot. A BAT node is not proof that a
 // cell is installed, and voltage never establishes USB or charging state.
 #include "System_Battery.h"
+#include "System_PowerJson.h"
 #include "System_Events.h"
 #include "System_CommandRegistry.h"  // argWantsJson
 #include "System_MemUtil.h"
@@ -14,6 +15,7 @@
 #include "System_Mutex.h"
 #include <esp_err.h>
 #include <time.h>
+#include "System_Utils.h"
 
 #if ENABLE_BATTERY_MONITOR && BATTERY_BACKEND_ADC
 #include <esp_adc/adc_oneshot.h>
@@ -503,7 +505,6 @@ static const int    kBatteryLogMaxRotations  = 2;      // keep .1 and .2
 // a power-state change. Every row carries the live battery snapshot, so an
 // event is automatically annotated with the battery state at that instant.
 static void batteryLogAppend(const char* event) {
-  extern uint32_t gBootCounter;            // session id — bumps each boot
   const time_t epoch = time(nullptr);
   char dt[20];
   struct tm tmv;

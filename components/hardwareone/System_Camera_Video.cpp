@@ -458,7 +458,6 @@ static void recordingTask(void* /*arg*/) {
 // ── Public API ──────────────────────────────────────────────────────────────
 bool startVideoRecording() {
   STACK_TRACEF("startVideoRecording.enter");
-  extern bool gCameraRunning;
   SemaphoreHandle_t ctrl = getRecCtrl();
   if (!ctrl) {
     ERROR_CAMERAF("[Video] Cannot create recorder control mutex");

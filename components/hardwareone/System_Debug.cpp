@@ -27,6 +27,15 @@
 #include "WebServer_Utils.h"
 #include "System_ESPSR.h"  // srSyncDebugLevel()
 #include "System_CommandRegistry.h"
+#include "System_Notifications.h"
+#include "System_SensorStubs.h"
+#include "i2csensor_bno055.h"
+#include "i2csensor_mlx90640.h"
+#include "i2csensor_rda5807.h"
+#include "i2csensor_vl53l4cx.h"
+#if ENABLE_ESPNOW
+#include "System_ESPNow.h"
+#endif
 
 // External dependencies from .ino
 
@@ -225,10 +234,6 @@ static const uint32_t G2_FLUSH_INTERVAL_MS = 2000;  // Send to glasses every 2 s
 static const size_t G2_BUFFER_MAX = 500;            // Max chars to buffer
 #endif
 
-
-// External dependencies from main .ino
-extern bool gCLIValidateOnly;
-extern volatile bool gInHelpRender;
 
 // Settings and persistence (defined in settings.h and main .ino)
 
@@ -909,8 +914,6 @@ void debugQueuePrintf(DebugFlagMask flag, const char* fmt, ...) {
   if (!getDebugQueue() || !getDebugFreeQueue()) return;
 
   // CRITICAL: Check if we're in a sensor task that's shutting down
-  extern bool gThermalRunning, gImuRunning, gTofRunning, gFmRadioRunning;
-  extern TaskHandle_t gThermalTaskHandle, gImuTaskHandle, gTofTaskHandle, gFmRadioTaskHandle;
   TaskHandle_t currentTask = xTaskGetCurrentTaskHandle();
   if (currentTask == gThermalTaskHandle && !gThermalRunning) return;
   if (currentTask == gImuTaskHandle && !gImuRunning) return;
@@ -1009,11 +1012,6 @@ static void flushPreInitEvents() {
 // Broadcast Output Functions
 // ============================================================================
 
-// Per-task current command context lives in System_AuthIdentity's TLS slot.
-// Read via currentCommandContext() (returns void*); the outputMask helper
-// is getCurrentCommandOutputMask() in HardwareOne.cpp.
-extern uint32_t getCurrentCommandOutputMask();
-
 // Output capture state lives in the calling task's TLS slot too (Stage 3).
 // Access via currentCaptureState() — returns nullptr for tasks that never
 // set a capture buffer, in which case broadcastOutput skips capture.
@@ -1054,9 +1052,7 @@ static void broadcastOutputCore(const char* text, size_t len, uint8_t routeOverr
   }
 
   // 3. Skip output if current task is a sensor task that's been disabled
-  extern bool gThermalRunning, gImuRunning, gTofRunning;
   TaskHandle_t currentTask = xTaskGetCurrentTaskHandle();
-  extern TaskHandle_t gThermalTaskHandle, gImuTaskHandle, gTofTaskHandle;
   if (currentTask == gThermalTaskHandle && !gThermalRunning) return;
   if (currentTask == gImuTaskHandle && !gImuRunning) return;
   if (currentTask == gTofTaskHandle && !gTofRunning) return;
@@ -1093,8 +1089,6 @@ static void broadcastOutputCore(const char* text, size_t len, uint8_t routeOverr
   //    owner decides from the calling task's command context whether, and to
   //    which requester, this line streams.
 #if ENABLE_ESPNOW
-  extern bool espnowStreamOutputWanted();
-  extern void sendEspNowStreamMessage(const String& message);
   if (espnowStreamOutputWanted()) {
     sendEspNowStreamMessage(String(text));
   }
@@ -1643,7 +1637,6 @@ static void dbgApplyHook(DbgFlagIdx idx, bool modeTemp, int v, bool* settingPtr)
       // Drive ESP-IDF TLS/HTTPS tag verbosity. Skipped during the CLI
       // validation pass (dbgFlagCmd short-circuits before the hook, so
       // gCLIValidateOnly is false here — guarded anyway to match pre-C3).
-      extern bool gCLIValidateOnly;
       if (!gCLIValidateOnly) applyHttpsLogLevels(isDebugFlagSet(DEBUG_HTTPS));
       break;
     }
@@ -2229,9 +2222,6 @@ const char* cmd_debugstack(const String& argsInput) {
 // Debug Command Registry
 // ============================================================================
 
-// Implemented in System_Notifications.cpp (owns the pipeline counters).
-extern const char* cmd_notifstats(const String& argsInput);
-
 // Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
 const CommandEntry debugCommands[] = {
   { "debughttp", "Debug HTTP requests.", true, cmd_debughttp, "Usage: debughttp <0|1> [temp|runtime]" },
@@ -2519,9 +2509,6 @@ bool DebugManager::getLogCategoryTags() const { return gSystemLogCategoryTags; }
 // ============================================================================
 // Handles structured logging to LittleFS files with automatic cap enforcement.
 
-// External dependencies
-extern bool appendLineWithCap(const char* path, const String& line, size_t capBytes);
-
 // Time sync marker flag
 bool gTimeSyncedMarkerWritten = false;
 
@@ -2698,7 +2685,6 @@ void logI2CError(uint8_t address, const char* deviceName, int consecutiveErrors,
 // time-synced marker ties millis→wall-clock once NTP lands.
 void logBootAnchorToLogs(const char* resetReason, const char* detail) {
   if (!filesystemReady) return;
-  extern uint32_t gBootCounter;
 
   String line = buildTimestampPrefix();
   line += "Device Powered On | boot #";

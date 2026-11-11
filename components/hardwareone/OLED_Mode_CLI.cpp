@@ -14,9 +14,6 @@
 #include "System_Utils.h"
 #include "System_Debug.h"
 
-// External OLED console buffer (display pointer via HAL_Display.h #define oledDisplay gDisplay)
-extern OLEDConsoleBuffer gOledConsole;
-
 // CLI viewer state
 static int cliScrollOffset = 0;
 static uint32_t cliSelectedTimestamp = 0;  // Track by timestamp (survives buffer shifts)

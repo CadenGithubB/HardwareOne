@@ -70,21 +70,6 @@ class OLEDMapCtxGuard {
 
 // External OLED display pointer (provided via HAL_Display.h #define oledDisplay gDisplay)
 
-// External map state from GPS_MapRenderer.cpp
-extern float gMapRotation;
-extern float gMapZoom;
-
-// Center position for map viewing (defined in GPS_MapRenderer.cpp, accessed via extern)
-extern float gMapCenterLat;
-extern float gMapCenterLon;
-extern bool gMapCenterSet;
-extern bool gMapManuallyPanned;
-
-// Momentum-based scrolling
-extern float gMapVelocityLat;
-extern float gMapVelocityLon;
-extern float gMapRotationVelocity;
-
 // Singleton renderer for OLED (used only for overlays now)
 static OLEDMapRenderer* gOledMapRenderer = nullptr;
 

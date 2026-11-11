@@ -81,6 +81,9 @@ void settingsEditorShowError(const String& message, uint32_t durationMs);
 // Returns true if module was found and editor was opened
 bool openSettingsEditorForModule(const char* moduleName);
 
+void displayQuickSettings();
+bool quickSettingsInputHandler(int deltaX, int deltaY, uint32_t newlyPressed);
+
 #endif // ENABLE_OLED_DISPLAY
 
 #endif // OLED_SETTINGSEDITOR_H

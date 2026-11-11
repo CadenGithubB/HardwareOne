@@ -80,7 +80,17 @@ def worker_sources(component: Path) -> tuple[str, str]:
     for old, new in SPIED:
         assert source.count(old) == 1, old
         source = source.replace(old, new)
-    return header, source
+    # The clients' ops tables are declared in their own headers, which go with
+    # the #include lines; keep the declarations this unit needs.
+    declared = []
+    for name, names in (('G2_Glasses.h', ('g2RingSetupOps', 'g2SetupOps', 'g2RingRetireSetupOps')),
+                        ('BLE_PhonePipe.h', ('phonePipeSetupOps',))):
+        text = (component / name).read_text()
+        for ops in names:
+            line = f'extern const BleSetupOps {ops};'
+            assert text.count(line) == 1, f'{name} declares {ops} once'
+            declared.append(line)
+    return header, '\n'.join(declared) + '\n' + source
 
 
 def check_sources(phone: str) -> None:

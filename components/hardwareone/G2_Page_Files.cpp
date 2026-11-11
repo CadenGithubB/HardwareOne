@@ -1316,7 +1316,6 @@ void g2FilesHandleTap(uint32_t idx) {
       return;
     }
     g2SetHijackPage(G2_HIJACK_PAGE_MAIN);
-    extern void g2RedrawHijackMainMenu();
     g2RedrawHijackMainMenu();
     return;
   }

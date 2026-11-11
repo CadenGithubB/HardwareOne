@@ -41,10 +41,6 @@
 #include "System_ESPNow.h"
 #include "System_MeshPeers.h"
 #include "System_ESPNow_Sensors.h"
-// Forward declarations for mesh bridge command routing
-extern const char* cmd_espnow_roomcmd(const String& argsInput);
-extern const char* cmd_espnow_tagcmd(const String& argsInput);
-extern const char* cmd_espnow_remote(const String& argsInput);
 #endif
 
 #if ENABLE_GPS_SENSOR

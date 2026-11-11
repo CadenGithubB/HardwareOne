@@ -17,6 +17,7 @@
 #include <cassert>                // ISR-context guard on the registry lock
 #include <cstdio>                 // snprintf (per-interval CPU% formatting)
 #include <cstring>                // strncmp/strlcpy (task stack-size registry)
+#include "System_CommandTypes.h"
 
 // Some ESP-IDF configurations do not provide uxTaskGetSystemState (runtime
 // stats disabled). Provide a weak stub so diagnostic commands still link. If
@@ -63,20 +64,6 @@ extern "C" __attribute__((weak)) UBaseType_t uxTaskGetSystemState(
 #if ENABLE_RTC_SENSOR
 #include "i2csensor_ds3231.h"
 #endif
-
-// gCmdExecTaskHandle is not a sensor — declared separately.
-extern TaskHandle_t gCmdExecTaskHandle;
-
-// Per-sensor task functions (each defined in its own .cpp module).
-extern void inputTask(void* parameter);
-extern void thermalTask(void* parameter);
-extern void imuTask(void* parameter);
-extern void tofTask(void* parameter);
-extern void fmRadioTask(void* parameter);
-extern void apdsTask(void* parameter);
-extern void presenceTask(void* parameter);
-extern void gpsTask(void* parameter);
-extern void rtcTask(void* parameter);
 
 // ============================================================================
 // Task Stack-Size Registry

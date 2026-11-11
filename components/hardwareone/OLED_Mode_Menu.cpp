@@ -8,22 +8,13 @@
 #include "System_Settings.h"
 #include "System_BuildConfig.h"
 #include <esp_app_desc.h>
+#if ENABLE_OLED_DISPLAY
+#include "System_SensorStubs.h"
+#endif
 
 #if ENABLE_OLED_DISPLAY
 
-extern DisplayDriver* oledDisplay;
-
-// Sensor menu state variables from OLED_Display.cpp
-extern const OLEDMenuItem oledSensorMenuItems[];
-extern const int oledSensorMenuItemCount;
-
 // BatteryIconState declared in OLED_Utils.h (included above)
-
-// External functions
-extern float getBatteryPercentage();
-extern char getBatteryIcon();
-extern void enterUnavailablePage(const String& title, const String& reason);
-extern void resetOLEDMenu();  // defined in OLED_Utils.cpp; called by the launcher onEnter hook
 
 // ============================================================================
 // Shared menu primitives (used by BOTH the sensor menu and the main launcher)
@@ -145,12 +136,6 @@ static void oledMenuExecuteItem(const OLEDMenuItem* item, const char* slug) {
 // ============================================================================
 // Main Menu Display (List Style - Only Option)
 // ============================================================================
-
-// Forward declare category arrays from OLED_Utils.cpp
-extern const OLEDMenuItem oledMenuCategory0[], oledMenuCategory1[], oledMenuCategory2[];
-extern const OLEDMenuItem oledMenuCategory3[], oledMenuCategory4[], oledMenuCategory5[];
-extern const int oledMenuCategory0Count, oledMenuCategory1Count, oledMenuCategory2Count;
-extern const int oledMenuCategory3Count, oledMenuCategory4Count, oledMenuCategory5Count;
 
 // Helper to get category items and count
 void getCategoryItems(int categoryId, const OLEDMenuItem** outItems, int* outCount) {
@@ -349,9 +334,6 @@ REGISTER_OLED_MODE_MODULE(sSensorMenuModes, sizeof(sSensorMenuModes) / sizeof(sS
 // ============================================================================
 // Logo Display (with 3D animated device)
 // ============================================================================
-
-extern void rotateCubePoint(float& x, float& y, float& z, float angleX, float angleY, float angleZ);
-extern void projectCubePoint(float x, float y, float z, int& screenX, int& screenY, int centerX, int centerY);
 
 void displayLogo() {
   // Text on the left

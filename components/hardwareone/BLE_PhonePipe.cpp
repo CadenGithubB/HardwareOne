@@ -1332,8 +1332,6 @@ static const char* scanCommand(const char* args,bool local) {
 // `phone`: the Android phone as a device. `relay`: what its pipe carries.
 // =============================================================================
 // HardwareOne.cpp: the one-shot serial sink for `phone pair new`'s code.
-extern bool serialCommandSecretSinkReady();
-extern bool serialWriteCommandSecret(const char* text,size_t len);
 // The registry rows set the tier; pairing and forgetting also need the admin
 // on serial or the OLED, checked here, because they bind the phone to a user.
 static bool localAdmin(const AuthContext& auth) {

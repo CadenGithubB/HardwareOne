@@ -198,4 +198,9 @@ struct CmdExecItem {
 // cmd_exec; the last owner performs all request/semaphore destruction.
 void releaseSyncExecReqOwner(ExecReq* request);
 
+// The command executor's queue and task (HardwareOne.cpp). Code that must
+// know whether it runs on the executor compares against the task handle.
+extern QueueHandle_t gCmdExecQ;
+extern TaskHandle_t gCmdExecTaskHandle;
+
 #endif // SYSTEM_COMMANDTYPES_H

@@ -200,7 +200,6 @@ String ImageManager::generateFilename() {
 
 String ImageManager::captureAndSave(ImageStorageLocation location) {
 #if ENABLE_CAMERA_SENSOR
-  extern bool gCameraRunning;
   if (!gCameraRunning) {
     ERROR_CAMERAF("[ImageManager] Camera not enabled");
     return "";

@@ -35,6 +35,11 @@ extern WebMirrorBuf gWebMirror;
 extern volatile unsigned long gWebMirrorSeq;  // defined in HardwareOne.cpp
 extern size_t gWebMirrorCap;
 
+// Adds one executed command to the web command feed (HardwareOne.cpp).
+// Does nothing in builds without the HTTP server.
+void appendCommandToFeed(const char* source, const String& cmd,
+                         const String& user = String(), const String& ip = String());
+
 #if ENABLE_HTTP_SERVER
 
 #include <esp_http_server.h>

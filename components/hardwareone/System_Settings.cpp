@@ -61,6 +61,12 @@
 // (filesystemReady is provided by System_Filesystem.h, included below)
 #include "System_Filesystem.h"
 #include "System_CommandRegistry.h"
+#if ENABLE_LLM_BACKEND && ENABLE_LLM_SOURCE_HTTP
+#include "System_LLMHttp.h"
+#endif
+#if ENABLE_MAPS
+#include "System_Maps.h"
+#endif
 
 // ----------------------------------------------------------------------------
 // Dotted-path JSON helpers
@@ -111,16 +117,12 @@ static JsonVariantConst jsonPathRead(const JsonDocument& doc, const char* path) 
   }
   return current;
 }
-extern volatile uint32_t gOutputFlags;
 // gDebugFlags now from debug_system.h
 
 // WiFi network constants - defined as macros in wifi_system.h (MAX_WIFI_NETWORKS)
 // Debug flag constants - defined as macros in debug_system.h (DEBUG_*)
 // Output flag constants - defined as macros in wifi_system.h (OUTPUT_*)
 // ESP-NOW mode constants - defined as enum in espnow_system.h (ESPNOW_MODE_*)
-
-// File paths - need to be non-static in .ino for access from .cpp files
-extern const char* SETTINGS_JSON_FILE;
 
 // Settings batching is owner-scoped. The core is a fixed-allocation state
 // machine; this adapter supplies the short critical section and all I/O.
@@ -566,10 +568,6 @@ void settingsWriteBatchTick() {
           : SettingsBatchOwner{kExplicitBatchDomain, 0};
   (void)flushSettingsDirtyMask(retryOwner, dirtyMask);
 }
-
-// Filesystem locking
-extern void fsLock(const char* owner);
-extern void fsUnlock();
 
 // CommandEntry struct is defined in system_utils.h (included at top of file)
 
@@ -1326,7 +1324,6 @@ void applySettings() {
 
   // Push persisted Maps defaults into the live runtime variables.
 #if ENABLE_MAPS
-  extern void mapsApplyPersistedSettings();
   mapsApplyPersistedSettings();
 #endif
 
@@ -3330,7 +3327,6 @@ size_t readRegisteredSettings(JsonDocument& doc, const char* onlyPersistFile, bo
                    (unsigned long)(gSettingsTypeMismatches - 4));
   }
 #if ENABLE_LLM_BACKEND && ENABLE_LLM_SOURCE_HTTP
-  extern void llmHttpApplySettings();
   llmHttpApplySettings();
 #endif
   return count;

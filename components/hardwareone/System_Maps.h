@@ -927,4 +927,16 @@ public:
 
 #endif // ENABLE_MAPS
 
+#if ENABLE_MAPS
+extern float gMapCenterLat;
+extern float gMapCenterLon;
+extern bool gMapCenterSet;
+extern bool gMapManuallyPanned;
+extern float gMapRotationVelocity;
+extern float gMapVelocityLat;
+extern float gMapVelocityLon;
+extern float gMapZoom;
+void mapsApplyPersistedSettings();
+#endif
+
 #endif // SYSTEM_MAPS_H

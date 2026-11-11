@@ -9,9 +9,7 @@
 #include "System_MemUtil.h"
 #include "System_Utils.h"
 #include <ArduinoJson.h>
-
-// External helpers
-extern const char* buildSensorStatusJson();
+#include "System_I2C.h"
 
 bool sseWrite(httpd_req_t* req, const char* chunk) {
   if (!req) {

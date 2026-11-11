@@ -483,7 +483,6 @@ static void populateG2Menu() {
       if (idx >= 0 && idx < (int)(sizeof(sG2Actions) / sizeof(sG2Actions[0]))) sG2Actions[idx] = act;
     }
   };
-  extern bool gG2MenuNavEnabled;
   const bool connected = isG2Connected();
   if (connected) add("Disconnect", G2_ACT_DISCONNECT);
   else add("Connect", G2_ACT_CONNECT);
@@ -576,7 +575,6 @@ static void displayG2StatusDetail() {
     char statusBuf[64];
     getG2Status(statusBuf, sizeof(statusBuf));
     oledDisplay->println(statusBuf);
-    extern bool gG2MenuNavEnabled;
     oledDisplay->print("Nav Mode: ");
     oledDisplay->println(gG2MenuNavEnabled ? "ON" : "OFF");
   } else {

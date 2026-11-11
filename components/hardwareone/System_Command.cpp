@@ -18,6 +18,7 @@
 #include "System_Settings.h"
 #include "System_Utils.h"
 #include "System_CommandRegistry.h"
+#include "System_ESPNow.h"
 
 // Forward declaration for exitToNormalBanner function (defined in cli_system.cpp)
 String exitToNormalBanner();
@@ -421,7 +422,6 @@ bool CommandArgs::argBool(int index, bool defaultVal) const {
 
 bool CommandArgs::argMac(int index, uint8_t mac[6]) const {
   if (!has(index)) return false;
-  extern bool parseMacAddress(const String& macStr, uint8_t mac[6]);
   return parseMacAddress(args_[index], mac);
 }
 

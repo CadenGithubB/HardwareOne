@@ -1126,7 +1126,6 @@ static esp_err_t handleBondStatus(httpd_req_t* req) {
     // hand-rolled mask here omitted RTC/APDS/FM Radio, so locally-present
     // sensors (notably RTC) wrongly showed OFF on this device even though the
     // peer correctly reported them ON from the same physical state.
-    extern void buildLocalBondStatus(BondPeerStatus& status);
     BondPeerStatus localStatus;
     buildLocalBondStatus(localStatus);
     webBondSendChunkf(req, "\"sensorConnectedMask\":%u,", (unsigned)localStatus.sensorConnectedMask);

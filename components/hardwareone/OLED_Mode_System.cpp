@@ -21,15 +21,7 @@
 #include "System_WiFi.h"  // wifiRadioDisplayOn() — RADIO power axis
 #endif
 
-// External references
-extern String customOLEDText;
-extern String unavailableOLEDTitle;
-extern String unavailableOLEDReason;
-
 // popOLEDMode is declared in OLED_Display.h
-
-// Unavailable page state - defined in OLED_Display.cpp
-extern unsigned long unavailableOLEDStartTime;
 
 // ============================================================================
 // Custom Text Display

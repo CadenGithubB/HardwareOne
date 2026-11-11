@@ -72,6 +72,7 @@
 #include "System_VFS.h"
 #include "WebServer_MigrationTool.h"
 #include "System_CommandRegistry.h"
+#include "System_ESPNow.h"
 #if ENABLE_ESPNOW
 #include "System_ESPNow.h"
 #endif
@@ -1552,13 +1553,11 @@ int webBroadcastSessionsHuman() {
 // ============================================================================
 
 // Page rendering and authentication dependencies.
-extern void streamDashboardContent(httpd_req_t* req, const String& username);
-extern void streamSettingsContent(httpd_req_t* req, const String& username);
+void streamDashboardContent(httpd_req_t* req, const String& username);
+void streamSettingsContent(httpd_req_t* req, const String& username);
 
 // Auth handler dependencies
-extern String getLogoutReason(const String& ip);
-extern void appendCommandToFeed(const char* origin, const String& cmd, const String& user, const String& ip);
-extern bool gMeshActivitySuspended;
+String getLogoutReason(const String& ip);
 // gBroadcastSkipSessionIdx declared in web_server.h
 
 // Command dispatch historically echoed the full line for an unknown verb.
@@ -1585,10 +1584,10 @@ static String redactWebCommandResult(const String& output,
   if (lineEnd >= 0) rebuilt += safe.substring(lineEnd);
   return rebuilt;
 }
-extern void streamCLIContent(httpd_req_t* req, const String& username);
-extern void streamAutomationsContent(httpd_req_t* req, const String& username);
-extern void streamFilesContent(httpd_req_t* req, const String& username);
-extern void streamLoggingContent(httpd_req_t* req, const String& username);
+void streamCLIContent(httpd_req_t* req, const String& username);
+void streamAutomationsContent(httpd_req_t* req, const String& username);
+void streamFilesContent(httpd_req_t* req, const String& username);
+void streamLoggingContent(httpd_req_t* req, const String& username);
 
 // Universal page streaming function (moved from .ino)
 void streamPageWithContent(httpd_req_t* req, const String& activePage, const String& username, void (*contentStreamer)(httpd_req_t*, const String&)) {
@@ -2982,7 +2981,6 @@ esp_err_t handleDeviceRegistryGet(httpd_req_t* req) {
   if (!buf) buf = (char*)ps_alloc(kBufSize, AllocPref::PreferPSRAM, "api.devices.json");
   if (!buf) { httpd_resp_send(req, "{}", HTTPD_RESP_USE_STRLEN); return ESP_OK; }
   PSRAM_JSON_DOC(doc);
-  extern void buildDeviceRegistryJson(JsonDocument& doc);  // System_I2C.cpp
   buildDeviceRegistryJson(doc);
   serializeJson(doc, buf, kBufSize);
   DEBUG_HTTPF("/api/devices len=%u", (unsigned)strlen(buf));
@@ -4052,13 +4050,6 @@ esp_err_t handleRegisterSubmit(httpd_req_t* req) {
 // File Handlers (Batch 3 - migrated from .ino)
 // ============================================================================
 
-// File handler dependencies
-extern bool ensureFileViewBuffers();
-extern char* gFileReadBuf;
-extern char* gFileOutBuf;
-extern const size_t kFileReadBufSize;
-extern const size_t kFileOutBufSize;
-
 esp_err_t handleFilesList(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);
   // Check if filesystem is ready
@@ -4852,10 +4843,6 @@ esp_err_t handleIconTestPage(httpd_req_t* req) {
 // ============================================================================
 // Admin Handlers (Batch 4 - migrated from .ino)
 // ============================================================================
-
-// Admin handler dependencies
-extern bool approvePendingUserInternal(const String& username, String& errorOut);
-extern bool denyPendingUserInternal(const String& username, String& errorOut);
 
 esp_err_t handleAdminPending(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);

@@ -18,6 +18,7 @@
 #include "System_Settings.h"
 #include "System_PollPause.h"   // pollPause/pollResume — global sensor-poll pause
 #include "System_TaskUtils.h"   // taskStackRecord — taskstats stack-size registry
+#include "System_I2C.h"
 
 // I2C bus configuration (defaults, overridden by settings at runtime)
 #define I2C_WIRE1_DEFAULT_FREQ 100000
@@ -656,7 +657,6 @@ void I2CDeviceManager::updateHistogram(uint8_t bus, uint32_t txDurationUs) {
 
 bool I2CDeviceManager::enqueueDeviceStart(I2CDeviceType sensor) {
   // Refuse to enqueue if the bus is disabled — nothing will drain the queue
-  extern bool gI2CBusRunning;
   if (!gI2CBusRunning || sensor < 0 || sensor >= I2C_DEVICE_COUNT || !queueMutex) return false;
   
   if (xSemaphoreTake(queueMutex, portMAX_DELAY) == pdTRUE) {

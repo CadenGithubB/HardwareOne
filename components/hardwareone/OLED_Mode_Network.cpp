@@ -43,6 +43,9 @@
 #include "network/wifi/System_WiFiNetworks.h"   // credential-free saved-network snapshots
 #include "OLED_UI.h"               // oledToastShow — Add-WiFi refusals and replies
 #include "OLED_SettingsEditor.h"   // openSettingsEditorForModule — WiFi and Web settings rows
+#include "OLED_ESPNow.h"
+#include "System_ESPNow.h"
+#include "WebServer_Server.h"
 
 #if ENABLE_WIFI
 #include <WiFi.h>
@@ -51,21 +54,6 @@
 #if ENABLE_ESPNOW
 #include "System_ESPNow.h"
 #include <esp_wifi.h>
-#endif
-
-// External references
-#if ENABLE_HTTP_SERVER
-extern bool gServerIsHttps;  // Defined in WebServer_Server.cpp
-#endif
-
-#if ENABLE_ESPNOW
-// gMeshPeers, gMeshPeerSlots declared in System_ESPNow.h (pointer, not array)
-extern String macToHexString(const uint8_t* mac);
-extern void macFromHexString(const String& s, uint8_t out[6]);
-extern bool isSelfMac(const uint8_t* mac);
-extern bool isMeshPeerAlive(const MeshPeerHealth* peer);
-extern bool meshEnabled();
-extern String getEspNowDeviceName(const uint8_t* mac);
 #endif
 
 // ============================================================================
@@ -780,11 +768,6 @@ static void startWifiScan() {
 // OLED_ESPNOW — delegates to OLED_ESPNow module
 // ============================================================================
 
-extern void enterUnavailablePage(const String& title, const String& reason);
-extern void oledEspNowDisplay(Adafruit_SSD1306* display);
-extern void oledEspNowShowInitPrompt();
-extern void oledEspNowInit();
-
 // Entry hook for OLED_ESPNOW. Previously duplicated in cmd_oledmode AND the
 // menu-select path (and skipped entirely on back-nav). Now owned here: on a
 // fresh visit, show the init prompt if ESP-NOW isn't up yet, else (re)build the
@@ -848,8 +831,6 @@ void displayEspNow() {
 #if ENABLE_HTTP_SERVER
 #include "WebServer_Server.h"  // server, SessionEntry, MAX_SESSIONS, gSessions
 #endif
-
-extern SessionEntry* gSessions;
 
 struct WebStatsRenderData {
   int activeSessions;

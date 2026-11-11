@@ -20,12 +20,9 @@
 #include "i2csensor_seesaw.h"
 #include "System_I2C.h"
 #include <esp_attr.h>  // EXT_RAM_BSS_ATTR
+#include "OLED_FirstTimeSetup.h"
 
 // OLED_I2C_ADDRESS, OLED_TRANSACTION, and oledConnected from OLED_Display.h
-
-// OLED text input
-extern String getOLEDTextInput(const char* prompt, bool masked, const char* defaultValue, int maxLen, bool* wasCancelled = nullptr, bool canSkip = true);
-extern bool getOLEDWiFiSelection(String& selectedSSID);
 
 // Joystick navigation state
 static bool sJoyUpHeld = false;

@@ -22,8 +22,6 @@
 #include <esp_attr.h>
 #include <freertos/FreeRTOS.h>
 
-extern void g2ShowAppsMenu();
-
 namespace {
 constexpr size_t kTailBytes = 1024, kEntries = 8, kWindowBytes = 512;
 constexpr uint32_t kTextPollMs = 800, kStatusPollMs = 1000;
