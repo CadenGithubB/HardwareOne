@@ -106,6 +106,7 @@ struct OledPairingRibbon {
   uint8_t blinkCount;            // Number of blinks remaining
   int scrollOffset;              // Horizontal scroll position in pixels for long text
   uint32_t lastScrollMs;         // Last time scroll position updated
+  uint32_t eventSeq;             // the event it shows (oledEventBannerShow); 0 = not from an event
 };
 
 extern OledPairingRibbon gOledPairingRibbon;
@@ -132,6 +133,16 @@ void oledPairingRibbonRender();
 // General-purpose notification banner (wraps ribbon for non-pairing use)
 void oledNotificationBannerShow(const char* message, PairingRibbonIcon icon,
                                 uint32_t visibleMs = 2500, bool blink = false);
+
+// The banner of a notification event (systemEventsNotifyTick). Remembers the
+// event's seq so clearing the notification center can take it back.
+void oledEventBannerShow(uint32_t eventSeq, const char* message, PairingRibbonIcon icon,
+                         uint32_t visibleMs, bool blink);
+
+// Clearing the notification center: drop every queued event banner with a seq
+// at or below `seq`, and slide out the visible one if it is such a banner.
+// Banners that are not from an event (seq 0) stay.
+void oledEventBannersDismissThrough(uint32_t seq);
 
 // Update an already-visible banner in place (icon + text) without re-animating.
 // Extends display by extraMs so the user sees the change. Falls back to full

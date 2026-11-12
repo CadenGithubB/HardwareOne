@@ -46,6 +46,7 @@
 
 #if ENABLE_OLED_DISPLAY
 #include "OLED_UI.h"
+#include "OLED_Utils.h"  // oledNotificationClearedSeq: a cleared event shows no banner
 #endif
 
 // Real impl in WebServer_Server.cpp; inline no-op stub when HTTP server disabled
@@ -1068,6 +1069,7 @@ struct NotifPipeStats {
   uint32_t fetched;          // events the tick pulled from the ring
   uint32_t bannersShown;
   uint32_t bannersFiltered;  // viewer rule denied the banner (policy/mute)
+  uint32_t bannersCleared;   // drained after the user cleared it on the OLED: no banner
   uint32_t toastsBroadcast;  // events offered to the SSE layer
   uint32_t toastsFiltered;   // per-session denials by the toast predicate
   uint32_t g2Pushed;         // native G2 cards enqueued to the lens worker
@@ -1122,8 +1124,9 @@ const char* cmd_notifstats(const String& argsInput) {
                    (unsigned long)gNotifPipe.ringSkipped,
                    (unsigned long)gNotifPipe.staleDropped,
                    (unsigned long)sseEventDropsTotal());
-  BROADCAST_PRINTF("  Suppressed (benign): cooldown=%lu | Filtered (policy/mutes, intentional): banner=%lu toast-sessions=%lu g2=%lu app=%lu | g2-drop(enqueue-fail)=%lu app-drop(link-busy)=%lu",
+  BROADCAST_PRINTF("  Suppressed (benign): cooldown=%lu cleared-on-oled=%lu | Filtered (policy/mutes, intentional): banner=%lu toast-sessions=%lu g2=%lu app=%lu | g2-drop(enqueue-fail)=%lu app-drop(link-busy)=%lu",
                    (unsigned long)gNotifPipe.cooldownSupp,
+                   (unsigned long)gNotifPipe.bannersCleared,
                    (unsigned long)gNotifPipe.bannersFiltered,
                    (unsigned long)gNotifPipe.toastsFiltered,
                    (unsigned long)gNotifPipe.g2Filtered,
@@ -1226,8 +1229,12 @@ void systemEventsNotifyTick() {
           notifViewerResolve(gLocalDisplayAuthed ? gLocalDisplayUser.c_str() : "", oledViewer);
           oledViewerResolved = true;
         }
-        if (notifRuleForViewer(e.kind, oledViewer).sinks & NSINK_BANNER) {
-          oledNotificationBannerShow(msg, levelIcon(r.level), r.durMs, r.level >= 3);
+        if (e.seq <= oledNotificationClearedSeq()) {
+          // Posted before the user cleared the notification center, drained
+          // after it: the clear covers its banner too.
+          if (r.sinks & NSINK_BANNER) gNotifPipe.bannersCleared++;
+        } else if (notifRuleForViewer(e.kind, oledViewer).sinks & NSINK_BANNER) {
+          oledEventBannerShow(e.seq, msg, levelIcon(r.level), r.durMs, r.level >= 3);
           gNotifPipe.bannersShown++;
         } else if (r.sinks & NSINK_BANNER) {
           gNotifPipe.bannersFiltered++;  // device offered a banner; viewer denied

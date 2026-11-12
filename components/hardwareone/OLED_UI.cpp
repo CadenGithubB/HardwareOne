@@ -265,6 +265,7 @@ struct BannerQueueEntry {
   PairingRibbonIcon icon;
   uint32_t visibleMs;
   bool blink;
+  uint32_t eventSeq;  // the event it shows; 0 = not from an event
 };
 EXT_RAM_BSS_ATTR static BannerQueueEntry sBannerQueue[BANNER_QUEUE_MAX];
 static uint8_t  sBannerQHead = 0;
@@ -272,7 +273,7 @@ static uint8_t  sBannerQCount = 0;
 static uint32_t sBannerQDropped = 0;   // overflow drops (visible via bannerqueue diag if wanted)
 
 static void oledBannerQueuePush(const char* message, PairingRibbonIcon icon,
-                                uint32_t visibleMs, bool blink) {
+                                uint32_t visibleMs, bool blink, uint32_t eventSeq) {
   if (sBannerQCount >= BANNER_QUEUE_MAX) {          // full — drop oldest pending
     sBannerQHead = (uint8_t)((sBannerQHead + 1) % BANNER_QUEUE_MAX);
     sBannerQCount--;
@@ -285,6 +286,7 @@ static void oledBannerQueuePush(const char* message, PairingRibbonIcon icon,
   e.icon = icon;
   e.visibleMs = visibleMs;
   e.blink = blink;
+  e.eventSeq = eventSeq;
   sBannerQCount++;
 }
 
@@ -295,11 +297,32 @@ static void oledBannerQueuePump() {
   if (gOledPairingRibbon.state != PairingRibbonState::HIDDEN) return;
   const BannerQueueEntry& e = sBannerQueue[sBannerQHead];
   oledPairingRibbonShow(e.message, e.icon, e.visibleMs, e.blink);
+  gOledPairingRibbon.eventSeq = e.eventSeq;
   sBannerQHead = (uint8_t)((sBannerQHead + 1) % BANNER_QUEUE_MAX);
   sBannerQCount--;
 }
 
+void oledEventBannersDismissThrough(uint32_t seq) {
+  // Keep the pending banners that are not cleared, in their order.
+  uint8_t kept = 0;
+  for (uint8_t i = 0; i < sBannerQCount; i++) {
+    const BannerQueueEntry& e = sBannerQueue[(sBannerQHead + i) % BANNER_QUEUE_MAX];
+    if (e.eventSeq != 0 && e.eventSeq <= seq) continue;
+    if (kept != i) sBannerQueue[(sBannerQHead + kept) % BANNER_QUEUE_MAX] = e;
+    kept++;
+  }
+  sBannerQCount = kept;
+  // The visible one slides out; the pump then shows the next kept banner.
+  const uint32_t shown = gOledPairingRibbon.eventSeq;
+  if (shown != 0 && shown <= seq &&
+      (gOledPairingRibbon.state == PairingRibbonState::UNFURLING ||
+       gOledPairingRibbon.state == PairingRibbonState::VISIBLE)) {
+    oledPairingRibbonMinimize();
+  }
+}
+
 void oledPairingRibbonShow(const char* message, PairingRibbonIcon icon, uint32_t visibleMs, bool blink) {
+  gOledPairingRibbon.eventSeq = 0;  // oledEventBannerShow sets it after this call
   strncpy(gOledPairingRibbon.message, message, sizeof(gOledPairingRibbon.message) - 1);
   gOledPairingRibbon.message[sizeof(gOledPairingRibbon.message) - 1] = '\0';
   gOledPairingRibbon.icon = icon;
@@ -477,18 +500,24 @@ static void drawPairingIcon(int x, int y, PairingRibbonIcon icon, bool visible) 
   }
 }
 
-void oledNotificationBannerShow(const char* message, PairingRibbonIcon icon,
-                                uint32_t visibleMs, bool blink) {
+void oledEventBannerShow(uint32_t eventSeq, const char* message, PairingRibbonIcon icon,
+                         uint32_t visibleMs, bool blink) {
   // Suppress notifications during boot animation - they overlay the progress screen
   if (oledBootModeActive) return;
   // If the ribbon is already busy (a prior banner still animating, or a pairing
   // ribbon), queue this one instead of clobbering it — the ribbon pumps the
   // queue when it returns to idle. Show immediately only when idle.
   if (gOledPairingRibbon.state != PairingRibbonState::HIDDEN) {
-    oledBannerQueuePush(message, icon, visibleMs, blink);
+    oledBannerQueuePush(message, icon, visibleMs, blink, eventSeq);
     return;
   }
   oledPairingRibbonShow(message, icon, visibleMs, blink);
+  gOledPairingRibbon.eventSeq = eventSeq;
+}
+
+void oledNotificationBannerShow(const char* message, PairingRibbonIcon icon,
+                                uint32_t visibleMs, bool blink) {
+  oledEventBannerShow(0, message, icon, visibleMs, blink);
 }
 
 void oledNotificationBannerUpdate(const char* message, PairingRibbonIcon icon,
@@ -502,7 +531,9 @@ void oledNotificationBannerUpdate(const char* message, PairingRibbonIcon icon,
     return;
   }
   
-  // Update icon and text in place - no animation reset
+  // Update icon and text in place - no animation reset. The text is no longer
+  // an event's, so a clear of the notification center leaves it.
+  gOledPairingRibbon.eventSeq = 0;
   gOledPairingRibbon.icon = icon;
   strncpy(gOledPairingRibbon.message, message, sizeof(gOledPairingRibbon.message) - 1);
   gOledPairingRibbon.message[sizeof(gOledPairingRibbon.message) - 1] = '\0';

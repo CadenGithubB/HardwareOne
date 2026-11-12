@@ -276,6 +276,11 @@ void oledNotificationMarkAllRead() {
 void oledNotificationClear() {
   sNotifClearedSeq = systemEventLatestSeq();
   sNotifReadSeq = sNotifClearedSeq;
+  oledEventBannersDismissThrough(sNotifClearedSeq);
+}
+
+uint32_t oledNotificationClearedSeq() {
+  return sNotifClearedSeq;
 }
 
 const OledNotification* oledNotificationGet(int index) {

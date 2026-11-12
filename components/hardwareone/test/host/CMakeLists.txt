@@ -2165,6 +2165,13 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_text_form_owners.py)
 
+# Clearing the OLED notification center takes back the banners of the cleared
+# events, queued or showing; banners that are not from an event stay.
+add_test(
+  NAME oled_banner_clear
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_oled_banner_clear.py)
+
 # OLED display-session writer windows (README "OLED display-session writer windows"):
 # the frame commit and the command-result path validate under the display lifecycle
 # writer, release it, push or copy, then re-check without opening a session.

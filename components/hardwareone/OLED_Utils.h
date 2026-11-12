@@ -74,8 +74,12 @@ int oledNotificationUnreadCount();
 // Mark all notifications as read
 void oledNotificationMarkAllRead();
 
-// Clear all notifications
+// Clear all notifications: hides every event up to now from the list and takes
+// back its banners, queued or showing (oledEventBannersDismissThrough).
 void oledNotificationClear();
+// Events at or below this seq were cleared; the notify tick shows no banner for
+// them even when it drains them after the clear.
+uint32_t oledNotificationClearedSeq();
 
 // Get notification by index (0 = newest)
 const OledNotification* oledNotificationGet(int index);
