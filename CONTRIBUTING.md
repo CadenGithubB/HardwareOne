@@ -217,9 +217,9 @@ attachment should report unavailable without breaking unrelated services.
   one word group without a further underscore (`System_LLMModel`,
   `System_DebugManager`); a second part is used only where the family already
   has one (`OLED_Mode_X`, `G2_Page_X`, `System_ESPNow_X`, `HAL_Camera_X`).
-- New code, and code that is being changed anyway, follows these forms. They
-  are the most common form in the tree today; nothing is renamed in bulk for
-  them.
+- New code, and code that is being changed anyway, follows these forms. The
+  tree is still mixed for each of them (older headers use `#ifndef` guards,
+  older flags are `volatile`); nothing is renamed in bulk for them.
 
   | Subject | Form |
   |---|---|
