@@ -134,6 +134,12 @@ struct CamSetting {
   int          control = -1;    // CameraControl, or -1 for shared pipeline settings
 };
 
+// The resolution row: it opens a picker instead of cycling and marks a frame
+// size the sensor does not offer. Known by the setting it edits, not its label.
+static bool isFramesizeRow(const CamSetting& s) {
+  return s.valuePtr == &gSettings.cameraFramesize;
+}
+
 // Typed read — bool storage stays bool in gSettings; we expose it as int
 // (0/1) at the table layer so cycle/format/apply can be a single int shape.
 static int readSetting(const CamSetting& s) {
@@ -414,14 +420,14 @@ static size_t buildSubRows(CamCategory cat) {
     char valueBuf[16];
     valueBuf[0] = '\0';
     if (s.format) s.format(valueBuf, sizeof(valueBuf), readSetting(s));
-    if (strcmp(s.label, "Resolution") == 0 &&
+    if (isFramesizeRow(s) &&
         (readSetting(s) < 0 || readSetting(s) >= int(CameraFrameSize::Count) ||
          !(caps.resolutions & cameraResolutionBit(static_cast<CameraFrameSize>(readSetting(s)))))) {
       snprintf(valueBuf, sizeof(valueBuf), "%s [N/A]", framesizeLabel(readSetting(s)));
     }
     // Resolution is the one row that opens a picker instead of cycling —
     // keep the ">" affordance so the user knows tap behaviour differs.
-    if (strcmp(s.label, "Resolution") == 0) {
+    if (isFramesizeRow(s)) {
       snprintf(gRows[row], CAM_SETTINGS_ROW_LEN, "Resolution: %s >", valueBuf);
     } else {
       snprintf(gRows[row], CAM_SETTINGS_ROW_LEN, "%s: %s", s.label, valueBuf);
@@ -627,7 +633,7 @@ void g2BuildCameraSettingsInfo(char* out, size_t cap) {
       char valueBuf[16];
       valueBuf[0] = '\0';
       if (s.format) s.format(valueBuf, sizeof(valueBuf), readSetting(s));
-      if (strcmp(s.label, "Resolution") == 0 &&
+      if (isFramesizeRow(s) &&
           (readSetting(s) < 0 || readSetting(s) >= int(CameraFrameSize::Count) ||
            !(caps.resolutions & cameraResolutionBit(static_cast<CameraFrameSize>(readSetting(s)))))) {
         snprintf(valueBuf, sizeof(valueBuf), "%s [N/A]", framesizeLabel(readSetting(s)));
@@ -721,7 +727,7 @@ static void handleSubTap(CamCategory cat, uint32_t idx) {
 
   // Resolution opens the framesize picker rather than cycling — same
   // affordance the row's ">" indicator hints at.
-  if (strcmp(s.label, "Resolution") == 0) {
+  if (isFramesizeRow(s)) {
     showResolutionPicker();
     return;
   }

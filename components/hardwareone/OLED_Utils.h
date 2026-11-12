@@ -462,7 +462,6 @@ extern int loggingMenuSelection;
 
 // Mode entry points and shared state defined across the OLED files.
 struct FileBrowserRenderData;  // System_FileManager.h
-void enterUnavailablePage(const String& title, const String& reason);
 extern FileBrowserRenderData fileBrowserRenderData;
 int getCliViewerSelectedIndex();
 void oledAuthModeInit();
@@ -482,9 +481,6 @@ void oledSetPatternModeInit();
 void oledSetPatternModeResetSessionState();
 void oledUserManagerModeInit();
 void oledUserManagerModeResetSessionState();
-extern String unavailableOledReason;
-extern unsigned long unavailableOledStartTime;
-extern String unavailableOledTitle;
 
 #if ENABLE_OLED_DISPLAY && ENABLE_AUTOMATION
 void oledAutomationsModeResetSessionState();

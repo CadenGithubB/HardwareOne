@@ -2137,6 +2137,13 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_identity_names.py)
 
+# A title, a label or a reason line is display text; no branch reads one
+# (CONTRIBUTING.md, "Display text and reply text").
+add_test(
+  NAME display_text_decisions
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_display_text_decisions.py)
+
 # OLED display-session writer windows (README "OLED display-session writer windows"):
 # the frame commit and the command-result path validate under the display lifecycle
 # writer, release it, push or copy, then re-check without opening a session.

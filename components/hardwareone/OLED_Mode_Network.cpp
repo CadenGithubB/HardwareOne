@@ -785,14 +785,15 @@ static void espnowOnEnter(bool isForward) {
 
 void displayEspNow() {
 #if !ENABLE_ESPNOW
-  enterUnavailablePage("ESP-NOW", "Disabled at\ncompile time");
+  enterUnavailablePage(OLED_ESPNOW, MenuAvailability::NOT_BUILT, "ESP-NOW", "Disabled at\ncompile time");
   return;
 #else
   // Defensive curtain — keyboard is used for device-name entry on first setup.
   if (oledKeyboardDrawIfActive(oledDisplay)) return;
 
   if (!gSettings.espnowEnabled && (!gEspNow || !gEspNow->initialized)) {
-    enterUnavailablePage("ESP-NOW", "Disabled\nRun: espnowenabled 1\nReboot required");
+    enterUnavailablePage(OLED_ESPNOW, MenuAvailability::FEATURE_DISABLED, "ESP-NOW",
+                         "Disabled\nRun: espnowenabled 1\nReboot required");
     return;
   }
 

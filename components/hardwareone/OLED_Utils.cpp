@@ -3118,12 +3118,12 @@ void drawOledFooter() {
       break;
       
     case OLED_UNAVAILABLE:
-      // If feature is "Not built" (compile-time disabled), no X action is possible
-      if (unavailableOledReason.indexOf("Not built") >= 0) {
+      // A feature that is not built has no X action
+      if (unavailableOledAvailability == MenuAvailability::NOT_BUILT) {
         hints = "B:Back";  // Can only go back, no action available
-      } else if (unavailableOledTitle == "ESP-NOW") {
+      } else if (unavailableOledTarget == OLED_ESPNOW) {
         hints = "X:Setup B:Back";  // X opens ESP-NOW setup (then Y to name device)
-      } else if (unavailableOledTitle == "Automations") {
+      } else if (unavailableOledTarget == OLED_AUTOMATIONS) {
         hints = "X:Enable B:Back";  // X enables automation system
       } else {
         hints = "X:Start B:Back";  // X attempts to initialize/start sensor, B returns to menu
@@ -3897,6 +3897,10 @@ void printRegisteredOledModes() {
   }
 }
 
+// The unavailable page: the mode it stands for and why that mode cannot be
+// entered decide the hints and the X action; title and reason are display text.
+OledMode unavailableOledTarget = OLED_UNAVAILABLE;
+MenuAvailability unavailableOledAvailability = MenuAvailability::FEATURE_DISABLED;
 String unavailableOledTitle = "Unavailable";
 String unavailableOledReason = "";
 unsigned long unavailableOledStartTime = 0;  // Non-static for extern access from OLED_Mode_System.cpp
@@ -3913,15 +3917,16 @@ static void debugOledModeChange(const char* src, OledMode from, OledMode to, con
   }
 }
 
-void enterUnavailablePage(const String& title, const String& reason) {
+void enterUnavailablePage(OledMode target, MenuAvailability availability,
+                          const String& title, const String& reason) {
+  unavailableOledTarget = target;
+  unavailableOledAvailability = availability;
   unavailableOledTitle = title.length() > 0 ? title : String("Unavailable");
   unavailableOledReason = reason;
-  unavailableOledStartTime = millis();
-  // If we expect the user to take an action (e.g. "Press X"), keep the page up
-  // rather than auto-returning after a timeout.
-  if (unavailableOledReason.indexOf("Press X") >= 0) {
-    unavailableOledStartTime = 0;
-  }
+  // UNINITIALIZED: the hardware is there and X starts it, so the page stays up
+  // until the user acts. Every other class returns after the timeout.
+  unavailableOledStartTime =
+      availability == MenuAvailability::UNINITIALIZED ? 0 : millis();
   requestOledMode(OLED_UNAVAILABLE, "unavail.enter", false);
 }
 
@@ -4344,7 +4349,7 @@ void updateOledDisplay() {
 
 #if !ENABLE_AUTOMATION
       case OLED_AUTOMATIONS:
-        enterUnavailablePage("Automations", "Not compiled");
+        enterUnavailablePage(OLED_AUTOMATIONS, MenuAvailability::NOT_BUILT, "Automations", "Not compiled");
         break;
 #endif
       // When ENABLE_AUTOMATION is set, OLED_AUTOMATIONS is handled by registered mode in OLED_Mode_Automations.cpp
@@ -4691,7 +4696,8 @@ static void oledRunOwnerRequest(OledOwnerRequest& request, bool superseded) {
     if (!oledModeRuleAllows(request.mode, &refusal)) {
       const OledModeEntry* entry = findOledMode(request.mode);
       pushOledMode(currentOledMode);
-      enterUnavailablePage(entry && entry->name ? entry->name : "", refusal);
+      enterUnavailablePage(request.mode, MenuAvailability::FEATURE_DISABLED,
+                           entry && entry->name ? entry->name : "", refusal);
       return;
     }
   }
@@ -5699,7 +5705,7 @@ static MenuAvailability oledModeFeatureState(OledMode mode, String* outReason) {
       // If enabled but not initialized, show as unavailable with setup instructions
       if (gSettings.espnowEnabled) {
         if (outReason) *outReason = "Not initialized\nPress X to setup";
-        return MenuAvailability::FEATURE_DISABLED;
+        return MenuAvailability::UNINITIALIZED;
       }
 #endif
       if (outReason) *outReason = "Disabled\nRun: espnowenabled 1\nReboot required";
@@ -5735,7 +5741,7 @@ static MenuAvailability oledModeFeatureState(OledMode mode, String* outReason) {
       for (int i = 0; i < connectedDeviceCount; i++) {
         if (connectedDevices[i].address == I2C_ADDR_THERMAL && connectedDevices[i].isConnected) {
           if (outReason) *outReason = "Disabled\nPress X to start";
-          return MenuAvailability::FEATURE_DISABLED;
+          return MenuAvailability::UNINITIALIZED;
         }
       }
       if (outReason) *outReason = "Not detected";
@@ -5754,7 +5760,7 @@ static MenuAvailability oledModeFeatureState(OledMode mode, String* outReason) {
       for (int i = 0; i < connectedDeviceCount; i++) {
         if (connectedDevices[i].address == I2C_ADDR_FM_RADIO && connectedDevices[i].isConnected) {
           if (outReason) *outReason = "Disabled\nPress X to start";
-          return MenuAvailability::FEATURE_DISABLED;
+          return MenuAvailability::UNINITIALIZED;
         }
       }
       if (outReason) *outReason = "Not detected";
@@ -5774,7 +5780,7 @@ static MenuAvailability oledModeFeatureState(OledMode mode, String* outReason) {
       for (int i = 0; i < connectedDeviceCount; i++) {
         if (connectedDevices[i].address == I2C_ADDR_GPS && connectedDevices[i].isConnected) {
           if (outReason) *outReason = "Disabled\nPress X to start";
-          return MenuAvailability::FEATURE_DISABLED;
+          return MenuAvailability::UNINITIALIZED;
         }
       }
       if (outReason) *outReason = "Not detected";
@@ -5793,7 +5799,7 @@ static MenuAvailability oledModeFeatureState(OledMode mode, String* outReason) {
       for (int i = 0; i < connectedDeviceCount; i++) {
         if (connectedDevices[i].address == I2C_ADDR_IMU && connectedDevices[i].isConnected) {
           if (outReason) *outReason = "Disabled\nPress X to start";
-          return MenuAvailability::FEATURE_DISABLED;
+          return MenuAvailability::UNINITIALIZED;
         }
       }
       if (outReason) *outReason = "Not detected";
@@ -5812,7 +5818,7 @@ static MenuAvailability oledModeFeatureState(OledMode mode, String* outReason) {
       for (int i = 0; i < connectedDeviceCount; i++) {
         if (connectedDevices[i].address == I2C_ADDR_TOF && connectedDevices[i].isConnected) {
           if (outReason) *outReason = "Disabled\nPress X to start";
-          return MenuAvailability::FEATURE_DISABLED;
+          return MenuAvailability::UNINITIALIZED;
         }
       }
       if (outReason) *outReason = "Not detected";
@@ -5831,7 +5837,7 @@ static MenuAvailability oledModeFeatureState(OledMode mode, String* outReason) {
       for (int i = 0; i < connectedDeviceCount; i++) {
         if (connectedDevices[i].address == I2C_ADDR_APDS && connectedDevices[i].isConnected) {
           if (outReason) *outReason = "Disabled\nPress X to start";
-          return MenuAvailability::FEATURE_DISABLED;
+          return MenuAvailability::UNINITIALIZED;
         }
       }
       if (outReason) *outReason = "Not detected";
@@ -5850,7 +5856,7 @@ static MenuAvailability oledModeFeatureState(OledMode mode, String* outReason) {
       for (int i = 0; i < connectedDeviceCount; i++) {
         if (connectedDevices[i].address == I2C_ADDR_GAMEPAD && connectedDevices[i].isConnected) {
           if (outReason) *outReason = "Disabled\nPress X to start";
-          return MenuAvailability::FEATURE_DISABLED;
+          return MenuAvailability::UNINITIALIZED;
         }
       }
       if (outReason) *outReason = "Not detected";
@@ -5869,7 +5875,7 @@ static MenuAvailability oledModeFeatureState(OledMode mode, String* outReason) {
       for (int i = 0; i < connectedDeviceCount; i++) {
         if (connectedDevices[i].address == I2C_ADDR_DS3231 && connectedDevices[i].isConnected) {
           if (outReason) *outReason = "Disabled\nPress X to start";
-          return MenuAvailability::FEATURE_DISABLED;
+          return MenuAvailability::UNINITIALIZED;
         }
       }
       if (outReason) *outReason = "Not detected";
@@ -5889,7 +5895,7 @@ static MenuAvailability oledModeFeatureState(OledMode mode, String* outReason) {
         for (int i = 0; i < connectedDeviceCount; i++) {
           if (connectedDevices[i].address == I2C_ADDR_PRESENCE && connectedDevices[i].isConnected) {
             if (outReason) *outReason = "Disabled\nPress X to start";
-            return MenuAvailability::FEATURE_DISABLED;
+            return MenuAvailability::UNINITIALIZED;
           }
         }
         if (outReason) *outReason = "Not detected";
@@ -6159,40 +6165,40 @@ void handleOledActionButton() {
   // enqueueDeviceStart, isInQueue provided by System_I2C.h
   switch (currentOledMode) {
     case OLED_UNAVAILABLE:
-      // If feature is "Not built" (compile-time disabled), redirect to menu - no action possible
-      if (unavailableOledReason.indexOf("Not built") >= 0) {
+      // A feature that is not built has no action: go to the menu
+      if (unavailableOledAvailability == MenuAvailability::NOT_BUILT) {
         requestOledMode(OLED_SENSOR_MENU, "unavail.notbuilt", false);
         break;
       }
 
-      // Try to start whatever sensor was unavailable based on the title.
+      // Start the feature the page stands for (unavailableOledTarget).
       // pushStack=false: we are replacing OLED_UNAVAILABLE, not stacking over it.
-      if (unavailableOledTitle == "Thermal") {
+      if (unavailableOledTarget == OLED_THERMAL_VISUAL) {
 #if ENABLE_THERMAL_SENSOR
         executeOledCommand("openthermal");
         requestOledMode(OLED_THERMAL_VISUAL, "unavail.start.thermal", false);
 #endif
-      } else if (unavailableOledTitle == "ToF") {
+      } else if (unavailableOledTarget == OLED_TOF_DATA) {
 #if ENABLE_TOF_SENSOR
         executeOledCommand("opentof");
         requestOledMode(OLED_TOF_DATA, "unavail.start.tof", false);
 #endif
-      } else if (unavailableOledTitle == "IMU") {
+      } else if (unavailableOledTarget == OLED_IMU_ACTIONS) {
 #if ENABLE_IMU_SENSOR
         executeOledCommand("openimu");
         requestOledMode(OLED_IMU_ACTIONS, "unavail.start.imu", false);
 #endif
-      } else if (unavailableOledTitle == "APDS") {
+      } else if (unavailableOledTarget == OLED_APDS_DATA) {
 #if ENABLE_APDS_SENSOR
         executeOledCommand("openapds");
         requestOledMode(OLED_APDS_DATA, "unavail.start.apds", false);
 #endif
-      } else if (unavailableOledTitle == "GPS") {
+      } else if (unavailableOledTarget == OLED_GPS_DATA) {
 #if ENABLE_GPS_SENSOR
         executeOledCommand("opengps");
         requestOledMode(OLED_GPS_DATA, "unavail.start.gps", false);
 #endif
-      } else if (unavailableOledTitle == "RTC") {
+      } else if (unavailableOledTarget == OLED_RTC_DATA) {
 #if ENABLE_RTC_SENSOR
         // Start RTC with confirmation
         static auto rtcOpenConfirmedUnavail = [](void* userData) {
@@ -6202,7 +6208,7 @@ void handleOledActionButton() {
         };
         oledConfirmRequest("Open RTC?", nullptr, rtcOpenConfirmedUnavail, nullptr);
 #endif
-      } else if (unavailableOledTitle == "Presence") {
+      } else if (unavailableOledTarget == OLED_PRESENCE_DATA) {
 #if ENABLE_PRESENCE_SENSOR
         // Start Presence with confirmation
         static auto presenceOpenConfirmedUnavail = [](void* userData) {
@@ -6212,10 +6218,10 @@ void handleOledActionButton() {
         };
         oledConfirmRequest("Open Presence?", nullptr, presenceOpenConfirmedUnavail, nullptr);
 #endif
-      } else if (unavailableOledTitle == "FM Radio") {
+      } else if (unavailableOledTarget == OLED_FM_RADIO) {
         executeOledCommand("openfmradio");
         requestOledMode(OLED_FM_RADIO, "unavail.start.fmradio", false);
-      } else if (unavailableOledTitle == "ESP-NOW") {
+      } else if (unavailableOledTarget == OLED_ESPNOW) {
 #if ENABLE_ESPNOW
         requestOledMode(OLED_ESPNOW, "unavail.start.espnow", false);
         if (gSettings.espnowDeviceName.length() == 0) {
@@ -6229,7 +6235,7 @@ void handleOledActionButton() {
           }
         }
 #endif
-      } else if (unavailableOledTitle == "Automations") {
+      } else if (unavailableOledTarget == OLED_AUTOMATIONS) {
         // Enable automation system
         if (oledRunCommand("automation system enable")) {
           broadcastOutput("[OLED] Automation system enabled - restart required");

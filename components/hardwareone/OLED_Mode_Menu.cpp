@@ -48,7 +48,9 @@ static void menuItemRightPaneDraw(Adafruit_SSD1306* d, OledScrollItem* item,
     d->setTextSize(1);
     d->setTextColor(DISPLAY_COLOR_WHITE);
     d->setCursor(columnX, badgeY);
-    d->print(avail == MenuAvailability::FEATURE_DISABLED ? "D" : "X");
+    const bool off = avail == MenuAvailability::FEATURE_DISABLED ||
+                     avail == MenuAvailability::UNINITIALIZED;
+    d->print(off ? "D" : "X");
   }
   const int dotX = columnX + kPaneDotRadius;
   const int dotY = badgeY + kGlyphHeight + kPaneGap + kPaneDotRadius;
@@ -61,6 +63,7 @@ static int menuAvailRank(MenuAvailability a) {
   switch (a) {
     case MenuAvailability::AVAILABLE:        return 0;
     case MenuAvailability::FEATURE_DISABLED: return 1;
+    case MenuAvailability::UNINITIALIZED:    return 1;
     case MenuAvailability::NOT_DETECTED:     return 2;
     default:                                 return 3;
   }
@@ -120,13 +123,14 @@ static void oledMenuExecuteItem(const OledMenuItem* item, const char* slug) {
     if (reason.length() == 0) {
       switch (avail) {
         case MenuAvailability::FEATURE_DISABLED: reason = "Disabled"; break;
+        case MenuAvailability::UNINITIALIZED:    reason = "Disabled"; break;
         case MenuAvailability::NOT_DETECTED:     reason = "Not detected"; break;
         case MenuAvailability::NOT_BUILT:        reason = "Not built"; break;
         default:                                 reason = "Unavailable"; break;
       }
     }
     pushOledMode(currentOledMode);  // B from the unavailable page returns to this menu
-    enterUnavailablePage(item->name, reason);
+    enterUnavailablePage(target, avail, item->name, reason);
     return;
   }
   requestOledMode(target, slug);

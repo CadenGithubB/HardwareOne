@@ -262,13 +262,18 @@ static const TransportSessionEpoch kNoTransportSessionEpoch = 0;
 void requestOledMode(OledMode newMode, const char* reason, bool pushStack = true,
                      bool isBackNav = false);
 
-// Same contract as OLED_Utils.cpp: record the page text, then a replace-in-place
-// transition to OLED_UNAVAILABLE.
+// Same contract as OLED_Utils.cpp: record the page's target, class and text,
+// then a replace-in-place transition to OLED_UNAVAILABLE.
 static int gUnavailableShown = 0;
+static OledMode gUnavailableTarget = OLED_UNAVAILABLE;
+static MenuAvailability gUnavailableAvailability = MenuAvailability::AVAILABLE;
 static std::string gUnavailableTitle;
 static std::string gUnavailableReason;
-static void enterUnavailablePage(const String& title, const String& reason) {
+static void enterUnavailablePage(OledMode target, MenuAvailability availability,
+                                 const String& title, const String& reason) {
   gUnavailableShown++;
+  gUnavailableTarget = target;
+  gUnavailableAvailability = availability;
   gUnavailableTitle = title.c_str();
   gUnavailableReason = reason.c_str();
   requestOledMode(OLED_UNAVAILABLE, "unavail.enter", false);
@@ -367,6 +372,8 @@ static void resetCase(OledMode mode) {
   sFirstPattern = "^^vv";
   gCliInputRefuses = false;
   gUnavailableShown = 0;
+  gUnavailableTarget = OLED_UNAVAILABLE;
+  gUnavailableAvailability = MenuAvailability::AVAILABLE;
   gUnavailableTitle.clear();
   gUnavailableReason.clear();
 }
@@ -622,6 +629,9 @@ static void caseModeRule() {
   check(currentOledMode == OLED_UNAVAILABLE,
         "oledmode to a mode whose own entry rule refuses (CLI Input, no named display "
         "session) must show the unavailable page instead of entering the mode");
+  check(gUnavailableTarget == OLED_CLI_INPUT &&
+            gUnavailableAvailability == MenuAvailability::FEATURE_DISABLED,
+        "the unavailable page carries the refused mode and its class, not only text");
   check(gUnavailableTitle == "CLI Input" && gUnavailableReason == "Login required",
         "the unavailable page names the mode and the module's reason (title '" +
             gUnavailableTitle + "', reason '" + gUnavailableReason + "')");

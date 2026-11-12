@@ -301,6 +301,17 @@ the phone app send it as text.
   the reasons above. The test also fails on `DEBUGF(flag, ...)` and
   `DEBUGF_BROADCAST`, which were folded into the area macros.
 
+## Display text and reply text
+
+- A title, a label or a reason line is what the user reads. Code that has to
+  know which row, page or state it is looking at carries that as a value next
+  to the text (a mode, an enum, the setting a row edits) and branches on the
+  value. The OLED unavailable page is the model: `enterUnavailablePage` takes
+  the target `OledMode` and its `MenuAvailability` for the hints and the X
+  action, and the title and reason only for drawing.
+- The host test `display_text_decisions` fails on a title, label or reason
+  compared with a string literal. Its table lists the uses that remain.
+
 ## Identity and role names
 
 - `System_User.h` owns the names the firmware stamps on a context in place of

@@ -293,7 +293,7 @@ extern const int oledSensorMenuItemCount;
 enum class MenuAvailability {
   AVAILABLE,
   FEATURE_DISABLED,      // Feature exists but turned off in settings
-  UNINITIALIZED,         // Hardware exists but not initialized/detected
+  UNINITIALIZED,         // Hardware or link is there but not started; X on the unavailable page starts it
   NOT_BUILT,             // Feature not compiled in
   NOT_DETECTED           // Hardware not found
 };
@@ -307,6 +307,20 @@ bool oledModeRuleAllows(OledMode mode, String* outReason);
 // (not built, not detected, turned off), then the mode's own entry rule, whose
 // refusal makes an otherwise available mode FEATURE_DISABLED with its reason.
 MenuAvailability getMenuAvailability(OledMode mode, String* outReason);
+
+// The unavailable page (OLED_UNAVAILABLE): what the launcher shows for a mode
+// it cannot enter. The target mode and its availability class decide the
+// hints and the X action; the title and the reason are only drawn.
+// NOT_BUILT offers no action, UNINITIALIZED keeps the page up until the user
+// starts the feature with X, the other classes return to the previous screen
+// after a timeout.
+void enterUnavailablePage(OledMode target, MenuAvailability availability,
+                          const String& title, const String& reason);
+extern OledMode unavailableOledTarget;
+extern MenuAvailability unavailableOledAvailability;
+extern String unavailableOledTitle;
+extern String unavailableOledReason;
+extern unsigned long unavailableOledStartTime;
 
 // =============================================================================
 // Display Hardware Abstraction Layer

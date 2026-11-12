@@ -219,8 +219,8 @@ static void caseSensorClassification() {
   expect(OLED_GPS_DATA, "GPS", MenuAvailability::NOT_DETECTED, "Not detected",
          "GPS not detected (both rules refuse): the launcher keeps the No-HW class");
   detect(I2C_ADDR_GPS);
-  expect(OLED_GPS_DATA, "GPS", MenuAvailability::FEATURE_DISABLED, "Disabled\nPress X to start",
-         "GPS detected but stopped: stays Off with the X:Start reason");
+  expect(OLED_GPS_DATA, "GPS", MenuAvailability::UNINITIALIZED, "Disabled\nPress X to start",
+         "GPS detected but stopped: the class X starts, with the X:Start reason");
   gGpsConnected = gGpsRunning = true;
   expect(OLED_GPS_DATA, "GPS", MenuAvailability::AVAILABLE, "", "GPS running: available");
 
@@ -228,8 +228,8 @@ static void caseSensorClassification() {
   expect(OLED_THERMAL_VISUAL, "Thermal", MenuAvailability::NOT_DETECTED, "Not detected",
          "thermal not detected (the module allows navigation): still No HW");
   detect(I2C_ADDR_THERMAL);
-  expect(OLED_THERMAL_VISUAL, "Thermal", MenuAvailability::FEATURE_DISABLED,
-         "Disabled\nPress X to start", "thermal detected but stopped: still Off");
+  expect(OLED_THERMAL_VISUAL, "Thermal", MenuAvailability::UNINITIALIZED,
+         "Disabled\nPress X to start", "thermal detected but stopped: the class X starts");
   gThermalConnected = true;
   expect(OLED_THERMAL_VISUAL, "Thermal", MenuAvailability::AVAILABLE, "",
          "thermal connected: available");

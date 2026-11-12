@@ -106,7 +106,8 @@ def build_unit(component: Path, source_dir: Path | None) -> str:
     setpattern.append(definition(pattern, "static const char* cmd_setpattern("))
 
     harness = (HERE / "oled_owner_requests_harness.cpp").read_text(encoding="utf-8")
-    for marker, text in (("// INSERT_TYPES", mode_enum + ";"),
+    availability = definition(display_h, "enum class MenuAvailability")
+    for marker, text in (("// INSERT_TYPES", mode_enum + ";\n" + availability + ";"),
                          ("// INSERT_OWNER", owner),
                          ("// INSERT_TRANSITION", transition),
                          ("// INSERT_SETPATTERN", "\n\n".join(setpattern))):
