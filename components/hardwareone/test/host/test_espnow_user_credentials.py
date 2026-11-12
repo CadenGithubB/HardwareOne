@@ -42,6 +42,7 @@ import subprocess
 import tempfile
 
 from test_web_batch_handlers import extract_block, require
+from identity_names_source import identity_constants
 from test_user_store_mutations import string_double
 
 HERE = Path(__file__).resolve().parent
@@ -89,7 +90,7 @@ def generate(component: Path) -> str:
     types += "\n".join(limits) + "\n"
     reserved = re.findall(r"^inline constexpr const char\* kBondAdminUser = .*;$", header, re.M)
     require(len(reserved) == 1, "System_User.h: one reserved bond-admin name")
-    types += reserved[0] + "\n"
+    types += reserved[0] + "\n" + identity_constants(header) + "\n"
     types += extract_block(header, "struct NewAccount") + ";\n"
     begin_marker = "// Credential attempt table: the brute-force lockout"
     end_marker = "uint32_t getTotalFailedLoginCount();"

@@ -3049,7 +3049,7 @@ static const char* cmd_stt(const String& argsInput) {
   secureClearString(reply);
   const AuthContext& ctx = currentAuthContext();
   SttOwner owner{ctx.transport, captureTransportSessionEpoch(ctx)};
-  if (ctx.user.length() == 0 || ctx.user == "AuthBypass" || !sttOwnerLive(owner))
+  if (!hasNamedUser(ctx) || !sttOwnerLive(owner))
     return "Error: STT requires a live authenticated serial, web, BLE, OLED or G2 session";
   CommandArgs args(argsInput);
   const String op = args.count() ? args.arg(0) : "status";

@@ -27,6 +27,7 @@ import subprocess
 import tempfile
 
 from test_web_batch_handlers import extract_block, require
+from identity_names_source import identity_constants, identity_predicates
 from test_user_store_mutations import last_block, string_double, unique_block
 
 HERE = Path(__file__).resolve().parent
@@ -46,6 +47,7 @@ def auth_types(header: str) -> str:
     epoch = re.findall(r"^using TransportSessionEpoch = uint32_t;$", header, re.M)
     require(len(epoch) == 1, "one TransportSessionEpoch alias")
     pieces.append(epoch[0])
+    pieces += [identity_constants(header), identity_predicates(header)]
     return "\n".join(pieces)
 
 

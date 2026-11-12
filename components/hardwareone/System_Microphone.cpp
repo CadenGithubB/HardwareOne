@@ -2528,10 +2528,7 @@ const char* cmd_micstart(const String& argsInput) {
   const AuthContext& admissionCtx = currentAuthContext();
   const CommandContext* commandCtx =
       static_cast<const CommandContext*>(currentCommandContext());
-  const bool syntheticEvenAi =
-      admissionCtx.transport == SOURCE_INTERNAL &&
-      admissionCtx.user == "uart-session" &&
-      admissionCtx.path == "/g2evenai";
+  const bool syntheticEvenAi = isG2EvenAiIdentity(admissionCtx);
   if (syntheticEvenAi) {
     if (!commandCtx ||
         !(commandCtx->behaviorFlags &
@@ -2712,10 +2709,7 @@ const char* cmd_micrecord(const String& argsInput) {
     const AuthContext& admissionCtx = currentAuthContext();
     const CommandContext* commandCtx =
         static_cast<const CommandContext*>(currentCommandContext());
-    const bool syntheticEvenAi =
-        admissionCtx.transport == SOURCE_INTERNAL &&
-        admissionCtx.user == "uart-session" &&
-        admissionCtx.path == "/g2evenai";
+    const bool syntheticEvenAi = isG2EvenAiIdentity(admissionCtx);
     if (syntheticEvenAi) {
       if (!commandCtx ||
           !(commandCtx->behaviorFlags &
@@ -2735,7 +2729,7 @@ const char* cmd_micrecord(const String& argsInput) {
       if (admissionCtx.transport == SOURCE_UART) {
         admissionSessionEpoch = currentSessionEpoch;
       } else if (admissionCtx.transport == SOURCE_INTERNAL &&
-                 admissionCtx.path == "/g2evenai" &&
+                 admissionCtx.path == kG2EvenAiPath &&
                  g2EvenAiExchangeBoundToUartSession(
                      owner, currentSessionEpoch)) {
         admissionSessionEpoch = currentSessionEpoch;

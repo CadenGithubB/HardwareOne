@@ -527,7 +527,7 @@ static bool webResolveGuestRole(const AuthContext& ctx, bool& guestRole) {
     roleVerified = getUserAuthorizationRole(ctx.user, role);
     // Preserve the legacy device-owner recovery rule only after the account
     // was resolved positively from the same locked roster snapshot.
-    guestRole = roleVerified && role == "guest" &&
+    guestRole = roleVerified && role == kRoleGuest &&
                 !isSuperAdminUser(ctx.user);
   }
   return roleVerified;
@@ -535,7 +535,7 @@ static bool webResolveGuestRole(const AuthContext& ctx, bool& guestRole) {
 
 bool webGuestMutationAllowed(httpd_req_t* req, const AuthContext& ctx) {
   if (!req) return false;
-  if (ctx.user.length() == 0 || ctx.user == "AuthBypass") return true;
+  if (!hasNamedUser(ctx)) return true;
   bool guestRole = false;
   if (!webResolveGuestRole(ctx, guestRole) || guestRole) {
     webGuestSendForbidden(req);
@@ -546,7 +546,7 @@ bool webGuestMutationAllowed(httpd_req_t* req, const AuthContext& ctx) {
 
 bool webGuestAccessAllowed(httpd_req_t* req, const AuthContext& ctx) {
   if (!req) return false;
-  if (ctx.user.length() == 0 || ctx.user == "AuthBypass") return true;
+  if (!hasNamedUser(ctx)) return true;
   bool guestRole = false;
   if (!webResolveGuestRole(ctx, guestRole)) {
     webGuestSendForbidden(req);
@@ -709,7 +709,7 @@ String generateNavigation(const String& activePage, const String& username, cons
   nav += "<div class=\"user-info\">";
   String navRole;
   const bool namedGuest =
-      getUserAuthorizationRole(username, navRole) && navRole == "guest";
+      getUserAuthorizationRole(username, navRole) && navRole == kRoleGuest;
   if (username.length() == 0 || namedGuest) {
     nav += "<a href=\"/login\" class=\"login-btn\">Login</a>";
   } else {

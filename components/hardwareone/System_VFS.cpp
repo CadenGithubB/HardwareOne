@@ -1510,7 +1510,7 @@ bool rmdirGuarded(const String& path, const AuthContext& ctx) {
 AuthContext systemAuth(const char* reason) {
   AuthContext ctx;
   ctx.transport = SOURCE_INTERNAL;
-  ctx.user      = "system";
+  ctx.user      = kSystemUser;
   ctx.path      = reason ? String("system:") + reason : String("system:");
   ctx.ip        = "local";
   ctx.sid       = "";

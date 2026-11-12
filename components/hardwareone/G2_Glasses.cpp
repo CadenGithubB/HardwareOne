@@ -12506,9 +12506,9 @@ static bool g2EvenAiSubmitCmd(const char* line) {
   uc.line = line;
   uc.ctx.origin         = ORIGIN_SYSTEM;
   uc.ctx.auth.transport = SOURCE_INTERNAL;
-  uc.ctx.auth.user      = "uart-session";
+  uc.ctx.auth.user      = kUartSessionUser;
   uc.ctx.auth.ip        = "";
-  uc.ctx.auth.path      = "/g2evenai";
+  uc.ctx.auth.path      = kG2EvenAiPath;
   uc.ctx.auth.sid       = "";
   uc.ctx.auth.opaque    = nullptr;
   uc.ctx.id             = (uint32_t)millis();

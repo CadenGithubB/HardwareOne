@@ -16,6 +16,7 @@ import subprocess
 import tempfile
 
 from test_web_batch_handlers import extract_block, require
+from identity_names_source import identity_constants
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
@@ -62,6 +63,7 @@ def generate() -> str:
     require("ownerCredentialSetupPending()" in detect, "boot detection must check the owner credential (G-38)")
     types = "\n".join(extract_block(header, marker) + ";" for marker in
                        ("enum FirstTimeSetupState", "enum SetupProgressStage", "enum SetupMode "))
+    types += "\n" + identity_constants((COMPONENT / "System_User.h").read_text())
     harness = (HERE / "initial_admin_setup_harness.cpp").read_text()
     for marker, replacement in (("// INSERT_TYPES", types),
                                 ("// INSERT_OWNER_AND_RESTORE", owner_and_restore),

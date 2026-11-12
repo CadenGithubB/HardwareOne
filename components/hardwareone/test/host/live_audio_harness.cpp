@@ -79,6 +79,8 @@ extern const CommandEntry liveAudioCommands[];
 extern const size_t liveAudioCommandsCount;
 enum { SOURCE_UART, SOURCE_INTERNAL, SOURCE_WEB };
 struct AuthContext { int transport = SOURCE_UART; String user = "test"; String path; } auth;
+// The reserved names and context predicates of System_User.h.
+// INSERT_IDENTITY_NAMES
 const AuthContext& currentAuthContext() { return auth; }
 uint32_t uartLinkSessionEpoch() { return epoch; }
 bool uartLinkIsRunning() { return linkUp; }

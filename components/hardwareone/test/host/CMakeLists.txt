@@ -2130,6 +2130,13 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_disabled_feature_branches.py)
 
+# Reserved identities and role names are defined once, in System_User.h; no
+# other file spells one as a literal (CONTRIBUTING.md, "Identity and role names").
+add_test(
+  NAME identity_names
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_identity_names.py)
+
 # OLED display-session writer windows (README "OLED display-session writer windows"):
 # the frame commit and the command-result path validate under the display lifecycle
 # writer, release it, push or copy, then re-check without opening a session.

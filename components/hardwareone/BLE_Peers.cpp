@@ -700,14 +700,14 @@ static String bleResolveStampUsername(BlePeerKind kind) {
   String who = currentAuthContext().user;
   auto usable = [](const String& u) -> bool {
     if (u.length() == 0) return false;
-    if (u.equalsIgnoreCase("AuthBypass")) return false;
+    if (u.equalsIgnoreCase(kAuthBypassUser)) return false;
     if (u.equalsIgnoreCase(kBondAdminUser)) return false;
     // Positive account resolution is intentional. `isGuestUser()` falls back
     // to ordinary User when users.json is unavailable; pair ownership is
     // persistent authority, so unknown/malformed/missing identities fail
     // closed just like targeted session control.
     String role;
-    return getUserAuthorizationRole(u, role) && role != "guest";
+    return getUserAuthorizationRole(u, role) && role != kRoleGuest;
   };
 
   // The UART host link is a machine channel: its account must never become

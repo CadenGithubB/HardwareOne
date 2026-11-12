@@ -25,6 +25,7 @@ import subprocess
 import tempfile
 
 from test_web_batch_handlers import extract_block, require
+from identity_names_source import identity_constants
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
@@ -43,7 +44,8 @@ def generate() -> str:
     utils = (COMPONENT / "WebServer_Utils.cpp").read_text()
 
     merge_struct = unique(settings, "struct UserSettingsMergeContext", "System_Settings.cpp") + ";"
-    pieces = ["namespace {\n" + merge_struct + "\n" +
+    pieces = [identity_constants(user_header),
+              "namespace {\n" + merge_struct + "\n" +
               unique(settings, "bool mergeUserSettingsMutation(", "System_Settings.cpp") + "\n}  // namespace"]
     has_refused_key = "const char* userSettingsPatchRefusedKey(" in settings
     if has_refused_key:

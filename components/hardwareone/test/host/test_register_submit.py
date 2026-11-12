@@ -41,6 +41,7 @@ import subprocess
 import tempfile
 
 from test_web_batch_handlers import extract_block, request_body_readers, require
+from identity_names_source import identity_constants, identity_predicates
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
@@ -92,9 +93,10 @@ def generate() -> tuple[str, bool]:
     has_owner = "enum class AccountRequestResult" in header
     result = (unique(header, "enum class AccountRequestResult", "System_User.h") + ";") if has_owner \
         else FALLBACK_RESULT
-    types = ["\n".join(limits + reserved),
+    types = ["\n".join(limits + reserved + [identity_constants(header)]),
              unique(header, "enum CommandSource", "System_User.h") + ";",
              unique(header, "struct AuthContext", "System_User.h") + ";",
+             identity_predicates(header),
              result]
 
     pieces = [

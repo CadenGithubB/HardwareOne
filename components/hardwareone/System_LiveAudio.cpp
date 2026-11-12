@@ -330,7 +330,7 @@ bool crc32SelfTest() {
 bool realUartCaller() {
   const AuthContext& ctx = currentAuthContext();
   return ctx.transport == SOURCE_UART && uartLinkSessionEpoch() != 0 &&
-         ctx.user.length() > 0 && ctx.user != "AuthBypass";
+         hasNamedUser(ctx);
 }
 
 uint32_t leaseRemainingLocked(uint32_t now) {
@@ -1062,7 +1062,7 @@ bool liveAudioRecorderCaptureEligible(
     return false;
   }
   const bool provenanceOk = arm.native
-      ? (ctx.transport == SOURCE_INTERNAL && ctx.path == "/g2evenai" &&
+      ? (ctx.transport == SOURCE_INTERNAL && ctx.path == kG2EvenAiPath &&
          g2EvenAiExchangeBoundToUartSession(exchangeId, epoch))
       : (ctx.transport == SOURCE_UART && realUartCaller());
   if (!provenanceOk) return false;

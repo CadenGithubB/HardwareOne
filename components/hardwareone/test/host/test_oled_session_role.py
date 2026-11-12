@@ -29,6 +29,7 @@ import subprocess
 import tempfile
 
 from test_web_batch_handlers import extract_block, require
+from identity_names_source import identity_constants
 
 HERE = Path(__file__).resolve().parent
 
@@ -97,6 +98,7 @@ def build_unit(component: Path, source_dir: Path | None) -> str:
     mode_enum = definition(display_h, "enum OledMode").replace(
         "enum OledMode", "enum OledMode : int", 1)
     types = "\n".join([
+        identity_constants(read_source(component, source_dir, "System_User.h")),
         max_items.group(0),
         mode_enum + ";",
         definition(display_h, "enum class MenuAvailability") + ";",

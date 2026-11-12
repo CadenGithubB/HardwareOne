@@ -3203,7 +3203,7 @@ static OledSessionRole oledLookupSessionRole(bool resolveAdmin) {
   String role;
   if (getUserAuthorizationRole(gLocalDisplayUser, role)) {
     looked.resolved = true;
-    looked.guest = role == "guest";
+    looked.guest = role == kRoleGuest;
     looked.admin = resolveAdmin && !looked.guest && isAdminUser(gLocalDisplayUser);
   }
   return looked;
@@ -3311,7 +3311,7 @@ AuthContext oledAuthContext(const char* path) {
   // input handling. buildOledCommand() pairs this mirror with its exact epoch;
   // if authority changed, the central live-session fence rejects the command.
   ctx.user      = gLocalDisplayAuthed ? gLocalDisplayUser
-                                      : String("AuthBypass");
+                                      : String(kAuthBypassUser);
   ctx.ip        = "oled";
   ctx.path      = path ? path : "/oled";
   ctx.sid       = "";

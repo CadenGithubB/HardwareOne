@@ -46,6 +46,7 @@ import subprocess
 import tempfile
 
 from test_web_batch_handlers import extract_block, json_text, mac_text, require
+from identity_names_source import identity_constants
 import ble_pipe_console_host as pipe_host
 
 HERE = Path(__file__).resolve().parent
@@ -68,6 +69,7 @@ def generated(component: Path) -> str:
     debug_h = (COMPONENT / "System_Debug.h").read_text()
 
     types = [
+        identity_constants(user_h),
         extract_block(user_h, "enum CommandSource") + ";",
         extract_block(user_h, "struct AuthContext") + ";",
         found(r"^using TransportSessionEpoch = uint32_t;", user_h, "System_User.h has the epoch type"),

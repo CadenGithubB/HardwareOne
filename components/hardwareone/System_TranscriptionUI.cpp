@@ -91,7 +91,7 @@ const char* commandSession(const String& input) {
     putStatus(doc, lease);
   } else if (op == "start" && args.count() == 1) {
     String role;
-    if (!getUserAuthorizationRole(currentAuthContext().user, role) || role == "guest")
+    if (!getUserAuthorizationRole(currentAuthContext().user, role) || role == kRoleGuest)
       return error(doc, "Transcription requires a non-guest account");
     if (!dictationAppBegin(lease.source, lease.epoch, &lease)) {
       const char* why = nullptr; (void)dictationAvailable(&why);

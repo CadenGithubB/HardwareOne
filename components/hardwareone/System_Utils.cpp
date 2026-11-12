@@ -3739,7 +3739,7 @@ static bool callerMayTargetAnotherSession(const AuthContext& auth,
     return false;
   };
 
-  if (auth.user.length() == 0 || auth.user == "AuthBypass") {
+  if (!hasNamedUser(auth)) {
     return deny("Error: sign in on this interface before targeting another session.");
   }
   if (!userMayControlOtherSessions(auth.user)) {
@@ -3823,7 +3823,7 @@ static bool authorizeCommand(const AuthContext& ctx, const String& line,
 
   // Trusted internal identity (status REST facades, system FS). Same privilege
   // model as FsRole::SYSTEM — never a loginable account.
-  if (ctx.transport == SOURCE_INTERNAL && ctx.user == "system") {
+  if (isSystemIdentity(ctx)) {
     return true;
   }
   // External transports must carry a real username (or AuthBypass when a
@@ -3849,10 +3849,8 @@ static bool authorizeCommand(const AuthContext& ctx, const String& line,
   const bool liveBondIdentity =
       ctx.transport == SOURCE_ESPNOW && ctx.user == kBondAdminUser &&
       isSuperAdminUser(ctx.user);
-  const bool liveG2UartSessionIdentity =
-      ctx.transport == SOURCE_INTERNAL && ctx.user == "uart-session" &&
-      ctx.path == "/g2evenai";
-  if (ctx.user.length() > 0 && ctx.user != "AuthBypass" &&
+  const bool liveG2UartSessionIdentity = isG2EvenAiIdentity(ctx);
+  if (hasNamedUser(ctx) &&
       !liveBondIdentity &&
       !liveG2UartSessionIdentity &&
       !getUserAuthorizationRole(ctx.user, liveRole)) {
@@ -3864,7 +3862,7 @@ static bool authorizeCommand(const AuthContext& ctx, const String& line,
   }
   // Guest: authenticated but view-only. Deny before admin/super checks so a
   // guest never reaches an admin-gated handler by accident.
-  if (liveRole == "guest" && !commandAllowedForGuest(line)) {
+  if (liveRole == kRoleGuest && !commandAllowedForGuest(line)) {
     String cmdName = line;
     int spacePos = line.indexOf(' ');
     if (spacePos > 0) cmdName = line.substring(0, spacePos);
@@ -3876,8 +3874,7 @@ static bool authorizeCommand(const AuthContext& ctx, const String& line,
   // Forced password change: every external transport (the web refuses the
   // same account in tgRequireAuth). Internal callers run stored work such as
   // automations, not a signed-in user, and are not gated here.
-  if (ctx.transport != SOURCE_INTERNAL && ctx.user.length() > 0 &&
-      ctx.user != "AuthBypass" && !liveBondIdentity &&
+  if (ctx.transport != SOURCE_INTERNAL && hasNamedUser(ctx) && !liveBondIdentity &&
       !commandAllowedDuringPasswordChange(line) &&
       userMustChangePassword(ctx.user)) {
     String cmdName = line;
@@ -3932,7 +3929,7 @@ static bool authorizeRemoteCommand(const AuthContext& ctx, const String& line,
                                    const String& redactedLine,
                                    char* out, size_t outSize) {
   // The trusted internal identity passes authorizeCommand unchecked; same here.
-  if (ctx.transport == SOURCE_INTERNAL && ctx.user == "system") return true;
+  if (isSystemIdentity(ctx)) return true;
   if (remoteCommandAllowedWithoutAdmin(line) || hasAdminPrivilege(ctx)) return true;
   snprintf(out, outSize,
            "Error: Admin access required to send this command to the bonded device; "
@@ -4162,9 +4159,7 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
   if (cmdCtx &&
       (cmdCtx->behaviorFlags &
        COMMAND_CONTEXT_REQUIRE_G2_EVENAI_AUTHORITY)) {
-    const bool exactSyntheticIdentity =
-        ctx.transport == SOURCE_INTERNAL && ctx.user == "uart-session" &&
-        ctx.path == "/g2evenai";
+    const bool exactSyntheticIdentity = isG2EvenAiIdentity(ctx);
     if (!exactSyntheticIdentity || cmdCtx->authorityId == 0 ||
         cmdCtx->authoritySessionEpoch == 0 ||
         !g2EvenAiExchangeBoundToUartSession(
@@ -4180,7 +4175,7 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
   // AuthBypass is an execution-time policy, not a durable permission. A
   // command admitted while authentication was disabled must not run after an
   // administrator enables it ahead of the command in the shared executor.
-  if (ctx.user == "AuthBypass") {
+  if (isAuthBypassUser(ctx.user)) {
     const bool authNowRequired =
         (ctx.transport == SOURCE_SERIAL && gSettings.serialRequireAuth) ||
         (ctx.transport == SOURCE_UART && gSettings.uartRequireAuth) ||
@@ -4725,7 +4720,7 @@ bool submitDeferredToCmdExec(ExecReq::DeferredFn fn, void* arg) {
 void runUnifiedSystemCommand(const String& argsInput) {
   AuthContext actx;
   actx.transport = SOURCE_INTERNAL;
-  actx.user = "system";
+  actx.user = kSystemUser;
   actx.ip = String();
   actx.path = "/system";
   actx.opaque = nullptr;
@@ -4762,7 +4757,7 @@ bool executeInternalStatusCommand(const char* cmd, char* out, size_t outSize) {
   uc.line = cmd;
   uc.ctx.origin = ORIGIN_SYSTEM;
   uc.ctx.auth.transport = SOURCE_INTERNAL;
-  uc.ctx.auth.user = "system";
+  uc.ctx.auth.user = kSystemUser;
   uc.ctx.auth.ip = "local";
   uc.ctx.auth.path = cmd;
   uc.ctx.id = (uint32_t)millis();

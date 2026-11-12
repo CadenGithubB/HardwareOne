@@ -115,9 +115,9 @@ assert 'patch["password"].isNull()' not in settings_post
 # with a forced change (createAccount on trees with the creation owner).
 creator = function_body(user, "bool createAccount(" if "bool createAccount(" in user
                         else "bool adminCreateUser(")
-assert 'account.mustChangePassword && account.role == "guest"' in creator, \
+assert 'account.mustChangePassword && account.role == kRoleGuest' in creator, \
     "account creation accepts a guest that must change its password"
-assert creator.index('account.role == "guest"') < creator.index("FsLockGuard guard(")
+assert creator.index('account.role == kRoleGuest') < creator.index("FsLockGuard guard(")
 
 # The forced change is decided once (userMustChangePassword) and every
 # authenticated web request, APIs included, passes the gate in tgRequireAuth.

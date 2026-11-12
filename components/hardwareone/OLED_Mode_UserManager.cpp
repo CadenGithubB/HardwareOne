@@ -47,8 +47,6 @@ static char    gUmDelName[kPublicUsernameMaxLen + 1] = {0};   // full name, capt
 static String        umError;
 static unsigned long umErrorUntil = 0;
 
-static const char* const kUmRoles[4] = { "guest", "user", "admin", "superadmin" };
-
 static void umWipe(char* buffer, size_t size) {
   volatile char* p = reinterpret_cast<volatile char*>(buffer);
   while (size-- > 0) *p++ = '\0';
@@ -140,7 +138,7 @@ static void umDrawRole(int y, int cursor, int maxRank, int curRank, const char* 
   for (int rank = 0; rank <= maxRank; rank++) {
     oledDisplay->setCursor(0, yy);
     oledDisplay->print(rank == cursor ? "> " : "  ");
-    oledDisplay->print(kUmRoles[rank]);
+    oledDisplay->print(kUserRoleNames[rank]);
     if (rank == curRank) oledDisplay->print(" *");
     yy += 10;
   }
@@ -312,10 +310,10 @@ bool userManagerInput(int /*dx*/, int /*dy*/, uint32_t newlyPressed) {
         const UserRosterEntry& u = gUsers[gUmTarget];
         int cur = userRoleRank(u.role);
         if (gUmRoleSel == cur) { gUmLevel = UM_ACTIONS; return true; }  // no change
-        String cmd = String(gUmRoleSel > cur ? "userpromote " : "userdemote ") + u.username + " " + kUmRoles[gUmRoleSel];
+        String cmd = String(gUmRoleSel > cur ? "userpromote " : "userdemote ") + u.username + " " + kUserRoleNames[gUmRoleSel];
         umDispatch(cmd);
       } else {                            // UM_ADD_ROLE → useradd
-        String cmd = String("useradd \"") + gAddUser + "\" \"" + gAddPass + "\" 0 " + kUmRoles[gUmRoleSel];
+        String cmd = String("useradd \"") + gAddUser + "\" \"" + gAddPass + "\" 0 " + kUserRoleNames[gUmRoleSel];
         umDispatch(cmd);
         secureClearString(cmd);
       }

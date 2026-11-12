@@ -836,7 +836,7 @@ static esp_err_t handleTranscriptionGet(httpd_req_t* req) {
   if (httpd_resp_set_hdr(req, "Cache-Control", "no-store") != ESP_OK) return ESP_FAIL;
   WEB_AUTH_OR_RETURN(req, ctx);
   const TransportSessionEpoch epoch = captureTransportSessionEpoch(ctx);
-  if (!ctx.sid.length() || !ctx.user.length() || ctx.user == "AuthBypass" || !epoch ||
+  if (!ctx.sid.length() || !hasNamedUser(ctx) || !epoch ||
       !transportSessionEpochIsLive(SOURCE_WEB, epoch))
     return transcriptionWebError(req, "401 Unauthorized", "A live named web session is required");
   ExecIdentityGuard identity(ctx);
@@ -969,7 +969,7 @@ static esp_err_t handleTranscriptionPost(httpd_req_t* req) {
   if (httpd_resp_set_hdr(req, "Cache-Control", "no-store") != ESP_OK) return ESP_FAIL;
   WEB_AUTH_OR_RETURN(req, ctx);
   const TransportSessionEpoch epoch = captureTransportSessionEpoch(ctx);
-  if (!ctx.sid.length() || !ctx.user.length() || ctx.user == "AuthBypass" || !epoch ||
+  if (!ctx.sid.length() || !hasNamedUser(ctx) || !epoch ||
       !transportSessionEpochIsLive(SOURCE_WEB, epoch))
     return transcriptionWebError(req, "401 Unauthorized", "A live named web session is required");
   // Small fixed forms only; do not allocate based on an untrusted body length.

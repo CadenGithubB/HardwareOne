@@ -301,6 +301,25 @@ the phone app send it as text.
   the reasons above. The test also fails on `DEBUGF(flag, ...)` and
   `DEBUGF_BROADCAST`, which were folded into the area macros.
 
+## Identity and role names
+
+- `System_User.h` owns the names the firmware stamps on a context in place of
+  an account: `kSystemUser`, `kAuthBypassUser`, `kUartSessionUser` and
+  `kBondAdminUser`, plus `kG2EvenAiPath`. No other file spells one of them as
+  a literal.
+- A check on a context asks a predicate: `hasNamedUser(ctx)` (the name is not
+  empty and is not the bypass stamp), `isAuthBypassUser(name)`,
+  `isSystemIdentity(ctx)`, `isG2EvenAiIdentity(ctx)` and
+  `bondIdentityLive(ctx)`. A reserved name counts only together with its
+  transport, so compare the context, not the name alone.
+- The four role names are `kRoleGuest`, `kRoleUser`, `kRoleAdmin` and
+  `kRoleSuperAdmin`. `users.json` stores the names; code compares a role with
+  its constant or compares ranks (`userRoleRank`, `kRoleRank*`).
+  `kUserRoleNames` lists the names in rank order for a page that shows or
+  sends a role.
+- The host test `identity_names` fails on a literal of these values outside
+  `System_User.h`.
+
 ## Keep the setup tool thin
 
 The host configuration tool chooses what enters the firmware. The on-device

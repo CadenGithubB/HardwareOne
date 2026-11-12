@@ -252,7 +252,7 @@ static void runVoiceCommandJob(void* opaque) {
         (!job->requiresEpoch || (job->armEpoch != 0 &&
          transportSessionEpochIsLive(job->armTransport, job->armEpoch)));
     // A bypass login must not survive enabling authentication on its source.
-    if (authorized && job->command.ctx.auth.user == "AuthBypass") {
+    if (authorized && isAuthBypassUser(job->command.ctx.auth.user)) {
       authorized = !((job->armTransport == SOURCE_SERIAL && gSettings.serialRequireAuth) ||
           (job->armTransport == SOURCE_UART && gSettings.uartRequireAuth) ||
           (job->armTransport == SOURCE_LOCAL_DISPLAY && gSettings.localDisplayRequireAuth) ||

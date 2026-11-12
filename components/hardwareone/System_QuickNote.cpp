@@ -762,7 +762,7 @@ const char* commandStart(JsonDocument& doc, const CommandArgs& args,
   }
   const auto& ctx = currentAuthContext();
   String role;
-  if (!getUserAuthorizationRole(ctx.user, role) || role == "guest")
+  if (!getUserAuthorizationRole(ctx.user, role) || role == kRoleGuest)
     return error(doc, "Notes require a non-guest account");
   QuickNoteStartReq req;
   req.hold = hold;

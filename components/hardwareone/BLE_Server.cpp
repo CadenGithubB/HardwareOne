@@ -465,7 +465,7 @@ static bool bleFillCommandAuth(uint16_t connId, AuthContext& auth, bool forLogin
   if (bleIsAuthed(connId, u)) {
     auth.user = u;
   } else if (!bleRequiresLogin(connId)) {
-    auth.user = "AuthBypass";
+    auth.user = kAuthBypassUser;
   } else {
     auth.user = "";
   }

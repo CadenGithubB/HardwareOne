@@ -2878,7 +2878,7 @@ void hardwareone_loop() {
                   whoamiEpoch) {
             Serial.printf("You are %s%s\n",
                           liveSerialAuthed && liveSerialUser.length()
-                              ? liveSerialUser.c_str() : "AuthBypass",
+                              ? liveSerialUser.c_str() : kAuthBypassUser,
                           isCurrentlyAdmin ? " (admin)" : "");
           }
         } else {
@@ -2895,7 +2895,7 @@ void hardwareone_loop() {
           const TransportSessionEpoch commandSessionEpoch =
               admittedSerialEpoch;
           actx.user = admittedSerialAuthed && admittedSerialUser.length()
-                          ? admittedSerialUser : String("AuthBypass");
+                          ? admittedSerialUser : String(kAuthBypassUser);
           actx.ip = "local";
           actx.path = "serial";
           Command uc;

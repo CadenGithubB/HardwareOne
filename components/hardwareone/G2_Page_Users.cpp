@@ -97,8 +97,7 @@ static uint32_t gUserCmdTokenNext = 0;
 static uint32_t gPendingCmdToken = 0;
 static uint32_t gResultReadyToken = 0;
 
-// Role vocabulary, indexed by rank (guest=0 .. superadmin=3).
-static const char* const kRoleNames[4] = { "guest", "user", "admin", "superadmin" };
+// The role names by rank are kUserRoleNames (System_User.h).
 
 static void showListMenu();
 static void showDetailMenu();
@@ -354,7 +353,7 @@ static void showRoleMenu() {
   strlcpy(rows[0], "<- Back", sizeof(rows[0])); ptrs[0] = rows[0];
   size_t n = 1;
   for (int rank = 0; rank <= maxRank && n < 5; rank++) {   // rows 1..N = ranks 0..maxRank
-    snprintf(rows[n], 28, "[%c] %s", (rank == curRank) ? 'X' : ' ', kRoleNames[rank]);
+    snprintf(rows[n], 28, "[%c] %s", (rank == curRank) ? 'X' : ' ', kUserRoleNames[rank]);
     ptrs[n] = rows[n];
     n++;
   }
@@ -570,7 +569,7 @@ static void addPassConfirmCommit(const char* text) {
   // useradd <user> <pass> 0 <role>  (0 = don't force a password change).
   // The keyboard charset can't produce a double-quote, so quoting is safe.
   String line = String("useradd \"") + gAddUser + "\" \"" + gAddPass +
-                "\" 0 " + kRoleNames[gAddRoleRank];
+                "\" 0 " + kUserRoleNames[gAddRoleRank];
   submitUserCmd(line.c_str());
   scrubPasswordStaging();
   gAddUser[0] = '\0';
@@ -618,7 +617,7 @@ static void showAddRoleMenu() {
   strlcpy(rows[0], "<- Cancel", sizeof(rows[0])); ptrs[0] = rows[0];
   size_t n = 1;
   for (int rank = 0; rank <= maxRank && n < 5; rank++) {   // rows 1..N = ranks 0..maxRank
-    snprintf(rows[n], 24, "%s", kRoleNames[rank]);
+    snprintf(rows[n], 24, "%s", kUserRoleNames[rank]);
     ptrs[n] = rows[n];
     n++;
   }
@@ -702,7 +701,7 @@ static void roleHandleTap(uint32_t idx) {
   if (targetRank == curRank) return;           // already that role — no-op
   // promote raises, demote lowers — there is no single set-role command.
   String line = String(targetRank > curRank ? "userpromote \"" : "userdemote \"") +
-                r.username + "\" " + kRoleNames[targetRank];
+                r.username + "\" " + kUserRoleNames[targetRank];
   submitUserCmd(line.c_str());
 }
 

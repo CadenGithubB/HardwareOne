@@ -18,6 +18,7 @@ import tempfile
 from test_espsr_runtime import function
 from test_web_batch_handlers import extract_block
 from g2_client_source import g2_client_text
+from identity_names_source import identity_constants
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
@@ -48,7 +49,8 @@ def unit_source():
     dictation = (COMPONENT / 'System_Dictation.h').read_text()
     transcript = (COMPONENT / 'System_Transcript.h').read_text()
     store = (COMPONENT / 'QuickNote_Store.h').read_text()
-    types = extract_block(transcript, 'struct TranscriptStatus') + ';\n'
+    types = identity_constants((COMPONENT / 'System_User.h').read_text()) + '\n'
+    types += extract_block(transcript, 'struct TranscriptStatus') + ';\n'
     for name in ('enum class DictationState', 'struct DictationSnapshot', 'struct DictationTextReceipt',
                  'enum class DictationAppPurpose', 'struct DictationAppLease',
                  'struct DictationAppSnapshot', 'struct DictationAppOptions'):

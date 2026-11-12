@@ -596,7 +596,7 @@ TransportSessionEpoch captureTransportSessionEpoch(const AuthContext& ctx) {
       bool authed = false;
       TransportSessionEpoch epoch = serialTransportSessionSnapshot(user, authed);
       if (authed) return user.equalsIgnoreCase(ctx.user) ? epoch : 0;
-      return !gSettings.serialRequireAuth && ctx.user == "AuthBypass"
+      return !gSettings.serialRequireAuth && isAuthBypassUser(ctx.user)
                  ? epoch : 0;
     }
     case SOURCE_LOCAL_DISPLAY: {
@@ -605,7 +605,7 @@ TransportSessionEpoch captureTransportSessionEpoch(const AuthContext& ctx) {
       TransportSessionEpoch epoch =
           localDisplayTransportSessionSnapshot(user, authed);
       if (authed) return user.equalsIgnoreCase(ctx.user) ? epoch : 0;
-      return !gSettings.localDisplayRequireAuth && ctx.user == "AuthBypass"
+      return !gSettings.localDisplayRequireAuth && isAuthBypassUser(ctx.user)
                  ? epoch : 0;
     }
     case SOURCE_BLUETOOTH: {
@@ -785,7 +785,7 @@ static bool fill(const String& who, Entry& out) {
   out.admin = adminFromRosterJson(json, who);
   out.super = superFromRosterJson(json, who);
   String legacy;
-  out.legacyGuest = legacyRoleFromRosterJson(json, who, legacy) && legacy == "guest";
+  out.legacyGuest = legacyRoleFromRosterJson(json, who, legacy) && legacy == kRoleGuest;
   portENTER_CRITICAL(&sMux);
   size_t slot = sNext;
   for (size_t i = 0; i < kSlots; ++i) {
@@ -890,7 +890,7 @@ static bool adminFromRosterJson(const String& json, const String& who) {
         if (uname == who) {
           // superadmin is a strict superset of admin — it satisfies every
           // admin-gated command too.
-          return (role == "admin" || role == "superadmin");
+          return (role == kRoleAdmin || role == kRoleSuperAdmin);
         }
       }
       pos = uq2 + 1;
@@ -982,7 +982,7 @@ static bool superFromRosterJson(const String& json, const String& who) {
       int rq1 = json.indexOf('"', json.indexOf(':', rKey) + 1);
       int rq2 = json.indexOf('"', rq1 + 1);
       String role = (rq1 > 0 && rq2 > rq1) ? json.substring(rq1 + 1, rq2) : String("");
-      if (role == "superadmin") {
+      if (role == kRoleSuperAdmin) {
         anyExplicitSuper = true;
         if (uname == who) return true;
       }
@@ -1018,7 +1018,7 @@ static bool legacyRoleFromRosterJson(const String& json, const String& username,
   for (JsonObject uObj : users) {
     const char* uname = uObj["username"] | "";
     if (username == uname) {
-      outRole = String(uObj["role"] | "user");
+      outRole = String(uObj["role"] | kRoleUser);
       return true;
     }
   }
@@ -1054,7 +1054,7 @@ static bool roleFromRosterJson(const String& json, const String& username,
       // module: the first account remains the recovery owner, while another
       // account with no legacy role is an ordinary user. Missing is distinct
       // from a present-but-malformed/unknown role, which stays fail-closed.
-      role = firstAccount ? "superadmin" : "user";
+      role = firstAccount ? kRoleSuperAdmin : kRoleUser;
     } else if (roleField.is<const char*>()) {
       role = String(roleField.as<const char*>());
     } else {
@@ -1144,14 +1144,14 @@ bool getUserRoleAndSuper(const String& who, String& roleOut, bool& isSuperOut) {
 // A caller may not demote/ban/delete a target of higher rank, nor grant a
 // role above its own (enforced in the user-mutation handlers).
 int userRoleRank(const String& role) {
-  if (role == "superadmin") return kRoleRankSuperAdmin;
-  if (role == "admin")      return kRoleRankAdmin;
-  if (role == "guest")      return kRoleRankGuest;
+  if (role == kRoleSuperAdmin) return kRoleRankSuperAdmin;
+  if (role == kRoleAdmin)      return kRoleRankAdmin;
+  if (role == kRoleGuest)      return kRoleRankGuest;
   return kRoleRankUser;  // "user" and unrecognised names
 }
 
 bool isKnownUserRole(const String& role) {
-  return role == "guest" || role == "user" || role == "admin" || role == "superadmin";
+  return role == kRoleGuest || role == kRoleUser || role == kRoleAdmin || role == kRoleSuperAdmin;
 }
 
 // Authoritative role lookup at the access boundary: an unreadable, missing or
@@ -1197,7 +1197,7 @@ bool getUserAuthorizationRole(const String& username, String& roleOut) {
 
 bool userMayControlOtherSessions(const String& username) {
   String role;
-  return getUserAuthorizationRole(username, role) && role != "guest";
+  return getUserAuthorizationRole(username, role) && role != kRoleGuest;
 }
 
 static bool userMayPublishCm5Presence(const String& username) {
@@ -2096,7 +2096,7 @@ std::atomic<uint32_t> sWrites{0};
 // recovery owner is not treated as a guest.
 static bool accountIsGuestForPasswordChange(const String& username) {
   String role;
-  return getUserAuthorizationRole(username, role) && role == "guest" &&
+  return getUserAuthorizationRole(username, role) && role == kRoleGuest &&
          !isSuperAdminUser(username);
 }
 
@@ -2196,7 +2196,7 @@ bool setUserPassword(const String& username, const String& newPasswordRaw, bool 
 bool isReservedUsername(const String& username) {
   // Audit/dispatch sentinels, compared case-insensitively and ignoring the
   // surrounding whitespace the public intake trims.
-  static const char* const kReserved[] = { "system", "AuthBypass", kBondAdminUser };
+  static const char* const kReserved[] = { kSystemUser, kAuthBypassUser, kBondAdminUser };
   String u = username;
   u.trim();
   for (const char* r : kReserved) {
@@ -2416,7 +2416,7 @@ static UsersJsonMutation createAccountMutation(JsonDocument& doc, JsonArray user
   // Unrecognised values collapse to "user" rather than being written through:
   // an unknown string would otherwise look like a real tier in users.json
   // while rating as kRoleRankUser everywhere else.
-  newUser["role"] = isKnownUserRole(ctx->account->role) ? ctx->account->role.c_str() : "user";
+  newUser["role"] = isKnownUserRole(ctx->account->role) ? ctx->account->role.c_str() : kRoleUser;
   // Pending (resolved lazily via boot anchor) unless the caller asked for the
   // wall-clock time and the clock is valid.
   char createdAtBuf[24];
@@ -2453,7 +2453,7 @@ bool createAccount(const NewAccount& account, uint32_t& idOut, String& errorOut)
   }
   // Guests cannot change their own password on any interface, so a guest
   // created with a forced change could never get past it.
-  if (account.mustChangePassword && account.role == "guest") {
+  if (account.mustChangePassword && account.role == kRoleGuest) {
     errorOut = "A guest account cannot be required to change its password";
     return false;
   }
@@ -2858,7 +2858,7 @@ bool getUserRole(const String& username, String& outRole) {
   for (JsonObject uObj : users) {
     const char* uname = uObj["username"] | "";
     if (username == uname) {
-      outRole = String(uObj["role"] | "user");
+      outRole = String(uObj["role"] | kRoleUser);
       return true;
     }
   }
@@ -2899,7 +2899,7 @@ int userAccountRank(const String& username) {
     if (isSuperAdminUser(username)) return kRoleRankSuperAdmin;
     if (isAdminUser(username))      return kRoleRankAdmin;
     String bondRole;
-    if (getUserRole(username, bondRole) && bondRole == "guest") return kRoleRankGuest;
+    if (getUserRole(username, bondRole) && bondRole == kRoleGuest) return kRoleRankGuest;
     return kRoleRankUser;
   }
 #endif
@@ -2919,7 +2919,7 @@ int userAccountRank(const String& username) {
   if (superFromRosterJson(json, username)) return kRoleRankSuperAdmin;
   if (adminFromRosterJson(json, username)) return kRoleRankAdmin;
   String role;
-  if (legacyRoleFromRosterJson(json, username, role) && role == "guest") return kRoleRankGuest;
+  if (legacyRoleFromRosterJson(json, username, role) && role == kRoleGuest) return kRoleRankGuest;
   return kRoleRankUser;
 }
 
@@ -2979,7 +2979,7 @@ bool approvePendingUserInternal(const String& username, String& errorOut) {
   NewAccount account;
   account.username = username;
   account.passwordHash = String(request["password"] | "");  // stored hashed at request time
-  account.role = "user";
+  account.role = kRoleUser;
   account.createdBy = approvedByBuf;
   uint32_t createdUserId = 0;
   if (!createAccount(account, createdUserId, errorOut)) {
@@ -3326,11 +3326,11 @@ const char* cmd_user_promote(const String& argsInput) {
   CommandArgs a(argsInput);
   if (!a.hasMinArgs(1)) return "Error: invalid arguments — Usage: userpromote <username> [user|admin|superadmin]";
   String username = a.arg(0);
-  String role = a.has(1) ? a.arg(1) : String("admin");
+  String role = a.has(1) ? a.arg(1) : String(kRoleAdmin);
   role.toLowerCase();
   // Promote steps up: guest→user, user→admin, admin→superadmin. "guest" is
   // demote-only (use userdemote).
-  if (role != "user" && role != "admin" && role != "superadmin")
+  if (role != kRoleUser && role != kRoleAdmin && role != kRoleSuperAdmin)
     return "Error: role must be 'user', 'admin', or 'superadmin'";
   DEBUG_USERSF("[users] CLI promote username=%s role=%s", username.c_str(), role.c_str());
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
@@ -3364,9 +3364,9 @@ const char* cmd_user_demote(const String& argsInput) {
   CommandArgs a(argsInput);
   if (!a.hasMinArgs(1)) return "Error: invalid arguments — Usage: userdemote <username> [admin|user|guest]";
   String username = a.arg(0);
-  String role = a.has(1) ? a.arg(1) : String("user");
+  String role = a.has(1) ? a.arg(1) : String(kRoleUser);
   role.toLowerCase();
-  if (role != "admin" && role != "user" && role != "guest")
+  if (role != kRoleAdmin && role != kRoleUser && role != kRoleGuest)
     return "Error: role must be 'admin', 'user', or 'guest'";
   DEBUG_USERSF("[users] CLI demote username=%s role=%s", username.c_str(), role.c_str());
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
@@ -3703,7 +3703,7 @@ const char* cmd_user_add(const String& argsInput) {
   String rest = a.arg(1);
 
   bool mustChange = false;
-  String role = "user";
+  String role = kRoleUser;
   for (int i = 2; i <= 3; i++) {
     String t = a.arg(i);
     if (t.length() == 0) continue;
@@ -3792,13 +3792,13 @@ static RosterReadResult visitUserRoster(UserRosterVisitor visit, void* context) 
     const JsonVariantConst roleField = user["role"];
     String role;
     if (roleField.isNull()) {
-      role = wasFirst ? "superadmin" : "user";
+      role = wasFirst ? kRoleSuperAdmin : kRoleUser;
     } else if (roleField.is<const char*>()) {
       role = roleField.as<const char*>();
       role.toLowerCase();
-      if (!isKnownUserRole(role)) role = "user";
+      if (!isKnownUserRole(role)) role = kRoleUser;
     } else {
-      role = "user";
+      role = kRoleUser;
     }
     snprintf(entry.role, sizeof(entry.role), "%s", role.c_str());
     entry.banned = user["banned"] | false;
@@ -4960,7 +4960,7 @@ const char* cmd_user_sync(const String& argsInput) {
   // Get user role
   String role;
   if (!getUserRole(username, role)) {
-    role = "user";  // Default if not found
+    role = kRoleUser;  // Default if not found
   }
   
   // Resolve device MAC

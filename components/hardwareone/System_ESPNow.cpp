@@ -4264,7 +4264,7 @@ static void doUserSyncWork(const DeferredUserSyncWork* w) {
   const char* adminPass  = doc["recv_admin_pass"] | "";
   const char* targetUser = doc["target_user"]     | "";
   const char* targetPass = doc["target_pass"]     | "";
-  const char* role       = doc["role"]            | "user";
+  const char* role       = doc["role"]            | kRoleUser;
 
   if (!strlen(adminUser) || !strlen(adminPass) || !strlen(targetUser) || !strlen(targetPass)) {
     WARN_ESPNOWF("[USER_SYNC] Missing required fields from %s", deviceName);
@@ -4340,7 +4340,7 @@ static void doUserSyncWork(const DeferredUserSyncWork* w) {
   NewAccount account;
   account.username = targetUser;
   account.passwordHash = hashUserPassword(String(targetPass));
-  account.role = "user";
+  account.role = kRoleUser;
   account.createdBy = createdByBuf;
   // A user synced after this boot's NTP sync would otherwise stay
   // createdAt=null until the next reboot's resolver pass.
@@ -4363,7 +4363,7 @@ static void doUserSyncWork(const DeferredUserSyncWork* w) {
   // mesh, not via a local command). Durable so the account is attributable.
   logSystemEvent("USERS", "user '%s' (id=%u) created via mesh user-sync from '%s'",
                  targetUser, (unsigned)newId, deviceName);
-  bool srcWasAdmin = (strcmp(role, "user") != 0);
+  bool srcWasAdmin = (strcmp(role, kRoleUser) != 0);
   INFO_ESPNOWF("[USER_SYNC] Created user '%s' (id=%u) as standard user from %s%s",
                targetUser, (unsigned)newId, deviceName,
                srcWasAdmin ? " [source was admin — not propagated]" : "");

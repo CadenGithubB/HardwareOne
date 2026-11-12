@@ -7,6 +7,8 @@ import shutil
 import subprocess
 import tempfile
 
+from identity_names_source import identity_constants, identity_predicates
+
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
 
@@ -28,6 +30,10 @@ def main():
         source = (COMPONENT / filename).read_text()
         source = re.sub(r'^#include[^\n]*', '', source, flags=re.M)
         harness = harness.replace('// INSERT_' + marker, source)
+    user_header = (COMPONENT / 'System_User.h').read_text()
+    assert harness.count('// INSERT_IDENTITY_NAMES') == 1
+    harness = harness.replace('// INSERT_IDENTITY_NAMES',
+                              identity_constants(user_header) + '\n' + identity_predicates(user_header))
     with tempfile.TemporaryDirectory(prefix='hw1-live-audio-') as tmp:
         unit = Path(tmp) / 'test.cpp'
         unit.write_text(harness)

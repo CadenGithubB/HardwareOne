@@ -839,7 +839,7 @@ static void uartProcessLine(String& cmd, uint32_t admittedTransportEpoch) {
         sessionUser, sizeof(sessionUser), nullptr, &whoamiTransportEpoch);
     if (whoamiTransportEpoch != admittedTransportEpoch) return;
     const char* name = sessionAuthed && sessionUser[0]
-                           ? sessionUser : "AuthBypass";
+                           ? sessionUser : kAuthBypassUser;
     const String userName(name);
     snprintf(msg, sizeof(msg), "OK: %s%s", name,
              (sessionAuthed && isAdminUser(userName)) ? " (admin)" : "");
@@ -1067,7 +1067,7 @@ static void uartProcessLine(String& cmd, uint32_t admittedTransportEpoch) {
       &commandTransportEpoch);
   if (commandTransportEpoch != admittedTransportEpoch) return;
   actx.user = sessionAuthed && sessionUser[0]
-                  ? String(sessionUser) : String("AuthBypass");
+                  ? String(sessionUser) : String(kAuthBypassUser);
   actx.ip = kUartLockoutKey;
   actx.path = "uart";
   actx.opaque = nullptr;   // not an HTTP request; matches the MQTT pattern

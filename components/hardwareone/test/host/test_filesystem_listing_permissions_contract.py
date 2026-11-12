@@ -88,10 +88,9 @@ assert "generation" not in class_text.lower()
 resolve_role = function_body(
     FS_CPP, "static FsRole resolveRole(const AuthContext& ctx)"
 )
-assert 'ctx.transport == SOURCE_INTERNAL && ctx.user == "system"' in resolve_role
-assert 'ctx.user == "AuthBypass"' in resolve_role
-assert 'ctx.transport == SOURCE_INTERNAL && ctx.user == "uart-session"' in resolve_role
-assert 'ctx.path == "/g2evenai"' in resolve_role
+assert 'if (isSystemIdentity(ctx)) return FsRole::SYSTEM;' in resolve_role
+assert 'if (isAuthBypassUser(ctx.user)) return FsRole::USER;' in resolve_role
+assert 'if (isG2EvenAiIdentity(ctx)) {' in resolve_role
 assert "ctx.transport == SOURCE_ESPNOW && isSuperAdminUser(ctx.user)" in resolve_role
 assert resolve_role.count("getUserRoleAndSuper(ctx.user, storedRole, isSuper)") == 1
 
@@ -120,7 +119,7 @@ super_parser = function_body(
 assert "deserializeJson" not in super_parser
 assert 'json.indexOf("\\\"username\\\""' in super_parser
 assert 'json.indexOf("\\\"role\\\""' in super_parser
-assert 'role == "superadmin"' in super_parser
+assert 'role == kRoleSuperAdmin' in super_parser
 assert "anyExplicitSuper" in super_parser
 
 # Construction owns/reuses the filesystem lock before resolving a named role.
@@ -250,10 +249,13 @@ def run_role_matrix(cxx: str, sanitize: bool) -> None:
     here = ROOT / "test" / "host"
     sys.path.insert(0, str(here))
     from test_web_batch_handlers import extract_block
+    from identity_names_source import identity_constants, identity_predicates
 
     header = FS_H
+    user_header = (ROOT / "System_User.h").read_text()
     internal = re.sub(r"^#include.*\n", "", FS_INTERNAL_H, flags=re.M)
-    pieces = [extract_block(header, "enum FilePermission") + ";",
+    pieces = [identity_constants(user_header), identity_predicates(user_header),
+              extract_block(header, "enum FilePermission") + ";",
               extract_block(FS_CPP, "struct PathRule") + ";",
               extract_block(FS_CPP, "static const PathRule sPathRules[]") + ";"]
     for marker in ("static const PathRule& lookupRule(", "static bool hasSensitiveExtension(",

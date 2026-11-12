@@ -51,6 +51,7 @@ import tempfile
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from test_web_batch_handlers import extract_block, require  # noqa: E402
+from identity_names_source import identity_constants, identity_predicates  # noqa: E402
 
 HARNESS = HERE / "remote_command_authority_harness.cpp"
 ROUTING_MARKER = "// ===== REMOTE COMMAND ROUTING ====="
@@ -115,8 +116,10 @@ def generate(read) -> str:
     require(cmd_type is not None and ack_flag is not None, "the CMD opcode and ACK_REQ flag")
     types = [
         reserved[0],
+        identity_constants(user_header),
         unique(user_header, "enum CommandSource", "System_User.h") + ";",
         unique(user_header, "struct AuthContext", "System_User.h") + ";",
+        identity_predicates(user_header),
         f"static constexpr uint8_t ESPNOW_V4_TYPE_CMD = {cmd_type.group(1)};\n"
         f"static constexpr uint16_t ESPNOW_V4_FLAG_ACK_REQ = {ack_flag.group(1)};",
     ]

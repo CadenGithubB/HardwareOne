@@ -27,6 +27,7 @@ import subprocess
 import tempfile
 
 from test_web_batch_handlers import extract_block, require
+from identity_names_source import identity_constants
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
@@ -90,7 +91,7 @@ def production(user: str, header: str, settings: str, mutex: str, mutex_header: 
     require(types.count("\n") == 2, "the three public account limits")
     reserved = re.findall(r"^inline constexpr const char\* kBondAdminUser = .*;$", header, re.M)
     require(len(reserved) == 1, "one reserved bond-admin name")
-    types += "\n" + reserved[0]
+    types += "\n" + reserved[0] + "\n" + identity_constants(header)
     declaration = re.findall(r"^bool adminCreateUser\([^;]*\);", header, re.M | re.S)
     require(len(declaration) == 1, "one useradd declaration (its default role)")
     types += "\n" + declaration[0]

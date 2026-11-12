@@ -1830,18 +1830,17 @@ static inline bool isUnrestrictedRole(FsRole r) {
 
 static FsRole resolveRole(const AuthContext& ctx) {
   if (ctx.user.length() == 0) return FsRole::ANON;
-  if (ctx.transport == SOURCE_INTERNAL && ctx.user == "system") return FsRole::SYSTEM;
+  if (isSystemIdentity(ctx)) return FsRole::SYSTEM;
   // AuthBypass is a reserved execution identity used only when a transport's
   // require-auth policy is disabled.  It is not a users.json account, but it
   // intentionally retains the ordinary User filesystem tier.
-  if (ctx.user == "AuthBypass") return FsRole::USER;
+  if (isAuthBypassUser(ctx.user)) return FsRole::USER;
 
   // The G2 EvenAI worker carries a non-transferable UART-session capability
   // as this exact synthetic tuple instead of copying a mutable UART username
   // across tasks.  Preserve only its existing ordinary-User filesystem tier;
   // neither the username nor SOURCE_INTERNAL alone is sufficient.
-  if (ctx.transport == SOURCE_INTERNAL && ctx.user == "uart-session" &&
-      ctx.path == "/g2evenai") {
+  if (isG2EvenAiIdentity(ctx)) {
     return FsRole::USER;
   }
 
@@ -1887,10 +1886,10 @@ static FsRole resolveRole(const AuthContext& ctx) {
   if (isSuper) return FsRole::SUPER;
   // Guest shares the user path-rule column but is masked to PERM_READ in
   // permsForRole — view-only surface, no separate PathRule column needed.
-  if (storedRole == "guest") return FsRole::GUEST;
-  if (storedRole == "superadmin") return FsRole::SUPER;
-  if (storedRole == "admin") return FsRole::ADMIN;
-  return storedRole == "user" ? FsRole::USER : FsRole::ANON;
+  if (storedRole == kRoleGuest) return FsRole::GUEST;
+  if (storedRole == kRoleSuperAdmin) return FsRole::SUPER;
+  if (storedRole == kRoleAdmin) return FsRole::ADMIN;
+  return storedRole == kRoleUser ? FsRole::USER : FsRole::ANON;
 }
 
 static const char* roleName(FsRole r) {

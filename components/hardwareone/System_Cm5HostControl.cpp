@@ -219,8 +219,7 @@ bool exactPlainArgs(const CommandArgs& args, int count) {
 bool realAuthenticatedUartCaller(uint32_t* sessionEpochOut,
                                  bool requireNamedSession) {
   const AuthContext& ctx = currentAuthContext();
-  if (ctx.transport != SOURCE_UART || ctx.user.length() == 0 ||
-      ctx.user == "AuthBypass") {
+  if (ctx.transport != SOURCE_UART || !hasNamedUser(ctx)) {
     return false;
   }
 

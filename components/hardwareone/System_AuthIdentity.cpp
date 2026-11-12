@@ -135,7 +135,7 @@ bool currentExecIsAdmin() {
 AuthContext systemIdentity(const char* purpose) {
   AuthContext ctx;
   ctx.transport = SOURCE_INTERNAL;
-  ctx.user      = "system";
+  ctx.user      = kSystemUser;
   ctx.path      = String("/system/") + (purpose ? purpose : "?");
   ctx.ip        = "internal";
   ctx.sid       = "";

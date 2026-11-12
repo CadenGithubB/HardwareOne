@@ -192,6 +192,40 @@ bool hasSuperAdminPrivilege(const AuthContext& ctx);
 // account id and never pass a credential check.
 bool isReservedUsername(const String& username);
 
+// The other names the firmware stamps on a context in place of an account.
+// Code names them through these constants and asks the predicates below; no
+// other file spells one of them as a literal (host test identity_names).
+//   kSystemUser       trusted firmware-internal work (systemIdentity(),
+//                     VFS::systemAuth()); reserved
+//   kAuthBypassUser   a serial, UART, OLED or BLE command admitted while that
+//                     transport's require-auth setting is off; reserved
+//   kUartSessionUser  the G2 EvenAI worker acting for the live UART session;
+//                     counts only together with the internal transport and
+//                     kG2EvenAiPath, so it is not in the reserved-name table
+inline constexpr const char* kSystemUser = "system";
+inline constexpr const char* kAuthBypassUser = "AuthBypass";
+inline constexpr const char* kUartSessionUser = "uart-session";
+// The path the G2 EvenAI worker stamps on its context.
+inline constexpr const char* kG2EvenAiPath = "/g2evenai";
+
+// The name is the bypass stamp, not an account.
+inline bool isAuthBypassUser(const String& user) { return user == kAuthBypassUser; }
+// The context names an account: the name is not empty and is not the bypass
+// stamp. It does not say that the account exists or that its session is live.
+inline bool hasNamedUser(const AuthContext& ctx) {
+  return ctx.user.length() > 0 && !isAuthBypassUser(ctx.user);
+}
+// The trusted internal identity: the internal transport and kSystemUser, both.
+inline bool isSystemIdentity(const AuthContext& ctx) {
+  return ctx.transport == SOURCE_INTERNAL && ctx.user == kSystemUser;
+}
+// The G2 EvenAI worker: the internal transport, kUartSessionUser and
+// kG2EvenAiPath, all three. The name or the transport alone never qualifies.
+inline bool isG2EvenAiIdentity(const AuthContext& ctx) {
+  return ctx.transport == SOURCE_INTERNAL && ctx.user == kUartSessionUser &&
+         ctx.path == kG2EvenAiPath;
+}
+
 // Web request admission (ENABLE_HTTP_SERVER builds only): every caller passes
 // makeWebAuthCtx(req); any other context is refused. Command transports are
 // admitted by authorizeCommand.
@@ -211,6 +245,13 @@ bool isSuperAdminUser(const String& who);
 // to PERM_READ.
 bool isGuestUser(const String& who);
 
+// The four role names, as users.json stores them. Code compares and assigns
+// roles through these constants (host test identity_names).
+inline constexpr const char* kRoleGuest = "guest";
+inline constexpr const char* kRoleUser = "user";
+inline constexpr const char* kRoleAdmin = "admin";
+inline constexpr const char* kRoleSuperAdmin = "superadmin";
+
 // Privilege ranks — single source of truth for C++ comparisons. The settings
 // page mirrors these as window.__hwRoleRank (injected from the same values).
 // Accounts store role *names* in users.json, never these integers.
@@ -218,6 +259,9 @@ constexpr int kRoleRankGuest      = 0;
 constexpr int kRoleRankUser       = 1;
 constexpr int kRoleRankAdmin      = 2;
 constexpr int kRoleRankSuperAdmin = 3;
+// The role names in rank order: kUserRoleNames[kRoleRankGuest] is kRoleGuest.
+inline constexpr const char* const kUserRoleNames[4] = {
+    kRoleGuest, kRoleUser, kRoleAdmin, kRoleSuperAdmin};
 // Sentinel for userMutationAllowed when the mutation grants no role (delete/ban).
 constexpr int kRoleRankNoGrant    = -1;
 
@@ -463,7 +507,7 @@ bool readUserRoster(UserRosterEntry* out, size_t capacity, size_t& countOut,
 // FIRST — this is a data mutator and does not enforce "cannot grant a role above
 // your own"; cmd_user_add does that via userMutationAllowed().
 bool adminCreateUser(const String& username, const String& plainPassword, bool mustChangeOnLogin,
-                     const String& createdBy, String& errorOut, const String& role = "user");
+                     const String& createdBy, String& errorOut, const String& role = kRoleUser);
 
 // Account creation owner. Every path that turns a name and a stored credential
 // into a usable account (useradd, approve, ESP-NOW USER_SYNC) calls this. It
@@ -484,7 +528,7 @@ bool adminCreateUser(const String& username, const String& plainPassword, bool m
 struct NewAccount {
   String username;                 // trimmed and validated here
   String passwordHash;             // hashUserPassword output, never plaintext
-  String role = "user";            // unknown values collapse to "user"
+  String role = kRoleUser;         // unknown values collapse to kRoleUser
   String createdBy;                // provenance recorded in users.json
   bool mustChangePassword = false; // userMustChangePassword until the first change
   // Record createdAt from the wall clock when it is valid (createdAtSource
