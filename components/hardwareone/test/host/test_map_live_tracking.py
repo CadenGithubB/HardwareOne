@@ -17,6 +17,8 @@ import tempfile
 from test_mqtt_boolean_commands import extract_macro
 from test_web_batch_handlers import extract_block, require
 
+from reply_words_source import module_reply_constants
+
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
 
@@ -82,7 +84,7 @@ def main():
         for label, source in ([('baseline', args.baseline)] if args.baseline else []) + [('current', None)]:
             unit = root / f"{label}.cpp"
             (root / "System_CommandReply.h").write_text((COMPONENT / "System_CommandReply.h").read_text())
-            unit.write_text('#include "System_CommandReply.h"\n' + generated(source))
+            unit.write_text('#include "System_CommandReply.h"\n' + module_reply_constants(COMPONENT) + generated(source))
             for gps in (0, 1):
                 exe = root / f"{label}-{gps}"
                 subprocess.run([args.cxx, *flags, f"-DENABLE_GPS_SENSOR={gps}",

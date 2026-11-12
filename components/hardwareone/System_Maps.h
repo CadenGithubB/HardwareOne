@@ -368,6 +368,10 @@ struct TileCacheSlot {
 
 #if ENABLE_MAPS
 
+// `gpstrack clear` when it cleared the track. The OLED map menu compares the
+// reply with it to tell a cleared track from a reply that only reports state.
+constexpr char kGpsTrackReplyCleared[] = "GPS track cleared";
+
 // Loaded map state - v6 tiled architecture
 struct LoadedMap {
   bool valid;

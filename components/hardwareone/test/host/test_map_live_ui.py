@@ -16,6 +16,7 @@ import subprocess
 import tempfile
 
 from test_web_batch_handlers import extract_block, require, web_command_types
+from reply_words_source import reply_prelude
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
@@ -76,7 +77,7 @@ def main() -> None:
         flags += ["-fsanitize=address,undefined", "-fno-sanitize-recover=all", "-fno-omit-frame-pointer", "-g"]
     with tempfile.TemporaryDirectory(prefix="hw1-map-live-ui-") as directory:
         unit, binary = Path(directory) / "test.cpp", Path(directory) / "test"
-        unit.write_text(generated(args.baseline))
+        unit.write_text(reply_prelude(COMPONENT) + generated(args.baseline))
         for gps in (0, 1):
             subprocess.run([args.cxx, *flags, f"-DENABLE_GPS_SENSOR={gps}", str(unit),
                             "-o", str(binary)], check=True, timeout=120)

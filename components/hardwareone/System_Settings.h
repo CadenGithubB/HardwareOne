@@ -1368,6 +1368,12 @@ void finishSettingChange(const void* fieldPtr, const SettingEntry* entry = nullp
 // Apply settings to runtime flags
 void applySettings();
 
+// The two replies of `savesettings` for a completed save. The web settings
+// batch disarms its cleanup only on one of these, so an unrelated success
+// cannot.
+constexpr char kSettingsReplySaved[] = "Settings saved";
+constexpr char kSettingsReplySavedNoChange[] = "Settings saved — no changed files";
+
 // ============================================================================
 // Centralized Setting Mutator — auto-persists on change
 // ============================================================================

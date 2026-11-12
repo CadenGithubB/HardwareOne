@@ -984,7 +984,7 @@ const char* cmd_filerename(const String& argsInput) {
   const AuthContext& ctx = currentAuthContext();
   // existsGuarded gates by canRead — must be readable to be checked for
   // existence. renameGuarded then checks RENAME on src AND CREATE on dst.
-  if (!VFS::existsGuarded(oldPath, ctx)) return "Error: File does not exist or access denied";
+  if (!VFS::existsGuarded(oldPath, ctx)) return kFileReplyMissingOrDenied;
   if (!VFS::renameGuarded(oldPath, newPath, ctx)) {
     snprintf(getDebugBuffer(), 1024, "Error: Failed to rename (denied or fs error): %s -> %s", oldPath.c_str(), newPath.c_str());
     return getDebugBuffer();
@@ -1411,7 +1411,7 @@ const char* cmd_filedelete(const String& argsInput) {
   if (a.has(2)) return "Error: unexpected argument — usage: filedelete \"<path>\" [confirm]";
 
   const AuthContext& ctx = currentAuthContext();
-  if (!VFS::existsGuarded(path, ctx)) return "Error: File does not exist or access denied";
+  if (!VFS::existsGuarded(path, ctx)) return kFileReplyMissingOrDenied;
 
   if (oneShot) {
     return doFiledelete(path, ctx);

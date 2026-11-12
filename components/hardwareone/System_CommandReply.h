@@ -28,10 +28,80 @@ constexpr char kCommandReplyNotANumber[] =
 constexpr char kCommandReplyNotOnOff[] =
     "Error: Not an on/off value. Use on or off.";
 
+// ---- The words a reply leads with ------------------------------------------
+// This header is the only place that spells them to read a reply (host test
+// reply_wording). Everything else asks the functions below.
+//   "OK: <text>"       the executor's stamp on a handler success (stampOkStatus)
+//   "SUCCESS: <text>"  a handler's own confirmation that it did the action; the
+//                      executor leaves it unstamped
+//   "Error: <reason>"  a failure
+constexpr char kCommandReplyOkStamp[] = "OK: ";
+constexpr char kCommandReplyErrorLead[] = "Error: ";
+
+// The executor's refusal of a caller without the privilege a command row
+// needs. The executor appends the command name and the next action.
+constexpr char kCommandReplyAdminRequired[] = "Error: Admin access required";
+constexpr char kCommandReplySuperAdminRequired[] = "Error: Super-admin access required";
+
+// The reply leads with "Error" or "ERROR" (a peer on older firmware): a
+// failure that carries a reason. Narrower than commandReplyIsFailure().
+inline bool commandReplyIsError(const char* reply) {
+  return reply && (strncmp(reply, "Error", 5) == 0 || strncmp(reply, "ERROR", 5) == 0);
+}
+
 inline bool commandReplyIsFailure(const char* reply) {
   if (!reply) return false;
-  return strncmp(reply, "Error", 5) == 0 ||   // the reply contract
-         strncmp(reply, "ERROR", 5) == 0 ||   // a peer on older firmware
+  return commandReplyIsError(reply) ||        // the reply contract
          strncmp(reply, "Usage:", 6) == 0 ||  // refused: arguments it could not use
          strncmp(reply, "Unknown command:", 16) == 0;  // no such command
+}
+
+// The whole reply is "OK": a handler that printed its output on the way and
+// has nothing else to return.
+inline bool commandReplyIsBareOk(const char* reply) {
+  return reply && strcmp(reply, "OK") == 0;
+}
+
+// The reply leads with "OK": a completed command as the executor reports it.
+// A prompt, a status dump or a structured payload does not carry the stamp.
+inline bool commandReplyHasOkStamp(const char* reply) {
+  return reply && strncmp(reply, "OK", 2) == 0;
+}
+
+// The reply leads with "SUCCESS": the handler confirms that it carried out the
+// action it was asked for (a logger started, a track toggled).
+inline bool commandReplyConfirms(const char* reply) {
+  return reply && strncmp(reply, "SUCCESS", 7) == 0;
+}
+
+// The reply is the executor's admin or super-admin refusal.
+inline bool commandReplyIsAdminRefusal(const char* reply) {
+  return reply &&
+         (strncmp(reply, kCommandReplyAdminRequired, sizeof(kCommandReplyAdminRequired) - 1) == 0 ||
+          strncmp(reply, kCommandReplySuperAdminRequired,
+                  sizeof(kCommandReplySuperAdminRequired) - 1) == 0);
+}
+
+// The text after the "OK: " stamp, for a row or a toast; the reply itself when
+// it carries no stamp. Never nullptr.
+inline const char* commandReplyBody(const char* reply) {
+  if (!reply) return "";
+  const size_t lead = sizeof(kCommandReplyOkStamp) - 1;
+  return strncmp(reply, kCommandReplyOkStamp, lead) == 0 ? reply + lead : reply;
+}
+
+// A failure's reason: the text after "Error: "; the reply itself when it does
+// not lead with it. Never nullptr.
+inline const char* commandReplyReason(const char* reply) {
+  if (!reply) return "";
+  const size_t lead = sizeof(kCommandReplyErrorLead) - 1;
+  return strncmp(reply, kCommandReplyErrorLead, lead) == 0 ? reply + lead : reply;
+}
+
+// A structured reply states its own verdict: {"schema":1,"ok":true|false,...}.
+inline bool commandReplyJsonOk(const char* reply) {
+  return reply && strstr(reply, "\"ok\":true") != nullptr;
+}
+inline bool commandReplyJsonFailed(const char* reply) {
+  return reply && strstr(reply, "\"ok\":false") != nullptr;
 }

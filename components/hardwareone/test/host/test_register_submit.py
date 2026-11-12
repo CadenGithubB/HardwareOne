@@ -42,6 +42,7 @@ import tempfile
 
 from test_web_batch_handlers import extract_block, request_body_readers, require
 from identity_names_source import identity_constants, identity_predicates
+from reply_words_source import reply_prelude
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
@@ -174,7 +175,7 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="hw1-register-submit-") as directory:
         unit = Path(directory) / "register_submit.cpp"
         binary = Path(directory) / "register_submit"
-        unit.write_text(unit_text)
+        unit.write_text(reply_prelude(COMPONENT) + unit_text)
         command = [args.cxx, "-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic",
                    "-Wno-unused-function", "-Wno-unused-parameter",
                    str(unit), "-o", str(binary)]

@@ -38,6 +38,7 @@ import tempfile
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from test_web_batch_handlers import extract_block, require  # noqa: E402
+from reply_words_source import reply_prelude
 
 RUN_COMMAND = "bool oledRunCommand("
 REPLY_TEXT = "void oledCommandReplyText("
@@ -172,7 +173,7 @@ def main() -> None:
         flags += ["-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-g"]
     with tempfile.TemporaryDirectory(prefix="hw1-oled-command-feedback-") as directory:
         unit, executable = Path(directory) / "test.cpp", Path(directory) / "test"
-        unit.write_text(unit_text)
+        unit.write_text(reply_prelude(args.component) + unit_text)
         subprocess.run([args.cxx, *flags, str(unit), "-o", str(executable)], check=True, timeout=300)
         run = subprocess.run([str(executable)], timeout=60)
     failures = static_checks(read)

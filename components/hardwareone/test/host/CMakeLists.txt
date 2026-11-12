@@ -2144,6 +2144,13 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_display_text_decisions.py)
 
+# The words of a command reply ("OK", "SUCCESS", "Error", the admin refusal)
+# are read through System_CommandReply.h only.
+add_test(
+  NAME reply_wording
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_reply_wording.py)
+
 # OLED display-session writer windows (README "OLED display-session writer windows"):
 # the frame commit and the command-result path validate under the display lifecycle
 # writer, release it, push or copy, then re-check without opening a session.

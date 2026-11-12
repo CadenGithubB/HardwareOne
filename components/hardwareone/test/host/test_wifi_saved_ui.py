@@ -33,6 +33,7 @@ import tempfile
 
 from test_g2_status_corner import link_status_unit
 from test_web_batch_handlers import extract_block
+from reply_words_source import reply_prelude
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
@@ -235,7 +236,7 @@ def add_form_unit(component):
 
 def run_add_form(args, component, temp, flags):
     unit = Path(temp) / "add_form.cpp"
-    unit.write_text(add_form_unit(component))
+    unit.write_text(reply_prelude(component) + add_form_unit(component))
     executable = Path(temp) / "add_form"
     subprocess.run([args.cxx, *flags, str(unit), "-o", str(executable)],
                    check=True, timeout=120)

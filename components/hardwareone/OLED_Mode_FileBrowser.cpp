@@ -2,6 +2,8 @@
 // Extracted from OLED_Display.cpp for modularity
 
 #include "OLED_Display.h"
+#include "System_CommandReply.h"  // the reply words and how to read them
+#include "System_Filesystem.h"    // kFileReplyMissingOrDenied
 #include "OLED_Utils.h"             // oledAuthContext() — shared OLED identity builder
 #include "OLED_UI.h"                // shared icon drawing and transfer confirmation toasts
 #include "System_BuildConfig.h"
@@ -226,16 +228,14 @@ static FbMutateResult fbSubmitMutate(const String& line) {
   char out[96] = {};
   // The executor stamps "OK" on a handler success; refusals and handler
   // errors start with "Error".
-  if (executeOledCommandWithResult(line, out, sizeof(out)) && strncmp(out, "OK", 2) == 0) {
+  if (executeOledCommandWithResult(line, out, sizeof(out)) && commandReplyHasOkStamp(out)) {
     gOledFileManager->forceRescan();   // refresh() is generation-gated
     return FbMutateResult::Done;
   }
-  static const char kAdminRefusal[] = "Error: Admin access required";
   // The handlers' path-policy refusal: a path this identity may not read is
   // reported exactly like a missing one, so the toast names both.
-  static const char kPathRefusal[] = "Error: File does not exist or access denied";
-  if (strncmp(out, kAdminRefusal, sizeof(kAdminRefusal) - 1) == 0) return FbMutateResult::AdminOnly;
-  if (strncmp(out, kPathRefusal, sizeof(kPathRefusal) - 1) == 0) return FbMutateResult::NoAccess;
+  if (commandReplyIsAdminRefusal(out)) return FbMutateResult::AdminOnly;
+  if (strncmp(out, kFileReplyMissingOrDenied, sizeof(kFileReplyMissingOrDenied) - 1) == 0) return FbMutateResult::NoAccess;
   return FbMutateResult::Failed;
 }
 

@@ -14,6 +14,7 @@ import argparse
 import os
 from pathlib import Path
 import re
+from reply_words_source import module_reply_constants, reply_header_include, reply_prelude
 import shutil
 import subprocess
 import tempfile
@@ -56,17 +57,15 @@ inline int parseBoolArg(const String& arg) {
 
 def arg_text(component: Path = COMPONENT, replies: bool = True, on_off=True) -> str:
     """The command-argument parsers as text to place in a generated translation
-    unit: System_ArgParse.h (parseIntArg); with `replies` the two shared
-    refusals from System_CommandReply.h (leave them out when the unit includes
-    that header); with `on_off` parseBoolArg, argIsOn and argIsOff from
+    unit: System_ArgParse.h (parseIntArg); with `replies` an include of the real
+    System_CommandReply.h (leave it out when the unit includes that header
+    itself); the replies a page compares, from their module headers; with `on_off` parseBoolArg, argIsOn and argIsOff from
     System_Utils.h, which need a String type declared before this text
     (`on_off="double"` gives ON_OFF_DOUBLE instead)."""
     parts = [(component / "System_ArgParse.h").read_text().replace("#pragma once\n", "", 1)]
     if replies:
-        reply_h = (component / "System_CommandReply.h").read_text()
-        for name in ("kCommandReplyNotANumber", "kCommandReplyNotOnOff"):
-            start = reply_h.index(f"constexpr char {name}[]")
-            parts.append("[[maybe_unused]] " + reply_h[start:reply_h.index(";", start) + 1])
+        parts.append(reply_header_include(component).rstrip("\n"))
+    parts.append(module_reply_constants(component).rstrip("\n"))
     if on_off == "double":
         parts.append(ON_OFF_DOUBLE)
     elif on_off:
@@ -241,7 +240,7 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="hw1-web-batch-host-") as temp:
         generated = Path(temp) / "web_batch_handlers.cpp"
         executable = Path(temp) / "web_batch_handlers"
-        generated.write_text(harness)
+        generated.write_text(reply_prelude(COMPONENT) + harness)
         command = [args.cxx, "-std=c++17", "-Wall", "-Wextra", "-Werror",
                    "-pedantic", "-Wno-sign-compare", "-I", str(HERE / "web_batch_stubs"),
                    "-I", str(JSON_INCLUDE), str(generated), "-o", str(executable)]

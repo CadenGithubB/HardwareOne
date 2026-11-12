@@ -1,4 +1,5 @@
 #include "OLED_Touch.h"
+#include "System_CommandReply.h"  // the reply words and how to read them
 #include "OLED_MessageText.h"
 #include "WebServer_Handle.h"
 #include "HAL_Input.h"
@@ -3425,7 +3426,7 @@ void oledCommandReplyText(bool ok, const char* reply, const char* okText,
   // The toast box shows ~17 columns: the admin gate's sentence becomes a fixed
   // short text; any other reply loses its error token and keeps its first line.
   if (!reply) reply = "";
-  if (strstr(reply, "Admin access required") || strstr(reply, "Super-admin access required")) {
+  if (commandReplyIsAdminRefusal(reply)) {
     snprintf(out, outSize, "Admin required");
     return;
   }

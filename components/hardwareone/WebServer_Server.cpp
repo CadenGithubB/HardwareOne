@@ -5,6 +5,7 @@
  */
 
 #include "System_BuildConfig.h"
+#include "System_CommandReply.h"  // the reply words and how to read them
 #include <esp_attr.h>
 
 #if ENABLE_HTTP_SERVER
@@ -2699,9 +2700,7 @@ esp_err_t handlePasswordChangePage(httpd_req_t* req) {
       // Strip "Error: " prefix for display — the page template expects just
       // the human-readable message. Fall back to the full string if the
       // prefix is absent (defensive, shouldn't happen).
-      String err = (strncmp(result, "Error: ", 7) == 0)
-                     ? String(result + 7)
-                     : String(result[0] ? result : "Unknown error");
+      String err = result[0] ? String(commandReplyReason(result)) : String("Unknown error");
       httpd_resp_set_type(req, "text/html");
       gMeshActivitySuspended = true;
       streamPasswordChangeInner(req, ctx.user, err);
@@ -3499,7 +3498,7 @@ esp_err_t handleCliCommand(httpd_req_t* req) {
   httpd_resp_set_type(req, "text/plain");
   if (!webSessionStillLive) {
     httpd_resp_set_status(req, "401 Unauthorized");
-  } else if (!ok && redactedOut.startsWith("Error: Admin access required")) {
+  } else if (!ok && commandReplyIsAdminRefusal(redactedOut.c_str())) {
     httpd_resp_set_status(req, "403 Forbidden");
   } else if (!ok || redactedOut.startsWith("Empty command")) {
     httpd_resp_set_status(req, "400 Bad Request");
@@ -5114,13 +5113,12 @@ static bool cliBatchCommandEquals(JsonVariantConst value,
 
 static bool settingsSaveOutputConfirmed(const String& output) {
   // executeCommand() status-stamps successful human-facing results after the
-  // handler returns. Keep the raw forms for the early/direct and test paths,
+  // handler returns. Accept the raw forms too, for the early/direct and test paths,
   // but match exact complete messages so an unrelated success cannot disarm
   // request cleanup.
-  return output == "Settings saved" ||
-         output == "Settings saved — no changed files" ||
-         output == "OK: Settings saved" ||
-         output == "OK: Settings saved — no changed files";
+  const char* body = commandReplyBody(output.c_str());
+  return strcmp(body, kSettingsReplySaved) == 0 ||
+         strcmp(body, kSettingsReplySavedNoChange) == 0;
 }
 
 // A local settings batch must be finalized even if the cookie generation is

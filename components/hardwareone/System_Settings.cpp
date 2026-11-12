@@ -4102,11 +4102,11 @@ const char* cmd_savesettings(const String& argsInput) {
   if (finished.found && !finished.final) {
     return "Settings batch remains open";
   }
-  if (dirtyMask == 0) return "Settings saved — no changed files";
+  if (dirtyMask == 0) return kSettingsReplySavedNoChange;
   if (!flushSettingsDirtyMask(owner, dirtyMask)) {
     return "Error: settings save failed; savesettings will retry pending files";
   }
-  return "Settings saved";
+  return kSettingsReplySaved;
 }
 
 // beginwrite and savesettings are registered in settingsCommands[] above.

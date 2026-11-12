@@ -6,6 +6,7 @@
  */
 
 #include "WebServer_Handle.h"
+#include "System_CommandReply.h"  // the reply words and how to read them
 #include "System_Events.h"  // systemEventPost — event register producer
 #include "System_BuildConfig.h"
 
@@ -1222,7 +1223,7 @@ static RadioPowerOffResult radioPowerOff() {
   // WiFi driver underneath them or falsely report airplane mode success.
   if (espnowOwnsRadio()) {
     const char* closeResult = cmd_espnow_deinit("");
-    if (!closeResult || strstr(closeResult, "successfully") == nullptr) {
+    if (!closeResult || commandReplyIsFailure(closeResult)) {
       gRadioForcedOff = false;
       return RadioPowerOffResult::ESPNOW_BUSY;
     }

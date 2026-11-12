@@ -35,6 +35,7 @@ import sys
 import tempfile
 
 from test_web_batch_handlers import extract_block, require
+from reply_words_source import reply_prelude
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
@@ -148,7 +149,7 @@ def source_contracts(page: str, oled: str) -> list[str]:
 def compile_and_run(cxx: str, flags: list[str], unit: str, name: str, temp: Path,
                     include: Path) -> str | None:
     source = temp / f"{name}.cpp"
-    source.write_text(unit)
+    source.write_text(reply_prelude(COMPONENT) + unit)
     executable = temp / name
     compiled = subprocess.run([cxx, *flags, "-I", str(include), str(source), "-o", str(executable)],
                               timeout=180)

@@ -1,4 +1,5 @@
 #include "Arduino.h"
+#include "System_CommandReply.h"  // the reply words and how to read them
 #include <atomic>
 #include <esp_attr.h>
 #include <esp_system.h>
@@ -556,7 +557,7 @@ static void commandExecTask(void* pv) {
         size_t capturedLen = capState ? capState->len : 0;
         clearCaptureBuffer();
         if (capturedLen > 0) {
-          bool trivialReturn = (strcmp(r->out, "OK") == 0);
+          bool trivialReturn = commandReplyIsBareOk(r->out);
           if (trivialReturn) {
             // Replace "OK" with the captured output
             size_t copyLen = capturedLen < sizeof(r->out) - 1 ? capturedLen : sizeof(r->out) - 1;

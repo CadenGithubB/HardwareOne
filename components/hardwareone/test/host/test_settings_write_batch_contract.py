@@ -420,8 +420,9 @@ require(
     "web batch does not distinguish executor completion from handler success",
 )
 require(
-    'output == "OK: Settings saved"' in web
-    and 'output == "OK: Settings saved — no changed files"' in web,
+    "const char* body = commandReplyBody(output.c_str());" in web
+    and "strcmp(body, kSettingsReplySaved) == 0" in web
+    and "strcmp(body, kSettingsReplySavedNoChange) == 0" in web,
     "web cleanup disarm ignores executeCommand's successful OK status stamp",
 )
 

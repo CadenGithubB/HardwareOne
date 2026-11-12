@@ -1,4 +1,5 @@
 #include "System_Cm5HostControl.h"
+#include "System_CommandReply.h"  // the reply words and how to read them
 
 #if ENABLE_RASPBERRY_PI_HOST_POWER || ENABLE_RASPBERRY_PI_HOST_FAN
 
@@ -1625,9 +1626,7 @@ Cm5HostCallbackIntrinsicResult cm5HostControlHandleCallbackIntrinsic(
     // The command executor historically stamps bare `Usage:` handler returns
     // into a terminal status line. Direct replies have no such outer layer;
     // normalize them here or the host's status collector would wait forever.
-    if (strncmp(result, "OK", 2) != 0 &&
-        strncmp(result, "Error", 5) != 0 &&
-        strncmp(result, "ERROR", 5) != 0) {
+    if (!commandReplyHasOkStamp(result) && !commandReplyIsError(result)) {
       snprintf(reply, replySize, "Error: %s", result);
     } else {
       strlcpy(reply, result, replySize);

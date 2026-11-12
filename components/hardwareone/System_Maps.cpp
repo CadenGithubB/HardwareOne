@@ -1,4 +1,5 @@
 #include "System_BuildConfig.h"
+#include "System_CommandReply.h"  // the reply words and how to read them
 #include "System_Filesystem.h"  // requireQuotedPath (uniform quoted-path rule)
 #include "System_MapViewportCore.h"
 #include "System_Maps.h"
@@ -3199,7 +3200,7 @@ const char* GpsTrackManager::startLiveTracking() {
   result = sensorLogStartLiveTrack("/logging_captures/tracks/live.csv", 1000);
   if (!result) return "Error: Sensor logger returned no result";
   if (commandReplyIsFailure(result)) return result;
-  if (strncmp(result, "SUCCESS:", 8) != 0) return "Error: Sensor logger did not confirm startup";
+  if (!commandReplyConfirms(result)) return "Error: Sensor logger did not confirm startup";
 
   const uint32_t sessionId = sensorLogCurrentSessionId();
   if (!sessionId) return "Error: Live track logger is no longer active";
@@ -3476,7 +3477,7 @@ const char* cmd_gpstrack(const String& argsInput) {
       const String message = GpsTrackManager::getValidationMessage(
           loaded.validation, loaded.coveragePercent);
       snprintf(buf, 1024, "Loaded %d GPS points\n%s", loaded.pointCount, message.c_str());
-    } else if (errorMsg.startsWith("Error:")) {
+    } else if (commandReplyIsError(errorMsg.c_str())) {
       // Validation refusals are already complete replies (the OLED toast
       // shows the same text); do not stack a second status prefix on them.
       strlcpy(buf, errorMsg.c_str(), 1024);
@@ -3488,7 +3489,7 @@ const char* cmd_gpstrack(const String& argsInput) {
 
   if (sub == "clear") {
     if (!GpsTrackManager::clearTrack()) return "Error: Track busy; stop live tracking or retry after the current operation";
-    return "GPS track cleared";
+    return kGpsTrackReplyCleared;
   }
 
   return "Error: invalid arguments — Usage: gpstrack [status|load <filepath>|clear|live <start|stop|toggle>]";

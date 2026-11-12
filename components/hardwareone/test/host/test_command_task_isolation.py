@@ -27,6 +27,7 @@ import subprocess
 import tempfile
 
 from test_web_batch_handlers import extract_block, require
+from reply_words_source import reply_prelude
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
@@ -87,7 +88,7 @@ def run_case(name: str, source_fn, args, temporary: Path) -> str | None:
     except (AssertionError, ValueError) as error:
         return f"{name}: cannot build from the sources: {error}"
     unit, binary = temporary / f"{name}.cpp", temporary / name
-    unit.write_text(source)
+    unit.write_text(reply_prelude(COMPONENT) + source)
     command = [args.cxx, "-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic", "-pthread",
                f"-DHW1_CASE_{name.upper()}", "-I", str(HERE / "web_batch_stubs"),
                str(unit), "-o", str(binary)]

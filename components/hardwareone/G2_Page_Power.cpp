@@ -27,6 +27,7 @@
 // CPU clock and I2C-drain policy remain in the shared power command owner.
 
 #include "G2_Page_Power.h"
+#include "System_CommandReply.h"  // the reply words and how to read them
 #include "System_Utils.h"
 
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
@@ -234,7 +235,7 @@ static bool powerPublishResult(const G2CmdCookie& cookie, PowerLevel level,
                                const char* message) {
   char copy[POWER_ROW_LEN] = {};
   if (message) {
-    if (strncmp(message, "Error: ", 7) == 0) message += 7;
+    message = commandReplyReason(message);
     snprintf(copy, sizeof(copy), "%s", message);
   }
   bool published = false;

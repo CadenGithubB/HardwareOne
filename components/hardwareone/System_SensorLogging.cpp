@@ -9,6 +9,7 @@
  */
 
 #include "System_SensorLogging.h"
+#include "System_CommandReply.h"  // the reply words and how to read them
 #include "System_Clock.h"   // Clock::isSynced — session subfolder/timestamp shaping
 #include "System_Utils.h"
 #include "System_Command.h"
@@ -1502,7 +1503,7 @@ const char* sensorLogStartLiveTrack(const char* path, uint32_t intervalMs) {
   gSensorLogMask = LOG_GPS;
   const char* result = sensorLogStart(String(path), sensorLogClampInterval(intervalMs),
                                       /*persist=*/false);
-  if (!result || strncmp(result, "SUCCESS:", 8) != 0) {
+  if (!commandReplyConfirms(result)) {
     gSensorLogFormat = previousFormat;
     gSensorLogMask = previousMask;
   }
@@ -2234,7 +2235,7 @@ static const char* healthLoggingSet(bool on) {
     }
 
     const char* result = healthLoggingRestartWithCurrentMask();
-    if (result && strncmp(result, "SUCCESS", 7) == 0) {
+    if (commandReplyConfirms(result)) {
       snprintf(getDebugBuffer(), 1024,
                "SUCCESS: Health logging ON — logging R1 vitals to %s",
                gSensorLogPath.c_str());
@@ -2263,7 +2264,7 @@ static const char* healthLoggingSet(bool on) {
 
   // Other sensors still selected — restart so CSV headers drop R1 columns.
   const char* result = healthLoggingRestartWithCurrentMask();
-  if (result && strncmp(result, "SUCCESS", 7) == 0) {
+  if (commandReplyConfirms(result)) {
     return "SUCCESS: Health logging OFF — R1 removed; other sensors still logging";
   }
   return result ? result : "SUCCESS: Health logging OFF";
@@ -2806,7 +2807,7 @@ void sensorLogAutoStart() {
   // when they contain spaces or quotes, and all validation/space checks run.
   BROADCAST_PRINTF("[sensorlog] Auto-start: sensorlog start %s %d", path.c_str(), (int)gSensorLogIntervalMs);
   const char* result = sensorLogStart(path, sensorLogClampInterval(gSensorLogIntervalMs));
-  if (result && strncmp(result, "SUCCESS", 7) != 0) {
+  if (result && !commandReplyConfirms(result)) {
     // Command failed - broadcast the error
     BROADCAST_PRINTF("[sensorlog] Auto-start failed: %s", result);
     logSystemEvent("LOG", "sensor-log autostart FAILED: %s", result);

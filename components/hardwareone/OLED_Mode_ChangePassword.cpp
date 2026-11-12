@@ -4,6 +4,7 @@
 // Allows authenticated users to change their password via OLED interface
 
 #include "OLED_Display.h"
+#include "System_CommandReply.h"  // the reply words and how to read them
 #include "System_BuildConfig.h"
 
 #if ENABLE_OLED_DISPLAY
@@ -325,8 +326,9 @@ static bool handleChangePasswordModeInput(int deltaX, int deltaY, uint32_t newly
         return true;
       }
 
-      if (commandOk && result && strstr(result, "Error") == NULL &&
-          strstr(result, "successfully") != NULL) {
+      // The executor's verdict: every refusal of the handler leads with "Error".
+      const bool passwordChanged = commandOk && result && !commandReplyIsFailure(result);
+      if (passwordChanged) {
         // Success
         errorMessage = "Password changed!";
         errorDisplayUntil = millis() + 2000;
@@ -339,10 +341,10 @@ static bool handleChangePasswordModeInput(int deltaX, int deltaY, uint32_t newly
         currentField = FIELD_CURRENT_PASSWORD;
       } else {
         // Error
-        String errMsg = result ? String(result) : "Unknown error";
-        if (errMsg.indexOf("Current password incorrect") >= 0) {
+        const char* why = result ? result : "";
+        if (strncmp(why, kPasswordReplyWrongCurrent, sizeof(kPasswordReplyWrongCurrent) - 1) == 0) {
           errorMessage = "Wrong password";
-        } else if (errMsg.indexOf("do not match") >= 0) {
+        } else if (strncmp(why, kPasswordReplyMismatch, sizeof(kPasswordReplyMismatch) - 1) == 0) {
           errorMessage = "Passwords differ";
         } else {
           errorMessage = "Change failed";
@@ -355,9 +357,6 @@ static bool handleChangePasswordModeInput(int deltaX, int deltaY, uint32_t newly
         currentField = FIELD_CURRENT_PASSWORD;
       }
 
-      const bool passwordChanged =
-          commandOk && result && strstr(result, "Error") == NULL &&
-          strstr(result, "successfully") != NULL;
       wipeResultBuffer(resultBuf, sizeof(resultBuf));
 
       if (passwordChanged) {

@@ -622,6 +622,10 @@ const char* cmd_user_changepassword(const String& argsInput);  // revoke other â
 //   "Password changed successfully for user '<name>'" on success,
 //   "Error: <reason>" on validation/auth/storage failure.
 // USER_CHANGE_PASSWORD_MESSAGE_MAX holds every message in full.
+// Two of its refusals are named here because the local-display password page
+// shows each with its own short line.
+constexpr char kPasswordReplyWrongCurrent[] = "Error: Current password incorrect";
+constexpr char kPasswordReplyMismatch[] = "Error: New passwords do not match";
 constexpr size_t USER_CHANGE_PASSWORD_MESSAGE_MAX = 160;
 bool userChangePasswordCore(const String& currentPassword,
                             const String& newPassword,

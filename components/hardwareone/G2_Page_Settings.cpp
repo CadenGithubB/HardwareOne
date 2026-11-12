@@ -39,6 +39,7 @@
 // System_SettingsEditorCore helpers). The JSON view stays read-only.
 
 #include "G2_Page_Settings.h"
+#include "System_CommandReply.h"  // the reply words and how to read them
 
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
 
@@ -605,7 +606,7 @@ static bool settingsCommitSucceeded(bool ok, const char* result) {
   if (!ok || !result) return false;
   while (*result == ' ' || *result == '\t' || *result == '\r' || *result == '\n') result++;
   if (!result[0]) return false;
-  if (strncmp(result, "OK", 2) == 0 || strncmp(result, "SUCCESS", 7) == 0) {
+  if (commandReplyHasOkStamp(result) || commandReplyConfirms(result)) {
     return true;
   }
   // executeCommand preserves structured results instead of prefixing them.
@@ -713,7 +714,7 @@ static void onSettingsCommitDone(bool ok, const char* result,
 
   const bool success = settingsCommitSucceeded(ok, result);
   const char* msg = (result && result[0]) ? result : "Save failed";
-  if (!success && strncmp(msg, "Error: ", 7) == 0) msg += 7;
+  if (!success) msg = commandReplyReason(msg);
   if (!settingsPublishCommitResult(submitNavGen, success, msg)) return;
   if (!g2EnqueueRedraw(cookie,
                        success ? settingsRenderCommitSuccess : settingsRenderCommitFailure,

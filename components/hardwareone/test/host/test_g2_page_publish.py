@@ -28,6 +28,7 @@ import sys
 import tempfile
 
 from test_web_batch_handlers import extract_block, require
+from reply_words_source import reply_prelude
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
@@ -187,7 +188,7 @@ def main() -> None:
                             ("led", led_unit)):
             unit = Path(directory) / f"{name}.cpp"
             executable = Path(directory) / name
-            unit.write_text(build(component))
+            unit.write_text(reply_prelude(COMPONENT) + build(component))
             compiled = subprocess.run([args.cxx, *flags, str(unit), "-o", str(executable)],
                                       timeout=180)
             if compiled.returncode != 0:

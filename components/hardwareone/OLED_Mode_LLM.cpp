@@ -27,6 +27,7 @@
 //   - Settings actually apply (gSettings.llm* is consumed by chatBeginTurn).
 
 #include "OLED_Display.h"
+#include "System_CommandReply.h"  // the reply words and how to read them
 #include "System_BuildConfig.h"
 
 #if ENABLE_OLED_DISPLAY && ENABLE_LLM_BACKEND
@@ -209,9 +210,9 @@ static void llmCommandDone(bool ok, const char* result, void* userData) {
   const char* r = result ? result : "";
   const char* status = nullptr;
   char reason[sizeof(sCmdReplyReason)] = {0};
-  if (strstr(r, "Admin access")) {
+  if (commandReplyIsAdminRefusal(r)) {
     status = "admin required";
-  } else if (!ok || strstr(r, "\"ok\":false")) {
+  } else if (!ok || commandReplyJsonFailed(r)) {
     status = (op == LLM_CMD_LOAD) ? "load failed" : "unload failed";
     // The backend's reason (a remote host's message, a missing model) is the
     // reply's "error" string, which the firmware writes without quotes.

@@ -29,6 +29,7 @@ import subprocess
 import tempfile
 
 from test_web_batch_handlers import extract_block, require
+from reply_words_source import reply_prelude
 
 HERE = Path(__file__).resolve().parent
 HELPER = "static bool oledEspNowRunOwnerCommand("
@@ -106,7 +107,7 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="hw1-oled-pair-prompt-") as directory:
         unit, executable = Path(directory) / "test.cpp", Path(directory) / "test"
         (unit.parent / 'System_MacText.h').write_text((HERE.parents[1] / 'System_MacText.h').read_text())
-        unit.write_text(unit_text, encoding="utf-8")
+        unit.write_text(reply_prelude(args.component) + unit_text, encoding="utf-8")
         subprocess.run([args.cxx, *flags, str(unit), "-o", str(executable)],
                        check=True, timeout=120)
         result = subprocess.run([str(executable)], timeout=60)

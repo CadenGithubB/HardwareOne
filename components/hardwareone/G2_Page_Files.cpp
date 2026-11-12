@@ -38,6 +38,7 @@
 // subsystem that depends on auth, follow the same pattern.
 
 #include "G2_Page_Files.h"
+#include "System_CommandReply.h"  // the reply words and how to read them
 
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
 
@@ -657,9 +658,9 @@ static void renderFilesResult() {
 static void onFilesMutateDone(bool ok, const char* result,
                               const G2CmdCookie& cookie, void* /*userData*/) {
   // A completed change carries the executor's "OK" stamp.
-  const bool success = ok && result && strncmp(result, "OK", 2) == 0;
+  const bool success = ok && commandReplyHasOkStamp(result);
   const char* msg = (result && result[0]) ? result : (ok ? "Done" : "Failed");
-  if (strncmp(msg, "OK: ", 4) == 0) msg += 4;  // back-row brevity
+  msg = commandReplyBody(msg);  // back-row brevity
   char copy[FILES_ROW_LEN];
   snprintf(copy, sizeof(copy), "%s", msg);
   DEBUG_G2F("[G2] Files: mutate done ok=%d success=%d '%s'",

@@ -311,6 +311,20 @@ the phone app send it as text.
   action, and the title and reason only for drawing.
 - The host test `display_text_decisions` fails on a title, label or reason
   compared with a string literal. Its table lists the uses that remain.
+- A command reply is text, and `System_CommandReply.h` is the one file that
+  spells its words. A caller that holds the executor's bool uses it. Code that
+  must read the text asks that header: `commandReplyIsFailure`,
+  `commandReplyHasOkStamp` (the executor's "OK" on a completed command),
+  `commandReplyConfirms` (a handler's "SUCCESS"), `commandReplyIsAdminRefusal`,
+  `commandReplyBody` and `commandReplyReason` for the text to show, and
+  `commandReplyJsonOk` / `commandReplyJsonFailed` for a structured reply.
+- A page that needs one particular reply of a module compares it with a
+  constant the module's header defines and the module returns
+  (`kGpsTrackReplyCleared`, `kFileReplyMissingOrDenied`,
+  `kPasswordReplyWrongCurrent`, `kSettingsReplySaved`). It does not search the
+  reply for a phrase.
+- The host test `reply_wording` fails on a comparison or search against a
+  reply word outside `System_CommandReply.h`.
 
 ## Identity and role names
 

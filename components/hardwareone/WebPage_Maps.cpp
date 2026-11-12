@@ -1,4 +1,5 @@
 #include "System_BuildConfig.h"
+#include "System_CommandReply.h"  // the reply words and how to read them
 
 #if ENABLE_WEB_MAPS
 
@@ -102,7 +103,7 @@ static esp_err_t handleGpsLiveTrackAction(httpd_req_t* req, AuthContext& ctx,
   String result;
   const bool executed = executeUnifiedWebCommand(
       req, ctx, start ? "gpstrack live start" : "gpstrack live stop", result);
-  if (!executed || !result.startsWith("SUCCESS:")) {
+  if (!executed || !commandReplyConfirms(result.c_str())) {
     httpd_resp_set_status(req, "409 Conflict");
     PSRAM_JSON_DOC(doc);
     doc["error"] = result.length() ? result : String("Live track command failed");
@@ -505,7 +506,7 @@ esp_err_t handleWaypointsApi(httpd_req_t* req) {
         bool ok = executeUnifiedWebCommand(req, ctx, addCmd, addOut);
         if (ok) {
           // Tolerate the uniform "OK: " status-token stamp before the anchored parse.
-          if (addOut.startsWith("OK: ")) addOut = addOut.substring(4);
+          addOut = String(commandReplyBody(addOut.c_str()));
           // Parse returned index from "Added waypoint N: ..." output
           int addedIdx = -1;
           if (addOut.startsWith("Added waypoint ")) {

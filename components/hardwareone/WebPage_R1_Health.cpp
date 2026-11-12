@@ -1,4 +1,5 @@
 #include "System_BuildConfig.h"
+#include "System_CommandReply.h"  // the reply words and how to read them
 
 #if ENABLE_WEB_R1_HEALTH
 
@@ -64,7 +65,7 @@ static esp_err_t healthCommandReply(httpd_req_t* req, AuthContext& ctx,
   String result;
   if (executeUnifiedWebCommand(req, ctx, line, result))
     return healthActionReply(req, "202 Accepted", result.c_str());
-  const bool adminRefusal = result.startsWith("Error: Admin access required");
+  const bool adminRefusal = commandReplyIsAdminRefusal(result.c_str());
   return healthActionReply(req, adminRefusal ? "403 Forbidden" : "409 Conflict",
                            result.c_str());
 }
@@ -102,7 +103,7 @@ esp_err_t handleR1HealthAction(httpd_req_t* req) {
   if (action == "logging-toggle") {
     String result;
     const bool executed = executeUnifiedWebCommand(req, ctx, "healthlogging toggle", result);
-    const bool ok = executed && result.startsWith("SUCCESS");
+    const bool ok = executed && commandReplyConfirms(result.c_str());
     return healthActionReply(req, ok ? nullptr : "409 Conflict", result.c_str());
   }
   if (action == "control-refresh") {

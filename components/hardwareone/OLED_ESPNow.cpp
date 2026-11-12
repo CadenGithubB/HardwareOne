@@ -1,4 +1,5 @@
 #include "OLED_ESPNow.h"
+#include "System_CommandReply.h"  // the reply words and how to read them
 
 #if ENABLE_OLED_DISPLAY && ENABLE_ESPNOW
 
@@ -61,7 +62,7 @@ EXT_RAM_BSS_ATTR static struct { bool isSent; uint32_t msgId; uint8_t sendState;
 static bool oledEspNowRunOwnerCommand(const char* cmd, const char* failToast) {
   char out[160];
   if (executeOledCommandWithResult(cmd, out, sizeof(out))) return true;
-  oledToastShow(strstr(out, "Admin access required") ? "Admin required" : failToast, 2500);
+  oledToastShow(commandReplyIsAdminRefusal(out) ? "Admin required" : failToast, 2500);
   return false;
 }
 

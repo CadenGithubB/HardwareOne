@@ -5,6 +5,7 @@
 // Contains all OLED-specific map rendering and menu code
 
 #include "OLED_Display.h"
+#include "System_CommandReply.h"  // the reply words and how to read them
 #include "System_MemUtil.h"  // ps_alloc / AllocPref
 #include "System_BuildConfig.h"
 
@@ -1658,8 +1659,8 @@ static void executeSubmenuAction(int submenuType, int action) {
             char result[160] = {};
             const bool executed = executeOledCommandWithResult(
                 "gpstrack clear", result, sizeof(result));
-            const char* message = strncmp(result, "OK: ", 4) == 0 ? result + 4 : result;
-            if (!executed || strcmp(message, "GPS track cleared") != 0) {
+            const char* message = commandReplyBody(result);
+            if (!executed || strcmp(message, kGpsTrackReplyCleared) != 0) {
               oledToastShow(result[0] ? result : "Clear track failed", 3000,
                             OledUiIcon::ERROR);
             } else {
@@ -1684,7 +1685,7 @@ static void executeSubmenuAction(int submenuType, int action) {
             char result[160] = {};
             const bool executed = executeOledCommandWithResult(
                 "gpstrack live toggle", result, sizeof(result));
-            if (!executed || strncmp(result, "SUCCESS:", 8) != 0) {
+            if (!executed || !commandReplyConfirms(result)) {
               oledToastShow(result[0] ? result : "Live track failed", 3000,
                             OledUiIcon::ERROR);
             } else {

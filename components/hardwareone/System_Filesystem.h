@@ -188,6 +188,11 @@ class CommandArgs;  // fwd decl (System_Command.h)
 // returns a ready-to-return "Error:" cstring describing the quoting problem.
 const char* requireQuotedPath(const CommandArgs& a, int idx, String& out);
 
+// A file command's reply for a path that is missing or that the caller may not
+// read: one text for both, so a refusal does not reveal that the path exists.
+// The OLED file browser shows its own toast for it.
+constexpr char kFileReplyMissingOrDenied[] = "Error: File does not exist or access denied";
+
 // Like requireQuotedPath but returns the token verbatim (no leading slash
 // forced) — for commands whose name/path is resolved against a feature folder
 // (e.g. a recording name, a model filename) rather than an absolute VFS path.

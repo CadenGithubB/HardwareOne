@@ -11,6 +11,7 @@
 // label is shortened.
 
 #include "OLED_Display.h"
+#include "System_CommandReply.h"  // the reply words and how to read them
 #include "System_BuildConfig.h"
 
 #if ENABLE_OLED_DISPLAY
@@ -112,7 +113,7 @@ static void umDispatch(const String& cmd) {
   FsLockGuard fsGuard("oled.user_manager.result");
   if (!ok) {
     const char* m = out[0] ? out : "Failed";
-    if (strncmp(m, "Error: ", 7) == 0) m += 7;
+    m = commandReplyReason(m);
     umShowError(m);
   }
   loadUsers();

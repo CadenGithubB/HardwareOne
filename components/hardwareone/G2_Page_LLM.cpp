@@ -5,6 +5,7 @@
 // functions this file uses are declared in G2_GlassesInternal.h.
 
 #include "G2_Glasses.h"
+#include "System_CommandReply.h"  // the reply words and how to read them
 
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
 
@@ -483,7 +484,7 @@ static void llmMenuOpenViewerRender() {
 // for a busy/stale reply (the JSON payload is exempt from OK:/Error: stamping),
 // so classify off the reply's own {"ok":...} field.
 static void llmMenuAskDone(bool ok, const char* result, const G2CmdCookie& c, void* /*ud*/) {
-  if (ok && result && strstr(result, "\"ok\":true")) {
+  if (ok && commandReplyJsonOk(result)) {
     int guidedSession = 0;
     if (llmMenuLastAskInfo(&guidedSession))
       llmMenuMarkGuidedTurn(guidedSession);
@@ -519,16 +520,16 @@ static void llmMenuSubmit(int entityIdx) {
 // cmd_exec completion for llmload / llmunload. Same JSON {"ok":...} shape as
 // the web / CLI; admin denial is an Error: line (executeCommand returns false).
 static void llmMenuModelCmdDone(bool ok, const char* result, const G2CmdCookie& c, void* /*ud*/) {
-  if (ok && result && strstr(result, "\"ok\":true")) {
+  if (ok && commandReplyJsonOk(result)) {
     sLlmResume = LLM_MENU_HOME;   // guided resume is stale after a model swap
     (void)g2EnqueueRedraw(c, g2ShowLlmMenu, "LLM model-ok");
     return;
   }
-  if (result && (strstr(result, "Admin") || strstr(result, "admin")))
+  if (commandReplyIsAdminRefusal(result))
     snprintf(sLlmMsg, sizeof(sLlmMsg), "Admin required");
   else if (result && strstr(result, "clear chat before"))
     snprintf(sLlmMsg, sizeof(sLlmMsg), "New chat before changing agent source");
-  else if (result && strstr(result, "\"ok\":false"))
+  else if (commandReplyJsonFailed(result))
     snprintf(sLlmMsg, sizeof(sLlmMsg), "Load failed");
   else
     snprintf(sLlmMsg, sizeof(sLlmMsg), "Command failed");

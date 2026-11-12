@@ -1,6 +1,7 @@
 // System_UartLink.cpp — UART host link drain. See System_UartLink.h for the
 // design charter and docs/UART_HOST_LINK_PLAN.md for the verified plan.
 #include "System_UartLink.h"
+#include "System_CommandReply.h"  // the reply words and how to read them
 #include "System_Cm5HostControl.h"
 #include "System_Cm5Presence.h"
 #include "System_Dictation.h"  // direct keyboard-dictation control plane
@@ -419,6 +420,10 @@ static bool sDiscardingLine = false;         // true = swallow bytes until the n
 // it into its own internal line buffer first. Carries usernames, never
 // passwords or tokens (verified 2026-08-19).
 EXT_RAM_BSS_ATTR static char sUartControlReply[256];
+// The control reply just built reports success (for the control log lines).
+static bool uartControlReplyOk() {
+  return commandReplyHasOkStamp(sUartControlReply);
+}
 
 // Deferred lifecycle request. Command handlers run on cmd_exec, which
 // ticks concurrently with the loop task that owns the drain — calling
@@ -734,8 +739,7 @@ static void uartProcessLine(String& cmd, uint32_t admittedTransportEpoch) {
         sUartControlReply, liveTransportEpoch);
     DEBUG_UART_CONTROLF("[UART-CTRL] RX liveaudio.ready epoch=%lu -> %s reply=%s",
                         static_cast<unsigned long>(liveNamedEpoch),
-                        strncmp(sUartControlReply, "OK", 2) == 0
-                            ? "OK" : "ERROR",
+                        uartControlReplyOk() ? "OK" : "ERROR",
                         sent ? "sent" : "dropped");
     return;
   }
@@ -867,8 +871,7 @@ static void uartProcessLine(String& cmd, uint32_t admittedTransportEpoch) {
         sUartControlReply, heartbeatTransportEpoch);
     DEBUG_UART_CONTROLF("[UART-CTRL] RX cm5.heartbeat epoch=%lu -> %s reply=%s",
                         static_cast<unsigned long>(heartbeatNamedEpoch),
-                        strncmp(sUartControlReply, "OK", 2) == 0
-                            ? "OK" : "ERROR",
+                        uartControlReplyOk() ? "OK" : "ERROR",
                         sent ? "sent" : "dropped");
     return;
   }
@@ -884,8 +887,7 @@ static void uartProcessLine(String& cmd, uint32_t admittedTransportEpoch) {
         sUartControlReply, heartbeatTransportEpoch);
     DEBUG_UART_CONTROLF("[UART-CTRL] RX cm5.time epoch=%lu -> %s reply=%s",
                         static_cast<unsigned long>(heartbeatNamedEpoch),
-                        strncmp(sUartControlReply, "OK", 2) == 0
-                            ? "OK" : "ERROR",
+                        uartControlReplyOk() ? "OK" : "ERROR",
                         sent ? "sent" : "dropped");
     return;
   }
@@ -902,8 +904,7 @@ static void uartProcessLine(String& cmd, uint32_t admittedTransportEpoch) {
         sUartControlReply, heartbeatTransportEpoch);
     DEBUG_UART_CONTROLF("[UART-CTRL] RX cm5.linkhealth epoch=%lu -> %s reply=%s",
                         static_cast<unsigned long>(heartbeatNamedEpoch),
-                        strncmp(sUartControlReply, "OK", 2) == 0
-                            ? "OK" : "ERROR",
+                        uartControlReplyOk() ? "OK" : "ERROR",
                         sent ? "sent" : "dropped");
     return;
   }
@@ -939,7 +940,7 @@ static void uartProcessLine(String& cmd, uint32_t admittedTransportEpoch) {
     DEBUG_UART_CONTROLF(
         "[UART-CTRL] RX dictate epoch=%lu -> %s reply=%s",
         static_cast<unsigned long>(dictationNamedEpoch),
-        strncmp(sUartControlReply, "OK", 2) == 0 ? "OK" : "ERROR",
+        uartControlReplyOk() ? "OK" : "ERROR",
         sent ? "sent" : "dropped");
     return;
   }
@@ -989,7 +990,7 @@ static void uartProcessLine(String& cmd, uint32_t admittedTransportEpoch) {
     uartLinkTransportSessionEndUse();
     DEBUG_UART_CONTROLF("[UART-CTRL] RX cm5.llm epoch=%lu -> %s reply=%s",
                         static_cast<unsigned long>(llmNamedEpoch),
-                        strncmp(sUartControlReply, "OK", 2) == 0 ? "OK" : "ERROR",
+                        uartControlReplyOk() ? "OK" : "ERROR",
                         llmSent ? "sent" : "dropped");
     return;
   }
@@ -1037,8 +1038,7 @@ static void uartProcessLine(String& cmd, uint32_t admittedTransportEpoch) {
     DEBUG_UART_CONTROLF("[UART-CTRL] RX %s epoch=%lu -> %s reply=%s",
                         callbackName,
                         static_cast<unsigned long>(callbackNamedEpoch),
-                        strncmp(sUartControlReply, "OK", 2) == 0
-                            ? "OK" : "ERROR",
+                        uartControlReplyOk() ? "OK" : "ERROR",
                         sent ? "sent" : "dropped");
     return;
   }

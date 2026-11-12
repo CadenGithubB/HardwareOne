@@ -1,4 +1,5 @@
 #include "i2csensor_pa1010d.h"
+#include "System_CommandReply.h"  // the reply words and how to read them
 #include "System_Events.h"  // systemEventPost — event register producer
 #include "System_Utils.h"
 #include "System_MemUtil.h"  // ps_alloc — the GPS object lives in PSRAM (see gpsDestroyObject)
@@ -680,7 +681,7 @@ const char* cmd_gpslog(const String& argsInput) {
   // boot-only health policy. The owner shapes the path and returns start errors.
   const char* logResult = sensorLogStartConfiguredSession();
   if (const char* error = gpsLogStepError(logResult)) return error;
-  if (strncmp(logResult, "SUCCESS:", 8) != 0) {
+  if (!commandReplyConfirms(logResult)) {
     return "Error: Sensor logger did not confirm startup";
   }
 

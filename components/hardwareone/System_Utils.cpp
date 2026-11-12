@@ -3894,7 +3894,7 @@ static bool authorizeCommand(const AuthContext& ctx, const String& line,
   if (requiresSuperAdmin && !hasSuperAdminPrivilege(ctx)) {
     // The row's own name, so a multi-word row reads `phone secret`, not `phone`.
     const String cmdName = resolution.entry->name;
-    snprintf(out, outSize, "Error: Super-admin access required for command '%s'.", cmdName.c_str());
+    snprintf(out, outSize, "%s for command '%s'.", kCommandReplySuperAdminRequired, cmdName.c_str());
     { char auditBuf[180]; snprintf(auditBuf, sizeof(auditBuf), "cmd=%.170s", redactedLine.c_str()); logAuthAttempt(false, ctx.path.c_str(), ctx.user, ctx.ip, auditBuf); }
     if (ctx.user.length() > 0) {
       systemEventPost(SYSEVT_COMMAND_DENIED, ctx.user.c_str(), cmdName.c_str());
@@ -3909,7 +3909,7 @@ static bool authorizeCommand(const AuthContext& ctx, const String& line,
   if (requiresAdmin && !hasAdminPrivilege(ctx)) {
     // The row's own name: `ring control`, not `ring` (whose status is open).
     const String cmdName = resolution.entry->name;
-    snprintf(out, outSize, "Error: Admin access required for command '%s'. Contact an administrator.", cmdName.c_str());
+    snprintf(out, outSize, "%s for command '%s'. Contact an administrator.", kCommandReplyAdminRequired, cmdName.c_str());
     { char auditBuf[180]; snprintf(auditBuf, sizeof(auditBuf), "cmd=%.170s", redactedLine.c_str()); logAuthAttempt(false, ctx.path.c_str(), ctx.user, ctx.ip, auditBuf); }
     // A privileged command was refused. Post only when a username is resolved
     // (a LOGGED-IN, non-admin user) — anonymous/unauthenticated denials have no
@@ -3932,8 +3932,8 @@ static bool authorizeRemoteCommand(const AuthContext& ctx, const String& line,
   if (isSystemIdentity(ctx)) return true;
   if (remoteCommandAllowedWithoutAdmin(line) || hasAdminPrivilege(ctx)) return true;
   snprintf(out, outSize,
-           "Error: Admin access required to send this command to the bonded device; "
-           "it runs there as administrator.");
+           "%s to send this command to the bonded device; "
+           "it runs there as administrator.", kCommandReplyAdminRequired);
   char auditBuf[180];
   snprintf(auditBuf, sizeof(auditBuf), "remote cmd=%.160s", redactedLine.c_str());
   logAuthAttempt(false, ctx.path.c_str(),
@@ -4010,11 +4010,11 @@ static void stampOkStatus(char* out, size_t outSize, bool success) {
   }
   if (out[0] == 'O' && out[1] == 'K' &&
       (out[2] == '\0' || out[2] == ':')) return;         // bare "OK" sentinel or already "OK:"
-  if (strncmp(out, "SUCCESS", 7) == 0) return;           // existing success token — no double-stamp
-  const size_t pfx = 4;                                  // "OK: "
+  if (commandReplyConfirms(out)) return;           // existing success token — no double-stamp
+  const size_t pfx = sizeof(kCommandReplyOkStamp) - 1;
   size_t keep = (n + pfx <= outSize - 1) ? n : (outSize - 1 - pfx);
   memmove(out + pfx, out, keep);
-  memcpy(out, "OK: ", pfx);
+  memcpy(out, kCommandReplyOkStamp, pfx);
   out[pfx + keep] = '\0';
 }
 

@@ -3548,7 +3548,7 @@ bool userChangePasswordCore(const String& currentPassword,
   if (!filesystemReady) return fail("Error: LittleFS not ready");
 
   if (newPassword != confirmPassword) {
-    return fail("Error: New passwords do not match");
+    return fail(kPasswordReplyMismatch);
   }
 
   if (newPassword.length() < 6) {
@@ -3571,7 +3571,7 @@ bool userChangePasswordCore(const String& currentPassword,
     // Security event — log alongside login attempts so the auth-events
     // file shows both authentication AND credential-rotation activity.
     logAuthAttempt(false, caller.path.c_str(), username, caller.ip, "Current password incorrect");
-    return fail("Error: Current password incorrect");
+    return fail(kPasswordReplyWrongCurrent);
   }
 
   if (!setUserPassword(username, newPassword)) {

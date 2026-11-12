@@ -23,6 +23,7 @@ import tempfile
 
 from test_mqtt_boolean_commands import extract_macro
 from test_web_batch_handlers import extract_block, require, web_command_types
+from reply_words_source import reply_prelude
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
@@ -137,7 +138,7 @@ def main() -> None:
         flags += ["-fsanitize=address,undefined", "-fno-sanitize-recover=all", "-fno-omit-frame-pointer", "-g"]
     with tempfile.TemporaryDirectory(prefix="hw1-health-logging-ui-") as directory:
         unit, binary = Path(directory) / "test.cpp", Path(directory) / "test"
-        unit.write_text(generated(args.component, args.source_dir, args.baseline))
+        unit.write_text(reply_prelude(args.component) + generated(args.component, args.source_dir, args.baseline))
         subprocess.run([args.cxx, *flags, str(unit), "-o", str(binary)], check=True, timeout=120)
         subprocess.run([str(binary)], check=True, timeout=60)
 

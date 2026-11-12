@@ -12,6 +12,7 @@
  */
 
 #include "System_BuildConfig.h"
+#include "System_CommandReply.h"  // the reply words and how to read them
 
 #if ENABLE_LLM_BACKEND && ENABLE_HTTP_SERVER
 
@@ -241,7 +242,7 @@ static esp_err_t sendLlmCommandReply(httpd_req_t* req, const String& out,
                                      const char* fallback) {
   if (out.startsWith("{")) return sendJsonResponse(req, out.c_str());
   const char* why = out.length() ? out.c_str() : fallback;
-  if (strncmp(why, "Error: ", 7) == 0) why += 7;
+  why = commandReplyReason(why);
   char msg[200];
   strlcpy(msg, why, sizeof(msg));
   PSRAM_JSON_DOC(doc);
