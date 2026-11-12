@@ -1,7 +1,7 @@
 #include <cassert>
 #include <cmath>
 #include <cstdlib>
-#define DEBUGF(...) ((void)0)
+#define DEBUG_AUTOMATIONSF(...) ((void)0)
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>

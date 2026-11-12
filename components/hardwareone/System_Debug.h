@@ -318,7 +318,7 @@ extern volatile bool gDebugStackTraceEnabled;
 // Read the global directly. DebugManager::getDebugFlags() is literally
 // `return gDebugFlags;`, but routing through the singleton makes this an
 // un-inlinable cross-TU call (getInstance() + getter, returning a 32-byte mask
-// by value) at every DEBUGF guard site. gDebugFlags is extern above and
+// by value) at every debug macro guard site. gDebugFlags is extern above and
 // static-init'd independent of the manager, so a direct read is equivalent and
 // lets the compiler fold the mask math for single-bit flags.
 inline DebugFlagMask getDebugFlags() { return gDebugFlags; }
@@ -465,10 +465,6 @@ inline bool isDebugOutputEnabled(DebugFlagMask flag) {
     } \
   } while (0)
 
-// All debug output now uses queue - no direct broadcast
-// This ensures thread-safe, ordered output from all sources
-#define DEBUGF_BROADCAST(flag, fmt, ...) DEBUGF_QUEUE(flag, fmt, ##__VA_ARGS__)
-
 #define DEBUGF_QUEUE_DEBUG(flag, fmt, ...) \
   do { \
     if (isDebugOutputEnabled(flag)) { \
@@ -588,6 +584,7 @@ inline bool isDebugOutputEnabled(DebugFlagMask flag) {
 #define DEBUG_SYSTEMF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_SYSTEM, fmt, ##__VA_ARGS__)
 #define DEBUG_USERSF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_USERS, fmt, ##__VA_ARGS__)
 #define DEBUG_AUTOMATIONSF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_AUTOMATIONS, fmt, ##__VA_ARGS__)
+#define DEBUG_AUTO_SCHEDULERF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_AUTO_SCHEDULER, fmt, ##__VA_ARGS__)
 #define DEBUG_LOGGERF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_LOGGER, fmt, ##__VA_ARGS__)
 #define DEBUG_MEMORYF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_MEMORY, fmt, ##__VA_ARGS__)
 // Memory sub-flag macros — gate on parent OR sub-flag so the Memory "All"
@@ -597,6 +594,9 @@ inline bool isDebugOutputEnabled(DebugFlagMask flag) {
 #define DEBUG_MEMORY_BUFFERSF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_MEMORY | DEBUG_MEMORY_BUFFERS, fmt, ##__VA_ARGS__)
 #define DEBUG_ESPNOW_STREAMF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_ESPNOW_STREAM, fmt, ##__VA_ARGS__)
 #define DEBUG_ESPNOWF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_ESPNOW_CORE, fmt, ##__VA_ARGS__)  // General ESP-NOW debug
+#define DEBUG_ESPNOW_ROUTERF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_ESPNOW_ROUTER, fmt, ##__VA_ARGS__)
+#define DEBUG_ESPNOW_MESHF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_ESPNOW_MESH, fmt, ##__VA_ARGS__)
+#define DEBUG_ESPNOW_TOPOF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_ESPNOW_TOPO, fmt, ##__VA_ARGS__)
 #define DEBUG_COMMAND_SYSTEMF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_COMMAND_SYSTEM, fmt, ##__VA_ARGS__)
 
 
@@ -612,9 +612,6 @@ inline bool isDebugOutputEnabled(DebugFlagMask flag) {
 #define DEBUG_PRESENCEF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_PRESENCE, fmt, ##__VA_ARGS__)
 #define DEBUG_DISPLAYF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_DISPLAY, fmt, ##__VA_ARGS__)
 #define DEBUG_NOTIFICATIONSF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_NOTIFICATIONS, fmt, ##__VA_ARGS__)
-
-// Legacy compatibility macro
-#define DEBUGF(flag, fmt, ...) DEBUGF_QUEUE_DEBUG(flag, fmt, ##__VA_ARGS__)
 
 // ============================================================================
 // Severity-Based Logging Macros

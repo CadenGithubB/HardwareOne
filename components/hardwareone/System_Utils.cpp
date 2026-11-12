@@ -4385,7 +4385,7 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
       args.trim();
     }
     DEBUG_CMD_FLOWF("[registry_exec] executing: %s", found->name);
-    DEBUGF(DEBUG_CLI, "[registry_exec] executing: %s", found->name);
+    DEBUG_CLIF("[registry_exec] executing: %s", found->name);
 
     // Capture CliMode state BEFORE the handler runs. If the handler enters
     // a mode (e.g. cmd_filedelete -> cliRequestConfirm) the command hasn't

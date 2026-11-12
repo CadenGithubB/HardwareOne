@@ -862,7 +862,7 @@ static void wizardMode_onExit(void* /*ud*/) {
   sWizard.wifiPendingSsid = "";
   sWizard.result = SetupWizardResult{};
   sWizard.subMode = WizardSubMode::DONE;
-  DEBUGF(DEBUG_CLI, "[wizardMode] exited (applied=%d)", applied ? 1 : 0);
+  DEBUG_CLIF("[wizardMode] exited (applied=%d)", applied ? 1 : 0);
 }
 
 // Periodic tick — called from HardwareOne.cpp loop() every iteration
@@ -964,7 +964,7 @@ static const CliMode kWizardMode = {
 
 bool setupWizardMode_start() {
   if (cliInModeActive()) {
-    DEBUGF(DEBUG_CLI, "[wizardMode] start rejected: '%s' already active",
+    DEBUG_CLIF("[wizardMode] start rejected: '%s' already active",
            cliCurrentMode() && cliCurrentMode()->name ? cliCurrentMode()->name : "(unnamed)");
     return false;
   }

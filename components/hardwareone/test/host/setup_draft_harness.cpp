@@ -32,7 +32,6 @@ class String : public std::string {
   long toInt() const { return std::strtol(c_str(), nullptr, 10); }
 };
 #define EXT_RAM_BSS_ATTR
-#define DEBUGF(...) do {} while (0)
 #define WARN_STORAGEF(...) operations.emplace_back("storage.warn")
 // INSERT_TYPES
 

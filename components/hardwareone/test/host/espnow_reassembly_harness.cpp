@@ -28,7 +28,7 @@ __attribute__((format(printf, 1, 2))) static void hostLog(const char* fmt, ...) 
   va_end(ap);
 }
 static unsigned warnings = 0;
-#define DEBUGF(flag, fmt, ...) hostLog(fmt, ##__VA_ARGS__)
+#define DEBUG_ESPNOW_ROUTERF(fmt, ...) hostLog(fmt, ##__VA_ARGS__)
 #define WARN_ESPNOWF(fmt, ...) (++warnings, hostLog(fmt, ##__VA_ARGS__))
 
 static uint32_t clockMs = 1000;

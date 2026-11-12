@@ -84,7 +84,7 @@ static SetupWizardResult runSetupWizard() {
   if (dialogCancel) requestWizardCancel();
   return dialogResult;
 }
-#define DEBUGF(...) do {} while (0)
+#define DEBUG_CLIF(...) do {} while (0)
 static void appendPromptTo(char*, size_t) { assert(false && "unexpected navigation"); }
 static char* getWizardDeviceNameBuf() { static char buffer[21]; return buffer; }
 static CliModeInputResult unexpectedDispatch(const String&, char*, size_t) {

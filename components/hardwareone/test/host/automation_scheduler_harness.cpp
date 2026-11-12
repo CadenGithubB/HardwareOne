@@ -19,7 +19,6 @@ static std::atomic<unsigned> checks{0};
   std::fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #condition); std::abort(); \
 } } while (false)
 void webBatchTestStringAppend() {}
-#define DEBUGF(...) do {} while (false)
 #define ERROR_SYSTEMF(...) do {} while (false)
 #define PSRAM_JSON_DOC(name) JsonDocument name
 

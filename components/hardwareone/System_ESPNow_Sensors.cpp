@@ -248,7 +248,7 @@ bool initRemoteSensorSystem() {
   gSensorStreamingShutdown.store(false, std::memory_order_release);
   xSemaphoreGive(gSensorBroadcasterLifecycleMutex);
 
-  DEBUGF(DEBUG_ESPNOW_CORE, "[REMOTE_SENSORS] System initialized (%u bytes)",
+  DEBUG_ESPNOWF("[REMOTE_SENSORS] System initialized (%u bytes)",
          (unsigned)cacheBytes);
   return true;
 }
@@ -327,7 +327,7 @@ RemoteSensorData* findOrCreateCacheEntry(const uint8_t* deviceMac, const char* d
     }
   }
   
-  DEBUGF(DEBUG_ESPNOW_CORE, "[REMOTE_SENSORS] Cache full, cannot add device %s sensor %s",
+  DEBUG_ESPNOWF("[REMOTE_SENSORS] Cache full, cannot add device %s sensor %s",
          deviceName, sensorTypeToString(sensorType));
   return nullptr;
 }
@@ -343,7 +343,7 @@ void updateRemoteSensorStatus(const uint8_t* mac, const char* name, RemoteSensor
   entry->enabled = enabled;
   entry->lastSeen = millis();
   if (!enabled) entry->valid = false;  // disabled → no live data
-  DEBUGF(DEBUG_ESPNOW_CORE, "[REMOTE_SENSORS] Sensor %s %s on %s",
+  DEBUG_ESPNOWF("[REMOTE_SENSORS] Sensor %s %s on %s",
          sensorTypeToString(type), enabled ? "enabled" : "disabled", name);
 }
 
@@ -379,7 +379,7 @@ void broadcastSensorStatus(RemoteSensorType sensorType, bool enabled) {
   // Build and send V3 status message
   DEBUG_ESPNOW_METADATAF("%s", "[SENSOR_STATUS_TX] Broadcasting V3 sensor status");
   
-  DEBUGF(DEBUG_ESPNOW_CORE, "[REMOTE_SENSORS] Broadcasting status: %s = %s",
+  DEBUG_ESPNOWF("[REMOTE_SENSORS] Broadcasting status: %s = %s",
          sensorTypeToString(sensorType), enabled ? "enabled" : "disabled");
   
   // Send via V4 binary protocol
@@ -469,7 +469,7 @@ void startSensorDataStreaming(RemoteSensorType sensorType) {
   DEBUG_ESPNOW_STREAMF("[SENSOR_STREAM] Streaming enabled: %s (flag=%d)",
          sensorTypeToString(sensorType), gSensorStreamingEnabled[sensorType]);
   
-  DEBUGF(DEBUG_ESPNOW_CORE, "[REMOTE_SENSORS] Started streaming for %s",
+  DEBUG_ESPNOWF("[REMOTE_SENSORS] Started streaming for %s",
          sensorTypeToString(sensorType));
   
   BROADCAST_PRINTF("[ESP-NOW] Started streaming %s sensor data", sensorTypeToString(sensorType));
@@ -519,14 +519,14 @@ void stopSensorDataStreaming(RemoteSensorType sensorType) {
   // its next 50 ms lap and self-deletes. Do not synchronously join it here:
   // subscription updates can run on espnow_task, whose RX drain must not block.
   if (!anyEnabled) {
-    DEBUGF(DEBUG_ESPNOW_CORE,
+    DEBUG_ESPNOWF(
            "[SENSOR_BROADCASTER] All sensors disabled; task retirement requested");
   }
   
   DEBUG_ESPNOW_STREAMF("[SENSOR_STREAM] Streaming disabled: %s (flag=%d)",
          sensorTypeToString(sensorType), gSensorStreamingEnabled[sensorType]);
   
-  DEBUGF(DEBUG_ESPNOW_CORE, "[REMOTE_SENSORS] Stopped streaming for %s",
+  DEBUG_ESPNOWF("[REMOTE_SENSORS] Stopped streaming for %s",
          sensorTypeToString(sensorType));
   
   BROADCAST_PRINTF("[ESP-NOW] Stopped streaming %s sensor data", sensorTypeToString(sensorType));
@@ -763,7 +763,7 @@ static void announceConnectedSensors() {
 static void sensorBroadcasterTask(void* param) {
   (void)param;
 
-  DEBUGF(DEBUG_ESPNOW_CORE, "[SENSOR_BCAST_TASK] Started on core %d", xPortGetCoreID());
+  DEBUG_ESPNOWF("[SENSOR_BCAST_TASK] Started on core %d", xPortGetCoreID());
 
   for (;;) {
     if (gSensorBroadcasterStopRequested.load(std::memory_order_acquire) ||
@@ -788,7 +788,7 @@ static void sensorBroadcasterTask(void* param) {
     if (now - lastHwmLog >= 5000) {
       lastHwmLog = now;
       UBaseType_t hwmFreeWords = uxTaskGetStackHighWaterMark(nullptr);
-      DEBUGF(DEBUG_ESPNOW_CORE,
+      DEBUG_ESPNOWF(
              "[SENSOR_BCAST] stack free=%u words peak_used=%u of %u",
              (unsigned)hwmFreeWords,
              (unsigned)(SENSOR_BCAST_STACK_WORDS - hwmFreeWords),
@@ -885,7 +885,7 @@ static void sensorBroadcasterTask(void* param) {
       taskEXIT_CRITICAL(&gSensorBcastTaskMux);
       xSemaphoreGive(gSensorBroadcasterLifecycleMutex);
       if (!externallyOwned) {
-        DEBUGF(DEBUG_ESPNOW_CORE, "[SENSOR_BCAST_TASK] all sensors stopped — self-teardown");
+        DEBUG_ESPNOWF("[SENSOR_BCAST_TASK] all sensors stopped — self-teardown");
         vTaskDelete(nullptr);  // natural exit; no external join owner
       }
       break;
@@ -936,7 +936,7 @@ static bool startSensorBroadcasterLocked() {
     gBroadcasterBuf = (char*)ps_alloc(maxBuf, AllocPref::RequirePsram,
                                       "espnow.sensor.broadcast");
     if (!gBroadcasterBuf) {
-      DEBUGF(DEBUG_ESPNOW_CORE, "[SENSOR_BROADCASTER] Failed to alloc %u-byte PSRAM buffer", (unsigned)maxBuf);
+      DEBUG_ESPNOWF("[SENSOR_BROADCASTER] Failed to alloc %u-byte PSRAM buffer", (unsigned)maxBuf);
       return false;
     }
     gBroadcasterBufSize = maxBuf;
@@ -958,14 +958,14 @@ static bool startSensorBroadcasterLocked() {
     taskENTER_CRITICAL(&gSensorBcastTaskMux);
     gSensorBroadcasterTask = createdTask;
     taskEXIT_CRITICAL(&gSensorBcastTaskMux);
-    DEBUGF(DEBUG_ESPNOW_CORE, "[SENSOR_BROADCASTER] Task started");
+    DEBUG_ESPNOWF("[SENSOR_BROADCASTER] Task started");
     return true;
   } else {
     taskENTER_CRITICAL(&gSensorBcastTaskMux);
     gSensorBroadcasterTask = nullptr;
     taskEXIT_CRITICAL(&gSensorBcastTaskMux);
     gSensorBroadcasterStopRequested.store(true, std::memory_order_release);
-    DEBUGF(DEBUG_ESPNOW_CORE, "[SENSOR_BROADCASTER] Failed to create task");
+    DEBUG_ESPNOWF("[SENSOR_BROADCASTER] Failed to create task");
     return false;
   }
 }
@@ -983,7 +983,7 @@ static bool stopSensorBroadcasterLocked(uint32_t timeoutMs) {
   }
   if (task == xTaskGetCurrentTaskHandle()) {
     taskEXIT_CRITICAL(&gSensorBcastTaskMux);
-    DEBUGF(DEBUG_ESPNOW_CORE, "[SENSOR_BROADCASTER] stop rejected from broadcaster task");
+    DEBUG_ESPNOWF("[SENSOR_BROADCASTER] stop rejected from broadcaster task");
     return false;
   }
   // A retrying close may adopt the same explicit stop and wait for the task's
@@ -994,7 +994,7 @@ static bool stopSensorBroadcasterLocked(uint32_t timeoutMs) {
 
   (void)xTaskAbortDelay(task);
   if (!stopDone || xSemaphoreTake(stopDone, pdMS_TO_TICKS(timeoutMs)) != pdTRUE) {
-    DEBUGF(DEBUG_ESPNOW_CORE,
+    DEBUG_ESPNOWF(
            "[SENSOR_BROADCASTER] stop TIMEOUT after %ums; resources retained for retry",
            (unsigned)timeoutMs);
     return false;
@@ -1005,7 +1005,7 @@ static bool stopSensorBroadcasterLocked(uint32_t timeoutMs) {
   if (gSensorBroadcasterTask == task) gSensorBroadcasterTask = nullptr;
   gSensorBroadcasterExternalStop = false;
   taskEXIT_CRITICAL(&gSensorBcastTaskMux);
-  DEBUGF(DEBUG_ESPNOW_CORE, "[SENSOR_BROADCASTER] Task stopped");
+  DEBUG_ESPNOWF("[SENSOR_BROADCASTER] Task stopped");
   return true;
 }
 

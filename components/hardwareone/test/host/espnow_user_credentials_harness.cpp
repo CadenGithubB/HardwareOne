@@ -60,7 +60,7 @@ static void logSink(const char*, ...) {}
 #define WARN_ESPNOWF(...) logSink(__VA_ARGS__)
 #define INFO_ESPNOWF(...) logSink(__VA_ARGS__)
 #define DEBUG_ESPNOWF(...) logSink(__VA_ARGS__)
-#define DEBUGF(flag, ...) logSink(__VA_ARGS__)
+#define DEBUG_ESPNOW_MESHF(...) logSink(__VA_ARGS__)
 static void broadcastOutput(const String& message) { output.emplace_back(message.c_str()); }
 static void broadcastOutput(const char* message) { output.emplace_back(message ? message : ""); }
 static void logSystemEvent(const char* category, const char* format, ...) {

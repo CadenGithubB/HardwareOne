@@ -293,24 +293,24 @@ bool initFilesystem() {
       // First: sanitize duplicate IDs
       if (sanitizeAutomationsJson(json)) {
         modified = true;
-        DEBUGF(DEBUG_AUTO_SCHEDULER, "[autos] Boot sanitize: fixed duplicate IDs");
+        DEBUG_AUTO_SCHEDULERF("[autos] Boot sanitize: fixed duplicate IDs");
       } else {
-        DEBUGF(DEBUG_AUTO_SCHEDULER, "[autos] Boot sanitize: no duplicate IDs found");
+        DEBUG_AUTO_SCHEDULERF("[autos] Boot sanitize: no duplicate IDs found");
       }
 
       // Write back if any changes were made
       if (modified) {
         if (writeAutomationsJsonAtomic(json)) {
-          DEBUGF(DEBUG_AUTO_SCHEDULER, "[autos] Boot: wrote updated automations.json; scheduler refresh queued");
+          DEBUG_AUTO_SCHEDULERF("[autos] Boot: wrote updated automations.json; scheduler refresh queued");
         } else {
-          DEBUGF(DEBUG_AUTO_SCHEDULER, "[autos] Boot sanitize: failed to write automations.json");
+          DEBUG_AUTO_SCHEDULERF("[autos] Boot sanitize: failed to write automations.json");
         }
       }
     } else {
-      DEBUGF(DEBUG_AUTO_SCHEDULER, "[autos] Boot sanitize: failed to read automations.json");
+      DEBUG_AUTO_SCHEDULERF("[autos] Boot sanitize: failed to read automations.json");
     }
   } else {
-    DEBUGF(DEBUG_AUTO_SCHEDULER, "[autos] Boot sanitize: /system/automations.json not found, skipping");
+    DEBUG_AUTO_SCHEDULERF("[autos] Boot sanitize: /system/automations.json not found, skipping");
   }
   setDebugFlags(_dbgSaved);  // restore debug flags
 #endif

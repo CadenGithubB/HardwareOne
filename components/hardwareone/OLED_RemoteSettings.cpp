@@ -287,7 +287,7 @@ bool loadRemoteSettingsModules() {
     DeserializationError err =
         deserializeJson(doc, schema, DeserializationOption::Filter(filter));
     if (err) {
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[RemoteSettings] schema parse error: %s", err.c_str());
+      DEBUG_ESPNOW_ROUTERF("[RemoteSettings] schema parse error: %s", err.c_str());
       gRemoteLastError = "Schema parse error";
       return false;
     }
@@ -309,7 +309,7 @@ bool loadRemoteSettingsModules() {
     gRemoteStrings = (char*)ps_alloc(stringBytes, AllocPolicy::PreferPsram, "oled.remote.strings");
     if (!gRemoteModules || !gRemoteEntries || !gRemoteSlots || !gRemoteStrings) {
       releaseRemoteModules();
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[RemoteSettings] alloc failed (%zu mods, %zu entries)",
+      DEBUG_ESPNOW_ROUTERF("[RemoteSettings] alloc failed (%zu mods, %zu entries)",
              moduleCount, entryCount);
       gRemoteLastError = "Out of memory";
       return false;
@@ -334,7 +334,7 @@ bool loadRemoteSettingsModules() {
   }
 
   gRemoteLastError = "";
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[RemoteSettings] Loaded %zu modules, %zu entries",
+  DEBUG_ESPNOW_ROUTERF("[RemoteSettings] Loaded %zu modules, %zu entries",
          gRemoteModuleCount, gRemoteEntryCount);
   return true;
 }
@@ -432,7 +432,7 @@ bool applyRemoteSettingChange(const SettingEntry* entry, const String& value, St
   const String cmd = String("remote:") + entry->cmdKey + " " + trimmed;
   if (!executeOledCommandWithResult(cmd, out, sizeof(out))) {
     errOut = out[0] ? String(out) : String("Send failed");
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[RemoteSettings] %s not sent: %s", entry->cmdKey, errOut.c_str());
+    DEBUG_ESPNOW_ROUTERF("[RemoteSettings] %s not sent: %s", entry->cmdKey, errOut.c_str());
     return false;
   }
   // The remote: owner's reply names the request id the peer will answer
@@ -441,7 +441,7 @@ bool applyRemoteSettingChange(const SettingEntry* entry, const String& value, St
   uint32_t reqId = 0;
   if (!parseRemoteCommandSentReqId(out, &reqId)) {
     errOut = "Sent, but no request id to match the reply";
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[RemoteSettings] %s: %s", entry->cmdKey, errOut.c_str());
+    DEBUG_ESPNOW_ROUTERF("[RemoteSettings] %s: %s", entry->cmdKey, errOut.c_str());
     return false;
   }
 

@@ -56,7 +56,7 @@ static void logMessage(const char* format, ...) {
   messages.emplace_back(value);
 }
 #define DEBUG_LOGGERF(...) logMessage(__VA_ARGS__)
-#define DEBUGF_BROADCAST(flag, ...) logMessage(__VA_ARGS__)
+#define DEBUGF_QUEUE(flag, ...) logMessage(__VA_ARGS__)
 static void logSystemEvent(const char*, const char* format, ...) {
   char line[256];
   va_list args; va_start(args, format); vsnprintf(line, sizeof(line), format, args); va_end(args);

@@ -76,7 +76,7 @@ static void noteLog(const char* level, const char* fmt, ...) {
 #define WARN_ESPNOWF(...)  noteLog("WARN", __VA_ARGS__)
 #define INFO_ESPNOWF(...)  noteLog("INFO", __VA_ARGS__)
 #define DEBUG_ESPNOW_CORE 0
-#define DEBUGF(flag, ...)  noteLog("DEBUG", __VA_ARGS__)
+#define DEBUG_ESPNOWF(...) noteLog("DEBUG", __VA_ARGS__)
 
 enum class AllocPref { PreferPsram };
 static void* ps_alloc(size_t n, AllocPref, const char*) { return std::calloc(1, n); }

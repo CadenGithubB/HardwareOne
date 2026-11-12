@@ -1112,7 +1112,7 @@ void sensorLogTick() {
             sizeFile.close();
           }
           if (isDebugFlagSet(DEBUG_STORAGE)) {
-            DEBUGF_BROADCAST(DEBUG_STORAGE, "Sensor log: row write failed (%u/%u bytes)",
+            DEBUGF_QUEUE(DEBUG_STORAGE, "Sensor log: row write failed (%u/%u bytes)",
                              (unsigned)written, (unsigned)(len + 1));
           }
           if (isDebugFlagSet(DEBUG_LOGGER)) {
@@ -1162,7 +1162,7 @@ void sensorLogTick() {
           gApproxSizeBytes = 0;
           log_trunc++;
           if (isDebugFlagSet(DEBUG_STORAGE)) {
-            DEBUGF_BROADCAST(DEBUG_STORAGE, "Sensor log: rotated file on %s (max size=%u bytes)",
+            DEBUGF_QUEUE(DEBUG_STORAGE, "Sensor log: rotated file on %s (max size=%u bytes)",
                              onSd ? "SD" : "LittleFS", (unsigned)gSensorLogMaxSize);
           }
           if (isDebugFlagSet(DEBUG_LOGGER)) {
@@ -1172,14 +1172,14 @@ void sensorLogTick() {
         }
         
         if (complete && isDebugFlagSet(DEBUG_STORAGE)) {
-          DEBUGF_BROADCAST(DEBUG_STORAGE, "Sensor log: wrote %d bytes", (int)len);
+          DEBUGF_QUEUE(DEBUG_STORAGE, "Sensor log: wrote %d bytes", (int)len);
         }
         if (complete && isDebugFlagSet(DEBUG_LOGGER)) {
           DEBUG_LOGGERF("logger: wrote %dB, approxSize=%uB, writes=%u", (int)len, (unsigned)gApproxSizeBytes, (unsigned)log_writes);
         }
       } else {
         if (isDebugFlagSet(DEBUG_STORAGE)) {
-          DEBUGF_BROADCAST(DEBUG_STORAGE, "Sensor log: failed to open file");
+          DEBUGF_QUEUE(DEBUG_STORAGE, "Sensor log: failed to open file");
         }
         log_open_fail++;
         if (isDebugFlagSet(DEBUG_LOGGER)) {

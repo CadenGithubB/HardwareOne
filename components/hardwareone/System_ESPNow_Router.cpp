@@ -96,7 +96,7 @@ void noteDirect(const uint8_t mac[6], int8_t metric, uint32_t nowMs) {
     // been relaying to this node a moment ago and it just came back in range.
     if (r->hops != 1) {
       gMetrics.routesReplaced++;
-      DEBUGF(DEBUG_ESPNOW_MESH, "[MESH_ROUTE] " MAC_FMT " now DIRECT (was %u hops)",
+      DEBUG_ESPNOW_MESHF("[MESH_ROUTE] " MAC_FMT " now DIRECT (was %u hops)",
              MAC_ARGS(mac), (unsigned)r->hops);
     }
     memcpy(r->nextHop, mac, 6);
@@ -161,7 +161,7 @@ void meshRouterSyncDirect(uint32_t nowMs) {
     if (!r.active || r.hops != 1) continue;
     if (neighbourAlive(r.dst, nowMs)) continue;
     char macStr[18]; macToDisplay(r.dst, macStr, sizeof(macStr));
-    DEBUGF(DEBUG_ESPNOW_MESH, "[MESH_ROUTE] direct route to %s withdrawn (peer silent)", macStr);
+    DEBUG_ESPNOW_MESHF("[MESH_ROUTE] direct route to %s withdrawn (peer silent)", macStr);
     r.active = false;
     gMetrics.routesExpired++;
   }
@@ -175,7 +175,7 @@ void meshRouterSyncDirect(uint32_t nowMs) {
     const MeshRoute* via = findRoute(r.nextHop);
     if (via && via->active && via->hops == 1) continue;
     char macStr[18]; macToDisplay(r.dst, macStr, sizeof(macStr));
-    DEBUGF(DEBUG_ESPNOW_MESH, "[MESH_ROUTE] route to %s withdrawn (next hop gone)", macStr);
+    DEBUG_ESPNOW_MESHF("[MESH_ROUTE] route to %s withdrawn (next hop gone)", macStr);
     r.active = false;
     gMetrics.routesExpired++;
   }
@@ -190,7 +190,7 @@ void meshRouterExpire(uint32_t nowMs) {
     if (!r.active || r.hops <= 1) continue;
     if ((uint32_t)(nowMs - r.lastUpdateMs) < MESH_ROUTE_EXPIRY_MS) continue;
     char macStr[18]; macToDisplay(r.dst, macStr, sizeof(macStr));
-    DEBUGF(DEBUG_ESPNOW_MESH, "[MESH_ROUTE] route to %s expired (%lu ms stale)",
+    DEBUG_ESPNOW_MESHF("[MESH_ROUTE] route to %s expired (%lu ms stale)",
            macStr, (unsigned long)(nowMs - r.lastUpdateMs));
     r.active = false;
     gMetrics.routesExpired++;
@@ -250,7 +250,7 @@ void meshRouterIngestAdvert(const uint8_t* fromMac, int8_t linkMetric,
       char dstStr[18], viaStr[18];
       macToDisplay(e.mac, dstStr, sizeof(dstStr));
       macToDisplay(fromMac, viaStr, sizeof(viaStr));
-      DEBUGF(DEBUG_ESPNOW_MESH, "[MESH_ROUTE] %s: %u hops -> %u hops via %s (metric %d)",
+      DEBUG_ESPNOW_MESHF("[MESH_ROUTE] %s: %u hops -> %u hops via %s (metric %d)",
              dstStr, (unsigned)r->hops, (unsigned)newHops, viaStr, (int)newMetric);
       memcpy(r->nextHop, fromMac, 6);
       r->hops         = newHops;
@@ -281,7 +281,7 @@ void meshRouterIngestAdvert(const uint8_t* fromMac, int8_t linkMetric,
     char dstStr[18], viaStr[18];
     macToDisplay(e.mac, dstStr, sizeof(dstStr));
     macToDisplay(fromMac, viaStr, sizeof(viaStr));
-    DEBUGF(DEBUG_ESPNOW_MESH, "[MESH_ROUTE] learned %s via %s (%u hops, metric %d)",
+    DEBUG_ESPNOW_MESHF("[MESH_ROUTE] learned %s via %s (%u hops, metric %d)",
            dstStr, viaStr, (unsigned)newHops, (int)newMetric);
   }
 }

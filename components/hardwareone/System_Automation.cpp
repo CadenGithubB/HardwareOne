@@ -101,7 +101,7 @@ static void queueAutomationSubCommand(const char* cmd, const char* owner, const 
   uc.ctx.origin = ORIGIN_SYSTEM;
   uc.ctx.auth.transport = SOURCE_INTERNAL;
   uc.ctx.auth.user = owner ? owner : "";
-  DEBUGF(DEBUG_AUTOMATIONS, "[autos queue] Queueing cmd='%s' user='%s' automation='%s'",
+  DEBUG_AUTOMATIONSF("[autos queue] Queueing cmd='%s' user='%s' automation='%s'",
          safeCmd.c_str(), owner ? owner : "", autoName ? autoName : "");
   uc.ctx.auth.ip = "";
   uc.ctx.auth.path = "/automation";
@@ -123,7 +123,7 @@ static void queueAutomationSubCommand(const char* cmd, const char* owner, const 
     const char* dropReason = inputLengthAccepted
                                  ? "exec queue unavailable"
                                  : "command exceeds input limit";
-    DEBUGF(DEBUG_AUTOMATIONS, "[autos] DROPPED sub-command (%s): %s",
+    DEBUG_AUTOMATIONSF("[autos] DROPPED sub-command (%s): %s",
            dropReason, safeCmd.c_str());
     // Durable: a scheduled automation silently half-ran — one of its commands
     // never reached cmd_exec (queue unavailable or over the shared input
@@ -165,7 +165,7 @@ static void queueAutomationSubCommand(const char* cmd, const char* owner, const 
       sDropsSuppressed++;
     }
   } else {
-    DEBUGF(DEBUG_AUTOMATIONS, "[autos] Queued sub-command: %s", safeCmd.c_str());
+    DEBUG_AUTOMATIONSF("[autos] Queued sub-command: %s", safeCmd.c_str());
   }
 }
 
@@ -578,7 +578,7 @@ bool sanitizeAutomationsJson(String& jsonRef) {
   PSRAM_JSON_DOC(doc);
   DeserializationError error = deserializeJson(doc, jsonRef);
   if (error) {
-    DEBUGF(DEBUG_AUTOMATIONS, "[sanitize] JSON parse error: %s", error.c_str());
+    DEBUG_AUTOMATIONSF("[sanitize] JSON parse error: %s", error.c_str());
     return false;
   }
   
@@ -644,7 +644,7 @@ bool sanitizeAutomationsJson(String& jsonRef) {
     if (seenCount < kMax) seen[seenCount++] = newId;
     changed = true;
     
-    DEBUGF(DEBUG_AUTOMATIONS, "[sanitize] Replaced duplicate id %lu with %lu", idVal, newId);
+    DEBUG_AUTOMATIONSF("[sanitize] Replaced duplicate id %lu with %lu", idVal, newId);
   }
   
   if (changed) {
@@ -745,7 +745,7 @@ static bool loadAutomationsStoreForEdit(String& json, bool persistSeed) {
     json = automationsEmptyStoreJson();
     if (persistSeed) {
       writeAutomationsJsonAtomic(json);
-      DEBUGF(DEBUG_AUTOMATIONS, "[autos add] created default automations.json");
+      DEBUG_AUTOMATIONSF("[autos add] created default automations.json");
     }
   }
   return true;
@@ -1184,7 +1184,7 @@ static bool ensureAutomationsFile() {
     ERROR_SYSTEMF("[automations] Failed to create %s", AUTOMATIONS_JSON_FILE);
     return false;
   }
-  DEBUGF(DEBUG_AUTOMATIONS,
+  DEBUG_AUTOMATIONSF(
          "[automations] Created empty automation store for profile migration");
   return true;
 }
@@ -1200,7 +1200,7 @@ bool updateAutomationTriggerNextAt(long automationId, int triggerIdx, time_t new
   PSRAM_JSON_DOC(doc);
   DeserializationError error = deserializeJson(doc, json);
   if (error) {
-    DEBUGF(DEBUG_AUTOMATIONS, "[updateNextAt] JSON parse error: %s", error.c_str());
+    DEBUG_AUTOMATIONSF("[updateNextAt] JSON parse error: %s", error.c_str());
     return false;
   }
 
@@ -1270,12 +1270,12 @@ void runAutomationsOnBoot() {
 
   if (!filesystemReady) return;
 
-  DEBUGF(DEBUG_AUTOMATIONS, "[automations] Checking for boot automations");
+  DEBUG_AUTOMATIONSF("[automations] Checking for boot automations");
 
   // Read automations.json
   String json;
   if (!readAutomationsJson(json)) {
-    DEBUGF(DEBUG_AUTOMATIONS, "[automations] No automations file found");
+    DEBUG_AUTOMATIONSF("[automations] No automations file found");
     return;
   }
 
@@ -1445,7 +1445,7 @@ void runAutomationsOnBoot() {
       char wrapped[384];
       snprintf(wrapped, sizeof(wrapped), "IF %s THEN _", condition.c_str());
       bool conditionMet = evaluateCondition(wrapped);
-      DEBUGF(DEBUG_AUTOMATIONS, "[automations] id=%ld boot condition='%s' result=%s",
+      DEBUG_AUTOMATIONSF("[automations] id=%ld boot condition='%s' result=%s",
              id, condition.c_str(), conditionMet ? "TRUE" : "FALSE");
       if (!conditionMet) {
         if (automationLogActive()) {
@@ -1466,10 +1466,10 @@ void runAutomationsOnBoot() {
 
     // Log automation start
     if (bootDelayMs > 0) {
-      DEBUGF(DEBUG_AUTOMATIONS, "[automations] Running boot automation: %s (delay: %dms)", autoName.c_str(), bootDelayMs);
+      DEBUG_AUTOMATIONSF("[automations] Running boot automation: %s (delay: %dms)", autoName.c_str(), bootDelayMs);
       delay(bootDelayMs);
     } else {
-      DEBUGF(DEBUG_AUTOMATIONS, "[automations] Running boot automation: %s", autoName.c_str());
+      DEBUG_AUTOMATIONSF("[automations] Running boot automation: %s", autoName.c_str());
     }
 
     char _createdByBuf[64];
@@ -1508,7 +1508,7 @@ void runAutomationsOnBoot() {
       appendAutoLogEntry("AUTO_END", endMsg);
     }
 
-    DEBUGF(DEBUG_AUTOMATIONS, "[automations] Boot automation completed: %s", autoName.c_str());
+    DEBUG_AUTOMATIONSF("[automations] Boot automation completed: %s", autoName.c_str());
 
     if (now > 0) {
       time_t newNextAt = computeNextRunTime(obj.c_str(), now);
@@ -1523,11 +1523,11 @@ void runAutomationsOnBoot() {
 
 // Initialize automation system
 bool initAutomationSystem() {
-  DEBUGF(DEBUG_AUTOMATIONS, "[automations] System initialized");
+  DEBUG_AUTOMATIONSF("[automations] System initialized");
   
   // Start the automation scheduler
   if (!startAutomationScheduler()) {
-    DEBUGF(DEBUG_AUTOMATIONS, "[automations] WARNING: Failed to start scheduler");
+    DEBUG_AUTOMATIONSF("[automations] WARNING: Failed to start scheduler");
     return false;
   }
   
@@ -1537,13 +1537,13 @@ bool initAutomationSystem() {
 // Suspend automation system
 void suspendAutomationSystem() {
   stopAutomationScheduler();
-  DEBUGF(DEBUG_AUTOMATIONS, "[automations] System suspended");
+  DEBUG_AUTOMATIONSF("[automations] System suspended");
 }
 
 // Resume automation system
 void resumeAutomationSystem() {
   startAutomationScheduler();
-  DEBUGF(DEBUG_AUTOMATIONS, "[automations] System resumed");
+  DEBUG_AUTOMATIONSF("[automations] System resumed");
 }
 
 // Execute automation command (queues through FreeRTOS command queue, non-blocking)
@@ -1599,7 +1599,7 @@ const char* cmd_automation_add(const String& argsInput) {
   typeNorm.trim();
   typeNorm.toLowerCase();
   
-  DEBUGF(DEBUG_AUTOMATIONS, "[autos add] name='%s' type='%s' time='%s' days='%s' delayms='%s' intervalms='%s' enabled=%d",
+  DEBUG_AUTOMATIONSF("[autos add] name='%s' type='%s' time='%s' days='%s' delayms='%s' intervalms='%s' enabled=%d",
          name.c_str(), typeNorm.c_str(), timeS.c_str(), days.c_str(), delayMs.c_str(), intervalMs.c_str(), enabled ? 1 : 0);
   
   if (name.length() == 0) {
@@ -1749,15 +1749,15 @@ const char* cmd_automation_add(const String& argsInput) {
           extractJsonString(existingObj.c_str(), "\"createdBy\"", existingCreatedByBuf, sizeof(existingCreatedByBuf));
           String existingCreatedBy = existingCreatedByBuf;
           
-          DEBUGF(DEBUG_AUTOMATIONS, "[autos add/edit] Editing existing id=%lu createdBy='%s' requestedBy='%s' isAdmin=%d",
+          DEBUG_AUTOMATIONSF("[autos add/edit] Editing existing id=%lu createdBy='%s' requestedBy='%s' isAdmin=%d",
                  overrideId, existingCreatedBy.c_str(), currentExecUser().c_str(), currentExecIsAdmin());
 
           if (!currentExecIsAdmin() && existingCreatedBy != currentExecUser()) {
-            DEBUGF(DEBUG_AUTOMATIONS, "[autos add/edit] AUTHORIZATION DENIED: non-admin '%s' cannot edit automation created by '%s'",
+            DEBUG_AUTOMATIONSF("[autos add/edit] AUTHORIZATION DENIED: non-admin '%s' cannot edit automation created by '%s'",
                    currentExecUser().c_str(), existingCreatedBy.c_str());
             return "Error: You do not have permission to edit this automation. Only the creator or an admin can edit it.";
           }
-          DEBUGF(DEBUG_AUTOMATIONS, "[autos add/edit] AUTHORIZATION OK for edit");
+          DEBUG_AUTOMATIONSF("[autos add/edit] AUTHORIZATION OK for edit");
           String arrTmp = json.substring(aS + 1, aE); arrTmp.trim();
           if (arrTmp.indexOf('{') == arrTmp.lastIndexOf('{')) {
             json = json.substring(0, aS + 1) + json.substring(aE);
@@ -1900,13 +1900,13 @@ const char* cmd_automation_add(const String& argsInput) {
     if (nextAt > 0) body += ",\n      \"nextAt\": " + String((unsigned long)nextAt);
     else              body += ",\n      \"nextAt\": null";
     triggersJson += "    {\n" + body + "\n    }";
-    DEBUGF(DEBUG_AUTOMATIONS, "[autos add] primary trigger type=%s nextAt=%lu",
+    DEBUG_AUTOMATIONSF("[autos add] primary trigger type=%s nextAt=%lu",
            triggerType.c_str(), (unsigned long)nextAt);
   }
   if (runAtBoot && triggerType != "boot") {
     String body = buildPrimaryBody("boot");
     triggersJson += ",\n    {\n" + body + ",\n      \"nextAt\": null\n    }";
-    DEBUGF(DEBUG_AUTOMATIONS, "[autos add] added synthesized boot trigger from runAtBoot");
+    DEBUG_AUTOMATIONSF("[autos add] added synthesized boot trigger from runAtBoot");
   }
 
   // Parse and append secondary triggers (from the UI's + Add Trigger rows).
@@ -1963,7 +1963,7 @@ const char* cmd_automation_add(const String& argsInput) {
           addedSec++;
         }
         if (addedSec > 0) {
-          DEBUGF(DEBUG_AUTOMATIONS, "[autos add] appended %d secondary trigger(s)", addedSec);
+          DEBUG_AUTOMATIONSF("[autos add] appended %d secondary trigger(s)", addedSec);
         }
       }
     }
@@ -1974,7 +1974,7 @@ const char* cmd_automation_add(const String& argsInput) {
   // Build final automation object
   String obj = "{\n";
   String createdBy = currentExecUser();
-  DEBUGF(DEBUG_AUTOMATIONS, "[autos add] Storing automation id=%ld name='%s' createdBy='%s'", id, name.c_str(), createdBy.c_str());
+  DEBUG_AUTOMATIONSF("[autos add] Storing automation id=%ld name='%s' createdBy='%s'", id, name.c_str(), createdBy.c_str());
   obj += "  \"id\": " + String(id) + ",\n";
   obj += "  \"name\": \"" + jsonEscape(name) + "\",\n";
   obj += "  \"createdBy\": \"" + jsonEscape(createdBy) + "\",\n";
@@ -1992,9 +1992,9 @@ const char* cmd_automation_add(const String& argsInput) {
     return "Error: failed to write automations.json";
   }
   
-  DEBUGF(DEBUG_AUTOMATIONS, "[autos add] wrote automations.json (len=%d) id=%lu", json.length(), id);
+  DEBUG_AUTOMATIONSF("[autos add] wrote automations.json (len=%d) id=%lu", json.length(), id);
   
-  DEBUGF(DEBUG_AUTOMATIONS, "[autos add] scheduler refresh queued (type=%s)", typeNorm.c_str());
+  DEBUG_AUTOMATIONSF("[autos add] scheduler refresh queued (type=%s)", typeNorm.c_str());
   
   // SYSTEM-EVENT: a new automation was created and persisted. Edits (id= reuse)
   // share this path but are not creations, so post only on a genuine add.
@@ -2041,15 +2041,15 @@ const char* cmd_automation_enable_disable(const String& argsInput, bool enable) 
   extractJsonString(automationObj.c_str(), "\"createdBy\"", createdByBuf, sizeof(createdByBuf));
   String createdBy = createdByBuf;
   
-  DEBUGF(DEBUG_AUTOMATIONS, "[autos %s] id=%s createdBy='%s' requestedBy='%s' isAdmin=%d",
+  DEBUG_AUTOMATIONSF("[autos %s] id=%s createdBy='%s' requestedBy='%s' isAdmin=%d",
          enable ? "enable" : "disable", idStr.c_str(), createdBy.c_str(), currentExecUser().c_str(), currentExecIsAdmin());
 
   if (!currentExecIsAdmin() && createdBy != currentExecUser()) {
-    DEBUGF(DEBUG_AUTOMATIONS, "[autos %s] AUTHORIZATION DENIED: non-admin '%s' cannot modify automation created by '%s'",
+    DEBUG_AUTOMATIONSF("[autos %s] AUTHORIZATION DENIED: non-admin '%s' cannot modify automation created by '%s'",
            enable ? "enable" : "disable", currentExecUser().c_str(), createdBy.c_str());
     return "Error: You do not have permission to modify this automation. Only the creator or an admin can modify it.";
   }
-  DEBUGF(DEBUG_AUTOMATIONS, "[autos %s] AUTHORIZATION OK", enable ? "enable" : "disable");
+  DEBUG_AUTOMATIONSF("[autos %s] AUTHORIZATION OK", enable ? "enable" : "disable");
   
   int enabledPos = json.indexOf("\"enabled\":", idPos);
   if (enabledPos < 0) {
@@ -2113,15 +2113,15 @@ const char* cmd_automation_delete(const String& argsInput) {
   char deletedNameBuf[64];
   extractJsonString(automationObj.c_str(), "\"name\"", deletedNameBuf, sizeof(deletedNameBuf));
 
-  DEBUGF(DEBUG_AUTOMATIONS, "[autos delete] id=%s createdBy='%s' requestedBy='%s' isAdmin=%d",
+  DEBUG_AUTOMATIONSF("[autos delete] id=%s createdBy='%s' requestedBy='%s' isAdmin=%d",
          idStr.c_str(), createdBy.c_str(), currentExecUser().c_str(), currentExecIsAdmin());
 
   if (!currentExecIsAdmin() && createdBy != currentExecUser()) {
-    DEBUGF(DEBUG_AUTOMATIONS, "[autos delete] AUTHORIZATION DENIED: non-admin '%s' cannot delete automation created by '%s'",
+    DEBUG_AUTOMATIONSF("[autos delete] AUTHORIZATION DENIED: non-admin '%s' cannot delete automation created by '%s'",
            currentExecUser().c_str(), createdBy.c_str());
     return "Error: You do not have permission to delete this automation. Only the creator or an admin can delete it.";
   }
-  DEBUGF(DEBUG_AUTOMATIONS, "[autos delete] AUTHORIZATION OK");
+  DEBUG_AUTOMATIONSF("[autos delete] AUTHORIZATION OK");
   
   // Find array bounds
   int arrayStart = json.indexOf('[');
@@ -2336,7 +2336,7 @@ const char* cmd_automation_run(const String& argsInput) {
   if (condition.length() > 0) {
     String wrapped = "IF " + condition + " THEN _";
     bool conditionMet = evaluateCondition(wrapped.c_str());
-    DEBUGF(DEBUG_AUTOMATIONS, "[autos run] id=%s condition='%s' result=%s",
+    DEBUG_AUTOMATIONSF("[autos run] id=%s condition='%s' result=%s",
            idStr.c_str(), condition.c_str(), conditionMet ? "TRUE" : "FALSE");
     if (!conditionMet) {
       if (automationLogActive()) {
@@ -2355,11 +2355,11 @@ const char* cmd_automation_run(const String& argsInput) {
   
   char _createdByBuf[64];
   extractJsonString(obj.c_str(), "\"createdBy\"", _createdByBuf, sizeof(_createdByBuf));
-  DEBUGF(DEBUG_AUTOMATIONS, "[autos run] Extracted createdBy='%s' for automation id=%s", _createdByBuf, idStr.c_str());
+  DEBUG_AUTOMATIONSF("[autos run] Extracted createdBy='%s' for automation id=%s", _createdByBuf, idStr.c_str());
 
   // Authorization: non-admins may only trigger automations they created themselves
   if (!currentExecIsAdmin() && String(_createdByBuf) != currentExecUser()) {
-    DEBUGF(DEBUG_AUTOMATIONS, "[autos run] AUTHORIZATION DENIED: user='%s' isAdmin=%d tried to run automation created by '%s'",
+    DEBUG_AUTOMATIONSF("[autos run] AUTHORIZATION DENIED: user='%s' isAdmin=%d tried to run automation created by '%s'",
            currentExecUser().c_str(), currentExecIsAdmin(), _createdByBuf);
     {
       char authErr[120];
@@ -2368,17 +2368,17 @@ const char* cmd_automation_run(const String& argsInput) {
     }
     return "Error: Admin required";
   }
-  DEBUGF(DEBUG_AUTOMATIONS, "[autos run] AUTHORIZATION OK: user='%s' isAdmin=%d running automation created by '%s'",
+  DEBUG_AUTOMATIONSF("[autos run] AUTHORIZATION OK: user='%s' isAdmin=%d running automation created by '%s'",
          currentExecUser().c_str(), currentExecIsAdmin(), _createdByBuf);
 
   // Execute all commands (with conditional logic support)
   for (int ci = 0; ci < cmdsCount; ++ci) {
     const String safeRunCmd = redactAutomationCommandForAudit(cmdsList[ci]);
-    DEBUGF(DEBUG_AUTOMATIONS, "[autos run] id=%s cmd[%d]='%s'", idStr.c_str(), ci, safeRunCmd.c_str());
+    DEBUG_AUTOMATIONSF("[autos run] id=%s cmd[%d]='%s'", idStr.c_str(), ci, safeRunCmd.c_str());
     
     // Protect against malformed commands
     if (cmdsList[ci].length() == 0 || cmdsList[ci] == "\\") {
-      DEBUGF(DEBUG_AUTOMATIONS, "[autos run] skipping malformed command: '%s'", safeRunCmd.c_str());
+      DEBUG_AUTOMATIONSF("[autos run] skipping malformed command: '%s'", safeRunCmd.c_str());
       continue;
     }
     
@@ -2562,10 +2562,10 @@ const char* cmd_automation(const String& argsInput) {
     }
     if (sanitizeAutomationsJson(json)) {
       if (!writeAutomationsJsonAtomic(json)) return "Error: failed to write automations.json";
-      DEBUGF(DEBUG_AUTOMATIONS, "[autos] CLI sanitize: fixed duplicate IDs; scheduler refresh queued");
+      DEBUG_AUTOMATIONSF("[autos] CLI sanitize: fixed duplicate IDs; scheduler refresh queued");
       return "Sanitized automations.json: fixed duplicate IDs";
     } else {
-      DEBUGF(DEBUG_AUTOMATIONS, "[autos] CLI sanitize: no duplicate IDs found");
+      DEBUG_AUTOMATIONSF("[autos] CLI sanitize: no duplicate IDs found");
       return "Sanitize: no changes needed";
     }
   } else if (subCmd == "recompute") {
@@ -2577,7 +2577,7 @@ const char* cmd_automation(const String& argsInput) {
     if (rewritten < 0) return "Error: failed to rewrite automations.json";
 
     notifyAutomationScheduler();
-    DEBUGF(DEBUG_AUTOMATIONS, "[autos recompute] rewrote %d clock trigger(s), skipped %d",
+    DEBUG_AUTOMATIONSF("[autos recompute] rewrote %d clock trigger(s), skipped %d",
            rewritten, skipped);
     BROADCAST_PRINTF("Recomputed %d clock trigger(s); %d automation(s) skipped "
                      "(disabled or no schedulable trigger). Armed afterDelay timers left intact.",
@@ -3250,7 +3250,7 @@ const char* validateConditionSyntax(const char* condition) {
   
   const String safeConditionForTrace =
       redactAutomationCommandForAudit(String(condition ? condition : ""));
-  DEBUGF(DEBUG_AUTOMATIONS, "[validate] Input condition: '%s'", safeConditionForTrace.c_str());
+  DEBUG_AUTOMATIONSF("[validate] Input condition: '%s'", safeConditionForTrace.c_str());
   
   // Skip leading whitespace
   while (*cond == ' ' || *cond == '\t') { cond++; len--; }
@@ -3260,7 +3260,7 @@ const char* validateConditionSyntax(const char* condition) {
       (cond[0] != 'I' && cond[0] != 'i') ||
       (cond[1] != 'F' && cond[1] != 'f') ||
       cond[2] != ' ') {
-    DEBUGF(DEBUG_AUTOMATIONS, "[validate] FAIL: Condition must start with 'IF'");
+    DEBUG_AUTOMATIONSF("[validate] FAIL: Condition must start with 'IF'");
     return "Condition must start with 'IF'";
   }
 
@@ -3279,14 +3279,14 @@ const char* validateConditionSyntax(const char* condition) {
   }
   
   if (!thenPos) {
-    DEBUGF(DEBUG_AUTOMATIONS, "[validate] FAIL: Condition must contain 'THEN'");
+    DEBUG_AUTOMATIONSF("[validate] FAIL: Condition must contain 'THEN'");
     return "Condition must contain 'THEN'";
   }
 
   // Check condition part has content
   size_t condLen = thenPos - (cond + 3);
   if (condLen == 0) {
-    DEBUGF(DEBUG_AUTOMATIONS, "[validate] FAIL: Missing condition after 'IF'");
+    DEBUG_AUTOMATIONSF("[validate] FAIL: Missing condition after 'IF'");
     return "Missing condition after 'IF'";
   }
 
@@ -3294,7 +3294,7 @@ const char* validateConditionSyntax(const char* condition) {
   const char* cmdStart = thenPos + 5;
   while (*cmdStart == ' ' || *cmdStart == '\t') cmdStart++;
   if (*cmdStart == '\0') {
-    DEBUGF(DEBUG_AUTOMATIONS, "[validate] FAIL: Missing command after 'THEN'");
+    DEBUG_AUTOMATIONSF("[validate] FAIL: Missing command after 'THEN'");
     return "Missing command after 'THEN'";
   }
 
@@ -3311,11 +3311,11 @@ const char* validateConditionSyntax(const char* condition) {
   }
 
   if (!hasOperator) {
-    DEBUGF(DEBUG_AUTOMATIONS, "[validate] FAIL: No operator found in condition");
+    DEBUG_AUTOMATIONSF("[validate] FAIL: No operator found in condition");
     return "Condition must contain an operator (>, <, =, >=, <=, !=, CONTAINS)";
   }
 
-  DEBUGF(DEBUG_AUTOMATIONS, "[validate] PASS: Found operator '%s'", foundOp);
+  DEBUG_AUTOMATIONSF("[validate] PASS: Found operator '%s'", foundOp);
   return "";
 }
 
@@ -3371,7 +3371,7 @@ bool evaluateCondition(const char* condition) {
   const char* operators[] = { "CONTAINS", ">=", "<=", "!=", ">", "<", "=" };  // CONTAINS first for longest match
   const char* opFound = nullptr;
   
-  DEBUGF(DEBUG_AUTOMATIONS, "[eval] Parsing condition: '%s'", condStart);
+  DEBUG_AUTOMATIONSF("[eval] Parsing condition: '%s'", condStart);
   
   for (int i = 0; i < 7; i++) {
     const char* pos = strstr(condStart, operators[i]);
@@ -3402,11 +3402,11 @@ bool evaluateCondition(const char* condition) {
   }
   
   if (!opFound) {
-    DEBUGF(DEBUG_AUTOMATIONS, "[eval] FAIL: No operator found in parsed condition");
+    DEBUG_AUTOMATIONSF("[eval] FAIL: No operator found in parsed condition");
     return false;
   }
   
-  DEBUGF(DEBUG_AUTOMATIONS, "[eval] Parsed: sensor='%s' op='%s' value='%s'", sensor, op, value);
+  DEBUG_AUTOMATIONSF("[eval] Parsed: sensor='%s' op='%s' value='%s'", sensor, op, value);
 
   // Get current sensor value
   float currentValue = 0;
@@ -3422,7 +3422,7 @@ bool evaluateCondition(const char* condition) {
     return false;
  #endif
   } else if (strcmp(sensor, "HUMIDITY") == 0) {
-    DEBUGF(DEBUG_AUTOMATIONS, "[condition] Humidity sensor not available");
+    DEBUG_AUTOMATIONSF("[condition] Humidity sensor not available");
     return false;
   } else if (strcmp(sensor, "DISTANCE") == 0) {
     // Special handling for distance - check if ANY valid object meets the condition
@@ -3434,7 +3434,7 @@ bool evaluateCondition(const char* condition) {
     const int tofTotal = tof.tofTotalObjects;
     const auto& objs = tof.tofObjects;
 
-    DEBUGF(DEBUG_AUTOMATIONS, "[condition] distance: checking %d objects against %s%.1f",
+    DEBUG_AUTOMATIONSF("[condition] distance: checking %d objects against %s%.1f",
            tofTotal, op, targetValue);
 
     for (int j = 0; j < tofTotal && j < 4; j++) {
@@ -3449,7 +3449,7 @@ bool evaluateCondition(const char* condition) {
         else if (strcmp(op, "<=") == 0) objMeetsCondition = objDistance <= targetValue;
         else if (strcmp(op, "!=") == 0) objMeetsCondition = fabs(objDistance - targetValue) >= 0.1;
 
-        DEBUGF(DEBUG_AUTOMATIONS, "[condition] obj[%d]: %.1fcm %s %.1f = %s",
+        DEBUG_AUTOMATIONSF("[condition] obj[%d]: %.1fcm %s %.1f = %s",
                j, objDistance, op, targetValue, objMeetsCondition ? "TRUE" : "FALSE");
 
         if (objMeetsCondition) {
@@ -3458,7 +3458,7 @@ bool evaluateCondition(const char* condition) {
       }
     }
 
-    DEBUGF(DEBUG_AUTOMATIONS, "[condition] distance result: %s",
+    DEBUG_AUTOMATIONSF("[condition] distance result: %s",
            anyObjectMeetsCondition ? "TRUE" : "FALSE");
     return anyObjectMeetsCondition;
  #else
@@ -3503,7 +3503,7 @@ bool evaluateCondition(const char* condition) {
     } else {
       strlcpy(currentStringValue, "NONE", sizeof(currentStringValue));
     }
-    DEBUGF(DEBUG_AUTOMATIONS, "[eval] ROOM: current='%s' (from setting='%s')", 
+    DEBUG_AUTOMATIONSF("[eval] ROOM: current='%s' (from setting='%s')", 
            currentStringValue, gSettings.espnowRoom.c_str());
   } else if (strcmp(sensor, "ZONE") == 0) {
     // ESP-NOW metadata: zone assignment
@@ -3517,7 +3517,7 @@ bool evaluateCondition(const char* condition) {
     } else {
       strlcpy(currentStringValue, "NONE", sizeof(currentStringValue));
     }
-    DEBUGF(DEBUG_AUTOMATIONS, "[eval] ZONE: current='%s' (from setting='%s')", 
+    DEBUG_AUTOMATIONSF("[eval] ZONE: current='%s' (from setting='%s')", 
            currentStringValue, gSettings.espnowZone.c_str());
   } else if (strcmp(sensor, "TAGS") == 0) {
     // ESP-NOW metadata: tags (supports CONTAINS operator)
@@ -3531,7 +3531,7 @@ bool evaluateCondition(const char* condition) {
     } else {
       strlcpy(currentStringValue, "NONE", sizeof(currentStringValue));
     }
-    DEBUGF(DEBUG_AUTOMATIONS, "[eval] TAGS: current='%s' (from setting='%s')",
+    DEBUG_AUTOMATIONSF("[eval] TAGS: current='%s' (from setting='%s')",
            currentStringValue, gSettings.espnowTags.c_str());
   // ---- System-state variables (numeric) ----
   } else if (strcmp(sensor, "BATTERY") == 0) {
@@ -3792,7 +3792,7 @@ bool evaluateCondition(const char* condition) {
     return false;
  #endif
   } else {
-    DEBUGF(DEBUG_AUTOMATIONS, "[condition] Unknown sensor: %s", sensor);
+    DEBUG_AUTOMATIONSF("[condition] Unknown sensor: %s", sensor);
     return false;
   }
 
@@ -3806,7 +3806,7 @@ bool evaluateCondition(const char* condition) {
     else if (strcmp(op, ">=") == 0) result = currentValue >= targetValue;
     else if (strcmp(op, "<=") == 0) result = currentValue <= targetValue;
     else if (strcmp(op, "!=") == 0) result = fabs(currentValue - targetValue) >= 0.1;
-    DEBUGF(DEBUG_AUTOMATIONS, "[eval] Numeric: %.2f %s %.2f = %s", 
+    DEBUG_AUTOMATIONSF("[eval] Numeric: %.2f %s %.2f = %s", 
            currentValue, op, targetValue, result ? "TRUE" : "FALSE");
     return result;
   } else {
@@ -3817,16 +3817,16 @@ bool evaluateCondition(const char* condition) {
     bool result = false;
     if (strcmp(op, "=") == 0) {
       result = strcmp(currentStringValue, value) == 0;
-      DEBUGF(DEBUG_AUTOMATIONS, "[eval] String: '%s' = '%s' = %s", 
+      DEBUG_AUTOMATIONSF("[eval] String: '%s' = '%s' = %s", 
              currentStringValue, value, result ? "TRUE" : "FALSE");
     } else if (strcmp(op, "!=") == 0) {
       result = strcmp(currentStringValue, value) != 0;
-      DEBUGF(DEBUG_AUTOMATIONS, "[eval] String: '%s' != '%s' = %s", 
+      DEBUG_AUTOMATIONSF("[eval] String: '%s' != '%s' = %s", 
              currentStringValue, value, result ? "TRUE" : "FALSE");
     } else if (strcmp(op, "CONTAINS") == 0) {
       // Check if currentStringValue contains value (case-insensitive substring match)
       result = strstr(currentStringValue, value) != nullptr;
-      DEBUGF(DEBUG_AUTOMATIONS, "[eval] String: '%s' CONTAINS '%s' = %s", 
+      DEBUG_AUTOMATIONSF("[eval] String: '%s' CONTAINS '%s' = %s", 
              currentStringValue, value, result ? "TRUE" : "FALSE");
     }
     return result;
@@ -4175,21 +4175,21 @@ const char* executeConditionalCommand(const char* command, const char* owner, co
       snprintf(fullCondBuf, sizeof(fullCondBuf), "IF %s THEN dummy", condStart);
       bool conditionMet = evaluateCondition(fullCondBuf);
 
-      DEBUGF(DEBUG_AUTOMATIONS, "[conditional] condition='%s' result=%s",
+      DEBUG_AUTOMATIONSF("[conditional] condition='%s' result=%s",
              condStart, conditionMet ? "TRUE" : "FALSE");
 
       // Execute appropriate command via async queue (avoids deadlock)
       if (conditionMet) {
         if (thenCmdStart[0] != '\0') {
           const String safeThenCmd = redactAutomationCommandForAudit(String(thenCmdStart));
-          DEBUGF(DEBUG_AUTOMATIONS, "[conditional] queuing THEN: %s", safeThenCmd.c_str());
+          DEBUG_AUTOMATIONSF("[conditional] queuing THEN: %s", safeThenCmd.c_str());
           queueAutomationSubCommand(thenCmdStart, owner, autoName);
           return "Conditional THEN queued";
         }
       } else {
         if (elseBuf[0] != '\0') {
           const String safeElseCmd = redactAutomationCommandForAudit(String(elseBuf));
-          DEBUGF(DEBUG_AUTOMATIONS, "[conditional] queuing ELSE: %s", safeElseCmd.c_str());
+          DEBUG_AUTOMATIONSF("[conditional] queuing ELSE: %s", safeElseCmd.c_str());
           queueAutomationSubCommand(elseBuf, owner, autoName);
           return "Conditional ELSE queued";
         }
@@ -4451,7 +4451,7 @@ static void schedulerTickMinute() {
         if (nowMs - sEventBuf[i].tsMs <= 60000UL) sEventBuf[w++] = sEventBuf[i];
       }
       evCount = w;
-      DEBUGF(DEBUG_AUTOMATIONS, "[automations] tick drained %d fresh event(s)", evCount);
+      DEBUG_AUTOMATIONSF("[automations] tick drained %d fresh event(s)", evCount);
     }
   } else {
     // Heap too tight to drain: event triggers sit this tick out rather than
@@ -4470,7 +4470,7 @@ static void schedulerTickMinute() {
   // Without synced time only event fires are possible; skip the clock scan.
   if (!timeValid && evCount == 0) return;
 
-  DEBUGF(DEBUG_AUTOMATIONS, "[automations] tick now=%lu", (unsigned long)now);
+  DEBUG_AUTOMATIONSF("[automations] tick now=%lu", (unsigned long)now);
 
   // Load automations.json
   String json;
@@ -4482,7 +4482,7 @@ static void schedulerTickMinute() {
     markAutomationsCacheEmptyValid();
     return;
   }
-  DEBUGF(DEBUG_AUTOMATIONS, "[automations] json size=%d", json.length());
+  DEBUG_AUTOMATIONSF("[automations] json size=%d", json.length());
 
   int evaluated = 0, executed = 0;
   bool queueSanitize = false;
@@ -4523,7 +4523,7 @@ static void schedulerTickMinute() {
       }
     }
     if (dupSeen) {
-      DEBUGF(DEBUG_AUTOMATIONS, "[autos] duplicate id detected at runtime id=%ld; skipping and queuing sanitize", id);
+      DEBUG_AUTOMATIONSF("[autos] duplicate id detected at runtime id=%ld; skipping and queuing sanitize", id);
       queueSanitize = true;
       pos = objEnd + 1;
       continue;
@@ -4535,7 +4535,7 @@ static void schedulerTickMinute() {
     // Check if enabled
     bool enabled = (obj.indexOf("\"enabled\": true") >= 0) || (obj.indexOf("\"enabled\":true") >= 0);
     if (!enabled) {
-      DEBUGF(DEBUG_AUTOMATIONS, "[autos] id=%ld skip: disabled", id);
+      DEBUG_AUTOMATIONSF("[autos] id=%ld skip: disabled", id);
       pos = objEnd + 1;
       continue;
     }
@@ -4579,7 +4579,7 @@ static void schedulerTickMinute() {
       }
       if (slot >= 0 && (nowMs - sEvtFireMs[slot]) < EVT_COOLDOWN_MS) {
         eventDue = false;
-        DEBUGF(DEBUG_AUTOMATIONS, "[autos] id=%ld event fire suppressed (cooldown)", id);
+        DEBUG_AUTOMATIONSF("[autos] id=%ld event fire suppressed (cooldown)", id);
         if (automationLogActive()) {
           char cdBuf[128];
           snprintf(cdBuf, sizeof(cdBuf), "Event automation skipped: ID=%ld event cooldown (2s)", id);
@@ -4596,7 +4596,7 @@ static void schedulerTickMinute() {
     }
 
     if (nextAt <= 0 && !eventDue) {
-      DEBUGF(DEBUG_AUTOMATIONS, "[autos] id=%ld skip: no schedulable trigger due", id);
+      DEBUG_AUTOMATIONSF("[autos] id=%ld skip: no schedulable trigger due", id);
       pos = objEnd + 1;
       continue;
     }
@@ -4612,7 +4612,7 @@ static void schedulerTickMinute() {
     if (clockDue && (now - nextAt) > kMissedFireGraceSec) {
       logSystemEvent("AUTO", "automation %ld missed its %ld s-late schedule — skipped, rescheduled",
                      id, (long)(now - nextAt));
-      DEBUGF(DEBUG_AUTOMATIONS, "[autos] id=%ld MISSED by %lds (grace %ds) — advancing without firing",
+      DEBUG_AUTOMATIONSF("[autos] id=%ld MISSED by %lds (grace %ds) — advancing without firing",
              id, (long)(now - nextAt), (int)kMissedFireGraceSec);
       rescheduleAfterFire(id, obj.c_str(), now, false);
       automationClearCondBlock(id);
@@ -4627,7 +4627,7 @@ static void schedulerTickMinute() {
     if (clockDue || eventDue) {
       const char* fireLabel = (eventDue && !clockDue) ? "Event" : "Scheduled";
       if (eventDue) {
-        DEBUGF(DEBUG_AUTOMATIONS, "[autos] id=%ld event trigger matched: %s", id,
+        DEBUG_AUTOMATIONSF("[autos] id=%ld event trigger matched: %s", id,
                evKindName ? evKindName : "?");
       }
       // Extract commands
@@ -4732,7 +4732,7 @@ static void schedulerTickMinute() {
         if (condition.length() > 0) {
           String wrapped = "IF " + condition + " THEN _";
           bool conditionMet = evaluateCondition(wrapped.c_str());
-          DEBUGF(DEBUG_AUTOMATIONS, "[autos] id=%ld condition='%s' result=%s",
+          DEBUG_AUTOMATIONSF("[autos] id=%ld condition='%s' result=%s",
                  id, condition.c_str(), conditionMet ? "TRUE" : "FALSE");
           if (!conditionMet) {
             if (automationLogActive()) {
@@ -4740,7 +4740,7 @@ static void schedulerTickMinute() {
               snprintf(skipBuf, sizeof(skipBuf), "%s automation skipped: ID=%ld Name=%s Condition not met: %s", fireLabel, id, autoName.c_str(), condition.c_str());
               appendAutoLogEntry("AUTO_SKIP", skipBuf);
             }
-            DEBUGF(DEBUG_AUTOMATIONS, "[autos] id=%ld skipped - condition not met: %s", id, condition.c_str());
+            DEBUG_AUTOMATIONSF("[autos] id=%ld skipped - condition not met: %s", id, condition.c_str());
             // Deferred, not skipped: nextAt stays in the past so the fire
             // happens once the condition holds. Mute the re-check for a few
             // seconds so automationsAnyDue() stops forcing a full
@@ -4768,7 +4768,7 @@ static void schedulerTickMinute() {
         // Execute commands (with conditional logic support)
         for (int ci = 0; ci < cmdsCount; ++ci) {
           const String safeRunCmd = redactAutomationCommandForAudit(cmdsList[ci]);
-          DEBUGF(DEBUG_AUTOMATIONS, "[autos] id=%ld run cmd[%d]='%s'", id, ci, safeRunCmd.c_str());
+          DEBUG_AUTOMATIONSF("[autos] id=%ld run cmd[%d]='%s'", id, ci, safeRunCmd.c_str());
 
           // Queue command for execution (async, non-blocking)
           const char* result = executeConditionalCommand(cmdsList[ci].c_str(), _createdByBuf, autoName.c_str());
@@ -4807,20 +4807,20 @@ static void schedulerTickMinute() {
           rescheduleAfterFire(id, obj.c_str(), now, false);
         }
       } else {
-        DEBUGF(DEBUG_AUTOMATIONS, "[autos] id=%ld skip: no commands found", id);
+        DEBUG_AUTOMATIONSF("[autos] id=%ld skip: no commands found", id);
         // A command-less automation can never do anything, so deferring it is
         // pointless — advance it like a fire, or its past nextAt spins the
         // full tick (and its file read) on every main-loop pass forever.
         if (clockDue) rescheduleAfterFire(id, obj.c_str(), now, false);
       }
     } else {
-      DEBUGF(DEBUG_AUTOMATIONS, "[autos] id=%ld wait: nextAt=%lu now=%lu", id, (unsigned long)nextAt, (unsigned long)now);
+      DEBUG_AUTOMATIONSF("[autos] id=%ld wait: nextAt=%lu now=%lu", id, (unsigned long)nextAt, (unsigned long)now);
     }
 
     pos = objEnd + 1;
   }
 
-  DEBUGF(DEBUG_AUTOMATIONS, "[autos] evaluated=%d executed=%d", evaluated, executed);
+  DEBUG_AUTOMATIONSF("[autos] evaluated=%d executed=%d", evaluated, executed);
 
   // Handle duplicate sanitization
   static unsigned long s_lastAutoSanitizeMs = 0;
@@ -4831,15 +4831,15 @@ static void schedulerTickMinute() {
       if (readAutomationsJson(fix)) {
         if (sanitizeAutomationsJson(fix)) {
           if (writeAutomationsJsonAtomic(fix)) {
-            DEBUGF(DEBUG_AUTOMATIONS, "[autos] Runtime sanitize applied after duplicate detection; scheduler refresh queued");
+            DEBUG_AUTOMATIONSF("[autos] Runtime sanitize applied after duplicate detection; scheduler refresh queued");
           }
         } else {
-          DEBUGF(DEBUG_AUTOMATIONS, "[autos] Runtime sanitize: no changes needed");
+          DEBUG_AUTOMATIONSF("[autos] Runtime sanitize: no changes needed");
         }
       }
       s_lastAutoSanitizeMs = nowMs;
     } else {
-      DEBUGF(DEBUG_AUTOMATIONS, "[autos] Runtime sanitize skipped (debounced)");
+      DEBUG_AUTOMATIONSF("[autos] Runtime sanitize skipped (debounced)");
     }
   }
 
@@ -4900,7 +4900,7 @@ bool startAutomationScheduler() {
     sAutomationRefreshPending = true;
     sAutomationRunning = true;
   }
-  DEBUGF(DEBUG_AUTOMATIONS, "[automations] Scheduler enabled (runs from main loop)");
+  DEBUG_AUTOMATIONSF("[automations] Scheduler enabled (runs from main loop)");
   return true;
 }
 
@@ -4911,7 +4911,7 @@ void stopAutomationScheduler() {
     sAutomationRunning = false;
     releaseAutomationsCache();
   }
-  DEBUGF(DEBUG_AUTOMATIONS, "[automations] Scheduler disabled");
+  DEBUG_AUTOMATIONSF("[automations] Scheduler disabled");
 }
 
 // Owner transition for permission + runtime: `automation system enable|disable`

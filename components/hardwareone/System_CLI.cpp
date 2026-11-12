@@ -112,7 +112,7 @@ static HelpRenderSnapshot captureHelpRenderSnapshot(
 static void helpMode_onEnter(void* /*userData*/) {
   // cmd_help sets the requested page immediately after entry. Keeping this
   // callback side-effect free also makes prepared mode publication safe.
-  DEBUGF(DEBUG_CLI, "[climode/help] entered (gCLIState=%d)", (int)gCliState);
+  DEBUG_CLIF("[climode/help] entered (gCLIState=%d)", (int)gCliState);
 }
 
 static CliModeInputResult helpMode_onInput(const String& line, void* /*userData*/,
@@ -166,7 +166,7 @@ static void helpMode_onExit(void* /*userData*/) {
     gShowAllCommands = false;
   }
   resetHelpSession();
-  DEBUGF(DEBUG_CLI, "[climode/help] exited");
+  DEBUG_CLIF("[climode/help] exited");
 }
 
 static const CliMode kHelpMode = {
@@ -318,7 +318,7 @@ const char* renderHelpSensors() {
 
 bool handleHelpNavigation(const String& cmd, char* out, size_t outSize) {
   const String safeCmdForTrace = redactCmdForAudit(cmd);
-  DEBUGF(DEBUG_CLI, "[handleHelpNavigation] cmd='%s', gCLIState=%d", safeCmdForTrace.c_str(), (int)gCliState);
+  DEBUG_CLIF("[handleHelpNavigation] cmd='%s', gCLIState=%d", safeCmdForTrace.c_str(), (int)gCliState);
   if (gCliState == CLI_NORMAL) return false;
 
   gInHelpRender = true;
@@ -1024,7 +1024,7 @@ static const char* cmd_help(const String& argsInput) {
     }
     if (interactive) {
       gWebMirror.clear();
-      DEBUGF(DEBUG_CLI, "[cmd_help] gCLIState -> CLI_HELP_MAIN");
+      DEBUG_CLIF("[cmd_help] gCLIState -> CLI_HELP_MAIN");
     }
     gInHelpRender = true;
     renderHelpMain(false);

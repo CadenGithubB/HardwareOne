@@ -289,7 +289,7 @@ static void failJob(const Job& job) {
 
 static void txTask(void* param) {
   QueueHandle_t queue = static_cast<QueueHandle_t>(param);
-  DEBUGF(DEBUG_ESPNOW_CORE,
+  DEBUG_ESPNOWF(
          "[ESPNOW_TX] task started on core %d, stack=%u words queue=%u slots",
          (int)xPortGetCoreID(),
          (unsigned)ESPNOW_TX_STACK_WORDS, (unsigned)kQueueDepth);
@@ -337,7 +337,7 @@ static void txTask(void* param) {
       taskENTER_CRITICAL(&sStatsLock);
       snap = sStats;
       taskEXIT_CRITICAL(&sStatsLock);
-      DEBUGF(DEBUG_ESPNOW_CORE,
+      DEBUG_ESPNOWF(
              "[ESPNOW_TX] stack free=%u peak_used=%u of %u | submitted=%u sent=%u failed=%u dropped=%u depth_hwm=%u",
              (unsigned)freeWords,
              (unsigned)(ESPNOW_TX_STACK_WORDS - freeWords),
@@ -348,7 +348,7 @@ static void txTask(void* param) {
     }
   }
 
-  DEBUGF(DEBUG_ESPNOW_CORE,
+  DEBUG_ESPNOWF(
          "[ESPNOW_TX] quiesced; cancelled=%u", (unsigned)cancelled);
   // stop() owns deletion. Signal only after the queue can no longer be
   // touched, then park so stop() has an explicit join point before deleting
@@ -362,7 +362,7 @@ static void txTask(void* param) {
 // ----------------------------------------------------------------------------
 bool init() {
   if (!sStopOwner || xSemaphoreTake(sStopOwner, portMAX_DELAY) != pdTRUE) {
-    DEBUGF(DEBUG_ESPNOW_CORE, "[ESPNOW_TX] init lifecycle owner unavailable");
+    DEBUG_ESPNOWF("[ESPNOW_TX] init lifecycle owner unavailable");
     return false;
   }
   struct InitOwnerGuard {
@@ -376,7 +376,7 @@ bool init() {
   }
   if (sLifecycle != Lifecycle::STOPPED) {
     taskEXIT_CRITICAL(&sStateLock);
-    DEBUGF(DEBUG_ESPNOW_CORE, "[ESPNOW_TX] init rejected during lifecycle transition");
+    DEBUG_ESPNOWF("[ESPNOW_TX] init rejected during lifecycle transition");
     return false;
   }
   sLifecycle = Lifecycle::INITIALIZING;
@@ -384,7 +384,7 @@ bool init() {
 
   QueueHandle_t queue = xQueueCreate(kQueueDepth, sizeof(Job));
   if (!queue) {
-    DEBUGF(DEBUG_ESPNOW_CORE, "[ESPNOW_TX] FAIL: xQueueCreate(%u slots, %u B each)",
+    DEBUG_ESPNOWF("[ESPNOW_TX] FAIL: xQueueCreate(%u slots, %u B each)",
            (unsigned)kQueueDepth, (unsigned)sizeof(Job));
     taskENTER_CRITICAL(&sStateLock);
     sLifecycle = Lifecycle::STOPPED;
@@ -398,7 +398,7 @@ bool init() {
       sizeof(SyncCompletion) * kSyncCompletionSlots,
       AllocPref::PreferPsram, "espnow.tx.completions");
   if (!control || !completionPool) {
-    DEBUGF(DEBUG_ESPNOW_CORE, "[ESPNOW_TX] FAIL: lifecycle control allocation");
+    DEBUG_ESPNOWF("[ESPNOW_TX] FAIL: lifecycle control allocation");
     if (control) heap_caps_free(control);
     if (completionPool) free(completionPool);
     vQueueDelete(queue);
@@ -415,7 +415,7 @@ bool init() {
   EventGroupHandle_t completionEvents =
       xEventGroupCreateStatic(&control->completionEventsStorage);
   if (!stopDone || !completionLock || !completionEvents) {
-    DEBUGF(DEBUG_ESPNOW_CORE, "[ESPNOW_TX] FAIL: static lifecycle object creation");
+    DEBUG_ESPNOWF("[ESPNOW_TX] FAIL: static lifecycle object creation");
     if (completionEvents) vEventGroupDelete(completionEvents);
     if (completionLock) vSemaphoreDelete(completionLock);
     if (stopDone) vSemaphoreDelete(stopDone);
@@ -446,7 +446,7 @@ bool init() {
                                     TASK_PRIORITY_HIGH, &sTxTaskHandle,
                                     "espnow.tx", PRO_CORE);
   if (rc != pdPASS) {
-    DEBUGF(DEBUG_ESPNOW_CORE, "[ESPNOW_TX] FAIL: xTaskCreateLogged rc=%d", (int)rc);
+    DEBUG_ESPNOWF("[ESPNOW_TX] FAIL: xTaskCreateLogged rc=%d", (int)rc);
     vEventGroupDelete(completionEvents);
     vSemaphoreDelete(completionLock);
     vSemaphoreDelete(stopDone);
@@ -473,7 +473,7 @@ bool init() {
   sLifecycle = Lifecycle::RUNNING;
   taskEXIT_CRITICAL(&sStateLock);
 
-  DEBUGF(DEBUG_ESPNOW_CORE,
+  DEBUG_ESPNOWF(
          "[ESPNOW_TX] init OK; completion pool=%u B PSRAM-preferred, control=%u B INTERNAL",
          (unsigned)(sizeof(SyncCompletion) * kSyncCompletionSlots),
          (unsigned)sizeof(LifecycleControl));
@@ -483,7 +483,7 @@ bool init() {
 bool stop(uint32_t timeoutMs) {
   if (!sStopOwner ||
       xSemaphoreTake(sStopOwner, pdMS_TO_TICKS(timeoutMs)) != pdTRUE) {
-    DEBUGF(DEBUG_ESPNOW_CORE,
+    DEBUG_ESPNOWF(
            "[ESPNOW_TX] stop owner busy after %ums", (unsigned)timeoutMs);
     return false;
   }
@@ -502,12 +502,12 @@ bool stop(uint32_t timeoutMs) {
   }
   if (sLifecycle == Lifecycle::INITIALIZING) {
     taskEXIT_CRITICAL(&sStateLock);
-    DEBUGF(DEBUG_ESPNOW_CORE, "[ESPNOW_TX] stop rejected while init is in progress");
+    DEBUG_ESPNOWF("[ESPNOW_TX] stop rejected while init is in progress");
     return false;
   }
   if (xTaskGetCurrentTaskHandle() == sTxTaskHandle) {
     taskEXIT_CRITICAL(&sStateLock);
-    DEBUGF(DEBUG_ESPNOW_CORE, "[ESPNOW_TX] stop rejected from dispatcher task");
+    DEBUG_ESPNOWF("[ESPNOW_TX] stop rejected from dispatcher task");
     return false;
   }
   if (sLifecycle == Lifecycle::RUNNING) sLifecycle = Lifecycle::CLOSING;
@@ -517,14 +517,14 @@ bool stop(uint32_t timeoutMs) {
   taskEXIT_CRITICAL(&sStateLock);
 
   if (!queue || !task || !stopDone) {
-    DEBUGF(DEBUG_ESPNOW_CORE, "[ESPNOW_TX] stop found incomplete lifecycle state");
+    DEBUG_ESPNOWF("[ESPNOW_TX] stop found incomplete lifecycle state");
     return false;
   }
   // Wake xQueueReceive immediately. Existing submitters remain safe because
   // the queue is retained until the dispatcher observes their count at zero.
   xTaskAbortDelay(task);
   if (xSemaphoreTake(stopDone, pdMS_TO_TICKS(timeoutMs)) != pdTRUE) {
-    DEBUGF(DEBUG_ESPNOW_CORE,
+    DEBUG_ESPNOWF(
            "[ESPNOW_TX] stop TIMEOUT after %ums; resources retained for retry",
            (unsigned)timeoutMs);
     return false;
@@ -549,7 +549,7 @@ bool stop(uint32_t timeoutMs) {
   sActiveSubmitters = 0;
   sLifecycle = Lifecycle::STOPPED;
   taskEXIT_CRITICAL(&sStateLock);
-  DEBUGF(DEBUG_ESPNOW_CORE, "[ESPNOW_TX] stopped and resources released");
+  DEBUG_ESPNOWF("[ESPNOW_TX] stopped and resources released");
   return true;
 }
 
@@ -600,7 +600,7 @@ bool submitSync(Job& job, uint32_t timeoutMs) {
   if (!completion) {
     releaseQueueClaim();
     if (job.payload) free(job.payload);
-    DEBUGF(DEBUG_ESPNOW_CORE, "[ESPNOW_TX] submitSync completion pool exhausted");
+    DEBUG_ESPNOWF("[ESPNOW_TX] submitSync completion pool exhausted");
     return false;
   }
   job.completion = completion;
@@ -626,7 +626,7 @@ bool submitSync(Job& job, uint32_t timeoutMs) {
   // the job, so no stale event can survive into a future request.
   bool ok = completionWait(completion, timeoutMs);
   if (!ok) {
-    DEBUGF(DEBUG_ESPNOW_CORE, "[ESPNOW_TX] submitSync FAILED/TIMEOUT (%ums) type=%u",
+    DEBUG_ESPNOWF("[ESPNOW_TX] submitSync FAILED/TIMEOUT (%ums) type=%u",
            (unsigned)timeoutMs, (unsigned)job.type);
   }
   return ok;
@@ -674,7 +674,7 @@ bool sendAead(const uint8_t mac[6], uint8_t type, uint16_t flags,
   if (payloadLen > 0) {
     psBuf = (uint8_t*)ps_alloc(payloadLen, AllocPref::PreferPsram, "espnow.tx.aead");
     if (!psBuf) {
-      DEBUGF(DEBUG_ESPNOW_CORE, "[ESPNOW_TX] sendAead ps_alloc failed type=%u len=%u",
+      DEBUG_ESPNOWF("[ESPNOW_TX] sendAead ps_alloc failed type=%u len=%u",
              (unsigned)type, (unsigned)payloadLen);
       return false;
     }
@@ -704,7 +704,7 @@ bool sendAeadSync(const uint8_t mac[6], uint8_t type, uint16_t flags,
   if (payloadLen > 0) {
     psBuf = (uint8_t*)ps_alloc(payloadLen, AllocPref::PreferPsram, "espnow.tx.aead.sync");
     if (!psBuf) {
-      DEBUGF(DEBUG_ESPNOW_CORE, "[ESPNOW_TX] sendAeadSync ps_alloc failed type=%u len=%u",
+      DEBUG_ESPNOWF("[ESPNOW_TX] sendAeadSync ps_alloc failed type=%u len=%u",
              (unsigned)type, (unsigned)payloadLen);
       return false;
     }

@@ -156,7 +156,7 @@ static void confirm_onExit(void* /*userData*/) {
   sConfirm.originatingCmd[0] = '\0';
   sConfirm.responseText[0]   = '\0';
   sConfirm.requiredRoleRank  = kRoleRankGuest;
-  DEBUGF(DEBUG_CLI, "[climode/confirm] exited");
+  DEBUG_CLIF("[climode/confirm] exited");
 }
 
 static const CliMode kConfirmMode = {

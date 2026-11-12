@@ -41,7 +41,7 @@ static size_t commandRegistrySize = 0;
 //
 // That summary uses logSystemEvent(), NOT a WARN macro. initializeCommandSystem
 // runs at HardwareOne.cpp:1372 but initDebugSystem() not until :1476, so every
-// DEBUGF/WARN variant here lands in debugQueuePrintf's `if (!getDebugQueue())
+// DEBUG_/WARN_ macro here lands in debugQueuePrintf's `if (!getDebugQueue())
 // return;` (System_Debug.cpp:777) and is discarded — the WARN_COMMANDF that used
 // to be here could never have fired, and WARN_COMMANDF is additionally gated on
 // getLogLevel() >= LOG_LEVEL_WARN. logSystemEvent echoes to Serial immediately,
@@ -182,7 +182,7 @@ String executeCommandThroughRegistry(const String& argsInput) {
 
   if (found) {
     // Execute through registry handler - pass only args, not full command
-    DEBUGF(DEBUG_CLI, "[registry_exec] executing: %s", found->name);
+    DEBUG_CLIF("[registry_exec] executing: %s", found->name);
     const char* result = found->handler(resolvedArgs);
     
     // Check if result indicates an error or usage issue

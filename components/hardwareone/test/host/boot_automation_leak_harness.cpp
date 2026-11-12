@@ -49,7 +49,7 @@ class String {
   std::string text_;
 };
 
-#define DEBUGF(...) do {} while (false)
+#define DEBUG_AUTOMATIONSF(...) do {} while (false)
 static constexpr int DEBUG_AUTOMATIONS = 0;
 static const char* AUTOMATIONS_JSON_FILE = "/system/automations.json";
 static constexpr unsigned SYSEVT_AUTOMATION_FIRED = 7;

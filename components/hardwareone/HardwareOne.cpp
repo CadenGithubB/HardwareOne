@@ -213,22 +213,6 @@ String setSession(httpd_req_t* req, const String& u);
 String getCookieSid(httpd_req_t* req);
 void buildAllSessionsJson(const String& currentSid, JsonArray& sessions);
 
-#ifndef DEBUGF
-// Debug macros - only emit if flag is set (uses accessor functions)
-#define DEBUGF(flag, fmt, ...) \
-  do { \
-    if (isDebugFlagSet(flag)) { \
-      if (ensureDebugBuffer()) { \
-        snprintf(getDebugBuffer(), 1024, fmt, ##__VA_ARGS__); \
-        /* Use Serial direct to avoid stressing HTTP task stack via web history writes */ \
-        Serial.printf("[" #flag "] %s\n", getDebugBuffer()); \
-      } \
-    } \
-  } while (0)
-#endif
-
-// NOTE: Debug macros (DEBUGF_RING, DEBUGF_BROADCAST, DEBUG_*F) now defined in debug_system.h
-// All debug functionality moved to debug_system.cpp for proper encapsulation
 void setupWifi();
 
 // Output/logging used widely before definition

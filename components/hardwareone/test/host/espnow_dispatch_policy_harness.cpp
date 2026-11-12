@@ -47,7 +47,7 @@ class String {
   const char* c_str() const { return text_.c_str(); }
 };
 template <class... A> static void debugSink(A&&...) {}
-#define DEBUGF(flag, ...) debugSink(__VA_ARGS__)
+#define DEBUG_ESPNOW_ROUTERF(...) debugSink(__VA_ARGS__)
 #define BROADCAST_PRINTF(...) do { ++gPrints; debugSink(__VA_ARGS__); } while (0)
 #define DEBUG_ESPNOW_ROUTER 1
 #define ESPNOW_TEXT_MAX_LEN 1024

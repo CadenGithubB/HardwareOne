@@ -164,7 +164,7 @@ void* ps_alloc(size_t n, AllocPref, const char*) { return std::malloc(n); }
 void* ps_calloc(size_t c, size_t n, AllocPref, const char*) { return std::calloc(c, n); }
 void heap_caps_free(void* p) { std::free(p); }
 #define DEBUG_ESPNOW_CORE 1
-#define DEBUGF(level, ...) debugSink(level, __VA_ARGS__)
+#define DEBUG_ESPNOWF(...) debugSink(DEBUG_ESPNOW_CORE, __VA_ARGS__)
 static constexpr uint32_t ESPNOW_TX_STACK_WORDS = 5120;
 static constexpr UBaseType_t TASK_PRIORITY_HIGH = 5;
 static constexpr BaseType_t PRO_CORE = 0;
@@ -387,7 +387,7 @@ class String {
 String redactOutputForLog(const String& message) { return message; }
 
 #define DEBUG_ESPNOW_STREAM 1
-#define DEBUGF(level, ...) debugSink(level, __VA_ARGS__)
+#define DEBUG_ESPNOW_STREAMF(...) debugSink(DEBUG_ESPNOW_STREAM, __VA_ARGS__)
 
 // Mirrors System_ESPNow_Wire.h; the Python side checks the header still says so.
 #define ESPNOW_V4_MAX_PAYLOAD (250 - 32)

@@ -1476,7 +1476,7 @@ bool espnowRekeyInitiate(const uint8_t peerMac[6]) {
   // so never send one. This also keeps a responder's parked reply key (the
   // reply grace) from being overwritten by a local initiation.
   if ((uint32_t)(nowMs - s->establishedAtMs) < kRekeyMinIntervalMs) {
-    DEBUGF(DEBUG_ESPNOW_CORE, "REKEY initiate: skipping - session keyed %ums ago (min interval %ums)",
+    DEBUG_ESPNOWF("REKEY initiate: skipping - session keyed %ums ago (min interval %ums)",
            (unsigned)(nowMs - s->establishedAtMs), (unsigned)kRekeyMinIntervalMs);
     return false;
   }
@@ -1484,7 +1484,7 @@ bool espnowRekeyInitiate(const uint8_t peerMac[6]) {
   // converge before re-firing on the same trigger.
   if (s->rekeyInitiatedAtMs != 0 &&
       (nowMs - s->rekeyInitiatedAtMs) < kRekeyMinIntervalMs) {
-    DEBUGF(DEBUG_ESPNOW_CORE, "REKEY initiate: skipping — last attempt was %ums ago",
+    DEBUG_ESPNOWF("REKEY initiate: skipping — last attempt was %ums ago",
            (unsigned)(nowMs - s->rekeyInitiatedAtMs));
     return false;
   }

@@ -163,7 +163,7 @@ bool cliEnterModePrepared(const CliMode* mode,
   if (!mode) return false;
   CliModeOwner owner;
   if (!currentOwner(owner, /*requireInteractive=*/true)) {
-    DEBUGF(DEBUG_CLI,
+    DEBUG_CLIF(
            "[climode] enter '%s' rejected: invocation has no live interactive session",
            mode->name ? mode->name : "(unnamed)");
     return false;
@@ -175,7 +175,7 @@ bool cliEnterModePrepared(const CliMode* mode,
     if (!lock) return false;
     requestInvalidExitLocked();
     if (sMode.mode) {
-      DEBUGF(DEBUG_CLI, "[climode] enter '%s' rejected: '%s' already active",
+      DEBUG_CLIF("[climode] enter '%s' rejected: '%s' already active",
              mode->name ? mode->name : "(unnamed)",
              sMode.mode->name ? sMode.mode->name : "(unnamed)");
       return false;
@@ -198,7 +198,7 @@ bool cliEnterModePrepared(const CliMode* mode,
     sMode.exitReason = nullptr;
     sSuppressAmbientSerial.store(owner.source == SOURCE_SERIAL,
                                  std::memory_order_release);
-    DEBUGF(DEBUG_CLI, "[climode] enter '%s' instance=%lu transport=%d epoch=%lu",
+    DEBUG_CLIF("[climode] enter '%s' instance=%lu transport=%d epoch=%lu",
            mode->name ? mode->name : "(unnamed)",
            static_cast<unsigned long>(sMode.instanceId),
            static_cast<int>(owner.source),
@@ -363,7 +363,7 @@ bool cliModeDispatchInput(const String& line, char* out, size_t outSize) {
             consumed = false;
             break;
           default:
-            DEBUGF(DEBUG_CLI,
+            DEBUG_CLIF(
                    "[climode] '%s' returned invalid input result=%d; consuming",
                    mode->name ? mode->name : "(unnamed)",
                    static_cast<int>(result));
@@ -401,7 +401,7 @@ bool cliModeExecutorDrainPending() {
     if (!lock || !claimExitLocked(claim)) return false;
   }
 
-  DEBUGF(DEBUG_CLI, "[climode] exit '%s' instance=%lu reason=%s",
+  DEBUG_CLIF("[climode] exit '%s' instance=%lu reason=%s",
          claim.mode && claim.mode->name ? claim.mode->name : "(unnamed)",
          static_cast<unsigned long>(claim.instanceId),
          claim.reason ? claim.reason : "unknown");

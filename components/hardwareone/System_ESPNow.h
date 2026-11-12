@@ -1303,7 +1303,7 @@ bool isSelfMac(const uint8_t* mac);
 void macFromHexString(const String& s, uint8_t out[6]);
 // Zero-allocation MAC formatter for debug log call sites.
 // Uses a GCC statement expression + a function-static char[18] — no heap, no
-// String. Usage: DEBUGF(..., "%s", MAC_STR(mac))  instead of  macToDisplayStr(mac).c_str()
+// String. Usage: DEBUG_ESPNOWF("... %s", MAC_STR(mac))  instead of  macToDisplayStr(mac).c_str()
 //
 // The static lives in PSRAM (EXT_RAM_BSS_ATTR). Each expansion site mints its
 // own 18-byte static, so the ~37 sites in this build cost ~666 B of internal

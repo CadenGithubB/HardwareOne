@@ -448,7 +448,7 @@ static void v4_reasm_gc(uint32_t nowMs) {
   if (!gV4Reasm) return;
   for (int i = 0; i < V4_REASM_MAX; i++) {
     if (gV4Reasm[i].active && (nowMs - gV4Reasm[i].lastUpdateMs) > V4_REASM_TIMEOUT_MS) {
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_REASM_GC] Evicting stale msgId=%lu from " MAC_FMT,
+      DEBUG_ESPNOW_ROUTERF("[V4_REASM_GC] Evicting stale msgId=%lu from " MAC_FMT,
              (unsigned long)gV4Reasm[i].msgId,
              MAC_ARGS(gV4Reasm[i].src));
       if (gEspNow) { gEspNow->routerMetrics.v4FragRxGc++; }
@@ -489,7 +489,7 @@ static void v4_reasm_release(const uint8_t* src, uint32_t msgId) {
   for (int i = 0; i < V4_REASM_MAX; i++) {
     if (gV4Reasm[i].active && gV4Reasm[i].msgId == msgId &&
         memcmp(gV4Reasm[i].src, src, 6) == 0) {
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Cleaning up reassembly buffer for msgId=%lu",
+      DEBUG_ESPNOW_ROUTERF("[V4_FRAG_RX] Cleaning up reassembly buffer for msgId=%lu",
              (unsigned long)msgId);
       v4_reasm_reset(gV4Reasm[i]);
       return;
@@ -903,7 +903,7 @@ static bool saveEspNowDevices() {
                        VFS::systemAuth(VFS::Scopes::ESPNOW_STATE, "espnow.devices_save"));
     return false;
   }
-  DEBUGF(DEBUG_ESPNOW_MESH, "[ESP-NOW] Saved %d device(s) to %s", count, ESPNOW_DEVICES_FILE);
+  DEBUG_ESPNOW_MESHF("[ESP-NOW] Saved %d device(s) to %s", count, ESPNOW_DEVICES_FILE);
   return true;
 }
 
@@ -928,7 +928,7 @@ static void restoreEspNowPeers() {
 
     if (success) {
       String encStatus = gEspNow->devices[i].encrypted ? " (encrypted)" : " (unencrypted)";
-      DEBUGF(DEBUG_ESPNOW_STREAM, "[ESP-NOW] Restored device: %s (%s)%s", 
+      DEBUG_ESPNOW_STREAMF("[ESP-NOW] Restored device: %s (%s)%s", 
              gEspNow->devices[i].name.c_str(), macToDisplayStr(gEspNow->devices[i].mac).c_str(), encStatus.c_str());
     }
   }
@@ -963,7 +963,7 @@ void deriveKeyFromPassphrase(const String& passphrase, uint8_t* key) {
   espnowSelfStaMac(mac);
   String macStr = macToDisplayStr(mac);
 
-  DEBUGF(DEBUG_ESPNOW_STREAM, "[ESP-NOW] Encryption key derived successfully");
+  DEBUG_ESPNOW_STREAMF("[ESP-NOW] Encryption key derived successfully");
   // NOTE: Do not call broadcastOutput here - can cause watchdog timeout during init
 }
 
@@ -1051,21 +1051,21 @@ static SessionState* bondPeerActiveSession() {
 
 static bool validateBondSessionToken(const uint8_t* token, size_t tokenLen) {
   if (tokenLen != 16) {
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[BOND_AUTH] Validate failed: wrong token length %zu", tokenLen);
+    DEBUG_ESPNOW_ROUTERF("[BOND_AUTH] Validate failed: wrong token length %zu", tokenLen);
     return false;
   }
   SessionState* s = bondPeerActiveSession();
   if (!s) {
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[BOND_AUTH] Validate failed: no active bond-peer session token");
+    DEBUG_ESPNOW_ROUTERF("[BOND_AUTH] Validate failed: no active bond-peer session token");
     return false;
   }
   bool match = (memcmp(token, s->bondToken, 16) == 0);
   if (!match) {
     // A bond token is a bearer credential.  Prefixes are still credential
     // material and add no value beyond the mismatch itself.
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[BOND_AUTH] Token mismatch");
+    DEBUG_ESPNOW_ROUTERF("[BOND_AUTH] Token mismatch");
   } else {
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[BOND_AUTH] Token validated OK");
+    DEBUG_ESPNOW_ROUTERF("[BOND_AUTH] Token validated OK");
   }
   return match;
 }
@@ -1150,12 +1150,12 @@ static bool addEspNowPeerWithEncryption(const uint8_t* mac, bool /*useEncryption
   peerInfo.ifidx   = WIFI_IF_STA;
   peerInfo.encrypt = false;  // LMK removed — confidentiality via SESSION_FRAME
 
-  DEBUGF(DEBUG_ESPNOW_STREAM, "[ESP-NOW] Adding peer: %s (radio plaintext; AEAD via session if any)",
+  DEBUG_ESPNOW_STREAMF("[ESP-NOW] Adding peer: %s (radio plaintext; AEAD via session if any)",
          macToDisplayStr(mac).c_str());
 
   esp_err_t result = esp_now_add_peer(&peerInfo);
   if (result != ESP_OK) {
-    DEBUGF(DEBUG_ESPNOW_STREAM, "[ESP-NOW] Failed to add peer: %d", result);
+    DEBUG_ESPNOW_STREAMF("[ESP-NOW] Failed to add peer: %d", result);
     return false;
   }
   return true;
@@ -1280,7 +1280,7 @@ void sendChunkedResponse(const uint8_t* targetMac, bool success, const String& r
 
   if (sent) {
     broadcastOutput("[ESP-NOW] V3 response sent successfully");
-    DEBUGF(DEBUG_ESPNOW_STREAM, "[ESP-NOW] V3 response sent successfully to %s", senderName.c_str());
+    DEBUG_ESPNOW_STREAMF("[ESP-NOW] V3 response sent successfully to %s", senderName.c_str());
   } else {
     broadcastOutput("[ESP-NOW] WARNING: V3 response transmission failed");
   }
@@ -1364,7 +1364,7 @@ void sendEspNowStreamMessage(const String& message) {
 
   if (sent) {
     gEspNow->streamSentCount++;
-    DEBUGF(DEBUG_ESPNOW_STREAM, "[STREAM] Legacy sent | sent=%lu | %.50s",
+    DEBUG_ESPNOW_STREAMF("[STREAM] Legacy sent | sent=%lu | %.50s",
            (unsigned long)gEspNow->streamSentCount, safeMessage.c_str());
   }
 }
@@ -1427,12 +1427,12 @@ static StreamSession* createStreamSession(const uint8_t* mac, uint32_t cmdMsgId)
       gStreamSessions[i].cmdMsgId = cmdMsgId;
       gStreamSessions[i].createdAt = now;
       memcpy(gStreamSessions[i].targetMac, mac, 6);
-      DEBUGF(DEBUG_ESPNOW_STREAM, "[STREAM] Session created: msgId=%lu slot=%d", 
+      DEBUG_ESPNOW_STREAMF("[STREAM] Session created: msgId=%lu slot=%d", 
              (unsigned long)cmdMsgId, i);
       return &gStreamSessions[i];
     }
   }
-  DEBUGF(DEBUG_ESPNOW_STREAM, "[STREAM] No free session slots for msgId=%lu", (unsigned long)cmdMsgId);
+  DEBUG_ESPNOW_STREAMF("[STREAM] No free session slots for msgId=%lu", (unsigned long)cmdMsgId);
   return nullptr;
 }
 
@@ -1449,7 +1449,7 @@ static void destroyStreamSession(uint32_t cmdMsgId) {
   for (int i = 0; i < MAX_STREAM_SESSIONS; i++) {
     if (gStreamSessions[i].active && gStreamSessions[i].cmdMsgId == cmdMsgId) {
       gStreamSessions[i].active = false;
-      DEBUGF(DEBUG_ESPNOW_STREAM, "[STREAM] Session destroyed: msgId=%lu slot=%d", 
+      DEBUG_ESPNOW_STREAMF("[STREAM] Session destroyed: msgId=%lu slot=%d", 
              (unsigned long)cmdMsgId, i);
       return;
     }
@@ -1487,7 +1487,7 @@ static bool trySendToStreamSession(uint32_t cmdMsgId, const char* data, size_t l
   // Step 3c: fire-and-forget through clerk (called from cmd_exec output path).
   espnowtx::sendAead(sess->targetMac, ESPNOW_V4_TYPE_STREAM, 0, cmdMsgId,
                      (const uint8_t*)data, (uint16_t)len, 1);
-  DEBUGF(DEBUG_ESPNOW_STREAM, "[STREAM] Session %lu sent: %.50s", (unsigned long)cmdMsgId, data);
+  DEBUG_ESPNOW_STREAMF("[STREAM] Session %lu sent: %.50s", (unsigned long)cmdMsgId, data);
   return true;
 }
 
@@ -1558,7 +1558,7 @@ static void broadcast_tracker_record_ack(uint32_t msgId, const uint8_t* peerMac)
     if (memcmp(tracker->peerMacs[i], peerMac, 6) == 0 && !tracker->ackReceived[i]) {
       tracker->ackReceived[i] = true;
       tracker->receivedCount++;
-      DEBUGF(DEBUG_ESPNOW_CORE, "[BROADCAST_TRACK] ACK %u/%u for msgId=%lu",
+      DEBUG_ESPNOWF("[BROADCAST_TRACK] ACK %u/%u for msgId=%lu",
              tracker->receivedCount, tracker->expectedCount, (unsigned long)msgId);
       return;
     }
@@ -1984,7 +1984,7 @@ static bool v4_send_frame_ex(const uint8_t* dst, uint8_t type, uint16_t flags, u
     const MeshDerivedKeys* mk = meshKeysFindByFingerprint(h.meshFingerprint);
     if (mk && mk->valid) {
       if (payloadLen + ESPNOW_V4_BROADCAST_AUTH_TAG_LEN > ESPNOW_V4_MAX_PAYLOAD) {
-        DEBUGF(DEBUG_ESPNOW_CORE,
+        DEBUG_ESPNOWF(
                "[V4_TX] BROADCAST_AUTH: payload too large (%u + %u tag > %u) — dropping",
                payloadLen, ESPNOW_V4_BROADCAST_AUTH_TAG_LEN, ESPNOW_V4_MAX_PAYLOAD);
         return false;
@@ -2117,7 +2117,7 @@ static bool v4_relay_wrap_and_send(const uint8_t nextHop[6], const uint8_t final
   if (!nextHop || !finalDst || !innerFrame) return false;
   if (innerLen < sizeof(EspNowV4Header) || innerLen > ESPNOW_V4_RELAY_MAX_INNER_FRAME) {
     meshRelayMetrics().routedDropTooBig++;
-    DEBUGF(DEBUG_ESPNOW_MESH,
+    DEBUG_ESPNOW_MESHF(
            "[MESH_RELAY] frame of %u B will not fit an envelope (max %u) — not routed",
            (unsigned)innerLen, (unsigned)ESPNOW_V4_RELAY_MAX_INNER_FRAME);
     return false;
@@ -2141,7 +2141,7 @@ static bool v4_relay_wrap_and_send(const uint8_t nextHop[6], const uint8_t final
   const MeshDerivedKeys* mk = fp ? meshKeysFindByFingerprint(fp) : nullptr;
   if (!mk || !mk->valid) {
     meshRelayMetrics().routedDropPolicy++;
-    DEBUGF(DEBUG_ESPNOW_MESH,
+    DEBUG_ESPNOW_MESHF(
            "[MESH_ROUTED] no group key for next hop's mesh (fp=0x%04X) — cannot route",
            (unsigned)fp);
     return false;
@@ -2243,7 +2243,7 @@ bool v4_send_session_wrapped(const uint8_t dst[6], uint8_t type, uint16_t baseFl
   // trip unchanged, so a far peer's session works exactly like a near one's.
   esp_err_t rc = v4_radio_emit(dst, frame, frameLen, /*allowRoute=*/true) ? ESP_OK : ESP_FAIL;
   UBaseType_t hwmSend = uxTaskGetStackHighWaterMark(nullptr);
-  DEBUGF(DEBUG_ESPNOW_CORE,
+  DEBUG_ESPNOWF(
          "[TXDEPTH] task=%s type=%u len=%u free_words: pre=%u postAEAD=%u postSend=%u",
          pcTaskGetName(nullptr), (unsigned)type, (unsigned)plaintextLen,
          (unsigned)hwmPre, (unsigned)hwmAead, (unsigned)hwmSend);
@@ -2409,7 +2409,7 @@ bool v4_broadcast(uint8_t type, uint16_t flags, uint32_t msgId, const uint8_t* p
       tracker->active = true;
       tracker->reported = false;
       gBroadcastsTracked++;
-      DEBUGF(DEBUG_ESPNOW_CORE, "[BROADCAST_TRACK] Allocated tracker for msgId=%lu", (unsigned long)msgId);
+      DEBUG_ESPNOWF("[BROADCAST_TRACK] Allocated tracker for msgId=%lu", (unsigned long)msgId);
     } else {
       WARN_ESPNOWF("[BROADCAST_TRACK] No free tracker slots for msgId=%lu", (unsigned long)msgId);
     }
@@ -2444,7 +2444,7 @@ bool v4_broadcast(uint8_t type, uint16_t flags, uint32_t msgId, const uint8_t* p
     }
   }
   
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_BROADCAST] Sent to %d peers (msgId=%lu type=%u tracked=%s)",
+  DEBUG_ESPNOW_ROUTERF("[V4_BROADCAST] Sent to %d peers (msgId=%lu type=%u tracked=%s)",
          sentCount, (unsigned long)msgId, type, tracker ? "YES" : "NO");
 
   return anySuccess;
@@ -2547,7 +2547,7 @@ bool v4_broadcast_category(uint8_t type, uint16_t flags, uint32_t msgId,
     }
   }
 
-  DEBUGF(DEBUG_ESPNOW_ROUTER,
+  DEBUG_ESPNOW_ROUTERF(
          "[V4_BROADCAST_GATED] type=%u msgId=%lu category=0x%08lX sent=%d skipped=%d",
          type, (unsigned long)msgId, (unsigned long)category, sentCount, skippedCount);
   if (outAttempted) *outAttempted = attemptedCount;
@@ -2649,9 +2649,9 @@ bool v4_send_encrypted_chunked(const uint8_t dst[6], uint8_t type, uint16_t base
 
   char dstMac[18];
   macToDisplay(dst, dstMac, sizeof(dstMac));
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_ENC_FRAG_TX] ==============================");
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_ENC_FRAG_TX] Starting encrypted fragmented send to %s", dstMac);
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_ENC_FRAG_TX] msgId=%lu type=%u payloadLen=%u fragCount=%u",
+  DEBUG_ESPNOW_ROUTERF("[V4_ENC_FRAG_TX] ==============================");
+  DEBUG_ESPNOW_ROUTERF("[V4_ENC_FRAG_TX] Starting encrypted fragmented send to %s", dstMac);
+  DEBUG_ESPNOW_ROUTERF("[V4_ENC_FRAG_TX] msgId=%lu type=%u payloadLen=%u fragCount=%u",
          (unsigned long)msgId, type, payloadLen, fragCount);
 
   uint8_t myMac[6];
@@ -2668,7 +2668,7 @@ bool v4_send_encrypted_chunked(const uint8_t dst[6], uint8_t type, uint16_t base
     bool fragSent = false;
     for (uint8_t retry = 0; retry < MAX_RETRIES && !fragSent; retry++) {
       if (retry > 0) {
-        DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_ENC_FRAG_TX] retry %u/%u for fragment %u/%u",
+        DEBUG_ESPNOW_ROUTERF("[V4_ENC_FRAG_TX] retry %u/%u for fragment %u/%u",
                retry + 1, MAX_RETRIES, fragIdx + 1, fragCount);
       }
 
@@ -2725,7 +2725,7 @@ bool v4_send_encrypted_chunked(const uint8_t dst[6], uint8_t type, uint16_t base
       while ((millis() - waitStart) < ACK_TIMEOUT_MS) {
         if (ackWait->acked) {
           fragSent = true;
-          DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_ENC_FRAG_TX] ✓ frag %u/%u ACK in %lu ms",
+          DEBUG_ESPNOW_ROUTERF("[V4_ENC_FRAG_TX] ✓ frag %u/%u ACK in %lu ms",
                  fragIdx + 1, fragCount, (unsigned long)(millis() - waitStart));
           break;
         }
@@ -2742,15 +2742,15 @@ bool v4_send_encrypted_chunked(const uint8_t dst[6], uint8_t type, uint16_t base
     if (!fragSent) {
       WARN_ESPNOWF("[V4_ENC_FRAG_TX] FAILED: frag %u/%u no ACK after %u retries — aborting send",
                    fragIdx + 1, fragCount, MAX_RETRIES);
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_ENC_FRAG_TX] ==============================");
+      DEBUG_ESPNOW_ROUTERF("[V4_ENC_FRAG_TX] ==============================");
       return false;
     }
 
     offset += fragLen;
   }
 
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_ENC_FRAG_TX] ✓ SUCCESS: all %u fragments sent + ACKed", fragCount);
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_ENC_FRAG_TX] ==============================");
+  DEBUG_ESPNOW_ROUTERF("[V4_ENC_FRAG_TX] ✓ SUCCESS: all %u fragments sent + ACKed", fragCount);
+  DEBUG_ESPNOW_ROUTERF("[V4_ENC_FRAG_TX] ==============================");
   // A fragmented send is ACKed per-fragment (the waiter above), which never
   // reaches the broadcast-tracker ACK path that flips the web UI's delivery
   // bubble. Mark it delivered here so a long (chunked) message shows
@@ -2807,7 +2807,7 @@ bool v4_send_payload_smart(const uint8_t* dst, uint8_t type, uint16_t flags,
     bool ok = v4_send_encrypted_or_queue(dst, type, flags, msgId, payload, payloadLen,
                                           ttl, status, sizeof(status));
     if (!ok) {
-      DEBUGF(DEBUG_ESPNOW_CORE,
+      DEBUG_ESPNOWF(
              "[V4_TX] smart-send: encrypted-or-queue HARD-FAILED (%s) for type=%u msgId=%lu",
              status[0] ? status : "no detail", type, (unsigned long)msgId);
     }
@@ -2822,7 +2822,7 @@ bool v4_send_payload_smart(const uint8_t* dst, uint8_t type, uint16_t flags,
       if (v4_send_encrypted_chunked(dst, type, flags, msgId, payload, payloadLen, ttl)) {
         return true;
       }
-      DEBUGF(DEBUG_ESPNOW_CORE,
+      DEBUG_ESPNOWF(
              "[V4_TX] smart-send: encrypted-chunked FAILED for type=%u msgId=%lu (%u bytes)",
              type, (unsigned long)msgId, payloadLen);
       return false;
@@ -2836,7 +2836,7 @@ bool v4_send_payload_smart(const uint8_t* dst, uint8_t type, uint16_t flags,
   } else {
     (void)espnowSessionOpenInitiate(dst, nullptr);
   }
-  DEBUGF(DEBUG_ESPNOW_CORE,
+  DEBUG_ESPNOWF(
          "[V4_TX] smart-send: multi-frame send to " MAC_FMT " requires "
          "ACTIVE session (type=%u msgId=%lu, %u bytes) — kicked %s, dropping. Caller should retry.",
          MAC_ARGS(dst),
@@ -2848,9 +2848,9 @@ bool v4_send_payload_smart(const uint8_t* dst, uint8_t type, uint16_t flags,
 static bool v4_send_ack(const uint8_t* dst, uint32_t ackFor) {
   char dstMac[18];
   macToDisplay(dst, dstMac, sizeof(dstMac));
-  DEBUGF(DEBUG_ESPNOW_CORE, "[V4_ACK_TX] Sending ACK to %s for msgId=%lu", dstMac, (unsigned long)ackFor);
+  DEBUG_ESPNOWF("[V4_ACK_TX] Sending ACK to %s for msgId=%lu", dstMac, (unsigned long)ackFor);
   bool result = v4_send_frame(dst, ESPNOW_V4_TYPE_ACK, 0, ackFor, nullptr, 0, 1);
-  DEBUGF(DEBUG_ESPNOW_CORE, "[V4_ACK_TX] Result: %s", result ? "SUCCESS" : "FAILED");
+  DEBUG_ESPNOWF("[V4_ACK_TX] Result: %s", result ? "SUCCESS" : "FAILED");
   return result;
 }
 
@@ -2870,8 +2870,8 @@ static bool v4_send_file_cancel(const uint8_t* dst, uint32_t msgId, uint8_t reas
 static bool v4_send_frag_ack(const uint8_t* dst, uint32_t msgId, uint8_t fragIndex, uint8_t fragCount) {
   char dstMac[18];
   macToDisplay(dst, dstMac, sizeof(dstMac));
-  DEBUGF(DEBUG_ESPNOW_CORE, "[V4_FRAG_ACK_TX] Sending fragment ACK to %s", dstMac);
-  DEBUGF(DEBUG_ESPNOW_CORE, "[V4_FRAG_ACK_TX] msgId=%lu fragIdx=%u fragCnt=%u",
+  DEBUG_ESPNOWF("[V4_FRAG_ACK_TX] Sending fragment ACK to %s", dstMac);
+  DEBUG_ESPNOWF("[V4_FRAG_ACK_TX] msgId=%lu fragIdx=%u fragCnt=%u",
          (unsigned long)msgId, fragIndex, fragCount);
   
   // Build ACK frame with fragment info in header
@@ -2892,7 +2892,7 @@ static bool v4_send_frag_ack(const uint8_t* dst, uint32_t msgId, uint8_t fragInd
   h.meshFingerprint = fingerprintForPeer(dst);  // Phase 2: ACK rides the requester's mesh
   h.crc16 = 0;
 
-  DEBUGF(DEBUG_ESPNOW_CORE, "[V4_FRAG_ACK_TX] Calling esp_now_send: headerLen=%u", (unsigned)sizeof(h));
+  DEBUG_ESPNOWF("[V4_FRAG_ACK_TX] Calling esp_now_send: headerLen=%u", (unsigned)sizeof(h));
   captureEspNowFrame("TX", dst, 0, (const uint8_t*)&h, (int)sizeof(h));
   // ttl=1 above is the INNER frame's budget ("never flood an ACK"). When dst is
   // a routed peer the envelope carries its own hop budget, so per-fragment ACKs
@@ -2901,9 +2901,9 @@ static bool v4_send_frag_ack(const uint8_t* dst, uint32_t msgId, uint8_t fragInd
                          ? ESP_OK : ESP_FAIL;
   
   if (result == ESP_OK) {
-    DEBUGF(DEBUG_ESPNOW_CORE, "[V4_FRAG_ACK_TX] ✓ Fragment ACK sent successfully");
+    DEBUG_ESPNOWF("[V4_FRAG_ACK_TX] ✓ Fragment ACK sent successfully");
   } else {
-    DEBUGF(DEBUG_ESPNOW_CORE, "[V4_FRAG_ACK_TX] ✗ Fragment ACK send failed: esp_err=%d", result);
+    DEBUG_ESPNOWF("[V4_FRAG_ACK_TX] ✗ Fragment ACK send failed: esp_err=%d", result);
   }
   
   return (result == ESP_OK);
@@ -2920,7 +2920,7 @@ static bool v4_broadcast_time_sync(uint32_t epochTime, int32_t timeOffset) {
   payload.epochTime = epochTime;
   payload.timeOffset = timeOffset;
   uint32_t msgId = generateMessageId();
-  DEBUGF(DEBUG_ESPNOW_MESH, "[V4_TX_TIME_SYNC] Broadcasting (BROADCAST_AUTH) msgId=%lu ttl=%u",
+  DEBUG_ESPNOW_MESHF("[V4_TX_TIME_SYNC] Broadcasting (BROADCAST_AUTH) msgId=%lu ttl=%u",
          (unsigned long)msgId, (unsigned)gSettings.meshTtl);
   // Live meshTtl, not a literal: this is one of the two flood-relayed opcodes,
   // so the setting is what decides how far a clock update travels.
@@ -2936,7 +2936,7 @@ static bool v4_send_topo_request(const uint8_t* dst, uint32_t reqId) {
   uint32_t msgId = generateMessageId();
   char dstMac[18];
   macToDisplay(dst, dstMac, sizeof(dstMac));
-  DEBUGF(DEBUG_ESPNOW_TOPO, "[V4_TX_TOPO_REQ] Sending to %s msgId=%lu reqId=%lu",
+  DEBUG_ESPNOW_TOPOF("[V4_TX_TOPO_REQ] Sending to %s msgId=%lu reqId=%lu",
          dstMac, (unsigned long)msgId, (unsigned long)reqId);
   // Keep topology on its established plaintext V4 transport. Moving this
   // multi-frame exchange through the one-deep encrypted pending queue would
@@ -2944,12 +2944,12 @@ static bool v4_send_topo_request(const uint8_t* dst, uint32_t reqId) {
   // a session is being established.
   bool result = v4_send_frame(dst, ESPNOW_V4_TYPE_TOPO_REQ, 0, msgId,
                               (const uint8_t*)&payload, sizeof(payload), 2);
-  DEBUGF(DEBUG_ESPNOW_TOPO, "[V4_TX_TOPO_REQ] Result: %s", result ? "SUCCESS" : "FAILED");
+  DEBUG_ESPNOW_TOPOF("[V4_TX_TOPO_REQ] Result: %s", result ? "SUCCESS" : "FAILED");
   return result;
 }
 
 bool v4_broadcast_topo_request(uint32_t reqId) {
-  DEBUGF(DEBUG_ESPNOW_TOPO, "[V4_BROADCAST_TOPO_REQ] Broadcasting reqId=%lu", (unsigned long)reqId);
+  DEBUG_ESPNOW_TOPOF("[V4_BROADCAST_TOPO_REQ] Broadcasting reqId=%lu", (unsigned long)reqId);
   uint8_t broadcastMac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
   return v4_send_topo_request(broadcastMac, reqId);
 }
@@ -3008,7 +3008,7 @@ static bool bondSendEncryptedAsync(const uint8_t* mac, uint8_t type, uint16_t fl
   if (len > 0) {
     psBuf = (uint8_t*)ps_alloc((size_t)len, AllocPref::PreferPsram, "espnow.tx.payload");
     if (!psBuf) {
-      DEBUGF(DEBUG_ESPNOW_CORE, "[BOND_TX_ASYNC] ps_alloc failed len=%u", (unsigned)len);
+      DEBUG_ESPNOWF("[BOND_TX_ASYNC] ps_alloc failed len=%u", (unsigned)len);
       return false;
     }
     memcpy(psBuf, payload, len);
@@ -3132,14 +3132,14 @@ bool v4_broadcast_sensor_status(RemoteSensorType sensorType, bool enabled) {
   memset(payload.reserved, 0, sizeof(payload.reserved));
   
   uint32_t msgId = generateMessageId();
-  DEBUGF(DEBUG_ESPNOW_MESH, "[V4_BROADCAST_SENSOR_STATUS] Broadcasting msgId=%lu", (unsigned long)msgId);
-  DEBUGF(DEBUG_ESPNOW_MESH, "[V4_BROADCAST_SENSOR_STATUS] sensor=%s enabled=%s",
+  DEBUG_ESPNOW_MESHF("[V4_BROADCAST_SENSOR_STATUS] Broadcasting msgId=%lu", (unsigned long)msgId);
+  DEBUG_ESPNOW_MESHF("[V4_BROADCAST_SENSOR_STATUS] sensor=%s enabled=%s",
          sensorTypeToString(sensorType), enabled ? "YES" : "NO");
   // Phase 5: gate on per-peer SENSOR subscription.
   bool result = v4_broadcast_category(ESPNOW_V4_TYPE_SENSOR_STATUS, 0, msgId,
                                        (const uint8_t*)&payload, sizeof(payload), 2,
                                        ESPNOW_EVT_SENSOR);
-  DEBUGF(DEBUG_ESPNOW_MESH, "[V4_BROADCAST_SENSOR_STATUS] Result: %s", result ? "SUCCESS" : "FAILED");
+  DEBUG_ESPNOW_MESHF("[V4_BROADCAST_SENSOR_STATUS] Result: %s", result ? "SUCCESS" : "FAILED");
   return result;
 }
 
@@ -3154,7 +3154,7 @@ bool v4_broadcast_sensor_status(RemoteSensorType sensorType, bool enabled) {
 bool v4_send_sensor_envelope(const uint8_t* dstMac, RemoteSensorType sensorType,
                              const char* jsonData, uint16_t jsonLen) {
   if (!dstMac || !jsonData || jsonLen == 0 || jsonLen > 200) {
-    DEBUGF(DEBUG_ESPNOW_MESH, "[V4_TX_SENSOR_ENVELOPE] invalid params (len=%u)", jsonLen);
+    DEBUG_ESPNOW_MESHF("[V4_TX_SENSOR_ENVELOPE] invalid params (len=%u)", jsonLen);
     return false;
   }
   uint8_t buffer[256];
@@ -3178,21 +3178,21 @@ bool v4_send_sensor_envelope(const uint8_t* dstMac, RemoteSensorType sensorType,
 
 bool v4_send_user_sync(const uint8_t* dst, const char* jsonPayload, uint16_t jsonLen) {
   if (!jsonPayload || jsonLen == 0) {
-    DEBUGF(DEBUG_ESPNOW_MESH, "[V4_TX_USER_SYNC] ERROR: Invalid params (jsonPayload=%p len=%u)",
+    DEBUG_ESPNOW_MESHF("[V4_TX_USER_SYNC] ERROR: Invalid params (jsonPayload=%p len=%u)",
            jsonPayload, jsonLen);
     return false;
   }
   uint32_t msgId = generateMessageId();
   char dstMac[18];
   macToDisplay(dst, dstMac, sizeof(dstMac));
-  DEBUGF(DEBUG_ESPNOW_MESH, "[V4_TX_USER_SYNC] Sending (encrypted) to %s msgId=%lu len=%u", dstMac, (unsigned long)msgId, jsonLen);
+  DEBUG_ESPNOW_MESHF("[V4_TX_USER_SYNC] Sending (encrypted) to %s msgId=%lu len=%u", dstMac, (unsigned long)msgId, jsonLen);
   // USER_SYNC carries user records (possibly hashed credentials). Smart is
   // now strict encrypt-or-fail (2026-05 cleanup) — no plaintext fallback — so
   // routing through it gets the right semantics for free. Smart also auto-kicks
   // KEY_EX/SESSION_OPEN if needed (encrypt-or-wait foundation).
   bool result = v4_send_payload_smart(dst, ESPNOW_V4_TYPE_USER_SYNC, ESPNOW_V4_FLAG_ACK_REQ,
                                        msgId, (const uint8_t*)jsonPayload, jsonLen, 3);
-  DEBUGF(DEBUG_ESPNOW_MESH, "[V4_TX_USER_SYNC] Result: %s", result ? "SUCCESS" : "FAILED");
+  DEBUG_ESPNOW_MESHF("[V4_TX_USER_SYNC] Result: %s", result ? "SUCCESS" : "FAILED");
   return result;
 }
 
@@ -3201,13 +3201,13 @@ bool v4_send_text(const uint8_t* dst, const char* text, uint16_t textLen) {
   uint32_t msgId = generateMessageId();
   char dstMac[18];
   macToDisplay(dst, dstMac, sizeof(dstMac));
-  DEBUGF(DEBUG_ESPNOW_CORE, "[V4_TX_TEXT] Sending (encrypted) to %s msgId=%lu len=%u", dstMac, (unsigned long)msgId, textLen);
+  DEBUG_ESPNOWF("[V4_TX_TEXT] Sending (encrypted) to %s msgId=%lu len=%u", dstMac, (unsigned long)msgId, textLen);
   // Smart is now strict encrypt-or-fail (2026-05 cleanup) — no plaintext
   // fallback anywhere. v4_send_text's original "refuse if not encryptable"
   // contract holds for free now. Smart also auto-handshakes for unknown peers.
   bool result = v4_send_payload_smart(dst, ESPNOW_V4_TYPE_TEXT, ESPNOW_V4_FLAG_ACK_REQ,
                                        msgId, (const uint8_t*)text, textLen, 1);
-  DEBUGF(DEBUG_ESPNOW_CORE, "[V4_TX_TEXT] Result: %s", result ? "SUCCESS" : "FAILED");
+  DEBUG_ESPNOWF("[V4_TX_TEXT] Result: %s", result ? "SUCCESS" : "FAILED");
   return result;
 }
 
@@ -3233,12 +3233,12 @@ bool v4_send_command_response(const uint8_t* dst, uint32_t cmdMsgId, bool succes
   if (!buffer) return false;
   buffer[0] = success ? 1 : 0;
   memcpy(buffer + 1, resultText, textLen);
-  DEBUGF(DEBUG_ESPNOW_CORE, "[V4_TX_CMD_RESP] Sending to %s cmdMsgId=%lu len=%u (encrypt-preferred)",
+  DEBUG_ESPNOWF("[V4_TX_CMD_RESP] Sending to %s cmdMsgId=%lu len=%u (encrypt-preferred)",
          dstMac, (unsigned long)cmdMsgId, totalLen);
   bool result = v4_send_payload_smart(dst, ESPNOW_V4_TYPE_CMD_RESP, ESPNOW_V4_FLAG_ACK_REQ,
                                        cmdMsgId, buffer, totalLen, 1);
   free(buffer);
-  DEBUGF(DEBUG_ESPNOW_CORE, "[V4_TX_CMD_RESP] Result: %s", result ? "SUCCESS" : "FAILED");
+  DEBUG_ESPNOWF("[V4_TX_CMD_RESP] Result: %s", result ? "SUCCESS" : "FAILED");
   return result;
 }
 
@@ -3247,14 +3247,14 @@ bool v4_broadcast_text(const char* text, uint16_t textLen) {
   if (!text || textLen == 0 || textLen > ESPNOW_V4_MAX_PAYLOAD) return false;
   
   uint32_t msgId = generateMessageId();
-  DEBUGF(DEBUG_ESPNOW_CORE, "[V4_BROADCAST_TEXT] Broadcasting msgId=%lu len=%u ttl=%u",
+  DEBUG_ESPNOWF("[V4_BROADCAST_TEXT] Broadcasting msgId=%lu len=%u ttl=%u",
          (unsigned long)msgId, textLen, (unsigned)gSettings.meshTtl);
 
   // Live meshTtl — a broadcast text is the headline multi-hop case: it should
   // reach every node in the mesh, not just those in earshot of the sender.
   bool result = v4_broadcast(ESPNOW_V4_TYPE_TEXT, 0, msgId, (const uint8_t*)text, textLen,
                              gSettings.meshTtl);
-  DEBUGF(DEBUG_ESPNOW_CORE, "[V4_BROADCAST_TEXT] Result: %s", result ? "SUCCESS" : "FAILED");
+  DEBUG_ESPNOWF("[V4_BROADCAST_TEXT] Result: %s", result ? "SUCCESS" : "FAILED");
   return result;
 }
 
@@ -3375,13 +3375,13 @@ struct V4OpcodeEntry {
 
 // TIME_SYNC — synchronous, updates gTimeOffset / gTimeIsSynced.
 static void v4h_time_sync(const V4RxCtx& ctx) {
-  DEBUGF(DEBUG_ESPNOW_MESH, "[V4_RX_TIME_SYNC] Received from %s msgId=%lu payloadLen=%u",
+  DEBUG_ESPNOW_MESHF("[V4_RX_TIME_SYNC] Received from %s msgId=%lu payloadLen=%u",
          ctx.deviceName, (unsigned long)ctx.h->msgId, ctx.payloadLen);
   if (ctx.payloadLen >= sizeof(V4PayloadTimeSync)) {
     const V4PayloadTimeSync* ts = (const V4PayloadTimeSync*)ctx.payload;
-    DEBUGF(DEBUG_ESPNOW_MESH, "[V4_RX_TIME_SYNC] epochTime=%lu timeOffset=%ld",
+    DEBUG_ESPNOW_MESHF("[V4_RX_TIME_SYNC] epochTime=%lu timeOffset=%ld",
            (unsigned long)ts->epochTime, (long)ts->timeOffset);
-    DEBUGF(DEBUG_ESPNOW_MESH, "[V4_RX_TIME_SYNC] Previous time state: synced=%s offset=%lld",
+    DEBUG_ESPNOW_MESHF("[V4_RX_TIME_SYNC] Previous time state: synced=%s offset=%lld",
            gTimeIsSynced ? "YES" : "NO", (long long)gTimeOffset);
     // Multi-hop widens the replay window for this opcode. A TIME_SYNC used to
     // be heard once, from a neighbour, within one hop-time; flooding means the
@@ -3402,9 +3402,9 @@ static void v4h_time_sync(const V4RxCtx& ctx) {
     }
     gTimeOffset = (int64_t)ts->timeOffset;
     gTimeIsSynced = true;
-    DEBUGF(DEBUG_ESPNOW_MESH, "[V4_RX_TIME_SYNC] Time sync applied successfully");
+    DEBUG_ESPNOW_MESHF("[V4_RX_TIME_SYNC] Time sync applied successfully");
   } else {
-    DEBUGF(DEBUG_ESPNOW_MESH, "[V4_RX_TIME_SYNC] ERROR: Payload too small (%u < %u)",
+    DEBUG_ESPNOW_MESHF("[V4_RX_TIME_SYNC] ERROR: Payload too small (%u < %u)",
            ctx.payloadLen, (unsigned)sizeof(V4PayloadTimeSync));
   }
 }
@@ -3437,7 +3437,7 @@ static void v4h_text(const V4RxCtx& ctx) {
   // legitimately arrives on.
   if (memcmp(ctx.h->origin, ctx.recv_info->src_addr, 6) != 0 &&
       !espnowOriginIsKnown(ctx.h->origin)) {
-    DEBUGF(DEBUG_ESPNOW_ROUTER,
+    DEBUG_ESPNOW_ROUTERF(
            "[V4_RX] relayed TEXT from unknown origin " MAC_FMT " — dropped",
            MAC_ARGS(ctx.h->origin));
     return;
@@ -3446,7 +3446,7 @@ static void v4h_text(const V4RxCtx& ctx) {
   // SESSION_FRAME unwrap path delivers a non-null-terminated buffer, so a
   // plain `%.80s` would scan past the valid bytes into adjacent stack memory.
   int printLen = ctx.payloadLen > 80 ? 80 : (int)ctx.payloadLen;
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_RX] TEXT message detected, payload: %.*s",
+  DEBUG_ESPNOW_ROUTERF("[V4_RX] TEXT message detected, payload: %.*s",
          ctx.payloadLen > 0 ? printLen : 7,
          ctx.payloadLen > 0 ? (const char*)ctx.payload : "(empty)");
   // Text arrives PER-FRAGMENT: the RX reassembler deliberately excludes
@@ -3505,20 +3505,20 @@ static void v4h_text(const V4RxCtx& ctx) {
       slot.fragCount = ctx.h->fragCount;
       slot.used = true;
       gEspNow->textQueueHead = nextHead;
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_RX] TEXT message enqueued slot=%d (encrypted=%s authenticated=%s)",
+      DEBUG_ESPNOW_ROUTERF("[V4_RX] TEXT message enqueued slot=%d (encrypted=%s authenticated=%s)",
              head, slot.encrypted ? "YES" : "NO", slot.authenticated ? "YES" : "NO");
       if (ctx.isPaired && meshEnabled()) {
         noteMeshPeerRxActivity(ctx.recv_info->src_addr, EspNowMeshRxKind::RxActivity, -128,
                                ctx.recv_info->rx_ctrl ? ctx.recv_info->rx_ctrl->rssi : (int8_t)-128);
       }
     } else {
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_RX] TEXT queue full, message dropped");
+      DEBUG_ESPNOW_ROUTERF("[V4_RX] TEXT queue full, message dropped");
     }
   } else {
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_RX] TEXT message REJECTED: payloadLen=%u gEspNow=%p",
+    DEBUG_ESPNOW_ROUTERF("[V4_RX] TEXT message REJECTED: payloadLen=%u gEspNow=%p",
            ctx.payloadLen, gEspNow);
   }
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_RX] ========================================");
+  DEBUG_ESPNOW_ROUTERF("[V4_RX] ========================================");
 }
 
 // CMD — deferred to task via gEspNow->deferredCmd* fields (one in flight).
@@ -3708,20 +3708,20 @@ static void v4h_heartbeat(const V4RxCtx& ctx) {
 
 // SENSOR_STATUS — remote sensor enable/disable announcement (mesh broadcast).
 static void v4h_sensor_status(const V4RxCtx& ctx) {
-  DEBUGF(DEBUG_ESPNOW_MESH, "[V4_RX_SENSOR_STATUS] Received from %s msgId=%lu payloadLen=%u",
+  DEBUG_ESPNOW_MESHF("[V4_RX_SENSOR_STATUS] Received from %s msgId=%lu payloadLen=%u",
          ctx.deviceName, (unsigned long)ctx.h->msgId, ctx.payloadLen);
   if (ctx.payloadLen >= sizeof(V4PayloadSensorStatus)) {
     const V4PayloadSensorStatus* ss = (const V4PayloadSensorStatus*)ctx.payload;
     RemoteSensorType sensorType = (RemoteSensorType)ss->sensorType;
     bool enabled = (ss->enabled != 0);
-    DEBUGF(DEBUG_ESPNOW_MESH, "[V4_RX_SENSOR_STATUS] sensor=%s enabled=%s",
+    DEBUG_ESPNOW_MESHF("[V4_RX_SENSOR_STATUS] sensor=%s enabled=%s",
            sensorTypeToString(sensorType), enabled ? "YES" : "NO");
 
-    DEBUGF(DEBUG_ESPNOW_MESH, "[V4_RX_SENSOR_STATUS] Updating remote sensor status");
+    DEBUG_ESPNOW_MESHF("[V4_RX_SENSOR_STATUS] Updating remote sensor status");
     updateRemoteSensorStatus(ctx.recv_info->src_addr, ctx.deviceName, sensorType, enabled);
-    DEBUGF(DEBUG_ESPNOW_MESH, "[V4_RX_SENSOR_STATUS] Status update complete");
+    DEBUG_ESPNOW_MESHF("[V4_RX_SENSOR_STATUS] Status update complete");
   } else {
-    DEBUGF(DEBUG_ESPNOW_MESH, "[V4_RX_SENSOR_STATUS] ERROR: Payload too small (%u < %u)",
+    DEBUG_ESPNOW_MESHF("[V4_RX_SENSOR_STATUS] ERROR: Payload too small (%u < %u)",
            ctx.payloadLen, (unsigned)sizeof(V4PayloadSensorStatus));
   }
 }
@@ -3731,7 +3731,7 @@ static void v4h_sensor_status(const V4RxCtx& ctx) {
 // Dispatch guarantees REQ_PAIRED|REQ_SESSION_ENC before this runs.
 static void v4_ingest_sensor_reading(const V4RxCtx& ctx, const char* tag) {
   if (ctx.payloadLen < sizeof(V4PayloadSensorBroadcast)) {
-    DEBUGF(DEBUG_ESPNOW_MESH, "[%s] ERROR: Payload too small (%u < %u)",
+    DEBUG_ESPNOW_MESHF("[%s] ERROR: Payload too small (%u < %u)",
            tag, ctx.payloadLen, (unsigned)sizeof(V4PayloadSensorBroadcast));
     return;
   }
@@ -3739,13 +3739,13 @@ static void v4_ingest_sensor_reading(const V4RxCtx& ctx, const char* tag) {
   RemoteSensorType sensorType = (RemoteSensorType)sb->sensorType;
   uint16_t dataLen = sb->dataLen;
   if (dataLen == 0 || ctx.payloadLen < (sizeof(V4PayloadSensorBroadcast) + dataLen)) {
-    DEBUGF(DEBUG_ESPNOW_MESH, "[%s] ERROR: Invalid data length (%u) or truncated payload", tag, dataLen);
+    DEBUG_ESPNOW_MESHF("[%s] ERROR: Invalid data length (%u) or truncated payload", tag, dataLen);
     return;
   }
   const char* jsonData = (const char*)sb->data;
   RemoteSensorData* entry = findOrCreateCacheEntry(ctx.recv_info->src_addr, ctx.deviceName, sensorType);
   if (!entry) {
-    DEBUGF(DEBUG_ESPNOW_MESH, "[%s] ERROR: Failed to allocate cache entry", tag);
+    DEBUG_ESPNOW_MESHF("[%s] ERROR: Failed to allocate cache entry", tag);
     return;
   }
   size_t copyLen = (dataLen < REMOTE_SENSOR_BUFFER_SIZE - 1) ? dataLen : REMOTE_SENSOR_BUFFER_SIZE - 1;
@@ -3757,7 +3757,7 @@ static void v4_ingest_sensor_reading(const V4RxCtx& ctx, const char* tag) {
   entry->valid = true;
   entry->enabled = true;     // live data implies the sensor is running
   entry->connected = true;
-  DEBUGF(DEBUG_ESPNOW_MESH, "[%s] cached %s data (%u bytes)",
+  DEBUG_ESPNOW_MESHF("[%s] cached %s data (%u bytes)",
          tag, sensorTypeToString(sensorType), (unsigned)copyLen);
 }
 
@@ -3775,15 +3775,15 @@ static void v4h_sensor_envelope(const V4RxCtx& ctx) {
 // unsafe on the RX task). This handler never reaches executeCommand: no RCE (D1/scope).
 static void v4h_sensor_req(const V4RxCtx& ctx) {
   if (!gSettings.espnowAcceptSensorControl) {
-    DEBUGF(DEBUG_ESPNOW_MESH, "[V4_RX_SENSOR_REQ] drop: acceptSensorControl is off");
+    DEBUG_ESPNOW_MESHF("[V4_RX_SENSOR_REQ] drop: acceptSensorControl is off");
     return;
   }
   if (ctx.payloadLen < sizeof(V4PayloadSensorReq)) {
-    DEBUGF(DEBUG_ESPNOW_MESH, "[V4_RX_SENSOR_REQ] drop: short payload (%u)", ctx.payloadLen);
+    DEBUG_ESPNOW_MESHF("[V4_RX_SENSOR_REQ] drop: short payload (%u)", ctx.payloadLen);
     return;
   }
   if (!espnowSensorControlAuthorized(ctx.recv_info->src_addr)) {
-    DEBUGF(DEBUG_ESPNOW_MESH,
+    DEBUG_ESPNOW_MESHF(
            "[V4_RX_SENSOR_REQ] drop: %s not an authorized controller (fingerprint mismatch)",
            ctx.deviceName);
     return;
@@ -3796,7 +3796,7 @@ static void v4h_sensor_req(const V4RxCtx& ctx) {
   gEspNow->meshSensorReqLeaseMs    = rq->leaseMs;
   memcpy(gEspNow->meshSensorReqSrcMac, ctx.recv_info->src_addr, 6);
   gEspNow->meshSensorReqPending    = true;
-  DEBUGF(DEBUG_ESPNOW_MESH, "[V4_RX_SENSOR_REQ] queued mode=%u mask=0x%lx interval=%u lease=%u from %s",
+  DEBUG_ESPNOW_MESHF("[V4_RX_SENSOR_REQ] queued mode=%u mask=0x%lx interval=%u lease=%u from %s",
          rq->mode, (unsigned long)rq->sensorMask, rq->intervalMs, rq->leaseMs, ctx.deviceName);
 }
 
@@ -3804,7 +3804,7 @@ static void v4h_sensor_req(const V4RxCtx& ctx) {
 // BOND_HEARTBEAT — bond-mode keepalive from paired peer; updates bond peer
 // online state, boot counter, settings hash, RSSI; may trigger sync recovery.
 static void v4h_bond_heartbeat(const V4RxCtx& ctx) {
-  DEBUGF(DEBUG_ESPNOW_MESH, "[BOND_HB_RX] from %s payloadLen=%u (need %u) isPaired=%d",
+  DEBUG_ESPNOW_MESHF("[BOND_HB_RX] from %s payloadLen=%u (need %u) isPaired=%d",
          ctx.deviceName, ctx.payloadLen, (unsigned)sizeof(V4PayloadBondHeartbeat), (int)ctx.isPaired);
   if (ctx.payloadLen < sizeof(V4PayloadBondHeartbeat)) return;
 
@@ -3840,7 +3840,7 @@ static void v4h_bond_heartbeat(const V4RxCtx& ctx) {
     gEspNow->bondSettingsReceived = false;
     gEspNow->bondSyncInFlight = BOND_SYNC_NONE;
     gEspNow->bondSyncRetryCount = 0;
-    DEBUGF(DEBUG_ESPNOW_MESH, "[BOND_HB_RX] Peer settings hash changed 0x%08lX->0x%08lX, will re-fetch",
+    DEBUG_ESPNOW_MESHF("[BOND_HB_RX] Peer settings hash changed 0x%08lX->0x%08lX, will re-fetch",
            (unsigned long)oldSettingsHash, (unsigned long)hb->settingsHash);
   }
 
@@ -3898,7 +3898,7 @@ static void v4h_stream_ctrl(const V4RxCtx& ctx) {
     gEspNow->bondDeferredStreamCtrlSensor = ctx.payload[0];  // sensorType
     gEspNow->bondDeferredStreamCtrlEnable = ctx.payload[1];  // enable
     gEspNow->bondDeferredStreamCtrlPending = true;
-    DEBUGF(DEBUG_ESPNOW_MESH, "[BOND_STREAM_CTRL_RX] sensor=%u enable=%u (deferred)",
+    DEBUG_ESPNOW_MESHF("[BOND_STREAM_CTRL_RX] sensor=%u enable=%u (deferred)",
            ctx.payload[0], ctx.payload[1]);
   }
 }
@@ -3906,16 +3906,16 @@ static void v4h_stream_ctrl(const V4RxCtx& ctx) {
 
 // TOPO_REQ — peer is asking for our topology; respond with TOPO_START + N×TOPO_PEER.
 static void v4h_topo_req(const V4RxCtx& ctx) {
-  DEBUGF(DEBUG_ESPNOW_TOPO, "[V4_RX_TOPO_REQ] Received from %s msgId=%lu payloadLen=%u",
+  DEBUG_ESPNOW_TOPOF("[V4_RX_TOPO_REQ] Received from %s msgId=%lu payloadLen=%u",
          ctx.deviceName, (unsigned long)ctx.h->msgId, ctx.payloadLen);
   if (ctx.payloadLen < sizeof(V4PayloadTopoReq)) {
-    DEBUGF(DEBUG_ESPNOW_TOPO, "[V4_RX_TOPO_REQ] ERROR: Payload too small (%u < %u)",
+    DEBUG_ESPNOW_TOPOF("[V4_RX_TOPO_REQ] ERROR: Payload too small (%u < %u)",
            ctx.payloadLen, (unsigned)sizeof(V4PayloadTopoReq));
     return;
   }
   V4PayloadTopoReq tr;
   memcpy(&tr, ctx.payload, sizeof(tr));
-  DEBUGF(DEBUG_ESPNOW_TOPO, "[V4_RX_TOPO_REQ] reqId=%lu requesterMeshFp=0x%04X",
+  DEBUG_ESPNOW_TOPOF("[V4_RX_TOPO_REQ] reqId=%lu requesterMeshFp=0x%04X",
          (unsigned long)tr.reqId, ctx.h->meshFingerprint);
 
   // Phase 2: filter peers by requester's mesh. If the requester stamped a
@@ -3954,7 +3954,7 @@ static void v4h_topo_req(const V4RxCtx& ctx) {
     }
   }
 
-  DEBUGF(DEBUG_ESPNOW_TOPO, "[V4_RX_TOPO_REQ] Responding with %d peer(s) in requester's mesh", peerCount);
+  DEBUG_ESPNOW_TOPOF("[V4_RX_TOPO_REQ] Responding with %d peer(s) in requester's mesh", peerCount);
   if (!v4_send_topo_start(ctx.recv_info->src_addr, tr.reqId,
                           (uint8_t)peerCount)) {
     WARN_ESPNOWF("[V4_RX_TOPO_REQ] Failed to send TOPO_START; response aborted");
@@ -3978,21 +3978,21 @@ static void v4h_topo_req(const V4RxCtx& ctx) {
       peerIndex++;
     }
   }
-  DEBUGF(DEBUG_ESPNOW_TOPO, "[V4_RX_TOPO_REQ] Sent %d TOPO_PEER frame(s)", peerIndex);
+  DEBUG_ESPNOW_TOPOF("[V4_RX_TOPO_REQ] Sent %d TOPO_PEER frame(s)", peerIndex);
 }
 
 // TOPO_START — incoming topology response start (peer count). Initializes stream.
 static void v4h_topo_start(const V4RxCtx& ctx) {
-  DEBUGF(DEBUG_ESPNOW_TOPO, "[V4_RX_TOPO_START] Received from %s msgId=%lu payloadLen=%u",
+  DEBUG_ESPNOW_TOPOF("[V4_RX_TOPO_START] Received from %s msgId=%lu payloadLen=%u",
          ctx.deviceName, (unsigned long)ctx.h->msgId, ctx.payloadLen);
   if (ctx.payloadLen < sizeof(V4PayloadTopoStart)) {
-    DEBUGF(DEBUG_ESPNOW_TOPO, "[V4_RX_TOPO_START] ERROR: Payload too small (%u < %u)",
+    DEBUG_ESPNOW_TOPOF("[V4_RX_TOPO_START] ERROR: Payload too small (%u < %u)",
            ctx.payloadLen, (unsigned)sizeof(V4PayloadTopoStart));
     return;
   }
   V4PayloadTopoStart ts;
   memcpy(&ts, ctx.payload, sizeof(ts));
-  DEBUGF(DEBUG_ESPNOW_TOPO, "[V4_RX_TOPO_START] reqId=%lu peerCount=%u",
+  DEBUG_ESPNOW_TOPOF("[V4_RX_TOPO_START] reqId=%lu peerCount=%u",
          (unsigned long)ts.reqId, ts.peerCount);
   if (ts.peerCount > MESH_PEER_MAX) {
     WARN_ESPNOWF("[V4_RX_TOPO_START] Rejected peerCount=%u (max=%u)",
@@ -4008,7 +4008,7 @@ static void v4h_topo_start(const V4RxCtx& ctx) {
   const uint32_t now = (uint32_t)millis();
   if (ts.reqId != gTopoRequestId ||
       (int32_t)(gTopoRequestTimeout - now) <= 0) {
-    DEBUGF(DEBUG_ESPNOW_TOPO, "[V4_RX_TOPO_START] Rejected: reqId mismatch or timeout");
+    DEBUG_ESPNOW_TOPOF("[V4_RX_TOPO_START] Rejected: reqId mismatch or timeout");
     return;
   }
   if (!topologySenderExpectedLocked(ctx.recv_info->src_addr)) {
@@ -4017,7 +4017,7 @@ static void v4h_topo_start(const V4RxCtx& ctx) {
   }
   TopologyStream* stream = findOrCreateTopoStreamLocked(ctx.recv_info->src_addr, ts.reqId);
   if (!stream || !stream->active) {
-    DEBUGF(DEBUG_ESPNOW_TOPO, "[V4_RX_TOPO_START] ERROR: Could not allocate stream");
+    DEBUG_ESPNOW_TOPOF("[V4_RX_TOPO_START] ERROR: Could not allocate stream");
     return;
   }
   if (!stream->started) {
@@ -4047,7 +4047,7 @@ static void v4h_topo_start(const V4RxCtx& ctx) {
     stream->totalPeers = ts.peerCount;
     stream->started = true;
     addTopoDeviceName(ctx.recv_info->src_addr, senderNamePtr);
-    DEBUGF(DEBUG_ESPNOW_TOPO, "[V4_RX_TOPO_START] Stream initialized for %s: expecting %d peers",
+    DEBUG_ESPNOW_TOPOF("[V4_RX_TOPO_START] Stream initialized for %s: expecting %d peers",
            stream->senderName, ts.peerCount);
   } else if (stream->totalPeers != ts.peerCount) {
     WARN_ESPNOWF("[V4_RX_TOPO_START] Conflicting duplicate start for %s: had=%u new=%u",
@@ -4055,17 +4055,17 @@ static void v4h_topo_start(const V4RxCtx& ctx) {
     return;
   }
   if (ts.peerCount == 0) {
-    DEBUGF(DEBUG_ESPNOW_TOPO, "[V4_RX_TOPO_START] 0 peers - edge device, finalizing");
+    DEBUG_ESPNOW_TOPOF("[V4_RX_TOPO_START] 0 peers - edge device, finalizing");
     finalizeTopologyStreamLocked(stream);
   }
 }
 
 // TOPO_PEER — incoming topology peer entry. Stores one bounded indexed record.
 static void v4h_topo_peer(const V4RxCtx& ctx) {
-  DEBUGF(DEBUG_ESPNOW_TOPO, "[V4_RX_TOPO_PEER] Received from %s msgId=%lu payloadLen=%u",
+  DEBUG_ESPNOW_TOPOF("[V4_RX_TOPO_PEER] Received from %s msgId=%lu payloadLen=%u",
          ctx.deviceName, (unsigned long)ctx.h->msgId, ctx.payloadLen);
   if (ctx.payloadLen < sizeof(V4PayloadTopoPeer)) {
-    DEBUGF(DEBUG_ESPNOW_TOPO, "[V4_RX_TOPO_PEER] ERROR: Payload too small (%u < %u)",
+    DEBUG_ESPNOW_TOPOF("[V4_RX_TOPO_PEER] ERROR: Payload too small (%u < %u)",
            ctx.payloadLen, (unsigned)sizeof(V4PayloadTopoPeer));
     return;
   }
@@ -4076,7 +4076,7 @@ static void v4h_topo_peer(const V4RxCtx& ctx) {
   wireName[sizeof(tp.name)] = '\0';
   char peerMacStr[18];
   macToDisplay(tp.mac, peerMacStr, sizeof(peerMacStr));
-  DEBUGF(DEBUG_ESPNOW_TOPO, "[V4_RX_TOPO_PEER] reqId=%lu idx=%u isLast=%u mac=%s name=%s",
+  DEBUG_ESPNOW_TOPOF("[V4_RX_TOPO_PEER] reqId=%lu idx=%u isLast=%u mac=%s name=%s",
          (unsigned long)tp.reqId, tp.peerIndex, tp.isLast, peerMacStr, wireName);
   if (tp.isLast > 1) {
     WARN_ESPNOWF("[V4_RX_TOPO_PEER] Rejected invalid isLast=%u", tp.isLast);
@@ -4091,7 +4091,7 @@ static void v4h_topo_peer(const V4RxCtx& ctx) {
   const uint32_t now = (uint32_t)millis();
   if (tp.reqId != gTopoRequestId ||
       (int32_t)(gTopoRequestTimeout - now) <= 0) {
-    DEBUGF(DEBUG_ESPNOW_TOPO, "[V4_RX_TOPO_PEER] Rejected: reqId mismatch or timeout");
+    DEBUG_ESPNOW_TOPOF("[V4_RX_TOPO_PEER] Rejected: reqId mismatch or timeout");
     return;
   }
   if (!topologySenderExpectedLocked(ctx.recv_info->src_addr)) {
@@ -4100,7 +4100,7 @@ static void v4h_topo_peer(const V4RxCtx& ctx) {
   }
   TopologyStream* stream = findTopoStreamLocked(ctx.recv_info->src_addr, tp.reqId);
   if (!stream || !stream->active || !stream->started) {
-    DEBUGF(DEBUG_ESPNOW_TOPO, "[V4_RX_TOPO_PEER] No active stream for this sender");
+    DEBUG_ESPNOW_TOPOF("[V4_RX_TOPO_PEER] No active stream for this sender");
     return;
   }
   if (tp.peerIndex >= stream->totalPeers || tp.peerIndex >= MESH_PEER_MAX) {
@@ -4116,7 +4116,7 @@ static void v4h_topo_peer(const V4RxCtx& ctx) {
   }
   const uint16_t peerBit = (uint16_t)(1u << tp.peerIndex);
   if ((stream->receivedPeerMask & peerBit) != 0) {
-    DEBUGF(DEBUG_ESPNOW_TOPO, "[V4_RX_TOPO_PEER] Duplicate index %u, skipping", tp.peerIndex);
+    DEBUG_ESPNOW_TOPOF("[V4_RX_TOPO_PEER] Duplicate index %u, skipping", tp.peerIndex);
     return;
   }
 
@@ -4154,7 +4154,7 @@ static void v4h_topo_peer(const V4RxCtx& ctx) {
   stream->receivedPeerMask |= peerBit;
   stream->receivedPeers++;
   gTopoLastResponseTime = now;
-  DEBUGF(DEBUG_ESPNOW_TOPO, "[V4_RX_TOPO_PEER] Stored peer %d/%d: %s",
+  DEBUG_ESPNOW_TOPOF("[V4_RX_TOPO_PEER] Stored peer %d/%d: %s",
          stream->receivedPeers, stream->totalPeers, peerNamePtr2 ? peerNamePtr2 : "Unknown");
   if (stream->receivedPeers == stream->totalPeers) {
     finalizeTopologyStreamLocked(stream);
@@ -4225,7 +4225,7 @@ static void doUserSyncWork(const DeferredUserSyncWork* w) {
   const uint8_t* payload      = w->payload;
   const uint16_t payloadLen   = w->payloadLen;
 
-  DEBUGF(DEBUG_ESPNOW_MESH, "[V4_RX_USER_SYNC] Processing from %s msgId=%lu encrypted=%s",
+  DEBUG_ESPNOW_MESHF("[V4_RX_USER_SYNC] Processing from %s msgId=%lu encrypted=%s",
          deviceName, (unsigned long)msgId, w->isSessionEncrypted ? "YES" : "NO");
 
   // Security: must have arrived AEAD-encrypted in a SESSION_FRAME. Pre-fix
@@ -4414,7 +4414,7 @@ static void v4h_user_sync(const V4RxCtx& ctx) {
 #if ENABLE_BONDED_MODE
 // BOND_CAP_REQ — peer asks for our capability summary. Defer to task.
 static void v4h_bond_cap_req(const V4RxCtx& ctx) {
-  DEBUGF(DEBUG_ESPNOW_MESH, "[BOND_CAP_REQ_RX] from %s role=%d capSent=%d",
+  DEBUG_ESPNOW_MESHF("[BOND_CAP_REQ_RX] from %s role=%d capSent=%d",
          ctx.deviceName, (int)gSettings.bondRole,
          gEspNow ? (int)gEspNow->bondCapSent : -1);
   if (gEspNow) {
@@ -4429,7 +4429,7 @@ static void v4h_bond_cap_req(const V4RxCtx& ctx) {
 static void v4h_bond_cap_resp(const V4RxCtx& ctx) {
   if (ctx.payloadLen != sizeof(CapabilitySummary)) return;
   const CapabilitySummary* cap = (const CapabilitySummary*)ctx.payload;
-  DEBUGF(DEBUG_ESPNOW_MESH, "[BOND_CAP_RESP_RX] from %s role=%d capSent=%d sensorMask=0x%04lX devName='%.16s'",
+  DEBUG_ESPNOW_MESHF("[BOND_CAP_RESP_RX] from %s role=%d capSent=%d sensorMask=0x%04lX devName='%.16s'",
          ctx.deviceName, (int)gSettings.bondRole,
          gEspNow ? (int)gEspNow->bondCapSent : -1,
          (unsigned long)cap->sensorMask, cap->deviceName);
@@ -4444,9 +4444,9 @@ static void v4h_bond_cap_resp(const V4RxCtx& ctx) {
   if (!gEspNow->bondCapSent) {
     memcpy(gEspNow->bondPendingResponseMac, ctx.recv_info->src_addr, 6);
     gEspNow->bondNeedsCapabilityResponse = true;
-    DEBUGF(DEBUG_ESPNOW_MESH, "[BOND_CAP_RESP_RX] queued reciprocal CAP_RESP (bondCapSent was false)");
+    DEBUG_ESPNOW_MESHF("[BOND_CAP_RESP_RX] queued reciprocal CAP_RESP (bondCapSent was false)");
   } else {
-    DEBUGF(DEBUG_ESPNOW_MESH, "[BOND_CAP_RESP_RX] NOT sending reciprocal (bondCapSent already true)");
+    DEBUG_ESPNOW_MESHF("[BOND_CAP_RESP_RX] NOT sending reciprocal (bondCapSent already true)");
   }
 }
 
@@ -4469,17 +4469,17 @@ static void v4h_sensor_data(const V4RxCtx& ctx) {
   entry->valid = true;
   entry->enabled = true;     // live data implies the sensor is running
   entry->connected = true;
-  DEBUGF(DEBUG_ESPNOW_MESH, "[BOND] Sensor %s from %s len=%u seq=%lu",
+  DEBUG_ESPNOW_MESHF("[BOND] Sensor %s from %s len=%u seq=%lu",
          sensorTypeToString(sensorType), ctx.deviceName, (unsigned)copyLen, (unsigned long)sd->seqNum);
 }
 
 // SETTINGS_REQ — peer asks for our settings file. Defer to task.
 static void v4h_settings_req(const V4RxCtx& ctx) {
-  DEBUGF(DEBUG_ESPNOW_MESH, "[BOND_SETTINGS_REQ_RX] from %s isPaired=%d", ctx.deviceName, (int)ctx.isPaired);
+  DEBUG_ESPNOW_MESHF("[BOND_SETTINGS_REQ_RX] from %s isPaired=%d", ctx.deviceName, (int)ctx.isPaired);
   if (gEspNow) {
     memcpy(gEspNow->bondPendingResponseMac, ctx.recv_info->src_addr, 6);
     gEspNow->bondNeedsSettingsResponse = true;
-    DEBUGF(DEBUG_ESPNOW_MESH, "[BOND_SETTINGS_REQ_RX] set bondNeedsSettingsResponse=true");
+    DEBUG_ESPNOW_MESHF("[BOND_SETTINGS_REQ_RX] set bondNeedsSettingsResponse=true");
   }
 }
 
@@ -4488,17 +4488,17 @@ static void v4h_settings_req(const V4RxCtx& ctx) {
 // file transfer happens later in the tick (section 9f) where there's stack
 // headroom and we can gate on an encrypted session.
 static void v4h_schema_req(const V4RxCtx& ctx) {
-  DEBUGF(DEBUG_ESPNOW_MESH, "[BOND_SCHEMA_REQ_RX] from %s isPaired=%d", ctx.deviceName, (int)ctx.isPaired);
+  DEBUG_ESPNOW_MESHF("[BOND_SCHEMA_REQ_RX] from %s isPaired=%d", ctx.deviceName, (int)ctx.isPaired);
   if (gEspNow) {
     memcpy(gEspNow->bondPendingResponseMac, ctx.recv_info->src_addr, 6);
     gEspNow->bondNeedsSchemaResponse = true;
-    DEBUGF(DEBUG_ESPNOW_MESH, "[BOND_SCHEMA_REQ_RX] set bondNeedsSchemaResponse=true");
+    DEBUG_ESPNOW_MESHF("[BOND_SCHEMA_REQ_RX] set bondNeedsSchemaResponse=true");
   }
 }
 
 // BOND_STATUS_REQ — peer asks for live status. Defer to task.
 static void v4h_bond_status_req(const V4RxCtx& ctx) {
-  DEBUGF(DEBUG_ESPNOW_MESH, "[BOND_STATUS_REQ_RX] from %s", ctx.deviceName);
+  DEBUG_ESPNOW_MESHF("[BOND_STATUS_REQ_RX] from %s", ctx.deviceName);
   if (gEspNow) {
     memcpy(gEspNow->bondPendingResponseMac, ctx.recv_info->src_addr, 6);
     gEspNow->bondNeedsStatusResponse = true;
@@ -4519,11 +4519,11 @@ static void v4h_bond_status_resp(const V4RxCtx& ctx) {
 
 // MANIFEST_REQ — peer asks for our manifest file. Defer to task.
 static void v4h_manifest_req(const V4RxCtx& ctx) {
-  DEBUGF(DEBUG_ESPNOW_MESH, "[BOND_MANIFEST_REQ_RX] from %s isPaired=%d", ctx.deviceName, (int)ctx.isPaired);
+  DEBUG_ESPNOW_MESHF("[BOND_MANIFEST_REQ_RX] from %s isPaired=%d", ctx.deviceName, (int)ctx.isPaired);
   if (gEspNow) {
     memcpy(gEspNow->bondPendingResponseMac, ctx.recv_info->src_addr, 6);
     gEspNow->bondNeedsManifestResponse = true;
-    DEBUGF(DEBUG_ESPNOW_MESH, "[BOND_MANIFEST_REQ_RX] set bondNeedsManifestResponse=true");
+    DEBUG_ESPNOW_MESHF("[BOND_MANIFEST_REQ_RX] set bondNeedsManifestResponse=true");
   }
 }
 #endif // ENABLE_BONDED_MODE
@@ -5446,7 +5446,7 @@ static void v4_relay_maybe_forward(const esp_now_recv_info* recv_info,
   if (payloadLen + ESPNOW_V4_BROADCAST_AUTH_TAG_LEN + sizeof(EspNowV4Header) > 250) return;
   if (!v4_flood_rate_ok()) {
     m.floodDropRate++;
-    DEBUGF(DEBUG_ESPNOW_MESH, "[MESH_FLOOD] rate limit hit — not forwarding type=%u msgId=%lu",
+    DEBUG_ESPNOW_MESHF("[MESH_FLOOD] rate limit hit — not forwarding type=%u msgId=%lu",
            (unsigned)h->type, (unsigned long)h->msgId);
     return;
   }
@@ -5485,7 +5485,7 @@ static void v4_relay_maybe_forward(const esp_now_recv_info* recv_info,
   const size_t outLen = sizeof(EspNowV4Header) + outPayloadLen;
 
   m.floodForwards++;
-  DEBUGF(DEBUG_ESPNOW_MESH,
+  DEBUG_ESPNOW_MESHF(
          "[MESH_FLOOD] forwarding type=%u msgId=%lu origin=" MAC_FMT " ttl %u->%u",
          (unsigned)h->type, (unsigned long)h->msgId,
          MAC_ARGS(h->origin),
@@ -5512,7 +5512,7 @@ static void v4h_relay_data(const V4RxCtx& ctx) {
   if (ih->magic != (uint16_t)ESPNOW_V4_MAGIC || ih->ver != ESPNOW_V4_VERSION ||
       ih->headerLen != sizeof(EspNowV4Header) || !v4_routed_type_allowed(ih->type)) {
     m.routedDropPolicy++;
-    DEBUGF(DEBUG_ESPNOW_MESH, "[MESH_ROUTED] refused inner type=%u (policy or malformed)",
+    DEBUG_ESPNOW_MESHF("[MESH_ROUTED] refused inner type=%u (policy or malformed)",
            (unsigned)ih->type);
     return;
   }
@@ -5548,7 +5548,7 @@ static void v4h_relay_data(const V4RxCtx& ctx) {
     ri.rx_ctrl  = &rxCtrl;
 
     m.routedDelivered++;
-    DEBUGF(DEBUG_ESPNOW_MESH,
+    DEBUG_ESPNOW_MESHF(
            "[MESH_ROUTED] delivering inner type=%u from " MAC_FMT " (%u hops)",
            (unsigned)ih->type, MAC_ARGS(synthSrc), (unsigned)(env->hopsUsed + 1));
 
@@ -5567,7 +5567,7 @@ static void v4h_relay_data(const V4RxCtx& ctx) {
   uint8_t hops = 0;
   if (!meshRouterLookup(env->finalDst, nextHop, &hops)) {
     m.routedDropNoRoute++;
-    DEBUGF(DEBUG_ESPNOW_MESH, "[MESH_ROUTED] no route to " MAC_FMT " — dropping",
+    DEBUG_ESPNOW_MESHF("[MESH_ROUTED] no route to " MAC_FMT " — dropping",
            MAC_ARGS(env->finalDst));
     return;
   }
@@ -6214,13 +6214,13 @@ static V4ReasmOutcome v4_reasm_accept(const esp_now_recv_info* recv_info, const 
                                       const uint8_t*& payload, uint16_t& payloadLen) {
   char srcMac[18];
   macToDisplay(recv_info->src_addr, srcMac, sizeof(srcMac));
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] ==============================");
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Fragment received from %s", srcMac);
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Fragment %u/%u msgId=%lu type=%u len=%u",
+  DEBUG_ESPNOW_ROUTERF("[V4_FRAG_RX] ==============================");
+  DEBUG_ESPNOW_ROUTERF("[V4_FRAG_RX] Fragment received from %s", srcMac);
+  DEBUG_ESPNOW_ROUTERF("[V4_FRAG_RX] Fragment %u/%u msgId=%lu type=%u len=%u",
          h->fragIndex + 1, h->fragCount, (unsigned long)h->msgId, h->type, payloadLen);
 
   // Run GC
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Running reassembly GC...");
+  DEBUG_ESPNOW_ROUTERF("[V4_FRAG_RX] Running reassembly GC...");
   v4_reasm_gc(millis());
 
   // The sender refuses to split past V4_FRAG_MAX (v4_send_encrypted_chunked), so a
@@ -6236,15 +6236,15 @@ static V4ReasmOutcome v4_reasm_accept(const esp_now_recv_info* recv_info, const 
   V4ReasmEntry* e = v4_reasm_find_or_alloc(recv_info->src_addr, h->msgId, h->type, h->fragCount);
   if (!e) {
     WARN_ESPNOWF("[V4_FRAG_RX] No reassembly slot available - all %u slots in use", V4_REASM_MAX);
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] ==============================");
+    DEBUG_ESPNOW_ROUTERF("[V4_FRAG_RX] ==============================");
     return V4ReasmOutcome::Dropped;
   }
 
   bool isNewEntry = (e->received == 0);
   if (isNewEntry) {
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Allocated new reassembly buffer: bufSize=%u", e->bufferSize);
+    DEBUG_ESPNOW_ROUTERF("[V4_FRAG_RX] Allocated new reassembly buffer: bufSize=%u", e->bufferSize);
   } else {
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Using existing reassembly buffer: %u/%u fragments already received",
+    DEBUG_ESPNOW_ROUTERF("[V4_FRAG_RX] Using existing reassembly buffer: %u/%u fragments already received",
            e->received, e->fragCount);
   }
 
@@ -6262,13 +6262,13 @@ static V4ReasmOutcome v4_reasm_accept(const esp_now_recv_info* recv_info, const 
   // have[] is never indexed past its fragCount (at most V4_FRAG_MAX).
   if (h->fragIndex >= e->fragCount) {
     WARN_ESPNOWF("[V4_FRAG_RX] Invalid fragment index %u (max %u)", h->fragIndex, e->fragCount - 1);
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] ==============================");
+    DEBUG_ESPNOW_ROUTERF("[V4_FRAG_RX] ==============================");
     return V4ReasmOutcome::Dropped;
   }
 
   if (e->have[h->fragIndex]) {
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Duplicate fragment %u - ignoring", h->fragIndex + 1);
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] ==============================");
+    DEBUG_ESPNOW_ROUTERF("[V4_FRAG_RX] Duplicate fragment %u - ignoring", h->fragIndex + 1);
+    DEBUG_ESPNOW_ROUTERF("[V4_FRAG_RX] ==============================");
     return V4ReasmOutcome::Dropped;
   }
 
@@ -6287,13 +6287,13 @@ static V4ReasmOutcome v4_reasm_accept(const esp_now_recv_info* recv_info, const 
 
   // Copy fragment data to buffer
   uint16_t offset = (uint16_t)(h->fragIndex * stride);
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Storing at offset=%u len=%u stride=%u (bufSize=%u)",
+  DEBUG_ESPNOW_ROUTERF("[V4_FRAG_RX] Storing at offset=%u len=%u stride=%u (bufSize=%u)",
          offset, payloadLen, stride, e->bufferSize);
   if (offset + payloadLen > e->bufferSize) {
     WARN_ESPNOWF("[V4_FRAG_RX] Fragment overflow: offset=%u len=%u bufSize=%u", offset, payloadLen, e->bufferSize);
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Resetting corrupted reassembly buffer");
+    DEBUG_ESPNOW_ROUTERF("[V4_FRAG_RX] Resetting corrupted reassembly buffer");
     v4_reasm_reset(*e);
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] ==============================");
+    DEBUG_ESPNOW_ROUTERF("[V4_FRAG_RX] ==============================");
     return V4ReasmOutcome::Dropped;
   }
 
@@ -6302,11 +6302,11 @@ static V4ReasmOutcome v4_reasm_accept(const esp_now_recv_info* recv_info, const 
   e->received++;
   e->lastUpdateMs = millis();
 
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Fragment %u stored successfully", h->fragIndex + 1);
+  DEBUG_ESPNOW_ROUTERF("[V4_FRAG_RX] Fragment %u stored successfully", h->fragIndex + 1);
 
   // Check if complete
   if (e->received < e->fragCount) {
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Progress: %u/%u fragments received",
+    DEBUG_ESPNOW_ROUTERF("[V4_FRAG_RX] Progress: %u/%u fragments received",
            e->received, e->fragCount);
 
     // Log which fragments are still missing
@@ -6324,11 +6324,11 @@ static V4ReasmOutcome v4_reasm_accept(const esp_now_recv_info* recv_info, const 
         }
       }
       if (offset > 0) {
-        DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Still waiting for fragments: %s", missing);
+        DEBUG_ESPNOW_ROUTERF("[V4_FRAG_RX] Still waiting for fragments: %s", missing);
       }
     }
 
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] ==============================");
+    DEBUG_ESPNOW_ROUTERF("[V4_FRAG_RX] ==============================");
     return V4ReasmOutcome::Pending;
   }
 
@@ -6347,10 +6347,10 @@ static V4ReasmOutcome v4_reasm_accept(const esp_now_recv_info* recv_info, const 
     return V4ReasmOutcome::Dropped;
   }
 
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] ✓✓✓ REASSEMBLY COMPLETE ✓✓✓");
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] All %u fragments received! Total size: %u bytes",
+  DEBUG_ESPNOW_ROUTERF("[V4_FRAG_RX] ✓✓✓ REASSEMBLY COMPLETE ✓✓✓");
+  DEBUG_ESPNOW_ROUTERF("[V4_FRAG_RX] All %u fragments received! Total size: %u bytes",
          e->fragCount, reassembledSize);
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Proceeding to handle reassembled message type=%u", h->type);
+  DEBUG_ESPNOW_ROUTERF("[V4_FRAG_RX] Proceeding to handle reassembled message type=%u", h->type);
 
   // Update pointers to point to reassembled buffer
   payload = e->buffer;
@@ -6449,7 +6449,7 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
   const EspNowV4Header* h = (const EspNowV4Header*)data;
   if (h->magic != (uint16_t)ESPNOW_V4_MAGIC) return false;
   if (h->ver != ESPNOW_V4_VERSION || h->headerLen != sizeof(EspNowV4Header)) {
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_RX] REJECTED: ver=%u headerLen=%u (expected ver=%u headerLen=%u)",
+    DEBUG_ESPNOW_ROUTERF("[V4_RX] REJECTED: ver=%u headerLen=%u (expected ver=%u headerLen=%u)",
            h->ver, h->headerLen, (unsigned)ESPNOW_V4_VERSION, (unsigned)sizeof(EspNowV4Header));
     return true;
   }
@@ -6464,7 +6464,7 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
   const bool isSessionFrame = (h->flags & ESPNOW_V4_FLAG_SESSION_FRAME) != 0;
   if (!isSessionFrame && payloadLen > 0 &&
       v4_crc16_ccitt(payload, payloadLen) != h->crc16) {
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_RX] REJECTED: CRC mismatch (got=0x%04X expected=0x%04X) payloadLen=%u",
+    DEBUG_ESPNOW_ROUTERF("[V4_RX] REJECTED: CRC mismatch (got=0x%04X expected=0x%04X) payloadLen=%u",
            v4_crc16_ccitt(payload, payloadLen), h->crc16, payloadLen);
     return true;
   }
@@ -6487,7 +6487,7 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
   // to the user as an incoming message from themselves.
   if (isSelfMac(h->origin)) {
     meshRelayMetrics().selfOriginDrops++;
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_RX] dropped frame with our own origin (type=%u msgId=%lu)",
+    DEBUG_ESPNOW_ROUTERF("[V4_RX] dropped frame with our own origin (type=%u msgId=%lu)",
            (unsigned)h->type, (unsigned long)h->msgId);
     return true;
   }
@@ -6520,16 +6520,16 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
   // strip the tag so downstream handlers see only the core payload.
   if (h->flags & ESPNOW_V4_FLAG_BROADCAST_AUTH) {
     if (h->fragCount > 1) {
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_RX] BROADCAST_AUTH cannot be fragmented — dropping");
+      DEBUG_ESPNOW_ROUTERF("[V4_RX] BROADCAST_AUTH cannot be fragmented — dropping");
       return true;
     }
     if (payloadLen < ESPNOW_V4_BROADCAST_AUTH_TAG_LEN) {
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_RX] BROADCAST_AUTH payload too short for tag (%u) — dropping",
+      DEBUG_ESPNOW_ROUTERF("[V4_RX] BROADCAST_AUTH payload too short for tag (%u) — dropping",
              payloadLen);
       return true;
     }
     if (h->meshFingerprint == 0) {
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_RX] BROADCAST_AUTH requires mesh fingerprint — dropping");
+      DEBUG_ESPNOW_ROUTERF("[V4_RX] BROADCAST_AUTH requires mesh fingerprint — dropping");
       return true;
     }
     const MeshDerivedKeys* mk = meshKeysFindByFingerprint(h->meshFingerprint);
@@ -6629,7 +6629,7 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
     payloadLen = plainLen;
     wasAuthenticated = true;
     wasSessionEncrypted = true;  // AEAD-decrypted — genuinely confidential
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_RX] SESSION_FRAME unwrapped: type=%u msgId=%lu frag=%u/%u plainLen=%u",
+    DEBUG_ESPNOW_ROUTERF("[V4_RX] SESSION_FRAME unwrapped: type=%u msgId=%lu frag=%u/%u plainLen=%u",
            h->type, (unsigned long)h->msgId, h->fragIndex + 1, h->fragCount, plainLen);
   }
 
@@ -6676,7 +6676,7 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
   // proof that a broadcast cannot arrive session-encrypted.
   if (h->fragCount > 1 && h->type != ESPNOW_V4_TYPE_ACK &&
       h->type != ESPNOW_V4_TYPE_TEXT && !wasSessionEncrypted) {
-    DEBUGF(DEBUG_ESPNOW_ROUTER,
+    DEBUG_ESPNOW_ROUTERF(
            "[V4_RX] plaintext multi-frame refused (type=%u msgId=%lu frag %u/%u) — "
            "splice defence", (unsigned)h->type, (unsigned long)h->msgId,
            (unsigned)h->fragIndex, (unsigned)h->fragCount);
@@ -6691,16 +6691,16 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
     if (gEspNow) { gEspNow->routerMetrics.v4FragRxCompleted++; }
   }
   
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_RX] ========================================");
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_RX] V4 BINARY MESSAGE RECEIVED");
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_RX] Type=%u MsgId=%lu PayloadLen=%u Flags=0x%02X",
+  DEBUG_ESPNOW_ROUTERF("[V4_RX] ========================================");
+  DEBUG_ESPNOW_ROUTERF("[V4_RX] V4 BINARY MESSAGE RECEIVED");
+  DEBUG_ESPNOW_ROUTERF("[V4_RX] Type=%u MsgId=%lu PayloadLen=%u Flags=0x%02X",
          h->type, (unsigned long)h->msgId, payloadLen, h->flags);
   
   // Handle ACK (no dedup needed)
   if (h->type == ESPNOW_V4_TYPE_ACK) {
     char srcMac[18];
     macToDisplay(recv_info->src_addr, srcMac, sizeof(srcMac));
-    DEBUGF(DEBUG_ESPNOW_CORE, "[V4_ACK_RX] ACK received from %s for msgId=%lu fragIdx=%u fragCnt=%u",
+    DEBUG_ESPNOWF("[V4_ACK_RX] ACK received from %s for msgId=%lu fragIdx=%u fragCnt=%u",
            srcMac, (unsigned long)h->msgId, h->fragIndex, h->fragCount);
     
     // Update peer health ACK tracking
@@ -6728,7 +6728,7 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
             gV4FragAckWait[i].fragIndex == h->fragIndex) {
           gV4FragAckWait[i].acked = true;
           foundV3 = true;
-          DEBUGF(DEBUG_ESPNOW_CORE, "[V4_ACK_RX] Matched V3 fragment ACK waiter slot %d (msgId=%lu fragIdx=%u)",
+          DEBUG_ESPNOWF("[V4_ACK_RX] Matched V3 fragment ACK waiter slot %d (msgId=%lu fragIdx=%u)",
                  i, (unsigned long)h->msgId, h->fragIndex);
           break;
         }
@@ -6743,7 +6743,7 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
     espnowAppPingNoteAck(recv_info->src_addr, h->msgId);
 
     if (!foundV3) {
-      DEBUGF(DEBUG_ESPNOW_CORE, "[V4_ACK_RX] No matching ACK waiter found (msgId=%lu fragIdx=%u)",
+      DEBUG_ESPNOWF("[V4_ACK_RX] No matching ACK waiter found (msgId=%lu fragIdx=%u)",
              (unsigned long)h->msgId, h->fragIndex);
     }
     
@@ -6757,7 +6757,7 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
     // For fragmented messages, send fragment-specific ACK
     if (h->fragCount > 1) {
       v4_send_frag_ack(recv_info->src_addr, h->msgId, h->fragIndex, h->fragCount);
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_ACK] Sent ACK for fragment %u/%u msgId=%lu",
+      DEBUG_ESPNOW_ROUTERF("[V4_FRAG_ACK] Sent ACK for fragment %u/%u msgId=%lu",
              h->fragIndex + 1, h->fragCount, (unsigned long)h->msgId);
     } else {
       v4_send_ack(recv_info->src_addr, h->msgId);
@@ -6833,7 +6833,7 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
   // verified BROADCAST_AUTH HMAC (authenticated, maybe plaintext). The old
   // log read ESPNOW_V4_FLAG_ENCRYPTED, a legacy LMK bit that's never set
   // anymore, so it always printed "encrypted=NO" — even for AEAD frames.
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_RX] Source: %s (paired=%s enc=%s auth=%s)",
+  DEBUG_ESPNOW_ROUTERF("[V4_RX] Source: %s (paired=%s enc=%s auth=%s)",
          deviceName, isPaired ? "YES" : "NO",
          wasSessionEncrypted ? "YES" : "NO",
          wasAuthenticated ? "YES" : "NO");
@@ -6881,7 +6881,7 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
   //     handled inside v4h_file_end.
 
   // Unknown V4 type - log and ignore
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_RX] Unknown type %d from %s", h->type, deviceName);
+  DEBUG_ESPNOW_ROUTERF("[V4_RX] Unknown type %d from %s", h->type, deviceName);
   
   // CRITICAL: Cleanup reassembly buffer for ALL fragmented messages (not just unknown types)
   // This was previously only cleaning up at the end of the function, causing memory leaks
@@ -6922,7 +6922,7 @@ static void v4CmdResultCallback(bool ok, const char* result, void* userData) {
   if (!ctx) return;
   
   size_t resultLen = result ? strlen(result) : 0;
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4] CMD result callback: ok=%d len=%zu to %s (msgId=%lu)",
+  DEBUG_ESPNOW_ROUTERF("[V4] CMD result callback: ok=%d len=%zu to %s (msgId=%lu)",
          ok, resultLen, ctx->deviceName, (unsigned long)ctx->cmdMsgId);
 
   // No further output streams to this session: commandExecTask cleared the
@@ -7402,7 +7402,7 @@ static void onEspNowRawRecv(const esp_now_recv_info* recv_info, const uint8_t* i
   }
 
   // V3 didn't handle it - log and drop
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[RX] Message not handled by V3 - dropped (len=%d)", len);
+  DEBUG_ESPNOW_ROUTERF("[RX] Message not handled by V3 - dropped (len=%d)", len);
   return;
 
 }
@@ -9032,7 +9032,7 @@ static void finalizeTopologyStreamLocked(TopologyStream* stream) {
   stream->complete = true;
   gTopoLastResponseTime = (uint32_t)millis();
   gTopoResponsesReceived++;
-  DEBUGF(DEBUG_ESPNOW_TOPO, "[TOPO] Finalized stream for %s (%d/%d peers)",
+  DEBUG_ESPNOW_TOPOF("[TOPO] Finalized stream for %s (%d/%d peers)",
          stream->senderName, stream->receivedPeers, stream->totalPeers);
   finishTopologyRequestIfCompleteLocked();
 }
@@ -9089,7 +9089,7 @@ static void addTopoDeviceName(const uint8_t* mac, const char* name) {
       // Update existing entry
       strncpy(gTopoDeviceCache[i].name, name, 31);
       gTopoDeviceCache[i].name[31] = '\0';
-      DEBUGF(DEBUG_ESPNOW_TOPO, "[TOPO_CACHE] Updated device: %s = %s", MAC_STR(mac), name);
+      DEBUG_ESPNOW_TOPOF("[TOPO_CACHE] Updated device: %s = %s", MAC_STR(mac), name);
       return;
     }
   }
@@ -9101,12 +9101,12 @@ static void addTopoDeviceName(const uint8_t* mac, const char* name) {
       strncpy(gTopoDeviceCache[i].name, name, 31);
       gTopoDeviceCache[i].name[31] = '\0';
       gTopoDeviceCache[i].active = true;
-      DEBUGF(DEBUG_ESPNOW_TOPO, "[TOPO_CACHE] Added device: %s = %s", MAC_STR(mac), name);
+      DEBUG_ESPNOW_TOPOF("[TOPO_CACHE] Added device: %s = %s", MAC_STR(mac), name);
       return;
     }
   }
   
-  DEBUGF(DEBUG_ESPNOW_TOPO, "[TOPO_CACHE] Cache full, cannot add %s", name);
+  DEBUG_ESPNOW_TOPOF("[TOPO_CACHE] Cache full, cannot add %s", name);
 }
 
 // Helper: Get device name from topology cache
@@ -9282,7 +9282,7 @@ static void cleanupStaleTopoStreams() {
   unsigned long now = millis();
   for (int i = 0; i < MAX_CONCURRENT_TOPO_STREAMS; i++) {
     if (gTopoStreams[i].active && (now - gTopoStreams[i].startTime > 10000)) {
-      DEBUGF(DEBUG_ESPNOW_TOPO, "[TOPO] Timeout: Finalizing partial stream from %s (reqId=%lu)",
+      DEBUG_ESPNOW_TOPOF("[TOPO] Timeout: Finalizing partial stream from %s (reqId=%lu)",
                     gTopoStreams[i].senderName, (unsigned long)gTopoStreams[i].reqId);
       finalizeTopologyStreamLocked(&gTopoStreams[i]);
     }
@@ -9332,7 +9332,7 @@ static void loadEspNowDevices() {
   {
     FsLockGuard fsGuard("espnow.devices.load");
     if (!VFS::existsGuarded(ESPNOW_DEVICES_FILE, loadAuth)) {
-      DEBUGF(DEBUG_ESPNOW_MESH, "[ESP-NOW] No saved devices file at %s", ESPNOW_DEVICES_FILE);
+      DEBUG_ESPNOW_MESHF("[ESP-NOW] No saved devices file at %s", ESPNOW_DEVICES_FILE);
       sEspNowDevicesLoad = ConfigLoad::Status::AbsentOk;
       return;
     }
@@ -9547,7 +9547,7 @@ static void loadEspNowDevices() {
       WARN_ESPNOWF("[ESP-NOW] Registry migration not persisted because one or more source entries could not be represented safely");
     }
   }
-  DEBUGF(DEBUG_ESPNOW_MESH, "[ESP-NOW] Loaded %d device(s) from %s", count, ESPNOW_DEVICES_FILE);
+  DEBUG_ESPNOW_MESHF("[ESP-NOW] Loaded %d device(s) from %s", count, ESPNOW_DEVICES_FILE);
 }
 
 
@@ -9990,7 +9990,7 @@ void requestTopologyDiscovery() {
       finishTopologyRequestIfCompleteLocked();
     }
   }
-  DEBUGF(DEBUG_ESPNOW_TOPO, "[TOPO] Discovery request sent to %d/%d peers (reqId=%lu)",
+  DEBUG_ESPNOW_TOPOF("[TOPO] Discovery request sent to %d/%d peers (reqId=%lu)",
          sentCount, targetCount, (unsigned long)requestId);
 }
 
@@ -11025,7 +11025,7 @@ void processMeshHeartbeats() {
       if (parseMacAddress(gSettings.bondPeerMac, peerMac)) {
         uint32_t reqId = generateMessageId();
         bondSendEncryptedAsync(peerMac, ESPNOW_V4_TYPE_BOND_STATUS_REQ, 0, reqId, nullptr, 0);
-        DEBUGF(DEBUG_ESPNOW_MESH, "[BOND] 9k: Sent status request to peer");
+        DEBUG_ESPNOW_MESHF("[BOND] 9k: Sent status request to peer");
       }
     }
   }
@@ -11204,7 +11204,7 @@ bool stopEspNowTask(uint32_t timeoutMs) {
   }
   if (task == xTaskGetCurrentTaskHandle()) {
     taskEXIT_CRITICAL(&gEspNowHbLifecycleLock);
-    DEBUGF(DEBUG_ESPNOW_CORE, "[ESP-NOW] heartbeat stop rejected from heartbeat task");
+    DEBUG_ESPNOWF("[ESP-NOW] heartbeat stop rejected from heartbeat task");
     return false;
   }
   gEspNowHbStopRequested.store(true, std::memory_order_release);
@@ -11214,7 +11214,7 @@ bool stopEspNowTask(uint32_t timeoutMs) {
   // immediately after processMeshHeartbeats returns and all stack guards unwind.
   (void)xTaskAbortDelay(task);
   if (!stopDone || xSemaphoreTake(stopDone, pdMS_TO_TICKS(timeoutMs)) != pdTRUE) {
-    DEBUGF(DEBUG_ESPNOW_CORE,
+    DEBUG_ESPNOWF(
            "[ESP-NOW] heartbeat stop TIMEOUT after %ums; task retained for retry",
            (unsigned)timeoutMs);
     return false;
@@ -11303,7 +11303,7 @@ bool espnowAppPingStart(const uint8_t* mac) {
     // Pending — that would let a stale ACK from an unrelated send win.
     gEspNowAppPing.state = EspNowAppPingState::Idle;
   }
-  DEBUGF(DEBUG_ESPNOW_CORE, "[ESPNOW_APP_PING] start msgId=%lu peer=" MAC_FMT " ok=%d",
+  DEBUG_ESPNOWF("[ESPNOW_APP_PING] start msgId=%lu peer=" MAC_FMT " ok=%d",
          (unsigned long)msgId, MAC_ARGS(mac), (int)ok);
   return ok;
 }
@@ -11314,7 +11314,7 @@ void espnowAppPingNoteAck(const uint8_t* src, uint32_t msgId) {
   if (memcmp(gEspNowAppPing.peerMac, src, 6) != 0) return;
   gEspNowAppPing.rttMs = (uint32_t)millis() - gEspNowAppPing.startMs;
   gEspNowAppPing.state = EspNowAppPingState::Ok;
-  DEBUGF(DEBUG_ESPNOW_CORE, "[ESPNOW_APP_PING] ack matched: rtt=%lums",
+  DEBUG_ESPNOWF("[ESPNOW_APP_PING] ack matched: rtt=%lums",
          (unsigned long)gEspNowAppPing.rttMs);
 }
 
@@ -11795,7 +11795,7 @@ static bool initEspNow() {
   gBroadcastsCompleted = 0;
   gBroadcastsTimedOut = 0;
 
-  DEBUGF(DEBUG_ESPNOW_STREAM, "[ESP-NOW] Initialized successfully on channel %d", gEspNow->channel);
+  DEBUG_ESPNOW_STREAMF("[ESP-NOW] Initialized successfully on channel %d", gEspNow->channel);
   // Use BROADCAST_PRINTF for user-visible init message (safe, doesn't trigger streaming)
   BROADCAST_PRINTF("[ESP-NOW] Initialized successfully on channel %d", gEspNow->channel);
 
@@ -11811,7 +11811,7 @@ static bool initEspNow() {
   if (bootPw.length() > 0) {
     gEspNow->passphrase = bootPw;
     deriveKeyFromPassphrase(bootPw, gEspNow->derivedKey);
-    DEBUGF(DEBUG_ESPNOW_STREAM, "[ESP-NOW] Restored encryption passphrase from settings");
+    DEBUG_ESPNOW_STREAMF("[ESP-NOW] Restored encryption passphrase from settings");
   } else {
     BROADCAST_PRINTF("[ESP-NOW] WARNING: No passphrase configured — encrypted "
                      "frames from peers will fail to decrypt. "
@@ -11827,7 +11827,7 @@ static bool initEspNow() {
   
   esp_err_t addStatus = esp_now_add_peer(&broadcastPeer);
   if (addStatus == ESP_OK) {
-    DEBUGF(DEBUG_ESPNOW_STREAM, "[ESP-NOW] Broadcast peer (FF:FF:FF:FF:FF:FF) registered for public heartbeat mode");
+    DEBUG_ESPNOW_STREAMF("[ESP-NOW] Broadcast peer (FF:FF:FF:FF:FF:FF) registered for public heartbeat mode");
   } else if (addStatus == ESP_ERR_ESPNOW_EXIST) {
     // Already exists, that's fine
   } else {
@@ -14945,7 +14945,7 @@ const char* cmd_espnow_list(const String& argsInput) {
   if (!gEspNow->listBuffer) return "{}";
   serializeJson(doc, gEspNow->listBuffer, needed);
 
-  DEBUGF(DEBUG_HTTP, "[ESP-NOW] list: %d devices", gEspNow->deviceCount);
+  DEBUG_HTTPF("[ESP-NOW] list: %d devices", gEspNow->deviceCount);
   return gEspNow->listBuffer;
 }
 
@@ -15655,7 +15655,7 @@ bool sendFileToMac(const uint8_t* mac, const String& localPath) {
   // they would on a direct read; internal bond/USER_SYNC callers run
   // through the same gate using whatever identity their task installed.
   if (!canRead(localPath, currentAuthContext())) {
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FILE_TX] SECURITY: Blocked sending sensitive file: %s", localPath.c_str());
+    DEBUG_ESPNOW_ROUTERF("[V4_FILE_TX] SECURITY: Blocked sending sensitive file: %s", localPath.c_str());
     broadcastOutput("[ESP-NOW] SECURITY: Cannot send file containing credentials: " + localPath);
     return false;
   }
@@ -15663,7 +15663,7 @@ bool sendFileToMac(const uint8_t* mac, const String& localPath) {
   {
     FsLockGuard guard("espnow.send_file.exists");
     if (!VFS::existsGuarded(localPath, currentAuthContext())) {
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FILE_TX] File not found: %s", localPath.c_str());
+      DEBUG_ESPNOW_ROUTERF("[V4_FILE_TX] File not found: %s", localPath.c_str());
       return false;
     }
   }
@@ -15680,7 +15680,7 @@ bool sendFileToMac(const uint8_t* mac, const String& localPath) {
     FsLockGuard guard("espnow.send_file.open");
     file = VFS::openGuarded(localPath, "r", currentAuthContext());
     if (!file) {
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FILE_TX] Cannot open file: %s", localPath.c_str());
+      DEBUG_ESPNOW_ROUTERF("[V4_FILE_TX] Cannot open file: %s", localPath.c_str());
       return false;
     }
     fileSize = file.size();
@@ -15699,7 +15699,7 @@ bool sendFileToMac(const uint8_t* mac, const String& localPath) {
   uint32_t maxFileSize = 65535 * v4ChunkSize;  // 16-bit chunk count max
   if (fileSize > maxFileSize) {
     { FsLockGuard guard("espnow.send_file.close"); file.close(); }
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FILE_TX] File too large: %lu bytes (max %lu)",
+    DEBUG_ESPNOW_ROUTERF("[V4_FILE_TX] File too large: %lu bytes (max %lu)",
            (unsigned long)fileSize, (unsigned long)maxFileSize);
     return false;
   }
@@ -15732,13 +15732,13 @@ bool sendFileToMac(const uint8_t* mac, const String& localPath) {
   if (!fileSendFrame(ESPNOW_V4_TYPE_FILE_START, ESPNOW_V4_FLAG_ACK_REQ, transferId,
                      (const uint8_t*)&startPayload, sizeof(startPayload))) {
     { FsLockGuard guard("espnow.send_file.close"); file.close(); }
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FILE_TX] Failed to send FILE_START");
+    DEBUG_ESPNOW_ROUTERF("[V4_FILE_TX] Failed to send FILE_START");
     return false;
   }
   
   DEBUG_ESPNOWF("[V4_FILE_TX] START: %s (%lu bytes, %u chunks, chunkSize=%u) to %s, transferId=%lu",
          filename.c_str(), (unsigned long)fileSize, totalChunks, v4ChunkSize, macToDisplayStr(mac).c_str(), (unsigned long)transferId);
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FILE_TX] Transfer initiated: %s -> %s", filename.c_str(), macToDisplayStr(mac).c_str());
+  DEBUG_ESPNOW_ROUTERF("[V4_FILE_TX] Transfer initiated: %s -> %s", filename.c_str(), macToDisplayStr(mac).c_str());
   
   vTaskDelay(pdMS_TO_TICKS(100));  // Give receiver more time to set up
   
@@ -15791,7 +15791,7 @@ bool sendFileToMac(const uint8_t* mac, const String& localPath) {
       sent = fileSendFrame(ESPNOW_V4_TYPE_FILE_DATA, 0, transferId,
                            chunkPayload, payloadLen);
       if (!sent) {
-        DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FILE_TX] Chunk %u send failed, retry %d", chunkIdx, attempt + 1);
+        DEBUG_ESPNOW_ROUTERF("[V4_FILE_TX] Chunk %u send failed, retry %d", chunkIdx, attempt + 1);
         vTaskDelay(pdMS_TO_TICKS(20));
       } else {
         DEBUG_ESPNOWF("[V4_FILE_TX] Chunk %u sent: %u bytes (attempt %d)", chunkIdx, payloadLen, attempt + 1);
@@ -15923,7 +15923,7 @@ bool sendBondedSensorData(uint8_t sensorType, const uint8_t* data, uint16_t data
   // separate from the 200 B gate in v4_send_sensor_envelope on the mesh path.
   const uint16_t maxDataLen = ESPNOW_V4_MAX_PAYLOAD - sizeof(V4PayloadSensorData);
   if (dataLen > maxDataLen) {
-    DEBUGF(DEBUG_ESPNOW_MESH, "[V4_SENSOR_TX] Data too large: %u > %u", dataLen, maxDataLen);
+    DEBUG_ESPNOW_MESHF("[V4_SENSOR_TX] Data too large: %u > %u", dataLen, maxDataLen);
     return false;
   }
   
@@ -15949,7 +15949,7 @@ bool sendBondedSensorData(uint8_t sensorType, const uint8_t* data, uint16_t data
   bool sent = bondSendEncryptedAsync(peerMac, ESPNOW_V4_TYPE_BOND_SENSOR_DATA, 0, msgId, payloadBuf, totalLen);
 
   // Single concise debug line only on success/failure
-  DEBUGF(DEBUG_ESPNOW_MESH, "[BOND] Sensor TX type=%u len=%u seq=%lu %s",
+  DEBUG_ESPNOW_MESHF("[BOND] Sensor TX type=%u len=%u seq=%lu %s",
          sensorType, dataLen, (unsigned long)sd->seqNum, sent ? "QUEUED" : "DROP");
 
   return sent;
@@ -15978,7 +15978,7 @@ bool sendBondStreamCtrl(RemoteSensorType sensorType, bool enable) {
   bool sent = bondSendEncryptedAsync(peerMac, ESPNOW_V4_TYPE_BOND_STREAM_CTRL, ESPNOW_V4_FLAG_ACK_REQ,
                             msgId, (const uint8_t*)&ctrl, sizeof(ctrl));
 
-  DEBUGF(DEBUG_ESPNOW_MESH, "[BOND_STREAM_CTRL] TX %s %s -> %s",
+  DEBUG_ESPNOW_MESHF("[BOND_STREAM_CTRL] TX %s %s -> %s",
          sensorTypeToString(sensorType), enable ? "ON" : "OFF", sent ? "QUEUED" : "FAIL");
   return sent;
 }
@@ -16784,7 +16784,7 @@ const char* cmd_espnow_startstream(const String& argsInput) {
     senderName = macToDisplayStr(senderMac);
   }
 
-  DEBUGF(DEBUG_ESPNOW_STREAM, "[STREAM] Activated: target=%s name=%s active=%d counters_reset=YES",
+  DEBUG_ESPNOW_STREAMF("[STREAM] Activated: target=%s name=%s active=%d counters_reset=YES",
          macToDisplayStr(gEspNow->streamTarget).c_str(), senderName.c_str(), gEspNow->streamActive);
 
   // Bus event: this device is now streaming all output to the requesting peer.
@@ -16830,7 +16830,7 @@ const char* cmd_espnow_stopstream(const String& argsInput) {
     snprintf(streamBuffer + pos, sizeof(streamBuffer) - pos, "\nDrop rate: %.1f%%", dropRate);
   }
 
-  DEBUGF(DEBUG_ESPNOW_STREAM, "[STREAM] Deactivated: target=%s sent=%lu dropped=%lu",
+  DEBUG_ESPNOW_STREAMF("[STREAM] Deactivated: target=%s sent=%lu dropped=%lu",
          targetName.c_str(),
          (unsigned long)gEspNow->streamSentCount,
          (unsigned long)gEspNow->streamDroppedCount);
@@ -16877,7 +16877,7 @@ const char* cmd_espnow_send(const String& argsInput) {
   String target = a.arg(base);
   String message = a.remaining(base);
 
-  DEBUGF(DEBUG_ESPNOW_STREAM, "[cmd_espnow_send] message.length()=%d",
+  DEBUG_ESPNOW_STREAMF("[cmd_espnow_send] message.length()=%d",
          message.length());
 
   // Resolve device name or MAC address

@@ -562,7 +562,7 @@ static void batteryLogAppend(const char* event) {
       if (header) header.close();
       if (!complete || !VFS::replaceFileGuarded(temporary, String(kBatteryLogPath), ctx)) {
         VFS::removeGuarded(temporary, ctx);
-        if (isDebugFlagSet(DEBUG_STORAGE)) DEBUGF_BROADCAST(DEBUG_STORAGE, "Battery log: header write failed");
+        if (isDebugFlagSet(DEBUG_STORAGE)) DEBUGF_QUEUE(DEBUG_STORAGE, "Battery log: header write failed");
         return;
       }
       f = VFS::openGuarded(String(kBatteryLogPath), "a", ctx, true);
@@ -574,7 +574,7 @@ static void batteryLogAppend(const char* event) {
     const size_t sz = f.size();
     f.close();
     if (!complete && isDebugFlagSet(DEBUG_STORAGE)) {
-      DEBUGF_BROADCAST(DEBUG_STORAGE, "Battery log: row write failed (%u/%u bytes)",
+      DEBUGF_QUEUE(DEBUG_STORAGE, "Battery log: row write failed (%u/%u bytes)",
                        (unsigned)written, (unsigned)(len + 1));
     }
 

@@ -81,7 +81,7 @@ static const char* gCase = "";
 #define ENABLE_OLED_DISPLAY 1
 #define ENABLE_ESPNOW 1
 #define ENABLE_BONDED_MODE 1
-#define DEBUGF(...) ((void)0)
+#define DEBUG_ESPNOW_ROUTERF(...) ((void)0)
 #define DEBUG_SYSTEMF(...) ((void)0)
 #define DEBUG_ESPNOW_ROUTER 0
 #define EXT_RAM_BSS_ATTR

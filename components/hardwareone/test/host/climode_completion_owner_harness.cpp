@@ -45,7 +45,7 @@ static int xSemaphoreTakeRecursive(SemaphoreHandle_t mutex, TickType_t wait) {
   mutex->lock(); return pdTRUE;
 }
 static void xSemaphoreGiveRecursive(SemaphoreHandle_t mutex) { mutex->unlock(); }
-#define DEBUGF(...) ((void)0)
+#define DEBUG_CLIF(...) ((void)0)
 
 static std::vector<std::pair<CommandSource, TransportSessionEpoch>> liveSessions;
 static bool transportSessionEpochIsLive(CommandSource source, TransportSessionEpoch epoch) {
