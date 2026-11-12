@@ -2107,6 +2107,13 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_code_name_spelling.py)
 
+# Log lines go through the project log; ESP_LOGx and Serial writes are counted
+# per file (CONTRIBUTING.md, "Logging").
+add_test(
+  NAME logging_routes
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_logging_routes.py)
+
 # OLED display-session writer windows (README "OLED display-session writer windows"):
 # the frame commit and the command-result path validate under the display lifecycle
 # writer, release it, push or copy, then re-check without opening a session.

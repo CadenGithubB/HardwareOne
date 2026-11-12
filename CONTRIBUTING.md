@@ -232,6 +232,36 @@ attachment should report unavailable without breaking unrelated services.
   | Header guard | `#pragma once` |
   | A flag two tasks touch | `std::atomic` |
 
+## Logging
+
+- A log line goes through the project log: `DEBUG_<AREA>F`, `INFO_<AREA>F`,
+  `WARN_<AREA>F` and `ERROR_<AREA>F` from `System_Debug.h`. These lines follow
+  the debug flags and the log level and reach the serial port, the web log and
+  the log files. A debug line uses the area macro of its flag; a new flag gets
+  its macro next to the others. `DEBUGF_QUEUE(DEBUG_ALWAYS | flag, ...)` is the
+  primitive below the area macros, for the few lines that must ignore the
+  level.
+- A lifecycle event (a boot decision, a format, a settings load failure) uses
+  `logSystemEvent`. It is always on, it is saved, and it works before the
+  debug system exists. Keep it to single state changes.
+- `ESP_LOGx` reaches the serial port only. It stays for three kinds of line:
+  a bench record that a tool or a test reads from the console (`STT: TL`,
+  `BLE_COEX`, `RADIO_STATS`, `CAPTEST`); a path where the project log is not
+  running yet or cannot be trusted (early boot, update safety, filesystem
+  mount, memory diagnostics); and a driver unit that a host harness compiles
+  without the project log (`HAL_Radio`, the HAL display and camera files).
+  The `loglink` command routes the whole IDF log into the project log when
+  these lines are wanted in the web log or a file; it is off by default.
+- `Serial.print` and `Serial.printf` stay in the setup wizards, the serial
+  console itself, the writer of the project log and fatal paths before the log
+  exists. `esp_rom_printf` stays in the crash record and the memory
+  diagnostics.
+- The host test `logging_routes` holds the number of `ESP_LOGx`, `Serial` and
+  `esp_rom_printf` calls per file. A new call of these kinds fails the test
+  until its file's number is raised, so it is added on purpose and for one of
+  the reasons above. The test also fails on `DEBUGF(flag, ...)` and
+  `DEBUGF_BROADCAST`, which were folded into the area macros.
+
 ## Keep the setup tool thin
 
 The host configuration tool chooses what enters the firmware. The on-device

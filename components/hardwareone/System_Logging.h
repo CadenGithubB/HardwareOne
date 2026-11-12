@@ -9,33 +9,42 @@
 // Centralized logging utilities and file path definitions
 //
 // ─── Which logging mechanism should I use? ──────────────────────────────────
-// This codebase has three ways to emit log output. Pick by audience:
+// The project log is the default. The other routes stay for stated reasons.
+// CONTRIBUTING.md, "Logging", has the full rule; the host test `logging_routes`
+// counts the calls of routes 3 and 4 per file.
 //
-//   1. ESP_LOGE / ESP_LOGW / ESP_LOGI / ESP_LOGD   (from "esp_log.h")
-//        For low-level / driver / IDF-facing diagnostics. Tagged, colored,
-//        runtime-filterable via esp_log_level_set("TAG", level).
-//        Use for:  hardware init failures, driver errors, IDF subsystem events.
+//   1. The project log  (area macros from "System_Debug.h")
+//        DEBUG_<AREA>F, INFO_<AREA>F, WARN_<AREA>F, ERROR_<AREA>F.
+//        A line is formatted into a pooled message and queued without
+//        blocking. It follows the debug flags and the log level and reaches
+//        the serial port, the web log viewer and the log files; ERROR lines
+//        are also kept in LOG_ERROR_FILE.
+//        Use for:  everything that is not covered by 2 to 4.
 //
-//   2. System_Debug  (DEBUG_PRINT, ERROR_PRINT, etc. from "System_Debug.h")
-//        For user-visible application events. Timestamped, queued to PSRAM,
-//        mirrored to the web log viewer, and persisted to LOG_ERROR_FILE
-//        when emitted at ERROR level.
-//        Use for:  login events, command execution, WiFi/BT state changes,
-//                  anything an admin watching the web UI should see.
-//
-//   3. Raw printf / Serial.print
-//        Avoid. No timestamp, no level, no tag, not mirrored to web.
-//        Only acceptable inside first-time setup wizards that run before
-//        System_Debug is initialized.
-//
-//   4. logSystemEvent()  (from "System_Debug.h")
+//   2. logSystemEvent()  (from "System_Debug.h")
 //        For durable system lifecycle events: boot decisions, FS format /
 //        file deletions, settings load/save failures, WiFi connects.
 //        Always-on (independent of debug flags and log level), persisted to
 //        LOG_EVENTS_FILE, safe to call before the debug system exists.
 //        Keep it LOW VOLUME — discrete state changes only.
 //
-// Level guidance (applies to both ESP_LOG* and System_Debug ERROR/WARN/INFO):
+//   3. ESP_LOGE / ESP_LOGW / ESP_LOGI / ESP_LOGD   (from "esp_log.h")
+//        Serial port only, unless the `loglink` command routes the IDF log
+//        into the project log. Three kinds of line use it:
+//          - a bench record that a tool or a test reads from the console
+//            ("STT: TL ...", BLE_COEX, RADIO_STATS, CAPTEST);
+//          - a path where the project log is not running yet or cannot be
+//            trusted: early boot, update safety, filesystem mount, memory
+//            diagnostics;
+//          - a driver unit that a host harness compiles without the project
+//            log (HAL_Radio, the HAL display and camera files).
+//
+//   4. Serial.print / Serial.printf / esp_rom_printf
+//        No timestamp, no level, no tag, not mirrored to web. Only in the
+//        setup wizards, the serial console itself, the writer of the project
+//        log, and fatal paths before the log exists.
+//
+// Level guidance (applies to both ESP_LOG* and the project log):
 //   ERROR — something failed that a user/admin needs to know about
 //   WARN  — recoverable issue (sensor timeout, client disconnect mid-stream)
 //   INFO  — state changes (boot, connect, command OK)
