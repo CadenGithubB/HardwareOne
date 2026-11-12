@@ -2640,8 +2640,8 @@ const char* cmd_certgen(const String& argsInput) {
       VFS::removeGuarded(certTmp, certAuth);
       snprintf(gDebugBuffer, 1024,
                "Error: New key saved but the certificate could not be moved into place, so they no longer match. "
-               "With httpsEnabled 1, HTTPS connections will fail after a reboot until certgen succeeds "
-               "(or set httpsEnabled 0).");
+               "With httpsenabled 1, HTTPS connections will fail after a reboot until certgen succeeds "
+               "(or set httpsenabled 0).");
       goto cleanup;
     }
   }
@@ -2651,7 +2651,7 @@ const char* cmd_certgen(const String& argsInput) {
     "  Cert: /system/certs/https_server.crt\n"
     "  Key:  /system/certs/https_server.key\n"
     "Run 'certinfo' to view details.\n"
-    "Enable HTTPS: httpsEnabled 1\n"
+    "Enable HTTPS: httpsenabled 1\n"
     "Then reboot to activate.",
     useRsa ? "RSA-2048" : "ECDSA P-256");
   systemEventPost(SYSEVT_CERT_GENERATED, "HardwareOne", useRsa ? "RSA-2048" : "ECDSA P-256");
@@ -3185,9 +3185,9 @@ extern const SettingsModule wifiSettingsModule = {
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry httpSettingsEntries[] = {
   { "httpEnabled", SETTING_BOOL, &gSettings.httpEnabled, 1, 0, nullptr, 0, 1, "Enabled", nullptr, false, nullptr, "httpenabled" },
-  { "httpAutoStart", SETTING_BOOL, &gSettings.httpAutoStart, true, 0, nullptr, 0, 1, "Auto-start at boot", nullptr, false, nullptr, "httpAutoStart" },
+  { "httpAutoStart", SETTING_BOOL, &gSettings.httpAutoStart, true, 0, nullptr, 0, 1, "Auto-start at boot", nullptr, false, nullptr, "httpautostart" },
 #if ENABLE_HTTPS
-  { "httpsEnabled", SETTING_BOOL, &gSettings.httpsEnabled, false, 0, nullptr, 0, 1, "Enable HTTPS (requires certs + reboot)", nullptr, false, nullptr, "httpsEnabled" },
+  { "httpsEnabled", SETTING_BOOL, &gSettings.httpsEnabled, false, 0, nullptr, 0, 1, "Enable HTTPS (requires certs + reboot)", nullptr, false, nullptr, "httpsenabled" },
 #endif
   { "webCliHistorySize", SETTING_INT, &gSettings.webCliHistorySize, 10, 0, nullptr, 1, 100, "Web CLI history size", nullptr, false, nullptr, "webclihistorysize" },
 };

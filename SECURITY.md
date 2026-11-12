@@ -70,7 +70,7 @@ here so you can choose a deployment with them in mind.
 - The web UI is served over plain **HTTP by default**. Over HTTP, logins and session cookies can be
   read by anyone who can see the traffic on your network.
 - HTTPS exists only in builds compiled with `ENABLE_HTTPS=1`, where it is a setting
-  (`httpsEnabled`, off by default, needs certificates and a reboot). It is **compiled out** of the
+  (`httpsenabled`, off by default, needs certificates and a reboot). It is **compiled out** of the
   `p4x_eye` board profile and of every deployment (`headless`, `pocket_assistant`, `handheld`).
   Those builds serve the web UI over HTTP only and cannot be switched to HTTPS.
 

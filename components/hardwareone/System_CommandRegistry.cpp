@@ -107,15 +107,15 @@ static constexpr CommandModule gCommandModules[] = {
 #if ENABLE_MQTT
   { "mqtt",       "MQTT broker connection for Home Assistant", "The MQTT subsystem connects the device to a broker, primarily to publish its "
     "sensor and system telemetry to Home Assistant via HA discovery. It is almost "
-    "entirely configuration: broker host/port (mqttHost, mqttPort), credentials "
-    "(mqttUser, mqttPassword), TLS mode and CA path, base/discovery topics, publish "
-    "interval, and a long list of per-source publish toggles (mqttPublishThermal, "
-    "mqttPublishIMU, and so on). These are persisted settings and most config commands "
+    "entirely configuration: broker host/port (mqtthost, mqttport), credentials "
+    "(mqttuser, mqttpassword), TLS mode and CA path, base/discovery topics, publish "
+    "interval, and a long list of per-source publish toggles (mqttpublishthermal, "
+    "mqttpublishimu, and so on). These are persisted settings and most config commands "
     "are admin-only; after changing them, reconnect with closemqtt/openmqtt to apply to "
     "a live session. openmqtt and closemqtt start and stop the client, mqttstatus shows "
     "connection state, and mqttautostart controls whether it connects at boot. For "
-    "inbound data, enable mqttSubscribeExternal with mqttSubscribeTopics; values "
-    "received from those topics are cached and read back with mqttExternalSensors.", mqttCommands,         &mqttCommandsCount, 0, nullptr },
+    "inbound data, enable mqttsubscribeexternal with mqttsubscribetopics; values "
+    "received from those topics are cached and read back with mqttexternalsensors.", mqttCommands,         &mqttCommandsCount, 0, nullptr },
 #endif
   #if ENABLE_BLUETOOTH
   { "bluetooth",  "Bluetooth LE control and status", "The Bluetooth radio runs one role at a time. "
@@ -519,7 +519,7 @@ static constexpr CommandModule gCommandModules[] = {
     "and ESP-NOW metadata "
     "(room, zone, tags); numeric variables use the > < = >= <= != operators and "
     "string/enum variables use = != CONTAINS. A true condition fires every time its "
-    "trigger is due. Supporting commands: validate-conditions checks conditional syntax without "
+    "trigger is due. Supporting commands: validateconditions checks conditional syntax without "
     "running it, autolog records automation activity to a file, and print <message> "
     "broadcasts text to all outputs.", automationCommands,   &automationCommandsCount, 0, nullptr },
 #endif
@@ -565,7 +565,7 @@ static constexpr CommandModule gCommandModules[] = {
     "minutes. savesettings remains an explicit flush-now command when no batch is open. "
     "Most commands here are admin-gated. Some "
     "changes only take effect after a reboot (for example espnowenabled and "
-    "httpsEnabled are marked reboot required). The controls command emits a "
+    "httpsenabled are marked reboot required). The controls command emits a "
     "machine-readable JSON descriptor of a module's settable controls for UI use. Note "
     "that most subsystem settings (wifi, i2c, sensors, power, oled, bluetooth, espnow) "
     "are owned and registered by their own modules; this module hosts the cross-cutting "
@@ -723,7 +723,7 @@ static constexpr CommandModule gCommandModules[] = {
     "starts scan-and-connect IN THE BACKGROUND and returns immediately -- it does not "
     "block, so poll g2status (or g2info for firmware/MAC/battery) to see when the link "
     "is up, and nearly every other command here requires that connection first. Display "
-    "commands render to the lens: g2show prints text, g2ai/g2ai-noask/g2ai-direct push "
+    "commands render to the lens: g2show prints text, g2ai/g2ainoask/g2aidirect push "
     "a front-pane AI answer card through the EvenAI pipeline, g2bmp shows a BMP file, "
     "and g2sensors/g2network/g2files/g2settingspage show built-in info pages; g2nav "
     "[on|off] enables menu-navigation mode and g2clear blanks the display. For audio, "

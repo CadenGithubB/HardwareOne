@@ -995,11 +995,11 @@ static bool webMenuInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPr
 #endif
         break;
       case WEB_ACT_AUTO_START:
-        oledRunCommand(gSettings.httpAutoStart ? "httpAutoStart 0" : "httpAutoStart 1");
+        oledRunCommand(gSettings.httpAutoStart ? "httpautostart 0" : "httpautostart 1");
         break;
       case WEB_ACT_HTTPS:
 #if ENABLE_HTTPS
-        if (oledRunCommand(gSettings.httpsEnabled ? "httpsEnabled 0" : "httpsEnabled 1")) {
+        if (oledRunCommand(gSettings.httpsEnabled ? "httpsenabled 0" : "httpsenabled 1")) {
           oledToastShow("Reboot to apply", 2500);
         }
 #endif

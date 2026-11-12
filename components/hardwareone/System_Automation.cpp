@@ -210,6 +210,7 @@ static String redactAutomationCommandForAuditImpl(const String& command,
   CommandArgs outer(command);
   if (outer.count() > 0 &&
       (outer.arg(0).equalsIgnoreCase("automationadd") ||
+       outer.arg(0).equalsIgnoreCase("validateconditions") ||
        outer.arg(0).equalsIgnoreCase("validate-conditions"))) {
     return outer.arg(0) + " ***";
   }
@@ -4963,7 +4964,9 @@ const CommandEntry automationCommands[] = {
 
   // Utility commands
   { "autolog", "Automation logging: autolog start <file> | stop | status.", false, cmd_autolog, "Usage: autolog start <filename> | autolog stop | autolog status" },
-  { "validate-conditions", "Validate conditional automation syntax: validate-conditions IF temp>75 THEN ledcolor red.", true, cmd_validate_conditions },
+  { "validateconditions", "Validate conditional automation syntax: validateconditions IF temp>75 THEN ledcolor red.", true, cmd_validate_conditions },
+  // Name from before 1.0, kept for one release (CONTRIBUTING.md, "Command names").
+  { "validate-conditions", "Alias of validateconditions.", true, cmd_validate_conditions },
   { "print", "Broadcast a message to all outputs: print <message>.", false, cmd_print },
   
   // NOTE: downloadautomation and if/conditional commands are registered

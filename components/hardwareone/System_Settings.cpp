@@ -686,10 +686,10 @@ const CommandEntry settingsCommands[] = {
   // espnowenabled (handler cmd_espnowenabled below) is registered by the
   // espnow module (System_ESPNow.cpp), which registers before this one.
 #if ENABLE_HTTP_SERVER
-  { "httpAutoStart", "Auto-start HTTP server at boot: <0|1>", true, cmd_httpAutoStart, "Usage: httpAutoStart <0|1>" },
+  { "httpautostart", "Auto-start HTTP server at boot: <0|1>", true, cmd_httpAutoStart, "Usage: httpautostart <0|1>" },
 #endif
 #if ENABLE_HTTPS
-  { "httpsEnabled", "Enable/disable HTTPS: <0|1> (reboot required)", true, cmd_httpsEnabled, "Usage: httpsEnabled <0|1>" },
+  { "httpsenabled", "Enable/disable HTTPS: <0|1> (reboot required)", true, cmd_httpsEnabled, "Usage: httpsenabled <0|1>" },
 #endif
   
   // Note: I2C settings are now handled by the modular registry in i2c_system.cpp
@@ -2265,11 +2265,11 @@ const char* cmd_httpAutoStart(const String& argsInput) {
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   String valStr = argsInput;
   valStr.trim();
-  if (valStr.length() == 0) return "Error: invalid arguments — Usage: httpAutoStart <0|1>";
+  if (valStr.length() == 0) return "Error: invalid arguments — Usage: httpautostart <0|1>";
   const char* p = valStr.c_str();
   bool enabled = (*p == '1' || strncasecmp(p, "true", 4) == 0);
   setSetting(gSettings.httpAutoStart, enabled);
-  snprintf(getDebugBuffer(), 1024, "httpAutoStart set to %s", enabled ? "1" : "0");
+  snprintf(getDebugBuffer(), 1024, "httpautostart set to %s", enabled ? "1" : "0");
   return getDebugBuffer();
 }
 #endif
@@ -2280,11 +2280,11 @@ const char* cmd_httpsEnabled(const String& argsInput) {
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   String valStr = argsInput;
   valStr.trim();
-  if (valStr.length() == 0) return "Error: invalid arguments — Usage: httpsEnabled <0|1>";
+  if (valStr.length() == 0) return "Error: invalid arguments — Usage: httpsenabled <0|1>";
   const char* p = valStr.c_str();
   bool enabled = (*p == '1' || strncasecmp(p, "true", 4) == 0);
   setSetting(gSettings.httpsEnabled, enabled);
-  snprintf(getDebugBuffer(), 1024, "httpsEnabled set to %s (takes effect after reboot)", enabled ? "1" : "0");
+  snprintf(getDebugBuffer(), 1024, "httpsenabled set to %s (takes effect after reboot)", enabled ? "1" : "0");
   return getDebugBuffer();
 }
 #endif

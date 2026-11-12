@@ -2114,6 +2114,13 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_logging_routes.py)
 
+# Command names are lower-case words without separators; old public names stay
+# as listed alias rows (CONTRIBUTING.md, "Command names").
+add_test(
+  NAME command_name_form
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_command_name_form.py)
+
 # OLED display-session writer windows (README "OLED display-session writer windows"):
 # the frame commit and the command-result path validate under the display lifecycle
 # writer, release it, push or copy, then re-check without opening a session.

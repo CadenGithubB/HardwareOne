@@ -153,8 +153,8 @@ enum HttpRowAction : uint8_t {
   HTTP_ROW_BACK = 0,      // -> WiFi submenu
   HTTP_ROW_INFO,          // URL / not compiled: no action
   HTTP_ROW_SERVER,        // on: openhttp; off: closehttp
-  HTTP_ROW_HTTPS,         // httpsEnabled 1|0 (reboot to apply)
-  HTTP_ROW_AUTO_START,    // httpAutoStart 1|0
+  HTTP_ROW_HTTPS,         // httpsenabled 1|0 (reboot to apply)
+  HTTP_ROW_AUTO_START,    // httpautostart 1|0
 };
 enum BluetoothRowAction : uint8_t {
   BT_ROW_BACK = 0,        // -> Network chooser
@@ -2386,7 +2386,7 @@ static void handleHttpTap(uint32_t idx) {
 
     case HTTP_ROW_HTTPS: {  // HTTPS mode toggle (reboot required to take effect)
       char line[40];
-      snprintf(line, sizeof(line), "httpsEnabled %d", row.on ? 1 : 0);
+      snprintf(line, sizeof(line), "httpsenabled %d", row.on ? 1 : 0);
       if (g2SubmitHijackCommand(line, cookie, onHttpMenuRefreshDone, nullptr)) {
         BROADCAST_PRINTF("[G2] HTTPS mode toggle %s→%s submitted (reboot to apply)",
                          row.on ? "OFF" : "ON", row.on ? "ON" : "OFF");
@@ -2398,7 +2398,7 @@ static void handleHttpTap(uint32_t idx) {
 
     case HTTP_ROW_AUTO_START: {  // HTTP Auto Start toggle (boot-time start)
       char line[40];
-      snprintf(line, sizeof(line), "httpAutoStart %d", row.on ? 1 : 0);
+      snprintf(line, sizeof(line), "httpautostart %d", row.on ? 1 : 0);
       if (g2SubmitHijackCommand(line, cookie, onHttpMenuRefreshDone, nullptr)) {
         BROADCAST_PRINTF("[G2] HTTP Auto Start toggle %s→%s submitted",
                          row.on ? "OFF" : "ON", row.on ? "ON" : "OFF");

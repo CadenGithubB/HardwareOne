@@ -30691,8 +30691,11 @@ extern const CommandEntry g2Commands[] = {
   { "g2listrebuild","REBUILD-list on swap when pure list + same row count [on|off] (default ON)", false, cmd_g2listrebuild, "Usage: g2listrebuild [<on|off>]  (bare = report state)" },
   { "g2show",       "Display text: g2show <text>",                     false, cmd_g2show, "Usage: g2show <text>" },
   { "g2ai",         "Front-pane AI card (full pipeline): g2ai <text>", false, cmd_g2ai, "Usage: g2ai <text>" },
-  { "g2ai-noask",   "Variant: skip ASK step: g2ai-noask <text>",       false, cmd_g2ai_noask, "Usage: g2ai-noask <text>" },
-  { "g2ai-direct",  "Variant: CTRL+REPLY only: g2ai-direct <text>",    false, cmd_g2ai_direct, "Usage: g2ai-direct <text>" },
+  { "g2ainoask",    "Variant: skip ASK step: g2ainoask <text>",        false, cmd_g2ai_noask, "Usage: g2ainoask <text>" },
+  { "g2aidirect",   "Variant: CTRL+REPLY only: g2aidirect <text>",     false, cmd_g2ai_direct, "Usage: g2aidirect <text>" },
+  // Names from before 1.0, kept for one release (CONTRIBUTING.md, "Command names").
+  { "g2ai-noask",   "Alias of g2ainoask.",                             false, cmd_g2ai_noask },
+  { "g2ai-direct",  "Alias of g2aidirect.",                            false, cmd_g2ai_direct },
   { "g2terminal", "Native Terminal voice/chat (firmware 2.3.2.14)", false, cmd_g2terminal, "Usage: g2terminal open | status | close. Browse Mingus host sessions and recent history; no automatic submission." },
   { "g2evenai",     "Push into the matching live Hey-Even exchange (strict 16-hex ID required)", false, cmd_g2evenai, "Usage: g2evenai <askid|replyid|replypartid|replyendid|exitid> <16hex-id> [text]\n  status:       show active exchange ID/arm/generation\n  capabilities: show guarded command contract\n  replypartid:  stream one delta (leading glue preserved)\n  legacy ask/reply/replypart/replyend/exit fail closed; use g2ai for deliberate bench cards" },
   { "g2aih",        "Front-pane card with custom heading: g2aih <heading>|<body>", false, cmd_g2aih, "Usage: g2aih <heading>|<body>  (no | = whole text as body)" },

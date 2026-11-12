@@ -845,7 +845,8 @@ namespace {
     // the wrapper identity; the nested payload is opaque secret material here.
     { "automation add ",     MASK_AFTER_TOKEN_POS, 2, nullptr },
     { "automationadd ",      MASK_AFTER_TOKEN_POS, 1, nullptr },
-    { "validate-conditions ", MASK_AFTER_TOKEN_POS, 1, nullptr },
+    { "validateconditions ",  MASK_AFTER_TOKEN_POS, 1, nullptr },
+    { "validate-conditions ", MASK_AFTER_TOKEN_POS, 1, nullptr },  // the name before 1.0, still accepted
   };
 }
 

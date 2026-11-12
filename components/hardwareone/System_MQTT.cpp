@@ -315,27 +315,27 @@ bool getExternalSensor(int index, String& topic, String& name, String& value, un
 static const SettingEntry mqttSettingEntries[] = {
   { "mqttClientEnabled", SETTING_BOOL, &gSettings.mqttEnabled, false, 0, nullptr, 0, 1, "MQTT Enabled", nullptr, false, nullptr, "mqttclientenabled" },
   { "mqttAutoStart", SETTING_BOOL, &gSettings.mqttAutoStart, false, 0, nullptr, 0, 1, "Auto-start at boot", nullptr, false, "broker", "mqttautostart" },
-  { "mqttHost", SETTING_STRING, &gSettings.mqttHost, 0, 0, "", 0, 0, "Broker Host", nullptr, false, "broker", "mqttHost" },
-  { "mqttPort", SETTING_INT, &gSettings.mqttPort, 1883, 0, nullptr, 1, 65535, "Broker Port", nullptr, false, "broker", "mqttPort" },
-  { "mqttTLSMode", SETTING_INT, &gSettings.mqttTlsMode, 0, 0, nullptr, 0, 2, "TLS Mode (0=None, 1=TLS, 2=TLS+Verify)", "0:None,1:TLS,2:TLS+Verify", false, "broker", "mqttTLSMode" },
-  { "mqttCACertPath", SETTING_STRING, &gSettings.mqttCaCertPath, 0, 0, "/system/certs/mqtt_ca.crt", 0, 0, "CA certificate path", nullptr, false, "broker", "mqttCACertPath" },
-  { "mqttSubscribeExternal", SETTING_BOOL, &gSettings.mqttSubscribeExternal, false, 0, nullptr, 0, 1, "Subscribe to external topics", nullptr, false, "topics", "mqttSubscribeExternal" },
-  { "mqttSubscribeTopics", SETTING_STRING, &gSettings.mqttSubscribeTopics, 0, 0, "", 0, 0, "Topics (comma-separated)", nullptr, false, "topics", "mqttSubscribeTopics" },
-  { "mqttUser", SETTING_STRING, &gSettings.mqttUser, 0, 0, "", 0, 0, "Username", nullptr, false, "broker", "mqttUser" },
-  { "mqttPassword", SETTING_STRING, &gSettings.mqttPassword, 0, 0, "", 0, 0, "Password", nullptr, true, "broker", "mqttPassword" },
-  { "mqttBaseTopic", SETTING_STRING, &gSettings.mqttBaseTopic, 0, 0, "", 0, 0, "Base Topic", nullptr, false, "topics", "mqttBaseTopic" },
-  { "mqttDiscoveryPrefix", SETTING_STRING, &gSettings.mqttDiscoveryPrefix, 0, 0, "homeassistant", 0, 0, "Discovery Prefix", nullptr, false, "topics", "mqttDiscoveryPrefix" },
-  { "mqttPublishIntervalMs", SETTING_INT, &gSettings.mqttPublishIntervalMs, 10000, 0, nullptr, 1000, 300000, "Publish Interval (ms)", nullptr, false, "publish", "mqttPublishIntervalMs" },
-  { "mqttPublishWiFi", SETTING_BOOL, &gSettings.mqttPublishWifi, false, 0, nullptr, 0, 1, "Publish WiFi info", nullptr, false, "publish", "mqttPublishWiFi" },
-  { "mqttPublishSystem", SETTING_BOOL, &gSettings.mqttPublishSystem, false, 0, nullptr, 0, 1, "Publish system info", nullptr, false, "publish", "mqttPublishSystem" },
-  { "mqttPublishThermal", SETTING_BOOL, &gSettings.mqttPublishThermal, false, 0, nullptr, 0, 1, "Publish thermal data", nullptr, false, "publish", "mqttPublishThermal" },
-  { "mqttPublishToF", SETTING_BOOL, &gSettings.mqttPublishTof, false, 0, nullptr, 0, 1, "Publish ToF data", nullptr, false, "publish", "mqttPublishToF" },
-  { "mqttPublishIMU", SETTING_BOOL, &gSettings.mqttPublishImu, false, 0, nullptr, 0, 1, "Publish IMU data", nullptr, false, "publish", "mqttPublishIMU" },
-  { "mqttPublishPresence", SETTING_BOOL, &gSettings.mqttPublishPresence, false, 0, nullptr, 0, 1, "Publish presence data", nullptr, false, "publish", "mqttPublishPresence" },
-  { "mqttPublishGPS", SETTING_BOOL, &gSettings.mqttPublishGps, false, 0, nullptr, 0, 1, "Publish GPS data", nullptr, false, "publish", "mqttPublishGPS" },
-  { "mqttPublishAPDS", SETTING_BOOL, &gSettings.mqttPublishApds, false, 0, nullptr, 0, 1, "Publish APDS data", nullptr, false, "publish", "mqttPublishAPDS" },
-  { "mqttPublishRTC", SETTING_BOOL, &gSettings.mqttPublishRtc, false, 0, nullptr, 0, 1, "Publish RTC time", nullptr, false, "publish", "mqttPublishRTC" },
-  { "mqttPublishInput", SETTING_BOOL, &gSettings.mqttPublishInput, false, 0, nullptr, 0, 1, "Publish input device data", nullptr, false, "publish", "mqttPublishInput" }
+  { "mqttHost", SETTING_STRING, &gSettings.mqttHost, 0, 0, "", 0, 0, "Broker Host", nullptr, false, "broker", "mqtthost" },
+  { "mqttPort", SETTING_INT, &gSettings.mqttPort, 1883, 0, nullptr, 1, 65535, "Broker Port", nullptr, false, "broker", "mqttport" },
+  { "mqttTLSMode", SETTING_INT, &gSettings.mqttTlsMode, 0, 0, nullptr, 0, 2, "TLS Mode (0=None, 1=TLS, 2=TLS+Verify)", "0:None,1:TLS,2:TLS+Verify", false, "broker", "mqtttlsmode" },
+  { "mqttCACertPath", SETTING_STRING, &gSettings.mqttCaCertPath, 0, 0, "/system/certs/mqtt_ca.crt", 0, 0, "CA certificate path", nullptr, false, "broker", "mqttcacertpath" },
+  { "mqttSubscribeExternal", SETTING_BOOL, &gSettings.mqttSubscribeExternal, false, 0, nullptr, 0, 1, "Subscribe to external topics", nullptr, false, "topics", "mqttsubscribeexternal" },
+  { "mqttSubscribeTopics", SETTING_STRING, &gSettings.mqttSubscribeTopics, 0, 0, "", 0, 0, "Topics (comma-separated)", nullptr, false, "topics", "mqttsubscribetopics" },
+  { "mqttUser", SETTING_STRING, &gSettings.mqttUser, 0, 0, "", 0, 0, "Username", nullptr, false, "broker", "mqttuser" },
+  { "mqttPassword", SETTING_STRING, &gSettings.mqttPassword, 0, 0, "", 0, 0, "Password", nullptr, true, "broker", "mqttpassword" },
+  { "mqttBaseTopic", SETTING_STRING, &gSettings.mqttBaseTopic, 0, 0, "", 0, 0, "Base Topic", nullptr, false, "topics", "mqttbasetopic" },
+  { "mqttDiscoveryPrefix", SETTING_STRING, &gSettings.mqttDiscoveryPrefix, 0, 0, "homeassistant", 0, 0, "Discovery Prefix", nullptr, false, "topics", "mqttdiscoveryprefix" },
+  { "mqttPublishIntervalMs", SETTING_INT, &gSettings.mqttPublishIntervalMs, 10000, 0, nullptr, 1000, 300000, "Publish Interval (ms)", nullptr, false, "publish", "mqttpublishintervalms" },
+  { "mqttPublishWiFi", SETTING_BOOL, &gSettings.mqttPublishWifi, false, 0, nullptr, 0, 1, "Publish WiFi info", nullptr, false, "publish", "mqttpublishwifi" },
+  { "mqttPublishSystem", SETTING_BOOL, &gSettings.mqttPublishSystem, false, 0, nullptr, 0, 1, "Publish system info", nullptr, false, "publish", "mqttpublishsystem" },
+  { "mqttPublishThermal", SETTING_BOOL, &gSettings.mqttPublishThermal, false, 0, nullptr, 0, 1, "Publish thermal data", nullptr, false, "publish", "mqttpublishthermal" },
+  { "mqttPublishToF", SETTING_BOOL, &gSettings.mqttPublishTof, false, 0, nullptr, 0, 1, "Publish ToF data", nullptr, false, "publish", "mqttpublishtof" },
+  { "mqttPublishIMU", SETTING_BOOL, &gSettings.mqttPublishImu, false, 0, nullptr, 0, 1, "Publish IMU data", nullptr, false, "publish", "mqttpublishimu" },
+  { "mqttPublishPresence", SETTING_BOOL, &gSettings.mqttPublishPresence, false, 0, nullptr, 0, 1, "Publish presence data", nullptr, false, "publish", "mqttpublishpresence" },
+  { "mqttPublishGPS", SETTING_BOOL, &gSettings.mqttPublishGps, false, 0, nullptr, 0, 1, "Publish GPS data", nullptr, false, "publish", "mqttpublishgps" },
+  { "mqttPublishAPDS", SETTING_BOOL, &gSettings.mqttPublishApds, false, 0, nullptr, 0, 1, "Publish APDS data", nullptr, false, "publish", "mqttpublishapds" },
+  { "mqttPublishRTC", SETTING_BOOL, &gSettings.mqttPublishRtc, false, 0, nullptr, 0, 1, "Publish RTC time", nullptr, false, "publish", "mqttpublishrtc" },
+  { "mqttPublishInput", SETTING_BOOL, &gSettings.mqttPublishInput, false, 0, nullptr, 0, 1, "Publish input device data", nullptr, false, "publish", "mqttpublishinput" }
 };
 
 static bool isMqttAvailable() {
@@ -1829,7 +1829,7 @@ const char* cmd_mqtttlsmode(const String& argsInput) {
   }
   
   if (newMode < 0 || newMode > 2) {
-    return "Error: invalid arguments — Usage: mqttTLSMode [0|1|2|none|tls|verify]\n  0/none = No TLS\n  1/tls = TLS (no verification)\n  2/verify = TLS + Certificate Verification";
+    return "Error: invalid arguments — Usage: mqtttlsmode [0|1|2|none|tls|verify]\n  0/none = No TLS\n  1/tls = TLS (no verification)\n  2/verify = TLS + Certificate Verification";
   }
   
   int oldMode = gSettings.mqttTlsMode;
@@ -2127,28 +2127,28 @@ const CommandEntry mqttCommands[] = {
   { "closemqtt", "Stop MQTT client", true, cmd_closemqtt },
   { "mqttstatus", "Show MQTT status (add 'json' for JSON output)", false, cmd_mqttstatus },
   { "mqttautostart", "MQTT auto-start [0|1]", true, cmd_mqttautostart, "Usage: mqttautostart [0|1]" },
-  { "mqttHost", "MQTT broker host [hostname]", true, cmd_mqtthost, "Usage: mqttHost [hostname]" },
-  { "mqttPort", "MQTT broker port [port]", true, cmd_mqttport, "Usage: mqttPort [port]" },
-  { "mqttTLSMode", "TLS mode [0|1|2]", true, cmd_mqtttlsmode, "Usage: mqttTLSMode [0|1|2|none|tls|verify]" },
-  { "mqttCACertPath", "CA cert path [path|clear]", true, cmd_mqttcacertpath, "Usage: mqttCACertPath [path|clear]" },
-  { "mqttSubscribeExternal", "External subscriptions [0|1]", true, cmd_mqttsubscribe, "Usage: mqttSubscribeExternal [0|1]" },
-  { "mqttSubscribeTopics", "Subscribe topics [topics]", true, cmd_mqtttopics, "Usage: mqttSubscribeTopics [topic1,topic2,...]" },
-  { "mqttExternalSensors", "List external sensor data (add 'json' for JSON output)", false, cmd_mqttexternalsensors },
-  { "mqttUser", "MQTT username [user|clear]", true, cmd_mqttuser, "Usage: mqttUser [username|clear]" },
-  { "mqttPassword", "MQTT password [pass|clear]", true, cmd_mqttpassword, "Usage: mqttPassword [password|clear]" },
-  { "mqttBaseTopic", "Base topic [topic|auto]", true, cmd_mqttbasetopic, "Usage: mqttBaseTopic [topic|auto]" },
-  { "mqttDiscoveryPrefix", "HA discovery prefix [prefix]", true, cmd_mqttdiscoveryprefix, "Usage: mqttDiscoveryPrefix [prefix]" },
-  { "mqttPublishIntervalMs", "Publish interval [ms]", true, cmd_mqttpublishinterval, "Usage: mqttPublishIntervalMs [1000-300000]" },
-  { "mqttPublishWiFi", "Publish WiFi [0|1]", true, cmd_mqttpublishwifi, "Usage: mqttPublishWiFi [0|1]" },
-  { "mqttPublishSystem", "Publish system [0|1]", true, cmd_mqttpublishsystem, "Usage: mqttPublishSystem [0|1]" },
-  { "mqttPublishThermal", "Publish thermal [0|1]", true, cmd_mqttpublishthermal, "Usage: mqttPublishThermal [0|1]" },
-  { "mqttPublishToF", "Publish ToF [0|1]", true, cmd_mqttpublishtof, "Usage: mqttPublishToF [0|1]" },
-  { "mqttPublishIMU", "Publish IMU [0|1]", true, cmd_mqttpublishimu, "Usage: mqttPublishIMU [0|1]" },
-  { "mqttPublishPresence", "Publish presence [0|1]", true, cmd_mqttpublishpresence, "Usage: mqttPublishPresence [0|1]" },
-  { "mqttPublishGPS", "Publish GPS [0|1]", true, cmd_mqttpublishgps, "Usage: mqttPublishGPS [0|1]" },
-  { "mqttPublishAPDS", "Publish APDS [0|1]", true, cmd_mqttpublishapds, "Usage: mqttPublishAPDS [0|1]" },
-  { "mqttPublishRTC", "Publish RTC [0|1]", true, cmd_mqttpublishrtc, "Usage: mqttPublishRTC [0|1]" },
-  { "mqttPublishInput", "Publish input device data [0|1]", true, cmd_mqttpublishinput, "Usage: mqttPublishInput [0|1]" }
+  { "mqtthost", "MQTT broker host [hostname]", true, cmd_mqtthost, "Usage: mqtthost [hostname]" },
+  { "mqttport", "MQTT broker port [port]", true, cmd_mqttport, "Usage: mqttport [port]" },
+  { "mqtttlsmode", "TLS mode [0|1|2]", true, cmd_mqtttlsmode, "Usage: mqtttlsmode [0|1|2|none|tls|verify]" },
+  { "mqttcacertpath", "CA cert path [path|clear]", true, cmd_mqttcacertpath, "Usage: mqttcacertpath [path|clear]" },
+  { "mqttsubscribeexternal", "External subscriptions [0|1]", true, cmd_mqttsubscribe, "Usage: mqttsubscribeexternal [0|1]" },
+  { "mqttsubscribetopics", "Subscribe topics [topics]", true, cmd_mqtttopics, "Usage: mqttsubscribetopics [topic1,topic2,...]" },
+  { "mqttexternalsensors", "List external sensor data (add 'json' for JSON output)", false, cmd_mqttexternalsensors },
+  { "mqttuser", "MQTT username [user|clear]", true, cmd_mqttuser, "Usage: mqttuser [username|clear]" },
+  { "mqttpassword", "MQTT password [pass|clear]", true, cmd_mqttpassword, "Usage: mqttpassword [password|clear]" },
+  { "mqttbasetopic", "Base topic [topic|auto]", true, cmd_mqttbasetopic, "Usage: mqttbasetopic [topic|auto]" },
+  { "mqttdiscoveryprefix", "HA discovery prefix [prefix]", true, cmd_mqttdiscoveryprefix, "Usage: mqttdiscoveryprefix [prefix]" },
+  { "mqttpublishintervalms", "Publish interval [ms]", true, cmd_mqttpublishinterval, "Usage: mqttpublishintervalms [1000-300000]" },
+  { "mqttpublishwifi", "Publish WiFi [0|1]", true, cmd_mqttpublishwifi, "Usage: mqttpublishwifi [0|1]" },
+  { "mqttpublishsystem", "Publish system [0|1]", true, cmd_mqttpublishsystem, "Usage: mqttpublishsystem [0|1]" },
+  { "mqttpublishthermal", "Publish thermal [0|1]", true, cmd_mqttpublishthermal, "Usage: mqttpublishthermal [0|1]" },
+  { "mqttpublishtof", "Publish ToF [0|1]", true, cmd_mqttpublishtof, "Usage: mqttpublishtof [0|1]" },
+  { "mqttpublishimu", "Publish IMU [0|1]", true, cmd_mqttpublishimu, "Usage: mqttpublishimu [0|1]" },
+  { "mqttpublishpresence", "Publish presence [0|1]", true, cmd_mqttpublishpresence, "Usage: mqttpublishpresence [0|1]" },
+  { "mqttpublishgps", "Publish GPS [0|1]", true, cmd_mqttpublishgps, "Usage: mqttpublishgps [0|1]" },
+  { "mqttpublishapds", "Publish APDS [0|1]", true, cmd_mqttpublishapds, "Usage: mqttpublishapds [0|1]" },
+  { "mqttpublishrtc", "Publish RTC [0|1]", true, cmd_mqttpublishrtc, "Usage: mqttpublishrtc [0|1]" },
+  { "mqttpublishinput", "Publish input device data [0|1]", true, cmd_mqttpublishinput, "Usage: mqttpublishinput [0|1]" }
 };
 
 const size_t mqttCommandsCount = sizeof(mqttCommands) / sizeof(mqttCommands[0]);

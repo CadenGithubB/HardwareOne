@@ -1061,7 +1061,7 @@ const char* cmd_c6console(const String& argsInput) {
     return radioHalConsoleMirrorOn() ? "C6 console mirror: on (the companion's log appears as C6> lines)"
                                      : "C6 console mirror: off";
   }
-  if (arg != "on" && arg != "off") return "Usage: c6_console [on|off]";
+  if (arg != "on" && arg != "off") return "Usage: c6console [on|off]";
   const esp_err_t err = radioHalConsoleMirror(arg == "on");
   if (err != ESP_OK) {
     if (!ensureDebugBuffer()) return "Error: console mirror failed";

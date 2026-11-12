@@ -80,6 +80,16 @@ everything user-visible since the v0.99.99.1 tag.
   task whose stack is not in internal RAM. Any clock change was exposed (power mode, `cpufreq`, the
   STT and display boosts). Not yet tested on hardware.
 
+### Changed
+- Command names have one form: lower-case letters and digits. The 22 camelCase `mqtt*` commands and
+  `httpAutoStart` / `httpsEnabled` are now `mqtthost`, `mqttpublishgps`, `httpautostart`,
+  `httpsenabled` and so on. Command lookup ignores case, so the earlier spelling still runs; help,
+  usage text and the documents show the new one. `validate-conditions`, `g2ai-noask` and
+  `g2ai-direct` are now `validateconditions`, `g2ainoask` and `g2aidirect`; the hyphen names stay
+  as aliases for one release, as `c6_console` does for `c6console`. Setting keys in saved settings
+  and in JSON are unchanged. Sub-command families keep their spaces (`phone pair new`,
+  `ring panel on`).
+
 ### Docs
 - Release gate, tracked-tree hygiene: the `git grep` in `RELEASING.md` could never come back empty,
   because the firmware and the tools use example and SoftAP addresses on purpose. It is now the host

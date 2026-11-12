@@ -41,7 +41,7 @@ Feature flags are declared, with their defaults, in `components/hardwareone/Syst
 | `WEB_FEATURE_LEVEL` | How much of the web UI is compiled: `0`=disabled, `1`=core UI, `2`=standard modules, `3`=all modules, `4`=custom |
 | `DISPLAY_TYPE` | Which panel driver is compiled: `0`=none, `1`=SSD1306 OLED, `2`=generic ST7789 TFT, `3`=generic ILI9341 TFT, `4`=ST7789 240×240 LCD of the ESP32-P4X-EYE, `5`=HX8394 720×1280 DSI panel of the Waveshare ESP32-P4 Touch LCD 5. `4` and `5` are set by those boards' feature files. SSD1306 is the tested path for the other boards; `2` and `3` are example branches without board wiring, and a saved configuration that selects them is refused at compile time |
 | `INPUT_DEVICE_TYPE` | Which physical input controller is compiled, mutually exclusive: `0`=none, `1`=Seesaw gamepad, `2`=ANO rotary encoder, `3`=GPIO wheel and buttons (ESP32-P4X-EYE), `4`=GT911 touch panel (Waveshare ESP32-P4 Touch LCD 5). `3` and `4` are set by those boards' feature files |
-| `ENABLE_HTTPS` | Set to `1` for TLS on the web server; certs in `/system/certs/`. Runtime toggle: `httpsEnabled` |
+| `ENABLE_HTTPS` | Set to `1` for TLS on the web server; certs in `/system/certs/`. Runtime toggle: `httpsenabled` |
 | `ENABLE_MAPS` | Set to `1` to build offline maps and waypoints |
 | `ENABLE_GAMES` | Set to `1` with `ENABLE_WEB_GAME_DARKROOM=1` to build A Dark Room and its browser launcher |
 | `ENABLE_ESP_SR` | Set to `1` to build ESP-SR voice: WakeNet wake word + MultiNet command grammar |
@@ -131,7 +131,7 @@ not a supported build path (see the [Quick Start](QUICKSTART.md#3-set-your-targe
 
 ## Web UI
 
-Navigate to the device's IP address in a browser. The web server must be running - start it for this session with `openhttp`, or set `httpAutoStart 1` to bring it up on every boot.
+Navigate to the device's IP address in a browser. The web server must be running - start it for this session with `openhttp`, or set `httpautostart 1` to bring it up on every boot.
 
 Which pages exist depends on the per-page compile gates (`CUSTOM_ENABLE_WEB_*` when `WEB_FEATURE_LEVEL = 4`); a page whose gate is off is not in the binary and cannot be enabled at runtime.
 
@@ -838,11 +838,11 @@ Configure via the **MQTT** tab in the web UI, or via CLI (single words; there is
 no `mqtt` command with subcommands - the full list is in the
 [mqtt command section](#command-reference) below):
 ```
-mqttHost [hostname]          - Set broker host/IP
-mqttPort [port]              - Set broker port (default 1883)
-mqttUser [user|clear]        - Set MQTT username
-mqttPassword [pass|clear]    - Set MQTT password
-mqttBaseTopic [topic|auto]   - Set topic prefix
+mqtthost [hostname]          - Set broker host/IP
+mqttport [port]              - Set broker port (default 1883)
+mqttuser [user|clear]        - Set MQTT username
+mqttpassword [pass|clear]    - Set MQTT password
+mqttbasetopic [topic|auto]   - Set topic prefix
 openmqtt                     - Connect to broker
 closemqtt                    - Disconnect
 mqttstatus                   - Show connection status
@@ -1054,7 +1054,7 @@ leaves help. Type `help all` to include disconnected sensors.
 
 Two things about lookup that explain most surprises:
 
-- Matching is **case-insensitive**, so `mqttHost` and `mqtthost` are the same command. A few commands are registered in camelCase (the `mqtt*` family and `httpAutoStart` / `httpsEnabled`); the rest are lowercase.
+- Matching is **case-insensitive**, so `MQTTHOST` and `mqtthost` are the same command. Every command is registered in lower case without separators (`mqtthost`, `httpautostart`); a family of sub-commands puts a space between its words (`phone pair new`, `ring panel on`).
 - Lookup is **longest-prefix**, so `automation list` resolves to the `automation` dispatcher with `list` as an argument rather than needing its own entry. This is why some features appear as one command with subcommands and others as a family of single words.
 
 <details>
@@ -1204,27 +1204,27 @@ openmqtt                        - Start MQTT client
 closemqtt                       - Stop MQTT client
 mqttstatus                      - Show connection status
 mqttautostart [0|1]             - Auto-connect on boot
-mqttHost [hostname]             - Set broker host/IP
-mqttPort [port]                 - Set broker port (default 1883)
-mqttUser [user|clear]           - Set username
-mqttPassword [pass|clear]       - Set password
-mqttBaseTopic [topic|auto]      - Set base topic prefix
-mqttTLSMode [0|1|2]             - TLS mode (0=off, 1=verify, 2=no-verify)
-mqttCACertPath [path|clear]     - CA certificate path
-mqttPublishIntervalMs [ms]      - Sensor publish interval
-mqttDiscoveryPrefix [prefix]    - Home Assistant discovery prefix
-mqttPublishWiFi [0|1]           - Publish WiFi state
-mqttPublishSystem [0|1]         - Publish system state
-mqttPublishThermal [0|1]        - Publish thermal data
-mqttPublishToF [0|1]            - Publish ToF distance
-mqttPublishIMU [0|1]            - Publish IMU orientation
-mqttPublishPresence [0|1]       - Publish presence/motion
-mqttPublishGPS [0|1]            - Publish GPS location
-mqttPublishAPDS [0|1]           - Publish APDS color/proximity
-mqttPublishRTC [0|1]            - Publish RTC time
-mqttPublishInput [0|1]          - Publish input device state
-mqttSubscribeTopics [topics]    - Set external subscription topics
-mqttExternalSensors             - List external sensor data received via MQTT
+mqtthost [hostname]             - Set broker host/IP
+mqttport [port]                 - Set broker port (default 1883)
+mqttuser [user|clear]           - Set username
+mqttpassword [pass|clear]       - Set password
+mqttbasetopic [topic|auto]      - Set base topic prefix
+mqtttlsmode [0|1|2]             - TLS mode (0=off, 1=verify, 2=no-verify)
+mqttcacertpath [path|clear]     - CA certificate path
+mqttpublishintervalms [ms]      - Sensor publish interval
+mqttdiscoveryprefix [prefix]    - Home Assistant discovery prefix
+mqttpublishwifi [0|1]           - Publish WiFi state
+mqttpublishsystem [0|1]         - Publish system state
+mqttpublishthermal [0|1]        - Publish thermal data
+mqttpublishtof [0|1]            - Publish ToF distance
+mqttpublishimu [0|1]            - Publish IMU orientation
+mqttpublishpresence [0|1]       - Publish presence/motion
+mqttpublishgps [0|1]            - Publish GPS location
+mqttpublishapds [0|1]           - Publish APDS color/proximity
+mqttpublishrtc [0|1]            - Publish RTC time
+mqttpublishinput [0|1]          - Publish input device state
+mqttsubscribetopics [topics]    - Set external subscription topics
+mqttexternalsensors             - List external sensor data received via MQTT
 ```
 </details>
 
@@ -1353,7 +1353,7 @@ automation add type=event on=<kind> [match=<text>] - Event-triggered automation
 autolog start <file>            - Start automation execution log
 autolog stop                    - Stop automation log
 autolog status                  - Show log status
-validate-conditions <expr>      - Validate conditional syntax (e.g. IF temp>75 THEN ledcolor red)
+validateconditions <expr>       - Validate conditional syntax (e.g. IF temp>75 THEN ledcolor red)
 print <message>                 - Broadcast a message to all output channels
 ```
 </details>
@@ -1365,8 +1365,8 @@ print <message>                 - Broadcast a message to all output channels
 wifiautoreconnect <0|1>         - WiFi auto-reconnect on disconnect
 ntpserver <hostname>            - Set NTP server
 tzoffsetminutes <-720..720>     - Set timezone offset in minutes
-httpAutoStart <0|1>             - Auto-start web server on boot
-httpsEnabled <0|1>              - Enable HTTPS (reboot required)
+httpautostart <0|1>             - Auto-start web server on boot
+httpsenabled <0|1>              - Enable HTTPS (reboot required)
 webclihistorysize <1-100>       - Web CLI history buffer size
 oledclihistorysize <10-100>     - OLED CLI history buffer size
 beginwrite                      - Coalesce this source's settings-file writes

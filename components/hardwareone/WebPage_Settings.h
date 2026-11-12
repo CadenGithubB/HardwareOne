@@ -2289,7 +2289,7 @@ function saveNotifPolicy() {
       return;
     }
     hw.$('https-nocert-row').style.display = 'none';
-    var cmd = 'httpsEnabled ' + (newVal ? '1' : '0');
+    var cmd = 'httpsenabled ' + (newVal ? '1' : '0');
     sendSequential([cmd], function(){
       window._httpsCurrentValue = newVal;
       var el = hw.$('https-enabled-value');

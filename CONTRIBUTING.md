@@ -202,8 +202,8 @@ attachment should report unavailable without breaking unrelated services.
   saved setting key.
 - The rule is about code names only. These keep their spelling: macros and
   build flags (`ENABLE_OLED_DISPLAY`), file names (`OLED_Mode_Network.cpp`,
-  `BLE_Server.cpp`), command names, setting keys, JSON keys, text on a screen
-  or a web page, log tags and part numbers.
+  `BLE_Server.cpp`), command names (they have their own rule below), setting
+  keys, JSON keys, text on a screen or a web page, log tags and part numbers.
 - A branch that was started before the rule is brought up to it before it
   merges: `python3 components/hardwareone/test/host/test_code_name_spelling.py --rewrite`
   renames the code names in the firmware and in the tests and tools that name
@@ -231,6 +231,34 @@ attachment should report unavailable without breaking unrelated services.
   | Bytes | `uint8_t` |
   | Header guard | `#pragma once` |
   | A flag two tasks touch | `std::atomic` |
+
+## Command names
+
+A command name is an interface: scripts, automations, the settings editors and
+the phone app send it as text.
+
+- A command name is lower-case letters and digits, without a capital letter,
+  hyphen or underscore: `mqtthost`, `httpautostart`, `validateconditions`.
+- A family of sub-commands puts one space between its words, and each word has
+  the same form: `phone pair new`, `ring panel on`, `cm5 power halt`. A new
+  single command does not use a space.
+- The `cmdKey` of a setting row is the name of its set command and has the same
+  form. The JSON key of the row keeps its own spelling (`mqttHost`); saved
+  settings depend on it.
+- Lookup ignores case, so `mqttHost broker.local` from an older script still runs
+  `mqtthost`. Help, usage text and documents show the lower-case name.
+- A name that was public in another form stays as an alias row for one release.
+  The row has the same handler and the help text `Alias of <name>.`. The
+  aliases today are `c6_console`, `g2ai-noask`, `g2ai-direct` and
+  `validate-conditions`. A table that matches on the command text (the masking
+  rules in `System_Utils.cpp`) lists both names while the alias exists.
+- The host test `command_name_form` reads every command table and every
+  setting row and fails on a name of another form; it prints the file, the line
+  and the name it expects. Its tables hold the aliases and the one name that
+  keeps another form (`cm5 power sleep_for`, the action word of the CM5 host
+  protocol).
+- After a change to a command table run `python3 tools/command_registry.py
+  reference`; `docs/COMMAND_REFERENCE.md` is generated from the tables.
 
 ## Logging
 

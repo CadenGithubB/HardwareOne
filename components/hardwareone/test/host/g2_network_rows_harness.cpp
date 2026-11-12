@@ -347,14 +347,14 @@ static void http_toggles_follow_label() {
   size_t row = rowOf("HTTPS: OFF");
   gSettings.httpsEnabled = true;
   handleHttpTap(tapRow(row));
-  EXPECT(sent("httpsEnabled 1"), "'HTTPS: OFF' sent httpsEnabled 0 after the setting changed");
+  EXPECT(sent("httpsenabled 1"), "'HTTPS: OFF' sent httpsenabled 0 after the setting changed");
 
   gSettings.httpAutoStart = true;
   showHttpMenu();
   row = rowOf("Auto Start: ON");
   gSettings.httpAutoStart = false;
   handleHttpTap(tapRow(row));
-  EXPECT(sent("httpAutoStart 0"), "'Auto Start: ON' sent httpAutoStart 1 after the setting changed");
+  EXPECT(sent("httpautostart 0"), "'Auto Start: ON' sent httpautostart 1 after the setting changed");
 }
 
 static void http_rows_unchanged_state() {
@@ -368,9 +368,9 @@ static void http_rows_unchanged_state() {
   handleHttpTap(tapRow(4));
   CHECK(submits == 0);
   handleHttpTap(tapRow(2));
-  CHECK(sent("httpsEnabled 1"));
+  CHECK(sent("httpsenabled 1"));
   handleHttpTap(tapRow(3));
-  CHECK(sent("httpAutoStart 1"));
+  CHECK(sent("httpautostart 1"));
   handleHttpTap(tapRow(1));
   CHECK(sent("closehttp"));
   server = nullptr;

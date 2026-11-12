@@ -4,7 +4,7 @@
 > Regenerate with `python3 tools/command_registry.py reference`.
 > Source of truth is the `CommandEntry` tables in `components/hardwareone/*.cpp`.
 
-1023 commands across 57 modules (1023 registry entries).
+1026 commands across 57 modules (1026 registry entries).
 
 Commands are matched case-insensitively, and lookup uses longest-prefix matching, so `automation list` resolves to the `automation` dispatcher with `list` as its argument.
 
@@ -49,7 +49,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 - [`stt`](#stt) — 5 commands
 - [`espsr`](#espsr) — 45 commands
 - [`i2c`](#i2c) — 24 commands
-- [`automation`](#automation) — 8 commands
+- [`automation`](#automation) — 9 commands
 - [`battery`](#battery) — 3 commands
 - [`debug`](#debug) — 181 commands
 - [`settings`](#settings) — 17 commands
@@ -65,7 +65,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 - [`cm5`](#cm5) — 15 commands
 - [`ota`](#ota) — 9 commands
 - [`setpattern`](#setpattern) — 1 commands
-- [`even_g2`](#even-g2) — 56 commands
+- [`even_g2`](#even-g2) — 58 commands
 - [`ring`](#ring) — 19 commands
 - [`llm`](#llm) — 36 commands
 - [`settingsedit`](#settingsedit) — 70 commands
@@ -297,36 +297,36 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 
 ## mqtt
 
-> The MQTT subsystem connects the device to a broker, primarily to publish its sensor and system telemetry to Home Assistant via HA discovery. It is almost entirely configuration: broker host/port (mqttHost, mqttPort), credentials (mqttUser, mqttPassword), TLS mode and CA path, base/discovery topics, publish interval, and a long list of per-source publish toggles (mqttPublishThermal, mqttPublishIMU, and so on). These are persisted settings and most config commands are admin-only; after changing them, reconnect with closemqtt/openmqtt to apply to a live session. openmqtt and closemqtt start and stop the client, mqttstatus shows connection state, and mqttautostart controls whether it connects at boot. For inbound data, enable mqttSubscribeExternal with mqttSubscribeTopics; values received from those topics are cached and read back with mqttExternalSensors.
+> The MQTT subsystem connects the device to a broker, primarily to publish its sensor and system telemetry to Home Assistant via HA discovery. It is almost entirely configuration: broker host/port (mqtthost, mqttport), credentials (mqttuser, mqttpassword), TLS mode and CA path, base/discovery topics, publish interval, and a long list of per-source publish toggles (mqttpublishthermal, mqttpublishimu, and so on). These are persisted settings and most config commands are admin-only; after changing them, reconnect with closemqtt/openmqtt to apply to a live session. openmqtt and closemqtt start and stop the client, mqttstatus shows connection state, and mqttautostart controls whether it connects at boot. For inbound data, enable mqttsubscribeexternal with mqttsubscribetopics; values received from those topics are cached and read back with mqttexternalsensors.
 
 | Command | | Description |
 | ------- | :-: | ----------- |
 | `closemqtt` | A | Stop MQTT client |
 | `mqttautostart` | A | MQTT auto-start [0\|1]<br/>`Usage: mqttautostart [0\|1]` |
-| `mqttBaseTopic` | A | Base topic [topic\|auto]<br/>`Usage: mqttBaseTopic [topic\|auto]` |
-| `mqttCACertPath` | A | CA cert path [path\|clear]<br/>`Usage: mqttCACertPath [path\|clear]` |
+| `mqttbasetopic` | A | Base topic [topic\|auto]<br/>`Usage: mqttbasetopic [topic\|auto]` |
+| `mqttcacertpath` | A | CA cert path [path\|clear]<br/>`Usage: mqttcacertpath [path\|clear]` |
 | `mqttclientenabled` | A | Enable/disable MQTT [0\|1]<br/>`Usage: mqttclientenabled [0\|1]` |
-| `mqttDiscoveryPrefix` | A | HA discovery prefix [prefix]<br/>`Usage: mqttDiscoveryPrefix [prefix]` |
-| `mqttExternalSensors` |  | List external sensor data (add 'json' for JSON output) |
-| `mqttHost` | A | MQTT broker host [hostname]<br/>`Usage: mqttHost [hostname]` |
-| `mqttPassword` | A | MQTT password [pass\|clear]<br/>`Usage: mqttPassword [password\|clear]` |
-| `mqttPort` | A | MQTT broker port [port]<br/>`Usage: mqttPort [port]` |
-| `mqttPublishAPDS` | A | Publish APDS [0\|1]<br/>`Usage: mqttPublishAPDS [0\|1]` |
-| `mqttPublishGPS` | A | Publish GPS [0\|1]<br/>`Usage: mqttPublishGPS [0\|1]` |
-| `mqttPublishIMU` | A | Publish IMU [0\|1]<br/>`Usage: mqttPublishIMU [0\|1]` |
-| `mqttPublishInput` | A | Publish input device data [0\|1]<br/>`Usage: mqttPublishInput [0\|1]` |
-| `mqttPublishIntervalMs` | A | Publish interval [ms]<br/>`Usage: mqttPublishIntervalMs [1000-300000]` |
-| `mqttPublishPresence` | A | Publish presence [0\|1]<br/>`Usage: mqttPublishPresence [0\|1]` |
-| `mqttPublishRTC` | A | Publish RTC [0\|1]<br/>`Usage: mqttPublishRTC [0\|1]` |
-| `mqttPublishSystem` | A | Publish system [0\|1]<br/>`Usage: mqttPublishSystem [0\|1]` |
-| `mqttPublishThermal` | A | Publish thermal [0\|1]<br/>`Usage: mqttPublishThermal [0\|1]` |
-| `mqttPublishToF` | A | Publish ToF [0\|1]<br/>`Usage: mqttPublishToF [0\|1]` |
-| `mqttPublishWiFi` | A | Publish WiFi [0\|1]<br/>`Usage: mqttPublishWiFi [0\|1]` |
+| `mqttdiscoveryprefix` | A | HA discovery prefix [prefix]<br/>`Usage: mqttdiscoveryprefix [prefix]` |
+| `mqttexternalsensors` |  | List external sensor data (add 'json' for JSON output) |
+| `mqtthost` | A | MQTT broker host [hostname]<br/>`Usage: mqtthost [hostname]` |
+| `mqttpassword` | A | MQTT password [pass\|clear]<br/>`Usage: mqttpassword [password\|clear]` |
+| `mqttport` | A | MQTT broker port [port]<br/>`Usage: mqttport [port]` |
+| `mqttpublishapds` | A | Publish APDS [0\|1]<br/>`Usage: mqttpublishapds [0\|1]` |
+| `mqttpublishgps` | A | Publish GPS [0\|1]<br/>`Usage: mqttpublishgps [0\|1]` |
+| `mqttpublishimu` | A | Publish IMU [0\|1]<br/>`Usage: mqttpublishimu [0\|1]` |
+| `mqttpublishinput` | A | Publish input device data [0\|1]<br/>`Usage: mqttpublishinput [0\|1]` |
+| `mqttpublishintervalms` | A | Publish interval [ms]<br/>`Usage: mqttpublishintervalms [1000-300000]` |
+| `mqttpublishpresence` | A | Publish presence [0\|1]<br/>`Usage: mqttpublishpresence [0\|1]` |
+| `mqttpublishrtc` | A | Publish RTC [0\|1]<br/>`Usage: mqttpublishrtc [0\|1]` |
+| `mqttpublishsystem` | A | Publish system [0\|1]<br/>`Usage: mqttpublishsystem [0\|1]` |
+| `mqttpublishthermal` | A | Publish thermal [0\|1]<br/>`Usage: mqttpublishthermal [0\|1]` |
+| `mqttpublishtof` | A | Publish ToF [0\|1]<br/>`Usage: mqttpublishtof [0\|1]` |
+| `mqttpublishwifi` | A | Publish WiFi [0\|1]<br/>`Usage: mqttpublishwifi [0\|1]` |
 | `mqttstatus` |  | Show MQTT status (add 'json' for JSON output) |
-| `mqttSubscribeExternal` | A | External subscriptions [0\|1]<br/>`Usage: mqttSubscribeExternal [0\|1]` |
-| `mqttSubscribeTopics` | A | Subscribe topics [topics]<br/>`Usage: mqttSubscribeTopics [topic1,topic2,...]` |
-| `mqttTLSMode` | A | TLS mode [0\|1\|2]<br/>`Usage: mqttTLSMode [0\|1\|2\|none\|tls\|verify]` |
-| `mqttUser` | A | MQTT username [user\|clear]<br/>`Usage: mqttUser [username\|clear]` |
+| `mqttsubscribeexternal` | A | External subscriptions [0\|1]<br/>`Usage: mqttsubscribeexternal [0\|1]` |
+| `mqttsubscribetopics` | A | Subscribe topics [topics]<br/>`Usage: mqttsubscribetopics [topic1,topic2,...]` |
+| `mqtttlsmode` | A | TLS mode [0\|1\|2]<br/>`Usage: mqtttlsmode [0\|1\|2\|none\|tls\|verify]` |
+| `mqttuser` | A | MQTT username [user\|clear]<br/>`Usage: mqttuser [username\|clear]` |
 | `openmqtt` | A | Start MQTT client |
 
 ## bluetooth
@@ -889,7 +889,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 
 ## automation
 
-> The automation module runs saved jobs (stored in automations.json) that execute one or more CLI commands on a schedule, condition, or system event. Every automation has one of four trigger types: atTime (fires daily at time=HH:MM, optionally limited to days=Mon,Tue,...), afterDelay (fires once after delayms milliseconds), interval (fires repeatedly every intervalms milliseconds), or event (fires when a system event occurs: on=<kind> with an optional match=<text> filter against the event's subject/detail — run 'events' to see recent kinds like peer_online, text_rx, battery_low, login_fail); jobs can also carry runatboot=1 to fire at startup. The primary entry point is automation <subcommand> (list, add, enable, disable, delete, run, trigger, sanitize, recompute) with single-word aliases automationlist, automationadd, automationrun, and automationtrigger. Note the important distinction: automationrun id=<id> executes a job commands immediately, whereas automationtrigger id=<id> only arms an afterDelay/manual timer so it fires after its delay; and automation system enable|disable|status is the global master switch that gates whether the scheduler runs at all, independent of each job own enabled flag. Jobs may also include an optional condition expression, and conditional commands use an IF <expr> THEN <command> [ELSE <command>] form (e.g. IF temp>75 THEN ledcolor red). Conditions can check sensors (temp, distance, light, motion), time (time, hour, day, ntp), system state (battery, heap, psram, fsfree, uptime, chiptemp), connectivity (wifi, rssi, peers, ble), ESP-NOW/bond (espnow, bond_mode, bond_paired, bond_online, bond_synced, bond_role, bond_rssi, bond_peer_heap, bond_peer_uptime, pairmode, pairmode_secs, peersknown, stalestpeerage), location (gps, speed, sats, wp_dist:<name>), the on-device model (llm), and ESP-NOW metadata (room, zone, tags); numeric variables use the > < = >= <= != operators and string/enum variables use = != CONTAINS. A true condition fires every time its trigger is due. Supporting commands: validate-conditions checks conditional syntax without running it, autolog records automation activity to a file, and print <message> broadcasts text to all outputs.
+> The automation module runs saved jobs (stored in automations.json) that execute one or more CLI commands on a schedule, condition, or system event. Every automation has one of four trigger types: atTime (fires daily at time=HH:MM, optionally limited to days=Mon,Tue,...), afterDelay (fires once after delayms milliseconds), interval (fires repeatedly every intervalms milliseconds), or event (fires when a system event occurs: on=<kind> with an optional match=<text> filter against the event's subject/detail — run 'events' to see recent kinds like peer_online, text_rx, battery_low, login_fail); jobs can also carry runatboot=1 to fire at startup. The primary entry point is automation <subcommand> (list, add, enable, disable, delete, run, trigger, sanitize, recompute) with single-word aliases automationlist, automationadd, automationrun, and automationtrigger. Note the important distinction: automationrun id=<id> executes a job commands immediately, whereas automationtrigger id=<id> only arms an afterDelay/manual timer so it fires after its delay; and automation system enable|disable|status is the global master switch that gates whether the scheduler runs at all, independent of each job own enabled flag. Jobs may also include an optional condition expression, and conditional commands use an IF <expr> THEN <command> [ELSE <command>] form (e.g. IF temp>75 THEN ledcolor red). Conditions can check sensors (temp, distance, light, motion), time (time, hour, day, ntp), system state (battery, heap, psram, fsfree, uptime, chiptemp), connectivity (wifi, rssi, peers, ble), ESP-NOW/bond (espnow, bond_mode, bond_paired, bond_online, bond_synced, bond_role, bond_rssi, bond_peer_heap, bond_peer_uptime, pairmode, pairmode_secs, peersknown, stalestpeerage), location (gps, speed, sats, wp_dist:<name>), the on-device model (llm), and ESP-NOW metadata (room, zone, tags); numeric variables use the > < = >= <= != operators and string/enum variables use = != CONTAINS. A true condition fires every time its trigger is due. Supporting commands: validateconditions checks conditional syntax without running it, autolog records automation activity to a file, and print <message> broadcasts text to all outputs.
 
 | Command | | Description |
 | ------- | :-: | ----------- |
@@ -900,7 +900,8 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `automationrun` | A | Run automation by ID: automationrun id=<id>. |
 | `automationtrigger` | A | Arm afterDelay automation timer: automationtrigger id=<id>. |
 | `print` |  | Broadcast a message to all outputs: print <message>. |
-| `validate-conditions` | A | Validate conditional automation syntax: validate-conditions IF temp>75 THEN ledcolor red. |
+| `validate-conditions` | A | Alias of validateconditions. |
+| `validateconditions` | A | Validate conditional automation syntax: validateconditions IF temp>75 THEN ledcolor red. |
 
 ## battery
 
@@ -1102,15 +1103,15 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 
 ## settings
 
-> The settings subsystem holds the device persisted configuration and the commands that change it. Each setting command (for example outserial, serialrequireauth, displayrequireauth, tzoffsetminutes, ntpserver, wifitxpower, webclihistorysize) sets one value and normally requests an immediate settings-file write. Because flash writes are costly, beginwrite and savesettings can coalesce changes made by the same request or transport session: the final save writes each changed settings file at most once. This is write coalescing, not a RAM transaction; unrelated sources continue to persist immediately, and their full snapshot can include live values changed while a batch is open. Idle batches expire after two minutes. savesettings remains an explicit flush-now command when no batch is open. Most commands here are admin-gated. Some changes only take effect after a reboot (for example espnowenabled and httpsEnabled are marked reboot required). The controls command emits a machine-readable JSON descriptor of a module's settable controls for UI use. Note that most subsystem settings (wifi, i2c, sensors, power, oled, bluetooth, espnow) are owned and registered by their own modules; this module hosts the cross-cutting CLI/output/auth/time settings plus the batch-write machinery.
+> The settings subsystem holds the device persisted configuration and the commands that change it. Each setting command (for example outserial, serialrequireauth, displayrequireauth, tzoffsetminutes, ntpserver, wifitxpower, webclihistorysize) sets one value and normally requests an immediate settings-file write. Because flash writes are costly, beginwrite and savesettings can coalesce changes made by the same request or transport session: the final save writes each changed settings file at most once. This is write coalescing, not a RAM transaction; unrelated sources continue to persist immediately, and their full snapshot can include live values changed while a batch is open. Idle batches expire after two minutes. savesettings remains an explicit flush-now command when no batch is open. Most commands here are admin-gated. Some changes only take effect after a reboot (for example espnowenabled and httpsenabled are marked reboot required). The controls command emits a machine-readable JSON descriptor of a module's settable controls for UI use. Note that most subsystem settings (wifi, i2c, sensors, power, oled, bluetooth, espnow) are owned and registered by their own modules; this module hosts the cross-cutting CLI/output/auth/time settings plus the batch-write machinery.
 
 | Command | | Description |
 | ------- | :-: | ----------- |
 | `beginwrite` | A | Start owner-scoped settings write coalescing until savesettings (not a RAM transaction). |
 | `controls` |  | Per-module control descriptor (JSON): controls json [module]<br/>`Usage: controls json <module> (e.g. 'controls json imu'); 'controls json' lists modules` |
 | `displayrequireauth` | S | Require auth for display: <0\|1><br/>`Usage: displayrequireauth <0\|1>` |
-| `httpAutoStart` | A | Auto-start HTTP server at boot: <0\|1><br/>`Usage: httpAutoStart <0\|1>` |
-| `httpsEnabled` | A | Enable/disable HTTPS: <0\|1> (reboot required)<br/>`Usage: httpsEnabled <0\|1>` |
+| `httpautostart` | A | Auto-start HTTP server at boot: <0\|1><br/>`Usage: httpautostart <0\|1>` |
+| `httpsenabled` | A | Enable/disable HTTPS: <0\|1> (reboot required)<br/>`Usage: httpsenabled <0\|1>` |
 | `ntpserver` | A | Set NTP server: <hostname><br/>`Usage: ntpserver <host>` |
 | `oledclihistorysize` | A | Set OLED CLI history size: <10..100><br/>`Usage: oledclihistorysize <10..100>` |
 | `outserial` | A | Set serial output: <0\|1> [persist\|temp]<br/>`Usage: outserial <0\|1> [persist\|temp]` |
@@ -1289,16 +1290,18 @@ _`otaCommands` has `#if` alternatives in `System_OTA.cpp`; this table is the fir
 
 ## even_g2
 
-> This subsystem drives Even Reality G2 smart glasses in the Glasses mode (blemode client or glasses: the glasses, plus the phone link whenever a phone secret is set, with the app console on that link); the two temples are addressed as left/right/auto. openg2 starts scan-and-connect IN THE BACKGROUND and returns immediately -- it does not block, so poll g2status (or g2info for firmware/MAC/battery) to see when the link is up, and nearly every other command here requires that connection first. Display commands render to the lens: g2show prints text, g2ai/g2ai-noask/g2ai-direct push a front-pane AI answer card through the EvenAI pipeline, g2bmp shows a BMP file, and g2sensors/g2network/g2files/g2settingspage show built-in info pages; g2nav [on|off] enables menu-navigation mode and g2clear blanks the display. For audio, use the shared Microphone controls: micsource selects auto, pdm or g2; openmic/closemic start and stop the selected source; micrecord controls WAV recording. g2micon/g2micoff are low-level stream probes; g2micrec and g2micwav remain SD-backed raw-LC3 and decoded-WAV diagnostics. closeg2 disconnects but keeps the GATT cache for fast reconnect; closeg2 full also frees the cache to recover about 30 KB. The remaining g2* commands are low-level protocol probes and diagnostics (g2probe, g2protostats, g2devcfg, g2dumpframes).
+> This subsystem drives Even Reality G2 smart glasses in the Glasses mode (blemode client or glasses: the glasses, plus the phone link whenever a phone secret is set, with the app console on that link); the two temples are addressed as left/right/auto. openg2 starts scan-and-connect IN THE BACKGROUND and returns immediately -- it does not block, so poll g2status (or g2info for firmware/MAC/battery) to see when the link is up, and nearly every other command here requires that connection first. Display commands render to the lens: g2show prints text, g2ai/g2ainoask/g2aidirect push a front-pane AI answer card through the EvenAI pipeline, g2bmp shows a BMP file, and g2sensors/g2network/g2files/g2settingspage show built-in info pages; g2nav [on|off] enables menu-navigation mode and g2clear blanks the display. For audio, use the shared Microphone controls: micsource selects auto, pdm or g2; openmic/closemic start and stop the selected source; micrecord controls WAV recording. g2micon/g2micoff are low-level stream probes; g2micrec and g2micwav remain SD-backed raw-LC3 and decoded-WAV diagnostics. closeg2 disconnects but keeps the GATT cache for fast reconnect; closeg2 full also frees the cache to recover about 30 KB. The remaining g2* commands are low-level protocol probes and diagnostics (g2probe, g2protostats, g2devcfg, g2dumpframes).
 
 | Command | | Description |
 | ------- | :-: | ----------- |
 | `closeg2` | A | Close the G2 glasses: drop both links and release the glasses runtime (ring, phone and Bluetooth stay up). |
 | `g2ai` |  | Front-pane AI card (full pipeline): g2ai <text><br/>`Usage: g2ai <text>` |
-| `g2ai-direct` |  | Variant: CTRL+REPLY only: g2ai-direct <text><br/>`Usage: g2ai-direct <text>` |
-| `g2ai-noask` |  | Variant: skip ASK step: g2ai-noask <text><br/>`Usage: g2ai-noask <text>` |
+| `g2ai-direct` |  | Alias of g2aidirect. |
+| `g2ai-noask` |  | Alias of g2ainoask. |
 | `g2aiconfig` |  | Send EvenAI CONFIG (cmd=10): g2aiconfig [voiceSwitch] [streamSpeed] [duplexMode]<br/>`Usage: g2aiconfig [voiceSwitch] [streamSpeed] [duplexMode] (defaults: 0 80 0; use - to omit a field)` |
+| `g2aidirect` |  | Variant: CTRL+REPLY only: g2aidirect <text><br/>`Usage: g2aidirect <text>` |
 | `g2aih` |  | Front-pane card with custom heading: g2aih <heading>\|<body><br/>`Usage: g2aih <heading>\|<body> (no \| = whole text as body)` |
+| `g2ainoask` |  | Variant: skip ASK step: g2ainoask <text><br/>`Usage: g2ainoask <text>` |
 | `g2battery` |  | Query G2 battery % on connected temples |
 | `g2bmp` |  | Display BMP: g2bmp </path.bmp> [brightness -100..100] [contrast -100..100] [holdSeconds 0..120]<br/>`Usage: g2bmp </path/to/file.bmp> [brightness -100..100] [contrast -100..100] [holdSeconds 0..120]` |
 | `g2clear` |  | Clear G2 display |

@@ -64,7 +64,7 @@ peer-metadata commands date from v0.95.10. Changes after v0.99.98.5 are recorded
    `available:false` JSON instead of text.
 5. **Deferred set** - `memreport`, `banlist`, `miclist`, `cameravideolist`, `ring status`.
 6. **Second-ring diagnostics** - `espnowidentity`, `espnowmeshmetrics`, `espnowworker`,
-   `i2chealth`, `i2cmetrics`, `servolist`, `mqttExternalSensors`, `logtier`, `map`,
+   `i2chealth`, `i2cmetrics`, `servolist`, `mqttexternalsensors`, `logtier`, `map`,
    `whereami`.
 7. **Sensors** - every live sensor read now has JSON, and `sensors json` is the
    preferred aggregate (see sec. 6).
@@ -135,7 +135,7 @@ Note: read the global on/off via `automation system status json`, not from
 | `servolist` | `{"schema":1,"servos":[{"channel","name","minPulse","maxPulse","centerPulse"}],"count"}` |
 | `map` | `{"schema":1,"valid","filename","region","featureCount","fileSize","bounds":{"minLat","minLon","maxLat","maxLon"}}` |
 | `whereami` | `{"schema":1,"valid","road"?,"roadDistanceM"?,"area"?,"areaDistanceM"?}` |
-| `mqttExternalSensors` | `{"schema":1,"sensors":[{"name","value","ageSec"}],"count"}` |
+| `mqttexternalsensors` | `{"schema":1,"sensors":[{"name","value","ageSec"}],"count"}` |
 | **ESP-NOW** | |
 | `espnowdevices` *(v0.95.10)* | all peers: `{"schema":1,"devices":[{"mac","deviceName","friendlyName","room","zone","tags","stationary","online","lastSeenSec","source"}],"count"}` |
 | `espnowdeviceinfo` *(v0.95.10)* | this device (self): `{"schema":1,"name","friendlyName","room","zone","tags","stationary","meshRole","mac"}` |

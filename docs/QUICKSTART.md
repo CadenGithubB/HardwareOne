@@ -290,9 +290,9 @@ the web **Settings** page.
 ### Step 4 - Access the UI
 > The boot path starts the web server only when the Web Interface is enabled **and** WiFi is already connected, and it connects to WiFi at boot only when WiFi auto-connect is on and a network is saved. Until then the Serial interface and the local display (if connected) are the only ones available.
 >
-> **Basic mode** turns the web server's auto-start on but configures no WiFi network, so it also leaves WiFi auto-connect off. In the serial console run `wifiscan`, then `wifiadd <ssid> <password>` and `wifiautostart 1`, and reboot: the device then joins the network and starts the web server on every boot. To use the web UI right away instead, run `openwifi` and then `openhttp` (this session only). The **Meshed Node** archetype does not turn the Web Interface on; add `httpenabled 1` and `httpAutoStart 1` first if you want it.
+> **Basic mode** turns the web server's auto-start on but configures no WiFi network, so it also leaves WiFi auto-connect off. In the serial console run `wifiscan`, then `wifiadd <ssid> <password>` and `wifiautostart 1`, and reboot: the device then joins the network and starts the web server on every boot. To use the web UI right away instead, run `openwifi` and then `openhttp` (this session only). The **Meshed Node** archetype does not turn the Web Interface on; add `httpenabled 1` and `httpautostart 1` first if you want it.
 >
-> **Advanced mode** with the Web Interface turned off or WiFi skipped: turn them on later with `httpenabled 1`, `httpAutoStart 1`, `wifiadd <ssid> <password>` and `wifiautostart 1`, or start them for this session with `openwifi` and `openhttp`.
+> **Advanced mode** with the Web Interface turned off or WiFi skipped: turn them on later with `httpenabled 1`, `httpautostart 1`, `wifiadd <ssid> <password>` and `wifiautostart 1`, or start them for this session with `openwifi` and `openhttp`.
 >
 > If you enabled the Web Interface and joined a network during the wizard, the device connects to WiFi and prints its IP address in the serial monitor. Navigate to that address in a browser to reach the web UI, and log in with the username and password you created in Step 2.
 
