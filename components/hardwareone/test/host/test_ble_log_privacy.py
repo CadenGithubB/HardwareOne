@@ -11,9 +11,10 @@ the specific lines that used to leak are pinned below.
 """
 from pathlib import Path
 import re
+from g2_client_source import SPLIT_FILES, g2_client_text
 
 ROOT = Path(__file__).resolve().parents[2]
-FILES = ['G2_Glasses.cpp', 'G2_Ring.cpp', 'G2_HijackCmd.cpp', 'G2_Page_ESPNow.cpp', 'G2_Page_Network.cpp',
+FILES = ['G2_Glasses.cpp', *SPLIT_FILES, 'G2_Ring.cpp', 'G2_HijackCmd.cpp', 'G2_Page_ESPNow.cpp', 'G2_Page_Network.cpp',
          'BLE_Server.cpp', 'HAL_Bluetooth.cpp', 'HAL_Radio.cpp', 'System_RadioCompanion.cpp',
          'OLED_Mode_Bluetooth.cpp'] + sorted(p.name for p in ROOT.glob('BLE_*.cpp'))
 ALWAYS_ON = re.compile(r'\b(BROADCAST_PRINTF|ERROR_\w+F|WARN_\w+F|INFO_\w+F|logSystemEvent|ESP_LOG[EWI]|broadcastOutput)\s*\(')
@@ -52,7 +53,7 @@ def main() -> None:
                 leaks.append(f'{name}:{text.count(chr(10), 0, pos) + 1}: {" ".join(call.split())[:120]}')
     assert not leaks, 'always-on log lines print an address:\n' + '\n'.join(leaks)
 
-    glasses = (ROOT / 'G2_Glasses.cpp').read_text()
+    glasses = g2_client_text(ROOT)
     assert 'MAC %s, attempt' not in glasses, 'the repair line names the temple address'
     tap = glasses[glasses.index('char lbl[kTapLabelWidth];'):]
     tap = tap[:tap.index('Text-entry overlay')]

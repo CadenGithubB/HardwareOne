@@ -19,6 +19,7 @@ import subprocess
 import tempfile
 
 from test_web_batch_handlers import extract_block, require
+from g2_client_source import g2_client_text
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
@@ -35,7 +36,7 @@ def line(text: str, prefix: str) -> str:
 
 
 def generated(component: Path) -> str:
-    owner = (component / 'G2_Glasses.cpp').read_text()
+    owner = g2_client_text(component)
     header = (component / 'G2_Glasses.h').read_text()
     peers = (component / 'BLE_Peers.h').read_text()
     types = [extract_block(peers, 'enum BlePeerKind :') + ';',
@@ -76,7 +77,7 @@ def order(text: str, *needles: str) -> None:
 
 
 def check_sources(component: Path) -> None:
-    owner = (component / 'G2_Glasses.cpp').read_text()
+    owner = g2_client_text(component)
     core = (component / 'G2_RepairCore.h').read_text()
     require('#include' in core and 'Arduino' not in core and 'freertos' not in core.lower(),
             'the schedule has no OS dependencies')

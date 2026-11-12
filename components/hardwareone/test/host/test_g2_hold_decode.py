@@ -15,6 +15,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+from g2_client_source import g2_client_text
 
 HERE = Path(__file__).resolve().parent
 
@@ -71,7 +72,7 @@ def main() -> None:
     sys.path.insert(0, str(c / 'test/host'))
     from test_web_batch_handlers import extract_block
 
-    source = (c / 'G2_Glasses.cpp').read_text()
+    source = g2_client_text(c)
 
     # 1. Production event names, compiled and executed.
     code = extract_block(source, 'static const char* osEventTypeName(uint32_t ev) ')
@@ -244,7 +245,7 @@ def main() -> None:
                    '__atomic_fetch_add(&gWidgetLifecycleEpoch'):
         assert writer not in source, writer
     assert 'gWidgetLifecycleEpoch = ' not in source.replace(
-        'static volatile uint32_t gWidgetLifecycleEpoch = 1;', '')
+        'volatile uint32_t gWidgetLifecycleEpoch = 1;', '')
     assert 'static uint32_t gHoldOpenLifecycle = 0;' in source
     ordered(accept, 'portENTER_CRITICAL(&gHoldMux);', 'const uint32_t now = millis();',
             'if (gHold.open && gHoldOpenLifecycle != lifecycleEpoch) {',

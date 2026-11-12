@@ -33,6 +33,7 @@ import subprocess
 import tempfile
 
 from test_web_batch_handlers import extract_block, require
+from g2_client_source import g2_client_text
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
@@ -48,7 +49,7 @@ LIFECYCLE_EXIT = "portEXIT_CRITICAL(&gControlLifecycleMux)"
 
 
 def generated(component: Path) -> str:
-    source = (component / "G2_Glasses.cpp").read_text()
+    source = g2_client_text(component)
     header = (component / "G2_Glasses.h").read_text()
     memory = (component / "System_MemoryMonitor.cpp").read_text()
     memory_header = (component / "System_MemoryMonitor.h").read_text()
@@ -85,14 +86,14 @@ def generated(component: Path) -> str:
         "static bool g2ClientInitIdle(",
         # The harness's worker creators consult the production gate.
         "static bool g2UiWorkerCreationOpenLocked(",
-        "static void g2UiSubmitDone(")]
+        "void g2UiSubmitDone(")]
     definitions += [extract_block(source, marker) + ";" for marker in (
         "struct G2ClientInitClaim", "class G2BleRoleTransitionClaim")]
     definitions += [extract_block(source, marker) for marker in (
         "bool initG2Client(", "bool deinitG2Client(",
         "bool isG2ClientInitialized(", "G2State getG2State(",
         "const char* getG2StateString(", "bool g2ConnectionStatusSnapshot(",
-        "static bool pageSwapRuntimeSnapshot(", "static bool tapRuntimeSnapshot(")]
+        "static bool pageSwapRuntimeSnapshot(", "bool tapRuntimeSnapshot(")]
     harness = (HERE / "g2_client_lifecycle_harness.cpp").read_text()
     return harness.replace("// INSERT_TYPES", "\n".join(types)).replace(
         "// INSERT_PRODUCTION", "\n\n".join(definitions))
@@ -179,7 +180,7 @@ def check_lifecycle_order(component: Path) -> None:
     """initG2Client opens the runtime on the shared stack; deinitG2Client closes
     the runtime only and leaves the stack, the pipe, the ring and the console
     to their owners."""
-    source = (component / "G2_Glasses.cpp").read_text()
+    source = g2_client_text(component)
     init = code_only(extract_block(source, "bool initG2Client("))
     stop = code_only(extract_block(source, "bool deinitG2Client("))
 
@@ -236,7 +237,7 @@ def check_worker_creation_gate(component: Path) -> None:
     """Each lazy UI-worker creator refuses a closed gate and claims its slot in
     the same lifecycle critical section, before it allocates anything; the
     gate's admission flag is written only under that lock."""
-    source = (component / "G2_Glasses.cpp").read_text()
+    source = g2_client_text(component)
     code = code_only(source)
     writes = [found.start() for found in
               re.finditer(r"(?<!static bool )\bgClientUiCreationOpen\s*=(?!=)", code)]
@@ -272,7 +273,7 @@ def check_stale_client_retire_before_scan(component: Path) -> None:
     connect job scans, not only when its own temple advertises again
     (memory audit BAPP-01); connectTemple keeps the late catch through the same
     helper, the only place the flag is cleared by retirement."""
-    source = (component / "G2_Glasses.cpp").read_text()
+    source = g2_client_text(component)
     # The helpers are forward-declared beside connectTemple's declaration, so
     # each block is taken from its definition, not its first mention.
     def definition(signature: str) -> str:

@@ -5,6 +5,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+from g2_client_source import g2_client_text
 
 HERE = Path(__file__).resolve().parent
 HARNESS = r'''
@@ -131,13 +132,13 @@ def main():
     component = args.component.resolve()
     sys.path.insert(0, str(component / 'test/host'))
     from test_web_batch_handlers import extract_block
-    source = (component / 'G2_Glasses.cpp').read_text()
+    source = g2_client_text(component, header_first=True)
     code = '\n\n'.join(extract_block(source[source.rindex(marker):], marker) for marker in (
-        'static inline uint32_t g2PresentationEpochCurrent(',
-        'static inline bool pageSwapInFlight(',
+        'uint32_t g2PresentationEpochCurrent(',
+        'bool pageSwapInFlight(',
         'static uint32_t g2TextViewNextSerialLocked(',
         'static void g2TextViewDisarmLocked(',
-        'static bool g2TextViewPublishForLifecycle(',
+        'bool g2TextViewPublishForLifecycle(',
         'bool g2TextPageReady('))
     with tempfile.TemporaryDirectory(prefix='hw1-g2-text-ready-') as tmp:
         unit, exe = Path(tmp) / 'test.cpp', Path(tmp) / 'test'

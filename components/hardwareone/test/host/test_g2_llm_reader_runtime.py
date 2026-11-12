@@ -6,6 +6,7 @@ import re
 import subprocess
 import tempfile
 from test_web_batch_handlers import extract_block
+from g2_client_source import g2_client_text, g2_internal_declaration
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
@@ -398,15 +399,16 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--sanitize', action='store_true')
     args = parser.parse_args()
-    source = (COMPONENT / 'G2_Glasses.cpp').read_text()
+    source = g2_client_text(COMPONENT)
     start = source.index('struct LlmPageArgs {')
     production = source[start:source.index('#endif // ENABLE_LLM_BACKEND', start)]
-    globals_text = '\n'.join(re.findall(r'^static std::atomic<[^>]+>\s+gLlmPage\w+[^;]*;', source, re.M))
+    globals_text = '\n'.join(re.findall(r'^(?:static )?std::atomic<[^>]+>\s+gLlmPage\w+[^;]*;', source, re.M))
     buffer = (COMPONENT / 'System_PsramBuffer.h').read_text()
     buffer = buffer.replace('#pragma once', '').replace('#include "System_MemUtil.h"', '')
     unit = (HARNESS.replace('// INSERT_BUFFER', buffer)
             .replace('// INSERT_GLOBALS', globals_text)
-            .replace('// INSERT_REBUILD', extract_block(source, 'static bool sendRebuildTextNamedAndWait('))
+            .replace('// INSERT_REBUILD', g2_internal_declaration(COMPONENT, 'bool sendRebuildTextNamedAndWait(') + '\n' +
+                     extract_block(source, 'bool sendRebuildTextNamedAndWait('))
             .replace('// INSERT_PRODUCTION', production))
     with tempfile.TemporaryDirectory(prefix='hw1-g2-llm-reader-') as directory:
         cpp, exe = Path(directory) / 'test.cpp', Path(directory) / 'test'

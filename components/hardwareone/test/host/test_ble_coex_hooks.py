@@ -10,6 +10,7 @@ bracketed through the shared chokepoint.
 from pathlib import Path
 import re
 from test_web_batch_handlers import extract_block
+from g2_client_source import g2_client_text
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
@@ -31,7 +32,7 @@ def no_return_between(text: str, begin: str, end: str) -> None:
 
 
 if __name__ == '__main__':
-    g2 = (ROOT / 'G2_Glasses.cpp').read_text()
+    g2 = g2_client_text(ROOT)
     ring = (ROOT / 'G2_Ring.cpp').read_text()
 
     body = extract_block(g2, 'static bool g2ConnectSync(')

@@ -24,6 +24,7 @@ import subprocess
 import tempfile
 
 from test_web_batch_handlers import extract_block, require
+from g2_client_source import g2_client_text
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
@@ -192,7 +193,7 @@ def main() -> None:
     require(bool(args.cxx), "a host C++17 compiler is required")
     sanitize = (["-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-g"]
                 if args.sanitize else [])
-    glasses = (args.component / "G2_Glasses.cpp").read_text()
+    glasses = g2_client_text(args.component)
     phone_header = (args.component / "BLE_PhoneStatus.h").read_text()
     phone_source = (args.component / "BLE_PhoneStatus.cpp").read_text()
     link_types, link_status = link_status_unit(args.component)

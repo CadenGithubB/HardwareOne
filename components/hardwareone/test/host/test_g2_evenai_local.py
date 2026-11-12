@@ -6,6 +6,7 @@ import re
 import subprocess
 import tempfile
 from test_web_batch_handlers import extract_block
+from g2_client_source import g2_client_text, g2_internal_declaration
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
@@ -15,10 +16,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--sanitize', action='store_true')
     args = parser.parse_args()
-    source = (COMPONENT / 'G2_Glasses.cpp').read_text()
+    source = g2_client_text(COMPONENT)
     native = source[source.index('struct G2EvenAiSessionState'):]
     session = extract_block(native, 'struct G2EvenAiSessionState') + ';\n'
-    ready = extract_block(source, 'static bool g2TempleReadyAtGeneration(')
+    ready = (g2_internal_declaration(COMPONENT, 'bool g2TempleReadyAtGeneration(') + '\n' +
+             extract_block(source, 'bool g2TempleReadyAtGeneration('))
     bound_arm = extract_block(native, 'static G2Temple* g2EvenAiBoundArm(')
     guard = extract_block(native, 'static bool g2EvenAiGuardMatches(')
     selected = extract_block(source, 'static bool g2EvenAiUseLocalSpeech(')

@@ -16,6 +16,7 @@ import re
 import subprocess
 import sys
 import tempfile
+from g2_client_source import g2_client_text
 
 HERE = Path(__file__).resolve().parent
 
@@ -86,7 +87,7 @@ def main() -> None:
     sys.path.insert(0, str(c / 'test/host'))
     from test_web_batch_handlers import extract_block
 
-    glasses = (c / 'G2_Glasses.cpp').read_text()
+    glasses = g2_client_text(c)
     protocol = (c / 'G2_Protocol.cpp').read_text()
 
     # 1. The hex helper and the sid names, compiled and executed.

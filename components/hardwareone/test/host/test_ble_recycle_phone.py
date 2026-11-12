@@ -11,13 +11,14 @@ from pathlib import Path
 import subprocess
 import tempfile
 from test_web_batch_handlers import extract_block
+from g2_client_source import g2_client_text
 
 HERE=Path(__file__).resolve().parent
 ROOT=HERE.parents[1]
 
 if __name__=='__main__':
     p=argparse.ArgumentParser();p.add_argument('--sanitize',action='store_true');args=p.parse_args()
-    source=(ROOT/'G2_Glasses.cpp').read_text()
+    source=g2_client_text(ROOT)
     unit=(HERE/'ble_recycle_phone_harness.cpp').read_text().replace(
         '// INSERT_PRODUCTION',extract_block(source,'bool bleStackRecycleIfWedged(void)'))
     with tempfile.TemporaryDirectory(prefix='hw1-ble-recycle-') as tmp:

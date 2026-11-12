@@ -13,6 +13,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+from g2_client_source import g2_client_text
 
 HERE = Path(__file__).resolve().parent
 START = ('// -----------------------------------------------------------------------------\n'
@@ -32,7 +33,7 @@ def main() -> None:
     sys.path.insert(0, str(c / 'test/host'))
     from test_web_batch_handlers import extract_block
 
-    source = (c / 'G2_Glasses.cpp').read_text()
+    source = g2_client_text(c)
     assert source.count(START) == 1 and source.count(END) == 1
     begin = source.index(START)
     code = source[begin:source.index(END, begin)]

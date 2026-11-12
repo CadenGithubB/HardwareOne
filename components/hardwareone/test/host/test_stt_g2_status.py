@@ -5,6 +5,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 from test_web_batch_handlers import extract_block
+from g2_client_source import g2_client_text
 
 HERE=Path(__file__).resolve().parent
 SOURCE=HERE.parents[1]
@@ -13,7 +14,7 @@ def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--sanitize',action='store_true')
     args=p.parse_args()
-    source=(SOURCE/'G2_Glasses.cpp').read_text()
+    source=g2_client_text(SOURCE)
     header=(SOURCE/'System_Dictation.h').read_text()
     unit='''#include <cassert>
 #include <cstdint>

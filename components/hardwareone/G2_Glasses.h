@@ -1002,19 +1002,19 @@ enum G2HijackPage : uint8_t {
   G2_HIJACK_PAGE_LED             = 14,
   // System Events viewer — read-only live list of the device's typed event
   // ring (kind / subject / age). Reached via the System launcher (hidden from
-  // the main hijack menu). Live-text page; impl inline in G2_Glasses.cpp.
+  // the main hijack menu). Live-text page; impl in G2_Page_SystemEvents.cpp.
   // NOTE: this is the ESP32-side event ring, NOT the G2's own native firmware
   // notification system (a separate, deferred effort).
   G2_HIJACK_PAGE_SYSEVENTS       = 15,
   // FM radio tuner — action rows (seek/volume/mute/power) beside a live
   // readout (freq or seek progress, RDS, volume, signal). Reached by tapping
   // the FM row on the Sensors page (hidden from the main hijack menu).
-  // Live-text compound mirroring the Ring/sensor-live pattern; impl inline
-  // in G2_Glasses.cpp under #if ENABLE_FM_RADIO.
+  // Live-text compound mirroring the Ring/sensor-live pattern; impl in
+  // G2_Page_FMRadio.cpp under #if ENABLE_FM_RADIO.
   G2_HIJACK_PAGE_FMRADIO         = 16,
   // Sensor-logging control — start/stop + a per-sensor selection list.
   // Reached via the Apps launcher (hidden from the main menu). Plain list
-  // page; impl inline in G2_Glasses.cpp.
+  // page; impl in G2_Page_Logging.cpp.
   G2_HIJACK_PAGE_LOGGING         = 17,
   // User manager (admin) — list / add / delete / role change. Reached via the
   // Config launcher (row shown only for an admin pairer; hidden from the main
@@ -1023,12 +1023,12 @@ enum G2HijackPage : uint8_t {
   // System launcher — groups the status/diagnostics pages (Status, System
   // Events, Logging, Tests) under one top-level menu entry, mirroring the
   // OLED's "System" category. Stateless: each row forwards to another page's
-  // show*Menu() / live-page start. Impl inline in G2_Glasses.cpp.
+  // show*Menu() / live-page start. Impl in G2_Page_Launchers.cpp.
   G2_HIJACK_PAGE_SYSTEM          = 19,
   // Config launcher — groups Settings and the admin-gated Users page under
   // one top-level menu entry, mirroring the OLED's "Config" category. It no
-  // longer exposes a G2-to-OLED login action. Stateless; impl inline in
-  // G2_Glasses.cpp.
+  // longer exposes a G2-to-OLED login action. Stateless; impl in
+  // G2_Page_Launchers.cpp.
   G2_HIJACK_PAGE_CONFIG          = 20,
   // Status dashboard — live-text compound (body + battery corner). Given its
   // own id (rather than the shared TEXT_VIEW) by the menu reorg so its back
@@ -1037,7 +1037,7 @@ enum G2HijackPage : uint8_t {
   G2_HIJACK_PAGE_STATUS          = 21,
   // LLM guided-input submenu (Apps -> LLM): Open chat / Ask (guided) /
   // Re-run last / Model select. Reached via the Apps launcher (hidden from
-  // the main menu). Impl inline in G2_Glasses.cpp under
+  // the main menu). Impl in G2_Page_LLM.cpp under
   // #if ENABLE_LLM_BACKEND. NOTE: this id must live here, not as a local
   // cast in the .cpp — a local `(G2HijackPage)N` silently aliases whichever
   // real member owns N once the enum grows, and the tap dispatcher resolves
@@ -1052,7 +1052,7 @@ G2HijackPage g2GetHijackPage();
 void         g2SetHijackPage(G2HijackPage p);
 
 #if ENABLE_FM_RADIO
-// Open the FM tuner compound page (Sensors → FM). Defined in G2_Glasses.cpp.
+// Open the FM tuner compound page (Sensors → FM). Defined in G2_Page_FMRadio.cpp.
 bool g2ShowFmTunerPage();
 #else
 inline bool g2ShowFmTunerPage() { return false; }

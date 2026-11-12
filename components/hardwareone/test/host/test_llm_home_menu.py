@@ -16,6 +16,7 @@ import subprocess
 import tempfile
 
 from test_web_batch_handlers import extract_block, require
+from g2_client_source import g2_client_text
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
@@ -24,9 +25,9 @@ ROW_LABELS = ('"Open chat"', '"Ask (Mic / Keys)"', '"Ask (guided)"', '"Re-run la
 
 
 def static_checks() -> None:
-    g2 = (COMPONENT / "G2_Glasses.cpp").read_text()
+    g2 = g2_client_text(COMPONENT)
     oled = (COMPONENT / "OLED_Mode_LLM.cpp").read_text()
-    for name, body in (("G2_Glasses.cpp g2ShowLlmMenu", extract_block(g2, "static void g2ShowLlmMenu() ")),
+    for name, body in (("G2_Glasses.cpp g2ShowLlmMenu", extract_block(g2, "void g2ShowLlmMenu() ")),
                        ("OLED_Mode_LLM.cpp populateHomeMenu",
                         extract_block(oled, "static void populateHomeMenu() "))):
         require("llmHomeMenuRowsNow(" in body, f"{name} must build its rows from llmHomeMenuRowsNow")

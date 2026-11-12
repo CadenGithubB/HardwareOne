@@ -28,6 +28,7 @@ import re
 import subprocess
 import tempfile
 from test_web_batch_handlers import extract_block, require
+from g2_client_source import g2_client_text
 
 HERE = Path(__file__).resolve().parent
 
@@ -55,7 +56,7 @@ def unit(component: Path) -> str:
     bluetooth_h = (component / 'BLE_Server.h').read_text()
     bluetooth = (component / 'BLE_Server.cpp').read_text()
     glasses_h = (component / 'G2_Glasses.h').read_text()
-    glasses = (component / 'G2_Glasses.cpp').read_text()
+    glasses = g2_client_text(component)
     ring = (component / 'G2_Ring.cpp').read_text()
     pipe = (component / 'BLE_PhonePipe.cpp').read_text()
 
@@ -150,7 +151,7 @@ def strip_comments(code: str) -> str:
 
 def check_text(component: Path) -> None:
     """The role owners the unit fakes, in their production order."""
-    glasses = (component / 'G2_Glasses.cpp').read_text()
+    glasses = g2_client_text(component)
     bluetooth = (component / 'BLE_Server.cpp').read_text()
     stack = (component / 'BLE_CentralStack.cpp').read_text()
     pipe = (component / 'BLE_PhonePipe.cpp').read_text()

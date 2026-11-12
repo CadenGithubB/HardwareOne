@@ -1277,7 +1277,7 @@ void g2SensorsHandleTap(uint32_t idx) {
     // text widget) instead of the generic list-only detail. Provides
     // a per-tick UPDATE_TEXT readout (level, sample rate, recording)
     // that doesn't disturb the list row selection — see g2ShowMicDetail
-    // and renderMicDetailLive in G2_Glasses.cpp. All other sensors
+    // and renderMicDetailLive in G2_Page_Microphone.cpp. All other sensors
     // still use the legacy showSensorDetail() path.
     if (strcmp(rows[pos].featureId, "microphone") == 0) {
       if (g2ShowMicDetail()) return;
@@ -1294,7 +1294,7 @@ void g2SensorsHandleTap(uint32_t idx) {
     }
 #if ENABLE_FM_RADIO
     // FM drills into the tuner compound page (seek / volume / mute / power
-    // action rows + live readout — inline in G2_Glasses.cpp) instead of the
+    // action rows + live readout — G2_Page_FMRadio.cpp) instead of the
     // generic sensor-live detail.
     if (strcmp(rows[pos].featureId, "fmradio") == 0) {
       if (g2ShowFmTunerPage()) return;

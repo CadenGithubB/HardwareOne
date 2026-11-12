@@ -12,13 +12,14 @@ import re
 import subprocess
 import tempfile
 from test_web_batch_handlers import extract_block, mac_text
+from g2_client_source import g2_client_text
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
 
 
 def generate(registry_source=None):
-    g2 = (COMPONENT / 'G2_Glasses.cpp').read_text()
+    g2 = g2_client_text(COMPONENT)
     ring = (COMPONENT / 'G2_Ring.cpp').read_text()
     peers = (COMPONENT / 'BLE_Peers.h').read_text()
     registry = registry_source if registry_source is not None else (COMPONENT / 'BLE_Peers.cpp').read_text()

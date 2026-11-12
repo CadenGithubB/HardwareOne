@@ -22,6 +22,7 @@ import re
 import subprocess
 import sys
 import tempfile
+from g2_client_source import g2_client_text
 
 HERE = Path(__file__).resolve().parent
 
@@ -208,7 +209,7 @@ def main() -> None:
     if not libs.is_dir():
         libs = HERE.parents[2] / 'hardwareone_libs'
     page = (c / 'G2_Page_Notes.cpp').read_text()
-    glasses = (c / 'G2_Glasses.cpp').read_text()
+    glasses = g2_client_text(c)
 
     # 1. The page itself.
     harness = (HERE / 'g2_notes_page_harness.cpp').read_text()

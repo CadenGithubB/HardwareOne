@@ -16,6 +16,7 @@ import subprocess
 import tempfile
 
 from test_web_batch_handlers import extract_block, require
+from g2_client_source import g2_client_text
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
@@ -29,7 +30,7 @@ def declaration(source: str, marker: str) -> str:
 def generated() -> str:
     header = (COMPONENT / "G2_HijackCmd.h").read_text()
     bridge = (COMPONENT / "G2_HijackCmd.cpp").read_text()
-    glasses = (COMPONENT / "G2_Glasses.cpp").read_text()
+    glasses = g2_client_text(COMPONENT)
     public = (COMPONENT / "G2_Glasses.h").read_text()
     types = [extract_block(public, "enum G2HijackPage") + ";"]
     types += [extract_block(header, marker) + ";" for marker in (

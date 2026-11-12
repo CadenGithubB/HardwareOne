@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import tempfile
 from test_web_batch_handlers import extract_block
+from g2_client_source import g2_client_text
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
@@ -21,12 +22,12 @@ def main():
     parser.add_argument('--cxx', default=shutil.which('c++'))
     parser.add_argument('--sanitize', action='store_true')
     args = parser.parse_args()
-    owner = (COMPONENT / 'G2_Glasses.cpp').read_text()
+    owner = g2_client_text(COMPONENT)
     header = (COMPONENT / 'G2_Protocol.h').read_text().replace('#include "System_BuildConfig.h"', '').replace('#include <Arduino.h>', '')
     protocol = (COMPONENT / 'G2_Protocol.cpp').read_text().replace('#include "G2_Protocol.h"', '').replace('#include <Arduino.h>', '')
     functions = [extract_block(owner.replace('static bool g2BothFirmwareExact(const char* expected);', ''), name) for name in (
         'static G2LinkSnapshot g2LinkSnapshot(',
-        'static bool g2TempleReadyAtGeneration(',
+        'bool g2TempleReadyAtGeneration(',
         'static bool g2TempleTransportAtGeneration(',
         'bool isG2Connected(',
         'static uint8_t g2NextSettingsMagic(',

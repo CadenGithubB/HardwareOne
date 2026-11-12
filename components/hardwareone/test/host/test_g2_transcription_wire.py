@@ -15,6 +15,7 @@ import subprocess
 import tempfile
 
 from test_web_batch_handlers import extract_block
+from g2_client_source import g2_client_text
 
 
 HERE = Path(__file__).resolve().parent
@@ -37,7 +38,7 @@ def main():
         raise SystemExit('a host C++17 compiler is required')
 
     page = ((args.source_dir or COMPONENT) / 'G2_Page_Transcription.cpp').read_text()
-    owner = (COMPONENT / 'G2_Glasses.cpp').read_text()
+    owner = g2_client_text(COMPONENT)
     header = (COMPONENT / 'G2_Protocol.h').read_text()
     header = header.replace('#include "System_BuildConfig.h"', '')
     header = header.replace('#include <Arduino.h>', '')

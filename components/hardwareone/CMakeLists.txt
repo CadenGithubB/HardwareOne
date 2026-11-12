@@ -167,6 +167,9 @@ set(hardwareone_srcs
         System_RadioCompanion.cpp
         BLE_SecureChannel.cpp
         G2_Glasses.cpp
+        G2_Keyboard.cpp
+        G2_ImageProbes.cpp
+        G2_ImageViewers.cpp
         G2_NativeNotes.cpp
         G2_HealthPush.cpp
         G2_Ring.cpp
@@ -192,6 +195,14 @@ set(hardwareone_srcs
         G2_Page_ESPNow.cpp
         G2_Page_Users.cpp
         G2_Page_LED.cpp
+        G2_Page_Launchers.cpp
+        G2_Page_Microphone.cpp
+        G2_Page_SystemEvents.cpp
+        G2_Page_Logging.cpp
+        G2_Page_FMRadio.cpp
+        G2_Page_LLM.cpp
+        G2_Page_Map.cpp
+        G2_Page_Health.cpp
         G2_Health.cpp
         R1_HealthHistoryStore.cpp
         G2_HijackFsm.cpp

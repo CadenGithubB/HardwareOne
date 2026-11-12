@@ -25,6 +25,7 @@ import subprocess
 import tempfile
 
 from test_web_batch_handlers import extract_block, require
+from g2_client_source import g2_client_text_via
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
@@ -66,7 +67,7 @@ def splice(harness: str, inserts) -> str:
 
 
 def generated(read) -> str:
-    g2 = read("G2_Glasses.cpp")
+    g2 = g2_client_text_via(read)
     public = read("G2_Glasses.h")
     bridge = read("G2_HijackCmd.h")
     types = logging_types(read)

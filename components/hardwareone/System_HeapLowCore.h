@@ -20,7 +20,7 @@ namespace heap_low_core {
 // Same line as the [HEAP_PRESSURE] console warning (HEAP_WARNING_THRESHOLD).
 inline constexpr size_t kFreeBytes = 25600;
 // Largest contiguous block line: the 16 KB figure the G2 image viewers already
-// use as their heap-low guard (g2ShowBmpFile in G2_Glasses.cpp).
+// use as their heap-low guard (g2ShowBmpFile in G2_ImageViewers.cpp).
 inline constexpr size_t kLargestBytes = 16384;
 inline constexpr size_t kRearmMarginBytes = 4096;
 inline constexpr uint32_t kCooldownMs = 60000;

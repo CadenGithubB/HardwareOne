@@ -17,13 +17,14 @@ import subprocess
 import tempfile
 
 from test_web_batch_handlers import extract_block, require
+from g2_client_source import g2_client_text
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
 
 
 def generated(component: Path, baseline: bool) -> str:
-    owner = (component / "G2_Glasses.cpp").read_text()
+    owner = g2_client_text(component)
     header = (component / "G2_Glasses.h").read_text()
     runtime = "struct G2ClientRuntime" in owner
     typed = "bool g2ConnectionStatusSnapshot(" in owner
@@ -38,7 +39,7 @@ def generated(component: Path, baseline: bool) -> str:
                   extract_block(header, "struct G2ClientState") + ";"]
     # Keep the actual declarations for the fields read by production. The rest
     # of the BLE driver's large temple state is irrelevant to this read API.
-    temple = extract_block(owner, "struct G2Temple")
+    temple = extract_block(owner, "struct G2Temple {")
     fields = []
     for name in ("connected", "mtu", "packetsSent", "packetsReceived",
                  "connectionGeneration", "sessionReadyGeneration"):

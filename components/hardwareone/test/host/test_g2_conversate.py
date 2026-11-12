@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import tempfile
 from test_web_batch_handlers import extract_block
+from g2_client_source import g2_client_text
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
@@ -24,7 +25,7 @@ def main():
     source = source.replace('#include <Arduino.h>', '')
     harness = (HERE / 'g2_conversate_harness.cpp').read_text()
     integration = (HERE / 'g2_conversate_owner_harness.cpp').read_text()
-    owner = (COMPONENT / 'G2_Glasses.cpp').read_text()
+    owner = g2_client_text(COMPONENT)
     # Definitions after the Native Conversate qualification marker have no
     # forward-declaration ambiguity. Hardware boundaries are mocked below.
     owner_impl = owner[owner.index('// ── Native Conversate microphone qualification'):]

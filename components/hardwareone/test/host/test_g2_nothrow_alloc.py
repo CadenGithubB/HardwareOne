@@ -4,7 +4,8 @@
 The firmware builds with C++ exceptions off, so a plain `new` that cannot
 allocate ends in abort and a panic reboot (G-71). Two checks:
 
-1. Every `= new T` in G2_Glasses.cpp is `new (std::nothrow)`.
+1. Every `= new T` in the G2 client (G2_Glasses.cpp and the files split from
+   it, see g2_client_source.py) is `new (std::nothrow)`.
 2. The production Health, Map and BMP launchers, compiled against an
    operator new that aborts when the heap is exhausted (the firmware's
    behaviour) and a nothrow form that returns nullptr, return false and queue
@@ -24,6 +25,7 @@ import subprocess
 import tempfile
 
 from test_web_batch_handlers import extract_block, require
+from g2_client_source import g2_client_files, g2_client_text
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
@@ -32,22 +34,23 @@ PLAIN_NEW = re.compile(r"=\s*new\s+(?!\(std::nothrow\))[A-Za-z_]")
 SITES = (
     ("struct HealthPageArgs", True),
     ("static void g2HealthPageDrop(void* p)", False),
-    ("static bool g2ShowHealthPage(void (*onDone)())", False),
+    ("bool g2ShowHealthPage(void (*onDone)())", False),
     ("struct MapPageArgs", True),
     ("static void g2MapPageDrop(void* p)", False),
-    ("static bool g2ShowMapPage(void (*onDone)())", False),
+    ("bool g2ShowMapPage(void (*onDone)())", False),
     ("struct BmpViewerArgs", True),
     ("static void g2BmpViewerDrop(void* p)", False),
     ("bool g2ShowBmpFile(const char* path, void (*onDone)())", False),
 )
 
 
-def plain_new_sites(source: str) -> list[str]:
+def plain_new_sites(component: Path) -> list[str]:
     found = []
-    for number, line in enumerate(source.splitlines(), 1):
-        code = line.split("//", 1)[0]
-        if PLAIN_NEW.search(code):
-            found.append(f"G2_Glasses.cpp:{number}: {line.strip()}")
+    for name, source in g2_client_files(component):
+        for number, line in enumerate(source.splitlines(), 1):
+            code = line.split("//", 1)[0]
+            if PLAIN_NEW.search(code):
+                found.append(f"{name}:{number}: {line.strip()}")
     return found
 
 
@@ -76,8 +79,8 @@ def main() -> None:
     parser.add_argument("--sanitize", action="store_true")
     args = parser.parse_args()
     require(bool(args.cxx), "a host C++17 compiler is required")
-    source = (args.component / "G2_Glasses.cpp").read_text()
-    failures = plain_new_sites(source)
+    source = g2_client_text(args.component)
+    failures = plain_new_sites(args.component)
     flags = ["-std=c++17", "-Wall", "-Wextra", "-Werror", "-Wno-unused-parameter",
              "-Wno-unused-function", "-Wno-unused-variable"]
     if args.sanitize:

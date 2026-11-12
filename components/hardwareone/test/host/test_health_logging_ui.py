@@ -16,6 +16,7 @@ import argparse
 import re
 import os
 from pathlib import Path
+from g2_client_source import g2_client_text_via
 import shutil
 import subprocess
 import tempfile
@@ -40,7 +41,7 @@ def generated(component: Path = COMPONENT, source_dir: Path | None = None,
 
     health = read("G2_Health.cpp")
     public = read("G2_Health.h")
-    glasses = read("G2_Glasses.cpp")
+    glasses = g2_client_text_via(read)
     web = read("WebPage_R1_Health.cpp")
     utils = read("WebServer_Utils.h")
     # The action body is read by the shared bounded reader (WebServer_Utils),

@@ -5,6 +5,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 from test_web_batch_handlers import extract_block
+from g2_client_source import g2_client_text
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
@@ -18,7 +19,7 @@ def main():
     header = header.replace('#include "System_BuildConfig.h"', '').replace('#include <Arduino.h>', '')
     protocol = (COMPONENT / 'G2_Protocol.cpp').read_text()
     protocol = protocol.replace('#include "G2_Protocol.h"', '').replace('#include <Arduino.h>', '')
-    fragmenter = extract_block((COMPONENT / 'G2_Glasses.cpp').read_text(),
+    fragmenter = extract_block(g2_client_text(COMPONENT),
                               'static bool sendPbFragmented(G2Temple& arm,')
     platform = ('#define ENABLE_BLUETOOTH 1\n#define ENABLE_G2_GLASSES 1\n'
                 '#include <stdint.h>\nuint32_t millis() { return 0; }\n'

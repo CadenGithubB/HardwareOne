@@ -98,7 +98,7 @@ struct G2TextEntryCleanupToken {
 // live-page-start failure.
 bool g2BeginTextEntry(const TextEntryConfig& cfg);
 
-// High-level key event from the arrow-pad surface (G2_Glasses.cpp):
+// High-level key event from the arrow-pad surface (G2_Keyboard.cpp):
 // printable char = append; '\b' backspace; '\n' Done (commit); '\x1b'
 // Cancel. Pad-mode sessions only; no-op otherwise.
 void g2TextEntryPadEvent(char code);
@@ -126,7 +126,7 @@ bool g2TextEntryIsSecret();
 // text-entry handler instead of the underlying page.
 void g2TextEntryHandleTap(uint32_t idx);
 
-// Internal execution lease for G2_Glasses.cpp paths that mutate the pad
+// Internal execution lease for the G2 client paths that mutate the pad
 // before calling back into this module (rowless double-select and dictation
 // service). Begin is non-blocking and validates the exact current session;
 // every successful Begin must be paired with End on the same task. Holding

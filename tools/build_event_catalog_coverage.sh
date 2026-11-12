@@ -645,7 +645,10 @@ verify_phase3_consumer_references() {
   local archive_nm="$2"
   local oled_automations_owner='OLED_Mode_Automations.cpp.obj:'
   local oled_utils_owner='OLED_Utils.cpp.obj:'
-  local g2_history_owner='G2_Glasses.cpp.obj:'
+  # The event history page of the glasses is G2_Page_SystemEvents.cpp; the
+  # client core is G2_Glasses.cpp. Neither may pull in the JSON catalog.
+  local g2_history_owner='G2_Page_SystemEvents.cpp.obj:'
+  local g2_core_owner='G2_Glasses.cpp.obj:'
   local g2_automations_owner='G2_Page_Automations.cpp.obj:'
   local g2_protocol_owner='G2_Protocol.cpp.obj:'
 
@@ -662,6 +665,9 @@ verify_phase3_consumer_references() {
         "$archive_nm" "$g2_history_owner" \
         'systemEventCatalogJson' || return $?
       assert_owner_symbol_absent \
+        "$archive_nm" "$g2_core_owner" \
+        'systemEventCatalogJson' || return $?
+      assert_owner_symbol_absent \
         "$archive_nm" "$g2_automations_owner" \
         'systemEventCatalogJson' || return $?
       assert_owner_symbol_absent \
@@ -676,6 +682,9 @@ verify_phase3_consumer_references() {
         'systemEventKindName(' || return $?
       assert_owner_symbol_absent \
         "$archive_nm" "$g2_history_owner" \
+        'systemEventCatalogJson' || return $?
+      assert_owner_symbol_absent \
+        "$archive_nm" "$g2_core_owner" \
         'systemEventCatalogJson' || return $?
       assert_owner_symbol_absent \
         "$archive_nm" "$g2_protocol_owner" \

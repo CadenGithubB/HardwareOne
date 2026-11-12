@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from g2_client_source import g2_client_text
 
 
 COMPONENT = Path(__file__).resolve().parents[2]
@@ -170,7 +171,7 @@ command_types = (COMPONENT / "System_CommandTypes.h").read_text(encoding="utf-8"
 web = (COMPONENT / "WebServer_Server.cpp").read_text(encoding="utf-8")
 ble_peers = (COMPONENT / "BLE_Peers.cpp").read_text(encoding="utf-8")
 g2_ring = (COMPONENT / "G2_Ring.cpp").read_text(encoding="utf-8")
-g2_glasses = (COMPONENT / "G2_Glasses.cpp").read_text(encoding="utf-8")
+g2_glasses = g2_client_text(COMPONENT)
 hardwareone = (COMPONENT / "HardwareOne.cpp").read_text(encoding="utf-8")
 rtc = (COMPONENT / "i2csensor_ds3231.cpp").read_text(encoding="utf-8")
 

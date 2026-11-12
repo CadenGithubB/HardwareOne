@@ -11,7 +11,7 @@
 // separately from the live sparklines.
 //
 // Portable TU: history buffers + BMP/text builders only. No BLE/hijack — the
-// worker in G2_Glasses.cpp owns transport and calls into here.
+// worker in G2_Page_Health.cpp owns the page and calls into here.
 // =============================================================================
 
 #include "System_BuildConfig.h"

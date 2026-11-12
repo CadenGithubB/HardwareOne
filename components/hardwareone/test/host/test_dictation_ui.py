@@ -18,6 +18,7 @@ import sys
 import tempfile
 from test_espsr_runtime import function
 from test_web_batch_handlers import extract_block
+from g2_client_source import g2_client_text
 HERE=Path(__file__).resolve().parent
 SOURCE=HERE.parents[1]
 
@@ -97,20 +98,20 @@ def main():
     p.add_argument('--cxx',default=os.environ.get('CXX') or 'clang++')
     p.add_argument('--component',type=Path,default=HERE.parents[1],help='production component tree (default: this checkout)')
     a=p.parse_args();SOURCE=a.component.resolve()
-    g2=(SOURCE/'G2_Glasses.cpp').read_text();te=(SOURCE/'G2_Page_TextEntry.cpp').read_text();oled=(SOURCE/'OLED_Utils.cpp').read_text();header=(SOURCE/'System_Dictation.h').read_text()
+    g2=g2_client_text(SOURCE);te=(SOURCE/'G2_Page_TextEntry.cpp').read_text();oled=(SOURCE/'OLED_Utils.cpp').read_text();header=(SOURCE/'System_Dictation.h').read_text()
     unit=(HERE/'dictation_ui_harness.cpp').read_text()
     transcript=(SOURCE/'System_Transcript.h').read_text()
     types=extract_block(transcript,'struct TranscriptStatus')+';\n'+'\n'.join(extract_block(header,s)+';' for s in ('enum class DictationState','struct DictationSnapshot','struct DictationTextReceipt'))+'\n'+extract_block(g2,'struct KbdPadState')+';'
     unit=unit.replace('// INSERT_TYPES',types)
     unit=unit.replace('// INSERT_FIELD','\n'.join(function(te,s) for s in ('size_t g2TextEntryPadRemaining(', 'size_t g2TextEntryPadAppendText(')))
-    unit=unit.replace('// INSERT_G2','\n'.join(function(g2,s) for s in ('static bool kbdPadConsumeDictationText(', 'static void kbdPadDictationServiceOnTap(')))
+    unit=unit.replace('// INSERT_G2','\n'.join(function(g2,s) for s in ('static bool kbdPadConsumeDictationText(', 'void kbdPadDictationServiceOnTap(')))
     unit=unit.replace('// INSERT_OLED','\n'.join(function(oled,s) for s in ('static bool oledKeyboardConsumeDictationText(', 'void oledKeyboardDictationTick(')))
-    for signature in ('static bool kbdPadConsumeDictationText(', 'static void kbdPadDictationServiceOnTap('):
+    for signature in ('static bool kbdPadConsumeDictationText(', 'void kbdPadDictationServiceOnTap('):
         assert 'ENABLE_LOCAL_STT' not in function(g2,signature)
     assert 'ENABLE_LOCAL_STT' not in function(oled,'void oledKeyboardDictationTick(')
     # Keyboard fields drain only the keyboard mailbox, which never matches an
     # App lease: neither a Transcription nor a QuickNote can type into a field.
-    for text,signature in ((g2,'static bool kbdPadConsumeDictationText('),(g2,'static void kbdPadDictationServiceOnTap('),
+    for text,signature in ((g2,'static bool kbdPadConsumeDictationText('),(g2,'void kbdPadDictationServiceOnTap('),
                            (oled,'static bool oledKeyboardConsumeDictationText('),(oled,'void oledKeyboardDictationTick(')):
         assert 'dictationApp' not in function(text,signature)
     with tempfile.TemporaryDirectory(prefix='hw1-dictation-ui-') as d:

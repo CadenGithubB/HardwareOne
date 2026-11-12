@@ -6,6 +6,7 @@ import re
 import subprocess
 import tempfile
 from test_espsr_runtime import function
+from g2_client_source import g2_client_text
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
@@ -198,7 +199,7 @@ def main():
     disabled_header = headers
     headers += f'\n#include "{COMPONENT / "G2_RenderTypes.h"}"\n'
     production = strip_local_includes((COMPONENT / 'G2_Page_TextEntry.cpp').read_text())
-    pad_start = function((COMPONENT / 'G2_Glasses.cpp').read_text(), 'bool g2KbdPadStartMic(')
+    pad_start = function(g2_client_text(COMPONENT), 'bool g2KbdPadStartMic(')
     unit = (HARNESS.replace('// INSERT_HEADERS', headers)
             .replace('// INSERT_PRODUCTION', production)
             .replace('// INSERT_PAD_START', pad_start))

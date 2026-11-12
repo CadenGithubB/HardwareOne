@@ -3,7 +3,7 @@
 // std::terminate -> abort -> panic reboot. This harness models that exactly:
 // the throwing operator new aborts the process when the heap is "exhausted",
 // while the nothrow form returns nullptr. The runner inserts the production
-// argument structs, drop functions and launchers from G2_Glasses.cpp; the
+// argument structs, drop functions and launchers from the G2 client files; the
 // session queue, workers and heap probes are boundary doubles.
 #include <cstdint>
 #include <cstdio>

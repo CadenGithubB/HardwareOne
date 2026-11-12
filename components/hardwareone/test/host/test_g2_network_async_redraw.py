@@ -24,6 +24,7 @@ import tempfile
 
 from test_g2_status_corner import link_status_unit
 from test_web_batch_handlers import extract_block, require
+from g2_client_source import g2_client_text
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
@@ -64,7 +65,7 @@ def definition(source: str, name: str) -> str:
 def generated(component: Path) -> str:
     header = (component / "G2_HijackCmd.h").read_text()
     bridge = (component / "G2_HijackCmd.cpp").read_text()
-    glasses = (component / "G2_Glasses.cpp").read_text()
+    glasses = g2_client_text(component)
     public = (component / "G2_Glasses.h").read_text()
     wifi = (component / "System_WiFi.h").read_text()
     page = (component / "G2_Page_Network.cpp").read_text()

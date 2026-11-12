@@ -13,6 +13,7 @@ import subprocess
 import tempfile
 
 from test_web_batch_handlers import extract_block
+from g2_client_source import g2_client_text
 
 HERE = Path(__file__).resolve().parent
 
@@ -23,7 +24,7 @@ def main():
     parser.add_argument("--sanitize", action="store_true")
     parser.add_argument("--component", type=Path, default=HERE.parents[1])
     args = parser.parse_args()
-    source = (args.component / "G2_Glasses.cpp").read_text()
+    source = g2_client_text(args.component)
     # These functions also have forward declarations. Start after the last
     # declaration so extract_block reads the actual implementation.
     send_source = source[source.index("// Internal: send Cmd=18 MenuStartUpFailed"):]

@@ -15,6 +15,7 @@ from pathlib import Path
 import re
 import subprocess
 import tempfile
+from g2_client_source import g2_client_text
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
@@ -76,7 +77,7 @@ def check_wiring() -> None:
     assert 'bool bleSetupWorkerRelease(uint32_t timeoutMs);' in header
     assert 'inline bool bleSetupWorkerRelease(uint32_t) { return true; }' in header
 
-    glasses = text('G2_Glasses.cpp')
+    glasses = g2_client_text(ROOT)
     phone = text('BLE_PhonePipe.cpp')
     tables = {
         'g2SetupOps': (glasses, 'g2SetupLabel, g2SetupReady, nullptr, g2SetupRun, g2SetupFinish, true'),

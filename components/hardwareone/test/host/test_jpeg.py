@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import tempfile
 from test_web_batch_handlers import extract_block
+from g2_client_source import g2_client_text
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
@@ -45,7 +46,7 @@ def main():
                             '-o', str(binary)], check=True)
             subprocess.run([str(binary), str(FIXTURES)], check=True)
         compile_run('core', 'test_jpeg_core.cpp', ['HAL_JPEG.cpp'])
-        helper = extract_block((COMPONENT / 'G2_Glasses.cpp').read_text(), 'static bool decodeJpegForG2(')
+        helper = extract_block(g2_client_text(COMPONENT), 'static bool decodeJpegForG2(')
         software_source = work / 'jpeg_software_with_g2.cpp'
         software_source.write_text((HERE / 'test_jpeg_software.cpp').read_text().replace('// INSERT_G2_JPEG_HELPER', helper))
         compile_run('software', software_source, ['HAL_JPEG.cpp', 'HAL_JPEG_Software.cpp'])

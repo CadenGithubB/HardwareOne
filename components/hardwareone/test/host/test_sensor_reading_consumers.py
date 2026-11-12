@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import tempfile
 from test_web_batch_handlers import extract_block, require
+from g2_client_source import g2_client_text
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
@@ -56,7 +57,7 @@ def generate(component, baseline):
                  for name in ['gpCell', 'anoCell', *FORMATTERS]]
     functions.append(extract_block((component / 'BLE_Server.cpp').read_text(),
                                    'static void buildSensorDataJson('))
-    functions.append(extract_block((component / 'G2_Glasses.cpp').read_text(),
+    functions.append(extract_block(g2_client_text(component),
                                    'static void buildFmTunerReadout('))
     logs = (component / 'System_SensorLogging.cpp').read_text()
     types.append(extract_block((COMPONENT / 'System_SensorLogging.h').read_text(),

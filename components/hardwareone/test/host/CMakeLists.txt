@@ -1877,7 +1877,8 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_boot_automation_leak.py
           ${SETUP_MQTT_TEST_ARGS})
-# G2 heap objects (G-71): every `= new T` in G2_Glasses.cpp is nothrow, and the
+# G2 heap objects (G-71): every `= new T` in the G2 client (G2_Glasses.cpp and
+# the files split from it) is nothrow, and the
 # Health/Map/BMP launchers refuse instead of aborting when the heap is out.
 add_test(
   NAME g2_nothrow_alloc

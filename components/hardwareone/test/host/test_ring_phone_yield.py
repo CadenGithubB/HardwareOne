@@ -33,6 +33,7 @@ import re
 import subprocess
 import tempfile
 from test_web_batch_handlers import extract_block
+from g2_client_source import g2_client_text
 
 HERE = Path(__file__).resolve().parent
 
@@ -110,7 +111,7 @@ def worker_source(component: Path) -> str:
 
 
 def queue_unit(component: Path) -> str:
-    glasses = (component / 'G2_Glasses.cpp').read_text()
+    glasses = g2_client_text(component)
     ring = (component / 'G2_Ring.cpp').read_text()
     g2 = [
         line(glasses, 'static portMUX_TYPE gControlLifecycleMux'),
@@ -180,7 +181,7 @@ def owner_unit(component: Path) -> str:
 
 def check_text(component: Path) -> None:
     ring = (component / 'G2_Ring.cpp').read_text()
-    glasses = (component / 'G2_Glasses.cpp').read_text()
+    glasses = g2_client_text(component)
     check_owner_lifetime_text(component, ring)
     # Every scan/connect path rechecks the runtime yield, including a late OPEN.
     for signature in ('bool g2RingScan(', 'bool ringPerformConnect(', 'static bool ringRequestCurrent('):

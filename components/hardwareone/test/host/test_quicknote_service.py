@@ -17,6 +17,7 @@ import tempfile
 
 from test_espsr_runtime import function
 from test_web_batch_handlers import extract_block
+from g2_client_source import g2_client_text
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
@@ -133,7 +134,7 @@ def check_wiring():
     build = (c / 'System_BuildConfig.h').read_text()
     assert '#define HW1_NOTE_MAX_SEC_DEFAULT (ENABLE_LOCAL_STT ? 60 : 30)' in build
 
-    g2 = (c / 'G2_Glasses.cpp').read_text()
+    g2 = g2_client_text(c)
     native = function(g2, 'bool g2NativeVoiceActive()')
     for owner in ('g2EvenAiSessionIsActive()', 'g2ConversateActive()',
                   'g2NativeTerminalActive()', 'g2NativeNotesActive()'):

@@ -1,7 +1,7 @@
 #ifndef SYSTEM_LLM_HOME_MENU_CORE_H
 #define SYSTEM_LLM_HOME_MENU_CORE_H
 // The LLM app's home menu: which actions it offers, in what order, and how they
-// are labelled. The glasses (G2_Glasses.cpp) and the local display
+// are labelled. The glasses (G2_Page_LLM.cpp) and the local display
 // (OLED_Mode_LLM.cpp) both build their home list from this, so the two cannot
 // drift apart. The caller gathers the backend state (llmHomeMenuRowsNow in
 // System_LLMBackend) and adds its own presentation rows, such as the lens'

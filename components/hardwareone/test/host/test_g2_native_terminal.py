@@ -5,6 +5,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 from test_web_batch_handlers import extract_block
+from g2_client_source import g2_client_text
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
@@ -14,11 +15,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--sanitize', action='store_true')
     args = parser.parse_args()
-    source = (COMPONENT / 'G2_Glasses.cpp').read_text()
+    source = g2_client_text(COMPONENT)
     adapter = source[source.index('// Native Terminal adapter.'):source.index('// End native Terminal adapter.')]
     header = (COMPONENT / 'G2_Protocol.h').read_text().replace('#include "System_BuildConfig.h"', '').replace('#include <Arduino.h>', '')
     protocol = (COMPONENT / 'G2_Protocol.cpp').read_text().replace('#include "G2_Protocol.h"', '').replace('#include <Arduino.h>', '')
-    globals_ = source[source.index('// Native Terminal owns its own lifecycle,'):source.index('// =============================================================================\n// Constants')]
+    globals_ = source[source.index('// Native Terminal owns its own lifecycle,'):source.index('// =============================================================================\n// BLE peer registry binding')]
     harness = (HERE / 'g2_native_terminal_harness.cpp').read_text()
     harness = harness.replace('// INSERT_PROTOCOL', header + '\n' + protocol)
     harness = harness.replace('// INSERT_GLOBALS', globals_)
