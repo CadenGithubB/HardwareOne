@@ -107,6 +107,9 @@ bool phonePipeRecoveryNeeded();
 // Stop worker API calls while retaining callback storage until terminal teardown.
 bool phonePipeQuiesceForHostRecovery();
 const char* phonePipeStatus();
+// The same status as a value: hw1link::PipeStatus (BLE_LinkStatusCore.h). The
+// status surfaces branch on this; phonePipeStatus() is its text. Lock-free.
+uint8_t phonePipeStatusCode();
 // Status surfaces (BLE_LinkStatusCore.h): the setup step as hw1link::PipeStep,
 // and whether `phone pair` is enrolling or `phone pair new`'s window is open.
 // Lock-free.
@@ -155,6 +158,7 @@ inline bool phonePipeRecoveryNeeded() {return false;}
 inline bool phonePipeQuiesceForHostRecovery() {return false;}
 inline void phonePipeTick() {}
 inline const char* phonePipeStatus() {return "not compiled";}
+inline uint8_t phonePipeStatusCode() {return 0;}
 inline uint8_t phonePipeStep() {return 0;}
 inline bool phonePipeEnrolling() {return false;}
 inline PhonePairView phonePipePairView(char code[20]) {if(code)for(int i=0;i<20;++i)code[i]=0;return {};}

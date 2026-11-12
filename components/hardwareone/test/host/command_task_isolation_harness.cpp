@@ -144,6 +144,7 @@ bool setUserPassword(const String&, const String& password) {
   return true;
 }
 template <typename... Args> void logAuthAttempt(Args&&...) {}
+template <typename... Args> void logCredentialChange(Args&&...) {}
 template <typename... Args> void revokeUserSessions(Args&&...) { ++revokes; }
 template <typename... Args> void systemEventPost(Args&&...) { ++events; }
 

@@ -271,6 +271,7 @@ static bool bleCentralRingShouldYield() { return false; }
 static bool phonePipeActive() { return w.pipeActive; }
 static bool phonePipeReady() { return w.pipeReady; }
 static const char* phonePipeStatus() { return w.label; }
+static uint8_t phonePipeStatusCode();  // defined below, after BLE_LinkStatusCore.h
 static uint8_t phonePipeStep() { return w.step; }
 static bool phonePipeEnrolling() { return w.enrolling; }
 #if ENABLE_BLE_PHONE_PIPE
@@ -348,6 +349,14 @@ struct JsonObject {
 // ---- The production code ---------------------------------------------------------
 #include "OLED_Mode_Bluetooth.cpp"
 #include "BLE_LinkStatus.cpp"
+// The status whose text is `label`: the scenarios name a pipe status by its text.
+static uint8_t pipeStatusCodeOf(const char* label) {
+  if (!label) return uint8_t(hw1link::PipeStatus::Stopped);
+  for (const auto& row : hw1link::kPipeStatusRows)
+    if (row.label && !strcmp(row.label, label)) return uint8_t(row.status);
+  return uint8_t(hw1link::PipeStatus::StackRefused);
+}
+static uint8_t phonePipeStatusCode() { return pipeStatusCodeOf(phonePipeStatus()); }
 
 // ---- Helpers -----------------------------------------------------------------------
 using Rows = std::vector<std::string>;

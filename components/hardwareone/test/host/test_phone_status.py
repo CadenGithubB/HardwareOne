@@ -62,7 +62,7 @@ def stubs(work: Path, component: Path, pipe: int) -> None:
     pipe_header = (component / "BLE_PhonePipe.h").read_text()
     (work / "BLE_PhonePipe.h").write_text(
         "#pragma once\n#include <cstdint>\nbool phonePipeActive();\nbool phonePipeStandalone();\n"
-        "bool phonePipeReady();\nconst char* phonePipeStatus();\n"
+        "bool phonePipeReady();\nconst char* phonePipeStatus();\nuint8_t phonePipeStatusCode();\n"
         "uint8_t phonePipeStep();\nbool phonePipeEnrolling();\n"
         + extract_block(pipe_header, "struct PhonePipeLinkSummary") + ";\n"
         "bool phonePipeLinkSummary(PhonePipeLinkSummary* out);\n")

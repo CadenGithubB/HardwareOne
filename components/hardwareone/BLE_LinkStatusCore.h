@@ -96,6 +96,82 @@ inline const char* roleLine(Role running, Role saved, char* buf, size_t n) {
 // Mirrors BLE_PhonePipe.cpp's setup step (phonePipeStep()).
 enum class PipeStep : uint8_t { Idle, Waiting, ScanParams, Scanning, Link, Retiring, Fault };
 
+// What the phone pipe reports about itself (phonePipeStatusCode()): one value
+// per state or reason. The first 8 mean nothing went wrong.
+enum class PipeStatus : uint8_t {
+  Stopped, Disconnected, Ready, Scanning, Authenticating, WaitingForRadio,
+  WaitingToEnroll, CloseRequested,
+  // Failures and refusals.
+  PhoneNotFound, SetupTimedOut, SetupTurnOverran, LinkLost, ScanSetupFailed,
+  ScanStartFailed, GattUnavailable, NoLinkCapacity, AuthUnavailable, EnrollmentExpired,
+  IntentChanged, IntentReplaced, EnrollmentChanged, ForgetAuthorityChanged,
+  DrainingForForget, TurnEndedUnused, StreamCleanupNotQueued, CallbackQueueFull,
+  CleanupIncomplete, EnrollmentForgotten, NoSecret, VersionMismatch, AppTooOld,
+  PairingCodeExpired, PairingCodeClosed,
+  // The BLE stack refused to come up; the text is the stack's own refusal.
+  StackRefused,
+  Count
+};
+
+// Each status with the text phonePipeStatus() returns and, for a failure, a
+// short reason of at most 9 characters ("not found", "timed out", ...), so
+// "Pipe: fail: <reason>" fits 21 OLED columns. A neutral status has no reason.
+// The rows are in enum order; the static_assert below keeps them complete.
+struct PipeStatusRow { PipeStatus status; const char* label; const char* reason; };
+inline constexpr PipeStatusRow kPipeStatusRows[] = {
+    {PipeStatus::Stopped, "stopped", nullptr},
+    {PipeStatus::Disconnected, "disconnected", nullptr},
+    {PipeStatus::Ready, "ready", nullptr},
+    {PipeStatus::Scanning, "scanning", nullptr},
+    {PipeStatus::Authenticating, "authenticating pipe", nullptr},
+    {PipeStatus::WaitingForRadio, "waiting for radio", nullptr},
+    {PipeStatus::WaitingToEnroll, "waiting to enroll", nullptr},
+    {PipeStatus::CloseRequested, "phone close requested", nullptr},
+    {PipeStatus::PhoneNotFound, "phone not found", "not found"},
+    {PipeStatus::SetupTimedOut, "BLE setup timed out", "timed out"},
+    {PipeStatus::SetupTurnOverran, "BLE setup turn overran", "timed out"},
+    {PipeStatus::LinkLost, "phone link lost", "link lost"},
+    {PipeStatus::ScanSetupFailed, "scan setup failed", "scan fail"},
+    {PipeStatus::ScanStartFailed, "scan start failed", "scan fail"},
+    {PipeStatus::GattUnavailable, "GATT registration unavailable", "busy"},
+    {PipeStatus::NoLinkCapacity, "central link capacity unavailable", "no slot"},
+    {PipeStatus::AuthUnavailable, "pipe authentication cooldown or secret unavailable", "auth fail"},
+    {PipeStatus::EnrollmentExpired, "phone enrollment expired", "expired"},
+    {PipeStatus::IntentChanged, "phone intent changed", "cancelled"},
+    {PipeStatus::IntentReplaced, "phone intent replaced", "cancelled"},
+    {PipeStatus::EnrollmentChanged, "phone enrollment changed", "cancelled"},
+    {PipeStatus::ForgetAuthorityChanged, "phone forget authority changed", "cancelled"},
+    {PipeStatus::DrainingForForget, "draining phone for forget", "cancelled"},
+    {PipeStatus::TurnEndedUnused, "setup turn ended unused", "busy"},
+    {PipeStatus::StreamCleanupNotQueued, "stream cleanup could not be queued", "busy"},
+    {PipeStatus::CallbackQueueFull, "BLE callback queue full", "busy"},
+    {PipeStatus::CleanupIncomplete, "phone cleanup incomplete", "cleanup"},
+    {PipeStatus::EnrollmentForgotten, "phone pipe enrollment forgotten", "forgotten"},
+    {PipeStatus::NoSecret, "configure phone secret first", "no secret"},
+    {PipeStatus::VersionMismatch, "phone app version mismatch", "version"},
+    {PipeStatus::AppTooOld, "phone app too old", "app old"},
+    {PipeStatus::PairingCodeExpired, "pairing code expired", "expired"},
+    {PipeStatus::PairingCodeClosed, "pairing code closed", "cancelled"},
+    {PipeStatus::StackRefused, nullptr, "error"},
+};
+constexpr bool pipeStatusRowsInOrder() {
+  if (sizeof(kPipeStatusRows) / sizeof(kPipeStatusRows[0]) != size_t(PipeStatus::Count)) return false;
+  for (size_t i = 0; i < size_t(PipeStatus::Count); ++i) {
+    if (kPipeStatusRows[i].status != PipeStatus(i)) return false;
+  }
+  return true;
+}
+static_assert(pipeStatusRowsInOrder(), "one kPipeStatusRows row per PipeStatus, in enum order");
+
+inline const PipeStatusRow& pipeStatusRow(PipeStatus status) {
+  const size_t index = size_t(status) < size_t(PipeStatus::Count) ? size_t(status) : 0;
+  return kPipeStatusRows[index];
+}
+// The status as text; nullptr for StackRefused, whose text the stack supplies.
+inline const char* pipeStatusLabel(PipeStatus status) { return pipeStatusRow(status).label; }
+// The short failure reason, or nullptr for a status that is not a failure.
+inline const char* pipeReason(PipeStatus status) { return pipeStatusRow(status).reason; }
+
 enum class Pipe : uint8_t {
   NotBuilt, Off, NoSecret, NotPaired, Pairing, Waiting, Searching, Linking,
   Ready, Closing, Idle, Failed, Fault
@@ -108,7 +184,7 @@ struct PipeInputs {
   bool enrolling = false;  // `phone pair` in progress, or `phone pair new`'s window open
   bool enrolled = false;   // a pipe enrollment is saved
   PipeStep step = PipeStep::Idle;
-  const char* label = nullptr;  // phonePipeStatus(): the pipe's own text
+  PipeStatus status = PipeStatus::Stopped;  // phonePipeStatusCode()
 };
 
 struct PipeView {
@@ -116,65 +192,13 @@ struct PipeView {
   const char* reason = nullptr;  // short failure reason, or nullptr
 };
 
-// The pipe's labels that mean nothing went wrong.
-inline bool pipeLabelNeutral(const char* label) {
-  static const char* const kNeutral[] = {
-    "stopped", "disconnected", "ready", "scanning", "authenticating pipe",
-    "waiting for radio", "waiting to enroll", "phone close requested",
-  };
-  if (!label || !label[0]) return true;
-  for (const char* k : kNeutral) if (strcmp(label, k) == 0) return true;
-  return false;
-}
-
-// A failure label as a short reason of at most 9 characters ("not found",
-// "timed out", ...), so "Pipe: fail: <reason>" fits 21 OLED columns. Neutral
-// labels give nullptr; a label this table does not know gives "error", so a new
-// failure is never shown as success (the host test pins every label in the pipe).
-inline const char* pipeReason(const char* label) {
-  struct Row { const char* label; const char* reason; };
-  static const Row kReasons[] = {
-    {"phone not found", "not found"},
-    {"BLE setup timed out", "timed out"},
-    {"BLE setup turn overran", "timed out"},
-    {"phone link lost", "link lost"},
-    {"scan setup failed", "scan fail"},
-    {"scan start failed", "scan fail"},
-    {"GATT registration unavailable", "busy"},
-    {"central link capacity unavailable", "no slot"},
-    {"pipe authentication cooldown or secret unavailable", "auth fail"},
-    {"phone enrollment expired", "expired"},
-    {"phone intent changed", "cancelled"},
-    {"phone intent replaced", "cancelled"},
-    {"phone enrollment changed", "cancelled"},
-    {"phone forget authority changed", "cancelled"},
-    {"draining phone for forget", "cancelled"},
-    {"setup turn ended unused", "busy"},
-    {"stream cleanup could not be queued", "busy"},
-    {"BLE callback queue full", "busy"},
-    {"phone cleanup incomplete", "cleanup"},
-    {"phone pipe enrollment forgotten", "forgotten"},
-    {"configure phone secret first", "no secret"},
-    // Version mismatch (phone link v2): a strike, and the third one's hold.
-    {"phone app version mismatch", "version"},
-    {"phone app too old", "app old"},
-    // `phone pair new`'s window (phone link v2): it ran out, or was closed.
-    {"pairing code expired", "expired"},
-    {"pairing code closed", "cancelled"},
-  };
-  if (pipeLabelNeutral(label)) return nullptr;
-  for (const Row& r : kReasons) if (strcmp(label, r.label) == 0) return r.reason;
-  return "error";
-}
-
 inline PipeView pipeOf(const PipeInputs& in) {
   PipeView v;
   if (!in.built) { v.phase = Pipe::NotBuilt; return v; }
   if (in.ready) { v.phase = Pipe::Ready; return v; }
-  const char* reason = pipeReason(in.label);
+  const char* reason = pipeReason(in.status);
   if (!in.active) {
-    v.phase = (in.label && strcmp(in.label, "configure phone secret first") == 0)
-        ? Pipe::NoSecret : Pipe::Off;
+    v.phase = in.status == PipeStatus::NoSecret ? Pipe::NoSecret : Pipe::Off;
     return v;
   }
   switch (in.step) {

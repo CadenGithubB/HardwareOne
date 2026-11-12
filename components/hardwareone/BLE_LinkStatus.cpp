@@ -73,7 +73,7 @@ BleLinkStatus bleLinkStatus() {
   pipe.ready = phonePipeReady();
   pipe.enrolling = phonePipeEnrolling();
   pipe.step = hw1link::PipeStep(phonePipeStep());
-  pipe.label = phonePipeStatus();
+  pipe.status = hw1link::PipeStatus(phonePipeStatusCode());
 #if ENABLE_BLE_PHONE_PIPE
   // The phone's saved target is its pipe enrollment, never an address.
   BlePeerReconnectSnapshot reconnect;
@@ -84,7 +84,8 @@ BleLinkStatus bleLinkStatus() {
 #endif
   pipe.enrolled = s.pipePaired;
   s.pipe = hw1link::pipeOf(pipe);
-  s.pipeLabel = pipe.label ? pipe.label : "";
+  const char* pipeLabel = phonePipeStatus();
+  s.pipeLabel = pipeLabel ? pipeLabel : "";
 
   s.phone = bleLinkPhoneInputs();
   s.consoleView = bleConsoleView();

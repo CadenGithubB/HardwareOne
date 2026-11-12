@@ -2523,36 +2523,18 @@ extern const char* const LOG_EVENT_STREAM_FILE = "/system/sys_logs/events.log"; 
 // wrapped in `#if ENABLE_HTTP_SERVER`, so a headless build used to lose login
 // auditing on EVERY transport (serial and UART included), silently.
 
-// Only logs to file for actual login events, not all auth attempts.
-void logAuthAttempt(bool success, const char* path, const String& userTried, const String& ip, const String& reason) {
-  // Normalize path for checking
+// The path of an auth log line: the request path with its URL escapes undone.
+static String authLogPath(const char* path) {
   String cleanPath = String(path ? path : "");
   cleanPath.replace("%2F", "/");
   cleanPath.replace("%20", " ");
+  return cleanPath;
+}
 
-  // Only log to file if this is an actual security event (login or credential
-  // rotation). Path checks use exact equality to avoid spurious matches like
-  // "/configure-login-page" or "/login-help" triggering on the substring
-  // "/login". The reason-based matches catch events whose path varies by
-  // transport (e.g. password change is "/account/password-change" from web
-  // but "/oled/command" from OLED).
-  // Any "<transport>/login" path (web "/login", serial/login, bluetooth/login,
-  // display/login) plus the G2 pair event and credential-rotation reasons.
-  // endsWith avoids spurious matches like "/login-help" / "/configure-login-page".
-  bool isSecurityAuditEvent =
-      cleanPath.endsWith("/login") ||
-      (cleanPath == "g2/pair") ||
-      (cleanPath == "espnow/bond") ||
-      (reason.indexOf("Login successful") >= 0) ||
-      (reason.indexOf("Password changed") >= 0) ||
-      (reason.indexOf("Current password incorrect") >= 0) ||
-      (reason.indexOf("Password storage failed") >= 0);
-
-  if (!isSecurityAuditEvent) {
-    // Not a security event - skip file logging (command audit handles command tracking)
-    return;
-  }
-
+// Appends one line to the auth log: accepted events to LOG_OK_FILE, refused
+// ones to LOG_FAIL_FILE.
+static void appendAuthLogLine(bool success, const String& cleanPath, const String& userTried,
+                              const String& ip, const String& reason) {
   char tsPrefix[40];
   getTimestampPrefixMsCached(tsPrefix, sizeof(tsPrefix));
   String status = success ? "SUCCESS" : "FAILED";
@@ -2574,6 +2556,31 @@ void logAuthAttempt(bool success, const char* path, const String& userTried, con
   appendLineWithCap(logFile, line, LOG_CAP_BYTES);
 }
 
+// A request or a command, admitted or refused. Only a security event reaches
+// the auth log file; the command audit tracks the rest. A request is one by
+// its path: a "<transport>/login" context (endsWith, so "/login-help" and
+// "/configure-login-page" do not match), the G2 pair event or the ESP-NOW
+// bond. The reason is free text for the reader and decides nothing: a
+// credential login comes in through recordLoginAttempt() and a password change
+// through logCredentialChange(), and both always file.
+void logAuthAttempt(bool success, const char* path, const String& userTried, const String& ip, const String& reason) {
+  const String cleanPath = authLogPath(path);
+  const bool isSecurityAuditEvent =
+      cleanPath.endsWith("/login") ||
+      (cleanPath == "g2/pair") ||
+      (cleanPath == "espnow/bond");
+  if (!isSecurityAuditEvent) return;
+  appendAuthLogLine(success, cleanPath, userTried, ip, reason);
+}
+
+// A password change, accepted or refused: always a security audit event,
+// whatever path its transport gave the request ("/account/password-change"
+// from the web, "/oled/command" from the local display).
+void logCredentialChange(bool success, const char* path, const String& user, const String& ip,
+                         const String& reason) {
+  appendAuthLogLine(success, authLogPath(path), user, ip, reason);
+}
+
 // Single audit front-door for all credential logins (web, serial, UART, BLE,
 // OLED, MQTT command envelopes). G2 is excluded — it has no credential login
 // (its pair-time identity is logged separately with path "g2/pair"). Maps the
@@ -2592,7 +2599,8 @@ void recordLoginAttempt(CommandSource transport, const String& user,
     case SOURCE_MQTT:          path = "mqtt/login";      defIp = "mqtt";  break;
     default:                   path = "login";           defIp = "local"; break;
   }
-  logAuthAttempt(success, path, user, ip.length() ? ip : String(defIp), reason ? reason : "");
+  appendAuthLogLine(success, String(path), user, ip.length() ? ip : String(defIp),
+                    String(reason ? reason : ""));
 }
 
 // Log a one-time marker when the clock first becomes valid; safe to call

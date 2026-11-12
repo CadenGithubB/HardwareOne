@@ -1,5 +1,5 @@
-// Runs BLE_LinkStatusCore.h as shipped. Pipe labels are inserted by
-// test_ble_link_status.py from BLE_PhonePipe.cpp.
+// Runs BLE_LinkStatusCore.h as shipped. The scenarios name a pipe status by
+// the text phonePipeStatus() returns for it.
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -20,7 +20,13 @@ static unsigned checks = 0;
   } while (0)
 static bool eq(const char* a, const char* b) { return a && b && std::strcmp(a, b) == 0; }
 
-// INSERT_LABELS
+// The status whose text is `label`: the scenarios name a pipe status by its text.
+static uint8_t pipeStatusCodeOf(const char* label) {
+  if (!label) return uint8_t(hw1link::PipeStatus::Stopped);
+  for (const auto& row : hw1link::kPipeStatusRows)
+    if (row.label && !strcmp(row.label, label)) return uint8_t(row.status);
+  return uint8_t(hw1link::PipeStatus::StackRefused);
+}
 
 static void roles() {
   // Every combination of the four live flags.
@@ -67,7 +73,7 @@ static PipeView pipeAt(PipeStep step, const char* label, bool active = true, boo
   in.enrolling = enrolling;
   in.enrolled = enrolled;
   in.step = step;
-  in.label = label;
+  in.status = PipeStatus(pipeStatusCodeOf(label));
   return pipeOf(in);
 }
 
@@ -126,7 +132,8 @@ static void pipes() {
     char line[32];
     CHECK(eq(pipeLine(v, line, sizeof(line)), "fail: app old"));
   }
-  // A label nobody classified never reads as success.
+  // A text the table does not hold (the BLE stack's own refusal) never reads
+  // as success.
   v = pipeAt(PipeStep::Idle, "some new failure");
   CHECK(v.phase == Pipe::Failed && eq(v.reason, "error"));
   // Words.
@@ -139,12 +146,19 @@ static void pipes() {
   }
   CHECK(eq(pipeBrief(Pipe::Ready), "ready") && eq(pipeBrief(Pipe::Linking), "link") &&
         eq(pipeBrief(Pipe::Searching), "scan") && eq(pipeBrief(Pipe::Off), "off"));
-  // Every label BLE_PhonePipe.cpp can set is classified: neutral, or a reason
-  // other than "error". The longest line still fits the OLED's 21 columns
-  // after "Pipe: ".
-  for (const char* label : kPipeLabels) {
-    const char* reason = pipeReason(label);
-    CHECK(pipeLabelNeutral(label) == (reason == nullptr));
+  // Every status has its row (the header's static_assert), a text of its own
+  // and, when it is a failure, a reason other than "error". Only the stack's
+  // refusal has no text and reads "error". The longest line still fits the
+  // OLED's 21 columns after "Pipe: ".
+  for (const PipeStatusRow& row : kPipeStatusRows) {
+    const char* reason = row.reason;
+    if (row.status == PipeStatus::StackRefused) {
+      CHECK(!row.label && reason && eq(reason, "error"));
+      continue;
+    }
+    CHECK(row.label && row.label[0]);
+    CHECK(PipeStatus(pipeStatusCodeOf(row.label)) == row.status);   // no text is used twice
+    CHECK(eq(pipeStatusLabel(row.status), row.label) && pipeReason(row.status) == reason);
     CHECK(!reason || !eq(reason, "error"));
     if (!reason) continue;
     char line[32];

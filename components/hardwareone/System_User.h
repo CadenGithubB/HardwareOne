@@ -336,6 +336,9 @@ String getTransportUser(CommandSource transport);
 // canonical "<x>/login" path and delegates here.
 void logAuthAttempt(bool success, const char* path, const String& userTried,
                     const String& ip, const String& reason);
+// A password change, accepted or refused. Always written to the auth log.
+void logCredentialChange(bool success, const char* path, const String& user,
+                         const String& ip, const String& reason);
 void recordLoginAttempt(CommandSource transport, const String& user,
                         const String& ip, bool success, const char* reason);
 

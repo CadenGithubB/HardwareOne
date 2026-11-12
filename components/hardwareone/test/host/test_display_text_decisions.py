@@ -43,12 +43,6 @@ PATTERNS = (
 
 # Uses that remain, per file.
 ALLOWED: dict[str, int] = {
-    # The phone pipe reports its state as a label; pipeOf() tells "no secret"
-    # from "off" by it. Goes when the pipe reports a status value.
-    "BLE_LinkStatusCore.h": 1,
-    # The auth log files an event by its reason wording ("Password changed",
-    # "Current password incorrect"). Goes when the caller states the event kind.
-    "System_Debug.cpp": 4,
     # Not display text: the words a user may not give a mesh as its label.
     "System_ESPNow.cpp": 5,
 }

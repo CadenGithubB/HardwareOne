@@ -143,6 +143,14 @@ static bool phonePipeReady() { return linkIn.pipeReady; }
 static bool phonePipeEnrolling() { return linkIn.enrolling; }
 static uint8_t phonePipeStep() { return uint8_t(linkIn.step); }
 static const char* phonePipeStatus() { return linkIn.label; }
+// The status whose text is `label`: the scenarios name a pipe status by its text.
+static uint8_t pipeStatusCodeOf(const char* label) {
+  if (!label) return uint8_t(hw1link::PipeStatus::Stopped);
+  for (const auto& row : hw1link::kPipeStatusRows)
+    if (row.label && !strcmp(row.label, label)) return uint8_t(row.status);
+  return uint8_t(hw1link::PipeStatus::StackRefused);
+}
+static uint8_t phonePipeStatusCode() { return pipeStatusCodeOf(phonePipeStatus()); }
 static bool blePeerReconnectSnapshot(BlePeerKind kind, BlePeerReconnectSnapshot& out) {
   out = BlePeerReconnectSnapshot{};
   if (kind != BLE_PEER_PHONE) return false;

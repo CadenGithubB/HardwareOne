@@ -3570,12 +3570,12 @@ bool userChangePasswordCore(const String& currentPassword,
   if (!isValidUser(username, currentPassword)) {
     // Security event — log alongside login attempts so the auth-events
     // file shows both authentication AND credential-rotation activity.
-    logAuthAttempt(false, caller.path.c_str(), username, caller.ip, "Current password incorrect");
+    logCredentialChange(false, caller.path.c_str(), username, caller.ip, "Current password incorrect");
     return fail(kPasswordReplyWrongCurrent);
   }
 
   if (!setUserPassword(username, newPassword)) {
-    logAuthAttempt(false, caller.path.c_str(), username, caller.ip, "Password storage failed");
+    logCredentialChange(false, caller.path.c_str(), username, caller.ip, "Password storage failed");
     snprintf(message, messageSize, "Error: Failed to change password for user '%s'", username.c_str());
     return false;
   }
@@ -3593,10 +3593,9 @@ bool userChangePasswordCore(const String& currentPassword,
                      caller.sid,         // skip current web SID (if any)
                      caller.transport);  // skip current transport's session
 
-  // Audit-log the successful rotation. The reason string "Password changed"
-  // is what logAuthAttempt's filter matches on to write this to the
-  // security-events file (rather than the verbose command-audit log).
-  logAuthAttempt(true, caller.path.c_str(), username, caller.ip, "Password changed");
+  // Audit-log the successful rotation. logCredentialChange always writes to
+  // the security-events file (rather than the verbose command-audit log).
+  logCredentialChange(true, caller.path.c_str(), username, caller.ip, "Password changed");
   systemEventPost(SYSEVT_PASSWORD_CHANGED, username.c_str(), "self");
 
   snprintf(message, messageSize, "Password changed successfully for user '%s'", username.c_str());

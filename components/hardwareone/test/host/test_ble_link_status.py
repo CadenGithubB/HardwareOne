@@ -27,27 +27,8 @@ HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
 
 
-def pipe_labels(pipe: str) -> list[str]:
-    """Every static text the pipe stores as its status."""
-    labels = set()
-    for pattern in (r'setStep\(Step::\w+,\s*"([^"]+)"', r'fail\((?:now|millis\(\)),\s*[^,]+,\s*"([^"]+)"',
-                    r'cleanupExpired\(now,\s*"([^"]+)"', r'\bstatus\s*=\s*"([^"]+)"'):
-        labels.update(re.findall(pattern, pipe))
-    # Ternaries inside setStep: setStep(Step::Idle,a?"x":b?"y":...)
-    for call in re.findall(r'setStep\(Step::\w+,([^;]*?),\s*(?:now|jobAt|millis\(\))\)', pipe):
-        labels.update(re.findall(r'"([^"]+)"', call))
-    # The pipe start's own refusal and the initial value.
-    labels.update(re.findall(r'std::atomic<const char\*> status\{"([^"]+)"\}', pipe))
-    return sorted(labels)
-
-
 def generated(component: Path) -> str:
-    pipe = (component / 'BLE_PhonePipe.cpp').read_text()
-    labels = pipe_labels(pipe)
-    require(len(labels) >= 25, f'found only {len(labels)} pipe labels; the extractor broke')
-    body = ', '.join('"' + l.replace('\\', '\\\\').replace('"', '\\"') + '"' for l in labels)
-    harness = (HERE / 'ble_link_status_harness.cpp').read_text()
-    return harness.replace('// INSERT_LABELS', f'static const char* const kPipeLabels[] = {{{body}}};')
+    return (HERE / 'ble_link_status_harness.cpp').read_text()
 
 
 def check_sources(component: Path) -> None:
@@ -59,6 +40,17 @@ def check_sources(component: Path) -> None:
             and 'std::atomic<PhonePairWindow> pairState{PhonePairWindow::None};' in pipe,
             'lock-free accessors (`phone pair new`\'s window reads as enrolling)')
     require("keep Step in BLE_LinkStatusCore.h's order" in pipe, 'Step and PipeStep are pinned together')
+    # The pipe's status is a hw1link::PipeStatus value; its text comes from the
+    # table in BLE_LinkStatusCore.h, so the pipe spells no status text itself.
+    require('std::atomic<PipeStatus> status{PipeStatus::Stopped};' in pipe and
+            'uint8_t phonePipeStatusCode(){return uint8_t(status.load());}' in pipe,
+            'the pipe status is an atomic PipeStatus with a lock-free accessor')
+    core = (component / 'BLE_LinkStatusCore.h').read_text()
+    rows = re.findall(r'\{PipeStatus::\w+, "([^"]+)", ', core)
+    require(len(rows) >= 25, f'found only {len(rows)} status rows; the extractor broke')
+    code = re.sub(r'//[^\n]*', '', pipe)
+    spelled = sorted(label for label in rows if len(label) > 12 and f'"{label}"' in code)
+    require(not spelled, f'BLE_PhonePipe.cpp spells status text itself: {spelled}')
     bt = (component / 'BLE_Server.cpp').read_text()
     helper = extract_block(bt, 'static bool bleAdvertiseIfRoomLocked() ')
     require('activeConnectionCount >= BLE_MAX_CONNECTIONS' in helper and 'sBleAdvertising.store(true)' in helper,
@@ -107,7 +99,7 @@ def main() -> None:
         print(subprocess.check_output([str(binary)], text=True, timeout=60).strip())
     check_sources(component)
     print('BLE link status: role, pipe and console words (console stream first); phone link '
-          'block words, end reasons 0..18 and lines; every pipe label classified; lock-free '
+          'block words, end reasons 0..18 and lines; every pipe status has its row; lock-free '
           'accessors; advertising re-arm')
 
 

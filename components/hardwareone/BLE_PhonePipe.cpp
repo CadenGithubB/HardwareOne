@@ -47,6 +47,7 @@
 namespace {
 using hw1phone::Gatt;
 using Error=hw1pipe::Error;
+using hw1link::PipeStatus;
 enum class Step : uint8_t { Idle, Waiting, ScanParams, Scanning, Link, Retiring, Fault };
 // phonePipeStep() hands the step to the status surfaces as hw1link::PipeStep.
 static_assert(uint8_t(Step::Fault) == uint8_t(hw1link::PipeStep::Fault) &&
@@ -121,7 +122,16 @@ std::atomic<bool> versionLatched{false};
 // Taken and given back outside the owner mutex: the lifecycle lock is never
 // taken under it.
 std::atomic<bool> stateHeld{false};
-std::atomic<const char*> status{"stopped"};
+// The pipe's status (hw1link::PipeStatus). StackRefused carries the BLE stack's
+// own refusal text in stackRefusal, set before the status.
+std::atomic<PipeStatus> status{PipeStatus::Stopped};
+std::atomic<const char*> stackRefusal{""};
+// The status as text: its label, or the stack's refusal. Lock-free.
+const char* statusText(){
+  const PipeStatus now=status.load();
+  if(now==PipeStatus::StackRefused){const char* text=stackRefusal.load();return text?text:"";}
+  return hw1link::pipeStatusLabel(now);
+}
 // Atomic so the status surfaces read them without the owner mutex.
 std::atomic<Step> step{Step::Idle};
 BlePeerConnectRequest request;
@@ -271,7 +281,7 @@ class Role {
   explicit operator bool() const{return held;}
  private:bool held;
 };
-void setStep(Step value,const char* label,uint32_t now){step=value;status=label;at=now;}
+void setStep(Step value,PipeStatus label,uint32_t now){step=value;status=label;at=now;}
 void routeSet() {
   portENTER_CRITICAL(&routeMux);
   route.enabled=active.load();
@@ -365,7 +375,7 @@ void formatPhoneEnd(char* out,size_t size,const Gatt::AttemptEnd* end,Error why,
       end?unsigned(end->connection):0xffffu,end?int(end->gatt):-1,
       end?unsigned(end->reason):0u,end?long(end->esp):0L,end?(unsigned long)end->at:0UL);
 }
-void fail(uint32_t now,Error why,const char* label,hw1coex::CauseDetail detail=hw1coex::CauseDetail::None) {
+void fail(uint32_t now,Error why,PipeStatus label,hw1coex::CauseDetail detail=hw1coex::CauseDetail::None) {
   // The first stop of an attempt that found the phone names its record (the
   // step then leaves Scanning/Link, and READY sets published).
   if(candidate && !published && (step==Step::Scanning || step==Step::Link)) {
@@ -392,7 +402,7 @@ void fail(uint32_t now,Error why,const char* label,hw1coex::CauseDetail detail=h
   }
   if(step!=Step::Retiring && step!=Step::Fault)setStep(Step::Retiring,label,now);
 }
-void cleanupExpired(uint32_t now,const char* label) {
+void cleanupExpired(uint32_t now,PipeStatus label) {
   setStep(Step::Fault,label,now);
   clearReady();cleanupFaulted=true;recoveryNeeded=true;
   // Keep the native GATT owner and capacity reservation alive for late events,
@@ -421,7 +431,7 @@ void endTurn() {
 void configureScan(uint32_t now) {
   scanTally.reset();scanUsed=scanProfile;scanOpen=false;scanStopRefused=false;
   scanWifi.begin(bleCoexWifiNow());scanBeganAt=now;
-  scanParamsPending=true;setStep(Step::ScanParams,"scanning",now);routeSet();
+  scanParamsPending=true;setStep(Step::ScanParams,PipeStatus::Scanning,now);routeSet();
   esp_ble_scan_params_t params{};params.scan_type=BLE_SCAN_TYPE_PASSIVE;
   params.own_addr_type=BLE_ADDR_TYPE_PUBLIC;params.scan_filter_policy=BLE_SCAN_FILTER_ALLOW_ALL;
   // The runtime profile; see hw1scan::Profile for the default. The scan stops
@@ -429,18 +439,18 @@ void configureScan(uint32_t now) {
   params.scan_interval=scanUsed.interval;params.scan_window=scanUsed.window;
   params.scan_duplicate=scanUsed.duplicates?BLE_SCAN_DUPLICATE_ENABLE:BLE_SCAN_DUPLICATE_DISABLE;
   if(esp_ble_gap_set_scan_params(&params)!=ESP_OK){
-    scanParamsPending=false;noteScanFailed(now);fail(now,Error::Connect,"scan setup failed");
+    scanParamsPending=false;noteScanFailed(now);fail(now,Error::Connect,PipeStatus::ScanSetupFailed);
   }
 }
 void startForget(uint32_t now) {
   if(!transportSessionEpochIsLive(forgetSource,forgetEpoch) ||
      !blePeerPhonePipeForgetIsCurrent(forgetRequest)) {
-    forgetWanted=false;status="phone forget authority changed";return;
+    forgetWanted=false;status=PipeStatus::ForgetAuthorityChanged;return;
   }
   const bool committed=blePeerCommitPhonePipeForget(forgetRequest);
   forgetWanted=false;
   if(committed)(void)requestSettingsPersist();
-  setStep(Step::Idle,committed?"phone pipe enrollment forgotten":"phone enrollment changed",now);
+  setStep(Step::Idle,committed?PipeStatus::EnrollmentForgotten:PipeStatus::EnrollmentChanged,now);
 }
 // One record per scan: whether the phone's advertisement was heard, and how
 // much the scan heard at all, timed by the controller's start and end when
@@ -521,18 +531,18 @@ void consume(const GapEvent& e,uint32_t now) {
     case GapKind::ScanParams:
       if(!scanParamsPending)break;  // not ours (F3)
       scanParamsPending=false;
-      if(e.status){noteScanFailed(now);fail(now,Error::Connect,"scan setup failed");break;}
+      if(e.status){noteScanFailed(now);fail(now,Error::Connect,PipeStatus::ScanSetupFailed);break;}
       if(retiring)break;
-      scanStartPending=true;setStep(Step::Scanning,"scanning",now);routeSet();
+      scanStartPending=true;setStep(Step::Scanning,PipeStatus::Scanning,now);routeSet();
       if(esp_ble_gap_start_scanning(scanUsed.seconds)!=ESP_OK){
-        scanStartPending=false;noteScanFailed(now);fail(now,Error::Connect,"scan start failed");
+        scanStartPending=false;noteScanFailed(now);fail(now,Error::Connect,PipeStatus::ScanStartFailed);
       }
       break;
     case GapKind::ScanStart:
       if(!scanStartPending)break;   // not ours (F3)
       scanStartPending=false;scanStarted=e.status==0;
       if(scanStarted)scanOpen=true;
-      if(e.status){noteScanFailed(now);fail(now,Error::Connect,"scan start failed");}
+      if(e.status){noteScanFailed(now);fail(now,Error::Connect,PipeStatus::ScanStartFailed);}
       break;
     case GapKind::Candidate:
       if(retiring || candidate || e.type>3)break;
@@ -557,14 +567,14 @@ void consume(const GapEvent& e,uint32_t now) {
       scanStarted=scanStartPending=false;
       noteScan(now,retiring);
       if(retiring)break;
-      if(!candidate){fail(now,Error::Connect,"phone not found");break;}
-      setStep(Step::Link,"authenticating pipe",now);routeSet();
+      if(!candidate){fail(now,Error::Connect,PipeStatus::PhoneNotFound);break;}
+      setStep(Step::Link,PipeStatus::Authenticating,now);routeSet();
       if(!pskValid || !BLEDevice::allocateAppId(nativeAppId)) {
-        fail(now,Error::Resources,"GATT registration unavailable");break;
+        fail(now,Error::Resources,PipeStatus::GattUnavailable);break;
       }
       if(!phoneGatt.begin(nativeAppId,target,targetType,now,cachedPsk)) {
         BLEDevice::releaseAppId(nativeAppId);nativeAppId=0xffff;
-        fail(now,Error::Resources,"GATT registration unavailable");break;
+        fail(now,Error::Resources,PipeStatus::GattUnavailable);break;
       }
       linkBegun=true;liveGeneration=phoneGatt.generation();for(auto& id:releaseIds)id=0;
       break;
@@ -610,7 +620,7 @@ void beginJob(uint32_t now) {
   linkBegun=false;gateWaitMs=now-jobAt;
   scanStarted=scanStartPending=scanStopPending=false;at=now;
   params={};lastStreamAt=now-kParamsActiveHoldMs; // a new connection starts idle with nothing requested
-  if(!pskValid || authCoolingDown(now)){fail(now,Error::Unauthorized,"pipe authentication cooldown or secret unavailable");return;}
+  if(!pskValid || authCoolingDown(now)){fail(now,Error::Unauthorized,PipeStatus::AuthUnavailable);return;}
   configureScan(now);
 }
 // One enrollment attempt (`phone pair`, and each try of `phone pair new`'s
@@ -622,10 +632,10 @@ const char* startEnrollmentLocked(uint32_t now,TransportSessionEpoch epoch,Comma
     bleSetupCancelClaim(BleSetupClient::Phone,t);return "Error: enrollment authority unavailable";
   }
   enrollmentEpoch=epoch;enrollmentSource=source;
-  enrolling=job=true;request={};jobAt=now;wantToken.store(t);setStep(Step::Waiting,"waiting to enroll",jobAt);
+  enrolling=job=true;request={};jobAt=now;wantToken.store(t);setStep(Step::Waiting,PipeStatus::WaitingToEnroll,jobAt);
   if(!bleSetupPublish(BleSetupClient::Phone,t)) {
     bleSetupCancelClaim(BleSetupClient::Phone,t);wantToken.store(0);job=enrolling=false;
-    setStep(Step::Idle,"disconnected",jobAt);return "Error: phone pipe busy; disconnect first";
+    setStep(Step::Idle,PipeStatus::Disconnected,jobAt);return "Error: phone pipe busy; disconnect first";
   }
   return nullptr;
 }
@@ -657,8 +667,8 @@ bool closePairWindowLocked(uint32_t now) {
   if(pairState.load()!=PhonePairWindow::Open)return false;
   const bool attempt=job && enrolling && step!=Step::Retiring && step!=Step::Fault;
   endPairWindow(PhonePairWindow::Closed);
-  if(attempt)fail(now,Error::Cancelled,"pairing code closed",hw1coex::CauseDetail::Stopped);
-  else status="pairing code closed";
+  if(attempt)fail(now,Error::Cancelled,PipeStatus::PairingCodeClosed,hw1coex::CauseDetail::Stopped);
+  else status=PipeStatus::PairingCodeClosed;
   return true;
 }
 void tickLocked(uint32_t now) {
@@ -672,14 +682,14 @@ void tickLocked(uint32_t now) {
     job=enrolling=scanStarted=scanStartPending=scanStopPending=false;
     endTurn();bleCentralLinkReleaseClient(&phoneGatt);
     cleanupFaulted=false;recoveryNeeded=false;quiesceWanted=false;quiesced=false;
-    setStep(Step::Idle,"stopped",now);routeSet();hostResetWanted=false;
+    setStep(Step::Idle,PipeStatus::Stopped,now);routeSet();hostResetWanted=false;
   }
   if(quiesceWanted.load()) {
     clearReady();active=false;endTurn();quiesced=true;routeSet();return;
   }
   if(!active.load())return;
-  if(abortLink.exchange(false))fail(now,Error::Resources,"stream cleanup could not be queued");
-  if(gapOverflow.exchange(false))fail(now,Error::Resources,"BLE callback queue full");
+  if(abortLink.exchange(false))fail(now,Error::Resources,PipeStatus::StreamCleanupNotQueued);
+  if(gapOverflow.exchange(false))fail(now,Error::Resources,PipeStatus::CallbackQueueFull);
   GapEvent event;
   for(unsigned i=0;i<8 && xQueueReceive(gapQueue,&event,0)==pdTRUE;++i)consume(event,now);
   // A link failure still queued in this tick is consumed after the cancel, so
@@ -689,12 +699,12 @@ void tickLocked(uint32_t now) {
   // (docs/BLE_SETUP_WORKER_PLAN.md). Enrollment has 60 s from its turn, and
   // at most 60 s waiting for it.
   if(job) {
-    if(stopWanted.load())fail(now,Error::Cancelled,"phone close requested",hw1coex::CauseDetail::Stopped);
-    else if(!currentJob())fail(now,Error::Cancelled,"phone intent changed",hw1coex::CauseDetail::Replaced);
+    if(stopWanted.load())fail(now,Error::Cancelled,PipeStatus::CloseRequested,hw1coex::CauseDetail::Stopped);
+    else if(!currentJob())fail(now,Error::Cancelled,PipeStatus::IntentChanged,hw1coex::CauseDetail::Replaced);
     else if(enrolling && hw1pipe::expired(now,setupHeld?grantAt:jobAt,60000))
-      fail(now,Error::Cancelled,"phone enrollment expired",hw1coex::CauseDetail::Expired);
+      fail(now,Error::Cancelled,PipeStatus::EnrollmentExpired,hw1coex::CauseDetail::Expired);
     else if(setupHeld && !hw1setup::grantHeld(turn,heldToken))
-      fail(now,Error::Deadline,"BLE setup turn overran");
+      fail(now,Error::Deadline,PipeStatus::SetupTurnOverran);
   }
   // Relays defer within their 2 s budget for the display, a setup or the mic
   // AFE; the console yields to the display alone, for as long as it lasts.
@@ -715,14 +725,14 @@ void tickLocked(uint32_t now) {
       BleCentralLinkGuard link(BleCentralLink::Phone,ENABLE_G2_GLASSES);  // the arms keep their links where glasses can open
       if(!link) {
         job=false;enrolling=false;
-        setStep(Step::Idle,"central link capacity unavailable",now);leaveSetup();
+        setStep(Step::Idle,PipeStatus::NoLinkCapacity,now);leaveSetup();
       } else {link.retain(&phoneGatt);beginJob(now);}
     } else if(!bleSetupLive(BleSetupClient::Phone,t)) {
       // The worker ended this job without a turn (the pipe stopping, or a
       // grant that went unused): never stay Waiting and answer BUSY forever.
       const bool nudge=!enrolling && request.explicitReseek && !request.autoReconnect;
       job=false;enrolling=false;wantToken.store(0);
-      setStep(Step::Idle,"setup turn ended unused",now);
+      setStep(Step::Idle,PipeStatus::TurnEndedUnused,now);
       if(nudge)(void)blePeerRestoreDroppedReseek(BLE_PEER_PHONE,intent,identityGeneration);
     }
   }
@@ -736,13 +746,13 @@ void tickLocked(uint32_t now) {
           ? blePeerCommitPhonePipeEnrollmentIfCurrent(intent,identityGeneration,&persist)
           : blePeerNoteLinkUpIfCurrent(BLE_PEER_PHONE,request,&intent,&identityGeneration));
       if(accepted && persist)(void)requestSettingsPersist();
-      if(!accepted){fail(now,Error::Cancelled,"phone intent replaced",hw1coex::CauseDetail::Replaced);}
+      if(!accepted){fail(now,Error::Cancelled,PipeStatus::IntentReplaced,hw1coex::CauseDetail::Replaced);}
       else {
         noteAttempt(now,true);
         const bool wasEnrolling=enrolling;
         // The turn goes back once no scan flag is left (below), so the route
         // has stopped claiming scan events.
-        published=true;enrolling=false;setReady();status="ready";leaveWanted=true;++sessionStats.ready;
+        published=true;enrolling=false;setReady();status=PipeStatus::Ready;leaveWanted=true;++sessionStats.ready;
 #ifdef ESP_PLATFORM
         systemEventPost(SYSEVT_PHONE_LINK_UP,nullptr,wasEnrolling?"enrolled":"reconnected");
 #else
@@ -763,13 +773,13 @@ void tickLocked(uint32_t now) {
         if(strikes>=3) {
           // Held: the ring gets its link back while the phone cannot use one.
           versionLatched=true;bleCentralPhoneEnabled(false);
-          fail(now,phoneGatt.pipe.error,"phone app too old");
+          fail(now,phoneGatt.pipe.error,PipeStatus::AppTooOld);
           // The hold ends `phone pair new`'s window too: its attempts skip
           // admit() and would keep claiming a link the ring may now hold. The
           // reason stays shown; `phone pair new` after the app update lifts it.
           endPairWindow(PhonePairWindow::Closed);
-        } else fail(now,phoneGatt.pipe.error,"phone app version mismatch");
-      } else fail(now,phoneGatt.pipe.error,"phone link lost");
+        } else fail(now,phoneGatt.pipe.error,PipeStatus::VersionMismatch);
+      } else fail(now,phoneGatt.pipe.error,PipeStatus::LinkLost);
     }
     if(ready.load()) {
       // A-4: relay streams and the console's own traffic (COMMAND/BINARY in,
@@ -796,7 +806,7 @@ void tickLocked(uint32_t now) {
   }
   if(leaveWanted && !scanParamsPending && !scanStarted && !scanStartPending && !scanStopPending)leaveSetup();
   if((step==Step::ScanParams || step==Step::Scanning) &&
-     hw1pipe::expired(now,at,scanUsed.seconds*1000u+1000u))fail(now,Error::Deadline,"BLE setup timed out");
+     hw1pipe::expired(now,at,scanUsed.seconds*1000u+1000u))fail(now,Error::Deadline,PipeStatus::SetupTimedOut);
   if(step==Step::Retiring || step==Step::Fault) {
     if(scanStarted && !scanStopPending && !scanStopRefused) {
       // A refused stop leaves the scan to end on its own timer (F1).
@@ -811,7 +821,7 @@ void tickLocked(uint32_t now) {
       // client's scan events (consume() ends a retiring scan without routeSet).
       // An attempt that never reached READY keeps its failure ("phone not
       // found", "BLE setup timed out"); only a link that was up reads disconnected.
-      setStep(Step::Idle,stopWanted.load()?"stopped":published?"disconnected":status.load(),now);routeSet();
+      setStep(Step::Idle,stopWanted.load()?PipeStatus::Stopped:published?PipeStatus::Disconnected:status.load(),now);routeSet();
       if(nativeAppId!=0xffff){BLEDevice::releaseAppId(nativeAppId);nativeAppId=0xffff;}
       bleCentralLinkReleaseClient(&phoneGatt);
       // Lift the block before the turn is given back, so the worker's next
@@ -825,11 +835,11 @@ void tickLocked(uint32_t now) {
       if(lost)blePeerNoteLinkLost(BLE_PEER_PHONE);
     } else if(!recoveryNeeded.load() &&
         hw1pipe::expired(now,at,scanStopRefused?scanUsed.seconds*1000u+1000u:4000u))
-      cleanupExpired(now,"phone cleanup incomplete");
+      cleanupExpired(now,PipeStatus::CleanupIncomplete);
   }
   if(forgetWanted && step==Step::Idle)startForget(now);
   if(stopWanted.load() && step==Step::Idle && !forgetWanted) {
-    active=false;bleCentralPhoneEnabled(false);status="stopped";routeSet();
+    active=false;bleCentralPhoneEnabled(false);status=PipeStatus::Stopped;routeSet();
   }
   noteAttemptIfWanted(now);
   routeSet();
@@ -845,12 +855,12 @@ void pairTickLocked(uint32_t now) {
   else if(hw1pipe::expired(now,pairOpenedAt,kPairWindowMs)) {
     const bool attempt=job && enrolling && step!=Step::Retiring && step!=Step::Fault;
     endPairWindow(PhonePairWindow::Expired);
-    if(attempt)fail(now,Error::Cancelled,"pairing code expired",hw1coex::CauseDetail::Expired);
-    else status="pairing code expired";
+    if(attempt)fail(now,Error::Cancelled,PipeStatus::PairingCodeExpired,hw1coex::CauseDetail::Expired);
+    else status=PipeStatus::PairingCodeExpired;
   } else if(!transportSessionEpochIsLive(pairSource,pairEpoch)) {
     // The issuing admin's session ended; an attempt in flight already failed
     // its own epoch check in the step machine.
-    endPairWindow(PhonePairWindow::Closed);status="pairing code closed";
+    endPairWindow(PhonePairWindow::Closed);status=PipeStatus::PairingCodeClosed;
   } else if(job)pairJobSeen=true;
   else {
     if(pairJobSeen){pairJobSeen=false;pairRetryAt=now+kPairRetryMs;}  // 2 s from the end of the last attempt
@@ -958,10 +968,10 @@ BlePeerConnectAdmission admit(const BlePeerConnectRequest& wanted) {
   if(!blePeerConnectRequestIsCurrent(BLE_PEER_PHONE,wanted))return BlePeerConnectAdmission::NO_TARGET;
   uint32_t t=0;if(!bleSetupClaim(BleSetupClient::Phone,&t))return BlePeerConnectAdmission::BUSY;
   request=wanted;intent=wanted.intentGeneration;identityGeneration=wanted.identityGeneration;
-  enrolling=false;job=true;jobAt=millis();wantToken.store(t);setStep(Step::Waiting,"waiting for radio",jobAt);
+  enrolling=false;job=true;jobAt=millis();wantToken.store(t);setStep(Step::Waiting,PipeStatus::WaitingForRadio,jobAt);
   if(!bleSetupPublish(BleSetupClient::Phone,t)) {
     bleSetupCancelClaim(BleSetupClient::Phone,t);wantToken.store(0);job=false;
-    setStep(Step::Idle,"disconnected",jobAt);return BlePeerConnectAdmission::BUSY;
+    setStep(Step::Idle,PipeStatus::Disconnected,jobAt);return BlePeerConnectAdmission::BUSY;
   }
   return BlePeerConnectAdmission::STARTED;
 }
@@ -975,7 +985,7 @@ void disconnect() {
   // It ends `phone pair new`'s window too: its next attempt's manual learn
   // would clear the user's disconnect.
   (void)closePairWindowLocked(now);
-  if(job)fail(now,Error::Cancelled,"disconnected",hw1coex::CauseDetail::Stopped);
+  if(job)fail(now,Error::Cancelled,PipeStatus::Disconnected,hw1coex::CauseDetail::Stopped);
 }
 // A stopped pipe gives its hold on gBleState back, which ends its console row
 // (the lifecycle lock: never with the owner mutex held).
@@ -1049,11 +1059,11 @@ bool phoneLinkOpen() {
   const char* why=nullptr;if(radioCompanionBlocksRadio(&why))return false;
   // The pipe is a device on the shared client stack: bring the stack up when
   // it is down (it stays up until `closeble`); the pipe never owns a host.
-  if(!bleStackUp()){status=bleStackLastRefusal();return false;}
+  if(!bleStackUp()){stackRefusal=bleStackLastRefusal();status=PipeStatus::StackRefused;return false;}
   if(!resources() || !bleSetupWorkerStart())return false;
   switch(loadPsk()) {
     case PskLoad::Ready:break;
-    case PskLoad::NoSecret:status="configure phone secret first";return false;
+    case PskLoad::NoSecret:status=PipeStatus::NoSecret;return false;
     case PskLoad::Retry:return false;  // as the refusals above: no status of its own
   }
   if(!bleStackReady() || !bluetoothHalStatus().ready())return false;
@@ -1076,7 +1086,7 @@ bool phoneLinkOpen() {
       active=false;
     } else {
       bleCentralPhoneEnabled(!versionLatched.load());  // a held pipe leaves the ring its link
-      setStep(Step::Idle,"disconnected",millis());routeSet();started=true;
+      setStep(Step::Idle,PipeStatus::Disconnected,millis());routeSet();started=true;
     }
   }}
   if(!started)giveStateBack();
@@ -1186,7 +1196,8 @@ bool phonePipeLinkRecord(PhonePipeLinkRecord* out) {
   return valid;
 }
 void phonePipeNoteConsoleActivity(){consoleActivity.fetch_add(1);}
-const char* phonePipeStatus(){return status.load();}
+const char* phonePipeStatus(){return statusText();}
+uint8_t phonePipeStatusCode(){return uint8_t(status.load());}
 uint8_t phonePipeStep(){return uint8_t(step.load());}
 bool phonePipeEnrolling(){return enrolling.load() || pairState.load()==PhonePairWindow::Open;}
 PhonePairView phonePipePairView(char code[20]) {
@@ -1345,7 +1356,7 @@ static const char* startLinkIfStopped() {
   if(isBleServerInitialized())return "Error: the app console server owns Bluetooth; run 'closeconsole', then 'openphone'";
   if(phoneLinkOpen())return nullptr;
   EXT_RAM_BSS_ATTR static char text[96];
-  snprintf(text,sizeof(text),"Error: phone link could not open (%s)",status.load());
+  snprintf(text,sizeof(text),"Error: phone link could not open (%s)",statusText());
   return text;
 }
 // A user's `openphone` or `phone pair` (and `phone pair new`) lifts the
@@ -1366,7 +1377,7 @@ static const char* cmd_openphone(const String&) {
   (void)liftVersionHold();  // before the open, which reads it
   if(!phoneLinkOpen()) {
     EXT_RAM_BSS_ATTR static char text[96];
-    snprintf(text,sizeof(text),"Error: phone link could not open (%s)",status.load());
+    snprintf(text,sizeof(text),"Error: phone link could not open (%s)",statusText());
     return text;
   }
   if(ready.load())return "Phone: open and connected";
@@ -1406,7 +1417,7 @@ static const char* phoneForgetCommand(const String&) {
   if(!blePeerBeginPhonePipeForget(owner.generation,forgetRequest))
     return closed?"Pairing window closed; no phone was paired":"Error: no current phone pipe enrollment";
   forgetEpoch=epoch;forgetSource=auth.transport;forgetWanted=true;
-  if(job)fail(millis(),Error::Cancelled,"draining phone for forget",hw1coex::CauseDetail::Stopped);
+  if(job)fail(millis(),Error::Cancelled,PipeStatus::DrainingForForget,hw1coex::CauseDetail::Stopped);
   return "Phone forget accepted; check phone status. Remove the pipe allowlist on Android separately.";
 }
 static const char* phonePairCommand(const String& args) {
@@ -1497,7 +1508,7 @@ static const char* phoneStatsCommand(const String&) {
   size_t used=size_t(snprintf(text,sizeof(text),"Phone pipe: %s interval_ms=%u.%02u params=%s\n"
       "sessions ready=%lu auth_failures=%lu ended=%lu service_changed=%lu peer_reset=%lu "
       "version_mismatch=%lu strikes=%u%s\nend reasons:",
-      status.load(),unsigned(params.interval*125u/100u),unsigned(params.interval*125u%100u),
+      statusText(),unsigned(params.interval*125u/100u),unsigned(params.interval*125u%100u),
       params.pending?"pending":!params.applied?(params.tries>=3?"refused":"unset"):params.active?"active":"idle",
       (unsigned long)st.ready,(unsigned long)st.authFailures,(unsigned long)st.ended,(unsigned long)st.serviceChanged,
       (unsigned long)st.peerReset,(unsigned long)st.versionMismatches,unsigned(versionStrikes.load()),

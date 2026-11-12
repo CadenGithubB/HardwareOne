@@ -180,6 +180,14 @@ static bool phonePipeReady() { return false; }
 static bool phonePipeEnrolling() { return false; }
 static uint8_t phonePipeStep() { return uint8_t(hw1link::PipeStep::Scanning); }
 static const char* phonePipeStatus() { return "scanning"; }
+// The status whose text is `label`: the scenarios name a pipe status by its text.
+static uint8_t pipeStatusCodeOf(const char* label) {
+  if (!label) return uint8_t(hw1link::PipeStatus::Stopped);
+  for (const auto& row : hw1link::kPipeStatusRows)
+    if (row.label && !strcmp(row.label, label)) return uint8_t(row.status);
+  return uint8_t(hw1link::PipeStatus::StackRefused);
+}
+static uint8_t phonePipeStatusCode() { return pipeStatusCodeOf(phonePipeStatus()); }
 // The phone link block's inputs (phone link v2): nothing offered here.
 static hw1link::PhoneLinkInputs bleLinkPhoneInputs() { return {}; }
 #if ENABLE_BLE_PHONE_PIPE

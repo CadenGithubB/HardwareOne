@@ -10,6 +10,7 @@
 // wrapped by spies that count and probe, then call the real functions. SDK,
 // BLE, account and clock operations are host boundaries; the glasses, ring
 // and ring-retirement clients are fakes.
+#include "BLE_LinkStatusCore.h"  // hw1link::PipeStatus, the pipe's status value
 #include "BLE_PhonePipeCore.h"
 #include "BLE_PhonePipeTypes.h"
 #include "BLE_PhonePairCode.h"  // `phone pair new` (phone link v2)
@@ -43,6 +44,7 @@
 #define ENABLE_LLM_BACKEND 0
 #define ENABLE_LLM_SOURCE_HTTP 0
 using Error=hw1pipe::Error;
+using hw1link::PipeStatus;
 using TransportSessionEpoch=uint32_t;
 enum CommandSource{SOURCE_SERIAL,SOURCE_LOCAL_DISPLAY,SOURCE_WEB};
 constexpr int BLE_PEER_PHONE=2,ESP_OK=0,pdTRUE=1,pdFALSE=0,pdPASS=1,APP_CORE=1;
@@ -393,7 +395,7 @@ static std::vector<TaskExit> taskExits;static bool phoneTaskGone=false,inPhonePa
 static void vTaskDelete(TaskHandle_t task) {
  if(!inPhonePass){assert(!"the setup worker never leaves in this unit");}
  assert(!task && critDepth==0 && ownerDepth==0 && !phoneTaskGone);
- taskExits.push_back({clockMs,phoneGatt.hostStops,phonePasses,linkSummary,status.load(),worker});phoneTaskGone=true;
+ taskExits.push_back({clockMs,phoneGatt.hostStops,phonePasses,linkSummary,statusText(),worker});phoneTaskGone=true;
 }
 // The recovery block: each call notes what the flags and the turn were.
 struct BlockCall{bool value,recoveryNeeded,setupHeld;uint32_t ended;};
@@ -617,7 +619,7 @@ static void phoneTaskStep(){
  if(onStep){auto hook=onStep;hook();}
 }
 static void simulate(uint32_t ms){for(uint32_t t=10;t<=ms;t+=10)phoneTaskStep();clockMs+=ms%10;}
-static bool statusIs(const char* text){return !std::strcmp(status.load(),text);}
+static bool statusIs(const char* text){return !std::strcmp(statusText(),text);}
 static bool phoneSlotIdle(){return bleSetupIdle(kPhoneMask);}
 static hw1setup::State phoneSlotState(){return sCore.peek(hw1setup::Client::Phone).state;}
 static uint32_t admitPhone(const BlePeerConnectRequest& wanted=BlePeerConnectRequest{}){
@@ -694,7 +696,7 @@ static void reset() {
  forgetWanted=false;forgetRequest={};forgetEpoch=5;forgetCurrent=forgetCommit=true;forgetCommitCount=0;
  phoneGatt.onHostStopped=nullptr;phoneGatt.hostStopped();for(auto& stream:phoneGatt.pipe.streams)stream.reset();phoneGatt.hostStops=0;
  active=true;ready=false;stopWanted=false;gapOverflow=false;abortLink=false;hostResetWanted=false;
- step=Step::Idle;status="disconnected";job=enrolling=false;scanParamsPending=false;
+ step=Step::Idle;status=PipeStatus::Disconnected;job=enrolling=false;scanParamsPending=false;
  scanStarted=scanStartPending=scanStopPending=candidate=published=authFailureSeen=false;params={};paramRequests.clear();paramResult=ESP_OK;
  jobAt=at=lastStreamAt=0;for(auto& id:releaseIds)id=0;request={};
  authorityIntent=intent=7;authorityIdentity=identityGeneration=9;authority=epochLive=true;
@@ -799,7 +801,7 @@ static void ownerTests() {
  {reset();forgetWanted=true;epochLive=false;startForget(clockMs);assert(!forgetWanted&&!forgetCommitCount&&!persistCount);}
  // A late cleanup after the bound: the turn went back at the bound; the
  // recovery is settled once the adapter finally idles.
- {reset();pendingEnrollment();const uint32_t t=heldToken;gattStuck=true;fail(clockMs,Error::Deadline,"late cleanup");clockMs+=4000;tickFlush(clockMs);
+ {reset();pendingEnrollment();const uint32_t t=heldToken;gattStuck=true;fail(clockMs,Error::Deadline,PipeStatus::StreamCleanupNotQueued);clockMs+=4000;tickFlush(clockMs);
   assert(recoveryNeeded&&!setupHeld&&turn.ended==t&&phoneWakes.size()==1);phoneGatt.state=Gatt::Phase::Idle;tickFlush(++clockMs);
   assert(!recoveryNeeded&&!recoveryBlocked&&capacityReleases==1&&phoneWakes.size()==1&&withdrawCalls==0);}
  // Admission refusals (none consults the temples, none claims a slot).
@@ -867,7 +869,7 @@ static void ownerTests() {
   phoneGatt.serviceChangedFlag=true;phoneGatt.pipe.error=Error::Protocol;phoneGatt.state=Gatt::Phase::Retiring;
   tickFlush(++clockMs);tickFlush(++clockMs);
   assert(!ready && sessionStats.ended==1 && sessionStats.serviceChanged==1 && sessionStats.endReason[unsigned(Error::Protocol)]==1);
-  fail(clockMs,Error::Connect,"again");assert(sessionStats.ended==1);}  // already down: not counted twice
+  fail(clockMs,Error::Connect,PipeStatus::ScanSetupFailed);assert(sessionStats.ended==1);}  // already down: not counted twice
  {reset();pendingEnrollment();phoneGatt.authFailed=true;phoneGatt.state=Gatt::Phase::Retiring;tickFlush(clockMs);
   assert(sessionStats.authFailures==1 && !sessionStats.ready && !sessionStats.ended);}  // never READY: no end counted
 }
@@ -890,7 +892,7 @@ static void openTests() {
   playWorker=[&]{
    const uint32_t t=clockMs-start;uint8_t f[512];
    if(t>=script.cancelAt)cancel=true;
-   if(t>=script.dropAt && ready){fail(clockMs,Error::Connect,"lost");phoneGatt.state=Gatt::Phase::Idle;}
+   if(t>=script.dropAt && ready){fail(clockMs,Error::Connect,PipeStatus::GattUnavailable);phoneGatt.state=Gatt::Phase::Idle;}
    if(t>=script.submitAt && phoneSession.peek(f)) {
     const bool last=(f[10]&hw1pipe::kLast)!=0;
     if(!last || t>=script.lastAt){assert(phoneSession.accept(clockMs));if(!opened)opened=hw1pipe::get16(f+2);}
@@ -998,13 +1000,13 @@ static void scanTests() {
  {reset();
   // Retirement whose stop crosses the timer: the end, then a failed stop. The
   // cleanup completes instead of faulting into a host restart (F1).
-  startScan();clockMs+=700;fail(clockMs,Error::Cancelled,"phone operation cancelled");tickFlush(clockMs);
+  startScan();clockMs+=700;fail(clockMs,Error::Cancelled,PipeStatus::IntentReplaced);tickFlush(clockMs);
   assert(scanStopPending);
   scanEvent(ESP_GAP_BLE_SCAN_RESULT_EVT);scanEvent(ESP_GAP_BLE_SCAN_STOP_COMPLETE_EVT,0,1);drainGap();
   tickFlush(clockMs);assert(step==Step::Idle && !recoveryNeeded && phoneScans(hw1coex::ScanOutcome::Aborted)==1);
   // A stop the API refuses leaves the scan to its own timer, with no retries.
   reset();stopResult=1;
-  startScan();fail(clockMs,Error::Cancelled,"phone operation cancelled");tickFlush(clockMs);tickFlush(clockMs);
+  startScan();fail(clockMs,Error::Cancelled,PipeStatus::IntentReplaced);tickFlush(clockMs);tickFlush(clockMs);
   assert(!scanStopPending && scanStopRefused && countEvents("stop-scan")==1);
   clockMs+=4000;tickFlush(clockMs);assert(step==Step::Retiring && !recoveryNeeded); // waits for the timer
   scanEvent(ESP_GAP_BLE_SCAN_RESULT_EVT);tickFlush(clockMs);assert(step==Step::Idle && !recoveryNeeded);
@@ -1045,7 +1047,7 @@ static void scanTests() {
   // A scan cut short by retirement is recorded as aborted, not missed.
   job=true;configureScan(clockMs);scanEvent(ESP_GAP_BLE_SCAN_PARAM_SET_COMPLETE_EVT);drainGap();
   scanEvent(ESP_GAP_BLE_SCAN_START_COMPLETE_EVT);drainGap();assert(scanStarted&&scanOpen);
-  clockMs+=700;fail(clockMs,Error::Cancelled,"phone operation cancelled");tickFlush(clockMs);assert(scanStopPending);
+  clockMs+=700;fail(clockMs,Error::Cancelled,PipeStatus::IntentReplaced);tickFlush(clockMs);assert(scanStopPending);
   scanEvent(ESP_GAP_BLE_SCAN_STOP_COMPLETE_EVT);drainGap();
   assert(coexLog.scanTotal==1 && phoneScans(hw1coex::ScanOutcome::Aborted)==1 && lastScanRecord().durationMs>=700);
  }
@@ -1088,7 +1090,7 @@ static void recordTests() {
   // The adapter stopped first (the phone's RESET reads as Cancelled too): a
   // later local stop's source does not apply.
   reset();runScan(1,0);drainGap();phoneGatt.latch(clockMs,Error::Cancelled);
-  fail(clockMs,Error::Cancelled,"disconnected",D::Stopped);tickFlush(clockMs);
+  fail(clockMs,Error::Cancelled,PipeStatus::Disconnected,D::Stopped);tickFlush(clockMs);
   assert(coexLog.connectTotal==1 && lastConnect().cause==uint8_t(Error::Cancelled) && lastConnect().detail==D::None);
  }
  // Retiring -> Idle after a stopped scan: consume() ends a retiring scan
@@ -1149,7 +1151,7 @@ static void recordTests() {
  {reset();
   // A stop from a command task (fail() under the owner mutex) is recorded by
   // the pipe task on its next pass.
-  runScan(1,0);drainGap();fail(clockMs,Error::Cancelled,"disconnected",D::Stopped);
+  runScan(1,0);drainGap();fail(clockMs,Error::Cancelled,PipeStatus::Disconnected,D::Stopped);
   assert(attemptWanted && !connectRecordPending && coexLog.connectTotal==0);
   tickFlush(clockMs);assert(coexLog.connectTotal==1 && lastConnect().detail==D::Stopped);
  }
@@ -1234,7 +1236,7 @@ static void opsTests() {
  // settle never lifts a request from the phone's own timed-out cleanup: the
  // escalation and the cleanup can land together.
  {reset();TurnEnv env;holdTurn();step=Step::Retiring;job=true;at=clockMs;
-  cleanupExpired(clockMs,"phone cleanup incomplete");
+  cleanupExpired(clockMs,PipeStatus::CleanupIncomplete);
   assert(cleanupFaulted&&recoveryNeeded&&recoveryBlocked&&!setupHeld);
   env.escalate(1);env.settle(1);
   assert(recoveryNeeded&&recoveryBlocked);
@@ -1290,7 +1292,7 @@ static void admissionTests() {
  {reset();active=false;serverUp=true;
   assert(!std::strcmp(cmd_openphone(""),"Error: the app console server owns Bluetooth; run 'closeconsole', then 'openphone'"));
   assert(pipeStarts==0&&!job&&claimCalls==0);}
- {reset();active=false;startOk=false;status="configure phone secret first";
+ {reset();active=false;startOk=false;status=PipeStatus::NoSecret;
   assert(!std::strcmp(cmd_openphone(""),"Error: phone link could not open (configure phone secret first)"));
   assert(pipeStarts==1&&!job&&claimCalls==0);}
  // An already-open pipe that is connected says so, with no new job.
@@ -1437,7 +1439,7 @@ static void workerReleaseTests() {
  // kPipeIdleRetireMs after the pass that found it so, on its own: no release
  // asked, no host reset, the final summary "stopped". A release afterwards has
  // nothing to do; the host stop later finds no task and nothing to reset.
- {reset();halStopped=false;active=false;status="stopped";playWorker=nullptr;
+ {reset();halStopped=false;active=false;status=PipeStatus::Stopped;playWorker=nullptr;
   phonePass();assert(idleOnHost && worker==&phoneTaskHandle && !phoneTaskGone && !exitWanted);
   clockMs+=kPipeIdleRetireMs-1;phonePass();assert(worker==&phoneTaskHandle && !phoneTaskGone);
   clockMs+=2;phonePass();
@@ -1488,7 +1490,7 @@ static void workerReleaseTests() {
  // follows it; the task nulls its own handle, so the worker's TurnEnv has
  // nothing to raise afterwards and nothing can queue a phone turn.
  {reset();static int handle;mutex=&handle;active=false;stateHeld=true;linkSummary.active=linkSummary.ready=true;
-  status="disconnected";playWorker=phonePass;unsigned resetPass=0;phoneGatt.onHostStopped=[&]{resetPass=phonePasses;};
+  status=PipeStatus::Disconnected;playWorker=phonePass;unsigned resetPass=0;phoneGatt.onHostStopped=[&]{resetPass=phonePasses;};
   assert(phonePipeWorkerRelease(kRelease));
   assert(!worker && !exitWanted && phoneTaskGone && taskExits.size()==1 && phoneGatt.hostStops==1 && resetPass==1);
   const TaskExit& e=taskExits[0];
@@ -1703,7 +1705,7 @@ static void turnTests() {
  // later quiesce and host reset finish the recovery.
  {reset();world.on=true;gattStuck=true;const uint32_t t=admitPhone();uint32_t failAt=0;bool heldAtBound=false;
   onStep=[&]{
-   if(!failAt&&step==Step::Link&&phoneGatt.state==Gatt::Phase::Opening){failAt=clockMs;fail(clockMs,Error::Deadline,"stuck phone");}
+   if(!failAt&&step==Step::Link&&phoneGatt.state==Gatt::Phase::Opening){failAt=clockMs;fail(clockMs,Error::Deadline,PipeStatus::CallbackQueueFull);}
    if(failAt&&clockMs==failAt+3990)heldAtBound=setupHeld&&!recoveryNeeded;};
   serveWorker();
   assert(heldAtBound&&clockMs==failAt+4000&&step==Step::Fault&&recoveryNeeded&&recoveryBlocked&&!ready);
@@ -1727,7 +1729,7 @@ static void idleLabelTests() {
  for(int stop=0;stop<2;++stop){reset();pendingEnrollment();lastStreamAt=clockMs-kParamsActiveHoldMs;phoneGatt.state=Gatt::Phase::Pipe;
   phoneGatt.pipe.state=hw1pipe::State::Ready;tickFlush(clockMs);assert(ready&&published&&statusIs("ready"));
   if(stop)stopWanted=true;
-  fail(clockMs,Error::Connect,"phone link lost");
+  fail(clockMs,Error::Connect,PipeStatus::LinkLost);
   for(int i=0;i<3&&step!=Step::Idle;++i)tickFlush(clockMs+=10);
   assert(step==Step::Idle&&statusIs(stop?"stopped":"disconnected"));}
  // An open that fails before READY keeps "phone link lost".
@@ -1826,7 +1828,7 @@ static void linkUp(uint8_t phone,uint8_t p4=0){
 // sends the HELLO, which the 2.7.x-like phone never answers. `ends` then ends
 // the session; the owner retires it to Idle.
 static void pipeAttempt(const std::function<void()>& ends){
- job=candidate=true;published=enrolling=false;holdTurn();step=Step::Link;status="authenticating pipe";
+ job=candidate=true;published=enrolling=false;holdTurn();step=Step::Link;status=PipeStatus::Authenticating;
  std::memset(phoneGatt.entered,0,sizeof(phoneGatt.entered));phoneGatt.state=Gatt::Phase::Secure;phoneSilent=true;enterPipe();
  tickFlush(clockMs+=10);assert(phoneSession.state==hw1pipe::State::Hello && !ready && helloFlags.size());
  ends();
@@ -1841,11 +1843,11 @@ static void v2Tests() {
  // event's 80-byte detail without losing the uptime or writing past the buffer.
  {linkUp(0);phoneGatt.concluded=true;phoneGatt.armed=false;
   phoneGatt.endv={1234,hw1coex::ConnectStage::Ready,Error::Connect,-1,0x100,false,41,4,-1};
-  fail(clockMs,Error::Connect,"phone link lost");
+  fail(clockMs,Error::Connect,PipeStatus::LinkLost);
   const std::string expected="lost e=7 ev=41 c=0004 g=-1 h=0100 api=-1 t=1234";
   assert(sessionStats.lastDown==expected);
   assert(std::string(phoneStatsCommand("")).find("last_down: "+expected)!=npos);
-  phoneGatt.endv={};fail(clockMs,Error::Deadline,"scan missed");
+  phoneGatt.endv={};fail(clockMs,Error::Deadline,PipeStatus::ScanStartFailed);
   assert(sessionStats.lastDown==expected && sessionStats.ended==1);
   Gatt::AttemptEnd end;end.at=UINT32_MAX;end.event=INT16_MAX;end.connection=UINT16_MAX;
   end.gatt=INT16_MIN;end.reason=UINT16_MAX;end.esp=INT32_MIN;
@@ -1865,7 +1867,7 @@ static void v2Tests() {
  // End reasons by code: 16, 17 and 18 have their own bucket (no &15 fold onto
  // 0..2); a code the pipe does not define counts as 0, never as a known one.
  for(const auto& c:{std::pair<uint16_t,uint16_t>{16,16},{17,17},{18,18},{2,2},{40,0},{0xffff,0}}){
-  linkUp(0);fail(clockMs,Error(c.first),"phone link lost");
+  linkUp(0);fail(clockMs,Error(c.first),PipeStatus::LinkLost);
   assert(sessionStats.ended==1 && sessionStats.endReason[c.second]==1 && sessionStats.lastEnd==c.second);
   for(unsigned i=0;i<19;++i)assert(sessionStats.endReason[i]==(i==c.second?1u:0u));
   tickFlush(clockMs+=10);PhonePipeLinkSummary sum;mutex=&handle;assert(phonePipeLinkSummary(&sum));mutex=nullptr;
@@ -1935,7 +1937,7 @@ static void v2Tests() {
   assert(!phonePipeOwnerHeldByCurrentTask());
   {Lock held;assert(phonePipeOwnerHeldByCurrentTask() && phonePipeConsolePush(gen,id,head,4,text,2,4,50)==PhonePipePush::Busy);}
   lockRefused=true;assert(phonePipeConsolePush(gen,id,head,4,text,2,4,10)==PhonePipePush::Busy);lockRefused=false;
-  fail(clockMs,Error::Connect,"phone link lost");assert(phonePipeConsolePush(gen,id,head,4,text,2,4,0)==PhonePipePush::Gone);
+  fail(clockMs,Error::Connect,PipeStatus::LinkLost);assert(phonePipeConsolePush(gen,id,head,4,text,2,4,0)==PhonePipePush::Gone);
   mutex=nullptr;assert(phonePipeConsolePush(gen,id,head,4,text,2,4,0)==PhonePipePush::Gone && !phonePipeOwnerHeldByCurrentTask());}
  // The status snapshot: copied under its leaf lock, never the owner mutex;
  // false and zeroed before the pipe has resources.
@@ -1949,7 +1951,7 @@ static void v2Tests() {
   assert(sum.strikes==2 && sum.versionMismatches==5 && sum.relayStreams==1 && sum.consoleStreams==1 && !sum.ended);
   consoleFlags=0;assert(phoneLinkState(0));tickFlush(clockMs+=10);assert(phonePipeLinkSummary(&sum));
   assert(!sum.relayOn && !sum.consoleWanted && !sum.consoleOffered && sum.ready);
-  versionLatched=true;fail(clockMs,Error::Paused,"phone link lost");tickFlush(clockMs+=10);assert(phonePipeLinkSummary(&sum));
+  versionLatched=true;fail(clockMs,Error::Paused,PipeStatus::LinkLost);tickFlush(clockMs+=10);assert(phonePipeLinkSummary(&sum));
   assert(!sum.ready && !sum.relayOn && sum.versionLatched && sum.ended==1 && sum.lastEnd==18 && sum.endReason[18]==1);
   mutex=nullptr;}
  // A stopped pipe's passes never read the console flags (their reader parses

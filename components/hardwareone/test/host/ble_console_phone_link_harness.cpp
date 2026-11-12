@@ -168,6 +168,14 @@ static bool phonePipeReady() { return w.pipeReady; }
 static bool phonePipeEnrolling() { return false; }
 static uint8_t phonePipeStep() { return uint8_t(hw1link::PipeStep::Link); }
 static const char* phonePipeStatus() { return w.pipeReady ? "ready" : "authenticating pipe"; }
+// The status whose text is `label`: the scenarios name a pipe status by its text.
+static uint8_t pipeStatusCodeOf(const char* label) {
+  if (!label) return uint8_t(hw1link::PipeStatus::Stopped);
+  for (const auto& row : hw1link::kPipeStatusRows)
+    if (row.label && !strcmp(row.label, label)) return uint8_t(row.status);
+  return uint8_t(hw1link::PipeStatus::StackRefused);
+}
+static uint8_t phonePipeStatusCode() { return pipeStatusCodeOf(phonePipeStatus()); }
 // The phone link block's inputs (phone link v2): design A's suite offers no
 // console stream (no device code), so its words are design A's.
 static hw1link::PhoneLinkInputs bleLinkPhoneInputs() { return {}; }
