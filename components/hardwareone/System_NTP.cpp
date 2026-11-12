@@ -17,9 +17,7 @@
 #include "OLED_Display.h"  // oledUpdate is safe when the display is disabled.
 #include "System_Logging.h"
 #include "System_User.h"
-#if ENABLE_RTC_SENSOR
 #include "i2csensor_ds3231.h"
-#endif
 
 // ---------------------------------------------------------------------------
 // SNTP sync notification — the only honest "an NTP server actually replied"

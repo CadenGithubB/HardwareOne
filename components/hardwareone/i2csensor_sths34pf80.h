@@ -54,6 +54,13 @@ bool presenceCacheSnapshot(PresenceCache& out, uint32_t timeoutMs = 10);
 int presenceBuildDataJson(char* buf, size_t bufSize);
 
 #else
+// The presence sensor is not in this build. Its state reads as stopped and a start
+// request fails, so callers need no build condition.
+inline bool gPresenceRunning = false;
+inline bool gPresenceConnected = false;
+inline unsigned long gPresenceLastStopTime = 0;
+inline TaskHandle_t gPresenceTaskHandle = nullptr;
+inline bool presenceStartInternal() { return false; }
 
 inline bool presenceCacheSnapshot(PresenceCache& out, uint32_t timeoutMs = 10) {
   (void)timeoutMs;

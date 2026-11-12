@@ -11,7 +11,6 @@
 #include "HAL_Input.h"
 #include "System_MemUtil.h"   // ps_alloc — bond-picker scroll/labels live in PSRAM
 #if ENABLE_OLED_DISPLAY && ENABLE_ESPNOW && ENABLE_BONDED_MODE
-#include "System_SensorStubs.h"
 #endif
 
 #if ENABLE_OLED_DISPLAY && ENABLE_ESPNOW && ENABLE_BONDED_MODE

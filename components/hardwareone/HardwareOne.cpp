@@ -22,7 +22,7 @@ void getClientIp(httpd_req_t* req, char* ipBuf, size_t bufSize);
 #if ENABLE_WIFI
   #include <WiFi.h>
 #endif
-// WiFi stub is provided by sensor_stubs_minimal.h when ENABLE_WIFI=0
+// Without Wi-Fi the name `WiFi` comes from the disabled branch of System_WiFi.h.
 
 #if ENABLE_HTTP_SERVER
   #include <esp_http_server.h>
@@ -32,8 +32,8 @@ void getClientIp(httpd_req_t* req, char* ipBuf, size_t bufSize);
 #include <esp_timer.h>
 #include <freertos/semphr.h>
 #include <ArduinoJson.h>
+#include "WebServer_Utils.h"  // web mirror buffer and the command feed, both present in every build
 #if ENABLE_HTTP_SERVER
-  #include "WebServer_Utils.h"
   #include "WebPage_Login.h"
   #include "WebPage_Dashboard.h"
   #include "WebPage_CLI.h"
@@ -79,9 +79,7 @@ void getClientIp(httpd_req_t* req, char* ipBuf, size_t bufSize);
 #include "System_I2C.h"
 #include "System_Logging.h"
 #include "System_Debug.h"
-#if ENABLE_WIFI
-  #include "System_WiFi.h"
-#endif
+#include "System_WiFi.h"
 #if ENABLE_MQTT
   #include "System_MQTT.h"
 #endif
@@ -92,18 +90,14 @@ void getClientIp(httpd_req_t* req, char* ipBuf, size_t bufSize);
   #include "System_STT.h"
   #include "System_STTVocabulary.h"
 #endif
-#if ENABLE_CAMERA_SENSOR
-  #include "System_Camera_DVP.h"
-#endif
+#include "System_Camera_DVP.h"
 #include "System_Command.h"
 #include "System_CrashRecord.h"
 #include "System_OTASafety.h"
 #include "System_FactoryWipe.h"  // factoryWipeRunIfArmed — `factoryreset all`, before the filesystem mounts
 #include "System_OTA.h"
 #include "System_RadioCompanion.h"  // ESP32-C6 companion: boot verdict, feature gating, loop tick
-#if ENABLE_HTTP_SERVER
-  #include "WebServer_Server.h"
-#endif
+#include "WebServer_Server.h"
 #include "System_Battery.h"
 #include "System_FirstTimeSetup.h"
 #include "System_SetupWizard.h"  // gWizardOwnsSerial — main loop yields Serial while legacy wizard is running
@@ -117,28 +111,13 @@ void getClientIp(httpd_req_t* req, char* ipBuf, size_t bufSize);
 #include "System_Notifications.h"  // systemEventsNotifyTick — main-loop toast render for bus events
 #include "System_Events.h"         // systemEventPost — power-save enter/exit events
 // sensor_config.h included early (before WiFi)
-#if ENABLE_THERMAL_SENSOR
-  #include "i2csensor_mlx90640.h"
-#endif
-#if ENABLE_TOF_SENSOR
-  #include "i2csensor_vl53l4cx.h"
-#endif
-#if ENABLE_IMU_SENSOR
-  #include "i2csensor_bno055.h"
-#endif
-#if ENABLE_GAMEPAD_SENSOR
-  #include "i2csensor_seesaw.h"
-#endif
-#if ENABLE_APDS_SENSOR
-  #include "i2csensor_apds9960.h"
-#endif
-#if ENABLE_GPS_SENSOR
-  #include "i2csensor_pa1010d.h"
-#endif
-#if ENABLE_RTC_SENSOR
-  #include "i2csensor_ds3231.h"
-#endif
-#include "System_SensorStubs.h"  // Minimal stubs only where required
+#include "i2csensor_mlx90640.h"
+#include "i2csensor_vl53l4cx.h"
+#include "i2csensor_bno055.h"
+#include "i2csensor_seesaw.h"
+#include "i2csensor_apds9960.h"
+#include "i2csensor_pa1010d.h"
+#include "i2csensor_ds3231.h"
 #include "i2csensor_rda5807.h"
 #include "OLED_Display.h"  // Always include - wrapper functions are safe to call when disabled
 #include "System_NeoPixel.h"

@@ -11,8 +11,16 @@
 // (when ENABLE_ANO_ENCODER). The ANO driver populates the shared input reading with
 // synthesized values (buttons in active-low layout matching the gamepad's
 // semantics) so the OLED input pipeline doesn't care which driver is live.
+#if ENABLE_GAMEPAD_SENSOR || ENABLE_ANO_ENCODER || ENABLE_GPIO_ENCODER || ENABLE_GT911_TOUCH
 extern bool gInputRunning;
 extern bool gInputConnected;
+#else
+// No input driver is in this build: the state reads as stopped and a start
+// request fails.
+inline bool gInputRunning = false;
+inline bool gInputConnected = false;
+inline bool inputStartInternal() { return false; }
+#endif
 
 // Joystick calibration constants. Shared by both input drivers since the
 // ANO encoder driver synthesizes joyX/Y at CENTER (encoder-to-nav-event goes
@@ -83,5 +91,8 @@ int gamepadGetX();
 int gamepadGetY();
 uint32_t gamepadGetButtons();
 
+#else
+// The gamepad is not in this build. Another input driver may still be.
+inline unsigned long gGamepadLastStopTime = 0;
 #endif // ENABLE_GAMEPAD_SENSOR
 #endif // GAMEPAD_SENSOR_H

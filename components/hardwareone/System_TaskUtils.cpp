@@ -7,7 +7,6 @@
 #include "System_ESPNow.h"       // Safe espnow_task stack snapshot
 #include "System_ESPNow_Tx.h"    // Safe espnow_tx stack snapshot
 #include "System_I2C.h"          // For queueProcessorTask
-#include "System_SensorStubs.h"  // Task handles/state for compiled-out sensors
 #include "HAL_Input.h"           // For INPUT_TASK_NAME / INPUT_TASK_TAG
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -34,36 +33,17 @@ extern "C" __attribute__((weak)) UBaseType_t uxTaskGetSystemState(
   return 0;
 }
 
-// Per-sensor TaskHandle_t and enabled-flag externs come from the sensor
-// headers (each header gates its decls on ENABLE_*_SENSOR; System_SensorStubs.h
-// supplies stubs for sensors compiled out).
-#if ENABLE_GAMEPAD_SENSOR
+// The task handle and the state of each sensor come from the sensor's own
+// header, which also holds the disabled branch for a sensor that is compiled out.
 #include "i2csensor_seesaw.h"
-#endif
-#if ENABLE_THERMAL_SENSOR
 #include "i2csensor_mlx90640.h"
-#endif
-#if ENABLE_IMU_SENSOR
 #include "i2csensor_bno055.h"
-#endif
-#if ENABLE_TOF_SENSOR
 #include "i2csensor_vl53l4cx.h"
-#endif
-#if ENABLE_FM_RADIO
 #include "i2csensor_rda5807.h"
-#endif
-#if ENABLE_GPS_SENSOR
 #include "i2csensor_pa1010d.h"
-#endif
-#if ENABLE_APDS_SENSOR
 #include "i2csensor_apds9960.h"
-#endif
-#if ENABLE_PRESENCE_SENSOR
 #include "i2csensor_sths34pf80.h"
-#endif
-#if ENABLE_RTC_SENSOR
 #include "i2csensor_ds3231.h"
-#endif
 
 // ============================================================================
 // Task Stack-Size Registry
@@ -373,6 +353,9 @@ BaseType_t xTaskCreateLogged(TaskFunction_t pxTaskCode,
 // Sensor tasks clear their owning handle after cleanup and before self-delete.
 // Never inspect a deleted task through a retained handle: idle frees its TCB.
 // ============================================================================
+
+// One slot for every input driver; see System_TaskUtils.h.
+TaskHandle_t gInputTaskHandle = nullptr;
 
 bool createInputTask() {
   if (gInputTaskHandle == nullptr) {

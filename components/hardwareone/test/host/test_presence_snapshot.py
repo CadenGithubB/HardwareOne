@@ -84,7 +84,7 @@ def generated(component: Path, baseline: bool) -> str:
         require(not re.search(r"\bextern\s+.*gPresenceCache", header), "Presence cache must stay private")
         for file in ["System_MQTT.cpp", "WebPage_Sensors.cpp", "G2_Page_Sensors.cpp",
                      "System_SensorLogging.cpp", "i2csensor_sths34pf80_oled.h",
-                     "i2csensor_sths34pf80_web.h", "System_SensorStubs.cpp", "System_SensorStubs.h"]:
+                     "i2csensor_sths34pf80_web.h"]:
             require("gPresenceCache" not in (component / file).read_text(),
                     f"{file} exposes or bypasses the presence cache")
     harness = (HERE / "presence_snapshot_harness.cpp").read_text()

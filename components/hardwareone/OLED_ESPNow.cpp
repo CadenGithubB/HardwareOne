@@ -10,9 +10,7 @@
 #include "System_MeshPeers.h"
 #include "System_Utils.h"
 
-#if ENABLE_GAMEPAD_SENSOR
 #include "i2csensor_seesaw.h"
-#endif
 
 // Mesh health data for online/offline status display
 // gMeshPeers, gMeshPeerMeta, gMeshPeerSlots, isMeshPeerAlive, getMeshPeerHealth,

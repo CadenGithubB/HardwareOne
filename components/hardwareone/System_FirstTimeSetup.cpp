@@ -22,7 +22,6 @@
 #include "System_FirstTimeSetup.h"
 #include "System_MemUtil.h"
 #include "System_I2C.h"
-#include "System_SensorStubs.h"
 #if ENABLE_OLED_INPUT
 #include "HAL_Input.h"
 #endif

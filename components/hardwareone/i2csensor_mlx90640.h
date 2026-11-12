@@ -94,6 +94,13 @@ int thermalBuildSummaryJson(char* buf, size_t bufSize);
 void thermalInterpolateFrame(const float* src, float* dst, int targetWidth, int targetHeight);
 
 #else
+// The thermal camera is not in this build. Its state reads as stopped and a start
+// request fails, so callers need no build condition.
+inline bool gThermalRunning = false;
+inline bool gThermalConnected = false;
+inline unsigned long gThermalLastStopTime = 0;
+inline TaskHandle_t gThermalTaskHandle = nullptr;
+inline bool thermalStartInternal() { return false; }
 inline bool thermalCacheSnapshot(ThermalCache& out, uint32_t timeoutMs = 10) {
   (void)timeoutMs; out = {}; return false;
 }

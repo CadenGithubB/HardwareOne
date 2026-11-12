@@ -21,30 +21,16 @@
 #include "WebPage_Sensors.h"          // streamSensorsContent/Inner, page helpers
 #include "System_I2C.h"           // I2C system helpers
 #include "System_BuildConfig.h"        // Conditional sensor configuration
-#if ENABLE_THERMAL_SENSOR
-  #include "i2csensor_mlx90640.h"     // ThermalCache, readings, thermalBuildDataJSON
-#endif
-#if ENABLE_TOF_SENSOR
-  #include "i2csensor_vl53l4cx.h"         // tofBuildDataJSON
-#endif
-#if ENABLE_IMU_SENSOR
-  #include "i2csensor_bno055.h"         // imuBuildDataJSON
-#endif
-#if ENABLE_GAMEPAD_SENSOR
-  #include "i2csensor_seesaw.h"     // gInputRunning, gInputConnected (gamepad build)
-#endif
+#include "i2csensor_mlx90640.h"     // ThermalCache, readings, thermalBuildDataJSON
+#include "i2csensor_vl53l4cx.h"         // tofBuildDataJSON
+#include "i2csensor_bno055.h"         // imuBuildDataJSON
+#include "i2csensor_seesaw.h"     // gInputRunning, gInputConnected (gamepad build)
 #if ENABLE_ANO_ENCODER
   #include "i2csensor_ano_encoder.h"  // anoEncoderBuildDataJSON + gAnoEncoder*
 #endif
-#if ENABLE_GPS_SENSOR
-  #include "i2csensor_pa1010d.h"    // GPSCache, gpsCacheSnapshot
-#endif
-#if ENABLE_RTC_SENSOR
-  #include "i2csensor_ds3231.h"     // RTCCache, RTCDateTime, readings
-#endif
-#if ENABLE_PRESENCE_SENSOR
-  #include "i2csensor_sths34pf80.h" // presenceCacheSnapshot, gPresenceRunning, gPresenceConnected
-#endif
+#include "i2csensor_pa1010d.h"    // GPSCache, gpsCacheSnapshot
+#include "i2csensor_ds3231.h"     // RTCCache, RTCDateTime, readings
+#include "i2csensor_sths34pf80.h" // presenceCacheSnapshot, gPresenceRunning, gPresenceConnected
 #if ENABLE_EDGE_IMPULSE
   #include "System_EdgeImpulse.h"
 #endif
@@ -59,16 +45,11 @@
 #include "HAL_Audio.h"
 #include "System_TranscriptionUIPolicy.h"
 #endif
-#include "System_SensorStubs.h" // Stubs for disabled sensors
 #include "i2csensor_rda5807.h"             // fmRadioEnabled, radioInitialized, fmRadioBuildDataJSON
 #include "System_MemUtil.h"             // ps_alloc, AllocPref
 #include "System_Camera_Video.h"
-#if ENABLE_CAMERA_SENSOR
 #include "System_Camera_DVP.h"
-#endif
-#if ENABLE_MICROPHONE
 #include "System_Microphone.h"
-#endif
 
 
 // streamSensorsContent() is now defined as inline in web_sensors.h with I2C_SENSORS_ENABLED conditional

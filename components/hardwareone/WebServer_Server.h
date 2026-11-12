@@ -94,8 +94,7 @@ struct SessionEntry {
 // Session array (defined in main .ino)
 extern SessionEntry* gSessions;
 
-// Identifies this boot; a session that carries another value is stale
-// (WebServer_Server.cpp; System_SensorStubs.cpp without the web server).
+// Identifies this boot; a session that carries another value is stale.
 extern String gBootId;
 
 // Logout reason structure (defined in main .ino)
@@ -341,6 +340,31 @@ esp_err_t streamChunkC(httpd_req_t* req, const char* s);
 void streamEndHtml(httpd_req_t* req);
 void streamChunk(httpd_req_t* req, const String& str);
 void streamChunk(httpd_req_t* req, const char* str);
+
+#else  // !ENABLE_HTTP_SERVER
+
+// The web server is not in this build. There are no sessions: the tables are
+// null, a lookup finds nothing, and an event for the web clients is dropped.
+// The names declared above for every build are defined here.
+inline char* gJsonResponseBuffer = nullptr;
+inline bool gServerIsHttps = false;
+inline SessionEntry* gSessions = nullptr;
+inline LogoutReason* gLogoutReasons = nullptr;
+inline String gBootId;
+inline void startHttpServer() {}
+inline bool isAdminUser(httpd_req_t*) { return false; }
+inline void getClientIp(httpd_req_t*, String& ipOut) { ipOut = "0.0.0.0"; }
+inline void getClientIp(httpd_req_t*, char* ipBuf, size_t bufSize) { if (bufSize > 0) ipBuf[0] = '\0'; }
+inline String getCookieSid(httpd_req_t*) { return ""; }
+inline int findSessionIndexBySid(const String&) { return -1; }
+inline TransportSessionEpoch webSessionEpochForSid(const String&) { return 0; }
+inline bool webSessionEpochIsLive(TransportSessionEpoch) { return false; }
+inline void sseEnqueueEvent(SessionEntry&, const char*, const char*) {}
+inline void broadcastSensorStatusToAllSessions() {}
+inline void broadcastEventToAllSessions(const char*, const char*) {}
+inline void broadcastEventToSessionsIf(const char*, const char*,
+                                       bool (*)(const char* username, void* arg), void*) {}
+inline uint32_t sseEventDropsTotal() { return 0; }
 
 #endif // ENABLE_HTTP_SERVER
 

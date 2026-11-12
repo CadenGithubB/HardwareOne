@@ -2121,6 +2121,14 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_command_name_form.py)
 
+# A compiled-out feature is described by the #else branch of its own header;
+# no central stub file, no include of that header behind its own flag
+# (CONTRIBUTING.md, "Keep interfaces small").
+add_test(
+  NAME disabled_feature_branches
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_disabled_feature_branches.py)
+
 # OLED display-session writer windows (README "OLED display-session writer windows"):
 # the frame commit and the command-result path validate under the display lifecycle
 # writer, release it, push or copy, then re-check without opening a session.

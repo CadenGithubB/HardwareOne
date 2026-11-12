@@ -6,9 +6,7 @@
 #include "System_SensorRegistry.h"
 #include "System_BuildConfig.h"
 #include <string.h>
-#if ENABLE_CAMERA_SENSOR
 #include "System_Camera_DVP.h"
-#endif
 
 // ============================================================================
 // Camera Sensor Callbacks

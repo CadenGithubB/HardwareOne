@@ -13,12 +13,9 @@
 #include "System_PollPause.h"     // pollPause/pollResume — global sensor-poll pause
 #include "network/wifi/System_WiFiNetworks.h"  // saved-network settings JSON hooks
 #include "System_Debug.h"    // DEBUG_* macros
-#if ENABLE_ESPNOW
-  #include "System_ESPNow.h" // EspNowMode enum
-#endif
+#include "System_ESPNow.h" // EspNowMode enum
 #include "System_MemUtil.h"  // PSRAM_JSON_DOC macro
 #include "System_Mutex.h"    // FsLockGuard — hold temp writes through promotion
-#include "System_SensorStubs.h" // Network stubs when disabled
 #include "System_Utils.h"    // RETURN_VALID_IF_VALIDATE_CSTR macro
 #include "System_RadioCompanion.h"  // companionSettingsModule (P4X-EYE)
 #include "System_Clock.h"    // Clock::applyTimezone — push tz offset into libc TZ

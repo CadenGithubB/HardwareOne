@@ -13,7 +13,6 @@
 #include "System_Debug.h"
 #include "System_User.h"
 #include "System_Utils.h"
-#include "System_SensorStubs.h"
 
 // ============================================================================
 // Password Change State

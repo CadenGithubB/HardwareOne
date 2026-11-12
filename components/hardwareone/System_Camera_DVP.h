@@ -123,6 +123,21 @@ const char* cmd_cameravflip(const String& argsInput);
 const char* cmd_cameraexposure(const String& argsInput);
 const char* cmd_cameraframesize(const String& argsInput);
 
+#else  // !ENABLE_CAMERA_SENSOR
+
+// The camera is not in this build. Its state reads as stopped and a capture
+// returns nothing. The status document has the keys of the real one, so a
+// client reads "supported" instead of guessing from an empty object.
+inline bool gCameraRunning = false;
+inline bool cameraConnected = false;
+inline bool cameraStreaming = false;
+inline uint8_t* captureFrame(size_t* outLen) { if (outLen) *outLen = 0; return nullptr; }
+inline const char* buildCameraStatusJson() {
+  return "{\"supported\":false,\"detected\":false,\"enabled\":false,"
+         "\"connected\":false,\"streaming\":false,\"model\":\"None\","
+         "\"width\":0,\"height\":0,\"psram\":false}";
+}
+
 #endif // ENABLE_CAMERA_SENSOR
 
 #endif // SYSTEM_CAMERA_DVP_H

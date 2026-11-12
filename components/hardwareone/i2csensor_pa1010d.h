@@ -54,6 +54,13 @@ const char* cmd_gpsstart(const String& argsInput);
 const char* cmd_gpsstop(const String& argsInput);
 
 #else
+// GPS is not in this build. Its state reads as stopped and a start
+// request fails, so callers need no build condition.
+inline bool gGpsRunning = false;
+inline bool gGpsConnected = false;
+inline unsigned long gGpsLastStopTime = 0;
+inline TaskHandle_t gGpsTaskHandle = nullptr;
+inline bool gpsStartInternal() { return false; }
 
 // Keep reading APIs available when GPS is omitted from the build.
 inline bool gpsCacheSnapshot(GpsCache& out, uint32_t timeoutMs = 10) {

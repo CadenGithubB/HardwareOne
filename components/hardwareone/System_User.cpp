@@ -12,7 +12,6 @@
   #include "WebServer_Server.h"
 #include "WebServer_Utils.h"
 #endif
-#include "System_SensorStubs.h" // Network stubs when disabled
 #include "System_Utils.h"  // For CommandEntry
 #include "System_Command.h"
 #include "System_Clock.h"  // Clock::isValidEpoch / isSynced — replaces tm_year>=120 magic

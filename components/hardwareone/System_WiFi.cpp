@@ -58,9 +58,7 @@
 #include "System_CommandRegistry.h"
 #include "System_ESPNow_Sensors.h"
 #include "System_Logging.h"
-#if ENABLE_HTTP_SERVER
 #include "WebServer_Server.h"
-#endif
 
 // Debug system globals and macros from debug_system.h (gDebugFlags, gDebugOutputQueue, DEBUG_WIFIF, etc.)
 

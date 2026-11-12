@@ -19,9 +19,7 @@
 #include <time.h>
 #include "System_CommandRegistry.h"
 
-#if ENABLE_CAMERA_SENSOR
 #include "System_Camera_DVP.h"
-#endif
 
 // Global instance
 ImageManager gImageManager;

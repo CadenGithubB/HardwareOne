@@ -540,11 +540,15 @@ bool oledFilePickerIsActive();
 void rotateCubePoint(float& x, float& y, float& z, float angleX, float angleY, float angleZ);
 void projectCubePoint(float x, float y, float z, int& screenX, int& screenY, int centerX, int centerY);
 
-#endif // ENABLE_OLED_DISPLAY
+#else  // !ENABLE_OLED_DISPLAY
 
-// Stub macro when OLED is disabled - expands to nothing
-#if !ENABLE_OLED_DISPLAY
+// The OLED is not in this build. Its state reads as absent, the boot sequence
+// has no step, and a mode registration expands to nothing.
+inline bool gOledRunning = false;
+inline bool oledConnected = false;
+inline void processOledBootSequence() {}
 #define REGISTER_OLED_MODE_MODULE(modes, count, name)
-#endif
+
+#endif // ENABLE_OLED_DISPLAY
 
 #endif // OLED_DISPLAY_H

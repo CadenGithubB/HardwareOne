@@ -14,12 +14,8 @@
 #include "System_Command.h"   // findCommand
 
 // gThermalConnected / gTofConnected come from the sensor headers.
-#if ENABLE_THERMAL_SENSOR
 #include "i2csensor_mlx90640.h"
-#endif
-#if ENABLE_TOF_SENSOR
 #include "i2csensor_vl53l4cx.h"
-#endif
 
 // -----------------------------------------------------------------------------
 // Visibility

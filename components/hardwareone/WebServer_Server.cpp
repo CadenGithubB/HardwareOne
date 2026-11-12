@@ -73,9 +73,7 @@
 #include "WebServer_MigrationTool.h"
 #include "System_CommandRegistry.h"
 #include "System_ESPNow.h"
-#if ENABLE_ESPNOW
 #include "System_ESPNow.h"
-#endif
 #if ENABLE_WIFI && ENABLE_MQTT
 #include "System_MQTT.h"
 #endif

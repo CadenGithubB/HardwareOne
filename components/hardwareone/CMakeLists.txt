@@ -249,7 +249,6 @@ set(hardwareone_srcs
         System_MemDiag.cpp
         System_SensorLogging.cpp
         System_CaptureCrypto.cpp
-        System_SensorStubs.cpp
         System_RamFlush.cpp
         System_Settings.cpp
         System_SettingsEditorCore.cpp

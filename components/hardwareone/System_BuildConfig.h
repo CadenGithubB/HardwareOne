@@ -796,8 +796,6 @@
 // httpd type stubs — provided whenever the real <esp_http_server.h> isn't
 // pulled in by this TU. The typedef alias is compatible with the real
 // header (same struct tag), so it's safe even when both are visible.
-// Function-level stubs that DO conflict live in System_SensorStubs.h and
-// are guarded against ENABLE_MIGRATION_TOOL there.
 #if !ENABLE_HTTP_SERVER
   #ifndef HW_HTTPD_TYPES_DEFINED
     #define HW_HTTPD_TYPES_DEFINED 1

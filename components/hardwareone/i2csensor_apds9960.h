@@ -68,6 +68,15 @@ bool apdsCacheSnapshot(ApdsCache& out, uint32_t timeoutMs = 10);
 size_t apdsCacheStorageBytes();
 
 #else
+// The APDS9960 is not in this build. Its state reads as stopped and a start
+// request fails, so callers need no build condition.
+inline bool gApdsConnected = false;
+inline bool gApdsColorRunning = false;
+inline bool gApdsProximityRunning = false;
+inline bool gApdsGestureRunning = false;
+inline unsigned long gApdsLastStopTime = 0;
+inline TaskHandle_t gApdsTaskHandle = nullptr;
+inline bool apdsStartInternal() { return false; }
 inline bool apdsCacheSnapshot(ApdsCache& out, uint32_t timeoutMs = 10) {
   (void)timeoutMs;
   out = {};

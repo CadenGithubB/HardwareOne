@@ -48,6 +48,7 @@ inline bool isHttpServerRunning() { return false; }
 
 // Number of httpd-task callers currently blocked waiting on cmd_exec.
 // Maintained by submitAndExecuteSync (System_Utils.cpp).
+#if ENABLE_HTTP_SERVER
 extern std::atomic<int> gWebCmdWaiters;
 
 // Stop the server without risking the circular wait above. Returns true if the
@@ -58,3 +59,13 @@ bool httpServerStopSafe();
 // Runs a pending deferred stop once the last web waiter has drained. Called
 // once per pass from hardwareone_loop().
 void httpServerStopPendingTick();
+
+#else  // !ENABLE_HTTP_SERVER
+
+// The web server is not in this build. No request can be in flight, so a stop
+// counts as done and the tick does nothing.
+inline std::atomic<int> gWebCmdWaiters{0};
+inline bool httpServerStopSafe() { return true; }
+inline void httpServerStopPendingTick() {}
+
+#endif // ENABLE_HTTP_SERVER

@@ -18,7 +18,6 @@
 #include "System_Settings.h"
 #include "System_TaskUtils.h"
 #include "System_Utils.h"
-#include "System_SensorStubs.h"
 #include "i2csensor_bno055.h"
 #include "i2csensor_ds3231.h"
 #include "i2csensor_mlx90640.h"
@@ -35,33 +34,15 @@
 #elif ENABLE_GPIO_ENCODER
 #include "Input_GPIOEncoder.h"
 #endif
-#if ENABLE_GPS_SENSOR
 #include "i2csensor_pa1010d.h"
-#endif
-#if ENABLE_IMU_SENSOR
 #include "i2csensor_bno055.h"
-#endif
-#if ENABLE_THERMAL_SENSOR
 #include "i2csensor_mlx90640.h"
-#endif
-#if ENABLE_TOF_SENSOR
 #include "i2csensor_vl53l4cx.h"
-#endif
-#if ENABLE_FM_RADIO
-  #include "i2csensor_rda5807.h"
-#endif
-#if ENABLE_RTC_SENSOR
+#include "i2csensor_rda5807.h"
 #include "i2csensor_ds3231.h"
-#endif
-#if ENABLE_PRESENCE_SENSOR
 #include "i2csensor_sths34pf80.h"
-#endif
-#if ENABLE_CAMERA_SENSOR
 #include "System_Camera_DVP.h"
-#endif
-#if ENABLE_MICROPHONE
 #include "System_Microphone.h"
-#endif
 
 // ==========================
 // Remote Sensor Data Cache
@@ -730,8 +711,9 @@ static void transmitSensorData(RemoteSensorType sensorType, const char* jsonData
 // sensors as red cards, the same way the local sensors page shows a connected-
 // but-disabled sensor. Reuses the existing SENSOR_STATUS opcode;
 // broadcastSensorStatus() self-gates on worker + mesh + broadcast-enabled.
-// The connected/enabled globals resolve to real driver state or a `false` stub
-// (System_SensorStubs.cpp), so referencing them unconditionally is link-safe.
+// The connected/enabled globals are real driver state, or `false` from the
+// disabled branch of the sensor's header, so naming them without a condition
+// is safe.
 static void announceConnectedSensors() {
   struct Item { bool connected; RemoteSensorType type; };
   const Item items[] = {

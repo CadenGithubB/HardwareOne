@@ -16,9 +16,7 @@
 #include "System_Filesystem.h"
 #include "System_Logging.h"
 #include "System_User.h"
-#if ENABLE_RTC_SENSOR
 #include "i2csensor_ds3231.h"
-#endif
 
 namespace Clock {
 

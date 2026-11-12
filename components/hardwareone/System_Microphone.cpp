@@ -12,8 +12,8 @@
 // Gate on the mic SUBSYSTEM (PDM silicon OR a G2-capable build), not on the PDM
 // silicon flag — this module is source-agnostic (all capture flows through
 // HAL_Audio) so it must compile and run on PDM-less boards where the G2 glasses
-// mic is the only source. See System_SensorStubs (gated on !ENABLE_MICROPHONE in
-// lockstep, or these definitions collide).
+// mic is the only source. The #else branch of System_Microphone.h holds the
+// same names for a build without the subsystem.
 #if ENABLE_MICROPHONE
 
 #include <Arduino.h>

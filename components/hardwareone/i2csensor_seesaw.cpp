@@ -22,9 +22,6 @@
 #include "System_TaskUtils.h"
 #include "System_CommandRegistry.h"
 
-// Task handle (owned by this module)
-TaskHandle_t gInputTaskHandle = nullptr;
-
 // Seesaw gamepad object — heap-allocated at gamepadInit with the TwoWire*
 // for the gamepad's configured bus. Was a stack global with hardcoded
 // `&Wire1` pre-dual-bus; the library binds the TwoWire at construction so

@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import tempfile
 
+from arduino_string_host import arduino_string
 from test_web_batch_handlers import extract_block
 
 
@@ -127,6 +128,13 @@ def main():
 
     with tempfile.TemporaryDirectory(prefix="hw1-espnow-interface-") as temp:
         work = Path(temp)
+        # The absent mesh state of the disabled branch holds String members.
+        # The library String is built apart from the strict flags of the probe.
+        string_flags, string_inputs = arduino_string(work)
+        string_object = work / "WString.o"
+        subprocess.run([args.cxx, "-std=c++17", *string_flags, "-c", string_inputs[0],
+                        "-o", str(string_object)], check=True, timeout=120)
+        string_inputs[0] = str(string_object)
         (work / "Arduino.h").write_text('#pragma once\n#include <cstddef>\n#include <WString.h>\n')
         (work / "esp_attr.h").write_text("#pragma once\n#define EXT_RAM_BSS_ATTR\n")
         (work / "esp_err.h").write_text(
@@ -151,7 +159,8 @@ def main():
                 "-DARDUINO_XIAO_ESP32S3_DEV=1",
                 f'-DHW1_BOARD_CONFIG_HEADER="{REPO / "boards/xiao_s3.features.h"}"',
                 f'-DHW1_FEATURE_CONFIG_HEADER="{profile}"',
-                str(COMPONENT / "System_ESPNow.cpp"), str(unit), "-o", str(executable)],
+                str(COMPONENT / "System_ESPNow.cpp"), str(unit), *string_inputs,
+                "-o", str(executable)],
                 check=True, timeout=120)
             subprocess.run([str(executable)], check=True, timeout=60)
         unit.write_text(HARNESS.replace("// INSERT_ENABLED_MAC_IMPLEMENTATION", enabled_mac))

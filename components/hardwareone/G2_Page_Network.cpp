@@ -25,9 +25,7 @@
 #include "System_Debug.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#if ENABLE_HTTP_SERVER
 #include "WebServer_Server.h"
-#endif
 
 #if ENABLE_WIFI
 #include <WiFi.h>
@@ -35,9 +33,7 @@
 #include "network/wifi/System_WiFiNetworks.h"
 #endif
 
-#if ENABLE_ESPNOW
 #include "System_ESPNow.h"
-#endif
 
 // -----------------------------------------------------------------------------
 // Local state

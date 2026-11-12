@@ -203,6 +203,39 @@ void wifiRehuntPoll();
 // Drop a pending rehunt: the device was asked to stay unassociated.
 void wifiRehuntCancel();
 
+// Set around the boot-time connection so it does not start its own NTP sync.
+extern bool gSkipNtpInWifiConnect;
+
+#else  // !ENABLE_WIFI
+
+#include <IPAddress.h>
+
+// Wi-Fi is not in this build. A connect fails, the main-loop calls do nothing,
+// and `WiFi` answers as a radio that is never connected, so callers need no
+// build condition.
+inline bool gSkipNtpInWifiConnect = false;
+inline void setupWifi() {}
+inline bool connectToBestWifiNetwork() { return false; }
+inline void wifiEventLogDrain() {}
+inline void wifiRehuntPoll() {}
+inline void wifiRehuntCancel() {}
+inline const char* cmd_wifitxpower(const String&) { return "WiFi disabled"; }
+inline const char* cmd_wifiautoreconnect(const String&) { return "WiFi disabled"; }
+
+class WiFiClass {
+public:
+  bool isConnected() { return false; }
+  String SSID() { return ""; }
+  // An IPAddress as in the real class: callers write WiFi.localIP().toString().
+  IPAddress localIP() { return IPAddress(); }
+  int8_t RSSI() { return 0; }
+  int32_t channel() { return 0; }
+  String macAddress() { return ""; }
+  bool hostByName(const char*, IPAddress&) { return false; }
+  void mode(int) {}
+};
+inline WiFiClass WiFi;
+
 #endif // ENABLE_WIFI
 
 // The device's own Wi-Fi state for the BLE coexistence records (lever 1 of
@@ -227,9 +260,5 @@ inline bool wifiCoexMirrorInstall() { return true; }
 #if ENABLE_WIFI
 const char* cmd_certgen(const String&);
 #endif
-
-// Set around the boot-time connection so it does not start its own NTP sync
-// (System_WiFi.cpp; System_SensorStubs.cpp when Wi-Fi is compiled out).
-extern bool gSkipNtpInWifiConnect;
 
 #endif // SYSTEM_WIFI_H

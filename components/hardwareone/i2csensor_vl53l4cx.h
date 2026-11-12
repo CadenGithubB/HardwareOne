@@ -78,6 +78,13 @@ bool tofCacheSnapshot(TofCache& out, uint32_t timeoutMs = 10);
 size_t tofCacheStorageBytes();
 
 #else
+// The ToF sensor is not in this build. Its state reads as stopped and a start
+// request fails, so callers need no build condition.
+inline bool gTofRunning = false;
+inline bool gTofConnected = false;
+inline uint32_t gTofLastStopTime = 0;
+inline TaskHandle_t gTofTaskHandle = nullptr;
+inline bool tofStartInternal() { return false; }
 inline bool tofCacheSnapshot(TofCache& out, uint32_t timeoutMs = 10) {
   (void)timeoutMs;
   out = {};

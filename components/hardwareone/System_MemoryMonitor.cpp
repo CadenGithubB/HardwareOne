@@ -11,7 +11,6 @@
 #include "System_MemTracker.h"
 #include "System_MemUtil.h"
 #include "System_Settings.h"
-#include "System_SensorStubs.h"
 #include "System_Utils.h"
 #include "System_TaskUtils.h"
 #include "System_ESPNow.h"
@@ -19,36 +18,17 @@
 #include "HAL_Input.h"          // For INPUT_TASK_NAME (gamepad vs ANO)
 #include "System_CommandTypes.h"
 
-// Per-sensor enabled/connected flags + task handles come from the sensor
-// headers (which gate their own decls on ENABLE_*_SENSOR). System_SensorStubs.h
-// (included above) provides stubs for sensors compiled out.
-#if ENABLE_IMU_SENSOR
+// Per-sensor running/connected flags and task handles come from the sensor
+// headers. Each header has its own branch for a build without the sensor.
 #include "i2csensor_bno055.h"
-#endif
-#if ENABLE_THERMAL_SENSOR
 #include "i2csensor_mlx90640.h"
-#endif
-#if ENABLE_TOF_SENSOR
 #include "i2csensor_vl53l4cx.h"
-#endif
-#if ENABLE_GAMEPAD_SENSOR
 #include "i2csensor_seesaw.h"
-#endif
-#if ENABLE_FM_RADIO
 #include "i2csensor_rda5807.h"
-#endif
-#if ENABLE_GPS_SENSOR
 #include "i2csensor_pa1010d.h"
-#endif
-#if ENABLE_APDS_SENSOR
 #include "i2csensor_apds9960.h"
-#endif
-#if ENABLE_PRESENCE_SENSOR
 #include "i2csensor_sths34pf80.h"
-#endif
-#if ENABLE_RTC_SENSOR
 #include "i2csensor_ds3231.h"
-#endif
 
 // ============================================================================
 // Memory Threshold Registry

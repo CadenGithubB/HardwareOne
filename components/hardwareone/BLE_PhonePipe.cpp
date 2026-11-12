@@ -1577,4 +1577,23 @@ extern const CommandEntry relayCommands[] = {
   { "relay",        "What the phone link carries.", false, relayUsage },
 };
 extern const size_t relayCommandsCount=sizeof(relayCommands)/sizeof(relayCommands[0]);
+
+#elif ENABLE_BLUETOOTH  // Bluetooth without the phone pipe
+
+#include "System_CommandRegistry.h"
+
+// The phone pipe is not in this build. Each module keeps its root row, so
+// `phone ...` and `relay ...` say why instead of "Unknown command".
+static const char* phoneNotBuilt(const String&) {
+  return "Error: the phone pipe is not in this build";
+}
+extern const CommandEntry phoneCommands[] = {
+  { "phone", "Android phone link (not in this build)", false, phoneNotBuilt, nullptr },
+};
+extern const size_t phoneCommandsCount = 1;
+extern const CommandEntry relayCommands[] = {
+  { "relay", "Phone relay (not in this build)", false, phoneNotBuilt, nullptr },
+};
+extern const size_t relayCommandsCount = 1;
+
 #endif

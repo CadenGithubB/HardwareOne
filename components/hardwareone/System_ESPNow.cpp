@@ -52,7 +52,6 @@
 #include "System_MemUtil.h"
 #include "System_MemoryMonitor.h"
 #include "System_Mutex.h"
-#include "System_SensorStubs.h"
 #include "System_ConfigLoad.h"
 #include "System_Settings.h"
 #include "System_TaskUtils.h"
@@ -95,16 +94,10 @@
 #if ENABLE_BONDED_MODE && ENABLE_TOF_SENSOR
 #include "i2csensor_vl53l4cx.h"
 #endif
-#if ENABLE_HTTP_SERVER
 #include "WebServer_Server.h"
-#endif
 
-#if ENABLE_IMU_SENSOR
 #include "i2csensor_bno055.h"
-#endif
-#if ENABLE_THERMAL_SENSOR
 #include "i2csensor_mlx90640.h"
-#endif
 
 // Forward declaration — definition is further down near onEspNowRawRecv. Used
 // by the send paths (v4_send_frame, fragmented tx) defined above that point.
@@ -19268,5 +19261,13 @@ esp_err_t espnowSelfApMac(uint8_t out[6]) {
   return ESP_ERR_NOT_SUPPORTED;
 #endif
 }
+
+// ESP-NOW is not in this build. Readers of the mesh state find an
+// uninitialised link, no peers and no topology.
+static EspNowState sEspNowAbsent = { false, ESPNOW_MODE_DIRECT, "", 0, false, nullptr };
+EspNowState* gEspNow = &sEspNowAbsent;
+MeshPeerHealth gMeshPeers[MAX_MESH_PEERS] = {};
+MeshTopoNode* gMeshTopology = nullptr;
+bool gMeshActivitySuspended = false;
 
 #endif // ENABLE_ESPNOW

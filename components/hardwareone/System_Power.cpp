@@ -31,18 +31,12 @@
 #include "soc/soc_caps.h"      // SOC_UART_SUPPORT_REF_TICK
 #include "System_CommandRegistry.h"
 #include "System_Battery.h"
-#if ENABLE_CAMERA_SENSOR
 #include "System_Camera_DVP.h"
-#endif
 #if ENABLE_LOCAL_STT
 #include "System_STT.h"
 #endif
-#if ENABLE_MICROPHONE
 #include "System_Microphone.h"
-#endif
-#if ENABLE_OLED_DISPLAY
 #include "OLED_Display.h"
-#endif
 #if CONFIG_IDF_TARGET_ESP32P4 && CONFIG_SPIRAM && !CONFIG_APP_BUILD_TYPE_PURE_RAM_APP
 #include "soc/rtc.h"
 #include "esp_attr.h"

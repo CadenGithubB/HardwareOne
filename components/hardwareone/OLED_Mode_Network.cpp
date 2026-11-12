@@ -828,9 +828,7 @@ void displayEspNow() {
 // the module settings. The menu is always enterable; it used to open only while
 // the server ran, so there was no way to start it or set Auto Start from here.
 
-#if ENABLE_HTTP_SERVER
 #include "WebServer_Server.h"  // server, SessionEntry, MAX_SESSIONS, gSessions
-#endif
 
 struct WebStatsRenderData {
   int activeSessions;

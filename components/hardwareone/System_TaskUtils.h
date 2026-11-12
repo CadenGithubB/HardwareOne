@@ -484,9 +484,8 @@ void reportTaskStack(TaskHandle_t handle, const char* name, uint32_t allocatedBy
 
 // The input device task. One slot for every input driver (Seesaw gamepad, ANO
 // encoder, GPIO encoder, GT911 touch): only one of them runs, and the task and
-// memory monitors read the slot without knowing which. Defined by the gamepad
-// driver (i2csensor_seesaw.cpp), or by System_SensorStubs.cpp when that driver
-// is compiled out.
+// memory monitors read the slot without knowing which. Defined in
+// System_TaskUtils.cpp for every build.
 extern TaskHandle_t gInputTaskHandle;
 
 // Report all sensor task stacks plus system tasks

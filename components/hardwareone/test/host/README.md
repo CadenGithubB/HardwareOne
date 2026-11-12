@@ -1206,7 +1206,7 @@ defined once, under `ENABLE_HTTP_SERVER`, and refuses any context that is not
 a web request, a revoke marks the slot without queueing a `[revoke]` notice,
 `/api/sessions` and `/api/admin/sessions` share `handleSessionsList`, and the
 undefined three-argument `streamBeginHtml` prototype is gone. No name is
-exempt. The HTTP-off no-op stubs that `System_SensorStubs.h` kept for
+exempt. The HTTP-off no-op stubs once kept for
 `authSuccessUnified`, `sseEnqueueNotice` and `sseDequeueNotice` were removed
 after the merge. It does not compile anything. `--component <dir>` scans
 another tree. Run with
@@ -2977,7 +2977,7 @@ stream open and the relay as it was), `status json`'s compact `phoneLink` block
 `Settings::phonePipeSecretGenerated` (two builds that differ only there), that
 no output carries an address or the secret, and that only the
 tick stub remains without the pipe (`phone` is then a one-row "not in this
-build" table in System_SensorStubs.cpp). The G2 Network page's Phone menu is covered by
+build" table in the `#elif` branch of BLE_PhonePipe.cpp). The G2 Network page's Phone menu is covered by
 `wifi_saved_ui` and `g2_network_async_redraw`; the web Phone card by
 `g2_status_browser` (Node, or a Deno-backed `node` shim).
 

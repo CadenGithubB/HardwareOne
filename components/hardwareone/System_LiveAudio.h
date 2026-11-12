@@ -138,8 +138,7 @@ inline bool liveAudioRecorderCaptureEligible(
 #endif  // ENABLE_UART_HOST_LINK
 
 // Stays unconditional: the command remains REGISTERED on builds without the
-// link and fails cleanly there (definition in System_SensorStubs.cpp when the
-// module is not built).
+// link and fails cleanly there (the #else branch of System_LiveAudio.cpp).
 const char* cmd_liveaudio(const String& argsInput);
 
 #endif  // SYSTEM_LIVEAUDIO_H

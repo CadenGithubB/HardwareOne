@@ -6,9 +6,7 @@
 #include "HAL_InputInternal.h"
 #include "System_Mutex.h"
 #include "System_Debug.h"
-#if ENABLE_GAMEPAD_SENSOR
 #include "i2csensor_seesaw.h"
-#endif
 #if ENABLE_ANO_ENCODER
 #include "i2csensor_ano_encoder.h"
 #endif

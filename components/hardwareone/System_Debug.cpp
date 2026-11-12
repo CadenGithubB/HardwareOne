@@ -28,14 +28,11 @@
 #include "System_ESPSR.h"  // srSyncDebugLevel()
 #include "System_CommandRegistry.h"
 #include "System_Notifications.h"
-#include "System_SensorStubs.h"
 #include "i2csensor_bno055.h"
 #include "i2csensor_mlx90640.h"
 #include "i2csensor_rda5807.h"
 #include "i2csensor_vl53l4cx.h"
-#if ENABLE_ESPNOW
 #include "System_ESPNow.h"
-#endif
 
 // External dependencies from .ino
 

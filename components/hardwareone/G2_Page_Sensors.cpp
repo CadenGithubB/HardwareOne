@@ -32,49 +32,27 @@
 // Each sensor owns its readings and synchronization. Formatters request
 // snapshots and render locally; lifecycle flags still describe runtime state.
 
-#if ENABLE_IMU_SENSOR
 #include "i2csensor_bno055.h"     // readings + gImuRunning / gImuConnected
-#endif
-#if ENABLE_TOF_SENSOR
 #include "i2csensor_vl53l4cx.h"   // readings + gTofRunning / gTofConnected
-#endif
-#if ENABLE_THERMAL_SENSOR
 #include "i2csensor_mlx90640.h"   // readings + gThermalRunning / gThermalConnected
-#endif
-#if ENABLE_GAMEPAD_SENSOR
 #include "i2csensor_seesaw.h"     // readings + gInputRunning / gInputConnected
-#endif
 #if ENABLE_ANO_ENCODER
 #include "i2csensor_ano_encoder.h" // readings + ANO_BTN_* + axis consts
 #endif
-#if ENABLE_APDS_SENSOR
 #include "i2csensor_apds9960.h"   // readings + gApdsRunning / gApdsConnected
-#endif
-#if ENABLE_RTC_SENSOR
 #include "i2csensor_ds3231.h"     // readings + gRtcRunning / gRtcConnected
-#endif
-#if ENABLE_FM_RADIO
 #include "i2csensor_rda5807.h"    // readings + gFmRadioRunning / gFmRadioConnected
-#endif
-#if ENABLE_GPS_SENSOR
 #include "i2csensor_pa1010d.h"    // gpsCacheSnapshot + gGpsRunning / gGpsConnected
-#endif
-#if ENABLE_PRESENCE_SENSOR
 #include "i2csensor_sths34pf80.h" // presenceCacheSnapshot + gPresenceRunning / gPresenceConnected
-#endif
 #if ENABLE_CAMERA_SENSOR
 #include "System_Camera_DVP.h"     // gCameraRunning, cameraPowerSetPostHook
 #include "G2_Page_CameraSettings.h" // g2ShowCameraSettingsMenu
 #endif
-#if ENABLE_MICROPHONE
 #include "System_Microphone.h"     // gMicRunning (status rows)
-#endif
 #include "HAL_Audio.h"             // audio source availability + selector (PDM/G2)
 #include "System_Settings.h"       // gSettings.micSource (source selector)
 #include "G2_Page_LED.h"           // g2ShowLedMenu — Sensors → LED drill-in
-#if ENABLE_OLED_DISPLAY
 #include "OLED_Display.h"
-#endif
 
 // -----------------------------------------------------------------------------
 // Per-sensor "current value" formatters

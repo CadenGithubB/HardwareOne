@@ -52,15 +52,9 @@
 #include "System_Utils.h"
 #include "System_Mutex.h"          // SensorCacheGuard (was pulled in transitively before 71bcd2c)
 
-#if ENABLE_APDS_SENSOR
 #include "i2csensor_apds9960.h"
-#endif
-#if ENABLE_THERMAL_SENSOR
 #include "i2csensor_mlx90640.h"
-#endif
-#if ENABLE_TOF_SENSOR
 #include "i2csensor_vl53l4cx.h"
-#endif
 
 // --- Additional condition-variable sources (see evaluateCondition) ---
 #include "System_Battery.h"        // BATTERY: valid battery snapshot
@@ -74,9 +68,7 @@
 #if ENABLE_WIFI
 #include <WiFi.h>                  // WIFI / RSSI: WiFi.isConnected() / WiFi.RSSI()
 #endif
-#if ENABLE_GPS_SENSOR
 #include "i2csensor_pa1010d.h"     // GPS / SPEED / SATS / WP_DIST: gpsCacheSnapshot()
-#endif
 #if ENABLE_MAPS
 #include "System_Maps.h"           // WP_DIST:<name>: WaypointManager::getDistanceBearingToName()
 #endif

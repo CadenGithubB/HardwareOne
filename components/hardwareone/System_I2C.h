@@ -589,25 +589,12 @@ const char* i2cSetDeviceBusAndReport(int& target, const String& argsInput,
                                      const char* settingName);
 
 // ============================================================================
-// Sensor State Variables
+// Bus State
 // ============================================================================
-extern volatile UBaseType_t gTofWatermarkNow;
-extern volatile UBaseType_t gTofWatermarkMin;
-extern volatile UBaseType_t gImuWatermarkNow;
-extern volatile UBaseType_t gImuWatermarkMin;
-extern volatile UBaseType_t gThermalWatermarkNow;
-extern volatile UBaseType_t gThermalWatermarkMin;
-extern volatile UBaseType_t gGamepadWatermarkNow;
-extern volatile UBaseType_t gGamepadWatermarkMin;
+// The state of one sensor (running, connected, task handle, stop time) is
+// declared in that sensor's own header, for both the enabled and the
+// disabled build.
 extern uint32_t gWire1DefaultHz;
-extern uint32_t gTofLastStopTime;
-extern unsigned long gThermalLastStopTime;
-extern volatile bool gImuInitRequested;
-extern volatile bool gImuInitResult;
-extern volatile bool gImuInitDone;
-extern volatile bool gThermalInitRequested;
-extern volatile bool gThermalInitResult;
-extern volatile bool gThermalInitDone;
 
 // ============================================================================
 // Helper Functions
@@ -620,9 +607,6 @@ void sensorStatusBumpWith(const char* reason);
 extern volatile unsigned long gSensorStatusSeq;
 extern const char* gLastStatusCause;
 const char* buildSensorStatusJson();
-bool imuInit();
-bool fmRadioInit();
-bool fmRadioStartInternal();
 
 // ============================================================================
 // Thermal Sensor Externs

@@ -43,33 +43,19 @@
 #include "System_ESPNow_Sensors.h"
 #endif
 
-#if ENABLE_GPS_SENSOR
 #include "i2csensor_pa1010d.h"
-#endif
 
-#if ENABLE_PRESENCE_SENSOR
 #include "i2csensor_sths34pf80.h"
-#endif
 
-#if ENABLE_THERMAL_SENSOR
 #include "i2csensor_mlx90640.h"
-#endif
 
-#if ENABLE_TOF_SENSOR
 #include "i2csensor_vl53l4cx.h"
-#endif
 
-#if ENABLE_IMU_SENSOR
 #include "i2csensor_bno055.h"
-#endif
 
-#if ENABLE_APDS_SENSOR
 #include "i2csensor_apds9960.h"
-#endif
 
-#if ENABLE_RTC_SENSOR
 #include "i2csensor_ds3231.h"
-#endif
 
 #if ENABLE_OLED_INPUT
 #include "HAL_Input.h"   // inputGetX/Y/ButtonsLogical — works for gamepad OR ANO

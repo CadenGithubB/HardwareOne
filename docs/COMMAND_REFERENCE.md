@@ -376,6 +376,8 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `phone stats` | A | Phone link sessions, counters and setup timings. |
 | `phone status` |  | Show the phone link. (add 'json' for JSON output) |
 
+_`phoneCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is the first branch. Other build configurations register a different version of these rows (for example the disabled branch of the feature)._
+
 ## relay
 
 > The phone pipe relays TCP for HardwareOne's network users: the LLM HTTP source and the G2 Terminal. relay status shows how their requests reached the network (Wi-Fi or the phone), with outcomes and the last eight requests.
@@ -384,6 +386,8 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | ------- | :-: | ----------- |
 | `relay` |  | What the phone link carries. |
 | `relay status` | A | How relay users' requests reached the network (Wi-Fi or phone). |
+
+_`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is the first branch. Other build configurations register a different version of these rows (for example the disabled branch of the feature)._
 
 ## filesystem
 
@@ -1240,6 +1244,8 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | ------- | :-: | ----------- |
 | `liveaudio` |  | Opt-in live PCM transport, lease, and shadow diagnostics<br/>`Usage: liveaudio <capabilities\|status\|ready 1 <controller_hex16>\|conversate 1 <controller_hex16> on\|off\|shadow 1 <controller_hex16> on <exchange_hex16\|native>\|shadow 1 <controller_hex16> off\|release 1 <controller_hex16>\|synth 1 <controller_hex16> <exchange_hex16> <duration_ms>\|abort 1 <controller_hex16> <exchange_hex16>>` |
 
+_`liveAudioCommands` has `#if` alternatives in `System_LiveAudio.cpp`; this table is the first branch. Other build configurations register a different version of these rows (for example the disabled branch of the feature)._
+
 ## cm5
 
 > Everything that talks to the CM5 Linux host over the authenticated UART link. cm5 status exposes the current named-UART epoch binding, freshness, state, command bridge, monitor transitions, and task stack watermark; cm5 capabilities reports the heartbeat protocol constants. The five-second heartbeat itself is authenticated UART control-plane traffic, not a user command, so it remains responsive even while the shared command executor is occupied. cm5 power and cm5 fan drive the host through two independent finite request/ACK/report state machines that share one ID space: cm5 power status requests fresh CM5 state, cm5 power profile <eco|balanced|performance|auto> requests a power profile, and cm5 fan <quiet|max> pins a fan mode while cm5 fan auto returns control to the Linux temperature curve. Bare cm5 power / cm5 fan (or their show form) display local delivery state and the last CM5 report. Initiation requires an admin; reboot, halt, suspend, and sleep_for <1..1440 minutes> additionally require superadmin plus a literal same-command confirm token, and recover confirm clears only an inspected fail-closed transition. ACK/report callbacks are accepted from a real authenticated UART session only, which lets the CM5 service account stay user-tier. One request per protocol may be pending at a time and delivery retries are finite; destructive execution additionally requires confirmed accepted and committed ACK phases, while a normalized Linux boot ID distinguishes a daemon restart from a completed host boot. A max fan request may supersede one pending non-max request.
@@ -1278,7 +1284,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `otaupdate` | A | Revalidate staged firmware and reboot into recovery apply.<br/>`Usage: otaupdate confirm [force-power]` |
 | `otawrite` | A | Stage exact OTA members over encrypted Bluetooth.<br/>`Usage: otawrite begin <candidate\|manifest> <size> <sha256> \| status \| finish \| abort` |
 
-_`otaCommands` has `#if` alternatives in `System_OTA.cpp`; this table is the first branch. Other build configurations register a different version of these rows (for example stubs)._
+_`otaCommands` has `#if` alternatives in `System_OTA.cpp`; this table is the first branch. Other build configurations register a different version of these rows (for example the disabled branch of the feature)._
 
 ## setpattern
 

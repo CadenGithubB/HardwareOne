@@ -80,7 +80,6 @@ static void oledApplyPendingOwnerRequests();
 #include "System_FirstTimeSetup.h"
 #include "System_I2C.h"
 #include "System_SensorLogging.h"
-#include "System_SensorStubs.h"
 #include "System_User.h"
 #include "System_Settings.h"
 #include "System_User.h"
@@ -90,9 +89,7 @@ static void oledApplyPendingOwnerRequests();
 #include "OLED_ESPNow.h"
 #include "System_ESPNow.h"
 #endif
-#if ENABLE_APDS_SENSOR
 #include "i2csensor_apds9960.h"
-#endif
 #if ENABLE_OLED_INPUT
 // Includes the InputCache struct + gGamepad* extern declarations and
 // JOYSTICK_CENTER/DEADZONE constants — used by both the seesaw gamepad and
@@ -103,21 +100,11 @@ static void oledApplyPendingOwnerRequests();
 #include "i2csensor_ano_encoder.h"
 #endif
 #endif
-#if ENABLE_IMU_SENSOR
 #include "i2csensor_bno055.h"
-#endif
-#if ENABLE_THERMAL_SENSOR
 #include "i2csensor_mlx90640.h"
-#endif
-#if ENABLE_TOF_SENSOR
 #include "i2csensor_vl53l4cx.h"
-#endif
-#if ENABLE_RTC_SENSOR
 #include "i2csensor_ds3231.h"
-#endif
-#if ENABLE_GPS_SENSOR
 #include "i2csensor_pa1010d.h"  // gGpsRunning, gGpsConnected
-#endif
 
 // =============================================================================
 // Standardized Footer System Implementation
@@ -1498,9 +1485,7 @@ void oledScrollRenderSimple(Adafruit_SSD1306* display, OledScrollState* state,
 
 #include "System_Utils.h"
 
-#if ENABLE_GAMEPAD_SENSOR
-  #include "i2csensor_seesaw.h"  // For JOYSTICK_DEADZONE
-#endif
+#include "i2csensor_seesaw.h"  // For JOYSTICK_DEADZONE
 
 // Character grid layouts - three modes (3 rows each)
 // Uppercase letters ONLY (10 columns x 3 rows)
@@ -6854,6 +6839,13 @@ const size_t oledCommandsCount = sizeof(oledCommands) / sizeof(oledCommands[0]);
 // Registration handled by gCommandModules[] in System_Utils.cpp
 
 // OLED Settings Module moved to OLED_Settings.cpp
+
+#else  // !ENABLE_OLED_DISPLAY
+
+// The OLED is not in this build. The command registry keeps its row for the
+// display commands, with an empty table behind it.
+const CommandEntry oledCommands[] = {};
+const size_t oledCommandsCount = 0;
 
 #endif // ENABLE_OLED_DISPLAY
 

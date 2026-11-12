@@ -44,9 +44,7 @@
 #if ENABLE_ESPNOW
 #include "System_ESPNow_Sensors.h"
 #endif
-#if ENABLE_WIFI
 #include "System_WiFi.h"
-#endif
 
 namespace {
 

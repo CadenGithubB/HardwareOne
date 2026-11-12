@@ -19,6 +19,9 @@ python3 tools/build_config.py build xiao-display
 python3 tools/build_config.py build xiao-no-bluetooth
 python3 tools/build_config.py build xiao-base
 python3 tools/build_config.py build qtpy-sensors
+python3 tools/build_config.py build qtpy-all-sensors
+python3 tools/build_config.py build xiao-no-network
+python3 tools/build_config.py build xiao-no-web
 python3 tools/build_config.py build qtpy-oled
 python3 tools/build_config.py build qtpy-espnow
 python3 tools/build_config.py build qtpy-logging-test
@@ -92,6 +95,16 @@ board: `XIAO_ESP32S3_SENSE_ENABLED`, `ENABLE_CAMERA_SENSOR` and
 `ENABLE_MICROPHONE_SENSOR` are 0, so the image has no camera, microphone or SD
 card and the user LED on GPIO21 is available. Every other XIAO configuration is
 for the Sense assembly. The image builds; it has not been run on a base board.
+
+`xiao-no-network`, `xiao-no-web` and `qtpy-all-sensors` are coverage builds.
+They exist to compile and link the branches that no other saved configuration
+reaches, so a disabled feature keeps building (CONTRIBUTING.md, "Keep interfaces
+small"). `xiao-no-network` is `xiao-base` without Bluetooth and with
+`NETWORK_FEATURE_LEVEL` 0: no Wi-Fi, no ESP-NOW and no web server.
+`xiao-no-web` keeps Wi-Fi and ESP-NOW and sets `WEB_FEATURE_LEVEL` 0, so only
+the web server is off. `qtpy-all-sensors` is `qtpy-sensors` with the thermal
+camera, IMU, APDS, FM radio, RTC and servo driver switched on as well. None of
+the three has been run on a board.
 
 `qtpy-sensors` targets the **Adafruit QT Py ESP32 Pico** (classic ESP32). It
 enables VL53L4CX ToF, the Seesaw gamepad, STHS34PF80 presence and PA1010D GPS,

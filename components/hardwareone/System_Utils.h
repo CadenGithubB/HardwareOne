@@ -35,15 +35,9 @@ void secureClearString(String& s);
 
 // Legacy subsystem imports retained for existing utility consumers.
 #include "System_BuildConfig.h"
-#if ENABLE_HTTP_SERVER
-  #include "WebServer_Server.h"
-#endif
-#include "System_SensorStubs.h"
+#include "WebServer_Server.h"  // has its own branch for builds without the web server
 // Defined by System_Command.h; only needed by the audit-redaction overload.
 struct CommandResolution;
-
-// HTTP server control (lowercase 'h' matches implementation in .ino)
-void startHttpServer();
 
 // Reboot helpers. Route all intentional restarts through these so every reboot is
 // attributable (durable REBOOT audit line) AND emits a typed SYSEVT_REBOOT on the

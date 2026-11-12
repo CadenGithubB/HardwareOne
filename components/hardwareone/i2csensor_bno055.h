@@ -85,6 +85,14 @@ bool imuCacheSnapshot(ImuCache& out, uint32_t timeoutMs = 10);
 size_t imuCacheStorageBytes();
 
 #else
+// The IMU is not in this build. Its state reads as stopped and a start
+// request fails, so callers need no build condition.
+inline bool gImuRunning = false;
+inline bool gImuConnected = false;
+inline unsigned long gImuLastStopTime = 0;
+inline TaskHandle_t gImuTaskHandle = nullptr;
+inline bool imuStartInternal() { return false; }
+inline void imuUpdateActions(bool postEvents = false) { (void)postEvents; }
 inline bool imuCacheSnapshot(ImuCache& out, uint32_t timeoutMs = 10) {
   (void)timeoutMs;
   out = {};

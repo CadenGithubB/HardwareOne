@@ -48,17 +48,10 @@
 // included these headers the compiler could not see the conflict, so it linked to
 // the real symbols and read them at the WRONG OFFSETS (the IMU stream published
 // imuTemp as "heading", never sent roll, and gated validity on a millis() byte).
-// System_SensorStubs.h supplies the types/globals when a sensor is compiled out.
-#if ENABLE_THERMAL_SENSOR
-  #include "i2csensor_mlx90640.h"   // ThermalCache, readings, gThermalRunning/Connected
-#endif
-#if ENABLE_TOF_SENSOR
-  #include "i2csensor_vl53l4cx.h"   // TofCache, readings, gTofRunning/Connected
-#endif
-#if ENABLE_IMU_SENSOR
-  #include "i2csensor_bno055.h"     // ImuCache, readings, gImuRunning/Connected
-#endif
-#include "System_SensorStubs.h"     // stubs for disabled sensors
+// Each header supplies the types and state names when its sensor is compiled out.
+#include "i2csensor_mlx90640.h"   // ThermalCache, readings, gThermalRunning/Connected
+#include "i2csensor_vl53l4cx.h"   // TofCache, readings, gTofRunning/Connected
+#include "i2csensor_bno055.h"     // ImuCache, readings, gImuRunning/Connected
 #include "System_SelfDevice.h"  // SelfDevice::firmwareVersion() for the Device Info BLE characteristic
 #include "System_Settings.h"
 #include "BLE_SecureChannel.h"  // app-layer Secure Channel v1 (replaces BLE link-layer bonding)

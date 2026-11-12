@@ -94,9 +94,7 @@ extern "C" {
 #include "G2_Page_TestSuite.h" // g2ShowTestSuiteMenu / g2TestSuiteHandleTap
 #include "G2_Page_Users.h"     // g2ShowUsersMenu / g2UsersHandleTap — admin user manager
 #include "G2_Page_TextEntry.h" // generic on-glasses text-entry overlay
-#if ENABLE_FM_RADIO
 #include "i2csensor_rda5807.h" // readings + lifecycle globals — FM tuner page
-#endif
 #include "G2_Page_ESPNow.h"    // g2ShowESPNowAppMenu / g2ESPNowAppHandleTap
 #include "G2_Page_Automations.h" // g2ShowAutomationsMenu / g2AutomationsHandleTap
 #include "G2_Page_LED.h"       // g2ShowLedMenu / g2LedHandleTap (Sensors → LED)
@@ -105,9 +103,7 @@ extern "C" {
 #include "System_TaskUtils.h"  // APP_CORE / task priority helpers used by G2 workers (needed regardless of maps)
 #if ENABLE_MAPS
 #include "System_Maps.h"       // MapCore/OffscreenMapRenderer — g2map renders the offline map to the lens
-#if ENABLE_GPS_SENSOR
 #include "i2csensor_pa1010d.h" // GPS running/fix state for the map status pane
-#endif
 #endif
 #if ENABLE_LLM_BACKEND
 #include "System_LLMBackend.h" // model registry — Select Model lists every source
@@ -122,9 +118,7 @@ extern "C" {
 #if ENABLE_WIFI
 #include <WiFi.h>
 #endif
-#if ENABLE_ESPNOW
 #include "System_ESPNow.h"
-#endif
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>

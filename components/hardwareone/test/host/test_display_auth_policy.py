@@ -120,6 +120,8 @@ def main() -> None:
                 row_tables[match.group(1)] = block + ";"
         for match in COMMAND_TABLE.finditer(text):
             block = definition_at(text, match)
+            if re.search(r"=\s*\{\s*\}\s*$", block):
+                continue   # the empty table of a feature's disabled branch
             hits = {w for w in writers if re.search(rf"\b{w}\b", block)}
             referenced |= hits
             if match.group(1) in FIXED_COMMAND_TABLES or hits:

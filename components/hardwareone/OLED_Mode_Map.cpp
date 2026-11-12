@@ -32,14 +32,11 @@
 #include "System_I2C.h"
 #include "System_Command.h"
 #include "HAL_Input.h"
-#include "System_SensorStubs.h"  // gGpsRunning when the GPS sensor is disabled
 #include "System_TaskUtils.h"
 #include "System_VFS.h"
 #include "System_AuthIdentity.h"  // CommandIdentityScope (OLEDMapCtxGuard)
 
-#if ENABLE_GPS_SENSOR
 #include "i2csensor_pa1010d.h"
-#endif
 
 #if ENABLE_ESPNOW
 #include "System_ESPNow_Sensors.h"

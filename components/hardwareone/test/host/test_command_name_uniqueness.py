@@ -9,7 +9,7 @@ each row sits in. Two rows with one name are a defect unless no build can
 link both: they sit in different branches of one #if group in one file, or in
 two definitions of the same table (a program links exactly one definition of
 a table symbol: the OTA table's layout and no-layout variants, a disabled
-module's stub in System_SensorStubs.cpp). The scan does not evaluate macros
+module's "not in this build" table in the #else branch of its own source). The scan does not evaluate macros
 otherwise, so rows of different tables count as compiled together;
 DEFERRED_DUPLICATES lists any name left to another session, with its reason. Part two compiles the production registration from
 System_Command.cpp against fixture modules and checks that

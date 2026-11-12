@@ -388,9 +388,7 @@ bool uartLinkSessionRestrictCm5PresenceIfUser(
 #include "System_AuthIdentity.h"  // currentAuthContext — transport/AuthBypass gate
 #include "System_Utils.h"         // RETURN_VALID_IF_VALIDATE_CSTR
 #include "System_LiveAudio.h"     // liveAudioStreamActive — no bulk fetch overlap
-#if ENABLE_MICROPHONE
 #include "System_Microphone.h"    // micRecordingBusy — never fetch an open WAV
-#endif
 #include "sdkconfig.h"
 #include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"

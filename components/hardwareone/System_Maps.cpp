@@ -37,9 +37,7 @@
 #include "System_FileManager.h"
 #endif
 
-#if ENABLE_GAMEPAD_SENSOR
 #include "i2csensor_seesaw.h"
-#endif
 
 #if ENABLE_GPS_SENSOR
 #include "i2csensor_pa1010d.h"

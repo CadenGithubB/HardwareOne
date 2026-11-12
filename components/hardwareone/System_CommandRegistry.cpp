@@ -14,9 +14,7 @@
 #if ENABLE_ANO_ENCODER
 #include "i2csensor_ano_encoder.h"
 #endif
-#if ENABLE_CAMERA_SENSOR
 #include "System_Camera_DVP.h"
-#endif
 #if ENABLE_MICROPHONE
 #include "HAL_Audio.h"
 #endif

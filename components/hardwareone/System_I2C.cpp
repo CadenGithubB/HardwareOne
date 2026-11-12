@@ -27,7 +27,6 @@
 #include "System_MemUtil.h"
 #include "System_Notifications.h"
 #include "System_SensorRegistry.h"
-#include "System_SensorStubs.h"
 #include "System_Events.h"          // systemEventPost — sensor lifecycle events
 
 #if ENABLE_ESPNOW
@@ -40,46 +39,26 @@
 #include "System_Utils.h"
 #include "System_CommandRegistry.h"
 #include "System_Camera_Video.h"
-#if ENABLE_CAMERA_SENSOR
 #include "System_Camera_DVP.h"
-#endif
 #if ENABLE_EDGE_IMPULSE
 #include "System_EdgeImpulse.h"
 #endif
-#if ENABLE_MICROPHONE
 #include "System_Microphone.h"
-#endif
 #if ENABLE_SERVO
 #include "i2csensor_pca9685.h"
 #endif
 
-#if ENABLE_APDS_SENSOR
 #include "i2csensor_apds9960.h"
-#endif
 #if ENABLE_ANO_ENCODER
 #include "i2csensor_ano_encoder.h"
 #endif
-#if ENABLE_GAMEPAD_SENSOR
 #include "i2csensor_seesaw.h"
-#endif
-#if ENABLE_GPS_SENSOR
 #include "i2csensor_pa1010d.h"
-#endif
-#if ENABLE_IMU_SENSOR
 #include "i2csensor_bno055.h"
-#endif
-#if ENABLE_THERMAL_SENSOR
 #include "i2csensor_mlx90640.h"
-#endif
-#if ENABLE_TOF_SENSOR
 #include "i2csensor_vl53l4cx.h"
-#endif
-#if ENABLE_RTC_SENSOR
 #include "i2csensor_ds3231.h"
-#endif
-#if ENABLE_PRESENCE_SENSOR
 #include "i2csensor_sths34pf80.h"
-#endif
 
 // ============================================================================
 // Unified I2C Manager Initialization

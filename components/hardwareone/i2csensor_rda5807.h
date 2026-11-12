@@ -68,6 +68,7 @@ const char* cmd_fmradio_status(const String& argsInput);
 
 // FM Radio functions
 bool fmRadioInit();
+bool fmRadioStartInternal();  // Called by the sensor start queue
 void fmRadioDeinit();
 void fmRadioPoll();  // Called periodically to update RDS data
 
@@ -75,6 +76,16 @@ void fmRadioPoll();  // Called periodically to update RDS data
 int fmRadioBuildDataJson(char* buf, size_t bufSize);
 
 #else
+// The FM radio is not in this build. Its state reads as stopped and a start
+// request fails, so callers need no build condition.
+inline bool gFmRadioRunning = false;
+inline bool gFmRadioConnected = false;
+inline unsigned long gFmRadioLastStopTime = 0;
+inline bool gRadioInitialized = false;
+inline TaskHandle_t gFmRadioTaskHandle = nullptr;
+inline bool fmRadioInit() { return false; }
+inline void fmRadioDeinit() {}
+inline bool fmRadioStartInternal() { return false; }
 inline bool fmRadioCacheSnapshot(FmRadioCache& out, uint32_t timeoutMs = 10) {
   (void)timeoutMs;
   out = {};

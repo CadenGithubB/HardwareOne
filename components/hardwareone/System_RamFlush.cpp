@@ -2,12 +2,12 @@
 
 #include <Arduino.h>
 #include "System_BuildConfig.h"
+// WiFi.isConnected() at RF_WIFI. Without Wi-Fi the name comes from the disabled
+// branch of System_WiFi.h, so the Arduino header stays behind the flag.
 #if ENABLE_WIFI
-// Ungated, this redefines the stub WiFiClass in System_SensorStubs.h on a
-// WiFi-off build. The only use here is WiFi.isConnected() at RF_WIFI, which
-// the stub provides.
 #include <WiFi.h>
 #endif
+#include "System_WiFi.h"
 #include <esp_attr.h>
 #include <esp_system.h>
 #include <string.h>
@@ -23,46 +23,21 @@
 // obvious-looking getters are wrong and were pinned deliberately.
 #include "System_Automation.h"
 #include "System_I2C.h"
-#include "System_SensorStubs.h"
 #include "WebServer_Handle.h"
-#if ENABLE_OLED_DISPLAY
 #include "OLED_Display.h"
-#endif
 
-// Per-sensor enabled-flag externs. System_SensorStubs.h above only supplies the
-// flags for sensors compiled OUT; the real declarations live in each sensor's own
-// header (gated on its ENABLE_*). Without these the file builds only on configs
-// where every sensor happens to be disabled — e.g. the XIAO Sense
-// (I2C_FEATURE_LEVEL 0) it was developed against — and fails the moment a sensor
-// is turned on (FeatherS3 → gThermalRunning/gGpsRunning/gRtcRunning undeclared).
-// Same include block System_TaskUtils.cpp uses for the same reason.
-#if ENABLE_GAMEPAD_SENSOR
+// Per-sensor running flags come from the sensor headers. Each header has its
+// own branch for a build without the sensor, so they are included without a
+// condition.
 #include "i2csensor_seesaw.h"
-#endif
-#if ENABLE_THERMAL_SENSOR
 #include "i2csensor_mlx90640.h"
-#endif
-#if ENABLE_IMU_SENSOR
 #include "i2csensor_bno055.h"
-#endif
-#if ENABLE_TOF_SENSOR
 #include "i2csensor_vl53l4cx.h"
-#endif
-#if ENABLE_FM_RADIO
 #include "i2csensor_rda5807.h"
-#endif
-#if ENABLE_GPS_SENSOR
 #include "i2csensor_pa1010d.h"
-#endif
-#if ENABLE_APDS_SENSOR
 #include "i2csensor_apds9960.h"
-#endif
-#if ENABLE_PRESENCE_SENSOR
 #include "i2csensor_sths34pf80.h"
-#endif
-#if ENABLE_RTC_SENSOR
 #include "i2csensor_ds3231.h"
-#endif
 
 #if ENABLE_MQTT
 #include "System_MQTT.h"
@@ -73,12 +48,8 @@
 #if ENABLE_LLM_BACKEND
 #include "System_LLMBackend.h"
 #endif
-#if ENABLE_CAMERA_SENSOR
 #include "System_Camera_DVP.h"
-#endif
-#if ENABLE_MICROPHONE
 #include "System_Microphone.h"
-#endif
 #if ENABLE_ESP_SR
 #include "System_ESPSR.h"
 #endif

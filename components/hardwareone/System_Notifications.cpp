@@ -52,7 +52,6 @@
 #if ENABLE_HTTP_SERVER
 #include "WebServer_Server.h"
 #else
-#include "System_SensorStubs.h"
 #endif
 
 // ============================================================================

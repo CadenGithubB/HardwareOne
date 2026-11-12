@@ -1,0 +1,14 @@
+{
+  "board": "xiao_s3",
+  "features": {
+    "ENABLE_BLUETOOTH": 0,
+    "ENABLE_CAMERA_SENSOR": 0,
+    "ENABLE_MICROPHONE_SENSOR": 0,
+    "ENABLE_MQTT": 0,
+    "XIAO_ESP32S3_SENSE_ENABLED": 0,
+    "NETWORK_FEATURE_LEVEL": 0
+  },
+  "sdkconfig": {
+    "CONFIG_BT_ENABLED": false
+  }
+}

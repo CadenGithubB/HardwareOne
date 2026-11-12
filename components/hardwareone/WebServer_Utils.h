@@ -1629,6 +1629,8 @@ inline void WebMirrorBuf::appendDirect(const char*, size_t, bool) {}
 inline String WebMirrorBuf::snapshot() { return String(); }
 inline size_t WebMirrorBuf::snapshotTo(char*, size_t) { return 0; }
 inline void WebMirrorBuf::assignFrom(const String&) {}
+inline WebMirrorBuf gWebMirror;
+inline size_t gWebMirrorCap = 0;
 
 #endif // ENABLE_HTTP_SERVER
 

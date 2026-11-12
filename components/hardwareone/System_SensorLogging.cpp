@@ -28,27 +28,15 @@
 
 // Conditional sensor includes (same approach as main .ino)
 #include "System_BuildConfig.h"
-#if ENABLE_THERMAL_SENSOR
-  #include "i2csensor_mlx90640.h"
-#endif
-#if ENABLE_IMU_SENSOR
-  #include "i2csensor_bno055.h"
-#endif
-#if ENABLE_TOF_SENSOR
-  #include "i2csensor_vl53l4cx.h"
-#endif
+#include "i2csensor_mlx90640.h"
+#include "i2csensor_bno055.h"
+#include "i2csensor_vl53l4cx.h"
 #if ENABLE_OLED_INPUT
   #include "HAL_Input.h"   // readings, gInputRunning/Connected — populated by either driver
 #endif
-#if ENABLE_APDS_SENSOR
-  #include "i2csensor_apds9960.h"
-#endif
-#if ENABLE_GPS_SENSOR
-  #include "i2csensor_pa1010d.h"
-#endif
-#if ENABLE_PRESENCE_SENSOR
-  #include "i2csensor_sths34pf80.h"
-#endif
+#include "i2csensor_apds9960.h"
+#include "i2csensor_pa1010d.h"
+#include "i2csensor_sths34pf80.h"
 #include "G2_Ring.h"       // ring telemetry + g2RingWearName (stubs without BT/G2)
 #include "G2_HealthPush.h" // g2HealthPushWantsRingData (stub without BT/G2/R1)
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
@@ -58,7 +46,6 @@
   #include "G2_Health.h"   // g2HealthPageIsActive — don't race page poll bursts
   #include "BLE_Events.h"  // CompactJson for buildHealthStatusJson
 #endif
-#include "System_SensorStubs.h"  // Provides stubs for disabled sensors
 #include "System_CaptureCrypto.h"  // at-rest sealing of capture files
 #include "System_CommandRegistry.h"
 

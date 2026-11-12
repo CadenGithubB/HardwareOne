@@ -13,32 +13,16 @@
 #include "System_I2C.h"
 #include "System_PollPause.h"
 
-#if ENABLE_RTC_SENSOR
 #include "i2csensor_ds3231.h"
-#endif
 
-#if ENABLE_PRESENCE_SENSOR
 #include "i2csensor_sths34pf80.h"
-#endif
 
-#if ENABLE_IMU_SENSOR
 #include "i2csensor_bno055.h"     // gImuRunning / gImuConnected
-#endif
-#if ENABLE_TOF_SENSOR
 #include "i2csensor_vl53l4cx.h"   // gTofRunning / gTofConnected
-#endif
-#if ENABLE_THERMAL_SENSOR
 #include "i2csensor_mlx90640.h"   // gThermalRunning / gThermalConnected
-#endif
-#if ENABLE_GPS_SENSOR
 #include "i2csensor_pa1010d.h"    // gGpsRunning / gGpsConnected
-#endif
-#if ENABLE_GAMEPAD_SENSOR
 #include "i2csensor_seesaw.h"     // gInputRunning / gInputConnected
-#endif
-#if ENABLE_APDS_SENSOR
 #include "i2csensor_apds9960.h"   // gApdsConnected
-#endif
 
 // External references
 // (Sensor enabled/connected flags are provided by the per-sensor headers above.)

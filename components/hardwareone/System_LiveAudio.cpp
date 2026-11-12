@@ -1622,4 +1622,22 @@ const CommandEntry liveAudioCommands[] = {
 const size_t liveAudioCommandsCount =
     sizeof(liveAudioCommands) / sizeof(liveAudioCommands[0]);
 
+#else  // !ENABLE_UART_HOST_LINK
+
+#include "System_CommandRegistry.h"
+
+// The UART host link is not in this build. The command stays registered and
+// says why it does nothing.
+const char* cmd_liveaudio(const String&) {
+  return "Error: liveaudio requires the UART host link, which is not compiled in this build";
+}
+
+const CommandEntry liveAudioCommands[] = {
+    {"liveaudio", "Live PCM UART transport (not compiled in this build)", false,
+     cmd_liveaudio, nullptr},
+};
+
+const size_t liveAudioCommandsCount =
+    sizeof(liveAudioCommands) / sizeof(liveAudioCommands[0]);
+
 #endif  // ENABLE_UART_HOST_LINK

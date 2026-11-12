@@ -18,8 +18,8 @@ tgRequireAuth is defined once, for web requests only; that a revoke queues no
 notice; that /api/sessions and /api/admin/sessions share one handler; and that
 the stale three-argument streamBeginHtml prototype is gone.
 
-No name is exempt: the HTTP-off no-op stubs System_SensorStubs.h kept for
-authSuccessUnified and the notice queue went after the merge. It reads source
+No name is exempt: the HTTP-off no-op stubs once kept for authSuccessUnified
+and the notice queue went after the merge. It reads source
 text only; it does not compile anything. `--component` points it at another
 tree's component directory (its repository is two levels up).
 """

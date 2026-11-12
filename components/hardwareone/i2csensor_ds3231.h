@@ -103,6 +103,13 @@ const char* cmd_rtcstop(const String& argsInput);
 bool rtcCacheSnapshot(RtcCache& out, uint32_t timeoutMs = 10);
 
 #else
+// The RTC is not in this build. Its state reads as stopped and a start
+// request fails, so callers need no build condition.
+inline bool gRtcRunning = false;
+inline bool gRtcConnected = false;
+inline unsigned long gRtcLastStopTime = 0;
+inline TaskHandle_t gRtcTaskHandle = nullptr;
+inline bool rtcStartInternal() { return false; }
 inline bool rtcCacheSnapshot(RtcCache& out, uint32_t timeoutMs = 10) {
   (void)timeoutMs;
   out = {};

@@ -134,6 +134,17 @@ attachment should report unavailable without breaking unrelated services.
   Gate the driver that is absent, not shared state needed by another consumer.
   Disabled-feature APIs keep compatible signatures and report unavailable;
   they must not pretend an operation succeeded.
+- A feature that is compiled out is described by its own header. The header has
+  two branches on the feature's flag. The `#else` branch holds what the rest of
+  the program may still name: inline functions that report "not available" and
+  inline variables for the state. A definition that cannot be inline sits in
+  the `#else` branch of the feature's own source file. There is no central stub
+  file. A caller includes the header without a condition and does not declare
+  the feature's names itself. A stub that nothing uses in a build without the
+  feature is removed. The host test `disabled_feature_branches` lists the
+  owning headers and checks these points. The `xiao-no-network`, `xiao-no-web`
+  and `qtpy-all-sensors` configurations build the branches that the board
+  defaults never reach; build them after a change to a disabled branch.
 - Do not expose a sensor mutex or borrowed cache buffer to a screen or transport.
   A reading snapshot does not consume events; use the owner's explicit consume
   operation for latched input. Keep reading validity separate from lock success.

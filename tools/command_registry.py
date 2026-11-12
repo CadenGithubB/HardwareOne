@@ -48,10 +48,6 @@ REPO = Path(__file__).resolve().parent.parent
 COMPONENTS = REPO / "components" / "hardwareone"
 OUT_REFERENCE = REPO / "docs" / "COMMAND_REFERENCE.md"
 
-# Disabled-build stubs: empty arrays that mirror real names. Excluded so they
-# don't read as duplicate registrations of the real thing.
-STUB_FILE = "System_SensorStubs.cpp"
-
 # Same command name registered twice on purpose, to give it a second voice
 # phrase (CommandEntry has no alias list). Not drift.
 INTENTIONAL_DUPLICATES = {"voicecancel"}
@@ -220,7 +216,7 @@ def mutually_exclusive(a: tuple, b: tuple) -> bool:
     return False
 
 
-def parse_commands_and_alternates(include_stubs: bool = False):
+def parse_commands_and_alternates():
     """(array name -> command dicts, alternative-branch definitions skipped).
 
     The second value lists (file, array, line, row names) for each later
@@ -230,8 +226,6 @@ def parse_commands_and_alternates(include_stubs: bool = False):
     by_array: dict[str, list[dict]] = collections.defaultdict(list)
     alternates: list[tuple[str, str, int, list[str]]] = []
     for path in sources():
-        if not include_stubs and path.name == STUB_FILE:
-            continue
         src = read(path)
         paths = None
         kept: dict[str, list[tuple]] = collections.defaultdict(list)
@@ -268,9 +262,9 @@ def parse_commands_and_alternates(include_stubs: bool = False):
     return by_array, alternates
 
 
-def parse_commands(include_stubs: bool = False) -> dict[str, list[dict]]:
+def parse_commands() -> dict[str, list[dict]]:
     """array name -> list of command dicts (one branch of each #if/#else table)."""
-    return parse_commands_and_alternates(include_stubs)[0]
+    return parse_commands_and_alternates()[0]
 
 
 MODULES_RE = re.compile(r"CommandModule\s+gCommandModules\s*\[\]\s*=\s*\{")
@@ -391,7 +385,7 @@ def render_reference() -> tuple[str, int, int]:
             add(f"_`{m['array']}` has `#if` alternatives in "
                 f"`{alt_arrays[m['array']]}`; this table is the first branch. "
                 f"Other build configurations register a different version of "
-                f"these rows (for example stubs)._")
+                f"these rows (for example the disabled branch of the feature)._")
             add("")
 
     orphans = {a: v for a, v in by_array.items() if a not in seen_arrays}

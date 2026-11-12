@@ -9,7 +9,6 @@
 #include "System_BuildConfig.h"
 #include <esp_app_desc.h>
 #if ENABLE_OLED_DISPLAY
-#include "System_SensorStubs.h"
 #endif
 
 #if ENABLE_OLED_DISPLAY

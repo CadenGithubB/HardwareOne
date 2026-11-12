@@ -65,7 +65,6 @@ bool isEspNowInitialized() { return false; }
 #include "System_Clock.h"        // Clock:: — epoch/sync/tz/format helpers (Stage 2)
 #include "System_Command.h"
 #include "System_CommandReply.h"  // commandReplyIsFailure — the reply failure rule
-#include "System_SensorStubs.h"  // Stubs for disabled sensors/modules
 #include "System_MemoryMonitor.h"
 #include "System_Notifications.h"
 #include "System_Events.h"  // cmd_events — system event register inspector
@@ -86,23 +85,14 @@ bool isEspNowInitialized() { return false; }
 #if ENABLE_LLM_BACKEND
 #include "System_LLMBackend.h"         // LLMStatus, llmBackendStatus()
 #endif
-#if ENABLE_HTTP_SERVER
 #include "WebServer_Server.h"   // server, gServerIsHttps, gSessions, MAX_SESSIONS
-#endif
 #include "i2csensor_ds3231.h"  // RTC for time functions
+#include "System_Microphone.h"  // recording state, stopRecording
 // Additional sensor headers for the gXxxEnabled/gXxxConnected externs used by cmd_voltage.
-#if ENABLE_IMU_SENSOR
 #include "i2csensor_bno055.h"
-#endif
-#if ENABLE_THERMAL_SENSOR
 #include "i2csensor_mlx90640.h"
-#endif
-#if ENABLE_TOF_SENSOR
 #include "i2csensor_vl53l4cx.h"
-#endif
-#if ENABLE_APDS_SENSOR
 #include "i2csensor_apds9960.h"
-#endif
 
 extern "C" {
   extern uint8_t _bss_start;
@@ -158,9 +148,7 @@ void secureClearString(String& s) {
 #include "System_CLI.h"
 #include "System_CLIMode.h"
 #include "System_BuildConfig.h"   // Conditional sensor configuration - must be early
-#if ENABLE_WIFI
-  #include "System_WiFi.h"
-#endif
+#include "System_WiFi.h"
 #include "OLED_Display.h"
 #include "System_Automation.h"
 #include "System_I2C.h"
@@ -177,26 +165,13 @@ void secureClearString(String& s) {
 #include "System_Settings.h"
 #include "System_User.h"
 #include "System_VFS.h"  // For sdCommands (SD card management)
-#if ENABLE_THERMAL_SENSOR
-  #include "i2csensor_mlx90640.h"  // For thermalCommands
-#endif
-#if ENABLE_TOF_SENSOR
-  #include "i2csensor_vl53l4cx.h"      // For tofCommands
-#endif
-#if ENABLE_IMU_SENSOR
-  #include "i2csensor_bno055.h"      // For imuCommands
-#endif
-#if ENABLE_GAMEPAD_SENSOR
-  #include "i2csensor_seesaw.h"  // For gamepadCommands
-#endif
+#include "i2csensor_mlx90640.h"  // For thermalCommands
+#include "i2csensor_vl53l4cx.h"      // For tofCommands
+#include "i2csensor_bno055.h"      // For imuCommands
+#include "i2csensor_seesaw.h"  // For gamepadCommands
 #include "System_RadioCompanion.h"  // companionCommands, sleep hooks, status (P4X-EYE); no-ops elsewhere
-#if ENABLE_APDS_SENSOR
-  #include "i2csensor_apds9960.h"     // For apdsCommands
-#endif
-#include "System_SensorStubs.h" // Stubs for disabled sensors
-#if ENABLE_GPS_SENSOR
-  #include "i2csensor_pa1010d.h"      // For gpsCommands
-#endif
+#include "i2csensor_apds9960.h"     // For apdsCommands
+#include "i2csensor_pa1010d.h"      // For gpsCommands
 
 // ============================================================================
 // Base64 Encoding (moved from .ino)
