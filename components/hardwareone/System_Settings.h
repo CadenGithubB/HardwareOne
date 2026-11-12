@@ -1430,6 +1430,19 @@ inline void setDebugSetting(T& field, const T& value) {
 }
 
 // AES-128-CBC string encryption/decryption (device-bound key)
+// The text form of an encrypted value: "AES:<32 hex IV>:<hex ciphertext>".
+// These constants and isDeviceCipherText() are the only spelling of that form.
+constexpr char kDeviceCipherPrefix[] = "AES:";
+constexpr size_t kDeviceCipherPrefixLen = sizeof(kDeviceCipherPrefix) - 1;
+constexpr size_t kDeviceCipherIvHexLen = 32;   // 16 IV bytes as hex
+constexpr size_t kDeviceCipherSeparatorAt = kDeviceCipherPrefixLen + kDeviceCipherIvHexLen;
+// The prefix, the IV, the separator and at least two ciphertext bytes.
+constexpr size_t kDeviceCipherMinLen = kDeviceCipherSeparatorAt + 1 + 4;
+// The text is an encrypted value (it leads with the prefix), not plaintext.
+inline bool isDeviceCipherText(const char* text) {
+  return text && strncmp(text, kDeviceCipherPrefix, kDeviceCipherPrefixLen) == 0;
+}
+inline bool isDeviceCipherText(const String& text) { return isDeviceCipherText(text.c_str()); }
 String encryptString(const String& plaintext);
 String decryptString(const String& encrypted, bool internalResult = false);
 bool setInternalSecretSetting(String& field,const String& value,const SettingEntry* entry = nullptr);

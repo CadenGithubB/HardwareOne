@@ -355,6 +355,8 @@ SttLocalCallBudget sttLocalCallBudget(size_t samples, const SttLocalSession* ses
   return {3u << 20, 3u << 20};
 }
 #define free trackedFree
+// The micSource words and their one reader, as shipped (System_Microphone).
+// INSERT_MIC_PREFERENCE
 // INSERT_BROKER
 #if HW1_STT_TEST_EXPECT_DEFAULT_TRIM
 static_assert(HW1_STT_TRIM_SILENCE && HW1_STT_SPECULATIVE_FINAL,

@@ -88,6 +88,17 @@ extern int micGain;
 // microphone) replaces the micsource setting for this start and is strict:
 // unavailable fails instead of opening another source. NONE = the setting.
 bool initMicrophone(AudioSource preferred = AUDIO_SRC_NONE);
+
+// The words of the micSource setting (`micsource <auto|pdm|g2>`).
+constexpr char kMicSourceAuto[] = "auto";
+constexpr char kMicSourcePdm[] = "pdm";
+constexpr char kMicSourceG2[] = "g2";
+// The saved preference as a capture source: the PDM microphone, the glasses,
+// or AUDIO_SRC_NONE for "auto" (the source is resolved when capture starts).
+// The one reader of the setting's word; everything else compares the source.
+AudioSource micPreferredSource();
+// The same, but AUDIO_SRC_NONE while the preferred source is not available.
+AudioSource micPreferredAvailableSource();
 // Stops the source and joins any recorder through FINALIZING. False means the
 // bounded join expired and callers must not reconfigure/restart the source.
 bool stopMicrophone();

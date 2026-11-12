@@ -334,6 +334,12 @@ the phone app send it as text.
   the compiler reports it until it names the new value. The host test
   `sensor_identity` fails on a module name or feature id compared with a
   literal.
+- A text form that code has to recognise has one owner. An encrypted setting
+  value is `kDeviceCipherPrefix` and its offsets in `System_Settings.h`, asked
+  through `isDeviceCipherText()`. The `micSource` word is read by
+  `micPreferredSource()`, and callers compare the `AudioSource` it returns.
+  The slugs `oledmode` accepts are the rows of `kOledModeSlugs`. The host test
+  `text_form_owners` covers the three.
 
 ## Identity and role names
 

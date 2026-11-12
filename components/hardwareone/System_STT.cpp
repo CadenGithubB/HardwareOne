@@ -2666,8 +2666,7 @@ static bool sttBeginMode(SttOwner owner, uint32_t captureMs, bool continuous,
   const uint32_t nonce = esp_random();
   // A caller's per-session source wins over the setting; both are strict.
   const AudioSource requestedSource = preferredSource != AUDIO_SRC_NONE ? preferredSource
-      : gSettings.micSource == "pdm" ? AUDIO_SRC_LOCAL_PDM
-      : gSettings.micSource == "g2" ? AUDIO_SRC_G2_LEFT : AUDIO_SRC_NONE;
+      : micPreferredSource();
   TranscriptOptions transcriptOptions = suppliedOptions ? *suppliedOptions
       : transcriptCaptureOptions(owner.source, owner.epoch);
   if (transcriptOptions.enabled && (transcriptOptions.source != owner.source ||

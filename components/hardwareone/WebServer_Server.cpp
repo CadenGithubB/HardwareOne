@@ -1160,7 +1160,7 @@ static void loadIpBansFromFile(bool replace) {
 
       // Decrypt IP — all entries on disk are AES-encrypted
       String ipStr;
-      if (strncmp(ipRaw, "AES:", 4) == 0) {
+      if (isDeviceCipherText(ipRaw)) {
         ipStr = decryptString(String(ipRaw));
         if (ipStr.length() == 0) {
           DEBUG_AUTHF("[ipban] load: decryption failed for entry %d, skipping", count);

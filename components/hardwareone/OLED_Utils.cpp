@@ -5159,49 +5159,69 @@ static const char* getOledModeName(OledMode mode) {
   }
 }
 
+// The slugs `oledmode` and the saved default mode accept, aliases included. A
+// mode's first row is its primary slug; slugFromMode() names more modes than
+// this table resolves (the ones only another screen or command opens).
+static const struct { const char* slug; OledMode mode; } kOledModeSlugs[] = {
+  { "off",            OLED_OFF },
+  { "menu",           OLED_MENU },
+  { "status",         OLED_SYSTEM_STATUS },
+  { "sensordata",     OLED_SENSOR_DATA },
+  { "sensors",        OLED_SENSOR_DATA },
+  { "sensorlist",     OLED_SENSOR_LIST },
+  { "thermal",        OLED_THERMAL_VISUAL },
+  { "camera",         OLED_CAMERA },
+  { "network",        OLED_NETWORK_INFO },
+  { "mesh",           OLED_MESH_STATUS },
+  { "text",           OLED_CUSTOM_TEXT },
+  { "logo",           OLED_LOGO },
+  { "anim",           OLED_ANIMATION },
+  { "animation",      OLED_ANIMATION },
+  { "imuactions",     OLED_IMU_ACTIONS },
+  { "imu",            OLED_IMU_ACTIONS },
+  { "actions",        OLED_IMU_ACTIONS },
+  { "gps",            OLED_GPS_DATA },
+  { "fmradio",        OLED_FM_RADIO },
+  { "files",          OLED_FILE_BROWSER },
+  { "filebrowser",    OLED_FILE_BROWSER },
+  { "fb",             OLED_FILE_BROWSER },
+  { "logging",        OLED_LOGGING },
+  { "automations",    OLED_AUTOMATIONS },
+  { "auto",           OLED_AUTOMATIONS },
+  { "espnow",         OLED_ESPNOW },
+  { "tof",            OLED_TOF_DATA },
+  { "apds",           OLED_APDS_DATA },
+  { "power",          OLED_POWER },
+  { "led",            OLED_LED },
+  { "gamepad",        OLED_GAMEPAD_VISUAL },
+  { "gpad",           OLED_GAMEPAD_VISUAL },
+  { "bluetooth",      OLED_BLUETOOTH },
+  { "r1health",       OLED_R1_HEALTH },
+  { "remote",         OLED_REMOTE_SENSORS },
+  { "memory",         OLED_MEMORY_STATS },
+  { "mem",            OLED_MEMORY_STATS },
+  { "perf",           OLED_PERF_STATS },
+  { "i2cdiag",        OLED_I2C_DIAG },
+  { "users",          OLED_USER_MANAGER },
+  { "transcription",  OLED_TRANSCRIPTION },
+  { "web",            OLED_WEB_STATS },
+  { "webstatus",      OLED_WEB_STATUS },
+  { "rtc",            OLED_RTC_DATA },
+  { "presence",       OLED_PRESENCE_DATA },
+  { "notifs",         OLED_NOTIFICATIONS },
+  { "notifications",  OLED_NOTIFICATIONS },
+  { "map",            OLED_GPS_MAP },
+  { "gpsmap",         OLED_GPS_MAP },
+  { "login",          OLED_LOGIN },
+  { "settings",       OLED_SETTINGS },
+};
+
 // modeFromSlug: canonical CLI slug -> OledMode (all recognised aliases included).
 // Returns (OledMode)-1 for unknown/invalid slugs.
 OledMode modeFromSlug(const String& slug) {
-  if (slug == "off") return OLED_OFF;
-  if (slug == "menu") return OLED_MENU;
-  if (slug == "status") return OLED_SYSTEM_STATUS;
-  if (slug == "sensordata" || slug == "sensors") return OLED_SENSOR_DATA;
-  if (slug == "sensorlist") return OLED_SENSOR_LIST;
-  if (slug == "thermal") return OLED_THERMAL_VISUAL;
-  if (slug == "camera") return OLED_CAMERA;
-  if (slug == "network") return OLED_NETWORK_INFO;
-  if (slug == "mesh") return OLED_MESH_STATUS;
-  if (slug == "text") return OLED_CUSTOM_TEXT;
-  if (slug == "logo") return OLED_LOGO;
-  if (slug == "anim" || slug == "animation") return OLED_ANIMATION;
-  if (slug == "imuactions" || slug == "imu" || slug == "actions") return OLED_IMU_ACTIONS;
-  if (slug == "gps") return OLED_GPS_DATA;
-  if (slug == "fmradio") return OLED_FM_RADIO;
-  if (slug == "files" || slug == "filebrowser" || slug == "fb") return OLED_FILE_BROWSER;
-  if (slug == "logging") return OLED_LOGGING;
-  if (slug == "automations" || slug == "auto") return OLED_AUTOMATIONS;
-  if (slug == "espnow") return OLED_ESPNOW;
-  if (slug == "tof") return OLED_TOF_DATA;
-  if (slug == "apds") return OLED_APDS_DATA;
-  if (slug == "power") return OLED_POWER;
-  if (slug == "led") return OLED_LED;
-  if (slug == "gamepad" || slug == "gpad") return OLED_GAMEPAD_VISUAL;
-  if (slug == "bluetooth") return OLED_BLUETOOTH;
-  if (slug == "r1health") return OLED_R1_HEALTH;
-  if (slug == "remote") return OLED_REMOTE_SENSORS;
-  if (slug == "memory" || slug == "mem") return OLED_MEMORY_STATS;
-  if (slug == "perf") return OLED_PERF_STATS;
-  if (slug == "i2cdiag") return OLED_I2C_DIAG;
-  if (slug == "users") return OLED_USER_MANAGER;
-  if (slug == "transcription") return OLED_TRANSCRIPTION;
-  if (slug == "web") return OLED_WEB_STATS;
-  if (slug == "webstatus") return OLED_WEB_STATUS;
-  if (slug == "rtc") return OLED_RTC_DATA;
-  if (slug == "presence") return OLED_PRESENCE_DATA;
-  if (slug == "notifs" || slug == "notifications") return OLED_NOTIFICATIONS;
-  if (slug == "map" || slug == "gpsmap") return OLED_GPS_MAP;
-  if (slug == "login") return OLED_LOGIN;
-  if (slug == "settings") return OLED_SETTINGS;
+  for (const auto& row : kOledModeSlugs) {
+    if (slug == row.slug) return row.mode;
+  }
   return (OledMode)-1;
 }
 

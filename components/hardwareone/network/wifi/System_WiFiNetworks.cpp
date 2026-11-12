@@ -346,7 +346,7 @@ bool wifiNetworksWriteJson(JsonDocument& doc, bool excludePasswords) {
       int oldCount = 0;
       for (JsonObjectConst oldNet : oldNetworks) {
         const char* blob = oldNet["password"] | "";
-        if (strncmp(blob, "AES:", 4) != 0) continue;
+        if (!isDeviceCipherText(blob)) continue;
         if (oldCount++ >= MAX_WIFI_NETWORKS) break;
         if (saved[i].ssid == (oldNet["ssid"] | "")) {
           oldBlob[i] = blob;
@@ -389,7 +389,7 @@ unsigned wifiNetworksReadJson(const JsonDocument& doc) {
     WifiNetwork& record = loaded[count++];
     record.ssid = ssid;
     record.password = getSecret(net, "password");
-    if (strncmp(password, "AES:", 4) == 0 && record.password.length() == 0) {
+    if (isDeviceCipherText(password) && record.password.length() == 0) {
       ++failures;
       logSystemEvent("CRYPTO", "wifi password for '%s' failed to decrypt at load — stored blob preserved", ssid);
       char subject[48];

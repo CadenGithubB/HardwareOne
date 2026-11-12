@@ -9386,7 +9386,7 @@ static void loadEspNowDevices() {
 
     // Decrypt MAC if stored encrypted
     String macStr = String(rawMac);
-    if (macStr.startsWith("AES:")) {
+    if (isDeviceCipherText(macStr)) {
       String decrypted = decryptString(macStr);
       if (decrypted.length() > 0) {
         macStr = decrypted;
@@ -9436,7 +9436,7 @@ static void loadEspNowDevices() {
     // exactly 32 hexadecimal characters.
     String keyStr = String(entry["key"] | "");
     if (dev.encrypted) {
-      if (keyStr.length() > 0 && keyStr.startsWith("AES:")) {
+      if (keyStr.length() > 0 && isDeviceCipherText(keyStr)) {
         keyStr = decryptString(keyStr);
       }
       bool validKey = keyStr.length() == 32;

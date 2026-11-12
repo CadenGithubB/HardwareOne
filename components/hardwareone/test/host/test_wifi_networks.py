@@ -15,6 +15,7 @@ import subprocess
 import tempfile
 
 from test_web_batch_handlers import extract_block
+from text_form_owners_source import device_cipher_text
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
@@ -167,7 +168,10 @@ int main() {
                      "freertos/FreeRTOS.h", "freertos/semphr.h"):
             path = work / name
             path.parent.mkdir(exist_ok=True)
-            path.write_text('#pragma once\n#include "wifi_networks_test_platform.h"\n')
+            path.write_text('#pragma once\n#include "wifi_networks_test_platform.h"\n' +
+                            ('#include "device_cipher_text.h"\n' if name == "System_Settings.h" else ""))
+        (work / "device_cipher_text.h").write_text(
+            '#pragma once\n#include "wifi_networks_test_platform.h"\n' + device_cipher_text(component))
         shutil.copyfile(HERE / "wifi_networks_test_platform.h", work / "wifi_networks_test_platform.h")
         settings = (component / "System_Settings.cpp").read_text()
         secrets = '\n'.join(extract_block(settings, signature) for signature in (
@@ -176,7 +180,8 @@ int main() {
         removal = '\n'.join(extract_block(wifi, signature) for signature in (
             "static uint32_t parseSavedNetworkId(", "static const char* finishWifiRemoval(",
             "const char* cmd_wifirm(", "static const char* cmd_wifirmid("))
-        source.write_text(harness.replace("// INSERT_PRODUCTION_AND_READ_ADAPTER", READ_ADAPTER)
+        source.write_text('#include "device_cipher_text.h"\n' +
+                          harness.replace("// INSERT_PRODUCTION_AND_READ_ADAPTER", READ_ADAPTER)
                           .replace("// INSERT_PRODUCTION_SECRET_HELPERS", secrets)
                           .replace("// INSERT_PRODUCTION_REMOVAL_COMMANDS", removal))
         subprocess.run(command + ["-DWIFI_NETWORKS_OWNER=1", "-DENABLE_WIFI=1",

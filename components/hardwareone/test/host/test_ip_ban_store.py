@@ -39,6 +39,7 @@ import subprocess
 import tempfile
 
 from test_web_batch_handlers import extract_block, require
+from text_form_owners_source import device_cipher_text
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
@@ -76,7 +77,8 @@ def production(server: str, header: str, mutex: str, mutex_header: str, utils: s
     defines = re.findall(r"^#define (?:MAX_IP_BANS|IP_BANS_FILE)\s+.*$", header, re.M)
     require(len(defines) == 2, "MAX_IP_BANS and IP_BANS_FILE")
     require(header.count("struct IpBanEntry") == 1, "one IpBanEntry")
-    types = "\n".join(defines) + "\n" + extract_block(header, "struct IpBanEntry") + ";"
+    types = "\n".join(defines) + "\n" + extract_block(header, "struct IpBanEntry") + ";\n" + \
+        device_cipher_text(COMPONENT)
 
     require(server.count(SECTION_START) == 1, "one ban table definition")
     require(server.count(SECTION_END) == 1, "one banListJson definition")

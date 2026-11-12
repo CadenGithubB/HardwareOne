@@ -870,7 +870,7 @@ String encryptString(const String& password) {
   }
 
   // Encode: AES:<hex-iv>:<hex-ciphertext>
-  int resultLen = 4 + 32 + 1 + (paddedLen * 2) + 1;  // "AES:" + IV + ":" + ciphertext + null
+  int resultLen = kDeviceCipherSeparatorAt + 1 + (paddedLen * 2) + 1;  // prefix + IV + ":" + ciphertext + null
   char* result = (char*)ps_alloc(resultLen, AllocPref::PreferPsram, "aes.enc.result");
   if (!result) {
     free(ciphertext);
@@ -878,7 +878,7 @@ String encryptString(const String& password) {
     return "";
   }
 
-  int pos = snprintf(result, resultLen, "AES:");
+  int pos = snprintf(result, resultLen, "%s", kDeviceCipherPrefix);
   for (int i = 0; i < 16; i++) {
     pos += snprintf(result + pos, resultLen - pos, "%02X", iv[i]);
   }
@@ -900,7 +900,7 @@ String decryptString(const String& encryptedPassword, bool internalResult) {
     return "";
   }
 
-  if (!encryptedPassword.startsWith("AES:")) {
+  if (!isDeviceCipherText(encryptedPassword)) {
     ERROR_STORAGEF("[AES] Invalid encrypted string format (missing AES: prefix)");
     return "";
   }
@@ -908,17 +908,17 @@ String decryptString(const String& encryptedPassword, bool internalResult) {
   DEBUG_STORAGEF("[AES] Decrypting string (len=%d)", encryptedPassword.length());
 
   // Parse: AES:<32-hex-iv>:<hex-ciphertext>
-  if (encryptedPassword.length() < 41) {  // "AES:" + 32 hex chars + ":" minimum
+  if (encryptedPassword.length() < kDeviceCipherMinLen) {
     ERROR_STORAGEF("[AES] Encrypted string too short");
     return "";
   }
 
-  String ivHex = encryptedPassword.substring(4, 36);  // 32 hex chars = 16 bytes
-  if (encryptedPassword[36] != ':') {
+  String ivHex = encryptedPassword.substring(kDeviceCipherPrefixLen, kDeviceCipherSeparatorAt);  // 16 bytes
+  if (encryptedPassword[kDeviceCipherSeparatorAt] != ':') {
     ERROR_STORAGEF("[AES] Missing separator after IV");
     return "";
   }
-  String ciphertextHex = encryptedPassword.substring(37);
+  String ciphertextHex = encryptedPassword.substring(kDeviceCipherSeparatorAt + 1);
 
   // Derive AES key
   String keyMaterial = getDeviceEncryptionKey();
@@ -1064,7 +1064,7 @@ static ConfigLoad::Status gDebugLoad = ConfigLoad::Status::NotLoaded;
 // of a non-empty value (encryptString returns "" on alloc/mbedtls errors).
 // prevBlob is the value that was on disk for this key (from the merge-read).
 void putSecretPreserving(JsonObject obj, const char* key, const String& plaintext, const String& prevBlob) {
-  bool prevIsBlob = prevBlob.startsWith("AES:");
+  bool prevIsBlob = isDeviceCipherText(prevBlob);
   if (plaintext.length() > 0) {
     String enc = encryptString(plaintext);
     if (enc.length() == 0 && prevIsBlob) {
@@ -1097,7 +1097,7 @@ String getSecret(JsonObjectConst obj, const char* key) {
 // rate negligible (~0.4% per blob, and candidates are majority-voted).
 static bool aesBlobDecryptsWith(const String& keyMaterial, const char* blob) {
   size_t len = strlen(blob);
-  if (len < 41 || strncmp(blob, "AES:", 4) != 0 || blob[36] != ':') return false;
+  if (len < kDeviceCipherMinLen || !isDeviceCipherText(blob) || blob[kDeviceCipherSeparatorAt] != ':') return false;
 
   uint8_t key[16];
   uint8_t hash[32];
@@ -1106,11 +1106,12 @@ static bool aesBlobDecryptsWith(const String& keyMaterial, const char* blob) {
 
   uint8_t iv[16];
   for (int i = 0; i < 16; i++) {
-    char hx[3] = { blob[4 + i * 2], blob[5 + i * 2], '\0' };
+    const char* at = blob + kDeviceCipherPrefixLen + i * 2;
+    char hx[3] = { at[0], at[1], '\0' };
     iv[i] = (uint8_t)strtol(hx, NULL, 16);
   }
 
-  const char* ctHex = blob + 37;
+  const char* ctHex = blob + kDeviceCipherSeparatorAt + 1;
   int ctLen = (int)strlen(ctHex) / 2;
   if (ctLen <= 0 || (ctLen % 16) != 0) return false;
 
@@ -1903,7 +1904,7 @@ static void collectAesBlobs(JsonVariantConst v, String* out, int cap, int& n) {
     for (JsonVariantConst e : v.as<JsonArrayConst>()) collectAesBlobs(e, out, cap, n);
   } else if (v.is<const char*>()) {
     const char* s = v.as<const char*>();
-    if (s && strncmp(s, "AES:", 4) == 0 && n < cap) out[n++] = s;
+    if (isDeviceCipherText(s) && n < cap) out[n++] = s;
   }
 }
 
@@ -3299,7 +3300,7 @@ size_t readRegisteredSettings(JsonDocument& doc, const char* onlyPersistFile, bo
             // Decrypt secret strings when reading from disk
             const char* encrypted = val | (e->stringDefault ? e->stringDefault : "");
             String dec = decryptString(encrypted, e->internalSecret);
-            if (strncmp(encrypted, "AES:", 4) == 0 && dec.length() == 0) {
+            if (isDeviceCipherText(encrypted) && dec.length() == 0) {
               gSecretLoadFailures++;
               logSystemEvent("CRYPTO", "secret '%s' failed to decrypt at load — stored blob preserved", e->jsonKey);
               systemEventPost(SYSEVT_SECRET_DECRYPT_FAILED, e->jsonKey, "stored blob preserved");

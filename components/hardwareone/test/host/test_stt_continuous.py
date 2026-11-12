@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 import subprocess
 import tempfile
+from text_form_owners_source import mic_preference
 
 HERE = Path(__file__).resolve().parent
 SOURCE = HERE.parents[1]
@@ -51,6 +52,7 @@ def main():
     broker = no_includes((SOURCE / 'System_STT.cpp').read_text().split('// CLI_ADAPTER_BEGIN')[0]) + '\n#endif\n'
     harness = (HERE / 'stt_continuous_harness.cpp').read_text()
     harness = harness.replace('// INSERT_INTERFACE', interface).replace('// INSERT_BROKER', broker).replace('// INSERT_FRONTEND', frontend)
+    harness = harness.replace('// INSERT_MIC_PREFERENCE', mic_preference(SOURCE))
     with tempfile.TemporaryDirectory(prefix='hw1-stt-continuous-') as tmp:
         unit, exe = Path(tmp) / 'test.cpp', Path(tmp) / 'test'
         unit.write_text(harness)

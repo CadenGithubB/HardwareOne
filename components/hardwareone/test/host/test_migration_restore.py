@@ -39,6 +39,7 @@ import subprocess
 import tempfile
 
 from test_web_batch_handlers import extract_block, require
+from text_form_owners_source import device_cipher_text
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
@@ -131,7 +132,7 @@ def production(migration: str, header: str, mutex: str, mutex_header: str, utils
                f"  addDirectoryToBackup(files, warnings, \"/maps\", ctx{cap_argument});\n"
                "  (void)doc;\n}")
     return {"// INSERT_FS_GUARD": guard, "// INSERT_TEXT_IO": text_io,
-            "// INSERT_CONSTANTS": "\n".join(constants),
+            "// INSERT_CONSTANTS": "\n".join(constants) + "\n" + device_cipher_text(COMPONENT),
             "// INSERT_PRODUCTION": "\n\n".join(pieces), "// INSERT_BACKUP_ADAPTER": adapter}
 
 

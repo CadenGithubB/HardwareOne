@@ -684,6 +684,15 @@ static uint32_t micEffectiveSampleRate() {
   return (audioGetSource() == AUDIO_SRC_G2_LEFT) ? AUDIO_HAL_SAMPLE_RATE
                                                  : (uint32_t)micSampleRate;
 }
+AudioSource micPreferredSource() {
+  if (gSettings.micSource == kMicSourcePdm) return AUDIO_SRC_LOCAL_PDM;
+  if (gSettings.micSource == kMicSourceG2) return AUDIO_SRC_G2_LEFT;
+  return AUDIO_SRC_NONE;  // "auto", or a word this build does not know
+}
+AudioSource micPreferredAvailableSource() {
+  const AudioSource wanted = micPreferredSource();
+  return (wanted != AUDIO_SRC_NONE && audioSourceAvailable(wanted)) ? wanted : AUDIO_SRC_NONE;
+}
 static const char* micSourceName() {
   switch (audioGetSource()) {
     case AUDIO_SRC_LOCAL_PDM: return "pdm";
@@ -1708,7 +1717,7 @@ static bool startRecordingInternal(MicRecordingOwner owner,
   // up on `preferred` already (initMicrophone(preferred)). So a request is only
   // checked, and a mismatch is refused below instead of recording another mic.
   if (preferred == AUDIO_SRC_NONE &&
-      gSettings.micSource == "g2" &&
+      micPreferredSource() == AUDIO_SRC_G2_LEFT &&
       audioGetSource() != AUDIO_SRC_G2_LEFT &&
       audioSourceAvailable(AUDIO_SRC_G2_LEFT) &&
       !micRecordingBusy()) {
@@ -2182,13 +2191,8 @@ bool initMicrophone(AudioSource preferred) {
     INFO_MIC_LIFECYCLEF("Requested mic source unavailable");
     return false;
   }
-  if (gSettings.micSource == "pdm" && audioSourceAvailable(AUDIO_SRC_LOCAL_PDM)) {
-    audioSetSource(AUDIO_SRC_LOCAL_PDM);
-  } else if (gSettings.micSource == "g2" && audioSourceAvailable(AUDIO_SRC_G2_LEFT)) {
-    audioSetSource(AUDIO_SRC_G2_LEFT);
-  } else {
-    audioSetSource(AUDIO_SRC_NONE);  // auto/unavailable preference: resolve afresh
-  }
+  // AUDIO_SRC_NONE for auto or an unavailable preference: resolve afresh.
+  audioSetSource(micPreferredAvailableSource());
 
   // Capture is owned by HAL_Audio (the single owner). audioCaptureStart resolves
   // the source (PDM-first if the selection is unavailable), starts the PDM I2S
@@ -3295,7 +3299,7 @@ const char* cmd_micsource(const String& argsInput) {
       audioSourceAvailable(AUDIO_SRC_G2_LEFT) ? "yes" : "no");
     return gMicCmdBuffer;
   }
-  if (arg != "auto" && arg != "pdm" && arg != "g2") {
+  if (arg != kMicSourceAuto && arg != kMicSourcePdm && arg != kMicSourceG2) {
     return "Error: invalid arguments — Usage: micsource <auto|onboard|pdm|g2>";
   }
   const bool wasEnabled = gMicRunning;

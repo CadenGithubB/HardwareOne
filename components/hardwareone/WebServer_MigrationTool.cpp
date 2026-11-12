@@ -106,7 +106,7 @@ static void stripAesCiphertextValues(JsonVariant v, int depth = 0) {
     for (JsonPair kv : obj) {
       if (kv.value().is<const char*>()) {
         const char* s = kv.value().as<const char*>();
-        if (s && strncmp(s, "AES:", 4) == 0) obj[kv.key()] = "";
+        if (isDeviceCipherText(s)) obj[kv.key()] = "";
       } else {
         stripAesCiphertextValues(kv.value(), depth + 1);
       }
@@ -155,7 +155,7 @@ static void collectAesEncryptedFields(JsonVariantConst v, const char* filePath,
     }
   } else if (v.is<const char*>()) {
     const char* s = v.as<const char*>();
-    if (s && strncmp(s, "AES:", 4) == 0) {
+    if (isDeviceCipherText(s)) {
       char entry[256];
       snprintf(entry, sizeof(entry), "%s:%s", filePath, pathBuf.c_str());
       encFields.add(entry);
@@ -170,7 +170,7 @@ static void collectEncryptedFieldsFromFiles(JsonObject files, JsonArray encField
     if (v.is<const char*>()) {
       const char* s = v.as<const char*>();
       // Whole-file ciphertext (certs/keys encrypted at export time)
-      if (s && strncmp(s, "AES:", 4) == 0) encFields.add(filePath);
+      if (isDeviceCipherText(s)) encFields.add(filePath);
       continue;
     }
     String pathBuf;
@@ -785,7 +785,7 @@ static bool writeRestoreFilesFromDoc(JsonDocument& doc, bool compatible,
       serializeJsonPretty(kv.value(), content);
     }
 
-    if (compatible && isCertFile(pathStr) && content.startsWith("AES:")) {
+    if (compatible && isCertFile(pathStr) && isDeviceCipherText(content)) {
       String decrypted = decryptString(content);
       if (decrypted.length() > 0) {
         content = decrypted;

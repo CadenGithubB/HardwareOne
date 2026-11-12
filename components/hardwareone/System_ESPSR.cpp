@@ -2077,13 +2077,8 @@ static bool initI2sMicrophone() {
   // lease capture for SR. audioCaptureStart resolves the source (PDM-first if the
   // preference is unavailable) and, for G2, arms the ring + enables the glasses
   // stream — so SR runs off the glasses mic on a PDM-less board too.
-  if (gSettings.micSource == "pdm" && audioSourceAvailable(AUDIO_SRC_LOCAL_PDM)) {
-    audioSetSource(AUDIO_SRC_LOCAL_PDM);
-  } else if (gSettings.micSource == "g2" && audioSourceAvailable(AUDIO_SRC_G2_LEFT)) {
-    audioSetSource(AUDIO_SRC_G2_LEFT);
-  } else {
-    audioSetSource(AUDIO_SRC_NONE);  // auto/unavailable preference: resolve afresh
-  }
+  // AUDIO_SRC_NONE for auto or an unavailable preference: resolve afresh.
+  audioSetSource(micPreferredAvailableSource());
   // Saved PDM gain / high-pass, applied when the channel starts.
   audioSetPdmTuning(static_cast<uint8_t>(gSettings.pdmAmplify), static_cast<uint16_t>(gSettings.pdmHpfHz));
   return audioCaptureStart("sr", I2S_SR_SAMPLE_RATE);

@@ -31,6 +31,7 @@ import subprocess
 import tempfile
 
 from test_web_batch_handlers import extract_block, require
+from text_form_owners_source import oled_mode_slugs
 
 HERE = Path(__file__).resolve().parent
 
@@ -187,7 +188,7 @@ def build_unit(component: Path, source_dir: Path | None) -> str:
     if not body.endswith(","):
         body += ","
     mode_enum = body + "\n  OLED_HARNESS_MODE_END\n};"
-    slugs = "\n\n".join(definition(oled, signature) for signature in (
+    slugs = oled_mode_slugs(oled) + "\n".join(definition(oled, signature) for signature in (
         "OledMode modeFromSlug(", "const char* slugFromMode("))
     harness = (HERE / "oled_dead_paths_harness.cpp").read_text(encoding="utf-8")
     for marker, text in (("// INSERT_ENUM", mode_enum), ("// INSERT_SLUGS", slugs)):
