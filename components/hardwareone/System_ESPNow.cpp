@@ -10880,20 +10880,13 @@ void processMeshHeartbeats() {
     
     // Only master pushes streaming prefs to worker (after full sync)
     if (isBondMaster() && isBondSynced()) {
-      struct { const char* name; bool enabled; RemoteSensorType type; } streams[] = {
-        { "thermal",  gSettings.bondStreamThermal,  REMOTE_SENSOR_THERMAL },
-        { "tof",      gSettings.bondStreamTof,      REMOTE_SENSOR_TOF },
-        { "imu",      gSettings.bondStreamImu,      REMOTE_SENSOR_IMU },
-        { "gps",      gSettings.bondStreamGps,      REMOTE_SENSOR_GPS },
-        { "input",    gSettings.bondStreamInput,    REMOTE_SENSOR_INPUT },
-        { "fmradio",  gSettings.bondStreamFmradio,   REMOTE_SENSOR_FMRADIO },
-        { "rtc",      gSettings.bondStreamRtc,       REMOTE_SENSOR_RTC },
-        { "presence", gSettings.bondStreamPresence,  REMOTE_SENSOR_PRESENCE },
-      };
-      for (auto& s : streams) {
-        if (s.enabled) {
-          BROADCAST_PRINTF("[BOND] 9f: Sending STREAM_CTRL %s ON to worker", s.name);
-          sendBondStreamCtrl(s.type, true);
+      // Every sensor type with a saved stream setting, in type order.
+      for (int t = 0; t < REMOTE_SENSOR_MAX; t++) {
+        const RemoteSensorType type = (RemoteSensorType)t;
+        const bool* enabled = bondStreamSetting(type);
+        if (enabled && *enabled) {
+          BROADCAST_PRINTF("[BOND] 9f: Sending STREAM_CTRL %s ON to worker", sensorTypeToString(type));
+          sendBondStreamCtrl(type, true);
           vTaskDelay(pdMS_TO_TICKS(20));  // Small gap between sends
         }
       }
@@ -17788,8 +17781,8 @@ const char* cmd_bond_stream(const String& argsInput) {
   action.toLowerCase();
   
   // Validate sensor name
-  RemoteSensorType sensorType = stringToSensorType(sensorName.c_str());
-  if (strcmp(sensorTypeToString(sensorType), sensorName.c_str()) != 0) {
+  RemoteSensorType sensorType = REMOTE_SENSOR_THERMAL;
+  if (!sensorTypeFromString(sensorName.c_str(), sensorType)) {
     return "Error: Unknown sensor. Valid: thermal, tof, imu, gps, input, fmradio, rtc, presence";
   }
   
@@ -17810,17 +17803,7 @@ const char* cmd_bond_stream(const String& argsInput) {
   }
   
   // Update persistent settings
-  switch (sensorType) {
-    case REMOTE_SENSOR_THERMAL:  setSetting(gSettings.bondStreamThermal, enable); break;
-    case REMOTE_SENSOR_TOF:      setSetting(gSettings.bondStreamTof, enable); break;
-    case REMOTE_SENSOR_IMU:      setSetting(gSettings.bondStreamImu, enable); break;
-    case REMOTE_SENSOR_GPS:      setSetting(gSettings.bondStreamGps, enable); break;
-    case REMOTE_SENSOR_INPUT:  setSetting(gSettings.bondStreamInput, enable); break;
-    case REMOTE_SENSOR_FMRADIO:  setSetting(gSettings.bondStreamFmradio, enable); break;
-    case REMOTE_SENSOR_RTC:      setSetting(gSettings.bondStreamRtc, enable); break;
-    case REMOTE_SENSOR_PRESENCE: setSetting(gSettings.bondStreamPresence, enable); break;
-    default: break;
-  }
+  if (bool* saved = bondStreamSetting(sensorType)) setSetting(*saved, enable);
   BROADCAST_PRINTF("[ESP-NOW] %s streaming %s sensor data", enable ? "Started" : "Stopped", sensorName.c_str());
   
   return enable ? "OK: Started streaming sensor data to bonded master" : "OK: Stopped streaming sensor data";

@@ -325,6 +325,15 @@ the phone app send it as text.
   reply for a phrase.
 - The host test `reply_wording` fails on a comparison or search against a
   reply word outside `System_CommandReply.h`.
+- A sensor is known by a value. An `i2cSensors[]` row states whether its
+  driver is in the build, the setting that routes it to a bus and its
+  `I2cDeviceType`; a row of the G2 sensors page has a `G2SensorKind`. The
+  module name and the feature id are the words for commands, logs and the
+  feature registry. Adding a sensor means a row with its facts; the `switch`
+  in `ramFlushIdForDevice()` and in `bondStreamSetting()` has no default, so
+  the compiler reports it until it names the new value. The host test
+  `sensor_identity` fails on a module name or feature id compared with a
+  literal.
 
 ## Identity and role names
 

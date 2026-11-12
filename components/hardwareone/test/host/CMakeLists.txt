@@ -2151,6 +2151,13 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_reply_wording.py)
 
+# A sensor is known by a value (its i2cSensors[] row fields, its I2cDeviceType,
+# its G2SensorKind), never by comparing its name with a literal.
+add_test(
+  NAME sensor_identity
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_sensor_identity.py)
+
 # OLED display-session writer windows (README "OLED display-session writer windows"):
 # the frame commit and the command-result path validate under the display lifecycle
 # writer, release it, push or copy, then re-check without opening a session.

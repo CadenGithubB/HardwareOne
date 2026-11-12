@@ -401,7 +401,15 @@ struct I2cSensorEntry {
   const char* moduleName;
   uint32_t i2cClockHz;
   uint32_t i2cTimeoutMs;
+  // What the row is, as values. Code branches on these, never on moduleName.
+  bool compiled;                  // the row's driver is in this build (its ENABLE_ flag)
+  int (*configuredBus)();         // reads the setting that routes the device to a bus
+  uint8_t (*configuredAddress)(); // the address when it is a setting, else nullptr
+  I2cDeviceType deviceType;       // the start/stop queue's id; I2C_DEVICE_COUNT when the queue does not manage it
 };
+
+// The module name of a queue-managed device (its feature id), from i2cSensors[].
+const char* i2cModuleNameForDeviceType(I2cDeviceType type);
 
 extern const I2cSensorEntry i2cSensors[];
 extern const size_t i2cSensorsCount;

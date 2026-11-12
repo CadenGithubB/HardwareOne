@@ -1289,20 +1289,14 @@ static esp_err_t handleBondStream(httpd_req_t* req) {
     onOff = "off";
   } else {
     // toggle: look up current state from gSettings
-    bool current = false;
-    if      (strcmp(sensorParam, "thermal")  == 0) current = gSettings.bondStreamThermal;
-    else if (strcmp(sensorParam, "tof")      == 0) current = gSettings.bondStreamTof;
-    else if (strcmp(sensorParam, "imu")      == 0) current = gSettings.bondStreamImu;
-    else if (strcmp(sensorParam, "gps")      == 0) current = gSettings.bondStreamGps;
-    else if (strcmp(sensorParam, "input")    == 0) current = gSettings.bondStreamInput;
-    else if (strcmp(sensorParam, "fmradio")  == 0) current = gSettings.bondStreamFmradio;
-    else if (strcmp(sensorParam, "presence") == 0) current = gSettings.bondStreamPresence;
-    else if (strcmp(sensorParam, "rtc")      == 0) current = gSettings.bondStreamRtc;
-    else {
+    RemoteSensorType sensorType = REMOTE_SENSOR_THERMAL;
+    const bool* current = sensorTypeFromString(sensorParam, sensorType)
+        ? bondStreamSetting(sensorType) : nullptr;
+    if (!current) {
       httpd_resp_send(req, "{\"success\":false,\"error\":\"Unknown sensor\"}", HTTPD_RESP_USE_STRLEN);
       return ESP_OK;
     }
-    onOff = current ? "off" : "on";
+    onOff = *current ? "off" : "on";
   }
 
   // Route through unified command: "bond stream <sensor> <on|off>"

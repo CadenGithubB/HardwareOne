@@ -238,37 +238,50 @@ bool initRemoteSensorSystem() {
 // Helper Functions
 // ==========================
 
+// The wire names of the sensor types, in RemoteSensorType order.
+static const char* const kRemoteSensorNames[] = {
+  "thermal", "tof", "imu", "gps", "input", "fmradio", "camera", "microphone", "rtc", "presence", "apds",
+};
+static_assert(sizeof(kRemoteSensorNames) / sizeof(kRemoteSensorNames[0]) == REMOTE_SENSOR_MAX,
+              "one name per RemoteSensorType, in enum order");
+
 const char* sensorTypeToString(RemoteSensorType type) {
-  switch (type) {
-    case REMOTE_SENSOR_THERMAL: return "thermal";
-    case REMOTE_SENSOR_TOF: return "tof";
-    case REMOTE_SENSOR_IMU: return "imu";
-    case REMOTE_SENSOR_GPS: return "gps";
-    case REMOTE_SENSOR_INPUT: return "input";
-    case REMOTE_SENSOR_FMRADIO: return "fmradio";
-    case REMOTE_SENSOR_CAMERA: return "camera";
-    case REMOTE_SENSOR_MICROPHONE: return "microphone";
-    case REMOTE_SENSOR_RTC: return "rtc";
-    case REMOTE_SENSOR_PRESENCE: return "presence";
-    case REMOTE_SENSOR_APDS: return "apds";
-    default: return "unknown";
+  return (type >= 0 && type < REMOTE_SENSOR_MAX) ? kRemoteSensorNames[type] : "unknown";
+}
+
+bool sensorTypeFromString(const char* str, RemoteSensorType& out) {
+  if (!str) return false;
+  for (int i = 0; i < REMOTE_SENSOR_MAX; i++) {
+    if (strcmp(str, kRemoteSensorNames[i]) == 0) { out = (RemoteSensorType)i; return true; }
   }
+  return false;
 }
 
 RemoteSensorType stringToSensorType(const char* str) {
-  if (strcmp(str, "thermal") == 0) return REMOTE_SENSOR_THERMAL;
-  if (strcmp(str, "tof") == 0) return REMOTE_SENSOR_TOF;
-  if (strcmp(str, "imu") == 0) return REMOTE_SENSOR_IMU;
-  if (strcmp(str, "gps") == 0) return REMOTE_SENSOR_GPS;
-  if (strcmp(str, "input") == 0) return REMOTE_SENSOR_INPUT;
-  if (strcmp(str, "fmradio") == 0) return REMOTE_SENSOR_FMRADIO;
-  if (strcmp(str, "camera") == 0) return REMOTE_SENSOR_CAMERA;
-  if (strcmp(str, "microphone") == 0) return REMOTE_SENSOR_MICROPHONE;
-  if (strcmp(str, "rtc") == 0) return REMOTE_SENSOR_RTC;
-  if (strcmp(str, "presence") == 0) return REMOTE_SENSOR_PRESENCE;
-  if (strcmp(str, "apds") == 0) return REMOTE_SENSOR_APDS;
-  return REMOTE_SENSOR_THERMAL;  // Default
+  RemoteSensorType type = REMOTE_SENSOR_THERMAL;  // Default
+  sensorTypeFromString(str, type);
+  return type;
 }
+
+#if ENABLE_BONDED_MODE
+bool* bondStreamSetting(RemoteSensorType type) {
+  switch (type) {
+    case REMOTE_SENSOR_THERMAL:    return &gSettings.bondStreamThermal;
+    case REMOTE_SENSOR_TOF:        return &gSettings.bondStreamTof;
+    case REMOTE_SENSOR_IMU:        return &gSettings.bondStreamImu;
+    case REMOTE_SENSOR_GPS:        return &gSettings.bondStreamGps;
+    case REMOTE_SENSOR_INPUT:      return &gSettings.bondStreamInput;
+    case REMOTE_SENSOR_FMRADIO:    return &gSettings.bondStreamFmradio;
+    case REMOTE_SENSOR_RTC:        return &gSettings.bondStreamRtc;
+    case REMOTE_SENSOR_PRESENCE:   return &gSettings.bondStreamPresence;
+    case REMOTE_SENSOR_CAMERA:
+    case REMOTE_SENSOR_MICROPHONE:
+    case REMOTE_SENSOR_APDS:
+    case REMOTE_SENSOR_MAX:        break;
+  }
+  return nullptr;
+}
+#endif  // ENABLE_BONDED_MODE
 
 // Find cache entry for device+sensor
 static RemoteSensorData* findCacheEntry(const uint8_t* deviceMac, RemoteSensorType sensorType) {

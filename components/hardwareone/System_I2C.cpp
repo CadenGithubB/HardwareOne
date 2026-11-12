@@ -64,96 +64,18 @@
 // Unified I2C Manager Initialization
 // ============================================================================
 
-// Helper function to check if a sensor is compiled in
-// Uses module name matching against compile-time flags
+// A row's driver is in this build. Each i2cSensors[] row states it.
 static bool isSensorCompiled(const I2cSensorEntry& sensor) {
-  if (sensor.moduleName && strcmp(sensor.moduleName, "matrix") == 0) return ENABLE_LED_MATRIX;
-  if (sensor.moduleName == nullptr) {
-    // Infrastructure devices (SSD1306, PCA9685) - check by address
-    if (sensor.address == 0x3C || sensor.address == 0x3D) {
-      // SSD1306 OLED
-      #if !ENABLE_OLED_DISPLAY
-        return false;
-      #endif
-    }
-    if (sensor.address == 0x40) {
-      // PCA9685 Servo
-      #if !ENABLE_SERVO
-        return false;
-      #endif
-    }
-    return true;
-  }
-  
-  #if !ENABLE_THERMAL_SENSOR
-    if (strcmp(sensor.moduleName, "thermal") == 0) return false;
-  #endif
-  #if !ENABLE_TOF_SENSOR
-    if (strcmp(sensor.moduleName, "tof") == 0) return false;
-  #endif
-  #if !ENABLE_IMU_SENSOR
-    if (strcmp(sensor.moduleName, "imu") == 0) return false;
-  #endif
-  #if !ENABLE_GAMEPAD_SENSOR && !ENABLE_ANO_ENCODER && !ENABLE_GT911_TOUCH
-    if (strcmp(sensor.moduleName, "input") == 0) return false;
-  #endif
-  // (Removed: two branches matching sensor.moduleName against the pre-unification
-  //  "gamepad"/"anoencoder" names. This function filters TABLE ROWS, and no
-  //  i2cSensors[] row carries either name — every seesaw row is "input", handled
-  //  above. The removed comment claimed it kept callers passing the old strings
-  //  working, which was false twice over: those callers go through the unrelated
-  //  isSensorConnected(), and this helper is file-local. It is why the
-  //  isSensorConnected("gamepad") bug looked covered for so long.)
-  #if !ENABLE_APDS_SENSOR
-    if (strcmp(sensor.moduleName, "apds") == 0) return false;
-  #endif
-  #if !ENABLE_GPS_SENSOR
-    if (strcmp(sensor.moduleName, "gps") == 0) return false;
-  #endif
-  #if !ENABLE_FM_RADIO
-    if (strcmp(sensor.moduleName, "fmradio") == 0) return false;
-  #endif
-  #if !ENABLE_RTC_SENSOR
-    if (strcmp(sensor.moduleName, "rtc") == 0) return false;
-  #endif
-  #if !ENABLE_PRESENCE_SENSOR
-    if (strcmp(sensor.moduleName, "presence") == 0) return false;
-  #endif
-  #if !ENABLE_SERVO
-    if (strcmp(sensor.moduleName, "servo") == 0) return false;
-  #endif
-  
-  return true;
+  return sensor.compiled;
 }
 
 // The registry is keyed by (bus, address), so boot-time identity records must
 // follow the same per-device routing settings used by the drivers.  Registering
 // every compiled device on bus 0 creates a "ghost" primary-bus record whenever
 // the real device is routed to I2C2; address-only health lookups can then report
-// and recover the wrong record.
+// and recover the wrong record. Each i2cSensors[] row names its bus setting.
 static uint8_t configuredBusForSensor(const I2cSensorEntry& sensor) {
-  int configuredBus = 0;
-
-  if (sensor.moduleName) {
-#if ENABLE_LED_MATRIX
-    if (strcmp(sensor.moduleName, "matrix") == 0) return matrixDeviceBus();
-#endif
-    if      (strcmp(sensor.moduleName, "thermal")  == 0) configuredBus = gSettings.thermalBus;
-    else if (strcmp(sensor.moduleName, "tof")      == 0) configuredBus = gSettings.tofBus;
-    else if (strcmp(sensor.moduleName, "imu")      == 0) configuredBus = gSettings.imuBus;
-    else if (strcmp(sensor.moduleName, "input")    == 0) configuredBus = gSettings.inputBus;
-    else if (strcmp(sensor.moduleName, "apds")     == 0) configuredBus = gSettings.apdsBus;
-    else if (strcmp(sensor.moduleName, "gps")      == 0) configuredBus = gSettings.gpsBus;
-    else if (strcmp(sensor.moduleName, "fmradio")  == 0) configuredBus = gSettings.fmRadioBus;
-    else if (strcmp(sensor.moduleName, "rtc")      == 0) configuredBus = gSettings.rtcBus;
-    else if (strcmp(sensor.moduleName, "presence") == 0) configuredBus = gSettings.presenceBus;
-    else if (strcmp(sensor.moduleName, "servo")    == 0) configuredBus = gSettings.servoBus;
-  } else {
-    // Infrastructure rows do not have module names.
-    if (sensor.address == 0x3C || sensor.address == 0x3D) configuredBus = gSettings.oledBus;
-    else if (sensor.address == 0x36)                     configuredBus = gSettings.fuelGaugeBus;
-    else if (sensor.address == 0x40)                     configuredBus = gSettings.servoBus;
-  }
+  const int configuredBus = sensor.configuredBus ? sensor.configuredBus() : 0;
 
   if (configuredBus < 0 || configuredBus >= I2cDeviceManager::NUM_BUSES) {
     WARN_I2CF("Invalid configured bus %d for 0x%02X (%s); using bus 0",
@@ -166,10 +88,7 @@ static uint8_t configuredBusForSensor(const I2cSensorEntry& sensor) {
 // Resolve configurable identity consistently for scans and health registration.
 static I2cSensorEntry configuredSensor(const I2cSensorEntry& source) {
   I2cSensorEntry sensor = source;
-#if ENABLE_LED_MATRIX
-  if (sensor.moduleName && strcmp(sensor.moduleName, "matrix") == 0)
-    sensor.address = matrixDeviceAddress();
-#endif
+  if (sensor.configuredAddress) sensor.address = sensor.configuredAddress();
   return sensor;
 }
 
@@ -247,48 +166,88 @@ int discoveryCount = 0;
 
 // I2C Sensor Database - Sensors actually used/detected in this system
 // Entry format: { address, name, description, manufacturer, multiAddress, altAddress,
-//                libraryHeapBytes, libraryName, headerGuard, moduleName, i2cClockHz, i2cTimeoutMs }
+//                libraryHeapBytes, libraryName, headerGuard, moduleName, i2cClockHz, i2cTimeoutMs,
+//                compiled, configuredBus, configuredAddress, deviceType }
+// The second line of a row is what the row is: whether its driver is in this
+// build, the setting that routes it to a bus, its address when that is a
+// setting, and its id in the start/stop queue.
+#if ENABLE_LED_MATRIX
+#define MATRIX_BUS     []() -> int { return matrixDeviceBus(); }
+#define MATRIX_ADDRESS []() -> uint8_t { return matrixDeviceAddress(); }
+#else
+#define MATRIX_BUS     nullptr
+#define MATRIX_ADDRESS nullptr
+#endif
 const I2cSensorEntry i2cSensors[] = {
   // Sensors with CLI Modules
   // { addr, name, desc, mfr, multiAddr, altAddr, heapBytes, library, headerGuard, module, clockHz, timeoutMs }
-  { 0x28, "BNO055", "9-DOF IMU", "Adafruit", true, 0x29, 1500, "Adafruit_BNO055", "_ADAFRUIT_BNO055_H_", "imu", 100000, 300 },
-  { 0x39, "APDS9960", "RGB, Gesture & Proximity", "Adafruit", false, 0x00, 500, "Adafruit_APDS9960", "_ADAFRUIT_APDS9960_H_", "apds", 100000, 200 },
-  { 0x29, "VL53L4CX", "ToF Distance (up to 6m)", "Adafruit", false, 0x00, 1000, "VL53L4CX", "_VL53L4CX_CLASS_H_", "tof", 400000, 250 },
+  { 0x28, "BNO055", "9-DOF IMU", "Adafruit", true, 0x29, 1500, "Adafruit_BNO055", "_ADAFRUIT_BNO055_H_", "imu", 100000, 300,
+    ENABLE_IMU_SENSOR, []() -> int { return gSettings.imuBus; }, nullptr, I2C_DEVICE_IMU },
+  { 0x39, "APDS9960", "RGB, Gesture & Proximity", "Adafruit", false, 0x00, 500, "Adafruit_APDS9960", "_ADAFRUIT_APDS9960_H_", "apds", 100000, 200,
+    ENABLE_APDS_SENSOR, []() -> int { return gSettings.apdsBus; }, nullptr, I2C_DEVICE_APDS },
+  { 0x29, "VL53L4CX", "ToF Distance (up to 6m)", "Adafruit", false, 0x00, 1000, "VL53L4CX", "_VL53L4CX_CLASS_H_", "tof", 400000, 250,
+    ENABLE_TOF_SENSOR, []() -> int { return gSettings.tofBus; }, nullptr, I2C_DEVICE_TOF },
   // Both seesaw I2C addresses (0x49 + 0x50) belong to the unified "input"
   // module — either the seesaw Mini Gamepad or the ANO Rotary Encoder can
   // appear at either address depending on hardware jumpers. The compiled-in
   // driver disambiguates at runtime; the descriptions show the relevant
   // device for the active build.
 #if ENABLE_GT911_TOUCH
-  { 0x5d, "GT911", "Single touchscreen", "Goodix", false, 0x00, 100, NULL, NULL, "input", 400000, 100 },
-  { 0x14, "GT911", "Single touchscreen (alt)", "Goodix", false, 0x00, 100, NULL, NULL, "input", 400000, 100 },
+  { 0x5d, "GT911", "Single touchscreen", "Goodix", false, 0x00, 100, NULL, NULL, "input", 400000, 100,
+    (ENABLE_GAMEPAD_SENSOR || ENABLE_ANO_ENCODER || ENABLE_GT911_TOUCH), []() -> int { return gSettings.inputBus; }, nullptr, I2C_DEVICE_INPUT },
+  { 0x14, "GT911", "Single touchscreen (alt)", "Goodix", false, 0x00, 100, NULL, NULL, "input", 400000, 100,
+    (ENABLE_GAMEPAD_SENSOR || ENABLE_ANO_ENCODER || ENABLE_GT911_TOUCH), []() -> int { return gSettings.inputBus; }, nullptr, I2C_DEVICE_INPUT },
 #elif ENABLE_ANO_ENCODER
-  { 0x49, "Seesaw", "ANO Rotary Encoder (default)", "Adafruit", false, 0x00, 800, "Adafruit_seesaw", "_ADAFRUIT_SEESAW_H_", "input", 400000, 200 },
-  { 0x50, "Seesaw", "ANO Rotary Encoder (alt addr)", "Adafruit", false, 0x00, 800, "Adafruit_seesaw", "_ADAFRUIT_SEESAW_H_", "input", 400000, 200 },
+  { 0x49, "Seesaw", "ANO Rotary Encoder (default)", "Adafruit", false, 0x00, 800, "Adafruit_seesaw", "_ADAFRUIT_SEESAW_H_", "input", 400000, 200,
+    (ENABLE_GAMEPAD_SENSOR || ENABLE_ANO_ENCODER || ENABLE_GT911_TOUCH), []() -> int { return gSettings.inputBus; }, nullptr, I2C_DEVICE_INPUT },
+  { 0x50, "Seesaw", "ANO Rotary Encoder (alt addr)", "Adafruit", false, 0x00, 800, "Adafruit_seesaw", "_ADAFRUIT_SEESAW_H_", "input", 400000, 200,
+    (ENABLE_GAMEPAD_SENSOR || ENABLE_ANO_ENCODER || ENABLE_GT911_TOUCH), []() -> int { return gSettings.inputBus; }, nullptr, I2C_DEVICE_INPUT },
 #else
-  { 0x50, "Seesaw", "Mini I2C Gamepad",              "Adafruit", false, 0x00, 800, "Adafruit_seesaw", "_ADAFRUIT_SEESAW_H_", "input", 400000, 200 },
-  { 0x49, "Seesaw", "Mini I2C Gamepad (alt addr)",   "Adafruit", false, 0x00, 800, "Adafruit_seesaw", "_ADAFRUIT_SEESAW_H_", "input", 400000, 200 },
+  { 0x50, "Seesaw", "Mini I2C Gamepad",              "Adafruit", false, 0x00, 800, "Adafruit_seesaw", "_ADAFRUIT_SEESAW_H_", "input", 400000, 200,
+    (ENABLE_GAMEPAD_SENSOR || ENABLE_ANO_ENCODER || ENABLE_GT911_TOUCH), []() -> int { return gSettings.inputBus; }, nullptr, I2C_DEVICE_INPUT },
+  { 0x49, "Seesaw", "Mini I2C Gamepad (alt addr)",   "Adafruit", false, 0x00, 800, "Adafruit_seesaw", "_ADAFRUIT_SEESAW_H_", "input", 400000, 200,
+    (ENABLE_GAMEPAD_SENSOR || ENABLE_ANO_ENCODER || ENABLE_GT911_TOUCH), []() -> int { return gSettings.inputBus; }, nullptr, I2C_DEVICE_INPUT },
 #endif
-  { 0x33, "MLX90640", "32x24 Thermal Camera", "Adafruit", false, 0x00, 2000, "Adafruit_MLX90640", "_ADAFRUIT_MLX90640_H_", "thermal", 100000, 500 },
-  { 0x10, "PA1010D", "Mini GPS Module", "Adafruit", false, 0x00, 500, "Adafruit_GPS", "_ADAFRUIT_GPS_H", "gps", 100000, 200 },
-  { 0x11, "RDA5807", "FM Radio Receiver", "ScoutMakes", false, 0x00, 500, "RDA5807", NULL, "fmradio", 100000, 200 },
-  { 0x68, "DS3231", "Precision RTC", "Adafruit", false, 0x00, 100, NULL, NULL, "rtc", 100000, 100 },
-  { 0x5A, "STHS34PF80", "IR Presence/Motion", "ST", false, 0x00, 200, NULL, NULL, "presence", 100000, 200 },
+  { 0x33, "MLX90640", "32x24 Thermal Camera", "Adafruit", false, 0x00, 2000, "Adafruit_MLX90640", "_ADAFRUIT_MLX90640_H_", "thermal", 100000, 500,
+    ENABLE_THERMAL_SENSOR, []() -> int { return gSettings.thermalBus; }, nullptr, I2C_DEVICE_THERMAL },
+  { 0x10, "PA1010D", "Mini GPS Module", "Adafruit", false, 0x00, 500, "Adafruit_GPS", "_ADAFRUIT_GPS_H", "gps", 100000, 200,
+    ENABLE_GPS_SENSOR, []() -> int { return gSettings.gpsBus; }, nullptr, I2C_DEVICE_GPS },
+  { 0x11, "RDA5807", "FM Radio Receiver", "ScoutMakes", false, 0x00, 500, "RDA5807", NULL, "fmradio", 100000, 200,
+    ENABLE_FM_RADIO, []() -> int { return gSettings.fmRadioBus; }, nullptr, I2C_DEVICE_FMRADIO },
+  { 0x68, "DS3231", "Precision RTC", "Adafruit", false, 0x00, 100, NULL, NULL, "rtc", 100000, 100,
+    ENABLE_RTC_SENSOR, []() -> int { return gSettings.rtcBus; }, nullptr, I2C_DEVICE_RTC },
+  { 0x5A, "STHS34PF80", "IR Presence/Motion", "ST", false, 0x00, 200, NULL, NULL, "presence", 100000, 200,
+    ENABLE_PRESENCE_SENSOR, []() -> int { return gSettings.presenceBus; }, nullptr, I2C_DEVICE_PRESENCE },
   
   // Detected Infrastructure (no CLI modules)
-  { 0x3D, "SSD1306", "OLED 128x64 Display", "Adafruit", true, 0x3C, 0, NULL, NULL, NULL, 400000, 50 },
+  { 0x3D, "SSD1306", "OLED 128x64 Display", "Adafruit", true, 0x3C, 0, NULL, NULL, NULL, 400000, 50,
+    ENABLE_OLED_DISPLAY, []() -> int { return gSettings.oledBus; }, nullptr, I2C_DEVICE_COUNT },
 #if BATTERY_BACKEND_FUEL_GAUGE
   // On-board LiPo fuel gauge (battery backend, not a toggleable sensor) — listed
   // so the I2C discovery scan probes 0x36 and names it instead of "Unknown".
-  { 0x36, "MAX17048", "LiPo Fuel Gauge", "Maxim", false, 0x00, 0, NULL, NULL, NULL, 400000, 100 },
+  { 0x36, "MAX17048", "LiPo Fuel Gauge", "Maxim", false, 0x00, 0, NULL, NULL, NULL, 400000, 100,
+    true, []() -> int { return gSettings.fuelGaugeBus; }, nullptr, I2C_DEVICE_COUNT },
 #endif
   // 0x70 is PCA9685's broadcast all-call address, not a second device identity.
-  { 0x40, "PCA9685", "16-Channel 12-bit PWM/Servo Driver", "Adafruit", false, 0x00, 0, "Adafruit_PWMServoDriver", "_ADAFRUIT_PWMSERVODRIVER_H_", NULL, 100000, 200 },
-  { 0x70, "HT16K33", "Monochrome 16x8 LED Matrix", "Adafruit", false, 0x00, 0, "Adafruit_LEDBackpack", "Adafruit_LEDBackpack_h", "matrix", 100000, 200 },
+  { 0x40, "PCA9685", "16-Channel 12-bit PWM/Servo Driver", "Adafruit", false, 0x00, 0, "Adafruit_PWMServoDriver", "_ADAFRUIT_PWMSERVODRIVER_H_", NULL, 100000, 200,
+    ENABLE_SERVO, []() -> int { return gSettings.servoBus; }, nullptr, I2C_DEVICE_COUNT },
+  { 0x70, "HT16K33", "Monochrome 16x8 LED Matrix", "Adafruit", false, 0x00, 0, "Adafruit_LEDBackpack", "Adafruit_LEDBackpack_h", "matrix", 100000, 200,
+    ENABLE_LED_MATRIX, MATRIX_BUS, MATRIX_ADDRESS, I2C_DEVICE_COUNT },
 };
+
+#undef MATRIX_BUS
+#undef MATRIX_ADDRESS
 
 // Export array size for use in .ino file
 const size_t i2cSensorsCount = sizeof(i2cSensors) / sizeof(i2cSensors[0]);
+
+const char* i2cModuleNameForDeviceType(I2cDeviceType type) {
+  if (type >= I2C_DEVICE_COUNT) return nullptr;
+  for (size_t i = 0; i < i2cSensorsCount; i++) {
+    if (i2cSensors[i].deviceType == type) return i2cSensors[i].moduleName;
+  }
+  return nullptr;
+}
 
 // Helper: Check if a sensor is connected by name (used by help system)
 // Uses sensor database to map module name to device name dynamically
@@ -2996,7 +2955,9 @@ extern const SettingsModule i2cSettingsModule = {
 // Check if a sensor is available for auto-start:
 // 1. Fast path: check connectedDevices[] registry (populated by discoverI2cDevices)
 // 2. Fallback: live I2C ping in case the scan missed the device (transient bus issue)
-static bool isSensorAvailableForAutoStart(const char* moduleName, I2cDeviceType deviceType) {
+static bool isSensorAvailableForAutoStart(I2cDeviceType deviceType) {
+  const char* moduleName = i2cModuleNameForDeviceType(deviceType);
+  if (!moduleName) moduleName = "?";
   if (isSensorConnected(moduleName)) return true;
   // Registry miss — try a direct I2C ping as fallback
   uint8_t addr = i2cAddressForDeviceType(deviceType);
@@ -3016,7 +2977,7 @@ static bool isSensorAvailableForAutoStart(const char* moduleName, I2cDeviceType 
   // intent=true and the next capture records "user turned it off" — which would
   // suppress the configured autostart on every later boot, with replugging the
   // sensor doing nothing to undo it.
-  ramFlushMarkAutostartFailed(ramFlushIdForModule(moduleName));
+  ramFlushMarkAutostartFailed(ramFlushIdForDevice(deviceType));
   return false;
 }
 
@@ -3059,7 +3020,7 @@ void processAutoStartSensors() {
   
   #if ENABLE_THERMAL_SENSOR
   if (gSettings.thermalEnabled && ramFlushResolve(RF_THERMAL, gSettings.thermalAutoStart)) {
-    if (isSensorAvailableForAutoStart("thermal", I2C_DEVICE_THERMAL)) {
+    if (isSensorAvailableForAutoStart(I2C_DEVICE_THERMAL)) {
       INFO_I2C_AUTOSTARTF("[AutoStart] Queuing thermal sensor");
       enqueueDeviceStart(I2C_DEVICE_THERMAL); autoStartQueued++;
     } else {
@@ -3070,7 +3031,7 @@ void processAutoStartSensors() {
   
   #if ENABLE_TOF_SENSOR
   if (gSettings.tofEnabled && ramFlushResolve(RF_TOF, gSettings.tofAutoStart)) {
-    if (isSensorAvailableForAutoStart("tof", I2C_DEVICE_TOF)) {
+    if (isSensorAvailableForAutoStart(I2C_DEVICE_TOF)) {
       INFO_I2C_AUTOSTARTF("[AutoStart] Queuing ToF sensor");
       enqueueDeviceStart(I2C_DEVICE_TOF); autoStartQueued++;
     } else {
@@ -3081,7 +3042,7 @@ void processAutoStartSensors() {
   
   #if ENABLE_IMU_SENSOR
   if (gSettings.imuEnabled && ramFlushResolve(RF_IMU, gSettings.imuAutoStart)) {
-    if (isSensorAvailableForAutoStart("imu", I2C_DEVICE_IMU)) {
+    if (isSensorAvailableForAutoStart(I2C_DEVICE_IMU)) {
       INFO_I2C_AUTOSTARTF("[AutoStart] Queuing IMU sensor");
       enqueueDeviceStart(I2C_DEVICE_IMU); autoStartQueued++;
     } else {
@@ -3092,7 +3053,7 @@ void processAutoStartSensors() {
   
   #if ENABLE_GPS_SENSOR
   if (gSettings.gpsEnabled && ramFlushResolve(RF_GPS, gSettings.gpsAutoStart)) {
-    if (isSensorAvailableForAutoStart("gps", I2C_DEVICE_GPS)) {
+    if (isSensorAvailableForAutoStart(I2C_DEVICE_GPS)) {
       INFO_I2C_AUTOSTARTF("[AutoStart] Queuing GPS sensor");
       enqueueDeviceStart(I2C_DEVICE_GPS); autoStartQueued++;
     } else {
@@ -3103,7 +3064,7 @@ void processAutoStartSensors() {
   
   #if ENABLE_FM_RADIO
   if (gSettings.fmRadioEnabled && ramFlushResolve(RF_FMRADIO, gSettings.fmRadioAutoStart)) {
-    if (isSensorAvailableForAutoStart("fmradio", I2C_DEVICE_FMRADIO)) {
+    if (isSensorAvailableForAutoStart(I2C_DEVICE_FMRADIO)) {
       INFO_I2C_AUTOSTARTF("[AutoStart] Queuing FM Radio sensor");
       enqueueDeviceStart(I2C_DEVICE_FMRADIO); autoStartQueued++;
     } else {
@@ -3114,7 +3075,7 @@ void processAutoStartSensors() {
   
   #if ENABLE_APDS_SENSOR
   if (gSettings.apdsEnabled && ramFlushResolve(RF_APDS, gSettings.apdsAutoStart)) {
-    if (isSensorAvailableForAutoStart("apds", I2C_DEVICE_APDS)) {
+    if (isSensorAvailableForAutoStart(I2C_DEVICE_APDS)) {
       INFO_I2C_AUTOSTARTF("[AutoStart] Queuing APDS sensor");
       enqueueDeviceStart(I2C_DEVICE_APDS); autoStartQueued++;
     } else {
@@ -3125,13 +3086,12 @@ void processAutoStartSensors() {
   
   #if ENABLE_GAMEPAD_SENSOR || ENABLE_GT911_TOUCH
   if (gSettings.inputEnabled && ramFlushResolve(RF_INPUT, gSettings.inputAutoStart)) {
-    // "input" (not the pre-unification "gamepad") — isSensorConnected matches
-    // against i2cSensors[].moduleName, and every seesaw row is named "input".
-    // Passing "gamepad" always missed the registry and fell through to the raw
-    // 0x50 ping, so a gamepad on the alt address 0x49 logged a false
-    // "not detected" + poisoned its ramflush bit. Keep in sync with
-    // ramFlushIdForModule() — it maps this exact string.
-    if (isSensorAvailableForAutoStart("input", I2C_DEVICE_INPUT)) {
+    // The device type is the identity. Its module name comes from its
+    // i2cSensors[] row, so the registry lookup and the ramflush id cannot
+    // disagree. (A hand-typed "gamepad" here once missed the registry, fell
+    // through to the raw 0x50 ping and poisoned the ramflush bit for a
+    // gamepad on the alt address 0x49.)
+    if (isSensorAvailableForAutoStart(I2C_DEVICE_INPUT)) {
       INFO_I2C_AUTOSTARTF("[AutoStart] Queuing Gamepad sensor");
       enqueueDeviceStart(I2C_DEVICE_INPUT); autoStartQueued++;
     } else {
@@ -3142,7 +3102,7 @@ void processAutoStartSensors() {
   
   #if ENABLE_RTC_SENSOR
   if (gSettings.rtcEnabled && ramFlushResolve(RF_RTC, gSettings.rtcAutoStart)) {
-    if (isSensorAvailableForAutoStart("rtc", I2C_DEVICE_RTC)) {
+    if (isSensorAvailableForAutoStart(I2C_DEVICE_RTC)) {
       INFO_I2C_AUTOSTARTF("[AutoStart] Queuing RTC sensor");
       enqueueDeviceStart(I2C_DEVICE_RTC); autoStartQueued++;
     } else {
@@ -3153,7 +3113,7 @@ void processAutoStartSensors() {
   
   #if ENABLE_PRESENCE_SENSOR
   if (gSettings.presenceEnabled && ramFlushResolve(RF_PRESENCE, gSettings.presenceAutoStart)) {
-    if (isSensorAvailableForAutoStart("presence", I2C_DEVICE_PRESENCE)) {
+    if (isSensorAvailableForAutoStart(I2C_DEVICE_PRESENCE)) {
       INFO_I2C_AUTOSTARTF("[AutoStart] Queuing Presence sensor");
       enqueueDeviceStart(I2C_DEVICE_PRESENCE); autoStartQueued++;
     } else {

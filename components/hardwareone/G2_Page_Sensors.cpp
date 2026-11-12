@@ -255,7 +255,14 @@ static void ledG2FormatValue(char* out, size_t cap) {
 }
 #endif
 
+// What a row is. The page branches on this; featureId is only the word its
+// commands and the feature registry use.
+enum class G2SensorKind : uint8_t {
+  Imu, Tof, Thermal, Apds, Input, Rtc, Gps, Presence, FmRadio, Camera, Microphone, Oled, Led
+};
+
 struct G2SensorRow {
+  G2SensorKind kind;
   const char* label;            // 5-char short identifier (e.g. "IMU", "THERM")
   const char* hardware;         // canonical part name (e.g. "BNO055")
   const char* featureId;        // feature-registry ID (lowercase, e.g. "imu",
@@ -278,76 +285,76 @@ struct G2SensorRow {
 static void buildRows(G2SensorRow* rows, size_t maxRows, size_t* outCount,
                       bool includeStubs = true) {
   size_t i = 0;
-  auto add = [&](const char* lbl, const char* hw, const char* fid,
+  auto add = [&](G2SensorKind kind, const char* lbl, const char* hw, const char* fid,
                  bool compiled, bool en, bool conn, G2SensorFormatter fmt) {
     if (i >= maxRows) return;
     if (!compiled && !includeStubs) return;
-    rows[i++] = { lbl, hw, fid, compiled, en, conn, fmt };
+    rows[i++] = { kind, lbl, hw, fid, compiled, en, conn, fmt };
   };
 
 #if ENABLE_IMU_SENSOR
-  add("IMU",   "BNO055",   "imu",      true,  gImuRunning,      gImuConnected,     imuG2FormatValue);
+  add(G2SensorKind::Imu, "IMU",   "BNO055",   "imu",      true,  gImuRunning,      gImuConnected,     imuG2FormatValue);
 #else
-  add("IMU",   "BNO055",   "imu",      false, false, false,                         nullptr);
+  add(G2SensorKind::Imu, "IMU",   "BNO055",   "imu",      false, false, false,                         nullptr);
 #endif
 
 #if ENABLE_TOF_SENSOR
-  add("TOF",   "VL53L4CX", "tof",      true,  gTofRunning,      gTofConnected,     tofG2FormatValue);
+  add(G2SensorKind::Tof, "TOF",   "VL53L4CX", "tof",      true,  gTofRunning,      gTofConnected,     tofG2FormatValue);
 #else
-  add("TOF",   "VL53L4CX", "tof",      false, false, false,                         nullptr);
+  add(G2SensorKind::Tof, "TOF",   "VL53L4CX", "tof",      false, false, false,                         nullptr);
 #endif
 
 #if ENABLE_THERMAL_SENSOR
-  add("THERM", "MLX90640", "thermal",  true,  gThermalRunning,  gThermalConnected, thermalG2FormatValue);
+  add(G2SensorKind::Thermal, "THERM", "MLX90640", "thermal",  true,  gThermalRunning,  gThermalConnected, thermalG2FormatValue);
 #else
-  add("THERM", "MLX90640", "thermal",  false, false, false,                         nullptr);
+  add(G2SensorKind::Thermal, "THERM", "MLX90640", "thermal",  false, false, false,                         nullptr);
 #endif
 
 #if ENABLE_APDS_SENSOR
-  add("APDS",  "APDS9960", "apds",     true,  gApdsRunning,     gApdsConnected,    apdsG2FormatValue);
+  add(G2SensorKind::Apds, "APDS",  "APDS9960", "apds",     true,  gApdsRunning,     gApdsConnected,    apdsG2FormatValue);
 #else
-  add("APDS",  "APDS9960", "apds",     false, false, false,                         nullptr);
+  add(G2SensorKind::Apds, "APDS",  "APDS9960", "apds",     false, false, false,                         nullptr);
 #endif
 
 #if ENABLE_GAMEPAD_SENSOR
-  add("GAMEP", "Seesaw",   "gamepad",  true,  gInputRunning,  gInputConnected, gamepadG2FormatValue);
+  add(G2SensorKind::Input, "GAMEP", "Seesaw",   "gamepad",  true,  gInputRunning,  gInputConnected, gamepadG2FormatValue);
 #elif ENABLE_ANO_ENCODER
   // Same row id ("gamepad") so the unified input commands (openinput /
   // inputautostart) and the registry remap to "input" keep working; only the
   // label, hardware name, formatter and live readout differ for the ANO.
-  add("ANO",   "Encoder",  "gamepad",  true,  gInputRunning,  gInputConnected, anoG2FormatValue);
+  add(G2SensorKind::Input, "ANO",   "Encoder",  "gamepad",  true,  gInputRunning,  gInputConnected, anoG2FormatValue);
 #else
-  add("GAMEP", "Seesaw",   "gamepad",  false, false, false,                         nullptr);
+  add(G2SensorKind::Input, "GAMEP", "Seesaw",   "gamepad",  false, false, false,                         nullptr);
 #endif
 
 #if ENABLE_RTC_SENSOR
-  add("RTC",   "DS3231",   "rtc",      true,  gRtcRunning,      gRtcConnected,     rtcG2FormatValue);
+  add(G2SensorKind::Rtc, "RTC",   "DS3231",   "rtc",      true,  gRtcRunning,      gRtcConnected,     rtcG2FormatValue);
 #else
-  add("RTC",   "DS3231",   "rtc",      false, false, false,                         nullptr);
+  add(G2SensorKind::Rtc, "RTC",   "DS3231",   "rtc",      false, false, false,                         nullptr);
 #endif
 
 #if ENABLE_GPS_SENSOR
-  add("GPS",   "PA1010D",  "gps",      true,  gGpsRunning,      gGpsConnected,     gpsG2FormatValue);
+  add(G2SensorKind::Gps, "GPS",   "PA1010D",  "gps",      true,  gGpsRunning,      gGpsConnected,     gpsG2FormatValue);
 #else
-  add("GPS",   "PA1010D",  "gps",      false, false, false,                         nullptr);
+  add(G2SensorKind::Gps, "GPS",   "PA1010D",  "gps",      false, false, false,                         nullptr);
 #endif
 
 #if ENABLE_PRESENCE_SENSOR
-  add("PRES",  "STHS34",   "presence", true,  gPresenceRunning, gPresenceConnected, presenceG2FormatValue);
+  add(G2SensorKind::Presence, "PRES",  "STHS34",   "presence", true,  gPresenceRunning, gPresenceConnected, presenceG2FormatValue);
 #else
-  add("PRES",  "STHS34",   "presence", false, false, false,                         nullptr);
+  add(G2SensorKind::Presence, "PRES",  "STHS34",   "presence", false, false, false,                         nullptr);
 #endif
 
 #if ENABLE_FM_RADIO
-  add("FM",    "RDA5807",  "fmradio",  true,  gFmRadioRunning,  gFmRadioConnected, fmG2FormatValue);
+  add(G2SensorKind::FmRadio, "FM",    "RDA5807",  "fmradio",  true,  gFmRadioRunning,  gFmRadioConnected, fmG2FormatValue);
 #else
-  add("FM",    "RDA5807",  "fmradio",  false, false, false,                         nullptr);
+  add(G2SensorKind::FmRadio, "FM",    "RDA5807",  "fmradio",  false, false, false,                         nullptr);
 #endif
 
 #if ENABLE_CAMERA_SENSOR
-  add("CAM",   "DVP",      "camera",     true,  gCameraRunning,   gCameraRunning,    nullptr);
+  add(G2SensorKind::Camera, "CAM",   "DVP",      "camera",     true,  gCameraRunning,   gCameraRunning,    nullptr);
 #else
-  add("CAM",   "DVP",      "camera",     false, false, false,                         nullptr);
+  add(G2SensorKind::Camera, "CAM",   "DVP",      "camera",     false, false, false,                         nullptr);
 #endif
 
 #if ENABLE_MICROPHONE
@@ -361,16 +368,16 @@ static void buildRows(G2SensorRow* rows, size_t maxRows, size_t* outCount,
                        : audioSourceAvailable(AUDIO_SRC_LOCAL_PDM)  ? "PDM"
                        : audioSourceAvailable(AUDIO_SRC_G2_LEFT)    ? "G2"
                                                                     : "—";
-    add("MIC", micSub, "microphone", micAvail, gMicRunning, micAvail, nullptr);
+    add(G2SensorKind::Microphone, "MIC", micSub, "microphone", micAvail, gMicRunning, micAvail, nullptr);
   }
 #else
-  add("MIC",   "PDM",      "microphone", false, false, false,                         nullptr);
+  add(G2SensorKind::Microphone, "MIC",   "PDM",      "microphone", false, false, false,                         nullptr);
 #endif
 
 #if ENABLE_OLED_DISPLAY
-  add("OLED",  "SSD1306",  "oled",     true,  gOledRunning,     gOledRunning,      nullptr);
+  add(G2SensorKind::Oled, "OLED",  "SSD1306",  "oled",     true,  gOledRunning,     gOledRunning,      nullptr);
 #else
-  add("OLED",  "SSD1306",  "oled",     false, false, false,                         nullptr);
+  add(G2SensorKind::Oled, "OLED",  "SSD1306",  "oled",     false, false, false,                         nullptr);
 #endif
 
   // LED-as-device row (same decision that put it on the OLED's Sensors
@@ -380,9 +387,9 @@ static void buildRows(G2SensorRow* rows, size_t maxRows, size_t* outCount,
   // write-only — no readable color state); tapping drills into the LED
   // control sub-page (G2_Page_LED.cpp) instead of the generic sensor detail.
 #if ENABLE_NEOPIXEL
-  add("LED",   "NeoPixel", "led",      true,  true,             true,              ledG2FormatValue);
+  add(G2SensorKind::Led, "LED",   "NeoPixel", "led",      true,  true,             true,              ledG2FormatValue);
 #else
-  add("LED",   "NeoPixel", "led",      false, false, false,                         nullptr);
+  add(G2SensorKind::Led, "LED",   "NeoPixel", "led",      false, false, false,                         nullptr);
 #endif
 
   if (outCount) *outCount = i;
@@ -569,7 +576,7 @@ void g2ShowSensorsMenu() {
 // is live; false leaves the previous level and page routing the visible rows.
 static bool showSensorDetail(const G2SensorRow& r) {
 #if ENABLE_CAMERA_SENSOR
-  const bool isCameraLive = (strcmp(r.featureId, "camera") == 0);
+  const bool isCameraLive = (r.kind == G2SensorKind::Camera);
 #else
   const bool isCameraLive = false;
 #endif
@@ -602,7 +609,7 @@ static bool showSensorDetail(const G2SensorRow& r) {
                                                       : nullptr;
 
 #if ENABLE_CAMERA_SENSOR
-  const bool isCamera = (strcmp(r.featureId, "camera") == 0);
+  const bool isCamera = (r.kind == G2SensorKind::Camera);
 #else
   const bool isCamera = false;
 #endif
@@ -615,7 +622,7 @@ static bool showSensorDetail(const G2SensorRow& r) {
   bool labelAsLiveState = isCamera;
   bool isMic            = false;
 #if ENABLE_MICROPHONE
-  isMic = (strcmp(r.featureId, "microphone") == 0);
+  isMic = (r.kind == G2SensorKind::Microphone);
   if (isMic) labelAsLiveState = true;
 #endif
 
@@ -725,9 +732,9 @@ static bool showSensorDetail(const G2SensorRow& r) {
 // device's row id is "gamepad", but the registry entry is the unified "input"
 // (gamepad/ANO) entry that owns gSettings.inputAutoStart — so remap it.
 // Everything else matches the registry id 1:1.
-static const FeatureEntry* sensorFeature(const char* featureId) {
-  if (featureId && strcmp(featureId, "gamepad") == 0) return getFeatureById("input");
-  return getFeatureById(featureId);
+static const FeatureEntry* sensorFeature(const G2SensorRow& r) {
+  if (r.kind == G2SensorKind::Input) return getFeatureById("input");
+  return getFeatureById(r.featureId);
 }
 
 // Build a sensor's runtime start/stop CLI command. Most i2c sensors use
@@ -736,10 +743,10 @@ static const FeatureEntry* sensorFeature(const char* featureId) {
 // exist (the registered names are openfmradio/closefmradio, which the generic
 // form below produces). Never hit on hardware because ENABLE_FM_RADIO builds
 // hadn't shipped; the FM row now drills into the tuner page anyway.
-static void sensorRuntimeCmd(const char* featureId, bool open, char* out, size_t cap) {
+static void sensorRuntimeCmd(const G2SensorRow& r, bool open, char* out, size_t cap) {
   const char* verb = open ? "open" : "close";
-  if (strcmp(featureId, "gamepad") == 0)       snprintf(out, cap, "%sinput", verb);
-  else                                         snprintf(out, cap, "%s%s", verb, featureId);
+  if (r.kind == G2SensorKind::Input) snprintf(out, cap, "%sinput", verb);
+  else                               snprintf(out, cap, "%s%s", verb, r.featureId);
 }
 
 // Build a sensor's PERSISTED auto-start command. The command + value format
@@ -748,13 +755,15 @@ static void sensorRuntimeCmd(const char* featureId, bool open, char* out, size_t
 // gSettings.oledEnabled IS the boot state), and the i2c data sensors use
 // "sensorautostart <id> <on|off>". Using the generic form for OLED is what
 // produced "Unknown sensor".
-static void sensorAutostartCmd(const char* featureId, bool on, char* out, size_t cap) {
+static void sensorAutostartCmd(const G2SensorRow& r, bool on, char* out, size_t cap) {
   const char* v = on ? "on" : "off";
-  if (strcmp(featureId, "gamepad") == 0)        snprintf(out, cap, "inputautostart %s", v);
-  else if (strcmp(featureId, "camera") == 0)    snprintf(out, cap, "cameraautostart %s", v);
-  else if (strcmp(featureId, "microphone") == 0)snprintf(out, cap, "micautostart %s", v);
-  else if (strcmp(featureId, "oled") == 0)      snprintf(out, cap, "oledenabled %d", on ? 1 : 0);
-  else                                          snprintf(out, cap, "sensorautostart %s %s", featureId, v);
+  switch (r.kind) {
+    case G2SensorKind::Input:      snprintf(out, cap, "inputautostart %s", v); return;
+    case G2SensorKind::Camera:     snprintf(out, cap, "cameraautostart %s", v); return;
+    case G2SensorKind::Microphone: snprintf(out, cap, "micautostart %s", v); return;
+    case G2SensorKind::Oled:       snprintf(out, cap, "oledenabled %d", on ? 1 : 0); return;
+    default:                       snprintf(out, cap, "sensorautostart %s %s", r.featureId, v); return;
+  }
 }
 
 #if ENABLE_GAMEPAD_SENSOR
@@ -1066,40 +1075,40 @@ void g2BuildSensorReadout(char* out, size_t cap) {
   }
 
 #if ENABLE_GAMEPAD_SENSOR
-  if (strcmp(r.featureId, "gamepad") == 0) {
+  if (r.kind == G2SensorKind::Input) {
     g2BuildGamepadArt(out, cap);
     return;
   }
 #elif ENABLE_ANO_ENCODER
-  if (strcmp(r.featureId, "gamepad") == 0) {   // same row id; ANO is the active input driver
+  if (r.kind == G2SensorKind::Input) {   // same row id; ANO is the active input driver
     g2BuildAnoArt(out, cap);
     return;
   }
 #endif
 
 #if ENABLE_RTC_SENSOR
-  if (strcmp(r.featureId, "rtc") == 0) {
+  if (r.kind == G2SensorKind::Rtc) {
     g2BuildRtcReadout(out, cap);
     return;
   }
 #endif
 #if ENABLE_IMU_SENSOR
-  if (strcmp(r.featureId, "imu") == 0)      { g2BuildImuReadout(out, cap);      return; }
+  if (r.kind == G2SensorKind::Imu)      { g2BuildImuReadout(out, cap);      return; }
 #endif
 #if ENABLE_TOF_SENSOR
-  if (strcmp(r.featureId, "tof") == 0)      { g2BuildTofReadout(out, cap);      return; }
+  if (r.kind == G2SensorKind::Tof)      { g2BuildTofReadout(out, cap);      return; }
 #endif
 #if ENABLE_APDS_SENSOR
-  if (strcmp(r.featureId, "apds") == 0)     { g2BuildApdsReadout(out, cap);     return; }
+  if (r.kind == G2SensorKind::Apds)     { g2BuildApdsReadout(out, cap);     return; }
 #endif
 #if ENABLE_GPS_SENSOR
-  if (strcmp(r.featureId, "gps") == 0)      { g2BuildGpsReadout(out, cap);      return; }
+  if (r.kind == G2SensorKind::Gps)      { g2BuildGpsReadout(out, cap);      return; }
 #endif
 #if ENABLE_PRESENCE_SENSOR
-  if (strcmp(r.featureId, "presence") == 0) { g2BuildPresenceReadout(out, cap); return; }
+  if (r.kind == G2SensorKind::Presence) { g2BuildPresenceReadout(out, cap); return; }
 #endif
 #if ENABLE_FM_RADIO
-  if (strcmp(r.featureId, "fmradio") == 0)  { g2BuildFmReadout(out, cap);       return; }
+  if (r.kind == G2SensorKind::FmRadio)  { g2BuildFmReadout(out, cap);       return; }
 #endif
 
   // Generic fallback — single most-useful value via the existing formatter.
@@ -1144,7 +1153,7 @@ size_t g2BuildSensorLiveList(const char** outRows, size_t maxRows) {
   }
 
   if (n < maxRows) {  // idx 2 — auto-start (persisted boot preference)
-    const FeatureEntry* feat = r ? sensorFeature(r->featureId) : nullptr;
+    const FeatureEntry* feat = r ? sensorFeature(*r) : nullptr;
     bool* autoPtr = (feat && feat->enabledSetting) ? feat->enabledSetting : nullptr;
     if (autoPtr) snprintf(gSensorsRows[2], SENSORS_ROW_LEN, "Auto Start: %s",
                           *autoPtr ? "ON" : "OFF");
@@ -1152,14 +1161,14 @@ size_t g2BuildSensorLiveList(const char** outRows, size_t maxRows) {
     outRows[n++] = gSensorsRows[2];
   }
 
-  if (n < maxRows && r && strcmp(r->featureId, "rtc") == 0) {  // idx 3 — RTC only
+  if (n < maxRows && r && r->kind == G2SensorKind::Rtc) {  // idx 3 — RTC only
     snprintf(gSensorsRows[3], SENSORS_ROW_LEN, "Sync clock");
     outRows[n++] = gSensorsRows[3];
   }
 #if ENABLE_MICROPHONE
   // idx 3 — microphone only: source selector. Tap cycles the preference among
   // auto + currently-available sources (see the SENSORS_LEVEL_LIVE tap handler).
-  if (n < maxRows && r && strcmp(r->featureId, "microphone") == 0) {
+  if (n < maxRows && r && r->kind == G2SensorKind::Microphone) {
     snprintf(gSensorsRows[3], SENSORS_ROW_LEN, "Source: %s", gSettings.micSource.c_str());
     outRows[n++] = gSensorsRows[3];
   }
@@ -1279,7 +1288,7 @@ void g2SensorsHandleTap(uint32_t idx) {
     // that doesn't disturb the list row selection — see g2ShowMicDetail
     // and renderMicDetailLive in G2_Page_Microphone.cpp. All other sensors
     // still use the legacy showSensorDetail() path.
-    if (strcmp(rows[pos].featureId, "microphone") == 0) {
+    if (rows[pos].kind == G2SensorKind::Microphone) {
       if (g2ShowMicDetail()) return;
       DEBUG_G2F("[G2] Sensors: MIC detail compound start failed — "
                 "falling back to generic showSensorDetail");
@@ -1288,7 +1297,7 @@ void g2SensorsHandleTap(uint32_t idx) {
     // LED drills into its dedicated control sub-page (color / effect /
     // brightness — G2_Page_LED.cpp) instead of the generic detail, whose
     // Run/Auto-Start rows map to open/close commands the LED doesn't have.
-    if (strcmp(rows[pos].featureId, "led") == 0) {
+    if (rows[pos].kind == G2SensorKind::Led) {
       g2ShowLedMenu();
       return;
     }
@@ -1296,7 +1305,7 @@ void g2SensorsHandleTap(uint32_t idx) {
     // FM drills into the tuner compound page (seek / volume / mute / power
     // action rows + live readout — G2_Page_FMRadio.cpp) instead of the
     // generic sensor-live detail.
-    if (strcmp(rows[pos].featureId, "fmradio") == 0) {
+    if (rows[pos].kind == G2SensorKind::FmRadio) {
       if (g2ShowFmTunerPage()) return;
       DEBUG_G2F("[G2] Sensors: FM tuner start failed — falling back to generic detail");
     }
@@ -1330,7 +1339,7 @@ void g2SensorsHandleTap(uint32_t idx) {
     if (idx == 1) {
       // Runtime Start/Stop — the same open/close path the web/CLI uses.
       char cmd[24];
-      sensorRuntimeCmd(r.featureId, /*open=*/ !r.enabled, cmd, sizeof(cmd));
+      sensorRuntimeCmd(r, /*open=*/ !r.enabled, cmd, sizeof(cmd));
       BROADCAST_PRINTF("[G2] Sensors: %s runtime %s (from glasses)",
                        r.label, r.enabled ? "STOP" : "START");
       (void)g2SubmitHijackCommand(cmd, cookie, nullptr, nullptr);
@@ -1343,18 +1352,18 @@ void g2SensorsHandleTap(uint32_t idx) {
     if (idx == 2) {
       // Auto-Start toggle (persisted boot preference). sensorautostart
       // accepts the row's featureId, incl. "gamepad" (-> inputAutoStart).
-      const FeatureEntry* feat = sensorFeature(r.featureId);
+      const FeatureEntry* feat = sensorFeature(r);
       const bool cur = (feat && feat->enabledSetting) ? *feat->enabledSetting
                                                       : false;
       char cmd[48];
-      sensorAutostartCmd(r.featureId, /*on=*/ !cur, cmd, sizeof(cmd));
+      sensorAutostartCmd(r, /*on=*/ !cur, cmd, sizeof(cmd));
       BROADCAST_PRINTF("[G2] Sensors: %s Auto Start %s -> %s (from glasses)",
                        r.label, cur ? "ON" : "OFF", cur ? "OFF" : "ON");
       (void)g2SubmitHijackCommand(cmd, cookie, nullptr, nullptr);
       showSensorDetail(r);
       return;
     }
-    if (idx == 3 && strcmp(r.featureId, "rtc") == 0) {
+    if (idx == 3 && r.kind == G2SensorKind::Rtc) {
       // RTC → system clock. Bare `rtcsync` is the SAFE direction: it writes
       // only the volatile system clock, never the battery-backed DS3231 (the
       // `from` direction, which we deliberately don't expose on a tap). Admin-
@@ -1366,7 +1375,7 @@ void g2SensorsHandleTap(uint32_t idx) {
       return;
     }
 #if ENABLE_MICROPHONE
-    if (idx == 3 && strcmp(r.featureId, "microphone") == 0) {
+    if (idx == 3 && r.kind == G2SensorKind::Microphone) {
       // Cycle the mic source PREFERENCE among "auto" + currently-available
       // sources. If the mic is running, `micsource` applies it live
       // (stop → set → start). Only offers sources that are actually reachable.
@@ -1444,14 +1453,14 @@ void g2SensorsHandleTap(uint32_t idx) {
     // Only a change of the live state needs the owner; otherwise the toggle
     // just saves the preference below. Camera power then runs on cam_power and
     // its post-hook redraws when done.
-    const bool cameraRuntime = strcmp(r.featureId, "camera") == 0 &&
+    const bool cameraRuntime = r.kind == G2SensorKind::Camera &&
                                next != gCameraRunning;
     if (cameraRuntime) skipImmediateRedraw = true;
 #endif
 #if ENABLE_MICROPHONE
     // Mic runtime is async on cmd_exec — redraw only after openmic/closemic
     // completes (see onMicAutostartRuntimeDone).
-    if (strcmp(r.featureId, "microphone") == 0) {
+    if (r.kind == G2SensorKind::Microphone) {
       skipImmediateRedraw = true;
     }
 #endif
@@ -1481,7 +1490,7 @@ void g2SensorsHandleTap(uint32_t idx) {
     // Mic: open/close first; micautostart only on success (callback).
     // executeCommand returns ok=true even for "Error: …" handler strings,
     // so the callback also inspects the result text.
-    if (strcmp(r.featureId, "microphone") == 0) {
+    if (r.kind == G2SensorKind::Microphone) {
       const char* runtime = next ? "openmic" : "closemic";
       if (!g2SubmitHijackCommand(runtime, cookie, onMicAutostartRuntimeDone,
                                  (void*)(uintptr_t)(next ? 1 : 0))) {
@@ -1511,7 +1520,7 @@ void g2SensorsHandleTap(uint32_t idx) {
 #endif
 
     char line[80];
-    if (strcmp(r.featureId, "camera") == 0) {
+    if (r.kind == G2SensorKind::Camera) {
       snprintf(line, sizeof(line), "cameraautostart %s", next ? "on" : "off");
     } else {
       // Falls through to the generic per-sensor command, which covers
@@ -1546,7 +1555,7 @@ void g2SensorsHandleTap(uint32_t idx) {
   const G2SensorRow& r = rows[gSensorsDetailIdx];
 
 #if ENABLE_CAMERA_SENSOR
-  if (strcmp(r.featureId, "camera") == 0) {
+  if (r.kind == G2SensorKind::Camera) {
     // CAM detail layout:
     //   idx 2 = Capture      (one-shot frame — push, hold, double-tap to dismiss)
     //   idx 3 = Stream       (continuous frames until double-tap)

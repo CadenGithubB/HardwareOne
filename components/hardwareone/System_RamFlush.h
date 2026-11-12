@@ -107,9 +107,10 @@ void ramFlushClearOverlay(void);
 void ramFlushMarkAutostartFailed(RamFlushFeatureId f);
 void ramFlushClearAutostartFailed(RamFlushFeatureId f);
 
-// Map an I2C autostart module name ("thermal", "gamepad", …) to its id. Returns
-// RF_FEATURE_COUNT for anything unrecognised, which the two calls above no-op on.
-RamFlushFeatureId ramFlushIdForModule(const char* moduleName);
+// The ramflush id of a queue-managed I2C device (System_I2C_Manager.h). Returns
+// RF_FEATURE_COUNT for I2C_DEVICE_COUNT, which the two calls above no-op on.
+enum I2cDeviceType : int;
+RamFlushFeatureId ramFlushIdForDevice(I2cDeviceType device);
 
 // Registered in systemCommands[] next to `reboot`, which it is a sibling of.
 const char* cmd_ramflush(const String& argsInput);

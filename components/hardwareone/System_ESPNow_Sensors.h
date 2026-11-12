@@ -141,8 +141,16 @@ String getRemoteDevicesListJson();
 // Helper: Convert sensor type to string
 const char* sensorTypeToString(RemoteSensorType type);
 
-// Helper: Convert string to sensor type
+// Helper: Convert string to sensor type; an unknown name gives the thermal type.
 RemoteSensorType stringToSensorType(const char* str);
+// The same parse with its verdict: false for a name that is not a sensor type.
+bool sensorTypeFromString(const char* str, RemoteSensorType& out);
+
+#if ENABLE_BONDED_MODE
+// The saved "stream this sensor to the bonded peer" setting of a sensor type,
+// or nullptr for a type that has none (camera, microphone, APDS).
+bool* bondStreamSetting(RemoteSensorType type);
+#endif
 
 // Find or create cache entry for a remote sensor (used by v3 handler)
 RemoteSensorData* findOrCreateCacheEntry(const uint8_t* deviceMac, const char* deviceName, RemoteSensorType sensorType);

@@ -2620,63 +2620,6 @@ extern const size_t batteryCommandsCount = sizeof(batteryCommands) / sizeof(batt
 
 // Print detailed breakdown of sensor libraries from device registry
 // Returns total bytes via outTotal parameter
-static bool isCompiledModuleName(const char* moduleName) {
-  if (!moduleName) return true;
-
-  if (strcmp(moduleName, "thermal") == 0) {
-#if ENABLE_THERMAL_SENSOR
-    return true;
-#else
-    return false;
-#endif
-  }
-  if (strcmp(moduleName, "tof") == 0) {
-#if ENABLE_TOF_SENSOR
-    return true;
-#else
-    return false;
-#endif
-  }
-  if (strcmp(moduleName, "imu") == 0) {
-#if ENABLE_IMU_SENSOR
-    return true;
-#else
-    return false;
-#endif
-  }
-  if (strcmp(moduleName, "gamepad") == 0) {
-#if ENABLE_GAMEPAD_SENSOR
-    return true;
-#else
-    return false;
-#endif
-  }
-  if (strcmp(moduleName, "apds") == 0) {
-#if ENABLE_APDS_SENSOR
-    return true;
-#else
-    return false;
-#endif
-  }
-  if (strcmp(moduleName, "gps") == 0) {
-#if ENABLE_GPS_SENSOR
-    return true;
-#else
-    return false;
-#endif
-  }
-  if (strcmp(moduleName, "oled") == 0) {
-#if ENABLE_OLED_DISPLAY
-    return true;
-#else
-    return false;
-#endif
-  }
-
-  // Unknown module name: assume compiled (fail-open so report still works)
-  return true;
-}
-
 void printConnectedDevicesLibraries(size_t& outTotal) {
   // Track which libraries we've printed
   const char* printedLibraries[50];  // MAX_CONNECTED_DEVICES from .ino
@@ -2697,7 +2640,7 @@ void printConnectedDevicesLibraries(size_t& outTotal) {
         // If the hardware is detected but the module is not compiled in, do not
         // attribute library memory. This keeps the report truthful under the
         // subdirectory-based modular build.
-        if (!isCompiledModuleName(i2cSensors[j].moduleName)) {
+        if (!i2cSensors[j].compiled) {
           break;
         }
 

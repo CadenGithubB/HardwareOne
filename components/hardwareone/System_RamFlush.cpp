@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 #include "System_BuildConfig.h"
+#include "System_I2C_Manager.h"  // I2cDeviceType
 // WiFi.isConnected() at RF_WIFI. Without Wi-Fi the name comes from the disabled
 // branch of System_WiFi.h, so the Arduino header stays behind the flag.
 #if ENABLE_WIFI
@@ -348,22 +349,20 @@ void ramFlushClearOverlay(void) {
   sOverlayActive   = false;
 }
 
-RamFlushFeatureId ramFlushIdForModule(const char* moduleName) {
-  if (!moduleName) return RF_FEATURE_COUNT;
-  // Names as passed to isSensorAvailableForAutoStart() (System_I2C.cpp:3002-3090).
-  // The input device's module name is "input" (post-unification) — it must match
-  // the string System_I2C.cpp passes to isSensorAvailableForAutoStart(), which is
-  // this function's only caller. A mismatch returns RF_FEATURE_COUNT and silently
-  // no-ops ramFlushMarkAutostartFailed().
-  if (!strcmp(moduleName, "thermal"))  return RF_THERMAL;
-  if (!strcmp(moduleName, "tof"))      return RF_TOF;
-  if (!strcmp(moduleName, "imu"))      return RF_IMU;
-  if (!strcmp(moduleName, "gps"))      return RF_GPS;
-  if (!strcmp(moduleName, "fmradio"))  return RF_FMRADIO;
-  if (!strcmp(moduleName, "apds"))     return RF_APDS;
-  if (!strcmp(moduleName, "input"))    return RF_INPUT;
-  if (!strcmp(moduleName, "rtc"))      return RF_RTC;
-  if (!strcmp(moduleName, "presence")) return RF_PRESENCE;
+RamFlushFeatureId ramFlushIdForDevice(I2cDeviceType device) {
+  // No default: a new I2cDeviceType has to be given its id here to compile clean.
+  switch (device) {
+    case I2C_DEVICE_THERMAL:  return RF_THERMAL;
+    case I2C_DEVICE_TOF:      return RF_TOF;
+    case I2C_DEVICE_IMU:      return RF_IMU;
+    case I2C_DEVICE_INPUT:    return RF_INPUT;
+    case I2C_DEVICE_GPS:      return RF_GPS;
+    case I2C_DEVICE_FMRADIO:  return RF_FMRADIO;
+    case I2C_DEVICE_APDS:     return RF_APDS;
+    case I2C_DEVICE_RTC:      return RF_RTC;
+    case I2C_DEVICE_PRESENCE: return RF_PRESENCE;
+    case I2C_DEVICE_COUNT:    break;
+  }
   return RF_FEATURE_COUNT;
 }
 
