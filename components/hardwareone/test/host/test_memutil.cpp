@@ -8,6 +8,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <string>
+
 #include <algorithm>
 #include <limits>
 #include <new>

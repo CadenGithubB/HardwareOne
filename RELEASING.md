@@ -45,7 +45,9 @@ Every step below must pass on the exact commit you intend to tag, from a clean t
 
 1. Arduino component vendored and patched: `tools/vendor_arduino.sh --check` prints OK
    (a fresh clone: `tools/vendor_arduino.sh`, then ESP32-P4 rows also `tools/p4/prepare_sdk.sh`).
-2. Host suite green, serially and in parallel, with Node.js installed so the browser suites run:
+2. Host suite green, serially and in parallel, with Node.js installed so the browser suites run.
+   It runs on the development Mac, where it is maintained; the repository has no GitHub Actions
+   workflow on purpose, so a push to GitHub runs nothing:
    `cmake -S components/hardwareone/test/host -B /tmp/hw1-host && cmake --build /tmp/hw1-host -j6 &&
    ctest --test-dir /tmp/hw1-host && ctest --test-dir /tmp/hw1-host -j6` — 0 failures; "Not Run" only for
    the documented optional suites (`stt_conv_scratch`, the camera managed-SCCB/video suites). The

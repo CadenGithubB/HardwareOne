@@ -399,7 +399,7 @@ def cmd_upgrade(_args) -> int:
 # The jsonKey fallback that caused the misfires is now deleted in C++
 # (settingsEditorCommandName returns cmdKey only), so a broken cmdKey is now
 # merely dead rather than dangerous. This check keeps it from going dead
-# unnoticed — run it in CI or before a commit that renames commands.
+# unnoticed — the host suite runs it; run it alone before a commit that renames commands.
 
 # A CommandEntry row: { "name", <help>, <bool admin>, handler, ... }
 #
