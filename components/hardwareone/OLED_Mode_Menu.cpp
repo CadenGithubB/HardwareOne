@@ -120,15 +120,6 @@ static void oledMenuExecuteItem(const OledMenuItem* item, const char* slug) {
   String reason;
   MenuAvailability avail = getMenuAvailability(target, &reason);
   if (avail != MenuAvailability::AVAILABLE) {
-    if (reason.length() == 0) {
-      switch (avail) {
-        case MenuAvailability::FEATURE_DISABLED: reason = "Disabled"; break;
-        case MenuAvailability::UNINITIALIZED:    reason = "Disabled"; break;
-        case MenuAvailability::NOT_DETECTED:     reason = "Not detected"; break;
-        case MenuAvailability::NOT_BUILT:        reason = "Not built"; break;
-        default:                                 reason = "Unavailable"; break;
-      }
-    }
     pushOledMode(currentOledMode);  // B from the unavailable page returns to this menu
     enterUnavailablePage(target, avail, item->name, reason);
     return;

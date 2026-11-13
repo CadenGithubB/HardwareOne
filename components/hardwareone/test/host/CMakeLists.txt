@@ -2172,6 +2172,13 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_oled_banner_clear.py)
 
+# Every path that enters an OLED mode asks getMenuAvailability(); oledmode and
+# the saved default mode refuse a mode that is not in the build.
+add_test(
+  NAME oled_mode_entry
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_oled_mode_entry.py)
+
 # OLED display-session writer windows (README "OLED display-session writer windows"):
 # the frame commit and the command-result path validate under the display lifecycle
 # writer, release it, push or copy, then re-check without opening a session.

@@ -182,6 +182,15 @@ static void broadcastOutput(const char* text) { effectOrder.emplace_back(std::st
 static OledMode modeFromSlug(const String& slug) {
   return slug == "status" ? OLED_SYSTEM_STATUS : slug == "menu" ? OLED_MENU : (OledMode)-1;
 }
+// savedDefaultOledMode() as shipped resolves gSettings.oledDefaultMode the same
+// way and also falls back for a mode the build cannot draw; every mode of this
+// small enum is drawable.
+static OledMode savedDefaultOledMode() {
+  String slug = gSettings.oledDefaultMode;
+  slug.toLowerCase();
+  const OledMode mode = modeFromSlug(slug);
+  return (int)mode == -1 ? OLED_SYSTEM_STATUS : mode;
+}
 static void requestOledMode(OledMode mode, const char*, bool) {
   currentOledMode = mode;
   effectOrder.emplace_back("display mode");

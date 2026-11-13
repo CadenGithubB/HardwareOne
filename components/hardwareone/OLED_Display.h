@@ -306,7 +306,19 @@ bool oledModeRuleAllows(OledMode mode, String* outReason);
 // Launcher availability: the build, hardware and feature state of the mode
 // (not built, not detected, turned off), then the mode's own entry rule, whose
 // refusal makes an otherwise available mode FEATURE_DISABLED with its reason.
+// Whether a mode can be entered now, and why not: the build, the hardware and
+// settings state (oledModeFeatureState) and the mode's own entry rule. The one
+// question for every path that enters a mode: the launcher, oledmode and the
+// saved default mode. Owner task only: the rule may read the display session.
+// When the mode cannot be entered and outReason is given, *outReason is never
+// left empty.
 MenuAvailability getMenuAvailability(OledMode mode, String* outReason);
+
+// The mode has something to draw in this build: a registered module with a
+// display function, or OLED_OFF. The registry is filled before boot and never
+// changes, so any task may ask. A mode that is not drawable is not in the build;
+// entering it would leave the screen blank.
+bool oledModeInBuild(OledMode mode);
 
 // The unavailable page (OLED_UNAVAILABLE): what the launcher shows for a mode
 // it cannot enter. The target mode and its availability class decide the
@@ -387,6 +399,9 @@ void requestOledModePrepared(OledMode newMode, const char* reason, bool pushStac
 // Slug <-> enum helpers (canonical CLI slugs; used by CLI, boot defaults, and Web selects).
 // modeFromSlug returns (OledMode)-1 for unknown slugs.
 OledMode     modeFromSlug(const String& slug);
+// gSettings.oledDefaultMode as a mode: OLED_SYSTEM_STATUS for an unknown slug
+// or a mode this build cannot draw (oledModeInBuild).
+OledMode     savedDefaultOledMode();
 const char*  slugFromMode(OledMode mode);
 
 extern String customOledText;

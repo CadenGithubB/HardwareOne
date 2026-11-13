@@ -193,15 +193,29 @@ static const OledModeEntry* findOledMode(OledMode mode) {
   return mode == OLED_CLI_INPUT ? &gCliInputEntry : &gModeEntry;
 }
 
-// The CLI Input module's entry rule (OledModeEntry::availFunc), as
-// oledModeRuleAllows() reports it; every other mode has none.
+// getMenuAvailability() as the owner sees it: the CLI Input module's entry rule
+// refuses when gCliInputRefuses (FEATURE_DISABLED, "Login required"), the
+// thermal camera is detected but stopped when gThermalStopped (UNINITIALIZED);
+// every other mode can be entered. It reads the display session, so it is an
+// owner effect.
 static bool gCliInputRefuses = false;
-static bool oledModeRuleAllows(OledMode mode, String* outReason) {
-  ownerEffect("entry rule read (display session)");
-  if (mode != OLED_CLI_INPUT || !gCliInputRefuses) return true;
-  if (outReason) *outReason = "Login required";
-  return false;
+static bool gThermalStopped = false;
+MenuAvailability getMenuAvailability(OledMode mode, String* outReason) {
+  ownerEffect("availability read (display session)");
+  if (mode == OLED_CLI_INPUT && gCliInputRefuses) {
+    if (outReason) *outReason = "Login required";
+    return MenuAvailability::FEATURE_DISABLED;
+  }
+  if (mode == OLED_THERMAL_VISUAL && gThermalStopped) {
+    if (outReason) *outReason = "Disabled\nPress X to start";
+    return MenuAvailability::UNINITIALIZED;
+  }
+  return MenuAvailability::AVAILABLE;
 }
+
+// oledModeInBuild(): the GPS module is not in this build; every other mode is.
+// The registry is fixed before boot, so any task may ask (no owner effect).
+static bool oledModeInBuild(OledMode mode) { return mode != OLED_GPS_DATA; }
 
 static const char* getOledModeName(OledMode mode) {
   switch (mode) {
@@ -213,6 +227,8 @@ static const char* getOledModeName(OledMode mode) {
     case OLED_LOGIN: return "Login";
     case OLED_SET_PATTERN: return "Gamepad Password";
     case OLED_CLI_INPUT: return "CLI Input";
+    case OLED_GPS_DATA: return "GPS";
+    case OLED_THERMAL_VISUAL: return "Thermal";
     case OLED_UNAVAILABLE: return "Unavail";
     default: return "Other";
   }
@@ -224,6 +240,8 @@ static OledMode modeFromSlug(const String& slug) {
   if (slug == "status") return OLED_SYSTEM_STATUS;
   if (slug == "text") return OLED_CUSTOM_TEXT;
   if (slug == "cliinput") return OLED_CLI_INPUT;
+  if (slug == "gps") return OLED_GPS_DATA;
+  if (slug == "thermal") return OLED_THERMAL_VISUAL;
   return (OledMode)-1;
 }
 
@@ -371,6 +389,7 @@ static void resetCase(OledMode mode) {
   sStep = PATTERN_STEP_CONFIRM;
   sFirstPattern = "^^vv";
   gCliInputRefuses = false;
+  gThermalStopped = false;
   gUnavailableShown = 0;
   gUnavailableTarget = OLED_UNAVAILABLE;
   gUnavailableAvailability = MenuAvailability::AVAILABLE;
@@ -656,6 +675,29 @@ static void caseModeRule() {
   check(currentOledMode == OLED_CLI_INPUT && gModeStack.empty() && gUnavailableShown == 0 &&
             gOnEnterCalls == 1,
         "oledmode enters a mode whose rule allows it, as before");
+
+  // A mode this build has nothing to draw for: refused by the command itself,
+  // with nothing posted to the owner and the screen untouched.
+  resetCase(OLED_SYSTEM_STATUS);
+  onExec();
+  const std::string notBuilt = cmd_oledmode("gps");
+  check(notBuilt.rfind("Error: ", 0) == 0 && notBuilt.find("not in this build") != std::string::npos,
+        "oledmode to a mode that is not in the build is an error, not OK ('" + notBuilt + "')");
+  checkNothingOffOwner("oledmode gps (not in the build)");
+  ownerFrame();
+  check(currentOledMode == OLED_SYSTEM_STATUS && gUnavailableShown == 0 && gModeStack.empty(),
+        "a mode that is not in the build leaves the screen as it was");
+
+  // Detected but stopped hardware: the unavailable page with the class the
+  // launcher gives it, so X starts it and the page does not time out.
+  resetCase(OLED_SYSTEM_STATUS);
+  gThermalStopped = true;
+  onExec();
+  check(std::strcmp(cmd_oledmode("thermal"), "OK") == 0, "oledmode thermal replies OK");
+  ownerFrame();
+  check(currentOledMode == OLED_UNAVAILABLE && gUnavailableTarget == OLED_THERMAL_VISUAL &&
+            gUnavailableAvailability == MenuAvailability::UNINITIALIZED,
+        "detected-but-stopped hardware shows the unavailable page with its own class");
 
   resetCase(OLED_SYSTEM_STATUS);
   gCliInputRefuses = true;

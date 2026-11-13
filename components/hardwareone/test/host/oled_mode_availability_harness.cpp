@@ -251,8 +251,8 @@ static void caseUnchanged() {
 // R4: a refusal without a reason is still a refusal (the launcher fills "Disabled").
 static void caseSilentRefusal() {
   resetWorld();
-  expect(OLED_PERF_STATS, "Perf", MenuAvailability::FEATURE_DISABLED, "",
-         "a rule that refuses without a reason: refused");
+  expect(OLED_PERF_STATS, "Perf", MenuAvailability::FEATURE_DISABLED, "Disabled",
+         "a rule that refuses without a reason: refused, with the default reason");
 }
 
 #if ENABLE_BLUETOOTH

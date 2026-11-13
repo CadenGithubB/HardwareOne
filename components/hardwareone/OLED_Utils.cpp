@@ -4448,8 +4448,7 @@ const char* cmd_oled_enabled(const String& argsInput) {
     String defaultMode = gSettings.oledDefaultMode;
     defaultMode.toLowerCase();
     OledMode prevMode = currentOledMode;
-    OledMode defMode = modeFromSlug(defaultMode);
-    if ((int)defMode == -1) defMode = OLED_SYSTEM_STATUS;
+    OledMode defMode = savedDefaultOledMode();
     requestOledMode(defMode, "cmd.oledenabled.forceDefault", false);
 
     // Off the owner task the transition is still pending: log the requested mode.
@@ -4694,16 +4693,19 @@ static void oledRunOwnerRequest(OledOwnerRequest& request, bool superseded) {
     return;
   }
 
-  // oledmode honors the target mode's own entry rule as the launcher does: a
-  // refusal shows its reason on the unavailable page, which returns to the
-  // current screen. The display-auth redirect to the login page comes first.
+  // oledmode asks the launcher's question (getMenuAvailability): a mode that
+  // cannot be entered shows the unavailable page with its class and reason,
+  // which returns to the current screen. The display-auth redirect to the
+  // login page comes first.
   if (request.kind == OledOwnerRequest::CliMode && !shouldBlockForDisplayAuth()) {
     String refusal;
-    if (!oledModeRuleAllows(request.mode, &refusal)) {
+    const MenuAvailability avail = getMenuAvailability(request.mode, &refusal);
+    if (avail != MenuAvailability::AVAILABLE) {
       const OledModeEntry* entry = findOledMode(request.mode);
       pushOledMode(currentOledMode);
-      enterUnavailablePage(request.mode, MenuAvailability::FEATURE_DISABLED,
-                           entry && entry->name ? entry->name : "", refusal);
+      enterUnavailablePage(request.mode, avail,
+                           entry && entry->name ? entry->name : getOledModeName(request.mode),
+                           refusal);
       return;
     }
   }
@@ -4837,6 +4839,13 @@ const char* cmd_oledmode(const String& argsInput) {
     return "Error: Invalid mode. Options: menu, status, sensordata, sensorlist, gamepad, "
            "thermal, network, gps, text, logo, anim, imuactions, fmradio, files, "
            "logging, automations, espnow, memory, off";
+  }
+  // A mode this build has nothing to draw for is refused here, where the
+  // caller can still be told; the owner checks the rest when it applies.
+  if (!oledModeInBuild(target)) {
+    if (!ensureDebugBuffer()) return "Error: That display mode is not in this build.";
+    snprintf(getDebugBuffer(), 1024, "Error: %s is not in this build.", getOledModeName(target));
+    return getDebugBuffer();
   }
 
   // The owner task applies the transition (auth gating + debug log inside
@@ -5230,6 +5239,16 @@ OledMode modeFromSlug(const String& slug) {
   return (OledMode)-1;
 }
 
+OledMode savedDefaultOledMode() {
+  String slug = gSettings.oledDefaultMode;
+  slug.toLowerCase();
+  const OledMode mode = modeFromSlug(slug);
+  // A saved setting can name a mode this build lacks (a settings file from a
+  // board with that sensor): the status screen, not a blank one.
+  if ((int)mode == -1 || !oledModeInBuild(mode)) return OLED_SYSTEM_STATUS;
+  return mode;
+}
+
 // slugFromMode: OledMode -> primary CLI slug (round-trips with modeFromSlug).
 const char* slugFromMode(OledMode mode) {
   switch (mode) {
@@ -5469,10 +5488,10 @@ void processOledBootSequence() {
             String defaultMode = gSettings.oledDefaultMode;
             defaultMode.toLowerCase();
             
-            // modeFromSlug resolves the saved slug; fallback to status if unrecognised.
-            // B-button from any mode falls back to OLED_MENU via empty-stack default.
-            OledMode defMode = modeFromSlug(defaultMode);
-            if ((int)defMode == -1) defMode = OLED_SYSTEM_STATUS;
+            // savedDefaultOledMode falls back to status for an unknown slug or a
+            // mode this build cannot draw. B-button from any mode falls back to
+            // OLED_MENU via empty-stack default.
+            OledMode defMode = savedDefaultOledMode();
             requestOledMode(defMode, "boot.default", false);
 
             { char dbgBuf[48]; snprintf(dbgBuf, sizeof(dbgBuf), "defaultMode=%s", defaultMode.c_str()); debugOledModeChange("boot.complete.defaultMode", prevMode, currentOledMode, dbgBuf); }
@@ -5969,9 +5988,27 @@ MenuAvailability getMenuAvailability(OledMode mode, String* outReason) {
   const MenuAvailability state = oledModeFeatureState(mode, outReason);
   // A mode that is not built, not detected or turned off keeps that class and
   // reason; otherwise the mode's own refusal turns it off with its reason.
-  if (ruleAllows || state != MenuAvailability::AVAILABLE) return state;
-  if (outReason) *outReason = refusal;
-  return MenuAvailability::FEATURE_DISABLED;
+  MenuAvailability result = state;
+  if (!ruleAllows && state == MenuAvailability::AVAILABLE) {
+    if (outReason) *outReason = refusal;
+    result = MenuAvailability::FEATURE_DISABLED;
+  }
+  if (outReason && result != MenuAvailability::AVAILABLE && outReason->length() == 0) {
+    switch (result) {
+      case MenuAvailability::FEATURE_DISABLED: *outReason = "Disabled"; break;
+      case MenuAvailability::UNINITIALIZED:    *outReason = "Disabled"; break;
+      case MenuAvailability::NOT_DETECTED:     *outReason = "Not detected"; break;
+      case MenuAvailability::NOT_BUILT:        *outReason = "Not built"; break;
+      default:                                 *outReason = "Unavailable"; break;
+    }
+  }
+  return result;
+}
+
+bool oledModeInBuild(OledMode mode) {
+  if (mode == OLED_OFF) return true;  // drawn by the render switch itself
+  const OledModeEntry* entry = findOledMode(mode);
+  return entry && entry->displayFunc;
 }
 
 // BatteryIconState struct declared in OLED_Utils.h
