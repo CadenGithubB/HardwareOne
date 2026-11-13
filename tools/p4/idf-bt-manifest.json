@@ -2111,7 +2111,8 @@
     "common/tinycrypt/port/esp_tinycrypt_port.h": "56ba7201fea3a1b8dfdea283f42787190f29e6c3a1ef76b4517cd9276b0184f0",
     "common/tinycrypt/src/ecc.c": "025b237331acb4e800f4d6fdaee83ed263e41e4428e6233be9ad9f11dab5dc34",
     "common/tinycrypt/src/ecc_dh.c": "c0cb59554bb0a20f143b861441218d27a90289fc25dc3fe9c221819cd5d84a58",
-    "common/tinycrypt/src/ecc_dsa.c": "e6e876d13f1ebbafb439e4866cbc28a7c83b01dcdc32251745509717648748ed"
+    "common/tinycrypt/src/ecc_dsa.c": "e6e876d13f1ebbafb439e4866cbc28a7c83b01dcdc32251745509717648748ed",
+    "host/bluedroid/stack/gap/gap_ble.c": "220c9993ffa53454771dbfc49fe7d0a3ff2497f16302feda8646fcc3c1492f8f"
   },
   "upstream_git_blob_sha1": {
     "common/tinycrypt/port/esp_tinycrypt_port.c": "16bbfb822ce3fc565c04b51e4a2512ccc8543917",
@@ -2119,5 +2120,17 @@
     "common/tinycrypt/src/ecc.c": "72cc5f299ddfd87b22f27a02b3ef459df51266b8",
     "common/tinycrypt/src/ecc_dh.c": "d740a429eb88616c6490804b2982850e9183a886",
     "common/tinycrypt/src/ecc_dsa.c": "aef4bfe2fa933ecad164ef26c934ce2d23299fff"
-  }
+  },
+  "local_patches": [
+    {
+      "file": "idf-bt-gap-deinit.patch",
+      "sha256": "50f1e9eff1dc5430c250f84b1c96a3dc7e4f9861a1466c6e9c1bff37f625cd37",
+      "strip": 3,
+      "files": [
+        "host/bluedroid/stack/gap/gap_ble.c"
+      ],
+      "upstream": "Not fixed upstream (checked release/v5.5, release/v6.0 and master on 2026-11-13): GAP_Deinit() frees gap_cb without deregistering GAP from GATT. Drop this patch when ESP-IDF fixes it.",
+      "review": "GAP's three GATT callbacks return at once when gap_cb_ptr is NULL. Fixes a load access fault in gap_find_clcb_by_bd_addr() during esp_bluedroid_deinit(): btu_task_shut_down() frees GAP (BTE_DeinitStack) before L2CAP (btu_free_core), and l2c_free() releases each remaining link, whose GATT clean-up calls GAP's connect callback. Seen on the P4X-EYE 2026-11-13 when the G2 stack recycle tore the host down with a ring connection still pending. No behaviour change while GAP is alive."
+    }
+  ]
 }

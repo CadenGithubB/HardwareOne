@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-"""Prepare a clean ESP-IDF 5.5.5 Bluetooth component with the upstream ECC fix.
+"""Prepare a clean ESP-IDF 5.5.5 Bluetooth component with the upstream ECC fix
+and the project's local Bluetooth fixes.
 
 Usage: python3 -B prepare_idf_bt.py --idf "$IDF_PATH"
        python3 -B prepare_idf_bt.py --check
 
 The shared SDK is read only. All baseline component files and the SDK version
-file are pinned in idf-bt-manifest.json. Only five official TinyCrypt diffs are
-applied; the upstream NimBLE submodule update and diagnostic instrumentation are
-excluded. Existing output is verified, never overwritten. No build is started.
+file are pinned in idf-bt-manifest.json. Five official TinyCrypt diffs are
+applied (the upstream NimBLE submodule update and diagnostic instrumentation are
+excluded), then each `local_patches` entry: a fix that ESP-IDF does not have
+yet, pinned by hash, applied at its recorded positions with no fuzz. Existing
+output is verified, never overwritten. No build is started.
 """
 from __future__ import annotations
 
@@ -133,7 +136,33 @@ def load_manifest(path: Path = ROOT / "idf-bt-manifest.json") -> dict:
         raise ValueError("upstream TinyCrypt patch hash mismatch")
     if patch["strip"] != 3:
         raise ValueError("unexpected patch strip level")
+    for local in manifest.get("local_patches", []):
+        local_path = path.parent / safe_relative(local["file"])
+        if local_path.is_symlink() or digest(local_path.read_bytes()) != local["sha256"]:
+            raise ValueError(f"local patch hash mismatch: {local['file']}")
+        if local["strip"] != 3:
+            raise ValueError(f"unexpected patch strip level: {local['file']}")
+        if not local.get("files") or not local.get("upstream"):
+            raise ValueError(f"local patch needs its files and upstream status: {local['file']}")
+        for relative in local["files"]:
+            safe_relative(relative)
+            if relative not in manifest["patched_files"]:
+                raise ValueError(f"local patch file is not pinned in patched_files: {relative}")
     return manifest
+
+
+def apply_patch(stage: Path, patch_path: Path, sha256: str, what: str) -> None:
+    """Apply one pinned patch at exactly its recorded positions."""
+    if patch_path.is_symlink() or digest(patch_path.read_bytes()) != sha256:
+        raise ValueError(f"{what} changed during preparation")
+    result = subprocess.run(
+        ["patch", "--verbose", "-f", "-F", "0", "-p", "3", "-i", str(patch_path.resolve())],
+        cwd=stage, capture_output=True, text=True, timeout=30,
+        env={**os.environ, "LC_ALL": "C"},
+    )
+    report = result.stdout + result.stderr
+    if result.returncode or re.search(r"\b(?:fuzz|offset)\b", report, re.IGNORECASE):
+        raise ValueError(f"{what} did not apply exactly at recorded positions")
 
 
 def output_files(manifest: dict) -> dict[str, str]:
@@ -177,17 +206,11 @@ def prepare(idf: Path, destination: Path, manifest: dict,
             shutil.copyfile(component / relative, target)
             target.chmod(0o755 if relative in executable else 0o644)
         verify_tree(stage, manifest["baseline"]["files"], sorted(executable))
-        patch_path = patch_root / manifest["patch"]["file"]
-        if patch_path.is_symlink() or digest(patch_path.read_bytes()) != manifest["patch"]["sha256"]:
-            raise ValueError("upstream TinyCrypt patch changed during preparation")
-        result = subprocess.run(
-            ["patch", "--verbose", "-f", "-F", "0", "-p", "3", "-i", str(patch_path.resolve())],
-            cwd=stage, capture_output=True, text=True, timeout=30,
-            env={**os.environ, "LC_ALL": "C"},
-        )
-        report = result.stdout + result.stderr
-        if result.returncode or re.search(r"\b(?:fuzz|offset)\b", report, re.IGNORECASE):
-            raise ValueError("upstream patch did not apply exactly at recorded positions")
+        apply_patch(stage, patch_root / manifest["patch"]["file"], manifest["patch"]["sha256"],
+                    "upstream TinyCrypt patch")
+        for local in manifest.get("local_patches", []):
+            apply_patch(stage, patch_root / local["file"], local["sha256"],
+                        f"local patch {local['file']}")
         count = check_output(stage, manifest)
         # Detect an output created while we staged. Never merge or replace it.
         if destination.exists() or destination.is_symlink():

@@ -2514,6 +2514,12 @@ add_test(NAME p4_ram_monitor COMMAND ${Python3_EXECUTABLE}
 # in prepare_sdk.sh --check, on fake trees (readiness G-26).
 add_test(NAME p4_prepare_sdk COMMAND ${Python3_EXECUTABLE} -B
   ${CMAKE_CURRENT_LIST_DIR}/../../../../tools/p4/test_prepare_sdk.py)
+# The local Bluetooth patches (idf-bt-manifest.json local_patches) apply exactly
+# to the pinned ESP-IDF; GAP's GATT callbacks check that GAP is still alive.
+add_test(NAME p4_idf_bt_local_patches COMMAND ${Python3_EXECUTABLE} -B
+  ${CMAKE_CURRENT_LIST_DIR}/../../../../tools/p4/test_idf_bt_local_patches.py)
+# Exit 77 = the pinned ESP-IDF install is not on this machine (reported as skipped).
+set_tests_properties(p4_idf_bt_local_patches PROPERTIES SKIP_RETURN_CODE 77)
 # BUILD_INFO.md names the ESP-IDF commit, its local edits and (esp32p4) the PIE-fix state (G-26).
 add_test(NAME gen_build_info_idf COMMAND ${Python3_EXECUTABLE} -B
   ${CMAKE_CURRENT_LIST_DIR}/test_gen_build_info_idf.py)

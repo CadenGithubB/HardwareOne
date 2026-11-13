@@ -768,7 +768,9 @@ add_compile_definitions(NETWORK_EVENTS_MUTEX)
 
 # ESP32-P4 builds replace two ESP-IDF 5.5.5 components with verified patched
 # copies (never edits to the shared SDK): `bt` carries the upstream TinyCrypt
-# ECC fix that BLE Secure Connections needs on P4 (esp-idf#19002), and
+# ECC fix that BLE Secure Connections needs on P4 (esp-idf#19002) and a local
+# fix for GAP's callbacks running after GAP_Deinit() during host teardown
+# (tools/p4/idf-bt-gap-deinit.patch, see idf-bt-manifest.json), and
 # `esp_driver_jpeg` fixes allocation/interrupt unwind and marks the hardware
 # JPEG decoder as qualified. The managed espressif/esp-dl 3.3.12 is replaced
 # the same way (tools/p4/esp-dl-3.3.12-hw1.patch: P4 pointwise-conv tiles,

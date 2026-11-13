@@ -1,0 +1,71 @@
+--- a/components/bt/host/bluedroid/stack/gap/gap_ble.c
++++ b/components/bt/host/bluedroid/stack/gap/gap_ble.c
+@@ -48,6 +48,22 @@
+ static void  gap_ble_c_connect_cback (tGATT_IF gatt_if, BD_ADDR bda, UINT16 conn_id, BOOLEAN connected,
+                                       tGATT_DISCONN_REASON reason, tGATT_TRANSPORT transport);
+ static void  gap_ble_c_cmpl_cback (UINT16 conn_id, tGATTC_OPTYPE op, tGATT_STATUS status, tGATT_CL_COMPLETE *p_data);
++
++/* HardwareOne local patch (tools/p4/idf-bt-gap-deinit.patch). GAP_Deinit()
++ * frees the GAP control block without deregistering GAP from GATT, and
++ * btu_task_shut_down() frees L2CAP after it: l2c_free() releases every link
++ * still in the pool, and the GATT clean-up of each one calls these callbacks
++ * with gap_cb_ptr already NULL. A link left in the stack at deinit (a pending
++ * LE connection the controller never answered) then faults in
++ * gap_find_clcb_by_bd_addr(). The callbacks ignore events once GAP is gone. */
++static inline BOOLEAN gap_ble_cb_alive(void)
++{
++#if GAP_DYNAMIC_MEMORY == TRUE
++    return gap_cb_ptr != NULL;
++#else
++    return TRUE;
++#endif
++}
+ 
+ static const tGATT_CBACK gap_cback = {
+     gap_ble_c_connect_cback,
+@@ -360,6 +376,10 @@
+     tGATTS_RSP  rsp_msg;
+     BOOLEAN     ignore = FALSE;
+ 
++    if (!gap_ble_cb_alive()) {
++        return;
++    }
++
+     GAP_TRACE_EVENT("gap_ble_s_attr_request_cback : recv type (0x%02x)", type);
+ 
+     memset(&rsp_msg, 0, sizeof(tGATTS_RSP));
+@@ -664,10 +684,15 @@
+                                      BOOLEAN connected, tGATT_DISCONN_REASON reason,
+                                      tGATT_TRANSPORT transport)
+ {
+-    tGAP_CLCB   *p_clcb = gap_find_clcb_by_bd_addr (bda);
++    tGAP_CLCB   *p_clcb;
+ 
+     UNUSED(gatt_if);
+     UNUSED(transport);
++
++    if (!gap_ble_cb_alive()) {
++        return;
++    }
++    p_clcb = gap_find_clcb_by_bd_addr (bda);
+ 
+     if (p_clcb != NULL) {
+         if (connected) {
+@@ -696,12 +721,16 @@
+ static void gap_ble_c_cmpl_cback (UINT16 conn_id, tGATTC_OPTYPE op, tGATT_STATUS status, tGATT_CL_COMPLETE *p_data)
+ 
+ {
+-    tGAP_CLCB   *p_clcb = gap_ble_find_clcb_by_conn_id(conn_id);
++    tGAP_CLCB   *p_clcb;
+     UINT16      op_type;
+     UINT16      min, max, latency, tout;
+     UINT16      len;
+     UINT8       *pp;
+ 
++    if (!gap_ble_cb_alive()) {
++        return;
++    }
++    p_clcb = gap_ble_find_clcb_by_conn_id(conn_id);
+     if (p_clcb == NULL) {
+         return;
+     }
