@@ -30,6 +30,7 @@
 #include "System_CommandLimits.h"  // the client buffers match the command result ceiling
 #include "System_MQTTLifecycleGate.h"
 #include "System_MQTTAdmission.h"
+#include "System_MQTTControlTopic.h"
 #include "System_User.h"
 #include <cstdarg>
 #include <utility>
@@ -137,6 +138,22 @@ static ExternalSensor* externalSensors = nullptr;
 static int externalSensorCount = 0;
 static SemaphoreHandle_t externalSensorMutex = nullptr;
 
+// Base topic the command subscription was made with. The broker keeps
+// delivering that command topic until the next connect, also after
+// `mqttbasetopic` changed the setting. Written (CONNECTED) and read (DATA) on
+// the esp-mqtt task only.
+static String sMqttSubscribedBaseTopic;
+
+// True for the command and response topics of this client: of the base topic
+// in the settings (what handleMqttCommand executes) and of the base topic the
+// live subscription was made with.
+static bool mqttIsOwnControlTopic(const char* topic, size_t topicLen) {
+  return mqttIsControlTopic(topic, topicLen, gSettings.mqttBaseTopic.c_str(),
+                            gSettings.mqttBaseTopic.length()) ||
+         mqttIsControlTopic(topic, topicLen, sMqttSubscribedBaseTopic.c_str(),
+                            sMqttSubscribedBaseTopic.length());
+}
+
 static bool initExternalSensorStorage() {
   if (!externalSensorMutex) {
     externalSensorMutex = xSemaphoreCreateMutex();
@@ -187,6 +204,10 @@ static void releaseExternalSensorStorage() {
 static void updateExternalSensor(const char* topic, int topicLen, const char* data, int dataLen) {
   if (!externalSensorMutex || !externalSensors) return;
   if (!topic || topicLen <= 0) return;
+  // The command topic's payload is the {user,pass,cmd} envelope and the
+  // response topic's is command output. `mqttexternalsensors` needs no admin
+  // and the MQTT page shows the table, so neither is ever stored.
+  if (mqttIsOwnControlTopic(topic, (size_t)topicLen)) return;
   if (!data || dataLen < 0) dataLen = 0;
 
   // esp-mqtt hands over length-delimited buffers with no terminating NUL.
@@ -491,7 +512,8 @@ static void subscribeToCommandTopic() {
   if (!mqttClient ||
       !mqttTofConnected.load(std::memory_order_acquire)) return;
   
-  String commandTopic = gSettings.mqttBaseTopic + "/command";
+  sMqttSubscribedBaseTopic = gSettings.mqttBaseTopic;
+  String commandTopic = sMqttSubscribedBaseTopic + kMqttCommandTopicSuffix;
   int msgId = esp_mqtt_client_subscribe(mqttClient, commandTopic.c_str(), 1);
   if (msgId >= 0) {
     INFO_MQTT_PUBSUBF("Subscribed to command topic: %s", commandTopic.c_str());
@@ -626,8 +648,8 @@ static void submitMqttCommand(MqttAdmission&& use, const String& line,
 // Handle incoming MQTT command
 // Expected JSON format: {"user":"username","pass":"password","cmd":"command"}
 static void handleMqttCommand(const char* topic, int topicLen, const char* data, int dataLen) {
-  String commandTopic = gSettings.mqttBaseTopic + "/command";
-  String responseTopic = gSettings.mqttBaseTopic + "/response";
+  String commandTopic = gSettings.mqttBaseTopic + kMqttCommandTopicSuffix;
+  String responseTopic = gSettings.mqttBaseTopic + kMqttResponseTopicSuffix;
   
   // Check if this is our command topic
   if (topicLen != (int)commandTopic.length() || 
@@ -1175,7 +1197,8 @@ static void mqtt_event_handler(void* handler_args, esp_event_base_t base, int32_
       // Check for command topic first
       handleMqttCommand(event->topic, event->topic_len, event->data, event->data_len);
       
-      // Store incoming data as external sensor if subscriptions enabled
+      // Store incoming data as external sensor if subscriptions enabled.
+      // updateExternalSensor drops this client's command and response topics.
       if (gSettings.mqttSubscribeExternal && event->topic_len > 0) {
         updateExternalSensor(event->topic, event->topic_len, event->data, event->data_len);
       }

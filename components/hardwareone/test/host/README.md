@@ -971,8 +971,14 @@ publishes every document of at most 1023 bytes exactly and skips every longer
 one; esp-mqtt's topic and payload, given in exactly-sized buffers with no NUL
 (payload with an embedded NUL), are stored with exactly `topic_len` /
 `data_len` bytes, and a topic length covering a prefix of a longer buffer
-stores only that prefix. Source guards: no unchecked `sizeof(configJson) - pos`
-remains, and the periodic state document is checked before it is published.
+stores only that prefix; the client's own `<base>/command` and
+`<base>/response` (`System_MQTTControlTopic.h`) are never stored, for the base
+topic of the live subscription and for the one in the settings, while their
+neighbours (`.../command/extra`, another device's command topic) still are.
+Source guards: no unchecked `sizeof(configJson) - pos`
+remains, the periodic state document is checked before it is published, the
+two topic words are spelled only through the header, and the filter runs
+inside `updateExternalSensor` before the table is touched.
 Not covered: the state document's sensor sections, JSON escaping of setting
 text, and the real esp-mqtt client. `--case discovery|peer|sensor` runs one
 group. Run with

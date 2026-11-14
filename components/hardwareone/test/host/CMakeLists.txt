@@ -2294,7 +2294,8 @@ add_test(
           ${SETUP_MQTT_TEST_ARGS})
 # MQTT discovery builders skip a document that does not fit the 1 KB buffer
 # (400-character base topic) and the external-sensor table copies esp-mqtt's
-# length-delimited topic/payload with exactly topic_len/data_len bytes.
+# length-delimited topic/payload with exactly topic_len/data_len bytes. The
+# client's own command and response topics never reach that table.
 add_test(
   NAME mqtt_json_bounds
   COMMAND ${Python3_EXECUTABLE}

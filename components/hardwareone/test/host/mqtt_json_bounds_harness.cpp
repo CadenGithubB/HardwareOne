@@ -293,6 +293,82 @@ static void test_external_sensor_exact_copy() {
   externalSensorCount = 0;
 }
 
+// The client's own command topic (the {user, pass, cmd} envelope) and response
+// topic (command output) are delivered to the same handler as the external
+// subscriptions. Neither may be stored: `mqttexternalsensors` needs no admin.
+static void test_control_topics_never_stored() {
+  externalSensorMutex = &sensorMutexToken;
+  ExternalSensor table[MAX_EXTERNAL_SENSORS];
+  externalSensors = table;
+  externalSensorCount = 0;
+  newSensorEvents = 0;
+  gSettings.mqttBaseTopic = "hardwareone/bench";
+#if HW1_MQTT_CONTROL_TOPIC_PRESENT
+  sMqttSubscribedBaseTopic = "hardwareone/bench";
+#endif
+
+  const std::string envelope = "{\"user\":\"u\",\"pass\":\"p\",\"cmd\":\"status\"}";
+  auto deliver = [&](const std::string& topicText) {
+    // Exactly-sized, not NUL-terminated, as esp-mqtt hands them over.
+    char* topic = new char[topicText.size()];
+    std::memcpy(topic, topicText.data(), topicText.size());
+    char* data = new char[envelope.size()];
+    std::memcpy(data, envelope.data(), envelope.size());
+    updateExternalSensor(topic, (int)topicText.size(), data, (int)envelope.size());
+    delete[] topic;
+    delete[] data;
+  };
+  auto storedAnywhere = [&](const std::string& needle) {
+    for (int i = 0; i < externalSensorCount; i++) {
+      if (table[i].value.find(needle) != std::string::npos) return true;
+    }
+    return false;
+  };
+
+  deliver("hardwareone/bench/command");
+  check(externalSensorCount == 0, "the command topic is not stored as a sensor");
+  check(!storedAnywhere("\"pass\""), "no command envelope in the sensor table");
+  deliver("hardwareone/bench/response");
+  check(externalSensorCount == 0, "the response topic is not stored as a sensor");
+  check(newSensorEvents == 0, "no new-sensor event for a control topic");
+  check(mutexDepth == 0, "sensor mutex untouched or released for a control topic");
+
+  // Only the exact two topics are dropped: neighbours are ordinary sensors.
+  for (const char* topic : {"hardwareone/bench/command/extra", "hardwareone/bench/commands",
+                            "hardwareone/bench/state", "hardwareone/other/command",
+                            "xhardwareone/bench/command", "hardwareone/bench/respons"}) {
+    const int before = externalSensorCount;
+    deliver(topic);
+    check(externalSensorCount == before + 1, std::string("stored as a sensor: ") + topic);
+  }
+
+  // `mqttbasetopic` changed the setting while the client stays subscribed to
+  // the old command topic until the next connect: both bases are covered.
+  gSettings.mqttBaseTopic = "hardwareone/renamed";
+  const int before = externalSensorCount;
+  deliver("hardwareone/bench/command");
+  deliver("hardwareone/bench/response");
+  deliver("hardwareone/renamed/command");
+  deliver("hardwareone/renamed/response");
+  check(externalSensorCount == before,
+        "command and response topics of the subscribed and the configured base are dropped");
+  // The six neighbour rows hold the envelope text by construction; none of
+  // them is a control topic.
+  for (int i = 0; i < externalSensorCount; i++) {
+    const std::string& topic = table[i].topic;
+    check(topic != "hardwareone/bench/command" && topic != "hardwareone/bench/response" &&
+              topic != "hardwareone/renamed/command" && topic != "hardwareone/renamed/response",
+          "no control topic among the stored rows: " + topic);
+  }
+
+  externalSensors = nullptr;
+  externalSensorCount = 0;
+  gSettings.mqttBaseTopic = "";
+#if HW1_MQTT_CONTROL_TOPIC_PRESENT
+  sMqttSubscribedBaseTopic = "";
+#endif
+}
+
 int main(int argc, char** argv) {
   // An optional argument runs one group: discovery, peer or sensor.
   const std::string only = argc > 1 ? argv[1] : "";
@@ -302,7 +378,10 @@ int main(int argc, char** argv) {
     test_local_discovery_boundary();
   }
   if (only.empty() || only == "peer") test_peer_discovery();
-  if (only.empty() || only == "sensor") test_external_sensor_exact_copy();
+  if (only.empty() || only == "sensor") {
+    test_external_sensor_exact_copy();
+    test_control_topics_never_stored();
+  }
   if (failures != 0) {
     std::fprintf(stderr, "%d of %d MQTT JSON bound checks failed\n", failures, checks);
     return 1;
