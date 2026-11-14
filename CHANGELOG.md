@@ -80,6 +80,50 @@ everything user-visible since the v0.99.99.1 tag.
   task whose stack is not in internal RAM. Any clock change was exposed (power mode, `cpufreq`, the
   STT and display boosts). Not yet tested on hardware.
 
+- ESP32-P4 Bluetooth: tearing the host stack down while a link was still open (the G2 watchdog's
+  "host stack recycle" after a stuck connect) could panic in `BTC_TASK` at
+  `gap_find_clcb_by_bd_addr()` (bench 2026-11-13). ESP-IDF 5.5.5 frees GAP before L2CAP, and the
+  link clean-up then calls GAP's freed callbacks; not fixed upstream. `tools/p4/idf-bt-gap-deinit.patch`
+  makes those callbacks return when GAP is gone, applied by `prepare_idf_bt.py` and pinned by hash.
+  P4 builds only; the ESP32 and ESP32-S3 builds keep the stock component. Existing checkouts re-stage
+  with `tools/p4/prepare_sdk.sh` after moving `.sdk-overrides/esp32p4/bt` aside. On the bench P4
+  since 2026-11-13 without the fault recurring, though nothing has provoked it on purpose.
+- Saved files: no file is replaced unless the boot read it. `settings.json`, `debug.json`, the
+  notification policy, map waypoints, the IP ban list, the ESP-NOW device registry, automations,
+  `pending_users.json` and `boot_anchors.json` keep a load result. A damaged file (empty, cut short,
+  unparseable) is moved to `<file>.corrupt-1..3` and that file starts from defaults; `debug.json` and
+  the notification policy used to refuse saves until someone deleted them by hand. A file that is
+  intact but could not be read (no memory, open failed, no filesystem) is left in place and saves
+  are refused until a boot reads it; the notification policy and the automations store used to be
+  replaced by an empty one. A file the device loaded only partly is copied to `<file>.partial-1`
+  (newest three kept) before the first save. `users.json.bad` and `<file>.corrupt` are now
+  `<file>.corrupt-N`, and factory reset removes the kept copies of the user files. Host-tested; not
+  yet tested on hardware.
+- OLED: clearing the notification center (X on the Notifs page) left every banner already queued
+  coming down for the notifications just cleared. The queued banners of cleared events are dropped,
+  the one on screen slides out, and an event at or below the cleared point puts up no banner.
+  Web toasts, G2 cards and app cards are unchanged. Host-tested; not yet tested on hardware.
+- OLED: `oledmode` with a mode the build cannot draw (`oledmode thermal` on the P4) answered OK and
+  left the display blank, and a saved default mode could boot into the same blank screen. The
+  command now answers "Error: Thermal is not in this build.", a mode that is built but cannot be
+  entered opens the unavailable page as the menu does, and the saved default falls back to the
+  status screen. With ESP-NOW or automations not built, the unavailable page no longer offers an X
+  action that does nothing. Host-tested; not yet tested on hardware.
+- Web: a request body that stops arriving is refused instead of being parsed as a truncated request
+  (register, CLI batch, bond batch), and file create, bond streaming and exec, the Maps form and the
+  backup category body read the whole body and refuse one that does not fit, instead of taking a
+  single receive.
+- Command replies are read by one set of rules: the super-admin refusal is recognised wherever the
+  admin refusal is (the web CLI and the ring health page answer 403; the OLED and G2 pages show
+  "Admin required"); the G2 LLM page shows "Admin required" only for that refusal, not for any reply
+  containing "admin"; the OLED password page takes the executor's verdict.
+- Auth log: a login on a transport without its own path is now written when it fails, not only when
+  it succeeds; password changes are always written.
+- Smaller fixes: exporting a single automation whose name has an escaped quote no longer cuts the file
+  name short; `whoami` names every command source, not five of them; JSON text escapes every control
+  character; a user-sync MAC address with non-hex digits is refused instead of read as zeros; an
+  admin reject without a body answers "Username required"; the `xiao-no-network` and `xiao-no-web`
+  configurations build again.
 ### Changed
 - Command names have one form: lower-case letters and digits. The 22 camelCase `mqtt*` commands and
   `httpAutoStart` / `httpsEnabled` are now `mqtthost`, `mqttpublishgps`, `httpautostart`,
@@ -89,6 +133,22 @@ everything user-visible since the v0.99.99.1 tag.
   as aliases for one release, as `c6_console` does for `c6console`. Setting keys in saved settings
   and in JSON are unchanged. Sub-command families keep their spaces (`phone pair new`,
   `ring panel on`).
+
+- Command arguments: a number must be a whole decimal number inside its range. `abc` used to be read
+  as 0 and `12x` as 12; the command now answers "Error: Not a whole number". `i2crecover` and
+  `matrixaddress` still take a hex address. On/off arguments take on/true/1/enable and
+  off/false/0/disable in any letter case everywhere, and the commands that read a flag as a number
+  (`webconsole`, `wifiautoreconnect`, the I2C bus enables, `ledstartupenabled` and others) refuse
+  other text instead of treating any non-zero number as on.
+- Command failures say why: a failing command answers `Error: <reason>` instead of a bare `ERROR`, so
+  the OLED, the glasses, MQTT and the UART link, which show only the reply, show the reason. Live
+  output lines that began `ERROR: ` now begin `Error: `; scripts that match the upper-case form need
+  to match either.
+### Security
+- G2 glasses and R1 ring frames: one bounded protobuf reader for both parsers. A malformed frame whose
+  declared length was near 2^64 passed the bounds check of the old skip and moved the read cursor
+  backwards; it is now refused, as is a varint that overflows 64 bits. Well-formed frames are read as
+  before.
 
 ### Docs
 - Release gate, tracked-tree hygiene: the `git grep` in `RELEASING.md` could never come back empty,
@@ -102,6 +162,19 @@ everything user-visible since the v0.99.99.1 tag.
   suite `managed_components_stamp` checks that they match the main project's lock.
 - Host suite `esp_hosted_mempool` compiles on macOS again (fortified `memset` is turned off for the
   host build of the ESP-Hosted pool); `RELEASING.md` names the option that includes it in the gate.
+- `CONTRIBUTING.md` states the code rules the cleanup applied, each kept by a host test: acronyms in
+  code names are written as words (`code_name_spelling`), the logging routes (`logging_routes`), one
+  declaration of a shared name in its header (`extern_declarations`), each feature header owns its
+  disabled branch and there is no central stub file (`disabled_feature_branches`), reserved identity
+  and role names live in `System_User.h` (`identity_names`), reply words in `System_CommandReply.h`
+  (`reply_wording`, `command_reply_contract`), and the shared text, number and MAC helpers
+  (`shared_text_helpers`, `arg_parse_tests`).
+- Source files that stood outside their family were renamed (for example `Bluetooth.cpp` is
+  `BLE_Server.cpp`, `System_G2_Protocol.cpp` is `G2_Protocol.cpp`, `System_LLM_Model.h` is
+  `System_LLMModel.h`), and `G2_Glasses.cpp` is split into a core and eleven part files. Patches made
+  against the old names need the new paths; earlier changelog entries keep the names as written.
+- The GitHub Actions "Host tests" workflow is removed: the host suite runs on the development
+  machine and `RELEASING.md` step 2 is the gate. The issue templates stay.
 
 ## [0.99.99.1] - 2026-11-08
 
