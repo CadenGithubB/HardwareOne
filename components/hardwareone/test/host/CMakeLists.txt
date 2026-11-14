@@ -2301,6 +2301,14 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_mqtt_json_bounds.py
           ${SETUP_MQTT_TEST_ARGS})
+# MQTT page: the External Sensors table shows a received topic segment and
+# payload; both reach the page HTML-escaped (README "Untrusted names on web
+# pages").
+add_test(
+  NAME web_mqtt_sensor_rows
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_web_mqtt_sensor_rows.py
+          ${SETUP_MQTT_TEST_ARGS})
 # Self-registration: /register/submit hands the decoded fields to
 # submitAccountRequest byte-exact (spaced and quoted passphrases), owner
 # refusals do not count toward the login lockout, anonymous `userrequest` is

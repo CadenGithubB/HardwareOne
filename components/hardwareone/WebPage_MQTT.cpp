@@ -15,6 +15,26 @@
 #include "WebServer_Server.h"
 #include "WebServer_Utils.h"
 
+// Bytes of a received value the External Sensors table shows.
+static constexpr size_t kMqttSensorValueShownMax = 100;
+
+// One row of the External Sensors table. The name is the last segment of a
+// received topic and the value is a received payload: whoever publishes to a
+// subscribed topic chooses both, so both go out HTML-escaped. Each is shown up
+// to its first NUL, as `%s` showed it.
+static void streamMqttExternalSensorRow(httpd_req_t* req, const String& name,
+                                        const String& value, unsigned long ageSec) {
+  httpd_resp_send_chunk(req, "<tr><td style=\"width:140px;font-weight:500;\">",
+                        HTTPD_RESP_USE_STRLEN);
+  streamHtmlEscaped(req, name.c_str(), strlen(name.c_str()));
+  httpd_resp_send_chunk(req, "</td><td>", HTTPD_RESP_USE_STRLEN);
+  streamHtmlEscaped(req, value.c_str(), strnlen(value.c_str(), kMqttSensorValueShownMax));
+  char tail[128];
+  snprintf(tail, sizeof(tail),
+           "</td><td style=\"width:80px;color:var(--panel-fg);font-size:0.85em;\">%lus ago</td></tr>",
+           ageSec);
+  httpd_resp_send_chunk(req, tail, HTTPD_RESP_USE_STRLEN);
+}
 
 // Stream MQTT page inner content
 void streamMqttInner(httpd_req_t* req) {
@@ -283,15 +303,7 @@ void streamMqttInner(httpd_req_t* req) {
         unsigned long lastUpdate;
         if (getExternalSensor(i, topic, name, value, lastUpdate)) {
           unsigned long ageSec = (now - lastUpdate) / 1000;
-          char row[512];
-          snprintf(row, sizeof(row),
-            "<tr><td style=\"width:140px;font-weight:500;\">%s</td>"
-            "<td>%s</td>"
-            "<td style=\"width:80px;color:var(--panel-fg);font-size:0.85em;\">%lus ago</td></tr>",
-            name.c_str(),
-            value.substring(0, 100).c_str(),
-            ageSec);
-          httpd_resp_send_chunk(req, row, HTTPD_RESP_USE_STRLEN);
+          streamMqttExternalSensorRow(req, name, value, ageSec);
         }
       }
       

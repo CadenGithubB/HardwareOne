@@ -3560,6 +3560,24 @@ engine the suite exits 77 after the contracts (skipped). `--contract-only` and
 ctest --test-dir /tmp/hw1-hardwareone-host -R '^web_untrusted_names$' --output-on-failure
 ```
 
+`web_mqtt_sensor_rows` covers a sink the server writes itself: the External
+Sensors table of the MQTT page shows the last segment of a received topic and
+the first 100 bytes of its payload, both chosen by whoever publishes to a
+subscribed topic. It compiles the production `streamMqttExternalSensorRow`
+(`WebPage_MQTT.cpp`) with the production `streamHtmlEscaped` /
+`streamHtmlEscapedChecked` (`WebServer_Utils.cpp`) against an httpd double.
+Markup in either cell must arrive as text and read back unchanged; a clean row
+keeps its bytes; the value is cut at 100 received bytes and at its first NUL;
+an empty cell sends no zero-length chunk (the terminator of a chunked
+response). Source contract: the table loop sends every row through that
+function and formats no received text with `%s`. Not covered: the rest of the
+page, whose text comes from settings. It takes `--cxx`, `--sanitize` and
+`--component <directory>`.
+
+```sh
+ctest --test-dir /tmp/hw1-hardwareone-host -R '^web_mqtt_sensor_rows$' --output-on-failure
+```
+
 This does not open a real browser; a user-role upload of a hostile name and a
 hotspot named `<b>x</b>` remain the on-device checks.
 
