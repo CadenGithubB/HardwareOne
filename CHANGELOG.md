@@ -53,7 +53,7 @@ everything user-visible since the v0.99.99.1 tag.
   reboot, because a lost connection was retried only on the network that dropped. When a connection
   is lost without a command asking for it and the device is still offline 60 s later, it now hunts
   across all saved networks (two or more saved), and again after 60 s, 120 s and then every 300 s.
-  `wifidrop`, `closewifi` and `wifiautoreconnect 0` stop it; a boot that never connected is not
+  `wifidisconnect`, `closewifi` and `wifiautoreconnect 0` stop it; a boot that never connected is not
   retried. Once a hunt has failed, a router that returns is rejoined at the next hunt rather than
   within seconds. Host-tested; not yet tested on hardware (readiness G-66).
 - Recording: a recording cut by a power loss or reset was lost, since its WAV header was completed
@@ -124,6 +124,58 @@ everything user-visible since the v0.99.99.1 tag.
   character; a user-sync MAC address with non-hex digits is refused instead of read as zeros; an
   admin reject without a body answers "Username required"; the `xiao-no-network` and `xiao-no-web`
   configurations build again.
+- Automations: a trigger that names a time of day ran on a clock that was not set. The scheduler
+  took the clock as set one second after boot, so "07:30" fired seven and a half hours after a boot
+  without a time source. Time-of-day triggers now wait until the clock is set (2020 or later);
+  interval triggers run as before. `espnowtimesync`, `certgen`, `certinfo` and the HTTPS
+  certificate expiry check used a test that turned false after 28 hours without a time source, and
+  then sent or dated 1970; they ask the same question now. Host-tested; not yet tested on hardware.
+- Long uptime: the millisecond counter wraps after 49.7 days, and a signed test of it misbehaves from
+  day 24.9. Host-tested; not yet tested on hardware.
+  - With eight saved logout reasons and the counter past its wrap, the next logout wrote one row
+    before the table in memory. The oldest row is now found by age.
+  - After the wrap the OLED repainted every frame for as many days as the device had been up, and
+    dropped later repaint requests.
+  - Automations created after 24.9 days of uptime could not be addressed by id, were not
+    rescheduled after they fired, and a second one was skipped as a duplicate. New ids stay within
+    1 to 2147483647; a stored id above that is given a new one.
+  - Deadlines that use 0 for "none" read as pending from day 24.9 to 49.7: the glasses LLM page
+    showed "Reply in progress" in place of the reply, the OLED camera preview did not start, the
+    R1 Health header showed [DENIED], and the OLED transcription page skipped its first status
+    poll. Error boxes on the login, change-password and settings screens, the quick-settings status
+    line and the web event stream's retry timer had the same fault the other way round. A deadline
+    that has passed is now cleared.
+  - Twelve elapsed-time tests stopped working for a stamp 24.9 to 49.7 days old: a sensor log
+    restarted after such a pause took no sample, wrote no heartbeat and did not rotate; the health
+    logging read, the Health page sync and the ring's vital polling stalled.
+  - Uptime counts on past 49.7 days, where it used to start again at 0: the mesh and bond
+    heartbeats, the Bluetooth status, the OLED and glasses status pages, command audit stamps,
+    `i2cmetrics` and automation conditions on `UPTIME`.
+  - Values stored as unsigned numbers are read back as unsigned: a time-sync anchor taken after 24.9
+    days of uptime read as 0 (and from 2038 no anchor would have loaded), and an automation interval
+    longer than 24.8 days read as "no interval". A user's creation time is resolved correctly when
+    the account and the time sync lie on either side of 2^31 ms or of the wrap.
+  - `mqttstatus` printed about 4294967000 ms as "Next Publish" for a publish that was already due;
+    it prints 0 ms.
+- Settings changed from two tasks at once could lose one of the changes: the output lanes (web,
+  file, Bluetooth, glasses, serial) could keep a lane on or off until it was switched again; a list
+  row tapped on the glasses camera stream or Health page while the page was updating did nothing;
+  the glasses menu generation, command sequence, Health page generation and notification
+  preference generation could count two steps as one. Each is one atomic operation now.
+  Host-tested; not yet tested on hardware.
+- Speech recognition (ESP-SR builds): the OLED speech page, the web speech status and `srdebugstats`
+  read the detected category and last command while the recognizer replaced them, which could read
+  freed memory. Other tasks now read copies made under a lock. Host-tested; built for the P4X-EYE
+  default only; not yet tested on hardware.
+- `espnowtimestatus` showed the uptime as "Last sync"; it counts from the last applied time sync.
+  The memory monitor's periodic stack sample did not report the `espnow_tx` task; both reports now
+  read one table of tasks. Host-tested; not yet tested on hardware.
+- `/api/videos` and the LLM model list wrote file and model names without JSON escaping: a name with
+  a quote or a backslash broke the reply, and a video name with a colon was cut there. Host-tested;
+  not yet tested on hardware.
+- Automations: an `IF` command of three or four characters, which only a hand-edited or synced
+  `automations.json` can hold, made the THEN and ELSE search read past the end of the text.
+  Host-tested; not yet tested on hardware.
 ### Changed
 - Command names have one form: lower-case letters and digits. The 22 camelCase `mqtt*` commands and
   `httpAutoStart` / `httpsEnabled` are now `mqtthost`, `mqttpublishgps`, `httpautostart`,
@@ -150,6 +202,14 @@ everything user-visible since the v0.99.99.1 tag.
   backwards; it is now refused, as is a varint that overflows 64 bits. Well-formed frames are read as
   before.
 
+- MQTT: with `mqttSubscribeExternal` on, a command sent to the device over MQTT, user name and
+  password included, was stored as an external sensor reading and shown by `mqttexternalsensors`,
+  which needs no admin, and on the MQTT page. The device's own command and response topics are no
+  longer stored. A wildcard subscription can still deliver another device's command topic, and
+  that is still stored. Host-tested; not yet tested on hardware.
+- MQTT page: external sensor names and values, which whoever publishes to a subscribed topic
+  chooses, were written into the page as markup. They are HTML-escaped now, as is the
+  subscribed-topics line. Host-tested; not yet tested on hardware.
 ### Docs
 - Release gate, tracked-tree hygiene: the `git grep` in `RELEASING.md` could never come back empty,
   because the firmware and the tools use example and SoftAP addresses on purpose. It is now the host
@@ -175,6 +235,10 @@ everything user-visible since the v0.99.99.1 tag.
   against the old names need the new paths; earlier changelog entries keep the names as written.
 - The GitHub Actions "Host tests" workflow is removed: the host suite runs on the development
   machine and `RELEASING.md` step 2 is the gate. The issue templates stay.
+- The user guide and `KNOWN_ISSUES.md` named a `wifidrop` command that does not exist; the command is
+  `wifidisconnect`. In the code, each command handler is now named after the command it serves
+  (`closewifi` is handled by `cmd_closewifi`, `wifidisconnect` by `cmd_wifidisconnect`), and the
+  host test `command_handler_names` keeps it so.
 
 ## [0.99.99.1] - 2026-11-08
 
