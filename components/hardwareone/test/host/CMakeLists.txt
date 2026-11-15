@@ -2301,6 +2301,13 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_mqtt_json_bounds.py
           ${SETUP_MQTT_TEST_ARGS})
+# `espnowtimestatus`: "Last sync" counts from the moment the last mesh
+# TIME_SYNC was applied (it used to read a stamp nothing wrote: the uptime).
+add_test(
+  NAME espnow_time_status
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_espnow_time_status.py
+          ${SETUP_MQTT_TEST_ARGS})
 # MQTT page: the External Sensors table shows a received topic segment and
 # payload; both reach the page HTML-escaped (README "Untrusted names on web
 # pages").

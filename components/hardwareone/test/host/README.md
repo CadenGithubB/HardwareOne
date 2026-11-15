@@ -3657,6 +3657,17 @@ instead of comparing absolute times. `System_ESPNow_Deadline.h` is pasted when t
 (`espnow_session_replay` and `espnow_rekey_retry` paste it the same way); `--source-dir <component-directory>`
 replays the pre-fix sources. No radio is used.
 
+## ESP-NOW time status
+
+`espnow_time_status` compiles the production time-sync state, the TIME_SYNC handler `v4h_time_sync` and
+`cmd_espnow_timestatus` (`System_ESPNow.cpp`) with the production `V4PayloadTimeSync` and `V4RxCtx` against a
+settable 32-bit `millis()`. The reply's "Last sync: N seconds ago" must count from the moment the last sync was
+applied (it read a stamp nothing wrote, so it showed the uptime): no such line before a sync, 60 after 60 s on a
+device that had been up 100 s, a later sync restarts the count, a refused correction and a short payload leave
+the stamp, and the count is right across the `millis()` wrap. Source contract: the stamp is stored before
+`gTimeIsSynced` is set, and only that handler sets it. `--component <component-directory>` replays other
+sources. No radio is used.
+
 ## ESP-NOW peer message store
 
 `espnow_message_store` compiles the whole message-buffer section of

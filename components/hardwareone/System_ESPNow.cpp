@@ -652,7 +652,9 @@ static char* gTopoOutputBuffer = nullptr;
 // Time synchronization state (exported for .ino access)
 int64_t gTimeOffset = 0;           // Offset to add to millis() to get epoch time (milliseconds)
 bool gTimeIsSynced = false;        // True if we have received time sync from master
-unsigned long gLastTimeSyncMs = 0; // When we last synced time (millis())
+// millis() when the last TIME_SYNC was applied. v4h_time_sync stores it before
+// it sets gTimeIsSynced; `espnowtimestatus` reads it on the command task.
+static std::atomic<uint32_t> sLastTimeSyncMs{0};
 extern const unsigned long TIME_SYNC_INTERVAL = 600000; // Broadcast time sync every 10 minutes (master only)
 
 // Worker status configuration
@@ -3394,6 +3396,7 @@ static void v4h_time_sync(const V4RxCtx& ctx) {
       return;
     }
     gTimeOffset = (int64_t)ts->timeOffset;
+    sLastTimeSyncMs.store((uint32_t)millis());
     gTimeIsSynced = true;
     DEBUG_ESPNOW_MESHF("[V4_RX_TIME_SYNC] Time sync applied successfully");
   } else {
@@ -14477,7 +14480,7 @@ const char* cmd_espnow_timestatus(const String& argsInput) {
   
   if (gTimeIsSynced) {
     uint32_t epoch = (uint32_t)time(nullptr);
-    uint32_t secondsSinceSync = (millis() - gLastTimeSyncMs) / 1000;
+    uint32_t secondsSinceSync = (uint32_t)((uint32_t)millis() - sLastTimeSyncMs.load()) / 1000;
     snprintf(getDebugBuffer(), 1024, 
              "Time Status:\n  Synced: Yes\n  Epoch: %lu\n  Last sync: %lu seconds ago",
              (unsigned long)epoch, (unsigned long)secondsSinceSync);
