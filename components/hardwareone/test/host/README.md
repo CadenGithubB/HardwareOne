@@ -3832,6 +3832,18 @@ the automation unchanged; a file whose ids are in range (2147483647 included) is
 `automationIdTextAboveRange` flags, the sanitizer changes. Source rules: both places that make an id use the
 owner, and the scheduler pass leaves an automation with an id above the range out and queues the sanitizer.
 
+`clock_set_question`: "is the clock set" has one owner, `Clock::isValidEpoch` (the year 2020 or later). The
+suite runs the production `cmd_espnow_timesync` (`System_ESPNow.cpp`) with the real `Clock::isValidEpoch`
+(`System_Clock.cpp`): it refuses and sends nothing while the clock counts from 1970, also 55 hours after boot
+(its old test `epoch < 100000` let a 1970 date out to the mesh from hour 28 on), and sends a set clock as it is.
+Source rules: no comparison of a time with 100000 is left; `cmd_certinfo`, `cmd_certgen` and the expiry check
+at HTTPS start ask the owner; the scheduler pass asks it and takes its next run from `automationNextRunTime`;
+the due cache leaves a time-of-day trigger out while the clock is not set. Four own tests stay and are listed
+in the test (`KEPT`) with their reasons; a new hand test elsewhere fails the rule. The scheduler's behaviour is
+in `automation_scheduler` (`clockNotSet`): with the clock not set, a trigger that names a time of day is not
+part of the next run and is not "due" in the cache, an interval trigger still is, and the public
+`computeNextRunTime` is unchanged; `Clock::isValidEpoch` is compiled from `System_Clock.cpp` there too.
+
 `automation_condition_bounds` is about a size, not a time, and sits here with the group that fixed it. It
 compiles the production `validateConditionSyntax` and `executeConditionalCommand` (`System_Automation.cpp`).
 Their scan for ` THEN ` was bounded by `i < len - 5` on a `size_t`: for a command of 3 or 4 characters that

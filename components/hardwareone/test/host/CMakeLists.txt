@@ -2406,6 +2406,15 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_automation_ids.py
           ${SETUP_MQTT_TEST_ARGS})
+# "Is the clock set" is asked of System_Clock: the mesh time-sync command with
+# the real Clock::isValidEpoch, and source rules for the certificate sites and
+# the automation scheduler (whose next-run and due-cache cases run in
+# automation_scheduler). The own tests that stay are listed with their reasons.
+add_test(
+  NAME clock_set_question
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_clock_set_question.py
+          ${SETUP_MQTT_TEST_ARGS})
 # Self-registration: /register/submit hands the decoded fields to
 # submitAccountRequest byte-exact (spaced and quoted passphrases), owner
 # refusals do not count toward the login lockout, anonymous `userrequest` is

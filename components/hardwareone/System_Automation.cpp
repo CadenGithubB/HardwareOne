@@ -1035,6 +1035,11 @@ static void rebuildAutomationsCache() {
   int n = 0;
   uint32_t evtMask[AUTOMATION_EVENT_MASK_WORDS]{};
   const time_t now = time(nullptr);
+  // A trigger of type "time" names a time of day and waits for a set clock
+  // (the scheduler pass leaves it out, see automationNextRunTime). It is left
+  // out here as well, or its stored next run would make automationsAnyDue()
+  // ask for a full pass on every loop while the pass refuses to fire it.
+  const bool clockSet = Clock::isValidEpoch(now);
   bool sawAll = true;
   automationVolatileSweep(true);
   for (JsonObjectConst a : autos) {
@@ -1051,11 +1056,12 @@ static void rebuildAutomationsCache() {
       for (JsonVariantConst t : triggers) {
         slot++;
         bool isEventTrig = (strcmp(t["type"] | "", "event") == 0);
+        const bool waitsForClock = !clockSet && strcmp(t["type"] | "", "time") == 0;
         // Event triggers never clock-fire; a stale hand-edited nextAt on one
         // would otherwise make automationsAnyDue() spin the full tick every
         // loop pass forever (the scheduler computes 0 for it and never
         // clears the persisted value). Mirror parseOneTrigger's defense.
-        if (!isEventTrig) {
+        if (!isEventTrig && !waitsForClock) {
           unsigned long raw = t["nextAt"] | 0UL;
           time_t na = (time_t)raw;
           // A short interval's next run is in RAM; the file value is stale.
@@ -3229,19 +3235,32 @@ static int automationRecomputeAllClockTriggers(time_t now, int* outSkipped) {
   return rewritten;
 }
 
-// Thin wrapper preserving the existing public API. Returns the min nextAt
-// across all triggers of the automation, or 0 if none are scheduled.
-time_t computeNextRunTime(const char* automationJson, time_t fromTime) {
+// The min nextAt across the triggers of the automation, or 0 if none is
+// scheduled. `clockSet` is System_Clock's answer to "is the clock set". While
+// it is false a trigger that names a time of day (daily, weekly, monthly,
+// yearly) is left out: against a clock that still counts from 1970 its
+// "07:00" is seven hours after boot. Interval and armed-delay triggers only
+// count seconds and are scheduled as before.
+static time_t automationNextRunTime(const char* automationJson, time_t fromTime, bool clockSet) {
   Trigger triggers[MAX_TRIGGERS];
   int n = triggersFromJson(automationJson, triggers, MAX_TRIGGERS);
   if (n == 0) return 0;
   // For triggers without persisted nextAt, compute fresh ones.
   time_t minAt = 0;
   for (int i = 0; i < n; i++) {
+    const bool namesTimeOfDay = triggers[i].type == Trigger::TIME || triggers[i].type == Trigger::MONTHLY ||
+                                triggers[i].type == Trigger::YEARLY;
+    if (namesTimeOfDay && !clockSet) continue;
     time_t t = (triggers[i].nextAt > 0) ? triggers[i].nextAt : nextFire(triggers[i], fromTime);
     if (t > 0 && (minAt == 0 || t < minAt)) minAt = t;
   }
   return minAt;
+}
+
+// Thin wrapper preserving the existing public API. Returns the min nextAt
+// across all triggers of the automation, or 0 if none are scheduled.
+time_t computeNextRunTime(const char* automationJson, time_t fromTime) {
+  return automationNextRunTime(automationJson, fromTime, true);
 }
 
 // Validate condition syntax (const char* input)
@@ -4411,7 +4430,12 @@ static SystemEvent* sEventBuf = nullptr;
 // Core scheduler logic - extracted for reuse
 static void schedulerTickMinute() {
   time_t now = time(nullptr);
+  // time() has started to count. This is not "the clock is set": one second
+  // after boot it is true on a clock that reads 1970.
   bool timeValid = (now > 0);
+  // System_Clock owns "is the clock set". A trigger that names a time of day
+  // waits for it; interval and armed-delay triggers run on a counting clock.
+  const bool clockSet = Clock::isValidEpoch(now);
 
   // Drain pending bus events BEFORE the time-sync bail so event triggers
   // work on devices without NTP/RTC. Events older than 60 s are discarded
@@ -4472,7 +4496,8 @@ static void schedulerTickMinute() {
     // the same tick as that failure, so warning again would just double it.
   }
 
-  // Without synced time only event fires are possible; skip the clock scan.
+  // Before time() counts at all only event fires are possible; skip the clock
+  // scan. A clock that counts but is not set is handled per trigger below.
   if (!timeValid && evCount == 0) return;
 
   DEBUG_AUTOMATIONSF("[automations] tick now=%lu", (unsigned long)now);
@@ -4567,7 +4592,9 @@ static void schedulerTickMinute() {
     // busy-spinning the full tick every main-loop pass until the primary came due.
     // rescheduleAfterFire (below) then advances each trigger that was due, so the
     // min moves forward and the cache/fire-check agree again.
-    time_t nextAt = timeValid ? computeNextRunTime(obj.c_str(), now) : 0;
+    // With the clock not set a time-of-day trigger is not part of the minimum
+    // (automationNextRunTime), so it cannot be due.
+    time_t nextAt = timeValid ? automationNextRunTime(obj.c_str(), now, clockSet) : 0;
     bool clockDue = (timeValid && nextAt > 0 && now >= nextAt);
 
     // Event triggers: fire when a drained bus event matches one of this

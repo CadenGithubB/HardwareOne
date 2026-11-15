@@ -81,25 +81,40 @@ def generated(component: Path) -> str:
         "void automationTick()"))
     tick = extract_block(owner, "static void schedulerTickMinute()")
     begin = tick.index("  static uint32_t sEventCursor")
-    drain = tick[begin:tick.index("  // Without synced time only event fires", begin)]
+    # The comment that follows the drain; an older tree words it differently.
+    drain_end = "  // Before time() counts at all only event fires"
+    if drain_end not in tick:
+        drain_end = "  // Without synced time only event fires"
+    drain = tick[begin:tick.index(drain_end, begin)]
     require("gAutomationEventsPending.exchange(false);" in drain,
             "event drain extraction holds the pending-flag exchange")
     events = (component / "System_Events.cpp").read_text()
     ring = "\n".join(extract_block(events, signature) for signature in (
         "uint32_t systemEventLatestSeq()", "int systemEventFetchSince("))
     # G-70: the post-fire path, which keeps a short interval's next run in RAM.
+    # The next run with the clock owner's answer; a tree without it has the
+    # public function only, and the clock cases then do not compile.
+    next_run = "static time_t automationNextRunTime(const char* automationJson, time_t fromTime, bool clockSet) "
     reschedule = "\n".join(extract_block(owner, signature) for signature in (
         "static time_t nextFire(const Trigger& s, time_t from)",
         "static bool onFired(Trigger& s, time_t firedAt)",
         "static void rescheduleAfterFire(long id, const char* automationJson, time_t firedAt, bool notify) ",
+        *((next_run,) if next_run in owner else ()),
         "time_t computeNextRunTime(const char* automationJson, time_t fromTime) "))
+    # System_Clock's "is this a real epoch", which the due cache and the pass ask.
+    clock = (component / "System_Clock.cpp").read_text()
+    threshold = re.search(r"^static constexpr int kSyncedTmYearThreshold = \d+;", clock, re.M)
+    require(threshold is not None, "System_Clock.cpp holds the year threshold")
+    clock_owner = ("namespace Clock {\n" + threshold.group(0) + "\n" +
+                   extract_block(clock, "bool isValidEpoch(time_t t)") + "\n}  // namespace Clock")
     require("automationVolatileSet(" in reschedule and "if (notify) notifyAutomationScheduler();" in reschedule,
             "rescheduleAfterFire keeps short intervals in RAM and notifies without a write")
     summary = owner_summary(component)
     require(bool(summary), "System_Automation.cpp has no owner automation summary "
             "(automationCopySummaries); pages still parse automations.json themselves")
     harness = (HERE / "automation_scheduler_harness.cpp").read_text()
-    for marker, replacement in {"// INSERT_CACHE_OWNER": cache,
+    for marker, replacement in {"// INSERT_CLOCK_OWNER": clock_owner,
+                                "// INSERT_CACHE_OWNER": cache,
                                 "// INSERT_SCHEDULER_API": functions,
                                 "// INSERT_EVENT_RING": ring,
                                 "// INSERT_PENDING_EVENT_DRAIN": drain,

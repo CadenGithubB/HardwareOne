@@ -5522,7 +5522,7 @@ void startHttpServer() {
           mbedtls_x509_crt_init(&crt);
           if (mbedtls_x509_crt_parse(&crt, (const unsigned char*)sHttpsCertData.c_str(), sHttpsCertData.length() + 1) == 0) {
             time_t now = time(NULL);
-            if (now > 100000) {  // Only check if time is set (post-NTP)
+            if (Clock::isValidEpoch(now)) {  // Only check if time is set; System_Clock owns that question
               struct tm expTm = {};
               expTm.tm_year = crt.valid_to.year - 1900;
               expTm.tm_mon = crt.valid_to.mon - 1;

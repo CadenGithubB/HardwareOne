@@ -14454,10 +14454,14 @@ const char* cmd_espnow_timesync(const String& argsInput) {
     return "Error: Mesh mode not enabled. Use 'espnowmode mesh' first.";
   }
   
-  uint32_t epoch = (uint32_t)time(nullptr);
-  if (epoch < 100000) {
+  // System_Clock owns "is the clock set". `epoch < 100000` stopped refusing
+  // after 28 hours of uptime without any time source, and a 1970 date went
+  // out to the mesh.
+  const time_t now = time(nullptr);
+  if (!Clock::isValidEpoch(now)) {
     return "Error: No valid NTP time available. Ensure WiFi is connected and NTP is synced.";
   }
+  uint32_t epoch = (uint32_t)now;
   
   DEBUG_ESPNOWF("[TIME_SYNC] Broadcasting time sync: epoch=%lu", (unsigned long)epoch);
   

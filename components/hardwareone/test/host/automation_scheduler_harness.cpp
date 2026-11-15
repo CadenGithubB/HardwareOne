@@ -137,6 +137,9 @@ bool automationSchedulerRunning();
 void automationTick();
 static void schedulerTickMinute();
 
+// Clock::isValidEpoch from System_Clock.cpp, the owner of "is the clock set".
+// INSERT_CLOCK_OWNER
+
 // INSERT_CACHE_OWNER
 
 // Only full trigger evaluation/command dispatch is substituted. The production
@@ -763,6 +766,61 @@ static void shortIntervals() {
   stopAutomationScheduler();
 }
 
+// The clock question (census-duplicates-08). The scheduler took `now > 0` for
+// a set clock, which is true one second after boot. It asks System_Clock now:
+// a trigger that names a time of day waits for a set clock, in the pass's
+// next-run computation and in the due cache alike; an interval trigger only
+// counts seconds and runs as before.
+static void clockNotSet() {
+  reset();
+  // 55 hours after a boot without any time source time() reads 200000: past
+  // every hand threshold the firmware had (`> 0`, `>= 100000`).
+  constexpr time_t kUnset = 200000;
+  constexpr time_t kSet = 1763000000;
+  CHECK(!Clock::isValidEpoch(kUnset) && !Clock::isValidEpoch(1) && Clock::isValidEpoch(kSet));
+  const char* daily = R"({"id":51,"enabled":true,"triggers":[{"type":"time","time":"07:30","nextAt":150000}]})";
+  const char* monthly = R"({"id":55,"enabled":true,"triggers":[{"type":"time","time":"07:30","recurrence":"monthly","dayOfMonth":15,"nextAt":150000}]})";
+  const char* yearly = R"({"id":56,"enabled":true,"triggers":[{"type":"time","time":"06:05","recurrence":"yearly","dayOfMonth":9,"month":3,"nextAt":150000}]})";
+  const char* fresh = R"({"id":54,"enabled":true,"triggers":[{"type":"time","time":"07:30"}]})";
+  const char* every = R"({"id":52,"enabled":true,"triggers":[{"type":"interval","intervalMs":900000,"nextAt":150000}]})";
+  const char* both = R"({"id":53,"enabled":true,"triggers":[{"type":"time","time":"07:30","nextAt":150000},{"type":"interval","intervalMs":900000,"nextAt":190000}]})";
+  clockSeconds = kUnset;
+
+  // The pass: with the clock not set, a time of day is not part of the next run.
+  CHECK(automationNextRunTime(daily, kUnset, false) == 0);
+  CHECK(automationNextRunTime(monthly, kUnset, false) == 0);
+  CHECK(automationNextRunTime(yearly, kUnset, false) == 0);
+  CHECK(automationNextRunTime(fresh, kUnset, false) == 0);  // and none is made up from 1970
+  CHECK(automationNextRunTime(every, kUnset, false) == 150000);  // an interval counts seconds
+  CHECK(automationNextRunTime(both, kUnset, false) == 190000);   // the interval alone decides
+  // With the clock set every trigger counts; the public function is that case.
+  CHECK(automationNextRunTime(daily, kSet, true) == 150000 && computeNextRunTime(daily, kSet) == 150000);
+  CHECK(automationNextRunTime(both, kSet, true) == 150000 && computeNextRunTime(both, kSet) == 150000);
+  CHECK(automationNextRunTime(fresh, kSet, true) > kSet && computeNextRunTime(fresh, kSet) > kSet);
+  CHECK(computeNextRunTime(daily, kUnset) == 150000);  // its other callers are unchanged
+
+  // The due cache agrees with the pass: a waiting trigger is not "due".
+  replaceStore(String(R"({"version":2,"automations":[)") + daily + "," + every + "," + both + "," + monthly + "]}");
+  CHECK(startAutomationScheduler());
+  rebuildAutomationsCache();
+  CHECK(gAutomationsCacheCount == 4 && gAutomationsCache[0].id == 51 && gAutomationsCache[0].nextAt == 0);
+  CHECK(gAutomationsCache[1].nextAt == 150000 && gAutomationsCache[2].nextAt == 190000);
+  CHECK(gAutomationsCache[3].nextAt == 0);
+  CHECK(automationsAnyDue(kUnset));  // the interval of 52 is due
+  replaceStore(String(R"({"version":2,"automations":[)") + daily + "," + monthly + "]}");
+  rebuildAutomationsCache();
+  // Stored next runs of 150000 with the clock at 200000: `now > 0` called
+  // both due and ran them against 1970.
+  CHECK(gAutomationsCacheCount == 2 && !automationsAnyDue(kUnset));
+
+  // The clock is set: the stored next runs count again (the pass then settles
+  // a run that is this late as missed).
+  clockSeconds = kSet;
+  rebuildAutomationsCache();
+  CHECK(gAutomationsCache[0].nextAt == 150000 && gAutomationsCache[1].nextAt == 150000 && automationsAnyDue(kSet));
+  stopAutomationScheduler();
+}
+
 int main() {
   eventDrainFromStart();
   summaries();
@@ -773,6 +831,7 @@ int main() {
   invalidationAndOverlap();
   concurrentRequests();
   shortIntervals();
+  clockNotSet();
   reset();
   std::printf("automation scheduler: %u summary, ownership, timing and overlap checks passed\n", checks.load());
 }

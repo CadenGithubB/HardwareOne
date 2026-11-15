@@ -2415,7 +2415,7 @@ const char* cmd_certinfo(const String& argsInput) {
   const char* expiryStatus;
   char expiryBuf[64];
   time_t now = time(NULL);
-  if (now < 100000) {
+  if (!Clock::isValidEpoch(now)) {  // System_Clock owns "is the clock set"
     expiryStatus = "unknown (time not set)";
   } else {
     struct tm expTm = {};
@@ -2559,7 +2559,10 @@ const char* cmd_certgen(const String& argsInput) {
   // Validity: now to 10 years from now
   {
     time_t now = time(NULL);
-    if (now < 100000) now = 1709251200;  // Fallback: 2024-03-01 if NTP not synced
+    // Fallback: 2024-03-01 if the clock is not set. System_Clock owns that
+    // question; `now < 100000` let a certificate be dated 1970 once the device
+    // had been up 28 hours without a time source.
+    if (!Clock::isValidEpoch(now)) now = 1709251200;
     struct tm tmStart, tmEnd;
     time_t expiry = now + (3650LL * 86400);
     gmtime_r(&now, &tmStart);
