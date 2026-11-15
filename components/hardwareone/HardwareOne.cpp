@@ -523,9 +523,10 @@ static void commandExecTask(void* pv) {
       ExecReq* r = item.req;
       if (!r) continue;
 
-      const String safeExecLine = redactCmdForAudit(String(r->line));
+      // The redacted line feeds this trace only; it is made when the trace is on.
       DEBUG_CMD_FLOWF("[cmd_exec] exec '%.80s' user='%s' heap=%lu",
-                  safeExecLine.c_str(), r->ctx.auth.user.c_str(), (unsigned long)ESP.getFreeHeap());
+                  redactCmdForAudit(String(r->line)).c_str(), r->ctx.auth.user.c_str(),
+                  (unsigned long)ESP.getFreeHeap());
 
       // The per-task context carries validateOnly for broadcastOutput and the
       // audit (currentCommandValidateOnly); the global mirror is for handlers.
@@ -631,10 +632,11 @@ void broadcastOutput(const String& s, const CommandContext& ctx) {
   }
 
   String prefix = originPrefix(source, ctx.auth.user, ctx.auth.ip);
-  const String safeOutputForTrace = redactOutputForLog(s);
+  // The trace redacts its own copy of the result, made only when the trace
+  // is on (a trace's arguments are evaluated only then).
   DEBUG_CMD_FLOWF("[BROADCAST_CTX] origin=%s user=%s mask=0x%02lX msg='%.50s'",
                   source, ctx.auth.user.c_str(),
-                  (unsigned long)ctx.outputMask, safeOutputForTrace.c_str());
+                  (unsigned long)ctx.outputMask, redactOutputForLog(s).c_str());
 
   // outputMask holds MSG_ROUTE_* bits directly; keep only the sinks a
   // command may address. OLED and G2 always included for command return values.
@@ -649,9 +651,15 @@ void broadcastOutput(const String& s, const CommandContext& ctx) {
   // remains a deliberately small line-sized envelope.
   // STT transcripts belong only to their initiating session. Direct serial,
   // HTTP and targeted BLE delivery retain the original; shared mirrors do not.
+  // For a private result redactOutputForLog gives only its fixed placeholder,
+  // without copying the result.
   const bool privateStt = s.indexOf("\"sttText\"") >= 0 ||
                           s.indexOf("\"transcriptPath\"") >= 0;
-  broadcastCommandResultQueued(prefix, privateStt ? safeOutputForTrace : s, route);
+  if (privateStt) {
+    broadcastCommandResultQueued(prefix, redactOutputForLog(s), route);
+  } else {
+    broadcastCommandResultQueued(prefix, s, route);
+  }
   // (No web-mirror backfill here: the drain appends WEB-routed messages to
   // the mirror unconditionally, so a backfill would double-append.)
 

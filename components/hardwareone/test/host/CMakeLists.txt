@@ -2345,6 +2345,14 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_auth_log_paths.py
           ${SETUP_MQTT_TEST_ARGS})
+# The redacted copies that only DEBUG_CMD_FLOW traces read (the submit
+# functions, cmd_exec, broadcastOutput's result copy) are made only when the
+# trace is written; the lines and the queued results are those of before.
+add_test(
+  NAME command_trace_copies
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_command_trace_copies.py
+          ${SETUP_MQTT_TEST_ARGS})
 # Flags and counters that more than one task changes: the production
 # definitions and the production statements that change them run against each
 # other on threads; a load-modify-store loses a change, one atomic step never.

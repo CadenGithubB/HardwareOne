@@ -4432,9 +4432,20 @@ bool submitAndExecuteSync(const Command& cmd, String& out,
     return false;
   }
 
-  const String safeLineForTrace = redactCmdForAudit(cmd.line);
+  // The redacted line is read only by the traces below and the timeout
+  // error, so it is made the first time one of them is written. (A trace's
+  // arguments are evaluated only when the trace is on.)
+  String safeLineForTrace;
+  bool safeLineForTraceMade = false;
+  auto traceLine = [&]() -> const char* {
+    if (!safeLineForTraceMade) {
+      safeLineForTrace = redactCmdForAudit(cmd.line);
+      safeLineForTraceMade = true;
+    }
+    return safeLineForTrace.c_str();
+  };
   DEBUG_CMD_FLOWF("[submitSync] cmd='%.80s' origin=%d user='%s'",
-                  safeLineForTrace.c_str(), (int)cmd.ctx.origin, cmd.ctx.auth.user.c_str());
+                  traceLine(), (int)cmd.ctx.origin, cmd.ctx.auth.user.c_str());
 
   // If executor queue isn't ready (very early boot) fallback to direct call
   if (gCmdExecQ == nullptr) {
@@ -4520,7 +4531,7 @@ bool submitAndExecuteSync(const Command& cmd, String& out,
 #if ENABLE_HTTP_SERVER
     if (waiterIsHttpd) gWebCmdWaiters.fetch_sub(1, std::memory_order_acq_rel);
 #endif
-    DEBUG_CMD_FLOWF("[submitSync] queue full for '%.40s'", safeLineForTrace.c_str());
+    DEBUG_CMD_FLOWF("[submitSync] queue full for '%.40s'", traceLine());
     vSemaphoreDelete(r->done);
     r->~ExecReq();
     free(r);
@@ -4528,7 +4539,7 @@ bool submitAndExecuteSync(const Command& cmd, String& out,
     return false;
   }
   
-  DEBUG_CMD_FLOWF("[submitSync] queued '%.40s' waiting...", safeLineForTrace.c_str());
+  DEBUG_CMD_FLOWF("[submitSync] queued '%.40s' waiting...", traceLine());
 
   // Timeout bumped from 10s → 60s to cover PBKDF2 (~12 s) and any other
   // long-running synchronous command. Caller and executor retain independent
@@ -4548,7 +4559,7 @@ bool submitAndExecuteSync(const Command& cmd, String& out,
     r->syncTimedOut.store(true, std::memory_order_release);
     releaseSyncExecReqOwner(r);
     ERROR_COMMANDF("sync command timed out after 60000 ms; command execution may continue; line='%.60s'",
-                   safeLineForTrace.c_str());
+                   traceLine());
     out = "[ERROR] Command timed out";
     return false;
   }
@@ -4579,8 +4590,8 @@ bool submitCommandAsync(const Command& cmd, ExecAsyncCallback callback, void* us
     return false;
   }
 
-  const String safeLineForTrace = redactCmdForAudit(cmd.line);
-  DEBUG_CMD_FLOWF("[submitAsync] enter: cmd.line='%s'", safeLineForTrace.c_str());
+  // The redacted line feeds this trace only; it is made when the trace is on.
+  DEBUG_CMD_FLOWF("[submitAsync] enter: cmd.line='%s'", redactCmdForAudit(cmd.line).c_str());
   
   if (gCmdExecQ == nullptr) {
     DEBUG_CMD_FLOWF("[submitAsync] ERROR: gCmdExecQ is NULL");

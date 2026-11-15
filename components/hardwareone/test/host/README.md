@@ -3704,6 +3704,25 @@ command that are not security events make no String block. It takes `--cxx`,
 ctest --test-dir /tmp/hw1-hardwareone-host -R '^auth_log_paths$' --output-on-failure
 ```
 
+`command_trace_copies` covers the redacted copies that only a debug trace
+reads. It runs the production `submitAndExecuteSync`, `submitCommandAsync`,
+`releaseSyncExecReqOwner` and `redactOutputForLog` (`System_Utils.cpp`) and
+`broadcastOutput` (`HardwareOne.cpp`) with the production command types, on
+the counted Arduino String; the trace macro records a line and evaluates its
+arguments only while the trace is on, the command redactor is a counting
+double. With the trace off a submitted command is not redacted and
+`broadcastOutput` makes no String block; with it on, on a full queue and on
+a timeout the lines are those of before (one redaction per sync submit,
+shared by its traces and the timeout error). The queued copy of a result is
+the result itself, or the placeholder for a private STT result, and a
+Bluetooth session still gets the original. Source contract: cmd_exec
+redacts its line only inside its trace. It takes `--cxx`, `--sanitize` and
+`--component <directory>`.
+
+```sh
+ctest --test-dir /tmp/hw1-hardwareone-host -R '^command_trace_copies$' --output-on-failure
+```
+
 This does not open a real browser; a user-role upload of a hostile name and a
 hotspot named `<b>x</b>` remain the on-device checks.
 
