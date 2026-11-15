@@ -2,9 +2,10 @@
 """Uptime has one owner, SelfDevice::uptimeSeconds(), and it does not restart at 49.7 days.
 
 `millis() / 1000` starts again at 0 when millis() wraps. The owner returned
-exactly that, and 19 other places divided millis() themselves: heartbeat and
+exactly that, and 21 other places divided millis() themselves: heartbeat and
 capability fields, status screens and JSON, the command audit stamp, I2C rates
-(a division by it), the automation UPTIME sensor.
+(a division by it), the automation UPTIME sensor. 18 of them ask the owner
+now; 3 are fallbacks for a wall clock that reads 0 and stay.
 
 The production uptimeSeconds (System_SelfDevice.cpp) is compiled against a
 settable 64-bit boot timer: it agrees with millis() / 1000 up to the wrap and
