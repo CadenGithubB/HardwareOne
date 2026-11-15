@@ -100,16 +100,15 @@ check('? G2_CONTROL_STACK_BYTES - freeNow : 0;' in g2,
 
 # Each task name may appear only at its known places, each exactly once: the
 # one plain create with the shared constant, its size-registry entry and the
-# known-task table rows. Any other "name" literal -- a second create under a
-# board #if, a caps-based (PSRAM-stack) create, a record with another size --
-# fails here. All three tasks can reach a flash operation, which needs an
-# internal stack.
-ROW = r'\{\s*"cmd_exec",\s*\w+,\s*CMD_EXEC_STACK_WORDS\s*\}'
+# row of the one known-task table (collectKnownTaskRows, System_TaskUtils.cpp).
+# Any other "name" literal -- a second create under a board #if, a caps-based
+# (PSRAM-stack) create, a record with another size -- fails here. All three
+# tasks can reach a flash operation, which needs an internal stack.
+ROW = r'\{\s*"cmd_exec",\s*\w+,\s*CMD_EXEC_STACK_WORDS\s*,[^{}]*\}'
 ALLOWED = {
     'cmd_exec': [
         ('HardwareOne.cpp', r'xTaskCreateLogged\(commandExecTask, "cmd_exec", cmdExecStackWords,',
          'created through xTaskCreateLogged with cmdExecStackWords'),
-        ('System_MemoryMonitor.cpp', ROW, 'known-task row uses CMD_EXEC_STACK_WORDS'),
         ('System_TaskUtils.cpp', ROW, 'known-task row uses CMD_EXEC_STACK_WORDS'),
     ],
     'log_out': [
@@ -148,10 +147,15 @@ check('uint32_t stackTotal = taskStackLookup(taskArray[i].pcTaskName);' in utils
       and 't["stackSize"] = (unsigned)stackTotal;' in utils,
       'taskstats json no longer reports stackSize from the size registry')
 
-# Known-task tables: every row names its size by constant, never a literal, and
-# the cmd_exec rows use CMD_EXEC_STACK_WORDS.
-for text, where in ((monitor, 'System_MemoryMonitor.cpp'), (taskutils, 'System_TaskUtils.cpp')):
-    rows = re.findall(r'\{\s*("[a-z_]+"|INPUT_TASK_NAME),\s*\w+,\s*(\w+)\s*\}', text)
+# Known-task table: every row names its size by constant, never a literal, and
+# the cmd_exec row uses CMD_EXEC_STACK_WORDS. The table has one owner; the
+# memory monitor's stack sample reads its rows (host test known_task_table).
+check('collectKnownTaskRows(tasks, kKnownTaskMax)' in monitor,
+      'System_MemoryMonitor.cpp: the stack sample does not read the known-task table')
+check('.stackBytes' in monitor and '_STACK_WORDS}' not in monitor,
+      'System_MemoryMonitor.cpp: the stack sample does not take its sizes from the table rows')
+for text, where in ((taskutils, 'System_TaskUtils.cpp'),):
+    rows = re.findall(r'\{\s*("[a-z_]+"|INPUT_TASK_NAME),\s*\w+,\s*(\w+)\s*,[^{}]*\}', text)
     check(rows, f'{where}: known-task table not found')
     for name, size in rows:
         check(not size.isdigit(), f'{where}: table row {name} uses a literal stack size {size}')

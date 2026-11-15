@@ -15,11 +15,14 @@
 #include "System_TaskUtils.h"
 #include "System_ESPNow.h"
 #include "System_I2C.h"
-#include "HAL_Input.h"          // For INPUT_TASK_NAME (gamepad vs ANO)
+#include "HAL_Input.h"
 #include "System_CommandTypes.h"
 
-// Per-sensor running/connected flags and task handles come from the sensor
-// headers. Each header has its own branch for a build without the sensor.
+// The stack sample reads task names, handles and running state from the
+// known-task table (collectKnownTaskRows, System_TaskUtils.h) and no longer
+// names them here. HAL_Input.h and the sensor headers below were included for
+// that; they stay until a board build shows nothing else in this file reaches
+// a name through them.
 #include "i2csensor_bno055.h"
 #include "i2csensor_mlx90640.h"
 #include "i2csensor_vl53l4cx.h"
@@ -359,72 +362,29 @@ void sampleMemoryState(bool forceFullScan) {
   }
   
   if (doTaskScan) {
-    struct TaskEntry {
-      const char* name;
-      TaskHandle_t handle;
-      uint32_t stackWords;
-    };
-    
-#if ENABLE_ESPNOW
-    TaskHandle_t espnowHandle = nullptr;
-    UBaseType_t espnowWatermark = 0;
-    const bool espnowSnapshotValid =
-        getEspNowTaskStackSnapshot(&espnowHandle, &espnowWatermark);
-#else
-    TaskHandle_t espnowHandle = nullptr;
-    UBaseType_t espnowWatermark = 0;
-    const bool espnowSnapshotValid = false;
-#endif
-    
-    const TaskEntry tasks[] = {
-      {"espnow_task",        espnowHandle,          ESPNOW_HB_STACK_WORDS},
-      {"cmd_exec",      gCmdExecTaskHandle,    CMD_EXEC_STACK_WORDS},
-      {"sensor_queue",  queueProcessorTask,    SENSOR_QUEUE_STACK_WORDS},
-      {INPUT_TASK_NAME,      gInputTaskHandle,     INPUT_STACK_WORDS},
-      {"sensor_thermal",  gThermalTaskHandle,     THERMAL_STACK_WORDS},
-      {"sensor_imu",      gImuTaskHandle,         IMU_STACK_WORDS},
-      {"sensor_tof",      gTofTaskHandle,         TOF_STACK_WORDS},
-      {"sensor_fmradio",  gFmRadioTaskHandle,     FMRADIO_STACK_WORDS},
-      {"sensor_gps",      gGpsTaskHandle,         GPS_STACK_WORDS},
-      {"sensor_apds",     gApdsTaskHandle,        APDS_STACK_WORDS},
-      {"sensor_presence", gPresenceTaskHandle,    PRESENCE_STACK_WORDS},
-      {"sensor_rtc",      gRtcTaskHandle,         RTC_STACK_WORDS},
-    };
-    
-    // Enabled flags for each task — if false, handle may be stale (task self-deleted)
-    const bool taskAlive[] = {
-      espnowSnapshotValid,                                            // espnow_task
-      gCmdExecTaskHandle != nullptr,                                  // cmd_exec
-      queueProcessorTask != nullptr,                                  // sensor_queue
-      gInputRunning,                                                 // input_gamepad
-      gThermalRunning,                                                 // sensor_thermal
-      gImuRunning,                                                     // sensor_imu
-      gTofRunning,                                                     // sensor_tof
-      gFmRadioRunning,                                                 // sensor_fmradio
-      gGpsRunning,                                                     // sensor_gps
-      (gApdsColorRunning || gApdsProximityRunning || gApdsGestureRunning), // sensor_apds
-      gPresenceRunning,                                                // sensor_presence
-      gRtcRunning,                                                     // sensor_rtc
-    };
-    
+    // The rows of the one known-task table (System_TaskUtils.cpp), the same
+    // rows `taskstats` prints. A row that is not alive may hold a stale handle
+    // (the task deleted itself) and is skipped.
+    KnownTaskRow tasks[kKnownTaskMax];
+    const size_t taskCount = collectKnownTaskRows(tasks, kKnownTaskMax);
+
     bool anyTask = false;
-    int taskIdx = 0;
-    for (const auto& t : tasks) {
-      bool alive = taskAlive[taskIdx++];
-      if (!t.handle || !alive) continue;
+    for (size_t taskIdx = 0; taskIdx < taskCount; taskIdx++) {
+      const KnownTaskRow& t = tasks[taskIdx];
+      if (!t.handle || !t.alive) continue;
       if (!anyTask) {
         broadcastOutput("[MEMSAMPLE] Task Stacks (name: used/total, watermark):");
         anyTask = true;
       }
-      // BYTES throughout: t.stackWords holds the byte count handed to
+      // BYTES throughout: t.stackBytes holds the byte count handed to
       // xTaskCreate, and the HWM is bytes too. The old "* 4" inflated every
       // absolute figure 4x (percentages stayed right, since both terms scaled)
       // AND made these warnings 4x less sensitive — LOW only fired below 256 B
       // free. See System_TaskUtils.h.
-      UBaseType_t watermark = (taskIdx == 1)
-          ? espnowWatermark
+      UBaseType_t watermark = t.ownerSampled
+          ? t.highWaterMark
           : uxTaskGetStackHighWaterMark(t.handle);
-      uint32_t totalBytes = t.stackWords;
+      uint32_t totalBytes = t.stackBytes;
       uint32_t freeBytes  = (uint32_t)watermark;
       uint32_t usedBytes = totalBytes - freeBytes;
       uint32_t usedPct = totalBytes ? ((usedBytes * 100) / totalBytes) : 0;

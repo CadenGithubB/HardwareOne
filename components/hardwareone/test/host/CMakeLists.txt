@@ -2301,6 +2301,14 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_mqtt_json_bounds.py
           ${SETUP_MQTT_TEST_ARGS})
+# Known tasks: one table (collectKnownTaskRows, System_TaskUtils.cpp) that
+# `taskstats` and the memory monitor's stack sample both read; the monitor's
+# own copy had lost the espnow_tx row.
+add_test(
+  NAME known_task_table
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_known_task_table.py
+          ${SETUP_MQTT_TEST_ARGS})
 # `espnowtimestatus`: "Last sync" counts from the moment the last mesh
 # TIME_SYNC was applied (it used to read a stamp nothing wrote: the uptime).
 add_test(

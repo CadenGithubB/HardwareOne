@@ -59,7 +59,7 @@ struct InputCache {
 // Canonical task name + log tag for the input poller. The single inputTask()
 // symbol is provided by either i2csensor_seesaw.cpp or i2csensor_ano_encoder.cpp
 // depending on INPUT_TYPE — these macros keep xTaskCreate, the known-task
-// tables in System_TaskUtils / System_MemoryMonitor / System_Utils, and any
+// table in System_TaskUtils (collectKnownTaskRows), and any
 // stack/HWM reports showing the actual driver in use instead of a misleading
 // "input_gamepad" on ANO builds. FreeRTOS task name cap is
 // CONFIG_FREERTOS_MAX_TASK_NAME_LEN (16) — both names fit.

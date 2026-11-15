@@ -5479,6 +5479,20 @@ traversal order (including a freed child), exclusive block ends, freed blocks an
 address arithmetic under ASan/UBSan. `tools/p4/test_ram_monitor.py` tests the
 live graph's numeric whitelist, malformed samples and private-log redaction.
 CTest names: `task_heap_measure`, `p4_ram_monitor`.
+`known_task_table` covers the table of tasks created under a fixed name and
+stack size. `taskstats` (`reportAllTaskStacks`) and the memory monitor's
+periodic stack sample each kept a copy with a parallel list of "alive" flags;
+the monitor's copy had lost the `espnow_tx` row. The one table is
+`collectKnownTaskRows()` in `System_TaskUtils.cpp`. The test compiles that
+function with `KnownTaskRow`, `kKnownTaskMax` and the stack constants of
+`System_TaskUtils.h` against stand-in handles and running flags, with and
+without ESP-NOW: every row is returned, a row is alive exactly while its owner
+says so (a stale handle is not), each row carries its own stack size, the
+ESP-NOW rows carry the watermark their owners sampled, a short buffer is not
+overrun. Source contracts: both reports walk the owner's rows, neither keeps a
+second table, a flag list or a test on a row's position, and every row name is
+a name a task is created with (`xTaskCreate*` or `taskStackRecord`). Not
+covered: the two reports' output and the live FreeRTOS queries.
 The phone runtime suite additionally exercises the production session storage
 construction with external BSS enabled and disabled. For phone link v2 it runs
 the real v2 Session behind the fake adapter, with a fake phone that answers

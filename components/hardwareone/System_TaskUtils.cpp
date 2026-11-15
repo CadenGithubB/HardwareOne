@@ -561,6 +561,49 @@ static int deltaCpuPercent(TaskHandle_t h, uint32_t curRun, uint32_t totalDelta)
   return -1;  // task absent last round (newly created) → no baseline yet
 }
 
+// The one table of the tasks created under a fixed name and stack size. The
+// ESP-NOW rows carry a watermark their owners sampled while holding the task
+// alive; every other row is only `alive` while its stop was not requested
+// (cleanup in progress counts as stopped), which narrows the rows to running
+// tasks but does not pin a handle.
+size_t collectKnownTaskRows(KnownTaskRow* rows, size_t cap) {
+  if (!rows) return 0;
+  TaskHandle_t espnowHandle = nullptr;
+  UBaseType_t espnowWatermark = 0;
+  bool espnowAlive = false;
+  TaskHandle_t espnowTxHandle = nullptr;
+  UBaseType_t espnowTxWatermark = 0;
+  bool espnowTxAlive = false;
+#if ENABLE_ESPNOW
+  espnowAlive = getEspNowTaskStackSnapshot(&espnowHandle, &espnowWatermark);
+  espnowTxAlive = espnowtx::getTaskStackSnapshot(&espnowTxHandle, &espnowTxWatermark);
+#endif
+
+  // Each row goes straight into the caller's buffer: the two callers run on
+  // cmd_exec and on the main loop, so no second copy of the table is put on
+  // their stack. The host test `known_task_table` checks that kKnownTaskMax
+  // holds every row.
+  size_t count = 0;
+  auto add = [&](const KnownTaskRow& row) {
+    if (count < cap) rows[count++] = row;
+  };
+  add({"espnow_task", espnowHandle, ESPNOW_HB_STACK_WORDS, espnowAlive, true, espnowWatermark});
+  add({"espnow_tx", espnowTxHandle, ESPNOW_TX_STACK_WORDS, espnowTxAlive, true, espnowTxWatermark});
+  add({"cmd_exec", gCmdExecTaskHandle, CMD_EXEC_STACK_WORDS, gCmdExecTaskHandle != nullptr, false, 0});
+  add({"sensor_queue", queueProcessorTask, SENSOR_QUEUE_STACK_WORDS, queueProcessorTask != nullptr, false, 0});
+  add({INPUT_TASK_NAME, gInputTaskHandle, INPUT_STACK_WORDS, gInputRunning, false, 0});
+  add({"sensor_thermal", gThermalTaskHandle, THERMAL_STACK_WORDS, gThermalRunning, false, 0});
+  add({"sensor_imu", gImuTaskHandle, IMU_STACK_WORDS, gImuRunning, false, 0});
+  add({"sensor_tof", gTofTaskHandle, TOF_STACK_WORDS, gTofRunning, false, 0});
+  add({"sensor_fmradio", gFmRadioTaskHandle, FMRADIO_STACK_WORDS, gFmRadioRunning, false, 0});
+  add({"sensor_gps", gGpsTaskHandle, GPS_STACK_WORDS, gGpsRunning, false, 0});
+  add({"sensor_apds", gApdsTaskHandle, APDS_STACK_WORDS,
+       (gApdsColorRunning || gApdsProximityRunning || gApdsGestureRunning), false, 0});
+  add({"sensor_presence", gPresenceTaskHandle, PRESENCE_STACK_WORDS, gPresenceRunning, false, 0});
+  add({"sensor_rtc", gRtcTaskHandle, RTC_STACK_WORDS, gRtcRunning, false, 0});
+  return count;
+}
+
 void reportAllTaskStacks() {
   broadcastOutput("");
   broadcastOutput("========== TASK STACK REPORT ==========");
@@ -651,47 +694,10 @@ void reportAllTaskStacks() {
     else       snprintf(buf, n, "?");
   };
 
-  // Known sensor tasks with their stack sizes
-  struct KnownTask {
-    const char* name;
-    TaskHandle_t handle;
-    uint32_t stackWords;
-  };
-  
-  // Build known tasks list dynamically (some handles are runtime-resolved)
-#if ENABLE_ESPNOW
-  TaskHandle_t espnowHandle = nullptr;
-  UBaseType_t espnowWatermark = 0;
-  const bool espnowSnapshotValid =
-      getEspNowTaskStackSnapshot(&espnowHandle, &espnowWatermark);
-  TaskHandle_t espnowTxHandle = nullptr;
-  UBaseType_t espnowTxWatermark = 0;
-  const bool espnowTxSnapshotValid =
-      espnowtx::getTaskStackSnapshot(&espnowTxHandle, &espnowTxWatermark);
-#else
-  TaskHandle_t espnowHandle = nullptr;
-  UBaseType_t espnowWatermark = 0;
-  const bool espnowSnapshotValid = false;
-  TaskHandle_t espnowTxHandle = nullptr;
-  UBaseType_t espnowTxWatermark = 0;
-  const bool espnowTxSnapshotValid = false;
-#endif
-
-  const KnownTask knownTasks[] = {
-    {"espnow_task", espnowHandle, ESPNOW_HB_STACK_WORDS},
-    {"espnow_tx", espnowTxHandle, ESPNOW_TX_STACK_WORDS},
-    {"cmd_exec", gCmdExecTaskHandle, CMD_EXEC_STACK_WORDS},
-    {"sensor_queue", queueProcessorTask, SENSOR_QUEUE_STACK_WORDS},
-    {INPUT_TASK_NAME, gInputTaskHandle, INPUT_STACK_WORDS},
-    {"sensor_thermal", gThermalTaskHandle, THERMAL_STACK_WORDS},
-    {"sensor_imu", gImuTaskHandle, IMU_STACK_WORDS},
-    {"sensor_tof", gTofTaskHandle, TOF_STACK_WORDS},
-    {"sensor_fmradio", gFmRadioTaskHandle, FMRADIO_STACK_WORDS},
-    {"sensor_gps", gGpsTaskHandle, GPS_STACK_WORDS},
-    {"sensor_apds", gApdsTaskHandle, APDS_STACK_WORDS},
-    {"sensor_presence", gPresenceTaskHandle, PRESENCE_STACK_WORDS},
-    {"sensor_rtc", gRtcTaskHandle, RTC_STACK_WORDS}
-  };
+  // Known tasks with their stack sizes: the rows of the one table
+  // (collectKnownTaskRows), with the handles resolved for this report.
+  KnownTaskRow knownTasks[kKnownTaskMax];
+  const size_t knownTaskCount = collectKnownTaskRows(knownTasks, kKnownTaskMax);
 
   auto isTaskHandleInSnapshot = [&](TaskHandle_t h) -> bool {
     if (!h) return false;
@@ -709,30 +715,15 @@ void reportAllTaskStacks() {
     return 0;
   };
   
-  // Skip tasks whose stop was requested, including cleanup still in progress.
-  // This narrows the rows to running tasks; it does not pin a handle (a task
-  // can still exit after this check), so rows read only snapshot fields.
-  const bool taskAlive[] = {
-    espnowSnapshotValid,                                            // espnow_task
-    espnowTxSnapshotValid,                                         // espnow_tx
-    gCmdExecTaskHandle != nullptr,                                  // cmd_exec
-    queueProcessorTask != nullptr,                                  // sensor_queue
-    gInputRunning,                                                 // input_gamepad
-    gThermalRunning,                                                 // sensor_thermal
-    gImuRunning,                                                     // sensor_imu
-    gTofRunning,                                                     // sensor_tof
-    gFmRadioRunning,                                                 // sensor_fmradio
-    gGpsRunning,                                                     // sensor_gps
-    (gApdsColorRunning || gApdsProximityRunning || gApdsGestureRunning), // sensor_apds
-    gPresenceRunning,                                                // sensor_presence
-    gRtcRunning,                                                     // sensor_rtc
-  };
+  // A row that is not alive is skipped: its stop was requested, including
+  // cleanup still in progress. This narrows the rows to running tasks; it does
+  // not pin a handle (a task can still exit after this check), so rows read
+  // only snapshot fields.
 
   // First print known tasks
-  int ktIdx = 0;
-  for (const auto& kt : knownTasks) {
-    bool alive = taskAlive[ktIdx++];
-    if (!kt.handle || !alive) continue;
+  for (size_t ktIdx = 0; ktIdx < knownTaskCount; ktIdx++) {
+    const KnownTaskRow& kt = knownTasks[ktIdx];
+    if (!kt.handle || !kt.alive) continue;
     if (!isTaskHandleInSnapshot(kt.handle)) continue;
     
     // Find the snapshot row by handle (names can be stale/duplicate): it
@@ -756,16 +747,13 @@ void reportAllTaskStacks() {
       }
     }
 
-    // BYTES, not words — kt.stackWords holds the byte count passed to
+    // BYTES, not words — kt.stackBytes holds the byte count passed to
     // xTaskCreate, and the HWM is in bytes too. See System_TaskUtils.h.
     // No live FreeRTOS query here: a sensor or ESP-NOW task may have been
     // deleted since its handle was captured. The snapshot row was filled by
     // uxTaskGetSystemState (as cmd_taskstats uses it); the ESP-NOW rows use
     // watermarks sampled while their owners held the task alive.
-    UBaseType_t watermark = (ktIdx == 1)
-        ? espnowWatermark
-        : (ktIdx == 2) ? espnowTxWatermark
-                       : snapshotWatermark;
+    UBaseType_t watermark = kt.ownerSampled ? kt.highWaterMark : snapshotWatermark;
     char dc[16];  // sized for worst-case %4d%% so -Wformat-truncation stays quiet
     if (dCpu < 0) snprintf(dc, sizeof(dc), "%5s", "-");
     else          snprintf(dc, sizeof(dc), "%4d%%", dCpu);
@@ -819,7 +807,8 @@ void reportAllTaskStacks() {
     
     // Skip already reported sensor tasks (match by handle, not name, to avoid stale name ptrs)
     bool isKnown = false;
-    for (const auto& kt : knownTasks) {
+    for (size_t k = 0; k < knownTaskCount; k++) {
+      const KnownTaskRow& kt = knownTasks[k];
       if (taskArray[i].xHandle == kt.handle && kt.handle != nullptr) {
         isKnown = true;
         break;
@@ -933,18 +922,15 @@ void reportAllTaskStacks() {
   broadcastOutput("");
   broadcastOutput("-- WARNINGS & ALERTS --");
   
-  int warnIdx = 0;
-  for (const auto& kt : knownTasks) {
-    bool alive = taskAlive[warnIdx++];
-    if (!kt.handle || !alive) continue;
+  for (size_t warnIdx = 0; warnIdx < knownTaskCount; warnIdx++) {
+    const KnownTaskRow& kt = knownTasks[warnIdx];
+    if (!kt.handle || !kt.alive) continue;
     if (!isTaskHandleInSnapshot(kt.handle)) continue;
     // Stack warnings stay behind the performance debug flag.
     if (!isDebugFlagSet(DEBUG_PERFORMANCE)) continue;
-    UBaseType_t watermark = (warnIdx == 1)
-        ? espnowWatermark
-        : (warnIdx == 2) ? espnowTxWatermark
-                         : watermarkInSnapshot(kt.handle);
-    uint32_t freePercent = (watermark * 100) / kt.stackWords;
+    UBaseType_t watermark = kt.ownerSampled ? kt.highWaterMark
+                                            : watermarkInSnapshot(kt.handle);
+    uint32_t freePercent = (watermark * 100) / kt.stackBytes;
     if (freePercent < 25) {
       BROADCAST_PRINTF("  [!] %-16s CRITICAL: Only %u%% stack free!", 
         kt.name, (unsigned)freePercent);

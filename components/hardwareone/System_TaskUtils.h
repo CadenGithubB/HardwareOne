@@ -488,6 +488,24 @@ void reportTaskStack(TaskHandle_t handle, const char* name, uint32_t allocatedBy
 // System_TaskUtils.cpp for every build.
 extern TaskHandle_t gInputTaskHandle;
 
+// One row per task the firmware creates under a fixed name and stack size.
+// collectKnownTaskRows() in System_TaskUtils.cpp holds the one table of them:
+// reportAllTaskStacks() (`taskstats`) and the memory monitor's periodic stack
+// sample both walk its rows, so a task added there shows up in both.
+struct KnownTaskRow {
+  const char*  name;           // the name the task is created with
+  TaskHandle_t handle;         // null when there is no such task
+  uint32_t     stackBytes;     // the size handed to xTaskCreate (BYTES, see the top of this header)
+  bool         alive;          // false: not running or stop requested; the handle may be stale
+  bool         ownerSampled;   // highWaterMark was sampled by the task's owner while it kept the task alive
+  UBaseType_t  highWaterMark;  // valid when ownerSampled; otherwise the caller queries or reads a snapshot
+};
+// Room for every row of the table; the host test `known_task_table` checks it.
+constexpr size_t kKnownTaskMax = 16;
+// Fills `rows` with at most `cap` rows and returns how many it wrote. A row is
+// worth reading only when it has a handle and is alive.
+size_t collectKnownTaskRows(KnownTaskRow* rows, size_t cap);
+
 // Report all sensor task stacks plus system tasks
 void reportAllTaskStacks();
 
