@@ -994,7 +994,7 @@ static void automationApplyRuntimeSchedule(JsonObject automation) {
   for (JsonObject t : triggers) {
     if (++slot >= 255) break;
     if (strcmp(t["type"] | "", "interval") != 0) continue;
-    const uint32_t intervalMs = t["intervalMs"] | 0;
+    const uint32_t intervalMs = t["intervalMs"] | uint32_t(0);
     const unsigned long fileNextAt = t["nextAt"] | 0UL;
     taskENTER_CRITICAL(&sVolatileScheduleMux);
     const time_t at = sVolatileSchedule.peek(id, (uint8_t)slot, intervalMs, (time_t)fileNextAt);
@@ -1060,7 +1060,7 @@ static void rebuildAutomationsCache() {
           // its interval.
           if (gAutomationsCache[n].enabled && slot < 255 &&
               strcmp(t["type"] | "", "interval") == 0) {
-            const uint32_t intervalMs = t["intervalMs"] | 0;
+            const uint32_t intervalMs = t["intervalMs"] | uint32_t(0);
             na = automationVolatileNextAt(gAutomationsCache[n].id, (uint8_t)slot, intervalMs,
                                           na, now, now > 0);
           }
@@ -1928,7 +1928,7 @@ const char* cmd_automation_add(const String& argsInput) {
             const char* daysV = sv["days"] | "";
             if (daysV[0]) body += ",\n      \"days\": \"" + String(daysV) + "\"";
           } else if (strcmp(stype, "interval") == 0) {
-            long ims = sv["intervalMs"] | 0;
+            const uint32_t ims = sv["intervalMs"] | uint32_t(0);
             if (ims > 0) body += ",\n      \"intervalMs\": " + String(ims);
           } else if (strcmp(stype, "manual") == 0) {
             long dms = sv["delayMs"] | 0;
@@ -2736,7 +2736,9 @@ static bool parseOneTrigger(JsonVariantConst trig, Trigger& out) {
   }
   if (strcmp(type, "interval") == 0) {
     out.type = Trigger::INTERVAL;
-    out.intervalMs = trig["intervalMs"] | 0;
+    // The default decides the type that is read: through `| 0` (int) an
+    // interval above 2^31 ms (24.8 days) came back as 0, "no interval".
+    out.intervalMs = trig["intervalMs"] | uint32_t(0);
     return true;
   }
   if (strcmp(type, "boot") == 0) {

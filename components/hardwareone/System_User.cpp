@@ -4378,12 +4378,17 @@ static int parseBootAnchors(const String& usersJson, BootAnchor* anchors, int ma
   for (JsonObject anchor : bootAnchorsArray) {
     if (count >= maxCount) break;
     
-    int ntpAnchorId = anchor["ntpAnchorId"] | 0;
-    int epochAtSync = anchor["epochAtSync"] | 0;
-    int millisAtSync = anchor["millisAtSync"] | 0;
-    
+    // Read with the type that writeBootAnchor() stores, uint32_t. The default
+    // decides the type ArduinoJson reads: through `| 0` (int) a value above
+    // 2^31 came back as 0, so a sync taken after 24.9 days of uptime lost its
+    // millisAtSync and from 2038 on every anchor would have failed the epoch
+    // test below.
+    const uint32_t ntpAnchorId = anchor["ntpAnchorId"] | uint32_t(0);
+    const uint32_t epochAtSync = anchor["epochAtSync"] | uint32_t(0);
+    const uint32_t millisAtSync = anchor["millisAtSync"] | uint32_t(0);
+
     if (ntpAnchorId > 0 && epochAtSync > 0) {
-      anchors[count++] = BootAnchor(ntpAnchorId, epochAtSync, millisAtSync);
+      anchors[count++] = BootAnchor(ntpAnchorId, (time_t)epochAtSync, millisAtSync);
     }
   }
 

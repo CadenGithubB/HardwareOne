@@ -3815,6 +3815,14 @@ test's table (`ASKERS`) ask the owner, and the only divisions of the 32-bit mill
 left in the firmware are the three fallbacks for a wall clock that reads 0 (two glasses microphone file names,
 one ESP-NOW capture file).
 
+`stored_time_values` compiles the production `parseBootAnchors` (`System_User.cpp`) and `parseOneTrigger` with
+`nextFire` (`System_Automation.cpp`) with the real ArduinoJson. `value | default` reads with the type of the
+default, and these values are stored as `uint32_t`: a `millisAtSync` of 3000000000 (a sync after 34.7 days of
+uptime), an `epochAtSync` of 2200000000 (the year 2039) and an `intervalMs` of 2592000000 (30 days) must read
+back as written, where an `int` default gave 0; every value up to 2^31 - 1 reads back as before, and a zero,
+negative, text or missing value is still "none". Source rule: no read of `intervalMs`, `epochAtSync`,
+`millisAtSync` or `ntpAnchorId` in those two files goes through a default other than `uint32_t(0)`.
+
 `automation_condition_bounds` is about a size, not a time, and sits here with the group that fixed it. It
 compiles the production `validateConditionSyntax` and `executeConditionalCommand` (`System_Automation.cpp`).
 Their scan for ` THEN ` was bounded by `i < len - 5` on a `size_t`: for a command of 3 or 4 characters that

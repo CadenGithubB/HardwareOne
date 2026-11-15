@@ -2391,6 +2391,13 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_uptime_owner.py
           ${SETUP_MQTT_TEST_ARGS})
+# Boot anchors and automation intervals are stored as uint32_t and read back
+# as uint32_t (through an int default a value above 2^31 read as 0).
+add_test(
+  NAME stored_time_values
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_stored_time_values.py
+          ${SETUP_MQTT_TEST_ARGS})
 # Self-registration: /register/submit hands the decoded fields to
 # submitAccountRequest byte-exact (spaced and quoted passphrases), owner
 # refusals do not count toward the login lockout, anonymous `userrequest` is
