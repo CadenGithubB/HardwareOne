@@ -47,6 +47,7 @@
 #endif
 #include "i2csensor_rda5807.h"             // fmRadioEnabled, radioInitialized, fmRadioBuildDataJSON
 #include "System_MemUtil.h"             // ps_alloc, AllocPref
+#include "System_PsramJson.h"            // PsramJsonText: the transcription replies
 #include "System_Camera_Video.h"
 #include "System_Camera_DVP.h"
 #include "System_Microphone.h"
@@ -818,9 +819,8 @@ static esp_err_t transcriptionWebReply(httpd_req_t* req, TransportSessionEpoch e
     return transcriptionWebError(req, "401 Unauthorized", "Web session changed");
   if (doc.overflowed())
     return transcriptionWebError(req, "500 Internal Server Error", "Response unavailable");
-  String body;
-  const size_t size = serializeJson(doc, body);
-  if (!size || size != measureJson(doc))
+  PsramJsonText body(doc, "web.transcription.json");
+  if (!body.length())
     return transcriptionWebError(req, "500 Internal Server Error", "Response unavailable");
   // Recheck after allocation/serialization; an old cookie never receives a
   // previous owner's text after logout/revocation. No shared-output broadcast.
@@ -828,7 +828,7 @@ static esp_err_t transcriptionWebReply(httpd_req_t* req, TransportSessionEpoch e
   if (!transportSessionEpochIsLive(SOURCE_WEB, epoch))
     result = transcriptionWebError(req, "401 Unauthorized", "Web session changed");
   else result = sendJsonResponse(req, body.c_str(), body.length());
-  secureClearString(body);
+  body.wipe();
   return result;
 }
 

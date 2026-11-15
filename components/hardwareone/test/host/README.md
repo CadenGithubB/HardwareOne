@@ -3768,6 +3768,22 @@ The harnesses that run those functions (`quicknote_service`,
 document is made on it and released; a plain document leaves the counters at
 zero.
 
+`psram_json_text` runs `PsramJsonText` (`System_PsramJson.h`), the reply text
+of the polled JSON endpoints, against `serializeJson(doc, String&)` on the
+real Arduino core String with its heap calls counted. For documents from
+`null` to 20 KB (escapes, an embedded NUL, UTF-8, every number form, the
+31-character flush boundary of ArduinoJson's String writer) the bytes are
+equal; the new text is one `PreferPsram` block of `measureJson + 1` bytes
+with the caller's tag and makes no String block (the old path regrows its
+String once per 31 characters: 619 times for 19 KB); a refused block gives the
+empty text and no partial document; `wipe()` clears the text. A source
+contract checks the eight sites of census-json-docs-03 (`handleLlmPoll`,
+`transcriptionWebReply`, `handleEdgeImpulseDetect`, `handleBleStatus`,
+`buildEspSrStatusJson`, `publishMeshPeerSensorData`, the GET branch of
+`handleWaypointsApi`, `handleSessionsList`) write their reply through it.
+`ble_info_status` and `edge_impulse_jpeg` run two of the handlers with it.
+It takes `--cxx`, `--sanitize` and `--component <directory>`.
+
 ## ESP-NOW dispatch policy
 
 `espnow_dispatch_policy` extracts the production V4 opcode table, its flag constants, the lookup, the dispatcher (`v4_dispatch_table_try`), `espnowOriginIsKnown`, `v4h_text` and the espnow_task text-queue drain from `System_ESPNow.cpp`. It also extracts `LogMessageType` and `TextQueueEntry` from `System_ESPNow.h`, the opcode/flag enums and header from `System_ESPNow_Wire.h`, and `V4RxCtx`. It generates one recording double per other handler named in the table and compiles the harness with `ENABLE_BONDED_MODE` 1 and 0. It checks the following. SUBSCRIBE_UPDATE needs a paired, session-encrypted frame. Once the device has a mesh passphrase, SENSOR_STATUS, TEXT and BOOT need an authenticated frame, and a plaintext one is dropped with one warning; a keyless device still accepts plaintext. Plaintext TEXT accepted on a keyless device is filed under its origin MAC, never a paired peer's name, and posts no `SYSEVT_TEXT_RX`. Authenticated text (BROADCAST_AUTH or session-encrypted, direct or relayed) keeps its registry name, encryption flag, per-fragment records and single bus event, and BOOT stays a system notice. The retired opcode 150 has no row. Every zero-flag row is on an explicit allow-list (handshakes, HEARTBEAT, TOPO_*, USER_SYNC); this is a subset check, so later items may only shrink the list. `--component <component-directory>` or `--source-dir <overlay>` replays the pre-fix sources. It uses ASan/UBSan when `HW1_SANITIZE` is enabled and mocks history, the event bus and the radio.

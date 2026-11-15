@@ -15,6 +15,7 @@
 #include "System_VFS.h"
 #include "System_BuildConfig.h"
 #include "System_MemUtil.h"
+#include "System_PsramJson.h"  // PsramJsonText: the status text, sized once
 #include "System_Microphone.h"
 #include "System_Mutex.h"
 #include "G2_Glasses.h"  // g2MicSetAfeFeedActive / g2MicReadPcmSamples (Phase 2B)
@@ -3050,7 +3051,12 @@ void buildEspSrStatusJson(String& output) {
     doc["srTaskStackHwmNote"] =
         "Run srstart; HWM resets when task is created. Sample after stress.";
   }
-  serializeJson(doc, output);
+  // Measured into one PSRAM block, then one assignment: the String writer
+  // would free `output` and regrow it every 31 characters. An output that
+  // already has the room (srstatus keeps a static one) keeps its block.
+  const PsramJsonText text(doc, "sr.status.json");
+  if (text.ok()) output = text.c_str();
+  else serializeJson(doc, output);
 }
 
 static const char* setEnabledFromArgs(const String& argsInput) {

@@ -80,10 +80,18 @@ enum class AllocPref : uint8_t {
   PreferPsram = 0, PreferInternal = 1, RequirePsram = 2, RequireInternal = 3, DefaultHeap = 4
 };
 inline std::atomic<int> gFakePsAllocs{0};
-inline void* ps_alloc(size_t size, AllocPref, const char*) {
+// The web detect reply text (PsramJsonText, tag "ei.detect.json").
+inline std::atomic<int> gFakeDetectTextBlocks{0};
+inline std::atomic<size_t> gFakeDetectTextBytes{0};
+inline void* ps_alloc(size_t size, AllocPref, const char* tag) {
   ++gFakePsAllocs;
+  if (tag && std::strcmp(tag, "ei.detect.json") == 0) {
+    ++gFakeDetectTextBlocks;
+    gFakeDetectTextBytes = size;
+  }
   return std::malloc(size);
 }
+inline void ps_free(void* ptr) { std::free(ptr); }
 #define PSRAM_JSON_DOC(name) JsonDocument name
 
 // Arduino min/max as used by older module code (after ArduinoJson so its own

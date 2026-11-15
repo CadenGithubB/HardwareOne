@@ -34,6 +34,7 @@
 #include "System_User.h"
 #include "System_Utils.h"     // executeUnifiedWebCommand
 #include "System_MemUtil.h"   // PSRAM_JSON_DOC
+#include "System_PsramJson.h"  // PsramJsonText: the poll reply
 #include "WebServer_Server.h"
 #include "WebServer_Utils.h"
 #include "WebPage_LLM.h"
@@ -481,8 +482,7 @@ static esp_err_t handleLlmPoll(httpd_req_t* req) {
     if (est.errorMsg[0] != '\0') jdoc["error"] = (const char*)est.errorMsg;
   }
 
-  String resp;
-  serializeJson(jdoc, resp);
+  const PsramJsonText resp(jdoc, "web.llm.poll");
   return sendJsonResponse(req, resp.c_str());
 }
 

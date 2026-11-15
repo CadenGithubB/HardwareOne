@@ -12,6 +12,7 @@
 #include <ArduinoJson.h>
 #include "BLE_Server.h"
 #include "System_MemUtil.h"
+#include "System_PsramJson.h"  // PsramJsonText: the status reply
 #include "BLE_LinkStatus.h"
 #include "BLE_PhoneStatus.h"
 #if ENABLE_G2_GLASSES
@@ -161,16 +162,15 @@ static esp_err_t handleBleStatus(httpd_req_t* req) {
   bleLinkPhoneJson(doc["phoneLink"].to<JsonObject>(), link, true);
 #endif
 
-  String out;
-  if (!doc.overflowed()) serializeJson(doc, out);
-  // ArduinoJson's String writer can report accepted bytes before its final
-  // flush. Check the resulting length so allocation failure cannot publish a
-  // truncated status document as a successful response.
-  if (doc.overflowed() || out.length() != measureJson(doc)) {
-    httpd_resp_set_status(req, "500 Internal Server Error");
-    return httpd_resp_send(req, "{\"error\":\"Out of memory\"}", HTTPD_RESP_USE_STRLEN);
+  // The text is sized before it is written and handed out whole or not at
+  // all, so an allocation failure cannot publish a truncated status document
+  // as a successful response.
+  if (!doc.overflowed()) {
+    const PsramJsonText out(doc, "web.ble.status");
+    if (out.ok()) return httpd_resp_send(req, out.c_str(), out.length());
   }
-  return httpd_resp_send(req, out.c_str(), out.length());
+  httpd_resp_set_status(req, "500 Internal Server Error");
+  return httpd_resp_send(req, "{\"error\":\"Out of memory\"}", HTTPD_RESP_USE_STRLEN);
 }
 
 void registerBluetoothHandlers(httpd_handle_t server) {

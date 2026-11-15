@@ -147,9 +147,24 @@ static char* getDebugBuffer() { return debugBuffer; }
 enum class AllocPref { PreferPsram };
 static bool psAllocAllowed = true;
 static char cliStorage[2048];
-static void* ps_alloc(size_t size, AllocPref, const char*) {
+// /api/ble/status writes its reply text into one PsramJsonText block.
+static unsigned statusTextBlocks = 0, statusTextLive = 0;
+static size_t statusTextBytes = 0;
+static bool refuseStatusText = false;
+static void* ps_alloc(size_t size, AllocPref, const char* tag) {
+  if (tag && !std::strcmp(tag, "web.ble.status")) {
+    ++statusTextBlocks;
+    if (refuseStatusText) return nullptr;
+    ++statusTextLive; statusTextBytes = size;
+    return std::malloc(size);
+  }
   check(size == sizeof(cliStorage), "CLI retains bounded storage");
   return psAllocAllowed ? cliStorage : nullptr;
+}
+static void ps_free(void* ptr) {
+  if (!ptr || ptr == cliStorage) return;
+  --statusTextLive;
+  std::free(ptr);
 }
 #define BLE_DEBUGF(...) ((void)0)
 static void broadcastOutput(const char*) {}
@@ -1483,15 +1498,20 @@ static void webChecks() {
     check(jsonAllocator.outstanding == 0 && lockDepth == 0,
           "HTTP failure releases JSON and lifecycle ownership");
   }
-  jsonAllocator.reset(); stringAppendAllowed = false;
+  jsonAllocator.reset(); refuseStatusText = true;
   httpd_req_t shortWrite; handleBleStatus(&shortWrite);
-  stringAppendAllowed = true;
+  refuseStatusText = false;
   check(shortWrite.status == "500 Internal Server Error" &&
         parsed(shortWrite.output.c_str())["error"] == "Out of memory",
-        "HTTP detects short final String serialization");
+        "HTTP refuses a status whose reply text cannot be had");
+  statusTextBlocks = 0;
   httpd_req_t retry; handleBleStatus(&retry);
   check(retry.status == "200 OK" && parsed(retry.output.c_str())["ble"]["schema"] == 1,
         "normal request succeeds after allocation and serialization faults");
+  // The reply text is one block of its measured size (no String regrowth),
+  // released once the reply is sent.
+  check(statusTextBlocks == 1 && statusTextLive == 0 && statusTextBytes == retry.output.size() + 1,
+        "HTTP status text is one measured block, released after the send");
 }
 
 // blesend/blestream/bleevent receive the dispatcher's arguments (the command

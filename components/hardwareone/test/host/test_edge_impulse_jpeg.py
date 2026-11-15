@@ -29,6 +29,7 @@ import subprocess
 import sys
 import tempfile
 from test_web_batch_handlers import extract_block, with_arg_text
+from psram_json_source import psram_json_text
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
@@ -57,7 +58,7 @@ def module_text(component=COMPONENT):
     source = source.replace(extract_block(source, REGISTER), REGISTER + ' {\n'
                             '  (void)server;\n  (void)&handleEiOrganize;\n'
                             '  (void)&handleEdgeImpulseDetect;\n}')
-    return strip_includes(header) + strip_includes(source)
+    return strip_includes(header) + psram_json_text(component) + strip_includes(source)
 
 
 def compile_unit(args, workdir, name, text, defines):

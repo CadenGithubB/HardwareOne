@@ -44,6 +44,7 @@ import subprocess
 import tempfile
 
 from test_web_batch_handlers import extract_block, JSON_INCLUDE, json_text, mac_text, require, with_arg_text
+from psram_json_source import psram_json_text
 import ble_pipe_console_host as pipe_host
 
 HERE = Path(__file__).resolve().parent
@@ -232,7 +233,8 @@ def generated(component: Path, baseline: bool) -> str:
             ("static const char* g2DesiredJsonName(",
              "static const char* g2ObservedJsonName(", "static const char* g2PhaseJsonName(",
              "static void addG2FeatureJson(",
-             "static void addG2TempleConnectionJson(")], "#endif", handler]
+             "static void addG2TempleConnectionJson(")], "#endif",
+            psram_json_text(component), handler]
     harness = (HERE / "ble_info_status_harness.cpp").read_text()
     return harness.replace("// INSERT_TYPES", types).replace(
         "// INSERT_PRODUCTION", "\n\n".join(definitions))

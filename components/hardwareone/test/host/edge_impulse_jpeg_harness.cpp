@@ -338,7 +338,11 @@ static void scenarioWebJson() {
   loadFakeModel("/EI Models/web/web.tflite", {"bg", "cup", "pen"});
   gFakeCameraJpeg = readFixture(gFixtures + "/rgb420_320x240.jpg");
   httpd_req_t req;
+  gFakeDetectTextBlocks = 0;
   eiCheck(handleEdgeImpulseDetect(&req) == ESP_OK, "handler answers");
+  // The reply text is one PsramJsonText block of its measured size.
+  eiCheck(gFakeDetectTextBlocks == 1 && gFakeDetectTextBytes == req.body.size() + 1,
+          "reply text is one measured PSRAM block");
   JsonDocument doc;
   eiCheck(!deserializeJson(doc, req.body.c_str()), "reply parses");
   eiCheck(doc["success"].as<bool>(), "reply reports success");

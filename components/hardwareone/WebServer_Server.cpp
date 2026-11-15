@@ -34,6 +34,7 @@
 #include "System_Logging.h"
 #include "System_MemUtil.h"
 #include "System_PsramBuffer.h"
+#include "System_PsramJson.h"  // PsramJsonText: the sessions list reply
 #include "System_Mutex.h"
 #include "System_PollPause.h"
 #include "System_Settings.h"
@@ -3042,8 +3043,7 @@ esp_err_t handleSessionsList(httpd_req_t* req) {
   
   buildAllSessionsJson(ctx.sid, sessions);
   
-  String response;
-  serializeJson(doc, response);
+  const PsramJsonText response(doc, "web.sessions.json");
   
   sendJsonResponse(req, response.c_str());
   return ESP_OK;

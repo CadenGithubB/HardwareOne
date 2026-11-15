@@ -11,6 +11,7 @@
 #include "System_Debug.h"
 #include "System_Camera_DVP.h"
 #include "System_MemUtil.h"
+#include "System_PsramJson.h"  // PsramJsonText: the web detect reply
 #include "System_TaskUtils.h"
 #include "HAL_JPEG.h"
 #include <ArduinoJson.h>
@@ -1680,8 +1681,7 @@ esp_err_t handleEdgeImpulseDetect(httpd_req_t* req) {
     }
   }
 
-  String jsonOutput;
-  serializeJson(doc, jsonOutput);
+  const PsramJsonText jsonOutput(doc, "ei.detect.json");
 
   httpd_resp_set_type(req, "application/json");
   httpd_resp_set_hdr(req, "Cache-Control", "no-cache");

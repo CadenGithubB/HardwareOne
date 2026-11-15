@@ -27,6 +27,7 @@
 #include "System_Debug.h"
 #include "System_Command.h"
 #include "System_MemUtil.h"
+#include "System_PsramJson.h"  // PsramJsonText: the mesh peer state documents
 #include "System_CommandLimits.h"  // the client buffers match the command result ceiling
 #include "System_MQTTLifecycleGate.h"
 #include "System_MQTTAdmission.h"
@@ -1107,10 +1108,11 @@ static void publishMeshPeerSensorData() {
       sys["last_seen"] = lastContact ? ((millis() - lastContact) / 1000) : 0;
     }
 
-    // Serialize and publish
-    String output;
-    serializeJson(doc, output);
-    esp_mqtt_client_publish(mqttClient, peerStateTopic.c_str(), output.c_str(), 0, 0, false);
+    // Serialize and publish; a document whose text cannot be had is not sent.
+    const PsramJsonText output(doc, "mqtt.peer.json");
+    if (output.ok()) {
+      esp_mqtt_client_publish(mqttClient, peerStateTopic.c_str(), output.c_str(), 0, 0, false);
+    }
 
     // Update availability
     String peerAvailTopic = gSettings.mqttBaseTopic + "/devices/hardwareone_" + macCompact + "/availability";

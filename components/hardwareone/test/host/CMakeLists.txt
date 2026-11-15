@@ -2367,6 +2367,14 @@ add_test(
   NAME json_docs_psram
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_json_docs_psram.py)
+# The polled JSON replies (LLM poll, transcription, Edge Impulse detect, BLE
+# status, speech status, MQTT mesh peers, waypoints, sessions) are written
+# into one measured PSRAM block, byte-equal to serializeJson into a String.
+add_test(
+  NAME psram_json_text
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_psram_json_text.py
+          ${SETUP_MQTT_TEST_ARGS})
 # Flags and counters that more than one task changes: the production
 # definitions and the production statements that change them run against each
 # other on threads; a load-modify-store loses a change, one atomic step never.

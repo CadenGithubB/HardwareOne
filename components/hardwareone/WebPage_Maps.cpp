@@ -15,6 +15,7 @@
 #include "System_User.h"
 #include <ArduinoJson.h>
 #include "System_MemUtil.h"
+#include "System_PsramJson.h"  // PsramJsonText: the waypoint list reply
 #include "System_Utils.h"  // urlDecode
 #include <FS.h>
 #include <cstring>
@@ -440,8 +441,7 @@ esp_err_t handleWaypointsApi(httpd_req_t* req) {
       }
     }
     
-    String response;
-    serializeJson(doc, response);
+    const PsramJsonText response(doc, "web.waypoints.json");
     
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, response.c_str(), response.length());
