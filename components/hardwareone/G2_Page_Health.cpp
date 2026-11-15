@@ -235,8 +235,8 @@ static void g2HealthPageWorker(void* arg) {
       // window; a dead worker stops feeding and the watchdog can still fire.
       gHijackStartedMs = millis();
 
-      const uint32_t taps = gHealthPagePendingTap;
-      gHealthPagePendingTap = 0;
+      // One atomic read-and-clear: a tap recorded meanwhile stays pending.
+      const uint32_t taps = gHealthPagePendingTap.exchange(0);
       if (taps & (1u << 0)) {
         // Trends submenu Back returns to MAIN Overview; MAIN Back exits.
         if (g2HealthInTrendsNav()) {

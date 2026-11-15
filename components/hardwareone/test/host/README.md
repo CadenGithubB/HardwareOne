@@ -1159,6 +1159,12 @@ under any scheduling once each change is one atomic operation.
   `applySettings` with `outSerial` on and off. A lane must read as its owner
   left it until the owner changes it again. `applySettings` keeps WEB, FILE,
   BLE and G2, sets SERIAL from the setting and drops every other bit.
+- Glasses tap masks (`gCamStreamPendingTap`, `gHealthPagePendingTap`): one
+  thread per row records taps with the event dispatch's statement and waits
+  until the worker took each one; a worker thread runs the page worker's
+  drain. The number of taps the drains return must equal the number recorded.
+  The drain is one `exchange(0)`; a read followed by a store of 0 erases the
+  tap that arrives between the two.
 
 Source contract: each variable has one definition and one declaration, both
 `std::atomic`, and no statement stores a value computed from an earlier read

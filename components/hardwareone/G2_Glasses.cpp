@@ -2157,7 +2157,9 @@ static bool g2SessionWorkerBusy();
 // in gCamStreamPendingTap. The worker drains and clears the bitfield
 // between frames. Bits are mutually-exclusive in practice (firmware
 // dispatches one tap event at a time) but we OR them so a quick double
-// tap can't lose a request. Bit map:
+// tap can't lose a request. The OR (g2_owner) and the worker's drain
+// (g2_session) are one atomic operation each, so a tap that arrives while
+// the worker drains stays pending for its next pass. Bit map:
 //   0x1  = idx 0  ("<- Back")         → exit, run onDone() (back to CAM detail)
 //   0x2  = idx 1  ("Snapshot")        → save current frame to /sd/PICTURES/
 //   0x4  = idx 2  ("Rec start/stop")  → camerarecord start|stop (viewfinder stays)
@@ -2169,7 +2171,7 @@ static bool g2SessionWorkerBusy();
 // Record label is intentionally static: REBUILD-list mid-compound drops
 // the image child on this firmware (verified 2026-05-08). Tap toggles
 // videoRecording; row text stays "Rec start/stop".
-volatile uint32_t gCamStreamPendingTap = 0;
+std::atomic<uint32_t> gCamStreamPendingTap{0};
 volatile bool     gCamStreamActive     = false;
 #if ENABLE_MAPS
 // Interactive Maps page mailbox. Pan rows use bounded signed accumulators so
@@ -2236,7 +2238,9 @@ char              gMapSearchQuery[33] = {};
 #if ENABLE_R1_HEALTH
 // Health page (g2HealthPageWorker) — list+image R1 vitals/graphs. Rows:
 //   0 Back · 1 Overview · 2 HR · 3 HRV · 4 SpO2 · 5 Battery · 6 Poll · 7 Track.
-volatile uint32_t gHealthPagePendingTap = 0;
+// One bit per tapped row, set by the event dispatch (g2_owner) and drained by
+// the page worker (g2_session); atomic like gCamStreamPendingTap.
+std::atomic<uint32_t> gHealthPagePendingTap{0};
 volatile bool     gHealthPageActive     = false;
 // Bumped each Health open so a timed-out worker's deferred onDone
 // (→ Apps) cannot clobber a newer Health session that already started.

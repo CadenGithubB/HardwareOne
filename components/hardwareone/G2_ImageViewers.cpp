@@ -849,10 +849,10 @@ static void g2CameraStreamWorker(void* arg) {
         break;
       }
 
-      // Drain pending list-row taps. Read-and-clear so a re-tap during
-      // this iteration sets a fresh pending bit for the next pass.
-      const uint32_t taps = gCamStreamPendingTap;
-      gCamStreamPendingTap = 0;
+      // Drain pending list-row taps. Read-and-clear in one atomic exchange:
+      // a tap the dispatcher records while this runs is either in `taps` or
+      // still pending for the next pass, never erased by the clear.
+      const uint32_t taps = gCamStreamPendingTap.exchange(0);
       if (taps & 0x1u) {
         DEBUG_G2F("[G2] Camera stream: Back tap → exit");
         break;

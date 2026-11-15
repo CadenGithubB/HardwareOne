@@ -429,7 +429,7 @@ void kbdPadSysDoublePublish(uint32_t presentationEpoch);
 bool firmwareOverlayActive();
 extern volatile bool gImgProbeHoldActive;
 extern volatile bool gImgProbeHoldTapPending;
-extern volatile uint32_t gCamStreamPendingTap;
+extern std::atomic<uint32_t> gCamStreamPendingTap;
 extern volatile bool gCamStreamActive;
 #if ENABLE_MAPS
 extern std::atomic<uint32_t> gMapPageActionMask;
@@ -448,7 +448,7 @@ extern char gMapSearchQuery[33];
 #endif
 
 #if ENABLE_R1_HEALTH
-extern volatile uint32_t gHealthPagePendingTap;
+extern std::atomic<uint32_t> gHealthPagePendingTap;
 extern volatile bool gHealthPageActive;
 extern volatile uint32_t gHealthPageGen;
 extern volatile bool gHealthTextDead;

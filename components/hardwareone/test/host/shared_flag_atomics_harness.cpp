@@ -100,8 +100,86 @@ static void testOutputLanes() {
         "gOutputFlags is a std::atomic<uint32_t>");
 }
 
+// ---- Glasses tap masks: gCamStreamPendingTap, gHealthPagePendingTap ---------
+// INSERT_TAP_MASK_DEFINITIONS
+static void camTapRecord(uint32_t bit) {
+// INSERT_CAM_TAP_RECORD
+}
+static uint32_t camTapsDrain() {
+// INSERT_CAM_TAPS_DRAIN
+  return taps;
+}
+static void healthTapRecord(uint32_t idx) {
+// INSERT_HEALTH_TAP_RECORD
+}
+static uint32_t healthTapsDrain() {
+// INSERT_HEALTH_TAPS_DRAIN
+  return taps;
+}
+
+constexpr uint32_t kTapsPerRow = 60000;
+
+// The event dispatch records one tap of a row and waits until the worker has
+// taken it, as a user's next tap comes after the page reacted. Every recorded
+// tap must come out of exactly one drain.
+template <typename Mask>
+static void tapProducer(Mask* pending, void (*record)(uint32_t), uint32_t argument, uint32_t bit) {
+  waitForStart();
+  for (uint32_t tap = 0; tap < kTapsPerRow; ++tap) {
+    record(argument);
+    for (unsigned spins = 0; (*pending & bit) != 0; ++spins) if (spins > 200) std::this_thread::yield();
+  }
+}
+
+static void tapWorker(uint32_t (*drain)(), const std::atomic<bool>* stop, uint32_t* handled) {
+  waitForStart();
+  for (;;) {
+    const bool last = stop->load();
+    for (uint32_t taps = drain(); taps != 0; taps &= taps - 1) ++*handled;
+    if (last) return;
+  }
+}
+
+template <typename Mask>
+static uint32_t runTapMask(Mask* pending, void (*record)(uint32_t), uint32_t (*drain)(),
+                           const uint32_t* arguments, const uint32_t* bits, unsigned rows) {
+  *pending = 0;
+  std::atomic<bool> stop{false};
+  uint32_t handled = 0;
+  std::thread worker(tapWorker, drain, &stop, &handled);
+  std::vector<std::thread> producers;
+  for (unsigned row = 0; row < rows; ++row)
+    producers.emplace_back(tapProducer<Mask>, pending, record, arguments[row], bits[row]);
+  runTogether(producers);
+  stop.store(true);
+  worker.join();
+  return handled;
+}
+
+static void testTapMasks() {
+  const uint32_t camBits[] = {0x1u, 0x2u, 0x4u, 0x8u};  // Back, Snapshot, Rec, Settings
+  const uint32_t camHandled = runTapMask(&gCamStreamPendingTap, camTapRecord, camTapsDrain, camBits, camBits, 4);
+  CHECK(camHandled == 4 * kTapsPerRow, "every camera-stream row tap reaches the stream worker once");
+  const uint32_t healthRows[] = {0, 1, 5, 31};
+  const uint32_t healthBits[] = {1u << 0, 1u << 1, 1u << 5, 1u << 31};
+  const uint32_t healthHandled = runTapMask(&gHealthPagePendingTap, healthTapRecord, healthTapsDrain,
+                                            healthRows, healthBits, 4);
+  CHECK(healthHandled == 4 * kTapsPerRow, "every Health page row tap reaches the page worker once");
+
+  camTapRecord(0x2u);
+  camTapRecord(0x8u);
+  CHECK(camTapsDrain() == 0xAu, "two taps recorded before a drain are both in it");
+  CHECK(camTapsDrain() == 0u, "a drain leaves nothing pending");
+
+  CHECK((std::is_same<decltype(gCamStreamPendingTap), std::atomic<uint32_t>>::value),
+        "gCamStreamPendingTap is a std::atomic<uint32_t>");
+  CHECK((std::is_same<decltype(gHealthPagePendingTap), std::atomic<uint32_t>>::value),
+        "gHealthPagePendingTap is a std::atomic<uint32_t>");
+}
+
 int main() {
   testOutputLanes();
+  testTapMasks();
   if (failures) {
     std::fprintf(stderr, "%d check(s) failed\n", failures);
     return 1;

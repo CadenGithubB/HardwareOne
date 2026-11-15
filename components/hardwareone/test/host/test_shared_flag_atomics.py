@@ -12,6 +12,11 @@ and close lanes (`log start`, outble, outg2, outserial, the HTTP server start)
 while the main loop closes the BLE and WEB lanes at a session end or server
 stop, and applySettings rewrites the SERIAL lane from both tasks.
 
+Glasses tap masks (gCamStreamPendingTap, gHealthPagePendingTap): the event
+dispatch on g2_owner records a tapped row with |= while the page worker on
+g2_session drains the mask. The drain was a read followed by a store of 0; a
+tap recorded between the two was erased. It is one exchange(0) now.
+
 The production definition of each variable and the production statements that
 change it are compiled into shared_flag_atomics_harness.cpp and run against
 each other on real threads; the harness states the invariant each run checks.
@@ -57,6 +62,12 @@ def code_lines(text: str):
         yield number, line.split("//", 1)[0]
 
 
+def definition(text: str, name: str) -> str:
+    """The file-scope definition of an integer variable, whatever its type says."""
+    return one_line(text, r"^(?:static\s+)?(?:volatile\s+)?(?:uint32_t|uint64_t|std::atomic<\w+>)\s+"
+                    + name + r"\b[^;\n]*;", f"the definition of {name}")
+
+
 def one_line(text: str, pattern: str, what: str) -> str:
     found = re.findall(pattern, text, re.M)
     require(len(found) == 1, f"{what}: expected one, found {len(found)}")
@@ -75,8 +86,7 @@ def output_lane_parts(component: Path, sources: dict[Path, str]) -> dict[str, st
     debug_header = sources[component / "System_Debug.h"]
     route_bits = "\n".join(re.findall(r"^#define MSG_ROUTE_\w+\s+0x[0-9A-Fa-f]+", debug_header, re.M))
     require(route_bits.count("#define") == 8, "the eight MSG_ROUTE_* values of System_Debug.h")
-    definition = one_line(sources[component / "HardwareOne.cpp"],
-                          r"^[\w:<> ]*\bgOutputFlags\b[^;\n]*;", "the definition of gOutputFlags")
+    flags_definition = definition(sources[component / "HardwareOne.cpp"], "gOutputFlags")
     apply_settings = extract_block(sources[component / "System_Settings.cpp"], "void applySettings(")
     lane = between(apply_settings, "// Apply the one persisted output lane (SERIAL)",
                    "// Apply debug settings to runtime flags", "the output lane step of applySettings")
@@ -92,7 +102,7 @@ def output_lane_parts(component: Path, sources: dict[Path, str]) -> dict[str, st
         for prefix in ("laneOpen_", "laneClose_"):
             require(prefix + name in steps, f"a production statement for {prefix}{name}")
     functions = "\n".join(f"static void {name}() {{ {statement} }}" for name, statement in sorted(steps.items()))
-    return {"// INSERT_ROUTE_BITS": route_bits, "// INSERT_OUTPUT_FLAGS_DEFINITION": definition,
+    return {"// INSERT_ROUTE_BITS": route_bits, "// INSERT_OUTPUT_FLAGS_DEFINITION": flags_definition,
             "// INSERT_APPLY_SETTINGS_LANE": lane, "// INSERT_LANE_STEPS": functions}
 
 
@@ -118,6 +128,51 @@ def check_output_lane_sources(component: Path, sources: dict[Path, str]) -> None
             "applySettings rewrites the SERIAL lane with one compare-exchange loop")
 
 
+# ---- Glasses tap masks ------------------------------------------------------------
+
+TAP_MASKS = (("gCamStreamPendingTap", "G2_ImageViewers.cpp", "CAM"),
+             ("gHealthPagePendingTap", "G2_Page_Health.cpp", "HEALTH"))
+
+
+def tap_drain(text: str, name: str) -> str:
+    """The worker's statements from the read of the mask up to its first use of `taps`."""
+    lines = text.splitlines()
+    starts = [i for i, line in enumerate(lines) if re.match(rf"\s*const uint32_t taps = {name}\b", line)]
+    require(len(starts) == 1, f"one drain of {name}, found {len(starts)}")
+    end = next(i for i in range(starts[0] + 1, len(lines)) if re.match(r"\s*if \(taps &", lines[i]))
+    return "\n".join(lines[starts[0]:end])
+
+
+def tap_mask_parts(component: Path, sources: dict[Path, str]) -> dict[str, str]:
+    glasses = sources[component / "G2_Glasses.cpp"]
+    parts = {"// INSERT_TAP_MASK_DEFINITIONS":
+             "\n".join(definition(glasses, name) for name, _, _ in TAP_MASKS)}
+    for name, worker_file, tag in TAP_MASKS:
+        parts[f"// INSERT_{tag}_TAP_RECORD"] = one_line(
+            glasses, rf"^\s*({name}\s*\|=[^;\n]*;)", f"the statement that records a tap in {name}")
+        parts[f"// INSERT_{tag}_TAPS_DRAIN"] = tap_drain(sources[component / worker_file], name)
+    return parts
+
+
+def check_tap_mask_sources(component: Path, sources: dict[Path, str]) -> None:
+    internal = sources[component / "G2_GlassesInternal.h"]
+    glasses = sources[component / "G2_Glasses.cpp"]
+    for name, worker_file, _ in TAP_MASKS:
+        require(f"extern std::atomic<uint32_t> {name};" in internal,
+                f"G2_GlassesInternal.h declares {name} as std::atomic<uint32_t>")
+        require(definition(glasses, name) == f"std::atomic<uint32_t> {name}{{0}};",
+                f"G2_Glasses.cpp defines {name} as std::atomic<uint32_t>")
+        drain = "\n".join(line for _, line in code_lines(tap_drain(sources[component / worker_file], name)))
+        require(drain.strip() == f"const uint32_t taps = {name}.exchange(0);",
+                f"{worker_file}: the worker takes and clears {name} in one exchange(0), found `{drain.strip()}`")
+        for path, text in sources.items():
+            for number, line in code_lines(text):
+                # A reset to 0 (page start, page end, teardown) is one store; anything
+                # else that assigns the mask would be built from an earlier read.
+                require(not re.search(rf"\b{name}\s*=(?!=)(?!\s*0\s*;)", line),
+                        f"{path.relative_to(component)}:{number}: {name} is assigned something other than 0")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cxx", default=os.environ.get("CXX") or shutil.which("c++"))
@@ -131,6 +186,7 @@ def main() -> None:
     harness = (HERE / "shared_flag_atomics_harness.cpp").read_text()
     parts = {}
     parts.update(output_lane_parts(component, sources))
+    parts.update(tap_mask_parts(component, sources))
     for marker, body in parts.items():
         require(harness.count(marker) == 1, f"one {marker} in the harness")
         harness = harness.replace(marker, body)
@@ -145,7 +201,7 @@ def main() -> None:
         subprocess.run([args.cxx, *flags, str(source), "-o", str(binary)], check=True, timeout=180)
         if subprocess.run([str(binary)], timeout=300).returncode != 0:
             failures.append("the harness reported lost updates or a non-atomic type")
-    for check in (check_output_lane_sources,):
+    for check in (check_output_lane_sources, check_tap_mask_sources):
         try:
             check(component, sources)
         except AssertionError as error:
