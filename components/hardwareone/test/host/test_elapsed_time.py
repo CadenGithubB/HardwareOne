@@ -188,7 +188,9 @@ def main() -> None:
             print(f"FAIL: {failure}", file=sys.stderr)
         print(f"elapsed time: {len(failures)} failure(s)", file=sys.stderr)
         sys.exit(1)
-    print(f"elapsed time: four production functions and {len(ELAPSED)} comparisons passed", flush=True)
+    comparisons = sum(count for _, _, _, count in ELAPSED)
+    print(f"elapsed time: four production functions and {comparisons} comparisons at {len(ELAPSED)} stamps passed",
+          flush=True)
 
 
 if __name__ == "__main__":

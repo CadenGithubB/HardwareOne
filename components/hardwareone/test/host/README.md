@@ -3795,12 +3795,12 @@ passed deadline is set back to 0.
 `g2HealthTick`, `healthPollStatusLine` and `g2HealthLoggingStatusLine` (`G2_Health.cpp`) and
 `g2RingPollVitalForLogging` (`G2_Ring.cpp`) with stamps that are 25, 30 and 49 days old and across the wrap; the
 driver writes `long` in the inserted text as the 32-bit type it is on the device, so a base run shows the fault
-(17 of 36 checks). Source rules cover all twelve comparisons of the change (the sensor log tick, the health
-logging mine, the Health page, the EvenCore failure dump throttle, the ring vitals poll): each is
-`(uint32_t)(now - stamp)`, no signed difference is left for those stamps, and the three stamps another task
-renews are copied before the clock is read. `g2_health_graph_core_tests` holds the one test that stays signed
-on purpose: the unknown-timestamp dedupe of `pushSeries` orders two stamps, and a replayed sample may be older
-than the series tail.
+(17 of 36 checks). Source rules cover all thirteen comparisons of the change, at twelve stamps (the sensor
+log tick, the health logging mine, the Health page, the EvenCore failure dump throttle, the ring vitals poll):
+each is `(uint32_t)(now - stamp)`, no signed difference is left for those stamps, and the three stamps another
+task renews are copied before the clock is read. `g2_health_graph_core_tests` holds the one test that stays
+signed on purpose: the unknown-timestamp dedupe of `pushSeries` orders two stamps, and a replayed sample may be
+older than the series tail.
 
 `mqtt_next_publish` compiles `mqttMsUntilNextPublish` (`System_MQTT.cpp`), the value behind the "Next Publish"
 line of `mqttstatus`: counting down, 0 when due and when overdue (the old `(last + interval) - millis()` wrapped
