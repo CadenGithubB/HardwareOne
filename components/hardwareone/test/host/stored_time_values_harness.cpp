@@ -1,7 +1,8 @@
 // Host harness for clock values and intervals read back from JSON.
 //
 // test_stored_time_values.py inserts, from the production sources:
-//   * System_User.cpp: struct BootAnchor and parseBootAnchors;
+//   * System_User.cpp: struct BootAnchor, parseBootAnchors, formatEpochAsIso8601
+//     and resolveUserTimestamp;
 //   * System_Automation.cpp: struct Trigger, daysCsvToMask, parseOneTrigger
 //     and nextFire.
 // ArduinoJson is the real library. Host boundaries: the Arduino String stub,
@@ -20,6 +21,15 @@ void webBatchTestStringAppend() {}
 #define PSRAM_JSON_DOC(name) JsonDocument name
 static constexpr size_t SYSEVT_DETAIL_LEN = 80;
 static int systemEventKindFromName(const char*) { return 0; }
+// System_Clock.cpp's rule: an epoch is valid from 2020 on.
+namespace Clock {
+static bool isValidEpoch(time_t t) {
+  if (t <= 0) return false;
+  struct tm tminfo;
+  if (!gmtime_r(&t, &tminfo)) return false;
+  return tminfo.tm_year >= 120;
+}
+}  // namespace Clock
 
 // INSERT_BOOT_ANCHORS
 
@@ -102,6 +112,29 @@ int main() {
       R"({"ntpAnchorId":2,"epochAtSync":1763000100,"millisAtSync":2},)"
       R"({"ntpAnchorId":3,"epochAtSync":1763000200,"millisAtSync":3})").c_str()), anchors, 2);
   check(n == 2 && anchors[1].ntpAnchorId == 2u, "the caller's capacity is respected");
+
+  // ---- user creation time from a boot anchor: 32-bit millis() stamps ---------
+  {
+    struct Case { uint32_t createdMs; uint32_t syncMs; const char* createdAt; const char* source; const char* what; };
+    const Case cases[] = {
+        {1000u, 61000u, "2025-11-13T02:12:20Z", "ntp_resolved", "a user created a minute before the sync"},
+        {0x7FFFFFFFu, 0x80000005u, "2025-11-13T02:13:20Z", "ntp_resolved",
+         "created at 2^31 - 1 ms, synced at 2^31 + 5 ms: 6 ms apart, same boot"},
+        {0xFFFFF000u, 0x00001000u, "2025-11-13T02:13:12Z", "ntp_resolved",
+         "created just before the wrap, synced just after it: 8.192 s apart, same boot"},
+        {500000u, 1000u, "2025-11-13T02:13:20Z", "approx_ntp", "created later in the count than the sync: a previous boot"},
+    };
+    for (const Case& c : cases) {
+      JsonDocument doc;
+      JsonObject user = doc.to<JsonObject>();
+      const BootAnchor anchor(1, static_cast<time_t>(1763000000), c.syncMs);
+      const bool resolved = resolveUserTimestamp(user, c.createdMs, anchor);
+      const std::string createdAt = user["createdAt"] | "";
+      const std::string source = user["createdAtSource"] | "";
+      check(resolved && createdAt == c.createdAt && source == c.source,
+            std::string(c.what) + ": got " + createdAt + " " + source);
+    }
+  }
 
   // ---- automation interval: stored as a number of ms, read back unsigned -------
   bool ok = false;

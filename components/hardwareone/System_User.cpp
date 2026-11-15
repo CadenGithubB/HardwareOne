@@ -4443,7 +4443,11 @@ static BootAnchor* findMatchingAnchor(BootAnchor* anchors, int count, uint32_t n
 // Resolve user timestamp using NTP anchor
 static bool resolveUserTimestamp(JsonObject user, unsigned long createdMs,
                                  const BootAnchor& anchor) {
-  long delta = (long)anchor.millisAtSync - (long)createdMs;
+  // Both stamps are 32-bit millis() values. Their difference is taken unsigned
+  // and read as int32_t: a user created at 2^31 - 1 ms and a sync at 2^31 + 5 ms
+  // are 6 ms apart, and a creation just before the wrap is still before a sync
+  // just after it. A subtraction of two longs overflowed in the first case.
+  const int32_t delta = (int32_t)((uint32_t)anchor.millisAtSync - (uint32_t)createdMs);
 
   time_t createdAtUtc;
   bool crossBoot = false;

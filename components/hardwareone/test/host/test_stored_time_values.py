@@ -10,7 +10,12 @@ was read the same way, so an interval above 24.8 days was "no interval".
 The production parseBootAnchors (System_User.cpp) and parseOneTrigger with
 nextFire (System_Automation.cpp) are compiled with the real ArduinoJson and
 run on stored values on both sides of 2^31; every value below 2^31 must read
-back as before. Source rule: no read of intervalMs, epochAtSync or
+back as before. The production resolveUserTimestamp (with formatEpochAsIso8601)
+is run on a user created and an anchor synced on both sides of 2^31 and of the
+wrap: the two millis() stamps are 32-bit, so their difference is taken as
+uint32_t and read as int32_t. A subtraction of two longs overflowed on the
+device when the stamps straddled 2^31, and on a host with 64-bit long it calls
+a creation just before the wrap a previous boot. Source rule: no read of intervalMs, epochAtSync or
 millisAtSync goes through an int default.
 
 Options: --cxx <compiler>, --sanitize (ASan + UBSan), --component <dir> to run
@@ -49,7 +54,10 @@ def generated(component: Path) -> str:
     automation = (component / "System_Automation.cpp").read_text()
     anchors = "\n\n".join([
         definition(user, "struct BootAnchor") + ";",
-        definition(user, "static int parseBootAnchors(const String& usersJson, BootAnchor* anchors, int maxCount)")])
+        definition(user, "static int parseBootAnchors(const String& usersJson, BootAnchor* anchors, int maxCount)"),
+        definition(user, "static bool formatEpochAsIso8601(time_t epoch, char* buf, size_t bufSize)"),
+        definition(user, "static bool resolveUserTimestamp(JsonObject user, unsigned long createdMs,\n"
+                         "                                 const BootAnchor& anchor)")])
     triggers = "\n\n".join(definition(automation, part) + (";" if part.startswith("struct ") else "")
                            for part in TRIGGER_PARTS)
     harness = (HERE / "stored_time_values_harness.cpp").read_text()

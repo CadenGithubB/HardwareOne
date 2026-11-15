@@ -3826,6 +3826,10 @@ uptime), an `epochAtSync` of 2200000000 (the year 2039) and an `intervalMs` of 2
 back as written, where an `int` default gave 0; every value up to 2^31 - 1 reads back as before, and a zero,
 negative, text or missing value is still "none". Source rule: no read of `intervalMs`, `epochAtSync`,
 `millisAtSync` or `ntpAnchorId` in those two files goes through a default other than `uint32_t(0)`.
+The suite also runs the production `resolveUserTimestamp` with `formatEpochAsIso8601`: a user created at
+2^31 - 1 ms and synced at 2^31 + 5 ms is 6 ms before the sync, one created just before the `millis()` wrap and
+synced just after it is 8.192 s before it, both in the same boot; one created later in the count than the sync
+is from a previous boot. The difference of the two 32-bit stamps is taken unsigned and read as `int32_t`.
 
 `automation_ids` compiles `System_AutomationId.h` as it is and runs the production `sanitizeAutomationsJson`
 (`System_Automation.cpp`) with the real ArduinoJson. An automation id is stored as a number and read as a signed
