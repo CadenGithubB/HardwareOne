@@ -64,6 +64,9 @@ using BaseType_t = int;
 #define pdMS_TO_TICKS(ms) (ms)
 static uint32_t nowMs = 1000;
 static uint32_t millis() { return nowMs; }
+namespace SelfDevice {
+static uint32_t uptimeSeconds() { return nowMs / 1000u; }  // the uptime owner (System_SelfDevice.h)
+}
 static unsigned backoffs = 0;
 static int landingAfterDelays = -1;  // a post in flight lands after this many delays
 static void landPostInFlight();

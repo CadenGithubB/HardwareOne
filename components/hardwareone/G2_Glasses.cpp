@@ -49,6 +49,7 @@
 #include "System_Notifications.h"
 #include "System_MemUtil.h"
 #include "System_MemoryMonitor.h"   // checkMemoryAvailable() — g2client gate
+#include "System_SelfDevice.h"      // SelfDevice::uptimeSeconds — the status page
 #include "System_VFS.h"
 #include "System_Mutex.h"       // FsLockGuard — serialize long-lived File handles
 #include "System_Battery.h"   // Valid battery snapshot for ESP corner widget
@@ -6647,7 +6648,7 @@ buildG2StatusSnapshot(char* out, size_t cap) {
   s += name;
   s += '\n';
 
-  unsigned long seconds = millis() / 1000UL;
+  unsigned long seconds = SelfDevice::uptimeSeconds();
   unsigned long hours   = seconds / 3600UL;
   unsigned long minutes = (seconds / 60UL) % 60UL;
   float tempC = temperatureRead();

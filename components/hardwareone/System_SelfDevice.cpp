@@ -4,6 +4,7 @@
 #include <esp_heap_caps.h>
 #include <esp_wifi.h>
 #include <esp_system.h>
+#include <esp_timer.h>
 #include <cstdio>
 #include <cstring>
 
@@ -13,10 +14,10 @@
 namespace SelfDevice {
 
 uint32_t uptimeSeconds() {
-  // millis() returns unsigned long (uint32_t on ESP-IDF). Divide by 1000 for
-  // seconds. Rolls over at ~49.7 days — every other caller had this same
-  // behavior so no behavior change.
-  return (uint32_t)(millis() / 1000UL);
+  // From the 64-bit microsecond timer, not from millis(): millis() is that
+  // same timer cut to 32 bits of milliseconds, so millis() / 1000 starts again
+  // at 0 after 49.7 days. In seconds a uint32_t lasts 136 years.
+  return (uint32_t)(esp_timer_get_time() / 1000000LL);
 }
 
 uint32_t freeHeapBytes() {

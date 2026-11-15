@@ -8,6 +8,7 @@
 #if ENABLE_ESPNOW
 
 #include "System_Clock.h"  // Clock::isValidEpoch — one epoch-validity vocabulary
+#include "System_SelfDevice.h"  // SelfDevice::uptimeSeconds — the uptime in heartbeats and status
 #include <esp_attr.h>
 #include <atomic>
 #include <ctype.h>
@@ -7452,7 +7453,7 @@ void onEspNowDataSent(const esp_now_send_info_t* tx_info, esp_now_send_status_t 
 void buildLocalBondStatus(BondPeerStatus& status) {
   memset(&status, 0, sizeof(BondPeerStatus));
   
-  status.uptimeSec = millis() / 1000;
+  status.uptimeSec = SelfDevice::uptimeSeconds();
   status.freeHeap = (uint32_t)ESP.getFreeHeap();
   status.minFreeHeap = (uint32_t)ESP.getMinFreeHeap();
   
@@ -7673,7 +7674,7 @@ static void buildCapabilitySummary(CapabilitySummary& cap) {
   strncpy(cap.deviceName, gSettings.espnowDeviceName.c_str(), 19);
   cap.deviceName[19] = '\0';
   
-  cap.uptimeSeconds = millis() / 1000;
+  cap.uptimeSeconds = SelfDevice::uptimeSeconds();
 }
 
 /**
@@ -7688,7 +7689,7 @@ static void buildDeviceManifest(JsonDocument& doc) {
   espnowSelfStaMac(mac);
   device["mac"] = macToDisplayStr(mac);
   device["role"] = isBondMaster() ? "master" : "worker";
-  device["uptime"] = millis() / 1000;
+  device["uptime"] = SelfDevice::uptimeSeconds();
   
   // Capability summary (embedded)
   CapabilitySummary cap;
@@ -10379,7 +10380,7 @@ void processMeshHeartbeats() {
       hb.peerCount = activePeerCount > 0 ? activePeerCount : pairedDeviceCount;
       wifi_ap_record_t ap = {};
       hb.rssi      = (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) ? ap.rssi : (int8_t)-127;
-      hb.uptimeSec = now / 1000;
+      hb.uptimeSec = SelfDevice::uptimeSeconds();
       hb.freeHeap  = (uint32_t)ESP.getFreeHeap();
       strncpy(hb.deviceName, gSettings.espnowDeviceName.c_str(), sizeof(hb.deviceName) - 1);
       // Phase 5: gate on per-peer HEARTBEAT subscription. Peers default to
@@ -10404,7 +10405,7 @@ void processMeshHeartbeats() {
       if (parseMacAddress(gSettings.meshBackupMac, backupMac)) {
         V4PayloadHeartbeat hb = {};
         hb.role      = MESH_ROLE_MASTER;
-        hb.uptimeSec = now / 1000;
+        hb.uptimeSec = SelfDevice::uptimeSeconds();
         hb.freeHeap  = (uint32_t)ESP.getFreeHeap();
         wifi_ap_record_t ap = {};
         hb.rssi = (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) ? ap.rssi : (int8_t)-127;
@@ -10445,7 +10446,7 @@ void processMeshHeartbeats() {
       if (parseMacAddress(gSettings.bondPeerMac, bondMac)) {
         V4PayloadBondHeartbeat phb = {};
         phb.role      = gSettings.bondRole;
-        phb.uptimeSec = now / 1000;
+        phb.uptimeSec = SelfDevice::uptimeSeconds();
         phb.freeHeap  = (uint32_t)ESP.getFreeHeap();
         phb.seqNum    = ++gBondHeartbeatSeqNum;
         phb.bootCounter = gBootCounter;
@@ -12323,7 +12324,7 @@ const char* cmd_espnow_stats(const String& argsInput) {
     doc["filesSent"]     = (unsigned long)gEspNow->fileTransfersSent;
     doc["filesReceived"] = (unsigned long)gEspNow->fileTransfersReceived;
     doc["uptimeSec"]     = (unsigned long)(gEspNow->lastResetTime > 0
-                            ? (millis() - gEspNow->lastResetTime) / 1000 : millis() / 1000);
+                            ? (millis() - gEspNow->lastResetTime) / 1000 : SelfDevice::uptimeSeconds());
     serializeJson(doc, getDebugBuffer(), 1024);
     return getDebugBuffer();
   }
@@ -12364,7 +12365,7 @@ const char* cmd_espnow_stats(const String& argsInput) {
     unsigned long uptime = (millis() - gEspNow->lastResetTime) / 1000;
     BROADCAST_PRINTF("  Uptime: %lus", uptime);
   } else {
-    BROADCAST_PRINTF("  Uptime: %lus (since boot)", millis() / 1000);
+    BROADCAST_PRINTF("  Uptime: %lus (since boot)", (unsigned long)SelfDevice::uptimeSeconds());
   }
 
   return "OK";
@@ -13244,7 +13245,7 @@ const char* cmd_espnow_pair(const String& argsInput) {
     noteMeshPeerRxActivity(mac, EspNowMeshRxKind::BootstrapLiveness);
     V4PayloadHeartbeat hb = {};
     hb.role = gSettings.meshRole;
-    hb.uptimeSec = (uint32_t)(millis() / 1000);
+    hb.uptimeSec = SelfDevice::uptimeSeconds();
     hb.freeHeap  = (uint32_t)ESP.getFreeHeap();
     strncpy(hb.deviceName, gSettings.espnowDeviceName.c_str(), sizeof(hb.deviceName) - 1);
     wifi_ap_record_t ap = {};
@@ -16355,7 +16356,7 @@ const char* cmd_espnow_pairsecure(const String& argsInput) {
     noteMeshPeerRxActivity(mac, EspNowMeshRxKind::BootstrapLiveness);
     V4PayloadHeartbeat hb = {};
     hb.role = gSettings.meshRole;
-    hb.uptimeSec = (uint32_t)(millis() / 1000);
+    hb.uptimeSec = SelfDevice::uptimeSeconds();
     hb.freeHeap  = (uint32_t)ESP.getFreeHeap();
     strncpy(hb.deviceName, gSettings.espnowDeviceName.c_str(), sizeof(hb.deviceName) - 1);
     wifi_ap_record_t ap = {};

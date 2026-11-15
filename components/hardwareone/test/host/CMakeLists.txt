@@ -2384,6 +2384,13 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_automation_condition_bounds.py
           ${SETUP_MQTT_TEST_ARGS})
+# Uptime: SelfDevice::uptimeSeconds() counts on past the millis() wrap, and the
+# places that show, send or compare uptime ask it instead of millis() / 1000.
+add_test(
+  NAME uptime_owner
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_uptime_owner.py
+          ${SETUP_MQTT_TEST_ARGS})
 # Self-registration: /register/submit hands the decoded fields to
 # submitAccountRequest byte-exact (spaced and quoted passphrases), owner
 # refusals do not count toward the login lockout, anonymous `userrequest` is

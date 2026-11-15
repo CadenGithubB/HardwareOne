@@ -11,6 +11,7 @@
 #include "OLED_Utils.h"
 #include "System_Settings.h"
 #include "System_Battery.h"
+#include "System_SelfDevice.h"  // SelfDevice::uptimeSeconds
 #include "System_Utils.h"
 // Must come before the first hw1Internal*() use (this file also includes it
 // further down, but that is after the System/memory render paths).
@@ -495,7 +496,7 @@ void prepareSystemStatusData() {
   systemStatusRenderData.freeHeap = hw1InternalFreeBytes();
   
   // Calculate uptime OUTSIDE I2C transaction
-  unsigned long uptimeSec = millis() / 1000;
+  unsigned long uptimeSec = SelfDevice::uptimeSeconds();
   systemStatusRenderData.uptimeHours = uptimeSec / 3600;
   systemStatusRenderData.uptimeMinutes = (uptimeSec % 3600) / 60;
   

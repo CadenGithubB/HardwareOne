@@ -30,8 +30,9 @@ namespace SelfDevice {
 
 // ----- Time / lifecycle ---------------------------------------------------
 
-// Seconds since boot. Wraps millis()/1000 with a single rollover behavior
-// (millis() wraps at ~49 days). Use for uptime display.
+// Seconds since boot. Counts on past the 49.7 days at which millis() starts
+// again at 0 (it reads the 64-bit boot timer). Every place that shows, sends
+// or compares uptime asks here; `millis() / 1000` is not an uptime.
 uint32_t uptimeSeconds();
 
 // Milliseconds since boot. Just millis(), but routed through here so callers

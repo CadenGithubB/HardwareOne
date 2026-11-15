@@ -11,6 +11,7 @@
 #include "System_SensorLogging.h"
 #include "System_CommandReply.h"  // the reply words and how to read them
 #include "System_Clock.h"   // Clock::isSynced — session subfolder/timestamp shaping
+#include "System_SelfDevice.h"  // SelfDevice::uptimeSeconds — track stamp without GPS time
 #include "System_Utils.h"
 #include "System_Command.h"
 #include "System_Debug.h"
@@ -717,7 +718,7 @@ void sensorLogTick() {
     if (s.gpsHasTime) {
       snprintf(ts, sizeof(ts), "%02d:%02d:%02d", s.gpsHour, s.gpsMinute, s.gpsSecond);
     } else {
-      unsigned long secs = millis() / 1000;
+      unsigned long secs = SelfDevice::uptimeSeconds();
       snprintf(ts, sizeof(ts), "%02lu:%02lu:%02lu",
                (secs / 3600) % 24, (secs / 60) % 60, secs % 60);
     }

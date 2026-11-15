@@ -60,6 +60,7 @@
 #include "System_Battery.h"        // BATTERY: valid battery snapshot
 #include "System_Events.h"         // event triggers: ring drain + kind names
 #include "System_Clock.h"          // NTP: Clock::isSynced()
+#include "System_SelfDevice.h"     // SelfDevice::uptimeSeconds: the UPTIME condition sensor
 #include "BLE_Server.h"             // BLE: isBLEConnected() (stub returns false when BT disabled)
 #include "System_ESPNow.h"         // PEERS/bond/pairing: gMeshPeers, isBondModeOnline, espnowPairModeActive, gEspNow
 #include "System_BondedPeer.h"     // BOND_PAIRED: BondedPeer::isPaired()
@@ -3545,8 +3546,8 @@ bool evaluateCondition(const char* condition) {
     // Free LittleFS space in KB (cached read, scheduler-safe)
     currentValue = (float)(VFS::getCachedLittleFsFree() / 1024);
   } else if (strcmp(sensor, "UPTIME") == 0) {
-    // Minutes since boot (millis rolls over ~49.7 days, matching every other caller)
-    currentValue = (float)(millis() / 60000UL);
+    // Minutes since boot, from the uptime owner (it does not restart at 49.7 days)
+    currentValue = (float)(SelfDevice::uptimeSeconds() / 60u);
   } else if (strcmp(sensor, "CHIPTEMP") == 0) {
     // On-die SoC temperature in Celsius (self-heated, not ambient); NAN on read failure
     float tc = temperatureRead();

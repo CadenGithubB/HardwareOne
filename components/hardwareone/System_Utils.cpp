@@ -543,7 +543,7 @@ static void logCommandExecutionPrepared(const AuthContext& ctx,
 
   // Build log entry
   char entry[512];
-  unsigned long ts = millis() / 1000;  // Seconds since boot
+  unsigned long ts = SelfDevice::uptimeSeconds();  // Seconds since boot
   
   // Command source
   const char* source = commandSourceName(ctx.transport);

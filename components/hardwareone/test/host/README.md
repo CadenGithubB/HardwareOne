@@ -3808,6 +3808,13 @@ to about 4294967000 ms when the command ran after the due time and before the ma
 right across the wrap. Source rules: `cmd_mqttstatus` copies the main loop's stamp before it reads the clock
 and prints that function's result; the reply line is unchanged.
 
+`uptime_owner` compiles the production `SelfDevice::uptimeSeconds` (`System_SelfDevice.cpp`) against a settable
+64-bit boot timer: it equals `millis() / 1000` up to the wrap and counts on after it (4294966 s, then 4294968 s,
+while `millis() / 1000` is back at 1), for 100 days and for ten years. Source rules: the eight files in the
+test's table (`ASKERS`) ask the owner, and the only divisions of the 32-bit millisecond clock by 1000 or 60000
+left in the firmware are the three fallbacks for a wall clock that reads 0 (two glasses microphone file names,
+one ESP-NOW capture file).
+
 `automation_condition_bounds` is about a size, not a time, and sits here with the group that fixed it. It
 compiles the production `validateConditionSyntax` and `executeConditionalCommand` (`System_Automation.cpp`).
 Their scan for ` THEN ` was bounded by `i < len - 5` on a `size_t`: for a command of 3 or 4 characters that

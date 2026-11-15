@@ -1049,7 +1049,7 @@ class CmdStatusCallbacks : public BLECharacteristicCallbacks {
     char statusBuf[128];
     snprintf(statusBuf, sizeof(statusBuf),
              "{\"state\":\"connected\",\"uptime\":%lu,\"rx\":%lu,\"tx\":%lu}",
-             (unsigned long)(millis() / 1000),
+             (unsigned long)SelfDevice::uptimeSeconds(),
              (unsigned long)gBleState->commandsReceived,
              (unsigned long)gBleState->responsesSent);
     pCharacteristic->setValue(statusBuf);
@@ -4985,7 +4985,7 @@ static void buildSystemStatusJson(char* buf, size_t bufSize) {
   uint32_t freeHeap = ESP.getFreeHeap();
   uint32_t minHeap = ESP.getMinFreeHeap();
   uint32_t freePsram = ESP.getFreePsram();
-  uint32_t uptime = millis() / 1000;
+  uint32_t uptime = SelfDevice::uptimeSeconds();
   
   snprintf(buf, bufSize,
            "{\"system\":{\"heap_free\":%lu,\"heap_min\":%lu,\"psram_free\":%lu,\"uptime\":%lu},\"ts\":%lu}",

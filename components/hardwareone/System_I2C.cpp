@@ -23,6 +23,7 @@
 #include "System_I2C.h"
 #include "System_RamFlush.h"
 #include "System_Logging.h"
+#include "System_SelfDevice.h"        // SelfDevice::uptimeSeconds — i2cmetrics rates
 #include "System_Mutex.h"
 #include "System_MemUtil.h"
 #include "System_Notifications.h"
@@ -725,7 +726,7 @@ const char* cmd_i2cmetrics(const String& argsInput) {
   if (!mgr) return "Error: I2C manager not initialized";
 
   // Counters are cumulative since boot — nothing clears them at runtime.
-  unsigned long uptimeSec = millis() / 1000;
+  unsigned long uptimeSec = SelfDevice::uptimeSeconds();
 
   if (argWantsJson(argsInput)) {
     PSRAM_JSON_DOC(doc);
