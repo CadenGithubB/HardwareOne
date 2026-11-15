@@ -258,7 +258,9 @@ def run_role_matrix(cxx: str, sanitize: bool) -> None:
               extract_block(header, "enum FilePermission") + ";",
               extract_block(FS_CPP, "struct PathRule") + ";",
               extract_block(FS_CPP, "static const PathRule sPathRules[]") + ";"]
-    for marker in ("static const PathRule& lookupRule(", "static bool hasSensitiveExtension(",
+    for marker in ("static char asciiLower(", "static bool lowerEndsWith(",
+                   "static bool lowerBaseNameContains(",
+                   "static const PathRule& lookupRule(", "static bool hasSensitiveExtension(",
                    "static bool isImageFile(", "bool normalizeFsPath(", "enum class FsRole"):
         pieces.append(extract_block(FS_CPP, marker) + (";" if marker.startswith("enum") else ""))
     for marker in ("static inline bool isUnrestrictedRole(", "static FsRole resolveRole(",

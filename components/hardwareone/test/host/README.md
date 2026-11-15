@@ -3723,6 +3723,31 @@ redacts its line only inside its trace. It takes `--cxx`, `--sanitize` and
 ctest --test-dir /tmp/hw1-hardwareone-host -R '^command_trace_copies$' --output-on-failure
 ```
 
+`fs_permission_strings` covers the file permission path. It runs the
+production path-rule table, `lookupRule`, the filename tests
+(`hasSensitiveExtension`, `isImageFile` and their in-place helpers),
+`pathWithinScope`, `resolveRole`, `checkPerm` with the six `canX` queries,
+`logFsAccessDeny`, `getPermissions` and `isAdminOnlyPath`
+(`System_Filesystem.cpp`) and `VFS::systemAuth` (`System_VFS.cpp`) on the
+counted Arduino String, with roster, FS lock and debug queue doubles. For a
+path set built from every rule of the table (the prefix, a name below it, a
+trailing slash added or taken away, an upper-case spelling, `..`, sensitive
+and image names) plus the empty path, the root, paths at 127 and 255
+characters and paths with an embedded NUL, it prints the matched rule, both
+filename tests, `isAdminOnlyPath` and, for eleven identities (anonymous,
+guest, user, admin, super, AuthBypass, an unknown name, system, two scoped
+system contexts, a scoped user), the six answers, `getPermissions` and the
+reason `logFsAccessDeny` gives for each refusal; then a `pathWithinScope`
+matrix and the contexts `systemAuth` builds. The report must equal
+`fs_permission_answers.txt`, printed by the tree before these functions
+stopped copying. No permission query makes a String block. It takes `--cxx`,
+`--sanitize`, `--component <directory>` and `--print` (write the report
+instead of comparing it).
+
+```sh
+ctest --test-dir /tmp/hw1-hardwareone-host -R '^fs_permission_strings$' --output-on-failure
+```
+
 This does not open a real browser; a user-role upload of a hostile name and a
 hotspot named `<b>x</b>` remain the on-device checks.
 

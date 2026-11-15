@@ -2353,6 +2353,13 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_command_trace_copies.py
           ${SETUP_MQTT_TEST_ARGS})
+# The file permission path gives the answers of fs_permission_answers.txt for
+# every rule of the path table and makes no String on the way.
+add_test(
+  NAME fs_permission_strings
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_fs_permission_strings.py
+          ${SETUP_MQTT_TEST_ARGS})
 # Flags and counters that more than one task changes: the production
 # definitions and the production statements that change them run against each
 # other on threads; a load-modify-store loses a change, one atomic step never.

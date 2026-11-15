@@ -1661,7 +1661,8 @@ static const PathRule sPathRules[] = {
   {nullptr,                             PERM_ALL,  PERM_ALL,                                           PERM_ALL,  false, false},
 };
 
-// Look up the first matching rule for a path.
+// Look up the first matching rule for a path. A prefix is compared in place:
+// String::startsWith(const char*) would wrap each prefix tried in a String.
 static const PathRule& lookupRule(const String& path) {
   for (size_t i = 0; i < sizeof(sPathRules) / sizeof(sPathRules[0]); i++) {
     const PathRule& rule = sPathRules[i];
@@ -1669,10 +1670,49 @@ static const PathRule& lookupRule(const String& path) {
     if (rule.exactMatch) {
       if (path == rule.path) return rule;
     } else {
-      if (path.startsWith(rule.path)) return rule;
+      const size_t prefixLength = strlen(rule.path);
+      if (path.length() >= prefixLength && strncmp(path.c_str(), rule.path, prefixLength) == 0) return rule;
     }
   }
   return sPathRules[sizeof(sPathRules) / sizeof(sPathRules[0]) - 1];
+}
+
+// The two filename tests below read the path in place and answer what they
+// answered on a lower-cased copy of it: String::toLowerCase stops at the first
+// NUL, so a byte after one keeps its case; String::endsWith compares the whole
+// tail; lastIndexOf and indexOf stop at the first NUL. The words compared are
+// lower-case ASCII, which tolower makes only from 'A'..'Z'.
+static char asciiLower(char c) {
+  return (c >= 'A' && c <= 'Z') ? char(c - 'A' + 'a') : c;
+}
+
+// The lower-cased path ends with `suffix`.
+static bool lowerEndsWith(const String& path, const char* suffix) {
+  const char* text = path.c_str();
+  const size_t length = path.length(), suffixLength = strlen(suffix);
+  if (text == nullptr || length < suffixLength) return false;
+  const size_t lowered = strlen(text);
+  const size_t start = length - suffixLength;
+  for (size_t i = 0; i < suffixLength; i++) {
+    const char c = (start + i < lowered) ? asciiLower(text[start + i]) : text[start + i];
+    if (c != suffix[i]) return false;  // a NUL never matches
+  }
+  return true;
+}
+
+// The lower-cased final segment of the path (after its last '/') contains `word`.
+static bool lowerBaseNameContains(const String& path, const char* word) {
+  const char* text = path.c_str();
+  if (text == nullptr) return false;
+  const char* lastSlash = strrchr(text, '/');
+  const size_t base = lastSlash ? size_t(lastSlash - text) + 1 : 0;
+  const size_t end = strlen(text), wordLength = strlen(word);
+  for (size_t at = base; at + wordLength <= end; at++) {
+    size_t k = 0;
+    while (k < wordLength && asciiLower(text[at + k]) == word[k]) k++;
+    if (k == wordLength) return true;
+  }
+  return false;
 }
 
 // ----------------------------------------------------------------------------
@@ -1684,9 +1724,6 @@ static const PathRule& lookupRule(const String& path) {
 // would also miss "config.crt" / "model.bin" / etc.
 // ----------------------------------------------------------------------------
 static bool hasSensitiveExtension(const String& path) {
-  String lower = path;
-  lower.toLowerCase();
-
   // Block specific extensions (suffix match).
   static const char* const kBlockedSuffixes[] = {
     ".key",  ".pem",  ".crt",  ".cert",  ".cer",   // TLS / cryptographic material
@@ -1694,27 +1731,23 @@ static bool hasSensitiveExtension(const String& path) {
     ".bin",  ".hex",  ".elf",                       // firmware images / executables
   };
   for (const char* sfx : kBlockedSuffixes) {
-    if (lower.endsWith(sfx)) return true;
+    if (lowerEndsWith(path, sfx)) return true;
   }
 
   // Block filenames whose final segment contains the words "password" or
   // "secret" (whole-name substring on the basename only, not the directory).
-  int lastSlash = lower.lastIndexOf('/');
-  String base = (lastSlash >= 0) ? lower.substring(lastSlash + 1) : lower;
-  if (base.indexOf("password") >= 0)   return true;
-  if (base.indexOf("secret") >= 0)     return true;
-  if (base.indexOf("credential") >= 0) return true;
+  if (lowerBaseNameContains(path, "password"))   return true;
+  if (lowerBaseNameContains(path, "secret"))     return true;
+  if (lowerBaseNameContains(path, "credential")) return true;
 
   return false;
 }
 
 // Image files: can be viewed but not text-edited.
 static bool isImageFile(const String& path) {
-  String lower = path;
-  lower.toLowerCase();
-  return (lower.endsWith(".jpg") || lower.endsWith(".jpeg") || lower.endsWith(".png") ||
-          lower.endsWith(".gif") || lower.endsWith(".bmp") || lower.endsWith(".webp") ||
-          lower.endsWith(".ico") || lower.endsWith(".avif") || lower.endsWith(".heif"));
+  return (lowerEndsWith(path, ".jpg") || lowerEndsWith(path, ".jpeg") || lowerEndsWith(path, ".png") ||
+          lowerEndsWith(path, ".gif") || lowerEndsWith(path, ".bmp") || lowerEndsWith(path, ".webp") ||
+          lowerEndsWith(path, ".ico") || lowerEndsWith(path, ".avif") || lowerEndsWith(path, ".heif"));
 }
 
 // ============================================================================
@@ -1923,12 +1956,19 @@ static uint8_t permsForRole(const PathRule& rule, FsRole r) {
 // Capability scope: true if `path` (already normalized) is within `scope` (a
 // path prefix). Empty scope = unconfined. Boundary-aware so "/sd/VIDEOS" does
 // NOT match "/sd/VIDEOS_secret" — only the scope dir itself and paths beneath it.
+// Compared in place: the base is the scope without its trailing slashes (the
+// root keeps one), and the path is that base or begins with base + "/". The
+// String comparisons this replaces stop at a NUL inside the base, so then the
+// byte after the base is not asked.
 static bool pathWithinScope(const String& path, const String& scope) {
-  if (scope.length() == 0) return true;
-  String base = scope;
-  while (base.length() > 1 && base.endsWith("/")) base.remove(base.length() - 1);
-  if (path == base) return true;
-  return path.startsWith(base + "/");
+  size_t baseLength = scope.length();
+  if (baseLength == 0) return true;
+  const char* base = scope.c_str();
+  while (baseLength > 1 && base[baseLength - 1] == '/') baseLength--;
+  const size_t length = path.length();
+  if (length < baseLength || strncmp(path.c_str(), base, baseLength) != 0) return false;
+  return length == baseLength || path.c_str()[baseLength] == '/' ||
+         memchr(base, '\0', baseLength) != nullptr;
 }
 
 // Resolve a named account only for the private transcript tree. Ordinary file
@@ -2054,13 +2094,14 @@ static bool checkPerm(const String& path, const AuthContext& ctx,
   if (!pathWithinScope(path, ctx.scope)) return false;
   // Directories marked exemptSensitiveExt (e.g. /system/llm/, /system/certs/)
   // intentionally hold files with otherwise-blocked extensions (.bin, .pem, etc.)
-  // and must not be caught by the blanket sensitive-extension guard.
+  // and must not be caught by the blanket sensitive-extension guard. The role
+  // is asked before the filename tests: system and super ignore their answers.
   const PathRule& rule = lookupRule(path);
   bool sensitiveBlocked = sensitiveExtensionApplies && !rule.exemptSensitiveExt
-                          && hasSensitiveExtension(path) && !isUnrestrictedRole(role);
+                          && !isUnrestrictedRole(role) && hasSensitiveExtension(path);
   if (sensitiveBlocked) return false;
-  if (imageEditApplies && isImageFile(path) && !isUnrestrictedRole(role)) return false;
-  uint8_t granted = permsForRole(lookupRule(path), role) &
+  if (imageEditApplies && !isUnrestrictedRole(role) && isImageFile(path)) return false;
+  uint8_t granted = permsForRole(rule, role) &
                     transcriptPermissionMask(path, transcriptAccountId(path, ctx.user, role), role);
   return (granted & needed) == needed;
 }
@@ -2120,12 +2161,12 @@ void logFsAccessDeny(const String& path, const AuthContext& ctx,
   const PathRule& rule = lookupRule(path);
   bool sensitiveApplies = (needed & (PERM_READ | PERM_WRITE)) != 0;
   bool imageEditApplies = (needed == PERM_WRITE);
-  if (sensitiveApplies && !rule.exemptSensitiveExt && hasSensitiveExtension(path) && !isUnrestrictedRole(role)) {
+  if (sensitiveApplies && !rule.exemptSensitiveExt && !isUnrestrictedRole(role) && hasSensitiveExtension(path)) {
     DEBUG_STORAGEF("[PERM] DENY %s '%s' role=%s reason=sensitive-extension",
                    op, path.c_str(), roleName(role));
     return;
   }
-  if (imageEditApplies && isImageFile(path) && !isUnrestrictedRole(role)) {
+  if (imageEditApplies && !isUnrestrictedRole(role) && isImageFile(path)) {
     DEBUG_STORAGEF("[PERM] DENY %s '%s' role=%s reason=image-not-editable",
                    op, path.c_str(), roleName(role));
     return;
