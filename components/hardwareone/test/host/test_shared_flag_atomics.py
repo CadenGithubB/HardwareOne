@@ -22,6 +22,15 @@ g2SubmitHijackCommand run on the tap, session, page and command tasks on both
 cores. A lost menu bump lets a stale completion pass the menuGen check; a
 64-bit ++ gave two submissions one number. Both are std::atomic<uint32_t>.
 
+Generation counters (gNotifPrefsGen in System_Notifications.cpp, gHealthPageGen
+in G2_Glasses.cpp): bumped with ++ from the main loop, cmd_exec and the G2 tap
+dispatcher. Two Health page opens could get one generation, so the older
+worker's deferred onDone was not recognised as stale.
+
+Not covered here on purpose: sRxQueueDropped (G2_Ring.cpp) and gDebugDropped
+(System_Debug.h) are diagnostic counters that are only printed;
+System_Utils.h (observeHwm) records that a lost count is accepted for them.
+
 The production definition of each variable and the production statements that
 change it are compiled into shared_flag_atomics_harness.cpp and run against
 each other on real threads; the harness states the invariant each run checks.
@@ -209,6 +218,43 @@ def check_hijack_counter_sources(component: Path, sources: dict[Path, str]) -> N
             "g2SubmitHijackCommand stamps the sequence number with one ++gCmdSeq")
 
 
+# ---- Generation counters ----------------------------------------------------------
+
+def generation_parts(component: Path, sources: dict[Path, str]) -> dict[str, str]:
+    notifications = sources[component / "System_Notifications.cpp"]
+    bumps = set(re.findall(r"^\s*(gNotifPrefsGen\s*\+\+\s*;|\+\+\s*gNotifPrefsGen\s*;)", notifications, re.M))
+    require(len(bumps) == 1, f"the notification prefs generation is bumped with one statement form, found {bumps}")
+    return {
+        "// INSERT_GENERATION_DEFINITIONS":
+            definition(notifications, "gNotifPrefsGen") + "\n"
+            + definition(sources[component / "G2_Glasses.cpp"], "gHealthPageGen"),
+        "// INSERT_NOTIF_PREFS_GENERATION": extract_block(notifications, "uint32_t notifPrefsGeneration()"),
+        "// INSERT_NOTIF_PREFS_BUMP": bumps.pop(),
+        "// INSERT_HEALTH_PAGE_GEN_STAMP": one_line(
+            sources[component / "G2_Page_Health.cpp"], r"^\s*(a->gen\s*=[^;\n]*;)",
+            "the statement that stamps a Health page open's generation"),
+    }
+
+
+def check_generation_sources(component: Path, sources: dict[Path, str]) -> None:
+    notifications = sources[component / "System_Notifications.cpp"]
+    require(definition(notifications, "gNotifPrefsGen") == "static std::atomic<uint32_t> gNotifPrefsGen{1};",
+            "System_Notifications.cpp defines gNotifPrefsGen as a file-private std::atomic<uint32_t>")
+    require('#include <atomic>' in notifications, "System_Notifications.cpp includes <atomic> itself")
+    require(len(re.findall(r"^\s*gNotifPrefsGen\+\+;", notifications, re.M)) == 3,
+            "the three notification prefs bumps (policy load, user prefs invalidate, notifydevicekind)")
+    require(definition(sources[component / "G2_Glasses.cpp"], "gHealthPageGen") ==
+            "std::atomic<uint32_t> gHealthPageGen{0};", "G2_Glasses.cpp defines gHealthPageGen as std::atomic<uint32_t>")
+    require("extern std::atomic<uint32_t> gHealthPageGen;" in sources[component / "G2_GlassesInternal.h"],
+            "G2_GlassesInternal.h declares gHealthPageGen as std::atomic<uint32_t>")
+    require(re.search(r"a->gen\s*=\s*\+\+gHealthPageGen;", sources[component / "G2_Page_Health.cpp"]) is not None,
+            "g2ShowHealthPage stamps the generation with one ++gHealthPageGen")
+    for name in ("gNotifPrefsGen", "gHealthPageGen"):
+        for where, line in lines_naming(component, sources, name):
+            require(not re.search(rf"\b{name}\s*(?:=(?!=)|\+=|-=)", line),
+                    f"{where}: {name} is stored from an earlier read")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cxx", default=os.environ.get("CXX") or shutil.which("c++"))
@@ -224,6 +270,7 @@ def main() -> None:
     parts.update(output_lane_parts(component, sources))
     parts.update(tap_mask_parts(component, sources))
     parts.update(hijack_counter_parts(component, sources))
+    parts.update(generation_parts(component, sources))
     for marker, body in parts.items():
         require(harness.count(marker) == 1, f"one {marker} in the harness")
         harness = harness.replace(marker, body)
@@ -238,7 +285,8 @@ def main() -> None:
         subprocess.run([args.cxx, *flags, str(source), "-o", str(binary)], check=True, timeout=180)
         if subprocess.run([str(binary)], timeout=300).returncode != 0:
             failures.append("the harness reported lost updates or a non-atomic type")
-    for check in (check_output_lane_sources, check_tap_mask_sources, check_hijack_counter_sources):
+    for check in (check_output_lane_sources, check_tap_mask_sources, check_hijack_counter_sources,
+                  check_generation_sources):
         try:
             check(component, sources)
         except AssertionError as error:

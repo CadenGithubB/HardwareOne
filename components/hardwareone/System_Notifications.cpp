@@ -11,6 +11,7 @@
 #include "System_Notifications.h"
 
 #include <Arduino.h>
+#include <atomic>
 #include <cstdio>
 #include <cstring>
 #include <string_view>
@@ -187,7 +188,11 @@ static NotifRule notifDefaultRuleFor(uint8_t kind) {
 
 static volatile uint32_t gNotifOffMask[NOTIF_KIND_MASK_WORDS]   = {0};  // level: off
 static volatile uint32_t gNotifAdminMask[NOTIF_KIND_MASK_WORDS] = {0};  // level: admin
-static volatile uint32_t gNotifPrefsGen = 1;
+// Bumped by every policy or per-user prefs change; screens redraw when it
+// moves. The bumps come from the main loop (notifPolicyLoad), cmd_exec
+// (notifydevicekind) and whichever task saves user prefs, so the counter is
+// atomic: two bumps at once still move it twice.
+static std::atomic<uint32_t> gNotifPrefsGen{1};
 // Guards the per-user prefs cache below (resolvers run on the main loop AND
 // the OLED task). Created in notifPolicyLoad() before render tasks contend.
 static SemaphoreHandle_t gUserPrefsMutex = nullptr;

@@ -2244,7 +2244,9 @@ std::atomic<uint32_t> gHealthPagePendingTap{0};
 volatile bool     gHealthPageActive     = false;
 // Bumped each Health open so a timed-out worker's deferred onDone
 // (→ Apps) cannot clobber a newer Health session that already started.
-volatile uint32_t gHealthPageGen        = 0;
+// g2ShowHealthPage runs on cmd_exec (g2health) and on the tap dispatcher;
+// atomic, so two opens never get the same generation.
+std::atomic<uint32_t> gHealthPageGen{0};
 // Set on EvenCore TextFailed while Health is open — stop UPDATE_TEXT
 // against a dying container (avoids dump spam + radio pressure that
 // can accelerate the firmware "connection lost" teardown).

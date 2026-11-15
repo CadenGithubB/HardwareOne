@@ -231,10 +231,41 @@ static void testHijackCounters() {
   CHECK((std::is_same<decltype(gCmdSeq), std::atomic<uint32_t>>::value), "gCmdSeq is a std::atomic<uint32_t>");
 }
 
+// ---- Generation counters: gNotifPrefsGen, gHealthPageGen --------------------
+// INSERT_GENERATION_DEFINITIONS
+// INSERT_NOTIF_PREFS_GENERATION
+static void notifPrefsBump() {
+// INSERT_NOTIF_PREFS_BUMP
+}
+static uint32_t nextHealthPageGen() {
+  struct { uint32_t gen; } args, *a = &args;
+// INSERT_HEALTH_PAGE_GEN_STAMP
+  return a->gen;
+}
+
+static void testGenerationCounters() {
+  const uint32_t prefsBefore = notifPrefsGeneration();
+  CHECK(prefsBefore == 1, "the notification prefs generation starts at 1");
+  std::vector<std::thread> threads;
+  for (unsigned i = 0; i < kCounterThreads; ++i) threads.emplace_back(repeat, notifPrefsBump);
+  runTogether(threads);
+  CHECK(notifPrefsGeneration() - prefsBefore == kCounterThreads * kCounterRounds,
+        "every notification prefs change from every task moves the generation by one");
+
+  CHECK(nextHealthPageGen() == 1, "the first Health page open has generation 1");
+  CHECK(allDistinct<uint32_t>(nextHealthPageGen), "no two Health page opens get the same generation");
+
+  CHECK((std::is_same<decltype(gNotifPrefsGen), std::atomic<uint32_t>>::value),
+        "gNotifPrefsGen is a std::atomic<uint32_t>");
+  CHECK((std::is_same<decltype(gHealthPageGen), std::atomic<uint32_t>>::value),
+        "gHealthPageGen is a std::atomic<uint32_t>");
+}
+
 int main() {
   testOutputLanes();
   testTapMasks();
   testHijackCounters();
+  testGenerationCounters();
   if (failures) {
     std::fprintf(stderr, "%d check(s) failed\n", failures);
     return 1;

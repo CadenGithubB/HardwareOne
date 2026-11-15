@@ -1170,6 +1170,14 @@ under any scheduling once each change is one atomic operation.
   number of calls; four threads run the statement of `g2SubmitHijackCommand`
   that stamps a command's sequence number, and no number may repeat or be
   skipped.
+- Generation counters (`gNotifPrefsGen`, `gHealthPageGen`): four threads run
+  the notification prefs bump and `notifPrefsGeneration()` must move by the
+  number of bumps; four threads run the statement of `g2ShowHealthPage` that
+  stamps an open's generation, and no two opens may get the same one.
+
+Not covered on purpose: `sRxQueueDropped` (`G2_Ring.cpp`) and `gDebugDropped`
+(`System_Debug.h`) are diagnostic counters that are only printed; the comment
+on `observeHwm` in `System_Utils.h` records that a lost count is accepted there.
 
 Source contract: each variable has one definition and one declaration, both
 `std::atomic`, and no statement stores a value computed from an earlier read

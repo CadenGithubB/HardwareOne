@@ -450,7 +450,7 @@ extern char gMapSearchQuery[33];
 #if ENABLE_R1_HEALTH
 extern std::atomic<uint32_t> gHealthPagePendingTap;
 extern volatile bool gHealthPageActive;
-extern volatile uint32_t gHealthPageGen;
+extern std::atomic<uint32_t> gHealthPageGen;
 extern volatile bool gHealthTextDead;
 #endif
 
