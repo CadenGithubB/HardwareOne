@@ -18,7 +18,8 @@ redaction, and no String block in broadcastOutput (the old tree makes them);
 with it on, and on a full queue or a timeout: the same lines as before. The
 queued and Bluetooth copies of a result are unchanged, a private STT result
 included. cmd_exec's loop cannot run on the host; a source check keeps its
-redaction inside the trace's arguments.
+redaction inside the trace's arguments, and another keeps the production
+DEBUG_CMD_FLOWF lazy: its arguments are evaluated only when the trace is on.
 
 Not changed, and pinned elsewhere: the transports' own redaction,
 executeCommand's (test_command_resolution_contract.py), and the web feed's
@@ -70,6 +71,16 @@ def source_contract(component: Path) -> None:
             "cmd_exec redacts the line inside the trace's arguments")
     require(executor.count("redactCmdForAudit(") == 1,
             "cmd_exec makes no redacted copy outside its trace")
+    # The saving rests on the production trace macro evaluating its arguments
+    # only when the trace is on; the harness has its own lazy copy of it.
+    debug = (component / "System_Debug.h").read_text()
+    require(re.search(r"(?m)^#define DEBUG_CMD_FLOWF\(fmt, \.\.\.\) "
+                      r"DEBUGF_QUEUE_DEBUG\(DEBUG_CMD_FLOW, fmt, ##__VA_ARGS__\)$", debug) is not None,
+            "DEBUG_CMD_FLOWF is DEBUGF_QUEUE_DEBUG on DEBUG_CMD_FLOW")
+    queue = re.search(r"(?ms)^#define DEBUGF_QUEUE_DEBUG\(flag, fmt, \.\.\.\) \\\n(.*?)\n\n", debug)
+    body = " ".join(queue.group(1).replace("\\", " ").split()) if queue else ""
+    require(body == "do { if (isDebugOutputEnabled(flag)) { debugQueuePrintf(flag, fmt, ##__VA_ARGS__); } } while (0)",
+            "DEBUGF_QUEUE_DEBUG evaluates its arguments only inside if (isDebugOutputEnabled(flag))")
 
 
 def main() -> None:

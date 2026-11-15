@@ -3081,20 +3081,26 @@ esp_err_t handleLogs(httpd_req_t* req) {
   // httpd_resp_send has copied it out before the handler returns. It is kept
   // only in PSRAM; when PSRAM refuses, the poll borrows a PreferPsram block
   // and frees it, as every poll did before.
+  // The kept block remembers its own size, so a later change to gWebMirrorCap
+  // can never make a poll write past it.
   static char* sLogsResponseBuf = nullptr;
+  static size_t sLogsResponseCap = 0;
   if (!sLogsResponseBuf) {
     sLogsResponseBuf = (char*)ps_alloc(gWebMirrorCap, AllocPref::RequirePsram, "handleLogs.resp");
+    sLogsResponseCap = sLogsResponseBuf ? gWebMirrorCap : 0;
   }
   char* responseBuf = sLogsResponseBuf;
+  size_t responseCap = sLogsResponseCap;
   if (!responseBuf) {
     responseBuf = (char*)ps_alloc(gWebMirrorCap, AllocPref::PreferPsram, "handleLogs.resp");
+    responseCap = gWebMirrorCap;
   }
   if (!responseBuf) {
     ERROR_WEBF("Failed to allocate response buffer for logs");
     httpd_resp_sendstr(req, "[ERROR] Memory allocation failed");
     return ESP_OK;
   }
-  size_t copied = gWebMirror.snapshotTo(responseBuf, gWebMirrorCap);
+  size_t copied = gWebMirror.snapshotTo(responseBuf, responseCap);
   DEBUG_HTTPF("[LOGS_DEBUG] Sending %zu bytes, seq=%lu", copied, gWebMirrorSeq);
   httpd_resp_send(req, responseBuf, copied);
   if (responseBuf != sLogsResponseBuf) free(responseBuf);

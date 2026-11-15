@@ -141,6 +141,19 @@ int main() {
   // An empty mirror sends an empty body from the kept buffer.
   gWebMirror.len = 0; resetRequests();
   { httpd_req_t r; handleLogs(&r); check(r.body.empty() && r.sends == 1 && gRequests.empty(), "empty mirror"); }
+  // The kept block keeps its own size: a later, larger gWebMirrorCap must not
+  // make a poll copy past the 8 KB block that was kept.
+  const size_t keptCap = gWebMirrorCap;
+  std::free(gWebMirror.buf);
+  gWebMirrorCap = 2 * keptCap;
+  gWebMirror.init(gWebMirrorCap);
+  const std::string longText(keptCap + 4000, 'y');
+  std::memcpy(gWebMirror.buf, longText.c_str(), longText.size() + 1);
+  gWebMirror.len = longText.size();
+  resetRequests();
+  { httpd_req_t r; handleLogs(&r);
+    check(r.body == longText.substr(0, keptCap - 1) && gRequests.empty() && gLive.size() == 1,
+          "a larger mirror capacity: the kept block is filled to its own size only"); }
   if (gFailures) return 1;
   std::puts("handleLogs: one kept PSRAM reply buffer; borrowed and freed only when PSRAM refuses");
   return 0;

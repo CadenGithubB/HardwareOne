@@ -3716,7 +3716,9 @@ a timeout the lines are those of before (one redaction per sync submit,
 shared by its traces and the timeout error). The queued copy of a result is
 the result itself, or the placeholder for a private STT result, and a
 Bluetooth session still gets the original. Source contract: cmd_exec
-redacts its line only inside its trace. It takes `--cxx`, `--sanitize` and
+redacts its line only inside its trace, and the production `DEBUG_CMD_FLOWF`
+(`DEBUGF_QUEUE_DEBUG`) evaluates its arguments only inside
+`if (isDebugOutputEnabled(flag))`, as the harness's copy does. It takes `--cxx`, `--sanitize` and
 `--component <directory>`.
 
 ```sh
@@ -3791,7 +3793,9 @@ that record every `ps_alloc`. Both keep one `RequirePsram` block (8 KB for the
 logs reply, 16 KB for the state document) made by the first call and reused by
 the next ones; when PSRAM refuses, a call borrows a `PreferPsram` block and
 frees it, as every call did before; with no memory at all the old error reply
-and warning stand. The replies and documents are those of before. Source
+and warning stand. The replies and documents are those of before. The kept
+logs block keeps its own size: after a larger `gWebMirrorCap`, a poll fills it
+only to that size. Source
 contract: `stopMqttNow` releases the state buffer on both of its finished
 paths. It takes `--cxx`, `--sanitize` and `--component <directory>`.
 

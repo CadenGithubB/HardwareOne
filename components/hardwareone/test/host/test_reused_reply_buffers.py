@@ -4,7 +4,8 @@
 - handleLogs (/api/cli/logs, polled every 500 ms by the CLI page) took an
   8 KB PreferPsram block per poll, copied the web mirror into it, sent it and
   freed it (census-raw-alloc-hot-07). It now keeps one RequirePsram block for
-  later polls; every handler runs on the one httpd task.
+  later polls; every handler runs on the one httpd task. The kept block keeps
+  its own size, so a later gWebMirrorCap never makes a poll write past it.
 - publishMqttSensorData (every MQTT publish interval, 1 to 10 s and more) did
   the same with a 16 KB state buffer (census-raw-alloc-hot-12). It now keeps
   one RequirePsram block until stopMqttNow releases it.
