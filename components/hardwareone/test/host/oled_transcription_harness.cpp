@@ -1,4 +1,5 @@
 #include <ArduinoJson.h>
+#include "psram_json_doc_host.h"  // PSRAM_JSON_DOC on a counting allocator
 #include <algorithm>
 #include <cassert>
 #include <cstdint>
@@ -99,7 +100,10 @@ static void home(){currentOledMode=OLED_TRANSCRIPTION;tick();assert(request()=="
 static void start(){v.menu.selectedIndex=0;menuInput(0,0,INPUT_BUTTON_A);tick(1);assert(request()=="transcription start");answer(status(true));tick(1);}
 static void list(){v.menu.selectedIndex=3;menuInput(0,0,INPUT_BUTTON_A);tick(1);assert(request()=="transcripts list internal 0");answer("{\"success\":true,\"offset\":0,\"nextOffset\":2,\"more\":true,\"entries\":[{\"name\":\"one.txt\",\"path\":\"/stt/u7/one.txt\"},{\"name\":\"two.txt\",\"path\":\"/stt/u7/two.txt\"}]}");tick(1);}
 int main(){
-  reset();home();v.menu.selectedIndex=0;menuInput(0,0,INPUT_BUTTON_A);tick(1);
+  reset();const unsigned long replyPools=gHostPsramJson.allocations;home();
+  // acceptReply parses each command reply into a PSRAM_JSON_DOC and releases it.
+  assert(gHostPsramJson.allocations>replyPools&&gHostPsramJson.allocations==gHostPsramJson.frees);
+  v.menu.selectedIndex=0;menuInput(0,0,INPUT_BUTTON_A);tick(1);
   const char* refusal="Speech model cannot be opened. Install the matching model at /sd/STT Models/quartznet15x5-gen2-25397.p4.stt.";
   const std::string failure=std::string("{\"success\":false,\"error\":\"")+refusal+"\"}";
   answer(failure);tick(1);

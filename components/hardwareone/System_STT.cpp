@@ -3108,7 +3108,7 @@ static const char* cmd_stt(const String& argsInput) {
     if (args.count() != 2 || !token) return "Error: Usage: stt draft <id>";
     SttDraft draft;
     if (!sttReadDraft(owner, token, &draft)) return "Error: no STT run belongs to this session";
-    JsonDocument doc;
+    PSRAM_JSON_DOC(doc);
     doc["sequence"] = draft.sequence;
     doc["version"] = draft.version;
     doc["sttText"] = draft.text;  // private tag: shared sinks redact the reply
@@ -3120,7 +3120,7 @@ static const char* cmd_stt(const String& argsInput) {
     return "Error: Usage: stt start | record [seconds] | status [id] | stop|cancel|result|next <id> | ack <id> <sequence>";
   if ((op == "result" || op == "next") && !token) return "Error: Usage: stt result <id>";
   if (!sttSnapshot(owner, token, &snap)) return "Error: no STT run belongs to this session";
-  JsonDocument doc;
+  PSRAM_JSON_DOC(doc);
   char id[17];
   snprintf(id, sizeof(id), "%08lx%08lx", static_cast<unsigned long>(snap.token >> 32),
            static_cast<unsigned long>(snap.token & 0xffffffffu));

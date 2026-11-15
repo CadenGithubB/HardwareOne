@@ -84,7 +84,7 @@ def main():
         unit.write_text(harness)
         cmd = [a.cxx, '-std=c++17', '-Wall', '-Wextra', '-pedantic', '-Werror',
                '-Wno-unused-parameter', '-Wno-unused-function',
-               '-I', str(json_include), str(unit), '-o', str(exe)]
+               '-I', str(json_include), '-I', str(HERE), str(unit), '-o', str(exe)]
         if a.sanitize:
             cmd[1:1] = ['-fsanitize=address,undefined', '-fno-omit-frame-pointer', '-g']
         subprocess.run(cmd, check=True, timeout=180)

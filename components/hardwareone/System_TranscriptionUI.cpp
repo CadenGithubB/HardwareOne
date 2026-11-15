@@ -5,6 +5,7 @@
 #include "System_AuthIdentity.h"
 #include "System_Command.h"
 #include "System_Filesystem.h"
+#include "System_MemUtil.h"
 #include "System_Mutex.h"
 #include "System_Settings.h"
 #if ENABLE_LOCAL_STT
@@ -78,7 +79,7 @@ void putStatus(JsonDocument& doc, const DictationAppLease& lease) {
 }
 const char* commandSession(const String& input) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  JsonDocument doc;
+  PSRAM_JSON_DOC(doc);
   CommandArgs args(input);
   DictationAppLease lease{};
   if (!actor(lease)) return error(doc, "Sign in to use transcription");
@@ -172,7 +173,7 @@ const char* commandSession(const String& input) {
 }
 const char* commandFiles(const String& input) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  JsonDocument doc;
+  PSRAM_JSON_DOC(doc);
   CommandArgs args(input);
   DictationAppLease owner{};
   if (!actor(owner)) return error(doc, "Sign in to view transcripts");

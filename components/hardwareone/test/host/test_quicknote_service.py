@@ -208,7 +208,7 @@ def main():
             exe = tmp / f'test_local{local}'
             cmd = [a.cxx, '-std=c++17', '-Wall', '-Wextra', '-Werror', '-Wno-unused-function',
                    '-Wno-missing-field-initializers', '-Wno-unused-const-variable',
-                   f'-DENABLE_LOCAL_STT={local}', '-I', str(tmp),
+                   f'-DENABLE_LOCAL_STT={local}', '-I', str(tmp), '-I', str(HERE),
                    '-I', str(COMPONENT.parent / 'hardwareone_libs/ArduinoJson/src'), str(cpp), '-o', str(exe)]
             if a.sanitize:
                 cmd[1:1] = ['-fsanitize=address,undefined', '-fno-omit-frame-pointer']

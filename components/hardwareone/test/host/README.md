@@ -3752,6 +3752,22 @@ ctest --test-dir /tmp/hw1-hardwareone-host -R '^fs_permission_strings$' --output
 This does not open a real browser; a user-role upload of a hostile name and a
 hotspot named `<b>x</b>` remain the on-device checks.
 
+`json_docs_psram` reads the component sources (test/ excluded): no JSON
+document is declared without an allocator (a plain `JsonDocument doc;` takes
+ArduinoJson's malloc allocator, internal RAM below 16 KB), except the `doc_`
+member of `hw1http::Stream`, which the firmware builds with its budgeted PSRAM
+allocator. The eleven documents the 2026-11-14 heap sweep found plain
+(`commandSession`, `commandFiles`, `commandNote`, the OLED transcription
+`acceptReply`, the two of `cmd_stt`, `cmd_oledcameraread` and the four ESP-NOW
+identity readers and writers) are `PSRAM_JSON_DOC(doc)` and their files
+include `System_MemUtil.h`. `--component <directory>` reads another copy.
+The harnesses that run those functions (`quicknote_service`,
+`oled_transcription`, `camera_oled_preview`, `espnow_identity_writes`,
+`transcription_ui_adapter`) take `PSRAM_JSON_DOC` from
+`psram_json_doc_host.h`, a counting allocator, and check that each reply
+document is made on it and released; a plain document leaves the counters at
+zero.
+
 ## ESP-NOW dispatch policy
 
 `espnow_dispatch_policy` extracts the production V4 opcode table, its flag constants, the lookup, the dispatcher (`v4_dispatch_table_try`), `espnowOriginIsKnown`, `v4h_text` and the espnow_task text-queue drain from `System_ESPNow.cpp`. It also extracts `LogMessageType` and `TextQueueEntry` from `System_ESPNow.h`, the opcode/flag enums and header from `System_ESPNow_Wire.h`, and `V4RxCtx`. It generates one recording double per other handler named in the table and compiles the harness with `ENABLE_BONDED_MODE` 1 and 0. It checks the following. SUBSCRIBE_UPDATE needs a paired, session-encrypted frame. Once the device has a mesh passphrase, SENSOR_STATUS, TEXT and BOOT need an authenticated frame, and a plaintext one is dropped with one warning; a keyless device still accepts plaintext. Plaintext TEXT accepted on a keyless device is filed under its origin MAC, never a paired peer's name, and posts no `SYSEVT_TEXT_RX`. Authenticated text (BROADCAST_AUTH or session-encrypted, direct or relayed) keeps its registry name, encryption flag, per-fragment records and single bus event, and BOOT stays a system notice. The retired opcode 150 has no row. Every zero-flag row is on an explicit allow-list (handshakes, HEARTBEAT, TOPO_*, USER_SYNC); this is a subset check, so later items may only shrink the list. `--component <component-directory>` or `--source-dir <overlay>` replays the pre-fix sources. It uses ASan/UBSan when `HW1_SANITIZE` is enabled and mocks history, the event bus and the radio.

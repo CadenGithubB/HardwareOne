@@ -4,6 +4,7 @@
 #define ARDUINOJSON_ENABLE_PROGMEM 0
 #include <Arduino.h>
 #include <ArduinoJson.h>
+#include "psram_json_doc_host.h"  // PSRAM_JSON_DOC on a counting allocator
 #include "System_TranscriptionUIPolicy.h"
 #include <cassert>
 #include <cstdio>
@@ -89,8 +90,10 @@ static bool dictationAppCommitText(const DictationAppLease& lease,const Dictatio
 static std::shared_ptr<Node> add(const std::string& path,const std::string& data,bool dir=false){auto node=std::make_shared<Node>();node->path=path;node->data=data;node->directory=dir;nodes[path]=node;return node;}
 static void reset(){speakerSnapshot={};auth={};epochLive=accountExists=sdAvailable=allowBegin=true;guest=storageBusy=shortRead=seekFails=false;readCalls=beginCalls=stopCalls=cancelCalls=commitCalls=currentLookups=0;readHook=peekHook=snapshotHook=nullptr;openedPaths.clear();nodes.clear();haveLease=active=haveText=true;current={SOURCE_WEB,7,0x1122334455667788ULL};assert(!fsDepth);gSettings.sttSaveTranscripts=true;}
 static JsonDocument parsed(const char* result){JsonDocument doc;assert(!deserializeJson(doc,result));assert(!doc["transcriptPath"].isNull());return doc;}
-static JsonDocument files(const String& args){auto doc=parsed(commandFiles(args));assert(!fsDepth);return doc;}
-static JsonDocument session(const String& args){return parsed(commandSession(args));}
+// Both reply documents are PSRAM_JSON_DOCs, released before the reply returns.
+static const char* psramReply(const char* result,unsigned long pools){assert(gHostPsramJson.allocations>pools&&gHostPsramJson.allocations==gHostPsramJson.frees);return result;}
+static JsonDocument files(const String& args){const unsigned long pools=gHostPsramJson.allocations;const char* result=commandFiles(args);auto doc=parsed(psramReply(result,pools));assert(!fsDepth);return doc;}
+static JsonDocument session(const String& args){const unsigned long pools=gHostPsramJson.allocations;const char* result=commandSession(args);return parsed(psramReply(result,pools));}
 static void deniedFile(const char* args){auto d=files(args);assert(d["success"]==false&&!d.containsKey("sttText"));assert(openedPaths.empty());}
 static void testFiles(){
  reset();auto dir=add("/stt/u7","",true);for(int i=0;i<11;++i){char p[64];snprintf(p,sizeof(p),"/stt/u7/session-%02d.txt",i);dir->children.push_back(add(p,"saved"));}

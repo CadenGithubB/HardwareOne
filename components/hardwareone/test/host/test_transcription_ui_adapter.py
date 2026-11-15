@@ -6,13 +6,14 @@ import subprocess
 import tempfile
 from test_espsr_runtime import function
 from test_web_batch_handlers import extract_block
+from identity_names_source import identity_constants
 HERE=Path(__file__).resolve().parent
 COMPONENT=HERE.parents[1]
 def main():
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('--sanitize',action='store_true');a=p.parse_args()
     source=(COMPONENT/'System_TranscriptionUI.cpp').read_text()
     header=(COMPONENT/'System_Dictation.h').read_text()
-    types='#include "System_STTMetadata.h"\n'+extract_block((COMPONENT/'System_Transcript.h').read_text(),'struct TranscriptStatus')+';\n'
+    types=identity_constants((COMPONENT/'System_User.h').read_text())+'\n'+'#include "System_STTMetadata.h"\n'+extract_block((COMPONENT/'System_Transcript.h').read_text(),'struct TranscriptStatus')+';\n'
     for name in ('enum class DictationState','struct DictationSnapshot','struct DictationTextReceipt','enum class DictationAppPurpose','struct DictationAppLease','struct DictationAppSnapshot'):
         types+=extract_block(header,name)+';\n'
     parser=extract_block((COMPONENT/'System_Command.h').read_text(),'class CommandArgs')+';\nconst String CommandArgs::empty_;\n'
@@ -26,7 +27,7 @@ def main():
         # production filesystem normalizer's reserve/character append surface.
         arduino=(HERE/'web_batch_stubs/Arduino.h').read_text().replace('  String& operator+=(const String& other)', '  void reserve(size_t n) { text_.reserve(n); }\n  String& operator+=(char c) { text_ += c; return *this; }\n  String& operator+=(const String& other)')
         (t/'Arduino.h').write_text(arduino)
-        cmd=['clang++','-std=c++17','-Wall','-Wextra','-Werror','-Wno-unused-function','-Wno-deprecated-declarations','-Wno-sign-compare','-I',str(t),'-I',str(COMPONENT.parent/'hardwareone_libs/ArduinoJson/src'),'-I',str(COMPONENT),str(cpp),'-o',str(exe)]
+        cmd=['clang++','-std=c++17','-Wall','-Wextra','-Werror','-Wno-unused-function','-Wno-deprecated-declarations','-Wno-sign-compare','-I',str(t),'-I',str(COMPONENT.parent/'hardwareone_libs/ArduinoJson/src'),'-I',str(COMPONENT),'-I',str(HERE),str(cpp),'-o',str(exe)]
         if a.sanitize:cmd[1:1]=['-fsanitize=address,undefined','-fno-omit-frame-pointer']
         subprocess.run(cmd,check=True);subprocess.run([str(exe)],check=True)
 if __name__=='__main__':main()

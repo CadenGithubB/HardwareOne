@@ -11,6 +11,7 @@
 #include "System_AuthIdentity.h"
 #include "System_TranscriptionUIPolicy.h"
 #include "System_Deadline.h"  // deadlinePending: the poll timer
+#include "System_MemUtil.h"   // PSRAM_JSON_DOC: the reply document
 #include <ArduinoJson.h>
 #include <new>
 #include <cstdio>
@@ -93,7 +94,7 @@ static void readAt(unsigned offset) {
   queue(String("transcripts read \"")+v.path+"\" "+String(offset),Op::Read);
 }
 static void acceptReply(const Ticket& ticket,bool ok) {
-  JsonDocument doc;
+  PSRAM_JSON_DOC(doc);
   const bool parsed=!deserializeJson(doc,received);
   if (ticket.generation!=v.generation || ticket.epoch!=v.epoch || !v.entered) {
     // A slow start may finish after Back. Only its returned exact lease may be

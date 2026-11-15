@@ -11,6 +11,7 @@
 #define ARDUINOJSON_ENABLE_PROGMEM 0
 #include <Arduino.h>
 #include <ArduinoJson.h>
+#include "psram_json_doc_host.h"  // PSRAM_JSON_DOC on a counting allocator
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
@@ -470,8 +471,12 @@ bool remove(const AuthContext&, const char* path, const char** why) {
 // ---- tests ------------------------------------------------------------------------
 static std::string lastReply;
 static JsonDocument note(const char* line) {
+  const unsigned long pools = gHostPsramJson.allocations, freed = gHostPsramJson.frees;
   const char* out = commandNote(String(line));
   CHECK(gDepth == 0);
+  // The reply document is a PSRAM_JSON_DOC, released before the reply returns.
+  CHECK(gHostPsramJson.allocations > pools);
+  CHECK(gHostPsramJson.allocations - pools == gHostPsramJson.frees - freed);
   lastReply = out;
   JsonDocument doc;
   CHECK(!deserializeJson(doc, out));

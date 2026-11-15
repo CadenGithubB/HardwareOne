@@ -9,6 +9,7 @@
 // stores fewer bytes than write() reports, so the size check is exercised on
 // its own. File writes assert the filesystem lock is held.
 #include <ArduinoJson.h>
+#include "psram_json_doc_host.h"  // PSRAM_JSON_DOC on a counting allocator
 
 #include <cassert>
 #include <cstdarg>
@@ -180,8 +181,11 @@ static const char* kPeerTmp = "/system/espnow/peers/AABBCCDDEEFF/identity.tmp";
 
 static size_t completeSize(bool peer) {
   reset();
+  const unsigned long pools = gHostPsramJson.allocations, freed = gHostPsramJson.frees;
   const bool ok = peer ? writePeerIdentityFile(samplePeer()) : writeIdentityFile(sampleIdentity());
   check(ok, peer ? "peer identity: normal write succeeds" : "identity: normal write succeeds");
+  check(gHostPsramJson.allocations > pools, "the writer's document is a PSRAM_JSON_DOC");
+  check(gHostPsramJson.allocations - pools == gHostPsramJson.frees - freed, "the writer's document is released");
   const char* dest = peer ? kPeer : kId;
   check(!has(peer ? kPeerTmp : kIdTmp), "normal write leaves no temp");
   JsonDocument doc;

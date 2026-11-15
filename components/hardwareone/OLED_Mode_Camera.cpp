@@ -324,7 +324,7 @@ const char* cmd_oledcameraread(const String&) {
   // A thread-local array would reserve this space in every RTOS task.
   if (!ensureDebugBuffer()) return "Error: Preview status needs memory. Stop unused tasks and retry.";
   char* result = getDebugBuffer();
-  JsonDocument doc;
+  PSRAM_JSON_DOC(doc);
   doc["active"] = state.active;
   doc["workerActive"] = state.worker;
   doc["working"] = state.working;

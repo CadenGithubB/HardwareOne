@@ -2360,6 +2360,13 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_fs_permission_strings.py
           ${SETUP_MQTT_TEST_ARGS})
+# No JSON document in the firmware sources takes the default (internal
+# malloc) allocator; the documents of the 2026-11-14 heap sweep are
+# PSRAM_JSON_DOC. The harnesses that run them check the allocator.
+add_test(
+  NAME json_docs_psram
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_json_docs_psram.py)
 # Flags and counters that more than one task changes: the production
 # definitions and the production statements that change them run against each
 # other on threads; a load-modify-store loses a change, one atomic step never.
@@ -2683,6 +2690,11 @@ add_test(NAME oled_layout
           ${OLED_LAYOUT_TEST_ARGS})
 add_test(NAME oled_transcription
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_oled_transcription.py
+          ${OLED_LAYOUT_TEST_ARGS})
+# The transcription and transcripts commands (System_TranscriptionUI.cpp) on
+# the real parser, normalizer and JSON, with storage and lease fakes.
+add_test(NAME transcription_ui_adapter
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_transcription_ui_adapter.py
           ${OLED_LAYOUT_TEST_ARGS})
 
 # Waveshare input and shared battery policy/backend regressions.

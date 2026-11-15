@@ -13,6 +13,7 @@
 #include "System_Debug.h"
 #include "System_ESPNow_Crypto.h"
 #include "System_Filesystem.h"   // filesystemReady
+#include "System_MemUtil.h"      // PSRAM_JSON_DOC
 #include "System_Mutex.h"        // FsLockGuard
 #include "System_Settings.h"     // encryptString / decryptString
 #include "System_VFS.h"          // openGuarded / mkdirGuarded / renameGuarded / systemAuth
@@ -129,7 +130,7 @@ bool writeIdentityFile(const EspNowIdentity& id) {
   char pubHex[65];
   bytesToHex(id.pub, sizeof(id.pub), pubHex);
 
-  JsonDocument doc;
+  PSRAM_JSON_DOC(doc);
   doc["version"]                       = kIdentityFileVersion;
   doc["ed25519_pub_hex"]               = pubHex;
   doc["ed25519_secret_encrypted"]      = secEncrypted;
@@ -166,7 +167,7 @@ bool readIdentityFile(EspNowIdentity& out, bool& absent) {
     return false;
   }
 
-  JsonDocument doc;
+  PSRAM_JSON_DOC(doc);
   DeserializationError jerr = deserializeJson(doc, f);
   f.close();
   if (jerr) {
@@ -381,7 +382,7 @@ bool writePeerIdentityFile(const PeerIdentity& p) {
   char pubHex[65];
   bytesToHex(p.longTermPub, 32, pubHex);
 
-  JsonDocument doc;
+  PSRAM_JSON_DOC(doc);
   doc["version"]                  = kPeerFileVersion;
   doc["mac"]                      = String(macColons);
   doc["meshId"]                   = p.meshId;
@@ -402,7 +403,7 @@ bool readPeerIdentityFile(const char* path, PeerIdentity& out) {
   FsLockGuard fsGuard("espnow.peer_identity_read");
   File f = VFS::openGuarded(path, "r", auth);
   if (!f) return false;
-  JsonDocument doc;
+  PSRAM_JSON_DOC(doc);
   DeserializationError jerr = deserializeJson(doc, f);
   f.close();
   if (jerr) return false;

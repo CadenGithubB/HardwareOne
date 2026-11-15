@@ -14,7 +14,7 @@ def main():
     parser.add_argument('--sanitize',action='store_true')
     args=parser.parse_args()
     flags=['clang++','-std=c++17','-Wall','-Wextra','-Werror','-Wno-unused-function',
-           '-Wno-unused-variable','-Wno-missing-field-initializers','-DHW_CAMERA_HAL_HOST_TEST=1','-I',str(COMPONENT),
+           '-Wno-unused-variable','-Wno-missing-field-initializers','-DHW_CAMERA_HAL_HOST_TEST=1','-I',str(COMPONENT),'-I',str(HERE),
            '-I',str(COMPONENT.parent/'hardwareone_libs/ArduinoJson/src')]
     if args.sanitize:flags+=['-fsanitize=address,undefined','-fno-omit-frame-pointer']
     source=re.sub(r'^#include.*\n','',(COMPONENT/'OLED_Mode_Camera.cpp').read_text(),flags=re.M)

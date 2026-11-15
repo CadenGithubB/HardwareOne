@@ -26,6 +26,7 @@
 #include "System_Debug.h"
 #include "System_Dictation.h"
 #include "System_Events.h"
+#include "System_MemUtil.h"      // PSRAM_JSON_DOC
 #include "System_Microphone.h"   // MIC_STT_MAX_CAPTURE_MS
 #include "System_Settings.h"
 #if ENABLE_LOCAL_STT
@@ -949,7 +950,7 @@ const char* commandRead(JsonDocument& doc, const CommandArgs& args) {
 
 const char* commandNote(const String& input) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  JsonDocument doc;
+  PSRAM_JSON_DOC(doc);
   doc.to<JsonObject>();
   CommandArgs args(input);
   DictationAppLease caller;

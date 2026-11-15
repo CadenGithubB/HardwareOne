@@ -4,6 +4,7 @@
 #include "HAL_JPEG.h"
 #include "System_Deadline.h"
 #include <ArduinoJson.h>
+#include "psram_json_doc_host.h"  // PSRAM_JSON_DOC on a counting allocator
 #include <cassert>
 #include <cstdio>
 #include <cstdlib>
@@ -147,7 +148,10 @@ int main() {
   resetOledCameraPreview();refuseTask=true;nowMs+=4000;prepareCameraPreviewData();assert(!snapshot().worker);refuseTask=false;
   resetOledCameraPreview();guest=true;prepareCameraPreviewData();assert(!snapshot().active);guest=false;
   validateOnly=true;assert(std::string(cmd_oledcameraread(""))=="VALID");validateOnly=false;
+  const unsigned long statusPools=gHostPsramJson.allocations;
   assert(strstr(cmd_oledcameraread(""),"workerActive"));
+  // The status document is a PSRAM_JSON_DOC, released before the reply returns.
+  assert(gHostPsramJson.allocations>statusPools&&gHostPsramJson.allocations==gHostPsramJson.frees);
   replyBufferAvailable=false;
   assert(strstr(cmd_oledcameraread(""),"needs memory"));
   replyBufferAvailable=true;
