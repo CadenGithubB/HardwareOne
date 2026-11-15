@@ -196,6 +196,31 @@ everything user-visible since the v0.99.99.1 tag.
   the OLED, the glasses, MQTT and the UART link, which show only the reply, show the reason. Live
   output lines that began `ERROR: ` now begin `Error: `; scripts that match the upper-case form need
   to match either.
+- Memory: recurring paths make fewer short-lived blocks in internal RAM, the scarce kind (findings
+  of the 2026-11-14 sweep). Replies, log lines, permission answers and the auth log are the same
+  byte for byte. Host-tested and compiled for every board (Edge Impulse, which no saved configuration
+  enables, is host-tested only); not yet measured on hardware.
+  - A web request reads its session cookie once instead of up to three times. The warning "Failed
+    to get Cookie header for URI" and the auth debug cookie lines now appear once per request.
+  - A request that is not a security event is let go before it is turned into text for the auth log.
+  - A command is redacted for the `debugcmdflow` trace only while that trace is on, and a command
+    result (up to 4 KB) is no longer copied for it when it is off.
+  - A file permission check reads its rules, the scope and the file name in place; it made 4 to 6
+    text copies, twice per check.
+  - Polled JSON replies (the LLM poll, Bluetooth status, the sessions list, map waypoints, Edge
+    Impulse detection, the transcription panel, `srstatus`, the mesh peer state) are written into
+    one measured PSRAM block, not an internal String regrown 31 characters at a time. When memory
+    runs out they send an empty body, where they could send a cut-off document.
+  - The transcription, notes, `stt`, OLED camera and ESP-NOW identity JSON documents are made in
+    PSRAM.
+  - The OLED camera preview's software JPEG decoder takes its workspace, its copy of the frame and
+    the pixels from PSRAM first. With the diagnostic PSRAM bypass on, the pixels now stay in
+    internal RAM, as the bypass asks.
+  - `/api/cli/logs` (every 500 ms while the CLI page is open) and the MQTT state publish keep one
+    PSRAM reply buffer (8 KB and 16 KB) instead of making it on every call; the MQTT one is released
+    when MQTT stops.
+  - Serial and system-log lines up to 320 bytes are written from the log task's own buffer, without
+    the heap block printf made for every line over 64 bytes.
 ### Security
 - G2 glasses and R1 ring frames: one bounded protobuf reader for both parsers. A malformed frame whose
   declared length was near 2^64 passed the bounds check of the old skip and moved the read cursor
