@@ -183,12 +183,15 @@ everything user-visible since the v0.99.99.1 tag.
   shows the newest reading, and a status request reads the volume only when there is none yet. The
   log writer's own free-space check renews it with log lines (every 2 to 15 s; every 30 s while
   logs are moved to SD), and so does any capacity check, such as an upload's or `files stats`'s.
-  While nothing is logged the figure keeps its last value, so after a web upload on a quiet device
-  it can stay behind until the next logged line; it used to be at most 5 s old. Uploads, captures,
-  `files stats` and `logtier` still read the volume fresh, and the SD figure is unchanged.
+  A web upload, or a `filedelete`, `micdelete` or `imagedelete` on the internal filesystem, marks
+  the figure stale, so the next reader (the Files page's own storage request, the log writer or a
+  status request) reads the volume once. Other changes, such as an editor save or a capture, show
+  at the log writer's next reading; while nothing is logged the figure keeps its last value (it
+  used to be at most 5 s old). Uploads, captures, `files stats` and `logtier` still read the volume fresh,
+  and the SD figure is unchanged.
   Host-tested; on the P4X-EYE bench board `/api/system` answers in 97 to 205 ms instead of 1.24 to
   1.34 s, with no loop stalls in 8 polls 10 s apart (one per poll before), and its figure matched
-  a fresh `files stats`.
+  a fresh `files stats` before and after a 64 KB upload and its `filedelete`.
 ### Changed
 - Command names have one form: lower-case letters and digits. The 22 camelCase `mqtt*` commands and
   `httpAutoStart` / `httpsEnabled` are now `mqtthost`, `mqttpublishgps`, `httpautostart`,
