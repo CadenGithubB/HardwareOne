@@ -2326,15 +2326,17 @@ bool readTextLimited(const char* path, String& out, size_t maxBytes, const AuthC
 // callers — a whole extra LittleFS open (~20 ms measured) for a number the
 // append handle already knew. The read handle in appendLineWithCap is opened
 // only when a rotation is actually due.
-static bool appendCappedLineOnce(const char* dest, const String& line, const AuthContext& ctx,
-                                 size_t& sz, size_t& written) {
+static bool appendCappedLineOnce(const String& dest, const char* line, size_t lineLength,
+                                 const AuthContext& ctx, size_t& sz, size_t& written) {
   sz = 0;
   written = 0;
-  File a = VFS::openGuarded(String(dest), "a", ctx, true);
+  File a = VFS::openGuarded(dest, "a", ctx, true);
   if (!a) { STACK_TRACEF("appendLineWithCap.open_a_failed"); return false; }
   STACK_TRACEF("appendLineWithCap.opened_for_append");
-  written = a.println(line);
-  const bool appended = written == line.length() + 2 && !a.getWriteError();  // CRLF
+  // The writes println(const String&) makes: the text, then CRLF.
+  written = a.write(reinterpret_cast<const uint8_t*>(line), lineLength);
+  written += a.println();
+  const bool appended = written == lineLength + 2 && !a.getWriteError();  // CRLF
   STACK_TRACEF("appendLineWithCap.println_done");
   sz = a.position();
   a.close();
@@ -2350,33 +2352,34 @@ static bool appendCappedLineOnce(const char* dest, const String& line, const Aut
 // G-39: the rotation copy could not be written, so hold the cap by starting
 // the log over. Removing first releases the old blocks before anything new is
 // written; the marker and the line are small enough for LittleFS to inline.
-static bool restartCappedLog(const char* dest, const String& line, size_t droppedBytes,
+static bool restartCappedLog(const String& dest, const char* line, size_t lineLength, size_t droppedBytes,
                              const AuthContext& ctx) {
-  if (!VFS::removeGuarded(String(dest), ctx)) { STACK_TRACEF("appendLineWithCap.restart_remove_failed"); return false; }
-  File t = VFS::openGuarded(String(dest), "w", ctx, true);
+  if (!VFS::removeGuarded(dest, ctx)) { STACK_TRACEF("appendLineWithCap.restart_remove_failed"); return false; }
+  File t = VFS::openGuarded(dest, "w", ctx, true);
   if (!t) { STACK_TRACEF("appendLineWithCap.restart_open_failed"); return false; }
   char marker[80];
   snprintf(marker, sizeof(marker), "[LOG] rotation blocked (low space): %u older bytes dropped",
            (unsigned)droppedBytes);
   size_t n = t.println(marker);
-  n += t.println(line);
-  const bool ok = n == strlen(marker) + line.length() + 4 && !t.getWriteError();
+  n += t.write(reinterpret_cast<const uint8_t*>(line), lineLength);
+  n += t.println();
+  const bool ok = n == strlen(marker) + lineLength + 4 && !t.getWriteError();
   t.close();
   VFS::noteLittleFsBytesWritten(n);
-  Serial.printf("[FS] %s: rotation copy failed; log restarted to hold its cap\n", dest);
+  Serial.printf("[FS] %s: rotation copy failed; log restarted to hold its cap\n", dest.c_str());
   STACK_TRACEF("appendLineWithCap.restarted ok=%d", ok ? 1 : 0);
   return ok;
 }
 
-bool appendLineWithCap(const char* path, const String& line, size_t capBytes) {
+bool appendLineWithCap(const char* path, const char* line, size_t lineLength, size_t capBytes) {
   STACK_TRACEF("appendLineWithCap.enter path=%s line_len=%u cap=%u",
-               path ? path : "(null)", (unsigned)line.length(), (unsigned)capBytes);
+               path ? path : "(null)", (unsigned)lineLength, (unsigned)capBytes);
 
   FsLockGuard guard("appendLineWithCap");  // reentrant-safe; nested VFS calls are fine.
 
   // Resolve destination (LittleFS primary, or /sd overflow mirror if flash full).
   char dest[128];
-  if (VFS::resolveLogPath(path, line.length() + 512, dest, sizeof(dest)) == VFS::LogTier::Refused) {
+  if (VFS::resolveLogPath(path, lineLength + 512, dest, sizeof(dest)) == VFS::LogTier::Refused) {
     // G-39: LittleFS is below the reserve and no card takes the overflow.
     VFS::noteLogReserveDrop();
     STACK_TRACEF("appendLineWithCap.reserve_refused");
@@ -2386,13 +2389,16 @@ bool appendLineWithCap(const char* path, const String& line, size_t capBytes) {
   // trusted: the capped-log writer, confined to the sys_logs tree of the tier
   // the overflow latch resolved. Every caller's path lives there; one that
   // does not is refused by the scope and shows up as a [PERM] line.
-  AuthContext ctx = VFS::systemAuth(VFS::sysLogScopeFor(String(dest)), "log.append");
+  // destPath is `dest` as the guarded calls take it, made once per resolved
+  // tier rather than once per call.
+  String destPath(dest);
+  AuthContext ctx = VFS::systemAuth(VFS::sysLogScopeFor(destPath), "log.append");
 
   // 1. Append the new line — fast path, same as before.
   size_t sz = 0;
   size_t written = 0;
-  bool appended = appendCappedLineOnce(dest, line, ctx, sz, written);
-  if (!appended && VFS::getStorageType(String(dest)) == VFS::SDCARD &&
+  bool appended = appendCappedLineOnce(destPath, line, lineLength, ctx, sz, written);
+  if (!appended && VFS::getStorageType(destPath) == VFS::SDCARD &&
       VFS::getStorageType(String(path)) != VFS::SDCARD) {
     // G-39: the latch sent this line to a card that no longer takes writes
     // (yanked SPI or detect-less SDMMC card, or a log tree the card's write
@@ -2401,13 +2407,14 @@ bool appendLineWithCap(const char* path, const String& line, size_t capBytes) {
     // retry once wherever the latch resolves now: flash while free space is
     // above the floor, otherwise a counted drop.
     VFS::noteLogOverflowSdFailure("log.append");
-    if (VFS::resolveLogPath(path, line.length() + 512, dest, sizeof(dest)) == VFS::LogTier::Refused) {
+    if (VFS::resolveLogPath(path, lineLength + 512, dest, sizeof(dest)) == VFS::LogTier::Refused) {
       VFS::noteLogReserveDrop();
       STACK_TRACEF("appendLineWithCap.sd_failed_reserve_refused");
       return false;
     }
-    ctx = VFS::systemAuth(VFS::sysLogScopeFor(String(dest)), "log.append");
-    appended = appendCappedLineOnce(dest, line, ctx, sz, written);
+    destPath = dest;
+    ctx = VFS::systemAuth(VFS::sysLogScopeFor(destPath), "log.append");
+    appended = appendCappedLineOnce(destPath, line, lineLength, ctx, sz, written);
   }
   if (!appended) { STACK_TRACEF("appendLineWithCap.short_append"); return false; }
 
@@ -2418,7 +2425,7 @@ bool appendLineWithCap(const char* path, const String& line, size_t capBytes) {
   if (sz <= capBytes) { STACK_TRACEF("appendLineWithCap.no_rotate_exit"); return true; }
 
   // Rotation is due — only now is a read handle worth its open.
-  File r = VFS::openGuarded(String(dest), "r", ctx);
+  File r = VFS::openGuarded(destPath, "r", ctx);
   if (!r) { STACK_TRACEF("appendLineWithCap.open_r_failed"); return false; }
   // close() cannot report a buffered append failure. Before discarding any
   // old data, require the reopened file to contain the size we observed.
@@ -2456,7 +2463,8 @@ bool appendLineWithCap(const char* path, const String& line, size_t capBytes) {
   //    the task during a first-of-session error-log write.
   char tmpPath[140];
   snprintf(tmpPath, sizeof(tmpPath), "%s.tmp", dest);
-  VFS::removeGuarded(String(tmpPath), ctx);  // clear any stale .tmp from a prior crash
+  const String tmpName(tmpPath);
+  VFS::removeGuarded(tmpName, ctx);  // clear any stale .tmp from a prior crash
 
   static uint8_t* sRotateBuf = nullptr;
   static const size_t ROTATE_BUF_SIZE = 1024;
@@ -2465,15 +2473,15 @@ bool appendLineWithCap(const char* path, const String& line, size_t capBytes) {
     if (!sRotateBuf) {
       r.close();
       STACK_TRACEF("appendLineWithCap.rotatebuf_alloc_failed");
-      return restartCappedLog(dest, line, sz - line.length() - 2, ctx);  // G-39: hold the cap
+      return restartCappedLog(destPath, line, lineLength, sz - lineLength - 2, ctx);  // G-39: hold the cap
     }
   }
 
-  File w = VFS::openGuarded(String(tmpPath), "w", ctx, true);
+  File w = VFS::openGuarded(tmpName, "w", ctx, true);
   if (!w) {
     r.close();
     STACK_TRACEF("appendLineWithCap.open_tmp_failed");
-    return restartCappedLog(dest, line, sz - line.length() - 2, ctx);  // G-39: hold the cap
+    return restartCappedLog(destPath, line, lineLength, sz - lineLength - 2, ctx);  // G-39: hold the cap
   }
   STACK_TRACEF("appendLineWithCap.tmp_opened copying...");
 
@@ -2494,31 +2502,36 @@ bool appendLineWithCap(const char* path, const String& line, size_t capBytes) {
   w.close();
   STACK_TRACEF("appendLineWithCap.copy_done bytes=%u", (unsigned)copied);
   if (!complete) {
-    VFS::removeGuarded(String(tmpPath), ctx);
+    VFS::removeGuarded(tmpName, ctx);
     STACK_TRACEF("appendLineWithCap.incomplete_copy");
     // G-39: a copy the original could not feed keeps the original; a copy
     // that could not be WRITTEN (the low-space case) restarts the log.
-    return readShort ? false : restartCappedLog(dest, line, sz - line.length() - 2, ctx);
+    return readShort ? false : restartCappedLog(destPath, line, lineLength, sz - lineLength - 2, ctx);
   }
 
   // 6. LittleFS can replace the original directly, preserving it on rename
   // failure. SD's FAT backend requires an absent destination; retain its
   // existing recovery protocol, now only with a checked complete temp file.
-  const bool onSd = VFS::getStorageType(String(dest)) == VFS::SDCARD;
+  const bool onSd = VFS::getStorageType(destPath) == VFS::SDCARD;
   if (onSd) {
-    if (!VFS::removeGuarded(String(dest), ctx)) {
-      VFS::removeGuarded(String(tmpPath), ctx);
+    if (!VFS::removeGuarded(destPath, ctx)) {
+      VFS::removeGuarded(tmpName, ctx);
       STACK_TRACEF("appendLineWithCap.remove_orig_failed");
       return false;
     }
   }
-  if (!VFS::renameGuarded(String(tmpPath), String(dest), ctx)) {
-    if (!onSd) VFS::removeGuarded(String(tmpPath), ctx);
+  if (!VFS::renameGuarded(tmpName, destPath, ctx)) {
+    if (!onSd) VFS::removeGuarded(tmpName, ctx);
     STACK_TRACEF("appendLineWithCap.rename_failed");
     return false;
   }
   STACK_TRACEF("appendLineWithCap.rotate_complete");
   return true;
+}
+
+// The String form: the same bytes, the text and its length taken from `line`.
+bool appendLineWithCap(const char* path, const String& line, size_t capBytes) {
+  return appendLineWithCap(path, line.c_str(), line.length(), capBytes);
 }
 
 // Recover a log file's partner .tmp left over from a crashed or power-cut

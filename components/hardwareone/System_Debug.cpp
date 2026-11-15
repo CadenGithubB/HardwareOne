@@ -318,8 +318,9 @@ void helpSuppressedTailDump() {
 // Initialization
 // ============================================================================
 
-// Forward declaration (definition with I2C helpers below)
+// Forward declarations (definitions with I2C helpers below)
 static String buildTimestampPrefix();
+static void appendTimestampedLine(const char* path, const char* text, size_t capBytes);
 
 // Forward declaration (definition with logSystemEvent below)
 static void flushPreInitEvents();
@@ -475,10 +476,8 @@ void debugOutputTask(void* parameter) {
         STACK_TRACEF("log_out.err_entry dup=%d text=%.40s", isDup ? 1 : 0, msg->text);
 
         if (!isDup) {
-          String line = buildTimestampPrefix();
-          line += msg->text;
           STACK_TRACEF("log_out.before_appendLineWithCap");
-          appendLineWithCap(LOG_ERROR_FILE, line, LOG_ERROR_CAP);
+          appendTimestampedLine(LOG_ERROR_FILE, msg->text, LOG_ERROR_CAP);
           STACK_TRACEF("log_out.after_appendLineWithCap");
           strlcpy(lastErrText, msg->text, sizeof(lastErrText));
           lastErrTimeMs = now;
@@ -489,9 +488,7 @@ void debugOutputTask(void* parameter) {
       // the always-on lifecycle record; see logSystemEvent()). Low volume by
       // design (discrete decisions, not polling), so no dedupe window needed.
       if (filesystemReady && strncmp(msg->text, "[EVENT]", 7) == 0) {
-        String line = buildTimestampPrefix();
-        line += msg->text;
-        appendLineWithCap(LOG_EVENTS_FILE, line, LOG_EVENTS_CAP);
+        appendTimestampedLine(LOG_EVENTS_FILE, msg->text, LOG_EVENTS_CAP);
       }
 
       // Structured event-stream tee (always, independent of routing) — one
@@ -499,9 +496,7 @@ void debugOutputTask(void* parameter) {
       // [EVLOG] prefix and no display sinks in its route mask, so this file
       // append is the line's only destination.
       if (filesystemReady && strncmp(msg->text, "[EVLOG]", 7) == 0) {
-        String line = buildTimestampPrefix();
-        line += msg->text;
-        appendLineWithCap(LOG_EVENT_STREAM_FILE, line, LOG_EVENT_STREAM_CAP);
+        appendTimestampedLine(LOG_EVENT_STREAM_FILE, msg->text, LOG_EVENT_STREAM_CAP);
       }
 
       // OLED console
@@ -2686,15 +2681,50 @@ void logTimeSyncedMarkerIfReady(const char* source) {
   // run (repeatably, upsert-safe) from Clock::clockDutiesTick().
 }
 
-static String buildTimestampPrefix() {
-  char tsPrefix[48];
-  getTimestampPrefixMsCached(tsPrefix, sizeof(tsPrefix));
-  if (tsPrefix[0]) {
-    return String(tsPrefix);
-  }
+// The prefix of a capped log line, into `out` (kTimestampPrefixSize bytes,
+// NUL-terminated): the wall-clock "[YYYY-MM-DD HH:MM:SS.mmm] | ", or
+// "[ms=<uptime>] " while the clock is not set. Not inlined, so its scratch
+// buffer is not on the stack during the append that follows.
+static constexpr size_t kTimestampPrefixSize = 48;
+static __attribute__((noinline)) void formatTimestampPrefix(char* out) {
+  getTimestampPrefixMsCached(out, kTimestampPrefixSize);
+  if (out[0]) return;
   char msBuf[24];
   snprintf(msBuf, sizeof(msBuf), "[ms=%lu] ", millis());
-  return String(msBuf);
+  memcpy(out, msBuf, sizeof(msBuf));
+}
+
+static String buildTimestampPrefix() {
+  char tsPrefix[kTimestampPrefixSize];
+  formatTimestampPrefix(tsPrefix);
+  return String(tsPrefix);
+}
+
+// Appends buildTimestampPrefix() + text to a capped log (log_out's [ERROR],
+// [EVENT] and [EVLOG] lines). The line is formatted into one PSRAM block this
+// function keeps: log_out is its only caller, one line at a time. While PSRAM
+// refuses the block, or for a text that does not end within it (a queued text
+// is NUL-terminated within DEBUG_MSG_SIZE, so only a broken one), the line is
+// made as a String as before. The file receives the same bytes either way.
+static void appendTimestampedLine(const char* path, const char* text, size_t capBytes) {
+  static constexpr size_t kLineCapacity = kTimestampPrefixSize + DEBUG_MSG_SIZE;
+  static char* sLine = nullptr;
+  if (!sLine) sLine = static_cast<char*>(ps_alloc(kLineCapacity, AllocPref::RequirePsram, "log.capped_line"));
+  if (sLine) {
+    formatTimestampPrefix(sLine);
+    const size_t prefixLength = strlen(sLine);
+    const size_t room = kLineCapacity - 1 - prefixLength;
+    const size_t textLength = strnlen(text, room);
+    if (textLength < room) {
+      memcpy(sLine + prefixLength, text, textLength);
+      sLine[prefixLength + textLength] = '\0';
+      appendLineWithCap(path, sLine, prefixLength + textLength, capBytes);
+      return;
+    }
+  }
+  String line = buildTimestampPrefix();
+  line += text;
+  appendLineWithCap(path, line, capBytes);
 }
 
 void logI2cError(uint8_t address, const char* deviceName, int consecutiveErrors, int totalErrors, bool nowDegraded) {

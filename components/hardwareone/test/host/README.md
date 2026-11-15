@@ -176,6 +176,21 @@ each log's `/sd` mirror whenever a card is mounted, so an orphan left by a
 rotation that ran while overflow was latched on an earlier boot is promoted or
 discarded like a primary one, and left alone without a card.
 
+Lines of 0, 1, 255, 256, 257 and 302 bytes (a 47-character prefix and the
+longest log text) are appended with and without a rotation on both tiers. The
+log task's line, `appendTimestampedLine` (`System_Debug.cpp`), runs against the
+statements it replaced (`String line = buildTimestampPrefix(); line +=
+text;` and the String form of `appendLineWithCap`) for the wall-clock prefix,
+the `[ms=...]` prefix before the clock is set and the longest prefix, text
+lengths up to past its kept block, both tiers and with a rotation, first with
+the PSRAM block refused: the files and every file call must be equal, the kept
+block is asked for once, and a line that fits makes no String block. The
+String is the core one with its heap calls counted. `--previous
+<component-directory>` runs the same harness on an earlier tree and requires
+an equal transcript. A source check pins that log_out's three capped-log lines
+go through `appendTimestampedLine` and the command audit hands its buffer on
+without a String.
+
 ```sh
 python3 components/hardwareone/test/host/test_capped_log_writes.py --sanitize
 ctest --test-dir /tmp/hw1-hardwareone-host \

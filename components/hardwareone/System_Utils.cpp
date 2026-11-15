@@ -561,8 +561,9 @@ static void logCommandExecutionPrepared(const AuthContext& ctx,
   snprintf(entry, sizeof(entry), "[%lu] %s@%s %s -> %s",
            ts, ctx.user.c_str(), source, redactedCmd.c_str(), status);
   
-  // Append to audit log with 500KB cap (rotates automatically)
-  appendLineWithCap("/system/sys_logs/command-audit.log", entry, 500 * 1024);
+  // Append to audit log with 500KB cap (rotates automatically); the line is
+  // handed on from `entry` itself, not copied into a String.
+  appendLineWithCap("/system/sys_logs/command-audit.log", entry, strlen(entry), 500 * 1024);
   
   // Console echo of the "who did what from where" notice. This is OPERATIONAL
   // visibility (the broadcast domain) — always shown, like it has always been,

@@ -242,7 +242,9 @@ bool readTextLimited(const char* path, String& out, size_t maxBytes, const AuthC
  * remove/rename recovery window. A failed append may leave a partial line.
  * File's void flush/close API cannot establish durable-storage success.
  * @param path File path
- * @param line Line to append
+ * @param line Line to append: `lineLength` bytes, no terminator needed; the
+ *        file receives those bytes and CRLF
+ * @param lineLength Bytes of `line`
  * @param capBytes Maximum file size in bytes
  * @return false on a detected append or rotation failure. A short append also
  *         skips rotation. A rotation whose copy cannot be written (low space,
@@ -253,6 +255,8 @@ bool readTextLimited(const char* path, String& out, size_t maxBytes, const AuthC
  *         VFS::logReserveDrops) to keep the reserve; a failed append on the SD mirror marks the card unwritable
  *         and retries once on the re-resolved tier.
  */
+bool appendLineWithCap(const char* path, const char* line, size_t lineLength, size_t capBytes);
+// The same, with the text and its length taken from a String.
 bool appendLineWithCap(const char* path, const String& line, size_t capBytes);
 
 /**

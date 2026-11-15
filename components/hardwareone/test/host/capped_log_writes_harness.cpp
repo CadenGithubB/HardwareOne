@@ -1,5 +1,6 @@
 // Executes production code against observable storage and allocation boundaries.
 #include <Print.h>
+#include "string_heap_count.h"
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -43,8 +44,21 @@ struct FsLockGuard {
   explicit FsLockGuard(const char*) { check(lockDepth == 0, "one filesystem lock"); ++lockDepth; events.push_back("lock"); }
   ~FsLockGuard() { check(liveFiles == 0, "files closed before unlock"); --lockDepth; events.push_back("unlock"); }
 };
-enum class AllocPref { PreferPsram };
+enum class AllocPref { PreferPsram, RequirePsram };
+// log_out's kept line block (appendTimestampedLine): asked outside the FS lock.
+#define DEBUG_MSG_SIZE 256
+static int lineAllocCalls = 0;
+static bool failLineAlloc = false;
+static std::vector<std::unique_ptr<char[]>> lineBlocks;
 static void* ps_alloc(size_t size, AllocPref pref, const char* tag) {
+  if (std::string(tag) == "log.capped_line") {
+    ++lineAllocCalls;
+    check(size == 48 + DEBUG_MSG_SIZE && pref == AllocPref::RequirePsram && lockDepth == 0,
+          "one PSRAM-only line block of prefix + DEBUG_MSG_SIZE, asked outside the lock");
+    if (failLineAlloc) return nullptr;
+    lineBlocks.push_back(std::make_unique<char[]>(size));
+    return lineBlocks.back().get();
+  }
   ++allocCalls; io("alloc");
   check(size == 1024 && pref == AllocPref::PreferPsram && std::string(tag) == "logrot.buf", "retained 1 KB PSRAM buffer policy");
   if (failAlloc) return nullptr;
@@ -186,8 +200,14 @@ static bool renameGuarded(const String& from, const String& to, const AuthContex
 struct SerialOutput {
   template <typename... Args> void printf(const char*, Args...) { events.push_back("serial"); }
 } Serial;
+// The wall clock of buildTimestampPrefix: a set prefix, or "" while unsynced.
+static std::string clockPrefix;
+static void getTimestampPrefixMsCached(char* out, size_t size) { std::snprintf(out, size, "%s", clockPrefix.c_str()); }
+static unsigned long millis() { return 123456; }
 
 // INSERT_PRODUCTION
+
+// INSERT_LOG_LINE
 
 static std::string destination() { return overflow ? "/sd/logs/events.log" : "/logs/events.log"; }
 static bool seen(const std::string& event) { return std::find(events.begin(), events.end(), event) != events.end(); }
@@ -273,6 +293,19 @@ static void normalCases(bool onSd) {
   check(disk.empty() && seen("serial"), "existing failed recovery policy discards orphan and reports"); normalResult("recovery-failed", false);
   reset(onSd); disk[destination()] = "authoritative"; disk[destination() + ".tmp"] = "stale"; refuseRemove = destination() + ".tmp"; recover();
   check(disk.at(destination()) == "authoritative" && disk.at(destination() + ".tmp") == "stale", "failed stale cleanup preserves both files"); normalResult("stale-cleanup-failed", false);
+  // Line lengths around the log line limits (DEBUG_MSG_SIZE, a 47-character
+  // prefix plus the longest text), with and without a rotation.
+  for (size_t length : {size_t(0), size_t(1), size_t(255), size_t(256), size_t(257), size_t(47 + DEBUG_MSG_SIZE - 1)}) {
+    std::string line(length, 'L');
+    for (size_t i = 0; i < length; i += 7) line[i] = char('a' + i % 26);
+    for (bool rotate : {false, true}) {
+      reset(onSd);
+      disk[destination()] = rotate ? rows(0, 60) : rows(0, 2);
+      check(append(line.c_str(), rotate ? 400 : 100000), "line of each length appends");
+      if (!rotate) check(disk.at(destination()) == rows(0, 2) + line + "\r\n", "the line and CRLF follow the old lines");
+      normalResult(("length-" + std::to_string(length) + (rotate ? "-rotate" : "")).c_str(), true);
+    }
+  }
 }
 static void failureCases(bool onSd) {
   const auto original = rows(0, 20);
@@ -374,6 +407,78 @@ static void reserveAndSdLatch() {
   reset(false); failAppendOpen = true;
   check(!append() && sdFailures == 0 && reserveDrops == 0, "a flash append failure never reports the card");
 }
+#if HAVE_TIMESTAMPED_LINE
+// log_out's capped-log line: production appendTimestampedLine against the
+// statements it replaced (String line = buildTimestampPrefix(); line += text;
+// appendLineWithCap), byte for byte and file call for file call, for each
+// prefix form (wall clock, "[ms=...]" before the clock is set, the longest
+// prefix getTimestampPrefixMsCached can write), both tiers, with and without a
+// rotation, text lengths up to past the kept block, with PSRAM refused first.
+static std::string snapshot() {
+  std::string out;
+  for (const auto& file : disk) out += file.first + "=" + file.second + "\n";
+  for (const auto& event : events) out += event + ",";
+  return out;
+}
+static void timestampedLines() {
+  const std::string synced = "[2026-11-15 12:34:56.789] | ";
+  const std::string longest(47, 'P');
+  const std::string uptime = "[ms=123456] ";
+  int cases = 0;
+  for (bool refuse : {true, false}) {
+    for (const std::string& prefix : {synced, std::string(), longest}) {
+      const std::string shown = prefix.empty() ? uptime : prefix;
+      const size_t room = 48 + DEBUG_MSG_SIZE - 1 - shown.size();
+      for (bool onSd : {false, true}) {
+        for (bool rotate : {false, true}) {
+          for (size_t length : {size_t(0), size_t(1), size_t(13), size_t(14), size_t(255), size_t(256), size_t(257),
+                                room - 1, room, room + 1, size_t(400)}) {
+            std::string text(length, 't');
+            for (size_t i = 0; i < length; i += 5) text[i] = char('A' + i % 26);
+            const size_t cap = rotate ? 400 : 100000;
+            auto run = [&](bool production) {
+              reset(onSd);
+              clockPrefix = prefix;
+              failLineAlloc = refuse;
+              disk[destination()] = rotate ? rows(0, 60) : rows(0, 2);
+              gStringHeap = StringHeapCount{};
+              if (production) {
+                appendTimestampedLine("/logs/events.log", text.c_str(), cap);
+              } else {
+                String line = buildTimestampPrefix();
+                line += text.c_str();
+                check(appendLineWithCap("/logs/events.log", line, cap), "the String line appends");
+              }
+              check(lockDepth == 0 && liveFiles == 0, "the line releases lock and handles");
+              return std::make_pair(snapshot(), gStringHeap.made);
+            };
+            const int asked = lineAllocCalls;
+            const bool hadBlock = !lineBlocks.empty();
+            const auto now = run(true);
+            const int asks = lineAllocCalls - asked;
+            const auto old = run(false);
+            check(now.first == old.first, "the same bytes and file calls as the String line");
+            if (!rotate) check(disk.at(destination()) == rows(0, 2) + shown + text + "\r\n", "prefix, text and CRLF");
+            check(requestedSpace == shown.size() + length + 512, "the same overflow admission");
+            const bool block = !refuse && length < room;
+            if (refuse) check(asks == 1, "a refused block is asked for again on the next line");
+            else check(asks == (hadBlock ? 0 : 1), "the block is asked for once and kept");
+            if (block && !rotate) {
+              check(now.second == (onSd ? 1u : 0u), "the line makes no String block (only the SD path's own)");
+              check(old.second == now.second + (shown.size() + length >= 19 ? 1u : 0u), "the String line made one");
+            }
+            if (!block) check(now.second == old.second, "without the block the String line is made as before");
+            ++cases;
+          }
+        }
+      }
+    }
+  }
+  check(lineBlocks.size() == 1, "one line block made and kept for the boot");
+  std::cerr << "timestamped lines: " << cases << " cases equal; ";
+}
+#endif
+
 int main() {
   // Must precede successful rotation: the production allocation persists for the boot.
   reset(); disk[destination()] = rows(0, 20); failAlloc = true;
@@ -381,6 +486,9 @@ int main() {
   else { check(append(), "PSRAM allocation failure restarts the log"); restartedRotation(rows(0, 20)); }
   for (bool onSd : {false, true}) { normalCases(onSd); failureCases(onSd); }
   if (!BASELINE) { mirrorRecovery(); lowSpaceHoldsCap(false); lowSpaceHoldsCap(true); reserveAndSdLatch(); }
+#if HAVE_TIMESTAMPED_LINE
+  if (!BASELINE) timestampedLines();
+#endif
   check(allocCalls == 2, "one failed allocation then one reusable PSRAM allocation across all logs");
   reset(); recovering = true; cleanupLogOrphan(nullptr); recovering = false; check(events.empty(), "null recovery path is a no-op");
   std::cerr << cases << " scenarios, " << checks << " assertions passed (real Arduino Print and String)\n";
