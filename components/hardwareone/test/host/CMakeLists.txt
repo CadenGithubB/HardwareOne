@@ -2370,6 +2370,13 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_elapsed_time.py
           ${SETUP_MQTT_TEST_ARGS})
+# `mqttstatus`: "Next Publish" is 0 when the publish is already due (the
+# unsigned subtraction wrapped to about 4294967000 ms).
+add_test(
+  NAME mqtt_next_publish
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_mqtt_next_publish.py
+          ${SETUP_MQTT_TEST_ARGS})
 # Self-registration: /register/submit hands the decoded fields to
 # submitAccountRequest byte-exact (spaced and quoted passphrases), owner
 # refusals do not count toward the login lockout, anonymous `userrequest` is

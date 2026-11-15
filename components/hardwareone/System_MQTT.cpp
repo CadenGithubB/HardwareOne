@@ -1687,6 +1687,14 @@ const char* cmd_closemqtt(const String& argsInput) {
   return "[MQTT] Client stop scheduled";
 }
 
+// Milliseconds until the next periodic publish, 0 when it is already due.
+// `(last + interval) - now` wrapped to about 4294967000 when the command ran
+// after the due time and before the main loop had published.
+static uint32_t mqttMsUntilNextPublish(uint32_t lastPublishMs, uint32_t intervalMs, uint32_t nowMs) {
+  const uint32_t elapsedMs = nowMs - lastPublishMs;
+  return elapsedMs < intervalMs ? intervalMs - elapsedMs : 0;
+}
+
 const char* cmd_mqttstatus(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
@@ -1726,7 +1734,11 @@ const char* cmd_mqttstatus(const String& argsInput) {
   }
   
   if (connected) {
-    unsigned long nextPublish = (lastPublishTime + gSettings.mqttPublishIntervalMs) - millis();
+    // The main loop owns lastPublishTime and renews it while this command
+    // runs: copy it first, then read the clock, so the copy is never ahead.
+    const uint32_t lastPublishMs = (uint32_t)lastPublishTime;
+    const unsigned long nextPublish = mqttMsUntilNextPublish(
+        lastPublishMs, (uint32_t)gSettings.mqttPublishIntervalMs, (uint32_t)millis());
     BROADCAST_PRINTF("Next Publish: %lu ms", nextPublish);
   }
   

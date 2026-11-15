@@ -3802,6 +3802,12 @@ renews are copied before the clock is read. `g2_health_graph_core_tests` holds t
 on purpose: the unknown-timestamp dedupe of `pushSeries` orders two stamps, and a replayed sample may be older
 than the series tail.
 
+`mqtt_next_publish` compiles `mqttMsUntilNextPublish` (`System_MQTT.cpp`), the value behind the "Next Publish"
+line of `mqttstatus`: counting down, 0 when due and when overdue (the old `(last + interval) - millis()` wrapped
+to about 4294967000 ms when the command ran after the due time and before the main loop had published), and
+right across the wrap. Source rules: `cmd_mqttstatus` copies the main loop's stamp before it reads the clock
+and prints that function's result; the reply line is unchanged.
+
 ## ESP-NOW peer message store
 
 `espnow_message_store` compiles the whole message-buffer section of
