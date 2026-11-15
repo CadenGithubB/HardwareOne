@@ -3795,6 +3795,17 @@ and warning stand. The replies and documents are those of before. Source
 contract: `stopMqttNow` releases the state buffer on both of its finished
 paths. It takes `--cxx`, `--sanitize` and `--component <directory>`.
 
+`log_line_writes` runs the log writer's `writeLogLine` (`System_Debug.cpp`)
+against the real Arduino core `Print.cpp`, compiled on the host with its
+`malloc` counted. For 195 lines (timestamps 0 to 4294967295, no tag, short,
+21- and 47-character tags, messages from empty to 255 characters across the
+64-byte boundary, `%` text, UTF-8) the bytes equal `Print::printf`'s and both
+make one write; printf makes its heap block for each of the 93 lines of 64
+bytes or more, `writeLogLine` none. A line that does not fit its buffer (a tag
+over 47 characters with a full message) takes printf's path. Source contract:
+`debugOutputTask` writes the serial line and both system-log-file lines
+through it. It takes `--cxx`, `--sanitize` and `--component <directory>`.
+
 ## ESP-NOW dispatch policy
 
 `espnow_dispatch_policy` extracts the production V4 opcode table, its flag constants, the lookup, the dispatcher (`v4_dispatch_table_try`), `espnowOriginIsKnown`, `v4h_text` and the espnow_task text-queue drain from `System_ESPNow.cpp`. It also extracts `LogMessageType` and `TextQueueEntry` from `System_ESPNow.h`, the opcode/flag enums and header from `System_ESPNow_Wire.h`, and `V4RxCtx`. It generates one recording double per other handler named in the table and compiles the harness with `ENABLE_BONDED_MODE` 1 and 0. It checks the following. SUBSCRIBE_UPDATE needs a paired, session-encrypted frame. Once the device has a mesh passphrase, SENSOR_STATUS, TEXT and BOOT need an authenticated frame, and a plaintext one is dropped with one warning; a keyless device still accepts plaintext. Plaintext TEXT accepted on a keyless device is filed under its origin MAC, never a paired peer's name, and posts no `SYSEVT_TEXT_RX`. Authenticated text (BROADCAST_AUTH or session-encrypted, direct or relayed) keeps its registry name, encryption flag, per-fragment records and single bus event, and BOOT stays a system notice. The retired opcode 150 has no row. Every zero-flag row is on an explicit allow-list (handshakes, HEARTBEAT, TOPO_*, USER_SYNC); this is a subset check, so later items may only shrink the list. `--component <component-directory>` or `--source-dir <overlay>` replays the pre-fix sources. It uses ASan/UBSan when `HW1_SANITIZE` is enabled and mocks history, the event bus and the radio.

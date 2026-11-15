@@ -2382,6 +2382,13 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_reused_reply_buffers.py
           ${SETUP_MQTT_TEST_ARGS})
+# The log writer sends each serial and system-log-file line in one write of
+# its own buffer, byte-equal to Print::printf and without printf's heap block.
+add_test(
+  NAME log_line_writes
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_log_line_writes.py
+          ${SETUP_MQTT_TEST_ARGS})
 # Flags and counters that more than one task changes: the production
 # definitions and the production statements that change them run against each
 # other on threads; a load-modify-store loses a change, one atomic step never.

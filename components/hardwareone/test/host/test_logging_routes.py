@@ -78,7 +78,7 @@ SERIAL_WRITE_ALLOWED: dict[str, int] = {
     "HardwareOne.cpp": 19,
     "OLED_FirstTimeSetup.cpp": 20,
     "OLED_SetupWizard.cpp": 37,
-    "System_Debug.cpp": 12,
+    "System_Debug.cpp": 11,
     "System_Debug.h": 1,
     "System_FactoryWipe.cpp": 7,
     "System_Filesystem.cpp": 3,

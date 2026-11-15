@@ -325,6 +325,30 @@ static String buildTimestampPrefix();
 static void flushPreInitEvents();
 static bool growDebugPoolIfNeeded(bool force);
 
+// Writes one log line, "[<timestamp>] <text>\n" or with the category tag
+// "[<timestamp>] [<tag>] <text>\n", to the serial port or the system log file
+// in one write, the bytes Print::printf would write. printf formats into 64
+// bytes on its stack and mallocs a block for a longer line, which is most of
+// them; this formats into its own buffer, sized for a 255-character message
+// with its prefix, and falls back to printf only for a line that does not fit
+// (a category tag over 47 characters). Not inlined, so the buffer lives in
+// this frame only for the write and the log task's own frame stays as it was.
+static constexpr size_t kLogLineCapacity = DEBUG_MSG_SIZE + 64;
+static __attribute__((noinline)) void writeLogLine(Print& out, unsigned long timestamp,
+                                                   const char* tag, const char* text) {
+  char line[kLogLineCapacity];
+  const int length = tag ? snprintf(line, sizeof(line), "[%lu] [%s] %s\n", timestamp, tag, text)
+                         : snprintf(line, sizeof(line), "[%lu] %s\n", timestamp, text);
+  if (length < 0) return;  // printf writes nothing for a format error either
+  if (static_cast<size_t>(length) < sizeof(line)) {
+    out.write(reinterpret_cast<const uint8_t*>(line), static_cast<size_t>(length));
+  } else if (tag) {
+    out.printf("[%lu] [%s] %s\n", timestamp, tag, text);
+  } else {
+    out.printf("[%lu] %s\n", timestamp, text);
+  }
+}
+
 // Debug output task - single writer for all debug messages
 static TaskHandle_t gDebugOutputTaskHandle = nullptr;
 
@@ -379,7 +403,7 @@ void debugOutputTask(void* parameter) {
       if (!suppressAmbientSerial &&
           (msg->routing & MSG_ROUTE_SERIAL) &&
           (gOutputFlags & MSG_ROUTE_SERIAL)) {
-        Serial.printf("[%lu] %s\n", msg->timestamp, msg->text);
+        writeLogLine(Serial, msg->timestamp, nullptr, msg->text);
       }
       // Web mirror (circular buffer for /api/cli/logs polling)
       if ((msg->routing & MSG_ROUTE_WEB) && gWebMirror.buf) {
@@ -407,9 +431,9 @@ void debugOutputTask(void* parameter) {
         } else if (gSystemLogFile) {
           if (gSystemLogCategoryTags && msg->category != 0) {
             const char* cat = getDebugCategoryName(msg->category);
-            gSystemLogFile.printf("[%lu] [%s] %s\n", msg->timestamp, cat, msg->text);
+            writeLogLine(gSystemLogFile, msg->timestamp, cat, msg->text);
           } else {
-            gSystemLogFile.printf("[%lu] %s\n", msg->timestamp, msg->text);
+            writeLogLine(gSystemLogFile, msg->timestamp, nullptr, msg->text);
           }
           gSystemLogLastWrite = millis();
           gSystemLogUnflushedCount++;
