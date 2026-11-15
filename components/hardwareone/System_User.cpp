@@ -663,18 +663,18 @@ bool tgRequireAuth(AuthContext& ctx) {
   if (ctx.transport != SOURCE_WEB) return false;
   httpd_req_t* req = reinterpret_cast<httpd_req_t*>(ctx.opaque);
   if (!req) return false;
-  // Prefer cached auth for high-frequency endpoints
+  // Prefer cached auth for high-frequency endpoints. ctx.sid is the request's
+  // session cookie, read once by makeWebAuthCtx.
   String userTmp;
-  bool ok = isAuthed(req, userTmp);
+  bool ok = isAuthed(req, ctx.sid, userTmp);
   if (!ok) {
     sendAuthRequiredResponse(req);
     return false;
   }
   ctx.user = userTmp;
-  // Keep the bearer locator separate from the numeric command-generation
-  // fence. Basic Auth has no cookie and therefore remains intentionally
-  // stateless (empty sid / epoch zero).
-  ctx.sid = getCookieSid(req);
+  // ctx.sid stays the bearer locator, separate from the numeric
+  // command-generation fence. Basic Auth has no cookie and therefore remains
+  // intentionally stateless (empty sid / epoch zero).
   if (ctx.ip.length() == 0) { getClientIp(req, ctx.ip); }
   logAuthAttempt(true, ctx.path.c_str(), ctx.user, ctx.ip, "");
   // A forced password change admits only the change form and logout, for

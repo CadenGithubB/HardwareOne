@@ -213,8 +213,11 @@ String setSession(httpd_req_t* req, const String& u);
 void clearSession(httpd_req_t* req, const char* logoutReason = nullptr);
 
 
-// Authentication
+// Authentication. The second form takes the session cookie value the caller
+// already read with getCookieSid(req) (makeWebAuthCtx's ctx.sid), so the
+// request's cookie is read once.
 bool isAuthed(httpd_req_t* req, String& outUser);
+bool isAuthed(httpd_req_t* req, const String& sid, String& outUser);
 bool isAdminUser(const String& who);
 
 // Cookie and header helpers

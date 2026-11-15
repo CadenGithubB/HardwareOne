@@ -190,7 +190,7 @@ def check_contracts() -> None:
             "the old web-owned lockout table must be gone")
     require("single-threaded" not in web_header,
             "WebServer_Server.h must not claim a single-threaded writer")
-    authed = extract_block(web, "bool isAuthed(httpd_req_t* req, String& outUser)")
+    authed = extract_block(web, "bool isAuthed(httpd_req_t* req, const String& sid, String& outUser)")
     basic = authed[authed.index("decodeBasicAuth("):authed.index("no session cookie")]
     require_before("Basic Auth", basic, "credentialAttemptAllowed(SOURCE_WEB",
                    "isValidUser(baUser, baPass)")

@@ -154,7 +154,6 @@ static int httpd_req_recv(httpd_req_t* req, char* destination, size_t length) {
   return static_cast<int>(count);
 }
 static bool isBondMaster() { return scenario.bondMaster; }
-static String getCookieSid(httpd_req_t*) { return scenario.stateful ? "session" : ""; }
 static TransportSessionEpoch captureTransportSessionEpoch(const AuthContext&) {
   ++scenario.captures;
   const auto epoch = scenario.stateful ? scenario.epoch : 0;

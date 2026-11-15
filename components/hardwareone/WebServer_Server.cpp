@@ -741,10 +741,14 @@ static bool requestIsInteraction(httpd_req_t* req, const char* uri) {
 
 // Authentication check
 bool isAuthed(httpd_req_t* req, String& outUser) {
+  return isAuthed(req, getCookieSid(req), outUser);
+}
+
+// sid is getCookieSid(req), read by the caller.
+bool isAuthed(httpd_req_t* req, const String& sid, String& outUser) {
   // httpd_req_t::uri is a fixed-size char array and never NULL; only guard req itself.
   const char* uri = req ? req->uri : "(null)";
   pruneExpiredSessions();
-  String sid = getCookieSid(req);
   char ipBuf[64];
   getClientIp(req, ipBuf, sizeof(ipBuf));
 
@@ -3036,8 +3040,7 @@ esp_err_t handleSessionsList(httpd_req_t* req) {
   doc["success"] = true;
   JsonArray sessions = doc["sessions"].to<JsonArray>();
   
-  String currentSid = getCookieSid(req);
-  buildAllSessionsJson(currentSid, sessions);
+  buildAllSessionsJson(ctx.sid, sessions);
   
   String response;
   serializeJson(doc, response);
@@ -3093,7 +3096,7 @@ esp_err_t handleSensorsStatusWithUpdates(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);
 
   // Check if this session needs a status update notification
-  int sessIdx = findSessionIndexBySid(getCookieSid(req));
+  int sessIdx = findSessionIndexBySid(ctx.sid);
   bool needsRefresh = false;
   if (sessIdx >= 0) {
     // Check if flagged for status update
@@ -3398,7 +3401,7 @@ esp_err_t handleCliCommand(httpd_req_t* req) {
   }
 
   // Determine originating session index and set skip for SSE broadcast during this command
-  String sidForCmd = getCookieSid(req);
+  const String& sidForCmd = ctx.sid;
   int originIdx = findSessionIndexBySid(sidForCmd);
   int prevSkip = gBroadcastSkipSessionIdx;
   gBroadcastSkipSessionIdx = originIdx;
@@ -5237,7 +5240,7 @@ esp_err_t handleCliBatch(httpd_req_t* req) {
     }
   }
 
-  String sidForCmd = getCookieSid(req);
+  const String& sidForCmd = ctx.sid;
   const TransportSessionEpoch batchSessionEpoch =
       captureTransportSessionEpoch(ctx);
   const bool interactiveBatch = doc["interactive"] | false;

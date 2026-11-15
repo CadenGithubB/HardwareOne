@@ -2330,6 +2330,13 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_web_mqtt_sensor_rows.py
           ${SETUP_MQTT_TEST_ARGS})
+# An authenticated web request reads its session cookie once (makeWebAuthCtx);
+# isAuthed, tgRequireAuth and the handlers use that ctx.sid.
+add_test(
+  NAME web_auth_cookie_reads
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_web_auth_cookie_reads.py
+          ${SETUP_MQTT_TEST_ARGS})
 # Flags and counters that more than one task changes: the production
 # definitions and the production statements that change them run against each
 # other on threads; a load-modify-store loses a change, one atomic step never.

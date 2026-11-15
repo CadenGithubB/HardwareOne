@@ -3673,6 +3673,22 @@ covered: the rest of the page, whose text comes from settings. It takes `--cxx`,
 ctest --test-dir /tmp/hw1-hardwareone-host -R '^web_mqtt_sensor_rows$' --output-on-failure
 ```
 
+`web_auth_cookie_reads` covers the prologue every authenticated handler runs:
+`WEB_AUTH_OR_RETURN`, `makeWebAuthCtx` and `tgRequireAuth` with the production
+`AuthContext`, on the real Arduino String with its heap calls counted
+(`arduino_string_counted` in `arduino_string_host.py`). A cookie session reads
+the cookie once and makes two String blocks (the URI and the session id), the
+same session id reaches `isAuthed` and the handler, the auth log arguments are
+those of before, and a refusal sends the denial and logs nothing. Source
+contract: the session-id form of `isAuthed` and the session list, sensor
+status, CLI and CLI batch handlers read no cookie, and every direct
+`tgRequireAuth(ctx)` caller builds `ctx` with `makeWebAuthCtx(req)`. It takes
+`--cxx`, `--sanitize` and `--component <directory>`.
+
+```sh
+ctest --test-dir /tmp/hw1-hardwareone-host -R '^web_auth_cookie_reads$' --output-on-failure
+```
+
 This does not open a real browser; a user-role upload of a hostile name and a
 hotspot named `<b>x</b>` remain the on-device checks.
 
