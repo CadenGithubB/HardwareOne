@@ -916,6 +916,14 @@ real tables is not covered (`command_catalogue` covers module order with
 fixture rows). Run with
 `ctest --test-dir build -R '^command_name_uniqueness$' --output-on-failure`.
 
+`command_handler_names` reads the same tables for the handler each row names.
+When a handler's name, without its `cmd` prefix and its underscores, is the
+name of a command that exists, that handler must be on a row of that command:
+`cmd_wifidisconnect` was the handler of `closewifi` while the command
+`wifidisconnect` ran another function. `HANDLERS` in the runner pins the rows
+of the Wi-Fi disconnect commands. It reads source text only; `--component`
+points it at another component directory.
+
 ## Edge Impulse inference lock and continuous task
 
 `test_edge_impulse_lifecycle.py` compiles the whole of `System_EdgeImpulse.cpp`

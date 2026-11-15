@@ -1009,7 +1009,7 @@ const char* cmd_wificonnect(const String& originalCmd) {
   return "Error: Could not join a saved network. Check signal and password.";
 }
 
-const char* cmd_wifidisconnect(const String& argsInput) {
+const char* cmd_closewifi(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   // Stop a boot connect still hunting in the background before closing.
@@ -1245,7 +1245,7 @@ static RadioPowerOffResult radioPowerOff() {
   WiFi.setAutoReconnect(false);
 
   // Power the radio fully down, AP first. See the long note in
-  // cmd_wifidisconnect: mode(NULL) while the AP bit is still set frees both
+  // cmd_closewifi: mode(NULL) while the AP bit is still set frees both
   // esp_netifs synchronously while WIFI_EVENT_AP_STOP is still queued on
   // sys_evt, and the AP netif's deferred dhcps_stop() then runs against freed
   // memory. ESP-NOW is torn down above, so its channel-parking AP is exactly
@@ -1407,7 +1407,7 @@ const char* cmd_radiopower(const String& originalCmd) {
 }
 
 // Drop the current AP association but KEEP the radio (STA mode) on, and leave
-// the HTTP server + web output running — unlike closewifi/cmd_wifidisconnect,
+// the HTTP server + web output running — unlike closewifi/cmd_closewifi,
 // which tears those down to free heap. Use this to disconnect from one network
 // and reconnect/scan to another without re-enabling WiFi.
 const char* cmd_wifidrop(const String& argsInput) {
@@ -2699,7 +2699,7 @@ const CommandEntry wifiCommands[] = {
   
   // Connection Control — lifecycle open/close is admin-only (status/scan stay open)
   { "openwifi", "Connect to WiFi: [--best | --index <N> | --saved-id <id>] (default: best; ids come from a screen's saved list and are valid for this boot only)", true, cmd_wificonnect, "Usage: openwifi [--best | --index <1..N> | --saved-id <id>]" },
-  { "closewifi", "Disconnect from WiFi (also stops HTTP server + web output to free heap).", true, cmd_wifidisconnect },
+  { "closewifi", "Disconnect from WiFi (also stops HTTP server + web output to free heap).", true, cmd_closewifi },
   { "wifidisconnect", "Disconnect from the current network but keep the radio on (HTTP/web stay up).", true, cmd_wifidrop },
   { "radiopower", "Power the whole 2.4GHz radio on/off (airplane mode; also stops/restores ESP-NOW; runtime only, not persisted): [on|off|toggle]", true, cmd_radiopower, "Usage: radiopower [on|off|toggle]" },
   { "wifiscan", "Scan for available WiFi networks. (add 'json' for JSON output)", false, cmd_wifiscan },

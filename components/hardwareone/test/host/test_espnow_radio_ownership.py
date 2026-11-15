@@ -74,7 +74,7 @@ int main() {
 # System_WiFi.cpp radio decisions that must ask the owner's predicate.
 WIFI_DECISIONS = (
     "bool connectToBestWifiNetwork(",
-    "const char* cmd_wifidisconnect(",
+    "const char* cmd_closewifi(",
     "static RadioPowerOffResult radioPowerOff(",
     "static bool connectWifiTargetWithin(const WifiConnectionTarget& nw",
     "bool ensureWifiInitialized(",

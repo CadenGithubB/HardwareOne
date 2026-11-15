@@ -2121,6 +2121,12 @@ add_test(
   NAME command_name_form
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_command_name_form.py)
+# A handler named after a command is the handler of that command
+# (cmd_wifidisconnect used to serve closewifi).
+add_test(
+  NAME command_handler_names
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_command_handler_names.py)
 
 # A compiled-out feature is described by the #else branch of its own header;
 # no central stub file, no include of that header behind its own flag

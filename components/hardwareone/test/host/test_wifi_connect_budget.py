@@ -116,7 +116,7 @@ def check_boot_callers(component: Path = COMPONENT) -> None:
     if "bool wifiSupersedeBackgroundConnect(" in wifi:
         require("setupWifi(wifiBootConnectBudgetMs(), WifiConnectOrigin::BACKGROUND);" in boot,
                 "the background boot connect passes the trial-aware budget and the BACKGROUND origin")
-        for handler in ("const char* cmd_wificonnect(", "const char* cmd_wifidisconnect(",
+        for handler in ("const char* cmd_wificonnect(", "const char* cmd_closewifi(",
                         "const char* cmd_wifidrop(", "const char* cmd_radiopower("):
             body = extract_block(wifi, handler)
             name = handler.split('(')[0].split()[-1]
