@@ -11,7 +11,11 @@ and no deadline is ever stored as 0.
 
 Source rules: each listed deadline variable is asked through deadlinePending()
 in its file, and none of the old forms is left for it: a comparison with
-millis() through < or >=, or a signed difference without the zero test.
+millis() through < or >=, or a signed difference without the zero test. A
+deadline that stays in a file-scope variable after it has passed is set back
+to 0 by the code that reads it (CLEARED): otherwise it reads as pending again
+24.9 to 49.7 days later, which kept the OLED camera preview worker from
+starting and put old error boxes back on the login screens.
 
 The OLED timed dirty deadline (OLED_Utils.cpp) is run as production code: the
 definition of oledDirtyUntilMs, oledMarkDirtyUntil and oledIsDirty against a
@@ -45,14 +49,22 @@ SITES = (
     # Deadlines whose 0 means "none" or "now" and that were read as a bare signed difference.
     ("G2_Page_LLM.cpp", "noticeUntil", 1),
     ("OLED_Mode_Transcription.cpp", "v.pollAt", 2),
-    ("OLED_Mode_Camera.cpp", "retryAt", 1),
-    ("OLED_Mode_R1_Health.cpp", "sHealthDeniedUntilMs", 1),
+    ("OLED_Mode_Camera.cpp", "retryAt", 2),
+    ("OLED_Mode_R1_Health.cpp", "sHealthDeniedUntilMs", 2),
     # File-scope deadlines that were compared with millis() through < or >=.
-    ("OLED_Mode_Auth.cpp", "errorDisplayUntil", 3),
-    ("OLED_Mode_ChangePassword.cpp", "errorDisplayUntil", 1),
+    ("OLED_Mode_Auth.cpp", "errorDisplayUntil", 4),
+    ("OLED_Mode_ChangePassword.cpp", "errorDisplayUntil", 2),
     ("OLED_SettingsEditor.cpp", "gSettingsEditor.errorDisplayUntil", 1),
     ("OLED_SettingsEditor.cpp", "quickStatusExpireMs", 1),
     ("WebServer_Events.cpp", "gSessions[sessIdx].noticeBurstUntil", 1),
+)
+
+# File-scope deadlines that outlive their moment and are set back to 0 once passed.
+CLEARED = (
+    ("OLED_Mode_Camera.cpp", "retryAt"),
+    ("OLED_Mode_R1_Health.cpp", "sHealthDeniedUntilMs"),
+    ("OLED_Mode_Auth.cpp", "errorDisplayUntil"),
+    ("OLED_Mode_ChangePassword.cpp", "errorDisplayUntil"),
 )
 
 
@@ -86,6 +98,16 @@ def site_failures(component: Path) -> list[str]:
         for pattern, what in old_forms:
             for match in re.finditer(pattern, code):
                 failures.append(f"{name}: {what}: {match.group(0)!r}")
+    for name, variable in CLEARED:
+        path = component / name
+        if not path.exists():
+            continue
+        code = strip_comments(path.read_text())
+        var = re.escape(variable)
+        clear = (rf"if\s*\(\s*{var}\s*!=\s*0\s*&&\s*!\s*deadlinePending\(\s*{var}\s*,\s*millis\(\)\s*\)\s*\)"
+                 rf"\s*{var}\s*=\s*0\s*;")
+        if not re.search(clear, code):
+            failures.append(f"{name}: {variable} is not set back to 0 once it has passed")
     return failures
 
 
@@ -140,7 +162,8 @@ def main() -> None:
             print(f"FAIL: {failure}", file=sys.stderr)
         print(f"millis() deadlines: {len(failures)} failure(s)", file=sys.stderr)
         sys.exit(1)
-    print(f"millis() deadlines: the owner header, {len(SITES)} deadline variables and the OLED dirty deadline passed",
+    print(f"millis() deadlines: the owner header, {len(SITES)} deadline variables ({len(CLEARED)} cleared once passed) "
+          "and the OLED dirty deadline passed",
           flush=True)
 
 

@@ -179,7 +179,9 @@ static void displayChangePasswordMode() {
   oledDisplay->print(passwordChangeInProgress ? "[Changing...]" : "[Change Password]");
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
   
-  // Show error message if active - overlay with centered message box
+  // Show error message if active - overlay with centered message box. A passed
+  // deadline is set back to 0, so it cannot read as pending again 24.9 days on.
+  if (errorDisplayUntil != 0 && !deadlinePending(errorDisplayUntil, millis())) errorDisplayUntil = 0;
   if (deadlinePending(errorDisplayUntil, millis()) && errorMessage.length() > 0) {
     const int boxX = 10;
     const int boxY = 20;

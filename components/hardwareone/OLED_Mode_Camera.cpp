@@ -268,6 +268,11 @@ void resetOledCameraPreview() {
 }
 
 void prepareCameraPreviewData() {
+  // Runs on every display update, also when the page is not shown. A passed
+  // retry deadline is set back to 0 here: left in place, it would read as
+  // pending again 24.9 to 49.7 days later and keep the preview worker from
+  // starting for that whole window.
+  if (retryAt != 0 && !deadlinePending(retryAt, millis())) retryAt = 0;
   const bool here = currentOledMode == OLED_CAMERA && gOledRunning && oledConnected &&
                     displayIsReady() && powerLocalDisplayAwake() && !oledIsGuestSession();
   auto state = snapshot();
@@ -296,7 +301,7 @@ void prepareCameraPreviewData() {
   }
   if (!state.error[0]) lastError[0] = 0;
   if (state.worker || deadlinePending(retryAt, millis())) return;  // retryAt 0: never tried
-  retryAt = millis() + 3000;
+  retryAt = deadlineAfter(millis(), 3000);
   portENTER_CRITICAL(&mutex);
   view.worker = true;
   portEXIT_CRITICAL(&mutex);

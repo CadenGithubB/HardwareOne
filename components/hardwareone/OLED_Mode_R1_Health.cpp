@@ -111,6 +111,8 @@ static void displayR1Health() {
 
   oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
   oledDisplay->print("R1 HEALTH ");
+  // A passed notice is set back to 0, so it cannot read as pending again 24.9 days on.
+  if (sHealthDeniedUntilMs != 0 && !deadlinePending(sHealthDeniedUntilMs, millis())) sHealthDeniedUntilMs = 0;
   if (deadlinePending(sHealthDeniedUntilMs, millis()))  // 0: nothing was refused
                                oledDisplay->println("[DENIED]");
   else if (!bleSubsystemActive()) oledDisplay->println("[BLE]");

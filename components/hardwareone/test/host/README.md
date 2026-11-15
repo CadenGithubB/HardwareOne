@@ -3783,6 +3783,10 @@ The table holds the four deadlines that use 0 for "none" or "now" (glasses LLM n
 transcription poll, R1 Health refusal flash) and the five file-scope UI deadlines that were compared with
 `millis()` directly (login and change-password error boxes, settings editor error and quick-settings status,
 the event stream's notice burst).
+Four of them stay in a file-scope variable after they have passed (the OLED camera retry, the R1 Health refusal
+flash and the two error boxes); a fifth rule (`CLEARED`) requires the code that reads each to set it back to 0
+once passed. Left in place, the camera retry read as pending again 24.9 to 49.7 days later and kept the preview
+worker from starting for that window, and an old error box came back over the login form.
 The same suite runs the OLED timed dirty deadline as production code: the definition of `oledDirtyUntilMs`,
 `oledMarkDirtyUntil` and `oledIsDirty` (`OLED_Utils.cpp`) with every other reason for "dirty" quiet. A mark keeps
 the frame dirty until it is reached and no longer, a later mark extends and an earlier one does not shorten; a
