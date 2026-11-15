@@ -176,6 +176,19 @@ everything user-visible since the v0.99.99.1 tag.
 - Automations: an `IF` command of three or four characters, which only a hand-edited or synced
   `automations.json` can hold, made the THEN and ELSE search read past the end of the text.
   Host-tested; not yet tested on hardware.
+- Status polls: every `/api/system` request, `status json` and the dashboard's live status read
+  the internal filesystem's size afresh once the last reading was 5 s old, a whole-volume LittleFS
+  walk that takes about 1.3 s on the P4X-EYE. A poll every 10 s held the main loop up for about
+  1.2 s each time (7497 loop-stall warnings in a 24 h bench soak). The internal storage figure now
+  shows the newest reading, and a status request reads the volume only when there is none yet. The
+  log writer's own free-space check renews it with log lines (every 2 to 15 s; every 30 s while
+  logs are moved to SD), and so does any capacity check, such as an upload's or `files stats`'s.
+  While nothing is logged the figure keeps its last value, so after a web upload on a quiet device
+  it can stay behind until the next logged line; it used to be at most 5 s old. Uploads, captures,
+  `files stats` and `logtier` still read the volume fresh, and the SD figure is unchanged.
+  Host-tested; on the P4X-EYE bench board `/api/system` answers in 97 to 205 ms instead of 1.24 to
+  1.34 s, with no loop stalls in 8 polls 10 s apart (one per poll before), and its figure matched
+  a fresh `files stats`.
 ### Changed
 - Command names have one form: lower-case letters and digits. The 22 camelCase `mqtt*` commands and
   `httpAutoStart` / `httpsEnabled` are now `mqtthost`, `mqttpublishgps`, `httpautostart`,
