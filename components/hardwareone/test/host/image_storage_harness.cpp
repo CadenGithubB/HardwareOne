@@ -166,6 +166,9 @@ static bool isSdAvailable() { return sdMounted; }
 static uint32_t sdGeneration = 0;
 static uint32_t sdMountGeneration() { return sdGeneration; }
 String normalize(const String&);
+// Status polls read the internal capacity figure at any age; user deletes mark it stale.
+static unsigned internalStatusMarks = 0, sdStatusMarks = 0;
+static void invalidateStatsSnapshot(StorageType type) { ++(type == SDCARD ? sdStatusMarks : internalStatusMarks); }
 }
 // INSERT_VFS_PATHS
 // INSERT_DIRECTORY_READER
@@ -289,7 +292,7 @@ static void reset(bool sd = false, bool internal = true) {
   gSettings.cameraStorageLocation = 0; captures = 0; capturedTo = IMAGE_STORAGE_LITTLEFS; recordings.clear();
   failOpen = failMkdir = failRemove = failStats = failAlloc = false; largestBlock = 4096;
   metadataUnlocked = closesUnlocked = directoryOpens = closeCalls = statCalls = mtimeCalls = 0;
-  takes = gives = 0; lastStatType = -1;
+  takes = gives = 0; lastStatType = -1; VFS::internalStatusMarks = VFS::sdStatusMarks = 0;
   auto root = std::make_shared<Node>(); root->name = "/"; root->directory = true; nodes["/"] = root;
   if (sd) { auto sdroot = std::make_shared<Node>(*root); nodes["/sd"] = sdroot; }
 }
@@ -361,6 +364,7 @@ static void callerIdentity(bool sd) {
   // retention a listing that holds only the surviving photo.
   nodes.at(folder)->children.clear(); nodes.erase(folder + "/b.jpg"); add(folder + "/b.jpg");
   check(owner.deleteOldestImages(1, location) && !nodes.count(folder + "/b.jpg"), "retention keeps system authority for paths from its own listing");
+  check(VFS::internalStatusMarks == 0 && VFS::sdStatusMarks == 0, "retention deletes leave the status storage figure alone (they run on every rotating capture)");
   expectIdentity("remove", sd ? "imgmgr.delete.sd" : "imgmgr.delete_image");
   check(callerLookups == 0, "ImageManager never reads the command identity itself"); balanced();
 }
@@ -369,11 +373,14 @@ static void commandPath() {
   gImageManager.init(); accesses.clear(); statCalls = 0; takes = gives = 0; callerLookups = 0;
   check(std::strcmp(cmd_imagedelete("\"/system/settings.json\""), "Error: Failed to delete image") == 0 && nodes.count("/system/settings.json") && accesses.empty(),
         "imagedelete refuses a path outside the capture folder and the file stays");
+  check(VFS::internalStatusMarks == 0, "a refused imagedelete leaves the status storage figure alone");
   check(std::strcmp(cmd_imagedelete("\"/photos/a.jpg\""), "Image deleted") == 0 && !nodes.count("/photos/a.jpg"), "imagedelete removes a managed photo");
+  check(VFS::internalStatusMarks == 1 && VFS::sdStatusMarks == 0, "a LittleFS imagedelete marks the internal status figure stale once");
   expectIdentity("remove", "cli", "admin");
   check(callerLookups == 2, "the command supplies its caller identity on every delete");
   accesses.clear(); deniedUsers.insert("admin");
   check(std::strcmp(cmd_imagedelete("\"/photos/b.jpg\""), "Error: Failed to delete image") == 0 && nodes.count("/photos/b.jpg"), "a caller the filesystem rules deny cannot delete through imagedelete");
+  check(VFS::internalStatusMarks == 1, "a denied imagedelete adds no mark");
   deniedUsers.clear(); accesses.clear();
   // The command stays a parser: quoting, argument count and validate-only are unchanged.
   check(std::strncmp(cmd_imagedelete("/photos/b.jpg"), "Error: name must be in quotes", 29) == 0, "unquoted path is refused by the parser");
@@ -382,6 +389,11 @@ static void commandPath() {
   check(std::strcmp(cmd_imagedelete("\"/photos/b.jpg\""), "VALID") == 0, "validate-only returns VALID");
   gCliValidateOnly = false;
   check(accesses.empty() && nodes.count("/photos/b.jpg"), "parser refusals and validate-only touch no file"); balanced();
+  // An SD photo leaves the internal status figure alone.
+  reset(true); add("/sd/photos", true); add("/sd/photos/c.jpg");
+  gImageManager.init(); accesses.clear(); takes = gives = 0; callerLookups = 0;
+  check(std::strcmp(cmd_imagedelete("\"/sd/photos/c.jpg\""), "Image deleted") == 0 && !nodes.count("/sd/photos/c.jpg"), "imagedelete removes an SD photo");
+  check(VFS::internalStatusMarks == 0, "an SD imagedelete leaves the internal status figure alone"); balanced();
 }
 static void listLock() {
   reset(true); add("/sd/photos", true); add("/sd/photos/image.jpg"); auto owner = manager();

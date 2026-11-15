@@ -96,6 +96,8 @@ struct Metrics {
   unsigned receives = 0, responses = 0, promotions = 0;
   bool badIoScope = false, badHookResources = false, badCloseScope = false;
   std::vector<std::string> cleanupUsers, openedUsers, openedPaths, promotedUsers, systemReasons;
+  std::vector<int> snapshotInvalidations;  // tiers marked stale for status polls
+  unsigned promotionsAtInvalidation = 0;
 } metrics;
 static std::set<void*> buffers;
 static bool filesystemReady = true;
@@ -187,6 +189,9 @@ namespace VFS {
 enum StorageType { INTERNAL, SDCARD };
 static StorageType getStorageType(const String& path) { return path == "/sd" || path.startsWith("/sd/") ? SDCARD : INTERNAL; }
 static bool isSdAvailable() { return control.sd; }
+static void invalidateStatsSnapshot(StorageType type) {
+  metrics.snapshotInvalidations.push_back(int(type)); metrics.promotionsAtInvalidation = metrics.promotions;
+}
 static bool getStats(StorageType, uint64_t& total, uint64_t& used, uint64_t& free) { io(); free = control.freeBytes; total = free * 2; used = free; return true; }
 static bool existsGuarded(const String&, const AuthContext&) { io(); return control.parentExists; }
 static bool mkdirGuarded(const String&, const AuthContext&) { io(); ++metrics.mkdirs; return true; }
@@ -308,6 +313,7 @@ static void failed(httpd_req_t& req, const char* reason) {
         "expected upload failure '" + std::string(reason) + "', got " + req.response);
   check(metrics.responses == 1, "one error response");
   check(metrics.posthooks == 0 && metrics.mapHooks == 0 && metrics.mapProbes == 0 && metrics.waypointHooks == 0, "failed upload ran post-save hooks");
+  check(metrics.snapshotInvalidations.empty(), "a failed upload leaves the status storage figure alone");
   balanced();
 }
 static void succeeded(httpd_req_t& req, const std::string& path, const std::string& bytes) {
@@ -320,6 +326,14 @@ static void succeeded(httpd_req_t& req, const std::string& path, const std::stri
   check(metrics.promotions == 1 && metrics.promotedUsers == std::vector<std::string>{"alice"},
         "staged copy promoted once under the authenticated user");
   check(metrics.cleanupUsers.empty() && metrics.posthooks == 1, "success hooks exactly once without cleanup");
+  // Status polls read the internal figure at any age: a completed LittleFS
+  // upload marks it stale once, after the promotion; an SD upload does not.
+  if (path.rfind("/sd/", 0) == 0) {
+    check(metrics.snapshotInvalidations.empty(), "an SD upload leaves the internal status figure alone");
+  } else {
+    check(metrics.snapshotInvalidations == std::vector<int>{VFS::INTERNAL} && metrics.promotionsAtInvalidation == 1,
+          "a LittleFS upload marks the internal status figure stale once, after promotion");
+  }
   balanced();
 }
 static std::shared_ptr<Node> original() { return std::make_shared<Node>(Node{"original"}); }
@@ -378,6 +392,9 @@ int main(int argc, char** argv) {
   add("two consecutive timeouts before open abort", "timeout", [] { control.timeouts = 2; auto req = request(); failed(req, "Recv timeout"); check(metrics.receives == 2 && metrics.opens == 0 && metrics.cleanupUsers.empty(), "half-open socket abandoned before any file work"); });
   add("two consecutive timeouts after open release the partial", "timeout", [] { control.chunkSize = 16; control.timeoutAt = {{64, 2}}; auto req = request("/user/upload.txt", std::string(100, 'a')); failed(req, "Recv timeout"); check(metrics.opens == 1 && metrics.closes == 1 && files.empty() && metrics.cleanupUsers == std::vector<std::string>{"alice"}, "abandoned upload closes and removes its partial under the file lock"); });
   add("re-upload keeps the previous content on disconnect", "replace", [] { files["/user/upload.txt"] = original(); control.disconnectAt = 8192; auto req = request("/user/upload.txt", std::string(12000, 'a')); failed(req, "Recv error"); check(files.size() == 1 && files.at("/user/upload.txt")->bytes == "original" && metrics.cleanupUsers == std::vector<std::string>{"alice"}, "failed replacement must leave the destination untouched and remove only its staged copy"); });
+  add("LittleFS body with an SD admission query still marks the internal figure", "replace", [] { control.sd = true; auto req = request("/user/upload.txt", "flash bytes"); req.query = "path=%2Fsd%2Fupload.txt"; succeeded(req, "/user/upload.txt", "flash bytes"); });
+  add("SD body without an admission query leaves the internal figure", "replace", [] { control.sd = true; auto req = request("/sd/upload.txt", "card bytes"); succeeded(req, "/sd/upload.txt", "card bytes"); });
+  add("SD upload leaves the internal status figure", "replace", [] { control.sd = true; auto req = request("/sd/upload.txt", "card bytes"); req.query = "path=%2Fsd%2Fupload.txt"; succeeded(req, "/sd/upload.txt", "card bytes"); });
   add("re-upload promotes over the previous content", "replace", [] { files["/user/upload.txt"] = original(); auto req = request("/user/upload.txt", "replacement"); succeeded(req, "/user/upload.txt", "replacement"); });
   add("promotion failure keeps the previous content", "replace", [] { files["/user/upload.txt"] = original(); control.replaceFails = true; auto req = request("/user/upload.txt", "replacement"); failed(req, "Could not replace destination"); check(files.size() == 1 && files.at("/user/upload.txt")->bytes == "original" && metrics.promotions == 1 && metrics.cleanupUsers == std::vector<std::string>{"alice"}, "failed promotion leaves the destination and removes the staged copy"); });
   // An IMPORT|WRITE|CREATE grant without RENAME (/system/llm/): the upload promotes through the writer's system identity.

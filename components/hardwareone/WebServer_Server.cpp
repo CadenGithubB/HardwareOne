@@ -2568,6 +2568,13 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
       // The previous destination is still in place; only the staged copy went.
       ERROR_STORAGEF("[handleFileUpload] Could not promote %s over %s", save.path().c_str(), path.c_str());
       uploadError = "Could not replace destination";
+    } else if (VFS::getStorageType(path) != VFS::SDCARD) {
+      // Status polls show the newest internal capacity reading at any age, and
+      // the admission check above took one from before this file. Mark it
+      // stale so the next reader (the Files page's own fresh stats requests,
+      // the log writer, or a status poll) takes one fresh reading. No walk
+      // here: the Files page already re-reads storage after an upload.
+      VFS::invalidateStatsSnapshot(VFS::INTERNAL);
     }
   }
   fileLock.reset();

@@ -1507,7 +1507,8 @@ void buildSystemInfoJson(JsonDocument& doc, bool includeDeviceList) {
   // when there is none: a LittleFS walk takes about 1.3 s under the FS mutex on
   // the P4X-EYE, and a 5 s limit made every 10 s /api/system poll pay it and
   // stall the loop. The log writer's free-space check and any getStats() renew
-  // the reading; while nothing is logged it keeps its last value.
+  // the reading; a web upload, filedelete, micdelete or imagedelete on
+  // LittleFS marks it stale for one re-read.
   static constexpr uint32_t kSystemInfoSdStatsMaxAgeMs = 5000;
   JsonObject storage = doc["storage"].to<JsonObject>();
   {

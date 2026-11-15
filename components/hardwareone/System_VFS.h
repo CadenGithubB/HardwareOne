@@ -221,7 +221,9 @@ bool getStatsSnapshot(StorageType type, CapacitySnapshot& out,
  *  any getStats() and by the log writer's free-space check, which runs with
  *  log lines (every 2, 5 or 15 s by headroom; every 30 s while logs are moved
  *  to SD). While nothing is logged it keeps its last value, so it can lag a
- *  file write for as long as the device stays quiet. */
+ *  file write for as long as the device stays quiet; a web upload, or a
+ *  `filedelete`, `micdelete` or `imagedelete` on LittleFS, marks it stale
+ *  (invalidateStatsSnapshot), so the next reader samples once. */
 static constexpr uint32_t kSnapshotAnyAgeMs = UINT32_MAX;
 
 /** Invalidate one tier's presentation snapshot. AUTO follows the existing

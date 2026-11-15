@@ -2114,7 +2114,13 @@ bool deleteRecording(const char* filename) {
   String lfPath = String(kMicRecLittleFs) + "/" + filename;
   FsLockGuard fsGuard("mic.record.delete");
   if (VFS::existsGuarded(sdPath, currentAuthContext())) return VFS::removeGuarded(sdPath, currentAuthContext());
-  if (VFS::existsGuarded(lfPath, currentAuthContext())) return VFS::removeGuarded(lfPath, currentAuthContext());
+  if (VFS::existsGuarded(lfPath, currentAuthContext())) {
+    if (!VFS::removeGuarded(lfPath, currentAuthContext())) return false;
+    // A user delete (micdelete): status polls show the internal capacity
+    // reading at any age, so mark it stale for one fresh re-read.
+    VFS::invalidateStatsSnapshot(VFS::INTERNAL);
+    return true;
+  }
   return false;
 }
 
@@ -2968,7 +2974,12 @@ const char* cmd_micdelete(const String& argsInput) {
       }
       return deleted;
     };
-    int deleted = wipeWavs(kMicRecSd) + wipeWavs(kMicRecLittleFs);
+    const int sdDeleted = wipeWavs(kMicRecSd);
+    const int flashDeleted = wipeWavs(kMicRecLittleFs);
+    // Status polls show the internal capacity reading at any age; one mark
+    // for the whole wipe, so the next reader takes one fresh reading.
+    if (flashDeleted > 0) VFS::invalidateStatsSnapshot(VFS::INTERNAL);
+    int deleted = sdDeleted + flashDeleted;
     if (deleted == 0) {
       return "No recordings found";
     }

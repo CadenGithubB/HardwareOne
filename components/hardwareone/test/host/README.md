@@ -2353,9 +2353,22 @@ shared web/CLI JSON builder with the production cache core and filesystem
 guard. It covers backend errors (including nonzero outputs on error), zero
 capacity, unchanged caller outputs on failure, freshness/cache integration,
 generation invalidation, separate storage tiers, 64-bit SD capacity and JSON
-responses. `--baseline <component-directory>` replays regressions against
+responses. It also runs the log writer's free-space check
+(`refreshLittleFsFreeCached`), whose walk seeds the internal snapshot that status
+polls read at any age (`VFS::kSnapshotAnyAgeMs`): seeding, no walk on a status
+read once a reading exists, no seeding from a failed, zero-capacity or unmounted
+walk, and no publication across an invalidation during the walk.
+`--baseline <component-directory>` replays regressions against
 saved sources. `vfs_capacity_cache_tests` and `vfs_capacity_snapshot_contract`
 retain expiry, clock-wrap, invalidation and consumer-boundary checks.
+
+`filedelete_storage_figure` runs the production `doFiledelete` (the routine
+behind `filedelete` from every client) against a filesystem double: a LittleFS
+delete marks the internal status figure stale once, after the remove, while an SD
+delete, a refused delete, a missing file and an unready filesystem leave it alone.
+`upload_lifecycle` checks the same for a completed upload (once, after promotion;
+never for a failed or SD upload). `--source <cpp>` takes a saved
+`System_Filesystem.cpp`.
 
 `espnow_fs_transcript_privacy` runs the actual LIST/STAT/GET handlers, path
 policies, VFS normalization/directory reader and packed wire definitions. Its

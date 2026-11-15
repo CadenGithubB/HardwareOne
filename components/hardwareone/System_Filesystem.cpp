@@ -1369,6 +1369,10 @@ static const char* doFiledelete(const String& path, const AuthContext& ctx) {
              "Error: Failed to delete file (denied or fs error): %s", path.c_str());
     return respBuf;
   }
+  // Status polls show the newest internal capacity reading at any age; mark it
+  // stale so the next reader takes one fresh reading. No walk here: the web
+  // and glasses Files pages re-read storage right after a delete themselves.
+  if (VFS::getStorageType(path) != VFS::SDCARD) VFS::invalidateStatsSnapshot(VFS::INTERNAL);
   snprintf(respBuf, sizeof(respBuf), "Deleted file: %s", path.c_str());
   return respBuf;
 }

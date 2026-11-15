@@ -641,6 +641,10 @@ const char* cmd_imagedelete(const String& argsInput) {
   if (a.has(1)) return "Error: unexpected argument — usage: imagedelete \"<path>\"";
 
   if (gImageManager.deleteImage(path, currentAuthContext())) {
+    // A user delete: status polls show the internal capacity reading at any
+    // age, so mark it stale for one fresh re-read. Not in deleteImage itself,
+    // which retention also calls on every capture that rotates old photos.
+    if (VFS::getStorageType(path) != VFS::SDCARD) VFS::invalidateStatsSnapshot(VFS::INTERNAL);
     return "Image deleted";
   }
   return "Error: Failed to delete image";

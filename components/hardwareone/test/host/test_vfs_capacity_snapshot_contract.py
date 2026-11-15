@@ -152,4 +152,25 @@ assert (refresh.index("capacitySnapshotGeneration(INTERNAL)")
         < refresh.index("publishCapacitySnapshot("))
 assert "if (filesystemReady && infoErr == ESP_OK && total > 0)" in refresh
 
+# User deletes mark the internal status figure stale (status polls read it at
+# any age); automatic deletes do not, or a rotating capture or a dictation
+# cleanup would make every next status poll walk LittleFS again. The upload,
+# filedelete and imagedelete marks are executed by upload_lifecycle,
+# filedelete_storage_figure and image_storage.
+mic_cpp = (COMPONENT / "System_Microphone.cpp").read_text(encoding="utf-8")
+mark = "VFS::invalidateStatsSnapshot(VFS::INTERNAL);"
+recording = function_body(mic_cpp, "bool deleteRecording(const char* filename)")
+assert recording.count(mark) == 1
+refused = "if (!VFS::removeGuarded(lfPath, currentAuthContext())) return false;"
+assert recording.count(refused) == 1
+assert recording.index(refused) + len(refused) < recording.index(mark)  # only after a successful remove
+wipe = function_body(mic_cpp, "const char* cmd_micdelete(")
+assert "if (flashDeleted > 0) " + mark in wipe
+assert wipe.index("const int flashDeleted = wipeWavs(kMicRecLittleFs);") < wipe.index("if (flashDeleted > 0)")
+for signature in ("MicRecordingOwnedOp deleteRecordingOwned(", "MicRecordingOwnedOp deleteRecordingOwnedPublished("):
+    assert "invalidateStatsSnapshot" not in function_body(mic_cpp, signature)
+images_cpp = (COMPONENT / "System_ImageManager.cpp").read_text(encoding="utf-8")
+for signature in ("bool ImageManager::deleteImage(", "bool ImageManager::deleteOldestImages("):
+    assert "invalidateStatsSnapshot" not in function_body(images_cpp, signature)
+
 print("VFS capacity snapshot source guards passed")
