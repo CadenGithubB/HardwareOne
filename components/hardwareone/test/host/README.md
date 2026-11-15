@@ -1143,6 +1143,31 @@ executeCommand's own refusal of other tasks, and who writes
 `ctest --test-dir build -R '^command_task_isolation$' --output-on-failure` (or
 the runner with `--sanitize`).
 
+## Flags and counters that several tasks change
+
+`shared_flag_atomics` covers integers that more than one task changes with `|=`,
+`&=` or `++`. On a plain or `volatile` integer each of those is a load, a
+change and a store, and a task scheduled between another task's load and store
+loses one of the two changes. The test takes the definition of each variable
+and the statements that change it from the firmware sources and runs them
+against each other on host threads; every check is an invariant that holds
+under any scheduling once each change is one atomic operation.
+
+- Output lanes (`gOutputFlags`): one thread per lane opens and closes its lane
+  with the production statements (`log start`/`log stop`, `outble`, `outg2`,
+  the HTTP server start and stop) while another runs the output-lane step of
+  `applySettings` with `outSerial` on and off. A lane must read as its owner
+  left it until the owner changes it again. `applySettings` keeps WEB, FILE,
+  BLE and G2, sets SERIAL from the setting and drops every other bit.
+
+Source contract: each variable has one definition and one declaration, both
+`std::atomic`, and no statement stores a value computed from an earlier read
+(`x = x | y`, or a read followed by `x = 0`). The harness also checks the
+type, so a variable that goes back to a plain integer fails without relying on
+timing. `--component <component-directory>` replays other sources; the sources
+from before the change lose updates in every run. Threads are host threads;
+FreeRTOS scheduling, the two cores and the commands' other work are not run.
+
 ## Battery log clear
 
 `battery_log_clear` extracts the `clear` branch of `cmd_batterylog` and the log

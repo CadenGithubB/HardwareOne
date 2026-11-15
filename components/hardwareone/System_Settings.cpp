@@ -1251,8 +1251,14 @@ void applySettings() {
   // with `log start`/`log stop`, BLE and G2 are per-session opt-in streams
   // (outble/outg2). OLED is deliberately absent: the OLED console is gated
   // by msg->routing only — see the System_Debug.h charter.
-  gOutputFlags = (gOutputFlags & (MSG_ROUTE_WEB | MSG_ROUTE_FILE | MSG_ROUTE_BLE | MSG_ROUTE_G2))
-               | (gSettings.outSerial ? MSG_ROUTE_SERIAL : 0);
+  // One atomic update: applySettings runs on cmd_exec and on the main loop,
+  // and a lane another task opens or closes meanwhile (`log start`, a BLE
+  // session end) must stay as that task left it. A failed exchange reloads
+  // outputLanes, so the next round starts from the newer value.
+  const uint32_t runtimeLanes = MSG_ROUTE_WEB | MSG_ROUTE_FILE | MSG_ROUTE_BLE | MSG_ROUTE_G2;
+  const uint32_t serialLane = gSettings.outSerial ? MSG_ROUTE_SERIAL : 0;
+  uint32_t outputLanes = gOutputFlags.load();
+  while (!gOutputFlags.compare_exchange_weak(outputLanes, (outputLanes & runtimeLanes) | serialLane)) {}
 
   // Apply debug settings to runtime flags using the generated map above.
   // Multiple settings can map to the same flag (debugAuth and

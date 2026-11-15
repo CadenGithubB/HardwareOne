@@ -313,7 +313,7 @@ extern "C" void __attribute__((weak)) memAllocDebug(const char* op, void* ptr, s
   memTrackerRecord(op, ptr, size, requestedPs, usedPs, fellBack, tag);
 }
 
-volatile uint32_t gOutputFlags = MSG_ROUTE_SERIAL;
+std::atomic<uint32_t> gOutputFlags{MSG_ROUTE_SERIAL};
 
 void appendCommandToFeed(const char* source, const String& cmd, const String& user, const String& ip) {
 #if ENABLE_HTTP_SERVER

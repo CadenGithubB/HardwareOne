@@ -2330,6 +2330,14 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_web_mqtt_sensor_rows.py
           ${SETUP_MQTT_TEST_ARGS})
+# Flags and counters that more than one task changes: the production
+# definitions and the production statements that change them run against each
+# other on threads; a load-modify-store loses a change, one atomic step never.
+add_test(
+  NAME shared_flag_atomics
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_shared_flag_atomics.py
+          --cxx ${CMAKE_CXX_COMPILER})
 # Self-registration: /register/submit hands the decoded fields to
 # submitAccountRequest byte-exact (spaced and quoted passphrases), owner
 # refusals do not count toward the login lockout, anonymous `userrequest` is

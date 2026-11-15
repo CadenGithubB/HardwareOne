@@ -34,6 +34,7 @@
 #define DEBUG_SYSTEM_H
 
 #include <Arduino.h>
+#include <atomic>
 #include <stdint.h>
 
 // ============================================================================
@@ -216,7 +217,10 @@ struct DebugMessage {
 // top of this header. (The former OUTPUT_* constants were a second, value-
 // misaligned copy of the same sinks; unified 2026-07.) Persisted lanes come
 // from named settings booleans in applySettings; FILE/BLE are runtime lanes.
-extern volatile uint32_t gOutputFlags;
+// Atomic: command handlers (cmd_exec), the main loop and session teardown
+// paths open and close lanes with |= and &=, each one atomic operation; a
+// plain load-modify-store would drop the other task's lane change.
+extern std::atomic<uint32_t> gOutputFlags;
 
 // System logging state
 extern String gSystemLogPath;
