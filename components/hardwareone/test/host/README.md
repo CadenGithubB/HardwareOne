@@ -3758,6 +3758,19 @@ the stamp, and the count is right across the `millis()` wrap. Source contract: t
 `gTimeIsSynced` is set, and only that handler sets it. `--component <component-directory>` replays other
 sources. No radio is used.
 
+## Time: the millis() wrap and stored clock values
+
+`millis()` is a 32-bit count that returns to 0 after 49.7 days. These suites put a settable 32-bit clock on both
+sides of that point (`unsigned long` is 64 bits on the host, so each clock double returns `uint32_t`) or feed
+stored values above 2^31. Each takes `--cxx`, `--sanitize` and `--component <component-directory>` to replay
+other sources.
+
+`logout_reason_table` compiles the production `storeLogoutReason` (`WebServer_Server.cpp`) with `LogoutReason`
+and `MAX_LOGOUT_REASONS` from `WebServer_Server.h`; the table sits between two guard rows. With the table full,
+the ninth address must replace the oldest row by age: without a wrap, with every stored stamp before the wrap
+and `now` after it (the search used to select nothing and write one element before the table), and with stamps
+on both sides of the wrap (the row with the smallest number is then one of the newest).
+
 ## ESP-NOW peer message store
 
 `espnow_message_store` compiles the whole message-buffer section of

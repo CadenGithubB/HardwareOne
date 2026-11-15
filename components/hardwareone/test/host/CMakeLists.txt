@@ -2347,6 +2347,14 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_espsr_voice_text.py
           ${SETUP_MQTT_TEST_ARGS})
+# Logout reasons: with the table full the oldest row is replaced by age, also
+# after millis() has wrapped (the index stayed -1 and the write landed before
+# the table).
+add_test(
+  NAME logout_reason_table
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_logout_reason_table.py
+          ${SETUP_MQTT_TEST_ARGS})
 # Self-registration: /register/submit hands the decoded fields to
 # submitAccountRequest byte-exact (spaced and quoted passphrases), owner
 # refusals do not count toward the login lockout, anonymous `userrequest` is

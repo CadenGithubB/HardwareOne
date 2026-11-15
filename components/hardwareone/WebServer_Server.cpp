@@ -993,12 +993,14 @@ void storeLogoutReason(const String& ip, const String& reason) {
     }
   }
 
-  // If no slot found, use oldest entry
+  // If no slot found, use the oldest entry. Age is the 32-bit distance back
+  // from `now`, so the choice holds across the millis() wrap, and the search
+  // starts at slot 0, so idx always names a slot.
   if (idx == -1) {
-    unsigned long oldest = now;
-    for (int i = 0; i < MAX_LOGOUT_REASONS; i++) {
-      if (gLogoutReasons[i].timestamp < oldest) {
-        oldest = gLogoutReasons[i].timestamp;
+    idx = 0;
+    for (int i = 1; i < MAX_LOGOUT_REASONS; i++) {
+      if ((uint32_t)(now - gLogoutReasons[i].timestamp) >
+          (uint32_t)(now - gLogoutReasons[idx].timestamp)) {
         idx = i;
       }
     }
