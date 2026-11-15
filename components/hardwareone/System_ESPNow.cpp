@@ -3068,8 +3068,8 @@ void bondNotifySessionEstablished(const uint8_t* peerMac) {
     String bondWho = getEspNowDeviceName(peerMac);
     if (bondWho.length() == 0) bondWho = macToDisplayStr(peerMac);
     logAuthAttempt(true, "espnow/bond", bondWho, String("espnow"),
-                   String("Bond session active (role=") +
-                       (isBondMaster() ? "master" : "worker") + ")");
+                   isBondMaster() ? "Bond session active (role=master)"
+                                  : "Bond session active (role=worker)");
 #endif
     {
       String bondName = getEspNowDeviceName(peerMac);
@@ -4177,7 +4177,7 @@ struct BondAuthFailLog { char who[40]; char ip[20]; char reason[72]; };
 
 static void runDeferredBondAuthFailLog(void* arg) {
   auto* w = static_cast<BondAuthFailLog*>(arg);
-  logAuthAttempt(false, "espnow/bond", String(w->who), String(w->ip), String(w->reason));
+  logAuthAttempt(false, "espnow/bond", String(w->who), String(w->ip), w->reason);
   free(w);
 }
 

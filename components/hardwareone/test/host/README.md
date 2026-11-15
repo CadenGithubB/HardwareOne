@@ -3689,6 +3689,21 @@ status, CLI and CLI batch handlers read no cookie, and every direct
 ctest --test-dir /tmp/hw1-hardwareone-host -R '^web_auth_cookie_reads$' --output-on-failure
 ```
 
+`auth_log_paths` covers which requests and commands reach the auth log. It
+runs the production `logAuthAttempt`, its path test `isSecurityAuditPath`,
+`authLogPath` and `appendAuthLogLine` (`System_Debug.cpp`) on the counted
+Arduino String against a recording capped-append double. A table of paths
+fixes the file and the exact line of each security event (`/login` and
+`<transport>/login`, `g2/pair`, `espnow/bond`, also behind `%2F` and `%20`)
+and that every other path writes nothing (`/login-help`, `/LOGIN`, `/login/`,
+`g2/pair/x`, `espnow%20bond`, an empty and a null path); a web request and a
+command that are not security events make no String block. It takes `--cxx`,
+`--sanitize` and `--component <directory>`.
+
+```sh
+ctest --test-dir /tmp/hw1-hardwareone-host -R '^auth_log_paths$' --output-on-failure
+```
+
 This does not open a real browser; a user-role upload of a hostile name and a
 hotspot named `<b>x</b>` remain the on-device checks.
 

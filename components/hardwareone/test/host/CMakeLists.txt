@@ -2337,6 +2337,14 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_web_auth_cookie_reads.py
           ${SETUP_MQTT_TEST_ARGS})
+# The auth log writes a line only for a security event (a <transport>/login
+# path, the G2 pair, the ESP-NOW bond); other requests and commands make no
+# String on the way.
+add_test(
+  NAME auth_log_paths
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_auth_log_paths.py
+          ${SETUP_MQTT_TEST_ARGS})
 # Flags and counters that more than one task changes: the production
 # definitions and the production statements that change them run against each
 # other on threads; a load-modify-store loses a change, one atomic step never.

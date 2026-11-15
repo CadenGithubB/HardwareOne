@@ -2556,21 +2556,35 @@ static void appendAuthLogLine(bool success, const String& cleanPath, const Strin
   appendLineWithCap(logFile, line, LOG_CAP_BYTES);
 }
 
+// A security event by its (cleaned) path: ends in "/login" (so "/login-help"
+// and "/configure-login-page" do not match), or is the G2 pair event or the
+// ESP-NOW bond.
+static bool isSecurityAuditPath(const char* cleanPath) {
+  if (!cleanPath) return false;
+  static const char kLoginTail[] = "/login";
+  const size_t length = strlen(cleanPath);
+  const size_t tail = sizeof(kLoginTail) - 1;
+  return (length >= tail && strcmp(cleanPath + length - tail, kLoginTail) == 0) ||
+         strcmp(cleanPath, "g2/pair") == 0 ||
+         strcmp(cleanPath, "espnow/bond") == 0;
+}
+
 // A request or a command, admitted or refused. Only a security event reaches
 // the auth log file; the command audit tracks the rest. A request is one by
-// its path: a "<transport>/login" context (endsWith, so "/login-help" and
-// "/configure-login-page" do not match), the G2 pair event or the ESP-NOW
-// bond. The reason is free text for the reader and decides nothing: a
-// credential login comes in through recordLoginAttempt() and a password change
-// through logCredentialChange(), and both always file.
-void logAuthAttempt(bool success, const char* path, const String& userTried, const String& ip, const String& reason) {
+// its path (isSecurityAuditPath): a "<transport>/login" context, the G2 pair
+// event or the ESP-NOW bond. The reason is free text for the reader and
+// decides nothing: a credential login comes in through recordLoginAttempt()
+// and a password change through logCredentialChange(), and both always file.
+// Nearly every call is not a security event (each web request, each command),
+// so the path is tested before any String is made: a path without a '%' is
+// its own cleaned path.
+void logAuthAttempt(bool success, const char* path, const String& userTried, const String& ip, const char* reason) {
+  if (!path || !strchr(path, '%')) {
+    if (!isSecurityAuditPath(path)) return;
+  }
   const String cleanPath = authLogPath(path);
-  const bool isSecurityAuditEvent =
-      cleanPath.endsWith("/login") ||
-      (cleanPath == "g2/pair") ||
-      (cleanPath == "espnow/bond");
-  if (!isSecurityAuditEvent) return;
-  appendAuthLogLine(success, cleanPath, userTried, ip, reason);
+  if (!isSecurityAuditPath(cleanPath.c_str())) return;
+  appendAuthLogLine(success, cleanPath, userTried, ip, String(reason ? reason : ""));
 }
 
 // A password change, accepted or refused: always a security audit event,

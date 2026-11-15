@@ -333,9 +333,10 @@ String getTransportUser(CommandSource transport);
 // audit survives a headless build — that file compiles away entirely with
 // ENABLE_HTTP_SERVER=0 and used to take login auditing with it on every
 // transport. Call recordLoginAttempt(); it maps the transport to the
-// canonical "<x>/login" path and delegates here.
+// canonical "<x>/login" path and delegates here. The reason is plain text,
+// copied only for an event that is written.
 void logAuthAttempt(bool success, const char* path, const String& userTried,
-                    const String& ip, const String& reason);
+                    const String& ip, const char* reason);
 // A password change, accepted or refused. Always written to the auth log.
 void logCredentialChange(bool success, const char* path, const String& user,
                          const String& ip, const String& reason);
