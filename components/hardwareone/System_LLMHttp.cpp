@@ -7,6 +7,7 @@
 #include "System_LLMHttpCore.h"
 #include "System_LLMHttpTransport.h"
 #include "System_MemUtil.h"
+#include "System_TaskUtils.h"  // SERVICE_TASK_IDLE_RETIRE_MS: the Terminal worker's idle exit
 #include <atomic>
 #include <new>
 #include <esp_http_client.h>
@@ -85,9 +86,16 @@ uint32_t sTerminalToken = 0, sTerminalNextToken = 0;
 std::atomic<bool> sTerminalCancel{false};
 EXT_RAM_BSS_ATTR HttpTerminalResult sTerminalResult;
 EXT_RAM_BSS_ATTR char sTerminalResponse[HTTP_TERMINAL_JSON_CAP + 1];
+// The kept Terminal worker (System_LLMHttpTerminal.inc), under Lock; sTerminalKept
+// mirrors sTerminalTask != nullptr for the start's check before it takes the lock.
+TaskHandle_t sTerminalTask = nullptr;
+std::atomic<bool> sTerminalKept{false};
+bool sTerminalRetire = false;
 void interruptTerminalLocked() {
   sTerminalCancel.store(true, std::memory_order_release);
   llmHttpIoCancel(sTerminalIo);
+  // A parked worker wakes to see a withdrawn or changed configuration and leave.
+  if (sTerminalTask) xTaskNotifyGive(sTerminalTask);
 }
 #else
 void interruptTerminalLocked() {}

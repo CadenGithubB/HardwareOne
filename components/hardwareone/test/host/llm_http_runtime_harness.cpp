@@ -8,8 +8,11 @@
 #include <mutex>
 #include <string>
 #include <atomic>
+#include <condition_variable>
 #include <new>
+#include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #define ESP_LOGW(...) ((void)0)
 
 // Arduino declares this global type; the HTTP SSE parser must stay qualified.
@@ -29,7 +32,11 @@ class Stream {};
 using SemaphoreHandle_t = std::mutex*;
 static SemaphoreHandle_t xSemaphoreCreateMutex() { return new std::mutex; }
 static bool failNextLock = false;
+// Runs on main just before the n-th later bounded lock take (not yet held).
+static std::function<void()> lockHook;
+static int lockHookTake = 0;
 static int xSemaphoreTake(SemaphoreHandle_t p, unsigned wait) {
+  if (lockHook && wait != portMAX_DELAY && !--lockHookTake) { auto hook = lockHook; lockHook = {}; hook(); }
   if (failNextLock && wait != portMAX_DELAY) { failNextLock = false; return 0; }
   p->lock(); return 1;
 }
@@ -41,14 +48,74 @@ static void vTaskDelay(unsigned n) { nowMs += n; }
 static void (*pendingTask)(void*) = nullptr;
 static void* pendingArg = nullptr;
 static bool failTask = false;
-static int xTaskCreate(void (*fn)(void*), const char*, int, void* ctx, int, void*) {
+// The chat worker ("llm_http") runs to its end inside drainWorker(). The kept
+// Terminal worker ("g2_terminal_http") is a real thread that takes turns with
+// main: it runs only inside drainTerminal()/idleTerminal() and hands the turn
+// back when it parks in ulTaskNotifyTake or leaves through vTaskDelete. The
+// turn hand-off orders every access to the shared fakes.
+using TaskHandle_t = void*;
+using BaseType_t = int;
+static std::mutex turnMutex;
+static std::condition_variable turnChanged;
+static bool workerTurn = false;
+enum class TerminalTask { None, Alive, Exited };
+static TerminalTask terminalTask = TerminalTask::None;
+static std::thread terminalThread;
+static thread_local bool onTerminalThread = false;
+static int terminalTaskHandle = 0;  // its address is the handle
+static int terminalCreates = 0, terminalDeletes = 0;
+static uint32_t terminalNotifications = 0;
+static bool wakeIsTimeout = false, terminalStarted = false;
+static unsigned lastParkTicks = 0;
+static std::function<void()> parkHook;  // on the worker, at its wait, no lock held
+static void handTurn(bool toWorker) {
+  std::unique_lock<std::mutex> lock(turnMutex);
+  workerTurn = toWorker; turnChanged.notify_all();
+  turnChanged.wait(lock, [&] { return workerTurn != toWorker; });
+}
+static void terminalThreadMain(void (*fn)(void*), void* arg) {
+  onTerminalThread = true;
+  { std::unique_lock<std::mutex> lock(turnMutex); turnChanged.wait(lock, [] { return workerTurn; }); }
+  terminalStarted = true;
+  fn(arg);
+  std::lock_guard<std::mutex> lock(turnMutex);
+  terminalTask = TerminalTask::Exited; workerTurn = false; turnChanged.notify_all();
+}
+static int xTaskCreate(void (*fn)(void*), const char* name, int stack, void* ctx, int priority,
+                       TaskHandle_t* created) {
   if (failTask) { failTask = false; return 0; }
+  if (!strcmp(name, "g2_terminal_http")) {
+    assert(stack == 8192 && priority == 1 && created && !onTerminalThread);
+    assert(terminalTask != TerminalTask::Alive);
+    if (terminalThread.joinable()) terminalThread.join();
+    terminalTask = TerminalTask::Alive; terminalNotifications = 0; wakeIsTimeout = terminalStarted = false;
+    ++terminalCreates; *created = &terminalTaskHandle;
+    terminalThread = std::thread(terminalThreadMain, fn, ctx);
+    return 1;
+  }
   assert(!pendingTask); pendingTask = fn; pendingArg = ctx; return 1;
 }
-static void vTaskDelete(void*) {}
+static void vTaskDelete(void* task) { if (onTerminalThread) { assert(!task); ++terminalDeletes; } }
+[[maybe_unused]] static void xTaskNotifyGive(TaskHandle_t task) {
+  assert(task == &terminalTaskHandle && terminalTask == TerminalTask::Alive);
+  ++terminalNotifications;
+}
+[[maybe_unused]] static uint32_t ulTaskNotifyTake(BaseType_t clear, unsigned ticks) {
+  assert(onTerminalThread && clear == 1);
+  if (parkHook) { auto hook = parkHook; parkHook = {}; hook(); }
+  if (!terminalNotifications) {
+    lastParkTicks = ticks;
+    handTurn(false);  // parked: main runs until it hands the turn back
+    if (wakeIsTimeout) { wakeIsTimeout = false; nowMs += ticks; return 0; }
+    assert(terminalNotifications);  // a parked task runs again only when woken
+  }
+  const uint32_t count = terminalNotifications; terminalNotifications = 0; return count;
+}
 enum class AllocPref { PreferPsram };
 static size_t allocations = 0;
-static bool failConfigAllocation = false;
+static bool failConfigAllocation = false, failTerminalRunAllocation = false;
+static int terminalRunAllocations = 0;
+static std::unordered_set<void*> terminalRuns;
 static std::unordered_map<void*, size_t> sensitiveAllocations;
 static size_t wipedAllocations = 0;
 static void mbedtls_platform_zeroize(void* p, size_t n) {
@@ -65,8 +132,13 @@ static void* ps_calloc(size_t n, size_t s, AllocPref, const char* tag) {
   if (failConfigAllocation && !strcmp(tag, "llm.http.config")) {
     failConfigAllocation = false; return nullptr;
   }
+  if (!strcmp(tag, "llm.terminal.run")) {
+    if (failTerminalRunAllocation) { failTerminalRunAllocation = false; return nullptr; }
+    ++terminalRunAllocations;
+  }
   ++allocations;
   void* p = calloc(n, s);
+  if (p && !strcmp(tag, "llm.terminal.run")) terminalRuns.insert(p);
   if (p && (!strcmp(tag, "llm.http.config") || !strcmp(tag, "llm.http.run") ||
             !strcmp(tag, "llm.terminal.run")))
     sensitiveAllocations[p] = n * s;
@@ -82,6 +154,7 @@ static void ps_free(void* p) {
     sensitiveAllocations.erase(found);
     ++wipedAllocations;
   }
+  terminalRuns.erase(p);
   --allocations; free(p);
 }
 static void esp_fill_random(void* p, size_t n) {
@@ -167,6 +240,7 @@ static bool esp_http_client_is_complete_data_received(Client*) { return complete
 // users route on (phone link v2).
 static bool phoneRelay = false;
 static bool phonePipeRelayAvailable() { return phoneRelay; }
+// INSERT_TASK_UTILS
 // INSERT_IO
 // INSERT_INTERFACE
 // INSERT_IMPLEMENTATION
@@ -189,6 +263,36 @@ static void drainWorker() {
   assert(httpLlmIsDone()); assert(allocations == 0);
   assert(logSuppressions == 1);
   assert(ignoreLogSuppression || httpLogLevel == ESP_LOG_WARN);
+}
+// Runs the kept Terminal worker until it parks again or leaves.
+static void drainTerminal() {
+  assert(terminalTask == TerminalTask::Alive && (!terminalStarted || terminalNotifications || wakeIsTimeout));
+  handTurn(true);
+  if (terminalTask == TerminalTask::Exited) terminalThread.join();
+  assert(logSuppressions >= 1);
+  assert(ignoreLogSuppression || httpLogLevel == ESP_LOG_WARN);
+}
+// The parked worker's wait runs out with no wake.
+static void idleTerminal() {
+  assert(!terminalNotifications); wakeIsTimeout = true; drainTerminal();
+}
+static bool terminalKept() { return terminalTask == TerminalTask::Alive; }
+// Every byte of the kept run is zero between requests: no credential, body or
+// response survives into the next request.
+static void assertRunsWiped() {
+  for (void* run : terminalRuns) {
+    const auto* bytes = static_cast<const unsigned char*>(run);
+    for (size_t i = 0; i < sensitiveAllocations[run]; ++i) assert(bytes[i] == 0);
+  }
+}
+static bool runHolds(const char* text) {
+  for (void* run : terminalRuns)
+    if (memmem(run, sensitiveAllocations[run], text, strlen(text))) return true;
+  return false;
+}
+static void assertTerminalAdmissionFree() {
+  assert(llmHttpRequestAdmit(LlmHttpRequestKind::Terminal, true) == LlmHttpAdmission::Accepted);
+  llmHttpRequestRelease(LlmHttpRequestKind::Terminal);
 }
 static std::string response() {
   char chunk[512];
@@ -309,27 +413,31 @@ int main() {
   assert(httpTerminalStart(operation, strlen(operation), &token)==HttpTerminalStartResult::Busy && !token);
   assert(opens==0);llmHttpRequestRelease(LlmHttpRequestKind::Terminal);
   const uint32_t revision = httpTerminalConfigRevision();
+  // One worker task and one run serve the whole sequence below, until the
+  // idle exit. (The refused start above made and freed one run.)
+  const int runBase = terminalRunAllocations;
   assert(revision && httpTerminalStart(operation, strlen(operation), &token) == HttpTerminalStartResult::Accepted);
   assert(httpTerminalStart(operation, strlen(operation), &refused) == HttpTerminalStartResult::Busy && !refused);
   assert(httpTerminalRead(token, terminalOutput, sizeof(terminalOutput), &terminalResult) && !terminalResult.done);
-  drainWorker();
+  drainTerminal(); assert(terminalKept() && terminalCreates == 1 && allocations == 1); assertRunsWiped();
   assert(opens == 1 && cleanups == 1 && requestUrl == "https://relay/v1/terminal");
   assert(request == operation && auth == "Bearer device-token");
   assert(httpTerminalRead(token, terminalOutput, sizeof(terminalOutput), &terminalResult));
   assert(terminalResult.done && !terminalResult.error[0] && terminalOutput == wire);
   assert(terminalResult.configRevision == revision && response() == priorChat);
   assert(!httpTerminalRead(token, terminalOutput, 2, &terminalResult));
+  assertTerminalAdmissionFree();
   resetServer();status=503;wire="busy";terminalJson=false;
   assert(httpTerminalStart(operation, strlen(operation), &token)==HttpTerminalStartResult::Accepted);
-  drainWorker();assert(httpTerminalRead(token,terminalOutput,sizeof(terminalOutput),&terminalResult));
+  drainTerminal();assert(httpTerminalRead(token,terminalOutput,sizeof(terminalOutput),&terminalResult));
   assert(terminalResult.httpStatus==503 && !strcmp(terminalResult.error,"relay busy with an earlier request (outcome unknown)"));
-  assert(opens==1 && !terminalOutput[0]);
+  assert(opens==1 && !terminalOutput[0]); assertRunsWiped();
   const HttpTerminalToken previousToken = token;
   resetServer(); terminalJson = true; wire = "{}";
   assert(httpTerminalStart(operation, strlen(operation), &token) == HttpTerminalStartResult::Accepted);
   assert(!httpTerminalRead(previousToken, terminalOutput, sizeof(terminalOutput), &terminalResult));
   httpTerminalCancel(previousToken); // A stale close cannot cancel the new view.
-  drainWorker(); assert(!shuts);
+  drainTerminal(); assert(!shuts);
   for (int fault = 0; fault < 4; ++fault) {
     resetServer(); terminalJson = true; wire = "{}";
     if (fault == 0) wire.assign(HTTP_TERMINAL_JSON_CAP + 1, 'x');
@@ -337,21 +445,172 @@ int main() {
     if (fault == 2) status = 302;
     if (fault == 3) failWrite = true;
     assert(httpTerminalStart(operation, strlen(operation), &token) == HttpTerminalStartResult::Accepted);
-    drainWorker();
+    drainTerminal();
     assert(httpTerminalRead(token, terminalOutput, sizeof(terminalOutput), &terminalResult));
     assert(terminalResult.done && terminalResult.error[0] && !terminalOutput[0] && opens == 1);
+    assertRunsWiped(); assertTerminalAdmissionFree();
   }
   resetServer(); terminalJson = true; wire = "{}";
   assert(httpTerminalStart(operation, strlen(operation), &token) == HttpTerminalStartResult::Accepted);
-  httpTerminalCancel(token); drainWorker(); assert(opens == 0);
+  httpTerminalCancel(token); drainTerminal(); assert(opens == 0);
+  assert(httpTerminalRead(token, terminalOutput, sizeof(terminalOutput), &terminalResult));
+  assert(terminalResult.done && !strcmp(terminalResult.error, "Terminal stopped locally; host outcome may be unknown"));
+  // No stale data: a long body and response, then a short one. The host sees
+  // exactly the new body, the reader exactly the new response.
+  const std::string longBody = "{\"schema\":1,\"op\":\"prompt\",\"text\":\"" + std::string(3000, 'b') + "\"}";
+  resetServer(); terminalJson = true; wire = "{\"text\":\"" + std::string(3500, 'L') + "\"}";
+  assert(httpTerminalStart(longBody.c_str(), longBody.size(), &token) == HttpTerminalStartResult::Accepted);
+  drainTerminal(); assert(request == longBody);
+  assert(httpTerminalRead(token, terminalOutput, sizeof(terminalOutput), &terminalResult) && terminalOutput == wire);
+  assertRunsWiped();
+  resetServer(); terminalJson = true; wire = "{\"ok\":1}";
+  assert(httpTerminalStart(operation, strlen(operation), &token) == HttpTerminalStartResult::Accepted);
+  drainTerminal(); assert(request == operation);
+  assert(httpTerminalRead(token, terminalOutput, sizeof(terminalOutput), &terminalResult));
+  assert(terminalResult.length == wire.size() && terminalOutput == wire);
+  assert(!memchr(sTerminalResponse + wire.size(), 'L', sizeof(sTerminalResponse) - wire.size()));
+  // A start while the worker is between its last request and its wait (no lock
+  // held): the request is staged, the wait returns at once and serves it.
+  resetServer(); terminalJson = true; wire = "{\"first\":1}";
+  HttpTerminalToken second = 0;
+  parkHook = [&] {
+    resetServer(); terminalJson = true; wire = "{\"second\":2}";
+    assert(httpTerminalStart(operation, strlen(operation), &second) == HttpTerminalStartResult::Accepted);
+  };
+  assert(httpTerminalStart(operation, strlen(operation), &token) == HttpTerminalStartResult::Accepted);
+  drainTerminal(); assert(second && second != token && !parkHook && opens == 1);
+  assert(!httpTerminalRead(token, terminalOutput, sizeof(terminalOutput), &terminalResult));
+  assert(httpTerminalRead(second, terminalOutput, sizeof(terminalOutput), &terminalResult));
+  assert(terminalResult.done && !strcmp(terminalOutput, "{\"second\":2}"));
+  // A wake with nothing staged (a cancel after completion) parks it again for
+  // the rest of the idle time only.
+  nowMs += 20000; httpTerminalCancel(second); drainTerminal();
+  assert(terminalKept() && lastParkTicks == SERVICE_TASK_IDLE_RETIRE_MS - 20000);
+  assert(terminalCreates == 1 && terminalDeletes == 0 && terminalRunAllocations == runBase + 1 && allocations == 1);
+  // After the idle time it leaves: the run is freed wiped (ps_free checks), the
+  // task deleted once; the next start makes a new one.
+  idleTerminal(); assert(!terminalKept() && terminalDeletes == 1 && allocations == 0 && terminalRuns.empty());
+  resetServer(); terminalJson = true; wire = "{}";
+  assert(httpTerminalStart(operation, strlen(operation), &token) == HttpTerminalStartResult::Accepted);
+  drainTerminal(); assert(terminalCreates == 2 && terminalKept() && terminalRunAllocations == runBase + 2);
+  // Released while parked (view closed): it leaves at once.
+  httpTerminalReleaseWorker(); drainTerminal();
+  assert(!terminalKept() && terminalDeletes == 2 && allocations == 0);
+  httpTerminalReleaseWorker();  // nothing kept: nothing to wake
+  assert(httpTerminalRead(token, terminalOutput, sizeof(terminalOutput), &terminalResult) && !strcmp(terminalOutput, "{}"));
+  // Released while a request is in flight (view closed mid-request): the
+  // request ends as before, then the worker leaves.
+  resetServer(); terminalJson = true; wire = "{}";
+  assert(httpTerminalStart(operation, strlen(operation), &token) == HttpTerminalStartResult::Accepted);
+  httpTerminalCancel(token); httpTerminalReleaseWorker(); drainTerminal();
+  assert(opens == 0 && !terminalKept() && terminalCreates == 3 && terminalDeletes == 3 && allocations == 0);
+  assert(httpTerminalRead(token, terminalOutput, sizeof(terminalOutput), &terminalResult) && terminalResult.done &&
+         !strcmp(terminalResult.error, "Terminal stopped locally; host outcome may be unknown"));
+  assertTerminalAdmissionFree();
+  // Released, then a new view starts before the worker woke: it is reused.
+  resetServer(); terminalJson = true; wire = "{}";
+  assert(httpTerminalStart(operation, strlen(operation), &token) == HttpTerminalStartResult::Accepted);
+  drainTerminal(); assert(terminalCreates == 4);
+  httpTerminalReleaseWorker();
+  assert(httpTerminalStart(operation, strlen(operation), &token) == HttpTerminalStartResult::Accepted);
+  drainTerminal(); assert(terminalKept() && terminalCreates == 4 && opens == 2);
+  // The configuration withdrawn while parked (a failed publication, applied by
+  // the tick): the wake makes it leave.
+  failNextLock = true;
+  assert(!httpLlmConfigure(true, "https://relay/v1", "openclaw/default", "device-token", false, "test-ca"));
+  httpLlmTick(); drainTerminal(); assert(!terminalKept() && terminalDeletes == 4 && allocations == 0);
+  assert(!httpTerminalConfigRevision());
+  assert(httpTerminalStart(operation, strlen(operation), &token) == HttpTerminalStartResult::Unavailable && !token);
+  assert(httpLlmConfigure(true, "https://relay/v1", "openclaw/default", "device-token", false, "test-ca"));
+  // A changed configuration while parked: it leaves.
+  resetServer(); terminalJson = true; wire = "{}";
+  assert(httpTerminalStart(operation, strlen(operation), &token) == HttpTerminalStartResult::Accepted);
+  drainTerminal(); assert(terminalCreates == 5);
+  assert(httpLlmConfigure(true, "https://relay/v1", "openclaw/default", "rotated-token", false, "test-ca"));
+  drainTerminal(); assert(!terminalKept() && terminalDeletes == 5 && allocations == 0);
+  resetServer(); terminalJson = true; wire = "{}";
+  assert(httpTerminalStart(operation, strlen(operation), &token) == HttpTerminalStartResult::Accepted);
+  drainTerminal(); assert(terminalCreates == 6 && auth == "Bearer rotated-token");
+  // Busy and Unavailable while a request is staged on the kept worker make
+  // nothing and leave the staged run as it is.
+  resetServer(); terminalJson = true; wire = "{}";
+  assert(httpTerminalStart(operation, strlen(operation), &token) == HttpTerminalStartResult::Accepted);
+  assert(httpTerminalStart(operation, strlen(operation), &refused) == HttpTerminalStartResult::Busy && !refused);
+  WiFi.connected = false;
+  assert(httpTerminalStart(operation, strlen(operation), &refused) == HttpTerminalStartResult::Unavailable && !refused);
+  WiFi.connected = true;
+  assert(runHolds(operation) && terminalNotifications == 1);
+  drainTerminal(); assert(request == operation && auth == "Bearer rotated-token" && terminalRunAllocations == runBase + 7);  // six workers, one refused start
+  assert(httpTerminalRead(token, terminalOutput, sizeof(terminalOutput), &terminalResult) && !strcmp(terminalOutput, "{}"));
+  // Admission refused with the worker parked: Busy, the run wiped again, no wake.
+  assert(llmHttpRequestAdmit(LlmHttpRequestKind::Terminal, true) == LlmHttpAdmission::Accepted);
+  assert(httpTerminalStart(operation, strlen(operation), &refused) == HttpTerminalStartResult::Busy && !refused);
+  llmHttpRequestRelease(LlmHttpRequestKind::Terminal);
+  assert(terminalKept() && terminalNotifications == 0 && allocations == 1); assertRunsWiped();
+  // The admission gate closed while a request is staged: the next start is
+  // Unavailable and leaves that run alone; the request stops locally and the
+  // worker then leaves.
+  resetServer(); terminalJson = true; wire = "{}";
+  assert(httpTerminalStart(operation, strlen(operation), &token) == HttpTerminalStartResult::Accepted);
+  failNextLock = true;
+  assert(!httpLlmConfigure(true, "https://relay/v1", "openclaw/default", "rotated-token", false, "test-ca"));
+  assert(httpTerminalStart(operation, strlen(operation), &refused) == HttpTerminalStartResult::Unavailable && !refused);
+  assert(runHolds(operation));
+  drainTerminal(); assert(opens == 0 && !terminalKept() && allocations == 0);
+  assert(httpTerminalRead(token, terminalOutput, sizeof(terminalOutput), &terminalResult) && terminalResult.done &&
+         !strcmp(terminalResult.error, "Terminal configuration changed"));
+  assert(!strcmp(sTerminalResult.error, "Terminal stopped locally; host outcome may be unknown"));
+  assertTerminalAdmissionFree();
+  assert(httpLlmConfigure(true, "https://relay/v1", "openclaw/default", "rotated-token", false, "test-ca"));
+  // The kept worker leaves between the start's check and its lock (the start's
+  // second bounded take, after httpTerminalPathAvailable): the start makes a run
+  // and a new worker, as with none kept.
+  resetServer(); terminalJson = true; wire = "{}";
+  assert(httpTerminalStart(operation, strlen(operation), &token) == HttpTerminalStartResult::Accepted);
+  drainTerminal(); assert(terminalKept()); request.clear();
+  int createsNow = terminalCreates, runsNow = terminalRunAllocations;
+  lockHookTake = 2; lockHook = [] { idleTerminal(); assert(!terminalKept() && allocations == 0); };
+  assert(httpTerminalStart(operation, strlen(operation), &token) == HttpTerminalStartResult::Accepted);
+  assert(!lockHook && terminalCreates == createsNow + 1 && terminalRunAllocations == runsNow + 1);
+  drainTerminal(); assert(terminalKept() && allocations == 1 && request == operation);
+  httpTerminalReleaseWorker(); drainTerminal(); assert(!terminalKept() && allocations == 0);
+  // Another start keeps a worker between this start's allocation and its lock:
+  // this start uses the kept worker and frees the run it made.
+  resetServer(); terminalJson = true; wire = "{}";
+  createsNow = terminalCreates; runsNow = terminalRunAllocations;
+  HttpTerminalToken other = 0;
+  lockHookTake = 2; lockHook = [&] {
+    assert(httpTerminalStart(operation, strlen(operation), &other) == HttpTerminalStartResult::Accepted);
+    drainTerminal(); assert(terminalKept() && allocations == 2);
+    resetServer(); terminalJson = true; wire = "{\"outer\":1}";
+  };
+  assert(httpTerminalStart(operation, strlen(operation), &token) == HttpTerminalStartResult::Accepted);
+  assert(other && token != other && terminalCreates == createsNow + 1 && terminalRunAllocations == runsNow + 2);
+  assert(allocations == 1 && terminalNotifications == 1);
+  drainTerminal(); assert(httpTerminalRead(token, terminalOutput, sizeof(terminalOutput), &terminalResult) &&
+                          terminalResult.done && !strcmp(terminalOutput, "{\"outer\":1}") && opens == 1);
+  httpTerminalReleaseWorker(); drainTerminal(); assert(!terminalKept() && allocations == 0);
+  // No memory for the first run: Busy, as before; a failed task start: Busy
+  // with the old error, nothing kept, nothing left allocated.
+  failTerminalRunAllocation = true;
+  assert(httpTerminalStart(operation, strlen(operation), &token) == HttpTerminalStartResult::Busy && !token);
+  const int createsBefore = terminalCreates;
+  failTask = true;
+  assert(httpTerminalStart(operation, strlen(operation), &token) == HttpTerminalStartResult::Busy && !token);
+  assert(terminalCreates == createsBefore && !terminalKept() && allocations == 0 && terminalRuns.empty());
+  assert(!strcmp(sTerminalResult.error, "Could not start Terminal worker") && sTerminalResult.done);
+  assertTerminalAdmissionFree();
+  // The configuration changes mid-request: the request ends as before and the
+  // worker then leaves.
   resetServer(); terminalJson = true; wire = "{}";
   readHook = [] { if (!readOffset) assert(httpLlmConfigure(true, "https://replacement/v1",
       "openclaw/default", "replacement-token", false, "test-ca")); };
   assert(httpTerminalStart(operation, strlen(operation), &token) == HttpTerminalStartResult::Accepted);
-  drainWorker();
+  drainTerminal();
   assert(httpTerminalConfigRevision() != revision && shuts == 1);
   assert(httpTerminalRead(token, terminalOutput, sizeof(terminalOutput), &terminalResult));
   assert(terminalResult.error[0] && !terminalOutput[0] && response() == priorChat);
+  assert(!terminalKept() && terminalCreates == terminalDeletes);
   assert(wipedAllocations > 0 && sensitiveAllocations.empty() && allocations == 0);
   std::cout << "HTTP worker lifecycle tests passed\n";
 }

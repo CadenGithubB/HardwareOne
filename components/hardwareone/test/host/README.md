@@ -5963,6 +5963,19 @@ refusal 16 to Network and 17 to Protocol and counts refusals per code 0..18;
 checks that socket resource exhaustion is not misclassified as network failure
 and cannot trigger fallback.
 
+`llm_http_runtime` also runs the kept Terminal worker (`g2_terminal_http`) as a
+real thread that takes turns with the test: it runs only when woken and hands
+the turn back when it parks in `ulTaskNotifyTake` or leaves through `vTaskDelete`.
+It pins one task and one run for many requests, the run all zero after every
+request, no stale body or response, a start staged while the worker is between
+its last request and its wait, the rest of the idle time after a wake with
+nothing staged, the exits (idle, `httpTerminalReleaseWorker` while parked or
+mid-request, configuration withdrawn or changed while parked or mid-request),
+refused starts that leave a staged run alone, and the old Busy answers for no
+run memory and a failed task start. `--component <dir>` builds another tree
+(an older commit) with the same harness. `g2_native_terminal` pins that the view
+asks the worker to leave at every close and right before speech starts.
+
 ## Android handshake fixture and timing
 
 The registered `phone_secure_channel` suite compares the production responder,

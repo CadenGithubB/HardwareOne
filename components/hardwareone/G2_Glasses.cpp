@@ -14051,6 +14051,7 @@ static void g2NativeTerminalEnded(const char* reason) {
   gNativeTerminalEpoch.store(0, std::memory_order_release);
   g2NativeTerminalCancelDraft(); g2NativeTerminalClearQuery(); g2NativeTerminalDropBatch();
   if (s.rpcToken) httpTerminalCancel(s.rpcToken);
+  httpTerminalReleaseWorker();
   s.rpcToken = 0; s.rpc = s.nextRpc = NativeRpc::None;
   s.policy.abandon(millis()); s.epoch = 0; s.opened = false;
   memset(s.text, 0, sizeof(s.text)); memset(s.json, 0, sizeof(s.json)); memset(s.pb, 0, sizeof(s.pb));
@@ -14828,6 +14829,9 @@ static void g2NativeTerminalOnRx(G2Temple& temple, uint32_t generation, uint32_t
     uint32_t claimed = s.epoch | 0x80000000u; (void)gNativeTerminalSubmitGate.compare_exchange_strong(claimed,s.epoch);
     if (gNativeTerminalSubmitGate.load() != s.epoch) { g2NativeTerminalFail("view-expired"); return; }
     s.deferredConfirm = false; s.promptLen = 0; memset(s.prompt,0,sizeof(s.prompt)); s.voiceMs = millis();
+    // Speech allocates next: the parked HTTP worker gives its stack back (a
+    // running poll finishes first), as when each poll had its own task.
+    httpTerminalReleaseWorker();
     TranscriptOptions noSave{}; char error[96] = {};
     if (!sttBeginContinuousG2Native(s.owner,gNativeTerminalLeft.load(),&s.speechToken,error,sizeof(error),&noSave,g2ControlWake,/*speakerLabels=*/false))
       g2NativeTerminalFail("speech-unavailable");

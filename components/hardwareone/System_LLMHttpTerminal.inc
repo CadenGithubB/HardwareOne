@@ -1,6 +1,13 @@
 // Private implementation included by System_LLMHttp.cpp. Configuration and
 // credential publication remain with that owner; Terminal results are separate
 // from normal chat. All network work runs on this worker, never the G2 worker.
+//
+// One worker serves a Terminal session: the first accepted start creates it
+// with its run, later starts stage the next request in that run and wake it.
+// Between requests it waits; it leaves when httpTerminalReleaseWorker() asks
+// (view closed, speech starting), when the configuration is withdrawn or
+// changed, or after SERVICE_TASK_IDLE_RETIRE_MS with no request. The run is
+// wiped after every request, before the next start can stage into it.
 #if (ENABLE_G2_GLASSES && ENABLE_LOCAL_STT) || ENABLE_BLE_PHONE_PIPE
 namespace {
 constexpr uint32_t kTerminalTotalMs = 15000;
@@ -12,6 +19,22 @@ struct TerminalRun {
   char body[HTTP_TERMINAL_JSON_CAP + 1]{};
   char response[HTTP_TERMINAL_JSON_CAP + 1]{};
 };
+// The kept worker's run: published with sTerminalTask, under Lock.
+TerminalRun* sTerminalRun = nullptr;
+
+// Back to the state ps_calloc gave it: credential, body and response zeroised.
+void terminalWipe(TerminalRun* run) {
+  run->~TerminalRun();
+  mbedtls_platform_zeroize(run, sizeof(*run));
+  new (run) TerminalRun;
+}
+
+void terminalDiscard(TerminalRun* run) {
+  if (!run) return;
+  run->~TerminalRun();
+  mbedtls_platform_zeroize(run, sizeof(*run));
+  ps_free(run);
+}
 
 esp_err_t terminalHttpEvent(esp_http_client_event_t* event) {
   if (event->event_id == HTTP_EVENT_ON_HEADER && event->header_key && event->header_value &&
@@ -29,8 +52,8 @@ bool terminalCancelled() {
       !sConfigAdmitted.load(std::memory_order_acquire);
 }
 
-void terminalWorker(void* context) {
-  auto* run = static_cast<TerminalRun*>(context);
+// One request, staged in run by httpTerminalStart. Returns the run's revision.
+uint32_t terminalServe(TerminalRun* run) {
   esp_log_level_set("HTTP_CLIENT", ESP_LOG_WARN);
   const char* error = esp_log_level_get("HTTP_CLIENT") >= ESP_LOG_DEBUG ?
       "HTTP debug logging exposes credentials; lower log verbosity" : nullptr;
@@ -132,9 +155,11 @@ void terminalWorker(void* context) {
   if (client) { esp_http_client_close(client); esp_http_client_cleanup(client); }
   llmHttpIoDestroy(io);
   llmHttpRequestRelease(LlmHttpRequestKind::Terminal);
+  uint32_t revision = 0;
   {
     Lock lock(true);
-    if (lock && sTerminalToken == run->token) {
+    const bool current = lock && sTerminalToken == run->token;
+    if (current) {
       if (terminalCancelled() || sRevision != run->revision)
         error = "Terminal stopped locally; host outcome may be unknown";
       sTerminalResult = {};
@@ -149,12 +174,45 @@ void terminalWorker(void* context) {
         memcpy(sTerminalResponse, run->response, received);
         sTerminalResult.length = received;
       }
-      sTerminalWorker = false;
     }
+    revision = run->revision;
+    terminalWipe(run);
+    if (current) sTerminalWorker = false;
   }
-  run->~TerminalRun();
-  mbedtls_platform_zeroize(run, sizeof(*run));
-  ps_free(run);
+  return revision;
+}
+
+// Waits for the next staged request (true) or leaves the session (false, with
+// the task and run unpublished in the same hold of the lock). The wake is only
+// a hint: what is staged, released or changed is read under the lock, first
+// right after a request and then after each wake.
+bool terminalPark(TerminalRun* run, uint32_t revision) {
+  uint32_t parkedMs = millis();
+  bool idle = false;
+  for (;;) {
+    {
+      Lock lock(true);
+      if (!lock) { parkedMs = millis(); idle = false; }
+      else if (sTerminalWorker && run->token) return true;
+      else if (idle || sTerminalRetire || !sConfigAdmitted.load(std::memory_order_acquire) ||
+               !sConfig.enabled || !sConfig.valid || sRevision != revision) {
+        sTerminalTask = nullptr;
+        sTerminalRun = nullptr;
+        sTerminalRetire = false;
+        sTerminalKept.store(false, std::memory_order_release);
+        return false;
+      }
+    }
+    const uint32_t waitedMs = uint32_t(millis() - parkedMs);
+    idle = waitedMs >= SERVICE_TASK_IDLE_RETIRE_MS ||
+        !ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(SERVICE_TASK_IDLE_RETIRE_MS - waitedMs));
+  }
+}
+
+void terminalWorker(void* context) {
+  auto* run = static_cast<TerminalRun*>(context);
+  while (terminalPark(run, terminalServe(run))) {}
+  terminalDiscard(run);
   vTaskDelete(nullptr);
 }
 } // namespace
@@ -177,48 +235,71 @@ HttpTerminalStartResult httpTerminalStart(const char* json, size_t length, HttpT
   if (!token || !json || !length || length > HTTP_TERMINAL_JSON_CAP ||
       memchr(json, 0, length)) return HttpTerminalStartResult::Unavailable;
   if (!httpTerminalPathAvailable()) return HttpTerminalStartResult::Unavailable;
-  auto* memory = ps_calloc(1, sizeof(TerminalRun), AllocPref::PreferPsram, "llm.terminal.run");
-  if (!memory) return HttpTerminalStartResult::Busy;
-  auto* run = new (memory) TerminalRun;
-  Lock lock;
-  if(!lock){run->~TerminalRun();ps_free(run);return HttpTerminalStartResult::Busy;}
-  if(!sConfigAdmitted.load(std::memory_order_acquire) || !sConfig.enabled || !sConfig.valid ||
-      !llmHttpPathAvailable(!strncasecmp(sConfig.url,"https://",8))) {
-    run->~TerminalRun();ps_free(run);return HttpTerminalStartResult::Unavailable;
+  // A kept worker brings its run. Without one, the run is made here, outside
+  // the lock, as for every request before; the loop repeats only when the kept
+  // worker left between that check and the lock.
+  TerminalRun* fresh = nullptr;
+  for (;;) {
+    if (!fresh && !sTerminalKept.load(std::memory_order_acquire)) {
+      auto* memory = ps_calloc(1, sizeof(TerminalRun), AllocPref::PreferPsram, "llm.terminal.run");
+      if (!memory) return HttpTerminalStartResult::Busy;
+      fresh = new (memory) TerminalRun;
+    }
+    Lock lock;
+    if(!lock){terminalDiscard(fresh);return HttpTerminalStartResult::Busy;}
+    if(!sTerminalTask && !fresh) continue;
+    if(!sConfigAdmitted.load(std::memory_order_acquire) || !sConfig.enabled || !sConfig.valid ||
+        !llmHttpPathAvailable(!strncasecmp(sConfig.url,"https://",8))) {
+      terminalDiscard(fresh);return HttpTerminalStartResult::Unavailable;
+    }
+    if(sTerminalWorker){terminalDiscard(fresh);return HttpTerminalStartResult::Busy;}
+    // Idle from here: the kept run is not in use and was wiped after its last request.
+    TerminalRun* const run = sTerminalTask ? sTerminalRun : fresh;
+    if (run != fresh) { terminalDiscard(fresh); fresh = nullptr; }
+    run->config = sConfig;
+    const char suffix[] = "/chat/completions";
+    const size_t urlLen = strlen(run->config.url), suffixLen = sizeof(suffix) - 1;
+    if (urlLen < suffixLen || strcmp(run->config.url + urlLen - suffixLen, suffix)) {
+      if (fresh) terminalDiscard(run); else terminalWipe(run);
+      return HttpTerminalStartResult::Unavailable;
+    }
+    strlcpy(run->config.url + urlLen - suffixLen, "/terminal",
+            sizeof(run->config.url) - (urlLen - suffixLen));
+    const auto admission=llmHttpRequestAdmit(LlmHttpRequestKind::Terminal,!strncasecmp(sConfig.url,"https://",8));
+    if(admission!=LlmHttpAdmission::Accepted) {
+      if (fresh) terminalDiscard(run); else terminalWipe(run);
+      return admission==LlmHttpAdmission::Busy?HttpTerminalStartResult::Busy:HttpTerminalStartResult::Unavailable;
+    }
+    run->revision = sRevision;
+    if (++sTerminalNextToken == 0) ++sTerminalNextToken;
+    run->token = sTerminalToken = sTerminalNextToken;
+    run->bodyLen = length;
+    memcpy(run->body, json, length);
+    sTerminalResult = {};
+    sTerminalResult.configRevision = sRevision;
+    memset(sTerminalResponse, 0, sizeof(sTerminalResponse));
+    sTerminalCancel.store(false, std::memory_order_release);
+    sTerminalWorker = true;
+    sTerminalRetire = false;
+    if (sTerminalTask) {
+      xTaskNotifyGive(sTerminalTask);
+      *token = run->token;
+      return HttpTerminalStartResult::Accepted;
+    }
+    TaskHandle_t task = nullptr;
+    if (xTaskCreate(terminalWorker, "g2_terminal_http", 8192, run, 1, &task) != pdPASS) {
+      llmHttpRequestRelease(LlmHttpRequestKind::Terminal);
+      sTerminalWorker = false;
+      sTerminalResult.done = true;
+      strlcpy(sTerminalResult.error, "Could not start Terminal worker", sizeof(sTerminalResult.error));
+      terminalDiscard(run); return HttpTerminalStartResult::Busy;
+    }
+    sTerminalTask = task;
+    sTerminalRun = run;
+    sTerminalKept.store(true, std::memory_order_release);
+    *token = run->token;
+    return HttpTerminalStartResult::Accepted;
   }
-  if(sTerminalWorker){run->~TerminalRun();ps_free(run);return HttpTerminalStartResult::Busy;}
-  run->config = sConfig;
-  const char suffix[] = "/chat/completions";
-  const size_t urlLen = strlen(run->config.url), suffixLen = sizeof(suffix) - 1;
-  if (urlLen < suffixLen || strcmp(run->config.url + urlLen - suffixLen, suffix)) {
-    run->~TerminalRun(); mbedtls_platform_zeroize(run, sizeof(*run)); ps_free(run); return HttpTerminalStartResult::Unavailable;
-  }
-  strlcpy(run->config.url + urlLen - suffixLen, "/terminal",
-          sizeof(run->config.url) - (urlLen - suffixLen));
-  const auto admission=llmHttpRequestAdmit(LlmHttpRequestKind::Terminal,!strncasecmp(sConfig.url,"https://",8));
-  if(admission!=LlmHttpAdmission::Accepted) {
-    run->~TerminalRun();mbedtls_platform_zeroize(run,sizeof(*run));ps_free(run);
-    return admission==LlmHttpAdmission::Busy?HttpTerminalStartResult::Busy:HttpTerminalStartResult::Unavailable;
-  }
-  run->revision = sRevision;
-  if (++sTerminalNextToken == 0) ++sTerminalNextToken;
-  run->token = sTerminalToken = sTerminalNextToken;
-  run->bodyLen = length;
-  memcpy(run->body, json, length);
-  sTerminalResult = {};
-  sTerminalResult.configRevision = sRevision;
-  memset(sTerminalResponse, 0, sizeof(sTerminalResponse));
-  sTerminalCancel.store(false, std::memory_order_release);
-  sTerminalWorker = true;
-  if (xTaskCreate(terminalWorker, "g2_terminal_http", 8192, run, 1, nullptr) != pdPASS) {
-    llmHttpRequestRelease(LlmHttpRequestKind::Terminal);
-    sTerminalWorker = false;
-    sTerminalResult.done = true;
-    strlcpy(sTerminalResult.error, "Could not start Terminal worker", sizeof(sTerminalResult.error));
-    run->~TerminalRun(); mbedtls_platform_zeroize(run, sizeof(*run)); ps_free(run); return HttpTerminalStartResult::Busy;
-  }
-  *token = run->token;
-  return HttpTerminalStartResult::Accepted;
 }
 
 bool httpTerminalRead(HttpTerminalToken token, char* out, size_t cap, HttpTerminalResult* result) {
@@ -246,5 +327,12 @@ void httpTerminalCancel(HttpTerminalToken token) {
   memset(sTerminalResponse, 0, sizeof(sTerminalResponse));
   sTerminalResult.length = 0;
   strlcpy(sTerminalResult.error, "Stopped locally; host actions may continue", sizeof(sTerminalResult.error));
+}
+
+void httpTerminalReleaseWorker() {
+  Lock lock;
+  if (!lock) return;  // the idle time still ends it
+  sTerminalRetire = true;
+  if (sTerminalTask) xTaskNotifyGive(sTerminalTask);
 }
 #endif

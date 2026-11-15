@@ -14,10 +14,17 @@ def stripped(path):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--sanitize', action='store_true')
+    parser.add_argument('--component', type=Path,
+                        help='component tree to build instead of this checkout (an older commit)')
     args = parser.parse_args()
     here = Path(__file__).resolve().parent
-    source = here.parents[1]
+    source = args.component.resolve() if args.component else here.parents[1]
     harness = (here / 'llm_http_runtime_harness.cpp').read_text()
+    # The kept Terminal worker's idle exit takes the shared service-task figure.
+    idle = re.search(r'^constexpr uint32_t SERVICE_TASK_IDLE_RETIRE_MS = \d+;$',
+                     (source / 'System_TaskUtils.h').read_text(), flags=re.M)
+    assert idle, 'SERVICE_TASK_IDLE_RETIRE_MS not found in System_TaskUtils.h'
+    harness = harness.replace('// INSERT_TASK_UTILS', idle.group(0))
     harness = harness.replace('// INSERT_IO', stripped(source / 'System_LLMHttpTransport.h') + '\n' + stripped(source / 'System_LLMHttpTransport.cpp'))
     harness = harness.replace('// INSERT_INTERFACE', stripped(source / 'System_LLMHttp.h'))
     harness = harness.replace('// INSERT_IMPLEMENTATION', stripped(source / 'System_LLMHttp.cpp') +
@@ -25,7 +32,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix='hw1-llm-http-runtime-') as tmp:
         unit, exe = Path(tmp) / 'test.cpp', Path(tmp) / 'test'
         unit.write_text(harness)
-        cmd = ['clang++', '-std=c++17', '-Wall', '-Wextra', '-Werror', '-pedantic',
+        cmd = ['clang++', '-std=c++17', '-Wall', '-Wextra', '-Werror', '-pedantic', '-pthread',
                '-I', str(source), '-I', str(source.parent / 'hardwareone_libs/ArduinoJson/src'),
                str(unit), '-o', str(exe)]
         if args.sanitize:

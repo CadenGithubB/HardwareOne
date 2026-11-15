@@ -46,6 +46,7 @@ uint32_t liveOwner = 7;
 bool sttLive = false, textReady = false, pausedAtTeardown = false;
 std::string transcript;
 unsigned speechBegins = 0, finishRequests = 0;
+unsigned workerReleases = 0; bool releasedForSpeech = false;  // httpTerminalReleaseWorker, below
 struct G2Temple { char side; uint32_t connectionGeneration; bool ready = true, audioNotifyChar = true;
   char firmwareVersion[32] = "2.3.2.14"; } gL{'L', 8}, gR{'R', 9};
 bool g2TempleReadyAtGeneration(const G2Temple& t, uint32_t generation = 0) { return t.ready && (!generation || generation == t.connectionGeneration); }
@@ -55,6 +56,7 @@ bool sttBeginContinuousG2Native(SttOwner owner, uint32_t gen, SttToken* token, c
                                 const TranscriptOptions* options, void (*)(), bool speakerLabels) {
   assert(!speakerLabels);
   assert(owner.epoch == liveOwner && gen == gL.connectionGeneration && options && !options->enabled);
+  assert(releasedForSpeech); releasedForSpeech = false;
   ++speechBegins; sttLive = true; *token = speechBegins; return true;
 }
 bool sttCancel(SttOwner, SttToken) { sttLive = false; textReady = false; return true; }
@@ -196,6 +198,7 @@ bool phonePipeRetired(PhonePipeStream h){
 bool httpTerminalPathAvailable(){return pathAvailable;}
 HttpTerminalStartResult httpTerminalStart(const char* json,size_t length,HttpTerminalToken* token) {
   assert(length&&length<=4096&&strlen(json)==length);if(!pathAvailable)return HttpTerminalStartResult::Unavailable;
+  releasedForSpeech=false;
   if(activeRpcToken || admissionBusy)return HttpTerminalStartResult::Busy;
   const auto admission=llmHttpRequestAdmit(LlmHttpRequestKind::Terminal,true);
   if(admission!=LlmHttpAdmission::Accepted)return admission==LlmHttpAdmission::Busy?HttpTerminalStartResult::Busy:HttpTerminalStartResult::Unavailable;
@@ -209,6 +212,9 @@ bool httpTerminalRead(HttpTerminalToken token,char* out,size_t cap,HttpTerminalR
   activeRpcToken=0;llmHttpRequestRelease(LlmHttpRequestKind::Terminal);return true;
 }
 void httpTerminalCancel(HttpTerminalToken token){if(token==activeRpcToken){activeRpcToken=0;llmHttpRequestRelease(LlmHttpRequestKind::Terminal);}}
+// The kept HTTP worker is asked to leave when the view ends and right before
+// speech allocates (no start in between).
+void httpTerminalReleaseWorker(){++workerReleases;releasedForSpeech=true;}
 
 // INSERT_ADAPTER
 #if ENABLE_LOCAL_STT && ENABLE_LLM_BACKEND && ENABLE_LLM_SOURCE_HTTP
@@ -281,7 +287,7 @@ void tick(unsigned count=1){while(count--){clockMs+=100;g2NativeTerminalTick();}
 void settle(unsigned count=50){while(count--&&g2NativeTerminalActive()){tick();ack();}}
 void untilIdle(){for(unsigned i=0;i<200&&g2NativeTerminalActive()&&gNativeTerminal.policy.phase!=NativeTerm::Phase::Idle;++i){tick();ack();}assert(gNativeTerminal.policy.phase==NativeTerm::Phase::Idle);}
 void open(){assert(strncmp(g2NativeTerminalRequestOpen(),"Error:",6));assert(pausedAtTeardown);untilIdle();}
-void close(){gNativeTerminalSubmitGate.store(0);gNativeTerminalCloseRequested.store(true);tick();ack();assert(!g2NativeTerminalActive());}
+void close(){const unsigned released=workerReleases;gNativeTerminalSubmitGate.store(0);gNativeTerminalCloseRequested.store(true);tick();ack();assert(!g2NativeTerminalActive()&&workerReleases>released);}
 void dictate(const char* text){transcript=text;event(G2_TERMINAL_CMD_VOICE,1);event(G2_TERMINAL_CMD_VOICE,1);event(G2_TERMINAL_CMD_VOICE,2);event(G2_TERMINAL_CMD_VOICE,2);
   for(unsigned i=0;i<20&&gNativeTerminal.policy.phase!=NativeTerm::Phase::AwaitConfirm;++i){tick();ack();}assert(gNativeTerminal.policy.phase==NativeTerm::Phase::AwaitConfirm);}
 void awaitQuery(){const uint32_t through=eventCounter;for(unsigned i=0;i<100&&(!gNativeTerminal.queryActive||gNativeTerminal.queryDirty||gNativeTerminal.cursor<through);++i){tick();ack();}assert(gNativeTerminal.queryActive&&!gNativeTerminal.queryDirty&&gNativeTerminal.cursor>=through);}

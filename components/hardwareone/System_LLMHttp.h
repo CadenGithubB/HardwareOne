@@ -55,6 +55,11 @@ bool httpTerminalRead(HttpTerminalToken token, char* out, size_t cap,
                       HttpTerminalResult* result);
 // Stops local I/O only; a sent host mutation may already have been accepted.
 void httpTerminalCancel(HttpTerminalToken token);
+// One worker task serves the Terminal session. This asks it to leave once it
+// has no request (now, or after the one in flight), giving its stack back; the
+// next start makes a new one. Call when the view closes and before speech
+// allocates. Waits at most 200 ms for the configuration lock.
+void httpTerminalReleaseWorker();
 // Zero means configuration is unavailable. A change invalidates a native view.
 uint32_t httpTerminalConfigRevision();
 #endif

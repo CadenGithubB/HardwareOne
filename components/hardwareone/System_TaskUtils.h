@@ -259,7 +259,9 @@ constexpr BaseType_t I2C_SENSOR_CORE = APP_CORE;
 // nothing to do, giving its stack and TCB back; the next request creates it
 // again, which may then fail under heap pressure where today it could not
 // (each refuses cleanly). mapRender (OLED map), the phone pipe and cam_power
-// keep their own figures and their own exits.
+// keep their own figures and their own exits. g2_terminal_http
+// (System_LLMHttpTerminal.inc) takes this figure but keeps its own lifecycle,
+// under the LLM HTTP lock its state already lives under.
 constexpr uint32_t SERVICE_TASK_IDLE_RETIRE_MS = 60000;
 
 // ============================================================================
