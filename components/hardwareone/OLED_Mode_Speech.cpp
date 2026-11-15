@@ -64,12 +64,15 @@ void displaySpeechStatus() {
 
   // Line 2: Current context (if in multi-stage)
   if (running && wakeActive) {
-    const char* cat = getEspSrCurrentCategory();
-    const char* sub = getEspSrCurrentSubCategory();
-    if (cat && cat[0]) {
+    // Copies: the recognizer task rewrites these texts while this page draws.
+    char cat[kEspSrPhraseTextSize];
+    char sub[kEspSrPhraseTextSize];
+    getEspSrCurrentCategory(cat, sizeof(cat));
+    getEspSrCurrentSubCategory(sub, sizeof(sub));
+    if (cat[0]) {
       oledDisplay->print(">");
       oledDisplay->print(cat);
-      if (sub && sub[0]) {
+      if (sub[0]) {
         oledDisplay->print(">");
         oledDisplay->print(sub);
       }
@@ -91,8 +94,11 @@ void displaySpeechStatus() {
   }
 
   // Line 3: Last command + confidence
-  const char* lastCmd = getEspSrLastCommand();
-  if (lastCmd && lastCmd[0]) {
+  // The line shows the first 10 characters; 15 are enough to tell that the
+  // command is longer.
+  char lastCmd[16];
+  getEspSrLastCommand(lastCmd, sizeof(lastCmd));
+  if (lastCmd[0]) {
     float conf = getEspSrLastConfidence();
     oledDisplay->print("Last: ");
     String cmdStr = lastCmd;

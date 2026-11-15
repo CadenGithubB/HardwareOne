@@ -33,6 +33,12 @@ static bool gEspSrWakeDetected = false;
 enum class VoiceState { IDLE };
 static VoiceState gVoiceState = VoiceState::IDLE;
 static String gCurrentCategory, gCurrentSubCategory;
+// Production: the one writer of the two Strings above (it also publishes the
+// shared copy that test_espsr_voice_text.py covers).
+static void voiceSetContext(const char* category, const char* subCategory) {
+  if (category) gCurrentCategory = category;
+  if (subCategory) gCurrentSubCategory = subCategory;
+}
 static std::vector<String> destroyed;
 static String error;
 static std::atomic<const char*> gSrError{nullptr};

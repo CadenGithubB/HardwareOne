@@ -2338,6 +2338,15 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_shared_flag_atomics.py
           --cxx ${CMAKE_CXX_COMPILER})
+# Speech recognition: the category, subcategory and last command the
+# recognizer task rewrites reach the OLED speech page, the status JSON and the
+# telemetry print as copies made under one lock, never as a pointer into a
+# String the recognizer may be re-making.
+add_test(
+  NAME espsr_voice_text
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_espsr_voice_text.py
+          ${SETUP_MQTT_TEST_ARGS})
 # Self-registration: /register/submit hands the decoded fields to
 # submitAccountRequest byte-exact (spaced and quoted passphrases), owner
 # refusals do not count toward the login lockout, anonymous `userrequest` is

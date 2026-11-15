@@ -326,7 +326,6 @@ static bool executeVoiceCommandAsArmedUser(const char* cliCmd, char* out, size_t
   return true;
 }
 static uint32_t gLastWakeMs = 0;
-static String gLastCommand = "";
 static float gLastConfidence = 0.0f;  // Last command confidence (0.0-1.0)
 
 // ============================================================================
@@ -341,9 +340,69 @@ enum class VoiceState {
 };
 
 static VoiceState gVoiceState = VoiceState::IDLE;
+// The recognizer's own working values. Only voiceSetContext() below assigns
+// them, and only the recognizer (onVoiceCommandDetected, srTask) reads them.
 static String gCurrentCategory = "";    // The detected category (e.g., "sensor")
 static String gCurrentSubCategory = ""; // The detected sub-category (e.g., "thermal")
 static uint32_t gCategoryTimeoutMs = 0; // Timeout for next stage detection
+
+// ============================================================================
+// Voice text other tasks read
+// ============================================================================
+// sr_main re-makes the category, the subcategory and the last command at every
+// recognised phrase and timeout. The OLED speech page, the status JSON and
+// `srdebugstats` show them from other tasks. A String that one task re-makes
+// while another copies it can be read after its block was freed, so no other
+// task reads a String of the recognizer: voiceSetContext and
+// voiceSetLastCommand publish every change into this fixed text under
+// sVoiceTextMux, and a reader gets a copy made under the same lock. No pointer
+// into sVoiceText leaves these functions. The buffers are sized for esp-sr's
+// phrase limit; a longer text is cut in this copy only, never in the
+// recognizer's own Strings.
+static_assert(kEspSrPhraseTextSize == ESP_MN_MAX_PHRASE_LEN + 1,
+              "the shared voice text holds a whole MultiNet phrase");
+struct VoiceSharedText {
+  char category[kEspSrPhraseTextSize];
+  char subCategory[kEspSrPhraseTextSize];
+  char lastCommand[kEspSrLastCommandTextSize];
+};
+static VoiceSharedText sVoiceText = {};
+static portMUX_TYPE sVoiceTextMux = portMUX_INITIALIZER_UNLOCKED;
+
+// The one place that changes the recognizer's category and subcategory; it
+// publishes the same change. nullptr leaves that value as it is. Runs on
+// sr_main, on the start/stop path while sr_main does not run, and for
+// `srcmdssync` on cmd_exec, which empties the category as it always did.
+static void voiceSetContext(const char* category, const char* subCategory) {
+  if (category) gCurrentCategory = category;
+  if (subCategory) gCurrentSubCategory = subCategory;
+  portENTER_CRITICAL(&sVoiceTextMux);
+  if (category) strlcpy(sVoiceText.category, category, sizeof(sVoiceText.category));
+  if (subCategory) strlcpy(sVoiceText.subCategory, subCategory, sizeof(sVoiceText.subCategory));
+  portEXIT_CRITICAL(&sVoiceTextMux);
+}
+
+// The last command exists only as shared text: nothing but displays reads it.
+static void voiceSetLastCommand(const String& text) {
+  portENTER_CRITICAL(&sVoiceTextMux);
+  strlcpy(sVoiceText.lastCommand, text.c_str(), sizeof(sVoiceText.lastCommand));
+  portEXIT_CRITICAL(&sVoiceTextMux);
+}
+
+// All three texts as they were at one moment.
+static void voiceTextSnapshot(VoiceSharedText& out) {
+  portENTER_CRITICAL(&sVoiceTextMux);
+  out = sVoiceText;
+  portEXIT_CRITICAL(&sVoiceTextMux);
+}
+
+// One shared text copied into the caller's buffer, cut to outSize - 1 characters.
+static void voiceCopyText(const char* sharedText, char* out, size_t outSize) {
+  if (!out || outSize == 0) return;
+  portENTER_CRITICAL(&sVoiceTextMux);
+  strlcpy(out, sharedText, outSize);
+  portEXIT_CRITICAL(&sVoiceTextMux);
+}
 
 static uint8_t gSrDebugLevel = 0;
 static uint32_t gSrTelemetryPeriodMs = 0;
@@ -1125,8 +1184,7 @@ static void onVoiceCommandDetected(int commandId, const char* phrase) {
     INFO_SRF("[HIER] CANCEL DETECTED - Aborting from state: %s", voiceStateToString(gVoiceState));
     broadcastOutput("[Voice] Cancelled.");
     gVoiceState = VoiceState::IDLE;
-    gCurrentCategory = "";
-    gCurrentSubCategory = "";
+    voiceSetContext("", "");
     if (!loadCategories()) voiceTableLoadFailed();
     return;
   }
@@ -1214,8 +1272,7 @@ static void onVoiceCommandDetected(int commandId, const char* phrase) {
     if (categoryHasSubCategories(category)) {
       // 3-level: category -> subcategory -> target
       DEBUG_SRF("[HIER-DEBUG] Category has subcategories -> transitioning to AWAIT_SUBCATEGORY");
-      gCurrentCategory = category;
-      gCurrentSubCategory = "";
+      voiceSetContext(category, "");
       gVoiceState = VoiceState::AWAIT_SUBCATEGORY;
       gCategoryTimeoutMs = millis() + gSettings.srCommandTimeout;
       
@@ -1229,8 +1286,7 @@ static void onVoiceCommandDetected(int commandId, const char* phrase) {
     } else if (categoryHasDirectTargets(category)) {
       // 2-level: category -> target (no subcategory)
       DEBUG_SRF("[HIER-DEBUG] Category has direct targets -> transitioning to AWAIT_TARGET");
-      gCurrentCategory = category;
-      gCurrentSubCategory = "";
+      voiceSetContext(category, "");
       gVoiceState = VoiceState::AWAIT_TARGET;
       gCategoryTimeoutMs = millis() + gSettings.srCommandTimeout;
       
@@ -1263,15 +1319,14 @@ static void onVoiceCommandDetected(int commandId, const char* phrase) {
           oledNotificationBannerShow(vmsg, PairingRibbonIcon::ERROR_ICON, 2000);
         }
 #endif
-        gLastCommand = category;
+        voiceSetLastCommand(category);
       } else {
         WARN_SYSTEMF("[HIER] Category '%s' has no associated command!", category);
         broadcastOutput("[Voice] Sorry, I don't know how to do that.");
       }
       // Return to idle
       gVoiceState = VoiceState::IDLE;
-      gCurrentCategory = "";
-      gCurrentSubCategory = "";
+      voiceSetContext("", "");
       if (!loadCategories()) voiceTableLoadFailed();
     }
     
@@ -1288,7 +1343,7 @@ static void onVoiceCommandDetected(int commandId, const char* phrase) {
     INFO_SRF("[HIER] ============================================");
     
     // Now load targets for this category+subcategory combination
-    gCurrentSubCategory = subCategory;
+    voiceSetContext(nullptr, subCategory);
     gVoiceState = VoiceState::AWAIT_TARGET;
     gCategoryTimeoutMs = millis() + gSettings.srCommandTimeout;
     
@@ -1320,11 +1375,11 @@ static void onVoiceCommandDetected(int commandId, const char* phrase) {
       if (gCurrentSubCategory.length() > 0) {
         String normSubCat = normalizePhrase(gCurrentSubCategory.c_str());
         broadcastOutput(String("[Voice] Queuing ") + normSubCat + " " + normTarget + ".");
-        gLastCommand = gCurrentCategory + " " + gCurrentSubCategory + " " + target;
+        voiceSetLastCommand(gCurrentCategory + " " + gCurrentSubCategory + " " + target);
       } else {
         String normCat = normalizePhrase(gCurrentCategory.c_str());
         broadcastOutput(String("[Voice] Queuing ") + normCat + " " + normTarget + ".");
-        gLastCommand = gCurrentCategory + " " + target;
+        voiceSetLastCommand(gCurrentCategory + " " + target);
       }
       
       char cmdOut[128];
@@ -1349,8 +1404,7 @@ static void onVoiceCommandDetected(int commandId, const char* phrase) {
     // Return to idle, reload categories
     DEBUG_SRF("[HIER-DEBUG] Returning to IDLE, reloading categories...");
     gVoiceState = VoiceState::IDLE;
-    gCurrentCategory = "";
-    gCurrentSubCategory = "";
+    voiceSetContext("", "");
     if (!loadCategories()) voiceTableLoadFailed();
     
   } else {
@@ -1725,8 +1779,11 @@ static void srDebugPrintTelemetry() {
            (unsigned)gSrAfeFeedOk, (unsigned)gSrAfeFetchOk, gSrLastVolumeDb, gSrLastVadState, gSrLastAfeRetValue);
   WARN_SRF("Wake: count=%u, last_ms=%u, last_idx=%d, last_model=%d",
            (unsigned)gWakeWordCount, (unsigned)gLastWakeMs, gSrLastWakeWordIndex, gSrLastWakeNetModelIndex);
+  // Runs on sr_main (periodic telemetry) and on cmd_exec (`srdebugstats`).
+  char lastCommand[kEspSrLastCommandTextSize];
+  getEspSrLastCommand(lastCommand, sizeof(lastCommand));
   WARN_SRF("MN: detect_calls=%u, detected=%u, accepted=%u, last_cmd='%s'",
-           (unsigned)gSrMnDetectCalls, (unsigned)gSrMnDetected, (unsigned)gCommandCount.load(), gLastCommand.c_str());
+           (unsigned)gSrMnDetectCalls, (unsigned)gSrMnDetected, (unsigned)gCommandCount.load(), lastCommand);
   WARN_SRF("Accept: gap_enabled=%d floor=%.2f gap=%.2f require_speech=%d gap_accepts=%u rejects=%u",
            gSrGapAcceptEnabled ? 1 : 0, gSrGapAcceptFloor, gSrGapAcceptGap,
            gSrTargetRequireSpeech ? 1 : 0, (unsigned)gSrGapAccepts, (unsigned)gSrLowConfidenceRejects);
@@ -2437,8 +2494,7 @@ static void srTask(void*) {
       // Transition to hierarchical state machine
       DEBUG_SRF("[HIER-DEBUG] State transition: %s -> AWAIT_CATEGORY", voiceStateToString(gVoiceState));
       gVoiceState = VoiceState::AWAIT_CATEGORY;
-      gCurrentCategory = "";
-      gCurrentSubCategory = "";
+      voiceSetContext("", "");
 
       INFO_SRF("[HIER] ============================================");
       INFO_SRF("[HIER] WAKE WORD DETECTED!");
@@ -2495,8 +2551,7 @@ static void srTask(void*) {
           broadcastOutput("[Voice] Sorry, I didn't catch that.");
 
           gVoiceState = VoiceState::IDLE;
-          gCurrentCategory = "";
-          gCurrentSubCategory = "";
+          voiceSetContext("", "");
         } else if (gVoiceState == VoiceState::AWAIT_SUBCATEGORY) {
           INFO_SRF("[HIER] ============================================");
           INFO_SRF("[HIER] TIMEOUT: No subcategory detected for '%s'", gCurrentCategory.c_str());
@@ -2507,8 +2562,7 @@ static void srTask(void*) {
           broadcastOutput(String("[Voice] Timed out waiting for ") + gCurrentCategory + " selection.");
 
           gVoiceState = VoiceState::IDLE;
-          gCurrentCategory = "";
-          gCurrentSubCategory = "";
+          voiceSetContext("", "");
           // Reload categories for next wake word
           DEBUG_SRF("[HIER-DEBUG] Reloading categories after subcategory timeout...");
           if (!loadCategories()) voiceTableLoadFailed();
@@ -2527,8 +2581,7 @@ static void srTask(void*) {
           }
 
           gVoiceState = VoiceState::IDLE;
-          gCurrentCategory = "";
-          gCurrentSubCategory = "";
+          voiceSetContext("", "");
           // Reload categories for next wake word
           DEBUG_SRF("[HIER-DEBUG] Reloading categories after target timeout...");
           if (!loadCategories()) voiceTableLoadFailed();
@@ -2665,7 +2718,7 @@ static void srTask(void*) {
               if (acceptByGap && cmdProb < requiredConfidence) {
                 gSrGapAccepts++;
               }
-              gLastCommand = cmdPhrase ? cmdPhrase : String(cmdId);
+              voiceSetLastCommand(cmdPhrase ? cmdPhrase : String(cmdId));
               gLastConfidence = cmdProb;
 
               {
@@ -2714,8 +2767,7 @@ static void srTask(void*) {
             if (!loadCategories()) voiceTableLoadFailed();
           }
           gVoiceState = VoiceState::IDLE;
-          gCurrentCategory = "";
-          gCurrentSubCategory = "";
+          voiceSetContext("", "");
 
           listeningForCommand = false;
           gEspSrWakeDetected = false;
@@ -2812,8 +2864,7 @@ static bool stopEspSrLocked() {
   gWnModelName[0] = gMnModelName[0] = '\0';
   gEspSrWakeDetected = false;
   gVoiceState = VoiceState::IDLE;
-  gCurrentCategory = "";
-  gCurrentSubCategory = "";
+  voiceSetContext("", "");
   restoreMicrophoneAfterSrIfNeeded();
   return true;
 }
@@ -2879,8 +2930,7 @@ bool startEspSr() {
   prepareSrAudioProcessing();
   gSrDynGainCurrent = 1.0f;
   gVoiceState = VoiceState::IDLE;
-  gCurrentCategory = "";
-  gCurrentSubCategory = "";
+  voiceSetContext("", "");
   if (!loadCategories()) {
     srSetError("Speech command table could not be loaded");
     stopEspSrLocked();
@@ -2944,6 +2994,10 @@ void setEspSrCommandCallback(void (*callback)(int, const char*)) {
 }
 
 void buildEspSrStatusJson(String& output) {
+  // Runs on the web server task and on cmd_exec: the recognizer's texts are
+  // read from one locked copy, which lives until the document is serialized.
+  VoiceSharedText voiceText;
+  voiceTextSnapshot(voiceText);
   PSRAM_JSON_DOC(doc);
   doc["enabled"] = true;
   doc["initialized"] = gEspSrInitialized;
@@ -2954,12 +3008,12 @@ void buildEspSrStatusJson(String& output) {
   doc["modelBytes"] = gSrModelBytes;
   doc["wakeActive"] = gEspSrWakeDetected;
   doc["state"] = getEspSrVoiceState();
-  doc["category"] = gCurrentCategory;
-  doc["subcategory"] = gCurrentSubCategory;
+  doc["category"] = voiceText.category;
+  doc["subcategory"] = voiceText.subCategory;
   doc["wakeCount"] = gWakeWordCount;
   doc["commandCount"] = gCommandCount.load();
   doc["lastWakeMs"] = gLastWakeMs;
-  doc["lastCommand"] = gLastCommand;
+  doc["lastCommand"] = voiceText.lastCommand;
   doc["lastConfidence"] = gLastConfidence;
   doc["lowConfidenceRejects"] = gSrLowConfidenceRejects;
   doc["hasAFE"] = (gAfe != nullptr);
@@ -3389,7 +3443,7 @@ static const char* cmd_sr_cmds_sync(const String& argsInput) {
   
   // Reset hierarchical state machine
   gVoiceState = VoiceState::IDLE;
-  gCurrentCategory = "";
+  voiceSetContext("", nullptr);
   
   // Load categories using the hierarchical helper
   if (!loadCategories()) {
@@ -4200,22 +4254,16 @@ const char* getEspSrVoiceState() {
   }
 }
 
-const char* getEspSrCurrentCategory() {
-  static String s;
-  s = gCurrentCategory;
-  return s.c_str();
+void getEspSrCurrentCategory(char* out, size_t outSize) {
+  voiceCopyText(sVoiceText.category, out, outSize);
 }
 
-const char* getEspSrCurrentSubCategory() {
-  static String s;
-  s = gCurrentSubCategory;
-  return s.c_str();
+void getEspSrCurrentSubCategory(char* out, size_t outSize) {
+  voiceCopyText(sVoiceText.subCategory, out, outSize);
 }
 
-const char* getEspSrLastCommand() {
-  static String s;
-  s = gLastCommand;
-  return s.c_str();
+void getEspSrLastCommand(char* out, size_t outSize) {
+  voiceCopyText(sVoiceText.lastCommand, out, outSize);
 }
 
 float getEspSrLastConfidence() {

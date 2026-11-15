@@ -25,9 +25,16 @@ void buildEspSrStatusJson(String& output);
 
 // Voice state getters for OLED/Web display
 const char* getEspSrVoiceState();      // Returns "idle", "category", "subcategory", "target"
-const char* getEspSrCurrentCategory(); // Returns current category being processed
-const char* getEspSrCurrentSubCategory(); // Returns current subcategory being processed
-const char* getEspSrLastCommand();     // Returns last executed command
+// The recognizer task rewrites the category, the subcategory and the last
+// command while other tasks show them, so a caller gets a copy, never a
+// pointer: each call fills `out` (NUL-terminated, cut to outSize - 1
+// characters) under the recognizer's text lock. The sizes hold a whole
+// MultiNet phrase and the longest last command built from three of them.
+constexpr size_t kEspSrPhraseTextSize = 64;  // a MultiNet phrase (at most 63 characters) and its NUL
+constexpr size_t kEspSrLastCommandTextSize = 3 * kEspSrPhraseTextSize;  // "category subcategory target"
+void getEspSrCurrentCategory(char* out, size_t outSize);     // category being processed, "" when none
+void getEspSrCurrentSubCategory(char* out, size_t outSize);  // subcategory being processed, "" when none
+void getEspSrLastCommand(char* out, size_t outSize);         // last recognised command, "" when none
 float getEspSrLastConfidence();        // Returns last command confidence (0.0-1.0)
 uint32_t getEspSrWakeCount();          // Returns total wake word detections
 uint32_t getEspSrCommandCount();       // Returns total commands executed

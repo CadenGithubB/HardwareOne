@@ -1187,6 +1187,40 @@ timing. `--component <component-directory>` replays other sources; the sources
 from before the change lose updates in every run. Threads are host threads;
 FreeRTOS scheduling, the two cores and the commands' other work are not run.
 
+## Speech recognition: voice text read by other tasks
+
+`espsr_voice_text` covers the category, the subcategory and the last command
+of the speech recognizer (`System_ESPSR.cpp`). The recognizer task `sr_main`
+re-made three Strings at every recognised phrase and timeout while the OLED
+speech page, the status JSON and the telemetry print read them from other
+tasks with no lock; a String that is re-made during a copy can be read after
+its block was freed. The recognizer now publishes every change into fixed text
+under one lock (`voiceSetContext`, `voiceSetLastCommand`) and a reader gets a
+copy made under that lock (`getEspSrCurrentCategory`,
+`getEspSrCurrentSubCategory`, `getEspSrLastCommand` into a caller buffer;
+`voiceTextSnapshot` for the status JSON).
+
+The test compiles that block and the three accessors with the size constants
+of `System_ESPSR.h`: values and partial updates (a subcategory alone, the
+category alone as `srcmdssync` empties it), a phrase of the esp-sr limit and
+the longest last command published whole, over-long text cut in the shared
+copy while the recognizer's own Strings keep it, reader buffers of 0, 1 and 16
+bytes, every reader and writer waiting while the lock is held, every copy made
+with the lock held by the copying thread, and two reader threads that never
+see a mix of two values while a third rewrites all three texts. Source
+contract for what the host does not compile: the two recognizer Strings are
+assigned only in `voiceSetContext` and named only by `onVoiceCommandDetected`,
+`srTask` and that writer; `gLastCommand` is gone; `sVoiceText` is named only
+by its own functions and the accessors; each of those enters and leaves the
+lock once; the status JSON takes its three texts from one non-const snapshot
+(ArduinoJson stores a `const char` array as a literal with its padding); the
+OLED speech page passes its own buffers. Host doubles: `String`, the critical
+section (a mutex that records its owner), `strlcpy` and the esp-sr phrase
+limit. Not covered: the ESP-IDF critical section itself, the recognizer and
+ArduinoJson; `System_ESPSR.cpp` and `OLED_Mode_Speech.cpp` only compile in a
+build with `ENABLE_ESP_SR` set. `--component <component-directory>` replays
+other sources; `--sanitize` adds ASan and UBSan.
+
 ## Battery log clear
 
 `battery_log_clear` extracts the `clear` branch of `cmd_batterylog` and the log
