@@ -17,6 +17,11 @@ dispatch on g2_owner records a tapped row with |= while the page worker on
 g2_session drains the mask. The drain was a read followed by a store of 0; a
 tap recorded between the two was erased. It is one exchange(0) now.
 
+G2 hijack bridge (gMenuGen, gCmdSeq in G2_HijackCmd.cpp): g2BumpMenuGen and
+g2SubmitHijackCommand run on the tap, session, page and command tasks on both
+cores. A lost menu bump lets a stale completion pass the menuGen check; a
+64-bit ++ gave two submissions one number. Both are std::atomic<uint32_t>.
+
 The production definition of each variable and the production statements that
 change it are compiled into shared_flag_atomics_harness.cpp and run against
 each other on real threads; the harness states the invariant each run checks.
@@ -68,6 +73,16 @@ def definition(text: str, name: str) -> str:
                     + name + r"\b[^;\n]*;", f"the definition of {name}")
 
 
+def lines_naming(component: Path, sources: dict[Path, str], name: str):
+    """(file:line, code) of every firmware line that names the variable."""
+    for path, text in sources.items():
+        if name not in text:
+            continue
+        for number, line in code_lines(text):
+            if re.search(rf"\b{name}\b", line):
+                yield f"{path.relative_to(component)}:{number}", line
+
+
 def one_line(text: str, pattern: str, what: str) -> str:
     found = re.findall(pattern, text, re.M)
     require(len(found) == 1, f"{what}: expected one, found {len(found)}")
@@ -108,18 +123,14 @@ def output_lane_parts(component: Path, sources: dict[Path, str]) -> dict[str, st
 
 def check_output_lane_sources(component: Path, sources: dict[Path, str]) -> None:
     declarations = []
-    for path, text in sources.items():
-        for number, line in code_lines(text):
-            if "gOutputFlags" not in line:
-                continue
-            where = f"{path.relative_to(component)}:{number}"
-            if re.search(r"\b(?:uint32_t|std::atomic<[^>]*>)\s+gOutputFlags\b", line):
-                declarations.append((where, line.strip()))
-                continue
-            require(not re.search(r"\bgOutputFlags\s*=(?!=)", line),
-                    f"{where}: gOutputFlags is stored from an earlier read; use |=, &= or a compare-exchange")
-            require(not re.search(r"gOutputFlags\s*(\^=|\+=|-=|\+\+|--)", line),
-                    f"{where}: unexpected change of gOutputFlags")
+    for where, line in lines_naming(component, sources, "gOutputFlags"):
+        if re.search(r"\b(?:uint32_t|std::atomic<[^>]*>)\s+gOutputFlags\b", line):
+            declarations.append((where, line.strip()))
+            continue
+        require(not re.search(r"\bgOutputFlags\s*=(?!=)", line),
+                f"{where}: gOutputFlags is stored from an earlier read; use |=, &= or a compare-exchange")
+        require(not re.search(r"gOutputFlags\s*(\^=|\+=|-=|\+\+|--)", line),
+                f"{where}: unexpected change of gOutputFlags")
     require(sorted(text for _, text in declarations) ==
             ["extern std::atomic<uint32_t> gOutputFlags;", "std::atomic<uint32_t> gOutputFlags{MSG_ROUTE_SERIAL};"],
             f"gOutputFlags has one atomic definition and one atomic declaration, found {declarations}")
@@ -165,12 +176,37 @@ def check_tap_mask_sources(component: Path, sources: dict[Path, str]) -> None:
         drain = "\n".join(line for _, line in code_lines(tap_drain(sources[component / worker_file], name)))
         require(drain.strip() == f"const uint32_t taps = {name}.exchange(0);",
                 f"{worker_file}: the worker takes and clears {name} in one exchange(0), found `{drain.strip()}`")
-        for path, text in sources.items():
-            for number, line in code_lines(text):
-                # A reset to 0 (page start, page end, teardown) is one store; anything
-                # else that assigns the mask would be built from an earlier read.
-                require(not re.search(rf"\b{name}\s*=(?!=)(?!\s*0\s*;)", line),
-                        f"{path.relative_to(component)}:{number}: {name} is assigned something other than 0")
+        for where, line in lines_naming(component, sources, name):
+            # A reset to 0 (page start, page end, teardown) is one store; anything
+            # else that assigns the mask would be built from an earlier read.
+            require(not re.search(rf"\b{name}\s*=(?!=)(?!\s*0\s*;)", line),
+                    f"{where}: {name} is assigned something other than 0")
+
+
+# ---- G2 hijack bridge counters ----------------------------------------------------
+
+def hijack_counter_parts(component: Path, sources: dict[Path, str]) -> dict[str, str]:
+    bridge = sources[component / "G2_HijackCmd.cpp"]
+    return {
+        "// INSERT_HIJACK_COUNTER_DEFINITIONS":
+            definition(bridge, "gMenuGen") + "\n" + definition(bridge, "gCmdSeq"),
+        "// INSERT_MENU_GEN_FUNCTIONS":
+            extract_block(bridge, "void g2BumpMenuGen()") + "\n" + extract_block(bridge, "uint32_t g2CurrentMenuGen()"),
+        "// INSERT_COMMAND_SEQ_STAMP":
+            one_line(bridge, r"^\s*(ctx->cookie\.seq\s*=[^;\n]*;)", "the statement that stamps a command's sequence number"),
+    }
+
+
+def check_hijack_counter_sources(component: Path, sources: dict[Path, str]) -> None:
+    bridge = sources[component / "G2_HijackCmd.cpp"]
+    for name in ("gMenuGen", "gCmdSeq"):
+        require(definition(bridge, name) == f"static std::atomic<uint32_t> {name}{{0}};",
+                f"G2_HijackCmd.cpp defines {name} as a file-private std::atomic<uint32_t>")
+        for where, line in lines_naming(component, sources, name):
+            require(not re.search(rf"\b{name}\s*(?:=(?!=)|\+=|-=)", line),
+                    f"{where}: {name} is stored from an earlier read")
+    require(re.search(r"ctx->cookie\.seq\s*=\s*\+\+gCmdSeq;", bridge) is not None,
+            "g2SubmitHijackCommand stamps the sequence number with one ++gCmdSeq")
 
 
 def main() -> None:
@@ -187,6 +223,7 @@ def main() -> None:
     parts = {}
     parts.update(output_lane_parts(component, sources))
     parts.update(tap_mask_parts(component, sources))
+    parts.update(hijack_counter_parts(component, sources))
     for marker, body in parts.items():
         require(harness.count(marker) == 1, f"one {marker} in the harness")
         harness = harness.replace(marker, body)
@@ -201,7 +238,7 @@ def main() -> None:
         subprocess.run([args.cxx, *flags, str(source), "-o", str(binary)], check=True, timeout=180)
         if subprocess.run([str(binary)], timeout=300).returncode != 0:
             failures.append("the harness reported lost updates or a non-atomic type")
-    for check in (check_output_lane_sources, check_tap_mask_sources):
+    for check in (check_output_lane_sources, check_tap_mask_sources, check_hijack_counter_sources):
         try:
             check(component, sources)
         except AssertionError as error:

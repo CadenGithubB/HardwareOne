@@ -1165,6 +1165,11 @@ under any scheduling once each change is one atomic operation.
   drain. The number of taps the drains return must equal the number recorded.
   The drain is one `exchange(0)`; a read followed by a store of 0 erases the
   tap that arrives between the two.
+- G2 hijack bridge (`gMenuGen`, `gCmdSeq` in `G2_HijackCmd.cpp`): four threads
+  call the production `g2BumpMenuGen()` and the generation must move by the
+  number of calls; four threads run the statement of `g2SubmitHijackCommand`
+  that stamps a command's sequence number, and no number may repeat or be
+  skipped.
 
 Source contract: each variable has one definition and one declaration, both
 `std::atomic`, and no statement stores a value computed from an earlier read

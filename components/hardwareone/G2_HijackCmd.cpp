@@ -37,15 +37,19 @@
 
 // =============================================================================
 // Generation + sequence counters.
-// Single-writer for gCmdSeq (only g2SubmitHijackCommand mutates it).
-// Multi-writer for gMenuGen (any navigation site bumps). volatile is
-// sufficient for single-core monotonic increments here; if we ever need
-// strict atomicity we'll switch to std::atomic, but for staleness checks
-// the worst-case "torn read" is benign — a cookie that captured a partial
-// value compares unequal to the live value, which just drops the job.
+// Both are incremented from several tasks on both cores: gMenuGen by every
+// navigation site (g2BumpMenuGen: the tap dispatcher, the session and page
+// workers, cmd_exec, the main loop), gCmdSeq by g2SubmitHijackCommand on the
+// tap, session and command tasks and the main loop. Each is a std::atomic, so
+// an increment is one atomic step: two bumps never collapse into one (a stale
+// completion would pass the menuGen check) and two submissions never get one
+// number.
+// gCmdSeq is 32 bits: a 64-bit atomic is not lock-free on these chips, and
+// the number only labels a submission in log lines. G2CmdCookie::seq and
+// LensUiJob::cmdSeq stay uint64_t and take the 32-bit value unchanged.
 // =============================================================================
-static volatile uint32_t gMenuGen = 0;
-static volatile uint64_t gCmdSeq  = 0;
+static std::atomic<uint32_t> gMenuGen{0};
+static std::atomic<uint32_t> gCmdSeq{0};
 
 void g2BumpMenuGen() {
   gMenuGen++;

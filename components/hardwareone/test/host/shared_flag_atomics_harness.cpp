@@ -177,9 +177,64 @@ static void testTapMasks() {
         "gHealthPagePendingTap is a std::atomic<uint32_t>");
 }
 
+// ---- G2 hijack bridge: gMenuGen, gCmdSeq ------------------------------------
+// INSERT_HIJACK_COUNTER_DEFINITIONS
+// INSERT_MENU_GEN_FUNCTIONS
+static uint64_t nextCommandSeq() {
+  struct { struct { uint64_t seq; } cookie; } context, *ctx = &context;
+// INSERT_COMMAND_SEQ_STAMP
+  return ctx->cookie.seq;
+}
+
+constexpr unsigned kCounterThreads = 4;
+constexpr uint32_t kCounterRounds = 100000;
+
+static void repeat(void (*step)()) {
+  waitForStart();
+  for (uint32_t round = 0; round < kCounterRounds; ++round) step();
+}
+
+template <typename Value>
+static void collect(Value (*next)(), std::vector<Value>* out) {
+  out->reserve(kCounterRounds);
+  waitForStart();
+  for (uint32_t round = 0; round < kCounterRounds; ++round) out->push_back(next());
+}
+
+// Runs `next` on kCounterThreads threads; true when no two calls returned the same value.
+template <typename Value>
+static bool allDistinct(Value (*next)()) {
+  std::vector<Value> perThread[kCounterThreads];
+  std::vector<std::thread> threads;
+  for (std::vector<Value>& values : perThread) threads.emplace_back(collect<Value>, next, &values);
+  runTogether(threads);
+  std::vector<Value> all;
+  for (const std::vector<Value>& values : perThread) all.insert(all.end(), values.begin(), values.end());
+  std::sort(all.begin(), all.end());
+  return all.size() == size_t(kCounterThreads) * kCounterRounds &&
+         std::adjacent_find(all.begin(), all.end()) == all.end();
+}
+
+static void testHijackCounters() {
+  const uint32_t menuGenBefore = g2CurrentMenuGen();
+  std::vector<std::thread> threads;
+  for (unsigned i = 0; i < kCounterThreads; ++i) threads.emplace_back(repeat, g2BumpMenuGen);
+  runTogether(threads);
+  CHECK(g2CurrentMenuGen() - menuGenBefore == kCounterThreads * kCounterRounds,
+        "every g2BumpMenuGen from every task moves the menu generation by one");
+
+  CHECK(nextCommandSeq() == 1, "the first submitted command has sequence number 1");
+  CHECK(allDistinct<uint64_t>(nextCommandSeq), "no two submitted commands get the same sequence number");
+  CHECK(nextCommandSeq() == uint64_t(kCounterThreads) * kCounterRounds + 2, "no sequence number is skipped");
+
+  CHECK((std::is_same<decltype(gMenuGen), std::atomic<uint32_t>>::value), "gMenuGen is a std::atomic<uint32_t>");
+  CHECK((std::is_same<decltype(gCmdSeq), std::atomic<uint32_t>>::value), "gCmdSeq is a std::atomic<uint32_t>");
+}
+
 int main() {
   testOutputLanes();
   testTapMasks();
+  testHijackCounters();
   if (failures) {
     std::fprintf(stderr, "%d check(s) failed\n", failures);
     return 1;
