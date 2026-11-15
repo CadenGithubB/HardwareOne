@@ -54,7 +54,10 @@ ANSWERS = HERE / "fs_permission_answers.txt"
 OPTIONAL = ("static char asciiLower(", "static bool lowerEndsWith(", "static bool lowerBaseNameContains(")
 
 
-def generate(component: Path) -> str:
+def permission_pieces(component: Path) -> dict[str, str]:
+    """The production text for the harness markers: the transcript path policy,
+    the identity names and AuthContext, and the permission path with both
+    systemAuth forms (also used by test_guarded_path_normalize.py)."""
     fs = (component / "System_Filesystem.cpp").read_text()
     fs_h = (component / "System_Filesystem.h").read_text()
     user_h = (component / "System_User.h").read_text()
@@ -84,10 +87,13 @@ def generate(component: Path) -> str:
     pieces.append("namespace VFS {\n" + extract_block(vfs, "AuthContext systemAuth(const char* reason)")
                   + "\n\n" + extract_block(vfs, "AuthContext systemAuth(const char* scope, const char* reason)")
                   + "\n}  // namespace VFS")
+    return {"// INSERT_POLICY": policy, "// INSERT_IDENTITY": identity,
+            "// INSERT_PRODUCTION": "\n\n".join(pieces)}
 
+
+def generate(component: Path) -> str:
     harness = (HERE / "fs_permission_strings_harness.cpp").read_text()
-    for marker, value in (("// INSERT_POLICY", policy), ("// INSERT_IDENTITY", identity),
-                          ("// INSERT_PRODUCTION", "\n\n".join(pieces))):
+    for marker, value in permission_pieces(component).items():
         require(harness.count(marker) == 1, f"one {marker} marker")
         harness = harness.replace(marker, value)
     return harness

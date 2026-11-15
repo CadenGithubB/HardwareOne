@@ -3751,6 +3751,29 @@ and `--print` (write the report instead of comparing it).
 ctest --test-dir /tmp/hw1-hardwareone-host -R '^fs_permission_strings$' --output-on-failure
 ```
 
+`guarded_path_normalize` covers the guarded file calls. It runs the
+production `normalizeFsPath` and permission path (`System_Filesystem.cpp`)
+and `VFS::normalize`, `getStorageType`, the backend dispatchers (`exists`,
+`open`, `mkdir`, `remove`, `rename`, `rmdir`) and the guarded calls in front
+of them (`System_VFS.cpp`) on the counted Arduino String, with LittleFS and SD
+doubles that record every path they are handed. For about 5800 generated
+paths (every rule prefix with tails, slashes, `.` and `..`, spaces, tabs and
+case changes; token sequences of up to three pieces; every byte 0x80-0xFF;
+paths at 127, 128, 255 and 256 bytes and one past; embedded NULs) it prints
+`normalizeFsPath`'s answer and text, `normalize`, `getStorageType` and, for six
+identities, each guarded call's answer with the backend calls and their paths.
+The report's digest must equal that of the tree before the guarded calls
+stopped normalizing a second and a third time; `--baseline <directory>` builds
+an older tree beside it and compares the two reports line by line. In the
+same binary the backend path of every normalized path must be
+`normalize(normalizeFsPath(path))`, and a guarded call on a normalized path of
+14+ characters makes one String block (its normalized text). It takes `--cxx`,
+`--sanitize`, `--component <directory>`, `--baseline <directory>` and `--print`.
+
+```sh
+ctest --test-dir /tmp/hw1-hardwareone-host -R '^guarded_path_normalize$' --output-on-failure
+```
+
 This does not open a real browser; a user-role upload of a hostile name and a
 hotspot named `<b>x</b>` remain the on-device checks.
 

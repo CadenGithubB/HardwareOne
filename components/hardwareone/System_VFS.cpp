@@ -474,8 +474,34 @@ void noteSdWriteFailure(const char* hint) {
   gSdWritable = false;
 }
 
+// True when normalize(path) would hand back `path` unchanged, so it need not
+// be copied: a leading '/', no "//", no trailing '/' (root alone keeps it) and
+// no last byte that trim() drops (the first byte is the '/'). Every result of
+// normalizeFsPath passes unless its last segment ends in such a byte (e.g. a
+// space before a slash: "/a /" gives "/a "); a path with an embedded NUL is
+// left to normalize(), whose search stops there. The guarded calls hand their
+// normalizeFsPath text on, so their backend open and its getStorageType no
+// longer copy and normalize it a second and a third time.
+static bool alreadyNormalized(const String& path) {
+  const char* p = path.c_str();
+  const size_t n = path.length();
+  if (n == 0 || !p || p[0] != '/' || strlen(p) != n) return false;
+  if (n > 1 && p[n - 1] == '/') return false;
+  if (isspace(p[n - 1])) return false;
+  return strstr(p, "//") == nullptr;
+}
+
+// `path` itself when it is already normalized, else normalize(path) in
+// `scratch`: the text normalize(path) returns, either way.
+static const String& normalizedView(const String& path, String& scratch) {
+  if (alreadyNormalized(path)) return path;
+  scratch = normalize(path);
+  return scratch;
+}
+
 StorageType getStorageType(const String& path) {
-  String p = normalize(path);
+  String scratch;
+  const String& p = normalizedView(path, scratch);
   if (p == "/sd" || p.startsWith("/sd/")) return SDCARD;
   return INTERNAL;
 }
@@ -586,7 +612,8 @@ static FS* fsForPath(const String& path) {
 // ---- Backend dispatchers: private to this file. Every public operation is a
 // guarded call below that authorizes an identity first and then lands here.
 static bool exists(const String& path) {
-  String p = normalize(path);
+  String scratch;
+  const String& p = normalizedView(path, scratch);
   if (p.indexOf("..") >= 0) return false;  // reject traversal (matches guarded-op rejection)
   FsLockGuard guard("VFS.exists");
 
@@ -601,7 +628,8 @@ static bool exists(const String& path) {
 }
 
 static File open(const String& path, const char* mode = FILE_READ, bool create = false) {
-  String p = normalize(path);
+  String scratch;
+  const String& p = normalizedView(path, scratch);
   if (p.indexOf("..") >= 0) return File();  // reject traversal (matches guarded-op rejection)
   FsLockGuard guard("VFS.open");
 
@@ -628,7 +656,8 @@ static File open(const String& path, const char* mode = FILE_READ, bool create =
 }
 
 static bool mkdir(const String& path) {
-  String p = normalize(path);
+  String scratch;
+  const String& p = normalizedView(path, scratch);
   if (p.indexOf("..") >= 0) return false;  // reject traversal (matches guarded-op rejection)
   FsLockGuard guard("VFS.mkdir");
 
@@ -654,7 +683,8 @@ static void postFileDeleted(const char* path) {
 }
 
 static bool remove(const String& path) {
-  String p = normalize(path);
+  String scratch;
+  const String& p = normalizedView(path, scratch);
   if (p.indexOf("..") >= 0) return false;  // reject traversal (matches guarded-op rejection)
   FsLockGuard guard("VFS.remove");
 
@@ -671,8 +701,9 @@ static bool remove(const String& path) {
 }
 
 static bool rename(const String& pathFrom, const String& pathTo) {
-  String from = normalize(pathFrom);
-  String to = normalize(pathTo);
+  String fromScratch, toScratch;
+  const String& from = normalizedView(pathFrom, fromScratch);
+  const String& to = normalizedView(pathTo, toScratch);
   if (from.indexOf("..") >= 0 || to.indexOf("..") >= 0) return false;  // reject traversal
 
   StorageType tf = getStorageType(from);
@@ -696,7 +727,8 @@ static bool rename(const String& pathFrom, const String& pathTo) {
 }
 
 static bool rmdir(const String& path) {
-  String p = normalize(path);
+  String scratch;
+  const String& p = normalizedView(path, scratch);
   if (p.indexOf("..") >= 0) return false;  // reject traversal (matches guarded-op rejection)
   FsLockGuard guard("VFS.rmdir");
 

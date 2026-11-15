@@ -19,6 +19,10 @@ import subprocess
 import sys
 import tempfile
 
+# getStorageType reads an already normalized path in place through these
+# (an older tree has neither).
+NORMALIZED_VIEW = ('static bool alreadyNormalized(', 'static const String& normalizedView(')
+
 HERE = Path(__file__).resolve().parent
 
 def client_contracts(read, extract_block):
@@ -78,7 +82,8 @@ def main():
     # This lets the current regressions run against the pre-fix implementation.
     harness = (HERE / 'espnow_fs_transcript_privacy_harness.cpp').read_text()
     routing = '\n\n'.join(extract_block(vfs, marker) for marker in
-                            ('String normalize(', 'StorageType getStorageType(',
+                            ('String normalize(', *[m for m in NORMALIZED_VIEW if m in vfs],
+                             'StorageType getStorageType(',
                              'String stripSdPrefix('))
     reader = vfs_header[vfs_header.index('struct DirectoryEntry {'):
                         vfs_header.index('bool getStats(StorageType type')]

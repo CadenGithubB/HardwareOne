@@ -18,6 +18,10 @@ import tempfile
 from test_mqtt_boolean_commands import extract_macro
 from test_web_batch_handlers import extract_block, require
 
+# getStorageType reads an already normalized path in place through these
+# (an older tree has neither).
+NORMALIZED_VIEW = ("static bool alreadyNormalized(", "static const String& normalizedView(")
+
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
 
@@ -37,7 +41,8 @@ def generate(baseline: Path | None) -> str:
         "FsLockGuard::~FsLockGuard()"))
     vfs, header = read("System_VFS.cpp"), read("System_VFS.h")
     paths = "namespace VFS {\n" + "\n".join(extract_block(vfs, marker) for marker in (
-        "String normalize(", "StorageType getStorageType(", "String stripSdPrefix(",
+        "String normalize(", *[m for m in NORMALIZED_VIEW if m in vfs], "StorageType getStorageType(",
+        "String stripSdPrefix(",
         "size_t listVirtualEntries(")) + "\n}\n"
     reader = "namespace VFS {\n" + header[header.index("struct DirectoryEntry {"):
         header.index("bool getStats(StorageType type")]

@@ -1790,23 +1790,33 @@ bool normalizeFsPath(const String& in, String& out) {
   // Rebuilding from segments makes all three impossible by construction.
   // NOTE: only a segment that is exactly "." is dropped — dotFILES such as
   // /logging_captures/sensors/.anchors.csv must survive untouched.
-  String trimmed = in;
-  trimmed.trim();
-  if (trimmed.length() == 0) return false;
+  //
+  // The text is read in place between the bounds String::trim() keeps (the
+  // same isspace tests from each end; `in` holds no NUL by now), so no trimmed
+  // copy is made. A caller that passes one String as both arguments gets the
+  // copy the old code made, since `out` is cleared before `in` is read.
+  if (&in == &out) {
+    const String copy = in;
+    return normalizeFsPath(copy, out);
+  }
+  const char* text = in.c_str();
+  size_t i = 0;
+  size_t n = in.length();
+  while (i < n && isspace(text[i])) i++;
+  while (n > i && isspace(text[n - 1])) n--;
+  if (n == i) return false;
 
   out = "";
-  out.reserve(trimmed.length() + 1);
-  const size_t n = trimmed.length();
-  size_t i = 0;
+  out.reserve((n - i) + 1);
   while (i < n) {
-    while (i < n && trimmed[i] == '/') i++;           // skip a run of slashes
+    while (i < n && text[i] == '/') i++;           // skip a run of slashes
     const size_t start = i;
-    while (i < n && trimmed[i] != '/') i++;           // segment is [start, i)
+    while (i < n && text[i] != '/') i++;           // segment is [start, i)
     const size_t len = i - start;
-    if (len == 0) continue;                           // trailing slash(es)
-    if (len == 1 && trimmed[start] == '.') continue;  // drop no-op "." segment
+    if (len == 0) continue;                        // trailing slash(es)
+    if (len == 1 && text[start] == '.') continue;  // drop no-op "." segment
     out += '/';
-    for (size_t k = start; k < i; k++) out += trimmed[k];
+    for (size_t k = start; k < i; k++) out += text[k];
   }
   if (out.length() == 0) out = "/";  // "/", "///", "/.", "/./" all mean root
   return true;

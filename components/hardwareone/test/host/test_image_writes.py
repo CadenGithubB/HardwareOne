@@ -17,6 +17,10 @@ import tempfile
 
 from test_web_batch_handlers import extract_block, require
 
+# getStorageType reads an already normalized path in place through these
+# (an older tree has neither).
+NORMALIZED_VIEW = ("static bool alreadyNormalized(", "static const String& normalizedView(")
+
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
 
@@ -43,7 +47,8 @@ def generate(baseline: Path | None) -> str:
         "value_ += value.value_; return true; }\n  String& operator+=(const String& value)")
     vfs, vfs_header = read("System_VFS.cpp"), read("System_VFS.h")
     paths = "namespace VFS {\n" + "\n".join(extract_block(vfs, marker) for marker in (
-        "String normalize(", "StorageType getStorageType(", "String stripSdPrefix(",
+        "String normalize(", *[m for m in NORMALIZED_VIEW if m in vfs], "StorageType getStorageType(",
+        "String stripSdPrefix(",
         "size_t listVirtualEntries(")) + "\n}\n"
     # The stale-temporary sweep walks the folder with the shared directory reader.
     reader = "namespace VFS {\n" + vfs_header[vfs_header.index("struct DirectoryEntry {"):

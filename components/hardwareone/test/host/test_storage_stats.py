@@ -17,6 +17,10 @@ import tempfile
 
 from test_web_batch_handlers import extract_block, require
 
+# getStorageType reads an already normalized path in place through these
+# (an older tree has neither).
+NORMALIZED_VIEW = ("static bool alreadyNormalized(", "static const String& normalizedView(")
+
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
 
@@ -46,7 +50,7 @@ def main() -> None:
                       vfs.index("// Why both flags exist:")]
     definitions += "\n" + extract_block(vfs, "struct FreshCapacitySample") + ";\n"
     definitions += "\n\n".join(extract_block(vfs, marker) for marker in (
-        "String normalize(", "StorageType getStorageType(",
+        "String normalize(", *[m for m in NORMALIZED_VIEW if m in vfs], "StorageType getStorageType(",
         "static FreshCapacitySample sampleCapacityFreshLocked(",
         "bool getStats(", "bool getStatsSnapshot(", "void invalidateStatsSnapshot("))
     harness = (HERE / "storage_stats_harness.cpp").read_text()

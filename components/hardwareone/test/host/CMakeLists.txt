@@ -2360,6 +2360,14 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_fs_permission_strings.py
           ${SETUP_MQTT_TEST_ARGS})
+# A guarded file call normalizes its path once: normalizeFsPath reads it in
+# place, and the backend and getStorageType take an already normalized path
+# as it is. Answers and backend paths equal the tree before, over ~5800 paths.
+add_test(
+  NAME guarded_path_normalize
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_guarded_path_normalize.py
+          ${SETUP_MQTT_TEST_ARGS})
 # No JSON document in the firmware sources takes the default (internal
 # malloc) allocator; the documents of the 2026-11-14 heap sweep are
 # PSRAM_JSON_DOC. The harnesses that run them check the allocator.
