@@ -17,6 +17,7 @@
 #include "System_Battery.h"
 #include "System_BuildConfig.h"
 #include "System_Command.h"
+#include "System_Deadline.h"  // deadlinePending: the timed dirty deadline
 #include "System_Icons.h"
 #include "System_RamFlush.h"
 #include "System_Settings.h"
@@ -3572,7 +3573,13 @@ static unsigned long oledLastRenderedSensorSeq = 0;
 // makes an auth-boundary request's repaint visible to the main-loop reader.
 static std::atomic<uint32_t> oledDirtySeq{1};
 static uint32_t oledConsumedDirtySeq = 0;    // != oledDirtySeq → forces the first render
-static unsigned long oledDirtyUntilMs = 0;  // Keep rendering dirty until this time (for timed popups)
+// Keep rendering dirty until this millis() deadline (timed popups); 0 = none.
+// It holds the latest mark that is still ahead and goes back to 0 once it has
+// passed. As a running maximum of raw millis() values it stayed above millis()
+// after the 49.7-day wrap for as long as the device had been up, so every
+// frame was repainted and later marks, being smaller, were dropped. Atomic:
+// a mark may arrive from another task while the frame loop clears a passed one.
+static std::atomic<uint32_t> oledDirtyUntilMs{0};
 
 // Snapshot of the three counters taken when the in-flight frame committed to
 // rendering. oledClearDirty() records these rather than "whatever is current
@@ -3597,7 +3604,15 @@ void oledMarkDirtyMode(OledMode mode) {
 }
 
 void oledMarkDirtyUntil(unsigned long untilMs) {
-  if (untilMs > oledDirtyUntilMs) oledDirtyUntilMs = untilMs;
+  const uint32_t nowMs = (uint32_t)millis();
+  const uint32_t requestedMs = (uint32_t)untilMs;
+  if (!deadlinePending(requestedMs, nowMs)) return;  // 0 or already reached: nothing to keep alive
+  // Take the mark when none is running or when it ends later than the one
+  // that is. "Later" is the signed 32-bit distance, right across the wrap.
+  uint32_t currentMs = oledDirtyUntilMs.load();
+  while ((!deadlinePending(currentMs, nowMs) || (int32_t)(requestedMs - currentMs) > 0) &&
+         !oledDirtyUntilMs.compare_exchange_weak(currentMs, requestedMs)) {
+  }
 }
 
 bool oledIsDirty() {
@@ -3609,7 +3624,14 @@ bool oledIsDirty() {
   if (inputActivitySequence(inputSeq, 5) && inputSeq != oledLastRenderedGamepadSeq) return true;
   if (gSensorStatusSeq != oledLastRenderedSensorSeq) return true;
   if (oledPairingRibbonActive()) return true;  // Continuous render during notification animations
-  if (millis() < oledDirtyUntilMs) return true;  // Timed dirty (popup auto-dismiss, etc.)
+  // Timed dirty (popup auto-dismiss, etc.). A deadline that has passed is set
+  // back to 0, unless a newer mark replaced it meanwhile, so it cannot read as
+  // ahead again when millis() has run on by another 24.9 days.
+  uint32_t untilMs = oledDirtyUntilMs.load();
+  if (untilMs != 0) {
+    if (deadlinePending(untilMs, (uint32_t)millis())) return true;
+    oledDirtyUntilMs.compare_exchange_strong(untilMs, 0);
+  }
   return false;
 }
 

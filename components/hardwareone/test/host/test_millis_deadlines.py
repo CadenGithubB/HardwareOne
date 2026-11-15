@@ -13,6 +13,14 @@ Source rules: each listed deadline variable is asked through deadlinePending()
 in its file, and none of the old forms is left for it: a comparison with
 millis() through < or >=, or a signed difference without the zero test.
 
+The OLED timed dirty deadline (OLED_Utils.cpp) is run as production code: the
+definition of oledDirtyUntilMs, oledMarkDirtyUntil and oledIsDirty against a
+settable 32-bit clock. It was a running maximum of raw millis() values: after
+the wrap the last value stayed above millis() for days, oledIsDirty() was true
+on every check and later marks were dropped. A mark must keep the frame dirty
+until it is reached and no longer, before, across and after the wrap, and a
+passed deadline must be cleared.
+
 Options: --cxx <compiler>, --sanitize (ASan + UBSan), --component <dir> to run
 the same cases and rules against another components/hardwareone directory.
 """
@@ -27,7 +35,7 @@ import subprocess
 import sys
 import tempfile
 
-from test_web_batch_handlers import require
+from test_web_batch_handlers import extract_block, require
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
@@ -81,6 +89,20 @@ def site_failures(component: Path) -> list[str]:
     return failures
 
 
+def oled_dirty_unit(component: Path) -> str:
+    utils = (component / "OLED_Utils.cpp").read_text()
+    state = re.search(r"^static [^\n]*\boledDirtyUntilMs\b[^\n]*$", utils, re.M)
+    require(state is not None, "OLED_Utils.cpp defines oledDirtyUntilMs")
+    functions = [extract_block(utils, marker) for marker in
+                 ("void oledMarkDirtyUntil(unsigned long untilMs)", "bool oledIsDirty()")]
+    harness = (HERE / "oled_dirty_deadline_harness.cpp").read_text()
+    for marker, text in (("// INSERT_STATE", state.group(0)),
+                         ("// INSERT_PRODUCTION", "\n\n".join(functions))):
+        require(harness.count(marker) == 1, f"one insertion marker: {marker}")
+        harness = harness.replace(marker, text)
+    return harness
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cxx", default=os.environ.get("CXX") or shutil.which("c++"))
@@ -90,28 +112,36 @@ def main() -> None:
     require(bool(args.cxx), "a host C++17 compiler is required")
     component = args.component.resolve()
     failures = []
-    if not (component / "System_Deadline.h").exists():
-        failures.append("System_Deadline.h, the deadline owner, does not exist")
-    else:
-        flags = ["-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic", "-I", str(component)]
-        if args.sanitize:
-            flags += ["-fsanitize=address,undefined", "-fno-sanitize-recover=all",
-                      "-fno-omit-frame-pointer", "-g"]
-        with tempfile.TemporaryDirectory(prefix="hw1-millis-deadlines-") as directory:
-            binary = Path(directory) / "millis_deadlines"
-            built = subprocess.run([args.cxx, *flags, str(HERE / "millis_deadlines_harness.cpp"),
-                                    "-o", str(binary)], timeout=180)
-            if built.returncode != 0:
-                failures.append("the deadline harness does not compile")
+    # The harnesses include System_Deadline.h; a base tree without it takes this tree's.
+    flags = ["-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic", "-I", str(component), "-I", str(COMPONENT)]
+    if args.sanitize:
+        flags += ["-fsanitize=address,undefined", "-fno-sanitize-recover=all",
+                  "-fno-omit-frame-pointer", "-g"]
+    with tempfile.TemporaryDirectory(prefix="hw1-millis-deadlines-") as directory:
+        work = Path(directory)
+
+        def build_and_run(name: str, source: Path) -> None:
+            binary = work / name
+            if subprocess.run([args.cxx, *flags, str(source), "-o", str(binary)], timeout=180).returncode != 0:
+                failures.append(f"the {name} harness does not compile")
             elif subprocess.run([str(binary)], timeout=60).returncode != 0:
-                failures.append("the deadline harness failed")
+                failures.append(f"the {name} harness failed")
+
+        if not (component / "System_Deadline.h").exists():
+            failures.append("System_Deadline.h, the deadline owner, does not exist")
+        else:
+            build_and_run("millis_deadlines", HERE / "millis_deadlines_harness.cpp")
+        dirty = work / "oled_dirty_deadline.cpp"
+        dirty.write_text(oled_dirty_unit(component))
+        build_and_run("oled_dirty_deadline", dirty)
     failures += site_failures(component)
     if failures:
         for failure in failures:
             print(f"FAIL: {failure}", file=sys.stderr)
         print(f"millis() deadlines: {len(failures)} failure(s)", file=sys.stderr)
         sys.exit(1)
-    print(f"millis() deadlines: the owner header and {len(SITES)} deadline variables passed", flush=True)
+    print(f"millis() deadlines: the owner header, {len(SITES)} deadline variables and the OLED dirty deadline passed",
+          flush=True)
 
 
 if __name__ == "__main__":

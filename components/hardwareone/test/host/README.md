@@ -3783,6 +3783,12 @@ The table holds the four deadlines that use 0 for "none" or "now" (glasses LLM n
 transcription poll, R1 Health refusal flash) and the five file-scope UI deadlines that were compared with
 `millis()` directly (login and change-password error boxes, settings editor error and quick-settings status,
 the event stream's notice burst).
+The same suite runs the OLED timed dirty deadline as production code: the definition of `oledDirtyUntilMs`,
+`oledMarkDirtyUntil` and `oledIsDirty` (`OLED_Utils.cpp`) with every other reason for "dirty" quiet. A mark keeps
+the frame dirty until it is reached and no longer, a later mark extends and an earlier one does not shorten; a
+mark made on day 40 does not keep the frame dirty after the wrap (the old running maximum of raw `millis()`
+values did, for 40 days, and dropped every later mark as smaller); a mark across the wrap works on both sides; a
+passed deadline is set back to 0.
 
 ## ESP-NOW peer message store
 
