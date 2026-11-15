@@ -3257,9 +3257,11 @@ const char* validateConditionSyntax(const char* condition) {
     return "Condition must start with 'IF'";
   }
 
-  // Find THEN (case-insensitive)
+  // Find THEN (case-insensitive). The bound is written as a sum: `len - 5`
+  // wraps for a text shorter than five characters, and the scan then reads
+  // past the terminator.
   const char* thenPos = nullptr;
-  for (size_t i = 3; i < len - 5; i++) {
+  for (size_t i = 3; i + 5 < len; i++) {
     if ((cond[i] == ' ' || cond[i] == '\t') &&
         (cond[i+1] == 'T' || cond[i+1] == 't') &&
         (cond[i+2] == 'H' || cond[i+2] == 'h') &&
@@ -3969,7 +3971,7 @@ const char* evaluateConditionalChain(const char* chainStr, char* outBuf, size_t 
       size_t actionEnd = len;
 
       // Look for next conditional keyword
-      for (size_t i = actionStart; i < len - 7; i++) {
+      for (size_t i = actionStart; i + 7 < len; i++) {
         if (strncmp(input + i, " ELSE IF ", 9) == 0 || strncmp(input + i, " ELSE ", 6) == 0) {
           actionEnd = i;
           break;
@@ -4078,9 +4080,11 @@ const char* executeConditionalCommand(const char* command, const char* owner, co
     prefix[3] = '\0';
     
     if (strcmp(prefix, "IF ") == 0) {
-      // Find THEN position (case-insensitive)
+      // Find THEN position (case-insensitive). The bound is written as a sum:
+      // `cmdLen - 5` wraps for "IF " plus 0 or 1 characters, and the scan then
+      // reads past the terminator.
       int thenPos = -1;
-      for (size_t i = 3; i < cmdLen - 5; i++) {
+      for (size_t i = 3; i + 5 < cmdLen; i++) {
         if ((cmdStr[i] == ' ' || cmdStr[i] == '\t') &&
             (cmdStr[i+1] == 'T' || cmdStr[i+1] == 't') &&
             (cmdStr[i+2] == 'H' || cmdStr[i+2] == 'h') &&
@@ -4099,7 +4103,7 @@ const char* executeConditionalCommand(const char* command, const char* owner, co
 
       // Find ELSE position (case-insensitive)
       int elsePos = -1;
-      for (size_t i = thenPos + 5; i < cmdLen - 5; i++) {
+      for (size_t i = thenPos + 5; i + 5 < cmdLen; i++) {
         if ((cmdStr[i] == ' ' || cmdStr[i] == '\t') &&
             (cmdStr[i+1] == 'E' || cmdStr[i+1] == 'e') &&
             (cmdStr[i+2] == 'L' || cmdStr[i+2] == 'l') &&

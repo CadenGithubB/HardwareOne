@@ -3808,6 +3808,15 @@ to about 4294967000 ms when the command ran after the due time and before the ma
 right across the wrap. Source rules: `cmd_mqttstatus` copies the main loop's stamp before it reads the clock
 and prints that function's result; the reply line is unchanged.
 
+`automation_condition_bounds` is about a size, not a time, and sits here with the group that fixed it. It
+compiles the production `validateConditionSyntax` and `executeConditionalCommand` (`System_Automation.cpp`).
+Their scan for ` THEN ` was bounded by `i < len - 5` on a `size_t`: for a command of 3 or 4 characters that
+starts with `IF ` the bound wraps and the scan reads past the terminator. Each short command is followed, after
+its terminator, by the text ` THEN go ELSE no`, so a scan that leaves the command finds it (and under
+`--sanitize` the command also sits in an exactly sized heap block). Well-formed commands, the shortest complete
+ones included, behave as before. Source rule: no `for` in the file has a `size_t` bound of the form
+`i < length - n`.
+
 ## ESP-NOW peer message store
 
 `espnow_message_store` compiles the whole message-buffer section of

@@ -2377,6 +2377,13 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_mqtt_next_publish.py
           ${SETUP_MQTT_TEST_ARGS})
+# Automation command parser: the THEN and ELSE scans stay inside a 3 or 4
+# character "IF " command (the size_t bound `len - 5` wrapped).
+add_test(
+  NAME automation_condition_bounds
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_automation_condition_bounds.py
+          ${SETUP_MQTT_TEST_ARGS})
 # Self-registration: /register/submit hands the decoded fields to
 # submitAccountRequest byte-exact (spaced and quoted passphrases), owner
 # refusals do not count toward the login lockout, anonymous `userrequest` is
