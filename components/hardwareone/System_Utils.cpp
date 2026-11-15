@@ -765,18 +765,30 @@ namespace {
     return String("phone pair new (code redacted)");
   }
 
-  static bool redactRuleMatches(const String& command,
+  // True when the line's first words are the rule's words. The caller parses
+  // the line once for every row. The row's words are read in place from its
+  // prefix, which holds lowercase words separated by single spaces (no quote,
+  // no tab: the host test redact_audit checks every row), so splitting it on
+  // spaces gives the words CommandArgs gave for it. Each word is compared as
+  // String::equalsIgnoreCase compares: the same length, then tolower() on each
+  // byte up to the line word's first NUL.
+  static bool redactRuleMatches(const CommandArgs& actual,
                                 const char* rulePrefix) {
-    CommandArgs actual(command);
-    String expectedLine(rulePrefix ? rulePrefix : "");
-    expectedLine.trim();
-    CommandArgs expected(expectedLine);
-    if (expected.count() == 0 || actual.count() < expected.count())
-      return false;
-    for (int i = 0; i < expected.count(); ++i) {
-      if (!actual.arg(i).equalsIgnoreCase(expected.arg(i))) return false;
+    const char* p = rulePrefix ? rulePrefix : "";
+    int words = 0;
+    for (;;) {
+      while (*p && isspace(static_cast<unsigned char>(*p))) ++p;
+      if (!*p) break;
+      const char* word = p;
+      while (*p && !isspace(static_cast<unsigned char>(*p))) ++p;
+      if (words >= actual.count()) return false;
+      const String& token = actual.arg(words++);
+      if (token.length() != static_cast<unsigned int>(p - word)) return false;
+      for (const char* t = token.c_str(); *t; ++t, ++word) {
+        if (tolower(*t) != tolower(*word)) return false;
+      }
     }
-    return true;
+    return words > 0;
   }
 
   // Rule table (extend here to add new redactions)
@@ -902,18 +914,37 @@ String redactCmdForAudit(const String& argsInput,
   // Addresses first: masking one keeps it a single token, so the rules below
   // still find their positions.
   String c = maskMacTokens(argsInput);
-  String cl = c; cl.toLowerCase();
 
   // Credential verbs accept the command registry's full whitespace grammar.
   // Mask login's password before the legacy literal-prefix rule table so a
   // tab/CR/VT/FF separator cannot bypass redaction.
+  //
+  // The verb is found on c itself, each byte read as a lower-cased copy of c
+  // held it (String::toLowerCase stops at the first NUL), and compared as
+  // `== "login"` compared it (strcmp, which also stops at a NUL).
+  const char* text = c.c_str();
+  const int textLength = c.length();
+  int lowered = 0;
+  while (text && lowered < textLength && text[lowered]) lowered++;
+  auto verbByte = [text, lowered](int i) -> char {
+    return i < lowered ? static_cast<char>(tolower(text[i])) : text[i];
+  };
   int verbStart = 0;
-  while (verbStart < cl.length() &&
-         isspace(static_cast<unsigned char>(cl[verbStart]))) verbStart++;
+  while (verbStart < textLength &&
+         isspace(static_cast<unsigned char>(verbByte(verbStart)))) verbStart++;
   int verbEnd = verbStart;
-  while (verbEnd < cl.length() &&
-         !isspace(static_cast<unsigned char>(cl[verbEnd]))) verbEnd++;
-  if (cl.substring(verbStart, verbEnd) == "login") {
+  while (verbEnd < textLength &&
+         !isspace(static_cast<unsigned char>(verbByte(verbEnd)))) verbEnd++;
+  static const char kLoginVerb[] = "login";
+  constexpr int kLoginVerbLength = sizeof(kLoginVerb) - 1;
+  bool verbIsLogin = verbEnd - verbStart >= kLoginVerbLength;
+  for (int k = 0; verbIsLogin && k < kLoginVerbLength; ++k) {
+    verbIsLogin = verbByte(verbStart + k) == kLoginVerb[k];
+  }
+  if (verbIsLogin && verbEnd - verbStart > kLoginVerbLength) {
+    verbIsLogin = verbByte(verbStart + kLoginVerbLength) == '\0';
+  }
+  if (verbIsLogin) {
     CommandArgs loginArgs(c);
     // Login grammar has no escaping. Treat malformed or surprising input as
     // entirely secret after the username instead of trying to preserve an
@@ -932,9 +963,10 @@ String redactCmdForAudit(const String& argsInput,
     return safe;
   }
 
+  const CommandArgs actual(c);
   for (size_t i = 0; i < (sizeof(kRules) / sizeof(kRules[0])); ++i) {
     const RedactRule& r = kRules[i];
-    if (!redactRuleMatches(c, r.prefix)) continue;
+    if (!redactRuleMatches(actual, r.prefix)) continue;
 
     if (r.type == CALL_HANDLER && r.handler) {
       return r.handler(c);

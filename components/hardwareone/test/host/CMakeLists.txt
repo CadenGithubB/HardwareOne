@@ -2353,6 +2353,14 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_command_trace_copies.py
           ${SETUP_MQTT_TEST_ARGS})
+# The command audit redaction parses the line once and reads the rule words in
+# place; its text equals the tree before for ~32000 generated lines, and its
+# String blocks per call are pinned.
+add_test(
+  NAME redact_audit
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_redact_audit.py
+          ${SETUP_MQTT_TEST_ARGS})
 # The file permission path gives the answers of fs_permission_answers.txt for
 # every rule of the path table and makes no String on the way.
 add_test(

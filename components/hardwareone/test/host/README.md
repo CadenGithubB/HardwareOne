@@ -3740,6 +3740,33 @@ redacts its line only inside its trace, and the production `DEBUG_CMD_FLOWF`
 ctest --test-dir /tmp/hw1-hardwareone-host -R '^command_trace_copies$' --output-on-failure
 ```
 
+`redact_audit` covers the command audit redaction. It runs the production
+`redactCmdForAudit` (both overloads), `maskMacTokens`, the rule table and its
+helpers (`System_Utils.cpp`) and `CommandArgs` (`System_Command.cpp`) on the
+counted Arduino String built with the device's inline capacity (13
+characters); `resolveCommand` is the production name matcher
+(`System_CommandLookupCore.h`) over a name list. The line is parsed once for
+the rule loop, each row's words are read in place from its prefix, and the
+`login` verb is found without a lower-cased copy. A fixed corpus of about
+21600 lines (every rule prefix in sixteen spellings with 33 tails, the login
+forms, blank lines, bytes 0x80-0xFF, embedded NULs, lines of 13 to 1024
+bytes, 4000 random lines) is run through the one-argument form, the
+two-argument form with and without an entry, and the one-argument form again
+on its own result; the report's digest must equal that of the tree before.
+Every registered command name (with none to thirteen words, upper case, tabs,
+a quoted word, a password-like word) is run the same way, and in the same
+binary every rule row's match must equal a copy of the old match.
+`--baseline <directory>` builds an older tree beside it and compares both
+reports line by line. The String blocks of one call are pinned (`status`
+0, before 27; a 20-character line of short words 2, before 58), and a source
+check keeps every rule prefix to lowercase words separated by single spaces.
+It takes `--cxx`, `--sanitize`, `--component <directory>`, `--baseline
+<directory>` and `--print-counts`.
+
+```sh
+ctest --test-dir /tmp/hw1-hardwareone-host -R '^redact_audit$' --output-on-failure
+```
+
 `fs_permission_strings` covers the file permission path. It runs the
 production path-rule table, `lookupRule`, the filename tests
 (`hasSensitiveExtension`, `isImageFile` and their in-place helpers),
