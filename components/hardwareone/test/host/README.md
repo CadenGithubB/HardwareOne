@@ -3740,9 +3740,10 @@ system contexts, a scoped user), the six answers, `getPermissions` and the
 reason `logFsAccessDeny` gives for each refusal; then a `pathWithinScope`
 matrix and the contexts `systemAuth` builds. The report must equal
 `fs_permission_answers.txt`, printed by the tree before these functions
-stopped copying. No permission query makes a String block. It takes `--cxx`,
-`--sanitize`, `--component <directory>` and `--print` (write the report
-instead of comparing it).
+stopped copying. No permission query makes a String block, and `systemAuth`
+makes one for its `system:<reason>` text and one for a scope longer than the
+inline capacity. It takes `--cxx`, `--sanitize`, `--component <directory>`
+and `--print` (write the report instead of comparing it).
 
 ```sh
 ctest --test-dir /tmp/hw1-hardwareone-host -R '^fs_permission_strings$' --output-on-failure

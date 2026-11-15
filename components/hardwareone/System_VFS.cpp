@@ -1505,13 +1505,16 @@ bool rmdirGuarded(const String& path, const AuthContext& ctx) {
 // Constructed fresh on each call. The `reason` string is folded into the
 // AuthContext.path so that any [PERM] denial (which won't happen for
 // system, but the pattern stays consistent) and any future audit log
-// records why this code was running as system. Cheap — three String
-// assignments.
+// records why this code was running as system. The "system:<reason>" text
+// is made in its own block, sized once (a String sum and the copy the
+// conditional made of it were two).
 AuthContext systemAuth(const char* reason) {
   AuthContext ctx;
   ctx.transport = SOURCE_INTERNAL;
   ctx.user      = kSystemUser;
-  ctx.path      = reason ? String("system:") + reason : String("system:");
+  ctx.path.reserve(7 + (reason ? strlen(reason) : 0));
+  ctx.path      = "system:";
+  if (reason) ctx.path += reason;
   ctx.ip        = "local";
   ctx.sid       = "";
   ctx.opaque    = nullptr;

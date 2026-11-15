@@ -11,7 +11,8 @@
 // the reason logFsAccessDeny names for each refusal. The runner compares that
 // report byte for byte with fs_permission_answers.txt (the answers of the
 // tree before these functions stopped copying) on stdout; the String block
-// counts go to stderr and are checked here: a permission query makes none.
+// counts go to stderr and are checked here: a permission query makes none,
+// systemAuth makes one per text it keeps.
 #include <Arduino.h>
 #include "string_heap_count.h"
 
@@ -282,9 +283,13 @@ int main() {
   }
 
   // The block checks come after the report, so an older tree still prints
-  // its answers. A permission query makes no String.
+  // its answers. A permission query makes no String; systemAuth makes one
+  // block for the kept "system:<reason>" text and one for a long scope.
   std::fprintf(stderr, "permission queries: %lu String blocks over %zu paths\n", queryBlocks, paths.size());
   check(queryBlocks == 0);
+  check(sAuthBlocks[0] == 1);
+  check(sAuthBlocks[1] == 2);
+  check(sAuthBlocks[2] == 0);
   std::fprintf(stderr, "fs permission strings passed (%u checks)\n", checks);
   return 0;
 }

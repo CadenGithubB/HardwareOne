@@ -6,9 +6,11 @@ lookupRule wrapped each rule prefix it tried in a String (String::startsWith
 of a const char*), checkPerm looked the rule up twice, the sensitive-extension
 and image tests each lower-cased a copy of the path (and the first one copied
 the base name) before the role was asked, though system and super ignore both
-answers, and pathWithinScope copied the scope twice. Now the rule prefixes
-and the scope are compared in place, and the filename tests read the path in
-place and run only for a role they apply to.
+answers, and pathWithinScope copied the scope twice. VFS::systemAuth made the
+"system:<reason>" text as a sum and then a copy of it. Now the rule prefixes
+and the scope are compared in place, the filename tests read the path in place
+and run only for a role they apply to, and systemAuth makes its text in one
+block.
 
 The production table and functions (System_Filesystem.cpp, System_VFS.cpp)
 run on the real Arduino String with its heap calls counted; the roster, the FS
@@ -21,7 +23,8 @@ eleven identities, the six canX answers, getPermissions and the reason
 logFsAccessDeny gives for each refusal; then a pathWithinScope matrix and the
 contexts systemAuth builds. That report must equal fs_permission_answers.txt,
 which the tree before the change printed. The harness then checks that no
-permission query made a String block.
+permission query made a String block and that systemAuth made one per kept
+text.
 
 Options: --cxx <compiler>, --sanitize, --component <dir> to run against
 another components/hardwareone directory, --print to write the report to
