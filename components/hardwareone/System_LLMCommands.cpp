@@ -30,9 +30,9 @@
 #include "System_Settings.h"
 #include "System_VFS.h"
 #include "System_CommandRegistry.h"
+#include "System_Utils.h"  // jsonAppendEscaped, RETURN_VALID_IF_VALIDATE_CSTR
 #if ENABLE_LLM_SOURCE_HTTP
 #include "System_LLMHttp.h"
-#include "System_Utils.h"  // RETURN_VALID_IF_VALIDATE_CSTR
 #endif
 
 #if ENABLE_LLM_SOURCE_ONBOARD
@@ -55,14 +55,16 @@ String llmListModels() {
   EXT_RAM_BSS_ATTR static LlmModelDesc rows[LLM_REGISTRY_MAX_MODELS];
   const size_t n = llmEnumerateModels(rows, LLM_REGISTRY_MAX_MODELS);
 
+  // id, name and path come from file names on the device and from what a
+  // remote source reports, so they are JSON-escaped.
   String json = "[";
   for (size_t k = 0; k < n; k++) {
     if (k) json += ",";
-    json += "{\"id\":\"";      json += rows[k].id;
-    json += "\",\"name\":\""; json += rows[k].name;
+    json += "{\"id\":\"";      jsonAppendEscaped(json, rows[k].id);
+    json += "\",\"name\":\""; jsonAppendEscaped(json, rows[k].name);
     json += "\",\"backend\":\""; json += llmBackendKindName(rows[k].backend);
     json += "\",\"size\":";   json += (unsigned long)rows[k].sizeKb * 1024UL;
-    json += ",\"path\":\"";   json += rows[k].path;
+    json += ",\"path\":\"";   jsonAppendEscaped(json, rows[k].path);
     json += "\",\"storage\":\"";
     json += (rows[k].storage == LLM_STORAGE_SD)     ? "sd"
           : (rows[k].storage == LLM_STORAGE_REMOTE) ? "remote" : "internal";

@@ -2,25 +2,29 @@
 """Hand-built web JSON replies and response-header storage.
 
 Compiles the production handleAutomationsExport, handleIconGet,
-handleFilesCreate and handleMicRecordingsList bodies (plus the
-shared jsonQuote / sendJsonError and the recordings-list builder where the
-tree has them) into web_json_replies_harness.cpp with real ArduinoJson and a
-local Arduino String stub. The fake httpd keeps header pointers and reads them
+handleFilesCreate, handleMicRecordingsList, handleVideoRecordingsList and
+llmListModels bodies (plus the shared jsonQuote / jsonAppendEscaped /
+sendJsonError and the recordings-list builder where the tree has them) into
+web_json_replies_harness.cpp with real ArduinoJson and a local Arduino String
+stub. The fake httpd keeps header pointers and reads them
 at httpd_resp_send, so a header value that dies first is an ASan
 use-after-free (run with --sanitize). Every JSON payload the harness prints is
 parsed here with Python's strict json module and compared with the text that
 went in: file names with backslashes, commas, colons, quotes and control
-characters; command errors with quotes and newlines.
+characters; command errors with quotes and newlines; video names with a colon
+(the size follows the last one); model ids, names and paths with quotes and
+backslashes.
 
 Options: --cxx <compiler>, --sanitize (ASan + UBSan), --case <name>.
 Not covered: the map feature, GPS track and LLM status replies (same helper,
-no harness), and the producer side of the recordings list.
+no harness), and the producer side of the recordings, video and model lists.
 """
 from __future__ import annotations
 
 import argparse
 import json
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -30,7 +34,7 @@ from test_web_batch_handlers import extract_block, json_text, request_body_reade
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
 JSON_INCLUDE = COMPONENT.parent / "hardwareone_libs" / "ArduinoJson" / "src"
-CASES = ("export", "icon", "files_create", "recordings")
+CASES = ("export", "icon", "files_create", "recordings", "videos", "llm_models")
 
 ARDUINO_STUB = r'''
 #pragma once
@@ -93,6 +97,17 @@ def required(source: str, marker: str) -> str:
     return extract_block(source, marker)
 
 
+def llm_model_types(backend: str) -> str:
+    """LlmBackendKind, the descriptor lengths and storage classes, and
+    LlmModelDesc, as System_LLMBackend.h defines them."""
+    defines = re.findall(r"(?m)^#define LLM_(?:MODEL_\w+_LEN|STORAGE_\w+|REGISTRY_MAX_MODELS)\s+\d+$",
+                         backend)
+    require(len(defines) == 7, f"LLM descriptor #defines: found {len(defines)}")
+    return "\n".join([extract_block(backend, "enum class LlmBackendKind : uint8_t") + ";",
+                      *defines,
+                      extract_block(backend, "struct LlmModelDesc") + ";"])
+
+
 def production() -> str:
     utils_cpp = (COMPONENT / "WebServer_Utils.cpp").read_text()
     server = (COMPONENT / "WebServer_Server.cpp").read_text()
@@ -115,6 +130,13 @@ def production() -> str:
     pieces.append(required(server, "esp_err_t handleFilesCreate("))
     pieces += optional(sensors, "static String buildRecordingsListJson(")
     pieces.append(required(sensors, "esp_err_t handleMicRecordingsList("))
+    video = (COMPONENT / "System_Camera_Video.cpp").read_text()
+    pieces.append(required(video, "esp_err_t handleVideoRecordingsList("))
+    pieces.append(llm_model_types((COMPONENT / "System_LLMBackend.h").read_text()))
+    pieces.append("const char* llmBackendKindName(LlmBackendKind k);\n"
+                  "size_t llmEnumerateModels(LlmModelDesc* out, size_t cap);")
+    pieces.append(required((COMPONENT / "System_LLMCommands.cpp").read_text(),
+                           "String llmListModels()"))
     return "\n\n".join(pieces)
 
 
@@ -163,6 +185,28 @@ def validate(case: str, found: dict[str, list[str]]) -> list[str]:
             expect([(f["name"], f["size"]) for f in reply.get("files", [])] == expected,
                    f"recordings files: {reply.get('files')!r}")
             expect(strict(found["RECORDINGS_EMPTY"][0]) == {"count": 0, "files": []}, "empty recordings")
+        elif case == "videos":
+            reply = strict(found["VIDEOS"][0])
+            expected = [("plain.avi", 10), ("12:30:05.avi", 20), ('q"uote.avi', 30),
+                        ("back\\slash.avi", 40), ("ctl\x01.avi", 5), ("zero.avi", 0)]
+            expect(reply.get("count") == len(expected), f"videos count: {reply.get('count')}")
+            expect(reply.get("sdAvailable") is True, f"videos sdAvailable: {reply.get('sdAvailable')!r}")
+            expect([(f["name"], f["size"]) for f in reply.get("files", [])] == expected,
+                   f"videos files: {reply.get('files')!r}")
+            expect(strict(found["VIDEOS_EMPTY"][0]) == {"count": 0, "sdAvailable": False, "files": []},
+                   "empty video list")
+        elif case == "llm_models":
+            reply = strict(found["LLM_MODELS"][0])
+            expected = [
+                {"id": "onboard:model.bin", "name": "model.bin", "backend": "onboard",
+                 "size": 2048 * 1024, "path": "/sd/llm/model.bin", "storage": "sd", "available": True},
+                {"id": 'cm5:a"b\\c', "name": 'Q"uoted\\name', "backend": "cm5",
+                 "size": 0, "path": "", "storage": "remote", "available": False},
+                {"id": 'onboard:we"ird.bin', "name": "tab\there", "backend": "onboard",
+                 "size": 1024, "path": '/llm/we"ird\\.bin', "storage": "internal", "available": True},
+            ]
+            expect(reply == expected, f"llm models: {reply!r}")
+            expect(strict(found["LLM_MODELS_EMPTY"][0]) == [], "empty model list")
     except (KeyError, IndexError) as missing:
         problems.append(f"missing payload {missing}")
     except json.JSONDecodeError as invalid:

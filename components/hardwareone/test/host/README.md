@@ -1060,9 +1060,11 @@ is unchanged. It takes `--cxx` and `--sanitize`; CTest runs it without
 arguments (`c++`, no sanitizers).
 
 `web_json_replies` compiles the production `handleAutomationsExport`,
-`handleIconGet`, `handleFilesCreate` and `handleMicRecordingsList`
-(plus `jsonQuote`, `sendJsonError` and the recordings-list
-builder) against a fake httpd that keeps header pointers and reads them at
+`handleIconGet`, `handleFilesCreate`, `handleMicRecordingsList`,
+`handleVideoRecordingsList` (`System_Camera_Video.cpp`) and `llmListModels`
+(`System_LLMCommands.cpp`, with `LlmModelDesc` taken from
+`System_LLMBackend.h`) (plus `jsonQuote`, `jsonAppendEscaped`, `sendJsonError`
+and the recordings-list builder) against a fake httpd that keeps header pointers and reads them at
 `httpd_resp_send`, with real ArduinoJson. Under `--sanitize` a header value
 that dies before the send is an ASan error (the `?id=` export disposition, the
 icon `X-Icon-Size`); the export filename keeps only `[A-Za-z0-9._-]`, at most
@@ -1072,9 +1074,11 @@ parses every printed payload with Python's strict
 `json` module: recordings named with a backslash, comma, colon, quote or
 control character; `files/create` errors with quotes, a backslash, a newline
 and a control character (folder and file branches); a 150-character name that
-must reach `filecreate` whole. Not
+must reach `filecreate` whole; `/api/videos` names with a quote, a backslash, a
+control character or a colon (the size is what follows the last colon);
+`/api/llm/models` ids, names and paths with a quote, a backslash or a tab. Not
 covered: the map, GPS track and LLM status replies (same helper, no harness)
-and the recordings producer in `System_Microphone.cpp`. Run with
+and the producers of the recordings, video and model lists. Run with
 `ctest --test-dir build -R '^web_json_replies$' --output-on-failure` (or the
 runner with `--sanitize` / `--case <name>`).
 

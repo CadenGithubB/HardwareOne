@@ -1,8 +1,9 @@
 // Hand-built web replies and header storage, run against the production
 // handler bodies that test_web_json_replies.py inserts:
 //   handleAutomationsExport (?id= and bulk), handleIconGet (?debug=1),
-//   handleFilesCreate, handleMicRecordingsList, and the shared
-//   jsonQuote / sendJsonError helpers.
+//   handleFilesCreate, handleMicRecordingsList, handleVideoRecordingsList,
+//   llmListModels, and the shared jsonQuote / jsonAppendEscaped /
+//   sendJsonError helpers.
 // httpd_resp_set_hdr keeps the caller's pointer and httpd_resp_send reads it,
 // as ESP-IDF does, so a header value that died before the send is a
 // use-after-free under ASan. JSON payloads are printed as "<tag>\t<payload>"
@@ -18,6 +19,7 @@
 #include <vector>
 
 #define ENABLE_MICROPHONE 1
+#define EXT_RAM_BSS_ATTR
 #define PSRAM_JSON_DOC(name) JsonDocument name
 #define DEBUG_HTTPF(...) ((void)0)
 
@@ -93,6 +95,8 @@ namespace VFS {
 // Unused once the export reads through readAutomationsJson; kept for older trees.
 namespace Scopes { [[maybe_unused]] constexpr const char* SYSTEM_STATE = "/system"; }
 [[maybe_unused]] static AuthContext systemAuth(const char*, const char*) { AuthContext ctx; ctx.user = "system"; return ctx; }
+static bool gSdAvailable = true;
+static bool isSdAvailable() { return gSdAvailable; }
 }
 bool tgRequireAuth(const AuthContext&) { return true; }
 bool webGuestAccessAllowed(httpd_req_t*, const AuthContext&) { return true; }
@@ -156,6 +160,10 @@ bool executeUnifiedWebCommand(httpd_req_t*, AuthContext&, const String& cmd, Str
 static std::string gRecordings;
 String getRecordingsList() { return gRecordings.c_str(); }
 struct ExecIdentityGuard { explicit ExecIdentityGuard(const AuthContext&) {} };
+
+// ---- video list fixture: getVideoRecordingsList() returns "name:size\n..." ----
+static std::string gVideos;
+String getVideoRecordingsList() { return gVideos.c_str(); }
 
 // INSERT_PRODUCTION
 
@@ -264,12 +272,70 @@ static void caseRecordings() {
   emit("RECORDINGS_EMPTY", empty.body);
 }
 
+static void caseVideos() {
+  // A name may hold ':' (the size follows the last one), a quote, a backslash
+  // or a control character.
+  gVideos = "plain.avi:10\n12:30:05.avi:20\nq\"uote.avi:30\nback\\slash.avi:40\n"
+            "ctl\x01.avi:5\nzero.avi:0";
+  VFS::gSdAvailable = true;
+  httpd_req_t req;
+  check(handleVideoRecordingsList(&req) == ESP_OK, "videos returns ESP_OK");
+  check(req.type == "application/json" && req.sends == 1, "videos sends one JSON reply");
+  emit("VIDEOS", req.body);
+  gVideos.clear();
+  VFS::gSdAvailable = false;
+  httpd_req_t empty;
+  check(handleVideoRecordingsList(&empty) == ESP_OK, "empty videos returns ESP_OK");
+  emit("VIDEOS_EMPTY", empty.body);
+  VFS::gSdAvailable = true;
+}
+
+// ---- model registry fixture (declared before the production block) ----
+static std::vector<LlmModelDesc> gModels;
+const char* llmBackendKindName(LlmBackendKind k) {
+  return k == LlmBackendKind::Onboard ? "onboard" : k == LlmBackendKind::Cm5 ? "cm5" : "none";
+}
+size_t llmEnumerateModels(LlmModelDesc* out, size_t cap) {
+  const size_t n = std::min(cap, gModels.size());
+  for (size_t i = 0; i < n; ++i) out[i] = gModels[i];
+  return n;
+}
+static LlmModelDesc model(const char* id, const char* name, LlmBackendKind backend, const char* path,
+                          uint32_t sizeKb, uint8_t storage, bool available) {
+  LlmModelDesc m{};
+  std::snprintf(m.id, sizeof(m.id), "%s", id);
+  std::snprintf(m.name, sizeof(m.name), "%s", name);
+  std::snprintf(m.path, sizeof(m.path), "%s", path);
+  m.backend = backend;
+  m.sizeKb = sizeKb;
+  m.storage = storage;
+  m.available = available;
+  return m;
+}
+
+static void caseLlmModels() {
+  // A file name on the device and a name a remote source reports can hold a
+  // quote, a backslash or a control character.
+  gModels = {
+      model("onboard:model.bin", "model.bin", LlmBackendKind::Onboard, "/sd/llm/model.bin", 2048,
+            LLM_STORAGE_SD, true),
+      model("cm5:a\"b\\c", "Q\"uoted\\name", LlmBackendKind::Cm5, "", 0, LLM_STORAGE_REMOTE, false),
+      model("onboard:we\"ird.bin", "tab\there", LlmBackendKind::Onboard, "/llm/we\"ird\\.bin", 1,
+            LLM_STORAGE_INTERNAL, true),
+  };
+  emit("LLM_MODELS", llmListModels().c_str());
+  gModels.clear();
+  emit("LLM_MODELS_EMPTY", llmListModels().c_str());
+}
+
 int main(int argc, char** argv) {
   const std::string which = argc > 1 ? argv[1] : "all";
   if (which == "export" || which == "all") caseExport();
   if (which == "icon" || which == "all") caseIcon();
   if (which == "files_create" || which == "all") caseFilesCreate();
   if (which == "recordings" || which == "all") caseRecordings();
+  if (which == "videos" || which == "all") caseVideos();
+  if (which == "llm_models" || which == "all") caseLlmModels();
   std::printf("DONE\t%d\n", failures);
   return failures ? 1 : 0;
 }

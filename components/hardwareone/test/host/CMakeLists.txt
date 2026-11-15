@@ -2274,9 +2274,9 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_mqtt_command_reply.py
           ${SETUP_MQTT_TEST_ARGS})
-# Hand-built web JSON replies (recordings list, files/create errors, SSE
-# notice) parse as strict JSON, and the automation export and icon debug
-# header values live until httpd_resp_send.
+# Hand-built web JSON replies (recordings list, video list, LLM model list,
+# files/create errors, SSE notice) parse as strict JSON, and the automation
+# export and icon debug header values live until httpd_resp_send.
 add_test(
   NAME web_json_replies
   COMMAND ${Python3_EXECUTABLE}

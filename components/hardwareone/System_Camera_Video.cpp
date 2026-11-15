@@ -37,6 +37,7 @@ static const char* VIDEO_FOLDER_SD = "/sd/VIDEOS";
 #include "WebServer_Utils.h"   // WEB_AUTH_OR_RETURN
 #include "WebServer_Server.h"  // makeWebAuthCtx
 #include "System_User.h"       // AuthContext, tgRequireAuth
+#include "System_Utils.h"      // jsonQuote
 #endif
 
 #if ENABLE_CAMERA_SENSOR
@@ -688,7 +689,9 @@ esp_err_t handleVideoRecordingsList(httpd_req_t* req) {
   String raw = getVideoRecordingsList();
 
   // Build the files array first so the count falls out of the same parse.
-  // List items are newline-separated "name:size".
+  // List items are newline-separated "name:size". A file name may itself hold
+  // ':', so the size is what follows the item's last ':' (getVideoRecordingsList
+  // always ends an item with ":<decimal size>"). Names are JSON-escaped.
   String files = "";
   int count = 0;
   if (raw.length() > 0) {
@@ -697,12 +700,12 @@ esp_err_t handleVideoRecordingsList(httpd_req_t* req) {
       int nl = raw.indexOf('\n', start);
       if (nl < 0) nl = raw.length();
       String item = raw.substring(start, nl);
-      int colon = item.indexOf(':');
+      int colon = item.lastIndexOf(':');
       if (colon > 0) {
         if (count) files += ",";
-        files += "{\"name\":\"";
-        files += item.substring(0, colon);
-        files += "\",\"size\":";
+        files += "{\"name\":";
+        files += jsonQuote(item.substring(0, colon));
+        files += ",\"size\":";
         files += item.substring(colon + 1);
         files += "}";
         count++;
