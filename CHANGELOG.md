@@ -221,6 +221,28 @@ everything user-visible since the v0.99.99.1 tag.
     when MQTT stops.
   - Serial and system-log lines up to 320 bytes are written from the log task's own buffer, without
     the heap block printf made for every line over 64 bytes.
+- Memory, continued: the log line path, the guarded file calls, command redaction and the glasses
+  Terminal make fewer internal-RAM blocks (step 3 of the 2026-11-14 sweep). Audit text, log file
+  bytes, the paths checked and opened, permission answers and Terminal results are the same; the
+  redactor, path normalisation and capped log writes were compared with the earlier code over
+  thousands of generated inputs. Host-tested and compiled for every board; not yet measured on
+  hardware.
+  - A guarded file call cleans up its path once, where it did it three times: 1 temporary block
+    for a path of 14 or more characters instead of 4.
+  - An error, event or event-stream line is written to its capped log from a kept PSRAM buffer:
+    4 temporary blocks per line instead of 9, and the command audit line no longer copies its text.
+  - Redacting a command for the audit log splits it into words once instead of once per rule: a
+    20-character command makes 2 temporary blocks instead of 58, `status` none instead of 27.
+  - A serial, UART-link or internal command moves its caller's identity into the command instead
+    of copying it, and a serial command's result no longer copies the identity to clear one
+    route.
+  - The glasses Terminal view keeps one HTTP worker for the session instead of creating and
+    deleting an 8 KB task for every host poll (every 500 ms on Wi-Fi). The worker's request, reply
+    and credential are wiped after every request, as before. It leaves when the view closes, the
+    configuration changes, after 60 s without a request, and before speech starts (a voice start
+    waits up to 50 ms for it, so its 8 KB is free before the speech task is made). While the
+    worker is kept, a start no longer needs a new PSRAM block, so it can be accepted where an
+    out-of-memory state used to answer Busy.
 ### Security
 - G2 glasses and R1 ring frames: one bounded protobuf reader for both parsers. A malformed frame whose
   declared length was near 2^64 passed the bounds check of the old skip and moved the read cursor
