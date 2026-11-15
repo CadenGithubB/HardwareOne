@@ -10,6 +10,7 @@
 #include "i2csensor_seesaw.h"
 #include "OLED_Display.h"
 #include "OLED_Utils.h"
+#include "System_Deadline.h"  // deadlinePending: how long an error or status line stays up
 #include "System_Debug.h"
 #include "System_I2C.h"
 #include "System_Settings.h"
@@ -296,7 +297,7 @@ void displaySettingsEditor() {
   
   
   // Display error message if active
-  if (millis() < gSettingsEditor.errorDisplayUntil) {
+  if (deadlinePending(gSettingsEditor.errorDisplayUntil, millis())) {
     DEBUG_SYSTEMF("[SettingsEditor] Showing error: %s", gSettingsEditor.errorMessage.c_str());
     oledDisplay->setTextSize(1);
     oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
@@ -1233,7 +1234,7 @@ void displayQuickSettings() {
     }
   }
   
-  if (quickStatusMsg[0] != '\0' && millis() < quickStatusExpireMs) {
+  if (quickStatusMsg[0] != '\0' && deadlinePending(quickStatusExpireMs, millis())) {
     // Draw status toast at bottom of content area (above footer)
     oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
     oledDisplay->setCursor(0, OLED_CONTENT_HEIGHT - 10);

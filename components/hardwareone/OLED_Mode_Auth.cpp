@@ -10,6 +10,7 @@
 
 #include <Adafruit_SSD1306.h>
 #include "OLED_Utils.h"
+#include "System_Deadline.h"  // deadlinePending: how long an error stays up
 #include "System_User.h"
 #include "System_Utils.h"
 #include "System_Notifications.h"
@@ -120,7 +121,7 @@ static void displayLoginMode() {
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
   
   // Show error message if active - overlay with centered message box
-  if (millis() < errorDisplayUntil && errorMessage.length() > 0) {
+  if (deadlinePending(errorDisplayUntil, millis()) && errorMessage.length() > 0) {
     // Draw semi-transparent overlay effect (clear center area)
     oledDisplay->fillRect(8, 20, 112, 24, DISPLAY_COLOR_BLACK);
     oledDisplay->drawRect(8, 20, 112, 24, DISPLAY_COLOR_WHITE);
@@ -222,7 +223,7 @@ static bool handleLoginModeInput(int deltaX, int deltaY, uint32_t newlyPressed) 
           oledMarkDirtyUntil(errorDisplayUntil);
         }
       } else {
-        if (millis() >= errorDisplayUntil) {
+        if (!deadlinePending(errorDisplayUntil, millis())) {
           errorMessage = "Enter user/pass";
           errorDisplayUntil = millis() + 5000;
           oledMarkDirtyUntil(errorDisplayUntil);
@@ -256,7 +257,7 @@ static bool handleLoginModeInput(int deltaX, int deltaY, uint32_t newlyPressed) 
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
     if (gSettings.localDisplayRequireAuth && !isTransportAuthenticated(SOURCE_LOCAL_DISPLAY)) {
       // Authentication is required and user is not logged in - block navigation
-      if (millis() >= errorDisplayUntil) {
+      if (!deadlinePending(errorDisplayUntil, millis())) {
         errorMessage = "Login required";
         errorDisplayUntil = millis() + 5000;
         oledMarkDirtyUntil(errorDisplayUntil);

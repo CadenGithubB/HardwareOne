@@ -3779,6 +3779,10 @@ wrap stays passed, an oversized delay is capped, and no deadline is stored as 0.
 variable in the test's table (`SITES`) is asked through `deadlinePending()` in its file, and neither a comparison
 with `millis()` through `<` or `>=` nor a signed difference without the zero test is left for it. The four
 ESP-NOW suites that paste `System_ESPNow_Deadline.h` paste `System_Deadline.h` in front of it.
+The table holds the four deadlines that use 0 for "none" or "now" (glasses LLM notice, OLED camera retry, OLED
+transcription poll, R1 Health refusal flash) and the five file-scope UI deadlines that were compared with
+`millis()` directly (login and change-password error boxes, settings editor error and quick-settings status,
+the event stream's notice burst).
 
 ## ESP-NOW peer message store
 

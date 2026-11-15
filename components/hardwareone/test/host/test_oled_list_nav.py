@@ -141,7 +141,8 @@ def main() -> None:
         return (overlay if overlay and overlay.exists() else args.component / name).read_text()
 
     # settingsEditorDown/Select keep a module-list local that only some cases read.
-    flags = ["-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic",
+    # System_Deadline.h is included by the harness from this tree, also on a base run.
+    flags = ["-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic", "-I", str(HERE.parents[1]),
              "-Wno-unused-function", "-Wno-unused-parameter", "-Wno-unused-variable"]
     if args.sanitize:
         flags += ["-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-g"]

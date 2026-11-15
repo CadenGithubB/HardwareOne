@@ -21,6 +21,8 @@
 #include <type_traits>
 #include <vector>
 
+#include "System_Deadline.h"  // production: deadlinePending
+
 #define EXT_RAM_BSS_ATTR
 #define ENABLE_ESPNOW 0
 #define ENABLE_BONDED_MODE 0

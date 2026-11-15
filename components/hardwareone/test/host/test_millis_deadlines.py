@@ -39,6 +39,12 @@ SITES = (
     ("OLED_Mode_Transcription.cpp", "v.pollAt", 2),
     ("OLED_Mode_Camera.cpp", "retryAt", 1),
     ("OLED_Mode_R1_Health.cpp", "sHealthDeniedUntilMs", 1),
+    # File-scope deadlines that were compared with millis() through < or >=.
+    ("OLED_Mode_Auth.cpp", "errorDisplayUntil", 3),
+    ("OLED_Mode_ChangePassword.cpp", "errorDisplayUntil", 1),
+    ("OLED_SettingsEditor.cpp", "gSettingsEditor.errorDisplayUntil", 1),
+    ("OLED_SettingsEditor.cpp", "quickStatusExpireMs", 1),
+    ("WebServer_Events.cpp", "gSessions[sessIdx].noticeBurstUntil", 1),
 )
 
 

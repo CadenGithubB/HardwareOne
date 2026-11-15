@@ -11,6 +11,7 @@
 
 #include <Adafruit_SSD1306.h>
 #include "OLED_Utils.h"
+#include "System_Deadline.h"  // deadlinePending: how long an error stays up
 #include "System_Debug.h"
 #include "System_User.h"
 #include "System_Utils.h"
@@ -179,7 +180,7 @@ static void displayChangePasswordMode() {
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
   
   // Show error message if active - overlay with centered message box
-  if (millis() < errorDisplayUntil && errorMessage.length() > 0) {
+  if (deadlinePending(errorDisplayUntil, millis()) && errorMessage.length() > 0) {
     const int boxX = 10;
     const int boxY = 20;
     const int boxW = 108;

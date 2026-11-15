@@ -5,6 +5,7 @@
 #include "WebServer_Server.h"
 #include "WebServer_Utils.h"   // webGuestAccessAllowed — guest role HTTP gate
 #include "System_User.h"
+#include "System_Deadline.h"  // deadlinePending: the notice burst window
 #include "System_Debug.h"
 #include "System_MemUtil.h"
 #include "System_Utils.h"
@@ -146,7 +147,7 @@ esp_err_t handleEvents(httpd_req_t* req) {
 
   // Advise browser to backoff reconnects and send initial comment to open stream
   unsigned long nowRetry = millis();
-  unsigned long retryMs = (gSessions[sessIdx].needsNotificationTick || (nowRetry < gSessions[sessIdx].noticeBurstUntil)) ? 1000UL : 5000UL;
+  unsigned long retryMs = (gSessions[sessIdx].needsNotificationTick || deadlinePending(gSessions[sessIdx].noticeBurstUntil, nowRetry)) ? 1000UL : 5000UL;
   char retryLine[32];
   snprintf(retryLine, sizeof(retryLine), "retry: %lu\n\n", (unsigned long)retryMs);
   if (!sseWrite(req, retryLine)) {
