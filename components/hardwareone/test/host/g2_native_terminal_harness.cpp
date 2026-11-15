@@ -215,6 +215,7 @@ void httpTerminalCancel(HttpTerminalToken token){if(token==activeRpcToken){activ
 // The kept HTTP worker is asked to leave when the view ends and right before
 // speech allocates (no start in between).
 void httpTerminalReleaseWorker(){++workerReleases;releasedForSpeech=true;}
+bool httpTerminalReleaseWorkerAndWait(uint32_t){++workerReleases;releasedForSpeech=true;return true;}
 
 // INSERT_ADAPTER
 #if ENABLE_LOCAL_STT && ENABLE_LLM_BACKEND && ENABLE_LLM_SOURCE_HTTP
@@ -836,6 +837,22 @@ int main(){
     assert(rpcRequests.size()==requests&&submissions==before&&sttLive&&g2NativeTerminalActive());
     close();
   }
+  // Speech holds its memory: a start accepted while a voice answer records
+  // (an interrupt gesture) hands the kept HTTP worker back after that one
+  // request, as each request's own task did.
+  hostState="idle";hostRun.clear();sttLive=false;open();hostRun="voice-run";hostStatus("busy");settle(10);
+  hostQuery("question",false,true);awaitQuery();
+  event(G2_TERMINAL_CMD_QUERY_REPLY,gNativeTerminal.queryId,101);settle(8);
+  display(3,gNativeTerminal.sessionId,2);event(G2_TERMINAL_CMD_VOICE,1);
+  assert(sttLive&&gNativeTerminal.policy.phase==NativeTerm::Phase::Recording);
+  event(G2_TERMINAL_CMD_INTERRUPT,gNativeTerminal.sessionId);
+  assert(gNativeTerminal.nextRpc==NativeRpc::Interrupt);
+  {
+    const unsigned released=workerReleases;holdRpc=true;tick();
+    assert(gNativeTerminal.rpc==NativeRpc::Interrupt&&workerReleases==released+1&&releasedForSpeech);
+    holdRpc=false;
+  }
+  close();
   NativeTerm magic;for(unsigned i=0;i<255;++i)assert(magic.allocate(100));assert(!magic.allocate(100));assert(magic.allocate(3101));
   puts("native Terminal host-session lifecycle tests passed");
 }

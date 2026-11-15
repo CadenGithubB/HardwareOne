@@ -14253,6 +14253,9 @@ static bool g2NativeTerminalRpcStart() {
   if (s.nextRpc == NativeRpc::Poll) { s.more = false; if (!s.phonePoll) s.pollMs = millis(); }
   snprintf(s.activeRequest,sizeof(s.activeRequest),"%s",s.request);
   s.rpcToken = token; s.rpc = s.nextRpc; s.nextRpc = NativeRpc::None;
+  // An accepted start keeps the worker; while speech holds its memory the
+  // worker serves this one request and leaves, as a per-request task did.
+  if (g2NativeTerminalSpeechAllocating()) httpTerminalReleaseWorker();
   return true;
 }
 static void g2NativeTerminalWireRows() {
@@ -14830,8 +14833,9 @@ static void g2NativeTerminalOnRx(G2Temple& temple, uint32_t generation, uint32_t
     if (gNativeTerminalSubmitGate.load() != s.epoch) { g2NativeTerminalFail("view-expired"); return; }
     s.deferredConfirm = false; s.promptLen = 0; memset(s.prompt,0,sizeof(s.prompt)); s.voiceMs = millis();
     // Speech allocates next: the parked HTTP worker gives its stack back (a
-    // running poll finishes first), as when each poll had its own task.
-    httpTerminalReleaseWorker();
+    // running poll finishes first), as when each poll had its own task. Wait
+    // briefly so its 8 KB is free before the speech task is created.
+    (void)httpTerminalReleaseWorkerAndWait(50);
     TranscriptOptions noSave{}; char error[96] = {};
     if (!sttBeginContinuousG2Native(s.owner,gNativeTerminalLeft.load(),&s.speechToken,error,sizeof(error),&noSave,g2ControlWake,/*speakerLabels=*/false))
       g2NativeTerminalFail("speech-unavailable");

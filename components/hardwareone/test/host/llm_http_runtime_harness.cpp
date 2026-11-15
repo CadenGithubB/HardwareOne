@@ -44,7 +44,10 @@ static void xSemaphoreGive(SemaphoreHandle_t p) { p->unlock(); }
 static void vSemaphoreDelete(SemaphoreHandle_t p) { delete p; }
 static uint32_t nowMs = 10;
 static uint32_t millis() { return nowMs; }
-static void vTaskDelay(unsigned n) { nowMs += n; }
+// Runs on main inside vTaskDelay (not on the worker): lets a test give the
+// parked worker its turn while a caller waits for it.
+static void (*delayHook)() = nullptr;
+static void vTaskDelay(unsigned n);
 static void (*pendingTask)(void*) = nullptr;
 static void* pendingArg = nullptr;
 static bool failTask = false;
@@ -277,6 +280,11 @@ static void idleTerminal() {
   assert(!terminalNotifications); wakeIsTimeout = true; drainTerminal();
 }
 static bool terminalKept() { return terminalTask == TerminalTask::Alive; }
+static void vTaskDelay(unsigned n) {
+  if (delayHook && !onTerminalThread) delayHook();
+  nowMs += n;
+}
+static void drainIfKept() { if (terminalKept()) drainTerminal(); }
 // Every byte of the kept run is zero between requests: no credential, body or
 // response survives into the next request.
 static void assertRunsWiped() {
@@ -612,5 +620,39 @@ int main() {
   assert(terminalResult.error[0] && !terminalOutput[0] && response() == priorChat);
   assert(!terminalKept() && terminalCreates == terminalDeletes);
   assert(wipedAllocations > 0 && sensitiveAllocations.empty() && allocations == 0);
+  // Released for speech while parked: the call waits until the worker has
+  // left and its stack had two ticks to be freed, then answers true.
+  resetServer(); terminalJson = true; wire = "{}";
+  assert(httpTerminalStart(operation, strlen(operation), &token) == HttpTerminalStartResult::Accepted);
+  drainTerminal(); assert(terminalKept());
+  {
+    const int deletes = terminalDeletes; const uint32_t before = nowMs;
+    delayHook = drainIfKept;
+    assert(httpTerminalReleaseWorkerAndWait(50));
+    delayHook = nullptr;
+    assert(!terminalKept() && terminalDeletes == deletes + 1 && allocations == 0 && terminalRuns.empty());
+    assert(nowMs - before == 3);  // one tick until it left, two for the stack
+  }
+  // Nothing kept: true at once, no wait.
+  { const uint32_t before = nowMs; assert(httpTerminalReleaseWorkerAndWait(50) && nowMs == before); }
+  // A request in flight is not waited for: false at once, and the worker
+  // leaves after that request, as httpTerminalReleaseWorker asks.
+  resetServer(); terminalJson = true; wire = "{}";
+  assert(httpTerminalStart(operation, strlen(operation), &token) == HttpTerminalStartResult::Accepted);
+  {
+    const uint32_t before = nowMs;
+    assert(!httpTerminalReleaseWorkerAndWait(50) && nowMs == before && terminalKept());
+    drainTerminal(); assert(!terminalKept() && allocations == 0);
+  }
+  // A worker that does not get to run in time: false after waitMs.
+  resetServer(); terminalJson = true; wire = "{}";
+  assert(httpTerminalStart(operation, strlen(operation), &token) == HttpTerminalStartResult::Accepted);
+  drainTerminal(); assert(terminalKept());
+  {
+    const uint32_t before = nowMs;
+    assert(!httpTerminalReleaseWorkerAndWait(50) && nowMs - before == 50 && terminalKept());
+    drainTerminal(); assert(!terminalKept() && allocations == 0);
+  }
+  assert(terminalCreates == terminalDeletes);
   std::cout << "HTTP worker lifecycle tests passed\n";
 }

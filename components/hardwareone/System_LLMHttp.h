@@ -60,6 +60,11 @@ void httpTerminalCancel(HttpTerminalToken token);
 // next start makes a new one. Call when the view closes and before speech
 // allocates. Waits at most 200 ms for the configuration lock.
 void httpTerminalReleaseWorker();
+// As httpTerminalReleaseWorker, for a caller about to allocate (speech): when
+// the worker has no request in flight it waits up to waitMs for it to leave,
+// then two scheduler ticks for its stack to be freed. True when no kept worker
+// remains; a request in flight is not waited for (it leaves after it).
+bool httpTerminalReleaseWorkerAndWait(uint32_t waitMs);
 // Zero means configuration is unavailable. A change invalidates a native view.
 uint32_t httpTerminalConfigRevision();
 #endif

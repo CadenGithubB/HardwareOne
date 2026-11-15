@@ -335,4 +335,24 @@ void httpTerminalReleaseWorker() {
   sTerminalRetire = true;
   if (sTerminalTask) xTaskNotifyGive(sTerminalTask);
 }
+
+bool httpTerminalReleaseWorkerAndWait(uint32_t waitMs) {
+  bool parked = false;
+  {
+    Lock lock;
+    if (!lock) return !sTerminalKept.load(std::memory_order_acquire);
+    sTerminalRetire = true;
+    if (sTerminalTask) xTaskNotifyGive(sTerminalTask);
+    parked = sTerminalTask && !sTerminalWorker;
+  }
+  if (!parked) return !sTerminalKept.load(std::memory_order_acquire);
+  // The worker unpublishes itself under the lock, wipes its run and deletes
+  // itself; the idle task then frees its stack, so give it two more ticks.
+  const uint32_t started = millis();
+  while (sTerminalKept.load(std::memory_order_acquire) && uint32_t(millis() - started) < waitMs)
+    vTaskDelay(1);
+  if (sTerminalKept.load(std::memory_order_acquire)) return false;
+  vTaskDelay(2);
+  return true;
+}
 #endif
