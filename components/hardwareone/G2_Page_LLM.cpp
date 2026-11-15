@@ -18,6 +18,7 @@
 #include "System_LLMChat.h"
 #include "G2_LlmReader.h"
 #include "System_PsramBuffer.h"
+#include "System_Deadline.h"  // deadlinePending: the busy notice
 #endif
 #include "G2_GlassesInternal.h"
 
@@ -907,7 +908,7 @@ static void g2LlmPageWorker(void* arg) {
       while (moves > 0) { G2LlmReader::navigate(pager, true); --moves; }
       while (moves < 0) { G2LlmReader::navigate(pager, false); ++moves; }
       if (gLlmPageBusyNotice.exchange(false)) noticeUntil = millis() + 2500;
-      if ((int32_t)(noticeUntil - millis()) > 0) {
+      if (deadlinePending(noticeUntil, millis())) {  // 0: no notice asked for
         strlcpy(frame, "Reply in progress.\nHold to ask after it finishes.\n2x-tap: back", sizeof(frame));
       } else if (!run) {
         strlcpy(frame, "No reply yet.\nHold to ask a question.\n2x-tap: back", sizeof(frame));

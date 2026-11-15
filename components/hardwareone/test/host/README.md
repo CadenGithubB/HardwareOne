@@ -3771,6 +3771,15 @@ the ninth address must replace the oldest row by age: without a wrap, with every
 and `now` after it (the search used to select nothing and write one element before the table), and with stamps
 on both sides of the wrap (the row with the smallest number is then one of the newest).
 
+`millis_deadlines` compiles the production `System_Deadline.h` (`deadlineAfter`, `deadlinePending`: a deadline is
+a 32-bit `millis()` value, 0 means none) together with `System_ESPNow_Deadline.h`, whose two names forward to it.
+A deadline that was never set must be pending at no uptime (a bare signed difference read it as pending from day
+24.9 to day 49.7), one set just before the wrap is pending until it is reached, one left over from before the
+wrap stays passed, an oversized delay is capped, and no deadline is stored as 0. Source rules: each deadline
+variable in the test's table (`SITES`) is asked through `deadlinePending()` in its file, and neither a comparison
+with `millis()` through `<` or `>=` nor a signed difference without the zero test is left for it. The four
+ESP-NOW suites that paste `System_ESPNow_Deadline.h` paste `System_Deadline.h` in front of it.
+
 ## ESP-NOW peer message store
 
 `espnow_message_store` compiles the whole message-buffer section of

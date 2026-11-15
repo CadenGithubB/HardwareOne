@@ -27,6 +27,7 @@ HARNESS = r'''
 #include "G2_RenderTypes.h"
 #include "G2_LlmReader.h"
 #include "System_LLMReplyLimits.h"
+#include "System_Deadline.h"
 #define LLM_CHAT_TURN_MAX_BYTES kLlmReplyCapacityBytes
 #define DEBUG_G2F(...) ((void)0)
 #define pdMS_TO_TICKS(x) (x)

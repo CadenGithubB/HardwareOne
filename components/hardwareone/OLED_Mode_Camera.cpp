@@ -14,6 +14,7 @@
 #include "System_MemUtil.h"
 #include "System_Command.h"
 #include "System_Debug.h"
+#include "System_Deadline.h" // deadlinePending: the worker retry timer
 #include "System_Utils.h" // Command validation context
 #include <ArduinoJson.h>
 #include <freertos/task.h>
@@ -294,7 +295,7 @@ void prepareCameraPreviewData() {
     oledToastShow(state.error, oled_message::kErrorDurationMs, OledUiIcon::ERROR);
   }
   if (!state.error[0]) lastError[0] = 0;
-  if (state.worker || int32_t(millis() - retryAt) < 0) return;
+  if (state.worker || deadlinePending(retryAt, millis())) return;  // retryAt 0: never tried
   retryAt = millis() + 3000;
   portENTER_CRITICAL(&mutex);
   view.worker = true;

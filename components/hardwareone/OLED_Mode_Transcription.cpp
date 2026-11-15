@@ -10,6 +10,7 @@
 #include "System_Dictation.h"
 #include "System_AuthIdentity.h"
 #include "System_TranscriptionUIPolicy.h"
+#include "System_Deadline.h"  // deadlinePending: the poll timer
 #include <ArduinoJson.h>
 #include <new>
 #include <cstdio>
@@ -353,10 +354,10 @@ void prepareTranscriptionData() {
   }
   if(!v.entered || inFlight) return;
   if(pendingAck.length()) {
-    if(int32_t(millis()-v.pollAt)>=0) send(pendingAck,Op::Ack);
+    if(!deadlinePending(v.pollAt,millis())) send(pendingAck,Op::Ack); // pollAt 0: due now
   } else if(pending.length()) {
     if(send(pending,pendingOp)) wipeString(pending);
-  } else if(int32_t(millis()-v.pollAt)>=0) {
+  } else if(!deadlinePending(v.pollAt,millis())) {
     if(v.nextPoll && v.exchange[0]) send(command("next"),Op::Next);
     else send(v.exchange[0]?command("status"):String("transcription status"),Op::Status);
     v.pollAt=millis()+600;

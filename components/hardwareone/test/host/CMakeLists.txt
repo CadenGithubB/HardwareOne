@@ -2355,6 +2355,14 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_logout_reason_table.py
           ${SETUP_MQTT_TEST_ARGS})
+# millis() deadlines: System_Deadline.h (0 = none, wrap-safe "still ahead")
+# compiled as it is with the ESP-NOW names that forward to it, and the listed
+# deadline variables asked through it instead of a raw or bare signed compare.
+add_test(
+  NAME millis_deadlines
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_millis_deadlines.py
+          ${SETUP_MQTT_TEST_ARGS})
 # Self-registration: /register/submit hands the decoded fields to
 # submitAccountRequest byte-exact (spaced and quoted passphrases), owner
 # refusals do not count toward the login lockout, anonymous `userrequest` is

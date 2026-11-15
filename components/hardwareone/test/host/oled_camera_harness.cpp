@@ -2,6 +2,7 @@
 #include "OLED_CameraMonochrome.h"
 #include "HAL_Camera.h"
 #include "HAL_JPEG.h"
+#include "System_Deadline.h"
 #include <ArduinoJson.h>
 #include <cassert>
 #include <cstdio>

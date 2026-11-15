@@ -20,6 +20,7 @@
 #include "G2_Health.h"
 #include "HAL_Input.h"
 #include "OLED_Utils.h"
+#include "System_Deadline.h"   // deadlinePending: the [DENIED] flash
 #include "System_SensorLogging.h"
 #include "System_Settings.h"
 #include "System_User.h"
@@ -110,7 +111,7 @@ static void displayR1Health() {
 
   oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
   oledDisplay->print("R1 HEALTH ");
-  if ((int32_t)(sHealthDeniedUntilMs - millis()) > 0)
+  if (deadlinePending(sHealthDeniedUntilMs, millis()))  // 0: nothing was refused
                                oledDisplay->println("[DENIED]");
   else if (!bleSubsystemActive()) oledDisplay->println("[BLE]");
   else if (conn)             oledDisplay->println("[OK]");

@@ -64,6 +64,7 @@ void oledToastShow(const char* text,unsigned duration,OledUiIcon icon=OledUiIcon
 void oledMarkDirty(){}
 void requestOledMode(OledMode mode,const char*){currentOledMode=mode;}
 #include "OLED_Layout.h"
+#include "System_Deadline.h"
 #ifndef TEST_CANVAS_HEIGHT
 #define TEST_CANVAS_HEIGHT 64
 #endif

@@ -6,21 +6,24 @@
 // the uint32 rollover (prev-key window, sensor leases, pre-warm cooldown).
 // Delays up to INT32_MAX ms (24.8 days) are represented exactly; longer ones
 // are capped so they read as "far ahead" rather than "already passed".
+//
+// The rule itself lives in System_Deadline.h, which the rest of the firmware
+// uses; the two names below are the ESP-NOW module's and forward to it.
 #ifndef SYSTEM_ESPNOW_DEADLINE_H
 #define SYSTEM_ESPNOW_DEADLINE_H
 
 #include <stdint.h>
 
+#include "System_Deadline.h"
+
 // The deadline that is delayMs after nowMs; never returns 0.
 inline uint32_t espnowDeadlineAfter(uint32_t nowMs, uint32_t delayMs) {
-  if (delayMs > 0x7FFFFFFFu) delayMs = 0x7FFFFFFFu;
-  const uint32_t deadlineMs = nowMs + delayMs;
-  return deadlineMs ? deadlineMs : 1u;
+  return deadlineAfter(nowMs, delayMs);
 }
 
 // True while a set (non-zero) deadline lies ahead of nowMs.
 inline bool espnowDeadlinePending(uint32_t deadlineMs, uint32_t nowMs) {
-  return deadlineMs != 0 && (int32_t)(deadlineMs - nowMs) > 0;
+  return deadlinePending(deadlineMs, nowMs);
 }
 
 #endif  // SYSTEM_ESPNOW_DEADLINE_H

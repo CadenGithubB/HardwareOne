@@ -185,6 +185,12 @@ def main():
     # tree has it; '' when neither the overlay nor the component does.
     deadline = locate('System_ESPNow_Deadline.h')
     deadline = deadline.read_text() if deadline.exists() else ''
+    # The header forwards to the shared owner System_Deadline.h where the tree
+    # has one: paste that owner in front, without the include and the pragma.
+    shared = locate('System_Deadline.h')
+    if deadline and shared.exists():
+        deadline = (shared.read_text().replace('#pragma once\n', '') +
+                    deadline.replace('#include "System_Deadline.h"\n', ''))
 
     crypto_internal, crypto_public = build_crypto(read('System_ESPNow_Handlers_Crypto.cpp'))
     harness = (HERE / 'espnow_session_rekey_harness.cpp').read_text()

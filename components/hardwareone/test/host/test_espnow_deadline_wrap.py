@@ -66,6 +66,12 @@ def main():
         return extract_block(source, marker)
 
     deadline = read_optional('System_ESPNow_Deadline.h')
+    # The header forwards to the shared owner System_Deadline.h where the tree
+    # has one: paste that owner in front, without the include and the pragma.
+    shared = read_optional('System_Deadline.h')
+    if deadline and shared:
+        deadline = (shared.replace('#pragma once\n', '') +
+                    deadline.replace('#include "System_Deadline.h"\n', ''))
     failures = []
 
     def run_unit(unit, harness, label):
