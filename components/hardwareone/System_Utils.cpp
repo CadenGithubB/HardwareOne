@@ -1503,12 +1503,17 @@ void buildSystemInfoJson(JsonDocument& doc, bool includeDeviceList) {
   // web/SSE telemetry as well as explicit status responses, so repeated calls
   // use the presentation-only capacity snapshot. Admission paths (uploads,
   // image saves, sensor logging) continue to call fresh VFS::getStats().
-  static constexpr uint32_t kSystemInfoStatsMaxAgeMs = 5000;
+  // The internal figure takes the newest reading of any age and samples only
+  // when there is none: a LittleFS walk takes about 1.3 s under the FS mutex on
+  // the P4X-EYE, and a 5 s limit made every 10 s /api/system poll pay it and
+  // stall the loop. The log writer's free-space check and any getStats() renew
+  // the reading; while nothing is logged it keeps its last value.
+  static constexpr uint32_t kSystemInfoSdStatsMaxAgeMs = 5000;
   JsonObject storage = doc["storage"].to<JsonObject>();
   {
     VFS::CapacitySnapshot stats = {};
     (void)VFS::getStatsSnapshot(VFS::INTERNAL, stats,
-                                kSystemInfoStatsMaxAgeMs);
+                                VFS::kSnapshotAnyAgeMs);
     storage["total_kb"] = (int)(stats.totalBytes / 1024);
     storage["used_kb"] = (int)(stats.usedBytes / 1024);
     storage["free_kb"] = (int)(stats.freeBytes / 1024);
@@ -1516,7 +1521,7 @@ void buildSystemInfoJson(JsonDocument& doc, bool includeDeviceList) {
   if (VFS::isSdAvailable()) {
     VFS::CapacitySnapshot stats = {};
     if (VFS::getStatsSnapshot(VFS::SDCARD, stats,
-                              kSystemInfoStatsMaxAgeMs)) {
+                              kSystemInfoSdStatsMaxAgeMs)) {
       JsonObject sd = storage["sd"].to<JsonObject>();
       sd["total_mb"] = (int)(stats.totalBytes / (1024 * 1024));
       sd["used_mb"] = (int)(stats.usedBytes / (1024 * 1024));

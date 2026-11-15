@@ -23,7 +23,10 @@ static int traverses = 0, writableProbes = 0, lowSpacePosts = 0, warnings = 0, s
 static bool sdMounted = false, sdWritableNow = false;
 static std::vector<std::string> eventLines;
 static constexpr const char* kLittleFsPartitionLabel = "littlefs";
-static int esp_littlefs_info(const char* label, size_t* total, size_t* used) {
+using esp_err_t = int;
+static constexpr esp_err_t ESP_OK = 0;
+static bool filesystemReady = true;
+static esp_err_t esp_littlefs_info(const char* label, size_t* total, size_t* used) {
   CHECK(std::strcmp(label, kLittleFsPartitionLabel) == 0);
   ++traverses; *total = lfsTotal; *used = lfsUsed; return 0;
 }
@@ -41,6 +44,17 @@ enum class LogTier : uint8_t { Primary, Overflow, Refused };
 static bool isSdAvailable() { return sdMounted; }
 static bool isSdWritable() { ++writableProbes; return sdMounted && sdWritableNow; }
 static void noteSdWriteFailure(const char*) { ++sdFailureNotes; }
+// Each free-space walk also hands its reading to the presentation snapshot
+// (the real cache and its fencing run in the storage_stats test).
+enum StorageType { INTERNAL, SDCARD };
+struct CapacitySnapshot { uint64_t totalBytes, usedBytes, freeBytes; uint32_t sampledAtMs; };
+static int snapshotPublishes = 0;
+static uint32_t capacitySnapshotGeneration(StorageType) { return 7; }
+static void publishCapacitySnapshot(StorageType type, uint32_t generation, const CapacitySnapshot& sample) {
+  CHECK(type == INTERNAL && generation == 7);
+  CHECK(sample.totalBytes == lfsTotal && sample.usedBytes == lfsUsed && sample.freeBytes == lfsTotal - lfsUsed);
+  ++snapshotPublishes;
+}
 // INSERT_PRODUCTION
 }  // namespace VFS
 
@@ -163,6 +177,7 @@ int main() {
 
   VFS::noteLogReserveDrop(); VFS::noteLogReserveDrop();
   CHECK(VFS::logReserveDrops() == 2);
+  CHECK(traverses > 0 && VFS::snapshotPublishes == traverses);
   std::fprintf(stderr, "checks=%d\n", checks);
   return 0;
 }

@@ -893,15 +893,16 @@ static size_t gLogFreeBytesWrittenSinceRefresh = 0;
 static constexpr size_t LOG_FREE_CACHE_BYTES_THRESHOLD = 32 * 1024;
 
 // How long a free-space reading stays good, as a function of how much headroom
-// it reported. A full traverse costs 216-776 ms (measured) under the global FS
-// mutex, and appendLineWithCap calls this on EVERY logged line — so with a flat
+// it reported. A full traverse costs 216-776 ms (measured earlier) and about
+// 1.3 s on the P4X-EYE's volume (2026-11-15) under the global FS mutex, and
+// appendLineWithCap calls this on EVERY logged line — so with a flat
 // 2 s window every interactive command typed more than 2 s after the last one
 // paid a whole volume walk before it did any work.
 //
-// The relaxation is bounded on purpose. gLogFreeBytesWrittenSinceRefresh has
-// exactly ONE caller (appendLineWithCap), so the byte counter sees log appends
-// and NOTHING else — photos, settings, captures and OTA staging all consume
-// space invisibly to it. The time-based refresh is the only thing that catches
+// The relaxation is bounded on purpose. gLogFreeBytesWrittenSinceRefresh sees
+// only the writers that call noteLittleFsBytesWritten (log appends, image
+// saves, QuickNotes, transcripts) — settings, uploads, recordings and OTA
+// staging all consume space invisibly to it. The time-based refresh is the only thing that catches
 // those, which is why it is scaled rather than removed, and why the tight 2 s
 // cadence is kept unchanged whenever the reading is anywhere near the reserve.
 static uint32_t logFreeCheckIntervalMs(size_t cachedFree) {
@@ -921,11 +922,24 @@ static size_t refreshLittleFsFreeCached() {
     // more here: this runs on a 2 s cadence (plus write-pressure forcing)
     // while holding the global FS mutex, and ESP-IDF's httpd is single-task,
     // so every extra lfs_fs_size() here stalls every pending web request.
+    const uint32_t generation = capacitySnapshotGeneration(INTERNAL);
     size_t total = 0, used = 0;
-    (void)esp_littlefs_info(kLittleFsPartitionLabel, &total, &used);
+    const esp_err_t infoErr = esp_littlefs_info(kLittleFsPartitionLabel, &total, &used);
     gLogFreeCheckCached = (total > used) ? (total - used) : 0;
     gLogFreeCheckLastMs = now;
     gLogFreeBytesWrittenSinceRefresh = 0;
+    // This walk is the whole cost of a capacity reading, so a usable one (the
+    // same rule as sampleCapacityFreshLocked) also becomes the INTERNAL
+    // presentation snapshot: status polls show it instead of walking again.
+    // The decision above never reads that cache.
+    if (filesystemReady && infoErr == ESP_OK && total > 0) {
+      CapacitySnapshot sample = {};
+      sample.totalBytes = total;
+      sample.usedBytes = used;
+      sample.freeBytes = (total > used) ? (total - used) : 0;
+      sample.sampledAtMs = millis();
+      publishCapacitySnapshot(INTERNAL, generation, sample);
+    }
   }
   return gLogFreeCheckCached;
 }

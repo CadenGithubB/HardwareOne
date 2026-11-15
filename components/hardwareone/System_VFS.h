@@ -214,6 +214,16 @@ bool getStats(StorageType type, uint64_t& totalBytes, uint64_t& usedBytes, uint6
 bool getStatsSnapshot(StorageType type, CapacitySnapshot& out,
                       uint32_t maxAgeMs = 0);
 
+/** maxAgeMs for getStatsSnapshot: reuse the tier's newest successful sample
+ *  however old it is, and sample only when it has none (before the first
+ *  reading, or after invalidateStatsSnapshot). For periodic status figures
+ *  that must not wait on a LittleFS walk. The INTERNAL reading is renewed by
+ *  any getStats() and by the log writer's free-space check, which runs with
+ *  log lines (every 2, 5 or 15 s by headroom; every 30 s while logs are moved
+ *  to SD). While nothing is logged it keeps its last value, so it can lag a
+ *  file write for as long as the device stays quiet. */
+static constexpr uint32_t kSnapshotAnyAgeMs = UINT32_MAX;
+
 /** Invalidate one tier's presentation snapshot. AUTO follows the existing
  * getStats routing rule and addresses INTERNAL. Generation fencing prevents a
  * slow in-flight refresh from publishing across this invalidation. */
@@ -511,7 +521,9 @@ void noteLogOverflowSdFailure(const char* hint);
  *  to the primary path (or Refused) whenever SD cannot take writes. */
 bool isLogOverflowActive();
 
-/** Cached LittleFS free bytes (refreshed at most every 2s). */
+/** Cached LittleFS free bytes (refreshed every 2, 5 or 15 s by headroom, or
+ *  after 32 KB of writes reported through noteLittleFsBytesWritten: log
+ *  lines, image saves, QuickNotes, transcripts). */
 size_t getCachedLittleFsFree();
 
 /** Invalidate the cached free-space reading immediately. Call after unusual

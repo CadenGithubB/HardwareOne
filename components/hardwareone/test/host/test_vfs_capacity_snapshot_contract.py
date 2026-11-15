@@ -35,6 +35,7 @@ assert (
 assert "bool getStatsSnapshot(StorageType type, CapacitySnapshot& out," in vfs_h
 assert "uint32_t maxAgeMs = 0" in vfs_h
 assert "void invalidateStatsSnapshot(StorageType type);" in vfs_h
+assert "static constexpr uint32_t kSnapshotAnyAgeMs = UINT32_MAX;" in vfs_h
 
 legacy = function_body(vfs_cpp, "bool getStats(StorageType type")
 assert "sampleCapacityFreshLocked(type)" in legacy
@@ -86,10 +87,15 @@ for retired_local_cache in (
     assert retired_local_cache not in g2_cpp
 
 # Periodic system JSON is the other presentation consumer. Its zero-initialized
-# local snapshots preserve the historical zero-on-failure JSON fields.
+# local snapshots preserve the historical zero-on-failure JSON fields. The
+# internal figure never asks for a fresh LittleFS walk once a reading exists
+# (about 1.3 s on the P4X-EYE, paid by every 10 s /api/system poll under the
+# former 5 s limit); SD keeps its 5 s limit.
 system_info = function_body(utils_cpp, "void buildSystemInfoJson(")
-assert "static constexpr uint32_t kSystemInfoStatsMaxAgeMs = 5000;" in system_info
+assert "static constexpr uint32_t kSystemInfoSdStatsMaxAgeMs = 5000;" in system_info
 assert system_info.count("VFS::getStatsSnapshot(") == 2
+assert "VFS::getStatsSnapshot(VFS::INTERNAL, stats,\n                                VFS::kSnapshotAnyAgeMs);" in system_info
+assert "VFS::getStatsSnapshot(VFS::SDCARD, stats,\n                              kSystemInfoSdStatsMaxAgeMs)" in system_info
 assert system_info.count("VFS::CapacitySnapshot stats = {};") == 2
 
 # Explicit command diagnostics remain authoritative even though periodic
@@ -127,13 +133,23 @@ for path in COMPONENT.glob("*.cpp"):
         continue
     assert "VFS::getStatsSnapshot(" not in path.read_text(encoding="utf-8"), path
 
-# The specialized overflow cache remains separate from presentation snapshots.
+# The overflow decision never reads presentation snapshots. Its free-space walk
+# hands a usable reading to the INTERNAL snapshot (fenced by the generation
+# taken before the walk), so status polls need no walk of their own; the
+# storage_stats executable runs that path against the real cache.
 overflow = vfs_cpp[
     vfs_cpp.index("static bool           gLogOverflowActive") :
     vfs_cpp.index("bool unmountSd()")
 ]
 assert "gLogFreeCheckCached" in overflow
 assert "getStatsSnapshot" not in overflow
+assert "readCapacitySnapshot" not in overflow
 assert "gCapacitySnapshots" not in overflow
+refresh = function_body(vfs_cpp, "static size_t refreshLittleFsFreeCached()")
+assert refresh.count("publishCapacitySnapshot(INTERNAL, generation, sample);") == 1
+assert (refresh.index("capacitySnapshotGeneration(INTERNAL)")
+        < refresh.index("esp_littlefs_info(")
+        < refresh.index("publishCapacitySnapshot("))
+assert "if (filesystemReady && infoErr == ESP_OK && total > 0)" in refresh
 
 print("VFS capacity snapshot source guards passed")

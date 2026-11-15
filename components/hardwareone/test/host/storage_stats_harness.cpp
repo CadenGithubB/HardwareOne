@@ -112,6 +112,7 @@ static void reset() {
   infoError = ESP_OK; infoWritesOutputsOnError = false; nowMs = 100; duringSample = {};
   lfsReads = sdTotalReads = sdUsedReads = 0;
   VFS::gCapacitySnapshots = VFS::detail::CapacitySnapshotCache{};
+  VFS::gLogFreeCheckCached = SIZE_MAX; VFS::gLogFreeCheckLastMs = 0; VFS::gLogFreeBytesWrittenSinceRefresh = 0;
 }
 static std::string json(const char* path) {
   char buffer[256] = {};
@@ -205,6 +206,48 @@ int main(int argc, char** argv) {
       lfsUsed = 900;
       check(VFS::getStatsSnapshot(VFS::INTERNAL, out, 5000) && out.usedBytes == 900 && lfsReads == 2,
             "invalidated in-flight sample was not cached");
+    });
+    // Status polls (buildSystemInfoJson) read INTERNAL with the any-age limit,
+    // VFS::kSnapshotAnyAgeMs == UINT32_MAX, and the log writer's walks renew it.
+    run("log writer's free check seeds the status snapshot", [] {
+      check(VFS::getCachedLittleFsFree() == 750 && lfsReads == 1, "log writer walks once");
+      VFS::CapacitySnapshot out{}; nowMs += 600000;
+      check(VFS::getStatsSnapshot(VFS::INTERNAL, out, UINT32_MAX), "status read hits the log writer's reading");
+      check(out.totalBytes == 1000 && out.usedBytes == 250 && out.freeBytes == 750 && out.sampledAtMs == 100,
+            "complete sample with the walk's time");
+      check(lfsReads == 1 && takes == 1, "status read neither walks nor takes the FS lock");
+    });
+    run("any-age status read walks only when there is no reading", [] {
+      VFS::CapacitySnapshot out{};
+      check(VFS::getStatsSnapshot(VFS::INTERNAL, out, UINT32_MAX) && lfsReads == 1, "first read samples");
+      lfsUsed = 400; nowMs += 3600000;
+      check(VFS::getStatsSnapshot(VFS::INTERNAL, out, UINT32_MAX) && out.usedBytes == 250 && lfsReads == 1,
+            "an hour later the read still does not walk");
+      check(VFS::getCachedLittleFsFree() == 600 && lfsReads == 2, "the log writer's next check walks");
+      check(VFS::getStatsSnapshot(VFS::INTERNAL, out, UINT32_MAX) && out.usedBytes == 400 &&
+            out.sampledAtMs == nowMs && lfsReads == 2, "status shows the log writer's newer reading");
+      VFS::invalidateStatsSnapshot(VFS::INTERNAL);
+      check(VFS::getStatsSnapshot(VFS::INTERNAL, out, UINT32_MAX) && lfsReads == 3,
+            "after an invalidation the read samples again");
+    });
+    run("unusable log writer walks do not seed the status snapshot", [] {
+      VFS::CapacitySnapshot out{};
+      infoError = -1; infoWritesOutputsOnError = true;
+      (void)VFS::getCachedLittleFsFree();
+      check(!VFS::readCapacitySnapshot(VFS::INTERNAL, UINT32_MAX, out), "failed walk not published");
+      infoError = ESP_OK; infoWritesOutputsOnError = false; lfsTotal = 0; VFS::invalidateLittleFsFreeCache();
+      (void)VFS::getCachedLittleFsFree();
+      check(!VFS::readCapacitySnapshot(VFS::INTERNAL, UINT32_MAX, out), "zero-capacity walk not published");
+      lfsTotal = 1000; filesystemReady = false; VFS::invalidateLittleFsFreeCache();
+      (void)VFS::getCachedLittleFsFree();
+      check(!VFS::readCapacitySnapshot(VFS::INTERNAL, UINT32_MAX, out), "unmounted volume not published");
+      check(lfsReads == 3, "each check still walked for the log writer");
+    });
+    run("invalidation during the log writer's walk prevents publication", [] {
+      duringSample = [] { VFS::invalidateStatsSnapshot(VFS::INTERNAL); };
+      check(VFS::getCachedLittleFsFree() == 750, "log writer keeps its own reading");
+      VFS::CapacitySnapshot out{};
+      check(!VFS::readCapacitySnapshot(VFS::INTERNAL, UINT32_MAX, out), "in-flight walk was not cached");
     });
     run("SD and internal cache tiers stay independent", [] {
       VFS::CapacitySnapshot internal{}, sd{};

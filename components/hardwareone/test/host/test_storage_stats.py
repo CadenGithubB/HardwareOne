@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Exercise production VFS capacity queries and the shared files-stats JSON builder.
 
-Sampling, cache integration, path routing, JSON formatting and FsLockGuard are
-extracted unchanged; the cache core is the real production header. Arduino
+Sampling, cache integration, the log writer's free-space check (which seeds the
+status snapshot), path routing, JSON formatting and FsLockGuard are extracted
+unchanged; the cache core is the real production header. Arduino
 String, driver results, time and RTOS synchronization are host boundaries.
 --baseline overlays saved component sources to reproduce old false successes.
 """
@@ -11,6 +12,7 @@ from __future__ import annotations
 import argparse
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
@@ -53,6 +55,15 @@ def main() -> None:
         "String normalize(", *[m for m in NORMALIZED_VIEW if m in vfs], "StorageType getStorageType(",
         "static FreshCapacitySample sampleCapacityFreshLocked(",
         "bool getStats(", "bool getStatsSnapshot(", "void invalidateStatsSnapshot("))
+    # The log writer's free-space cache, whose walk also seeds the INTERNAL
+    # snapshot that status polls read.
+    reserve = re.search(r"(?m)^static constexpr size_t LOG_OVERFLOW_DEFAULT_RESERVE[^\n]*$", vfs)
+    require(reserve is not None, "log reserve constant")
+    free_start = re.search(r"(?m)^static unsigned long\s+gLogFreeCheckLastMs", vfs)
+    free_end = "size_t getCachedLittleFsFree() { return refreshLittleFsFreeCached(); }"
+    require(free_start is not None and free_end in vfs, "log free-space cache region")
+    definitions += "\n" + reserve.group(0) + "\n"
+    definitions += vfs[free_start.start():vfs.index(free_end) + len(free_end)] + "\n"
     harness = (HERE / "storage_stats_harness.cpp").read_text()
     for marker, replacement in {
         "// INSERT_FS_GUARD": guard,
