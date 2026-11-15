@@ -180,6 +180,16 @@ static bool initExternalSensorStorage() {
   return true;
 }
 
+// The state document's 16 KB buffer. publishMqttSensorData makes it at its
+// first publish and keeps it, only in PSRAM, until stopMqttNow releases it;
+// both run on the main loop (mqttTick), and a publish holds an MqttClientUse,
+// which the stop waits out.
+static char* sMqttStateJson = nullptr;
+static void releaseMqttStateJson() {
+  free(sMqttStateJson);
+  sMqttStateJson = nullptr;
+}
+
 static void releaseExternalSensorStorage() {
   if (!externalSensorMutex) return;
 
@@ -1396,6 +1406,7 @@ static bool stopMqttNow() {
   if (!mqttClientRunning.load(std::memory_order_acquire)) {
     failuresBeforeConnect = 0;
     releaseExternalSensorStorage();
+    releaseMqttStateJson();
     return true;
   }
   
@@ -1444,6 +1455,7 @@ static bool stopMqttNow() {
   sMqttBeforeConnectSeen.store(false, std::memory_order_release);
   failuresBeforeConnect = 0;
   releaseExternalSensorStorage();
+  releaseMqttStateJson();
   broadcastOutput("[MQTT] Client stopped");
   return true;
 }
@@ -1470,8 +1482,14 @@ void publishMqttSensorData() {
     return;
   }
   
-  // Build sensor data JSON blob from caches
-  char* jsonBuf = (char*)ps_alloc(16384, AllocPref::PreferPsram, "mqtt.json");
+  // Build sensor data JSON blob from caches, in the kept PSRAM buffer. When
+  // PSRAM refuses it, this publish borrows a PreferPsram block and frees it,
+  // as every publish did before.
+  if (!sMqttStateJson) {
+    sMqttStateJson = (char*)ps_alloc(16384, AllocPref::RequirePsram, "mqtt.json");
+  }
+  char* jsonBuf = sMqttStateJson;
+  if (!jsonBuf) jsonBuf = (char*)ps_alloc(16384, AllocPref::PreferPsram, "mqtt.json");
   if (!jsonBuf) {
     WARN_MQTTF("Failed to allocate JSON buffer");
     return;
@@ -1606,7 +1624,7 @@ void publishMqttSensorData() {
     }
   }
 
-  free(jsonBuf);
+  if (jsonBuf != sMqttStateJson) free(jsonBuf);
   
   // Publish sensor data for mesh peers (master bridge mode)
 #if ENABLE_ESPNOW

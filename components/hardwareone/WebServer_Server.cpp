@@ -3075,9 +3075,20 @@ esp_err_t handleLogs(httpd_req_t* req) {
       return ESP_OK;
     }
   }
-  // Use zero-copy snapshotTo() to avoid String allocation on every poll (500ms)
-  // Allocate response buffer from PSRAM to avoid heap fragmentation
-  char* responseBuf = (char*)ps_alloc(gWebMirrorCap, AllocPref::PreferPsram, "handleLogs.resp");
+  // Use zero-copy snapshotTo() to avoid String allocation on every poll (500ms).
+  // The response buffer is made once and kept for the next poll: every handler
+  // runs on the one httpd task, so it has one user at a time, and
+  // httpd_resp_send has copied it out before the handler returns. It is kept
+  // only in PSRAM; when PSRAM refuses, the poll borrows a PreferPsram block
+  // and frees it, as every poll did before.
+  static char* sLogsResponseBuf = nullptr;
+  if (!sLogsResponseBuf) {
+    sLogsResponseBuf = (char*)ps_alloc(gWebMirrorCap, AllocPref::RequirePsram, "handleLogs.resp");
+  }
+  char* responseBuf = sLogsResponseBuf;
+  if (!responseBuf) {
+    responseBuf = (char*)ps_alloc(gWebMirrorCap, AllocPref::PreferPsram, "handleLogs.resp");
+  }
   if (!responseBuf) {
     ERROR_WEBF("Failed to allocate response buffer for logs");
     httpd_resp_sendstr(req, "[ERROR] Memory allocation failed");
@@ -3086,7 +3097,7 @@ esp_err_t handleLogs(httpd_req_t* req) {
   size_t copied = gWebMirror.snapshotTo(responseBuf, gWebMirrorCap);
   DEBUG_HTTPF("[LOGS_DEBUG] Sending %zu bytes, seq=%lu", copied, gWebMirrorSeq);
   httpd_resp_send(req, responseBuf, copied);
-  free(responseBuf);
+  if (responseBuf != sLogsResponseBuf) free(responseBuf);
   DEBUG_HTTPF("[LOGS_DEBUG] Response sent");
   return ESP_OK;
 }

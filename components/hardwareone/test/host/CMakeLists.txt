@@ -2375,6 +2375,13 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_psram_json_text.py
           ${SETUP_MQTT_TEST_ARGS})
+# /api/cli/logs and the MQTT state document keep one PSRAM reply buffer for
+# reuse; only a PSRAM refusal borrows a block per call, as before.
+add_test(
+  NAME reused_reply_buffers
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_reused_reply_buffers.py
+          ${SETUP_MQTT_TEST_ARGS})
 # Flags and counters that more than one task changes: the production
 # definitions and the production statements that change them run against each
 # other on threads; a load-modify-store loses a change, one atomic step never.
