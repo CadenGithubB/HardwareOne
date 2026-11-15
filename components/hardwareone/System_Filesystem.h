@@ -256,8 +256,12 @@ bool readTextLimited(const char* path, String& out, size_t maxBytes, const AuthC
  *         and retries once on the re-resolved tier.
  */
 bool appendLineWithCap(const char* path, const char* line, size_t lineLength, size_t capBytes);
-// The same, with the text and its length taken from a String.
-bool appendLineWithCap(const char* path, const String& line, size_t capBytes);
+// The same, with the text and its length taken from a String. Inline, so a
+// caller on a small task stack pays no extra call frame (Xtensa makes no
+// sibling calls).
+inline bool appendLineWithCap(const char* path, const String& line, size_t capBytes) {
+  return appendLineWithCap(path, line.c_str(), line.length(), capBytes);
+}
 
 /**
  * Recover a log file from a partial rotation. SD rotation (and older LittleFS

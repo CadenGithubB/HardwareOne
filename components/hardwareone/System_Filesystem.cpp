@@ -2530,10 +2530,6 @@ bool appendLineWithCap(const char* path, const char* line, size_t lineLength, si
 }
 
 // The String form: the same bytes, the text and its length taken from `line`.
-bool appendLineWithCap(const char* path, const String& line, size_t capBytes) {
-  return appendLineWithCap(path, line.c_str(), line.length(), capBytes);
-}
-
 // Recover a log file's partner .tmp left over from a crashed or power-cut
 // rotation. Three possible on-disk states after a crash:
 //

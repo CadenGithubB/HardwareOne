@@ -33,13 +33,22 @@ def generate(overlay: Path | None, baseline: bool | None = None) -> str:
     markers = [marker for marker in ("static bool appendCappedLineOnce(", "static bool restartCappedLog(")
                if marker in production]
     markers.append("bool appendLineWithCap(")
-    # The String form, a wrapper around the (text, length) form since C1.
+    # The String form, a wrapper around the (text, length) form since C1: out of
+    # line in System_Filesystem.cpp at first, inline in System_Filesystem.h since.
+    wrapper = "bool appendLineWithCap(const char* path, const String& line, size_t capBytes) {"
+    header = ((overlay or COMPONENT) / "System_Filesystem.h").read_text()
+    string_form = ""
     if "bool appendLineWithCap(const char* path, const char* line, size_t lineLength" in production:
-        markers.append("bool appendLineWithCap(const char* path, const String& line, size_t capBytes) {"[:-2])
+        if wrapper in production:
+            markers.append(wrapper[:-2])
+        elif "inline " + wrapper in header:
+            string_form = extract_block(header, "inline " + wrapper[:-2])
     if "static void recoverLogOrphanAt(" in production:
         markers.append("static void recoverLogOrphanAt(")
     markers.append("void cleanupLogOrphan(")
     functions = "\n\n".join(extract_block(production, marker) for marker in markers)
+    if string_form:
+        functions += "\n\n" + string_form
     # log_out's capped-log line (System_Debug.cpp): the timestamp prefix and,
     # since C1, the line formatted into its kept PSRAM block.
     debug = ((overlay or COMPONENT) / "System_Debug.cpp").read_text()
