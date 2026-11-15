@@ -3823,6 +3823,15 @@ back as written, where an `int` default gave 0; every value up to 2^31 - 1 reads
 negative, text or missing value is still "none". Source rule: no read of `intervalMs`, `epochAtSync`,
 `millisAtSync` or `ntpAnchorId` in those two files goes through a default other than `uint32_t(0)`.
 
+`automation_ids` compiles `System_AutomationId.h` as it is and runs the production `sanitizeAutomationsJson`
+(`System_Automation.cpp`) with the real ArduinoJson. An automation id is stored as a number and read as a signed
+32-bit `long` everywhere; new ids were `millis()`, a number above 2^31 - 1 after 24.9 days of uptime, which
+`as<long>()` reads as 0. `automationIdSeed` and `automationIdAdvance` stay in 1..2147483647 at every uptime; a
+duplicate found on day 35 gets an id in range; a stored id above the range is given a new one with the rest of
+the automation unchanged; a file whose ids are in range (2147483647 included) is not touched; what
+`automationIdTextAboveRange` flags, the sanitizer changes. Source rules: both places that make an id use the
+owner, and the scheduler pass leaves an automation with an id above the range out and queues the sanitizer.
+
 `automation_condition_bounds` is about a size, not a time, and sits here with the group that fixed it. It
 compiles the production `validateConditionSyntax` and `executeConditionalCommand` (`System_Automation.cpp`).
 Their scan for ` THEN ` was bounded by `i < len - 5` on a `size_t`: for a command of 3 or 4 characters that

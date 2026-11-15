@@ -2398,6 +2398,14 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_stored_time_values.py
           ${SETUP_MQTT_TEST_ARGS})
+# Automation ids: a new id fits the signed long every reader takes it as (it
+# was millis(), above 2^31 after 24.9 days), and the sanitizer renumbers a
+# stored id above the range.
+add_test(
+  NAME automation_ids
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_automation_ids.py
+          ${SETUP_MQTT_TEST_ARGS})
 # Self-registration: /register/submit hands the decoded fields to
 # submitAccountRequest byte-exact (spaced and quoted passphrases), owner
 # refusals do not count toward the login lockout, anonymous `userrequest` is

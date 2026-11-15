@@ -28,6 +28,7 @@
  */
 
 #include "System_Automation.h"
+#include "System_AutomationId.h"   // the id range; new ids are made there
 #include "System_BuildConfig.h"
 
 #if ENABLE_AUTOMATION
@@ -566,7 +567,9 @@ bool automationIdExistsInJson(const String& json, unsigned long id) {
   return strstr(json.c_str(), needle) != nullptr;
 }
 
-// Sanitize duplicate IDs in automations array using ArduinoJson
+// Sanitize the IDs in the automations array using ArduinoJson: a duplicate,
+// and an id above kAutomationIdMax (which no reader can take, see
+// System_AutomationId.h), is replaced by a new unique id.
 bool sanitizeAutomationsJson(String& jsonRef) {
   // Use ArduinoJson for proper parsing
   PSRAM_JSON_DOC(doc);
@@ -612,13 +615,13 @@ bool sanitizeAutomationsJson(String& jsonRef) {
       }
     }
     
-    if (!dup) {
+    if (!dup && idVal <= kAutomationIdMax) {
       if (seenCount < kMax) seen[seenCount++] = idVal;
       continue;
     }
     
-    // Duplicate found: generate a new unique ID
-    unsigned long newId = (unsigned long)millis();
+    // Duplicate or out-of-range id found: generate a new unique ID
+    unsigned long newId = automationIdSeed((uint32_t)millis());
     int guard = 0;
     
     // Check against already seen IDs in this pass
@@ -630,7 +633,7 @@ bool sanitizeAutomationsJson(String& jsonRef) {
     };
     
     while (idExists(newId) && guard < 100) {
-      newId += 1 + (unsigned long)random(1, 100000);
+      newId = automationIdAdvance((uint32_t)newId, 1 + (uint32_t)random(1, 100000));
       guard++;
     }
     
@@ -638,7 +641,7 @@ bool sanitizeAutomationsJson(String& jsonRef) {
     if (seenCount < kMax) seen[seenCount++] = newId;
     changed = true;
     
-    DEBUG_AUTOMATIONSF("[sanitize] Replaced duplicate id %lu with %lu", idVal, newId);
+    DEBUG_AUTOMATIONSF("[sanitize] Replaced %s id %lu with %lu", dup ? "duplicate" : "out-of-range", idVal, newId);
   }
   
   if (changed) {
@@ -1804,10 +1807,12 @@ const char* cmd_automation_add(const String& argsInput) {
   if (idOverrideStr.length() > 0) {
     id = strtoul(idOverrideStr.c_str(), nullptr, 10);
   } else {
-    id = millis();
+    // From the uptime, kept inside 1..kAutomationIdMax: after 24.9 days of
+    // uptime millis() itself is a number no reader of the id can take.
+    id = automationIdSeed((uint32_t)millis());
     int guard = 0;
     while (automationIdExistsInJson(json, id) && guard < 100) {
-      id += 1 + (unsigned long)random(1, 100000);
+      id = automationIdAdvance((uint32_t)id, 1 + (uint32_t)random(1, 100000));
       guard++;
     }
   }
@@ -4513,6 +4518,17 @@ static void schedulerTickMinute() {
     long id = idStr.toInt();
 
     String obj = json.substring(objStart, objEnd + 1);
+
+    // An id above kAutomationIdMax does not fit the `long` it was just read
+    // into (toInt cut it to 2147483647), so it could be neither rescheduled
+    // after a fire nor addressed. Leave it out of this pass and let the
+    // sanitizer below give it a new id, as it does for a duplicate.
+    if (automationIdTextAboveRange(idStr.c_str())) {
+      DEBUG_AUTOMATIONSF("[autos] id %s is above the id range; skipping and queuing sanitize", idStr.c_str());
+      queueSanitize = true;
+      pos = objEnd + 1;
+      continue;
+    }
 
     // Duplicate-id guard
     bool dupSeen = false;
