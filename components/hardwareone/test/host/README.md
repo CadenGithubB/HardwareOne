@@ -3664,8 +3664,9 @@ Markup in either cell must arrive as text and read back unchanged; a clean row
 keeps its bytes; the value is cut at 100 received bytes and at its first NUL;
 an empty cell sends no zero-length chunk (the terminator of a chunked
 response). Source contract: the table loop sends every row through that
-function and formats no received text with `%s`. Not covered: the rest of the
-page, whose text comes from settings. It takes `--cxx`, `--sanitize` and
+function and formats no received text with `%s`, and the "Subscribed topics"
+line sends the `mqttSubscribeTopics` setting through `streamHtmlEscaped`. Not
+covered: the rest of the page, whose text comes from settings. It takes `--cxx`, `--sanitize` and
 `--component <directory>`.
 
 ```sh

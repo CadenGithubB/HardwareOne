@@ -11,7 +11,8 @@ arrive as text and read back unchanged, a clean row keeps its bytes, the value
 is cut at 100 received bytes and at its first NUL, and no zero-length chunk
 (the chunked-response terminator) is sent for an empty cell. Source contract:
 the table loop sends every row through that function and formats no received
-text with %s.
+text with %s, and the "Subscribed topics" line under the table sends the
+mqttSubscribeTopics setting through streamHtmlEscaped as well.
 
 Options: --cxx <compiler>, --sanitize (ASan + UBSan), --component <dir> to run
 the same cases against another components/hardwareone directory.
@@ -21,6 +22,7 @@ from __future__ import annotations
 import argparse
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
@@ -60,6 +62,9 @@ def check_sources(page: str) -> None:
             and row.count("streamHtmlEscaped(req, value.c_str()") == 1,
             "the row escapes the name and the value")
     require("%s" not in row, "the row formats no text with %s")
+    require("streamHtmlEscaped(req, gSettings.mqttSubscribeTopics.c_str()," in inner
+            and not re.search(r"httpd_resp_send_chunk\([^;]*mqttSubscribeTopics", inner),
+            "the subscribed topics line is sent HTML-escaped")
 
 
 def main() -> None:

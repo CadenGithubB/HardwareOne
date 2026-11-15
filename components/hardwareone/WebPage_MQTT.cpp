@@ -313,9 +313,12 @@ void streamMqttInner(httpd_req_t* req) {
     httpd_resp_send_chunk(req,
       "<p style=\"color:var(--panel-fg);font-size:0.85em;margin-top:8px;\">"
       "Subscribed topics: ", HTTPD_RESP_USE_STRLEN);
-    httpd_resp_send_chunk(req, 
-      gSettings.mqttSubscribeTopics.length() > 0 ? gSettings.mqttSubscribeTopics.c_str() : "(none)",
-      HTTPD_RESP_USE_STRLEN);
+    if (gSettings.mqttSubscribeTopics.length() > 0) {
+      streamHtmlEscaped(req, gSettings.mqttSubscribeTopics.c_str(),
+                        strlen(gSettings.mqttSubscribeTopics.c_str()));
+    } else {
+      httpd_resp_send_chunk(req, "(none)", HTTPD_RESP_USE_STRLEN);
+    }
     httpd_resp_send_chunk(req, "</p></div>", HTTPD_RESP_USE_STRLEN);
   }
 
