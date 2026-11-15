@@ -1407,10 +1407,10 @@ const char* cmd_radiopower(const String& originalCmd) {
 }
 
 // Drop the current AP association but KEEP the radio (STA mode) on, and leave
-// the HTTP server + web output running — unlike closewifi/cmd_closewifi,
+// the HTTP server + web output running — unlike closewifi (cmd_closewifi),
 // which tears those down to free heap. Use this to disconnect from one network
 // and reconnect/scan to another without re-enabling WiFi.
-const char* cmd_wifidrop(const String& argsInput) {
+const char* cmd_wifidisconnect(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   // Stop a boot connect still hunting in the background before dropping.
   if (!wifiSupersedeBackgroundConnect()) {
@@ -2700,7 +2700,7 @@ const CommandEntry wifiCommands[] = {
   // Connection Control — lifecycle open/close is admin-only (status/scan stay open)
   { "openwifi", "Connect to WiFi: [--best | --index <N> | --saved-id <id>] (default: best; ids come from a screen's saved list and are valid for this boot only)", true, cmd_wificonnect, "Usage: openwifi [--best | --index <1..N> | --saved-id <id>]" },
   { "closewifi", "Disconnect from WiFi (also stops HTTP server + web output to free heap).", true, cmd_closewifi },
-  { "wifidisconnect", "Disconnect from the current network but keep the radio on (HTTP/web stay up).", true, cmd_wifidrop },
+  { "wifidisconnect", "Disconnect from the current network but keep the radio on (HTTP/web stay up).", true, cmd_wifidisconnect },
   { "radiopower", "Power the whole 2.4GHz radio on/off (airplane mode; also stops/restores ESP-NOW; runtime only, not persisted): [on|off|toggle]", true, cmd_radiopower, "Usage: radiopower [on|off|toggle]" },
   { "wifiscan", "Scan for available WiFi networks. (add 'json' for JSON output)", false, cmd_wifiscan },
   { "wifigettxpower", "Report the current WiFi TX power in dBm (read-only; set it with 'wifitxpower').", true, cmd_wifigettxpower, "Usage: wifigettxpower  (no arguments)" },
@@ -2824,7 +2824,7 @@ void wifiEventLogDrain() {
   snprintf(det, sizeof(det), "reason=%d/%s (connected %lus)",
            reason, reasonName, (unsigned long)connSecs);
   systemEventPost(SYSEVT_WIFI_DISCONNECTED, ssid, det);
-  // ASSOC_LEAVE is what the device's own disconnects report (wifidrop,
+  // ASSOC_LEAVE is what the device's own disconnects report (wifidisconnect,
   // closewifi, a switch to another network); the driver does not retry after
   // it either. Every other reason is a link the device still wants.
   if (reason != WIFI_REASON_ASSOC_LEAVE) wifiRehuntNoteDropped();

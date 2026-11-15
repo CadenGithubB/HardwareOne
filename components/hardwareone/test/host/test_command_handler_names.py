@@ -9,9 +9,11 @@ web server), while the command `wifidisconnect` ran `cmd_wifidrop`.
 
 The rule: when the name of a handler, without its `cmd` prefix and its
 underscores, is the name of a command in some table, the handler is on a row
-of that command. HANDLERS pins the rows of the two Wi-Fi disconnects, and no
-source or user document may keep a retired handler name as if it were a
-command.
+of that command. HANDLERS pins the rows of the two Wi-Fi disconnects.
+RETIRED lists handler names that were never commands: `wifidrop` had found
+its way into comments and into the user guide as if it could be typed. No
+firmware source and no user document may name one (CHANGELOG.md keeps its
+history and is not read).
 
 Reads the working tree. --component points the test at another component
 directory.
@@ -36,7 +38,14 @@ HANDLER_NAME = re.compile(r"cmd_?(\w+)")
 # Command -> the handler its row names.
 HANDLERS: dict[str, str] = {
     "closewifi": "cmd_closewifi",
+    "wifidisconnect": "cmd_wifidisconnect",
 }
+# Retired handler words -> the command that was meant.
+RETIRED: dict[str, str] = {
+    "wifidrop": "wifidisconnect",
+}
+# User documents, relative to the repository root.
+DOCUMENTS = ("docs/USERGUIDE.md", "docs/QUICKSTART.md", "KNOWN_ISSUES.md", "README.md")
 
 
 def measure(component: Path):
@@ -90,6 +99,20 @@ def main() -> None:
         if handler_of.get(command) != {handler}:
             failures.append(f"`{command}` is handled by {sorted(handler_of.get(command, []))}, "
                             f"expected {handler}")
+
+    texts = {relative: text for relative, text in sources(component, (".h", ".cpp", ".inc"))}
+    repo = component.parents[1]
+    for document in DOCUMENTS:
+        if (repo / document).exists():
+            texts[document] = (repo / document).read_text(encoding="utf-8")
+    for word, meant in sorted(RETIRED.items()):
+        if word in commands:
+            failures.append(f"RETIRED lists `{word}`, which is a command now; remove the entry")
+        for relative, text in sorted(texts.items()):
+            for number, line in enumerate(text.splitlines(), 1):
+                if re.search(rf"\b(?:cmd_)?{word}\b", line):
+                    failures.append(f"{relative}:{number} names `{word}`, which is not a command; "
+                                    f"the command is `{meant}`")
 
     for failure in failures:
         print(f"FAIL {failure}", file=sys.stderr)

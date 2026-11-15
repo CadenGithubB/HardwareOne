@@ -921,8 +921,12 @@ When a handler's name, without its `cmd` prefix and its underscores, is the
 name of a command that exists, that handler must be on a row of that command:
 `cmd_wifidisconnect` was the handler of `closewifi` while the command
 `wifidisconnect` ran another function. `HANDLERS` in the runner pins the rows
-of the Wi-Fi disconnect commands. It reads source text only; `--component`
-points it at another component directory.
+of the Wi-Fi disconnect commands. `RETIRED` lists handler words that were
+never commands (`wifidrop`, which comments and the user guide had named as if
+it could be typed): no firmware source, and none of `docs/USERGUIDE.md`,
+`docs/QUICKSTART.md`, `KNOWN_ISSUES.md` and the top `README.md`, may name
+one. It reads source text only; `--component` points it at another component
+directory.
 
 ## Edge Impulse inference lock and continuous task
 

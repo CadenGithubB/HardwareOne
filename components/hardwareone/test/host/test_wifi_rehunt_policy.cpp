@@ -143,7 +143,7 @@ static void cancelDuringAHunt() {
   Policy p;
   p.noteDropped(0);
   CHECK(p.poll(offline(2), Policy::kFirstDelayMs), "hunt");
-  p.clear();  // wifidrop while the hunt runs
+  p.clear();  // wifidisconnect while the hunt runs
   CHECK(p.hunting, "the running hunt is still accounted for");
   CHECK(!p.poll(offline(2), 10 * Policy::kFirstDelayMs), "nothing starts beside it");
   p.huntEnded(false, true, Policy::kFirstDelayMs + 2000);

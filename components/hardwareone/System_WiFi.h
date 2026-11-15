@@ -106,7 +106,7 @@ const char* cmd_wifirm(const String& originalCmd);
 const char* cmd_wifipromote(const String& originalCmd);
 const char* cmd_wificonnect(const String& originalCmd);
 const char* cmd_closewifi(const String& argsInput);
-const char* cmd_wifidrop(const String& argsInput);   // `wifidisconnect` cmd: drop AP, keep radio + HTTP up
+const char* cmd_wifidisconnect(const String& argsInput);   // drop the AP, keep radio + HTTP up (closewifi stops those too)
 const char* cmd_radiopower(const String& originalCmd);  // `radiopower [on|off|toggle]`: power the whole radio (WiFi+ESP-NOW) up/down, runtime only
 const char* cmd_wifiscan(const String& command);
 const char* cmd_wifitxpower(const String& originalCmd);

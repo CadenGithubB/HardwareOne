@@ -1114,7 +1114,7 @@ first retried on the same network. If the device is still offline 60 seconds
 later and two or more networks are saved, it tries all saved networks, as
 `openwifi` does, and repeats that after 60 s, 120 s and then every 5 minutes
 until one answers. So a device carried to another saved network comes back online by
-itself. `wifidrop`, `closewifi` and `wifiautoreconnect 0` stop it. A device that
+itself. `wifidisconnect`, `closewifi` and `wifiautoreconnect 0` stop it. A device that
 found no network at boot is not retried: run `openwifi`.
 </details>
 

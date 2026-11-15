@@ -13,8 +13,8 @@
 //
 // Rules:
 //  - Only an involuntary drop of an established connection starts it. A
-//    disconnect the device asked for (wifidrop, closewifi, a switch to another
-//    network) and a boot that never connected do not.
+//    disconnect the device asked for (wifidisconnect, closewifi, a switch to
+//    another network) and a boot that never connected do not.
 //  - The driver gets kFirstDelayMs to rejoin the dropped network by itself.
 //  - With one saved network there is nothing else to hunt for, so the driver's
 //    retry is left alone. Once a hunt has failed the driver no longer retries
@@ -22,7 +22,8 @@
 //    the hunt is the only retry and runs with a single saved network too.
 //  - Failed hunts back off: kGapMs[0], kGapMs[1], then kGapMs[2] for good.
 //  - It ends when the link is back, or when reconnecting is no longer wanted
-//    (wifienabled 0, wifiautoreconnect 0, closewifi, radiopower off, wifidrop).
+//    (wifienabled 0, wifiautoreconnect 0, closewifi, radiopower off,
+//    wifidisconnect).
 struct WifiRehuntPolicy {
   static constexpr uint32_t kFirstDelayMs = 60000;
   static constexpr uint32_t kGapMs[3] = {60000, 120000, 300000};
