@@ -11,6 +11,7 @@
 #include "System_CommandLimits.h"
 
 #include <atomic>
+#include <utility>
 #include <freertos/semphr.h>
 #if defined(UART_LINK_PORT)
 #include "WebServer_Utils.h"
@@ -1075,7 +1076,7 @@ static void uartProcessLine(String& cmd, uint32_t admittedTransportEpoch) {
   Command uc;
   uc.line = cmd;
   uc.ctx.origin = ORIGIN_UART;
-  uc.ctx.auth = actx;
+  uc.ctx.auth = std::move(actx);  // actx is not read again
   uc.ctx.id = (uint32_t)millis();
   uc.ctx.timestampMs = (uint32_t)millis();
   uc.ctx.transportSessionEpoch = commandTransportEpoch;

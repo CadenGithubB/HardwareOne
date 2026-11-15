@@ -12,8 +12,9 @@ submit, the first time a trace or the timeout error needs it.
 
 The production submitAndExecuteSync, submitCommandAsync,
 releaseSyncExecReqOwner and redactOutputForLog (System_Utils.cpp) and
-broadcastOutput (HardwareOne.cpp) run on the production command types and the
-real Arduino String with counted heap calls. With the trace off: no
+broadcastOutput with broadcastOutputRouted, its body (HardwareOne.cpp) run on
+the production command types and the real Arduino String with counted heap
+calls. With the trace off: no
 redaction, and no String block in broadcastOutput (the old tree makes them);
 with it on, and on a full queue or a timeout: the same lines as before. The
 queued and Bluetooth copies of a result are unchanged, a private STT result
@@ -54,8 +55,12 @@ def generate(component: Path) -> str:
         extract_block(utils, "bool submitAndExecuteSync(const Command& cmd, String& out,\n"),
         extract_block(utils, "bool submitCommandAsync(const Command& cmd,"),
         extract_block(utils, "String redactOutputForLog(const String& output)"),
-        extract_block(main, "void broadcastOutput(const String& s, const CommandContext& ctx) "),
     ]
+    # broadcastOutput's body, which takes the route mask; a tree before it has none.
+    routed = "static void broadcastOutputRouted(const String& s, const CommandContext& ctx,"
+    if routed in main:
+        pieces.append(extract_block(main, routed))
+    pieces.append(extract_block(main, "void broadcastOutput(const String& s, const CommandContext& ctx) "))
     harness = (HERE / "command_trace_copies_harness.cpp").read_text()
     marker = "// INSERT_PRODUCTION"
     require(harness.count(marker) == 1, "one insertion marker")

@@ -1497,6 +1497,7 @@ python3 components/hardwareone/test/host/test_stt_privacy.py --sanitize
 ```
 
 `stt_privacy` splices `broadcastOutput(const String&, const CommandContext&)`
+with its body `broadcastOutputRouted` (the route mask as an argument)
 and `deliverCommandResult` from `HardwareOne.cpp` and `redactOutputForLog` from
 `System_Utils.cpp`. It checks that a private STT result (`sttText`,
 `transcriptPath`, QuickNote replies) reaches only the direct serial or BLE reply
@@ -3722,7 +3723,8 @@ ctest --test-dir /tmp/hw1-hardwareone-host -R '^auth_log_paths$' --output-on-fai
 `command_trace_copies` covers the redacted copies that only a debug trace
 reads. It runs the production `submitAndExecuteSync`, `submitCommandAsync`,
 `releaseSyncExecReqOwner` and `redactOutputForLog` (`System_Utils.cpp`) and
-`broadcastOutput` (`HardwareOne.cpp`) with the production command types, on
+`broadcastOutput` with its body `broadcastOutputRouted` (`HardwareOne.cpp`)
+with the production command types, on
 the counted Arduino String; the trace macro records a line and evaluates its
 arguments only while the trace is on, the command redactor is a counting
 double. With the trace off a submitted command is not redacted and
@@ -3765,6 +3767,34 @@ It takes `--cxx`, `--sanitize`, `--component <directory>`, `--baseline
 
 ```sh
 ctest --test-dir /tmp/hw1-hardwareone-host -R '^redact_audit$' --output-on-failure
+```
+
+`command_identity_copies` covers the copies of a command's identity on the
+way to its result. It runs the production `broadcastOutput`,
+`broadcastOutputRouted` and `deliverCommandResult` (`HardwareOne.cpp`, with
+`redactOutputForLog`) and `TaskIdentity`, `getOrCreateSlot` and
+`ExecIdentityGuard` (`System_AuthIdentity.cpp`) on the production command
+types and the counted Arduino String with the device's inline capacity; the
+line queue, the BLE sender, the serial port, the session registry and the
+task-local storage are doubles. For five origins x all 64 masks of the six
+route bits x three session ids x three results x validate-only x the serial
+kill switch x five session states x a CLI mode owned or not x the trace on or
+off (230400 deliveries, plus `broadcastOutput` itself for the live ones) the
+transcript of the console bytes, the drain wait, the queued copy with its
+route and prefix, the BLE reply, the broadcast lines and the traces must have
+the digest of the tree before; `--previous <directory>` builds an older tree
+and compares line by line. The serial mirror is no copy of the context: a
+serial delivery whose user and address are past the inline capacity makes 3
+String blocks (before 5). The identity slot is measured as it is: a web
+identity installed and restored on one task makes 2 blocks the first time and
+none after, and the restore frees none. Source checks: the serial console,
+the UART link and `runUnifiedSystemCommand` move their local `AuthContext`
+into the command and do not read it again, and `deliverCommandResult` makes
+no `CommandContext` copy. It takes `--cxx`, `--sanitize`, `--component
+<directory>`, `--previous <directory>` and `--print-counts`.
+
+```sh
+ctest --test-dir /tmp/hw1-hardwareone-host -R '^command_identity_copies$' --output-on-failure
 ```
 
 `fs_permission_strings` covers the file permission path. It runs the

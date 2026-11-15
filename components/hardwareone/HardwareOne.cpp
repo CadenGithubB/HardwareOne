@@ -1,6 +1,7 @@
 #include "Arduino.h"
 #include "System_CommandReply.h"  // the reply words and how to read them
 #include <atomic>
+#include <utility>
 #include <esp_attr.h>
 #include <esp_system.h>
 // Forward declarations to satisfy Arduino's auto-generated prototypes
@@ -613,8 +614,11 @@ static void commandExecTask(void* pv) {
 
 // Context-aware broadcastOutput that includes origin/user/path metadata.
 // Used to broadcast a command's return value after execution completes.
-// Routing is derived from ctx.outputMask (MSG_ROUTE_* sink bits).
-void broadcastOutput(const String& s, const CommandContext& ctx) {
+// Routing is derived from outputMask (MSG_ROUTE_* sink bits), which stands for
+// ctx.outputMask: deliverCommandResult's mirror passes it with the serial bit
+// cleared instead of copying the whole context to clear that bit.
+static void broadcastOutputRouted(const String& s, const CommandContext& ctx,
+                                  uint32_t outputMask) {
   const char* source;
   switch (ctx.origin) {
     case ORIGIN_SERIAL: source = "serial"; break;
@@ -636,11 +640,11 @@ void broadcastOutput(const String& s, const CommandContext& ctx) {
   // is on (a trace's arguments are evaluated only then).
   DEBUG_CMD_FLOWF("[BROADCAST_CTX] origin=%s user=%s mask=0x%02lX msg='%.50s'",
                   source, ctx.auth.user.c_str(),
-                  (unsigned long)ctx.outputMask, redactOutputForLog(s).c_str());
+                  (unsigned long)outputMask, redactOutputForLog(s).c_str());
 
   // outputMask holds MSG_ROUTE_* bits directly; keep only the sinks a
   // command may address. OLED and G2 always included for command return values.
-  uint8_t route = (uint8_t)(ctx.outputMask & (MSG_ROUTE_SERIAL | MSG_ROUTE_WEB | MSG_ROUTE_FILE | MSG_ROUTE_BLE))
+  uint8_t route = (uint8_t)(outputMask & (MSG_ROUTE_SERIAL | MSG_ROUTE_WEB | MSG_ROUTE_FILE | MSG_ROUTE_BLE))
                 | MSG_ROUTE_OLED | MSG_ROUTE_G2;
 
   // Pass explicit route to the queued command-result fan-out. This runs AFTER
@@ -671,7 +675,7 @@ void broadcastOutput(const String& s, const CommandContext& ctx) {
   // dropped instead of reaching the replacement session. A context without a
   // connection id has no direct BLE recipient: console-mirror sessions get
   // only the queued copy above (private STT text redacted), never the original.
-  if (ctx.outputMask & MSG_ROUTE_BLE) {
+  if (outputMask & MSG_ROUTE_BLE) {
     const char* sid = ctx.auth.sid.c_str();
     uint32_t targetConnId = 0;
     bool haveConn = sid && *sid;
@@ -688,6 +692,10 @@ void broadcastOutput(const String& s, const CommandContext& ctx) {
   }
 
   DEBUG_CMD_FLOWF("[broadcast] route=0x%02X len=%d", route, s.length());
+}
+
+void broadcastOutput(const String& s, const CommandContext& ctx) {
+  broadcastOutputRouted(s, ctx, ctx.outputMask);
 }
 
 // Transport-completion delivery for the command return value (OUTPUT CONTRACT
@@ -803,11 +811,9 @@ void deliverCommandResult(const String& result, const CommandContext& ctx) {
         static_cast<unsigned long>(ctx.transportSessionEpoch));
     return;
   }
-  CommandContext mirrorCtx = ctx;
-  mirrorCtx.outputMask &= ~(uint32_t)MSG_ROUTE_SERIAL;
   if (!cliModeOwnedBySession(ctx.auth.transport,
                              ctx.transportSessionEpoch)) {
-    broadcastOutput(result, mirrorCtx);
+    broadcastOutputRouted(result, ctx, ctx.outputMask & ~(uint32_t)MSG_ROUTE_SERIAL);
   }
 }
 
@@ -2910,7 +2916,7 @@ void hardwareone_loop() {
           Command uc;
           uc.line = cmd;
           uc.ctx.origin = ORIGIN_SERIAL;
-          uc.ctx.auth = actx;
+          uc.ctx.auth = std::move(actx);  // actx is not read again
           uc.ctx.id = (uint32_t)millis();
           uc.ctx.timestampMs = (uint32_t)millis();
           uc.ctx.transportSessionEpoch = commandSessionEpoch;

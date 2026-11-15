@@ -22,7 +22,11 @@ def main():
     harness = (HERE / 'stt_privacy_harness.cpp').read_text()
     for marker, code in {
         'REDACTOR': function(utils, 'String redactOutputForLog('),
-        'BROADCAST': function(main, 'void broadcastOutput(const String& s, const CommandContext& ctx)'),
+        # broadcastOutputRouted is broadcastOutput's body (the route mask as an
+        # argument); a tree before it has none.
+        'BROADCAST': (function(main, 'static void broadcastOutputRouted(') + '\n'
+                      if 'static void broadcastOutputRouted(' in main else '') +
+                     function(main, 'void broadcastOutput(const String& s, const CommandContext& ctx)'),
         'DELIVER': function(main, 'void deliverCommandResult('),
     }.items():
         harness = harness.replace('// INSERT_' + marker, code)

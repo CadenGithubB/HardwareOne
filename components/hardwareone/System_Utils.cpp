@@ -9,6 +9,7 @@
 #include <Arduino.h>
 #include <atomic>
 #include <ctype.h>
+#include <utility>
 #include <esp_heap_caps.h>
 #if CONFIG_HEAP_TASK_TRACKING
 #include <esp_heap_task_info.h>   // heap_task_totals_t, heap_caps_get_per_task_info
@@ -4714,7 +4715,7 @@ void runUnifiedSystemCommand(const String& argsInput) {
   Command uc;
   uc.line = argsInput;
   uc.ctx.origin = ORIGIN_SYSTEM;
-  uc.ctx.auth = actx;
+  uc.ctx.auth = std::move(actx);  // actx is not read again
   uc.ctx.id = (uint32_t)millis();
   uc.ctx.timestampMs = (uint32_t)millis();
   uc.ctx.outputMask = MSG_ROUTE_FILE;

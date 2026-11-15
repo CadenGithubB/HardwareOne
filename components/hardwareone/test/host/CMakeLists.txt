@@ -2361,6 +2361,14 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_redact_audit.py
           ${SETUP_MQTT_TEST_ARGS})
+# A command's identity is moved where the transport's copy dies, and the
+# serial mirror clears its route bit without copying the context; every
+# delivered route and text equals the tree before.
+add_test(
+  NAME command_identity_copies
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_command_identity_copies.py
+          ${SETUP_MQTT_TEST_ARGS})
 # The file permission path gives the answers of fs_permission_answers.txt for
 # every rule of the path table and makes no String on the way.
 add_test(
