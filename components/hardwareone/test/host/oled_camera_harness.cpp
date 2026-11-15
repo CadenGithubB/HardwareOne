@@ -51,7 +51,8 @@ static bool refuseScratch=false;
 void* trackedAlloc(size_t n){void* p=std::malloc(n);assert(p);allocations.insert(p);return p;}
 void trackedFree(void* p){if(p){assert(allocations.erase(p)==1);std::free(p);}}
 enum class AllocPref{PreferPsram};
-void* ps_alloc(size_t n,AllocPref,const char*){return refuseScratch?nullptr:trackedAlloc(n);}
+static std::string lastPsTag;
+void* ps_alloc(size_t n,AllocPref,const char* tag){lastPsTag=tag?tag:"";return refuseScratch?nullptr:trackedAlloc(n);}
 static bool authed=true,awake=true,guest=false,sourceRunning=true,snapshotBusy=false,decodeFail=false;
 static uint64_t liveEpoch=1;
 static unsigned captures=0,sessions=0,toasts=0;
@@ -71,9 +72,17 @@ void cameraFrameRelease(CameraFrame& frame){trackedFree(frame.data);frame={};}
 namespace hwjpeg {
 Image::~Image(){reset();}
 void Image::reset(){trackedFree(pixels);pixels=nullptr;}
-bool decode(const uint8_t*,size_t,Image& image,const DecodeOptions&,const char** error){
+static unsigned softwareStorage=0;
+bool decode(const uint8_t*,size_t,Image& image,const DecodeOptions& options,const char** error){
   if(onDecode)onDecode();if(decodeFail){*error="no memory";return false;}
-  image.width=16;image.height=16;image.stride=48;image.size=768;image.pixels=(uint8_t*)trackedAlloc(image.size);
+  // The preview hands the software decoder a PSRAM-first allocator: its
+  // workspace (3100 B or more), a normalized copy and the pixels come from it,
+  // released with free() as OutputAllocator's contract says.
+  assert(options.softwareAllocator);
+  uint8_t* workspace=options.softwareAllocator(3100);
+  assert(workspace&&lastPsTag=="oled.camera.jpeg");trackedFree(workspace);++softwareStorage;
+  image.width=16;image.height=16;image.stride=48;image.size=768;image.pixels=options.softwareAllocator(image.size);
+  assert(image.pixels&&lastPsTag=="oled.camera.jpeg");
   for(unsigned p=0;p<256;++p)for(unsigned c=0;c<3;++c)image.pixels[p*3+c]=p;
   return true;
 }
@@ -121,6 +130,7 @@ int main() {
     else if(delays==2){assert(snapshot().frozen&&captures==1);input(0,0,INPUT_BUTTON_A);}
     else {assert(captures==2);currentOledMode=OLED_MENU;prepareCameraPreviewData();}};
   task(nullptr);assert(!snapshot().worker&&!snapshot().ready&&!sessions&&allocations.empty());
+  assert(hwjpeg::softwareStorage>=2);
   assert(!input(0,0,INPUT_BUTTON_B));
   // Stopping an externally paused source must clear hold, so restarting can
   // produce a frame rather than waiting for an impossible resume of no image.

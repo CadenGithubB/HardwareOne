@@ -132,6 +132,12 @@ static void worker(void*) {
         hwjpeg::DecodeOptions options;
         options.maxInputBytes = kCameraMaxFrameBytes;
         options.maxOutputBytes = 1600u * 1600u * 3u;
+        // The software decoder's workspace, a marker-normalized copy and the
+        // pixels in PSRAM first, as the camera HAL and the glasses viewer ask;
+        // without an allocator the workspace and the copy are internal RAM.
+        options.softwareAllocator = [](size_t size) -> uint8_t* {
+          return static_cast<uint8_t*>(ps_alloc(size, AllocPref::PreferPsram, "oled.camera.jpeg"));
+        };
         const char* error = nullptr;
         const bool decodedOk = hwjpeg::decode(frame.data, frame.length, decoded, options, &error);
         cameraFrameRelease(frame);
