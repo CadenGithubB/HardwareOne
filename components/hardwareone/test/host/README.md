@@ -3790,6 +3790,18 @@ mark made on day 40 does not keep the frame dirty after the wrap (the old runnin
 values did, for 40 days, and dropped every later mark as smaller); a mark across the wrap works on both sides; a
 passed deadline is set back to 0.
 
+`elapsed_time` covers elapsed time since a `millis()` stamp, which is an unsigned 32-bit difference:
+`(long)(now - stamp) < interval` is negative, so "not yet", for a stamp between 24.9 and 49.7 days old. It runs
+`g2HealthTick`, `healthPollStatusLine` and `g2HealthLoggingStatusLine` (`G2_Health.cpp`) and
+`g2RingPollVitalForLogging` (`G2_Ring.cpp`) with stamps that are 25, 30 and 49 days old and across the wrap; the
+driver writes `long` in the inserted text as the 32-bit type it is on the device, so a base run shows the fault
+(17 of 36 checks). Source rules cover all twelve comparisons of the change (the sensor log tick, the health
+logging mine, the Health page, the EvenCore failure dump throttle, the ring vitals poll): each is
+`(uint32_t)(now - stamp)`, no signed difference is left for those stamps, and the three stamps another task
+renews are copied before the clock is read. `g2_health_graph_core_tests` holds the one test that stays signed
+on purpose: the unknown-timestamp dedupe of `pushSeries` orders two stamps, and a replayed sample may be older
+than the series tail.
+
 ## ESP-NOW peer message store
 
 `espnow_message_store` compiles the whole message-buffer section of

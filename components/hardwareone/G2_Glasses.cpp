@@ -9207,7 +9207,7 @@ static void handleEnvelope(G2Temple& t, const G2EnvelopeView& env,
               const bool throttleTextFail =
                   (cmd == 6 && res == 9 &&
                    sLastFailDumpMs != 0 &&
-                   (long)(nowDump - sLastFailDumpMs) < 5000);
+                   (uint32_t)(nowDump - sLastFailDumpMs) < 5000);
               if (!throttleTextFail) {
                 char reasonBuf[64];
                 snprintf(reasonBuf, sizeof(reasonBuf),

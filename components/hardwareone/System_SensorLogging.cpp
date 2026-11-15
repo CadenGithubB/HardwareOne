@@ -457,7 +457,9 @@ void sensorLogTick() {
   if (healthOwnedR1Only) {
     if (!forced) return;
   } else {
-    if (!forced && lastTickMs != 0 && (long)(nowMs - lastTickMs) < (long)gSensorLogIntervalMs) return;
+    // Elapsed time is unsigned: a stamp left from a logging pause of more than
+    // 24.9 days must read as old, not as a negative number (no sample at all).
+    if (!forced && lastTickMs != 0 && (uint32_t)(nowMs - lastTickMs) < gSensorLogIntervalMs) return;
   }
 
   if (forced) sForceSample = false;
@@ -971,7 +973,7 @@ void sensorLogTick() {
     static unsigned long lastHeartbeatMs = 0;
     const unsigned long heartbeatMs = 5000;
     if (!hasSelectedData) {
-      if (lastHeartbeatMs != 0 && (long)(nowMs - lastHeartbeatMs) < (long)heartbeatMs) {
+      if (lastHeartbeatMs != 0 && (uint32_t)(nowMs - lastHeartbeatMs) < heartbeatMs) {
         log_idle_skips++;
         if (isDebugFlagSet(DEBUG_LOGGER)) {
           DEBUG_LOGGERF("logger: idle skip #%u (dt=%lums)", (unsigned)log_idle_skips, (nowMs - lastHeartbeatMs));
@@ -1112,7 +1114,7 @@ void sensorLogTick() {
         // Handle log rotation. Rotation runs on whichever tier we're writing
         // to. When overflow is active we rotate inside `/sd/...` and the
         // LittleFS copies are preserved (never touched again).
-        if (gApproxSizeBytes > gSensorLogMaxSize && (lastTruncateMs == 0 || (long)(millis() - lastTruncateMs) >= (long)truncateCooldownMs)) {
+        if (gApproxSizeBytes > gSensorLogMaxSize && (lastTruncateMs == 0 || (uint32_t)(millis() - lastTruncateMs) >= truncateCooldownMs)) {
           lastTruncateMs = millis();
 
           if (gSensorLogMaxRotations > 0) {
@@ -1178,7 +1180,7 @@ void sensorLogTick() {
 
     // Periodic summary
     unsigned long now2 = millis();
-    if (isDebugFlagSet(DEBUG_LOGGER) && (lastSummaryMs == 0 || (long)(now2 - lastSummaryMs) >= 5000)) {
+    if (isDebugFlagSet(DEBUG_LOGGER) && (lastSummaryMs == 0 || (uint32_t)(now2 - lastSummaryMs) >= 5000)) {
       lastSummaryMs = now2;
       DEBUG_LOGGERF("logger: summary | writes=%u open_fail=%u idle_skips=%u trunc=%u",
                     (unsigned)log_writes, (unsigned)log_open_fail,
@@ -1952,8 +1954,12 @@ void healthLoggingTick() {
 
   // Mine cadence gate — used both when connected (poll vitals) and when
   // down (nudge BLE once per interval instead of spinning every loop).
-  const bool mineDue = (sHtMineLastBurstMs == 0 ||
-      (long)(now - sHtMineLastBurstMs) >= (long)healthLoggingIntervalMs());
+  // Elapsed time is unsigned, so a stamp older than 24.9 days still reads as
+  // old. `healthlogging interval` renews this stamp from the command task; it
+  // is read before the clock, so it can never be ahead of it.
+  const uint32_t lastBurstMs = sHtMineLastBurstMs;
+  const bool mineDue = (lastBurstMs == 0 ||
+      (uint32_t)(millis() - lastBurstMs) >= healthLoggingIntervalMs());
 
   if (!g2RingIsConnected()) {
     sHtMineState = HT_MINE_IDLE;
@@ -1965,7 +1971,7 @@ void healthLoggingTick() {
       // short reboot. When the ring comes up, mineDue must still be true
       // so the first real sample lands within seconds, not +15 min.
       if (sHtMineLastReseekMs == 0 ||
-          (long)(now - sHtMineLastReseekMs) >= (long)healthLoggingIntervalMs()) {
+          (uint32_t)(now - sHtMineLastReseekMs) >= healthLoggingIntervalMs()) {
         sHtMineLastReseekMs = now;
         // Non-blocking: schedules connectSaved on the next bleAutoReconnectTick.
         // Respects user ring disconnect; works even if bleautoreconnect is off
@@ -2010,7 +2016,7 @@ void healthLoggingTick() {
   }
 
   if (sHtMineState == HT_MINE_POLLING) {
-    if (sHtMineLastMs == 0 || (long)(now - sHtMineLastMs) >= 700) {
+    if (sHtMineLastMs == 0 || (uint32_t)(now - sHtMineLastMs) >= 700) {
       (void)g2RingPollVital(sHtMineCursor);
       sHtMineCursor++;
       sHtMineLastMs = now;
@@ -2023,7 +2029,7 @@ void healthLoggingTick() {
   }
 
   if (sHtMineState == HT_MINE_SETTLE) {
-    if ((long)(now - sHtMineLastMs) >= 1500) {
+    if ((uint32_t)(now - sHtMineLastMs) >= 1500) {
       sHtMineLastBurstMs = now;
       sHtMineState = HT_MINE_IDLE;
       if (gSensorLoggingRunning && (gSensorLogMask & LOG_R1)) {

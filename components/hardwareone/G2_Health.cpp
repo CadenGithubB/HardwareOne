@@ -1436,7 +1436,7 @@ void g2HealthTick(void) {
     sRefreshSupportedLast = refreshSupported;
     bumpMenuGen();
   }
-  if (sLastSyncMs == 0 || (long)(now - sLastSyncMs) >= 1000) {
+  if (sLastSyncMs == 0 || (uint32_t)(now - sLastSyncMs) >= 1000) {
     syncFromTelemetry();
     sLastSyncMs = now;
   }
@@ -1627,7 +1627,6 @@ void g2HealthNotePollUnsupported(void) {
 // Status line under vitals / metric readout. A successful refresh can return
 // the same recorded sample, so do not claim the value itself was updated.
 static const char* healthPollStatusLine(const char* fallback) {
-  const uint32_t now = millis();
   if (sPollUi == POLL_UI_ACTIVE) return "Refreshing...";
   if (sPollUi == POLL_UI_DONE || sPollUi == POLL_UI_PARTIAL ||
       sPollUi == POLL_UI_FAILED || sPollUi == POLL_UI_UNSUPPORTED) {
@@ -1635,7 +1634,11 @@ static const char* healthPollStatusLine(const char* fallback) {
         sPollUi == POLL_UI_PARTIAL ? "Refresh incomplete" :
         sPollUi == POLL_UI_FAILED ? "Refresh failed" :
         "Refresh unsupported";
-    if ((long)(now - sPollUiMs) < 4000) return status;
+    // Unsigned elapsed time: a result older than 24.9 days is old, not fresh.
+    // The stamp is read before the clock (another task renews it), so it is
+    // never ahead of it.
+    const uint32_t shownMs = sPollUiMs;
+    if ((uint32_t)(millis() - shownMs) < 4000) return status;
     sPollUi = POLL_UI_IDLE;
     return fallback ? fallback : "";
   }
@@ -1671,7 +1674,8 @@ void g2HealthNoteLoggingCommandRefused(void) {
 // The refusal or error shown for a few seconds under the vitals, or nullptr.
 const char* g2HealthLoggingStatusLine(void) {
   if (!sLoggingUiMsg[0]) return nullptr;
-  if ((long)(millis() - sLoggingUiMs) < (long)kLoggingUiHoldMs) return sLoggingUiMsg;
+  const uint32_t shownMs = sLoggingUiMs;  // read before the clock; unsigned elapsed time
+  if ((uint32_t)(millis() - shownMs) < kLoggingUiHoldMs) return sLoggingUiMsg;
   sLoggingUiMsg[0] = '\0';
   return nullptr;
 }

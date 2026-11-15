@@ -2363,6 +2363,13 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_millis_deadlines.py
           ${SETUP_MQTT_TEST_ARGS})
+# Elapsed time since a millis() stamp is an unsigned difference: a stamp that is
+# 24.9 to 49.7 days old read as "not yet" through (long)(now - stamp).
+add_test(
+  NAME elapsed_time
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_elapsed_time.py
+          ${SETUP_MQTT_TEST_ARGS})
 # Self-registration: /register/submit hands the decoded fields to
 # submitAccountRequest byte-exact (spaced and quoted passphrases), owner
 # refusals do not count toward the login lockout, anonymous `userrequest` is

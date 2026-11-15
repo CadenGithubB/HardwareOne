@@ -51,6 +51,35 @@ static void test_unknown_timestamp_dedupe_is_unchanged() {
   assert(hw1_g2_health::pushSeries(&series, 50, 0, 6000));
 }
 
+// The unknown-timestamp dedupe orders two stamps: the replayed sample may be
+// older than the series tail, so its distance is signed on purpose. An
+// unsigned "elapsed time" here would re-insert the sample below.
+static void test_replay_older_than_the_tail_is_not_reinserted() {
+  Series<3> series{};
+  assert(hw1_g2_health::pushSeries(&series, 70, 0, 1000));  // live sample
+
+  // A backfill fills the ring, which pushes the live sample out, and ends on
+  // the same value with later stamps.
+  assert(hw1_g2_health::pushSeries(&series, 60, 11, 2000));
+  assert(hw1_g2_health::pushSeries(&series, 65, 12, 2001));
+  assert(hw1_g2_health::pushSeries(&series, 70, 13, 2002));
+  assert(series.count == 3 && series.lastMs == 2002);
+
+  // The next cache sync replays the retained live sample with its original,
+  // older receive stamp. It is no longer in the ring, yet it is not new.
+  assert(!hw1_g2_health::pushSeries(&series, 70, 0, 1000));
+  assert(series.count == 3 && series.lastMs == 2002);
+
+  // A synthetic backfill stamp can lie before 0 at early uptime (a 24 h
+  // window fetched one hour after boot); a replay is older than that tail too.
+  Series<2> early{};
+  assert(hw1_g2_health::pushSeries(&early, 70, 0, 0xFFFFF000u));
+  assert(hw1_g2_health::pushSeries(&early, 64, 21, 0x00000100u));
+  assert(hw1_g2_health::pushSeries(&early, 70, 22, 0x00000200u));
+  assert(!hw1_g2_health::pushSeries(&early, 70, 0, 0xFFFFF000u));
+  assert(early.count == 2);
+}
+
 struct Segment {
   bool vertical;
   int a;
@@ -89,6 +118,7 @@ int main() {
   test_daily_latest_wins_over_colliding_backfill();
   test_timestamp_scan_uses_only_active_ring_entries();
   test_unknown_timestamp_dedupe_is_unchanged();
+  test_replay_older_than_the_tail_is_not_reinserted();
   test_frame_has_no_right_rail();
   puts("G2 health graph core tests passed");
   return 0;

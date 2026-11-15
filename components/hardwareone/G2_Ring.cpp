@@ -6685,7 +6685,7 @@ void g2RingPollVitalForLogging(void) {
   static uint8_t cursor = 0;
   static uint32_t lastMs = 0;
   const uint32_t now = millis();
-  if (lastMs != 0 && (long)(now - lastMs) < 700) return;
+  if (lastMs != 0 && (uint32_t)(now - lastMs) < 700) return;
   (void)g2RingPollVital(cursor);
   cursor = (uint8_t)((cursor + 1) % G2_RING_POLL_VITAL_COUNT);
   lastMs = now;
