@@ -1585,6 +1585,10 @@ add_test(
   NAME filesystem_listing_permissions_contract
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_filesystem_listing_permissions_contract.py)
+add_test(
+  NAME file_manager_refresh_contract
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_file_manager_refresh_contract.py)
 set(FILESYSTEM_PSRAM_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
 if(HW1_SANITIZE)
   list(APPEND FILESYSTEM_PSRAM_TEST_ARGS --sanitize)

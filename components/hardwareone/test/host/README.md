@@ -2370,6 +2370,13 @@ delete, a refused delete, a missing file and an unready filesystem leave it alon
 never for a failed or SD upload). `--source <cpp>` takes a saved
 `System_Filesystem.cpp`.
 
+`file_manager_refresh_contract` pins one storage refresh per folder load in the
+web file manager (`createFileManager`, `WebServer_Utils.h`): the explorer's
+`onNavigate` calls `config.onRefresh`, and the actions (new folder, new file,
+upload, Refresh) only reload the folder. On the Files page each refresh is a
+fresh `/api/files/stats`, a LittleFS walk of about 1.3 s on the P4X-EYE. It
+takes an optional saved `WebServer_Utils.h` path for a before/after run.
+
 `espnow_fs_transcript_privacy` runs the actual LIST/STAT/GET handlers, path
 policies, VFS normalization/directory reader and packed wire definitions. Its
 STAT cases distinguish `/sd` and `/sd/...` from `/sdata` and `/sdcard`, with

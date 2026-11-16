@@ -878,6 +878,11 @@ inline const char* getFileBrowserScript() {
           currentPath = path;
           setStatus('Path: ' + currentPath);
           updateToolbar(dirPerms);
+          // The one onRefresh per load: every folder load (navigation, or the
+          // reload after an action) ends here, including empty folders and
+          // error replies. On the Files page onRefresh asks /api/files/stats,
+          // a fresh storage reading (about 1.3 s of LittleFS walk on the
+          // P4X-EYE), so actions must not call it a second time.
           if (config.onRefresh) config.onRefresh(currentPath);
         }
       });
@@ -902,8 +907,7 @@ inline const char* getFileBrowserScript() {
         hw.postFormText('/api/cli', { cmd: 'mkdir "' + fullPath + '"' })
         .then(function(txt) {
           setStatus(txt, txt.indexOf('Error') >= 0);
-          loadExplorer();
-          if (config.onRefresh) config.onRefresh(currentPath);
+          loadExplorer();  // its onNavigate runs onRefresh once the folder has loaded
         })
         .catch(function(e) { setStatus('Error: ' + e.message, true); });
       });
@@ -918,8 +922,7 @@ inline const char* getFileBrowserScript() {
         hw.postFormText('/api/cli', { cmd: 'filecreate "' + fullPath + '"' })
         .then(function(txt) {
           setStatus(txt, txt.indexOf('Error') >= 0);
-          loadExplorer();
-          if (config.onRefresh) config.onRefresh(currentPath);
+          loadExplorer();  // its onNavigate runs onRefresh once the folder has loaded
         })
         .catch(function(e) { setStatus('Error: ' + e.message, true); });
       });
@@ -966,7 +969,7 @@ inline const char* getFileBrowserScript() {
               var wrap = hw.$(progressId);
               hw.hide(wrap);
               setStatus(ok ? 'Uploaded: ' + file.name : msg, !ok);
-              if (ok) { loadExplorer(); if (config.onRefresh) config.onRefresh(currentPath); }
+              if (ok) loadExplorer();  // its onNavigate runs onRefresh once the folder has loaded
               input.value = '';
             }
           });
@@ -977,8 +980,7 @@ inline const char* getFileBrowserScript() {
     
     // Action: Refresh
     window[managerId + 'Refresh'] = function() {
-      loadExplorer();
-      if (config.onRefresh) config.onRefresh(currentPath);
+      loadExplorer();  // its onNavigate runs onRefresh once the folder has loaded
     };
     
     // Action: View file
