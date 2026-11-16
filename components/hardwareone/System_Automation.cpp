@@ -1239,7 +1239,10 @@ static void automationCarryUptimeSchedule(time_t now) {
     for (JsonObject automation : doc["automations"].as<JsonArray>()) {
       const long id = automation["id"] | 0L;
       int slot = -1;
-      for (JsonObject t : automation["triggers"].as<JsonArray>()) {
+      // A named array, not the member proxy's temporary: GCC's
+      // -Werror=dangling-reference rejects a range-for over the latter.
+      JsonArray triggers = automation["triggers"].as<JsonArray>();
+      for (JsonObject t : triggers) {
         if (++slot >= 255) break;
         AutomationUptimeSchedule::Entry e{};
         taskENTER_CRITICAL(&sUptimeScheduleMux);
@@ -2851,7 +2854,8 @@ const char* cmd_automation_trigger(const String& argsInput) {
 // "... fixed 1 out-of-range ID", "... fixed 1 duplicate ID and 3 out-of-range
 // IDs". An out-of-range id is one above kAutomationIdMax (System_AutomationId.h).
 static const char* automationSanitizeReply(const AutomationSanitizeCounts& counts) {
-  EXT_RAM_BSS_ATTR static char reply[112];
+  // 34 + 39 + 5 + 39 + 1 bytes at most (two 10-digit counts).
+  EXT_RAM_BSS_ATTR static char reply[128];
   char duplicates[40] = "";
   char outOfRange[40] = "";
   if (counts.duplicates > 0) {
