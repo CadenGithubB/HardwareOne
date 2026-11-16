@@ -66,6 +66,7 @@ class Adafruit_SSD1306 {
  private:
   int cx_ = 0, cy_ = 0;
 };
+#include "oled_text_field_op_double.h"  // list labels go through the bounded field policy
 struct OLEDFooterHints;
 void oledRenderFooter(Adafruit_SSD1306*, const OLEDFooterHints*) {}
 bool oledDrawIcon(Adafruit_SSD1306*, const char*, int, int, int) { return true; }

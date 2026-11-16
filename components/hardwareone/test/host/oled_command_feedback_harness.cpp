@@ -3,7 +3,7 @@
 // code in at the INSERT_* markers: the OLED action helpers (OLED_Utils.cpp
 // oledRunCommand, oledCommandReplyText and oledRunCommandAsync with its
 // frame-loop delivery, when the tree has them) and real callers: the Automations
-// toggle/delete actions and their footer toast, the Quick Settings rows and
+// toggle/delete actions and their shared toast, the Quick Settings rows and
 // the Network screen's HTTP confirm callbacks. Everything else is a double:
 // the OLED command executor, the global toast, the Automations list rows and
 // the radio / Wi-Fi / Bluetooth / HTTP state.
@@ -132,17 +132,13 @@ struct AutomationRenderData {
   unsigned long lastRefresh;
 };
 static AutomationRenderData autoRenderData;
-static const char* autoActionMsg = nullptr;
-static unsigned long autoActionMsgTime = 0;
 static bool autoForceRefresh = false;
-static const unsigned long AUTO_TOAST_MS = 1500;
 static long sPendingDeleteId = 0;
 static unsigned long gDirtyUntil = 0;
 static void oledMarkDirtyUntil(unsigned long untilMs) { if (untilMs > gDirtyUntil) gDirtyUntil = untilMs; }
 
 // ---- Quick Settings / Network doubles -------------------------------------------------
 static char quickStatusMsg[32] = "";
-static unsigned long quickStatusExpireMs = 0;
 static bool gRadioOn = true;
 bool wifiRadioOn() { return gRadioOn; }
 struct HarnessWiFi {
@@ -178,13 +174,10 @@ static void resetWorld() {
   gToast.clear();
   gToastCount = 0;
   autoRenderData = AutomationRenderData();
-  autoActionMsg = nullptr;
-  autoActionMsgTime = 0;
   autoForceRefresh = false;
   sPendingDeleteId = 0;
   gDirtyUntil = 0;
   quickStatusMsg[0] = '\0';
-  quickStatusExpireMs = 0;
   gRadioOn = true;
   WiFi.connected = true;
   gBleServer = gG2Client = gPhonePipe = false;
@@ -353,8 +346,7 @@ static void case_automations_toggle() {
   refuse(kAdminRefusal);
   autoToggleSelected();
   EXPECT(ran() == "automation disable id=7", "the toggle runs the owner command, ran: " + ran());
-  EXPECT(autoActionMsg == nullptr,
-         "a refused toggle shows no success text, shown: " + msg(autoActionMsg));
+  EXPECT(gToastIcon == OledUIIcon::ERROR, "a refused toggle shows error feedback");
   EXPECT(gToast == "Admin required", "a refused toggle shows the refusal, toast: '" + gToast + "'");
   EXPECT(autoForceRefresh, "the list refreshes after the action either way");
 
@@ -363,8 +355,8 @@ static void case_automations_toggle() {
   autoRenderData.count = 1;
   gExecText = "OK: Automation enabled";
   autoToggleSelected();
-  EXPECT(msg(autoActionMsg) == "Enabled" && gToastCount == 0,
-         "an accepted toggle shows 'Enabled' in the list footer, shown: " + msg(autoActionMsg));
+  EXPECT(gToast == "Enabled" && gToastIcon == OledUIIcon::SUCCESS,
+         "an accepted toggle shows 'Enabled' in the list footer, shown: " + gToast);
 }
 
 static void case_automations_delete() {
@@ -374,15 +366,15 @@ static void case_automations_delete() {
   refuse(kAdminRefusal);
   autoDeleteConfirmed(nullptr);
   EXPECT(ran() == "automation delete id=9", "delete runs the owner command, ran: " + ran());
-  EXPECT(autoActionMsg == nullptr && gToast == "Admin required",
-         "a refused delete shows the refusal, not 'Deleted', shown: " + msg(autoActionMsg) +
+  EXPECT(gToastIcon == OledUIIcon::ERROR && gToast == "Admin required",
+         "a refused delete shows the refusal, not 'Deleted', shown: " + gToast +
              ", toast: '" + gToast + "'");
 
   resetWorld();
   sPendingDeleteId = 9;
   autoDeleteConfirmed(nullptr);
-  EXPECT(msg(autoActionMsg) == "Deleted" && gToastCount == 0 && autoForceRefresh,
-         "an accepted delete shows 'Deleted', shown: " + msg(autoActionMsg));
+  EXPECT(gToast == "Deleted" && gToastIcon == OledUIIcon::SUCCESS && autoForceRefresh,
+         "an accepted delete shows 'Deleted', shown: " + gToast);
 }
 
 static void case_quick_radio_wifi() {
@@ -399,7 +391,7 @@ static void case_quick_radio_wifi() {
   resetWorld();
   toggleQuickRadio();
   land();
-  EXPECT(std::string(quickStatusMsg) == "Radio OFF" && gToastCount == 0,
+  EXPECT(gToast == "Radio OFF" && gToastCount == 1,
          "an accepted radio toggle shows 'Radio OFF', status: '" + std::string(quickStatusMsg) + "'");
 
   resetWorld();
@@ -414,14 +406,14 @@ static void case_quick_radio_wifi() {
   WiFi.connected = false;
   toggleQuickWiFi();
   land();
-  EXPECT(ran() == "openwifi --best" && std::string(quickStatusMsg) == "WiFi ON",
+  EXPECT(ran() == "openwifi --best" && gToast == "WiFi ON",
          "an accepted Wi-Fi connect shows 'WiFi ON', status: '" + std::string(quickStatusMsg) + "'");
 
   resetWorld();
   gRadioOn = false;
   toggleQuickWiFi();
   land();
-  EXPECT(ran() == "(none)" && std::string(quickStatusMsg) == "Radio off!",
+  EXPECT(ran() == "(none)" && gToast == "Radio is off. Turn it on first.",
          "with the radio off the Wi-Fi row refuses locally without a command");
 }
 
@@ -439,7 +431,7 @@ static void case_quick_bluetooth_http() {
   gBleServer = true;
   bluetoothToggleConfirmedQuick(nullptr);
   land();
-  EXPECT(ran() == "closeble" && std::string(quickStatusMsg) == "Bluetooth OFF",
+  EXPECT(ran() == "closeble" && gToast == "Bluetooth OFF",
          "an accepted Bluetooth stop shows 'Bluetooth OFF', status: '" + std::string(quickStatusMsg) + "'");
 
   // The toggle is the whole radio: anything running (server, glasses, phone)
@@ -461,7 +453,7 @@ static void case_quick_bluetooth_http() {
     gSettings.bleMode = role.mode;
     bluetoothToggleConfirmedQuick(nullptr);
     land();
-    EXPECT(ran() == role.command && std::string(quickStatusMsg) == role.status,
+    EXPECT(ran() == role.command && gToast == role.status,
            std::string("the Bluetooth toggle runs ") + role.command + ", ran: " + ran());
   }
 
@@ -477,14 +469,14 @@ static void case_quick_bluetooth_http() {
   server = &gHttpHandle;
   httpToggleConfirmedQuick(nullptr);
   land();
-  EXPECT(ran() == "closehttp" && std::string(quickStatusMsg) == "HTTP OFF",
+  EXPECT(ran() == "closehttp" && gToast == "HTTP OFF",
          "an accepted HTTP stop shows 'HTTP OFF', status: '" + std::string(quickStatusMsg) + "'");
 
   resetWorld();
   WiFi.connected = false;
   httpToggleConfirmedQuick(nullptr);
   land();
-  EXPECT(ran() == "(none)" && std::string(quickStatusMsg) == "Need WiFi first!",
+  EXPECT(ran() == "(none)" && gToast == "Connect Wi-Fi first.",
          "without Wi-Fi the HTTP row refuses locally without a command");
 }
 
@@ -511,13 +503,13 @@ static void case_quick_async() {
          "a second row while one runs toasts 'Please wait', ran: " + ran() + ", toast: '" + gToast + "'");
 
   finishCommand();
-  EXPECT(gDirtyMarks == 1 && std::string(quickStatusMsg) == "Working...",
+  EXPECT(gDirtyMarks == 2 && std::string(quickStatusMsg) == "Working...",
          "the executor only stores the reply and asks for a frame");
   nextFrame();
-  EXPECT(std::string(quickStatusMsg) == "Radio OFF" && gToast == "Please wait",
+  EXPECT(gToast == "Radio OFF" && quickStatusMsg[0] == '\0',
          "the next frame shows the result, status: '" + std::string(quickStatusMsg) + "'");
   nextFrame();
-  EXPECT(std::string(quickStatusMsg) == "Radio OFF" && gToastCount == 1,
+  EXPECT(gToast == "Radio OFF" && gToastCount == 2,
          "a reply is delivered once");
 
   // After it lands the next row runs.
@@ -526,7 +518,7 @@ static void case_quick_async() {
   EXPECT(gQueued.size() == 1 && gQueued[0].line == "openwifi --best",
          "the next row runs after the first finished, ran: " + ran());
   land();
-  EXPECT(std::string(quickStatusMsg) == "WiFi ON", "and shows its own result");
+  EXPECT(gToast == "WiFi ON", "and shows its own result");
 
   // A full command queue: told at once, nothing in flight, the next press works.
   resetWorld();
@@ -538,7 +530,7 @@ static void case_quick_async() {
   gQueueAccepts = true;
   toggleQuickRadio();
   land();
-  EXPECT(std::string(quickStatusMsg) == "Radio OFF", "the next press runs normally");
+  EXPECT(gToast == "Radio OFF", "the next press runs normally");
 
   // The display session changed while the command ran (logout, another user):
   // its reply is not shown to the new session, and the row is free again.
@@ -555,7 +547,7 @@ static void case_quick_async() {
   gExecText = "OK";
   toggleQuickRadio();
   land();
-  EXPECT(std::string(quickStatusMsg) == "Radio OFF", "the new session's own press runs");
+  EXPECT(gToast == "Radio OFF", "the new session's own press runs");
 
   // An executor 'ok' whose reply is an error is still a failure.
   resetWorld();

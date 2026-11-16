@@ -31,6 +31,7 @@ constexpr int GPIO_NUM_NC=-1,I2S_NUM_0=0,I2S_ROLE_MASTER=1,I2S_DATA_BIT_WIDTH_16
 const char* esp_err_to_name(int){return "fake error";}
 static int failStage=0,lockDepth=0,transactions=0,reads=0,creates=0,deletes=0,amp=0;
 static bool present=true;
+static int codecVolumeReg=-1,speakerPeak=0;
 struct Write {int address,value;};static std::vector<Write> writes;
 struct TwoWire {
  int reg=-1,value=-1;
@@ -62,12 +63,19 @@ esp_err_t i2s_channel_enable(Channel* h){if(failStage==4)return ESP_FAIL;h->enab
 esp_err_t i2s_channel_disable(Channel* h){assert(h->enabled);h->enabled=false;return ESP_OK;}
 esp_err_t i2s_del_channel(Channel* h){assert(h->allocated&&!h->enabled);h->allocated=false;++deletes;return ESP_OK;}
 esp_err_t i2s_channel_read(Channel* h,void* out,size_t bytes,size_t* got,uint32_t){assert(h->enabled&&!lockDepth);++reads;*got=warmupFail?0:std::min(bytes,readLimit);std::memset(out,0x12,*got);return warmupFail?ESP_ERR_TIMEOUT:readError;}
-esp_err_t i2s_channel_write(Channel* h,const void*,size_t bytes,size_t* got,uint32_t){assert(h->enabled&&h->tx&&!lockDepth);*got=bytes;return ESP_OK;}
+esp_err_t i2s_channel_write(Channel* h,const void* data,size_t bytes,size_t* got,uint32_t){
+ assert(h->enabled&&h->tx&&!lockDepth&&amp==HIGH);
+ const auto* pcm=static_cast<const int16_t*>(data);
+ for(size_t i=0;i<bytes/sizeof(int16_t);i+=2){assert(pcm[i]==pcm[i+1]);speakerPeak=std::max(speakerPeak,std::abs(int(pcm[i])));}
+ *got=bytes;return ESP_OK;
+}
 using es8311_handle_t=void*;constexpr int ES8311_ADDRESS_0=0x18,ES8311_RESOLUTION_16=16;
 struct es8311_clock_config_t {bool a,b,c;uint32_t mclk,rate;};
 es8311_handle_t es8311_create(int,int){return &txChannel;}int es8311_delete(void*){return 0;}
 int es8311_init(void*,const es8311_clock_config_t*,int,int){return failStage==6?ESP_FAIL:ESP_OK;}
-int es8311_voice_volume_set(void*,int,void*){return ESP_OK;}
+constexpr int ES8311_DAC_REG32=0x32;
+esp_err_t es8311_write_reg(void*,int reg,int value){assert(lockDepth&&reg==ES8311_DAC_REG32);codecVolumeReg=value;return failStage==7?ESP_FAIL:ESP_OK;}
+// INSERT_CODEC_VOLUME
 // INSERT_HEADER
 // INSERT_MIC
 // INSERT_SPEAKER
@@ -92,8 +100,15 @@ int main(){
  }
  assert(waveshareAudioTryClaim());assert(!waveshareMicStart(16000));assert(!waveshareAudioTryClaim());waveshareAudioRelease();idle();
  #endif
- assert(speakerPlayTone(660,50,10)==ESP_OK);idle();
- for(int failure:{1,2,4,6}){failStage=failure;assert(speakerPlayTone(660,50,10)!=ESP_OK);idle();}failStage=0;
+ for(int volume:{0,10,40,60}){
+  speakerPeak=0;codecVolumeReg=-1;
+  assert(speakerPlayTone(660,50,volume)==ESP_OK);idle();
+  assert(codecVolumeReg==0xBF); // Actual vendor mapping must leave DAC at unity.
+  const int expectedPeak=volume*100;
+  assert(speakerPeak<=expectedPeak&&speakerPeak>=expectedPeak-1);
+ }
+ for(int failure:{1,2,4,6,7}){failStage=failure;assert(speakerPlayTone(660,50,10)!=ESP_OK);idle();}failStage=0;
  assert(speakerPlayTone(0,50,10)==ESP_ERR_INVALID_ARG);idle();
- std::puts("Waveshare production mic/speaker: rate, failure cleanup, PCM timeout, overflow and shared-pin exclusion passed");
+ const int before=creates;assert(speakerPlayTone(660,50,61)==ESP_ERR_INVALID_ARG&&creates==before);idle();
+ std::puts("Waveshare production mic/speaker: DAC unity, PCM volume/mute, rate, failure cleanup, PCM timeout, overflow and shared-pin exclusion passed");
 }

@@ -126,7 +126,7 @@ static void rtcNTPSyncConfirmed(void* userData) {
   (void)userData;
   executeOLEDCommand("ntpsync");
   // ntpsync handles RTC sync internally when RTC is connected
-  oledNotificationBannerShow("NTP sync requested", PairingRibbonIcon::SUCCESS, 2000);
+  oledNotificationBannerShow("NTP sync requested", OledUIIcon::SUCCESS, 2000);
 }
 
 // Input handler for RTC OLED mode - X toggles sensor, Y syncs time via NTP
@@ -149,10 +149,10 @@ static bool rtcInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
     if (WiFi.isConnected()) {
       oledConfirmRequest("Sync NTP?", nullptr, rtcNTPSyncConfirmed, nullptr);
     } else {
-      oledNotificationBannerShow("WiFi not connected", PairingRibbonIcon::ERROR_ICON, 2000);
+      oledNotificationBannerShow("WiFi not connected", OledUIIcon::ERROR, 2000);
     }
 #else
-    oledNotificationBannerShow("WiFi disabled", PairingRibbonIcon::ERROR_ICON, 2000);
+    oledNotificationBannerShow("WiFi disabled", OledUIIcon::ERROR, 2000);
 #endif
     return true;
   }

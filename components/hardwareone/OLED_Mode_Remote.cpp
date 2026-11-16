@@ -4,6 +4,7 @@
 
 #include "OLED_Display.h"
 #include "OLED_Utils.h"
+#include "OLED_TextField.h"
 #include "System_Settings.h"
 #include "System_BuildConfig.h"
 #include "System_ESPNow.h"
@@ -101,6 +102,18 @@ static bool isRemoteSensorConnected(uint16_t mask) {
 // Status Display (detailed view)
 // =============================================================================
 
+// "<peer name>  [ON]" on the current text row: the name in a bounded field,
+// the state right-aligned in its own column. Advances to the next row.
+static void remoteDrawPeerNameRow(const char* peerName, bool online) {
+  const char* state = online ? "[ON]" : "[OFF]";
+  const int stateX = SCREEN_WIDTH - (int)strlen(state) * 6;
+  const int ry = oledDisplay->getCursorY();
+  oledTextFieldDraw(oledDisplay, 0, ry, stateX - 6, peerName, DISPLAY_COLOR_WHITE, DISPLAY_COLOR_WHITE,
+                    false, &bondMenuSelection);
+  oledDisplay->setCursor(stateX, ry);
+  oledDisplay->println(state);
+}
+
 static void displayBondStatus() {
   if (!gEspNow) return;
   
@@ -117,9 +130,7 @@ static void displayBondStatus() {
   
   // Line 1: Peer name + online/offline
   bool online = gEspNow->bondPeerOnline;
-  peerName[14] = '\0';  // Truncate for display
-  oledDisplay->print(peerName);
-  oledDisplay->println(online ? " [ON]" : " [OFF]");
+  remoteDrawPeerNameRow(peerName, online);
   
   // Line 2: Role + sync status
   const char* role = (isBondMaster()) ? "Master" : "Worker";
@@ -236,16 +247,22 @@ static void displayBondSensors() {
     const char* fieldLabel = isStreamField ? "Strm" : "Enbl";
     bool value = isStreamField ? streaming : enabled;
 
-    char line[22];
+    // Fixed columns: cursor, a nine-glyph name field (the former %-9s), then
+    // the field label and value, which never move under a long name.
+    const int ry = oledDisplay->getCursorY();
+    oledDisplay->setCursor(0, ry);
+    oledDisplay->print(cursor);
+    oledTextFieldDraw(oledDisplay, 6, ry, 54, sd.name, DISPLAY_COLOR_WHITE, DISPLAY_COLOR_WHITE,
+                      isSelected, bondSensorDefs);
+    char tail[12];
     if (!connected) {
       // Disconnected: both rows show "--" instead of a value.
-      snprintf(line, sizeof(line), "%s%-9s%s --",
-               cursor, sd.name, fieldLabel);
+      snprintf(tail, sizeof(tail), "%s --", fieldLabel);
     } else {
-      snprintf(line, sizeof(line), "%s%-9s%s [%s]",
-               cursor, sd.name, fieldLabel, value ? "ON " : "OFF");
+      snprintf(tail, sizeof(tail), "%s [%s]", fieldLabel, value ? "ON " : "OFF");
     }
-    oledDisplay->println(line);
+    oledDisplay->setCursor(60, ry);
+    oledDisplay->println(tail);
   }
 }
 
@@ -352,9 +369,8 @@ void displayRemoteMode() {
   String displayName = BondedPeer::peerName();
   strncpy(peerName, displayName.c_str(), sizeof(peerName) - 1);
   peerName[sizeof(peerName) - 1] = '\0';
-  peerName[14] = '\0';  // Truncate for display
-  oledDisplay->print(peerName);
-  oledDisplay->println(online ? " [ON]" : " [OFF]");
+  // The peer name in a bounded field; the link state keeps a fixed right column.
+  remoteDrawPeerNameRow(peerName, online);
   
   // Menu options
   bool isMaster = (isBondMaster());
@@ -362,12 +378,13 @@ void displayRemoteMode() {
     // Skip Sensors for workers (they can't control)
     if (i == 1 && !isMaster) continue;
     
-    if (i == bondMenuSelection) {
-      oledDisplay->print("> ");
-    } else {
-      oledDisplay->print("  ");
-    }
-    oledDisplay->println(bondMenuItems[i]);
+    const int ry = oledDisplay->getCursorY();
+    const bool selected = i == bondMenuSelection;
+    oledDisplay->setCursor(0, ry);
+    oledDisplay->print(selected ? "> " : "  ");
+    oledTextFieldDraw(oledDisplay, 12, ry, SCREEN_WIDTH - 12, bondMenuItems[i],
+                      DISPLAY_COLOR_WHITE, DISPLAY_COLOR_WHITE, selected, bondMenuItems);
+    oledDisplay->println();
   }
 }
 

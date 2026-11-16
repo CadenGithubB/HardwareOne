@@ -115,8 +115,8 @@ template<typename Fn> static void transact(Fn fn) {
 template<typename Fn> static void i2cDeviceTransactionVoid(uint8_t,int,int,int,Fn fn) { transact(fn); }
 template<typename Fn> static void i2cTransactionNACKTolerant(uint8_t,int,int,int,Fn fn) { transact(fn); }
 #define ENABLE_OLED_DISPLAY 1
-enum class PairingRibbonIcon { INFO_ICON };
-static void oledNotificationBannerShow(const char* message,PairingRibbonIcon,int) {
+enum class OledUIIcon { INFO };
+static void oledNotificationBannerShow(const char* message,OledUIIcon,int) {
   callbackAllowed(); assert(!busHeld); banners.emplace_back(message);
 }
 

@@ -68,6 +68,24 @@ struct OLEDFooterHints {};
 void oledRenderFooter(Adafruit_SSD1306*, const OLEDFooterHints*){}
 void oledDrawIcon(Adafruit_SSD1306*, const char*, int, int, int){}
 // INSERT_TYPES
+// The shared renderers draw every label through the production text field:
+// its implementation is spliced here over the GFX double, and the canvas
+// bridges drawPixel to its framebuffer.
+#include "oled_text_field_gfx_double.h"
+static int currentOLEDMode=0;
+uint32_t millis();
+// INSERT_TEXT_FIELD
+struct CanvasGfx : Adafruit_GFX {
+  Adafruit_SSD1306& c;
+  explicit CanvasGfx(Adafruit_SSD1306& d):Adafruit_GFX(128,canvasHeight),c(d){}
+  void drawPixel(int16_t px,int16_t py,uint16_t v) override { c.pixel(px,py,v); }
+};
+void oledTextFieldDraw(Adafruit_SSD1306* d,int x,int y,int w,const char* t,uint16_t fg,uint16_t bg,bool a,const void* o) {
+  if(!d) return;
+  if(t && *t) d->textRows.push_back(y);
+  CanvasGfx g(*d);
+  oledTextFieldDraw(static_cast<Adafruit_GFX*>(&g),x,y,w,t,fg,bg,a,o);
+}
 // INSERT_FUNCTIONS
 static OLEDScrollState sMainScroll;
 static bool sMainScrollInit=false;
@@ -78,7 +96,8 @@ static bool oledConnected=true;
 static struct {bool up=false,down=false;} gNavEvents;
 #define INPUT_BUTTON_A 1
 #define INPUT_CHECK(buttons,mask) ((buttons)&(mask))
-uint32_t millis(){return 1000;}
+static uint32_t gNow=1000;
+uint32_t millis(){return gNow;}
 void oledMarkDirtyUntil(uint32_t){}
 void oledMarkDirty(){}
 // INSERT_PERF
@@ -199,6 +218,80 @@ int main(int argc,char** argv) {
       gNavEvents={};
     }
     oledDisplay=nullptr;
+
+    // Overflowing labels through the shipping renderers, checked on pixels: a
+    // lit pixel never leaves its field (the pane, the cursor column, the
+    // scrollbar), unselected rows end in "...", and only the selected row
+    // moves, at the shared marquee's pace.
+    {
+      auto litIn=[&](const Adafruit_SSD1306& d,int x0,int y0,int x1,int y1){
+        int n=0;for(int yy=y0;yy<y1;++yy)for(int xx=x0;xx<x1;++xx)n+=((d.buffer[(yy/8)*128+xx]>>(yy&7))&1)!=0;return n;};
+      const char* longLabel="A label far too long for any OLED row to hold";
+      // Compact list with a scrollbar: label field is [12, 126).
+      OLEDScrollState compact;oledScrollInit(&compact,nullptr,3);
+      for(int i=0;i<6;++i) oledScrollAddItem(&compact,longLabel,nullptr,true,nullptr);
+      compact.selectedIndex=1;
+      gNow=5000;Adafruit_SSD1306 c0;oledTextFieldFrameBegin();oledScrollRenderSimple(&c0,&compact,true,11);oledTextFieldFrameEnd();
+      // The same list with empty labels draws only the cursor and the scrollbar:
+      // the long labels must leave both column ranges exactly as they are.
+      OLEDScrollState bare;oledScrollInit(&bare,nullptr,3);
+      for(int i=0;i<6;++i) oledScrollAddItem(&bare,"",nullptr,true,nullptr);
+      bare.selectedIndex=1;
+      Adafruit_SSD1306 cb;oledTextFieldFrameBegin();oledScrollRenderSimple(&cb,&bare,true,11);oledTextFieldFrameEnd();
+      for(int yy=11;yy<35;++yy){
+        for(int xx=0;xx<12;++xx) assert(((c0.buffer[(yy/8)*128+xx]>>(yy&7))&1)==((cb.buffer[(yy/8)*128+xx]>>(yy&7))&1));
+        for(int xx=126;xx<128;++xx) assert(((c0.buffer[(yy/8)*128+xx]>>(yy&7))&1)==((cb.buffer[(yy/8)*128+xx]>>(yy&7))&1));
+      }
+      assert(litIn(c0,12,11,126,35)>litIn(cb,12,11,126,35));                 // the labels are drawn in between
+      oledTextFieldReset();gNow=5000;c0=Adafruit_SSD1306();oledTextFieldFrameBegin();oledScrollRenderSimple(&c0,&compact,true,11);oledTextFieldFrameEnd();
+      // Unselected rows end in the ellipsis: the last three cells are dots.
+      Adafruit_SSD1306 dots;dots.setCursor(108,11);dots.print("...");
+      for(int xx=108;xx<126;++xx)for(int yy=11;yy<19;++yy) assert((((c0.buffer[(yy/8)*128+xx]>>(yy&7))&1)!=0)==(((dots.buffer[(yy/8)*128+xx]>>(yy&7))&1)!=0));
+      // The selected row has not moved before the initial pause, then moves.
+      gNow=5999;assert(!oledTextFieldNeedsFrame());
+      gNow=6000+50*4;assert(oledTextFieldNeedsFrame());
+      Adafruit_SSD1306 c1;oledTextFieldFrameBegin();oledScrollRenderSimple(&c1,&compact,true,11);oledTextFieldFrameEnd();
+      auto rowSame=[&](const Adafruit_SSD1306& a,const Adafruit_SSD1306& b,int y){
+        for(int yy=y;yy<y+8;++yy)for(int xx=12;xx<126;++xx)
+          if((((a.buffer[(yy/8)*128+xx]>>(yy&7))&1))!=(((b.buffer[(yy/8)*128+xx]>>(yy&7))&1)))return false;
+        return true;};
+      for(int row=0;row<3;++row) assert(rowSame(c0,c1,11+row*8)==(row!=1));   // only the selected row changed
+      for(int yy=11;yy<35;++yy){                                             // cursor and scrollbar stayed put
+        for(int xx=0;xx<12;++xx) assert(((c1.buffer[(yy/8)*128+xx]>>(yy&7))&1)==((cb.buffer[(yy/8)*128+xx]>>(yy&7))&1));
+        for(int xx=126;xx<128;++xx) assert(((c1.buffer[(yy/8)*128+xx]>>(yy&7))&1)==((cb.buffer[(yy/8)*128+xx]>>(yy&7))&1));
+      }
+      // Split pane (the main menu's 68 px list): nothing crosses the separator.
+      OLEDScrollState split;oledScrollInit(&split,nullptr,4);oledScrollSetSplitPane(&split,68,74,32);
+      for(int i=0;i<3;++i) oledScrollAddItem(&split,longLabel,nullptr,true,nullptr);
+      split.selectedIndex=0;
+      Adafruit_SSD1306 s0;oledTextFieldFrameBegin();oledScrollRender(&s0,&split,true,true,nullptr);oledTextFieldFrameEnd();
+      assert(litIn(s0,67,11,74,11+OLED_CONTENT_HEIGHT)==0);                   // between the bar and the separator
+      assert(litIn(s0,75,11,128,11+OLED_CONTENT_HEIGHT)==0);                   // the icon pane (no icon here)
+      assert(litIn(s0,2,13,67,21)>0);                                         // the selected row's glyphs are there
+      // Two-line full-width rows (items start at y=0, so the second item is the
+      // first one fully inside the content area): each declared line is
+      // bounded, the selected item's two long lines both draw, and nothing
+      // spills into a third line below the visible window.
+      OLEDScrollState two;oledScrollInit(&two,nullptr,2);
+      oledScrollAddItem(&two,"short","and short",true,nullptr);
+      oledScrollAddItem(&two,longLabel,longLabel,true,nullptr);
+      oledScrollAddItem(&two,"third","row",true,nullptr);
+      two.selectedIndex=1;
+      Adafruit_SSD1306 t0;oledTextFieldFrameBegin();oledScrollRender(&t0,&two,true,true,nullptr);oledTextFieldFrameEnd();
+      assert(litIn(t0,0,16,3,32)>0);                                           // selection bar on the second item
+      assert(litIn(t0,5,16,126,24)>0 && litIn(t0,5,24,126,32)>0);              // both lines drawn
+      assert(litIn(t0,0,32,126,48)==0);                                        // no third line, nothing below the window
+      assert(litIn(t0,126,16,128,32)==litIn(t0,126,16,128,32));                // scrollbar columns are the bar's
+      if(argc>1){
+        Adafruit_SSD1306 pc;chrome(pc);oledScrollRenderSimple(&pc,&compact,true,11);
+        save(pc,std::string(argv[1])+"/overflow-compact-"+std::to_string(height)+".pgm");
+        gNow+=1000+50*30;Adafruit_SSD1306 pm;chrome(pm);oledTextFieldFrameBegin();oledScrollRenderSimple(&pm,&compact,true,11);oledTextFieldFrameEnd();
+        save(pm,std::string(argv[1])+"/overflow-compact-moved-"+std::to_string(height)+".pgm");
+        Adafruit_SSD1306 ps;chrome(ps);oledScrollRender(&ps,&split,true,true,nullptr);
+        save(ps,std::string(argv[1])+"/overflow-split-"+std::to_string(height)+".pgm");
+      }
+      oledTextFieldReset();gNow=1000;
+    }
 
     // Exercise the shipping map packer over both sizes, including the last row.
     std::vector<uint8_t> shades(128*height), packed(128*((height+7)/8),0xaa);

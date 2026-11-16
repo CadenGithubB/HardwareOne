@@ -140,7 +140,9 @@ std::atomic<TaskHandle_t> sOledOwnerTask{&gOwnerToken};
 
 int gToasts = 0;
 std::string gLastToast;
-void oledToastShow(const char* message, uint32_t /*durationMs*/) {
+namespace oled_message { constexpr uint32_t kErrorDurationMs = 8000; }
+enum class OledUIIcon { ERROR };
+void oledToastShow(const char* message, uint32_t /*durationMs*/, OledUIIcon) {
   ++gToasts;
   gLastToast = message ? message : "";
 }

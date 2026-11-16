@@ -26,7 +26,7 @@
 // Sink bits for a kind's rule row.
 enum : uint8_t {
   NSINK_NONE   = 0,
-  NSINK_BANNER = 1 << 0,  // transient OLED banner/ribbon
+  NSINK_BANNER = 1 << 0,  // event-driven OLED feedback (shared toast renderer)
   NSINK_QUEUE  = 1 << 1,  // persistent notification-center view (ring-backed)
   NSINK_TOAST  = 1 << 2,  // web toast via SSE
   NSINK_G2     = 1 << 3,  // native notification card on the G2 lens (EFS push)

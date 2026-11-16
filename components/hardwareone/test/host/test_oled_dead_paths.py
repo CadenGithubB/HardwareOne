@@ -73,7 +73,7 @@ REMOVED = {
 }
 
 KEPT = (
-    "oledUIRender", "oledToastRender", "oledPairingRibbonRender", "displaySystemStatusRendered",
+    "oledUIRender", "oledToastRender", "displaySystemStatusRendered",
     "displayMemoryStatsRendered", "displayWebStatsRendered", "displayConnectedSensorsRendered",
     "findOLEDMode", "popOLEDMode", "oledMenuBack", "modeFromSlug", "slugFromMode",
     "oledDrawIcon", "oledDrawLevelBars",

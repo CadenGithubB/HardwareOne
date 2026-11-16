@@ -4,6 +4,7 @@
 
 #include "OLED_Display.h"
 #include "OLED_Utils.h"
+#include "OLED_TextField.h"
 #include "OLED_UI.h"                  // oledToastShow — owner refusals on unpair/discovery
 #include "System_ESPNow.h"
 #include "System_ESPNow_Sessions.h"   // sendStatusGet / SendStatusState — post-send delivery indicator
@@ -55,15 +56,13 @@ EXT_RAM_BSS_ATTR static OLEDScrollState sEspNowMessageListScroll;
 // PSRAM .bss: CPU-only row metadata, written/read solely on the OLED task.
 EXT_RAM_BSS_ATTR static struct { bool isSent; uint32_t msgId; uint8_t sendState; } gOledRowMeta[OLED_SCROLL_MAX_ITEMS];
 
-// Run an owner command under the display identity (admin gate, live-session
-// fence and audit log in the executor) and show a short refusal on the toast.
-// The toast box fits ~17 columns (OLED_UI.cpp), so the owner's reply is mapped
-// to two fixed strings instead of being truncated mid-sentence. Returns true
-// only when the owner accepted the command.
+// Owner commands preserve their refusal through the shared reply mapping.
 static bool oledEspNowRunOwnerCommand(const char* cmd, const char* failToast) {
-  char out[160];
-  if (executeOLEDCommandWithResult(cmd, out, sizeof(out)) && strncmp(out, "Error", 5) != 0) return true;
-  oledToastShow(strstr(out, "Admin access required") ? "Admin required" : failToast, 2500);
+  char out[oled_message::kMessageBytes] = {};
+  if (executeOLEDCommandWithResult(cmd, out, sizeof(out)) && !oled_message::isError(out)) return true;
+  char text[oled_message::kMessageBytes];
+  oledCommandReplyText(false, out, nullptr, failToast, text, sizeof(text));
+  oledToastShow(text, oled_message::kErrorDurationMs, OledUIIcon::ERROR);
   return false;
 }
 
@@ -339,17 +338,16 @@ void oledEspNowDisplayMainMenu(Adafruit_SSD1306* display) {
   int menuStartY = OLED_CONTENT_START_Y + kStatusHeight;
   for (int i = 0; i < kMaxVisibleItems && (scrollOffset + i) < kTotalItems; i++) {
     int itemIndex = scrollOffset + i;
-    display->setCursor(0, menuStartY + i * kLineHeight);
-    if (itemIndex == gOledEspNowState.mainMenuSelection) {
-      display->print("> ");
-    } else {
-      display->print("  ");
-    }
-    display->print(espnowMenuItems[itemIndex]);
-    
-    // Show state indicators inline
-    if (itemIndex == 4) {  // Start/Stop
-      display->print(gEspNow && gEspNow->initialized ? " *" : "");
+    const int y = menuStartY + i * kLineHeight;
+    const bool selected = itemIndex == gOledEspNowState.mainMenuSelection;
+    display->setCursor(0, y);
+    display->print(selected ? "> " : "  ");
+    // The label field ends before the fixed marker column (OLED_TextField.h).
+    oledTextFieldDraw(display, 12, y, 114 - 12 - 6, espnowMenuItems[itemIndex],
+                      DISPLAY_COLOR_WHITE, DISPLAY_COLOR_WHITE, selected, espnowMenuItems);
+    if (itemIndex == 4 && gEspNow && gEspNow->initialized) {  // Start/Stop: running marker
+      display->setCursor(114, y);
+      display->print("*");
     }
   }
   
@@ -402,11 +400,15 @@ void oledEspNowDisplayStatus(Adafruit_SSD1306* display) {
   display->print("Channel: ");
   display->println(gEspNow ? gEspNow->channel : 0);
   
-  // Device name (truncate if too long)
+  // Device name on the rest of the row, bounded (OLED_TextField.h).
   display->print("Name: ");
-  String name = gSettings.espnowDeviceName.length() > 0 ? gSettings.espnowDeviceName : "(none)";
-  if (name.length() > 15) { name = name.substring(0, 14); name += '~'; }
-  display->println(name);
+  {
+    const String name = gSettings.espnowDeviceName.length() > 0 ? gSettings.espnowDeviceName : "(none)";
+    const int nameY = display->getCursorY();
+    oledTextFieldDraw(display, 36, nameY, SCREEN_WIDTH - 36, name.c_str(), DISPLAY_COLOR_WHITE,
+                      DISPLAY_COLOR_WHITE, false, &gOledEspNowState);
+    display->println();
+  }
   
   // Note: Footer is drawn by global render loop
 }
@@ -548,11 +550,16 @@ void oledEspNowDisplayRooms(Adafruit_SSD1306* display) {
         display->setTextColor(DISPLAY_COLOR_WHITE);
       }
       
-      display->setCursor(2, y + 1);
-      // Room name + device count
-      char buf[28];
-      snprintf(buf, sizeof(buf), "%s (%d)", sRoomList[idx].name, sRoomList[idx].deviceCount);
-      display->print(buf);
+      // Room name in its own field; the device count keeps a fixed right column.
+      char count[12];
+      snprintf(count, sizeof(count), "(%d)", sRoomList[idx].deviceCount);
+      const int countW = (int)strlen(count) * 6;
+      const int countX = 118 - countW;
+      const bool selected = idx == gOledEspNowState.roomsMenuSelection;
+      const uint16_t ink = selected ? DISPLAY_COLOR_BLACK : DISPLAY_COLOR_WHITE;
+      oledTextFieldDraw(display, 2, y + 1, countX - 6 - 2, sRoomList[idx].name, ink, DISPLAY_COLOR_WHITE,
+                        selected, sRoomList);
+      oledTextFieldDraw(display, countX, y + 1, countW, count, ink, DISPLAY_COLOR_WHITE, false, sRoomList);
     }
     
     // Scroll indicators
@@ -610,8 +617,13 @@ void oledEspNowDisplayRooms(Adafruit_SSD1306* display) {
       
       display->setCursor(2, y + 1);
       display->print(sRoomDevices[idx].alive ? "+" : "-");
-      display->print(" ");
-      display->print(sRoomDevices[idx].name);
+      // Device name in a bounded field after the fixed status glyph.
+      {
+        const bool selected = idx == gOledEspNowState.roomsDeviceSelection;
+        oledTextFieldDraw(display, 14, y + 1, 118 - 14, sRoomDevices[idx].name,
+                          selected ? DISPLAY_COLOR_BLACK : DISPLAY_COLOR_WHITE, DISPLAY_COLOR_WHITE,
+                          selected, sRoomDevices);
+      }
     }
     
     // Scroll indicators
@@ -718,7 +730,8 @@ void oledEspNowDisplayPairing(Adafruit_SSD1306* display) {
       if (!espnowGetPairCandidate(i, nm, sizeof(nm), mac, &rssi)) continue;
       display->setCursor(0, y);
       display->print(i == sPairingSel ? "> " : "  ");
-      display->println(nm);
+      oledTextFieldDraw(display, 12, y, SCREEN_WIDTH - 12, nm, DISPLAY_COLOR_WHITE, DISPLAY_COLOR_WHITE,
+                        i == sPairingSel, &sPairingSel);
       y += 10;
     }
     return;
@@ -857,7 +870,9 @@ void oledEspNowDisplayDeviceDetail(Adafruit_SSD1306* display) {
       }
       display->setCursor(6, y + 1);
       display->print(sel ? "> " : "  ");
-      display->print(opts[i]);
+      oledTextFieldDraw(display, 18, y + 1, SCREEN_WIDTH - 18, opts[i],
+                        sel ? DISPLAY_COLOR_BLACK : DISPLAY_COLOR_WHITE,
+                        sel ? DISPLAY_COLOR_BLACK : DISPLAY_COLOR_WHITE, sel, opts);
       y += 14;
     }
     display->setTextColor(DISPLAY_COLOR_WHITE);
@@ -883,19 +898,21 @@ void oledEspNowDisplayDeviceDetail(Adafruit_SSD1306* display) {
     bool isSelected = (i == sEspNowMessageListScroll.selectedIndex);
     bool isSent = gOledRowMeta[i].isSent;  // left = received, right = sent (web-style)
 
-    // Line 1: message text (truncated). Sent right-aligned, received left-aligned.
-    String msg = item->line1 ? item->line1 : "";
-    if (msg.length() > 20) { msg = msg.substring(0, 19); msg += '~'; }
-    int textW = (int)msg.length() * 6;  // ~6 px/char at text size 1
-    int x = isSent ? max(4, rightEdge - textW) : (isSelected ? 4 : 0);
+    // Line 1: the message's first line in a bounded field. A sent message is
+    // right-aligned while it fits; a longer one fills the row from the left
+    // and scrolls when selected (OLED_TextField.h).
+    const char* msg = item->line1 ? item->line1 : "";
+    const int fieldX = (isSelected || isSent) ? 4 : 0;
+    const int textW = (int)strlen(msg) * 6;  // 6 px/glyph at text size 1
+    const int x = (isSent && textW <= rightEdge - fieldX) ? rightEdge - textW : fieldX;
 
     // Selection bar on the message's own side.
     if (isSelected) {
       int barX = isSent ? (SCREEN_WIDTH - 2) : 0;
       display->fillRect(barX, yPos, 2, lineHeight * 2, DISPLAY_COLOR_WHITE);
     }
-    display->setCursor(x, yPos);
-    display->print(msg);
+    oledTextFieldDraw(display, x, yPos, rightEdge - x, msg, DISPLAY_COLOR_WHITE, DISPLAY_COLOR_WHITE,
+                      isSelected, &sEspNowMessageListScroll);
     yPos += lineHeight;
 
     // Line 2: delivery status (sent, right) or sender (received, left).
@@ -917,8 +934,9 @@ void oledEspNowDisplayDeviceDetail(Adafruit_SSD1306* display) {
       display->setCursor(lx, yPos);
       display->print(label);
     } else {
-      display->setCursor(isSelected ? 4 : 0, yPos);
-      if (item->line2) display->print(item->line2);
+      const int senderX = isSelected ? 4 : 0;
+      oledTextFieldDraw(display, senderX, yPos, rightEdge - senderX, item->line2,
+                        DISPLAY_COLOR_WHITE, DISPLAY_COLOR_WHITE, false, &sEspNowMessageListScroll);
     }
     yPos += lineHeight;
   }
@@ -2041,11 +2059,9 @@ void oledEspNowDisplaySettings(Adafruit_SSD1306* display) {
       display->fillRect(0, y, 2, lineHeight - 1, DISPLAY_COLOR_WHITE);
     }
     
-    display->setCursor(4, y);
-    display->print(espnowSettingsLabels[i]);
-    display->print(": ");
-    
-    // Show current value (truncated)
+    // Label and value keep separate fields: the value in a fixed right-aligned
+    // column, the label scrolling when selected (OLED_TextField.h).
+    const bool selected = i == gOledEspNowState.settingsMenuIndex;
     String value;
     switch (i) {
       case 0: // Device Name
@@ -2092,13 +2108,13 @@ void oledEspNowDisplaySettings(Adafruit_SSD1306* display) {
         break;
     }
     
-    // Truncate value if needed
-    int labelLen = strlen(espnowSettingsLabels[i]) + 2;  // label + ": "
-    int maxValueLen = (128 - 4 - labelLen * 6) / 6;
-    if (value.length() > maxValueLen && maxValueLen > 3) {
-      value = value.substring(0, maxValueLen - 1); value += '~';
-    }
-    display->print(value);
+    int valueW = (int)value.length() * 6;
+    if (valueW > 60) valueW = 60;
+    const int valueX = 118 - valueW;
+    oledTextFieldDraw(display, 4, y, valueX - 6 - 4, espnowSettingsLabels[i],
+                      DISPLAY_COLOR_WHITE, DISPLAY_COLOR_WHITE, selected, espnowSettingsLabels);
+    oledTextFieldDraw(display, valueX, y, valueW, value.c_str(),
+                      DISPLAY_COLOR_WHITE, DISPLAY_COLOR_WHITE, false, espnowSettingsLabels);
   }
   
   // Scroll indicators
@@ -2309,8 +2325,9 @@ void oledEspNowDisplayDeviceConfig(Adafruit_SSD1306* display) {
       display->fillRect(0, y, 2, lineHeight - 1, DISPLAY_COLOR_WHITE);
     }
     
-    display->setCursor(4, y);
-    display->print(deviceConfigLabels[i]);
+    oledTextFieldDraw(display, 4, y, SCREEN_WIDTH - 4, deviceConfigLabels[i],
+                      DISPLAY_COLOR_WHITE, DISPLAY_COLOR_WHITE,
+                      i == gOledEspNowState.deviceConfigMenuIndex, deviceConfigLabels);
   }
   
   // Note: Footer is drawn by global render loop
@@ -2540,7 +2557,8 @@ void oledEspNowDisplayRemoteFiles(Adafruit_SSD1306* display) {
     int idx = i + gRemoteFileBrowse.scrollOffset;
     int y = startY + (i * 9);
     
-    if (idx == gRemoteFileBrowse.selectedIndex) {
+    const bool selected = idx == gRemoteFileBrowse.selectedIndex;
+    if (selected) {
       display->fillRect(0, y, 128, 9, DISPLAY_COLOR_WHITE);
       display->setTextColor(DISPLAY_COLOR_BLACK);
     } else {
@@ -2548,12 +2566,11 @@ void oledEspNowDisplayRemoteFiles(Adafruit_SSD1306* display) {
     }
     
     display->setCursor(2, y + 1);
-    if (gRemoteFileBrowse.isFolder[idx]) {
-      display->print("[D] ");
-    } else {
-      display->print("    ");
-    }
-    display->print(gRemoteFileBrowse.items[idx]);
+    display->print(gRemoteFileBrowse.isFolder[idx] ? "[D]" : "");
+    // The name in a bounded field after the fixed folder tag (OLED_TextField.h).
+    const uint16_t ink = selected ? DISPLAY_COLOR_BLACK : DISPLAY_COLOR_WHITE;
+    oledTextFieldDraw(display, 26, y + 1, SCREEN_WIDTH - 26, gRemoteFileBrowse.items[idx], ink, ink,
+                      selected, &gRemoteFileBrowse);
   }
   
   display->setTextColor(DISPLAY_COLOR_WHITE);

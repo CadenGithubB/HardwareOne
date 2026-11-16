@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <Adafruit_SSD1306.h>
 #include "OLED_Utils.h"
+#include "OLED_TextField.h"
 #include "System_Command.h"
 #include "System_User.h"
 #include "System_Logging.h"
@@ -56,25 +57,15 @@ static constexpr int loggingFormatRow = loggingIntervalRow + 1;
 static constexpr int loggingBackRow = loggingFormatRow + 1;
 static constexpr int loggingSensorConfigCount = loggingBackRow + 1;
 
-// Helper to draw menu items
+// Helper to draw menu items: inverse bar for the selection, the label in a
+// bounded field that ends before the arrow column (OLED_TextField.h). A
+// disabled row never scrolls.
+static const int kLoggingMenuRows = 0;  // marquee owner tag for these rows
 static void drawLoggingMenuItem(int y, const char* text, bool selected, bool enabled = true) {
-  if (selected) {
-    oledDisplay->fillRect(0, y, 128, 10, DISPLAY_COLOR_WHITE);
-    oledDisplay->setTextColor(DISPLAY_COLOR_BLACK);
-  } else {
-    oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-  }
-  
-  oledDisplay->setCursor(selected ? 4 : 2, y + 1);
-  
-  if (!enabled && !selected) {
-    char dimmed[32];
-    snprintf(dimmed, sizeof(dimmed), "%.20s", text);
-    oledDisplay->print(dimmed);
-  } else {
-    oledDisplay->print(text);
-  }
-  
+  if (selected) oledDisplay->fillRect(0, y, 128, 10, DISPLAY_COLOR_WHITE);
+  const int x = selected ? 4 : 2;
+  const uint16_t ink = selected ? DISPLAY_COLOR_BLACK : DISPLAY_COLOR_WHITE;
+  oledTextFieldDraw(oledDisplay, x, y + 1, 120 - x, text, ink, ink, selected && enabled, &kLoggingMenuRows);
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
 }
 

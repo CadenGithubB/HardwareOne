@@ -10,6 +10,9 @@
 
 namespace {
 constexpr uint32_t rate = 16000;
+// The vendor volume API scales the DAC register, whose steps are in dB.
+// 75 maps to 0xBF (0 dB); apply the user's 0..60 volume to PCM instead.
+constexpr int codecUnityVolume = 75;
 struct Playback {
   i2s_chan_handle_t tx = nullptr;
   es8311_handle_t codec = nullptr;
@@ -71,13 +74,14 @@ esp_err_t speakerPlayTone(uint32_t frequencyHz, uint32_t durationMs,
                                              rate};
         return es8311_init(playback.codec, &clock, ES8311_RESOLUTION_16,
                            ES8311_RESOLUTION_16) == ESP_OK &&
-               es8311_voice_volume_set(playback.codec, volume, nullptr) ==
+               es8311_voice_volume_set(playback.codec, codecUnityVolume, nullptr) ==
                    ESP_OK;
       });
   if (!configured)
     return ESP_FAIL;
   digitalWrite(WS_SPEAKER_AMP_PIN, HIGH);
   const uint32_t samples = rate * durationMs / 1000;
+  const float amplitude = 10000.f * volume / 100.f;
   int16_t frame[128 * 2];
   for (uint32_t offset = 0; offset < samples + 1024; offset += 128) {
     for (uint32_t i = 0; i < 128; ++i) {
@@ -86,7 +90,7 @@ esp_err_t speakerPlayTone(uint32_t frequencyHz, uint32_t durationMs,
       if (n < samples)
         envelope = fminf(1.f, fminf(n / 320.f, (samples - n) / 320.f));
       const int16_t value = static_cast<int16_t>(
-          6000.f * envelope * sinf(6.2831853f * frequencyHz * n / rate));
+          amplitude * envelope * sinf(6.2831853f * frequencyHz * n / rate));
       frame[i * 2] = frame[i * 2 + 1] = value;
     }
     size_t written = 0;

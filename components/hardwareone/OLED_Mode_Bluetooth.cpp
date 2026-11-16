@@ -24,6 +24,7 @@
 #include <Adafruit_SSD1306.h>
 #include <cstdarg>    // va_list (status detail rows)
 #include "OLED_Utils.h"
+#include "OLED_TextField.h"
 #include "HAL_Input.h"
 #include "System_Settings.h"
 #include "Bluetooth.h"
@@ -325,6 +326,58 @@ static void displayBluetoothStatusDetail() {
 }
 
 // ---- OLED_BLUETOOTH: main menu (display + input) ---------------------------
+// Decorated rows: a two-glyph cursor, the label in its own bounded field, and
+// the live marker '*' in a fixed column before the scroll arrows. Rows that
+// can carry the marker end their label field before it; the others run to the
+// arrow column. The marker stays put while a long selected label scrolls
+// (OLED_TextField.h).
+static constexpr int kBtLabelX = 12;
+static constexpr int kBtMarkX = 114;
+static constexpr int kBtArrowX = 120;
+
+static bool btRowCanMark(BtAction action) {
+  switch (action) {
+    case BT_ACT_CONSOLE:
+    case BT_ACT_GLASSES:
+    case BT_ACT_PIPE:
+#if ENABLE_G2_GLASSES
+    case BT_ACT_G2:
+    case BT_ACT_R1:
+#endif
+#if ENABLE_BLE_PHONE_PIPE
+    case BT_ACT_PHONE:
+#endif
+    case BT_ACT_ADVERTISING:
+      return true;
+    default:
+      return false;
+  }
+}
+
+static bool btRowLive(BtAction action) {
+  switch (action) {
+    case BT_ACT_CONSOLE:
+    case BT_ACT_GLASSES:
+    case BT_ACT_PIPE:
+      if (const BtRoleRow* r = btRoleRow(action)) return btRoleRuns(*r, sBtShown.role);
+      return false;
+#if ENABLE_G2_GLASSES
+    case BT_ACT_G2:
+      return isG2Connected();
+    case BT_ACT_R1:
+      return g2RingIsConnected();
+#endif
+#if ENABLE_BLE_PHONE_PIPE
+    case BT_ACT_PHONE:
+      return sBtShown.pipe.phase == hw1link::Pipe::Ready;
+#endif
+    case BT_ACT_ADVERTISING:
+      return sBtShown.consoleView.advertising;
+    default:
+      return false;
+  }
+}
+
 static void displayBluetoothStatus() {
   if (!oledDisplay) return;
   oledDisplay->setTextSize(1);
@@ -339,35 +392,16 @@ static void displayBluetoothStatus() {
   if (visEnd > sBtMenuScroll.itemCount) visEnd = sBtMenuScroll.itemCount;
   int row = 0;
   for (int i = sBtMenuScroll.scrollOffset; i < visEnd; i++, row++) {
-    oledDisplay->setCursor(0, OLED_CONTENT_START_Y + row * lineHeight);
-    oledDisplay->print(i == sBtMenuScroll.selectedIndex ? "> " : "  ");
-    if (sBtMenuScroll.items[i].line1) oledDisplay->print(sBtMenuScroll.items[i].line1);
-    switch (sBtActions[i]) {
-      case BT_ACT_CONSOLE:
-      case BT_ACT_GLASSES:
-      case BT_ACT_PIPE:
-        if (const BtRoleRow* r = btRoleRow(sBtActions[i])) {
-          if (btRoleRuns(*r, sBtShown.role)) oledDisplay->print(" *");
-        }
-        break;
-#if ENABLE_G2_GLASSES
-      case BT_ACT_G2:
-        if (isG2Connected()) oledDisplay->print(" *");
-        break;
-      case BT_ACT_R1:
-        if (g2RingIsConnected()) oledDisplay->print(" *");
-        break;
-#endif
-#if ENABLE_BLE_PHONE_PIPE
-      case BT_ACT_PHONE:
-        if (sBtShown.pipe.phase == hw1link::Pipe::Ready) oledDisplay->print(" *");
-        break;
-#endif
-      case BT_ACT_ADVERTISING:
-        if (sBtShown.consoleView.advertising) oledDisplay->print(" *");
-        break;
-      default:
-        break;
+    const int y = OLED_CONTENT_START_Y + row * lineHeight;
+    const bool selected = i == sBtMenuScroll.selectedIndex;
+    oledDisplay->setCursor(0, y);
+    oledDisplay->print(selected ? "> " : "  ");
+    const int right = btRowCanMark(sBtActions[i]) ? kBtMarkX - 6 : kBtArrowX;
+    oledTextFieldDraw(oledDisplay, kBtLabelX, y, right - kBtLabelX, sBtMenuScroll.items[i].line1,
+                      SSD1306_WHITE, SSD1306_WHITE, selected, &sBtMenuScroll);
+    if (btRowLive(sBtActions[i])) {
+      oledDisplay->setCursor(kBtMarkX, y);
+      oledDisplay->print("*");
     }
   }
 
@@ -656,7 +690,7 @@ static bool r1InputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed
           char out[96];
           if (!executeOLEDCommandWithResult("openring", out, sizeof(out)) ||
               strncmp(out, "Error", 5) == 0) {
-            oledToastShow(bleCentralRingShouldYield() ? "Ring paused: pipe on" : "Ring connect refused", 2000);
+            oledToastShow(bleCentralRingShouldYield() ? "Ring paused: pipe on" : "Ring connect refused", 8000, OledUIIcon::ERROR);
           }
         }
         break;
@@ -765,11 +799,22 @@ static void displayPhone() {
   if (visEnd > sPhoneScroll.itemCount) visEnd = sPhoneScroll.itemCount;
   int row = 0;
   for (int i = sPhoneScroll.scrollOffset; i < visEnd; i++, row++) {
-    oledDisplay->setCursor(0, top + row * lineHeight);
+    const int y = top + row * lineHeight;
     const bool label = sPhoneActions[i] == PH_ACT_LABEL;
-    if (!label) oledDisplay->print(i == sPhoneScroll.selectedIndex ? "> " : "  ");
-    if (sPhoneScroll.items[i].line1) oledDisplay->print(sPhoneScroll.items[i].line1);
-    if (sPhoneActions[i] == PH_ACT_PIPE && phoneReady(s)) oledDisplay->print(" *");
+    const bool selected = !label && i == sPhoneScroll.selectedIndex;
+    if (!label) {
+      oledDisplay->setCursor(0, y);
+      oledDisplay->print(selected ? "> " : "  ");
+    }
+    // Bounded label field; the pipe row keeps a fixed column for its ready marker.
+    const int x = label ? 0 : kBtLabelX;
+    const int right = sPhoneActions[i] == PH_ACT_PIPE ? kBtMarkX - 6 : kBtArrowX;
+    oledTextFieldDraw(oledDisplay, x, y, right - x, sPhoneScroll.items[i].line1,
+                      SSD1306_WHITE, SSD1306_WHITE, selected, &sPhoneScroll);
+    if (sPhoneActions[i] == PH_ACT_PIPE && phoneReady(s)) {
+      oledDisplay->setCursor(kBtMarkX, y);
+      oledDisplay->print("*");
+    }
   }
   if (sPhoneScroll.scrollOffset > 0) {
     oledDisplay->setCursor(120, top);
@@ -822,14 +867,14 @@ static bool phoneInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPres
     case PH_ACT_LABEL:
       break;
     case PH_ACT_PAIR:  // opens a 60 s enrollment window (starts a stopped pipe)
-      if (ready) oledToastShow("Disconnect first", 2000);
+      if (ready) oledToastShow("Disconnect first", 8000, OledUIIcon::ERROR);
       else if (oledRunCommand("phone pair")) oledToastShow("Pairing open 60s", 2500);
       break;
     case PH_ACT_PAIR_NEW:  // replaces the secret, so it asks first (defaults to No)
       (void)oledConfirmRequest("New pairing code?", "Replaces the secret", phonePairNewConfirmed, nullptr, false);
       break;
     case PH_ACT_FORGET:
-      if (!s.pipePaired) oledToastShow("No phone paired", 2000);
+      if (!s.pipePaired) oledToastShow("No phone paired", 8000, OledUIIcon::ERROR);
       else oledConfirmRequest("Forget phone?", "Pair again after", phoneForgetConfirmed,
                               nullptr, false);
       break;

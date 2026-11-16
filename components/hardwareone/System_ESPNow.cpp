@@ -16673,7 +16673,7 @@ const char* cmd_espnow_remote(const String& argsInput) {
     cmdName[nlen] = '\0';
     char rmsg[48];
     snprintf(rmsg, sizeof(rmsg), "Running: %s", cmdName);
-    oledNotificationBannerShow(rmsg, PairingRibbonIcon::SYNC, 2000);
+    oledNotificationBannerShow(rmsg, OledUIIcon::INFO, 2000);
   }
 #endif
 

@@ -4,7 +4,7 @@
 Splices in the production OLED action helpers (OLED_Utils.cpp oledRunCommand,
 its reply-to-toast mapping oledCommandReplyText, and oledRunCommandAsync with
 its frame-loop delivery) and real callers: the
-Automations toggle/delete actions with their footer toast
+Automations toggle/delete actions with their shared toast
 (OLED_Mode_Automations.cpp), the Quick Settings radio, Wi-Fi, Bluetooth and HTTP
 rows (OLED_SettingsEditor.cpp) and the Web menu's server confirm callbacks
 (OLED_Mode_Network.cpp). The OLED command executor, the global toast, the

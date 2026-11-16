@@ -1560,6 +1560,22 @@
 #ifndef CAMERA_SCCB_SHARED
 #define CAMERA_SCCB_SHARED 0
 #endif
+// A board whose camera module faces sideways states the counter-clockwise
+// quarter turn (0, 90, 180 or 270 degrees) that makes delivered frames
+// upright. The CSI backend turns each frame in its software resize beneath
+// the user's mirror/flip controls, swapping the delivered width and height
+// for a quarter turn. The DVP backend delivers sensor JPEGs and cannot turn
+// them, so a DVP board leaves this at 0.
+#ifndef CAMERA_MOUNT_ROTATION
+#define CAMERA_MOUNT_ROTATION 0
+#endif
+#if CAMERA_MOUNT_ROTATION != 0 && CAMERA_MOUNT_ROTATION != 90 && \
+    CAMERA_MOUNT_ROTATION != 180 && CAMERA_MOUNT_ROTATION != 270
+  #error "CAMERA_MOUNT_ROTATION must be 0, 90, 180 or 270 degrees counter-clockwise"
+#endif
+#if ENABLE_CAMERA_SENSOR && CAMERA_MOUNT_ROTATION && !defined(CONFIG_IDF_TARGET_ESP32P4)
+  #error "CAMERA_MOUNT_ROTATION is applied by the CSI backend; the DVP backend delivers sensor JPEG frames as the sensor sees them"
+#endif
 #if ENABLE_CAMERA_SENSOR && CAMERA_SCCB_SHARED && !ENABLE_I2C_SYSTEM
   #error "Shared camera SCCB requires the I2C subsystem; enable I2C_FEATURE_LEVEL or disable ENABLE_CAMERA_SENSOR"
 #endif

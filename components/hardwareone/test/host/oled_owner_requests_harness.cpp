@@ -152,6 +152,7 @@ struct FakeDisplay {
 };
 static FakeDisplay gFakeDisplay;
 static FakeDisplay* oledDisplay = &gFakeDisplay;
+static void prepareCameraPreviewData() {}
 static bool displayIsReady() { return true; }
 #define OLED_TRANSACTION(code) do { if (displayIsReady()) { code; } } while (0)
 
@@ -170,7 +171,9 @@ static bool oledIsGuestSession() {
   return false;
 }
 static bool oledModeAllowedForGuest(OLEDMode) { return true; }
-static void oledToastShow(const char*, unsigned long) { ownerEffect("toast"); }
+namespace oled_message { constexpr unsigned kErrorDurationMs=8000; }
+enum class OledUIIcon { ERROR };
+static void oledToastShow(const char*, unsigned long, OledUIIcon) { ownerEffect("toast"); }
 
 static std::vector<OLEDMode> gModeStack;
 static void pushOLEDMode(OLEDMode mode) {

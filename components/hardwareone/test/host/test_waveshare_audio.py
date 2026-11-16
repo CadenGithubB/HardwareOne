@@ -5,6 +5,7 @@ from pathlib import Path
 import re
 import subprocess
 import tempfile
+from test_web_batch_handlers import extract_block
 HERE=Path(__file__).resolve().parent
 COMPONENT=HERE.parents[1]
 def main():
@@ -12,6 +13,8 @@ def main():
     p.add_argument('--sanitize',action='store_true')
     args=p.parse_args()
     unit=(HERE/'waveshare_audio_harness.cpp').read_text()
+    codec=(COMPONENT/'third_party/es8311/es8311.c').read_text()
+    unit=unit.replace('// INSERT_CODEC_VOLUME', extract_block(codec, 'esp_err_t es8311_voice_volume_set('))
     for marker,name in [('HEADER','HAL_Audio_Waveshare.h'),('MIC','HAL_Audio_Waveshare.cpp'),('SPEAKER','HAL_Speaker_Waveshare.cpp')]:
         source=re.sub(r'^#(?:include|pragma once).*\n','',(COMPONENT/name).read_text(),flags=re.M)
         unit=unit.replace('// INSERT_'+marker,source)

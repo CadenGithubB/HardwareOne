@@ -78,7 +78,7 @@ size_t allocatedOutputBytes = 0;
 int failRequest = -1, dequeue = 0, requeue = 0, gpioLow = 0, closes = 0;
 int64_t now = 0, frameUs = 40000, maxDqWait = 2000000;
 size_t outputCapacity = 0;
-unsigned jpegQuality = 0;
+unsigned jpegQuality = 0, encodeWidth = 0, encodeHeight = 0;
 std::vector<uint8_t*> raw;
 void* token(int n) { return reinterpret_cast<void*>(intptr_t(n)); }
 void releaseBuffers() { for (auto* p : raw) free(p); raw.clear(); }
@@ -200,6 +200,7 @@ esp_err_t jpeg_encoder_process(void* h, const jpeg_encode_cfg_t* cfg, const uint
   // entropy output. This checks the real backend ownership handoff order.
   assert(out == fake::outputAllocation && !fake::dirtyOutput);
   fake::outputCapacity = capacity; fake::jpegQuality = cfg->image_quality;
+  fake::encodeWidth = cfg->width; fake::encodeHeight = cfg->height;
   if (fake::failJpeg) return ESP_ERR_INVALID_STATE;
   *used = 8; out[0] = 255; out[1] = 216; out[6] = 255; out[7] = 217; return ESP_OK;
 }
@@ -217,6 +218,12 @@ void cameraSharedSccbRelease(){assert(fake::bus&&!fake::video);fake::bus=false;}
 int main() {
   const auto& b = cameraP4Backend();
   CameraConfig config;
+  // A sideways mount (the Waveshare lane's 90 degrees) delivers each selected
+  // size turned upright, so the reported, encoded and returned geometry is
+  // portrait there and unchanged on an upright mount.
+  constexpr bool turned = CAMERA_MOUNT_ROTATION == 90 || CAMERA_MOUNT_ROTATION == 270;
+  constexpr unsigned vgaW = turned ? 480 : 640, vgaH = turned ? 640 : 480;
+  constexpr unsigned qqvgaW = turned ? 120 : 160, qqvgaH = turned ? 160 : 120;
   assert(!(b.capabilities().resolutions & cameraResolutionBit(CameraFrameSize::UXGA)));
   assert(!b.begin(CameraConfig{CameraFrameSize::UXGA, 12, {}}));
   assert(!fake::bus);
@@ -238,10 +245,11 @@ int main() {
     assert(b.info().error && fake::gpioLow == 0);
   }
   fake::reset(); assert(b.begin(config));
-  assert(b.info().detected && b.info().width == 640 && b.info().height == 480);
+  assert(b.info().detected && b.info().width == vgaW && b.info().height == vgaH);
   CameraFrame frame;
   assert(b.capture(frame, 128 * 1024));
-  assert(frame.width == 640 && frame.height == 480 && frame.length == 8 && frame.data);
+  assert(frame.width == vgaW && frame.height == vgaH && frame.length == 8 && frame.data);
+  assert(fake::encodeWidth == vgaW && fake::encodeHeight == vgaH);
   assert(fake::dequeue == 51 && fake::requeue == 51+CAMERA_BUFFER_COUNT && fake::jpegQuality == 81);
   // The first returned frame is independent of the stream lifetime.
   uint8_t* owned = frame.data;
@@ -254,7 +262,9 @@ int main() {
   assert(!b.setResolution(CameraFrameSize::UXGA));
   assert(b.info().resolution == CameraFrameSize::QQVGA);
   assert(b.capture(frame, 8191));
-  assert(frame.width == 160 && frame.height == 120 && fake::outputCapacity == 8128 && fake::jpegQuality == 1);
+  assert(frame.width == qqvgaW && frame.height == qqvgaH && fake::outputCapacity == 8128 && fake::jpegQuality == 1);
+  assert(fake::encodeWidth == qqvgaW && fake::encodeHeight == qqvgaH);
+  assert(b.info().width == qqvgaW && b.info().height == qqvgaH);
   cameraFrameRelease(frame);
   const int before = fake::dequeue;
   assert(b.capture(frame, 128 * 1024)); assert(fake::dequeue - before == CAMERA_BUFFER_COUNT+1); cameraFrameRelease(frame);

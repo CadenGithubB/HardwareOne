@@ -15,6 +15,7 @@
 #include "OLED_Display.h"
 #include "OLED_Footer.h"
 #include "OLED_Utils.h"
+#include "OLED_TextField.h"
 #include "System_BuildConfig.h"
 #include "System_Debug.h"
 #include "System_I2C.h"
@@ -604,18 +605,12 @@ bool getOLEDWiFiSelection(String& outSSID) {
             oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
           }
 
-          oledDisplay->setCursor(2, y);
-          char displayName[21];
-          const size_t labelLength = strlen(sFtsWifiMenuLabels[idx]);
-          if (labelLength > 20) {
-            memcpy(displayName, sFtsWifiMenuLabels[idx], 17);
-            memcpy(displayName + 17, "...", 4);
-          } else {
-            strncpy(displayName, sFtsWifiMenuLabels[idx],
-                    sizeof(displayName) - 1);
-            displayName[sizeof(displayName) - 1] = '\0';
-          }
-          oledDisplay->print(displayName);
+          // The whole label in a field ending before the arrow column; setup
+          // pages redraw on input, so a long one ends in an ellipsis
+          // (OLED_TextField.h).
+          const uint16_t ink = idx == selection ? DISPLAY_COLOR_BLACK : DISPLAY_COLOR_WHITE;
+          oledTextFieldDraw(oledDisplay, 2, y, 120 - 2 - 2, sFtsWifiMenuLabels[idx], ink, ink, false,
+                            sFtsWifiMenuLabels);
         }
 
         oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);

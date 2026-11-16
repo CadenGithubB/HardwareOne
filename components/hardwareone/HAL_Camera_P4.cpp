@@ -52,6 +52,19 @@ uint32_t resolutionMask() {
 constexpr i2c_port_num_t kSccbPort = static_cast<i2c_port_num_t>(CAMERA_SCCB_I2C_PORT);
 constexpr uint64_t kControls = cameraControlBit(CameraControl::HMirror) |
                                cameraControlBit(CameraControl::VFlip);
+// The board states how far its module faces away from upright. The resize
+// turns every frame by this before the user's mirror/flip, so a sideways
+// module delivers the selected size with its width and height swapped.
+constexpr unsigned kMountRotation = CAMERA_MOUNT_ROTATION;
+static_assert(camera_rgb565::validRotation(kMountRotation),
+              "CAMERA_MOUNT_ROTATION must be 0, 90, 180 or 270 degrees counter-clockwise");
+constexpr bool kTurned = camera_rgb565::transposes(kMountRotation);
+uint16_t deliveredWidth(const CameraFrameSizeInfo* size) {
+  return size ? (kTurned ? size->height : size->width) : 0;
+}
+uint16_t deliveredHeight(const CameraFrameSizeInfo* size) {
+  return size ? (kTurned ? size->width : size->height) : 0;
+}
 constexpr gpio_num_t kPower = static_cast<gpio_num_t>(CAMERA_POWER_PIN);
 constexpr gpio_num_t kXclk = static_cast<gpio_num_t>(CAMERA_XCLK_PIN);
 constexpr gpio_num_t kReset = static_cast<gpio_num_t>(CAMERA_RESET_PIN);
@@ -102,7 +115,7 @@ CameraCapabilities capabilities() {
 CameraBackendInfo info() {
   const auto* size = cameraFrameSizeInfo(state.resolution);
   return {state.model, state.detected, state.resolution, state.quality,
-          uint16_t(size ? size->width : 0), uint16_t(size ? size->height : 0),
+          deliveredWidth(size), deliveredHeight(size),
           state.error[0] ? state.error : nullptr};
 }
 
@@ -290,9 +303,9 @@ bool initialize(const CameraConfig& config) {
   state.mirror = config.controls[unsigned(CameraControl::HMirror)] != 0;
   state.flip = config.controls[unsigned(CameraControl::VFlip)] != 0;
   state.error[0] = 0;
-  ESP_LOGI(kTag, "%s, native %lux%lu, JPEG budget %u bytes", state.model,
+  ESP_LOGI(kTag, "%s, native %lux%lu, mount turned %u degrees, JPEG budget %u bytes", state.model,
            static_cast<unsigned long>(kWidth), static_cast<unsigned long>(kHeight),
-           unsigned(kCameraMaxFrameBytes));
+           kMountRotation, unsigned(kCameraMaxFrameBytes));
   return true;
 }
 
@@ -353,7 +366,7 @@ bool capture(CameraFrame& frame, size_t maxBytes) {
     if (valid && i == discard) {
       valid = camera_rgb565::resize(state.buffers[buffer.index], buffer.bytesused,
           kWidth, kHeight, state.resized, state.resizedCapacity, size->width,
-          size->height, state.mirror, state.flip);
+          size->height, state.mirror, state.flip, kMountRotation);
     }
     // Even an invalid frame must be returned before reporting failure.
     if (!io(VIDIOC_QBUF, &buffer, "return CSI frame")) return false;
@@ -379,7 +392,7 @@ bool capture(CameraFrame& frame, size_t maxBytes) {
     free(jpeg); return fail("prepare JPEG output for DMA", prepared);
   }
   jpeg_encode_cfg_t encode = {};
-  encode.width = size->width; encode.height = size->height;
+  encode.width = deliveredWidth(size); encode.height = deliveredHeight(size);
   encode.src_type = JPEG_ENCODE_IN_FORMAT_RGB565;
   encode.sub_sample = JPEG_DOWN_SAMPLING_YUV420;
   encode.image_quality = camera_rgb565::qualityToJpeg(state.quality);
@@ -399,7 +412,7 @@ bool capture(CameraFrame& frame, size_t maxBytes) {
   }
   // jpeg_alloc_encoder_mem storage is free()-compatible. It is detached from
   // all camera/driver state and remains valid through stop/reconfiguration.
-  frame = {jpeg, used, size->width, size->height};
+  frame = {jpeg, used, deliveredWidth(size), deliveredHeight(size)};
   state.error[0] = 0;
   return true;
 }

@@ -103,6 +103,9 @@ def generated(component: Path = COMPONENT, source_dir: Path | None = None,
                   extract_block(ring, "extern const CommandEntry g2RingCommands[] =") + ";",
                   extract_block(sensor_logging, "const CommandEntry healthCommands[] =") + ";",
                   *optional(oled, "static const char* healthNextDesiredToken("),
+                  extract_block(read("OLED_Utils.cpp"), "void oledCommandReplyText("),
+                  extract_block(read("OLED_Utils.cpp"), "static bool oledReportCommandReply("),
+                  extract_block(read("OLED_Utils.cpp"), "bool oledRunCommand("),
                   *optional(oled, "static void healthRunCommand("),
                   extract_block(oled, "static bool healthInputHandler(")]
     production.append("namespace disabled {\n" + extract_block(
@@ -115,7 +118,7 @@ def generated(component: Path = COMPONENT, source_dir: Path | None = None,
                          ("// INSERT_PRODUCTION", "\n\n".join(production))):
         require(harness.count(marker) == 1, f"bad harness marker: {marker}")
         harness = harness.replace(marker, body)
-    return f"#define HAVE_WEB_CONTEXT_HELPER {int(has_helper)}\n" + harness
+    return '#include "' + str(component / "OLED_MessageText.h") + '"\n' + f"#define HAVE_WEB_CONTEXT_HELPER {int(has_helper)}\n" + harness
 
 
 def main() -> None:

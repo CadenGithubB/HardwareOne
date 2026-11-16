@@ -27,6 +27,7 @@
 #include <algorithm>
 #include "System_Dictation.h"  // KEYBOARD_MODE_MIC: dictation state + control
 #include "OLED_ConsoleBuffer.h"
+#include "OLED_TextField.h"
 #include "OLED_Mode_Transcription.h"
 #include "OLED_Mode_Camera.h"
 
@@ -523,11 +524,7 @@ static void ncToggleMute(const SystemEventCatalogKindInfo& kind) {
   const bool selectedWasMuted = eventKindMaskTest(sNcViewer.muteMask, kindId);
   String cmd = String("notifyusermute set ") + kind.name +
                (selectedWasMuted ? " off" : " on");
-  char out[96];
-  if (!executeOLEDCommandWithResult(cmd, out, sizeof(out)) || strncmp(out, "Error", 5) == 0) {
-    oledToastShow("Save failed", 2000);
-    return;
-  }
+  if (!oledRunCommand(cmd)) return;
   // The committed save invalidated the prefs cache; only a successful command
   // may replace the viewer snapshot used for the next redraw.
   ncResolveViewer();
@@ -537,10 +534,7 @@ static void ncCycleDeviceLevel(const SystemEventCatalogKindInfo& kind) {
   const uint8_t kindId = static_cast<uint8_t>(kind.id);
   uint8_t next = (uint8_t)((notifDeviceKindLevel(kindId) + 1) % 3);  // all→admin→off→all
   String cmd = String("notifydevicekind ") + kind.name + " " + notifLevelToken(next);
-  char out[96];
-  if (!executeOLEDCommandWithResult(cmd, out, sizeof(out)) || strncmp(out, "Error", 5) == 0) {
-    oledToastShow("Save failed", 2000);
-  }
+  oledRunCommand(cmd);
   // cmd_notifydevicekind updates the RAM masks before persisting, so the
   // very next notifDeviceKindLevel read renders the new value.
 }
@@ -865,7 +859,7 @@ bool handleNotificationsInput(int deltaX, int deltaY, uint32_t newlyPressed) {
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_Y) && !sNotificationsShowingDetail) {
     if (oledGuestBlocksMutate()) return true;
     if (!gLocalDisplayAuthed) {
-      oledToastShow("Login required", 2000);
+      oledToastShow("Login required", oled_message::kErrorDurationMs, OledUIIcon::ERROR);
       return true;
     }
     sNcIsAdmin = isAdminUser(gLocalDisplayUser);  // snapshot once, not per frame
@@ -1339,6 +1333,7 @@ void oledScrollRender(Adafruit_SSD1306* display, OLEDScrollState* state,
   // Calculate visible range
   int visibleStart = state->scrollOffset;
   int visibleEnd = min(state->itemCount, state->scrollOffset + state->visibleLines);
+  const bool scrollbarShown = !splitPane && showScrollbar && state->itemCount > state->visibleLines;
   
   display->setTextSize(1);
   
@@ -1356,65 +1351,32 @@ void oledScrollRender(Adafruit_SSD1306* display, OLEDScrollState* state,
         display->setTextColor(DISPLAY_COLOR_WHITE);
       }
       
-      display->setCursor(2, yPos + 1);
-      if (item->line1) display->print(item->line1);
-      
+      // The label is confined to the highlight bar: it never crosses the pane
+      // separator or the icon pane; the selected row reveals a long label by
+      // scrolling (OLED_TextField.h).
+      {
+        const bool inverse = showSelection && isSelected;
+        const uint16_t ink = inverse ? DISPLAY_COLOR_BLACK : DISPLAY_COLOR_WHITE;
+        oledTextFieldDraw(display, 2, yPos + 1, state->listWidth - 3, item->line1,
+                          ink, ink, inverse, state);
+      }
+
       yPos += itemHeight;
     } else {
-      // Full-width mode: selection bar, two lines
-      if (showSelection && isSelected) {
-        display->fillRect(0, yPos, 3, lineHeight * 2, DISPLAY_COLOR_WHITE);
-        display->setCursor(5, yPos);
-      } else {
-        display->setCursor(0, yPos);
-      }
-      
-      if (showSelection && isSelected) {
-        display->setTextColor(DISPLAY_COLOR_BLACK, DISPLAY_COLOR_WHITE);
-      } else {
-        display->setTextColor(DISPLAY_COLOR_WHITE);
-      }
-      
-      // Draw line1
-      if (item->line1 && item->line1[0] != '\0') {
-        int len = strlen(item->line1);
-        if (len > 20) {
-          char truncated[22];
-          strncpy(truncated, item->line1, 19);
-          truncated[19] = '~';
-          truncated[20] = '\0';
-          display->println(truncated);
-        } else {
-          display->println(item->line1);
-        }
-      } else {
-        display->println("---");
-      }
-      
-      // Draw line2
+      // Full-width mode: selection bar, two declared lines. Each line is its
+      // own bounded field, ending before the scrollbar's columns; a selected
+      // row's long lines scroll, never wrap into a third line.
+      const bool inverse = showSelection && isSelected;
+      if (inverse) display->fillRect(0, yPos, 3, lineHeight * 2, DISPLAY_COLOR_WHITE);
+      const int textX = inverse ? 5 : 0;
+      const int textW = SCREEN_WIDTH - textX - (scrollbarShown ? 2 : 0);  // the scrollbar's two columns
+      oledTextFieldDraw(display, textX, yPos, textW,
+                        (item->line1 && item->line1[0] != '\0') ? item->line1 : "---",
+                        inverse ? DISPLAY_COLOR_BLACK : DISPLAY_COLOR_WHITE,
+                        DISPLAY_COLOR_WHITE, inverse, state);
       yPos += lineHeight;
-      if (showSelection && isSelected) {
-        display->setCursor(5, yPos);
-      } else {
-        display->setCursor(0, yPos);
-      }
-      
-      display->setTextColor(DISPLAY_COLOR_WHITE);
-      if (item->line2 && item->line2[0] != '\0') {
-        int len = strlen(item->line2);
-        if (len > 20) {
-          char truncated[22];
-          strncpy(truncated, item->line2, 19);
-          truncated[19] = '~';
-          truncated[20] = '\0';
-          display->println(truncated);
-        } else {
-          display->println(item->line2);
-        }
-      } else {
-        display->println("");
-      }
-      
+      oledTextFieldDraw(display, textX, yPos, textW, item->line2,
+                        DISPLAY_COLOR_WHITE, DISPLAY_COLOR_WHITE, inverse, state);
       yPos += lineHeight;
     }
   }
@@ -1490,13 +1452,22 @@ void oledScrollRenderSimple(Adafruit_SSD1306* display, OLEDScrollState* state,
   const int lineHeight = 8;
   int visibleStart = state->scrollOffset;
   int visibleEnd = min(state->itemCount, state->scrollOffset + state->visibleLines);
+  // The label field starts after the two-glyph cursor column and ends before
+  // the scrollbar's two columns when one is drawn (OLED_TextField.h); a glyph
+  // cell already ends in a blank column, so 19 glyphs still fit beside it.
+  const bool overflow = state->itemCount > state->visibleLines;
+  const int textX = 12;
+  const int textW = SCREEN_WIDTH - textX - (overflow ? 2 : 0);  // the scrollbar's two columns
 
   int yPos = startY;
   for (int i = visibleStart; i < visibleEnd; i++) {
-    display->setCursor(0, yPos);
-    display->print((showSelection && i == state->selectedIndex) ? "> " : "  ");
-    if (state->items[i].line1) display->print(state->items[i].line1);
-    display->println();
+    const bool selected = showSelection && i == state->selectedIndex;
+    if (selected) {
+      display->setCursor(0, yPos);
+      display->print("> ");
+    }
+    oledTextFieldDraw(display, textX, yPos, textW, state->items[i].line1,
+                      DISPLAY_COLOR_WHITE, DISPLAY_COLOR_WHITE, selected, state);
     yPos += lineHeight;
   }
 
@@ -2703,182 +2674,6 @@ static void oledConfirmRender() {
 }
 
 // ============================================================================
-// OLED Console Buffer (merged from oled_console_buffer.cpp)
-// ============================================================================
-
-#include "OLED_ConsoleBuffer.h"
-#include "System_Debug.h"  // For DEBUG_SYSTEMF, ERROR_SYSTEMF
-
-// Global instance
-OLEDConsoleBuffer gOledConsole;
-
-// Constructor
-// Runs during static init, long before gSettings is loaded, so the ring cannot
-// be sized here — init() owns the allocation.
-OLEDConsoleBuffer::OLEDConsoleBuffer()
-  : lines(nullptr), timestamps(nullptr), head(0), count(0), capacity(0), mutex(nullptr) {
-}
-
-// Initialize buffer and mutex
-void OLEDConsoleBuffer::init() {
-  // Idempotent, and deliberately does not reset a ring it did not just allocate:
-  // debugOutputTask is already running by the time initDebugSystem calls this
-  // (it is created first), so clearing head/count here would race a concurrent
-  // append(). A second call therefore leaves a live ring strictly alone — which
-  // also means the depth is fixed by the allocation, hence "requires reboot".
-  if (!lines) {
-    // Latch effective history depth from settings (clamped to the ceiling).
-    int eff = gSettings.oledCliHistorySize;
-    if (eff < 10) eff = 10; else if (eff > OLED_CONSOLE_LINES) eff = OLED_CONSOLE_LINES;
-
-    // Build into locals and publish `lines` last: it is the flag every accessor
-    // gates on, so a reader sees either no ring at all or a fully-formed one,
-    // and the failure path below can free without racing that gate. calloc
-    // zeroes the ring, so there is nothing further to clear.
-    //
-    // RequireInternal, not PreferInternal: the ring holds identity-private
-    // command history, and PreferInternal still spills to PSRAM once the
-    // internal heap is exhausted. Internal is a requirement, not a preference.
-    char (*newLines)[OLED_CONSOLE_LINE_LEN] =
-      (char (*)[OLED_CONSOLE_LINE_LEN])ps_calloc(eff, OLED_CONSOLE_LINE_LEN,
-                                                 AllocPref::RequireInternal,
-                                                 "oled.console.lines");
-    uint32_t* newStamps = (uint32_t*)ps_calloc(eff, sizeof(uint32_t),
-                                               AllocPref::RequireInternal,
-                                               "oled.console.stamps");
-    if (newLines && newStamps) {
-      head = 0;
-      count = 0;
-      capacity = (uint8_t)eff;
-      timestamps = newStamps;
-      lines = newLines;
-    } else {
-      // Hand back whichever half succeeded; neither pointer was ever published.
-      heap_caps_free(newLines);
-      heap_caps_free(newStamps);
-      ERROR_SYSTEMF("Failed to allocate OLED console buffer (%d lines × %d chars) - history disabled",
-                    eff, OLED_CONSOLE_LINE_LEN);
-    }
-  }
-
-  if (!mutex) {
-    mutex = xSemaphoreCreateMutex();
-    if (!mutex) {
-      ERROR_SYSTEMF("Failed to create OLED console buffer mutex");
-    }
-  }
-
-  // Both halves must be live for the console to work — append() gates on each —
-  // so only claim success when they are, or the mutex-failure path would print a
-  // contradictory "initialized" line over its own error.
-  if (lines && mutex) {
-    DEBUG_SYSTEMF("OLED console buffer initialized (%d lines of %d max × %d chars, %u B)",
-                  (int)capacity, OLED_CONSOLE_LINES, OLED_CONSOLE_LINE_LEN,
-                  (unsigned)((size_t)capacity * (OLED_CONSOLE_LINE_LEN + sizeof(uint32_t))));
-  }
-}
-
-// Append a line to the ring buffer (filters non-ASCII for OLED display)
-void OLEDConsoleBuffer::append(const char* text, uint32_t timestamp) {
-  if (!text || !mutex || !lines) return;
-
-  if (xSemaphoreTake(mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-    // Copy text, filtering non-ASCII characters (OLED font only supports ASCII)
-    char* dst = lines[head];
-    const char* src = text;
-    int dstIdx = 0;
-    
-    while (*src && dstIdx < OLED_CONSOLE_LINE_LEN - 1) {
-      unsigned char c = (unsigned char)*src;
-      
-      if (c >= 32 && c < 127) {
-        // Printable ASCII - keep as-is
-        dst[dstIdx++] = c;
-        src++;
-      } else if (c == '\t') {
-        // Tab -> space
-        dst[dstIdx++] = ' ';
-        src++;
-      } else if (c >= 0xC0) {
-        // UTF-8 multi-byte sequence start - skip entire sequence
-        // Common box-drawing chars are 3-byte (0xE2...), warning symbol too
-        if (c >= 0xF0) { src += 4; }       // 4-byte sequence
-        else if (c >= 0xE0) { src += 3; }  // 3-byte sequence
-        else { src += 2; }                  // 2-byte sequence
-      } else {
-        // Other non-printable or continuation byte - skip
-        src++;
-      }
-    }
-    dst[dstIdx] = '\0';
-    
-    // Store timestamp
-    timestamps[head] = timestamp;
-    
-    // Advance head (circular, within the effective capacity)
-    head = (head + 1) % capacity;
-    
-    // Update count (saturate at effective capacity)
-    if (count < capacity) {
-      count++;
-    }
-    
-    xSemaphoreGive(mutex);
-  }
-}
-
-void OLEDConsoleBuffer::clear() {
-  if (!mutex || !lines) return;
-  if (xSemaphoreTake(mutex, portMAX_DELAY) != pdTRUE) return;
-  memset(lines, 0, static_cast<size_t>(capacity) * OLED_CONSOLE_LINE_LEN);
-  memset(timestamps, 0, static_cast<size_t>(capacity) * sizeof(uint32_t));
-  head = 0;
-  count = 0;
-  xSemaphoreGive(mutex);
-}
-
-// Get number of valid lines in buffer
-int OLEDConsoleBuffer::getLineCount() const {
-  return lines ? count : 0;
-}
-
-// Get line by index (0 = oldest, count-1 = newest)
-const char* OLEDConsoleBuffer::getLine(int index) const {
-  if (!lines || index < 0 || index >= count) {
-    return nullptr;
-  }
-  
-  // Calculate actual buffer position
-  // If buffer not full: oldest is at 0
-  // If buffer full: oldest is at head (just overwritten = oldest remaining)
-  int bufferIndex;
-  if (count < capacity) {
-    bufferIndex = index;
-  } else {
-    bufferIndex = (head + index) % capacity;
-  }
-
-  return lines[bufferIndex];
-}
-
-// Get timestamp by index (0 = oldest, count-1 = newest)
-uint32_t OLEDConsoleBuffer::getTimestamp(int index) const {
-  if (!timestamps || index < 0 || index >= count) {
-    return 0;
-  }
-  
-  // Calculate actual buffer position (same logic as getLine)
-  int bufferIndex;
-  if (count < capacity) {
-    bufferIndex = index;
-  } else {
-    bufferIndex = (head + index) % capacity;
-  }
-
-  return timestamps[bufferIndex];
-}
-
-// ============================================================================
 // OLED Footer Drawing (merged from oled_footer.cpp)
 // ============================================================================
 
@@ -3111,16 +2906,8 @@ void drawOLEDFooter() {
     // OLED_CUSTOM_TEXT, OLED_LOGO, OLED_ANIMATION hints provided via OLEDModeEntry registration (static "B:Back")
 
     case OLED_CLI_VIEWER:
-      {
-        // Show selected/total in footer
-        extern OLEDConsoleBuffer gOledConsole;
-        extern int getCLIViewerSelectedIndex();
-        int lineCount = gOledConsole.getLineCount();
-        int selected = getCLIViewerSelectedIndex();
-        static char cliHints[32];
-        snprintf(cliHints, sizeof(cliHints), "A:Info B:Back [%d/%d]", selected, lineCount);
-        hints = cliHints;
-      }
+      // Live, Paused and Reader each publish their own hint while rendering.
+      hints = oledCLIViewerFooterHint();
       break;
 
     case OLED_CLI_INPUT:
@@ -3342,7 +3129,7 @@ bool oledModeAllowedForGuest(OLEDMode mode) {
 
 bool oledGuestBlocksMutate() {
   if (!oledIsGuestSession()) return false;
-  oledToastShow("View-only", 2000);
+  oledToastShow("View-only", oled_message::kErrorDurationMs, OledUIIcon::ERROR);
   return true;
 }
 
@@ -3653,15 +3440,18 @@ void oledMarkDirtyUntil(unsigned long untilMs) {
 }
 
 bool oledIsDirty() {
+  oledFeedbackSetPaused(oledConfirmIsActive());
+  oledTextFieldSetPaused(oledConfirmIsActive());  // a confirmation freezes scrolling labels
   (void)oledToastActive(); // Expiry must invalidate even an otherwise static frame.
   extern volatile unsigned long gSensorStatusSeq;
 
   if (oledDirtySeq.load(std::memory_order_acquire) !=
       oledConsumedDirtySeq) return true;
+  if (oledCLIViewerNeedsFrame()) return true;  // new console output, or a retry after a busy ring
+  if (oledTextFieldNeedsFrame()) return true;  // a selected label's scroll is due to move
   uint32_t inputSeq = oledLastRenderedGamepadSeq;
   if (inputActivitySequence(inputSeq, 5) && inputSeq != oledLastRenderedGamepadSeq) return true;
   if (gSensorStatusSeq != oledLastRenderedSensorSeq) return true;
-  if (oledPairingRibbonActive()) return true;  // Continuous render during notification animations
   if (millis() < oledDirtyUntilMs) return true;  // Timed dirty (popup auto-dismiss, etc.)
   return false;
 }
@@ -3770,7 +3560,7 @@ void requestOLEDMode(OLEDMode newMode, const char* reason, bool pushStack, bool 
                    getOLEDModeName(currentOLEDMode), getOLEDModeName(newMode),
                    reason ? reason : "");
     if (newMode != OLED_MENU) {
-      oledToastShow("View-only", 2000);
+      oledToastShow("View-only", oled_message::kErrorDurationMs, OledUIIcon::ERROR);
     }
     newMode = OLED_MENU;
     pushStack = false;
@@ -4439,6 +4229,7 @@ void updateOLEDDisplay() {
     }
     gDisplay->setTextSize(1);
     gDisplay->setTextColor(DISPLAY_COLOR_WHITE);
+    oledTextFieldFrameBegin();  // scrolling labels claim their slots while this frame draws
     
     // Determine if header should be shown (drawn after content, like footer)
     bool showHeader = (currentOLEDMode != OLED_ANIMATION && 
@@ -4534,8 +4325,9 @@ void updateOLEDDisplay() {
     // Draw persistent footer with button hints (always last, in same frame)
     drawOLEDFooter();
     
-    // Draw UI overlays (toast, dialog, progress, list) on top of everything
+    // Draw shared feedback only when the confirmation does not own the screen
     oledUIRender();
+    oledTextFieldFrameEnd();  // labels this frame did not draw stop animating
 
     // Mark mode as clean after successful render
     oledClearDirty();
@@ -5319,6 +5111,7 @@ OLEDMode modeFromSlug(const String& slug) {
   if (slug == "imuactions" || slug == "imu" || slug == "actions") return OLED_IMU_ACTIONS;
   if (slug == "gps") return OLED_GPS_DATA;
   if (slug == "fmradio") return OLED_FM_RADIO;
+  if (slug == "mic" || slug == "microphone") return OLED_MICROPHONE;
   if (slug == "files" || slug == "filebrowser" || slug == "fb") return OLED_FILE_BROWSER;
   if (slug == "logging") return OLED_LOGGING;
   if (slug == "automations" || slug == "auto") return OLED_AUTOMATIONS;
@@ -7149,6 +6942,7 @@ static void oledResetLocalDisplaySessionTransients() {
   // callbacks were admitted by the previous identity and must never execute
   // after a remote/local replacement, even if the new user presses A.
   oledConfirmResetForSessionBoundary();
+  oledToastClear();
 
   // A dictation armed by the departing identity must not keep recording, and
   // its transcript must never land in the new identity's field. Discards the
@@ -7174,6 +6968,8 @@ static void oledResetLocalDisplaySessionTransients() {
   // the panel is asleep/disconnected; otherwise waking it could revive an old
   // back-stack or old command result without another auth callback.
   clearOLEDModeStack();
+  oledCLIViewerResetSessionState();  // owned Reader copy and anchors leave with the identity
+  oledTextFieldReset();              // no scrolling label carries over either
   gOledConsole.clear();
 }
 

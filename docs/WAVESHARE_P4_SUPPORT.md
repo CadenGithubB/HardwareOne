@@ -6,9 +6,9 @@ the initially pasted 4.3-inch ST7701 page is not this device.
 
 ## Device and scope
 
-- Target USB hub port `/dev/cu.usbmodem5ABA0541421`, bridge serial `5ABA054142`,
-  VID:PID `1a86:55d3`. P4 MAC `80:f1:b2:d1:c3:12`, silicon revision v1.3.
-- Existing STT board `/dev/cu.usbmodem101`, serial `E8:F6:0A:E3:A7:68`, was
+- Target USB hub port `/dev/cu.usbmodem<bridge-serial>1` (the bridge's serial
+  number is kept in the private archive), VID:PID `1a86:55d3`. P4 MAC `02:48:57:31:06:12`, silicon revision v1.3.
+- Existing STT board `/dev/cu.usbmodem101`, serial `02:48:57:31:04:68`, was
   not flashed or reset. Never substitute that port for this bring-up.
 - esptool verified 32 MB flash; 32 MB PSRAM at 200 MHz passed the boot memory
   test. CPU is 360 MHz; UART0 TX37/RX38, console 115200 baud.
@@ -90,6 +90,40 @@ On-device `speakertone 660 600 40` initialized ES8311, completed I2S writes and
 returned success. **Audible output has not been confirmed**: the user was away
 and asked to skip listening for now. This is tone playback support, not a media
 player or microphone integration.
+
+On 2026-11-02 the user repeated `speakertone 660 600 40` with a speaker
+connected and heard nothing despite successful command replies. The vendor's
+volume API maps 40 to DAC register 0x65, approximately -45 dB, before the
+tone's own sample attenuation. The speaker backend now holds the DAC at
+0xBF (0 dB, vendor API value 75) and scales PCM amplitude with the requested
+0..60 volume instead. Maximum sample amplitude remains 6000; volume zero
+produces silence. Register scaling is documented in the
+[ES8311 datasheet](https://files.waveshare.com/wiki/common/ES8311.DS.pdf).
+The sanitized host audio suite checks the actual vendor register mapping,
+PCM levels at 0/10/40/60, stereo samples, volume-write failure cleanup and
+microphone-enabled/disabled builds. Audible qualification of this correction
+is still pending. The saved `waveshare-p4-bringup`
+profile built successfully: 4,986,496-byte application, 3,402,112 bytes of app
+partition headroom (41%). Reused its existing build directory; no additional
+build/dependency copy was created. The login watchdog warning preceded
+playback and remains a separate issue.
+
+Installed the corrected v0.99.99 application at 0x10000 on the confirmed
+Waveshare (MAC 02:48:57:31:06:12); esptool verified its flash hash. Application
+SHA256: `585af1e07b8c9a2be74de8ff0c1c934e9930d9a14393263e5d9caafa645546b4`.
+Bootloader, partition table and filesystem were preserved. Boot #50 reported
+v0.99.99, loaded saved settings and brought display, Wi-Fi and GT911 touch
+online. A CPU0/main watchdog warning occurred during early startup; boot
+continued.
+
+The user subsequently confirmed audible output and repeated playback sounded
+fine. Their serial capture (22:17:04 through 22:17:37) shows repeated
+`speakertone 660 600 40` requests completing successfully, including requests
+sent faster than playback completes and then processed in sequence. Playback
+still blocks the serial input/main-loop path for roughly 0.9-1.0 seconds per
+tone, producing LOOPHEALTH stall notices. The approximately nine-second login
+stall/watchdog warning also persists. This confirms audible repeated test
+tones; it does not qualify continuous media playback or nonblocking operation.
 
 ## Companion installation
 
@@ -649,9 +683,9 @@ JavaScript behavior test passed; the existing EYE baseline at the same shared
 source checkpoint remains unchanged.
 
 Application-only flash matched MAC/partition layout and verified the image
-hash. Existing saved Wi-Fi connected to `TestESPNetwork` at `192.168.21.75`;
+hash. Existing saved Wi-Fi connected to `<your-network>` at `192.168.1.75`;
 HTTP started automatically on port 80. The Sensors page is
-`http://192.168.21.75/sensors` (address may change with DHCP). The user verified
+`http://192.168.1.75/sensors` (address may change with DHCP). The user verified
 the web interface, camera capture and recording from a computer on that network.
 This Mac was on a different subnet and could not independently reach that IP;
 its failed browser/TCP attempts are not camera/server failures.
@@ -697,7 +731,7 @@ passed while preview was live. A two-second onboard-mic/local-STT job completed
 advancing. Leaving Camera cleared the bitmap and retired the worker; the
 camera remained available for capture. Reentry started a fresh live preview.
 
-HTTP still starts automatically on port 80 at `192.168.21.75`, touch remains
+HTTP still starts automatically on port 80 at `192.168.1.75`, touch remains
 connected, and C6 stays online with zero bridge timeouts/transport errors.
 Saved landscape, resolution and mirror/flip settings remain intact. The current
 user-selected quality 0 and FPS 20 are preserved; preview does not rewrite them.
@@ -712,3 +746,82 @@ caches (~1.0 GiB Waveshare, ~1.1 GiB EYE, ~1.3 GiB XIAO) remain for the agreed
 hardware validation and any resulting edits. Cleanup reclaimed 229,376
 allocated bytes of superseded preview build logs and the temporary serial
 helper. No push before that validation.
+
+## Camera mount rotation (2026-11-03)
+
+The user reported the OV5647 image a quarter turn off on this assembly and
+asked for a 90-degree counter-clockwise correction that belongs to the board.
+A camera module's facing is attached hardware, so the Waveshare board
+definition (`System_Board_WaveshareP4.h`) now states `CAMERA_MOUNT_ROTATION 90`
+beside the module's wiring and native geometry. `System_BuildConfig.h` owns the
+upright default of 0, accepts only quarter turns, and refuses a non-zero turn
+on a DVP board, whose backend delivers sensor JPEGs it cannot rotate.
+
+`HAL_Camera_P4` applies the turn inside the existing RGB565 centre-crop/resize
+(`CameraRgb565.h`), beneath the user's H Mirror, V Flip and Rotate 180
+controls, which therefore act on the upright frame. A quarter turn walks the
+frame in 32-pixel tiles so the transposed reads stay within a few cache lines
+of the PSRAM source. Because the turn is a quarter turn, every delivered size
+is portrait on this board: selecting VGA produces a 480×640 JPEG and the status
+row, `camerares`, recordings and the local preview follow the delivered
+geometry. Size names keep their sensor-side dimensions. EYE states no turn and
+is unchanged. The host camera suites cover the resize for every turn with
+mirror/flip, a scaled turn, tile edges and both board lanes.
+
+Both P4 saved profiles built and linked in their existing build directories;
+no extra build or dependency copy was created. The EYE figure includes other
+uncommitted work in the tree.
+
+| Saved profile | Application bytes | Application headroom |
+| --- | ---: | ---: |
+| waveshare-p4-bringup | 4,991,296 | 3,397,312 |
+| p4-phone-pipe (EYE) | 6,143,152 | 1,282,896 |
+
+Application-only flashing (2026-11-03) refused to write until the board's MAC
+and installed partition table matched the build; esptool verified the image
+digest. The user confirmed the turned camera preview on the device. One boot
+after the update panicked on core 1 with a jump to address zero from the
+Arduino `NetworkEvents::_checkForEvent` callback list (an empty
+`std::function` entry); the automatic restart completed setup and started the
+web server. That fault is in the network event dispatcher, not the camera
+path, and was seen once. Nothing is committed.
+
+## Onboard microphone meter on the local display (2026-11-03)
+
+The user reported the Microphone page showing no activity: capture started,
+but the meter never moved, then after a tap on the module it showed a value
+and stayed there. Serial checks on the board found the capture itself healthy:
+source `pdm` (onboard), gain 70 %, `miclevel` polled at 1–2 % in a quiet room
+with bumps to 9–21 % on room sounds, and a recorded clip pulled over serial
+(1.44 s recovered of 114,732 bytes) with DC 0.4, RMS about 1,900 counts, a
+varying envelope and one clipped tap peak. The earlier 1 November check had
+only shown samples flowing, never a sound registering.
+
+The fault was the page, not the mic. The display loop repaints a frame only
+when the mode changes or something marks it dirty, and the Microphone page
+never marked itself, so it painted once on entry and again only on input.
+`System_Microphone_OLED.h` now keeps the next frame due while capture runs
+(`oledMarkDirtyUntil`, the same mechanism the System page's perf view uses),
+so the meter follows the level at the display interval and goes quiet when
+the page is left. `oledmode mic` (or `microphone`) now reaches the page from
+the CLI: `slugFromMode` already named it `mic`, but `modeFromSlug` had no entry
+for it, so the documented round trip failed with "Invalid mode". The
+dead-paths, owner-request and settings-mutation host suites pass with the
+entry. Note for later tuning: the clip clipped at full scale on a
+tap, because the 24× base software gain sized for the PDM boards sits on top
+of the ES7210's 37.5 dB analog gain; speech may clip for local STT.
+
+The speaker cannot serve as an automated sound source for this check: the mic
+and speaker hold one claim on the shared I2S pins, so playback refuses while
+capture runs. Application-only flashing of the rebuilt image (4,991,120 bytes,
+digest verified) booted to setup complete.
+
+Serial evidence on the board, after logging the display in (`login <user>
+<password> display`; the LCD has its own session and a CLI mode request is
+auth-gated to the Login page without it): on the Microphone page with the mic
+closed, 10 s produced no draws; with the mic open, 20 s produced at least 41
+draws (level-call counter and render counter both crossed their next
+fifty-call log marks); after `closemic`, 5 s produced none. The meter now
+follows the level while capture runs and the page is otherwise static. The
+test recording was deleted, temporary debug flags cleared and the log level
+restored to info. Nothing is committed.

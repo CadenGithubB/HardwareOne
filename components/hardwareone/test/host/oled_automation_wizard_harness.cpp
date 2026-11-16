@@ -84,6 +84,7 @@ class HarnessDisplay {
  private:
   int x_ = 0, y_ = 0;
 };
+#include "oled_text_field_op_double.h"  // bounded list labels through the shipping policy
 static HarnessDisplay gDisplay;
 static HarnessDisplay* oledDisplay = &gDisplay;
 
@@ -136,14 +137,14 @@ static bool executeOLEDCommandWithResult(const String& cmd, char* out, size_t ou
   return true;
 }
 
-// ---- Automations list state the toast and wizard touch -------------------------------
-static const char* autoActionMsg = nullptr;
-static unsigned long autoActionMsgTime = 0;
-static bool autoForceRefresh = false;
-static const unsigned long AUTO_TOAST_MS = 1500;
-static unsigned long gDirtyUntil = 0;
-static void oledMarkDirtyUntil(unsigned long untilMs) { if (untilMs > gDirtyUntil) gDirtyUntil = untilMs; }
+static bool oledRunCommand(const String& cmd) { char out[192]; return executeOLEDCommandWithResult(cmd, out, sizeof(out)); }
 
+// ---- Automations list state the toast and wizard touch -------------------------------
+static std::string gToast;
+enum class OledUIIcon { SUCCESS, ERROR };
+namespace oled_message { constexpr unsigned kErrorDurationMs=8000; }
+static void oledToastShow(const char* msg, uint32_t, OledUIIcon) { gToast=msg; }
+static bool autoForceRefresh = false;
 // ---- production: footer toast and the wizard ----------------------------------------
 // INSERT_TOAST
 // INSERT_WIZARD
@@ -155,14 +156,13 @@ static void resetWorld() {
   gSent.clear();
   gDisplay.drawn.clear();
   gNavEvents = {false, false, false, false};
-  autoActionMsg = nullptr;
-  autoActionMsgTime = 0;
+  gToast.clear();
   autoForceRefresh = false;
   gNowMs += 10000;
   oledAutomationsModeResetSessionState();
 }
 
-static std::string toast() { return autoActionMsg ? autoActionMsg : "(none)"; }
+static std::string toast() { return gToast.empty() ? "(none)" : gToast; }
 
 // "+ New" row pressed: the list handler resets the wizard and opens the name keyboard.
 static void startWizard() {

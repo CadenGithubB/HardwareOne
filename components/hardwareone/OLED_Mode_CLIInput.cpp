@@ -14,18 +14,11 @@
 
 #include <Adafruit_SSD1306.h>
 #include "OLED_Utils.h"
-#include "OLED_ConsoleBuffer.h"
 #include "System_Command.h"
 #include "System_Debug.h"
 #include "System_Utils.h"
 
-extern OLEDConsoleBuffer gOledConsole;
-
 static bool     sKeyboardActive  = false;
-static bool     sAwaitingResult  = false;
-// Snapshot of the console line count taken at command submit time,
-// used to detect when new output has arrived.
-static int      sPreSubmitCount  = 0;
 
 // After a command runs we show an inline result screen (instead of silently
 // re-opening a blank keyboard) so the user gets affirmative/negative feedback
@@ -54,6 +47,16 @@ static OledCliNativeTransition classifyNativeTransition(const String& cmd) {
     return OledCliNativeTransition::Logout;
   }
   return OledCliNativeTransition::None;
+}
+
+// The echo and the executor's reply reach CLI Output through the shared output
+// queue, routed to the OLED sink only: they keep their order relative to the
+// lines the command broadcast while running and cross the same identity fence.
+// The reply is an explicit handoff, not a guess about missing output; it is
+// shown on no other display sink, so this is its one copy on the page.
+static void cliInputPublish(const char* text) {
+  if (!text || !text[0]) return;
+  broadcastOutputCore_Routed(text, strlen(text), MSG_ROUTE_OLED);
 }
 
 static void startInputKeyboard() {
@@ -218,24 +221,19 @@ static bool handleCLIInputInput(int deltaX, int deltaY, uint32_t newlyPressed) {
           transition == OledCliNativeTransition::Login
               ? "Use the OLED Login screen"
               : "Use the OLED Logout screen";
-      gOledConsole.append(echoBuf, millis());
-      gOledConsole.append(guidance, millis());
+      cliInputPublish(echoBuf);
+      cliInputPublish(guidance);
       sLastCommand = safeCommand;
       sLastResult = guidance;
       sLastOk = false;
       sResultEpoch = sessionEpoch;
       sShowingResult = true;
-      sAwaitingResult = false;
       oledMarkDirty();
       secureClearString(cmd);
       return true;
     }
 
-    gOledConsole.append(echoBuf, millis());
-
-    // Record console size before executing so we can detect new output.
-    sPreSubmitCount = gOledConsole.getLineCount();
-    sAwaitingResult = true;
+    cliInputPublish(echoBuf);
 
     // Execute through the same auth context used by all OLED commands.
     char out[256] = {};
@@ -251,13 +249,8 @@ static bool handleCLIInputInput(int deltaX, int deltaY, uint32_t newlyPressed) {
       return true;
     }
 
-    // If the command produced no output to the console buffer itself,
-    // append the returned string so the CLI Output page always has feedback.
-    if (gOledConsole.getLineCount() == sPreSubmitCount) {
-      const char* feedback = (strlen(out) > 0) ? out : (ok ? "OK" : "Error");
-      gOledConsole.append(feedback, millis());
-    }
-    sAwaitingResult = false;
+    // Hand the reply to CLI Output after the lines the command broadcast.
+    cliInputPublish((strlen(out) > 0) ? out : (ok ? "OK" : "Error"));
 
     // Show the inline result screen so the user sees pass/fail right here
     // instead of a blank re-opened keyboard.
@@ -315,8 +308,6 @@ void resetCLIInputState() {
   sLastResult = "";
   sResultEpoch = kNoTransportSessionEpoch;
   sInputEpoch = kNoTransportSessionEpoch;
-  sAwaitingResult = false;
-  sPreSubmitCount = 0;
 }
 
 void oledCLIInputResetSessionState() {

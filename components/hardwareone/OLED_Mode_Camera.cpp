@@ -195,7 +195,7 @@ static bool input(int, int, uint32_t buttons) {
     // Holding the preview freezes only the displayed bitmap.
     if (photoPending) { oledToastShow("Photo pending", 1500); return true; }
     photoPending = new(std::nothrow) PhotoTicket{state.generation, state.frozen};
-    if (!photoPending) { oledToastShow("Photo request needs memory", 2000); return true; }
+    if (!photoPending) { oledToastShow("Photo request needs memory", oled_message::kErrorDurationMs, OledUIIcon::ERROR); return true; }
     portENTER_CRITICAL(&mutex);
     view.frozen = true;
     ++view.revision;

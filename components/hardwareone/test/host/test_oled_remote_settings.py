@@ -258,7 +258,7 @@ def main() -> None:
         work = Path(directory)
         (work / "Arduino.h").write_text("// ArduinoJson includes <Arduino.h>; String is the harness's.\n")
         unit, executable = work / "test.cpp", work / "test"
-        unit.write_text(generated(read))
+        unit.write_text('#include "' + str(args.component / "OLED_MessageText.h") + '"\n' + generated(read))
         subprocess.run([args.cxx, *flags, "-I", str(work), "-I", str(JSON_INCLUDE),
                         str(unit), "-o", str(executable)], check=True, timeout=300)
         run = subprocess.run([str(executable)], timeout=60)

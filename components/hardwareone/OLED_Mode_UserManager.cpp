@@ -17,6 +17,8 @@
 
 #include <Adafruit_SSD1306.h>
 #include "OLED_Utils.h"
+#include "OLED_TextField.h"
+#include "OLED_UI.h"
 #include "System_Debug.h"
 #include "System_Mutex.h"
 #include "System_User.h"      // readUserRoster / isAdminUser / isSuperAdminUser / userRoleRank / gLocalDisplay*
@@ -46,8 +48,6 @@ static char    gAddUser[33] = {0};
 static char    gAddPass[65] = {0};
 static char    gUmDelName[kPublicUsernameMaxLen + 1] = {0};   // full name, captured at delete-confirm request
 
-static String        umError;
-static unsigned long umErrorUntil = 0;
 
 static const char* const kUmRoles[4] = { "guest", "user", "admin", "superadmin" };
 
@@ -70,8 +70,6 @@ void oledUserManagerModeResetSessionState() {
   umWipe(gAddUser, sizeof(gAddUser));
   umWipe(gAddPass, sizeof(gAddPass));
   umWipe(gUmDelName, sizeof(gUmDelName));
-  secureClearString(umError);
-  umErrorUntil = 0;
 }
 
 // ----------------------------------------------------------------------------
@@ -81,9 +79,7 @@ static bool umIsAdmin() { return gLocalDisplayAuthed && isAdminUser(gLocalDispla
 static int  umMaxRank() { return isSuperAdminUser(gLocalDisplayUser) ? 3 : 2; }
 
 static void umShowError(const char* msg) {
-  umError = String(msg).substring(0, 40);
-  umErrorUntil = millis() + 2500;
-  oledMarkDirtyUntil(umErrorUntil);
+  oledToastShow(msg, oled_message::kErrorDurationMs, OledUIIcon::ERROR);
 }
 
 static void loadUsers() {
@@ -114,7 +110,7 @@ static void umDispatch(const String& cmd) {
     return;
   }
   FsLockGuard fsGuard("oled.user_manager.result");
-  if (!ok || strncmp(out, "Error", 5) == 0) {
+  if (!ok || oled_message::isError(out)) {
     const char* m = out[0] ? out : "Failed";
     if (strncmp(m, "Error: ", 7) == 0) m += 7;
     umShowError(m);
@@ -135,6 +131,20 @@ static void umDeleteConfirmed(void* /*ud*/) {
 // ----------------------------------------------------------------------------
 // Display
 // ----------------------------------------------------------------------------
+// One roster row: the username field from `x` up to the role badge, which is
+// right-aligned in a fixed column before the scroll arrows and never moves.
+static void umDrawUserRow(int x, int y, const UserRosterEntry& u, bool selected) {
+  char role[16];
+  snprintf(role, sizeof(role), "(%s)", u.role);
+  int roleW = (int)strlen(role) * 6;
+  if (roleW > 60) roleW = 60;
+  const int roleX = 120 - roleW;
+  oledTextFieldDraw(oledDisplay, x, y, roleX - 6 - x, u.username,
+                    DISPLAY_COLOR_WHITE, DISPLAY_COLOR_WHITE, selected, gUsers);
+  oledTextFieldDraw(oledDisplay, roleX, y, roleW, role,
+                    DISPLAY_COLOR_WHITE, DISPLAY_COLOR_WHITE, false, gUsers);
+}
+
 static void umDrawRole(int y, int cursor, int maxRank, int curRank, const char* header) {
   oledDisplay->setCursor(0, y);
   oledDisplay->print(header);
@@ -142,8 +152,13 @@ static void umDrawRole(int y, int cursor, int maxRank, int curRank, const char* 
   for (int rank = 0; rank <= maxRank; rank++) {
     oledDisplay->setCursor(0, yy);
     oledDisplay->print(rank == cursor ? "> " : "  ");
-    oledDisplay->print(kUmRoles[rank]);
-    if (rank == curRank) oledDisplay->print(" *");
+    // Role label in a bounded field; the current-role marker keeps its column.
+    oledTextFieldDraw(oledDisplay, 12, yy, 114 - 12 - 6, kUmRoles[rank],
+                      DISPLAY_COLOR_WHITE, DISPLAY_COLOR_WHITE, rank == cursor, kUmRoles);
+    if (rank == curRank) {
+      oledDisplay->setCursor(114, yy);
+      oledDisplay->print("*");
+    }
     yy += 10;
   }
 }
@@ -164,9 +179,6 @@ void displayUserManager() {
     return;
   }
 
-  // Error banner (bottom strip) — drawn over whatever level is active.
-  const bool showErr = (umError.length() && (long)(umErrorUntil - millis()) > 0);
-
   if (gUmLevel == UM_LIST) {
     const int total = gUmCount + 1;   // + Add User row
     const int lineH = 10, visible = oledVisibleRows(lineH, 0, 4);
@@ -175,14 +187,17 @@ void displayUserManager() {
     for (int row = 0; row < visible; row++) {
       int i = gUmScroll + row;
       if (i >= total) break;
-      oledDisplay->setCursor(0, y + row * lineH);
-      oledDisplay->print(i == gUmSel ? "> " : "  ");
+      const int ry = y + row * lineH;
+      const bool selected = i == gUmSel;
+      oledDisplay->setCursor(0, ry);
+      oledDisplay->print(selected ? "> " : "  ");
       if (i == gUmCount) {
-        oledDisplay->print("+ Add User");
+        oledTextFieldDraw(oledDisplay, 12, ry, 122 - 12, "+ Add User",
+                          DISPLAY_COLOR_WHITE, DISPLAY_COLOR_WHITE, false, gUsers);
       } else {
-        char buf[22];
-        snprintf(buf, sizeof(buf), "%.11s (%.5s)", gUsers[i].username, gUsers[i].role);
-        oledDisplay->print(buf);
+        // The whole username in its own field (scrolling when selected); the
+        // role badge keeps a fixed right column before the arrows.
+        umDrawUserRow(12, ry, gUsers[i], selected);
       }
     }
     if (gUmScroll > 0) { oledDisplay->setCursor(122, y); oledDisplay->print("\x18"); }
@@ -191,17 +206,16 @@ void displayUserManager() {
     }
   } else if (gUmLevel == UM_ACTIONS) {
     const UserRosterEntry& u = gUsers[gUmTarget];
-    oledDisplay->setCursor(0, y);
-    char hdr[22]; snprintf(hdr, sizeof(hdr), "%.11s (%.5s)", u.username, u.role);
-    oledDisplay->print(hdr);
+    umDrawUserRow(0, y, u, false);
     const bool founder = (u.id == 1);
     const char* acts[3] = { "Change Role", "Delete", "< Back" };
     int yy = y + 12;
     for (int i = 0; i < 3; i++) {
       oledDisplay->setCursor(0, yy);
       oledDisplay->print(i == gUmActSel ? "> " : "  ");
-      if (founder && i < 2) { oledDisplay->print(i == 0 ? "Change Role -" : "Delete -"); }
-      else oledDisplay->print(acts[i]);
+      const char* act = (founder && i < 2) ? (i == 0 ? "Change Role -" : "Delete -") : acts[i];
+      oledTextFieldDraw(oledDisplay, 12, yy, SCREEN_WIDTH - 12, act,
+                        DISPLAY_COLOR_WHITE, DISPLAY_COLOR_WHITE, i == gUmActSel, acts);
       yy += 10;
     }
     if (founder) { oledDisplay->setCursor(0, yy); oledDisplay->print("(founder locked)"); }
@@ -211,14 +225,7 @@ void displayUserManager() {
     umDrawRole(y, gUmRoleSel, umMaxRank(), -1, "New user role:");
   }
 
-  if (showErr) {
-    int ey = OLED_CONTENT_START_Y + OLED_CONTENT_HEIGHT - 9;
-    oledDisplay->fillRect(0, ey, 128, 9, DISPLAY_COLOR_WHITE);
-    oledDisplay->setTextColor(DISPLAY_COLOR_BLACK);
-    oledDisplay->setCursor(1, ey + 1);
-    oledDisplay->print(umError);
-    oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-  }
+
 }
 
 // ----------------------------------------------------------------------------

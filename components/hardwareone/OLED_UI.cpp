@@ -1,5 +1,5 @@
 // OLED_UI.cpp - Unified OLED UI Component System
-// Provides the reusable Toast and Pairing Ribbon overlays and drawing helpers
+// Shared feedback queue, notification adapter and drawing helpers
 
 #include "OLED_UI.h"
 #include "System_BuildConfig.h"
@@ -8,12 +8,10 @@
 
 #include "OLED_Display.h"
 #include "OLED_Utils.h"
-#include "HAL_Input.h"
 #include "System_Icons.h"
 #include <cstring>
 #include <cmath>
 #include <climits>
-#include <esp_attr.h>  // EXT_RAM_BSS_ATTR
 
 // Spinlock for thread-safe toast access (called from ESP-NOW, ESP-SR, BLE, main loop)
 static portMUX_TYPE sToastMux = portMUX_INITIALIZER_UNLOCKED;
@@ -162,43 +160,104 @@ void oledDrawLevelBars(int x, int y, int level, int maxBars, int barHeight) {
 // Toast Component
 // ============================================================================
 
+// One bounded queue serves local action replies and event notifications. The
+// current item always gets its full visible lifetime. Overflow favours errors:
+// routine feedback cannot evict an error, and duplicate bursts are coalesced.
+static constexpr unsigned kToastQueueCapacity = 12;
+struct PendingToast {
+  char message[oled_message::kMessageBytes];
+  uint32_t durationMs;
+  OledUIIcon icon;
+};
+static PendingToast sToastQueue[kToastQueueCapacity];
+static unsigned sToastQueueCount = 0;
+static bool sToastPaused = false;
+static uint32_t sToastPausedAt = 0;
+
 void oledToastShow(const char* message, uint32_t durationMs, OledUIIcon icon) {
-  if (icon == OledUIIcon::NONE && oled_message::isError(message)) icon = OledUIIcon::ERROR;
+  if (icon == OledUIIcon::NONE)
+    icon = oled_message::isError(message) ? OledUIIcon::ERROR : OledUIIcon::INFO;
   if (icon == OledUIIcon::ERROR) {
     if (durationMs < oled_message::kErrorDurationMs) durationMs = oled_message::kErrorDurationMs;
     message = oled_message::reason(message);
     if (!message[0]) message = "Command failed. Check logs.";
   }
+  PendingToast item{};
+  snprintf(item.message, sizeof(item.message), "%s", message ? message : "");
+  item.durationMs = durationMs;
+  item.icon = icon;
   portENTER_CRITICAL(&sToastMux);
-  strncpy(gOledToast.message, message ? message : "", sizeof(gOledToast.message) - 1);
-  gOledToast.message[sizeof(gOledToast.message) - 1] = '\0';
-  gOledToast.expireMs = millis() + durationMs;
-  gOledToast.icon = icon;
-  gOledToast.active = true;
+  bool duplicate = gOledToast.active && gOledToast.icon == icon &&
+                   strcmp(gOledToast.message, item.message) == 0 &&
+                   (sToastPaused || static_cast<int32_t>(millis() - gOledToast.expireMs) < 0);
+  for (unsigned i = 0; i < sToastQueueCount; ++i)
+    duplicate |= sToastQueue[i].icon == icon && strcmp(sToastQueue[i].message, item.message) == 0;
+  if (!duplicate) {
+    if (!gOledToast.active) {
+      memcpy(gOledToast.message, item.message, sizeof(item.message));
+      gOledToast.icon = icon;
+      gOledToast.expireMs = (sToastPaused ? sToastPausedAt : millis()) + durationMs;
+      gOledToast.active = true;
+    } else {
+      if (sToastQueueCount == kToastQueueCapacity) {
+        unsigned discard = 0;
+        while (discard < sToastQueueCount && sToastQueue[discard].icon == OledUIIcon::ERROR) ++discard;
+        // With only errors pending, discard the oldest only for another error.
+        if (discard == sToastQueueCount && icon == OledUIIcon::ERROR) discard = 0;
+        if (discard < sToastQueueCount) {
+          for (unsigned i = discard + 1; i < sToastQueueCount; ++i) sToastQueue[i-1] = sToastQueue[i];
+          --sToastQueueCount;
+        }
+      }
+      if (sToastQueueCount < kToastQueueCapacity) sToastQueue[sToastQueueCount++] = item;
+    }
+  }
   portEXIT_CRITICAL(&sToastMux);
   oledMarkDirty();
 }
 
 void oledToastClear() {
   portENTER_CRITICAL(&sToastMux);
-  gOledToast.active = false;
-  gOledToast.message[0] = '\0';
-  gOledToast.expireMs = 0;
+  gOledToast = {};
+  // Erase messages as well as counters at a display identity boundary.
+  memset(sToastQueue, 0, sizeof(sToastQueue));
+  sToastQueueCount = 0;
+  sToastPaused = false;
+  sToastPausedAt = 0;
   portEXIT_CRITICAL(&sToastMux);
   oledMarkDirty();
 }
 
-bool oledToastActive() {
-  bool expired = false;
+void oledFeedbackSetPaused(bool paused) {
   portENTER_CRITICAL(&sToastMux);
-  bool active = gOledToast.active;
-  if (active && static_cast<int32_t>(millis() - gOledToast.expireMs) >= 0) {
-    gOledToast.active = false;
-    gOledToast.message[0] = '\0';
-    active = false; expired = true;
+  if (paused != sToastPaused) {
+    const uint32_t now = millis();
+    if (paused) sToastPausedAt = now;
+    else if (gOledToast.active) gOledToast.expireMs += now - sToastPausedAt;
+    sToastPaused = paused;
   }
   portEXIT_CRITICAL(&sToastMux);
-  if (expired) oledMarkDirty(); // Repaint a static screen when the toast disappears.
+}
+
+bool oledToastActive() {
+  bool changed = false;
+  portENTER_CRITICAL(&sToastMux);
+  if (!sToastPaused && gOledToast.active && static_cast<int32_t>(millis() - gOledToast.expireMs) >= 0) {
+    gOledToast = {};
+    if (sToastQueueCount) {
+      const PendingToast item = sToastQueue[0];
+      for (unsigned i = 1; i < sToastQueueCount; ++i) sToastQueue[i-1] = sToastQueue[i];
+      sToastQueue[--sToastQueueCount] = {};
+      memcpy(gOledToast.message, item.message, sizeof(item.message));
+      gOledToast.icon = item.icon;
+      gOledToast.expireMs = millis() + item.durationMs;
+      gOledToast.active = true;
+    }
+    changed = true;
+  }
+  const bool active = gOledToast.active;
+  portEXIT_CRITICAL(&sToastMux);
+  if (changed) oledMarkDirty();
   return active;
 }
 
@@ -231,393 +290,19 @@ void oledToastRender() {
   gDisplay->setTextColor(DISPLAY_FG);
 }
 
-// ============================================================================
-// Pairing Ribbon Component
-// ============================================================================
-
-// Zero image == hidden ribbon (HIDDEN==0, LINK==0). oledPairingRibbonShow()
-// rewrites every field before any state leaves HIDDEN, so the old {3000,-20}
-// initializer values were dead; .ext_ram.bss is zeroed before C++ ctors run.
-EXT_RAM_BSS_ATTR OledPairingRibbon gOledPairingRibbon;
-
-// Ribbon dimensions
-static const int RIBBON_WIDTH = 80;    // Width of the ribbon
-static const int RIBBON_HEIGHT = 18;   // Height when fully visible
-static const int RIBBON_ICON_SIZE = 16; // Icon size in the ribbon (0.5x of 32x32 -> clean 2x2 downsample)
-static const int RIBBON_MIN_SIZE = 18; // Minimized indicator size (fits the 16px icon)
-static const int RIBBON_ANIM_DURATION_MS = 500; // Total time for slide in/out animation (~5 frames at 10 FPS)
-
-// Marquee scroll speed for long banner text. The panel redraws ~10 FPS, so we
-// advance this many pixels per 100ms frame; 2 px ≈ 20 px/s (2x the old 1 px).
-// Faster scroll also clears each banner sooner, shrinking the queue backlog.
-static const int RIBBON_SCROLL_PX_PER_FRAME = 2;
-
-// ── Notification banner queue ──────────────────────────────────────────────
-// The ribbon is a single animated slot, so back-to-back notifications used to
-// clobber each other. oledNotificationBannerShow() enqueues when the ribbon is
-// busy; oledBannerQueuePump() shows the next one the moment it returns to idle.
-// Retention isn't the point (the notification center holds full history) — this
-// just paces transient pop-ups so each shows for its full duration. Overflow
-// drops the OLDEST pending (favour recency; the record is still in history).
-static const uint8_t BANNER_QUEUE_MAX = 12;
-struct BannerQueueEntry {
-  char message[128];
-  PairingRibbonIcon icon;
-  uint32_t visibleMs;
-  bool blink;
-};
-EXT_RAM_BSS_ATTR static BannerQueueEntry sBannerQueue[BANNER_QUEUE_MAX];
-static uint8_t  sBannerQHead = 0;
-static uint8_t  sBannerQCount = 0;
-static uint32_t sBannerQDropped = 0;   // overflow drops (visible via bannerqueue diag if wanted)
-
-static void oledBannerQueuePush(const char* message, PairingRibbonIcon icon,
-                                uint32_t visibleMs, bool blink) {
-  if (sBannerQCount >= BANNER_QUEUE_MAX) {          // full — drop oldest pending
-    sBannerQHead = (uint8_t)((sBannerQHead + 1) % BANNER_QUEUE_MAX);
-    sBannerQCount--;
-    sBannerQDropped++;
-  }
-  uint8_t tail = (uint8_t)((sBannerQHead + sBannerQCount) % BANNER_QUEUE_MAX);
-  BannerQueueEntry& e = sBannerQueue[tail];
-  strncpy(e.message, message, sizeof(e.message) - 1);
-  e.message[sizeof(e.message) - 1] = '\0';
-  e.icon = icon;
-  e.visibleMs = visibleMs;
-  e.blink = blink;
-  sBannerQCount++;
-}
-
-// Show the next queued banner if the ribbon is idle. Called every update tick.
-static void oledBannerQueuePump() {
+// Event policy remains in System_Notifications; accepted events share the
+// local-feedback queue, severity and renderer.
+void oledNotificationBannerShow(const char* message, OledUIIcon icon,
+                                uint32_t visibleMs) {
   if (oledBootModeActive) return;
-  if (sBannerQCount == 0) return;
-  if (gOledPairingRibbon.state != PairingRibbonState::HIDDEN) return;
-  const BannerQueueEntry& e = sBannerQueue[sBannerQHead];
-  oledPairingRibbonShow(e.message, e.icon, e.visibleMs, e.blink);
-  sBannerQHead = (uint8_t)((sBannerQHead + 1) % BANNER_QUEUE_MAX);
-  sBannerQCount--;
+  oledToastShow(message, visibleMs, icon);
 }
 
-void oledPairingRibbonShow(const char* message, PairingRibbonIcon icon, uint32_t visibleMs, bool blink) {
-  strncpy(gOledPairingRibbon.message, message, sizeof(gOledPairingRibbon.message) - 1);
-  gOledPairingRibbon.message[sizeof(gOledPairingRibbon.message) - 1] = '\0';
-  gOledPairingRibbon.icon = icon;
-  
-  // Calculate dynamic duration for long messages to ensure full scroll completes
-  int msgLen = strlen(gOledPairingRibbon.message);
-  int textWidth = RIBBON_WIDTH - 22;  // Available pixel width for text (4px left + 18px right icon)
-  int fullTextWidth = msgLen * 6;     // Total pixel width of message
-  if (fullTextWidth > textWidth) {
-    // Message needs scrolling - calculate time for one full scroll cycle
-    // Scroll time budget: RIBBON_SCROLL_PX_PER_FRAME px per 100ms frame + end pauses.
-    int pixelsToScroll = fullTextWidth - textWidth;
-    uint32_t scrollTimeMs = (pixelsToScroll * 100 / RIBBON_SCROLL_PX_PER_FRAME) + 2000;
-    // Use the longer of: provided duration or scroll duration, but cap at 15 seconds
-    gOledPairingRibbon.visibleDurationMs = min(max(visibleMs, scrollTimeMs), (uint32_t)15000);
-  } else {
-    // Short message - use provided duration
-    gOledPairingRibbon.visibleDurationMs = visibleMs;
-  }
-  
-  gOledPairingRibbon.iconBlink = blink;
-  gOledPairingRibbon.blinkCount = blink ? 6 : 0;  // 3 full blink cycles
-  gOledPairingRibbon.state = PairingRibbonState::UNFURLING;
-  gOledPairingRibbon.stateStartMs = millis();
-  gOledPairingRibbon.animY = -RIBBON_HEIGHT;  // Start above screen
-  gOledPairingRibbon.scrollOffset = 0;  // Reset scroll position
-  gOledPairingRibbon.lastScrollMs = millis();
-}
-
-void oledPairingRibbonMinimize() {
-  if (gOledPairingRibbon.state != PairingRibbonState::HIDDEN) {
-    gOledPairingRibbon.state = PairingRibbonState::SHRINKING;
-    gOledPairingRibbon.stateStartMs = millis();
-  }
-}
-
-void oledPairingRibbonHide() {
-  gOledPairingRibbon.state = PairingRibbonState::HIDDEN;
-  gOledPairingRibbon.animY = -RIBBON_HEIGHT;
-}
-
-bool oledPairingRibbonActive() {
-  return gOledPairingRibbon.state != PairingRibbonState::HIDDEN;
-}
-
-void oledPairingRibbonUpdate() {
-  if (gOledPairingRibbon.state == PairingRibbonState::HIDDEN) {
-    oledBannerQueuePump();  // idle — show the next queued notification banner, if any
-    return;
-  }
-  
-  uint32_t now = millis();
-  uint32_t elapsed = now - gOledPairingRibbon.stateStartMs;
-  
-  switch (gOledPairingRibbon.state) {
-    case PairingRibbonState::UNFURLING:
-      // Time-based slide down: lerp from -RIBBON_HEIGHT to 0 over RIBBON_ANIM_DURATION_MS
-      if (elapsed >= (uint32_t)RIBBON_ANIM_DURATION_MS) {
-        gOledPairingRibbon.animY = 0;
-        gOledPairingRibbon.state = PairingRibbonState::VISIBLE;
-        gOledPairingRibbon.stateStartMs = now;
-      } else {
-        // Linear interpolation: -RIBBON_HEIGHT .. 0
-        gOledPairingRibbon.animY = -RIBBON_HEIGHT + (int)((long)RIBBON_HEIGHT * elapsed / RIBBON_ANIM_DURATION_MS);
-      }
-      break;
-      
-    case PairingRibbonState::VISIBLE:
-      // Stay visible for duration, then shrink
-      if (elapsed >= gOledPairingRibbon.visibleDurationMs) {
-        gOledPairingRibbon.state = PairingRibbonState::SHRINKING;
-        gOledPairingRibbon.stateStartMs = now;
-      }
-      // Update blink state
-      if (gOledPairingRibbon.blinkCount > 0 && (elapsed / 150) % 2 == 0) {
-        // Decrement blink count every 300ms (full cycle)
-        if (elapsed > 0 && (elapsed % 300) < 50) {
-          gOledPairingRibbon.blinkCount--;
-        }
-      }
-      // Update horizontal pixel scroll for long text (RIBBON_SCROLL_PX_PER_FRAME px / 100ms frame)
-      if (now - gOledPairingRibbon.lastScrollMs >= 100) {
-        gOledPairingRibbon.lastScrollMs = now;
-        int msgLen = strlen(gOledPairingRibbon.message);
-        int textWidth = RIBBON_WIDTH - 22;
-        int fullTextWidth = msgLen * 6;
-        if (fullTextWidth > textWidth) {
-          gOledPairingRibbon.scrollOffset += RIBBON_SCROLL_PX_PER_FRAME;
-          int maxScroll = fullTextWidth - textWidth;
-          if (gOledPairingRibbon.scrollOffset > maxScroll + 12) {
-            gOledPairingRibbon.scrollOffset = -12;  // Reset with brief pause (12px ~ 2 chars)
-          }
-        }
-      }
-      break;
-      
-    case PairingRibbonState::SHRINKING:
-      // Time-based slide up: lerp from 0 to -RIBBON_HEIGHT over RIBBON_ANIM_DURATION_MS
-      if (elapsed >= (uint32_t)RIBBON_ANIM_DURATION_MS) {
-        gOledPairingRibbon.state = PairingRibbonState::HIDDEN;
-        gOledPairingRibbon.stateStartMs = now;
-        gOledPairingRibbon.animY = -RIBBON_HEIGHT;
-      } else {
-        gOledPairingRibbon.animY = -(int)((long)RIBBON_HEIGHT * elapsed / RIBBON_ANIM_DURATION_MS);
-      }
-      break;
-      
-    case PairingRibbonState::MINIMIZED:
-      // No longer used - ribbon hides completely after shrinking
-      gOledPairingRibbon.state = PairingRibbonState::HIDDEN;
-      break;
-      
-    default:
-      break;
-  }
-}
-
-// Draw a small pairing icon from embedded icon sheet
-static void drawPairingIcon(int x, int y, PairingRibbonIcon icon, bool visible) {
-  if (!gDisplay || !visible) return;
-  
-  // Ribbon states reuse general-purpose icons, scaled down by oledDrawIcon.
-  // These read well at RIBBON_ICON_SIZE (bold, few features); the bespoke
-  // pair_* glyphs are no longer needed here.
-  const char* iconName = nullptr;
-  switch (icon) {
-    case PairingRibbonIcon::LINK:      iconName = "check"; break;    // linked / connected
-    case PairingRibbonIcon::LINK_OFF:  iconName = "close"; break;    // link down
-    case PairingRibbonIcon::SYNC:      iconName = "refresh"; break;  // syncing
-    case PairingRibbonIcon::SEARCHING: iconName = "search"; break;   // discovering peers
-    default: break;  // SUCCESS/ERROR draw programmatically; others use text fallback below
-  }
-  
-  // Try embedded icon first
-  if (iconName) {
-    const EmbeddedIcon* embIcon = findEmbeddedIcon(iconName);
-    if (embIcon) {
-      oledDrawIcon(x, y, iconName, RIBBON_ICON_SIZE);
-      return;
-    }
-  }
-  
-  // Programmatic icons for SUCCESS (checkmark) and ERROR (X mark)
-  if (icon == PairingRibbonIcon::SUCCESS) {
-    // Draw checkmark: short leg down-right, long leg up-right
-    gDisplay->drawLine(x + 1, y + 5, x + 4, y + 8, DISPLAY_FG);
-    gDisplay->drawLine(x + 4, y + 8, x + 10, y + 2, DISPLAY_FG);
-    // Thicken by drawing offset lines
-    gDisplay->drawLine(x + 1, y + 6, x + 4, y + 9, DISPLAY_FG);
-    gDisplay->drawLine(x + 4, y + 9, x + 10, y + 3, DISPLAY_FG);
-    return;
-  }
-  if (icon == PairingRibbonIcon::ERROR_ICON) {
-    // Draw X mark: two diagonal lines
-    gDisplay->drawLine(x + 1, y + 1, x + 9, y + 9, DISPLAY_FG);
-    gDisplay->drawLine(x + 9, y + 1, x + 1, y + 9, DISPLAY_FG);
-    // Thicken
-    gDisplay->drawLine(x + 2, y + 1, x + 10, y + 9, DISPLAY_FG);
-    gDisplay->drawLine(x + 10, y + 1, x + 2, y + 9, DISPLAY_FG);
-    return;
-  }
-
-  // Text fallback for other icon types
-  gDisplay->setTextSize(1);
-  gDisplay->setTextColor(DISPLAY_FG);
-  gDisplay->setCursor(x + 2, y + 2);
-  switch (icon) {
-    case PairingRibbonIcon::LINK:         gDisplay->print("OK"); break;
-    case PairingRibbonIcon::LINK_OFF:     gDisplay->print("X"); break;
-    case PairingRibbonIcon::SYNC:         gDisplay->print("~"); break;
-    case PairingRibbonIcon::SEARCHING:    gDisplay->print("?"); break;
-    case PairingRibbonIcon::WARNING_ICON: gDisplay->print("!"); break;
-    case PairingRibbonIcon::INFO_ICON:    gDisplay->print("i"); break;
-    default: break;
-  }
-}
-
-void oledNotificationBannerShow(const char* message, PairingRibbonIcon icon,
-                                uint32_t visibleMs, bool blink) {
-  // Suppress notifications during boot animation - they overlay the progress screen
-  if (oledBootModeActive) return;
-  // If the ribbon is already busy (a prior banner still animating, or a pairing
-  // ribbon), queue this one instead of clobbering it — the ribbon pumps the
-  // queue when it returns to idle. Show immediately only when idle.
-  if (gOledPairingRibbon.state != PairingRibbonState::HIDDEN) {
-    oledBannerQueuePush(message, icon, visibleMs, blink);
-    return;
-  }
-  oledPairingRibbonShow(message, icon, visibleMs, blink);
-}
-
-void oledNotificationBannerUpdate(const char* message, PairingRibbonIcon icon,
-                                  uint32_t extraMs) {
-  // Suppress notifications during boot animation
-  if (oledBootModeActive) return;
-  // If banner is not currently showing, fall back to full show
-  if (gOledPairingRibbon.state == PairingRibbonState::HIDDEN ||
-      gOledPairingRibbon.state == PairingRibbonState::SHRINKING) {
-    oledPairingRibbonShow(message, icon, extraMs + 1000, false);
-    return;
-  }
-  
-  // Update icon and text in place - no animation reset
-  gOledPairingRibbon.icon = icon;
-  strncpy(gOledPairingRibbon.message, message, sizeof(gOledPairingRibbon.message) - 1);
-  gOledPairingRibbon.message[sizeof(gOledPairingRibbon.message) - 1] = '\0';
-  gOledPairingRibbon.iconBlink = false;
-  gOledPairingRibbon.blinkCount = 0;
-  
-  // Reset scroll for the new (likely shorter) text
-  gOledPairingRibbon.scrollOffset = 0;
-  gOledPairingRibbon.lastScrollMs = millis();
-  
-  // Extend visible duration from now by extraMs so user sees the new icon
-  gOledPairingRibbon.state = PairingRibbonState::VISIBLE;
-  gOledPairingRibbon.stateStartMs = millis();
-  
-  // Recalculate duration: at least extraMs, longer if new text needs scrolling
-  int msgLen = strlen(gOledPairingRibbon.message);
-  int textWidthBanner = RIBBON_WIDTH - 22;
-  int fullTextWidth = msgLen * 6;
-  if (fullTextWidth > textWidthBanner) {
-    int pixelsToScroll = fullTextWidth - textWidthBanner;
-    uint32_t scrollTimeMs = (pixelsToScroll * 100 / RIBBON_SCROLL_PX_PER_FRAME) + 2000;
-    gOledPairingRibbon.visibleDurationMs = min(max(extraMs, scrollTimeMs), (uint32_t)15000);
-  } else {
-    gOledPairingRibbon.visibleDurationMs = extraMs;
-  }
-}
-
-void oledPairingRibbonRender() {
-  if (!gDisplay || gOledPairingRibbon.state == PairingRibbonState::HIDDEN) return;
-  
-  uint32_t now = millis();
-  int x = SCREEN_WIDTH - RIBBON_WIDTH;  // Right-aligned
-  int y = gOledPairingRibbon.animY;
-  
-  // Determine if icon should be visible (for blinking)
-  bool iconVisible = true;
-  if (gOledPairingRibbon.iconBlink && gOledPairingRibbon.blinkCount > 0) {
-    iconVisible = ((now / 150) % 2) == 0;
-  }
-  
-  if (gOledPairingRibbon.state == PairingRibbonState::MINIMIZED) {
-    // Draw minimized indicator - small box in top-right corner
-    int minX = SCREEN_WIDTH - RIBBON_MIN_SIZE - 2;
-    int minY = 1;
-    
-    // Background
-    gDisplay->fillRect(minX, minY, RIBBON_MIN_SIZE, RIBBON_MIN_SIZE, DISPLAY_BG);
-    gDisplay->drawRect(minX, minY, RIBBON_MIN_SIZE, RIBBON_MIN_SIZE, DISPLAY_FG);
-    
-    // Small icon centered
-    drawPairingIcon(minX + 1, minY + 1, gOledPairingRibbon.icon, true);
-  } else {
-    // Draw full ribbon
-    // Background with border
-    gDisplay->fillRect(x, y, RIBBON_WIDTH, RIBBON_HEIGHT, DISPLAY_BG);
-    gDisplay->drawRect(x, y, RIBBON_WIDTH, RIBBON_HEIGHT, DISPLAY_FG);
-    
-    // Left edge accent (ribbon fold effect)
-    gDisplay->fillTriangle(x, y, x, y + RIBBON_HEIGHT - 1, x - 4, y + RIBBON_HEIGHT / 2, DISPLAY_FG);
-    
-    // Text with horizontal scrolling for long messages (LEFT side)
-    gDisplay->setTextSize(1);
-    gDisplay->setTextColor(DISPLAY_FG);
-    
-    int msgLen = strlen(gOledPairingRibbon.message);
-    int textX = x + 4;
-    int textY = y + 5;
-    int textWidth = RIBBON_WIDTH - 22;  // Available width for text (4px left pad + 18px right icon area)
-    
-    int charW = 6;  // pixels per character at textSize(1)
-    int maxVisible = textWidth / charW;
-    
-    if (msgLen * charW <= textWidth) {
-      // Short message - just display it
-      gDisplay->setCursor(textX, textY);
-      gDisplay->print(gOledPairingRibbon.message);
-    } else {
-      // Long message - pixel-based smooth scroll with clipping
-      int pixelOffset = max(0, gOledPairingRibbon.scrollOffset);
-      // Draw characters that overlap the visible text area
-      int firstChar = pixelOffset / charW;
-      int subPixel = pixelOffset % charW;
-      int charsVisible = (textWidth + charW - 1) / charW + 1;  // +1 for partial char
-      for (int i = 0; i < charsVisible && (firstChar + i) < msgLen; i++) {
-        int cx = textX + i * charW - subPixel;
-        if (cx + charW > textX && cx < textX + textWidth) {
-          gDisplay->setCursor(cx, textY);
-          gDisplay->write(gOledPairingRibbon.message[firstChar + i]);
-        }
-      }
-    }
-    
-    // Icon on the RIGHT side (16px, right-aligned with a 1px margin, vertically centered in the 18px ribbon)
-    drawPairingIcon(x + RIBBON_WIDTH - 17, y + 1, gOledPairingRibbon.icon, iconVisible);
-  }
-}
-
-// ============================================================================
-// Unified UI System
-// ============================================================================
-
-void oledUIInit() {
-  memset(&gOledToast, 0, sizeof(gOledToast));
-  memset(&gOledPairingRibbon, 0, sizeof(gOledPairingRibbon));
-  gOledPairingRibbon.state = PairingRibbonState::HIDDEN;
-  gOledPairingRibbon.animY = -RIBBON_HEIGHT;
-}
+void oledUIInit() { oledToastClear(); }
 
 void oledUIRender() {
-  // Update pairing ribbon animation state
-  oledPairingRibbonUpdate();
-  
-  // Render in layer order (bottom to top)
-  oledPairingRibbonRender();  // Pairing ribbon (below the toast)
-  oledToastRender();  // Toast always on top
+  oledFeedbackSetPaused(oledConfirmIsActive());
+  if (!oledConfirmIsActive()) oledToastRender();
 }
 
 #endif // ENABLE_OLED_DISPLAY

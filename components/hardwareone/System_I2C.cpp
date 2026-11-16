@@ -84,6 +84,13 @@
 static bool isSensorCompiled(const I2CSensorEntry& sensor) {
   if (sensor.moduleName && strcmp(sensor.moduleName, "matrix") == 0) return ENABLE_LED_MATRIX;
   if (sensor.moduleName == nullptr) {
+    if (sensor.address == 0x18) {
+#if defined(WS_SPEAKER_I2C_BUS) && ENABLE_SPEAKER
+      return true;
+#else
+      return false;
+#endif
+    }
     // Infrastructure devices (SSD1306, PCA9685) - check by address
     if (sensor.address == 0x3C || sensor.address == 0x3D) {
       // SSD1306 OLED
@@ -165,6 +172,9 @@ static uint8_t configuredBusForSensor(const I2CSensorEntry& sensor) {
     else if (strcmp(sensor.moduleName, "servo")    == 0) configuredBus = gSettings.servoBus;
   } else {
     // Infrastructure rows do not have module names.
+#ifdef WS_SPEAKER_I2C_BUS
+    if (sensor.address == 0x18) return WS_SPEAKER_I2C_BUS;
+#endif
     if (sensor.address == 0x3C || sensor.address == 0x3D) configuredBus = gSettings.oledBus;
     else if (sensor.address == 0x36)                     configuredBus = gSettings.fuelGaugeBus;
     else if (sensor.address == 0x40)                     configuredBus = gSettings.servoBus;
@@ -300,6 +310,7 @@ const I2CSensorEntry i2cSensors[] = {
   { 0x5A, "STHS34PF80", "IR Presence/Motion", "ST", false, 0x00, 200, NULL, NULL, "presence", 100000, 200 },
   
   // Detected Infrastructure (no CLI modules)
+  { 0x18, "ES8311", "Speaker Audio Codec", "Everest Semiconductor", false, 0x00, 0, NULL, NULL, NULL, 100000, 500 },
   { 0x3D, "SSD1306", "OLED 128x64 Display", "Adafruit", true, 0x3C, 0, NULL, NULL, NULL, 400000, 50 },
 #if BATTERY_BACKEND_FUEL_GAUGE
   // On-board LiPo fuel gauge (battery backend, not a toggleable sensor) — listed

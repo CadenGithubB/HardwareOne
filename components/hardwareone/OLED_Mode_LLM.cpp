@@ -122,9 +122,12 @@ static int          sReaderTop   = 0;      // first visible line
 static const int LLM_ENT_PAGE = 29;
 
 // OLEDScrollState stores string POINTERS (no copy), so each row's text must live
-// in stable backing storage while its list is on screen. Rows are truncated to
-// LLM_CHARS (display only — selection is by index). Kept in PSRAM: DRAM is tight
+// in stable backing storage while its list is on screen. Rows hold up to
+// LLM_ROW_CHARS glyphs (display only — selection is by index); the shared list
+// renderer bounds them and scrolls the selected one, so a long model, group,
+// template or entity name is readable in full. Kept in PSRAM: DRAM is tight
 // and menu data is not secret.
+#define LLM_ROW_CHARS 47
 EXT_RAM_BSS_ATTR static OLEDScrollState sGroupScroll;
 EXT_RAM_BSS_ATTR static OLEDScrollState sTplScroll;
 EXT_RAM_BSS_ATTR static OLEDScrollState sEntScroll;
@@ -138,15 +141,15 @@ static bool sPickScrollInit = false;
 EXT_RAM_BSS_ATTR static OLEDScrollState sHomeScroll;
 EXT_RAM_BSS_ATTR static llmhome::Row    sHomeRows[LLM_HOME_ROWS];
 EXT_RAM_BSS_ATTR static OLEDScrollState sModelScroll;
-EXT_RAM_BSS_ATTR static char         sModelRows[LLM_MODEL_ROWS][LLM_CHARS + 1];
+EXT_RAM_BSS_ATTR static char         sModelRows[LLM_MODEL_ROWS][LLM_ROW_CHARS + 1];
 EXT_RAM_BSS_ATTR static LlmModelDesc sModelDescs[LLM_MODEL_ROWS];
 static int  sModelCount = 0;
 static const char* sMenuStatus = nullptr;
 static char sMenuStatusBuffer[64];
 
-EXT_RAM_BSS_ATTR static char sGroupRows[8][LLM_CHARS + 1];
-EXT_RAM_BSS_ATTR static char sTplRows[OLED_SCROLL_MAX_ITEMS][LLM_CHARS + 1];
-EXT_RAM_BSS_ATTR static char sEntRows[LLM_ENT_PAGE][LLM_CHARS + 1];
+EXT_RAM_BSS_ATTR static char sGroupRows[8][LLM_ROW_CHARS + 1];
+EXT_RAM_BSS_ATTR static char sTplRows[OLED_SCROLL_MAX_ITEMS][LLM_ROW_CHARS + 1];
+EXT_RAM_BSS_ATTR static char sEntRows[LLM_ENT_PAGE][LLM_ROW_CHARS + 1];
 
 // Generation stamped when the picker opens; every frame re-checks it so a model
 // unload/swap (which bumps menuGeneration) pops us straight back out.
@@ -416,21 +419,20 @@ static void populateModelPicker() {
   const bool haveActive = llmBackendIsReady() && llmBackendActiveModel(&active);
   for (int i = 0; i < sModelCount; i++) {
     const LlmModelDesc& d = sModelDescs[i];
-    // 21 glyphs total, and oledScrollRenderSimple prints a 2-char "> " cursor
-    // first, so 19 are usable. Budget the tag first, then give the rest to the
-    // name — the tag is what tells you WHERE the model runs, which matters more
-    // than the last few characters of its name.
+    // The marks and the tag lead, so they stay visible when the list renderer
+    // shortens an unselected row or scrolls the selected one; the name takes
+    // the rest of the row buffer and is no longer cut to the screen width.
     const char* tag = (d.backend == LlmBackendKind::Cm5) ? "[pi]"
                     : (d.storage == LLM_STORAGE_SD)      ? "[sd]" : "";
     const bool isActive = haveActive && strcmp(d.id, active.id) == 0;
-    char nameBuf[LLM_CHARS + 1];
+    char nameBuf[LLM_ROW_CHARS + 1];
     const size_t tagLen  = strlen(tag) ? strlen(tag) + 1 : 0;   // tag + space
-    const size_t markLen = (d.available ? 0 : 2) + (isActive ? 1 : 0);  // " x", "*"
-    size_t room = 19;
+    const size_t markLen = (d.available ? 2 : 0) + (isActive ? 1 : 0);  // "x ", "*"
+    size_t room = LLM_ROW_CHARS;
     room = (room > tagLen + markLen) ? room - tagLen - markLen : 1;
     llmhome::fitName(d.name, room, nameBuf, sizeof(nameBuf));
     snprintf(sModelRows[i], sizeof(sModelRows[i]), "%s%s%s%s%s", isActive ? "*" : "",
-             tag, tagLen ? " " : "", nameBuf, d.available ? "" : " x");
+             d.available ? "" : "x ", tag, tagLen ? " " : "", nameBuf);
     oledScrollAddItem(&sModelScroll, sModelRows[i], nullptr, true,
                       (void*)(uintptr_t)(i + 1));   // +1 so index 0 isn't nullptr
   }
@@ -552,7 +554,7 @@ static void populateGroupPicker() {
   for (uint8_t i = 0; i < n; i++) {
     LLMMenuGroupInfo gi;
     if (llmMenuGroupInfo(i, &gi)) {
-      strlcpy(sGroupRows[i], gi.name, sizeof(sGroupRows[i]));   // 21-char truncation
+      strlcpy(sGroupRows[i], gi.name, sizeof(sGroupRows[i]));   // bounded by the row buffer
     } else {
       sGroupRows[i][0] = '\0';
     }

@@ -1,5 +1,65 @@
 # HardwareOne host tests
 
+## Expanding OLED Health and graphs
+
+`python3 components/hardwareone/test/host/test_oled_health.py` executes the
+shipping health page, list renderer and graph snapshot with ASan/UBSan at
+64/88/128 pixels. It checks P4 list capacity, OLED scrolling, graph bounds,
+empty/offline series, owned chronological snapshots, rollover, guest navigation,
+poll gating and nested Back behavior. `--preview-dir <path>` writes synthetic
+PGM render previews. See [OLED Health](../../../../docs/OLED_HEALTH.md).
+
+## OLED list text bounds and scrolling
+
+`python3 components/hardwareone/test/host/test_oled_text_field.py` executes the
+shipping bounded text field (`OLED_TextFieldCore.h` directly, the drawing side
+spliced from `OLED_TextField.cpp` over `oled_text_field_gfx_double.h`, a double
+of the vendored GFX surface) at 64/88/128 pixels with ASan/UBSan: no pixel
+outside a field or the content area, exact-fit and one-glyph-too-long text,
+ellipsis degradation down to one dot, opaque inverse cells, the 1000 ms /
+20 px/s / 1500 ms marquee on elapsed time, continuity across list rebuilds,
+resets on selection/label/width/owner/mode changes, view and modal pauses,
+clock rollover and hostile text. `test_oled_layout.py` adds overflow cases
+through the shipping compact, split-pane and two-line renderers; the health
+and logging-UI suites run those renderers through the same primitive
+(`oled_text_field_op_double.h` for op-recording canvases). See
+[OLED list text](../../../../docs/OLED_LIST_TEXT.md).
+
+## OLED CLI Output and its console history
+
+`python3 components/hardwareone/test/host/test_oled_console_buffer.py` executes
+the shipping console owner (`OLED_ConsoleCore.h` directly, `OLED_ConsoleBuffer.cpp`
+over mutex/allocator/clock doubles) with ASan/UBSan: checked sanitizer bounds
+for escapes and malformed UTF-8, a model check of the byte-budget ring,
+contiguous record IDs across duplicate timestamps, clock and ID wrap, loss and
+truncation accounting, the identity-boundary delivery fence, and a producer
+thread against a snapshotting reader thread.
+
+`python3 components/hardwareone/test/host/test_oled_cli_output.py` drives the
+shipping CLI Output page over that owner at 64/88/128 pixels (the P4X-EYE's
+10/10 chrome and the 12/16 color chrome): Live/Paused/Reader, pause by ID,
+arrival counts, expiry, the pinned Reader copy after eviction, multiline and
+hostile text, busy-ring retry frames, dropped-output reporting and session
+reset. Its framebuffer double rejects any draw outside the content area, any
+row that would wrap, and any draw while the ring's lock is held.
+`--preview-dir <path>` writes PGM renders. Both are registered as
+`oled_console_buffer` and `oled_cli_output`. See
+[OLED CLI Output](../../../../docs/OLED_CLI_OUTPUT.md).
+
+## Shared OLED feedback
+
+`python3 components/hardwareone/test/host/test_oled_toast.py` executes the
+production queue and renderer with sanitizers at 64/88/128-pixel heights. It
+checks error styling and eight-second lifetime, FIFO promotion, duplicate
+suppression, error-preserving overflow, confirmation hiding and lifetime pause,
+arrival while paused, clock rollover and clearing. Source guards connect the
+pause to the dirty poll and clearing to display-session replacement.
+
+`test_oled_command_feedback.py --sanitize`, `test_oled_remote_settings.py
+--sanitize`, `test_oled_automation_wizard.py --sanitize`,
+`test_oled_espnow_ownership.py --sanitize` and `test_oled_pair_prompt.py
+--sanitize` cover shared results at their real callers. See [OLED feedback](../../../../docs/OLED_FEEDBACK.md).
+
 ## Cross-board power policy
 
 `power_cpu_frequency` explicitly exercises classic ESP32, ESP32-S3 and both P4
@@ -1736,6 +1796,24 @@ every tail expectation from that constant. `stt_continuous_full_phrase` builds
 the `-DHW1_STT_TRIM_SILENCE=0` opt-out and checks that full phrases are kept.
 `--speakers` adds the speaker-label path; `--trim-silence` is an alias of the
 default.
+
+## STT raw-input recorder and replay
+
+These cover the `sttraw` bench tap (System_STTRawCapture; see
+`tools/stt_raw/README.md`).
+- `stt_raw_ring_tests` runs the production `stt/stt_raw_ring.h`. It checks SPSC order across
+  wrap-around, whole-block drops recorded as coalesced gaps in session samples, the gap-list
+  cap, and invalid capacities. It also runs a two-thread producer/consumer check; run it under
+  ThreadSanitizer by hand with `-fsanitize=thread`.
+- `stt_raw_replay` builds the replay CLI and checks it on synthetic noise with one
+  ordinary-level and one quiet phrase:
+  - the production floors and continuous settings come from `stt/stt_continuous_config.h`;
+  - segments are the same at any push chunk size;
+  - lowering both floors admits the quiet phrase;
+  - `--cut-dir` output is byte-exact;
+  - the sidecar rate and drop count are checked.
+The firmware tap itself (file writes, drain task) is not host-tested; the
+broker calls it only under `ESP_PLATFORM`.
 
 ## Boot temporary-file cleanup
 
@@ -4008,7 +4086,7 @@ python3 components/hardwareone/test/host/test_oled_dead_paths.py --sanitize
 - the helpers those deletions left without a caller: `hasRemoteSettings`, `oledDrawBox`, `oledDrawButton` and `oledDrawTextCentered`;
 - the unified actions mode.
 
-The live replacements must stay defined: `oledUIRender`, the toast and ribbon renders, the live drawing helpers `oledDrawIcon` and `oledDrawLevelBars`, the `*Rendered` displays, the mode registry, back-navigation and the slug functions. The suite then compiles the production `enum OLEDMode`, `modeFromSlug` and `slugFromMode` and checks three things: `oledmode unified` names no mode, no mode's slug resolves to a different mode, and "actions"/"imuactions" still open IMU actions. `--component`/`--source-dir` read production sources from another tree. On f4cc542 the contract names 65 identifiers, and the slug harness fails 2 checks: "unified" opens a mode, and `slugFromMode(OLED_UNIFIED_MENU)` is "actions", which opens IMU actions.
+The live replacements must stay defined: `oledUIRender`, the shared toast renderer, the live drawing helpers `oledDrawIcon` and `oledDrawLevelBars`, the `*Rendered` displays, the mode registry, back-navigation and the slug functions. The suite then compiles the production `enum OLEDMode`, `modeFromSlug` and `slugFromMode` and checks three things: `oledmode unified` names no mode, no mode's slug resolves to a different mode, and "actions"/"imuactions" still open IMU actions. `--component`/`--source-dir` read production sources from another tree. On f4cc542 the contract names 65 identifiers, and the slug harness fails 2 checks: "unified" opens a mode, and `slugFromMode(OLED_UNIFIED_MENU)` is "actions", which opens IMU actions.
 
 `oled_without_input` also accepts `--component`/`--source-dir`/`--sanitize`. It requires that the display-state API carry no bonded data-source selection.
 
@@ -4022,7 +4100,7 @@ python3 components/hardwareone/test/host/test_oled_command_feedback.py --sanitiz
 reply-to-toast mapping `oledCommandReplyText` and `oledRunCommandAsync`, all from
 `OLED_Utils.cpp`) and real callers:
 
-- the Automations toggle and delete actions with their footer toast (`OLED_Mode_Automations.cpp`);
+- the Automations toggle and delete actions with shared feedback (`OLED_Mode_Automations.cpp`);
 - the Quick Settings radio, Wi-Fi, Bluetooth and HTTP rows (`OLED_SettingsEditor.cpp`);
 - the Network menu's HTTP confirm callbacks (`OLED_Mode_Network.cpp`).
 
@@ -4039,7 +4117,7 @@ The checks:
 - `oledCommandReplyText` (also used by the Add-WiFi flow) gives the caller's success text on
   success and the caller's fallback text for an empty refusal, and stays inside the caller's buffer.
 - Each caller shows its success text ("Enabled", "Deleted", "Radio OFF", "HTTP OFF", ...)
-  only on success; local refusals ("Radio off!", "Need WiFi first!") still run no command.
+  only on success; local refusals ("Radio is off. Turn it on first.", "Connect Wi-Fi first.") still run no command.
 - The Quick Settings rows never wait for cmd_exec (the P4 radio toggle held the display
   task for 637 ms). The executor double finishes a queued command only when a case says so.
   The row shows "Working..." and returns at once; the executor only stores the reply and asks
@@ -4336,8 +4414,14 @@ backend from `HAL_Camera_DVP.cpp` with the SCCB port set to 0 and to 1 against
 simulated camera and SCCB edges (SDK port ownership, maximum-geometry
 allocation, live resize, SOF verification, cleanup). `camera_p4` runs the P4
 backend and RGB565 resize code under host faults (ownership, cleanup,
-stream-stop retry, deadlines, budget and capture failures). No hardware is
-touched.
+stream-stop retry, deadlines, budget and capture failures) for the EYE and
+Waveshare board definitions. The resize unit checks each board mount rotation
+(0, 90, 180 and 270 degrees) combined with mirror and flip against an
+independent turn-then-reflect model, a scaled quarter turn, tile edges on a
+frame that is not a multiple of the tile width, and rejected angles. The
+Waveshare lane's 90-degree mount must report, encode and return each selected
+size as portrait while the upright EYE lane keeps landscape sizes. No hardware
+is touched.
 
 The eight camera suites (`camera_core`, `camera_dvp`, `camera_p4`,
 `camera_i2c_reservation`, `camera_managed_sccb`, `camera_video_buffers` and

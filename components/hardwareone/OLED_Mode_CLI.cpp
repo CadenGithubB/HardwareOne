@@ -1,7 +1,30 @@
 // ============================================================================
-// OLED CLI Viewer Mode
+// OLED CLI Output - read-only browser of the local console history
 // ============================================================================
-// Extracted from OLED_Display.cpp for modularity
+// Three explicit states over OLEDConsoleBuffer's owned snapshots:
+//   Live    follows new output. Up pauses on the record above the newest, A
+//           reads the newest, Y jumps to the oldest retained, B leaves.
+//   Paused  the selection is anchored by record ID while output keeps
+//           arriving; the status row counts arrivals since the pause. Up/Down
+//           browse (Down past the newest resumes Live), A reads, X resumes
+//           Live, Y selects the oldest, B leaves.
+//   Reader  an owned copy of one complete retained record, wrapped to the
+//           screen. Up/Down scroll (by wheel detents) and continue into the
+//           adjacent record past either end; Left/Right change records
+//           directly; A/B return to the list on that record, X resumes Live,
+//           Y opens the oldest.
+// The page never holds the ring's mutex while drawing: each frame copies a
+// status, a window of previews or one record, then draws from the copies. A
+// busy ring draws a notice and asks for the next frame; new output invalidates
+// the page through oledCLIViewerNeedsFrame() in the dirty poll.
+//
+// What it shows is the OLED sink of the shared output queue: command output
+// always, ambient and debug output when those flags are enabled. It is one
+// mixed stream, not a history of commands typed on this display. Each record
+// is one queue envelope (at most 255 bytes); a long command result arrives as
+// several records, and upstream clamping is visible as the queue's own [CUT]
+// mark. This page keeps no instrumentation of its own, so browsing never
+// feeds the stream it displays.
 
 #include "OLED_Display.h"
 #include "System_BuildConfig.h"
@@ -9,327 +32,430 @@
 #if ENABLE_OLED_DISPLAY
 
 #include <Adafruit_SSD1306.h>
+#include "HAL_Input.h"  // INPUT_CHECK / INPUT_BUTTON_*
 #include "OLED_Utils.h"
 #include "OLED_ConsoleBuffer.h"
-#include "System_Utils.h"
-#include "System_Debug.h"
+#include "System_TextPager.h"
 
-// External OLED console buffer (display pointer via HAL_Display.h #define oledDisplay gDisplay)
-extern OLEDConsoleBuffer gOledConsole;
+enum class CliView : uint8_t { LIVE, PAUSED, READER };
 
-// CLI viewer state
-static int cliScrollOffset = 0;
-static uint32_t cliSelectedTimestamp = 0;  // Track by timestamp (survives buffer shifts)
-static bool cliShowingDetail = false;
-static uint32_t cliDetailLockedTimestamp = 0;  // Locked message timestamp when viewing detail
-// Calculate max visible lines based on content area (43px / 10px per line = 4 lines)
-static const int CLI_MAX_VISIBLE_LINES = OLED_CONTENT_HEIGHT / 10;
+// Geometry: an 8-pixel status row, then 8-pixel record rows; one column each
+// for the selection cursor and the scroll marks. 4 rows on the 128x64 OLED,
+// 7 on the 128x88 Waveshare canvas, 12 on the P4X-EYE's 128x128 canvas.
+static const int CLI_COLS        = DISPLAY_WIDTH / 6;
+static const int CLI_LIST_COLS   = CLI_COLS - 2;
+static const int CLI_READER_COLS = CLI_COLS - 1;
+static const int CLI_ROW_H       = 8;
+static const int CLI_STATUS_H    = 9;
+static const int CLI_ROWS        = oledVisibleRows(CLI_ROW_H, CLI_STATUS_H);
+static const int CLI_ROWS_Y      = OLED_CONTENT_START_Y + CLI_STATUS_H;
+static const int CLI_GUTTER_X    = (CLI_COLS - 1) * 6;
+// Soft wraps add at most one '\n' per CLI_READER_COLS characters.
+static const size_t CLI_READER_WRAP_CAP =
+    oled_console::kRecordTextMax + oled_console::kRecordTextMax / 8 + 2;
+static_assert(CLI_LIST_COLS + 2 <= (int)oled_console::kPreviewMax,
+              "list previews must fit the console's preview copies");
 
-// Helper: find index by timestamp, returns -1 if not found
-static int findIndexByTimestamp(uint32_t ts) {
-  if (ts == 0) return -1;
-  int count = gOledConsole.getLineCount();
-  for (int i = 0; i < count; i++) {
-    if (gOledConsole.getTimestamp(i) == ts) return i;
+static CliView  sView = CliView::LIVE;
+static uint32_t sSelectedId = oled_console::kNoRecord;    // Paused selection
+static uint32_t sWindowTopId = oled_console::kNoRecord;   // first visible Paused row
+static uint32_t sPauseNewestId = oled_console::kNoRecord; // newest record when the pause began
+static bool     sSelectionExpired = false;  // the paused selection was evicted
+static bool     sReaderFromLive = false;    // Reader opened out of Live
+static oled_console::RecordCopy sReader;    // owned Reader copy; survives eviction
+static int      sReaderTop = 0;             // first visible wrapped line
+static uint32_t sRenderedGeneration = 0;
+static bool     sRetryPending = false;      // a busy ring left the last frame incomplete
+// The footer draws "Back" as an 8-pixel icon, so a hint may run four glyphs
+// past the column count and still fit.
+static char     sFooterHint[32] = "B:Back";
+
+static bool cliRetained(uint32_t id, const oled_console::Status& st) {
+  return st.count > 0 && (id - st.oldestId) < st.count;  // IDs are contiguous
+}
+
+static void cliWipeReader() {
+  memset(&sReader, 0, sizeof(sReader));
+  sReaderTop = 0;
+}
+
+static void cliEnterLive() {
+  sView = CliView::LIVE;
+  sSelectedId = oled_console::kNoRecord;
+  sWindowTopId = oled_console::kNoRecord;
+  sSelectionExpired = false;
+  cliWipeReader();
+}
+
+// A paused selection that has been evicted moves to the oldest survivor and
+// says so until the next explicit navigation.
+static void cliResolveSelection(const oled_console::Status& st) {
+  if (st.count == 0) { cliEnterLive(); return; }
+  if (!cliRetained(sSelectedId, st)) {
+    sSelectedId = st.oldestId;
+    sSelectionExpired = true;
   }
-  return -1;  // Message was evicted from buffer
 }
 
-// Get current CLI viewer selection (1-indexed for display, 0 if none)
-int getCLIViewerSelectedIndex() {
-  int idx = findIndexByTimestamp(cliSelectedTimestamp);
-  return (idx >= 0) ? idx + 1 : 0;  // 1-indexed for user display
+static void cliSelect(uint32_t id) {
+  sSelectedId = id;
+  sSelectionExpired = false;
 }
 
-// Reset transient viewer state on mode entry (clears stuck detail view, resets scroll)
-void resetCLIViewerState() {
-  DEBUG_CLIF("[CLI_VIEWER] resetState: detail=%d scroll=%d", cliShowingDetail, cliScrollOffset);
-  cliShowingDetail = false;
-  cliDetailLockedTimestamp = 0;
-  cliScrollOffset = 0;
-  // Keep cliSelectedTimestamp so we return to where the user was
+// Pauses on `id`. `newPause` restarts the arrival count (a pause out of Live);
+// returning from a Reader opened while paused keeps the original count.
+static void cliEnterPaused(uint32_t id, const oled_console::Status& st, bool newPause) {
+  if (st.count == 0) { cliEnterLive(); return; }
+  if (newPause || sView == CliView::LIVE) sPauseNewestId = st.newestId;
+  sView = CliView::PAUSED;
+  cliSelect(id);
+  cliResolveSelection(st);
+  cliWipeReader();
 }
 
-// CLI display function
-static void displayCLIViewer() {
-  if (!oledDisplay) {
-    ERROR_SYSTEMF("[CLI_VIEWER] oledDisplay is NULL!");
+// Copies record `id` into the owned Reader buffer. A busy ring asks for a
+// retry frame; a record that is gone leaves the current view unchanged.
+static bool cliReaderShow(uint32_t id) {
+  oled_console::RecordCopy copy;
+  bool busy = false;
+  if (!gOledConsole.tryCopyRecord(id, copy, &busy)) {
+    if (busy) sRetryPending = true;
+    return false;
+  }
+  sReader = copy;
+  sReaderTop = 0;
+  sView = CliView::READER;
+  return true;
+}
+
+// Opens the Reader from a list; where it returns to is fixed here, not by the
+// records browsed inside it.
+static bool cliOpenReader(uint32_t id, bool fromLive) {
+  if (!cliReaderShow(id)) return false;
+  sReaderFromLive = fromLive;
+  return true;
+}
+
+// Back to the list on the record that was open: Live only when the Reader was
+// opened from Live and still shows the newest record.
+static void cliCloseReader(const oled_console::Status& st) {
+  const uint32_t id = sReader.id;
+  if (sReaderFromLive && st.count > 0 && id == st.newestId) {
+    cliEnterLive();
+  } else {
+    sView = CliView::PAUSED;
+    cliEnterPaused(id, st, sReaderFromLive);
+  }
+}
+
+// Wraps the owned record for the screen and returns its line count.
+static int cliWrapReader(char* out, size_t cap) {
+  bool truncated = false;
+  const size_t n = textWrapInto(out, cap, sReader.text, CLI_READER_COLS, 0, true, &truncated);
+  if (n == 0) return 0;
+  int lines = 1;
+  for (size_t i = 0; i < n; ++i) if (out[i] == '\n') ++lines;
+  return lines;
+}
+
+static void cliReaderLine(const char* wrapped, int index, char* out, size_t cap) {
+  out[0] = '\0';
+  const char* p = wrapped;
+  for (int i = 0; i < index && p; ++i) {
+    p = strchr(p, '\n');
+    if (p) ++p;
+  }
+  if (!p) return;
+  size_t n = 0;
+  while (p[n] && p[n] != '\n' && n + 1 < cap) { out[n] = p[n]; ++n; }
+  out[n] = '\0';
+}
+
+static void cliScrollReader(int delta, int lines) {
+  const int maxTop = lines > CLI_ROWS ? lines - CLI_ROWS : 0;
+  sReaderTop += delta;
+  if (sReaderTop > maxTop) sReaderTop = maxTop;
+  if (sReaderTop < 0) sReaderTop = 0;
+}
+
+// Moves the Reader to the adjacent record. `fromEnd` opens an older record at
+// its last page, so scrolling up out of a record keeps reading backwards; an
+// expired record has nothing older and continues at the oldest survivor.
+static void cliReaderNeighbor(bool newer, bool fromEnd, const oled_console::Status& st) {
+  if (st.count == 0) return;
+  const bool retained = cliRetained(sReader.id, st);
+  uint32_t id;
+  if (newer) {
+    if (sReader.id == st.newestId) return;
+    id = retained ? sReader.id + 1 : st.oldestId;
+  } else {
+    if (!retained || sReader.id == st.oldestId) return;
+    id = sReader.id - 1;
+  }
+  if (!cliReaderShow(id) || !fromEnd) return;
+  char wrapped[CLI_READER_WRAP_CAP];
+  const int lines = cliWrapReader(wrapped, sizeof(wrapped));
+  cliScrollReader(lines, lines);  // clamps to the last page
+}
+
+// Status row: at most CLI_COLS glyphs so it never wraps into the rows.
+static const size_t CLI_STATUS_SCRATCH = 48;  // holds any status before the column cut
+static void cliDrawStatus(const char* text) {
+  char row[CLI_COLS + 1];
+  snprintf(row, sizeof(row), "%.*s", CLI_COLS, text);
+  oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
+  oledDisplay->print(row);
+}
+
+static void cliDrawMarks(bool olderAbove, bool newerBelow) {
+  if (olderAbove) {
+    oledDisplay->setCursor(CLI_GUTTER_X, CLI_ROWS_Y);
+    oledDisplay->print("\x18");
+  }
+  if (newerBelow) {
+    oledDisplay->setCursor(CLI_GUTTER_X, CLI_ROWS_Y + (CLI_ROWS - 1) * CLI_ROW_H);
+    oledDisplay->print("\x19");
+  }
+}
+
+static void cliSetHint(const char* hint) {
+  snprintf(sFooterHint, sizeof(sFooterHint), "%s", hint);
+}
+
+static void cliDrawList(const oled_console::Status& st) {
+  int selected, top;
+  if (sView == CliView::LIVE) {
+    selected = st.count - 1;
+    top = st.count > CLI_ROWS ? st.count - CLI_ROWS : 0;
+  } else {
+    cliResolveSelection(st);
+    selected = (int)(sSelectedId - st.oldestId);
+    top = cliRetained(sWindowTopId, st) ? (int)(sWindowTopId - st.oldestId) : 0;
+    if (selected < top) top = selected;
+    if (selected >= top + CLI_ROWS) top = selected - CLI_ROWS + 1;
+    const int maxTop = st.count > CLI_ROWS ? st.count - CLI_ROWS : 0;
+    if (top > maxTop) top = maxTop;
+    if (top < 0) top = 0;
+    sWindowTopId = st.oldestId + (uint32_t)top;
+  }
+
+  oled_console::Preview rows[CLI_ROWS];
+  bool busy = false;
+  const size_t shown = gOledConsole.tryCopyWindow(st.oldestId + (uint32_t)top, CLI_ROWS,
+                                                  CLI_LIST_COLS, rows, &busy);
+  if (shown == 0) {
+    // Busy, or the window moved under the status snapshot: draw again next frame.
+    sRetryPending = true;
+    cliDrawStatus(busy ? "Console busy..." : "Updating...");
+    cliSetHint("B:Back");
     return;
   }
-  
+
+  char status[CLI_STATUS_SCRATCH];
+  if (sView == CliView::LIVE) {
+    const uint32_t lost = gOledConsole.droppedCount();
+    if (lost) snprintf(status, sizeof(status), "Live %u lost %lu", (unsigned)st.count, (unsigned long)lost);
+    else      snprintf(status, sizeof(status), "Live %u", (unsigned)st.count);
+  } else {
+    const uint32_t arrivals = st.newestId - sPauseNewestId;
+    char since[16] = "";
+    if (arrivals) snprintf(since, sizeof(since), " +%lu", (unsigned long)arrivals);
+    snprintf(status, sizeof(status), "%d/%u%s%s", selected + 1, (unsigned)st.count, since,
+             sSelectionExpired ? " expired" : "");
+  }
+  cliDrawStatus(status);
+
+  for (size_t i = 0; i < shown; ++i) {
+    const int y = CLI_ROWS_Y + (int)i * CLI_ROW_H;
+    if (top + (int)i == selected) {
+      oledDisplay->setCursor(0, y);
+      oledDisplay->print(">");
+    }
+    char text[oled_console::kPreviewMax];
+    snprintf(text, sizeof(text), "%s", rows[i].text);
+    if (rows[i].cut) {  // the row shows less than the record holds
+      size_t n = strlen(text);
+      if ((int)n >= CLI_LIST_COLS) n = CLI_LIST_COLS - 1;
+      text[n] = '~';
+      text[n + 1] = '\0';
+    }
+    oledDisplay->setCursor(6, y);
+    oledDisplay->print(text);
+  }
+  cliDrawMarks(top > 0, top + (int)shown < st.count);
+  cliSetHint(sView == CliView::LIVE ? "A:Read Y:Old B:Back" : "A:Read X:Live B:Back");
+}
+
+static void cliDrawReader(const oled_console::Status& st) {
+  char wrapped[CLI_READER_WRAP_CAP];
+  const int lines = cliWrapReader(wrapped, sizeof(wrapped));
+  cliScrollReader(0, lines);
+
+  // The owned copy stays readable after eviction; the status row says so
+  // instead of substituting another record.
+  char status[CLI_STATUS_SCRATCH];
+  const unsigned long ts = sReader.timestampMs;
+  const char* cut = (sReader.flags & oled_console::kFlagTruncated) ? " ~" : "";
+  if (cliRetained(sReader.id, st)) {
+    snprintf(status, sizeof(status), "%lu/%u T+%lu.%03lus%s",
+             (unsigned long)(sReader.id - st.oldestId + 1), (unsigned)st.count,
+             ts / 1000UL, ts % 1000UL, cut);
+  } else {
+    snprintf(status, sizeof(status), "expired T+%lu.%03lus%s", ts / 1000UL, ts % 1000UL, cut);
+  }
+  cliDrawStatus(status);
+
+  if (lines == 0) {
+    oledDisplay->setCursor(0, CLI_ROWS_Y);
+    oledDisplay->print("(empty)");
+  }
+  char line[CLI_READER_COLS + 1];
+  for (int row = 0; row < CLI_ROWS && sReaderTop + row < lines; ++row) {
+    cliReaderLine(wrapped, sReaderTop + row, line, sizeof(line));
+    oledDisplay->setCursor(0, CLI_ROWS_Y + row * CLI_ROW_H);
+    oledDisplay->print(line);
+  }
+  cliDrawMarks(sReaderTop > 0, sReaderTop + CLI_ROWS < lines);
+  cliSetHint("\x18\x19:Scroll X:Live B:Back");
+}
+
+static void displayCLIViewer() {
+  if (!oledDisplay) return;
   oledDisplay->setTextSize(1);
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-  
-  // Lock buffer for reading
-  if (!gOledConsole.mutex || xSemaphoreTake(gOledConsole.mutex, pdMS_TO_TICKS(10)) != pdTRUE) {
-    oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
-    oledDisplay->print("Buffer locked...");
+
+  oled_console::Status st;
+  if (!gOledConsole.tryStatus(st)) {
+    sRetryPending = true;
+    cliDrawStatus("Console busy...");
+    cliSetHint("B:Back");
     return;
   }
-  
-  int totalLines = gOledConsole.getLineCount();
-  
-  if (totalLines == 0) {
-    xSemaphoreGive(gOledConsole.mutex);
-    oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
+  sRenderedGeneration = st.generation;
+  sRetryPending = false;
+
+  if (sView == CliView::READER) {
+    cliDrawReader(st);
+    return;
+  }
+  if (st.count == 0) {
+    cliEnterLive();
+    cliDrawStatus("Live");
+    oledDisplay->setCursor(0, CLI_ROWS_Y);
     oledDisplay->print("No CLI output yet");
+    cliSetHint("B:Back");
     return;
   }
-  
-  // Find current selection by timestamp (survives buffer shifts)
-  int cliSelectedIndex = findIndexByTimestamp(cliSelectedTimestamp);
-  if (cliSelectedIndex < 0) {
-    // Message was evicted or not set - select newest
-    cliSelectedIndex = totalLines - 1;
-    cliSelectedTimestamp = gOledConsole.getTimestamp(cliSelectedIndex);
-  }
-  
-  // Auto-scroll to keep selection visible
-  int selectionFromEnd = totalLines - 1 - cliSelectedIndex;
-  if (selectionFromEnd < cliScrollOffset) {
-    cliScrollOffset = selectionFromEnd;  // Scroll down to show selection
-  } else if (selectionFromEnd >= cliScrollOffset + CLI_MAX_VISIBLE_LINES) {
-    cliScrollOffset = selectionFromEnd - CLI_MAX_VISIBLE_LINES + 1;  // Scroll up
-  }
-  
-  // Clamp scroll offset
-  int maxScroll = max(0, totalLines - CLI_MAX_VISIBLE_LINES);
-  if (cliScrollOffset > maxScroll) cliScrollOffset = maxScroll;
-  if (cliScrollOffset < 0) cliScrollOffset = 0;
-  
-  // Calculate visible window
-  int endIdx = totalLines - cliScrollOffset;
-  int startIdx = max(0, endIdx - CLI_MAX_VISIBLE_LINES);
-  int visibleCount = endIdx - startIdx;
-  
-  // Detail popup - improved layout (in content area)
-  if (cliShowingDetail && visibleCount > 0) {
-    // Find locked message by timestamp (survives buffer shifts)
-    int selectedIdx = findIndexByTimestamp(cliDetailLockedTimestamp);
-    if (selectedIdx < 0) {
-      // Message was evicted - fall back to current selection
-      selectedIdx = cliSelectedIndex;
-      cliDetailLockedTimestamp = gOledConsole.getTimestamp(selectedIdx);
-    }
-    
-    const char* line = gOledConsole.getLine(selectedIdx);
-    uint32_t timestamp = gOledConsole.getTimestamp(selectedIdx);
-    
-    if (line) {
-      // Full screen detail view in content area
-      oledDisplay->fillRect(0, OLED_CONTENT_START_Y, 128, OLED_CONTENT_HEIGHT, DISPLAY_COLOR_WHITE);
-      oledDisplay->drawRect(0, OLED_CONTENT_START_Y, 128, OLED_CONTENT_HEIGHT, DISPLAY_COLOR_BLACK);
-      oledDisplay->setTextColor(DISPLAY_COLOR_BLACK);
-      
-      // Header: Line number
-      oledDisplay->setCursor(2, OLED_CONTENT_START_Y + 2);
-      oledDisplay->setTextSize(1);
-      oledDisplay->printf("Line %d/%d", selectedIdx + 1, totalLines);
-      
-      // Timestamp (seconds since boot)
-      oledDisplay->setCursor(2, OLED_CONTENT_START_Y + 12);
-      oledDisplay->printf("T: %lu.%03lu s", timestamp / 1000, timestamp % 1000);
-      
-      // Separator line
-      oledDisplay->drawFastHLine(2, OLED_CONTENT_START_Y + 22, 124, DISPLAY_COLOR_BLACK);
-      
-      // Content - word wrap across 2 lines (44px content area)
-      int contentY = OLED_CONTENT_START_Y + 24;
-      int lineHeight = 10;
-      int maxLines = oledVisibleRows(10, 24, 2);
-      int charsPerLine = 20;
-      
-      size_t lineLen = strlen(line);
-      for (int l = 0; l < maxLines && l * charsPerLine < (int)lineLen; l++) {
-        oledDisplay->setCursor(2, contentY + (l * lineHeight));
-        char segment[21];
-        size_t start = l * charsPerLine;
-        size_t end = min(start + charsPerLine, lineLen);
-        strncpy(segment, line + start, end - start);
-        segment[end - start] = '\0';
-        oledDisplay->print(segment);
-      }
-      
-      oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-    }
-    
-    xSemaphoreGive(gOledConsole.mutex);
-    return;
-  }
-  
-  // Normal view (in content area) - ensure lines don't overflow into footer
-  int y = OLED_CONTENT_START_Y;
-  const int lineHeight = 10;
-  const int maxY = OLED_CONTENT_START_Y + OLED_CONTENT_HEIGHT - lineHeight;
-  
-  for (int i = startIdx; i < endIdx && y <= maxY; i++) {
-    const char* line = gOledConsole.getLine(i);
-    if (line) {
-      bool isSelected = (i == cliSelectedIndex);
-      
-      if (isSelected) {
-        oledDisplay->setCursor(0, y);
-        oledDisplay->print(">");
-      }
-      
-      oledDisplay->setCursor(6, y);
-      char truncated[21];
-      strncpy(truncated, line, 20);
-      truncated[20] = '\0';
-      oledDisplay->print(truncated);
-      y += lineHeight;
-    }
-  }
-  
-  xSemaphoreGive(gOledConsole.mutex);
-  
-  // Scroll indicators (in content area)
-  if (cliScrollOffset > 0) {
-    oledDisplay->setCursor(120, OLED_CONTENT_START_Y);
-    oledDisplay->print("\x19");  // Down arrow (more below)
-  }
-  if (startIdx > 0) {
-    oledDisplay->setCursor(120, OLED_CONTENT_START_Y + OLED_CONTENT_HEIGHT - 10);
-    oledDisplay->print("\x18");  // Up arrow (more above)
-  }
+  cliDrawList(st);
 }
 
-// CLI Viewer input handler
-static bool handleCLIViewerInput(int deltaX, int deltaY, uint32_t newlyPressed) {
-  bool handled = false;
-  
-  // Acquire mutex for thread-safe buffer access
-  if (!gOledConsole.mutex || xSemaphoreTake(gOledConsole.mutex, pdMS_TO_TICKS(10)) != pdTRUE) {
+static bool handleCLIViewerInput(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed) {
+  oled_console::Status st;
+  if (!gOledConsole.tryStatus(st)) {
+    sRetryPending = true;
     return false;
   }
-  
-  int totalLines = gOledConsole.getLineCount();
-  if (totalLines == 0) {
-    xSemaphoreGive(gOledConsole.mutex);
+  const bool a = INPUT_CHECK(newlyPressed, INPUT_BUTTON_A);
+  const bool b = INPUT_CHECK(newlyPressed, INPUT_BUTTON_B);
+  const bool x = INPUT_CHECK(newlyPressed, INPUT_BUTTON_X);
+  const bool y = INPUT_CHECK(newlyPressed, INPUT_BUTTON_Y);
+
+  if (sView == CliView::READER) {
+    if (a || b) { cliCloseReader(st); return true; }
+    if (x) { cliEnterLive(); return true; }
+    if (y) {
+      if (st.count > 0) cliReaderShow(st.oldestId);
+      return true;
+    }
+    if (gNavEvents.left)  { cliReaderNeighbor(false, false, st); return true; }
+    if (gNavEvents.right) { cliReaderNeighbor(true, false, st); return true; }
+    if (gNavEvents.up || gNavEvents.down) {
+      // Scroll by the wheel's detents (one line per joystick step). A wheel
+      // has no Left/Right, so scrolling past either end continues into the
+      // adjacent record; a fast spin stops at the end first.
+      char wrapped[CLI_READER_WRAP_CAP];
+      const int lines = cliWrapReader(wrapped, sizeof(wrapped));
+      const int maxTop = lines > CLI_ROWS ? lines - CLI_ROWS : 0;
+      int step = gNavEvents.wheelDelta < 0 ? -gNavEvents.wheelDelta : gNavEvents.wheelDelta;
+      if (step < 1) step = 1;
+      if (gNavEvents.down) {
+        if (sReaderTop < maxTop) cliScrollReader(step, lines);
+        else cliReaderNeighbor(true, false, st);
+      } else {
+        if (sReaderTop > 0) cliScrollReader(-step, lines);
+        else cliReaderNeighbor(false, true, st);
+      }
+      return true;
+    }
     return false;
   }
-  
-  // Find current selection index from timestamp
-  int currentIdx = findIndexByTimestamp(cliSelectedTimestamp);
-  if (currentIdx < 0) {
-    currentIdx = totalLines - 1;
-    cliSelectedTimestamp = gOledConsole.getTimestamp(currentIdx);
+
+  if (st.count == 0) {
+    cliEnterLive();
+    return a || x || y;  // nothing to browse; B still leaves the page
   }
 
-  if (gNavEvents.up || gNavEvents.down || newlyPressed) {
-    DEBUG_CLIF("[CLI_VIEWER] input: detail=%d idx=%d/%d scroll=%d up=%d dn=%d btn=0x%lx",
-      cliShowingDetail, currentIdx, totalLines, cliScrollOffset,
-      gNavEvents.up, gNavEvents.down, (unsigned long)newlyPressed);
+  if (sView == CliView::LIVE) {
+    if (a) { cliOpenReader(st.newestId, true); return true; }
+    if (x) return true;  // already following
+    if (y) { cliEnterPaused(st.oldestId, st, true); return true; }
+    if (gNavEvents.up) {
+      cliEnterPaused(st.count > 1 ? st.newestId - 1 : st.newestId, st, true);
+      return true;
+    }
+    if (gNavEvents.down) return true;
+    return false;
   }
 
-  // A button = toggle detail
-  if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
-    if (!cliShowingDetail) {
-      // Entering detail view - lock the current message by its timestamp
-      cliDetailLockedTimestamp = cliSelectedTimestamp;
-      DEBUG_CLIF("[CLI_VIEWER] A: entering detail view idx=%d ts=%lu", currentIdx, cliSelectedTimestamp);
-    } else {
-      DEBUG_CLIF("[CLI_VIEWER] A: exiting detail view");
-    }
-    cliShowingDetail = !cliShowingDetail;
-    if (!cliShowingDetail) {
-      // Exiting detail view - unlock
-      cliDetailLockedTimestamp = 0;
-    }
-    handled = true;
-  }
-
-  // B button closes detail
-  if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
-    if (cliShowingDetail) {
-      DEBUG_CLIF("[CLI_VIEWER] B: closing detail view");
-      cliShowingDetail = false;
-      cliDetailLockedTimestamp = 0;
-      handled = true;
-    }
-  }
-
-  // In detail view, allow joystick navigation between messages using gNavEvents
-  if (cliShowingDetail) {
-    int lockedIdx = findIndexByTimestamp(cliDetailLockedTimestamp);
-    if (lockedIdx < 0) {
-      lockedIdx = currentIdx;
-      cliDetailLockedTimestamp = gOledConsole.getTimestamp(lockedIdx);
-    }
-
-    if (gNavEvents.up && lockedIdx > 0) {
-      cliDetailLockedTimestamp = gOledConsole.getTimestamp(lockedIdx - 1);
-      DEBUG_CLIF("[CLI_VIEWER] detail up: %d -> %d", lockedIdx, lockedIdx - 1);
-      handled = true;
-    } else if (gNavEvents.down && lockedIdx < totalLines - 1) {
-      cliDetailLockedTimestamp = gOledConsole.getTimestamp(lockedIdx + 1);
-      DEBUG_CLIF("[CLI_VIEWER] detail down: %d -> %d", lockedIdx, lockedIdx + 1);
-      handled = true;
-    } else if (gNavEvents.up || gNavEvents.down) {
-      DEBUG_CLIF("[CLI_VIEWER] detail nav blocked: lockedIdx=%d total=%d", lockedIdx, totalLines);
-    }
-    xSemaphoreGive(gOledConsole.mutex);
-    return handled;
-  }
-
-  // Navigation using centralized gNavEvents (already has debounce/auto-repeat)
+  // Paused
+  cliResolveSelection(st);
+  if (a) { cliOpenReader(sSelectedId, false); return true; }
+  if (x) { cliEnterLive(); return true; }
+  if (y) { cliSelect(st.oldestId); return true; }
   if (gNavEvents.up) {
-    // Move to older message (scroll up in history)
-    if (currentIdx > 0) {
-      DEBUG_CLIF("[CLI_VIEWER] up: idx %d -> %d (total=%d scroll=%d)", currentIdx, currentIdx - 1, totalLines, cliScrollOffset);
-      cliSelectedTimestamp = gOledConsole.getTimestamp(currentIdx - 1);
-    } else {
-      DEBUG_CLIF("[CLI_VIEWER] up: already at top (idx=%d total=%d scroll=%d)", currentIdx, totalLines, cliScrollOffset);
-    }
-    handled = true;
-  } else if (gNavEvents.down) {
-    // Move to newer message (scroll down in history)
-    if (currentIdx < totalLines - 1) {
-      DEBUG_CLIF("[CLI_VIEWER] down: idx %d -> %d (total=%d scroll=%d)", currentIdx, currentIdx + 1, totalLines, cliScrollOffset);
-      cliSelectedTimestamp = gOledConsole.getTimestamp(currentIdx + 1);
-    } else {
-      DEBUG_CLIF("[CLI_VIEWER] down: already at bottom (idx=%d total=%d scroll=%d)", currentIdx, totalLines, cliScrollOffset);
-    }
-    handled = true;
+    if (sSelectedId != st.oldestId) cliSelect(sSelectedId - 1);
+    else sSelectionExpired = false;
+    return true;
   }
-  
-  // X button = jump to newest
-  if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
-    cliSelectedTimestamp = gOledConsole.getTimestamp(totalLines - 1);
-    cliScrollOffset = 0;
-    handled = true;
+  if (gNavEvents.down) {
+    if (sSelectedId != st.newestId) cliSelect(sSelectedId + 1);
+    else cliEnterLive();
+    return true;
   }
-  
-  // Y button = jump to oldest
-  if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_Y)) {
-    cliSelectedTimestamp = gOledConsole.getTimestamp(0);  // Oldest message
-    cliScrollOffset = max(0, totalLines - CLI_MAX_VISIBLE_LINES);
-    handled = true;
-  }
-  
-  xSemaphoreGive(gOledConsole.mutex);
-  return handled;
+  return false;
 }
 
-// CLI availability check
+// Dirty-poll hook: the page needs a frame when the console changed since the
+// last one or a busy ring left that frame incomplete.
+bool oledCLIViewerNeedsFrame() {
+  if (currentOLEDMode != OLED_CLI_VIEWER) return false;
+  return sRetryPending || gOledConsole.generation() != sRenderedGeneration;
+}
+
+// The shared footer draws this after the page renders each frame.
+const char* oledCLIViewerFooterHint() { return sFooterHint; }
+
+// Identity boundary: the owned Reader copy and every anchor belong to the
+// identity that is leaving.
+void oledCLIViewerResetSessionState() {
+  cliEnterLive();
+  sPauseNewestId = oled_console::kNoRecord;
+  sRenderedGeneration = 0;
+  sRetryPending = false;
+  cliSetHint("B:Back");
+}
+
 static bool isCLIViewerAvailable(String* outReason) {
-  // Both halves are needed, and they fail independently: the ring allocation can
-  // come up short on internal DRAM while the much smaller mutex still succeeds.
-  // Checking only the mutex would advertise the viewer and then show an empty
-  // page forever, indistinguishable from a fresh boot.
-  if (!gOledConsole.mutex || !gOledConsole.lines) {
+  if (!gOledConsole.isReady()) {
     if (outReason) *outReason = "Console buffer not initialized";
     return false;
   }
   return true;
 }
 
-// CLI mode registration
-// Entry hook (owns what used to be an inline reset inside requestOLEDMode):
-// the CLI output always re-renders fresh, so reset on every entry regardless of
-// forward/back navigation.
+// Every entry opens Live on the newest output, forward or back.
 static void cliViewerOnEnter(bool /*isForward*/) {
-  resetCLIViewerState();
+  oledCLIViewerResetSessionState();
 }
 
 static const OLEDModeEntry cliViewerEntry = {
@@ -341,11 +467,10 @@ static const OLEDModeEntry cliViewerEntry = {
   handleCLIViewerInput,
   true,
   92,
-  nullptr,  // dynamic hints (shows line count)
+  nullptr,  // state-specific hints via oledCLIViewerFooterHint()
   cliViewerOnEnter
 };
 
-// Columns: mode, name, iconName, displayFunc, availFunc, inputFunc, showInMenu, menuOrder, hints
 static const OLEDModeEntry cliViewerModes[] = { cliViewerEntry };
 
 REGISTER_OLED_MODE_MODULE(cliViewerModes, sizeof(cliViewerModes) / sizeof(cliViewerModes[0]), "CLIViewer");

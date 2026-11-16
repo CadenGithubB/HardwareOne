@@ -408,6 +408,12 @@ void oledClearDirty();             // Record current sequences after render
 void oledSetAlwaysDirty(bool always);  // For animations that need constant refresh
 void oledMarkDirtyUntil(unsigned long untilMs);  // Keep rendering until timestamp (for popup auto-dismiss)
 
+// CLI Output page (OLED_Mode_CLI.cpp): consulted by the dirty poll, the shared
+// footer and the local-display session boundary.
+bool oledCLIViewerNeedsFrame();
+const char* oledCLIViewerFooterHint();
+void oledCLIViewerResetSessionState();
+
 // Boot sequence helpers (called from setup() and loop())
 bool earlyOLEDInit();  // Probe and init OLED for boot animation
 void processOLEDBootSequence();  // Handle boot phase transitions

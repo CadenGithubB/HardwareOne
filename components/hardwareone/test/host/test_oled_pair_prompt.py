@@ -77,8 +77,8 @@ def build_unit(component: Path, source_dir: Path | None) -> str:
     confirm += [definition(utils, signature) for signature in CONFIRM_FUNCTIONS]
     # The shared refusal helper exists only after the A2/A12 fixes; a tree
     # without it still compiles here and is judged by the behavioral cases.
-    helper = definition(oled, HELPER) if HELPER in oled else ""
-    harness = (HERE / "oled_pair_prompt_harness.cpp").read_text(encoding="utf-8")
+    helper = definition(utils, "void oledCommandReplyText(") + "\n" + definition(oled, HELPER) if HELPER in oled else ""
+    harness = '#include "' + str(component / "OLED_MessageText.h") + '"\n' + (HERE / "oled_pair_prompt_harness.cpp").read_text(encoding="utf-8")
     for marker, body in (("// INSERT_TYPES", "\n\n".join(types)),
                          ("// INSERT_CONFIRM", "\n\n".join(confirm)),
                          ("// INSERT_HELPER", helper),

@@ -24,6 +24,15 @@ set_target_properties(dictation_policy_tests PROPERTIES
 target_compile_options(dictation_policy_tests PRIVATE
   -Wall -Wextra -Werror -pedantic)
 
+# STT raw-input recorder ring (stt/stt_raw_ring.h, used by
+# System_STTRawCapture): SPSC order, whole-block drops and gap records.
+add_executable(stt_raw_ring_tests test_stt_raw_ring.cpp)
+set_target_properties(stt_raw_ring_tests PROPERTIES
+  CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+target_include_directories(stt_raw_ring_tests PRIVATE ../..)
+target_link_libraries(stt_raw_ring_tests PRIVATE Threads::Threads)
+target_compile_options(stt_raw_ring_tests PRIVATE -Wall -Wextra -Werror -pedantic)
+
 # Long-press (hold) press/release pairing and route policy used by
 # G2_Glasses.cpp. Production dependency-free header; the firmware owns the
 # portMUX and the clock.
@@ -249,11 +258,21 @@ target_include_directories(stt_lm_tool PRIVATE ../..)
 target_compile_options(stt_lm_tool PRIVATE
   -O2 -Wall -Wextra -Werror -pedantic)
 
+# Replay an `sttraw` recording through the production segmenter and its
+# continuous settings (stt/stt_continuous_config.h); see tools/stt_raw/README.md.
+add_executable(stt_raw_replay stt_raw_replay.cpp)
+set_target_properties(stt_raw_replay PROPERTIES
+  CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+target_include_directories(stt_raw_replay PRIVATE ../..)
+target_compile_options(stt_raw_replay PRIVATE -O2 -Wall -Wextra -Werror -pedantic)
+
 # Sanitizers are the point of test 1: the walk-back reads backwards through the
 # buffer, and an earlier draft ran off the front. Without ASan that is invisible.
 option(HW1_SANITIZE "Build the host tests with ASan/UBSan" ON)
 if(HW1_SANITIZE)
   target_compile_options(llm_utf8_tests PRIVATE -fsanitize=address,undefined -g)
+  target_compile_options(stt_raw_ring_tests PRIVATE -fsanitize=address,undefined -g)
+  target_link_options(stt_raw_ring_tests PRIVATE -fsanitize=address,undefined)
   target_link_options(llm_utf8_tests PRIVATE -fsanitize=address,undefined)
   target_compile_options(dictation_policy_tests PRIVATE
     -fsanitize=address,undefined -g)
@@ -1068,6 +1087,7 @@ add_test(NAME ht16k33_geometry_tests COMMAND ht16k33_geometry_tests)
 add_test(NAME llm_utf8_tests COMMAND llm_utf8_tests)
 add_test(NAME dictation_policy_tests COMMAND dictation_policy_tests)
 add_test(NAME g2_hold_gesture_tests COMMAND g2_hold_gesture_tests)
+add_test(NAME stt_raw_ring_tests COMMAND stt_raw_ring_tests)
 add_test(NAME quicknote_policy_tests COMMAND quicknote_policy_tests)
 add_test(NAME mqtt_lifecycle_gate_tests COMMAND mqtt_lifecycle_gate_tests)
 add_test(NAME memutil_tests COMMAND memutil_tests)
@@ -1292,6 +1312,9 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_map_live_ui.py
           ${SETUP_MQTT_TEST_ARGS})
+add_test(
+  NAME oled_health
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_oled_health.py)
 add_test(
   NAME health_logging_ui
   COMMAND ${Python3_EXECUTABLE}
@@ -1776,6 +1799,18 @@ add_test(
           ${CMAKE_CURRENT_LIST_DIR}/test_stt_continuous.py --full-phrase
           ${STT_CONTINUOUS_TEST_ARGS})
 
+# `sttraw` host replay (stt_raw_replay.cpp): production floors and continuous
+# settings, chunk-size independence, floor overrides, cuts and the sidecar checks.
+set(STT_RAW_REPLAY_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND STT_RAW_REPLAY_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME stt_raw_replay
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_stt_raw_replay.py
+          ${STT_RAW_REPLAY_TEST_ARGS})
+
 # STT result privacy and the targeted BLE command result (README "STT result privacy
 # and the targeted BLE reply"): the private-STT rule, and since D1 the BLE reply is
 # fenced on the command's session epoch with no console-mirror fallback.
@@ -2183,6 +2218,23 @@ endforeach()
 
 add_test(NAME oled_toast
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_oled_toast.py)
+# The OLED console history owner (OLED_ConsoleCore.h + OLED_ConsoleBuffer.cpp):
+# checked sanitizer bounds, contiguous record IDs, the byte budget, loss
+# accounting, the identity-boundary fence and concurrent producer/screen access.
+add_test(NAME oled_console_buffer
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_oled_console_buffer.py)
+# The CLI Output page (OLED_Mode_CLI.cpp) over that owner at the 64/88/128-pixel
+# canvases: Live/Paused/Reader, stable selection, arrivals, expiry, the pinned
+# Reader copy, busy-ring retry, lock-free drawing and session reset.
+add_test(NAME oled_cli_output
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_oled_cli_output.py)
+# The bounded list text field (OLED_TextFieldCore.h + OLED_TextField.cpp):
+# pixel bounds at 64/88/128, ellipsis degradation, the 1000 ms / 20 px/s /
+# 1500 ms marquee, rebuild continuity, selection resets, view and modal
+# pauses, rollover, hostile text. The layout, health and logging-UI suites run
+# the shared renderers through the same production primitive.
+add_test(NAME oled_text_field
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_oled_text_field.py)
 
 add_test(NAME wifi_command_errors
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_wifi_command_errors.py)

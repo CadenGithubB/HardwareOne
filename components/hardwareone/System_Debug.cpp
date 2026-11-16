@@ -405,8 +405,10 @@ void debugOutputTask(void* parameter) {
 
       // OLED console
       #if ENABLE_OLED_DISPLAY
-      if ((msg->routing & MSG_ROUTE_OLED) && gOledConsole.mutex) {
-        gOledConsole.append(msg->text, msg->timestamp);
+      if (msg->routing & MSG_ROUTE_OLED) {
+        // A stale generation skips only this sink: the other branches above
+        // and below still ran or run for the same envelope.
+        gOledConsole.append(msg->text, (uint32_t)msg->timestamp, msg->oledGeneration);  // no-op until the ring exists
       }
       #endif
 
@@ -813,6 +815,13 @@ static bool enqueueChunk(const char* text, size_t len, uint8_t routing,
   msg->timestamp = millis();
   msg->category  = category;
   msg->routing   = routing;
+  // The OLED sink's ownership token for this envelope: a relaxed atomic load,
+  // so it is safe from interrupt context and costs no lock.
+#if ENABLE_OLED_DISPLAY
+  msg->oledGeneration = gOledConsole.deliveryGeneration();
+#else
+  msg->oledGeneration = 0;
+#endif
   memcpy(msg->text, text, copy);
   msg->text[copy] = '\0';
   markTrunc(msg->text, truncated || len > (size_t)(DEBUG_MSG_SIZE - 1));

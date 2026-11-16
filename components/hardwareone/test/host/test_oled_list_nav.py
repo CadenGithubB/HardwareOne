@@ -103,7 +103,8 @@ EDITOR_FUNCTIONS = (
 
 def editor(read) -> str:
     source = read("OLED_SettingsEditor.cpp")
-    parts = []
+    # The editor's row geometry constants, as the production file defines them.
+    parts = re.findall(r"(?m)^static constexpr int kSe\w+ = \d+;$", source)
     for marker, standin in EDITOR_FUNCTIONS:
         if marker in source:
             parts.append(unique(source, marker, "OLED_SettingsEditor.cpp"))
@@ -142,7 +143,8 @@ def main() -> None:
 
     # settingsEditorDown/Select keep a module-list local that only some cases read.
     flags = ["-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic",
-             "-Wno-unused-function", "-Wno-unused-parameter", "-Wno-unused-variable"]
+             "-Wno-unused-function", "-Wno-unused-parameter", "-Wno-unused-variable",
+             "-I", str(HERE), "-I", str(args.component)]
     if args.sanitize:
         flags += ["-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-g"]
     with tempfile.TemporaryDirectory(prefix="hw1-oled-list-nav-") as directory:

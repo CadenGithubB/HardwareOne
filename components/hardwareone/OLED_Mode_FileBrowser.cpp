@@ -4,6 +4,7 @@
 #include "OLED_Display.h"
 #include "OLED_Utils.h"             // oledAuthContext() — shared OLED identity builder
 #include "OLED_UI.h"                // shared icon drawing and transfer confirmation toasts
+#include "OLED_TextField.h"         // bounded list labels
 #include "System_BuildConfig.h"
 
 #if ENABLE_OLED_DISPLAY
@@ -265,11 +266,11 @@ static FbMutateResult fbDeleteSelected() {
 static void fbToastMutate(FbMutateResult result, const char* done, const char* failed) {
   switch (result) {
     case FbMutateResult::Done:        oledToastShow(done, 2000); break;
-    case FbMutateResult::Unresolved:  oledToastShow("Entry unavailable", 2500); break;
-    case FbMutateResult::QuoteInName: oledToastShow("Quote in name", 2500); break;
-    case FbMutateResult::AdminOnly:   oledToastShow("Admin only", 2500); break;
-    case FbMutateResult::NoAccess:    oledToastShow("Not found or denied", 2500); break;
-    case FbMutateResult::Failed:      oledToastShow(failed, 2500); break;
+    case FbMutateResult::Unresolved:  oledToastShow("Entry unavailable", oled_message::kErrorDurationMs, OledUIIcon::ERROR); break;
+    case FbMutateResult::QuoteInName: oledToastShow("Quote in name", oled_message::kErrorDurationMs, OledUIIcon::ERROR); break;
+    case FbMutateResult::AdminOnly:   oledToastShow("Admin only", oled_message::kErrorDurationMs, OledUIIcon::ERROR); break;
+    case FbMutateResult::NoAccess:    oledToastShow("Not found or denied", oled_message::kErrorDurationMs, OledUIIcon::ERROR); break;
+    case FbMutateResult::Failed:      oledToastShow(failed, oled_message::kErrorDurationMs, OledUIIcon::ERROR); break;
   }
 }
 
@@ -615,12 +616,12 @@ static void onEspnowGetAck(const uint8_t /*peerMac*/[6], const V4PayloadFsGetAck
   // Toast the outcome (overlays any screen; the actual "Received" confirmation is
   // toasted from the inbound file-complete path once the bytes land). oledToastShow
   // is thread-safe + self-marks dirty, so it's safe from this BTC_TASK callback.
-  if (!ack) { sGetUi = FsGetUi::FAILED; oledToastShow("Download failed"); return; }
+  if (!ack) { sGetUi = FsGetUi::FAILED; oledToastShow("Download failed", oled_message::kErrorDurationMs, OledUIIcon::ERROR); return; }
   switch ((FsListStatus)ack->status) {
     case FS_LIST_STATUS_OK:          sGetUi = FsGetUi::OK;        oledToastShow("Downloading file..."); break;
-    case FS_LIST_STATUS_NOT_FOUND:   sGetUi = FsGetUi::NOT_FOUND; oledToastShow("File not found");      break;
-    case FS_LIST_STATUS_PERM_DENIED: sGetUi = FsGetUi::DENIED;    oledToastShow("Permission denied");   break;
-    default:                         sGetUi = FsGetUi::FAILED;    oledToastShow("Download failed");      break;
+    case FS_LIST_STATUS_NOT_FOUND:   sGetUi = FsGetUi::NOT_FOUND; oledToastShow("File not found", oled_message::kErrorDurationMs, OledUIIcon::ERROR);      break;
+    case FS_LIST_STATUS_PERM_DENIED: sGetUi = FsGetUi::DENIED;    oledToastShow("Permission denied", oled_message::kErrorDurationMs, OledUIIcon::ERROR);   break;
+    default:                         sGetUi = FsGetUi::FAILED;    oledToastShow("Download failed", oled_message::kErrorDurationMs, OledUIIcon::ERROR);      break;
   }
 }
 
@@ -663,7 +664,7 @@ static void peerActivate() {
   if (sEspnowCtx == EspnowFileCtx::RECEIVE) {
     if (!peerBrowseAuthorized()) {
       sGetUi = FsGetUi::DENIED;
-      oledToastShow("Permission denied");
+      oledToastShow("Permission denied", oled_message::kErrorDurationMs, OledUIIcon::ERROR);
       return;
     }
     sGetUi = FsGetUi::REQUESTING;
@@ -685,7 +686,7 @@ static void runEspnowSendFile(void* arg) {
     SYSTEM_IDENTITY_SCOPE("oled.espnow.sendfile");  // read the local file at device level
     ok = sendFileToMac(j->mac, String(j->path));
   }
-  oledToastShow(ok ? "File sent" : "Send failed");  // completion confirmation (cmd_exec task)
+  oledToastShow(ok ? "File sent" : "Send failed", ok ? 2500 : oled_message::kErrorDurationMs, ok ? OledUIIcon::SUCCESS : OledUIIcon::ERROR);  // completion confirmation (cmd_exec task)
   free(j);
 }
 
@@ -698,10 +699,10 @@ static void espnowSendOnPicked(const char* fullPath, bool cancelled) {
   if (cancelled || !fullPath || ctx != EspnowFileCtx::SEND) return;
   EspnowSendFileJob* j = (EspnowSendFileJob*)ps_alloc(
       sizeof(EspnowSendFileJob), AllocPref::DefaultHeap, "oled.espnow.sendfile.job");
-  if (!j) { oledToastShow("Send failed"); return; }
+  if (!j) { oledToastShow("Send failed", oled_message::kErrorDurationMs, OledUIIcon::ERROR); return; }
   memcpy(j->mac, mac, 6);
   strlcpy(j->path, fullPath, sizeof(j->path));
-  if (!submitDeferredToCmdExec(runEspnowSendFile, j)) { free(j); oledToastShow("Send failed"); return; }
+  if (!submitDeferredToCmdExec(runEspnowSendFile, j)) { free(j); oledToastShow("Send failed", oled_message::kErrorDurationMs, OledUIIcon::ERROR); return; }
   oledToastShow("Sending file...");  // instant feedback; "File sent" follows on completion
 }
 
@@ -872,7 +873,7 @@ void prepareFileBrowserData() {
       oledKeyboardReset();
       sFbRenameActive = false;
       if (newName.length() == 0) {
-        oledToastShow("Empty name - kept", 2500);
+        oledToastShow("Empty name - kept", oled_message::kErrorDurationMs, OledUIIcon::ERROR);
       } else {
         fbToastMutate(fbRenameSelected(newName), "Renamed", "Rename failed");
       }
@@ -897,7 +898,7 @@ void prepareFileBrowserData() {
             // .hwmap fallback); entry.name is a bounded display copy.
             String fullPath;
             if (!gOledFileManager->getSelectedPath(fullPath)) {
-              oledToastShow("Entry unavailable", 2500);
+              oledToastShow("Entry unavailable", oled_message::kErrorDurationMs, OledUIIcon::ERROR);
               break;
             }
 
@@ -953,7 +954,7 @@ void prepareFileBrowserData() {
           if (entry.size > FB_VIEW_MAX_FILE) {
             // FileManager::readFile pulls the whole file byte-at-a-time into
             // a String — refuse big files here; serial `fileview` pages them.
-            oledToastShow("Too big - use fileview", 3000);
+            oledToastShow("Too big - use fileview", oled_message::kErrorDurationMs, OledUIIcon::ERROR);
             sFbLevel = FbLevel::LIST;
             break;
           }
@@ -965,7 +966,7 @@ void prepareFileBrowserData() {
             fbFillView(content.c_str(), content.length(), pretty);
             sFbLevel = FbLevel::VIEW;
           } else {
-            oledToastShow("Read failed", 2500);
+            oledToastShow("Read failed", oled_message::kErrorDurationMs, OledUIIcon::ERROR);
             sFbLevel = FbLevel::LIST;
           }
         } else {
@@ -1100,15 +1101,12 @@ void displayFileBrowserRendered() {
         } else {
           oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
         }
-        oledDisplay->setCursor(2, y + 1);
-        // Format: "[F] name" (folder) or "name 1.2K" (file)
-        char line[24];
-        if (e.isFolder) {
-          snprintf(line, sizeof(line), "%s/", e.name);
-        } else {
-          snprintf(line, sizeof(line), "%.18s", e.name);
-        }
-        oledDisplay->print(line);
+        // Folder names keep their '/'; the field ends before the arrow column.
+        char line[72];
+        if (e.isFolder) snprintf(line, sizeof(line), "%s/", e.name);
+        else            snprintf(line, sizeof(line), "%s", e.name);
+        const uint16_t ink = selected ? DISPLAY_COLOR_BLACK : DISPLAY_COLOR_WHITE;
+        oledTextFieldDraw(oledDisplay, 2, y + 1, 121 - 2 - 2, line, ink, ink, selected, &sPeerSelectedIdx);
       }
       oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
       // Scroll arrows + "x of N"
@@ -1156,11 +1154,9 @@ void displayFileBrowserRendered() {
     fbPopulateActionScroll();
     oledDisplay->setTextSize(1);
     oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-    // Filename header (clipped to one row).
-    char nameRow[22];
-    snprintf(nameRow, sizeof(nameRow), "%s", sFbActionName);
-    oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
-    oledDisplay->print(nameRow);
+    // Filename header on one bounded row.
+    oledTextFieldDraw(oledDisplay, 0, OLED_CONTENT_START_Y, SCREEN_WIDTH, sFbActionName,
+                      DISPLAY_COLOR_WHITE, DISPLAY_COLOR_WHITE, false, &sFbActionScroll);
     // List rendered one row below the header via the shared single-line renderer.
     oledScrollRenderSimple(oledDisplay, &sFbActionScroll, /*showSelection=*/true,
                            OLED_CONTENT_START_Y + 8);
@@ -1253,13 +1249,11 @@ void displayFileBrowserRendered() {
         oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
       }
       
-      // Draw name (truncate to fit in list area, 1px down to align with highlight)
-      oledDisplay->setCursor(2, y + 1);
-      String name = String(entry.name);
-      if (name.length() > 13) {
-        name = name.substring(0, 10); name += "...";
-      }
-      oledDisplay->print(name);
+      // The whole name in a field inside the list pane: the selected row
+      // scrolls a long name instead of cutting it (OLED_TextField.h).
+      const uint16_t ink = isSelected ? DISPLAY_COLOR_BLACK : DISPLAY_COLOR_WHITE;
+      oledTextFieldDraw(oledDisplay, 2, y + 1, listWidth - 3, entry.name, ink, ink, isSelected,
+                        &fileBrowserRenderData);
     }
   }
   
