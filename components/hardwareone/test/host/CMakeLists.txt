@@ -2365,6 +2365,14 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_redact_audit.py
           ${SETUP_MQTT_TEST_ARGS})
+# The audit redactor iterates nested forwarding commands instead of recursing:
+# its text equals the recursive redactor's for 7125 generated lines nested up to
+# 131 levels, and its stack stays flat in nesting depth.
+add_test(
+  NAME redact_audit_nesting
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_redact_audit_nesting.py
+          ${SETUP_MQTT_TEST_ARGS})
 # A command's identity is moved where the transport's copy dies, and the
 # serial mirror clears its route bit without copying the context; every
 # delivered route and text equals the tree before.

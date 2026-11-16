@@ -2370,6 +2370,27 @@ delete, a refused delete, a missing file and an unready filesystem leave it alon
 never for a failed or SD upload). `--source <cpp>` takes a saved
 `System_Filesystem.cpp`.
 
+`redact_audit_nesting` covers the nested forwarding commands of the audit redactor (`espnowremote`,
+`espnowroomcmd`, `espnowtagcmd`). It runs the production `redactCmdForAudit` (both overloads),
+`redactAuditLevel`, `maskMacTokens`, the rule table and its helpers (`System_Utils.cpp`) and `CommandArgs`
+on the counted Arduino String with the device's inline capacity, with the live String bytes tracked.
+`resolveCommand` is the production name matcher over a fixed name list. Each forwarded command used to be
+redacted by a recursive call from the forwarding handler, so a 2047-byte line of `espnowremote a b c `
+nested about a hundred levels and took about 100 KB of stack on the host. Now `redactCmdForAudit` iterates:
+each forwarded command is resolved on its own and redacted as a fresh line. The corpus has 7125 lines (seed
+20261115): every depth from 0 to 130 with the three verbs mixed and quoted, joined by eight separator forms
+(space, double space, tab, space-tab-space, CR, VT, FF, LF); 33 bottom commands (login, wifiadd, usersync,
+automation add, dictate, phone pair new, espnowbrowse / espnowfetch, unknown verbs, MAC addresses, the empty
+tail); ambiguous quotes at one level; 1084 lines of exactly 2047 bytes (and 300 deeper ones past it, up to
+4661 bytes); 6000 random lines. Each line goes through the one-argument form, the two-argument form with and
+without an entry, and the one-argument form again on its own result; the report's digest must equal the
+recursive redactor's. `--baseline <component dir>` compiles that tree's redactor into the same binary and
+compares every output in place. On a painted thread stack a 2047-byte nested line may use at most 2 KB more
+than a line nested once, and the peak of live String bytes may be at most 8 times the line length plus
+512 bytes. The deep lines also redact on a 64 KB thread stack, where the recursive code dies (SIGBUS). A
+source check keeps `redactCmdForAudit` out of the rule handlers and out of one level of the redaction.
+Options: `--cxx`, `--sanitize`, `--component`, `--baseline`, `--print-stack`.
+
 `file_manager_refresh_contract` pins one storage refresh per folder load in the
 web file manager (`createFileManager`, `WebServer_Utils.h`): the explorer's
 `onNavigate` calls `config.onRefresh`, and the actions (new folder, new file,

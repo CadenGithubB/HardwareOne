@@ -612,7 +612,10 @@ namespace {
     const char* prefix;      // lowercase prefix to match, including trailing space when appropriate
     RedactType type;         // action type
     uint8_t param;           // token index (1-based) for MASK_* types
-    String (*handler)(const String&); // optional specialized handler
+    // Optional specialized handler. It returns the line's redacted text; a
+    // command-forwarding handler also sets forwardedTail to the forwarded
+    // command when that is kept, and the caller redacts it as a line of its own.
+    String (*handler)(const String& line, String& forwardedTail);
   };
 
   // Quote-aware token walk — mirrors CommandArgs: tokens split on spaces,
@@ -679,10 +682,12 @@ namespace {
 
   // Shared handler for peer-credential commands: "<cmd> <target> <username>
   // <password> <rest>..." (espnowremote / roomcmd / tagcmd / browse / fetch).
-  // Mask the peer password. For command-forwarding forms, recursively redact
-  // the nested command too: it may itself be `login ...` or another credential
-  // verb.
-  static String redactPeerCredCmd(const String& in) {
+  // Mask the peer password. For command-forwarding forms the nested command is
+  // redacted too (it may itself be `login ...` or another credential verb), but
+  // not here: its text goes back in forwardedTail and redactCmdForAudit
+  // redacts it as a fresh line in a loop, so a line nested a hundred levels
+  // deep needs no more stack than one level.
+  static String redactPeerCredCmd(const String& in, String& forwardedTail) {
     String c = in;
     CommandArgs parsed(c);
     String safe;
@@ -709,14 +714,14 @@ namespace {
     }
     String tail = c.substring(passwordEnd);
     tail.trim();
-    if (tail.length()) safe += String(" ") + redactCmdForAudit(tail);
+    if (tail.length()) forwardedTail = std::move(tail);
     return safe;
   }
 
   // usersync <username> <userPass> <device> <targetAdminUser> <targetAdminPass> <yourAdminPass>
   // Mask the THREE password tokens (positions 3, 6, 7); keep username(2),
   // device(4), and targetAdminUser(5) visible for the audit trail.
-  static String redactUserSyncCmd(const String& in) {
+  static String redactUserSyncCmd(const String& in, String& /*forwardedTail*/) {
     String c = in;
     const int kPwTokens[] = { 7, 6, 3 };  // high → low so edits don't shift earlier tokens
     // CALL_HANDLER rules run BEFORE the generic dispatch guard, so this needs its
@@ -738,7 +743,7 @@ namespace {
   // syntactically valid correlation ID useful to the audit trail, but never
   // retain the free-form tail. A malformed ID is masked too so invalid command
   // attempts cannot repurpose the nominal ID position as an unredacted field.
-  static String redactDictateCmd(const String& in) {
+  static String redactDictateCmd(const String& in, String& /*forwardedTail*/) {
     CommandArgs parsed(in);
     String safe = "dictate";
     if (parsed.count() > 1) {
@@ -762,7 +767,7 @@ namespace {
 
   // `phone pair new` (phone link v2) takes no argument and its code is never on
   // the line; the audit line, the [CMD] echo and the feeds say so all the same.
-  static String redactPhonePairNew(const String&) {
+  static String redactPhonePairNew(const String&, String& /*forwardedTail*/) {
     return String("phone pair new (code redacted)");
   }
 
@@ -905,13 +910,15 @@ String maskMacTokens(const String& text) {
   return out;
 }
 
-String redactCmdForAudit(const String& argsInput) {
-  const CommandResolution resolution = resolveCommand(argsInput);
-  return redactCmdForAudit(argsInput, resolution);
-}
-
-String redactCmdForAudit(const String& argsInput,
-                         const CommandResolution& resolution) {
+// One level of the audit redaction: the line's addresses masked, then the
+// login check, the rule table and the unknown-verb mask. A command-forwarding
+// verb (espnowremote / espnowroomcmd / espnowtagcmd) returns its kept head
+// and sets forwardedTail to the forwarded command when that is kept; any
+// other line leaves forwardedTail as it is. redactCmdForAudit below runs the
+// levels; nothing here calls it.
+static String redactAuditLevel(const String& argsInput,
+                               const CommandResolution& resolution,
+                               String& forwardedTail) {
   // Addresses first: masking one keeps it a single token, so the rules below
   // still find their positions.
   String c = maskMacTokens(argsInput);
@@ -970,7 +977,7 @@ String redactCmdForAudit(const String& argsInput,
     if (!redactRuleMatches(actual, r.prefix)) continue;
 
     if (r.type == CALL_HANDLER && r.handler) {
-      return r.handler(c);
+      return r.handler(c, forwardedTail);
     }
 
     // Compute token boundaries QUOTE-AWARE (nthTokenBounds mirrors
@@ -1015,6 +1022,33 @@ String redactCmdForAudit(const String& argsInput,
   }
 
   return c;
+}
+
+String redactCmdForAudit(const String& argsInput) {
+  const CommandResolution resolution = resolveCommand(argsInput);
+  return redactCmdForAudit(argsInput, resolution);
+}
+
+// The caller's resolution is for the outermost level only. Each forwarded
+// command is redacted as a fresh line would be (resolved on its own, then one
+// level), and its text follows its forwarder's head after one space. This
+// used to be a recursive call from the forwarding handler: a crafted line of
+// "espnowremote a b c " repeated to the console's 2047 bytes nested about a
+// hundred levels and needed tens of KB of stack on whichever task audited
+// it, with every level's Strings alive at once. Here the stack stays one
+// level deep, and only the text so far plus the current level are held.
+String redactCmdForAudit(const String& argsInput,
+                         const CommandResolution& resolution) {
+  String forwarded;
+  String out = redactAuditLevel(argsInput, resolution, forwarded);
+  while (forwarded.length()) {
+    String next;
+    const CommandResolution nested = resolveCommand(forwarded);
+    out += ' ';
+    out += redactAuditLevel(forwarded, nested, next);
+    forwarded = std::move(next);
+  }
+  return out;
 }
 
 // Redact sensitive data from command outputs (JSON responses, etc.)

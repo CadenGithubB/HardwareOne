@@ -97,10 +97,23 @@ resolved_redactor = function_body(
     "String redactCmdForAudit(const String& argsInput,\n"
     "                         const CommandResolution& resolution)",
 )
-assert "!resolution.entry" in resolved_redactor
+# One level of the redaction lives in redactAuditLevel when the tree has it
+# (the forwarding verbs are iterated in redactCmdForAudit, not recursed): the
+# caller's resolution goes to the outermost level, each forwarded command is
+# resolved on its own.
+level_signature = "static String redactAuditLevel(const String& argsInput,"
+if level_signature in utils_cpp:
+    redactor_level = function_body(utils_cpp, level_signature)
+    assert "redactAuditLevel(argsInput, resolution, " in resolved_redactor
+    assert "resolveCommand(forwarded)" in resolved_redactor
+    assert "redactCmdForAudit(" not in redactor_level
+    assert "findCommand(" not in redactor_level
+else:
+    redactor_level = resolved_redactor
+assert "!resolution.entry" in redactor_level
 assert "findCommand(" not in resolved_redactor
 assert "CommandResolution& resolution" in utils_h
-assert 'return c.substring(0, verbEnd) + " ***";' in resolved_redactor
+assert 'return c.substring(0, verbEnd) + " ***";' in redactor_level
 
 # The dependency-light registry path resolves once and dispatches that exact
 # row. In particular, it never canonicalizes to text and performs a second

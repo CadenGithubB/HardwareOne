@@ -110,8 +110,10 @@ def generate(component: Path) -> tuple[str, bool]:
         "CommandArgs::CommandArgs(", "void CommandArgs::parse(", "const String& CommandArgs::arg("))
     redactor_start = utils.index("namespace {", utils.index("// Audit / Redaction utilities"))
     redaction = extract_block(utils[redactor_start:], "namespace") + "\n"
+    level = "static String redactAuditLevel(const String& argsInput,\n"
     for signature in ("static bool macHexDigit(char ch)", "static bool macGlued(char ch)",
                       "String maskMacTokens(const String& text)",
+                      *((level,) if level in utils else ()),
                       "String redactCmdForAudit(const String& argsInput)",
                       "String redactCmdForAudit(const String& argsInput,\n"):
         redaction += extract_block(utils, signature) + "\n"

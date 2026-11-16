@@ -63,7 +63,10 @@ def main() -> None:
     espnow = (ROOT / 'G2_Page_ESPNow.cpp').read_text()
     assert 'forget peer: %s", who' in espnow and 'line + 13' not in espnow
     utils = (ROOT / 'System_Utils.cpp').read_text()
-    redactor = utils[utils.index('String redactCmdForAudit(const String& argsInput,\n'):]
+    # One level of the audit (redactAuditLevel) when the tree iterates the
+    # forwarding verbs; before that, the two-argument redactCmdForAudit.
+    level = 'static String redactAuditLevel(const String& argsInput,\n'
+    redactor = utils[utils.index(level if level in utils else 'String redactCmdForAudit(const String& argsInput,\n'):]
     assert 'String c = maskMacTokens(argsInput);' in redactor[:600], 'the audit masks addresses before its rules'
     print(f'BLE log privacy: no always-on line in {len(FILES)} files prints an address')
 

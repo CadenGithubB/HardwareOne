@@ -243,6 +243,8 @@ def main():
     redaction += block(utils, "static bool macHexDigit(char ch) {") + "\n"
     redaction += block(utils, "static bool macGlued(char ch) {") + "\n"
     redaction += block(utils, "String maskMacTokens(const String& text) {") + "\n"
+    if "static String redactAuditLevel(const String& argsInput,\n" in utils:
+        redaction += block(utils, "static String redactAuditLevel(const String& argsInput,\n") + "\n"
     redaction += block(utils, "String redactCmdForAudit(const String& argsInput) {") + "\n"
     redaction += block(utils, "String redactCmdForAudit(const String& argsInput,\n")
     unit = HARNESS
