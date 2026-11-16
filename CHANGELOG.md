@@ -192,6 +192,24 @@ everything user-visible since the v0.99.99.1 tag.
   Host-tested; on the P4X-EYE bench board `/api/system` answers in 97 to 205 ms instead of 1.24 to
   1.34 s, with no loop stalls in 8 polls 10 s apart (one per poll before), and its figure matched
   a fresh `files stats` before and after a 64 KB upload and its `filedelete`.
+- Automations without a set clock (no NTP, RTC or phone time): interval and armed-delay triggers
+  count uptime instead of half working. An interval is first due one interval after automations
+  start, then every interval, with no `automations.json` write per fire; `automation trigger` arms
+  a delay in RAM (32 timers; with all in use it refuses with "Error: cannot arm while the clock is
+  not set: all 32 uptime timers are in use"). Time-of-day triggers still wait for a set clock. When
+  the clock is set later, an armed delay or an interval that already ran on uptime keeps the time
+  it had left; an interval still in its first countdown keeps the saved next run, so a clock that
+  arrives seconds after boot changes nothing. Adding, editing or deleting an automation drops its
+  uptime timers, as with a clock. Without a clock the web page shows no next run for these
+  triggers. Before, an interval saved while the clock was set never fired on a later boot without
+  one. Host-tested; not yet tested on hardware.
+- `automation add id=<n>` refuses an id that is not a whole number from 1 to 2147483647 ("Error: id
+  must be a whole number from 1 to 2147483647"); it used to be accepted and renumbered on the next
+  pass. `automation sanitize` now says what it fixed ("fixed 2 duplicate IDs", "fixed 1 out-of-range
+  ID", or both). Host-tested; not yet tested on hardware.
+- Files page: every new folder, new file, upload and Refresh asked for the storage figures twice,
+  and on the P4X-EYE each fresh reading is a LittleFS walk of about 1.3 s on the one web server
+  task. They now ask once. Source-tested; the page was not run in a browser here.
 ### Changed
 - Command names have one form: lower-case letters and digits. The 22 camelCase `mqtt*` commands and
   `httpAutoStart` / `httpsEnabled` are now `mqtthost`, `mqttpublishgps`, `httpautostart`,
@@ -259,6 +277,10 @@ everything user-visible since the v0.99.99.1 tag.
     waits up to 50 ms for it, so its 8 KB is free before the speech task is made). While the
     worker is kept, a start no longer needs a new PSRAM block, so it can be accepted where an
     out-of-memory state used to answer Busy.
+- Code: the OTA handoff keys (`ap_pass`, `auth_token`), the OTA upload frame marker and its head
+  length, and the HTTPS certificate and key paths each have one definition, used by the firmware,
+  the recovery updater, the phone link and the web server alike (step 4 of the 2026-11-14 sweep). No
+  behaviour change; keys, frames, paths and replies are byte-identical.
 ### Security
 - G2 glasses and R1 ring frames: one bounded protobuf reader for both parsers. A malformed frame whose
   declared length was near 2^64 passed the bounds check of the old skip and moved the read cursor
@@ -273,6 +295,12 @@ everything user-visible since the v0.99.99.1 tag.
 - MQTT page: external sensor names and values, which whoever publishes to a subscribed topic
   chooses, were written into the page as markup. They are HTML-escaped now, as is the
   subscribed-topics line. Host-tested; not yet tested on hardware.
+- Audit log: the redactor masked a forwarded command (`espnowremote`, `espnowroomcmd`,
+  `espnowtagcmd`) by calling itself, so a crafted 2047-byte line of nested forwards could use tens of
+  KB of stack on whichever task logged it (web, serial, Bluetooth, ESP-NOW and MQTT receive, OLED,
+  glasses, automations). Nested forwards are now redacted in a loop: the audit text is unchanged at
+  every depth (compared with the old code over 7125 generated lines) and the stack no longer grows
+  with nesting. Host-tested; not yet tested on hardware.
 ### Docs
 - Release gate, tracked-tree hygiene: the `git grep` in `RELEASING.md` could never come back empty,
   because the firmware and the tools use example and SoftAP addresses on purpose. It is now the host
