@@ -9,6 +9,7 @@
 #include <cstring>
 #include <ctime>
 #include <string>
+#include <utility>
 #include <vector>
 
 static unsigned checks = 0;
@@ -73,8 +74,14 @@ static bool readAutomationsJson(String& out) {
   return readText(AUTOMATIONS_JSON_FILE, out, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "automation.state"));
 }
 
-static time_t testTime(time_t*) { return 0; }  // clock invalid: no nextAt rewrite
+// The clock: 0 by default (no nextAt rewrite). Case 5 sets it.
+static time_t gClock = 0;
+static time_t testTime(time_t*) { return gClock; }
 #define time testTime
+// System_Clock's "is the clock set" (2020 or later).
+namespace Clock {
+static bool isValidEpoch(time_t t) { return t >= 1577836800; }
+}  // namespace Clock
 static void delay(int) {}
 
 // Condition double: "ROOM=here" is true, every other expression false.
@@ -105,8 +112,13 @@ static bool extractJsonString(const char*, const char*, char* out, size_t outSiz
   if (outSize) out[0] = '\0';
   return false;
 }
-static time_t computeNextRunTime(const char*, time_t) { return 0; }
-static bool updateAutomationNextAt(long, time_t) { return true; }
+// The next run after a boot fire, and the rewrites of it the pass asks for.
+static time_t computeNextRunTime(const char*, time_t from) { return from + 60; }
+static std::vector<std::pair<long, time_t>> gNextAtWrites;
+static bool updateAutomationNextAt(long id, time_t at) {
+  gNextAtWrites.emplace_back(id, at);
+  return true;
+}
 
 // Every strdup/free the inserted owner code makes is counted. The live set
 // catches a pointer that is never freed even if the totals happened to match.
@@ -145,6 +157,7 @@ static void reset(const std::string& file) {
   gLog.clear();
   gFiredEvents = 0;
   gStrdups = gFrees = 0;
+  gNextAtWrites.clear();
   CHECK(gLive.empty());
 }
 
@@ -207,6 +220,27 @@ int main() {
   const unsigned before = gStrdups;
   runAutomationsOnBoot();
   CHECK(gStrdups == before && gExecuted.size() == 1);
+  CHECK(gNextAtWrites.empty());  // no clock: nothing rewritten
+
+  // 5. After a boot fire the pass saves the automation's next run only with a
+  //    set clock. 55 hours after a boot without a time source time() reads
+  //    200000: a next run from 1970 is not saved (interval and delay triggers
+  //    count uptime in RAM then). With the clock set it is saved as before.
+  const std::string interval = R"({"automations":[
+    {"id": 31, "name": "boot-and-every", "enabled": true,
+     "triggers": [{"type": "boot"}, {"type": "interval", "intervalMs": 60000}],
+     "commands": ["d1"]}
+  ]})";
+  reset(interval);
+  gClock = 200000;
+  runAutomationsOnBoot();
+  CHECK(gExecuted.size() == 1 && gNextAtWrites.empty());
+  reset(interval);
+  gClock = 1763000000;
+  runAutomationsOnBoot();
+  CHECK(gExecuted.size() == 1 && gNextAtWrites.size() == 1 && gNextAtWrites[0].first == 31 &&
+        gNextAtWrites[0].second == 1763000060);
+  gClock = 0;
 
   std::printf("boot automation pass: %u checks passed\n", checks);
   return 0;

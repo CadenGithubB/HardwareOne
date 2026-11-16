@@ -215,7 +215,7 @@ assert start.index("ensureAutomationsFile()") < start.index(
 # Duplicate repair is reachable from schedulerTickMinute() on the main task.
 # Keep its 512-ID (2 KiB) scratch allocation off that constrained stack and
 # prove the single successful allocation is released on the normal exit.
-sanitize = function_body(automation, "bool sanitizeAutomationsJson(String& jsonRef)")
+sanitize = function_body(automation, "bool sanitizeAutomationsJson(String& jsonRef")
 assert "unsigned long seen[kMax]" not in sanitize
 allocation = sanitize.index('ps_alloc(kMax * sizeof(unsigned long)')
 failure = sanitize.index("if (!seen)", allocation)
@@ -234,6 +234,51 @@ assert "else writeTextAtomic(AUTOMATIONS_JSON_FILE, json, VFS::systemAuth(VFS::S
 assert tick.count("rescheduleAfterFire(") == 3
 assert tick.count("rescheduleAfterFire(id, obj.c_str(), now, false)") == 3
 assert "rescheduleAfterFire(idStr.toInt(), obj.c_str(), now, true);" in automation
+
+# Without a set clock interval and armed-delay triggers count uptime
+# (AutomationUptimeSchedule; behavior in automation_scheduler). The pass takes
+# the uptime as its now, carries the uptime schedule over to the clock once it
+# is set before it reads the file, and advances a next run from before the
+# clock was set without the "missed" line (which would name decades). A
+# manual run reschedules on the same now; `automation trigger` arms a delay in
+# RAM without a clock and no longer refuses for an unset time; the boot pass
+# writes no next run without a clock.
+tick_code = code_only(tick)
+assert "if (!clockSet) now = automationUptimeNow();" in tick_code
+assert tick_code.index("if (!clockSet) now = automationUptimeNow();") < tick_code.index(
+    "automationNextRunTime(obj.c_str(), now, clockSet)")
+assert "if (clockSet) automationCarryUptimeSchedule(now);" in tick_code
+assert tick_code.index("if (clockSet) automationCarryUptimeSchedule(now);") < tick_code.index(
+    "readAutomationsJson(json)")
+assert "timeValid" not in tick_code, "the pass no longer skips the clock scan on time() <= 0"
+missed = tick_code[tick_code.index("if (clockDue && (now - nextAt) > kMissedFireGraceSec)"):]
+assert missed.index("if (clockSet && !Clock::isValidEpoch(nextAt))") < missed.index("logSystemEvent(")
+run = code_only(function_body(automation, "const char* cmd_automation_run(const String& argsInput)"))
+assert "const time_t now = automationScheduleNow();" in run and "if (now > 0)" not in run
+arm = code_only(function_body(automation, "const char* cmd_automation_trigger(const String& argsInput)"))
+assert "system time not set" not in arm
+uptime_arm = function_body(arm, "if (!Clock::isValidEpoch(now))")
+assert "automationUptimeArm(" in uptime_arm and "updateAutomationTriggerNextAt(" not in uptime_arm
+boot_pass = code_only(function_body(automation, "void runAutomationsOnBoot()"))
+assert function_body(boot_pass, "if (Clock::isValidEpoch(now))").count("updateAutomationNextAt(") == 1
+assert "if (now > 0)" not in boot_pass
+cache_code = code_only(rebuild)
+assert "gAutomationsCacheOnUptime = !clockSet;" in cache_code
+assert "if (onUptime != gAutomationsCacheOnUptime.load()) return true;" in code_only(due)
+assert "gAutomationsCacheOnUptime = " in code_only(empty)
+# Adding (an edit through id= included) or deleting an automation drops its
+# uptime entries once the file is written, so without a clock an armed delay
+# does not survive the edit and an interval starts again, as with a clock
+# (behavior of automationUptimeForget in automation_scheduler).
+add_write = "if (!writeAutomationsJsonAtomic(json))"
+assert add.count("automationUptimeForget((long)id);") == 1
+assert add.index("RETURN_VALID_IF_VALIDATE_CSTR();") < add.index(add_write) < add.index(
+    "automationUptimeForget((long)id);")
+delete = code_only(function_body(automation, "const char* cmd_automation_delete(const String& argsInput)"))
+assert delete.count("automationUptimeForget(deletedId);") == 1
+assert delete.index("const long deletedId = strtol(json.c_str() + idPos") < delete.index(
+    "json = json.substring(0, arrayStart + 1)")
+assert delete.index(add_write) < delete.index("automationUptimeForget(deletedId);")
 
 # The main loop ticks unconditionally; the owner checks permission itself and
 # stops when another writer revoked it (automationSchedulerRunning stays true

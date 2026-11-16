@@ -56,10 +56,15 @@ static constexpr size_t SYSEVT_DETAIL_LEN = 80;
 static int systemEventKindFromName(const char* name) { return std::strcmp(name, "edge") == 0 ? 1 : -1; }
 static const char* systemEventKindName(uint8_t kind) { return kind == 1 ? "edge" : "?"; }
 
-// The scheduler's RAM schedule for short intervals is outside the page boundary.
+// The scheduler's RAM schedules (short intervals; everything that counts
+// uptime while the clock is not set) are outside the page boundary.
 static time_t automationVolatileNextAt(long, uint8_t, uint32_t, time_t fileNextAt, time_t, bool) {
   return fileNextAt;
 }
+static bool automationOnUptime(time_t) { return false; }
+static time_t automationScheduleNow() { return 0; }
+static time_t automationUptimeIntervalAt(long, uint8_t, uint32_t, time_t) { return 0; }
+static time_t automationUptimeArmedAt(long, uint8_t) { return 0; }
 
 // INSERT_OWNER_SUMMARY
 

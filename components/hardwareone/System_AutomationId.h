@@ -10,6 +10,8 @@
 // New ids are made here and stay in 1..kAutomationIdMax (0 means "no id" to
 // the scheduler's tables). A stored id above the range is given a new one by
 // the sanitizer; the scheduler asks automationIdTextAboveRange() to find it.
+// `automation add id=<n>` refuses an id outside the range
+// (automationIdTextInRange()).
 #pragma once
 
 #include <stdint.h>
@@ -45,4 +47,22 @@ inline bool automationIdTextAboveRange(const char* text) {
   while (*text == ' ' || *text == '\t' || *text == '\r' || *text == '\n') ++text;
   if (digits == 0 || *text != '\0') return false;
   return value > kAutomationIdMax && value <= 0xFFFFFFFFull;
+}
+
+// True when the text is a whole number from 1 to kAutomationIdMax, an id the
+// scheduler addresses: what `automation add id=<n>` accepts. Leading zeros and
+// surrounding white space are allowed; a sign, a fraction, 0 and anything
+// above the range are not.
+inline bool automationIdTextInRange(const char* text) {
+  if (!text) return false;
+  while (*text == ' ' || *text == '\t' || *text == '\r' || *text == '\n') ++text;
+  uint64_t value = 0;
+  int digits = 0;
+  for (; *text >= '0' && *text <= '9'; ++text) {
+    value = value * 10u + (uint32_t)(*text - '0');
+    if (value > kAutomationIdMax) return false;  // also stops a long run before it overflows
+    ++digits;
+  }
+  while (*text == ' ' || *text == '\t' || *text == '\r' || *text == '\n') ++text;
+  return digits > 0 && *text == '\0' && value >= 1u;
 }

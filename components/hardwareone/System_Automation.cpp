@@ -569,8 +569,10 @@ bool automationIdExistsInJson(const String& json, unsigned long id) {
 
 // Sanitize the IDs in the automations array using ArduinoJson: a duplicate,
 // and an id above kAutomationIdMax (which no reader can take, see
-// System_AutomationId.h), is replaced by a new unique id.
-bool sanitizeAutomationsJson(String& jsonRef) {
+// System_AutomationId.h), is replaced by a new unique id. `counts`, when
+// given, says how many of each it replaced (zero when nothing changed).
+bool sanitizeAutomationsJson(String& jsonRef, AutomationSanitizeCounts* counts) {
+  if (counts) *counts = AutomationSanitizeCounts{};
   // Use ArduinoJson for proper parsing
   PSRAM_JSON_DOC(doc);
   DeserializationError error = deserializeJson(doc, jsonRef);
@@ -640,6 +642,10 @@ bool sanitizeAutomationsJson(String& jsonRef) {
     automation["id"] = newId;
     if (seenCount < kMax) seen[seenCount++] = newId;
     changed = true;
+    if (counts) {
+      if (dup) counts->duplicates++;
+      else counts->outOfRange++;
+    }
     
     DEBUG_AUTOMATIONSF("[sanitize] Replaced %s id %lu with %lu", dup ? "duplicate" : "out-of-range", idVal, newId);
   }
@@ -789,6 +795,10 @@ static std::atomic_bool sAutomationRefreshPending{false};
 static AutomationsCacheEntry* gAutomationsCache = nullptr;
 static int gAutomationsCacheCount = 0;
 static std::atomic_bool gAutomationsCacheValid{false};
+// The cached next runs are uptime seconds: the clock was not set at the
+// rebuild (AutomationUptimeSchedule). automationsAnyDue() asks for a pass when
+// that no longer matches the clock.
+static std::atomic_bool gAutomationsCacheOnUptime{false};
 
 // Which SystemEventKind bits any ENABLED automation subscribes to via an
 // event trigger. 256-bit mask stored as 8x32-bit words (word = kind >> 5,
@@ -823,6 +833,7 @@ static void markAutomationsCacheEmptyValid() {
   for (size_t w = 0; w < AUTOMATION_EVENT_MASK_WORDS; ++w) {
     gAutomationEventKindMask[w] = 0;
   }
+  gAutomationsCacheOnUptime = !Clock::isValidEpoch(time(nullptr));
   gAutomationsCacheValid = true;
 }
 
@@ -987,16 +998,296 @@ static bool automationVolatileSet(long id, uint8_t slot, uint32_t intervalMs, ti
   return kept;
 }
 
+// ---------------------------------------------------------------------------
+// Interval and armed-delay triggers while the clock is not set
+// ---------------------------------------------------------------------------
+// Without a set clock (Clock::isValidEpoch false: no NTP, no RTC) time() counts
+// from 1970 at boot, and a next run in automations.json means nothing: one
+// saved while the clock was set lies in 2026 and never came due. So while the
+// clock is not set, interval and armed-delay triggers count uptime
+// (SelfDevice::uptimeSeconds: monotonic, it does not start again when millis()
+// wraps after 49.7 days) and their next runs live here, in RAM:
+// - an interval fires one interval after the scheduler first sees it (after a
+//   boot: one interval after automations start), then every interval;
+// - `automation trigger` arms a delay here, and its fire disarms it;
+// - neither reads nor writes its nextAt in the file.
+// Every other trigger has no next run meanwhile: a time of day waits for a set
+// clock (automationNextRunTime), boot and event triggers never had one.
+//
+// The table holds kEntries triggers. Without a clock an interval beyond them
+// waits for a set clock like a time of day, and `automation trigger` refuses
+// to arm a delay; a removed or disabled automation gives its interval entry
+// back on the next rebuild (an armed delay stays while the trigger exists).
+// A restart starts with an empty table, as an armed delay in RAM is lost.
+//
+// When the clock becomes set, the next scheduler pass carries an entry over to
+// clock time with the time it had left (automationCarryUptimeSchedule) when it
+// replaced the file: an armed delay, or an interval that already ran on uptime
+// (the file's next run is stale then). No such fire is repeated or made up,
+// and none is reported as missed by the decades between 1970 and now. An
+// interval still in its first countdown since the scheduler saw it changes
+// nothing in the file: it is dropped, and the trigger goes on from the file's
+// next run as before (the clock usually arrives seconds after boot, and a
+// carry would move a daily run's phase to the boot time on every power cycle).
+// Adding, editing or deleting an automation drops its entries
+// (automationUptimeForget), as it rebuilds or removes the stored triggers.
+//
+// A schedule time names its own base: below 2020 (not a valid epoch) it is an
+// uptime. The scheduler pass, the due cache and the post-fire update take the
+// uptime as their `now` while the clock is not set.
+struct AutomationUptimeSchedule {
+  static constexpr int kEntries = 32;
+  struct Entry {
+    uint32_t nextAt;      // uptime seconds
+    long     id;          // 0 = free
+    uint32_t intervalMs;  // an interval trigger's interval; 0 = an armed delay
+    uint8_t  slot;        // position in the triggers array
+    bool     seen;        // touched since the last sweep began
+    bool     ran;         // an interval advanced on uptime (fired, or advanced
+                          // past a missed run): the file's nextAt is stale
+  };
+  // No initializer: the one instance is static (zeroed .bss in PSRAM); a
+  // local one is made with `{}`.
+  Entry entries[kEntries];
+
+  Entry* find(long id, uint8_t slot) {
+    if (id == 0) return nullptr;
+    for (Entry& e : entries) {
+      if (e.id == id && e.slot == slot) return &e;
+    }
+    return nullptr;
+  }
+  Entry* findOrFree(long id, uint8_t slot) {
+    Entry* e = find(id, slot);
+    for (int i = 0; !e && i < kEntries; i++) {
+      if (entries[i].id == 0) e = &entries[i];
+    }
+    return e;
+  }
+  // An interval trigger's next run. First sight starts it: one interval from
+  // `now`. 0 when there is no interval or no room.
+  time_t interval(long id, uint8_t slot, uint32_t intervalMs, time_t now) {
+    if (id == 0 || intervalMs == 0) return 0;
+    Entry* e = find(id, slot);
+    if (e && e->intervalMs != intervalMs) {  // edited, or an armed delay before
+      *e = Entry{};
+      e = nullptr;
+    }
+    if (!e) {
+      e = findOrFree(id, slot);
+      if (!e) return 0;
+      e->nextAt = (uint32_t)(now + AutomationVolatileSchedule::stepOf(intervalMs));
+      e->id = id;
+      e->intervalMs = intervalMs;
+      e->slot = slot;
+    }
+    e->seen = true;
+    return (time_t)e->nextAt;
+  }
+  // An armed delay's run, 0 when the trigger is not armed.
+  time_t armed(long id, uint8_t slot) {
+    Entry* e = find(id, slot);
+    if (!e || e->intervalMs != 0) return 0;
+    e->seen = true;
+    return (time_t)e->nextAt;
+  }
+  // Arm a delay to run at `at`; a second arm moves it. False when full.
+  bool arm(long id, uint8_t slot, time_t at) {
+    if (id == 0) return false;
+    Entry* e = findOrFree(id, slot);
+    if (!e) return false;
+    *e = Entry{};
+    e->nextAt = (uint32_t)(at > 0 ? at : 1);
+    e->id = id;
+    e->slot = slot;
+    e->seen = true;
+    return true;
+  }
+  // After a fire: the trigger's next run, or 0 to free the entry (a delay
+  // that fired).
+  void advance(long id, uint8_t slot, time_t nextAt) {
+    Entry* e = find(id, slot);
+    if (!e) return;
+    if (nextAt <= 0) {
+      *e = Entry{};
+      return;
+    }
+    e->nextAt = (uint32_t)nextAt;
+    e->seen = true;
+    e->ran = true;
+  }
+  // Whether the clock-set carry-over keeps this entry: an armed delay, or an
+  // interval that ran on uptime. One still in its first countdown is dropped.
+  static bool carries(const Entry& e) { return e.id != 0 && (e.intervalMs == 0 || e.ran); }
+  // Drop every entry of automation `id` (it was added, edited or deleted).
+  void forget(long id) {
+    if (id == 0) return;
+    for (Entry& e : entries) {
+      if (e.id == id) e = Entry{};
+    }
+  }
+  bool empty() const {
+    for (const Entry& e : entries) {
+      if (e.id != 0) return false;
+    }
+    return true;
+  }
+  bool anyCarries() const {
+    for (const Entry& e : entries) {
+      if (carries(e)) return true;
+    }
+    return false;
+  }
+  void clear() {
+    for (Entry& e : entries) e = Entry{};
+  }
+  void beginSweep() {
+    for (Entry& e : entries) e.seen = false;
+  }
+  void endSweep() {
+    for (Entry& e : entries) {
+      if (e.id != 0 && !e.seen) e = Entry{};
+    }
+  }
+};
+
+// PSRAM: the table is only touched under its lock, never from an ISR.
+EXT_RAM_BSS_ATTR static AutomationUptimeSchedule sUptimeSchedule;
+static portMUX_TYPE sUptimeScheduleMux = portMUX_INITIALIZER_UNLOCKED;
+
+static time_t automationUptimeNow() { return (time_t)SelfDevice::uptimeSeconds(); }
+
+// True when `t` is not a clock time: an uptime (see above).
+static bool automationOnUptime(time_t t) { return !Clock::isValidEpoch(t); }
+
+// The scheduler's now: the clock when it is set, else the uptime.
+static time_t automationScheduleNow() {
+  const time_t now = time(nullptr);
+  return Clock::isValidEpoch(now) ? now : automationUptimeNow();
+}
+
+static time_t automationUptimeIntervalAt(long id, uint8_t slot, uint32_t intervalMs, time_t now) {
+  taskENTER_CRITICAL(&sUptimeScheduleMux);
+  const time_t at = sUptimeSchedule.interval(id, slot, intervalMs, now);
+  taskEXIT_CRITICAL(&sUptimeScheduleMux);
+  return at;
+}
+
+static time_t automationUptimeArmedAt(long id, uint8_t slot) {
+  taskENTER_CRITICAL(&sUptimeScheduleMux);
+  const time_t at = sUptimeSchedule.armed(id, slot);
+  taskEXIT_CRITICAL(&sUptimeScheduleMux);
+  return at;
+}
+
+static bool automationUptimeArm(long id, uint8_t slot, time_t at) {
+  taskENTER_CRITICAL(&sUptimeScheduleMux);
+  const bool armed = sUptimeSchedule.arm(id, slot, at);
+  taskEXIT_CRITICAL(&sUptimeScheduleMux);
+  return armed;
+}
+
+static void automationUptimeAdvance(long id, uint8_t slot, time_t nextAt) {
+  taskENTER_CRITICAL(&sUptimeScheduleMux);
+  sUptimeSchedule.advance(id, slot, nextAt);
+  taskEXIT_CRITICAL(&sUptimeScheduleMux);
+}
+
+// `automation add` (also an edit through id=) and `automation delete` drop the
+// automation's uptime entries, as they rebuild its stored triggers with a
+// fresh next run or remove them: without a clock an armed delay does not
+// survive the edit (with one, the rebuilt trigger is written unarmed), and an
+// interval starts again one interval after the scheduler next sees it.
+static void automationUptimeForget(long id) {
+  taskENTER_CRITICAL(&sUptimeScheduleMux);
+  sUptimeSchedule.forget(id);
+  taskEXIT_CRITICAL(&sUptimeScheduleMux);
+}
+
+static void automationUptimeSweep(bool begin) {
+  taskENTER_CRITICAL(&sUptimeScheduleMux);
+  if (begin) sUptimeSchedule.beginSweep();
+  else sUptimeSchedule.endSweep();
+  taskEXIT_CRITICAL(&sUptimeScheduleMux);
+}
+
+// The clock is set (`now` is clock time) and the table may still hold the
+// uptime schedule: give every entry that replaced the file
+// (AutomationUptimeSchedule::carries: an armed delay, an interval that ran on
+// uptime) the time it had left, from now. A short interval goes to the RAM
+// schedule above (AutomationVolatileSchedule); a long one, an interval that
+// finds that table full and an armed delay are written to their trigger's
+// nextAt, in one write. An entry that was due runs now, not as a missed run.
+// An interval still in its first countdown is dropped: its trigger keeps the
+// file's next run, a future one as it is and a past one under the pass's
+// missed-run rule, as without the uptime schedule. Then the table is empty.
+// Called by the scheduler pass before it reads the file, so it writes without
+// notifying: the pass's trailing rebuild reads the result.
+static void automationCarryUptimeSchedule(time_t now) {
+  // Nothing to carry (the table is empty, or holds only first countdowns):
+  // no file read; the table is emptied.
+  taskENTER_CRITICAL(&sUptimeScheduleMux);
+  const bool any = sUptimeSchedule.anyCarries();
+  if (!any) sUptimeSchedule.clear();
+  taskEXIT_CRITICAL(&sUptimeScheduleMux);
+  if (!any) return;
+  const time_t upNow = automationUptimeNow();
+  bool changed = false;
+  String json;
+  PSRAM_JSON_DOC(doc);
+  if (readAutomationsJson(json) && !deserializeJson(doc, json)) {
+    for (JsonObject automation : doc["automations"].as<JsonArray>()) {
+      const long id = automation["id"] | 0L;
+      int slot = -1;
+      for (JsonObject t : automation["triggers"].as<JsonArray>()) {
+        if (++slot >= 255) break;
+        AutomationUptimeSchedule::Entry e{};
+        taskENTER_CRITICAL(&sUptimeScheduleMux);
+        AutomationUptimeSchedule::Entry* held = sUptimeSchedule.find(id, (uint8_t)slot);
+        if (held) {
+          e = *held;
+          *held = AutomationUptimeSchedule::Entry{};
+        }
+        taskEXIT_CRITICAL(&sUptimeScheduleMux);
+        if (!AutomationUptimeSchedule::carries(e)) continue;
+        const time_t left = (time_t)e.nextAt > upNow ? (time_t)e.nextAt - upNow : 0;
+        const time_t at = now + left;
+        if (e.intervalMs != 0 && automationVolatileSet(id, (uint8_t)slot, e.intervalMs, at)) continue;
+        t["nextAt"] = (unsigned long)at;
+        changed = true;
+      }
+    }
+  }
+  // Entries no trigger in the file holds any more, or a file that did not
+  // read: nothing is left to carry.
+  taskENTER_CRITICAL(&sUptimeScheduleMux);
+  sUptimeSchedule.clear();
+  taskEXIT_CRITICAL(&sUptimeScheduleMux);
+  if (!changed) return;
+  json = "";
+  serializeJsonPretty(doc, json);
+  writeTextAtomic(AUTOMATIONS_JSON_FILE, json, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "automation.state"));
+}
+
 // An automation as a client should see it: a short interval shows the next
 // run the scheduler holds in RAM instead of the stale value in the file. The
-// web page reloads its list while a shown next run is in the past.
+// web page reloads its list while a shown next run is in the past. Without a
+// set clock interval and delay triggers count uptime, which no clock shows:
+// they show no next run (null) instead of the file's value, which the
+// scheduler does not use meanwhile.
 static void automationApplyRuntimeSchedule(JsonObject automation) {
   const long id = automation["id"] | 0L;
+  const bool onUptime = automationOnUptime(time(nullptr));
   int slot = -1;
   JsonArray triggers = automation["triggers"].as<JsonArray>();
   for (JsonObject t : triggers) {
     if (++slot >= 255) break;
-    if (strcmp(t["type"] | "", "interval") != 0) continue;
+    const char* type = t["type"] | "";
+    if (onUptime) {
+      if (strcmp(type, "interval") == 0 || strcmp(type, "manual") == 0) t["nextAt"] = nullptr;
+      continue;
+    }
+    if (strcmp(type, "interval") != 0) continue;
     const uint32_t intervalMs = t["intervalMs"] | uint32_t(0);
     const unsigned long fileNextAt = t["nextAt"] | 0UL;
     taskENTER_CRITICAL(&sVolatileScheduleMux);
@@ -1040,8 +1331,12 @@ static void rebuildAutomationsCache() {
   // out here as well, or its stored next run would make automationsAnyDue()
   // ask for a full pass on every loop while the pass refuses to fire it.
   const bool clockSet = Clock::isValidEpoch(now);
+  // Without a set clock the cached next runs are uptime seconds: an interval
+  // or an armed delay from AutomationUptimeSchedule, nothing else.
+  const time_t upNow = clockSet ? 0 : automationUptimeNow();
   bool sawAll = true;
   automationVolatileSweep(true);
+  if (!clockSet) automationUptimeSweep(true);
   for (JsonObjectConst a : autos) {
     if (n >= AUTOMATIONS_CACHE_MAX) { sawAll = false; break; }
     gAutomationsCache[n].id = a["id"].as<long>();
@@ -1066,12 +1361,20 @@ static void rebuildAutomationsCache() {
           time_t na = (time_t)raw;
           // A short interval's next run is in RAM; the file value is stale.
           // A disabled automation holds no entry, so enabling it restarts
-          // its interval.
+          // its interval. Without a set clock every interval counts uptime.
           if (gAutomationsCache[n].enabled && slot < 255 &&
               strcmp(t["type"] | "", "interval") == 0) {
             const uint32_t intervalMs = t["intervalMs"] | uint32_t(0);
-            na = automationVolatileNextAt(gAutomationsCache[n].id, (uint8_t)slot, intervalMs,
-                                          na, now, now > 0);
+            na = clockSet ? automationVolatileNextAt(gAutomationsCache[n].id, (uint8_t)slot, intervalMs,
+                                                     na, now, now > 0)
+                          : automationUptimeIntervalAt(gAutomationsCache[n].id, (uint8_t)slot,
+                                                       intervalMs, upNow);
+          } else if (!clockSet) {
+            // The file's next run is not used without a set clock; an armed
+            // delay (also on a disabled automation) is kept in RAM.
+            na = (slot < 255 && strcmp(t["type"] | "", "manual") == 0)
+                     ? automationUptimeArmedAt(gAutomationsCache[n].id, (uint8_t)slot)
+                     : 0;
           }
           if (na > 0 && (minAt == 0 || na < minAt)) minAt = na;
         }
@@ -1086,8 +1389,12 @@ static void rebuildAutomationsCache() {
   }
   // Every trigger in the file was visited: entries left unseen belong to
   // automations or triggers that were removed or disabled.
-  if (sawAll) automationVolatileSweep(false);
+  if (sawAll) {
+    automationVolatileSweep(false);
+    if (!clockSet) automationUptimeSweep(false);
+  }
   gAutomationsCacheCount = n;
+  gAutomationsCacheOnUptime = !clockSet;
   for (size_t w = 0; w < AUTOMATION_EVENT_MASK_WORDS; ++w) {
     gAutomationEventKindMask[w] = evtMask[w];
   }
@@ -1148,6 +1455,12 @@ static void automationClearCondBlock(long id) {
 static bool automationsAnyDue(time_t now) {
   if (!gAutomationsCache) return true;       // force a full tick to allocate/rebuild
   if (!gAutomationsCacheValid) return true;  // force a full tick to rebuild
+  // Without a set clock the cache holds uptime seconds. When the clock has
+  // been set (or lost) since the rebuild, one pass carries the schedule over
+  // and rebuilds.
+  const bool onUptime = automationOnUptime(now);
+  if (onUptime != gAutomationsCacheOnUptime.load()) return true;
+  if (onUptime) now = automationUptimeNow();
   for (int i = 0; i < gAutomationsCacheCount; i++) {
     if (gAutomationsCache[i].enabled && gAutomationsCache[i].nextAt > 0 && now >= gAutomationsCache[i].nextAt) {
       // Deferred-by-condition automations stay due by design; don't let one
@@ -1513,7 +1826,9 @@ void runAutomationsOnBoot() {
 
     DEBUG_AUTOMATIONSF("[automations] Boot automation completed: %s", autoName.c_str());
 
-    if (now > 0) {
+    // Without a set clock nothing is written: interval and delay triggers
+    // then count uptime in RAM, and a next run from 1970 means nothing.
+    if (Clock::isValidEpoch(now)) {
       time_t newNextAt = computeNextRunTime(obj.c_str(), now);
       if (newNextAt > 0) {
         updateAutomationNextAt(id, newNextAt);
@@ -1723,6 +2038,15 @@ const char* cmd_automation_add(const String& argsInput) {
   if (bootDelayMsStr.length() > 0 && !isNumeric(bootDelayMsStr)) {
     return "Error: bootdelayms must be numeric (milliseconds)";
   }
+
+  // id= adds or replaces the automation with that id. Only an id the scheduler
+  // addresses is taken: one outside 1..kAutomationIdMax used to be stored and
+  // then renumbered by the next scheduler pass (System_AutomationId.h).
+  String idOverrideStr = a.value("id");
+  static_assert(kAutomationIdMax == 2147483647u, "the reply below names the id range");
+  if (idOverrideStr.length() > 0 && !automationIdTextInRange(idOverrideStr.c_str())) {
+    return "Error: id must be a whole number from 1 to 2147483647";
+  }
   
   bool runAtBoot = (argIsOn(runAtBootStr) || runAtBootStr.equalsIgnoreCase("yes"));
   
@@ -1732,7 +2056,6 @@ const char* cmd_automation_add(const String& argsInput) {
   }
   
   // If a specific id= was provided and that entry already exists, remove it first
-  String idOverrideStr = a.value("id");
   if (idOverrideStr.length() > 0) {
     unsigned long overrideId = strtoul(idOverrideStr.c_str(), nullptr, 10);
     if (automationIdExistsInJson(json, overrideId)) {
@@ -1998,6 +2321,9 @@ const char* cmd_automation_add(const String& argsInput) {
   }
   
   DEBUG_AUTOMATIONSF("[autos add] wrote automations.json (len=%d) id=%lu", json.length(), id);
+  // The stored triggers were rebuilt with fresh next runs: an uptime arm or
+  // interval phase of the old ones goes too (AutomationUptimeSchedule).
+  automationUptimeForget((long)id);
   
   DEBUG_AUTOMATIONSF("[autos add] scheduler refresh queued (type=%s)", typeNorm.c_str());
   
@@ -2111,6 +2437,8 @@ const char* cmd_automation_delete(const String& argsInput) {
     return "Error: malformed JSON";
   }
   String automationObj = json.substring(objStart, objEnd + 1);
+  // The id of the object that matched (read from it, not from the argument).
+  const long deletedId = strtol(json.c_str() + idPos + (sizeof("\"id\": ") - 1), nullptr, 10);
   extractJsonString(automationObj.c_str(), "\"createdBy\"", createdByBuf, sizeof(createdByBuf));
   String createdBy = createdByBuf;
   // Capture the display name before the object is spliced out of the JSON,
@@ -2174,6 +2502,9 @@ const char* cmd_automation_delete(const String& argsInput) {
     return "Error: failed to write automations.json";
   }
   
+  // Its uptime arm or interval phase goes with it (AutomationUptimeSchedule).
+  automationUptimeForget(deletedId);
+
   // SYSTEM-EVENT: automation removed and the change persisted.
   systemEventPost(SYSEVT_AUTOMATION_DELETED, deletedNameBuf);
 
@@ -2404,10 +2735,9 @@ const char* cmd_automation_run(const String& argsInput) {
   systemEventPost(SYSEVT_AUTOMATION_FIRED, autoName.c_str(), "manual");
   
   // Advance nextAt after manual execution via the unified post-fire helper.
-  time_t now = time(nullptr);
-  if (now > 0) {
-    rescheduleAfterFire(idStr.toInt(), obj.c_str(), now, true);
-  }
+  // Without a set clock `now` is the uptime and the uptime schedule advances.
+  const time_t now = automationScheduleNow();
+  rescheduleAfterFire(idStr.toInt(), obj.c_str(), now, true);
   
   // Log automation end if logging is active
   if (automationLogActive()) {
@@ -2422,8 +2752,10 @@ const char* cmd_automation_run(const String& argsInput) {
   return "OK";
 }
 
-// Arm an afterDelay automation's timer: nextAt = now + delayMs/1000.
-// No commands run here; the scheduler fires them when the delay elapses.
+// Arm an afterDelay automation's timer: nextAt = now + delayMs/1000, saved in
+// the file; without a set clock it counts uptime in RAM instead
+// (AutomationUptimeSchedule). No commands run here; the scheduler fires them
+// when the delay elapses.
 const char* cmd_automation_trigger(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
@@ -2484,15 +2816,22 @@ const char* cmd_automation_trigger(const String& argsInput) {
   }
 
   time_t now = time(nullptr);
-  if (now <= 0) {
-    return "Error: system time not set";
-  }
-  time_t nextAt = now + (manualDelayMs / 1000);
-
   int delayMs = manualDelayMs;  // alias for the log message below
-
-  if (!updateAutomationTriggerNextAt(id, manualIdx, nextAt)) {
-    return "Error: failed to update nextAt";
+  if (!Clock::isValidEpoch(now)) {
+    // No set clock: the delay counts uptime and is armed in RAM, not in the
+    // file (AutomationUptimeSchedule). It is lost on a restart.
+    const time_t at = automationUptimeNow() + (manualDelayMs / 1000);
+    if (manualIdx >= 255 || !automationUptimeArm(id, (uint8_t)manualIdx, at)) {
+      static_assert(AutomationUptimeSchedule::kEntries == 32, "the reply below names the table size");
+      return "Error: cannot arm while the clock is not set: all 32 uptime timers are in use";
+    }
+  } else {
+    time_t nextAt = now + (manualDelayMs / 1000);
+    if (!updateAutomationTriggerNextAt(id, manualIdx, nextAt)) {
+      return "Error: failed to update nextAt";
+    }
+    // An arm from before the clock was set is replaced by this one.
+    if (manualIdx < 255) automationUptimeAdvance(id, (uint8_t)manualIdx, 0);
   }
 
   // Wake the scheduler so it re-reads the file and picks up the armed nextAt.
@@ -2505,6 +2844,28 @@ const char* cmd_automation_trigger(const String& argsInput) {
   broadcastOutput(msg);
   cliHint("the commands run later when the timer elapses, not now - to capture what they output, start 'autolog start <file>' first and read it back with 'fileview \"<file>\"'");
   return "OK";
+}
+
+// The reply of `automation sanitize` when it changed the file: what it fixed,
+// with counts. "Sanitized automations.json: fixed 2 duplicate IDs",
+// "... fixed 1 out-of-range ID", "... fixed 1 duplicate ID and 3 out-of-range
+// IDs". An out-of-range id is one above kAutomationIdMax (System_AutomationId.h).
+static const char* automationSanitizeReply(const AutomationSanitizeCounts& counts) {
+  EXT_RAM_BSS_ATTR static char reply[112];
+  char duplicates[40] = "";
+  char outOfRange[40] = "";
+  if (counts.duplicates > 0) {
+    snprintf(duplicates, sizeof(duplicates), "%d duplicate ID%s", counts.duplicates,
+             counts.duplicates == 1 ? "" : "s");
+  }
+  if (counts.outOfRange > 0) {
+    snprintf(outOfRange, sizeof(outOfRange), "%d out-of-range ID%s", counts.outOfRange,
+             counts.outOfRange == 1 ? "" : "s");
+  }
+  if (!duplicates[0] && !outOfRange[0]) return "Sanitized automations.json: fixed IDs";
+  snprintf(reply, sizeof(reply), "Sanitized automations.json: fixed %s%s%s", duplicates,
+           duplicates[0] && outOfRange[0] ? " and " : "", outOfRange);
+  return reply;
 }
 
 // Main automation command dispatcher
@@ -2565,10 +2926,11 @@ const char* cmd_automation(const String& argsInput) {
     if (!readAutomationsJson(json)) {
       return automationsReadErrorReply();
     }
-    if (sanitizeAutomationsJson(json)) {
+    AutomationSanitizeCounts fixed;
+    if (sanitizeAutomationsJson(json, &fixed)) {
       if (!writeAutomationsJsonAtomic(json)) return "Error: failed to write automations.json";
       DEBUG_AUTOMATIONSF("[autos] CLI sanitize: fixed duplicate IDs; scheduler refresh queued");
-      return "Sanitized automations.json: fixed duplicate IDs";
+      return automationSanitizeReply(fixed);
     } else {
       DEBUG_AUTOMATIONSF("[autos] CLI sanitize: no duplicate IDs found");
       return "Sanitize: no changes needed";
@@ -2775,14 +3137,17 @@ static bool parseOneTrigger(JsonVariantConst trig, Trigger& out) {
 
 // Parse an automation object's `triggers` array. Fills `out[]` up to
 // `maxCount` entries. Returns the number of valid triggers (0 if none).
-static int triggersFromJson(const char* automationJson, Trigger* out, int maxCount) {
+// `now` is the scheduler's now (automationScheduleNow): an uptime while the
+// clock is not set, and then each nextAt is the uptime schedule's
+// (AutomationUptimeSchedule) instead of the file's.
+static int triggersFromJson(const char* automationJson, Trigger* out, int maxCount, time_t now) {
   if (maxCount <= 0) return 0;
   PSRAM_JSON_DOC(doc);
   if (deserializeJson(doc, automationJson)) return 0;
   JsonArrayConst arr = doc["triggers"].as<JsonArrayConst>();
   if (arr.isNull()) return 0;
   const long id = doc["id"] | 0L;
-  const time_t now = time(nullptr);
+  const bool onUptime = automationOnUptime(now);
   int n = 0;
   int slot = -1;
   for (JsonVariantConst t : arr) {
@@ -2792,17 +3157,27 @@ static int triggersFromJson(const char* automationJson, Trigger* out, int maxCou
     if (parseOneTrigger(t, tmp)) {
       if (slot < 255) {
         tmp.slot = (uint8_t)slot;
-        if (tmp.type == Trigger::INTERVAL) {
+        if (onUptime) {
+          tmp.nextAt = tmp.type == Trigger::INTERVAL
+                           ? automationUptimeIntervalAt(id, tmp.slot, tmp.intervalMs, now)
+                       : tmp.type == Trigger::MANUAL ? automationUptimeArmedAt(id, tmp.slot)
+                                                     : 0;
+        } else if (tmp.type == Trigger::INTERVAL) {
           tmp.nextAt = automationVolatileNextAt(id, tmp.slot, tmp.intervalMs, tmp.nextAt,
                                                 now, now > 0);
         }
       } else {
         tmp.slot = 255;  // never matches a RAM entry
+        if (onUptime) tmp.nextAt = 0;
       }
       out[n++] = tmp;
     }
   }
   return n;
+}
+
+static int triggersFromJson(const char* automationJson, Trigger* out, int maxCount) {
+  return triggersFromJson(automationJson, out, maxCount, automationScheduleNow());
 }
 
 // ---------------------------------------------------------------------------
@@ -3111,8 +3486,11 @@ static bool onFired(Trigger& s, time_t firedAt) {
 // triggers array back to the JSON file.
 static void rescheduleAfterFire(long id, const char* automationJson, time_t firedAt, bool notify) {
   Trigger triggers[MAX_TRIGGERS];
-  int n = triggersFromJson(automationJson, triggers, MAX_TRIGGERS);
+  int n = triggersFromJson(automationJson, triggers, MAX_TRIGGERS, firedAt);
   if (n == 0) return;  // Malformed — scheduler will skip on next rebuild.
+  // `firedAt` is an uptime while the clock is not set: every next run then
+  // stays in AutomationUptimeSchedule and the file is not written.
+  const bool onUptime = automationOnUptime(firedAt);
 
   // For each trigger that was due, advance it. Leave others untouched.
   bool save = false;
@@ -3120,6 +3498,10 @@ static void rescheduleAfterFire(long id, const char* automationJson, time_t fire
     if (triggers[i].nextAt > 0 && triggers[i].nextAt <= firedAt) {
       onFired(triggers[i], firedAt);  // mutates anchor if needed
       triggers[i].nextAt = nextFire(triggers[i], firedAt);  // 0 = disarm
+      if (onUptime) {
+        if (triggers[i].slot < 255) automationUptimeAdvance(id, triggers[i].slot, triggers[i].nextAt);
+        continue;
+      }
       const bool inRam = triggers[i].type == Trigger::INTERVAL && triggers[i].slot < 255 &&
                          automationVolatileSet(id, triggers[i].slot, triggers[i].intervalMs,
                                                triggers[i].nextAt);
@@ -3239,11 +3621,12 @@ static int automationRecomputeAllClockTriggers(time_t now, int* outSkipped) {
 // scheduled. `clockSet` is System_Clock's answer to "is the clock set". While
 // it is false a trigger that names a time of day (daily, weekly, monthly,
 // yearly) is left out: against a clock that still counts from 1970 its
-// "07:00" is seven hours after boot. Interval and armed-delay triggers only
-// count seconds and are scheduled as before.
+// "07:00" is seven hours after boot. Interval and armed-delay triggers then
+// count uptime: `fromTime` is the uptime and their next runs come from
+// AutomationUptimeSchedule (triggersFromJson).
 static time_t automationNextRunTime(const char* automationJson, time_t fromTime, bool clockSet) {
   Trigger triggers[MAX_TRIGGERS];
-  int n = triggersFromJson(automationJson, triggers, MAX_TRIGGERS);
+  int n = triggersFromJson(automationJson, triggers, MAX_TRIGGERS, fromTime);
   if (n == 0) return 0;
   // For triggers without persisted nextAt, compute fresh ones.
   time_t minAt = 0;
@@ -4430,15 +4813,15 @@ static SystemEvent* sEventBuf = nullptr;
 // Core scheduler logic - extracted for reuse
 static void schedulerTickMinute() {
   time_t now = time(nullptr);
-  // time() has started to count. This is not "the clock is set": one second
-  // after boot it is true on a clock that reads 1970.
-  bool timeValid = (now > 0);
   // System_Clock owns "is the clock set". A trigger that names a time of day
-  // waits for it; interval and armed-delay triggers run on a counting clock.
+  // waits for it. Without it interval and armed-delay triggers count uptime
+  // (AutomationUptimeSchedule): `now` is then the uptime, the base of every
+  // next run this pass compares, logs and reschedules.
   const bool clockSet = Clock::isValidEpoch(now);
+  if (!clockSet) now = automationUptimeNow();
 
-  // Drain pending bus events BEFORE the time-sync bail so event triggers
-  // work on devices without NTP/RTC. Events older than 60 s are discarded
+  // Drain pending bus events first; event triggers work on devices without
+  // NTP/RTC. Events older than 60 s are discarded
   // unmatched — they piled up while automations were disabled, and firing
   // on minute-old edges after a re-enable would surprise the user.
   static uint32_t sEventCursor = UINT32_MAX;  // UINT32_MAX = start "from now"
@@ -4496,9 +4879,9 @@ static void schedulerTickMinute() {
     // the same tick as that failure, so warning again would just double it.
   }
 
-  // Before time() counts at all only event fires are possible; skip the clock
-  // scan. A clock that counts but is not set is handled per trigger below.
-  if (!timeValid && evCount == 0) return;
+  // The clock was set while interval or armed-delay triggers counted uptime:
+  // carry their schedule over to it before the file is read (no-op otherwise).
+  if (clockSet) automationCarryUptimeSchedule(now);
 
   DEBUG_AUTOMATIONSF("[automations] tick now=%lu", (unsigned long)now);
 
@@ -4594,8 +4977,8 @@ static void schedulerTickMinute() {
     // min moves forward and the cache/fire-check agree again.
     // With the clock not set a time-of-day trigger is not part of the minimum
     // (automationNextRunTime), so it cannot be due.
-    time_t nextAt = timeValid ? automationNextRunTime(obj.c_str(), now, clockSet) : 0;
-    bool clockDue = (timeValid && nextAt > 0 && now >= nextAt);
+    time_t nextAt = automationNextRunTime(obj.c_str(), now, clockSet);
+    bool clockDue = (nextAt > 0 && now >= nextAt);
 
     // Event triggers: fire when a drained bus event matches one of this
     // automation's event triggers. At most one fire per automation per tick
@@ -4652,11 +5035,20 @@ static void schedulerTickMinute() {
     // automations.json rewrite. Past the grace window we advance the schedule
     // WITHOUT running the commands: a 07:00 morning routine should not run at
     // 14:00 because that is when the clock became known.
+    // A next run that is no clock time while the clock is set was computed
+    // before it was set (`automation add`, `automation recompute` or older
+    // firmware counted from 1970): it is advanced the same way, but not
+    // reported as a run decades late.
     if (clockDue && (now - nextAt) > kMissedFireGraceSec) {
-      logSystemEvent("AUTO", "automation %ld missed its %ld s-late schedule — skipped, rescheduled",
-                     id, (long)(now - nextAt));
-      DEBUG_AUTOMATIONSF("[autos] id=%ld MISSED by %lds (grace %ds) — advancing without firing",
-             id, (long)(now - nextAt), (int)kMissedFireGraceSec);
+      if (clockSet && !Clock::isValidEpoch(nextAt)) {
+        DEBUG_AUTOMATIONSF("[autos] id=%ld next run %ld predates the clock; advancing without firing",
+                           id, (long)nextAt);
+      } else {
+        logSystemEvent("AUTO", "automation %ld missed its %ld s-late schedule — skipped, rescheduled",
+                       id, (long)(now - nextAt));
+        DEBUG_AUTOMATIONSF("[autos] id=%ld MISSED by %lds (grace %ds) — advancing without firing",
+               id, (long)(now - nextAt), (int)kMissedFireGraceSec);
+      }
       rescheduleAfterFire(id, obj.c_str(), now, false);
       automationClearCondBlock(id);
       if (!eventDue) {  // an event match still deserves its fire

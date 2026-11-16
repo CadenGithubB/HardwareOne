@@ -55,13 +55,22 @@ void automationOnSystemEvent(uint8_t kind);
 
 // Automation file operations
 extern const char* AUTOMATIONS_JSON_FILE;
-bool sanitizeAutomationsJson(String& jsonRef);
+// What sanitizeAutomationsJson changed: ids given to a second holder of the
+// same id, and ids above the range (System_AutomationId.h) given a new one.
+struct AutomationSanitizeCounts {
+  int duplicates = 0;
+  int outOfRange = 0;
+};
+// True when it changed the document. `counts`, when given, says what it fixed.
+bool sanitizeAutomationsJson(String& jsonRef, AutomationSanitizeCounts* counts = nullptr);
 // Redact credential-bearing command strings in an automations JSON document
 // before it crosses a CLI/HTTP/log boundary. Returns an empty String on parse
 // failure so callers fail closed instead of echoing malformed raw storage.
 // The result also shows each short interval's next run as the scheduler holds
 // it in RAM; the file keeps an older value for those (see
-// AutomationVolatileSchedule in System_Automation.cpp).
+// AutomationVolatileSchedule in System_Automation.cpp). While the clock is not
+// set, interval and delay triggers count uptime and show no next run (null;
+// AutomationUptimeSchedule).
 String redactAutomationsJsonForResponse(const String& json);
 // Reads automations.json. False when it is missing, unreadable or written by
 // newer firmware (a "version" above kAutomationsFileVersion): such a file is

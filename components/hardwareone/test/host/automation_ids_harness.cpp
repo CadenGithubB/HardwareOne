@@ -2,7 +2,9 @@
 //
 // System_AutomationId.h is included as it is (test_automation_ids.py puts the
 // component directory on the include path). The driver inserts the production
-// automationIdExistsInJson and sanitizeAutomationsJson (System_Automation.cpp).
+// automationIdExistsInJson, sanitizeAutomationsJson and the reply of
+// `automation sanitize`, automationSanitizeReply (System_Automation.cpp), with
+// the AutomationSanitizeCounts struct from System_Automation.h.
 // ArduinoJson is the real library. Host boundaries: the Arduino String stub, a
 // settable 32-bit millis(), a counting random(), the scratch allocator and the
 // log macros.
@@ -22,6 +24,7 @@ void webBatchTestStringAppend() {}
 #define PSRAM_JSON_DOC(name) JsonDocument name
 #define DEBUG_AUTOMATIONSF(...) ((void)0)
 #define ERROR_SYSTEMF(...) ((void)0)
+#define EXT_RAM_BSS_ATTR
 enum class AllocPref { RequireInternal, PreferPsram };
 static void* ps_alloc(size_t size, AllocPref, const char*) { return std::malloc(size); }
 static void ps_free(void* memory) { std::free(memory); }
@@ -151,6 +154,45 @@ int main() {
     check(automationIdTextAboveRange(id) && sanitizeAutomationsJson(json) && inRange(idsOf(json)[0]),
           std::string("a flagged id is renumbered: ") + id);
   }
+  // ---- what the sanitizer fixed, and the reply of `automation sanitize` ----
+  {
+    gNowMs = 5000;
+    gRandomStep = 1;
+    AutomationSanitizeCounts counts;
+    counts.duplicates = counts.outOfRange = 9;
+    String clean(R"({"automations":[{"id":1},{"id":2147483647}]})");
+    check(!sanitizeAutomationsJson(clean, &counts) && counts.duplicates == 0 && counts.outOfRange == 0,
+          "nothing to fix: both counts are 0");
+    String dups(R"({"automations":[{"id":4},{"id":4},{"id":4}]})");
+    check(sanitizeAutomationsJson(dups, &counts) && counts.duplicates == 2 && counts.outOfRange == 0,
+          "two duplicates are counted as duplicates");
+    check(std::string(automationSanitizeReply(counts)) == "Sanitized automations.json: fixed 2 duplicate IDs",
+          std::string("duplicates only: ") + automationSanitizeReply(counts));
+    String above(R"({"automations":[{"id":4},{"id":3000000000}]})");
+    check(sanitizeAutomationsJson(above, &counts) && counts.duplicates == 0 && counts.outOfRange == 1,
+          "an id above the range is counted as out of range, not as a duplicate");
+    check(std::string(automationSanitizeReply(counts)) == "Sanitized automations.json: fixed 1 out-of-range ID",
+          std::string("out of range only: ") + automationSanitizeReply(counts));
+    String both(R"({"automations":[{"id":4},{"id":2147483648},{"id":4},{"id":4294967295},{"id":3000000000}]})");
+    check(sanitizeAutomationsJson(both, &counts) && counts.duplicates == 1 && counts.outOfRange == 3,
+          "one duplicate and three ids above the range");
+    check(std::string(automationSanitizeReply(counts)) ==
+              "Sanitized automations.json: fixed 1 duplicate ID and 3 out-of-range IDs",
+          std::string("both: ") + automationSanitizeReply(counts));
+    String plain(R"({"automations":[{"id":4},{"id":4}]})");
+    check(sanitizeAutomationsJson(plain), "the counts are optional");
+  }
+
+  // ---- the ids `automation add id=<n>` accepts ----------------------------------
+  for (const char* ok : {"1", "5000", "2147483647", " 42 ", "007", "0000000000000000000002147483647"}) {
+    check(automationIdTextInRange(ok), std::string("accepted as an id: '") + ok + "'");
+  }
+  for (const char* refused : {"0", "2147483648", "3000000000", "4294967295", "4294967296", "99999999999999999999",
+                              "-5", "+5", "5.0", "5x", "abc", "", " ", "1 2"}) {
+    check(!automationIdTextInRange(refused), std::string("refused as an id: '") + refused + "'");
+  }
+  check(!automationIdTextInRange(nullptr), "no text is not an id");
+
   // automationIdExistsInJson finds what the add path writes.
   check(automationIdExistsInJson(String("{\n  \"id\": 852516352,\n"), 852516352ul), "the add path's own id form is found");
 

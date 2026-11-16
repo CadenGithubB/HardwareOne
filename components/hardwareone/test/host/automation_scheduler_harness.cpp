@@ -137,8 +137,21 @@ bool automationSchedulerRunning();
 void automationTick();
 static void schedulerTickMinute();
 
-// Clock::isValidEpoch from System_Clock.cpp, the owner of "is the clock set".
+// Clock::isValidEpoch from System_Clock.cpp, the owner of "is the clock set",
+// goes in as ClockOwner. The cases written before the uptime schedule count
+// small numbers as a set clock (clockForcedSet, the default after reset()); the
+// clock and uptime cases clear it and ask the owner itself.
 // INSERT_CLOCK_OWNER
+static std::atomic<bool> clockForcedSet{true};
+namespace Clock {
+static bool isValidEpoch(time_t t) { return clockForcedSet.load() || ClockOwner::isValidEpoch(t); }
+}  // namespace Clock
+// SelfDevice::uptimeSeconds, settable; it does not follow millis(), which wraps.
+static std::atomic<uint32_t> uptimeSec{0};
+namespace SelfDevice {
+static uint32_t uptimeSeconds() { return uptimeSec.load(); }
+}  // namespace SelfDevice
+#define EXT_RAM_BSS_ATTR
 
 // INSERT_CACHE_OWNER
 
@@ -172,6 +185,10 @@ static void reset(const char* json = emptyRules) {
   CHECK(allocations == releases);
   clockMs += 100000;
   clockSeconds = 100;
+  clockForcedSet = true;
+#ifdef HAVE_UPTIME_SCHEDULE
+  sUptimeSchedule.clear();
+#endif
   gSettings.automationEnabled = true;
   storeExists = json != nullptr;
   storeJson = json ? json : "";
@@ -769,10 +786,11 @@ static void shortIntervals() {
 // The clock question (census-duplicates-08). The scheduler took `now > 0` for
 // a set clock, which is true one second after boot. It asks System_Clock now:
 // a trigger that names a time of day waits for a set clock, in the pass's
-// next-run computation and in the due cache alike; an interval trigger only
-// counts seconds and runs as before.
+// next-run computation and in the due cache alike; an interval trigger counts
+// uptime meanwhile (uptimeSchedule below has the rest of that).
 static void clockNotSet() {
   reset();
+  clockForcedSet = false;
   // 55 hours after a boot without any time source time() reads 200000: past
   // every hand threshold the firmware had (`> 0`, `>= 100000`).
   constexpr time_t kUnset = 200000;
@@ -785,40 +803,381 @@ static void clockNotSet() {
   const char* every = R"({"id":52,"enabled":true,"triggers":[{"type":"interval","intervalMs":900000,"nextAt":150000}]})";
   const char* both = R"({"id":53,"enabled":true,"triggers":[{"type":"time","time":"07:30","nextAt":150000},{"type":"interval","intervalMs":900000,"nextAt":190000}]})";
   clockSeconds = kUnset;
+  uptimeSec = kUnset;  // the pass's now without a clock is the uptime
+  const time_t up = kUnset;
 
   // The pass: with the clock not set, a time of day is not part of the next run.
-  CHECK(automationNextRunTime(daily, kUnset, false) == 0);
-  CHECK(automationNextRunTime(monthly, kUnset, false) == 0);
-  CHECK(automationNextRunTime(yearly, kUnset, false) == 0);
-  CHECK(automationNextRunTime(fresh, kUnset, false) == 0);  // and none is made up from 1970
-  CHECK(automationNextRunTime(every, kUnset, false) == 150000);  // an interval counts seconds
-  CHECK(automationNextRunTime(both, kUnset, false) == 190000);   // the interval alone decides
+  CHECK(automationNextRunTime(daily, up, false) == 0);
+  CHECK(automationNextRunTime(monthly, up, false) == 0);
+  CHECK(automationNextRunTime(yearly, up, false) == 0);
+  CHECK(automationNextRunTime(fresh, up, false) == 0);  // and none is made up from 1970
+  // An interval counts uptime from when the scheduler first sees it; the
+  // file's value is not used.
+  CHECK(automationNextRunTime(every, up, false) == up + 900);
+  CHECK(automationNextRunTime(both, up, false) == up + 900);  // the interval alone decides
   // With the clock set every trigger counts; the public function is that case.
   CHECK(automationNextRunTime(daily, kSet, true) == 150000 && computeNextRunTime(daily, kSet) == 150000);
   CHECK(automationNextRunTime(both, kSet, true) == 150000 && computeNextRunTime(both, kSet) == 150000);
   CHECK(automationNextRunTime(fresh, kSet, true) > kSet && computeNextRunTime(fresh, kSet) > kSet);
-  CHECK(computeNextRunTime(daily, kUnset) == 150000);  // its other callers are unchanged
 
   // The due cache agrees with the pass: a waiting trigger is not "due".
   replaceStore(String(R"({"version":2,"automations":[)") + daily + "," + every + "," + both + "," + monthly + "]}");
   CHECK(startAutomationScheduler());
   rebuildAutomationsCache();
   CHECK(gAutomationsCacheCount == 4 && gAutomationsCache[0].id == 51 && gAutomationsCache[0].nextAt == 0);
-  CHECK(gAutomationsCache[1].nextAt == 150000 && gAutomationsCache[2].nextAt == 190000);
+  CHECK(gAutomationsCache[1].nextAt == up + 900 && gAutomationsCache[2].nextAt == up + 900);
   CHECK(gAutomationsCache[3].nextAt == 0);
-  CHECK(automationsAnyDue(kUnset));  // the interval of 52 is due
+  CHECK(!automationsAnyDue(kUnset));
+  uptimeSec = kUnset + 900;
+  CHECK(automationsAnyDue(kUnset));  // the interval of 52 is due on uptime
   replaceStore(String(R"({"version":2,"automations":[)") + daily + "," + monthly + "]}");
   rebuildAutomationsCache();
   // Stored next runs of 150000 with the clock at 200000: `now > 0` called
   // both due and ran them against 1970.
   CHECK(gAutomationsCacheCount == 2 && !automationsAnyDue(kUnset));
 
-  // The clock is set: the stored next runs count again (the pass then settles
-  // a run that is this late as missed).
+  // The clock is set: the stored next runs count again (the pass then
+  // advances a next run from before the clock was set without firing it).
   clockSeconds = kSet;
+  CHECK(automationsAnyDue(kSet));  // the cache holds uptime seconds: one pass
   rebuildAutomationsCache();
   CHECK(gAutomationsCache[0].nextAt == 150000 && gAutomationsCache[1].nextAt == 150000 && automationsAnyDue(kSet));
   stopAutomationScheduler();
+}
+
+static JsonObject automationNamed(JsonDocument& doc, long id) {
+  for (JsonObject automation : doc["automations"].as<JsonArray>()) {
+    if (automation["id"].as<long>() == id) return automation;
+  }
+  CHECK(false);
+  return JsonObject();
+}
+
+// Interval and armed-delay triggers without a set clock count uptime. An
+// interval saved while the clock was set held a 2026 next run in the file and
+// never fired on a later boot without a clock; a long one rewrote the file on
+// every fire. Now: the first fire one interval after automations start, then
+// every interval, no file write, and when the clock is set the schedule is
+// carried over with the time each trigger had left.
+static void uptimeSchedule() {
+  reset();
+  clockForcedSet = false;
+  constexpr time_t kUnset = 200000;      // time() without a time source
+  constexpr time_t kSaved = 1763000000;  // a next run saved while the clock was set
+  const char* minute = R"({"id":61,"enabled":true,"commands":["a"],"triggers":[{"type":"interval","intervalMs":60000,"nextAt":1763000000}]})";
+  const char* hourly = R"({"id":63,"enabled":true,"commands":["a"],"triggers":[{"type":"interval","intervalMs":3600000,"nextAt":1763000000}]})";
+  const char* daily = R"({"id":65,"enabled":true,"commands":["a"],"triggers":[{"type":"time","time":"07:30","nextAt":1763000000}]})";
+  replaceStore(String(R"({"version":2,"automations":[)") + minute + "," + hourly + "," + daily + "]}");
+  clockSeconds = kUnset;
+  uptimeSec = 1000;
+  CHECK(startAutomationScheduler());
+  automationTick();  // the first pass: automations start at uptime 1000
+  CHECK(ticks == 1 && gAutomationsCacheCount == 3);
+  // First fire one interval after the start, not at the stored 2026 run.
+  CHECK(gAutomationsCache[0].nextAt == 1060 && gAutomationsCache[1].nextAt == 4600);
+  CHECK(gAutomationsCache[2].nextAt == 0);  // a time of day waits for the clock
+  CHECK(automationNextRunTime(minute, 1000, false) == 1060);
+  uptimeSec = 1059;
+  automationTick();
+  CHECK(ticks == 1);  // nothing is due: no pass, no file read
+  uptimeSec = 1060;
+  automationTick();
+  CHECK(ticks == 2);  // due on uptime
+  // The pass fires it and reschedules on uptime: nothing is written, the next
+  // run is one interval on, and the cache stops asking for passes.
+  rescheduleAfterFire(61, minute, 1060, false);
+  CHECK(writes == 0 && automationNextRunTime(minute, 1060, false) == 1120);
+  notifyAutomationScheduler();
+  automationTick();
+  CHECK(ticks == 3 && gAutomationsCache[0].nextAt == 1120);
+  for (int i = 0; i < 20; ++i) automationTick();
+  CHECK(ticks == 3);
+  // The hour long interval is not saved per fire either.
+  uptimeSec = 4600;
+  rescheduleAfterFire(63, hourly, 4600, false);
+  CHECK(writes == 0 && automationNextRunTime(hourly, 4600, false) == 8200);
+  // millis() wraps after 49.7 days; the schedule does not use it.
+  clockMs = UINT32_MAX - 5;
+  clockMs += 10;
+  CHECK(automationNextRunTime(minute, 4600, false) == 1120 && automationNextRunTime(hourly, 4600, false) == 8200);
+  {
+    JsonDocument doc = storeDoc();
+    CHECK(automationNamed(doc, 61)["triggers"][0]["nextAt"].as<long>() == kSaved);  // file untouched
+  }
+  stopAutomationScheduler();
+
+#ifdef HAVE_UPTIME_SCHEDULE
+  using Table = AutomationUptimeSchedule;
+  {
+    Table t{};
+    CHECK(t.empty());
+    CHECK(t.interval(0, 0, 5000, 10) == 0 && t.interval(7, 0, 0, 10) == 0 && t.empty());
+    CHECK(t.interval(7, 0, 5000, 10) == 15 && t.interval(7, 0, 5000, 99) == 15);  // first sight only
+    CHECK(t.interval(7, 0, 500, 10) == 11);    // a sub-second interval steps one second
+    CHECK(t.interval(7, 0, 10000, 20) == 30);  // an edited interval starts again
+    CHECK(t.armed(7, 0) == 0);                  // an interval is not an armed delay
+    CHECK(t.arm(7, 1, 40) && t.armed(7, 1) == 40 && t.interval(7, 1, 5000, 50) == 55);  // retyped
+    CHECK(t.arm(8, 0, 0) && t.armed(8, 0) == 1);  // a zero time still counts as armed
+    t.advance(8, 0, 0);
+    CHECK(t.armed(8, 0) == 0 && t.find(8, 0) == nullptr);  // a delay that fired is gone
+    t.advance(7, 0, 77);
+    CHECK(t.interval(7, 0, 10000, 70) == 77);
+    t.beginSweep();
+    CHECK(t.interval(7, 0, 10000, 70) == 77);
+    t.endSweep();
+    CHECK(t.find(7, 0) && !t.find(7, 1));
+    t.clear();
+    CHECK(t.empty());
+    // Full: the next interval has no next run, and a delay cannot be armed.
+    for (int i = 0; i < Table::kEntries; i++) CHECK(t.interval(100 + i, 0, 5000, 10) == 15);
+    CHECK(t.interval(999, 0, 5000, 10) == 0 && !t.arm(999, 0, 10));
+    CHECK(t.arm(100, 0, 30) && t.armed(100, 0) == 30);  // an existing entry is reused
+  }
+#ifdef HAVE_UPTIME_CARRY_RULE
+  {
+    // The clock-set carry keeps an armed delay and an interval that ran on
+    // uptime; an interval in its first countdown is not carried.
+    Table t{};
+    CHECK(!t.anyCarries());
+    CHECK(t.interval(7, 0, 5000, 10) == 15 && !Table::carries(*t.find(7, 0)) && !t.anyCarries());
+    t.advance(7, 0, 20);
+    CHECK(Table::carries(*t.find(7, 0)) && t.anyCarries());
+    CHECK(t.interval(7, 0, 10000, 20) == 30 && !Table::carries(*t.find(7, 0)));  // edited: a new countdown
+    CHECK(t.arm(8, 1, 40) && Table::carries(*t.find(8, 1)));
+    CHECK(t.interval(9, 0, 5000, 10) == 15);
+    // forget drops every entry of one automation and nothing else.
+    t.forget(8);
+    t.forget(0);
+    CHECK(!t.find(8, 1) && t.find(7, 0) && t.find(9, 0));
+    t.forget(7);
+    CHECK(!t.find(7, 0) && t.find(9, 0));
+    CHECK(t.interval(7, 0, 10000, 50) == 60);  // seen again: one interval from then
+  }
+#endif
+
+  // Armed delays: in RAM, the file's value is not used, a fire disarms it.
+  reset();
+  clockForcedSet = false;
+  clockSeconds = kUnset;
+  uptimeSec = 1000;
+  const char* delay = R"({"id":64,"enabled":true,"commands":["a"],"triggers":[{"type":"boot"},{"type":"manual","delayMs":30000,"nextAt":1763000500}]})";
+  const char* off = R"({"id":66,"enabled":false,"commands":["a"],"triggers":[{"type":"interval","intervalMs":5000},{"type":"manual","delayMs":5000}]})";
+  replaceStore(String(R"({"version":2,"automations":[)") + minute + "," + hourly + "," + delay + "," + off + "]}");
+  Trigger parsed[MAX_TRIGGERS];
+  CHECK(triggersFromJson(delay, parsed, MAX_TRIGGERS) == 2 && parsed[0].nextAt == 0 && parsed[1].nextAt == 0);
+  CHECK(automationUptimeArm(64, 1, 1030) && automationUptimeArm(66, 1, 1005));
+  CHECK(triggersFromJson(delay, parsed, MAX_TRIGGERS) == 2 && parsed[1].nextAt == 1030);
+  CHECK(startAutomationScheduler());
+  automationTick();
+  CHECK(gAutomationsCacheCount == 4 && gAutomationsCache[2].nextAt == 1030);
+  // A disabled automation's interval holds no entry; its armed delay stays.
+  CHECK(sUptimeSchedule.find(66, 0) == nullptr && sUptimeSchedule.armed(66, 1) == 1005);
+  rescheduleAfterFire(64, delay, 1030, false);
+  CHECK(writes == 0 && automationUptimeArmedAt(64, 1) == 0);
+  // The client view: no next run for what counts uptime; a time of day keeps
+  // the file's value.
+  {
+    JsonDocument doc;
+    CHECK(!deserializeJson(doc, String(R"({"automations":[)") + delay + "," + daily + "]}"));
+    for (JsonObject automation : doc["automations"].as<JsonArray>()) automationApplyRuntimeSchedule(automation);
+    CHECK(doc["automations"][0]["triggers"][1]["nextAt"].isNull());
+    CHECK(doc["automations"][1]["triggers"][0]["nextAt"].as<long>() == kSaved);
+  }
+  // More intervals than the table holds: the ones beyond it wait for a set
+  // clock (no next run, so the cache never calls them due).
+  {
+    String many = R"({"version":2,"automations":[)";
+    for (int i = 0; i < AutomationUptimeSchedule::kEntries + 3; i++) {
+      if (i) many += ",";
+      many += String(R"({"id":)") + String(std::to_string(200 + i)) +
+              R"(,"enabled":true,"triggers":[{"type":"interval","intervalMs":5000}]})";
+    }
+    replaceStore(many + "]}");
+    notifyAutomationScheduler();
+    const unsigned before = ticks;
+    automationTick();
+    CHECK(ticks == before + 1 && gAutomationsCacheCount == AutomationUptimeSchedule::kEntries + 3);
+    // The removed automations' entries are given back at the end of that
+    // rebuild; the next one fills them.
+    notifyAutomationScheduler();
+    automationTick();
+    int scheduled = 0;
+    for (int i = 0; i < gAutomationsCacheCount; i++) scheduled += gAutomationsCache[i].nextAt == 1005;
+    CHECK(scheduled == AutomationUptimeSchedule::kEntries);
+    CHECK(gAutomationsCache[AutomationUptimeSchedule::kEntries + 2].nextAt == 0);
+    for (int i = 0; i < 20; ++i) automationTick();
+    CHECK(ticks == before + 2);
+  }
+  stopAutomationScheduler();
+
+  // The clock is set while the uptime schedule runs. An armed delay and an
+  // interval that already ran on uptime keep the time they had left: a short
+  // interval goes to the RAM schedule, a long one and an armed delay are
+  // written in one save; nothing is late, nothing runs twice, nothing is
+  // reported missed.
+  reset();
+  clockForcedSet = false;
+  clockSeconds = kUnset;
+  uptimeSec = 1000;
+  replaceStore(String(R"({"version":2,"automations":[)") + minute + "," + hourly + "," + delay + "]}");
+  CHECK(startAutomationScheduler());
+  automationTick();
+  CHECK(automationUptimeArm(64, 1, 1150));
+  uptimeSec = 1060;
+  rescheduleAfterFire(61, minute, 1060, false);  // the minute fired at 1060: next 1120
+  uptimeSec = 4600;
+  rescheduleAfterFire(61, minute, 4600, false);  // and on: next 4660
+  rescheduleAfterFire(63, hourly, 4600, false);  // the hour fired at 4600: next 8200
+  CHECK(automationUptimeArm(64, 1, 4650));
+  uptimeSec = 4640;
+  constexpr time_t kSet = 1763100000;
+  clockSeconds = kSet;
+  CHECK(automationsAnyDue(kSet));  // a pass carries the schedule over
+  automationCarryUptimeSchedule(kSet);
+  CHECK(writes == 1 && sUptimeSchedule.empty());
+  {
+    JsonDocument doc = storeDoc();
+    CHECK(automationNamed(doc, 61)["triggers"][0]["nextAt"].as<long>() == kSaved);  // in RAM instead
+    CHECK(automationNamed(doc, 63)["triggers"][0]["nextAt"].as<long>() == kSet + 3560);
+    CHECK(automationNamed(doc, 64)["triggers"][1]["nextAt"].as<long>() == kSet + 10);
+  }
+  CHECK(sVolatileSchedule.find(61, 0) && sVolatileSchedule.find(61, 0)->nextAt == kSet + 20);
+  rebuildAutomationsCache();
+  CHECK(gAutomationsCache[0].nextAt == kSet + 20 && gAutomationsCache[1].nextAt == kSet + 3560 &&
+        gAutomationsCache[2].nextAt == kSet + 10);
+  CHECK(!automationsAnyDue(kSet) && !automationsAnyDue(kSet + 9) && automationsAnyDue(kSet + 10));
+  CHECK(automationNextRunTime(minute, kSet, true) == kSet + 20);
+  automationCarryUptimeSchedule(kSet);  // nothing left to carry
+  CHECK(writes == 1);
+  stopAutomationScheduler();
+  sVolatileSchedule = AutomationVolatileSchedule{};
+
+  // A trigger that ran on uptime and was due again when the clock was set (a
+  // condition held it, say) runs now, not as missed.
+  reset();
+  clockForcedSet = false;
+  clockSeconds = kUnset;
+  uptimeSec = 1000;
+  replaceStore(String(R"({"version":2,"automations":[)") + hourly + "]}");
+  CHECK(startAutomationScheduler());
+  automationTick();
+  uptimeSec = 4600;
+  rescheduleAfterFire(63, hourly, 4600, false);  // next 8200
+  uptimeSec = 8600;  // 400 s past it
+  clockSeconds = kSet;
+  automationCarryUptimeSchedule(kSet);
+  {
+    JsonDocument doc = storeDoc();
+    CHECK(automationNamed(doc, 63)["triggers"][0]["nextAt"].as<long>() == kSet);
+  }
+  rebuildAutomationsCache();
+  CHECK(gAutomationsCache[0].nextAt == kSet && automationsAnyDue(kSet));
+  stopAutomationScheduler();
+  sVolatileSchedule = AutomationVolatileSchedule{};
+
+  // Most boots have no clock for the first seconds (NTP, the phone or the
+  // ring sets it). An interval still in its first countdown then changes
+  // nothing: the file's next run stays, as without the uptime schedule.
+  // A carry used to move it to the boot time plus one interval, so a daily
+  // automation on a device switched off each night never fired.
+  {
+    // Clock 5 s after the start; the file's next runs lie ahead.
+    reset();
+    clockForcedSet = false;
+    clockSeconds = kUnset;
+    uptimeSec = 1000;
+    const time_t kNow = kSet;
+    const String day = String(R"({"id":71,"enabled":true,"commands":["a"],"triggers":[{"type":"interval","intervalMs":86400000,"nextAt":)") +
+                       String(std::to_string(kNow + 40000)) + "}]}";
+    const String quick = String(R"({"id":72,"enabled":true,"commands":["a"],"triggers":[{"type":"interval","intervalMs":60000,"nextAt":)") +
+                         String(std::to_string(kNow + 30)) + "}]}";
+    replaceStore(String(R"({"version":2,"automations":[)") + day + "," + quick + "]}");
+    CHECK(startAutomationScheduler());
+    automationTick();
+    CHECK(gAutomationsCache[0].nextAt == 1000 + 86400 && gAutomationsCache[1].nextAt == 1060);
+    uptimeSec = 1005;
+    clockSeconds = kNow;
+    CHECK(automationsAnyDue(kNow));  // the base changed: one pass
+    const unsigned readsBefore = reads;
+    automationCarryUptimeSchedule(kNow);
+    CHECK(writes == 0 && sUptimeSchedule.empty());
+#ifdef HAVE_UPTIME_CARRY_RULE
+    CHECK(reads == readsBefore);  // nothing to carry: not even a file read
+#endif
+    {
+      JsonDocument doc = storeDoc();
+      CHECK(automationNamed(doc, 71)["triggers"][0]["nextAt"].as<long>() == kNow + 40000);
+      CHECK(automationNamed(doc, 72)["triggers"][0]["nextAt"].as<long>() == kNow + 30);
+    }
+    rebuildAutomationsCache();
+    CHECK(gAutomationsCache[0].nextAt == kNow + 40000 && gAutomationsCache[1].nextAt == kNow + 30);
+    CHECK(automationNextRunTime(day.c_str(), kNow, true) == kNow + 40000);
+    CHECK(!automationsAnyDue(kNow) && !automationsAnyDue(kNow + 29) && automationsAnyDue(kNow + 30));
+    stopAutomationScheduler();
+    sVolatileSchedule = AutomationVolatileSchedule{};
+  }
+  {
+    // A past file next run: the pass's missed-run rule as before (due now;
+    // beyond the grace the pass advances it without firing, which is
+    // rescheduleAfterFire from the clock's now), within the grace it runs.
+    reset();
+    clockForcedSet = false;
+    clockSeconds = kUnset;
+    uptimeSec = 1000;
+    const time_t kNow = kSet;
+    const String late = String(R"({"id":73,"enabled":true,"commands":["a"],"triggers":[{"type":"interval","intervalMs":3600000,"nextAt":)") +
+                        String(std::to_string(kNow - 3 * 3600)) + "}]}";
+    const String recent = String(R"({"id":74,"enabled":true,"commands":["a"],"triggers":[{"type":"interval","intervalMs":3600000,"nextAt":)") +
+                          String(std::to_string(kNow - 60)) + "}]}";
+    replaceStore(String(R"({"version":2,"automations":[)") + late + "," + recent + "]}");
+    CHECK(startAutomationScheduler());
+    automationTick();
+    uptimeSec = 1005;
+    clockSeconds = kNow;
+    automationCarryUptimeSchedule(kNow);
+    CHECK(writes == 0 && sUptimeSchedule.empty());
+    rebuildAutomationsCache();
+    CHECK(gAutomationsCache[0].nextAt == kNow - 3 * 3600 && gAutomationsCache[1].nextAt == kNow - 60);
+    CHECK(automationsAnyDue(kNow));
+    CHECK(automationNextRunTime(late.c_str(), kNow, true) == kNow - 3 * 3600);
+    CHECK(kNow - (kNow - 3 * 3600) > kMissedFireGraceSec && kNow - (kNow - 60) <= kMissedFireGraceSec);
+    rescheduleAfterFire(73, late.c_str(), kNow, false);  // what the missed-run rule does
+    {
+      JsonDocument doc = storeDoc();
+      CHECK(automationNamed(doc, 73)["triggers"][0]["nextAt"].as<long>() == kNow + 3600);
+    }
+    stopAutomationScheduler();
+    sVolatileSchedule = AutomationVolatileSchedule{};
+  }
+
+#ifdef HAVE_UPTIME_CARRY_RULE
+  // Adding, editing or deleting an automation drops its uptime entries
+  // (automationUptimeForget, called by `automation add` and `automation
+  // delete`): an armed delay does not survive an edit (with a clock the
+  // rebuilt trigger is written unarmed), and an interval starts again.
+  reset();
+  clockForcedSet = false;
+  clockSeconds = kUnset;
+  uptimeSec = 1000;
+  replaceStore(String(R"({"version":2,"automations":[)") + minute + "," + delay + "]}");
+  CHECK(startAutomationScheduler());
+  automationTick();
+  CHECK(automationUptimeArm(64, 1, 1030));
+  uptimeSec = 1060;
+  rescheduleAfterFire(61, minute, 1060, false);  // next 1120
+  uptimeSec = 1100;
+  automationUptimeForget(64);
+  automationUptimeForget(61);
+  CHECK(sUptimeSchedule.empty());
+  notifyAutomationScheduler();
+  automationTick();
+  CHECK(gAutomationsCache[0].nextAt == 1160 && gAutomationsCache[1].nextAt == 0);  // restarted, unarmed
+  CHECK(automationUptimeArmedAt(64, 1) == 0);
+  CHECK(sUptimeSchedule.find(61, 0) && !AutomationUptimeSchedule::carries(*sUptimeSchedule.find(61, 0)));
+#endif
+  stopAutomationScheduler();
+  sVolatileSchedule = AutomationVolatileSchedule{};
+#endif
 }
 
 int main() {
@@ -831,6 +1190,7 @@ int main() {
   invalidationAndOverlap();
   concurrentRequests();
   shortIntervals();
+  uptimeSchedule();
   clockNotSet();
   reset();
   std::printf("automation scheduler: %u summary, ownership, timing and overlap checks passed\n", checks.load());

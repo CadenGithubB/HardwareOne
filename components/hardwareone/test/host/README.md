@@ -2138,7 +2138,25 @@ until the owner starts it. A newer automations.json format (`"version"` above
 never written and keeps its text, and the add command's load
 (`loadAutomationsStoreForEdit`) refuses without seeding an empty store over it;
 no version, version 1 and a non-numeric version load as before, and a missing
-file is seeded (written only when not validating). The actual disabled
+file is seeded (written only when not validating). Without a set clock interval
+and armed-delay triggers count uptime (`AutomationUptimeSchedule`, case
+`uptimeSchedule`): an interval saved with a 2026 next run is first due one
+interval after automations start and then every interval, a fire writes nothing
+(long intervals included) and a millis() wrap changes nothing; an armed delay
+lives in RAM and its fire disarms it; the table has 32 entries, beyond which an
+interval waits for a set clock and the cache never calls it due; the client view
+shows no next run (null) for these triggers. When the clock is set, one pass
+carries over what replaced the file, with the time it had left: an armed delay,
+and an interval that already ran on uptime (a short one to the RAM schedule, the
+rest in one write), so nothing is repeated, made up or reported missed. An
+interval still in its first countdown is dropped without a write (when nothing carries, the file is not even read):
+a clock that arrives 5 s after boot leaves a future file next run as it is, and
+a past one goes through the missed-run rule as without the uptime schedule.
+Adding, editing or deleting an automation drops its uptime entries
+(`automationUptimeForget`): an armed delay does not survive an edit, an interval
+starts again. The cases written before the uptime schedule count small numbers
+as a set clock (`clockForcedSet`); the clock and uptime cases ask
+`Clock::isValidEpoch` itself. The actual disabled
 public header is compiled independently. `automation_scheduler_contract`
 retains the main-loop integration and full-tick early-exit/source guards, plus
 the quiet in-pass reschedule writes, the unconditional main-loop tick and the
@@ -2147,7 +2165,12 @@ goes through the format check and no writer spells the version as a literal.
 With comments removed, the add command loads only through
 `loadAutomationsStoreForEdit` and returns on its refusal, and the web
 Automations page and both exports read through `readAutomationsJson` and name
-a refused format.
+a refused format. It also guards the pass's uptime `now`, the carry-over before
+the file read, the silent advance of a next run from before the clock was set,
+the manual run's `automationScheduleNow()`, `automation trigger` arming on
+uptime, the boot pass saving only with a set clock, the cache recording and
+comparing its base, and `automation add` / `automation delete` calling
+`automationUptimeForget` after their write.
 
 ```sh
 python3 components/hardwareone/test/host/test_automation_scheduler.py --sanitize
@@ -4108,8 +4131,17 @@ is from a previous boot. The difference of the two 32-bit stamps is taken unsign
 `as<long>()` reads as 0. `automationIdSeed` and `automationIdAdvance` stay in 1..2147483647 at every uptime; a
 duplicate found on day 35 gets an id in range; a stored id above the range is given a new one with the rest of
 the automation unchanged; a file whose ids are in range (2147483647 included) is not touched; what
-`automationIdTextAboveRange` flags, the sanitizer changes. Source rules: both places that make an id use the
-owner, and the scheduler pass leaves an automation with an id above the range out and queues the sanitizer.
+`automationIdTextAboveRange` flags, the sanitizer changes. The sanitizer counts what it fixed
+(`AutomationSanitizeCounts`, optional: a clean file reports 0 and 0 whatever the struct held, a duplicate counts
+as a duplicate even when it is also above the range) and `automation sanitize` replies with it
+(`automationSanitizeReply`: "fixed 1 duplicate ID", "fixed 2 duplicate IDs", "fixed 1 out-of-range ID",
+"fixed 3 out-of-range IDs", "fixed 1 duplicate ID and 3 out-of-range IDs"; "Sanitize: no changes needed" as
+before). `automationIdTextInRange` accepts a whole number 1..2147483647 only (white space and leading zeros
+allowed; no sign, fraction, 0, overflow or value above the range). Source rules: both places that make an id use
+the owner, the scheduler pass leaves an automation with an id above the range out and queues the sanitizer,
+`automation add` refuses an `id=` outside the range with "Error: id must be a whole number from 1 to 2147483647"
+before it loads the store (validate-only included), and the `automation sanitize` branch replies through
+`automationSanitizeReply` and no longer spells "fixed duplicate IDs".
 
 `clock_set_question`: "is the clock set" has one owner, `Clock::isValidEpoch` (the year 2020 or later). The
 suite runs the production `cmd_espnow_timesync` (`System_ESPNow.cpp`) with the real `Clock::isValidEpoch`
@@ -4118,10 +4150,12 @@ suite runs the production `cmd_espnow_timesync` (`System_ESPNow.cpp`) with the r
 Source rules: no comparison of a time with 100000 is left; `cmd_certinfo`, `cmd_certgen` and the expiry check
 at HTTPS start ask the owner; the scheduler pass asks it and takes its next run from `automationNextRunTime`;
 the due cache leaves a time-of-day trigger out while the clock is not set. Four own tests stay and are listed
-in the test (`KEPT`) with their reasons; a new hand test elsewhere fails the rule. The scheduler's behaviour is
-in `automation_scheduler` (`clockNotSet`): with the clock not set, a trigger that names a time of day is not
-part of the next run and is not "due" in the cache, an interval trigger still is, and the public
-`computeNextRunTime` is unchanged; `Clock::isValidEpoch` is compiled from `System_Clock.cpp` there too.
+in the test (`KEPT`) with their reasons; a new hand test elsewhere fails the rule. The scheduler's behaviour is in `automation_scheduler` (`clockNotSet`): with the clock not set, a trigger that
+names a time of day is not part of the next run and is not "due" in the cache; an interval trigger counts uptime
+instead, one interval from when the scheduler first sees it, and the file's next run is not used meanwhile (see
+`uptimeSchedule` under "Automation scheduler"); the public `computeNextRunTime` (the clock-set case) still takes
+the file's next run; when the clock becomes set the cache asks for one pass and then holds the file's next runs
+again. `Clock::isValidEpoch` is compiled from `System_Clock.cpp` there too.
 
 `automation_condition_bounds` is about a size, not a time, and sits here with the group that fixed it. It
 compiles the production `validateConditionSyntax` and `executeConditionalCommand` (`System_Automation.cpp`).

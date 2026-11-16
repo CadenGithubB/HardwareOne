@@ -81,10 +81,10 @@ def generated(component: Path) -> str:
         "void automationTick()"))
     tick = extract_block(owner, "static void schedulerTickMinute()")
     begin = tick.index("  static uint32_t sEventCursor")
-    # The comment that follows the drain; an older tree words it differently.
-    drain_end = "  // Before time() counts at all only event fires"
-    if drain_end not in tick:
-        drain_end = "  // Without synced time only event fires"
+    # The comment that follows the drain; older trees word it differently.
+    drain_end = next(marker for marker in ("  // The clock was set while interval",
+                                           "  // Before time() counts at all only event fires",
+                                           "  // Without synced time only event fires") if marker in tick)
     drain = tick[begin:tick.index(drain_end, begin)]
     require("gAutomationEventsPending.exchange(false);" in drain,
             "event drain extraction holds the pending-flag exchange")
@@ -102,13 +102,22 @@ def generated(component: Path) -> str:
         *((next_run,) if next_run in owner else ()),
         "time_t computeNextRunTime(const char* automationJson, time_t fromTime) "))
     # System_Clock's "is this a real epoch", which the due cache and the pass ask.
+    # It goes in as ClockOwner; the harness's Clock::isValidEpoch asks it
+    # unless a case counts small numbers as a set clock (clockForcedSet).
     clock = (component / "System_Clock.cpp").read_text()
     threshold = re.search(r"^static constexpr int kSyncedTmYearThreshold = \d+;", clock, re.M)
     require(threshold is not None, "System_Clock.cpp holds the year threshold")
-    clock_owner = ("namespace Clock {\n" + threshold.group(0) + "\n" +
-                   extract_block(clock, "bool isValidEpoch(time_t t)") + "\n}  // namespace Clock")
+    clock_owner = ("namespace ClockOwner {\n" + threshold.group(0) + "\n" +
+                   extract_block(clock, "bool isValidEpoch(time_t t)") + "\n}  // namespace ClockOwner")
     require("automationVolatileSet(" in reschedule and "if (notify) notifyAutomationScheduler();" in reschedule,
             "rescheduleAfterFire keeps short intervals in RAM and notifies without a write")
+    # The uptime schedule's own cases need its table; the regression cases
+    # before them run against any tree.
+    uptime_table = "struct AutomationUptimeSchedule {" in owner
+    # The carry rule (an interval in its first countdown is not carried) and
+    # automationUptimeForget: their table cases need the new API; the
+    # clock-set behaviour cases run against any tree with the table.
+    carry_rule = "static bool carries(const Entry& e)" in owner
     summary = owner_summary(component)
     require(bool(summary), "System_Automation.cpp has no owner automation summary "
             "(automationCopySummaries); pages still parse automations.json themselves")
@@ -122,7 +131,8 @@ def generated(component: Path) -> str:
                                 "// INSERT_RESCHEDULE": reschedule}.items():
         require(harness.count(marker) == 1, f"exactly one insertion marker: {marker}")
         harness = harness.replace(marker, replacement)
-    return harness
+    return (("#define HAVE_UPTIME_SCHEDULE 1\n" if uptime_table else "") +
+            ("#define HAVE_UPTIME_CARRY_RULE 1\n" if carry_rule else "") + harness)
 
 
 def g2_page(component: Path) -> str:
