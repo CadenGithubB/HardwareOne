@@ -35,6 +35,8 @@ HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
 REAL = ('BLE_PhonePipeConsole.cpp', 'BLE_PhonePipeConsole.h', 'BLE_PhonePipeCore.h',
         'BLE_PhonePipeConsoleCore.h', 'BLE_PhonePairCode.h')
+# Copied too when the tree has it (the OTA frame head the record layer includes).
+OPTIONAL = ('BLE_OtaWire.h',)
 
 
 def found(pattern: str, text: str, what: str) -> str:
@@ -182,6 +184,9 @@ def stage(component: Path, directory: Path) -> Path:
     (src / 'freertos').mkdir(parents=True)
     for name in REAL:
         shutil.copyfile(component / name, src / name)
+    for name in OPTIONAL:
+        if (component / name).exists():
+            shutil.copyfile(component / name, src / name)
     for name, text in fake_headers(component).items():
         (src / name).write_text(text)
     shutil.copyfile(HERE / 'phone_console_harness.cpp', src / 'phone_console_harness.cpp')

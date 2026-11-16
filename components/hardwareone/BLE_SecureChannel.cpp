@@ -6,6 +6,7 @@
 #include "BLE_SecureCrypto.h"
 #include "System_Settings.h"
 #include "BLE_Types.h"          // BLE_MAX_CONNECTIONS
+#include "BLE_OtaWire.h"        // hw1otawire::kOtaMagic — the binary envelope marker
 
 #include <sodium.h>
 #include <string.h>
@@ -373,10 +374,9 @@ BleScResult bleScHandleInbound(uint16_t connId, TransportSessionEpoch epoch, con
   // App->device binary application envelope. Text commands can never begin
   // with NUL, so this marker is unambiguous and preserves opaque OTA bytes
   // without teaching the generic command parser to accept binary input.
-  // Layout: 00 "HW1OTA" 01 offset_be32 payload...
-  static const uint8_t kOtaPrefix[] = {0x00, 'H', 'W', '1', 'O', 'T', 'A', 0x01};
-  if (ctLen >= sizeof(kOtaPrefix) &&
-      memcmp(out, kOtaPrefix, sizeof(kOtaPrefix)) == 0) {
+  // Layout: 00 "HW1OTA" 01 offset_be32 payload... (BLE_OtaWire.h)
+  if (ctLen >= sizeof(hw1otawire::kOtaMagic) &&
+      memcmp(out, hw1otawire::kOtaMagic, sizeof(hw1otawire::kOtaMagic)) == 0) {
     return BLE_SC_BINARY_READY;
   }
   return BLE_SC_PLAINTEXT_READY;

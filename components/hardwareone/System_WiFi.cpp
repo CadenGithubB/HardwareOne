@@ -46,6 +46,7 @@
 #if ENABLE_HTTPS
 #include <FS.h>
 #include "System_VFS.h"   // VFS::*Guarded + systemAuth (Phase 2 perm refactor)
+#include "System_HttpsCertPaths.h"  // HW1_HTTPS_CERT_PATH, HW1_HTTPS_KEY_PATH
 #include <time.h>
 #include "mbedtls/x509_crt.h"
 #include "mbedtls/pk.h"
@@ -2383,12 +2384,11 @@ const char* cmd_certinfo(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
 
-  static const char* CERT_PATH = "/system/certs/https_server.crt";
-  if (!VFS::existsGuarded(CERT_PATH, VFS::systemAuth(VFS::Scopes::CERTS, "wifi.cert.info"))) {
-    return "Error: No certificate found at /system/certs/https_server.crt";
+  if (!VFS::existsGuarded(HW1_HTTPS_CERT_PATH, VFS::systemAuth(VFS::Scopes::CERTS, "wifi.cert.info"))) {
+    return "Error: No certificate found at " HW1_HTTPS_CERT_PATH;
   }
 
-  File f = VFS::openGuarded(CERT_PATH, "r", VFS::systemAuth(VFS::Scopes::CERTS, "wifi.cert.info"));
+  File f = VFS::openGuarded(HW1_HTTPS_CERT_PATH, "r", VFS::systemAuth(VFS::Scopes::CERTS, "wifi.cert.info"));
   if (!f) return "Error: Cannot open certificate file";
   String certPem = f.readString();
   f.close();
@@ -2617,10 +2617,10 @@ const char* cmd_certgen(const String& argsInput) {
     // server still starts on 443 and every TLS handshake fails (no HTTP
     // fallback) until certgen succeeds or httpsEnabled is set to 0.
     const AuthContext certAuth = VFS::systemAuth(VFS::Scopes::CERTS, "wifi.cert.gen");
-    const String keyPath = "/system/certs/https_server.key";
-    const String certPath = "/system/certs/https_server.crt";
-    const String keyTmp = "/system/certs/https_server.key.tmp";
-    const String certTmp = "/system/certs/https_server.crt.tmp";
+    const String keyPath = HW1_HTTPS_KEY_PATH;
+    const String certPath = HW1_HTTPS_CERT_PATH;
+    const String keyTmp = HW1_HTTPS_KEY_PATH ".tmp";
+    const String certTmp = HW1_HTTPS_CERT_PATH ".tmp";
     const size_t keyLen = strnlen((const char*)keyPem, 4096);
     const size_t certLen = strnlen((const char*)certPem, 4096);
     String keyText;
@@ -2650,8 +2650,8 @@ const char* cmd_certgen(const String& argsInput) {
 
   snprintf(gDebugBuffer, 1024,
     "Self-signed %s certificate generated and saved:\n"
-    "  Cert: /system/certs/https_server.crt\n"
-    "  Key:  /system/certs/https_server.key\n"
+    "  Cert: " HW1_HTTPS_CERT_PATH "\n"
+    "  Key:  " HW1_HTTPS_KEY_PATH "\n"
     "Run 'certinfo' to view details.\n"
     "Enable HTTPS: httpsenabled 1\n"
     "Then reboot to activate.",

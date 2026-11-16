@@ -46,6 +46,7 @@
 #if ENABLE_BLUETOOTH
 #include "BLE_Server.h"
 #include "BLE_SecureChannel.h"
+#include "BLE_OtaWire.h"  // hw1otawire::kOtaMagic, kHeaderSize — the upload frame head
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #endif
@@ -68,7 +69,6 @@ constexpr float kMinimumBatteryPercent = 30.0f;
 constexpr size_t kMinimumRecoveryPassphrase = 12;
 constexpr size_t kMaximumRecoveryPassphrase = 63;
 constexpr uint32_t kCrashLoopEscapeCount = 3;
-constexpr size_t kBleUploadHeaderSize = 12;  // 00 + HW1OTA + version + offset_be32
 constexpr size_t kBleUploadChunkMax = 477;   // 489-byte secure plaintext at MTU 517
 // 60 s, not 30 s: Android's own GATT operation timeout is ~30 s, so a single
 // stalled write on the phone freezes the uploader for almost exactly that long.
@@ -707,8 +707,8 @@ bool credentialConfigured() {
   if (nvs_open(HW1_OTA_NVS_NAMESPACE, NVS_READONLY, &handle) != ESP_OK) return false;
   size_t apLength = 0;
   size_t tokenLength = 0;
-  const esp_err_t apErr = nvs_get_str(handle, "ap_pass", nullptr, &apLength);
-  const esp_err_t tokenErr = nvs_get_str(handle, "auth_token", nullptr, &tokenLength);
+  const esp_err_t apErr = nvs_get_str(handle, HW1_OTA_NVS_AP_PASS_KEY, nullptr, &apLength);
+  const esp_err_t tokenErr = nvs_get_str(handle, HW1_OTA_NVS_AUTH_TOKEN_KEY, nullptr, &tokenLength);
   bool valid = apErr == ESP_OK && tokenErr == ESP_OK &&
                apLength > kMinimumRecoveryPassphrase &&
                apLength <= kMaximumRecoveryPassphrase + 1 &&
@@ -718,8 +718,8 @@ bool credentialConfigured() {
   if (valid) {
     size_t readAp = sizeof(apPass);
     size_t readToken = sizeof(authToken);
-    valid = nvs_get_str(handle, "ap_pass", apPass, &readAp) == ESP_OK &&
-            nvs_get_str(handle, "auth_token", authToken, &readToken) == ESP_OK &&
+    valid = nvs_get_str(handle, HW1_OTA_NVS_AP_PASS_KEY, apPass, &readAp) == ESP_OK &&
+            nvs_get_str(handle, HW1_OTA_NVS_AUTH_TOKEN_KEY, authToken, &readToken) == ESP_OK &&
             readAp == readToken && memcmp(apPass, authToken, readAp) == 0;
   }
   nvs_close(handle);
@@ -731,8 +731,8 @@ bool credentialConfigured() {
 bool storeCredential(const String& passphrase, char* reason, size_t reasonSize) {
   nvs_handle_t handle = 0;
   esp_err_t err = nvs_open(HW1_OTA_NVS_NAMESPACE, NVS_READWRITE, &handle);
-  if (err == ESP_OK) err = nvs_set_str(handle, "ap_pass", passphrase.c_str());
-  if (err == ESP_OK) err = nvs_set_str(handle, "auth_token", passphrase.c_str());
+  if (err == ESP_OK) err = nvs_set_str(handle, HW1_OTA_NVS_AP_PASS_KEY, passphrase.c_str());
+  if (err == ESP_OK) err = nvs_set_str(handle, HW1_OTA_NVS_AUTH_TOKEN_KEY, passphrase.c_str());
   if (err == ESP_OK) err = nvs_commit(handle);
   if (handle) nvs_close(handle);
   if (err != ESP_OK) {
@@ -747,11 +747,11 @@ bool clearCredential(char* reason = nullptr, size_t reasonSize = 0) {
   nvs_handle_t handle = 0;
   esp_err_t err = nvs_open(HW1_OTA_NVS_NAMESPACE, NVS_READWRITE, &handle);
   if (err == ESP_OK) {
-    esp_err_t one = nvs_erase_key(handle, "ap_pass");
+    esp_err_t one = nvs_erase_key(handle, HW1_OTA_NVS_AP_PASS_KEY);
     if (one != ESP_OK && one != ESP_ERR_NVS_NOT_FOUND) err = one;
   }
   if (err == ESP_OK) {
-    esp_err_t one = nvs_erase_key(handle, "auth_token");
+    esp_err_t one = nvs_erase_key(handle, HW1_OTA_NVS_AUTH_TOKEN_KEY);
     if (one != ESP_OK && one != ESP_ERR_NVS_NOT_FOUND) err = one;
   }
   if (err == ESP_OK) err = nvs_commit(handle);
@@ -1158,9 +1158,8 @@ const char* cmdOtaWrite(const String& argsInput) {
 }
 
 bool handleBleUploadFrame(uint16_t connId, const uint8_t* frame, size_t size) {
-  static const uint8_t prefix[] = {0x00, 'H', 'W', '1', 'O', 'T', 'A', 0x01};
-  if (!frame || size < kBleUploadHeaderSize + 1 ||
-      memcmp(frame, prefix, sizeof(prefix)) != 0) return false;
+  if (!frame || size < hw1otawire::kHeaderSize + 1 ||
+      memcmp(frame, hw1otawire::kOtaMagic, sizeof(hw1otawire::kOtaMagic)) != 0) return false;
   if (!gBleUploadMutex) return true;
   xSemaphoreTake(gBleUploadMutex, portMAX_DELAY);
 
@@ -1181,8 +1180,8 @@ bool handleBleUploadFrame(uint16_t connId, const uint8_t* frame, size_t size) {
                           (static_cast<uint32_t>(frame[9]) << 16) |
                           (static_cast<uint32_t>(frame[10]) << 8) |
                           static_cast<uint32_t>(frame[11]);
-  const uint8_t* payload = frame + kBleUploadHeaderSize;
-  const size_t payloadSize = size - kBleUploadHeaderSize;
+  const uint8_t* payload = frame + hw1otawire::kHeaderSize;
+  const size_t payloadSize = size - hw1otawire::kHeaderSize;
   gBleUpload.lastActivityMs = millis();
   if (gBleUpload.failed) {
     xSemaphoreGive(gBleUploadMutex);

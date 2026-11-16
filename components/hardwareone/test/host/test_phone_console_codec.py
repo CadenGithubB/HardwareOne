@@ -38,21 +38,33 @@ COMPACT = re.compile(r'\{"v":1,"fw":' + STRING + r',"model":' + STRING +
 def check_sources(component: Path) -> None:
     header = (component / 'BLE_PhonePipeConsoleCore.h').read_text()
     includes = re.findall(r'^#include\s+(\S+)', header, re.MULTILINE)
-    require(includes == ['<cstddef>', '<cstdint>', '<cstring>'],
+    require(includes == ['<cstddef>', '<cstdint>', '<cstring>', '"BLE_OtaWire.h"'],
             f'the record layer stays pure (no BLE, OS or Arduino): {includes}')
-    code = re.sub(r'//[^\n]*', '', header)
-    require(not re.search(r'\bnew\b|malloc|std::string|std::vector|snprintf|esp_|Arduino|xSemaphore', code),
-            'the record layer allocates nothing and calls no SDK')
+    # The OTA frame head it includes is pure as well.
+    wire = (component / 'BLE_OtaWire.h').read_text()
+    wire_includes = re.findall(r'^#include\s+(\S+)', wire, re.MULTILINE)
+    require(wire_includes == ['<cstddef>', '<cstdint>'],
+            f'BLE_OtaWire.h stays pure: {wire_includes}')
+    for text, name in ((header, 'the record layer'), (wire, 'BLE_OtaWire.h')):
+        code = re.sub(r'//[^\n]*', '', text)
+        require(not re.search(r'\bnew\b|malloc|std::string|std::vector|snprintf|esp_|Arduino|xSemaphore', code),
+                f'{name} allocates nothing and calls no SDK')
     for constant in ('kInfo = 0x01', 'kText = 0x02', 'kBlob = 0x03', 'kCard = 0x04', 'kMirror = 0x05',
                      'kAbort = 0x06', 'kTicket = 0x07', 'kCommand = 0x81', 'kBinary = 0x82', 'kResume = 0x83'):
         require(constant in header, f'record type {constant}')
     ota = (component / 'System_OTA.cpp').read_text()
-    require("{0x00, 'H', 'W', '1', 'O', 'T', 'A', 0x01}" in ota and
-            "kOtaMagic[8] = {0x00, 'H', 'W', '1', 'O', 'T', 'A', 0x01}" in header,
+    # One marker and one head length (BLE_OtaWire.h) for the record layer and
+    # the OTA handler; test_definition_owners.py pins that nobody re-spells them.
+    require("kOtaMagic[8] = {0x00, 'H', 'W', '1', 'O', 'T', 'A', 0x01}" in wire and
+            'using hw1otawire::kOtaMagic;' in header and
+            'memcmp(frame, hw1otawire::kOtaMagic, sizeof(hw1otawire::kOtaMagic))' in ota,
             'BINARY carries the OtaBleWire magic the OTA handler checks')
-    head = re.search(r'kBleUploadHeaderSize = (\d+);', ota)
+    require('kHeaderSize = sizeof(kOtaMagic) + kOffsetSize;' in wire and 'kOffsetSize = 4;' in wire and
+            'kBinaryMin = hw1otawire::kHeaderSize + 1' in header and
+            'hw1otawire::kHeaderSize + 1' in ota,
+            'BINARY and the OTA handler take the 12 B head from BLE_OtaWire.h')
     chunk = re.search(r'kBleUploadChunkMax = (\d+);', ota)
-    require(head and chunk and int(head.group(1)) == 12 and int(head.group(1)) + int(chunk.group(1)) == 489,
+    require(chunk and 12 + int(chunk.group(1)) == 489,
             'BINARY 13..489 is the OTA frame: 12 B head plus a 1..477 B chunk')
     limits = re.search(r'CMD_RESULT_MAX = (\d+);', (component / 'System_CommandLimits.h').read_text())
     require(limits and int(limits.group(1)) + 512 == 4608 and 'kChainMax = 4608' in header,

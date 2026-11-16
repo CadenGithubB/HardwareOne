@@ -510,10 +510,11 @@ static esp_err_t load_credentials(recovery_credentials_t *credentials)
     if (err != ESP_OK) {
         return err;
     }
-    err = nvs_get_str(handle, "ap_pass", credentials->ap_password, &ap_size);
+    err = nvs_get_str(handle, HW1_OTA_NVS_AP_PASS_KEY,
+                      credentials->ap_password, &ap_size);
     if (err == ESP_OK) {
-        err = nvs_get_str(handle, "auth_token", credentials->auth_token,
-                          &token_size);
+        err = nvs_get_str(handle, HW1_OTA_NVS_AUTH_TOKEN_KEY,
+                          credentials->auth_token, &token_size);
     }
     nvs_close(handle);
     if (err != ESP_OK || ap_size != token_size || ap_size < 13 || ap_size > 64 ||
@@ -618,9 +619,9 @@ static esp_err_t store_recovery_pin(const char *pin)
     if (err != ESP_OK) {
         return err;
     }
-    err = nvs_set_str(handle, "ap_pass", pin);
+    err = nvs_set_str(handle, HW1_OTA_NVS_AP_PASS_KEY, pin);
     if (err == ESP_OK) {
-        err = nvs_set_str(handle, "auth_token", pin);
+        err = nvs_set_str(handle, HW1_OTA_NVS_AUTH_TOKEN_KEY, pin);
     }
     if (err == ESP_OK) {
         err = nvs_commit(handle);

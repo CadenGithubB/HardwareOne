@@ -10,6 +10,13 @@ extern "C" {
 #define HW1_OTA_NVS_NAMESPACE "hw1up"
 #define HW1_OTA_NVS_SLOT_A_KEY "tx_a"
 #define HW1_OTA_NVS_SLOT_B_KEY "tx_b"
+/*
+ * Recovery handoff credential: the application stores the recovery passphrase
+ * under both keys (same value) and the updater reads both and requires them to
+ * match; the updater's own PIN path writes both the same way.
+ */
+#define HW1_OTA_NVS_AP_PASS_KEY "ap_pass"
+#define HW1_OTA_NVS_AUTH_TOKEN_KEY "auth_token"
 
 typedef struct {
     uint8_t valid_slots;   /* bit 0 = A, bit 1 = B */

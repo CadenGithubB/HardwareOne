@@ -31,18 +31,20 @@
 #include <cstdint>
 #include <cstring>
 
+#include "BLE_OtaWire.h"  // the OTA frame marker and head (pure, shared with the OTA handler)
+
 namespace hw1rec {
 constexpr uint8_t kInfo = 0x01, kText = 0x02, kBlob = 0x03, kCard = 0x04, kMirror = 0x05,
   kAbort = 0x06, kTicket = 0x07, kCommand = 0x81, kBinary = 0x82, kResume = 0x83;
 constexpr uint8_t kMore = 0x01;
 constexpr size_t kHeader = 4, kPayloadMax = 1024, kRecordMax = kHeader + kPayloadMax;
 constexpr size_t kInfoMax = 256, kTextMax = 1024, kChainMax = 4608, kCardMax = 512, kMirrorMax = 512,
-  kCommandMax = 511, kBinaryMin = 13, kBinaryMax = 489, kUnknownMax = 1024;
-inline constexpr uint8_t kOtaMagic[8] = {0x00, 'H', 'W', '1', 'O', 'T', 'A', 0x01};
+  kCommandMax = 511, kBinaryMin = hw1otawire::kHeaderSize + 1, kBinaryMax = 489, kUnknownMax = 1024;
+using hw1otawire::kOtaMagic;  // a BINARY payload starts with it (BLE_OtaWire.h)
 constexpr size_t kScanPeek = kHeader + sizeof(kOtaMagic);  // scan() reads at most this many bytes
 constexpr unsigned kInfoVersion = 1;                        // INFO "v": the record format
 constexpr size_t kInfoField = 64;                           // escaped bytes per INFO string
-static_assert(kBinaryMin == sizeof(kOtaMagic) + 4 + 1 && kBinaryMax + kHeader == 493, "OtaBleWire 12 B head + 1..477");
+static_assert(kBinaryMin == 13 && kBinaryMax + kHeader == 493, "OtaBleWire 12 B head + 1..477");
 static_assert(kChainMax == 4096 + 512, "CMD_RESULT_MAX (System_CommandLimits.h) plus headroom");
 
 enum class Side : uint8_t { P4, Phone };  // the receiving side

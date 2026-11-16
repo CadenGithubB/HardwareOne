@@ -81,6 +81,9 @@ def main():
                         ignore=shutil.ignore_patterns('._*'))
         for name in ('BLE_SecureChannel.cpp', 'BLE_SecureChannel.h', 'BLE_SecureCrypto.h', 'BLE_Types.h'):
             shutil.copy(args.component / name, work / name)
+        # The binary envelope marker's owner, when the tree has one.
+        if (args.component / 'BLE_OtaWire.h').exists():
+            shutil.copy(args.component / 'BLE_OtaWire.h', work / 'BLE_OtaWire.h')
         unit = work / 'harness.cpp'
         unit.write_text(harness)
         exe = work / 'test'

@@ -5069,6 +5069,20 @@ python3 components/hardwareone/test/host/test_espnow_identity_writes.py --saniti
 python3 components/hardwareone/test/host/test_https_cert_writes.py
 ```
 
+`definition_owners` is a source contract on three definitions that used to be spelled at every
+use: the OTA handoff NVS keys `ap_pass`/`auth_token` (owner `hw1_ota_nvs.h`, used by System_OTA.cpp
+and the updater), the OTA upload frame marker `00 'HW1OTA' 01` and its 12-byte head (owner
+`BLE_OtaWire.h`, used by the secure channel, the phone console records and handleBleUploadFrame)
+and the HTTPS key pair paths (owner `System_HttpsCertPaths.h`, used by HTTPS start, certinfo and
+certgen). Each literal appears only in its owner (the web settings page script is the one listed
+exception) and every former site uses the owner's name. It also compiles the owners and the
+extracted certinfo/certgen reply expressions on the host and compares them byte for byte with the
+old values. `--root <repository>` reads another tree; the pre-change tree fails.
+
+```sh
+python3 components/hardwareone/test/host/test_definition_owners.py
+```
+
 ## Camera lifecycle and backends
 
 ```sh

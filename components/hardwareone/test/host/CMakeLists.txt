@@ -2365,6 +2365,12 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_redact_audit.py
           ${SETUP_MQTT_TEST_ARGS})
+# Drift-prone definitions keep one owner: OTA handoff NVS keys (hw1_ota_nvs.h), the OTA frame
+# marker/head (BLE_OtaWire.h) and the HTTPS key pair paths (System_HttpsCertPaths.h).
+add_test(
+  NAME definition_owners
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_definition_owners.py)
 # The audit redactor iterates nested forwarding commands instead of recursing:
 # its text equals the recursive redactor's for 7125 generated lines nested up to
 # 131 levels, and its stack stays flat in nesting depth.

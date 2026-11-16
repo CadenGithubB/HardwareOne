@@ -14,6 +14,7 @@
 #include "System_UserSettings.h"
 #include "System_Settings.h"
 #include "System_VFS.h"
+#include "System_HttpsCertPaths.h"  // HW1_HTTPS_CERT_PATH, HW1_HTTPS_KEY_PATH
 #include <lwip/sockets.h>
 #include <esp_random.h>
 #include <memory>
@@ -426,8 +427,8 @@ esp_err_t sendJsonError(httpd_req_t* req, const String& message) {
 }
 
 #if ENABLE_HTTPS
-const char* const kHttpsCertPath = "/system/certs/https_server.crt";
-const char* const kHttpsKeyPath  = "/system/certs/https_server.key";  // a file path, not key material. secret-guard: allow
+const char* const kHttpsCertPath = HW1_HTTPS_CERT_PATH;
+const char* const kHttpsKeyPath  = HW1_HTTPS_KEY_PATH;
 
 bool webLoadHttpsCertPair(String& certOut, String& keyOut, const char* reason) {
   certOut = "";

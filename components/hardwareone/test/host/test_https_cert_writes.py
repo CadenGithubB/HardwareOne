@@ -54,8 +54,12 @@ def main():
         failures.append('a certificate file is promoted on its own before the other is staged')
 
     tmps = {}
-    for var, leaf in (('keyTmp', 'https_server.key'), ('certTmp', 'https_server.crt')):
-        if not re.search(r'\b' + var + r'\s*=\s*"/system/certs/' + re.escape(leaf) + r'\.tmp"', body):
+    # The staging path is the live path plus ".tmp": spelled out, or (since
+    # the paths have one owner, System_HttpsCertPaths.h) the owner's macro.
+    for var, leaf, macro in (('keyTmp', 'https_server.key', 'HW1_HTTPS_KEY_PATH'),
+                             ('certTmp', 'https_server.crt', 'HW1_HTTPS_CERT_PATH')):
+        if not re.search(r'\b' + var + r'\s*=\s*(?:"/system/certs/' + re.escape(leaf) + r'\.tmp"|'
+                         + macro + r'\s*"\.tmp")', body):
             failures.append(f'{var} is not the {leaf}.tmp staging path')
         tmps[var] = [m.start() for m in re.finditer(r'writeText\(\s*' + var + r'\.c_str\(\)', body)]
         if len(tmps[var]) != 1:
