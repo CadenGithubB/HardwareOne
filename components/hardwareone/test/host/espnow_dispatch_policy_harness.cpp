@@ -5,7 +5,9 @@
 // v4h_text, one recording double per other handler named in kV4HandlerTable,
 // the table itself, v4_dispatch_lookup, v4_dispatch_table_try and the
 // espnow_task text-queue drain at the INSERT_* tags, and defines
-// ENABLE_BONDED_MODE on the command line (compiled once per value).
+// ENABLE_BONDED_MODE on the command line (compiled once per value). The bond
+// cases also get the real isBondPeerMac (when the source has it) and the list
+// of bond rows.
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -52,8 +54,8 @@ template <class... A> static void debugSink(A&&...) {}
 #define DEBUG_ESPNOW_ROUTER 1
 #define ESPNOW_TEXT_MAX_LEN 1024
 
-#define WARN_ESPNOWF(...) do { ++gWarns; } while (0)
-[[maybe_unused]] static struct { bool bondModeEnabled = true; } gSettings;
+#define WARN_ESPNOWF(...) do { ++gWarns; debugSink(__VA_ARGS__); } while (0)
+[[maybe_unused]] static struct { bool bondModeEnabled = true; String bondPeerMac; } gSettings;
 
 // INSERT_MESSAGE_TYPES
 
@@ -110,6 +112,21 @@ static void systemEventPost(uint8_t kind, const char* subject = nullptr, const c
                             uint8_t = 0, const char* = nullptr) {
   gEvents.push_back({kind, subject ? subject : "", detail ? detail : ""});
 }
+
+// ---- Bond partner gate: doubles for isBondPeerMac and the dispatcher ---------
+// The firmware parseMacAddress needs the Arduino String. This double accepts
+// the same hand-typed separators and counts its calls, so the cases can show
+// that the DISPLAY form bondconnect stores is answered without it (the firmware
+// parser allocates; the gate runs for every received bond frame).
+static unsigned gParseCalls = 0;
+static bool parseMacAddress(const String& text, uint8_t mac[6]) {
+  ++gParseCalls;
+  return macParse(text.c_str(), mac);
+}
+static uint32_t gNowMs = 1;
+static uint32_t millis() { return gNowMs; }
+
+// INSERT_BOND_PEER
 
 // INSERT_POLICY
 
@@ -356,6 +373,123 @@ static unsigned runTextCases() {
   return failures;
 }
 
+// ---- Bond rows: only the configured bond partner reaches a bond handler ------
+// Every opcode in the table's ENABLE_BONDED_MODE block (the runner checks the
+// list against the table).
+static const uint8_t kBondOpcodes[] = {
+// INSERT_BOND_OPCODES
+};
+// Locally administered test addresses: gPartner is the configured bond partner,
+// gOtherPaired is a second paired mesh peer with a live session.
+static uint8_t gPartner[6] = {0x02, 0x11, 0x22, 0x33, 0x44, 0x02};
+static uint8_t gOtherPaired[6] = {0x02, 0x11, 0x22, 0x33, 0x44, 0x03};
+
+// Dispatches one bond frame from `src`; true when exactly one handler ran.
+// `minuteLater` moves the clock past the gate's one-line-a-minute limit first.
+static bool bondRun(uint8_t type, uint8_t* src, bool paired, bool enc, bool minuteLater = true) {
+  if (minuteLater) gNowMs += 61000;
+  gLastHandler.clear();
+  gHandlerCalls = gCleanups = gWarns = gParseCalls = 0;
+  esp_now_recv_info ri{src, nullptr, nullptr};
+  EspNowV4Header h{};
+  h.type = type;
+  h.fragCount = 1;
+  uint8_t payload[16] = {};
+  const bool claimed = v4_dispatch_table_try(&ri, &h, payload, sizeof payload, paired, enc, enc, "peer");
+  return claimed && gHandlerCalls == 1;
+}
+
+static unsigned runBondCases() {
+  unsigned failures = 0;
+  auto check = [&](const std::string& what, bool ok) {
+    if (!ok) ++failures;
+    std::printf("%s %s\n", ok ? "ok  " : "FAIL", what.c_str());
+  };
+  gEspNow->encryptionEnabled = true;
+#if ENABLE_BONDED_MODE
+  auto expect = [&](const std::string& what, bool got, bool want) {
+    if (got != want) ++failures;
+    if (got != want) std::printf("FAIL %s: got %s, want %s\n", what.c_str(),
+                                 got ? "dispatched" : "dropped", want ? "dispatched" : "dropped");
+    else std::printf("ok   %s\n", what.c_str());
+  };
+  const std::string partnerText = macText(gPartner);
+  for (uint8_t op : kBondOpcodes) {
+    const std::string name = opcodeName(op);
+    const V4OpcodeEntry* row = v4_dispatch_lookup(op);
+    check(name + " row requires REQ_PAIRED|REQ_SESSION_ENC",
+          row && (row->flags & (V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC)) ==
+                     (V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC));
+
+    gSettings.bondModeEnabled = true;
+    gSettings.bondPeerMac = String(partnerText.c_str());
+    expect(name + " from the bond partner, session-encrypted", bondRun(op, gPartner, true, true), true);
+    check(name + " from the bond partner: no WARN, cleaned up once", gWarns == 0 && gCleanups == 1);
+    expect(name + " from a second paired peer, session-encrypted (bond mode on)",
+           bondRun(op, gOtherPaired, true, true), false);
+    check(name + " from a second paired peer: drop is logged (one WARN) and cleaned up",
+          gWarns == 1 && gCleanups == 1 && gHandlerCalls == 0);
+    expect(name + " from the bond partner, plaintext", bondRun(op, gPartner, true, false), false);
+    expect(name + " from an unpaired source, session-encrypted", bondRun(op, gOtherPaired, false, true), false);
+
+    gSettings.bondPeerMac = String("");
+    expect(name + " with bond mode on and no partner configured", bondRun(op, gPartner, true, true), false);
+
+    gSettings.bondModeEnabled = false;
+    gSettings.bondPeerMac = String(partnerText.c_str());
+    expect(name + " from the bond partner with bond mode off", bondRun(op, gPartner, true, true), false);
+    check(name + " with bond mode off: dropped without a WARN, cleaned up", gWarns == 0 && gCleanups == 1);
+    expect(name + " from a second paired peer with bond mode off", bondRun(op, gOtherPaired, true, true), false);
+  }
+
+  // How the partner is stored. bondconnect writes the DISPLAY form; both answers
+  // for it are a text compare (parseMacAddress, which allocates, is not called).
+  const uint8_t hb = ESPNOW_V4_TYPE_BOND_HEARTBEAT;
+  gSettings.bondModeEnabled = true;
+  gSettings.bondPeerMac = String(partnerText.c_str());
+  expect("partner stored in DISPLAY form: partner accepted", bondRun(hb, gPartner, true, true), true);
+  check("partner stored in DISPLAY form: partner accepted without parseMacAddress", gParseCalls == 0);
+  expect("partner stored in DISPLAY form: second paired peer dropped", bondRun(hb, gOtherPaired, true, true), false);
+  check("partner stored in DISPLAY form: second paired peer dropped without parseMacAddress", gParseCalls == 0);
+  // The setting can be typed by hand (espnowbondpeermac): the partner the
+  // senders resolve with parseMacAddress is the partner the gate accepts.
+  gSettings.bondPeerMac = String("02-11-22-33-44-02");
+  expect("partner typed with dashes: partner accepted", bondRun(hb, gPartner, true, true), true);
+  check("partner typed with dashes: resolved by parseMacAddress, the senders' parser", gParseCalls == 1);
+  expect("partner typed with dashes: second paired peer dropped", bondRun(hb, gOtherPaired, true, true), false);
+  gSettings.bondPeerMac = String("02:11:22:33:44:0a");
+  uint8_t lowerCasePartner[6] = {0x02, 0x11, 0x22, 0x33, 0x44, 0x0A};
+  expect("partner typed in lower case: partner accepted", bondRun(hb, lowerCasePartner, true, true), true);
+  expect("partner typed in lower case: second paired peer dropped", bondRun(hb, gOtherPaired, true, true), false);
+  gSettings.bondPeerMac = String("not a mac");
+  expect("partner text that does not parse: dropped", bondRun(hb, gPartner, true, true), false);
+
+  // A peer whose own partner setting is stale sends a heartbeat every few
+  // seconds: one WARN a minute, every frame still dropped and cleaned up.
+  gSettings.bondPeerMac = String(partnerText.c_str());
+  expect("stale peer, first heartbeat", bondRun(hb, gOtherPaired, true, true), false);
+  check("stale peer, first heartbeat: one WARN", gWarns == 1);
+  gNowMs += 5000;
+  expect("stale peer, heartbeat 5 s later", bondRun(hb, gOtherPaired, true, true, false), false);
+  check("stale peer, heartbeat 5 s later: dropped and cleaned up without a second WARN",
+        gWarns == 0 && gCleanups == 1 && gHandlerCalls == 0);
+  gNowMs += 56000;
+  expect("stale peer, heartbeat a minute after the first", bondRun(hb, gOtherPaired, true, true, false), false);
+  check("stale peer, heartbeat a minute after the first: WARN again", gWarns == 1);
+  expect("partner heartbeat between the stale ones is still accepted",
+         bondRun(hb, gPartner, true, true, false), true);
+#else
+  // Bonded mode compiled out: no bond row exists, so the frames fall to the
+  // unknown-type drop whatever the settings say.
+  for (uint8_t op : kBondOpcodes) {
+    check(std::string(opcodeName(op)) + " has no table row (bonded mode compiled out)",
+          v4_dispatch_lookup(op) == nullptr && !bondRun(op, gPartner, true, true) &&
+              !bondRun(op, gOtherPaired, true, true));
+  }
+#endif
+  return failures;
+}
+
 int main() {
   unsigned failures = 0;
   auto expect = [&](const char* what, bool got, bool want) {
@@ -428,6 +562,7 @@ int main() {
   if (zeroFlagOk) std::printf("ok   every zero-flag row is on the allow-list\n");
 
   failures += runTextCases();
+  failures += runBondCases();
 
   std::printf("ENABLE_BONDED_MODE=%d: %u failure%s\n", ENABLE_BONDED_MODE, failures, failures == 1 ? "" : "s");
   return failures ? 1 : 0;

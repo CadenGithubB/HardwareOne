@@ -19,11 +19,8 @@
 #include "System_CommandTypes.h"   // ExecReq::DeferredFn (signature for submitDeferredToCmdExec)
 #include "System_Utils.h"  // submitDeferredToCmdExec
 #include "System_Debug.h"
-#include "System_ESPNow.h"          // generateMessageId
+#include "System_ESPNow.h"          // generateMessageId; isBondPeerMac — the one requester FS RPC serves
 #include "System_ESPNow_Tx.h"       // espnowtx::sendAead / sendAeadSync (Step 3c)
-#if ENABLE_BONDED_MODE
-#include "System_BondedPeer.h"     // BondedPeer::peerMacBytes — the one requester FS RPC serves
-#endif
 #include "System_Filesystem.h"      // filesystemReady, getPermissions
 #include "System_MemUtil.h"         // ps_alloc — PSRAM-backed reply buffer (off espnow_task stack)
 #include "System_Mutex.h"           // FsLockGuard
@@ -624,8 +621,7 @@ static bool fsRpcPathAllowed(const char* rawPath) {
 // authorizes as the supplied account.
 static bool fsRpcRequesterIdentity(const uint8_t srcMac[6], AuthContext& out) {
 #if ENABLE_BONDED_MODE
-  uint8_t bondMac[6];
-  if (!BondedPeer::peerMacBytes(bondMac) || memcmp(bondMac, srcMac, 6) != 0) return false;
+  if (!isBondPeerMac(srcMac)) return false;
   if (!isBondSessionTokenValid()) return false;
   out.transport = SOURCE_ESPNOW;
   out.user      = kBondAdminUser;

@@ -1660,6 +1660,10 @@ void bondNotifySessionEstablished(const uint8_t* peerMac);
 String buildBondedCommandPayload(const String& command);
 bool espnowConsumePairingWindow(const uint8_t mac[6]);
 bool isBondSessionTokenValid();
+// True when bond mode is on, a partner is configured and `mac` is that partner:
+// the one owner of "is this our bond partner" (receive table, session hook,
+// bond magic files, file RPC). False when bonded mode is compiled out.
+bool isBondPeerMac(const uint8_t* mac);
 bool v4_broadcast_sensor_status(RemoteSensorType sensorType, bool enabled);
 bool v4_send_encrypted_or_queue(const uint8_t dst[6], uint8_t type, uint16_t baseFlags, uint32_t msgId, const uint8_t* plaintext, uint16_t plaintextLen, uint8_t ttl, char* outStatus = nullptr, size_t outStatusLen = 0);
 bool v4_send_sensor_envelope(const uint8_t* dstMac, RemoteSensorType sensorType, const char* jsonData, uint16_t jsonLen);

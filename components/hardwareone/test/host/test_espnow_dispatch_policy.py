@@ -14,7 +14,12 @@ mesh passphrase (plaintext stays accepted on a keyless device), that plaintext
 TEXT accepted on a keyless device is filed under its MAC rather than a paired
 peer's name and posts no SYSEVT_TEXT_RX, that authenticated text keeps its
 name, encryption flag, per-fragment records and single bus event, that opcode
-150 has no row, and that every zero-flag row is on an explicit allow-list.
+150 has no row, that every zero-flag row is on an explicit allow-list, and
+that every bond row reaches its handler only from the configured bond partner:
+a second paired peer with a session is dropped with a WARN (one a minute),
+bond mode off drops silently, the stored partner text is matched without a
+parse when it is in the form bondconnect writes and through parseMacAddress
+when it was typed by hand, and with bonded mode compiled out no bond row exists.
 History, the event bus and the G2 push-kick are recording doubles; no radio or
 transport is accessed.
 
@@ -40,6 +45,13 @@ ZERO_FLAG_ALLOWED = ('KEY_EX_HELLO', 'KEY_EX_REPLY', 'KEY_EX_CONFIRM',
                      'SESSION_OPEN', 'SESSION_CONFIRM', 'SESSION_REKEY',
                      'HEARTBEAT',
                      'TOPO_REQ', 'TOPO_START', 'TOPO_PEER', 'USER_SYNC')
+
+# The rows of the table's ENABLE_BONDED_MODE block: accepted only from the
+# configured bond partner. A row added to or removed from that block must be
+# added here or removed, so it gets the partner cases.
+BOND_OPCODES = ('BOND_HEARTBEAT', 'BOND_STREAM_CTRL', 'BOND_CAP_REQ', 'BOND_CAP_RESP',
+                'BOND_SENSOR_DATA', 'SETTINGS_REQ', 'SCHEMA_REQ', 'BOND_STATUS_REQ',
+                'BOND_STATUS_RESP', 'MANIFEST_REQ')
 
 
 def main():
@@ -90,6 +102,16 @@ def main():
     text_handler = extract_block(source, 'static void v4h_text(')
     drain = 'static void drainTextQueueForTest() ' + extract_block(source, '// 11. Drain text message queue')
 
+    # The bond partner predicate runs for real when the source has it (a tree
+    # from before the partner gate has none; its dispatcher never calls one).
+    bond_marker = 'bool isBondPeerMac(const uint8_t* mac)'
+    bond_peer = extract_block(source, bond_marker) if bond_marker in source else ''
+    bond_block = re.search(r'#if ENABLE_BONDED_MODE\n(.*?)#endif', table, re.DOTALL)
+    assert bond_block, 'kV4HandlerTable has no ENABLE_BONDED_MODE block'
+    bond_rows = re.findall(r'\{\s*ESPNOW_V4_TYPE_(\w+)\s*,', bond_block.group(1))
+    assert sorted(bond_rows) == sorted(BOND_OPCODES), f'bond rows changed, update BOND_OPCODES: {bond_rows}'
+    bond_opcodes = '\n'.join(f'  ESPNOW_V4_TYPE_{name},' for name in BOND_OPCODES)
+
     handlers = sorted(set(re.findall(r'\{\s*ESPNOW_V4_TYPE_\w+\s*,[^,]*,\s*(\w+)\s*\}', table)))
     assert handlers, 'no handler rows found in kV4HandlerTable'
     assert 'v4h_text' in handlers, 'the TEXT row must name v4h_text'
@@ -106,6 +128,8 @@ def main():
                        ('// INSERT_RXCTX', ctx),
                        ('// INSERT_MESSAGE_TYPES', message_types),
                        ('// INSERT_TEXT_QUEUE_ENTRY', queue_entry),
+                       ('// INSERT_BOND_PEER', bond_peer),
+                       ('// INSERT_BOND_OPCODES', bond_opcodes),
                        ('// INSERT_POLICY', policy),
                        ('// INSERT_ORIGIN_KNOWN', origin_known),
                        ('// INSERT_TEXT_HANDLER', text_handler),

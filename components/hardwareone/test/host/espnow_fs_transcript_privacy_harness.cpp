@@ -72,6 +72,8 @@ AuthContext systemIdentity(const char*){AuthContext c;c.transport=SOURCE_INTERNA
 #define SYSTEM_IDENTITY_SCOPE(label) ExecIdentityGuard identity(systemIdentity(label))
 const AuthContext& currentAuthContext(){assert(scopeDepth);return auth;}
 namespace BondedPeer{bool peerMacBytes(uint8_t out[6]){if(!bondConfigured)return false;std::memcpy(out,bondMac,6);return true;}}
+// The owner of "is this our bond partner" (System_ESPNow.cpp); sources from before it ask peerMacBytes above.
+bool isBondPeerMac(const uint8_t* m){return bondConfigured&&std::memcmp(m,bondMac,6)==0;}
 bool isBondSessionTokenValid(){return bondSession;}
 // Mirrors the two resolveRole branches that matter: SYSTEM is unrestricted; the bond identity over
 // ESP-NOW is SUPER only while the bond session is live, and nobody otherwise.

@@ -175,6 +175,8 @@ bool peerMacBytes(uint8_t out[6]) {
 const char* lastError() { return sLastError; }
 // INSERT_BONDED
 }  // namespace BondedPeer
+// The one owner of "is this our bond partner" (System_ESPNow.cpp), modelled on the same fixture.
+static bool isBondPeerMac(const uint8_t* mac) { return gPaired && mac && std::memcmp(mac, kPeerMac, 6) == 0; }
 
 // ---- remote: reply owner (production System_Utils, when the tree has it) -------
 // INSERT_REMOTE_REPLY

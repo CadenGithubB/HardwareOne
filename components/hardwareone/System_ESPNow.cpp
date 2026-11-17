@@ -1100,6 +1100,30 @@ bool isBondSessionTokenValid() {
   return bondPeerActiveSession() != nullptr;
 }
 
+// The one answer to "is `mac` our bond partner": bond mode is on, a partner is
+// configured and `mac` is that partner. The receive table (REQ_BOND_PEER), the
+// session-established hook, the bond magic files and the file RPC all ask here.
+// `mac` is the radio source of a frame: bond traffic is single hop.
+//
+// bondconnect stores the partner in DISPLAY form, so both usual answers are a
+// text compare with no allocation (this runs for every received bond frame).
+// The setting can also be typed by hand (espnowbondpeermac); a text that is not
+// in DISPLAY form goes through parseMacAddress, the parser every bond sender
+// uses, so the device accepts exactly the partner it sends to.
+bool isBondPeerMac(const uint8_t* mac) {
+  if (!mac || !gSettings.bondModeEnabled || gSettings.bondPeerMac.length() == 0) return false;
+  const char* stored = gSettings.bondPeerMac.c_str();
+  char text[18];
+  macToDisplay(mac, text, sizeof(text));
+  if (strcmp(stored, text) == 0) return true;
+  uint8_t partner[6];
+  if (macParse(stored, partner)) {
+    macToDisplay(partner, text, sizeof(text));
+    if (strcmp(stored, text) == 0) return false;   // DISPLAY form of another device
+  }
+  return parseMacAddress(gSettings.bondPeerMac, partner) && macEquals(partner, mac);
+}
+
 String buildBondedCommandPayload(const String& command) {
   if (!gEspNow) {
     ERROR_ESPNOWF("[BOND_AUTH] buildPayload: gEspNow null");
@@ -1121,6 +1145,7 @@ String buildBondedCommandPayload(const String& command) {
 }
 #else
 bool isBondSessionTokenValid() { return false; }
+bool isBondPeerMac(const uint8_t* /*mac*/) { return false; }
 String buildBondedCommandPayload(const String& /*command*/) { return String(); }
 #endif // ENABLE_BONDED_MODE
 
@@ -3052,9 +3077,7 @@ static bool bondSessionActiveWith(const uint8_t* mac) {
 // sessions opened for non-bond reasons don't spuriously start a bond sync.
 void bondNotifySessionEstablished(const uint8_t* peerMac) {
 #if ENABLE_BONDED_MODE
-  if (!gEspNow || !gSettings.bondModeEnabled || !peerMac) return;
-  uint8_t bm[6];
-  if (!parseMacAddress(gSettings.bondPeerMac, bm) || memcmp(bm, peerMac, 6) != 0) return;
+  if (!gEspNow || !isBondPeerMac(peerMac)) return;
   bool wasOffline = !gEspNow->bondPeerOnline;
   gEspNow->bondPeerOnline = true;
   gEspNow->lastBondHeartbeatReceivedMs = millis();  // session ACTIVE counts as liveness
@@ -3341,7 +3364,10 @@ using V4OpcodeHandler = void (*)(const V4RxCtx& ctx);
 
 // Flags on handler-table entries
 static constexpr uint8_t V4_OPC_FLAG_REQ_PAIRED        = 0x01;  // require src to be a paired peer
-static constexpr uint8_t V4_OPC_FLAG_REQ_BOND_MODE     = 0x02;  // require gSettings.bondModeEnabled
+// Require bond mode on AND the radio source to be the configured bond partner
+// (isBondPeerMac). Every bond opcode carries it: a bond is 1:1, so another
+// paired mesh peer, session or not, never reaches a bond handler.
+static constexpr uint8_t V4_OPC_FLAG_REQ_BOND_PEER     = 0x02;
 // Require the frame to be authenticated (came in via SESSION_FRAME unwrap or
 // BROADCAST_AUTH HMAC verify). Drops plaintext unicast and plain broadcasts
 // silently. Used by opcodes whose handler mutates device-level state from
@@ -4537,7 +4563,7 @@ static void v4h_manifest_req(const V4RxCtx& ctx) {
 // FS_LIST / FS_STAT / FS_GET — thin shims that unpack V4RxCtx and call into
 // System_ESPNow_FsList.cpp where the real work lives. All six opcodes are
 // gated on REQ_PAIRED + REQ_SESSION_ENC by the dispatch table — no
-// REQ_BOND_MODE, so a reply still reaches a requester whose own bond mode is
+// REQ_BOND_PEER, so a reply still reaches a requester whose own bond mode is
 // off. So by the time we reach these handlers the sender is a securely paired
 // peer over an active encrypted session. Serving a request is narrower:
 // System_ESPNow_FsList.cpp answers LIST/STAT/GET only for our bonded peer
@@ -4923,8 +4949,7 @@ static bool v4FileBondMagicAllowed(const uint8_t* sndMac, const char* filename) 
     WARN_ESPNOWF("[V4_FILE] Rejected bond file '%s': bond mode inactive or peer offline", filename);
     return false;
   }
-  uint8_t bondMac[6];
-  if (!parseMacAddress(gSettings.bondPeerMac, bondMac) || memcmp(bondMac, sndMac, 6) != 0) {
+  if (!isBondPeerMac(sndMac)) {
     WARN_ESPNOWF("[V4_FILE] Rejected bond file '%s' from non-bond peer", filename);
     return false;
   }
@@ -6159,7 +6184,7 @@ static const V4OpcodeEntry kV4HandlerTable[] = {
   { ESPNOW_V4_TYPE_SUBSCRIBE_UPDATE, V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, v4h_subscribe_update  },
   // Remote filesystem (FsList) — browse/stat/fetch a peer's files over an active
   // encrypted session. The rows carry REQ_PAIRED + REQ_SESSION_ENC and no
-  // REQ_BOND_MODE; the request handlers in System_ESPNow_FsList.cpp then serve
+  // REQ_BOND_PEER; the request handlers in System_ESPNow_FsList.cpp then serve
   // only our bonded peer while its bond session is live, under the bond identity
   // (fsRpcRequesterIdentity), and answer PERM_DENIED to every other paired peer.
   // Both REQ and REPLY/ACK rows live here so a requester whose own bond mode is
@@ -6171,18 +6196,20 @@ static const V4OpcodeEntry kV4HandlerTable[] = {
   { ESPNOW_V4_TYPE_FS_GET_REQ,       V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_fs_get_req        },
   { ESPNOW_V4_TYPE_FS_GET_ACK,       V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_fs_get_ack        },
 #if ENABLE_BONDED_MODE
-  { ESPNOW_V4_TYPE_BOND_HEARTBEAT,   V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_bond_heartbeat    },
-  { ESPNOW_V4_TYPE_BOND_STREAM_CTRL, V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_stream_ctrl       },
-  { ESPNOW_V4_TYPE_BOND_CAP_REQ,     V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_bond_cap_req      },
-  { ESPNOW_V4_TYPE_BOND_CAP_RESP,    V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_bond_cap_resp     },
-  { ESPNOW_V4_TYPE_BOND_SENSOR_DATA, V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_sensor_data       },
-  { ESPNOW_V4_TYPE_SETTINGS_REQ,     V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_settings_req      },
-  { ESPNOW_V4_TYPE_SCHEMA_REQ,       V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_schema_req        },
-  { ESPNOW_V4_TYPE_BOND_STATUS_REQ,  V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_bond_status_req   },
-  { ESPNOW_V4_TYPE_BOND_STATUS_RESP, V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_bond_status_resp  },
-  { ESPNOW_V4_TYPE_MANIFEST_REQ,     V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_manifest_req      },
+  // Bond rows: accepted only from the configured bond partner over its session
+  // (REQ_BOND_PEER). Replies to the deferred requests go back to that sender.
+  { ESPNOW_V4_TYPE_BOND_HEARTBEAT,   V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_PEER | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_bond_heartbeat    },
+  { ESPNOW_V4_TYPE_BOND_STREAM_CTRL, V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_PEER | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_stream_ctrl       },
+  { ESPNOW_V4_TYPE_BOND_CAP_REQ,     V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_PEER | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_bond_cap_req      },
+  { ESPNOW_V4_TYPE_BOND_CAP_RESP,    V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_PEER | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_bond_cap_resp     },
+  { ESPNOW_V4_TYPE_BOND_SENSOR_DATA, V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_PEER | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_sensor_data       },
+  { ESPNOW_V4_TYPE_SETTINGS_REQ,     V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_PEER | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_settings_req      },
+  { ESPNOW_V4_TYPE_SCHEMA_REQ,       V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_PEER | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_schema_req        },
+  { ESPNOW_V4_TYPE_BOND_STATUS_REQ,  V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_PEER | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_bond_status_req   },
+  { ESPNOW_V4_TYPE_BOND_STATUS_RESP, V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_PEER | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_bond_status_resp  },
+  { ESPNOW_V4_TYPE_MANIFEST_REQ,     V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_PEER | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_manifest_req      },
   // (FS_LIST / FS_STAT / FS_GET rows are above, outside this block: no
-  // REQ_BOND_MODE in the table; FsList serves requests to the bonded peer only.)
+  // REQ_BOND_PEER in the table; FsList serves requests to the bonded peer only.)
 #endif
 };
 static constexpr size_t kV4HandlerTableSize = sizeof(kV4HandlerTable) / sizeof(kV4HandlerTable[0]);
@@ -6377,14 +6404,40 @@ static bool v4_dispatch_table_try(const esp_now_recv_info* recv_info, const EspN
     return true;
   }
 #if ENABLE_BONDED_MODE
-  if ((e->flags & V4_OPC_FLAG_REQ_BOND_MODE) && !gSettings.bondModeEnabled) {
+  if ((e->flags & V4_OPC_FLAG_REQ_BOND_PEER) && !gSettings.bondModeEnabled) {
     // Bond-mode-only opcodes were gated `&& gSettings.bondModeEnabled` originally.
     // When bond mode is off, drop silently (no other branch handles these types).
     v4_dispatch_post_cleanup(recv_info, h);
     return true;
   }
+  if ((e->flags & V4_OPC_FLAG_REQ_BOND_PEER) && !isBondPeerMac(recv_info->src_addr)) {
+    // Bond mode is on, but this paired peer is not our partner (bond frames are
+    // single hop, so the radio source is the sender). Without this gate its
+    // heartbeat kept our partner "online" and reset the sync, and it could pull
+    // settings, schema, manifest and status or switch sensor streaming.
+    // A peer whose own partner setting is stale (bonddisconnect is local) keeps
+    // sending a heartbeat every few seconds, so the line is limited to one a
+    // minute and carries the count of the drops in between.
+    static uint32_t sLastWarnMs = 0;
+    static uint32_t sUnreported = 0;
+    const uint32_t nowMs = millis();
+    if (sLastWarnMs == 0 || (uint32_t)(nowMs - sLastWarnMs) >= 60000UL) {
+      WARN_ESPNOWF("[V4_RX] type=%u from " MAC_FMT " dropped: "
+                   "bond opcode from a peer that is not the bond partner "
+                   "(%lu more dropped since the last report)",
+                   h->type,
+                   MAC_ARGS(recv_info->src_addr),
+                   (unsigned long)sUnreported);
+      sLastWarnMs = nowMs ? nowMs : 1;
+      sUnreported = 0;
+    } else {
+      sUnreported++;
+    }
+    v4_dispatch_post_cleanup(recv_info, h);
+    return true;
+  }
 #else
-  if (e->flags & V4_OPC_FLAG_REQ_BOND_MODE) {
+  if (e->flags & V4_OPC_FLAG_REQ_BOND_PEER) {
     // Bond feature compiled out — drop any bond-gated opcode (none are
     // registered in kV4HandlerTable when ENABLE_BONDED_MODE=0, but keep the
     // flag check honest for forward-compat / stale peers).
