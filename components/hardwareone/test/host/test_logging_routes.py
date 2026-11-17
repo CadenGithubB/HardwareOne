@@ -56,7 +56,7 @@ IDF_LOG_ALLOWED: dict[str, int] = {
     "HAL_Camera_P4.cpp": 3,
     "HAL_Display_P4Eye.cpp": 5,
     "HAL_Display_Waveshare.cpp": 5,
-    "HAL_Radio.cpp": 15,
+    "HAL_Radio.cpp": 16,      # C6 bring-up at boot, before the queued log runs; 16th: transport not up N ms after the start
     "HAL_SDCard.cpp": 4,
     "Input_GT911.cpp": 2,
     "System_Filesystem.cpp": 10,
@@ -67,9 +67,10 @@ IDF_LOG_ALLOWED: dict[str, int] = {
     "System_OTA.cpp": 23,
     "System_OTASafety.cpp": 12,
     "System_RadioCompanion.cpp": 2,
-    "System_STT.cpp": 34,
+    "System_STT.cpp": 38,     # TL bench trace lines; +4 for the phrase leveler and the glasses gain (TL phrasegain, TL g2autogain)
     "System_STTLocal.cpp": 22,
     "System_STTRawCapture.cpp": 2,
+    "System_Utils.cpp": 2,    # rebootDevice: the SDMMC quiesce record, printed just before esp_restart(); a queued line would not drain
     "stt/quartznet_runtime.cpp": 5,
     "stt/citrinet_runtime.cpp": 7,   # QuartzNet's runtime's five model-load/resident-model/admission lines, the image-trim record (TL e3t) and the bench self-check (HW1_STT_SELFCHECK builds)
     "stt/stt_heap_watch.inc": 5,     # diagnostic builds only (HW1_STT_HEAP_WATCH): the low-point report

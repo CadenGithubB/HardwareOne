@@ -41,16 +41,11 @@
 #include "esp_now_hosted_companion.h"
 #include "esp_now_hosted_rpc.h"
 #include "System_CommandRegistry.h"
-#if ENABLE_HTTP_SERVER
 #include "WebServer_Handle.h"
-#endif
 #if ENABLE_ESPNOW
 #include "System_ESPNow_Sensors.h"
 #endif
 #include "System_WiFi.h"
-#if ENABLE_HTTP_SERVER
-extern const char* cmd_httpstart(const String& argsInput);  // `openhttp` (System_WiFi.cpp)
-#endif
 
 namespace {
 
