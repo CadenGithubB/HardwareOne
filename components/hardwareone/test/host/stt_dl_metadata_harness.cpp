@@ -36,6 +36,11 @@ namespace dl {
 #include "tensor_extract.inc"
 void TensorBase::print(bool) {}  // debug output, not under test (its only other virtual)
 }  // namespace dl
+extern "C" {
+int hw1_dl_compact_exponents = 0;  // dl_tensor_base.cpp (not compiled here beyond the extract above)
+void* hw1_dl_fbs_new(size_t size);          // dl_tool_metadata.cpp: libfbs_model's operator new(size_t)
+void hw1_dl_fbs_delete(void* ptr, size_t);  // and its operator delete(void*, size_t)
+}
 
 using dl::TensorBase;
 using dl::tool::MetadataKind;
@@ -321,9 +326,75 @@ void threads() {
   std::printf("PASS threads: %u blocks from 4 tasks, all returned\n", unsigned(d.allocs));
 }
 
+// The two kinds that live only while a model is built, and per-channel exponents kept as bytes.
+void buildTime() {
+  fake::reset({8u << 20, 8u << 20});
+  const DlMetadataStats total0 = hw1::stt::dlMetadataStats();
+  const auto kind = [](MetadataKind k) { return hw1::stt::dlMetadataStats(size_t(k)); };
+  const DlMetadataStats plan0 = kind(MetadataKind::Plan), map0 = kind(MetadataKind::FbsMap);
+  // What prebuilt libfbs_model allocates itself, by the names its linked copy calls.
+  void* node = hw1_dl_fbs_new(44);
+  assert(node && fake_heap_is_psram(node) && gTags["stt.dl.fbsmap"] >= 1);
+  hw1_dl_fbs_delete(node, 44);
+  hw1_dl_fbs_delete(nullptr, 0);
+  void* foreign = fake::prebuiltAlloc(24);  // a block made outside the hook (the caller's global new), freed inside the library
+  hw1_dl_fbs_delete(foreign, 24);
+  // The memory planner's containers.
+  {
+    dl::tool::plan_vector<int> shape{1, 500, 1, 384};
+    dl::tool::plan_string name("/blocks.3/main/main.1/Conv_output_0");
+    assert(fake_heap_is_psram(shape.data()) && fake_heap_is_psram(name.data()) && gTags["stt.dl.plan"] >= 2);
+    const std::vector<int> copy = shape;
+    assert(copy == std::vector<int>({1, 500, 1, 384}) && !fake::owns(copy.data()));
+  }
+  const DlMetadataStats plan1 = kind(MetadataKind::Plan), map1 = kind(MetadataKind::FbsMap);
+  assert(plan1.allocs - plan0.allocs == 2 && map1.allocs - map0.allocs == 1 && map1.bytes - map0.bytes == 44);
+  // Totals count what a model keeps: the build-time kinds add frees only.
+  const DlMetadataStats d = delta(total0);
+  assert(d.allocs == 0 && d.bytes == 0 && d.frees == 4 && fake::liveAll() == 0);
+
+  // Per-channel exponents: int[] as upstream unless the application asks while it builds a model.
+  std::vector<int> exps{-26, -2, 0, 127, -128, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
+  const size_t used0 = fake::usedPsram();
+  dl::ExponentInfo wide(exps);
+  assert(wide.is_per_channel() && wide.data() && fake::owns(wide.data()) && fake::alignment(wide.data()) >= 16);
+  assert(fake::usedPsram() - used0 >= exps.size() * sizeof(int));
+  {
+    const hw1::stt::DlCompactExponents compact;
+    assert(hw1_dl_compact_exponents == 1);
+    const size_t used1 = fake::usedPsram();
+    dl::ExponentInfo small(exps);
+    assert(fake::usedPsram() - used1 < exps.size() * 2);  // one byte each
+    assert(small.is_valid() && small.is_per_channel() && small.channel_size() == int(exps.size()) && !small.data());
+    for (size_t i = 0; i < exps.size(); ++i) assert(small.get(int(i)) == exps[i] && wide.get(int(i)) == exps[i]);
+    assert(small.get() == 0 && small == wide && wide == small);
+    dl::ExponentInfo copy(small), assigned, moved{dl::ExponentInfo(exps)}, moveAssigned;
+    assigned = small;
+    moveAssigned = dl::ExponentInfo(exps);
+    for (const dl::ExponentInfo* e : {&copy, &assigned, &moved, &moveAssigned}) assert(*e == small && !e->data());
+    assigned = wide;  // a copy keeps its source's form, whatever the flag
+    assert(assigned.data() && assigned == small);
+    moved = -7;       // back to one exponent
+    assert(!moved.is_per_channel() && int(moved) == -7 && *moved.data() == -7);
+    std::vector<int> big = exps;
+    big[2] = 128;     // one value outside int8: the whole array stays int
+    dl::ExponentInfo kept(big);
+    assert(kept.data() && kept.get(2) == 128 && !(kept == small));
+    // The tensor constructor libfbs_model calls: the channel count it checks afterwards is unchanged.
+    int8_t w[17 * 4] = {};
+    auto* t = new TensorBase({1, 1, 4, 17}, w, exps, dl::DATA_TYPE_INT8, false);
+    assert(t->exponent.channel_size() == 17 && t->exponent.is_per_channel() && !t->exponent.data());
+    delete t;
+  }
+  assert(hw1_dl_compact_exponents == 0);
+  dl::ExponentInfo after(exps);
+  assert(after.data() && after == wide);
+  std::printf("PASS build-time kinds and compact exponents: fbsmap/plan placed and counted apart, int8 arrays equal to int\n");
+}
+
 void kindNames() {
   static const char* const expected[] = {"model", "ctx", "loader", "fbs", "module", "tensor",
-                                         "exp", "shape", "index", "list", "names"};
+                                         "exp", "shape", "index", "list", "names", "plan", "fbsmap"};
   static_assert(sizeof(expected) / sizeof(expected[0]) == dl::tool::kMetadataKinds);
   for (size_t k = 0; k < dl::tool::kMetadataKinds; ++k) {
     assert(!std::strcmp(dl::tool::metadata_kind_name(MetadataKind(k)), expected[k]));
@@ -349,6 +420,7 @@ int main() {
   containersAndObjects();
   fallbacks();
   threads();
+  buildTime();
   kindNames();
   std::printf("dl metadata hook host test passed (C++%ld)\n", long(__cplusplus / 100 % 100));
 }

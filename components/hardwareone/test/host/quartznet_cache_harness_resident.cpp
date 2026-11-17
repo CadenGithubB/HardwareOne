@@ -71,7 +71,8 @@ struct State {
     bool hookInstalled=false; int installs=0;
     bool psramRefuses=false;            // metadata and resident blocks land in internal RAM
     size_t metaPsram=0, metaInternal=0, psPsram=0, psInternal=0;
-    uint32_t allocs[11]={}, bytes[11]={}, internal[11]={}, internalBytes[11]={}, failed[11]={}, frees=0;
+    uint32_t allocs[13]={}, bytes[13]={}, internal[13]={}, internalBytes[13]={}, failed[13]={}, frees=0;
+    int compactExponents=0;             // live DlCompactExponents (the runtime holds one around every model it constructs)
     int modelNews=0, failModelAt=0;     // fail the n-th Model allocation (1-based; 0: never)
     int psAllocs=0, failPsAt=0;         // fail the n-th sttPsramAlloc (1-based; 0: never)
     uint32_t foreignObjects=0;
@@ -219,7 +220,14 @@ struct DlMetadataStats {
   uint32_t failed = 0;         // requests neither heap could serve
   uint32_t frees = 0;          // non-null blocks returned through the hook
 };
-inline constexpr size_t kDlMetadataKinds = 11;  // dl::tool::kMetadataKinds (static_assert in the .cpp)
+inline constexpr size_t kDlMetadataKinds = 13;  // dl::tool::kMetadataKinds (static_assert in the .cpp)
+inline constexpr size_t kDlMetadataLongLivedKinds = 11;  // totals leave out the two build-time kinds (plan, fbsmap)
+struct DlCompactExponents {
+  DlCompactExponents();
+  ~DlCompactExponents();
+  DlCompactExponents(const DlCompactExponents&) = delete;
+  DlCompactExponents& operator=(const DlCompactExponents&) = delete;
+};
 
 // Idempotent; call before building any model. Returns true once installed.
 bool installDlMetadataAllocator();
@@ -309,6 +317,8 @@ long field(const std::string& line,const std::string& key) {
 }
 namespace hw1::stt {
 bool installDlMetadataAllocator() { fake::state.hookInstalled=true;++fake::state.installs;return true; }
+DlCompactExponents::DlCompactExponents() { ++fake::state.compactExponents; }
+DlCompactExponents::~DlCompactExponents() { --fake::state.compactExponents; }
 bool dlMetadataAllocatorInstalled() { return fake::state.hookInstalled; }
 DlMetadataStats dlMetadataStats(size_t k) {
     DlMetadataStats s;
@@ -319,7 +329,7 @@ DlMetadataStats dlMetadataStats(size_t k) {
 }
 DlMetadataStats dlMetadataStats() {
     DlMetadataStats t;
-    for(size_t k=0;k<kDlMetadataKinds;++k) {
+    for(size_t k=0;k<kDlMetadataLongLivedKinds;++k) {
         const DlMetadataStats s=dlMetadataStats(k);
         t.allocs+=s.allocs;t.bytes+=s.bytes;t.internal+=s.internal;t.internalBytes+=s.internalBytes;t.failed+=s.failed;
     }
@@ -431,6 +441,7 @@ class Model {
         assert(fake::hasRaw(raw));assert(location==fbs::MODEL_LOCATION_IN_FLASH_RODATA);
         assert(index==0 && manager==MEMORY_MANAGER_GREEDY && !unused && !copy);
         assert(fake::state.models<=1);   // a resident model plus at most one per-call model
+        assert(fake::state.compactExponents==1);   // per-channel exponents may be kept as bytes for this model
         ++fake::state.models;++fake::state.created;
         if(fake::state.created==2) fake::state.internalFree-=fake::state.unrelatedBuildDelta;
         fake::state.events.push_back("create model");
@@ -752,7 +763,9 @@ struct FakeDecoder {
     int decodes=0, releases=0;
     size_t frames=0, capacity=0; int exponent=0; const int8_t* logits=nullptr;
     void* lm=nullptr; size_t lmBytes=0;   // PSRAM a real LM would keep resident
-    static DecodeResult decode(void* c,const int8_t* logits,size_t frames,int exponent,char* text,size_t cap,const SttLocalControl& control) {
+    static DecodeResult decode(void* c,const int8_t* logits,size_t frames,int exponent,char* text,size_t cap,const SttLocalControl& control,
+                               const DecodeScratch& scratch) {
+        assert(!scratch.data && !scratch.bytes);   // QuartzNet's runtime lends nothing
         auto& d=*static_cast<FakeDecoder*>(c);++d.decodes;
         assert(fake::state.phase==SttLocalPhase::Decoding && !control.cancelled(control.context));
         d.frames=frames;d.exponent=exponent;d.capacity=cap;d.logits=logits;
@@ -995,7 +1008,7 @@ void refusals() {
     fake::clean();
     {
         struct Squeeze {
-            static DecodeResult decode(void*,const int8_t*,size_t,int,char* text,size_t cap,const SttLocalControl&) {
+            static DecodeResult decode(void*,const int8_t*,size_t,int,char* text,size_t cap,const SttLocalControl&,const DecodeScratch&) {
                 fake::state.internalFree=150*1024-1;std::snprintf(text,cap,"%s","lm");return DecodeResult::Decoded;
             }
         };
@@ -1124,6 +1137,7 @@ void placement() {
         const auto m=fake::linesWith("STT: TL e3m ");
         assert(m.size()==1 && fake::numericTL(m[0]) && fake::field(m[0],"model")==long(sizeof(dl::Model)));
         assert(fake::field(m[0],"module")==long(kMeta/2) && fake::field(m[0],"names")>0 && fake::field(m[0],"shape")==0);
+        assert(fake::field(m[0],"plan")==0 && fake::field(m[0],"fbsmap")==0);   // the two build-time kinds are listed too
         everyTLLineNumeric();
         fake::state.internalFree=128*1024;
         Reader b;assert(call(&cache,b,480).ok && fake::state.created==2);

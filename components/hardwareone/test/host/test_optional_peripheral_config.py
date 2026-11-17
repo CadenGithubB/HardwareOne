@@ -148,17 +148,25 @@ class PeripheralConfig(unittest.TestCase):
                     'SD_MMC_CLK_PIN == 43', 'SD_MMC_CMD_PIN == 44'],
                     board_profile=board)
 
-    def test_p4_local_stt_requires_card_and_15x5(self):
+    def test_p4_local_stt_requires_card_and_one_model(self):
         board = SOURCE.parents[1] / 'boards/p4x_eye.features.h'
-        # The 5x5 LittleFS model is not published: local STT on a P4 must run
-        # the 15x5 model, which lives on the card.
+        # Local STT on a P4 runs its model from the card: Citrinet by default; a QuartzNet build runs the
+        # 15x5 model (the 5x5 LittleFS model is not published), which the board derives from the choice.
         self.check_profile({'ENABLE_SDMMC_CARD': 1, 'ENABLE_LOCAL_STT': 1},
-                           ['ENABLE_LOCAL_STT == 1', 'ENABLE_STT_MODEL_15X5_GEN2 == 1',
-                            'ENABLE_STT_SPEAKER_LABELS == 1', 'ENABLE_SD_CARD == 1'], board_profile=board)
+                           ['ENABLE_LOCAL_STT == 1', 'ENABLE_STT_MODEL_CITRINET == 1', 'ENABLE_STT_MODEL_QUARTZNET == 0',
+                            'ENABLE_STT_MODEL_15X5_GEN2 == 0', 'ENABLE_STT_SPEAKER_LABELS == 1', 'ENABLE_SD_CARD == 1'],
+                           board_profile=board)
+        quartznet = {'ENABLE_SDMMC_CARD': 1, 'ENABLE_LOCAL_STT': 1, 'ENABLE_STT_MODEL_CITRINET': 0,
+                     'ENABLE_STT_MODEL_QUARTZNET': 1}
+        self.check_profile(quartznet, ['ENABLE_STT_MODEL_CITRINET == 0', 'ENABLE_STT_MODEL_15X5_GEN2 == 1'],
+                           board_profile=board)
         self.check_profile({'ENABLE_SDMMC_CARD': 0, 'ENABLE_LOCAL_STT': 1}, [], succeeds=False,
                            board_profile=board)
-        self.check_profile({'ENABLE_SDMMC_CARD': 1, 'ENABLE_LOCAL_STT': 1, 'ENABLE_STT_MODEL_15X5_GEN2': 0},
-                           [], succeeds=False, board_profile=board)
+        self.check_profile(dict(quartznet, ENABLE_STT_MODEL_15X5_GEN2=0), [], succeeds=False, board_profile=board)
+        self.check_profile({'ENABLE_SDMMC_CARD': 1, 'ENABLE_LOCAL_STT': 1, 'ENABLE_STT_MODEL_QUARTZNET': 1},
+                           [], succeeds=False, board_profile=board)   # both models
+        self.check_profile({'ENABLE_SDMMC_CARD': 1, 'ENABLE_LOCAL_STT': 1, 'ENABLE_STT_MODEL_CITRINET': 0},
+                           [], succeeds=False, board_profile=board)   # no model
 
     def test_handheld_local_stt_follows_card(self):
         handheld = SOURCE.parents[1] / 'deployments/handheld/boards/p4x_eye/features.h'
@@ -167,8 +175,8 @@ class PeripheralConfig(unittest.TestCase):
                                      'ENABLE_STT_MODEL_15X5_GEN2 == 0'])
         self.check_profile(dict(include, ENABLE_LOCAL_STT=1), [], succeeds=False)
         self.check_profile(dict(include, ENABLE_SDMMC_CARD=1, ENABLE_SD_CARD=1, ENABLE_LOCAL_STT=1),
-                           ['ENABLE_SD_CARD == 1', 'ENABLE_LOCAL_STT == 1',
-                            'ENABLE_STT_MODEL_15X5_GEN2 == 1'])
+                           ['ENABLE_SD_CARD == 1', 'ENABLE_LOCAL_STT == 1', 'ENABLE_STT_MODEL_CITRINET == 1',
+                            'ENABLE_STT_MODEL_15X5_GEN2 == 0'])
 
     def test_p4_openclaw_preserves_local_speech_profile(self):
         repo = SOURCE.parents[1]
@@ -185,7 +193,7 @@ class PeripheralConfig(unittest.TestCase):
                     'ENABLE_LLM_SOURCE_ONBOARD == 0',
                     'ENABLE_LLM_SOURCE_CM5 == 0',
                     'ENABLE_LOCAL_STT == 1',
-                    'ENABLE_STT_MODEL_15X5_GEN2 == 1',
+                    'ENABLE_STT_MODEL_CITRINET == 1', 'ENABLE_STT_MODEL_15X5_GEN2 == 0',
                     'ENABLE_STT_SPEAKER_LABELS == 1',
                     'ENABLE_STT_LM == 1', 'ENABLE_QUICKNOTE == 1',
                     'ENABLE_SDMMC_CARD == 1', 'ENABLE_SD_CARD == 1',

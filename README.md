@@ -197,26 +197,32 @@ run time; the file is not part of the firmware image or of this repository.
 
 - **Saved P4 configurations** (`p4-glasses-test`, `p4-phone-pipe`, `p4-openclaw`
   and the other `p4-*` profiles in `configurations/`, plus `waveshare-p4-bringup`)
-  set `ENABLE_STT_MODEL_15X5_GEN2` and load
-  `/sd/STT Models/quartznet15x5-gen2-25397.p4.stt` from the microSD card. That
-  file is published as a release asset of the public speech-to-text repository:
+  run Citrinet-384, the default acoustic model (`ENABLE_STT_MODEL_CITRINET`), and
+  load `/sd/STT Models/citrinet384-2000h.p4.stt` from the microSD card:
+  22,700,240 bytes, SHA-256
+  `3781e173c3595ebb3e2087c7a0a4dfc1b85219135c57c8335930f7bc0658a70a`. That file
+  is not published yet; it is built by the speech-to-text repository's
+  `tools/stt_p4/package_citrinet.py` from the model's int8 export (repacked so
+  the firmware can return 1.3 MB of it to PSRAM once the model is built).
+- **QuartzNet instead** (`ENABLE_STT_MODEL_QUARTZNET=1`, `ENABLE_STT_MODEL_CITRINET=0`,
+  configuration `p4-glasses-test-quartznet`) loads
+  `/sd/STT Models/quartznet15x5-gen2-25397.p4.stt`, published as a release asset of
+  the public speech-to-text repository:
   [`model-gen2-25397`](https://github.com/CadenGithubB/ESP32_Onboard_Speech_To_Text/releases/tag/model-gen2-25397)
   → `quartznet15x5-gen2-25397.p4.stt`, 20,112,224 bytes, SHA-256
   `dccef3a8cead069d97d780e0d08ddfc65d9f0870c0af4673b29327f00158f048`
-  (`SHA256SUMS.txt` in the same release lists it).
-- **To install it**, download the file, check it with
-  `shasum -a 256 quartznet15x5-gen2-25397.p4.stt`, and copy it onto the FAT32
-  microSD card into a top-level folder named exactly `STT Models`, keeping the
-  file name. The firmware refuses a file of the wrong size and checks the
-  model's embedded checksum before using it. The release's `meeting.lm` is
-  optional: copied into the same folder it is used as the language model;
-  without it decoding is greedy.
+  (`SHA256SUMS.txt` in the same release lists it). A build holds one model.
+- **To install a model**, check the file with `shasum -a 256 <file>` and copy it
+  onto the FAT32 microSD card into a top-level folder named exactly `STT Models`,
+  keeping the file name. The firmware refuses a file of the wrong size and checks
+  the model's embedded checksum before using it. `meeting.lm` (in the 15x5 release)
+  is optional and serves both models: copied into the same folder it is used as
+  the language model; without it decoding is greedy.
 - **The plain `p4x_eye` board build and the `handheld` deployment** keep
   microSD off, so they build without local transcription. Local STT on an
-  ESP32-P4 always runs this 15×5 model from the card: enable it with
+  ESP32-P4 always runs its model from the card: enable it with
   `ENABLE_SDMMC_CARD=1` and `ENABLE_LOCAL_STT=1` (in the handheld deployment
-  also `ENABLE_SD_CARD=1`); the model choice follows, and the build refuses
-  local STT without the card.
+  also `ENABLE_SD_CARD=1`); the build refuses local STT without the card.
 - **Speaker labels** (on by default on `p4x_eye`) also read
   `/sd/STT Models/speaker.spk`, which is not published either. Without it,
   transcription still works and transcripts carry no speaker labels.

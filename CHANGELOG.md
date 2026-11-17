@@ -207,10 +207,49 @@ everything user-visible since the v0.99.99.1 tag.
   must be a whole number from 1 to 2147483647"); it used to be accepted and renumbered on the next
   pass. `automation sanitize` now says what it fixed ("fixed 2 duplicate IDs", "fixed 1 out-of-range
   ID", or both). Host-tested; not yet tested on hardware.
+- Local STT (P4): building an ESP-DL model took up to 220 KB of internal RAM in some 3,500 small
+  blocks (the memory planner's records and the name tables of the prebuilt model loader): with
+  Bluetooth on, free internal RAM fell to 19 KB while Citrinet loaded, and a QuartzNet 15x5 build
+  took about half as much. They are PSRAM requests now, like the rest of a model's metadata; the
+  low point of a session with Bluetooth on is 177 KB. Checked on the bench P4.
 - Files page: every new folder, new file, upload and Refresh asked for the storage figures twice,
   and on the P4X-EYE each fresh reading is a LittleFS walk of about 1.3 s on the one web server
   task. They now ask once. Source-tested; the page was not run in a browser here.
 ### Changed
+- Local STT (P4) acoustic model: Citrinet-384 (2,000 h, the speech repository's Voice Model 3
+  training data) replaces the QuartzNet 15x5 gen2-25397 as the default. It reads
+  `/sd/STT Models/citrinet384-2000h.p4.stt` (22,700,240 bytes, SHA-256
+  `3781e173c3595ebb3e2087c7a0a4dfc1b85219135c57c8335930f7bc0658a70a`; not published yet, built by the
+  speech repository's `tools/stt_p4/package_citrinet.py` from its int8 export) and decodes
+  `meeting.lm` through a new word-piece beam search (`stt/stt_lm_wordpiece.h`: LM weight 0.2, word
+  bonus 0.75, tuned on held-out dev clips; the user vocabulary's hotwords as before); without the LM
+  it decodes greedily (`HW1_STT_CITRINET_LM=0` builds it that way). Host replay of ten P4
+  recordings: 40.6% word errors against 43.3% for the best 15x5 with the LM and 46.5% for
+  gen2-25397 (Citrinet float; its int8 export costs 0.84 points on 600 dev clips).
+  Build flags `ENABLE_STT_MODEL_CITRINET` (default 1) and `ENABLE_STT_MODEL_QUARTZNET` (default 0):
+  one model per build, the other's runtime, front end and ESP-DL kernels are not compiled;
+  configuration `p4-glasses-test-quartznet` builds the 15x5 instead (`ENABLE_STT_MODEL_15X5_GEN2` now
+  applies to QuartzNet builds only and follows that choice on `p4x_eye`; the `p4-*` profiles no
+  longer set it). Capture-time feature rows follow the model's front end (80 bands, 400-sample
+  window). Image 5,722,672 bytes for `p4-glasses-test`. On the bench P4 at 1 ft with the LM and
+  speaker labels on (16 Nov, a noisier take than the 15x5's own): 41.9% / 21.8% word errors on the
+  two playlists against 49.1% / 33.3% for the 15x5 decode of the same recordings; 227-254 ms of
+  processing per second of audio against 298-301 ms (acoustic model 180 against 276, LM decode
+  20-46 against 16-17, front end 26 against 6); median caption latency 1.6-1.7 s against
+  1.9-2.5 s; no overruns. Open: on the same recordings the device's int8 result is 2.2-3.6 points
+  behind the Mac's float model.
+- Local STT (P4) memory: Citrinet, `meeting.lm` and the speaker-label model run together (they
+  needed 34.4 MB of the 33.0 MB PSRAM heap). The model file is packaged with what only a model
+  build reads at its end (per-channel exponents, parameter shapes and names, test tensors) and the
+  firmware returns that 1.32 MB once the session's model is built; ESP-DL keeps Citrinet's 150,338
+  per-channel exponents as bytes (601 KB to 150 KB); the LM search works in the acoustic model's
+  idle activation arena instead of allocating up to 0.67 MB per phrase; the speaker model asks for
+  1.5 MiB of spare PSRAM after it instead of 3 MiB. PSRAM low point in the bench sessions
+  1.44-1.46 MB (the 15x5's: 1.56 MB). The capture-time feature pool (0.78 MB, kept only while
+  2 MiB stays free) does not load beside all three: features are computed at transcription
+  time, about 20 ms per second of audio. `HW1_STT_SELFCHECK=1` builds run one fixed input through
+  a fresh model on the whole image and through the session's model (trimmed image, byte exponents,
+  arena zeroed and overwritten) and log whether the outputs are the same bytes: they are.
 - Local STT (P4) speech detector: the level-robust phrase onset from the speech repository's
   version 3.1 replaces HardwareOne's own pre-emphasis judge. A phrase opens or stays open when
   either the raw level or the level of the pre-emphasised audio (x[n] - 0.97 x[n-1], matched to the

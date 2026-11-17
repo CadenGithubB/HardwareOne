@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Compile actual profile/model selection and reject mismatched STT containers.
 
-The 96-byte fixtures are public model envelopes from the pre-change 5x5 file
-and the SHA-verified 15x5 gen2 export, not generated from the selected identity.
+The 96-byte fixtures are public model envelopes from the pre-change 5x5 file,
+the SHA-verified 15x5 gen2 export and the packaged Citrinet-384 2000 h export
+(tools/stt_p4/package_citrinet.py, repacked), not generated from the selected identity.
+Model index: 0 QuartzNet 5x5, 1 QuartzNet 15x5 gen2, 2 Citrinet (the default).
 No weights, external artifacts, device access or ESP-DL execution is needed.
 """
 
@@ -28,9 +30,13 @@ HEADERS = (
     '4857315354543100010000000000000000e3320100e33201803e000000530700'
     '47e58faa01470d32dad88f1faa46e3f61dff0fd605aa542103aefd11502dae72'
     'ca91eb9683f7151b8be1a01532a6790c6eb7d515f67169a207751e3fc48cc58b',
+    '4857315354543100010000000000000070605a0170605a01803e000000530700'
+    'a9dbce5bcf9ba039b3a3ca31dc30e6de1d6cf56ad2d7c091d30110c65784623b'
+    '4b00ac087270695e7bbc56f0867c995b30bc29323bdda6ca073b03bb5dbb8cc3',
 )
 PATHS = ('/STT Models/quartznet5x5.p4.stt',
-         '/sd/STT Models/quartznet15x5-gen2-25397.p4.stt')
+         '/sd/STT Models/quartznet15x5-gen2-25397.p4.stt',
+         '/sd/STT Models/citrinet384-2000h.p4.stt')
 
 HARNESS = r'''
 #ifdef TEST_FIRMWARE
@@ -43,23 +49,38 @@ HARNESS = r'''
 // INSERT_FIXTURES
 int main() {
   using namespace hw1::stt;
-  static_assert(identity::kNodeCount == (EXPECT_GEN2 ? 201 : 71));
-  static_assert(identity::kRawBytes == (EXPECT_GEN2 ? 20112128 : 7171984));
-  static_assert(identity::kCodec == (EXPECT_GEN2 ? 0 : 1));
-  static_assert(identity::kOutputExponent == (EXPECT_GEN2 ? -1 : -2));
-  assert(std::strcmp(identity::kOutputName, EXPECT_GEN2 ? "529" : "189") == 0);
+  constexpr int nodes[] = {71, 201, 395}, exponents[] = {-2, -1, -1};
+  constexpr size_t raw[] = {7171984, 20112128, 22700144}, sizes[] = {5487504, 20112224, 22700240};
+  constexpr unsigned codecs[] = {1, 0, 0};
+  const char* outputs[] = {"189", "529", "913"};
+  static_assert(identity::kNodeCount == nodes[EXPECT_MODEL]);
+  static_assert(identity::kRawBytes == raw[EXPECT_MODEL]);
+  static_assert(identity::kCodec == codecs[EXPECT_MODEL]);
+  static_assert(identity::kOutputExponent == exponents[EXPECT_MODEL]);
+  static_assert(HW1_STT_CITRINET == (EXPECT_MODEL == 2));
+#if HW1_STT_CITRINET
+  // The repacked image: what a built model still reads ends on a 16-byte boundary inside it.
+  static_assert(identity::kResidentKeepBytes == 21383888 && identity::kResidentKeepBytes % 16 == 0);
+  static_assert(identity::kResidentKeepBytes < identity::kRawBytes);
+#endif
+  assert(std::strcmp(identity::kOutputName, outputs[EXPECT_MODEL]) == 0);
   assert(std::strcmp(HW1_STT_MODEL_PATH, EXPECT_PATH) == 0);
-  constexpr size_t sizes[] = {5487504, 20112224};
-  const auto& expected = envelopes[EXPECT_GEN2];
-  assert(container::valid_size(sizes[EXPECT_GEN2]));
-  assert(container::valid_header(expected, sizeof(expected), sizes[EXPECT_GEN2]));
+  const auto& expected = envelopes[EXPECT_MODEL];
+  assert(container::valid_size(sizes[EXPECT_MODEL]));
+  assert(container::valid_header(expected, sizeof(expected), sizes[EXPECT_MODEL]));
   // Wrong-model headers fail even when paired with the selected file size.
-  assert(!container::valid_header(envelopes[!EXPECT_GEN2], sizeof(expected), sizes[EXPECT_GEN2]));
-  assert(!container::valid_size(sizes[!EXPECT_GEN2]));
-  // A correct-size container must still match the exact raw model hash.
+  for (int other = 0; other < 3; ++other) {
+    if (other == EXPECT_MODEL) continue;
+    assert(!container::valid_header(envelopes[other], sizeof(expected), sizes[EXPECT_MODEL]));
+    assert(!container::valid_size(sizes[other]));
+  }
+  // A correct-size container must still match the exact raw model hash and front end.
   uint8_t wrongHash[96]; std::memcpy(wrongHash, expected, sizeof(wrongHash));
   wrongHash[32] ^= 1;
-  assert(!container::valid_header(wrongHash, sizeof(wrongHash), sizes[EXPECT_GEN2]));
+  assert(!container::valid_header(wrongHash, sizeof(wrongHash), sizes[EXPECT_MODEL]));
+  std::memcpy(wrongHash, expected, sizeof(wrongHash));
+  wrongHash[64] ^= 1;
+  assert(!container::valid_header(wrongHash, sizeof(wrongHash), sizes[EXPECT_MODEL]));
 }
 '''
 
@@ -73,8 +94,11 @@ def main():
         raise SystemExit('a host C++17 compiler is required')
     saved = json.loads((REPO / 'configurations/p4-glasses-test.json').read_text())
     build_config.validate(saved)
-    assert saved['features']['ENABLE_STT_MODEL_15X5_GEN2'] == 1
-    fixtures = 'static const uint8_t envelopes[2][96] = {\n' + ',\n'.join(
+    # The speech profile takes the default model (Citrinet): it sets neither model switch.
+    assert not {'ENABLE_STT_MODEL_15X5_GEN2', 'ENABLE_STT_MODEL_CITRINET', 'ENABLE_STT_MODEL_QUARTZNET'} & set(saved['features'])
+    quartznet = json.loads((REPO / 'configurations/p4-glasses-test-quartznet.json').read_text())
+    build_config.validate(quartznet)
+    fixtures = 'static const uint8_t envelopes[3][96] = {\n' + ',\n'.join(
         '{' + ','.join(f'0x{x:02x}' for x in bytes.fromhex(header)) + '}'
         for header in HEADERS) + '\n};'
     checks = 0
@@ -83,11 +107,11 @@ def main():
         source = directory / 'test.cpp'
         source.write_text(HARNESS.replace('// INSERT_FIXTURES', fixtures))
 
-        def run(name, gen2, features=None, target='ESP32P4', legacy_path=None, error=None):
+        def run(name, model, features=None, target='ESP32P4', legacy_path=None, error=None):
             nonlocal checks
             command = [args.cxx, '-std=c++17', '-Wall', '-Wextra', '-Werror',
-                       '-I', str(COMPONENT), f'-DEXPECT_GEN2={gen2}',
-                       '-DEXPECT_PATH=' + json.dumps(legacy_path or PATHS[gen2])]
+                       '-I', str(COMPONENT), f'-DEXPECT_MODEL={model}',
+                       '-DEXPECT_PATH=' + json.dumps(legacy_path or PATHS[model])]
             if features is not None:
                 overlay = directory / f'{name}.h'
                 overlay.write_text('\n'.join(f'#undef {key}\n#define {key} {value}'
@@ -112,22 +136,33 @@ def main():
                 subprocess.run([str(executable)], check=True, timeout=60)
             checks += 1
 
+        CITRINET, QUARTZNET_OFF = 2, {'ENABLE_STT_MODEL_CITRINET': 0, 'ENABLE_STT_MODEL_QUARTZNET': 1}
         run('portable-default', 0)
-        run('board-default', 0, {})
-        run('board-card', 0, {'ENABLE_SDMMC_CARD': 1})
-        run('board-card-stt', 1, {'ENABLE_SDMMC_CARD': 1, 'ENABLE_LOCAL_STT': 1})
-        run('saved-gen2', 1, saved['features'])
-        run('saved-disabled', 0, {**saved['features'], 'ENABLE_STT_MODEL_15X5_GEN2': 0},
-            error='Local STT on ESP32-P4 runs the 15x5 gen2 model from the microSD card')
-        run('legacy-path', 1, saved['features'], legacy_path='/sd/STT Models/test-gen2.stt')
+        run('board-default', CITRINET, {})
+        run('board-card', CITRINET, {'ENABLE_SDMMC_CARD': 1})
+        run('board-card-stt', CITRINET, {'ENABLE_SDMMC_CARD': 1, 'ENABLE_LOCAL_STT': 1})
+        run('saved-citrinet', CITRINET, saved['features'])
+        # QuartzNet: the board derives the 15x5 gen2 switch from it (boards/p4x_eye.features.h).
+        run('saved-quartznet', 1, quartznet['features'])
+        run('quartznet-explicit-gen2', 1, {**quartznet['features'], 'ENABLE_STT_MODEL_15X5_GEN2': 1})
+        run('legacy-path', CITRINET, saved['features'], legacy_path='/sd/STT Models/test-citrinet.stt')
+        run('both-models', CITRINET, {**saved['features'], 'ENABLE_STT_MODEL_QUARTZNET': 1},
+            error='Local STT builds one acoustic model')
+        run('no-model', CITRINET, {**saved['features'], 'ENABLE_STT_MODEL_CITRINET': 0},
+            error='Local STT needs an acoustic model')
+        run('gen2-with-citrinet', CITRINET, {**saved['features'], 'ENABLE_STT_MODEL_15X5_GEN2': 1},
+            error="ENABLE_STT_MODEL_15X5_GEN2 selects QuartzNet's 15x5 model")
+        card = 'Local STT on ESP32-P4 runs its model from the microSD card'
+        run('no-card', CITRINET, {**saved['features'], 'ENABLE_SDMMC_CARD': 0}, error=card)
+        run('card-forced-off', CITRINET, {**saved['features'], 'ENABLE_SD_CARD': 0}, error=card)
+        run('quartznet-gen2-off', 0, {**quartznet['features'], 'ENABLE_STT_MODEL_15X5_GEN2': 0},
+            error='A QuartzNet local-STT build on ESP32-P4 runs the 15x5 gen2 model')
         dependency = 'ENABLE_STT_MODEL_15X5_GEN2 requires ENABLE_LOCAL_STT, ESP32-P4 and ENABLE_SD_CARD.'
-        run('no-card', 1, {**saved['features'], 'ENABLE_SDMMC_CARD': 0}, error=dependency)
-        run('card-forced-off', 1, {**saved['features'], 'ENABLE_SD_CARD': 0}, error=dependency)
-        run('no-local-stt', 1, {**saved['features'], 'ENABLE_LOCAL_STT': 0,
+        run('no-local-stt', 1, {**quartznet['features'], 'ENABLE_STT_MODEL_15X5_GEN2': 1, 'ENABLE_LOCAL_STT': 0,
                                'ENABLE_STT_SPEAKER_LABELS': 0}, error=dependency)
-        run('wrong-target', 1, {'ENABLE_LOCAL_STT': 1, 'ENABLE_SD_CARD': 1,
+        run('wrong-target', 1, {'ENABLE_LOCAL_STT': 1, 'ENABLE_SD_CARD': 1, **QUARTZNET_OFF,
                                 'ENABLE_STT_MODEL_15X5_GEN2': 1}, target='ESP32S3', error=dependency)
-    print(f'STT model selection: {checks} profiles passed; exact envelopes accepted, wrong model/hash rejected')
+    print(f'STT model selection: {checks} profiles passed; exact envelopes accepted, wrong model/hash/front end rejected')
 
 
 if __name__ == '__main__':

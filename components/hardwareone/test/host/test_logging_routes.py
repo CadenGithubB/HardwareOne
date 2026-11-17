@@ -71,6 +71,8 @@ IDF_LOG_ALLOWED: dict[str, int] = {
     "System_STTLocal.cpp": 22,
     "System_STTRawCapture.cpp": 2,
     "stt/quartznet_runtime.cpp": 5,
+    "stt/citrinet_runtime.cpp": 7,   # QuartzNet's runtime's five model-load/resident-model/admission lines, the image-trim record (TL e3t) and the bench self-check (HW1_STT_SELFCHECK builds)
+    "stt/stt_heap_watch.inc": 5,     # diagnostic builds only (HW1_STT_HEAP_WATCH): the low-point report
     "stt/stt_dl_metadata.cpp": 1,
     "stt/stt_internal_memory.cpp": 1,
 }

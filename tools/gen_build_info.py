@@ -523,13 +523,16 @@ def source_versions(enabled, firmware="", argv=None, companion=False):
         add("c6_bridge_wire_expected", "C6 bridge wire expected",
             _int_expr(_define("ESP_NOW_HOSTED_WIRE_VERSION", hosted + "esp_now_hosted_rpc.h")))
     if enabled("ENABLE_LOCAL_STT"):
-        gen2 = enabled("ENABLE_STT_MODEL_15X5_GEN2")
+        # stt_model_selection.h's order: Citrinet (the default), QuartzNet 15x5 gen2, QuartzNet 5x5.
+        citrinet = enabled("ENABLE_STT_MODEL_CITRINET") and not enabled("ENABLE_STT_MODEL_QUARTZNET")
+        gen2 = not citrinet and enabled("ENABLE_STT_MODEL_15X5_GEN2")
         selection = _source(hw + "stt/stt_model_selection.h")
         paths = re.findall(r'#define HW1_STT_MODEL_PATH "([^"]+)"', selection)
-        if len(paths) != 2:  # the 15x5-gen2 branch's default, then the 5x5 one
-            raise ValueError("stt_model_selection.h: expected two default model paths")
-        path = define_from_argv(argv, "HW1_STT_MODEL_PATH") or paths[0 if gen2 else 1]
-        ident = hw + ("stt/stt_model_identity_15x5_gen2.h" if gen2 else "stt/stt_model_identity.h")
+        if len(paths) != 3:  # the Citrinet, 15x5-gen2 and 5x5 branches' defaults
+            raise ValueError("stt_model_selection.h: expected three default model paths")
+        path = define_from_argv(argv, "HW1_STT_MODEL_PATH") or paths[0 if citrinet else 1 if gen2 else 2]
+        ident = hw + ("stt/stt_model_identity_citrinet384.h" if citrinet else
+                      "stt/stt_model_identity_15x5_gen2.h" if gen2 else "stt/stt_model_identity.h")
         sha = re.findall(r"0x([0-9a-fA-F]{2})", _match(r"kRawSha\[32\] = \{([^}]*)\}", ident))[:4]
         add("stt_model", "Local STT model", "%s sha %s" % (path.rsplit("/", 1)[-1], "".join(sha).lower()))
     add("idf", "ESP-IDF", define_from_argv(argv, "IDF_VER") or "?")

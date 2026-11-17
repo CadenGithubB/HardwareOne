@@ -112,15 +112,16 @@
 // ESP-SR models load from LittleFS, keeping the no_sr partition layout.
 #undef HW1_SR_MODELS_IN_FILESYSTEM
 #define HW1_SR_MODELS_IN_FILESYSTEM 1
-// Fully local transcription on the P4 (no Pi/UART, Wi-Fi or cloud) runs the
-// published 15x5 gen2 model from the microSD card, so it follows the card
-// selection: off while microSD is off. Set ENABLE_SDMMC_CARD,
-// ENABLE_SD_CARD and ENABLE_LOCAL_STT to 1 to enable it with the 15x5 model
-// (the build refuses local STT without the card).
+// Fully local transcription on the P4 (no Pi/UART, Wi-Fi or cloud) runs its
+// acoustic model (Citrinet-384 by default) from the microSD card, so it follows
+// the card selection: off while microSD is off. Set ENABLE_SDMMC_CARD,
+// ENABLE_SD_CARD and ENABLE_LOCAL_STT to 1 to enable it (the build refuses local
+// STT without the card). A QuartzNet build (ENABLE_STT_MODEL_QUARTZNET 1,
+// ENABLE_STT_MODEL_CITRINET 0) runs the 15x5 gen2 model: the switch below follows.
 #undef ENABLE_LOCAL_STT
 #define ENABLE_LOCAL_STT 0
 #undef ENABLE_STT_MODEL_15X5_GEN2
-#define ENABLE_STT_MODEL_15X5_GEN2 ENABLE_LOCAL_STT
+#define ENABLE_STT_MODEL_15X5_GEN2 (ENABLE_LOCAL_STT && ENABLE_STT_MODEL_QUARTZNET)
 
 // --- Not used on this board --------------------------------------------------
 #undef ENABLE_EDGE_IMPULSE

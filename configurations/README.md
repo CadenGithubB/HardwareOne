@@ -60,9 +60,15 @@ saved settings are not changed, so flashing `p4-glasses-test` again restores the
 `sttdecisionpre 0` gives the same detector at run time on the ordinary image. HardwareOne's
 earlier pre-emphasis judge is in neither build; it needs the previous app image.
 
+`p4-glasses-test-quartznet` is `p4-glasses-test` built with the QuartzNet 15x5 gen2
+acoustic model instead of the default Citrinet-384 (`ENABLE_STT_MODEL_QUARTZNET 1`,
+`ENABLE_STT_MODEL_CITRINET 0`; the board derives `ENABLE_STT_MODEL_15X5_GEN2` from them).
+It reads `/sd/STT Models/quartznet15x5-gen2-25397.p4.stt`; Citrinet's runtime and kernels
+are not in that image.
+
 `p4-openclaw` starts from the qualified `p4-glasses-test` speech profile and
-adds the LLM feature and HTTP source. It keeps local STT, the pinned 15x5 gen2
-model, speaker labels and SDMMC enabled, with ESP-SR and onboard/CM5 LLM sources
+adds the LLM feature and HTTP source. It keeps local STT (the default Citrinet
+model), speaker labels and SDMMC enabled, with ESP-SR and onboard/CM5 LLM sources
 off. Like every P4 speech profile, both opt into `CONFIG_HEAP_USE_HOOKS` for the
 speech pipeline's internal-memory accounting (added to `p4-glasses-test` on
 2026-10-18; 0.99.98.5 built that profile and flashed it to the bench P4X-EYE,

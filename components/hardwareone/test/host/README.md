@@ -5380,6 +5380,11 @@ level/stage arrays; the performance ring explicitly constructs nonzero sentinels
 unchanged) with `stt/stt_dl_metadata.cpp` against a fake heap: every block the
 hook hands out returns through `ps_free` on every destructor path, prebuilt-style
 blocks are accepted, PSRAM refusal falls back to internal RAM and is counted.
+The two build-time kinds (the memory planner's records; prebuilt libfbs_model's
+own `operator new`, by the names its linked copy calls) are placed the same way
+and counted apart from the long-lived totals, and per-channel exponents kept as
+`int8_t` (`DlCompactExponents`) read back equal to the `int` arrays through
+every copy and move.
 Without a staged override (`tools/p4/prepare_sdk.sh`) it exits 77 (skipped).
 `test_g2_tl_send.py` checks the Conversate TL send bookkeeping.
 

@@ -40,6 +40,25 @@ dependencies.lock.esp32p4 pins plus tools/p4/esp-dl-3.3.12-hw1.patch:
   - Conv setup borrows per-channel factors from its existing aligned prepared
     PSRAM block; temporary argument vectors use the metadata allocator, removing
     repeated internal allocations without changing kernels or split ownership;
+  - what a model needs only while it is built goes through the same allocator
+    hook (two more kinds): the memory planner's records (TensorInfo, chunk
+    lists) and everything prebuilt libfbs_model allocates itself (FbsModel's
+    name maps, the strings and vectors it returns). CMakeLists.txt links a
+    copy of libfbs_model.a whose operator new(size_t) and sized operator
+    delete references are renamed to hw1_dl_fbs_new / hw1_dl_fbs_delete
+    (objcopy --redefine-sym; nothing else in the object changes). Upstream
+    they were ~3,500 small blocks of internal RAM during a 395-node build
+    (220 KB at the low point, measured); with no hook installed, malloc as
+    before;
+  - per-channel exponent arrays may be int8_t instead of int while an
+    application sets hw1_dl_compact_exponents (ExponentInfo: the array's
+    address is tagged, the channel count libfbs_model checks is unchanged;
+    get() returns the same values);
+  - GlobalAveragePool, Sigmoid and Mul return in the prepare pass like Add,
+    LUT and Relu (they computed on stale activations and wrote over the
+    arena, including the place the planner shares with the model input);
+  - Model::clear_arena() and get_psram_arena(): the activation arena, to zero
+    it or to use it as scratch memory between runs;
   - dl_fft pinned to ==0.7.0: a local component's dependencies join the root
     solve, which would otherwise be free to pick a newer dl_fft.
 
@@ -67,8 +86,8 @@ VERSION = "3.3.12"
 COMPONENT_HASH = "d792e72ab3858d805d8918d1215a862541344625f62134597866834de666fd04"
 SOURCE_TREE_SHA256 = "e5c5155078c46e090ad7f08a7239bb52d456394fab1356d78b4c127eefcb6e86"
 PATCH = ROOT / "esp-dl-3.3.12-hw1.patch"
-PATCH_SHA256 = "0dc9782643ce3d2332b2c4a54624fce27150736314d065b48b55d5cf2a54d593"
-PATCHED_TREE_SHA256 = "b217d41df9f399d7958496ae62f075cfbc8adecd222f9fe9c03064a452ddcd2c"
+PATCH_SHA256 = "3683c14d3061707ecae4d5892c7a0bc1e67119ca192e5c7ef13b76a2811c9821"
+PATCHED_TREE_SHA256 = "b1533b70400053c3f7518e19b17e9082f0f486f7ce9c9b4ee39967d349c76347"
 MANIFEST = "hw1-esp-dl-override.json"
 # Present only in component-manager copies; not part of the package itself.
 IGNORED = {".component_hash", MANIFEST}

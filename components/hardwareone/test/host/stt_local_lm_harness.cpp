@@ -150,7 +150,7 @@ bool transcribe(ModelReader reader, const int16_t*, size_t, char* text, size_t c
     assert(bool(decoder)==bool(ENABLE_STT_LM) && (!decoder || (decoder->decode && decoder->release)));
     if(decoder && fake::state.releaseBeforeDecode)fake::state.released=decoder->release(decoder->context);
     const DecodeResult r=decoder ? decoder->decode(decoder->context,fake::state.logits.data(),fake::state.logits.size()/29,
-                                                   identity::kOutputExponent,text,capacity,control)
+                                                   identity::kOutputExponent,text,capacity,control,DecodeScratch{})
                                  : DecodeResult::Fallback;
     if(r==DecodeResult::Cancelled) { text[0]=0; std::snprintf(error,errorCapacity,"Cancelled"); return false; }
     if(r==DecodeResult::Fallback)std::snprintf(text,capacity,"greedy");
@@ -253,7 +253,7 @@ void loadedOncePerSession() {
     }
     assert(fake::state.heap.empty()); // session destruction frees the LM
     assert(run(nullptr)=="cat" && fake::state.heap.empty() && fake::state.lastCache==nullptr);
-    assert(fake::state.opens[kLm]==2 && logged("I [STT] Language model /STT Models/meeting.lm: 4 words, 0 bigrams, 0 trigrams, beam 8, 0 custom words")==1);
+    assert(fake::state.opens[kLm]==2 && logged("I [STT] Language model /STT Models/meeting.lm (char decoder): 4 words, 0 bigrams, 0 trigrams, beam 8, 0 custom words")==1);
     char weighting[160];
     std::snprintf(weighting,sizeof(weighting),
                   "lm_strength=%.3f alpha=1.000->%.3f beta=0.000->0.000 hotword_bonus=20.000->%.3f",

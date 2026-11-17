@@ -945,3 +945,50 @@ three `help` probes answered at the login gate. Stacks: `ble_setup` 696 / 5,120 
 
 Evidence is in `tools/p4/companion/private/flash-2026-10-18i/`
 (`boot-console.filtered.log` has addresses, IP, SSID and device-name suffixes removed).
+
+### Citrinet with the LM and speaker labels: memory fit, 2026-11-16
+
+Bench P4X-EYE, `p4-glasses-test` (Citrinet-384 default), uncommitted work on
+`claude/stt-onset-3.1`. PSRAM heap 33,009,612 B; internal heap 496,111 B.
+
+**Internal RAM while a model is built.** With `HW1_STT_HEAP_WATCH=1` (every
+task's internal allocations, the table copied at each new low): free internal
+RAM went from 240,067 B at session start to 19,131 B, with Bluetooth on, while
+the "stt" task built an ESP-DL model. That task held 171,345 B in 3,835 blocks,
+144,529 B of it in blocks of at most 128 B: the three name maps of prebuilt
+`libfbs_model.a` and the memory planner's `TensorInfo` records. Both are PSRAM
+requests now (ESP-DL patch: metadata kinds `Plan` and `FbsMap`; a copy of the
+library is linked with its `operator new` / sized `operator delete` renamed).
+After: low point 175,087 B under the watch, 176,616 B without it; what remains
+is the session's own task stacks.
+
+**PSRAM in a session** (`HW1_STT_HEAP_WATCH=2`: every block of 4 KiB and more at
+the low point), before the changes, Citrinet with speaker labels and no LM:
+
+| Block | Bytes |
+|---|---|
+| Citrinet weights image | 22,698,464 |
+| Speaker model image | 1,994,544 |
+| Five 10 s PCM buffers (working segment, three queue slots, draft) | 1,600,000 |
+| Citrinet activation arena | 1,120,000 |
+| Citrinet metadata (small blocks; 601,352 of it per-channel exponents) | about 840,000 |
+| Speaker arena | 600,064 |
+| Speaker job audio (4 slots of 2.99 s) | 382,720 |
+| Per-phrase features, when the feature pool is out | 266,560 |
+| Speaker workspace | 185,616 |
+| Speaker metadata (small blocks) | about 187,000 |
+
+**After** (weights image trimmed to 21,383,888 B once the resident model is
+built, exponents as bytes, the LM search in the acoustic model's arena), one
+session with the LM (2,499,996 B) and speaker labels:
+
+| Point | PSRAM free |
+|---|---|
+| Resident model built | 4,262,508 |
+| Image trimmed (`TL e3t`, 1,316,256 B back) | 5,578,764 |
+| Speaker model loaded (3,327,308 B) | 2,267,588 |
+| Feature pool | not loaded (needs 2,876,680 B free) |
+| Low point, 80 s session without the raw recording | 1,737,916 |
+| Low point, 10 min bench sessions with the raw recording ring | 1,443,112 |
+
+The 15x5 build's bench sessions ran at 1,559,728 B.

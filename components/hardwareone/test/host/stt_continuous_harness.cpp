@@ -543,9 +543,10 @@ static std::atomic<unsigned> cachedSpecs{0}, cachedTrimmedFinals{0};  // feature
 // kind: 0 final, 1 draft, 2 speculative final (combined).
 static void checkPrefix(const int16_t* pcm, size_t count, const SttFeaturePrefix* prefix, int kind) {
   if (!prefix) return;
-  assert(prefix->rows && prefix->count && prefix->count <= hw1::stt::feature_frames(count));
-  hw1::stt::FrontendWorkspace w;
-  float row[64];
+  // stt_fe: the broker's front end (System_STT.cpp), QuartzNet's or Citrinet's (--citrinet).
+  assert(prefix->rows && prefix->count && prefix->count <= stt_fe::feature_frames(count));
+  stt_fe::FrontendWorkspace w;
+  float row[stt_fe::kMelBins];
   // combined: finals and speculative finals are checked row for row. A draft is
   // checked on its first/last 8 rows and every 16th: a full -O0 check of a
   // long draft held the worker long enough that speculation's speculative snapshot
@@ -555,8 +556,8 @@ static void checkPrefix(const int16_t* pcm, size_t count, const SttFeaturePrefix
   // preempted between model stages instead.
   for (size_t r = 0; r < prefix->count; ++r) {
     if (kind == 1 && r >= 8 && r + 8 < prefix->count && r % 16) continue;
-    assert(hw1::stt::log_mel_frame(pcm, count, r, row, &w) == hw1::stt::Status::Ok);
-    if (memcmp(row, prefix->rows + r * 64, sizeof(row))) ++rowMismatches;
+    assert(stt_fe::log_mel_frame(pcm, count, r, row, &w) == hw1::stt::Status::Ok);
+    if (memcmp(row, prefix->rows + r * stt_fe::kMelBins, sizeof(row))) ++rowMismatches;
   }
   (kind == 1 ? cachedDrafts : kind == 2 ? cachedSpecs : cachedFinals) += 1; cachedRows += unsigned(prefix->count);
 }

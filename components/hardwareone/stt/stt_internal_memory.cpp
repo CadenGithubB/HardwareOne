@@ -15,13 +15,25 @@ hw1::stt::InternalMemoryLedger ledger;
 std::atomic<TaskHandle_t> owner{nullptr};
 #endif
 }
+#if HW1_STT_HEAP_WATCH
+#if !CONFIG_HEAP_USE_HOOKS
+#error "HW1_STT_HEAP_WATCH needs CONFIG_HEAP_USE_HOOKS"
+#endif
+#include "stt_heap_watch.inc"
+#endif
 #if CONFIG_HEAP_USE_HOOKS
 extern "C" void esp_heap_trace_alloc_hook(void* p,size_t bytes,uint32_t) {
+#if HW1_STT_HEAP_WATCH
+    heapWatchAlloc(p,bytes);
+#endif
     const auto task=owner.load(std::memory_order_acquire);
     if(!task || xPortInIsrContext() || xTaskGetCurrentTaskHandle()!=task || !esp_ptr_internal(p))return;
     ledger.allocated(p,bytes);
 }
 extern "C" void esp_heap_trace_free_hook(void* p) {
+#if HW1_STT_HEAP_WATCH
+    heapWatchFree(p);
+#endif
     const auto task=owner.load(std::memory_order_acquire);
     if(!task || xPortInIsrContext() || xTaskGetCurrentTaskHandle()!=task || !esp_ptr_internal(p))return;
     ledger.freed(p);

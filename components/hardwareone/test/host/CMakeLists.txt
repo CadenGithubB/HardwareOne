@@ -2015,7 +2015,14 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_stt_continuous.py --prev-onset
           ${STT_CONTINUOUS_TEST_ARGS})
-set_tests_properties(stt_continuous stt_continuous_full_phrase stt_continuous_prev_onset PROPERTIES RUN_SERIAL TRUE)
+# The Citrinet broker (ENABLE_STT_MODEL_CITRINET, the firmware default): capture-time rows from its 80-band
+# front end and 400-sample window must equal its batch rows bit for bit, as QuartzNet's do above.
+add_test(
+  NAME stt_continuous_citrinet
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_stt_continuous.py --citrinet
+          ${STT_CONTINUOUS_TEST_ARGS})
+set_tests_properties(stt_continuous stt_continuous_full_phrase stt_continuous_prev_onset stt_continuous_citrinet PROPERTIES RUN_SERIAL TRUE)
 
 # The continuous-STT speech segmenter (stt/stt_segmenter.h). stt_segmenter: the
 # harness of HardwareOne's own cases (chunking, pre-roll, cuts, adaptive levels and

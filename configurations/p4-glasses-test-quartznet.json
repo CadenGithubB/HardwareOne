@@ -1,0 +1,13 @@
+{
+  "board": "p4x_eye",
+  "features": {
+    "ENABLE_ESP_SR": 0,
+    "ENABLE_SDMMC_CARD": 1,
+    "ENABLE_LOCAL_STT": 1,
+    "ENABLE_STT_MODEL_CITRINET": 0,
+    "ENABLE_STT_MODEL_QUARTZNET": 1
+  },
+  "sdkconfig": {
+    "CONFIG_HEAP_USE_HOOKS": true
+  }
+}
