@@ -249,6 +249,19 @@ everything user-visible since the v0.99.99.1 tag.
   They now open the remote command form with the command filled in, which asks for the target
   account and shows the peer's verdict. The unfinished remote file view is removed. Host-tested; not
   yet tested on hardware.
+- ESP-NOW meshes and device name: a device could not be taken back to "no mesh, no name" by
+  command. Its only mesh could not be disabled ("Cannot remove the default mesh", with a hint to
+  pick another default that did not exist), a disabled mesh kept its slot for good (four labels
+  used up the four slots), and the device name could be changed but not cleared. Now the default
+  mesh can be disabled when no other enabled mesh could take over; `espnowmeshes delete <label>`
+  empties a slot for `add` to use again (refused while paired devices still belong to that mesh;
+  deleting the only mesh of a stopped device leaves none, as on a new device); and
+  `espnowsetname clear` removes the name while ESP-NOW is stopped. Re-enabling a mesh no longer leaves two default meshes. The web
+  ESP-NOW page has a Delete button on disabled meshes. Host-tested; not yet tested on hardware.
+- ESP-NOW messages: the start-up warning for a device without a passphrase and the reply to
+  clearing one called the mesh "primary" whatever its label was. Both now use the mesh's own label,
+  and the reply to clearing the passphrase of the mesh in slot 0 says that this also disables the
+  mesh and how to turn it back on. Host-tested; not yet tested on hardware.
 ### Changed
 - Command names have one form: lower-case letters and digits. The 22 camelCase `mqtt*` commands and
   `httpAutoStart` / `httpsEnabled` are now `mqtthost`, `mqttpublishgps`, `httpautostart`,

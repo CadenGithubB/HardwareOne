@@ -1845,6 +1845,47 @@ static void initPrimaryMeshFromLegacySettings() {
 #endif
 }
 
+// The slot whose passphrase a starting ESP-NOW loads: an enabled default mesh
+// in slots 1..N-1 that has one, else slot 0.
+static uint8_t espnowStartPassphraseSlot() {
+  for (uint8_t i = 1; i < Settings::N_MESHES; i++) {
+    if (gSettings.meshes[i].enabled && gSettings.meshes[i].isDefault &&
+        gSettings.meshes[i].passphrase.length() > 0) {
+      return i;
+    }
+  }
+  return 0;
+}
+
+// The mesh a "set a passphrase" hint should name: the enabled default mesh,
+// else the first enabled one. nullptr when no mesh is enabled.
+static const char* meshLabelForPassphraseHint() {
+  const Settings::MeshIdentity* first = nullptr;
+  for (uint8_t i = 0; i < Settings::N_MESHES; i++) {
+    const Settings::MeshIdentity& m = gSettings.meshes[i];
+    if (!m.enabled || m.label.length() == 0) continue;
+    if (m.isDefault) return m.label.c_str();
+    if (!first) first = &m;
+  }
+  return first ? first->label.c_str() : nullptr;
+}
+
+// The start-up warning for a device with no mesh passphrase. It names the mesh
+// by its own label: slot 0 is only called "primary" until someone renames it.
+static void formatNoPassphraseWarning(char* out, size_t outLen) {
+  const char* label = meshLabelForPassphraseHint();
+  if (label) {
+    snprintf(out, outLen,
+             "[ESP-NOW] WARNING: No passphrase configured — encrypted frames from peers "
+             "will fail to decrypt. Run 'espnowsetpassphrase %s <pw>'.", label);
+  } else {
+    snprintf(out, outLen,
+             "[ESP-NOW] WARNING: No passphrase configured and no mesh is enabled. "
+             "Run 'espnowmeshes' to see them, then 'espnowmeshes enable <label>' and "
+             "'espnowsetpassphrase <label> <pw>'.");
+  }
+}
+
 // Entries older than this are stale and must not shadow a new message that
 // reuses the id. A peer that reboots restarts its msgId counter from ~0, so
 // without expiry its reused low ids collide with our pre-reboot entries and get
@@ -12114,23 +12155,16 @@ static bool initEspNow() {
   // Use BROADCAST_PRINTF for user-visible init message (safe, doesn't trigger streaming)
   BROADCAST_PRINTF("[ESP-NOW] Initialized successfully on channel %d", gEspNow->channel);
 
-  // Restore encryption passphrase from the primary mesh
-  String bootPw = gSettings.meshes[0].passphrase;
-  for (uint8_t i = 1; i < Settings::N_MESHES; i++) {
-    if (gSettings.meshes[i].enabled && gSettings.meshes[i].isDefault &&
-        gSettings.meshes[i].passphrase.length() > 0) {
-      bootPw = gSettings.meshes[i].passphrase;
-      break;
-    }
-  }
+  // Restore the encryption passphrase (slot 0, or an enabled default mesh that has one)
+  String bootPw = gSettings.meshes[espnowStartPassphraseSlot()].passphrase;
   if (bootPw.length() > 0) {
     gEspNow->passphrase = bootPw;
     deriveKeyFromPassphrase(bootPw, gEspNow->derivedKey);
     DEBUG_ESPNOW_STREAMF("[ESP-NOW] Restored encryption passphrase from settings");
   } else {
-    BROADCAST_PRINTF("[ESP-NOW] WARNING: No passphrase configured — encrypted "
-                     "frames from peers will fail to decrypt. "
-                     "Run 'espnowsetpassphrase primary <pw>'.");
+    char warning[224];
+    formatNoPassphraseWarning(warning, sizeof(warning));
+    BROADCAST_PRINTF("%s", warning);
   }
 
   // Add broadcast peer for public heartbeat mode
@@ -13957,6 +13991,36 @@ const char* cmd_espnow_setname(const String& argsInput) {
   }
 
   String name = a.arg(0);
+  if (name == "clear") {
+    // Same keyword as the room/zone/tags commands. A running ESP-NOW announces
+    // itself by this name, so it has to be stopped first; with no name it will
+    // not start again until one is set, which is how a new device behaves.
+    if (gEspNow && (gEspNow->initialized || espnowShutdownPending())) {
+      return "Error: ESP-NOW is running and needs its device name. Run 'closeespnow' first.";
+    }
+    if (gSettings.espnowDeviceName.length() == 0) return "Device name: (not set)";
+    setSetting(gSettings.espnowDeviceName, String(""));
+    setSetting(gSettings.espnowFirstTimeSetup, false);
+    gMetadataChanged = true;
+    systemEventPost(SYSEVT_SETTING_CHANGED, "espnowDeviceName", "(cleared)");
+    if (gEspNow) {
+      // The stopped instance keeps its tables for the next start; drop the name
+      // from this device's own entry so nothing shows the old one meanwhile.
+      gEspNow->deviceName = "";
+      uint8_t myMac[6] = {};
+      // With the radio off the address may not be readable; the next start
+      // rewrites this entry from the setting in any case.
+      if (espnowSelfStaMac(myMac) == ESP_OK) {
+        for (int i = 0; i < gEspNow->deviceCount; i++) {
+          if (memcmp(gEspNow->devices[i].mac, myMac, 6) == 0) {
+            gEspNow->devices[i].name = "";
+            break;
+          }
+        }
+      }
+    }
+    return "Device name cleared. ESP-NOW will not start until a name is set with 'espnowsetname <name>'.";
+  }
   if (name.length() > 19) {
     return "Error: Device name must be 19 bytes or less";
   }
@@ -15348,13 +15412,16 @@ const char* cmd_espnow_meshstatus(const String& argsInput) {
 //                                                        passphrase; set one
 //                                                        with espnowsetpassphrase)
 //   espnowmeshes remove <label>                        — disable a mesh (does NOT unpair peers)
+//   espnowmeshes delete <label>                        — empty the slot so 'add' can use it again
+//                                                        (refused while paired peers belong to it)
 //   espnowmeshes setdefault <label>                    — set the default mesh
 //   espnowmeshes setpassphrase <label> <passphrase>    — change a mesh's passphrase
 //   espnowmeshes rename <oldlabel> <newlabel>          — rename (changes fingerprint!)
 //
-// Mesh slot 0 ("primary") is special: it's bootstrapped at boot and holds
-// the primary mesh passphrase. Removing or renaming it is allowed but breaks
-// comms with existing peers until they too rename.
+// Mesh slot 0 is special: an ESP-NOW start bootstraps it under the label
+// "primary" when it is empty (see meshesCmd_delete for what delete does there).
+// Removing or renaming it is allowed but breaks comms with existing peers
+// until they too rename.
 
 static bool isValidMeshLabel(const String& label) {
   if (label.length() == 0 || label.length() > 16) return false;
@@ -15504,27 +15571,134 @@ static const char* meshesCmd_add(const String& label) {
   return getDebugBuffer();
 }
 
+// True when a mesh other than `slot` is enabled, so the default can move there.
+static bool meshOtherEnabledExists(uint8_t slot) {
+  for (uint8_t i = 0; i < Settings::N_MESHES; i++) {
+    if (i != slot && gSettings.meshes[i].enabled) return true;
+  }
+  return false;
+}
+
+// Paired devices whose stored identity names mesh slot `slot`. The identity
+// records are loaded at boot, so this is right whether or not ESP-NOW is open.
+static int meshPairedPeerCount(uint8_t slot) {
+  int count = 0;
+  for (uint8_t i = 0; i < peerIdentitySlotCount(); i++) {
+    const PeerIdentity* pid = peerIdentityAt(i);
+    if (pid && pid->valid && pid->meshId == slot) count++;
+  }
+  return count;
+}
+
+// The default mesh may only go away when no other enabled mesh could take over;
+// while one exists the user chooses the new default first.
+static const char* meshDefaultInUseReply() {
+  return "Error: This is the default mesh. Use 'espnowmeshes setdefault <other>' first.";
+}
+
 static const char* meshesCmd_remove(const String& label) {
   for (uint8_t i = 0; i < Settings::N_MESHES; i++) {
     if (gSettings.meshes[i].label == label) {
-      if (gSettings.meshes[i].isDefault) {
-        return "Error: Cannot remove the default mesh. Use 'espnowmeshes setdefault <other>' first.";
-      }
-      setSetting(gSettings.meshes[i].enabled, false);
-      // Don't clear label — preserves it for future re-enable. Note there is no
-      // way to fully delete a slot today: rename rejects an empty label
-      // (isValidMeshLabel) and no wipe subcommand exists. Because
-      // findFreeMeshSlot only claims slots whose label is EMPTY, a disabled
-      // slot is also never reused by 'add' — it stays spent until re-enabled
-      // under its old label.
+      Settings::MeshIdentity& m = gSettings.meshes[i];
       if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+      if (!m.enabled) {
+        snprintf(getDebugBuffer(), 1024,
+                 "Mesh '%s' is already disabled. Turn it back on with 'espnowmeshes enable %s' "
+                 "or free its slot with 'espnowmeshes delete %s'.",
+                 label.c_str(), label.c_str(), label.c_str());
+        return getDebugBuffer();
+      }
+      if (m.isDefault && meshOtherEnabledExists(i)) return meshDefaultInUseReply();
+      // The label stays, so 'enable' can bring the mesh back and 'add' does not
+      // reuse the slot; 'delete' is what frees it. A disabled mesh is not the
+      // default: 'enable' and 'add' flag one again when no enabled mesh has it.
+      m.enabled = false;
+      m.isDefault = false;
+      if (!requestSettingsPersist()) {
+        return "Error: Mesh disabled in RAM, but the change could not be persisted.";
+      }
       snprintf(getDebugBuffer(), 1024,
                "Disabled mesh '%s'. Paired peers in this mesh remain in their slots "
                "but their frames will be silently dropped. Re-enable with "
-               "'espnowmeshes enable %s' or fully unpair with 'espnowunpair'.",
-               label.c_str(), label.c_str());
+               "'espnowmeshes enable %s', or unpair them with 'espnowunpair' and free "
+               "the slot with 'espnowmeshes delete %s'.",
+               label.c_str(), label.c_str(), label.c_str());
       return getDebugBuffer();
     }
+  }
+  return "Error: Mesh not found. Run 'espnowmeshes' to list.";
+}
+
+// Empty a mesh slot: label, passphrase, cached keys and flags. 'add' can use
+// the slot again afterwards. With no other mesh and ESP-NOW stopped this leaves
+// the device as a new one is: no mesh until 'add' or the next ESP-NOW start.
+static const char* meshesCmd_delete(const String& label) {
+  for (uint8_t i = 0; i < Settings::N_MESHES; i++) {
+    if (gSettings.meshes[i].label != label) continue;
+    Settings::MeshIdentity& m = gSettings.meshes[i];
+    if (m.enabled && m.isDefault && meshOtherEnabledExists(i)) return meshDefaultInUseReply();
+    if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+    // Stored identities name their mesh by slot number. Freeing a slot they
+    // still point at would hand those devices to whichever mesh takes it next.
+    const int paired = meshPairedPeerCount(i);
+    if (paired > 0) {
+      snprintf(getDebugBuffer(), 1024,
+               "Error: %d paired device%s still belong%s to mesh '%s'. "
+               "Unpair with 'espnowunpair <name_or_mac>' first.",
+               paired, paired == 1 ? "" : "s", paired == 1 ? "s" : "", label.c_str());
+      return getDebugBuffer();
+    }
+    const bool hadPassphrase = m.passphrase.length() > 0;
+    const bool othersEnabled = meshOtherEnabledExists(i);
+    meshKeysInvalidate(i);
+    m.label = "";
+    m.passphrase = "";
+    m.fingerprint = 0;
+    m.enabled = false;
+    m.isDefault = false;
+    sodium_memzero(m.passphraseStretchedKey, sizeof(m.passphraseStretchedKey));
+    m.passphraseStretchedKeyValid = false;
+#if ENABLE_BONDED_MODE
+    if (i != 0) {  // slot 0 mirrors the device's single bond setting
+      gSettings.bondModeEnabledMesh[i] = false;
+      gSettings.bondRoleMesh[i] = 0;
+      gSettings.bondPeerMacMesh[i] = "";
+    }
+#endif
+    if (i == 0) {
+      // An ESP-NOW start bootstraps an empty slot 0 as an enabled default mesh
+      // "primary". A stopped device with no other mesh is simply left empty, as
+      // a new device is. A running instance gets the bootstrap now, and so does
+      // a device with another mesh in use, where the placeholder must not join
+      // in beside that mesh or take the default from it at the next start.
+      const bool running = gEspNow && (gEspNow->initialized || espnowShutdownPending());
+      if (running || othersEnabled) {
+        initPrimaryMeshFromLegacySettings();
+        if (othersEnabled) {
+          m.enabled = false;
+          m.isDefault = false;
+        }
+      }
+    }
+    // A running ESP-NOW holds the passphrase it started with; load it again so
+    // a deleted mesh's passphrase does not stay in use until the next start.
+    if (hadPassphrase && gEspNow && gEspNow->initialized) {
+      const String livePw = gSettings.meshes[espnowStartPassphraseSlot()].passphrase;
+      gEspNow->passphrase = livePw;
+      deriveKeyFromPassphrase(livePw, gEspNow->derivedKey);
+    }
+    if (!requestSettingsPersist()) {
+      return "Error: Mesh deleted in RAM, but the change could not be persisted.";
+    }
+    if (hadPassphrase) systemEventPost(SYSEVT_MESH_PASSPHRASE_CHANGED, label.c_str(), "cleared");
+    if (m.label.length() > 0) {
+      snprintf(getDebugBuffer(), 1024,
+               "Deleted mesh '%s'. Slot 0 now holds the unconfigured mesh '%s' (no passphrase, %s).",
+               label.c_str(), m.label.c_str(), m.enabled ? "enabled" : "disabled");
+    } else {
+      snprintf(getDebugBuffer(), 1024, "Deleted mesh '%s'. Slot %u is free.", label.c_str(), (unsigned)i);
+    }
+    return getDebugBuffer();
   }
   return "Error: Mesh not found. Run 'espnowmeshes' to list.";
 }
@@ -15547,6 +15721,16 @@ static const char* meshesCmd_enable(const String& label) {
       // unrelated later save.
       gSettings.meshes[i].enabled = true;
       gSettings.meshes[i].fingerprint = meshFingerprintForLabel(label);
+      // Exactly one enabled mesh is the default. This one takes the flag when no
+      // enabled mesh holds it, and gives up a flag left from before it was
+      // disabled when another mesh became the default meanwhile.
+      {
+        bool otherDefault = false;
+        for (uint8_t j = 0; j < Settings::N_MESHES; j++) {
+          if (j != i && gSettings.meshes[j].enabled && gSettings.meshes[j].isDefault) otherDefault = true;
+        }
+        gSettings.meshes[i].isDefault = !otherDefault;
+      }
       if (!requestSettingsPersist()) {
         return "Error: Mesh enabled in RAM, but its fingerprint could not be persisted.";
       }
@@ -15630,9 +15814,15 @@ static const char* meshesCmd_setpassphrase(const String& label, const String& pa
       }
       if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
       if (passphrase.length() == 0) {
-        snprintf(getDebugBuffer(), 1024,
-                 "Cleared passphrase for mesh '%s'.%s", label.c_str(),
-                 i == 0 ? " ESP-NOW encryption disabled for primary mesh." : "");
+        // Clearing slot 0's passphrase also disables that mesh (setEspNowPassphrase);
+        // the other slots stay enabled. Say what happened, with the mesh's own label.
+        if (gSettings.meshes[i].enabled) {
+          snprintf(getDebugBuffer(), 1024, "Cleared passphrase for mesh '%s'.", label.c_str());
+        } else {
+          snprintf(getDebugBuffer(), 1024,
+                   "Cleared passphrase for mesh '%s'. The mesh is disabled; turn it back on "
+                   "with 'espnowmeshes enable %s'.", label.c_str(), label.c_str());
+        }
       } else {
         snprintf(getDebugBuffer(), 1024,
                  "Updated passphrase for mesh '%s'.%s "
@@ -15719,6 +15909,10 @@ const char* cmd_espnow_meshes(const String& argsInput) {
     if (!a.hasMinArgs(2)) return "Error: invalid arguments — Usage: espnowmeshes remove <label>";
     return meshesCmd_remove(a.arg(1));
   }
+  if (sub == "delete") {
+    if (!a.hasMinArgs(2)) return "Error: invalid arguments — Usage: espnowmeshes delete <label>";
+    return meshesCmd_delete(a.arg(1));
+  }
   if (sub == "enable") {
     if (!a.hasMinArgs(2)) return "Error: invalid arguments — Usage: espnowmeshes enable <label>";
     return meshesCmd_enable(a.arg(1));
@@ -15735,7 +15929,7 @@ const char* cmd_espnow_meshes(const String& argsInput) {
     if (!a.hasMinArgs(3)) return "Error: invalid arguments — Usage: espnowmeshes rename <oldlabel> <newlabel>";
     return meshesCmd_rename(a.arg(1), a.arg(2));
   }
-  return "Error: invalid arguments — Usage: espnowmeshes [list|add|remove|enable|setdefault|setpassphrase|rename] ...";
+  return "Error: invalid arguments — Usage: espnowmeshes [list|add|remove|delete|enable|setdefault|setpassphrase|rename] ...";
 }
 
 // Tear down the cryptographic relationship for a peer: close any live AEAD
@@ -18643,11 +18837,11 @@ extern const CommandEntry espNowCommands[] = {
   { "espnowmeshstatus", "Show mesh peer health (heartbeats & ACKs).", false, cmd_espnow_meshstatus },
   { "espnowmeshmetrics", "Show multi-hop routing metrics (flood forwards, routed hops, drops, route churn).", false, cmd_espnow_meshmetrics },
   { "espnowmeshroutes", "Show the mesh route table: who this node can reach and via which neighbour.", false, cmd_espnow_meshroutes, "Usage: espnowmeshroutes [clear]\n       'via (direct)' = in radio range. Anything else is reached over one or more relay hops.\n       Multi-hop routes are learned from neighbours every 30s — allow a minute after boot." },
-  { "espnowmeshes", "Manage multi-mesh slots: 'espnowmeshes [list|add|remove|enable|setdefault|rename|setpassphrase] ...'.", true, cmd_espnow_meshes, "Usage: espnowmeshes list\n       espnowmeshes add <label>          (then set passphrase via 'espnowsetpassphrase <label> <pw>')\n       espnowmeshes remove <label>       (alias: disable)\n       espnowmeshes enable <label>\n       espnowmeshes setdefault <label>\n       espnowmeshes setpassphrase <label> <passphrase>\n       espnowmeshes rename <oldLabel> <newLabel>" },
+  { "espnowmeshes", "Manage multi-mesh slots: 'espnowmeshes [list|add|remove|delete|enable|setdefault|rename|setpassphrase] ...'.", true, cmd_espnow_meshes, "Usage: espnowmeshes list\n       espnowmeshes add <label>          (then set passphrase via 'espnowsetpassphrase <label> <pw>')\n       espnowmeshes remove <label>       (alias: disable)\n       espnowmeshes delete <label>       (frees the slot; unpair its devices first)\n       espnowmeshes enable <label>\n       espnowmeshes setdefault <label>\n       espnowmeshes setpassphrase <label> <passphrase>\n       espnowmeshes rename <oldLabel> <newLabel>" },
   { "espnowmode", "Get/set ESP-NOW mode: 'espnowmode [direct|mesh]'.", true, cmd_espnow_mode, "Usage: espnowmode [direct|mesh]" },
   { "espnowmeshttl", "Get/set the multi-hop budget: 'espnowmeshttl [1-10]'.", false, cmd_espnow_meshttl, "Usage: espnowmeshttl [<1..10>]\n       How many hops this node's relay-eligible frames may travel. 1 = single hop (no multi-hop).\n       Applies to broadcast text/time sync and to routed unicast; heartbeats and pairing are always single-hop." },
   { "espnowchannel", "Get/set preferred ESP-NOW channel: 'espnowchannel [1-13|auto|resync]'. No arg shows a checker (actual vs expected). Set the SAME value on both devices to pair off-grid.", true, cmd_espnow_channel, "Usage: espnowchannel [<1..13>|auto|resync]\n       (no arg) = show preference, actual radio channel, expected, and an OK/MISMATCH check.\n       auto (0) = follow WiFi, pin fallback when offline. 1-13 = force this channel when not joined to WiFi.\n       resync   = force the radio back onto the correct channel now (no setting change).\n       Two devices only hear each other on the same channel — set both the same for field use." },
-  { "espnowsetname", "Get/set device name: 'espnowsetname [name]'.", true, cmd_espnow_setname, "Usage: espnowsetname [<name>]   (<=19 bytes; letters, numbers, - and _ only)" },
+  { "espnowsetname", "Get/set device name: 'espnowsetname [name|clear]'.", true, cmd_espnow_setname, "Usage: espnowsetname [<name>|clear]   (<=19 bytes; letters, numbers, - and _ only; 'clear' removes it while ESP-NOW is stopped)" },
   { "espnowhbmode", "Get/set heartbeat mode: 'espnowhbmode [public|private]'.", true, cmd_espnow_hbmode, "Usage: espnowhbmode [public|private]" },
   { "espnowmeshrole", "Get/set mesh role: 'espnowmeshrole [worker|master|backup]'.", true, cmd_espnow_meshrole, "Usage: espnowmeshrole [worker|master|backup]" },
   { "espnowmeshmaster", "Get/set master MAC: 'espnowmeshmaster [MAC]'.", true, cmd_espnow_meshmaster, "Usage: espnowmeshmaster [<AA:BB:CC:DD:EE:FF>]" },

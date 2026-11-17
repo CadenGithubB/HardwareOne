@@ -211,7 +211,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `espnowlist` |  | List all paired ESP-NOW devices. |
 | `espnowmasterfingerprint` | A | Worker: set the authorized PRIMARY-master Ed25519 fingerprint (64-hex; empty=deny).<br/>`Usage: espnowmasterfingerprint <64-hex-pubkey>` |
 | `espnowmeshbackup` | A | Get/set backup MAC: 'espnowmeshbackup [MAC]'.<br/>`Usage: espnowmeshbackup [<AA:BB:CC:DD:EE:FF>]` |
-| `espnowmeshes` | A | Manage multi-mesh slots: 'espnowmeshes [list\|add\|remove\|enable\|setdefault\|rename\|setpassphrase] ...'.<br/>`Usage: espnowmeshes list espnowmeshes add <label> (then set passphrase via 'espnowsetpassphrase <label> <pw>') espnowmeshes remove <label> (alias: disable) espnowmeshes enable <label> espnowmeshes setdefault <label> espnowmeshes setpassphrase <label> <passphrase> espnowmeshes rename <oldLabel> <newLabel>` |
+| `espnowmeshes` | A | Manage multi-mesh slots: 'espnowmeshes [list\|add\|remove\|delete\|enable\|setdefault\|rename\|setpassphrase] ...'.<br/>`Usage: espnowmeshes list espnowmeshes add <label> (then set passphrase via 'espnowsetpassphrase <label> <pw>') espnowmeshes remove <label> (alias: disable) espnowmeshes delete <label> (frees the slot; unpair its devices first) espnowmeshes enable <label> espnowmeshes setdefault <label> espnowmeshes setpassphrase <label> <passphrase> espnowmeshes rename <oldLabel> <newLabel>` |
 | `espnowmeshmaster` | A | Get/set master MAC: 'espnowmeshmaster [MAC]'.<br/>`Usage: espnowmeshmaster [<AA:BB:CC:DD:EE:FF>]` |
 | `espnowmeshmetrics` |  | Show multi-hop routing metrics (flood forwards, routed hops, drops, route churn). |
 | `espnowmeshpeermax` | A | Set max peer slots: <1-16> (reboot required)<br/>`Usage: espnowmeshpeermax <1..16>` |
@@ -253,7 +253,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `espnowsessionopen` | A | Initiate SESSION handshake (requires prior espnowkeyex). (async - session goes ACTIVE later; check espnowsessions)<br/>`Usage: espnowsessionopen <name_or_mac> [<mesh>] Returns OK when SESSION_OPEN is sent; the session becomes ACTIVE when CONFIRM arrives - run 'espnowsessions'.` |
 | `espnowsessions` |  | Show in-RAM session state (peer, sessionId, dir, age, counters). |
 | `espnowsessionsend` | A | DIAGNOSTIC: send an AEAD-encrypted CHAT message over an active session (exercises the session-crypto path). NOT executed on the peer and returns no reply - to RUN a command use 'espnowremote'.<br/>`Usage: espnowsessionsend <name_or_mac> <message> Delivers an encrypted CHAT message (lands in the peer's espnowmessages). It is NOT command execution and no reply comes back. To run a command on the peer: espnowremote <target> <target-user> <target-pass> <command>.` |
-| `espnowsetname` | A | Get/set device name: 'espnowsetname [name]'.<br/>`Usage: espnowsetname [<name>] (<=19 bytes; letters, numbers, - and _ only)` |
+| `espnowsetname` | A | Get/set device name: 'espnowsetname [name\|clear]'.<br/>`Usage: espnowsetname [<name>\|clear] (<=19 bytes; letters, numbers, - and _ only; 'clear' removes it while ESP-NOW is stopped)` |
 | `espnowsetpassphrase` | S | Set encryption passphrase on a mesh: 'espnowsetpassphrase <mesh> <phrase>'.<br/>`Usage: espnowsetpassphrase <mesh> <passphrase> espnowsetpassphrase <mesh> clear` |
 | `espnowstationary` |  | Get/set stationary flag: 'espnowstationary [0\|1]'.<br/>`Usage: espnowstationary [on\|off\|0\|1]` |
 | `espnowstats` |  | Show ESP-NOW statistics (messages, errors, etc.). |

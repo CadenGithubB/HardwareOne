@@ -637,7 +637,7 @@ With `ENABLE_BONDED_MODE=1`, two devices can bond into a master/worker pair. The
 ### Metadata Sync
 Each device has a name, room, zone, and tags set in settings. The **Metadata** tab lets you pull this information from any peer. Set your own device metadata with (note: single words, no space after `espnow`):
 ```
-espnowsetname [name]            - Device name (<=20 chars; letters, numbers, - and _)
+espnowsetname [name|clear]      - Device name (<=19 bytes; letters, numbers, - and _)
 espnowroom [name]               - Room, e.g. Kitchen. 'espnowroom clear' to unset
 espnowzone [name]               - Zone, e.g. Counter. 'espnowzone clear' to unset
 espnowtags [tag1,tag2,...]      - Tags. 'espnowtags clear' to unset
@@ -1148,7 +1148,7 @@ espnowtimesync                  - Broadcast NTP time to mesh (master only)
 espnowtimestatus                - Show time sync status
 
 --- Device identity ---
-espnowsetname [name]            - Get/set device name
+espnowsetname [name|clear]      - Get/set device name ('clear' while ESP-NOW is stopped)
 espnowroom [name]               - Get/set room
 espnowzone [name]               - Get/set zone
 espnowtags [tag1,tag2,...]      - Get/set tags

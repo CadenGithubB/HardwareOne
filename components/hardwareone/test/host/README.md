@@ -6212,3 +6212,11 @@ command shortens the echo, never the request id. `oled_espnow_remote_actions` ru
 rows: they fill in and open the remote form, and no OLED ESP-NOW action sends a command line whose first word is
 not a registered command. Outside ctest, `tools/webui/tests/test_espnow_remote_page.py` feeds the firmware's real
 replies to the web page's remote file browser.
+
+`espnow_mesh_slots` runs the production `espnowmeshes` subcommands, the passphrase messages and
+`cmd_espnow_setname` on the production mesh record: a device's only mesh can be disabled and deleted, which
+leaves a stopped device with no mesh, as a new one, and a running one with the unconfigured `primary`; `delete`
+frees a slot for `add`, clears its keys and bond settings, and is refused while stored identities still name the
+slot; deleting slot 0 beside a mesh in use leaves a disabled placeholder and the running passphrase alone;
+exactly one enabled mesh is the default after `enable`; the start-up warning and the passphrase-cleared reply name the mesh by its label; `espnowsetname clear`
+works only while ESP-NOW is stopped.

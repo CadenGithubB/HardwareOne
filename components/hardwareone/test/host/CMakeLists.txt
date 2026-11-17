@@ -2436,6 +2436,19 @@ add_test(
           ${CMAKE_CURRENT_LIST_DIR}/test_settings_onoff_commands.py
           ${SETTINGS_ONOFF_COMMANDS_TEST_ARGS})
 
+# Mesh slots and the device name can be taken back to a new device's state:
+# the only mesh can be disabled, 'espnowmeshes delete' frees a slot, one enabled
+# mesh is the default, messages use the mesh's own label, 'espnowsetname clear'.
+set(ESPNOW_MESH_SLOTS_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND ESPNOW_MESH_SLOTS_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME espnow_mesh_slots
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_espnow_mesh_slots.py
+          ${ESPNOW_MESH_SLOTS_TEST_ARGS})
+
 # Web requests no longer pause the ESP-NOW loop (review RT-2): the flag is gone
 # and the loop's early return asks only for its own state.
 add_test(

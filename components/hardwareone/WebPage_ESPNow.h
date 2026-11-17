@@ -1537,7 +1537,8 @@ inline void streamEspNowInner(httpd_req_t* req) {
         // catch-all action menu lives behind the ⋯ button for the rest.
         var primaryAction = m.enabled
           ? '<button class="btn btn-mesh-actions" data-guest-hide data-slot="' + m.slot + '" data-label="' + label + '" style="font-size:.82em;padding:4px 10px">⋯</button>'
-          : '<button class="btn btn-mesh-enable" data-guest-hide data-slot="' + m.slot + '" data-label="' + label + '" style="font-size:.82em;padding:4px 10px">Enable</button>';
+          : '<button class="btn btn-mesh-enable" data-guest-hide data-slot="' + m.slot + '" data-label="' + label + '" style="font-size:.82em;padding:4px 10px">Enable</button>' +
+            '<button class="btn btn-mesh-delete" data-guest-hide data-slot="' + m.slot + '" data-label="' + label + '" title="Free this slot. Devices paired in this mesh must be unpaired first." style="font-size:.82em;padding:4px 10px">Delete</button>';
 
         html += '<div class="mesh-row" data-slot="' + m.slot + '" data-label="' + label + '" style="display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:8px;background:var(--crumb-bg);border:1px solid var(--border);flex-wrap:wrap">' +
           '<span style="font-weight:600;color:var(--panel-fg);min-width:80px">' + label + '</span>' +
@@ -1602,7 +1603,11 @@ inline void streamEspNowInner(httpd_req_t* req) {
       var setdefaultBtn = isDefault
         ? ''
         : '<button class="btn btn-mesh-setdefault" data-label="' + label + '" style="font-size:.82em;padding:3px 10px">Set as default</button>';
-      var disableBtn = isDefault
+      // The default mesh can be disabled only when no other enabled mesh could
+      // take over; the firmware applies the same rule.
+      var all = (window.gMeshes && window.gMeshes.meshes) || [];
+      var otherEnabled = all.some(function(o) { return o.enabled && String(o.slot) !== String(slot); });
+      var disableBtn = (isDefault && otherEnabled)
         ? '<button class="btn" disabled title="Cannot disable the default mesh — set another as default first" style="font-size:.82em;padding:3px 10px;opacity:.5;cursor:not-allowed">Disable</button>'
         : '<button class="btn btn-mesh-disable" data-label="' + label + '" style="font-size:.82em;padding:3px 10px">Disable</button>';
 
@@ -1715,6 +1720,16 @@ inline void streamEspNowInner(httpd_req_t* req) {
         if (t.classList.contains('btn-mesh-enable')) {
           if (!label) return;
           fireMeshCmd('espnowmeshes enable ' + label, 'MESH_ENABLE');
+          return;
+        }
+        // Delete a disabled mesh: frees its slot. The firmware refuses while
+        // paired devices still belong to it, so show its answer.
+        if (t.classList.contains('btn-mesh-delete')) {
+          if (!label) return;
+          if (!confirm('Delete mesh "' + label + '"? Its label and passphrase are erased and the slot becomes free.')) return;
+          fireMeshCmd('espnowmeshes delete ' + label, 'MESH_DELETE').then(function(text) {
+            if (/^Error/.test(String(text || ''))) alert(text);
+          });
           return;
         }
         // Open/close action panel

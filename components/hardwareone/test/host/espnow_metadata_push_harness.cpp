@@ -71,10 +71,13 @@ struct EspNowState {
   bool initialized = true;
   int deviceCount = 0;
   EspNowDevice devices[4];
+  String deviceName;  // read by 'espnowsetname clear' (run by test_espnow_mesh_slots.py)
 };
 static EspNowState state;
 static EspNowState* gEspNow = &state;
 typedef int esp_err_t;
+enum { ESP_OK = 0 };
+[[maybe_unused]] static bool espnowShutdownPending() { return false; }
 static const uint8_t kSelfMac[6] = {0x02, 0, 0, 0, 0, 0x01};
 esp_err_t espnowSelfStaMac(uint8_t out[6]) { std::memcpy(out, kSelfMac, 6); return 0; }
 void addEspNowDevice(const uint8_t* mac, const String& name, bool, const uint8_t*) {
