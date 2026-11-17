@@ -107,10 +107,19 @@ def production(migration: str, header: str, mutex: str, mutex_header: str, utils
                           for marker in ("bool readText(", "bool writeText(", "bool writeTextAtomic("))
 
     constants = re.findall(r'^static const char\* [A-Z_]+\s*=\s*"[^"]*";', migration, re.M)
-    require(len(constants) == 8, "the eight migration path constants")
+    if '#include "System_StatePaths.h"' in migration:
+        # The /system state paths come from their owner (System_StatePaths.h)
+        # and the network.wifi keys the restore edits from hw1wifijson; only
+        # MAPS_DIR stays local.
+        require(len(constants) == 1 and "MAPS_DIR" in constants[0], "MAPS_DIR is the one local path constant")
+        wifi = (COMPONENT / "network" / "wifi" / "System_WiFiNetworks.h").read_text()
+        constants = [(COMPONENT / "System_StatePaths.h").read_text().replace("#pragma once\n", "", 1),
+                     extract_block(wifi, "namespace hw1wifijson") + "  // namespace hw1wifijson"] + constants
+    else:
+        require(len(constants) == 8, "the eight migration path constants")
     constants += re.findall(r"^static constexpr size_t k\w+ = [^;]+;", migration, re.M)
     constants += re.findall(r"^constexpr uint32_t kBackupFormatVersion = \d+;", header, re.M)
-    require(len(constants) >= 9 and constants[-1].startswith("constexpr uint32_t kBackupFormatVersion"),
+    require(len(constants) >= 4 and constants[-1].startswith("constexpr uint32_t kBackupFormatVersion"),
             "the backup format constant from WebServer_MigrationTool.h")
 
     require(migration.count(RESTORE_START) == 1 and migration.count(RESTORE_END) == 1, "one restore section")

@@ -71,6 +71,11 @@ def generate() -> str:
     start = utils.index(start_marker)
     end = utils.index(end_marker)
     reset = utils[start:end] + extract_block(utils[end:], end_marker)
+    # The pending list, the per-user folder and the prompt's users.json are
+    # named by System_StatePaths.h on a tree that has it.
+    paths = COMPONENT / "System_StatePaths.h"
+    if "HW1_" in reset and paths.exists():
+        reset = paths.read_text().replace("#pragma once\n", "", 1) + "\n" + reset
     reset += "\n\n" + unique_block(utils, "static const char* factoryreset_cancelled(")
     reset += "\n\n" + unique_block(utils, "const char* cmd_factoryreset(")
 

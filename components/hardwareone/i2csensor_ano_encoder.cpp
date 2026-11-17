@@ -19,6 +19,7 @@
 #include "System_Command.h"
 #include "System_Debug.h"
 #include "System_I2C.h"
+#include "System_SensorJsonKeys.h"  // inter-device sensor JSON key names (receivers read the same)
 #include "System_Settings.h"
 #include "System_TaskUtils.h"
 #include "i2csensor_seesaw.h"  // For InputCache struct + gGamepad* extern declarations
@@ -322,7 +323,7 @@ int anoEncoderBuildDataJson(char* buf, size_t bufSize) {
     // Cache-lock timeout: not-ready envelope (was: return 0 / no output).
     int pos = sensorEnvelopeBegin(buf, bufSize, false, gAnoEncoderConnected, 0);
     if (pos == 0) return 0;
-    int n = snprintf(buf + pos, bufSize - pos, ",\"pos\":0,\"axis\":0,\"buttons\":0}");
+    int n = snprintf(buf + pos, bufSize - pos, "," HW1_SK_Q(HW1_SK_POS) "0," HW1_SK_Q(HW1_SK_AXIS) "0," HW1_SK_Q(HW1_SK_BUTTONS) "0}");
     if (n < 0 || (size_t)n >= bufSize - pos) return 0;
     return pos + n;
   }
@@ -330,7 +331,7 @@ int anoEncoderBuildDataJson(char* buf, size_t bufSize) {
   int pos = sensorEnvelopeBegin(buf, bufSize, reading.dataValid, gAnoEncoderConnected, reading.lastUpdate);
   if (pos == 0) return 0;
   int n = snprintf(buf + pos, bufSize - pos,
-                   ",\"pos\":%ld,\"axis\":%u,\"buttons\":%lu}",
+                   "," HW1_SK_Q(HW1_SK_POS) "%ld," HW1_SK_Q(HW1_SK_AXIS) "%u," HW1_SK_Q(HW1_SK_BUTTONS) "%lu}",
                    (long)reading.encoderPosition,
                    (unsigned)reading.currentAxis,
                    (unsigned long)reading.buttons);

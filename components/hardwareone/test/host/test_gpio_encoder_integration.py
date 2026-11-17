@@ -19,7 +19,8 @@ class GPIOEncoderIntegrationTest(unittest.TestCase):
                     # Copy it intact so heavy platform headers can be substituted.
                     for name in ("Input_GPIOEncoder.cpp", "Input_GPIOEncoder.h",
                                  "Input_ButtonCore.h", "Input_RotaryCore.h",
-                                 "System_Board_P4X_EYE.h", "HAL_InputInternal.h"):
+                                 "System_Board_P4X_EYE.h", "HAL_InputInternal.h",
+                                 "System_SensorJsonKeys.h"):
                         shutil.copyfile(production / name, work / name)
                     header = (production / "HAL_Input.h").read_text()
                     reading = re.search(r"struct InputCache \{.*?\n\};", header, re.S)

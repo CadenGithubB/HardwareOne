@@ -18,6 +18,7 @@
 #include "System_Command.h"
 #include "System_Debug.h"
 #include "System_I2C.h"
+#include "System_SensorJsonKeys.h"  // inter-device sensor JSON key names (receivers read the same)
 #include "System_Settings.h"
 #include "System_TaskUtils.h"
 #include "System_CommandRegistry.h"
@@ -409,7 +410,7 @@ int gamepadBuildDataJson(char* buf, size_t bufSize) {
     // Cache-lock timeout: not-ready envelope (was: return 0 / no output).
     int pos = sensorEnvelopeBegin(buf, bufSize, false, gInputConnected, 0);
     if (pos == 0) return 0;
-    int n = snprintf(buf + pos, bufSize - pos, ",\"x\":0,\"y\":0,\"buttons\":0}");
+    int n = snprintf(buf + pos, bufSize - pos, "," HW1_SK_Q(HW1_SK_X) "0," HW1_SK_Q(HW1_SK_Y) "0," HW1_SK_Q(HW1_SK_BUTTONS) "0}");
     if (n < 0 || (size_t)n >= bufSize - pos) return 0;
     return pos + n;
   }
@@ -417,7 +418,7 @@ int gamepadBuildDataJson(char* buf, size_t bufSize) {
   int pos = sensorEnvelopeBegin(buf, bufSize, reading.dataValid, gInputConnected, reading.lastUpdate);
   if (pos == 0) return 0;
   int n = snprintf(buf + pos, bufSize - pos,
-                   ",\"x\":%d,\"y\":%d,\"buttons\":%lu}",
+                   "," HW1_SK_Q(HW1_SK_X) "%d," HW1_SK_Q(HW1_SK_Y) "%d," HW1_SK_Q(HW1_SK_BUTTONS) "%lu}",
                    reading.joyX, reading.joyY,
                    (unsigned long)reading.buttons);
   if (n < 0 || (size_t)n >= bufSize - pos) return 0;

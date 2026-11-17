@@ -13,6 +13,7 @@
 #include "System_Utils.h"   // rebootDevice()
 #include "System_User.h"    // isReservedUsername, isValidPublicUsername, kPublicPasswordMinLen
 #include "System_VFS.h"   // VFS::*Guarded + systemAuth (Phase 2 perm refactor)
+#include "System_StatePaths.h"  // the state file paths the setup replies quote
 
 #include "OLED_Display.h"
 #include "OLED_FirstTimeSetup.h"
@@ -355,7 +356,7 @@ static bool createInitialAdminUser(const String& username, const String& plainte
     broadcastOutput("Error: Failed to write users.json");
     return false;
   }
-  broadcastOutput("Saved /system/users/users.json");
+  broadcastOutput("Saved " HW1_USERS_JSON_PATH);
   // A new roster: every cached account verdict (System_User authority cache,
   // display session role) must be refilled from it.
   bumpIdentityGeneration("user.setup");
@@ -1070,7 +1071,7 @@ void firstTimeSetupIfNeeded() {
     if (!writeAutomationsJsonAtomic(a)) {
       broadcastOutput("Error: Failed to write automations.json");
     } else {
-      broadcastOutput("Created /system/automations.json");
+      broadcastOutput("Created " HW1_AUTOMATIONS_JSON_PATH);
     }
   }
  #endif

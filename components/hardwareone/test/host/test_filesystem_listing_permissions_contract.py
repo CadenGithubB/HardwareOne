@@ -256,6 +256,9 @@ def run_role_matrix(cxx: str, sanitize: bool) -> None:
     internal = re.sub(r"^#include.*\n", "", FS_INTERNAL_H, flags=re.M)
     pieces = [identity_constants(user_header), identity_predicates(user_header),
               extract_block(header, "enum FilePermission") + ";",
+              # The state-file rows name their paths through System_StatePaths.h.
+              (ROOT / "System_StatePaths.h").read_text().replace("#pragma once\n", "", 1)
+              if (ROOT / "System_StatePaths.h").exists() else "",
               extract_block(FS_CPP, "struct PathRule") + ";",
               extract_block(FS_CPP, "static const PathRule sPathRules[]") + ";"]
     for marker in ("static char asciiLower(", "static bool lowerEndsWith(",

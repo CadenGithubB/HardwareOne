@@ -34,6 +34,7 @@
 #include "System_Debug.h"
 #include "System_User.h"  // logAuthAttempt — bond auth audit (was a local extern)
 #include "System_ESPNow.h"
+#include "System_StatePaths.h"  // HW1_ESPNOW_DEVICES_JSON_PATH — the device registry file
 #include "System_CommandTypes.h"  // CMD_RESULT_MAX — the V4 fragment budget derives from it
 #include "System_ESPNow_Wire.h"      // V3 wire schema (Phase 0 extraction)
 #include "System_ESPNow_Crypto.h"    // Phase 3.0: libsodium init / RNG / Ed25519 keygen
@@ -617,9 +618,9 @@ static bool addEspNowPeerWithEncryption(const uint8_t* mac, bool useEncryption, 
 
 // Settings struct is now in settings.h (included via espnow_system.h)
 
-// File paths
-static const char* ESPNOW_DEVICES_FILE = "/system/espnow/devices.json";
-static const char* ESPNOW_DEVICES_TEMP_FILE = "/system/espnow/devices.json.tmp";
+// File paths (the registry's own path is owned by System_StatePaths.h)
+static const char* ESPNOW_DEVICES_FILE = HW1_ESPNOW_DEVICES_JSON_PATH;
+static const char* ESPNOW_DEVICES_TEMP_FILE = HW1_ESPNOW_DEVICES_JSON_PATH ".tmp";
 static const char* ESPNOW_DEVICES_MIGRATION_BACKUP_FILE =
     "/system/espnow/devices.pre-psram.json";
 static const char* ESPNOW_DEVICES_MIGRATION_BACKUP_TEMP_FILE =

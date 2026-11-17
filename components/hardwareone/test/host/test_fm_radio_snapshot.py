@@ -19,10 +19,17 @@ HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
 
 
+def sensor_json_keys(component: Path) -> str:
+    """The sensor JSON key owner the builder's format strings use, when the tree has it."""
+    owner = component / 'System_SensorJsonKeys.h'
+    return owner.read_text().replace('#pragma once\n', '') if owner.exists() else ''
+
+
 def generated(component: Path, baseline: bool) -> str:
     owner = (component / 'i2csensor_rda5807.cpp').read_text()
     header = (component / 'i2csensor_rda5807.h').read_text()
-    types = extract_block(header, 'struct FmRadioCache') + ';\n'
+    types = sensor_json_keys(component)
+    types += extract_block(header, 'struct FmRadioCache') + ';\n'
     types += extract_block((COMPONENT / 'System_Mutex.h').read_text(), 'struct SensorCacheGuard') + ';\n'
     mutex = (COMPONENT / 'System_Mutex.cpp').read_text()
     functions = [extract_block(mutex, 'SensorCacheGuard::SensorCacheGuard('),

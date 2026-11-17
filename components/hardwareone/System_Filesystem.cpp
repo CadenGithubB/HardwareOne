@@ -22,6 +22,7 @@
 #include "System_TranscriptPathPolicy.h"
 #include "System_Mutex.h"
 #include "System_Settings.h"
+#include "System_StatePaths.h"  // the /system state files: permission rows, boot checks
 #include "System_Utils.h"
 #include "System_BuildConfig.h"
 #include "System_ImageManager.h"
@@ -83,7 +84,7 @@ static bool littlefsPartitionIsBlank(const esp_partition_t* part) {
 // temps that no reader ever recovers from.
 static void cleanupBootTemporaryFiles() {
   const char* cleanupDirs[] = {
-      "/", "/system", "/system/users", "/system/users/user_settings",
+      "/", "/system", "/system/users", HW1_USER_SETTINGS_DIR,
       "/system/espnow", "/system/certs", "/maps"
 #if ENABLE_LLM_SOURCE_ONBOARD
       , "/system/llm"
@@ -207,7 +208,7 @@ bool initFilesystem() {
     VFS::mkdirGuarded("/system",                      sys);  // settings, automations, devices, etc.
     VFS::mkdirGuarded("/system/sys_logs",             sys);  // protected system logs
     VFS::mkdirGuarded("/system/users",                sys);  // users.json + per-user settings dir
-    VFS::mkdirGuarded("/system/users/user_settings",  sys);  // per-user setting files
+    VFS::mkdirGuarded(HW1_USER_SETTINGS_DIR,          sys);  // per-user setting files
     VFS::mkdirGuarded("/system/certs",                sys);  // TLS certs (HTTPS, MQTT)
 #if HW1_OTA_LAYOUT
     VFS::mkdirGuarded("/system/ota",                  VFS::systemAuth(VFS::Scopes::OTA, "fs.init.ota"));
@@ -237,7 +238,7 @@ bool initFilesystem() {
     // carries two strictly better guards (the gSettingsLoad save refusal and the
     // merge-read abort), and a first-character check cannot see truncation, which is
     // the dominant corruption mode.
-    const char* criticalFiles[] = { "/system/debug.json", "/system/automations.json", "/system/users/users.json" };
+    const char* criticalFiles[] = { HW1_DEBUG_JSON_PATH, HW1_AUTOMATIONS_JSON_PATH, HW1_USERS_JSON_PATH };
     for (const char* path : criticalFiles) {
       if (!VFS::existsGuarded(path, sys)) continue;
       String content;
@@ -310,7 +311,7 @@ bool initFilesystem() {
       DEBUG_AUTO_SCHEDULERF("[autos] Boot sanitize: failed to read automations.json");
     }
   } else {
-    DEBUG_AUTO_SCHEDULERF("[autos] Boot sanitize: /system/automations.json not found, skipping");
+    DEBUG_AUTO_SCHEDULERF("[autos] Boot sanitize: " HW1_AUTOMATIONS_JSON_PATH " not found, skipping");
   }
   setDebugFlags(_dbgSaved);  // restore debug flags
 #endif
@@ -1592,15 +1593,15 @@ static const PathRule sPathRules[] = {
   // ---- Sensitive credentials ----
   // Per-user settings: admin can READ them (the lens-Files admin-view bug fix);
   // system has full access (loadUserSettings/saveUserSettings); user gets nothing.
-  {"/system/users/user_settings",       0,         PERM_READ,                                          PERM_ALL,  false, false},
+  {HW1_USER_SETTINGS_DIR,               0,         PERM_READ,                                          PERM_ALL,  false, false},
   // pending_users.json: same — admin reads, system writes, user nothing.
-  {"/system/users/pending_users.json",  0,         PERM_READ,                                          PERM_ALL,  true,  false},
+  {HW1_PENDING_USERS_JSON_PATH,         0,         PERM_READ,                                          PERM_ALL,  true,  false},
 
   // ---- Immutable config files: read-only for admin, full for system ----
-  {"/system/settings.json",             0,         PERM_READ,                                          PERM_ALL,  true,  false},
-  {"/system/debug.json",                0,         PERM_READ,                                          PERM_ALL,  true,  false},
-  {"/system/automations.json",          0,         PERM_READ,                                          PERM_ALL,  true,  false},
-  {"/system/espnow/devices.json",       0,         PERM_READ,                                          PERM_ALL,  true,  false},
+  {HW1_SETTINGS_JSON_PATH,              0,         PERM_READ,                                          PERM_ALL,  true,  false},
+  {HW1_DEBUG_JSON_PATH,                 0,         PERM_READ,                                          PERM_ALL,  true,  false},
+  {HW1_AUTOMATIONS_JSON_PATH,           0,         PERM_READ,                                          PERM_ALL,  true,  false},
+  {HW1_ESPNOW_DEVICES_JSON_PATH,        0,         PERM_READ,                                          PERM_ALL,  true,  false},
 
   // ---- TLS certificates: admin can read/delete/import; system full ----
   // exemptSensitiveExt: .pem/.crt/.key files live here by design.

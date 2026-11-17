@@ -28,6 +28,9 @@ int main(){
   puts("Phone enrollment schema: old SMP/console metadata and wrong types/version rejected; explicit v1 marker accepted");
 }
 '''.replace('// BLOCK',block)
+# The enrolment keys are named by BLE_PhonePipeKeys.h on a tree that has it.
+keys=ROOT/'BLE_PhonePipeKeys.h'
+if 'hw1pipekeys::' in block and keys.exists():unit=keys.read_text().replace('#pragma once\n','',1)+unit
 with tempfile.TemporaryDirectory(prefix='hw1-pipe-schema-') as tmp:
  d=Path(tmp);(d/'test.cpp').write_text(unit)
  cmd=[os.environ.get('CXX','clang++'),'-std=c++17','-Wall','-Wextra','-Werror','-I',str(ROOT.parent/'hardwareone_libs/ArduinoJson/src'),str(d/'test.cpp'),'-o',str(d/'test')]

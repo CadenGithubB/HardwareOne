@@ -16,6 +16,7 @@
 #include "System_Command.h"
 #include "System_Debug.h"
 #include "System_I2C.h"
+#include "System_SensorJsonKeys.h"  // inter-device sensor JSON key names (receivers read the same)
 #include "System_MemUtil.h"
 #include "System_Mutex.h"
 #include "System_Settings.h"
@@ -642,7 +643,8 @@ int imuBuildDataJson(char* buf, size_t bufSize) {
     // Cache-lock timeout: not-ready envelope (was: {"error":"IMU cache timeout"}).
     int pos = sensorEnvelopeBegin(buf, bufSize, false, gImuConnected, 0);
     if (pos == 0) return 0;
-    int n = snprintf(buf + pos, bufSize - pos, ",\"accel\":null,\"gyro\":null,\"ori\":null,\"temp\":null}");
+    int n = snprintf(buf + pos, bufSize - pos, ",\"accel\":null,\"gyro\":null,"
+                     HW1_SK_Q(HW1_SK_ORI) "null,\"temp\":null}");
     if (n < 0 || (size_t)n >= bufSize - pos) return 0;
     return pos + n;
   }
@@ -661,7 +663,8 @@ int imuBuildDataJson(char* buf, size_t bufSize) {
   int n = snprintf(buf + pos, bufSize - pos,
                    ",\"accel\":{\"x\":%.2f,\"y\":%.2f,\"z\":%.2f},"
                    "\"gyro\":{\"x\":%.3f,\"y\":%.3f,\"z\":%.3f},"
-                   "\"ori\":{\"yaw\":%.2f,\"pitch\":%.2f,\"roll\":%.2f},"
+                   HW1_SK_Q(HW1_SK_ORI) "{" HW1_SK_Q(HW1_SK_YAW) "%.2f,"
+                   HW1_SK_Q(HW1_SK_PITCH) "%.2f," HW1_SK_Q(HW1_SK_ROLL) "%.2f},"
                    "\"temp\":%d}",
                    reading.accelX, reading.accelY, reading.accelZ,
                    reading.gyroX, reading.gyroY, reading.gyroZ,

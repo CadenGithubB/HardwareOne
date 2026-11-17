@@ -38,6 +38,7 @@
 #include "System_Mutex.h"
 #include "System_PollPause.h"
 #include "System_Settings.h"
+#include "System_StatePaths.h"  // HW1_PENDING_USERS_JSON_PATH — the pending account list
 #include "System_ConfigLoad.h"
 #include "System_SelfDevice.h"
 #include "System_Clock.h"
@@ -4884,8 +4885,8 @@ esp_err_t handleAdminPending(httpd_req_t* req) {
   // PERM_READ on pending_users.json per the rule table. Use the guarded
   // API with the caller's identity rather than systemAuth so the [PERM]
   // log shows which admin actually viewed the list.
-  if (VFS::existsGuarded("/system/users/pending_users.json", ctx)) {
-    File file = VFS::openGuarded("/system/users/pending_users.json", "r", ctx);
+  if (VFS::existsGuarded(HW1_PENDING_USERS_JSON_PATH, ctx)) {
+    File file = VFS::openGuarded(HW1_PENDING_USERS_JSON_PATH, "r", ctx);
     if (file) {
       PSRAM_JSON_DOC(doc);
       DeserializationError err = deserializeJson(doc, file);

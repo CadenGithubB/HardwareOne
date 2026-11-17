@@ -80,7 +80,10 @@ def production(user: str, header: str, settings: str, mutex: str, mutex_header: 
         "void fsLock(const char* owner)",
         "void fsUnlock()"))
     text_io = "\n\n".join(extract_block(utils, marker) for marker in ("bool readText(", "bool writeText(", "bool writeTextAtomic("))
-    text_io += "\n\n" + unique_block(settings, "String getUserSettingsPath(")
+    path = unique_block(settings, "String getUserSettingsPath(")
+    # The per-user folder is named by System_StatePaths.h on a tree that has it.
+    owner = '#include "System_StatePaths.h"\n' if "HW1_USER_SETTINGS_DIR" in path else ""
+    text_io += "\n\n" + owner + path
     # The quarantine helper the request intake calls for a damaged pending list.
     keep_start = settings.index("static constexpr unsigned kCorruptQuarantineKeep")
     keep_end = settings.index("bool keepPartialOriginal(const String& path, const AuthContext& auth, String& copiedTo) {")

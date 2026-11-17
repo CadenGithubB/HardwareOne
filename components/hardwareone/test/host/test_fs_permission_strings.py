@@ -70,7 +70,10 @@ def permission_pieces(component: Path) -> dict[str, str]:
                             extract_block(user_h, "struct AuthContext") + ";",
                             identity_predicates(user_h)])
 
-    pieces = [extract_block(fs_h, "enum FilePermission") + ";",
+    # The state-file rows name their paths through System_StatePaths.h on a tree that has it.
+    paths = component / "System_StatePaths.h"
+    owner = paths.read_text().replace("#pragma once\n", "", 1) if paths.exists() else ""
+    pieces = [extract_block(fs_h, "enum FilePermission") + ";", owner,
               extract_block(fs, "struct PathRule") + ";",
               extract_block(fs, "static const PathRule sPathRules[]") + ";"]
     pieces += [extract_block(fs, marker) for marker in OPTIONAL if marker in fs]

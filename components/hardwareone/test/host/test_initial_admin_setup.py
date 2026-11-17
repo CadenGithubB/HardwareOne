@@ -64,6 +64,10 @@ def generate() -> str:
     types = "\n".join(extract_block(header, marker) + ";" for marker in
                        ("enum FirstTimeSetupState", "enum SetupProgressStage", "enum SetupMode "))
     types += "\n" + identity_constants((COMPONENT / "System_User.h").read_text())
+    # The setup replies quote the state paths through their owner on a tree that has it.
+    paths = COMPONENT / "System_StatePaths.h"
+    if paths.exists():
+        types += "\n" + paths.read_text().replace("#pragma once\n", "", 1)
     harness = (HERE / "initial_admin_setup_harness.cpp").read_text()
     for marker, replacement in (("// INSERT_TYPES", types),
                                 ("// INSERT_OWNER_AND_RESTORE", owner_and_restore),

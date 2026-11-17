@@ -22,6 +22,12 @@ HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
 
 
+def sensor_json_keys(component: Path) -> str:
+    """The sensor JSON key owner the builder's format strings use, when the tree has it."""
+    owner = component / "System_SensorJsonKeys.h"
+    return owner.read_text().replace("#pragma once\n", "") if owner.exists() else ""
+
+
 def generated(component: Path, baseline: bool) -> str:
     owner = (component / "i2csensor_pa1010d.cpp").read_text()
     header = (component / "i2csensor_pa1010d.h").read_text()
@@ -31,7 +37,8 @@ def generated(component: Path, baseline: bool) -> str:
     logging = (component / "System_SensorLogging.cpp").read_text()
     mutex_header = (COMPONENT / "System_Mutex.h").read_text()
     mutex = (COMPONENT / "System_Mutex.cpp").read_text()
-    types = extract_block(header, "struct GpsCache") + ";\n"
+    types = sensor_json_keys(component)
+    types += extract_block(header, "struct GpsCache") + ";\n"
     types += extract_block((COMPONENT / "System_SensorLogging.h").read_text(),
                            "struct SensorCacheSnapshot") + ";\n"
     types += extract_block(mutex_header, "struct SensorCacheGuard") + ";\n"

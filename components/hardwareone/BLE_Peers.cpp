@@ -13,6 +13,7 @@
 // consumer protocol lives in System_AuthIdentity.h.
 
 #include "BLE_Peers.h"
+#include "BLE_PhonePipeKeys.h"  // peers.phone enrolment keys, shared with factory reset
 
 #if ENABLE_BLUETOOTH
 
@@ -1802,9 +1803,10 @@ void blePeersWriteJson(JsonDocument& doc) {
     // Only emit mac2 if it has content — keeps single-MAC peers tidy.
     if (mac2.length() > 0) e["mac2"] = mac2;
     e["autoReconnect"] = autoReconnect;
-    e.remove("pipeBondVersion");e.remove("pipeIdentity");e.remove("pipeIdentityType");
-    e.remove("pipeChannelVersion");e.remove("pipeEnrolled");
-    if(pipeEnrollment.length()) {e["pipeChannelVersion"]=1;e["pipeEnrolled"]=true;}
+    // Enrolment keys come from BLE_PhonePipeKeys.h, whose list factory reset
+    // removes: a key written here must be in kPhonePipeEnrollmentKeys.
+    for (const char* key : hw1pipekeys::kPhonePipeEnrollmentKeys) e.remove(key);
+    if(pipeEnrollment.length()) {e[hw1pipekeys::kPipeChannelVersion]=1;e[hw1pipekeys::kPipeEnrolled]=true;}
     // Only emit pairedByUser if set — legacy peers paired before this
     // field existed leave it blank.
     if (owner.user.length() > 0) e["pairedByUser"] = owner.user;
@@ -1862,8 +1864,9 @@ void blePeersReadJson(JsonDocument& doc) {
       if (!guard) continue;
       if (row.kind == BLE_PEER_PHONE) {
         // Old SMP/console addresses never establish app-channel authority.
-        const bool valid=e["pipeChannelVersion"].is<int>() && e["pipeChannelVersion"].as<int>()==1 &&
-                         e["pipeEnrolled"].is<bool>() && e["pipeEnrolled"].as<bool>();
+        const bool valid=e[hw1pipekeys::kPipeChannelVersion].is<int>() &&
+                         e[hw1pipekeys::kPipeChannelVersion].as<int>()==1 &&
+                         e[hw1pipekeys::kPipeEnrolled].is<bool>() && e[hw1pipekeys::kPipeEnrolled].as<bool>();
         gBlePeerData[row.kind].pipeEnrollment=valid?"app-key-v1":"";
       }
       (void)peerConfigApply(row.kind, true, newMac1, true, newMac2,

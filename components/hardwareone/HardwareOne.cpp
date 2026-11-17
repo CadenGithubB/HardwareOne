@@ -180,10 +180,11 @@ void broadcastOutput(const String& s, const CommandContext& ctx);
 #define DEBUG_MEM_SUMMARY 1
 #endif
 
-// File paths (LittleFS)
-const char* SETTINGS_JSON_FILE = "/system/settings.json";  // Non-static for settings.cpp
+// File paths (LittleFS); the values are owned by System_StatePaths.h
+#include "System_StatePaths.h"
+const char* SETTINGS_JSON_FILE = HW1_SETTINGS_JSON_PATH;  // Non-static for settings.cpp
 #if ENABLE_AUTOMATION
-const char* AUTOMATIONS_JSON_FILE = "/system/automations.json";
+const char* AUTOMATIONS_JSON_FILE = HW1_AUTOMATIONS_JSON_PATH;
 #endif
 
 #include "System_Mutex.h"

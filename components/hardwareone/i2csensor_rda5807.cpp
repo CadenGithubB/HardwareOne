@@ -33,6 +33,7 @@
 #include "OLED_UI.h"  // oledNotificationBannerShow — direct volume banner
 #endif
 #include "System_Command.h"
+#include "System_SensorJsonKeys.h"  // inter-device sensor JSON key names (receivers read the same)
 #include "System_Notifications.h"
 #include "System_Debug.h"
 #include "System_I2C.h"
@@ -781,8 +782,9 @@ int fmRadioBuildDataJson(char* buf, size_t bufSize) {
   int pos = sensorEnvelopeBegin(buf, bufSize, snap.dataValid, gFmRadioConnected, snap.lastUpdate);
   if (pos == 0) return 0;
   int n = snprintf(buf + pos, bufSize - pos,
-    ",\"frequency\":%.1f,\"volume\":%d,"
-    "\"muted\":%s,\"stereo\":%s,\"rssi\":%d,\"headphones\":%s,\"seeking\":%s,\"station\":\"%s\",\"radioText\":\"%s\"}",
+    "," HW1_SK_Q(HW1_SK_FREQUENCY) "%.1f,\"volume\":%d,"
+    "\"muted\":%s,\"stereo\":%s," HW1_SK_Q(HW1_SK_RSSI) "%d,\"headphones\":%s,\"seeking\":%s,"
+    HW1_SK_Q(HW1_SK_STATION) "\"%s\",\"radioText\":\"%s\"}",
     snap.frequency / 100.0,
     snap.volume,
     snap.muted ? "true" : "false",

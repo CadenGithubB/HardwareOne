@@ -3150,9 +3150,11 @@ void setupWifi(uint32_t budgetMs, WifiConnectOrigin origin) {
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry wifiSettingsEntries[] = {
-  { "wifiEnabled",        SETTING_BOOL,   &gSettings.wifiEnabled,       true, 0, nullptr, 0, 1, "Enabled", nullptr, false, nullptr, "wifienabled" },
-  { "wifiAutoStart",      SETTING_BOOL,   &gSettings.wifiAutoStart,     true, 0, nullptr, 0, 1, "Connect at boot", nullptr, false, nullptr, "wifiautostart" },
-  { "wifiAutoReconnect",  SETTING_BOOL,   &gSettings.wifiAutoReconnect, true, 0, nullptr, 0, 1, "Auto-reconnect after drop", nullptr, false, nullptr, "wifiautoreconnect" },
+  // Keys and section owned by hw1wifijson (System_WiFiNetworks.h); the backup
+  // restore forces these three on by the same names.
+  { hw1wifijson::kEnabled,       SETTING_BOOL,   &gSettings.wifiEnabled,       true, 0, nullptr, 0, 1, "Enabled", nullptr, false, nullptr, "wifienabled" },
+  { hw1wifijson::kAutoStart,     SETTING_BOOL,   &gSettings.wifiAutoStart,     true, 0, nullptr, 0, 1, "Connect at boot", nullptr, false, nullptr, "wifiautostart" },
+  { hw1wifijson::kAutoReconnect, SETTING_BOOL,   &gSettings.wifiAutoReconnect, true, 0, nullptr, 0, 1, "Auto-reconnect after drop", nullptr, false, nullptr, "wifiautoreconnect" },
   // The legacy single-network "ssid"/"password" rows are gone (removed
   // 2026-07-20): they were frozen at "" for the device's whole life — no
   // command could reach them (cmdKey=nullptr + readOnly) and real credentials
@@ -3170,7 +3172,7 @@ static bool isWifiConnected() { return WiFi.status() == WL_CONNECTED; }
 // Columns: name, jsonSection, entries, count, isConnected, description
 extern const SettingsModule wifiSettingsModule = {
   "wifi",
-  "network.wifi",
+  hw1wifijson::kModuleSection,
   wifiSettingsEntries,
   sizeof(wifiSettingsEntries) / sizeof(wifiSettingsEntries[0]),
   isWifiConnected,

@@ -25,7 +25,9 @@ SENSORS = [('apds', 'apds9960', 'ApdsCache', 'Apds', 'APDS'),
 
 def generate(component: Path, baseline: bool) -> str:
     mutex = (COMPONENT / 'System_Mutex.cpp').read_text()
-    types = [extract_block((COMPONENT / 'System_Mutex.h').read_text(), 'struct SensorCacheGuard') + ';',
+    keys = component / 'System_SensorJsonKeys.h'  # the builders' format strings use it
+    types = [keys.read_text().replace('#pragma once\n', '') if keys.exists() else '',
+             extract_block((COMPONENT / 'System_Mutex.h').read_text(), 'struct SensorCacheGuard') + ';',
              extract_block((component / 'i2csensor_ds3231.h').read_text(), 'struct RtcDateTime') + ';']
     state, functions = [], [extract_block(mutex, 'SensorCacheGuard::SensorCacheGuard('),
                            extract_block(mutex, 'SensorCacheGuard::~SensorCacheGuard('),

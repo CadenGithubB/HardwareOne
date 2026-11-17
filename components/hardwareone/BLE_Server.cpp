@@ -15,6 +15,7 @@
 #include "System_Mutex.h"  // FsLockGuard for authentication
 #include "System_PollPause.h"   // PollPauseGuard — quiesce sensor polling during BLE init
 #include "BLE_PhonePipe.h"
+#include "BLE_PhonePipeKeys.h"  // phonePipeSecret / phonePipeSecretGenerated row keys
 #include "BLE_PhonePipeConsole.h"  // the console as pipe stream slot 2 (phone link v2)
 #include "BLE_PhonePairCode.h"  // `phone secret` stores a pairing code canonical (phone link v2)
 #include "System_InternalSecretString.h"  // the `phone secret` steps copy into internal RAM
@@ -4603,11 +4604,11 @@ const SettingEntry bluetoothSettingsEntries[] = {
   { "bleRequireSecureChannel", SETTING_BOOL, &gSettings.bleRequireSecureChannel, true, 0, nullptr, 0, 1, "Require Secure Channel", nullptr, false, nullptr, "blesecure" },
   { "bleSecureChannelSecret",  SETTING_STRING, &gSettings.bleSecureChannelSecret, 0, 0, "", 0, 0, "Secure Channel Secret", nullptr, true, nullptr, "blesecret" },
   { "bleConsoleOnPipe", SETTING_BOOL, &gSettings.bleConsoleOnPipe, true, 0, nullptr, 0, 1, "App console on the phone link", nullptr, false, nullptr, "bleconsole" },
-  { "phonePipeSecret", SETTING_STRING, &gSettings.phonePipeSecret, 0, 0, "", 0, 128, "Phone pipe secret", nullptr, true, nullptr, "phone secret", false, true },
+  { hw1pipekeys::kPhonePipeSecret, SETTING_STRING, &gSettings.phonePipeSecret, 0, 0, "", 0, 128, "Phone pipe secret", nullptr, true, nullptr, "phone secret", false, true },
   // Set by `phone pair new` only, cleared by `phone secret` and factory reset: no
   // command (no cmdKey) and display-only, so no surface can mark a passphrase
   // device-made and offer it the app console.
-  { "phonePipeSecretGenerated", SETTING_BOOL, &gSettings.phonePipeSecretGenerated, false, 0, nullptr, 0, 1, "Phone secret is a device code", nullptr, false, nullptr, nullptr, true },
+  { hw1pipekeys::kPhonePipeSecretGenerated, SETTING_BOOL, &gSettings.phonePipeSecretGenerated, false, 0, nullptr, 0, 1, "Phone secret is a device code", nullptr, false, nullptr, nullptr, true },
 
 };
 

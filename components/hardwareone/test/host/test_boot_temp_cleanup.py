@@ -31,6 +31,10 @@ def generate(component: Path, baseline: bool) -> str:
         require(baseline, "shipping boot cleanup helper is required")
         body = extract_block(source, "// Boot-time cleanup: remove orphaned .tmp files")
         cleanup = "static void cleanupBootTemporaryFiles() " + body[body.index("{"):]
+    # The per-user folder is named by System_StatePaths.h on a tree that has it.
+    paths = component / "System_StatePaths.h"
+    if "HW1_USER_SETTINGS_DIR" in cleanup and paths.exists():
+        cleanup = paths.read_text().replace("#pragma once\n", "", 1) + "\n" + cleanup
     mutex_header = (COMPONENT / "System_Mutex.h").read_text()
     mutex = (COMPONENT / "System_Mutex.cpp").read_text()
     locks = extract_block(mutex_header, "struct FsLockGuard") + ";\n"

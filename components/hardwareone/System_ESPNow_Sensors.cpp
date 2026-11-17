@@ -14,6 +14,7 @@
 #include "System_ESPNow.h"
 #include "System_ESPNow_Deadline.h"   // wrap-safe lease deadlines
 #include "System_ESPNow_Identity.h"   // peerIdentityFindByMac / espnowIdentityFormatPubHex — fingerprint auth
+#include "System_SensorJsonKeys.h"    // the senders' key names (getRemoteGpsData reads them)
 #include "System_MemUtil.h"
 #include "System_Settings.h"
 #include "System_TaskUtils.h"
@@ -1408,13 +1409,13 @@ bool getRemoteGpsData(RemoteGpsData* outData) {
   }
   
   // Extract GPS values
-  outData->hasFix = doc["fix"] | 0;
-  outData->fixQuality = doc["quality"] | 0;
-  outData->satellites = doc["sats"] | 0;
-  outData->latitude = doc["lat"] | 0.0f;
-  outData->longitude = doc["lon"] | 0.0f;
-  outData->altitude = doc["alt"] | 0.0f;
-  outData->speed = doc["speed"] | 0.0f;
+  outData->hasFix = doc[HW1_SK_FIX] | 0;
+  outData->fixQuality = doc[HW1_SK_QUALITY] | 0;
+  outData->satellites = doc[HW1_SK_SATS] | 0;
+  outData->latitude = doc[HW1_SK_LAT] | 0.0f;
+  outData->longitude = doc[HW1_SK_LON] | 0.0f;
+  outData->altitude = doc[HW1_SK_ALT] | 0.0f;
+  outData->speed = doc[HW1_SK_SPEED] | 0.0f;
   outData->lastUpdate = bestEntry->lastUpdate;
   strncpy(outData->deviceName, bestEntry->deviceName, sizeof(outData->deviceName) - 1);
   outData->deviceName[sizeof(outData->deviceName) - 1] = '\0';

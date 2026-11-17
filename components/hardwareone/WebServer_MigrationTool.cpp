@@ -46,6 +46,8 @@
 #include "System_VFS.h"
 #include "System_MemUtil.h"
 #include "System_Settings.h"
+#include "System_StatePaths.h"  // the /system state files a backup carries
+#include "network/wifi/System_WiFiNetworks.h"  // hw1wifijson — network.wifi keys the restore edits
 #include "System_User.h"
 #include "System_Utils.h"
 #include "System_Events.h"  // systemEventPost — SYSEVT_BACKUP_CREATED/RESTORED producer
@@ -55,14 +57,10 @@
 #endif
 #include "WebServer_MigrationTool.h"
 
-// File path constants (must match firmware layout)
-static const char* SETTINGS_FILE     = "/system/settings.json";
-static const char* DEBUG_FILE        = "/system/debug.json";  // debug flags split out of settings.json
-static const char* USERS_FILE        = "/system/users/users.json";
-static const char* AUTOMATIONS_FILE  = "/system/automations.json";
-static const char* ESPNOW_DEVICES    = "/system/espnow/devices.json";
-static const char* USER_SETTINGS_DIR  = "/system/users/user_settings";
-static const char* BOOT_ANCHORS_FILE  = "/system/boot_anchors.json";  // pending-user NTP anchors (split out of users.json)
+// The /system state file paths come from their owner, System_StatePaths.h
+// (HW1_*_PATH, HW1_USER_SETTINGS_DIR), the header the modules that write them
+// and the permission table use, so a backup always carries the files the
+// firmware keeps.
 static const char* MAPS_DIR          = "/maps";
 
 // /api/restore refuses bodies larger than this; /api/backup keeps every bundle
@@ -432,17 +430,17 @@ static esp_err_t handleBackup(httpd_req_t* req) {
   JsonArray encFields = doc["encryptedFields"].to<JsonArray>();
 
   if (wantSettings) {
-    addFileToBackup(files, warnings, SETTINGS_FILE);
-    addFileToBackup(files, warnings, DEBUG_FILE);  // debug flags live in their own file now — bundle with "settings"
+    addFileToBackup(files, warnings, HW1_SETTINGS_JSON_PATH);
+    addFileToBackup(files, warnings, HW1_DEBUG_JSON_PATH);  // debug flags live in their own file now — bundle with "settings"
   }
   if (wantUsers) {
-    addFileToBackup(files, warnings, USERS_FILE);
-    addFileToBackup(files, warnings, BOOT_ANCHORS_FILE);  // so pending-user timestamps stay resolvable after restore
-    addDirectoryToBackup(files, warnings, USER_SETTINGS_DIR, ctx);
+    addFileToBackup(files, warnings, HW1_USERS_JSON_PATH);
+    addFileToBackup(files, warnings, HW1_BOOT_ANCHORS_JSON_PATH);  // so pending-user timestamps stay resolvable after restore
+    addDirectoryToBackup(files, warnings, HW1_USER_SETTINGS_DIR, ctx);
   }
-  if (wantAutomations) addFileToBackup(files, warnings, AUTOMATIONS_FILE);
+  if (wantAutomations) addFileToBackup(files, warnings, HW1_AUTOMATIONS_JSON_PATH);
   if (wantEspNow) {
-    addFileToBackup(files, warnings, ESPNOW_DEVICES);
+    addFileToBackup(files, warnings, HW1_ESPNOW_DEVICES_JSON_PATH);
   }
   if (wantCerts) addDirectoryToBackup(files, warnings, "/system/certs", ctx);
   // Maps go last and are the one category trimmed to fit the restore limit.
@@ -669,10 +667,11 @@ static String restoreStagingPath(const String& dest) {
 // map tree. Anything else is refused before it is staged, by name.
 static bool restorePathAllowed(const String& path) {
   const char* p = path.c_str();
-  static const char* const kExact[] = { SETTINGS_FILE, DEBUG_FILE, USERS_FILE, BOOT_ANCHORS_FILE,
-                                        AUTOMATIONS_FILE, ESPNOW_DEVICES };
+  static const char* const kExact[] = { HW1_SETTINGS_JSON_PATH, HW1_DEBUG_JSON_PATH, HW1_USERS_JSON_PATH,
+                                        HW1_BOOT_ANCHORS_JSON_PATH, HW1_AUTOMATIONS_JSON_PATH,
+                                        HW1_ESPNOW_DEVICES_JSON_PATH };
   for (const char* exact : kExact) if (strcmp(p, exact) == 0) return true;
-  static const char* const kTrees[] = { USER_SETTINGS_DIR, "/system/certs", MAPS_DIR };
+  static const char* const kTrees[] = { HW1_USER_SETTINGS_DIR, "/system/certs", MAPS_DIR };
   for (const char* tree : kTrees) {
     const size_t n = strlen(tree);
     if (strncmp(p, tree, n) == 0 && p[n] == '/' && p[n + 1] != '\0') return true;
@@ -691,7 +690,7 @@ static AuthContext restoreAuthFor(const String& destination) {
 
 static bool writeRestoreFilesFromDoc(JsonDocument& doc, bool compatible,
                                      int* outWritten, int* outErrored) {
-  const AuthContext restoreAuth = restoreAuthFor(SETTINGS_FILE);  // /system state
+  const AuthContext restoreAuth = restoreAuthFor(HW1_SETTINGS_JSON_PATH);  // /system state
   // Cross-device restore: preserve the WiFi network the user entered during Import.
   // The source device's wifiNetworks (under network.wifi.networks) carry passwords
   // encrypted with the source's device key and won't decrypt here, so we keep THIS
@@ -700,7 +699,7 @@ static bool writeRestoreFilesFromDoc(JsonDocument& doc, bool compatible,
   bool haveDeviceWifi = false;
   if (!compatible) {
     String curSettings;
-    if (readText(SETTINGS_FILE, curSettings, restoreAuth)) {
+    if (readText(HW1_SETTINGS_JSON_PATH, curSettings, restoreAuth)) {
       DeserializationError derr = deserializeJson(deviceSettingsDoc, curSettings);
       if (derr) {
         // Falling through with haveDeviceWifi == false keeps the SOURCE device's
@@ -709,14 +708,14 @@ static bool writeRestoreFilesFromDoc(JsonDocument& doc, bool compatible,
         // instead; the import is restartable, a lost WiFi config is not.
         ERROR_STORAGEF("[migrate] local %s is unreadable (%s) - aborting restore rather than "
                        "discarding this device's WiFi credentials",
-                       SETTINGS_FILE, derr.c_str());
-        systemEventPost(SYSEVT_CONFIG_FILE_CORRUPT, SETTINGS_FILE,
+                       HW1_SETTINGS_JSON_PATH, derr.c_str());
+        systemEventPost(SYSEVT_CONFIG_FILE_CORRUPT, HW1_SETTINGS_JSON_PATH,
                         "unreadable at migration restore");
         if (outWritten) *outWritten = 0;
         if (outErrored) *outErrored = 0;
         return false;   // caller reports the failure to the client
       }
-      if (deviceSettingsDoc["network"]["wifi"]["networks"].is<JsonArray>()) {
+      if (deviceSettingsDoc[hw1wifijson::kParent][hw1wifijson::kSection][hw1wifijson::kNetworks].is<JsonArray>()) {
         haveDeviceWifi = true;
       }
     }
@@ -767,16 +766,18 @@ static bool writeRestoreFilesFromDoc(JsonDocument& doc, bool compatible,
       PSRAM_JSON_DOC(mergedDoc);
       mergedDoc.set(kv.value());
       stripAesCiphertextValues(mergedDoc.as<JsonVariant>());
-      if (haveDeviceWifi && pathStr == SETTINGS_FILE) {
-        mergedDoc["network"]["wifi"]["networks"] = deviceSettingsDoc["network"]["wifi"]["networks"];
+      if (haveDeviceWifi && pathStr == HW1_SETTINGS_JSON_PATH) {
+        using namespace hw1wifijson;  // network.wifi keys, owned with the wifi settings rows
+        mergedDoc[kParent][kSection][kNetworks] = deviceSettingsDoc[kParent][kSection][kNetworks];
         // Force this device back online after a cross-device restore. WiFi is
         // three independent axes now, and ALL of them have to be on or the
         // guarantee is hollow: enabled (may it run), autoStart (connect at
         // boot), autoReconnect (keep trying after a drop). This used to be the
-        // single key "autoReconnect", which no longer exists.
-        mergedDoc["network"]["wifi"]["wifiEnabled"]       = true;
-        mergedDoc["network"]["wifi"]["wifiAutoStart"]     = true;
-        mergedDoc["network"]["wifi"]["wifiAutoReconnect"] = true;
+        // single key "autoReconnect", which no longer exists; the names now
+        // come from the rows' owner, so a rename cannot leave them behind.
+        mergedDoc[kParent][kSection][kEnabled]       = true;
+        mergedDoc[kParent][kSection][kAutoStart]     = true;
+        mergedDoc[kParent][kSection][kAutoReconnect] = true;
       }
       serializeJsonPretty(mergedDoc, content);
     } else if (kv.value().is<const char*>()) {
@@ -820,7 +821,7 @@ static bool writeRestoreFilesFromDoc(JsonDocument& doc, bool compatible,
       // users.json last: until it is in place the device still boots into setup.
       for (int pass = 0; pass < 2 && filesErrored == 0; ++pass) {
         for (const String& dest : staged) {
-          if ((dest == USERS_FILE) != (pass == 1)) continue;
+          if ((dest == HW1_USERS_JSON_PATH) != (pass == 1)) continue;
           if (!VFS::renameGuarded(restoreStagingPath(dest), dest, restoreAuthFor(dest))) {
             ERROR_STORAGEF("[migrate] could not move the restored %s into place", dest.c_str());
             filesErrored++;

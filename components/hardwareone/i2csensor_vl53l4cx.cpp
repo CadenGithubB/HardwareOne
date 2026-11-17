@@ -16,6 +16,7 @@
 #include "System_Command.h"
 #include "System_Debug.h"
 #include "System_I2C.h"
+#include "System_SensorJsonKeys.h"  // inter-device sensor JSON key names (receivers read the same)
 #include "System_MemUtil.h"
 #include "System_Mutex.h"
 #include "System_Settings.h"
@@ -497,7 +498,7 @@ int tofBuildDataJson(char* buf, size_t bufSize) {
       // (replaces the old {"error":"ToF sensor not ready"} shape).
       pos = sensorEnvelopeBegin(buf, bufSize, false, gTofConnected, reading.tofLastUpdate);
       if (pos == 0) { buf[0] = '\0'; return 0; }
-      int n = snprintf(buf + pos, bufSize - pos, ",\"objects\":[]}");
+      int n = snprintf(buf + pos, bufSize - pos, "," HW1_SK_Q(HW1_SK_OBJECTS) "[]}");
       if (n < 0 || (size_t)n >= bufSize - pos) { buf[0] = '\0'; return 0; }
       pos += n;
       return pos;
@@ -507,7 +508,7 @@ int tofBuildDataJson(char* buf, size_t bufSize) {
     // ts now carries the timestamp, so the old top-level "timestamp" key is gone.
     pos = sensorEnvelopeBegin(buf, bufSize, true, gTofConnected, reading.tofLastUpdate);
     if (pos == 0) { buf[0] = '\0'; return 0; }
-    int n = snprintf(buf + pos, bufSize - pos, ",\"objects\":[");
+    int n = snprintf(buf + pos, bufSize - pos, "," HW1_SK_Q(HW1_SK_OBJECTS) "[");
     if (n < 0 || (size_t)n >= bufSize - pos) { buf[0] = '\0'; return 0; }
     pos += n;
 
@@ -519,7 +520,8 @@ int tofBuildDataJson(char* buf, size_t bufSize) {
     for (int j = 0; j < 4; j++) {
       if (!reading.tofObjects[j].detected) continue;
       int n = snprintf(buf + pos, bufSize - pos,
-                      "%s{\"id\":%d,\"distance_mm\":%d,\"status\":%d,\"valid\":%s}",
+                      "%s{\"id\":%d," HW1_SK_Q(HW1_SK_DISTANCE_MM) "%d,"
+                      HW1_SK_Q(HW1_SK_STATUS) "%d,\"valid\":%s}",
                       first ? "" : ",", j + 1,
                       reading.tofObjects[j].distance_mm,
                       reading.tofObjects[j].status,
@@ -539,7 +541,7 @@ int tofBuildDataJson(char* buf, size_t bufSize) {
     // (replaces the old {"error":"ToF cache timeout"} shape).
     pos = sensorEnvelopeBegin(buf, bufSize, false, gTofConnected, 0);
     if (pos == 0) { buf[0] = '\0'; return 0; }
-    int n = snprintf(buf + pos, bufSize - pos, ",\"objects\":[],\"total_objects\":0}");
+    int n = snprintf(buf + pos, bufSize - pos, "," HW1_SK_Q(HW1_SK_OBJECTS) "[],\"total_objects\":0}");
     if (n < 0 || (size_t)n >= bufSize - pos) { buf[0] = '\0'; return 0; }
     pos += n;
   }

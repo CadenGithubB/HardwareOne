@@ -127,6 +127,32 @@ STRLIT_RE = re.compile(r'"((?:[^"\\]|\\.)*)"')
 # single line — these strings become one table cell.
 _UNESCAPE = {r"\n": " ", r"\t": " ", r'\"': '"', r"\\": "\\"}
 
+# A path constant such as HW1_USERS_JSON_PATH is spliced into help text by
+# literal concatenation ("Deletes " HW1_USERS_JSON_PATH ", ..."). The names
+# below are the object-like macros whose whole value is one string literal;
+# a name defined with two different values is left alone.
+_STRING_MACRO_RE = re.compile(
+    r'^[ \t]*#[ \t]*define[ \t]+([A-Za-z_]\w*)[ \t]+("(?:[^"\\]|\\.)*")[ \t]*(?://.*)?$', re.M)
+_TOKEN_RE = re.compile(r'"(?:[^"\\]|\\.)*"|[A-Za-z_]\w*')
+_string_macros = None
+
+
+def string_macros() -> dict[str, str]:
+    global _string_macros
+    if _string_macros is None:
+        values = collections.defaultdict(set)
+        for path in sources():
+            for name, literal in _STRING_MACRO_RE.findall(read(path)):
+                values[name].add(literal)
+        _string_macros = {name: next(iter(found)) for name, found in values.items() if len(found) == 1}
+    return _string_macros
+
+
+def _expand_string_macro(match) -> str:
+    token = match.group(0)
+    return token if token.startswith('"') else string_macros().get(token, token)
+
+
 
 def cstr(field: str) -> str:
     """Concatenate adjacent C string literals into one plain string.
@@ -136,7 +162,7 @@ def cstr(field: str) -> str:
     truncates the text; taking the raw field leaks stray quotes into the
     generated table.
     """
-    parts = STRLIT_RE.findall(field)
+    parts = STRLIT_RE.findall(_TOKEN_RE.sub(_expand_string_macro, field))
     if not parts:
         return ""
     out = "".join(parts)

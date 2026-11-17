@@ -62,6 +62,13 @@ def generate(source: str) -> str:
     if "const char* userSettingsPatchRefusedKey(" in source:
         user_markers.insert(-1, "const char* userSettingsPatchRefusedKey(")
     user_functions = "\n\n".join(extract_block(source, marker) for marker in user_markers)
+    # The per-user folder (System_StatePaths.h) and the pipe credential keys
+    # factory reset removes (BLE_PhonePipeKeys.h) have owners on a tree that has them.
+    owners = ""
+    if "HW1_USER_SETTINGS_DIR" in user_functions:
+        owners += '#include "System_StatePaths.h"\n'
+    if "hw1pipekeys::" in extract_block(source, "static bool writeSettingsJsonImpl("):
+        owners += '#include "BLE_PhonePipeKeys.h"\n'
     # Struct extractors deliberately omit the trailing declaration semicolon.
     for marker in ("struct UserPrefsInvalidateOnExit", "struct UserSettingsMergeContext"):
         declaration = extract_block(source, marker)
@@ -76,7 +83,7 @@ def generate(source: str) -> str:
         "// INSERT_FS_GUARD": guard,
         "// INSERT_WRITER_GUARD": source[start:end],
         "// INSERT_SNAPSHOT": helper + "\n" + quarantine,
-        "// INSERT_WRITERS": "\n\n".join(definitions),
+        "// INSERT_WRITERS": owners + "\n\n".join(definitions),
         "// INSERT_USER_WRITERS": user_functions,
     }.items():
         require(harness.count(marker) == 1, f"one insertion marker: {marker}")

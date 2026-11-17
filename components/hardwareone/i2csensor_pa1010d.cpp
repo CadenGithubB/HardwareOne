@@ -18,6 +18,7 @@
 #include "System_Command.h"
 #include "System_Debug.h"
 #include "System_I2C.h"
+#include "System_SensorJsonKeys.h"  // inter-device sensor JSON key names (receivers read the same)
 #include "System_Maps.h"
 #include "System_MemoryMonitor.h"
 #include "System_Mutex.h"
@@ -321,15 +322,19 @@ int gpsBuildDataJson(char* buf, size_t bufSize) {
   int n;
   if (gps.hasFix) {
     n = snprintf(buf + pos, bufSize - pos,
-                 ",\"fix\":1,\"quality\":%d,\"sats\":%d,"
-                 "\"lat\":%.6f,\"lon\":%.6f,\"alt\":%.2f,\"speed\":%.2f}",
+                 "," HW1_SK_Q(HW1_SK_FIX) "1," HW1_SK_Q(HW1_SK_QUALITY) "%d,"
+                 HW1_SK_Q(HW1_SK_SATS) "%d," HW1_SK_Q(HW1_SK_LAT) "%.6f,"
+                 HW1_SK_Q(HW1_SK_LON) "%.6f," HW1_SK_Q(HW1_SK_ALT) "%.2f,"
+                 HW1_SK_Q(HW1_SK_SPEED) "%.2f}",
                  (int)gps.fixQuality, (int)gps.satellites,
                  gps.latitude, gps.longitude,
                  gps.altitude, gps.speed);
   } else {
     n = snprintf(buf + pos, bufSize - pos,
-                 ",\"fix\":0,\"quality\":0,\"sats\":%d,"
-                 "\"lat\":0,\"lon\":0,\"alt\":0,\"speed\":0}",
+                 "," HW1_SK_Q(HW1_SK_FIX) "0," HW1_SK_Q(HW1_SK_QUALITY) "0,"
+                 HW1_SK_Q(HW1_SK_SATS) "%d," HW1_SK_Q(HW1_SK_LAT) "0,"
+                 HW1_SK_Q(HW1_SK_LON) "0," HW1_SK_Q(HW1_SK_ALT) "0,"
+                 HW1_SK_Q(HW1_SK_SPEED) "0}",
                  (int)gps.satellites);
   }
   if (n < 0 || (size_t)n >= bufSize - pos) return 0;

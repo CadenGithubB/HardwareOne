@@ -32,7 +32,9 @@ def main() -> None:
     mutex_source = (COMPONENT / "System_Mutex.cpp").read_text()
     i2c_header = (COMPONENT / "System_I2C.h").read_text()
     require("readToFDistance" not in owner, "superseded direct hardware reader remains")
-    types = [extract_block(header, "struct TofCache") + ";",
+    # The builder's format strings use the sensor JSON key owner.
+    types = [(COMPONENT / "System_SensorJsonKeys.h").read_text().replace("#pragma once\n", ""),
+             extract_block(header, "struct TofCache") + ";",
              extract_block(mutex_header, "struct SensorCacheGuard") + ";"]
     state = [re.search(r"(?m)^static constexpr uint32_t CACHE_MUTEX_TIMEOUT_MS[^\n]+", mutex_header)[0]]
     for name in ("sTofCache", "sTofCacheMutex"):

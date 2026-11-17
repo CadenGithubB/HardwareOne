@@ -24,6 +24,7 @@
 #include "System_AuthIdentity.h"   // currentAuthContext (createdBy stamp, admin sync)
 #include "System_CLIConfirm.h"     // cliRequestConfirm — yes/no gate for destructive userdelete
 #include "System_Settings.h"
+#include "System_StatePaths.h"  // users.json, pending_users.json, boot_anchors.json
 #include "System_ConfigLoad.h"
 #include "System_UartLink.h"
 #include "BLE_Server.h"
@@ -158,8 +159,8 @@ bool sessionIdleExpired(CommandSource transport, unsigned long lastInteractionMs
   return sessionIdleExpired(lastInteractionMs, nowMs, sessionIdleWindowMs(transport));
 }
 
-// File paths
-#define PENDING_USERS_FILE "/system/users/pending_users.json"
+// File paths (values owned by System_StatePaths.h)
+#define PENDING_USERS_FILE HW1_PENDING_USERS_JSON_PATH
 
 // ============================================================================
 // Boot-local transport session generations
@@ -3083,7 +3084,7 @@ AccountRequestResult submitAccountRequest(const String& usernameInput, const Str
   if (VFS::existsGuarded(PENDING_USERS_FILE, requestAuth)) {
     String json;
     if (!readText(PENDING_USERS_FILE, json, requestAuth)) {
-      DEBUG_CMD_FLOWF("[users] ERROR: Failed to read existing /system/pending_users.json");
+      DEBUG_CMD_FLOWF("[users] ERROR: Failed to read existing " HW1_PENDING_USERS_JSON_PATH);
       return AccountRequestResult::ReadFailed;
     }
     // The list on disk holds the only copy of each waiting request's password
@@ -3136,7 +3137,7 @@ AccountRequestResult submitAccountRequest(const String& usernameInput, const Str
   String writeError;
   if (!writePendingUsers(doc, "user.request", writeError)) {
     ERROR_STORAGEF("writeText failed when writing pending_users.json");
-    broadcastOutput("[users] ERROR: writeText failed for /system/pending_users.json");
+    broadcastOutput("[users] ERROR: writeText failed for " HW1_PENDING_USERS_JSON_PATH);
     return AccountRequestResult::WriteFailed;
   }
 
@@ -4291,14 +4292,14 @@ const char* cmd_user_request(const String& argsInput) {
 // ============================================================================
 
 // File path (exported for use by other modules)
-const char* USERS_JSON_FILE = "/system/users/users.json";
+const char* USERS_JSON_FILE = HW1_USERS_JSON_PATH;
 
 // Boot anchors (NTP time-sync scaffolding) live in their OWN file, decoupled
 // from the credential database. They are written once per boot on NTP sync;
 // keeping them out of users.json means users.json only changes on real account
 // edits, and an anchor write can never touch the auth DB. Structure:
 //   {"bootAnchors":[{"ntpAnchorId":N,"epochAtSync":E,"millisAtSync":M}, ...]}
-const char* BOOT_ANCHORS_FILE = "/system/boot_anchors.json";
+const char* BOOT_ANCHORS_FILE = HW1_BOOT_ANCHORS_JSON_PATH;
 
 // Boot anchor structure - represents an NTP sync point
 struct BootAnchor {

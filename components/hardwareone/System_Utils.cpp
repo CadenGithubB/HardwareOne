@@ -2124,6 +2124,7 @@ const char* cmd_reboot(const String& originalCmd) {
 #include "System_CLIConfirm.h"
 #include "System_AuthIdentity.h"
 #include "System_User.h"   // USERS_JSON_FILE
+#include "System_StatePaths.h"  // pending_users.json, user_settings, users.json in the prompts
 #include "System_VFS.h"
 #include "System_MemDiag.h"
 
@@ -2136,8 +2137,8 @@ static void factoryreset_doRestart(void* /*arg*/) {
 
 // Per-account data factoryreset removes besides users.json. All of it is keyed
 // by account id, and the transcript and note views authorize by id alone.
-static constexpr const char* kFactoryResetPendingUsers = "/system/users/pending_users.json";
-static constexpr const char* kFactoryResetUserSettingsDir = "/system/users/user_settings";
+static constexpr const char* kFactoryResetPendingUsers = HW1_PENDING_USERS_JSON_PATH;
+static constexpr const char* kFactoryResetUserSettingsDir = HW1_USER_SETTINGS_DIR;
 static constexpr const char* kFactoryResetUsersDir = "/system/users";
 static constexpr uint8_t kFactoryResetMaxDepth = 8;
 
@@ -2418,7 +2419,7 @@ const char* cmd_factoryreset(const String& argsInput) {
 
   String prompt = wipeAll ?
     "Confirm FULL FACTORY RESET (handover)? This will:\n"
-    "  - Delete all user accounts (/system/users/users.json), pending requests and user settings\n"
+    "  - Delete all user accounts (" HW1_USERS_JSON_PATH "), pending requests and user settings\n"
     "  - Delete every account's transcripts and notes (/stt/u*, /sd/stt/u*)\n"
     "  - Reboot and erase the whole internal filesystem and NVS: saved WiFi networks,\n"
     "    MQTT/LLM credentials, ESP-NOW keys, Bluetooth bonds, the otapin recovery\n"
@@ -2433,7 +2434,7 @@ const char* cmd_factoryreset(const String& argsInput) {
     "This cannot be undone."
     :
     "Confirm FACTORY RESET? This will:\n"
-    "  - Delete all user accounts (/system/users/users.json)\n"
+    "  - Delete all user accounts (" HW1_USERS_JSON_PATH ")\n"
     "  - Delete pending account requests and every user's settings\n"
     "  - Delete every account's transcripts and notes (/stt/u*, /sd/stt/u*)\n"
     "  - Reboot the device\n"
@@ -2648,7 +2649,7 @@ extern const CommandEntry commands[] = {
   { "factoryreset", "Wipe user accounts and their data (all: every stored setting and file) and reboot to setup wizard.", true,
     cmd_factoryreset,
     "Usage: factoryreset [all] (confirmation required)\n"
-    "Deletes /system/users/users.json, pending account requests, every user's\n"
+    "Deletes " HW1_USERS_JSON_PATH ", pending account requests, every user's\n"
     "settings file and every account's transcripts and notes (/stt/u*, /sd/stt/u*),\n"
     "so the first-time setup wizard runs on next boot. WiFi credentials and\n"
     "other settings are preserved.\n"

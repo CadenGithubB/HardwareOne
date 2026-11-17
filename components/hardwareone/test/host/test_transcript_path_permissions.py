@@ -32,7 +32,11 @@ def main():
     source = read('System_Filesystem.cpp')
     internal = re.sub(r'^#include.*\n', '', read('System_Filesystem_Internal.h'), flags=re.M)
     header = read('System_Filesystem.h')
-    pieces = [extract_block(header, 'enum FilePermission') + ';',
+    # The state-file rows name their paths through System_StatePaths.h on a tree that has it.
+    paths = args.source_dir / 'System_StatePaths.h' if args.source_dir else None
+    paths = paths if paths and paths.exists() else args.component / 'System_StatePaths.h'
+    owner = paths.read_text().replace('#pragma once\n', '', 1) if 'HW1_' in source and paths.exists() else ''
+    pieces = [extract_block(header, 'enum FilePermission') + ';', owner,
               extract_block(source, 'struct PathRule') + ';',
               extract_block(source, 'static const PathRule sPathRules[]') + ';']
     for marker in ('static char asciiLower(', 'static bool lowerEndsWith(',

@@ -281,6 +281,17 @@ everything user-visible since the v0.99.99.1 tag.
   length, and the HTTPS certificate and key paths each have one definition, used by the firmware,
   the recovery updater, the phone link and the web server alike (step 4 of the 2026-11-14 sweep). No
   behaviour change; keys, frames, paths and replies are byte-identical.
+- Code: more values that were spelled in several places have one definition each (step 4 of the
+  2026-11-14 sweep, second part): the eight `/system` state-file paths (settings, debug, users,
+  pending users, per-user settings, boot anchors, automations, ESP-NOW devices), used by the
+  owning modules, the file permission table, the boot checks, factory reset and the backup and
+  restore tool; the phone-link enrolment and secret keys that factory reset clears; the
+  `network.wifi` setting names the restore tool merges; and the sensor JSON keys a remote device
+  sends over ESP-NOW and the controller reads back by name (GPS, IMU, ToF, FM radio, input). No
+  behaviour change; paths, keys, permission rows, backups and replies are byte-identical. The
+  command reference generator now resolves a path constant spliced into help text, so
+  `docs/COMMAND_REFERENCE.md` is unchanged. Host-tested and built for six configurations; not run
+  on hardware.
 ### Security
 - G2 glasses and R1 ring frames: one bounded protobuf reader for both parsers. A malformed frame whose
   declared length was near 2^64 passed the bounds check of the old skip and moved the read cursor

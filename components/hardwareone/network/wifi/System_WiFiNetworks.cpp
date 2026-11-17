@@ -340,7 +340,8 @@ bool wifiNetworksWriteJson(JsonDocument& doc, bool excludePasswords) {
   // Match old ciphertext by SSID before replacing the array. Keep Settings'
   // existing preservation policy and pass the prior blob without another copy.
   String oldBlob[MAX_WIFI_NETWORKS];
-  JsonArrayConst oldNetworks = doc["network"]["wifi"]["networks"].as<JsonArrayConst>();
+  JsonArrayConst oldNetworks =
+      doc[hw1wifijson::kParent][hw1wifijson::kSection][hw1wifijson::kNetworks].as<JsonArrayConst>();
   if (!excludePasswords) {
     for (int i = 0; i < count; ++i) {
       int oldCount = 0;
@@ -356,7 +357,7 @@ bool wifiNetworksWriteJson(JsonDocument& doc, bool excludePasswords) {
       }
     }
   }
-  JsonArray networks = doc["network"]["wifi"]["networks"].to<JsonArray>();
+  JsonArray networks = doc[hw1wifijson::kParent][hw1wifijson::kSection][hw1wifijson::kNetworks].to<JsonArray>();
   for (int i = 0; i < count; ++i) {
     JsonObject net = networks.add<JsonObject>();
     net["ssid"] = saved[i].ssid;
@@ -372,7 +373,8 @@ bool wifiNetworksWriteJson(JsonDocument& doc, bool excludePasswords) {
 
 unsigned wifiNetworksReadJson(const JsonDocument& doc) {
   // Boot-only restore. Keep its legacy acceptance/defaults separate from upsert.
-  JsonArrayConst networks = doc["network"]["wifi"]["networks"].as<JsonArrayConst>();
+  JsonArrayConst networks =
+      doc[hw1wifijson::kParent][hw1wifijson::kSection][hw1wifijson::kNetworks].as<JsonArrayConst>();
   if (networks.isNull()) { WARN_STORAGEF("No wifiNetworks array found in JSON"); return 0; }
   WifiNetwork loaded[MAX_WIFI_NETWORKS];
   ScrubOnExit scrubLoaded{loaded, MAX_WIFI_NETWORKS};  // Unpublished copies, all paths.

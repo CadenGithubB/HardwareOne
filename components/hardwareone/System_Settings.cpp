@@ -21,6 +21,7 @@
 #include "System_Clock.h"    // Clock::applyTimezone — push tz offset into libc TZ
 #include "System_NTP.h"
 #include "BLE_Peers.h"       // bluetooth.peers JSON (de)serialization
+#include "BLE_PhonePipeKeys.h"  // the pipe credential keys factory reset removes (every build)
 #include "System_Command.h"
 #include "System_SettingsEditorCore.h"  // settingsEditorHasCommand — schema cmdKey only for registered setters
 #include "System_CommandTypes.h"
@@ -1731,10 +1732,11 @@ static bool writeSettingsJsonImpl(bool clearPipeCredentials) {
   if(clearPipeCredentials) {
     // Merge preserves disabled modules. Factory reset must also revoke a pipe
     // credential saved by an earlier Bluetooth-enabled firmware.
+    // The key lists belong to the module that writes them (BLE_PhonePipeKeys.h).
     JsonObject bluetooth=doc["network"]["bluetooth"].as<JsonObject>();
-    bluetooth.remove("phonePipeSecret");bluetooth.remove("phonePipeSecretGenerated");
+    for(const char* key:hw1pipekeys::kPhonePipeSecretKeys)bluetooth.remove(key);
     JsonObject phone=bluetooth["peers"]["phone"].as<JsonObject>();
-    for(const char* key:{"pipeChannelVersion","pipeEnrolled","pipeBondVersion","pipeIdentity","pipeIdentityType"})phone.remove(key);
+    for(const char* key:hw1pipekeys::kPhonePipeEnrollmentKeys)phone.remove(key);
   }
 
   // Remove runtime-only fields that must never be persisted to disk
@@ -4122,7 +4124,7 @@ const char* cmd_savesettings(const String& argsInput) {
 
 String getUserSettingsPath(uint32_t userId) {
   char pathBuf[48];
-  snprintf(pathBuf, sizeof(pathBuf), "/system/users/user_settings/%lu.json", (unsigned long)userId);
+  snprintf(pathBuf, sizeof(pathBuf), HW1_USER_SETTINGS_DIR "/%lu.json", (unsigned long)userId);
   return String(pathBuf);
 }
 

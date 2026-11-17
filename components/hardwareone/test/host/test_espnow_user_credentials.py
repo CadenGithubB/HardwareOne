@@ -116,7 +116,10 @@ def generate(component: Path) -> str:
         "void fsUnlock()"))
     text_io = "\n\n".join(extract_block(utils, marker)
                           for marker in ("bool readText(", "bool writeText(", "bool writeTextAtomic("))
-    text_io += "\n\n" + unique_block(settings, "String getUserSettingsPath(", "System_Settings.cpp")
+    path = unique_block(settings, "String getUserSettingsPath(", "System_Settings.cpp")
+    # The per-user folder is named by System_StatePaths.h on a tree that has it.
+    owner = '#include "System_StatePaths.h"\n' if "HW1_USER_SETTINGS_DIR" in path else ""
+    text_io += "\n\n" + owner + path
 
     for marker in ("bool isValidPublicUsername(", "bool adminCreateUser("):
         require(user.count(marker) == 1, f"System_User.cpp: expected one {marker!r}")

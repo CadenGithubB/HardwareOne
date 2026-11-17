@@ -2371,6 +2371,19 @@ add_test(
   NAME definition_owners
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_definition_owners.py)
+# The state the device stores has one owner per name: the /system state paths
+# (System_StatePaths.h), the phone-link credential keys factory reset removes
+# (BLE_PhonePipeKeys.h) and the network.wifi keys the restore edits (hw1wifijson).
+add_test(
+  NAME state_file_owners
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_state_file_owners.py)
+# Inter-device sensor JSON keys keep one owner (System_SensorJsonKeys.h): the drivers'
+# BuildDataJson formats and the ESP-NOW GPS reader / remote-sensor OLED screen use it.
+add_test(
+  NAME sensor_json_keys
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_sensor_json_keys.py)
 # The audit redactor iterates nested forwarding commands instead of recursing:
 # its text equals the recursive redactor's for 7125 generated lines nested up to
 # 131 levels, and its stack stays flat in nesting depth.

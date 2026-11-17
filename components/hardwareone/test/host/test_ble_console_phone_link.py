@@ -98,6 +98,11 @@ def generated(component: Path) -> str:
         # its own opening brace; the struct carries inline member functions.
         extract_block(settings[settings.index("struct SettingEntry {"):], "struct SettingEntry") + ";",
     ]
+    # The pipe credential row keys (phonePipeSecret...) have their own owner on
+    # a tree that has it; the settings table below names them through it.
+    keys = component / "BLE_PhonePipeKeys.h"
+    if keys.exists():
+        types.append(keys.read_text().replace("#pragma once\n", "", 1))
 
     # The console's state, before the host boundaries (the GATT send double
     # reads the mode and the posts in flight).

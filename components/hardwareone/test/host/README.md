@@ -5083,6 +5083,39 @@ old values. `--root <repository>` reads another tree; the pre-change tree fails.
 python3 components/hardwareone/test/host/test_definition_owners.py
 ```
 
+`sensor_json_keys` is a source contract on the sensor JSON that travels between devices. Each
+key the receiving device reads by name has one owner, `System_SensorJsonKeys.h` (`HW1_SK_*`
+string-literal macros, `HW1_SK_Q(key)` for a quoted key inside a format string). The owner is
+used by the seven drivers whose readings a receiver parses (GPS, IMU, ToF, FM radio, gamepad,
+ANO and GPIO encoder `BuildDataJson`). Its receivers are `getRemoteGpsData` and the remote-sensor
+OLED screen. No sender or receiver spells an owned key, and the most distinctive keys appear
+nowhere else. The test also compiles every sender format and receiver key on the host. It
+compares them byte for byte with the old literals and runs old and new formats through snprintf
+with the same sample values. `--root <repository>` reads another tree; the pre-change tree fails.
+
+```sh
+python3 components/hardwareone/test/host/test_sensor_json_keys.py
+```
+
+`state_file_owners` is a source contract on the state the device stores. The eight /system state
+files (settings, debug, users, pending_users, the user_settings folder, boot_anchors, automations,
+espnow/devices) take their paths from `System_StatePaths.h`: the modules keep their names
+(SETTINGS_JSON_FILE, USERS_JSON_FILE, DEBUG_JSON_FILE, ...) as aliases, and the path permission
+table, the backup/restore tool, factory reset and the setup replies use the owner. The phone-link
+credential keys come from `BLE_PhonePipeKeys.h`, whose lists the peers writer drops and factory
+reset removes, so a key the writer adds cannot survive a reset. The network.wifi section and
+switch keys come from `hw1wifijson` (System_WiFiNetworks.h), shared by the wifi settings rows, the
+saved-network array and the restore. Each literal appears only in its owner and every former site
+uses the owner's name. It also compiles the owners, the permission table (the state-file rows must
+equal the old rows), the texts that splice a path, and runs the changed JSON blocks (factory
+reset's key removal, the peers.phone writer and reader, the restore's network.wifi merge) beside
+the old code on the same JSON. `--root <repository>` reads another tree; the pre-change tree fails.
+`--print-table` prints the compiled table for an old/new comparison.
+
+```sh
+python3 components/hardwareone/test/host/test_state_file_owners.py
+```
+
 ## Camera lifecycle and backends
 
 ```sh

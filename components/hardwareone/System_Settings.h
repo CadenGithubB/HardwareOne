@@ -1267,7 +1267,9 @@ void settingsDefaults();
 // rewrote the whole (large) settings.json. A compile-time literal (not a
 // const char* like SETTINGS_JSON_FILE) so it can be used in the static
 // debugSettingsModule initializer with no static-init-order dependency.
-#define DEBUG_JSON_FILE "/system/debug.json"
+// The path is owned by System_StatePaths.h.
+#include "System_StatePaths.h"
+#define DEBUG_JSON_FILE HW1_DEBUG_JSON_PATH
 
 // Settings JSON serialization/deserialization.
 // mainFileOnly=true excludes own-file modules (debug) — used only by the

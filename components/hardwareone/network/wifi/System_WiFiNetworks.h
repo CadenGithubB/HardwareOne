@@ -7,6 +7,40 @@
 
 #define MAX_WIFI_NETWORKS 8
 
+// Where the Wi-Fi settings sit in settings.json, one owner for every spelling:
+// network.wifi holds the wifi settings module's switch rows (System_WiFi.cpp,
+// whose jsonSection is kModuleSection) and the saved-network array that
+// wifiNetworksWriteJson/ReadJson keep. The backup restore
+// (WebServer_MigrationTool.cpp) keeps this device's networks and forces the
+// three switches on by these names, so a renamed key cannot silently stop
+// matching (it once forced "autoReconnect" after that key was gone). Char
+// arrays, so ArduinoJson takes each key as the string literal it replaces.
+// Every build, also with Wi-Fi compiled out: the restore and the settings
+// file layout do not depend on the radio.
+namespace hw1wifijson {
+inline constexpr char kParent[] = "network";
+inline constexpr char kSection[] = "wifi";
+inline constexpr char kModuleSection[] = "network.wifi";  // SettingsModule::jsonSection
+inline constexpr char kNetworks[] = "networks";
+inline constexpr char kEnabled[] = "wifiEnabled";
+inline constexpr char kAutoStart[] = "wifiAutoStart";
+inline constexpr char kAutoReconnect[] = "wifiAutoReconnect";
+
+// True when whole is "<parent>.<child>".
+constexpr bool isDottedPath(const char* whole, const char* parent, const char* child) {
+  while (*parent) {
+    if (*whole++ != *parent++) return false;
+  }
+  if (*whole++ != '.') return false;
+  while (*child) {
+    if (*whole++ != *child++) return false;
+  }
+  return *whole == '\0';
+}
+static_assert(isDottedPath(kModuleSection, kParent, kSection),
+              "the wifi module section is network.wifi, the path the networks array and the restore use");
+}  // namespace hw1wifijson
+
 // Copies for presentation contain no credentials. IDs identify one saved entry
 // for this boot, survive sorting, and are never reused after removal or reload.
 struct SavedWifiNetwork {

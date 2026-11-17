@@ -45,6 +45,7 @@
 #include "OLED_SettingsEditor.h"   // openSettingsEditorForModule — WiFi and Web settings rows
 #include "OLED_ESPNow.h"
 #include "System_ESPNow.h"
+#include "System_SensorJsonKeys.h"   // the senders' key names (displayRemoteSensors reads them)
 #include "WebServer_Server.h"
 
 #if ENABLE_WIFI
@@ -1323,11 +1324,11 @@ void displayRemoteSensors() {
           // and render the matching widget. Before this split, ANO data fell into
           // the gamepad joystick layout below: x/y defaulted to 512 (dead-center
           // stick) and the gamepad button-bit mapping mislabeled the ANO buttons.
-          if (!doc["pos"].isNull()) {
+          if (!doc[HW1_SK_POS].isNull()) {
             // ---- ANO rotary encoder widget ----
-            long     pos  = doc["pos"]     | 0L;
-            int      axis = doc["axis"]    | 0;
-            uint32_t b    = doc["buttons"] | 0u;   // active-HIGH: set bit = pressed
+            long     pos  = doc[HW1_SK_POS]     | 0L;
+            int      axis = doc[HW1_SK_AXIS]    | 0;
+            uint32_t b    = doc[HW1_SK_BUTTONS] | 0u;   // active-HIGH: set bit = pressed
 
             // Left column: position + active axis.
             oledDisplay->setCursor(0, 24);
@@ -1375,9 +1376,9 @@ void displayRemoteSensors() {
           }
 
           // ---- gamepad joystick widget (buttons active-LOW) ----
-          int x = doc["x"] | 512;
-          int y = doc["y"] | 512;
-          uint32_t buttons = doc["buttons"] | 0xFFFFFFFF;
+          int x = doc[HW1_SK_X] | 512;
+          int y = doc[HW1_SK_Y] | 512;
+          uint32_t buttons = doc[HW1_SK_BUTTONS] | 0xFFFFFFFF;
 
           // Draw joystick position (small box)
           int joyX = 10 + ((x * 20) / 1023);
@@ -1407,10 +1408,10 @@ void displayRemoteSensors() {
 
         case REMOTE_SENSOR_IMU: {
           // IMU JSON: {"ori":{"yaw":..,"pitch":..,"roll":..},...}
-          JsonObject ori = doc["ori"];
-          float roll = ori["roll"] | 0.0f;
-          float pitch = ori["pitch"] | 0.0f;
-          float yaw = ori["yaw"] | 0.0f;
+          JsonObject ori = doc[HW1_SK_ORI];
+          float roll = ori[HW1_SK_ROLL] | 0.0f;
+          float pitch = ori[HW1_SK_PITCH] | 0.0f;
+          float yaw = ori[HW1_SK_YAW] | 0.0f;
 
           oledDisplay->setCursor(0, 24);
           oledDisplay->print("Roll:  ");
@@ -1427,10 +1428,10 @@ void displayRemoteSensors() {
 
         case REMOTE_SENSOR_GPS: {
           // GPS JSON: {"fix":1,"sats":8,"lat":..,"lon":..,...}
-          float lat = doc["lat"] | 0.0f;
-          float lon = doc["lon"] | 0.0f;
-          int sats = doc["sats"] | 0;
-          int fix = doc["fix"] | 0;
+          float lat = doc[HW1_SK_LAT] | 0.0f;
+          float lon = doc[HW1_SK_LON] | 0.0f;
+          int sats = doc[HW1_SK_SATS] | 0;
+          int fix = doc[HW1_SK_FIX] | 0;
 
           oledDisplay->setCursor(0, 24);
           oledDisplay->print("Lat: ");
@@ -1445,13 +1446,13 @@ void displayRemoteSensors() {
 
         case REMOTE_SENSOR_TOF: {
           // ToF JSON: {"objects":[{"distance_mm":123,"status":0},...]}
-          JsonArray objects = doc["objects"];
+          JsonArray objects = doc[HW1_SK_OBJECTS];
           if (objects.size() > 0) {
             // Objects are now detected-only, so objects[0] existing IS a detection
             // (the per-object "detected" flag was dropped).
             JsonObject obj = objects[0];
-            int dist = obj["distance_mm"] | 0;
-            int status = obj["status"] | -1;
+            int dist = obj[HW1_SK_DISTANCE_MM] | 0;
+            int status = obj[HW1_SK_STATUS] | -1;
 
             oledDisplay->setCursor(0, 28);
             oledDisplay->print("Distance: ");
@@ -1468,9 +1469,9 @@ void displayRemoteSensors() {
 
         case REMOTE_SENSOR_FMRADIO: {
           // FM JSON: {"frequency":101.5,"rssi":45,"station":"..."}
-          float freq = doc["frequency"] | 0.0f;
-          int rssi = doc["rssi"] | 0;
-          const char* station = doc["station"] | "";
+          float freq = doc[HW1_SK_FREQUENCY] | 0.0f;
+          int rssi = doc[HW1_SK_RSSI] | 0;
+          const char* station = doc[HW1_SK_STATION] | "";
 
           oledDisplay->setCursor(0, 24);
           oledDisplay->print("Freq: ");

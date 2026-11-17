@@ -9,6 +9,7 @@
 #include "Input_ButtonCore.h"
 #endif
 #include "System_Debug.h"
+#include "System_SensorJsonKeys.h"  // inter-device sensor JSON key names (receivers read the same)
 #include "System_TaskUtils.h"
 #include <driver/gpio.h>
 #include <limits.h>
@@ -250,8 +251,9 @@ int gpioEncoderBuildDataJson(char* buf, size_t size) {
   const bool pressed = running && sGestures.pressed();
   xSemaphoreGive(sGpioStateMutex);
   const int n = snprintf(buf, size,
-      "{\"connected\":%s,\"running\":%s,\"valid\":%s,\"ts\":%lu,\"pos\":%ld,\"axis\":0,"
-      "\"pendingDetents\":%d,\"buttons\":%lu,\"pressed\":%s,\"sampleMs\":%lu,\"auxButtonsEnabled\":%s}",
+      "{\"connected\":%s,\"running\":%s,\"valid\":%s,\"ts\":%lu," HW1_SK_Q(HW1_SK_POS) "%ld,"
+      HW1_SK_Q(HW1_SK_AXIS) "0,\"pendingDetents\":%d," HW1_SK_Q(HW1_SK_BUTTONS) "%lu,"
+      "\"pressed\":%s,\"sampleMs\":%lu,\"auxButtonsEnabled\":%s}",
       connected ? "true" : "false", running ? "true" : "false",
       reading.dataValid ? "true" : "false", static_cast<unsigned long>(reading.lastUpdate),
       static_cast<long>(position), pending,
