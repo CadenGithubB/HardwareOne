@@ -240,6 +240,15 @@ static void peerCachePath(const uint8_t* mac, const char* name, char* out, size_
   snprintf(out, n, "%s/%s", dir, name);
 }
 
+// ---- Manifest reference (test_espnow_peer_files.py runs the real one) -----
+// Not static: a tree before the reference never calls it.
+static int gManifestUseCalls = 0;
+static uint8_t gManifestUseMac[6];
+void manifestCacheRecordUse(const uint8_t* peerMac, const uint8_t*) {
+  ++gManifestUseCalls;
+  std::memcpy(gManifestUseMac, peerMac, 6);
+}
+
 // INSERT_PRODUCTION
 
 // ---- Fixtures --------------------------------------------------------------
@@ -370,6 +379,8 @@ static void testReceiveManifest(const std::string& json) {
   assert(gEspNowState.bondManifestReceived && gEspNowState.bondSyncInFlight == BOND_SYNC_NONE &&
          gEspNowState.bondSyncRetryCount == 0);
   assert(gFiles.count(path) && *gFiles[path] == json);
+  // Only the manifest that reached the cache is recorded, under its sender.
+  assert(gManifestUseCalls == 1 && std::memcmp(gManifestUseMac, mac, 6) == 0);
   assert(manifestCachedFor(gEspNow->lastRemoteCap.fwHash));
   assert(gFsLockDepth == 0);
 

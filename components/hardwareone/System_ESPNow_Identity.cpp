@@ -324,8 +324,8 @@ constexpr uint8_t  kPeerFileVersion = 2;
 // stored lastSeenSec forward, and only once it is this far behind.
 constexpr uint32_t kPeerLastSeenRefreshSec = 3600;
 
-// Strict PATH TOKEN parser for peer directory names: exactly the 12 hex
-// digits macToPathToken() writes, nothing else.
+// 12 hex digits, either case. A peer folder must also be spelled exactly as
+// macToPathToken() writes it (upper case); peerIdentityLoadAll checks that.
 bool parseMacNoSep(const char* in, uint8_t mac[6]) {
   return in && strlen(in) == 12 && macParse(in, mac);
 }
@@ -428,7 +428,14 @@ bool readPeerIdentityFile(const char* path, PeerIdentity& out) {
   if (pos != 12) return false;
   if (!parseMacNoSep(macFlat, out.mac)) return false;
 
-  out.meshId      = doc["meshId"] | (uint8_t)0;
+  // The mesh slot indexes per-mesh tables elsewhere, and a file that names a
+  // slot this firmware does not have is not one it wrote: leave it out, so the
+  // walk marks the cache incomplete and names it. ArduinoJson turns a value
+  // that does not fit a uint8_t into the default 0, so the range is checked on
+  // the unsigned value; a missing, negative or non-integer meshId fails it too.
+  JsonVariantConst meshVal = doc["meshId"];
+  if (!meshVal.is<unsigned>() || meshVal.as<unsigned>() >= Settings::N_MESHES) return false;
+  out.meshId      = (uint8_t)meshVal.as<unsigned>();
   out.bondedAtSec = doc["bondedAtSec"] | (uint32_t)0;
   out.lastSeenSec = doc["lastSeenSec"] | (uint32_t)0;
   // Phase 5: v1 files don't carry subscribedEvents — default to ALL so they
@@ -452,6 +459,12 @@ const PeerIdentity* peerIdentityFindByMac(const uint8_t mac[6]) {
 
 bool peerIdentityPersist(const uint8_t mac[6], uint8_t meshId,
                          const uint8_t pub[32], uint32_t bondedAtSec) {
+  // The KEY_EX handlers pass the slot their fingerprint matched; a file with
+  // anything else would not load at the next boot.
+  if (meshId >= Settings::N_MESHES) {
+    ERROR_ESPNOWF("peer identity persist: mesh slot %u out of range", (unsigned)meshId);
+    return false;
+  }
   int idx = findSlotByMac(mac);
   if (idx < 0) idx = findFreeSlot();
   if (idx < 0) {
@@ -558,6 +571,7 @@ bool peerIdentityForget(const uint8_t mac[6]) {
   // Remove the identity file(s) even if the slot wasn't cached, so manual flash
   // editing or a stale file gets cleaned up.
   char path[80];
+  bool fileRemoved = false;
   if (buildPeerPath(mac, "identity.json", path, sizeof(path)) && VFS::existsGuarded(path, auth)) {
     VFS::removeGuarded(path, auth);
     // A file that would not go away is loaded again at the next boot with its
@@ -565,6 +579,8 @@ bool peerIdentityForget(const uint8_t mac[6]) {
     if (VFS::existsGuarded(path, auth)) {
       gPeerIdentitiesLoaded = false;
       WARN_ESPNOWF("stored peer identity %s could not be removed", path);
+    } else {
+      fileRemoved = true;
     }
   }
   if (buildPeerPath(mac, "identity.tmp", path, sizeof(path)) && VFS::existsGuarded(path, auth)) {
@@ -580,7 +596,103 @@ bool peerIdentityForget(const uint8_t mac[6]) {
   if (idx >= 0) {
     gPeerIdentities[idx] = PeerIdentity{};
   }
-  return true;
+  // A file the boot walk left out of the cache (a bad meshId) counts too.
+  return idx >= 0 || fileRemoved;
+}
+
+namespace {
+
+// Removes what is in `dir`, counting the files into `out`; subfolders `depth`
+// levels down are emptied and removed too. Entries are taken a few at a time
+// with the directory closed before anything is removed, so the removal never
+// runs under an open directory handle. The caller holds the filesystem lock.
+void removeFolderContents(const char* dir, uint8_t depth, const AuthContext& auth,
+                          PeerFilesRemoved& out) {
+  constexpr uint8_t kBatch = 4;
+  constexpr uint8_t kMaxPasses = 32;   // bounds a folder whose entries keep failing
+  struct Entry {
+    char name[64];
+    bool folder;
+    uint32_t size;
+  };
+  uint8_t failedHere = 0;   // entries of this folder that would not go
+  for (uint8_t pass = 0; pass < kMaxPasses; ++pass) {
+    Entry batch[kBatch];
+    uint8_t n = 0;
+    uint8_t skip = 0;   // the entries that failed are listed again: step over them
+    File d = VFS::openGuarded(dir, "r", auth);
+    if (!d || !d.isDirectory()) {
+      if (d) d.close();
+      break;
+    }
+    File e = d.openNextFile();
+    while (e && n < kBatch) {
+      const char* name = e.name();
+      const char* leaf = strrchr(name, '/');
+      leaf = leaf ? leaf + 1 : name;
+      const size_t len = strlen(leaf);
+      if (skip < failedHere) {
+        ++skip;
+      } else if (len < sizeof(batch[n].name)) {   // LittleFS names are at most 63 characters
+        memcpy(batch[n].name, leaf, len + 1);
+        batch[n].folder = e.isDirectory();
+        batch[n].size = batch[n].folder ? 0 : (uint32_t)e.size();
+        ++n;
+      }
+      e.close();
+      e = d.openNextFile();
+    }
+    if (e) e.close();
+    d.close();
+    if (n == 0) break;
+
+    for (uint8_t i = 0; i < n; ++i) {
+      char path[136];
+      const int w = snprintf(path, sizeof(path), "%s/%s", dir, batch[i].name);
+      if (w < 0 || (size_t)w >= sizeof(path)) {
+        // A path this long is not one this firmware writes: leave it, count it.
+        if (failedHere < UINT8_MAX) failedHere++;
+        continue;
+      }
+      bool gone;
+      if (batch[i].folder) {
+        if (depth > 0) removeFolderContents(path, depth - 1, auth, out);
+        gone = VFS::rmdirGuarded(path, auth) || !VFS::existsGuarded(path, auth);
+      } else {
+        gone = VFS::removeGuarded(path, auth) || !VFS::existsGuarded(path, auth);
+        if (gone) {
+          if (out.files < UINT16_MAX) out.files++;
+          out.bytes += batch[i].size;
+        }
+      }
+      if (!gone && failedHere < UINT8_MAX) failedHere++;
+    }
+  }
+  out.failed = (uint8_t)((out.failed + failedHere) > UINT8_MAX ? UINT8_MAX : out.failed + failedHere);
+}
+
+}  // namespace
+
+bool peerFilesRemove(const uint8_t mac[6], PeerFilesRemoved& out) {
+  out = PeerFilesRemoved{};
+  // The cache slot and the identity files first, through the one function that
+  // keeps the "identities read" mark honest.
+  peerIdentityForget(mac);
+  if (!filesystemReady) return false;
+
+  char dir[64], token[13];
+  macToPathToken(mac, token);
+  snprintf(dir, sizeof(dir), "%s/%s", kPeersDir, token);
+  auto auth = VFS::systemAuth(VFS::Scopes::ESPNOW_STATE, "espnow.peer_files_remove");
+  FsLockGuard fsGuard("espnow.peer_files_remove");
+  if (!VFS::existsGuarded(dir, auth)) return true;
+  removeFolderContents(dir, 1, auth, out);
+  VFS::rmdirGuarded(dir, auth);
+  out.folderLeft = VFS::existsGuarded(dir, auth);
+  if (out.folderLeft) {
+    WARN_ESPNOWF("%s could not be removed completely", dir);
+  }
+  return !out.folderLeft;
 }
 
 uint8_t peerIdentityLoadAll() {
@@ -616,8 +728,27 @@ uint8_t peerIdentityLoadAll() {
       base = base ? base + 1 : name;
       uint8_t mac[6];
       char path[80];
-      if (parseMacNoSep(base, mac) && buildPeerPath(mac, "identity.json", path, sizeof(path)) &&
-          VFS::existsGuarded(path, auth)) {
+      // Only a folder spelled exactly as macToPathToken writes it is a peer
+      // folder: every reader and writer (persist, forget, the bond caches)
+      // builds that spelling, so "aabbccddee01" beside "AABBCCDDEE01" must not
+      // load the upper-case folder's identity a second time.
+      char canonical[13] = {};
+      const bool isAddress = parseMacNoSep(base, mac);
+      if (isAddress) macToPathToken(mac, canonical);
+      if (isAddress && strcmp(base, canonical) != 0) {
+        // Never written by this firmware, never read or removed by it either,
+        // so it holds no mesh slot: skipped without marking the cache
+        // incomplete, but named, since espnowforget cannot remove it.
+        char odd[96];
+        snprintf(odd, sizeof(odd), "%s/%s/identity.json", kPeersDir, base);
+        if (VFS::existsGuarded(odd, auth)) {
+          WARN_ESPNOWF("stored peer identity %s is ignored: peer folders are named %s; remove that folder",
+                       odd, canonical);
+        }
+      } else if (isAddress && findSlotByMac(mac) >= 0) {
+        // Already cached under this address: one cache entry per device.
+      } else if (isAddress && buildPeerPath(mac, "identity.json", path, sizeof(path)) &&
+                 VFS::existsGuarded(path, auth)) {
         PeerIdentity p = {};
         // The mac must match the directory name (paranoia — defends against a
         // moved/renamed file).

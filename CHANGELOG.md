@@ -329,6 +329,74 @@ everything user-visible since the v0.99.99.1 tag.
   was set and removed again while ESP-NOW was stopped. Host-tested; on the two boards the warning
   named `primary` while that was the default and `bench` once that was. The slot 0 reply was not
   run on hardware.
+- ESP-NOW start: an `openespnow` refused because no device name was set had already created the
+  default mesh `primary` and allocated the ESP-NOW state, so a mesh added afterwards went to slot 1 and
+  was not the default. The name is now checked before anything is allocated or changed, `primary` is
+  created only once the radio is up, and a start that fails after that leaves slot 0 as it was, unless
+  its cleanup is left pending (the TX dispatcher or heartbeat task failed and could not be stopped): then
+  `primary` stays, as after a successful start, and `closeespnow` finishes the cleanup. A
+  restart after `espnowmeshpeermax` was raised no longer counts more peer slots than were allocated, and
+  the refusal no longer says "Error:" twice. Host-tested; not yet tested on hardware.
+- ESP-NOW boot notice: the notice a device sends when ESP-NOW starts carried an empty name, and the
+  receiving device printed and stored it as raw JSON, shown as a chat bubble on the web ESP-NOW page and
+  as a message on the G2 and OLED. The notice now carries the device name, and the receiver prints
+  "[ESP-NOW] benchxiao is online (boot #42)" and stores "Online (boot #42)" under the name it resolves
+  for the sender (not the name in the notice); anything else that arrives as a system notice gets a short
+  neutral line. Host-tested; not yet tested on hardware.
+- Bond mode: after `bondconnect` on both devices the worker could stay "SYNCING (cap=0 ...)" until the
+  master ran `bondresync --all`. The master's capability exchange arrived while the worker's own
+  `bondconnect` was still running, and the sync reset at its end wiped it; the master, already synced,
+  asked for nothing more. A change of bond partner, role or bond mode (`bondconnect`, `bonddisconnect`,
+  `bondrole`, `bondresync --all`, `espnowbondmodeenabled`, `espnowbondpeermac` and the pages that run them)
+  now holds bond frames off and resets the sync state before frames are accepted again;
+  `espnowbondmodeenabled` and `espnowbondpeermac` used to keep the old partner's state. A worker that lost
+  its sync record while the master stayed synced (its own `bondresync`, a heartbeat timeout only it saw) now
+  asks for the master's capability and takes the master's status request as proof that its own data
+  arrived, so it reaches SYNCED by itself. Host-tested; not yet tested on hardware.
+- Bond mode: a bond partner that is not there (switched off, or an address no device has) started a key
+  exchange with every heartbeat, every 5 s, and logged two warnings each time, for as long as it ran.
+  Automatic handshake starts to a peer that does not answer now wait 5 s, 10 s, 20 s and so on up to
+  5 minutes, and heartbeats and bond sensor data are no longer queued without a session. The "giving
+  up", "ESTABLISHING timeout" and bond state lines of automatic tries come at most once per 15 minutes
+  while the partner is away, and the "pending: timeout" and "pending: evicting" lines once a minute, each
+  with the count held back. A partner that comes back is bonded again within about 15 s of being heard.
+  `espnowkeyex`, `espnowprobe`, `espnowpairsecure` and `espnowsessionopen` start at once, end the back-off,
+  and their own failure ("giving up" or "ESTABLISHING timeout") is always printed. `bondconnect` and
+  `bondresync` end the back-off and, on the device that starts bond handshakes (the higher address), start
+  one at once. Host-tested; not yet tested on hardware.
+- ESP-NOW unpair: `espnowunpair` left the files this device kept about the peer: the bond caches in
+  `/system/espnow/peers/<mac>/` (the partner's settings, 7 kB on the bench, and its schema) and the partner's
+  cached command manifest in `/system/manifests/` (62 kB). Unpairing now removes that folder with everything in
+  it, and the cached manifest unless another paired device on the same firmware still uses it; a device that
+  moves to new firmware no longer leaves the old manifest behind. Files received from the device stay in
+  `/espnow/received/<mac>/`. The reply says in one line what was removed and where received files are.
+  `espnowforget` keeps the cached files, as the device stays paired. A manifest cached before this change is
+  tracked from the partner's first bond sync after the update; one from a former partner that never syncs
+  again stays until removed by hand. Host-tested; not yet tested on hardware.
+- ESP-NOW stored identities: a peer identity file naming a mesh slot this firmware does not have (for example
+  `"meshId":200`, or 300, which was read as slot 0) loaded as it was. Such a file is now left out at start-up
+  like an unreadable one: the log names the address and `espnowforget`, and `espnowmeshes delete` stays refused
+  until it is removed and the device restarts. A peer folder whose name is not upper case (`aabbccddee01` beside `AABBCCDDEE01`) loaded
+  the same identity twice, and one copy stayed after `espnowforget`; only folders named the way the firmware
+  writes them are read now, once each, and one that holds an identity of its own is named in a warning.
+  Hand-made files only. Host-tested; not yet tested on hardware.
+- ESP-NOW mesh passphrase: setting the passphrase of a mesh in slots 1 to 3 answered "(Not used for current
+  encryption.) Existing paired peers will need to re-pair", although that mesh's pairing and broadcast keys
+  change at once and no paired device has to re-pair. The device's own passphrase (the fingerprint in
+  `espnowencstatus`, and what sending and pairing require) now follows the mesh a start would load as soon as
+  it changes: a new passphrase on the default mesh, `setdefault`, `enable`, `disable` and `delete` apply at
+  once instead of at the next start, and setting slot 0's passphrase no longer replaces the default mesh's in
+  another slot. Setting a passphrase says whether it applies now or at the next start (or, on a disabled
+  mesh, that the mesh stays off until 'espnowmeshes enable'), that the other devices on the mesh need the same
+  passphrase and that paired devices need not re-pair. Clearing one says what stops: on slot 0 the mesh is
+  disabled and its paired devices cannot exchange frames until it is enabled again; on the other slots new
+  pairings need a passphrase and heartbeats and time sync with devices that still have one stop getting
+  through, while paired devices keep their keys and open sessions. The passphrase and default-mesh commands
+  name the passphrase in use (or say there is none) when it changes. Slot 0's passphrase set before the first
+  ESP-NOW start of a boot is now stored (it was dropped while the reply said it was updated). `espnowmeshes
+  listjson` reports the slot in use; the web page marks it in the mesh table, shows the answer after Save or
+  Clear passphrase, and its clear dialog says the same as the reply for that slot instead of one text for all
+  meshes. Host-tested; not yet tested on hardware.
 
 ### Changed
 - OLED feedback is one shared message box. It replaces the animated status ribbon, the error boxes

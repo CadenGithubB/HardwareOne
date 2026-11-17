@@ -126,6 +126,11 @@ static bool parseMacAddress(const String& text, uint8_t mac[6]) {
 static uint32_t gNowMs = 1;
 static uint32_t millis() { return gNowMs; }
 
+// Bond partner change hold and the handshake back-off (both tested by their
+// own suites): no change under way, and hearing a peer has no effect here.
+[[maybe_unused]] static bool bondPartnerChanging() { return false; }
+[[maybe_unused]] static void espnowHandshakeHeard(const uint8_t*) {}
+
 // INSERT_BOND_PEER
 
 // INSERT_POLICY

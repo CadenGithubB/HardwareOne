@@ -762,6 +762,8 @@ int gMeshPeerSlots = 0;  // Runtime slot count — 0 until the peer arrays are a
                          // offset 0xE0). Set to the real count only after both arrays exist.
 MeshPeerHealth* gMeshPeers = nullptr;
 MeshPeerMeta* gMeshPeerMeta = nullptr;
+// Slots gMeshPeers was allocated with (0 until then). Written once by initEspNow.
+static int sMeshPeerArraySlots = 0;
 uint32_t gLastHeartbeatSentMs = 0;
 
 // (gMeshRetryQueue — a planned mesh ACK/retry queue — was removed 2026-08-19.
@@ -994,29 +996,38 @@ void deriveKeyFromPassphrase(const String& passphrase, uint8_t* key) {
   // NOTE: Do not call broadcastOutput here - can cause watchdog timeout during init
 }
 
-// Set ESP-NOW passphrase and derive the live key. Persistence is deliberately
-// owned by meshesCmd_setpassphrase() after it has also refreshed the cached
-// stretched-key tuple; writing from here would create a long power-loss window
-// where disk held the new passphrase beside the old cached key.
 // Forward decl — defined further down with other multi-mesh helpers
 static uint16_t meshFingerprintForLabel(const String& label);
 
-// The mesh slot whose passphrase the instance holds in gEspNow->passphrase and
-// derivedKey, -1 for none. A start loads it from espnowStartPassphraseSlot(),
-// setting slot 0's passphrase replaces it, a stop clears it. The slot is what
-// says whose it is: the text does not (a mesh's passphrase can change after the
-// start without the instance following, and two meshes can share one).
+// What the instance's passphrase (gEspNow->passphrase, derivedKey,
+// encryptionEnabled) is used for: the fingerprint 'espnowencstatus' and
+// 'espnowpairsecure' print, the "set a mesh passphrase first" gate of the send
+// and pairing commands, and the receive gate that drops plaintext frames of
+// REQ_AUTH_WHEN_KEYED opcodes. It is not on the air: the radio-layer key it fed
+// was removed (addEspNowPeerWithEncryption ignores it, the copy in each device
+// entry's key is stored but unused). Pairing (KEY_EX HMAC) and signed broadcasts
+// (BROADCAST_AUTH) use the per-mesh keys from each mesh's own passphrase
+// (meshKeysDerive), and sessions rest on the stored device keys.
+//
+// The mesh slot whose passphrase a running instance holds, -1 for none. It is
+// always the one a start would load now (espnowStartPassphraseSlot): a start
+// loads it, the mesh commands reload it (espnowLoadLivePassphrase), a stop
+// clears it. The slot says whose it is; the text does not (two meshes can
+// share one).
 static int8_t gEspNowLivePassphraseSlot = -1;
 
+// Slot 0's passphrase in the settings. Clearing it also disables slot 0's mesh.
+// The caller reloads the instance (espnowLoadLivePassphrase): slot 0's
+// passphrase is the one in use only while no enabled default mesh in another
+// slot has one. Persistence is owned by meshesCmd_setpassphrase() after it has
+// also refreshed the cached stretched-key tuple; writing from here would create
+// a long power-loss window where disk held the new passphrase beside the old
+// cached key.
 static void setEspNowPassphrase(const String& passphrase) {
-  if (!gEspNow) return;
-  gEspNow->passphrase = passphrase;
-  deriveKeyFromPassphrase(passphrase, gEspNow->derivedKey);
-  gEspNowLivePassphraseSlot = passphrase.length() > 0 ? 0 : -1;
-
   // Slot 0 holds a mesh here: the one caller finds it by its label, and an empty
   // label never matches. Creating "primary" is initPrimaryMeshFromLegacySettings's
-  // job alone, which knows when a device must not get one.
+  // job alone, which knows when a device must not get one. This also runs before
+  // the first start of a boot (no instance yet): the setting is all there is then.
   Settings::MeshIdentity& m0 = gSettings.meshes[0];
   m0.passphrase = passphrase;
   if (passphrase.length() == 0) {
@@ -1136,6 +1147,40 @@ bool isBondSessionTokenValid() {
   return bondPeerActiveSession() != nullptr;
 }
 
+// Bond partner changes (bench 2026-11-17, step c1). bondconnect used to set the
+// partner, then bond mode, and reset the sync state last. espnow_task runs
+// above cmd_exec on the same core, so the partner's capability exchange was
+// received and acted on in between, and the reset then wiped it (worker:
+// bondCapSent, lastRemoteCapValid). The master was SYNCED and asked for
+// nothing more, so the worker stayed SYNCING. Every change of partner, role
+// or bond mode now runs with bond frames held off: isBondPeerMac answers false
+// while the hold is up (the old partner's frames stop first), and the sync
+// state is reset before it is released, so all the new partner sends lands
+// on a clean state. Taken on cmd_exec (commands; the web page, settings pages
+// and display controls run commands); read on espnow_task and cmd_exec.
+static std::atomic<uint8_t> gBondPartnerChanging{0};
+
+static bool bondPartnerChanging() {
+  return gBondPartnerChanging.load(std::memory_order_acquire) != 0;
+}
+
+template <typename Fn>
+static void bondWithFramesHeld(Fn&& fn) {
+  gBondPartnerChanging.fetch_add(1, std::memory_order_acq_rel);
+  fn();
+  gBondPartnerChanging.fetch_sub(1, std::memory_order_acq_rel);
+}
+
+// The partner (or bond mode) changed: nothing known about the old one applies.
+// Call inside bondWithFramesHeld, after the settings changed.
+static void bondForgetPartnerState() {
+  if (gEspNow) {
+    gEspNow->bondPeerOnline = false;            // set again by the session or a heartbeat
+    gEspNow->lastBondHeartbeatReceivedMs = 0;
+  }
+  resetBondSync();
+}
+
 // The one answer to "is `mac` our bond partner": bond mode is on, a partner is
 // configured and `mac` is that partner. The receive table (REQ_BOND_PEER), the
 // session-established hook, the bond magic files and the file RPC all ask here.
@@ -1148,6 +1193,7 @@ bool isBondSessionTokenValid() {
 // uses, so the device accepts exactly the partner it sends to.
 bool isBondPeerMac(const uint8_t* mac) {
   if (!mac || !gSettings.bondModeEnabled || gSettings.bondPeerMac.length() == 0) return false;
+  if (bondPartnerChanging()) return false;
   const char* stored = gSettings.bondPeerMac.c_str();
   char text[18];
   macToDisplay(mac, text, sizeof(text));
@@ -1904,6 +1950,66 @@ static void initPrimaryMeshFromLegacySettings() {
 #endif
 }
 
+// The slot 0 bootstrap of one ESP-NOW start. It runs when constructed and, if
+// it created "primary", puts slot 0 back unless the start calls keep(): a start
+// that fails must leave no default mesh behind, or a mesh added afterwards lands
+// in slot 1 and is not the default. Only initEspNow uses it, on the task that
+// runs the start (cmd_exec or setup), where no command can change the meshes
+// in between.
+class PrimaryMeshBootstrap {
+ public:
+  PrimaryMeshBootstrap() {
+    Settings::MeshIdentity& m0 = gSettings.meshes[0];
+    const bool wasEmpty = m0.label.length() == 0;
+    savedEnabled_ = m0.enabled;
+    savedDefault_ = m0.isDefault;
+    savedKeyValid_ = m0.passphraseStretchedKeyValid;
+#if ENABLE_BONDED_MODE
+    savedBondEnabled_ = gSettings.bondModeEnabledMesh[0];
+    savedBondRole_    = gSettings.bondRoleMesh[0];
+    savedBondPeer_    = gSettings.bondPeerMacMesh[0];
+#endif
+    initPrimaryMeshFromLegacySettings();
+    recomputeAllMeshFingerprints();
+    created_ = wasEmpty && m0.label.length() > 0;
+  }
+  ~PrimaryMeshBootstrap() {
+    if (!created_ || kept_) return;
+    Settings::MeshIdentity& m0 = gSettings.meshes[0];
+    m0.label       = "";
+    m0.fingerprint = 0;
+    m0.enabled     = savedEnabled_;
+    m0.isDefault   = savedDefault_;
+    // A key stretched during the start used "primary" as its salt; it does not
+    // fit the unlabelled slot, so it is dropped and stretched again when needed.
+    if (!savedKeyValid_ && m0.passphraseStretchedKeyValid) {
+      memset(m0.passphraseStretchedKey, 0, sizeof(m0.passphraseStretchedKey));
+      m0.passphraseStretchedKeyValid = false;
+    }
+#if ENABLE_BONDED_MODE
+    gSettings.bondModeEnabledMesh[0] = savedBondEnabled_;
+    gSettings.bondRoleMesh[0]        = savedBondRole_;
+    gSettings.bondPeerMacMesh[0]     = savedBondPeer_;
+#endif
+  }
+  PrimaryMeshBootstrap(const PrimaryMeshBootstrap&) = delete;
+  PrimaryMeshBootstrap& operator=(const PrimaryMeshBootstrap&) = delete;
+  // The start went ahead (or cannot prove nothing still reads slot 0).
+  void keep() { kept_ = true; }
+
+ private:
+  bool created_ = false;
+  bool kept_ = false;
+  bool savedEnabled_ = false;
+  bool savedDefault_ = false;
+  bool savedKeyValid_ = false;
+#if ENABLE_BONDED_MODE
+  bool savedBondEnabled_ = false;
+  uint8_t savedBondRole_ = 0;
+  String savedBondPeer_;
+#endif
+};
+
 // The slot whose passphrase a starting ESP-NOW loads: an enabled default mesh
 // in slots 1..N-1 that has one, else slot 0.
 static uint8_t espnowStartPassphraseSlot() {
@@ -1926,6 +2032,75 @@ static const char* meshLabelForPassphraseHint() {
     if (m.enabled && m.isDefault && m.label.length() > 0) return m.label.c_str();
   }
   return nullptr;
+}
+
+// The slot whose passphrase a start would load now, -1 when that slot has none.
+static int8_t espnowStartPassphraseSource() {
+  const uint8_t slot = espnowStartPassphraseSlot();
+  return gSettings.meshes[slot].passphrase.length() > 0 ? (int8_t)slot : -1;
+}
+
+// Give a running instance the passphrase a start would load now, so a new
+// passphrase on that mesh, or another mesh becoming the one, applies at once
+// rather than at the next start. Safe for paired devices and open sessions:
+// nothing on the air uses this passphrase (see gEspNowLivePassphraseSlot). A
+// stopped instance holds none; its next start loads it. Called by the mesh
+// commands on cmd_exec and by initEspNow; espnow_task only reads encryptionEnabled.
+static void espnowLoadLivePassphrase() {
+  if (!gEspNow || !gEspNow->initialized) return;
+  const uint8_t slot = espnowStartPassphraseSlot();
+  const String pw = gSettings.meshes[slot].passphrase;
+  gEspNow->passphrase = pw;
+  deriveKeyFromPassphrase(pw, gEspNow->derivedKey);
+  gEspNowLivePassphraseSlot = pw.length() > 0 ? (int8_t)slot : -1;
+}
+
+// One sentence for the mesh replies: whose passphrase this device uses now for
+// its own checks (the fingerprint in 'espnowencstatus', the gate of sending and
+// pairing), or, while ESP-NOW is stopped, whose the next start loads.
+static void formatLivePassphraseNote(char* out, size_t outLen) {
+  const bool running = gEspNow && gEspNow->initialized;
+  const int8_t slot = running ? gEspNowLivePassphraseSlot : espnowStartPassphraseSource();
+  const char* label = slot >= 0 ? gSettings.meshes[slot].label.c_str() : nullptr;
+  if (!running) {
+    if (label) {
+      snprintf(out, outLen, "ESP-NOW is stopped; its next start uses the passphrase of mesh '%s'.", label);
+    } else {
+      snprintf(out, outLen, "ESP-NOW is stopped; its next start finds no passphrase to use.");
+    }
+    return;
+  }
+  if (label) {
+    snprintf(out, outLen,
+             "This device now uses the passphrase of mesh '%s' (the fingerprint in 'espnowencstatus').",
+             label);
+    return;
+  }
+  const char* hint = meshLabelForPassphraseHint();
+  if (hint) {
+    snprintf(out, outLen,
+             "This device has no passphrase in use now: sending and pairing are refused until mesh '%s' has one.",
+             hint);
+  } else {
+    snprintf(out, outLen,
+             "This device has no passphrase in use now: sending and pairing are refused until an enabled "
+             "default mesh has one.");
+  }
+}
+
+// The slot whose passphrase this device uses now (running) or its next start
+// loads (stopped), -1 for none: what formatLivePassphraseNote describes.
+static int8_t espnowPassphraseInUse() {
+  return (gEspNow && gEspNow->initialized) ? gEspNowLivePassphraseSlot : espnowStartPassphraseSource();
+}
+
+// Appends formatLivePassphraseNote to the reply in the debug buffer.
+static void appendLivePassphraseNote() {
+  char* buf = getDebugBuffer();
+  const size_t used = strlen(buf);
+  if (used + 2 >= 1024) return;
+  buf[used] = ' ';
+  formatLivePassphraseNote(buf + used + 1, 1024 - used - 1);
 }
 
 // The start-up warning for a device with no mesh passphrase. It names the mesh
@@ -3163,6 +3338,14 @@ bool v4_broadcast_topo_request(uint32_t reqId) {
 //      the responder: skip this send; the initiator will bring the session up.
 // Receivers enforce the matching rule via V4_OPC_FLAG_REQ_SESSION_ENC.
 
+// Bond frames sent on a timer. One that waits for a handshake is stale by the
+// time it could go out, and queuing it made a partner that is not there cost
+// a pending-frame warning plus a key exchange every 5 s (bench 2026-11-17,
+// step d2). Without a session these are dropped quietly.
+static bool bondFrameIsPeriodic(uint8_t type) {
+  return type == ESPNOW_V4_TYPE_BOND_HEARTBEAT || type == ESPNOW_V4_TYPE_BOND_SENSOR_DATA;
+}
+
 // THE bond send entry — enforces the two rules above (single-initiator +
 // encrypt-or-wait). The AEAD seal / capture / esp_now_send happens on espnow_tx
 // rather than the caller's stack, so callers never pay the crypto on their own
@@ -3194,6 +3377,13 @@ static bool bondSendEncryptedAsync(const uint8_t* mac, uint8_t type, uint16_t fl
   if (!active && !iAmInitiator) {
     // Rule 2's silent skip: a responder without an active session never
     // initiates. Caller treats this as a "drop this frame, not an error."
+    return false;
+  }
+  if (!active && bondFrameIsPeriodic(type)) {
+    // The heartbeat (espnow_task, every 5 s) is what brings the session up:
+    // it starts the key exchange or SESSION_OPEN, backed off for a partner
+    // that does not answer (System_ESPNow_HandshakeBackoff.h).
+    if (type == ESPNOW_V4_TYPE_BOND_HEARTBEAT) (void)espnowHandshakeAutoStart(mac);
     return false;
   }
 
@@ -3249,6 +3439,8 @@ static bool bondSessionActiveWith(const uint8_t* mac) {
 // The master kicks the capability exchange here. Filtered to the bonded peer so
 // sessions opened for non-bond reasons don't spuriously start a bond sync.
 void bondNotifySessionEstablished(const uint8_t* peerMac) {
+  // Any peer: a session that came up ends its handshake back-off.
+  if (peerMac) espnowHandshakeBackoffClear(peerMac);
 #if ENABLE_BONDED_MODE
   if (!gEspNow || !isBondPeerMac(peerMac)) return;
   bool wasOffline = !gEspNow->bondPeerOnline;
@@ -3460,6 +3652,7 @@ static bool            getTopoDeviceName(const uint8_t* mac, char* outBuf, size_
 static void            finalizeTopologyStreamLocked(TopologyStream* stream);
 #if ENABLE_BONDED_MODE
 static bool            cacheManifestToLittleFs(const uint8_t fwHash[16], const char* manifest, size_t len);
+static void            manifestCacheRecordUse(const uint8_t* peerMac, const uint8_t fwHash[16]);
 #endif
 #if ENABLE_BONDED_MODE
 static void            processBondSettings(const uint8_t* srcMac, const String& deviceName, const String& settingsStr);
@@ -3499,8 +3692,9 @@ static void processBondModeManifestResp(const uint8_t* srcMac, const String& dev
   gEspNow->bondSyncInFlight = BOND_SYNC_NONE;
   gEspNow->bondSyncRetryCount = 0;
 
-  if (gEspNow->lastRemoteCapValid) {
-    cacheManifestToLittleFs(gEspNow->lastRemoteCap.fwHash, manifest, len);
+  if (gEspNow->lastRemoteCapValid &&
+      cacheManifestToLittleFs(gEspNow->lastRemoteCap.fwHash, manifest, len)) {
+    manifestCacheRecordUse(srcMac, gEspNow->lastRemoteCap.fwHash);
   }
   // Sync tick will pick up the next missing item (settings) on next iteration
 }
@@ -3692,8 +3886,8 @@ static void v4h_text(const V4RxCtx& ctx) {
       // web UI's message bubble always showed "not encrypted".)
       slot.encrypted = ctx.isSessionEncrypted;
       // A frame that arrived under the dedicated BOOT type is a device/system
-      // notice, not chat — tag it so the drain stores MSG_SYSTEM_EVENT and clients
-      // filter it out of the conversation (same class as the metadata snapshot).
+      // notice, not chat — tag it so the drain stores MSG_SYSTEM_EVENT, as a
+      // readable line rather than the JSON (same class as the metadata snapshot).
       slot.msgType = (ctx.h->type == ESPNOW_V4_TYPE_BOOT) ? MSG_SYSTEM_EVENT : MSG_TEXT;
       // Carry the fragment tags so the drain can store this piece as its own
       // record. Single-frame text has fragCount==1 → stored as piece 1/1.
@@ -4646,9 +4840,15 @@ static void v4h_bond_cap_resp(const V4RxCtx& ctx) {
   gEspNow->lastRemoteCapValid = true;
   gEspNow->lastRemoteCapTime = millis();
   gEspNow->bondReceivedCapability = true;
-  gEspNow->bondSyncInFlight = BOND_SYNC_NONE;
-  gEspNow->bondSyncRetryCount = 0;
-  gEspNow->bondSyncLastAttemptMs = 0;
+  // Ends only the capability request. A CAP_RESP the worker sends unasked
+  // (its reply to our CAP_RESP after it asked for ours, see
+  // bondWorkerAskForCap) must not restart a manifest or settings transfer
+  // that is under way.
+  if (gEspNow->bondSyncInFlight == BOND_SYNC_CAP) {
+    gEspNow->bondSyncInFlight = BOND_SYNC_NONE;
+    gEspNow->bondSyncRetryCount = 0;
+    gEspNow->bondSyncLastAttemptMs = 0;
+  }
   if (!gEspNow->bondCapSent) {
     memcpy(gEspNow->bondPendingResponseMac, ctx.recv_info->src_addr, 6);
     gEspNow->bondNeedsCapabilityResponse = true;
@@ -4710,6 +4910,16 @@ static void v4h_bond_status_req(const V4RxCtx& ctx) {
   if (gEspNow) {
     memcpy(gEspNow->bondPendingResponseMac, ctx.recv_info->src_addr, 6);
     gEspNow->bondNeedsStatusResponse = true;
+    // The master asks for status only once it is SYNCED (firePostSyncSideEffects
+    // and the 30 s poll both require isBondSynced), and that means it holds our
+    // capability and settings. A worker whose own record of sending them was
+    // reset while the master stayed SYNCED (its bondconnect or bondresync, a
+    // heartbeat timeout only it saw) would otherwise show SYNCING for good:
+    // the master asks for nothing more.
+    if (isBondWorker()) {
+      gEspNow->bondCapSent = true;
+      gEspNow->bondSettingsSent = true;
+    }
   }
 }
 
@@ -6637,6 +6847,13 @@ static bool v4_dispatch_table_try(const esp_now_recv_info* recv_info, const EspN
                                   const uint8_t* payload, uint16_t payloadLen,
                                   bool isPaired, bool isAuthenticated,
                                   bool isSessionEncrypted, const char* deviceName) {
+  // An authenticated frame sent straight from its origin shows that peer is on
+  // the air: it ends the peer's handshake back-off if the peer had been quiet.
+  // (A relayed frame says nothing about the origin's own radio.)
+  if ((isSessionEncrypted || isAuthenticated) &&
+      memcmp(h->origin, recv_info->src_addr, 6) == 0) {
+    espnowHandshakeHeard(recv_info->src_addr);
+  }
   const V4OpcodeEntry* e = v4_dispatch_lookup(h->type);
   if (!e) return false;
   if ((e->flags & V4_OPC_FLAG_REQ_PAIRED) && !isPaired) {
@@ -6646,9 +6863,12 @@ static bool v4_dispatch_table_try(const esp_now_recv_info* recv_info, const EspN
     return true;
   }
 #if ENABLE_BONDED_MODE
-  if ((e->flags & V4_OPC_FLAG_REQ_BOND_PEER) && !gSettings.bondModeEnabled) {
+  if ((e->flags & V4_OPC_FLAG_REQ_BOND_PEER) &&
+      (!gSettings.bondModeEnabled || bondPartnerChanging())) {
     // Bond-mode-only opcodes were gated `&& gSettings.bondModeEnabled` originally.
     // When bond mode is off, drop silently (no other branch handles these types).
+    // Also silent while bondconnect & co. change the partner: the frame is
+    // neither from a wrong partner nor one to act on before the sync reset.
     v4_dispatch_post_cleanup(recv_info, h);
     return true;
   }
@@ -8998,6 +9218,148 @@ static bool manifestCachedFor(const uint8_t fwHash[16]) {
   return complete;
 }
 
+// ---- Which peer uses which cached manifest ---------------------------------
+// /system/manifests/<fwHash>.json is keyed by firmware, not by device, so each
+// peer whose manifest bond sync delivered or found in the cache records its
+// hash in /system/espnow/peers/<MAC>/manifest.hash (32 lowercase hex, no
+// newline). A cached manifest is removed once no peer folder names it: when
+// its peer is unpaired (the folder goes) or when that peer moves to other
+// firmware. Bond sync only ever looks up the current partner's hash, so the
+// cache holds at most one file per peer that used one; two peers on the same
+// firmware share one file, and it stays while either still names it.
+static const char* const kManifestRefName = "manifest.hash";
+
+static void manifestHashToHex(const uint8_t fwHash[16], char hex[33]) {
+  for (int i = 0; i < 16; i++) snprintf(hex + (i * 2), 3, "%02x", fwHash[i]);
+  hex[32] = '\0';
+}
+
+// The hash recorded in `refPath`; false when there is none or it is not 32
+// lowercase hex digits. The caller holds the filesystem lock.
+static bool manifestRefReadPath(const char* refPath, char hex[33]) {
+  hex[0] = '\0';
+  auto auth = VFS::systemAuth(VFS::Scopes::ESPNOW_STATE, "espnow.manifest_ref_read");
+  if (!VFS::existsGuarded(refPath, auth)) return false;
+  File f = VFS::openGuarded(refPath, "r", auth);
+  if (!f) return false;
+  const size_t size = f.size();
+  const size_t got = size == 32 ? f.read((uint8_t*)hex, 32) : 0;
+  f.close();
+  if (got != 32) {
+    hex[0] = '\0';
+    return false;
+  }
+  hex[32] = '\0';
+  for (int i = 0; i < 32; i++) {
+    if (!((hex[i] >= '0' && hex[i] <= '9') || (hex[i] >= 'a' && hex[i] <= 'f'))) {
+      hex[0] = '\0';
+      return false;
+    }
+  }
+  return true;
+}
+
+// The manifest hash `peerMac` recorded, if any.
+static bool manifestRefRead(const uint8_t* peerMac, char hex[33]) {
+  char refPath[64];
+  peerCachePath(peerMac, kManifestRefName, refPath, sizeof(refPath));
+  FsLockGuard fsGuard("espnow.manifest_ref_read");
+  return manifestRefReadPath(refPath, hex);
+}
+
+// True when a peer folder still names manifest `hex`, and also when the peer
+// folders cannot be read: a manifest is only removed when nobody is known to
+// need it. The caller holds the filesystem lock.
+static bool manifestHashInUse(const char* hex) {
+  const char* peersDir = "/system/espnow/peers";
+  auto auth = VFS::systemAuth(VFS::Scopes::ESPNOW_STATE, "espnow.manifest_ref_scan");
+  if (!VFS::existsGuarded(peersDir, auth)) return false;
+  File dir = VFS::openGuarded(peersDir, "r", auth);
+  if (!dir || !dir.isDirectory()) {
+    if (dir) dir.close();
+    return true;
+  }
+  bool used = false;
+  File entry = dir.openNextFile();
+  while (entry) {
+    if (entry.isDirectory()) {
+      const char* name = entry.name();
+      const char* base = strrchr(name, '/');
+      base = base ? base + 1 : name;
+      char refPath[112];
+      char other[33];
+      // Any folder name counts here, canonical or not: keeping a file is safe.
+      if (strlen(base) < 64) {
+        snprintf(refPath, sizeof(refPath), "%s/%s/%s", peersDir, base, kManifestRefName);
+        used = manifestRefReadPath(refPath, other) && strcmp(other, hex) == 0;
+      }
+    }
+    entry.close();
+    if (used) break;
+    entry = dir.openNextFile();
+  }
+  dir.close();
+  return used;
+}
+
+// Removes /system/manifests/<hex>.json when no peer folder names it. Returns
+// the size of the file removed, 0 when it was kept or not there.
+static uint32_t manifestDropIfUnused(const char* hex) {
+  if (!filesystemReady || !hex || strlen(hex) != 32) return 0;
+  char path[64];
+  snprintf(path, sizeof(path), "/system/manifests/%.32s.json", hex);
+  auto auth = VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "espnow.manifest_drop");
+  FsLockGuard fsGuard("espnow.manifest_drop");
+  if (!VFS::existsGuarded(path, auth) || manifestHashInUse(hex)) return 0;
+  uint32_t size = 0;
+  File f = VFS::openGuarded(path, "r", auth);
+  if (f) {
+    size = (uint32_t)f.size();
+    f.close();
+  }
+  if (!VFS::removeGuarded(path, auth)) {
+    WARN_ESPNOWF("[BOND] cached manifest %s could not be removed", path);
+    return 0;
+  }
+  return size;
+}
+
+// Records that `peerMac` uses the cached manifest of `fwHash`, and removes the
+// one it named before when no other peer names that one.
+static void manifestCacheRecordUse(const uint8_t* peerMac, const uint8_t fwHash[16]) {
+  if (!filesystemReady || !peerMac) return;
+  char hex[33], previous[33];
+  manifestHashToHex(fwHash, hex);
+  char dirPath[48], refPath[64];
+  peerCacheDir(peerMac, dirPath, sizeof(dirPath));
+  peerCachePath(peerMac, kManifestRefName, refPath, sizeof(refPath));
+  auto auth = VFS::systemAuth(VFS::Scopes::ESPNOW_STATE, "espnow.manifest_ref_write");
+  FsLockGuard fsGuard("espnow.manifest_ref_write");
+  const bool hadPrevious = manifestRefReadPath(refPath, previous);
+  if (hadPrevious && strcmp(previous, hex) == 0) return;
+  if (!VFS::existsGuarded(dirPath, auth)) VFS::mkdirGuarded(dirPath, auth);
+  File f = VFS::openGuarded(refPath, "w", auth, true);
+  const bool written = f && f.write((const uint8_t*)hex, 32) == 32;
+  if (f) f.close();
+  if (!written) {
+    // Without the reference this manifest is never removed by an unpair; the
+    // previous one stays named by the old reference, if that survived.
+    ERROR_ESPNOWF("[BOND] could not record the manifest of %s", refPath);
+    return;
+  }
+  if (hadPrevious) manifestDropIfUnused(previous);
+}
+
+// Bond sync: whether `peerMac`'s manifest is cached already. A hit is recorded
+// for this peer as well, so a manifest it reaches through the cache (another
+// peer on the same firmware, or one cached before references existed) is named
+// by it and not removed when the peer that first sent it is unpaired.
+static bool manifestCacheHit(const uint8_t* peerMac, const uint8_t fwHash[16]) {
+  if (!manifestCachedFor(fwHash)) return false;
+  manifestCacheRecordUse(peerMac, fwHash);
+  return true;
+}
+
 #endif // ENABLE_BONDED_MODE
 
 // Cached manifests live at /system/manifests/<fwHash>.json, where fwHash is the
@@ -10357,6 +10719,43 @@ String buildBootNotification(uint32_t msgId, const char* src,
   return out;
 }
 
+// The history text and console line for a received system notice (the text of
+// a BOOT frame) from devName, the name resolved from the frame's authenticated
+// origin. The text is the peer's: it gets a bounded parse and only its boot
+// counter is used, never its "src" (a peer can put any name there). Anything
+// that is not a well-formed BOOT notice gets a neutral line, never the raw text.
+// Called by the text-queue drain on espnow_task.
+static void formatEspNowSystemNotice(const char* text, size_t textCap, const char* devName,
+                                     char* history, size_t historyLen,
+                                     char* line, size_t lineLen) {
+  bool isBoot = false;
+  bool hasCounter = false;
+  uint32_t bootCounter = 0;
+  if (text && textCap > 0) {
+    PSRAM_JSON_DOC(doc);
+    if (!deserializeJson(doc, text, strnlen(text, textCap))) {
+      JsonVariantConst type = doc["type"];
+      isBoot = type.is<const char*>() && strcmp(type.as<const char*>(), MSG_TYPE_BOOT) == 0;
+      JsonVariantConst boot = doc["pld"]["boot"];
+      if (isBoot && boot.is<uint32_t>()) {
+        hasCounter = true;
+        bootCounter = boot.as<uint32_t>();
+      }
+    }
+  }
+  const char* who = (devName && devName[0]) ? devName : "a peer";
+  if (isBoot && hasCounter) {
+    snprintf(history, historyLen, "Online (boot #%lu)", (unsigned long)bootCounter);
+    snprintf(line, lineLen, "[ESP-NOW] %s is online (boot #%lu)", who, (unsigned long)bootCounter);
+  } else if (isBoot) {
+    snprintf(history, historyLen, "Online");
+    snprintf(line, lineLen, "[ESP-NOW] %s is online", who);
+  } else {
+    snprintf(history, historyLen, "System notice");
+    snprintf(line, lineLen, "[ESP-NOW] System notice from %s", who);
+  }
+}
+
 // Send topology discovery requests to a stable snapshot of active peers.
 void requestTopologyDiscovery() {
   if (!gEspNow || !gEspNow->initialized || !gMeshPeers) return;
@@ -10530,6 +10929,45 @@ static bool bondSendReadyOrDeferred(const uint8_t* mac) {
     return true;                           // deadline passed → plaintext fallback
   }
   return false;                            // still racing → defer to next tick
+}
+
+// Worker without the master's capability while the bond is up. The master
+// sends its CAP_RESP once, in reply to the worker's first one; a worker that
+// lost it later (its own bondconnect, bondresync or heartbeat timeout while
+// the master stayed SYNCED) never got it again and showed SYNCING for good.
+// After 10 s online with the session up, ask for it, then every 10 s while it
+// is still missing. The master's CAP_RESP brings our own reply back
+// (bondCapSent); the master's next status poll restores bondSettingsSent
+// (v4h_bond_status_req). espnow_task.
+static const uint32_t BOND_WORKER_CAP_WAIT_MS = 10000;
+
+static void bondWorkerAskForCap(uint32_t now) {
+  static uint32_t sMissingSinceMs = 0;   // 0 = not missing
+  static uint32_t sLastAskMs = 0;
+  uint8_t peerMac[6];
+  const bool missing = gSettings.bondModeEnabled && isBondWorker() && gEspNow->bondPeerOnline &&
+                       !gEspNow->lastRemoteCapValid &&
+                       parseMacAddress(gSettings.bondPeerMac, peerMac) &&
+                       bondSessionActiveWith(peerMac);
+  if (!missing) {
+    sMissingSinceMs = 0;
+    sLastAskMs = 0;
+    return;
+  }
+  if (sMissingSinceMs == 0) {
+    sMissingSinceMs = now ? now : 1;
+    return;
+  }
+  if ((uint32_t)(now - sMissingSinceMs) < BOND_WORKER_CAP_WAIT_MS) return;
+  if (sLastAskMs != 0 && (uint32_t)(now - sLastAskMs) < BOND_WORKER_CAP_WAIT_MS) return;
+  const bool firstAsk = (sLastAskMs == 0);
+  sLastAskMs = now ? now : 1;
+  const uint32_t reqId = generateMessageId();
+  if (bondSendEncryptedAsync(peerMac, ESPNOW_V4_TYPE_BOND_CAP_REQ, ESPNOW_V4_FLAG_ACK_REQ, reqId,
+                             nullptr, 0) && firstAsk) {
+    BROADCAST_PRINTF("[BOND_SYNC] worker: no capability from the master after %lus online - asking (msgId=%lu)",
+                     (unsigned long)((now - sMissingSinceMs) / 1000), (unsigned long)reqId);
+  }
 }
 #endif // ENABLE_BONDED_MODE
 
@@ -10880,21 +11318,27 @@ void processMeshHeartbeats() {
         phb.role      = gSettings.bondRole;
         phb.uptimeSec = SelfDevice::uptimeSeconds();
         phb.freeHeap  = (uint32_t)ESP.getFreeHeap();
-        phb.seqNum    = ++gBondHeartbeatSeqNum;
+        phb.seqNum    = gBondHeartbeatSeqNum + 1;
         phb.bootCounter = gBootCounter;
         phb.settingsHash = gEspNow ? gEspNow->bondLocalSettingsHash : 0;
         wifi_ap_record_t ap2 = {};
         phb.rssi = (esp_wifi_sta_get_ap_info(&ap2) == ESP_OK) ? ap2.rssi : (int8_t)-127;
-        // Encrypted + initiator-only: bondSendEncryptedAsync kicks the session on the
-        // initiator (higher-MAC) side; the responder skips until the session is up.
-        // The session handshake is now what bootstraps the bond (see
-        // bondNotifySessionEstablished), so the heartbeat no longer needs to be
-        // the plaintext discovery beacon.
+        // Encrypted + initiator-only: without a session bondSendEncryptedAsync
+        // drops the heartbeat and, on the initiator (higher-MAC) side, starts
+        // the handshake (backed off for a partner that does not answer); the
+        // responder skips until the session is up. The session handshake is
+        // what bootstraps the bond (see bondNotifySessionEstablished), so the
+        // heartbeat no longer needs to be the plaintext discovery beacon.
         bool sent = bondSendEncryptedAsync(bondMac, ESPNOW_V4_TYPE_BOND_HEARTBEAT, 0,
                       generateMessageId(), (const uint8_t*)&phb, (uint16_t)sizeof(phb));
-        gEspNow->bondHeartbeatsSent++;
+        // Only heartbeats that went out are counted and logged: a partner that
+        // is not there no longer adds a line every 30 s.
+        if (sent) {
+          ++gBondHeartbeatSeqNum;
+          gEspNow->bondHeartbeatsSent++;
+        }
         // Log every 6th heartbeat (every 30s) or first one, plus full state
-        if (gBondHeartbeatSeqNum <= 2 || gBondHeartbeatSeqNum % 6 == 0) {
+        if (sent && (gBondHeartbeatSeqNum <= 2 || gBondHeartbeatSeqNum % 6 == 0)) {
           BROADCAST_PRINTF("[BOND_HB_TX] seq=%lu sent=%d to=%s role=%d synced=%d peerOnline=%d hbRx=%lu",
                            (unsigned long)gBondHeartbeatSeqNum, (int)sent,
                            gSettings.bondPeerMac.c_str(), (int)gSettings.bondRole,
@@ -10967,6 +11411,10 @@ void processMeshHeartbeats() {
       if (isMeshPeerAlive(&p)) {
         if (!p.onlineLogged) {
           p.onlineLogged = true;
+          // Not heard -> heard: a peer that came back gets its next automatic
+          // handshake start at once. An edge, so a peer heard all along does
+          // not end its back-off with every heartbeat.
+          espnowHandshakeBackoffClear(pm);
           logSystemEvent("MESH", "peer " MAC_FMT " online",
                          MAC_ARGS(pm));
           char macStr[18];
@@ -11155,7 +11603,7 @@ void processMeshHeartbeats() {
         BROADCAST_PRINTF("[BOND_SYNC] Requesting CAP (msgId=%lu)", (unsigned long)reqId);
       } else if (!haveManifest) {
         // Have cap, need manifest — check cache first
-        const bool haveCached = manifestCachedFor(gEspNow->lastRemoteCap.fwHash);
+        const bool haveCached = manifestCacheHit(peerMac, gEspNow->lastRemoteCap.fwHash);
         if (haveCached) {
           gEspNow->bondManifestReceived = true;
           BROADCAST_PRINTF("[BOND_SYNC] Manifest found in cache, skipping request");
@@ -11217,6 +11665,7 @@ void processMeshHeartbeats() {
     if (gEspNow->bondReceivedCapability) {
       gEspNow->bondReceivedCapability = false;
     }
+    bondWorkerAskForCap(now);
   }
 
   // POST-SYNC FALLBACK GUARD (both roles): if we've landed in isBondSynced()
@@ -11387,10 +11836,13 @@ void processMeshHeartbeats() {
     }
   }
 
-  // 9i. Bond: periodic state dump (every 30s when bond mode active)
+  // 9i. Bond: periodic state dump (every 30s when bond mode active; every
+  // 15 min while the partner is offline, so an absent partner costs a few
+  // lines an hour)
   {
     static uint32_t sLastBondStateDump = 0;
-    if (gSettings.bondModeEnabled && (now - sLastBondStateDump >= 30000)) {
+    const uint32_t dumpEveryMs = gEspNow->bondPeerOnline ? 30000UL : 15UL * 60UL * 1000UL;
+    if (gSettings.bondModeEnabled && (now - sLastBondStateDump >= dumpEveryMs)) {
       sLastBondStateDump = now;
       BROADCAST_PRINTF("[BOND_STATE] role=%d synced=%d peerOnline=%d hbTx=%lu hbRx=%lu rssi=%d rejects=%lu peer='%s' capValid=%d capSent=%d statusValid=%d connMask=0x%04X",
                        (int)gSettings.bondRole, (int)isBondSynced(),
@@ -11501,20 +11953,35 @@ void processMeshHeartbeats() {
       if (entry.used) {
         String devName = String(entry.deviceName);
         if (devName.length() == 0) devName = macToDisplayStr(entry.srcMac);
-        // Store this piece as its own record. Group = msgId; piece = fragIndex+1
-        // of fragCount. Single-frame text is just piece 1/1. The client groups
-        // by reqId and stitches — the device never holds the whole message.
-        bool stored = storeMessageInPeerHistory(entry.srcMac, devName.c_str(),
-                                                entry.content, entry.encrypted,
-                                                entry.msgType, entry.msgId,
-                                                (uint8_t)(entry.fragIndex + 1), entry.fragCount);
-        if (entry.fragCount > 1) {
-          BROADCAST_PRINTF("[%s%s] (part %u/%u) %s", devName.c_str(),
-                           entry.encrypted ? " [enc]" : "",
-                           entry.fragIndex + 1, entry.fragCount, entry.content);
+        bool stored;
+        if (entry.msgType == MSG_SYSTEM_EVENT) {
+          // A system notice (BOOT) is stored and printed as a readable line,
+          // never as the peer's raw JSON, so every history reader (web, phone,
+          // G2, OLED) shows the line. One record with no group id: it is not
+          // chat, and a remote-command answer is matched by that id.
+          EXT_RAM_BSS_ATTR static char noticeText[40];
+          EXT_RAM_BSS_ATTR static char noticeLine[96];
+          formatEspNowSystemNotice(entry.content, sizeof(entry.content), devName.c_str(),
+                                   noticeText, sizeof(noticeText), noticeLine, sizeof(noticeLine));
+          stored = storeMessageInPeerHistory(entry.srcMac, devName.c_str(), noticeText,
+                                             entry.encrypted, entry.msgType, 0, 1, 1);
+          BROADCAST_PRINTF("%s", noticeLine);
         } else {
-          BROADCAST_PRINTF("[%s%s] %s", devName.c_str(),
-                           entry.encrypted ? " [enc]" : "", entry.content);
+          // Store this piece as its own record. Group = msgId; piece = fragIndex+1
+          // of fragCount. Single-frame text is just piece 1/1. The client groups
+          // by reqId and stitches — the device never holds the whole message.
+          stored = storeMessageInPeerHistory(entry.srcMac, devName.c_str(),
+                                             entry.content, entry.encrypted,
+                                             entry.msgType, entry.msgId,
+                                             (uint8_t)(entry.fragIndex + 1), entry.fragCount);
+          if (entry.fragCount > 1) {
+            BROADCAST_PRINTF("[%s%s] (part %u/%u) %s", devName.c_str(),
+                             entry.encrypted ? " [enc]" : "",
+                             entry.fragIndex + 1, entry.fragCount, entry.content);
+          } else {
+            BROADCAST_PRINTF("[%s%s] %s", devName.c_str(),
+                             entry.encrypted ? " [enc]" : "", entry.content);
+          }
         }
         // ESP-NOW App page push-kick: if the user is currently viewing the
         // inbox (merged or per-peer), enqueue a Redraw so the new entry
@@ -11786,6 +12253,24 @@ static bool initEspNow() {
     broadcastOutput("[ESP-NOW] Cannot start: previous shutdown is still in progress");
     return false;
   }
+  if (gEspNow && gEspNow->initialized) {
+    broadcastOutput("[ESP-NOW] Already initialized");
+    return true;
+  }
+
+  // Checks that can refuse the start run before anything is allocated or any
+  // setting changes, so a refused start leaves the device as it was.
+  const char* setupError = checkEspNowFirstTimeSetup();
+  if (setupError && strlen(setupError) > 0) {
+    snprintf(gLastInitErrorReason, sizeof(gLastInitErrorReason),
+             "%s", setupError);
+    broadcastOutput(setupError);
+    // Enabled but couldn't come up because identity/name isn't set — exactly the
+    // "configured but didn't start" divergence this log exists to record.
+    logSystemEvent("ESPNOW", "init FAILED — mesh unavailable (%s)", setupError);
+    return false;
+  }
+
   // Callers only enter for a stopped instance; each fresh start must read the
   // actual radio identity again before admitting receive or transmit work.
   setEspNowSelfMacCache(nullptr, nullptr);
@@ -11801,6 +12286,10 @@ static bool initEspNow() {
   int slots = gSettings.meshPeerMax;
   if (slots < 1) slots = 1;
   if (slots > MESH_PEER_MAX) slots = MESH_PEER_MAX;
+  // The arrays outlive closeespnow. A later start keeps the count they were
+  // made with: meshPeerMax changed in between takes effect at reboot, and a
+  // larger count than the arrays hold would run every peer loop past them.
+  if (sMeshPeerArraySlots > 0) slots = sMeshPeerArraySlots;
 
   // Allocate mesh peer arrays (dynamic based on meshPeerMax setting)
   if (!gMeshPeers) {
@@ -11808,6 +12297,7 @@ static bool initEspNow() {
     gMeshPeers = (MeshPeerHealth*)ps_alloc(healthSize, AllocPref::PreferPsram, "mesh.peers");
     if (gMeshPeers) {
       memset(gMeshPeers, 0, healthSize);
+      sMeshPeerArraySlots = slots;
     } else {
       snprintf(gLastInitErrorReason, sizeof(gLastInitErrorReason),
                "out of PSRAM (peer health array)");
@@ -11835,11 +12325,8 @@ static bool initEspNow() {
   // Both arrays exist — NOW it's safe to advertise the slot count to readers.
   gMeshPeerSlots = slots;
 
-  // Allocate ESP-NOW state on first use
-  // Initialize primary mesh metadata
-  initPrimaryMeshFromLegacySettings();
-  recomputeAllMeshFingerprints();
-
+  // Allocate ESP-NOW state on first use. The slot 0 mesh bootstrap waits for
+  // the driver (see PrimaryMeshBootstrap below).
   if (!gEspNow) {
     void* stateStorage = ps_alloc(sizeof(EspNowState), AllocPref::PreferPsram, "espnow.state");
     if (!stateStorage) {
@@ -11848,8 +12335,8 @@ static bool initEspNow() {
       broadcastOutput("[ESP-NOW] ERROR: Failed to allocate state structure");
       return false;
     }
-    // EspNowState still embeds top-level String objects (passphrase,
-    // deviceName, etc.), so ps_alloc's raw storage must be placement-constructed.
+    // EspNowState still embeds top-level String objects (passphrase, etc.),
+    // so ps_alloc's raw storage must be placement-constructed.
     // Device registry metadata is allocation-free EspNowInlineText embedded in
     // this PSRAM block; its constructors establish valid empty strings.
     memset(stateStorage, 0, sizeof(EspNowState));
@@ -11930,22 +12417,6 @@ static bool initEspNow() {
     } else {
       broadcastOutput("[ESP-NOW] WARNING: Failed to allocate reassembly buffers in PSRAM — fragmentation disabled");
     }
-  }
-
-  if (gEspNow->initialized) {
-    broadcastOutput("[ESP-NOW] Already initialized");
-    return true;
-  }
-
-  const char* setupError = checkEspNowFirstTimeSetup();
-  if (setupError && strlen(setupError) > 0) {
-    snprintf(gLastInitErrorReason, sizeof(gLastInitErrorReason),
-             "%s", setupError);
-    broadcastOutput(setupError);
-    // Enabled but couldn't come up because identity/name isn't set — exactly the
-    // "configured but didn't start" divergence this log exists to record.
-    logSystemEvent("ESPNOW", "init FAILED — mesh unavailable (%s)", setupError);
-    return false;
   }
 
   // Claim the master-side remote-sensor cache only when ESP-NOW is actually
@@ -12130,6 +12601,12 @@ static bool initEspNow() {
     gEspNowRxTail = 0;
   }
 
+  // Create the default mesh "primary" on a device that has none, now that the
+  // radio is up and before the first frame can arrive: fingerprints, the
+  // passphrase restore, restored peers and the boot notice all read slot 0.
+  // A start that fails from here puts slot 0 back when this goes out of scope.
+  PrimaryMeshBootstrap meshBootstrap;
+
   // The checked identity and RX ring must both exist before admission.
   setEspNowSelfMacCache(radioSelfMac, radioSelfApMacOk ? radioSelfApMac : nullptr);
   // Enable callback admission only after the RX ring exists. Registration can
@@ -12184,6 +12661,8 @@ static bool initEspNow() {
     broadcastOutput("[ESP-NOW] ERROR: TX dispatcher failed to start; unwinding ESP-NOW init");
     logSystemEvent("ESPNOW", "init FAILED — TX dispatcher did not start (out of memory?)");
     const bool unwound = deinitEspNow(false);
+    // With cleanup pending a send may still read slot 0; leave it as it is.
+    if (!unwound) meshBootstrap.keep();
     snprintf(gLastInitErrorReason, sizeof(gLastInitErrorReason),
              unwound
                  ? "TX dispatcher creation failed (cleanup complete; retry is safe)"
@@ -12221,19 +12700,12 @@ static bool initEspNow() {
   // Use BROADCAST_PRINTF for user-visible init message (safe, doesn't trigger streaming)
   BROADCAST_PRINTF("[ESP-NOW] Initialized successfully on channel %d", gEspNow->channel);
 
-  // Restore the encryption passphrase (slot 0, or an enabled default mesh that has one)
-  const uint8_t bootPwSlot = espnowStartPassphraseSlot();
-  String bootPw = gSettings.meshes[bootPwSlot].passphrase;
-  gEspNowLivePassphraseSlot = bootPw.length() > 0 ? (int8_t)bootPwSlot : -1;
-  if (bootPw.length() > 0) {
-    gEspNow->passphrase = bootPw;
-    deriveKeyFromPassphrase(bootPw, gEspNow->derivedKey);
+  // Restore the encryption passphrase (slot 0, or an enabled default mesh that
+  // has one). With none in the settings the instance holds none either.
+  espnowLoadLivePassphrase();
+  if (gEspNowLivePassphraseSlot >= 0) {
     DEBUG_ESPNOW_STREAMF("[ESP-NOW] Restored encryption passphrase from settings");
   } else {
-    // A passphrase set while the instance was stopped stays in it; with none in
-    // the settings now (cleared, or its mesh deleted) it must not be used.
-    gEspNow->passphrase = "";
-    deriveKeyFromPassphrase(bootPw, gEspNow->derivedKey);
     char warning[224];
     formatNoPassphraseWarning(warning, sizeof(warning));
     BROADCAST_PRINTF("%s", warning);
@@ -12335,7 +12807,10 @@ static bool initEspNow() {
   {
     time_t now = time(nullptr);
     uint32_t timestamp = Clock::isValidEpoch(now) ? (uint32_t)now : 0;
-    String bootMsg = buildBootNotification(generateMessageId(), gEspNow->deviceName.c_str(), gBootCounter, timestamp);
+    // The setting is the name's only source; receivers show the name they
+    // resolve for this device, not this text.
+    String bootMsg = buildBootNotification(generateMessageId(), gSettings.espnowDeviceName.c_str(),
+                                           gBootCounter, timestamp);
     meshSendBootToPeers(bootMsg);
     BROADCAST_PRINTF("[ESP-NOW] Boot notification sent (counter=%lu)", (unsigned long)gBootCounter);
   }
@@ -12346,6 +12821,7 @@ static bool initEspNow() {
     broadcastOutput("[ESP-NOW] ERROR: Failed to start heartbeat task; unwinding ESP-NOW init");
     logSystemEvent("ESPNOW", "init FAILED — heartbeat task did not start (out of memory?), mesh features unavailable");
     const bool unwound = deinitEspNow(false);
+    if (!unwound) meshBootstrap.keep();
     snprintf(gLastInitErrorReason, sizeof(gLastInitErrorReason),
              unwound
                  ? "heartbeat task creation failed (cleanup complete; retry is safe)"
@@ -12361,6 +12837,7 @@ static bool initEspNow() {
   BROADCAST_PRINTF("[ESP-NOW] Heap allocated: ~%u KB (includes task stack, buffers, peer storage)", (unsigned)(heapUsed / 1024));
   broadcastOutput("[ESP-NOW] NOTE: closeespnow releases the TX dispatcher, RX ring, and broadcast tracker; durable peer/state caches remain for fast re-init.");
 
+  meshBootstrap.keep();
   systemEventPost(SYSEVT_ESPNOW_ON);
   logSystemEvent("ESPNOW", "init OK — mesh online on channel %d (mode=%s)",
                  gEspNow->channel, gEspNow->mode == ESPNOW_MODE_MESH ? "mesh" : "direct");
@@ -12444,8 +12921,9 @@ const char* cmd_espnow_init(const String& argsInput) {
   // went wrong without digging through serial broadcasts.
   EXT_RAM_BSS_ATTR static char fullMsg[128];
   if (gLastInitErrorReason[0]) {
+    // The setup check's reason carries its own "Error: "; do not say it twice.
     snprintf(fullMsg, sizeof(fullMsg), "Error: Cannot start ESP-NOW: %s",
-             gLastInitErrorReason);
+             commandReplyReason(gLastInitErrorReason));
   } else {
     snprintf(fullMsg, sizeof(fullMsg),
              "Error: Cannot start ESP-NOW (no reason captured)");
@@ -13084,7 +13562,8 @@ const char* cmd_espnow_keyex(const String& argsInput) {
     return "Error: not a paired device name and not a valid MAC.";
   }
 
-  bool ok = espnowKeyExInitiate(mac, meshLabel.length() > 0 ? meshLabel.c_str() : nullptr);
+  // Asked for by the user: starts now and ends any back-off for this peer.
+  bool ok = espnowKeyExInitiateManual(mac, meshLabel.length() > 0 ? meshLabel.c_str() : nullptr);
   if (!ok) {
     return "Error: KEY_EX initiate failed (see [ERROR][ESP-NOW] log).";
   }
@@ -13123,11 +13602,13 @@ const char* cmd_espnow_sessionopen(const String& argsInput) {
   }
   String meshLabel = (a.count() >= 2) ? a.arg(1) : String("");
   bool alreadyInFlight = false;
+  espnowHandshakeBackoffClear(mac);  // asked for by the user
   bool ok = espnowSessionOpenInitiate(mac, meshLabel.length() > 0 ? meshLabel.c_str() : nullptr,
                                       &alreadyInFlight);
   if (!ok) {
     return "Error: SESSION_OPEN initiate failed (see [ERROR][ESP-NOW] log).";
   }
+  sessionMarkUserStarted(mac);   // its timeout is printed, not rate-limited
   if (alreadyInFlight) {
     return "A handshake with this peer is already in flight - SESSION_OPEN not sent again. "
            "Run 'espnowsessions' to inspect.";
@@ -13195,7 +13676,7 @@ const char* cmd_espnow_probe(const String& argsInput) {
   bool hadIdentityBefore = (preProbe != nullptr);
 
   uint32_t kickMs = (uint32_t)millis();
-  bool ok = espnowKeyExInitiate(mac, meshLabel.length() > 0 ? meshLabel.c_str() : nullptr);
+  bool ok = espnowKeyExInitiateManual(mac, meshLabel.length() > 0 ? meshLabel.c_str() : nullptr);
   if (!ok) {
     return "Error: KEY_EX initiate failed (no enabled mesh? see [ERROR][ESP-NOW] log).";
   }
@@ -14102,7 +14583,6 @@ const char* cmd_espnow_setname(const String& argsInput) {
     if (gEspNow) {
       // The stopped instance keeps its tables for the next start; drop the name
       // from this device's own entry so nothing shows the old one meanwhile.
-      gEspNow->deviceName = "";
       uint8_t myMac[6] = {};
       // With the radio off the address may not be readable; the next start
       // rewrites this entry from the setting in any case.
@@ -15572,6 +16052,8 @@ static const char* meshesCmd_list() {
 //     "nMeshes": 4,
 //     "configuredCount": 3,
 //     "defaultSlot": 0,
+//     "running": true,
+//     "passphraseSlot": 0,
 //     "meshes": [
 //       { "slot": 0, "label": "primary", "enabled": true,
 //         "fingerprint": 18265, "fingerprintHex": "0x4759",
@@ -15580,7 +16062,9 @@ static const char* meshesCmd_list() {
 //     ]
 //   }
 // Only configured slots (label != "" or enabled) are emitted, but the
-// caller can compute free slots = nMeshes - configuredCount.
+// caller can compute free slots = nMeshes - configuredCount. passphraseSlot is
+// the mesh whose passphrase the device uses now (running) or its next start
+// loads (stopped), -1 for none (espnowPassphraseInUse).
 static const char* meshesCmd_listjson() {
   PSRAM_JSON_DOC(doc);
   doc["nMeshes"] = (int)Settings::N_MESHES;
@@ -15609,6 +16093,8 @@ static const char* meshesCmd_listjson() {
   }
   doc["configuredCount"] = configured;
   doc["defaultSlot"]     = defaultSlot;
+  doc["running"]         = gEspNow && gEspNow->initialized;
+  doc["passphraseSlot"]  = (int)espnowPassphraseInUse();
 
   // Use a static buffer so this command works pre-init (meshes are settings,
   // not runtime state — the user may want to view/configure them before
@@ -15772,8 +16258,11 @@ static const char* meshesCmd_remove(const String& label) {
       // The label stays, so 'enable' can bring the mesh back and 'add' does not
       // reuse the slot; 'delete' is what frees it. A disabled mesh is not the
       // default: 'enable' and 'add' flag one again when no enabled mesh has it.
+      const int8_t inUseBefore = espnowPassphraseInUse();
       m.enabled = false;
       m.isDefault = false;
+      // Disabling the default mesh hands the passphrase in use back to slot 0.
+      espnowLoadLivePassphrase();
       if (!requestSettingsPersist()) {
         return "Error: Mesh disabled in RAM, but the change could not be persisted.";
       }
@@ -15783,6 +16272,7 @@ static const char* meshesCmd_remove(const String& label) {
                "'espnowmeshes enable %s', or unpair them with 'espnowunpair' and free "
                "the slot with 'espnowmeshes delete %s'.",
                label.c_str(), label.c_str(), label.c_str());
+      if (espnowPassphraseInUse() != inUseBefore) appendLivePassphraseNote();
       return getDebugBuffer();
     }
   }
@@ -15825,9 +16315,7 @@ static const char* meshesCmd_delete(const String& label) {
       return getDebugBuffer();
     }
     const bool hadPassphrase = m.passphrase.length() > 0;
-    // Only when the instance, running or stopped, holds the passphrase it took
-    // from this slot is there one to replace; another mesh's stays as it is.
-    const bool wasLive = gEspNow && gEspNowLivePassphraseSlot == (int8_t)i;
+    const int8_t inUseBefore = espnowPassphraseInUse();
     meshKeysInvalidate(i);
     m.label = "";
     m.passphrase = "";
@@ -15844,18 +16332,13 @@ static const char* meshesCmd_delete(const String& label) {
     }
 #endif
     // Load what a start would load now, so the deleted one is not used again.
-    if (wasLive) {
-      const uint8_t liveSlot = espnowStartPassphraseSlot();
-      const String livePw = gSettings.meshes[liveSlot].passphrase;
-      gEspNow->passphrase = livePw;
-      deriveKeyFromPassphrase(livePw, gEspNow->derivedKey);
-      gEspNowLivePassphraseSlot = livePw.length() > 0 ? (int8_t)liveSlot : -1;
-    }
+    espnowLoadLivePassphrase();
     if (!requestSettingsPersist()) {
       return "Error: Mesh deleted in RAM, but the change could not be persisted.";
     }
     if (hadPassphrase) systemEventPost(SYSEVT_MESH_PASSPHRASE_CHANGED, label.c_str(), "cleared");
     snprintf(getDebugBuffer(), 1024, "Deleted mesh '%s'. Slot %u is free.", label.c_str(), (unsigned)i);
+    if (espnowPassphraseInUse() != inUseBefore) appendLivePassphraseNote();
     return getDebugBuffer();
   }
   return "Error: Mesh not found. Run 'espnowmeshes' to list.";
@@ -15878,6 +16361,7 @@ static const char* meshesCmd_enable(const String& label) {
       // Stage both fields before persisting. Writing enabled first would put a
       // stale fingerprint beside an enabled mesh in settings.json until some
       // unrelated later save.
+      const int8_t inUseBefore = espnowPassphraseInUse();
       gSettings.meshes[i].enabled = true;
       gSettings.meshes[i].fingerprint = meshFingerprintForLabel(label);
       // Exactly one enabled mesh is the default. This one takes the flag when no
@@ -15890,6 +16374,8 @@ static const char* meshesCmd_enable(const String& label) {
         }
         gSettings.meshes[i].isDefault = !otherDefault;
       }
+      // A keyed mesh that became the default brings its passphrase into use.
+      espnowLoadLivePassphrase();
       if (!requestSettingsPersist()) {
         return "Error: Mesh enabled in RAM, but its fingerprint could not be persisted.";
       }
@@ -15898,6 +16384,7 @@ static const char* meshesCmd_enable(const String& label) {
                "Enabled mesh '%s' (fp=0x%04X). Paired peers in this mesh "
                "will start exchanging frames again.",
                label.c_str(), (unsigned)gSettings.meshes[i].fingerprint);
+      if (espnowPassphraseInUse() != inUseBefore) appendLivePassphraseNote();
       return getDebugBuffer();
     }
   }
@@ -15915,19 +16402,23 @@ static const char* meshesCmd_setdefault(const String& label) {
       for (uint8_t j = 0; j < Settings::N_MESHES; j++) {
         setSetting(gSettings.meshes[j].isDefault, j == i);
       }
+      // The default mesh's passphrase, when it has one, is the one in use.
+      espnowLoadLivePassphrase();
       if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
       snprintf(getDebugBuffer(), 1024, "Set '%s' as default mesh.", label.c_str());
+      appendLivePassphraseNote();
       return getDebugBuffer();
     }
   }
   return "Error: Mesh not found.";
 }
 
-// Set/clear the passphrase on a mesh by label. Pass an empty passphrase
-// to clear. For slot 0 (the legacy primary mesh) this routes through
-// setEspNowPassphrase() so gEspNow->derivedKey is re-derived immediately —
-// otherwise the new passphrase wouldn't take effect for encrypted pairings
-// until reboot.
+// Set/clear the passphrase on a mesh by label. Pass an empty passphrase to
+// clear. Everything it changes applies at once, on any slot: the mesh's own keys
+// (pairing and signed broadcasts on this mesh) are re-derived here, and when
+// this mesh's passphrase is the one a start loads, the running instance takes it
+// too (espnowLoadLivePassphrase). Paired devices keep their stored keys and open
+// sessions: neither rests on a mesh passphrase.
 static const char* meshesCmd_setpassphrase(const String& label, const String& passphrase) {
   // Length check — but allow empty as a "clear" sentinel.
   if (passphrase.length() > 0 && passphrase.length() < 8) {
@@ -15939,35 +16430,27 @@ static const char* meshesCmd_setpassphrase(const String& label, const String& pa
   if (label.length() == 0) return "Error: Mesh not found. Run 'espnowmeshes add <label>' first.";  // "" would match an empty slot
   for (uint8_t i = 0; i < Settings::N_MESHES; i++) {
     if (gSettings.meshes[i].label == label) {
+      // Stage in RAM; persist only after the label-salted stretched key and
+      // validity flag below are coherent with this passphrase.
       if (i == 0) {
-        // Route slot 0 through the canonical funnel: updates the legacy
-        // field, re-derives gEspNow->derivedKey, and re-stamps mesh
-        // metadata. Without this, encrypted pairings would keep using
-        // the OLD derivedKey until reboot.
-        setEspNowPassphrase(passphrase);
+        setEspNowPassphrase(passphrase);  // slot 0 also disables its mesh on a clear
       } else {
-        // Stage in RAM; persist only after the label-salted stretched key and
-        // validity flag below are coherent with this passphrase.
         gSettings.meshes[i].passphrase = passphrase;
         gSettings.meshes[i].fingerprint = meshFingerprintForLabel(label);
-        // No setEspNowPassphrase call here: slot 0 alone owns the legacy
-        // gEspNow->derivedKey. The per-slot mesh keys are still derived — see
-        // the shared meshKeysStretchPassphrase/meshKeysDerive below, which run
-        // for EVERY slot.
       }
       // Phase 3.1: passphrase changed → cached stretched hash is stale.
       // Invalidate first (so callers can't accidentally use a stale subkey),
       // then re-stretch and re-derive synchronously. PBKDF2 stretching is
       // ~12 s with HW SHA accel — submitSync's 60 s timeout covers it.
-      // Runs for every slot, not just 0: these mesh keys authenticate KEY_EX
-      // HMACs and sign BROADCAST_AUTH frames, so a non-zero slot's passphrase
-      // is live crypto material, not inert metadata.
+      // These per-mesh keys authenticate KEY_EX HMACs and sign BROADCAST_AUTH
+      // frames on this mesh, so they change now, whichever slot it is.
       meshKeysInvalidate(i);
       gSettings.meshes[i].passphraseStretchedKeyValid = false;
       if (passphrase.length() > 0) {
         meshKeysStretchPassphrase(i);
         meshKeysDerive(i);
       }
+      espnowLoadLivePassphrase();
       // Persist only after the crypto state is coherent (or merely mark this
       // owner dirty when the command is inside an owner-scoped write batch).
       if (!requestSettingsPersist()) {
@@ -15978,20 +16461,38 @@ static const char* meshesCmd_setpassphrase(const String& label, const String& pa
         // Clearing slot 0's passphrase also disables that mesh (setEspNowPassphrase);
         // the other slots stay enabled. Say what happened, with the mesh's own label.
         if (gSettings.meshes[i].enabled) {
-          snprintf(getDebugBuffer(), 1024, "Cleared passphrase for mesh '%s'.", label.c_str());
-        } else {
+          // Without the group key this mesh's broadcasts go out unsigned: devices
+          // that hold a passphrase drop them, and their signed ones are dropped here.
           snprintf(getDebugBuffer(), 1024,
-                   "Cleared passphrase for mesh '%s'. The mesh is disabled; turn it back on "
-                   "with 'espnowmeshes enable %s'.", label.c_str(), label.c_str());
+                   "Cleared passphrase for mesh '%s'. New pairings on this mesh need a passphrase "
+                   "again. Its heartbeats and time sync now go out unsigned, so devices on it that "
+                   "still have a passphrase drop them, and their signed ones are dropped here. "
+                   "Paired devices keep their keys and open sessions.", label.c_str());
+        } else {
+          // Frames of a disabled mesh are dropped on receipt (meshByFingerprint).
+          snprintf(getDebugBuffer(), 1024,
+                   "Cleared passphrase for mesh '%s'. The mesh is disabled, so its paired devices "
+                   "cannot exchange frames with this device until you turn it back on with "
+                   "'espnowmeshes enable %s'.", label.c_str(), label.c_str());
         }
+      } else if (!gSettings.meshes[i].enabled) {
+        // The keys are stored, but frames of a disabled mesh are dropped on receipt.
+        snprintf(getDebugBuffer(), 1024,
+                 "Updated passphrase for mesh '%s', but the mesh is disabled: pairing and traffic "
+                 "on it stay off until you turn it back on with 'espnowmeshes enable %s'. The "
+                 "other devices on this mesh need the same passphrase. Paired devices keep their "
+                 "keys and do not need to re-pair.",
+                 label.c_str(), label.c_str());
       } else {
         snprintf(getDebugBuffer(), 1024,
-                 "Updated passphrase for mesh '%s'.%s "
-                 "Existing paired peers will need to re-pair if they were "
-                 "using the old passphrase for encryption.",
+                 "Updated passphrase for mesh '%s'; it applies %s. The other devices on this "
+                 "mesh need the same passphrase: until they have it, pairing with them fails and "
+                 "this mesh's signed broadcasts (heartbeats, time sync) are dropped. Paired "
+                 "devices keep their keys and open sessions and do not need to re-pair.",
                  label.c_str(),
-                 i == 0 ? " Key re-derived." : " (Not used for current encryption.)");
+                 (gEspNow && gEspNow->initialized) ? "now" : "from the next ESP-NOW start");
       }
+      appendLivePassphraseNote();
       // Bus event: passphrase set/cleared on this mesh. NEVER include the
       // passphrase value — only the mesh label and the set/cleared transition.
       systemEventPost(SYSEVT_MESH_PASSPHRASE_CHANGED, label.c_str(),
@@ -16096,18 +16597,80 @@ const char* cmd_espnow_meshes(const String& argsInput) {
 
 // Tear down the cryptographic relationship for a peer: close any live AEAD
 // session and delete the stored KEY_EX (Ed25519) identity at
-// /system/espnow/peers/<MAC>/identity.json. Returns true if a stored identity
-// was present (vs. just sweeping a stale file). Safe to call for an unknown
-// peer. Shared by espnowunpair (full teardown) and espnowforget.
-static bool espnowForgetPeerCrypto(const uint8_t mac[6]) {
+// /system/espnow/peers/<MAC>/identity.json. Returns true if a cached identity
+// was present (vs. just sweeping a stale file). *removedAny, when given, is
+// also true when only an identity file went (one the boot walk did not load),
+// for the unpair reply. Safe to call for an unknown peer. Shared by
+// espnowunpair (full teardown) and espnowforget.
+static bool espnowForgetPeerCrypto(const uint8_t mac[6], bool* removedAny = nullptr) {
   const PeerIdentity* pid = peerIdentityFindByMac(mac);
   bool had = (pid != nullptr);
   if (pid) {
     SessionState* s = sessionFindByPeer(mac, pid->meshId);
     if (s) sessionClear(s);  // drop ephemeral AEAD keys for this peer
   }
-  peerIdentityForget(mac);
+  const bool forgot = peerIdentityForget(mac);
+  if (removedAny) *removedAny = had || forgot;
+  espnowHandshakeBackoffClear(mac);  // its handshake back-off entry goes too
   return had;
+}
+
+// printf into out at pos; pos stops at the end of the buffer.
+__attribute__((format(printf, 4, 5)))
+static void appendUnpairText(char* out, size_t outLen, size_t& pos, const char* format, ...) {
+  if (pos + 1 >= outLen) return;
+  va_list args;
+  va_start(args, format);
+  const int n = vsnprintf(out + pos, outLen - pos, format, args);
+  va_end(args);
+  if (n > 0) pos = (pos + (size_t)n < outLen) ? pos + (size_t)n : outLen - 1;
+}
+
+// A stored size for the unpair reply: bytes below 1 kB, whole kB above.
+static void formatStoredSize(uint32_t bytes, char* out, size_t outLen) {
+  if (bytes < 1024) {
+    snprintf(out, outLen, "%lu bytes", (unsigned long)bytes);
+  } else {
+    snprintf(out, outLen, "%lu kB", (unsigned long)((bytes + 512) / 1024));
+  }
+}
+
+// The unpair reply's line about what this device kept about the peer: what
+// went, what would not go, and where files received from it stay (receivedDir
+// null when there are none).
+static void formatUnpairFilesLine(char* out, size_t outLen, bool hadIdentity,
+                                  const PeerFilesRemoved& files, uint32_t manifestBytes,
+                                  const char* peerDir, const char* receivedDir) {
+  if (!out || outLen == 0) return;
+  out[0] = '\0';
+  size_t pos = 0;
+  char size[24];
+  if (!hadIdentity && files.files == 0 && manifestBytes == 0) {
+    // "Nothing stored" only when nothing stayed either.
+    if (!files.folderLeft) appendUnpairText(out, outLen, pos, "Nothing was stored about it.");
+  } else {
+    const char* sep = "";
+    appendUnpairText(out, outLen, pos, "Removed: ");
+    if (hadIdentity) {
+      appendUnpairText(out, outLen, pos, "crypto identity");
+      sep = ", ";
+    }
+    if (files.files > 0) {
+      formatStoredSize(files.bytes, size, sizeof(size));
+      appendUnpairText(out, outLen, pos, "%s%u cached file%s (%s)", sep, (unsigned)files.files,
+                       files.files == 1 ? "" : "s", size);
+      sep = ", ";
+    }
+    if (manifestBytes > 0) {
+      formatStoredSize(manifestBytes, size, sizeof(size));
+      appendUnpairText(out, outLen, pos, "%scached command manifest (%s)", sep, size);
+    }
+    appendUnpairText(out, outLen, pos, ".");
+  }
+  if (files.folderLeft) {
+    appendUnpairText(out, outLen, pos, "%sNot removed: some files in %s.", pos ? " " : "", peerDir);
+  }
+  if (receivedDir) appendUnpairText(out, outLen, pos, " Received files stay in %s.", receivedDir);
 }
 
 const char* cmd_espnow_unpair(const String& argsInput) {
@@ -16144,7 +16707,37 @@ const char* cmd_espnow_unpair(const String& argsInput) {
   // Full teardown: also drop the crypto identity + any live session so a later
   // re-pair starts clean (no stale-key pub-conflict). De-bond story:
   // bonddisconnect (bond) → espnowunpair (pairing + crypto identity).
-  espnowForgetPeerCrypto(mac);
+  bool hadIdentity = false;
+  espnowForgetPeerCrypto(mac, &hadIdentity);
+
+  // The rest of what this device kept about the peer goes too: the bond
+  // caches in its peers folder and the cached command manifest, unless another
+  // peer's folder still names that manifest (espnowforget keeps all of these:
+  // the device stays paired there). The manifest reference is read before the
+  // folder that holds it goes. Received files are the user's and stay.
+#if ENABLE_BONDED_MODE
+  char manifestHex[33];
+  const bool usedManifest = manifestRefRead(mac, manifestHex);
+#endif
+  PeerFilesRemoved files = {};
+  peerFilesRemove(mac, files);
+  uint32_t manifestBytes = 0;
+#if ENABLE_BONDED_MODE
+  if (usedManifest) manifestBytes = manifestDropIfUnused(manifestHex);
+#endif
+  char peerDir[48];
+  peerCacheDir(mac, peerDir, sizeof(peerDir));
+  char receivedDir[32];
+  {
+    char token[13];
+    macToPathToken(mac, token);
+    snprintf(receivedDir, sizeof(receivedDir), "/espnow/received/%s", token);
+  }
+  const bool receivedKept = filesystemReady &&
+      VFS::existsGuarded(receivedDir, VFS::systemAuth(VFS::Scopes::ESPNOW_RECEIVED, "espnow.unpair_received"));
+  char filesLine[256];
+  formatUnpairFilesLine(filesLine, sizeof(filesLine), hadIdentity, files, manifestBytes, peerDir,
+                        receivedKept ? receivedDir : nullptr);
 
   // Peer + crypto identity are gone — announce the unpair.
   systemEventPost(SYSEVT_PEER_UNPAIRED, deviceName.c_str(), macToDisplayStr(mac).c_str());
@@ -16163,15 +16756,15 @@ const char* cmd_espnow_unpair(const String& argsInput) {
   if (!devicesOk) {
     snprintf(getDebugBuffer(), 1024,
       "Unpaired device but failed to encrypt and save the registry — device encryption key "
-      "unavailable. The pairing may not persist across reboot.");
+      "unavailable. The pairing may not persist across reboot.\n%s", filesLine);
     return getDebugBuffer();
   }
   if (deviceName.length() > 0) {
-    snprintf(getDebugBuffer(), 1024, "Unpaired device: %s (%s)",
-             deviceName.c_str(), macToDisplayStr(mac).c_str());
+    snprintf(getDebugBuffer(), 1024, "Unpaired device: %s (%s)\n%s",
+             deviceName.c_str(), macToDisplayStr(mac).c_str(), filesLine);
   } else {
-    snprintf(getDebugBuffer(), 1024, "Unpaired device: %s",
-             macToDisplayStr(mac).c_str());
+    snprintf(getDebugBuffer(), 1024, "Unpaired device: %s\n%s",
+             macToDisplayStr(mac).c_str(), filesLine);
   }
   return getDebugBuffer();
 }
@@ -16180,7 +16773,9 @@ const char* cmd_espnow_unpair(const String& argsInput) {
 // session, WITHOUT touching the device-registry pairing. This is the command
 // the KEY_EX conflict warnings tell the operator to run ("presented new pubkey
 // — run 'espnowforget'"). Accepts a raw MAC even for an already-unpaired peer
-// (identities persist independently of the device registry).
+// (identities persist independently of the device registry). The bond caches
+// in the peer's folder and its cached manifest stay: the device is still
+// paired, and the next KEY_EX brings the same partner back.
 const char* cmd_espnow_forget(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   CommandArgs a(argsInput);
@@ -16908,8 +17503,7 @@ const char* cmd_espnow_setpassphrase(const String& argsInput) {
   }
 
   // Delegate to the canonical mesh-aware path (re-derives the mesh keys for
-  // whichever slot matches; slot 0 additionally re-derives the legacy
-  // gEspNow->derivedKey).
+  // whichever slot matches, and reloads the running instance's passphrase).
   return meshesCmd_setpassphrase(meshLabel, passphrase);
 }
 
@@ -17153,7 +17747,7 @@ const char* cmd_espnow_pairsecure(const String& argsInput) {
                               gSettings.meshes[meshId].label.length() > 0)
                                  ? gSettings.meshes[meshId].label.c_str()
                                  : nullptr;
-  bool keyExKicked = espnowKeyExInitiate(mac, meshLabelArg);
+  bool keyExKicked = espnowKeyExInitiateManual(mac, meshLabelArg);
   if (!keyExKicked) {
     WARN_ESPNOWF("[pairsecure] KEY_EX initiate failed for %s — encrypted "
                  "unicast will fail until the user runs espnowkeyex manually",
@@ -17776,6 +18370,19 @@ static void resetBondSync() {
 // Bond Mode CLI Commands
 // ============================================================================
 
+// bondconnect / bondresync: asked for by the user, so the handshake with the
+// partner starts now (on the initiator side; the other side answers) and any
+// back-off for it ends. It is a manual start: if the partner does not answer,
+// that is printed. cmd_exec.
+static void bondStartHandshakeNow(const uint8_t peerMac[6]) {
+  espnowHandshakeBackoffClear(peerMac);
+  uint8_t selfMac[6];
+  espnowSelfStaMac(selfMac);
+  if (sessionIsASide(selfMac, peerMac)) return;   // the partner initiates
+  (void)espnowHandshakeStartNow(peerMac);
+}
+
+
 /**
  * Request capability summary from bonded peer
  */
@@ -18013,15 +18620,19 @@ const char* cmd_bond_resync(const String& argsInput) {
   // (where the peer's state hasn't actually changed), here the whole POINT is
   // to declare the local view stale and re-fetch. The auth token and session
   // state are preserved by resetBondSync (see comment in that function).
-  resetBondSync();
-
+  // Bond frames are held off for the reset so none is acted on and then wiped.
   const bool master = isBondMaster();
+  bondWithFramesHeld([&] {
+    resetBondSync();
+    // Master drives sync via the tick. Setting bondNeedsCapabilityRequest=true
+    // kicks the existing chain on the next super-loop iteration.
+    if (master) gEspNow->bondNeedsCapabilityRequest = true;
+  });
+  bondStartHandshakeNow(peerMac);   // no-op while the session is up
+
   const bool peerOnline = gEspNow->bondPeerOnline;
 
   if (master) {
-    // Master drives sync via the tick. Setting bondNeedsCapabilityRequest=true
-    // kicks the existing chain on the next super-loop iteration.
-    gEspNow->bondNeedsCapabilityRequest = true;
     if (!ensureDebugBuffer()) return peerOnline
                                 ? "Bond resync initiated (master): full sync chain queued."
                                 : "Bond resync queued (master); peer offline, will fire when peer returns.";
@@ -18204,6 +18815,7 @@ const char* cmd_bond_connect(const String& argsInput) {
   // Check if already connected
   if (gSettings.bondModeEnabled && 
       gSettings.bondPeerMac == macToDisplayStr(peerMac)) {
+    bondStartHandshakeNow(peerMac);   // no-op while the session is up
     return "Already connected to this device in bond mode.";
   }
   
@@ -18213,25 +18825,24 @@ const char* cmd_bond_connect(const String& argsInput) {
   // Role-based handshake sequencing:
   // - Master (role=1) waits for worker's data, then sends its own
   // - Worker (role=0) sends data first when entering each exchange state
-  // Set peer MAC and role BEFORE enabling bond mode to avoid race window
-  // where espnow task sees bondModeEnabled=true with empty peerMac
-  setSetting(gSettings.bondPeerMac, macToDisplayStr(peerMac));
-  
-  // Determine role by comparing our MAC with peer MAC (higher MAC = master)
   uint8_t ourMac[6];
   espnowSelfStaMac(ourMac);
   int cmp = memcmp(ourMac, peerMac, 6);
-  setSetting(gSettings.bondRole, (uint8_t)((cmp > 0) ? 1 : 0));  // Higher MAC becomes MASTER
-  
-  // Enable bond mode last — peerMac and role are already set
-  setSetting(gSettings.bondModeEnabled, true);
+  // Partner, role and bond mode change with bond frames held off (the old
+  // partner's stop first), and the sync state is reset before frames are
+  // accepted again, so nothing the new partner sends is wiped (bench
+  // 2026-11-17, step c1; see bondWithFramesHeld).
+  bondWithFramesHeld([&] {
+    setSetting(gSettings.bondPeerMac, macToDisplayStr(peerMac));
+    setSetting(gSettings.bondRole, (uint8_t)((cmp > 0) ? 1 : 0));  // Higher MAC becomes MASTER
+    setSetting(gSettings.bondModeEnabled, true);
+    bondForgetPartnerState();
+  });
   INFO_ESPNOWF("[PAIR] Role assigned by MAC comparison: %s (our=" MAC_FMT ", peer=" MAC_FMT ")",
                 isBondMaster() ? "MASTER" : "WORKER",
                 MAC_ARGS(ourMac),
                 MAC_ARGS(peerMac));
-  gEspNow->bondPeerOnline = false;  // Will be set true when heartbeat received
-  gEspNow->lastBondHeartbeatReceivedMs = 0;
-  resetBondSync();  // Reset handshake state for fresh start
+  bondStartHandshakeNow(peerMac);
   
   String deviceName = getEspNowDeviceName(peerMac);
   if (deviceName.length() == 0) deviceName = macToDisplayStr(peerMac);
@@ -18258,10 +18869,11 @@ const char* cmd_bond_disconnect(const String& argsInput) {
   }
   
   String prevPeer = gSettings.bondPeerMac;
-  setSetting(gSettings.bondModeEnabled, false);
-  setSetting(gSettings.bondPeerMac, String(""));
-  resetBondSync();  // Reset handshake state
-  if (gEspNow) gEspNow->bondPeerOnline = false;
+  bondWithFramesHeld([&] {
+    setSetting(gSettings.bondModeEnabled, false);
+    setSetting(gSettings.bondPeerMac, String(""));
+    bondForgetPartnerState();
+  });
 
   // Bond is torn down by explicit operator command — announce it (same event
   // the heartbeat-timeout path fires). bondPeerMac is now cleared, so resolve
@@ -18395,12 +19007,14 @@ const char* cmd_bond_role(const String& argsInput) {
   }
   
   bool changed = (newRole != gSettings.bondRole);
-  setSetting(gSettings.bondRole, newRole);
+  // A role change on a running ESP-NOW is made inside the frame hold below.
+  const bool resync = changed && gEspNow && gEspNow->initialized;
+  if (!resync) setSetting(gSettings.bondRole, newRole);
   
   // Reset handshake when role changes — sequencing is role-dependent
   // (worker=initiator, master=responder). Without reset, both sides
   // could end up waiting or both initiating simultaneously.
-  if (changed && gEspNow && gEspNow->initialized) {
+  if (resync) {
     // Snapshot the "what we know about the peer / what we've sent the peer"
     // fields BEFORE resetBondSync. None of these change just because OUR
     // local role flipped — the peer's cap data is hardware-derived (role-
@@ -18427,23 +19041,28 @@ const char* cmd_bond_role(const String& argsInput) {
     // 2026-05 fix: snapshot + restore all six peer-state/obligation flags,
     // then fire the post-sync side effects directly via the shared helper
     // (firePostSyncSideEffects) below.
-    bool wasCapValid   = gEspNow->lastRemoteCapValid;
-    bool hadManifest   = gEspNow->bondManifestReceived;
-    bool hadSettings   = gEspNow->bondSettingsReceived;
-    bool hadSchema     = gEspNow->bondSchemaReceived;
-    bool hadCapSent    = gEspNow->bondCapSent;
-    bool hadSettSent   = gEspNow->bondSettingsSent;
+    // Snapshot, reset and restore with bond frames held off, so a frame
+    // arriving in between is neither half-applied nor wiped.
+    bondWithFramesHeld([&] {
+      setSetting(gSettings.bondRole, newRole);
+      bool wasCapValid   = gEspNow->lastRemoteCapValid;
+      bool hadManifest   = gEspNow->bondManifestReceived;
+      bool hadSettings   = gEspNow->bondSettingsReceived;
+      bool hadSchema     = gEspNow->bondSchemaReceived;
+      bool hadCapSent    = gEspNow->bondCapSent;
+      bool hadSettSent   = gEspNow->bondSettingsSent;
 
-    resetBondSync();
+      resetBondSync();
 
-    // Restore the still-valid peer state. The peer hasn't changed, so the
-    // UI doesn't need to re-show "Establishing Bond" — just relabel master/worker.
-    gEspNow->lastRemoteCapValid     = wasCapValid;
-    gEspNow->bondManifestReceived   = hadManifest;
-    gEspNow->bondSettingsReceived   = hadSettings;
-    gEspNow->bondSchemaReceived     = hadSchema;
-    gEspNow->bondCapSent            = hadCapSent;
-    gEspNow->bondSettingsSent       = hadSettSent;
+      // Restore the still-valid peer state. The peer hasn't changed, so the
+      // UI doesn't need to re-show "Establishing Bond" — just relabel master/worker.
+      gEspNow->lastRemoteCapValid     = wasCapValid;
+      gEspNow->bondManifestReceived   = hadManifest;
+      gEspNow->bondSettingsReceived   = hadSettings;
+      gEspNow->bondSchemaReceived     = hadSchema;
+      gEspNow->bondCapSent            = hadCapSent;
+      gEspNow->bondSettingsSent       = hadSettSent;
+    });
 
     // bondPeerStatusValid is left cleared (resetBondSync wiped it) — status
     // payload may legitimately differ now that roles flipped (e.g. master
@@ -18990,7 +19609,7 @@ extern const CommandEntry espNowCommands[] = {
   { "openespnow", "Initialize ESP-NOW communication.", true, cmd_espnow_init },
   { "closeespnow", "Deinitialize ESP-NOW and free resources.", true, cmd_espnow_deinit },
   { "espnowpair", "Pair ESP-NOW device: 'espnowpair <mac> <name> [mesh]'. (synchronous; local registry add, no remote handshake)", true, cmd_espnow_pair, "Usage: espnowpair <mac> <name> [mesh]" },
-  { "espnowunpair", "Unpair ESP-NOW device (also clears its crypto identity): 'espnowunpair <name_or_mac>'.", true, cmd_espnow_unpair, "Usage: espnowunpair <name_or_mac>" },
+  { "espnowunpair", "Unpair ESP-NOW device and remove what this device stored about it (crypto identity, bond caches, its cached manifest): 'espnowunpair <name_or_mac>'.", true, cmd_espnow_unpair, "Usage: espnowunpair <name_or_mac>" },
   { "espnowforget", "Forget a peer's crypto identity + close its session: 'espnowforget <name_or_mac>'.", true, cmd_espnow_forget, "Usage: espnowforget <name_or_mac>" },
   { "espnowlist", "List all paired ESP-NOW devices.", false, cmd_espnow_list },
   { "espnowmessages", "Buffered message history as JSON: 'espnowmessages json [sinceSeq] [mac]' — async results of espnowremote/browse/fetch.", false, cmd_espnow_messages, "Usage: espnowmessages [json] [<sinceSeq>] [<AA:BB:CC:DD:EE:FF>]" },
@@ -19239,8 +19858,49 @@ const char* cmd_espnow_sensorreq(const String& argsInput) {
 }
 
 #if ENABLE_BONDED_MODE
-ESPNOW_SETTING_CMD(cmd_espnow_bondmodeenabled, "bondModeEnabled")
-ESPNOW_SETTING_CMD(cmd_espnow_bondpeermac, "bondPeerMac")
+// espnowbondmodeenabled / espnowbondpeermac (also what the settings pages
+// run): a real change of bond mode or partner goes through the same frame
+// hold and sync reset as bondconnect. These used to change the setting and
+// keep the old partner's sync state. A value equal to the current one (a
+// settings page saves every field) holds and resets nothing.
+static const char* bondSettingCommand(const char* jsonKey, const String& args) {
+  const SettingEntry* entry = findEspNowEntry(jsonKey);
+  String value = args;
+  value.trim();
+  bool changes = false;
+  if (entry && entry->valuePtr && value.length() > 0) {
+    if (entry->type == SETTING_BOOL) {
+      const int parsed = parseBoolArg(value);
+      changes = parsed >= 0 && (parsed != 0) != *(const bool*)entry->valuePtr;
+    } else if (entry->type == SETTING_STRING) {
+      changes = value != *(const String*)entry->valuePtr;
+    }
+  }
+  if (!changes) return handleSettingCommand(entry, args);
+  const char* reply = nullptr;
+  bondWithFramesHeld([&] {
+    reply = handleSettingCommand(entry, args);
+    bondForgetPartnerState();
+  });
+  // Like bondconnect: the user named the partner, so its handshake starts now.
+  uint8_t peerMac[6];
+  if (gSettings.bondModeEnabled && gEspNow && gEspNow->initialized &&
+      parseMacAddress(gSettings.bondPeerMac, peerMac)) {
+    bondStartHandshakeNow(peerMac);
+  }
+  return reply;
+}
+
+const char* cmd_espnow_bondmodeenabled(const String& a) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  return bondSettingCommand("bondModeEnabled", a);
+}
+
+const char* cmd_espnow_bondpeermac(const String& a) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  return bondSettingCommand("bondPeerMac", a);
+}
+
 ESPNOW_SETTING_CMD(cmd_espnow_bondstreamthermal, "bondStreamThermal")
 ESPNOW_SETTING_CMD(cmd_espnow_bondstreamtof, "bondStreamTof")
 ESPNOW_SETTING_CMD(cmd_espnow_bondstreamimu, "bondStreamImu")

@@ -6285,11 +6285,12 @@ handshake cannot be started fails instead of saying "try again"; a busy slot tab
 receive; release and abort do no filesystem work under the slot lock; an abort under lock contention does not pin
 the slot.
 
-`espnow_command_privileges` (source) pins the admin flag on the ESP-NOW test commands that change live state and
-on both writers of the heartbeat mode. `espnow_history_depth` compiles the two `#if` blocks that size the message
-history and the web poll: they follow `CONFIG_SPIRAM`, so the ESP32-P4 gets the PSRAM depth. `settings_onoff_commands`
-runs five `<0|1>` setting commands: every word the shared parser accepts, any other word refused, side effects
-kept. `espnow_user_credentials` (extended) refuses a remote command whose user name or password does not fit.
+`espnow_command_privileges` (source) pins the admin flag on the ESP-NOW test commands that change live state and on
+both writers of the heartbeat mode. `espnow_history_depth` compiles the two `#if` blocks that size the message
+history and the web poll: they follow `CONFIG_SPIRAM`, so the ESP32-P4 gets the PSRAM depth.
+`settings_onoff_commands` runs five `<0|1>` setting commands: every word the shared parser accepts, any other word
+refused, side effects kept. `espnow_user_credentials` (extended) refuses a remote command whose user name or
+password does not fit.
 
 `espnow_loop_not_paused` (source) keeps `gMeshActivitySuspended` out of the tree and the ESP-NOW loop's early
 return free of outside switches. `espnow_remote_ack` compiles the acknowledgement of `espnowremote`: a long
@@ -6298,28 +6299,95 @@ rows: they fill in and open the remote form, and no OLED ESP-NOW action sends a 
 not a registered command. Outside ctest, `tools/webui/tests/test_espnow_remote_page.py` feeds the firmware's real
 replies to the web page's remote file browser.
 
-`espnow_mesh_slots` runs the production `espnowmeshes` subcommands, the meshes settings writer and reader (with
-the vendored ArduinoJson), the slot 0 bootstrap, the passphrase messages and `cmd_espnow_setname` on the production
+`espnow_mesh_slots` runs the production `espnowmeshes` subcommands, the meshes settings writer and reader (with the
+vendored ArduinoJson), the slot 0 bootstrap, the passphrase messages and `cmd_espnow_setname` on the production
 mesh record. A device's only mesh can be disabled and deleted, which leaves no mesh, as on a new device; `delete`
 frees a slot for `add`, clears its keys and bond settings, and is refused while a stored identity or a registry
-device (in RAM, or in the saved file before the first start) still names the slot, and when either cannot be
-read. After deleting a middle slot and a save and load, every mesh is still in its slot; files without slot
-numbers load in order. The bootstrap creates `primary` only on a device with no mesh at all, so no second default
-and no second `primary` appear. An instance, running or stopped, drops a deleted mesh's passphrase. Exactly one
-enabled mesh is the default after `enable`; the start-up warning names the mesh a start loads the passphrase
-from; `espnowsetname clear` works only while ESP-NOW is stopped. A pairing with no mesh argument goes to the
-default mesh and never to a slot without a mesh (`meshSlotForPairing`); an empty label matches no mesh; deleting
-a mesh whose passphrase is not the live one leaves the live one alone (the instance records the slot its
-passphrase came from; the text does not say whose it is); a registry that failed to load, or whose last save did
-not reach the file, is counted from the table and the file together. The suite fails 102 checks on the tree
-before the fix, and 51, 17 and 3 on its first three versions (1319eff0, df7fec4f, 31456b6c), each of which an
-independent review found wanting.
+device (in RAM, or in the saved file before the first start) still names the slot, and when either cannot be read.
+After deleting a middle slot and a save and load, every mesh is still in its slot; files without slot numbers load
+in order. The bootstrap creates `primary` only on a device with no mesh at all, so no second default and no second
+`primary` appear. A running instance always holds the passphrase a start would load (an enabled default mesh in
+slots 1..3 that has one, else slot 0's): a new passphrase on that mesh, `setdefault`, `enable`, `disable` and
+`delete` apply at once, a stopped instance holds none and the next start loads it, and every reply says whose
+passphrase is in use (or that none is) when it changes; a passphrase set on a disabled mesh says the mesh stays off
+until it is enabled, and a clear says what stops (slot 0: the mesh is disabled and its devices cannot exchange
+frames; slots 1..3: heartbeats and time sync with devices that still have a passphrase); `listjson` reports the
+slot, the web page's mesh table marks it and its clear dialog says the same per slot. Exactly one enabled mesh is
+the default after `enable`; the start-up warning names the mesh a start loads the passphrase from; `espnowsetname
+clear` works only while ESP-NOW is stopped. A pairing with no mesh argument goes to the default mesh and never to a
+slot without a mesh (`meshSlotForPairing`); an empty label matches no mesh; deleting a mesh whose passphrase is not
+the live one leaves the live one alone (the instance records the slot its passphrase came from; the text does not
+say whose it is); a registry that failed to load, or whose last save did not reach the file, is counted from the
+table and the file together. The suite fails 102 checks on the tree before the fix, and 51, 17 and 3 on its first
+three versions (1319eff0, df7fec4f, 31456b6c), each of which an independent review found wanting. The
+passphrase-in-use cases (2026-11-17, rounds 3 and 4) fail 33 harness checks and all 5 web page source checks on
+cca36fa9.
 
-`espnow_identity_walk` runs the production `peerIdentityLoadAll`, `readPeerIdentityFile`, `peerIdentityForget`
-and the cache accessors over the shared in-memory filesystem: a readable identity loads with its mesh slot; no
-peers directory counts as read; an unmounted filesystem or a peers path that will not open does not; folders
-without an `identity.json` are skipped; an `identity.json` that stays out of the cache (unreadable, another
-address inside, a 17th when the 16 slots are full) leaves `peerIdentitiesLoaded()` false with a warning that names
-the address and `espnowforget`, while the readable ones still load and nothing is written past the cache; a forget
-whose file will not go away marks the cache incomplete; the next walk recomputes the mark. 18 of its 70 checks
-fail on the tree before the fix.
+`espnow_identity_walk` runs the production `peerIdentityLoadAll`, `readPeerIdentityFile`, `peerIdentityForget` and
+the cache accessors over the shared in-memory filesystem: a readable identity loads with its mesh slot; no peers
+directory counts as read; an unmounted filesystem or a peers path that will not open does not; folders without an
+`identity.json` are skipped; an `identity.json` that stays out of the cache (unreadable, another address inside, a
+17th when the 16 slots are full) leaves `peerIdentitiesLoaded()` false with a warning that names the address and
+`espnowforget`, while the readable ones still load and nothing is written past the cache; a forget whose file will
+not go away marks the cache incomplete; the next walk recomputes the mark. An identity whose `meshId` is not a slot
+of this firmware (4 and up, too large for a byte, negative, text, missing) stays out of the cache like an
+unreadable one. Only a folder spelled as `macToPathToken` writes it is a peer folder: a lower- or mixed-case twin
+neither loads the identity a second time nor keeps a copy in the cache after a forget, and one that holds its own
+`identity.json` is named in a warning without marking the cache incomplete (no command reads or removes it, so it
+holds no mesh slot). Two source checks pin the duplicate-address guard and the range check in
+`peerIdentityPersist`. 18 of its first 70 checks failed on the tree before the first fix; 44 of its 127 fail on
+cca36fa9.
+
+`espnow_peer_files` runs the production `peerFilesRemove`, the manifest reference (`manifestCacheRecordUse`,
+`manifestDropIfUnused`, and `manifestCacheHit`, the bond sync's cache lookup) and the unpair reply line over the
+shared in-memory filesystem. After an unpair nothing is left under `/system/espnow/peers/<MAC>/` (identity, bond
+caches, manifest reference, a subfolder) and the folder is gone, with nothing removed while a listing is open;
+files received from the peer stay. The cached manifest goes once no peer folder names its hash (two peers on one
+firmware keep it until both are unpaired; folders that cannot be listed keep it), and new firmware on a peer drops
+the hash it named before, so the cache holds one file per peer. A manifest the bond sync finds already cached is
+recorded for that peer as well, so a second device on the same firmware keeps it, and one cached before the
+references is named at the next sync. A file that will not go is reported. The reply line names what went and where
+received files are, within its buffer. Source checks pin the order inside `cmd_espnow_unpair`, keep `espnowforget`
+away from the caches, record a reference only for a manifest that reached the cache, and route the sync's cache
+lookup through `manifestCacheHit`. 40 of its 72 checks fail on cca36fa9.
+
+`espnow_start_order` runs the production slot 0 bootstrap and its `PrimaryMeshBootstrap` guard on the
+production mesh record, compiled with bonded mode on and off: a start that fails leaves a new device with
+no mesh (no `primary`, flags, bond fields and an unlabelled slot's passphrase as before, a key stretched
+during the start dropped), a start that succeeds creates the enabled default `primary` once, and a
+configured or deliberately emptied slot 0 is never touched. Source checks pin what needs the radio: the
+"already running" answer and the device-name check come before any allocation, the guard sits after
+`esp_now_init` and before the callbacks, the passphrase restore and the boot notice, and only a successful
+start (or one whose cleanup is pending) keeps it; a later start keeps the peer-array size the arrays were
+allocated with; `openespnow` does not say "Error:" twice. 18 of its 48 checks fail on the tree before the
+fix.
+
+`espnow_system_notice` runs the production text-queue drain, `formatEspNowSystemNotice` and
+`buildBootNotification` with the vendored ArduinoJson: a BOOT notice prints `[ESP-NOW] <name> is online
+(boot #N)` and is stored as one readable `MSG_SYSTEM_EVENT` record with no group id; the name is the one
+resolved from the authenticated origin, never the notice's "src"; malformed, unterminated and other
+system events get a neutral line; chat is unchanged; source checks keep the notice built from the
+device-name setting and no copy of the name in `EspNowState`. 19 of its 25 checks fail on the tree before
+the fix.
+
+`espnow_bond_partner_change` runs the production `bondconnect`, `bonddisconnect`, `espnowbondmodeenabled`,
+`espnowbondpeermac`, the bond frame hold, `isBondPeerMac`, `resetBondSync`, the worker's capability request
+and the CAP_REQ, CAP_RESP and STATUS_REQ handlers against a settings double that lets the receive task run
+between any two statements of a command, and a model of the master's sync tick. The bench's order of events
+(2026-11-17, step c1) no longer leaves the worker SYNCING; no frame accepted during a partner change is wiped;
+the old partner's frames stop and its sync state goes; saving the same value resets nothing; a worker that
+lost its sync record while the master stayed SYNCED recovers; an unasked CAP_RESP does not restart a manifest
+request. espnow_task also runs at every use of the ESP-NOW state and every INFO line, so a reset moved
+after the end of the hold is caught at run time; source rules keep the resets in `bondconnect`,
+`bonddisconnect`, the two setting commands, `bondresync` and `bondrole` inside the hold.
+
+`espnow_handshake_backoff` runs `System_ESPNow_HandshakeBackoff.h`, the KEY_EX in-flight table and retry sweep, the
+pending-frame queue, the ESTABLISHING sweep, `v4_send_encrypted_or_queue` and `bondSendEncryptedAsync` through
+simulated hours: a partner that is not there (step d2) costs 4 warning lines and 17 key exchanges in the first hour
+instead of 1,439 and 720, and no heartbeat is queued; a partner that comes back is bonded within 15 s of being
+heard; one heard all along but never answering keeps its back-off; an answering partner behaves as before; a manual
+key exchange starts at once, is always reported and ends the back-off; `espnowsessionopen` starts at once and its
+failure is printed even after the partner has been away; `bondconnect`/`bondresync` end the back-off and start the
+handshake at once on the side that starts bond handshakes; bond sensor data is dropped like the heartbeat; the
+pending-frame warnings carry the count they held back. Source rules pin the calls that end a back-off (key exchange
+reply and confirm, session up, authenticated frame, mesh online edge, unpair, manual commands).

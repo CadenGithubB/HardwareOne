@@ -231,6 +231,10 @@ static void sessionPrewarmReset(const uint8_t*) {}
 static bool sessionPrewarmInCooldown(const SessionPrewarm&, uint32_t) { return false; }
 static bool sessionPrewarmNoteAttempt(SessionPrewarm*, uint32_t) { return false; }
 static bool espnowSessionOpenInitiate(const uint8_t*, const char*) { return true; }
+// Bond partner change hold and the handshake back-off (both tested by their
+// own suites): no change under way, and hearing a peer has no effect here.
+[[maybe_unused]] static bool bondPartnerChanging() { return false; }
+[[maybe_unused]] static void espnowHandshakeHeard(const uint8_t*) {}
 static bool gBackupPromoted = false;
 static uint32_t gLastMasterHeartbeat = 0;
 static bool parseMacAddress(const String&, uint8_t*) { return false; }

@@ -6,7 +6,8 @@
 // peerIdentitiesLoaded, peerIdentityForget, peerIdentityLoadAll, peerIdentityAt
 // and peerIdentitySlotCount. The filesystem is the shared fake (fake_vfs.h),
 // ArduinoJson is the vendored library. Doubles here: logging macros, the
-// filesystem lock guard, filesystemReady, EXT_RAM_BSS_ATTR and PSRAM_JSON_DOC.
+// filesystem lock guard, filesystemReady, EXT_RAM_BSS_ATTR, PSRAM_JSON_DOC and
+// Settings::N_MESHES (the value from System_Settings.h).
 #define FAKE_VFS_PROVIDE_VFS_NAMESPACE
 #include <Arduino.h>  // web_batch_stubs String double, which fake_vfs.h needs
 #include "fake_vfs.h"
@@ -45,6 +46,10 @@ static void logLine(char level, const char* format, ...) {
 #define DEBUG_ESPNOWF(...) logLine('D', __VA_ARGS__)
 
 // ---- Production dependencies ----------------------------------------------
+// The mesh slot count, from System_Settings.h through the runner.
+struct Settings {
+  static constexpr uint8_t N_MESHES = HW1_N_MESHES;
+};
 #define EXT_RAM_BSS_ATTR
 static bool filesystemReady = true;
 
@@ -109,6 +114,14 @@ static std::string identityText(const Mac& inside, unsigned meshId) {
   return text;
 }
 static void store(const Mac& m, unsigned meshId) { fake_vfs::fs().put(jsonPath(m), identityText(m, meshId)); }
+
+// The same file with the "meshId" member replaced by `member` ("" drops it).
+static std::string identityWithMeshMember(const Mac& inside, const std::string& member) {
+  std::string text = identityText(inside, 1);
+  const std::string field = "\"meshId\":1,";
+  const size_t at = text.find(field);
+  return text.replace(at, field.size(), member.empty() ? std::string() : member + ",");
+}
 
 static void reset() {
   fake_vfs::Fs& fs = fake_vfs::fs();
@@ -263,6 +276,74 @@ static void unreadableIdentity() {
   oneBadAmongGood(identityText(kElsewhere, 2), "another address inside");
 }
 
+// A meshId that is not a slot of this firmware: left out like an unreadable file.
+static void meshIdOutOfRange() {
+  check(Settings::N_MESHES == 4, "the settings header has 4 mesh slots (the cases below assume it)");
+  oneBadAmongGood(identityText(kB, 200), "meshId 200");
+  oneBadAmongGood(identityText(kB, Settings::N_MESHES), "meshId N_MESHES (first slot past the end)");
+  oneBadAmongGood(identityText(kB, 300), "meshId 300 (does not fit a byte)");
+  oneBadAmongGood(identityWithMeshMember(kB, "\"meshId\":-1"), "meshId -1");
+  oneBadAmongGood(identityWithMeshMember(kB, "\"meshId\":\"1\""), "meshId as text");
+  oneBadAmongGood(identityWithMeshMember(kB, "\"meshId\":1.5"), "meshId 1.5");
+  oneBadAmongGood(identityWithMeshMember(kB, ""), "no meshId");
+
+  reset();
+  store(kA, Settings::N_MESHES - 1);
+  check(peerIdentityLoadAll() == 1 && cached(kA) && cached(kA)->meshId == Settings::N_MESHES - 1 &&
+            peerIdentitiesLoaded(),
+        "the last mesh slot still loads");
+}
+
+static std::string lower(std::string text) {
+  for (char& c : text) c = static_cast<char>(c >= 'A' && c <= 'F' ? c - 'A' + 'a' : c);
+  return text;
+}
+static std::string mixed(std::string text) {
+  for (size_t i = 0; i < text.size(); i += 2) text[i] = static_cast<char>(text[i] >= 'A' && text[i] <= 'F' ? text[i] - 'A' + 'a' : text[i]);
+  return text;
+}
+
+// Only the folder spelled as macToPathToken writes it is a peer folder.
+static void canonicalFolders() {
+  fake_vfs::Fs& fs = fake_vfs::fs();
+  const std::string lowerFolder = "/system/espnow/peers/" + lower(token(kA));
+
+  // An empty lower-case twin beside the real folder: one identity, one cache entry.
+  reset();
+  store(kA, 1);
+  fs.mkdirAll(lowerFolder);
+  check(peerIdentityLoadAll() == 1, "an empty lower-case twin folder: the walk reports 1");
+  check(cachedCount() == 1 && cached(kA) && cached(kA)->meshId == 1, "an empty lower-case twin folder: one cache entry");
+  check(peerIdentitiesLoaded() && warnings() == 0, "an empty lower-case twin folder: marked as read, no warning");
+  peerIdentityForget(kA.data());
+  check(!cached(kA) && cachedCount() == 0, "after a forget no copy of the identity stays in the cache");
+  check(!fs.exists(folder(kA)), "the forget removes the real folder");
+
+  // Mixed case is not the canonical spelling either.
+  reset();
+  store(kA, 1);
+  fs.mkdirAll("/system/espnow/peers/" + mixed(token(kA)));
+  check(peerIdentityLoadAll() == 1 && cachedCount() == 1 && peerIdentitiesLoaded() && warnings() == 0,
+        "an empty mixed-case twin folder: one cache entry, marked as read");
+
+  // A non-canonical folder with an identity of its own, alone: never loaded (no
+  // command reads or removes it), named in a warning, cache still complete.
+  reset();
+  fs.put(lowerFolder + "/identity.json", identityText(kA, 2));
+  check(peerIdentityLoadAll() == 0 && cachedCount() == 0, "a lower-case folder's own identity is not loaded");
+  check(peerIdentitiesLoaded(), "a lower-case folder's own identity does not mark the cache incomplete");
+  check(warnings() == 1 && warned(lower(token(kA)) + "/identity.json", "ignored"),
+        "a lower-case folder's own identity: one warning naming the file");
+
+  // Both folders hold an identity: the real one loads once, the twin is named.
+  reset();
+  store(kA, 1);
+  fs.put(lowerFolder + "/identity.json", identityText(kA, 3));
+  check(peerIdentityLoadAll() == 1 && cachedCount() == 1 && cached(kA) && cached(kA)->meshId == 1,
+        "both spellings with an identity: the canonical folder's one is cached once");
+  check(peerIdentitiesLoaded() && warnings() == 1, "both spellings with an identity: marked as read, the twin named");
+}
+
 static Mac numbered(unsigned i) { return Mac{0x02, 0x00, 0x00, 0x00, 0x10, static_cast<uint8_t>(i)}; }
 
 static void fullCache() {
@@ -336,6 +417,8 @@ int main() {
   peersNotOpenable();
   skippedEntries();
   unreadableIdentity();
+  meshIdOutOfRange();
+  canonicalFolders();
   fullCache();
   forget();
   forgetCannotRemove();

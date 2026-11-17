@@ -100,6 +100,15 @@ def main():
     origin_known = extract_block(source, 'static bool espnowOriginIsKnown(')
     text_handler = extract_block(source, 'static void v4h_text(')
     drain = 'static void drainTextQueueForTest() ' + extract_block(source, '// 11. Drain text message queue')
+    # A drain that formats system notices calls formatEspNowSystemNotice;
+    # test_espnow_system_notice.py runs the real one, a double does here.
+    if 'static void formatEspNowSystemNotice(' in source:
+        drain = ('#define EXT_RAM_BSS_ATTR\n'
+                 'static void formatEspNowSystemNotice(const char*, size_t, const char*, char* history,\n'
+                 '                                     size_t historyLen, char* line, size_t lineLen) {\n'
+                 '  std::snprintf(history, historyLen, "notice");\n'
+                 '  std::snprintf(line, lineLen, "notice");\n'
+                 '}\n' + drain)
 
     # The bond partner predicate runs for real when the source has it (a tree
     # from before the partner gate has none; its dispatcher never calls one).

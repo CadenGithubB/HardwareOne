@@ -2502,7 +2502,8 @@ add_test(
 
 # Mesh slots and the device name can be taken back to a new device's state:
 # the only mesh can be disabled, 'espnowmeshes delete' frees a slot, one enabled
-# mesh is the default, messages use the mesh's own label, 'espnowsetname clear'.
+# mesh is the default, messages use the mesh's own label, 'espnowsetname clear',
+# and a running ESP-NOW always uses the passphrase a start would load.
 set(ESPNOW_MESH_SLOTS_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
 if(HW1_SANITIZE)
   list(APPEND ESPNOW_MESH_SLOTS_TEST_ARGS --sanitize)
@@ -2514,8 +2515,10 @@ add_test(
           ${ESPNOW_MESH_SLOTS_TEST_ARGS})
 
 # The boot-time walk over the stored peer identities says when it is incomplete
-# (an identity that is stored but not in the cache), which the mesh delete
-# guard relies on; peerIdentityForget marks it when a file will not go away.
+# (an identity that is stored but not in the cache, or names a mesh slot this
+# firmware does not have), which the mesh delete guard relies on; only folders
+# spelled as macToPathToken writes them are read, once each; peerIdentityForget
+# marks the cache when a file will not go away.
 set(ESPNOW_IDENTITY_WALK_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
 if(HW1_SANITIZE)
   list(APPEND ESPNOW_IDENTITY_WALK_TEST_ARGS --sanitize)
@@ -2525,6 +2528,70 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_espnow_identity_walk.py
           ${ESPNOW_IDENTITY_WALK_TEST_ARGS})
+
+# A refused or failed ESP-NOW start changes no mesh settings: the name check runs
+# before anything is allocated, and the slot 0 bootstrap is undone unless the
+# start succeeds (device check 2026-11-17).
+set(ESPNOW_START_ORDER_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND ESPNOW_START_ORDER_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME espnow_start_order
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_espnow_start_order.py
+          ${ESPNOW_START_ORDER_TEST_ARGS})
+
+# A received BOOT notice prints and stores a readable line with the resolved
+# name, never the peer's JSON; the sender fills in its name.
+set(ESPNOW_SYSTEM_NOTICE_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND ESPNOW_SYSTEM_NOTICE_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME espnow_system_notice
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_espnow_system_notice.py
+          ${ESPNOW_SYSTEM_NOTICE_TEST_ARGS})
+
+# A bond partner change holds bond frames off and resets the sync state before
+# frames are accepted again, and a worker that lost its sync record while the
+# master stayed SYNCED gets back to SYNCED (bench 2026-11-17, step c1).
+set(ESPNOW_BOND_PARTNER_CHANGE_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND ESPNOW_BOND_PARTNER_CHANGE_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME espnow_bond_partner_change
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_espnow_bond_partner_change.py
+          ${ESPNOW_BOND_PARTNER_CHANGE_TEST_ARGS})
+
+# Automatic handshake starts to a peer that does not answer back off from 5 s
+# to 5 min, periodic bond frames are not queued without a session, and the
+# warnings carry the count they held back (bench 2026-11-17, step d2).
+set(ESPNOW_HANDSHAKE_BACKOFF_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND ESPNOW_HANDSHAKE_BACKOFF_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME espnow_handshake_backoff
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_espnow_handshake_backoff.py
+          ${ESPNOW_HANDSHAKE_BACKOFF_TEST_ARGS})
+
+# espnowunpair removes what the device kept about the peer: its folder under
+# /system/espnow/peers and the cached manifest no other peer names; files
+# received from the peer stay, and the reply says what went.
+set(ESPNOW_PEER_FILES_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND ESPNOW_PEER_FILES_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME espnow_peer_files
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_espnow_peer_files.py
+          ${ESPNOW_PEER_FILES_TEST_ARGS})
 
 # Web requests no longer pause the ESP-NOW loop (review RT-2): the flag is gone
 # and the loop's early return asks only for its own state.

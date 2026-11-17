@@ -58,6 +58,34 @@ void keyExRetrySweep(uint32_t nowMs);
 // handshake has resolved (succeed → identity present; fail → identity absent).
 bool keyExIsInFlight(const uint8_t peerMac[6]);
 
+// ---- Back-off for automatic handshake starts (System_ESPNow_HandshakeBackoff.h)
+
+// The key exchange a user asked for (espnowkeyex, espnowprobe,
+// espnowpairsecure): ends the peer's back-off and starts at once. Its give-up
+// warning is always printed; automatic ones are limited to one per 15 minutes.
+bool espnowKeyExInitiateManual(const uint8_t peerMac[6], const char* meshLabel);
+
+// For periodic senders (the bond heartbeat): starts the key exchange, or the
+// session handshake when an identity is on file, unless one is in flight, a
+// session is up, or the peer is backing off. True if a handshake was started.
+// Runs on espnow_task or cmd_exec.
+bool espnowHandshakeAutoStart(const uint8_t peerMac[6]);
+
+// For user commands that name a peer (bondconnect, bondresync): ends the
+// peer's back-off and starts the handshake at once, as a manual one: the key
+// exchange's give-up and the SESSION_OPEN timeout are always printed. Nothing
+// is started while a session is ACTIVE. True if a handshake is under way.
+// cmd_exec.
+bool espnowHandshakeStartNow(const uint8_t peerMac[6]);
+
+// The peer answered (key exchange finished, session ACTIVE), a user command
+// named it, or it was unpaired: its next automatic start is due at once.
+void espnowHandshakeBackoffClear(const uint8_t peerMac[6]);
+
+// An authenticated frame from `peerMac` (or the mesh table saw it come online):
+// ends its back-off if it had been quiet (see handshakeBackoffHeard).
+void espnowHandshakeHeard(const uint8_t peerMac[6]);
+
 // ---- Phase 3.4 — SESSION handshake -----------------------------------------
 
 // Receive handlers for SESSION_OPEN / SESSION_CONFIRM. Both verify the

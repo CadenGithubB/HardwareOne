@@ -266,7 +266,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `espnowtopoautorefresh` | A | Set auto refresh topology: <0\|1><br/>`Usage: espnowtopoautorefresh <0\|1>` |
 | `espnowtopodiscoveryinterval` | A | Set topology discovery interval: <0-300000 ms><br/>`Usage: espnowtopodiscoveryinterval <0..300000>` |
 | `espnowtoporesults` |  | Get topology results: 'espnowtoporesults [page] [request-id]'. |
-| `espnowunpair` | A | Unpair ESP-NOW device (also clears its crypto identity): 'espnowunpair <name_or_mac>'.<br/>`Usage: espnowunpair <name_or_mac>` |
+| `espnowunpair` | A | Unpair ESP-NOW device and remove what this device stored about it (crypto identity, bond caches, its cached manifest): 'espnowunpair <name_or_mac>'.<br/>`Usage: espnowunpair <name_or_mac>` |
 | `espnowusersync` | S | Enable/disable user credential sync: 'espnowusersync [on\|off]'.<br/>`Usage: espnowusersync [on\|off]` |
 | `espnowworker` |  | Configure worker status reporting: 'espnowworker [show\|on\|off\|interval <ms>\|fields <list>]'.<br/>`Usage: espnowworker [show\|on\|off\|interval <ms>\|fields <heap,rssi,thermal,imu>]` |
 | `espnowworkerstatusinterval` | A | Set worker status interval: <5000-120000 ms><br/>`Usage: espnowworkerstatusinterval <5000..120000>` |

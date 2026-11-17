@@ -15,6 +15,14 @@ load; peerIdentityForget removes the files, the folder and the cache slot and
 marks the cache incomplete when the file stays; the next walk recomputes the
 mark.
 
+Also checked: a stored meshId that is not a slot this firmware has (4 and up,
+one that does not fit a byte, negative, text, missing) leaves that identity out
+like an unreadable one; only a folder spelled as macToPathToken writes it is a
+peer folder, so a lower- or mixed-case twin neither loads the identity twice
+nor survives a forget in the cache, and one with its own identity.json is
+named in a warning without marking the cache incomplete. Two source checks
+cover the duplicate-address guard and the range check in peerIdentityPersist.
+
 Compiled: the production functions are taken as text from
 System_ESPNow_Identity.cpp and pasted into espnow_identity_walk_harness.cpp,
 with the vendored ArduinoJson and the shared in-memory filesystem (fake_vfs.h).
@@ -102,6 +110,27 @@ def main():
             sys.exit(f'FAIL extraction: harness: {tag} must appear once')
         harness = harness.replace(tag, text + '\n')
 
+    # The mesh slot count the range check compares against comes from the settings header.
+    n_meshes = re.findall(r'static constexpr uint8_t N_MESHES = (\d+);', read('System_Settings.h'))
+    if len(n_meshes) != 1:
+        sys.exit('FAIL extraction: System_Settings.h: expected one N_MESHES definition')
+
+    # Source checks for what the walk cannot reach through the filesystem. Each
+    # is counted with the harness's checks and fails on the trees before the fix.
+    source_failures = 0
+    load_all = body(source, 'uint8_t peerIdentityLoadAll()', 'System_ESPNow_Identity.cpp')
+    persist = body(source, 'bool peerIdentityPersist(', 'System_ESPNow_Identity.cpp')
+    for ok, what in (
+            ('findSlotByMac(mac) >= 0' in load_all,
+             'the walk never caches a second entry for an address it already cached'),
+            ('meshId >= Settings::N_MESHES' in persist and
+             persist.index('meshId >= Settings::N_MESHES') < persist.index('findSlotByMac(mac)'),
+             'peerIdentityPersist refuses a mesh slot past N_MESHES before it touches the cache')):
+        if not ok:
+            print(f'FAIL: {what}', file=sys.stderr)
+            source_failures += 1
+    print(f'source checks: {2 - source_failures} of 2 passed', flush=True)
+
     print(f'peerIdentitiesLoaded: {"present" if have_loaded else "absent (stand-in)"}', flush=True)
     json_include = a.component.parent / 'hardwareone_libs' / 'ArduinoJson' / 'src'
     with tempfile.TemporaryDirectory(prefix='hw1-espnow-identity-walk-') as tmp:
@@ -109,7 +138,7 @@ def main():
         (Path(tmp) / 'System_MacText.h').write_text(read('System_MacText.h'))
         unit.write_text(harness)
         cmd = [a.cxx, '-std=c++17', '-Wall', '-Wextra', '-Werror', '-pedantic',
-               f'-DHW1_HAVE_IDENTITIES_LOADED={1 if have_loaded else 0}',
+               f'-DHW1_HAVE_IDENTITIES_LOADED={1 if have_loaded else 0}', f'-DHW1_N_MESHES={n_meshes[0]}',
                '-I', tmp, '-I', str(HERE / 'web_batch_stubs'), '-I', str(HERE), '-I', str(json_include),
                str(unit), '-o', str(exe)]
         if a.sanitize:
@@ -117,7 +146,7 @@ def main():
                         '-fno-omit-frame-pointer', '-g']
         subprocess.run(cmd, check=True, timeout=240)
         result = subprocess.run([str(exe)], timeout=60)
-    if result.returncode:
+    if result.returncode or source_failures:
         print('FAIL espnow_identity_walk: the peer identity walk checks reported failures', file=sys.stderr)
         sys.exit(1)
     print('PASS espnow_identity_walk')

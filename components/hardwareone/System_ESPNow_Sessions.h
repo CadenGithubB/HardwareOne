@@ -73,7 +73,8 @@ struct SessionState {
   uint32_t lastUseMs;          // millis() of last TX or RX through this session
   uint8_t  state;              // SessionStateLifecycle enum
   uint8_t  consecutiveSendTimeouts; // our own send no-ACK run (TX-driven self-heal); reset on any delivered ACK
-  uint8_t  _pad2[2];
+  uint8_t  userStarted;        // a user command started this SESSION_OPEN: its timeout is always reported
+  uint8_t  _pad2;
 
   // ---- Phase 3.6 — REKEY state -----------------------------------------------
   // Previous AEAD keys, kept valid briefly after a key swap so in-flight frames
@@ -249,6 +250,12 @@ uint8_t pendingFrameTimeoutSweep(uint32_t nowMs);
 // FREE/CLOSED, so the bond can never re-establish. Called from the heartbeat
 // tick. Returns count reset.
 uint8_t sessionEstablishingTimeoutSweep(uint32_t nowMs);
+
+// A user command (espnowsessionopen, bondconnect, bondresync) started or
+// joined the SESSION_OPEN to `peerMac` that is now ESTABLISHING: if it times
+// out, the warning is printed at once instead of going through the 15-minute
+// limit of automatic tries. cmd_exec.
+void sessionMarkUserStarted(const uint8_t peerMac[6]);
 
 // True while a handshake on this slot is under way and must be left alone: a
 // SESSION_OPEN we sent that is still inside its CONFIRM budget (ESTABLISHING),
