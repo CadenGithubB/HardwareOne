@@ -99,7 +99,7 @@ STRNCPY_ALLOWED: dict[str, int] = {
     "G2_Page_Settings.cpp": 1,
     "G2_Page_TestSuite.cpp": 3,
     "G2_Page_TextEntry.cpp": 1,
-    "OLED_ESPNow.cpp": 6,
+    "OLED_ESPNow.cpp": 3,
     "OLED_FirstTimeSetup.cpp": 2,
     "OLED_Mode_Automations.cpp": 1,
     "OLED_Mode_CLI.cpp": 2,

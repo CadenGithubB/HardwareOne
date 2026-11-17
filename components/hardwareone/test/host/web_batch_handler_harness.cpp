@@ -105,7 +105,6 @@ static Scenario scenario;
 static struct { bool bondModeEnabled = true; } gSettings;
 static void* server = reinterpret_cast<void*>(1);
 static int gBroadcastSkipSessionIdx = 17;
-static bool gMeshActivitySuspended = false;
 
 void webBatchTestStringAppend() {
   if (scenario.revokeOnSerialize) scenario.live = false;
@@ -132,7 +131,6 @@ static void httpd_resp_set_type(httpd_req_t* req, const char* type) { req->conte
 static void httpd_resp_set_status(httpd_req_t* req, const char* status) { req->status = status; }
 static void httpd_resp_sendstr(httpd_req_t* req, const char* output) {
   check(server != nullptr, "no HTTP send after server destruction");
-  check(!gMeshActivitySuspended, "mesh suspension restored before HTTP response");
   check(gBroadcastSkipSessionIdx == 17, "broadcast origin restored before HTTP response");
   req->output = output ? output : "";
   ++req->sends;
@@ -245,7 +243,7 @@ static void resetScenario() {
   const auto nextClock = scenario.now + 1000;
   scenario = Scenario{}; scenario.now = nextClock;
   gSettings.bondModeEnabled = true; server = reinterpret_cast<void*>(1);
-  gBroadcastSkipSessionIdx = 17; gMeshActivitySuspended = false;
+  gBroadcastSkipSessionIdx = 17;
 }
 static httpd_req_t invoke(bool bond, const std::vector<std::string>& commands,
                          bool interactive = false) {
@@ -259,7 +257,7 @@ static httpd_req_t invoke(bool bond, const std::vector<std::string>& commands,
   scenario.expectedReq = bond ? nullptr : &req;
   if (bond) handleBondCliBatch(&req); else handleCliBatch(&req);
   scenario.expectedReq = nullptr;
-  check(!gMeshActivitySuspended && gBroadcastSkipSessionIdx == 17,
+  check(gBroadcastSkipSessionIdx == 17,
         "handler exit restores web globals");
   check(requestAllocator.live.empty() && responseAllocator.live.empty(),
         "handler releases request and response JSON allocations");

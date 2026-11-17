@@ -160,7 +160,8 @@ void oledEspNowShowNameKeyboard();
 // Remote form and text message functions
 bool oledEspNowHandleRemoteFormInput(int deltaX, int deltaY, uint32_t newlyPressed);
 void oledEspNowSendTextMessage();
-void oledEspNowSendRemoteCommand();
+// False only when a field is still empty (nothing sent, form kept).
+bool oledEspNowSendRemoteCommand();
 
 // Settings menu functions (local device)
 void oledEspNowDisplaySettings(Adafruit_SSD1306* display);
@@ -168,7 +169,8 @@ bool oledEspNowHandleSettingsInput(int deltaX, int deltaY, uint32_t newlyPressed
 void oledEspNowOpenSettings();
 void oledEspNowApplySettingsEdit(const String& value);
 
-// Device config menu functions (remote device)
+// Device config menu functions (remote device). The remote rows fill in and
+// open the remote form; only the form sends.
 bool oledEspNowHandleDeviceConfigInput(int deltaX, int deltaY, uint32_t newlyPressed);
 void oledEspNowOpenDeviceConfig();
 void oledEspNowApplyDeviceConfigEdit(const String& value);
@@ -176,17 +178,6 @@ void oledEspNowApplyDeviceConfigEdit(const String& value);
 // Buffer safety validation (implemented in cpp)
 bool oledEspNowValidateDevicePtr(const void* devicePtr);
 
-// Remote file browsing
-void oledEspNowSendBrowseRequest(const char* path = "/");
-void oledEspNowDisplayRemoteFiles(Adafruit_SSD1306* display);
-bool oledEspNowHandleRemoteFilesInput(int deltaX, int deltaY, uint32_t newlyPressed);
-
 #endif // ENABLE_OLED_DISPLAY && ENABLE_ESPNOW
-
-// Stub for storing remote file browse results (callable from ESP-NOW handler even when OLED disabled)
-#if ENABLE_ESPNOW
-#include <ArduinoJson.h>
-void storeRemoteFileBrowseResult(const uint8_t* mac, const char* path, JsonArray& files);
-#endif
 
 #endif // OLED_ESPNOW_H

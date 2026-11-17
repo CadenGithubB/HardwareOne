@@ -119,6 +119,34 @@ static void oledEspNowScrubRemoteForm() {
   secureClearString(gOledEspNowState.remoteCommand);
 }
 
+// Open the remote-command form with its command line filled in (the Device
+// Config rows). The form collects an account of the TARGET device and sends
+// nothing until Y.
+static void oledEspNowOpenRemoteFormWith(const String& command) {
+  oledEspNowScrubRemoteForm();
+  gOledEspNowState.remoteCommand = command;
+  gOledEspNowState.remoteFormField = 0;
+  gOledEspNowState.currentView = ESPNOW_VIEW_REMOTE_FORM;
+}
+
+// `espnowremote` acknowledges a command it handed to the radio with the request
+// id the peer's answer will carry: the reply ends "(match reqId <n>)", or is
+// {"schema":1,"ok":true,"reqId":<n>} when the typed command holds a `json`
+// word. Several of its refusals do not lead with "Error", so the executor
+// reports them as done; the id is what says a command left this device.
+static bool oledEspNowRemoteAcknowledged(const char* reply) {
+  if (!reply) return false;
+  if (reply[0] == '{') return commandReplyJsonOk(reply) && strstr(reply, "\"reqId\":") != nullptr;
+  static const char kTag[] = "(match reqId ";
+  const char* tag = nullptr;   // the last one: the echoed command sits before it
+  for (const char* p = strstr(reply, kTag); p; p = strstr(p + 1, kTag)) tag = p;
+  if (!tag) return false;
+  const char* digits = tag + sizeof(kTag) - 1;
+  const char* end = digits;
+  while (*end >= '0' && *end <= '9') end++;
+  return end != digits && end[0] == ')' && end[1] == '\0';
+}
+
 void oledEspNowInit() {
   gOledEspNowState.currentView = ESPNOW_VIEW_MAIN_MENU;
   gOledEspNowState.interactionMode = ESPNOW_MODE_TEXT;
@@ -1236,9 +1264,10 @@ bool oledEspNowHandleInput(int deltaX, int deltaY, uint32_t newlyPressed) {
       bool kbHandled = oledKeyboardHandleInput(deltaX, deltaY, newlyPressed);
       if (oledKeyboardIsCompleted()) {
         String value = oledKeyboardGetText();
-        oledEspNowApplyDeviceConfigEdit(value);
         oledKeyboardReset();
         gOledEspNowState.currentView = ESPNOW_VIEW_DEVICE_CONFIG;
+        // A value moves on to the remote form with the command filled in.
+        oledEspNowApplyDeviceConfigEdit(value);
         return true;
       }
       if (oledKeyboardIsCancelled()) {
@@ -1892,10 +1921,11 @@ bool oledEspNowHandleRemoteFormInput(int deltaX, int deltaY, uint32_t newlyPress
     return true;
   }
   
-  // Y button: Send remote command
+  // Y button: Send remote command. An incomplete form stays open as typed.
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_Y)) {
-    oledEspNowSendRemoteCommand();
-    gOledEspNowState.currentView = ESPNOW_VIEW_DEVICE_DETAIL;
+    if (oledEspNowSendRemoteCommand()) {
+      gOledEspNowState.currentView = ESPNOW_VIEW_DEVICE_DETAIL;
+    }
     return true;
   }
   
@@ -1942,14 +1972,20 @@ void oledEspNowSendTextMessage() {
   gOledEspNowState.needsRefresh = true;
 }
 
-void oledEspNowSendRemoteCommand() {
-  if (!gEspNow) return;
+// Hand the form to `espnowremote` and show its verdict. Returns false only
+// when a field is still empty: nothing was sent and the form stays as typed.
+// Otherwise the form is scrubbed, whether the command left or was refused; the
+// peer's own answer (its result, or "Auth failed") arrives later as a row of
+// the conversation.
+bool oledEspNowSendRemoteCommand() {
+  if (!gEspNow) return true;
   
   // Validate that all fields are filled
   if (gOledEspNowState.remoteUsername.length() == 0 ||
       gOledEspNowState.remotePassword.length() == 0 ||
       gOledEspNowState.remoteCommand.length() == 0) {
-    return;  // Don't send if any field is empty
+    oledToastShow("Fill all 3 fields", 2500);
+    return false;  // Don't send if any field is empty
   }
   
   
@@ -1957,13 +1993,16 @@ void oledEspNowSendRemoteCommand() {
   char macStr[18];
   macToDisplay(gOledEspNowState.selectedDeviceMac, macStr, sizeof(macStr));
   
-  // Build command: espnow remote <mac> <username> <password> <command>
+  // Build command: espnowremote <mac> <username> <password> <command>
   char cmdBuf[384];
   snprintf(cmdBuf, sizeof(cmdBuf), "espnowremote %s %s %s %s", macStr,
            gOledEspNowState.remoteUsername.c_str(),
            gOledEspNowState.remotePassword.c_str(),
            gOledEspNowState.remoteCommand.c_str());
-  executeOledCommand(cmdBuf);
+  // The owner's reply is 255 bytes at most plus the executor's "OK: " stamp;
+  // the request id that marks an accepted command is at its end.
+  char reply[272];
+  const bool executed = executeOledCommandWithResult(cmdBuf, reply, sizeof(reply));
 
   // Scrub the stack copy too — cmdBuf holds the full "espnowremote ... <pass>"
   // line in plaintext. Volatile so the optimizer can't elide a memset on a
@@ -1971,11 +2010,18 @@ void oledEspNowSendRemoteCommand() {
   volatile char* vcmd = cmdBuf;
   for (size_t i = 0; i < sizeof(cmdBuf); i++) vcmd[i] = 0;
 
+  // The toast box fits ~17 columns: two fixed strings, as for the other owner
+  // commands of this screen.
+  if (!executed || !oledEspNowRemoteAcknowledged(reply)) {
+    oledToastShow(commandReplyIsAdminRefusal(reply) ? "Admin required" : "Remote not sent", 2500);
+  }
+
   // Clear form (scrubbing, not just truncating)
   oledEspNowScrubRemoteForm();
   
   // Refresh message list
   gOledEspNowState.needsRefresh = true;
+  return true;
 }
 
 // =============================================================================
@@ -2255,18 +2301,31 @@ void oledEspNowApplySettingsEdit(const String& value) {
 // Device Configuration Menu (Remote Device)
 // ============================================================================
 
-// Device config menu items: 0=Restart, 1=Role, 2=Name, 3=Room, 4=Zone, 5=PrettyName, 6=Unpair
-#define DEVICE_CONFIG_COUNT 7
-
-static const char* deviceConfigLabels[DEVICE_CONFIG_COUNT] = {
-  "Restart Device",
-  "Set Role",
-  "Set Name",
-  "Set Room",
-  "Set Zone",
-  "Set Pretty Name",
-  "Unpair Device"
+// Six rows act on the selected peer. Each fills the command line of the remote
+// form (ESPNOW_VIEW_REMOTE_FORM) and opens it; the form collects an account of
+// the target device and sends `espnowremote <mac> <user> <pass> <command>` on
+// Y, so the peer checks the account and runs a registered command. Nothing
+// leaves this device before that. "Unpair Device" acts on this device and goes
+// to the unpair owner. Host suite oled_espnow_remote_actions checks that each
+// command here is a registered one.
+struct DeviceConfigAction {
+  const char* label;
+  const char* remoteCommand;   // what the peer runs; nullptr = not a remote action
+  const char* valuePrompt;     // keyboard title when the command takes a value
+  uint8_t     valueMax;        // longest value the keyboard accepts
+  bool        startsWithPeerName;
 };
+static const DeviceConfigAction kDeviceConfigActions[] = {
+  { "Restart Device",  "reboot",             nullptr,                        0,  false },
+  { "Set Role",        "espnowmeshrole",     "Role (master/backup/worker):", 16, false },
+  { "Set Name",        "espnowsetname",      "Device Name:",                 16, true  },
+  { "Set Room",        "espnowroom",         "Room:",                        16, false },
+  { "Set Zone",        "espnowzone",         "Zone:",                        16, false },
+  { "Set Pretty Name", "espnowfriendlyname", "Pretty Name:",                 24, false },
+  { "Unpair Device",   nullptr,              nullptr,                        0,  false },
+};
+static const int DEVICE_CONFIG_COUNT =
+    (int)(sizeof(kDeviceConfigActions) / sizeof(kDeviceConfigActions[0]));
 
 void oledEspNowOpenDeviceConfig() {
   gOledEspNowState.currentView = ESPNOW_VIEW_DEVICE_CONFIG;
@@ -2303,7 +2362,7 @@ void oledEspNowDisplayDeviceConfig(Adafruit_SSD1306* display) {
     }
     
     display->setCursor(4, y);
-    display->print(deviceConfigLabels[i]);
+    display->print(kDeviceConfigActions[i].label);
   }
   
   // Note: Footer is drawn by global render loop
@@ -2320,62 +2379,23 @@ bool oledEspNowHandleDeviceConfigInput(int deltaX, int deltaY, uint32_t newlyPre
     return true;
   }
   
-  // A button: Execute selected action
+  // A button: the selected action. A remote action only fills in and opens
+  // the remote form (after a keyboard for its value, if it takes one).
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
-    char macStr[18];
-    macToDisplay(gOledEspNowState.selectedDeviceMac, macStr, sizeof(macStr));
-    
-    switch (gOledEspNowState.deviceConfigMenuIndex) {
-      case 0: // Restart Device
-        {
-          char cmdBuf[64];
-          snprintf(cmdBuf, sizeof(cmdBuf), "espnow cmd %s restart", macStr);
-          executeOledCommand(cmdBuf);
-          broadcastOutput("[ESP-NOW] Sent restart command");
-          gOledEspNowState.currentView = ESPNOW_VIEW_DEVICE_DETAIL;
-        }
-        break;
-        
-      case 1: // Set Role
-        gOledEspNowState.deviceConfigEditField = 1;
-        oledKeyboardInit(
-            "Role (master/backup/worker):", "", 16,
-            OledKeyboardDictationPolicy::ALLOW_PLAINTEXT);
-        gOledEspNowState.currentView = ESPNOW_VIEW_DEVICE_CONFIG_KEYBOARD;
-        break;
-        
-      case 2: // Set Name
-        gOledEspNowState.deviceConfigEditField = 2;
-        oledKeyboardInit(
-            "Device Name:", gOledEspNowState.selectedDeviceName.c_str(), 16,
-            OledKeyboardDictationPolicy::ALLOW_PLAINTEXT);
-        gOledEspNowState.currentView = ESPNOW_VIEW_DEVICE_CONFIG_KEYBOARD;
-        break;
-        
-      case 3: // Set Room
-        gOledEspNowState.deviceConfigEditField = 3;
-        oledKeyboardInit("Room:", "", 16,
-                         OledKeyboardDictationPolicy::ALLOW_PLAINTEXT);
-        gOledEspNowState.currentView = ESPNOW_VIEW_DEVICE_CONFIG_KEYBOARD;
-        break;
-        
-      case 4: // Set Zone
-        gOledEspNowState.deviceConfigEditField = 4;
-        oledKeyboardInit("Zone:", "", 16,
-                         OledKeyboardDictationPolicy::ALLOW_PLAINTEXT);
-        gOledEspNowState.currentView = ESPNOW_VIEW_DEVICE_CONFIG_KEYBOARD;
-        break;
-        
-      case 5: // Set Pretty Name
-        gOledEspNowState.deviceConfigEditField = 5;
-        oledKeyboardInit("Pretty Name:", "", 24,
-                         OledKeyboardDictationPolicy::ALLOW_PLAINTEXT);
-        gOledEspNowState.currentView = ESPNOW_VIEW_DEVICE_CONFIG_KEYBOARD;
-        break;
-        
-      case 6: // Unpair Device
-        oledEspNowUnpairDevice();
-        break;
+    const int index = gOledEspNowState.deviceConfigMenuIndex;
+    if (index < 0 || index >= DEVICE_CONFIG_COUNT) return true;
+    const DeviceConfigAction& action = kDeviceConfigActions[index];
+    if (!action.remoteCommand) {
+      oledEspNowUnpairDevice();
+    } else if (!action.valuePrompt) {
+      oledEspNowOpenRemoteFormWith(action.remoteCommand);
+    } else {
+      gOledEspNowState.deviceConfigEditField = index;
+      oledKeyboardInit(
+          action.valuePrompt,
+          action.startsWithPeerName ? gOledEspNowState.selectedDeviceName.c_str() : "",
+          action.valueMax, OledKeyboardDictationPolicy::ALLOW_PLAINTEXT);
+      gOledEspNowState.currentView = ESPNOW_VIEW_DEVICE_CONFIG_KEYBOARD;
     }
     return true;
   }
@@ -2389,218 +2409,19 @@ bool oledEspNowHandleDeviceConfigInput(int deltaX, int deltaY, uint32_t newlyPre
   return false;
 }
 
+// The value typed for a Device Config row: "<command> <value>" goes into the
+// remote form, which opens for the target account. Nothing is sent here and
+// nothing shown on this device changes; an empty value returns to the menu.
 void oledEspNowApplyDeviceConfigEdit(const String& value) {
-  if (value.length() == 0) {
-    gOledEspNowState.deviceConfigEditField = -1;
-    return;
-  }
-  
-  char macStr[18];
-  macToDisplay(gOledEspNowState.selectedDeviceMac, macStr, sizeof(macStr));
-  
-  switch (gOledEspNowState.deviceConfigEditField) {
-    case 1: // Set Role
-      {
-        char cmdBuf[96];
-        snprintf(cmdBuf, sizeof(cmdBuf), "espnow cmd %s meshrole %s", macStr, value.c_str());
-        executeOledCommand(cmdBuf);
-        broadcastOutput("[ESP-NOW] Sent role change command");
-      }
-      break;
-      
-    case 2: // Set Name
-      {
-        char cmdBuf[96];
-        snprintf(cmdBuf, sizeof(cmdBuf), "espnow cmd %s espnowname %s", macStr, value.c_str());
-        executeOledCommand(cmdBuf);
-        gOledEspNowState.selectedDeviceName = value;
-        broadcastOutput("[ESP-NOW] Sent name change command");
-      }
-      break;
-      
-    case 3: // Set Room
-      {
-        char cmdBuf[96];
-        snprintf(cmdBuf, sizeof(cmdBuf), "espnow cmd %s room %s", macStr, value.c_str());
-        executeOledCommand(cmdBuf);
-        broadcastOutput("[ESP-NOW] Sent room change command");
-      }
-      break;
-      
-    case 4: // Set Zone
-      {
-        char cmdBuf[96];
-        snprintf(cmdBuf, sizeof(cmdBuf), "espnow cmd %s zone %s", macStr, value.c_str());
-        executeOledCommand(cmdBuf);
-        broadcastOutput("[ESP-NOW] Sent zone change command");
-      }
-      break;
-      
-    case 5: // Set Pretty Name
-      {
-        char cmdBuf[96];
-        snprintf(cmdBuf, sizeof(cmdBuf), "espnow cmd %s prettyname %s", macStr, value.c_str());
-        executeOledCommand(cmdBuf);
-        broadcastOutput("[ESP-NOW] Sent pretty name change command");
-      }
-      break;
-  }
-  
+  const int field = gOledEspNowState.deviceConfigEditField;
   gOledEspNowState.deviceConfigEditField = -1;
-}
-
-// ============================================================================
-// Remote File Browsing State and Functions
-// ============================================================================
-
-// Remote file browser state
-struct RemoteFileBrowseState {
-  bool active;                    // Remote file browse mode active
-  bool pending;                   // Waiting for response
-  bool hasData;                   // Have data to display
-  uint8_t targetMac[6];           // Target device MAC
-  char currentPath[128];          // Current browse path
-  char items[10][64];             // File/folder names (max 10 items displayed)
-  bool isFolder[10];              // Is item a folder
-  int itemCount;                  // Number of items
-  int selectedIndex;              // Currently selected item
-  int scrollOffset;               // Scroll offset for display
-};
-EXT_RAM_BSS_ATTR static RemoteFileBrowseState gRemoteFileBrowse;
-
-void oledEspNowSendBrowseRequest(const char* path) {
-  if (!gEspNow || !gEspNow->initialized || !gEspNow->encryptionEnabled) {
-    return;
-  }
-  
-  // Need credentials - for now use a stored admin credential or prompt
-  // This is a simplified version - in production you'd want stored credentials
-  gRemoteFileBrowse.pending = true;
-  strncpy(gRemoteFileBrowse.currentPath, path, sizeof(gRemoteFileBrowse.currentPath) - 1);
-  
-  // Build and send FILE_BROWSE message
-  // Note: This requires stored credentials - placeholder for now
-  broadcastOutput("[ESP-NOW] Remote file browse requires stored credentials (not yet implemented)");
-}
-
-void oledEspNowDisplayRemoteFiles(Adafruit_SSD1306* display) {
-  if (!display) return;
-  
-  display->setTextSize(1);
-  display->setTextColor(DISPLAY_COLOR_WHITE);
-  display->setCursor(0, 0);
-  
-  if (gRemoteFileBrowse.pending) {
-    display->println("Remote Files");
-    display->println();
-    display->println("Loading...");
-    return;
-  }
-  
-  if (!gRemoteFileBrowse.hasData) {
-    display->println("Remote Files");
-    display->println();
-    display->println("No data");
-    display->println();
-    display->println("Press A to browse");
-    return;
-  }
-  
-  // Display path
-  display->print("Path: ");
-  String pathStr = gRemoteFileBrowse.currentPath;
-  if (pathStr.length() > 15) pathStr = "..." + pathStr.substring(pathStr.length() - 12);
-  display->println(pathStr);
-  
-  display->drawFastHLine(0, 9, 128, DISPLAY_COLOR_WHITE);
-  
-  // Display files
-  int startY = 12;
-  const int visibleItems = oledVisibleRows(9, 1, 5);
-  for (int i = 0; i < visibleItems && (i + gRemoteFileBrowse.scrollOffset) < gRemoteFileBrowse.itemCount; i++) {
-    int idx = i + gRemoteFileBrowse.scrollOffset;
-    int y = startY + (i * 9);
-    
-    if (idx == gRemoteFileBrowse.selectedIndex) {
-      display->fillRect(0, y, 128, 9, DISPLAY_COLOR_WHITE);
-      display->setTextColor(DISPLAY_COLOR_BLACK);
-    } else {
-      display->setTextColor(DISPLAY_COLOR_WHITE);
-    }
-    
-    display->setCursor(2, y + 1);
-    if (gRemoteFileBrowse.isFolder[idx]) {
-      display->print("[D] ");
-    } else {
-      display->print("    ");
-    }
-    display->print(gRemoteFileBrowse.items[idx]);
-  }
-  
-  display->setTextColor(DISPLAY_COLOR_WHITE);
-}
-
-bool oledEspNowHandleRemoteFilesInput(int deltaX, int deltaY, uint32_t newlyPressed) {
-  // Handle navigation
-  if (deltaY < 0 && gRemoteFileBrowse.selectedIndex > 0) {
-    gRemoteFileBrowse.selectedIndex--;
-    if (gRemoteFileBrowse.selectedIndex < gRemoteFileBrowse.scrollOffset) {
-      gRemoteFileBrowse.scrollOffset = gRemoteFileBrowse.selectedIndex;
-    }
-    return true;
-  }
-  if (deltaY > 0 && gRemoteFileBrowse.selectedIndex < gRemoteFileBrowse.itemCount - 1) {
-    gRemoteFileBrowse.selectedIndex++;
-    if (gRemoteFileBrowse.selectedIndex >= gRemoteFileBrowse.scrollOffset + oledVisibleRows(9, 1, 5)) {
-      gRemoteFileBrowse.scrollOffset = gRemoteFileBrowse.selectedIndex - oledVisibleRows(9, 1, 5) + 1;
-    }
-    return true;
-  }
-  
-  return false;
+  if (value.length() == 0 || field < 0 || field >= DEVICE_CONFIG_COUNT) return;
+  const DeviceConfigAction& action = kDeviceConfigActions[field];
+  if (!action.remoteCommand || !action.valuePrompt) return;
+  String command = action.remoteCommand;
+  command += ' ';
+  command += value;
+  oledEspNowOpenRemoteFormWith(command);
 }
 
 #endif // ENABLE_OLED_DISPLAY && ENABLE_ESPNOW
-
-// ============================================================================
-// Stub for storing remote file browse results
-// This is outside the OLED guard so it can be called from ESP-NOW handler
-// ============================================================================
-#if ENABLE_ESPNOW
-#include <ArduinoJson.h>
-
-void storeRemoteFileBrowseResult(const uint8_t* mac, const char* path, JsonArray& files) {
-#if ENABLE_OLED_DISPLAY
-  // Store results in remote file browse state
-  
-  gRemoteFileBrowse.pending = false;
-  gRemoteFileBrowse.hasData = true;
-  memcpy(gRemoteFileBrowse.targetMac, mac, 6);
-  strncpy(gRemoteFileBrowse.currentPath, path, sizeof(gRemoteFileBrowse.currentPath) - 1);
-  
-  gRemoteFileBrowse.itemCount = 0;
-  gRemoteFileBrowse.selectedIndex = 0;
-  gRemoteFileBrowse.scrollOffset = 0;
-  
-  for (JsonVariant file : files) {
-    if (gRemoteFileBrowse.itemCount >= 10) break;
-    
-    const char* name = file["name"] | "";
-    const char* type = file["type"] | "file";
-    
-    strncpy(gRemoteFileBrowse.items[gRemoteFileBrowse.itemCount], name, 63);
-    gRemoteFileBrowse.items[gRemoteFileBrowse.itemCount][63] = '\0';
-    gRemoteFileBrowse.isFolder[gRemoteFileBrowse.itemCount] = (strcmp(type, "folder") == 0);
-    gRemoteFileBrowse.itemCount++;
-  }
-  
-  INFO_ESPNOWF("[FILE_BROWSE] Stored %d items from path '%s'", gRemoteFileBrowse.itemCount, path);
-#else
-  // OLED not enabled - just log
-  (void)mac;
-  (void)path;
-  (void)files;
-#endif
-}
-
-#endif // ENABLE_ESPNOW

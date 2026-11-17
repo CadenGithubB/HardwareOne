@@ -832,6 +832,75 @@
     };
     console.log('[ESP-NOW] Chunk 3L: loadRemoteAutomations ready');
     console.log('[ESP-NOW] Chunk 3M: doRemoteExec start');
+    // What this device answered to `espnowremote`. A command it handed to the
+    // radio is acknowledged with the request id the peer's answer will carry:
+    // {"schema":1,"ok":true,"reqId":N} when the command line holds a `json`
+    // word, otherwise text that ends "(match reqId N)" (the command executor may
+    // put "OK: " in front). Anything else is a refusal by this device: nothing
+    // was sent. Returns {sent, reqId, error}; the acknowledgement is never the
+    // command's result.
+    window.espnowRemoteAck = function(reply) {
+      var text = String(reply == null ? '' : reply).trim();
+      if (text.charAt(0) === '{') {
+        var parsed = null;
+        try { parsed = JSON.parse(text); } catch (_) { parsed = null; }
+        if (parsed && parsed.ok === true && Number(parsed.reqId) > 0) {
+          return { sent: true, reqId: Number(parsed.reqId), error: '' };
+        }
+        return { sent: false, reqId: 0, error: (parsed && parsed.error) ? String(parsed.error) : text };
+      }
+      var id = /\(match reqId (\d+)\)$/.exec(text);
+      if (id && Number(id[1]) > 0) return { sent: true, reqId: Number(id[1]), error: '' };
+      return { sent: false, reqId: 0, error: text.replace(/^OK: /, '') || 'this device gave no reply' };
+    };
+    // Collects a peer's answer to one remote command from /api/espnow/messages
+    // records: the records received from that peer that carry the request id.
+    // What the command returned is stored in 200-byte pieces ("piece k of n");
+    // it is whole when all n are here. Lines the command printed while it ran,
+    // and a short answer such as "Auth failed", are single records with the same
+    // id. `cursor` is the highest sequence number seen, for the next request.
+    window.espnowRemoteAnswer = function(mac, reqId) {
+      var target = String(mac || '').toUpperCase();
+      var pieces = {};      // piece number -> text of a multi-piece answer
+      var piecesOf = 0;
+      var singles = [];     // one-record answers, in arrival order
+      var answer = { cursor: 0 };
+      answer.add = function(messages) {
+        for (var i = 0; i < (messages || []).length; i++) {
+          var m = messages[i] || {};
+          var seq = Number(m.seq || m.seqNum || 0);
+          if (seq > answer.cursor) answer.cursor = seq;
+          if (Number(m.reqId || 0) !== reqId || m.sent === true) continue;
+          if (String(m.mac || m.from || '').toUpperCase() !== target) continue;
+          var text = String(m.msg == null ? (m.message == null ? '' : m.message) : m.msg);
+          var of = Number(m.of || 0), piece = Number(m.piece || 0);
+          if (of > 1) {
+            piecesOf = of;
+            if (piece >= 1 && piece <= of) pieces[piece] = text;
+          } else {
+            singles.push(text);
+          }
+        }
+      };
+      // {have, of} while a multi-piece answer is still short of pieces, else null.
+      answer.missing = function() {
+        if (!piecesOf) return null;
+        var have = 0;
+        for (var k = 1; k <= piecesOf; k++) { if (pieces[k] !== undefined) have++; }
+        return have < piecesOf ? { have: have, of: piecesOf } : null;
+      };
+      // Every whole answer text received so far, the multi-piece one first.
+      answer.texts = function() {
+        var out = [];
+        if (piecesOf && !answer.missing()) {
+          var joined = '';
+          for (var k = 1; k <= piecesOf; k++) joined += pieces[k];
+          out.push(joined);
+        }
+        return out.concat(singles);
+      };
+      return answer;
+    };
     window.doRemoteExec = function(mac) {
       const u = (hw.$('ru-' + mac) || {}).value || '';
       const p = (hw.$('rp-' + mac) || {}).value || '';
@@ -843,27 +912,28 @@
       
       // Remote command output is picked up by the message polling loop
       // (/api/espnow/messages) which runs every 500ms — no SSE needed.
+      // postForm, not postFormText: a refusal comes back as HTTP 400/403 with
+      // the reason in the body, and the reason is what the user needs to see.
       const cmd = 'espnowremote ' + mac + ' ' + u + ' ' + p + ' ' + c;
-      hw.postFormText('/api/cli', { cmd: cmd })
+      hw.postForm('/api/cli', { cmd: cmd })
+        .then(function(r) { return r.text(); })
         .then(t=>{
           console.log('[ESP-NOW] Remote exec result:', t);
-          // Update sending bubble to show completion
+          const ack = window.espnowRemoteAck(t);
+          // Update sending bubble: the reply only says whether the command left
+          // this device. The peer's answer arrives later through the polling loop.
           if (sendingBubble) {
             const statusDiv = sendingBubble.querySelector('.message-status');
-            const lowerResult = (t || '').toLowerCase();
-            // Check for ACK confirmation (v2 protocol with ACK)
-            if (lowerResult.indexOf('failed') >= 0 || lowerResult.indexOf('error') >= 0) {
-              statusDiv.innerHTML = '<span class="status-icon">✗</span>Failed';
-            } else if (lowerResult.indexOf('remote command sent') >= 0) {
+            if (ack.sent) {
               statusDiv.innerHTML = '<span class="status-icon">✓</span>Sent';
             } else {
-              statusDiv.innerHTML = '<span class="status-icon">✓</span>' + t;
+              sendingBubble.className = 'message-bubble message-error';
+              statusDiv.innerHTML = '<span class="status-icon">✗</span>Not sent';
             }
           }
-          
-          // Show immediate result if it's not just the "sent" confirmation
-          if (t && !t.includes('Remote command sent')) {
-            appendLogLine('log-' + mac, 'RECEIVED', 'Result: ' + t, null);
+          if (!ack.sent) {
+            appendLogLine('log-' + mac, 'ERROR', 'Not sent: ' + ack.error, null);
+            return;
           }
           
           // Clear command input
@@ -909,11 +979,20 @@
     };
     console.log('[ESP-NOW] Chunk 3N: toggleFileMode ready');
     console.log('[ESP-NOW] Chunk 3O: browseRemoteFiles start');
+    // Remote file browser. Sends `files json "<path>"` to the peer through
+    // `espnowremote`, reads the request id from this device's acknowledgement
+    // and waits for the peer's records with that id. The JSON form is what the
+    // peer returns whole (the text listing is printed line by line and cut to
+    // one radio frame). The wait always ends: with the listing, with what the
+    // peer answered instead, or with a message that nothing arrived.
+    window.REMOTE_BROWSE_WAIT_POLLS = 15;   // idle polls, one second apart
+    window.REMOTE_BROWSE_TEXT_GRACE = 2;    // idle polls a text answer waits for a listing
     window.browseRemoteFiles = function(mac, path) {
       var u = (hw.$('remote-user-' + mac) || {}).value || '';
       var p = (hw.$('remote-pass-' + mac) || {}).value || '';
       var container = hw.$('remote-fexplorer-' + mac);
       var statusDiv = hw.$('remote-fstat-' + mac);
+      var esc = window.espnowEscapeHtml;
       
       if (!u || !p) {
         hw.setText(statusDiv, 'Enter username and password first');
@@ -924,183 +1003,171 @@
       container.innerHTML = '<div class="remote-explorer"><div class="remote-explorer-crumb">Loading...</div><div class="remote-entry remote-entry-empty" style="display:flex">Requesting directory...</div></div>';
       hw.setText(statusDiv, 'Requesting directory listing from ' + mac + '...');
       
-      var targetMac = String(mac || '').toUpperCase();
       var browsePath = path || '/';
-      var seqBefore = 0;
-      
-      // Get current max sequence number so we only look at NEW messages
-      hw.fetchJSON('/api/espnow/messages?since=0')
-        .then(function(data) {
-          var msgs = Array.isArray(data) ? data : (data.messages || []);
-          for (var i = 0; i < msgs.length; i++) {
-            var s = msgs[i].seq || msgs[i].seqNum || 0;
-            if (s > seqBefore) seqBefore = s;
-          }
-        })
-        .catch(function() {})
-        .finally(function() {
-      
-      // Send browse command (sends V3 CMD: user:pass:files "/path"). The remote
-      // 'files' command requires the path in quotes (quoted-path standard), so
-      // quote it here — an unquoted path is rejected with "path must be in quotes".
-      var cmd = 'espnowremote ' + mac + ' ' + u + ' ' + p + ' files "' + browsePath + '"';
-      hw.postFormText('/api/cli', { cmd: cmd })
+      // A newer browse of the same peer retires this one's polling.
+      window.__remoteBrowseRun = window.__remoteBrowseRun || {};
+      var run = (window.__remoteBrowseRun[mac] || 0) + 1;
+      window.__remoteBrowseRun[mac] = run;
+      function current() { return window.__remoteBrowseRun[mac] === run; }
+      // Records up to this sequence number were read by an earlier browse of
+      // this peer; an answer to a later request is always above it.
+      window.__remoteBrowseCursor = window.__remoteBrowseCursor || {};
+
+      // End of the browse without a listing. Readiness G-50: the path is built
+      // from a peer-supplied folder name and the message can be peer text.
+      function finish(message, status) {
+        container.innerHTML = '<div class="remote-explorer"><div class="remote-explorer-crumb">' + esc(browsePath) + '</div><div class="remote-entry remote-entry-empty" style="display:flex">' + esc(message) + '</div></div>';
+        hw.setText(statusDiv, status || message);
+      }
+      function showListing(listing) {
+        var entries = window.parseRemoteFileListing(listing);
+        // Render with the SHARED file-explorer (window.BondFs.renderExplorer +
+        // window.FileBrowser) so the remote browser matches the local / Files /
+        // Logging views — same icons, breadcrumb, hover rows. peerLabel shows the
+        // peer MAC (not the bonded peer). Track current path for the Browse button.
+        window.remoteCurrentPath = window.remoteCurrentPath || {};
+        window.remoteCurrentPath[mac] = browsePath;
+        window.BondFs.renderExplorer('remote-fexplorer-' + mac, browsePath, entries, {
+          peerLabel: mac,
+          onNavigate: function(p) { window.browseRemoteFiles(mac, p); },
+          fileActions: [{
+            label: 'Select',
+            title: 'Select this file — then click Fetch File to download it to this device',
+            fn: function(full) {
+              var input = hw.$('remote-fp-' + mac);
+              if (input) input.value = full;
+              var sd = hw.$('remote-fstat-' + mac);
+              hw.setText(sd, 'Selected: ' + full + ' — click Fetch File to download');
+            }
+          }]
+        });
+        hw.setText(statusDiv, 'Browse complete - ' + entries.length + ' items in ' + browsePath);
+      }
+      // The `files json` reply among the answer texts: {success:true, files:[...]}
+      // or {success:false, error:"..."}. null while none has arrived.
+      function listingIn(texts) {
+        for (var i = 0; i < texts.length; i++) {
+          if (texts[i].charAt(0) !== '{') continue;
+          var parsed = null;
+          try { parsed = JSON.parse(texts[i]); } catch (_) { parsed = null; }
+          if (parsed && typeof parsed.success === 'boolean') return parsed;
+        }
+        return null;
+      }
+
+      // The remote 'files' command takes its path in quotes (quoted-path
+      // standard); an unquoted path is rejected with "path must be in quotes".
+      var cmd = 'espnowremote ' + mac + ' ' + u + ' ' + p + ' files json "' + browsePath + '"';
+      hw.postForm('/api/cli', { cmd: cmd })
+      .then(function(r) { return r.text(); })
       .then(function(text) {
-        if (!text.includes('Remote command sent')) {
-          // Readiness G-50: the CLI reply can echo the requested path, which
-          // comes from a peer folder name; keep it literal.
-          container.innerHTML = '<pre style="margin:0;white-space:pre-wrap;font-size:0.85em">' + window.espnowEscapeHtml(text) + '</pre>';
-          hw.setText(statusDiv, text);
+        if (!current()) return;
+        var ack = window.espnowRemoteAck(text);
+        if (!ack.sent) {
+          finish('Not sent: ' + ack.error);
           return;
         }
-        hw.setText(statusDiv, 'Request sent, waiting for response...');
+        hw.setText(statusDiv, 'Request ' + ack.reqId + ' sent, waiting for ' + mac + '...');
 
-        // Poll peer messages for streamed file listing output.
-        // Two notes about the polling design (mirror of the BondFs fix):
-        //  1. seqBefore is local to this browse session — no shared mutable
-        //     cursor across concurrent browses (would race the same way the
-        //     bonded file viewer did before the BondFs.exec rewrite).
-        //  2. doneMarker uses ' entries' (with leading space) rather than
-        //     'Total:' — the file listing terminates with "Total: N entries"
-        //     but other commands the peer may stream (fsusage emits
-        //     "Total: NNNN bytes") would falsely trigger completion if we
-        //     matched bare "Total:". This same collision broke the bonded
-        //     viewer; fixing it preemptively here too.
-        // We also advance seqBefore as we consume messages so each poll only
-        // fetches new ones — earlier this loop re-processed every message
-        // since the initial baseline on every tick.
-        var pollCount = 0;
-        var maxPolls = 15;
-        var pollInterval = setInterval(function() {
-          pollCount++;
-          if (pollCount > maxPolls) {
-            clearInterval(pollInterval);
-            // Readiness G-50: browsePath is built from a peer-supplied folder
-            // name (BondFs onNavigate below), and the peer controls the timeout.
-            container.innerHTML = '<div class="remote-explorer"><div class="remote-explorer-crumb">' + window.espnowEscapeHtml(browsePath) + '</div><div class="remote-entry remote-entry-empty" style="display:flex">Timed out waiting for response</div></div>';
-            hw.setText(statusDiv, 'Timed out');
-            return;
+        var answer = window.espnowRemoteAnswer(mac, ack.reqId);
+        var startCursor = window.__remoteBrowseCursor[mac] || 0;
+        answer.cursor = startCursor;
+        var idlePolls = 0;        // polls that brought no new record
+        var textSeenAt = -1;      // idlePolls when a non-listing answer first showed
+        var burst = 0;            // consecutive polls without a pause
+        var rereadFromStart = false;
+
+        function conclude() {
+          window.__remoteBrowseCursor[mac] = answer.cursor;
+          var texts = answer.texts();
+          var missing = answer.missing();
+          if (missing) {
+            finish('The listing arrived incomplete (' + missing.have + ' of ' + missing.of + ' parts). It may be too large for this device\'s message store.',
+                   'Listing incomplete');
+          } else if (texts.length) {
+            finish('Remote device answered: ' + texts.join(' | '));
+          } else {
+            finish('No answer from ' + mac + ' to request ' + ack.reqId + '. It may be out of range or busy.',
+                   'No answer');
           }
-
-          hw.fetchJSON('/api/espnow/messages?since=' + seqBefore)
+        }
+        function poll() {
+          if (!current()) return;
+          hw.fetchJSON('/api/espnow/messages?since=' + answer.cursor + '&mac=' + encodeURIComponent(mac))
             .then(function(data) {
-              var msgs = Array.isArray(data) ? data : (data.messages || []);
-              var browseLines = [];
-              var foundComplete = false;
-
-              for (var i = 0; i < msgs.length; i++) {
-                var m = msgs[i];
-                var mMac = String(m.mac || m.from || '').toUpperCase();
-                var mMsg = String(m.message || m.msg || m.text || '');
-                var mSeq = m.seq || m.seqNum || 0;
-                if (mSeq > seqBefore) seqBefore = mSeq;
-
-                if (mMac !== targetMac) continue;
-
-                // Match streamed file listing output from 'files' command.
-                // Note: we INTENTIONALLY no longer include 'Total:' in the
-                // line-keep whitelist — the file listing's terminator
-                // "Total: N entries" is detected as the completion marker
-                // (see the ' entries' check below), not parsed as content.
-                if (mMsg.indexOf('Files (') >= 0 ||
-                    mMsg.indexOf('items)') >= 0 ||
-                    mMsg.indexOf('bytes)') >= 0 ||
-                    mMsg.indexOf('[DIR]') >= 0 ||
-                    mMsg.indexOf('[FILE]') >= 0 ||
-                    mMsg.indexOf('File listing') >= 0 ||
-                    mMsg.indexOf('File browse FAILED') >= 0 ||
-                    mMsg.indexOf('empty directory') >= 0 ||
-                    mMsg.indexOf('Directory not found') >= 0 ||
-                    mMsg.indexOf('Error:') >= 0) {
-                  browseLines.push(mMsg);
-                }
-                // doneMarker — see comment block above re: ' entries' vs 'Total:'
-                if (mMsg.indexOf(' entries') >= 0) foundComplete = true;
+              if (!current()) return;
+              var before = answer.cursor;
+              answer.add(Array.isArray(data) ? data : ((data && data.messages) || []));
+              var texts = answer.texts();
+              var listing = listingIn(texts);
+              if (listing) {
+                window.__remoteBrowseCursor[mac] = answer.cursor;
+                if (listing.success === true) showListing(listing);
+                else finish('Remote device answered: ' + (listing.error || 'the listing failed'));
+                return;
               }
-
-              if (foundComplete && browseLines.length > 0) {
-                clearInterval(pollInterval);
-                // Flatten multi-line messages into individual lines before parsing
-                var flatLines = [];
-                for (var li = 0; li < browseLines.length; li++) {
-                  var subLines = browseLines[li].split('\n');
-                  for (var si = 0; si < subLines.length; si++) {
-                    flatLines.push(subLines[si]);
-                  }
+              // The store hands out a page per request: read on without a pause
+              // while pages keep coming.
+              if (answer.cursor !== before && burst < 20) { burst++; poll(); return; }
+              burst = 0;
+              idlePolls++;
+              if (texts.length && textSeenAt < 0) textSeenAt = idlePolls;
+              if (textSeenAt >= 0 && idlePolls - textSeenAt >= window.REMOTE_BROWSE_TEXT_GRACE) { conclude(); return; }
+              if (idlePolls >= window.REMOTE_BROWSE_WAIT_POLLS) {
+                // Nothing at all above a remembered position: this device may
+                // have restarted and numbered its records anew. Read once from
+                // the start before giving up.
+                if (startCursor > 0 && !rereadFromStart && !texts.length && !answer.missing()) {
+                  rereadFromStart = true;
+                  answer.cursor = 0;
+                  idlePolls = window.REMOTE_BROWSE_WAIT_POLLS - 1;
+                  poll();
+                  return;
                 }
-                var entries = window.parseRemoteFileListing(flatLines);
-                // Render with the SHARED file-explorer (window.BondFs.renderExplorer +
-                // window.FileBrowser) so the remote browser matches the local / Files /
-                // Logging views — same icons, breadcrumb, hover rows. Data source stays
-                // the espnowbrowse text-scrape (arbitrary peer + credentials), so we
-                // feed the parsed {name,isDir,size} entries straight in. peerLabel shows
-                // the peer MAC (not the bonded peer). Track current path for the Browse
-                // button (the old renderer used to set this).
-                window.remoteCurrentPath = window.remoteCurrentPath || {};
-                window.remoteCurrentPath[mac] = browsePath;
-                window.BondFs.renderExplorer('remote-fexplorer-' + mac, browsePath, entries, {
-                  peerLabel: mac,
-                  onNavigate: function(p) { window.browseRemoteFiles(mac, p); },
-                  fileActions: [{
-                    label: 'Select',
-                    title: 'Select this file — then click Fetch File to download it to this device',
-                    fn: function(full) {
-                      var input = hw.$('remote-fp-' + mac);
-                      if (input) input.value = full;
-                      var sd = hw.$('remote-fstat-' + mac);
-                      hw.setText(sd, 'Selected: ' + full + ' — click Fetch File to download');
-                    }
-                  }]
-                });
-                hw.setText(statusDiv, 'Browse complete - ' + entries.length + ' items in ' + browsePath);
-              } else if (pollCount > 2) {
-                hw.setText(statusDiv, 'Waiting for response... (' + pollCount + '/' + maxPolls + ')');
+                conclude();
+                return;
               }
+              if (idlePolls > 2) hw.setText(statusDiv, 'Waiting for ' + mac + '... (' + idlePolls + '/' + window.REMOTE_BROWSE_WAIT_POLLS + ')');
+              setTimeout(poll, 1000);
             })
-            .catch(function() {});
-        }, 1000);
+            .catch(function() {
+              if (!current()) return;
+              idlePolls++;
+              if (idlePolls >= window.REMOTE_BROWSE_WAIT_POLLS) { conclude(); return; }
+              setTimeout(poll, 1000);
+            });
+        }
+        poll();
       })
       .catch(function(e) {
-        container.innerHTML = '<div style="color:var(--danger);padding:12px">Error: ' + e.message + '</div>';
-        hw.setText(statusDiv, 'Browse error: ' + e.message);
+        if (!current()) return;
+        finish('Request to this device failed: ' + ((e && e.message) || 'no response'), 'Browse error');
       });
-      
-      }); // end of .finally() from seqBefore fetch
     };
     console.log('[ESP-NOW] Chunk 3O: browseRemoteFiles ready');
     console.log('[ESP-NOW] Chunk 3P: parseRemoteFileListing start');
-    // Parse the human-readable text listing produced by the remote 'files'
-    // command (System_Filesystem.cpp buildFilesListing, asJson=false). Lines:
-    //   "Files (/path):"            header  -> skipped
-    //   "  name (123 bytes)"        file    -> {isDir:false}
-    //   "  name (3 items)"          folder  -> {isDir:true}
-    //   "  name (3 items) [mount]"  mount   -> {isDir:true}
-    //   "Total: N entries"          footer  -> skipped
-    //   "  No files found"          empty   -> skipped
-    window.parseRemoteFileListing = function(flatLines) {
+    // Entries of a peer's `files json` reply (System_Filesystem.cpp
+    // buildFilesListJson): {"success":true,"dirPerms":N,"files":[
+    //   {"name":"a.txt","type":"file","size":"123 bytes","perms":N},
+    //   {"name":"logs","type":"folder","size":"3 items","count":3,"perms":N}]}
+    // as {name, isDir, size, meta} for the shared explorer, folders first.
+    window.parseRemoteFileListing = function(listing) {
       var entries = [];
       var seen = {};
-      if (!flatLines) return entries;
-      var re = /^\s+(.+?)\s+\((\d+)\s+(items|bytes)\)(\s+\[mount\])?\s*$/;
-      for (var i = 0; i < flatLines.length; i++) {
-        var line = String(flatLines[i] || '');
-        if (!line) continue;
-        if (line.indexOf('Files (') >= 0) continue;
-        if (line.indexOf('Total:') >= 0) continue;
-        if (line.indexOf('No files found') >= 0) continue;
-        var m = line.match(re);
-        if (!m) continue;
-        var name = m[1].trim();
+      var files = (listing && Array.isArray(listing.files)) ? listing.files : [];
+      for (var i = 0; i < files.length; i++) {
+        var f = files[i] || {};
+        var name = String(f.name == null ? '' : f.name);
         if (!name || seen[name]) continue;
         seen[name] = true;
-        var count = parseInt(m[2], 10);
-        var isDir = (m[3] === 'items') || !!m[4];
+        var isDir = f.type === 'folder';
+        var meta = String(f.size == null ? '' : f.size);
+        var count = isDir ? Number(f.count) : parseInt(meta, 10);
         entries.push({
           name: name,
           isDir: isDir,
-          isMount: !!m[4],
-          size: count,
-          meta: isDir ? (count + ' items') : (count + ' bytes')
+          size: isFinite(count) ? count : 0,
+          meta: meta
         });
       }
       // Folders first, then files; alphabetical within each group.

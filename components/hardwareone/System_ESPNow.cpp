@@ -781,7 +781,6 @@ static uint8_t gTopoExpectedTargetCount = 0;
 
 // ESP-NOW output streaming support - MIGRATED TO gEspNow struct
 static const unsigned long STREAM_MIN_INTERVAL_MS = 100;  // Rate limit: max 10 messages/second
-bool gMeshActivitySuspended = false;               // Suspend mesh heartbeats during HTTP requests (exported to web_server.cpp)
 
 // ============================================================================
 // HELPER FUNCTIONS
@@ -10523,7 +10522,11 @@ void processMeshHeartbeats() {
     }
   }
 
-  if (!gEspNow || !gEspNow->initialized || gMeshActivitySuspended) return;
+  // Everything below runs on every pass. No other task may switch it off: a
+  // web request once paused this loop, and a command longer than the bond
+  // timeout then cost the bond its session (heartbeats, sweeps and the
+  // result, text and stream drains all sit below this line).
+  if (!gEspNow || !gEspNow->initialized) return;
 
   // 1b. Phase 3.5 — sweep expired pending encrypted frames (queued while
   // waiting for SESSION_OPEN that never completed). 5-second budget per slot.
@@ -17036,6 +17039,30 @@ const char* cmd_espnow_fetch(const String& argsInput) {
   return fetchBuffer;
 }
 
+// The text acknowledgement of `espnowremote`: the command was handed to the
+// radio and the peer's answer will carry this request id. The id ends the reply
+// ("... (match reqId <n>)"); the web page and the OLED remote form read it from
+// there to tell an accepted command from a refusal and to find the answer. A
+// long command shortens the echo, never the id.
+static void espnowFormatRemoteAck(char* out, size_t outSize, const char* safeCommand,
+                                  const char* target, const uint8_t targetMac[6],
+                                  uint32_t msgId) {
+  if (!out || outSize == 0) return;
+  char tail[120];
+  snprintf(tail, sizeof(tail),
+           ". Output is ASYNC - read it with:  espnowmessages json 0 " MAC_FMT "  (match reqId %lu)",
+           MAC_ARGS(targetMac), (unsigned long)msgId);
+  static const char kLead[] = "Sent '";
+  static const char kJoin[] = "' to ";
+  const char* echo = safeCommand ? safeCommand : "";
+  const char* name = target ? target : "";
+  const size_t fixed = (sizeof(kLead) - 1) + (sizeof(kJoin) - 1) + strlen(name) + strlen(tail);
+  size_t echoLen = strlen(echo);
+  const size_t room = outSize > fixed ? outSize - 1 - fixed : 0;
+  if (echoLen > room) echoLen = room;
+  snprintf(out, outSize, "%s%.*s%s%s%s", kLead, (int)echoLen, echo, kJoin, name, tail);
+}
+
 // Remote command execution
 const char* cmd_espnow_remote(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
@@ -17139,11 +17166,8 @@ const char* cmd_espnow_remote(const String& argsInput) {
     snprintf(remoteBuffer, sizeof(remoteBuffer), "{\"schema\":1,\"ok\":true,\"reqId\":%lu}", (unsigned long)msgId);
     return remoteBuffer;
   }
-  snprintf(remoteBuffer, sizeof(remoteBuffer),
-           "Sent '%s' to %s. Output is ASYNC - read it with:  espnowmessages json 0 " MAC_FMT "  (match reqId %lu)",
-           safeCommand.c_str(), target.c_str(),
-           MAC_ARGS(targetMac),
-           (unsigned long)msgId);
+  espnowFormatRemoteAck(remoteBuffer, sizeof(remoteBuffer), safeCommand.c_str(),
+                        target.c_str(), targetMac, msgId);
   return remoteBuffer;
 }
 
@@ -19653,6 +19677,5 @@ static EspNowState sEspNowAbsent = { false, ESPNOW_MODE_DIRECT, "", 0, false, nu
 EspNowState* gEspNow = &sEspNowAbsent;
 MeshPeerHealth gMeshPeers[MAX_MESH_PEERS] = {};
 MeshTopoNode* gMeshTopology = nullptr;
-bool gMeshActivitySuspended = false;
 
 #endif // ENABLE_ESPNOW

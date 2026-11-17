@@ -1613,9 +1613,6 @@ void streamPageWithContent(httpd_req_t* req, const String& activePage, const Str
     return;
   }
 
-  // Suspend mesh activity during page generation to reduce CPU contention
-  gMeshActivitySuspended = true;
-
   // Streaming debug: reset per-request counters
   streamDebugReset(activePage.c_str());
 
@@ -1635,9 +1632,6 @@ void streamPageWithContent(httpd_req_t* req, const String& activePage, const Str
 
   // HTTP debug: page route exit (totals captured by streamDebugFlush)
   DEBUG_HTTPF("page_exit tag=%s", activePage.c_str());
-
-  // Resume mesh activity after page is sent
-  gMeshActivitySuspended = false;
 }
 
 // Use DEBUG_*F macros from debug_system.h
@@ -2677,9 +2671,7 @@ esp_err_t handlePasswordChangePage(httpd_req_t* req) {
       if (bodyBuf.status == WebBodyStatus::Empty || bodyBuf.status == WebBodyStatus::TooLarge) problem = "Invalid request";
       else if (bodyBuf.status == WebBodyStatus::NoMemory) problem = "Out of memory";
       httpd_resp_set_type(req, "text/html");
-      gMeshActivitySuspended = true;
       streamPasswordChangeInner(req, ctx.user, String(problem));
-      gMeshActivitySuspended = false;
       streamDebugFlush();
       return ESP_OK;
     }
@@ -2717,9 +2709,7 @@ esp_err_t handlePasswordChangePage(httpd_req_t* req) {
       // prefix is absent (defensive, shouldn't happen).
       String err = result[0] ? String(commandReplyReason(result)) : String("Unknown error");
       httpd_resp_set_type(req, "text/html");
-      gMeshActivitySuspended = true;
       streamPasswordChangeInner(req, ctx.user, err);
-      gMeshActivitySuspended = false;
       streamDebugFlush();
       return ESP_OK;
     }
@@ -3453,11 +3443,8 @@ esp_err_t handleCliCommand(httpd_req_t* req) {
   uc.ctx.validateOnly = doValidate;
   uc.ctx.captureOutput = doCapture;
 
-  // Suspend mesh activity during command execution to reduce CPU contention
-  gMeshActivitySuspended = true;
   String out;
   bool ok = submitAndExecuteSync(uc, out);
-  gMeshActivitySuspended = false;
 
   // The command result belongs to the exact cookie-session generation that
   // submitted it. A concurrent logout/revoke/re-login may let an already
@@ -5305,7 +5292,6 @@ esp_err_t handleCliBatch(httpd_req_t* req) {
   int originIdx = findSessionIndexBySid(sidForCmd);
   int prevSkip = gBroadcastSkipSessionIdx;
   gBroadcastSkipSessionIdx = originIdx;
-  gMeshActivitySuspended = true;
 
   // Retain replies directly in the PSRAM-backed response, not a second list
   // of ordinary-heap Strings. ArduinoJson owns each appended String's text.
@@ -5390,7 +5376,6 @@ esp_err_t handleCliBatch(httpd_req_t* req) {
     vTaskDelay(pdMS_TO_TICKS(2));
   }
 
-  gMeshActivitySuspended = false;
   gBroadcastSkipSessionIdx = prevSkip;
   if (terminalSettingsSaveConfirmed) {
     // The user's last command already closed and durably flushed this exact

@@ -1376,7 +1376,6 @@ void espnowMeshesWriteJson(JsonDocument& doc, bool excludePasswords = false);
 void espnowMeshesReadJson(JsonDocument& doc);
 
 // Mesh heartbeat processing (FreeRTOS task)
-extern bool gMeshActivitySuspended;  // Suspend mesh during HTTP requests
 void processMeshHeartbeats();  // Internal worker function (called by task)
 // Flag an ESP-NOW channel re-sync after a WiFi association change. Called from
 // the WiFi event handler (System_WiFi.cpp); the actual re-derive + re-pin runs
@@ -1636,7 +1635,6 @@ struct EspNowState {
 extern EspNowState* gEspNow;
 extern MeshPeerHealth gMeshPeers[MAX_MESH_PEERS];
 extern MeshTopoNode* gMeshTopology;
-extern bool gMeshActivitySuspended;
 
 inline const char* checkEspNowFirstTimeSetup() { return "ESP-NOW disabled"; }
 inline const char* cmd_espnow_init(const String& argsInput) { return "ESP-NOW disabled"; }

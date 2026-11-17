@@ -3004,8 +3004,12 @@ void drawOledFooter() {
             hints = "A:Toggle B:Back";
             break;
           case ESPNOW_VIEW_TEXT_KEYBOARD:
-          case ESPNOW_VIEW_REMOTE_FORM:
             hints = "A:Type X:Done B:Cancel";
+            break;
+          case ESPNOW_VIEW_REMOTE_FORM:
+            // The form itself (its keyboard draws its own footer): A edits the
+            // selected field, Y sends, as oledEspNowHandleRemoteFormInput reads them.
+            hints = "A:Edit Y:Send B:Back";
             break;
           default:
             hints = "B:Back";
