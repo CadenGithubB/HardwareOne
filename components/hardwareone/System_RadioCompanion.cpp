@@ -41,10 +41,16 @@
 #include "esp_now_hosted_companion.h"
 #include "esp_now_hosted_rpc.h"
 #include "System_CommandRegistry.h"
+#if ENABLE_HTTP_SERVER
+#include "WebServer_Handle.h"
+#endif
 #if ENABLE_ESPNOW
 #include "System_ESPNow_Sensors.h"
 #endif
 #include "System_WiFi.h"
+#if ENABLE_HTTP_SERVER
+extern const char* cmd_httpstart(const String& argsInput);  // `openhttp` (System_WiFi.cpp)
+#endif
 
 namespace {
 
@@ -73,6 +79,7 @@ RadioHalEventData sEvents[kEventRing];       // guarded by sLock
 uint8_t sEvHead = 0, sEvTail = 0;
 uint32_t sEventsDropped = 0;
 std::atomic<bool> sOpInFlight{false};
+std::atomic<bool> sRestarting{false};  // radioCompanionBeforeRestart ran: start nothing new
 std::atomic<uint8_t> sOp{static_cast<uint8_t>(Op::None)};
 bool sBootInitDone = false;
 bool sEverOnline = false;
@@ -89,8 +96,19 @@ struct RadioUsers {
   bool bleServer = false;
   bool g2Client = false;          // the shared client stack is up (glasses, ring and phone open on it)
   bool radioPoweredOff = false;   // stopUsers ran `radiopower off`; `radiopower on` replays its snapshot
+  bool http = false;              // the web server ran; `radiopower off` stops it, `radiopower on` does not
 };
 RadioUsers sHeldUsers;  // restored by `c6hold off`
+
+#if ENABLE_HTTP_SERVER
+// An HTTP restart restoreUsers could not do on cmd_exec: a stop deferred past
+// an in-flight web request had not run yet (that request waits on cmd_exec,
+// behind the restore), or Wi-Fi was still associating. The main-loop tick
+// starts the server once both have settled, within the window.
+constexpr uint32_t kHttpRestoreWindowMs = 60000;
+std::atomic<bool> sHttpRestorePending{false};
+std::atomic<uint32_t> sHttpRestoreArmedMs{0};
+#endif
 
 }  // namespace
 
@@ -270,9 +288,16 @@ void stopUsers(RadioUsers& users) {
 #if ENABLE_BLUETOOTH
   shutDownBleForCompanionReset(users);
 #endif
+#if ENABLE_HTTP_SERVER
+  // `radiopower off` stops the HTTP server too, but its snapshot covers only
+  // ESP-NOW and Wi-Fi: `radiopower on` leaves the web server off (as the
+  // user's airplane-mode switch does). Remember it here; restoreUsers starts
+  // it again. A restart still pending from an earlier reset counts as running.
+  users.http = isHttpServerRunning() || sHttpRestorePending.exchange(false);
+#endif
 #if ENABLE_WIFI
   // `radiopower off` stops ESP-NOW, the HTTP server and Wi-Fi in order and
-  // keeps a snapshot of exactly what ran, which `radiopower on` replays.
+  // keeps a snapshot of ESP-NOW and Wi-Fi, which `radiopower on` replays.
   if (users.wifi) {
     cmd_radiopower("off");
     users.radioPoweredOff = true;
@@ -282,6 +307,62 @@ void stopUsers(RadioUsers& users) {
   if (users.espnow && isEspNowInitialized()) cmd_espnow_deinit("");
 #endif
 }
+
+#if ENABLE_HTTP_SERVER
+void armHttpRestore() {
+  sHttpRestoreArmedMs.store(millis());
+  sHttpRestorePending.store(true);
+}
+
+// On cmd_exec, like `openhttp`. Starts the server now when it can, else
+// leaves it to httpRestoreTick.
+void restartHttpServer() {
+  if (httpServerStopPending()) {  // the handle is still set; the stop has not run
+    armHttpRestore();
+    return;
+  }
+#if ENABLE_WIFI
+  const bool linked = wifiRadioState() == WIFI_RADIO_CONNECTED;
+#else
+  const bool linked = true;
+#endif
+  if (linked && !isHttpServerRunning()) cmd_httpstart("");  // `openhttp`; it checks httpenabled itself
+  if (isHttpServerRunning()) {
+    sHttpRestorePending.store(false);
+  } else {
+    armHttpRestore();
+  }
+}
+
+void httpRestoreProc(void*) {
+  if (!httpServerStopPending() && !isHttpServerRunning()) {
+    const char* result = cmd_httpstart("");
+    if (!isHttpServerRunning()) {
+      logSystemEvent("C6", "HTTP server not restarted after the companion reset: %s", result ? result : "?");
+    }
+  }
+}
+
+// Main loop, between companion procedures.
+void httpRestoreTick(uint32_t now) {
+  if (!sHttpRestorePending.load()) return;
+  if (now - sHttpRestoreArmedMs.load() >= kHttpRestoreWindowMs) {
+    sHttpRestorePending.store(false);
+    logSystemEvent("C6", "HTTP server not restarted after the companion reset (no Wi-Fi link within %lu s); "
+                   "run openhttp", static_cast<unsigned long>(kHttpRestoreWindowMs / 1000));
+    return;
+  }
+  if (httpServerStopPending()) return;
+  if (isHttpServerRunning()) {
+    sHttpRestorePending.store(false);
+    return;
+  }
+#if ENABLE_WIFI
+  if (wifiRadioDisplayState() != WIFI_RADIO_CONNECTED) return;
+#endif
+  if (submitDeferredToCmdExec(httpRestoreProc, nullptr)) sHttpRestorePending.store(false);
+}
+#endif
 
 void restoreUsers(const RadioUsers& users) {
 #if ENABLE_WIFI
@@ -301,6 +382,13 @@ void restoreUsers(const RadioUsers& users) {
       bleBootReconnect();
     }
   }
+#endif
+#if ENABLE_HTTP_SERVER
+  // Last, so DHCP has had the BLE restore's time too. Without this the web UI
+  // stayed down after every companion reset with Wi-Fi up (c6restart, c6hold
+  // off, the automatic recoveries; bench 2026-11-08: Wi-Fi back, port 80
+  // refused until a reboot).
+  if (users.http) restartHttpServer();
 #endif
 }
 
@@ -602,6 +690,7 @@ void updateProc(void* arg) {
       rest.g2Client = false;
       stopUsers(rest);
       users.radioPoweredOff = rest.radioPoweredOff;
+      users.http = rest.http;
       radioHalStopTransport();
       ok = radioHalStartTransport() == ESP_OK;
       // State first, then the users: the radio gate must not refuse them.
@@ -643,6 +732,7 @@ void updateProc(void* arg) {
 }
 
 bool submitOp(Op op, ExecReq::DeferredFn fn, void* arg) {
+  if (sRestarting.load()) return false;  // the P4 restarts; the companion stays held
   bool expected = false;
   if (!sOpInFlight.compare_exchange_strong(expected, true)) return false;
   sOp.store(static_cast<uint8_t>(op));
@@ -847,6 +937,7 @@ void fillStatus(JsonObject out, bool full) {
   counters["events_dropped"] = bs.eventsDropped;
   counters["malformed"] = bs.malformed;
   counters["stale"] = bs.stale;
+  counters["hci_tx_down_drops"] = bs.hciTxDownDrops;
   JsonObject rec = out["recovery"].to<JsonObject>();
   rec["start_attempts"] = stats.startAttempts;
   rec["start_failures"] = stats.startFailures;
@@ -936,8 +1027,9 @@ const char* cmd_c6status(const String& argsInput) {
                    radioHalResetReasonLabel(stats.lastResetReason));
   RadioBridgeStats bs;
   radioHalBridgeStats(bs);
-  BROADCAST_PRINTF("  Bridge counters: %" PRIu32 " timeouts, %" PRIu32 " transport errors, %" PRIu32 " dropped events",
-                   bs.timeouts, bs.transportErrors, bs.eventsDropped);
+  BROADCAST_PRINTF("  Bridge counters: %" PRIu32 " timeouts, %" PRIu32 " transport errors, %" PRIu32
+                   " dropped events, %" PRIu32 " BLE HCI packets dropped while the link was down",
+                   bs.timeouts, bs.transportErrors, bs.eventsDropped, bs.hciTxDownDrops);
   BROADCAST_PRINTF("  Recovery: %" PRIu32 " starts (%" PRIu32 " failed), %" PRIu32 " soft recoveries (%" PRIu32
                    " failed), %" PRIu32 " reboots requested; last outage: %s",
                    stats.startAttempts, stats.startFailures, stats.softRecoveries, stats.recoveriesFailed,
@@ -1139,11 +1231,14 @@ void radioCompanionLogBootSummary() {
 }
 
 void radioCompanionTick() {
-  if (!sBootInitDone) return;
+  if (!sBootInitDone || sRestarting.load()) return;
   const uint32_t now = millis();
   RadioHalEventData event;
   while (popEvent(event)) handleEvent(event, now);
   if (sOpInFlight.load()) return;  // a procedure owns the transport right now
+#if ENABLE_HTTP_SERVER
+  httpRestoreTick(now);
+#endif
   CompanionAction action;
   portENTER_CRITICAL(&sLock);
   action = sMonitor.tick(now);
@@ -1155,6 +1250,10 @@ bool radioCompanionOnline() { return monitorState() == CompanionState::Online &&
 
 bool radioCompanionBlocksRadio(const char** reason) {
   if (reason) *reason = nullptr;
+  if (sRestarting.load()) {
+    if (reason) *reason = "the device is restarting";
+    return true;
+  }
   if (!sBootInitDone) return false;  // before boot init, the HAL state alone decides
   const CompanionState state = monitorState();
   switch (state) {
@@ -1214,6 +1313,18 @@ void radioCompanionBeforeDeepSleep() {
   stopUsers(users);
   radioHalStopTransport();
   radioHalPrepareForDeepSleep();
+}
+
+void radioCompanionBeforeRestart() {
+  // The P4 restarts next (rebootDevice). Unlike deep sleep, the users are not
+  // stopped: their owners can block for seconds or refuse (the reboot may be
+  // escaping a stuck BLE worker or a dead companion), and a restart must not
+  // depend on them. What matters is that the SDMMC host is idle when
+  // esp_restart() resets it, so the companion is silenced at the source and
+  // nothing here starts it again. Blocks for Hosted's TX flush (about 100 ms,
+  // only while the link was up) and a few GPIO writes.
+  sRestarting.store(true);
+  radioHalSilenceForRestart();
 }
 
 void radioCompanionJson(JsonObject out) { fillStatus(out, false); }

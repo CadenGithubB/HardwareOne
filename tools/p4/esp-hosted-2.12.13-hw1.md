@@ -1,4 +1,4 @@
-# ESP-Hosted shared TX pool alignment
+# ESP-Hosted 2.12.13 patch: shared TX pool alignment and restart TX fence
 
 `prepare_esp_hosted.py` stages the pinned registry package plus
 `esp-hosted-2.12.13-hw1.patch` in
@@ -57,6 +57,71 @@ diagnostic: 1600 divides evenly by the current internal 64-byte cache line.
 It moves roughly 85.6 KiB of the two pools into internal RAM before other DMA
 allocations, so the retained fix preserves the existing SPIRAM policy.
 
+## Restart TX fence
+
+Before an intentional P4 restart, HardwareOne latches the C6's EN pad low so
+the companion stops sending while the SDMMC host drains
+(`radioHalSilenceForRestart`, HAL_Radio.cpp). The radio users keep running
+through that drain, and each packet they queued after EN went low became a
+CMD53 the held C6 never answered: "sdmmc_send_cmd returned 0x107", "Failed to
+send data", "Unrecoverable host sdio state" (bench 2026-11-08, 7 of 15
+reboots). Before the hold, HardwareOne closes TX and lets the write task send
+what was already queued while the C6 still answers.
+
+The patch adds that gate to `transport_drv.c`. `esp_hosted_hw1_fence_tx()` sets
+a one-way flag, and `esp_hosted_hw1_tx_open()` (the TX-ready state and no
+fence) replaces `is_transport_tx_ready()` in the STA, AP and serial wrappers
+and in the SDIO `esp_hosted_tx`. Every producer reaches the queue through
+those: lwIP through the STA/AP wrappers, serial RPC, BLE VHCI and the
+private-interface path through `esp_hosted_tx`. A refused packet is freed and
+returns the error a packet on a down transport already gets. Only a CPU reset
+clears the flag. The other transports' `esp_hosted_tx` (SPI, SPI-HD, UART)
+are not changed; the P4 uses SDIO.
+
+A refusal at the fence is not logged by Hosted's transport layer. Hosted's
+refusal logs (`tx fail ... transport_up(0)` in `esp_hosted_tx`, `Tx failed` in
+the Bluedroid VHCI send, `drop pkt` in the wrappers) run on the producer's own
+task. With G2 or R1 connected, Bluedroid's `hciT` task (a fixed 2.5 KB stack,
+about 1.95 KB usable after the P4's coprocessor and TLS reservations) kept
+sending HCI packets after the fence, and vfprintf for the `tx fail` line
+overflowed it: a stack protection fault in 3 of 15 reboots (bench 2026-11-08,
+image f9d931bb). `esp_hosted_hw1_tx_drop_if_fenced()` returns 1 once the fence
+is set and counts the drop; the wrapper log sites log only when it returns 0,
+so a refusal for any other reason (transport down, bad length, missing
+channel) still logs as upstream. HardwareOne prints the count,
+`esp_hosted_hw1_tx_fence_drops()`, in its `SDMMC quiesced` line.
+
+The serial RPC producer is quiet only at this layer: `transport_drv_serial_tx`
+refuses without a log, but its callers still print their own errors on the
+`rpc_tx` task for an RPC sent after the fence (`Failed to write data` in
+serial_drv.c, `Failed to write TX data` in serial_if.c, `Send RPC req[0x..]
+failed` in rpc_core.c). `rpc_tx` has a 5 KB stack, so those lines are not a
+stack risk; the patch leaves them as upstream.
+
+HCI packets get one more rule, because every one of them is sent from `hciT`.
+`esp_hosted_hw1_hci_drop_if_closed()` returns 1 at the fence (counted as a
+fence drop) and also whenever TX is not ready for any other reason, counted
+separately in `esp_hosted_hw1_hci_down_drops()`. That covers a C6 crash or
+watchdog recovery (the transport is marked lost before the BLE teardown), a
+companion reset or hold that leaves the Bluedroid host up, and a Hosted re-init
+window, which would otherwise print the same two lines on `hciT` per packet.
+`hosted_hci_bluedroid_send` checks it before its allocation and drops the
+packet without a heap call or a log; `esp_hosted_tx` uses it for `ESP_HCI_IF`
+so a transport that closes during the call is also silent; and the VHCI
+`Tx failed` line is printed only for a refusal with TX still open (a bad
+length). HardwareOne reports the HCI count in `c6status` and its JSON
+(`bridge_counters.hci_tx_down_drops`). The NimBLE VHCI paths log nothing on a
+refused send (the P4 build uses Bluedroid).
+
+`transport_state` is deliberately not changed. Lowering it with Hosted's own
+`set_transport_state(TRANSPORT_RX_ACTIVE)` would also refuse TX, but
+`transport_drv_reconfigure()` treats any state below TX_ACTIVE as a slave to
+bring up. A Wi-Fi init (`esp_wifi_remote_init`) or BLE open (`vhci_drv.c`)
+during the flush or the drain would then pulse the C6's reset and run SDIO
+card init on slot 1, the bus activity the restart quiesce keeps away. With the
+fence the state stays TX_ACTIVE and those calls return "Transport is already
+up", as before.
+
 ## Verification
 
 After exporting ESP-IDF 5.5.5, run:
@@ -79,6 +144,17 @@ I/O. The original 128-byte SPIRAM case rejects 12 of 25 blocks; the patched
 case accepts all 25. It covers 64/128/256-byte cache requirements, internal
 fallback, SPIRAM preference on/off, uncached memory and an increased encryption
 alignment. ASan/UBSan failures abort the test.
+
+`tools/p4/test_esp_hosted_tx_fence.py` applies the patch to the pristine
+package and compiles the fence, the STA/AP/serial wrappers, the SDIO
+`esp_hosted_tx` and `hosted_hci_bluedroid_send` unchanged against fakes of the
+OS abstraction, queue and log: with TX open every producer queues; a down
+transport keeps Hosted's logs for every producer except HCI, which drops
+before its allocation and is counted as a down drop (also when TX closes
+inside a VHCI send); after the fence (also one that closes inside a VHCI
+send) nothing logs, the VHCI send allocates nothing and every buffer is
+freed. It does not compile the serial RPC callers above the wrapper. `--patch` runs it on another patch (f9d931bb's fails). It
+exits 77 without a pristine package.
 
 For device qualification, build the affected saved profile and its baseline,
 check their resolved component paths reference the override, then capture a

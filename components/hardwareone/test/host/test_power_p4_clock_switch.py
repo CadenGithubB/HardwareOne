@@ -21,8 +21,10 @@ It also checks the declaration in the source.
 riscv32-esp-elf-g++ and the build's P4 flags at -Os and -O2 (object files only,
 no firmware build) and reads the relocations: the stall, freeze, set and
 unfreeze calls must sit in a .iram1 function named p4SwitchCpuClock, not in
-the flash owner, and the window must reference no flash data. It exits 77
-(skipped) without the cross compiler or an ESP-IDF tree.
+the flash owner, and the window may branch only to its own local labels and
+reference no data but the DRAM configuration copy (no .LC*/.LANCHOR* labels,
+which are flash .rodata). It exits 77 (skipped) without the cross compiler or
+an ESP-IDF tree.
 
 --source-dir points the suite at another copy of the component (the pre-fix
 tree fails both modes).
@@ -175,16 +177,19 @@ def placement(args, switch: str, owner: str) -> int:
             if os.environ.get("HW1_DUMP"):
                 print(dump)
             sections: dict[str, list[str]] = {}
+            kinds: dict[str, list[str]] = {}
             name = ""
             for line in dump.splitlines():
                 m = re.match(r"Disassembly of section (\S+):", line)
                 if m:
                     name = m.group(1)
                     sections[name] = []
+                    kinds[name] = []
                     continue
                 r = re.search(r"\bR_RISCV_(\w+)\s+(.+)$", line)
                 if r and name and r.group(1) != "RELAX":   # a linker-relaxation marker, no target
                     sections[name].append(r.group(2).strip())
+                    kinds[name].append(r.group(1))
             holders = {sec for sec, relocs in sections.items() if any(w in relocs for w in WINDOW)}
             require(holders and all(sec.startswith(".iram1") for sec in holders),
                     f"{opt}: the frozen-cache window is in {sorted(holders)}, not only IRAM "
@@ -198,9 +203,16 @@ def placement(args, switch: str, owner: str) -> int:
                 relocs = sections[sec]
                 first = relocs.index("esp_cache_freeze_ext_mem_cache")
                 last = relocs.index("esp_cache_unfreeze_ext_mem_cache")
-                inside = [r for r in relocs[first + 1:last] if r not in ("rtc_clk_cpu_freq_set_config_fast",)]
-                # Only the internal-RAM configuration copy (hi/lo halves of its address).
-                bad = [r for r in inside if not re.match(r"^(\.dram1\.\d+|\.L\w+|.*sP4ClockTarget.*)(\+0x[0-9a-f]+)?$", r)]
+                inside = [(kind, r) for kind, r in zip(kinds[sec][first + 1:last], relocs[first + 1:last])
+                          if r not in ("rtc_clk_cpu_freq_set_config_fast",)]
+                # A branch or jump may target a local code label of this function.
+                # Every data reference must be the internal-RAM configuration copy
+                # (hi/lo halves of its address); a local data label (.LC* string
+                # or constant pool, .LANCHOR*) lives in flash .rodata on the P4.
+                code_kinds = ("BRANCH", "JAL", "RVC_BRANCH", "RVC_JUMP")
+                bad = [f"{kind} {r}" for kind, r in inside
+                       if not (kind in code_kinds and re.match(r"^\.L\d+$", r))
+                       and not re.match(r"^(\.dram1\.\d+|sP4ClockTarget)(\+0x[0-9a-f]+)?$", r)]
                 require(not bad, f"{opt}: the frozen window references {bad}")
     print("PASS: p4SwitchCpuClock is a separate IRAM function holding the whole frozen-cache window (-Os, -O2)")
     return 0

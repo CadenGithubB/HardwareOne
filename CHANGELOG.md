@@ -74,6 +74,39 @@ everything user-visible since the v0.99.99.1 tag.
   shorter than 15 minutes now keeps its next run in memory (up to 16 triggers) and fires without a
   file write; after a restart it first fires one interval after the automations start. Host-tested;
   not yet tested on hardware (readiness G-70).
+- P4X-EYE: after a `reboot` (or OTA, ramflush, setup or factory-reset restart) the C6 link could stay
+  down, with no Wi-Fi or web page and no SD card, until a USB reset. The P4's software restart resets
+  the SDMMC host without idling its DMA and was taken with the C6 link streaming. An intentional
+  restart now holds the C6 in reset, drops the Wi-Fi stop RPC, takes the filesystem lock and waits for
+  a cut-off transfer to time out first; the C6 enable line is latched low (pad hold) so a companion
+  start that was already running cannot release it before the restart. Before the hold it closes
+  ESP-Hosted's TX at a one-way fence added to the Hosted patch and gives the write task 100 ms to send
+  what was already queued, so packets the radio users keep producing during the drain are refused
+  instead of timing out against the held C6 (bench 2026-11-08: `sdmmc_send_cmd returned 0x107` and
+  `Unrecoverable host sdio state` in 7 of 15 reboots). Hosted's transport state stays up, so a Wi-Fi
+  or BLE init in that window does not reset the C6 or rerun SDIO card init. A packet refused at the
+  fence is dropped without a log and counted in the `SDMMC quiesced` line (`N TX dropped at the
+  fence`): the log ran on the sending task, and with G2 or R1 connected Bluedroid's `hciT` task
+  overflowed its 2.5 KB stack printing Hosted's `tx fail` line (bench 2026-11-08, stack protection
+  fault in 3 of 15 reboots). For the same reason a BLE HCI packet is now also dropped without a log
+  whenever the Hosted link is down for another reason with the BLE host still up (a C6 crash or
+  recovery, a companion reset or hold); `c6status` counts those drops. The serial RPC callers above
+  the fence still log a refused request on their 5 KB `rpc_tx` stack. A restart takes 100 ms longer.
+  The Hosted override must be re-staged (`tools/p4/prepare_sdk.sh` after removing `.sdk-overrides/esp32p4/espressif__esp_hosted`).
+  Separately, a companion retry
+  now waits for the C6 instead of failing in the same millisecond once ESP-Hosted's retry counter is
+  spent; that helps a healthy link after earlier failed starts, does not recover a wedged SDMMC host,
+  and makes a retry on a dead companion last up to 20 s. The boot's second C6 attempt reused the
+  failed Hosted session and gave up in the same millisecond; it now closes the session, resets the C6
+  and waits again, so a boot with a dead companion (or a wedged SDMMC host) takes up to about 20 s
+  longer. Not yet tested on hardware.
+- P4X-EYE: after `c6restart`, `c6hold off`, an automatic companion recovery or a companion update
+  with Wi-Fi up, the web page stayed unreachable (connection refused) until a reboot, though Wi-Fi
+  and BLE came back. The companion stops Wi-Fi with `radiopower off`, which also stops the HTTP
+  server, and `radiopower on` restores only ESP-NOW and Wi-Fi (present since 2026-10-02, bench
+  2026-11-08). The companion now restarts a server that was running once Wi-Fi is back: at once, or,
+  when the link or a stop deferred past an open web request comes later, from the main loop within
+  60 s. A plain `radiopower off`/`on` still leaves the web server off. Not yet tested on hardware.
 - ESP32-P4: every task, including ESP-IDF's fixed-size ones, lost 576 bytes of stack to two camera
   `thread_local` buffers (added 2026-11-02): the P4's FreeRTOS port reserves thread-local storage on
   each task's stack, which left Bluedroid's 2.5 KB `hciT` about 1.95 KB, and it overflowed by 4 bytes

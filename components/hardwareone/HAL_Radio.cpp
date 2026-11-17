@@ -17,6 +17,7 @@
 #include "esp_hosted_misc_types.h"
 #include "esp_hosted_ota.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include "esp_now_hosted_companion.h"
 #include "esp_now_hosted_host.h"
 #include "esp_now_hosted_rpc.h"
@@ -25,6 +26,25 @@
 #include "esp32-hal-hosted.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "Radio_CompanionCore.h"
+
+// ESP-Hosted 2.12.13 host/drivers/transport/transport_drv.{h,c} (external
+// linkage, but not in the component's public include dirs).
+// esp_hosted_hw1_fence_tx is HardwareOne's one-way restart TX fence
+// (tools/p4/esp-hosted-2.12.13-hw1.patch): every producer goes through
+// esp_hosted_tx or the STA/AP/serial wrappers in front of it (lwIP, RPC, BLE
+// HCI), and each refuses a new packet once it is set. radioHalSilenceForRestart
+// sets it before it holds the C6. Hosted's transport_state is left alone on
+// purpose (see there). A refusal at the fence is silent and only counted
+// (esp_hosted_hw1_tx_fence_drops): the log ran on the producer's task, and
+// Bluedroid's hciT overflowed its stack printing it (bench 2026-11-08). An
+// HCI packet is also dropped without a log whenever TX is not ready (a C6
+// crash or recovery, a companion reset or hold with the Bluedroid host still
+// up), counted in esp_hosted_hw1_hci_down_drops and shown by c6status.
+extern "C" uint8_t is_transport_tx_ready(void);
+extern "C" void esp_hosted_hw1_fence_tx(void);
+extern "C" uint32_t esp_hosted_hw1_tx_fence_drops(void);
+extern "C" uint32_t esp_hosted_hw1_hci_down_drops(void);
 
 namespace {
 
@@ -81,13 +101,28 @@ void consoleTask(void*) {
 #endif
 
 constexpr int kBootAttempts = 2;  // each attempt resets the C6 and waits up to ~20 s
+// Hosted's own slave-ready wait (MAX_RETRY_TRANSPORT_ACTIVE 100 x 200 ms). A
+// start waits for TRANSPORT_UP inside this budget even when Hosted's spent
+// retry counter made it give up at once (hw1::radio::waitForTransportUp).
+constexpr uint32_t kSlaveReadyBudgetMs = 20000;
+constexpr uint32_t kSlaveReadyPollMs = 50;
+// After the TX fence closes, Hosted's write task still empties its queue (the
+// packets producers had already queued) while the C6 runs and acknowledges
+// them. A full queue is 3 priority queues x 20 packets (SDIO TX queue size) of
+// at most 1536 bytes, about 0.15 ms each at 20 MHz 4-bit: about 10 ms, and
+// 60 ms even at 1 ms a packet. The margin covers a slave briefly out of RX
+// buffers; one that stays out makes the write task drop the packet after its
+// buffer polls (up to about 0.5 s), which a fixed wait cannot cover.
+constexpr uint32_t kHostedTxFlushMs = 100;
 
 bool sBoardPrepared = false;
 bool sPrepared = false;        // radioHalPrepare() ran and the transport came up at least once
 bool sUpdateOnly = false;     // Explicit legacy OTA session; unavailable to radio users.
 bool sTransportUp = false;     // last TRANSPORT_UP without a DOWN/FAILURE since
+bool sHostedLinkUp = false;    // Hosted posted TRANSPORT_UP in this session (cleared before each start)
 bool sTransportLost = false;
 bool sHeld = false;
+bool sRestartLatched = false;  // radioHalSilenceForRestart ran: EN stays low until the CPU reset
 bool sEventsRegistered = false;
 RadioHalEventFn sEventFn = nullptr;
 RadioCompanionIdentity sIdentity = {};
@@ -164,6 +199,7 @@ void hostedEventHandler(void*, esp_event_base_t base, int32_t id, void* data) {
     case ESP_HOSTED_EVENT_TRANSPORT_UP:
       portENTER_CRITICAL(&sLock);
       sTransportUp = true;
+      sHostedLinkUp = true;
       portEXIT_CRITICAL(&sLock);
       deliver(RadioHalEvent::TransportUp, 0);
       break;
@@ -171,6 +207,7 @@ void hostedEventHandler(void*, esp_event_base_t base, int32_t id, void* data) {
       portENTER_CRITICAL(&sLock);
       sTransportUp = false;
       sSessionBleLinks = 0;
+      sHostedLinkUp = false;
       portEXIT_CRITICAL(&sLock);
       deliver(RadioHalEvent::TransportDown, 0);
       break;
@@ -178,6 +215,7 @@ void hostedEventHandler(void*, esp_event_base_t base, int32_t id, void* data) {
       portENTER_CRITICAL(&sLock);
       sTransportUp = false;
       sSessionBleLinks = 0;
+      sHostedLinkUp = false;
       portEXIT_CRITICAL(&sLock);
       deliver(RadioHalEvent::TransportFailure, 0);
       break;
@@ -252,13 +290,42 @@ esp_err_t applyMonitoring() {
   return first;
 }
 
+bool hostedLinkUp() {
+  portENTER_CRITICAL(&sLock);
+  const bool up = sHostedLinkUp;
+  portEXIT_CRITICAL(&sLock);
+  return up;
+}
+
 // One Hosted bring-up attempt: Arduino's helper resets the companion, waits
 // for the SDIO link and records its lifecycle state. The version query is the
 // first RPC and proves the link end to end.
 esp_err_t startOnce(bool allowLegacyUpdate) {
+  const uint32_t startedAt = nowMs();
+  // A fresh Hosted session announces itself with TRANSPORT_UP. An already
+  // initialized one (another claim kept it) has nothing new to announce.
+  const bool freshSession = !hostedIsInitialized();
+  if (freshSession) {
+    portENTER_CRITICAL(&sLock);
+    sHostedLinkUp = false;
+    portEXIT_CRITICAL(&sLock);
+  }
   if (!hostedInitWiFi()) {
     ESP_LOGE(kTag, "Hosted transport initialization failed");
     return ESP_FAIL;
+  }
+  // hostedInitWiFi() returns as soon as Hosted's reconfigure gives up, which
+  // after one start that spent Hosted's whole wait is at once (its retry
+  // counter is never reset on failure). Wait for the slave ourselves, in
+  // Hosted's own budget.
+  // This helps when the SDMMC host is healthy; it does not recover a wedged
+  // one (the 2026-11-08 reboot outage), and a retry on a dead companion now
+  // takes the full budget instead of returning at once.
+  if (freshSession &&
+      !hw1::radio::waitForTransportUp(
+          startedAt, kSlaveReadyBudgetMs, kSlaveReadyPollMs, [] { return hostedLinkUp(); },
+          [] { return nowMs(); }, [](uint32_t ms) { vTaskDelay(pdMS_TO_TICKS(ms) ? pdMS_TO_TICKS(ms) : 1); })) {
+    ESP_LOGW(kTag, "C6 transport not up %" PRIu32 " ms after the start", nowMs() - startedAt);
   }
   esp_hosted_coprocessor_fwver_t version = {};
   const esp_err_t err = esp_hosted_get_coprocessor_fwversion(&version);
@@ -345,6 +412,13 @@ esp_err_t radioHalPrepare() {
   ESP_RETURN_ON_ERROR(registerEvents(), kTag, "Hosted events");
   esp_err_t err = ESP_FAIL;
   for (int attempt = 1; attempt <= kBootAttempts; attempt++) {
+    // A failed start leaves Hosted initialised (Arduino's hostedInit keeps its
+    // flag: esp_hosted_connect_to_slave returns ESP_OK even when the slave
+    // never answered), so a second start would reuse the dead session: no C6
+    // reset, no wait, and the version query fails in the same millisecond
+    // (bench log 2026-11-08: attempts 1 and 2 both failed at 26756 ms). Close
+    // it first, as the companion's Recover does before every retry.
+    if (attempt > 1) radioHalStopTransport();
     err = radioHalStartTransport();
     if (err == ESP_OK) break;
     ESP_LOGW(kTag, "C6 did not come up (attempt %d of %d): %s", attempt, kBootAttempts, esp_err_to_name(err));
@@ -458,6 +532,7 @@ void radioHalBridgeStats(RadioBridgeStats& out) {
   out.eventsDropped = stats.events_dropped;
   out.timeouts = stats.request_timeouts;
   out.transportErrors = stats.transport_errors;
+  out.hciTxDownDrops = esp_hosted_hw1_hci_down_drops();
 }
 
 esp_err_t radioHalQueryMemory(RadioCompanionMemory& out) {
@@ -494,7 +569,15 @@ esp_err_t radioHalConfigureMonitoring(uint16_t heartbeatSec, uint32_t lowMemoryB
   return applyMonitoring();
 }
 
+static bool restartLatched() {
+  portENTER_CRITICAL(&sLock);
+  const bool latched = sRestartLatched;
+  portEXIT_CRITICAL(&sLock);
+  return latched;
+}
+
 static esp_err_t startTransport(bool allowLegacyUpdate) {
+  if (restartLatched()) return ESP_ERR_INVALID_STATE;  // the P4 restarts with the C6 held
   ESP_RETURN_ON_ERROR(prepareBoard(), kTag, "Board preparation failed");
   ESP_RETURN_ON_ERROR(registerEvents(), kTag, "Hosted events");
   // A new link starts from a clean slate on both sides.
@@ -545,6 +628,10 @@ esp_err_t radioHalStartTransport() { return startTransport(false); }
 esp_err_t radioHalStartUpdateTransport() { return startTransport(true); }
 
 void radioHalStopTransport() {
+  // After radioHalSilenceForRestart, Hosted stays up on purpose: its teardown
+  // deletes tasks that may be inside an SDMMC transaction (an op that was
+  // already running when the restart began).
+  if (restartLatched()) return;
   if (hostedIsInitialized()) {
     // Arduino closes the transport once neither Wi-Fi nor BLE claims it. The
     // callers have stopped both; clear a stale BLE claim so the close happens.
@@ -574,12 +661,32 @@ bool radioHalTransportLost() {
   return lost;
 }
 
+// Drive C6 EN low and latch the pad (gpio_hold_en): while it is held, a
+// gpio_set_level/gpio_config on the pin, Hosted's own reset pulse included,
+// does not reach the pad. The hold is in the LP domain and survives the CPU
+// reset; prepareBoard() releases it at the next boot before Hosted drives EN.
+static void latchC6EnableLow() {
+  gpio_hold_dis(board::kC6Enable);
+  gpio_set_level(board::kC6Enable, 0);
+  gpio_set_direction(board::kC6Enable, GPIO_MODE_OUTPUT);
+  gpio_hold_en(board::kC6Enable);
+}
+
 esp_err_t radioHalHold(bool hold) {
+  // A restart is under way and the C6 is latched in reset: it stays there.
+  if (restartLatched()) return hold ? ESP_OK : ESP_ERR_INVALID_STATE;
   if (hold && hostedIsInitialized()) return ESP_ERR_INVALID_STATE;  // stop the transport first
   ESP_RETURN_ON_ERROR(prepareBoard(), kTag, "Board preparation failed");
   gpio_hold_dis(board::kC6Enable);
   ESP_RETURN_ON_ERROR(gpio_set_level(board::kC6Enable, hold ? 0 : 1), kTag, "C6 EN level");
   ESP_RETURN_ON_ERROR(gpio_set_direction(board::kC6Enable, GPIO_MODE_OUTPUT), kTag, "C6 EN direction");
+  // A release that raced radioHalSilenceForRestart (checked above before it
+  // latched, wrote EN after it) puts the line back: whoever writes last with
+  // the latch set leaves EN low.
+  if (!hold && restartLatched()) {
+    latchC6EnableLow();
+    return ESP_ERR_INVALID_STATE;
+  }
   portENTER_CRITICAL(&sLock);
   sHeld = hold;
   if (hold) {
@@ -612,6 +719,58 @@ void radioHalPrepareForDeepSleep() {
   gpio_deep_sleep_hold_en();
 #endif
 }
+
+void radioHalSilenceForRestart() {
+  // The caller restarts the P4 next (rebootDevice). esp_restart() would run
+  // esp_wifi_remote's esp_wifi_stop shutdown handler, an RPC over SDIO taken
+  // in the last milliseconds before the SDMMC reset; Hosted's own restart
+  // helper (hosted_restart_host) unregisters it for the same reason.
+  esp_unregister_shutdown_handler(reinterpret_cast<shutdown_handler_t>(&esp_wifi_stop));
+  // The latch flag goes first, so radioHalHold(false), startTransport and
+  // radioHalStopTransport refuse from here on (see below).
+  portENTER_CRITICAL(&sLock);
+  sRestartLatched = true;
+  sHeld = true;
+  sTransportUp = false;
+  sSessionBleLinks = 0;
+  sHostedLinkUp = false;
+  portEXIT_CRITICAL(&sLock);
+  // Then stop Hosted TX at the fence while the C6 still runs. The users keep
+  // running (lwIP's reply to `reboot`, TCP ACKs, BLE HCI, RPC polls), and each
+  // packet they queued after the C6 went into reset became a CMD53 with no
+  // answer: "sdmmc_send_cmd returned 0x107", "Failed to send data",
+  // "Unrecoverable host sdio state" during the drain (bench 2026-11-08, 7 of
+  // 15 reboots). With the fence set every new packet is refused and freed by
+  // its producer, without a log on that task (Bluedroid's hciT overflowed its
+  // stack printing one; radioHalRestartTxDrops counts them instead); the
+  // short wait lets the write task send what was already
+  // queued to a C6 that still acknowledges it. Receive is left alone. The
+  // fence is one-way (a slave INIT from a Start op cannot reopen it), and it
+  // leaves Hosted's transport_state at TX_ACTIVE: lowering that state would
+  // make any transport_drv_reconfigure() in the window (a Wi-Fi init, a BLE
+  // open) pulse the C6's reset and run SDIO card init on slot 1. Without a
+  // live link there is nothing queued to flush.
+  const bool txWasOpen = is_transport_tx_ready();
+  esp_hosted_hw1_fence_tx();
+  if (txWasOpen) vTaskDelay(pdMS_TO_TICKS(kHostedTxFlushMs));
+  // Hold the C6 in reset so it stops sending: no new rx data or interrupts,
+  // and a transfer it was in the middle of ends on the SDMMC timeout instead
+  // of streaming into the reset. Hosted stays initialised on purpose: its
+  // teardown deletes tasks that may be inside an SDMMC transaction, and its
+  // users are still running.
+  //
+  // The pad is latched low with gpio_hold_en: a Start/Recover op that was
+  // already inside hostedInitWiFi (Hosted's transport_gpio_reset pulses EN,
+  // at the start and every 50 slave-ready polls) cannot raise it again during
+  // the drain.
+  // Hosted never touches the hold in this build (host power save is off, so
+  // H_HOST_PS_ALLOWED is 0). EN stays low through the CPU reset; prepareBoard()
+  // releases the hold at the next boot before Hosted's reset pulse, as after
+  // deep sleep.
+  latchC6EnableLow();
+}
+
+uint32_t radioHalRestartTxDrops() { return esp_hosted_hw1_tx_fence_drops(); }
 
 esp_err_t radioHalUpdateBegin() {
   if (!updateTransportUp()) return ESP_ERR_INVALID_STATE;

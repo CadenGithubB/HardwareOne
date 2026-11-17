@@ -45,6 +45,7 @@ bool isEspNowInitialized() { return false; }
 #if ENABLE_HTTP_SERVER
   #include <esp_http_server.h>
 #endif
+#include <esp_log.h>
 #include <esp_timer.h>
 #include <time.h>
 #include "System_RamFlush.h"
@@ -171,6 +172,7 @@ void secureClearString(String& s) {
 #include "i2csensor_bno055.h"      // For imuCommands
 #include "i2csensor_seesaw.h"  // For gamepadCommands
 #include "System_RadioCompanion.h"  // companionCommands, sleep hooks, status (P4X-EYE); no-ops elsewhere
+#include "System_RestartQuiesceCore.h"  // hw1::restartq — SDMMC idle before an intentional restart
 #include "i2csensor_apds9960.h"     // For apdsCommands
 #include "i2csensor_pa1010d.h"      // For gpsCommands
 
@@ -2062,6 +2064,34 @@ static bool finalizeMicRecordingForRestart(const char* reason) {
   return false;
 }
 
+// The ESP32-P4's software restart is a CPU reset that resets the SDMMC host
+// without first idling its DMA. Taken while the C6 link (slot 1) or the SD card
+// (slot 0) is moving data, it left the SDMMC data path dead until a chip reset
+// (bench 2026-11-08: no Wi-Fi after `reboot`). Silence the companion, hold the
+// filesystem lock and let a cut-off transfer time out first. The policy and the
+// order are host-tested (System_RestartQuiesceCore.h). Only boards with an
+// SDMMC user pay the wait.
+static void quiesceSdmmcForRestart() {
+#if HW1_RADIO_COMPANION || (ENABLE_SD_CARD && ENABLE_SDMMC_CARD)
+  hw1::restartq::QuiescePolicy policy;
+  if (!HW1_RADIO_COMPANION) policy.drainMs = 0;  // the lock alone idles an SD card
+  const hw1::restartq::QuiesceResult result = hw1::restartq::quiesceSdmmcForRestart(
+      [] { radioCompanionBeforeRestart(); },
+      [](uint32_t timeoutMs) { return fsLockForRestart(timeoutMs); },
+      [] { return static_cast<uint32_t>(millis()); },
+      [](uint32_t ms) { delay(ms); },
+      policy);
+#if HW1_RADIO_COMPANION
+  ESP_LOGI("REBOOT", "SDMMC quiesced: C6 held, %lu TX dropped at the fence, storage %s, %lu ms drain",
+           static_cast<unsigned long>(radioHalRestartTxDrops()),
+           result.storageLocked ? "locked" : "lock timed out", static_cast<unsigned long>(result.drainedMs));
+#else
+  ESP_LOGI("REBOOT", "SDMMC quiesced: storage %s, %lu ms drain",
+           result.storageLocked ? "locked" : "lock timed out", static_cast<unsigned long>(result.drainedMs));
+#endif
+#endif
+}
+
 void rebootDevice(const char* reason, const char* auditDetail, uint32_t flushDelayMs) {
   // Normal reboot/OTA/ramflush paths must not cut power while a WAV still owns
   // its placeholder header or is in FINALIZING. This is deliberately bounded:
@@ -2069,6 +2099,7 @@ void rebootDevice(const char* reason, const char* auditDetail, uint32_t flushDel
   finalizeMicRecordingForRestart(reason);
   recordRebootIntent(reason, auditDetail);
   delay(flushDelayMs);  // let the queued output + REBOOT audit line flush to disk
+  quiesceSdmmcForRestart();
   ESP.restart();
 }
 
@@ -2132,6 +2163,7 @@ const char* cmd_reboot(const String& originalCmd) {
 // scheduling. Runs on the esp_timer task, not cmd_exec, so it can call
 // ESP.restart() without disrupting any in-flight audit writes.
 static void factoryreset_doRestart(void* /*arg*/) {
+  quiesceSdmmcForRestart();  // as rebootDevice: SDMMC idle before the CPU reset
   ESP.restart();
 }
 

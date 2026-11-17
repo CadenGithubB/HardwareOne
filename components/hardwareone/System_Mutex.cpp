@@ -109,6 +109,12 @@ void fsUnlock() {
   }
 }
 
+bool fsLockForRestart(uint32_t timeoutMs) {
+  if (!gFsMutex) return false;
+  if (isHeldByCurrentTask(gFsMutex)) return true;
+  return xSemaphoreTake(gFsMutex, pdMS_TO_TICKS(timeoutMs)) == pdTRUE;
+}
+
 // ============================================================================
 // MapCacheGuard Implementation
 // ============================================================================

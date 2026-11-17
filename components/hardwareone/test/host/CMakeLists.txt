@@ -507,10 +507,24 @@ if(HW1_SANITIZE)
   target_link_options(radio_companion_core_tests PRIVATE -fsanitize=address,undefined)
 endif()
 
+# What an intentional restart does to the P4's SDMMC host first
+# (System_RestartQuiesceCore.h): silence the C6, take the filesystem lock,
+# drain for the SDMMC timeout, every step bounded.
+add_executable(restart_quiesce_core_tests test_restart_quiesce_core.cpp)
+set_target_properties(restart_quiesce_core_tests PROPERTIES
+  CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+target_compile_options(restart_quiesce_core_tests PRIVATE
+  -Wall -Wextra -Werror -pedantic)
+if(HW1_SANITIZE)
+  target_compile_options(restart_quiesce_core_tests PRIVATE -fsanitize=address,undefined -g)
+  target_link_options(restart_quiesce_core_tests PRIVATE -fsanitize=address,undefined)
+endif()
+
 enable_testing()
 
 add_test(NAME esp_now_hosted_protocol COMMAND esp_now_hosted_protocol_tests)
 add_test(NAME radio_companion_core COMMAND radio_companion_core_tests)
+add_test(NAME restart_quiesce_core COMMAND restart_quiesce_core_tests)
 # The real HAL_Bluetooth.cpp under native and Hosted (P4 + C6) controller
 # substitutes, with the app console's teardown hooks around every stop; see
 # test_hal_bluetooth.py for what it does and does not prove.
@@ -1670,6 +1684,19 @@ if(HW1_ESP_HOSTED_TEST_IDF)
 else()
   message(STATUS "Hosted DMA regression needs HW1_ESP_HOSTED_TEST_IDF pointing to ESP-IDF 5.5.5 sources")
 endif()
+# A refusal at the restart TX fence is silent on the producer's task (bench
+# 2026-11-08: hciT stack overflow in the "tx fail" log). Needs the pristine
+# Hosted 2.12.13 package (component-manager cache or managed_components); 77
+# (skipped) without it.
+set(ESP_HOSTED_FENCE_TEST_ARGS --cc ${CMAKE_C_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND ESP_HOSTED_FENCE_TEST_ARGS --sanitize)
+endif()
+add_test(NAME esp_hosted_tx_fence
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/../../../../tools/p4/test_esp_hosted_tx_fence.py
+          ${ESP_HOSTED_FENCE_TEST_ARGS})
+set_tests_properties(esp_hosted_tx_fence PROPERTIES SKIP_RETURN_CODE 77)
 foreach(terminal_suite g2_terminal_protocol g2_native_terminal)
   add_test(NAME ${terminal_suite}
     COMMAND ${Python3_EXECUTABLE}
@@ -2820,6 +2847,14 @@ add_test(
   NAME time_anchor_persistence
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_time_anchor_persistence.py
+          ${SETUP_MQTT_TEST_ARGS})
+# rebootDevice() and the factory-reset restart idle the SDMMC host first (C6
+# silenced, filesystem lock, drain), and a companion start waits for the slave
+# after Hosted's spent retry counter gives up at once (bench 2026-11-08).
+add_test(
+  NAME restart_sdmmc_quiesce
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_restart_sdmmc_quiesce.py
           ${SETUP_MQTT_TEST_ARGS})
 # The C6 companion's reboot escalation restarts through rebootDevice().
 add_test(

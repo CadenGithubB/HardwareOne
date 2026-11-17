@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Run production Hosted admission and OTA chunking against controlled RPCs."""
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 from test_web_batch_handlers import extract_block
@@ -9,14 +10,19 @@ SOURCE = HERE.parents[1]
 
 def main():
     source = (SOURCE / 'HAL_Radio.cpp').read_text()
-    names = ['esp_err_t startOnce(', 'static bool updateTransportUp(',
+    names = ['bool hostedLinkUp(', 'esp_err_t startOnce(', 'static bool updateTransportUp(',
              'bool radioHalTransportUp(', 'esp_err_t radioHalUpdateWrite(']
-    production = '\n'.join(extract_block(source, name) for name in names)
+    # startOnce's slave-ready wait budget (test_restart_sdmmc_quiesce.py covers the wait).
+    constants = [re.search(r'constexpr uint32_t ' + name + r' = [^;]+;', source).group(0)
+                 for name in ('kSlaveReadyBudgetMs', 'kSlaveReadyPollMs')]
+    production = '\n'.join(constants + [extract_block(source, name) for name in names])
     scaffold = r'''
 #include <cassert>
+#include <cinttypes>
 #include <cstdint>
 #include <cstddef>
 #include <vector>
+#include "Radio_CompanionCore.h"
 using esp_err_t = int;
 constexpr int ESP_OK=0, ESP_FAIL=-1, ESP_ERR_WIFI_NOT_INIT=2,
   ESP_ERR_INVALID_ARG=3, ESP_ERR_INVALID_STATE=4, WIFI_IF_STA=0;
@@ -27,7 +33,12 @@ constexpr int ESP_OK=0, ESP_FAIL=-1, ESP_ERR_WIFI_NOT_INIT=2,
 #define ESP_LOGW(...) ((void)0)
 #define portENTER_CRITICAL(...) ((void)0)
 #define portEXIT_CRITICAL(...) ((void)0)
-bool sTransportUp=false, sTransportLost=false, sHeld=false, sUpdateOnly=false;
+bool sTransportUp=false, sTransportLost=false, sHeld=false, sUpdateOnly=false, sHostedLinkUp=false;
+int sLock=0;
+#define pdMS_TO_TICKS(ms) (ms)
+uint32_t fakeNow=0;
+uint32_t nowMs() { return fakeNow; }
+void vTaskDelay(uint32_t ms) { fakeNow += ms; }
 struct { bool versionKnown=false, versionMatches=false; int major=0,minor=0,patch=0; } sIdentity;
 struct esp_hosted_coprocessor_fwver_t { int major1=2,minor1=12,patch1=13; };
 bool initialized=true;
@@ -89,7 +100,7 @@ int main() {
         path = Path(directory)
         (path/'test.cpp').write_text(scaffold + production + checks)
         subprocess.run(['c++', '-std=c++17', '-Wall', '-Wextra', '-Werror',
-                        '-fsanitize=address,undefined', str(path/'test.cpp'),
+                        '-fsanitize=address,undefined', '-I', str(SOURCE), str(path/'test.cpp'),
                         '-o',str(path/'test')],check=True)
         subprocess.run([str(path/'test')],check=True)
     print('Hosted legacy update admission and chunking passed')

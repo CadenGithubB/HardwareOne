@@ -84,6 +84,9 @@ struct RadioCompanionIdentity {
 
 struct RadioBridgeStats {
   uint32_t malformed, stale, eventsDropped, timeouts, transportErrors;
+  // BLE HCI packets Hosted dropped (without a log) while its TX was closed
+  // outside a restart: C6 crash or recovery, companion reset or hold.
+  uint32_t hciTxDownDrops;
 };
 
 // Last memory report from the companion (monitor event or explicit query).
@@ -151,6 +154,18 @@ esp_err_t radioHalHold(bool hold);
 bool radioHalHeld();
 // Hold through host deep sleep: the enable line stays low until the next boot.
 void radioHalPrepareForDeepSleep();
+// Right before an intentional restart (rebootDevice): no SDIO RPC in
+// esp_restart()'s shutdown handlers, Hosted TX closed at HardwareOne's fence
+// in the Hosted patch and flushed (about 100 ms, only while the link was up)
+// while the C6 still runs, then the C6 latched in reset
+// (gpio_hold_en), so neither side sends before the restart resets the SDMMC
+// host. One-way: from then on radioHalHold(false), the transport starts and
+// radioHalStopTransport refuse. The caller restarts. See
+// System_RestartQuiesceCore.h.
+void radioHalSilenceForRestart();
+// Packets the producers dropped at that fence (silently, no log on their
+// task); reported with "SDMMC quiesced".
+uint32_t radioHalRestartTxDrops();
 // Mirror the companion's UART console into the P4 log (tag "C6>"). Started by
 // radioHalPrepare(); the only view of the C6's own boot log and crashes while
 // HardwareOne is running.
@@ -198,6 +213,7 @@ inline bool radioHalTransportLost() { return false; }
 inline esp_err_t radioHalHold(bool) { return ESP_ERR_NOT_SUPPORTED; }
 inline bool radioHalHeld() { return false; }
 inline void radioHalPrepareForDeepSleep() {}
+inline void radioHalSilenceForRestart() {}
 inline esp_err_t radioHalConsoleMirror(bool) { return ESP_ERR_NOT_SUPPORTED; }
 inline bool radioHalConsoleMirrorOn() { return false; }
 inline esp_err_t radioHalUpdateBegin() { return ESP_ERR_NOT_SUPPORTED; }

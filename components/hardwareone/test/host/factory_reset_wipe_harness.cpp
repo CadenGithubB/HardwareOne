@@ -68,6 +68,9 @@ static void ramFlushClearOverlay() { ++overlayClears; }
 
 struct FakeEsp { unsigned restarts = 0; void restart() { ++restarts; } };
 static FakeEsp ESP;
+// System_Utils.cpp's SDMMC quiesce (test_restart_sdmmc_quiesce.py covers it).
+static unsigned quiesces = 0, restartsAtQuiesce = 0;
+static void quiesceSdmmcForRestart() { ++quiesces; restartsAtQuiesce = ESP.restarts; }
 
 struct FakeTimer { int unused; };
 typedef FakeTimer* esp_timer_handle_t;
@@ -265,6 +268,8 @@ static fake_vfs::Fs& populate() {
   gSettings.phonePipeSecretGenerated=generatedPersisted=true;
   micFinalizeOk = true; overlayClears = 0;
   ESP = FakeEsp{};
+  quiesces = 0;
+  restartsAtQuiesce = 0;
   timersCreated = timersStarted = 0; timerDelayUs = 0; timerCallback = nullptr;
   rebootIntents = 0; events.clear(); logLines.clear();
   idRecords = 0; idRecordAt = 0; idRecordOk = true;
@@ -321,8 +326,10 @@ static void wipeRemovesAccountData() {
   // The role was held at the stop, the key drop and the clear, and given back.
   check(outsideRole==0&&roleDepth==0&&roleKind==int(BleRoleTransition::PHONE_STOP));
 #endif
+  check(quiesces == 0);
   timerCallback(nullptr);
   check(ESP.restarts == 1);
+  check(quiesces == 1 && restartsAtQuiesce == 0);  // the SDMMC host is idled before the restart
 
   // The issued ids are recorded before anything is removed, the account data
   // goes before users.json (the commit), and the settings files after it.
