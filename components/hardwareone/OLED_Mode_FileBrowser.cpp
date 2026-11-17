@@ -674,12 +674,16 @@ struct EspNowSendFileJob { uint8_t mac[6]; char path[FILE_MANAGER_MAX_PATH]; };
 static void runEspNowSendFile(void* arg) {
   EspNowSendFileJob* j = (EspNowSendFileJob*)arg;
   if (!j) return;
-  bool ok;
+  FileSendResult result;
   {
     SYSTEM_IDENTITY_SCOPE("oled.espnow.sendfile");  // read the local file at device level
-    ok = sendFileToMac(j->mac, String(j->path));
+    result = sendFileToMacResult(j->mac, String(j->path));
   }
-  oledToastShow(ok ? "File sent" : "Send failed");  // completion confirmation (cmd_exec task)
+  // Completion confirmation (cmd_exec task). NoSession: nothing went out, the
+  // encrypted session is still being opened — a retry in a few seconds works.
+  oledToastShow(result == FileSendResult::Sent      ? "File sent"
+              : result == FileSendResult::NoSession ? "No session yet. Try again."
+                                                    : "Send failed");
   free(j);
 }
 

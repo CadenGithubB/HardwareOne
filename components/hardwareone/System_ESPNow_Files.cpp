@@ -95,23 +95,45 @@ SemaphoreHandle_t      gFileSlotsMutex = nullptr;
 //
 // Every touch of this handle is cmd_exec's, and DELIBERATELY OUTSIDE
 // gFileSlotsMutex: streamDrainPending lazy-opens it and writes it holding only the
-// FS lock, and finalize/release close it. That is the whole point of the module —
-// espnow_task must never block on flash — so the mutex covers the FIFO/metadata
-// steps around the write, not the write. Safety comes from ownership instead: a
-// buffer sitting in the PENDING FIFO is untouchable by espnow_task, and a streaming
-// slot is only freed by its own cmd_exec finalize/abort job, so no other task can
-// close the handle mid-write. Do not "fix" this by taking the slot mutex across the
-// flash work.
+// FS lock, and finalize/release (releaseSlot) close it the same way. That is the
+// whole point of the module — espnow_task must never block on flash — so the mutex
+// covers the FIFO/metadata steps around the write, not the write. Safety comes from
+// ownership instead: a buffer sitting in the PENDING FIFO is untouchable by
+// espnow_task, and a streaming slot is only freed by its own cmd_exec
+// finalize/abort job, so no other task can close the handle mid-write. Do not
+// "fix" this by taking the slot mutex across the flash work.
 File gStreamFile[kFileSlots];
+
+// Slot-table lock.
+//
+// Invariant: gFileSlotsMutex guards table bookkeeping only. It is never held
+// across filesystem work, a wait for the filesystem lock or anything else that
+// can block, so every critical section is a few memory operations long. (It used
+// to be held across the close + remove of a streaming teardown, which waits for
+// the filesystem lock: a long directory walk elsewhere then made the receive
+// path's bounded wait miss, and a miss was read as "no such transfer".)
+//
+// Two kinds of taker, the same split System_ESPNow_FsList.cpp uses for its lock:
+//   - The per-frame receive path and the timeout sweep (espnow_task) keep the
+//     short bounded wait, so RX never stalls. A miss there is reported as BUSY,
+//     never as "not found" (see FileSlotLookup, STREAM_APPEND_BUSY).
+//   - Takers that would leak a slot, pin it, write a buffer twice or cancel a
+//     complete file by giving up — every cmd_exec job, plus release, finalize
+//     hand-off and teardown parking — wait without a limit (kFileSlotsLockWait).
+//     Given the invariant that wait is microseconds.
+const TickType_t kFileSlotsLockBounded = pdMS_TO_TICKS(50);
+const TickType_t kFileSlotsLockWait    = portMAX_DELAY;
 
 struct FileSlotsLockGuard {
   bool ok;
-  FileSlotsLockGuard() : ok(false) {
-    if (gFileSlotsMutex) ok = (xSemaphoreTake(gFileSlotsMutex, pdMS_TO_TICKS(50)) == pdTRUE);
+  explicit FileSlotsLockGuard(TickType_t wait = kFileSlotsLockBounded) : ok(false) {
+    if (gFileSlotsMutex) ok = (xSemaphoreTake(gFileSlotsMutex, wait) == pdTRUE);
   }
   ~FileSlotsLockGuard() {
     if (ok && gFileSlotsMutex) xSemaphoreGive(gFileSlotsMutex);
   }
+  FileSlotsLockGuard(const FileSlotsLockGuard&) = delete;
+  FileSlotsLockGuard& operator=(const FileSlotsLockGuard&) = delete;
 };
 
 // Defined in the second anonymous-namespace block below (same unnamed
@@ -126,26 +148,16 @@ const FileTransferSlotImpl* implC(const FileTransferSlot* s) {
   return reinterpret_cast<const FileTransferSlotImpl*>(s);
 }
 
+// Free a slot's memory and return it to FREE. CALLER HOLDS gFileSlotsMutex.
+// Memory only — no filesystem work happens here (see the lock invariant above).
+// A streaming slot's .part handle and staging file are dealt with by releaseSlot
+// BEFORE it calls this; the inline callers (allocate's supersede, the sweep) only
+// ever pass RAM-path slots.
 void releaseLocked(FileTransferSlotImpl& s) {
-  if (s.streaming) {
-    int idx = (int)(&s - gFileSlots);
-    {
-      FsLockGuard fg("fileslots.stream.release");  // hold the FS lock for close + remove
-      if (idx >= 0 && idx < kFileSlots && gStreamFile[idx]) {
-        gStreamFile[idx].close();
-      }
-      if (s.partPath[0]) {
-        // Best-effort: removes the .part on failure/timeout. After a successful
-        // FILE_END rename the .part no longer exists, so this is a harmless no-op.
-        AuthContext ctx = VFS::systemAuth(VFS::Scopes::ESPNOW_RECEIVED, "espnow.file_part_cleanup");
-        VFS::removeGuarded(s.partPath, ctx);
-      }
-    }
-    for (uint8_t b = 0; b < kFileStreamBufs; b++) {
-      if (s.streamBuf[b]) {
-        ps_free(s.streamBuf[b]);
-        s.streamBuf[b] = nullptr;
-      }
+  for (uint8_t b = 0; b < kFileStreamBufs; b++) {
+    if (s.streamBuf[b]) {
+      ps_free(s.streamBuf[b]);
+      s.streamBuf[b] = nullptr;
     }
   }
   if (s.dataBuffer) {
@@ -158,6 +170,51 @@ void releaseLocked(FileTransferSlotImpl& s) {
   }
   memset(&s, 0, sizeof(s));
   s.state = FILE_SLOT_FREE;
+}
+
+// Release a slot from outside the lock: fileSlotsRelease and the cmd_exec abort
+// job. Waits for the slot lock (skipping would leak the slot).
+//
+// RAM-path slot: freed in one critical section.
+//
+// Streaming slot (cmd_exec only — it owns the .part handle): three steps, so
+// the filesystem lock is never waited for with the slot lock held.
+//   1. Under the slot lock: detach. The slot is parked in COMPLETING with no
+//      teardown owed, which keeps it claimed — allocate cannot hand the index
+//      (and with it the staging path and gStreamFile entry) to a new transfer,
+//      the sweep skips it, and a late chunk or FILE_END is turned away before
+//      it touches a buffer. From here on this job is the slot's only writer.
+//   2. No slot lock: close the handle and remove the staging file under the
+//      filesystem lock. partPath is read in place: it is written at allocation
+//      and wiped in step 3, and nothing else writes a claimed slot.
+//   3. Under the slot lock: free the buffers and mark the slot FREE.
+void releaseSlot(FileTransferSlotImpl& s) {
+  {
+    FileSlotsLockGuard g(kFileSlotsLockWait);
+    if (!g.ok) return;                       // no mutex: module never initialised
+    if (s.state == FILE_SLOT_FREE) return;   // idempotent
+    if (!s.streaming) {
+      releaseLocked(s);
+      return;
+    }
+    s.state           = FILE_SLOT_COMPLETING;
+    s.teardownPending = false;
+  }
+  {
+    const int idx = (int)(&s - gFileSlots);
+    FsLockGuard fg("fileslots.stream.release");  // hold the FS lock for close + remove
+    if (idx >= 0 && idx < kFileSlots && gStreamFile[idx]) {
+      gStreamFile[idx].close();
+    }
+    if (s.partPath[0]) {
+      // Best-effort: removes the .part on failure/timeout. After a successful
+      // FILE_END rename the .part no longer exists, so this is a harmless no-op.
+      AuthContext ctx = VFS::systemAuth(VFS::Scopes::ESPNOW_RECEIVED, "espnow.file_part_cleanup");
+      VFS::removeGuarded(s.partPath, ctx);
+    }
+  }
+  FileSlotsLockGuard g(kFileSlotsLockWait);
+  if (g.ok) releaseLocked(s);
 }
 
 }  // namespace
@@ -411,7 +468,7 @@ FileTransferSlot* fileSlotsAllocate(const uint8_t peerMac[6],
     // COMPLETING (teardownPending) still holding its open handle, and a retry
     // of the same file legitimately allocates a different slot. Without the
     // index both would name the same file, and the parked slot's eventual
-    // abort — releaseLocked closes the handle and removeGuarded()s partPath —
+    // abort — releaseSlot closes the handle and removeGuarded()s partPath —
     // would delete the file the live transfer is streaming into. The receive
     // CRC could not catch it either: it is accumulated over bytes as they
     // arrive, never re-read from flash.
@@ -469,14 +526,23 @@ FileTransferSlot* fileSlotsAllocate(const uint8_t peerMac[6],
   return reinterpret_cast<FileTransferSlot*>(&s);
 }
 
-FileTransferSlot* fileSlotsFindByMsg(const uint8_t peerMac[6], uint32_t msgId) {
+FileTransferSlot* fileSlotsFindByMsg(const uint8_t peerMac[6], uint32_t msgId,
+                                     FileSlotLookup* resultOut) {
+  auto setResult = [&](FileSlotLookup r) { if (resultOut) *resultOut = r; };
+  setResult(FILE_SLOT_LOOKUP_NOT_FOUND);
   if (!gFileSlots || !peerMac) return nullptr;
   FileSlotsLockGuard g;
-  if (!g.ok) return nullptr;
+  if (!g.ok) {
+    // The table could not be read in the bounded wait. Nothing is known about
+    // this transfer — do not let the caller mistake that for "no such slot".
+    setResult(FILE_SLOT_LOOKUP_BUSY);
+    return nullptr;
+  }
   for (uint8_t i = 0; i < kFileSlots; i++) {
     FileTransferSlotImpl& s = gFileSlots[i];
     if (s.state == FILE_SLOT_FREE) continue;
     if (s.msgId == msgId && memcmp(s.peerMac, peerMac, 6) == 0) {
+      setResult(FILE_SLOT_LOOKUP_FOUND);
       return reinterpret_cast<FileTransferSlot*>(&s);
     }
   }
@@ -578,7 +644,7 @@ void streamDrainPending(FileTransferSlotImpl& s) {
     bool     needOpen;
     char     partPathCopy[80];
     {
-      FileSlotsLockGuard g;
+      FileSlotsLockGuard g(kFileSlotsLockWait);
       if (!g.ok) return;
       if (!s.streaming || s.streamFailed || s.streamPendCount == 0) return;
       buf      = s.streamPendQ[s.streamPendHead];
@@ -605,7 +671,10 @@ void streamDrainPending(FileTransferSlotImpl& s) {
       }
     }
     {
-      FileSlotsLockGuard g;
+      // Must not be skipped: the buffer above is on flash now, and leaving it in
+      // the FIFO would write it a second time on the next drain while the
+      // arrival-side CRC still matched.
+      FileSlotsLockGuard g(kFileSlotsLockWait);
       if (!g.ok) return;
       if (openedNow) s.streamOpened = true;
       if (!wrote) { s.streamFailed = true; return; }
@@ -622,7 +691,7 @@ StreamAppendResult fileSlotsStreamAppend(FileTransferSlot* slot, uint16_t chunkI
   if (!slot || !data) return STREAM_APPEND_FAIL;
   FileTransferSlotImpl& s = *impl(slot);
   FileSlotsLockGuard g;
-  if (!g.ok) return STREAM_APPEND_FAIL;
+  if (!g.ok) return STREAM_APPEND_BUSY;   // nothing read, nothing changed — not a failure of the transfer
   if (!s.streaming) return STREAM_APPEND_FAIL;
   // Abort already in progress from an earlier chunk (streamFailed set, or slot
   // handed to COMPLETING teardown): report ALREADY_FAILED so the caller cancels
@@ -698,16 +767,28 @@ void fileSlotsStreamDrainJob(void* arg) {        // cmd_exec
   FileTransferSlot* slot = (FileTransferSlot*)arg;
   if (!slot) return;
   FileTransferSlotImpl& s = *impl(slot);
-  streamDrainPending(s);
-  FileSlotsLockGuard g;                           // re-arm: next committed buffer queues a fresh drain
-  if (g.ok) s.streamDrainQueued = false;
+  for (;;) {
+    streamDrainPending(s);
+    // Re-arm: the next committed buffer queues a fresh drain. Waits for the lock —
+    // a skipped re-arm would leave the flag set and no drain would ever run again.
+    // The flag is cleared only while the FIFO is seen empty under the same lock
+    // hold: a buffer the receive task committed after the drain's last look found
+    // the flag still set and queued nothing, so it is drained here instead of
+    // being stranded until the other buffer fills and the transfer is aborted
+    // for backpressure.
+    FileSlotsLockGuard g(kFileSlotsLockWait);
+    if (!g.ok) return;
+    if (s.streamPendCount == 0) { s.streamDrainQueued = false; return; }
+  }
 }
 
 void fileSlotsStreamAbortJob(void* arg) {        // cmd_exec
   FileTransferSlot* slot = (FileTransferSlot*)arg;
   if (!slot) return;
-  FileSlotsLockGuard g;
-  if (g.ok) releaseLocked(*impl(slot));           // close + delete .part + free buffers + FREE
+  // close + delete .part + free buffers + FREE. Waits for the slot lock: this job
+  // is the only thing that will ever free the slot (a COMPLETING slot is skipped
+  // by allocate and by the sweep), so giving up on a busy lock pinned it for good.
+  releaseSlot(*impl(slot));
 }
 
 void fileSlotsStreamFail(FileTransferSlot* slot) {
@@ -720,7 +801,10 @@ void fileSlotsStreamFail(FileTransferSlot* slot) {
 bool fileSlotsStreamBeginFinalize(FileTransferSlot* slot) {     // espnow_task (FILE_END)
   if (!slot) return false;
   FileTransferSlotImpl& s = *impl(slot);
-  FileSlotsLockGuard g;
+  // Waits for the lock: the caller reads `false` as "the slot is already failing"
+  // and cancels, which must not happen to a complete, CRC-checked file because
+  // the table was busy for a moment.
+  FileSlotsLockGuard g(kFileSlotsLockWait);
   if (!g.ok) return false;
   if (!s.streaming || s.state != FILE_SLOT_RECEIVING || s.streamFailed) return false;
   if (s.streamFill > 0) {                          // commit the trailing partial buffer
@@ -741,7 +825,7 @@ bool fileSlotsStreamFinalizeWrite(FileTransferSlot* slot) {     // cmd_exec
   bool ok;
   int  idx;
   {
-    FileSlotsLockGuard g;
+    FileSlotsLockGuard g(kFileSlotsLockWait);
     if (!g.ok) return false;
     ok  = !s.streamFailed;
     idx = (int)(&s - gFileSlots);
@@ -789,14 +873,14 @@ uint32_t fileSlotsGetMsgId(const FileTransferSlot* slot) {
 
 void fileSlotsRelease(FileTransferSlot* slot) {
   if (!slot) return;
-  FileSlotsLockGuard g;
-  if (!g.ok) return;
-  releaseLocked(*impl(slot));
+  releaseSlot(*impl(slot));
 }
 
 void fileSlotsMarkTeardownPending(FileTransferSlot* slot) {
   if (!slot) return;
-  FileSlotsLockGuard g;
+  // Waits for the lock: this is the last resort that keeps a slot whose abort job
+  // could not be queued reachable by the sweep; skipping it would pin the slot.
+  FileSlotsLockGuard g(kFileSlotsLockWait);
   if (!g.ok) return;
   FileTransferSlotImpl& s = *impl(slot);
   if (!s.streaming || s.state == FILE_SLOT_FREE) return;

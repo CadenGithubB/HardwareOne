@@ -673,11 +673,18 @@ const char* cmd_imagesend(const String& argsInput) {
     return errBuf;
   }
   
-  if (sendFileToMac(mac, path)) {
+  const FileSendResult result = sendFileToMacResult(mac, path);
+  if (result == FileSendResult::Sent) {
     EXT_RAM_BSS_ATTR static char buf[128];
     snprintf(buf, sizeof(buf), "Sent %s to %s", path.c_str(), device.c_str());
     cliHint("the image lands in the peer's /espnow/received/ inbox");
     return buf;
+  }
+  if (result == FileSendResult::NoSession) {
+    // Nothing was sent: the encrypted session is still being opened.
+    EXT_RAM_BSS_ATTR static char noSessionBuf[160];
+    snprintf(noSessionBuf, sizeof(noSessionBuf), ESPNOW_NO_SESSION_REPLY_FMT, device.c_str());
+    return noSessionBuf;
   }
 
   return "Error: Failed to send image (send aborted or receiver cancelled)";

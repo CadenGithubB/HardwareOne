@@ -31,6 +31,21 @@ enum class EspNowMeshRxKind : uint8_t {
   BootstrapLiveness = 3,
 };
 
+// Outcome of sendFileToMacResult.
+enum class FileSendResult : uint8_t {
+  Sent      = 0,  // every frame was handed to the radio (sender-side truth only)
+  Failed    = 1,  // refused, aborted or cancelled by the receiver; the log names the cause
+  NoSession = 2,  // no ACTIVE encrypted session with the peer: nothing was sent, the
+                  // handshake was started — a retry a few seconds later can succeed
+};
+
+// The one reply for a send that needs an ACTIVE encrypted session with the peer
+// (a file, a multi-frame message) when there is none yet. %s = the peer as the
+// user named it. Starts with "Error:" and has no "sent"/"success" in it: the web
+// device card decides success from those words.
+#define ESPNOW_NO_SESSION_REPLY_FMT \
+  "Error: no secure session with %s yet; one is being opened, try again in a few seconds"
+
 // This radio instance's own STA / AP address. ESP-NOW uses its checked cache
 // while running; a driver query can be a blocking RPC on a Hosted (P4 + C6)
 // radio, so it is only the fallback before start or after stop.
@@ -1511,7 +1526,12 @@ int espnowHistoryMessageCount(const uint8_t* mac);
 // Adds online/lastSeenSec from MeshPeerHealth on top of the stored metadata.
 void espnowSerializeMeshPeerMeta(JsonObject o, const MeshPeerMeta& m);
 
-// File transfer to specific MAC (used by ImageManager)
+// File transfer to a specific MAC. Synchronous: pumps FILE_START/DATA/END on the
+// calling task (cmd_exec for every caller). Refuses to start — NoSession, with
+// the handshake kicked — unless the encrypted session with the peer is ACTIVE:
+// a file cannot be carried across a handshake (one pending frame per peer).
+FileSendResult sendFileToMacResult(const uint8_t* mac, const String& localPath);
+// Same send; true only for FileSendResult::Sent.
 bool sendFileToMac(const uint8_t* mac, const String& localPath);
 
 #if ENABLE_BONDED_MODE
@@ -1624,6 +1644,10 @@ inline bool meshEnabled() { return false; }
 inline bool resolveDeviceNameOrMac(const String& nameOrMac, uint8_t* outMac) {
   (void)nameOrMac; (void)outMac;
   return false;
+}
+inline FileSendResult sendFileToMacResult(const uint8_t* mac, const String& localPath) {
+  (void)mac; (void)localPath;
+  return FileSendResult::Failed;
 }
 inline bool sendFileToMac(const uint8_t* mac, const String& localPath) {
   (void)mac; (void)localPath;

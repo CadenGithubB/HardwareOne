@@ -41,6 +41,11 @@
 //   the mutex guards the buffer/FIFO metadata while the flash write happens outside
 //   it, and a streaming slot is only ever freed by its cmd_exec finalize/abort job
 //   (RECEIVING → COMPLETING → FREE), so the sweep never closes a handle mid-write.
+//   The mutex is never held across filesystem work or a wait for the filesystem
+//   lock — teardown included — so a hold is a few memory operations long. The
+//   per-frame receive path keeps a short bounded wait and reports a miss as BUSY
+//   (never as "no such transfer"); cmd_exec jobs and the release / finalize
+//   hand-off wait for the lock. Details: FileSlotsLockGuard in the .cpp.
 // ============================================================================
 
 #include "System_BuildConfig.h"
@@ -138,9 +143,20 @@ FileTransferSlot* fileSlotsAllocate(const uint8_t peerMac[6],
                                      uint16_t chunkSize,
                                      const char** errOut);
 
+// Why fileSlotsFindByMsg returned what it did.
+enum FileSlotLookup : uint8_t {
+  FILE_SLOT_LOOKUP_FOUND     = 0,
+  FILE_SLOT_LOOKUP_NOT_FOUND = 1,  // the table was read; no slot owns (peer, msgId)
+  FILE_SLOT_LOOKUP_BUSY      = 2,  // the table lock was not obtained in the bounded
+                                   // wait — NOTHING is known about the transfer, so
+                                   // the caller must not answer it with FILE_CANCEL
+};
+
 // Lookup the slot that owns an incoming chunk by (peerMac, msgId).
-// Returns nullptr if no slot matches.
-FileTransferSlot* fileSlotsFindByMsg(const uint8_t peerMac[6], uint32_t msgId);
+// Returns nullptr if no slot matches OR the table was busy; *resultOut (if
+// non-null) tells the two apart. Runs on espnow_task with a bounded wait.
+FileTransferSlot* fileSlotsFindByMsg(const uint8_t peerMac[6], uint32_t msgId,
+                                     FileSlotLookup* resultOut = nullptr);
 
 // Write a chunk into the slot's buffer at offset = chunkIdx * chunkSize.
 // RAM-path slots ONLY — a streaming slot returns false here; those go through
@@ -184,6 +200,7 @@ enum StreamAppendResult : uint8_t {
   STREAM_APPEND_FAIL = 2,  // gap, backpressure, or error — transfer aborted THIS chunk (cleanup queued); caller should FILE_CANCEL and log once
   STREAM_APPEND_ALREADY_FAILED = 3,  // slot was already aborting from an earlier chunk — caller should FILE_CANCEL but NOT re-log (avoids per-chunk durable-log flood)
   STREAM_APPEND_FINALIZING     = 4,  // slot left RECEIVING for a SUCCESSFUL finalize (FILE_END already processed); a late/duplicate chunk — caller must NOT cancel or log, the transfer is fine
+  STREAM_APPEND_BUSY           = 5,  // the slot-table lock was not obtained in the bounded wait: the chunk was NOT buffered and the slot is unchanged — caller must NOT cancel (the slot is not failing; if the chunk stays missing the next one reports the gap)
 };
 // Append one in-order chunk to a streaming slot (runs on espnow_task). Self-
 // contained: on a full buffer it submits a cmd_exec drain job; on failure it marks
@@ -225,9 +242,13 @@ uint32_t       fileSlotsGetReceivedCrc(const FileTransferSlot* slot);
 bool           fileSlotsIsReceiving(const FileTransferSlot* slot);
 
 // Release a slot — free PSRAM buffer, return to FREE state. Idempotent.
+// Waits for the slot-table lock (a skipped release would leave a finished
+// transfer's slot behind for the sweep to report as a timeout).
 // STREAMING slots: only call this from cmd_exec (their .part handle and
 // buffers may be mid-write there). From espnow_task use
-// fileSlotsMarkTeardownPending instead.
+// fileSlotsMarkTeardownPending instead. The close + remove of the staging file
+// happens under the filesystem lock with the slot-table lock released; the slot
+// stays COMPLETING (claimed) until that is done.
 void fileSlotsRelease(FileTransferSlot* slot);
 
 // Park a streaming slot in COMPLETING with its teardown owed, for when the

@@ -4880,11 +4880,40 @@ static void v4h_file_start(const V4RxCtx& ctx) {
                fs->filename, (unsigned long)fs->fileSize, fs->chunkCount, fs->chunkSize, ctx.deviceName);
 }
 
+// The slot table could not be read (or written) within the receive path's
+// bounded wait, so one FILE_* frame was dropped. Deliberately NOT answered with
+// FILE_CANCEL: "busy" says nothing about the transfer, and a cancel here would
+// make the sender abort a healthy one (it used to: the lookup returned null for
+// a lock miss and null was read as "no such transfer"). The protocol has no
+// retransmission, so the frame is lost; what happens next is decided by the
+// code that does know the slot's state — a RAM-path transfer is found
+// incomplete at FILE_END, a streaming one sees the gap at the next chunk, a
+// lost FILE_END leaves the slot to the 30 s sweep — and each of those tells the
+// sender the real reason, once. The defence is that this cannot practically
+// happen: the slot lock is never held across filesystem work or any other wait
+// (see FileSlotsLockGuard), so a 50 ms miss needs the holder starved for 50 ms.
+// Rate-limited: a stuck holder would otherwise log once per chunk.
+static void v4FileNoteSlotTableBusy(const char* frame, const V4RxCtx& ctx) {
+  static uint32_t sLastLogMs = 0;
+  static bool     sLogged    = false;
+  const uint32_t nowMs = (uint32_t)millis();
+  if (sLogged && (nowMs - sLastLogMs) < 1000) return;
+  sLogged    = true;
+  sLastLogMs = nowMs;
+  WARN_ESPNOWF("[V4_FILE] %s msgId=%lu from %s dropped: slot table busy (no cancel sent; the transfer is not known to have failed)",
+               frame, (unsigned long)ctx.h->msgId, ctx.deviceName);
+}
+
 // FILE_DATA — route the chunk to its owning slot in the multi-slot table.
 // Pairing + session AEAD enforced by dispatch flags (see FILE_START note).
 static void v4h_file_data(const V4RxCtx& ctx) {
   if (ctx.payloadLen < 3) return;
-  FileTransferSlot* slot = fileSlotsFindByMsg(ctx.recv_info->src_addr, ctx.h->msgId);
+  FileSlotLookup lookup = FILE_SLOT_LOOKUP_NOT_FOUND;
+  FileTransferSlot* slot = fileSlotsFindByMsg(ctx.recv_info->src_addr, ctx.h->msgId, &lookup);
+  if (!slot && lookup == FILE_SLOT_LOOKUP_BUSY) {
+    v4FileNoteSlotTableBusy("FILE_DATA", ctx);
+    return;
+  }
   if (!slot) {
     DEBUG_ESPNOWF("[V4_FILE_RX] FILE_DATA ignored: no slot for msgId=%lu from %s",
                  (unsigned long)ctx.h->msgId, ctx.deviceName);
@@ -4928,6 +4957,12 @@ static void v4h_file_data(const V4RxCtx& ctx) {
     // finalizing SUCCESSFULLY) deliberately falls through silently — cancelling
     // there would match the sender's abort slot and turn a good transfer into a
     // reported failure.
+    // STREAM_APPEND_BUSY (slot table busy; the chunk was not buffered and the
+    // slot is NOT failing) gets no cancel either — see v4FileNoteSlotTableBusy.
+    if (r == STREAM_APPEND_BUSY) {
+      v4FileNoteSlotTableBusy("FILE_DATA", ctx);
+      return;
+    }
     if (r == STREAM_APPEND_FAIL || r == STREAM_APPEND_ALREADY_FAILED) {
       // Use the frame's src_addr (== this slot's peer) for the cancel so we don't
       // race cmd_exec, which may already be tearing the slot down. The cancel is a
@@ -5040,7 +5075,20 @@ static bool v4FileBondMagicAllowed(const uint8_t* sndMac, const char* filename) 
 // Slot identity: (peerMac, msgId) — the FILE_START's msgId is the transferId
 // used by every chunk and the FILE_END itself.
 static void v4h_file_end(const V4RxCtx& ctx) {
-  FileTransferSlot* slot = fileSlotsFindByMsg(ctx.recv_info->src_addr, ctx.h->msgId);
+  // One retry on a busy table, FILE_END only: this frame decides the whole file
+  // and no further frame of the transfer follows it, so a second bounded wait
+  // costs the RX drain little and a dropped FILE_END costs everything received.
+  FileSlotLookup lookup = FILE_SLOT_LOOKUP_NOT_FOUND;
+  FileTransferSlot* slot = fileSlotsFindByMsg(ctx.recv_info->src_addr, ctx.h->msgId, &lookup);
+  if (!slot && lookup == FILE_SLOT_LOOKUP_BUSY) {
+    slot = fileSlotsFindByMsg(ctx.recv_info->src_addr, ctx.h->msgId, &lookup);
+  }
+  if (!slot && lookup == FILE_SLOT_LOOKUP_BUSY) {
+    // Still busy: drop it without a verdict. The slot keeps what it received;
+    // the timeout sweep reclaims it and sends the sender FILE_CANCEL(TIMEOUT).
+    v4FileNoteSlotTableBusy("FILE_END", ctx);
+    return;
+  }
   if (!slot) {
     ERROR_ESPNOWF("[V4_FILE] FILE_END for unknown msgId=%lu from %s — slot already released or never started",
                   (unsigned long)ctx.h->msgId, ctx.deviceName);
@@ -15862,37 +15910,67 @@ struct FileSendActiveGuard {
   FileSendActiveGuard& operator=(const FileSendActiveGuard&) = delete;
 };
 
-bool sendFileToMac(const uint8_t* mac, const String& localPath) {
-  if (!gEspNow || !gEspNow->initialized) {
+// Gate for sends that cannot ride the pending-frame store (a file, a multi-frame
+// message). That store keeps ONE frame per peer, newest wins, for 5 s, so it can
+// carry a single frame across a handshake and nothing longer.
+//
+// espnowSessionActiveWith only reads the state. espnowSessionActiveOrKick
+// returns true when the encrypted session with `mac` is ACTIVE; otherwise it
+// starts whichever handshake step is missing and returns false, without waiting:
+//   - Never waits, because the handshake is completed by jobs on cmd_exec
+//     (runDeferredSessionOpen / runDeferredSessionConfirm), and cmd_exec is the
+//     task these senders run on. A wait here can only time out.
+//   - Kicks once: a handshake or rekey already in flight is left alone (the
+//     state is tested here, and espnowSessionOpenInitiate itself starts nothing
+//     while one is in flight).
+//   - *outOpening (optional) says whether a handshake is under way after the
+//     call, so the caller can tell "try again in a few seconds" from "this
+//     cannot work": no shared mesh key, no free session slot, own identity
+//     missing or a radio failure (the kick returned false).
+static bool espnowSessionActiveWith(const uint8_t* mac) {
+  if (!gEspNow || !mac) return false;
+  const PeerIdentity* pid = peerIdentityFindByMac(mac);
+  SessionState* s = pid ? sessionFindByPeer(mac, pid->meshId) : nullptr;
+  return (s && s->state == SESSION_ACTIVE);
+}
+
+static bool espnowSessionActiveOrKick(const uint8_t* mac, bool* outOpening = nullptr) {
+  if (outOpening) *outOpening = false;
+  if (!gEspNow || !mac) return false;
+  const PeerIdentity* pid = peerIdentityFindByMac(mac);
+  if (!pid) {
+    // No identity yet: the key exchange comes first; the session is opened by
+    // the next attempt (or by the peer's heartbeat pre-warm).
+    const bool opening = keyExIsInFlight(mac) || espnowKeyExInitiate(mac, nullptr);
+    if (outOpening) *outOpening = opening;
     return false;
   }
+  SessionState* s = sessionFindByPeer(mac, pid->meshId);
+  if (s && s->state == SESSION_ACTIVE) return true;
+  bool opening = true;  // ESTABLISHING or REKEYING: in flight, left alone
+  if (!s || s->state == SESSION_FREE || s->state == SESSION_CLOSED) {
+    opening = espnowSessionOpenInitiate(mac, nullptr);
+  }
+  if (outOpening) *outOpening = opening;
+  return false;
+}
 
-  // ── Per-chunk routing through smart ───────────────────────────────────────
-  // 2026-05 (encrypt-or-wait foundation): each FILE_DATA chunk is small enough
-  // for a single SESSION_FRAME (200 data + 2 chunkIdx + 16 AEAD tag = 218 =
-  // MAX_PAYLOAD). Smart's single-frame path goes through v4_send_encrypted_or_queue
-  // which now auto-handles every "no session / no identity" case (queue-and-kick
-  // KEY_EX/SESSION_OPEN, drain via SESSION_CONFIRM). So we just call smart per
-  // chunk and let it figure out encryption + session state per frame. Replaces
-  // the old "fileSessionReady snapshot at start of transfer" wart, which got
-  // the choice wrong if the session came up partway through.
-  //
-  // Hint: kick session establishment up-front (no-op if already in flight) so
-  // the first FILE_START doesn't pay the full handshake RTT in its own queue
-  // wait. Cheap.
-  {
-    const PeerIdentity* pid = peerIdentityFindByMac(mac);
-    if (pid) {
-      SessionState* s = sessionFindByPeer(mac, pid->meshId);
-      if (!s || s->state != SESSION_ACTIVE) {
-        espnowSessionOpenInitiate(mac, nullptr);
-      }
-    }
-    // If !pid, smart's _or_queue will auto-kick KEY_EX on the first frame.
+FileSendResult sendFileToMacResult(const uint8_t* mac, const String& localPath) {
+  if (!gEspNow || !gEspNow->initialized) {
+    return FileSendResult::Failed;
   }
 
+  // Every frame of a transfer goes through v4_send_payload_smart, one
+  // SESSION_FRAME each (a FILE_DATA chunk is 200 data + 2 chunkIdx + 16 AEAD tag
+  // = 218 = MAX_PAYLOAD). Without an ACTIVE session smart parks a single frame
+  // in the pending store and returns true — fine for one frame, fatal for a
+  // file: each chunk replaces the one before it and the pump would report a
+  // send of which the peer saw at most a lone FILE_END. So a frame is only
+  // handed to smart while the session is ACTIVE; fileSendFrame refuses
+  // otherwise, which the loops below treat as a failed send.
   auto fileSendFrame = [&](uint8_t type, uint16_t flags, uint32_t id,
                            const uint8_t* p, uint16_t len) -> bool {
+    if (!espnowSessionActiveWith(mac)) return false;
     return v4_send_payload_smart(mac, type, flags, id, p, len, 1);
   };
 
@@ -15903,15 +15981,35 @@ bool sendFileToMac(const uint8_t* mac, const String& localPath) {
   if (!canRead(localPath, currentAuthContext())) {
     DEBUG_ESPNOW_ROUTERF("[V4_FILE_TX] SECURITY: Blocked sending sensitive file: %s", localPath.c_str());
     broadcastOutput("[ESP-NOW] SECURITY: Cannot send file containing credentials: " + localPath);
-    return false;
+    return FileSendResult::Failed;
   }
 
   {
     FsLockGuard guard("espnow.send_file.exists");
     if (!VFS::existsGuarded(localPath, currentAuthContext())) {
       DEBUG_ESPNOW_ROUTERF("[V4_FILE_TX] File not found: %s", localPath.c_str());
-      return false;
+      return FileSendResult::Failed;
     }
+  }
+
+  // Refuse to start without an ACTIVE session (see fileSendFrame above). Placed
+  // after the file checks so "try again" is only said for a send that a retry
+  // can complete, and before the open so there is nothing to clean up. The
+  // handshake is kicked once and NOT waited for: it completes on cmd_exec, the
+  // task this pump is running on, so the session cannot come up while we are
+  // in here. Every caller turns NoSession into its own "no session yet" reply.
+  bool sessionOpening = false;
+  if (!espnowSessionActiveOrKick(mac, &sessionOpening)) {
+    if (!sessionOpening) {
+      // The handshake could not even be started; a retry will not help by itself.
+      WARN_ESPNOWF("[V4_FILE_TX] not started: no secure session with %s and none could be opened "
+                   "(no shared mesh passphrase, no free session slot or a radio failure) - %s",
+                   macToDisplayStr(mac).c_str(), localPath.c_str());
+      return FileSendResult::Failed;
+    }
+    WARN_ESPNOWF("[V4_FILE_TX] not started: no secure session with %s yet (one is being opened) - %s",
+                 macToDisplayStr(mac).c_str(), localPath.c_str());
+    return FileSendResult::NoSession;
   }
 
   // Open + size under the FS lock, then RELEASE it. The send loop below runs for
@@ -15927,7 +16025,7 @@ bool sendFileToMac(const uint8_t* mac, const String& localPath) {
     file = VFS::openGuarded(localPath, "r", currentAuthContext());
     if (!file) {
       DEBUG_ESPNOW_ROUTERF("[V4_FILE_TX] Cannot open file: %s", localPath.c_str());
-      return false;
+      return FileSendResult::Failed;
     }
     fileSize = file.size();
   }
@@ -15947,7 +16045,7 @@ bool sendFileToMac(const uint8_t* mac, const String& localPath) {
     { FsLockGuard guard("espnow.send_file.close"); file.close(); }
     DEBUG_ESPNOW_ROUTERF("[V4_FILE_TX] File too large: %lu bytes (max %lu)",
            (unsigned long)fileSize, (unsigned long)maxFileSize);
-    return false;
+    return FileSendResult::Failed;
   }
   
   String filename = localPath;
@@ -15973,13 +16071,14 @@ bool sendFileToMac(const uint8_t* mac, const String& localPath) {
   startPayload.chunkSize = v4ChunkSize;
   strncpy(startPayload.filename, filename.c_str(), sizeof(startPayload.filename) - 1);
   
-  // Session was ensured up-front (see fileSessionReady); fileSendFrame picks
-  // encrypted fast-path vs plaintext chunked accordingly — no queue/evict.
+  // The session was ACTIVE at the gate above; fileSendFrame re-checks it for
+  // every frame and sends session-wrapped or not at all — a file frame never
+  // goes to the pending store.
   if (!fileSendFrame(ESPNOW_V4_TYPE_FILE_START, ESPNOW_V4_FLAG_ACK_REQ, transferId,
                      (const uint8_t*)&startPayload, sizeof(startPayload))) {
     { FsLockGuard guard("espnow.send_file.close"); file.close(); }
     DEBUG_ESPNOW_ROUTERF("[V4_FILE_TX] Failed to send FILE_START");
-    return false;
+    return FileSendResult::Failed;
   }
   
   DEBUG_ESPNOWF("[V4_FILE_TX] START: %s (%lu bytes, %u chunks, chunkSize=%u) to %s, transferId=%lu",
@@ -16001,6 +16100,9 @@ bool sendFileToMac(const uint8_t* mac, const String& localPath) {
   //      Previously logged and CONTINUED, then reported success.
   //   3. short read — FS error or the file shrank mid-send. Previously broke
   //      out silently and still sent FILE_END success=1.
+  //   4. the session stopped being ACTIVE mid-transfer (closed, or reset by a
+  //      fresh handshake). The remaining chunks would only replace each other
+  //      in the pending store; stop and say so.
   uint8_t chunkPayload[ESPNOW_V4_MAX_PAYLOAD];
   uint16_t chunkIdx = 0;
   uint32_t runningCrc = 0;               // esp_crc32_le over bytes read == bytes sent
@@ -16010,6 +16112,10 @@ bool sendFileToMac(const uint8_t* mac, const String& localPath) {
     // stale store from a previous transfer's late cancel can never match.
     if (gEspNow->fileSendAbortMsgId == transferId) {
       abortWhy = "receiver cancelled the transfer";
+      break;
+    }
+    if (!espnowSessionActiveWith(mac)) {
+      abortWhy = "secure session with the receiver ended mid-transfer";
       break;
     }
     V4PayloadFileData* fd = (V4PayloadFileData*)chunkPayload;
@@ -16096,8 +16202,10 @@ bool sendFileToMac(const uint8_t* mac, const String& localPath) {
   // has no slot for this msgId, so the frame carries nothing it can use and
   // would land in its "FILE_END for unknown msgId" ERROR log — making a
   // correctly-handled rejection look like a fault on every failed transfer.
+  // Also skipped when the session is no longer ACTIVE: the frame could not be
+  // sent, and the receiver's slot is reclaimed by its own timeout sweep.
   bool endSent = false;
-  if (!receiverKilled) {
+  if (!receiverKilled && espnowSessionActiveWith(mac)) {
     V4PayloadFileEnd endPayload = {};
     endPayload.crc32 = runningCrc;
     endPayload.success = aborted ? 0 : 1;
@@ -16116,10 +16224,14 @@ bool sendFileToMac(const uint8_t* mac, const String& localPath) {
          filename.c_str(), chunkIdx, totalChunks, (unsigned long)runningCrc,
          macToDisplayStr(mac).c_str(), endSent,
          receiverKilled ? " (FILE_END skipped — receiver cancelled)" : "");
-  // Honest result: false when the transfer aborted OR FILE_END could not even
-  // be queued. Still sender-side truth only — "true" means every frame was
+  // Honest result: Failed when the transfer aborted OR FILE_END could not even
+  // be queued. Still sender-side truth only — Sent means every frame was
   // handed to the radio, not that the receiver verified and stored the file.
-  return !aborted && endSent;
+  return (!aborted && endSent) ? FileSendResult::Sent : FileSendResult::Failed;
+}
+
+bool sendFileToMac(const uint8_t* mac, const String& localPath) {
+  return sendFileToMacResult(mac, localPath) == FileSendResult::Sent;
 }
 
 #if ENABLE_BONDED_MODE
@@ -16314,7 +16426,13 @@ const char* cmd_espnow_sendfile(const String& argsInput) {
   BROADCAST_PRINTF("[ESP-NOW] Sending file to %s: %s (%lu bytes) via v3", deviceName.c_str(), filename.c_str(), (unsigned long)fileSize);
 
   // Use unified v3 file transfer
-  if (!sendFileToMac(mac, filepath)) {
+  const FileSendResult sendResult = sendFileToMacResult(mac, filepath);
+  if (sendResult == FileSendResult::NoSession) {
+    // Nothing was sent. Also what a remote espnowfetch gets back as its result.
+    snprintf(sendfileBuffer, sizeof(sendfileBuffer), ESPNOW_NO_SESSION_REPLY_FMT, deviceName.c_str());
+    return sendfileBuffer;
+  }
+  if (sendResult != FileSendResult::Sent) {
     // Name the file in the failure text. This branch is now COMMON (receiver
     // cancel / chunk-send failure / short read all land here, where the old
     // code always returned true once FILE_START was away). The web ESP-NOW
@@ -17162,27 +17280,25 @@ const char* cmd_espnow_send(const String& argsInput) {
 
   // Multi-frame (chunked) sends require an ACTIVE session — the chunked transport
   // can't queue across the handshake the way single-frame sends do, so a long
-  // message fired before the session is up would be dropped. The heartbeat path
-  // pre-warms sessions, but cover the brief boot/discovery window too: if this is
-  // a multi-frame send to a known peer with no active session yet, kick the
-  // handshake and wait briefly for it. Safe to block here — this runs on the
-  // cmd_exec task, NOT the espnow RX task, so the RX drainer keeps processing the
-  // inbound SESSION_CONFIRM and the handshake can complete. Best-effort: if it
-  // doesn't come up in time, the send proceeds and fails cleanly (marked below).
-  if (msgLen > (size_t)ESPNOW_V4_MAX_PLAINTEXT) {
-    const PeerIdentity* pid = peerIdentityFindByMac(mac);
-    if (pid) {
-      SessionState* s = sessionFindByPeer(mac, pid->meshId);
-      if (!s || s->state != SESSION_ACTIVE) {
-        espnowSessionOpenInitiate(mac, nullptr);  // kick (no-op if already in flight)
-        uint32_t deadline = (uint32_t)millis() + 3000;
-        while ((int32_t)(deadline - (uint32_t)millis()) > 0) {
-          vTaskDelay(pdMS_TO_TICKS(50));
-          s = sessionFindByPeer(mac, pid->meshId);
-          if (s && s->state == SESSION_ACTIVE) break;
-        }
-      }
+  // message fired before the session is up cannot be delivered. The heartbeat
+  // path pre-warms sessions; in the boot/discovery window before that, kick the
+  // handshake and say so. No wait: this runs on cmd_exec, and the handshake is
+  // completed by a job on cmd_exec (the RX task only queues the inbound
+  // SESSION_OPEN / SESSION_CONFIRM for it), so a wait here could never see the
+  // session come up — it used to burn 3 s and then report a "clerk timeout".
+  // Returning before the send also keeps the smart path from kicking a second
+  // SESSION_OPEN on top of the one just started.
+  bool sessionOpening = false;
+  if (msgLen > (size_t)v4_single_frame_cap(mac) && !espnowSessionActiveOrKick(mac, &sessionOpening)) {
+    if (jsonMode) return "{\"schema\":1,\"ok\":false,\"error\":\"no session\"}";
+    if (!sessionOpening) {
+      // The handshake could not be started: "try again" would not be true.
+      return "Error: no secure session with the peer and none could be opened; "
+             "check that both devices share a mesh passphrase";
     }
+    if (!ensureDebugBuffer()) return "Error: no secure session with the peer yet; try again in a few seconds";
+    snprintf(getDebugBuffer(), 1024, ESPNOW_NO_SESSION_REPLY_FMT, target.c_str());
+    return getDebugBuffer();
   }
   // Step 3b: route through clerk (JOB_AEAD_SMART → v4_send_payload_smart →
   // v4_send_encrypted_or_queue). The clerk's notification is OK/FAIL only, so
