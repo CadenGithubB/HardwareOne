@@ -6288,5 +6288,19 @@ read. After deleting a middle slot and a save and load, every mesh is still in i
 numbers load in order. The bootstrap creates `primary` only on a device with no mesh at all, so no second default
 and no second `primary` appear. An instance, running or stopped, drops a deleted mesh's passphrase. Exactly one
 enabled mesh is the default after `enable`; the start-up warning names the mesh a start loads the passphrase
-from; `espnowsetname clear` works only while ESP-NOW is stopped. The suite fails 77 checks on the tree before the
-fix and 31 on its first version (1319eff0), which an independent review found wanting.
+from; `espnowsetname clear` works only while ESP-NOW is stopped. A pairing with no mesh argument goes to the
+default mesh and never to a slot without a mesh (`meshSlotForPairing`); an empty label matches no mesh; deleting
+a mesh whose passphrase is not the live one leaves the live one alone (the instance records the slot its
+passphrase came from; the text does not say whose it is); a registry that failed to load, or whose last save did
+not reach the file, is counted from the table and the file together. The suite fails 102 checks on the tree
+before the fix, and 51, 17 and 3 on its first three versions (1319eff0, df7fec4f, 31456b6c), each of which an
+independent review found wanting.
+
+`espnow_identity_walk` runs the production `peerIdentityLoadAll`, `readPeerIdentityFile`, `peerIdentityForget`
+and the cache accessors over the shared in-memory filesystem: a readable identity loads with its mesh slot; no
+peers directory counts as read; an unmounted filesystem or a peers path that will not open does not; folders
+without an `identity.json` are skipped; an `identity.json` that stays out of the cache (unreadable, another
+address inside, a 17th when the 16 slots are full) leaves `peerIdentitiesLoaded()` false with a warning that names
+the address and `espnowforget`, while the readable ones still load and nothing is written past the cache; a forget
+whose file will not go away marks the cache incomplete; the next walk recomputes the mark. 18 of its 70 checks
+fail on the tree before the fix.
