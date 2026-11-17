@@ -173,6 +173,7 @@ enum class Status : uint8_t { NotLoaded = 0, Ok, AbsentOk, NotMounted, OpenFaile
 inline bool savable(Status s) { return s == Status::Ok || s == Status::AbsentOk; }
 }  // namespace ConfigLoad
 static ConfigLoad::Status sEspNowDevicesLoad = ConfigLoad::Status::NotLoaded;
+static bool sEspNowDevicesFileBehind = false;  // set by a registry save that did not reach the file
 enum class RegistryFile { Absent, Unreadable, Present };
 static RegistryFile gRegistryFile = RegistryFile::Absent;
 static std::string gRegistryFileText;
@@ -229,6 +230,11 @@ private:
   String empty_;
 };
 
+#if HW1_HAVE_LIVE_SLOT
+// Production keeps this beside setEspNowPassphrase: the slot the live passphrase came from.
+static int8_t gEspNowLivePassphraseSlot = -1;
+#endif
+
 // INSERT_PRODUCTION
 
 #if !HW1_HAVE_MESH_DELETE
@@ -270,6 +276,10 @@ static void resetNeverStarted() {
   std::memset(gPeers, 0, sizeof(gPeers));
   gIdentitiesLoaded = true;
   sEspNowDevicesLoad = ConfigLoad::Status::NotLoaded;
+  sEspNowDevicesFileBehind = false;
+#if HW1_HAVE_LIVE_SLOT
+  gEspNowLivePassphraseSlot = -1;
+#endif
   gRegistryFile = RegistryFile::Absent;
   gRegistryFileText.clear();
   gRegistryFileReads = 0;
@@ -284,13 +294,32 @@ static void startEspNow() {
   gEspNow = &gState;
   if (sEspNowDevicesLoad == ConfigLoad::Status::NotLoaded) sEspNowDevicesLoad = ConfigLoad::Status::AbsentOk;
   initPrimaryMeshFromLegacySettings();
+#if HW1_HAVE_LIVE_SLOT
+  {
+    // The passphrase a start loads, as initEspNow does it (pinned there by the runner).
+    const uint8_t slot = espnowStartPassphraseSlot();
+    const String pw = gSettings.meshes[slot].passphrase;
+    gEspNowLivePassphraseSlot = pw.length() > 0 ? (int8_t)slot : -1;
+    gState.passphrase = pw;
+    deriveKeyFromPassphrase(pw, gState.derivedKey);
+  }
+#endif
   gState.initialized = true;
   gLastSelfKnown = true;
   bool haveSelf = false;
   for (int i = 0; i < gState.deviceCount; i++) haveSelf = haveSelf || std::memcmp(gState.devices[i].mac, kSelfMac, 6) == 0;
   if (!haveSelf) addEspNowDevice(kSelfMac, String("self"), false, nullptr);
 }
-static void stopEspNow() { gState.initialized = false; }
+static void stopEspNow() {
+  gState.initialized = false;
+#if HW1_HAVE_LIVE_SLOT
+  // A stop clears the live passphrase and key, as the production stop does.
+  gState.passphrase = "";
+  std::memset(gState.derivedKey, 0, sizeof(gState.derivedKey));
+  gState.encryptionEnabled = false;
+  gEspNowLivePassphraseSlot = -1;
+#endif
+}
 // The usual starting point: ESP-NOW was started once and stopped again.
 static void resetAll() {
   resetNeverStarted();
@@ -504,6 +533,18 @@ static void testDeleteFreesTheSlot() {
   addRegistryDevice(0x24, 1);
   r = meshesCmd_delete(String("lab"));
   CHECK(isError(r) && has(r, "3 in the device list"), "D2d table and file are not both counted after a failed load: %s", r);
+  // A save that did not reach the file (full filesystem, refused) leaves an
+  // unpaired device in it, to come back at the next start: the file counts again.
+  resetAll();
+  CHECK(!isError(meshesCmd_add(String("lab"))), "D2d setup");
+  sEspNowDevicesLoad = ConfigLoad::Status::Ok;
+  sEspNowDevicesFileBehind = true;
+  gRegistryFile = RegistryFile::Present;
+  gRegistryFileText = "{\"devices\":[{\"meshId\":1}]}";
+  r = meshesCmd_delete(String("lab"));
+  CHECK(isError(r) && has(r, "1 in the device list") && slotOf("lab") == 1,
+        "D2d a device still in the file after a failed save was missed: %s", r);
+  sEspNowDevicesFileBehind = false;
   // A partial load is rewritten from the table, and a clean one equals it: the table alone counts.
   for (ConfigLoad::Status st : {ConfigLoad::Status::Partial, ConfigLoad::Status::Ok}) {
     resetAll();
@@ -607,6 +648,26 @@ static void testDeleteFreesTheSlot() {
   CHECK(gState.passphrase == String("prim-passphrase"), "D4b setup: live passphrase is slot 0's");
   CHECK(!isError(meshesCmd_delete(String("temp"))), "D4b delete temp");
   CHECK(gState.passphrase == String("prim-passphrase"), "D4b deleting another mesh replaced the live passphrase");
+  // The same when the other mesh happens to have the very same passphrase text.
+  CHECK(!isError(meshesCmd_add(String("temp"))) && !isError(meshesCmd_setpassphrase(String("temp"), String("prim-passphrase"))),
+        "D4b setup: temp with primary's passphrase text");
+  CHECK(!isError(meshesCmd_delete(String("temp"))), "D4b delete temp again");
+  CHECK(gState.passphrase == String("prim-passphrase") && gState.derivedKey[0] == 0xA5,
+        "D4b a mesh with the same passphrase text was taken for the live one");
+
+  // D4c: the instance holds what it loaded at the start. Changing that mesh's
+  // passphrase afterwards does not reach the instance, and deleting the mesh
+  // must still drop what the instance holds.
+  resetAll();
+  CHECK(!isError(meshesCmd_add(String("work"))) && !isError(meshesCmd_setpassphrase(String("work"), String("work-passphrase"))) &&
+            !isError(meshesCmd_setdefault(String("work"))) && !isError(meshesCmd_delete(String("primary"))),
+        "D4c setup: work is the only mesh, keyed and default");
+  startEspNow();
+  CHECK(gState.passphrase == String("work-passphrase"), "D4c setup: the start loaded the default mesh's passphrase");
+  CHECK(!isError(meshesCmd_setpassphrase(String("work"), String("changed-passphrase"))), "D4c setup: change it after the start");
+  CHECK(!isError(meshesCmd_delete(String("work"))), "D4c delete work");
+  CHECK(gState.passphrase.length() == 0 && gState.derivedKey[0] == 0 && !gState.encryptionEnabled,
+        "D4c the instance still holds the deleted mesh's start-time passphrase");
 
   // D5: a failed save is reported; an unknown label is an error.
   makeBenchLeftover();
@@ -630,6 +691,8 @@ static void testDeleteFreesTheSlot() {
   CHECK(isError(meshesCmd_delete(String(""))) && isError(meshesCmd_remove(String(""))) && isError(meshesCmd_enable(String(""))) &&
             isError(meshesCmd_setdefault(String(""))),
         "D6 an empty label was taken for a mesh");
+  CHECK(isError(meshesCmd_rename(String(""), String("foo"))) && slotOf("foo") < 0, "D6 rename \"\" labelled an empty slot");
+  CHECK(meshSlotByLabel(String("")) == -1 && meshSlotByLabel(String("lab")) == 1, "D6 meshSlotByLabel took \"\" for a mesh");
   CHECK(gPersists == persistsAtD6 && slotIsEmpty(0) && !gSettings.meshes[0].enabled, "D6 an empty label changed something");
 }
 

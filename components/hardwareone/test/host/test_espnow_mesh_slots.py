@@ -68,8 +68,12 @@ REST = (
     'static const char* meshesCmd_enable(',
     'static const char* meshesCmd_setdefault(',
     'static const char* meshesCmd_setpassphrase(',
+    'static const char* meshesCmd_rename(',
+    'static int meshSlotByLabel(',
     'const char* cmd_espnow_setname(',
 )
+LIVE_SLOT = 'static int8_t gEspNowLivePassphraseSlot = -1;'
+
 
 
 def main():
@@ -104,6 +108,7 @@ def main():
     have_delete = DELETE in source
     have_guard = have_delete and REGISTRY_GUARD in source  # the delete guard that also reads the device registry
     have_pairing = PAIRING in source
+    have_live_slot = LIVE_SLOT in source  # the instance records which slot its passphrase came from
 
     # Source order matters: each piece only uses what is defined above it.
     order = list(BASE)
@@ -145,12 +150,12 @@ def main():
         load_all = definition(identity, 'uint8_t peerIdentityLoadAll()', 'System_ESPNow_Identity.cpp')
         assert load_all.index('gPeerIdentitiesLoaded = false;') < load_all.index('if (!filesystemReady) return 0;'), \
             'a load that cannot run must leave the identities marked as not read'
-        assert load_all.count('gPeerIdentitiesLoaded = true;') <= 2, \
+        assert load_all.count('gPeerIdentitiesLoaded = true;') == (1 if have_pairing else 2), \
             'the identities are marked read on a path that did not read them'
     if have_hint:
         init = source[source.index('// Restore the encryption passphrase'):]
         init = init[:init.index('// Add broadcast peer')]
-        assert 'gSettings.meshes[espnowStartPassphraseSlot()].passphrase' in init, \
+        assert 'espnowStartPassphraseSlot()' in init and 'gSettings.meshes[0].passphrase' not in init, \
             'ESP-NOW start does not use espnowStartPassphraseSlot()'
         assert 'formatNoPassphraseWarning(' in init and "espnowsetpassphrase primary" not in init, \
             'the start-up warning still names the mesh "primary"'
@@ -160,6 +165,23 @@ def main():
         assert 'gEspNow->passphrase = "";' in no_passphrase and \
             'deriveKeyFromPassphrase(bootPw, gEspNow->derivedKey);' in no_passphrase, \
             'a start without a passphrase keeps what the stopped instance held'
+    if have_live_slot:
+        # A start records the slot it loaded the passphrase from, a stop forgets it, and a
+        # registry save that fails leaves the "file is behind" mark (the harness doubles all three).
+        assert 'gEspNowLivePassphraseSlot = bootPw.length() > 0 ? (int8_t)bootPwSlot : -1;' in init, \
+            'the start does not record which slot its passphrase came from'
+        stop = definition(source, 'static bool deinitEspNow(bool publishOffEvent)', 'System_ESPNow.cpp')
+        assert 'gEspNowLivePassphraseSlot = -1;' in stop, 'a stop keeps the live passphrase slot'
+        saver = definition(source, 'static bool saveEspNowDevices()', 'System_ESPNow.cpp')
+        assert '~Outcome() { sEspNowDevicesFileBehind = !written; }' in saver and \
+            saver.count('outcome.written = true;') == 1 and \
+            saver.rstrip().endswith('outcome.written = true;\n  return true;\n}'), \
+            'a registry save that does not reach the file is not marked'
+        assert saver.index('} outcome;') < saver.index('if (!filesystemReady) return false;'), \
+            'a save refused for an unmounted filesystem is not marked'
+        forget = definition(identity, 'bool peerIdentityForget(const uint8_t mac[6])', 'System_ESPNow_Identity.cpp')
+        assert 'gPeerIdentitiesLoaded = false;' in forget, \
+            'an identity file that could not be removed leaves the cache marked complete'
     if have_pairing:
         # Both pair commands take their slot from the helper; neither falls back to slot 0 itself.
         assert source.count('meshSlotForPairing(a.arg(2))') == 2, 'a pair command does not use meshSlotForPairing'
@@ -199,6 +221,7 @@ def main():
                f'-DHW1_HAVE_MESH_DELETE={1 if have_delete else 0}',
                f'-DHW1_HAVE_REGISTRY_GUARD={1 if have_guard else 0}',
                f'-DHW1_HAVE_PAIRING_SLOT={1 if have_pairing else 0}',
+               f'-DHW1_HAVE_LIVE_SLOT={1 if have_live_slot else 0}',
                f'-DHW1_HAVE_PASSPHRASE_HINT={1 if have_hint else 0}',
                '-I', tmp, '-I', str(json_include),
                str(unit), '-o', str(exe)]

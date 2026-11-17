@@ -2449,6 +2449,19 @@ add_test(
           ${CMAKE_CURRENT_LIST_DIR}/test_espnow_mesh_slots.py
           ${ESPNOW_MESH_SLOTS_TEST_ARGS})
 
+# The boot-time walk over the stored peer identities says when it is incomplete
+# (an identity that is stored but not in the cache), which the mesh delete
+# guard relies on; peerIdentityForget marks it when a file will not go away.
+set(ESPNOW_IDENTITY_WALK_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND ESPNOW_IDENTITY_WALK_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME espnow_identity_walk
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_espnow_identity_walk.py
+          ${ESPNOW_IDENTITY_WALK_TEST_ARGS})
+
 # Web requests no longer pause the ESP-NOW loop (review RT-2): the flag is gone
 # and the loop's early return asks only for its own state.
 add_test(

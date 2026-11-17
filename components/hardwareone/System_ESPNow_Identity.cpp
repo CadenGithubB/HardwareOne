@@ -545,6 +545,13 @@ bool peerIdentityWantsEvent(const uint8_t mac[6], uint32_t category) {
   return (gPeerIdentities[idx].subscribedEvents & category) != 0;
 }
 
+// True once peerIdentityLoadAll has walked the peers directory this boot (or
+// found there is none) and every stored identity went into the cache. While
+// false the cache does not say which mesh slots the stored identities use.
+static bool gPeerIdentitiesLoaded = false;
+
+bool peerIdentitiesLoaded() { return gPeerIdentitiesLoaded; }
+
 bool peerIdentityForget(const uint8_t mac[6]) {
   int idx = findSlotByMac(mac);
   auto auth = VFS::systemAuth(VFS::Scopes::ESPNOW_STATE, "espnow.peer_identity_forget");
@@ -553,6 +560,12 @@ bool peerIdentityForget(const uint8_t mac[6]) {
   char path[80];
   if (buildPeerPath(mac, "identity.json", path, sizeof(path)) && VFS::existsGuarded(path, auth)) {
     VFS::removeGuarded(path, auth);
+    // A file that would not go away is loaded again at the next boot with its
+    // mesh slot; until then the cache no longer shows it.
+    if (VFS::existsGuarded(path, auth)) {
+      gPeerIdentitiesLoaded = false;
+      WARN_ESPNOWF("stored peer identity %s could not be removed", path);
+    }
   }
   if (buildPeerPath(mac, "identity.tmp", path, sizeof(path)) && VFS::existsGuarded(path, auth)) {
     VFS::removeGuarded(path, auth);   // stray temp from an interrupted write
@@ -569,13 +582,6 @@ bool peerIdentityForget(const uint8_t mac[6]) {
   }
   return true;
 }
-
-// True once peerIdentityLoadAll has walked the peers directory this boot (or
-// found there is none) and every stored identity went into the cache. While
-// false the cache does not say which mesh slots the stored identities use.
-static bool gPeerIdentitiesLoaded = false;
-
-bool peerIdentitiesLoaded() { return gPeerIdentitiesLoaded; }
 
 uint8_t peerIdentityLoadAll() {
   gPeerIdentitiesLoaded = false;
@@ -622,8 +628,10 @@ uint8_t peerIdentityLoadAll() {
           // Stored but not in the cache (unreadable now, another address
           // inside, or no room): which mesh slot it uses is not known.
           if (notLoaded < 255) notLoaded++;
-          WARN_ESPNOWF("stored peer identity %s/%s was not loaded; 'espnowforget <mac>' removes it",
-                       kPeersDir, base);
+          char shown[18];
+          macToDisplay(mac, shown, sizeof(shown));  // the form espnowforget accepts
+          WARN_ESPNOWF("stored peer identity %s/%s was not loaded; 'espnowforget %s' removes it",
+                       kPeersDir, base, shown);
         }
       }
     }

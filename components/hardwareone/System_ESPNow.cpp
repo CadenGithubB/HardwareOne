@@ -651,6 +651,9 @@ static const char* ESPNOW_DEVICES_MIGRATION_BACKUP_TEMP_FILE =
 // What the last read of ESPNOW_DEVICES_FILE found. saveEspNowDevices() replaces
 // the file only when the registry in memory can stand for it.
 static ConfigLoad::Status sEspNowDevicesLoad = ConfigLoad::Status::NotLoaded;
+// True from a registry save that did not reach the file (failed or refused)
+// until one does: the file may then still list devices the table has dropped.
+static bool sEspNowDevicesFileBehind = false;
 static constexpr size_t ESPNOW_PEER_ALIAS_MAX_BYTES = 31;
 
 // ============================================================================
@@ -814,6 +817,11 @@ static const unsigned long STREAM_MIN_INTERVAL_MS = 100;  // Rate limit: max 10 
 // file with entries the load could not take is copied aside first.
 static bool saveEspNowDevices() {
   if (!gEspNow) return false;
+  // Whatever way this returns, the file is behind the table unless it wrote it.
+  struct Outcome {
+    bool written = false;
+    ~Outcome() { sEspNowDevicesFileBehind = !written; }
+  } outcome;
   if (!filesystemReady) return false;
 
   FsLockGuard fsGuard("espnow.devices.save");
@@ -922,6 +930,7 @@ static bool saveEspNowDevices() {
     return false;
   }
   DEBUG_ESPNOW_MESHF("[ESP-NOW] Saved %d device(s) to %s", count, ESPNOW_DEVICES_FILE);
+  outcome.written = true;
   return true;
 }
 
@@ -992,10 +1001,18 @@ void deriveKeyFromPassphrase(const String& passphrase, uint8_t* key) {
 // Forward decl — defined further down with other multi-mesh helpers
 static uint16_t meshFingerprintForLabel(const String& label);
 
+// The mesh slot whose passphrase the instance holds in gEspNow->passphrase and
+// derivedKey, -1 for none. A start loads it from espnowStartPassphraseSlot(),
+// setting slot 0's passphrase replaces it, a stop clears it. The slot is what
+// says whose it is: the text does not (a mesh's passphrase can change after the
+// start without the instance following, and two meshes can share one).
+static int8_t gEspNowLivePassphraseSlot = -1;
+
 static void setEspNowPassphrase(const String& passphrase) {
   if (!gEspNow) return;
   gEspNow->passphrase = passphrase;
   deriveKeyFromPassphrase(passphrase, gEspNow->derivedKey);
+  gEspNowLivePassphraseSlot = passphrase.length() > 0 ? 0 : -1;
 
   // Slot 0 holds a mesh here: the one caller finds it by its label, and an empty
   // label never matches. Creating "primary" is initPrimaryMeshFromLegacySettings's
@@ -12205,7 +12222,9 @@ static bool initEspNow() {
   BROADCAST_PRINTF("[ESP-NOW] Initialized successfully on channel %d", gEspNow->channel);
 
   // Restore the encryption passphrase (slot 0, or an enabled default mesh that has one)
-  String bootPw = gSettings.meshes[espnowStartPassphraseSlot()].passphrase;
+  const uint8_t bootPwSlot = espnowStartPassphraseSlot();
+  String bootPw = gSettings.meshes[bootPwSlot].passphrase;
+  gEspNowLivePassphraseSlot = bootPw.length() > 0 ? (int8_t)bootPwSlot : -1;
   if (bootPw.length() > 0) {
     gEspNow->passphrase = bootPw;
     deriveKeyFromPassphrase(bootPw, gEspNow->derivedKey);
@@ -12590,6 +12609,7 @@ static bool deinitEspNow(bool publishOffEvent) {
   gEspNow->channel = 0;
   gEspNow->encryptionEnabled = false;
   gEspNow->passphrase = "";
+  gEspNowLivePassphraseSlot = -1;
   memset(gEspNow->derivedKey, 0, sizeof(gEspNow->derivedKey));
 
   size_t heapAfter = ESP.getFreeHeap();
@@ -15718,9 +15738,12 @@ static int meshRegistryDeviceCount(uint8_t slot) {
     }
   }
   // Once the file has been read this boot the table holds what it held (a
-  // partial read is rewritten from the table). Until then the file counts too.
-  const bool fileIsInRam = gEspNow && (ConfigLoad::savable(sEspNowDevicesLoad) ||
-                                       sEspNowDevicesLoad == ConfigLoad::Status::Partial);
+  // partial read is rewritten from the table). Until then the file counts too,
+  // and again while a save has failed: an unpaired device is then still in it
+  // and comes back with its slot number at the next start.
+  const bool fileIsInRam = gEspNow && !sEspNowDevicesFileBehind &&
+                           (ConfigLoad::savable(sEspNowDevicesLoad) ||
+                            sEspNowDevicesLoad == ConfigLoad::Status::Partial);
   if (fileIsInRam) return count;
   const int inFile = meshRegistryCountInFile(slot);
   return inFile < 0 ? -1 : count + inFile;
@@ -15802,9 +15825,9 @@ static const char* meshesCmd_delete(const String& label) {
       return getDebugBuffer();
     }
     const bool hadPassphrase = m.passphrase.length() > 0;
-    // Only when the instance, running or stopped, holds this mesh's passphrase
-    // is there one to replace; another mesh's stays as it is.
-    const bool wasLive = hadPassphrase && gEspNow && gEspNow->passphrase == m.passphrase;
+    // Only when the instance, running or stopped, holds the passphrase it took
+    // from this slot is there one to replace; another mesh's stays as it is.
+    const bool wasLive = gEspNow && gEspNowLivePassphraseSlot == (int8_t)i;
     meshKeysInvalidate(i);
     m.label = "";
     m.passphrase = "";
@@ -15822,9 +15845,11 @@ static const char* meshesCmd_delete(const String& label) {
 #endif
     // Load what a start would load now, so the deleted one is not used again.
     if (wasLive) {
-      const String livePw = gSettings.meshes[espnowStartPassphraseSlot()].passphrase;
+      const uint8_t liveSlot = espnowStartPassphraseSlot();
+      const String livePw = gSettings.meshes[liveSlot].passphrase;
       gEspNow->passphrase = livePw;
       deriveKeyFromPassphrase(livePw, gEspNow->derivedKey);
+      gEspNowLivePassphraseSlot = livePw.length() > 0 ? (int8_t)liveSlot : -1;
     }
     if (!requestSettingsPersist()) {
       return "Error: Mesh deleted in RAM, but the change could not be persisted.";
