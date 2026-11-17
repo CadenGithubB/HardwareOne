@@ -107,7 +107,7 @@ def main():
         unit, exe = Path(tmp) / 'espnow_bond_json.cpp', Path(tmp) / 'espnow_bond_json'
         unit.write_text(harness)
         cmd = [a.cxx, '-std=c++17', '-Wall', '-Wextra', '-pedantic', '-Werror',
-               '-Wno-unused-parameter',  # processBondModeManifestResp does not read srcMac
+               '-Wno-unused-parameter',  # processBondModeManifestResp read no srcMac before the manifest reference
                '-I', str(json_include),
                str(unit), '-o', str(exe)]
         if a.sanitize:

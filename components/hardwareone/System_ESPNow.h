@@ -876,9 +876,8 @@ struct EspNowState {
 
   unsigned long lastResetTime;
 
-  // Device name
-  String deviceName;
-  
+  // (The device's own name is gSettings.espnowDeviceName; there is no copy here.)
+
   // Last received remote capability (for OLED/web display)
   CapabilitySummary lastRemoteCap;
   bool lastRemoteCapValid;
@@ -1068,7 +1067,6 @@ struct EspNowState {
     fileSendMsgId(0),
     fileSendAbortMsgId(0),
     lastResetTime(0),
-    deviceName(""),
     lastRemoteCapValid(false),
     lastRemoteCapTime(0),
 #if ENABLE_BONDED_MODE

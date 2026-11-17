@@ -11,6 +11,7 @@
 #include "System_Debug.h"
 #include "System_ESPNow_Crypto.h"
 #include "System_ESPNow_Deadline.h"  // wrap-safe prev-key window
+#include "System_ESPNow_HandshakeBackoff.h"  // WarnLimiter
 #include "System_ESPNow_Wire.h"  // EspNowV4Header, flag constants
 #include "System_MemUtil.h"      // ps_alloc, AllocPref
 #include "System_Mutex.h"        // EspNowTxGuard — serializes the session TX critical section
@@ -86,6 +87,7 @@ SessionState* sessionAllocate(const uint8_t peerMac[6], uint8_t meshId) {
     sodium_memzero(existing->aeadKeyTx, sizeof(existing->aeadKeyTx));
     sodium_memzero(existing->aeadKeyRx, sizeof(existing->aeadKeyRx));
     existing->state = SESSION_ESTABLISHING;
+    existing->userStarted = 0;   // set again by the caller when a user asked
     existing->txSeqNext = 0;
     existing->rxSeqHighWater = 0;
     existing->rxSeqBitmap = 0;
@@ -433,6 +435,13 @@ struct PendingFrame {
 
 PendingFrame* gPending = nullptr;
 
+// A peer that does not answer makes every frame sent to it evict the one
+// before it and then time out. One line a minute each, with the count held
+// back. Both are touched only under the EspNowTxGuard the queue holds.
+constexpr uint32_t kPendingWarnWindowMs = 60000;
+WarnLimiter gPendingEvictWarn = {};
+WarnLimiter gPendingTimeoutWarn = {};
+
 bool ensurePendingAllocated() {
   if (gPending) return true;
   gPending = (PendingFrame*)ps_alloc(sizeof(PendingFrame) * kPendingFrameSlots,
@@ -470,10 +479,13 @@ bool pendingFrameQueue(const uint8_t peerMac[6], uint8_t type, uint16_t flags,
   for (uint8_t i = 0; i < kPendingFrameSlots; i++) {
     PendingFrame& p = gPending[i];
     if (p.inUse && memcmp(p.peerMac, peerMac, 6) == 0) {
-      WARN_ESPNOWF("pending: evicting older pending frame for " MAC_FMT " "
-                   "(msgId=%lu→%lu)",
-                   MAC_ARGS(peerMac),
-                   (unsigned long)p.msgId, (unsigned long)msgId);
+      uint32_t held = 0;
+      if (warnLimiterTake(gPendingEvictWarn, (uint32_t)millis(), kPendingWarnWindowMs, &held)) {
+        WARN_ESPNOWF("pending: evicting older pending frame for " MAC_FMT " "
+                     "(msgId=%lu→%lu; %lu more in the last minute)",
+                     MAC_ARGS(peerMac),
+                     (unsigned long)p.msgId, (unsigned long)msgId, (unsigned long)held);
+      }
       slot = &p;
       break;
     }
@@ -542,11 +554,15 @@ uint8_t pendingFrameTimeoutSweep(uint32_t nowMs) {
     PendingFrame& p = gPending[i];
     if (!p.inUse) continue;
     if ((nowMs - p.queuedAtMs) < kPendingFrameTimeoutMs) continue;
-    WARN_ESPNOWF("pending: timeout msgId=%lu to " MAC_FMT " "
-                 "(no SESSION_CONFIRM in %ums) — dropping",
-                 (unsigned long)p.msgId,
-                 MAC_ARGS(p.peerMac),
-                 (unsigned)kPendingFrameTimeoutMs);
+    uint32_t held = 0;
+    if (warnLimiterTake(gPendingTimeoutWarn, nowMs, kPendingWarnWindowMs, &held)) {
+      WARN_ESPNOWF("pending: timeout msgId=%lu to " MAC_FMT " "
+                   "(no SESSION_CONFIRM in %ums) — dropping (%lu more in the last minute)",
+                   (unsigned long)p.msgId,
+                   MAC_ARGS(p.peerMac),
+                   (unsigned)kPendingFrameTimeoutMs,
+                   (unsigned long)held);
+    }
     // Phase 3.5 task #49 — propagate the drop into the tracked-send table
     // so the web UI flips the bubble to ✗ Failed instead of hanging at ✓ Sent.
     sendStatusMarkFailed(p.msgId, p.peerMac);
@@ -571,22 +587,46 @@ static constexpr uint32_t kSessionEstablishTimeoutMs = 6000;  // > pending-frame
 
 uint8_t sessionEstablishingTimeoutSweep(uint32_t nowMs) {
   if (!gSessions) return 0;
-  static uint32_t sLastEstabWarnMs = 0;  // throttle: a re-keyed peer times out every 6s forever
+  // A peer that is not there times out at every automatic try (backed off up
+  // to 5 min): one line per 15 minutes, with the count held back. A handshake
+  // a user command started is always reported (sessionMarkUserStarted).
+  // espnow_task.
+  static uint32_t sLastEstabWarnMs = 0;
+  static uint32_t sEstabWarnHeld = 0;
   uint8_t reset = 0;
   for (uint8_t i = 0; i < kSessionSlots; i++) {
     SessionState& s = gSessions[i];
     if (s.state != SESSION_ESTABLISHING) continue;
     if ((nowMs - s.lastUseMs) < kSessionEstablishTimeoutMs) continue;
-    if (logCooldownOk(sLastEstabWarnMs, 30000)) {
+    if (s.userStarted) {
       WARN_ESPNOWF("session: ESTABLISHING timeout for " MAC_FMT " "
-                   "(no SESSION_CONFIRM in %ums) — resetting so the next send re-kicks SESSION_OPEN",
+                   "(no SESSION_CONFIRM in %ums) — the peer did not answer the handshake",
                    MAC_ARGS(s.peerMac),
                    (unsigned)kSessionEstablishTimeoutMs);
+    } else if (logCooldownOk(sLastEstabWarnMs, 15UL * 60UL * 1000UL)) {
+      WARN_ESPNOWF("session: ESTABLISHING timeout for " MAC_FMT " "
+                   "(no SESSION_CONFIRM in %ums) — resetting so the next send re-kicks SESSION_OPEN "
+                   "(%lu more in the last 15 min)",
+                   MAC_ARGS(s.peerMac),
+                   (unsigned)kSessionEstablishTimeoutMs,
+                   (unsigned long)sEstabWarnHeld);
+      sEstabWarnHeld = 0;
+    } else {
+      sEstabWarnHeld++;
     }
     sessionClear(&s);
     reset++;
   }
   return reset;
+}
+
+void sessionMarkUserStarted(const uint8_t peerMac[6]) {
+  if (!gSessions || !peerMac) return;
+  EspNowTxGuard mark("sessMarkUser");   // same lock as the SESSION_OPEN slot claim
+  for (uint8_t i = 0; i < kSessionSlots; i++) {
+    SessionState& s = gSessions[i];
+    if (s.state == SESSION_ESTABLISHING && memcmp(s.peerMac, peerMac, 6) == 0) s.userStarted = 1;
+  }
 }
 
 bool sessionHandshakeInFlight(const SessionState* s, uint32_t nowMs) {

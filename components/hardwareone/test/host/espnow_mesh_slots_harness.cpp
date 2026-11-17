@@ -6,7 +6,9 @@
 // meshes settings writer and reader, setEspNowPassphrase,
 // initPrimaryMeshFromLegacySettings, the start-passphrase and hint helpers, the
 // espnowmeshes subcommands (add, remove, delete, enable, setdefault,
-// setpassphrase) with the delete guard's counters, and cmd_espnow_setname.
+// setpassphrase, listjson) with the delete guard's counters, the helpers that
+// keep the running instance on the passphrase a start would load, and
+// cmd_espnow_setname.
 // ArduinoJson is the vendored library. Everything else here is a small double:
 // settings writes, the key cache, stored identities, the device registry and
 // its file, events and the ESP-NOW state. No radio or flash is touched.
@@ -24,8 +26,10 @@
 void webBatchTestStringAppend() {}
 
 static int gFailures = 0;
+static int gChecks = 0;
 #define CHECK(cond, ...)                                              \
   do {                                                                \
+    ++gChecks;                                                        \
     if (!(cond)) {                                                    \
       ++gFailures;                                                    \
       std::printf("FAIL %s:%d: ", __FILE__, __LINE__);                \
@@ -36,6 +40,7 @@ static int gFailures = 0;
 
 #define ENABLE_BONDED_MODE 1
 #define PSRAM_JSON_DOC(name) JsonDocument name
+#define EXT_RAM_BSS_ATTR
 
 // ---- Settings double: the production mesh record inside a small Settings.
 struct Settings {
@@ -89,7 +94,7 @@ struct EspNowState {
   String passphrase;
   uint8_t derivedKey[16] = {};
   bool encryptionEnabled = false;
-  String deviceName;
+  String deviceName;  // written only by trees from before the field was dropped (2026-11-17)
   EspNowDevice devices[6];
   int deviceCount = 0;
 };
@@ -294,7 +299,11 @@ static void startEspNow() {
   gEspNow = &gState;
   if (sEspNowDevicesLoad == ConfigLoad::Status::NotLoaded) sEspNowDevicesLoad = ConfigLoad::Status::AbsentOk;
   initPrimaryMeshFromLegacySettings();
-#if HW1_HAVE_LIVE_SLOT
+#if HW1_HAVE_LIVE_LOADER
+  // initEspNow marks the instance initialized, then loads (pinned there by the runner).
+  gState.initialized = true;
+  espnowLoadLivePassphrase();
+#elif HW1_HAVE_LIVE_SLOT
   {
     // The passphrase a start loads, as initEspNow does it (pinned there by the runner).
     const uint8_t slot = espnowStartPassphraseSlot();
@@ -625,13 +634,14 @@ static void testDeleteFreesTheSlot() {
   CHECK(!isError(meshesCmd_delete(String("bench"))), "D4 delete");
   CHECK(gState.passphrase.length() == 0 && gState.derivedKey[0] == 0 && !gState.encryptionEnabled,
         "D4 the deleted mesh's passphrase is still in use (running)");
-  // ...and stopped, where a passphrase set after the stop is still in the instance.
+  // ...and stopped: a stopped instance holds no passphrase (the next start loads
+  // one), so neither the set nor the delete puts one there.
   resetNeverStarted();
   CHECK(!isError(meshesCmd_add(String("bench"))), "D4 setup");
   startEspNow();
   stopEspNow();
   CHECK(!isError(meshesCmd_setpassphrase(String("bench"), String("correct-horse"))), "D4 setup passphrase while stopped");
-  CHECK(gState.passphrase == String("correct-horse"), "D4 setup: live passphrase while stopped");
+  CHECK(gState.passphrase.length() == 0 && !gState.encryptionEnabled, "D4 a passphrase set while stopped went into the stopped instance");
   CHECK(!isError(meshesCmd_delete(String("bench"))), "D4 delete while stopped");
   CHECK(gState.passphrase.length() == 0 && gState.derivedKey[0] == 0 && !gState.encryptionEnabled,
         "D4 the deleted mesh's passphrase is still in the stopped instance");
@@ -640,9 +650,6 @@ static void testDeleteFreesTheSlot() {
   resetAll();
   startEspNow();
   CHECK(!isError(meshesCmd_setpassphrase(String("primary"), String("prim-passphrase"))), "D4b setup slot 0");
-  CHECK(!isError(meshesCmd_add(String("work"))) && !isError(meshesCmd_setpassphrase(String("work"), String("work-passphrase"))) &&
-            !isError(meshesCmd_setdefault(String("work"))),
-        "D4b setup work: keyed and default, not live until the next start");
   CHECK(!isError(meshesCmd_add(String("temp"))) && !isError(meshesCmd_setpassphrase(String("temp"), String("temp-passphrase"))),
         "D4b setup temp");
   CHECK(gState.passphrase == String("prim-passphrase"), "D4b setup: live passphrase is slot 0's");
@@ -655,9 +662,9 @@ static void testDeleteFreesTheSlot() {
   CHECK(gState.passphrase == String("prim-passphrase") && gState.derivedKey[0] == 0xA5,
         "D4b a mesh with the same passphrase text was taken for the live one");
 
-  // D4c: the instance holds what it loaded at the start. Changing that mesh's
-  // passphrase afterwards does not reach the instance, and deleting the mesh
-  // must still drop what the instance holds.
+  // D4c: the instance holds what a start would load. Changing that mesh's
+  // passphrase after the start reaches the instance, and deleting the mesh
+  // drops what the instance holds.
   resetAll();
   CHECK(!isError(meshesCmd_add(String("work"))) && !isError(meshesCmd_setpassphrase(String("work"), String("work-passphrase"))) &&
             !isError(meshesCmd_setdefault(String("work"))) && !isError(meshesCmd_delete(String("primary"))),
@@ -665,6 +672,10 @@ static void testDeleteFreesTheSlot() {
   startEspNow();
   CHECK(gState.passphrase == String("work-passphrase"), "D4c setup: the start loaded the default mesh's passphrase");
   CHECK(!isError(meshesCmd_setpassphrase(String("work"), String("changed-passphrase"))), "D4c setup: change it after the start");
+#if HW1_HAVE_LIVE_SLOT
+  CHECK(gState.passphrase == String("changed-passphrase") && gEspNowLivePassphraseSlot == slotOf("work"),
+        "D4c the running instance did not take the new passphrase of the mesh in use");
+#endif
   CHECK(!isError(meshesCmd_delete(String("work"))), "D4c delete work");
   CHECK(gState.passphrase.length() == 0 && gState.derivedKey[0] == 0 && !gState.encryptionEnabled,
         "D4c the instance still holds the deleted mesh's start-time passphrase");
@@ -905,7 +916,6 @@ static void testNameCanBeCleared() {
   resetAll();
   CHECK(has(cmd_espnow_setname(String("benchp4")), "benchp4"), "N1 setup");
   CHECK(gSettings.espnowFirstTimeSetup, "N1 setup flag");
-  gState.deviceName = "benchp4";
   gState.devices[0].name = "benchp4";  // the own entry
   gEvents.clear();
   gMetadataChanged = false;
@@ -913,7 +923,7 @@ static void testNameCanBeCleared() {
   CHECK(!isError(r) && has(r, "cleared"), "N1 clear refused: %s", r);
   CHECK(gSettings.espnowDeviceName.length() == 0, "N1 the name is still '%s'", gSettings.espnowDeviceName.c_str());
   CHECK(!gSettings.espnowFirstTimeSetup, "N1 the setup-done flag stayed set with no name");
-  CHECK(gState.deviceName.length() == 0 && gState.devices[0].name.length() == 0, "N1 the stopped instance kept the name");
+  CHECK(gState.devices[0].name.length() == 0, "N1 the stopped instance kept the name");
   CHECK(gMetadataChanged, "N1 metadata not marked changed");
   CHECK(gEvents.size() == 1 && gEvents[0].kind == SYSEVT_SETTING_CHANGED && gEvents[0].subject == "espnowDeviceName",
         "N1 no setting-changed event");
@@ -958,6 +968,164 @@ static void testNameCanBeCleared() {
   CHECK(!isError(r) && gSettings.espnowDeviceName.length() == 0, "N6 clear with no instance: %s", r);
 }
 
+// The slot of the passphrase the instance holds, as the instance shows it: the
+// marker byte of the legacy key double says whether it holds one at all.
+static bool instanceHolds(const char* passphrase) {
+  if (!passphrase) return gState.passphrase.length() == 0 && gState.derivedKey[0] == 0 && !gState.encryptionEnabled;
+  return gState.passphrase == String(passphrase) && gState.derivedKey[0] == 0xA5 && gState.encryptionEnabled;
+}
+// What 'espnowmeshes listjson' says about the passphrase in use: {running, passphraseSlot}.
+static bool listjsonSays(bool running, int slot) {
+  JsonDocument doc;
+  if (deserializeJson(doc, meshesCmd_listjson())) return false;
+  return doc["running"].is<bool>() && doc["running"].as<bool>() == running &&
+         doc["passphraseSlot"].is<int>() && doc["passphraseSlot"].as<int>() == slot;
+}
+
+static void testPassphraseInUse() {
+  // L1: a passphrase set on the default mesh in slot 1 while ESP-NOW runs is in
+  // use at once, and the reply says so instead of "not used for current encryption".
+  resetAll();
+  startEspNow();
+  CHECK(!isError(meshesCmd_add(String("work"))) && !isError(meshesCmd_setdefault(String("work"))), "L1 setup");
+  CHECK(instanceHolds(nullptr), "L1 setup: no passphrase anywhere");
+  const char* r = meshesCmd_setpassphrase(String("work"), String("work-passphrase"));
+  CHECK(!isError(r), "L1 set: %s", r);
+  CHECK(instanceHolds("work-passphrase"), "L1 the running instance did not take the default mesh's new passphrase");
+  CHECK(!has(r, "Not used for current encryption") && !has(r, "will need to re-pair"), "L1 the reply still says it is not used: %s", r);
+  CHECK(has(r, "applies now") && has(r, "do not need to re-pair") && has(r, "need the same passphrase") &&
+            has(r, "uses the passphrase of mesh 'work'"),
+        "L1 the reply does not say what applies now and what peers need: %s", r);
+  CHECK(listjsonSays(true, 1), "L1 listjson does not name slot 1 as the passphrase in use");
+
+  // L2: slot 0's passphrase set beside it does not replace the default mesh's.
+  r = meshesCmd_setpassphrase(String("primary"), String("prim-passphrase"));
+  CHECK(!isError(r) && instanceHolds("work-passphrase"), "L2 slot 0's passphrase replaced the default mesh's: %s", r);
+  CHECK(has(r, "uses the passphrase of mesh 'work'") && has(r, "applies now"), "L2 the reply does not name the mesh in use: %s", r);
+#if HW1_HAVE_PASSPHRASE_HINT
+  CHECK(espnowStartPassphraseSlot() == 1, "L2 a start would load another slot");
+#endif
+
+  // L3: setdefault moves the passphrase in use at once, and says which.
+  r = meshesCmd_setdefault(String("primary"));
+  CHECK(!isError(r) && instanceHolds("prim-passphrase"), "L3 setdefault primary did not bring its passphrase into use: %s", r);
+  CHECK(has(r, "uses the passphrase of mesh 'primary'"), "L3 reply: %s", r);
+  r = meshesCmd_setdefault(String("work"));
+  CHECK(!isError(r) && instanceHolds("work-passphrase") && has(r, "mesh 'work'"), "L3 setdefault work: %s", r);
+  CHECK(listjsonSays(true, 1), "L3 listjson");
+
+  // L4: a default mesh without a passphrase leaves slot 0's in use, as a start does.
+  CHECK(!isError(meshesCmd_add(String("lab"))), "L4 setup");
+  r = meshesCmd_setdefault(String("lab"));
+  CHECK(!isError(r) && instanceHolds("prim-passphrase") && has(r, "uses the passphrase of mesh 'primary'"),
+        "L4 setdefault to a mesh without a passphrase: %s", r);
+  CHECK(listjsonSays(true, 0), "L4 listjson");
+
+  // L5: clearing the passphrase in use falls back to what a start would load.
+  r = meshesCmd_setdefault(String("work"));
+  CHECK(instanceHolds("work-passphrase"), "L5 setup: %s", r);
+  r = meshesCmd_setpassphrase(String("work"), String(""));
+  CHECK(!isError(r) && instanceHolds("prim-passphrase") && has(r, "uses the passphrase of mesh 'primary'"),
+        "L5 cleared default mesh: %s", r);
+  CHECK(has(r, "keep their keys and open sessions"), "L5 the clear does not say what happens to paired devices: %s", r);
+  // Without the group key the mesh's broadcasts go out unsigned and keyed peers drop them.
+  CHECK(has(r, "heartbeats and time sync now go out unsigned") && has(r, "their signed ones are dropped here"),
+        "L5 the clear does not say that the mesh's heartbeats stop getting through: %s", r);
+  r = meshesCmd_setpassphrase(String("primary"), String(""));
+  CHECK(!isError(r) && instanceHolds(nullptr), "L5 the cleared passphrase is still in use: %s", r);
+  // Slot 0's clear also disables its mesh, whose frames are then dropped: the reply says so.
+  CHECK(!gSettings.meshes[0].enabled && has(r, "The mesh is disabled") &&
+            has(r, "cannot exchange frames with this device") && has(r, "'espnowmeshes enable primary'"),
+        "L5 slot 0's clear does not say its paired devices cannot exchange frames: %s", r);
+  CHECK(has(r, "no passphrase in use") && has(r, "until mesh 'work' has one"), "L5 the reply does not say none is in use: %s", r);
+  CHECK(listjsonSays(true, -1), "L5 listjson");
+
+  // L6: enable brings a keyed mesh into use when it becomes the default; disabling
+  // the default hands the passphrase back to slot 0. Each reply says so.
+  resetAll();
+  startEspNow();
+  CHECK(!isError(meshesCmd_setpassphrase(String("primary"), String("prim-passphrase"))) &&
+            !isError(meshesCmd_add(String("work"))) &&
+            !isError(meshesCmd_setpassphrase(String("work"), String("work-passphrase"))) &&
+            !isError(meshesCmd_remove(String("work"))) && !isError(meshesCmd_remove(String("primary"))),
+        "L6 setup: both keyed, both disabled");
+  CHECK(enabledDefaults() == 0 && instanceHolds("prim-passphrase"), "L6 setup: slot 0's passphrase in use, as a start loads");
+  r = meshesCmd_enable(String("work"));
+  CHECK(!isError(r) && gSettings.meshes[1].isDefault && instanceHolds("work-passphrase"),
+        "L6 enable did not bring the new default's passphrase into use: %s", r);
+  CHECK(has(r, "uses the passphrase of mesh 'work'"), "L6 the enable reply does not say: %s", r);
+  r = meshesCmd_remove(String("work"));
+  CHECK(!isError(r) && instanceHolds("prim-passphrase") && has(r, "uses the passphrase of mesh 'primary'"),
+        "L6 disabling the default mesh: %s", r);
+  // A command that does not move it does not mention it.
+  r = meshesCmd_enable(String("primary"));
+  CHECK(!isError(r) && instanceHolds("prim-passphrase") && !has(r, "passphrase of mesh"), "L6 enable primary: %s", r);
+
+  // L7: delete names the passphrase in use when it moved.
+  resetAll();
+  startEspNow();
+  CHECK(!isError(meshesCmd_setpassphrase(String("primary"), String("prim-passphrase"))) &&
+            !isError(meshesCmd_add(String("work"))) && !isError(meshesCmd_setdefault(String("work"))),
+        "L7 setup");
+  r = meshesCmd_delete(String("primary"));
+  CHECK(!isError(r) && instanceHolds(nullptr) && has(r, "no passphrase in use"), "L7 delete of the mesh in use: %s", r);
+
+  // L8: rename keeps the passphrase in use.
+  resetAll();
+  startEspNow();
+  CHECK(!isError(meshesCmd_setpassphrase(String("primary"), String("prim-passphrase"))), "L8 setup");
+  CHECK(!isError(meshesCmd_rename(String("primary"), String("home"))) && instanceHolds("prim-passphrase"), "L8 rename");
+
+  // L9: while ESP-NOW is stopped the instance holds none; the reply says what the
+  // next start uses, and the start loads it.
+  resetAll();
+  CHECK(!isError(meshesCmd_add(String("work"))) && !isError(meshesCmd_setdefault(String("work"))), "L9 setup");
+  r = meshesCmd_setpassphrase(String("work"), String("work-passphrase"));
+  CHECK(!isError(r) && instanceHolds(nullptr), "L9 the stopped instance took a passphrase: %s", r);
+  CHECK(has(r, "stopped") && has(r, "next start uses the passphrase of mesh 'work'") &&
+            has(r, "applies from the next ESP-NOW start") && !has(r, "applies now"),
+        "L9 reply while stopped: %s", r);
+  r = meshesCmd_setpassphrase(String("primary"), String("prim-passphrase"));
+  CHECK(!isError(r) && instanceHolds(nullptr) && has(r, "next start uses the passphrase of mesh 'work'"),
+        "L9 slot 0 while stopped: %s", r);
+  CHECK(listjsonSays(false, 1), "L9 listjson while stopped");
+  startEspNow();
+  CHECK(instanceHolds("work-passphrase"), "L9 the start did not load the default mesh's passphrase");
+
+  // L10: before the first start of a boot (no instance) slot 0's passphrase is
+  // still stored, and the first start uses it.
+  resetNeverStarted();
+  CHECK(!isError(meshesCmd_add(String("bench"))) && slotOf("bench") == 0, "L10 setup");
+  r = meshesCmd_setpassphrase(String("bench"), String("correct-horse"));
+  CHECK(!isError(r) && gSettings.meshes[0].passphrase == String("correct-horse") && gSettings.meshes[0].passphraseStretchedKeyValid,
+        "L10 slot 0's passphrase was not stored without an instance: %s", r);
+  CHECK(has(r, "next start uses the passphrase of mesh 'bench'"), "L10 reply: %s", r);
+  CHECK(listjsonSays(false, 0), "L10 listjson");
+  startEspNow();
+  CHECK(instanceHolds("correct-horse"), "L10 the first start did not use it");
+
+  // L11: a new passphrase on a disabled mesh (slot 0 after a clear, or one turned
+  // off with 'remove') does not claim to apply: the mesh's frames are dropped until
+  // it is enabled again, so the reply says that and how.
+  resetAll();
+  startEspNow();
+  CHECK(!isError(meshesCmd_setpassphrase(String("primary"), String("prim-passphrase"))) &&
+            !isError(meshesCmd_setpassphrase(String("primary"), String(""))) && !gSettings.meshes[0].enabled,
+        "L11 setup: slot 0 cleared and disabled");
+  r = meshesCmd_setpassphrase(String("primary"), String("prim-passphrase"));
+  CHECK(!isError(r) && !gSettings.meshes[0].enabled && gSettings.meshes[0].passphrase == String("prim-passphrase"),
+        "L11 set on the disabled slot 0: %s", r);
+  CHECK(has(r, "the mesh is disabled") && has(r, "'espnowmeshes enable primary'") && !has(r, "applies now") &&
+            has(r, "do not need to re-pair"),
+        "L11 the reply for a disabled slot 0 mesh does not say it stays off: %s", r);
+  CHECK(!isError(meshesCmd_add(String("work"))) && !isError(meshesCmd_remove(String("work"))) &&
+            !gSettings.meshes[1].enabled,
+        "L11 setup: 'work' disabled");
+  r = meshesCmd_setpassphrase(String("work"), String("work-passphrase"));
+  CHECK(!isError(r) && has(r, "the mesh is disabled") && has(r, "'espnowmeshes enable work'") && !has(r, "applies now"),
+        "L11 the reply for a disabled mesh in slot 1 does not say it stays off: %s", r);
+}
+
 int main() {
   testOnlyMeshCanBeRemovedAndDeleted();
   testDeleteFreesTheSlot();
@@ -966,10 +1134,11 @@ int main() {
   testOneDefault();
   testMessagesNameTheMesh();
   testNameCanBeCleared();
+  testPassphraseInUse();
   if (gFailures) {
-    std::printf("%d check(s) failed\n", gFailures);
+    std::printf("%d of %d check(s) failed\n", gFailures, gChecks);
     return 1;
   }
-  std::printf("all mesh slot and device name checks passed\n");
+  std::printf("all %d mesh slot and device name checks passed\n", gChecks);
   return 0;
 }

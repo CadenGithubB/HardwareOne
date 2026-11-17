@@ -4,9 +4,10 @@
 Extracts the production Settings::MeshIdentity record and, from
 System_ESPNow.cpp, meshFingerprintForLabel, the meshes settings writer and
 reader, setEspNowPassphrase, initPrimaryMeshFromLegacySettings, the
-start-passphrase and hint helpers, the espnowmeshes subcommands (add, remove,
-delete, enable, setdefault, setpassphrase) with the delete guard's counters, and
-cmd_espnow_setname, and runs them with the vendored ArduinoJson against host
+start-passphrase and hint helpers, the helpers that keep a running instance on
+the passphrase a start would load, the espnowmeshes subcommands (add, remove,
+delete, enable, setdefault, setpassphrase, listjson) with the delete guard's
+counters, and cmd_espnow_setname, and runs them with the vendored ArduinoJson against host
 doubles for settings writes, the key cache, stored identities, the device
 registry, events and the ESP-NOW state.
 
@@ -16,8 +17,12 @@ stored identity or a registry device still names it or while either list cannot
 be read, that meshes keep their slot numbers across a settings save and load,
 that the slot 0 bootstrap only runs on a device with no mesh at all, that
 exactly one enabled mesh is the default, that the passphrase messages name the
-mesh a start loads, and that the device name can be cleared while ESP-NOW is
-stopped. --source-dir replays other production sources (for example the trees
+mesh a start loads, that a running instance always holds the passphrase a start
+would load (a new passphrase on that mesh, setdefault, enable, disable and delete
+apply at once) and every reply says what is in use, that slot 0's passphrase is
+stored before the first start, and that the device name can be cleared while
+ESP-NOW is stopped. Source checks pin the start's use of the loader and the web
+page's mesh table and passphrase forms (not runnable here). --source-dir replays other production sources (for example the trees
 before the fix) against this suite.
 """
 import argparse
@@ -46,6 +51,15 @@ HINT_HELPERS = (
     'static const char* meshLabelForPassphraseHint()',
     'static void formatNoPassphraseWarning(',
 )
+# The running instance follows what a start would load. Present after the fix.
+LIVE_LOADER = (
+    'static int8_t espnowStartPassphraseSource()',
+    'static void espnowLoadLivePassphrase()',
+    'static void formatLivePassphraseNote(',
+    'static int8_t espnowPassphraseInUse()',
+    'static void appendLivePassphraseNote()',
+)
+LISTJSON = 'static const char* meshesCmd_listjson()'
 PAIRING = 'static uint8_t meshSlotForPairing('
 PARSE_MESH_ARG = 'static uint8_t parseMeshArgOrDefault('
 ADD = (
@@ -109,11 +123,15 @@ def main():
     have_guard = have_delete and REGISTRY_GUARD in source  # the delete guard that also reads the device registry
     have_pairing = PAIRING in source
     have_live_slot = LIVE_SLOT in source  # the instance records which slot its passphrase came from
+    have_loader = have_hint and all(m in source for m in LIVE_LOADER)
 
     # Source order matters: each piece only uses what is defined above it.
     order = list(BASE)
     if have_hint:
         order += list(HINT_HELPERS)
+    if have_loader:
+        order += list(LIVE_LOADER)
+    order.append(LISTJSON)
     order.append(PARSE_MESH_ARG)
     if have_pairing:
         order.append(PAIRING)
@@ -155,11 +173,24 @@ def main():
     if have_hint:
         init = source[source.index('// Restore the encryption passphrase'):]
         init = init[:init.index('// Add broadcast peer')]
-        assert 'espnowStartPassphraseSlot()' in init and 'gSettings.meshes[0].passphrase' not in init, \
+        assert ('espnowStartPassphraseSlot()' in init or 'espnowLoadLivePassphrase();' in init) and \
+            'gSettings.meshes[0].passphrase' not in init, \
             'ESP-NOW start does not use espnowStartPassphraseSlot()'
         assert 'formatNoPassphraseWarning(' in init and "espnowsetpassphrase primary" not in init, \
             'the start-up warning still names the mesh "primary"'
-    if have_guard:
+    if have_loader:
+        # The start loads through the same helper the mesh commands use.
+        assert 'espnowLoadLivePassphrase();' in init and 'gEspNow->passphrase =' not in init, \
+            'the start does not load its passphrase through espnowLoadLivePassphrase()'
+        assert 'formatNoPassphraseWarning(' in init[init.index('} else {'):], \
+            'a start without a passphrase does not warn'
+        # The loader does nothing for an instance that is not marked initialized, so
+        # initEspNow must set the flag before it loads (the harness's start does the same).
+        start = definition(source, 'static bool initEspNow()', 'System_ESPNow.cpp')
+        assert start.count('gEspNow->initialized = true;') == 1 and start.count('espnowLoadLivePassphrase();') == 1 and \
+            start.index('gEspNow->initialized = true;') < start.index('espnowLoadLivePassphrase();'), \
+            'initEspNow loads the passphrase before it marks the instance initialized'
+    if have_guard and not have_loader:
         # The branch of a start that found no passphrase: it clears the name and the key.
         no_passphrase = init[init.index('} else {'):]
         assert 'gEspNow->passphrase = "";' in no_passphrase and \
@@ -168,7 +199,7 @@ def main():
     if have_live_slot:
         # A start records the slot it loaded the passphrase from, a stop forgets it, and a
         # registry save that fails leaves the "file is behind" mark (the harness doubles all three).
-        assert 'gEspNowLivePassphraseSlot = bootPw.length() > 0 ? (int8_t)bootPwSlot : -1;' in init, \
+        assert have_loader or 'gEspNowLivePassphraseSlot = bootPw.length() > 0 ? (int8_t)bootPwSlot : -1;' in init, \
             'the start does not record which slot its passphrase came from'
         stop = definition(source, 'static bool deinitEspNow(bool publishOffEvent)', 'System_ESPNow.cpp')
         assert 'gEspNowLivePassphraseSlot = -1;' in stop, 'a stop keeps the live passphrase slot'
@@ -193,6 +224,38 @@ def main():
         assert 'gPeerIdentitiesLoaded = notLoaded == 0;' in load_all and 'VFS::existsGuarded(path, auth)' in load_all, \
             'a stored identity that was not loaded does not mark the cache incomplete'
 
+    # The web page's mesh table and passphrase forms (not runnable here, so pinned in
+    # the source): the table marks the mesh whose passphrase the device uses, from
+    # listjson's passphraseSlot; the clear dialog does not claim that all encrypted
+    # traffic stops (paired devices keep their keys and sessions), but for slot 0,
+    # whose mesh the firmware disables on a clear, it says the mesh is disabled and
+    # its devices cannot exchange frames, and for slots 1..3 that heartbeats and time
+    # sync stop getting through; the passphrase forms show the firmware's answer,
+    # which says what applies now. These are counted, not fatal, so a replay of an
+    # older page still runs the harness.
+    page = read('WebPage_ESPNow.h')
+    page_failures = []
+    PAGE_CHECKS = 5
+    table = page[page.find('function renderMeshesTable('):page.find('function updatePairChooser(')]
+    if 'data.passphraseSlot' not in table or 'data.running' not in table or '(device passphrase)' not in table:
+        page_failures.append('the mesh table does not mark the mesh whose passphrase the device uses')
+    if 'Encrypted communication will fail until a new passphrase is set' in page:
+        page_failures.append('the clear-passphrase dialog says encrypted communication stops')
+    clear_button = page[page.find('btn btn-mesh-clearpass'):]
+    clear_button = clear_button[:clear_button.find('</button>')]
+    clear_handler = page[page.find("t.classList.contains('btn-mesh-clearpass')"):page.find("'MESH_PASS_CLEAR')")]
+    if 'data-slot=' not in clear_button or "String(slot) === '0'" not in clear_handler or \
+            'This also disables the mesh' not in clear_handler or 'cannot exchange frames' not in clear_handler or \
+            'heartbeats and time sync' not in clear_handler:
+        page_failures.append('the clear-passphrase dialog does not say that slot 0\'s mesh is disabled '
+                             '(frames stop) and that heartbeats stop on the others')
+    for tag in ("'MESH_PASS')", "'MESH_PASS_CLEAR')"):
+        at = page.find(tag)
+        if at < 0 or 'alert(text)' not in page[at:at + 120]:
+            page_failures.append(f'the passphrase form {tag[1:-2]} does not show the firmware\'s answer')
+    for failure in page_failures:
+        print(f'FAIL web page: {failure}', flush=True)
+
     harness = (HERE / 'espnow_mesh_slots_harness.cpp').read_text()
     for tag, value in (('// INSERT_MESH_IDENTITY', mesh_identity),
                        ('// INSERT_PRODUCTION', '\n\n'.join(pieces))):
@@ -202,7 +265,8 @@ def main():
     print(f'delete subcommand: {"present" if have_delete else "absent"}; '
           f'registry guard: {"present" if have_guard else "absent"}; '
           f'pairing slot helper: {"present" if have_pairing else "absent"}; '
-          f'passphrase hint helpers: {"present" if have_hint else "absent"}', flush=True)
+          f'passphrase hint helpers: {"present" if have_hint else "absent"}; '
+          f'live passphrase loader: {"present" if have_loader else "absent"}', flush=True)
     json_include = a.component.parent / 'hardwareone_libs' / 'ArduinoJson' / 'src'
     with tempfile.TemporaryDirectory(prefix='hw1-espnow-mesh-slots-') as tmp:
         unit, exe = Path(tmp) / 'espnow_mesh_slots.cpp', Path(tmp) / 'espnow_mesh_slots'
@@ -223,6 +287,7 @@ def main():
                f'-DHW1_HAVE_PAIRING_SLOT={1 if have_pairing else 0}',
                f'-DHW1_HAVE_LIVE_SLOT={1 if have_live_slot else 0}',
                f'-DHW1_HAVE_PASSPHRASE_HINT={1 if have_hint else 0}',
+               f'-DHW1_HAVE_LIVE_LOADER={1 if have_loader else 0}',
                '-I', tmp, '-I', str(json_include),
                str(unit), '-o', str(exe)]
         if a.sanitize:
@@ -230,7 +295,8 @@ def main():
                         '-fno-omit-frame-pointer', '-g']
         subprocess.run(cmd, check=True, timeout=240)
         result = subprocess.run([str(exe)], timeout=60)
-    if result.returncode:
+    print(f'web page source checks: {PAGE_CHECKS - len(page_failures)} of {PAGE_CHECKS} passed', flush=True)
+    if result.returncode or page_failures:
         print('FAIL espnow_mesh_slots: the mesh slot and device name checks reported failures', file=sys.stderr)
         sys.exit(1)
     print('PASS espnow_mesh_slots')

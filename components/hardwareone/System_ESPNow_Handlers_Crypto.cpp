@@ -16,6 +16,7 @@
 #include "System_Debug.h"
 #include "System_ESPNow.h"          // EspNowState (gEspNow); V4RxCtx comes from System_ESPNow_RxCtx.h
 #include "System_ESPNow_Crypto.h"
+#include "System_ESPNow_HandshakeBackoff.h"
 #include "System_ESPNow_Identity.h"
 #include "System_ESPNow_MeshKeys.h"
 #include "System_ESPNow_Sessions.h"
@@ -450,6 +451,8 @@ void v4hKeyExReply(const V4RxCtx& ctx) {
 
   // Handshake resolved for us (initiator) — stop the HELLO retry timer (F6).
   keyExClearInFlight(msg->responderMac);
+  // The peer answered: its automatic starts need no back-off any more.
+  espnowHandshakeBackoffClear(msg->responderMac);
 
   if (!ensureUnencryptedPeer(msg->responderMac)) return;
 
@@ -509,6 +512,9 @@ void v4hKeyExConfirm(const V4RxCtx& ctx) {
   keyExClearInFlight(msg->confirmerMac);
 
   if (msg->status == 0) {
+    // Finished on our (responder) side. A refusal (status 1 or 2) does not
+    // end the back-off: such a peer answers every time and never completes.
+    espnowHandshakeBackoffClear(msg->confirmerMac);
     INFO_ESPNOWF("KEY_EX with " MAC_FMT " complete "
                  "(remote pub fp: %02X%02X%02X%02X%02X%02X%02X%02X)",
                  MAC_ARGS(msg->confirmerMac),
@@ -602,6 +608,7 @@ struct KeyExInFlight {
   int8_t   meshSlot;     // resolved slot, to rebuild the HELLO on retry
   uint8_t  retriesLeft;
   uint32_t lastSentMs;
+  bool     automatic;    // not asked for by a user: give-up warning is rate-limited
 };
 
 // Tiny table (4 × ~16 B). Registered on cmd_exec (espnowKeyExInitiate via the
@@ -611,7 +618,7 @@ struct KeyExInFlight {
 // half-populated in-use slot; clear is a single-bool write.
 KeyExInFlight gKeyExInFlight[kKeyExInFlightSlots] = {};
 
-void keyExInFlightArm(const uint8_t peerMac[6], int slot) {
+void keyExInFlightArm(const uint8_t peerMac[6], int slot, bool automatic) {
   KeyExInFlight* e = nullptr;
   for (auto& k : gKeyExInFlight)
     if (k.inUse && memcmp(k.peerMac, peerMac, 6) == 0) { e = &k; break; }
@@ -626,8 +633,21 @@ void keyExInFlightArm(const uint8_t peerMac[6], int slot) {
   e->meshSlot     = (int8_t)slot;
   e->retriesLeft  = kKeyExMaxRetries;
   e->lastSentMs   = (uint32_t)millis();
+  e->automatic    = automatic;
   e->inUse        = true;   // publish last
 }
+
+// Automatic key exchanges to a peer that is not there give up again and
+// again; their warning comes once per 15 minutes with the count held back.
+constexpr uint32_t kKeyExGiveUpWarnWindowMs = 15UL * 60UL * 1000UL;
+WarnLimiter gKeyExGiveUpWarn = {};
+
+// Back-off table for automatic handshake starts. Taken on espnow_task (bond
+// heartbeat) and cmd_exec (bond commands); cleared from RX handlers on
+// espnow_task, session completion on cmd_exec and user commands. Every access
+// holds the spinlock: a few compares on 8 entries, no calls inside.
+HandshakeBackoffTable gHandshakeBackoff = {};
+portMUX_TYPE gHandshakeBackoffLock = portMUX_INITIALIZER_UNLOCKED;
 
 }  // namespace
 
@@ -649,10 +669,20 @@ void keyExRetrySweep(uint32_t nowMs) {
     if (!k.inUse) continue;
     if ((uint32_t)(nowMs - k.lastSentMs) < kKeyExRetryMs) continue;
     if (k.retriesLeft == 0) {
-      WARN_ESPNOWF("KEY_EX: no REPLY from " MAC_FMT " after %u attempts — "
-                   "giving up (run espnowkeyex to retry)",
-                   MAC_ARGS(k.peerMac),
-                   (unsigned)(kKeyExMaxRetries + 1));
+      uint32_t held = 0;
+      if (!k.automatic) {
+        WARN_ESPNOWF("KEY_EX: no REPLY from " MAC_FMT " after %u attempts — "
+                     "giving up (run espnowkeyex to retry)",
+                     MAC_ARGS(k.peerMac),
+                     (unsigned)(kKeyExMaxRetries + 1));
+      } else if (warnLimiterTake(gKeyExGiveUpWarn, nowMs, kKeyExGiveUpWarnWindowMs, &held)) {
+        WARN_ESPNOWF("KEY_EX: no REPLY from " MAC_FMT " after %u attempts — "
+                     "giving up; automatic tries back off up to 5 min "
+                     "(run espnowkeyex to retry now; %lu more not shown in the last 15 min)",
+                     MAC_ARGS(k.peerMac),
+                     (unsigned)(kKeyExMaxRetries + 1),
+                     (unsigned long)held);
+      }
       k.inUse = false;
       continue;
     }
@@ -665,7 +695,7 @@ void keyExRetrySweep(uint32_t nowMs) {
   }
 }
 
-bool espnowKeyExInitiate(const uint8_t peerMac[6], const char* meshLabel) {
+static bool keyExInitiate(const uint8_t peerMac[6], const char* meshLabel, bool automatic) {
   if (!gEspNow || !gEspNow->initialized) {
     ERROR_ESPNOWF("KEY_EX initiate: ESPNOW not initialized");
     return false;
@@ -677,7 +707,66 @@ bool espnowKeyExInitiate(const uint8_t peerMac[6], const char* meshLabel) {
     return false;
   }
   bool ok = keyExSendHello(peerMac, slot);
-  if (ok) keyExInFlightArm(peerMac, slot);  // arm retry/timeout
+  if (ok) keyExInFlightArm(peerMac, slot, automatic);  // arm retry/timeout
+  return ok;
+}
+
+bool espnowKeyExInitiate(const uint8_t peerMac[6], const char* meshLabel) {
+  return keyExInitiate(peerMac, meshLabel, true);
+}
+
+bool espnowKeyExInitiateManual(const uint8_t peerMac[6], const char* meshLabel) {
+  espnowHandshakeBackoffClear(peerMac);
+  return keyExInitiate(peerMac, meshLabel, false);
+}
+
+void espnowHandshakeBackoffClear(const uint8_t peerMac[6]) {
+  if (!peerMac) return;
+  portENTER_CRITICAL(&gHandshakeBackoffLock);
+  handshakeBackoffClear(gHandshakeBackoff, peerMac);
+  portEXIT_CRITICAL(&gHandshakeBackoffLock);
+}
+
+void espnowHandshakeHeard(const uint8_t peerMac[6]) {
+  if (!peerMac) return;
+  const uint32_t nowMs = (uint32_t)millis();
+  portENTER_CRITICAL(&gHandshakeBackoffLock);
+  handshakeBackoffHeard(gHandshakeBackoff, peerMac, nowMs);
+  portEXIT_CRITICAL(&gHandshakeBackoffLock);
+}
+
+bool espnowHandshakeAutoStart(const uint8_t peerMac[6]) {
+  if (!gEspNow || !gEspNow->initialized || !peerMac) return false;
+  const PeerIdentity* pid = peerIdentityFindByMac(peerMac);
+  if (!pid) {
+    if (keyExIsInFlight(peerMac)) return false;
+  } else {
+    const SessionState* s = sessionFindByPeer(peerMac, pid->meshId);
+    // ACTIVE needs nothing; ESTABLISHING / REKEYING is already in flight.
+    if (s && s->state != SESSION_FREE && s->state != SESSION_CLOSED) return false;
+  }
+  const uint32_t nowMs = (uint32_t)millis();
+  portENTER_CRITICAL(&gHandshakeBackoffLock);
+  const bool due = handshakeBackoffTake(gHandshakeBackoff, peerMac, nowMs);
+  portEXIT_CRITICAL(&gHandshakeBackoffLock);
+  if (!due) return false;
+  return pid ? espnowSessionOpenInitiate(peerMac, nullptr)
+             : keyExInitiate(peerMac, nullptr, true);
+}
+
+bool espnowHandshakeStartNow(const uint8_t peerMac[6]) {
+  if (!gEspNow || !gEspNow->initialized || !peerMac) return false;
+  espnowHandshakeBackoffClear(peerMac);
+  const PeerIdentity* pid = peerIdentityFindByMac(peerMac);
+  // No identity: a manual key exchange (one in flight is re-sent and re-armed
+  // as manual, so its give-up is printed).
+  if (!pid) return keyExInitiate(peerMac, nullptr, false);
+  const SessionState* s = sessionFindByPeer(peerMac, pid->meshId);
+  if (s && s->state == SESSION_ACTIVE) return false;   // up already: nothing to start
+  // Starts SESSION_OPEN, or leaves one in flight alone; either way its
+  // timeout is reported.
+  const bool ok = espnowSessionOpenInitiate(peerMac, nullptr);
+  if (ok) sessionMarkUserStarted(peerMac);
   return ok;
 }
 

@@ -155,12 +155,32 @@ bool peerIdentitySetSubscriptions(const uint8_t mac[6], uint32_t subscribedEvent
 bool peerIdentityWantsEvent(const uint8_t mac[6], uint32_t category);
 
 // Forget a paired peer. Removes the on-disk file AND clears the in-memory
-// slot. Idempotent — calling on a non-existent peer just returns true.
+// slot. Idempotent. Returns true when there was something to forget: a cached
+// identity, or an identity.json that is now gone (also one the boot walk did
+// not load); false for a peer with neither.
 bool peerIdentityForget(const uint8_t mac[6]);
+
+// What peerFilesRemove took away.
+struct PeerFilesRemoved {
+  uint16_t files;       // files removed from the peer's folder
+  uint32_t bytes;       // their size in total
+  uint8_t  failed;      // entries that would not go
+  bool     folderLeft;  // the folder is still there afterwards
+};
+
+// Everything this device stored about a peer: forgets its identity
+// (peerIdentityForget), then removes every other file under
+// /system/espnow/peers/<MAC>/ (the bond caches settings.json and schema.json,
+// the manifest reference) and the folder. Used by espnowunpair; espnowforget
+// only forgets the identity. Files received from the peer (/espnow/received/)
+// are the user's and are not touched. Returns false when the folder stays.
+bool peerFilesRemove(const uint8_t mac[6], PeerFilesRemoved& out);
 
 // Walk /system/espnow/peers/*/identity.json at boot. Populates the cache.
 // Called once after espnowIdentityLoadOrGenerate. Returns the number of
-// peer identities loaded.
+// peer identities loaded. Only folders named exactly as macToPathToken writes
+// them are read (one cache entry per address); a file whose meshId is not a
+// slot of this firmware is left out like an unreadable one.
 uint8_t peerIdentityLoadAll();
 
 // True once peerIdentityLoadAll has read every stored identity this boot (an

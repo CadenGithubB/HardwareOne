@@ -1532,6 +1532,14 @@ inline void streamEspNowInner(httpd_req_t* req) {
         var passPill = m.hasPassphrase
           ? '<span style="font-size:.78em;color:var(--panel-fg)">passphrase ✓</span>'
           : '<span style="font-size:.78em;color:var(--muted)">no passphrase</span>';
+        // The mesh whose passphrase the device itself uses (the fingerprint in
+        // espnowencstatus, needed for sending and pairing); while ESP-NOW is
+        // stopped, the one its next start loads. The firmware applies a change at once.
+        if (m.slot === data.passphraseSlot) {
+          passPill += data.running
+            ? ' <span class="mesh-device-pass" title="This device uses the passphrase of this mesh now: its fingerprint is in espnowencstatus, and sending and pairing need one" style="font-size:.75em;color:var(--muted)">(device passphrase)</span>'
+            : ' <span class="mesh-device-pass" title="ESP-NOW is stopped; its next start uses the passphrase of this mesh" style="font-size:.75em;color:var(--muted)">(device passphrase at next start)</span>';
+        }
 
         // Prominent Enable button when disabled (per UX decision); the
         // catch-all action menu lives behind the ⋯ button for the rest.
@@ -1598,7 +1606,7 @@ inline void streamEspNowInner(httpd_req_t* req) {
     function renderActionPanel(slot, label, isDefault, hasPassphrase) {
       var setpassText = hasPassphrase ? 'Change passphrase' : 'Set passphrase';
       var clearpassBtn = hasPassphrase
-        ? '<button class="btn btn-mesh-clearpass" data-label="' + label + '" style="font-size:.82em;padding:3px 10px">Clear passphrase</button>'
+        ? '<button class="btn btn-mesh-clearpass" data-label="' + label + '" data-slot="' + slot + '" style="font-size:.82em;padding:3px 10px">Clear passphrase</button>'
         : '';
       var setdefaultBtn = isDefault
         ? ''
@@ -1752,14 +1760,24 @@ inline void streamEspNowInner(httpd_req_t* req) {
           var pw = passInp ? passInp.value : '';
           if (!pw) { alert('Please enter a passphrase'); return; }
           if (pw.length < 8) { alert('Passphrase must be at least 8 characters'); return; }
-          // Wrap in quotes so the CLI parser keeps it as a single token.
-          fireMeshCmd('espnowsetpassphrase ' + label + ' "' + pw + '"', 'MESH_PASS');
+          // Wrap in quotes so the CLI parser keeps it as a single token. The
+          // answer says what applies now and what other devices need, so show it.
+          fireMeshCmd('espnowsetpassphrase ' + label + ' "' + pw + '"', 'MESH_PASS').then(function(text) {
+            if (text) alert(text);
+          });
           return;
         }
         // Clear passphrase
         if (t.classList.contains('btn-mesh-clearpass')) {
-          if (!confirm('Clear passphrase for mesh "' + label + '"? Encrypted communication will fail until a new passphrase is set.')) return;
-          fireMeshCmd('espnowsetpassphrase ' + label + ' clear', 'MESH_PASS_CLEAR');
+          // The firmware disables slot 0's mesh when its passphrase is cleared, and
+          // a disabled mesh's frames are dropped, so that dialog has to say so.
+          var clearMsg = String(slot) === '0'
+            ? 'Clear passphrase for mesh "' + label + '"? This also disables the mesh: its paired devices cannot exchange frames with this device until you enable it again.'
+            : 'Clear passphrase for mesh "' + label + '"? New pairings on this mesh will need a passphrase again, and its heartbeats and time sync stop getting through to devices that still have one. Paired devices keep their keys.';
+          if (!confirm(clearMsg)) return;
+          fireMeshCmd('espnowsetpassphrase ' + label + ' clear', 'MESH_PASS_CLEAR').then(function(text) {
+            if (text) alert(text);
+          });
           return;
         }
         // Rename — opens inline form
