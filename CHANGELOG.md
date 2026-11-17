@@ -219,7 +219,8 @@ everything user-visible since the v0.99.99.1 tag.
   fetch now answer "Error: no secure session with <peer> yet; one is being opened, try again in a few
   seconds" and send nothing; when no session can be opened at all the send fails and the log says
   why. A long `espnowsend` text no longer waits 3 s for a session that could not come up meanwhile.
-  Host-tested; not yet tested on hardware.
+  Host-tested; on two bench boards (P4X-EYE and XIAO S3) a send with no session was refused with
+  that reply and the retry 7 s later delivered the file.
 - ESP-NOW file receive: a receiver whose transfer table was busy for 50 ms answered a file chunk with
   a cancel, which aborted a healthy transfer. A busy table now drops that one frame without a
   cancel, and closing or removing a file no longer happens while the table is locked.
@@ -227,10 +228,11 @@ everything user-visible since the v0.99.99.1 tag.
 - `espnowenabled on` stored "off" and stopped ESP-NOW: five commands read anything but `1` or `true`
   as off (`espnowenabled`, `httpautostart`, `httpsenabled`, `thermalrollingminmaxenabled`,
   `thermalinterpolationenabled`). They accept the same on/off words as every other setting command
-  and refuse anything else. Host-tested; not yet tested on hardware.
+  and refuse anything else. Host-tested; `espnowenabled on` and `off` checked on two bench boards.
 - ESP32-P4: the ESP-NOW message history kept 16 messages per peer instead of 250, so a long remote
   command result lost its beginning. The P4 now gets the PSRAM depth (about 158 KB per peer, in
-  PSRAM); other boards are unchanged. Host-tested; not yet tested on hardware.
+  PSRAM); other boards are unchanged. Host-tested; the P4X-EYE reports a depth of 250 when ESP-NOW
+  starts.
 - ESP-NOW pairing and sessions: a long send while a handshake or a key rotation with the same peer
   was in flight restarted it and wiped the session being set up; a handshake in flight is now left
   alone. `espnowsessionopen` says so instead of sending a second request. Host-tested; not yet
@@ -366,7 +368,7 @@ everything user-visible since the v0.99.99.1 tag.
   hardware.
 - ESP-NOW remote commands: a user name or password longer than 31 bytes was cut to fit and the
   shortened name was checked, which could be another account's name. Such a command is refused and
-  counts as a failed attempt. Host-tested; not yet tested on hardware.
+  counts as a failed attempt. Host-tested; refused on the bench with a 36-byte name.
 - ESP-NOW test commands that rewrite live topology state (`teststreams`, `testconcurrent`,
   `testcleanup`) and `espnowhbmode` now need an admin account.
 ### Docs
