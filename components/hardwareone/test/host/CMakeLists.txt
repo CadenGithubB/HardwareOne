@@ -2365,6 +2365,98 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_redact_audit.py
           ${SETUP_MQTT_TEST_ARGS})
+# ---- ESP-NOW review fixes of 2026-11-17 ----
+# ESP-NOW V4 receive front end: the real v4_try_handle_incoming, duplicate rings, opcode table,
+# v4h_heartbeat, v4h_relay_data, flood forwarder and peer slot owners on forged, duplicate and
+# relayed frames (README "ESP-NOW receive front end").
+set(ESPNOW_RX_FRONTEND_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND ESPNOW_RX_FRONTEND_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME espnow_rx_frontend
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_espnow_rx_frontend.py
+          ${ESPNOW_RX_FRONTEND_TEST_ARGS})
+
+# ESP-NOW KEY_EX_HELLO replay (README "ESP-NOW KEY_EX_HELLO replay"): the production
+# HELLO handler on the production peer-identity cache; a replayed HELLO causes no
+# identity file write and at most one reply per sender MAC per interval.
+set(ESPNOW_KEYEX_HELLO_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND ESPNOW_KEYEX_HELLO_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME espnow_keyex_hello
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_espnow_keyex_hello.py
+          ${ESPNOW_KEYEX_HELLO_TEST_ARGS})
+
+# ESP-NOW file transfer, both ends: the receive slot table, the FILE_* handlers,
+# the sender pump and the commands that report a send, against host doubles. A
+# send without an ACTIVE session is refused and every caller says so; a busy
+# slot table never cancels a healthy receive; release and abort do no
+# filesystem work under the slot lock (README "ESP-NOW file transfer").
+set(ESPNOW_FILE_TRANSFER_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND ESPNOW_FILE_TRANSFER_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME espnow_file_transfer
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_espnow_file_transfer.py
+          ${ESPNOW_FILE_TRANSFER_TEST_ARGS})
+
+# ESP-NOW command privileges (README "ESP-NOW command privileges"): test commands
+# that change live state and both writers of the heartbeat mode are admin rows.
+# Source text only.
+add_test(
+  NAME espnow_command_privileges
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_espnow_command_privileges.py)
+
+# ESP-NOW message depth (README "ESP-NOW message depth"): MESSAGES_PER_DEVICE and
+# the web poll count follow CONFIG_SPIRAM, so the ESP32-P4 gets the PSRAM depth
+# and esp32/esp32s3 keep theirs. Compiles the two production #if blocks.
+add_test(
+  NAME espnow_history_depth
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_espnow_history_depth.py
+          --cxx ${CMAKE_CXX_COMPILER})
+
+# Five <0|1> setting commands (README "On/off setting commands") read their value
+# with parseBoolArg and refuse any other word with kCommandReplyNotOnOff.
+set(SETTINGS_ONOFF_COMMANDS_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND SETTINGS_ONOFF_COMMANDS_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME settings_onoff_commands
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_settings_onoff_commands.py
+          ${SETTINGS_ONOFF_COMMANDS_TEST_ARGS})
+
+# Web requests no longer pause the ESP-NOW loop (review RT-2): the flag is gone
+# and the loop's early return asks only for its own state.
+add_test(
+  NAME espnow_loop_not_paused
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_espnow_loop_not_paused.py)
+
+# The acknowledgement of `espnowremote` always ends with its request id
+# (review FEAT-4); the OLED remote form reads the reply (review FEAT-5).
+set(ESPNOW_REMOTE_ACK_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND ESPNOW_REMOTE_ACK_TEST_ARGS --sanitize)
+endif()
+foreach(test_name IN ITEMS espnow_remote_ack oled_espnow_remote_actions)
+  add_test(
+    NAME ${test_name}
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_LIST_DIR}/test_${test_name}.py
+            ${ESPNOW_REMOTE_ACK_TEST_ARGS})
+endforeach()
+
 # Drift-prone definitions keep one owner: OTA handoff NVS keys (hw1_ota_nvs.h), the OTA frame
 # marker/head (BLE_OtaWire.h) and the HTTPS key pair paths (System_HttpsCertPaths.h).
 add_test(

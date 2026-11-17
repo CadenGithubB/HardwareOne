@@ -6168,3 +6168,47 @@ locally patched 5.5.5 shows `portasm.S`), adds the PIE-fix state line for
 esp32p4 only, and reports an IDF that is not itself a git checkout as unknown
 rather than the HEAD of a repository it happens to sit in. An IDF under the
 home directory is shown as `~/...`.
+
+## ESP-NOW review fixes (2026-11-17)
+
+Tests added with the small fixes that followed the ESP-NOW architecture review. Each compiles production code
+against host doubles unless it says "source"; each fails on the tree before its fix.
+
+`espnow_dispatch_policy` (extended) models a second paired peer: every bond opcode from it is dropped, from the
+configured partner accepted, and with bond mode off or no partner configured dropped (`isBondPeerMac`, the
+`REQ_BOND_PEER` table flag). It also pins the HEARTBEAT row's `REQ_AUTH_WHEN_KEYED`.
+
+`espnow_rx_frontend` runs the production `v4_try_handle_incoming` with the duplicate rings, the opcode table and
+dispatcher, the real `v4h_heartbeat` and `v4h_relay_data`, the flood forwarder and the peer slot owners. A forged
+plaintext frame carrying a victim's origin and msgId no longer makes the genuine sealed frame drop; flooded and
+relayed duplicates are still suppressed; a frame whose fragIndex does not fit its fragCount is refused; on a keyed
+mesh a plaintext heartbeat is dropped and a tagged one accepted; an unknown MAC, or a captured tagged heartbeat
+replayed from an invented MAC, gets no slot; unpair frees the metadata slot; a ninth unpaired MAC does not block a
+paired peer's metadata.
+
+`espnow_keyex_hello` runs the production KEY_EX_HELLO handler on the production peer-identity cache: fifty
+replayed HELLOs cause one identity file write and rate-limited replies; the initiator's own retries are answered;
+a changed key or mesh is still written; lastSeenSec is refreshed at most hourly and never with an unset clock; a
+failed write leaves the cache as it was; two HELLOs for two meshes 30 ms apart are both answered. A source rule
+keeps KEY_EX_REPLY from kicking SESSION_OPEN over an ACTIVE session. `espnow_session_rekey` (extended) covers
+`espnowSessionOpenInitiate`: a re-kick during ESTABLISHING or REKEYING leaves keys and state untouched, a kick
+from FREE or CLOSED starts a handshake, a timed-out ESTABLISHING can be retried.
+
+`espnow_file_transfer` compiles the receive slot table, the FILE_* handlers, the sender pump and the commands
+that report a send (12 cases): a send without an ACTIVE session is refused and every caller says so; a send whose
+handshake cannot be started fails instead of saying "try again"; a busy slot table never cancels a healthy
+receive; release and abort do no filesystem work under the slot lock; an abort under lock contention does not pin
+the slot.
+
+`espnow_command_privileges` (source) pins the admin flag on the ESP-NOW test commands that change live state and
+on both writers of the heartbeat mode. `espnow_history_depth` compiles the two `#if` blocks that size the message
+history and the web poll: they follow `CONFIG_SPIRAM`, so the ESP32-P4 gets the PSRAM depth. `settings_onoff_commands`
+runs five `<0|1>` setting commands: every word the shared parser accepts, any other word refused, side effects
+kept. `espnow_user_credentials` (extended) refuses a remote command whose user name or password does not fit.
+
+`espnow_loop_not_paused` (source) keeps `gMeshActivitySuspended` out of the tree and the ESP-NOW loop's early
+return free of outside switches. `espnow_remote_ack` compiles the acknowledgement of `espnowremote`: a long
+command shortens the echo, never the request id. `oled_espnow_remote_actions` runs the OLED Device Config remote
+rows: they fill in and open the remote form, and no OLED ESP-NOW action sends a command line whose first word is
+not a registered command. Outside ctest, `tools/webui/tests/test_espnow_remote_page.py` feeds the firmware's real
+replies to the web page's remote file browser.

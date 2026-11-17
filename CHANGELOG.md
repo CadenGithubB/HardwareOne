@@ -210,6 +210,43 @@ everything user-visible since the v0.99.99.1 tag.
 - Files page: every new folder, new file, upload and Refresh asked for the storage figures twice,
   and on the P4X-EYE each fresh reading is a LittleFS walk of about 1.3 s on the one web server
   task. They now ask once. Source-tested; the page was not run in a browser here.
+- ESP-NOW and the web UI: every page load, web console command and batch of commands paused the
+  ESP-NOW loop while it ran: no heartbeats, no timeouts swept, no command results, texts or streamed
+  output handled. A web command longer than 15 s (Send File can take a minute) made a bond partner
+  drop its session. Web requests no longer pause anything. Host-tested; not yet tested on hardware.
+- ESP-NOW file send: a file sent to a peer before the encrypted session with it was up reported
+  success while the peer received nothing. `espnowsendfile`, `imagesend`, the OLED send and a served
+  fetch now answer "Error: no secure session with <peer> yet; one is being opened, try again in a few
+  seconds" and send nothing; when no session can be opened at all the send fails and the log says
+  why. A long `espnowsend` text no longer waits 3 s for a session that could not come up meanwhile.
+  Host-tested; not yet tested on hardware.
+- ESP-NOW file receive: a receiver whose transfer table was busy for 50 ms answered a file chunk with
+  a cancel, which aborted a healthy transfer. A busy table now drops that one frame without a
+  cancel, and closing or removing a file no longer happens while the table is locked.
+  Host-tested; not yet tested on hardware.
+- `espnowenabled on` stored "off" and stopped ESP-NOW: five commands read anything but `1` or `true`
+  as off (`espnowenabled`, `httpautostart`, `httpsenabled`, `thermalrollingminmaxenabled`,
+  `thermalinterpolationenabled`). They accept the same on/off words as every other setting command
+  and refuse anything else. Host-tested; not yet tested on hardware.
+- ESP32-P4: the ESP-NOW message history kept 16 messages per peer instead of 250, so a long remote
+  command result lost its beginning. The P4 now gets the PSRAM depth (about 158 KB per peer, in
+  PSRAM); other boards are unchanged. Host-tested; not yet tested on hardware.
+- ESP-NOW pairing and sessions: a long send while a handshake or a key rotation with the same peer
+  was in flight restarted it and wiped the session being set up; a handshake in flight is now left
+  alone. `espnowsessionopen` says so instead of sending a second request. Host-tested; not yet
+  tested on hardware.
+- ESP-NOW peers: a peer's metadata slot was never released, so after eight different devices had
+  been heard in one uptime, a newly paired peer's name, room and tags were refused until reboot.
+  Unpairing frees the slot, and a full table takes one back from a device that is not paired.
+  Host-tested; not yet tested on hardware.
+- Web ESP-NOW page: the remote file browser stopped at the acknowledgement of its request (it waited
+  for a phrase only bond commands print) and showed that acknowledgement as the result. It now
+  follows the request id and ends with a message when no listing arrives. Tested against the
+  firmware's replies on the host; not run in a browser.
+- OLED ESP-NOW "Device Config": six actions sent a command that does not exist and showed "Sent".
+  They now open the remote command form with the command filled in, which asks for the target
+  account and shows the peer's verdict. The unfinished remote file view is removed. Host-tested; not
+  yet tested on hardware.
 ### Changed
 - Command names have one form: lower-case letters and digits. The 22 camelCase `mqtt*` commands and
   `httpAutoStart` / `httpsEnabled` are now `mqtthost`, `mqttpublishgps`, `httpautostart`,
@@ -312,6 +349,26 @@ everything user-visible since the v0.99.99.1 tag.
   glasses, automations). Nested forwards are now redacted in a loop: the audit text is unchanged at
   every depth (compared with the old code over 7125 generated lines) and the stack no longer grows
   with nesting. Host-tested; not yet tested on hardware.
+- Bond mode: bond requests (heartbeat, settings, schema, manifest, status, capability, sensor
+  streaming) were accepted from any paired device, not only the bond partner. Another paired device
+  could keep the partner looking online, reset the sync, read the settings and schema, or switch
+  sensor streaming. They are accepted only from the configured partner now. Host-tested; not yet
+  tested on hardware.
+- ESP-NOW receive path: a device without the mesh passphrase could make a device discard a peer's
+  genuine encrypted frames (after acknowledging them) by sending forged frames with that peer's
+  message numbers first, and could fill the peer tables with invented addresses so real peers got no
+  slot. Duplicate detection is now keyed on what a frame proved, heartbeats must be signed or
+  encrypted once a mesh key is set, and a slot is created only for a paired device or a frame that
+  proves its sender. Host-tested; not yet tested on hardware.
+- ESP-NOW pairing: a recorded pairing hello could be replayed, and each copy cost a flash write and
+  a reply. An unchanged identity is no longer rewritten (at most one refresh an hour), and a hello
+  from one device for one mesh is answered at most once a second. Host-tested; not yet tested on
+  hardware.
+- ESP-NOW remote commands: a user name or password longer than 31 bytes was cut to fit and the
+  shortened name was checked, which could be another account's name. Such a command is refused and
+  counts as a failed attempt. Host-tested; not yet tested on hardware.
+- ESP-NOW test commands that rewrite live topology state (`teststreams`, `testconcurrent`,
+  `testcleanup`) and `espnowhbmode` now need an admin account.
 ### Docs
 - Release gate, tracked-tree hygiene: the `git grep` in `RELEASING.md` could never come back empty,
   because the firmware and the tools use example and SoftAP addresses on purpose. It is now the host
