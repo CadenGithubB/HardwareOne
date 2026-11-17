@@ -570,8 +570,9 @@ bool peerIdentityForget(const uint8_t mac[6]) {
   return true;
 }
 
-// True once peerIdentityLoadAll has walked the peers directory (or found there
-// is none) this boot. While false the cache says nothing about what is stored.
+// True once peerIdentityLoadAll has walked the peers directory this boot (or
+// found there is none) and every stored identity went into the cache. While
+// false the cache does not say which mesh slots the stored identities use.
 static bool gPeerIdentitiesLoaded = false;
 
 bool peerIdentitiesLoaded() { return gPeerIdentitiesLoaded; }
@@ -596,6 +597,7 @@ uint8_t peerIdentityLoadAll() {
   }
 
   uint8_t loaded = 0;
+  uint8_t notLoaded = 0;
   File entry = dir.openNextFile();
   while (entry) {
     if (entry.isDirectory()) {
@@ -607,18 +609,21 @@ uint8_t peerIdentityLoadAll() {
       const char* base = strrchr(name, '/');
       base = base ? base + 1 : name;
       uint8_t mac[6];
-      if (parseMacNoSep(base, mac) && loaded < kPeerSlots) {
-        char path[80];
-        if (buildPeerPath(mac, "identity.json", path, sizeof(path))) {
-          PeerIdentity p = {};
-          if (readPeerIdentityFile(path, p)) {
-            // Verify mac matches dir name (paranoia — defends against a
-            // moved/renamed file).
-            if (memcmp(p.mac, mac, 6) == 0) {
-              gPeerIdentities[loaded] = p;
-              loaded++;
-            }
-          }
+      char path[80];
+      if (parseMacNoSep(base, mac) && buildPeerPath(mac, "identity.json", path, sizeof(path)) &&
+          VFS::existsGuarded(path, auth)) {
+        PeerIdentity p = {};
+        // The mac must match the directory name (paranoia — defends against a
+        // moved/renamed file).
+        if (loaded < kPeerSlots && readPeerIdentityFile(path, p) && memcmp(p.mac, mac, 6) == 0) {
+          gPeerIdentities[loaded] = p;
+          loaded++;
+        } else {
+          // Stored but not in the cache (unreadable now, another address
+          // inside, or no room): which mesh slot it uses is not known.
+          if (notLoaded < 255) notLoaded++;
+          WARN_ESPNOWF("stored peer identity %s/%s was not loaded; 'espnowforget <mac>' removes it",
+                       kPeersDir, base);
         }
       }
     }
@@ -626,7 +631,7 @@ uint8_t peerIdentityLoadAll() {
     entry = dir.openNextFile();
   }
   dir.close();
-  gPeerIdentitiesLoaded = true;
+  gPeerIdentitiesLoaded = notLoaded == 0;
 
   if (loaded > 0) {
     INFO_ESPNOWF("loaded %u peer identities from %s", (unsigned)loaded, kPeersDir);

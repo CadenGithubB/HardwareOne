@@ -239,6 +239,13 @@ static const char* meshesCmd_delete(const String&) { return "Error: no delete su
 // Trees whose delete does not read the device registry have no parser for it.
 static int meshRegistryCountInJson(const String&, uint8_t) { return -1; }
 #endif
+#if !HW1_HAVE_PAIRING_SLOT
+// Trees before the pairing helper put a pairing with no mesh argument into slot 0.
+static uint8_t meshSlotForPairing(const String& arg) {
+  const uint8_t slot = parseMeshArgOrDefault(arg);
+  return slot == 0xFE ? 0 : slot;
+}
+#endif
 #if !HW1_HAVE_PASSPHRASE_HINT
 static void formatNoPassphraseWarning(char* out, size_t outLen) {
   std::snprintf(out, outLen, "%s", "Run 'espnowsetpassphrase primary <pw>'.");
@@ -426,7 +433,8 @@ static void testDeleteFreesTheSlot() {
   gPeers[6] = PeerIdentity{{2, 0, 0, 0, 0, 9}, 0, true};  // another mesh: not counted
   int persistsBefore = gPersists;
   r = meshesCmd_delete(String("work"));
-  CHECK(isError(r) && has(r, "2 with stored keys") && has(r, "espnowunpair"), "D2 delete with stored identities: %s", r);
+  CHECK(isError(r) && has(r, "2 with stored keys") && has(r, "espnowunpair") && has(r, "espnowforget"),
+        "D2 delete with stored identities: %s", r);
   CHECK(slotOf("work") == slotW && gSettings.meshes[slotW].enabled && gPersists == persistsBefore,
         "D2 a refused delete changed or persisted something");
   gPeers[5].valid = false;
@@ -479,12 +487,38 @@ static void testDeleteFreesTheSlot() {
   CHECK(isError(r) && slotOf("lab") == 1, "D2d a damaged registry file was read as 'no devices': %s", r);
   CHECK(meshRegistryCountInJson(String("[1,2]"), 0) == -1 && meshRegistryCountInJson(String("{}"), 0) == 0,
         "D2d registry text that is not an object must not count as empty");
-  // A registry that failed to load into RAM is not trusted either: the file is asked.
+  // A registry that failed to load into RAM is not trusted either: the file is asked...
   resetAll();
   CHECK(!isError(meshesCmd_add(String("lab"))), "D2d setup");
   sEspNowDevicesLoad = ConfigLoad::Status::OpenFailed;
   gRegistryFile = RegistryFile::Unreadable;
   CHECK(isError(meshesCmd_delete(String("lab"))), "D2d a registry that never loaded was treated as empty");
+  // ...and a device paired into the table since then counts although the file does not have it.
+  gRegistryFile = RegistryFile::Absent;
+  addRegistryDevice(0x23, 1);
+  r = meshesCmd_delete(String("lab"));
+  CHECK(isError(r) && has(r, "1 in the device list"), "D2d a device paired after a failed registry load was missed: %s", r);
+  gState.deviceCount--;
+  gRegistryFile = RegistryFile::Present;
+  gRegistryFileText = "{\"devices\":[{\"meshId\":1},{\"meshId\":1}]}";
+  addRegistryDevice(0x24, 1);
+  r = meshesCmd_delete(String("lab"));
+  CHECK(isError(r) && has(r, "3 in the device list"), "D2d table and file are not both counted after a failed load: %s", r);
+  // A partial load is rewritten from the table, and a clean one equals it: the table alone counts.
+  for (ConfigLoad::Status st : {ConfigLoad::Status::Partial, ConfigLoad::Status::Ok}) {
+    resetAll();
+    CHECK(!isError(meshesCmd_add(String("lab"))), "D2d setup");
+    sEspNowDevicesLoad = st;
+    gRegistryFile = RegistryFile::Present;
+    gRegistryFileText = "{\"devices\":[{\"meshId\":1}]}";  // what the file still says
+    addRegistryDevice(0x25, 1);
+    r = meshesCmd_delete(String("lab"));
+    CHECK(isError(r) && has(r, "1 in the device list") && gRegistryFileReads == 0,
+          "D2d status %d: the table in RAM was not the source (%d file reads): %s", (int)st, gRegistryFileReads, r);
+    gState.deviceCount--;
+    r = meshesCmd_delete(String("lab"));
+    CHECK(!isError(r) && gRegistryFileReads == 0, "D2d status %d: the file was asked although the table holds it: %s", (int)st, r);
+  }
 
   // D2e: stored identities that were not read at this start say nothing.
   resetAll();
@@ -561,12 +595,42 @@ static void testDeleteFreesTheSlot() {
   CHECK(gState.passphrase.length() == 0 && gState.derivedKey[0] == 0 && !gState.encryptionEnabled,
         "D4 the deleted mesh's passphrase is still in the stopped instance");
 
+  // D4b: deleting a mesh whose passphrase the instance does not hold leaves the live one alone.
+  resetAll();
+  startEspNow();
+  CHECK(!isError(meshesCmd_setpassphrase(String("primary"), String("prim-passphrase"))), "D4b setup slot 0");
+  CHECK(!isError(meshesCmd_add(String("work"))) && !isError(meshesCmd_setpassphrase(String("work"), String("work-passphrase"))) &&
+            !isError(meshesCmd_setdefault(String("work"))),
+        "D4b setup work: keyed and default, not live until the next start");
+  CHECK(!isError(meshesCmd_add(String("temp"))) && !isError(meshesCmd_setpassphrase(String("temp"), String("temp-passphrase"))),
+        "D4b setup temp");
+  CHECK(gState.passphrase == String("prim-passphrase"), "D4b setup: live passphrase is slot 0's");
+  CHECK(!isError(meshesCmd_delete(String("temp"))), "D4b delete temp");
+  CHECK(gState.passphrase == String("prim-passphrase"), "D4b deleting another mesh replaced the live passphrase");
+
   // D5: a failed save is reported; an unknown label is an error.
   makeBenchLeftover();
   gPersistOk = false;
   CHECK(isError(meshesCmd_delete(String("bench"))), "D5 a failed save was reported as success");
   gPersistOk = true;
   CHECK(isError(meshesCmd_delete(String("nosuch"))), "D5 unknown label");
+
+  // D6: an empty label (a quoted "" on the command line) matches no mesh, also
+  // not an emptied slot: nothing is created, deleted or changed.
+  resetAll();
+  startEspNow();
+  CHECK(!isError(meshesCmd_add(String("lab"))) && !isError(meshesCmd_setpassphrase(String("lab"), String("lab-passphrase"))) &&
+            !isError(meshesCmd_setdefault(String("lab"))) && !isError(meshesCmd_delete(String("primary"))),
+        "D6 setup: slot 0 emptied, lab keyed and default");
+  const int persistsAtD6 = gPersists;
+  const String liveAtD6 = gState.passphrase;
+  CHECK(isError(meshesCmd_setpassphrase(String(""), String("some-passphrase"))), "D6 setpassphrase \"\" was accepted");
+  CHECK(slotIsEmpty(0) && enabledDefaults() == 1 && labelCount("primary") == 0 && gState.passphrase == liveAtD6,
+        "D6 setpassphrase \"\" created a mesh in slot 0 or replaced the live passphrase");
+  CHECK(isError(meshesCmd_delete(String(""))) && isError(meshesCmd_remove(String(""))) && isError(meshesCmd_enable(String(""))) &&
+            isError(meshesCmd_setdefault(String(""))),
+        "D6 an empty label was taken for a mesh");
+  CHECK(gPersists == persistsAtD6 && slotIsEmpty(0) && !gSettings.meshes[0].enabled, "D6 an empty label changed something");
 }
 
 // The settings file keeps slot numbers, so a hole left by delete survives a restart.
@@ -655,6 +719,36 @@ static void testSlotsSurviveARestart() {
         "S5 the shared copy carries key material");
   CHECK(fullText.find("\"slot\":1") != std::string::npos && sharedText.find("\"slot\":1") != std::string::npos,
         "S5 the slot number is not written");
+}
+
+// A new pairing never lands in a slot without a mesh.
+static void testPairingSlot() {
+  const uint8_t none = Settings::N_MESHES;
+  // Q1: no mesh argument: the default mesh (slot 0 on an ordinary device).
+  resetAll();
+  CHECK(meshSlotForPairing(String("")) == 0, "Q1 default on a device with only 'primary'");
+  CHECK(!isError(meshesCmd_add(String("work"))) && !isError(meshesCmd_setdefault(String("work"))), "Q1 setup");
+  CHECK(meshSlotForPairing(String("")) == 1, "Q1 no argument did not go to the default mesh (slot %u)",
+        (unsigned)meshSlotForPairing(String("")));
+  // Q2: slot 0 emptied by delete: no argument still means the default mesh, never the empty slot.
+  CHECK(!isError(meshesCmd_delete(String("primary"))), "Q2 setup: delete slot 0");
+  CHECK(slotIsEmpty(0) && meshSlotForPairing(String("")) == 1, "Q2 a pairing with no mesh argument went to the emptied slot %u",
+        (unsigned)meshSlotForPairing(String("")));
+  // A slot number that holds no mesh is refused, a label or number of a real one is taken.
+  CHECK(meshSlotForPairing(String("0")) == none && meshSlotForPairing(String("2")) == none, "Q2 an empty slot was accepted by number");
+  CHECK(meshSlotForPairing(String("1")) == 1 && meshSlotForPairing(String("work")) == 1, "Q2 the mesh by number or label");
+  CHECK(meshSlotForPairing(String("7")) == none && meshSlotForPairing(String("nosuch")) == none, "Q2 unknown mesh");
+  // Q3: no enabled default: the first enabled mesh; no enabled mesh: the mesh in slot 0, if there is one.
+  resetAll();
+  CHECK(!isError(meshesCmd_add(String("work"))), "Q3 setup");
+  gSettings.meshes[0].isDefault = false;
+  CHECK(meshSlotForPairing(String("")) == 0, "Q3 first enabled mesh");
+  CHECK(!isError(meshesCmd_remove(String("work"))) && !isError(meshesCmd_remove(String("primary"))), "Q3 setup: all disabled");
+  CHECK(meshSlotForPairing(String("")) == 0, "Q3 no enabled mesh: the mesh in slot 0 as before");
+  CHECK(meshSlotForPairing(String("work")) == 1, "Q3 a disabled mesh named by its label, as before");
+  // Q4: no mesh at all: nothing to pair into.
+  resetNeverStarted();
+  CHECK(meshSlotForPairing(String("")) == none && meshSlotForPairing(String("0")) == none, "Q4 a device with no mesh");
 }
 
 static void testOneDefault() {
@@ -805,6 +899,7 @@ int main() {
   testOnlyMeshCanBeRemovedAndDeleted();
   testDeleteFreesTheSlot();
   testSlotsSurviveARestart();
+  testPairingSlot();
   testOneDefault();
   testMessagesNameTheMesh();
   testNameCanBeCleared();

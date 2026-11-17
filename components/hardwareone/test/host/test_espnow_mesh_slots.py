@@ -46,6 +46,8 @@ HINT_HELPERS = (
     'static const char* meshLabelForPassphraseHint()',
     'static void formatNoPassphraseWarning(',
 )
+PAIRING = 'static uint8_t meshSlotForPairing('
+PARSE_MESH_ARG = 'static uint8_t parseMeshArgOrDefault('
 ADD = (
     'static bool isValidMeshLabel(',
     'static int findFreeMeshSlot()',
@@ -101,11 +103,15 @@ def main():
     have_hint = all(m in source for m in HINT_HELPERS)
     have_delete = DELETE in source
     have_guard = have_delete and REGISTRY_GUARD in source  # the delete guard that also reads the device registry
+    have_pairing = PAIRING in source
 
     # Source order matters: each piece only uses what is defined above it.
     order = list(BASE)
     if have_hint:
         order += list(HINT_HELPERS)
+    order.append(PARSE_MESH_ARG)
+    if have_pairing:
+        order.append(PAIRING)
     order += list(ADD)
     order += [m for m in DELETE_HELPERS if m in source]
     order.append(REMOVE)
@@ -139,8 +145,8 @@ def main():
         load_all = definition(identity, 'uint8_t peerIdentityLoadAll()', 'System_ESPNow_Identity.cpp')
         assert load_all.index('gPeerIdentitiesLoaded = false;') < load_all.index('if (!filesystemReady) return 0;'), \
             'a load that cannot run must leave the identities marked as not read'
-        assert load_all.count('gPeerIdentitiesLoaded = true;') == 2, \
-            'the identities are marked read on other than the two complete paths (no directory, finished walk)'
+        assert load_all.count('gPeerIdentitiesLoaded = true;') <= 2, \
+            'the identities are marked read on a path that did not read them'
     if have_hint:
         init = source[source.index('// Restore the encryption passphrase'):]
         init = init[:init.index('// Add broadcast peer')]
@@ -149,8 +155,21 @@ def main():
         assert 'formatNoPassphraseWarning(' in init and "espnowsetpassphrase primary" not in init, \
             'the start-up warning still names the mesh "primary"'
     if have_guard:
-        assert 'gEspNow->passphrase = "";' in init and 'deriveKeyFromPassphrase(bootPw, gEspNow->derivedKey);' in init, \
+        # The branch of a start that found no passphrase: it clears the name and the key.
+        no_passphrase = init[init.index('} else {'):]
+        assert 'gEspNow->passphrase = "";' in no_passphrase and \
+            'deriveKeyFromPassphrase(bootPw, gEspNow->derivedKey);' in no_passphrase, \
             'a start without a passphrase keeps what the stopped instance held'
+    if have_pairing:
+        # Both pair commands take their slot from the helper; neither falls back to slot 0 itself.
+        assert source.count('meshSlotForPairing(a.arg(2))') == 2, 'a pair command does not use meshSlotForPairing'
+        assert 'if (meshId == 0xFE) meshId = 0' not in source, 'a pair command still defaults to slot 0'
+        # The slot 0 passphrase setter no longer creates a mesh.
+        setter = definition(source, 'static void setEspNowPassphrase(const String& passphrase)', 'System_ESPNow.cpp')
+        assert 'm0.label = "primary"' not in setter, 'setEspNowPassphrase still creates "primary"'
+        # An identity that is stored but did not load leaves the cache marked incomplete.
+        assert 'gPeerIdentitiesLoaded = notLoaded == 0;' in load_all and 'VFS::existsGuarded(path, auth)' in load_all, \
+            'a stored identity that was not loaded does not mark the cache incomplete'
 
     harness = (HERE / 'espnow_mesh_slots_harness.cpp').read_text()
     for tag, value in (('// INSERT_MESH_IDENTITY', mesh_identity),
@@ -160,18 +179,28 @@ def main():
 
     print(f'delete subcommand: {"present" if have_delete else "absent"}; '
           f'registry guard: {"present" if have_guard else "absent"}; '
+          f'pairing slot helper: {"present" if have_pairing else "absent"}; '
           f'passphrase hint helpers: {"present" if have_hint else "absent"}', flush=True)
     json_include = a.component.parent / 'hardwareone_libs' / 'ArduinoJson' / 'src'
     with tempfile.TemporaryDirectory(prefix='hw1-espnow-mesh-slots-') as tmp:
         unit, exe = Path(tmp) / 'espnow_mesh_slots.cpp', Path(tmp) / 'espnow_mesh_slots'
         unit.write_text(harness)
+        # parseMeshArgOrDefault reads a slot number with String::toInt, which the
+        # shared stub leaves to each test (others add their own the same way).
+        stub = (a.component / 'test/host/web_batch_stubs/Arduino.h').read_text()
+        anchor = '  char operator[]'
+        assert stub.count(anchor) == 1 and 'toInt' not in stub, 'String stub changed; adjust the toInt insertion'
+        stub = stub.replace(anchor, '  long toInt() const { return std::strtol(text_.c_str(), nullptr, 10); }\n' + anchor)
+        stub = stub.replace('#include <string>', '#include <cstdlib>\n#include <string>', 1)
+        (Path(tmp) / 'Arduino.h').write_text(stub)
         cmd = [a.cxx, '-std=c++17', '-Wall', '-Wextra', '-Werror', '-pedantic', '-Wno-unused-function',
                '-DARDUINOJSON_ENABLE_ARDUINO_STRING=1', '-DARDUINOJSON_ENABLE_ARDUINO_STREAM=0',
                '-DARDUINOJSON_ENABLE_ARDUINO_PRINT=0', '-DARDUINOJSON_ENABLE_PROGMEM=0',
                f'-DHW1_HAVE_MESH_DELETE={1 if have_delete else 0}',
                f'-DHW1_HAVE_REGISTRY_GUARD={1 if have_guard else 0}',
+               f'-DHW1_HAVE_PAIRING_SLOT={1 if have_pairing else 0}',
                f'-DHW1_HAVE_PASSPHRASE_HINT={1 if have_hint else 0}',
-               '-I', str(a.component / 'test/host/web_batch_stubs'), '-I', str(json_include),
+               '-I', tmp, '-I', str(json_include),
                str(unit), '-o', str(exe)]
         if a.sanitize:
             cmd[1:1] = ['-fsanitize=address,undefined', '-fno-sanitize-recover=undefined',

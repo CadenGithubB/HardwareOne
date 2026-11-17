@@ -260,9 +260,14 @@ everything user-visible since the v0.99.99.1 tag.
   last mesh leaves none, as on a new device: the next ESP-NOW start sets up `primary` again, and
   only then (a device that has a mesh in another slot keeps slot 0 empty). The settings file now
   stores each mesh's slot number, so the other meshes, their paired devices and their bond settings
-  stay together across a restart after a delete; older files are read as before. Re-enabling a
-  mesh no longer leaves two default meshes. The web ESP-NOW page has a Delete button on disabled
-  meshes. Host-tested; not yet tested on hardware.
+  stay together across a restart after a delete; older files are read as before. A settings file
+  with an emptied slot below a used one must not be taken to a build from before this change: that
+  build reads the meshes by position and would move them. Pairing with no mesh argument now uses
+  the default mesh (it used slot 0 whatever was there), and a slot number that holds no mesh is
+  refused, so a device cannot be attached to an empty slot that `add` would later give to another
+  mesh. An empty label (`""`) no longer matches an empty slot. Re-enabling a mesh no longer leaves
+  two default meshes. The web ESP-NOW page has a Delete button on disabled meshes. Host-tested;
+  not yet tested on hardware.
 - ESP-NOW messages: the start-up warning for a device without a passphrase and the reply to
   clearing one called the mesh "primary" whatever its label was. The warning now names the default
   mesh (the one whose passphrase a start loads) or says that no enabled mesh is the default, and

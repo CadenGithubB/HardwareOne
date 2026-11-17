@@ -6222,5 +6222,8 @@ read. After deleting a middle slot and a save and load, every mesh is still in i
 numbers load in order. The bootstrap creates `primary` only on a device with no mesh at all, so no second default
 and no second `primary` appear. An instance, running or stopped, drops a deleted mesh's passphrase. Exactly one
 enabled mesh is the default after `enable`; the start-up warning names the mesh a start loads the passphrase
-from; `espnowsetname clear` works only while ESP-NOW is stopped. The suite fails 77 checks on the tree before the
-fix and 31 on its first version (1319eff0), which an independent review found wanting.
+from; `espnowsetname clear` works only while ESP-NOW is stopped. A pairing with no mesh argument goes to the
+default mesh and never to a slot without a mesh (`meshSlotForPairing`); an empty label matches no mesh; deleting
+a mesh whose passphrase is not the live one leaves the live one alone; a registry that failed to load is counted
+from the table and the file together. The suite fails 94 checks on the tree before the fix, and 46 and 12 on
+its first two versions (1319eff0, df7fec4f), each of which an independent review found wanting.
