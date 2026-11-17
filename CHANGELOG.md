@@ -584,23 +584,24 @@ Everything user-visible since v0.99.99.
   newer than the updater it builds); the manifest format is unchanged. Updaters built before this report
   `1.0.0+<suffix>` and cannot be told apart.
 - `versions` (and `versions json`) lists the firmware version and every version a separately built
-  part must match: recovery updater and OTA layout, the ESP-NOW format (shown as `ESPNOW V1 (1.0)`)
-  and the radio's ESP-NOW stack, BLE console channel, phone link and pipe, CM5 control protocol, the
-  C6 companion's reported and expected versions, the local STT model, the ESP-NOW identity and peer
-  file versions, the automations file and backup bundle formats (`automations_file`, `backup_format`)
-  and the ESP-IDF and Arduino core. `status json` carries the same keys as `versions`, and `BUILD_INFO.md`
-  gains a Versions table with the build-time half.
+  part must match: recovery updater and OTA layout, the ESP-NOW format (shown as
+  `mesh v4 on ESP-NOW v1 frames`) and the radio's ESP-NOW stack, BLE console channel, phone link and
+  pipe, CM5 control protocol, the C6 companion's reported and expected versions, the local STT model,
+  the ESP-NOW identity and peer file versions, the automations file and backup bundle formats
+  (`automations_file`, `backup_format`) and the ESP-IDF and Arduino core. `status json` carries the
+  same keys as `versions`, and `BUILD_INFO.md` gains a Versions table with the build-time half.
 - Crash record captures the faulting task, stack-guard bounds and a RISC-V stack scan.
 - Build and release tooling: `tools/vendor_arduino.sh` (a fresh clone vendors and patches arduino-esp32
   3.3.5 in one step), the OTA protocol host suite under the main ctest gate, and the pre-tag gate in
   `RELEASING.md`.
 - `NOTICE.md` listing bundled third-party code and licences; `docs/COMPATIBILITY.md` (peer versions and
-  the 1.x upgrade promise); the 1.0 release-readiness assessment tracked in `docs/`.
+  what an update keeps).
 - Heap-poisoning diagnostic build profile for memory-corruption hunts (bench use).
-- Task-watchdog soak build (bench use, readiness P1-7): `tools/build_board.sh <board> [--config <name>]
-  --wdt-soak` builds in its own `-wdt-soak` directory with a 20 s watchdog that panics, and subscribes
-  the main loop. Ordinary builds are unchanged. `BUILD_INFO.md` now shows the watchdog panic and timeout,
-  and a soak build's manifest gives the `--wdt-soak` command. Configuration names may not end in `-wdt-soak`.
+- Task-watchdog soak build (bench use): `tools/build_board.sh <board> [--config <name>] --wdt-soak`
+  builds in its own `-wdt-soak` directory with a 20 s watchdog that panics, and subscribes the main
+  loop; the commands and watch list are in `RELEASING.md`, "Soak builds". Ordinary builds are
+  unchanged. `BUILD_INFO.md` now shows the watchdog panic and timeout, and a soak build's manifest
+  gives the `--wdt-soak` command. Configuration names may not end in `-wdt-soak`.
 - New `heap_low` event when internal RAM runs low, so automations and `events.log` can react
   (previously a console warning only).
 
@@ -676,7 +677,7 @@ Everything user-visible since v0.99.99.
   `FileNotFoundError`; the pair audit now builds the partition table and blank otadata it reads.
   `OTA_DEVICE_SETUP.md` states that `idf.py erase-flash` is not refused and wipes the recovery
   updater, and gives the re-provisioning steps; the same warning is in `KNOWN_ISSUES.md`, and
-  COMPATIBILITY and the user guide name the OTA re-provisioning steps after the 1.0 full erase.
+  COMPATIBILITY and the user guide name the OTA re-provisioning steps after a full erase.
   Host suite `ota_pair_audit_depends`.
 - Boot automations whose condition is false no longer leak their command strings on every boot.
 - Glasses pages and connects refuse when memory is short instead of rebooting the device.
@@ -701,7 +702,7 @@ Everything user-visible since v0.99.99.
 - `KNOWN_ISSUES.md` lists that `openwifi` holds the shared command executor while it connects: up to
   about 150 s for the best-network hunt (the web "save and connect" button) and up to about 160 s for
   `--index`/`--saved-id` (three 35 s attempts, then the rejoin of the previous network), with the web
-  caller timing out at 60 s. Deferred past 1.0.
+  caller timing out at 60 s. Deferred.
 - Private network names, addresses and account paths replaced with placeholders throughout the tracked
   tree; the Arduino patch README names every patch in replay order and the stale variant note is gone;
   QUICKSTART and README make vendoring step 1; two P4X-EYE Bluetooth reliability investigations and the
