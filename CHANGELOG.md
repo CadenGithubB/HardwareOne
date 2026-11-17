@@ -266,14 +266,21 @@ everything user-visible since the v0.99.99.1 tag.
   the default mesh (it used slot 0 whatever was there), and a slot number that holds no mesh is
   refused, so a device cannot be attached to an empty slot that `add` would later give to another
   mesh. An empty label (`""`) no longer matches an empty slot. Re-enabling a mesh no longer leaves
-  two default meshes. The web ESP-NOW page has a Delete button on disabled meshes. Host-tested;
-  not yet tested on hardware.
+  two default meshes. The web ESP-NOW page has a Delete button on disabled meshes. Host-tested,
+  and checked on two boards (P4X-EYE and XIAO S3, 185508b3) over their consoles: the leftover mesh
+  and name of an earlier test were removed, a mesh was deleted while paired devices blocked it and
+  after they were unpaired, slot 0 stayed empty across an ESP-NOW restart beside another mesh,
+  meshes in slots 0 and 2 kept their slots across a reboot, a pairing with no mesh argument went to
+  the default mesh in slot 1, and a mesh added into the freed slot 0 did not take the paired device
+  over. Not run on hardware: the web page's buttons and the refusals for unreadable lists.
 - ESP-NOW messages: the start-up warning for a device without a passphrase and the reply to
   clearing one called the mesh "primary" whatever its label was. The warning now names the default
   mesh (the one whose passphrase a start loads) or says that no enabled mesh is the default, and
   the reply to clearing the passphrase of the mesh in slot 0 says that this also disables the mesh
   and how to turn it back on. A start with no passphrase in the settings no longer keeps one that
-  was set and removed again while ESP-NOW was stopped. Host-tested; not yet tested on hardware.
+  was set and removed again while ESP-NOW was stopped. Host-tested; on the two boards the warning
+  named `primary` while that was the default and `bench` once that was. The slot 0 reply was not
+  run on hardware.
 
 ### Changed
 - Command names have one form: lower-case letters and digits. The 22 camelCase `mqtt*` commands and
@@ -380,8 +387,12 @@ everything user-visible since the v0.99.99.1 tag.
 - Bond mode: bond requests (heartbeat, settings, schema, manifest, status, capability, sensor
   streaming) were accepted from any paired device, not only the bond partner. Another paired device
   could keep the partner looking online, reset the sync, read the settings and schema, or switch
-  sensor streaming. They are accepted only from the configured partner now. Host-tested; not yet
-  tested on hardware.
+  sensor streaming. They are accepted only from the configured partner now. Host-tested, and
+  checked on two boards (a P4X-EYE build with bond mode on, and a XIAO S3; 185508b3): the bond
+  formed and synced (capabilities, a 61.9 kB manifest, settings, automation list), bond commands
+  worked both ways, and with another partner configured on the P4 the XIAO's bond frames were
+  dropped with one log line a minute ("12 more dropped") and none of its requests answered; with
+  the right partner set again the bond re-formed.
 - ESP-NOW receive path: a device without the mesh passphrase could make a device discard a peer's
   genuine encrypted frames (after acknowledging them) by sending forged frames with that peer's
   message numbers first, and could fill the peer tables with invented addresses so real peers got no
