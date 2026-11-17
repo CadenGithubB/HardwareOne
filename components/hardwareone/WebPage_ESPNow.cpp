@@ -117,7 +117,8 @@ static esp_err_t webEspNowSendJsonEscapedString(httpd_req_t* req, const char* s)
 // Failure mode: if the lazy ps_alloc fails (PSRAM exhausted, fragmented, etc.),
 // the handler sends an empty {"messages":[]} response and the next request will
 // retry the allocation. Once it succeeds, it sticks.
-#if CONFIG_SPIRAM_SUPPORT || CONFIG_ESP32S3_SPIRAM_SUPPORT
+// Same PSRAM test as MESSAGES_PER_DEVICE (System_ESPNow.h): CONFIG_SPIRAM.
+#if defined(CONFIG_SPIRAM) && CONFIG_SPIRAM
   static constexpr int kWebMessagesBufCount = 50;  // ~15.8 KB in PSRAM
 #else
   static constexpr int kWebMessagesBufCount = 15;  // ~4.7 KB DRAM (no-PSRAM fallback)

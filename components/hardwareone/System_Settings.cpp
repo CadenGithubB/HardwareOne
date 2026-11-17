@@ -2251,8 +2251,11 @@ const char* cmd_espnowenabled(const String& argsInput) {
   String valStr = argsInput;
   valStr.trim();
   if (valStr.length() == 0) return "Error: invalid arguments — Usage: espnowenabled <0|1>";
-  const char* p = valStr.c_str();
-  bool enabled = (*p == '1' || strncasecmp(p, "true", 4) == 0);
+  // Any other word is refused. Read as off, `espnowenabled on` stored false
+  // and stopped ESP-NOW.
+  const int v = parseBoolArg(valStr);
+  if (v < 0) return kCommandReplyNotOnOff;
+  const bool enabled = (v == 1);
   setSetting(gSettings.espnowEnabled, enabled);
   if (!enabled) {
 #if ENABLE_ESPNOW
@@ -2272,8 +2275,9 @@ const char* cmd_httpAutoStart(const String& argsInput) {
   String valStr = argsInput;
   valStr.trim();
   if (valStr.length() == 0) return "Error: invalid arguments — Usage: httpautostart <0|1>";
-  const char* p = valStr.c_str();
-  bool enabled = (*p == '1' || strncasecmp(p, "true", 4) == 0);
+  const int v = parseBoolArg(valStr);
+  if (v < 0) return kCommandReplyNotOnOff;
+  const bool enabled = (v == 1);
   setSetting(gSettings.httpAutoStart, enabled);
   snprintf(getDebugBuffer(), 1024, "httpautostart set to %s", enabled ? "1" : "0");
   return getDebugBuffer();
@@ -2287,8 +2291,9 @@ const char* cmd_httpsEnabled(const String& argsInput) {
   String valStr = argsInput;
   valStr.trim();
   if (valStr.length() == 0) return "Error: invalid arguments — Usage: httpsenabled <0|1>";
-  const char* p = valStr.c_str();
-  bool enabled = (*p == '1' || strncasecmp(p, "true", 4) == 0);
+  const int v = parseBoolArg(valStr);
+  if (v < 0) return kCommandReplyNotOnOff;
+  const bool enabled = (v == 1);
   setSetting(gSettings.httpsEnabled, enabled);
   snprintf(getDebugBuffer(), 1024, "httpsenabled set to %s (takes effect after reboot)", enabled ? "1" : "0");
   return getDebugBuffer();

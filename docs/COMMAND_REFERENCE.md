@@ -203,7 +203,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `espnowfirsttimesetup` | A | Set first time setup flag: <0\|1><br/>`Usage: espnowfirsttimesetup <0\|1>` |
 | `espnowforget` | A | Forget a peer's crypto identity + close its session: 'espnowforget <name_or_mac>'.<br/>`Usage: espnowforget <name_or_mac>` |
 | `espnowfriendlyname` |  | Get/set friendly display name: 'espnowfriendlyname [name]'.<br/>`Usage: espnowfriendlyname [<name>] (<=47 chars) espnowfriendlyname clear` |
-| `espnowhbmode` |  | Get/set heartbeat mode: 'espnowhbmode [public\|private]'.<br/>`Usage: espnowhbmode [public\|private]` |
+| `espnowhbmode` | A | Get/set heartbeat mode: 'espnowhbmode [public\|private]'.<br/>`Usage: espnowhbmode [public\|private]` |
 | `espnowheartbeatbroadcast` | A | Set heartbeat broadcast: <0\|1><br/>`Usage: espnowheartbeatbroadcast <0\|1>` |
 | `espnowheartbeatinterval` | A | Set master heartbeat interval: <1000-60000 ms><br/>`Usage: espnowheartbeatinterval <1000..60000>` |
 | `espnowidentity` |  | Show long-term Ed25519 identity (MAC, pub key, createdAtSec, regenCount). |
@@ -273,10 +273,10 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `espnowzone` |  | Get/set device zone: 'espnowzone [name]'.<br/>`Usage: espnowzone [Counter\|Door\|Ceiling\|...] espnowzone clear` |
 | `openespnow` | A | Initialize ESP-NOW communication. |
 | `openstream` | A | Start streaming all output to ESP-NOW caller (admin, remote only). |
-| `testcleanup` |  | Test cleanup of stale topology streams. |
-| `testconcurrent` |  | Test concurrent topology streams (simulated). |
+| `testcleanup` | A | Test cleanup of stale topology streams. |
+| `testconcurrent` | A | Test concurrent topology streams (simulated). |
 | `testfilelock` |  | Test file transfer lock acquire/release. |
-| `teststreams` |  | Test topology stream management functions. |
+| `teststreams` | A | Test topology stream management functions. |
 
 ## c6
 

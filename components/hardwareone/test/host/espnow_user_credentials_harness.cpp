@@ -109,10 +109,16 @@ static String hashUserPassword(const String& password) {
 // Password and role doubles: root/root-pass is this device's admin; carol is
 // a valid non-admin account.
 static int passwordChecks = 0;
+// An account whose name and password are each 31 bytes, the most a remote
+// command's credential fields hold.
+static const char kName31[] = "operator-with-a-31-byte-name-01";
+static const char kPass31[] = "a-password-of-exactly-31-bytes!";
+static_assert(sizeof(kName31) == 32 && sizeof(kPass31) == 32, "31 bytes each");
 bool isValidUser(const String& user, const String& password) {
   ++passwordChecks;
   return (user == "root" && password == "root-pass") ||
-         (user == "carol" && password == "carol-pass");
+         (user == "carol" && password == "carol-pass") ||
+         (user == kName31 && password == kPass31);
 }
 bool isAdminUser(const String& user) { return user == "root"; }
 void secureClearString(String& s) { s = ""; }
@@ -437,6 +443,54 @@ static void scenarioSyncGates() {
   finish(name);
 }
 
+// A user name or password longer than the 31 bytes v4_handle_cmd holds is
+// refused, not cut to fit and authenticated as the shorter credential.
+static void scenarioRemoteCredentialLength() {
+  const char* name = "remote command: a user name or password that does not fit is refused";
+  begin();
+  const std::string user(kName31), pass(kPass31);
+  remoteCommand(kPeerA, 1, (user + ":" + pass + ":status").c_str());
+  check(accepted.size() == 1 && accepted[0].user == user, name,
+        "a 31-byte name with a 31-byte password still runs its command");
+
+  int checks = passwordChecks;
+  remoteCommand(kPeerA, 2, (user + "x:" + pass + ":status").c_str());
+  check(accepted.size() == 1, name,
+        "a longer name is not cut to the account its first 31 bytes spell");
+  check(lastReply(2, false, "Auth failed"), name, "it answers Auth failed with its msgId");
+  check(passwordChecks == checks, name, "no password is checked for it");
+  check(credentialAttemptFailures(SOURCE_ESPNOW, "espnow") == 1, name,
+        "it counts as one failed attempt under ESP-NOW's key");
+  check(countEvents(SYSEVT_LOGIN_FAIL) == 1 && events.back().subject.empty(), name,
+        "the login failure names no account");
+  remoteCommand(kPeerA, 3, (user + ":" + pass + ":status").c_str());
+  check(accepted.size() == 2 && credentialAttemptFailures(SOURCE_ESPNOW, "espnow") == 1, name,
+        "the 31-byte account's own login does not own that failure (it stays counted)");
+
+  checks = passwordChecks;
+  remoteCommand(kPeerA, 4, (user + ":" + pass + "x:status").c_str());
+  check(accepted.size() == 2 && lastReply(4, false, "Auth failed"), name,
+        "a longer password is not cut to the 31 bytes that would match");
+  check(passwordChecks == checks && credentialAttemptFailures(SOURCE_ESPNOW, "espnow") == 2,
+        name, "it is refused unchecked and counted");
+
+  const std::string longName(64, 'n');
+  for (uint32_t id = 5; id <= 7; ++id) {
+    remoteCommand(kPeerB, id, (longName + ":" + pass + ":status").c_str());
+    check(lastReply(id, false, "Auth failed"), name, "each further over-long name is refused");
+  }
+  check(countEvents(SYSEVT_LOGIN_LOCKED) == 1, name, "the fifth refusal locks ESP-NOW's key");
+  checks = passwordChecks;
+  remoteCommand(kPeerB, 8, (longName + ":" + pass + ":status").c_str());
+  check(lastReply(8, false, "Auth locked out. Retry in 30s"), name,
+        "a locked key answers an over-long name with the lockout");
+  remoteCommand(kPeerA, 9, "root:root-pass:status");
+  check(lastReply(9, false, "Auth locked out. Retry in 30s") && passwordChecks == checks &&
+            accepted.size() == 2,
+        name, "and the lock they set holds for a right password");
+  finish(name);
+}
+
 int main() {
   scenarioRemoteLockout();
   scenarioPlaintextAndBond();
@@ -445,6 +499,7 @@ int main() {
   scenarioSyncCreates();
   scenarioSyncCheckedWrite();
   scenarioSyncGates();
+  scenarioRemoteCredentialLength();
   std::fprintf(stderr, "checks=%d\n", gChecks);
   std::printf("%d scenario(s) failed\n", gFailures);
   return gFailures == 0 ? 0 : 1;

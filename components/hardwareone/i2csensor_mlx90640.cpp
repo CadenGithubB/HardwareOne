@@ -530,8 +530,9 @@ const char* cmd_thermalrollingminmaxenabled(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String _arg = argsInput; _arg.trim();
   if (_arg.length() == 0) return "Error: invalid arguments — Usage: thermalrollingminmaxenabled <0|1>";
-  const char* p = _arg.c_str();
-  bool enabled = (*p == '1' || strncasecmp(p, "true", 4) == 0);
+  const int v = parseBoolArg(_arg);
+  if (v < 0) return kCommandReplyNotOnOff;
+  const bool enabled = (v == 1);
   setSetting(gSettings.thermalRollingMinMaxEnabled, enabled);
   BROADCAST_PRINTF("thermalRollingMinMaxEnabled set to %s", enabled ? "1" : "0");
   return "[Thermal] Setting updated";
@@ -1197,9 +1198,9 @@ const char* cmd_thermalinterpolationenabled(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String _arg = argsInput; _arg.trim();
   if (_arg.length() == 0) return "Error: invalid arguments — Usage: thermalinterpolationenabled <0|1>";
-  const char* p = _arg.c_str();
-  // Accept 0, 1, true, false (case insensitive)
-  bool enabled = (*p == '1' || strncasecmp(p, "true", 4) == 0);
+  const int v = parseBoolArg(_arg);
+  if (v < 0) return kCommandReplyNotOnOff;
+  const bool enabled = (v == 1);
   setSetting(gSettings.thermalInterpolationEnabled, enabled);
   BROADCAST_PRINTF("thermalInterpolationEnabled set to %s", enabled ? "1" : "0");
   return "[Thermal] Setting updated";

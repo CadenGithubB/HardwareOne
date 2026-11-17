@@ -651,6 +651,11 @@ inline String getCapabilityListLong(uint32_t mask, const CapabilityName* names) 
 // slot is a ReceivedTextMessage (324 B). So per-peer cost ≈ 2 * N * 324 B:
 //   PSRAM  : N=250 → ~158 KB/peer (in PSRAM — cheap on the 8 MB part). Capped at
 //            250 (not 256) because head/tail/count below are uint8_t (max 255).
+//            "PSRAM" is CONFIG_SPIRAM, the one option every target with
+//            PSRAM sets (hasPsramAvail() tests it, System_MemUtil.h). The older names
+//            CONFIG_SPIRAM_SUPPORT / CONFIG_ESP32S3_SPIRAM_SUPPORT are aliases
+//            ESP-IDF keeps only for esp32 and esp32s3, where they follow
+//            CONFIG_SPIRAM; testing them left the ESP32-P4 (32 MB) at 16.
 //   no-PSRAM: N=16 → ~10 KB/peer (in internal DRAM — tight; raised from 5 on
 //             request to keep a more useful local history on plain ESP32 boards).
 // PSRAM depth was raised 100 → 250 so a remote command's streamed output (a
@@ -661,7 +666,7 @@ inline String getCapabilityListLong(uint32_t mask, const CapabilityName* names) 
 // remote command at a time and finish paging its result before issuing another
 // (see docs/BLE_SECURE_CHANNEL_FRAMING.md). The race-free fix is a per-reqId
 // snapshot buffer; this avoids that larger change for now.
-#if CONFIG_SPIRAM_SUPPORT || CONFIG_ESP32S3_SPIRAM_SUPPORT
+#if defined(CONFIG_SPIRAM) && CONFIG_SPIRAM
   #define MESSAGES_PER_DEVICE 250
 #else
   #define MESSAGES_PER_DEVICE 16

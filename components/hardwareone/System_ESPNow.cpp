@@ -7320,21 +7320,43 @@ static void v4_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_
     char password[32];
     size_t userLen = firstColon - cmdPayload;
     size_t passLen = secondColon - firstColon - 1;
-    if (userLen >= sizeof(username)) userLen = sizeof(username) - 1;
-    if (passLen >= sizeof(password)) passLen = sizeof(password) - 1;
+    // A user name or password that does not fit is refused, never cut to fit:
+    // the first 31 bytes of a longer name can be another account's whole name.
+    // A name that does not fit names no account from here on (username stays
+    // empty), so the failure is not put down to the account it was cut to.
+    const bool userFits = userLen < sizeof(username);
+    const bool credentialFits = userFits && passLen < sizeof(password);
+    if (!userFits) userLen = 0;
+    if (!credentialFits) passLen = 0;
     memcpy(username, cmdPayload, userLen); username[userLen] = '\0';
     memcpy(password, firstColon + 1, passLen); password[passLen] = '\0';
     
     BROADCAST_PRINTF("[ESP-NOW] Remote command from %s (user=%s): %s",
                      deviceName, username, safeActualCmd.c_str());
+    if (!credentialFits) {
+      BROADCAST_PRINTF("[ESP-NOW] Refused remote command from %s: %s longer than %u bytes",
+                       deviceName, userFits ? "password" : "user name",
+                       (unsigned)(sizeof(username) - 1));
+    }
     
     // Quick auth check (runs in espnow_task - small stack usage). Every peer's
     // password commands count under ESP-NOW's one attempt-table key; a locked
     // key is refused before the password is checked.
+    // A credential that does not fit is checked against nothing, but it is
+    // still one attempt under that key: a locked key answers it like any other
+    // and it counts toward the lock, exactly as the cut credential's failed
+    // check did, so the refusal gives a sender no uncounted attempts.
     unsigned long lockoutRetryMs = 0;
-    const CredentialCheck check = checkCredentialAttempt(
-        SOURCE_ESPNOW, credentialAttemptConsolePeer(SOURCE_ESPNOW), username,
-        password, &lockoutRetryMs);
+    const char* const attemptPeer = credentialAttemptConsolePeer(SOURCE_ESPNOW);
+    CredentialCheck check = CredentialCheck::Invalid;
+    if (credentialFits) {
+      check = checkCredentialAttempt(SOURCE_ESPNOW, attemptPeer, username,
+                                     password, &lockoutRetryMs);
+    } else if (!credentialAttemptAllowed(SOURCE_ESPNOW, attemptPeer, &lockoutRetryMs)) {
+      check = CredentialCheck::LockedOut;
+    } else {
+      credentialAttemptRecord(SOURCE_ESPNOW, attemptPeer, username, false);
+    }
     if (check == CredentialCheck::Valid) {
       authOk = true;
     } else if (check == CredentialCheck::LockedOut) {
@@ -18602,7 +18624,7 @@ extern const CommandEntry espNowCommands[] = {
   { "espnowmeshttl", "Get/set the multi-hop budget: 'espnowmeshttl [1-10]'.", false, cmd_espnow_meshttl, "Usage: espnowmeshttl [<1..10>]\n       How many hops this node's relay-eligible frames may travel. 1 = single hop (no multi-hop).\n       Applies to broadcast text/time sync and to routed unicast; heartbeats and pairing are always single-hop." },
   { "espnowchannel", "Get/set preferred ESP-NOW channel: 'espnowchannel [1-13|auto|resync]'. No arg shows a checker (actual vs expected). Set the SAME value on both devices to pair off-grid.", true, cmd_espnow_channel, "Usage: espnowchannel [<1..13>|auto|resync]\n       (no arg) = show preference, actual radio channel, expected, and an OK/MISMATCH check.\n       auto (0) = follow WiFi, pin fallback when offline. 1-13 = force this channel when not joined to WiFi.\n       resync   = force the radio back onto the correct channel now (no setting change).\n       Two devices only hear each other on the same channel — set both the same for field use." },
   { "espnowsetname", "Get/set device name: 'espnowsetname [name]'.", true, cmd_espnow_setname, "Usage: espnowsetname [<name>]   (<=19 bytes; letters, numbers, - and _ only)" },
-  { "espnowhbmode", "Get/set heartbeat mode: 'espnowhbmode [public|private]'.", false, cmd_espnow_hbmode, "Usage: espnowhbmode [public|private]" },
+  { "espnowhbmode", "Get/set heartbeat mode: 'espnowhbmode [public|private]'.", true, cmd_espnow_hbmode, "Usage: espnowhbmode [public|private]" },
   { "espnowmeshrole", "Get/set mesh role: 'espnowmeshrole [worker|master|backup]'.", true, cmd_espnow_meshrole, "Usage: espnowmeshrole [worker|master|backup]" },
   { "espnowmeshmaster", "Get/set master MAC: 'espnowmeshmaster [MAC]'.", true, cmd_espnow_meshmaster, "Usage: espnowmeshmaster [<AA:BB:CC:DD:EE:FF>]" },
   { "espnowmeshbackup", "Get/set backup MAC: 'espnowmeshbackup [MAC]'.", true, cmd_espnow_meshbackup, "Usage: espnowmeshbackup [<AA:BB:CC:DD:EE:FF>]" },
@@ -18677,9 +18699,11 @@ extern const CommandEntry espNowCommands[] = {
   { "espnowreject", "Reject a pending incoming pair request: 'espnowreject [<mac_or_name>]'.", true, cmd_espnow_reject, "Usage: espnowreject [<mac_or_name>]" },
   
   // ---- ESP-NOW Testing Commands ----
-  { "teststreams", "Test topology stream management functions.", false, cmd_test_streams },
-  { "testconcurrent", "Test concurrent topology streams (simulated).", false, cmd_test_concurrent },
-  { "testcleanup", "Test cleanup of stale topology streams.", false, cmd_test_cleanup },
+  // The three that rewrite the live topology collection (gTopoStreams and the
+  // request counters) are admin-only; testfilelock only prints the slot table.
+  { "teststreams", "Test topology stream management functions.", true, cmd_test_streams },
+  { "testconcurrent", "Test concurrent topology streams (simulated).", true, cmd_test_concurrent },
+  { "testcleanup", "Test cleanup of stale topology streams.", true, cmd_test_cleanup },
   { "testfilelock", "Test file transfer lock acquire/release.", false, cmd_test_filelock },
   
   // ---- ESP-NOW Settings ----
@@ -19033,6 +19057,8 @@ static size_t peerHistoryStoreInit() {
   }
   BROADCAST_PRINTF("[ESP-NOW] Message history allocated: %d slots (~%u KB, grows to %d max)",
                    blocks, (unsigned)(blockBytes / 1024), capacity);
+  BROADCAST_PRINTF("[ESP-NOW] Message history depth: %d per peer in each direction (~%u KB per peer)",
+                   (int)MESSAGES_PER_DEVICE, (unsigned)(sizeof(PeerMessageHistory) / 1024));
   return tableBytes + blockBytes;
 }
 
