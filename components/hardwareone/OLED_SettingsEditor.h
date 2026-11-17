@@ -37,8 +37,6 @@ struct SettingsEditorContext {
   bool hasChanges;            // Whether current edit has unsaved changes
   const SettingsModule* currentModule;
   const SettingEntry* currentEntry;
-  String errorMessage;        // Error message to display
-  unsigned long errorDisplayUntil;  // Timestamp when error should clear
   SettingsEditKind editKind;  // Active VALUE_EDIT variant
   int optionIndex;            // Pick-list cursor (index into parsed options)
   int optionCount;            // Parsed option count for the current entry

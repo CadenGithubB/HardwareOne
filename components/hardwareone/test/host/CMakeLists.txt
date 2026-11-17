@@ -1473,6 +1473,9 @@ add_test(
           ${CMAKE_CURRENT_LIST_DIR}/test_map_live_ui.py
           ${SETUP_MQTT_TEST_ARGS})
 add_test(
+  NAME oled_health
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_oled_health.py)
+add_test(
   NAME health_logging_ui
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_health_logging_ui.py
@@ -2887,6 +2890,23 @@ endforeach()
 
 add_test(NAME oled_toast
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_oled_toast.py)
+# The OLED console history owner (OLED_ConsoleCore.h + OLED_ConsoleBuffer.cpp):
+# checked sanitizer bounds, contiguous record IDs, the byte budget, loss
+# accounting, the identity-boundary fence and concurrent producer/screen access.
+add_test(NAME oled_console_buffer
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_oled_console_buffer.py)
+# The CLI Output page (OLED_Mode_CLI.cpp) over that owner at the 64/88/128-pixel
+# canvases: Live/Paused/Reader, stable selection, arrivals, expiry, the pinned
+# Reader copy, busy-ring retry, lock-free drawing and session reset.
+add_test(NAME oled_cli_output
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_oled_cli_output.py)
+# The bounded list text field (OLED_TextFieldCore.h + OLED_TextField.cpp):
+# pixel bounds at 64/88/128, ellipsis degradation, the 1000 ms / 20 px/s /
+# 1500 ms marquee, rebuild continuity, selection resets, view and modal
+# pauses, rollover, hostile text. The layout, health and logging-UI suites run
+# the shared renderers through the same production primitive.
+add_test(NAME oled_text_field
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_oled_text_field.py)
 
 add_test(NAME wifi_command_errors
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_wifi_command_errors.py)

@@ -54,7 +54,8 @@ static int candidateCount = 0;
   std::snprintf(out, outSize, "%s", execReply.c_str());
   return execOk && std::strncmp(out, "Error", 5) != 0;
 }
-[[maybe_unused]] static void oledToastShow(const char* message, uint32_t = 3000) { toasts.emplace_back(message); }
+enum class OledUiIcon { ERROR };
+[[maybe_unused]] static void oledToastShow(const char* message, uint32_t = 3000, OledUiIcon = OledUiIcon::ERROR) { toasts.emplace_back(message); }
 [[maybe_unused]] static void oledMarkDirty() { ++dirtyMarks; }
 // Owner internals the OLED must not call directly.
 [[maybe_unused]] static bool espnowDeletePeerRuntime(const uint8_t*) { ++deleteCalls; return true; }
@@ -154,7 +155,7 @@ int main() {
   beginCase("U3 unpair unknown peer", ESPNOW_VIEW_DEVICE_CONFIG);
   execReply = "Error: Device 'AA:BB:CC:01:02:03' not found. Use 'espnowdevices' to see paired devices.";
   oledEspNowUnpairDevice();
-  expectRefusedUnpair("Unpair failed");
+  expectRefusedUnpair(execReply.substr(7).c_str());
 
   // U4: a replaced display session (false, empty reply) falls back to the generic toast.
   beginCase("U4 unpair replaced session", ESPNOW_VIEW_DEVICE_CONFIG);
@@ -178,7 +179,7 @@ int main() {
   sEspNow.initialized = false;
   execReply = "Error: ESP-NOW not initialized. Run 'openespnow' first.";
   oledEspNowUnpairDevice();
-  expectRefusedUnpair("Unpair failed");
+  expectRefusedUnpair(execReply.substr(7).c_str());
 
   // P1: A on the closed discovery screen opens the window through the owner.
   beginCase("P1 discovery open accepted", ESPNOW_VIEW_PAIRING);
@@ -264,14 +265,14 @@ int main() {
   CHECK(gOledEspNowState.currentView == ESPNOW_VIEW_MAIN_MENU, "B returns to the main menu");
   CHECK(commands.empty() && noOwnerCalls() && toasts.empty(), "B with the window closed submits nothing");
 
-  // P8: an owner refusal other than the admin gate toasts the generic text.
+  // P8: an owner refusal other than the admin gate preserves the service text.
   beginCase("P8 discovery open owner error", ESPNOW_VIEW_PAIRING);
   execReply = "Error: Set a mesh passphrase first (espnowsetpassphrase). Pairing needs the shared mesh key.";
   CHECK(pairingViewInput(INPUT_BUTTON_A), "A on the discovery screen is consumed");
   CHECK(commands.size() == 1 && commands[0] == "espnowpairmode 120",
         "A submits 'espnowpairmode 120' to the owner");
   CHECK(openCalls == 0, "the OLED never calls espnowPairModeOpen itself");
-  CHECK(toasts.size() == 1 && toasts[0] == "Discovery failed", "an owner error toasts 'Discovery failed'");
+  CHECK(toasts.size() == 1 && toasts[0] == execReply.substr(7), "an owner error preserves the refusal");
 
   if (failures) {
     std::fprintf(stderr, "%d OLED ESP-NOW ownership check(s) failed\n", failures);

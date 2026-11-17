@@ -268,8 +268,11 @@ static std::vector<std::string> oledRequests;
 static bool oledGuestBlocksMutate() { return oledGuest; }
 static void healthKickPollBurst() { ++pollRequests; }
 [[maybe_unused]] static bool healthRequireAdmin() { return adminUser; }  // 0.99.97.4 OLED gate
-static void executeOledCommand(const String& command) { oledRequests.emplace_back(command.c_str()); }
-[[maybe_unused]] static uint32_t sHealthDeniedUntilMs;
+enum class OledUiIcon { ERROR };
+static unsigned oledErrorCount;
+static void oledToastShow(const char*, uint32_t, OledUiIcon) { ++oledErrorCount; }
+static bool healthHandleGraphInput(uint32_t) { return false; }
+static void healthOpenGraphs() {}
 [[maybe_unused]] static unsigned oledDirtyMarks;
 [[maybe_unused]] static void oledMarkDirty() { ++oledDirtyMarks; }
 static String oledUser = "bob";
@@ -481,6 +484,7 @@ int main() {
   CHECK(oledRequests.size() == 2 && oledRequests[0] == "healthlogging toggle" && oledRequests[1] == "healthlogging toggle");
   CHECK(!healthInputHandler(0, 0, INPUT_BUTTON_B) && oledRequests.size() == 2);
 
+  audit.clear(); ringChanges.clear();
   // Ring controls and the forced history refresh: web, OLED and CLI submit the
   // same command under their own identity. The registry rows (ring control,
   // ring history force) decide admin; nothing else does.
@@ -505,7 +509,7 @@ int main() {
   size_t oledBefore = oledRequests.size();
   CHECK(healthInputHandler(0, 0, INPUT_BUTTON_A));
   CHECK(oledRequests.size() == oledBefore + 1 && oledRequests.back() == "ring control collection on");
-  CHECK(lastOledResult == refusal && sHealthDeniedUntilMs != 0 && oledDirtyMarks == 1);
+  CHECK(lastOledResult == refusal && oledErrorCount != 0);
   sHealthSel = HEALTH_ACTION_LOW_POWER;
   CHECK(healthInputHandler(0, 0, INPUT_BUTTON_X));
   CHECK(oledRequests.back() == "ring control lowpower on" && lastOledResult == refusal);
@@ -530,10 +534,10 @@ int main() {
   r = request("action=history-force");
   CHECK(webRequests.back().line == "ring history force");
   CHECK(r.status == "403 Forbidden" && r.output == forceRefusal);
-  sHealthSel = HEALTH_ACTION_HISTORY_FORCE; sHealthDeniedUntilMs = 0;
+  sHealthSel = HEALTH_ACTION_HISTORY_FORCE; oledErrorCount = 0;
   CHECK(healthInputHandler(0, 0, INPUT_BUTTON_A));
   CHECK(oledRequests.back() == "ring history force" && lastOledResult == forceRefusal);
-  CHECK(sHealthDeniedUntilMs != 0);
+  CHECK(oledErrorCount != 0);
   CHECK(!registryExecute(serial, "ring history force", out) && out == forceRefusal);
   gCliValidateOnly = true;  // the validate pass is refused at the same row
   CHECK(!registryExecute(serial, "ring history force", out) && out == forceRefusal);
@@ -598,19 +602,19 @@ int main() {
   CHECK(r.status == "202 Accepted" && webRequests.back().line == "ring control lowpower off" && r.output ==
         "OK: low-power preference saved; unsupported on the active ring profile, so no command was sent");
   ringStatus.lowPowerLastError = G2_RING_ERR_NONE;
-  sHealthDeniedUntilMs = 0;
+  oledErrorCount = 0;
   sHealthSel = HEALTH_ACTION_COLLECTION;  // on -> off
   CHECK(healthInputHandler(0, 0, INPUT_BUTTON_A) && oledRequests.back() == "ring control collection off");
   sHealthSel = HEALTH_ACTION_LOW_POWER;   // off -> preserve
   CHECK(healthInputHandler(0, 0, INPUT_BUTTON_A) && oledRequests.back() == "ring control lowpower preserve");
   CHECK(lastOledResult == "OK: low-power policy accepted; awaiting verified readback observation");
-  CHECK(sHealthDeniedUntilMs == 0);
+  CHECK(oledErrorCount == 0);
   CHECK(registryExecute(serial, "ring control Collection Preserve", out) &&
         out == "OK: health collection policy accepted; 0x0E has no proven readback, so ACK is not observed state");
   r = request("action=history-force");
   CHECK(r.status == "202 Accepted" && r.output == "OK: R1 forced typed history refresh queued");
   sHealthSel = HEALTH_ACTION_HISTORY_FORCE;
-  CHECK(healthInputHandler(0, 0, INPUT_BUTTON_A) && sHealthDeniedUntilMs == 0);
+  CHECK(healthInputHandler(0, 0, INPUT_BUTTON_A) && oledErrorCount == 0);
   CHECK(registryExecute(serial, "ring history force", out));
   CHECK((ringChanges == std::vector<std::string>{
       "collection=on", "lowpower=off", "collection=off", "lowpower=preserve", "collection=preserve",
@@ -625,7 +629,7 @@ int main() {
   ringAccepted = false;
   r = request("action=history-force");
   CHECK(r.status == "409 Conflict" && r.output.rfind("Error: forced history refresh not queued", 0) == 0);
-  CHECK(healthInputHandler(0, 0, INPUT_BUTTON_A) && sHealthDeniedUntilMs != 0);
+  CHECK(healthInputHandler(0, 0, INPUT_BUTTON_A) && oledErrorCount != 0);
   ringAccepted = true; routeCommands = false;
   std::printf("health_logging_ui: %u checks passed\n", checks);
 }

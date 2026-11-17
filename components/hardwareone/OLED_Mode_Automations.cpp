@@ -11,7 +11,9 @@
 #include "System_Automation.h"
 #include "System_Settings.h"
 #include "System_EventCatalog.h"  // shared indexed event picker
-#include "OLED_Utils.h"   // oledRunCommand, executeOLEDCommandWithResult
+#include "OLED_Utils.h"   // oledRunCommand, executeOledCommandWithResult
+#include "OLED_TextField.h"
+#include "OLED_UI.h"
 
 // ============================================================================
 // Automation List Data Model
@@ -33,23 +35,10 @@ struct AutomationRenderData {
 EXT_RAM_BSS_ATTR static AutomationRenderData autoRenderData;
 static const unsigned long AUTO_REFRESH_INTERVAL = 5000;
 
-// Action feedback
-static const char* autoActionMsg = nullptr;
-static unsigned long autoActionMsgTime = 0;
 static bool autoForceRefresh = false;
 
-// How long an action toast (Ran/Done/Armed/Disabled/Deleted/...) stays up.
-static const unsigned long AUTO_TOAST_MS = 1500;
-
-// Show a brief action toast in the list footer. The OLED render gate is
-// dirty-driven (oledIsDirty), so a toast set right after a single input frame
-// would paint exactly once and then freeze — it would never update to a result
-// and never auto-dismiss. Marking the display dirty across the toast window
-// makes it actually animate in and clear itself once the window elapses.
 static void autoShowToast(const char* msg) {
-  autoActionMsg = msg;
-  autoActionMsgTime = millis();
-  oledMarkDirtyUntil(autoActionMsgTime + AUTO_TOAST_MS + 100);  // +margin so the clear frame renders
+  oledToastShow(msg, 2500, OledUiIcon::SUCCESS);
 }
 
 // Pending delete target: Y arms the global confirm overlay, whose callback
@@ -100,7 +89,6 @@ static unsigned long sWizDelayMs    = 0;
 static int  sWizCursor = 0;          // pick-list cursor
 static int  sWizScroll = 0;          // pick-list scroll offset
 static int  sWizConfirmScroll = 0;   // first confirm-screen row shown
-static char sWizResultMsg[24] = {0}; // failure toast (autoActionMsg points here)
 
 // Type options -> (menu label, wire type= value).
 struct WizType { const char* label; const char* wireType; };
@@ -223,7 +211,6 @@ static void wizResetAll() {
 
 void oledAutomationsModeResetSessionState() {
   wizResetAll();
-  memset(sWizResultMsg, 0, sizeof(sWizResultMsg));
 }
 
 // Open a keyboard step. `numbers` preselects the digits/symbols mode (the mode
@@ -273,8 +260,7 @@ static void wizCreate() {
   else if (strcmp(wt, "event") == 0) {
     SystemEventCatalogKindInfo kind{};
     if (!wizSelectedKind(&kind)) {
-      snprintf(sWizResultMsg, sizeof(sWizResultMsg), "Event unavailable");
-      autoShowToast(sWizResultMsg);
+      oledToastShow("Event unavailable", oled_message::kErrorDurationMs, OledUiIcon::ERROR);
       return;
     }
     cmd += " on=" + String(kind.name);
@@ -284,15 +270,8 @@ static void wizCreate() {
   cmd += wizQuote(sWizCommand);
   cmd += " enabled=1";
 
-  char out[64];
-  bool ok = executeOledCommandWithResult(cmd, out, sizeof(out));
-  const bool failed = !ok;
-  if (failed) {
-    // Detail is in the log; keep the user on CONFIRM so A retries, B cancels.
-    snprintf(sWizResultMsg, sizeof(sWizResultMsg), "Add failed");
-    autoShowToast(sWizResultMsg);
-    return;
-  }
+  // Preserve the command owner's refusal and retain the draft for retry.
+  if (!oledRunCommand(cmd)) return;
   autoShowToast("Added");
   autoForceRefresh = true;
   sWizStep = AW_NONE;
@@ -361,7 +340,7 @@ static void wizKeyboardDone(const String& textIn) {
         return;
       }
       if (!wizStoreText(sWizName, sizeof(sWizName), text)) {
-        autoShowToast("Too long");
+        oledToastShow("Too long", 8000, OledUiIcon::ERROR);
         wizStartKeyboard(AW_NAME, "Name:", false);
         return;
       }
@@ -374,7 +353,7 @@ static void wizKeyboardDone(const String& textIn) {
                   isdigit(text[3]) && isdigit(text[4]) &&
                   text.substring(0, 2).toInt() < 24 && text.substring(3).toInt() < 60;
       if (!good) {
-        autoShowToast("Need HH:MM");
+        oledToastShow("Enter a time as HH:MM", 8000, OledUiIcon::ERROR);
         wizStartKeyboard(AW_DAILY, "Time HH:MM", true);
         return;
       }
@@ -388,7 +367,7 @@ static void wizKeyboardDone(const String& textIn) {
         return;
       }
       if (!wizStoreText(sWizCommand, sizeof(sWizCommand), text)) {
-        autoShowToast("Too long");
+        oledToastShow("Too long", 8000, OledUiIcon::ERROR);
         wizStartKeyboard(AW_COMMAND, "Command:", false);
         return;
       }
@@ -418,16 +397,12 @@ static void wizDrawList() {
   int y = listTop;
   for (int i = 0; i < vis && (sWizScroll + i) < n; i++) {
     const int idx = sWizScroll + i;
-    if (idx == sWizCursor) {
-      oledDisplay->fillRect(0, y, 128, lineH, DISPLAY_COLOR_WHITE);
-      oledDisplay->setTextColor(DISPLAY_COLOR_BLACK, DISPLAY_COLOR_WHITE);
-    } else {
-      oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-    }
-    oledDisplay->setCursor(2, y + 1);
-    char row[22];
-    snprintf(row, sizeof(row), "%s", wizListLabel(idx));
-    oledDisplay->print(row);
+    const bool selected = idx == sWizCursor;
+    if (selected) oledDisplay->fillRect(0, y, 128, lineH, DISPLAY_COLOR_WHITE);
+    // Bounded label ending before the arrow column (OLED_TextField.h).
+    oledTextFieldDraw(oledDisplay, 2, y + 1, 122 - 2 - 2, wizListLabel(idx),
+                      selected ? DISPLAY_COLOR_BLACK : DISPLAY_COLOR_WHITE, DISPLAY_COLOR_WHITE,
+                      selected, &sWizCursor);
     y += lineH;
   }
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
@@ -462,7 +437,7 @@ static int wizConfirmMaxScroll() {
 
 static void wizConfirmRowText(int row, char* line, size_t size) {
   if (row == 0) {
-    snprintf(line, size, "New: %.14s", sWizName);
+    snprintf(line, size, "New: %s", sWizName);  // the row drawer bounds it
     return;
   }
   if (row == 1) {
@@ -493,10 +468,11 @@ static void wizDrawConfirm() {
   if (sWizConfirmScroll < 0) sWizConfirmScroll = 0;
 
   int y = OLED_CONTENT_START_Y;
-  char line[24];
+  char line[64];
   for (int i = 0; i < vis && sWizConfirmScroll + i < rows; i++) {
     wizConfirmRowText(sWizConfirmScroll + i, line, sizeof(line));
-    oledDisplay->setCursor(0, y); oledDisplay->print(line);
+    oledTextFieldDraw(oledDisplay, 0, y, 122 - 2, line, DISPLAY_COLOR_WHITE, DISPLAY_COLOR_WHITE,
+                      false, &sWizConfirmScroll);
     y += kWizConfirmLineH;
   }
   if (sWizConfirmScroll > 0) {
@@ -657,9 +633,9 @@ void displayAutomations() {
       oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
     }
 
+    const uint16_t ink = isSelected ? DISPLAY_COLOR_BLACK : DISPLAY_COLOR_WHITE;
     if (isNewRow) {
-      oledDisplay->setCursor(2, y + 1);
-      oledDisplay->print("+ New");
+      oledTextFieldDraw(oledDisplay, 2, y + 1, listWidth - 3, "+ New", ink, ink, false, &autoRenderData);
       continue;
     }
 
@@ -674,12 +650,10 @@ void displayAutomations() {
       oledDisplay->drawCircle(dotX + 1, dotY + 1, 2, dotColor);
     }
 
-    // Name (truncated to fit)
-    oledDisplay->setCursor(8, y + 1);
-    char truncName[13];
-    strncpy(truncName, item.name, 12);
-    truncName[12] = '\0';
-    oledDisplay->print(truncName);
+    // The whole name in a field beside the dot, inside the list pane; the
+    // selected row scrolls a long name (OLED_TextField.h).
+    oledTextFieldDraw(oledDisplay, 8, y + 1, listWidth - 9, item.name, ink, ink, isSelected,
+                      &autoRenderData);
   }
 
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
@@ -735,17 +709,7 @@ void displayAutomations() {
   oledDisplay->setCursor(128 - pageStrWidth, 0);
   oledDisplay->print(pageStr);
 
-  // Action feedback overlay
-  if (autoActionMsg && (millis() - autoActionMsgTime) < AUTO_TOAST_MS) {
-    int msgY = OLED_CONTENT_START_Y + OLED_CONTENT_HEIGHT - 9;
-    oledDisplay->fillRect(0, msgY, 84, 9, DISPLAY_COLOR_WHITE);
-    oledDisplay->setTextColor(DISPLAY_COLOR_BLACK);
-    oledDisplay->setCursor(2, msgY + 1);
-    oledDisplay->print(autoActionMsg);
-    oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-  } else {
-    autoActionMsg = nullptr;
-  }
+
 }
 
 // ============================================================================
@@ -788,15 +752,7 @@ static void autoRunSelected() {
   // queue). Show a terminal result — the old "Running..." was set AFTER the
   // blocking call already returned, so it never reflected success/failure and,
   // without a dirty-window, froze on screen forever.
-  char out[64];
-  bool ok = executeOledCommandWithResult(String(cmd), out, sizeof(out));
-  const bool failed = !ok;
-
-  if (isAfterDelay) {
-    autoShowToast(failed ? "Arm failed" : "Armed");
-  } else {
-    autoShowToast(failed ? "Run failed" : "Done");
-  }
+  if (oledRunCommand(String(cmd))) autoShowToast(isAfterDelay ? "Armed" : "Done");
 }
 
 static void autoToggleSelected() {

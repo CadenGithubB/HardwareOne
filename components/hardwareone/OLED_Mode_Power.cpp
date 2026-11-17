@@ -90,36 +90,11 @@ static void populatePowerSleepMenu() {
 // Power Menu Display Functions
 // ============================================================================
 
-// Main Power keeps a 1-line status above the menu. oledScrollRenderSimple always
-// starts at OLED_CONTENT_START_Y, so this is the same single-line window +
-// scrollbar math, offset one row (matches the ESP-NOW status+list pattern).
+// Main Power keeps a 1-line status above the menu; the shared compact renderer
+// draws the list one row below it with bounded labels and the scrollbar
+// (OLED_TextField.h), the same list the Power submenus use.
 static void renderPowerMainList() {
-  oledScrollClampSelection(&sPowerMainScroll);
-
-  const int lineHeight = 8;
-  const int listStartY = OLED_CONTENT_START_Y + lineHeight;
-  const int visibleStart = sPowerMainScroll.scrollOffset;
-  const int visibleEnd = min(sPowerMainScroll.itemCount,
-                             sPowerMainScroll.scrollOffset + sPowerMainScroll.visibleLines);
-
-  int yPos = listStartY;
-  for (int i = visibleStart; i < visibleEnd; i++) {
-    oledDisplay->setCursor(0, yPos);
-    oledDisplay->print(i == sPowerMainScroll.selectedIndex ? "> " : "  ");
-    if (sPowerMainScroll.items[i].line1) oledDisplay->print(sPowerMainScroll.items[i].line1);
-    yPos += lineHeight;
-  }
-
-  if (sPowerMainScroll.itemCount > sPowerMainScroll.visibleLines) {
-    const int scrollbarX = SCREEN_WIDTH - 1;
-    const int barH = sPowerMainScroll.visibleLines * lineHeight;
-    oledDisplay->drawFastVLine(scrollbarX, listStartY, barH, DISPLAY_COLOR_WHITE);
-    const int thumbH = max(4, (barH * sPowerMainScroll.visibleLines) / sPowerMainScroll.itemCount);
-    const int thumbY = listStartY +
-                       (barH - thumbH) * sPowerMainScroll.scrollOffset /
-                           max(1, sPowerMainScroll.itemCount - sPowerMainScroll.visibleLines);
-    oledDisplay->fillRect(scrollbarX - 1, thumbY, 3, thumbH, DISPLAY_COLOR_WHITE);
-  }
+  oledScrollRenderSimple(oledDisplay, &sPowerMainScroll, true, OLED_CONTENT_START_Y + 8);
 }
 
 void displayPower() {

@@ -467,7 +467,6 @@ extern int loggingMenuSelection;
 // Mode entry points and shared state defined across the OLED files.
 struct FileBrowserRenderData;  // System_FileManager.h
 extern FileBrowserRenderData fileBrowserRenderData;
-int getCliViewerSelectedIndex();
 void oledAuthModeInit();
 void oledAuthModeResetSessionState();
 void oledCliInputModeInit();

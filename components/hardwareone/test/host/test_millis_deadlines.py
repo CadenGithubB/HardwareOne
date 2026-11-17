@@ -50,21 +50,16 @@ SITES = (
     ("G2_Page_LLM.cpp", "noticeUntil", 1),
     ("OLED_Mode_Transcription.cpp", "v.pollAt", 2),
     ("OLED_Mode_Camera.cpp", "retryAt", 2),
-    ("OLED_Mode_R1_Health.cpp", "sHealthDeniedUntilMs", 2),
     # File-scope deadlines that were compared with millis() through < or >=.
-    ("OLED_Mode_Auth.cpp", "errorDisplayUntil", 4),
-    ("OLED_Mode_ChangePassword.cpp", "errorDisplayUntil", 2),
-    ("OLED_SettingsEditor.cpp", "gSettingsEditor.errorDisplayUntil", 1),
-    ("OLED_SettingsEditor.cpp", "quickStatusExpireMs", 1),
+    # (The login, password, settings and health screens no longer keep an error
+    # deadline of their own: their errors go through the shared feedback queue,
+    # whose lifetime test_oled_toast.py runs across the clock wrap.)
     ("WebServer_Events.cpp", "gSessions[sessIdx].noticeBurstUntil", 1),
 )
 
 # File-scope deadlines that outlive their moment and are set back to 0 once passed.
 CLEARED = (
     ("OLED_Mode_Camera.cpp", "retryAt"),
-    ("OLED_Mode_R1_Health.cpp", "sHealthDeniedUntilMs"),
-    ("OLED_Mode_Auth.cpp", "errorDisplayUntil"),
-    ("OLED_Mode_ChangePassword.cpp", "errorDisplayUntil"),
 )
 
 

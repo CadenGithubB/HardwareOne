@@ -132,9 +132,8 @@ static inline void jsonSanitizeServedBytes(char* buf, int n) {
 // sequence truncated by the end of the buffer. Adding a longer replacement
 // without that guard would corrupt the buffer.
 //
-// Deliberately different from OledConsoleBuffer::append, which DROPS multi-byte
-// sequences outright: dropping turns "café" into "caf" and a word can
-// vanish silently. Substituting is louder and shorter.
+// The OLED console history (OLED_ConsoleCore.h) folds through this same
+// function, so "café" reads "cafe" there too instead of losing the word.
 static inline size_t utf8FoldToAscii(char* s, size_t n) {
   // U+00C0..U+00FF folded to a base letter, so European text stays readable
   // instead of becoming a row of '?'. Index is (second byte - 0x80).

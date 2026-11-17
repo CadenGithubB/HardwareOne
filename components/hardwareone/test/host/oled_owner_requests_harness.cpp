@@ -152,6 +152,7 @@ struct FakeDisplay {
 };
 static FakeDisplay gFakeDisplay;
 static FakeDisplay* oledDisplay = &gFakeDisplay;
+static void prepareCameraPreviewData() {}
 static bool displayIsReady() { return true; }
 #define OLED_TRANSACTION(code) do { if (displayIsReady()) { code; } } while (0)
 
@@ -170,7 +171,9 @@ static bool oledIsGuestSession() {
   return false;
 }
 static bool oledModeAllowedForGuest(OledMode) { return true; }
-static void oledToastShow(const char*, unsigned long) { ownerEffect("toast"); }
+namespace oled_message { constexpr unsigned kErrorDurationMs=8000; }
+enum class OledUiIcon { ERROR };
+static void oledToastShow(const char*, unsigned long, OledUiIcon) { ownerEffect("toast"); }
 
 static std::vector<OledMode> gModeStack;
 static void pushOledMode(OledMode mode) {
@@ -329,7 +332,6 @@ static void oledApplyPendingSessionBoundary() {
 }
 // oledUpdate prepares the shared camera viewer each pass (OLED_Mode_Camera.cpp);
 // the viewer has its own coverage, so the owner-request cases only need the call.
-static void prepareCameraPreviewData() {}
 
 // INSERT_TRANSITION
 

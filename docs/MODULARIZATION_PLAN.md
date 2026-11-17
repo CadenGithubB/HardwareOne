@@ -13,7 +13,26 @@ shared per-user JSON settings saves. Subsequent milestones follow
 the [cleanup-series guidance](../CONTRIBUTING.md#structural-cleanups-history-the-09997x-series), with
 a bounded scope and an explicit completion condition for each change.
 
-**Latest code milestone: shared checked JSON settings saves.**
+**Latest code milestone: expanding OLED Health and graph viewer (2026-11-02).**
+
+Health actions use the shared list renderer and content-height capacity. All
+seven actions fit on P4; compact OLEDs scroll without footer overlap. The new
+graph viewer uses owned chronological snapshots of the existing Health series,
+without changing G2 lens selection or creating another history owner. Five
+focused sanitized suites and the P4/display-disabled baseline builds passed.
+See [implementation and deployment](OLED_HEALTH.md).
+
+**Earlier milestone: shared OLED feedback (2026-11-02).**
+
+Event notifications and local action feedback now share one OLED severity,
+queue, renderer and lifetime policy. Confirmation prompts pause feedback;
+display-session replacement clears it. Screen-local transient error boxes and
+footer results, plus the unused ribbon state machine, have been removed.
+Nineteen focused host suites and the `qtpy-oled` / display-disabled
+`xiao-default` builds passed. Physical display qualification remains outstanding.
+See [implementation and verification](OLED_FEEDBACK.md).
+
+**Earlier milestone: shared checked JSON settings saves.**
 
 Main, debug, version-stamp and per-user settings reuse one checked temporary
 JSON writer in Settings. Callers keep their existing document, locking, cache

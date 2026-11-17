@@ -57,6 +57,7 @@ class Adafruit_SSD1306 {
  private:
   int cx_ = 0, cy_ = 0;
 };
+#include "oled_text_field_op_double.h"  // list labels go through the bounded field policy
 
 struct NavEvents {
   bool up, down, left, right;

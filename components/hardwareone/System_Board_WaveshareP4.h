@@ -62,3 +62,7 @@
 #define CAMERA_NATIVE_WIDTH 800
 #define CAMERA_NATIVE_HEIGHT 640
 #define CAMERA_BUFFER_COUNT 2
+// The module faces sideways on this assembly: frames are turned a quarter
+// turn counter-clockwise to read upright, so every delivered size is portrait
+// (VGA arrives as 480x640). H Mirror and V Flip act on the upright frame.
+#define CAMERA_MOUNT_ROTATION 90

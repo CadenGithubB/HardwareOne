@@ -221,6 +221,14 @@ const I2cSensorEntry i2cSensors[] = {
     ENABLE_PRESENCE_SENSOR, []() -> int { return gSettings.presenceBus; }, nullptr, I2C_DEVICE_PRESENCE },
   
   // Detected Infrastructure (no CLI modules)
+  // ES8311 speaker codec of the Waveshare P4 board: the board fixes its bus.
+#if defined(WS_SPEAKER_I2C_BUS) && ENABLE_SPEAKER
+  { 0x18, "ES8311", "Speaker Audio Codec", "Everest Semiconductor", false, 0x00, 0, NULL, NULL, NULL, 100000, 500,
+    true, []() -> int { return WS_SPEAKER_I2C_BUS; }, nullptr, I2C_DEVICE_COUNT },
+#else
+  { 0x18, "ES8311", "Speaker Audio Codec", "Everest Semiconductor", false, 0x00, 0, NULL, NULL, NULL, 100000, 500,
+    false, nullptr, nullptr, I2C_DEVICE_COUNT },
+#endif
   { 0x3D, "SSD1306", "OLED 128x64 Display", "Adafruit", true, 0x3C, 0, NULL, NULL, NULL, 400000, 50,
     ENABLE_OLED_DISPLAY, []() -> int { return gSettings.oledBus; }, nullptr, I2C_DEVICE_COUNT },
 #if BATTERY_BACKEND_FUEL_GAUGE

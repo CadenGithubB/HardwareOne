@@ -14,6 +14,9 @@
 #include <Adafruit_SSD1306.h>
 #include "OLED_Display.h"
 #include "OLED_Utils.h"
+#include "OLED_TextField.h"
+
+static const int kWizardRowsTag = 0;  // text-field owner for the wizard rows
 #include "System_SetupWizard.h"
 #include "System_FirstTimeSetup.h"
 #include "HAL_Input.h"
@@ -160,12 +163,17 @@ void renderWizardPage() {
     } else {
       oledDisplay->setTextColor(SSD1306_WHITE);
     }
-    // Keep the current value visible beside its label; long names remain editable.
-    const int valueWidth = min((int)strlen(value), 12);
-    char line[22];
-    snprintf(line, sizeof(line), "%.*s %.*s", 19 - valueWidth, label, valueWidth, value);
-    oledDisplay->setCursor(1, y);
-    oledDisplay->print(line);
+    // Label and value keep separate fields: the value right-aligned in a fixed
+    // column of at most twelve glyphs (as before), the label ending before it.
+    // These pages redraw on input, so labels end in an ellipsis rather than
+    // scrolling (OLED_TextField.h).
+    const bool selected = index == selection;
+    int valueW = (int)strlen(value) * 6;
+    if (valueW > 72) valueW = 72;
+    const int valueX = 120 - valueW;  // the arrow column is at 121
+    const uint16_t ink = selected ? SSD1306_BLACK : SSD1306_WHITE;
+    oledTextFieldDraw(oledDisplay, 1, y, valueX - 6 - 1, label, ink, SSD1306_WHITE, false, &kWizardRowsTag);
+    oledTextFieldDraw(oledDisplay, valueX, y, valueW, value, ink, SSD1306_WHITE, false, &kWizardRowsTag);
   }
   oledDisplay->setTextColor(SSD1306_WHITE);
   if (scrollOffset > 0) {
@@ -617,7 +625,8 @@ void handleModePage(SetupWizardPage page, SetupWizardResult& result, bool& runni
         oledDisplay->setTextColor(SSD1306_WHITE);
         oledDisplay->print(sel == i ? ">" : " ");
         oledDisplay->print(sel == i ? " [X] " : " [ ] ");
-        oledDisplay->println(sub->modes[i].label);
+        oledTextFieldDraw(oledDisplay, 36, 20 + i * 11, SCREEN_WIDTH - 36, sub->modes[i].label,
+                          SSD1306_WHITE, SSD1306_WHITE, false, &kWizardRowsTag);
       }
       const int footerY = OLED_HEADER_HEIGHT + OLED_CONTENT_HEIGHT;
       oledDisplay->drawFastHLine(0, footerY, 128, SSD1306_WHITE);
@@ -719,7 +728,8 @@ bool getOledSetupModeSelection(int& setupMode) {
         const SetupModeOption* option = getSetupModeOption(i);
         oledDisplay->setCursor(0, 24 + i * 10);
         oledDisplay->print(selection == i ? "> " : "  ");
-        oledDisplay->println(option->label);
+        oledTextFieldDraw(oledDisplay, 12, 24 + i * 10, SCREEN_WIDTH - 12, option->label,
+                          SSD1306_WHITE, SSD1306_WHITE, false, &kWizardRowsTag);
       }
       const int footerY = OLED_HEADER_HEIGHT + OLED_CONTENT_HEIGHT;
       oledDisplay->drawFastHLine(0, footerY, 128, SSD1306_WHITE);

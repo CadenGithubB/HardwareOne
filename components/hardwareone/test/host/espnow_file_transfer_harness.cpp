@@ -448,7 +448,9 @@ bool isMeshMode() { return false; }
 bool espnowPeerExists(const uint8_t*) { return true; }
 static std::vector<std::string> hints, toasts;
 void cliHint(const char* text) { hints.push_back(text); }
-void oledToastShow(const char* text) { toasts.push_back(text); }
+namespace oled_message { constexpr uint32_t kErrorDurationMs = 8000; }
+enum class OledUiIcon : uint8_t { NONE, INFO, WARNING, ERROR, SUCCESS, QUESTION };
+void oledToastShow(const char* text, uint32_t = 3000, OledUiIcon = OledUiIcon::NONE) { toasts.push_back(text); }
 static char debugBuffer[1024];
 bool ensureDebugBuffer() { return true; }
 char* getDebugBuffer() { return debugBuffer; }

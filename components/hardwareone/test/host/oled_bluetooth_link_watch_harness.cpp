@@ -70,6 +70,7 @@ struct FakeDisplay {
   void println(const char* t) { print(t); put('\n'); }
   void println() { put('\n'); }
 };
+#include "oled_text_field_op_double.h"  // the screen's rows draw labels through the shipping policy
 static FakeDisplay gScreen;
 static FakeDisplay* oledDisplay = &gScreen;
 
@@ -161,7 +162,10 @@ static bool executeOledCommandWithResult(const char* cmd, char* out, size_t n) {
   return true;
 }
 static std::vector<std::string> gToasts;  // every toast, for the code's no-toast check
-static void oledToastShow(const char* message, uint32_t = 3000) { gToast = message; gToasts.push_back(message); }
+// Shared feedback (OLED_UI.h is a stand-in here): the icon is recorded with
+// the message so error refusals stay distinguishable in these checks.
+enum class OledUiIcon : uint8_t { NONE = 0, INFO, WARNING, ERROR, SUCCESS, QUESTION };
+static void oledToastShow(const char* message, uint32_t = 3000, OledUiIcon = OledUiIcon::NONE) { gToast = message; gToasts.push_back(message); }
 // oledRunCommandAsync (OLED_Utils.cpp): queued on cmd_exec, its done callback.
 typedef void (*OledCommandDoneFn)(bool ok, const void* context);
 static std::vector<std::string> gAsyncCommands;
@@ -384,6 +388,13 @@ static Rows render(OledMode mode) {
     for (char& c : text) if (c == '\x18' || c == '\x19') c = ' ';
     while (!text.empty() && text.back() == ' ') text.pop_back();
     CHECK(text.size() <= 21);
+    // The live marker '*' sits in a fixed column past the bounded label field;
+    // the checks read it as "label *".
+    if (text.size() > 1 && text.back() == '*') {
+      size_t end = text.size() - 1;
+      while (end > 0 && text[end - 1] == ' ') --end;
+      text = text.substr(0, end) + " *";
+    }
     out[r] = text;
   }
   return out;

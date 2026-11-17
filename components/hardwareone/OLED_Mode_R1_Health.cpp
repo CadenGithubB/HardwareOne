@@ -15,12 +15,13 @@
 #include <Adafruit_SSD1306.h>
 #include <cstdio>
 #include <cstring>
+#include <esp_attr.h>
 
 #include "G2_Ring.h"
 #include "G2_Health.h"
 #include "HAL_Input.h"
 #include "OLED_Utils.h"
-#include "System_Deadline.h"   // deadlinePending: the [DENIED] flash
+#include "OLED_UI.h"
 #include "System_SensorLogging.h"
 #include "System_Settings.h"
 #include "System_User.h"
@@ -33,35 +34,162 @@ enum HealthAction : uint8_t {
   HEALTH_ACTION_HISTORY,
   HEALTH_ACTION_HISTORY_FORCE,
   HEALTH_ACTION_LOW_POWER,
+  HEALTH_ACTION_GRAPHS,
   HEALTH_ACTION_COUNT,
 };
 
 static uint8_t  sHealthSel        = 0;
-static uint8_t  sHealthActionTop  = 0;
+EXT_RAM_BSS_ATTR static OledScrollState sHealthActions;
+EXT_RAM_BSS_ATTR static char sHealthActionLabels[HEALTH_ACTION_COUNT][32];
 static bool     sHealthWasConn    = false;
-static uint32_t sHealthDeniedUntilMs = 0;
+enum HealthView : uint8_t { HEALTH_OVERVIEW, HEALTH_GRAPHS, HEALTH_GRAPH };
+static HealthView sHealthView = HEALTH_OVERVIEW;
+struct HealthGraphChoice { const char* label; G2HealthMetric metric; bool daily; };
+static const HealthGraphChoice kHealthGraphs[] = {
+  {"Heart rate", HEALTH_METRIC_HR, false},
+  {"HRV", HEALTH_METRIC_HRV, false},
+  {"SpO2", HEALTH_METRIC_SPO2, false},
+  {"Temperature", HEALTH_METRIC_TEMP, false},
+  {"Battery", HEALTH_METRIC_BATTERY, false},
+  {"Daily: Heart rate", HEALTH_METRIC_HR, true},
+  {"Daily: HRV", HEALTH_METRIC_HRV, true},
+  {"Daily: SpO2", HEALTH_METRIC_SPO2, true},
+};
+static constexpr int kHealthGraphCount = sizeof(kHealthGraphs) / sizeof(kHealthGraphs[0]);
+EXT_RAM_BSS_ATTR static OledScrollState sHealthGraphs;
+EXT_RAM_BSS_ATTR static G2HealthGraphSnapshot sHealthGraphSnapshot;  // OLED owner; no borrowed data
+
+static void healthOpenGraphs() {
+  sHealthView = HEALTH_GRAPHS;
+  oledScrollInit(&sHealthGraphs, nullptr, oledVisibleRows(8));
+  for (const auto& graph : kHealthGraphs) oledScrollAddItem(&sHealthGraphs, graph.label);
+}
+
+static bool healthHandleGraphInput(uint32_t newlyPressed) {
+  if (sHealthView == HEALTH_OVERVIEW) return false;
+  if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
+    sHealthView = sHealthView == HEALTH_GRAPH ? HEALTH_GRAPHS : HEALTH_OVERVIEW;
+    oledMarkDirty();
+    return true;
+  }
+  if (sHealthView == HEALTH_GRAPHS) {
+    if (oledScrollHandleNav(&sHealthGraphs)) return true;
+    if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A) || INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
+      sHealthView = HEALTH_GRAPH;
+      oledMarkDirty();
+      return true;
+    }
+  } else {
+    if (gNavEvents.left || gNavEvents.up) {
+      sHealthGraphs.selectedIndex = (sHealthGraphs.selectedIndex + kHealthGraphCount - 1) % kHealthGraphCount;
+      oledMarkDirty(); return true;
+    }
+    if (gNavEvents.right || gNavEvents.down) {
+      sHealthGraphs.selectedIndex = (sHealthGraphs.selectedIndex + 1) % kHealthGraphCount;
+      oledMarkDirty(); return true;
+    }
+    if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A) || INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
+      if (!oledGuestBlocksMutate()) (void)healthStartPollBurst();
+      return true;
+    }
+  }
+  // Graph/list input belongs to this subview, not the overview actions.
+  return true;
+}
+
+static void healthGraphValue(char* out, size_t cap, int value, G2HealthMetric metric) {
+  if (metric == HEALTH_METRIC_TEMP) {
+    const int magnitude = value < 0 ? -value : value;
+    snprintf(out, cap, "%s%d.%d", value < 0 ? "-" : "", magnitude / 10, magnitude % 10);
+  } else snprintf(out, cap, "%d", value);
+}
+
+static void displayHealthGraph() {
+  oledScrollClampSelection(&sHealthGraphs);
+  const auto& choice = kHealthGraphs[sHealthGraphs.selectedIndex];
+  const int top = OLED_CONTENT_START_Y;
+  oledDisplay->setCursor(0, top);
+  oledDisplay->print(choice.label);
+  if (!g2HealthGraphSnapshot(choice.metric, choice.daily, sHealthGraphSnapshot)) {
+    oledDisplay->setCursor(0, top + 12); oledDisplay->print("Graph unavailable");
+    return;
+  }
+  const auto& data = sHealthGraphSnapshot;
+  oledDisplay->setCursor(0, top + 8);
+  if (!data.count) {
+    oledDisplay->print(g2RingIsConnected() ? "No samples. X: Poll" : "No samples. Ring offline");
+    return;
+  }
+  int lo = data.points[0].value, hi = lo;
+  for (size_t i = 1; i < data.count; ++i) {
+    if (data.points[i].value < lo) lo = data.points[i].value;
+    if (data.points[i].value > hi) hi = data.points[i].value;
+  }
+  if (lo == hi) { --lo; ++hi; }
+  char value[16];
+  healthGraphValue(value, sizeof(value), data.points[data.count-1].value, choice.metric);
+  oledDisplay->print(value);
+  oledDisplay->print(choice.metric == HEALTH_METRIC_HR ? " bpm" :
+                     choice.metric == HEALTH_METRIC_HRV ? " ms" :
+                     choice.metric == HEALTH_METRIC_TEMP ? " C" : "%");
+  oledDisplay->print(g2RingIsConnected() ? "" : " offline");
+  const int x0 = 25, y0 = top + 16;
+  const int width = SCREEN_WIDTH - x0 - 3;
+  const int height = OLED_CONTENT_HEIGHT - 24;
+  if (width < 4 || height < 4) return;
+  oledDisplay->drawLine(x0, y0, x0, y0 + height - 1, DISPLAY_FG);
+  oledDisplay->drawLine(x0, y0 + height - 1, x0 + width - 1, y0 + height - 1, DISPLAY_FG);
+  healthGraphValue(value, sizeof(value), hi, choice.metric);
+  oledDisplay->setCursor(0, y0); oledDisplay->print(value);
+  healthGraphValue(value, sizeof(value), lo, choice.metric);
+  oledDisplay->setCursor(0, y0 + height - 8); oledDisplay->print(value);
+  const uint32_t oldestAge = data.points[0].ageMs;
+  const uint32_t newestAge = data.points[data.count-1].ageMs;
+  const bool dailyTime = choice.daily && data.endEpoch > data.startEpoch;
+  const uint32_t span = dailyTime ? data.endEpoch - data.startEpoch : oldestAge - newestAge;
+  int prevX = 0, prevY = 0;
+  for (size_t i = 0; i < data.count; ++i) {
+    uint32_t position = dailyTime ? (data.points[i].epoch >= data.startEpoch ? data.points[i].epoch - data.startEpoch : 0)
+                                  : oldestAge - data.points[i].ageMs;
+    if (position > span) position = span;
+    const int x = x0 + (span ? static_cast<uint64_t>(position) * (width-1) / span : (width-1)/2);
+    const int y = y0 + height - 1 - (data.points[i].value - lo) * (height-1) / (hi-lo);
+    if (i) oledDisplay->drawLine(prevX, prevY, x, y, DISPLAY_FG);
+    oledDisplay->drawPixel(x, y, DISPLAY_FG);
+    prevX = x; prevY = y;
+  }
+  oledDisplay->setCursor(x0, top + OLED_CONTENT_HEIGHT - 8);
+  if (choice.daily) oledDisplay->print("Daily history");
+  else if (data.backfilled) oledDisplay->print("Samples + history");
+  else {
+    char range[24];
+    snprintf(range, sizeof(range), "%lum-%lum ago", (unsigned long)(oldestAge/60000), (unsigned long)(newestAge/60000));
+    oledDisplay->print(range);
+  }
+}
 
 // Preserve -> On -> Off -> Preserve: the order A cycles a ring control.
+static const char* healthDesiredLabel(G2RingDesiredState value) {
+  return value == G2_RING_PRESERVE ? "keep" : g2RingDesiredStateName(value);
+}
+static const char* healthObservedLabel(G2RingObservedState value) {
+  return value == G2_RING_OBS_UNKNOWN ? "?" : g2RingObservedStateName(value);
+}
+
 static const char* healthNextDesiredToken(G2RingDesiredState current) {
   return current == G2_RING_PRESERVE ? "on"
        : current == G2_RING_ON       ? "off"
        : "preserve";
 }
 
-// Runs a ring control command as the display's identity. The command owns the
-// admin rule and the executor audits it; a refusal (role, or the ring not
-// ready) flashes [DENIED] in the header.
-static void healthRunCommand(const char* line) {
-  char out[96];
-  if (executeOledCommandWithResult(line, out, sizeof(out))) return;
-  sHealthDeniedUntilMs = millis() + 1500;
-  oledMarkDirty();
-}
+// Preserve the command owner's explanation through shared OLED feedback.
+static void healthRunCommand(const char* line) { (void)oledRunCommand(line); }
 
 static void healthOnEnter(bool isForward) {
   if (!isForward) return;
   sHealthSel        = 0;
-  sHealthActionTop  = 0;
+  sHealthView = HEALTH_OVERVIEW;
+  oledScrollInit(&sHealthActions, nullptr, oledVisibleRows(8, 32));
   sHealthWasConn    = g2RingIsConnected();
   if (sHealthWasConn && g2RingHealthPageRefreshSupported()) {
     (void)healthStartPollBurst();
@@ -102,6 +230,15 @@ static void displayR1Health() {
   oledDisplay->setTextSize(1);
   oledDisplay->setTextColor(SSD1306_WHITE);
 
+  if (sHealthView == HEALTH_GRAPHS) {
+    oledScrollRenderSimple(oledDisplay, &sHealthGraphs);
+    return;
+  }
+  if (sHealthView == HEALTH_GRAPH) {
+    displayHealthGraph();
+    oledMarkDirty();
+    return;
+  }
   const bool conn = g2RingIsConnected();
   if (conn && !sHealthWasConn &&
       g2RingHealthPageRefreshSupported()) {
@@ -111,11 +248,7 @@ static void displayR1Health() {
 
   oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
   oledDisplay->print("R1 HEALTH ");
-  // A passed notice is set back to 0, so it cannot read as pending again 24.9 days on.
-  if (sHealthDeniedUntilMs != 0 && !deadlinePending(sHealthDeniedUntilMs, millis())) sHealthDeniedUntilMs = 0;
-  if (deadlinePending(sHealthDeniedUntilMs, millis()))  // 0: nothing was refused
-                               oledDisplay->println("[DENIED]");
-  else if (!bleSubsystemActive()) oledDisplay->println("[BLE]");
+  if (!bleSubsystemActive()) oledDisplay->println("[BLE]");
   else if (conn)             oledDisplay->println("[OK]");
   else                       oledDisplay->println("[--]");
 
@@ -123,9 +256,9 @@ static void displayR1Health() {
   g2RingGetTelemetry(t);
   char v[20], age[8];
   fmtAgeShort(age, sizeof(age), freshestVitalAge(t));
-  const int r1 = OLED_CONTENT_START_Y + 9;
-  const int r2 = OLED_CONTENT_START_Y + 18;
-  const int r3 = OLED_CONTENT_START_Y + 27;
+  const int r1 = OLED_CONTENT_START_Y + 8;
+  const int r2 = OLED_CONTENT_START_Y + 16;
+  const int r3 = OLED_CONTENT_START_Y + 24;
 
   oledDisplay->setCursor(0, r1);
   if (t.hrValid) {
@@ -178,64 +311,53 @@ static void displayR1Health() {
   G2HealthHistorySummary history = {};
   g2HealthHistoryGetSummary(history);
 
-  const int a0 = OLED_CONTENT_START_Y + 38;
-  constexpr uint8_t kVisibleActions = 2;
-  if (sHealthSel < sHealthActionTop) sHealthActionTop = sHealthSel;
-  if (sHealthSel >= sHealthActionTop + kVisibleActions)
-    sHealthActionTop = sHealthSel - kVisibleActions + 1;
-  for (uint8_t row = 0; row < kVisibleActions; ++row) {
-    const uint8_t action = sHealthActionTop + row;
-    if (action >= HEALTH_ACTION_COUNT) break;
-    oledDisplay->setCursor(0, a0 + row * 8);
-    oledDisplay->print(action == sHealthSel ? "> " : "  ");
-    if (action == HEALTH_ACTION_POLL) {
-      if (conn && !g2RingHealthPageRefreshSupported()) {
-        oledDisplay->print("Poll unsupported");
-      } else {
-        oledDisplay->print("Poll Now");
-        if (healthPollBurstActive()) oledDisplay->print("...");
-      }
-    } else if (action == HEALTH_ACTION_LOGGING) {
-      oledDisplay->print("Logging ");
-      oledDisplay->print(healthLoggingIsActive() ? "ON" :
-                         (gSettings.healthLoggingEnabled ? "armed" : "off"));
-    } else if (action == HEALTH_ACTION_COLLECTION) {
-      oledDisplay->print("Collect ");
-      oledDisplay->print(g2RingDesiredStateName(control.healthDesired));
-      oledDisplay->print("/");
-      oledDisplay->print(g2RingObservedStateName(control.healthObserved));
-      if (control.healthPending) oledDisplay->print("...");
-      else if (control.healthLastError != G2_RING_ERR_NONE) oledDisplay->print(" !");
-    } else if (action == HEALTH_ACTION_HISTORY) {
-      oledDisplay->print("History ");
-      oledDisplay->print(r1HealthHistoryFetchStateName(history.fetchState));
-    } else if (action == HEALTH_ACTION_HISTORY_FORCE) {
-      oledDisplay->print("Force History");
-    } else if (action == HEALTH_ACTION_LOW_POWER) {
-      oledDisplay->print("LowP ");
-      oledDisplay->print(g2RingDesiredStateName(control.lowPowerDesired));
-      oledDisplay->print("/");
-      oledDisplay->print(g2RingObservedStateName(control.lowPowerObserved));
-      if (control.lowPowerPending) oledDisplay->print("...");
-      else if (control.lowPowerLastError != G2_RING_ERR_NONE) oledDisplay->print(" !");
+  const int a0 = OLED_CONTENT_START_Y + 32;
+  sHealthActions.visibleLines = oledVisibleRows(8, 32);
+  oledScrollClearKeepSelection(&sHealthActions);
+  sHealthActions.selectedIndex = sHealthSel;
+  for (uint8_t action = 0; action < HEALTH_ACTION_COUNT; ++action) {
+    char* label = sHealthActionLabels[action];
+    const size_t cap = sizeof(sHealthActionLabels[action]);
+    switch (action) {
+      case HEALTH_ACTION_POLL:
+        snprintf(label, cap, "%s%s", conn && !g2RingHealthPageRefreshSupported() ? "Poll unsupported" : "Poll Now",
+                 healthPollBurstActive() ? "..." : ""); break;
+      case HEALTH_ACTION_LOGGING:
+        snprintf(label, cap, "Logging %s", healthLoggingIsActive() ? "ON" : (gSettings.healthLoggingEnabled ? "armed" : "off")); break;
+      case HEALTH_ACTION_COLLECTION:
+        snprintf(label, cap, "Collect %s/%s%s", healthDesiredLabel(control.healthDesired),
+                 healthObservedLabel(control.healthObserved), control.healthPending ? "..." : control.healthLastError != G2_RING_ERR_NONE ? " !" : ""); break;
+      case HEALTH_ACTION_HISTORY:
+        snprintf(label, cap, "History %s", r1HealthHistoryFetchStateName(history.fetchState)); break;
+      case HEALTH_ACTION_HISTORY_FORCE: snprintf(label, cap, "Force History"); break;
+      case HEALTH_ACTION_LOW_POWER:
+        snprintf(label, cap, "LowP %s/%s%s", healthDesiredLabel(control.lowPowerDesired),
+                 healthObservedLabel(control.lowPowerObserved), control.lowPowerPending ? "..." : control.lowPowerLastError != G2_RING_ERR_NONE ? " !" : ""); break;
+      default: snprintf(label, cap, "Graphs"); break;
     }
+    oledScrollAddItem(&sHealthActions, label);
   }
+  oledScrollRenderSimple(oledDisplay, &sHealthActions, true, a0);
 
   // Telemetry arrives via BLE notify — keep redrawing while on this page.
   oledMarkDirty();
 }
 
 static bool healthInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed) {
-  if (oledGuestBlocksMutate()) return true;
+  if (healthHandleGraphInput(newlyPressed)) return true;
   if (gNavEvents.up   && sHealthSel > 0) { sHealthSel--; return true; }
   if (gNavEvents.down && sHealthSel + 1 < HEALTH_ACTION_COUNT) { sHealthSel++; return true; }
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A) || INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
+    if (sHealthSel != HEALTH_ACTION_GRAPHS && oledGuestBlocksMutate()) return true;
     switch (sHealthSel) {
+      case HEALTH_ACTION_GRAPHS:
+        healthOpenGraphs();
+        break;
       case HEALTH_ACTION_POLL:
         healthKickPollBurst();
         break;
       case HEALTH_ACTION_LOGGING:
-        executeOledCommand("healthlogging toggle");
+        healthRunCommand("healthlogging toggle");
         break;
       case HEALTH_ACTION_COLLECTION: {
         G2RingControlStatus status = {};

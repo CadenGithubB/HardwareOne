@@ -122,7 +122,7 @@ def main() -> None:
         return (overlay if overlay and overlay.exists() else args.component / name).read_text()
 
     flags = ["-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic",
-             "-Wno-unused-parameter"]
+             "-Wno-unused-parameter", "-I", str(HERE), "-I", str(args.component)]
     if args.sanitize:
         flags += ["-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-g"]
     failed = []

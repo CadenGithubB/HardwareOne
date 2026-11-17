@@ -43,12 +43,12 @@ def generated(component: Path) -> str:
     types.append(extract_block(display, "struct NavEvents") + ";")
     # The shared refusal helper exists only after the fix; a tree without it
     # still compiles here and is judged by the behavioral cases.
-    production = [extract_block(oled, HELPER)] if HELPER in oled else []
+    production = [extract_block((component / "OLED_Utils.cpp").read_text(), "void oledCommandReplyText("), extract_block(oled, HELPER)] if HELPER in oled else []
     production += [extract_block(oled, marker) for marker in (
         "void oledEspNowBackToList(", "void oledEspNowUnpairDevice(")]
     handler = extract_block(oled, "bool oledEspNowHandleInput(")
     arm = extract_block(handler, "case ESPNOW_VIEW_PAIRING:")
-    harness = (HERE / "oled_espnow_ownership_harness.cpp").read_text()
+    harness = '#include "' + str(component / "OLED_MessageText.h") + '"\n' + (HERE / "oled_espnow_ownership_harness.cpp").read_text()
     for marker, body in (("// INSERT_TYPES", "\n\n".join(types)),
                          ("// INSERT_DECLARATIONS", declaration(oled, "sPairingSel")),
                          ("// INSERT_PRODUCTION", "\n\n".join(production)),

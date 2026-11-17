@@ -40,7 +40,6 @@ enum PatternSetupStep {
 static PatternSetupStep sStep = PATTERN_STEP_AUTH_CHECK;
 static String sFirstPattern = "";
 static bool sKeyboardActive = false;
-static unsigned long sMessageUntil = 0;
 static bool sAuthUsingGamepad = false;  // True if authenticating with gamepad password
 // Seconds left on the display's attempt-table lock when the last
 // re-authentication was refused by it (0: the password itself was wrong).
@@ -50,7 +49,6 @@ void oledSetPatternModeResetSessionState() {
   sKeyboardActive = false;
   sStep = PATTERN_STEP_AUTH_CHECK;
   secureClearString(sFirstPattern);
-  sMessageUntil = 0;
   sAuthUsingGamepad = false;
   sAuthLockedSeconds = 0;
 }

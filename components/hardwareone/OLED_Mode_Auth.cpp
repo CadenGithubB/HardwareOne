@@ -10,7 +10,7 @@
 
 #include <Adafruit_SSD1306.h>
 #include "OLED_Utils.h"
-#include "System_Deadline.h"  // deadlinePending: how long an error stays up
+#include "OLED_UI.h"
 #include "System_User.h"
 #include "System_Utils.h"
 #include "System_Notifications.h"
@@ -32,8 +32,6 @@ enum LoginField {
 static LoginField currentField = FIELD_USERNAME;
 static String usernameBuffer = "";
 static String passwordBuffer = "";
-static String errorMessage = "";
-static unsigned long errorDisplayUntil = 0;
 static bool loginKeyboardActive = false;
 
 // Identity-boundary teardown. This is intentionally stronger than a normal
@@ -45,8 +43,6 @@ static void resetLoginSessionState() {
   currentField = FIELD_USERNAME;
   secureClearString(usernameBuffer);
   secureClearString(passwordBuffer);
-  secureClearString(errorMessage);
-  errorDisplayUntil = 0;
 }
 
 // Login display function
@@ -119,28 +115,7 @@ static void displayLoginMode() {
   oledDisplay->print(currentField == FIELD_LOGIN_BUTTON ? ">" : " ");
   oledDisplay->print("[Login]");
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-  
-  // Show error message if active - overlay with centered message box. A passed
-  // deadline is set back to 0, so it cannot read as pending again 24.9 days on.
-  if (errorDisplayUntil != 0 && !deadlinePending(errorDisplayUntil, millis())) errorDisplayUntil = 0;
-  if (deadlinePending(errorDisplayUntil, millis()) && errorMessage.length() > 0) {
-    // Draw semi-transparent overlay effect (clear center area)
-    oledDisplay->fillRect(8, 20, 112, 24, DISPLAY_COLOR_BLACK);
-    oledDisplay->drawRect(8, 20, 112, 24, DISPLAY_COLOR_WHITE);
-    oledDisplay->drawRect(9, 21, 110, 22, DISPLAY_COLOR_WHITE);
-    
-    // Center the message text - truncate if too long
-    oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-    String displayMsg = errorMessage;
-    if (displayMsg.length() > 16) {
-      displayMsg = displayMsg.substring(0, 15); displayMsg += '~';
-    }
-    int textWidth = displayMsg.length() * 6;
-    int textX = 64 - (textWidth / 2);
-    if (textX < 12) textX = 12;
-    oledDisplay->setCursor(textX, 28);
-    oledDisplay->print(displayMsg);
-  }
+
 }
 
 // Login input handler
@@ -214,22 +189,14 @@ static bool handleLoginModeInput(int deltaX, int deltaY, uint32_t newlyPressed) 
           char lockedText[24];
           snprintf(lockedText, sizeof(lockedText), "Locked out %lus",
                    (lockoutRetryMs + 999UL) / 1000UL);
-          errorMessage = lockedText;
-          errorDisplayUntil = millis() + 3000;
-          oledMarkDirtyUntil(errorDisplayUntil);
+          oledToastShow(lockedText, oled_message::kErrorDurationMs, OledUiIcon::ERROR);
         } else {
           systemEventPost(SYSEVT_LOGIN_FAIL, attemptedUser.c_str(), "display");
           secureClearString(attemptedUser);
-          errorMessage = "Invalid credentials";
-          errorDisplayUntil = millis() + 3000;
-          oledMarkDirtyUntil(errorDisplayUntil);
+          oledToastShow("Invalid credentials", oled_message::kErrorDurationMs, OledUiIcon::ERROR);
         }
       } else {
-        if (!deadlinePending(errorDisplayUntil, millis())) {
-          errorMessage = "Enter user/pass";
-          errorDisplayUntil = millis() + 5000;
-          oledMarkDirtyUntil(errorDisplayUntil);
-        }
+        oledToastShow("Enter user/pass", oled_message::kErrorDurationMs, OledUiIcon::ERROR);
       }
     } else {
       // Launch keyboard for username or password
@@ -259,11 +226,7 @@ static bool handleLoginModeInput(int deltaX, int deltaY, uint32_t newlyPressed) 
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
     if (gSettings.localDisplayRequireAuth && !isTransportAuthenticated(SOURCE_LOCAL_DISPLAY)) {
       // Authentication is required and user is not logged in - block navigation
-      if (!deadlinePending(errorDisplayUntil, millis())) {
-        errorMessage = "Login required";
-        errorDisplayUntil = millis() + 5000;
-        oledMarkDirtyUntil(errorDisplayUntil);
-      }
+      oledToastShow("Login required", oled_message::kErrorDurationMs, OledUiIcon::ERROR);
       handled = true;
     } else {
       // User is authenticated or auth not required - allow back navigation

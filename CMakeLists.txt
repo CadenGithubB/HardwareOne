@@ -757,14 +757,43 @@ if(HW1_FEATURE_CONFIG_FILE)
     add_compile_definitions(HW1_FEATURE_CONFIG_HEADER="${HW1_FEATURE_CONFIG_FILE}")
 endif()
 
-# Arduino 3.3.5's NetworkEvents dispatcher iterates its callback list without a
-# lock unless this is defined (NetworkEvents.h/.cpp). HardwareOne registers WiFi
-# handlers (wifiCoexMirrorInstall, the lazy WiFi init) while the hosted radio's
-# first events are already being dispatched; the unlocked vector growth produced
-# the 2026-11-06 null-call panics in arduino_events. Project-wide, before
-# project(): the define changes the class layout seen by every translation unit
-# that includes the header.
-add_compile_definitions(NETWORK_EVENTS_MUTEX)
+# Compile definitions for the vendored Arduino core. components/arduino is
+# gitignored, so these tracked lines are the reviewable source of truth and
+# survive a vendor resync. They must sit here, before project(): ESP-IDF
+# creates every component target during project(), and a directory-level
+# add_compile_definitions() placed after it never reaches those sources. The
+# stack-size line below lived at the end of this file until 2026-11-03;
+# compile_commands.json showed it absent from NetworkEvents.cpp in every
+# build directory, and it only "worked" because the vendored default is 4096.
+#
+# NETWORK_EVENTS_MUTEX: NetworkEvents.{h,cpp} guard the callback vector with a
+# std::mutex (held across the dispatch loop in _checkForEvent, taken by every
+# onEvent/onSysEvent/removeEvent) only when this is defined and
+# SOC_CPU_CORES_NUM > 1; single-core targets compile it out. Unlocked, the
+# arduino_events task walks std::vector storage that another core may be
+# reallocating (lazy Wi-Fi init registers wifiEventLogger from the boot
+# connect task): Core 1 instruction access fault at address 0 inside
+# arduino_events, Waveshare P4 boot #64, 2026-11-03. The macro changes the
+# class layout, so it must be identical in every translation unit that
+# includes NetworkEvents.h: directory scope, not one target. The mutex is
+# NOT recursive (ESP-IDF's default pthread mutex type is NORMAL, so a relock
+# blocks forever): no event callback may register or remove a callback or
+# change the Wi-Fi mode (mode() registers/removes the STA/AP handlers).
+# wifiCoexEvent and wifiEventLogger (System_WiFi.cpp) only touch atomics,
+# spinlocked fields and a pending flag; Arduino's own dispatch-time handlers
+# reconnect through esp_wifi_* calls that never take it.
+#
+# ARDUINO_NETWORK_EVENT_TASK_STACK_SIZE: arduino_events task stack, in BYTES
+# (ESP-IDF xTaskCreate takes bytes, not words; NetworkEvents.cpp wraps its
+# default in #ifndef). History: a local cut to 2560 believed the unit was
+# words ("2560 words = 10 KB"), the 4x footgun, leaving 2.5 KB, which the
+# disconnect-while-connected handler chain (wifiEventLogger -> logSystemEvent
+# -> systemEventPost) overflowed on every wifi teardown (panic observed
+# 2026-07-20). 4096 restores the upstream size.
+add_compile_definitions(
+    NETWORK_EVENTS_MUTEX
+    ARDUINO_NETWORK_EVENT_TASK_STACK_SIZE=4096
+)
 
 # ESP32-P4 builds replace two ESP-IDF 5.5.5 components with verified patched
 # copies (never edits to the shared SDK): `bt` carries the upstream TinyCrypt
@@ -1332,12 +1361,3 @@ else()
     target_compile_definitions(${_hw1_app_component} PRIVATE HW1_OTA_LAYOUT=0)
 endif()
 
-# arduino_events task stack, in BYTES (ESP-IDF xTaskCreate takes bytes, not
-# words). The vendored components/arduino is gitignored, so this tracked
-# override is the reviewable source of truth and survives a vendor resync
-# (NetworkEvents.cpp wraps its default in #ifndef). History: a local cut to
-# 2560 believed the unit was words ("2560 words = 10 KB") — the 4x footgun —
-# leaving 2.5 KB, which the disconnect-while-connected handler chain
-# (wifiEventLogger -> logSystemEvent -> systemEventPost) overflowed on every
-# wifi teardown (panic observed 2026-07-20). 4096 restores the upstream size.
-add_compile_definitions(ARDUINO_NETWORK_EVENT_TASK_STACK_SIZE=4096)

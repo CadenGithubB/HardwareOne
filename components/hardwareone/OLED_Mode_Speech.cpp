@@ -16,6 +16,7 @@
 
 #include <Adafruit_SSD1306.h>
 #include "OLED_Utils.h"
+#include "OLED_TextField.h"
 #include "HAL_Input.h"
 #include "System_Settings.h"
 #include "System_ESPSR.h"
@@ -160,16 +161,12 @@ void displaySpeechInfo() {
   // Inverse-bar menu render (the mode's established look) — selection/items now
   // come from the scroll state instead of a raw int + options[] array.
   for (int i = 0; i < sSpeechMenuScroll.itemCount; i++) {
-    if (i == sSpeechMenuScroll.selectedIndex) {
-      oledDisplay->fillRect(0, 10 + i * 10, 128, 10, DISPLAY_COLOR_WHITE);
-      oledDisplay->setTextColor(DISPLAY_COLOR_BLACK, DISPLAY_COLOR_WHITE);
-    } else {
-      oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-    }
-    oledDisplay->setCursor(2, 11 + i * 10);
-    if (sSpeechMenuScroll.items[i].line1) {
-      oledDisplay->print(sSpeechMenuScroll.items[i].line1);
-    }
+    const bool selected = i == sSpeechMenuScroll.selectedIndex;
+    if (selected) oledDisplay->fillRect(0, 10 + i * 10, 128, 10, DISPLAY_COLOR_WHITE);
+    // Bounded label on the inverse bar (OLED_TextField.h).
+    oledTextFieldDraw(oledDisplay, 2, 11 + i * 10, SCREEN_WIDTH - 2, sSpeechMenuScroll.items[i].line1,
+                      selected ? DISPLAY_COLOR_BLACK : DISPLAY_COLOR_WHITE, DISPLAY_COLOR_WHITE,
+                      selected, &sSpeechMenuScroll);
   }
 
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);

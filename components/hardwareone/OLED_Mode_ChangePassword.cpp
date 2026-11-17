@@ -11,7 +11,7 @@
 
 #include <Adafruit_SSD1306.h>
 #include "OLED_Utils.h"
-#include "System_Deadline.h"  // deadlinePending: how long an error stays up
+#include "OLED_UI.h"
 #include "System_Debug.h"
 #include "System_User.h"
 #include "System_Utils.h"
@@ -31,8 +31,6 @@ static PasswordChangeField currentField = FIELD_CURRENT_PASSWORD;
 static String currentPassBuffer = "";
 static String newPassBuffer = "";
 static String confirmPassBuffer = "";
-static String errorMessage = "";
-static unsigned long errorDisplayUntil = 0;
 static bool changePasswordKeyboardActive = false;
 static bool passwordChangeInProgress = false;
 
@@ -43,8 +41,6 @@ void oledChangePasswordModeResetSessionState() {
   secureClearString(currentPassBuffer);
   secureClearString(newPassBuffer);
   secureClearString(confirmPassBuffer);
-  secureClearString(errorMessage);
-  errorDisplayUntil = 0;
 }
 
 static void wipeResultBuffer(char* buffer, size_t size) {
@@ -178,37 +174,7 @@ static void displayChangePasswordMode() {
   oledDisplay->print(currentField == FIELD_CHANGE_BUTTON ? ">" : " ");
   oledDisplay->print(passwordChangeInProgress ? "[Changing...]" : "[Change Password]");
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-  
-  // Show error message if active - overlay with centered message box. A passed
-  // deadline is set back to 0, so it cannot read as pending again 24.9 days on.
-  if (errorDisplayUntil != 0 && !deadlinePending(errorDisplayUntil, millis())) errorDisplayUntil = 0;
-  if (deadlinePending(errorDisplayUntil, millis()) && errorMessage.length() > 0) {
-    const int boxX = 10;
-    const int boxY = 20;
-    const int boxW = 108;
-    const int boxH = 24;
-    
-    oledDisplay->fillRect(boxX, boxY, boxW, boxH, DISPLAY_COLOR_BLACK);
-    oledDisplay->drawRect(boxX, boxY, boxW, boxH, DISPLAY_COLOR_WHITE);
-    
-    oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-    oledDisplay->setCursor(boxX + 4, boxY + 8);
-    
-    // Word wrap error message
-    String msg = errorMessage;
-    if (msg.length() > 16) {
-      int space = msg.lastIndexOf(' ', 16);
-      if (space > 0) {
-        oledDisplay->println(msg.substring(0, space));
-        oledDisplay->setCursor(boxX + 4, boxY + 16);
-        oledDisplay->print(msg.substring(space + 1));
-      } else {
-        oledDisplay->print(msg.substring(0, 16));
-      }
-    } else {
-      oledDisplay->print(msg);
-    }
-  }
+
 }
 
 // ============================================================================
@@ -269,33 +235,23 @@ static bool handleChangePasswordModeInput(int deltaX, int deltaY, uint32_t newly
     if (currentField == FIELD_CHANGE_BUTTON) {
       // Validate all fields are filled
       if (currentPassBuffer.length() == 0) {
-        errorMessage = "Enter current pass";
-        errorDisplayUntil = millis() + 2000;
-        oledMarkDirtyUntil(errorDisplayUntil);
+        oledToastShow("Enter current pass", oled_message::kErrorDurationMs, OledUiIcon::ERROR);
         return true;
       }
       if (newPassBuffer.length() < 6) {
-        errorMessage = "New: min 6 chars";
-        errorDisplayUntil = millis() + 2000;
-        oledMarkDirtyUntil(errorDisplayUntil);
+        oledToastShow("New: min 6 chars", oled_message::kErrorDurationMs, OledUiIcon::ERROR);
         return true;
       }
       if (confirmPassBuffer.length() == 0) {
-        errorMessage = "Confirm password";
-        errorDisplayUntil = millis() + 2000;
-        oledMarkDirtyUntil(errorDisplayUntil);
+        oledToastShow("Confirm password", oled_message::kErrorDurationMs, OledUiIcon::ERROR);
         return true;
       }
       if (newPassBuffer != confirmPassBuffer) {
-        errorMessage = "Passwords differ";
-        errorDisplayUntil = millis() + 2000;
-        oledMarkDirtyUntil(errorDisplayUntil);
+        oledToastShow("Passwords differ", oled_message::kErrorDurationMs, OledUiIcon::ERROR);
         return true;
       }
       if (newPassBuffer == currentPassBuffer) {
-        errorMessage = "New must differ";
-        errorDisplayUntil = millis() + 2000;
-        oledMarkDirtyUntil(errorDisplayUntil);
+        oledToastShow("New must differ", oled_message::kErrorDurationMs, OledUiIcon::ERROR);
         return true;
       }
       
@@ -333,9 +289,7 @@ static bool handleChangePasswordModeInput(int deltaX, int deltaY, uint32_t newly
       const bool passwordChanged = commandOk && result && !commandReplyIsFailure(result);
       if (passwordChanged) {
         // Success
-        errorMessage = "Password changed!";
-        errorDisplayUntil = millis() + 2000;
-        oledMarkDirtyUntil(errorDisplayUntil);
+        oledToastShow("Password changed!", 2500, OledUiIcon::SUCCESS);
         
         // Clear buffers securely
         secureClearString(currentPassBuffer);
@@ -344,17 +298,11 @@ static bool handleChangePasswordModeInput(int deltaX, int deltaY, uint32_t newly
         currentField = FIELD_CURRENT_PASSWORD;
       } else {
         // Error
-        const char* why = result ? result : "";
-        if (strncmp(why, kPasswordReplyWrongCurrent, sizeof(kPasswordReplyWrongCurrent) - 1) == 0) {
-          errorMessage = "Wrong password";
-        } else if (strncmp(why, kPasswordReplyMismatch, sizeof(kPasswordReplyMismatch) - 1) == 0) {
-          errorMessage = "Passwords differ";
-        } else {
-          errorMessage = "Change failed";
-        }
-        errorDisplayUntil = millis() + 3000;
-        oledMarkDirtyUntil(errorDisplayUntil);
-        
+        char feedback[oled_message::kMessageBytes];
+        oledCommandReplyText(false, result, nullptr, "Password change failed. Try again.",
+                             feedback, sizeof(feedback));
+        oledToastShow(feedback, oled_message::kErrorDurationMs, OledUiIcon::ERROR);
+
         // Clear only current password on error
         secureClearString(currentPassBuffer);
         currentField = FIELD_CURRENT_PASSWORD;
@@ -404,7 +352,6 @@ static bool handleChangePasswordModeInput(int deltaX, int deltaY, uint32_t newly
     secureClearString(newPassBuffer);
     secureClearString(confirmPassBuffer);
     currentField = FIELD_CURRENT_PASSWORD;
-    errorMessage = "";
     // Let default handler process B button for mode change
   }
   

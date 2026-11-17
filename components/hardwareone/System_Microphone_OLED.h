@@ -27,6 +27,10 @@ static void displayMicrophone() {
     return;
   }
   
+  // A live meter: the display loop repaints only dirty frames, so keep the
+  // next frame due while capture runs (the level itself refreshes every 150 ms).
+  oledMarkDirtyUntil(millis() + 200);
+
   // Get current audio level (0-100)
   int level = getAudioLevel();
   

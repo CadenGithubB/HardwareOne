@@ -26,6 +26,16 @@ everything user-visible since the v0.99.99.1 tag.
   for every board; not yet run on hardware (readiness G-80).
 
 ### Fixed
+- Waveshare ESP32-P4 board: speaker test tones were close to inaudible at ordinary volume values,
+  because the volume was applied twice (codec register and sample level). The codec now stays at
+  0 dB and the volume scales the samples; volume 0 is silence. The camera module on this board faces
+  sideways, so the board states a quarter turn (`CAMERA_MOUNT_ROTATION 90`) and the P4 camera
+  backend delivers upright frames with width and height swapped. The ES8311 codec at 0x18 is a
+  known I2C device on this board. Tones were heard on the board on 2026-11-02; not re-tested on
+  hardware since the merge (`docs/WAVESHARE_P4_SUPPORT.md`).
+- Build: `ARDUINO_NETWORK_EVENT_TASK_STACK_SIZE=4096` is now defined before `project()`, next to
+  `NETWORK_EVENTS_MUTEX`. Placed after it, the line never reached the vendored Arduino sources; the
+  build only behaved because the vendored default is the same 4096 bytes.
 - R1 ring: an NTP reply that moves an already set device clock by more than a day is no longer
   passed to the ring, whose stored health days are keyed off that clock. The ring keeps the earlier
   clock until `timeset`, a local time source (RTC, CM5), an NTP reply that agrees with the earlier
@@ -101,7 +111,7 @@ everything user-visible since the v0.99.99.1 tag.
   yet tested on hardware.
 - OLED: clearing the notification center (X on the Notifs page) left every banner already queued
   coming down for the notifications just cleared. The queued banners of cleared events are dropped,
-  the one on screen slides out, and an event at or below the cleared point puts up no banner.
+  the one on screen ends, and an event at or below the cleared point puts up no banner.
   Web toasts, G2 cards and app cards are unchanged. Host-tested; not yet tested on hardware.
 - OLED: `oledmode` with a mode the build cannot draw (`oledmode thermal` on the P4) answered OK and
   left the display blank, and a saved default mode could boot into the same blank screen. The
@@ -271,6 +281,28 @@ everything user-visible since the v0.99.99.1 tag.
   was set and removed again while ESP-NOW was stopped. Host-tested; not yet tested on hardware.
 
 ### Changed
+- OLED feedback is one shared message box. It replaces the animated status ribbon, the error boxes
+  that the login, password, Settings editor and Health screens drew themselves, and the results
+  shown in footers. A refused command shows the command's own reason (the admin gate as "Admin
+  required"), an error stays at least eight seconds, up to twelve messages wait their turn,
+  identical ones are shown once, and an open confirmation pauses them. Login, password change, User
+  Manager, Settings editor, Quick Settings, Automations, ESP-NOW, File Browser, Bluetooth and Health
+  use it; event banners use the same box (`docs/OLED_FEEDBACK.md`). Host-tested; not re-tested on
+  hardware since it was merged with the other Unreleased work.
+- OLED **System → CLI Output** is rebuilt as three states, Live, Paused and Reader, over a console
+  history with stable record numbers: a paused selection stays on its record while output arrives,
+  the Reader shows one whole record wrapped to the screen and keeps it after the ring has dropped
+  it, and the status row counts arrivals and lost output (`docs/OLED_CLI_OUTPUT.md`). Host-tested at
+  the 64, 88 and 128 pixel canvases; not re-tested on hardware since the merge.
+- OLED lists keep every label inside its own field. A label that does not fit ends in `...`, and
+  the selected row scrolls to show the whole text; cursors, markers, values and scrollbars keep
+  fixed columns. Full file names, user names and automation names are shown instead of the first 12
+  or 13 characters (`docs/OLED_LIST_TEXT.md`). Host-tested; not re-tested on hardware since the merge.
+- OLED Health: all seven actions fit the P4X-EYE canvas and scroll inside the content area on
+  smaller displays, and **Health → Graphs** draws heart rate, HRV, SpO2, temperature, battery and
+  the three daily series with a scaled axis (`docs/OLED_HEALTH.md`). Host-tested; the graphs have
+  not been checked against live ring data.
+- `oledmode mic` and `oledmode microphone` open the microphone page.
 - Command names have one form: lower-case letters and digits. The 22 camelCase `mqtt*` commands and
   `httpAutoStart` / `httpsEnabled` are now `mqtthost`, `mqttpublishgps`, `httpautostart`,
   `httpsenabled` and so on. Command lookup ignores case, so the earlier spelling still runs; help,

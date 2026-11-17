@@ -15,10 +15,10 @@
 // ============================================================================
 // Provides reusable, standardized UI components for OLED display:
 // - Toast: Temporary notification overlay (auto-dismiss)
-// - Pairing ribbon / notification banner: animated status indicator
+// - Event notification adapter: same toast presentation
 //
-// Both are overlays drawn on top of the current display content; neither
-// captures input.
+// Feedback overlays are drawn on top of the current display content and never
+// capture input.
 // ============================================================================
 
 // ----------------------------------------------------------------------------
@@ -27,7 +27,7 @@
 
 // Icon types for toasts
 enum class OledUiIcon : uint8_t {
-  NONE = 0,
+  NONE = 0,  // Automatic classification: recognized error prefix, otherwise info.
   INFO,
   WARNING,
   ERROR,
@@ -46,109 +46,41 @@ struct OledToast {
   uint32_t expireMs;
   OledUiIcon icon;
   bool active;
+  uint32_t eventSeq;  // the event it shows (oledEventBannerShow); 0 = not from an event
 };
 
 extern OledToast gOledToast;
 
-// Show a toast message (auto-dismisses after durationMs)
+// Queue feedback. Errors have an eight-second minimum; duplicates coalesce.
+// Full queue drops the oldest pending non-error first.
 void oledToastShow(const char* message, uint32_t durationMs = 3000, OledUiIcon icon = OledUiIcon::NONE);
 
-// Clear any active toast immediately
+// Clear active and pending feedback (including at session replacement).
 void oledToastClear();
 
 // Check if toast is currently showing
 bool oledToastActive();
 
+// Pause visible lifetime while a confirmation owns the content region.
+void oledFeedbackSetPaused(bool paused);
+
 // Render toast overlay (call from display update, after main content)
 void oledToastRender();
 
-// ----------------------------------------------------------------------------
-// (Removed) OledList modal list-selector overlay
-// ----------------------------------------------------------------------------
-// The OledList component was a dormant modal list-picker superseded by
-// OledScrollState (OLED_Utils.h). It had no callers and was removed. For any
-// list/menu, use OledScrollState + oledScrollRenderSimple/oledScrollHandleNav.
+// Event-notification entry point. Policy is applied by System_Notifications;
+// accepted events use the shared feedback queue. Suppressed during boot.
+void oledNotificationBannerShow(const char* message, OledUiIcon icon,
+                                uint32_t visibleMs = 2500);
 
-// ----------------------------------------------------------------------------
-// Pairing Ribbon Component - Animated status indicator
-// ----------------------------------------------------------------------------
-// Shows pairing status with unfurl/shrink animation from top-right corner.
-// Displays icon + status text, then minimizes to a small indicator.
-
-enum class PairingRibbonState : uint8_t {
-  HIDDEN = 0,      // Not visible
-  UNFURLING,       // Animating down from top
-  VISIBLE,         // Fully visible, showing status
-  SHRINKING,       // Animating to minimized state
-  MINIMIZED        // Small persistent indicator in corner
-};
-
-enum class PairingRibbonIcon : uint8_t {
-  LINK = 0,        // Connected (chain link)
-  LINK_OFF,        // Disconnected (broken link)
-  SYNC,            // Handshake in progress (rotating arrows)
-  SEARCHING,       // Looking for peer (magnifying glass)
-  // General-purpose notification icons (text-only fallback, no embedded icon needed)
-  SUCCESS,         // Checkmark / OK
-  ERROR_ICON,      // X / fail
-  WARNING_ICON,    // ! / caution
-  INFO_ICON        // i / information
-};
-
-struct OledPairingRibbon {
-  char message[128];             // Status text (e.g., "Connected", peer name, command result)
-  PairingRibbonState state;      // Animation state
-  PairingRibbonIcon icon;        // Current icon to display
-  uint32_t stateStartMs;         // When current state started
-  uint32_t visibleDurationMs;    // How long to stay visible before shrinking
-  int animY;                     // Current Y position for animation
-  bool iconBlink;                // Whether icon should blink
-  uint8_t blinkCount;            // Number of blinks remaining
-  int scrollOffset;              // Horizontal scroll position in pixels for long text
-  uint32_t lastScrollMs;         // Last time scroll position updated
-  uint32_t eventSeq;             // the event it shows (oledEventBannerShow); 0 = not from an event
-};
-
-extern OledPairingRibbon gOledPairingRibbon;
-
-// Show pairing ribbon with message and icon
-void oledPairingRibbonShow(const char* message, PairingRibbonIcon icon, 
-                           uint32_t visibleMs = 3000, bool blink = true);
-
-// Update to minimized state (call when you want persistent indicator)
-void oledPairingRibbonMinimize();
-
-// Hide ribbon completely
-void oledPairingRibbonHide();
-
-// Check if ribbon is visible (any state except HIDDEN)
-bool oledPairingRibbonActive();
-
-// Update animation state (call from main loop)
-void oledPairingRibbonUpdate();
-
-// Render ribbon overlay
-void oledPairingRibbonRender();
-
-// General-purpose notification banner (wraps ribbon for non-pairing use)
-void oledNotificationBannerShow(const char* message, PairingRibbonIcon icon,
-                                uint32_t visibleMs = 2500, bool blink = false);
-
-// The banner of a notification event (systemEventsNotifyTick). Remembers the
+// The feedback for a notification event (systemEventsNotifyTick). Remembers the
 // event's seq so clearing the notification center can take it back.
-void oledEventBannerShow(uint32_t eventSeq, const char* message, PairingRibbonIcon icon,
-                         uint32_t visibleMs, bool blink);
+void oledEventBannerShow(uint32_t eventSeq, const char* message, OledUiIcon icon,
+                         uint32_t visibleMs = 2500);
 
-// Clearing the notification center: drop every queued event banner with a seq
-// at or below `seq`, and slide out the visible one if it is such a banner.
-// Banners that are not from an event (seq 0) stay.
+// Clearing the notification center: drop every pending event feedback with a
+// seq at or below `seq`, and end the visible one if it is such a message.
+// Feedback that is not from an event (seq 0) stays.
 void oledEventBannersDismissThrough(uint32_t seq);
-
-// Update an already-visible banner in place (icon + text) without re-animating.
-// Extends display by extraMs so the user sees the change. Falls back to full
-// show() if banner is not currently visible.
-void oledNotificationBannerUpdate(const char* message, PairingRibbonIcon icon,
-                                  uint32_t extraMs = 1000);
 
 // ----------------------------------------------------------------------------
 // UI System - Unified handling
@@ -158,7 +90,7 @@ void oledNotificationBannerUpdate(const char* message, PairingRibbonIcon icon,
 void oledUiInit();
 
 // Render all active UI overlays (call after main content, before display())
-// Renders in order: pairing ribbon, then toast on top
+// Defers feedback while a confirmation is active.
 void oledUiRender();
 
 // ----------------------------------------------------------------------------

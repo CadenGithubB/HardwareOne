@@ -28,6 +28,7 @@
 #define ENABLE_BONDED_MODE 0
 #define DEBUG_SYSTEMF(...) ((void)0)
 #define OLED_CONTENT_START_Y 11  // 10 px header + 1 px gap
+#define SCREEN_WIDTH 128
 #define OLED_CONTENT_HEIGHT 43   // 64 - 10 header - 10 footer - 1
 #define DISPLAY_COLOR_WHITE 1
 #define DISPLAY_COLOR_BLACK 0
@@ -98,8 +99,12 @@ class Adafruit_SSD1306 {
   }
   int cx_ = 0, cy_ = 0;
 };
+#include "oled_text_field_op_double.h"  // bounded list labels through the shipping policy
 static Adafruit_SSD1306 gDisplay;
 static Adafruit_SSD1306* oledDisplay = &gDisplay;
+// The editor's refusal toast (OLED_SettingsEditor.cpp) is not part of these
+// navigation checks.
+static void settingsEditorShowError(const String&, uint32_t) {}
 
 // ============================================================================
 // Automations list

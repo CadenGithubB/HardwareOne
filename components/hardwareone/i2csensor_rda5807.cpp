@@ -683,7 +683,7 @@ const char* cmd_fmradio_volume(const String& argsInput) {
   {
     char vmsg[24];
     snprintf(vmsg, sizeof(vmsg), "Vol: %d/15", vol);
-    oledNotificationBannerShow(vmsg, PairingRibbonIcon::INFO_ICON, 1500);
+    oledNotificationBannerShow(vmsg, OledUiIcon::INFO, 1500);
   }
 #endif
   

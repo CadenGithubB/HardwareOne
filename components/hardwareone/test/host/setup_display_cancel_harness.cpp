@@ -78,6 +78,7 @@ struct DisplayBoundary {
   template<typename T> void println(const T&) {}
 } display;
 static DisplayBoundary* oledDisplay = &display;
+#include "oled_text_field_op_double.h"  // menu labels go through the bounded field policy
 static std::vector<String> output;
 static void broadcastOutput(const String& value) { output.push_back(value); }
 static std::vector<unsigned> outputRoutes;

@@ -1051,12 +1051,12 @@ static size_t notifRenderToastJson(char* out, size_t outSize, const char* level,
 }
 
 #if ENABLE_OLED_DISPLAY
-static PairingRibbonIcon levelIcon(uint8_t level) {
+static OledUiIcon levelIcon(uint8_t level) {
   switch (level) {
-    case 1: return PairingRibbonIcon::SUCCESS;
-    case 2: return PairingRibbonIcon::WARNING_ICON;
-    case 3: return PairingRibbonIcon::ERROR_ICON;
-    default: return PairingRibbonIcon::INFO_ICON;
+    case 1: return OledUiIcon::SUCCESS;
+    case 2: return OledUiIcon::WARNING;
+    case 3: return OledUiIcon::ERROR;
+    default: return OledUiIcon::INFO;
   }
 }
 #endif
@@ -1239,7 +1239,7 @@ void systemEventsNotifyTick() {
           // after it: the clear covers its banner too.
           if (r.sinks & NSINK_BANNER) gNotifPipe.bannersCleared++;
         } else if (notifRuleForViewer(e.kind, oledViewer).sinks & NSINK_BANNER) {
-          oledEventBannerShow(e.seq, msg, levelIcon(r.level), r.durMs, r.level >= 3);
+          oledEventBannerShow(e.seq, msg, levelIcon(r.level), r.durMs);
           gNotifPipe.bannersShown++;
         } else if (r.sinks & NSINK_BANNER) {
           gNotifPipe.bannersFiltered++;  // device offered a banner; viewer denied

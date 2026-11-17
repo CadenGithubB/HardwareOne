@@ -2,6 +2,7 @@
 #include <cassert>
 #include <cstdint>
 #include <cstring>
+#include <cstdio>
 #include <string>
 #include <vector>
 #define SCREEN_WIDTH 128
@@ -28,6 +29,8 @@ struct Screen {
 };
 Screen display;Screen* gDisplay=&display;
 void oledDrawIcon(int,int,OledUiIcon,int color){display.iconColor=color;}
+bool oledBootModeActive=false, confirmation=false;
+bool oledConfirmIsActive(){return confirmation;}
 // INSERT_METHODS
 int main(){
  assert(oled_message::isError(" [error] timed out"));
@@ -49,8 +52,40 @@ int main(){
  assert(oledToastActive());now+=7999;assert(oledToastActive());++now;assert(!oledToastActive());
  oledToastShow("Saved",2500,OledUiIcon::SUCCESS);assert(gOledToast.expireMs==now+2500);
  oledToastClear();assert(!oledToastActive());
+ oledToastClear();
  std::string longText(300,'x');oledToastShow(longText.c_str());
  assert(strlen(gOledToast.message)==oled_message::kMessageBytes-1);
  display.lines.clear();oledToastRender();
  assert(display.lines.back().find("...")!=std::string::npos);
+ // Bursts cannot overwrite an error. Pending items start their own lifetime.
+ oledToastClear();now=0;
+ oledToastShow("Error: denied",1);oledToastShow("Saved",2000,OledUiIcon::SUCCESS);
+ assert(std::string(gOledToast.message)=="denied" && sToastQueueCount==1);
+ oledToastShow("Saved",2000,OledUiIcon::SUCCESS);assert(sToastQueueCount==1);
+ now=7999;assert(oledToastActive() && std::string(gOledToast.message)=="denied");
+ now=8000;assert(oledToastActive() && std::string(gOledToast.message)=="Saved" && gOledToast.expireMs==10000);
+ now=10000;assert(!oledToastActive());
+ // Confirmation hides feedback and preserves remaining lifetime, including
+ // messages submitted while it is open and pauses across millis rollover.
+ oledToastClear();now=UINT32_MAX-100;
+ oledToastShow("Error: wait",1);now+=50;
+ confirmation=true;display.lines.clear();oledUiRender();assert(display.lines.empty());
+ now+=20000;assert(oledToastActive());
+ confirmation=false;oledUiRender();assert(gOledToast.expireMs==now+7950);
+ now+=7950;assert(!oledToastActive());
+ oledToastClear();now=0;oledFeedbackSetPaused(true);now=10000;
+ oledToastShow("queued while confirming",2000);now=30000;oledFeedbackSetPaused(false);
+ assert(gOledToast.expireMs==32000);
+ // Overflow retains pending errors against routine feedback.
+ oledToastClear();oledToastShow("active",1);
+ for(unsigned i=0;i<kToastQueueCapacity;++i){char text[24];snprintf(text,sizeof(text),"error %u",i);oledToastShow(text,1,OledUiIcon::ERROR);}
+ oledToastShow("routine",1);assert(sToastQueueCount==kToastQueueCapacity && sToastQueue[0].icon==OledUiIcon::ERROR);
+ oledToastShow("new error",1,OledUiIcon::ERROR);assert(std::string(sToastQueue[kToastQueueCapacity-1].message)=="new error");
+ oledToastClear();assert(!oledToastActive() && !sToastQueueCount && !sToastQueue[0].message[0]);
+ // Event severity goes through the same renderer and minimum error duration.
+ now=0;oledNotificationBannerShow("event fault",OledUiIcon::ERROR,2000);
+ assert(gOledToast.icon==OledUiIcon::ERROR && gOledToast.expireMs==8000);
+ oledToastClear();oledBootModeActive=true;
+ oledNotificationBannerShow("boot",OledUiIcon::INFO,2000);assert(!oledToastActive());
+
 }

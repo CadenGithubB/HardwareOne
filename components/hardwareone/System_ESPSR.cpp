@@ -1317,7 +1317,7 @@ static void onVoiceCommandDetected(int commandId, const char* phrase) {
         if (!ok) {
           char vmsg[32];
           snprintf(vmsg, sizeof(vmsg), "Voice: %s", normCat.c_str());
-          oledNotificationBannerShow(vmsg, PairingRibbonIcon::ERROR_ICON, 2000);
+          oledNotificationBannerShow(vmsg, OledUiIcon::ERROR, 2000);
         }
 #endif
         voiceSetLastCommand(category);
@@ -1393,7 +1393,7 @@ static void onVoiceCommandDetected(int commandId, const char* phrase) {
       if (!ok) {
         char vmsg[32];
         snprintf(vmsg, sizeof(vmsg), "Voice: %s", normTarget.c_str());
-        oledNotificationBannerShow(vmsg, PairingRibbonIcon::ERROR_ICON, 2000);
+        oledNotificationBannerShow(vmsg, OledUiIcon::ERROR, 2000);
       }
 #endif
     } else {

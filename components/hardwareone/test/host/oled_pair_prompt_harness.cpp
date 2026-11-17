@@ -128,7 +128,8 @@ static int rosterReads = 0;         // direct users.json reads from the prompt c
 }
 
 static std::vector<std::string> toasts;
-[[maybe_unused]] static void oledToastShow(const char* message, uint32_t = 3000) { toasts.emplace_back(message); }
+enum class OledUiIcon { ERROR };
+[[maybe_unused]] static void oledToastShow(const char* message, uint32_t = 3000, OledUiIcon = OledUiIcon::ERROR) { toasts.emplace_back(message); }
 
 // INSERT_HELPER
 
@@ -304,7 +305,7 @@ int main() {
         accepted.empty() ? "" : accepted[0].c_str());
   CHECK(!commands.empty() && commands[0] == kAcceptX, "the answer names peerX's MAC (%s)",
         commands.empty() ? "nothing" : commands[0].c_str());
-  CHECK(toasts.size() == 1 && toasts[0] == "Accept failed", "the mismatch is toasted as 'Accept failed' (%zu)",
+  CHECK(toasts.size() == 1 && toasts[0] == "that name/MAC doesn't match the pending request.", "the mismatch preserves the owner refusal (%zu)",
         toasts.size());
   frame();
   CHECK(opens == 2 && lastPrompt == "'peerY'", "the newer request opens next with its own name (%d, %s)", opens,

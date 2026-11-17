@@ -61,8 +61,11 @@ static bool executeOledCommandWithResult(const String& line, char* out, size_t o
 }
 
 // OLED toast (OLED_UI.cpp): keeps the last message shown.
+namespace oled_message { constexpr uint32_t kErrorDurationMs = 8000; }
+enum class OledUiIcon : uint8_t { NONE, INFO, WARNING, ERROR, SUCCESS, QUESTION };
 static std::string lastToast;
-static void oledToastShow(const char* message, uint32_t /*durationMs*/) {
+static void oledToastShow(const char* message, uint32_t /*durationMs*/ = 3000,
+                          OledUiIcon /*icon*/ = OledUiIcon::NONE) {
   lastToast = message ? message : "";
 }
 

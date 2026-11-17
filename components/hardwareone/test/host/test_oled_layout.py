@@ -11,6 +11,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 from test_web_batch_handlers import extract_block
+from test_oled_text_field import text_field_implementation
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
@@ -26,6 +27,9 @@ def run(component, output, baseline=False, sanitize=False):
         'void oledScrollPageDown(', 'void oledScrollSetSplitPane(',
         'void oledScrollRender(', 'void oledScrollRenderSimple('))
     harness = harness.replace('// INSERT_TYPES', types).replace('// INSERT_FUNCTIONS', functions)
+    # A saved pre-change tree has no text field; its renderers print directly.
+    text_field = text_field_implementation() if (component / 'OLED_TextField.cpp').exists() else ''
+    harness = harness.replace('// INSERT_TEXT_FIELD', text_field)
     harness = harness.replace('// INSERT_MENU_INIT', extract_block((component/'OLED_Mode_Menu.cpp').read_text(), 'static void mainMenuEnsureInit('))
     # The old packer only handles 64px; compare its OLED output, and test the
     # current packer at both heights in either run.
@@ -46,7 +50,7 @@ def run(component, output, baseline=False, sanitize=False):
         unit=Path(tmp)/'layout.cpp';exe=Path(tmp)/'layout'
         unit.write_text(harness)
         cmd=['clang++','-std=c++17','-Wall','-Wextra','-Werror','-Wno-unused-parameter',
-             '-I',str(COMPONENT),'-I',str(COMPONENT.parent/'hardwareone_libs/Adafruit_GFX_Library'),str(unit),'-o',str(exe)]
+             '-I',str(COMPONENT),'-I',str(HERE),'-I',str(COMPONENT.parent/'hardwareone_libs/Adafruit_GFX_Library'),str(unit),'-o',str(exe)]
         if baseline: cmd += ['-DBASELINE_LAYOUT']
         if sanitize: cmd += ['-fsanitize=address,undefined','-fno-omit-frame-pointer','-g']
         subprocess.run(cmd,check=True)

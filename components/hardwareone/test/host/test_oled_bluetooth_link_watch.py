@@ -47,8 +47,10 @@ HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
 # Copied beside the harness, so their own includes find the empty stand-ins.
 REAL = ("OLED_Mode_Bluetooth.cpp", "BLE_LinkStatus.cpp", "BLE_LinkStatus.h", "BLE_LinkStatusCore.h",
-        "OLED_Layout.h", "BLE_PhonePairCode.h")
-SYSTEM = {"cstdarg", "cstddef", "cstdint", "cstdio", "cstring"}
+        "OLED_Layout.h", "BLE_PhonePairCode.h",
+        # The list-label policy the screen's rows draw through (dependency free).
+        "OLED_TextFieldCore.h", "OLED_ConsoleCore.h", "System_LLMUtf8.h")
+SYSTEM = {"cstdarg", "cstddef", "cstdint", "cstdio", "cstring", "stddef.h", "stdint.h", "string.h"}
 HEIGHTS = (43, 67, 107)  # Content heights for 64, 88 and 128 px canvases.
 
 
@@ -91,6 +93,7 @@ def main() -> None:
             (work / name).write_text("#pragma once\n")
         unit = work / "harness.cpp"
         shutil.copy(HERE / "oled_bluetooth_link_watch_harness.cpp", unit)
+        shutil.copy(HERE / "oled_text_field_op_double.h", work / "oled_text_field_op_double.h")
         for height in HEIGHTS:
             for g2 in (0, 1):
                 for pipe in (0, 1):

@@ -248,7 +248,8 @@ static void oledMarkDirty() { ++gDirty; }
 static unsigned long gDirtyUntil = 0;
 static void oledMarkDirtyUntil(unsigned long untilMs) { if (untilMs > gDirtyUntil) gDirtyUntil = untilMs; }
 static std::string gToast;
-static void oledToastShow(const char* text, uint32_t = 3000) { gToast = text ? text : ""; }
+enum class OledUiIcon { NONE, ERROR };
+static void oledToastShow(const char* text, uint32_t = 3000, OledUiIcon = OledUiIcon::NONE) { gToast = text ? text : ""; }
 static int gEditorDraws = 0;
 void displaySettingsEditor() { ++gEditorDraws; }
 static int gEditorInputs = 0;
@@ -680,8 +681,7 @@ static void case_editor_commits_remote_in_remote_mode() {
   gExecOk = false;
   gExecText = "Error: No session token - bond not ready or passphrase mismatch";
   EXPECT(!setSettingValueStr(ntp, "y") &&
-             std::string(gSettingsEditor.errorMessage.c_str()) == gExecText &&
-             gSettingsEditor.errorDisplayUntil > gNowMs,
+             gToast == gExecText,
          "a refused remote send shows the executor's error on the editor line");
 }
 
@@ -695,7 +695,7 @@ static void case_editor_commits_local_otherwise() {
   EXPECT(commandsAre(gWithResult, {"oledbrightness 5"}) && gLocal.empty(),
          "the local Settings screen runs its local setter through the checked executor, ran: " +
              joined(gWithResult) + " / fire-and-forget: " + joined(gLocal));
-  EXPECT(gSettingsEditor.errorMessage.length() == 0, "an accepted local save shows no error");
+  EXPECT(gToast.empty(), "an accepted local save shows no error");
 }
 
 // The slider (INT/BOOL) and INT pick-list commit through setSettingValue: a
@@ -708,10 +708,9 @@ static void case_editor_local_int_refusal_shown() {
   gExecOk = false;
   gExecText = "Error: Admin access required for command 'oledbrightness'. Contact an administrator.";
   setSettingValue(&kLocalOledEntries[0], 5);
-  EXPECT(std::string(gSettingsEditor.errorMessage.c_str()) == gExecText &&
-             gSettingsEditor.errorDisplayUntil > gNowMs,
+  EXPECT(gToast == gExecText,
          "a refused slider/pick-list save shows the executor's reply on the editor line, shown: '" +
-             std::string(gSettingsEditor.errorMessage.c_str()) + "'");
+             gToast + "'");
   EXPECT(gLocal.empty(), "the INT save does not use the fire-and-forget executor, ran: " + joined(gLocal));
 }
 
@@ -823,10 +822,9 @@ static void case_adapter_reports_peer_answer() {
   EXPECT(gDirtyUntil >= gNowMs + 250, "frames keep coming while the commit is pending");
   peerReplies(kPeerMac, false, "Error: value out of range");
   displayRemoteSettingsMode();
-  EXPECT(std::string(gSettingsEditor.errorMessage.c_str()) == "Peer: Error: value out of range" &&
-             gSettingsEditor.errorDisplayUntil >= gNowMs + 3000,
+  EXPECT(gToast == "Peer: Error: value out of range",
          "the peer's failure is shown on the editor line, not a local success");
-  EXPECT(gToast.empty() && intValue(b) == 128, "no 'Applied' and no value change on failure");
+  EXPECT(gToast != "Applied" && intValue(b) == 128, "no 'Applied' and no value change on failure");
 
   setSettingValue(b, 10);
   peerReplies(kPeerMac, true, "oledBrightness = 10");
@@ -836,7 +834,7 @@ static void case_adapter_reports_peer_answer() {
   setSettingValue(b, 11);
   gNowMs += 5000;
   displayRemoteSettingsMode();
-  EXPECT(std::string(gSettingsEditor.errorMessage.c_str()) == "No reply from peer",
+  EXPECT(gToast == "No reply from peer",
          "silence from the peer is shown as 'No reply from peer'");
 
   onEnterRemoteSettings(false);

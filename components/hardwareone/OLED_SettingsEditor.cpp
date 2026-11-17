@@ -10,7 +10,14 @@
 #include "i2csensor_seesaw.h"
 #include "OLED_Display.h"
 #include "OLED_Utils.h"
-#include "System_Deadline.h"  // deadlinePending: how long an error or status line stays up
+#include "OLED_TextField.h"
+
+// Row geometry shared by the editor's lists: label fields end before the
+// scroll-arrow column; a value keeps a fixed right-aligned column of at most
+// ten glyphs, so a long label scrolls under it without moving it.
+static constexpr int kSeLabelRight = 118;
+static constexpr int kSeValueMaxW = 60;
+#include "OLED_UI.h"
 #include "System_Debug.h"
 #include "System_I2C.h"
 #include "System_Settings.h"
@@ -90,13 +97,12 @@ static const SettingsModule** editorModules(size_t& count) {
 }
 
 void settingsEditorShowError(const String& message, uint32_t durationMs) {
-  gSettingsEditor.errorMessage = message;
-  gSettingsEditor.errorDisplayUntil = millis() + durationMs;
+  oledToastShow(message.c_str(), durationMs, OledUiIcon::ERROR);
 }
 
 // Remote commit: accepted-for-delivery here; the peer's answer reaches the
 // screen through OLED_Mode_RemoteSettings' outcome poll. Refusals use the
-// editor's error line exactly like a failed local string save.
+// shared error toast exactly like a failed local string save.
 static bool commitRemoteSettingValue(const SettingEntry* entry, const String& value) {
 #if ENABLE_ESPNOW && ENABLE_BONDED_MODE
   String err;
@@ -139,8 +145,6 @@ void initSettingsEditor() {
   gSettingsEditor.hasChanges = false;
   gSettingsEditor.currentModule = nullptr;
   gSettingsEditor.currentEntry = nullptr;
-  gSettingsEditor.errorMessage = "";
-  gSettingsEditor.errorDisplayUntil = 0;
   gSettingsEditor.editKind = SETTINGS_EDIT_SLIDER;
   gSettingsEditor.optionIndex = 0;
   gSettingsEditor.optionCount = 0;
@@ -223,7 +227,7 @@ int getSettingCurrentValue(const SettingEntry* entry) {
 // the bonded peer instead. Locally it runs through cmd_exec for the audit log
 // (handleSettingCommand's SETTING_STRING case assigns the whole trimmed args
 // string, so multi-word values survive), and a refusal or "Error:" reply is
-// shown on the editor's error line. Returns false when the save was refused.
+// shown on the shared error toast. Returns false when the save was refused.
 static bool setSettingValueStr(const SettingEntry* entry, const String& value) {
   if (!entry || !entry->jsonKey) return false;
   // cmdKey ONLY — see settingsEditorCommandName() for why the jsonKey fallback
@@ -231,16 +235,14 @@ static bool setSettingValueStr(const SettingEntry* entry, const String& value) {
   // rather than firing an unrelated one.
   const char* cmdName = entry->cmdKey;
   if (!cmdName || !cmdName[0]) {
-    gSettingsEditor.errorMessage = String("Not editable here");
-    gSettingsEditor.errorDisplayUntil = millis() + 2500;
+    settingsEditorShowError(String("Not editable here"), 2500);
     return false;
   }
   if (editorIsRemote()) return commitRemoteSettingValue(entry, value);
   char out[128];
   bool ok = executeOledCommandWithResult(String(cmdName) + " " + value, out, sizeof(out));
   if (!ok) {
-    gSettingsEditor.errorMessage = (out[0] != '\0') ? String(out) : String("Save failed");
-    gSettingsEditor.errorDisplayUntil = millis() + 2500;
+    settingsEditorShowError((out[0] != '\0') ? String(out) : String("Save failed"), 2500);
     return false;
   }
   return true;
@@ -296,18 +298,6 @@ void displaySettingsEditor() {
   
   
   
-  // Display error message if active
-  if (deadlinePending(gSettingsEditor.errorDisplayUntil, millis())) {
-    DEBUG_SYSTEMF("[SettingsEditor] Showing error: %s", gSettingsEditor.errorMessage.c_str());
-    oledDisplay->setTextSize(1);
-    oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
-    oledDisplay->println("ERROR:");
-    oledDisplay->setCursor(0, OLED_CONTENT_START_Y + 10);
-    oledDisplay->println(gSettingsEditor.errorMessage);
-    // Note: Don't call display() here - main render loop handles it via displayUpdate()
-    return;
-  }
-  
   switch (gSettingsEditor.state) {
     case SETTINGS_CATEGORY_SELECT: {
       
@@ -335,15 +325,11 @@ void displaySettingsEditor() {
         int y = OLED_CONTENT_START_Y;
         for (int i = 0; i < maxVisibleItems && (scrollOffset + i) < (int)moduleCount; i++) {
           int itemIdx = scrollOffset + i;
-          if (itemIdx == gSettingsEditor.categoryIndex) {
-            oledDisplay->fillRect(0, y, 128, 10, DISPLAY_COLOR_WHITE);
-            oledDisplay->setTextColor(DISPLAY_COLOR_BLACK, DISPLAY_COLOR_WHITE);
-          } else {
-            oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-          }
-          
-          oledDisplay->setCursor(2, y + 1);
-          oledDisplay->println(modules[itemIdx]->name);
+          const bool selected = itemIdx == gSettingsEditor.categoryIndex;
+          if (selected) oledDisplay->fillRect(0, y, 128, 10, DISPLAY_COLOR_WHITE);
+          oledTextFieldDraw(oledDisplay, 2, y + 1, kSeLabelRight - 2, modules[itemIdx]->name,
+                            selected ? DISPLAY_COLOR_BLACK : DISPLAY_COLOR_WHITE, DISPLAY_COLOR_WHITE,
+                            selected, &gSettingsEditor);
           y += lineHeight;
         }
         
@@ -420,36 +406,24 @@ void displaySettingsEditor() {
         
         int y = itemStartY + displayedCount * lineHeight;
         
-        if ((int)i == gSettingsEditor.itemIndex) {
-          oledDisplay->fillRect(0, y - 1, 128, 10, DISPLAY_COLOR_WHITE);
-          oledDisplay->setTextColor(DISPLAY_COLOR_BLACK, DISPLAY_COLOR_WHITE);
-        } else {
-          oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-        }
-        
-        oledDisplay->setCursor(2, y);
-        // Show label and current value - truncate to prevent wrapping
-        String label = entry->label ? entry->label : entry->jsonKey;
+        const bool selected = (int)i == gSettingsEditor.itemIndex;
+        if (selected) oledDisplay->fillRect(0, y - 1, 128, 10, DISPLAY_COLOR_WHITE);
+        const uint16_t ink = selected ? DISPLAY_COLOR_BLACK : DISPLAY_COLOR_WHITE;
 
-        // Truncate label if too long (max ~15 chars to leave room for value)
-        if (label.length() > 15) {
-          label = label.substring(0, 14); label += '~';
-        }
-
-        // Use print instead of println to prevent wrapping
-        oledDisplay->print(label);
-        oledDisplay->print(":");
-        if (entry->type == SETTING_STRING) {
-          // String value, clipped so the row never wraps (21 cols total).
-          String val = *((String*)entry->valuePtr);
-          const int room = 20 - (int)label.length() - 1;
-          if ((int)val.length() > room && room > 1) {
-            val = val.substring(0, room - 1); val += '~';
-          }
-          oledDisplay->print(val);
-        } else {
-          oledDisplay->print(getSettingCurrentValue(entry));
-        }
+        // Label and value keep separate fields: the value in a fixed
+        // right-aligned column, the label scrolling under it when selected
+        // (OLED_TextField.h). Neither can run into the other or the next row.
+        const char* label = entry->label ? entry->label : entry->jsonKey;
+        const String value = (entry->type == SETTING_STRING)
+                                 ? *((String*)entry->valuePtr)
+                                 : String(getSettingCurrentValue(entry));
+        int valueW = (int)value.length() * 6;
+        if (valueW > kSeValueMaxW) valueW = kSeValueMaxW;
+        const int valueX = kSeLabelRight - valueW;
+        oledTextFieldDraw(oledDisplay, 2, y, valueX - 6 - 2, label, ink, DISPLAY_COLOR_WHITE,
+                          selected, &gSettingsEditor);
+        oledTextFieldDraw(oledDisplay, valueX, y, valueW, value.c_str(), ink, DISPLAY_COLOR_WHITE,
+                          false, &gSettingsEditor);
         
         displayedCount++;
         currentVisibleIdx++;
@@ -477,9 +451,11 @@ void displaySettingsEditor() {
       if (!gSettingsEditor.currentEntry) break;
 
       oledDisplay->setTextSize(1);
-      oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
-      String label = gSettingsEditor.currentEntry->label ? gSettingsEditor.currentEntry->label : gSettingsEditor.currentEntry->jsonKey;
-      oledDisplay->println(label);
+      // The entry's name on one bounded row above the editor.
+      oledTextFieldDraw(oledDisplay, 0, OLED_CONTENT_START_Y, SCREEN_WIDTH,
+                        gSettingsEditor.currentEntry->label ? gSettingsEditor.currentEntry->label
+                                                            : gSettingsEditor.currentEntry->jsonKey,
+                        DISPLAY_COLOR_WHITE, DISPLAY_COLOR_WHITE, false, &gSettingsEditor);
 
       if (gSettingsEditor.editKind == SETTINGS_EDIT_PICKLIST) {
         // Option rows below the label — same invert-bar + arrow chrome as the
@@ -504,14 +480,11 @@ void displaySettingsEditor() {
                             nullptr, 0, optLabel, sizeof(optLabel))) {
             break;
           }
-          if (idx == gSettingsEditor.optionIndex) {
-            oledDisplay->fillRect(0, y, 128, 10, DISPLAY_COLOR_WHITE);
-            oledDisplay->setTextColor(DISPLAY_COLOR_BLACK, DISPLAY_COLOR_WHITE);
-          } else {
-            oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-          }
-          oledDisplay->setCursor(2, y + 1);
-          oledDisplay->print(optLabel);
+          const bool selected = idx == gSettingsEditor.optionIndex;
+          if (selected) oledDisplay->fillRect(0, y, 128, 10, DISPLAY_COLOR_WHITE);
+          oledTextFieldDraw(oledDisplay, 2, y + 1, kSeLabelRight - 2, optLabel,
+                            selected ? DISPLAY_COLOR_BLACK : DISPLAY_COLOR_WHITE, DISPLAY_COLOR_WHITE,
+                            selected, &gSettingsEditor);
           y += lineHeight;
         }
         oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
@@ -567,8 +540,7 @@ bool handleSettingsEditorInput(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPre
       if (text.length() == 0) {
         // Committing "" would send "<cmd>" with empty args, which SHOWS the
         // current value instead of clearing it — a silent no-op. Refuse.
-        gSettingsEditor.errorMessage = "Empty - not saved";
-        gSettingsEditor.errorDisplayUntil = millis() + 2000;
+        settingsEditorShowError("Empty - not saved", 2000);
       } else if (setSettingValueStr(gSettingsEditor.currentEntry, text)) {
         DEBUG_SYSTEMF("[SettingsEditor] Saved %s = \"%s\" (keyboard)",
                       gSettingsEditor.currentEntry->jsonKey, text.c_str());
@@ -802,8 +774,7 @@ void settingsEditorSelect() {
       // Defense in depth — navigation should never land here on a
       // non-editable entry now that everything shares isEditableEntry.
       if (!isEditableEntry(gSettingsEditor.currentEntry)) {
-        gSettingsEditor.errorMessage = "Not editable";
-        gSettingsEditor.errorDisplayUntil = millis() + 2000;
+        settingsEditorShowError("Not editable", 2000);
         break;
       }
 
@@ -822,8 +793,7 @@ void settingsEditorSelect() {
         if ((int)cur.length() > OLED_KEYBOARD_MAX_LENGTH) {
           // The keyboard buffer would silently clip the prefill and a save
           // would corrupt the value — refuse rather than truncate.
-          gSettingsEditor.errorMessage = "Too long for OLED edit";
-          gSettingsEditor.errorDisplayUntil = millis() + 2500;
+          settingsEditorShowError("Too long for OLED edit", 2500);
           break;
         }
         gSettingsEditor.editKind = SETTINGS_EDIT_KEYBOARD;
@@ -881,8 +851,7 @@ void settingsEditorSelect() {
       // Slider (INT/BOOL) — original path.
       String errorMsg;
       if (!validateSettingValue(gSettingsEditor.currentEntry, gSettingsEditor.editValue, errorMsg)) {
-        gSettingsEditor.errorMessage = errorMsg;
-        gSettingsEditor.errorDisplayUntil = millis() + 2000;
+        settingsEditorShowError(errorMsg, 2000);
         break;
       }
 
@@ -919,8 +888,6 @@ bool openSettingsEditorForModule(const char* moduleName) {
       gSettingsEditor.editValue = 0;
       gSettingsEditor.hasChanges = false;
       gSettingsEditor.currentEntry = nullptr;
-      gSettingsEditor.errorMessage = "";
-      gSettingsEditor.errorDisplayUntil = 0;
       gSettingsEditor.editKind = SETTINGS_EDIT_SLIDER;
       gSettingsEditor.optionIndex = 0;
       gSettingsEditor.optionCount = 0;
@@ -1053,12 +1020,9 @@ static bool quickItemsInitialized = false;
 static int quickSelectedItem = 0;
 
 static char quickStatusMsg[32] = "";
-static unsigned long quickStatusExpireMs = 0;
 
 static void setQuickStatus(const char* msg, unsigned long durationMs = 2000) {
-  strncpy(quickStatusMsg, msg, 31);
-  quickStatusMsg[31] = '\0';
-  quickStatusExpireMs = millis() + durationMs;
+  oledToastShow(msg, durationMs, OledUiIcon::SUCCESS);
 }
 
 static void addQuickItem(const char* name, QuickGetStateFunc getState, QuickToggleFunc toggle) {
@@ -1073,12 +1037,13 @@ static void addQuickItem(const char* name, QuickGetStateFunc getState, QuickTogg
 // the P4 each is a series of RPCs to the C6). The row shows its new state once
 // the command lands; until then the status line says it is running.
 static void quickCommandDone(bool ok, const void* okStatus) {
+  quickStatusMsg[0] = '\0';
   if (ok) setQuickStatus(static_cast<const char*>(okStatus));
-  else quickStatusMsg[0] = '\0';  // the failure toast says why
 }
 static void runQuickCommand(const char* command, const char* okStatus) {
   if (oledRunCommandAsync(command, quickCommandDone, okStatus)) {
-    setQuickStatus("Working...", 60000);
+    snprintf(quickStatusMsg, sizeof(quickStatusMsg), "Working...");
+    oledMarkDirty();
   }
 }
 
@@ -1111,7 +1076,7 @@ static void toggleQuickWifi() {
   // Can't connect a network with the radio powered down — mirror the HTTP row's
   // "Need WiFi first!" refusal instead of firing openwifi against a dead radio.
   if (!wifiRadioOn()) {
-    setQuickStatus("Radio off!");
+    oledToastShow("Radio is off. Turn it on first.", 8000, OledUiIcon::ERROR);
     return;
   }
   if (WiFi.isConnected()) {
@@ -1153,7 +1118,7 @@ static void httpToggleConfirmedQuick(void* userData) {
     runQuickCommand("closehttp", "HTTP OFF");
   } else {
     if (!WiFi.isConnected()) {
-      setQuickStatus("Need WiFi first!");
+      oledToastShow("Connect Wi-Fi first.", 8000, OledUiIcon::ERROR);
       return;
     }
     runQuickCommand("openhttp", "HTTP ON");
@@ -1164,7 +1129,7 @@ static void toggleQuickHttp() {
     oledConfirmRequest("Stop HTTP?", nullptr, httpToggleConfirmedQuick, nullptr, false);
   } else {
     if (!WiFi.isConnected()) {
-      setQuickStatus("Need WiFi first!");
+      oledToastShow("Connect Wi-Fi first.", 8000, OledUiIcon::ERROR);
       return;
     }
     oledConfirmRequest("Start HTTP?", nullptr, httpToggleConfirmedQuick, nullptr);
@@ -1224,8 +1189,10 @@ void displayQuickSettings() {
         oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
       }
 
-      oledDisplay->setCursor(4, yPos);
-      oledDisplay->print(quickItems[i].name);
+      // The name field ends before the fixed ON/OFF column (OLED_TextField.h).
+      const uint16_t ink = isSelected ? DISPLAY_COLOR_BLACK : DISPLAY_COLOR_WHITE;
+      oledTextFieldDraw(oledDisplay, 4, yPos, 90 - 6 - 4, quickItems[i].name, ink, ink, isSelected,
+                        quickItems);
 
       oledDisplay->setCursor(90, yPos);
       oledDisplay->print(isEnabled ? "[ON]" : "[OFF]");
@@ -1234,13 +1201,11 @@ void displayQuickSettings() {
     }
   }
   
-  if (quickStatusMsg[0] != '\0' && deadlinePending(quickStatusExpireMs, millis())) {
-    // Draw status toast at bottom of content area (above footer)
+  // Ongoing work is screen state; terminal results use shared feedback.
+  if (quickStatusMsg[0]) {
     oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
     oledDisplay->setCursor(0, OLED_CONTENT_HEIGHT - 10);
     oledDisplay->print(quickStatusMsg);
-  } else if (quickStatusMsg[0] != '\0') {
-    quickStatusMsg[0] = '\0';
   }
 }
 

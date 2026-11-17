@@ -440,6 +440,7 @@ if(HW_CFG_BUILD_OLED_MODES GREATER 0)
         OLED_Mode_Auth.cpp
         OLED_Mode_CLI.cpp
         OLED_Mode_CLIInput.cpp
+        OLED_ConsoleBuffer.cpp
         OLED_Mode_Logging.cpp
         OLED_Mode_Power.cpp
         OLED_Mode_LED.cpp
@@ -459,6 +460,7 @@ if(HW_CFG_BUILD_OLED_MODES GREATER 0)
         OLED_Mode_UserManager.cpp
         OLED_RemoteSettings.cpp
         OLED_UI.cpp
+        OLED_TextField.cpp
         OLED_SetupWizard.cpp
     )
     # Map / Automation OLED modes are gated on both the display AND

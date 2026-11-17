@@ -1822,6 +1822,36 @@ static inline uint32_t sampleAgeMs(const HealthSeries* s, size_t start, size_t i
   return (age > kAgePlausibleMs) ? 0u : age;
 }
 
+bool g2HealthGraphSnapshot(G2HealthMetric metric, bool daily, G2HealthGraphSnapshot& out) {
+  out = {};
+  SeriesLock lock;
+  if (!lock.locked()) return false;
+  const HealthSeries* series = daily ? trendSeriesFor(metric) : seriesFor(metric);
+  if (!series) return false;
+  const TrendMeta* meta = daily ? trendMetaFor(metric) : nullptr;
+  if (meta && meta->have) {
+    out.startEpoch = meta->startTs;
+    out.endEpoch = meta->endTs;
+  }
+  out.backfilled = !daily && series->hasBackfill;
+  const uint32_t now = millis();
+  const size_t start = seriesOrderedStart(series, &out.count);
+  for (size_t i = 0; i < out.count; ++i) {
+    const auto& point = seriesAt(series, start, i);
+    G2HealthGraphPoint copy{point.value, sampleAgeMs(series, start, i, now), point.ringTs};
+    size_t at = i;
+    // Backfill may be appended after newer telemetry; insertion order is not
+    // time order. Keep the same oldest-first interpretation as the lens.
+    while (at && (daily ? out.points[at-1].epoch > copy.epoch
+                        : out.points[at-1].ageMs < copy.ageMs)) {
+      out.points[at] = out.points[at-1];
+      --at;
+    }
+    out.points[at] = copy;
+  }
+  return true;
+}
+
 // Plot span snaps UP to a rung, so the window — and with it the axis labels —
 // reframes only when the trail outgrows its rung, and labels stay round
 // values. Roughly doubling on purpose: a finer ladder reframes more often and

@@ -20,14 +20,27 @@
 #include <stddef.h>
 #include <stdint.h>
 
+// Owned graph data for independent consumers (OLED, lens). No selection or
+// transport state is changed by taking a snapshot.
+static constexpr size_t HEALTH_HIST_CAP = 96;
+struct G2HealthGraphPoint {
+  int16_t value;
+  uint32_t ageMs;
+  uint32_t epoch;
+};
+struct G2HealthGraphSnapshot {
+  G2HealthGraphPoint points[HEALTH_HIST_CAP];  // chronological, oldest first
+  size_t count;
+  bool backfilled;  // synthetic receive times must not be labelled live time
+  uint32_t startEpoch;
+  uint32_t endEpoch;
+};
+
 #if ENABLE_R1_HEALTH
 
 // Tile geometry — Maps-sized so sparklines stay readable. W must be even (4bpp).
 static constexpr int HEALTH_TILE_W = 288;
 static constexpr int HEALTH_TILE_H = 144;
-
-// Per-metric sample capacity for in-RAM sparklines / Trends day series.
-static constexpr size_t HEALTH_HIST_CAP = 96;
 
 enum G2HealthMetric : uint8_t {
   HEALTH_METRIC_OVERVIEW = 0,
@@ -117,6 +130,9 @@ void g2HealthApplyTrendDaily(G2HealthMetric metric,
                              uint32_t startTs, uint32_t endTs);
 
 size_t g2HealthHistoryCount(G2HealthMetric metric);
+// Copies under the series lock; callers draw after it is released. daily is
+// supported for HR/HRV/SpO2. Empty supported series succeeds with count zero.
+bool g2HealthGraphSnapshot(G2HealthMetric metric, bool daily, G2HealthGraphSnapshot& out);
 
 // Render selected metric / Trends day graph as graph-only 4bpp BMP.
 size_t g2RenderHealthBmp(uint8_t* out, size_t cap);
@@ -218,6 +234,7 @@ inline void g2HealthNoteSample(G2HealthMetric, int16_t, uint32_t) {}
 inline void g2HealthApplyDailyBackfill(G2HealthMetric, const uint8_t*, size_t, uint32_t, uint32_t) {}
 inline void g2HealthApplyTrendDaily(G2HealthMetric, const uint8_t*, size_t, uint32_t, uint32_t) {}
 inline size_t g2HealthHistoryCount(G2HealthMetric) { return 0; }
+inline bool g2HealthGraphSnapshot(G2HealthMetric, bool, G2HealthGraphSnapshot& out) { out = {}; return false; }
 inline size_t g2RenderHealthBmp(uint8_t*, size_t) { return 0; }
 inline void g2HealthBuildOverviewText(char* out, size_t cap) { if (out && cap) out[0] = '\0'; }
 inline void g2HealthBuildMetricText(char* out, size_t cap) { if (out && cap) out[0] = '\0'; }

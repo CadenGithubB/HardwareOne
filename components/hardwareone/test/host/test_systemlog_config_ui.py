@@ -86,7 +86,8 @@ def main() -> None:
         return (args.component / name).read_text()
 
     command = [args.cxx, "-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic",
-               "-Wno-unused-parameter", "-I", str(HERE / "web_batch_stubs")]
+               "-Wno-unused-parameter", "-I", str(HERE / "web_batch_stubs"),
+               "-I", str(HERE), "-I", str(args.component)]
     if args.sanitize:
         command += ["-fsanitize=address,undefined", "-fno-sanitize-recover=all",
                     "-fno-omit-frame-pointer", "-g"]

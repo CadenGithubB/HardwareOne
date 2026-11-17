@@ -35,6 +35,8 @@ def main():
             definitions='\n'.join(line for line in header.splitlines() if line.startswith('#define CAMERA_'))
             definitions+='\n#define CAMERA_SCCB_I2C_PORT '+('1' if board=='WaveshareP4' else '0')+'\n'
             if board=='P4X_EYE': definitions+='#define CAMERA_SCCB_SHARED 0\n'
+            # System_BuildConfig.h supplies the upright default for boards that state no turn.
+            if 'CAMERA_MOUNT_ROTATION' not in definitions: definitions+='#define CAMERA_MOUNT_ROTATION 0\n'
             generated.write_text(harness.replace('// INSERT_PRODUCTION_P4_BACKEND',backend).replace('// INSERT_BOARD_CONFIG',definitions))
             run(generated, 'backend-'+board, ('-DHW_CAMERA_HAL_HOST_TEST=1',str(COMPONENT/'HAL_Camera.cpp')))
 

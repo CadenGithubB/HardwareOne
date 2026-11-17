@@ -83,7 +83,8 @@ def main() -> None:
         overlay = args.source_dir / name if args.source_dir else None
         return (overlay if overlay and overlay.exists() else args.component / name).read_text()
 
-    flags = ["-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic", "-Wno-unused-function"]
+    flags = ["-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic", "-Wno-unused-function",
+             "-I", str(HERE), "-I", str(args.component)]
     if args.sanitize:
         flags += ["-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-g"]
     with tempfile.TemporaryDirectory(prefix="hw1-oled-automation-wizard-") as directory:

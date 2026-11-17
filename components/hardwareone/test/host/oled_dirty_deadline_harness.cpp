@@ -17,7 +17,11 @@ static uint32_t gNowMs = 0;
 static uint32_t millis() { return gNowMs; }
 
 static bool oledToastActive() { return false; }
-static bool oledPairingRibbonActive() { return false; }
+static bool oledConfirmIsActive() { return false; }
+static void oledFeedbackSetPaused(bool) {}
+static void oledTextFieldSetPaused(bool) {}
+static bool oledCliViewerNeedsFrame() { return false; }
+static bool oledTextFieldNeedsFrame() { return false; }
 static bool inputActivitySequence(uint32_t&, int) { return false; }
 static std::atomic<uint32_t> oledDirtySeq{1};
 static uint32_t oledConsumedDirtySeq = 1;

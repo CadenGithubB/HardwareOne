@@ -88,6 +88,7 @@ deferred; memory slimming resumed in 0.99.98.5.)
 | Shared physical input readings and latched button presses | `HAL_Input`; backends publish through its internal producer API. Screens peek at snapshots; dispatch consumes presses atomically. Driver-specific detents remain with the encoder backend. |
 | Display hardware initialization, readiness, brightness, power and sleep/wake | `HAL_Display`; UI code owns boot policy, screen drawing and authentication. A retained canvas does not imply that the display is ready. |
 | Embedded icon availability and file-extension mapping; icon drawing | `System_Icons` owns lookup policy beside the generated assets; `OLED_UI` owns rendering on the shared graphics canvas. |
+| List-row label bounds, the static ellipsis and the selected label's scrolling | `OLED_TextField` (policy and timing in `OLED_TextFieldCore.h`); shared renderers and custom rows draw labels through `oledTextFieldDraw`, keep markers, values and scrollbars in their own fixed columns, and never shorten the stored text. See [OLED list text](docs/OLED_LIST_TEXT.md). |
 | CPU clock changes and I2C draining during a change | `System_Power`; commands and idle/wake choose frequencies through its existing policy functions and check the operation's result. |
 | NeoPixel colors, effects, brightness, startup settings and driver access | `System_NeoPixel`; screens use the existing authorized commands, and the driver instance stays private. |
 | Directory entry order, backend name translation and virtual mounts | `VFS::DirectoryReader` in `System_VFS`; callers retain guarded opens, filesystem lock ownership, visibility, permission metadata, caching and output formats. |
@@ -164,7 +165,10 @@ attachment should report unavailable without breaking unrelated services.
   test `command_reply_contract` checks both sides.
   Display command actions use `oledRunCommand`/`oledRunCommandAsync` and the shared reply
   mapping so failures share an error icon, wrapping and an eight-second minimum
-  toast. Toasts dismiss automatically and do not capture input. Do not replace a
+  toast. Event notifications and local feedback share the OLED_UI queue and
+  renderer; local validation uses explicit error severity. Confirmations pause
+  feedback, and session replacement clears it. See [OLED feedback](docs/OLED_FEEDBACK.md).
+  Toasts dismiss automatically and do not capture input. Do not replace a
   useful service refusal with a screen-local generic failure message.
 - Document ownership and asynchronous outcomes where callers need them. For
   example, “start accepted” and “connected” are different states, as are

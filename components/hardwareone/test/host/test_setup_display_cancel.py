@@ -94,7 +94,8 @@ def main() -> None:
                 command = [args.cxx, "-std=c++17", "-Wall", "-Wextra", "-Werror",
                            "-Wno-unused-function", "-Wno-unused-parameter", "-Wno-unused-variable",
                            "-DENABLE_OLED_DISPLAY=1", f"-DENABLE_WIFI={wifi}",
-                           f"-DENABLE_GPIO_ENCODER={gpio}", str(unit), "-o", str(output)]
+                           f"-DENABLE_GPIO_ENCODER={gpio}", "-I", str(HERE), "-I", str(args.component.resolve()),
+                           str(unit), "-o", str(output)]
                 if args.sanitize:
                     command[1:1] = ["-fsanitize=address,undefined", "-fno-sanitize-recover=all",
                                     "-fno-omit-frame-pointer", "-g"]

@@ -49,7 +49,16 @@ static int scrubs = 0;
   std::snprintf(out, outSize, "%s", execReply.c_str());
   return execOk && !commandReplyIsFailure(out);
 }
-[[maybe_unused]] static void oledToastShow(const char* message, uint32_t = 3000) { toasts.emplace_back(message); }
+// Shared OLED feedback (OLED_UI.h, OLED_MessageText.h, oledCommandReplyText in
+// OLED_Utils.cpp): the admin gate's short form, else the reply, else the fallback.
+namespace oled_message { constexpr size_t kMessageBytes = 192; constexpr uint32_t kErrorDurationMs = 8000; }
+enum class OledUiIcon : uint8_t { NONE, INFO, WARNING, ERROR, SUCCESS, QUESTION };
+[[maybe_unused]] static void oledCommandReplyText(bool, const char* reply, const char*, const char* failText,
+                                                  char* out, size_t outSize) {
+  if (reply && commandReplyIsAdminRefusal(reply)) std::snprintf(out, outSize, "Admin required");
+  else std::snprintf(out, outSize, "%s", (reply && reply[0]) ? reply : (failText ? failText : ""));
+}
+[[maybe_unused]] static void oledToastShow(const char* message, uint32_t = 3000, OledUiIcon = OledUiIcon::NONE) { toasts.emplace_back(message); }
 static void secureClearString(String& text) { ++scrubs; text.clear(); }
 
 enum class OledKeyboardDictationPolicy : uint8_t { DENY = 0, ALLOW_PLAINTEXT = 1 };

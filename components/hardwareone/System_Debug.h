@@ -210,8 +210,18 @@ struct DebugMessage {
   unsigned long timestamp;
   DebugFlagMask category;  // Debug category (DEBUG_WIFI, DEBUG_AUTH, etc.) — 0 for broadcast messages
   uint8_t  routing;    // MSG_ROUTE_* sink mask — which sinks receive this message
+  // OLED delivery generation captured at enqueue (OledConsoleBuffer::
+  // deliveryGeneration()). The OLED sink refuses the envelope once the ring
+  // has crossed a local-display identity boundary; no other sink reads it.
+  // Sits in the padding after `routing`, so a pool slot stays 304 bytes.
+  // 0 on builds without the display.
+  uint32_t oledGeneration;
   char text[DEBUG_MSG_SIZE];
 };
+// Pool slots are sized by this struct. oledGeneration lives in former padding
+// (8-byte aligned DebugFlagMask, 256-byte text): keep it there if the layout
+// changes, or every slot of the 64..192 message pool grows.
+static_assert(sizeof(DebugMessage) == 304, "DebugMessage grew; keep oledGeneration in the padding after routing");
 
 // Global output lane gates, using the MSG_ROUTE_* sink bits declared at the
 // top of this header. (The former OUTPUT_* constants were a second, value-
