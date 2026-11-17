@@ -333,7 +333,7 @@ static SttDetectorProfile sttDetectorProfileFor(bool glasses) {
   p.decisionHold = glasses ? gSettings.sttG2DecisionHold : gSettings.sttDecisionHold;
   return p;
 }
-// ENABLE_STT_LEVEL_ROBUST_ONSET 0 (configuration p4-glasses-test-prev-onset): every
+// ENABLE_STT_LEVEL_ROBUST_ONSET 0 (a saved configuration sets it): every
 // session runs the raw level only, whatever sttdecisionpre / sttg2decisionpre hold.
 #if defined(ENABLE_STT_LEVEL_ROBUST_ONSET) && !ENABLE_STT_LEVEL_ROBUST_ONSET
 static constexpr bool kSttOnsetBuilt = false;

@@ -9,5 +9,7 @@
   },
   "sdkconfig": {
     "CONFIG_BT_ENABLED": false
-  }
+  },
+  "summary": "The assistant answers over HTTP (OpenClaw) or from a Raspberry Pi; Bluetooth and the on-board model off to fit.",
+  "title": "Assistant over HTTP"
 }

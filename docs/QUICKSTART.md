@@ -189,7 +189,7 @@ Two layers of defaults are applied for you, and it helps to know which is which.
 | Board | Board file | PSRAM mode | Flash | Bluetooth |
 | ----- | ---------- | :--------: | :---: | :-------: |
 | Unexpected Maker FeatherS3 | `feathers3` | **Quad** | 16 MB | on |
-| Seeed XIAO ESP32-S3 | `xiao_s3` | **Octal** | 8 MB | on in the board file, which no longer fits the factory partition; build `--config xiao-no-bluetooth` (off) or the `pocket_assistant` deployment (on) |
+| Seeed XIAO ESP32-S3 | `xiao_s3` | **Octal** | 8 MB | on in the board file, which no longer fits the factory partition; build `--config xiao-default` (off) or the `pocket_assistant` deployment (on) |
 | Adafruit QT Py ESP32 | `qtpy_esp32` | **Quad** | 8 MB | **off** |
 | Adafruit Feather ESP32 V2 | `feather_esp32_v2` | **Quad** | 8 MB | on |
 | Unexpected Maker FeatherS3, flash-encrypted | `feathers3_fe` | **Quad** | 16 MB | on (see the warning below) |
@@ -198,10 +198,10 @@ Two layers of defaults are applied for you, and it helps to know which is which.
 
 > **Bluedroid is compiled out** (`CONFIG_BT_ENABLED=n`) to buy back flash and RAM on
 > `qtpy_esp32` (~14 KB IRAM / ~80 KB DRAM / ~70 KB flash on the memory-tight classic ESP32)
-> and in the saved XIAO configurations (`xiao-no-bluetooth`, `xiao-default`, `xiao-openclaw`). The bare `xiao_s3`
+> and in the saved XIAO configurations (`xiao-default`, `xiao-base`, `xiao-openclaw`). The bare `xiao_s3`
 > board file keeps Bluetooth on for the `pocket_assistant` deployment, so a plain
 > `tools/build_board.sh xiao_s3` overflows the 5.8 MB factory partition (by ~14 KB on
-> 2026-11-08); use `--config xiao-no-bluetooth` or the deployment. You do **not** hand-edit `System_BuildConfig.h` for this any more:
+> 2026-11-08); use `--config xiao-default` or the deployment. You do **not** hand-edit `System_BuildConfig.h` for this any more:
 > the header's derived rules see `CONFIG_BT_ENABLED` missing and force `ENABLE_BLUETOOTH` - and
 > its G2 / R1 dependents - to `0`, and `components/hardwareone/CMakeLists.txt` applies the same
 > downgrade to its source-list filter, so the `#if` gates and the file list cannot diverge.

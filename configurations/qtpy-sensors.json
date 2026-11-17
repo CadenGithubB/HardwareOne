@@ -29,5 +29,7 @@
     "INPUT_DEVICE_TYPE": 1,
     "NETWORK_FEATURE_LEVEL": 2,
     "WEB_FEATURE_LEVEL": 4
-  }
+  },
+  "summary": "GPS, distance and presence sensors with a Seesaw gamepad, Wi-Fi and the sensors web page.",
+  "title": "Sensor node"
 }

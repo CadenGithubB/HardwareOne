@@ -142,9 +142,10 @@ attachment should report unavailable without breaking unrelated services.
   file. A caller includes the header without a condition and does not declare
   the feature's names itself. A stub that nothing uses in a build without the
   feature is removed. The host test `disabled_feature_branches` lists the
-  owning headers and checks these points. The `xiao-no-network`, `xiao-no-web`
-  and `qtpy-all-sensors` configurations build the branches that the board
-  defaults never reach; build them after a change to a disabled branch.
+  owning headers and checks these points. No saved configuration reaches the branches with
+  networking off, the web server off or every I2C sensor on. After a change to a
+  disabled branch, create and build the three selections under "Coverage builds"
+  in `configurations/README.md`.
 - Do not expose a sensor mutex or borrowed cache buffer to a screen or transport.
   A reading snapshot does not consume events; use the owner's explicit consume
   operation for latched input. Keep reading validity separate from lock success.

@@ -122,8 +122,8 @@ everything user-visible since the v0.99.99.1 tag.
 - Smaller fixes: exporting a single automation whose name has an escaped quote no longer cuts the file
   name short; `whoami` names every command source, not five of them; JSON text escapes every control
   character; a user-sync MAC address with non-hex digits is refused instead of read as zeros; an
-  admin reject without a body answers "Username required"; the `xiao-no-network` and `xiao-no-web`
-  configurations build again.
+  admin reject without a body answers "Username required"; builds with networking or the web
+  server switched off (`NETWORK_FEATURE_LEVEL` 0, `WEB_FEATURE_LEVEL` 0) compile again.
 - Automations: a trigger that names a time of day ran on a clock that was not set. The scheduler
   took the clock as set one second after boot, so "07:30" fired seven and a half hours after a boot
   without a time source. Time-of-day triggers now wait until the clock is set (2020 or later);
@@ -216,6 +216,28 @@ everything user-visible since the v0.99.99.1 tag.
   and on the P4X-EYE each fresh reading is a LittleFS walk of about 1.3 s on the one web server
   task. They now ask once. Source-tested; the page was not run in a browser here.
 ### Changed
+- Build configurations: the guided setup is board first. `python3 tools/build_config.py new` asks
+  for the board, then what it should do (a saved configuration of that board, listed by title, or the
+  board's defaults), then lets you switch features on and off by plain name in eleven groups, and
+  asks for the name at review. `configure` is the same command. On and off are the values the
+  firmware will have for that board: the setup runs `System_BuildConfig.h` through the host C++
+  preprocessor with the board's feature header, the layered SDK defaults and the choices
+  (`tools/build_config_resolve.py`; on 12 built configurations it matched the real compiler on
+  all 97 values compared). An item brings its prerequisites and says so, Bluetooth moves the SDK's
+  Bluetooth stack with it, a change the header rejects is refused with the header's message, and a
+  board default the header rejects (the bare Waveshare selection) can be repaired item by item. The
+  plain names are in `tools/build_config_catalog.json`; the host test `build_config_catalog` fails
+  when a switch or a board has none. Saved configurations may carry a `title` and a `summary`
+  (shown by `list` and `show`, not build inputs), and `list configurations --board <id>` lists one
+  board's. The evaluation does not know image size or what only Kconfig resolves: the build stays
+  the final check.
+- Saved configurations: fourteen bench, debugging and duplicate ones are removed and eleven remain,
+  each a board and a job (`configurations/README.md` has the table, and what recreates each removed
+  one). `xiao-no-bluetooth` was identical to `xiao-default`, which the README, the quick start and the
+  watchdog-soak test now name. The three coverage selections (`xiao-no-network`, `xiao-no-web`,
+  `qtpy-all-sensors`) and the Waveshare bring-up selection are `create` commands in
+  `configurations/README.md` and `docs/WAVESHARE_P4_SUPPORT.md`; the tests that read removed files
+  carry those choices themselves.
 - Local STT (P4) acoustic model: Citrinet-384 (2,000 h, the speech repository's Voice Model 3
   training data) replaces the QuartzNet 15x5 gen2-25397 as the default. It reads
   `/sd/STT Models/citrinet384-2000h.p4.stt` (22,700,240 bytes, SHA-256
@@ -228,7 +250,7 @@ everything user-visible since the v0.99.99.1 tag.
   gen2-25397 (Citrinet float; its int8 export costs 0.84 points on 600 dev clips).
   Build flags `ENABLE_STT_MODEL_CITRINET` (default 1) and `ENABLE_STT_MODEL_QUARTZNET` (default 0):
   one model per build, the other's runtime, front end and ESP-DL kernels are not compiled;
-  configuration `p4-glasses-test-quartznet` builds the 15x5 instead (`ENABLE_STT_MODEL_15X5_GEN2` now
+  a saved configuration that sets them the other way round builds the 15x5 instead (`ENABLE_STT_MODEL_15X5_GEN2` now
   applies to QuartzNet builds only and follows that choice on `p4x_eye`; the `p4-*` profiles no
   longer set it). Capture-time feature rows follow the model's front end (80 bands, 400-sample
   window). Image 5,722,672 bytes for `p4-glasses-test`. On the bench P4 at 1 ft with the LM and
@@ -267,7 +289,7 @@ everything user-visible since the v0.99.99.1 tag.
   square roots of the detector's energies; `stt status`, `sttdetector` and the `sttraw` sidecar now
   name the detector (`"detector":"v3.1"`) and its gain and noise controls, and `stt_raw_replay`
   takes `--decision-gain`, `--decision-mod` and `--decision-hold`. Build flag
-  `ENABLE_STT_LEVEL_ROBUST_ONSET 0` (configuration `p4-glasses-test-prev-onset`) runs every session
+  `ENABLE_STT_LEVEL_ROBUST_ONSET 0` runs every session
   on the raw level only and leaves the saved settings alone. The segmenter, with the detector state,
   now lives in PSRAM per session, which leaves more of the `stt` task's stack free than before
   (low point 4,456 bytes against 3,192 on the bench). Host-tested (the speech repository's segmenter

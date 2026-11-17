@@ -3,6 +3,9 @@
 
 These small JSON files override board defaults. Dependency resolution stays in
 System_BuildConfig.h; the real build compiler verifies the requested choices.
+A file may also carry a "title" and a "summary": what the selection is for, in
+plain words. They are shown by the lists and the guided setup and are not build
+inputs.
 """
 
 import argparse
@@ -90,10 +93,24 @@ def board_choices():
     return boards
 
 
+DESCRIPTIONS = {"title": 60, "summary": 240}
+
+
+def build_inputs(config):
+    """The choices a build reads. A title or summary may change without touching a build."""
+    return {key: value for key, value in config.items() if key not in DESCRIPTIONS}
+
+
 def validate(config):
     if (not isinstance(config, dict) or not {"board", "features"} <= set(config)
-            or set(config) - {"board", "features", "sdkconfig"}):
-        raise ValueError("configuration needs 'board', 'features', and optionally 'sdkconfig'")
+            or set(config) - {"board", "features", "sdkconfig", *DESCRIPTIONS}):
+        raise ValueError("configuration needs 'board', 'features', and optionally 'sdkconfig', "
+                         "'title' and 'summary'")
+    for key, limit in DESCRIPTIONS.items():
+        text = config.get(key, "x")
+        if (not isinstance(text, str) or not text.strip() or text != text.strip()
+                or len(text) > limit or not text.isprintable()):
+            raise ValueError(f"{key} must be one line of text, at most {limit} characters")
     board = config["board"]
     if not isinstance(board, str):
         raise ValueError("board must be a name")
@@ -136,6 +153,7 @@ def apply_changes(config, feature_sets=(), feature_unsets=(), sdk_sets=(), sdk_u
     candidate = {"board": config["board"], "features": dict(config["features"])}
     if "sdkconfig" in config:
         candidate["sdkconfig"] = dict(config["sdkconfig"])
+    candidate.update({key: config[key] for key in DESCRIPTIONS if key in config})
     feature_updates, sdk_updates = {}, {}
     for setting in feature_sets:
         key, separator, value = setting.partition("=")
@@ -246,12 +264,25 @@ def edit(name, feature_sets=(), feature_unsets=(), sdk_sets=(), sdk_unsets=(), *
     return candidate
 
 
-def list_choices(category):
+def catalog():
+    """Plain names for boards and switches (tools/build_config_catalog.json); presentation only."""
+    return json.loads(Path(__file__).with_name("build_config_catalog.json").read_text())
+
+
+def list_choices(category, board=None):
     if category == "boards":
-        return [{"name": name, "target": target} for name, target in board_choices().items()]
+        described = catalog()["boards"]
+        return [{"name": name, "target": target,
+                 **{key: described[name][key] for key in ("title", "hardware") if key in described.get(name, {})}}
+                for name, target in board_choices().items()]
     if category == "configurations":
-        return [{"name": path.stem, "board": load(path.stem)["board"]}
-                for path in sorted((REPO / "configurations").glob("*.json"))]
+        rows = []
+        for path in sorted((REPO / "configurations").glob("*.json")):
+            config = load(path.stem)
+            if board in (None, config["board"]):
+                rows.append({"name": path.stem, "board": config["board"],
+                             **{key: config[key] for key in DESCRIPTIONS if key in config}})
+        return rows
     namespace = "features" if category == "features" else "sdkconfig"
     return [{"name": name, **spec} for name, spec in choice_schema()[namespace].items()]
 
@@ -262,6 +293,9 @@ def show(name, *, as_json=False):
         print(encode(config), end="")
         return
     print(f"Configuration: {name}\nBoard: {config['board']}")
+    for key, label in (("title", "Title"), ("summary", "What it is for")):
+        if key in config:
+            print(f"{label}: {config[key]}")
     for namespace, label in (("features", "Feature overrides"), ("sdkconfig", "SDK overrides")):
         print(f"{label}:")
         choices = config.get(namespace, {})
@@ -298,14 +332,14 @@ def prepare(name, board):
     sdk_lines.extend(f"{key}={'y' if value else 'n'}"
                      for key, value in sorted(config.get("sdkconfig", {}).items()))
     write_changed(directory / "sdkconfig.features", "\n".join(sdk_lines) + "\n")
-    write_changed(snapshot, encode(config))
+    write_changed(snapshot, encode(build_inputs(config)))
     return config
 
 
 def check(name):
     directory = build_dir(name)
     config = load(name)
-    if (directory / "configuration.json").read_text() != encode(config):
+    if (directory / "configuration.json").read_text() != encode(build_inputs(config)):
         raise ValueError("configuration changed; prepare and reconfigure the build first")
     sdk, sdk_path = gen_build_info.read_sdkconfig(str(directory))
     if sdk_path != str(directory / "sdkconfig"):
@@ -363,6 +397,7 @@ def main():
     create.add_argument("--sdk", action="append", default=[], metavar="CONFIG_FEATURE=y|n")
     listing = commands.add_parser("list", help="discover boards, configurations, or selectable inputs")
     listing.add_argument("category", choices=("boards", "configurations", "features", "sdk"))
+    listing.add_argument("--board", help="with 'configurations': only those saved for this board")
     listing.add_argument("--json", action="store_true")
     display = commands.add_parser("show", help="inspect saved choices and inheritance")
     display.add_argument("name")
@@ -376,12 +411,14 @@ def main():
     update.add_argument("--dry-run", action="store_true",
                         help="validate input syntax and preview JSON without saving; "
                              "dependency and resource checks require a build")
-    configure = commands.add_parser("configure", help="guided configuration creation or editing")
-    configure.add_argument("name", nargs="?")
-    source = configure.add_mutually_exclusive_group()
-    source.add_argument("--board")
-    source.add_argument("--from", dest="base")
-    source.add_argument("--edit", action="store_true", help="edit an existing saved configuration")
+    for guided, text in (("new", "guided setup: pick a board, then what it does"),
+                         ("configure", "the same guided setup; also edits a saved configuration")):
+        configure = commands.add_parser(guided, help=text)
+        configure.add_argument("name", nargs="?")
+        source = configure.add_mutually_exclusive_group()
+        source.add_argument("--board")
+        source.add_argument("--from", dest="base")
+        source.add_argument("--edit", action="store_true", help="edit an existing saved configuration")
     build_command = commands.add_parser("build", help="build a saved configuration")
     build_command.add_argument("name")
     build_command.add_argument("idf_args", nargs=argparse.REMAINDER)
@@ -393,19 +430,27 @@ def main():
     args = parser.parse_args()
     try:
         if args.command == "create":
-            config = load(args.base) if args.base else {"board": args.board, "features": {}}
+            config = build_inputs(load(args.base)) if args.base else {"board": args.board, "features": {}}
             config = apply_changes(config, feature_sets=args.set, sdk_sets=args.sdk)
             save_configuration(args.name, config)
             path = config_path(args.name)
             print(f"Saved {path.relative_to(REPO)}")
         elif args.command == "list":
-            rows = list_choices(args.category)
+            if args.board and args.category != "configurations":
+                raise ValueError("--board applies to 'list configurations'")
+            if args.board and args.board not in board_choices():
+                raise ValueError(f"unknown board: {args.board}")
+            rows = list_choices(args.category, args.board) if args.board else list_choices(args.category)
             if args.json:
                 print(encode(rows), end="")
             else:
                 for row in rows:
-                    if args.category in ("boards", "configurations"):
-                        print(f"{row['name']}\t{row.get('target', row.get('board'))}")
+                    if args.category == "boards":
+                        described = ": ".join(row[key] for key in ("title", "hardware") if key in row)
+                        print("\t".join(filter(None, (row["name"], row["target"], described))))
+                    elif args.category == "configurations":
+                        described = ": ".join(row[key] for key in ("title", "summary") if key in row)
+                        print("\t".join(filter(None, (row["name"], row["board"], described))))
                     elif args.category == "features":
                         print(f"{row['name']}\tinteger {row['minimum']}..{row['maximum']}")
                     else:
@@ -417,7 +462,7 @@ def main():
             show(args.name, as_json=args.json)
         elif args.command == "edit":
             edit(args.name, args.set, args.unset, args.sdk, args.unset_sdk, dry_run=args.dry_run)
-        elif args.command == "configure":
+        elif args.command in ("new", "configure"):
             from build_config_wizard import run
             return run(sys.modules[__name__], args.name, board=args.board,
                        base=args.base, editing=args.edit)

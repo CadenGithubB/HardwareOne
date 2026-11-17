@@ -9,5 +9,7 @@
   },
   "sdkconfig": {
     "CONFIG_BT_ENABLED": false
-  }
+  },
+  "summary": "The standard selection for a XIAO without the Sense board: no camera, microphone or SD card.",
+  "title": "Bare board"
 }

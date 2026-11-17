@@ -2,10 +2,12 @@
   "board": "p4x_eye",
   "features": {
     "ENABLE_ESP_SR": 0,
-    "ENABLE_SDMMC_CARD": 1,
-    "ENABLE_LOCAL_STT": 1
+    "ENABLE_LOCAL_STT": 1,
+    "ENABLE_SDMMC_CARD": 1
   },
   "sdkconfig": {
     "CONFIG_HEAP_USE_HOOKS": true
-  }
+  },
+  "summary": "Speech-to-text on the board with the G2 glasses and R1 ring, camera, microphone and microSD card.",
+  "title": "Glasses captions"
 }

@@ -1094,6 +1094,10 @@ add_test(NAME build_config_workflow
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_build_config_workflow.py)
 add_test(NAME build_config_wizard
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_build_config_wizard.py)
+# The guided setup's plain names (tools/build_config_catalog.json) cover every switch and board of
+# this checkout, and the configuration header accepts the saved configurations and what is offered.
+add_test(NAME build_config_catalog
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_build_config_catalog.py)
 add_test(NAME xiao_peripheral_config
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_xiao_peripheral_config.py)
 add_test(NAME sdkconfig_policy
@@ -2008,7 +2012,7 @@ add_test(
 # Both variants drive real threads against 10 s waits under the sanitizer. With
 # other suites running alongside (ctest -j6, 2026-11-06), about one run in six
 # timed out at a different wait each time, so they run alone rather than flake.
-# ENABLE_STT_LEVEL_ROBUST_ONSET 0 (configuration p4-glasses-test-prev-onset): the raw
+# ENABLE_STT_LEVEL_ROBUST_ONSET 0 (a saved configuration sets it): the raw
 # level only in every session, whatever sttdecisionpre holds.
 add_test(
   NAME stt_continuous_prev_onset

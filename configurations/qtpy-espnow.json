@@ -29,5 +29,7 @@
     "INPUT_DEVICE_TYPE": 0,
     "NETWORK_FEATURE_LEVEL": 3,
     "WEB_FEATURE_LEVEL": 4
-  }
+  },
+  "summary": "The OLED sensor node plus the ESP-NOW mesh and bonded pairs.",
+  "title": "Mesh sensor node"
 }

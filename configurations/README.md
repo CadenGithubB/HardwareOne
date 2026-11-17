@@ -3,34 +3,33 @@
 Build different feature selections for the same board without editing shared headers:
 
 ```sh
+python3 tools/build_config.py list configurations     # name, board, and what each is for
 python3 tools/build_config.py build xiao-default
-python3 tools/build_config.py build xiao-openclaw
-python3 tools/build_config.py build p4-openclaw
-python3 tools/build_config.py build p4-full-debug
-python3 tools/build_config.py build p4-glasses-test
-python3 tools/build_config.py build p4-glasses-test-prev-onset
-python3 tools/build_config.py build p4-phone-pipe
-python3 tools/build_config.py build p4-phone-only
-python3 tools/build_config.py build p4-phone-no-camera-test
-python3 tools/build_config.py build p4-phone-pipe-camera-off-test
-python3 tools/build_config.py build p4-phone-pipe-heapdiag
-python3 tools/build_config.py build waveshare-p4-bringup
-python3 tools/build_config.py build xiao-mqtt
-python3 tools/build_config.py build xiao-display
-python3 tools/build_config.py build xiao-no-bluetooth
-python3 tools/build_config.py build xiao-base
-python3 tools/build_config.py build qtpy-sensors
-python3 tools/build_config.py build qtpy-all-sensors
-python3 tools/build_config.py build xiao-no-network
-python3 tools/build_config.py build xiao-no-web
-python3 tools/build_config.py build qtpy-oled
-python3 tools/build_config.py build qtpy-espnow
-python3 tools/build_config.py build qtpy-logging-test
-python3 tools/build_config.py build qtpy-maps-test
+python3 tools/build_config.py new                     # make your own: board first, then what it does
 ```
 
+Eleven configurations are kept, each a board and a job:
+
+| Board | Configuration | What it is for |
+|---|---|---|
+| ESP32-P4X-EYE | `p4-glasses-test` | Glasses captions: speech-to-text on the board with the G2 glasses and R1 ring |
+| | `p4-openclaw` | Captions plus an assistant that answers over HTTP (OpenClaw) |
+| | `p4-phone-pipe` | Captions and the HTTP assistant plus the link to the Android app |
+| XIAO ESP32-S3 Sense | `xiao-default` | The standard selection; Bluetooth and MQTT off to fit the app partition |
+| | `xiao-base` | The standard selection for a XIAO without the Sense board |
+| | `xiao-mqtt` | Home Assistant node: MQTT and its settings page; offline maps off to fit |
+| | `xiao-openclaw` | Assistant over HTTP or from a Raspberry Pi; Bluetooth and the on-board model off |
+| | `xiao-display` | An SSD1306 display on external I2C; camera, maps and the on-board model off |
+| QT Py ESP32 | `qtpy-sensors` | Sensor node: GPS, distance and presence sensors with a gamepad |
+| | `qtpy-oled` | Sensor node with an SSD1306 display and a gesture sensor |
+| | `qtpy-espnow` | The OLED sensor node plus the ESP-NOW mesh |
+
+Each file carries that line as its `title` and `summary`; the lists and the guided setup show them.
+The other boards (FeatherS3, Feather ESP32 V2, Waveshare ESP32-P4 Touch LCD 5) have no saved
+configuration: the guided setup starts them from the board's defaults.
+
 Add `--wdt-soak` to `tools/build_board.sh` (for example
-`tools/build_board.sh xiao_s3 --config xiao-no-bluetooth --wdt-soak`, or
+`tools/build_board.sh xiao_s3 --config xiao-default --wdt-soak`, or
 `python3 tools/build_config.py build p4-openclaw --wdt-soak`) for the task-watchdog
 soak image: the watchdog panics after 20 s and the main loop is subscribed
 (`config/sdkconfig.wdt_soak.defaults`). It builds in `build-config-<name>-wdt-soak/`
@@ -53,19 +52,6 @@ fit the existing app partition. Both use the existing Sense assembly selection
 and board defaults. This trade-off is an explicit saved choice, not a dependency
 rule or an automatic size adjustment.
 
-`p4-glasses-test-prev-onset` is `p4-glasses-test` with `ENABLE_STT_LEVEL_ROBUST_ONSET 0`: every
-STT session runs the raw-level speech detector used before the level-robust onset, whatever
-`sttdecisionpre` / `sttg2decisionpre` hold (the speech repository's `sdkconfig.prev_onset`). The
-saved settings are not changed, so flashing `p4-glasses-test` again restores the onset;
-`sttdecisionpre 0` gives the same detector at run time on the ordinary image. HardwareOne's
-earlier pre-emphasis judge is in neither build; it needs the previous app image.
-
-`p4-glasses-test-quartznet` is `p4-glasses-test` built with the QuartzNet 15x5 gen2
-acoustic model instead of the default Citrinet-384 (`ENABLE_STT_MODEL_QUARTZNET 1`,
-`ENABLE_STT_MODEL_CITRINET 0`; the board derives `ENABLE_STT_MODEL_15X5_GEN2` from them).
-It reads `/sd/STT Models/quartznet15x5-gen2-25397.p4.stt`; Citrinet's runtime and kernels
-are not in that image.
-
 `p4-openclaw` starts from the qualified `p4-glasses-test` speech profile and
 adds the LLM feature and HTTP source. It keeps local STT (the default Citrinet
 model), speaker labels and SDMMC enabled, with ESP-SR and onboard/CM5 LLM sources
@@ -76,12 +62,6 @@ which booted to a complete setup, but its glasses qualification is still
 pending; see CHANGELOG.md). Runtime relay credentials and the public CA are configured on the device.
 Use the existing Stop → wait for transcription → review → Send interaction.
 The combined voice-to-agent path still needs hardware qualification.
-
-`p4-full-debug` is `p4-phone-pipe` (phone pipe, camera, glasses, ring, local
-STT, HTTP LLM source, microSD) with `ENABLE_DEBUG_ALL_BY_DEFAULT`, so a freshly
-erased P4X-EYE boots with every debug flag and sub-flag on and logs everything
-from its first boot. It is a bench image for finding unnecessary work in the
-console log; the flags stay runtime-editable, and no release profile sets it.
 
 `xiao-openclaw` enables the HTTP agent source and keeps CM5 available. This test
 profile explicitly disables Bluetooth (application and SDK) and the onboard LLM
@@ -101,24 +81,13 @@ External I2C uses SDA GPIO5 and SCL GPIO6. No external display has been physical
 qualified in this change. Supported external input selections can be saved
 independently; their bus and driver dependencies are checked at compile time.
 
-`xiao-no-bluetooth` disables application Bluetooth and its SDK stack. Bluetooth
-SDK policy now lives in `presets/`, separate from board hardware geometry.
+Bluetooth SDK policy lives in `presets/`, separate from board hardware geometry.
 
 `xiao-base` is `xiao-default` for a XIAO ESP32S3 without the Sense expansion
 board: `XIAO_ESP32S3_SENSE_ENABLED`, `ENABLE_CAMERA_SENSOR` and
 `ENABLE_MICROPHONE_SENSOR` are 0, so the image has no camera, microphone or SD
 card and the user LED on GPIO21 is available. Every other XIAO configuration is
 for the Sense assembly. The image builds; it has not been run on a base board.
-
-`xiao-no-network`, `xiao-no-web` and `qtpy-all-sensors` are coverage builds.
-They exist to compile and link the branches that no other saved configuration
-reaches, so a disabled feature keeps building (CONTRIBUTING.md, "Keep interfaces
-small"). `xiao-no-network` is `xiao-base` without Bluetooth and with
-`NETWORK_FEATURE_LEVEL` 0: no Wi-Fi, no ESP-NOW and no web server.
-`xiao-no-web` keeps Wi-Fi and ESP-NOW and sets `WEB_FEATURE_LEVEL` 0, so only
-the web server is off. `qtpy-all-sensors` is `qtpy-sensors` with the thermal
-camera, IMU, APDS, FM radio, RTC and servo driver switched on as well. None of
-the three has been run on a board.
 
 `qtpy-sensors` targets the **Adafruit QT Py ESP32 Pico** (classic ESP32). It
 enables VL53L4CX ToF, the Seesaw gamepad, STHS34PF80 presence and PA1010D GPS,
@@ -154,57 +123,75 @@ and remote filesystem tests with an XIAO peer. Pairing, channel and peer identit
 remain runtime settings; the build profile does not contain credentials or
 automatically pair devices.
 
-`qtpy-logging-test` adds the Seesaw gamepad and OLED input to that selection.
-`qtpy-maps-test` additionally enables Maps, including its web page. It exercises
-the shared `gpstrack live start|stop|toggle` operation with local GPS and OLED
-controls. Live recording leaves GPS and logger boot auto-start preferences
-unchanged; a GPS fix is required to collect coordinates. The Maps image has
-passed build and host checks; command/lifecycle hardware qualification is
-recorded in [the Map test results](../docs/LOGGER_TEST.md#map-live-recording--2026-10-10).
-
-`waveshare-p4-bringup` targets the **Waveshare ESP32-P4-WIFI6-Touch-LCD-5**
-with observed rev1.3 silicon. It includes Wi-Fi/HTTP and the standard Sensors
-web page for OV5647 camera preview, photos and recording. HX8394 display,
-GT911 touch, ES7210 onboard microphone, speaker support, local STT, G2 glasses
-and the phone pipe are included. It uses the qualified 32 MB factory partition
-layout; incremental updates flash the application only after verifying that
-layout. See [support status](../docs/WAVESHARE_P4_SUPPORT.md).
-
 ## Guided setup
 
-Start the terminal wizard from the repository root:
+Start it from the repository root:
 
 ```sh
-python3 tools/build_config.py configure
+python3 tools/build_config.py new
 ```
 
-Choose a saved configuration to copy, board defaults, or an existing
-configuration to edit. You can also choose that starting point directly:
+1. **Board.** The seven boards, each with its name and what is on it.
+2. **What should it do?** The saved configurations of that board, by title and summary, and "Board
+   defaults only". The one you pick is copied as the starting point; the saved file is not changed.
+3. **Add or remove.** Everything the board can have, grouped (Voice, Assistant, Network, Web pages,
+   Bluetooth and wearables, Sensors and add-ons, Display and input, Board hardware, Raspberry Pi
+   link, Apps and automation, Advanced). Open a group by number or name and switch an item by
+   number or name: `x` is on, blank is off, `-` cannot be turned on as things stand (choose it to
+   read why). Display, input control and speech model are lists of values instead of switches.
+4. **Review and save.** `review` asks for a name (Enter takes the suggestion, such as `xiao-custom`)
+   and one optional line on what it is for, shows what is on by group and the file to be written,
+   then `s` saves, `b` saves and builds, `e` returns to editing.
+
+What the setup does for you while you switch things:
+
+- **True states.** On and off are what the firmware will really have for this board and selection.
+  The setup runs `System_BuildConfig.h` through this computer's C++ preprocessor with the board's
+  feature header, the layered SDK defaults and your choices (`tools/build_config_resolve.py`), so
+  board defaults, feature levels and derived rules are all applied. It keeps no second copy of the
+  rules.
+- **Prerequisites.** Turning on an item also turns on what it needs and says so (the MQTT settings
+  page brings MQTT; speech-to-text on the board brings the microSD card). Turning Bluetooth on or
+  off moves the SDK's Bluetooth stack with it.
+- **Refusals with the reason.** A change the header rejects is not applied, and the header's own
+  message is shown with the setup's names added, for example
+  `External I2C uses controller 1, reserved by camera SCCB; ... disable ENABLE_CAMERA_SENSOR ("Camera")`.
+- **Side effects.** Items that go on or off as a consequence are listed ("now off as well: ...").
+- **Feature levels.** Network, web pages and I2C devices are governed by a level on some boards
+  (the P4X-EYE states network level 3). Switching one item sets that level to custom and writes the
+  other items of the group as they were, so nothing else changes.
+- **A starting point the rules reject.** The bare Waveshare selection is one: the shared defaults
+  leave the Raspberry Pi features on and the board has no UART link. The overview says what is
+  wrong ("Not buildable yet: ..."), and the selection can be repaired item by item.
+
+The other words on the overview: `names` lists every switch by its own name (`/mqtt` filters,
+`inherit` removes an override, help comes from the source comments), `sdk` lists the SDK choices,
+and `q`, Ctrl-C or EOF cancels without changing any file. Use `=name` for a literal name that
+could be read as a command, such as `=q` or `=2`.
+
+You can also start further in:
 
 ```sh
-python3 tools/build_config.py configure my-xiao --from xiao-mqtt
-python3 tools/build_config.py configure my-board --board feathers3
-python3 tools/build_config.py configure my-xiao --edit
+python3 tools/build_config.py new my-xiao --from xiao-mqtt     # copy a saved configuration
+python3 tools/build_config.py new my-board --board feathers3   # the board's defaults
+python3 tools/build_config.py new my-xiao --edit               # change a saved configuration
 ```
 
-The menu offers feature choices, SDK choices, and review. Select a choice by
-number or name; `/mqtt` filters the list, and `/` shows all choices again.
-Use `=name` for a literal name that could be a menu command, such as `=q` or `=2`.
-Help comes from the existing source comments. Use `on`/`off` for switches, the
-documented number for level/display/input choices, or `inherit` to remove an
-override. Enter keeps the current value or returns from a choice list.
+`configure` is the same command under its earlier name. New names cannot overwrite existing
+files. Editing preserves the board and checks the original file again before saving; if it
+detects an intervening edit, it stops and asks you to retry.
 
-At review, `s` saves, `b` saves and builds, and `e` returns to editing.
-`q`, Ctrl-C, or EOF while choosing/reviewing cancels the draft without changing
-configuration or build files. New names cannot overwrite existing files.
-Editing preserves the board and checks the original file again before saving;
-if it detects an intervening edit, it stops and asks you to retry.
+Saving alone needs Python and, for the checklist, a host C++ compiler (`c++`); without one the
+groups show `?` and `names` still works. To choose **Save and build**, source the ESP-IDF
+environment first. This runs the same board wrapper, compiler checks and image size checks as
+`build`; it does not flash. If the build fails, the configuration stays saved so you can revise
+it and retry. The setup's evaluation uses the SDK defaults files, not a resolved sdkconfig, and
+does not know image size: the build remains the final check.
 
-Saving alone needs Python. To choose **Save and build**, source the ESP-IDF
-environment first. This runs the same board wrapper, compiler checks and image
-size checks as `build`; it does not flash. If the build fails, the configuration
-stays saved so you can revise it and retry. Dependencies and resource limits
-are checked by the build, not inferred from the choice list.
+The plain names live in `tools/build_config_catalog.json`: a title, a group and one line for each
+switch, a name and hardware line for each board, and the prerequisite shortcuts. A switch added to
+`System_BuildConfig.h` is offered by `names` at once, and the host test `build_config_catalog`
+fails until it has a catalogue entry.
 
 ## Discover and inspect
 
@@ -214,6 +201,7 @@ create build files:
 ```sh
 python3 tools/build_config.py list boards
 python3 tools/build_config.py list configurations
+python3 tools/build_config.py list configurations --board xiao_s3
 python3 tools/build_config.py list features
 python3 tools/build_config.py list sdk
 python3 tools/build_config.py show xiao-mqtt
@@ -269,9 +257,15 @@ rejected. For example:
 {
   "board": "xiao_s3",
   "features": {"ENABLE_BLUETOOTH": 0},
-  "sdkconfig": {"CONFIG_BT_ENABLED": false}
+  "sdkconfig": {"CONFIG_BT_ENABLED": false},
+  "title": "No Bluetooth",
+  "summary": "The standard selection without Bluetooth."
 }
 ```
+
+`title` (at most 60 characters) and `summary` (at most 240) are optional single lines. They are
+not build inputs: changing them does not touch a build directory. A copy made with `--from` does
+not take them.
 
 SDK defaults layer shared preset, board preset, then saved choices. Changing or
 removing an SDK override reconciles the existing build-local sdkconfig before
@@ -282,7 +276,7 @@ Every key listed in `presets/sdkconfig.defaults` or a board preset is reconciled
 on every `tools/build_board.sh` build, plain board builds included. Changing
 such a key with `menuconfig` in a build's sdkconfig therefore does not stick:
 the next build resets it to the preset. Save the value as an SDK choice in a
-named configuration instead, as `xiao-no-bluetooth` does for
+named configuration instead, as `xiao-default` does for
 `CONFIG_BT_ENABLED`.
 
 Unlisted values inherit the shared and board defaults **at the source
@@ -290,8 +284,9 @@ revision being built**. These are feature overlays, not complete frozen release
 configurations. Keep the source revision and build manifest with an image.
 
 The script generates literal definitions for the existing CMake source filters
-and `System_BuildConfig.h`. It contains no alternate dependency resolver. After
-configuration, the real compiler verifies the explicit input values. MQTT
+and `System_BuildConfig.h`. It contains no alternate dependency resolver: the guided
+setup's checks evaluate that same header. After configuration, the real compiler verifies
+the explicit input values. MQTT
 without Wi-Fi is rejected with the dependency's explanation. Other input values
 that existing rules change are rejected with the selected and resolved values.
 `CUSTOM_ENABLE_*` values are input selectors; their corresponding effective
@@ -323,6 +318,9 @@ identical; the app partition remains 5,984,256 bytes.
 | `xiao-mqtt` | 5,784,272 | 199,984 |
 | `xiao-display` | 5,730,816 | 253,440 |
 | `xiao-no-bluetooth` | 4,350,144 | 1,634,112 |
+
+`xiao-no-bluetooth` was removed on 2026-11-16; `xiao-default` has carried the same choices since
+it turned Bluetooth off.
 
 An initial MQTT + settings page build retaining maps exceeded the partition
 by 11,296 bytes. This explains the explicit maps trade-off in `xiao-mqtt`.
@@ -377,12 +375,37 @@ These tooling checks do not require rebuilding or reflashing the firmware.
 Additional setup interfaces should reuse these functions as described in the
 [development guidelines](../CONTRIBUTING.md).
 
-## P4 phone-pipe camera-off qualification
+## Coverage builds
 
-`p4-phone-pipe-camera-off-test` copies `p4-phone-pipe` and changes only
-`ENABLE_CAMERA_SENSOR=0`. It keeps G2 glasses and the ring compiled in for
-three-link C6 coexistence tests, unlike `p4-phone-no-camera-test` which disables
-G2. The camera fault remains a separate investigation; disabling the camera in
-this diagnostic profile is not a fix or qualification of camera-enabled firmware.
-Build with `python3 tools/build_config.py build p4-phone-pipe-camera-off-test`.
-Flashing requires separate approval; this profile does not update the C6.
+No saved configuration reaches the branches with networking off, the web server off or every I2C
+sensor on. After a change to a disabled branch (CONTRIBUTING.md, "Keep interfaces small"), create
+these three and build them; they are throwaway, so delete the files afterwards.
+
+```sh
+python3 tools/build_config.py create cover-no-network --from xiao-base --set NETWORK_FEATURE_LEVEL=0
+python3 tools/build_config.py create cover-no-web --from xiao-base --set WEB_FEATURE_LEVEL=0
+python3 tools/build_config.py create cover-all-sensors --from qtpy-sensors \
+  --set CUSTOM_ENABLE_THERMAL=1 --set CUSTOM_ENABLE_IMU=1 --set CUSTOM_ENABLE_APDS=1 \
+  --set CUSTOM_ENABLE_FM_RADIO=1 --set CUSTOM_ENABLE_RTC=1 --set CUSTOM_ENABLE_SERVO=1
+for name in cover-no-network cover-no-web cover-all-sensors; do python3 tools/build_config.py build $name; done
+```
+
+## Removed on 2026-11-16
+
+Fourteen bench, debugging and duplicate configurations were removed. Older documents and
+changelog entries still name them; each is a few choices on top of a kept one:
+
+| Removed | Recreate from |
+|---|---|
+| `xiao-no-bluetooth` | identical to `xiao-default` |
+| `xiao-no-network`, `xiao-no-web`, `qtpy-all-sensors` | "Coverage builds" above |
+| `p4-glasses-test-quartznet` | `p4-glasses-test` with `ENABLE_STT_MODEL_QUARTZNET=1`, `ENABLE_STT_MODEL_CITRINET=0` (guided setup: Advanced, Speech-to-text model) |
+| `p4-glasses-test-prev-onset` | `p4-glasses-test` with `ENABLE_STT_LEVEL_ROBUST_ONSET=0` |
+| `p4-full-debug` | `p4-phone-pipe` with `ENABLE_DEBUG_ALL_BY_DEFAULT=1` |
+| `p4-phone-pipe-camera-off-test` | `p4-phone-pipe` with `ENABLE_CAMERA_SENSOR=0` |
+| `p4-phone-only` | `p4-phone-pipe` with `ENABLE_G2_GLASSES=0` (it also left the SDK choice `CONFIG_HEAP_USE_HOOKS` out) |
+| `p4-phone-no-camera-test` | `p4-phone-only` with `ENABLE_CAMERA_SENSOR=0` |
+| `p4-phone-pipe-heapdiag` | `p4-phone-pipe` with the SDK choice `CONFIG_HEAP_POISONING_COMPREHENSIVE` on |
+| `qtpy-logging-test` | `qtpy-espnow` with the Seesaw gamepad as input control (`CUSTOM_ENABLE_GAMEPAD=1`, `INPUT_DEVICE_TYPE=1`) |
+| `qtpy-maps-test` | `qtpy-logging-test` with `ENABLE_MAPS=1` |
+| `waveshare-p4-bringup` | the `create` command in [Waveshare support](../docs/WAVESHARE_P4_SUPPORT.md) |

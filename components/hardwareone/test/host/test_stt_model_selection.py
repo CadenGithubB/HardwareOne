@@ -96,7 +96,9 @@ def main():
     build_config.validate(saved)
     # The speech profile takes the default model (Citrinet): it sets neither model switch.
     assert not {'ENABLE_STT_MODEL_15X5_GEN2', 'ENABLE_STT_MODEL_CITRINET', 'ENABLE_STT_MODEL_QUARTZNET'} & set(saved['features'])
-    quartznet = json.loads((REPO / 'configurations/p4-glasses-test-quartznet.json').read_text())
+    # A QuartzNet build is the speech profile with the two model switches turned round.
+    quartznet = {'board': saved['board'], 'features': dict(saved['features'], ENABLE_STT_MODEL_CITRINET=0,
+                                                           ENABLE_STT_MODEL_QUARTZNET=1)}
     build_config.validate(quartznet)
     fixtures = 'static const uint8_t envelopes[3][96] = {\n' + ',\n'.join(
         '{' + ','.join(f'0x{x:02x}' for x in bytes.fromhex(header)) + '}'

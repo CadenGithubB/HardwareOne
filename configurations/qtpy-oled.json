@@ -29,5 +29,7 @@
     "INPUT_DEVICE_TYPE": 0,
     "NETWORK_FEATURE_LEVEL": 2,
     "WEB_FEATURE_LEVEL": 4
-  }
+  },
+  "summary": "GPS, distance, presence and gesture sensors with an SSD1306 display, Wi-Fi and the sensors web page.",
+  "title": "Sensor node with OLED"
 }

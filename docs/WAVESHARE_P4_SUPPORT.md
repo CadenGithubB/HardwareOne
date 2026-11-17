@@ -23,11 +23,22 @@ the initially pasted 4.3-inch ST7701 page is not this device.
 
 ## Configuration and wiring
 
-Use `configurations/waveshare-p4-bringup.json` with board
-`waveshare_p4_touch_lcd_5`. Build through the saved-profile tool:
+No saved configuration for this board is kept in `configurations/`. Create
+one on board `waveshare_p4_touch_lcd_5` with the bring-up choices (phone pipe,
+glasses, camera and local speech-to-text; `python3 tools/build_config.py new`
+offers the same choices as a checklist), then build it:
 
 ```sh
 source ~/esp/esp-idf/export.sh
+python3 tools/build_config.py create waveshare-p4-bringup --board waveshare_p4_touch_lcd_5 \
+  --set NETWORK_FEATURE_LEVEL=2 --set WEB_FEATURE_LEVEL=2 \
+  --set ENABLE_BLUETOOTH=1 --set ENABLE_BLE_PHONE_PIPE=1 --set ENABLE_G2_GLASSES=1 \
+  --set ENABLE_CAMERA_SENSOR=1 --set ENABLE_LOCAL_STT=1 --set ENABLE_ESP_SR=0 \
+  --set ENABLE_R1_HEALTH=0 --set ENABLE_MQTT=0 --set ENABLE_MAPS=0 --set ENABLE_GAMES=0 \
+  --set ENABLE_WEB_GAME_DARKROOM=0 --set ENABLE_AUTOMATION=0 --set ENABLE_BONDED_MODE=0 \
+  --set ENABLE_EDGE_IMPULSE=0 --set ENABLE_LLM_BACKEND=0 --set ENABLE_LLM_SOURCE_CM5=0 \
+  --set ENABLE_LLM_SOURCE_ONBOARD=0 --set ENABLE_UART_HOST_LINK=0 \
+  --set ENABLE_RASPBERRY_PI_HOST_POWER=0 --set ENABLE_RASPBERRY_PI_HOST_FAN=0
 python3 tools/build_config.py build waveshare-p4-bringup
 ```
 

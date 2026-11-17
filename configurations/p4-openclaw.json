@@ -2,12 +2,14 @@
   "board": "p4x_eye",
   "features": {
     "ENABLE_ESP_SR": 0,
-    "ENABLE_SDMMC_CARD": 1,
-    "ENABLE_LOCAL_STT": 1,
     "ENABLE_LLM_BACKEND": 1,
-    "ENABLE_LLM_SOURCE_HTTP": 1
+    "ENABLE_LLM_SOURCE_HTTP": 1,
+    "ENABLE_LOCAL_STT": 1,
+    "ENABLE_SDMMC_CARD": 1
   },
   "sdkconfig": {
     "CONFIG_HEAP_USE_HOOKS": true
-  }
+  },
+  "summary": "Glasses captions plus an assistant that answers over HTTP (OpenClaw).",
+  "title": "Captions and assistant"
 }

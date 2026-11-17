@@ -9,6 +9,17 @@ import unittest
 
 SOURCE = pathlib.Path(__file__).resolve().parents[2]
 
+# Choices of the Waveshare ESP32-P4 Touch LCD 5 bring-up build: phone pipe, glasses, camera and
+# local speech-to-text on the board's own feature header, without the P4X-EYE peripherals.
+WAVESHARE_BRINGUP = {
+    'ENABLE_AUTOMATION': 0, 'ENABLE_BLE_PHONE_PIPE': 1, 'ENABLE_BLUETOOTH': 1, 'ENABLE_BONDED_MODE': 0,
+    'ENABLE_CAMERA_SENSOR': 1, 'ENABLE_EDGE_IMPULSE': 0, 'ENABLE_ESP_SR': 0, 'ENABLE_G2_GLASSES': 1,
+    'ENABLE_GAMES': 0, 'ENABLE_LLM_BACKEND': 0, 'ENABLE_LLM_SOURCE_CM5': 0, 'ENABLE_LLM_SOURCE_ONBOARD': 0,
+    'ENABLE_LOCAL_STT': 1, 'ENABLE_MAPS': 0, 'ENABLE_MQTT': 0, 'ENABLE_R1_HEALTH': 0,
+    'ENABLE_RASPBERRY_PI_HOST_FAN': 0, 'ENABLE_RASPBERRY_PI_HOST_POWER': 0, 'ENABLE_UART_HOST_LINK': 0,
+    'ENABLE_WEB_GAME_DARKROOM': 0, 'NETWORK_FEATURE_LEVEL': 2, 'WEB_FEATURE_LEVEL': 2,
+}
+
 class PeripheralConfig(unittest.TestCase):
     def check_profile(self, flags, checks, succeeds=True, board_profile=None):
         compiler = shutil.which('c++')
@@ -63,8 +74,7 @@ class PeripheralConfig(unittest.TestCase):
 
     def test_waveshare_bringup_does_not_inherit_eye_peripherals(self):
         repo = SOURCE.parents[1]
-        config = json.loads((repo / 'configurations/waveshare-p4-bringup.json').read_text())
-        self.check_profile(config['features'], [
+        self.check_profile(dict(WAVESHARE_BRINGUP), [
             'BOARD_SUPPORTED == 1', 'HW_BOARD_WAVESHARE_P4_TOUCH == 1',
             'ENABLE_OLED_DISPLAY == 1', 'ENABLE_GPIO_ENCODER == 0',
             'ENABLE_GT911_TOUCH == 1', 'ENABLE_OLED_INPUT == 1',
@@ -82,7 +92,7 @@ class PeripheralConfig(unittest.TestCase):
 
     def test_waveshare_optional_peripherals_disabled(self):
         repo = SOURCE.parents[1]
-        flags = json.loads((repo / 'configurations/waveshare-p4-bringup.json').read_text())['features']
+        flags = dict(WAVESHARE_BRINGUP)
         board = repo / 'boards/waveshare_p4_touch_lcd_5.features.h'
         self.check_profile(dict(flags, INPUT_DEVICE_TYPE=0, DISPLAY_TYPE=0,
                                 ENABLE_SPEAKER=0, ENABLE_SDMMC_CARD=0, ENABLE_BATTERY_MONITOR=0,
@@ -97,7 +107,7 @@ class PeripheralConfig(unittest.TestCase):
     def test_touch_requires_supported_board_and_i2c(self):
         self.check_profile(self.profile(wheel=4), [], succeeds=False)
         board = SOURCE.parents[1] / 'boards/waveshare_p4_touch_lcd_5.features.h'
-        flags = json.loads((SOURCE.parents[1] / 'configurations/waveshare-p4-bringup.json').read_text())['features']
+        flags = dict(WAVESHARE_BRINGUP)
         self.check_profile(dict(flags, I2C_FEATURE_LEVEL=0, ENABLE_SPEAKER=0), [],
                            succeeds=False, board_profile=board)
         self.check_profile(dict(flags, INPUT_DEVICE_TYPE=0),
@@ -112,7 +122,7 @@ class PeripheralConfig(unittest.TestCase):
 
     def test_waveshare_battery_can_be_disabled(self):
         repo = SOURCE.parents[1]
-        flags = json.loads((repo / 'configurations/waveshare-p4-bringup.json').read_text())['features']
+        flags = dict(WAVESHARE_BRINGUP)
         self.check_profile(dict(flags, ENABLE_BATTERY_MONITOR=0),
                            ['ENABLE_BATTERY_MONITOR == 0', 'ENABLE_WEB_BATTERY == 0',
                             'ENABLE_SD_CARD == 1', 'ENABLE_GT911_TOUCH == 1'],
@@ -120,7 +130,7 @@ class PeripheralConfig(unittest.TestCase):
 
     def test_waveshare_sd_can_be_disabled(self):
         repo = SOURCE.parents[1]
-        flags = json.loads((repo / 'configurations/waveshare-p4-bringup.json').read_text())['features']
+        flags = dict(WAVESHARE_BRINGUP)
         board = repo / 'boards/waveshare_p4_touch_lcd_5.features.h'
         # The profile's local transcription model lives on the card, so turning
         # the card off must also turn transcription off; the guard refuses the mix.
@@ -180,8 +190,10 @@ class PeripheralConfig(unittest.TestCase):
 
     def test_p4_openclaw_preserves_local_speech_profile(self):
         repo = SOURCE.parents[1]
-        baseline = json.loads((repo / 'configurations/p4-glasses-test.json').read_text())
-        selected = json.loads((repo / 'configurations/p4-openclaw.json').read_text())
+        # The build inputs are compared; each file's own title and summary are not part of them.
+        baseline, selected = ({key: value for key, value in
+                               json.loads((repo / f'configurations/{name}.json').read_text()).items()
+                               if key not in ('title', 'summary')} for name in ('p4-glasses-test', 'p4-openclaw'))
         expected = dict(baseline['features'], ENABLE_LLM_BACKEND=1,
                         ENABLE_LLM_SOURCE_HTTP=1)
         self.assertEqual(selected, dict(baseline, features=expected))

@@ -8,5 +8,7 @@
     "ENABLE_MQTT": 0,
     "I2C_FEATURE_LEVEL": 1,
     "INPUT_DEVICE_TYPE": 0
-  }
+  },
+  "summary": "An SSD1306 display on external I2C, with Bluetooth, glasses and ring; camera, maps and the on-board model off.",
+  "title": "With an OLED display"
 }

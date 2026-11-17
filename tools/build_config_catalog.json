@@ -1,0 +1,198 @@
+{
+  "about": "Plain names for the guided setup (tools/build_config.py new). Presentation only: which switches exist, their ranges and their dependency rules stay in System_BuildConfig.h, which the setup evaluates for the chosen board. 'needs' and 'sdk' are shortcuts the setup applies and then checks against that header. The host test build_config_catalog fails when a switch or a board is missing here.",
+  "boards": {
+    "p4x_eye": {
+      "short": "p4",
+      "title": "Espressif ESP32-P4X-EYE",
+      "hardware": "camera, microphone, display, wheel and buttons, microSD slot, 32 MB PSRAM; Wi-Fi and Bluetooth through its ESP32-C6"
+    },
+    "waveshare_p4_touch_lcd_5": {
+      "short": "waveshare",
+      "title": "Waveshare ESP32-P4 Touch LCD 5",
+      "hardware": "5-inch touch display, microphone, speaker, microSD slot, camera connector; Wi-Fi and Bluetooth through its ESP32-C6"
+    },
+    "xiao_s3": {
+      "short": "xiao",
+      "title": "Seeed XIAO ESP32-S3 (Sense)",
+      "hardware": "camera, microphone and microSD on the Sense expansion board; 8 MB PSRAM, 8 MB flash"
+    },
+    "feathers3": {
+      "short": "feathers3",
+      "title": "Unexpected Maker FeatherS3",
+      "hardware": "STEMMA QT port for I2C sensors and displays, battery connector; 16 MB flash"
+    },
+    "feathers3_fe": {
+      "short": "feathers3-fe",
+      "title": "Unexpected Maker FeatherS3, flash-encrypted",
+      "hardware": "the FeatherS3 with flash encryption",
+      "caution": "The first boot of this build on a board that was never encrypted burns eFuses and encrypts its flash for good. Never flash it to a board you do not mean to encrypt (boards/feathers3_fe.defaults)."
+    },
+    "feather_esp32_v2": {
+      "short": "feather-v2",
+      "title": "Adafruit Feather ESP32 V2",
+      "hardware": "STEMMA QT port for I2C sensors and displays, battery connector; 2 MB PSRAM, 8 MB flash"
+    },
+    "qtpy_esp32": {
+      "short": "qtpy",
+      "title": "Adafruit QT Py ESP32",
+      "hardware": "STEMMA QT port for I2C sensors and displays; 2 MB PSRAM"
+    }
+  },
+  "groups": [
+    {"id": "voice", "title": "Voice"},
+    {"id": "assistant", "title": "Assistant"},
+    {"id": "network", "title": "Network"},
+    {"id": "web", "title": "Web pages"},
+    {"id": "wearables", "title": "Bluetooth and wearables"},
+    {"id": "sensors", "title": "Sensors and add-ons"},
+    {"id": "display", "title": "Display and input"},
+    {"id": "hardware", "title": "Board hardware"},
+    {"id": "host", "title": "Raspberry Pi link"},
+    {"id": "apps", "title": "Apps and automation"},
+    {"id": "advanced", "title": "Advanced"}
+  ],
+  "options": [
+    {"switch": "ENABLE_LOCAL_STT", "group": "voice", "title": "Speech-to-text on the board",
+     "summary": "Dictation and captions transcribed on the device. The model file is read from the microSD card.",
+     "needs": ["ENABLE_SDMMC_CARD", "ENABLE_MICROPHONE_SENSOR"], "sdk_on": ["CONFIG_HEAP_USE_HOOKS"], "targets": ["esp32p4"]},
+    {"switch": "ENABLE_ESP_SR", "group": "voice", "title": "Wake word and voice commands",
+     "summary": "ESP-SR: a wake word and a fixed list of spoken commands."},
+
+    {"switch": "ENABLE_LLM_BACKEND", "group": "assistant", "title": "Assistant",
+     "summary": "The LLM assistant: conversations, commands, its web page and its display and glasses pages. Turn on at least one of the answer sources below with it.",
+     "hint": "Turn on one of the answer sources instead; the assistant comes on with it."},
+    {"switch": "ENABLE_LLM_SOURCE_HTTP", "group": "assistant", "title": "Answers over HTTP (OpenClaw)",
+     "summary": "The assistant asks an OpenClaw endpoint over Wi-Fi. No model on the device.",
+     "needs": ["ENABLE_LLM_BACKEND", "CUSTOM_ENABLE_NET_WIFI"]},
+    {"switch": "ENABLE_LLM_SOURCE_CM5", "group": "assistant", "title": "Answers from a Raspberry Pi",
+     "summary": "The assistant asks a Raspberry Pi CM5 or Pi 5 over the UART link.",
+     "needs": ["ENABLE_LLM_BACKEND", "ENABLE_UART_HOST_LINK"]},
+    {"switch": "ENABLE_LLM_SOURCE_ONBOARD", "group": "assistant", "title": "Answers from a small model on the board",
+     "summary": "A tiny language model runs on this chip. Needs PSRAM and is the largest part of the assistant in flash.",
+     "needs": ["ENABLE_LLM_BACKEND"]},
+
+    {"switch": "CUSTOM_ENABLE_NET_WIFI", "group": "network", "title": "Wi-Fi",
+     "summary": "Wi-Fi connection. The web interface, ESP-NOW and MQTT need it."},
+    {"switch": "CUSTOM_ENABLE_NET_HTTP", "group": "network", "title": "Web interface",
+     "summary": "The browser interface served by the device.", "needs": ["CUSTOM_ENABLE_NET_WIFI"]},
+    {"switch": "ENABLE_HTTPS", "group": "network", "title": "HTTPS for the web interface",
+     "summary": "TLS for the web interface, with a self-signed or uploaded certificate.", "needs": ["CUSTOM_ENABLE_NET_WIFI", "CUSTOM_ENABLE_NET_HTTP"]},
+    {"switch": "CUSTOM_ENABLE_NET_ESPNOW", "group": "network", "title": "ESP-NOW mesh",
+     "summary": "Direct links to other Hardware One devices: pairing, messages and file transfer.", "needs": ["CUSTOM_ENABLE_NET_WIFI"]},
+    {"switch": "ENABLE_BONDED_MODE", "group": "network", "title": "Bonded pair",
+     "summary": "Two devices paired over ESP-NOW, one showing the other's features.", "needs": ["CUSTOM_ENABLE_NET_WIFI", "CUSTOM_ENABLE_NET_ESPNOW"]},
+    {"switch": "ENABLE_MQTT", "group": "network", "title": "MQTT (Home Assistant)",
+     "summary": "Publishes to an MQTT broker for Home Assistant.", "needs": ["CUSTOM_ENABLE_NET_WIFI"]},
+
+    {"switch": "CUSTOM_ENABLE_WEB_SENSORS", "group": "web", "title": "Sensors page",
+     "summary": "Sensor readings, camera preview and recordings.", "needs": ["CUSTOM_ENABLE_NET_WIFI", "CUSTOM_ENABLE_NET_HTTP"]},
+    {"switch": "CUSTOM_ENABLE_WEB_BLUETOOTH", "group": "web", "title": "Bluetooth page",
+     "summary": "Bluetooth, glasses, ring and phone link controls.", "needs": ["CUSTOM_ENABLE_NET_WIFI", "CUSTOM_ENABLE_NET_HTTP", "ENABLE_BLUETOOTH"]},
+    {"switch": "CUSTOM_ENABLE_WEB_SPEECH", "group": "web", "title": "Voice commands page",
+     "summary": "Controls for the wake word and voice commands.", "needs": ["CUSTOM_ENABLE_NET_WIFI", "CUSTOM_ENABLE_NET_HTTP", "ENABLE_ESP_SR"]},
+    {"switch": "CUSTOM_ENABLE_WEB_ESPNOW", "group": "web", "title": "ESP-NOW page",
+     "summary": "The ESP-NOW mesh in the browser.", "needs": ["CUSTOM_ENABLE_NET_WIFI", "CUSTOM_ENABLE_NET_HTTP", "CUSTOM_ENABLE_NET_ESPNOW"]},
+    {"switch": "CUSTOM_ENABLE_WEB_BOND", "group": "web", "title": "Bonded pair page",
+     "summary": "The bonded partner's features in this device's web interface.",
+     "needs": ["CUSTOM_ENABLE_NET_WIFI", "CUSTOM_ENABLE_NET_HTTP", "CUSTOM_ENABLE_NET_ESPNOW", "ENABLE_BONDED_MODE"]},
+    {"switch": "CUSTOM_ENABLE_WEB_MQTT", "group": "web", "title": "MQTT settings page",
+     "summary": "The MQTT client's settings and status.", "needs": ["CUSTOM_ENABLE_NET_WIFI", "CUSTOM_ENABLE_NET_HTTP", "ENABLE_MQTT"]},
+    {"switch": "CUSTOM_ENABLE_WEB_GAMES", "group": "web", "title": "Games page",
+     "summary": "The launcher for browser games, at /games.", "needs": ["CUSTOM_ENABLE_NET_WIFI", "CUSTOM_ENABLE_NET_HTTP", "ENABLE_GAMES"]},
+    {"switch": "CUSTOM_ENABLE_WEB_MAPS", "group": "web", "title": "Maps page",
+     "summary": "Offline maps and waypoints in the browser.", "needs": ["CUSTOM_ENABLE_NET_WIFI", "CUSTOM_ENABLE_NET_HTTP", "ENABLE_MAPS"]},
+    {"switch": "CUSTOM_ENABLE_WEB_BATTERY", "group": "web", "title": "Battery page",
+     "summary": "Battery status and its log.", "needs": ["CUSTOM_ENABLE_NET_WIFI", "CUSTOM_ENABLE_NET_HTTP"]},
+    {"switch": "CUSTOM_ENABLE_WEB_R1_HEALTH", "group": "web", "title": "Ring health page",
+     "summary": "Vitals from the R1 ring.",
+     "needs": ["CUSTOM_ENABLE_NET_WIFI", "CUSTOM_ENABLE_NET_HTTP", "ENABLE_BLUETOOTH", "ENABLE_G2_GLASSES", "ENABLE_R1_HEALTH"]},
+    {"switch": "CUSTOM_ENABLE_WEB_POWER", "group": "web", "title": "Power page",
+     "summary": "Power presets and status.", "needs": ["CUSTOM_ENABLE_NET_WIFI", "CUSTOM_ENABLE_NET_HTTP"]},
+
+    {"switch": "ENABLE_BLUETOOTH", "group": "wearables", "title": "Bluetooth",
+     "summary": "Bluetooth LE. The glasses, the ring and the phone link need it. Turning it off also leaves the Bluetooth stack out of the image.",
+     "sdk": ["CONFIG_BT_ENABLED"]},
+    {"switch": "ENABLE_G2_GLASSES", "group": "wearables", "title": "Even G2 glasses",
+     "summary": "Connects to Even Realities G2 glasses: display pages, glasses microphone and the R1 ring.", "needs": ["ENABLE_BLUETOOTH"]},
+    {"switch": "ENABLE_R1_HEALTH", "group": "wearables", "title": "R1 ring health",
+     "summary": "Vitals from the R1 ring, with health logging.", "needs": ["ENABLE_BLUETOOTH", "ENABLE_G2_GLASSES"]},
+    {"switch": "ENABLE_BLE_PHONE_PIPE", "group": "wearables", "title": "Phone link",
+     "summary": "A link to the Android app over Bluetooth.", "needs": ["ENABLE_BLUETOOTH"]},
+
+    {"switch": "CUSTOM_ENABLE_GPS", "group": "sensors", "title": "GPS (PA1010D)", "summary": "Position and time from a PA1010D module."},
+    {"switch": "CUSTOM_ENABLE_TOF", "group": "sensors", "title": "Distance sensor (VL53L4CX)", "summary": "Time-of-flight distance."},
+    {"switch": "CUSTOM_ENABLE_PRESENCE", "group": "sensors", "title": "Presence sensor (STHS34PF80)", "summary": "Infrared presence and motion."},
+    {"switch": "CUSTOM_ENABLE_APDS", "group": "sensors", "title": "Gesture and colour sensor (APDS9960)", "summary": "Gesture, colour and proximity."},
+    {"switch": "CUSTOM_ENABLE_IMU", "group": "sensors", "title": "Motion sensor (BNO055)", "summary": "Orientation and acceleration."},
+    {"switch": "CUSTOM_ENABLE_THERMAL", "group": "sensors", "title": "Thermal camera (MLX90640)", "summary": "A 32 x 24 thermal image."},
+    {"switch": "CUSTOM_ENABLE_RTC", "group": "sensors", "title": "Clock (DS3231)", "summary": "A battery-backed real-time clock."},
+    {"switch": "CUSTOM_ENABLE_FM_RADIO", "group": "sensors", "title": "FM radio (RDA5807)", "summary": "An FM receiver."},
+    {"switch": "CUSTOM_ENABLE_SERVO", "group": "sensors", "title": "Servo driver (PCA9685)", "summary": "Sixteen servo or PWM outputs."},
+    {"switch": "CUSTOM_ENABLE_LED_MATRIX", "group": "sensors", "title": "LED matrix (HT16K33)", "summary": "A 16 x 8 single-colour matrix."},
+
+    {"switch": "ENABLE_CAMERA_SENSOR", "group": "hardware", "title": "Camera",
+     "summary": "The board's camera.", "boards": ["p4x_eye", "waveshare_p4_touch_lcd_5", "xiao_s3"]},
+    {"switch": "ENABLE_MICROPHONE_SENSOR", "group": "hardware", "title": "Microphone on the board",
+     "summary": "The board's own microphone. The glasses microphone does not need it.", "boards": ["p4x_eye", "waveshare_p4_touch_lcd_5", "xiao_s3"]},
+    {"switch": "ENABLE_SPEAKER", "group": "hardware", "title": "Speaker", "summary": "Playback through the board's audio codec."},
+    {"switch": "ENABLE_SDMMC_CARD", "group": "hardware", "title": "microSD card (SDMMC slot)", "summary": "The card slot on the ESP32-P4 boards."},
+    {"switch": "XIAO_ESP32S3_SENSE_ENABLED", "group": "hardware", "title": "Sense expansion board fitted",
+     "summary": "Off for a XIAO without the Sense board; the camera and the microphone go off with it.", "boards": ["xiao_s3"],
+     "off_with": ["ENABLE_CAMERA_SENSOR", "ENABLE_MICROPHONE_SENSOR"]},
+
+    {"switch": "ENABLE_UART_HOST_LINK", "group": "host", "title": "Link to a Raspberry Pi",
+     "summary": "The authenticated UART link to a Raspberry Pi CM5 or Pi 5. It still has to be switched on in the device settings."},
+    {"switch": "ENABLE_RASPBERRY_PI_HOST_POWER", "group": "host", "title": "Pi power control",
+     "summary": "Commands that switch the Pi's power.", "needs": ["ENABLE_UART_HOST_LINK"]},
+    {"switch": "ENABLE_RASPBERRY_PI_HOST_FAN", "group": "host", "title": "Pi fan control",
+     "summary": "Commands that set and read the Pi's fan.", "needs": ["ENABLE_UART_HOST_LINK"]},
+
+    {"switch": "ENABLE_AUTOMATION", "group": "apps", "title": "Automations", "summary": "Scheduled and conditional commands."},
+    {"switch": "ENABLE_MAPS", "group": "apps", "title": "Offline maps", "summary": "Offline maps and waypoints."},
+    {"switch": "ENABLE_GAMES", "group": "apps", "title": "Games", "summary": "Browser games. Each game has its own switch."},
+    {"switch": "ENABLE_WEB_GAME_DARKROOM", "group": "apps", "title": "A Dark Room (browser game)",
+     "summary": "The text game, served by the web interface.", "needs": ["CUSTOM_ENABLE_NET_WIFI", "CUSTOM_ENABLE_NET_HTTP", "ENABLE_GAMES", "CUSTOM_ENABLE_WEB_GAMES"]},
+    {"switch": "ENABLE_EDGE_IMPULSE", "group": "apps", "title": "Edge Impulse", "summary": "On-device machine-learning inference."},
+
+    {"switch": "ENABLE_DEBUG_ALL_BY_DEFAULT", "group": "advanced", "title": "Every debug flag on from the first boot",
+     "summary": "For a bench image that should log everything. Not for a release image."},
+    {"switch": "ENABLE_BLE_COEX_RECORDS", "group": "advanced", "title": "Bluetooth and Wi-Fi coexistence records",
+     "summary": "Per-scan and per-connect measurement records (command blerecords).", "needs": ["ENABLE_BLUETOOTH"]},
+    {"switch": "ENABLE_G2_TESTSUITE", "group": "advanced", "title": "Glasses transport tests",
+     "summary": "Test pages and wire probes for the glasses link.", "needs": ["ENABLE_BLUETOOTH", "ENABLE_G2_GLASSES"]},
+    {"switch": "ENABLE_STT_LEVEL_ROBUST_ONSET", "group": "advanced", "title": "Level-robust speech onset",
+     "summary": "The speech detector that copes with quiet and loud talkers. Off runs the earlier raw-level detector."}
+  ],
+  "choices": [
+    {"id": "display", "group": "display", "title": "Display",
+     "summary": "The display fitted to the board.",
+     "values": [
+       {"title": "None", "set": {"DISPLAY_TYPE": 0}},
+       {"title": "SSD1306 OLED on I2C", "set": {"DISPLAY_TYPE": 1, "CUSTOM_ENABLE_OLED": 1}},
+       {"title": "ST7789 colour TFT (generic wiring, no interface yet)", "set": {"DISPLAY_TYPE": 2}},
+       {"title": "ILI9341 colour TFT (generic wiring, no interface yet)", "set": {"DISPLAY_TYPE": 3}},
+       {"title": "P4X-EYE panel", "set": {"DISPLAY_TYPE": 4}},
+       {"title": "Waveshare 5-inch panel", "set": {"DISPLAY_TYPE": 5}}
+     ]},
+    {"id": "input", "group": "display", "title": "Input control",
+     "summary": "The physical control that drives the display's menus.",
+     "values": [
+       {"title": "None", "set": {"INPUT_DEVICE_TYPE": 0, "CUSTOM_ENABLE_GAMEPAD": 0}},
+       {"title": "Seesaw gamepad on I2C", "set": {"INPUT_DEVICE_TYPE": 1, "CUSTOM_ENABLE_GAMEPAD": 1}},
+       {"title": "ANO rotary encoder on I2C", "set": {"INPUT_DEVICE_TYPE": 2, "CUSTOM_ENABLE_GAMEPAD": 0}},
+       {"title": "Wheel and buttons on the board", "set": {"INPUT_DEVICE_TYPE": 3, "CUSTOM_ENABLE_GAMEPAD": 0}},
+       {"title": "Touchscreen (GT911)", "set": {"INPUT_DEVICE_TYPE": 4, "CUSTOM_ENABLE_GAMEPAD": 0}}
+     ]},
+    {"id": "speech_model", "group": "advanced", "title": "Speech-to-text model",
+     "summary": "The acoustic model of speech-to-text on the board. One model per build.",
+     "values": [
+       {"title": "Citrinet-384 (default)", "set": {"ENABLE_STT_MODEL_CITRINET": 1, "ENABLE_STT_MODEL_QUARTZNET": 0, "ENABLE_STT_MODEL_15X5_GEN2": 0}},
+       {"title": "QuartzNet 15x5", "set": {"ENABLE_STT_MODEL_CITRINET": 0, "ENABLE_STT_MODEL_QUARTZNET": 1, "ENABLE_STT_MODEL_15X5_GEN2": 1}}
+     ]}
+  ],
+  "managed": {
+    "NETWORK_FEATURE_LEVEL": "Set to 4 (custom) by the setup when a Network item changes.",
+    "WEB_FEATURE_LEVEL": "Set to 4 (custom) by the setup when a Web page changes.",
+    "I2C_FEATURE_LEVEL": "Set to 4 (custom) by the setup when a sensor, the OLED or the gamepad changes."
+  }
+}
