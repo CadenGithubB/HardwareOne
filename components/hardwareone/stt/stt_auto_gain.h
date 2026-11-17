@@ -22,15 +22,32 @@
 // resolution is chosen here. Bench basis 2026-11-07/08 (P4X-EYE, speaker at
 // 1 ft): x8 was the best measured gain with no false captions; up close x1..x8
 // scored the same.
+//
+// The glasses stream is PCM after the glasses' own volume control, so there is
+// no PDM multiplier to set. The same history drives applyAutoGain on that PCM.
+// It starts at x1: a voice at the glasses is already near the target, and x8
+// would clip it. Quiet sessions still step it up, at most doubling, once three
+// agree.
+//
+// That history cannot help the sentence being heard: the gain is chosen when
+// the session opens. stepAutoGain is the within-phrase leveler. Every 0.1 s of
+// audio the segmenter is about to hear, it moves a software multiplier by at
+// most x2 or x0.5 toward the same target. The onboard path keeps the PDM
+// multiplier fixed for the session and starts this one at x1 on top of it.
+// The glasses path starts at the agreed gain and may climb during the
+// sentence. A window under the speech floor does not raise it, so silence and
+// room noise stay put. A window already near the target does not move.
 namespace hw1::stt {
 
 inline constexpr uint8_t kAutoGainMin = 1;
 inline constexpr uint8_t kAutoGainMax = 8;
 inline constexpr uint8_t kAutoGainStart = 8;
+inline constexpr uint8_t kAutoGainGlassesStart = 1;
 inline constexpr uint16_t kAutoGainTargetRms = 4096;   // -18 dBFS frame RMS: ~18 dB of crest headroom
 inline constexpr int16_t kAutoGainClipLevel = 32000;
 inline constexpr size_t kAutoGainFrameSamples = 160;   // 10 ms at 16 kHz
 inline constexpr uint64_t kAutoGainMinSamples = 32000; // 2 s
+inline constexpr uint64_t kAutoGainStepSamples = 1600; // 0.1 s at 16 kHz: ten phrase-level checks a second
 
 struct AutoGainStats {
     uint64_t samples = 0;
@@ -87,6 +104,21 @@ inline uint8_t clampAutoGain(uint32_t g) {
     return static_cast<uint8_t>(g < kAutoGainMin ? kAutoGainMin : g > kAutoGainMax ? kAutoGainMax : g);
 }
 
+// Integer gain on glasses PCM. Gain 1 is a no-op. Results saturate to int16.
+inline int16_t applyAutoGainSample(int16_t sample, uint8_t gain) {
+    gain = clampAutoGain(gain);
+    if (gain <= 1) return sample;
+    const int32_t y = int32_t(sample) * int32_t(gain);
+    if (y > 32767) return 32767;
+    if (y < -32768) return static_cast<int16_t>(-32768);
+    return static_cast<int16_t>(y);
+}
+
+inline void applyAutoGain(int16_t* pcm, size_t n, uint8_t gain) {
+    if (!pcm || gain <= 1) return;
+    for (size_t i = 0; i < n; ++i) pcm[i] = applyAutoGainSample(pcm[i], gain);
+}
+
 // The gain one session would have wanted, given the gain `used` and what it
 // measured; 0 when it says nothing (too short).
 inline uint8_t wantedAutoGain(uint8_t used, const AutoGainStats& s) {
@@ -100,6 +132,29 @@ inline uint8_t wantedAutoGain(uint8_t used, const AutoGainStats& s) {
     return clampAutoGain((static_cast<uint32_t>(used) * kAutoGainTargetRms + loud / 2) / loud);
 }
 
+// One step of the within-phrase leveler. `used` is the software gain already
+// on the samples in `s`. Returns `used` when the window is shorter than 0.1 s,
+// already near the target, or (for a raise) quieter than `speechFloor`.
+// Clipping still halves it. A raise or a cut is at most x2 or x0.5.
+inline uint8_t stepAutoGain(uint8_t used, const AutoGainStats& s, uint16_t speechFloor) {
+    used = clampAutoGain(used);
+    if (s.samples < kAutoGainStepSamples) return used;
+    if (static_cast<uint64_t>(s.clipped) * 20000 > s.samples)
+        return clampAutoGain(used / 2u);
+    const uint32_t loud = s.loud[2] ? s.loud[2] : 1;
+    const uint8_t wish = clampAutoGain((static_cast<uint32_t>(used) * kAutoGainTargetRms + loud / 2) / loud);
+    if (wish > used) {
+        if (loud < speechFloor) return used;
+        const uint32_t doubled = uint32_t(used) * 2u > kAutoGainMax ? kAutoGainMax : uint32_t(used) * 2u;
+        return static_cast<uint8_t>(wish < doubled ? wish : doubled);
+    }
+    if (wish < used) {
+        const uint32_t halved = used / 2u < kAutoGainMin ? kAutoGainMin : used / 2u;
+        return static_cast<uint8_t>(wish > halved ? wish : halved);
+    }
+    return used;
+}
+
 inline constexpr size_t kAutoGainHistory = 4;  // sessions kept
 inline constexpr size_t kAutoGainAgree = 3;    // newest sessions that must agree before a change
 
@@ -107,6 +162,8 @@ inline constexpr size_t kAutoGainAgree = 3;    // newest sessions that must agre
 // owner serialises access (System_STT: gSttMux).
 class AutoGainHistory {
 public:
+    explicit AutoGainHistory(uint8_t start = kAutoGainStart)
+        : gain_(start < kAutoGainMin ? kAutoGainMin : start > kAutoGainMax ? kAutoGainMax : start) {}
     uint8_t gain() const { return gain_; }
     size_t size() const { return count_; }
     uint8_t wish(size_t newest_first) const {
@@ -141,7 +198,7 @@ public:
     }
 
 private:
-    uint8_t gain_ = kAutoGainStart;
+    uint8_t gain_;
     uint8_t wish_[kAutoGainHistory] = {};
     size_t head_ = 0, count_ = 0;
 };

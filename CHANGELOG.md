@@ -375,6 +375,17 @@ everything user-visible since the v0.99.99.1 tag.
   `qtpy-all-sensors`) and the Waveshare bring-up selection are `create` commands in
   `configurations/README.md` and `docs/WAVESHARE_P4_SUPPORT.md`; the tests that read removed files
   carry those choices themselves.
+- Local STT (P4) input level: while a session runs, a software multiplier now levels the audio
+  the speech detector and the recognizer hear. Every 0.1 s it moves at most x2 or x0.5 (between x1
+  and x8) toward a -18 dBFS frame level; a window below the speech floor never raises it, and
+  clipping halves it. It applies to the onboard mic while `sttautogain` is on, on top of the PDM gain
+  chosen for the session, and to the glasses mic while the new `sttg2autogain` is on (default on):
+  glasses audio, already past the glasses' own volume, starts at x1 and its session gain moves only
+  when several sessions agree, like the onboard gain. `sttdetector` and `stt status` show the current
+  `phraseGain` and the glasses gain. The raw recording (`sttraw`) now holds the levelled audio.
+  Bench-checked on 9 November with the earlier detector and the 15x5 model; the Citrinet accuracy
+  figures above were measured without it, and it has not yet been run with Citrinet and the 3.1
+  onset. Host-tested.
 - Local STT (P4) acoustic model: Citrinet-384 (2,000 h, the speech repository's Voice Model 3
   training data) replaces the QuartzNet 15x5 gen2-25397 as the default. It reads
   `/sd/STT Models/citrinet384-2000h.p4.stt` (22,700,240 bytes, SHA-256

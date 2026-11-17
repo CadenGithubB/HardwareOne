@@ -4,7 +4,7 @@
 > Regenerate with `python3 tools/command_registry.py reference`.
 > Source of truth is the `CommandEntry` tables in `components/hardwareone/*.cpp`.
 
-1030 commands across 57 modules (1030 registry entries).
+1031 commands across 57 modules (1031 registry entries).
 
 Commands are matched case-insensitively, and lookup uses longest-prefix matching, so `automation list` resolves to the `automation` dispatcher with `list` as its argument.
 
@@ -68,7 +68,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 - [`even_g2`](#even-g2) — 58 commands
 - [`ring`](#ring) — 19 commands
 - [`llm`](#llm) — 36 commands
-- [`settingsedit`](#settingsedit) — 74 commands
+- [`settingsedit`](#settingsedit) — 75 commands
 
 ---
 
@@ -803,7 +803,7 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 | Command | | Description |
 | ------- | :-: | ----------- |
 | `stt` |  | Local continuous or bounded speech-to-text with private session-owned results.<br/>`Usage: stt start \| record [1..20 seconds] \| status [id] \| stop\|cancel\|result\|next\|draft <id> \| ack <id> <sequence>` |
-| `sttdetector` |  | Show the mic-path (PDM gain, high-pass) and speech-detector (floors, percentile) tuning in effect.<br/>`Usage: sttdetector (onboard: sttautogain, pdmamplify, pdmhpf, sttspeechfloor, sttsilencefloor, sttnoisepercentile, sttdecisionpre, sttdecisionmod, sttdecisionhold; glasses: sttg2speechfloor, sttg2silencefloor, sttg2noisepercentile, sttg2decisionpre, sttg2decisionmod, sttg2decisionhold)` |
+| `sttdetector` |  | Show the mic-path (PDM gain, high-pass) and speech-detector (floors, percentile) tuning in effect.<br/>`Usage: sttdetector (onboard: sttautogain, pdmamplify, pdmhpf, sttspeechfloor, sttsilencefloor, sttnoisepercentile, sttdecisionpre, sttdecisionmod, sttdecisionhold; glasses: sttg2autogain, sttg2speechfloor, sttg2silencefloor, sttg2noisepercentile, sttg2decisionpre, sttg2decisionmod, sttg2decisionhold)` |
 | `sttperf` |  | STT pacing/profiling per segment (timings and CPU only, never text).<br/>`Usage: sttperf [show\|clear\|log on\|off\|stages [all\|clear]]` |
 | `sttraw` | A | Save the raw microphone input of continuous STT sessions to /sd/STT Raw for bench replay.<br/>`Usage: sttraw [status\|on\|off] (on arms the next continuous session; not kept across reboot)` |
 | `sttvocab` |  | Speech vocabulary: names and terms with their display spelling (STT Models/user_vocab.tsv).<br/>`Usage: sttvocab [list] \| add DISPLAY[\|spoken] \| remove <spoken> \| reload (edits need an administrator)` |
@@ -1491,6 +1491,7 @@ _`otaCommands` has `#if` alternatives in `System_OTA.cpp`; this table is the fir
 | `sttdecisionhold` | A | Continuous-STT onset noise control: a phrase only the pre-emphasised level opened needs the raw level to reach its onset rule before raw votes hold it open (0 = off, the default); applies to the next session.<br/>`Usage: sttdecisionhold [0\|1]` |
 | `sttdecisionmod` | A | Continuous-STT onset noise control: the pre-emphasised level votes only while its last 500 ms is modulated (ratio x0.01; 0 = off, the default). A noisy-room mode that gives back far speech; applies to the next session.<br/>`Usage: sttdecisionmod [0\|101-1000]` |
 | `sttdecisionpre` | A | Continuous-STT level-robust onset: a phrase may also open on the pre-emphasised level, matched to the room (coefficient x0.01; 0 = raw level only, 97 = default); applies to the next session.<br/>`Usage: sttdecisionpre [0-100]` |
+| `sttg2autogain` | A | G2 glasses-mic profile: STT multiplies the glasses audio (1..8). Starts at x1 and changes only when several sessions agree. Applies to the next session.<br/>`Usage: sttg2autogain [0\|1]` |
 | `sttg2decisionhold` | A | G2 glasses-mic profile: onset raw-latch hold (0 = off, the default); applies to the next session.<br/>`Usage: sttg2decisionhold [0\|1]` |
 | `sttg2decisionmod` | A | G2 glasses-mic profile: onset modulation gate (ratio x0.01; 0 = off, the default); applies to the next session.<br/>`Usage: sttg2decisionmod [0\|101-1000]` |
 | `sttg2decisionpre` | A | G2 glasses-mic profile: level-robust onset (x0.01; 0 = raw level only, 97 = default); applies to the next session.<br/>`Usage: sttg2decisionpre [0-100]` |

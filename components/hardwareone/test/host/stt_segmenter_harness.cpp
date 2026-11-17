@@ -452,6 +452,11 @@ int main() {
         assert(wantedAutoGain(8,quiet)==kAutoGainMax&&wantedAutoGain(8,loud)==2&&wantedAutoGain(8,clip)==4);
         assert(wantedAutoGain(8,brief)==0);
         AutoGainHistory h;assert(h.gain()==kAutoGainStart);
+        AutoGainHistory glasses(kAutoGainGlassesStart);assert(glasses.gain()==1);
+        int16_t samples[4]={1000,-1000,2000,-2000};
+        applyAutoGain(samples,4,1);assert(samples[0]==1000&&samples[2]==2000);
+        applyAutoGain(samples,4,4);assert(samples[0]==4000&&samples[1]==-4000&&samples[2]==8000&&samples[3]==-8000);
+        int16_t hot[2]={5000,-20000};applyAutoGain(hot,2,8);assert(hot[0]==32767&&hot[1]==-32768);
         // One or two loud sessions never move it; a quiet one in between resets the agreement.
         assert(h.record(8,loud,true)==8&&h.record(8,loud,true)==8&&h.record(8,quiet,true)==8);
         assert(h.record(8,loud,true)==8);                  // newest three: loud, quiet, loud
@@ -470,6 +475,25 @@ int main() {
         assert(wantedAutoGain(5,session(4130,5))==5&&wantedAutoGain(8,session(6400,5))==5);
         AutoGainMeter knock;std::vector<int16_t> pcm(5*16000,50);for(size_t i=0;i<160;++i)pcm[i]=20000;
         knock.push(pcm.data(),pcm.size());assert(knock.stats().loud[0]>=19000&&knock.stats().loud[2]<=60);
+        // Within a phrase: every 0.1 s, at most x2 or x0.5. A window about 18 dB
+        // under the target (RMS 500 vs 4096) takes three steps, 1 -> 2 -> 4 -> 8.
+        // Shorter than 0.1 s, already at the target, or under the speech floor: stay.
+        const auto window=[&](int16_t amplitude,size_t n,size_t clipped=0) {
+            AutoGainMeter m;std::vector<int16_t> pcm(n);
+            for(size_t i=0;i<pcm.size();++i)pcm[i]=static_cast<int16_t>(i%2?amplitude:-amplitude);
+            for(size_t i=0;i<clipped&&i<pcm.size();++i)pcm[i*7%pcm.size()]=32767;
+            m.push(pcm.data(),pcm.size());return m.stats();
+        };
+        const auto stepQuiet=window(500,kAutoGainStepSamples);
+        assert(stepAutoGain(1,window(500,kAutoGainStepSamples-1),45)==1);
+        assert(stepAutoGain(1,stepQuiet,45)==2&&stepAutoGain(2,stepQuiet,45)==4);
+        assert(stepAutoGain(4,stepQuiet,45)==8&&stepAutoGain(8,stepQuiet,45)==8);
+        assert(stepAutoGain(1,window(4096,kAutoGainStepSamples),45)==1);
+        assert(stepAutoGain(4,window(4096,kAutoGainStepSamples),45)==4);
+        assert(stepAutoGain(8,window(16000,kAutoGainStepSamples),45)==4);
+        assert(stepAutoGain(1,window(20,kAutoGainStepSamples),45)==1);
+        assert(stepAutoGain(8,window(1000,kAutoGainStepSamples,10),45)==4);
+        assert(stepAutoGain(1,window(1000,kAutoGainStepSamples,10),45)==1);
     }
     puts("PASS: deterministic chunking, pre-roll,8s pause floor,20s cuts, exact raw delivery, overlap, silence/DC, short-tail finish, reset and ready ownership");
 }

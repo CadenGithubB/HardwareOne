@@ -2839,6 +2839,7 @@ static const SettingEntry sttSettingEntries[] = {
   { "sttg2decisionpre", SETTING_INT, &gSettings.sttG2DecisionPre, 97, 0, nullptr, 0, 100, "G2 mic: level-robust onset (pre-emphasis x0.01, 0 = raw level only)", nullptr, false, nullptr, "sttg2decisionpre" },
   { "sttg2decisionmod", SETTING_INT, &gSettings.sttG2DecisionMod, 0, 0, nullptr, 0, 1000, "G2 mic: onset modulation gate (ratio x0.01, 0 = off, 101-1000)", nullptr, false, nullptr, "sttg2decisionmod" },
   { "sttg2decisionhold", SETTING_BOOL, &gSettings.sttG2DecisionHold, 0, 0, nullptr, 0, 1, "G2 mic: onset raw-latch hold", nullptr, false, nullptr, "sttg2decisionhold" },
+  { "sttg2autogain", SETTING_BOOL, &gSettings.sttG2AutoGain, 1, 0, nullptr, 0, 1, "G2 mic: automatic PCM gain for STT", nullptr, false, nullptr, "sttg2autogain" },
 };
 
 static const SettingsModule sttSettingsModule = {
@@ -3747,6 +3748,7 @@ static const char* cmd_set_sttg2decisionmod(const String& a) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   return sttDecisionModCommand("sttg2decisionmod", a);
 }
+SETTING_EDITOR_CMD(cmd_set_sttg2autogain,        "sttg2autogain")
 #endif
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
 SETTING_EDITOR_CMD(cmd_set_g2holdaction,         "g2holdaction")
@@ -3843,6 +3845,7 @@ const CommandEntry settingEditorCommands[] = {
   { "sttg2decisionpre", "G2 glasses-mic profile: level-robust onset (x0.01; 0 = raw level only, 97 = default); applies to the next session.", true, cmd_set_sttg2decisionpre, "Usage: sttg2decisionpre [0-100]" },
   { "sttg2decisionmod", "G2 glasses-mic profile: onset modulation gate (ratio x0.01; 0 = off, the default); applies to the next session.", true, cmd_set_sttg2decisionmod, "Usage: sttg2decisionmod [0|101-1000]" },
   { "sttg2decisionhold", "G2 glasses-mic profile: onset raw-latch hold (0 = off, the default); applies to the next session.", true, cmd_set_sttg2decisionhold, "Usage: sttg2decisionhold [0|1]" },
+  { "sttg2autogain", "G2 glasses-mic profile: STT multiplies the glasses audio (1..8). Starts at x1 and changes only when several sessions agree. Applies to the next session.", true, cmd_set_sttg2autogain, "Usage: sttg2autogain [0|1]" },
   { "sttautogain", "STT picks its own onboard-mic gain (changed only when several sessions agree) and a 120 Hz high-pass; 0 = use pdmamplify/pdmhpf. Applies to the next session.", true, cmd_set_sttautogain, "Usage: sttautogain [0|1]" },
 #endif
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES

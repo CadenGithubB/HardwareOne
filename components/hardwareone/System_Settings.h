@@ -363,6 +363,8 @@ struct Settings {
       sttG2DecisionPre(97),
       sttG2DecisionMod(0),
       sttG2DecisionHold(false),
+      sttG2AutoGain(true),
+      sttPhraseLevel(true),
       micSource("auto"),  // Mic source preference: "auto" | "pdm" | "g2" (resolved at capture time)
       sttSaveTranscripts(false),
       noteMaxSec(HW1_NOTE_MAX_SEC_DEFAULT),
@@ -1073,6 +1075,8 @@ struct Settings {
   int sttG2DecisionPre;
   int sttG2DecisionMod;
   bool sttG2DecisionHold;
+  bool sttG2AutoGain;           // STT multiplies glasses PCM (1..8, agreed over sessions). Starts at x1.
+  bool sttPhraseLevel;          // Within-phrase software leveler: steps x1..x8 every 0.1 s while that mic's auto gain is on.
   String micSource;             // Preferred mic source: "auto" | "pdm" | "g2" (resolved lazily against availability)
   bool sttSaveTranscripts;      // Save recognized text; latched when a local or Pi dictation session starts
   // QuickNote (System_QuickNote.cpp), read when a note starts / each pass:

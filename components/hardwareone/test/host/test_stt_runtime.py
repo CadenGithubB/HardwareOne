@@ -31,7 +31,7 @@ def main():
     interface = no_includes((SOURCE / 'System_STT.h').read_text()).replace('#pragma once', '')
     broker = no_includes((SOURCE / 'System_STT.cpp').read_text().split('// CLI_ADAPTER_BEGIN')[0])
     broker += '\n#endif\n'
-    segmenter = no_includes((SOURCE / 'System_AudioVadPolicy.h').read_text()).replace('#pragma once', '') + '\n' + no_includes((SOURCE / 'stt/stt_segmenter.h').read_text()).replace('#pragma once', '')
+    segmenter = no_includes((SOURCE / 'System_AudioVadPolicy.h').read_text()).replace('#pragma once', '') + '\n' + no_includes((SOURCE / 'stt/stt_segmenter.h').read_text()).replace('#pragma once', '') + '\n' + no_includes((SOURCE / 'stt/stt_auto_gain.h').read_text()).replace('#pragma once', '') + '\n' + no_includes((SOURCE / 'stt/stt_continuous_config.h').read_text()).replace('#pragma once', '')
     harness = (HERE / 'stt_runtime_harness.cpp').read_text()
     harness = harness.replace('// INSERT_INTERFACE', backend + '\n' + interface + '\n' + segmenter)
     harness = harness.replace('// INSERT_BROKER', broker)
