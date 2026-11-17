@@ -536,6 +536,19 @@ int main() {
   expect("SENSOR_STATUS plaintext unkeyed (bootstrap compatibility)",
          run(ESPNOW_V4_TYPE_SENSOR_STATUS, false, false, false, false), true);
 
+  // HEARTBEAT records liveness that routing reads: same policy. Every sender
+  // tags (periodic broadcast) or seals (unicast) it once a mesh key exists.
+  expect("HEARTBEAT plaintext keyed from a paired MAC",
+         run(ESPNOW_V4_TYPE_HEARTBEAT, true, false, false, true), false);
+  check("HEARTBEAT plaintext keyed drop is logged (one WARN) and cleaned up",
+        gWarns == 1 && gCleanups == 1);
+  expect("HEARTBEAT BROADCAST_AUTH keyed from an unpaired neighbour",
+         run(ESPNOW_V4_TYPE_HEARTBEAT, false, true, false, true), true);
+  expect("HEARTBEAT session-encrypted keyed",
+         run(ESPNOW_V4_TYPE_HEARTBEAT, true, true, true, true), true);
+  expect("HEARTBEAT plaintext unkeyed (bootstrap compatibility)",
+         run(ESPNOW_V4_TYPE_HEARTBEAT, true, false, false, false), true);
+
   // The retired plaintext SENSOR_BROADCAST (150) has no row: the frame falls
   // to the unknown-type drop. The literal is used because the enum symbol is gone.
   check("opcode 150 (retired SENSOR_BROADCAST) has no table row",

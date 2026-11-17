@@ -120,6 +120,10 @@ static void setSetting(String& field, const String& value) {
   field = value;
 }
 
+// processMetadata asks for this when the cache is full (the real one is run by
+// test_espnow_rx_frontend); the four-slot cache here never fills.
+[[maybe_unused]] static int meshPeerMetaReclaimSlot(const uint8_t*) { return -1; }
+
 // INSERT_PRODUCTION
 
 // ---- Test helpers.

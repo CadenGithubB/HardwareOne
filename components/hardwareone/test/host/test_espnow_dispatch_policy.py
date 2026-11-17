@@ -9,7 +9,7 @@ and header from System_ESPNow_Wire.h and V4RxCtx from System_ESPNow_RxCtx.h,
 generates one recording double per other handler named in the table, and
 compiles the harness once with ENABLE_BONDED_MODE 1 and once with 0. The cases
 check that SUBSCRIBE_UPDATE needs a paired, session-encrypted frame, that
-SENSOR_STATUS, TEXT and BOOT need an authenticated frame once the device has a
+SENSOR_STATUS, HEARTBEAT, TEXT and BOOT need an authenticated frame once the device has a
 mesh passphrase (plaintext stays accepted on a keyless device), that plaintext
 TEXT accepted on a keyless device is filed under its MAC rather than a paired
 peer's name and posts no SYSEVT_TEXT_RX, that authenticated text keeps its
@@ -43,7 +43,6 @@ from test_web_batch_handlers import extract_block  # noqa: E402
 
 ZERO_FLAG_ALLOWED = ('KEY_EX_HELLO', 'KEY_EX_REPLY', 'KEY_EX_CONFIRM',
                      'SESSION_OPEN', 'SESSION_CONFIRM', 'SESSION_REKEY',
-                     'HEARTBEAT',
                      'TOPO_REQ', 'TOPO_START', 'TOPO_PEER', 'USER_SYNC')
 
 # The rows of the table's ENABLE_BONDED_MODE block: accepted only from the

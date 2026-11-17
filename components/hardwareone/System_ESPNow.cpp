@@ -1530,12 +1530,25 @@ bool espnowStreamOutputWanted() {
 
 // EspNowV4Header, V4PayloadCmdResp, V4PayloadFile* moved to System_ESPNow_Wire.h
 
-struct V4DedupEntry { uint8_t origin[6]; uint32_t id; uint32_t ts; uint8_t fragIndex; bool active; };
+// What a frame proved before it may write a duplicate-ring entry. The class is
+// part of the key, so an entry of one class never shadows a frame of another
+// (see v4_dedup_frame_seen for who gets which class and which MAC).
+enum class V4DedupClass : uint8_t { Group = 0, Sealed = 1, Relayed = 2, Plain = 3 };
+// `cls` sits in what was tail padding: the entry is still 20 bytes.
+struct V4DedupEntry { uint8_t origin[6]; uint32_t id; uint32_t ts; uint8_t fragIndex; bool active; uint8_t cls; };
 #define V4_DEDUP_SIZE 64
 // PSRAM .bss: POD dedup ring, touched only from the espnow RX-processing task
 // (never an ISR) and never DMA'd — no reason to hold ~1.3 KB of internal DRAM.
+// Written ONLY by frames that proved a key (Group, Sealed) or that an
+// authenticated relay envelope delivered (Relayed).
 EXT_RAM_BSS_ATTR static V4DedupEntry gV4Dedup[V4_DEDUP_SIZE];
 static int gV4DedupIdx = 0;
+// Frames that proved nothing get their own small ring (320 B, same PSRAM .bss,
+// same single task), so no amount of forged plaintext can evict or pre-insert
+// an entry of the ring above.
+#define V4_DEDUP_PLAIN_SIZE 16
+EXT_RAM_BSS_ATTR static V4DedupEntry gV4DedupPlain[V4_DEDUP_PLAIN_SIZE];
+static int gV4DedupPlainIdx = 0;
 
 // Broadcast ACK tracking. ~1.2 KB of internal DRAM (touched from RX ACK
 // processing), allocated in initEspNow so devices with ESP-NOW off never pay
@@ -1846,23 +1859,71 @@ static constexpr uint32_t V4_DEDUP_TTL_MS = 5000;
 // drop fragments 1..N-1 as "duplicates" of fragment 0. Keying on fragIndex too
 // keeps distinct fragments distinct while still catching a true retransmit of
 // the SAME fragment. Single-frame messages always pass fragIndex 0.
-static bool v4_dedup_seen_and_insert(const uint8_t* origin, uint32_t id, uint8_t fragIndex = 0) {
+static bool v4_dedup_ring_seen_and_insert(V4DedupEntry* ring, int size, int& nextIdx, V4DedupClass cls,
+                                          const uint8_t* mac, uint32_t id, uint8_t fragIndex) {
   uint32_t now = (uint32_t)millis();
-  for (int i = 0; i < V4_DEDUP_SIZE; i++) {
-    if (gV4Dedup[i].active && gV4Dedup[i].id == id && gV4Dedup[i].fragIndex == fragIndex &&
-        memcmp(gV4Dedup[i].origin, origin, 6) == 0) {
+  for (int i = 0; i < size; i++) {
+    if (ring[i].active && ring[i].id == id && ring[i].fragIndex == fragIndex &&
+        ring[i].cls == (uint8_t)cls && memcmp(ring[i].origin, mac, 6) == 0) {
       // Unsigned subtraction is rollover-safe across the ~49.7-day millis() wrap.
-      if ((uint32_t)(now - gV4Dedup[i].ts) < V4_DEDUP_TTL_MS) return true;
+      if ((uint32_t)(now - ring[i].ts) < V4_DEDUP_TTL_MS) return true;
       // Expired: accept as new and refresh in place so an immediate radio-level
       // duplicate of THIS message is still caught.
-      gV4Dedup[i].ts = now;
+      ring[i].ts = now;
       return false;
     }
   }
-  V4DedupEntry& e = gV4Dedup[gV4DedupIdx];
-  memcpy(e.origin, origin, 6); e.id = id; e.fragIndex = fragIndex; e.ts = now; e.active = true;
-  gV4DedupIdx = (gV4DedupIdx + 1) % V4_DEDUP_SIZE;
+  V4DedupEntry& e = ring[nextIdx];
+  memcpy(e.origin, mac, 6); e.id = id; e.fragIndex = fragIndex; e.ts = now; e.active = true;
+  e.cls = (uint8_t)cls;
+  nextIdx = (nextIdx + 1) % size;
   return false;
+}
+
+// Duplicate check for one received frame (the caller has excluded msgId 0 and
+// the opcodes that reuse a msgId on purpose). Returns true for a duplicate.
+//
+// The key is never taken from a field the frame did not prove. Before this
+// split every frame used one ring keyed on the header's origin, so a forged
+// plaintext frame (public magic/version, fingerprint 0, empty payload: no key
+// needed) could pre-insert a peer's next msgIds and have that peer's genuine
+// sealed frames acknowledged and then dropped as duplicates.
+//
+//   Sealed   SESSION_FRAME that opened under the session of `radioSrc`. Keyed
+//            on that MAC, which the session lookup bound the frame to, not on
+//            the header origin. Identical bytes already fail the session
+//            replay window; this entry is for what the window lets through: a
+//            re-sealed retry (fresh frameSeq, same msgId and fragIndex) after
+//            a lost ACK. The reassembler's have[] bitmap covers that for
+//            reassembled messages only; multi-frame TEXT is dispatched per
+//            fragment and single frames may be sent again under one msgId.
+//   Group    BROADCAST_AUTH tag verified. Keyed on the header origin, which
+//            flood forwarders keep verbatim: this is the loop suppression the
+//            ring was built for.
+//   Relayed  plaintext inner frame (handshake) handed in by v4h_relay_data.
+//            The envelope carried the group tag; `radioSrc` is the synthetic
+//            source, i.e. the inner origin.
+//   Plain    proved nothing. Separate small ring keyed on the radio source:
+//            every honest plaintext sender stamps its own MAC as origin and
+//            plaintext is never flooded, so radio-level duplicates are still
+//            caught, and a forger can only shadow plaintext frames of the MAC
+//            it transmits as, which it could forge outright anyway.
+static bool v4_dedup_frame_seen(const uint8_t* radioSrc, const EspNowV4Header* h,
+                                bool wasAuthenticated, bool wasSessionEncrypted, bool relayDelivery) {
+  if (wasSessionEncrypted) {
+    return v4_dedup_ring_seen_and_insert(gV4Dedup, V4_DEDUP_SIZE, gV4DedupIdx, V4DedupClass::Sealed,
+                                         radioSrc, h->msgId, h->fragIndex);
+  }
+  if (wasAuthenticated) {
+    return v4_dedup_ring_seen_and_insert(gV4Dedup, V4_DEDUP_SIZE, gV4DedupIdx, V4DedupClass::Group,
+                                         h->origin, h->msgId, h->fragIndex);
+  }
+  if (relayDelivery) {
+    return v4_dedup_ring_seen_and_insert(gV4Dedup, V4_DEDUP_SIZE, gV4DedupIdx, V4DedupClass::Relayed,
+                                         radioSrc, h->msgId, h->fragIndex);
+  }
+  return v4_dedup_ring_seen_and_insert(gV4DedupPlain, V4_DEDUP_PLAIN_SIZE, gV4DedupPlainIdx,
+                                       V4DedupClass::Plain, radioSrc, h->msgId, h->fragIndex);
 }
 
 // Drop all dedup entries from one origin. Called when a peer reboot is detected
@@ -1872,6 +1933,11 @@ static void v4_dedup_flush_origin(const uint8_t* origin) {
   for (int i = 0; i < V4_DEDUP_SIZE; i++) {
     if (gV4Dedup[i].active && memcmp(gV4Dedup[i].origin, origin, 6) == 0) {
       gV4Dedup[i].active = false;
+    }
+  }
+  for (int i = 0; i < V4_DEDUP_PLAIN_SIZE; i++) {
+    if (gV4DedupPlain[i].active && memcmp(gV4DedupPlain[i].origin, origin, 6) == 0) {
+      gV4DedupPlain[i].active = false;
     }
   }
 }
@@ -3641,8 +3707,20 @@ static bool sessionPrewarmNoteAttempt(SessionPrewarm* pw, uint32_t nowMs) {
 static void v4h_heartbeat(const V4RxCtx& ctx) {
   if (ctx.payloadLen >= sizeof(V4PayloadHeartbeat)) {
     const V4PayloadHeartbeat* hb = (const V4PayloadHeartbeat*)ctx.payload;
+    // Liveness is recorded for the RADIO SOURCE, so a missing slot may be created
+    // only when the frame proves that MAC, not merely a key. A session frame
+    // does: the session lookup bound it to src_addr. A BROADCAST_AUTH tag does
+    // not: it covers the header and payload, never the radio source, so a
+    // captured tagged heartbeat retransmitted from an invented MAC still
+    // verifies. The header origin IS under the tag, and a heartbeat is ttl=1,
+    // never flooded or routed, so a genuine one always has origin == source
+    // (the same test v4h_peer_list applies). A replay is thereby limited to the
+    // MACs of real mesh members and cannot fill the tables with invented ones.
+    const bool senderProven = ctx.isSessionEncrypted ||
+        (ctx.isAuthenticated && memcmp(ctx.h->origin, ctx.recv_info->src_addr, 6) == 0);
     noteMeshPeerRxActivity(ctx.recv_info->src_addr, EspNowMeshRxKind::MeshHeartbeat, hb->rssi,
-                           ctx.recv_info->rx_ctrl ? ctx.recv_info->rx_ctrl->rssi : (int8_t)-128);
+                           ctx.recv_info->rx_ctrl ? ctx.recv_info->rx_ctrl->rssi : (int8_t)-128,
+                           senderProven);
     if (gEspNow) gEspNow->heartbeatsReceived++;
 
     // Proactive session pre-warm. If this heartbeat is from a peer we've ALREADY
@@ -3852,7 +3930,7 @@ static void v4h_bond_heartbeat(const V4RxCtx& ctx) {
   if (bootChanged) {
     // Peer restarted its msgId counter; clear its stale dedup entries so its
     // reused low ids stop being dropped as duplicates. Clock-independent
-    // backstop to the TTL expiry in v4_dedup_seen_and_insert.
+    // backstop to the TTL expiry in v4_dedup_ring_seen_and_insert.
     v4_dedup_flush_origin(ctx.recv_info->src_addr);
     resetBondSync();
   }
@@ -5424,8 +5502,8 @@ static void v4_relay_fanout(const uint8_t* frame, size_t len,
     if (isSelfMac(mac)) continue;
     if (arrivedFrom && memcmp(mac, arrivedFrom, 6) == 0) continue;
     if (origin && memcmp(mac, origin, 6) == 0) continue;
-    // Health slots are created for any MAC we hear from, including nodes we
-    // have never added to the radio's peer table. Sending to those just returns
+    // Health slots also exist for nodes we have never added to the radio's peer
+    // table (an unpaired neighbour's sender-proven heartbeat creates one). Sending to those just returns
     // ESP_ERR_ESPNOW_NOT_FOUND and would inflate the failure counter with
     // something that was never going to work.
     if (!esp_now_is_peer_exist(mac)) continue;
@@ -6130,7 +6208,16 @@ static const V4OpcodeEntry kV4HandlerTable[] = {
   // enforce that confidentiality/integrity invariant on receive as well.
   { ESPNOW_V4_TYPE_CMD,              V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, v4h_cmd               },
   { ESPNOW_V4_TYPE_CMD_RESP,         V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, v4h_cmd_resp          },
-  { ESPNOW_V4_TYPE_HEARTBEAT,        0,                                                    v4h_heartbeat         },
+  // HEARTBEAT records liveness that routing reads (v4_radio_emit) and that the
+  // online/offline events are built on. Every sender signs or seals it once a
+  // mesh key exists: the periodic one goes through v4_broadcast_category
+  // (BROADCAST_AUTH), the master-to-backup, pairing-seed and app-ping ones
+  // through v4_send_payload_smart (session frame, never plaintext). So on a
+  // keyed device a plaintext heartbeat is a spoof; a keyless device still takes
+  // it, and v4h_heartbeat then creates no slot for a MAC that is not paired.
+  // The gate proves a key, not the radio source: v4h_heartbeat checks the
+  // tagged origin against the source before it lets a frame create a slot.
+  { ESPNOW_V4_TYPE_HEARTBEAT,        V4_OPC_FLAG_REQ_AUTH_WHEN_KEYED,                      v4h_heartbeat         },
   // Discovery beacon carries a mesh-group-key BROADCAST_AUTH HMAC (see sendPairBeacon).
   // REQ_AUTHENTICATED gates auto-pair to same-passphrase devices so an outsider cannot
   // forge a beacon to pollute our registry. NOT REQ_PAIRED — the sender is unpaired by
@@ -6504,6 +6591,18 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
            h->ver, h->headerLen, (unsigned)ESPNOW_V4_VERSION, (unsigned)sizeof(EspNowV4Header));
     return true;
   }
+  // fragIndex names one slot out of fragCount. No sender builds a frame whose
+  // index its own count does not have: single frames are index 0 of 1, the
+  // fragmenting sender counts 0..fragCount-1, and a fragment ACK echoes the
+  // pair it received. The index is part of the duplicate key and of the ACK
+  // waiter match, so a frame that disagrees with itself is refused here, before
+  // it is opened, acknowledged or remembered. (fragCount 0 is read as a single
+  // frame, as everywhere below.)
+  if (h->fragIndex >= (h->fragCount > 1 ? h->fragCount : (uint8_t)1)) {
+    DEBUG_ESPNOW_ROUTERF("[V4_RX] REJECTED: fragIndex %u does not fit fragCount %u (type=%u msgId=%lu)",
+           (unsigned)h->fragIndex, (unsigned)h->fragCount, (unsigned)h->type, (unsigned long)h->msgId);
+    return true;
+  }
   // V4 derives payloadLen from the ESPNOW radio length minus the fixed header
   // size (V3 carried a redundant payloadLen field in the header; V4 saves
   // those 2 bytes since the radio already gives us the frame length).
@@ -6838,7 +6937,11 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
       h->type != ESPNOW_V4_TYPE_FILE_START &&
       h->type != ESPNOW_V4_TYPE_FILE_DATA &&
       h->type != ESPNOW_V4_TYPE_FILE_END) {
-    if (h->msgId != 0 && v4_dedup_seen_and_insert(h->origin, h->msgId, h->fragIndex)) {
+    // Which ring and which MAC the check uses depends on what the frame proved
+    // (v4_dedup_frame_seen): unauthenticated frames can no longer write the
+    // entries that authenticated frames are checked against.
+    if (h->msgId != 0 && v4_dedup_frame_seen(recv_info->src_addr, h, wasAuthenticated,
+                                             wasSessionEncrypted, gEspNowInRelayDelivery)) {
       DEBUG_ESPNOWF("[V4_DEDUP] Dropped duplicate: type=%u msgId=%lu frag=%u", h->type, (unsigned long)h->msgId, h->fragIndex);
       meshRelayMetrics().floodDupSuppressed++;
       return true;
@@ -8937,6 +9040,10 @@ static int metadataPushTick(uint32_t nowMs) {
   return attempted;
 }
 
+// Defined beside getMeshPeerMeta: frees a metadata slot held by a MAC that is
+// not paired, for `forMac` to use. Returns the cleared slot's index, or -1.
+static int meshPeerMetaReclaimSlot(const uint8_t* forMac);
+
 /**
  * Process received metadata - store in gMeshPeerMeta
  */
@@ -8973,6 +9080,19 @@ static void processMetadata(const uint8_t* srcMac, const V4PayloadMetadata* meta
           i, MAC_STR(srcMac));
         break;
       }
+    }
+  }
+
+  if (idx == -1) {
+    // No free slot. Metadata slots used to be released only at init, so every
+    // MAC ever heard in one uptime kept one and a full table refused each new
+    // peer until reboot. Take back one that belongs to a MAC that is not paired.
+    idx = meshPeerMetaReclaimSlot(srcMac);
+    if (idx != -1) {
+      memcpy(gMeshPeerMeta[idx].mac, srcMac, 6);
+      gMeshPeerMeta[idx].isActive = true;
+      DEBUG_ESPNOW_METADATAF("[METADATA] processMetadata: reclaimed slot=%d for %s",
+        idx, MAC_STR(srcMac));
     }
   }
   
@@ -9621,7 +9741,7 @@ void macFromHexString(const String& s, uint8_t out[6]) {
 // a matching meta slot exists (empty meta is fine — name/room get filled in
 // later when the identity/topology message arrives, and displayName() falls
 // back to "Unknown" until then). Without this guarantee, the two arrays
-// drift: heartbeats and ACKs from an unknown peer go through this path
+// drift: sender-proven heartbeats from an unpaired peer go through this path
 // (via noteMeshPeerRxActivity) on EVERY frame and create health slots,
 // but meta is only created on a separate identity-message path that fires
 // much less often and only after the peer has been topologically learned.
@@ -9704,7 +9824,69 @@ MeshPeerMeta* getMeshPeerMeta(const uint8_t mac[6], bool createIfMissing) {
       return &gMeshPeerMeta[i];
     }
   }
+  const int reclaimed = meshPeerMetaReclaimSlot(mac);
+  if (reclaimed >= 0) {
+    memcpy(gMeshPeerMeta[reclaimed].mac, mac, 6);
+    gMeshPeerMeta[reclaimed].isActive = true;
+    gMeshPeerMeta[reclaimed].hbLastHeardMs = (uint32_t)millis();  // same seed as a free slot
+    return &gMeshPeerMeta[reclaimed];
+  }
   return nullptr;
+}
+
+// Called when the metadata table is full and `forMac` needs a slot. A slot is
+// only ever taken from a MAC that is not in the paired registry:
+//   1. first one whose health slot is gone as well (nothing refers to it), then
+//   2. if `forMac` itself is paired, the unpaired MAC heard longest ago. Its
+//      health slot stays; it loses only its heartbeat backoff timing, so it is
+//      sent heartbeats at the full rate again.
+// A paired peer's slot (its name, room and tags) is never taken. Returns the
+// index of the cleared slot, or -1 when every slot belongs to a paired peer or
+// (for an unpaired `forMac`) to a peer that is still being tracked.
+static int meshPeerMetaReclaimSlot(const uint8_t* forMac) {
+  if (!gMeshPeerMeta || !forMac) return -1;
+  const uint32_t now = (uint32_t)millis();
+  int victim = -1;
+  for (int i = 0; i < gMeshPeerSlots && victim < 0; i++) {
+    if (!gMeshPeerMeta[i].isActive || isPairedDevice(gMeshPeerMeta[i].mac)) continue;
+    if (!getMeshPeerHealth(gMeshPeerMeta[i].mac, false)) victim = i;
+  }
+  if (victim < 0 && isPairedDevice(forMac)) {
+    uint32_t oldestAge = 0;
+    for (int i = 0; i < gMeshPeerSlots; i++) {
+      if (!gMeshPeerMeta[i].isActive || isPairedDevice(gMeshPeerMeta[i].mac)) continue;
+      const uint32_t age = (uint32_t)(now - gMeshPeerMeta[i].hbLastHeardMs);
+      if (victim < 0 || age > oldestAge) { victim = i; oldestAge = age; }
+    }
+  }
+  if (victim < 0) return -1;
+  DEBUG_ESPNOWF("[MESH] metadata slot %d of unpaired " MAC_FMT " reclaimed", victim,
+                MAC_ARGS(gMeshPeerMeta[victim].mac));
+  gMeshPeerMeta[victim].clear();
+  return victim;
+}
+
+// Release both runtime slots of one peer (unpair). The metadata slot is cleared,
+// not just marked free: it holds the peer's name, room and tags, and
+// getEspNowDeviceName reads it before the registry.
+static void meshPeerSlotsRelease(const uint8_t* mac) {
+  if (gMeshPeers) {
+    for (int i = 0; i < gMeshPeerSlots; i++) {
+      if (gMeshPeers[i].isActive && macEquals(gMeshPeers[i].mac, mac)) {
+        gMeshPeers[i].isActive = false;
+        DEBUG_ESPNOWF("[MESH] Removed peer from mesh list: %s", MAC_STR(mac));
+        break;
+      }
+    }
+  }
+  if (gMeshPeerMeta) {
+    for (int i = 0; i < gMeshPeerSlots; i++) {
+      if (gMeshPeerMeta[i].isActive && macEquals(gMeshPeerMeta[i].mac, mac)) {
+        gMeshPeerMeta[i].clear();
+        break;
+      }
+    }
+  }
 }
 
 // Count active mesh peers whose room field matches `room` (case-sensitive,
@@ -9720,7 +9902,8 @@ int countMeshPeerMetaByRoom(const char* room) {
   return count;
 }
 
-void noteMeshPeerRxActivity(const uint8_t* mac, EspNowMeshRxKind kind, int8_t hbRssi, int8_t linkRssi) {
+void noteMeshPeerRxActivity(const uint8_t* mac, EspNowMeshRxKind kind, int8_t hbRssi, int8_t linkRssi,
+                            bool senderProven) {
   if (!mac || !gMeshPeers) return;
   // Everything this function records is LINK telemetry — "I can hear this node,
   // this well, this recently". A frame that reached us through a relay proves
@@ -9731,7 +9914,21 @@ void noteMeshPeerRxActivity(const uint8_t* mac, EspNowMeshRxKind kind, int8_t hb
   // (Heartbeats are ttl=1 and never relayed, so heartbeat-based aliveness and
   // the online/offline events built on it are untouched by this.)
   if (gEspNowInRelayDelivery) return;
-  MeshPeerHealth* peer = getMeshPeerHealth(mac, true);
+  // A slot (health, and with it metadata) is created only for a MAC in the
+  // paired registry or when the caller says the frame proved THIS MAC as its
+  // sender (`senderProven`: a session frame from it, or a BROADCAST_AUTH frame
+  // whose tagged origin is it; a verified tag alone says nothing about the
+  // radio source, see v4h_heartbeat). A plaintext heartbeat or ACK needs no
+  // key at all, and a captured tagged frame can be retransmitted from any
+  // source, so either could otherwise fill both tables with invented MACs.
+  // Such a frame still refreshes a slot that already exists. What remains
+  // creatable without a key: slots for registry MACs (spoofed source) and for
+  // real mesh members whose tagged heartbeats were captured (replayed as
+  // themselves; the tag carries no freshness). Both sets are bounded by real
+  // devices. The pairing seed (BootstrapLiveness) is called after the registry
+  // entry is written.
+  MeshPeerHealth* peer = getMeshPeerHealth(mac, false);
+  if (!peer && (senderProven || isPairedDevice(mac))) peer = getMeshPeerHealth(mac, true);
   if (!peer) return;
   const uint32_t t = millis();
   // Locally-measured link RSSI EWMA (alpha 1/4), quarter-dB fixed point.
@@ -15519,16 +15716,10 @@ const char* cmd_espnow_unpair(const String& argsInput) {
   // Clear the peer's mesh-liveness slot regardless of mode. gMeshPeers slots are
   // bootstrapped for paired devices even in DIRECT mode (and the OLED/G2 "online"
   // count reads them), so gating this on meshEnabled() left a stale "online" entry
-  // after a direct-mode unpair.
-  if (gMeshPeers) {
-    for (int i = 0; i < gMeshPeerSlots; i++) {
-      if (gMeshPeers[i].isActive && macEquals(gMeshPeers[i].mac, mac)) {
-        gMeshPeers[i].isActive = false;
-        DEBUG_ESPNOWF("[MESH] Removed peer from mesh list: %s", MAC_STR(mac));
-        break;
-      }
-    }
-  }
+  // after a direct-mode unpair. The metadata slot goes with it: it was never
+  // released before, so each unpaired peer kept one of the few slots (and its
+  // old name) until reboot.
+  meshPeerSlotsRelease(mac);
 
   bool devicesOk = saveEspNowDevices();
 

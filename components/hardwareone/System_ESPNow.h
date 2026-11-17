@@ -336,8 +336,14 @@ struct MeshPeerHealth {
 // linkRssi: OUR radio's RSSI for the frame that triggered this call (from
 // recv_info->rx_ctrl); use -128 when there is no radio frame in hand (e.g.
 // pairing bootstrap). Feeds MeshPeerHealth::linkRssiEwma.
+// senderProven: the frame proved `mac` itself as its sender, not merely a key:
+// it opened under the session bound to `mac`, or it carried a verified
+// BROADCAST_AUTH tag over a header whose origin is `mac` (the tag does not
+// cover the radio source, so a verified tag alone is not enough). A missing
+// slot is created only then, or for a MAC in the paired registry; any other
+// frame only refreshes a slot that already exists.
 void noteMeshPeerRxActivity(const uint8_t* mac, EspNowMeshRxKind kind, int8_t hbRssi = -128,
-                            int8_t linkRssi = -128);
+                            int8_t linkRssi = -128, bool senderProven = false);
 
 // Fills JsonArray for espnow meshstatus: union of active gMeshPeers + paired remotes not yet in slots.
 // JSON keys: mac, name, alive (mesh HB), activityAlive, lastHeartbeat (mesh HB ms), lastRxActivity,
@@ -1613,7 +1619,7 @@ inline void sendEspNowStreamMessage(const char* topic, const char* payload) {}
 inline bool isSelfMac(const uint8_t* mac) { return false; }
 inline bool isMeshPeerAlive(const MeshPeerHealth* peer) { return false; }
 inline bool isMeshPeerRecentlyActive(const MeshPeerHealth*) { return false; }
-inline void noteMeshPeerRxActivity(const uint8_t*, EspNowMeshRxKind, int8_t = -128, int8_t = -128) {}
+inline void noteMeshPeerRxActivity(const uint8_t*, EspNowMeshRxKind, int8_t = -128, int8_t = -128, bool = false) {}
 inline bool meshEnabled() { return false; }
 inline bool resolveDeviceNameOrMac(const String& nameOrMac, uint8_t* outMac) {
   (void)nameOrMac; (void)outMac;
