@@ -6186,13 +6186,15 @@ mesh a plaintext heartbeat is dropped and a tagged one accepted; an unknown MAC,
 replayed from an invented MAC, gets no slot; unpair frees the metadata slot; a ninth unpaired MAC does not block a
 paired peer's metadata.
 
-`espnow_keyex_hello` runs the production KEY_EX_HELLO handler on the production peer-identity cache: fifty
-replayed HELLOs cause one identity file write and rate-limited replies; the initiator's own retries are answered;
-a changed key or mesh is still written; lastSeenSec is refreshed at most hourly and never with an unset clock; a
-failed write leaves the cache as it was; two HELLOs for two meshes 30 ms apart are both answered. A source rule
-keeps KEY_EX_REPLY from kicking SESSION_OPEN over an ACTIVE session. `espnow_session_rekey` (extended) covers
-`espnowSessionOpenInitiate`: a re-kick during ESTABLISHING or REKEYING leaves keys and state untouched, a kick
-from FREE or CLOSED starts a handshake, a timed-out ESTABLISHING can be retried.
+`espnow_keyex_hello` runs the production KEY_EX_HELLO handler on the production peer-identity cache: fifty replayed
+HELLOs cause one identity file write and rate-limited replies; the initiator's own retries are answered; a changed
+key or mesh is still written; lastSeenSec is refreshed at most hourly and never with an unset clock; a failed write
+leaves the cache as it was; two HELLOs for two meshes 30 ms apart are both answered. A source rule keeps
+KEY_EX_REPLY from kicking SESSION_OPEN over an ACTIVE session. `espnow_session_rekey` (extended) covers
+`espnowSessionOpenInitiate`: a re-kick during ESTABLISHING or REKEYING leaves keys and state untouched, a kick from
+FREE or CLOSED starts a handshake, a timed-out ESTABLISHING can be retried. The KEY_EX_REPLY handler runs too: a
+REPLY to a key exchange an unpair called off stores nothing, so the unpaired peer's identity does not come back,
+and a new key exchange afterwards is stored as usual.
 
 `espnow_file_transfer` compiles the receive slot table, the FILE_* handlers, the sender pump and the commands
 that report a send (12 cases): a send without an ACTIVE session is refused and every caller says so; a send whose
@@ -6227,7 +6229,12 @@ slots 1..3 that has one, else slot 0's): a new passphrase on that mesh, `setdefa
 passphrase is in use (or that none is) when it changes; a passphrase set on a disabled mesh says the mesh stays off
 until it is enabled, and a clear says what stops (slot 0: the mesh is disabled and its devices cannot exchange
 frames; slots 1..3: heartbeats and time sync with devices that still have a passphrase); `listjson` reports the
-slot, the web page's mesh table marks it and its clear dialog says the same per slot. Exactly one enabled mesh is
+slot, the web page's mesh table marks it and its clear dialog says the same per slot. A disabled mesh keys nothing:
+slot 0's passphrase is in use only while its mesh is enabled, and the start-up warning, the replies, `listjson` and
+the web marker agree. An instance whose stop is still pending is left holding no passphrase. Clearing slot 0's
+passphrase follows `espnowmeshes remove`: refused with the same reply while that mesh is the default and another
+mesh is enabled, otherwise the mesh is disabled and no longer the default; the web page greys out Clear passphrase
+in the refused case, and its action panel writes mesh labels into attributes escaped. Exactly one enabled mesh is
 the default after `enable`; the start-up warning names the mesh a start loads the passphrase from; `espnowsetname
 clear` works only while ESP-NOW is stopped. A pairing with no mesh argument goes to the default mesh and never to a
 slot without a mesh (`meshSlotForPairing`); an empty label matches no mesh; deleting a mesh whose passphrase is not
@@ -6236,7 +6243,8 @@ say whose it is); a registry that failed to load, or whose last save did not rea
 table and the file together. The suite fails 102 checks on the tree before the fix, and 51, 17 and 3 on its first
 three versions (1319eff0, df7fec4f, 31456b6c), each of which an independent review found wanting. The
 passphrase-in-use cases (2026-11-17, rounds 3 and 4) fail 33 harness checks and all 5 web page source checks on
-cca36fa9.
+cca36fa9. The round-4 cases (X3, X6, X7, X8) fail 27 harness checks and 2 of the 7 web page source checks on
+3c5dda31.
 
 `espnow_identity_walk` runs the production `peerIdentityLoadAll`, `readPeerIdentityFile`, `peerIdentityForget` and
 the cache accessors over the shared in-memory filesystem: a readable identity loads with its mesh slot; no peers
@@ -6264,18 +6272,21 @@ recorded for that peer as well, so a second device on the same firmware keeps it
 references is named at the next sync. A file that will not go is reported. The reply line names what went and where
 received files are, within its buffer. Source checks pin the order inside `cmd_espnow_unpair`, keep `espnowforget`
 away from the caches, record a reference only for a manifest that reached the cache, and route the sync's cache
-lookup through `manifestCacheHit`. 40 of its 72 checks fail on cca36fa9.
+lookup through `manifestCacheHit`. 40 of its 72 checks fail on cca36fa9. Two more source checks pin that
+`cmd_espnow_unpair` ends the bond with the partner (compared with the partner setting itself) before it deletes the
+peer, and calls off its key exchange and the queued frames before the identity goes.
 
-`espnow_start_order` runs the production slot 0 bootstrap and its `PrimaryMeshBootstrap` guard on the
-production mesh record, compiled with bonded mode on and off: a start that fails leaves a new device with
-no mesh (no `primary`, flags, bond fields and an unlabelled slot's passphrase as before, a key stretched
-during the start dropped), a start that succeeds creates the enabled default `primary` once, and a
-configured or deliberately emptied slot 0 is never touched. Source checks pin what needs the radio: the
-"already running" answer and the device-name check come before any allocation, the guard sits after
-`esp_now_init` and before the callbacks, the passphrase restore and the boot notice, and only a successful
-start (or one whose cleanup is pending) keeps it; a later start keeps the peer-array size the arrays were
-allocated with; `openespnow` does not say "Error:" twice. 18 of its 48 checks fail on the tree before the
-fix.
+`espnow_start_order` runs the production slot 0 bootstrap and its `PrimaryMeshBootstrap` guard on the production
+mesh record, compiled with bonded mode on and off: a start that fails leaves a new device with no mesh (no
+`primary`, flags, bond fields and an unlabelled slot's passphrase and key as before) and writes the settings again,
+so a file another task wrote during the start cannot bring `primary` back, while a command that changed the meshes
+during the start (rename, passphrase, key, `add`, `remove`, bond) is kept and nothing is written, a start that
+succeeds creates the enabled default `primary` once, and a configured or deliberately emptied slot 0 is never
+touched. Source checks pin what needs the radio: the "already running" answer and the device-name check come before
+any allocation, the guard sits after `esp_now_init` and before the callbacks, the passphrase restore and the boot
+notice, and only a successful start (or one whose cleanup is pending) keeps it; a later start keeps the peer-array
+size the arrays were allocated with; `openespnow` does not say "Error:" twice. 18 of its 48 checks fail on the tree
+before the fix. The round-4 cases fail 8 of its 30 compiled checks (7 of 26 without bonded mode) on 3c5dda31.
 
 `espnow_system_notice` runs the production text-queue drain, `formatEspNowSystemNotice` and
 `buildBootNotification` with the vendored ArduinoJson: a BOOT notice prints `[ESP-NOW] <name> is online
@@ -6286,15 +6297,24 @@ device-name setting and no copy of the name in `EspNowState`. 19 of its 25 check
 the fix.
 
 `espnow_bond_partner_change` runs the production `bondconnect`, `bonddisconnect`, `espnowbondmodeenabled`,
-`espnowbondpeermac`, the bond frame hold, `isBondPeerMac`, `resetBondSync`, the worker's capability request
-and the CAP_REQ, CAP_RESP and STATUS_REQ handlers against a settings double that lets the receive task run
-between any two statements of a command, and a model of the master's sync tick. The bench's order of events
-(2026-11-17, step c1) no longer leaves the worker SYNCING; no frame accepted during a partner change is wiped;
-the old partner's frames stop and its sync state goes; saving the same value resets nothing; a worker that
-lost its sync record while the master stayed SYNCED recovers; an unasked CAP_RESP does not restart a manifest
-request. espnow_task also runs at every use of the ESP-NOW state and every INFO line, so a reset moved
-after the end of the hold is caught at run time; source rules keep the resets in `bondconnect`,
-`bonddisconnect`, the two setting commands, `bondresync` and `bondrole` inside the hold.
+`espnowbondpeermac`, the bond frame hold, `isBondPeerMac`, `resetBondSync`, the worker's capability request and the
+CAP_REQ, CAP_RESP and STATUS_REQ handlers against a settings double that lets the receive task run between any two
+statements of a command, and a model of the master's sync tick. The bench's order of events (2026-11-17, step c1)
+no longer leaves the worker SYNCING; no frame accepted during a partner change is wiped; the old partner's frames
+stop and its sync state goes; saving the same value resets nothing; a worker that lost its sync record while the
+master stayed SYNCED recovers; an unasked CAP_RESP does not restart a manifest request. espnow_task also runs at
+every use of the ESP-NOW state and every INFO line, so a reset moved after the end of the hold is caught at run
+time; source rules keep the resets in `bondconnect`, `bonddisconnect`, the two setting commands, `bondresync` and
+`bondrole` inside the hold. It also runs the bond parts of the ESP-NOW loop (the heartbeat send and timeout, and
+the sync tick up to the streaming setup) at every point espnow_task can take the CPU: while a partner change holds
+bond frames off, nothing is sent, no session is cleared, no offline event is posted and no manifest reference is
+recorded, and the tick works again afterwards. `cmd_espnow_unpair` runs with doubles for its registry and file
+steps: unpairing the bond partner ends the bond first (settings, state, offline event, a reply line) and afterwards
+nothing is sent or started toward it; another device leaves the bond alone; a partner set while bond mode is off is
+cleared. A partner change that runs while the tick waits (the gap between stream commands, the FS lock in the
+manifest lookup) ends that tick's work; the status answer, push and poll wait out a change and the old partner's
+pending requests are not answered after it; a bond file answer queued on cmd_exec before an unpair or partner
+change is dropped when it runs. 22 of its 66 checks fail on 3c5dda31.
 
 `espnow_handshake_backoff` runs `System_ESPNow_HandshakeBackoff.h`, the KEY_EX in-flight table and retry sweep, the
 pending-frame queue, the ESTABLISHING sweep, `v4_send_encrypted_or_queue` and `bondSendEncryptedAsync` through
@@ -6305,4 +6325,7 @@ key exchange starts at once, is always reported and ends the back-off; `espnowse
 failure is printed even after the partner has been away; `bondconnect`/`bondresync` end the back-off and start the
 handshake at once on the side that starts bond handshakes; bond sensor data is dropped like the heartbeat; the
 pending-frame warnings carry the count they held back. Source rules pin the calls that end a back-off (key exchange
-reply and confirm, session up, authenticated frame, mesh online edge, unpair, manual commands).
+reply and confirm, session up, authenticated frame, mesh online edge, unpair, manual commands). An unpair
+(`espnowKeyExCancel`, `pendingFrameDropForPeer`) stops the HELLO retries to the peer, frees the entry one retry
+interval later without a warning, lets a new key exchange start at once and drops only that peer's queued frames,
+each reported failed. 5 of its 60 checks fail on 3c5dda31.

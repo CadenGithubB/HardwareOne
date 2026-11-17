@@ -277,6 +277,11 @@ uint8_t pendingFrameCount();
 // to decide whether to auto-kick SESSION_OPEN — the "encrypt-or-wait" foundation.
 bool pendingFrameHasForPeer(const uint8_t peerMac[6]);
 
+// Unpair: drops the frames waiting for `peerMac`'s session (each is marked
+// failed in the tracked-send table), so a session that comes up later does
+// not deliver them to a device the user unpaired. Returns how many went.
+uint8_t pendingFrameDropForPeer(const uint8_t peerMac[6]);
+
 // ---- Phase 3.5 task #49 — tracked-send status (web-UI delivery confirmation)
 //
 // When the CLI accepts a user-initiated send, it registers the msgId+peerMac

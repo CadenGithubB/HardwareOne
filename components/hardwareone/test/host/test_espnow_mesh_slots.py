@@ -19,14 +19,21 @@ that the slot 0 bootstrap only runs on a device with no mesh at all, that
 exactly one enabled mesh is the default, that the passphrase messages name the
 mesh a start loads, that a running instance always holds the passphrase a start
 would load (a new passphrase on that mesh, setdefault, enable, disable and delete
-apply at once) and every reply says what is in use, that slot 0's passphrase is
-stored before the first start, and that the device name can be cleared while
-ESP-NOW is stopped. Source checks pin the start's use of the loader and the web
-page's mesh table and passphrase forms (not runnable here). --source-dir replays other production sources (for example the trees
+apply at once) and every reply says what is in use, that a disabled mesh keys
+nothing (slot 0's passphrase counts only while its mesh is enabled), that an
+instance whose stop is still pending is left holding no passphrase, that
+clearing slot 0's passphrase follows the rule of 'espnowmeshes remove' (refused
+while it is the default beside another enabled mesh, else disabled and no longer
+the default), that slot 0's passphrase is stored before the first start, and that
+the device name can be cleared while ESP-NOW is stopped. Source checks pin the
+start's use of the loader and the web page's mesh table, passphrase forms and
+action panel (escaped labels, Clear passphrase greyed out where the firmware
+refuses it), which are not runnable here. --source-dir replays other production sources (for example the trees
 before the fix) against this suite.
 """
 import argparse
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -45,15 +52,19 @@ BASE = (
     'static void initPrimaryMeshFromLegacySettings()',
 )
 # Present after the fix, absent on the trees before it, which then still compile
-# and fail on the checks that name the defect.
-HINT_HELPERS = (
-    'static uint8_t espnowStartPassphraseSlot()',
+# and fail on the checks that name the defect. The start slot returns -1 for "none"
+# since a disabled slot 0 stopped keying the device (int8_t); before, it always
+# named a slot (uint8_t). The harness compares it as an int, so both compile.
+START_SLOT = ('static int8_t espnowStartPassphraseSlot()', 'static uint8_t espnowStartPassphraseSlot()')
+HINT_REST = (
     'static const char* meshLabelForPassphraseHint()',
     'static void formatNoPassphraseWarning(',
 )
 # The running instance follows what a start would load. Present after the fix.
+# espnowStartPassphraseSource went away when the start slot learned to say "none";
+# it is taken when the source has it.
+LIVE_SOURCE = 'static int8_t espnowStartPassphraseSource()'
 LIVE_LOADER = (
-    'static int8_t espnowStartPassphraseSource()',
     'static void espnowLoadLivePassphrase()',
     'static void formatLivePassphraseNote(',
     'static int8_t espnowPassphraseInUse()',
@@ -118,7 +129,9 @@ def main():
 
     mesh_identity = definition(settings, 'struct MeshIdentity', 'System_Settings.h') + ';'
 
-    have_hint = all(m in source for m in HINT_HELPERS)
+    start_slot = next((m for m in START_SLOT if m in source), START_SLOT[0])
+    hint_helpers = (start_slot,) + HINT_REST
+    have_hint = all(m in source for m in hint_helpers)
     have_delete = DELETE in source
     have_guard = have_delete and REGISTRY_GUARD in source  # the delete guard that also reads the device registry
     have_pairing = PAIRING in source
@@ -128,9 +141,9 @@ def main():
     # Source order matters: each piece only uses what is defined above it.
     order = list(BASE)
     if have_hint:
-        order += list(HINT_HELPERS)
+        order += list(hint_helpers)
     if have_loader:
-        order += list(LIVE_LOADER)
+        order += ([LIVE_SOURCE] if LIVE_SOURCE in source else []) + list(LIVE_LOADER)
     order.append(LISTJSON)
     order.append(PARSE_MESH_ARG)
     if have_pairing:
@@ -235,7 +248,7 @@ def main():
     # older page still runs the harness.
     page = read('WebPage_ESPNow.h')
     page_failures = []
-    PAGE_CHECKS = 5
+    PAGE_CHECKS = 7
     table = page[page.find('function renderMeshesTable('):page.find('function updatePairChooser(')]
     if 'data.passphraseSlot' not in table or 'data.running' not in table or '(device passphrase)' not in table:
         page_failures.append('the mesh table does not mark the mesh whose passphrase the device uses')
@@ -253,6 +266,22 @@ def main():
         at = page.find(tag)
         if at < 0 or 'alert(text)' not in page[at:at + 120]:
             page_failures.append(f'the passphrase form {tag[1:-2]} does not show the firmware\'s answer')
+    # The action panel and its subforms put the label into attributes escaped: a
+    # label may hold '&' and ';', and the click handler reads it back from dataset,
+    # which decodes entities, so a raw label could name another mesh.
+    panel = page[page.find('function renderActionPanel('):page.find('function findMesh(')]
+    pass_form = page[page.find('function showPassphraseSubform('):page.find('function showRenameSubform(')]
+    rename_form = page[page.find('function showRenameSubform('):page.find('function clearSubform(')]
+    if "\"' + label + '\"" in panel or 'escHtml(label)' not in panel or \
+            "data-label=\"' + escHtml(label) + '\"" not in pass_form or \
+            "data-oldlabel=\"' + escHtml(label) + '\"" not in rename_form:
+        page_failures.append('the action panel or its subforms write the raw mesh label into an attribute')
+    # Clearing slot 0's passphrase disables its mesh, so the page offers it under the
+    # rule Disable follows: not while slot 0 is the default and another mesh is enabled.
+    if "String(slot) === '0' && isDefault && otherEnabled" not in panel or \
+            not re.search(r'<button class="btn" disabled[^>]*>Clear passphrase</button>', panel):
+        page_failures.append('the action panel offers Clear passphrase on the default slot 0 mesh '
+                             'while another mesh is enabled')
     for failure in page_failures:
         print(f'FAIL web page: {failure}', flush=True)
 

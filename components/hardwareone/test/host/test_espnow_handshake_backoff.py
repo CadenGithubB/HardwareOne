@@ -30,7 +30,11 @@ key exchange starts at once, is always reported and ends the back-off, that
 bondconnect / bondresync (espnowHandshakeStartNow) and espnowsessionopen
 start at once and their failure is printed even after the partner has been
 away a while, that bond sensor data is dropped like the heartbeat, and that
-the pending-frame warnings carry the count they held back. The wiring that cannot run here (the
+the pending-frame warnings carry the count they held back, and that an unpair
+(espnowKeyExCancel, pendingFrameDropForPeer) stops this device's HELLO
+retries to the peer, frees that entry one retry interval later without a
+warning, lets a new key exchange start at once and drops only that peer's
+queued frames, each reported failed (finding X4, round 3). The wiring that cannot run here (the
 calls from the receive handlers, the session hook, the mesh online edge, unpair
 and the manual commands) is pinned in the source.
 
@@ -92,6 +96,8 @@ def main():
     backoff_path = path_of(BACKOFF_H)
     have_backoff = backoff_path is not None and backoff_path.exists() and \
         'bool espnowHandshakeAutoStart(' in crypto
+    have_cancel = 'void espnowKeyExCancel(const uint8_t peerMac[6])' in crypto
+    have_drop = 'uint8_t pendingFrameDropForPeer(const uint8_t peerMac[6])' in sessions
     have_start_now = have_backoff and 'bool espnowHandshakeStartNow(const uint8_t peerMac[6])' in crypto and \
         'void sessionMarkUserStarted(const uint8_t peerMac[6])' in sessions
 
@@ -110,6 +116,8 @@ def main():
                    'uint8_t pendingFrameTimeoutSweep(', 'uint8_t pendingFrameCount()',
                    'bool pendingFrameHasForPeer('):
         pending.append(definition(sessions, marker, 'Sessions'))
+    if have_drop:
+        pending.append(definition(sessions, 'uint8_t pendingFrameDropForPeer(const uint8_t peerMac[6])', 'Sessions'))
     pending.append(line(sessions, r'^static constexpr uint32_t kSessionEstablishTimeoutMs = \d+;.*$',
                         'kSessionEstablishTimeoutMs'))
     pending.append(definition(sessions, 'uint8_t sessionEstablishingTimeoutSweep(', 'Sessions'))
@@ -129,8 +137,11 @@ def main():
                   line(crypto, r'^HandshakeBackoffTable gHandshakeBackoff = \{\};', 'gHandshakeBackoff'),
                   line(crypto, r'^portMUX_TYPE gHandshakeBackoffLock = portMUX_INITIALIZER_UNLOCKED;',
                        'gHandshakeBackoffLock')]
-    keyex += [definition(crypto, 'static void keyExClearInFlight(const uint8_t peerMac[6]) ', 'Crypto'),
-              definition(crypto, 'bool keyExIsInFlight(const uint8_t peerMac[6]) ', 'Crypto'),
+    keyex += [definition(crypto, 'static void keyExClearInFlight(const uint8_t peerMac[6]) ', 'Crypto')]
+    if have_cancel:
+        keyex += [definition(crypto, 'void espnowKeyExCancel(const uint8_t peerMac[6])', 'Crypto'),
+                  definition(crypto, 'static bool keyExCancelled(const uint8_t peerMac[6]) ', 'Crypto')]
+    keyex += [definition(crypto, 'bool keyExIsInFlight(const uint8_t peerMac[6]) ', 'Crypto'),
               definition(crypto, 'void keyExRetrySweep(uint32_t nowMs)', 'Crypto')]
     if have_backoff:
         for marker in ('static bool keyExInitiate(const uint8_t peerMac[6], const char* meshLabel, bool automatic)',
@@ -220,7 +231,9 @@ def main():
         assert harness.count(tag) == 1, tag
         harness = harness.replace(tag, value)
 
-    print(f'handshake back-off: {"present" if have_backoff else "absent"}', flush=True)
+    print(f'handshake back-off: {"present" if have_backoff else "absent"}; '
+          f'unpair call-off: {"present" if have_cancel else "absent"}; '
+          f'pending drop: {"present" if have_drop else "absent"}', flush=True)
     with tempfile.TemporaryDirectory(prefix='hw1-espnow-hs-backoff-') as tmp:
         unit, exe = Path(tmp) / 'espnow_handshake_backoff.cpp', Path(tmp) / 'espnow_handshake_backoff'
         unit.write_text(harness)
@@ -234,6 +247,8 @@ def main():
                '-Wno-unused-function', '-Wno-unused-parameter', '-Wno-unused-const-variable',
                f'-DHW1_HAVE_BACKOFF={1 if have_backoff else 0}',
                f'-DHW1_HAVE_START_NOW={1 if have_start_now else 0}',
+               f'-DHW1_HAVE_CANCEL={1 if have_cancel else 0}',
+               f'-DHW1_HAVE_PENDING_DROP={1 if have_drop else 0}',
                '-I', tmp, str(unit), '-o', str(exe)]
         if a.sanitize:
             cmd[1:1] = ['-fsanitize=address,undefined', '-fno-sanitize-recover=undefined',
