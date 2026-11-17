@@ -211,6 +211,7 @@ bool keyExHelloAdmit(const uint8_t mac[6], uint16_t meshFp, uint32_t nowMs) {
 // the handshake resolves. Forward-declared here so the REPLY/CONFIRM handlers
 // (above the table definition) can call it; defined alongside the table below.
 static void keyExClearInFlight(const uint8_t peerMac[6]);
+static bool keyExCancelled(const uint8_t peerMac[6]);
 
 // Build + send a KEY_EX_CONFIRM to peerMac with the given status
 // (0=ok, 1=hmac-fail, 2=pub-conflict). CONFIRM carries no HMAC — the prior
@@ -395,6 +396,14 @@ void v4hKeyExReply(const V4RxCtx& ctx) {
   if (meshSlot < 0) {
     WARN_ESPNOWF("KEY_EX_REPLY rejected (reason=%d) from " MAC_FMT,
                  meshSlot,
+                 MAC_ARGS(msg->responderMac));
+    return;
+  }
+
+  // The peer was unpaired while our HELLO was out (espnowKeyExCancel): its
+  // answer must not bring the identity back.
+  if (keyExCancelled(msg->responderMac)) {
+    INFO_ESPNOWF("KEY_EX_REPLY from " MAC_FMT " ignored: that key exchange was called off (unpaired)",
                  MAC_ARGS(msg->responderMac));
     return;
   }
@@ -609,6 +618,7 @@ struct KeyExInFlight {
   uint8_t  retriesLeft;
   uint32_t lastSentMs;
   bool     automatic;    // not asked for by a user: give-up warning is rate-limited
+  bool     cancelled;    // called off by an unpair: no retry, its REPLY is ignored
 };
 
 // Tiny table (4 × ~16 B). Registered on cmd_exec (espnowKeyExInitiate via the
@@ -634,6 +644,7 @@ void keyExInFlightArm(const uint8_t peerMac[6], int slot, bool automatic) {
   e->retriesLeft  = kKeyExMaxRetries;
   e->lastSentMs   = (uint32_t)millis();
   e->automatic    = automatic;
+  e->cancelled    = false;  // a new exchange replaces one that was called off
   e->inUse        = true;   // publish last
 }
 
@@ -656,11 +667,27 @@ static void keyExClearInFlight(const uint8_t peerMac[6]) {
     if (k.inUse && memcmp(k.peerMac, peerMac, 6) == 0) { k.inUse = false; return; }
 }
 
+// Unpair (cmd_exec): the entry stays, marked, until one retry interval after
+// its last HELLO, so a REPLY to that HELLO is still recognised and ignored.
+// Single-bool write, read by the sweep and the REPLY handler on espnow_task.
+void espnowKeyExCancel(const uint8_t peerMac[6]) {
+  if (!peerMac) return;
+  for (auto& k : gKeyExInFlight)
+    if (k.inUse && memcmp(k.peerMac, peerMac, 6) == 0) { k.cancelled = true; return; }
+}
+
+static bool keyExCancelled(const uint8_t peerMac[6]) {
+  for (auto& k : gKeyExInFlight)
+    if (k.inUse && k.cancelled && memcmp(k.peerMac, peerMac, 6) == 0) return true;
+  return false;
+}
+
 // Public accessor — see header for contract.
+// One called off by an unpair does not count: a new start replaces it.
 bool keyExIsInFlight(const uint8_t peerMac[6]) {
   if (!peerMac) return false;
   for (auto& k : gKeyExInFlight)
-    if (k.inUse && memcmp(k.peerMac, peerMac, 6) == 0) return true;
+    if (k.inUse && !k.cancelled && memcmp(k.peerMac, peerMac, 6) == 0) return true;
   return false;
 }
 
@@ -668,6 +695,10 @@ void keyExRetrySweep(uint32_t nowMs) {
   for (auto& k : gKeyExInFlight) {
     if (!k.inUse) continue;
     if ((uint32_t)(nowMs - k.lastSentMs) < kKeyExRetryMs) continue;
+    if (k.cancelled) {   // unpaired: nothing is re-sent, and the last HELLO had its interval
+      k.inUse = false;
+      continue;
+    }
     if (k.retriesLeft == 0) {
       uint32_t held = 0;
       if (!k.automatic) {

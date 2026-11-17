@@ -90,7 +90,8 @@ class EspNowRuntimeOpGuard {
  public:
   bool held() const { return true; }
 };
-static void sendStatusMarkFailed(uint32_t, const uint8_t*) {}
+static int gMarkedFailed = 0;
+static void sendStatusMarkFailed(uint32_t, const uint8_t*) { ++gMarkedFailed; }
 
 struct EspNowState { bool initialized = true; };
 static EspNowState gState;
@@ -138,6 +139,7 @@ static bool gPeerPresent = false;
 struct Event { uint32_t atMs; int kind; uint8_t mac[6]; };   // 0 = KEY_EX_REPLY, 1 = SESSION_CONFIRM
 static std::vector<Event> gEvents;
 static int gHellos = 0;
+static int gPartnerHellos = 0;
 static int gSessionOpens = 0;
 static int gSessionsUp = 0;
 static uint32_t gLastSessionUpMs = 0;
@@ -145,6 +147,7 @@ static uint32_t gLastSessionUpMs = 0;
 static int resolveMeshSlot(const char*) { return 0; }
 static bool keyExSendHello(const uint8_t peerMac[6], int) {
   ++gHellos;
+  if (std::memcmp(peerMac, kPartner, 6) == 0) ++gPartnerHellos;
   if (gPeerPresent && std::memcmp(peerMac, kPartner, 6) == 0) {
     Event e{gNowMs + 100, 0, {}};
     std::memcpy(e.mac, peerMac, 6);
@@ -227,6 +230,14 @@ void sessionMarkUserStarted(const uint8_t peerMac[6]);
 // INSERT_KEYEX
 
 // INSERT_SEND
+
+// A tree without the unpair call-off: the unpair did nothing of the kind.
+#if !HW1_HAVE_CANCEL
+static void espnowKeyExCancel(const uint8_t*) {}
+#endif
+#if !HW1_HAVE_PENDING_DROP
+static uint8_t pendingFrameDropForPeer(const uint8_t*) { return 0; }
+#endif
 
 namespace espnowtx {
 static bool submit(const Job& job) {
@@ -315,7 +326,8 @@ static void resetWorld() {
   gHeardEveryMs = 0;
   gPeerPresent = false;
   gEvents.clear();
-  gHellos = gSessionOpens = gSessionsUp = 0;
+  gHellos = gPartnerHellos = gSessionOpens = gSessionsUp = 0;
+  gMarkedFailed = 0;
   gLastSessionUpMs = 0;
   gDelivered.clear();
   gMaxPending = 0;
@@ -654,6 +666,51 @@ static void casePendingWarnings() {
   CHECK(carries, "the next timeout warning does not carry the 3 held back");
 }
 
+// Unpair (finding X4, round 3): cmd_espnow_unpair calls off the key exchange
+// this device started with the peer and drops the frames queued for its
+// session before it forgets the identity. A HELLO retry would otherwise bring
+// the identity back after the unpair. No heartbeats run here: the bond with
+// the peer ended first.
+static void caseUnpairCallsOff() {
+  resetWorld();
+  const uint8_t other[6] = {0x02, 0x11, 0x22, 0x33, 0x44, 0x05};
+  gNextHeartbeatMs = gNowMs + 0x40000000u;   // no heartbeats
+  v4_send_encrypted_or_queue(kPartner, 1, 0, ++gMsgId, nullptr, 0, 1, nullptr, 0);
+  v4_send_encrypted_or_queue(other, 1, 0, ++gMsgId, nullptr, 0, 1, nullptr, 0);
+  CHECK(keyExIsInFlight(kPartner) && pendingFrameHasForPeer(kPartner) && pendingFrameHasForPeer(other) &&
+        gPartnerHellos == 1, "setup: a key exchange and a queued frame for the partner and another peer");
+  const size_t w0 = gWarnLines.size();
+  espnowKeyExCancel(kPartner);
+  const uint8_t dropped = pendingFrameDropForPeer(kPartner);
+  CHECK(dropped == 1 && !pendingFrameHasForPeer(kPartner) && pendingFrameHasForPeer(other) && gMarkedFailed == 1,
+        "X4 unpair: the partner's queued frame was not dropped and reported failed alone "
+        "(dropped %u, failed %d)", (unsigned)dropped, gMarkedFailed);
+  CHECK(!keyExIsInFlight(kPartner), "X4 a key exchange called off by an unpair still counts as in flight");
+  runFor(1600);
+  CHECK(gPartnerHellos == 1, "X4 the HELLO to the unpaired peer was re-sent %d times", gPartnerHellos - 1);
+  bool entryLeft = false;
+  for (const auto& k : gKeyExInFlight) entryLeft = entryLeft || (k.inUse && std::memcmp(k.peerMac, kPartner, 6) == 0);
+  CHECK(!entryLeft, "X4 the called-off key exchange still holds its table entry one retry interval later");
+  runFor(6000);
+  CHECK(gPartnerHellos == 1 && warnsSince(w0, "KEY_EX: no REPLY") == 1,
+        "X4 after the unpair: %d HELLO retries to the peer and %zu give-up warnings (want 0 and 1, the other peer's)",
+        gPartnerHellos - 1, warnsSince(w0, "KEY_EX: no REPLY"));
+  // A new key exchange right after the unpair (pairing again) starts at once
+  // and is retried as usual.
+  resetWorld();
+  gNextHeartbeatMs = gNowMs + 0x40000000u;   // no heartbeats
+  espnowKeyExInitiate(kPartner, nullptr);
+  espnowKeyExCancel(kPartner);
+  CHECK(espnowKeyExInitiate(kPartner, nullptr) && keyExIsInFlight(kPartner) && gPartnerHellos == 2,
+        "a key exchange started after an unpair did not start at once");
+  runFor(1600);
+  CHECK(gPartnerHellos == 3, "a key exchange started after an unpair is not retried (%d HELLOs)", gPartnerHellos);
+  // Nothing to call off: no effect.
+  resetWorld();
+  espnowKeyExCancel(kPartner);
+  CHECK(pendingFrameDropForPeer(kPartner) == 0 && gMarkedFailed == 0, "calling off nothing changed something");
+}
+
 int main() {
   caseSchedule();
   caseTableAndHeard();
@@ -665,6 +722,7 @@ int main() {
   casePendingWarnings();
   caseSensorDataDropped();
   caseUserStartsReported();
+  caseUnpairCallsOff();
   std::printf("espnow_handshake_backoff: %d checks, %d failed\n", gChecks, gFailures);
   return gFailures ? 1 : 0;
 }

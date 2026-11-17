@@ -27,7 +27,13 @@ drops the manifest after, and puts the line in its reply; cmd_espnow_forget
 removes neither; the bond sync records the reference for a manifest that reached
 the cache and looks cached manifests up only through manifestCacheHit, which
 records one it finds; the unpair reply's identity flag comes from what
-peerIdentityForget removed.
+peerIdentityForget removed; an unpair of the bond partner (the partner setting
+itself, not isBondPeerMac, which answers false during a partner change) ends
+the bond before the peer is deleted, and the unpair calls off this device's
+key exchange with the peer and the frames queued for it before the identity
+and the folder go, so nothing under way brings them back (finding X4, round
+3; test_espnow_bond_partner_change runs the bond side, test_espnow_handshake_
+backoff and test_espnow_keyex_hello the calls).
 
 --source-dir <directory> reads the sources from another tree; a tree without
 one of the pieces compiles with a stand-in for it that does what its unpair
@@ -145,6 +151,16 @@ def main():
         (re.search(r'espnowForgetPeerCrypto\(mac, &hadIdentity\)', unpair) is not None and
          re.search(r'=\s*peerIdentityForget\(mac\);[^}]*\*removedAny = had \|\| forgot;', forget_crypto) is not None,
          'the unpair reply reports an identity file removed outside the cache as a removed identity'),
+        (re.search(r'parseMacAddress\(gSettings\.bondPeerMac, bondPartner\) && macEquals\(bondPartner, mac\)\)'
+                   r'\s*\{[^}]*bondEndPartnership\(\);', unpair) is not None and
+         0 <= at(unpair, 'bondEndPartnership();') < at(unpair, 'espnowDeletePeerRuntime(mac)') and
+         'isBondPeerMac(' not in unpair,
+         'cmd_espnow_unpair ends the bond first when the partner setting names the device'),
+        (0 <= at(unpair, 'espnowKeyExCancel(mac);') < at(unpair, 'espnowForgetPeerCrypto(mac') and
+         0 <= at(unpair, 'pendingFrameDropForPeer(mac);') < at(unpair, 'espnowForgetPeerCrypto(mac') and
+         at(forget, 'espnowKeyExCancel(') < 0,
+         'cmd_espnow_unpair calls off its key exchange with the peer and the frames queued for it before the '
+         'identity goes (espnowforget does not: the next key exchange is wanted there)'),
     )
     for ok, what in checks:
         if not ok:

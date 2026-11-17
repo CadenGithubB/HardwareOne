@@ -398,6 +398,46 @@ everything user-visible since the v0.99.99.1 tag.
   Clear passphrase, and its clear dialog says the same as the reply for that slot instead of one text for all
   meshes. Host-tested; not yet tested on hardware.
 
+- ESP-NOW start: a start that failed after the radio came up put the new default mesh `primary` back
+  only in memory, so a settings file written by another task during the start could bring it back at the
+  next boot, and the undo also blanked a slot 0 that a web command had renamed or given a passphrase in
+  that time (the boot autostart runs while the web server is up). The undo now happens only while the
+  meshes are exactly as the start left them, and it writes the settings again. Host-tested; not yet tested
+  on hardware.
+- ESP-NOW mesh passphrase: a disabled mesh in slot 0 still supplied the device passphrase, so after
+  `espnowmeshes remove primary` and `espnowmeshes add lab` the device counted as keyed: `espnowpairsecure`
+  passed its check into a mesh with no keys, and plaintext heartbeats of the new default mesh were dropped.
+  Slot 0's passphrase is now used only while its mesh is enabled, and the start-up warning, the mesh
+  replies, `espnowmeshes listjson` and the web page say the same. The start-up warning no longer claims
+  that encrypted frames from peers fail to decrypt; it says sending and pairing are refused. Clearing slot
+  0's passphrase (`espnowsetpassphrase <mesh> clear`, or Clear passphrase on the web page) now follows
+  `espnowmeshes remove`: it is refused while that mesh is the default and another mesh is enabled, and
+  otherwise the mesh is disabled and is no longer the default; the web page greys the button out in the
+  refused case. An ESP-NOW whose stop was left pending no longer keeps the passphrase of a mesh deleted
+  or changed afterwards. The web mesh actions no longer act on another mesh when a mesh label contains
+  text the browser reads as an HTML character reference (for example `&amp;` or `&lt;`); a label with a
+  plain `&`, such as `a&b`, already worked. Host-tested; not yet tested on hardware.
+- ESP-NOW: unpairing the bond partner (`espnowunpair`, and the OLED and G2 peer pages, which run it without
+  `bonddisconnect`) left bond mode naming it, so within seconds the bond heartbeat key-exchanged it again:
+  the identity and peer folder the reply had just reported removed came back and a session opened with the
+  unpaired device. `espnowunpair` now ends the bond first, as `bonddisconnect` does, with the same offline
+  event and a line in the reply; a partner set while bond mode is off is cleared too. A key exchange this
+  device had started with the peer is called off (its HELLO is not re-sent and an answer to it is ignored)
+  and frames waiting for its session are dropped, as is a bond file answer (manifest, settings, schema)
+  still queued for it, so nothing already under way brings it back. A device
+  that still has this one paired can still key-exchange with it; unpair on both. Host-tested; not yet
+  tested on hardware.
+- Bond mode: while `bondconnect` or another partner change was switching partner, the bond sync tick could
+  still run with the new partner's address and the old partner's sync state. It could record the old
+  partner's command manifest as used by the new one (so that manifest stayed after unpairing the old
+  partner), send capability, manifest or status requests to the new partner from the old flags, send a
+  heartbeat with the old role, or time the partner out and clear the new partner's session. Heartbeats, the
+  heartbeat timeout, the sync requests, the answers to the partner's requests and the status answer, push
+  and poll now wait while a partner change holds bond frames off, also when the change runs while the
+  tick is waiting (between stream commands, or for the file system in the manifest lookup); a status
+  request the old partner made just before the change is no longer answered after it. Host-tested; not
+  yet tested on hardware.
+
 ### Changed
 - OLED feedback is one shared message box. It replaces the animated status ribbon, the error boxes
   that the login, password, Settings editor and Health screens drew themselves, and the results

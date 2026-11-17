@@ -128,12 +128,26 @@ static bool writePeerIdentityFile(const PeerIdentity& p) {
   return true;
 }
 
+// What the KEY_EX_REPLY handler calls after it stored the identity: no
+// session and nothing queued here, so it sends its CONFIRM and stops.
+static void espnowHandshakeBackoffClear(const uint8_t*) {}
+enum : uint8_t { SESSION_FREE = 0, SESSION_ACTIVE = 2 };
+struct SessionState { uint8_t state; };
+static const SessionState* sessionFindByPeer(const uint8_t*, uint8_t) { return nullptr; }
+static void pendingFrameDrainForPeer(const uint8_t*) {}
+static bool pendingFrameHasForPeer(const uint8_t*) { return false; }
+static bool espnowSessionOpenInitiate(const uint8_t*, const char*, bool* = nullptr) { return true; }
+
 // ---- Production: Identity.cpp peer cache + peerIdentityPersist ---------------
 // INSERT_IDENTITY
 
 // ---- Production: Handlers_Crypto.cpp KEY_EX_HELLO path -------------------------
 // INSERT_KEYEX
 #undef time
+// A tree without the unpair call-off: the unpair did nothing to the key exchange.
+#ifndef HW1_HAS_KEYEX_CANCEL
+static void espnowKeyExCancel(const uint8_t*) {}
+#endif
 
 // ---- Test driver ------------------------------------------------------------------
 // The interval the cases are written for; tied to the production constant
@@ -201,6 +215,28 @@ static bool storedKeyIs(const Peer& p, uint8_t k) {
   return true;
 }
 
+// Deliver a KEY_EX_REPLY from `p` (the answer to our HELLO) on mesh `mesh`.
+static void replyFrom(const Peer& p, unsigned mesh = 0) {
+  V4PayloadKeyExReply msg{};
+  msg.meshFingerprint = gSettings.meshes[mesh].fingerprint;
+  std::memcpy(msg.responderMac, p.mac, 6);
+  std::memcpy(msg.responderPubEd25519, p.pub, 32);
+  computeKeyExHmac(msg.meshFingerprint, msg.responderMac, msg.responderPubEd25519,
+                   gMeshKeys[mesh].bootstrapKey, msg.hmac);
+  EspNowV4Header h{};
+  h.type = ESPNOW_V4_TYPE_KEY_EX_REPLY;
+  h.flags = ESPNOW_V4_FLAG_HANDSHAKE | ESPNOW_V4_FLAG_ACK_REQ;
+  h.msgId = generateMessageId();
+  std::memcpy(h.origin, p.mac, 6);
+  esp_now_recv_info ri{p.mac, kSelfMac};
+  V4RxCtx ctx{};
+  ctx.recv_info = &ri;
+  ctx.h = &h;
+  ctx.payload = reinterpret_cast<const uint8_t*>(&msg);
+  ctx.payloadLen = sizeof msg;
+  v4hKeyExReply(ctx);
+}
+
 // Empty peer cache, limiter, outbox, log and counters; the clock moves on.
 static void reset() {
   for (auto& p : gPeerIdentities) p = PeerIdentity{};
@@ -214,6 +250,7 @@ static void reset() {
   gWindowOpen = false;
   gWindowUses = 0;
   gEvents = 0;
+  for (auto& k : gKeyExInFlight) k = KeyExInFlight{};
   gNowMs += 100000;
   gNowSec += 100000;
 }
@@ -393,6 +430,28 @@ int main() {
   gNowMs += 30;
   hello(a, 1);
   check(replies() == 2 && gWrites == 2, "K12 a copy of the second one inside the interval is still dropped");
+
+  // K13 — finding X4 (round 3): a REPLY to a key exchange that an unpair
+  // called off stores nothing, so the unpaired peer's identity (and its
+  // folder) does not come back; a new key exchange after it works as before.
+  reset();
+  const Peer b = peer(7, 0xB7);
+  keyExInFlightArm(b.mac, 0, true);           // our automatic HELLO went out
+  replyFrom(b);
+  check(gWrites == 1 && storedKeyIs(b, 0xB7) && confirms() == 1,
+        "K13 a REPLY to our HELLO is stored and confirmed (preserved)");
+  reset();
+  keyExInFlightArm(b.mac, 0, true);           // HELLO out, then the user unpairs b
+  espnowKeyExCancel(b.mac);
+  replyFrom(b);
+  check(gWrites == 0 && peerIdentityFindByMac(b.mac) == nullptr && confirms() == 0,
+        "K13 a REPLY to a key exchange an unpair called off stores nothing (FAILS ON BASE: the identity is back)");
+  gNowMs += 50;
+  const unsigned confirmsBefore = confirms();
+  keyExInFlightArm(b.mac, 0, false);          // the user pairs b again (espnowkeyex)
+  replyFrom(b);
+  check(storedKeyIs(b, 0xB7) && confirms() == confirmsBefore + 1,
+        "K13 a new key exchange after the unpair is stored and confirmed as usual");
 
   std::printf("%u failure(s)\n", gFailures);
   return gFailures ? 1 : 0;

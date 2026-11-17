@@ -58,6 +58,12 @@ void keyExRetrySweep(uint32_t nowMs);
 // handshake has resolved (succeed → identity present; fail → identity absent).
 bool keyExIsInFlight(const uint8_t peerMac[6]);
 
+// Unpair: calls off the key exchange this device started with `peerMac`, if
+// any. Its HELLO is not re-sent and a REPLY to one already sent is ignored, so
+// the peer's identity does not come back. A new key exchange with the peer
+// (espnowkeyex, pairing) replaces it. cmd_exec.
+void espnowKeyExCancel(const uint8_t peerMac[6]);
+
 // ---- Back-off for automatic handshake starts (System_ESPNow_HandshakeBackoff.h)
 
 // The key exchange a user asked for (espnowkeyex, espnowprobe,

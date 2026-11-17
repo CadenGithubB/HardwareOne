@@ -6,10 +6,12 @@ System_ESPNow.cpp, meshFingerprintForLabel, recomputeAllMeshFingerprints,
 initPrimaryMeshFromLegacySettings and the PrimaryMeshBootstrap guard, and runs
 start attempts against a Settings double (compiled once with
 ENABLE_BONDED_MODE 1 and once with 0): a start that fails leaves slot 0 empty
-(no "primary", flags and bond fields as before, a passphrase it held kept, a
-key stretched under "primary" during the start dropped), a start that succeeds
-creates the enabled default "primary", and a configured or deliberately
-emptied slot 0 is never touched.
+(no "primary", flags and bond fields as before, a passphrase and key it held
+kept) and writes the settings again, a start that succeeds creates the enabled
+default "primary" and writes nothing, a configured or deliberately emptied slot
+0 is never touched, and a command that changed the meshes while the start was
+under way (rename, passphrase, key, add, remove, bond) is kept, with nothing
+written.
 
 Source part (initEspNow needs the radio, so its order is pinned in the source):
 the "already running" answer and the device-name check come before the first

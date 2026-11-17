@@ -5,9 +5,11 @@
 // initPrimaryMeshFromLegacySettings and (when the tree has it) the
 // PrimaryMeshBootstrap guard at the production marker. ENABLE_BONDED_MODE comes
 // from the command line (compiled once per value). A "start" here is what
-// initEspNow does with slot 0: construct the guard, then keep it on success or
-// drop it on failure. On a tree without the guard the start runs the bootstrap
-// the way initEspNow did before the fix (and never undoes it).
+// initEspNow does with slot 0: construct the guard, let a command run while the
+// start is under way (boot autostart runs in setup beside cmd_exec), then keep
+// the guard on success or drop it on failure. On a tree without the guard the
+// start runs the bootstrap the way initEspNow did before the fix (and never
+// undoes it). requestSettingsPersist counts the settings writes.
 #include <Arduino.h>
 
 #include <cstddef>
@@ -54,6 +56,14 @@ struct Settings {
 };
 static Settings gSettings;
 
+// Settings writes requested (the production call writes the whole file).
+static int gPersists = 0;
+static bool requestSettingsPersist() {
+  ++gPersists;
+  return true;
+}
+static void sodium_memzero(void* p, size_t n) { std::memset(p, 0, n); }
+
 // CRC16-CCITT (0xFFFF start), as System_ESPNow_Wire.
 static uint16_t v4_crc16_ccitt(const uint8_t* data, size_t len) {
   uint16_t crc = 0xFFFF;
@@ -66,7 +76,10 @@ static uint16_t v4_crc16_ccitt(const uint8_t* data, size_t len) {
 
 // INSERT_PRODUCTION
 
-static void resetSettings() { gSettings = Settings(); }
+static void resetSettings() {
+  gSettings = Settings();
+  gPersists = 0;
+}
 
 static bool same(const String& a, const char* b) { return std::strcmp(a.c_str(), b) == 0; }
 
@@ -81,20 +94,60 @@ static void stretchSlot0() {
   gSettings.meshes[0].passphraseStretchedKeyValid = true;
 }
 
-// One start attempt as initEspNow runs it for slot 0.
+// One start attempt as initEspNow runs it for slot 0; `during` stands for a
+// command that runs on cmd_exec while the start is under way.
+using During = void (*)();
 #if HW1_HAVE_BOOTSTRAP
-static void startAttempt(bool succeeds, bool stretch = false) {
+static void startAttempt(bool succeeds, bool stretch = false, During during = nullptr) {
   PrimaryMeshBootstrap bootstrap;
   if (stretch) stretchSlot0();
+  if (during) during();
   if (succeeds) bootstrap.keep();
 }
 #else
-static void startAttempt(bool, bool stretch = false) {
+static void startAttempt(bool, bool stretch = false, During during = nullptr) {
   initPrimaryMeshFromLegacySettings();
   recomputeAllMeshFingerprints();
   if (stretch) stretchSlot0();
+  if (during) during();
 }
 #endif
+
+// Commands a user can run during the start (what each does to the settings).
+static void renamePrimaryToHome() {
+  gSettings.meshes[0].label = "home";
+  gSettings.meshes[0].fingerprint = meshFingerprintForLabel(String("home"));
+  gSettings.meshes[0].passphraseStretchedKeyValid = false;
+}
+static void setPrimaryPassphrase() {
+  gSettings.meshes[0].passphrase = "pw-during";
+  gSettings.meshes[0].passphraseStretchedKey[0] = 0x77;
+  gSettings.meshes[0].passphraseStretchedKeyValid = true;
+}
+// A passphrase whose key stretch failed: the key stays zeroed and invalid, as
+// the bootstrap left it, so only the passphrase text differs.
+static void setPrimaryPassphraseStretchFailed() {
+  gSettings.meshes[0].passphrase = "pw-nokey";
+}
+static void addLabInSlot1() {
+  gSettings.meshes[1].label = "lab";
+  gSettings.meshes[1].fingerprint = meshFingerprintForLabel(String("lab"));
+  gSettings.meshes[1].enabled = true;
+}
+static void disablePrimary() {
+  gSettings.meshes[0].enabled = false;
+  gSettings.meshes[0].isDefault = false;
+}
+#if ENABLE_BONDED_MODE
+static void bondOnPrimary() {
+  gSettings.bondModeEnabledMesh[0] = true;
+  gSettings.bondRoleMesh[0] = 2;
+}
+#endif
+static bool primaryAsMade() {
+  const Settings::MeshIdentity& m0 = gSettings.meshes[0];
+  return same(m0.label, "primary") && m0.enabled && m0.isDefault && m0.fingerprint == fp("primary");
+}
 
 static bool slot0Empty() {
   const Settings::MeshIdentity& m0 = gSettings.meshes[0];
@@ -163,24 +216,82 @@ int main() {
   CHECK(same(gSettings.meshes[0].label, "primary") && same(gSettings.meshes[0].passphrase, "pw-early"),
         "S6 good start: slot 0 '%s'", gSettings.meshes[0].label.c_str());
 
-  // S8: a key stretched during a failed start (salted with "primary") is
-  // dropped; one that was there before the start is kept, and a good start
-  // keeps the one it stretched.
+  // S8: a key stretched during the start for slot 0's passphrase can only come
+  // from a command (the start stretches nothing), so slot 0 then stays as it is.
+  // A key that was there before the start is kept by the undo.
   resetSettings();
   gSettings.meshes[0].passphrase = "pw-early";
   startAttempt(false, true);
-  CHECK(slot0Empty() && !gSettings.meshes[0].passphraseStretchedKeyValid &&
-        gSettings.meshes[0].passphraseStretchedKey[0] == 0, "S8 failed start kept a key salted with primary");
+  CHECK(same(gSettings.meshes[0].label, "primary") && gSettings.meshes[0].passphraseStretchedKeyValid &&
+            gSettings.meshes[0].passphraseStretchedKey[0] == 0xAB,
+        "S8 a key stretched by a command during the start was undone");
+  resetSettings();
+  gSettings.meshes[0].passphrase = "pw-early";
   gSettings.meshes[0].passphraseStretchedKey[0] = 0xCD;
   gSettings.meshes[0].passphraseStretchedKeyValid = true;
   startAttempt(false);
-  CHECK(gSettings.meshes[0].passphraseStretchedKeyValid && gSettings.meshes[0].passphraseStretchedKey[0] == 0xCD,
-        "S8 failed start dropped a key it did not make");
+  CHECK(slot0Empty() && gSettings.meshes[0].passphraseStretchedKeyValid &&
+            gSettings.meshes[0].passphraseStretchedKey[0] == 0xCD,
+        "S8 failed start dropped a key it did not make, or kept primary");
   resetSettings();
   gSettings.meshes[0].passphrase = "pw-early";
   startAttempt(true, true);
   CHECK(gSettings.meshes[0].passphraseStretchedKeyValid && gSettings.meshes[0].passphraseStretchedKey[0] == 0xAB,
         "S8 good start dropped its key");
+
+  // S9: an undo writes the settings, so a file another task wrote during the
+  // start (with "primary" in it) does not bring "primary" back at the next boot.
+  // Nothing is written when there is nothing to undo.
+  resetSettings();
+  startAttempt(false);
+  CHECK(slot0Empty() && gPersists == 1, "S9 a failed start undid slot 0 without writing the settings (%d writes)",
+        gPersists);
+  resetSettings();
+  startAttempt(true);
+  CHECK(gPersists == 0, "S9 a good start wrote the settings (%d writes)", gPersists);
+  resetSettings();
+  gSettings.meshes[0].label = "work";
+  gSettings.meshes[0].enabled = true;
+  gSettings.meshes[0].isDefault = true;
+  startAttempt(false);
+  CHECK(gPersists == 0, "S9 a failed start with a configured slot 0 wrote the settings (%d writes)", gPersists);
+
+  // S10: a command that changed the meshes during a failed start is kept; the
+  // undo leaves slot 0 alone and writes nothing.
+  resetSettings();
+  startAttempt(false, false, renamePrimaryToHome);
+  CHECK(same(gSettings.meshes[0].label, "home") && gSettings.meshes[0].enabled && gSettings.meshes[0].isDefault &&
+            gSettings.meshes[0].fingerprint == fp("home") && gPersists == 0,
+        "S10 a rename during the start was undone: slot 0 '%s' enabled=%d default=%d",
+        gSettings.meshes[0].label.c_str(), (int)gSettings.meshes[0].enabled, (int)gSettings.meshes[0].isDefault);
+  resetSettings();
+  startAttempt(false, false, setPrimaryPassphrase);
+  CHECK(primaryAsMade() && same(gSettings.meshes[0].passphrase, "pw-during") &&
+            gSettings.meshes[0].passphraseStretchedKeyValid && gPersists == 0,
+        "S10 a passphrase set during the start was left on an unlabelled slot 0 ('%s')",
+        gSettings.meshes[0].label.c_str());
+  resetSettings();
+  startAttempt(false, false, setPrimaryPassphraseStretchFailed);
+  CHECK(primaryAsMade() && same(gSettings.meshes[0].passphrase, "pw-nokey") &&
+            !gSettings.meshes[0].passphraseStretchedKeyValid && gPersists == 0,
+        "S10 a passphrase set during the start (key stretch failed) was left on an unlabelled slot 0 ('%s')",
+        gSettings.meshes[0].label.c_str());
+  resetSettings();
+  startAttempt(false, false, addLabInSlot1);
+  CHECK(primaryAsMade() && same(gSettings.meshes[1].label, "lab") && gPersists == 0,
+        "S10 a mesh added during the start was left without a default (slot 0 '%s')",
+        gSettings.meshes[0].label.c_str());
+  resetSettings();
+  startAttempt(false, false, disablePrimary);
+  CHECK(same(gSettings.meshes[0].label, "primary") && !gSettings.meshes[0].enabled &&
+            !gSettings.meshes[0].isDefault && gPersists == 0,
+        "S10 'remove primary' during the start was undone");
+#if ENABLE_BONDED_MODE
+  resetSettings();
+  startAttempt(false, false, bondOnPrimary);
+  CHECK(primaryAsMade() && gSettings.bondModeEnabledMesh[0] && gSettings.bondRoleMesh[0] == 2 && gPersists == 0,
+        "S10 a bond change on slot 0 during the start was undone");
+#endif
 
 #if ENABLE_BONDED_MODE
   // S7: the bootstrap copies the legacy bond fields into slot 0; a failed start

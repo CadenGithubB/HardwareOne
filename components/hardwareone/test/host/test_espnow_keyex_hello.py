@@ -10,6 +10,13 @@ act on at most one verified HELLO per sender MAC per interval, while a first
 HELLO, the initiator's own retry and a HELLO with a changed key are handled as
 before. A failed file write must leave the identity cache equal to the file.
 
+The KEY_EX_REPLY handler (v4hKeyExReply) is compiled too, with the KEY_EX
+in-flight table it reads: a REPLY to a key exchange this device started is
+stored and confirmed as before, and one that answers a key exchange an unpair
+called off (espnowKeyExCancel) stores nothing, so the unpaired peer's identity
+does not come back (finding X4, round 3); a new key exchange after the unpair
+is answered and stored again.
+
 Compiled: v4hKeyExHello with its HMAC check, rate limit and CONFIRM builder
 from System_ESPNow_Handlers_Crypto.cpp, and the peer cache with
 peerIdentityPersist from System_ESPNow_Identity.cpp, spliced into
@@ -124,6 +131,18 @@ def build_keyex(crypto):
                   one(crypto, 'bool keyExHelloAdmit(', name)]
     parts.append(one(crypto, 'static void sendKeyExConfirm(', name))
     parts.append(one(crypto, 'void v4hKeyExHello(const V4RxCtx& ctx)', name))
+    # The in-flight table the REPLY handler reads, then the handler.
+    parts += [line(crypto, r'^constexpr uint8_t\s+kKeyExInFlightSlots\s*=.*;', 'kKeyExInFlightSlots'),
+              line(crypto, r'^constexpr uint8_t\s+kKeyExMaxRetries\s*=.*;', 'kKeyExMaxRetries'),
+              one(crypto, 'struct KeyExInFlight', name) + ';',
+              line(crypto, r'^KeyExInFlight gKeyExInFlight\[kKeyExInFlightSlots\] = \{\};', 'gKeyExInFlight'),
+              one(crypto, 'void keyExInFlightArm(', name),
+              one(crypto, 'static void keyExClearInFlight(const uint8_t peerMac[6]) ', name)]
+    if 'void espnowKeyExCancel(const uint8_t peerMac[6])' in crypto:
+        parts += ['#define HW1_HAS_KEYEX_CANCEL 1',
+                  one(crypto, 'void espnowKeyExCancel(const uint8_t peerMac[6])', name),
+                  one(crypto, 'static bool keyExCancelled(const uint8_t peerMac[6]) ', name)]
+    parts.append(one(crypto, 'void v4hKeyExReply(const V4RxCtx& ctx)', name))
     return '\n\n'.join(parts)
 
 

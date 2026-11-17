@@ -16,10 +16,20 @@
 // isBondPeerMac, which is what the receive table asks for bond opcodes), the
 // worker's tick stages 9b (answer CAP_REQ, mark bondCapSent) and 9e (answer
 // SETTINGS_REQ, mark bondSettingsSent), and a model of the master's sync tick.
+//
+// At INSERT_TICKS the runner pastes the bond parts of processMeshHeartbeats as
+// hbTickProduction (heartbeat send and timeout) and syncTickProduction (the
+// sync tick to the streaming setup), with doubles below for what they call;
+// cmd_espnow_unpair is pasted with the commands, with doubles for its registry
+// and file steps that record their order. The sync tick slice ends with the
+// status steps 9j, 9j2 and 9k; runDeferredBondFileSend runs the jobs the tick
+// queued (gCmdExecQ) with sender doubles; gTickWait runs a command where a
+// step of the tick waits.
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <string>
@@ -141,6 +151,11 @@ static const char* handleSettingCommand(const SettingEntry* entry, const String&
 
 struct EspNowState {
   bool initialized = true;
+  uint32_t bondPeerBootCounter = 0;
+  uint32_t bondHeartbeatsSent = 0;
+  uint32_t bondHeartbeatsReceived = 0;
+  uint32_t bondLocalSettingsHash = 0;
+  bool bondNeedsStreamingSetup = false;
   BondSyncRequestType bondSyncInFlight = BOND_SYNC_NONE;
   uint8_t bondSyncRetryCount = 0;
   uint32_t bondSyncLastAttemptMs = 0;
@@ -162,6 +177,7 @@ struct EspNowState {
   bool bondNeedsProactiveStatus = false;
   bool bondStatusReqSentOnce = false;
   bool bondNeedsStatusResponse = false;
+  unsigned long bondLastStatusReqMs = 0;
   bool bondPeerOnline = false;
   uint32_t lastBondHeartbeatReceivedMs = 0;
   uint8_t bondPendingResponseMac[6] = {};
@@ -203,8 +219,20 @@ static String getEspNowDeviceName(const uint8_t*) { return String(); }
 static char gDebugBuffer[1024];
 static bool ensureDebugBuffer() { return true; }
 static char* getDebugBuffer() { return gDebugBuffer; }
+
+// What the doubles record: whether a partner change held bond frames then.
+#if HW1_HAVE_HOLD
+static bool bondPartnerChanging();
+#else
+static bool bondPartnerChanging() { return false; }
+#endif
 static constexpr uint8_t SYSEVT_BOND_OFFLINE = 1;
-static void systemEventPost(uint8_t, const char* = nullptr, const char* = nullptr) {}
+static constexpr uint8_t SYSEVT_PEER_UNPAIRED = 2;
+struct PostedEvent { uint8_t type; std::string who; std::string detail; bool held; };
+static std::vector<PostedEvent> gPosted;
+static void systemEventPost(uint8_t type, const char* who = nullptr, const char* detail = nullptr) {
+  gPosted.push_back({type, who ? who : "", detail ? detail : "", bondPartnerChanging()});
+}
 static uint32_t gNextMsgId = 100;
 static uint32_t generateMessageId() { return ++gNextMsgId; }
 static bool sessionIsASide(const uint8_t a[6], const uint8_t b[6]) { return std::memcmp(a, b, 6) < 0; }
@@ -222,7 +250,10 @@ static int gManualStarts = 0;
 static const uint8_t kPartnerA[6] = {0x02, 0x11, 0x22, 0x33, 0x44, 0x01};
 static const uint8_t kPartnerB[6] = {0x02, 0x11, 0x22, 0x33, 0x44, 0x02};
 static bool gSessionUp = true;
-[[maybe_unused]] static bool bondSessionActiveWith(const uint8_t*) { return gSessionUp; }
+static const uint8_t* gSessionDownFor = nullptr;   // this peer's session is not ACTIVE
+[[maybe_unused]] static bool bondSessionActiveWith(const uint8_t* mac) {
+  return gSessionUp && !(gSessionDownFor && std::memcmp(mac, gSessionDownFor, 6) == 0);
+}
 
 enum RxKind { RX_CAP_REQ, RX_CAP_RESP, RX_STATUS_REQ, RX_SETTINGS_REQ };
 
@@ -246,10 +277,29 @@ static bool deliver(const uint8_t* src, RxKind kind);
 static void masterOnWorkerCapResp();
 static void masterOnWorkerCapReq();
 static constexpr uint8_t ESPNOW_V4_TYPE_BOND_CAP_REQ = 1;
+static constexpr uint8_t ESPNOW_V4_TYPE_BOND_HEARTBEAT = 2;
+static constexpr uint8_t ESPNOW_V4_TYPE_BOND_CAP_RESP = 3;
+static constexpr uint8_t ESPNOW_V4_TYPE_MANIFEST_REQ = 4;
+static constexpr uint8_t ESPNOW_V4_TYPE_BOND_STATUS_REQ = 6;
+static constexpr uint8_t ESPNOW_V4_TYPE_BOND_STATUS_RESP = 7;
+static constexpr uint8_t kSentSettingsReq = 5;      // requestBondSettings
+static constexpr uint8_t kSentFileBase = 100;       // submitBondFileSend + kind
+static constexpr uint8_t kSentStreamCtrl = 200;     // sendBondStreamCtrl
 [[maybe_unused]] static constexpr uint16_t ESPNOW_V4_FLAG_ACK_REQ = 0x01;
 static std::vector<uint8_t> gSentTypes;
-[[maybe_unused]] static bool bondSendEncryptedAsync(const uint8_t*, uint8_t type, uint16_t, uint32_t,
+// Every bond frame the device sends, to whom, and whether a hold was up.
+struct SentFrame { uint8_t mac[6]; uint8_t type; bool held; };
+static std::vector<SentFrame> gFrames;
+static void noteFrame(const uint8_t* mac, uint8_t type) {
+  SentFrame f{};
+  if (mac) std::memcpy(f.mac, mac, 6);
+  f.type = type;
+  f.held = bondPartnerChanging();
+  gFrames.push_back(f);
+}
+[[maybe_unused]] static bool bondSendEncryptedAsync(const uint8_t* mac, uint8_t type, uint16_t, uint32_t,
                                                     const uint8_t*, uint16_t) {
+  noteFrame(mac, type);
   gSentTypes.push_back(type);
   if (type == ESPNOW_V4_TYPE_BOND_CAP_REQ) masterOnWorkerCapReq();
   return true;
@@ -257,7 +307,187 @@ static std::vector<uint8_t> gSentTypes;
 
 static void resetBondSync();   // declared ahead of its users, as in the source
 
+// ---- Doubles for cmd_espnow_unpair: each step is recorded in order -------------
+#define EXT_RAM_BSS_ATTR
+class CommandArgs {
+ public:
+  explicit CommandArgs(const String& s) : s_(s) { s_.trim(); }
+  bool hasMinArgs(int n) const { return n <= 0 || (n == 1 && s_.length() > 0); }
+  String arg(int) const { return s_; }
+ private:
+  String s_;
+};
+static std::vector<std::string> gSteps;
+static void step(const char* name) {
+  // The bond state each step sees: "on" while bond mode still names a partner.
+  std::string s = name;
+  if (gSettings.bondModeEnabled || gSettings.bondPeerMac.length() > 0) s += "/bond";
+  gSteps.push_back(s);
+}
+static size_t stepAt(const char* name) {
+  for (size_t i = 0; i < gSteps.size(); ++i) {
+    if (gSteps[i].rfind(name, 0) == 0) return i;
+  }
+  return SIZE_MAX;
+}
+static bool stepSawBond(const char* name) {
+  const size_t i = stepAt(name);
+  return i != SIZE_MAX && gSteps[i].find("/bond") != std::string::npos;
+}
+static bool gDeleteOk = true;
+[[maybe_unused]] static bool espnowDeletePeerRuntime(const uint8_t*) { step("deleteRuntime"); return gDeleteOk; }
+[[maybe_unused]] static void removeEspNowDevice(const uint8_t*) { step("removeDevice"); }
+[[maybe_unused]] static void espnowKeyExCancel(const uint8_t*) { step("keyExCancel"); }
+[[maybe_unused]] static uint8_t pendingFrameDropForPeer(const uint8_t*) { step("pendingDrop"); return 0; }
+[[maybe_unused]] static bool espnowForgetPeerCrypto(const uint8_t*, bool* removedAny = nullptr) {
+  step("forgetCrypto");
+  if (removedAny) *removedAny = true;
+  return true;
+}
+[[maybe_unused]] static bool manifestRefRead(const uint8_t*, char hex[33]) {
+  step("manifestRefRead");
+  hex[0] = '\0';
+  return false;
+}
+struct PeerFilesRemoved { unsigned files; };
+[[maybe_unused]] static bool peerFilesRemove(const uint8_t*, PeerFilesRemoved&) { step("peerFilesRemove"); return true; }
+[[maybe_unused]] static uint32_t manifestDropIfUnused(const char*) { return 0; }
+[[maybe_unused]] static int peerCacheDir(const uint8_t*, char* out, size_t n) {
+  return std::snprintf(out, n, "/system/espnow/peers/x");
+}
+static bool filesystemReady = true;
+namespace VFS {
+enum class Scopes { ESPNOW_RECEIVED };
+struct Auth {};
+[[maybe_unused]] static Auth systemAuth(Scopes, const char*) { return {}; }
+[[maybe_unused]] static bool existsGuarded(const char*, Auth) { return false; }
+}  // namespace VFS
+[[maybe_unused]] static void formatUnpairFilesLine(char* out, size_t outLen, bool, const PeerFilesRemoved&, uint32_t,
+                                                   const char*, const char*) {
+  std::snprintf(out, outLen, "Removed: crypto identity.");
+}
+[[maybe_unused]] static void meshPeerSlotsRelease(const uint8_t*) { step("slotsRelease"); }
+[[maybe_unused]] static bool saveEspNowDevices() { return true; }
+
+// ---- Doubles for the bond parts of processMeshHeartbeats ------------------------
+static uint32_t gLastBondHeartbeatSentMs = 0;
+static uint32_t gBondHeartbeatSeqNum = 0;
+static uint32_t gBootCounter = 7;
+struct V4PayloadBondHeartbeat {
+  uint8_t role; int8_t rssi; uint8_t reserved[2];
+  uint32_t uptimeSec, freeHeap, seqNum, bootCounter, settingsHash;
+};
+namespace SelfDevice { [[maybe_unused]] static uint32_t uptimeSeconds() { return gNowMs / 1000; } }
+struct EspClass { uint32_t getFreeHeap() const { return 100000; } };
+[[maybe_unused]] static EspClass ESP;
+struct wifi_ap_record_t { int8_t rssi; };
+static constexpr int ESP_OK = 0;
+[[maybe_unused]] static int esp_wifi_sta_get_ap_info(wifi_ap_record_t* ap) { ap->rssi = -50; return ESP_OK; }
+[[maybe_unused]] static void logSystemEvent(const char*, const char*, ...) {}
+struct PeerIdentity { uint8_t meshId; };
+static PeerIdentity gAnyIdentity{0};
+[[maybe_unused]] static const PeerIdentity* peerIdentityFindByMac(const uint8_t*) { return &gAnyIdentity; }
+struct SessionState { uint8_t mac[6]; };
+static SessionState gSessionSlot{};
+[[maybe_unused]] static SessionState* sessionFindByPeer(const uint8_t* mac, uint8_t) {
+  std::memcpy(gSessionSlot.mac, mac, 6);
+  return &gSessionSlot;
+}
+struct ClearedSession { uint8_t mac[6]; bool held; };
+static std::vector<ClearedSession> gSessionClears;
+[[maybe_unused]] static void sessionClear(SessionState* s) {
+  ClearedSession c{};
+  std::memcpy(c.mac, s->mac, 6);
+  c.held = bondPartnerChanging();
+  gSessionClears.push_back(c);
+}
+// A step of the tick that waits (the FS lock in the manifest lookup, the gap
+// between stream commands): cmd_exec runs meanwhile. Runs once, then clears.
+static std::function<void()> gTickWait;
+static void tickWaits() {
+  if (!gTickWait) return;
+  auto fn = std::move(gTickWait);
+  gTickWait = nullptr;
+  fn();
+}
+// The manifest cache: every lookup is a hit and is recorded for that peer.
+struct ManifestHit { uint8_t mac[6]; uint8_t hash0; bool held; };
+static std::vector<ManifestHit> gManifestHits;
+[[maybe_unused]] static bool manifestCacheHit(const uint8_t* mac, const uint8_t fwHash[16]) {
+  tickWaits();
+  ManifestHit h{};
+  std::memcpy(h.mac, mac, 6);
+  h.hash0 = fwHash[0];
+  h.held = bondPartnerChanging();
+  gManifestHits.push_back(h);
+  return true;
+}
+[[maybe_unused]] static void requestBondSettings(const uint8_t* mac) { noteFrame(mac, kSentSettingsReq); }
+[[maybe_unused]] static bool espnowInboundFileActiveFrom(const uint8_t*) { return false; }
+struct PostSync { uint8_t mac[6]; bool held; };
+static std::vector<PostSync> gPostSync;
+[[maybe_unused]] static void firePostSyncSideEffects(const uint8_t mac[6]) {
+  PostSync p{};
+  std::memcpy(p.mac, mac, 6);
+  p.held = bondPartnerChanging();
+  gPostSync.push_back(p);
+}
+#define MAC_STR(m) ((void)(m), "mac")
+[[maybe_unused]] static void buildCapabilitySummary(CapabilitySummary& c) { c = CapabilitySummary{}; }
+[[maybe_unused]] static bool bondSendReadyOrDeferred(const uint8_t*) { return true; }
+enum BondFileKind : uint8_t { BOND_FILE_KIND_MANIFEST = 0, BOND_FILE_KIND_SETTINGS = 1, BOND_FILE_KIND_SCHEMA = 2 };
+// cmd_exec's queue: submitBondFileSend puts the job there, runQueuedBondFiles
+// runs the production runDeferredBondFileSend on each, later.
+struct BondFileSendWork { uint8_t destMac[6]; uint8_t kind; };
+static std::vector<BondFileSendWork*> gCmdExecQ;
+[[maybe_unused]] static bool submitBondFileSend(const uint8_t destMac[6], uint8_t kind) {
+  noteFrame(destMac, (uint8_t)(kSentFileBase + kind));
+  auto* w = (BondFileSendWork*)std::malloc(sizeof(BondFileSendWork));
+  std::memcpy(w->destMac, destMac, 6);
+  w->kind = kind;
+  gCmdExecQ.push_back(w);
+  return true;
+}
+// The senders the job calls, with their production entry checks: settings
+// and schema return when the partner is offline, the manifest does not. A
+// send goes through sendFileToMac, which key-exchanges a peer with no
+// identity (what an unpair removed).
+#define SYSTEM_IDENTITY_SCOPE(name) sink(name)
+struct FileSend { uint8_t mac[6]; uint8_t kind; };
+static std::vector<FileSend> gFileSends;
+static void noteFileSend(const uint8_t* mac, uint8_t kind) {
+  FileSend f{};
+  std::memcpy(f.mac, mac, 6);
+  f.kind = kind;
+  gFileSends.push_back(f);
+}
+[[maybe_unused]] static void sendBondManifest(const uint8_t* mac) { noteFileSend(mac, BOND_FILE_KIND_MANIFEST); }
+[[maybe_unused]] static void sendBondSettings(const uint8_t* mac) {
+  if (!gEspNow->bondPeerOnline) return;
+  noteFileSend(mac, BOND_FILE_KIND_SETTINGS);
+}
+[[maybe_unused]] static void sendBondSchema(const uint8_t* mac) {
+  if (!gEspNow->bondPeerOnline) return;
+  noteFileSend(mac, BOND_FILE_KIND_SCHEMA);
+}
+// Status (processMeshHeartbeats 9j / 9j2).
+struct BondPeerStatus { uint16_t sensorEnabledMask; uint16_t sensorConnectedMask; uint32_t freeHeap; };
+[[maybe_unused]] static void buildLocalBondStatus(BondPeerStatus& st) { st = BondPeerStatus{1, 1, 100000}; }
+enum RemoteSensorType { REMOTE_SENSOR_THERMAL = 0, REMOTE_SENSOR_TOF = 1, REMOTE_SENSOR_MAX = 2 };
+static bool gStreamThermal = true;
+[[maybe_unused]] static bool* bondStreamSetting(RemoteSensorType) { return &gStreamThermal; }
+[[maybe_unused]] static const char* sensorTypeToString(RemoteSensorType) { return "thermal"; }
+[[maybe_unused]] static void sendBondStreamCtrl(RemoteSensorType, bool) {
+  uint8_t mac[6] = {};
+  parseMacAddress(gSettings.bondPeerMac, mac);
+  noteFrame(mac, kSentStreamCtrl);
+}
+#define pdMS_TO_TICKS(x) (x)
+[[maybe_unused]] static void vTaskDelay(uint32_t) { tickWaits(); }
+
 // INSERT_PRODUCTION
+
+// INSERT_TICKS
 
 // ---- Worker tick stages (processMeshHeartbeats 9b / 9e) ---------------------------
 static void workerTick() {
@@ -349,7 +579,20 @@ static void resetWorld(const uint8_t self[6]) {
   gPreempt = nullptr;
   gSettingsTouched = false;
   gSessionUp = true;
+  gSessionDownFor = nullptr;
   gSentTypes.clear();
+  gFrames.clear();
+  gPosted.clear();
+  gSessionClears.clear();
+  gManifestHits.clear();
+  gPostSync.clear();
+  gSteps.clear();
+  gDeleteOk = true;
+  gTickWait = nullptr;
+  for (auto* w : gCmdExecQ) std::free(w);
+  gCmdExecQ.clear();
+  gFileSends.clear();
+  gLastBondHeartbeatSentMs = 0;
   gBackoffClears = gAutoStarts = gManualStarts = 0;
   std::memcpy(gSelfMac, self, 6);
 }
@@ -594,6 +837,381 @@ static void caseConnectKicksHandshake() {
         gManualStarts + gAutoStarts, gBackoffClears);
 }
 
+// ---- The bond parts of the espnow_task loop during a partner change (X5) --------
+static const uint8_t kPartnerC[6] = {0x02, 0x11, 0x22, 0x33, 0x44, 0x03};
+static void runTicks() {
+  hbTickProduction(gNowMs);
+  syncTickProduction(gNowMs);
+}
+static size_t heldFrames(uint8_t type = 0) {
+  size_t n = 0;
+  for (const auto& f : gFrames) n += f.held && (type == 0 || f.type == type);
+  return n;
+}
+static size_t framesTo(const uint8_t* mac, uint8_t type, bool held) {
+  size_t n = 0;
+  for (const auto& f : gFrames) n += f.held == held && f.type == type && macEquals(f.mac, mac);
+  return n;
+}
+static size_t heldPosts(uint8_t type) {
+  size_t n = 0;
+  for (const auto& e : gPosted) n += e.held && e.type == type;
+  return n;
+}
+// espnow_task's view while a command runs: `stepMs` pass each time it takes
+// the CPU, and the old partner is heard whenever its frames are not held.
+static void preemptWithTicks(uint32_t stepMs) {
+  gPreempt = [stepMs] {
+    gNowMs += stepMs;
+    if (!bondPartnerChanging() && gSettings.bondPeerMac == String("02:11:22:33:44:01")) {
+      gState.lastBondHeartbeatReceivedMs = gNowMs;
+    }
+    runTicks();
+  };
+}
+
+// Finding X5: master bonded to A, which is online with its capability known
+// and its manifest not yet looked up, but A's session is rekeying, so the
+// tick waits. bondconnect B (session up): while the partner setting already
+// names B and the state is still A's, the tick must not record A's manifest
+// for B, send anything, time the partner out or clear B's session.
+static void caseSwitchHoldsTick() {
+  resetWorld(kMasterSelf);
+  gSettings.bondModeEnabled = true;
+  gSettings.bondRole = BOND_ROLE_MASTER;
+  gSettings.bondPeerMac = "02:11:22:33:44:01";
+  gMaster.mac = kPartnerC;
+  gEspNow->bondPeerOnline = true;
+  gEspNow->lastRemoteCapValid = true;
+  gEspNow->lastRemoteCap.fwHash[0] = 0xA1;   // A's firmware
+  gEspNow->lastBondHeartbeatReceivedMs = gNowMs;
+  gLastBondHeartbeatSentMs = gNowMs;
+  gSessionDownFor = kPartnerA;
+  preemptWithTicks(5000);
+  cmd_bond_connect(String("02:11:22:33:44:02"));
+  gPreempt = nullptr;
+  size_t forB = 0;
+  for (const auto& h : gManifestHits) forB += macEquals(h.mac, kPartnerB);
+  CHECK(forB == 0, "X5 the tick recorded A's manifest for the new partner B during bondconnect (%zu)", forB);
+  CHECK(heldFrames() == 0, "X5 %zu bond frames were sent while the partner change held bond frames "
+        "(heartbeats %zu, MANIFEST_REQ %zu)", heldFrames(), heldFrames(ESPNOW_V4_TYPE_BOND_HEARTBEAT),
+        heldFrames(ESPNOW_V4_TYPE_MANIFEST_REQ));
+  size_t heldClears = 0;
+  for (const auto& c : gSessionClears) heldClears += c.held;
+  CHECK(heldClears == 0 && heldPosts(SYSEVT_BOND_OFFLINE) == 0,
+        "X5 the heartbeat timeout acted during the partner change (%zu sessions cleared, %zu offline events)",
+        heldClears, heldPosts(SYSEVT_BOND_OFFLINE));
+  CHECK(framesTo(kPartnerB, ESPNOW_V4_TYPE_BOND_HEARTBEAT, false) >= 1,
+        "the heartbeat did not go to the new partner after the change");
+  // The tick works again once the hold is over: B comes online with its own
+  // capability and the master looks its manifest up.
+  gManifestHits.clear();
+  gEspNow->bondPeerOnline = true;
+  gEspNow->lastRemoteCapValid = true;
+  gEspNow->lastRemoteCap.fwHash[0] = 0xB2;
+  gEspNow->lastBondHeartbeatReceivedMs = gNowMs;
+  runTicks();
+  CHECK(gManifestHits.size() == 1 && macEquals(gManifestHits[0].mac, kPartnerB) && gManifestHits[0].hash0 == 0xB2 &&
+        gEspNow->bondManifestReceived, "after the change the master did not look up B's own manifest");
+}
+
+// Finding X5: the post-sync status request and the deferred answers to the
+// old partner wait too. Master fully synced with A (status request not yet
+// sent, A's session rekeying), an answer to A's CAP_REQ and a streaming setup
+// pending; bondconnect B.
+static void caseSwitchHoldsPostSync() {
+  resetWorld(kMasterSelf);
+  gSettings.bondModeEnabled = true;
+  gSettings.bondRole = BOND_ROLE_MASTER;
+  gSettings.bondPeerMac = "02:11:22:33:44:01";
+  gMaster.mac = kPartnerC;
+  gEspNow->bondPeerOnline = true;
+  gEspNow->lastRemoteCapValid = true;
+  gEspNow->bondManifestReceived = true;
+  gEspNow->bondSettingsReceived = true;
+  gEspNow->bondCapSent = true;
+  gEspNow->lastBondHeartbeatReceivedMs = gNowMs;
+  gLastBondHeartbeatSentMs = gNowMs;
+  gSessionDownFor = kPartnerA;
+  gPreempt = [] {
+    // Set as the hold begins: frames A sent just before it, acted on in it.
+    if (bondPartnerChanging() && !gEspNow->bondNeedsCapabilityResponse && !gEspNow->bondNeedsStreamingSetup &&
+        gSettings.bondPeerMac == String("02:11:22:33:44:02") && gEspNow->bondManifestReceived) {
+      std::memcpy(gEspNow->bondPendingResponseMac, kPartnerA, 6);
+      gEspNow->bondNeedsCapabilityResponse = true;
+      gEspNow->bondNeedsStreamingSetup = true;
+    }
+    gNowMs += 10;
+    runTicks();
+  };
+  cmd_bond_connect(String("02:11:22:33:44:02"));
+  gPreempt = nullptr;
+  size_t heldSync = 0;
+  for (const auto& p : gPostSync) heldSync += p.held;
+  CHECK(heldSync == 0, "X5 the post-sync status request went out during the partner change (%zu)", heldSync);
+  CHECK(heldFrames() == 0, "X5 %zu bond frames were sent during the partner change (CAP_RESP %zu, stream %zu)",
+        heldFrames(), heldFrames(ESPNOW_V4_TYPE_BOND_CAP_RESP), heldFrames(kSentStreamCtrl));
+}
+
+// Finding X5: a worker whose capability from A is missing (A's session
+// rekeying) does not ask the new partner for it from A's flags.
+static void caseSwitchHoldsWorkerAsk() {
+  resetWorld(kWorkerSelf);
+  gSettings.bondModeEnabled = true;
+  gSettings.bondPeerMac = "02:11:22:33:44:01";
+  gMaster.mac = kPartnerC;
+  gEspNow->bondPeerOnline = true;
+  gEspNow->lastBondHeartbeatReceivedMs = gNowMs;
+  gLastBondHeartbeatSentMs = gNowMs;
+  gSessionDownFor = kPartnerA;
+  runTicks();                       // not missing yet: A's session is down
+  gPreempt = [] {
+    gNowMs += 10000;
+    gState.lastBondHeartbeatReceivedMs = gNowMs;   // no timeout here
+    runTicks();
+  };
+  cmd_bond_connect(String("02:11:22:33:44:02"));
+  gPreempt = nullptr;
+  CHECK(heldFrames(ESPNOW_V4_TYPE_BOND_CAP_REQ) == 0,
+        "X5 the worker asked the new partner for a capability during the change (%zu)",
+        heldFrames(ESPNOW_V4_TYPE_BOND_CAP_REQ));
+}
+
+// Round 4: the deferred answers (9d, 9e, 9e2) and the status steps (9j, 9j2,
+// 9k) wait too. Master SYNCED with A; as the hold begins, A's MANIFEST_REQ,
+// SETTINGS_REQ, SCHEMA_REQ and STATUS_REQ are pending, a sensor change asks
+// for a status push and the 30 s status poll is due. bondconnect B: nothing
+// goes out while held (to A, or to B from A's state), and nothing of A's goes
+// to A after the change either.
+static void caseSwitchHoldsAnswersAndStatus() {
+  resetWorld(kMasterSelf);
+  gSettings.bondModeEnabled = true;
+  gSettings.bondRole = BOND_ROLE_MASTER;
+  gSettings.bondPeerMac = "02:11:22:33:44:01";
+  gMaster.mac = kPartnerC;
+  gEspNow->bondPeerOnline = true;
+  gEspNow->lastRemoteCapValid = true;
+  gEspNow->bondManifestReceived = true;
+  gEspNow->bondSettingsReceived = true;
+  gEspNow->bondCapSent = true;
+  gEspNow->lastBondHeartbeatReceivedMs = gNowMs;
+  gLastBondHeartbeatSentMs = gNowMs;
+  bool armed = false;
+  size_t armedAt = 0;
+  gPreempt = [&armed, &armedAt] {
+    if (!armed && bondPartnerChanging() && gSettings.bondPeerMac == String("02:11:22:33:44:02") &&
+        gState.bondManifestReceived) {
+      armed = true;
+      armedAt = gFrames.size();
+      std::memcpy(gState.bondPendingResponseMac, kPartnerA, 6);
+      gState.bondNeedsManifestResponse = true;
+      gState.bondNeedsSettingsResponse = true;
+      gState.bondNeedsSchemaResponse = true;
+      gState.bondNeedsStatusResponse = true;
+      gState.bondNeedsProactiveStatus = true;
+      gState.bondLastStatusReqMs = gNowMs - 30000;
+    }
+    gNowMs += 10;
+    runTicks();
+  };
+  cmd_bond_connect(String("02:11:22:33:44:02"));
+  gPreempt = nullptr;
+  CHECK(armed, "the case did not reach the hold with A's state");
+  const size_t heldFiles = heldFrames(kSentFileBase + BOND_FILE_KIND_MANIFEST) +
+                           heldFrames(kSentFileBase + BOND_FILE_KIND_SETTINGS) +
+                           heldFrames(kSentFileBase + BOND_FILE_KIND_SCHEMA);
+  CHECK(heldFrames() == 0,
+        "X5 %zu bond frames went out during the partner change (file answers %zu, status answer/push %zu, "
+        "status poll %zu)", heldFrames(), heldFiles, heldFrames(ESPNOW_V4_TYPE_BOND_STATUS_RESP),
+        heldFrames(ESPNOW_V4_TYPE_BOND_STATUS_REQ));
+  // The rest of bondconnect and a few seconds of ticks: A's requests stay unanswered.
+  for (int i = 0; i < 50; ++i) { gNowMs += 100; runTicks(); }
+  size_t toA = 0;
+  for (size_t i = armedAt; i < gFrames.size(); ++i) toA += macEquals(gFrames[i].mac, kPartnerA);
+  CHECK(toA == 0, "X5 after the change %zu answers to the old partner's requests still went to it", toA);
+}
+
+// Round 4: a step of the tick that waits lets cmd_exec run a whole partner
+// change. The tick must not go on with the old partner's state afterwards.
+static void caseTickWaitsThroughSwitch() {
+  // The gap between stream commands (9f): master SYNCED with A, two sensors
+  // to stream; bondconnect B runs during the first gap.
+  resetWorld(kMasterSelf);
+  gSettings.bondModeEnabled = true;
+  gSettings.bondRole = BOND_ROLE_MASTER;
+  gSettings.bondPeerMac = "02:11:22:33:44:01";
+  gMaster.mac = kPartnerC;
+  gEspNow->bondPeerOnline = true;
+  gEspNow->lastRemoteCapValid = true;
+  gEspNow->bondManifestReceived = gEspNow->bondSettingsReceived = true;
+  gEspNow->bondStatusReqSentOnce = true;
+  gEspNow->bondLastStatusReqMs = gNowMs;
+  gEspNow->bondNeedsStreamingSetup = true;
+  gEspNow->lastBondHeartbeatReceivedMs = gNowMs;
+  gLastBondHeartbeatSentMs = gNowMs;
+  gStreamThermal = true;
+  gTickWait = [] { cmd_bond_connect(String("02:11:22:33:44:02")); };
+  syncTickProduction(gNowMs);
+  CHECK(gSettings.bondPeerMac == String("02:11:22:33:44:02"), "the partner change did not run in the gap");
+  CHECK(framesTo(kPartnerA, kSentStreamCtrl, false) == 1, "the first stream command did not go to A");
+  CHECK(framesTo(kPartnerB, kSentStreamCtrl, false) == 0,
+        "X5 the stream setup went on after a partner change in its gap and sent A's stream settings to B");
+
+  // The manifest lookup waits for the FS lock: master with A's capability,
+  // A's manifest not yet looked up; bondconnect B runs during the wait.
+  resetWorld(kMasterSelf);
+  gSettings.bondModeEnabled = true;
+  gSettings.bondRole = BOND_ROLE_MASTER;
+  gSettings.bondPeerMac = "02:11:22:33:44:01";
+  gMaster.mac = kPartnerC;
+  gEspNow->bondPeerOnline = true;
+  gEspNow->lastRemoteCapValid = true;
+  gEspNow->lastRemoteCap.fwHash[0] = 0xA1;
+  gEspNow->lastBondHeartbeatReceivedMs = gNowMs;
+  gTickWait = [] { cmd_bond_connect(String("02:11:22:33:44:02")); };
+  syncTickProduction(gNowMs);
+  CHECK(gSettings.bondPeerMac == String("02:11:22:33:44:02"), "the partner change did not run in the lookup");
+  CHECK(!gEspNow->bondManifestReceived,
+        "X5 a partner change during the manifest lookup: A's cache hit marked B's manifest as received");
+  size_t forB = 0;
+  for (const auto& h : gManifestHits) forB += macEquals(h.mac, kPartnerB);
+  CHECK(forB == 0 && framesTo(kPartnerB, ESPNOW_V4_TYPE_MANIFEST_REQ, false) == 0,
+        "X5 a partner change during the manifest lookup: B got A's manifest reference or a MANIFEST_REQ");
+}
+
+// ---- espnowunpair of the bond partner (X4) -----------------------------------
+static bool replyHas(const char* reply, const char* text) { return std::strstr(reply, text) != nullptr; }
+
+// Finding X4: bonded to A (initiator side), A online and synced. Unpairing A
+// ends the bond before anything about A is removed, the way bonddisconnect
+// does; afterwards the heartbeat starts nothing toward A.
+static void caseUnpairPartner() {
+  resetWorld(kMasterSelf);
+  gSettings.bondModeEnabled = true;
+  gSettings.bondRole = BOND_ROLE_MASTER;
+  gSettings.bondPeerMac = "02:11:22:33:44:01";
+  gMaster.mac = kPartnerC;
+  gEspNow->bondPeerOnline = true;
+  gEspNow->lastRemoteCapValid = true;
+  gEspNow->bondManifestReceived = gEspNow->bondSettingsReceived = true;
+  gEspNow->lastBondHeartbeatReceivedMs = gNowMs;
+  gPreempt = [] {
+    gNowMs += 10;
+    runTicks();
+  };
+  const char* reply = cmd_espnow_unpair(String("02:11:22:33:44:01"));
+  gPreempt = nullptr;
+  CHECK(!gSettings.bondModeEnabled && gSettings.bondPeerMac.length() == 0,
+        "X4 unpairing the bond partner left bond mode on with it (mode=%d peer='%s')",
+        (int)gSettings.bondModeEnabled, gSettings.bondPeerMac.c_str());
+  CHECK(!gEspNow->bondPeerOnline && !gEspNow->lastRemoteCapValid && !isBondSynced(),
+        "X4 the unpaired partner's bond state was kept (online=%d cap=%d)",
+        (int)gEspNow->bondPeerOnline, (int)gEspNow->lastRemoteCapValid);
+  size_t offline = 0;
+  for (const auto& e : gPosted) offline += e.type == SYSEVT_BOND_OFFLINE && e.detail == "02:11:22:33:44:01";
+  CHECK(offline == 1, "X4 the bond offline event for the unpaired partner was posted %zu times (want 1)", offline);
+  CHECK(replyHas(reply, "Unpaired device") && replyHas(reply, "bond"),
+        "X4 the reply does not say the bond was ended: %s", reply);
+  // Order: the bond ends before the peer is deleted, before anything already
+  // under way is called off and before its identity and folder go.
+  CHECK(stepAt("deleteRuntime") != SIZE_MAX && !stepSawBond("deleteRuntime") && !stepSawBond("forgetCrypto") &&
+        !stepSawBond("peerFilesRemove"),
+        "X4 the identity or folder was removed while bond mode still named the partner");
+  CHECK(stepAt("keyExCancel") < stepAt("forgetCrypto") && stepAt("pendingDrop") < stepAt("forgetCrypto") &&
+        stepAt("forgetCrypto") < stepAt("peerFilesRemove"),
+        "X4 unpair order: call off the key exchange and queued frames, forget the identity, remove the folder");
+  // A minute later: no heartbeat to A, no automatic handshake toward it.
+  const int autoStarts = gAutoStarts;
+  const size_t framesBefore = gFrames.size();
+  for (int i = 0; i < 600; ++i) { gNowMs += 100; runTicks(); }
+  size_t toA = 0;
+  for (size_t i = framesBefore; i < gFrames.size(); ++i) toA += macEquals(gFrames[i].mac, kPartnerA);
+  CHECK(toA == 0 && gAutoStarts == autoStarts,
+        "X4 after the unpair the bond still sent %zu frames to the unpaired partner and started %d handshakes",
+        toA, gAutoStarts - autoStarts);
+}
+
+// Unpairing another device leaves the bond alone; a partner set while bond
+// mode is off is cleared without an offline event; a failed peer delete says
+// the bond went.
+static void caseUnpairOther() {
+  resetWorld(kMasterSelf);
+  gSettings.bondModeEnabled = true;
+  gSettings.bondRole = BOND_ROLE_MASTER;
+  gSettings.bondPeerMac = "02:11:22:33:44:01";
+  gEspNow->bondPeerOnline = true;
+  const char* reply = cmd_espnow_unpair(String("02:11:22:33:44:03"));
+  CHECK(gSettings.bondModeEnabled && gSettings.bondPeerMac == String("02:11:22:33:44:01") &&
+        gEspNow->bondPeerOnline && !replyHas(reply, "bond") && gPosted.size() == 1,
+        "unpairing another device touched the bond: %s", reply);
+
+  resetWorld(kMasterSelf);
+  gSettings.bondPeerMac = "02:11:22:33:44:01";      // bond mode off, partner still set
+  reply = cmd_espnow_unpair(String("02:11:22:33:44:01"));
+  CHECK(gSettings.bondPeerMac.length() == 0 && !gSettings.bondModeEnabled,
+        "X4 a partner set while bond mode is off still names the unpaired device");
+  CHECK(heldPosts(SYSEVT_BOND_OFFLINE) == 0 && gPosted.size() == 1 && replyHas(reply, "bond partner"),
+        "X4 bond mode off: no offline event, and the reply says it is no longer the partner: %s", reply);
+
+  resetWorld(kMasterSelf);
+  gSettings.bondModeEnabled = true;
+  gSettings.bondPeerMac = "02:11:22:33:44:01";
+  gDeleteOk = false;
+  reply = cmd_espnow_unpair(String("02:11:22:33:44:01"));
+  CHECK(std::strncmp(reply, "Error:", 6) == 0 && replyHas(reply, "bond") && !gSettings.bondModeEnabled,
+        "a failed unpair of the partner does not say the bond was ended: %s", reply);
+}
+
+// Round 4: a bond file answer queued on cmd_exec before an unpair or partner
+// change (9d/9e/9e2 submit it; it runs when cmd_exec gets to it) is dropped
+// when it runs: sending it would key-exchange the unpaired device again.
+static void runQueuedBondFiles() {
+  std::vector<BondFileSendWork*> q;
+  q.swap(gCmdExecQ);
+  for (auto* w : q) runDeferredBondFileSend(w);
+}
+static void queueBondAnswers(const uint8_t* to) {
+  std::memcpy(gState.bondPendingResponseMac, to, 6);
+  gState.bondNeedsManifestResponse = gState.bondNeedsSettingsResponse = gState.bondNeedsSchemaResponse = true;
+  syncTickProduction(gNowMs);
+}
+static void bondedWorkerOfA() {
+  resetWorld(kWorkerSelf);
+  gSettings.bondModeEnabled = true;
+  gSettings.bondPeerMac = "02:11:22:33:44:01";
+  gMaster.mac = kPartnerC;
+  gEspNow->bondPeerOnline = true;
+  gEspNow->lastBondHeartbeatReceivedMs = gNowMs;
+}
+static size_t fileSendsTo(const uint8_t* mac) {
+  size_t n = 0;
+  for (const auto& f : gFileSends) n += macEquals(f.mac, mac);
+  return n;
+}
+static void caseQueuedBondFileAfterUnpair() {
+  bondedWorkerOfA();
+  queueBondAnswers(kPartnerA);
+  CHECK(gCmdExecQ.size() == 3, "the tick queued %zu bond file answers (want 3)", gCmdExecQ.size());
+  runQueuedBondFiles();
+  CHECK(fileSendsTo(kPartnerA) == 3, "queued answers to the online partner were not sent (%zu of 3)",
+        fileSendsTo(kPartnerA));
+
+  bondedWorkerOfA();
+  queueBondAnswers(kPartnerA);
+  cmd_espnow_unpair(String("02:11:22:33:44:01"));
+  runQueuedBondFiles();
+  CHECK(gFileSends.empty(), "X4 a bond file answer queued before the unpair still went to the unpaired device "
+        "(%zu sends, manifest %d): its key exchange brings the identity back",
+        gFileSends.size(), (int)(!gFileSends.empty() && gFileSends[0].kind == BOND_FILE_KIND_MANIFEST));
+
+  bondedWorkerOfA();
+  queueBondAnswers(kPartnerA);
+  cmd_bond_connect(String("02:11:22:33:44:02"));
+  runQueuedBondFiles();
+  CHECK(fileSendsTo(kPartnerA) == 0, "a bond file answer queued before bondconnect B still went to A (%zu)",
+        fileSendsTo(kPartnerA));
+}
+
 int main() {
   caseBenchOrder();
   caseSwitchPartner();
@@ -605,6 +1223,14 @@ int main() {
   caseNoAskWhenHealthy();
   caseCapRespInFlight();
   caseConnectKicksHandshake();
+  caseSwitchHoldsTick();
+  caseSwitchHoldsPostSync();
+  caseSwitchHoldsWorkerAsk();
+  caseUnpairPartner();
+  caseUnpairOther();
+  caseSwitchHoldsAnswersAndStatus();
+  caseTickWaitsThroughSwitch();
+  caseQueuedBondFileAfterUnpair();
   std::printf("espnow_bond_partner_change: %d checks, %d failed (%d frames accepted, %d dropped)\n",
               gChecks, gFailures, gAccepted, gDropped);
   return gFailures ? 1 : 0;

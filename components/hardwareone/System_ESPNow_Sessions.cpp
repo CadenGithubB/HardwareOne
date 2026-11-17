@@ -660,6 +660,22 @@ bool pendingFrameHasForPeer(const uint8_t peerMac[6]) {
   return false;
 }
 
+uint8_t pendingFrameDropForPeer(const uint8_t peerMac[6]) {
+  if (!gPending || !peerMac) return 0;
+  // Same lock as queue/drain/sweep. No sends here.
+  EspNowTxGuard g("pendDrop");
+  uint8_t dropped = 0;
+  for (uint8_t i = 0; i < kPendingFrameSlots; i++) {
+    PendingFrame& p = gPending[i];
+    if (!p.inUse || memcmp(p.peerMac, peerMac, 6) != 0) continue;
+    sendStatusMarkFailed(p.msgId, p.peerMac);
+    sodium_memzero(p.plaintext, p.plaintextLen);
+    memset(&p, 0, sizeof(p));
+    dropped++;
+  }
+  return dropped;
+}
+
 // ============================================================================
 // Phase 3.5 task #49 — tracked-send status (web-UI delivery confirmation)
 // ============================================================================

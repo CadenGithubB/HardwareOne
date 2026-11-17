@@ -1604,25 +1604,32 @@ inline void streamEspNowInner(httpd_req_t* req) {
 
     // ---- Per-row inline action panel ---------------------------------------
     function renderActionPanel(slot, label, isDefault, hasPassphrase) {
+      // Escaped for the attributes: a label may hold '&' and ';', and the click
+      // handler reads it back from dataset, which decodes it again.
+      var lab = escHtml(label);
       var setpassText = hasPassphrase ? 'Change passphrase' : 'Set passphrase';
-      var clearpassBtn = hasPassphrase
-        ? '<button class="btn btn-mesh-clearpass" data-label="' + label + '" data-slot="' + slot + '" style="font-size:.82em;padding:3px 10px">Clear passphrase</button>'
-        : '';
-      var setdefaultBtn = isDefault
-        ? ''
-        : '<button class="btn btn-mesh-setdefault" data-label="' + label + '" style="font-size:.82em;padding:3px 10px">Set as default</button>';
       // The default mesh can be disabled only when no other enabled mesh could
       // take over; the firmware applies the same rule.
       var all = (window.gMeshes && window.gMeshes.meshes) || [];
       var otherEnabled = all.some(function(o) { return o.enabled && String(o.slot) !== String(slot); });
+      // Clearing slot 0's passphrase also disables its mesh, so the firmware
+      // refuses it under the same rule as Disable.
+      var clearpassBtn = !hasPassphrase
+        ? ''
+        : (String(slot) === '0' && isDefault && otherEnabled)
+          ? '<button class="btn" disabled title="Clearing this passphrase disables the default mesh — set another as default first" style="font-size:.82em;padding:3px 10px;opacity:.5;cursor:not-allowed">Clear passphrase</button>'
+          : '<button class="btn btn-mesh-clearpass" data-label="' + lab + '" data-slot="' + slot + '" style="font-size:.82em;padding:3px 10px">Clear passphrase</button>';
+      var setdefaultBtn = isDefault
+        ? ''
+        : '<button class="btn btn-mesh-setdefault" data-label="' + lab + '" style="font-size:.82em;padding:3px 10px">Set as default</button>';
       var disableBtn = (isDefault && otherEnabled)
         ? '<button class="btn" disabled title="Cannot disable the default mesh — set another as default first" style="font-size:.82em;padding:3px 10px;opacity:.5;cursor:not-allowed">Disable</button>'
-        : '<button class="btn btn-mesh-disable" data-label="' + label + '" style="font-size:.82em;padding:3px 10px">Disable</button>';
+        : '<button class="btn btn-mesh-disable" data-label="' + lab + '" style="font-size:.82em;padding:3px 10px">Disable</button>';
 
       return '<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center">' +
-        '<button class="btn btn-mesh-setpass" data-label="' + label + '" data-slot="' + slot + '" style="font-size:.82em;padding:3px 10px">' + setpassText + '</button>' +
+        '<button class="btn btn-mesh-setpass" data-label="' + lab + '" data-slot="' + slot + '" style="font-size:.82em;padding:3px 10px">' + setpassText + '</button>' +
         clearpassBtn +
-        '<button class="btn btn-mesh-rename" data-label="' + label + '" data-slot="' + slot + '" style="font-size:.82em;padding:3px 10px">Rename</button>' +
+        '<button class="btn btn-mesh-rename" data-label="' + lab + '" data-slot="' + slot + '" style="font-size:.82em;padding:3px 10px">Rename</button>' +
         setdefaultBtn +
         disableBtn +
         '<button class="btn btn-mesh-close" data-slot="' + slot + '" style="font-size:.82em;padding:3px 10px;margin-left:auto">Close</button>' +
@@ -1675,7 +1682,7 @@ inline void streamEspNowInner(httpd_req_t* req) {
         '</div>' +
         '<div class="en-form-row" style="margin-top:8px">' +
         '<input type="password" class="mesh-pass-input" placeholder="New passphrase (min 8 chars)" maxlength="64">' +
-        '<button class="btn btn-mesh-savepass" data-label="' + label + '" data-slot="' + slot + '" style="font-size:.82em">Save</button>' +
+        '<button class="btn btn-mesh-savepass" data-label="' + escHtml(label) + '" data-slot="' + slot + '" style="font-size:.82em">Save</button>' +
         '<button class="btn btn-mesh-cancelsub" data-slot="' + slot + '" style="font-size:.82em">Cancel</button>' +
         '</div>';
       var inp = sf.querySelector('.mesh-pass-input');
@@ -1689,7 +1696,7 @@ inline void streamEspNowInner(httpd_req_t* req) {
       if (!sf) return;
       sf.innerHTML = '<div class="en-form-row" style="margin-top:8px">' +
         '<input type="text" class="mesh-rename-input" placeholder="New label" maxlength="16" value="' + escHtml(label) + '">' +
-        '<button class="btn btn-mesh-saverename" data-oldlabel="' + label + '" data-slot="' + slot + '" style="font-size:.82em">Save</button>' +
+        '<button class="btn btn-mesh-saverename" data-oldlabel="' + escHtml(label) + '" data-slot="' + slot + '" style="font-size:.82em">Save</button>' +
         '<button class="btn btn-mesh-cancelsub" data-slot="' + slot + '" style="font-size:.82em">Cancel</button>' +
         '</div>';
       var inp = sf.querySelector('.mesh-rename-input');
