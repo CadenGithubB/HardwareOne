@@ -2008,7 +2008,30 @@ add_test(
 # Both variants drive real threads against 10 s waits under the sanitizer. With
 # other suites running alongside (ctest -j6, 2026-11-06), about one run in six
 # timed out at a different wait each time, so they run alone rather than flake.
-set_tests_properties(stt_continuous stt_continuous_full_phrase PROPERTIES RUN_SERIAL TRUE)
+# ENABLE_STT_LEVEL_ROBUST_ONSET 0 (configuration p4-glasses-test-prev-onset): the raw
+# level only in every session, whatever sttdecisionpre holds.
+add_test(
+  NAME stt_continuous_prev_onset
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_stt_continuous.py --prev-onset
+          ${STT_CONTINUOUS_TEST_ARGS})
+set_tests_properties(stt_continuous stt_continuous_full_phrase stt_continuous_prev_onset PROPERTIES RUN_SERIAL TRUE)
+
+# The continuous-STT speech segmenter (stt/stt_segmenter.h). stt_segmenter: the
+# harness of HardwareOne's own cases (chunking, pre-roll, cuts, adaptive levels and
+# the continuousSegmenterConfig ranges). stt_segmenter_decision: the level-robust
+# onset's unit cases U1-U16, both golden hashes and 11 detecting header mutants;
+# stt_segmenter_boundaries: chunk invariance and PCM conservation in modes 0-11. The
+# last two are the speech repository's version 3.1 tests, ported verbatim.
+add_test(NAME stt_segmenter
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_stt_segmenter.py --sanitize
+          --cxx ${CMAKE_CXX_COMPILER})
+add_test(NAME stt_segmenter_decision
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_stt_segmenter_decision.py
+          --cxx ${CMAKE_CXX_COMPILER})
+add_test(NAME stt_segmenter_boundaries
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_stt_segmenter_boundaries.py
+          --cxx ${CMAKE_CXX_COMPILER})
 
 # `sttraw` host replay (stt_raw_replay.cpp): production floors and continuous
 # settings, chunk-size independence, floor overrides, cuts and the sidecar checks.

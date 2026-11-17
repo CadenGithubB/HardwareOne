@@ -358,6 +358,15 @@
 #define ENABLE_STT_MODEL_15X5_GEN2 0
 #endif
 
+// The continuous-STT level-robust onset (stt/stt_segmenter.h decision_pre_emphasis,
+// settings sttdecisionpre / sttg2decisionpre, default 97). 0 = every session runs the
+// raw level only, the detector before 12 Nov 2026, whatever those settings hold: the
+// speech repository's sdkconfig.prev_onset. Saved settings are left as they are, so
+// the default build runs the onset again after a reflash.
+#ifndef ENABLE_STT_LEVEL_ROBUST_ONSET
+#define ENABLE_STT_LEVEL_ROBUST_ONSET 1
+#endif
+
 // Local STT language-model influence: scale its probability weight, word
 // insertion score and custom-word bonus together. Preserve the checked file's
 // original weights by default. Range 0.0f..1.0f for trials; no file rewrite.

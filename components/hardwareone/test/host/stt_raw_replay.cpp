@@ -9,8 +9,15 @@
 //
 //   stt_raw_replay raw.pcm [--sidecar raw.json] [--speech-floor N]
 //       [--silence-floor N] [--noise-percentile N] [--blip-ms N]
+//       [--decision-pre N] [--decision-gain N] [--decision-mod N] [--decision-hold 0|1]
 //       [--no-short-close] [--single] [--chunk N]
 //       [--trace frames.csv] [--cut-dir DIR]
+//
+// The detector defaults to the raw level only (decision_pre 0), so stored
+// raw-only arms reproduce; --decision-pre 97 is the device default since the
+// level-robust onset (gain 150, as continuousSegmenterConfig sets it), and
+// --decision-mod / --decision-hold are its opt-in noise controls. The judge that
+// HardwareOne ran before the port needs this tool built from that commit.
 //
 // --trace writes one row per 10 ms frame: sample,rms,noise,threshold,open.
 // --cut-dir writes each phrase's PCM as seg_<n>.pcm for host decoding.
@@ -37,7 +44,8 @@ constexpr size_t kPhraseSamples = 10 * kRate;  // System_STT kStreamSamples
   std::fprintf(stderr, "stt_raw_replay: %s\n", why);
   std::fprintf(stderr,
                "usage: stt_raw_replay raw.pcm [--sidecar raw.json] [--speech-floor N] [--silence-floor N]\n"
-               "       [--noise-percentile N] [--blip-ms N] [--decision-pre N] [--no-short-close] [--single] [--chunk N]\n"
+               "       [--noise-percentile N] [--blip-ms N] [--decision-pre N] [--decision-gain N]\n"
+               "       [--decision-mod N] [--decision-hold 0|1] [--no-short-close] [--single] [--chunk N]\n"
                "       [--trace frames.csv] [--cut-dir DIR]\n");
   std::exit(2);
 }
@@ -77,6 +85,7 @@ int main(int argc, char** argv) {
   const char* tracePath = nullptr;
   const char* cutDir = nullptr;
   long speechFloor = -1, silenceFloor = -1, percentile = -1, blipMs = -1, decisionPre = -1;
+  long decisionGain = -1, decisionMod = -1, decisionHold = -1;
   bool shortClose = true, single = false;
   size_t chunk = 1024;  // the capture task's read size
   for (int i = 2; i < argc; ++i) {
@@ -87,7 +96,13 @@ int main(int argc, char** argv) {
     else if (a == "--silence-floor") silenceFloor = number(value(), 1, 32767, "--silence-floor");
     else if (a == "--noise-percentile") percentile = number(value(), 0, 50, "--noise-percentile");
     else if (a == "--blip-ms") blipMs = number(value(), 0, 1000, "--blip-ms");
-    else if (a == "--decision-pre") decisionPre = number(value(), 0, 99, "--decision-pre");
+    else if (a == "--decision-pre") decisionPre = number(value(), 0, 100, "--decision-pre");
+    else if (a == "--decision-gain") decisionGain = number(value(), 25, 400, "--decision-gain");
+    else if (a == "--decision-mod") {
+      decisionMod = number(value(), 0, 1000, "--decision-mod");
+      if (decisionMod > 0 && decisionMod <= 100) usage("bad --decision-mod (0 or 101..1000)");
+    }
+    else if (a == "--decision-hold") decisionHold = number(value(), 0, 1, "--decision-hold");
     else if (a == "--no-short-close") shortClose = false;
     else if (a == "--single") single = true;
     else if (a == "--chunk") chunk = size_t(number(value(), 1, 1 << 20, "--chunk"));
@@ -121,6 +136,9 @@ int main(int argc, char** argv) {
   if (percentile >= 0) config.noise_percentile = uint8_t(percentile);
   if (blipMs >= 0) config.silence_blip_samples = size_t(blipMs) * kRate / 1000;
   if (decisionPre >= 0) config.decision_pre_emphasis = uint8_t(decisionPre);
+  if (decisionGain >= 0) config.decision_gain_pct = uint16_t(decisionGain);
+  if (decisionMod >= 0) config.decision_modulation_ratio_pct = uint16_t(decisionMod);
+  if (decisionHold >= 0) config.decision_pre_hold_requires_raw = decisionHold != 0;
   std::vector<int16_t> work(config.max_segment_samples);
   Segmenter seg;
   if (!seg.reset(work.data(), work.size(), config)) usage("invalid segmenter settings (silence floor must be <= speech floor)");
@@ -182,15 +200,21 @@ int main(int argc, char** argv) {
   if (seg.finish() == SegmentStatus::Ready) emit();
   if (trace) std::fclose(trace);
 
+  const bool onset = config.decision_pre_emphasis != 0;
   std::printf("{\"file\":\"%s\",\"samples\":%zu,\"seconds\":%.2f,\"sidecar_dropped\":%ld,"
               "\"config\":{\"speech_floor\":%u,\"silence_floor\":%u,\"noise_percentile\":%u,"
               "\"blip_samples\":%zu,\"min_segment\":%zu,\"short_close\":%zu,\"end_silence\":%zu,"
-              "\"pre_roll\":%zu,\"min_voice\":%zu,\"max_segment\":%zu},"
+              "\"pre_roll\":%zu,\"min_voice\":%zu,\"max_segment\":%zu,\"detector\":\"%s\",\"decision_pre\":%u,"
+              "\"decision_gain_pct\":%u,\"decision_modulation_ratio_pct\":%u,\"decision_pre_hold_requires_raw\":%u},"
               "\"segments_covered_samples\":%llu,\"segments\":[%s\n]}\n",
               pcmPath, pcm.size(), double(pcm.size()) / kRate, dropped, config.adaptive_speech_floor,
               config.adaptive_silence_floor, unsigned(config.noise_percentile), config.silence_blip_samples,
               config.min_segment_samples, config.short_close_silence_samples, config.end_silence_samples,
-              config.pre_roll_samples, config.min_voice_samples, config.max_segment_samples,
+              config.pre_roll_samples, config.min_voice_samples, config.max_segment_samples, kContinuousDetectorVersion,
+              // As the device's sidecar reports them: gain and noise controls are 0 while the onset is off.
+              unsigned(config.decision_pre_emphasis), onset ? unsigned(config.decision_gain_pct) : 0u,
+              onset ? unsigned(config.decision_modulation_ratio_pct) : 0u,
+              onset ? unsigned(config.decision_pre_hold_requires_raw) : 0u,
               (unsigned long long)covered, out.c_str());
   if (dropped > 0)
     std::fprintf(stderr, "warning: the device dropped %ld samples; offsets after the first gap do not match the "

@@ -26,6 +26,8 @@ def main():
     group.add_argument('--thread-sanitize', action='store_true', help='ThreadSanitizer (supported hosts only)')
     parser.add_argument('--repeat', type=int, default=1)
     parser.add_argument('--speakers', action='store_true', help='Exercise controlled late speaker labels, cancellation, bounded saves and session fences')
+    parser.add_argument('--prev-onset', action='store_true',
+                        help='Build as ENABLE_STT_LEVEL_ROBUST_ONSET 0 (configuration p4-glasses-test-prev-onset): sessions run the raw level only')
     policy = parser.add_mutually_exclusive_group()
     policy.add_argument('--full-phrase', action='store_true',
                         help='Build the opt-out (-DHW1_STT_TRIM_SILENCE=0): full phrases, no speculative finals')
@@ -60,6 +62,8 @@ def main():
                '-Wno-unused-function', str(unit), '-o', str(exe)]
         if args.speakers:
             cmd += ['-DCONFIG_IDF_TARGET_ESP32P4=1', '-DENABLE_STT_SPEAKER_LABELS=1']
+        if args.prev_onset:
+            cmd += ['-DENABLE_STT_LEVEL_ROBUST_ONSET=0']
         if args.full_phrase:
             cmd += ['-DHW1_STT_TRIM_SILENCE=0', '-DHW1_STT_SPECULATIVE_FINAL=0', '-DHW1_STT_TEST_EXPECT_FULL_PHRASE=1']
         else:

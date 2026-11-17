@@ -14,7 +14,9 @@
 #include <functional>
 #include <limits>
 #include <map>
+#include <random>
 #include <mutex>
+#include <new>
 #include <string>
 #include <thread>
 #include <utility>
@@ -85,8 +87,10 @@ static bool recordingBusy = false;
 bool micRecordingBusy() { return recordingBusy; }
 struct { String micSource = "auto"; int microphoneGain = 70; int microphoneSampleRate = 48000;
          int sttSpeechFloor = 45; int sttSilenceFloor = 16; int sttNoisePercentile = 25; int sttDecisionPre = 0;
+         int sttDecisionMod = 0; bool sttDecisionHold = false;
          int pdmAmplify = 1; int pdmHpfHz = 36; bool sttAutoGain = true;
-         int sttG2SpeechFloor = 45; int sttG2SilenceFloor = 16; int sttG2NoisePercentile = 25; int sttG2DecisionPre = 0; } gSettings;
+         int sttG2SpeechFloor = 45; int sttG2SilenceFloor = 16; int sttG2NoisePercentile = 25; int sttG2DecisionPre = 0;
+         int sttG2DecisionMod = 0; bool sttG2DecisionHold = false; } gSettings;
 // PDM tuning the HAL would use at the next channel start, and what the last start used.
 static std::atomic<unsigned> pdmAmplifySet{1}, pdmHpfSet{36}, pdmAmplifyAtStart{0}, pdmHpfAtStart{0};
 void audioSetPdmTuning(uint8_t amplify, uint16_t hpfHz) { pdmAmplifySet = amplify; pdmHpfSet = hpfHz; }
@@ -117,7 +121,11 @@ static int16_t dc = 0;
 static std::vector<std::pair<uint64_t, uint64_t>> voiceIntervals;
 // Quiet PCM below the endpoint gate must still reach full-phrase inference.
 static std::vector<std::pair<uint64_t, uint64_t>> weakIntervals;
+// A scripted session's whole input, calibration included (testLevelRobustOnset);
+// set before a session starts and not changed while one runs.
+static std::vector<int16_t> scriptedPcm;
 static int16_t rawSample(uint64_t sample) {
+  if (!scriptedPcm.empty()) return sample < scriptedPcm.size() ? scriptedPcm[sample] : 0;
   if (sample < kCalibrationSamples) return dc; // Ambient quiet while UI says preparing.
   sample -= kCalibrationSamples;
   bool voice = allVoice;
@@ -636,7 +644,7 @@ bool sttLocalTranscribe(const int16_t* pcm, size_t count, char* text, size_t cap
 #if HW1_STT_SPEAKER_LABELS
   inferenceAllocations-=speakerRingAllocations;
 #endif
-  assert(inferenceAllocations == 5 || inferenceAllocations == 9); // capture-features: + ring, workspace, 2 row caches
+  assert(inferenceAllocations == 6 || inferenceAllocations == 10); // working, 3 slots, segmenter, draft; capture-features: + ring, workspace, 2 row caches
   if (prefix && count < call.rawSamples) ++cachedTrimmedFinals;  // combined: trim-trimmed input with cached rows
   auto assertPCM = [&] {
     for (size_t i = 0; i < std::min(call.rawSamples, count); ++i) assert(pcm[i] == rawSample(call.start + i));
@@ -719,7 +727,7 @@ static void reset() {
   gateNextIntegrity = integrityGateEntered = releaseIntegrityGate = false;
   allowedSamples = deliveredSamples = 0; starts = stops = 0;
   readLimit = 1024; readCounter = 0; irregularReads = false;
-  allVoice = true; dc = 0; voiceIntervals.clear(); weakIntervals.clear();
+  allVoice = true; dc = 0; voiceIntervals.clear(); weakIntervals.clear(); scriptedPcm.clear();
   modelAvailable = engineOK = true; engineOverlong = ignoreEngineCancel = engineActive = false;
   engineCalls = 0; enginePermits = UINT32_MAX; engineHistory.clear(); finalTextOverrides.clear();
   cacheStartFails = false; weightLoads = weightReuses = sessionCloses = 0;
@@ -798,15 +806,15 @@ static void acknowledgeAll(SttToken token, std::vector<SttTextChunk>* saved = nu
 }
 static void testQueuedBoundaryMetadata() {
   reset();
-  StreamRun run;
+  StreamRun run; hw1::stt::Segmenter segmenter; run.segmenter = &segmenter;  // the worker's is in PSRAM
   std::vector<int16_t> work(1600), queued(1600), voice(1600), silence(320);
   for(size_t i=0;i<voice.size();++i)voice[i]=(i&1)?1000:-1000;
   hw1::stt::SegmenterConfig config;
   config.max_segment_samples=1600;config.min_segment_samples=320;config.pre_roll_samples=0;
   config.end_silence_samples=320;config.min_voice_samples=160;config.forced_overlap_samples=160;
-  assert(run.segmenter.reset(work.data(),work.size(),config));run.slots[0].pcm=queued.data();
+  assert(run.segmenter->reset(work.data(),work.size(),config));run.slots[0].pcm=queued.data();
   auto queueAndCheck=[&](hw1::stt::SegmentEnd kind,bool continuation,size_t overlap) {
-    const auto* ready=run.segmenter.segment();assert(ready);
+    const auto* ready=run.segmenter->segment();assert(ready);
     const auto expected=*ready;
     assert(expected.end==kind&&expected.continuation==continuation&&expected.overlap_before_samples==overlap);
     assert(expected.new_voiced_samples>0);
@@ -820,12 +828,12 @@ static void testQueuedBoundaryMetadata() {
     assert(!memcmp(slot.pcm,original.data(),original.size()*sizeof(int16_t)));
     slot.state=StreamSlotState::Free;--gStt.snapshot.pendingAudio;
   };
-  assert(run.segmenter.push(voice.data(),320).consumed==320);
-  assert(run.segmenter.push(silence.data(),silence.size()).status==hw1::stt::SegmentStatus::Ready);
+  assert(run.segmenter->push(voice.data(),320).consumed==320);
+  assert(run.segmenter->push(silence.data(),silence.size()).status==hw1::stt::SegmentStatus::Ready);
   queueAndCheck(hw1::stt::SegmentEnd::Pause,false,0);
-  assert(run.segmenter.push(voice.data(),voice.size()).status==hw1::stt::SegmentStatus::Ready);
+  assert(run.segmenter->push(voice.data(),voice.size()).status==hw1::stt::SegmentStatus::Ready);
   queueAndCheck(hw1::stt::SegmentEnd::HardLimit,false,0);
-  assert(run.segmenter.push(voice.data(),1440).status==hw1::stt::SegmentStatus::Ready);
+  assert(run.segmenter->push(voice.data(),1440).status==hw1::stt::SegmentStatus::Ready);
   queueAndCheck(hw1::stt::SegmentEnd::HardLimit,true,160);
   assert(gStt.snapshot.segmentsCaptured==3&&!gStt.snapshot.pendingAudio);
 }
@@ -866,7 +874,7 @@ static void testOverlapAndDrain() {
   assert(engineCalls == 1 && snapshot(token).segmentsCaptured == 2);
   assert(sttRequestFinish(owner, token));
   await([] { return stopRequested.load(); }, "normal capture stop");
-  assert(sttRunActive(token) && allocationCount() == 9);
+  assert(sttRunActive(token) && allocationCount() == 10);
   assert(snapshot(token).segmentsCaptured == 3);
   enginePermits = UINT32_MAX; complete(token);
   auto s = snapshot(token); assert(s.state == SttState::Done && s.segmentsCompleted == 3 && s.recordedSamples == kCalibrationSamples + 360000);
@@ -963,12 +971,12 @@ static void testCancelAndJoin() {
   feed(token, 350000);
   assert(sttCancel(owner, token));
   await([] { return stopRequested.load(); }, "HAL asynchronous stop");
-  assert(sttRunActive(token) && allocationCount() == 9 && engineActive);
+  assert(sttRunActive(token) && allocationCount() == 10 && engineActive);
   assert(liveWeightCaches == 1 && sessionCloses == 0);
   rejectBegin();
   enginePermits = UINT32_MAX;
   await([] { return !engineActive.load(); }, "model cooperative join");
-  assert(sttRunActive(token) && allocationCount() == 9); // HAL still owns caller memory/lifecycle.
+  assert(sttRunActive(token) && allocationCount() == 10); // HAL still owns caller memory/lifecycle.
   assert(liveWeightCaches == 1 && sessionCloses == 0);
   releaseHALStop(); complete(token);
   assert(snapshot(token).state == SttState::Cancelled && engineCalls == 1 && !snapshot(token).pendingTexts);
@@ -1052,7 +1060,7 @@ static void testStopIntegrityRace() {
   assert(s.captureStackFreeBytes == 2048);
 }
 static void testFaults() {
-  for (unsigned allocation = 1; allocation <= 4; ++allocation) {
+  for (unsigned allocation = 1; allocation <= 5; ++allocation) {  // working, 3 slots, the segmenter
     reset(); failAllocation = allocation; const auto token = begin(); complete(token);
     assert(snapshot(token).state == SttState::Failed && strstr(snapshot(token).error, "PSRAM") && starts == 0);
   }
@@ -1160,23 +1168,98 @@ static void testAutoGainTuningApplied() {
   gSettings.pdmAmplify = 1; gSettings.pdmHpfHz = 36;
 }
 
+// test_stt_continuous.py --prev-onset builds as ENABLE_STT_LEVEL_ROBUST_ONSET 0.
+#if defined(ENABLE_STT_LEVEL_ROBUST_ONSET) && !ENABLE_STT_LEVEL_ROBUST_ONSET
+static constexpr bool kTestOnsetBuilt = false;
+#else
+static constexpr bool kTestOnsetBuilt = true;
+#endif
 // Each mic has its own detector profile, chosen for the mic the session uses.
 static void testDetectorProfilePerMic() {
+  // In a build without the onset, its four fields are 0 whatever the settings hold.
+  const auto want = [](std::array<int, 8> a) { if (!kTestOnsetBuilt) a[4] = a[5] = a[6] = a[7] = 0; return a; };
   const auto run = [](AudioSource requested) {
     reset(); allowedSamples = deliveredSamples = 0; readCounter = 0;
     SttToken token = 0; char error[96] = {};
     assert(sttBeginContinuous(owner, &token, error, sizeof(error), nullptr, requested) && token && !error[0]);
     started(token);
-    int sp = 0, si = 0, pc = 0, pre = -1;
-    sttDetectorProfileInUse(&sp, &si, &pc, &pre);
+    const SttDetectorProfile p = sttDetectorProfileInUse();
     feed(token, 16000); assert(sttRequestFinish(owner, token)); complete(token);
-    return std::array<int, 4>{sp, si, pc, pre};
+    return std::array<int, 8>{p.glasses, p.speechFloor, p.silenceFloor, p.noisePercentile,
+                              p.decisionPre, p.decisionGainPct, p.decisionModPct, p.decisionHold};
   };
-  gSettings.sttSpeechFloor = 40; gSettings.sttDecisionPre = 97;
-  gSettings.sttG2SpeechFloor = 60; gSettings.sttG2DecisionPre = 11;
-  assert((run(AUDIO_SRC_NONE) == std::array<int, 4>{40, 16, 25, 97}));       // auto: the onboard mic
-  assert((run(AUDIO_SRC_G2_LEFT) == std::array<int, 4>{60, 16, 25, 11}));    // the glasses' own profile
-  gSettings.sttSpeechFloor = 45; gSettings.sttDecisionPre = 0; gSettings.sttG2SpeechFloor = 45; gSettings.sttG2DecisionPre = 0;
+  gSettings.sttSpeechFloor = 40; gSettings.sttDecisionPre = 97; gSettings.sttDecisionMod = 300; gSettings.sttDecisionHold = true;
+  gSettings.sttG2SpeechFloor = 60; gSettings.sttG2DecisionPre = 11; gSettings.sttG2DecisionMod = 50;
+  assert((run(AUDIO_SRC_NONE) == want({0, 40, 16, 25, 97, 150, 300, 1})));   // auto: the onboard mic
+  assert((run(AUDIO_SRC_G2_LEFT) == want({1, 60, 16, 25, 11, 150, 101, 0}))); // the glasses' own profile
+  // With the onset off its noise controls and gain are reported as 0: they do not run.
+  gSettings.sttDecisionPre = 0; gSettings.sttDecisionMod = 300; gSettings.sttDecisionHold = true;
+  assert((run(AUDIO_SRC_NONE) == want({0, 40, 16, 25, 0, 0, 0, 0})));
+  // Out-of-range values (a hand-edited settings file) still give a session: clamped.
+  gSettings.sttDecisionPre = 250; gSettings.sttDecisionMod = 5000; gSettings.sttDecisionHold = false;
+  assert((run(AUDIO_SRC_NONE) == want({0, 40, 16, 25, 100, 150, 1000, 0})));
+  gSettings.sttSpeechFloor = 45; gSettings.sttDecisionPre = 0; gSettings.sttDecisionMod = 0; gSettings.sttDecisionHold = false;
+  gSettings.sttG2SpeechFloor = 45; gSettings.sttG2DecisionPre = 0; gSettings.sttG2DecisionMod = 0;
+}
+
+// The level-robust onset through the real broker: the speech repository's stream
+// pipeline case (tests/stt_stream_test.cpp decision_onset_pipeline, v3.1) on
+// HardwareOne's continuous worker. Low-frequency room tone with a quiet talker
+// whose energy sits near 2.5 kHz, below the 45-count raw floor: with sttdecisionpre
+// 97 it opens phrases and runs past the 10 s cap, so quiet-point continuations are
+// queued; every phrase is transcribed once on exactly its source samples (the fake
+// engine compares each with rawSample) and nothing is dropped. With 0 (the raw
+// level only) the same input opens nothing, and so does 97 in a build with
+// ENABLE_STT_LEVEL_ROBUST_ONSET 0 (test_stt_continuous.py --prev-onset).
+static void testLevelRobustOnset() {
+  constexpr bool onsetBuilt = kTestOnsetBuilt;
+  std::mt19937 rng(12); std::normal_distribution<double> n01(0, 1);
+  double room = 0, b1 = 0, b2 = 0;
+  std::vector<int16_t> x;
+  const auto add = [&](size_t n, double talker) {
+    for (size_t i = 0; i < n; ++i) {
+      room = 0.97 * room + 5 * 0.35 * n01(rng);
+      double v = room + 0.9 * n01(rng);
+      if (talker) { const double y = n01(rng) + b1 - 0.81 * b2; b2 = b1; b1 = y; v += talker * 0.33 * y; }
+      x.push_back(int16_t(std::lround(std::max(-32768.0, std::min(32767.0, v)))));
+    }
+  };
+  add(kCalibrationSamples + 24000, 0); add(23 * 16000, 35); add(40000, 0); add(32000, 35); add(48000, 0);
+  for (int pre : {0, 97}) {
+    reset(); scriptedPcm = x; gSettings.sttDecisionPre = pre;
+    const auto token = begin(); started(token);
+    const bool on = onsetBuilt && pre;
+    const SttDetectorProfile p = sttDetectorProfileInUse();
+    assert(p.decisionPre == (on ? pre : 0) && p.decisionGainPct == (on ? 150 : 0) && !p.decisionModPct && !p.decisionHold);
+    // One second at a time, each step's phrases done before the next: the broker has
+    // three audio slots, and an ordinary session fails on a full queue.
+    const uint64_t total = x.size() - kCalibrationSamples;
+    for (uint64_t at = 16000;; at += 16000) {
+      feed(token, std::min(at, total));
+      await([&] { const auto q = snapshot(token); return q.segmentsCompleted == q.segmentsCaptured || !q.workerActive; },
+            "onset phrases transcribed");
+      if (at >= total) break;
+    }
+    assert(sttRequestFinish(owner, token)); complete(token);
+    const auto s = snapshot(token);
+    assert(s.state == SttState::Done && s.recordedSamples == x.size());
+    std::vector<SttTextChunk> chunks; acknowledgeAll(token, &chunks);
+    unsigned forced = 0;
+    for (size_t i = 0; i < chunks.size(); ++i) {
+      assert(chunks[i].endSample > chunks[i].startSample && chunks[i].endSample - chunks[i].startSample <= kPhraseCap);
+      assert(!i || chunks[i].startSample >= chunks[i - 1].endSample);
+      forced += chunks[i].forcedBoundary;
+      assertTranscribedOnce(chunks[i].sequence);
+    }
+    if (on) {
+      assert(chunks.size() >= 3 && forced >= 2 && s.segmentsCaptured == chunks.size());
+    } else {
+      assert(chunks.empty() && engineCalls == 0 && s.segmentsCaptured == 0);
+    }
+    printf("  level-robust onset %s%s: %zu phrases (%u at the 10 s cap)\n", pre ? "97" : "off",
+           onsetBuilt ? "" : " (build without it)", chunks.size(), forced);
+  }
+  gSettings.sttDecisionPre = 0;
 }
 
 static void testRequestedSource() {
@@ -1624,7 +1707,7 @@ static void testSpeculativeFinal() {
 // capture-features: a failed pool allocation or feature task leaves capture-features off for the session
 // (batch frontend), never fails it; nothing leaks.
 static void testFeatureFaults() {
-  for (unsigned allocation = 6; allocation <= 9; ++allocation) {
+  for (unsigned allocation = 7; allocation <= 10; ++allocation) {  // after working, slots, segmenter, draft
     reset(); failAllocation = allocation; allVoice = false; voiceIntervals = {{0, 80000}};
     const unsigned before = cachedFinals.load();
     const auto token = begin(); started(token); feed(token, 8 * 16000);
@@ -1981,7 +2064,7 @@ static void testNativeRestarts() {
     const auto token = beginNativeWake(); started(token);
     feed(token, 8 * 16000);
     await([&] { return snapshot(token).segmentsCompleted == 1; }, "restarted native session final");
-    assert(allocationCount() == 9);  // working + 3 slots + draft + capture-features ring, workspace, 2 row caches
+    assert(allocationCount() == 10);  // working + 3 slots + segmenter + draft + capture-features ring, workspace, 2 row caches
     acknowledgeAll(token);
     assert(sttCancel(owner, token)); complete(token);  // an unexpected end: everything is freed (joinTasks)
     assert(allocationCount() == 0 && cachedRows.load() > rowsBefore);
@@ -2536,13 +2619,14 @@ static void testNativeUtterance() {
   // Saturation cannot take Conversate's drop-and-continue exception: losing
   // words from a question that may request an action must fail the run.
   StreamRun run; run.nativeGeneration = 7; run.singleUtterance = true;
+  hw1::stt::Segmenter segmenter; run.segmenter = &segmenter;  // the worker's is in PSRAM
   std::vector<int16_t> pcm(1600), voice(1600);
   for (size_t i = 0; i < voice.size(); ++i) voice[i] = i & 1 ? 1000 : -1000;
   hw1::stt::SegmenterConfig cfg;
   cfg.max_segment_samples = 1600; cfg.min_segment_samples = 320;
   cfg.pre_roll_samples = 0; cfg.min_voice_samples = 160; cfg.end_silence_samples = 320;
-  assert(run.segmenter.reset(pcm.data(), pcm.size(), cfg));
-  assert(run.segmenter.push(voice.data(), voice.size()).status == hw1::stt::SegmentStatus::Ready);
+  assert(run.segmenter->reset(pcm.data(), pcm.size(), cfg));
+  assert(run.segmenter->push(voice.data(), voice.size()).status == hw1::stt::SegmentStatus::Ready);
   for (auto& slot : run.slots) slot.state = StreamSlotState::Ready;
   assert(!sttQueueSegment(run) && run.failed && run.droppedSegments == 0);
   reset();
@@ -2577,6 +2661,7 @@ int main() {
   testSavedPdmTuningApplied(); puts("PASS saved PDM gain and high-pass are applied before STT opens the mic");
   testAutoGainTuningApplied(); puts("PASS automatic mode opens the mic with STT's own gain and 120 Hz high-pass");
   testDetectorProfilePerMic(); puts("PASS each mic uses its own detector profile (onboard vs G2)");
+  testLevelRobustOnset(); puts("PASS level-robust onset: a sub-floor HF talker opens phrases only with sttdecisionpre 97, cap continuations exact, none dropped");
   testRequestedSource(); puts("PASS per-session requested source overrides the setting and fails strictly");
   testKeepWarm(); puts("PASS keep-warm: park/adopt across runs, hold expiry and millis wrap, low-PSRAM release, warm load (awaited past 20 s) and its back-off");
 #if HW1_STT_TRIM_SILENCE

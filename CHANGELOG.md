@@ -211,6 +211,29 @@ everything user-visible since the v0.99.99.1 tag.
   and on the P4X-EYE each fresh reading is a LittleFS walk of about 1.3 s on the one web server
   task. They now ask once. Source-tested; the page was not run in a browser here.
 ### Changed
+- Local STT (P4) speech detector: the level-robust phrase onset from the speech repository's
+  version 3.1 replaces HardwareOne's own pre-emphasis judge. A phrase opens or stays open when
+  either the raw level or the level of the pre-emphasised audio (x[n] - 0.97 x[n-1], matched to the
+  room by an ambient gain re-learned on every idle frame, 150 %) passes its rule. The audio given
+  to the recognizer is unchanged (measured with the 15x5 gen2-25397). `sttdecisionpre` and
+  `sttg2decisionpre` keep their meaning and default (97), now 0-100, but the detector behind 97 is
+  new: recordings and A/B results made with the earlier judge are not reproduced by
+  `sttdecisionpre 97`; they need the previous image. 0 is the raw level only, the detector before
+  12 November 2026, bit for bit. Speech repository host replay with this model and `meeting.lm`:
+  1,568 -> 1,103 word errors over 2,614 words against raw only, 1,127 for the earlier judge; the
+  cost is more room noise inside phrases and about 2-3x more audio to the recognizer. New opt-in
+  noise controls, off by default (a noisy-room mode that gives back far speech): `sttdecisionmod`
+  (modulation gate, 0 or 101-1000) and `sttdecisionhold` (raw-latch hold), and the `sttg2*` pair for
+  the glasses. With the onset on, `noiseRms`, `thresholdRms` and `peakRms` in `stt status` are
+  square roots of the detector's energies; `stt status`, `sttdetector` and the `sttraw` sidecar now
+  name the detector (`"detector":"v3.1"`) and its gain and noise controls, and `stt_raw_replay`
+  takes `--decision-gain`, `--decision-mod` and `--decision-hold`. Build flag
+  `ENABLE_STT_LEVEL_ROBUST_ONSET 0` (configuration `p4-glasses-test-prev-onset`) runs every session
+  on the raw level only and leaves the saved settings alone. The segmenter, with the detector state,
+  now lives in PSRAM per session, which leaves more of the `stt` task's stack free than before
+  (low point 4,456 bytes against 3,192 on the bench). Host-tested (the speech repository's segmenter
+  decision and boundary tests ported, the onset through the continuous broker) and run on the bench
+  P4X-EYE on 16 November (14 sessions plus two at 1 ft: 0 audio overruns, decode queue at most 1).
 - Command names have one form: lower-case letters and digits. The 22 camelCase `mqtt*` commands and
   `httpAutoStart` / `httpsEnabled` are now `mqtthost`, `mqttpublishgps`, `httpautostart`,
   `httpsenabled` and so on. Command lookup ignores case, so the earlier spelling still runs; help,

@@ -8,6 +8,7 @@ python3 tools/build_config.py build xiao-openclaw
 python3 tools/build_config.py build p4-openclaw
 python3 tools/build_config.py build p4-full-debug
 python3 tools/build_config.py build p4-glasses-test
+python3 tools/build_config.py build p4-glasses-test-prev-onset
 python3 tools/build_config.py build p4-phone-pipe
 python3 tools/build_config.py build p4-phone-only
 python3 tools/build_config.py build p4-phone-no-camera-test
@@ -51,6 +52,13 @@ enables MQTT, Wi-Fi, and the MQTT settings page, and disables offline maps to
 fit the existing app partition. Both use the existing Sense assembly selection
 and board defaults. This trade-off is an explicit saved choice, not a dependency
 rule or an automatic size adjustment.
+
+`p4-glasses-test-prev-onset` is `p4-glasses-test` with `ENABLE_STT_LEVEL_ROBUST_ONSET 0`: every
+STT session runs the raw-level speech detector used before the level-robust onset, whatever
+`sttdecisionpre` / `sttg2decisionpre` hold (the speech repository's `sdkconfig.prev_onset`). The
+saved settings are not changed, so flashing `p4-glasses-test` again restores the onset;
+`sttdecisionpre 0` gives the same detector at run time on the ordinary image. HardwareOne's
+earlier pre-emphasis judge is in neither build; it needs the previous app image.
 
 `p4-openclaw` starts from the qualified `p4-glasses-test` speech profile and
 adds the LLM feature and HTTP source. It keeps local STT, the pinned 15x5 gen2

@@ -12,10 +12,26 @@ namespace hw1::stt {
 // speechFloor / silenceFloor / noisePercentile: the detector's tunable levels
 // (device settings sttSpeechFloor, sttSilenceFloor, sttNoisePercentile); the
 // defaults are the shipped values, so callers that pass nothing are unchanged.
+// decisionPreEmphasis / decisionModulationPct / decisionPreHold: the level-robust
+// onset and its two opt-in noise controls (sttdecisionpre, sttdecisionmod,
+// sttdecisionhold and the sttg2* three); 0 = raw level only, the 1a51eac
+// detector bit for bit. Any value the settings can hold gives a valid config.
+//
+// The level-robust onset's ambient gain, in percent of the learned ratio
+// (SegmenterConfig::decision_gain_pct). 150 is the value the onset was scored
+// with (docs/STT_ENGINE_INTEGRATION.md in the speech repository): the struct's
+// own default of 100 gave 17 more word errors over three bench recordings.
+inline constexpr uint16_t kContinuousDecisionGainPct = 150;
+// The speech detector's implementation, written into `stt status`, `sttdetector`,
+// the sttraw sidecar and stt_raw_replay's output: stt_segmenter.h as released in
+// the speech repository's version 3.1. A recording without this marker ran
+// HardwareOne's earlier pre-emphasis judge whenever its decision_pre was above 0.
+inline constexpr char kContinuousDetectorVersion[] = "v3.1";
 inline SegmenterConfig continuousSegmenterConfig(size_t rate, size_t maxSamples,
                                                  bool shortClose, bool singleUtterance,
                                                  uint16_t speechFloor = 45, uint16_t silenceFloor = 16,
-                                                 uint8_t noisePercentile = 25, uint8_t decisionPreEmphasis = 0) {
+                                                 uint8_t noisePercentile = 25, uint8_t decisionPreEmphasis = 0,
+                                                 uint16_t decisionModulationPct = 0, bool decisionPreHold = false) {
   SegmenterConfig config;
   config.adaptive = true;
   if (speechFloor == 0) speechFloor = 1;
@@ -24,8 +40,18 @@ inline SegmenterConfig continuousSegmenterConfig(size_t rate, size_t maxSamples,
   if (noisePercentile > 50) noisePercentile = 50;     // the segmenter rejects a percentile above the median
   config.adaptive_speech_floor = speechFloor;
   config.adaptive_silence_floor = silenceFloor;
-  // Pre-emphasis onset judge (device setting sttdecisionpre, 0 = off; 97 = the bench value).
-  config.decision_pre_emphasis = decisionPreEmphasis > 99 ? 99 : decisionPreEmphasis;
+  // Level-robust onset (device setting sttdecisionpre, 0 = raw level only; 97 = the
+  // default): a frame also opens or holds a phrase on the level of x[n] - C/100 x[n-1],
+  // matched to the room by an ambient gain re-learned while idle (stt_segmenter.h).
+  config.decision_pre_emphasis = decisionPreEmphasis > 100 ? 100 : decisionPreEmphasis;
+  config.decision_gain_pct = kContinuousDecisionGainPct;
+  // Opt-in noise controls, ignored while the onset is off. The modulation gate's
+  // ratio must exceed 1.00: 1..100 become 101 (the most permissive gate), above
+  // 1000 becomes 1000. Off by default; a noisy-room mode, not a default candidate.
+  if (decisionModulationPct > 1000) decisionModulationPct = 1000;
+  if (decisionModulationPct && decisionModulationPct <= 100) decisionModulationPct = 101;
+  config.decision_modulation_ratio_pct = decisionModulationPct;
+  config.decision_pre_hold_requires_raw = decisionPreHold;
   // Close a phrase after >=4 s (was the 8 s default) plus the usual 600 ms
   // pause, so text is finalised while the speaker is still talking and a
   // Stop leaves only a short tail. The 15x5 transcribes at ~0.45x real time,

@@ -354,11 +354,15 @@ struct Settings {
       sttSilenceFloor(16),
       sttNoisePercentile(25),
       sttDecisionPre(97),
+      sttDecisionMod(0),
+      sttDecisionHold(false),
       sttAutoGain(true),
       sttG2SpeechFloor(45),
       sttG2SilenceFloor(16),
       sttG2NoisePercentile(25),
       sttG2DecisionPre(97),
+      sttG2DecisionMod(0),
+      sttG2DecisionHold(false),
       micSource("auto"),  // Mic source preference: "auto" | "pdm" | "g2" (resolved at capture time)
       sttSaveTranscripts(false),
       noteMaxSec(HW1_NOTE_MAX_SEC_DEFAULT),
@@ -1051,14 +1055,24 @@ struct Settings {
   int sttSpeechFloor;
   int sttSilenceFloor;
   int sttNoisePercentile;
-  int sttDecisionPre;           // pre-emphasis onset judge coefficient x100 (0 = loudness only; default 97)
+  // Level-robust onset (stt/stt_segmenter.h decision_pre_emphasis): a phrase may also open
+  // on the pre-emphasised level x[n] - C/100 x[n-1], matched to the room. C x100, 0..100;
+  // 0 = raw level only (the detector before 12 Nov 2026); default 97. A build with
+  // ENABLE_STT_LEVEL_ROBUST_ONSET 0 runs every session at 0 and leaves this value alone.
+  int sttDecisionPre;
+  // Its opt-in noise controls (ignored while sttDecisionPre is 0; both off by default, a
+  // noisy-room mode): the modulation gate's ratio x100 (0 = off, 101..1000) and the raw-latch hold.
+  int sttDecisionMod;
+  bool sttDecisionHold;
   bool sttAutoGain;             // STT picks its own onboard-mic gain (agreed over sessions) and a 120 Hz high-pass
   // The same detector levels for sessions on the G2 glasses mic (LC3 over BLE, after the glasses' own
-  // AGC), tuned separately from the onboard mic (the four stt* fields above).
+  // AGC), tuned separately from the onboard mic (the stt* detector fields above).
   int sttG2SpeechFloor;
   int sttG2SilenceFloor;
   int sttG2NoisePercentile;
   int sttG2DecisionPre;
+  int sttG2DecisionMod;
+  bool sttG2DecisionHold;
   String micSource;             // Preferred mic source: "auto" | "pdm" | "g2" (resolved lazily against availability)
   bool sttSaveTranscripts;      // Save recognized text; latched when a local or Pi dictation session starts
   // QuickNote (System_QuickNote.cpp), read when a note starts / each pass:

@@ -141,8 +141,20 @@ bool sttAnySessionActive();
 // load or a low-PSRAM release). Only weights and the system LM are ever kept:
 // never audio, text or any session's state. Any task; never blocks.
 void sttKeepWarm(uint32_t holdMs, bool load);
-// Detector levels of the running (or last) continuous session: its mic's profile.
-void sttDetectorProfileInUse(int* speechFloor, int* silenceFloor, int* noisePercentile, int* decisionPre);
+// Speech-detector settings of a continuous session: its mic's profile (the stt*
+// settings for the onboard mic, the sttg2* ones for the glasses). The decision*
+// fields are what the segmenter runs with after stt/stt_continuous_config.h
+// (0 while the level-robust onset is off).
+struct SttDetectorProfile {
+  bool glasses = false;
+  int speechFloor = 45, silenceFloor = 16, noisePercentile = 25;
+  int decisionPre = 0;         // level-robust onset, pre-emphasis coefficient x100 (0 = raw level only)
+  int decisionGainPct = 0;     // its ambient gain in percent of the learned ratio
+  int decisionModPct = 0;      // modulation gate ratio x100 (0 = off)
+  bool decisionHold = false;   // raw-latch hold
+};
+// Detector settings of the running (or last) continuous session.
+SttDetectorProfile sttDetectorProfileInUse();
 // Main loop: ends a hold once it has passed (resident model or not) and frees
 // the resident model then, or at once when free PSRAM drops below a floor
 // that other features need. Self-throttled.
