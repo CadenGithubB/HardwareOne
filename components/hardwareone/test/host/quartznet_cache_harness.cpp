@@ -153,6 +153,14 @@ tinfl_status tinfl_decompress(tinfl_decompressor* d,const uint8_t* input,size_t*
     return more?TINFL_STATUS_NEEDS_MORE_INPUT:TINFL_STATUS_DONE;
 }
 namespace fbs { constexpr int MODEL_LOCATION_IN_FLASH_RODATA=1; }
+namespace fake { inline int compactExponents=0; }
+namespace hw1::stt {
+// stt_dl_metadata.h: held around every model the runtime constructs.
+struct DlCompactExponents {
+    DlCompactExponents() { ++fake::compactExponents; }
+    ~DlCompactExponents() { --fake::compactExponents; }
+};
+}
 namespace dl {
 constexpr int DATA_TYPE_INT8=1,MEMORY_MANAGER_GREEDY=1,RUNTIME_MODE_MULTI_CORE=1;
 struct Exponent { int value; bool is_valid()const{return true;} bool is_per_channel()const{return false;} explicit operator int()const{return value;} };
@@ -182,6 +190,7 @@ class Model {
         assert(fake::hasRaw(raw));assert(location==fbs::MODEL_LOCATION_IN_FLASH_RODATA);
         assert(index==0 && manager==MEMORY_MANAGER_GREEDY && !unused && !copy);
         assert(fake::state.models==0);++fake::state.models;++fake::state.created;
+        assert(fake::compactExponents==1);
         fake::state.events.push_back("create model");
         const auto shape=shapes.at(hw1::stt::identity::kInputName);
         assert(shape[0]==1 && shape[2]==1 && shape[3]==64);
@@ -475,7 +484,9 @@ struct FakeDecoder {
     int decodes=0, releases=0;
     size_t frames=0, capacity=0; int exponent=0; const int8_t* logits=nullptr;
     void* lm=nullptr; size_t lmBytes=0;   // PSRAM a real LM would keep resident
-    static DecodeResult decode(void* c,const int8_t* logits,size_t frames,int exponent,char* text,size_t cap,const SttLocalControl& control) {
+    static DecodeResult decode(void* c,const int8_t* logits,size_t frames,int exponent,char* text,size_t cap,const SttLocalControl& control,
+                               const DecodeScratch& scratch) {
+        assert(!scratch.data && !scratch.bytes);   // QuartzNet's runtime lends nothing
         auto& d=*static_cast<FakeDecoder*>(c);++d.decodes;
         assert(fake::state.phase==SttLocalPhase::Decoding && !control.cancelled(control.context));
         d.frames=frames;d.exponent=exponent;d.capacity=cap;d.logits=logits;

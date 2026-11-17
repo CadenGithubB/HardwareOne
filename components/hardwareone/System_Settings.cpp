@@ -3,6 +3,7 @@
 #include "System_UserSettings.h"   // Per-user settings declarations + transaction contract
 #include "System_SettingsWriteBatchCore.h"
 #include "System_ConfigLoad.h"   // ConfigLoad::Status — the load state that gates each writer
+#include "System_ArgParse.h"    // parseIntArg — sttdecisionmod refuses 1-100
 #include <cerrno>            // errno/ENOENT — distinguish absence from stat failure
 #include <cmath>             // floorf — whole-number check in settingsTypeAccepted
 #include <climits>           // INT_MIN/INT_MAX — same
@@ -2822,16 +2823,22 @@ static const SettingEntry sttSettingEntries[] = {
   { "sttspeechfloor", SETTING_INT, &gSettings.sttSpeechFloor, 45, 0, nullptr, 1, 32767, "Speech onset floor (frame RMS)", nullptr, false, nullptr, "sttspeechfloor" },
   { "sttsilencefloor", SETTING_INT, &gSettings.sttSilenceFloor, 16, 0, nullptr, 1, 32767, "Silence floor (frame RMS)", nullptr, false, nullptr, "sttsilencefloor" },
   { "sttnoisepercentile", SETTING_INT, &gSettings.sttNoisePercentile, 25, 0, nullptr, 0, 50, "Room-level percentile", nullptr, false, nullptr, "sttnoisepercentile" },
-  { "sttdecisionpre", SETTING_INT, &gSettings.sttDecisionPre, 97, 0, nullptr, 0, 99, "Pre-emphasis onset judge (x0.01, 0 = loudness only)", nullptr, false, nullptr, "sttdecisionpre" },
+  // Level-robust onset (stt/stt_segmenter.h): 0 = raw level only, 97 = default; its two
+  // opt-in noise controls (a noisy-room mode, off by default) apply only while it is on.
+  { "sttdecisionpre", SETTING_INT, &gSettings.sttDecisionPre, 97, 0, nullptr, 0, 100, "Level-robust onset (pre-emphasis x0.01, 0 = raw level only)", nullptr, false, nullptr, "sttdecisionpre" },
+  { "sttdecisionmod", SETTING_INT, &gSettings.sttDecisionMod, 0, 0, nullptr, 0, 1000, "Onset modulation gate (ratio x0.01, 0 = off, 101-1000)", nullptr, false, nullptr, "sttdecisionmod" },
+  { "sttdecisionhold", SETTING_BOOL, &gSettings.sttDecisionHold, 0, 0, nullptr, 0, 1, "Onset raw-latch hold", nullptr, false, nullptr, "sttdecisionhold" },
   // Automatic onboard-mic tuning for STT sessions (System_STT sttApplyMicTuning):
   // gain from the last sessions' levels, changed only when several agree, and a
   // 120 Hz high-pass. 0 = STT uses the saved pdmamplify / pdmhpf.
   { "sttautogain", SETTING_BOOL, &gSettings.sttAutoGain, 1, 0, nullptr, 0, 1, "Automatic mic gain for STT", nullptr, false, nullptr, "sttautogain" },
-  // G2 glasses-mic profile: the same four detector levels, used when a session runs on the glasses.
+  // G2 glasses-mic profile: the same detector settings, used when a session runs on the glasses.
   { "sttg2speechfloor", SETTING_INT, &gSettings.sttG2SpeechFloor, 45, 0, nullptr, 1, 32767, "G2 mic: speech onset floor (frame RMS)", nullptr, false, nullptr, "sttg2speechfloor" },
   { "sttg2silencefloor", SETTING_INT, &gSettings.sttG2SilenceFloor, 16, 0, nullptr, 1, 32767, "G2 mic: silence floor (frame RMS)", nullptr, false, nullptr, "sttg2silencefloor" },
   { "sttg2noisepercentile", SETTING_INT, &gSettings.sttG2NoisePercentile, 25, 0, nullptr, 0, 50, "G2 mic: room-level percentile", nullptr, false, nullptr, "sttg2noisepercentile" },
-  { "sttg2decisionpre", SETTING_INT, &gSettings.sttG2DecisionPre, 97, 0, nullptr, 0, 99, "G2 mic: pre-emphasis onset judge (x0.01, 0 = loudness only)", nullptr, false, nullptr, "sttg2decisionpre" },
+  { "sttg2decisionpre", SETTING_INT, &gSettings.sttG2DecisionPre, 97, 0, nullptr, 0, 100, "G2 mic: level-robust onset (pre-emphasis x0.01, 0 = raw level only)", nullptr, false, nullptr, "sttg2decisionpre" },
+  { "sttg2decisionmod", SETTING_INT, &gSettings.sttG2DecisionMod, 0, 0, nullptr, 0, 1000, "G2 mic: onset modulation gate (ratio x0.01, 0 = off, 101-1000)", nullptr, false, nullptr, "sttg2decisionmod" },
+  { "sttg2decisionhold", SETTING_BOOL, &gSettings.sttG2DecisionHold, 0, 0, nullptr, 0, 1, "G2 mic: onset raw-latch hold", nullptr, false, nullptr, "sttg2decisionhold" },
 };
 
 static const SettingsModule sttSettingsModule = {
@@ -3708,11 +3715,38 @@ SETTING_EDITOR_CMD(cmd_set_sttspeechfloor,       "sttspeechfloor")
 SETTING_EDITOR_CMD(cmd_set_sttsilencefloor,      "sttsilencefloor")
 SETTING_EDITOR_CMD(cmd_set_sttnoisepercentile,   "sttnoisepercentile")
 SETTING_EDITOR_CMD(cmd_set_sttdecisionpre,       "sttdecisionpre")
+SETTING_EDITOR_CMD(cmd_set_sttdecisionhold,      "sttdecisionhold")
 SETTING_EDITOR_CMD(cmd_set_sttautogain,          "sttautogain")
 SETTING_EDITOR_CMD(cmd_set_sttg2speechfloor,     "sttg2speechfloor")
 SETTING_EDITOR_CMD(cmd_set_sttg2silencefloor,    "sttg2silencefloor")
 SETTING_EDITOR_CMD(cmd_set_sttg2noisepercentile, "sttg2noisepercentile")
 SETTING_EDITOR_CMD(cmd_set_sttg2decisionpre,     "sttg2decisionpre")
+SETTING_EDITOR_CMD(cmd_set_sttg2decisionhold,    "sttg2decisionhold")
+// The onset modulation gate's ratio must exceed 1.00 (stt/stt_segmenter.h): the
+// editor refuses 1-100 (continuousSegmenterConfig lifts such a value read from a
+// settings file to 101, the most permissive gate).
+static const char* sttDecisionModCommand(const char* cmdKey, const String& a) {
+  const SettingEntry* e = findSettingByCmdKey(cmdKey);
+  if (!e) return "Error: setting not found for this command";
+  String value = a;
+  if (value.length() != a.length()) return "Error: Not enough memory to update setting";
+  value.trim();
+  int ratio = 0;
+  if (value.length() && parseIntArg(value.c_str(), 1, 100, ratio)) {
+    EXT_RAM_BSS_ATTR static char refused[96];
+    snprintf(refused, sizeof(refused), "Error: %s must be 0 (off) or 101..1000", cmdKey);
+    return refused;
+  }
+  return handleSettingCommand(e, a);
+}
+static const char* cmd_set_sttdecisionmod(const String& a) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  return sttDecisionModCommand("sttdecisionmod", a);
+}
+static const char* cmd_set_sttg2decisionmod(const String& a) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  return sttDecisionModCommand("sttg2decisionmod", a);
+}
 #endif
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
 SETTING_EDITOR_CMD(cmd_set_g2holdaction,         "g2holdaction")
@@ -3800,11 +3834,15 @@ const CommandEntry settingEditorCommands[] = {
   { "sttspeechfloor", "Continuous-STT speech onset floor in frame-RMS counts; applies to the next session.", true, cmd_set_sttspeechfloor, "Usage: sttspeechfloor [1-32767]" },
   { "sttsilencefloor", "Continuous-STT silence floor in frame-RMS counts; applies to the next session.", true, cmd_set_sttsilencefloor, "Usage: sttsilencefloor [1-32767]" },
   { "sttnoisepercentile", "Continuous-STT noise-window percentile used as the room level; applies to the next session.", true, cmd_set_sttnoisepercentile, "Usage: sttnoisepercentile [0-50]" },
-  { "sttdecisionpre", "Continuous-STT onset judge on pre-emphasised audio (coefficient x0.01; 0 = loudness only, 97 = default); applies to the next session.", true, cmd_set_sttdecisionpre, "Usage: sttdecisionpre [0-99]" },
+  { "sttdecisionpre", "Continuous-STT level-robust onset: a phrase may also open on the pre-emphasised level, matched to the room (coefficient x0.01; 0 = raw level only, 97 = default); applies to the next session.", true, cmd_set_sttdecisionpre, "Usage: sttdecisionpre [0-100]" },
+  { "sttdecisionmod", "Continuous-STT onset noise control: the pre-emphasised level votes only while its last 500 ms is modulated (ratio x0.01; 0 = off, the default). A noisy-room mode that gives back far speech; applies to the next session.", true, cmd_set_sttdecisionmod, "Usage: sttdecisionmod [0|101-1000]" },
+  { "sttdecisionhold", "Continuous-STT onset noise control: a phrase only the pre-emphasised level opened needs the raw level to reach its onset rule before raw votes hold it open (0 = off, the default); applies to the next session.", true, cmd_set_sttdecisionhold, "Usage: sttdecisionhold [0|1]" },
   { "sttg2speechfloor", "G2 glasses-mic profile: speech onset floor in frame-RMS counts; applies to the next session.", true, cmd_set_sttg2speechfloor, "Usage: sttg2speechfloor [1-32767]" },
   { "sttg2silencefloor", "G2 glasses-mic profile: silence floor in frame-RMS counts; applies to the next session.", true, cmd_set_sttg2silencefloor, "Usage: sttg2silencefloor [1-32767]" },
   { "sttg2noisepercentile", "G2 glasses-mic profile: noise-window percentile used as the room level; applies to the next session.", true, cmd_set_sttg2noisepercentile, "Usage: sttg2noisepercentile [0-50]" },
-  { "sttg2decisionpre", "G2 glasses-mic profile: onset judge on pre-emphasised audio (x0.01; 0 = loudness only); applies to the next session.", true, cmd_set_sttg2decisionpre, "Usage: sttg2decisionpre [0-99]" },
+  { "sttg2decisionpre", "G2 glasses-mic profile: level-robust onset (x0.01; 0 = raw level only, 97 = default); applies to the next session.", true, cmd_set_sttg2decisionpre, "Usage: sttg2decisionpre [0-100]" },
+  { "sttg2decisionmod", "G2 glasses-mic profile: onset modulation gate (ratio x0.01; 0 = off, the default); applies to the next session.", true, cmd_set_sttg2decisionmod, "Usage: sttg2decisionmod [0|101-1000]" },
+  { "sttg2decisionhold", "G2 glasses-mic profile: onset raw-latch hold (0 = off, the default); applies to the next session.", true, cmd_set_sttg2decisionhold, "Usage: sttg2decisionhold [0|1]" },
   { "sttautogain", "STT picks its own onboard-mic gain (changed only when several sessions agree) and a 120 Hz high-pass; 0 = use pdmamplify/pdmhpf. Applies to the next session.", true, cmd_set_sttautogain, "Usage: sttautogain [0|1]" },
 #endif
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES

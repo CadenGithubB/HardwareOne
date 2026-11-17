@@ -34,6 +34,10 @@ using hw1::stt::sttPsramFree;
 #include "System_STTVocabulary.h"
 #include "esp_heap_caps.h"
 #include "stt/stt_lm.h"
+#if HW1_STT_CITRINET
+#include "stt/citrinet_runtime.h"
+#include "stt/stt_lm_wordpiece.h"
+#endif
 #include <algorithm>
 #endif
 namespace {
@@ -56,6 +60,21 @@ size_t readModel(void* context,void* dest,size_t bytes) {
 namespace lm=hw1::stt::lm;
 static_assert(HW1_STT_LM_STRENGTH>=0.0f && HW1_STT_LM_STRENGTH<=1.0f,
               "HW1_STT_LM_STRENGTH must be finite and within [0, 1]");
+#if HW1_STT_CITRINET
+// Citrinet decodes meeting.lm through the word-piece prefix beam search (stt/stt_lm_wordpiece.h) with its own
+// LM weight and word bonus, tuned on the 600 held-out dev clips of the speech repository's export kit
+// (private/citrinet-lm/tune.py: greedy 14.44% -> 12.73%); the file's header values are QuartzNet's. Beam
+// width, OOV score, prune and hotword bonus stay the file's. HW1_STT_LM_STRENGTH scales all three as for
+// QuartzNet.
+constexpr double kCitrinetLmAlpha=0.2, kCitrinetLmBeta=0.75;
+lm::wordpiece::Params citrinetParams(const lm::Lm& view) {
+    lm::wordpiece::Params p=lm::wordpiece::fileParams(view);
+    p.alpha=kCitrinetLmAlpha*HW1_STT_LM_STRENGTH;
+    p.beta=kCitrinetLmBeta*HW1_STT_LM_STRENGTH;
+    p.hotwordBonus*=HW1_STT_LM_STRENGTH;
+    return p;
+}
+#endif
 // The microSD copy wins when present, so the LM can be swapped with the card
 // (like the 15x5 model) and the onboard copy removed to free LittleFS. The
 // hotword list beside it is the user vocabulary (System_STTVocabulary.h); the
@@ -66,11 +85,21 @@ constexpr LmFiles kLmFiles[]={
     {"/sd/STT Models/meeting.lm","/sd/STT Models/custom_words.txt"},
     {"/STT Models/meeting.lm","/STT Models/custom_words.txt"},
 };
-// Free PSRAM kept beside a resident LM: a warm worst-case (30 s) runtime call
-// needs ~5 MiB; the beam workspace is separately checked per decode.
-constexpr size_t kLmMaxBytes=32u<<20, kLmReserveBytes=6u<<20;
+// Free PSRAM kept beside a resident LM: a warm worst-case (30 s) QuartzNet call
+// needs ~5 MiB. A Citrinet session has ~7.6 MB here beside 22.7 MB of weights;
+// its resident model then takes 1.5 MB and returns 1.3 MB of the weights image
+// (citrinet_runtime.cpp, kResidentKeepBytes), so it keeps 3 MiB. The optional
+// speaker labels and feature pool check their own room afterwards; the beam
+// workspace is checked per decode (Citrinet: lent from the model's arena).
+constexpr size_t kLmMaxBytes=32u<<20, kLmReserveBytes=(HW1_STT_CITRINET ? 3u : 6u)<<20;
+// HW1_STT_CITRINET_LM=0 builds Citrinet without the language model: greedy
+// word-piece decoding, meeting.lm is not read (2.5 MB of PSRAM less).
+#ifndef HW1_STT_CITRINET_LM
+#define HW1_STT_CITRINET_LM 1
+#endif
+constexpr bool kLmEnabled=!HW1_STT_CITRINET || HW1_STT_CITRINET_LM;
 enum class LmState : uint8_t { Unloaded, Ready, Unavailable };
-enum LmNote : uint32_t { kLmMissing=1, kLmInvalid=2, kLmMemory=4, kLmLoaded=8, kLmDecode=16, kLmShed=32, kLmWords=64, kLmLegacyWords=128 };
+enum LmNote : uint32_t { kLmMissing=1, kLmInvalid=2, kLmMemory=4, kLmLoaded=8, kLmDecode=16, kLmShed=32, kLmWords=64, kLmLegacyWords=128, kLmOff=256 };
 std::atomic<uint32_t> gLmNoted{0};
 bool firstNote(LmNote note) { return !(gLmNoted.fetch_or(note)&note); }
 struct LanguageModel {
@@ -123,6 +152,10 @@ void loadCustomWords(LanguageModel& model) {
 bool loadLanguageModel(LanguageModel& model,const SttLocalControl& control) {
     model.state=LmState::Unavailable;
     model.files=nullptr;
+    if(!kLmEnabled) {
+        if(firstNote(kLmOff))INFO_SYSTEMF("[STT] Citrinet build without the language model (HW1_STT_CITRINET_LM 0); using greedy decoding");
+        return true;
+    }
     // trusted: fixed LM path beside the pinned model; content is SHA-checked.
     // Each candidate LM lives on its own tier; confine the probe and the read
     // to that tier's model folder.
@@ -163,27 +196,37 @@ bool loadLanguageModel(LanguageModel& model,const SttLocalControl& control) {
     // trusted: an existence probe of the retired fixed hotword file beside this LM.
     if(VFS::existsGuarded(model.files->legacyWords,authFor(model.files->legacyWords)) && firstNote(kLmLegacyWords))
         WARN_SYSTEMF("[STT] %s is no longer read; add its words with sttvocab (user_vocab.tsv)",model.files->legacyWords);
+#if HW1_STT_CITRINET
+    // The word-piece decoder's own weight and bonus (citrinetParams), not the file's QuartzNet values.
+    const double alpha0=kCitrinetLmAlpha, beta0=kCitrinetLmBeta;
+    const char* decoderName="wordpiece";
+#else
+    const double alpha0=double(model.view.alpha()), beta0=double(model.view.beta());
+    const char* decoderName="char";
+#endif
     if(firstNote(kLmLoaded))
-        ESP_LOGI("STT","Language model %s: %u words, %u bigrams, %u trigrams, beam %u, %u custom words, %u bytes, "
+        ESP_LOGI("STT","Language model %s (%s decoder): %u words, %u bigrams, %u trigrams, beam %u, %u custom words, %u bytes, "
                       "lm_strength=%.3f alpha=%.3f->%.3f beta=%.3f->%.3f hotword_bonus=%.3f->%.3f",
-                     kLmPath,unsigned(model.view.vocab()),unsigned(model.view.bigrams()),unsigned(model.view.trigrams()),
+                     kLmPath,decoderName,unsigned(model.view.vocab()),unsigned(model.view.bigrams()),unsigned(model.view.trigrams()),
                      unsigned(model.view.beamWidth()),unsigned(model.words ? model.words->size() : 0),unsigned(bytes),
-                     double(HW1_STT_LM_STRENGTH),double(model.view.alpha()),double(model.view.alpha())*HW1_STT_LM_STRENGTH,
-                     double(model.view.beta()),double(model.view.beta())*HW1_STT_LM_STRENGTH,
+                     double(HW1_STT_LM_STRENGTH),alpha0,alpha0*HW1_STT_LM_STRENGTH,
+                     beta0,beta0*HW1_STT_LM_STRENGTH,
                      double(model.view.hotwordBonus()),double(model.view.hotwordBonus())*HW1_STT_LM_STRENGTH);
     return true;
 }
 hw1::stt::DecodeResult decodeWithLanguageModel(void* context,const int8_t* logits,size_t frames,int exponent,
-                                               char* text,size_t capacity,const SttLocalControl& control) {
+                                               char* text,size_t capacity,const SttLocalControl& control,
+                                               const hw1::stt::DecodeScratch& scratch) {
     using hw1::stt::DecodeResult;
     auto& model=*static_cast<LanguageModel*>(context);
     const uint32_t call=++model.decodeCalls;
     lm::DecodeStats stats;
     auto note=[&](const char* status) {
-        ESP_LOGI("STT","TL lm_decode call=%lu frames=%u strength=%.3f status=%s history_start=%d history_end=%d",
+        ESP_LOGI("STT","TL lm_decode call=%lu frames=%u strength=%.3f status=%s history_start=%d history_end=%d workspace=%u lent=%d",
                  (unsigned long)call,unsigned(frames),double(HW1_STT_LM_STRENGTH),status,
                  stats.startHistoryWords==UINT8_MAX ? -1 : int(stats.startHistoryWords),
-                 stats.endHistoryWords==UINT8_MAX ? -1 : int(stats.endHistoryWords));
+                 stats.endHistoryWords==UINT8_MAX ? -1 : int(stats.endHistoryWords),
+                 unsigned(stats.workspaceBytes),stats.workspaceLent ? 1 : 0);
     };
     if(model.state==LmState::Unloaded && !loadLanguageModel(model,control)) {
         note("load_cancelled"); return DecodeResult::Cancelled;
@@ -191,8 +234,18 @@ hw1::stt::DecodeResult decodeWithLanguageModel(void* context,const int8_t* logit
     if(model.state!=LmState::Ready) { note("unavailable"); return DecodeResult::Fallback; }
     // Between phrases only: an edit never changes a decode already running.
     if(model.wordsGeneration!=sttVocabularyGeneration())loadCustomWords(model);
+#if HW1_STT_CITRINET
+    const lm::wordpiece::Pieces* pieces=hw1::stt::citrinetPieces();   // set by the runtime before it decodes
+    if(!pieces) { note("unavailable"); return DecodeResult::Fallback; }
+    const lm::DecodeStatus status=lm::wordpiece::decode(logits,frames,size_t(hw1::stt::identity::kOutputClasses),exponent,
+                                                        model.view,*pieces,citrinetParams(model.view),model.words,text,
+                                                        capacity,{control.context,control.cancelled},&stats,
+                                                        scratch.data,scratch.bytes);
+#else
+    (void)scratch;   // the character search keeps its own workspace
     const lm::DecodeStatus status=lm::decode(logits,frames,exponent,model.view,model.words,text,capacity,
                                              {control.context,control.cancelled},0,&stats,HW1_STT_LM_STRENGTH);
+#endif
     switch(status) {
         case lm::DecodeStatus::Ok: note("ok"); break;
         case lm::DecodeStatus::InvalidArgument: note("invalid_argument"); break;
@@ -203,8 +256,14 @@ hw1::stt::DecodeResult decodeWithLanguageModel(void* context,const int8_t* logit
     if(status==lm::DecodeStatus::Ok)return DecodeResult::Decoded;
     if(status==lm::DecodeStatus::Cancelled)return DecodeResult::Cancelled;
     // Workspace allocation failure or an over-long result: greedy decides.
+#if HW1_STT_CITRINET
+    const size_t workspace=stats.workspaceBytes ? stats.workspaceBytes
+        : lm::wordpiece::workspace_bytes(frames,model.view.beamWidth(),size_t(hw1::stt::identity::kOutputClasses));
+#else
+    const size_t workspace=lm::workspace_bytes(frames,model.view.beamWidth());
+#endif
     if(firstNote(kLmDecode))WARN_SYSTEMF("[STT] Language-model decode failed (%d, %u frames, %u workspace bytes); using greedy decoding",
-                                          int(status),unsigned(frames),unsigned(lm::workspace_bytes(frames,model.view.beamWidth())));
+                                          int(status),unsigned(frames),unsigned(workspace));
     return DecodeResult::Fallback;
 }
 bool releaseLanguageModel(void* context) {
@@ -363,7 +422,11 @@ bool readFully(File& file,uint8_t* dest,size_t bytes) {
 }
 constexpr const char* kSpeakerPath="/sd/STT Models/speaker.spk";
 constexpr const char* kSpeakerFixturePath="/sd/STT Models/speaker_fixture.bin";
-constexpr size_t kSpeakerMaxBytes=16u<<20, kSpeakerArenaEstimate=1u<<20, kSpeakerKeepFree=3u<<20;
+// kSpeakerKeepFree: PSRAM the speaker model must leave for the session's phrases. A QuartzNet session keeps
+// 3 MiB. A Citrinet session with the LM has 5.3-5.6 MB here (bench, 16 Nov 2026) and the speaker model takes
+// 3.33 MB of it; what a phrase then needs at once is its features and call margin (0.6 MB: the LM search works
+// in the acoustic model's arena), so 1.5 MiB. The feature pool keeps its own 2 MiB and stays out when short.
+constexpr size_t kSpeakerMaxBytes=16u<<20, kSpeakerArenaEstimate=1u<<20, kSpeakerKeepFree=(HW1_STT_CITRINET ? 3u<<19 : 3u<<20);
 // Diagnostics: the fixture (PCM + the Mac's embedding) kept in PSRAM, re-embedded before every background
 // job: a cosine below ~0.99 during a session means the trunk's result was corrupted (e.g. PIE state across a
 // context switch), not the audio.

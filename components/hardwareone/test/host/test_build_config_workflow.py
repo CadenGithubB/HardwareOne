@@ -70,6 +70,52 @@ class BuildConfigurationWorkflow(unittest.TestCase):
         self.assertIs(shown["sdkconfig"]["CONFIG_BT_ENABLED"], False)
         self.assertEqual(self.state(), before)
 
+    def describe(self, **text):
+        described = dict(self.original, **text)
+        self.path.write_text(build_config.encode(described))
+        return described
+
+    def test_title_and_summary_are_shown_listed_and_kept_by_an_edit(self):
+        described = self.describe(title="Bench device", summary="What the bench device is for.")
+        self.assertIn("Title: Bench device\nWhat it is for: What the bench device is for.\n", self.success("show", "device"))
+        self.assertEqual(json.loads(self.success("list", "configurations", "--json")),
+                         [{"name": "device", "board": "xiao_s3", "title": "Bench device",
+                           "summary": "What the bench device is for."}])
+        self.assertEqual(self.success("list", "configurations"),
+                         "device\txiao_s3\tBench device: What the bench device is for.\n")
+        self.success("edit", "device", "--set", "ENABLE_MAPS=0")
+        self.assertEqual(build_config.load("device"), dict(described, features={"ENABLE_MQTT": 0, "ENABLE_MAPS": 0}))
+
+    def test_a_copy_is_a_new_selection_without_the_original_description(self):
+        self.describe(title="Bench device", summary="What the bench device is for.")
+        self.success("create", "copy", "--from", "device")
+        self.assertEqual(build_config.load("copy"), self.original)
+
+    def test_configurations_can_be_listed_for_one_board(self):
+        build_config.config_path("feather").write_text(build_config.encode({"board": "feathers3", "features": {}}))
+        self.assertEqual(self.success("list", "configurations", "--board", "feathers3"), "feather\tfeathers3\n")
+        self.assertEqual(self.success("list", "configurations", "--board", "xiao_s3"), "device\txiao_s3\n")
+        for arguments in (("list", "configurations", "--board", "missing"), ("list", "features", "--board", "xiao_s3")):
+            status, _, error = self.cli(*arguments)
+            self.assertNotEqual(status, 0)
+            self.assertTrue(error)
+
+    def test_descriptions_are_one_bounded_line_and_nothing_else_is_accepted(self):
+        for bad in ({"title": ""}, {"title": " padded"}, {"title": "x" * 61}, {"summary": "two\nlines"},
+                    {"summary": 5}, {"summary": "x" * 241}, {"notes": "another key"}):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                build_config.validate(dict(self.original, **bad))
+        build_config.validate(dict(self.original, title="x" * 60, summary="x" * 240))
+
+    def test_a_description_is_not_a_build_input(self):
+        build_config.prepare("device", "xiao_s3")
+        directory = build_config.build_dir("device")
+        before = {path.name: (path.read_bytes(), path.stat().st_mtime_ns) for path in directory.iterdir()}
+        self.describe(title="Bench device", summary="What the bench device is for.")
+        build_config.prepare("device", "xiao_s3")
+        self.assertEqual({path.name: (path.read_bytes(), path.stat().st_mtime_ns) for path in directory.iterdir()}, before)
+        self.assertEqual(json.loads((directory / "configuration.json").read_text()), self.original)
+
     def test_catalogs_discover_valid_inputs_without_building_or_inventing_defaults(self):
         # OTA fragments lack a hardware target marker and are not board choices.
         (self.root / "boards/xiao_s3.ota.defaults").write_text("CONFIG_EXAMPLE=y\n")
@@ -82,10 +128,11 @@ class BuildConfigurationWorkflow(unittest.TestCase):
                 patch.dict(os.environ, {"PATH": "", "IDF_PATH": ""}):
             catalogs = {kind: json.loads(self.success("list", kind, "--json"))
                         for kind in ("boards", "configurations", "features", "sdk")}
-        self.assertEqual(catalogs["boards"], [
-            {"name": "feathers3", "target": "esp32s3"},
-            {"name": "xiao_s3", "target": "esp32s3"},
-        ])
+        # A board row also carries its plain name and hardware line from the catalogue.
+        self.assertEqual([(row["name"], row["target"]) for row in catalogs["boards"]],
+                         [("feathers3", "esp32s3"), ("xiao_s3", "esp32s3")])
+        self.assertEqual(catalogs["boards"][1]["title"], "Seeed XIAO ESP32-S3 (Sense)")
+        self.assertTrue(all(set(row) == {"name", "target", "title", "hardware"} for row in catalogs["boards"]))
         self.assertEqual(catalogs["configurations"], [{"name": "device", "board": "xiao_s3"}])
         self.assertEqual({row["name"] for row in catalogs["features"]}, build_config.editable_choices())
         self.assertEqual({row["name"] for row in catalogs["sdk"]}, build_config.sdk_choices())

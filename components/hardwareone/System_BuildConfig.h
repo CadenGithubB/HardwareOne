@@ -351,11 +351,35 @@
 #define ENABLE_LOCAL_STT        0
 #endif
 
-// Select the pinned 15x5 gen2 acoustic model on SD instead of the 5x5 model in
-// LittleFS. The model path and generated identity change together. On ESP32-P4
-// local STT requires it (and so the microSD card): the 5x5 file is not published.
+// Local STT acoustic model: exactly one per build (stt/stt_model_selection.h).
+// Citrinet-384 (2000 h, WordPiece output with its own word-piece LM decoder,
+// stt/citrinet_runtime.cpp, "/sd/STT Models/citrinet384-2000h.p4.stt") is the
+// default. QuartzNet (stt/quartznet_runtime.cpp, the 15x5 gen2 with
+// ENABLE_STT_MODEL_15X5_GEN2) is built instead with ENABLE_STT_MODEL_QUARTZNET 1
+// and ENABLE_STT_MODEL_CITRINET 0. CMake reads both switches as text: the other
+// model's runtime, front end and ESP-DL kernels are not compiled at all.
+#ifndef ENABLE_STT_MODEL_CITRINET
+#define ENABLE_STT_MODEL_CITRINET 1
+#endif
+#ifndef ENABLE_STT_MODEL_QUARTZNET
+#define ENABLE_STT_MODEL_QUARTZNET 0
+#endif
+
+// QuartzNet only: the pinned 15x5 gen2 acoustic model on SD instead of the 5x5
+// model in LittleFS. The model path and generated identity change together. On
+// ESP32-P4 a QuartzNet build requires it (and so the microSD card): the 5x5 file
+// is not published.
 #ifndef ENABLE_STT_MODEL_15X5_GEN2
 #define ENABLE_STT_MODEL_15X5_GEN2 0
+#endif
+
+// The continuous-STT level-robust onset (stt/stt_segmenter.h decision_pre_emphasis,
+// settings sttdecisionpre / sttg2decisionpre, default 97). 0 = every session runs the
+// raw level only, the detector before 12 Nov 2026, whatever those settings hold: the
+// speech repository's sdkconfig.prev_onset. Saved settings are left as they are, so
+// the default build runs the onset again after a reflash.
+#ifndef ENABLE_STT_LEVEL_ROBUST_ONSET
+#define ENABLE_STT_LEVEL_ROBUST_ONSET 1
 #endif
 
 // Local STT language-model influence: scale its probability weight, word
@@ -1463,14 +1487,28 @@
 #if ENABLE_SD_CARD && ENABLE_SDMMC_CARD && (!(HW_BOARD_P4X_EYE || HW_BOARD_WAVESHARE_P4_TOUCH) || !defined(CONFIG_IDF_TARGET_ESP32P4))
   #error "SDMMC card requires a supported ESP32-P4 board profile"
 #endif
+// One acoustic model per local-STT build (ENABLE_STT_MODEL_CITRINET, the default,
+// or ENABLE_STT_MODEL_QUARTZNET); both run from the microSD card on an ESP32-P4.
+#if ENABLE_LOCAL_STT && defined(CONFIG_IDF_TARGET_ESP32P4)
+  #if ENABLE_STT_MODEL_CITRINET && ENABLE_STT_MODEL_QUARTZNET
+    #error "Local STT builds one acoustic model: set ENABLE_STT_MODEL_CITRINET 1 (default) or ENABLE_STT_MODEL_QUARTZNET 1, not both."
+  #elif !ENABLE_STT_MODEL_CITRINET && !ENABLE_STT_MODEL_QUARTZNET
+    #error "Local STT needs an acoustic model: set ENABLE_STT_MODEL_CITRINET 1 (default) or ENABLE_STT_MODEL_QUARTZNET 1."
+  #endif
+  #if !ENABLE_SD_CARD
+    #error "Local STT on ESP32-P4 runs its model from the microSD card: set ENABLE_SDMMC_CARD 1, or ENABLE_LOCAL_STT 0."
+  #endif
+#endif
+#if ENABLE_STT_MODEL_15X5_GEN2 && !ENABLE_STT_MODEL_QUARTZNET
+  #error "ENABLE_STT_MODEL_15X5_GEN2 selects QuartzNet's 15x5 model: set ENABLE_STT_MODEL_QUARTZNET 1 and ENABLE_STT_MODEL_CITRINET 0, or remove it (Citrinet is the default model)."
+#endif
 #if ENABLE_STT_MODEL_15X5_GEN2 && (!ENABLE_LOCAL_STT || !defined(CONFIG_IDF_TARGET_ESP32P4) || !ENABLE_SD_CARD)
   #error "ENABLE_STT_MODEL_15X5_GEN2 requires ENABLE_LOCAL_STT, ESP32-P4 and ENABLE_SD_CARD."
 #endif
-// Local STT on an ESP32-P4 runs the published 15x5 gen2 model from the microSD
-// card; the 5x5 LittleFS model has no published file. So enabling local STT on
-// a P4 needs the card (the check above) and this model.
-#if ENABLE_LOCAL_STT && defined(CONFIG_IDF_TARGET_ESP32P4) && !ENABLE_STT_MODEL_15X5_GEN2
-  #error "Local STT on ESP32-P4 runs the 15x5 gen2 model from the microSD card: set ENABLE_SDMMC_CARD 1 and ENABLE_STT_MODEL_15X5_GEN2 1, or ENABLE_LOCAL_STT 0."
+// A QuartzNet build on an ESP32-P4 runs the published 15x5 gen2 model from the
+// microSD card; the 5x5 LittleFS model has no published file.
+#if ENABLE_LOCAL_STT && defined(CONFIG_IDF_TARGET_ESP32P4) && ENABLE_STT_MODEL_QUARTZNET && !ENABLE_STT_MODEL_15X5_GEN2
+  #error "A QuartzNet local-STT build on ESP32-P4 runs the 15x5 gen2 model from the microSD card: set ENABLE_STT_MODEL_15X5_GEN2 1."
 #endif
 
 // =============================================================================

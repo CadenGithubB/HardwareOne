@@ -77,7 +77,7 @@ without editing shared headers.
 | FeatherS3[D] | Its onboard MAX17048 requires I2C; the build diagnoses a disabled bus. |
 | Bluetooth SDK | Shared default on; QT Py defaults off through `presets/qtpy_esp32.sdkconfig.defaults`. Saved SDK choices can override either default. |
 
-`xiao-no-bluetooth` disables both the application feature and SDK Bluetooth
+`xiao-default` disables both the application feature and SDK Bluetooth
 support. `xiao-display` selects the supported SSD1306 backend. Missing bus,
 backend and assembly-pin requirements produce build errors. Physical flash,
 PSRAM, radio wiring and security settings remain outside the saved feature API.

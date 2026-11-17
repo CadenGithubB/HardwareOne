@@ -59,7 +59,7 @@ Feature flags are declared, with their defaults, in `components/hardwareone/Syst
 | `ENABLE_LLM_SOURCE_ONBOARD` | Set to `1` to build the tiny transformer that runs on this chip (needs PSRAM). Requires a model file on LittleFS or SD card. |
 | `ENABLE_LLM_SOURCE_CM5` | Set to `1` to answer from the Raspberry Pi co-processor over the UART link. Requires a board with a `UART_LINK_PORT` (all supported boards). |
 | `ENABLE_LLM_SOURCE_HTTP` | Set to `1` to answer from an OpenClaw server at a configured HTTP(S) endpoint. Requires WiFi; no local model. |
-| `ENABLE_LOCAL_STT` | On-device speech-to-text on the ESP32-P4 boards (the engine is compiled only for that target). Needs a model file on the device at run time; `ENABLE_STT_MODEL_15X5_GEN2` selects the published 15×5 model on the microSD card. Where the file comes from and how to install it: [README, Local speech-to-text model](../README.md#local-speech-to-text-model-esp32-p4) |
+| `ENABLE_LOCAL_STT` | On-device speech-to-text on the ESP32-P4 boards (the engine is compiled only for that target). Needs a model file on the microSD card at run time: Citrinet-384 by default (`ENABLE_STT_MODEL_CITRINET`), or the published QuartzNet 15×5 with `ENABLE_STT_MODEL_QUARTZNET=1` and `ENABLE_STT_MODEL_CITRINET=0` (one model per build). Where the file comes from and how to install it: [README, Local speech-to-text model](../README.md#local-speech-to-text-model-esp32-p4) |
 | `ENABLE_RASPBERRY_PI_HOST_POWER` | Set to `1` to build `cm5 power` - profile, reboot, halt, suspend, timed sleep of the Pi with confirmed request/ACK |
 | `ENABLE_RASPBERRY_PI_HOST_FAN` | Set to `1` to build `cm5 fan` - quiet/auto/max with temperature, PWM, RPM and health readback |
 

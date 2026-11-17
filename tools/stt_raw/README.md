@@ -31,10 +31,25 @@ clang++ -std=c++17 -O2 -Icomponents/hardwareone components/hardwareone/test/host
 ```bash
 ./stt_raw_replay raw_1a2b3c4d.pcm --sidecar raw_1a2b3c4d.json > base.json
 ./stt_raw_replay raw_1a2b3c4d.pcm --speech-floor 24 --silence-floor 8 --cut-dir cuts-24 > f24.json
+./stt_raw_replay raw_1a2b3c4d.pcm --sidecar raw_1a2b3c4d.json --decision-pre 97 > onset.json
 ```
 
-- **No overrides:** the segments must equal the device's `TL boundary` lines. Check that first;
-  it proves the replay is exact.
+- **Detector:** with no detector flags the replay uses the raw level only (`decision_pre` 0), so
+  stored raw-only arms reproduce; the device default is the level-robust onset, so a score arm
+  for it needs `--decision-pre 97` (gain 150 comes with it). To reproduce a session, pass the
+  sidecar's `--decision-pre <decision_pre>`, and when the sidecar's values are not 0 also
+  `--decision-mod <decision_modulation_ratio_pct>` and `--decision-hold
+  <decision_pre_hold_requires_raw>`. `--decision-gain` overrides the gain (25-400). Both the
+  sidecar and the replay report the gain and the noise controls as 0 while the onset is off.
+  A sidecar without `"detector":"v3.1"` predates the onset: its `decision_pre` above 0 was
+  HardwareOne's earlier judge, which only a replay built from that firmware's commit reproduces.
+- **Levels under the onset:** with `decision_pre` above 0 the `--trace` columns, the `TL level`
+  lines and `stt status` (`noiseRms`, `thresholdRms`, `peakRms`) are square roots of the
+  detector's energies, and `threshold` is the lower of the raw and the room-matched
+  pre-emphasis thresholds, so `rms >= threshold` no longer says whether a frame opens a phrase.
+  The speech repository's `tools/segmenter_replay --trace` prints both domains.
+- **Exact replay:** with the session's floors and detector settings, the segments must equal the
+  device's `TL boundary` lines. Check that first; it proves the replay is exact.
 - **Settings:** the defaults come from `stt/stt_continuous_config.h`, the same function the
   firmware calls.
 - **`--cut-dir`:** writes each phrase's PCM (`seg_<n>.pcm`) for a host decoder. Note that the

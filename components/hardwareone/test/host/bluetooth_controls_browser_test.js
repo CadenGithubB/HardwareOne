@@ -229,7 +229,7 @@ function glassesPipeStatus(fields = {}) {
   return base;
 }
 
-// p4-phone-only: no glasses in the build (no g2/ring keys), the pipe alone on
+// Phone-only build: no glasses in the build (no g2/ring keys), the pipe alone on
 // the client stack. `saved` is the saved mode: a pipe `openphone` opened under
 // a saved server mode runs the same way.
 function phoneOnlyStatus(fields = {}, saved = 'client') {
@@ -687,7 +687,7 @@ async function ready(mode = 'server', g2Reconnect = false, ringReconnect = false
     equal(f.element('bt-console-text').textContent, 'off', 'console off');
   }
 
-  // Phone-only build (p4-phone-only): the pipe alone is the client view with the
+  // Phone-only build: the pipe alone is the client view with the
   // phone card; no glasses panels because the glasses are not in the build. The
   // client view's header follows `host` here too: Running while the pipe runs,
   // the client start card once the stack is down.

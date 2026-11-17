@@ -7,5 +7,7 @@
     "ENABLE_MQTT": 1,
     "NETWORK_FEATURE_LEVEL": 4,
     "WEB_FEATURE_LEVEL": 4
-  }
+  },
+  "summary": "MQTT and its settings page, with Bluetooth, glasses and ring; offline maps off to fit.",
+  "title": "Home Assistant node"
 }

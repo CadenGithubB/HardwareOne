@@ -2249,11 +2249,25 @@ exercise the production configuration helpers and terminal flow with temporary
 configuration files. They cover inheritance, compiler verification, isolated
 build inputs, atomic saves, competing edits, cancellation, and build delegation.
 The wizard tests substitute user input and build execution; they do not flash
-hardware or claim that every selectable feature combination fits.
+hardware or claim that every selectable feature combination fits. Its
+`BoardFirstChecklist` cases run the board-first flow against copies of the real
+board and SDK defaults files: plain names, prerequisites, a change the header
+refuses, a feature-level group, the Bluetooth SDK stack and a multi-value choice.
+
+`build_config_catalog` reads this checkout as it is. Every editable switch has
+exactly one entry in `tools/build_config_catalog.json` (an option, part of a
+multi-value choice, or a managed level) and every board is described; each saved
+configuration has a title and a summary and is accepted by
+`System_BuildConfig.h`; every catalogued item is on, or can be switched on, for
+at least one board; and a board default the header rejects (the bare Waveshare
+selection) can be repaired from the checklist. The header is evaluated by the
+host C++ preprocessor (`tools/build_config_resolve.py`); those cases are skipped
+without one. It does not build firmware, so image size and SDK settings that
+only Kconfig resolves stay with the real build.
 
 ```sh
 ctest --test-dir /tmp/hw1-hardwareone-host \
-  -R '^(saved_build_config|build_config_workflow|build_config_wizard)$' --output-on-failure
+  -R '^(saved_build_config|build_config_workflow|build_config_wizard|build_config_catalog)$' --output-on-failure
 ```
 
 ## Network build selection and disabled ESP-NOW
@@ -5479,6 +5493,11 @@ level/stage arrays; the performance ring explicitly constructs nonzero sentinels
 unchanged) with `stt/stt_dl_metadata.cpp` against a fake heap: every block the
 hook hands out returns through `ps_free` on every destructor path, prebuilt-style
 blocks are accepted, PSRAM refusal falls back to internal RAM and is counted.
+The two build-time kinds (the memory planner's records; prebuilt libfbs_model's
+own `operator new`, by the names its linked copy calls) are placed the same way
+and counted apart from the long-lived totals, and per-channel exponents kept as
+`int8_t` (`DlCompactExponents`) read back equal to the `int` arrays through
+every copy and move.
 Without a staged override (`tools/p4/prepare_sdk.sh`) it exits 77 (skipped).
 `test_g2_tl_send.py` checks the Conversate TL send bookkeeping.
 

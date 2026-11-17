@@ -30,7 +30,7 @@ OTA = REPO / "config/sdkconfig.ota.defaults"
 # starved); the soak timeout must clear it with margin.
 MIN_SOAK_TIMEOUT_S = 20
 STABLE_ROWS = [("feather_esp32_v2", None), ("qtpy_esp32", None), ("feathers3", None),
-               ("xiao_s3", "xiao-no-bluetooth"), ("p4x_eye", "p4-openclaw")]
+               ("xiao_s3", "xiao-default"), ("p4x_eye", "p4-openclaw")]
 WDT_KEY = re.compile(r"^(?:#\s*)?(CONFIG_(?:ESP_)?TASK_WDT\w*)(?:=(.*)| is not set)\s*$", re.M)
 
 
@@ -351,13 +351,13 @@ class ManifestNaming(unittest.TestCase):
         self.assertIn("Watchdog soak build", text)
 
     def test_configuration_soak_names_the_real_configuration(self):
-        text = self.manifest(self.root / "build-config-xiao-no-bluetooth-wdt-soak", "xiao_s3",
+        text = self.manifest(self.root / "build-config-xiao-default-wdt-soak", "xiao_s3",
                              configuration_header=True)
-        self.assertIn("# Build manifest — `xiao-no-bluetooth`", text)
-        self.assertIn("python3 tools/build_config.py build xiao-no-bluetooth --wdt-soak\n", text)
-        self.assertIn("configurations/xiao-no-bluetooth.json", text)
-        self.assertNotIn("build xiao-no-bluetooth-wdt-soak", text)
-        self.assertNotIn("configurations/xiao-no-bluetooth-wdt-soak", text)
+        self.assertIn("# Build manifest — `xiao-default`", text)
+        self.assertIn("python3 tools/build_config.py build xiao-default --wdt-soak\n", text)
+        self.assertIn("configurations/xiao-default.json", text)
+        self.assertNotIn("build xiao-default-wdt-soak", text)
+        self.assertNotIn("configurations/xiao-default-wdt-soak", text)
 
     def test_ordinary_build_manifest_has_no_soak_marks(self):
         text = self.manifest(self.root / "build-feathers3", "feathers3")
@@ -438,10 +438,10 @@ class WrapperWiring(unittest.TestCase):
                                   idf[0])
 
     def test_option_order_and_pass_through_actions(self):
-        calls = self.run_wrapper("xiao_s3", "--wdt-soak", "--config", "xiao-no-bluetooth", "size")
+        calls = self.run_wrapper("xiao_s3", "--wdt-soak", "--config", "xiao-default", "size")
         self.assertTrue(calls[-1].endswith("-DHW1_WDT_SOAK=ON size"), calls[-1])
         self.log.write_text("")
-        calls = self.run_wrapper("xiao_s3", "--config", "xiao-no-bluetooth", "size")
+        calls = self.run_wrapper("xiao_s3", "--config", "xiao-default", "size")
         self.assertTrue(all("HW1_WDT_SOAK=0" in c for c in calls), calls)
         self.assertNotIn("wdt-soak", "\n".join(calls))
 
@@ -449,7 +449,7 @@ class WrapperWiring(unittest.TestCase):
     def test_reserved_configuration_name_is_refused(self):
         env = dict(os.environ, PATH=f"{self.bin}:{os.environ.get('PATH', '')}")
         result = subprocess.run(["bash", str(self.repo / "tools/build_board.sh"), "xiao_s3",
-                                 "--config", "xiao-no-bluetooth-wdt-soak"],
+                                 "--config", "xiao-default-wdt-soak"],
                                 capture_output=True, text=True, env=env)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("reserved", result.stderr)

@@ -147,7 +147,7 @@ gate); "experimental" rows build and have been run, but are not held to the rele
 |---|---|---|---|---|
 | Unexpected Maker FeatherS3 | `tools/build_board.sh feathers3`; release: `tools/build_deployment.sh headless feathers3` | stable | recovery OTA layout `hw1-f3-ota-v1` (signed, BLE or SoftAP) and cable | OTA end to end 2026-08-05 (v0.99.8); BLE/G2/R1 2026-07-30; needs re-qualification on the release image |
 | Adafruit Feather ESP32 V2 | `feather_esp32_v2`; release: `tools/build_deployment.sh headless feather_esp32_v2` | stable | recovery OTA layout `hw1-fv2-ota-v1` and cable | OTA recovery path, setup, Wi-Fi, web 2026-08-25; BLE/G2 2026-08-19 |
-| Seeed XIAO ESP32-S3 (+ Sense) | `xiao_s3 --config xiao-no-bluetooth` (Bluetooth off; the bare board build with Bluetooth does not fit its factory partition); release: `tools/build_deployment.sh pocket_assistant xiao_s3` (Bluetooth on, its own partition table) | stable (cable); OTA layout experimental until a dated record exists | cable; `pocket_assistant` OTA layout without a hardware record yet | 0.99.97.4 boot + serial check 2026-10-12 |
+| Seeed XIAO ESP32-S3 (+ Sense) | `xiao_s3 --config xiao-default` (Bluetooth off; the bare board build with Bluetooth does not fit its factory partition); release: `tools/build_deployment.sh pocket_assistant xiao_s3` (Bluetooth on, its own partition table) | stable (cable); OTA layout experimental until a dated record exists | cable; `pocket_assistant` OTA layout without a hardware record yet | 0.99.97.4 boot + serial check 2026-10-12 |
 | Adafruit QT Py ESP32 | `qtpy_esp32` | stable (cable) | cable; OTA layout experimental (no record) | 0.99.97.4 boot + serial check 2026-10-12 |
 | Espressif ESP32-P4X-EYE | `p4x_eye` (needs `tools/p4/prepare_sdk.sh`); release: `tools/build_deployment.sh handheld p4x_eye` | stable, cable-only | cable (app-only write; no OTA layout) | multi-hour STT bench runs and BLE investigations 2026-11-07/08 (`docs/P4X_PANIC_HUNT_20261107.md`) |
 | FeatherS3 flash-encrypted (`feathers3_fe`) | `feathers3_fe` | experimental | `hw1-f3fe-ota-v1` | flash-encryption trial 2026-07-30 |
@@ -183,7 +183,7 @@ These connect via Stemma QT (or standard I2C) and work the same on any supported
 | Peripheral | Compatible boards |
 | ---------- | ----------------- |
 | DVP camera (OV2640 / OV5640) | XIAO ESP32-S3 Sense |
-| MIPI-CSI camera | ESP32-P4X-EYE (onboard); Waveshare ESP32-P4 Touch LCD 5 (OV5647, enabled by the `waveshare-p4-bringup` saved profile) |
+| MIPI-CSI camera | ESP32-P4X-EYE (onboard); Waveshare ESP32-P4 Touch LCD 5 (OV5647, with `ENABLE_CAMERA_SENSOR` set in a saved configuration) |
 | PDM microphone | XIAO ESP32-S3 Sense, ESP32-P4X-EYE |
 | ES7210 codec microphone | Waveshare ESP32-P4 Touch LCD 5 (onboard) |
 | LiPo battery + BMS | Any board with a JST connector |
@@ -195,28 +195,33 @@ These connect via Stemma QT (or standard I2C) and work the same on any supported
 Local speech-to-text on the P4 boards reads its acoustic model from a file at
 run time; the file is not part of the firmware image or of this repository.
 
-- **Saved P4 configurations** (`p4-glasses-test`, `p4-phone-pipe`, `p4-openclaw`
-  and the other `p4-*` profiles in `configurations/`, plus `waveshare-p4-bringup`)
-  set `ENABLE_STT_MODEL_15X5_GEN2` and load
-  `/sd/STT Models/quartznet15x5-gen2-25397.p4.stt` from the microSD card. That
-  file is published as a release asset of the public speech-to-text repository:
+- **Saved P4 configurations** (`p4-glasses-test`, `p4-phone-pipe` and `p4-openclaw`)
+  run Citrinet-384, the default acoustic model (`ENABLE_STT_MODEL_CITRINET`), and
+  load `/sd/STT Models/citrinet384-2000h.p4.stt` from the microSD card:
+  22,700,240 bytes, SHA-256
+  `3781e173c3595ebb3e2087c7a0a4dfc1b85219135c57c8335930f7bc0658a70a`. That file
+  is not published yet; it is built by the speech-to-text repository's
+  `tools/stt_p4/package_citrinet.py` from the model's int8 export (repacked so
+  the firmware can return 1.3 MB of it to PSRAM once the model is built).
+- **QuartzNet instead** (`ENABLE_STT_MODEL_QUARTZNET=1` and `ENABLE_STT_MODEL_CITRINET=0` in a saved
+  configuration) loads
+  `/sd/STT Models/quartznet15x5-gen2-25397.p4.stt`, published as a release asset of
+  the public speech-to-text repository:
   [`model-gen2-25397`](https://github.com/CadenGithubB/ESP32_Onboard_Speech_To_Text/releases/tag/model-gen2-25397)
   → `quartznet15x5-gen2-25397.p4.stt`, 20,112,224 bytes, SHA-256
   `dccef3a8cead069d97d780e0d08ddfc65d9f0870c0af4673b29327f00158f048`
-  (`SHA256SUMS.txt` in the same release lists it).
-- **To install it**, download the file, check it with
-  `shasum -a 256 quartznet15x5-gen2-25397.p4.stt`, and copy it onto the FAT32
-  microSD card into a top-level folder named exactly `STT Models`, keeping the
-  file name. The firmware refuses a file of the wrong size and checks the
-  model's embedded checksum before using it. The release's `meeting.lm` is
-  optional: copied into the same folder it is used as the language model;
-  without it decoding is greedy.
+  (`SHA256SUMS.txt` in the same release lists it). A build holds one model.
+- **To install a model**, check the file with `shasum -a 256 <file>` and copy it
+  onto the FAT32 microSD card into a top-level folder named exactly `STT Models`,
+  keeping the file name. The firmware refuses a file of the wrong size and checks
+  the model's embedded checksum before using it. `meeting.lm` (in the 15x5 release)
+  is optional and serves both models: copied into the same folder it is used as
+  the language model; without it decoding is greedy.
 - **The plain `p4x_eye` board build and the `handheld` deployment** keep
   microSD off, so they build without local transcription. Local STT on an
-  ESP32-P4 always runs this 15×5 model from the card: enable it with
+  ESP32-P4 always runs its model from the card: enable it with
   `ENABLE_SDMMC_CARD=1` and `ENABLE_LOCAL_STT=1` (in the handheld deployment
-  also `ENABLE_SD_CARD=1`); the model choice follows, and the build refuses
-  local STT without the card.
+  also `ENABLE_SD_CARD=1`); the build refuses local STT without the card.
 - **Speaker labels** (on by default on `p4x_eye`) also read
   `/sd/STT Models/speaker.spk`, which is not published either. Without it,
   transcription still works and transcripts carry no speaker labels.
@@ -240,11 +245,12 @@ without editing shared headers. For code changes, follow the
 [development guidelines](CONTRIBUTING.md): clear ownership, small module
 interfaces, shared validation, and independently selectable features.
 
-Start guided setup to choose a board or saved configuration, select features,
-and review before saving or building:
+Start the guided setup to pick a board, then what it should do (a saved
+configuration of that board, or its defaults), switch features on and off by
+plain name, and review before saving or building:
 
 ```sh
-python3 tools/build_config.py configure
+python3 tools/build_config.py new
 ```
 
 Hardware One uses **ESP-IDF** (not Arduino IDE). The quickest way to get going:
@@ -262,7 +268,7 @@ tools/vendor_arduino.sh
 tools/build_board.sh feathers3 -p PORT flash monitor
 
 # A saved feature configuration (see configurations/): the XIAO ESP32-S3 without Bluetooth
-tools/build_board.sh xiao_s3 --config xiao-no-bluetooth -p PORT flash monitor
+tools/build_board.sh xiao_s3 --config xiao-default -p PORT flash monitor
 ```
 
 `tools/build_board.sh <board> [idf.py args...]` gives each board its own `build-<board>/` directory and its own sdkconfig, so switching boards never needs an `idf.py fullclean`.

@@ -211,7 +211,11 @@ static void adaptive_tests() {
     }
     auto invalid=config;invalid.adaptive_speech_floor=0;assert(!segmenter.reset(work.data(),work.size(),invalid));
     invalid=config;invalid.adaptive_silence_floor=13;assert(!segmenter.reset(work.data(),work.size(),invalid));
-    assert(sizeof(Segmenter)<2048); // Fixed1KB ambient history, never an unbounded ring.
+    // Fixed windows only, never an unbounded ring: four 500-frame uint16 windows (the ambient
+    // history, and since the level-robust onset its raw window and two idle-energy windows)
+    // and a 50-frame modulation ring. 4,472 B on RV32; it lives in StreamRun on the 12 KB stt
+    // task stack (System_STT.cpp kWorkerStackBytes), whose high-water mark is in `stt status`.
+    assert(sizeof(Segmenter)<5120);
     puts("PASS: adaptive calibration exclusion, configurable low/high RMS,120s measured room fluctuations, bounded noise window, loud/quiet reset, raw tails/pre-roll, DC/chunk invariance and sustained hard cuts");
 }
 // Opt-in latency options the continuous broker uses (HW1_STT_SHORT_CLOSE,
@@ -415,10 +419,22 @@ int main() {
     // Device settings reach the segmenter through continuousSegmenterConfig; any value the
     // settings accept must give a config the segmenter takes (a rejected config fails
     // every continuous STT session).
-    for(unsigned pct:{0u,25u,50u,51u,100u,255u}) for(unsigned pre:{0u,97u,99u,200u}) {
+    for(unsigned pct:{0u,25u,50u,51u,100u,255u}) for(unsigned pre:{0u,97u,99u,100u,101u,200u,255u}) {
         const auto c=continuousSegmenterConfig(16000,10*16000,true,false,45,16,uint8_t(pct),uint8_t(pre));
         Segmenter s;assert(s.reset(work.data(),work.size(),c));
-        assert(c.noise_percentile==std::min(pct,50u)&&c.decision_pre_emphasis==std::min(pre,99u));
+        assert(c.noise_percentile==std::min(pct,50u)&&c.decision_pre_emphasis==std::min(pre,100u));
+        // The level-robust onset is scored at gain 150, not the struct's 100; noise controls off.
+        assert(c.decision_gain_pct==kContinuousDecisionGainPct&&kContinuousDecisionGainPct==150);
+        assert(c.decision_modulation_ratio_pct==0&&!c.decision_pre_hold_requires_raw);
+    }
+    // The noise controls: any ratio the settings hold (0..1000, or a file's larger value)
+    // gives a config the segmenter takes; 1..100 cannot be a gate (the ratio must exceed
+    // 1.00) and become the most permissive one, 101.
+    for(unsigned mod:{0u,1u,50u,100u,101u,135u,300u,1000u,1001u,65535u}) for(bool hold:{false,true}) for(unsigned pre:{0u,97u}) {
+        const auto c=continuousSegmenterConfig(16000,10*16000,true,false,45,16,25,uint8_t(pre),uint16_t(mod),hold);
+        Segmenter s;assert(s.reset(work.data(),work.size(),c));
+        const unsigned want=mod==0?0u:mod<=100?101u:std::min(mod,1000u);
+        assert(c.decision_modulation_ratio_pct==want&&c.decision_pre_hold_requires_raw==hold);
     }
     for(unsigned sp:{1u,16u,45u,32767u}) for(unsigned si:{1u,16u,45u,32767u}) {
         const auto c=continuousSegmenterConfig(16000,10*16000,true,false,uint16_t(sp),uint16_t(si),25,0);

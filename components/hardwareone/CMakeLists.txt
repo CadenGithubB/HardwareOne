@@ -22,6 +22,8 @@ set(HW_CFG_ENABLE_CAMERA_SENSOR 0)
 set(HW_CFG_ENABLE_ESP_SR 0)
 set(HW_CFG_ENABLE_LOCAL_STT 0)
 set(HW_CFG_ENABLE_STT_SPEAKER_LABELS 0)
+set(HW_CFG_ENABLE_STT_MODEL_CITRINET 0)   # System_BuildConfig.h defaults it to 1
+set(HW_CFG_ENABLE_STT_MODEL_QUARTZNET 0)
 set(HW_CFG_ENABLE_EDGE_IMPULSE 0)
 set(HW_CFG_ENABLE_GAMES 0)
 set(HW_CFG_ENABLE_WEB_GAME_DARKROOM 0)
@@ -98,7 +100,7 @@ if(EXISTS "${hw_cfg_file}")
         ENABLE_LLM_BACKEND ENABLE_LLM_SOURCE_ONBOARD ENABLE_LLM_SOURCE_CM5
         ENABLE_LLM_SOURCE_HTTP
         ENABLE_MAPS ENABLE_CAMERA_SENSOR ENABLE_ESP_SR ENABLE_LOCAL_STT
-        ENABLE_STT_SPEAKER_LABELS
+        ENABLE_STT_SPEAKER_LABELS ENABLE_STT_MODEL_CITRINET ENABLE_STT_MODEL_QUARTZNET
         ENABLE_AUTOMATION ENABLE_EDGE_IMPULSE ENABLE_GAMES ENABLE_WEB_GAME_DARKROOM
         ENABLE_BLUETOOTH ENABLE_G2_GLASSES ENABLE_R1_HEALTH ENABLE_G2_TESTSUITE
         ENABLE_RASPBERRY_PI_HOST_POWER ENABLE_RASPBERRY_PI_HOST_FAN)
@@ -626,8 +628,23 @@ if(HW_CFG_ENABLE_LOCAL_STT GREATER 0)
     # System_STTVocabulary.cpp) belong to the local backend on every target.
     list(APPEND hardwareone_srcs System_STT.cpp System_STTLocal.cpp System_STTVocabulary.cpp System_STTRawCapture.cpp stt/stt_transcript.cpp)
     if(IDF_TARGET STREQUAL "esp32p4")
+        # One acoustic model per build (System_BuildConfig.h checks the same pair):
+        # Citrinet (the default) or QuartzNet; the other's runtime, front end and
+        # ESP-DL kernels are not compiled.
+        if(HW_CFG_ENABLE_STT_MODEL_CITRINET GREATER 0 AND HW_CFG_ENABLE_STT_MODEL_QUARTZNET GREATER 0)
+            message(FATAL_ERROR "Local STT builds one acoustic model: ENABLE_STT_MODEL_CITRINET or ENABLE_STT_MODEL_QUARTZNET, not both")
+        elseif(HW_CFG_ENABLE_STT_MODEL_CITRINET GREATER 0)
+            set(_hw1_stt_model citrinet)
+            # Citrinet's word-piece LM decoder uses stt_lm.cpp's model view and hotword list.
+            list(APPEND hardwareone_srcs stt/citrinet_runtime.cpp stt/citrinet_frontend.cpp stt/stt_lm_wordpiece.cpp)
+        elseif(HW_CFG_ENABLE_STT_MODEL_QUARTZNET GREATER 0)
+            set(_hw1_stt_model quartznet)
+            list(APPEND hardwareone_srcs stt/quartznet_runtime.cpp stt/quartznet_frontend.cpp)
+        else()
+            message(FATAL_ERROR "Local STT needs an acoustic model: ENABLE_STT_MODEL_CITRINET 1 (default) or ENABLE_STT_MODEL_QUARTZNET 1")
+        endif()
         # stt_lm.cpp is inert unless System_STTLocal.cpp uses it (ENABLE_STT_LM).
-        list(APPEND hardwareone_srcs stt/quartznet_runtime.cpp stt/quartznet_frontend.cpp stt/stt_lm.cpp stt/stt_internal_memory.cpp)
+        list(APPEND hardwareone_srcs stt/stt_lm.cpp stt/stt_internal_memory.cpp)
         # The resident model (stt/quartznet_runtime.h) is on unless the build is
         # configured with -DHW1_STT_RESIDENT_MODEL=0. stt_dl_metadata.cpp is its
         # PSRAM metadata hook for the tree-local ESP-DL (tools/p4/prepare_esp_dl.py).
@@ -707,9 +724,11 @@ if(HW_CFG_ENABLE_LOCAL_STT GREATER 0 AND IDF_TARGET STREQUAL "esp32p4")
     # phrase on the P4. The frontend keeps -ffp-contract=off (no FMA
     # contraction: features stay bit-identical to the reference). One call per
     # file: set_source_files_properties replaces COMPILE_OPTIONS.
-    set_source_files_properties(stt/quartznet_frontend.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off;-O2")
-    set_source_files_properties(stt/quartznet_runtime.cpp PROPERTIES COMPILE_OPTIONS "-O2")
+    set_source_files_properties(stt/quartznet_frontend.cpp stt/citrinet_frontend.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off;-O2")
+    set_source_files_properties(stt/quartznet_runtime.cpp stt/citrinet_runtime.cpp PROPERTIES COMPILE_OPTIONS "-O2")
     set_source_files_properties(stt/stt_lm.cpp PROPERTIES COMPILE_OPTIONS "-O2")
+    # The word-piece decoder keeps the reference's arithmetic: no fused multiply-adds either.
+    set_source_files_properties(stt/stt_lm_wordpiece.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off;-O2")
     # Speaker features and pooling are tight float loops (at -Os they were ~3x slower).
     if(HW_CFG_ENABLE_STT_SPEAKER_LABELS GREATER 0)
         set_source_files_properties(stt/speaker_frontend.cpp stt/speaker_model.cpp PROPERTIES COMPILE_OPTIONS "-O2")
@@ -721,8 +740,8 @@ if(HW_CFG_ENABLE_LOCAL_STT GREATER 0 AND IDF_TARGET STREQUAL "esp32p4")
     # Component-wide: ModelCache's layout depends on it, so every translation
     # unit (System_STTLocal.cpp included) must see the same value.
     target_compile_definitions(${COMPONENT_LIB} PRIVATE HW1_STT_RESIDENT_MODEL=${_hw1_stt_resident_model})
-    # ESP-SR also registers a model whitelist. Union QuartzNet's exact ops and
-    # kernel variants into it; otherwise SR's WN10 list strips our Relu/int8 Conv.
+    # ESP-SR also registers a model whitelist. Union the acoustic model's exact ops
+    # and kernel variants into it; otherwise SR's WN10 list strips our Relu/int8 Conv.
     idf_build_get_property(_stt_build_components BUILD_COMPONENTS)
     if("espressif__esp-dl" IN_LIST _stt_build_components)
         idf_component_get_property(_stt_dl_dir espressif__esp-dl COMPONENT_DIR)
@@ -732,7 +751,8 @@ if(HW_CFG_ENABLE_LOCAL_STT GREATER 0 AND IDF_TARGET STREQUAL "esp32p4")
         message(FATAL_ERROR "Local STT requires the pinned ESP-DL component")
     endif()
     include("${_stt_dl_dir}/cmake/compile_register.cmake")
-    esp_dl_compile_add_yml("${CMAKE_CURRENT_LIST_DIR}/stt/quartznet.compile_req.yml")
+    # citrinet.compile_req.yml or quartznet.compile_req.yml (tools/stt_p4 generators).
+    esp_dl_compile_add_yml("${CMAKE_CURRENT_LIST_DIR}/stt/${_hw1_stt_model}.compile_req.yml")
     # The speaker-embedding trunk (8-bit weights, 16-bit activations), only with speaker labels.
     if(HW_CFG_ENABLE_STT_SPEAKER_LABELS GREATER 0)
         esp_dl_compile_add_yml("${CMAKE_CURRENT_LIST_DIR}/stt/speaker.compile_req.yml")

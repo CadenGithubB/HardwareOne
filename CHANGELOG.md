@@ -132,8 +132,8 @@ everything user-visible since the v0.99.99.1 tag.
 - Smaller fixes: exporting a single automation whose name has an escaped quote no longer cuts the file
   name short; `whoami` names every command source, not five of them; JSON text escapes every control
   character; a user-sync MAC address with non-hex digits is refused instead of read as zeros; an
-  admin reject without a body answers "Username required"; the `xiao-no-network` and `xiao-no-web`
-  configurations build again.
+  admin reject without a body answers "Username required"; builds with networking or the web
+  server switched off (`NETWORK_FEATURE_LEVEL` 0, `WEB_FEATURE_LEVEL` 0) compile again.
 - Automations: a trigger that names a time of day ran on a clock that was not set. The scheduler
   took the clock as set one second after boot, so "07:30" fired seven and a half hours after a boot
   without a time source. Time-of-day triggers now wait until the clock is set (2020 or later);
@@ -217,6 +217,11 @@ everything user-visible since the v0.99.99.1 tag.
   must be a whole number from 1 to 2147483647"); it used to be accepted and renumbered on the next
   pass. `automation sanitize` now says what it fixed ("fixed 2 duplicate IDs", "fixed 1 out-of-range
   ID", or both). Host-tested; not yet tested on hardware.
+- Local STT (P4): building an ESP-DL model took up to 220 KB of internal RAM in some 3,500 small
+  blocks (the memory planner's records and the name tables of the prebuilt model loader): with
+  Bluetooth on, free internal RAM fell to 19 KB while Citrinet loaded, and a QuartzNet 15x5 build
+  took about half as much. They are PSRAM requests now, like the rest of a model's metadata; the
+  low point of a session with Bluetooth on is 177 KB. Checked on the bench P4.
 - Files page: every new folder, new file, upload and Refresh asked for the storage figures twice,
   and on the P4X-EYE each fresh reading is a LittleFS walk of about 1.3 s on the one web server
   task. They now ask once. Source-tested; the page was not run in a browser here.
@@ -315,6 +320,85 @@ everything user-visible since the v0.99.99.1 tag.
   the three daily series with a scaled axis (`docs/OLED_HEALTH.md`). Host-tested; the graphs have
   not been checked against live ring data.
 - `oledmode mic` and `oledmode microphone` open the microphone page.
+- Build configurations: the guided setup is board first. `python3 tools/build_config.py new` asks
+  for the board, then what it should do (a saved configuration of that board, listed by title, or the
+  board's defaults), then lets you switch features on and off by plain name in eleven groups, and
+  asks for the name at review. `configure` is the same command. On and off are the values the
+  firmware will have for that board: the setup runs `System_BuildConfig.h` through the host C++
+  preprocessor with the board's feature header, the layered SDK defaults and the choices
+  (`tools/build_config_resolve.py`; on 12 built configurations it matched the real compiler on
+  all 97 values compared). An item brings its prerequisites and says so, Bluetooth moves the SDK's
+  Bluetooth stack with it, a change the header rejects is refused with the header's message, and a
+  board default the header rejects (the bare Waveshare selection) can be repaired item by item. The
+  plain names are in `tools/build_config_catalog.json`; the host test `build_config_catalog` fails
+  when a switch or a board has none. Saved configurations may carry a `title` and a `summary`
+  (shown by `list` and `show`, not build inputs), and `list configurations --board <id>` lists one
+  board's. The evaluation does not know image size or what only Kconfig resolves: the build stays
+  the final check.
+- Saved configurations: fourteen bench, debugging and duplicate ones are removed and eleven remain,
+  each a board and a job (`configurations/README.md` has the table, and what recreates each removed
+  one). `xiao-no-bluetooth` was identical to `xiao-default`, which the README, the quick start and the
+  watchdog-soak test now name. The three coverage selections (`xiao-no-network`, `xiao-no-web`,
+  `qtpy-all-sensors`) and the Waveshare bring-up selection are `create` commands in
+  `configurations/README.md` and `docs/WAVESHARE_P4_SUPPORT.md`; the tests that read removed files
+  carry those choices themselves.
+- Local STT (P4) acoustic model: Citrinet-384 (2,000 h, the speech repository's Voice Model 3
+  training data) replaces the QuartzNet 15x5 gen2-25397 as the default. It reads
+  `/sd/STT Models/citrinet384-2000h.p4.stt` (22,700,240 bytes, SHA-256
+  `3781e173c3595ebb3e2087c7a0a4dfc1b85219135c57c8335930f7bc0658a70a`; not published yet, built by the
+  speech repository's `tools/stt_p4/package_citrinet.py` from its int8 export) and decodes
+  `meeting.lm` through a new word-piece beam search (`stt/stt_lm_wordpiece.h`: LM weight 0.2, word
+  bonus 0.75, tuned on held-out dev clips; the user vocabulary's hotwords as before); without the LM
+  it decodes greedily (`HW1_STT_CITRINET_LM=0` builds it that way). Host replay of ten P4
+  recordings: 40.6% word errors against 43.3% for the best 15x5 with the LM and 46.5% for
+  gen2-25397 (Citrinet float; its int8 export costs 0.84 points on 600 dev clips).
+  Build flags `ENABLE_STT_MODEL_CITRINET` (default 1) and `ENABLE_STT_MODEL_QUARTZNET` (default 0):
+  one model per build, the other's runtime, front end and ESP-DL kernels are not compiled;
+  a saved configuration that sets them the other way round builds the 15x5 instead (`ENABLE_STT_MODEL_15X5_GEN2` now
+  applies to QuartzNet builds only and follows that choice on `p4x_eye`; the `p4-*` profiles no
+  longer set it). Capture-time feature rows follow the model's front end (80 bands, 400-sample
+  window). Image 5,722,672 bytes for `p4-glasses-test`. On the bench P4 at 1 ft with the LM and
+  speaker labels on (16 Nov, a noisier take than the 15x5's own): 41.9% / 21.8% word errors on the
+  two playlists against 49.1% / 33.3% for the 15x5 decode of the same recordings; 227-254 ms of
+  processing per second of audio against 298-301 ms (acoustic model 180 against 276, LM decode
+  20-46 against 16-17, front end 26 against 6); median caption latency 1.6-1.7 s against
+  1.9-2.5 s; no overruns. Open: on the same recordings the device's int8 result is 2.2-3.6 points
+  behind the Mac's float model.
+- Local STT (P4) memory: Citrinet, `meeting.lm` and the speaker-label model run together (they
+  needed 34.4 MB of the 33.0 MB PSRAM heap). The model file is packaged with what only a model
+  build reads at its end (per-channel exponents, parameter shapes and names, test tensors) and the
+  firmware returns that 1.32 MB once the session's model is built; ESP-DL keeps Citrinet's 150,338
+  per-channel exponents as bytes (601 KB to 150 KB); the LM search works in the acoustic model's
+  idle activation arena instead of allocating up to 0.67 MB per phrase; the speaker model asks for
+  1.5 MiB of spare PSRAM after it instead of 3 MiB. PSRAM low point in the bench sessions
+  1.44-1.46 MB (the 15x5's: 1.56 MB). The capture-time feature pool (0.78 MB, kept only while
+  2 MiB stays free) does not load beside all three: features are computed at transcription
+  time, about 20 ms per second of audio. `HW1_STT_SELFCHECK=1` builds run one fixed input through
+  a fresh model on the whole image and through the session's model (trimmed image, byte exponents,
+  arena zeroed and overwritten) and log whether the outputs are the same bytes: they are.
+- Local STT (P4) speech detector: the level-robust phrase onset from the speech repository's
+  version 3.1 replaces HardwareOne's own pre-emphasis judge. A phrase opens or stays open when
+  either the raw level or the level of the pre-emphasised audio (x[n] - 0.97 x[n-1], matched to the
+  room by an ambient gain re-learned on every idle frame, 150 %) passes its rule. The audio given
+  to the recognizer is unchanged (measured with the 15x5 gen2-25397). `sttdecisionpre` and
+  `sttg2decisionpre` keep their meaning and default (97), now 0-100, but the detector behind 97 is
+  new: recordings and A/B results made with the earlier judge are not reproduced by
+  `sttdecisionpre 97`; they need the previous image. 0 is the raw level only, the detector before
+  12 November 2026, bit for bit. Speech repository host replay with this model and `meeting.lm`:
+  1,568 -> 1,103 word errors over 2,614 words against raw only, 1,127 for the earlier judge; the
+  cost is more room noise inside phrases and about 2-3x more audio to the recognizer. New opt-in
+  noise controls, off by default (a noisy-room mode that gives back far speech): `sttdecisionmod`
+  (modulation gate, 0 or 101-1000) and `sttdecisionhold` (raw-latch hold), and the `sttg2*` pair for
+  the glasses. With the onset on, `noiseRms`, `thresholdRms` and `peakRms` in `stt status` are
+  square roots of the detector's energies; `stt status`, `sttdetector` and the `sttraw` sidecar now
+  name the detector (`"detector":"v3.1"`) and its gain and noise controls, and `stt_raw_replay`
+  takes `--decision-gain`, `--decision-mod` and `--decision-hold`. Build flag
+  `ENABLE_STT_LEVEL_ROBUST_ONSET 0` runs every session
+  on the raw level only and leaves the saved settings alone. The segmenter, with the detector state,
+  now lives in PSRAM per session, which leaves more of the `stt` task's stack free than before
+  (low point 4,456 bytes against 3,192 on the bench). Host-tested (the speech repository's segmenter
+  decision and boundary tests ported, the onset through the continuous broker) and run on the bench
+  P4X-EYE on 16 November (14 sessions plus two at 1 ft: 0 audio overruns, decode queue at most 1).
 - Command names have one form: lower-case letters and digits. The 22 camelCase `mqtt*` commands and
   `httpAutoStart` / `httpsEnabled` are now `mqtthost`, `mqttpublishgps`, `httpautostart`,
   `httpsenabled` and so on. Command lookup ignores case, so the earlier spelling still runs; help,

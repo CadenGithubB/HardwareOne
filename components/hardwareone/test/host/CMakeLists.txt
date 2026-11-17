@@ -1094,6 +1094,10 @@ add_test(NAME build_config_workflow
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_build_config_workflow.py)
 add_test(NAME build_config_wizard
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_build_config_wizard.py)
+# The guided setup's plain names (tools/build_config_catalog.json) cover every switch and board of
+# this checkout, and the configuration header accepts the saved configurations and what is offered.
+add_test(NAME build_config_catalog
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_build_config_catalog.py)
 add_test(NAME xiao_peripheral_config
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_xiao_peripheral_config.py)
 add_test(NAME sdkconfig_policy
@@ -2011,7 +2015,37 @@ add_test(
 # Both variants drive real threads against 10 s waits under the sanitizer. With
 # other suites running alongside (ctest -j6, 2026-11-06), about one run in six
 # timed out at a different wait each time, so they run alone rather than flake.
-set_tests_properties(stt_continuous stt_continuous_full_phrase PROPERTIES RUN_SERIAL TRUE)
+# ENABLE_STT_LEVEL_ROBUST_ONSET 0 (a saved configuration sets it): the raw
+# level only in every session, whatever sttdecisionpre holds.
+add_test(
+  NAME stt_continuous_prev_onset
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_stt_continuous.py --prev-onset
+          ${STT_CONTINUOUS_TEST_ARGS})
+# The Citrinet broker (ENABLE_STT_MODEL_CITRINET, the firmware default): capture-time rows from its 80-band
+# front end and 400-sample window must equal its batch rows bit for bit, as QuartzNet's do above.
+add_test(
+  NAME stt_continuous_citrinet
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_stt_continuous.py --citrinet
+          ${STT_CONTINUOUS_TEST_ARGS})
+set_tests_properties(stt_continuous stt_continuous_full_phrase stt_continuous_prev_onset stt_continuous_citrinet PROPERTIES RUN_SERIAL TRUE)
+
+# The continuous-STT speech segmenter (stt/stt_segmenter.h). stt_segmenter: the
+# harness of HardwareOne's own cases (chunking, pre-roll, cuts, adaptive levels and
+# the continuousSegmenterConfig ranges). stt_segmenter_decision: the level-robust
+# onset's unit cases U1-U16, both golden hashes and 11 detecting header mutants;
+# stt_segmenter_boundaries: chunk invariance and PCM conservation in modes 0-11. The
+# last two are the speech repository's version 3.1 tests, ported verbatim.
+add_test(NAME stt_segmenter
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_stt_segmenter.py --sanitize
+          --cxx ${CMAKE_CXX_COMPILER})
+add_test(NAME stt_segmenter_decision
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_stt_segmenter_decision.py
+          --cxx ${CMAKE_CXX_COMPILER})
+add_test(NAME stt_segmenter_boundaries
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_stt_segmenter_boundaries.py
+          --cxx ${CMAKE_CXX_COMPILER})
 
 # `sttraw` host replay (stt_raw_replay.cpp): production floors and continuous
 # settings, chunk-size independence, floor overrides, cuts and the sidecar checks.

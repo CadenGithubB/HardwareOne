@@ -25,7 +25,27 @@
 #include "stt/stt_segmenter.h"
 #include "stt/stt_continuous_config.h"
 #include "stt/stt_auto_gain.h"
+// The acoustic model's front end (stt/stt_model_selection.h: Citrinet by default, or QuartzNet). Capture-time
+// feature rows use the same one, so they stay bit-identical to the runtime's batch rows.
+#include "stt/stt_model_selection.h"
+#include "stt/stt_internal_memory.h"
+#if HW1_STT_CITRINET
+#include "stt/citrinet_frontend.h"
+namespace stt_fe = hw1::stt::citrinet;
+// A Citrinet row reads samples [r*160-201, r*160+200): its 400-sample window and the pre-emphasis sample.
+static constexpr size_t kFeReachBack = 201, kFeReachAhead = 200;
+#else
 #include "stt/quartznet_frontend.h"
+namespace stt_fe = hw1::stt;
+// A QuartzNet row reads samples [r*160-161, r*160+160): its 320-sample window and the pre-emphasis sample.
+static constexpr size_t kFeReachBack = 161, kFeReachAhead = 160;
+#endif
+// Rows of a phrase of `samples` whose window lies inside it (r*160+reach <= samples): they never reflect at
+// the end, so they equal the batch front end's rows of any longer phrase with the same start. QuartzNet:
+// samples/160.
+static inline size_t sttFinalRows(size_t samples) {
+  return samples >= kFeReachAhead ? (samples - kFeReachAhead) / 160 + 1 : 0;
+}
 #include <ArduinoJson.h>
 #include <esp_random.h>
 #include <algorithm>
@@ -300,11 +320,8 @@ static uint8_t sttApplyMicTuning() {
 // The onboard mic (raw PDM, or the board's codec) and the G2 glasses mic (LC3
 // over BLE after the glasses' own AGC) reach the detector very differently, so
 // each has its own levels: sttspeechfloor / sttsilencefloor / sttnoisepercentile
-// / sttdecisionpre for the onboard mic, the sttg2* four for the glasses.
-struct SttDetectorProfile {
-  bool glasses = false;
-  int speechFloor = 45, silenceFloor = 16, noisePercentile = 25, decisionPre = 0;
-};
+// / sttdecisionpre / sttdecisionmod / sttdecisionhold for the onboard mic, the
+// sttg2* six for the glasses (SttDetectorProfile, System_STT.h).
 static SttDetectorProfile sttDetectorProfileFor(bool glasses) {
   SttDetectorProfile p;
   p.glasses = glasses;
@@ -312,7 +329,36 @@ static SttDetectorProfile sttDetectorProfileFor(bool glasses) {
   p.silenceFloor = glasses ? gSettings.sttG2SilenceFloor : gSettings.sttSilenceFloor;
   p.noisePercentile = glasses ? gSettings.sttG2NoisePercentile : gSettings.sttNoisePercentile;
   p.decisionPre = glasses ? gSettings.sttG2DecisionPre : gSettings.sttDecisionPre;
+  p.decisionModPct = glasses ? gSettings.sttG2DecisionMod : gSettings.sttDecisionMod;
+  p.decisionHold = glasses ? gSettings.sttG2DecisionHold : gSettings.sttDecisionHold;
   return p;
+}
+// ENABLE_STT_LEVEL_ROBUST_ONSET 0 (a saved configuration sets it): every
+// session runs the raw level only, whatever sttdecisionpre / sttg2decisionpre hold.
+#if defined(ENABLE_STT_LEVEL_ROBUST_ONSET) && !ENABLE_STT_LEVEL_ROBUST_ONSET
+static constexpr bool kSttOnsetBuilt = false;
+#else
+static constexpr bool kSttOnsetBuilt = true;
+#endif
+// Settings shared with host replay (stt/stt_continuous_config.h); `profile`'s
+// decision fields become the values the segmenter takes (clamped, 0 while off).
+static hw1::stt::SegmenterConfig sttSegmenterConfigFor(SttDetectorProfile& profile, size_t maxSamples,
+                                                        bool singleUtterance) {
+  const auto clampTo = [](int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; };
+  if (!kSttOnsetBuilt) profile.decisionPre = 0;
+  const hw1::stt::SegmenterConfig config = hw1::stt::continuousSegmenterConfig(
+      STT_SAMPLE_RATE, maxSamples, HW1_STT_SHORT_CLOSE != 0, singleUtterance,
+      static_cast<uint16_t>(clampTo(profile.speechFloor, 0, 65535)),
+      static_cast<uint16_t>(clampTo(profile.silenceFloor, 0, 65535)),
+      static_cast<uint8_t>(clampTo(profile.noisePercentile, 0, 255)),
+      static_cast<uint8_t>(clampTo(profile.decisionPre, 0, 255)),
+      static_cast<uint16_t>(clampTo(profile.decisionModPct, 0, 65535)), profile.decisionHold);
+  const bool onset = config.decision_pre_emphasis != 0;
+  profile.decisionPre = config.decision_pre_emphasis;
+  profile.decisionGainPct = onset ? config.decision_gain_pct : 0;
+  profile.decisionModPct = onset ? config.decision_modulation_ratio_pct : 0;
+  profile.decisionHold = onset && config.decision_pre_hold_requires_raw;
+  return config;
 }
 static SttDetectorProfile gSttActiveProfile;  // gSttMux: the profile of the running (or last) session
 
@@ -687,18 +733,18 @@ constexpr uint32_t kCaptureStackBytes = 8192; // 2 KiB PCM block plus HAL/BLE st
 // publishes where the phrase in progress starts and how long it is. At the
 // close the phrase's cache travels with its queue slot; the worker copies the
 // finished rows, computes the rest and runs CMVN + quantize (bit-identical to
-// the batch frontend: hw1::stt::log_mel_frame). Drafts use the same rows. The
-// pool (2 x 512 KB rows + 128 KB ring) is allocated after the warm-up, so the
+// the batch frontend: stt_fe::log_mel_frame). Drafts use the same rows. The
+// pool (2 row buffers of kFeMaxRows x kFeRowFloats floats + 128 KB ring) is allocated after the warm-up, so the
 // LM and the resident model are admitted exactly as without it.
 constexpr size_t kFeRingSamples = 65536;              // 4.1 s of stream; power of two
 constexpr size_t kFeMaxRows = kStreamSamples / 160;  // the 10 s phrase cap
 constexpr int kFeCaches = 2;                          // phrase in progress + one queued
 constexpr size_t kFeBatchRows = 8;
 constexpr uint32_t kFeStackBytes = 3072;
-constexpr size_t kFeRowFloats = hw1::stt::kMelBins;
+constexpr size_t kFeRowFloats = stt_fe::kMelBins;
 enum class FeState : uint8_t { Free, Live, Attached, Orphan };
 struct FeCache {
-  float* rows = nullptr;        // kFeMaxRows x 64 floats, fixed for the session
+  float* rows = nullptr;        // kFeMaxRows x kFeRowFloats floats, fixed for the session
   uint64_t start = 0;           // stream sample of the phrase's first sample
   size_t frames = 0;            // committed rows (final: never rewritten)
   uint32_t gen = 0;             // bumped on every reuse
@@ -774,7 +820,11 @@ struct StreamRun {
   AudioSource requested = AUDIO_SRC_NONE;
   int16_t* working = nullptr;
   StreamSlot slots[kAudioQueueDepth];
-  hw1::stt::Segmenter segmenter;
+  // The segmenter's state lives in PSRAM for the session (sttSegmenterCreate):
+  // 4,472 B on RV32 since the level-robust onset, which this struct, a local on
+  // the 12 KB stt stack, cannot hold (a 0.99.99 continuous session already went
+  // down to 2,664 B free with the 1,288-B segmenter).
+  hw1::stt::Segmenter* segmenter = nullptr;
   // Live mode: the capture task copies the utterance in progress here; the
   // worker transcribes it when no finished segment is waiting.
   int16_t* draftPcm = nullptr;
@@ -806,7 +856,7 @@ struct StreamRun {
   // rows/ring/workspace).
   FeCache fe[kFeCaches];
   int16_t* feRing = nullptr;
-  hw1::stt::FrontendWorkspace* feWork = nullptr;
+  stt_fe::FrontendWorkspace* feWork = nullptr;
   uint64_t feRingStart = 0, feRingHead = 0;  // stream samples [start, head) were written
   bool feRingStarted = false;
   int feLive = -1;            // cache of the phrase in progress
@@ -1082,7 +1132,7 @@ static int sttPerfFormat(const SttPerfRecord& r, char* out, size_t cap) {
 }
 
 static bool sttQueueSegment(StreamRun& run) {
-  const auto* segment = run.segmenter.segment();
+  const auto* segment = run.segmenter->segment();
   if (!segment) return true;
   StreamSlot* slot = nullptr;
   portENTER_CRITICAL(&gSttMux);
@@ -1105,7 +1155,7 @@ static bool sttQueueSegment(StreamRun& run) {
     portEXIT_CRITICAL(&gSttMux);
     // Release it, or the segmenter stays Ready and capture stalls until a slot
     // frees (then queues the "dropped" phrase late after all).
-    return run.segmenter.release();
+    return run.segmenter->release();
   }
   if (!slot || exhausted) {
     sttStreamFail(run, exhausted ? "STT sequence exhausted; start a new session"
@@ -1140,7 +1190,7 @@ static bool sttQueueSegment(StreamRun& run) {
     FeCache& c = run.fe[run.feLive];
     if (c.state == FeState::Live && c.start == segment->start_sample && segment->samples >= 320) {
       slot->fe = run.feLive; slot->feGen = c.gen;
-      slot->feRows = std::min(c.frames, segment->samples / 160);
+      slot->feRows = std::min(c.frames, sttFinalRows(segment->samples));
       c.state = FeState::Attached;
     } else {
       c.state = FeState::Orphan;
@@ -1162,7 +1212,7 @@ static bool sttQueueSegment(StreamRun& run) {
   slot->state = StreamSlotState::Ready;
   ++gStt.snapshot.pendingAudio;
   portEXIT_CRITICAL(&gSttMux);
-  return run.segmenter.release();
+  return run.segmenter->release();
 }
 #if HW1_STT_CAPTURE_FEATURES
 // Computes the phrase in progress's final rows from the stream ring.
@@ -1188,15 +1238,15 @@ static void sttFeatureWorker(void* context) {
       head = run.feRingHead;
       portEXIT_CRITICAL(&gSttMux);
       if (stop || idx < 0) break;
-      const size_t stable = len >= 320 ? std::min(len / 160, kFeMaxRows) : 0;
+      const size_t stable = len >= 320 ? std::min(sttFinalRows(len), kFeMaxRows) : 0;
       if (done >= stable) break;
       const size_t end = std::min(stable, done + kFeBatchRows);
-      // Oldest sample this batch reads (row r: [r*160-161, r*160+160)).
-      const uint64_t lo = start + (done * 160 > 161 ? done * 160 - 161 : 0);
+      // Oldest sample this batch reads (row r: [r*160-kFeReachBack, r*160+kFeReachAhead)).
+      const uint64_t lo = start + (done * 160 > kFeReachBack ? done * 160 - kFeReachBack : 0);
       const bool safe = lo + kFeRingSamples >= head + kStreamReadSamples;
       if (safe)
         for (size_t r = done; r < end; ++r)
-          (void)hw1::stt::log_mel_frame_ring(run.feRing, kFeRingSamples - 1, start, len, r,
+          (void)stt_fe::log_mel_frame_ring(run.feRing, kFeRingSamples - 1, start, len, r,
                                              run.fe[idx].rows + r * kFeRowFloats, run.feWork);
       portENTER_CRITICAL(&gSttMux);
       FeCache& c = run.fe[idx];
@@ -1221,7 +1271,7 @@ static void sttFeatureWorker(void* context) {
 // Capture task, per block: copy PCM into the stream ring (before the
 // segmenter sees it) ...
 static void sttFeatureRingWrite(StreamRun& run, int16_t* ring, const int16_t* block, size_t count) {
-  const uint64_t base = run.segmenter.samples_seen();
+  const uint64_t base = run.segmenter->samples_seen();
   const size_t at = static_cast<size_t>(base & (kFeRingSamples - 1));
   const size_t first = std::min(count, kFeRingSamples - at);
   memcpy(ring + at, block, first * sizeof(int16_t));
@@ -1236,7 +1286,7 @@ static void sttFeatureRingWrite(StreamRun& run, int16_t* ring, const int16_t* bl
 static void sttFeatureTrack(StreamRun& run) {
   uint64_t liveStart = 0;
   size_t liveLen = 0;
-  const bool active = run.segmenter.live_view(&liveStart, &liveLen);
+  const bool active = run.segmenter->live_view(&liveStart, &liveLen);
   portENTER_CRITICAL(&gSttMux);
   if (run.feLive >= 0 && (!active || run.fe[run.feLive].start != liveStart)) {
     run.fe[run.feLive].state = FeState::Orphan;  // discarded candidate
@@ -1266,8 +1316,8 @@ static void sttSpecCapture(StreamRun& run) {
   uint64_t start = 0;
   size_t voiced = 0, samples = 0, liveSamples = 0;
   const int16_t* live = nullptr;
-  const bool want = run.segmenter.speculation(kTrimTailSamples, &start, &voiced, &samples) &&
-                    run.segmenter.in_progress(&live, &liveSamples) && samples <= liveSamples;
+  const bool want = run.segmenter->speculation(kTrimTailSamples, &start, &voiced, &samples) &&
+                    run.segmenter->in_progress(&live, &liveSamples) && samples <= liveSamples;
   bool copy = false;
   portENTER_CRITICAL(&gSttMux);
   if (!want) {
@@ -1482,11 +1532,11 @@ static void sttCaptureWorker(void* context) {
 #endif
         size_t offset = 0;
         while (offset < count && !sttStreamCancelled(&run)) {
-          const auto fed = run.segmenter.push(block + offset, count - offset);
+          const auto fed = run.segmenter->push(block + offset, count - offset);
           offset += fed.consumed;
           if (fed.status == hw1::stt::SegmentStatus::Ready) {
             utteranceEnded = run.singleUtterance &&
-                run.segmenter.segment()->end == hw1::stt::SegmentEnd::Pause;
+                run.segmenter->segment()->end == hw1::stt::SegmentEnd::Pause;
             if (!sttQueueSegment(run)) break;
             if (utteranceEnded) break;
           } else if (fed.status != hw1::stt::SegmentStatus::Ok || !fed.consumed) {
@@ -1504,7 +1554,7 @@ static void sttCaptureWorker(void* context) {
         // paces itself: a new snapshot waits until the previous draft is done.
         const int16_t* live = nullptr;
         size_t liveSamples = 0;
-        if (run.draftPcm && run.segmenter.in_progress(&live, &liveSamples)) {
+        if (run.draftPcm && run.segmenter->in_progress(&live, &liveSamples)) {
           portENTER_CRITICAL(&gSttMux);
           const uint32_t nextSequence = gStt.snapshot.segmentsCaptured + 1;
 #if HW1_STT_SPECULATIVE_FINAL
@@ -1531,18 +1581,18 @@ static void sttCaptureWorker(void* context) {
             run.draftFe = -1; run.draftFeRows = 0;
             if (run.feLive >= 0 && run.fe[run.feLive].state == FeState::Live && liveSamples >= 320) {
               run.draftFe = run.feLive; run.draftFeGen = run.fe[run.feLive].gen;
-              run.draftFeRows = std::min(run.fe[run.feLive].frames, liveSamples / 160);
+              run.draftFeRows = std::min(run.fe[run.feLive].frames, sttFinalRows(liveSamples));
             }
 #endif
             portEXIT_CRITICAL(&gSttMux);
           }
         }
         portENTER_CRITICAL(&gSttMux);
-        gStt.snapshot.recordedSamples = run.segmenter.samples_seen();
-        if (run.segmenter.calibrated()) gStt.snapshot.state = SttState::Recording;
-        gStt.snapshot.rms = run.segmenter.current_rms();
-        gStt.snapshot.noiseRms = run.segmenter.noise_rms();
-        gStt.snapshot.thresholdRms = run.segmenter.threshold_rms();
+        gStt.snapshot.recordedSamples = run.segmenter->samples_seen();
+        if (run.segmenter->calibrated()) gStt.snapshot.state = SttState::Recording;
+        gStt.snapshot.rms = run.segmenter->current_rms();
+        gStt.snapshot.noiseRms = run.segmenter->noise_rms();
+        gStt.snapshot.thresholdRms = run.segmenter->threshold_rms();
 #ifdef ESP_PLATFORM
         {
           // Timeline: once a second, the endpointing inputs (is a phrase open?).
@@ -1556,11 +1606,11 @@ static void sttCaptureWorker(void* context) {
             TlLevel& e = gTlLevels[gTlLevelHead++ % kTlLevels];
             e.t = nowMs; e.rms = gStt.snapshot.rms; e.noise = gStt.snapshot.noiseRms;
             e.thr = gStt.snapshot.thresholdRms;
-            e.open = run.segmenter.in_progress(&openPcm, &openSamples);
+            e.open = run.segmenter->in_progress(&openPcm, &openSamples);
           }
         }
 #endif
-        gStt.snapshot.peakRms = run.segmenter.peak_rms();
+        gStt.snapshot.peakRms = run.segmenter->peak_rms();
         gStt.snapshot.level = level;
         gStt.snapshot.captureStackFreeBytes = uxTaskGetStackHighWaterMark(nullptr);
         portEXIT_CRITICAL(&gSttMux);
@@ -1618,7 +1668,7 @@ static void sttCaptureWorker(void* context) {
       }
     }
     if (!sttStreamCancelled(&run)) {
-      const auto status = run.segmenter.finish();
+      const auto status = run.segmenter->finish();
       if (status == hw1::stt::SegmentStatus::Ready) (void)sttQueueSegment(run);
       else if (status != hw1::stt::SegmentStatus::Finished)
         sttStreamFail(run, "Could not finish continuous audio segment");
@@ -1690,7 +1740,7 @@ static void sttFeatureRelease(StreamRun& run, int idx, uint32_t gen) {
 static void sttFeatureStart(StreamRun& run, const SttLocalSession& session) {
   constexpr size_t kRowsBytes = kFeMaxRows * kFeRowFloats * sizeof(float);
   constexpr size_t kPoolBytes = kFeCaches * kRowsBytes + kFeRingSamples * sizeof(int16_t) +
-                                sizeof(hw1::stt::FrontendWorkspace);
+                                sizeof(stt_fe::FrontendWorkspace);
   const char* why = nullptr;
   const SttLocalCallBudget call = sttLocalCallBudget(kStreamSamples, &session);
   const size_t keepFree = std::max<size_t>(2u << 20, call.total + (1u << 20));
@@ -1700,11 +1750,11 @@ static void sttFeatureStart(StreamRun& run, const SttLocalSession& session) {
   (void)kPoolBytes; (void)keepFree;
 #endif
   int16_t* ring = nullptr;
-  hw1::stt::FrontendWorkspace* work = nullptr;
+  stt_fe::FrontendWorkspace* work = nullptr;
   float* rows[kFeCaches] = {};
   if (!why) {
     ring = static_cast<int16_t*>(ps_alloc(kFeRingSamples * sizeof(int16_t), AllocPref::RequirePsram, "stt.fe_ring"));
-    work = static_cast<hw1::stt::FrontendWorkspace*>(ps_alloc(sizeof(hw1::stt::FrontendWorkspace), AllocPref::RequirePsram, "stt.fe_work"));
+    work = static_cast<stt_fe::FrontendWorkspace*>(ps_alloc(sizeof(stt_fe::FrontendWorkspace), AllocPref::RequirePsram, "stt.fe_work"));
     for (auto& r : rows) r = static_cast<float*>(ps_alloc(kRowsBytes, AllocPref::RequirePsram, "stt.fe_rows"));
     if (!ring || !work || !rows[0] || !rows[1]) why = "alloc";
   }
@@ -1940,6 +1990,17 @@ bool sttLabelledQueue(LabelledTranscript& lt, SttLocalSession& session, Transcri
 }
 }  // namespace
 #endif
+static hw1::stt::Segmenter* sttSegmenterCreate() {
+  void* memory = ps_alloc(sizeof(hw1::stt::Segmenter), AllocPref::RequirePsram, "stt.segmenter");
+  return memory ? new (memory) hw1::stt::Segmenter() : nullptr;
+}
+static void sttSegmenterDestroy(hw1::stt::Segmenter*& segmenter) {
+  if (!segmenter) return;
+  segmenter->~Segmenter();
+  sttWipe(segmenter, sizeof(*segmenter));
+  free(segmenter);
+  segmenter = nullptr;
+}
 static void sttContinuousWorker(void*) {
   StreamRun run;
   SttLocalSession backendSession;
@@ -1966,6 +2027,9 @@ static void sttContinuousWorker(void*) {
       slot.pcm = static_cast<int16_t*>(ps_alloc(kStreamSamples * sizeof(int16_t), AllocPref::RequirePsram, "stt.queue"));
       if (!slot.pcm) { sttStreamFail(run, "Insufficient PSRAM for continuous queue"); break; }
     }
+    if (sttStreamCancelled(&run)) break;
+    run.segmenter = sttSegmenterCreate();
+    if (!run.segmenter) { sttStreamFail(run, "Insufficient PSRAM for the speech detector"); break; }
     // Draft buffer is optional: without PSRAM for it, live mode just stays off.
     run.draftPcm = static_cast<int16_t*>(ps_alloc(kStreamSamples * sizeof(int16_t), AllocPref::RequirePsram, "stt.draft"));
     if (sttStreamCancelled(&run)) break;
@@ -1975,16 +2039,12 @@ static void sttContinuousWorker(void*) {
     const bool onGlasses = run.nativeGeneration != 0 || run.requested == AUDIO_SRC_G2_LEFT ||
         (run.requested == AUDIO_SRC_NONE && !audioSourceAvailable(AUDIO_SRC_LOCAL_PDM) &&
          audioSourceAvailable(AUDIO_SRC_G2_LEFT));
-    const SttDetectorProfile profile = sttDetectorProfileFor(onGlasses);
+    SttDetectorProfile profile = sttDetectorProfileFor(onGlasses);
+    const hw1::stt::SegmenterConfig segmentConfig = sttSegmenterConfigFor(profile, kStreamSamples, run.singleUtterance);
     portENTER_CRITICAL(&gSttMux);
     gSttActiveProfile = profile;
     portEXIT_CRITICAL(&gSttMux);
-    // Settings shared with host replay (stt/stt_continuous_config.h).
-    const hw1::stt::SegmenterConfig segmentConfig = hw1::stt::continuousSegmenterConfig(
-        STT_SAMPLE_RATE, kStreamSamples, HW1_STT_SHORT_CLOSE != 0, run.singleUtterance,
-        static_cast<uint16_t>(profile.speechFloor), static_cast<uint16_t>(profile.silenceFloor),
-        static_cast<uint8_t>(profile.noisePercentile), static_cast<uint8_t>(profile.decisionPre));
-    if (!run.segmenter.reset(run.working, kStreamSamples, segmentConfig)) {
+    if (!run.segmenter->reset(run.working, kStreamSamples, segmentConfig)) {
       sttStreamFail(run, "Invalid continuous segmentation settings"); break;
     }
     taskStackRecord("stt_capture", kCaptureStackBytes);
@@ -2020,6 +2080,9 @@ static void sttContinuousWorker(void*) {
                  warmed ? 1 : 0, warmStats.lmUsed ? 1 : 0, (unsigned long)getCpuFrequencyMhz(),
                  unsigned(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)),
                  unsigned(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM)));
+#if defined(HW1_STT_HEAP_WATCH) && HW1_STT_HEAP_WATCH
+        hw1::stt::heapWatchReport("warm");
+#endif
 #if HW1_STT_SPEAKER_LABELS
         sttStartSpeakers(backendSession, run.token, warmed, run.speakerLabels);
 #endif
@@ -2101,14 +2164,14 @@ static void sttContinuousWorker(void*) {
 #if HW1_STT_CAPTURE_FEATURES
             // Rows of the speculated phrase's cache committed by now, clipped
             // to rows whose samples all lie inside the snapshot
-            // ((r + 1) * 160 <= specSamples: the same rows the batch frontend
+            // (sttFinalRows(specSamples): the same rows the batch frontend
             // computes on it). Only the worker frees a cache, so they stay put
             // during the run; gen/start guard against a reused cache.
             if (run.specReadyFe >= 0 && specSamples >= 320) {
               const FeCache& c = run.fe[run.specReadyFe];
               if (c.gen == run.specReadyFeGen && c.state != FeState::Free && c.start == specA0) {
                 specPrefix.rows = c.rows;
-                specPrefix.count = std::min(c.frames, specSamples / 160);
+                specPrefix.count = std::min(c.frames, sttFinalRows(specSamples));
               }
             }
 #endif
@@ -2301,8 +2364,8 @@ static void sttContinuousWorker(void*) {
 #if HW1_STT_CAPTURE_FEATURES
         // Rows computed during capture for this phrase. The trim may infer
         // only a prefix (voiced end + 500 ms); then only the cached rows whose
-        // samples all lie inside that prefix are used, row r with
-        // (r + 1) * 160 <= inferenceSamples. Such a row never reflects at the
+        // samples all lie inside that prefix are used (sttFinalRows(inferenceSamples)).
+        // Such a row never reflects at the
         // end, so it equals the batch frontend's row of the trimmed input; the
         // runtime computes the rest on the trimmed PCM. A zero-padded input
         // (< 320 samples captured) has no cache (none is attached).
@@ -2310,7 +2373,7 @@ static void sttContinuousWorker(void*) {
         if (slot->fe >= 0 && slot->feRows && run.fe[slot->fe].gen == slot->feGen &&
             run.fe[slot->fe].state == FeState::Attached && inferenceSamples <= slot->samples) {
           prefix.rows = run.fe[slot->fe].rows;
-          prefix.count = std::min(slot->feRows, inferenceSamples / 160);
+          prefix.count = std::min(slot->feRows, sttFinalRows(inferenceSamples));
         }
         portEXIT_CRITICAL(&gSttMux);
 #endif
@@ -2597,6 +2660,7 @@ static void sttContinuousWorker(void*) {
   sttWipe(gSpecText, sizeof(gSpecText));  // a held, never-promoted result
 #endif
   if (run.working) { sttWipe(run.working, kStreamSamples * sizeof(int16_t)); free(run.working); }
+  sttSegmenterDestroy(run.segmenter);
   if (run.draftPcm) { sttWipe(run.draftPcm, kStreamSamples * sizeof(int16_t)); free(run.draftPcm); }
   for (auto& slot : run.slots) {
     if (slot.pcm) { sttWipe(slot.pcm, kStreamSamples * sizeof(int16_t)); free(slot.pcm); }
@@ -2608,6 +2672,9 @@ static void sttContinuousWorker(void*) {
   const bool cancelled = sttCancelled(&run.token);
   // Saving has a completion boundary here. Later cancellation can retire the
   // mailbox, but cannot rewrite this already-admitted final outcome.
+#if defined(HW1_STT_HEAP_WATCH) && HW1_STT_HEAP_WATCH
+  hw1::stt::heapWatchReport("end");
+#endif
   transcript.finish(cancelled ? "cancelled" : run.failed ? "failed" : "done");
   sttPublishTranscript(run.token, transcript.snapshot());
   portENTER_CRITICAL(&gSttMux);
@@ -2707,6 +2774,9 @@ static bool sttBeginMode(SttOwner owner, uint32_t captureMs, bool continuous,
   }
   portEXIT_CRITICAL(&gSttMux);
   if (!admitted) return sttError(error, errorCap, "STT is busy or a result belongs to another session");
+#if defined(HW1_STT_HEAP_WATCH) && HW1_STT_HEAP_WATCH   // diagnostic builds (stt/stt_internal_memory.h)
+  hw1::stt::heapWatchBegin();
+#endif
   taskStackRecord("stt", kWorkerStackBytes);
   // Core 1 avoids putting the frontend/capture worker on the radio/ISR core;
   // the model backend may use its own qualified multicore operator workers.
@@ -2783,14 +2853,11 @@ bool sttAnySessionActive() {
   return active;
 }
 
-void sttDetectorProfileInUse(int* speechFloor, int* silenceFloor, int* noisePercentile, int* decisionPre) {
+SttDetectorProfile sttDetectorProfileInUse() {
   portENTER_CRITICAL(&gSttMux);
   const SttDetectorProfile p = gSttActiveProfile;
   portEXIT_CRITICAL(&gSttMux);
-  if (speechFloor) *speechFloor = p.speechFloor;
-  if (silenceFloor) *silenceFloor = p.silenceFloor;
-  if (noisePercentile) *noisePercentile = p.noisePercentile;
-  if (decisionPre) *decisionPre = p.decisionPre;
+  return p;
 }
 
 void sttKeepWarm(uint32_t holdMs, bool load) {
@@ -3182,7 +3249,11 @@ static const char* cmd_stt(const String& argsInput) {
         doc["speechFloor"] = p.speechFloor;
         doc["silenceFloor"] = p.silenceFloor;
         doc["noisePercentile"] = p.noisePercentile;
+        doc["detector"] = hw1::stt::kContinuousDetectorVersion;
         doc["decisionPre"] = p.decisionPre;
+        doc["decisionGainPct"] = p.decisionGainPct;
+        doc["decisionModPct"] = p.decisionModPct;
+        doc["decisionHold"] = p.decisionHold;
       }
       doc["autoGain"] = gSettings.sttAutoGain && kSttPdmTunable;
     }
@@ -3356,6 +3427,9 @@ static const char* cmd_sttvocab(const String& argsInput) {
 // room audio to the card unencrypted. Arming is never persisted.
 // Mic-path and speech-detector tuning in effect (PDM knobs from HAL_Audio, detector
 // knobs from the "stt" settings group; a running session keeps the values it started with).
+// The onset fields are what the next session's segmenter takes (sttSegmenterConfigFor):
+// a modulation ratio of 1-100 read from a settings file shows as 101, and the gate and
+// hold show 0 while the onset is off (sttdecisionpre 0 or a build without it).
 static const char* cmd_sttdetector(const String&) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   static char out[384];
@@ -3371,13 +3445,19 @@ static const char* cmd_sttdetector(const String&) {
     portEXIT_CRITICAL(&gSttMux);
     hpf = kSttAutoHpfHz;
   }
+  SttDetectorProfile onboard = sttDetectorProfileFor(false), g2 = sttDetectorProfileFor(true);
+  (void)sttSegmenterConfigFor(onboard, kStreamSamples, false);
+  (void)sttSegmenterConfigFor(g2, kStreamSamples, false);
   snprintf(out, sizeof(out),
-           "{\"autoGain\":%s,\"pdmAmplify\":%u,\"pdmHpfHz\":%u,\"gainHistory\":%u,\"speechFloor\":%d,\"silenceFloor\":%d,"
-           "\"noisePercentile\":%d,\"decisionPre\":%d,\"g2\":{\"speechFloor\":%d,\"silenceFloor\":%d,"
-           "\"noisePercentile\":%d,\"decisionPre\":%d}}",
-           autoGain ? "true" : "false", amp, hpf, kept, gSettings.sttSpeechFloor, gSettings.sttSilenceFloor,
-           gSettings.sttNoisePercentile, gSettings.sttDecisionPre, gSettings.sttG2SpeechFloor, gSettings.sttG2SilenceFloor,
-           gSettings.sttG2NoisePercentile, gSettings.sttG2DecisionPre);
+           "{\"autoGain\":%s,\"pdmAmplify\":%u,\"pdmHpfHz\":%u,\"gainHistory\":%u,\"detector\":\"%s\",\"speechFloor\":%d,\"silenceFloor\":%d,"
+           "\"noisePercentile\":%d,\"decisionPre\":%d,\"decisionMod\":%d,\"decisionHold\":%s,"
+           "\"g2\":{\"speechFloor\":%d,\"silenceFloor\":%d,"
+           "\"noisePercentile\":%d,\"decisionPre\":%d,\"decisionMod\":%d,\"decisionHold\":%s}}",
+           autoGain ? "true" : "false", amp, hpf, kept, hw1::stt::kContinuousDetectorVersion, gSettings.sttSpeechFloor, gSettings.sttSilenceFloor,
+           gSettings.sttNoisePercentile, onboard.decisionPre, onboard.decisionModPct,
+           onboard.decisionHold ? "true" : "false", gSettings.sttG2SpeechFloor, gSettings.sttG2SilenceFloor,
+           gSettings.sttG2NoisePercentile, g2.decisionPre, g2.decisionModPct,
+           g2.decisionHold ? "true" : "false");
   return out;
 }
 
@@ -3402,7 +3482,7 @@ const CommandEntry sttCommands[] = {
   {"sttperf", "STT pacing/profiling per segment (timings and CPU only, never text).", false, cmd_sttperf,
    "Usage: sttperf [show|clear|log on|off|stages [all|clear]]"},
   {"sttdetector", "Show the mic-path (PDM gain, high-pass) and speech-detector (floors, percentile) tuning in effect.", false, cmd_sttdetector,
-   "Usage: sttdetector  (onboard: sttautogain, pdmamplify, pdmhpf, sttspeechfloor, sttsilencefloor, sttnoisepercentile, sttdecisionpre; glasses: sttg2speechfloor, sttg2silencefloor, sttg2noisepercentile, sttg2decisionpre)"},
+   "Usage: sttdetector  (onboard: sttautogain, pdmamplify, pdmhpf, sttspeechfloor, sttsilencefloor, sttnoisepercentile, sttdecisionpre, sttdecisionmod, sttdecisionhold; glasses: sttg2speechfloor, sttg2silencefloor, sttg2noisepercentile, sttg2decisionpre, sttg2decisionmod, sttg2decisionhold)"},
   {"sttraw", "Save the raw microphone input of continuous STT sessions to /sd/STT Raw for bench replay.", true, cmd_sttraw,
    "Usage: sttraw [status|on|off]  (on arms the next continuous session; not kept across reboot)"},
   {"sttvocab", "Speech vocabulary: names and terms with their display spelling (STT Models/user_vocab.tsv).", false, cmd_sttvocab,

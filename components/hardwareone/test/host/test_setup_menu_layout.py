@@ -84,7 +84,9 @@ def main() -> None:
     args = parser.parse_args()
     require(bool(args.cxx), "a host C++17 compiler is required")
     profiles = [
-        ("qtpy-maps", "qtpy-maps-test", None, "ESP32", "ARDUINO_ADAFRUIT_QTPY_ESP32_DEV", {}),
+        # qtpy-oled with the gamepad and offline maps added (the former qtpy-maps-test choices).
+        ("qtpy-maps", "qtpy-oled", None, "ESP32", "ARDUINO_ADAFRUIT_QTPY_ESP32_DEV",
+         {"CUSTOM_ENABLE_GAMEPAD": 1, "ENABLE_MAPS": 1, "INPUT_DEVICE_TYPE": 1, "NETWORK_FEATURE_LEVEL": 3}),
         ("xiao-default", "xiao-default", "xiao_s3", "ESP32S3", "ARDUINO_XIAO_ESP32S3_DEV", {}),
         ("p4-default", None, "p4x_eye", "ESP32P4", None, {}),
         # Explicitly qualify the SENSOR-category enablement exception and

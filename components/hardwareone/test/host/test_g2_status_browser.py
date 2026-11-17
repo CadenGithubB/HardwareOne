@@ -167,7 +167,7 @@ def browser_page(header: Path) -> dict:
         "script": script(False),
         "phoneScript": script(True),
         "markup": {str(enabled).lower(): markup(enabled) for enabled in (False, True)},
-        # Phone relay pipe builds, with and without the glasses (p4-phone-only).
+        # Phone relay pipe builds, with and without the glasses (a phone-only build).
         "phoneMarkup": {str(enabled).lower(): markup(enabled, phone=True)
                         for enabled in (False, True)},
         "featureMarkup": [

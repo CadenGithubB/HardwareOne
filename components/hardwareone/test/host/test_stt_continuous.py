@@ -26,9 +26,13 @@ def main():
     group.add_argument('--thread-sanitize', action='store_true', help='ThreadSanitizer (supported hosts only)')
     parser.add_argument('--repeat', type=int, default=1)
     parser.add_argument('--speakers', action='store_true', help='Exercise controlled late speaker labels, cancellation, bounded saves and session fences')
+    parser.add_argument('--prev-onset', action='store_true',
+                        help='Build as ENABLE_STT_LEVEL_ROBUST_ONSET 0 (a saved configuration sets it): sessions run the raw level only')
     policy = parser.add_mutually_exclusive_group()
     policy.add_argument('--full-phrase', action='store_true',
                         help='Build the opt-out (-DHW1_STT_TRIM_SILENCE=0): full phrases, no speculative finals')
+    parser.add_argument('--citrinet', action='store_true',
+                        help='Build the Citrinet broker (HW1_STT_CITRINET: its 80-band front end and 400-sample window for capture-time rows)')
     policy.add_argument('--trim-silence', action='store_true',
                         help='Alias of the default: production trailing trim (500 ms tail) with speculative finals')
     args = parser.parse_args()
@@ -46,9 +50,14 @@ def main():
     assert 'stats, error, sizeof(error));' in one_shot and 'sttWarmPark' not in one_shot
     interface = '\n'.join(no_includes((SOURCE / name).read_text()) for name in
                           ('System_STTMetadata.h', 'System_Transcript.h', 'System_STTLocal.h', 'System_STT.h', 'System_AudioVadPolicy.h', 'stt/stt_segmenter.h', 'stt/stt_continuous_config.h', 'stt/stt_auto_gain.h',
-                           'stt/quartznet_frontend.h'))
-    # The real frontend, so capture-time feature rows can be checked bit for bit.
-    frontend = no_includes((SOURCE / 'stt/quartznet_constants.h').read_text()) + no_includes((SOURCE / 'stt/quartznet_frontend.cpp').read_text())
+                           'stt/quartznet_frontend.h') + (('stt/citrinet_frontend.h',) if args.citrinet else ()))
+    # The real frontend, so capture-time feature rows can be checked bit for bit. Citrinet's shares
+    # QuartzNet's 512-point FFT tables (quartznet_constants.h).
+    frontend = no_includes((SOURCE / 'stt/quartznet_constants.h').read_text())
+    if args.citrinet:
+        frontend += no_includes((SOURCE / 'stt/citrinet_constants.h').read_text()) + no_includes((SOURCE / 'stt/citrinet_frontend.cpp').read_text())
+    else:
+        frontend += no_includes((SOURCE / 'stt/quartznet_frontend.cpp').read_text())
     broker = no_includes((SOURCE / 'System_STT.cpp').read_text().split('// CLI_ADAPTER_BEGIN')[0]) + '\n#endif\n'
     harness = (HERE / 'stt_continuous_harness.cpp').read_text()
     harness = harness.replace('// INSERT_INTERFACE', interface).replace('// INSERT_BROKER', broker).replace('// INSERT_FRONTEND', frontend)
@@ -60,6 +69,10 @@ def main():
                '-Wno-unused-function', str(unit), '-o', str(exe)]
         if args.speakers:
             cmd += ['-DCONFIG_IDF_TARGET_ESP32P4=1', '-DENABLE_STT_SPEAKER_LABELS=1']
+        if args.prev_onset:
+            cmd += ['-DENABLE_STT_LEVEL_ROBUST_ONSET=0']
+        if args.citrinet:
+            cmd += ['-DHW1_STT_CITRINET=1']
         if args.full_phrase:
             cmd += ['-DHW1_STT_TRIM_SILENCE=0', '-DHW1_STT_SPECULATIVE_FINAL=0', '-DHW1_STT_TEST_EXPECT_FULL_PHRASE=1']
         else:
