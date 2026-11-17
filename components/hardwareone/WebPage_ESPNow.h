@@ -227,7 +227,7 @@ inline void streamEspNowInner(httpd_req_t* req) {
 <input type='text' id='mesh-add-label' placeholder='New mesh label (e.g., lab2)' maxlength='16'>
 <button class='btn' id='btn-mesh-add'>Add Mesh</button>
 </div>
-<div id='meshes-full-msg' style='display:none;color:var(--muted);font-size:.82em;text-align:center;padding:6px'>All 4 mesh slots configured. Remove one to free a slot.</div>
+<div id='meshes-full-msg' style='display:none;color:var(--muted);font-size:.82em;text-align:center;padding:6px'>All 4 mesh slots are in use. Disable a mesh and delete it to free a slot.</div>
 </div>
 <div id='mesh-role-card' style='display:none;padding-top:16px;border-top:1px solid var(--border)'>
 <div style='font-size:1rem;font-weight:600;color:var(--panel-fg);margin-bottom:8px'>Mesh Role Configuration</div>

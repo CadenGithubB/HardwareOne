@@ -163,6 +163,11 @@ bool peerIdentityForget(const uint8_t mac[6]);
 // peer identities loaded.
 uint8_t peerIdentityLoadAll();
 
+// True once peerIdentityLoadAll has read the stored identities this boot (an
+// absent peers directory counts). False when it never ran or could not read
+// them: the cache then says nothing about which mesh slots paired devices use.
+bool peerIdentitiesLoaded();
+
 // Read-only iteration: returns the i-th valid entry or nullptr if i is past
 // the end. Order is not meaningful (insertion order in the cache).
 const PeerIdentity* peerIdentityAt(uint8_t i);

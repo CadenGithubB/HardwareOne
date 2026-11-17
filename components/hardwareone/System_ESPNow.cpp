@@ -126,6 +126,11 @@ static uint8_t gEspNowSelfMac[6] = {};
 static bool gEspNowSelfMacValid = false;
 static uint8_t gEspNowSelfApMac[6] = {};
 static bool gEspNowSelfApMacValid = false;
+// The station address of the last start this boot. Unlike the cache above it
+// is kept across a stop: the device table of a stopped instance still holds
+// this device's own entry, and this is how that entry is told from a peer's.
+static uint8_t gEspNowLastSelfMac[6] = {};
+static bool gEspNowLastSelfMacValid = false;
 
 // A null argument invalidates that cache. The mux keeps readers on other tasks
 // from observing a partially published address during startup or shutdown.
@@ -134,10 +139,27 @@ static void setEspNowSelfMacCache(const uint8_t* staMac, const uint8_t* apMac) {
   if (staMac) memcpy(gEspNowSelfMac, staMac, sizeof(gEspNowSelfMac));
   else memset(gEspNowSelfMac, 0, sizeof(gEspNowSelfMac));
   gEspNowSelfMacValid = staMac != nullptr;
+  if (staMac) {
+    memcpy(gEspNowLastSelfMac, staMac, sizeof(gEspNowLastSelfMac));
+    gEspNowLastSelfMacValid = true;
+  }
   if (apMac) memcpy(gEspNowSelfApMac, apMac, sizeof(gEspNowSelfApMac));
   else memset(gEspNowSelfApMac, 0, sizeof(gEspNowSelfApMac));
   gEspNowSelfApMacValid = apMac != nullptr;
   taskEXIT_CRITICAL(&gEspNowSelfMacLock);
+}
+
+// True for this device's own station address as of the last start this boot,
+// also while ESP-NOW is stopped (isSelfMac answers only while it runs).
+static bool isLastKnownSelfMac(const uint8_t* mac) {
+  if (!mac) return false;
+  uint8_t probe[6];
+  memcpy(probe, mac, sizeof(probe));
+  taskENTER_CRITICAL(&gEspNowSelfMacLock);
+  const bool matches = gEspNowLastSelfMacValid &&
+                       memcmp(probe, gEspNowLastSelfMac, sizeof(gEspNowLastSelfMac)) == 0;
+  taskEXIT_CRITICAL(&gEspNowSelfMacLock);
+  return matches;
 }
 
 // Every "who am I" read in the mesh code goes through these two. While the
@@ -1701,7 +1723,7 @@ static uint16_t fingerprintForPeer(const uint8_t* mac) {
 //
 // On-disk shape (under doc["espnow"]):
 //   "meshes": [
-//     {"label":"primary", "passphrase":"...", "enabled":true, "isDefault":true},
+//     {"slot":0, "label":"primary", "passphrase":"...", "enabled":true, "isDefault":true},
 //     ...
 //   ],
 //   "bondsByMesh": [
@@ -1721,6 +1743,10 @@ void espnowMeshesWriteJson(JsonDocument& doc, bool excludePasswords) {
     // mesh configured-but-off).
     if (!m.enabled && m.label.length() == 0) continue;
     JsonObject e = meshesArr.add<JsonObject>();
+    // Stored identities, the device registry and bondsByMesh name a mesh by its
+    // slot number, and 'espnowmeshes delete' can leave an empty slot below a
+    // used one, so the number is written and the reader puts the entry back there.
+    e["slot"]      = i;
     e["label"]     = m.label;
     if (!excludePasswords) {
       // At-rest AES (device key) — was plaintext. The bond-sync path uses
@@ -1767,9 +1793,20 @@ void espnowMeshesReadJson(JsonDocument& doc) {
     for (uint8_t i = 0; i < Settings::N_MESHES; i++) {
       gSettings.meshes[i] = Settings::MeshIdentity();
     }
-    uint8_t idx = 0;
+    // An entry goes to the slot it names. Files written before "slot" existed
+    // list the meshes in slot order with no gaps (a slot could not be emptied
+    // then), so an entry without a usable number takes the lowest free slot.
+    bool used[Settings::N_MESHES] = {};
     for (JsonObjectConst e : meshesArr) {
-      if (idx >= Settings::N_MESHES) break;
+      const int named = e["slot"] | -1;
+      uint8_t idx = 0;
+      if (named >= 0 && named < (int)Settings::N_MESHES && !used[named]) {
+        idx = (uint8_t)named;
+      } else {
+        while (idx < Settings::N_MESHES && used[idx]) idx++;
+        if (idx >= Settings::N_MESHES) break;
+      }
+      used[idx] = true;
       gSettings.meshes[idx].label      = String((const char*)(e["label"]      | ""));
       gSettings.meshes[idx].passphrase = getSecret(e, "passphrase");  // decrypt at-rest AES
       gSettings.meshes[idx].enabled    = e["enabled"]   | false;
@@ -1797,7 +1834,6 @@ void espnowMeshesReadJson(JsonDocument& doc) {
         gSettings.meshes[idx].passphraseStretchedKeyValid = ok;
       }
       // fingerprint recomputed below
-      idx++;
     }
     recomputeAllMeshFingerprints();
   }
@@ -1830,10 +1866,18 @@ static void initPrimaryMeshFromLegacySettings() {
     m0.fingerprint = meshFingerprintForLabel(m0.label);
     return;
   }
-  // Always bootstrap "primary" in slot 0, even on a fresh device with no
-  // passphrase yet. Decoupling 'espnowmeshes add' from passphrase setup
-  // (Phase 2.8 refactor) means CLI users target a mesh by name first and
-  // set its passphrase second — so the named slot has to exist at boot.
+  // Slot 0 is empty. When another slot holds a mesh, the user has set meshes
+  // up and emptied this one with 'espnowmeshes delete': it stays empty until
+  // 'add' uses it. Creating "primary" here would put a second enabled default
+  // mesh, with no passphrase, beside the one in use (or a second mesh with a
+  // label already taken).
+  for (uint8_t i = 1; i < Settings::N_MESHES; i++) {
+    if (gSettings.meshes[i].label.length() > 0) return;
+  }
+  // A device with no mesh at all gets "primary", also with no passphrase yet.
+  // Decoupling 'espnowmeshes add' from passphrase setup (Phase 2.8 refactor)
+  // means CLI users target a mesh by name first and set its passphrase second
+  // — so a named slot has to exist once ESP-NOW has started.
   m0.label       = "primary";
   m0.fingerprint = meshFingerprintForLabel(m0.label);
   m0.enabled     = true;
@@ -1858,26 +1902,33 @@ static uint8_t espnowStartPassphraseSlot() {
 }
 
 // The mesh a "set a passphrase" hint should name: the enabled default mesh,
-// else the first enabled one. nullptr when no mesh is enabled.
+// whose passphrase a start loads (see espnowStartPassphraseSlot). nullptr when
+// no enabled mesh is the default; a passphrase on some other mesh would not be
+// loaded, so the hint then says to choose a default first.
 static const char* meshLabelForPassphraseHint() {
-  const Settings::MeshIdentity* first = nullptr;
   for (uint8_t i = 0; i < Settings::N_MESHES; i++) {
     const Settings::MeshIdentity& m = gSettings.meshes[i];
-    if (!m.enabled || m.label.length() == 0) continue;
-    if (m.isDefault) return m.label.c_str();
-    if (!first) first = &m;
+    if (m.enabled && m.isDefault && m.label.length() > 0) return m.label.c_str();
   }
-  return first ? first->label.c_str() : nullptr;
+  return nullptr;
 }
 
 // The start-up warning for a device with no mesh passphrase. It names the mesh
 // by its own label: slot 0 is only called "primary" until someone renames it.
 static void formatNoPassphraseWarning(char* out, size_t outLen) {
   const char* label = meshLabelForPassphraseHint();
+  bool anyEnabled = false;
+  for (uint8_t i = 0; i < Settings::N_MESHES; i++) {
+    if (gSettings.meshes[i].enabled && gSettings.meshes[i].label.length() > 0) anyEnabled = true;
+  }
   if (label) {
     snprintf(out, outLen,
              "[ESP-NOW] WARNING: No passphrase configured — encrypted frames from peers "
              "will fail to decrypt. Run 'espnowsetpassphrase %s <pw>'.", label);
+  } else if (anyEnabled) {
+    snprintf(out, outLen,
+             "[ESP-NOW] WARNING: No passphrase configured and no enabled mesh is the default. "
+             "Run 'espnowmeshes setdefault <label>', then 'espnowsetpassphrase <label> <pw>'.");
   } else {
     snprintf(out, outLen,
              "[ESP-NOW] WARNING: No passphrase configured and no mesh is enabled. "
@@ -12162,6 +12213,10 @@ static bool initEspNow() {
     deriveKeyFromPassphrase(bootPw, gEspNow->derivedKey);
     DEBUG_ESPNOW_STREAMF("[ESP-NOW] Restored encryption passphrase from settings");
   } else {
+    // A passphrase set while the instance was stopped stays in it; with none in
+    // the settings now (cleared, or its mesh deleted) it must not be used.
+    gEspNow->passphrase = "";
+    deriveKeyFromPassphrase(bootPw, gEspNow->derivedKey);
     char warning[224];
     formatNoPassphraseWarning(warning, sizeof(warning));
     BROADCAST_PRINTF("%s", warning);
@@ -15418,8 +15473,8 @@ const char* cmd_espnow_meshstatus(const String& argsInput) {
 //   espnowmeshes setpassphrase <label> <passphrase>    — change a mesh's passphrase
 //   espnowmeshes rename <oldlabel> <newlabel>          — rename (changes fingerprint!)
 //
-// Mesh slot 0 is special: an ESP-NOW start bootstraps it under the label
-// "primary" when it is empty (see meshesCmd_delete for what delete does there).
+// Mesh slot 0 is special: on a device with no mesh at all, an ESP-NOW start
+// bootstraps it under the label "primary".
 // Removing or renaming it is allowed but breaks comms with existing peers
 // until they too rename.
 
@@ -15549,7 +15604,7 @@ static const char* meshesCmd_add(const String& label) {
   }
   int slot = findFreeMeshSlot();
   if (slot < 0) {
-    return "Error: All mesh slots full. Remove an existing mesh first.";
+    return "Error: All mesh slots are in use. Free one with 'espnowmeshes delete <label>' first.";
   }
   setSetting(gSettings.meshes[slot].label, label);
   setSetting(gSettings.meshes[slot].passphrase, String(""));
@@ -15579,13 +15634,66 @@ static bool meshOtherEnabledExists(uint8_t slot) {
   return false;
 }
 
-// Paired devices whose stored identity names mesh slot `slot`. The identity
-// records are loaded at boot, so this is right whether or not ESP-NOW is open.
+// Paired devices whose stored identity names mesh slot `slot`.
 static int meshPairedPeerCount(uint8_t slot) {
   int count = 0;
   for (uint8_t i = 0; i < peerIdentitySlotCount(); i++) {
     const PeerIdentity* pid = peerIdentityAt(i);
     if (pid && pid->valid && pid->meshId == slot) count++;
+  }
+  return count;
+}
+
+// Entries of a saved device registry (the text of ESPNOW_DEVICES_FILE) that
+// name mesh slot `slot`; an entry without "meshId" is in slot 0. The file never
+// holds this device's own entry. -1 when the text is not a registry.
+static int meshRegistryCountInJson(const String& content, uint8_t slot) {
+  PSRAM_JSON_DOC(doc);
+  if (deserializeJson(doc, content) || !doc.is<JsonObject>()) return -1;
+  // Named first: a range-for over the temporary is rejected by the device compiler.
+  JsonArrayConst devices = doc["devices"].as<JsonArrayConst>();
+  int count = 0;
+  for (JsonObjectConst entry : devices) {
+    if ((int)(entry["meshId"] | 0) == (int)slot) count++;
+  }
+  return count;
+}
+
+// The same count from the registry file, for a device that has not started
+// ESP-NOW since boot (the table in RAM is filled at the first start).
+// -1 when the file cannot be read.
+static int meshRegistryCountInFile(uint8_t slot) {
+  if (!filesystemReady) return -1;
+  const AuthContext auth = VFS::systemAuth(VFS::Scopes::ESPNOW_STATE, "espnow.devices_mesh_count");
+  String content;
+  {
+    FsLockGuard fsGuard("espnow.devices.meshcount");
+    if (!VFS::existsGuarded(ESPNOW_DEVICES_FILE, auth)) return 0;
+    File f = VFS::openGuarded(ESPNOW_DEVICES_FILE, "r", auth);
+    if (!f) return -1;
+    const size_t expected = f.size();
+    content = f.readString();
+    f.close();
+    if (content.length() != expected) return -1;
+  }
+  return meshRegistryCountInJson(content, slot);
+}
+
+// Registry devices that name mesh slot `slot`. A device gets into the registry
+// with its slot before any key exchange ('espnowpair', or 'espnowpairsecure'
+// to a peer that never answers) and stays there after 'espnowforget', so the
+// stored identities alone do not show every device that points at a slot.
+// -1 when the registry cannot be read.
+static int meshRegistryDeviceCount(uint8_t slot) {
+  const bool inRam = gEspNow && (ConfigLoad::savable(sEspNowDevicesLoad) ||
+                                 sEspNowDevicesLoad == ConfigLoad::Status::Partial);
+  if (!inRam) return meshRegistryCountInFile(slot);
+  int count = 0;
+  for (int i = 0; i < gEspNow->deviceCount; i++) {
+    const EspNowDevice& d = gEspNow->devices[i];
+    if (d.meshId != slot) continue;
+    if (isSelfMac(d.mac) || isLastKnownSelfMac(d.mac)) continue;  // this device's own entry
+    count++;
   }
   return count;
 }
@@ -15630,26 +15738,37 @@ static const char* meshesCmd_remove(const String& label) {
 }
 
 // Empty a mesh slot: label, passphrase, cached keys and flags. 'add' can use
-// the slot again afterwards. With no other mesh and ESP-NOW stopped this leaves
-// the device as a new one is: no mesh until 'add' or the next ESP-NOW start.
+// the slot again afterwards, and the other meshes keep their slot numbers (the
+// settings file stores them). Deleting the last mesh leaves the device as a new
+// one is: no mesh until 'add' or the next ESP-NOW start, which sets up
+// "primary" (initPrimaryMeshFromLegacySettings).
 static const char* meshesCmd_delete(const String& label) {
   for (uint8_t i = 0; i < Settings::N_MESHES; i++) {
     if (gSettings.meshes[i].label != label) continue;
     Settings::MeshIdentity& m = gSettings.meshes[i];
     if (m.enabled && m.isDefault && meshOtherEnabledExists(i)) return meshDefaultInUseReply();
     if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-    // Stored identities name their mesh by slot number. Freeing a slot they
-    // still point at would hand those devices to whichever mesh takes it next.
-    const int paired = meshPairedPeerCount(i);
-    if (paired > 0) {
+    // Stored identities and registry entries name their mesh by slot number.
+    // Freeing a slot they still point at would hand those devices to whichever
+    // mesh takes it next, so both lists have to be readable and empty for it.
+    if (!peerIdentitiesLoaded()) {
+      return "Error: The stored keys of paired devices were not read at this start, so it is "
+             "not known which meshes they use. Restart the device and try again.";
+    }
+    const int withKeys = meshPairedPeerCount(i);
+    const int inRegistry = meshRegistryDeviceCount(i);
+    if (inRegistry < 0) {
+      return "Error: The list of paired devices could not be read, so it is not known which "
+             "meshes they use. Nothing was deleted.";
+    }
+    if (withKeys > 0 || inRegistry > 0) {
       snprintf(getDebugBuffer(), 1024,
-               "Error: %d paired device%s still belong%s to mesh '%s'. "
-               "Unpair with 'espnowunpair <name_or_mac>' first.",
-               paired, paired == 1 ? "" : "s", paired == 1 ? "s" : "", label.c_str());
+               "Error: Mesh '%s' still has paired devices (%d in the device list, %d with stored keys). "
+               "Unpair them with 'espnowunpair <name_or_mac>' first.",
+               label.c_str(), inRegistry, withKeys);
       return getDebugBuffer();
     }
     const bool hadPassphrase = m.passphrase.length() > 0;
-    const bool othersEnabled = meshOtherEnabledExists(i);
     meshKeysInvalidate(i);
     m.label = "";
     m.passphrase = "";
@@ -15665,24 +15784,9 @@ static const char* meshesCmd_delete(const String& label) {
       gSettings.bondPeerMacMesh[i] = "";
     }
 #endif
-    if (i == 0) {
-      // An ESP-NOW start bootstraps an empty slot 0 as an enabled default mesh
-      // "primary". A stopped device with no other mesh is simply left empty, as
-      // a new device is. A running instance gets the bootstrap now, and so does
-      // a device with another mesh in use, where the placeholder must not join
-      // in beside that mesh or take the default from it at the next start.
-      const bool running = gEspNow && (gEspNow->initialized || espnowShutdownPending());
-      if (running || othersEnabled) {
-        initPrimaryMeshFromLegacySettings();
-        if (othersEnabled) {
-          m.enabled = false;
-          m.isDefault = false;
-        }
-      }
-    }
-    // A running ESP-NOW holds the passphrase it started with; load it again so
-    // a deleted mesh's passphrase does not stay in use until the next start.
-    if (hadPassphrase && gEspNow && gEspNow->initialized) {
+    // An instance, running or stopped, may hold this mesh's passphrase; load
+    // what a start would load now, so the deleted one is not used again.
+    if (hadPassphrase && gEspNow) {
       const String livePw = gSettings.meshes[espnowStartPassphraseSlot()].passphrase;
       gEspNow->passphrase = livePw;
       deriveKeyFromPassphrase(livePw, gEspNow->derivedKey);
@@ -15691,13 +15795,7 @@ static const char* meshesCmd_delete(const String& label) {
       return "Error: Mesh deleted in RAM, but the change could not be persisted.";
     }
     if (hadPassphrase) systemEventPost(SYSEVT_MESH_PASSPHRASE_CHANGED, label.c_str(), "cleared");
-    if (m.label.length() > 0) {
-      snprintf(getDebugBuffer(), 1024,
-               "Deleted mesh '%s'. Slot 0 now holds the unconfigured mesh '%s' (no passphrase, %s).",
-               label.c_str(), m.label.c_str(), m.enabled ? "enabled" : "disabled");
-    } else {
-      snprintf(getDebugBuffer(), 1024, "Deleted mesh '%s'. Slot %u is free.", label.c_str(), (unsigned)i);
-    }
+    snprintf(getDebugBuffer(), 1024, "Deleted mesh '%s'. Slot %u is free.", label.c_str(), (unsigned)i);
     return getDebugBuffer();
   }
   return "Error: Mesh not found. Run 'espnowmeshes' to list.";

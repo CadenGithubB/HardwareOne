@@ -570,13 +570,23 @@ bool peerIdentityForget(const uint8_t mac[6]) {
   return true;
 }
 
+// True once peerIdentityLoadAll has walked the peers directory (or found there
+// is none) this boot. While false the cache says nothing about what is stored.
+static bool gPeerIdentitiesLoaded = false;
+
+bool peerIdentitiesLoaded() { return gPeerIdentitiesLoaded; }
+
 uint8_t peerIdentityLoadAll() {
+  gPeerIdentitiesLoaded = false;
   if (!filesystemReady) return 0;
   // Reset cache.
   for (uint8_t i = 0; i < kPeerSlots; i++) gPeerIdentities[i] = PeerIdentity{};
 
   auto auth = VFS::systemAuth(VFS::Scopes::ESPNOW_STATE, "espnow.peer_identity_scan");
-  if (!VFS::existsGuarded(kPeersDir, auth)) return 0;
+  if (!VFS::existsGuarded(kPeersDir, auth)) {
+    gPeerIdentitiesLoaded = true;  // nothing stored yet
+    return 0;
+  }
 
   FsLockGuard fsGuard("espnow.peer_identity_scan");
   File dir = VFS::openGuarded(kPeersDir, "r", auth);
@@ -616,6 +626,7 @@ uint8_t peerIdentityLoadAll() {
     entry = dir.openNextFile();
   }
   dir.close();
+  gPeerIdentitiesLoaded = true;
 
   if (loaded > 0) {
     INFO_ESPNOWF("loaded %u peer identities from %s", (unsigned)loaded, kPeersDir);

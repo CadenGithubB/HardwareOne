@@ -6213,10 +6213,14 @@ rows: they fill in and open the remote form, and no OLED ESP-NOW action sends a 
 not a registered command. Outside ctest, `tools/webui/tests/test_espnow_remote_page.py` feeds the firmware's real
 replies to the web page's remote file browser.
 
-`espnow_mesh_slots` runs the production `espnowmeshes` subcommands, the passphrase messages and
-`cmd_espnow_setname` on the production mesh record: a device's only mesh can be disabled and deleted, which
-leaves a stopped device with no mesh, as a new one, and a running one with the unconfigured `primary`; `delete`
-frees a slot for `add`, clears its keys and bond settings, and is refused while stored identities still name the
-slot; deleting slot 0 beside a mesh in use leaves a disabled placeholder and the running passphrase alone;
-exactly one enabled mesh is the default after `enable`; the start-up warning and the passphrase-cleared reply name the mesh by its label; `espnowsetname clear`
-works only while ESP-NOW is stopped.
+`espnow_mesh_slots` runs the production `espnowmeshes` subcommands, the meshes settings writer and reader (with
+the vendored ArduinoJson), the slot 0 bootstrap, the passphrase messages and `cmd_espnow_setname` on the production
+mesh record. A device's only mesh can be disabled and deleted, which leaves no mesh, as on a new device; `delete`
+frees a slot for `add`, clears its keys and bond settings, and is refused while a stored identity or a registry
+device (in RAM, or in the saved file before the first start) still names the slot, and when either cannot be
+read. After deleting a middle slot and a save and load, every mesh is still in its slot; files without slot
+numbers load in order. The bootstrap creates `primary` only on a device with no mesh at all, so no second default
+and no second `primary` appear. An instance, running or stopped, drops a deleted mesh's passphrase. Exactly one
+enabled mesh is the default after `enable`; the start-up warning names the mesh a start loads the passphrase
+from; `espnowsetname clear` works only while ESP-NOW is stopped. The suite fails 77 checks on the tree before the
+fix and 31 on its first version (1319eff0), which an independent review found wanting.

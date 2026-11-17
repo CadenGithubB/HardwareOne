@@ -254,14 +254,22 @@ everything user-visible since the v0.99.99.1 tag.
   pick another default that did not exist), a disabled mesh kept its slot for good (four labels
   used up the four slots), and the device name could be changed but not cleared. Now the default
   mesh can be disabled when no other enabled mesh could take over; `espnowmeshes delete <label>`
-  empties a slot for `add` to use again (refused while paired devices still belong to that mesh;
-  deleting the only mesh of a stopped device leaves none, as on a new device); and
-  `espnowsetname clear` removes the name while ESP-NOW is stopped. Re-enabling a mesh no longer leaves two default meshes. The web
-  ESP-NOW page has a Delete button on disabled meshes. Host-tested; not yet tested on hardware.
+  empties a slot for `add` to use again; and `espnowsetname clear` removes the name while ESP-NOW
+  is stopped. Delete is refused while a paired device still belongs to the mesh (one with stored
+  keys or one that is only in the device list) and when either list cannot be read. Deleting the
+  last mesh leaves none, as on a new device: the next ESP-NOW start sets up `primary` again, and
+  only then (a device that has a mesh in another slot keeps slot 0 empty). The settings file now
+  stores each mesh's slot number, so the other meshes, their paired devices and their bond settings
+  stay together across a restart after a delete; older files are read as before. Re-enabling a
+  mesh no longer leaves two default meshes. The web ESP-NOW page has a Delete button on disabled
+  meshes. Host-tested; not yet tested on hardware.
 - ESP-NOW messages: the start-up warning for a device without a passphrase and the reply to
-  clearing one called the mesh "primary" whatever its label was. Both now use the mesh's own label,
-  and the reply to clearing the passphrase of the mesh in slot 0 says that this also disables the
-  mesh and how to turn it back on. Host-tested; not yet tested on hardware.
+  clearing one called the mesh "primary" whatever its label was. The warning now names the default
+  mesh (the one whose passphrase a start loads) or says that no enabled mesh is the default, and
+  the reply to clearing the passphrase of the mesh in slot 0 says that this also disables the mesh
+  and how to turn it back on. A start with no passphrase in the settings no longer keeps one that
+  was set and removed again while ESP-NOW was stopped. Host-tested; not yet tested on hardware.
+
 ### Changed
 - Command names have one form: lower-case letters and digits. The 22 camelCase `mqtt*` commands and
   `httpAutoStart` / `httpsEnabled` are now `mqtthost`, `mqttpublishgps`, `httpautostart`,
