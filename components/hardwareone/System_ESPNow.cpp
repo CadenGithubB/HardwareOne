@@ -2918,7 +2918,8 @@ bool v4_send_payload_smart(const uint8_t* dst, uint8_t type, uint16_t flags,
   }
   // No identity, or identity but no ACTIVE session. Kick whichever level is
   // missing so the next attempt has a chance, then fail this send so the caller
-  // knows to retry.
+  // knows to retry. The SESSION_OPEN kick starts a handshake only when none is
+  // in flight: a session that is ESTABLISHING or REKEYING is left as it is.
   if (!pid) {
     (void)espnowKeyExInitiate(dst, nullptr);
   } else {
@@ -3747,11 +3748,10 @@ static void v4h_heartbeat(const V4RxCtx& ctx) {
         if (s && s->state == SESSION_ACTIVE) {
           sessionPrewarmReset(pmac);                 // session up - clear backoff
         } else if (s && (s->state == SESSION_ESTABLISHING || s->state == SESSION_REKEYING)) {
-          // A handshake OR a rekey is in flight - leave it alone. REKEYING still
-          // holds the live working keys, so re-kicking SESSION_OPEN here would
-          // tear down a healthy session (sessionAllocate zeroes the AEAD keys);
-          // and it must not count as a fail against a healthy peer. (The old
-          // pre-warm only excluded ACTIVE, so it wrongly nuked rekeys too.)
+          // A handshake OR a rekey is in flight - leave it alone. A kick would
+          // now be a no-op (espnowSessionOpenInitiate starts nothing while one
+          // is in flight), but it must not count as a failed pre-warm attempt
+          // against a healthy peer either, which is what this branch is for.
         } else {
           // No live session - a fresh pre-warm is due.
           uint32_t now = millis();
@@ -5771,7 +5771,8 @@ static void v4_send_route_adverts() {
 //
 // KNOWN INLINE EXCEPTIONS to the rule (accepted, not oversights):
 //   * KEY_EX_HELLO and KEY_EX_REPLY call peerIdentityPersist() (small FS write).
-//     Bounded + once-per-pairing, so the RX-stall cost is negligible.
+//     Bounded + once-per-pairing (an unchanged identity is not rewritten, bar
+//     an hourly lastSeenSec refresh), so the RX-stall cost is negligible.
 //     KEY_EX_CONFIRM does no FS write at all — it only finalizes in-RAM state.
 //   * v4h_file_end runs processBondSettings/manifest caching + a deserializeJson
 //     of automations.json inline — the one genuine violation. Left inline
@@ -12941,9 +12942,15 @@ const char* cmd_espnow_sessionopen(const String& argsInput) {
     return "Error: not a paired device name and not a valid MAC.";
   }
   String meshLabel = (a.count() >= 2) ? a.arg(1) : String("");
-  bool ok = espnowSessionOpenInitiate(mac, meshLabel.length() > 0 ? meshLabel.c_str() : nullptr);
+  bool alreadyInFlight = false;
+  bool ok = espnowSessionOpenInitiate(mac, meshLabel.length() > 0 ? meshLabel.c_str() : nullptr,
+                                      &alreadyInFlight);
   if (!ok) {
     return "Error: SESSION_OPEN initiate failed (see [ERROR][ESP-NOW] log).";
+  }
+  if (alreadyInFlight) {
+    return "A handshake with this peer is already in flight - SESSION_OPEN not sent again. "
+           "Run 'espnowsessions' to inspect.";
   }
   if (!ensureDebugBuffer()) return "SESSION_OPEN sent.";
   snprintf(getDebugBuffer(), 1024,

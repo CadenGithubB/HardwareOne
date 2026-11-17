@@ -411,6 +411,18 @@ static bool establish() {
   return keysMirror();
 }
 
+// A SESSION_OPEN kick from `from` to `to`, with the "already in flight" report
+// where the source has one (HW1_OPEN_REPORTS_IN_FLIGHT, set by the driver).
+static bool openKick(Device& from, Device& to, bool* inFlight) {
+  use(from);
+#ifdef HW1_OPEN_REPORTS_IN_FLIGHT
+  return espnowSessionOpenInitiate(to.mac, "mesh", inFlight);
+#else
+  *inFlight = false;
+  return espnowSessionOpenInitiate(to.mac, "mesh");
+#endif
+}
+
 // One complete rekey: `i` initiates, `r` replies, both apply. Returns the
 // responder's reply through `reply`.
 static bool rekeyRound(Device& i, Device& r, Frame* reply = nullptr) {
@@ -701,13 +713,15 @@ int main() {
         "C13 a fresh REKEY 6 s after the apply is refused for the interval (FAILS ON BASE)");
 
   // C14 — a new handshake on a slot that is mid-REKEY drops the parked
-  // rekey state (the partial reset), then completes normally.
+  // rekey state (the partial reset), then completes normally. The REKEY is
+  // long past its retry budget here: one still in flight is left alone (C16).
   resetDevices();
   establish();
   gNow += kRekeyAgeThresholdMs;
   use(A);
   espnowRekeyInitiate(B.mac);
   take(A);
+  gNow += 2 * kSessionEstablishTimeoutMs;
   use(A);
   espnowSessionOpenInitiate(B.mac, "mesh");
   SessionState* sa = sessOf(A);
@@ -717,6 +731,123 @@ int main() {
   deliver(take(A), B);
   deliver(take(B), A);
   check(keysMirror(), "C14 the new handshake completes (preserved)");
+
+  // ---- SESSION_OPEN kicks while a handshake or rekey is in flight -----------
+  // Senders kick espnowSessionOpenInitiate whenever they find the session not
+  // ACTIVE. "FAILS ON BASE" below: the tree where every kick re-allocated the
+  // slot (keys zeroed, new sessionId, a second SESSION_OPEN).
+
+  // C15 — kicks while our SESSION_OPEN awaits its CONFIRM.
+  resetDevices();
+  bool inFlight = true;
+  check(openKick(A, B, &inFlight) && !inFlight && A.outbox.size() == 1 &&
+        sessOf(A) && sessOf(A)->state == SESSION_ESTABLISHING,
+        "C15 a kick with no session sends one SESSION_OPEN (preserved)");
+  o1 = take(A);
+  SessionState before;
+  std::memcpy(&before, sessOf(A), sizeof before);
+  bool allReported = true, allTrue = true;
+  for (int i = 0; i < 3; i++) {
+    gNow += 1500;
+    inFlight = false;
+    allTrue = openKick(A, B, &inFlight) && allTrue;
+    allReported = allReported && inFlight;
+  }
+  check(allTrue && allReported, "C15 three kicks during ESTABLISHING report a handshake in flight (FAILS ON BASE)");
+  check(A.outbox.size() == 1, "C15 they send no second SESSION_OPEN (FAILS ON BASE)");
+  check(std::memcmp(&before, sessOf(A), sizeof before) == 0,
+        "C15 the slot, its stashed handshake secrets and its sessionId are untouched (FAILS ON BASE)");
+  deliver(o1, B);
+  deliver(take(B), A);
+  check(keysMirror(), "C15 the CONFIRM of the first OPEN still completes the session (FAILS ON BASE)");
+
+  // C16 — a kick while a REKEY awaits the peer's answer.
+  resetDevices();
+  establish();
+  gNow += kRekeyAgeThresholdMs;
+  use(A);
+  espnowRekeyInitiate(B.mac);
+  Frame rk = take(A);
+  std::memcpy(&before, sessOf(A), sizeof before);
+  a0 = A.outbox.size();
+  gNow += 1000;
+  inFlight = false;
+  check(openKick(A, B, &inFlight) && inFlight, "C16 a kick during REKEYING reports a handshake in flight (FAILS ON BASE)");
+  check(A.outbox.size() == a0 && sessOf(A)->state == SESSION_REKEYING &&
+        std::memcmp(&before, sessOf(A), sizeof before) == 0,
+        "C16 the working keys, the parked rekey key and the state are untouched (FAILS ON BASE)");
+  deliver(rk, B);
+  deliver(take(B), A);
+  check(keysMirror() && std::memcmp(sessOf(A)->aeadKeyTx, before.aeadKeyTx, 32) != 0,
+        "C16 the rekey then completes on new keys (FAILS ON BASE)");
+
+  // C17 — a kick on a CLOSED slot, and one on an ACTIVE session (the explicit
+  // re-handshake), each start a new handshake (preserved).
+  resetDevices();
+  establish();
+  uint16_t idBefore = sessOf(A)->sessionId;
+  sessOf(A)->state = SESSION_CLOSED;
+  a0 = A.outbox.size();
+  inFlight = true;
+  check(openKick(A, B, &inFlight) && !inFlight && A.outbox.size() == a0 + 1 &&
+        sessOf(A)->state == SESSION_ESTABLISHING && sessOf(A)->sessionId != idBefore,
+        "C17 a kick on a CLOSED slot sends a SESSION_OPEN with a new sessionId");
+  deliver(take(A), B);
+  deliver(take(B), A);
+  check(keysMirror(), "C17 and the handshake completes");
+  idBefore = sessOf(A)->sessionId;
+  a0 = A.outbox.size();
+  inFlight = true;
+  check(openKick(A, B, &inFlight) && !inFlight && A.outbox.size() == a0 + 1 &&
+        sessOf(A)->state == SESSION_ESTABLISHING,
+        "C17 a kick on an ACTIVE session starts the explicit re-handshake");
+  deliver(take(A), B);
+  deliver(take(B), A);
+  check(keysMirror() && sessOf(A)->sessionId != idBefore, "C17 which completes on a new sessionId");
+
+  // C18 — an OPEN that never gets its CONFIRM: the timeout sweep frees the
+  // slot and the next kick starts over (preserved).
+  resetDevices();
+  openKick(A, B, &inFlight);
+  take(A);
+  gNow += kSessionEstablishTimeoutMs;
+  use(A);
+  check(sessionEstablishingTimeoutSweep(gNow) == 1 && sessOf(A) == nullptr,
+        "C18 the sweep frees an ESTABLISHING slot after the timeout");
+  inFlight = true;
+  check(openKick(A, B, &inFlight) && !inFlight && A.outbox.size() == 2,
+        "C18 the next kick sends a new SESSION_OPEN");
+  deliver(take(A), B);
+  deliver(take(B), A);
+  check(keysMirror(), "C18 and the retry completes");
+
+  // C19 — the same without the sweep (its tick held off): the slot counts as
+  // in flight up to the timeout and as stale from then on.
+  resetDevices();
+  openKick(A, B, &inFlight);
+  o1 = take(A);
+  idBefore = sessOf(A)->sessionId;
+  gNow += kSessionEstablishTimeoutMs - 1;
+  inFlight = false;
+  openKick(A, B, &inFlight);
+  check(inFlight && A.outbox.size() == 1 && sessOf(A)->sessionId == idBefore,
+        "C19 one millisecond before the timeout a kick still leaves the handshake alone (FAILS ON BASE)");
+  gNow += 1;
+  inFlight = true;
+  check(openKick(A, B, &inFlight) && !inFlight && A.outbox.size() == 2 &&
+        sessOf(A)->state == SESSION_ESTABLISHING && sessOf(A)->sessionId != idBefore,
+        "C19 at the timeout a kick replaces the stale handshake");
+  deliver(take(A), B);
+  deliver(take(B), A);
+  check(keysMirror(), "C19 and the new one completes");
+  use(B);
+  std::memset(B.table, 0, sizeof B.table);
+  deliver(o1, B);
+  const Frame lateConfirm = take(B);
+  deliver(lateConfirm, A);
+  check(sessOf(A)->state == SESSION_ACTIVE && sessOf(A)->sessionId != idBefore &&
+        logsContaining(A, "WARN", "no in-flight session") == 1,
+        "C19 a CONFIRM for the abandoned OPEN is refused and the live session kept");
 
   check(gGuardDepth == 0, "no lock left held");
   std::printf("%u failure(s)\n", gFailures);

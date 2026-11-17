@@ -11,7 +11,11 @@ stand-in crypto. The cases re-deliver captured handshake frames: a REKEY or
 SESSION_OPEN copy must be ignored without a reply and without touching the live
 keys, an older REKEY copy must end in one converged extra round instead of an
 endless exchange, and normal, concurrent, retransmitted, glare and post-reboot
-handshakes must still converge. No radio or hardware is accessed.
+handshakes must still converge. A SESSION_OPEN kick while a handshake or a
+rekey is in flight must leave the slot, its keys and its sessionId untouched
+and send nothing; a kick with no session, on a CLOSED or ACTIVE slot, or after
+the ESTABLISHING timeout must start a handshake. No radio or hardware is
+accessed.
 """
 import argparse
 import os
@@ -28,7 +32,7 @@ from test_web_batch_handlers import extract_block  # noqa: E402
 
 SOURCES = ('System_ESPNow_Handlers_Crypto.cpp', 'System_ESPNow_Sessions.cpp',
            'System_ESPNow_Sessions.h', 'System_ESPNow_Wire.h', 'System_ESPNow_Identity.h',
-           'System_ESPNow_RxCtx.h', 'System_ESPNow_Deadline.h')
+           'System_ESPNow_RxCtx.h', 'System_ESPNow_Deadline.h', 'System_ESPNow_Handlers_Crypto.h')
 
 
 def fail(what):
@@ -123,10 +127,16 @@ def build_sessions(sessions):
     for marker in ('SessionPeerRekeyVerdict sessionClassifyPeerRekey(', 'void sessionNotePeerRekey(',
                    'void sessionHoldRekeyReply(', 'bool sessionOpenIdStale('):
         pieces.append(optional(sessions, marker, name))
+    # The ESTABLISHING timeout sweep, and the in-flight test that
+    # espnowSessionOpenInitiate consults (absent on a tree without the guard).
+    pieces.append(line(sessions, r'^static constexpr uint32_t kSessionEstablishTimeoutMs = \d+;',
+                       'kSessionEstablishTimeoutMs'))
+    pieces.append(one(sessions, 'uint8_t sessionEstablishingTimeoutSweep(', name))
+    pieces.append(optional(sessions, 'bool sessionHandshakeInFlight(', name))
     return '\n\n'.join(p for p in pieces if p)
 
 
-def build_crypto(crypto):
+def build_crypto(crypto, crypto_h):
     """Returns (anonymous-namespace internals, public entry points)."""
     name = 'System_ESPNow_Handlers_Crypto.cpp'
     internal = [line(crypto, r'^constexpr const char\*\s+kOpenLabel\s*=[^;]*;', 'kOpenLabel'),
@@ -156,9 +166,15 @@ def build_crypto(crypto):
     internal.append(one(crypto, 'void runDeferredRekey(void* arg)', name))
     public = [one(crypto, marker, name) for marker in
               ('void v4hSessionOpen(const V4RxCtx& ctx)', 'void v4hSessionConfirm(const V4RxCtx& ctx)',
-               'bool espnowSessionOpenInitiate(const uint8_t peerMac[6], const char* meshLabel)',
+               'bool espnowSessionOpenInitiate(const uint8_t peerMac[6], const char* meshLabel',
                'void v4hSessionRekey(const V4RxCtx& ctx)',
                'bool espnowRekeyInitiate(const uint8_t peerMac[6])')]
+    # The header's declaration goes first: it carries the default argument of
+    # the in-flight report, where the tree has one, and the harness is told so.
+    declaration = line(crypto_h, r'^bool espnowSessionOpenInitiate\([^;]*;', 'espnowSessionOpenInitiate declaration')
+    if 'outAlreadyInFlight' in declaration:
+        declaration = '#define HW1_OPEN_REPORTS_IN_FLIGHT 1\n' + declaration
+    public.insert(0, declaration)
     return '\n\n'.join(p for p in internal if p), '\n\n'.join(public)
 
 
@@ -192,7 +208,8 @@ def main():
         deadline = (shared.read_text().replace('#pragma once\n', '') +
                     deadline.replace('#include "System_Deadline.h"\n', ''))
 
-    crypto_internal, crypto_public = build_crypto(read('System_ESPNow_Handlers_Crypto.cpp'))
+    crypto_internal, crypto_public = build_crypto(read('System_ESPNow_Handlers_Crypto.cpp'),
+                                                  read('System_ESPNow_Handlers_Crypto.h'))
     harness = (HERE / 'espnow_session_rekey_harness.cpp').read_text()
     for tag, value in (('// INSERT_DEADLINE', deadline),
                        ('// INSERT_WIRE', build_wire(read('System_ESPNow_Wire.h'))),

@@ -250,6 +250,18 @@ uint8_t pendingFrameTimeoutSweep(uint32_t nowMs);
 // tick. Returns count reset.
 uint8_t sessionEstablishingTimeoutSweep(uint32_t nowMs);
 
+// True while a handshake on this slot is under way and must be left alone: a
+// SESSION_OPEN we sent that is still inside its CONFIRM budget (ESTABLISHING),
+// or a REKEY awaiting the peer's answer (REKEYING, which still holds the
+// working keys). espnowSessionOpenInitiate starts nothing while this holds,
+// because sessionAllocate on the slot would zero the keys that exchange needs.
+// Ending a handshake that never completes stays with the two sweeps
+// (sessionEstablishingTimeoutSweep, rekeyRetrySweep). A slot they did not get
+// to - ESTABLISHING past the CONFIRM budget, REKEYING past twice the REKEY
+// retry budget - is stale and reads false, so the next kick replaces it instead
+// of waiting for ever. nullptr, FREE, ACTIVE and CLOSED read false.
+bool sessionHandshakeInFlight(const SessionState* s, uint32_t nowMs);
+
 // Inspector for the espnowsessions CLI / debugging.
 uint8_t pendingFrameCount();
 

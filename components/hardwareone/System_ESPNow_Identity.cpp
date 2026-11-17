@@ -320,6 +320,10 @@ constexpr const char* kPeersDir = "/system/espnow/peers";
 //       the next write rewrites them as v2.
 constexpr uint8_t  kPeerFileVersion = 2;
 
+// peerIdentityPersist rewrites an unchanged peer's file only to move the
+// stored lastSeenSec forward, and only once it is this far behind.
+constexpr uint32_t kPeerLastSeenRefreshSec = 3600;
+
 // Strict PATH TOKEN parser for peer directory names: exactly the 12 hex
 // digits macToPathToken() writes, nothing else.
 bool parseMacNoSep(const char* in, uint8_t mac[6]) {
@@ -455,15 +459,33 @@ bool peerIdentityPersist(const uint8_t mac[6], uint8_t meshId,
     return false;
   }
   PeerIdentity& p = gPeerIdentities[idx];
+  const PeerIdentity before = p;  // put back if the write fails
   bool isNewPeer = !p.valid;
+  time_t now = time(nullptr);
+  const uint32_t nowSec = (now > 0) ? (uint32_t)now : 0;
+
+  // A KEY_EX that changes nothing we store (same key, same mesh, bondedAtSec
+  // already set) is not worth a flash write. Every KEY_EX_HELLO and REPLY
+  // lands here, a recorded HELLO can be replayed without the passphrase, and
+  // the HELLO handler runs on the receive task. The one thing such a call
+  // would change is lastSeenSec, and that is rewritten at most once per
+  // kPeerLastSeenRefreshSec, and only forwards (a clock that is not set yet
+  // never replaces a real timestamp). The cached record always equals the
+  // stored one.
+  const bool unchanged = p.valid && p.meshId == meshId &&
+                         memcmp(p.longTermPub, pub, 32) == 0 &&
+                         (p.bondedAtSec != 0 || bondedAtSec == 0);
+  const bool lastSeenDue = nowSec > p.lastSeenSec &&
+                           (nowSec - p.lastSeenSec) >= kPeerLastSeenRefreshSec;
+  if (unchanged && !lastSeenDue) return true;
+
   memcpy(p.mac, mac, 6);
   p.meshId       = meshId;
   memcpy(p.longTermPub, pub, 32);
   // Preserve bondedAtSec across re-pair (don't update if already valid),
-  // overwrite if new. Always refresh lastSeenSec to "now".
+  // overwrite if new. lastSeenSec becomes "now" with every write.
   if (!p.valid || p.bondedAtSec == 0) p.bondedAtSec = bondedAtSec;
-  time_t now = time(nullptr);
-  p.lastSeenSec = (now > 0) ? (uint32_t)now : 0;
+  p.lastSeenSec = nowSec;
   // Phase 5: new peers default to ALL events. Existing peers' subscription
   // bitmap is preserved across re-pair (we don't want a KEY_EX redo to wipe
   // an explicit subscribe-narrowed bitmap).
@@ -471,6 +493,9 @@ bool peerIdentityPersist(const uint8_t mac[6], uint8_t meshId,
   p.valid = true;
 
   if (!writePeerIdentityFile(p)) {
+    // Keep the cache equal to the file: a record that exists only in RAM would
+    // read as "unchanged" on the next KEY_EX and never reach the flash.
+    p = before;
     ERROR_ESPNOWF("peer identity persist: disk write failed for " MAC_FMT,
                   MAC_ARGS(mac));
     return false;

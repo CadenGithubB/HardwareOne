@@ -27,8 +27,13 @@ struct V4RxCtx;  // defined in System_ESPNow_RxCtx.h (shared; forward-decl is en
 //   - Resolves mesh by header.meshFingerprint; rejects if unknown.
 //   - Verifies HMAC against the mesh bootstrap key. Loud reject on fail.
 //   - Persists the peer's pubkey to /system/espnow/peers/<MAC>/identity.json
-//     (HELLO + REPLY only — CONFIRM is just a status acknowledgement).
+//     (HELLO + REPLY only — CONFIRM is just a status acknowledgement). A key
+//     and mesh already stored are not written again (peerIdentityPersist).
 //   - Sends the next step in the handshake (HELLO → REPLY → CONFIRM).
+// A verified HELLO is acted on at most once per sender MAC and mesh per second: a
+// recorded HELLO stays valid (its HMAC covers nothing fresh), so copies of
+// one are dropped after the HMAC check. The initiator's own retry comes
+// 1.5 s later and is answered.
 void v4hKeyExHello   (const V4RxCtx& ctx);
 void v4hKeyExReply   (const V4RxCtx& ctx);
 void v4hKeyExConfirm (const V4RxCtx& ctx);
@@ -69,7 +74,20 @@ void v4hSessionConfirm(const V4RxCtx& ctx);
 // SessionState slot, generates a fresh ephemeral X25519 keypair + random
 // nonceA + random sessionId, signs the OPEN transcript with our long-term
 // Ed25519 secret, and sends. The session goes to ACTIVE when CONFIRM lands.
-bool espnowSessionOpenInitiate(const uint8_t peerMac[6], const char* meshLabel);
+//
+// Safe to call whenever the session is found not ACTIVE: while a handshake to
+// the peer is already in flight (sessionHandshakeInFlight: our SESSION_OPEN
+// awaiting its CONFIRM, or a REKEY awaiting its answer) the call sends
+// nothing and leaves the slot, its keys and its sessionId untouched. An
+// ACTIVE session is replaced (the explicit re-handshake).
+//
+// Returns true when a handshake to the peer is under way after the call:
+// a SESSION_OPEN was sent now, or one was already in flight and was left
+// alone; *outAlreadyInFlight (optional) tells the two apart. Returns false
+// when none is and none could be started (not initialised, no peer identity,
+// no free slot, keygen / signing / radio failure).
+bool espnowSessionOpenInitiate(const uint8_t peerMac[6], const char* meshLabel,
+                               bool* outAlreadyInFlight = nullptr);
 
 // ---- Phase 3.6 — SESSION_REKEY ---------------------------------------------
 //

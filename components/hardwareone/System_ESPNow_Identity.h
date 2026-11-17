@@ -106,7 +106,7 @@ struct PeerIdentity {
   uint8_t  _pad;
   uint8_t  longTermPub[32];   // peer's Ed25519 public key
   uint32_t bondedAtSec;       // Unix epoch when first paired
-  uint32_t lastSeenSec;       // updated by heartbeats / app frames (3.4+)
+  uint32_t lastSeenSec;       // time of the last KEY_EX that wrote the file (hourly at most)
   uint32_t subscribedEvents;  // Phase 5 — events this peer wants from US
   bool     valid;             // false = slot is empty
 };
@@ -132,8 +132,12 @@ enum EspNowEventCategory : uint32_t {
 // if KEY_EX with the same peer runs again).
 const PeerIdentity* peerIdentityFindByMac(const uint8_t mac[6]);
 
-// Store / overwrite the peer's identity. Writes the on-disk file AND updates
-// the in-memory cache. Returns false on any I/O or alloc failure.
+// Store / overwrite the peer's identity: the in-memory cache and the on-disk
+// file, which always hold the same record. A call that changes nothing stored
+// (same key, same mesh) writes nothing and returns true, except that it moves
+// lastSeenSec forward once the stored value is an hour or more behind. Returns
+// false when the cache is full or the write fails; the cache is then left as
+// it was.
 bool peerIdentityPersist(const uint8_t mac[6], uint8_t meshId,
                          const uint8_t pub[32], uint32_t bondedAtSec);
 

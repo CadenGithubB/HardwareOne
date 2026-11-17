@@ -9,6 +9,7 @@
 #include <string.h>
 #include <time.h>
 
+#include <esp_attr.h>   // EXT_RAM_BSS_ATTR
 #include <esp_now.h>
 #include <esp_wifi.h>
 
@@ -153,6 +154,56 @@ int verifyKeyExPayload(const V4RxCtx& ctx, uint16_t expectedFp,
   return -2;
 }
 
+// Accepted-HELLO rate limit. A HELLO's HMAC covers the mesh fingerprint, the
+// sender MAC and the sender's public key and nothing fresh, so a recorded
+// HELLO stays valid, and a copy with a new header msgId passes the
+// dispatcher's duplicate ring. Acting on one costs a REPLY (or a CONFIRM) on
+// the air and can use up a pairing window, so at most one verified HELLO per
+// sender MAC and mesh is acted on per kKeyExHelloMinIntervalMs; the others are
+// dropped right after the HMAC check. The mesh is part of the key because one
+// pairing action can send two HELLOs tens of milliseconds apart for two meshes
+// both devices share (the seed heartbeat's and the command's own), and the
+// second must not be mistaken for a copy of the first. The interval is shorter than the initiator's own
+// HELLO retry (kKeyExRetryMs, asserted where that is defined), so the
+// retransmit after a lost REPLY is always answered, and a first HELLO is
+// answered at once.
+//
+// One slot per sender MAC and mesh, as many as there are peer-identity slots. A slot is
+// taken over only after its interval has passed; while every slot is inside its
+// interval a HELLO from one more MAC is dropped, which bounds the HELLOs acted
+// on to kKeyExHelloSlots per interval however many sender MACs are replayed.
+// Only v4hKeyExHello (espnow_task) touches the table: no lock.
+constexpr uint8_t  kKeyExHelloSlots         = 16;
+constexpr uint32_t kKeyExHelloMinIntervalMs = 1000;
+struct KeyExHelloSeen {
+  uint8_t  mac[6];
+  bool     used;
+  uint16_t meshFp;    // mesh fingerprint the HELLO was for
+  uint32_t actedMs;   // millis() of the last HELLO from this MAC and mesh that was acted on
+};
+EXT_RAM_BSS_ATTR KeyExHelloSeen gKeyExHelloSeen[kKeyExHelloSlots] = {};
+
+// True when a verified HELLO from `mac` for mesh `meshFp` may be acted on now;
+// notes it if so.
+bool keyExHelloAdmit(const uint8_t mac[6], uint16_t meshFp, uint32_t nowMs) {
+  KeyExHelloSeen* spare = nullptr;
+  for (auto& e : gKeyExHelloSeen) {
+    const bool lapsed = !e.used || (uint32_t)(nowMs - e.actedMs) >= kKeyExHelloMinIntervalMs;
+    if (e.used && e.meshFp == meshFp && memcmp(e.mac, mac, 6) == 0) {
+      if (!lapsed) return false;
+      e.actedMs = nowMs;
+      return true;
+    }
+    if (lapsed && !spare) spare = &e;
+  }
+  if (!spare) return false;
+  memcpy(spare->mac, mac, 6);
+  spare->meshFp  = meshFp;
+  spare->actedMs = nowMs;
+  spare->used    = true;
+  return true;
+}
+
 }  // namespace
 
 // KEY_EX retry/timeout (F6) — clear the in-flight retry record for a peer once
@@ -235,6 +286,15 @@ void v4hKeyExHello(const V4RxCtx& ctx) {
     return;
   }
 
+  // Verified, but a copy of a recorded HELLO verifies too: act on one per
+  // sender MAC and mesh per interval (see keyExHelloAdmit). Checked before the
+  // pairing window below, which a dropped HELLO must not use up.
+  if (!keyExHelloAdmit(msg->senderMac, msg->meshFingerprint, (uint32_t)millis())) {
+    DEBUG_ESPNOWF("KEY_EX_HELLO from " MAC_FMT " ignored: one answered less than %ums ago",
+                  MAC_ARGS(msg->senderMac), (unsigned)kKeyExHelloMinIntervalMs);
+    return;
+  }
+
   // Check for conflicting existing identity. If we already know a different
   // pubkey for this MAC, refuse to overwrite — operator must espnowforget
   // first. Without this, an attacker who learns the passphrase later can
@@ -269,11 +329,12 @@ void v4hKeyExHello(const V4RxCtx& ctx) {
   } else {
     time_t now = time(nullptr);
     uint32_t bondedAt = (uint32_t)((now > 0) ? now : 0);
-    // Event-log gate: persist always rewrites the file (refreshes lastSeenSec),
-    // so a re-sent HELLO with the same key re-persists routinely. Only log the
-    // event when the stored identity actually changes (first pairing or an
-    // operator-authorized key replacement). Computed BEFORE persist mutates
-    // the slot `existing` points into.
+    // Event-log gate: a re-sent HELLO with the same key comes through here
+    // routinely (peerIdentityPersist then writes nothing, bar the hourly
+    // lastSeenSec refresh). Only log the event when the stored identity
+    // actually changes (first pairing or an operator-authorized key
+    // replacement). Computed BEFORE persist mutates the slot `existing`
+    // points into.
     bool identityNewOrReplaced = !existing ||
         memcmp(existing->longTermPub, msg->senderPubEd25519, 32) != 0;
     if (!peerIdentityPersist(msg->senderMac, (uint8_t)meshSlot,
@@ -371,9 +432,9 @@ void v4hKeyExReply(const V4RxCtx& ctx) {
   time_t now = time(nullptr);
   uint32_t bondedAt = (uint32_t)((now > 0) ? now : 0);
   // Event-log gate: only log when the stored identity actually changes (first
-  // pairing or authorized key replacement) — a duplicate REPLY re-persists the
-  // same key routinely (lastSeenSec refresh) and must not log. Computed BEFORE
-  // persist mutates the slot `existing` points into.
+  // pairing or authorized key replacement) — a duplicate REPLY presents the
+  // same key routinely (nothing is rewritten then) and must not log. Computed
+  // BEFORE persist mutates the slot `existing` points into.
   bool identityNewOrReplaced = !existing ||
       memcmp(existing->longTermPub, msg->responderPubEd25519, 32) != 0;
   if (!peerIdentityPersist(msg->responderMac, (uint8_t)meshSlot,
@@ -400,11 +461,20 @@ void v4hKeyExReply(const V4RxCtx& ctx) {
   // peer identity at send time), kick SESSION_OPEN now. The pending frames
   // will drain via the existing pendingFrameDrainForPeer hook in the
   // SESSION_CONFIRM handler. No-op when there's nothing pending.
-  if (pendingFrameHasForPeer(msg->responderMac)) {
-    if (!espnowSessionOpenInitiate(msg->responderMac, nullptr)) {
+  // A second REPLY to the same HELLO (a retransmit answered twice) finds the
+  // first one's SESSION_OPEN in flight; the kick then leaves it alone. One that
+  // finds the session already ACTIVE (a late second answer, or a replay: a
+  // REPLY's HMAC covers nothing fresh either) must not replace it, which a kick
+  // on an ACTIVE session does: what is waiting goes out over the live session.
+  const SessionState* live = sessionFindByPeer(msg->responderMac, (uint8_t)meshSlot);
+  if (live && live->state == SESSION_ACTIVE) {
+    pendingFrameDrainForPeer(msg->responderMac);
+  } else if (pendingFrameHasForPeer(msg->responderMac)) {
+    bool alreadyInFlight = false;
+    if (!espnowSessionOpenInitiate(msg->responderMac, nullptr, &alreadyInFlight)) {
       WARN_ESPNOWF("KEY_EX_REPLY: pending frames exist but SESSION_OPEN kick failed "
                    "— frames will time out in pending-frame sweep");
-    } else {
+    } else if (!alreadyInFlight) {
       INFO_ESPNOWF("KEY_EX_REPLY: pending frames for peer — kicked SESSION_OPEN to drain");
     }
   }
@@ -469,7 +539,7 @@ void v4hKeyExConfirm(const V4RxCtx& ctx) {
 //
 // We only need to retry the HELLO, not all three handshake messages: the
 // responder persists the initiator's identity on HELLO receipt and is fully
-// idempotent (a re-sent HELLO just re-persists the same key and re-emits the
+// idempotent (a re-sent HELLO finds the same key stored and re-emits the
 // REPLY). If the final CONFIRM is lost the responder already stored the
 // identity, so a single HELLO-retry makes the whole exchange robust.
 // ----------------------------------------------------------------------------
@@ -523,6 +593,8 @@ namespace {
 constexpr uint8_t  kKeyExInFlightSlots = 4;     // matches pending-frame sizing
 constexpr uint8_t  kKeyExMaxRetries    = 2;     // re-sends after the initial HELLO
 constexpr uint32_t kKeyExRetryMs       = 1500;  // re-send if unresolved this long
+static_assert(kKeyExHelloMinIntervalMs < kKeyExRetryMs,
+              "the responder must answer the initiator's HELLO retry");
 
 struct KeyExInFlight {
   bool     inUse;
@@ -1018,7 +1090,9 @@ void v4hSessionConfirm(const V4RxCtx& ctx) {
   }
 }
 
-bool espnowSessionOpenInitiate(const uint8_t peerMac[6], const char* meshLabel) {
+bool espnowSessionOpenInitiate(const uint8_t peerMac[6], const char* meshLabel,
+                               bool* outAlreadyInFlight) {
+  if (outAlreadyInFlight) *outAlreadyInFlight = false;
   if (!gEspNow || !gEspNow->initialized) {
     ERROR_ESPNOWF("SESSION_OPEN initiate: ESPNOW not initialized");
     return false;
@@ -1038,8 +1112,32 @@ bool espnowSessionOpenInitiate(const uint8_t peerMac[6], const char* meshLabel) 
   if (!self.valid) return false;
   if (!ensureUnencryptedPeer(peerMac)) return false;
 
-  // Allocate the slot and generate keys/nonces.
-  SessionState* s = sessionAllocate(peerMac, peer->meshId);
+  // Claim the slot, unless a handshake to this peer is already in flight.
+  // Callers kick this whenever they find the session not ACTIVE (the
+  // multi-frame sender, the bond sender, the file and long-text senders), and
+  // that includes the moments a SESSION_OPEN of ours awaits its CONFIRM
+  // (ESTABLISHING) or a REKEY awaits its answer (REKEYING, still on working
+  // keys). sessionAllocate on such a slot zeroes its keys and takes a new
+  // sessionId, so the CONFIRM or REKEY reply on its way would no longer match:
+  // leave the slot exactly as it is and report it. The check and the claim
+  // share one lock hold, so two callers on different tasks cannot both start
+  // one. An ACTIVE session is still replaced: asking for a handshake over it
+  // is the explicit re-handshake ('espnowsessionopen').
+  SessionState* s = nullptr;
+  bool inFlight = false;
+  {
+    EspNowTxGuard claim("sessOpenClaim");
+    inFlight = sessionHandshakeInFlight(sessionFindByPeer(peerMac, peer->meshId),
+                                        (uint32_t)millis());
+    if (!inFlight) s = sessionAllocate(peerMac, peer->meshId);
+  }
+  if (inFlight) {
+    if (outAlreadyInFlight) *outAlreadyInFlight = true;
+    DEBUG_ESPNOWF("SESSION_OPEN initiate: handshake already in flight to " MAC_FMT
+                  " - left alone",
+                  MAC_ARGS(peerMac));
+    return true;
+  }
   if (!s) return false;
 
   uint8_t selfMac[6]; espnowSelfStaMac(selfMac);

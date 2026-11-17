@@ -589,6 +589,20 @@ uint8_t sessionEstablishingTimeoutSweep(uint32_t nowMs) {
   return reset;
 }
 
+bool sessionHandshakeInFlight(const SessionState* s, uint32_t nowMs) {
+  if (!s) return false;
+  if (s->state == SESSION_ESTABLISHING) {
+    // lastUseMs is the moment the slot entered ESTABLISHING (see the sweep above).
+    return (uint32_t)(nowMs - s->lastUseMs) < kSessionEstablishTimeoutMs;
+  }
+  if (s->state == SESSION_REKEYING) {
+    // rekeyRetrySweep clears an unanswered REKEY after the same budget; twice
+    // that leaves it room to do so first.
+    return (uint32_t)(nowMs - s->rekeyInitiatedAtMs) < 2 * kSessionEstablishTimeoutMs;
+  }
+  return false;
+}
+
 uint8_t pendingFrameCount() {
   if (!gPending) return 0;
   uint8_t n = 0;
