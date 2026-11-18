@@ -3451,6 +3451,36 @@ size_t writeRegisteredSettings(JsonDocument& doc, const char* onlyPersistFile, b
 // Generic commands retain their descriptor's event label, including aliases.
 // Typed setters have only a field pointer and use its first registered row.
 // Formatting and secret redaction are shared by both paths.
+// The name a select-style setting gives `value` in its option list
+// ("0:Off,1:Alert" or "0|Off,1|Alert"), copied to `out`. False when the
+// setting has no list, is a bitmask, or the list does not name the value; the
+// caller then shows the number.
+bool settingOptionLabel(const SettingEntry* entry, long long value, char* out, size_t cap) {
+  if (!entry || !out || cap == 0) return false;
+  const char* opts = entry->optionsText();
+  if (!opts || !opts[0] || strncmp(opts, "bitmask:", 8) == 0) return false;
+  const char* p = opts;
+  while (*p) {
+    const char* end = strchr(p, ',');
+    if (!end) end = p + strlen(p);
+    const char* sep = p;
+    while (sep < end && *sep != ':' && *sep != '|') sep++;
+    if (sep < end && sep > p) {
+      char* numEnd = nullptr;
+      const long long n = strtoll(p, &numEnd, 0);
+      const size_t len = (size_t)(end - sep - 1);
+      if (numEnd == sep && n == value && len > 0) {
+        const size_t copy = len < cap - 1 ? len : cap - 1;
+        memcpy(out, sep + 1, copy);
+        out[copy] = '\0';
+        return true;
+      }
+    }
+    p = *end ? end + 1 : end;
+  }
+  return false;
+}
+
 void notifySettingChanged(const void* fieldPtr, const SettingEntry* entry) {
   if (!fieldPtr) return;
   if (entry && entry->valuePtr != fieldPtr) return;
@@ -3477,6 +3507,12 @@ void notifySettingChanged(const void* fieldPtr, const SettingEntry* entry) {
       snprintf(val, sizeof(val), "%s", entry->isSecret ? "********" : ((const String*)fieldPtr)->c_str());
       break;
     default: return;
+  }
+  // A select-style number shows by its name ("Verbose", not "3").
+  if (entry->type == SETTING_INT || entry->type == SETTING_U8 || entry->type == SETTING_U16 ||
+      entry->type == SETTING_U32) {
+    char name[SYSEVT_DETAIL_LEN];
+    if (settingOptionLabel(entry, strtoll(val, nullptr, 10), name, sizeof(name))) strlcpy(val, name, sizeof(val));
   }
   systemEventPost(SYSEVT_SETTING_CHANGED, entry->label ? entry->label : entry->jsonKey, val);
 #if ENABLE_OLED_DISPLAY
@@ -3610,7 +3646,12 @@ const char* handleSettingCommand(const SettingEntry* entry, const String& argsIn
         case SETTING_U32: setSetting(*((uint32_t*)entry->valuePtr), (uint32_t)v, entry); break;
         default: break;  // unreachable — outer switch already filtered
       }
-      BROADCAST_PRINTF("%s set to %lld", entry->jsonKey, v);
+      char optionName[48];
+      if (settingOptionLabel(entry, v, optionName, sizeof(optionName))) {
+        BROADCAST_PRINTF("%s set to %s", entry->jsonKey, optionName);
+      } else {
+        BROADCAST_PRINTF("%s set to %lld", entry->jsonKey, v);
+      }
       return "[Settings] Configuration updated";
     }
     case SETTING_FLOAT: {

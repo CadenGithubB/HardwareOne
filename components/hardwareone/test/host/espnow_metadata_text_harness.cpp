@@ -157,10 +157,14 @@ static void systemEventPost(uint8_t kind, const char*, const char* detail) {
   if (kind == SYSEVT_SETTING_CHANGED) ++gEvents;
   gLastEventDetail = detail ? detail : "";
 }
+// Like production: setSetting itself posts the one setting event, and only
+// when the value changes.
 static int gSettingWrites = 0;
 static void setSetting(String& field, const String& value) {
+  if (field == value) return;
   ++gSettingWrites;
   field = value;
+  systemEventPost(SYSEVT_SETTING_CHANGED, "Room", value.c_str());
 }
 
 // processMetadata asks for this when the cache is full (the real one is run by

@@ -36,6 +36,8 @@ def generated(baseline: Path | None) -> str:
              extract_block(settings, "enum SettingType") + ";",
              extract_block(settings, "struct SettingEntry ") + ";",
              extract_block((COMPONENT / "System_Command.h").read_text(), "class CommandArgs") + ";"]
+    if "bool settingOptionLabel(" in settings_cpp:
+        types.insert(0, "#define HW1_HAVE_OPTION_LABEL 1")
     entries = []
     for key in ("sensorLogMask", "sensorLogFormat"):
         match = re.search(r'  \{ "' + key + r'",[\s\S]*?\},', owner)

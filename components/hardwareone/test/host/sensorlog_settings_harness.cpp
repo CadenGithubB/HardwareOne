@@ -178,8 +178,15 @@ static void genericMutation(const char* key, const char* label, int value,
                             unsigned expectedPersists = 1) {
   (void)label;  // The shared formatter is exercised by settings_mutation.
   check(persistCalls == expectedPersists, "incorrect persistence count");
-  check(broadcasts.size() == 1 && broadcasts[0] ==
-        std::string(key) + " set to " + std::to_string(value), "generic broadcast changed");
+  // A setting with an option list replies with the option's name (its list in
+  // System_SensorLogging.cpp is "0|Text,1|CSV,2|Track").
+  std::string shown = std::to_string(value);
+#ifdef HW1_HAVE_OPTION_LABEL
+  static const char* const kFormatNames[] = {"Text", "CSV", "Track"};
+  if (std::string(key) == "sensorLogFormat" && value >= 0 && value <= 2) shown = kFormatNames[value];
+#endif
+  check(broadcasts.size() == 1 && broadcasts[0] == std::string(key) + " set to " + shown,
+        "generic broadcast changed");
   check(events.empty() && changedFields.size() == expectedPersists,
         "generic mutation bypassed/duplicated shared finalization");
   check(disableCalls == 0 && hints.empty(), "unrelated mutation effect");

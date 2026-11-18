@@ -219,6 +219,7 @@ def main():
                                (COMPONENT / "System_Events.h").read_text()).group()
     implementation = block(http_source, "bool httpLlmValidateBaseUrl(") + "\n"
     implementation += block((COMPONENT / "System_Utils.h").read_text(), "inline int parseBoolArg(") + "\n"
+    implementation += block(settings, "bool settingOptionLabel(") + "\n"
     implementation += block(settings, "void notifySettingChanged(") + "\n"
     implementation += block(settings, "void finishSettingChange(") + "\n"
     implementation += "\n".join(block(settings_header, signature) for signature in (

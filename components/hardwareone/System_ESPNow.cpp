@@ -15739,9 +15739,8 @@ static const char* metaGetSet(const String& args, String& field, const char* fie
     return getDebugBuffer();
   }
   if (trimmed == "clear") {
-    setSetting(field, String(""));  // Persist to flash
+    setSetting(field, String(""));  // Persist to flash; setSetting posts the setting event
     gMetadataChanged = true;  // Mark metadata as dirty
-    systemEventPost(SYSEVT_SETTING_CHANGED, fieldName, "(cleared)");
     snprintf(getDebugBuffer(), 1024, "%s cleared", fieldName);
     return getDebugBuffer();
   }
@@ -15758,9 +15757,8 @@ static const char* metaGetSet(const String& args, String& field, const char* fie
              "Error: %s may not contain control characters or < > \" ' & \\", fieldName);
     return getDebugBuffer();
   }
-  setSetting(field, trimmed);  // Persist to flash
+  setSetting(field, trimmed);  // Persist to flash; setSetting posts the setting event
   gMetadataChanged = true;  // Mark metadata as dirty
-  systemEventPost(SYSEVT_SETTING_CHANGED, fieldName, trimmed.c_str());
   snprintf(getDebugBuffer(), 1024, "%s set to: %s", fieldName, field.c_str());
   return getDebugBuffer();
 }

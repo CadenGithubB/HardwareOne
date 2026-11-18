@@ -523,9 +523,37 @@ static void oledEnabledCommand() {
 }
 #endif
 
+// A select-style number is named in the reply and the event; a value its list
+// does not name, a bitmask list and a setting without a list keep the number.
+static uint8_t levelField;
+static void optionNames() {
+  const SettingEntry level = {"level", SETTING_U8, &levelField, 1, 0, nullptr, 0, 3, "Level",
+                              "0:Off,1:Alert,2:Standard,3:Verbose"};
+  const SettingEntry piped = {"level", SETTING_U8, &levelField, 1, 0, nullptr, 0, 9, "Level",
+                              "0|Off,1|Alert,10|Ten"};
+  const SettingEntry mask = {"level", SETTING_U8, &levelField, 1, 0, nullptr, 0, 9, "Level",
+                             "bitmask:1|Thermal,2|ToF"};
+  struct Example { const SettingEntry* entry; const char* input; const char* reply; const char* event; };
+  for (const auto& example : std::vector<Example>{
+      {&level, "3", "level set to Verbose", "Verbose"},
+      {&level, "0", "level set to Off", "Off"},
+      {&piped, "1", "level set to Alert", "Alert"},
+      {&piped, "9", "level set to 9", "9"},
+      {&mask, "2", "level set to 2", "2"}}) {
+    reset(); levelField = 5; context = std::string("option name ") + example.input;
+    check(!error(handleSettingCommand(example.entry, example.input)), "option value rejected");
+    check(broadcasts.size() == 1 && broadcasts[0] == example.reply, "reply does not name the option");
+    check(eventCount(SYSEVT_SETTING_CHANGED) == 1 && events[0].value == example.event,
+          "event does not name the option");
+  }
+  char name[8];
+  check(!settingOptionLabel(&entries[1], 1, name, sizeof(name)), "setting without a list named a value");
+  check(settingOptionLabel(&level, 2, name, 4) && std::string(name) == "Sta", "long name not cut to the buffer");
+}
+
 int main() {
   numericValues(); booleanAndStopPolicy(); stringsPrivacyAndPreflight();
-  featureCommands(); persistenceBoundaries();
+  featureCommands(); persistenceBoundaries(); optionNames();
 #if ENABLE_OLED_DISPLAY
   oledEnabledCommand();
 #endif

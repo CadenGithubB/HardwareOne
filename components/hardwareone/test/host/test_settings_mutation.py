@@ -30,7 +30,9 @@ JSON_INCLUDE = COMPONENT.parent / "hardwareone_libs" / "ArduinoJson" / "src"
 
 def generic_setting_definitions(source: str, utils: str) -> list[str]:
     """Shared extraction keeps dependent logger tests on the actual parser."""
-    return [extract_block(utils, "inline int parseBoolArg("),
+    option_label = ([extract_block(source, "bool settingOptionLabel(")]
+                    if "bool settingOptionLabel(" in source else [])
+    return [extract_block(utils, "inline int parseBoolArg("), *option_label,
             extract_block(source, "const char* handleSettingCommand(")]
 
 
@@ -60,6 +62,7 @@ def generated(component: Path = COMPONENT) -> str:
          "const String& CommandArgs::arg(", "String CommandArgs::remaining(")],
         extract_block(settings_cpp, "bool requestSettingsPersist("),
         extract_block(settings_cpp, "static void applyMasterEnableDisable("),
+        "bool settingOptionLabel(const SettingEntry*, long long, char*, size_t);",
         extract_block(settings_cpp, "void notifySettingChanged("),
         extract_block(settings_cpp, "void finishSettingChange("),
         extract_block(settings_h, "template<typename T>\ninline void setSetting("),

@@ -1386,6 +1386,9 @@ struct SettingEntry;
 // Describe a changed field using its supplied command descriptor, or the first
 // registered descriptor for that field. Fields without metadata emit no event.
 void notifySettingChanged(const void* fieldPtr, const SettingEntry* entry = nullptr);
+// The name a select-style setting's option list gives `value`, for replies and
+// events; false when there is none (show the number then).
+bool settingOptionLabel(const SettingEntry* entry, long long value, char* out, size_t cap);
 // Shared completion of an accepted value change: request persistence, apply a
 // descriptor's existing generic disable action, then notify. Failed saves retain
 // the live value and enter the existing retry path; this is not a transaction.
