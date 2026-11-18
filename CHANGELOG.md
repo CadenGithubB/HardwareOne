@@ -451,6 +451,8 @@ everything user-visible since the v0.99.99.1 tag.
   yet tested on hardware.
 
 ### Changed
+- MQTT publishes the state every 30 s by default instead of every 10 s. Devices that already saved
+  their settings keep the interval they had; change it with `mqttpublishintervalms`.
 - Command replies: a command that failed or was refused answers `Error: <reason>. <next action>.`
   and the executor reports it as failed on every interface. A reply counts as failed when it starts
   with `Error`/`ERROR`, `Usage:` or `Unknown command:` (`commandReplyIsFailure()` in
