@@ -156,6 +156,27 @@ static bool gIgnoredOverSession = false;
 
 // INSERT_ORIGIN_KNOWN
 
+// Calls of the BOOT notice's session rule (sessionPeerBootNotice double, made
+// by the driver when the tree's BOOT row has its own handler), of the record
+// of a counter seen in a sealed notice (sessionPeerBootSeen double) and of the
+// SESSION_UNKNOWN rule (sessionUnknownHintReceived double, when the tree has
+// that row).
+[[maybe_unused]] static unsigned gBootRuleCalls = 0;
+[[maybe_unused]] static unsigned gBootSeenCalls = 0;
+[[maybe_unused]] static unsigned gHintRuleCalls = 0;
+// The verdict the sessionPeerBootNotice double answers (PeerBootVerdict:
+// 0 DropSession, 4 SameBoot, 5 OlderBoot).
+[[maybe_unused]] static int gBootVerdict = 0;
+// The header meshFingerprint deliver() stamps, and the fingerprint of the mesh
+// gPeerA is paired in (the fingerprintForPeer double). Any other MAC reads as
+// the default mesh's.
+static constexpr uint16_t kPeerAMeshFp = 0x4A21;
+static constexpr uint16_t kOtherMeshFp = 0x77C0;
+static uint16_t gFrameFp = kPeerAMeshFp;
+[[maybe_unused]] static uint16_t fingerprintForPeer(const uint8_t* mac) {
+  static const uint8_t peerA[6] = {0x02, 0x11, 0x22, 0x33, 0x44, 0x01};
+  return std::memcmp(mac, peerA, 6) == 0 ? kPeerAMeshFp : (uint16_t)0x1111;
+}
 // INSERT_TEXT_HANDLER
 
 // INSERT_HANDLER_STUBS
@@ -235,6 +256,9 @@ static void resetText(bool keyed) {
   gEvents.clear();
   gWarns = gPrints = gPushKicks = gCleanups = gHandlerCalls = 0;
   gLastHandler.clear();
+  gBootRuleCalls = gBootSeenCalls = gHintRuleCalls = 0;
+  gBootVerdict = 0;
+  gFrameFp = kPeerAMeshFp;
 }
 static int queued() {
   return (gEspNow->textQueueHead - gEspNow->textQueueTail) & (EspNowState::TEXT_QUEUE_SIZE - 1);
@@ -257,6 +281,7 @@ static bool deliver(uint8_t type, uint8_t* origin, uint8_t* radioSrc, const char
   h.ttl = 1;
   h.fragIndex = fragIndex;
   h.fragCount = fragCount;
+  h.meshFingerprint = gFrameFp;
   std::memcpy(h.origin, origin, 6);
   wifi_pkt_rx_ctrl_t ctrl{-50};
   esp_now_recv_info info{radioSrc, nullptr, &ctrl};
@@ -365,6 +390,101 @@ static unsigned runTextCases() {
         deliver(ESPNOW_V4_TYPE_BOOT, gPeerA, gPeerA, "{\"type\":\"boot\"}", false, false));
   check("BOOT plaintext keyed from a paired MAC: dropped (nothing queued, one WARN)",
         queued() == 0 && gWarns == 1);
+  check("BOOT plaintext keyed: the session rule is not asked", gBootRuleCalls == 0);
+
+  // A plaintext BOOT on a keyless device is filed, but closes no session.
+  resetText(false);
+  gBootRuleCalls = 0;
+  deliver(ESPNOW_V4_TYPE_BOOT, gPeerA, gPeerA, "{\"type\":\"boot\"}", false, false);
+  check("BOOT plaintext keyless: filed, the session rule is not asked",
+        queued() == 1 && gBootRuleCalls == 0);
+
+  // A group-signed BOOT (how the notice is sent since 2026-11-18) is filed and
+  // asks the session rule once; one relayed in (origin not the radio sender)
+  // is filed but asks nothing.
+  resetText(true);
+  gBootRuleCalls = 0;
+  deliver(ESPNOW_V4_TYPE_BOOT, gPeerA, gPeerA, "{\"type\":\"boot\"}", true, false);
+  check("BOOT group-signed keyed: queued as MSG_SYSTEM_EVENT and the session rule asked once",
+        queued() == 1 && queuedAt(0).msgType == MSG_SYSTEM_EVENT && gBootRuleCalls == 1);
+  resetText(true);
+  gBootRuleCalls = 0;
+  deliver(ESPNOW_V4_TYPE_BOOT, gPeerA, gStranger, "{\"type\":\"boot\"}", true, false);
+  check("BOOT whose origin is not the radio sender: the session rule is not asked", gBootRuleCalls == 0);
+
+  // A group-signed notice whose counter was already seen, or an older one, is
+  // a copy (anyone in range can capture a signed frame and play it again once
+  // the 5 s dedup forgets it): it is not filed again, so a re-sent notice makes
+  // no false "started" entry.
+  for (int verdict : {4, 5}) {
+    resetText(true);
+    gBootVerdict = verdict;
+    deliver(ESPNOW_V4_TYPE_BOOT, gPeerA, gPeerA, "{\"type\":\"boot\"}", true, false);
+    check(verdict == 4 ? "BOOT group-signed copy (counter already seen): not filed again "
+                         "(FAILS ON the handler that files every copy)"
+                       : "BOOT group-signed older counter (a re-sent old notice): not filed "
+                         "(FAILS ON the handler that files every copy)",
+          gBootRuleCalls == 1 && queued() == 0);
+  }
+
+  // Only the group tag of the peer's own mesh counts: a member of another mesh
+  // this device is in holds that mesh's key, not this one. The notice is
+  // still filed.
+  resetText(true);
+  gFrameFp = kOtherMeshFp;
+  deliver(ESPNOW_V4_TYPE_BOOT, gPeerA, gPeerA, "{\"type\":\"boot\"}", true, false);
+  check("BOOT group-signed under another mesh's tag: filed, the session rule is not asked "
+        "(FAILS ON the unscoped handler)",
+        queued() == 1 && gBootRuleCalls == 0 && gBootSeenCalls == 0);
+
+  // A notice sealed in the session shows the session works (the peer reopened
+  // ESP-NOW and kept it): nothing ends, the counter is only recorded.
+  resetText(true);
+  deliver(ESPNOW_V4_TYPE_BOOT, gPeerA, gPeerA, "{\"type\":\"boot\"}", true, true);
+  check("BOOT sealed in the session: filed, the counter recorded, the session rule not asked "
+        "(FAILS ON the handler that ends a working session)",
+        queued() == 1 && gBootRuleCalls == 0 && gBootSeenCalls == 1);
+
+  // SESSION_UNKNOWN (when the tree has the row): only from the peer itself,
+  // under its own mesh's tag.
+  if (v4_dispatch_lookup(18) != nullptr) {
+    static const uint8_t hint[12] = {0x3F, 0x40, 0, 0, 1, 0, 0, 0, 0x2A, 0, 0, 0};
+    const char* hintText = reinterpret_cast<const char*>(hint);
+    auto deliverHint = [&](uint8_t* origin, uint8_t* radioSrc, bool authed, bool enc) {
+      EspNowV4Header h{};
+      h.type = 18;
+      h.headerLen = sizeof(EspNowV4Header);
+      h.msgId = 2;
+      h.ttl = 1;
+      h.fragCount = 1;
+      h.meshFingerprint = gFrameFp;
+      std::memcpy(h.origin, origin, 6);
+      wifi_pkt_rx_ctrl_t ctrl{-50};
+      esp_now_recv_info info{radioSrc, nullptr, &ctrl};
+      const bool paired = std::memcmp(radioSrc, gPeerA, 6) == 0;
+      v4_dispatch_table_try(&info, &h, reinterpret_cast<const uint8_t*>(hintText), sizeof hint, paired,
+                            authed, enc, "alpha");
+    };
+    resetText(true);
+    deliverHint(gPeerA, gPeerA, true, false);
+    check("SESSION_UNKNOWN group-signed from the peer itself: the hint rule asked once", gHintRuleCalls == 1);
+    resetText(true);
+    deliverHint(gPeerA, gPeerA, false, false);
+    check("SESSION_UNKNOWN plaintext: the hint rule is not asked", gHintRuleCalls == 0);
+    resetText(true);
+    deliverHint(gPeerA, gStranger, true, false);
+    check("SESSION_UNKNOWN from an unpaired radio sender: the hint rule is not asked", gHintRuleCalls == 0);
+    resetText(true);
+    gFrameFp = fingerprintForPeer(gStranger);  // a tag the origin's mesh would carry
+    deliverHint(gStranger, gPeerA, true, false);
+    check("SESSION_UNKNOWN whose origin is not the radio sender: the hint rule is not asked",
+          gHintRuleCalls == 0);
+    resetText(true);
+    gFrameFp = kOtherMeshFp;
+    deliverHint(gPeerA, gPeerA, true, false);
+    check("SESSION_UNKNOWN under another mesh's tag: the hint rule is not asked "
+          "(FAILS ON the unscoped handler)", gHintRuleCalls == 0);
+  }
 
   // A session-encrypted BOOT is a system notice, never a chat event.
   resetText(true);

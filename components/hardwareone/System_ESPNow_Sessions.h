@@ -30,6 +30,7 @@
 #include <stdint.h>
 
 #include "System_ESPNow_PendingQueue.h"  // the pending-frame queue rules
+#include "System_ESPNow_PeerRestartCore.h"  // when a peer restarted, the session with it ends
 
 enum SessionStateLifecycle : uint8_t {
   SESSION_FREE        = 0,  // empty slot
@@ -76,7 +77,7 @@ struct SessionState {
   uint8_t  state;              // SessionStateLifecycle enum
   uint8_t  consecutiveSendTimeouts; // our own send no-ACK run (TX-driven self-heal); reset on any delivered ACK
   uint8_t  userStarted;        // a user command started this SESSION_OPEN: its timeout is always reported
-  uint8_t  _pad2;
+  uint8_t  openResent;         // ESTABLISHING (our OPEN): it was sent once more after a glare (at most once)
 
   // ---- Phase 3.6 — REKEY state -----------------------------------------------
   // Previous AEAD keys, kept valid briefly after a key swap so in-flight frames
@@ -138,7 +139,7 @@ SessionState* sessionFindBySessionId(uint16_t sessionId, const uint8_t peerMac[6
 //   - Free slot: full memset — every field starts at zero.
 //   - Existing session for the pair: a PARTIAL reset. It zeroes the live AEAD
 //     keys, txSeqNext, the rx replay window (rxSeqHighWater + rxSeqBitmap),
-//     establishedAtMs and the in-flight rekey state (rekeyEphPrivKey,
+//     establishedAtMs, openResent and the in-flight rekey state (rekeyEphPrivKey,
 //     rekeyInitiatedAtMs, rekeyTxSeqAtInit, rekeyReplyGraceUntilMs,
 //     lastPeerRekeyNonce), and pushes the sessionId it replaces onto
 //     recentSessionIds (the caller then writes the new sessionId). It leaves the
@@ -461,6 +462,43 @@ void sessionHoldRekeyReply(SessionState* s, const uint8_t ephPrivKey[32]);
 // the slot held before it. A genuine SESSION_OPEN always proposes a fresh
 // random id, so such an OPEN is a re-delivered copy.
 bool sessionOpenIdStale(const SessionState* s, uint16_t sessionId);
+
+// ---- A peer restarted: the session with it ends (System_ESPNow_PeerRestartCore.h)
+//
+// The rules are in the core header; these own the table (PSRAM, under
+// EspNowTxGuard), the session close and the lines. All run on espnow_task
+// (RX dispatch), never in the radio callback.
+
+// A group-signed BOOT notice from paired `peerMac` (the caller checked the tag
+// is of the peer's mesh; a sealed notice goes to sessionPeerBootSeen). `hasCounter` false when the notice carries no boot counter. On
+// a restart it closes the ACTIVE/REKEYING session this device holds with the
+// peer (sends after it queue and open a new one; frames that already wait
+// stay queued and go out on the new session) and prints one line naming the
+// peer. Returns the verdict.
+PeerBootVerdict sessionPeerBootNotice(const uint8_t peerMac[6], bool hasCounter, uint32_t bootCounter);
+
+// A boot counter seen in a sealed frame of the live session (bond heartbeat, a
+// BOOT notice sealed in the session): becomes the reference outright (lower
+// ones included: the peer's count was erased); never ends a session.
+void sessionPeerBootSeen(const uint8_t peerMac[6], uint32_t bootCounter);
+
+// This device holds an ACTIVE or REKEYING session with paired `peerMac` (the
+// slot of its identity's mesh). meshSendBootToPeers seals the notice then.
+bool sessionLiveWithPeer(const uint8_t peerMac[6]);
+
+// The receive path found no ACTIVE/REKEYING session for a sealed frame from
+// `srcMac`: answers with a SESSION_UNKNOWN hint when the rules say so (the
+// peer has a stored identity, the id is not this device's handshake in flight
+// or a replaced session, at most one per peer per second). Returns true when a
+// hint went out.
+bool sessionUnknownFrameSeen(const uint8_t srcMac[6], const struct EspNowV4Header* h);
+
+// A SESSION_UNKNOWN hint from paired `srcMac` (group tag checked by the row;
+// v4h_session_unknown checked it is of the peer's mesh and from the peer itself).
+// Closes the named live session, marks hint->msgId failed, prints one line and
+// starts a SESSION_OPEN when the rules say so. Returns the verdict.
+SessionHintVerdict sessionUnknownHintReceived(const uint8_t srcMac[6],
+                                              const struct V4PayloadSessionUnknown* hint);
 
 #endif  // ENABLE_ESPNOW
 

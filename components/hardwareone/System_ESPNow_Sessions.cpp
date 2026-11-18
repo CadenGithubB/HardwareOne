@@ -12,6 +12,7 @@
 #include "System_ESPNow_Crypto.h"
 #include "System_ESPNow_Deadline.h"  // wrap-safe prev-key window
 #include "System_ESPNow_HandshakeBackoff.h"  // WarnLimiter
+#include "System_ESPNow_Handlers_Crypto.h"  // espnowSessionOpenInitiate (SESSION_UNKNOWN)
 #include "System_ESPNow_Identity.h"  // peerIdentityFindByMac (pendingFrameDrainSettled)
 #include "System_ESPNow_Wire.h"  // EspNowV4Header, flag constants
 #include "System_MemUtil.h"      // ps_alloc, AllocPref
@@ -89,6 +90,7 @@ SessionState* sessionAllocate(const uint8_t peerMac[6], uint8_t meshId) {
     sodium_memzero(existing->aeadKeyRx, sizeof(existing->aeadKeyRx));
     existing->state = SESSION_ESTABLISHING;
     existing->userStarted = 0;   // set again by the caller when a user asked
+    existing->openResent = 0;    // a new attempt may be sent once more after a glare
     existing->txSeqNext = 0;
     existing->rxSeqHighWater = 0;
     existing->rxSeqBitmap = 0;
@@ -1040,6 +1042,151 @@ bool sessionOpenIdStale(const SessionState* s, uint16_t sessionId) {
     if (id != 0 && id == sessionId) return true;
   }
   return false;
+}
+
+// ============================================================================
+// A peer restarted: the session with it ends (System_ESPNow_PeerRestartCore.h)
+// ============================================================================
+
+namespace {
+
+PeerRestartTable* gPeerRestart = nullptr;
+
+// Caller holds EspNowTxGuard.
+bool ensurePeerRestartAllocated() {
+  if (gPeerRestart) return true;
+  gPeerRestart = (PeerRestartTable*)ps_alloc(sizeof(PeerRestartTable), AllocPref::PreferPsram,
+                                             "espnow.peerrestart");
+  if (!gPeerRestart) return false;
+  memset(gPeerRestart, 0, sizeof(PeerRestartTable));
+  return true;
+}
+
+// The session the send path would use for `mac`: identity first, then its
+// mesh's slot. nullptr when there is no identity or no slot.
+SessionState* sessionForPeer(const uint8_t mac[6]) {
+  const PeerIdentity* pid = peerIdentityFindByMac(mac);
+  return pid ? sessionFindByPeer(mac, pid->meshId) : nullptr;
+}
+
+bool sessionLiveState(const SessionState* s) {
+  return s && (s->state == SESSION_ACTIVE || s->state == SESSION_REKEYING);
+}
+
+}  // namespace
+
+PeerBootVerdict sessionPeerBootNotice(const uint8_t peerMac[6], bool hasCounter, uint32_t bootCounter) {
+  if (!peerMac) return PeerBootVerdict::NoSession;
+  const uint32_t nowMs = (uint32_t)millis();
+  uint16_t closedId = 0;
+  uint8_t waiting = 0;
+  PeerBootVerdict verdict = PeerBootVerdict::NoSession;
+  {
+    // Same lock as the seal (sessionWrapFrame) and the pending queue: a seal
+    // on another task and this clear do not interleave.
+    EspNowTxGuard g("peerBootNotice");
+    // Paired peers only (a stored identity): a mesh member that is not paired
+    // with this device holds no session with it, and must not use up entries.
+    if (!peerIdentityFindByMac(peerMac)) return PeerBootVerdict::NoSession;
+    if (!ensurePeerRestartAllocated()) return PeerBootVerdict::NoSession;
+    SessionState* s = sessionForPeer(peerMac);
+    const bool live = sessionLiveState(s);
+    const uint32_t age = live ? (uint32_t)(nowMs - s->establishedAtMs) : 0;
+    verdict = peerRestartOnBootNotice(*gPeerRestart, peerMac, hasCounter, bootCounter, live, age, nowMs);
+    if (verdict == PeerBootVerdict::DropSession) {
+      closedId = s->sessionId;
+      sessionClear(s);
+      waiting = pendingCountFor(gPending, kPendingFrameSlots, peerMac);
+    }
+  }
+  if (verdict != PeerBootVerdict::DropSession) return verdict;
+  // One line per restart: the next notice carries a newer counter or is
+  // refused by the 10 s limit.
+  String name = getEspNowDeviceName(peerMac);
+  char who[40];
+  if (name.length() > 0) strlcpy(who, name.c_str(), sizeof(who));
+  else snprintf(who, sizeof(who), MAC_FMT, MAC_ARGS(peerMac));
+  // A notice without a counter never ends a session (PeerBootVerdict::NoCounter).
+  BROADCAST_PRINTF("[ESP-NOW] %s restarted (boot #%lu): its session ended; the next message to it "
+                   "opens a new one", who, (unsigned long)bootCounter);
+  DEBUG_ESPNOWF("session: closed sessionId=%u with " MAC_FMT " (peer restarted)",
+                (unsigned)closedId, MAC_ARGS(peerMac));
+  // Frames that already wait for this peer would otherwise wait for a send
+  // that kicks the handshake: start it now so they go out on the new session.
+  if (waiting) (void)espnowSessionOpenInitiate(peerMac, nullptr);
+  return verdict;
+}
+
+bool sessionLiveWithPeer(const uint8_t peerMac[6]) {
+  if (!peerMac) return false;
+  EspNowTxGuard g("sessLivePeer");
+  return sessionLiveState(sessionForPeer(peerMac));
+}
+
+void sessionPeerBootSeen(const uint8_t peerMac[6], uint32_t bootCounter) {
+  if (!peerMac) return;
+  EspNowTxGuard g("peerBootSeen");
+  if (!peerIdentityFindByMac(peerMac) || !ensurePeerRestartAllocated()) return;
+  peerRestartBootSeen(*gPeerRestart, peerMac, bootCounter, (uint32_t)millis());
+}
+
+bool sessionUnknownFrameSeen(const uint8_t srcMac[6], const struct EspNowV4Header* h) {
+  if (!srcMac || !h) return false;
+  const uint32_t nowMs = (uint32_t)millis();
+  UnknownSessionReply reply = UnknownSessionReply::RateLimited;
+  {
+    EspNowTxGuard g("sessUnknownRx");
+    // Only a peer whose identity this device holds is answered: it is the
+    // only kind that can hold a session with us, and nobody else can make
+    // this device transmit by sending sealed-looking frames.
+    if (!peerIdentityFindByMac(srcMac)) return false;
+    if (!ensurePeerRestartAllocated()) return false;
+    // Id 0 is never a session (sessionFindBySessionId never matches it).
+    const SessionState* s = sessionForPeer(srcMac);
+    const bool idKnown = h->sessionId == 0 || (s && sessionOpenIdStale(s, h->sessionId));
+    reply = peerRestartOnUnknownSession(*gPeerRestart, srcMac, idKnown, nowMs);
+  }
+  if (reply != UnknownSessionReply::SendHint) return false;
+  V4PayloadSessionUnknown hint = {};
+  hint.sessionId = h->sessionId;
+  hint.frameSeq  = h->frameSeq;
+  hint.msgId     = h->msgId;
+  return v4_send_frame(srcMac, ESPNOW_V4_TYPE_SESSION_UNKNOWN, ESPNOW_V4_FLAG_BROADCAST_AUTH,
+                       generateMessageId(), reinterpret_cast<const uint8_t*>(&hint),
+                       (uint16_t)sizeof(hint), 1);
+}
+
+SessionHintVerdict sessionUnknownHintReceived(const uint8_t srcMac[6],
+                                              const struct V4PayloadSessionUnknown* hint) {
+  if (!srcMac || !hint) return SessionHintVerdict::NoSession;
+  const uint32_t nowMs = (uint32_t)millis();
+  SessionHintVerdict verdict = SessionHintVerdict::NoSession;
+  {
+    EspNowTxGuard g("sessUnknownHint");
+    if (!ensurePeerRestartAllocated()) return SessionHintVerdict::NoSession;
+    SessionState* s = sessionForPeer(srcMac);
+    const bool live = sessionLiveState(s);
+    verdict = peerRestartOnHint(*gPeerRestart, srcMac, live, live ? s->sessionId : 0,
+                                live ? s->txSeqNext : 0, hint->sessionId, hint->frameSeq, nowMs);
+    if (verdict == SessionHintVerdict::DropSession) sessionClear(s);
+  }
+  if (verdict != SessionHintVerdict::DropSession) {
+    DEBUG_ESPNOWF("session: SESSION_UNKNOWN from " MAC_FMT " for sessionId=%u ignored (verdict %u)",
+                  MAC_ARGS(srcMac), (unsigned)hint->sessionId, (unsigned)verdict);
+    return verdict;
+  }
+  // The frame it could not open never arrived: say so now, not after the
+  // 10 s ACK timeout.
+  sendStatusMarkFailed(hint->msgId, srcMac);
+  String name = getEspNowDeviceName(srcMac);
+  char who[40];
+  if (name.length() > 0) strlcpy(who, name.c_str(), sizeof(who));
+  else snprintf(who, sizeof(who), MAC_FMT, MAC_ARGS(srcMac));
+  BROADCAST_PRINTF("[ESP-NOW] %s no longer had the session with this device (it restarted?): "
+                   "the session ended and a new one is opening; messages sent in the old one did not "
+                   "arrive", who);
+  (void)espnowSessionOpenInitiate(srcMac, nullptr);
+  return verdict;
 }
 
 #endif  // ENABLE_ESPNOW

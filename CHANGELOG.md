@@ -207,6 +207,38 @@ everything user-visible since the v0.99.99.1 tag.
   as it did (its bond heartbeat counts as its agreement). Host-tested; not yet run on hardware.
 
 ### Fixed
+- ESP-NOW: messages sent to a device that has just restarted are no longer sent into the session it no
+  longer has. Sessions live in RAM, so a restarted device has none, while its peers kept the old one and
+  sealed messages into it; the restarted device could not open them and dropped them without a word
+  (bench 2026-11-18: three `espnowsend` to a restarted P4 answered "sent via SESSION_FRAME" and were
+  lost; the sender noticed only after two send timeouts, about 10 s, then lost 6 s more to both sides
+  opening a session at once). Now:
+  - The boot notice a device sends to its paired devices at every start goes out group-signed instead of
+    in a session, so it arrives at once. A device that still holds a session with the sender ends it when
+    the notice's boot counter is newer than the last one it saw from that device, and says so once:
+    "[ESP-NOW] <device> restarted (boot #N): its session ended; the next message to it opens a new one".
+    Messages sent after that answer "queued until the session with <device> opens" and go out on the new
+    session. A notice with a counter already seen, an older one or none ends nothing, and a copy is not
+    filed again, so a notice captured off the air and played again ends no session and adds no "started"
+    entry. A device whose count was erased is recognised again once its count is seen in a session (a bond
+    partner's heartbeat) or after this device restarts; until then the hint below ends each stale session.
+    After `closeespnow`/`openespnow` the sessions are kept, so the notice goes sealed to a device the session
+    with which is still open, and ends nothing there. Only the group key of the sender's own mesh counts: a
+    member of another mesh this device is in cannot end its sessions this way.
+  - Independently of the notice: a device that receives a sealed message for a session it does not have
+    answers once with a new group-signed frame SESSION_UNKNOWN (opcode 18) naming that session. The sender
+    ends that session if it is its live one and the message one it sealed in it, marks that message failed
+    at once, says "[ESP-NOW] <device> no longer had the session with this device (it restarted?): the
+    session ended and a new one is opening; messages sent in the old one did not arrive", and opens a new
+    session. Older firmware ignores the frame and recovers as before.
+  - Both signals are only group-signed, so they are limited: a session is ended this way at most once per
+    device every 10 s, a notice ends no session opened in the last 2 s, a hint is answered at most once
+    per device a second and only to a paired device, and nothing is accepted or sent on their strength
+    (the new session is the normal signed handshake).
+  - When both devices open a session at once, the one with the lower address keeps its own and now sends
+    it once more, unchanged, when the other's arrives: if the first was sent while the other device could
+    not hear it (it was restarting), the other now takes it at once instead of both waiting out the 6 s
+    timeout.
 - ESP-NOW: messages sent to a device before the encrypted session with it is open are no longer lost.
   The waiting queue kept one message per device, so a second `espnowsend` right after a restart replaced
   the first, which never arrived although both commands had answered "sent" (bench 2026-11-18). Up to 4

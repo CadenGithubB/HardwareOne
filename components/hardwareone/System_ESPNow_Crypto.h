@@ -96,6 +96,12 @@ bool espnowCryptoEd25519Verify(const uint8_t sig[64],
 // Returns false if libsodium init incomplete.
 bool espnowCryptoX25519Keygen(uint8_t pub[32], uint8_t sec[32]);
 
+// The X25519 public key of a private key (the pub espnowCryptoX25519Keygen
+// returned with it). A SESSION_OPEN awaiting its CONFIRM keeps only its
+// private key; sending the OPEN once more rebuilds it from that.
+// Returns false if libsodium init incomplete.
+bool espnowCryptoX25519Public(uint8_t pubOut[32], const uint8_t sec[32]);
+
 // X25519 ECDH: compute the 32-byte shared secret from our private + peer's
 // public. Result is NOT a final session key; feed into HKDF / Blake2b KDF
 // with distinct contexts to derive per-direction AEAD keys.

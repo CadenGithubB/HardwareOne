@@ -914,6 +914,35 @@ struct DeferredSessionConfirmWork {
   uint8_t                 headerOrigin[6];
 };
 
+// Send the SESSION_OPEN of slot `s` (ESTABLISHING, our initiation) once more,
+// unchanged: same sessionId, ephemeral key and nonce, so the peer derives the
+// same keys whichever copy it answers, and a peer that already answered the
+// first copy ignores this one as re-delivered (sessionOpenIdStale). The slot
+// keeps the ephemeral private key in aeadKeyRx and nonceA in aeadKeyTx[0..15]
+// until the CONFIRM (espnowSessionOpenInitiate); the public key is rebuilt
+// from the private one. The CONFIRM budget restarts with the copy.
+bool sessionOpenSendAgain(SessionState* s, const uint8_t peerMac[6]) {
+  if (!s || s->state != SESSION_ESTABLISHING) return false;
+  const auto& self = espnowIdentityGet();
+  if (!self.valid) return false;
+  uint8_t selfMac[6]; espnowSelfStaMac(selfMac);
+  V4PayloadSessionOpen open = {};
+  open.sessionId = s->sessionId;
+  memcpy(open.initiatorMac, selfMac, 6);
+  memcpy(open.responderMac, peerMac, 6);
+  if (!espnowCryptoX25519Public(open.ephX25519Pub, s->aeadKeyRx)) return false;
+  memcpy(open.nonceA, s->aeadKeyTx, 16);
+  uint8_t transcript[71];
+  buildOpenTranscript(transcript, open.sessionId, selfMac, peerMac, open.ephX25519Pub, open.nonceA);
+  if (!espnowCryptoEd25519Sign(open.signature, transcript, sizeof(transcript), self.sec)) return false;
+  s->openResent = 1;
+  s->lastUseMs = (uint32_t)millis();
+  return v4_send_frame(peerMac, ESPNOW_V4_TYPE_SESSION_OPEN,
+                       ESPNOW_V4_FLAG_HANDSHAKE | ESPNOW_V4_FLAG_ACK_REQ,
+                       generateMessageId(),
+                       reinterpret_cast<const uint8_t*>(&open), sizeof(open), 1);
+}
+
 void runDeferredSessionOpen(void* arg) {
   auto* w = static_cast<DeferredSessionOpenWork*>(arg);
   const V4PayloadSessionOpen* msg = &w->msg;
@@ -1003,12 +1032,23 @@ void runDeferredSessionOpen(void* arg) {
   // the canonical initiator and KEEPS its own session (ignore the peer's OPEN —
   // our CONFIRM will win on both ends); the B-side falls through and yields,
   // accepting the peer's OPEN. Both then converge on the A-initiated session.
+  //
+  // The peer's OPEN also proves it hears now. Our own OPEN may have gone out
+  // before it could (it was restarting, or its radio was busy): the peer then
+  // never saw it, and both sides would sit out the CONFIRM budget (bench
+  // 2026-11-18: glare, then a 6 s ESTABLISHING timeout). So the A side sends
+  // its OPEN once more, unchanged (sessionOpenSendAgain), at most once per
+  // attempt: a peer that missed it yields to it as above; one that already
+  // answered it ignores the copy as re-delivered.
   if (existing && existing->state == SESSION_ESTABLISHING &&
       sessionIsASide(selfMac, msg->initiatorMac)) {
+    const bool resend = !existing->openResent;
     WARN_ESPNOWF("SESSION_OPEN glare with " MAC_FMT " — we are A-side, "
-                 "keeping our initiation (ignoring peer sessionId=%u)",
+                 "keeping our initiation (ignoring peer sessionId=%u)%s",
                  MAC_ARGS(msg->initiatorMac),
-                 (unsigned)msg->sessionId);
+                 (unsigned)msg->sessionId,
+                 resend ? "; sending ours once more" : "");
+    if (resend) (void)sessionOpenSendAgain(existing, msg->initiatorMac);
     free(w);
     return;
   }

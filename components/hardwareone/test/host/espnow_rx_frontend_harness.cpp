@@ -213,6 +213,17 @@ static bool sessionUnwrapFrame(SessionState* s, const EspNowV4Header* header, co
   return true;
 }
 
+// The SESSION_UNKNOWN hint (System_ESPNow_Sessions.cpp, its rules run by
+// espnow_peer_restart_tests): recorded, so a case can see which sealed frames
+// the receive path asks about.
+static unsigned gUnknownSessionAsks = 0;
+static uint16_t gUnknownSessionLastId = 0;
+[[maybe_unused]] static bool sessionUnknownFrameSeen(const uint8_t*, const EspNowV4Header* h) {
+  ++gUnknownSessionAsks;
+  gUnknownSessionLastId = h->sessionId;
+  return true;
+}
+
 // ---- Radio, ACK bookkeeping, route table and reassembler doubles ------------
 static unsigned gAcksSent = 0, gFragAcksSent = 0, gFanouts = 0, gCleanups = 0, gRelayForwards = 0;
 static bool v4_send_ack(const uint8_t*, uint32_t) { ++gAcksSent; return true; }
@@ -355,6 +366,8 @@ static void reset(bool keyed) {
   gCalls.clear();
   gWarns = gAcksSent = gFragAcksSent = gFanouts = gCleanups = gRelayForwards = 0;
   gUnwrapCalls = gReplayRejects = gRegistrySaves = 0;
+  gUnknownSessionAsks = 0;
+  gUnknownSessionLastId = 0;
   gLastWarn.clear();
   gEspNowInRelayDelivery = false;
   gNowMs += 60000;  // every ring entry of an earlier case is past its TTL
@@ -904,6 +917,35 @@ static void testTimeAndSensorFramesThroughRelay() {
   }
 }
 
+// A sealed frame for a session this device does not hold (it restarted, bench
+// 2026-11-18): it is not opened, acknowledged or handed on, and the receive
+// path asks the SESSION_UNKNOWN rule once per such frame, so the sender learns
+// it must open a new session. A frame under a live session asks nothing.
+static void testUnknownSessionAsksForHint() {
+  reset(true);
+  SessionState lost{};
+  std::memcpy(lost.peerMac, gPeerB, 6);
+  lost.sessionId = 16447;  // the session B still holds; this device lost it
+  std::memset(lost.key, 0xB7, sizeof lost.key);
+  uint32_t id = 900;
+  for (int i = 0; i < 3; ++i) deliver(gPeerB, sealedFrame(&lost, ESPNOW_V4_TYPE_TEXT, gPeerB, ++id, text("burst")));
+  check("a sealed frame for an unknown session is not acknowledged or handed on",
+        gCalls.empty() && gAcksSent == 0 && gUnwrapCalls == 0);
+  check("each one asks the SESSION_UNKNOWN rule (FAILS ON BASE: dropped silently)",
+        gUnknownSessionAsks == 3 && gUnknownSessionLastId == 16447);
+  // A session that is not ACTIVE (our OPEN awaiting its CONFIRM) is also not
+  // opened; the rule decides (it answers nothing for that id).
+  reset(true);
+  gSessB->state = SESSION_ESTABLISHING;
+  deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_TEXT, gPeerB, ++id, text("early")));
+  check("a frame for a session still ESTABLISHING is not opened and asks the rule",
+        gCalls.empty() && gUnwrapCalls == 0 && gUnknownSessionAsks == 1 && gUnknownSessionLastId == 7);
+  reset(true);
+  deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_TEXT, gPeerB, ++id, text("live")));
+  check("a frame under the live session is delivered and asks nothing",
+        calls("v4h_text") == 1 && gUnknownSessionAsks == 0);
+}
+
 int main() {
   std::setvbuf(stdout, nullptr, _IOLBF, 0);  // keep the case lines if a pre-fix tree aborts
   testForgedPlaintextDoesNotShadowSealed();
@@ -918,6 +960,7 @@ int main() {
   testUnpairReleasesMetadata();
   testMetadataTableFull();
   testReplayedHeartbeatFromInventedSource();
+  testUnknownSessionAsksForHint();
   std::printf("espnow_rx_frontend: %u failure%s\n", gFailures, gFailures == 1 ? "" : "s");
   return gFailures ? 1 : 0;
 }

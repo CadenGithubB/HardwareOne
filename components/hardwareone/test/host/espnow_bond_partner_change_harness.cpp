@@ -419,6 +419,9 @@ struct portMUX_TYPE { int unused; };
 static std::vector<uint32_t> gWatchedSends;
 [[maybe_unused]] static void sendStatusRegister(uint32_t msgId, const uint8_t*) { gWatchedSends.push_back(msgId); }
 [[maybe_unused]] static void v4_dedup_flush_origin(const uint8_t*) {}
+// The partner's boot counter recorded for the peer-restart rule
+// (espnow_peer_restart_tests runs it).
+[[maybe_unused]] static void sessionPeerBootSeen(const uint8_t*, uint32_t) {}
 // The auth log: the reason text of every record (bondNotifySessionEstablished
 // writes one per bond session).
 static std::vector<std::string> gAuthLines;

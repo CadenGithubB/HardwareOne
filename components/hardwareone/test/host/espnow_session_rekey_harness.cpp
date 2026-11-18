@@ -151,6 +151,10 @@ static bool espnowCryptoX25519Keygen(uint8_t pub[32], uint8_t sec[32]) {
   for (int i = 0; i < 32; i++) pub[i] = (uint8_t)(sec[i] ^ 0x5A);
   return true;
 }
+[[maybe_unused]] static bool espnowCryptoX25519Public(uint8_t pub[32], const uint8_t sec[32]) {
+  for (int i = 0; i < 32; i++) pub[i] = (uint8_t)(sec[i] ^ 0x5A);
+  return true;
+}
 static bool espnowCryptoX25519Shared(uint8_t out[32], const uint8_t sec[32], const uint8_t pub[32]) {
   if (sodium_is_zero(pub, 32)) return false;
   for (int i = 0; i < 32; i++) out[i] = (uint8_t)((sec[i] ^ 0x5A) ^ pub[i] ^ 0x33);
@@ -677,7 +681,8 @@ int main() {
   check(B.outbox.size() == b0 && sessOf(B)->sessionId == second && keysMirror(),
         "C11 a copy of the previous session's OPEN is ignored (FAILS ON BASE)");
 
-  // C12 — OPEN glare (preserved): the A side keeps its initiation.
+  // C12 — OPEN glare (preserved): the A side keeps its initiation, and sends
+  // it once more, unchanged (2026-11-18): B's OPEN shows B hears now.
   resetDevices();
   use(A);
   espnowSessionOpenInitiate(B.mac, "mesh");
@@ -685,13 +690,22 @@ int main() {
   espnowSessionOpenInitiate(A.mac, "mesh");
   Frame oa = take(A), ob = take(B);
   deliver(ob, A);
-  check(A.outbox.size() == 1 && logsContaining(A, "WARN", "glare") == 1, "C12 A (A side) ignores B's OPEN");
+  check(logsContaining(A, "WARN", "glare") == 1 && sessOf(A)->state == SESSION_ESTABLISHING,
+        "C12 A (A side) ignores B's OPEN");
+  check(A.outbox.size() == 2 && A.outbox[1].type == ESPNOW_V4_TYPE_SESSION_OPEN &&
+        A.outbox[1].payload == oa.payload && A.outbox[1].msgId != oa.msgId,
+        "C12 and sends its own OPEN once more, byte for byte (FAILS ON BASE: no copy)");
+  const Frame oaCopy = A.outbox[1];
+  A.delivered = A.outbox.size();
   deliver(oa, B);
   deliver(take(B), A);
   V4PayloadSessionOpen oaMsg;
   std::memcpy(&oaMsg, oa.payload.data(), sizeof oaMsg);
   check(keysMirror() && sessOf(A)->sessionId == oaMsg.sessionId,
         "C12 B yields; both converge on A's session");
+  b0 = B.outbox.size();
+  deliver(oaCopy, B);
+  check(B.outbox.size() == b0 && keysMirror(), "C12 the copy reaching B after it answered is ignored");
 
   // C13 — the responder's reply grace ends after kRekeyPrevKeysWindowMs; a
   // later initiation inside the interval is refused, not applied.
@@ -848,6 +862,51 @@ int main() {
   check(sessOf(A)->state == SESSION_ACTIVE && sessOf(A)->sessionId != idBefore &&
         logsContaining(A, "WARN", "no in-flight session") == 1,
         "C19 a CONFIRM for the abandoned OPEN is refused and the live session kept");
+
+  // C20 — the bench glare (2026-11-18): A's OPEN went out while B could not
+  // hear it (B was restarting) and is lost; B then opens. Before, A ignored
+  // B's OPEN and both waited out the 6 s CONFIRM budget. Now A's copy reaches
+  // B, B yields, and one session stands at once.
+  resetDevices();
+  use(A);
+  espnowSessionOpenInitiate(B.mac, "mesh");
+  const Frame lostOpen = take(A);  // never delivered
+  gNow += 1500;
+  use(B);
+  espnowSessionOpenInitiate(A.mac, "mesh");
+  const Frame bOpen = take(B);
+  deliver(bOpen, A);
+  check(A.outbox.size() == 2 && A.outbox[1].payload == lostOpen.payload,
+        "C20 A answers the glare with a copy of its lost OPEN (FAILS ON BASE)");
+  deliver(bOpen, A);  // B's OPEN again (a retry): no second copy
+  check(A.outbox.size() == 2, "C20 at most one copy per attempt");
+  A.delivered = 1;
+  exchange(6);
+  V4PayloadSessionOpen lostMsg;
+  std::memcpy(&lostMsg, lostOpen.payload.data(), sizeof lostMsg);
+  check(keysMirror() && sessOf(B)->sessionId == lostMsg.sessionId,
+        "C20 B yields to the copy; both converge on A's session without a timeout (FAILS ON BASE)");
+  // A new attempt on the same slot may send its copy again.
+  gNow += 100000;
+  bool inFlight2 = false;
+  openKick(A, B, &inFlight2);
+  const Frame second2 = take(A);
+  openKick(B, A, &inFlight2);
+  const size_t aBefore = A.outbox.size();
+  deliver(take(B), A);
+  check(A.outbox.size() == aBefore + 1 && A.outbox.back().payload == second2.payload,
+        "C20 a new attempt on the slot sends its copy again (FAILS ON BASE)");
+
+  // C21 — only the A side sends a copy: B (higher MAC) yields as before.
+  resetDevices();
+  use(A);
+  espnowSessionOpenInitiate(B.mac, "mesh");
+  use(B);
+  espnowSessionOpenInitiate(A.mac, "mesh");
+  const size_t bBefore = B.outbox.size();
+  deliver(take(A), B);
+  check(B.outbox.size() == bBefore + 1 && B.outbox.back().type == ESPNOW_V4_TYPE_SESSION_CONFIRM,
+        "C21 the B side answers A's OPEN with a CONFIRM and sends no OPEN copy");
 
   check(gGuardDepth == 0, "no lock left held");
   std::printf("%u failure(s)\n", gFailures);

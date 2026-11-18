@@ -70,7 +70,8 @@ static_assert(ESPNOW_V4_VERSION == 4,
 //   0        invalid — never assign
 //   1–9      Transport     (ACK live, RELAY_DATA=5 live; NACK/FRAG_REQ/FRAG_REPLY reserved 2–4)
 //   10–29    Crypto        (KEY_EX_* 10–12, SESSION_* 13–15;
-//                           16/17 earmarked SESSION_AUTH_REQ/GRANT)
+//                           16/17 earmarked SESSION_AUTH_REQ/GRANT;
+//                           SESSION_UNKNOWN=18 live, 2026-11-18)
 //   30–49    Discovery     (HEARTBEAT, BOOT, TOPO_*, TIME_SYNC, PAIR_BEACON,
 //                           PEER_LIST=39 live; 37/38 earmarked CAP_REQ/CAP_RESP)
 //   50–69    App unicast   (CMD, CMD_RESP, TEXT, METADATA_*, USER_SYNC)
@@ -142,11 +143,27 @@ enum EspNowV4Type : uint8_t {
   ESPNOW_V4_TYPE_SESSION_CONFIRM = 14,
   ESPNOW_V4_TYPE_SESSION_REKEY   = 15,
   // 16/17 earmarked SESSION_AUTH_REQ / SESSION_AUTH_GRANT (session-scoped
-  // credential-free remote exec — mesh report §5.2 rank 11)
+  // credential-free remote exec — mesh report §5.2 rank 11; kept: still the plan)
+  ESPNOW_V4_TYPE_SESSION_UNKNOWN = 18,  // "I have no session with that id": the answer to a sealed frame for a
+                                        //   session the receiver does not hold (it restarted). Group-signed
+                                        //   (BROADCAST_AUTH), ttl 1, V4PayloadSessionUnknown. The sender of the
+                                        //   frame only closes that session and opens a new one; see
+                                        //   System_ESPNow_PeerRestartCore.h
 
   // --- Discovery / timing (30–49) ---
   ESPNOW_V4_TYPE_HEARTBEAT       = 30,
-  ESPNOW_V4_TYPE_BOOT            = 31,  // Device boot/online notice — its OWN type so the RX files it as a system event, not chat
+  ESPNOW_V4_TYPE_BOOT            = 31,  // Device boot/online notice — its OWN type so the RX files it as a system event, not chat.
+                                        //   JSON envelope, pld.boot = the sender's boot counter. Since 2026-11-18
+                                        //   sent group-signed (BROADCAST_AUTH, ttl 1) to each paired peer the
+                                        //   sender holds no live session with, so it arrives without a session: a
+                                        //   receiver that still holds a session with the sender closes it when the
+                                        //   counter is newer than the last one seen and the tag is of the sender's
+                                        //   mesh (System_ESPNow_PeerRestartCore.h); a copy (counter already seen or
+                                        //   older) is not filed again. Sealed to a peer the sender still holds a
+                                        //   live session with (ESP-NOW closed and opened again: sessions stay in
+                                        //   RAM), which ends nothing and only records the counter, and when no
+                                        //   group key is held for the peer's mesh. The row (REQ_AUTH_WHEN_KEYED)
+                                        //   is unchanged.
   ESPNOW_V4_TYPE_TOPO_REQ        = 32,
   ESPNOW_V4_TYPE_TOPO_START      = 33,
   ESPNOW_V4_TYPE_TOPO_PEER       = 34,
@@ -1134,6 +1151,40 @@ struct __attribute__((packed)) V4PayloadFsGetAck {
 static_assert(sizeof(V4PayloadFsGetAck) == 140, "V4PayloadFsGetAck layout");
 static_assert(sizeof(V4PayloadFsGetAck) <= ESPNOW_V4_MAX_PLAINTEXT,
               "V4PayloadFsGetAck must fit single SESSION_FRAME");
+
+// ---- SESSION_UNKNOWN (opcode 18, 2026-11-18) ----------------------------------
+//
+// A device that receives a SESSION_FRAME for a session id it does not hold
+// ACTIVE (it restarted, or dropped the session) cannot open the frame and,
+// before this, dropped it silently: the sender kept sealing into a session the
+// receiver no longer had until two of its own sends timed out (~10 s). Now the
+// receiver answers once, naming what it could not open:
+//
+//   B → A: SESSION_UNKNOWN { sessionId, frameSeq, msgId } of A's frame
+//
+// Sent group-signed (BROADCAST_AUTH: B has no session to seal it in) under the
+// tag of A's mesh (A ignores a hint under another mesh's tag), ttl 1, never
+// routed or flooded, at most once per peer per second, and only to a peer
+// whose identity B holds. Not sent when the id is B's own SESSION_OPEN
+// awaiting its CONFIRM (A's frames can overtake the CONFIRM) or a session B
+// replaced (a late frame). Row: REQ_AUTHENTICATED | REQ_PAIRED.
+//
+// A acts only when sessionId is its live (ACTIVE/REKEYING) session with B and
+// frameSeq is one it sealed in it (1..txSeqNext); then it closes that session,
+// marks msgId failed at once and starts a SESSION_OPEN. At most one such close
+// per peer per 10 s (shared with the BOOT notice rule). Nothing is accepted or
+// sent on the strength of the hint: the new session is the normal signed
+// SESSION_OPEN/CONFIRM. A forged hint (any mesh member holds the group key)
+// costs one fresh handshake per 10 s at most; a re-sent copy names a session
+// that is no longer live and does nothing.
+struct __attribute__((packed)) V4PayloadSessionUnknown {
+  uint16_t sessionId;    // 0  the header sessionId of the frame that could not be opened
+  uint8_t  reserved[2];  // 2  0
+  uint32_t frameSeq;     // 4  its header frameSeq
+  uint32_t msgId;        // 8  its header msgId (lets the sender mark that send failed at once)
+};
+static_assert(sizeof(V4PayloadSessionUnknown) == 12,
+              "V4PayloadSessionUnknown layout (12 B + the 32 B group tag: one frame)");
 
 // ---- Multi-hop reachability invariants -------------------------------------
 //

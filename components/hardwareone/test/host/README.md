@@ -6900,6 +6900,44 @@ in the responder's SESSION_OPEN handler, and the four bond request commands and 
 `espnow_pending_queue_tests` runs the header's rules alone (admission, order across slot reuse and counter wrap,
 expiry across the millis() wrap, the settle time).
 
+## A peer restarted: the session with it ends
+
+Bench 2026-11-18: the P4 restarted while the XIAO still held its session with it; three messages went "via
+SESSION_FRAME" into a session the P4 no longer had and were lost, the XIAO noticed only after two send timeouts
+(~10 s), and then lost 6 s more to a SESSION_OPEN glare. Rules: `System_ESPNow_PeerRestartCore.h`.
+
+`espnow_peer_restart_tests` compiles that production dependency-free header: a BOOT notice with a newer counter (or
+the first one this device sees) closes a live session; the same counter, an older one (never recorded: two captured
+notices of different starts played in turn close nothing), 0 or no counter, no session or a session younger than 2 s
+close nothing; a counter from a sealed frame (bond heartbeat) becomes the reference outright, so a peer whose count
+was erased is recognised again; copies (same or older counter) are not filed; counters compare as a signed 32-bit
+difference across the wrap; only a group tag of the peer's own mesh counts; the notice is sealed to a peer this
+device still holds a live session with; forged notices with ever newer counters close at most once per peer per
+10 s, a limit the SESSION_UNKNOWN hint shares; the device without the session answers at most one hint per peer per
+second and none for its own handshake or a replaced session; a hint closes only the live session it names, for a
+sequence this device sealed in it; the 16-entry table gives up the entry used longest ago; the times survive the
+millis() wrap.
+
+`espnow_rx_frontend` (extended) checks that a sealed frame for a session this device does not hold ACTIVE is not
+opened, acknowledged or handed on, and asks the hint rule once per frame, and that a frame under the live session
+asks nothing. `espnow_dispatch_policy` (extended) runs the real BOOT handler (`v4h_boot`): a group-signed notice from
+the peer itself under its mesh's tag asks the session rule once and is filed, unless the rule calls it a copy; one
+sealed in the session only records the counter; a plaintext one (keyed or keyless), one under another mesh's tag or
+one whose origin is not the radio sender asks nothing. It also runs the real SESSION_UNKNOWN handler: only a
+group-signed hint from the paired peer itself under its mesh's tag reaches the hint rule. `espnow_session_rekey` (extended, C12, C20, C21) runs the
+glare change in the production handlers: the A side keeps its SESSION_OPEN and sends it once more, byte for byte,
+when the peer's OPEN arrives; a peer that missed the first copy yields to the second and one session stands at once
+(before: a 6 s ESTABLISHING timeout); a peer that already answered ignores the copy; one copy per attempt; the B side
+sends none. `--source-dir` with the tree before the change fails the cases marked FAILS ON BASE.
+
+```sh
+ctest --test-dir <build> -R 'espnow_(peer_restart_tests|rx_frontend|dispatch_policy|session_rekey)' --output-on-failure
+```
+
+Not covered: the radio and the session close and hint send glue in `System_ESPNow_Sessions.cpp`
+(`sessionPeerBootNotice`, `sessionUnknownFrameSeen`, `sessionUnknownHintReceived`, `sessionLiveWithPeer`) and the
+per-peer choice in `meshSendBootToPeers`, which run on the device only (the rules they call are tested).
+
 ## Bond agreement (BOND_REQUEST / BOND_NOTICE)
 
 A bond is a setting on each device. These tests cover the two frames with which the devices tell each other how

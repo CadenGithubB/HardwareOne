@@ -11,7 +11,8 @@ stand-in crypto. The cases re-deliver captured handshake frames: a REKEY or
 SESSION_OPEN copy must be ignored without a reply and without touching the live
 keys, an older REKEY copy must end in one converged extra round instead of an
 endless exchange, and normal, concurrent, retransmitted, glare and post-reboot
-handshakes must still converge. A SESSION_OPEN kick while a handshake or a
+handshakes must still converge; in a glare the A side sends its own OPEN once
+more, unchanged, so a peer that missed it yields at once. A SESSION_OPEN kick while a handshake or a
 rekey is in flight must leave the slot, its keys and its sessionId untouched
 and send nothing; a kick with no session, on a CLOSED or ACTIVE slot, or after
 the ESTABLISHING timeout must start a handshake. No radio or hardware is
@@ -146,6 +147,8 @@ def build_crypto(crypto, crypto_h):
     for marker in ('void buildOpenTranscript(', 'void buildConfirmTranscript(',
                    'void buildRekeyTranscript(', 'static uint16_t sessionRejectLogCount('):
         internal.append(one(crypto, marker, name))
+    # The glare re-send of our own OPEN (absent on a tree before it).
+    internal.append(optional(crypto, 'bool sessionOpenSendAgain(', name))
     for marker in ('struct DeferredSessionOpenWork', 'struct DeferredSessionConfirmWork'):
         internal.append(one(crypto, marker, name) + ';')
     for marker in ('void runDeferredSessionOpen(void* arg)', 'void runDeferredSessionConfirm(void* arg)'):

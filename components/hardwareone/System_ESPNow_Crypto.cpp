@@ -152,6 +152,12 @@ bool espnowCryptoX25519Keygen(uint8_t pub[32], uint8_t sec[32]) {
   return crypto_kx_keypair(pub, sec) == 0;
 }
 
+bool espnowCryptoX25519Public(uint8_t pubOut[32], const uint8_t sec[32]) {
+  if (!gSodiumReady) return false;
+  // crypto_kx_keypair's public key is crypto_scalarmult_base of its secret.
+  return crypto_scalarmult_base(pubOut, sec) == 0;
+}
+
 bool espnowCryptoX25519Shared(uint8_t sharedOut[32],
                               const uint8_t ourSec[32],
                               const uint8_t theirPub[32]) {

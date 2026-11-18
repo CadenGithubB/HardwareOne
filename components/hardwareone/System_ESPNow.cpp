@@ -4160,6 +4160,67 @@ static void v4h_text(const V4RxCtx& ctx) {
   DEBUG_ESPNOW_ROUTERF("[V4_RX] ========================================");
 }
 
+// The boot counter of a BOOT notice (the JSON envelope buildBootNotification
+// makes: "type":"BOOT", pld.boot). Bounded parse of the received bytes; false
+// when it is not a well-formed BOOT notice with a counter.
+static bool bootNoticeCounter(const uint8_t* payload, uint16_t len, uint32_t* out) {
+  if (!payload || len == 0 || !out) return false;
+  PSRAM_JSON_DOC(doc);
+  if (deserializeJson(doc, reinterpret_cast<const char*>(payload), len)) return false;
+  JsonVariantConst type = doc["type"];
+  if (!type.is<const char*>() || strcmp(type.as<const char*>(), MSG_TYPE_BOOT) != 0) return false;
+  JsonVariantConst boot = doc["pld"]["boot"];
+  if (!boot.is<uint32_t>()) return false;
+  *out = boot.as<uint32_t>();
+  return true;
+}
+
+// BOOT — a paired peer started. If this device still holds a session with it,
+// that session is stale (sessions live in RAM): it ends now, so the next send
+// re-handshakes instead of sealing frames the peer cannot open (bench
+// 2026-11-18). Rules: System_ESPNow_PeerRestartCore.h. Only a frame that proved
+// a key counts, and only from the peer itself (the notice is sent link-local,
+// ttl 1):
+//   - group-signed (how a device that holds no session with us sends it): it
+//     counts only under the group tag of the peer's own mesh, and then the
+//     session rule decides (sessionPeerBootNotice). A counter already seen or
+//     an older one is a copy (a signed frame can be captured and played again
+//     by anyone in range): it is not filed again (peerBootNoticeFiled);
+//   - sealed in the session: the session works (the peer reopened ESP-NOW and
+//     kept its sessions, or an older firmware opened a new one to send it), so
+//     nothing ends; its counter becomes the reference (sessionPeerBootSeen).
+// Then filed like before (v4h_text).
+static void v4h_boot(const V4RxCtx& ctx) {
+  if (ctx.isAuthenticated && memcmp(ctx.h->origin, ctx.recv_info->src_addr, 6) == 0 &&
+      peerRestartSignalScoped(ctx.isSessionEncrypted, ctx.h->meshFingerprint,
+                              fingerprintForPeer(ctx.h->origin))) {
+    uint32_t boot = 0;
+    const bool hasCounter = bootNoticeCounter(ctx.payload, ctx.payloadLen, &boot);
+    if (ctx.isSessionEncrypted) {
+      if (hasCounter) sessionPeerBootSeen(ctx.h->origin, boot);
+    } else if (!peerBootNoticeFiled(sessionPeerBootNotice(ctx.h->origin, hasCounter, boot))) {
+      return;
+    }
+  }
+  v4h_text(ctx);
+}
+
+// SESSION_UNKNOWN — the peer could not open a sealed frame of ours: it has no
+// session with that id (it restarted). The row requires the group tag and a
+// paired sender; the tag must be of the peer's own mesh. sessionUnknownHintReceived
+// closes only the live session the hint names, for a sequence this device
+// sealed in it, at most once per peer per 10 s, and opens a new one
+// (System_ESPNow_PeerRestartCore.h).
+static void v4h_session_unknown(const V4RxCtx& ctx) {
+  if (ctx.payloadLen != sizeof(V4PayloadSessionUnknown)) return;
+  if (memcmp(ctx.h->origin, ctx.recv_info->src_addr, 6) != 0) return;  // link-local only
+  if (!peerRestartSignalScoped(ctx.isSessionEncrypted, ctx.h->meshFingerprint,
+                               fingerprintForPeer(ctx.h->origin))) return;  // another mesh's tag
+  V4PayloadSessionUnknown hint;
+  memcpy(&hint, ctx.payload, sizeof(hint));
+  (void)sessionUnknownHintReceived(ctx.recv_info->src_addr, &hint);
+}
+
 // CMD — deferred to task via gEspNow->deferredCmd* fields (one in flight).
 // Auth/validation runs later in v4_handle_cmd() on the espnow task.
 static void v4h_cmd(const V4RxCtx& ctx) {
@@ -5056,6 +5117,10 @@ static void v4h_bond_heartbeat(const V4RxCtx& ctx) {
   uint32_t oldSettingsHash = gEspNow->bondPeerSettingsHash;
 
   gEspNow->bondPeerBootCounter = hb->bootCounter;
+  // Seen inside the live session: the partner's boot counter becomes the
+  // reference its next BOOT notice is compared with (recorded only; a
+  // heartbeat never ends a session). System_ESPNow_PeerRestartCore.h.
+  sessionPeerBootSeen(ctx.recv_info->src_addr, hb->bootCounter);
   gEspNow->bondPeerSettingsHash = hb->settingsHash;
   gEspNow->bondPeerUptime = hb->uptimeSec;
 
@@ -7473,13 +7538,20 @@ static const V4OpcodeEntry kV4HandlerTable[] = {
   // REQ_PAIRED — handler verifies Ed25519 sig against the peer's stored
   // long-term pubkey (same trust path as SESSION_OPEN/CONFIRM).
   { ESPNOW_V4_TYPE_SESSION_REKEY,    0,                                                    v4hSessionRekey       },
+  // SESSION_UNKNOWN: "I have no session with that id" (the sender of a sealed
+  // frame learns the receiver restarted). It can only be group-signed (the
+  // receiver has no session to seal it in), so REQ_AUTHENTICATED; REQ_PAIRED
+  // because only a paired peer holds a session with us. The handler closes
+  // nothing but the live session it names, and only for a sequence this
+  // device sealed in it (System_ESPNow_PeerRestartCore.h).
+  { ESPNOW_V4_TYPE_SESSION_UNKNOWN,  V4_OPC_FLAG_REQ_AUTHENTICATED | V4_OPC_FLAG_REQ_PAIRED, v4h_session_unknown   },
   // TIME_SYNC can move the device clock: only a paired sender over its own
   // session reaches the handler (System_ESPNow_MeshTime.cpp), which then asks
   // whether that sender is the master named here and whether this device has
   // a better source. Not bond-gated: mesh time is a paired-mesh feature.
   { ESPNOW_V4_TYPE_TIME_SYNC,        V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, v4hTimeSync           },
-  // TEXT/BOOT: every legitimate sender seals (v4_send_text, meshSendBootToPeers
-  // → v4_send_payload_smart, encrypt-or-fail) or signs (v4_broadcast_text →
+  // TEXT/BOOT: every legitimate sender seals (v4_send_text → v4_send_payload_smart,
+  // encrypt-or-fail) or signs (v4_broadcast_text, meshSendBootToPeers →
   // BROADCAST_AUTH) once a mesh key exists, so a plaintext frame on a keyed
   // device is a spoof: it can carry any origin MAC behind a non-secret CRC16
   // via the fingerprint-0 compatibility path. Plaintext stays accepted only
@@ -7487,7 +7559,7 @@ static const V4OpcodeEntry kV4HandlerTable[] = {
   // not a registry name, and the drain posts no text_rx event for it. No
   // REQ_PAIRED: flooded broadcasts and 2-hop members are unpaired senders.
   { ESPNOW_V4_TYPE_TEXT,             V4_OPC_FLAG_REQ_AUTH_WHEN_KEYED,                      v4h_text              },
-  { ESPNOW_V4_TYPE_BOOT,             V4_OPC_FLAG_REQ_AUTH_WHEN_KEYED,                      v4h_text              },  // boot/online notice; v4h_text tags it MSG_SYSTEM_EVENT
+  { ESPNOW_V4_TYPE_BOOT,             V4_OPC_FLAG_REQ_AUTH_WHEN_KEYED,                      v4h_boot              },  // boot/online notice: ends a stale session, then v4h_text tags it MSG_SYSTEM_EVENT
   // Multi-hop transport. Both carry the mesh group-key HMAC and NOTHING else —
   // REQ_AUTHENTICATED is the whole trust check, and it is the right one: holding
   // the group key is exactly what "member of this mesh" means. NOT REQ_PAIRED,
@@ -8080,11 +8152,18 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
   if (h->flags & ESPNOW_V4_FLAG_SESSION_FRAME) {
     SessionState* s = sessionFindBySessionId(h->sessionId, recv_info->src_addr);
     if (!s || (s->state != SESSION_ACTIVE && s->state != SESSION_REKEYING)) {
+      // The sender still holds a session this device does not (it restarted,
+      // or dropped the session): tell it once, so it opens a new one now
+      // instead of after two of its sends time out (SESSION_UNKNOWN, rules in
+      // System_ESPNow_PeerRestartCore.h). The frame itself stays unopened and
+      // unacknowledged.
+      const bool hinted = sessionUnknownFrameSeen(recv_info->src_addr, h);
       WARN_ESPNOWF("[V4_RX] SESSION_FRAME no active session for sessionId=%u "
-                   "from " MAC_FMT " — dropping (frag %u/%u)",
+                   "from " MAC_FMT " — dropping (frag %u/%u)%s",
                    (unsigned)h->sessionId,
                    MAC_ARGS(recv_info->src_addr),
-                   h->fragIndex + 1, h->fragCount);
+                   h->fragIndex + 1, h->fragCount,
+                   hinted ? "; told the sender to open a new session" : "");
       return true;
     }
     uint16_t plainLen = 0;
@@ -12118,8 +12197,39 @@ void meshSendEnvelopeToPeers(const String& envelope) {
 // Boot/online notice — its OWN V4 type so the receiver files it as a system
 // event (MSG_SYSTEM_EVENT), not a chat bubble. (It used to ride
 // ESPNOW_V4_TYPE_TEXT, so every reboot showed up as a chat message on peers.)
+//
+// Group-signed (BROADCAST_AUTH, ttl 1) to each paired peer this device holds
+// no live session with, since 2026-11-18, no longer sealed: a device that just
+// started has no sessions, and a sealed notice had to open one first, so a
+// peer that still held the session from before the restart kept sealing into
+// it until its sends timed out (bench 2026-11-18). Signed, it arrives at once
+// and that peer ends the stale session (v4h_boot,
+// System_ESPNow_PeerRestartCore.h). Signed is authenticated, not encrypted:
+// anyone in range reads the name, boot counter and time it holds (the
+// group-signed mesh heartbeat already shows the name and uptime; the boot
+// counter is new on the air).
+// Sealed as before (bootNoticeSendMode) to a peer this device still holds a
+// live session with (ESP-NOW was closed and opened again: the sessions stayed
+// in RAM and the peer's is good, so the notice must not end it), and when no
+// group key for the peer's mesh is held yet (a signed frame would go out
+// plaintext and be refused) or the envelope does not fit a signed frame.
 void meshSendBootToPeers(const String& envelope) {
-  meshBroadcastEnvelopeTyped(envelope, ESPNOW_V4_TYPE_BOOT);
+  if (!gEspNow || !gEspNow->initialized || !gMeshPeers) return;
+  const uint8_t* data = (const uint8_t*)envelope.c_str();
+  const uint16_t len = (uint16_t)envelope.length();
+  const uint32_t msgId = generateMessageId();
+  for (int i = 0; i < gMeshPeerSlots; i++) {
+    if (!gMeshPeers[i].isActive || isSelfMac(gMeshPeers[i].mac)) continue;
+    const uint8_t* mac = gMeshPeers[i].mac;
+    const uint16_t fp = fingerprintForPeer(mac);
+    const MeshDerivedKeys* mk = fp ? meshKeysFindByFingerprint(fp) : nullptr;
+    if (bootNoticeSendMode(sessionLiveWithPeer(mac), mk && mk->valid,
+                           len <= ESPNOW_V4_MAX_BROADCAST_AUTHED_PLAINTEXT) == BootNoticeSend::Signed) {
+      v4_send_frame(mac, ESPNOW_V4_TYPE_BOOT, ESPNOW_V4_FLAG_BROADCAST_AUTH, msgId, data, len, 1);
+    } else {
+      v4_send_payload_smart(mac, ESPNOW_V4_TYPE_BOOT, 0, msgId, data, len, 3);
+    }
+  }
 }
 
 // Build a JSON boot notification string

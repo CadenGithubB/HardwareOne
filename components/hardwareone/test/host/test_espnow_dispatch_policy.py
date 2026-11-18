@@ -112,6 +112,35 @@ def main():
     queue_entry = extract_block(header, 'struct TextQueueEntry') + ';'
     origin_known = extract_block(source, 'static bool espnowOriginIsKnown(')
     text_handler = extract_block(source, 'static void v4h_text(')
+    # The BOOT row's handler (2026-11-18) runs for real when the tree has it:
+    # it hands an authenticated notice from the peer itself to the session
+    # rule (a recording double here; espnow_peer_restart_tests runs the rules)
+    # and then files it through v4h_text.
+    real_handlers = ['v4h_text']
+    if 'static void v4h_boot(' in source:
+        assert source.count('static void v4h_boot(') == 1, 'one definition required: v4h_boot'
+        # The production rule header (peerRestartSignalScoped), dependency-free;
+        # inlined because the unit is compiled alone.
+        core = read('System_ESPNow_PeerRestartCore.h').replace('#pragma once', '')
+        text_handler += ('\n\n' + core + '\n'
+                         'static bool bootNoticeCounter(const uint8_t*, uint16_t, uint32_t* out) {\n'
+                         '  *out = 7;\n  return true;\n}\n'
+                         'static PeerBootVerdict sessionPeerBootNotice(const uint8_t*, bool, uint32_t) {\n'
+                         '  ++gBootRuleCalls;\n  return static_cast<PeerBootVerdict>(gBootVerdict);\n}\n'
+                         '[[maybe_unused]] static void sessionPeerBootSeen(const uint8_t*, uint32_t) {\n'
+                         '  ++gBootSeenCalls;\n}\n'
+                         + extract_block(source, 'static void v4h_boot('))
+        real_handlers.append('v4h_boot')
+    # The SESSION_UNKNOWN row's handler runs for real when the tree has it; the
+    # rule behind it is a recording double (espnow_peer_restart_tests runs it).
+    if 'static void v4h_session_unknown(' in source:
+        assert source.count('static void v4h_session_unknown(') == 1, 'one definition required'
+        text_handler += ('\n\n' + extract_block(wire, 'struct __attribute__((packed)) V4PayloadSessionUnknown')
+                         + ';\n'
+                         'static int sessionUnknownHintReceived(const uint8_t*, const V4PayloadSessionUnknown*) {\n'
+                         '  ++gHintRuleCalls;\n  return 0;\n}\n'
+                         + extract_block(source, 'static void v4h_session_unknown('))
+        real_handlers.append('v4h_session_unknown')
     drain = 'static void drainTextQueueForTest() ' + extract_block(source, '// 11. Drain text message queue')
     # A drain that formats system notices calls formatEspNowSystemNotice;
     # test_espnow_system_notice.py runs the real one, a double does here.
@@ -142,7 +171,7 @@ def main():
     assert handlers, 'no handler rows found in kV4HandlerTable'
     assert 'v4h_text' in handlers, 'the TEXT row must name v4h_text'
     stubs = '\n'.join(f'static void {name}(const V4RxCtx& ctx) {{ noteHandler("{name}", ctx); }}'
-                      for name in handlers if name != 'v4h_text')
+                      for name in handlers if name not in real_handlers)
     enum_block = extract_block(wire, 'enum EspNowV4Type')
     opcodes = re.findall(r'^\s*ESPNOW_V4_TYPE_(\w+)\s*=', enum_block, re.MULTILINE)
     assert opcodes, 'no opcode symbols found in enum EspNowV4Type'
