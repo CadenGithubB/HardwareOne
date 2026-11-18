@@ -801,6 +801,31 @@ static void testFingerprintArg() {
         masterLeft.find("no mesh time") == std::string::npos);
 }
 
+// A bond worker's stream switches (BOND_STREAM_CTRL), kept per sensor until
+// the task applies them: two frames in one loop both count (review
+// 2026-11-18: a request for ToF and IMU used to start IMU only).
+static void testStreamCtrlQueue() {
+  StreamCtrlQueue q = {};
+  uint16_t on = 0xFFFF, off = 0xFFFF;
+  streamCtrlTake(q, &on, &off);
+  CHECK(on == 0 && off == 0);
+  streamCtrlPut(q, REMOTE_SENSOR_TOF, true);
+  streamCtrlPut(q, REMOTE_SENSOR_IMU, true);
+  streamCtrlPut(q, REMOTE_SENSOR_GPS, false);
+  streamCtrlPut(q, REMOTE_SENSOR_MAX, true);  // not a sensor here: dropped
+  streamCtrlPut(q, 200, false);
+  streamCtrlTake(q, &on, &off);
+  CHECK(on == (sensorBit(REMOTE_SENSOR_TOF) | sensorBit(REMOTE_SENSOR_IMU)) && off == sensorBit(REMOTE_SENSOR_GPS));
+  CHECK(q.pending == 0 && q.on == 0);
+  // For one sensor the last switch wins.
+  streamCtrlPut(q, REMOTE_SENSOR_TOF, true);
+  streamCtrlPut(q, REMOTE_SENSOR_TOF, false);
+  streamCtrlPut(q, REMOTE_SENSOR_IMU, false);
+  streamCtrlPut(q, REMOTE_SENSOR_IMU, true);
+  streamCtrlTake(q, &on, &off);
+  CHECK(on == sensorBit(REMOTE_SENSOR_IMU) && off == sensorBit(REMOTE_SENSOR_TOF));
+}
+
 int main() {
   testFingerprintArg();
   testSensorTable();
@@ -811,6 +836,7 @@ int main() {
   testTextCheck();
   testTargetAndReasons();
   testEndToEnd();
+  testStreamCtrlQueue();
   std::printf("espnow_sensor_core_tests: %u checks passed\n", gChecks);
   return 0;
 }

@@ -1,18 +1,22 @@
 // System_ESPNow_ForwardCore.h - rules of forwarding a bond partner's data to the mesh master
 //
-// A bond worker (X) sends its readings, battery state and events to its bond
-// master (B) only. B may forward them to the mesh master (M) named on B: a
+// A bond worker (X) sends its readings, battery state, events and sensor
+// status to its bond master (B) only. B may forward them to the master named
+// on B, and only when that master is paired in B's primary mesh (M): a
 // setting on B (bondforward, off by default). B announces the link in its own
 // frame, FORWARD_LINK (155), and M answers; only then are X's frames sent on,
-// as ordinary SENSOR_ENVELOPE / POWER_STATUS / EVENT_PUSH frames from B whose
-// reserved link byte (and, for readings and events, a reserved flag bit)
-// says "this is my bond partner's". On M the partner is its own sender, kept
-// under (partner, via B), with its own counters.
+// as ordinary SENSOR_ENVELOPE / POWER_STATUS / EVENT_PUSH / SENSOR_STATUS
+// frames from B whose reserved link byte (and, for readings and events, a
+// reserved flag bit) says "this is my bond partner's". On M the partner is its
+// own sender, kept under (partner, via B), with its own counters. M may ask
+// for X's readings as from any sender (SENSOR_REQ with the link byte, to B);
+// B turns the request into its own bond-link control of X's sensors.
 //
 // This header has the rules only: the 96-byte announcement frame, whether B
-// forwards and why not, B's state per receiving master, M's link table entry
-// and how announcements, withdrawals and forwarded frames are judged. Pure
-// logic on caller-owned state: no heap, no OS, no logging
+// forwards and why not, B's state per receiving master, M's link table entry,
+// how announcements, withdrawals and forwarded frames are judged, and how B
+// takes a sensor request for X. Pure logic on caller-owned state: no heap, no
+// OS, no logging
 // (test/host/test_espnow_forward_core.cpp). The owners are
 // System_ESPNow_BondForward.cpp (B) and System_ESPNow_ForwardRx.cpp (M).
 #pragma once
@@ -60,9 +64,12 @@ constexpr uint8_t kStreamIdEvents  = REMOTE_SENSOR_MAX + 1;  // 12
 constexpr uint8_t kStreamIdCount   = REMOTE_SENSOR_MAX + 2;
 constexpr uint16_t kResumeAll = (uint16_t)((1u << kStreamIdCount) - 1u);
 static_assert(kStreamIdCount <= 16, "the resume mask holds every stream");
+// The sensor status frame (which sensors the partner has and streams): part
+// of the readings stream, for no sensor in particular, never a resume.
+constexpr uint8_t kStreamIdStatus  = kStreamIdCount;          // 13
 
 constexpr uint8_t streamBitOf(uint8_t streamId) {
-  return streamId < REMOTE_SENSOR_MAX ? kStreamReadings
+  return streamId < REMOTE_SENSOR_MAX || streamId == kStreamIdStatus ? kStreamReadings
        : (streamId == kStreamIdBattery ? kStreamBattery : (streamId == kStreamIdEvents ? kStreamEvents : 0));
 }
 
@@ -73,6 +80,8 @@ constexpr uint16_t kSensorMaskDefault =
 
 // The streams B forwards to a receiving master: readings to the primary only
 // (B's own rule for readings switched on by hand), battery and events to both.
+// Both must be paired in B's primary mesh (inPrimaryMesh): a bond master in
+// several meshes forwards to no other mesh.
 constexpr uint8_t kTargetPrimary = 0;
 constexpr uint8_t kTargetBackup  = 1;
 constexpr uint8_t streamsForTarget(uint8_t kind) {
@@ -116,7 +125,9 @@ constexpr uint8_t kResultBadPartner  = 4;
 constexpr uint8_t kResultKeyMismatch = 5;
 constexpr uint8_t kResultFull        = 6;
 constexpr uint8_t kResultStale       = 7;
-constexpr uint8_t kResultNotAllowed  = 8;
+// 8 is never sent (it was "not allowed" while the mesh master kept a list of
+// the devices that may forward to it, removed before any release); a bond
+// master reads it as any refusal it does not know.
 constexpr uint8_t kResultNameTaken   = 9;
 constexpr uint8_t kResultCount       = 10;
 
@@ -149,11 +160,16 @@ inline void packLinkFrame(uint8_t out[kLinkFrameLen], const LinkFrame& f) {
   memcpy(out + 48, f.partnerName, kPartnerNameLen);
 }
 
-// False for a payload shorter than the frame or an op this firmware does not
-// know. A longer payload is read up to the frame's length.
+// False for a payload shorter than the frame, an op this firmware does not
+// know, or an announcement of link number 0. A longer payload is read up to
+// the frame's length.
 inline bool parseLinkFrame(const uint8_t* in, size_t len, LinkFrame& f) {
   if (!in || len < kLinkFrameLen) return false;
   if (in[0] < kOpAnnounce || in[0] > kOpAnswer) return false;
+  // An announcement names a link: its number is never 0, which marks "not
+  // forwarded" in a frame (and in a sensor request: a request for the
+  // device's own sensors).
+  if (in[0] == kOpAnnounce && in[1] == 0) return false;
   f.op = in[0];
   f.linkGen = in[1];
   f.viaBootTag = (uint16_t)(in[2] | ((uint16_t)in[3] << 8));
@@ -176,7 +192,6 @@ inline const char* resultKey(uint8_t result) {
     case kResultKeyMismatch: return "key_mismatch";
     case kResultFull:        return "full";
     case kResultStale:       return "stale";
-    case kResultNotAllowed:  return "not_allowed";
     case kResultNameTaken:   return "name_taken";
     default:                 return "refused";
   }
@@ -192,7 +207,6 @@ inline const char* resultText(uint8_t result) {
     case kResultKeyMismatch: return "it has the partner paired under another key";
     case kResultFull:        return "it already keeps the links of 16 devices";
     case kResultStale:       return "the announcement was older than one it already had";
-    case kResultNotAllowed:  return "it does not accept forwarded data from this device (espnowforwardfrom there)";
     case kResultNameTaken:   return "the partner's name is taken by another device there";
     default:                 return "for a reason this firmware does not know";
   }
@@ -223,6 +237,7 @@ enum class WhyNot : uint8_t {
   IsMaster,         // this device is the acting mesh master: X's data is kept here
   NoMaster,         // no master is named on this device
   MasterNotPaired,  // ... none of them is paired
+  NotPrimaryMesh,   // ... none of them is paired in this device's primary mesh
   TargetIsPartner,  // the named master is the bond partner itself (that target is skipped)
   NoSession,        // the master has no session with this device
   NotAccepted,      // announced, no answer yet
@@ -246,6 +261,7 @@ inline const char* whyNotKey(WhyNot why) {
     case WhyNot::IsMaster:        return "is_master";
     case WhyNot::NoMaster:        return "no_master";
     case WhyNot::MasterNotPaired: return "master_not_paired";
+    case WhyNot::NotPrimaryMesh:  return "not_primary_mesh";
     case WhyNot::TargetIsPartner: return "target_is_partner";
     case WhyNot::NoSession:       return "no_session";
     case WhyNot::NotAccepted:     return "not_accepted";
@@ -270,6 +286,7 @@ inline const char* whyNotText(WhyNot why) {
     case WhyNot::IsMaster:        return "this device is the mesh master: the partner's data is kept here";
     case WhyNot::NoMaster:        return "no master is named on this device (espnowmasterfingerprint)";
     case WhyNot::MasterNotPaired: return "the master named on this device is not paired with it";
+    case WhyNot::NotPrimaryMesh:  return "the master named here is paired in another mesh than this device's primary mesh";
     case WhyNot::TargetIsPartner: return "the master named here is the bond partner itself";
     case WhyNot::NoSession:       return "the master has no session with this device yet";
     case WhyNot::NotAccepted:     return "the master has not accepted yet";
@@ -321,6 +338,7 @@ struct DecideInputs {
   uint8_t meshRole;
   bool    masterNamed;     // a master or backup master fingerprint is set
   uint8_t targetsPaired;   // named masters that are paired (0 to 2)
+  uint8_t targetsInPrimary;// ... and paired in this device's primary mesh
 };
 
 inline WhyNot forwardDecide(const DecideInputs& in) {
@@ -331,8 +349,26 @@ inline WhyNot forwardDecide(const DecideInputs& in) {
   if (!espnowsensor::roleSends(in.meshRole)) return WhyNot::IsMaster;
   if (!in.masterNamed) return WhyNot::NoMaster;
   if (in.targetsPaired == 0) return WhyNot::MasterNotPaired;
+  if (in.targetsInPrimary == 0) return WhyNot::NotPrimaryMesh;
   return WhyNot::Forwards;
 }
+
+// ---- The primary mesh ----------------------------------------------------------
+// A device may be in up to four meshes (gSettings.meshes). Its primary mesh is
+// the default one (the enabled slot flagged isDefault, else the first enabled
+// slot, else slot 0, which the single-mesh settings fill). Forwarded data goes
+// only to a master paired in that mesh: the other meshes never get it.
+inline uint8_t primaryMeshSlot(const bool* enabled, const bool* isDefault, uint8_t slots) {
+  for (uint8_t i = 0; i < slots; ++i) {
+    if (enabled[i] && isDefault[i]) return i;
+  }
+  for (uint8_t i = 0; i < slots; ++i) {
+    if (enabled[i]) return i;
+  }
+  return 0;
+}
+// `peerSlot`: the mesh slot the master is paired in (-1: not paired).
+constexpr bool inPrimaryMesh(int peerSlot, uint8_t primarySlot) { return peerSlot >= 0 && peerSlot == (int)primarySlot; }
 
 // The one rule that keeps a bond worker's data off the mesh: a bond worker
 // sends readings, battery state, events and sensor status to its bond master
@@ -347,7 +383,7 @@ constexpr bool meshDataAllowed(bool bondWorker) { return !bondWorker; }
 // (DEBUG_MSG_SIZE - 1); kStatusLinesCap holds all of them.
 constexpr size_t kStatusJsonCap = 2560;
 constexpr size_t kStatusLineMax = 255;
-constexpr size_t kStatusLinesCap = 768;
+constexpr size_t kStatusLinesCap = 1024;  // four lines
 
 // ---------------------------------------------------------------------------
 // B's standing link: the partner it names, that partner's key, and the bond
@@ -604,6 +640,289 @@ inline WhyNot targetWhyNot(const TargetState& t, uint16_t sessionIdNow, uint8_t 
 }
 
 // ---------------------------------------------------------------------------
+// The partner's sensor status, forwarded: SENSOR_STATUS (151), 16 bytes,
+// little endian (V4PayloadSensorStatus):
+//
+//   0  presentMask    bit i: sensor i is connected on the sender (here: X)
+//   4  streamingMask  bit i: the sender streams sensor i
+//   8  bootTag        the sender's boot tag (here: X's)
+//  10  fwdLink        0, or B's link number: X's status, forwarded by B
+//  11  reserved       5 bytes, 0
+//
+// The frame has no flag byte: the link byte alone marks it, as in the battery
+// frame. X sends it to B over the bond link as BOND_SENSOR_STATUS (185) with
+// the byte 0; B sends it on with the sensors it forwards only.
+// ---------------------------------------------------------------------------
+constexpr size_t kStatusFrameLen = 16;
+
+struct StatusFrame {
+  uint32_t presentMask;
+  uint32_t streamingMask;
+  uint16_t bootTag;
+  uint8_t  fwdLink;
+};
+
+inline void packStatusFrame(uint8_t out[kStatusFrameLen], const StatusFrame& f) {
+  memset(out, 0, kStatusFrameLen);
+  for (int i = 0; i < 4; ++i) {
+    out[i] = (uint8_t)(f.presentMask >> (8 * i));
+    out[4 + i] = (uint8_t)(f.streamingMask >> (8 * i));
+  }
+  out[8] = (uint8_t)(f.bootTag & 0xFF);
+  out[9] = (uint8_t)(f.bootTag >> 8);
+  out[10] = f.fwdLink;
+}
+
+inline bool parseStatusFrame(const uint8_t* in, size_t len, StatusFrame& f) {
+  if (!in || len < kStatusFrameLen) return false;
+  f.presentMask = 0;
+  f.streamingMask = 0;
+  for (int i = 0; i < 4; ++i) {
+    f.presentMask |= (uint32_t)in[i] << (8 * i);
+    f.streamingMask |= (uint32_t)in[4 + i] << (8 * i);
+  }
+  f.bootTag = (uint16_t)(in[8] | ((uint16_t)in[9] << 8));
+  f.fwdLink = in[10];
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// A sensor request for the partner (SENSOR_REQ, 153, with its link byte set).
+// The mesh master asks for X's readings as it asks any sender: subscribe with
+// a lease, a one-shot, unsubscribe. It addresses B (the via) with B's link
+// number in byte 14 of the request (V4PayloadSensorReq.fwdLink). X never
+// takes a request from a mesh master (meshDataAllowed): B takes it, when
+// forwarding is on and the link stands, and turns it into its own bond-link
+// control of X's sensors (BOND_STREAM_CTRL on / off); the readings come back
+// through the forwarding. Only the master B forwards readings to may ask, and
+// only for sensors B forwards.
+// ---------------------------------------------------------------------------
+constexpr uint8_t kReqSubscribe   = 0;
+constexpr uint8_t kReqUnsubscribe = 1;
+constexpr uint8_t kReqOneshot     = 2;
+// A one-shot holds X's sensor on this long at least: two hops, and X's first
+// reading after the switch.
+constexpr uint32_t kReqOneshotHoldMs = 3000;
+
+enum class ReqVerdict : uint8_t {
+  Apply = 0,
+  Off,               // bondforward is off here
+  NotBondMaster,     // bond mode off, no paired partner, or this device is the worker
+  NoLink,            // no standing link (or a partner change runs)
+  OldLink,           // the request names another link number
+  NotPrimaryMaster,  // the sender is not the master this device forwards readings to (accepted)
+  BadMode,           // a mode this firmware does not know
+  NotForwarded,      // none of the sensors asked for is forwarded (bondforward sensors)
+  PartnerOffline,    // the partner is not connected and synced: nothing can be switched
+  Count
+};
+constexpr size_t kReqVerdictCount = (size_t)ReqVerdict::Count;
+
+inline const char* reqVerdictKey(ReqVerdict v) {
+  switch (v) {
+    case ReqVerdict::Apply:            return "applied";
+    case ReqVerdict::Off:              return "off";
+    case ReqVerdict::NotBondMaster:    return "not_bond_master";
+    case ReqVerdict::NoLink:           return "no_link";
+    case ReqVerdict::OldLink:          return "old_link";
+    case ReqVerdict::NotPrimaryMaster: return "not_primary_master";
+    case ReqVerdict::BadMode:          return "bad_mode";
+    case ReqVerdict::NotForwarded:     return "not_forwarded";
+    case ReqVerdict::PartnerOffline:   return "partner_offline";
+    case ReqVerdict::Count:            break;
+  }
+  return "?";
+}
+
+inline const char* reqVerdictText(ReqVerdict v) {
+  switch (v) {
+    case ReqVerdict::Apply:            return "applied";
+    case ReqVerdict::Off:              return "forwarding is off (bondforward on)";
+    case ReqVerdict::NotBondMaster:    return "only a bond master with a paired partner takes requests for it";
+    case ReqVerdict::NoLink:           return "this device forwards nothing for its partner now";
+    case ReqVerdict::OldLink:          return "the request names an old link";
+    case ReqVerdict::NotPrimaryMaster: return "only the master this device forwards readings to may ask";
+    case ReqVerdict::BadMode:          return "the request's mode is not known";
+    case ReqVerdict::NotForwarded:     return "none of those sensors is forwarded (bondforward sensors)";
+    case ReqVerdict::PartnerOffline:   return "the partner is not connected";
+    case ReqVerdict::Count:            break;
+  }
+  return "?";
+}
+
+struct ReqInputs {
+  bool     settingOn;
+  bool     bondMaster;          // bond mode on, a paired partner, role master
+  bool     linkActive;          // a standing link, no partner change since
+  uint8_t  linkGen;
+  uint8_t  fwdLink;             // the request's link byte (not 0)
+  bool     fromAcceptedPrimary; // the sender is the primary target, accepted on its ACTIVE session, with readings
+  uint8_t  mode;
+  uint16_t mask;                // the sensors asked for
+  uint16_t forwardedMask;       // the sensors the target accepted
+  bool     partnerOnline;
+};
+
+// First match. An unsubscribe needs neither the sensors nor the partner: it
+// only ends leases (what is still on at X is switched off when it can be).
+inline ReqVerdict sensorReqDecide(const ReqInputs& in) {
+  if (!in.settingOn) return ReqVerdict::Off;
+  if (!in.bondMaster) return ReqVerdict::NotBondMaster;
+  if (!in.linkActive) return ReqVerdict::NoLink;
+  if (in.fwdLink != in.linkGen) return ReqVerdict::OldLink;
+  if (!in.fromAcceptedPrimary) return ReqVerdict::NotPrimaryMaster;
+  if (in.mode > kReqOneshot) return ReqVerdict::BadMode;
+  if (in.mode == kReqUnsubscribe) return ReqVerdict::Apply;
+  if (!(in.mask & in.forwardedMask)) return ReqVerdict::NotForwarded;
+  if (!in.partnerOnline) return ReqVerdict::PartnerOffline;
+  return ReqVerdict::Apply;
+}
+
+// B's leases on X's sensors, one per sensor. `started`: B switched the sensor
+// on at X for the lease, so the lease's end switches it off. A sensor X
+// streamed already (its user's choice, or B's own bondstream) is not started
+// by a lease and goes on after it. `onSession`: the bond session the "on" was
+// sent on; on a new session (X restarted, its streams are off) it is sent
+// again. `byUser`: the sensors B's user switched on at X by hand (bondstream,
+// the bond page) and not off since: a lease never starts or stops them.
+// `offOwed`: the sensors a lease started and whose end switches them off,
+// until the "off" went out (leaseOffSent): a failed "off" is sent again, as a
+// failed "on" is.
+struct ReqLeases {
+  uint16_t leased;
+  uint16_t started;
+  uint16_t byUser;
+  uint16_t offOwed;
+  uint32_t untilMs[REMOTE_SENSOR_MAX];
+  uint16_t onSession[REMOTE_SENSOR_MAX];
+};
+
+struct LeaseActs {
+  uint16_t on;   // send "on" for these sensors
+  uint16_t off;  // send "off" for these (they are owed until sent)
+};
+
+// A lease ends: when it started the sensor, the "off" is owed.
+inline uint16_t leaseEndOne(ReqLeases& l, uint16_t bit) {
+  const bool started = (l.started & bit) != 0;
+  l.leased = (uint16_t)(l.leased & ~bit);
+  l.started = (uint16_t)(l.started & ~bit);
+  if (!started) return 0;
+  l.offOwed = (uint16_t)(l.offOwed | bit);
+  return bit;
+}
+
+// A request that was decided Apply. `mask`: the sensors asked for that are
+// forwarded (an unsubscribe: any). `streaming`: the sensors X streams already
+// (its status) or B's user chose to stream there (its saved bondstream
+// settings); `l.byUser` counts as well. A sensor whose "off" is still owed
+// streams because of the lease that ended, not by anyone's choice: a new
+// lease takes it over (and sends "on" again, which costs nothing).
+inline LeaseActs leaseApply(ReqLeases& l, uint8_t mode, uint16_t mask, uint16_t streaming, uint32_t intervalMs,
+                            uint32_t leaseMs, uint32_t nowMs) {
+  LeaseActs a = { 0, 0 };
+  for (uint8_t i = 0; i < REMOTE_SENSOR_MAX; ++i) {
+    const uint16_t bit = espnowsensor::sensorBit(i);
+    if (!(mask & bit)) continue;
+    if (mode == kReqUnsubscribe) {
+      if (!(l.leased & bit)) continue;
+      a.off = (uint16_t)(a.off | leaseEndOne(l, bit));
+      continue;
+    }
+    uint32_t forMs = leaseMs;
+    if (mode == kReqOneshot) forMs = intervalMs > kReqOneshotHoldMs ? intervalMs : kReqOneshotHoldMs;
+    // A renewal sets the end anew (as a sender's own lease does). A one-shot
+    // never cuts a running subscription short.
+    const uint32_t until = nowMs + forMs;
+    if (!(l.leased & bit) || mode != kReqOneshot || (int32_t)(until - l.untilMs[i]) > 0) l.untilMs[i] = until;
+    l.leased = (uint16_t)(l.leased | bit);
+    const bool owed = (l.offOwed & bit) != 0;
+    l.offOwed = (uint16_t)(l.offOwed & ~bit);
+    if (!(l.started & bit) && !(l.byUser & bit) && (owed || !(streaming & bit))) {
+      l.started = (uint16_t)(l.started | bit);
+      a.on = (uint16_t)(a.on | bit);
+    }
+  }
+  return a;
+}
+
+// Leases that ran out: their sensors, when a lease started them, are
+// switched off.
+inline uint16_t leaseExpire(ReqLeases& l, uint32_t nowMs) {
+  uint16_t off = 0;
+  for (uint8_t i = 0; i < REMOTE_SENSOR_MAX; ++i) {
+    const uint16_t bit = espnowsensor::sensorBit(i);
+    if (!(l.leased & bit) || (int32_t)(nowMs - l.untilMs[i]) < 0) continue;
+    off = (uint16_t)(off | leaseEndOne(l, bit));
+  }
+  return off;
+}
+
+// Leases on sensors outside `keep` end at once: the sensor is no longer
+// forwarded (bondforward sensors), or the master that asked no longer gets
+// the readings (keep 0: it left the primary mesh, or became the partner).
+inline uint16_t leaseKeepOnly(ReqLeases& l, uint16_t keep) {
+  uint16_t off = 0;
+  for (uint8_t i = 0; i < REMOTE_SENSOR_MAX; ++i) {
+    const uint16_t bit = espnowsensor::sensorBit(i);
+    if ((l.leased & bit) && !(keep & bit)) off = (uint16_t)(off | leaseEndOne(l, bit));
+  }
+  return off;
+}
+
+// This device's user switched the sensor at X by hand (bondstream): on, it is
+// the user's stream now, and the lease's end leaves it on; off, the lease
+// ends with it (a stop by hand ends the stream whoever started it, and the
+// user's own "off" is the one a lease owed).
+inline void leaseByHand(ReqLeases& l, uint8_t sensor, bool on) {
+  if (sensor >= REMOTE_SENSOR_MAX) return;
+  const uint16_t bit = espnowsensor::sensorBit(sensor);
+  l.started = (uint16_t)(l.started & ~bit);
+  l.offOwed = (uint16_t)(l.offOwed & ~bit);
+  if (on) {
+    l.byUser = (uint16_t)(l.byUser | bit);
+  } else {
+    l.byUser = (uint16_t)(l.byUser & ~bit);
+    l.leased = (uint16_t)(l.leased & ~bit);
+  }
+}
+
+// Every lease ends (the link ended, forwarding was switched off, another
+// master is named). Returns the sensors a lease started (their "off" is owed).
+inline uint16_t leaseEndAll(ReqLeases& l) {
+  const uint16_t off = l.started;
+  l.offOwed = (uint16_t)(l.offOwed | l.started);
+  l.leased = 0;
+  l.started = 0;
+  return off;
+}
+
+// The "off" for `bit` went out.
+inline void leaseOffSent(ReqLeases& l, uint16_t bit) { l.offOwed = (uint16_t)(l.offOwed & ~bit); }
+
+// This device is no longer the bond master of the partner the leases were
+// on (another partner, the bond ended, the worker role): nothing is owed to
+// it any more, and its user's streams there are not this device's to keep.
+inline void leaseForgetPartner(ReqLeases& l) {
+  l.leased = 0;
+  l.started = 0;
+  l.offOwed = 0;
+  l.byUser = 0;
+}
+
+// The sensors a lease started whose "on" went over another bond session than
+// `sessionNow` (0: none now, nothing to send).
+inline uint16_t leaseResend(const ReqLeases& l, uint16_t sessionNow) {
+  if (sessionNow == 0) return 0;
+  uint16_t on = 0;
+  for (uint8_t i = 0; i < REMOTE_SENSOR_MAX; ++i) {
+    const uint16_t bit = espnowsensor::sensorBit(i);
+    if ((l.started & bit) && l.onSession[i] != sessionNow) on = (uint16_t)(on | bit);
+  }
+  return on;
+}
+
+// ---------------------------------------------------------------------------
 // M's link table: one entry per device that announced (the via). A bond is
 // 1:1, so a via holds one link. The entry keeps the last (boot tag, link
 // number) seen from the via, also after its link ended, so an announcement a
@@ -624,7 +943,6 @@ inline const char* linkStateKey(LState s) {
 constexpr uint32_t kQueryGapMs = 5000;
 constexpr uint32_t kConfirmedForMs = 1800000;  // a link not confirmed for 30 minutes is shown "not confirmed"
 constexpr uint8_t  kLinkSlots = 16;
-constexpr uint8_t  kAllowedMax = 4;
 
 struct ForwardLink {
   bool     inUse;
@@ -668,14 +986,18 @@ inline void linkNoteLast(ForwardLink& e, uint16_t bootTag, uint8_t gen) {
 }
 
 // The checks of an announcement that do not need the entry, first match
-// (0: none refuses). `self`: this device. `partnerPaired`: the partner is
-// paired with this device; `partnerKeyMatches`: under the announced key.
-// `nameTaken`: the partner is not paired here and the announced name is
-// another paired device's or this device's own.
+// (0: none refuses). Any paired device may announce (the receive table lets
+// only a paired device's session frames through): a bond pair is one device
+// shown as two, and its data is accepted by the same rule as the bond
+// master's own readings, a role that keeps data. What a bond master sends for
+// its partner is always shown "via" it and never merged with a direct record.
+// `self`: this device. `partnerPaired`: the partner is paired with this
+// device; `partnerKeyMatches`: under the announced key. `nameTaken`: the
+// partner is not paired here and the announced name is another paired
+// device's or this device's own.
 inline uint8_t announceCheck(const LinkFrame& f, const uint8_t via[6], const uint8_t self[6], bool receives,
-                             bool allowed, bool partnerPaired, bool partnerKeyMatches, bool nameTaken) {
+                             bool partnerPaired, bool partnerKeyMatches, bool nameTaken) {
   if (!receives) return kResultNotReceiver;
-  if (!allowed) return kResultNotAllowed;
   bool keyZero = true;
   for (size_t i = 0; i < kPartnerKeyLen; ++i) {
     if (f.partnerKey[i]) { keyZero = false; break; }
@@ -824,23 +1146,8 @@ constexpr bool recordReusable(uint8_t link, bool originPaired, bool viaPaired, b
 }
 
 // ---------------------------------------------------------------------------
-// The devices that may forward to this device (espnowforwardfrom): up to four
-// entries, comma separated, each a paired device's address and the first 8
-// bytes of the key it was paired under when it was added:
-// "AA:BB:CC:DD:EE:FF/0123456789ABCDEF" (hex in either case). A device is
-// allowed only while it is paired under that key: another identity paired
-// later under the same address (an address can be set on an ESP32) is not.
-// A text that is not such an entry is skipped.
+// Text helpers of the readers.
 // ---------------------------------------------------------------------------
-constexpr size_t kAllowKeyLen = 8;
-constexpr size_t kAllowEntryTextLen = 17 + 1 + 2 * kAllowKeyLen;               // 34
-constexpr size_t kAllowListTextCap = kAllowedMax * (kAllowEntryTextLen + 1);  // 140: the longest list, its commas and the NUL
-
-struct AllowEntry {
-  uint8_t mac[6];
-  uint8_t key[kAllowKeyLen];  // the first bytes of the device's Ed25519 key
-};
-
 inline int hexNibble(char c) {
   if (c >= '0' && c <= '9') return c - '0';
   if (c >= 'a' && c <= 'f') return c - 'a' + 10;
@@ -859,123 +1166,6 @@ inline bool macFromText(const char* text, size_t len, uint8_t out[6]) {
     out[i] = (uint8_t)((hi << 4) | lo);
   }
   return true;
-}
-
-// `text` of `len` bytes is exactly one entry "AA:BB:CC:DD:EE:FF/<16 hex>".
-inline bool allowEntryFromText(const char* text, size_t len, AllowEntry& out) {
-  if (!text || len != kAllowEntryTextLen || text[17] != '/') return false;
-  if (!macFromText(text, 17, out.mac)) return false;
-  for (size_t i = 0; i < kAllowKeyLen; ++i) {
-    const int hi = hexNibble(text[18 + 2 * i]);
-    const int lo = hexNibble(text[18 + 2 * i + 1]);
-    if (hi < 0 || lo < 0) return false;
-    out.key[i] = (uint8_t)((hi << 4) | lo);
-  }
-  return true;
-}
-
-inline size_t allowListParse(const char* text, AllowEntry out[kAllowedMax]) {
-  size_t n = 0;
-  if (!text) return 0;
-  const char* p = text;
-  while (*p && n < kAllowedMax) {
-    while (*p == ' ' || *p == ',') ++p;
-    const char* start = p;
-    while (*p && *p != ',') ++p;
-    size_t len = (size_t)(p - start);
-    while (len && start[len - 1] == ' ') --len;
-    AllowEntry e;
-    if (allowEntryFromText(start, len, e)) {
-      bool dup = false;
-      for (size_t k = 0; k < n; ++k) dup = dup || macSame(out[k].mac, e.mac);
-      if (!dup) out[n++] = e;
-    }
-  }
-  return n;
-}
-
-// The entry allows `mac` paired under `key` (its 32-byte key; nullptr: not
-// paired, never allowed).
-inline bool allowEntryMatches(const AllowEntry& e, const uint8_t mac[6], const uint8_t* key) {
-  return key && macSame(e.mac, mac) && memcmp(e.key, key, kAllowKeyLen) == 0;
-}
-
-inline bool allowListHas(const char* text, const uint8_t mac[6], const uint8_t* key) {
-  AllowEntry list[kAllowedMax];
-  const size_t n = allowListParse(text, list);
-  for (size_t i = 0; i < n; ++i) {
-    if (allowEntryMatches(list[i], mac, key)) return true;
-  }
-  return false;
-}
-
-// Writes the list as the setting holds it (upper case, comma separated).
-inline size_t allowListFormat(const AllowEntry* list, size_t n, char* out, size_t cap) {
-  static const char kHex[] = "0123456789ABCDEF";
-  if (!out || cap == 0) return 0;
-  size_t pos = 0;
-  out[0] = '\0';
-  for (size_t i = 0; i < n; ++i) {
-    if (pos + (i ? 1 : 0) + kAllowEntryTextLen + 1 > cap) break;
-    if (i) out[pos++] = ',';
-    for (int b = 0; b < 6; ++b) {
-      out[pos++] = kHex[list[i].mac[b] >> 4];
-      out[pos++] = kHex[list[i].mac[b] & 0x0F];
-      if (b < 5) out[pos++] = ':';
-    }
-    out[pos++] = '/';
-    for (size_t b = 0; b < kAllowKeyLen; ++b) {
-      out[pos++] = kHex[list[i].key[b] >> 4];
-      out[pos++] = kHex[list[i].key[b] & 0x0F];
-    }
-    out[pos] = '\0';
-  }
-  return pos;
-}
-
-// KeyUpdated: the device was listed under another key (it was paired again)
-// and is now listed under the one it has.
-enum class AllowEdit : uint8_t { Added, AlreadyThere, KeyUpdated, Full, Removed, NotThere };
-
-// Adds `mac` with its 32-byte `key` (add) or removes `mac` (whatever key it
-// was listed under) in `text`, and writes the new list to `out`
-// (`cap` >= kAllowListTextCap).
-inline AllowEdit allowListEdit(const char* text, const uint8_t mac[6], const uint8_t* key, bool add, char* out,
-                               size_t cap) {
-  AllowEntry list[kAllowedMax + 1];
-  size_t n = allowListParse(text, list);
-  size_t at = n;
-  for (size_t i = 0; i < n; ++i) {
-    if (macSame(list[i].mac, mac)) at = i;
-  }
-  AllowEdit result;
-  if (add) {
-    if (!key) {
-      result = AllowEdit::NotThere;  // only a paired device is added (the caller checks)
-    } else if (at < n) {
-      if (memcmp(list[at].key, key, kAllowKeyLen) == 0) {
-        result = AllowEdit::AlreadyThere;
-      } else {
-        memcpy(list[at].key, key, kAllowKeyLen);
-        result = AllowEdit::KeyUpdated;
-      }
-    } else if (n >= kAllowedMax) {
-      result = AllowEdit::Full;
-    } else {
-      memcpy(list[n].mac, mac, 6);
-      memcpy(list[n].key, key, kAllowKeyLen);
-      n++;
-      result = AllowEdit::Added;
-    }
-  } else if (at < n) {
-    for (size_t i = at; i + 1 < n; ++i) list[i] = list[i + 1];
-    n--;
-    result = AllowEdit::Removed;
-  } else {
-    result = AllowEdit::NotThere;
-  }
-  allowListFormat(list, n, out, cap);
-  return result;
 }
 
 // Two names compare equal ignoring ASCII case.
@@ -1000,6 +1190,13 @@ struct ForwardOrigin {
   uint8_t link;          // espnowfwd::kLink*
   bool    resumePending; // judge it as a stream start (the first frame since the link began)
   char    name[33];      // the origin's name to keep with the record
+};
+
+// Where a sensor request for a forwarded origin goes (espnowForwardRequestTarget).
+enum class ForwardTarget : uint8_t {
+  Found,
+  NoVia,   // the device named as the forwarder is not known
+  NoLink,  // no active link names the origin (of that device)
 };
 
 enum class ForwardResolve : uint8_t {

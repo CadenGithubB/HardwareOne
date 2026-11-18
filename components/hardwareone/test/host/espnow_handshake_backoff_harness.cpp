@@ -103,6 +103,7 @@ static constexpr uint8_t ESPNOW_V4_TYPE_BOND_CAP_REQ = 171;
 static constexpr uint8_t ESPNOW_V4_TYPE_BOND_SENSOR_DATA = 179;
 static constexpr uint8_t ESPNOW_V4_TYPE_BOND_POWER_STATUS = 180;
 static constexpr uint8_t ESPNOW_V4_TYPE_BOND_EVENT_PUSH = 182;
+static constexpr uint8_t ESPNOW_V4_TYPE_BOND_SENSOR_STATUS = 185;
 
 // Our address and the partner's.
 static uint8_t gSelf[6] = {0x02, 0x11, 0x22, 0x33, 0x44, 0x09};      // higher: initiator
@@ -594,11 +595,13 @@ static void caseSensorDataDropped() {
         (unsigned)pendingFrameCount(), gSessionOpens);
 }
 
-// A bond worker's battery state and events (180/182) are periodic too: the
-// sender waits and sends again; nothing is queued and nothing is started.
+// A bond worker's battery state, events and sensor status (180/182/185) are
+// periodic too: the sender waits and sends again; nothing is queued and
+// nothing is started.
 static void caseBondPowerEventsDropped() {
   const uint8_t frame[24] = {};
-  for (uint8_t type : { ESPNOW_V4_TYPE_BOND_POWER_STATUS, ESPNOW_V4_TYPE_BOND_EVENT_PUSH }) {
+  for (uint8_t type : { ESPNOW_V4_TYPE_BOND_POWER_STATUS, ESPNOW_V4_TYPE_BOND_EVENT_PUSH,
+                        ESPNOW_V4_TYPE_BOND_SENSOR_STATUS }) {
     resetWorld();
     addIdentity(kPartner);
     bondSendEncryptedAsync(kPartner, type, 0, ++gMsgId, frame, sizeof frame);

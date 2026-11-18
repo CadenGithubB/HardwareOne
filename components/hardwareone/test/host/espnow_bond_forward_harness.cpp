@@ -1,15 +1,18 @@
 // Host harness for the bond master's side of forwarding: the production code
 // of System_ESPNow_BondForward.cpp between BOND_FORWARD_HOST_BEGIN and
-// BOND_FORWARD_HOST_END (the tick, the answers and queries, the three forward
-// calls, 'bondforward', the status line and JSON), compiled as it is with the
+// BOND_FORWARD_HOST_END (the tick, the answers and queries, the forward calls
+// with the partner's sensor status, the mesh master's sensor requests for the
+// partner and their leases, 'bondforward', the status lines and JSON),
+// compiled as it is with the
 // production rules headers System_ESPNow_ForwardCore.h,
 // System_ESPNow_SensorCore.h and System_ESPNow_PowerEventCore.h and the
 // production WarnLimiter.
 //
 // Host boundaries, all in this file: the bond (mode, partner, role, its key,
 // the agreement, the hold epoch), the settings, the mesh role, the named
-// masters, the sessions (with their session ids), the radio (a recording
-// queue that can refuse), the console, the reply buffer and the lock.
+// masters and which mesh they are paired in, the sessions (with their session
+// ids), the radio (a recording queue that can refuse), the bond-link stream
+// control of the partner's sensors, the console, the reply buffer and the lock.
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
@@ -125,6 +128,39 @@ static int bfParseBool(const char* word) {
 }
 static uint8_t bfRole() { return gRole; }
 static void bfTargets(SensorReceiverTargets* out) { *out = gTargets; }
+// The named masters paired in another mesh than this device's primary one.
+static std::vector<std::string> gOtherMesh;
+static bool bfInPrimaryMesh(const uint8_t mac[6]) {
+  notUnderLock();
+  char text[18];
+  macToDisplay(mac, text, sizeof(text));
+  return std::find(gOtherMesh.begin(), gOtherMesh.end(), std::string(text)) == gOtherMesh.end();
+}
+// The bond-link control of the partner's sensors (BOND_STREAM_CTRL).
+struct Ctrl {
+  uint8_t sensor;
+  bool on;
+};
+static std::vector<Ctrl> gCtrl;
+static bool gCtrlFails = false;
+static bool bfStreamCtrl(uint8_t sensor, bool on) {
+  notUnderLock();
+  if (gCtrlFails) return false;
+  gCtrl.push_back(Ctrl{sensor, on});
+  return true;
+}
+static bool gPartnerOnline = true;
+static bool bfPartnerOnline() {
+  notUnderLock();
+  return gPartnerOnline;
+}
+// The saved 'bondstream' settings (what this device's user chose to stream
+// at the partner on every bond session).
+static uint16_t gSavedStreams = 0;
+static uint16_t bfSavedStreams() {
+  notUnderLock();
+  return gSavedStreams;
+}
 static uint16_t bfSessionId(const uint8_t mac[6]) {
   notUnderLock();
   const TestSession* s = sessionOf(mac);
@@ -163,6 +199,7 @@ static bool bfSendPower(const uint8_t mac[6], const uint8_t* payload, uint16_t l
   return true;
 }
 static bool bfSendEvent(const uint8_t mac[6], const uint8_t* payload, uint16_t len) { return bfQueue(132, mac, payload, len); }
+static bool bfSendStatus(const uint8_t mac[6], const uint8_t* payload, uint16_t len) { return bfQueue(151, mac, payload, len); }
 // The longest names a device can show (31 bytes, as bfName's callers keep them).
 static bool gLongNames = false;
 static void bfName(const uint8_t mac[6], char* out, size_t cap) {
@@ -306,6 +343,11 @@ static void resetAll() {
   gWatched = 0;
   gHeld = false;
   gLongNames = false;
+  gOtherMesh.clear();
+  gCtrl.clear();
+  gCtrlFails = false;
+  gPartnerOnline = true;
+  gSavedStreams = 0;
 }
 
 // Forwarding on, both masters accepted.
@@ -496,7 +538,8 @@ static void testAnnounceAndForward() {
   char json[espnowfwd::kStatusJsonCap];
   check(bondForwardStatusJson(json, sizeof(json)) > 0 && has(json, "{\"setting\":true,\"sensors\":[\"thermal\"") &&
         has(json, "\"forwards\":true,\"whyNot\":null,\"linkGen\":1,\"partner\":{\"mac\":\"02:A0:00:00:00:01\",\"name\":\"porch\"}") &&
-        has(json, "{\"kind\":\"primary\",\"mac\":\"02:C0:00:00:00:10\",\"name\":\"hub\",\"isPartner\":false,\"state\":\"accepted\","
+        has(json, "{\"kind\":\"primary\",\"mac\":\"02:C0:00:00:00:10\",\"name\":\"hub\",\"isPartner\":false,"
+                  "\"inPrimaryMesh\":true,\"state\":\"accepted\","
                   "\"result\":\"accepted\",\"streams\":[\"readings\",\"battery\",\"events\"],\"session\":true}") &&
         has(json, "\"forwarded\":{\"readings\":2,\"battery\":1,\"events\":1}") &&
         has(json, "\"partner_changed\":2,") && has(json, "\"sensor_off\":1") && has(json, "\"not_accepted\":1") &&
@@ -605,11 +648,11 @@ static void testSessionsAndChanges() {
             (linkFrames(kHub).empty() ? std::string("-") : std::to_string(linkFrames(kHub)[0].linkGen)) + ")");
   // Refused: said, retried after 10 minutes.
   gConsole.clear();
-  answer(kHub, espnowfwd::kOpAnnounce, espnowfwd::kResultNotAllowed, 4, kShed);
-  check(gConsole.size() == 1 && gConsole[0] == "[ESP-NOW] hub refused forwarding for shed: it does not accept forwarded data from "
-                                               "this device (espnowforwardfrom there)", "a refusal is said");
+  answer(kHub, espnowfwd::kOpAnnounce, espnowfwd::kResultNameTaken, 4, kShed);
+  check(gConsole.size() == 1 && gConsole[0] == "[ESP-NOW] hub refused forwarding for shed: the partner's name is taken by "
+                                               "another device there", "a refusal is said");
   run(1);
-  check(has(describe(""), "hub refused: it does not accept forwarded data from this device"), "bondforward says why");
+  check(has(describe(""), "hub refused: the partner's name is taken by another device there"), "bondforward says why");
   gSent.clear();
   run(598);
   check(linkFrames(kHub).empty(), "not retried within 10 minutes");
@@ -764,7 +807,7 @@ static void testReviewCases() {
   // the longest refusal, every count at its largest.
   resetAll();
   upAndAccepted();
-  answer(kSpare, espnowfwd::kOpAnnounce, espnowfwd::kResultNotAllowed, 1, kPorch,
+  answer(kSpare, espnowfwd::kOpAnnounce, espnowfwd::kResultNameTaken, 1, kPorch,
          espnowfwd::kStreamBattery | espnowfwd::kStreamEvents, 0);
   run(1);
   for (auto& stream : sBf.counts.notForwarded) {
@@ -772,6 +815,11 @@ static void testReviewCases() {
   }
   for (auto& n : sBf.counts.forwarded) n = 0xFFFFFFFFu;
   sBf.counts.answersIgnored = 0xFFFFFFFFu;
+  // ... and the mesh master's requests for the partner: every sensor leased,
+  // the longest reason, every count at its largest.
+  sBf.req.applied = sBf.req.refused = 0xFFFFFFFFu;
+  sBf.req.lastRefused = (uint8_t)espnowfwd::ReqVerdict::NotBondMaster;
+  sBf.req.leases.leased = (uint16_t)espnowsensor::kSensorMaskAll;
   gLongNames = true;
   char lines[espnowfwd::kStatusLinesCap];
   bondForwardStatusLines(lines, sizeof(lines));
@@ -781,20 +829,355 @@ static void testReviewCases() {
     split.emplace_back(p, nl ? (size_t)(nl - p) : std::strlen(p));
     p = nl ? nl + 1 : p + std::strlen(p);
   }
-  bool fit = split.size() == 3;
-  for (const auto& l : split) fit = fit && l.size() <= espnowfwd::kStatusLineMax && !l.empty() && l.back() != ' ';
-  check(fit && split[1].find("(refused: it does not accept forwarded data from this device (espnowforwardfrom there)).") !=
-                   std::string::npos &&
+  bool fit = split.size() == 4;
+  size_t longest = 0;
+  for (const auto& l : split) {
+    fit = fit && l.size() <= espnowfwd::kStatusLineMax && !l.empty() && l.back() != ' ';
+    longest = std::max(longest, l.size());
+  }
+  check(fit && split[1].find("(refused: the partner's name is taken by another device there).") != std::string::npos &&
             split[2].rfind("  Forwarded 4294967295 readings, 4294967295 battery frames, 4294967295 events; ", 0) == 0 &&
-            split[2].back() == '.',
+            split[2].back() == '.' &&
+            split[3] == "  Sensor requests for the partner: 4294967295 applied, 4294967295 refused "
+                        "(last: only a bond master with a paired partner takes requests for it); leased now: thermal, "
+                        "tof, imu, gps, input, fmradio, camera, microphone, rtc, presence, apds.",
         std::string("every bondstatus line is whole and fits one console message: ") + lines);
   char json[espnowfwd::kStatusJsonCap];
   const size_t len = bondForwardStatusJson(json, sizeof(json));
-  check(len > 0 && len < sizeof(json) && has(json, "\"answersIgnored\":4294967295}") && has(json, "\\\"long-device"),
+  check(len > 0 && len < sizeof(json) && has(json, "\"answersIgnored\":4294967295,") && has(json, "\\\"long-device") &&
+            has(json, "\"sensorRequests\":{\"applied\":4294967295,\"refused\":4294967295,\"lastRefused\":\"not_bond_master\","
+                      "\"leased\":[\"thermal\",") && has(json, "\"apds\"]}}"),
         "the longest forward object fits espnowfwd::kStatusJsonCap (" + std::to_string(len) + " bytes)");
   std::printf("longest forward object: %zu of %zu bytes; longest bondstatus line: %zu of %zu\n", len, sizeof(json),
-              std::max(std::max(split[0].size(), split[1].size()), split[2].size()), espnowfwd::kStatusLineMax);
+              longest, espnowfwd::kStatusLineMax);
   gLongNames = false;
+}
+
+
+// Owner decisions of 2026-11-18, the bond master's side.
+static size_t ctrlCount(uint8_t sensor, bool on) {
+  size_t n = 0;
+  for (const Ctrl& c : gCtrl) n += (c.sensor == sensor && c.on == on) ? 1 : 0;
+  return n;
+}
+static void request(const uint8_t from[6], uint8_t mode, uint32_t mask, uint32_t leaseMs, uint8_t fwdLink = 1,
+                    uint32_t intervalMs = 0) {
+  bondForwardSensorRequest(from, mode, mask, intervalMs, leaseMs, fwdLink);
+}
+static espnowfwd::StatusFrame statusFrame(const std::vector<uint8_t>& bytes) {
+  espnowfwd::StatusFrame f{};
+  if (!espnowfwd::parseStatusFrame(bytes.data(), bytes.size(), f)) std::abort();
+  return f;
+}
+
+static void testPrimaryMesh() {
+  // The backup master is paired in another mesh: it gets nothing, the master
+  // of the primary mesh gets everything.
+  resetAll();
+  gOtherMesh.push_back("02:C0:00:00:00:11");
+  gSetting = true;
+  run(3);
+  check(!linkFrames(kHub).empty() && linkFrames(kHub)[0].op == espnowfwd::kOpAnnounce, "the primary mesh's master hears the link");
+  for (const auto& f : linkFrames(kSpare)) check(f.op != espnowfwd::kOpAnnounce, "a master in another mesh is never announced to");
+  check(linkFrames(kSpare).size() == 1 && espnowfwd::macIsZero(linkFrames(kSpare)[0].partnerMac),
+        "it hears once per session that this device forwards nothing to it");
+  answer(kHub, espnowfwd::kOpAnnounce, espnowfwd::kResultAccepted, 1);
+  answer(kSpare, espnowfwd::kOpAnnounce, espnowfwd::kResultAccepted, 1, kPorch,
+         espnowfwd::kStreamBattery | espnowfwd::kStreamEvents, 0);  // an answer it was never asked for
+  run(1);
+  gSent.clear();
+  espnowsensor::PowerFrame pf{};
+  pf.counter = 1;
+  bondForwardPower(kPorch, pf);
+  check(count(152, kHub) == 1 && count(152, kSpare) == 0, "battery state only to the primary mesh's master");
+  check(describe("") == "OK: forwarding is on: porch's readings, battery state and events go to hub (accepted).",
+        "bondforward names only the primary mesh's master");
+  char json[espnowfwd::kStatusJsonCap];
+  check(bondForwardStatusJson(json, sizeof(json)) > 0 && has(json, "\"kind\":\"backup\"") &&
+        has(json, "\"isPartner\":false,\"inPrimaryMesh\":false"), "the JSON says the backup is in another mesh");
+  // The master moves to another mesh while accepted: the link is withdrawn
+  // there and nothing more goes to it.
+  gOtherMesh.push_back("02:C0:00:00:00:10");
+  gSent.clear();
+  run(1);
+  std::vector<espnowfwd::LinkFrame> hub = linkFrames(kHub);
+  check(hub.size() == 1 && hub[0].op == espnowfwd::kOpWithdraw && hub[0].linkGen == 1 &&
+        std::memcmp(hub[0].partnerMac, kPorch, 6) == 0, "a master that left the primary mesh hears the withdrawal");
+  reading(kPorch, REMOTE_SENSOR_GPS, 5, "{}");
+  check(count(154) == 0, "and gets no more readings");
+  check(describe("") == "OK: forwarding is on, but nothing is forwarded yet: the master named here is paired in another "
+                        "mesh than this device's primary mesh.", "with no master in the primary mesh, bondforward says why");
+  // Back in the primary mesh: announced again, with a new link number.
+  gOtherMesh.clear();
+  gSent.clear();
+  run(1);
+  hub = linkFrames(kHub);
+  check(!hub.empty() && hub.back().op == espnowfwd::kOpAnnounce && hub.back().linkGen == 2, "back: a new link");
+}
+
+static void testStatusAndRequests() {
+  const uint32_t tof = espnowsensor::sensorBit(REMOTE_SENSOR_TOF);
+  const uint32_t imu = espnowsensor::sensorBit(REMOTE_SENSOR_IMU);
+  const uint32_t input = espnowsensor::sensorBit(REMOTE_SENSOR_INPUT);
+  // The partner's sensor status before the master accepted: kept, sent on
+  // acceptance with the forwarded sensors only, the link byte and X's boot tag.
+  resetAll();
+  gSetting = true;
+  run(1);
+  espnowfwd::StatusFrame st{};
+  st.presentMask = tof | imu | input;
+  st.streamingMask = imu | input;
+  st.bootTag = 0xAAAA;
+  bondForwardStatus(kPorch, st);
+  check(count(151) == 0, "no status before the master accepted");
+  answer(kHub, espnowfwd::kOpAnnounce, espnowfwd::kResultAccepted, 1);
+  check(count(151, kHub) == 1, "the partner's status goes to the master on acceptance");
+  espnowfwd::StatusFrame got = statusFrame(gSent.back().bytes);
+  check(got.presentMask == (tof | imu) && got.streamingMask == imu && got.bootTag == 0xAAAA && got.fwdLink == 1,
+        "with the forwarded sensors only (input left out), X's boot tag and the link number");
+  answer(kSpare, espnowfwd::kOpAnnounce, espnowfwd::kResultAccepted, 1, kPorch,
+         espnowfwd::kStreamBattery | espnowfwd::kStreamEvents, 0);
+  check(count(151, kSpare) == 0, "never to the backup master (no readings there)");
+  // A refresh acceptance does not send it again; a new status does.
+  answer(kHub, espnowfwd::kOpAnnounce, espnowfwd::kResultAccepted, 1);
+  check(count(151) == 1, "an acceptance of a refresh sends nothing more");
+  st.streamingMask = tof;
+  bondForwardStatus(kPorch, st);
+  check(count(151, kHub) == 2 && statusFrame(gSent.back().bytes).streamingMask == tof, "a new status goes on at once");
+  // From another device than the link's partner: not sent on.
+  bondForwardStatus(kShed, st);
+  check(count(151) == 2, "another device's status is not filed under the link");
+
+  // Sensor requests. The accepted primary asks for ToF with a lease: this
+  // device switches ToF on at the partner over the bond link.
+  gCtrl.clear();
+  st.streamingMask = 0;
+  bondForwardStatus(kPorch, st);
+  request(kHub, espnowfwd::kReqSubscribe, tof, 30000);
+  check(gCtrl.size() == 1 && ctrlCount(REMOTE_SENSOR_TOF, true) == 1 && sBf.req.applied == 1,
+        "subscribe: ToF switched on at the partner");
+  request(kHub, espnowfwd::kReqSubscribe, tof, 30000);
+  check(gCtrl.size() == 1 && sBf.req.applied == 2, "a renewal switches nothing again");
+  // Its readings come back through the forwarding.
+  gSent.clear();
+  reading(kPorch, REMOTE_SENSOR_TOF, 1, "{\"mm\":250}");
+  check(count(154, kHub) == 1, "the partner's ToF readings are forwarded to the master");
+  // The lease ends: ToF off.
+  run(31);
+  check(ctrlCount(REMOTE_SENSOR_TOF, false) == 1, "the lease ran out: ToF switched off at the partner");
+  // Refusals, each counted and said once a minute.
+  gConsole.clear();
+  request(kSpare, espnowfwd::kReqSubscribe, tof, 30000);
+  check(sBf.req.refused == 1 && sBf.req.lastRefused == (uint8_t)espnowfwd::ReqVerdict::NotPrimaryMaster &&
+        gConsole.size() == 1 && has(gConsole[0], "Sensor request from spare for the bond partner refused: only the master "
+                                                 "this device forwards readings to may ask"),
+        "the backup master may not ask");
+  request(kHub, espnowfwd::kReqSubscribe, tof, 30000, 2);
+  check(sBf.req.refused == 2 && sBf.req.lastRefused == (uint8_t)espnowfwd::ReqVerdict::OldLink && gConsole.size() == 1,
+        "another link number: refused, said no more within the minute");
+  request(kHub, espnowfwd::kReqSubscribe, input, 30000);
+  check(sBf.req.lastRefused == (uint8_t)espnowfwd::ReqVerdict::NotForwarded, "input is not forwarded: refused");
+  request(kHub, 7, tof, 30000);
+  check(sBf.req.lastRefused == (uint8_t)espnowfwd::ReqVerdict::BadMode, "an unknown mode: refused");
+  gPartnerOnline = false;
+  request(kHub, espnowfwd::kReqSubscribe, tof, 30000);
+  check(sBf.req.lastRefused == (uint8_t)espnowfwd::ReqVerdict::PartnerOffline, "the partner offline: refused");
+  gPartnerOnline = true;
+  check(ctrlCount(REMOTE_SENSOR_TOF, true) == 1, "no refused request switched anything");
+  // A stream the partner runs already (its status says so) is not started by
+  // the lease and goes on after it.
+  st.streamingMask = imu;
+  bondForwardStatus(kPorch, st);
+  gCtrl.clear();
+  request(kHub, espnowfwd::kReqSubscribe, imu, 5000);
+  run(6);
+  check(gCtrl.empty(), "IMU streams already: neither on nor off");
+  // This device's user streams ToF (bondstream, saved): the lease's end leaves it on.
+  gSavedStreams = (uint16_t)tof;
+  request(kHub, espnowfwd::kReqSubscribe, tof, 5000);
+  run(6);
+  check(gCtrl.empty(), "the user's own stream: not touched by the lease");
+  gSavedStreams = 0;
+  // By hand during a lease: on makes it the user's; off ends the lease.
+  request(kHub, espnowfwd::kReqSubscribe, tof, 5000);
+  check(ctrlCount(REMOTE_SENSOR_TOF, true) == 1, "leased and switched on");
+  bondForwardStreamByHand(REMOTE_SENSOR_TOF, true);
+  run(6);
+  check(ctrlCount(REMOTE_SENSOR_TOF, false) == 0, "switched on by hand meanwhile: the lease's end leaves it on");
+  gCtrl.clear();
+  request(kHub, espnowfwd::kReqSubscribe, tof, 60000);
+  bondForwardStreamByHand(REMOTE_SENSOR_TOF, false);
+  check(sBf.req.leases.leased == 0, "stopped by hand: the lease ends with it");
+  // Unsubscribe; a one-shot.
+  gCtrl.clear();
+  request(kHub, espnowfwd::kReqSubscribe, tof, 60000);
+  request(kHub, espnowfwd::kReqUnsubscribe, tof, 0);
+  check(ctrlCount(REMOTE_SENSOR_TOF, true) == 1 && ctrlCount(REMOTE_SENSOR_TOF, false) == 1 && sBf.req.leases.leased == 0,
+        "unsubscribe: switched off at once");
+  gCtrl.clear();
+  request(kHub, espnowfwd::kReqOneshot, tof, 0, 1, 500);
+  run(2);
+  check(ctrlCount(REMOTE_SENSOR_TOF, true) == 1 && ctrlCount(REMOTE_SENSOR_TOF, false) == 0, "a one-shot holds 3 s");
+  run(2);
+  check(ctrlCount(REMOTE_SENSOR_TOF, false) == 1, "then switches off");
+  // The partner restarted (a new bond session): what a lease started is
+  // switched on again; an "on" that could not be sent is sent again.
+  gCtrl.clear();
+  sessionUp(kPorch, 0x7001);
+  request(kHub, espnowfwd::kReqSubscribe, tof, 60000);
+  check(ctrlCount(REMOTE_SENSOR_TOF, true) == 1, "on");
+  run(1);
+  check(ctrlCount(REMOTE_SENSOR_TOF, true) == 1, "not again on the same session");
+  sessionUp(kPorch, 0x7002);
+  run(1);
+  check(ctrlCount(REMOTE_SENSOR_TOF, true) == 2, "again on the partner's new session");
+  st.streamingMask = 0;
+  bondForwardStatus(kPorch, st);  // IMU no longer streams there
+  gCtrlFails = true;              // the queue refuses the "on"
+  request(kHub, espnowfwd::kReqSubscribe, imu, 60000);
+  gCtrlFails = false;
+  check(ctrlCount(REMOTE_SENSOR_IMU, true) == 0, "the 'on' could not be sent");
+  run(1);
+  check(ctrlCount(REMOTE_SENSOR_IMU, true) == 1, "it is sent again on the next tick");
+  // Forwarding switched off: every lease ends, what they started is switched off.
+  gCtrl.clear();
+  gSetting = false;
+  run(1);
+  check(ctrlCount(REMOTE_SENSOR_TOF, false) == 1 && sBf.req.leases.leased == 0, "forwarding off ends every lease");
+  request(kHub, espnowfwd::kReqSubscribe, tof, 60000);
+  check(sBf.req.lastRefused == (uint8_t)espnowfwd::ReqVerdict::Off, "and refuses new requests");
+  // A partner change ends the leases without telling the new partner anything.
+  resetAll();
+  upAndAccepted();
+  sessionUp(kPorch, 0x7101);
+  request(kHub, espnowfwd::kReqSubscribe, tof, 60000);
+  gCtrl.clear();
+  gBond.epoch = 9;
+  std::memcpy(gBond.partner, kShed, 6);
+  gBond.agreeState = espnowfwd::kAgreeUnknown;
+  run(1);
+  check(gCtrl.empty() && sBf.req.leases.leased == 0, "a new partner: the old leases end, nothing is sent to the new one");
+  // The JSON and the bondstatus line.
+  resetAll();
+  upAndAccepted();
+  request(kHub, espnowfwd::kReqSubscribe, tof, 60000);
+  request(kSpare, espnowfwd::kReqSubscribe, tof, 60000);
+  char json[espnowfwd::kStatusJsonCap];
+  check(bondForwardStatusJson(json, sizeof(json)) > 0 &&
+        has(json, "\"sensorRequests\":{\"applied\":1,\"refused\":1,\"lastRefused\":\"not_primary_master\",\"leased\":[\"tof\"]}}"),
+        std::string("the JSON: ") + json);
+  char lines[espnowfwd::kStatusLinesCap];
+  bondForwardStatusLines(lines, sizeof(lines));
+  check(has(lines, "\n  Sensor requests for the partner: 1 applied, 1 refused (last: only the master "
+                   "this device forwards readings to may ask); leased now: tof."), std::string("the lines: ") + lines);
+}
+
+// Review of 2026-11-18 (second look at decision 2): the "off" a lease owes
+// is sent again until it went out; the user's streams by hand; leases end
+// when their master leaves the primary mesh, another master is named, or
+// their sensor is no longer forwarded; bondforward names a master of the
+// primary mesh only.
+static void testLeaseReview() {
+  const uint32_t tof = espnowsensor::sensorBit(REMOTE_SENSOR_TOF);
+  const uint32_t imu = espnowsensor::sensorBit(REMOTE_SENSOR_IMU);
+  // A failed "off" (the partner out of range when the lease ran out) is sent
+  // again once the partner is back, also after the link ended.
+  resetAll();
+  upAndAccepted();
+  sessionUp(kPorch, 0x7201);
+  request(kHub, espnowfwd::kReqSubscribe, (uint32_t)(tof | imu), 5000);
+  check(ctrlCount(REMOTE_SENSOR_TOF, true) == 1 && ctrlCount(REMOTE_SENSOR_IMU, true) == 1,
+        "two sensors asked for: both switched on (one control each)");
+  gCtrl.clear();
+  gCtrlFails = true;
+  run(6);
+  check(gCtrl.empty() && sBf.req.leases.leased == 0 && sBf.req.leases.offOwed == (tof | imu),
+        "the lease ran out and the 'off' could not be sent: still owed");
+  gCtrlFails = false;
+  gPartnerOnline = false;
+  run(1);
+  check(gCtrl.empty(), "nothing is sent while the partner is away");
+  gPartnerOnline = true;
+  run(1);
+  check(ctrlCount(REMOTE_SENSOR_TOF, false) == 1 && ctrlCount(REMOTE_SENSOR_IMU, false) == 1 &&
+        sBf.req.leases.offOwed == 0, "the partner is back: the 'off' goes out");
+  run(2);
+  check(gCtrl.size() == 2, "once");
+  // After the link ended (forwarding off) the owed "off" still goes out.
+  request(kHub, espnowfwd::kReqSubscribe, tof, 60000);
+  gCtrl.clear();
+  gCtrlFails = true;
+  gSetting = false;
+  run(1);
+  check(gCtrl.empty() && sBf.req.leases.offOwed == tof, "forwarding off: the 'off' could not be sent");
+  gCtrlFails = false;
+  run(1);
+  check(ctrlCount(REMOTE_SENSOR_TOF, false) == 1 && sBf.req.leases.offOwed == 0, "sent on the next tick");
+  // A new partner, or this device no longer the bond master: an owed "off"
+  // is dropped, nothing goes to anyone.
+  gSetting = true;
+  run(1);
+  answer(kHub, espnowfwd::kOpAnnounce, espnowfwd::kResultAccepted, sBf.link.linkGen);
+  request(kHub, espnowfwd::kReqSubscribe, tof, 60000, sBf.link.linkGen);
+  check(sBf.req.leases.leased == tof, "leased again on the new link");
+  gCtrl.clear();
+  gCtrlFails = true;
+  gSetting = false;
+  run(1);
+  check(sBf.req.leases.offOwed == tof, "owed");
+  gCtrlFails = false;
+  gBond.isMaster = false;
+  run(3);
+  check(gCtrl.empty() && sBf.req.leases.offOwed == 0, "no longer the bond master: forgotten, nothing sent");
+
+  // The user's stream by hand is never started or stopped by a lease, also
+  // when nothing is saved and the partner's status does not show it yet.
+  resetAll();
+  upAndAccepted();
+  bondForwardStreamByHand(REMOTE_SENSOR_IMU, true);
+  request(kHub, espnowfwd::kReqSubscribe, imu, 5000);
+  run(6);
+  check(gCtrl.empty(), "IMU switched on by hand here: the lease neither starts nor stops it");
+  bondForwardStreamByHand(REMOTE_SENSOR_IMU, false);
+  request(kHub, espnowfwd::kReqSubscribe, imu, 5000);
+  check(ctrlCount(REMOTE_SENSOR_IMU, true) == 1, "stopped by hand: the next lease starts it");
+
+  // The master that asked leaves the primary mesh: its leases end at once.
+  resetAll();
+  upAndAccepted();
+  request(kHub, espnowfwd::kReqSubscribe, (uint32_t)(tof | imu), 600000);
+  gCtrl.clear();
+  gOtherMesh.push_back("02:C0:00:00:00:10");
+  run(1);
+  check(ctrlCount(REMOTE_SENSOR_TOF, false) == 1 && ctrlCount(REMOTE_SENSOR_IMU, false) == 1 &&
+        sBf.req.leases.leased == 0, "the master left the primary mesh: its leases end, the sensors are switched off");
+  // 'bondforward sensors' no longer forwards ToF: its lease ends, IMU's not.
+  resetAll();
+  upAndAccepted();
+  request(kHub, espnowfwd::kReqSubscribe, (uint32_t)(tof | imu), 600000);
+  gCtrl.clear();
+  gMask = (uint16_t)(espnowfwd::kSensorMaskDefault & ~tof);
+  run(1);
+  check(ctrlCount(REMOTE_SENSOR_TOF, false) == 1 && ctrlCount(REMOTE_SENSOR_IMU, false) == 0 &&
+        sBf.req.leases.leased == imu, "ToF no longer forwarded: its lease ends");
+  // Another master is named as primary: the leases of the old one end.
+  resetAll();
+  upAndAccepted();
+  request(kHub, espnowfwd::kReqSubscribe, tof, 600000);
+  gCtrl.clear();
+  std::memcpy(gTargets.primary, kHub2, 6);
+  sessionUp(kHub2, 0x3333);
+  run(1);
+  check(ctrlCount(REMOTE_SENSOR_TOF, false) == 1 && sBf.req.leases.leased == 0,
+        "another master named: the old one's leases end");
+
+  // bondforward: a primary named in another mesh is not the one waited for.
+  resetAll();
+  gOtherMesh.push_back("02:C0:00:00:00:10");
+  gSetting = true;
+  run(1);
+  check(describe("") == "OK: forwarding is on, but nothing is forwarded yet: waiting for spare to accept.",
+        "bondforward waits for the backup in the primary mesh, not the master in another mesh: " + describe(""));
 }
 
 int main() {
@@ -802,6 +1185,9 @@ int main() {
   testAnnounceAndForward();
   testSessionsAndChanges();
   testReviewCases();
+  testPrimaryMesh();
+  testStatusAndRequests();
+  testLeaseReview();
   check(gLockViolations == 0, "nothing that may block, print or send ran under the lock");
   check(gLockDepth == 0, "every lock was released");
   if (failures != 0) {

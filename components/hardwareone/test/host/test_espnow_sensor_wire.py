@@ -141,17 +141,32 @@ int main() {
           "a forwarded reading's header: bit 2 of the flags, the link number in byte 7");
   }
 
-  // The status frame: 16 bytes, two masks in the one numbering.
+  // The status frame: 16 bytes, two masks in the one numbering, the link
+  // byte of a forwarded one where a reserved byte was (no growth).
   check(sizeof(V4PayloadSensorStatus) == 16 && offsetof(V4PayloadSensorStatus, presentMask) == 0 &&
         offsetof(V4PayloadSensorStatus, streamingMask) == 4 && offsetof(V4PayloadSensorStatus, bootTag) == 8 &&
-        offsetof(V4PayloadSensorStatus, reserved) == 10 && sizeof(((V4PayloadSensorStatus*)nullptr)->reserved) == 6,
-        "V4PayloadSensorStatus: 0 present, 4 streaming, 8 boot tag, 10 reserved[6]");
+        offsetof(V4PayloadSensorStatus, fwdLink) == 10 && offsetof(V4PayloadSensorStatus, reserved) == 11 &&
+        sizeof(((V4PayloadSensorStatus*)nullptr)->reserved) == 5,
+        "V4PayloadSensorStatus: 0 present, 4 streaming, 8 boot tag, 10 link byte, 11 reserved[5]");
+  {
+    V4PayloadSensorStatus wire{};
+    wire.presentMask = 0x0429;
+    wire.streamingMask = 0x0009;
+    wire.bootTag = 0xBEEF;
+    wire.fwdLink = 7;
+    espnowfwd::StatusFrame f{0x0429, 0x0009, 0xBEEF, 7};
+    uint8_t packed[16];
+    espnowfwd::packStatusFrame(packed, f);
+    check(std::memcmp(packed, &wire, sizeof(wire)) == 0, "espnowfwd::packStatusFrame writes the struct's layout");
+  }
 
-  // The request: 16 bytes with two reserved.
+  // The request: 16 bytes, the link byte of a request for a bond partner
+  // where a reserved byte was (no growth).
   check(sizeof(V4PayloadSensorReq) == 16 && offsetof(V4PayloadSensorReq, reqId) == 0 &&
         offsetof(V4PayloadSensorReq, mode) == 1 && offsetof(V4PayloadSensorReq, sensorMask) == 2 &&
         offsetof(V4PayloadSensorReq, intervalMs) == 6 && offsetof(V4PayloadSensorReq, leaseMs) == 10 &&
-        offsetof(V4PayloadSensorReq, reserved) == 14, "V4PayloadSensorReq: 0 id, 1 mode, 2 mask, 6 interval, 10 lease, 14 reserved[2]");
+        offsetof(V4PayloadSensorReq, fwdLink) == 14 && offsetof(V4PayloadSensorReq, reserved) == 15,
+        "V4PayloadSensorReq: 0 id, 1 mode, 2 mask, 6 interval, 10 lease, 14 link byte, 15 reserved");
 
   // The time frame: 16 bytes.
   check(sizeof(V4PayloadTimeSync) == 16 && offsetof(V4PayloadTimeSync, epochMs) == 0 &&
@@ -454,8 +469,32 @@ def rule_failures(component: Path) -> list[str]:
     power = strip_comments(files["System_ESPNow_PowerEvents.cpp"])
     expect("espnowfwd::meshDataAllowed(peBondWorker())" in strip_comments(extract_block(files["System_ESPNow_PowerEvents.cpp"], "static void pePlan(uint32_t nowMs, PeSendPlan* plan)")),
            "pePlan asks meshDataAllowed: a bond worker sends to its partner only")
-    expect("espnowfwd::meshDataAllowed(sensorIsBondWorker())" in strip_comments(extract_block(sensors, "static void announceSensorStatus(const uint8_t* alsoTo = nullptr)")),
-           "announceSensorStatus asks meshDataAllowed: a bond worker tells no mesh master")
+    announce = strip_comments(extract_block(sensors, "static void announceSensorStatus(const uint8_t* alsoTo = nullptr)"))
+    # Nothing ends the function early for a bond worker: its one early return
+    # is the one for "no receiver and no controller" (the worker's receiver is
+    # its bond master, target.viaBond).
+    before_send = announce[:announce.index("if (haveTarget && target.viaBond)")]
+    expect(before_send.count("return") == 1 and "if (!haveTarget && !alsoTo) return;" in before_send,
+           "announceSensorStatus returns early only when nobody is to be told")
+    expect("if (!espnowfwd::meshDataAllowed(bondWorker)) alsoTo = nullptr;" in announce and
+           "target.viaBond == bondWorker" in announce and
+           "v4_send_bond_sensor_status(target.mac, presentMask, streamingMask, sensorBootTag())" in announce and
+           announce.index("if (haveTarget && target.viaBond)") < announce.index("v4_send_sensor_status(target.mac"),
+           "announceSensorStatus: a bond worker tells its bond master only (185), never a mesh master or a controller")
+    bond_status = strip_comments(extract_block(espnow, "bool v4_send_bond_sensor_status(const uint8_t* dstMac, uint32_t presentMask, uint32_t streamingMask,"))
+    expect("bondSendEncryptedAsync(dstMac, ESPNOW_V4_TYPE_BOND_SENSOR_STATUS" in bond_status,
+           "the bond worker's status goes over the bond link")
+    expect("ESPNOW_V4_TYPE_BOND_SENSOR_STATUS" in periodic, "a bond status frame without a session is dropped, not parked")
+    tick_src = strip_comments(extract_block(sensors, "void sensorLinkTick(uint32_t nowMs)"))
+    bond_tick = strip_comments(extract_block(sensors, "static void sensorBondStatusTick(uint32_t nowMs)"))
+    expect("sensorBondStatusTick(nowMs);" in tick_src and "espnowSessionIdOf(target.mac)" in bond_tick and
+           "announceSensorStatus();" in bond_tick, "a bond worker tells its bond master its sensors once per bond session")
+    expect("ESPNOW_V4_TYPE_BOND_SENSOR_STATUS = 185," in wire_text and "BOND_SENSOR_STATUS=185" in wire_text,
+           "the opcode 185 has its number and is in the opcode map")
+    expect(re.search(r"\{ ESPNOW_V4_TYPE_BOND_SENSOR_STATUS, V4_OPC_FLAG_REQ_PAIRED \| V4_OPC_FLAG_REQ_BOND_PEER \| "
+                     r"V4_OPC_FLAG_REQ_SESSION_ENC, v4hBondSensorStatus \}", espnow) is not None and
+           depth_in(espnow, "  { ESPNOW_V4_TYPE_BOND_SENSOR_STATUS,", "ENABLE_BONDED_MODE") == 1,
+           "185 is a bond row: only from the bond partner, over its session, in a bond build")
     sensor_req = strip_comments(extract_block(espnow, "static void v4h_sensor_req(const V4RxCtx& ctx)"))
     refusal = re.search(r"\{\s*bool bondWorker = false;\s*#if ENABLE_BONDED_MODE\s*"
                         r"bondWorker = gSettings\.bondModeEnabled && isBondWorker\(\);\s*#endif\s*"
@@ -466,6 +505,22 @@ def rule_failures(component: Path) -> list[str]:
     expect(refusal is not None and sensor_req.index("if (!espnowfwd::meshDataAllowed(bondWorker)) {") <
            sensor_req.index("gSettings.espnowAcceptSensorControl"),
            "the bond worker's refusal comes before anything else is looked at")
+    # A request with the link byte: for this device's bond partner, handed to
+    # the bond master's side and never applied to this device's own sensors.
+    expect(re.search(r"if \(ctx\.payloadLen >= sizeof\(V4PayloadSensorReq\) &&\s*"
+                     r"\(\(const V4PayloadSensorReq\*\)ctx\.payload\)->fwdLink != 0\) \{", sensor_req) is not None,
+           "v4h_sensor_req takes every request with the link byte set as one for the bond partner")
+    fwd_at = sensor_req.index("->fwdLink != 0")
+    fwd_block = extract_block(sensor_req, "->fwdLink != 0)")
+    # The block ends with its return, after the #if/#else/#endif: whatever the
+    # build, the request never falls through to the own-sensor path.
+    expect(re.search(r"#endif\s*return;\s*\}$", fwd_block) is not None,
+           "the request for the bond partner returns at the end of its block, in every build")
+    expect(sensor_req.index("if (!espnowfwd::meshDataAllowed(bondWorker)) {") < fwd_at <
+           sensor_req.index("gSettings.espnowAcceptSensorControl") and
+           "bondForwardSensorRequest(ctx.recv_info->src_addr, fwd->mode, fwd->sensorMask, fwd->intervalMs, fwd->leaseMs," in fwd_block
+           and "meshSensorReqPending" not in fwd_block,
+           "a request for the bond partner goes to the bond master's side and returns before the own-sensor path")
     expect("if (wants && !plan.viaBond)" in power, "the battery step starts no handshake with the bond partner")
     # A bond is 1:1: the forward code reads only the single-bond settings.
     for name in ("System_ESPNow_BondForward.cpp", "System_ESPNow_ForwardRx.cpp", "System_ESPNow_PowerEvents.cpp",
@@ -531,10 +586,10 @@ def rule_failures(component: Path) -> list[str]:
            "the ingest makes the table only after the role rule")
     expect(ingest.index("readingTextIsObject") < ingest.index("sensorPeerSlotsEnsure(peer)"),
            "a sender's slots are made by a reading that is whole and well formed")
-    status_rx = strip_comments(extract_block(sensors, "void remoteSensorIngestStatus(const uint8_t* senderMac, const char* senderName,"))
-    expect("espnowsensor::roleReceives(gSettings.meshRole)" in status_rx and "remoteSensorTableEnsure()" in status_rx and
+    status_rx = strip_comments(extract_block(sensors, "static void sensorStatusIngest(const uint8_t* senderMac, const char* senderName, const uint8_t* payload,"))
+    expect("!fromBond && !espnowsensor::roleReceives(gSettings.meshRole)" in status_rx and "remoteSensorTableEnsure()" in status_rx and
            status_rx.index("espnowsensor::roleReceives(gSettings.meshRole)") < status_rx.index("remoteSensorTableEnsure()"),
-           "the status frame may make the table, only after the role rule")
+           "the status frame may make the table, only after the role rule (a bond partner's: whatever the role)")
     expect("statusNotKept" not in sensors, "no status frame is refused for want of a table any more")
     for field in ("valid", "lastUpdate", "jsonLength", "arrivalEpochMs", "counter", "aged"):
         expect(re.search(rf"entry->{field}\b", status_rx) is None,

@@ -238,10 +238,10 @@ struct Settings {
       espnowAcceptSensorControl(false),
       espnowMasterFingerprint(""),
       espnowBackupMasterFingerprint(""),
-      espnowForwardFrom(""),
 #if ENABLE_BONDED_MODE
       bondModeEnabled(false),
       bondRole(0),
+      bondRoleChosen(false),
       bondPeerMac(""),
       bondStreamThermal(false),
       bondStreamTof(false),
@@ -818,10 +818,6 @@ struct Settings {
   bool   espnowAcceptSensorControl;       // opt-in: honor SENSOR_REQ from master/backup (default false)
   String espnowMasterFingerprint;         // authorized PRIMARY-master Ed25519 pubkey (64-hex; empty=deny)
   String espnowBackupMasterFingerprint;   // authorized BACKUP-master Ed25519 pubkey (64-hex; empty=deny)
-  // The devices that may forward their bond partner's data to this device
-  // (espnowforwardfrom): up to 4 entries "<address>/<first 8 key bytes in
-  // hex>", comma separated; empty = none.
-  String espnowForwardFrom;
   // ============================================================================
   // Multi-mesh data model (Phase 2 of docs/ESPNOW_V4_PLAN.md)
   // ============================================================================
@@ -867,6 +863,11 @@ struct Settings {
   // Legacy single-mesh fields (still read by most callers as of Phase 2.1):
   bool bondModeEnabled;              // Enable bond mode (master/worker)
   uint8_t bondRole;                  // 0=worker (compute/network), 1=master (display/gamepad)
+  // The user chose bondRole (bondrole master|worker): bondconnect keeps it and
+  // the partner is told; false (the default, and after 'bondrole auto'): the
+  // role is automatic (the other than a partner whose user chose, else by the
+  // two addresses at bondconnect).
+  bool bondRoleChosen;
   String bondPeerMac;                // MAC address of bonded peer device
   // Bond mode sensor streaming (auto-enable on boot when bonded)
   bool bondStreamThermal;              // Auto-stream thermal data to bonded peer

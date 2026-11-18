@@ -861,6 +861,32 @@ inline const char* fingerprintEditorArg(const char* cmd, const char* value) {
   return "clear";
 }
 
+// The stream switches a bond worker received from its bond master
+// (BOND_STREAM_CTRL, one sensor each), kept per sensor until espnow_task
+// applies them after the receive ring is drained. Several switches that
+// arrive in one loop all count (a bond master switching two sensors sends two
+// frames back to back); for one sensor the last one wins. Sensor numbers this
+// firmware does not know are dropped.
+struct StreamCtrlQueue {
+  uint16_t pending;  // sensors with a switch to apply
+  uint16_t on;       // of those: on (else off)
+};
+
+inline void streamCtrlPut(StreamCtrlQueue& q, uint8_t sensor, bool on) {
+  if (sensor >= REMOTE_SENSOR_MAX) return;
+  const uint16_t bit = (uint16_t)sensorBit(sensor);
+  q.pending = (uint16_t)(q.pending | bit);
+  q.on = on ? (uint16_t)(q.on | bit) : (uint16_t)(q.on & ~bit);
+}
+
+// Takes every pending switch: `on`, `off` the sensors to switch on and off.
+inline void streamCtrlTake(StreamCtrlQueue& q, uint16_t* on, uint16_t* off) {
+  *on = (uint16_t)(q.pending & q.on);
+  *off = (uint16_t)(q.pending & ~q.on);
+  q.pending = 0;
+  q.on = 0;
+}
+
 constexpr const char* kFingerprintBadReply =
     "Error: a fingerprint is exactly 64 hexadecimal characters (the key 'espnowidentity' shows on that device), "
     "or 'clear' to name none";

@@ -5,14 +5,14 @@ A bond master may forward its bond partner's readings, battery state and
 events to the masters named on it (System_ESPNow_ForwardCore.h). The
 production code of System_ESPNow_ForwardRx.cpp between FORWARD_RX_HOST_BEGIN
 and FORWARD_RX_HOST_END (the link table, the FORWARD_LINK handler,
-espnowForwardResolve and the readers, espnowforwardfrom and
-espnowforwardlinks) is compiled with the production rules header against a
-host device (role, paired devices with keys and names, the setting, a
+espnowForwardResolve and the readers, where a sensor request for a forwarded
+partner goes, and espnowforwardlinks) is compiled with the production rules
+header against a host device (role, paired devices with keys and names, a
 recording radio):
 
-  * a worker answers not_receiver; by default nobody may forward
-    (not_allowed, said on the console); espnowforwardfrom add / remove /
-    clear / show, at most four, unknown devices refused;
+  * a worker answers not_receiver; a master accepts any paired device that
+    announces (there is no list of devices that may forward), also one
+    paired again under another key;
   * every announce check: the sender or this device as partner, no key, a
     name taken by a paired device or this device, a paired partner under
     another key (key_mismatch) or the same (this device's own name shown);
@@ -20,11 +20,15 @@ recording radio):
     late announcement of the old partner, or of an ended link, is stale;
   * whose a frame is: own (no lookup), over the bond link, forwarded (the
     partner via the sender, the link's name, the resume once per stream), the
-    battery frame's byte alone, malformed marks, unannounced and old link
+    battery frame's byte alone, the sensor status's byte alone (never a
+    resume, malformed on the bond link), malformed marks, unannounced and old link
     numbers refused with a query at most every 5 s (none from a worker), a
     stream not announced refused without a query;
-  * withdraw and the withdrawal of everything; the allow list read again
-    once a second, a removed device's link ends, a worker's links end;
+  * withdraw and the withdrawal of everything; a worker's links end, a
+    master's tick ends none;
+  * a sensor request for a partner: '<partner> via <device>', the partner's
+    name alone, addresses; an unknown via, a device that forwards nothing for
+    it, no link, an ended link; the current link number;
   * sixteen entries, a seventeenth refused while every holder is paired, an
     unpaired one's entry reused; no memory: full;
   * espnowforwardlinks in text and JSON, paged, "not confirmed" after 30
@@ -33,8 +37,10 @@ recording radio):
 
 Source rules: the row of 155 and its tick are outside every bonded-mode
 block, the handler hands the frame to the host-tested ingest, the block
-reaches the device only through its fwd* functions, the commands and the
-setting exist, and a bond partner cannot change the setting.
+reaches the device only through its fwd* functions, espnowforwardlinks
+exists, the allow list (espnowforwardfrom, its setting, its key binding) is
+gone, and espnowsensorreq sends a request for a forwarded partner to the
+device that forwards for it with that link's number.
 
 Options: --cxx <compiler>, --sanitize (ASan + UBSan), --component <dir>.
 """
@@ -87,18 +93,25 @@ def check_sources(component: Path) -> None:
     espnow = (component / "System_ESPNow.cpp").read_text()
     require(depth_in(espnow, "  { ESPNOW_V4_TYPE_FORWARD_LINK,", "ENABLE_BONDED_MODE") == 0,
             "the FORWARD_LINK row is in every build")
-    require('{ "forwardFrom", SETTING_STRING, &gSettings.espnowForwardFrom, 0, 0, "", 0, 0,' in espnow and
-            '"mesh", "espnowforwardfrom" }' in espnow, "the setting forwardFrom exists, empty by default")
-    for name, handler, admin in (("espnowforwardfrom", "cmd_espnow_forwardfrom", "true"),
-                                 ("espnowforwardlinks", "cmd_espnow_forwardlinks", "false")):
-        require(re.search(rf'\{{ "{name}", "[^\n]*", {admin}, {handler}, "Usage: {name}', espnow) is not None,
-                f"{name} is registered with admin = {admin} and its usage")
+    require(re.search(r'\{ "espnowforwardlinks", "[^\n]*", false, cmd_espnow_forwardlinks, "Usage: espnowforwardlinks',
+                      espnow) is not None, "espnowforwardlinks is registered (not admin) with its usage")
+    # Owner decision 2026-11-18: no allow list on the mesh master.
     bonded = (component / "System_BondedPeer.cpp").read_text()
-    require('if (key && strcmp(key, "forwardFrom") == 0) return false;' in
-            strip_comments(extract_block(bonded, "bool remoteEditAllowed(const char* moduleName, const char* key)")),
-            "a bond partner cannot change which devices may forward to this one")
     settings = (component / "System_Settings.h").read_text()
-    require("String espnowForwardFrom;" in settings and 'espnowForwardFrom(""),' in settings, "the setting's field")
+    core = (component / "System_ESPNow_ForwardCore.h").read_text()
+    for name, text in (("System_ESPNow.cpp", espnow), ("System_BondedPeer.cpp", bonded), ("System_Settings.h", settings),
+                       ("System_ESPNow_ForwardRx.cpp", source), ("System_ESPNow_ForwardCore.h", strip_comments(core))):
+        for word in ("forwardFrom", "ForwardFrom", "espnowforwardfrom", "AllowEntry", "allowList", "kResultNotAllowed"):
+            require(word not in strip_comments(text), f"the allow list is gone ({word} in {name})")
+    sensorreq = strip_comments(extract_block(espnow, "const char* cmd_espnow_sensorreq(const String& argsInput)"))
+    require('a.arg(1) == "via"' in sensorreq and
+            "espnowForwardRequestTarget(a.arg(0).c_str(), a.arg(2).c_str(), mac, origin, &linkGen)" in sensorreq and
+            "espnowForwardRequestTarget(a.arg(0).c_str(), nullptr, mac, origin, &linkGen)" in sensorreq and
+            "rq.fwdLink    = linkGen;" in sensorreq,
+            "espnowsensorreq names a forwarded partner ('via', or its name alone) and sends the link number")
+    require(sensorreq.index("resolveDeviceNameOrMac(a.arg(0), mac)") <
+            sensorreq.index("espnowForwardRequestTarget(a.arg(0).c_str(), nullptr"),
+            "a device paired here is asked directly; a forwarded partner only when no paired device has that name")
     cmake = (component / "CMakeLists.txt").read_text()
     require("System_ESPNow_ForwardRx.cpp" in cmake and "System_ESPNow_BondForward.cpp" in cmake,
             "the new sources are in the component's build list")

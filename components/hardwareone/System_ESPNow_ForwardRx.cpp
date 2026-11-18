@@ -41,9 +41,6 @@ static portMUX_TYPE sFwdMux = portMUX_INITIALIZER_UNLOCKED;
 static uint32_t fwdNow() { return (uint32_t)millis(); }
 static uint8_t fwdRole() { return gSettings.meshRole; }
 static void fwdSelfMac(uint8_t out[6]) { espnowSelfStaMac(out); }
-// The setting espnowforwardfrom (read on espnow_task once a second, and by the command).
-static void fwdAllowedText(char* out, size_t cap) { strlcpy(out, gSettings.espnowForwardFrom.c_str(), cap); }
-static void fwdSetAllowedText(const char* text) { setSetting(gSettings.espnowForwardFrom, String(text)); }
 // The key `mac` is paired under (false: not paired).
 static bool fwdPairedKey(const uint8_t mac[6], uint8_t key[32]) {
   const PeerIdentity* pid = peerIdentityFindByMac(mac);
@@ -111,47 +108,13 @@ struct FwdRefusals {
 struct FwdState {
   espnowfwd::ForwardLink* links;          // kLinkSlots, PSRAM, made by the first announcement or query
   FwdRefusals refused;
-  // The devices that may forward to this device (espnowforwardfrom), parsed
-  // once a second on espnow_task: each address with the key it was listed under.
-  espnowfwd::AllowEntry allowed[espnowfwd::kAllowedMax];
-  uint8_t allowedCount;
-  bool allowedLoaded;
   // A refused announcement is said once a minute at most (espnow_task only).
   WarnLimiter refusedWarn;
+  uint32_t lastTickMs;
+  bool ticked;
 };
 
 EXT_RAM_BSS_ATTR static FwdState sFwd;  // PSRAM: tasks only, never the radio callback
-
-// `key`: the key `mac` is paired under now (nullptr: not paired).
-static bool fwdAllowedLocked(const uint8_t mac[6], const uint8_t* key) {
-  for (uint8_t i = 0; i < sFwd.allowedCount; ++i) {
-    if (espnowfwd::allowEntryMatches(sFwd.allowed[i], mac, key)) return true;
-  }
-  return false;
-}
-
-static void fwdLoadAllowed() {
-  char text[espnowfwd::kAllowListTextCap];
-  fwdAllowedText(text, sizeof(text));
-  espnowfwd::AllowEntry list[espnowfwd::kAllowedMax];
-  const size_t n = espnowfwd::allowListParse(text, list);
-  FWD_LOCK();
-  memcpy(sFwd.allowed, list, sizeof(list));
-  sFwd.allowedCount = (uint8_t)n;
-  sFwd.allowedLoaded = true;
-  FWD_UNLOCK();
-}
-
-// `mac` is listed, and paired under the key it was listed with.
-static bool fwdAllowed(const uint8_t mac[6]) {
-  if (!sFwd.allowedLoaded) fwdLoadAllowed();
-  uint8_t key[32];
-  const bool paired = fwdPairedKey(mac, key);
-  FWD_LOCK();
-  const bool ok = fwdAllowedLocked(mac, paired ? key : nullptr);
-  FWD_UNLOCK();
-  return ok;
-}
 
 // The entry of `via`, or nullptr. espnow_task reads without the lock (it is
 // the only writer).
@@ -274,8 +237,9 @@ static void forwardLinkIngest(const uint8_t* src, const char* srcName, const uin
     if (!shown[0]) macToDisplay(f.partnerMac, shown, sizeof(shown));
   }
   const bool nameTaken = !partnerPaired && fwdNameTaken(shown);
-  uint8_t result = espnowfwd::announceCheck(f, src, self, receives, receives && fwdAllowed(src), partnerPaired,
-                                            keyMatches, nameTaken);
+  // Any paired device may announce (the receive table lets only paired
+  // devices' session frames through): the same rule as for its own readings.
+  uint8_t result = espnowfwd::announceCheck(f, src, self, receives, partnerPaired, keyMatches, nameTaken);
   espnowfwd::AnnounceEffect effect = espnowfwd::AnnounceEffect::Repeat;
   if (result == 0) {
     espnowfwd::ForwardLink* e = fwdEntryFor(src);
@@ -435,21 +399,26 @@ size_t espnowForwardLinkCount() {
   return n;
 }
 
-bool espnowForwardFindOrigin(const char* who, const uint8_t* via, uint8_t outOrigin[6], uint8_t outVia[6]) {
+// The active link that names `who` (the partner's shown name, any case, or
+// its address), of `via` when given: one copy, taken under the lock.
+static bool fwdFindActive(const char* who, const uint8_t* via, espnowfwd::ForwardLink* out) {
   if (!who || !who[0]) return false;
   uint8_t asMac[6];
   const bool isMac = espnowfwd::macFromText(who, strlen(who), asMac);
   for (uint8_t i = 0; i < espnowfwd::kLinkSlots; ++i) {
-    espnowfwd::ForwardLink e;
-    if (!fwdCopyAt(i, &e) || e.state != espnowfwd::LState::Active) continue;
-    if (via && !espnowfwd::macSame(e.via, via)) continue;
-    if (isMac ? espnowfwd::macSame(e.partner, asMac) : espnowfwd::nameSameIgnoringCase(e.name, who)) {
-      memcpy(outOrigin, e.partner, 6);
-      memcpy(outVia, e.via, 6);
-      return true;
-    }
+    if (!fwdCopyAt(i, out) || out->state != espnowfwd::LState::Active) continue;
+    if (via && !espnowfwd::macSame(out->via, via)) continue;
+    if (isMac ? espnowfwd::macSame(out->partner, asMac) : espnowfwd::nameSameIgnoringCase(out->name, who)) return true;
   }
   return false;
+}
+
+bool espnowForwardFindOrigin(const char* who, const uint8_t* via, uint8_t outOrigin[6], uint8_t outVia[6]) {
+  espnowfwd::ForwardLink e;
+  if (!fwdFindActive(who, via, &e)) return false;
+  memcpy(outOrigin, e.partner, 6);
+  memcpy(outVia, e.via, 6);
+  return true;
 }
 
 void espnowForwardOriginName(const uint8_t via[6], const uint8_t origin[6], char* out, size_t cap) {
@@ -464,26 +433,41 @@ void espnowForwardOriginName(const uint8_t via[6], const uint8_t origin[6], char
   }
 }
 
-// Once a second on espnow_task: the allowed devices are read again from the
-// setting (it may have been changed by any editor), and the link of a device
-// that is no longer allowed ends.
+ForwardTarget espnowForwardRequestTarget(const char* who, const char* viaWho, uint8_t outVia[6], uint8_t outOrigin[6],
+                                         uint8_t* outLinkGen) {
+  if (!who || !who[0] || !outVia || !outOrigin || !outLinkGen) return ForwardTarget::NoLink;
+  uint8_t via[6];
+  const uint8_t* onlyVia = nullptr;
+  if (viaWho) {
+    if (!fwdResolveName(viaWho, via)) return ForwardTarget::NoVia;
+    onlyVia = via;
+  }
+  // The partner, the via and the link number from the same copy of the link
+  // (the link may change on espnow_task meanwhile). An active link's number
+  // is never 0 (an announcement of 0 is malformed): 0 in a request would
+  // address the via's own sensors.
+  espnowfwd::ForwardLink e;
+  if (!fwdFindActive(who, onlyVia, &e) || e.linkGen == 0) return ForwardTarget::NoLink;
+  memcpy(outOrigin, e.partner, 6);
+  memcpy(outVia, e.via, 6);
+  *outLinkGen = e.linkGen;
+  return ForwardTarget::Found;
+}
+
+// Once a second on espnow_task: a device that no longer keeps data (its role
+// changed) ends every link it holds.
 void espnowForwardRxTick(uint32_t nowMs) {
-  static uint32_t sLastMs = 0;
-  if (sFwd.allowedLoaded && (uint32_t)(nowMs - sLastMs) < 1000) return;
-  sLastMs = nowMs;
-  fwdLoadAllowed();
+  if (sFwd.ticked && (uint32_t)(nowMs - sFwd.lastTickMs) < 1000) return;
+  sFwd.ticked = true;
+  sFwd.lastTickMs = nowMs;
+  if (espnowsensor::roleReceives(fwdRole())) return;
   for (uint8_t i = 0; sFwd.links && i < espnowfwd::kLinkSlots; ++i) {
     espnowfwd::ForwardLink& e = sFwd.links[i];
     if (!e.inUse || e.state != espnowfwd::LState::Active) continue;
-    uint8_t key[32];
-    const bool paired = fwdPairedKey(e.via, key);  // the pairing lookup, before the lock
     FWD_LOCK();
-    const bool allowed = fwdAllowedLocked(e.via, paired ? key : nullptr) && espnowsensor::roleReceives(fwdRole());
-    if (!allowed) {
-      e.state = espnowfwd::LState::Ended;
-      e.endedMs = nowMs;
-      e.resumeMask = 0;
-    }
+    e.state = espnowfwd::LState::Ended;
+    e.endedMs = nowMs;
+    e.resumeMask = 0;
     FWD_UNLOCK();
   }
 }
@@ -500,93 +484,6 @@ static bool fwdAppend(char* reply, size_t cap, size_t* pos, const char* fmt, ...
   *pos += (size_t)n;
   if (*pos >= cap) { *pos = cap; return false; }
   return true;
-}
-
-// espnowforwardfrom [add <name_or_mac> | remove <name_or_mac> | clear]
-const char* cmd_espnow_forwardfrom(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  size_t cap = 0;
-  char* reply = fwdReply(&cap);
-  if (!reply) return kCommandReplyOutOfMemory;
-  char copy[64];
-  strlcpy(copy, argsInput.c_str(), sizeof(copy));
-  char* save = nullptr;
-  char* verb = strtok_r(copy, " \t", &save);
-  char* who = verb ? strtok_r(nullptr, " \t", &save) : nullptr;
-  char* extra = who ? strtok_r(nullptr, " \t", &save) : nullptr;
-  char text[espnowfwd::kAllowListTextCap];
-  fwdAllowedText(text, sizeof(text));
-  static const char kUsage[] = "Usage: espnowforwardfrom [add <name_or_mac> | remove <name_or_mac> | clear]";
-  if (!verb) {
-    espnowfwd::AllowEntry list[espnowfwd::kAllowedMax];
-    const size_t n = espnowfwd::allowListParse(text, list);
-    if (n == 0) {
-      return "OK: no device may forward its bond partner's data to this device (espnowforwardfrom add <name_or_mac>)";
-    }
-    size_t pos = 0;
-    fwdAppend(reply, cap, &pos, "OK: these devices may forward their bond partner's data to this device:");
-    for (size_t i = 0; i < n; ++i) {
-      char name[32];
-      char mac[18];
-      fwdNameOf(list[i].mac, name, sizeof(name));
-      macToDisplay(list[i].mac, mac, sizeof(mac));
-      uint8_t key[32];
-      const bool paired = fwdPairedKey(list[i].mac, key);
-      const char* note = !paired ? ", not paired"
-                       : !espnowfwd::allowEntryMatches(list[i], list[i].mac, key)
-                           ? ", paired again under another key: not allowed until added again"
-                           : "";
-      fwdAppend(reply, cap, &pos, "%s %s (%s)%s", i ? "," : "", name, mac, note);
-    }
-    return reply;
-  }
-  if (strcmp(verb, "clear") == 0) {
-    if (who) return kUsage;
-    fwdSetAllowedText("");
-    fwdLoadAllowed();
-    return "OK: no device may forward its bond partner's data to this device now. Links already accepted end within "
-           "a second.";
-  }
-  const bool add = strcmp(verb, "add") == 0;
-  if ((!add && strcmp(verb, "remove") != 0) || !who || extra) return kUsage;
-  uint8_t mac[6];
-  if (!fwdResolveName(who, mac)) return "Error: no such device (use its name or its MAC address)";
-  uint8_t key[32];
-  const bool paired = fwdPairedKey(mac, key);
-  if (add && !paired) return "Error: that device is not paired with this device";
-  char updated[espnowfwd::kAllowListTextCap];
-  const espnowfwd::AllowEdit edit =
-      espnowfwd::allowListEdit(text, mac, paired ? key : nullptr, add, updated, sizeof(updated));
-  char name[32];
-  fwdNameOf(mac, name, sizeof(name));
-  switch (edit) {
-    case espnowfwd::AllowEdit::Full:
-      snprintf(reply, cap, "Error: %u devices are listed already; remove one first", (unsigned)espnowfwd::kAllowedMax);
-      return reply;
-    case espnowfwd::AllowEdit::AlreadyThere:
-      snprintf(reply, cap, "OK: %s may forward to this device already", name);
-      return reply;
-    case espnowfwd::AllowEdit::NotThere:
-      snprintf(reply, cap, "OK: %s was not listed", name);
-      return reply;
-    case espnowfwd::AllowEdit::KeyUpdated:
-      fwdSetAllowedText(updated);
-      fwdLoadAllowed();
-      snprintf(reply, cap, "OK: %s is listed again under the key it is paired with now.", name);
-      return reply;
-    case espnowfwd::AllowEdit::Added:
-      fwdSetAllowedText(updated);
-      fwdLoadAllowed();
-      snprintf(reply, cap, "OK: %s may forward its bond partner's readings, battery state and events to this device. "
-               "It must also have 'bondforward on' and this device named as its master.", name);
-      return reply;
-    case espnowfwd::AllowEdit::Removed:
-      fwdSetAllowedText(updated);
-      fwdLoadAllowed();
-      snprintf(reply, cap, "OK: %s may no longer forward to this device; its link ends within a second.", name);
-      return reply;
-  }
-  return kUsage;
 }
 
 static void fwdStreamsJson(uint8_t streams, char* out, size_t cap) {
@@ -685,18 +582,13 @@ const char* cmd_espnow_forwardlinks(const String& argsInput) {
   const uint32_t nowMs = fwdNow();
   if (json) {
     size_t pos = 0;
-    char text[espnowfwd::kAllowListTextCap];
-    fwdAllowedText(text, sizeof(text));
-    espnowfwd::AllowEntry list[espnowfwd::kAllowedMax];
-    const size_t n = espnowfwd::allowListParse(text, list);
     FwdRefusals refused;
     FWD_LOCK();
     refused = sFwd.refused;
     FWD_UNLOCK();
-    fwdAppend(reply, cap, &pos, "{\"schema\":1,\"role\":\"%s\",\"allowed\":[", espnowsensor::roleKey(fwdRole()));
-    for (size_t i = 0; i < n; ++i) fwdAppend(reply, cap, &pos, "%s\"" MAC_FMT "\"", i ? "," : "", MAC_ARGS(list[i].mac));
+    fwdAppend(reply, cap, &pos, "{\"schema\":1,\"role\":\"%s\"", espnowsensor::roleKey(fwdRole()));
     fwdAppend(reply, cap, &pos,
-              "],\"refused\":{\"malformed\":%lu,\"unannounced\":%lu,\"staleLink\":%lu,\"streamNotAnnounced\":%lu,"
+              ",\"refused\":{\"malformed\":%lu,\"unannounced\":%lu,\"staleLink\":%lu,\"streamNotAnnounced\":%lu,"
               "\"ignored\":%lu},\"from\":%lu,\"links\":[",
               (unsigned long)refused.malformed, (unsigned long)refused.unannounced, (unsigned long)refused.staleLink,
               (unsigned long)refused.streamNotAnnounced, (unsigned long)refused.ignored, (unsigned long)from);

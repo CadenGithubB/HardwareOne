@@ -4340,11 +4340,15 @@ battery, event and target lines of `espnowsensorstatus`.
 
 ## ESP-NOW forwarding for a bond partner
 
-A bond worker never sends its readings, battery state or events to a mesh master itself; its bond master may
-forward them to the master named on the bond master (`bondforward on`), which accepts only from devices it lists
-(`espnowforwardfrom`). The bond master announces the link in FORWARD_LINK (155); a forwarded 154/152/132 frame
-carries the link number in a reserved byte (and, for readings and events, a reserved flag bit). Design and
-decisions: `/Volumes/hw1build/bond-agreement-build/forward/DESIGN.md` and `DESIGN_DECISIONS.md`.
+A bond worker never sends its readings, battery state, events or sensor status to a mesh master itself; its
+bond master may forward them to the master named on the bond master when that master is paired in the bond
+master's primary mesh (`bondforward on`); the mesh master accepts any paired device that announces. The bond
+master announces the link in FORWARD_LINK (155); a forwarded 154/152/132/151 frame carries the link number in a
+reserved byte (and, for readings and events, a reserved flag bit). The mesh master asks for the partner's
+readings with a SENSOR_REQ (153) to the bond master whose reserved byte 14 carries the link number; the bond
+master turns it into its own bond-link stream control of the partner's sensors, with the lease. The bond request
+and notice carry whether the role was chosen (`bondrole`). Design and decisions:
+`/Volumes/hw1build/bond-agreement-build/forward/DESIGN.md` (sections M to O) and `DESIGN_DECISIONS.md`.
 
 `espnow_forward_core_tests` compiles `System_ESPNow_ForwardCore.h` (the production dependency-free header): the
 96-byte frame byte by byte, unknown ops, short and hostile frames; `forwardDecide` row by row; the partner's
@@ -4355,21 +4359,28 @@ forwarding, query, refresh, three withdraw tries, the withdrawal of everything o
 to a target and why not); `forwardFrameAllowed` (the link's partner, the hold epoch, the setting, a decline);
 every announce check on the master; the generation rule with a late announcement in both orders, after a
 withdrawal, across the u8 wrap, and a late withdrawal of everything; every withdraw row; every `attribute`
-verdict and the resume once per stream; the query limit; `recordReusable`; the allow list; names; X's numbers
-through the bond master to the master with a loss on each hop and a pause that is not counted as loss.
+verdict and the resume once per stream; the query limit; `recordReusable`; names; the primary mesh
+(`forwardDecide`'s `not_primary_mesh`, `primaryMeshSlot`, `inPrimaryMesh`); the 16-byte sensor status frame with
+its link byte and whose it is; every row of `sensorReqDecide` and the leases (subscribe, renew, one-shot,
+unsubscribe, expiry, a stream already running, by hand, the end of every lease, the "on" again on a new bond
+session, the clock wrap); X's numbers through the bond master to the master with a loss on each hop and a pause
+that is not counted as loss. `espnow_bond_agree_core_tests` adds the role: `roleForBond`, `roleYields`, an
+automatic device that yields to a chosen one by request or by notice (a lost request), both chose the same (a
+conflict), neither chose, a peer's earlier request used by `bondconnect`, ENDED, a partner change.
 `espnow_sensor_core_tests` and `espnow_power_event_core_tests` add the link byte of the reading header, the
 battery frame and the event frame, bit 4 of the event flags, `pushDecide`'s bond branch for every mesh input,
 and the fairness of a full event list by (sender, via).
 
 `espnow_forward_rx` compiles the production code of `System_ESPNow_ForwardRx.cpp` between
 `FORWARD_RX_HOST_BEGIN` and `FORWARD_RX_HOST_END` against a host device (role, paired devices with keys and
-names, the setting, a recording radio): every answer of an announcement, the console lines, a replaced partner
-and a late announcement of the old one, whose a frame is (own, bond link, forwarded with the resume, malformed
-marks, unannounced and old link numbers refused with a query at most every 5 s), withdraw and the withdrawal of
-everything, the allow list read again once a second and tied to each device's key (another identity under the
-same address is not allowed), a refused announcement said once a minute, sixteen entries and the reuse of an
-unpaired one, `espnowforwardfrom` and `espnowforwardlinks` (text, JSON, paging, "not confirmed"), and nothing
-that may block, print, send or allocate under the lock. `espnow_bond_forward` compiles the production code of
+names, a recording radio): every answer of an announcement (any paired device, no list), the console lines, a
+replaced partner and a late announcement of the old one, whose a frame is (own, bond link, forwarded with the
+resume, the sensor status, malformed marks, unannounced and old link numbers refused with a query at most every
+5 s), withdraw and the withdrawal of everything, a worker's links ended by the tick, a refused announcement said
+once a minute, sixteen entries and the reuse of an unpaired one, where a sensor request for a partner goes
+(`<partner> via <device>`, the name alone, addresses, an unknown via, no link, an ended link, the current link
+number), `espnowforwardlinks` (text, JSON, paging, "not confirmed"), and nothing that may block, print, send or
+allocate under the lock. `espnow_bond_forward` compiles the production code of
 `System_ESPNow_BondForward.cpp` between `BOND_FORWARD_HOST_BEGIN` and `BOND_FORWARD_HOST_END` against a host bond,
 named masters and sessions with session ids: every reason with its `bondforward` reply, `bondforward sensors`,
 the announcement's bytes, readings cut for the master's path with the partner's header plus the bit and link
@@ -4378,24 +4389,43 @@ frame of another source or after a partner change began, off at once, a full que
 object and the `bondstatus` lines (the longest of each proven to fit), a rekey, a new session, a query, the
 refresh, an absent partner, a decline, a partner change (the tick waits while it runs), another hold epoch, a
 sensor change while an announcement is out, stale, refused, a new named master, a handshake, promotion and
-demotion, the partner named as master (and a master that became the partner).
+demotion, the partner named as master (and a master that became the partner); a master paired in another mesh
+than the primary one (never announced to, gets nothing, a link it had is withdrawn, `inPrimaryMesh` in the
+JSON); the partner's sensor status sent on acceptance and on change with the forwarded sensors and the link
+byte; the mesh master's sensor requests (applied, renewed, ended by the lease, refused for each reason and said
+once a minute, a stream already running, by hand, unsubscribe, one-shot, the "on" again on a new bond session or
+after a failed send, forwarding off, a partner change) and their JSON and `bondstatus` line; an "off" that could
+not be sent, sent again once the partner is back (also after the link ended) and forgotten with a new partner or
+the worker role; a stream switched on by hand, never touched by a lease; leases ended when their master leaves the
+primary mesh, another master is named, or their sensor is no longer forwarded. Its source rules also hold that
+"the user streams it" is the saved `bondstream` setting, never the device's own streaming flags, and that a bond
+worker applies every stream switch of a loop (`espnowsensor::StreamCtrlQueue`, tested in
+`espnow_sensor_core_tests`).
 
 The existing suites cover the rest: `espnow_sensor_ingest` (a forwarded reading kept under (partner, via), its
 JSON with `link` and `via`, the partner's own counters, a direct and a forwarded record side by side, refused
 link numbers and streams, bit and byte that disagree, the resume taken by the last part of a reading in four
 parts, a forwarded record whose link ended given to another sender, the bond master handing its partner's
 reading to its forwarder, a repeat not handed on, bit 2 on 179 malformed, `not_kept_here`),
+a forwarded sensor status under (partner, via) before any reading, an old link number refused, the bond
+master keeping the partner's status (185) whatever its role and handing it on, a link byte on 185 malformed),
 `espnow_power_events` (a bond worker sends 180/182 to its partner only and starts no handshake, the bond master
 keeps them whatever its role and hands them on, two workers refuse, a mark on 180/182 is malformed, forwarded
 battery state and events under (partner, via) with the resume, the via's mesh list, `link`/`via` in JSON, a
-0xFF frame now read as forwarded and refused), `espnow_dispatch_policy` (155 through the real gates; 180/182 from
-the partner only), `espnow_handshake_backoff` (180/182 without a session are dropped, not parked),
-`espnow_sensor_wire` (the layouts, rows, the routed list, the opcode map, `meshDataAllowed` at the three sites,
-the single-bond-field rule, every reader passes the via, MQTT publishes own readings only).
+0xFF frame now read as forwarded and refused), `espnow_dispatch_policy` (155 through the real gates; 180/182/185
+from the partner only), `espnow_handshake_backoff` (180/182/185 without a session are dropped, not parked),
+`espnow_sensor_wire` (the layouts with the link bytes of 151 and 153, rows, the routed list, the opcode map,
+`meshDataAllowed` at the three sites, a request with the link byte handed to the bond master's side before the
+own-sensor path, the worker's status to its bond master only, the single-bond-field rule, every reader passes
+the via, MQTT publishes own readings only), `espnow_bond_agreement` (on the production glue: `bondconnect`
+keeps a chosen role, the request and notice carry the flag, an automatic role yields to a partner's request or
+notice and is answered with the new role, both chose the same is a conflict, a peer's earlier request decides
+`bondconnect`).
 
 Not compiled by any host test: the radio and the relay timing, `bondSendEncryptedAsync`, `espnowSessionIdOf`
-and the session table, the HTTP handlers, the web page script, and the G2, OLED and MQTT pages (source rules
-only).
+and the session table, `cmd_espnow_sensorreq`, `v4h_sensor_req`, `bondChangeRole` and `cmd_bond_role` (source
+rules), `espnowPeerInPrimaryMesh`, the HTTP handlers, the web page script, and the G2, OLED and MQTT pages (source
+rules only).
 
 ## Time: the millis() wrap and stored clock values
 

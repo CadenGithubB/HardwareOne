@@ -446,6 +446,15 @@ static void sensorForwardReading(const uint8_t src[6], const espnowsensor::Readi
   bondForwardReading(src, h, text, len);
 }
 static void sensorNotKept(uint8_t sensorType) { bondForwardNotKept(sensorType); }
+// Whose is a sensor status frame from `src`: the sender's own, or its bond
+// partner's that it forwards (the link byte alone marks it).
+static ForwardResolve sensorStatusWhose(const uint8_t* src, const char* srcName, bool fromBond, uint8_t fwdLink,
+                                        ForwardOrigin* out) {
+  return espnowForwardResolve(src, srcName, fromBond, /*hasBit=*/false, /*bitSet=*/false, fwdLink,
+                              espnowfwd::kStreamIdStatus, out);
+}
+// A bond master hands its partner's status it kept to its forwarder.
+static void sensorForwardStatus(const uint8_t src[6], const espnowfwd::StatusFrame& f) { bondForwardStatus(src, f); }
 static void sensorViaName(const uint8_t mac[6], char* out, size_t cap) {
   String name = getEspNowDeviceName(mac);
   if (name.length() == 0) name = macToDisplayStr(mac);
@@ -803,14 +812,31 @@ void remoteSensorIngestPart(const uint8_t* senderMac, const char* senderName,
                      espnowsensor::counterVerdictName(verdict), (unsigned)textLen, stored ? "" : " not stored");
 }
 
-void remoteSensorIngestStatus(const uint8_t* senderMac, const char* senderName,
-                              const uint8_t* payload, size_t payloadLen) {
-  if (!senderMac || !payload || payloadLen < sizeof(V4PayloadSensorStatus)) {
+static void sensorStatusIngest(const uint8_t* senderMac, const char* senderName, const uint8_t* payload,
+                               size_t payloadLen, bool fromBond) {
+  espnowfwd::StatusFrame frame = {};
+  if (!senderMac || !espnowfwd::parseStatusFrame(payload, payloadLen, frame)) {
     remoteSensorRefuse(&RemoteSensorRefusals::malformed);
     return;
   }
-  // The status frame goes to the device that receives the sender's readings.
-  if (!espnowsensor::roleReceives(gSettings.meshRole)) {
+  // Whose status it is: the sender's own, or its bond partner's that it
+  // forwards (refused unless a link of the sender names it). A link byte on
+  // the bond link is malformed.
+  ForwardOrigin origin;
+  switch (sensorStatusWhose(senderMac, senderName, fromBond, frame.fwdLink, &origin)) {
+    case ForwardResolve::Own:
+    case ForwardResolve::Forwarded:
+      break;
+    case ForwardResolve::Refused:
+      remoteSensorRefuse(&RemoteSensorRefusals::forwardRefused);
+      return;
+    case ForwardResolve::Malformed:
+      remoteSensorRefuse(&RemoteSensorRefusals::malformed);
+      return;
+  }
+  // The status frame goes to the device that receives the sender's readings;
+  // a bond master keeps its partner's whatever its mesh role.
+  if (!fromBond && !espnowsensor::roleReceives(gSettings.meshRole)) {
     remoteSensorRefuse(&RemoteSensorRefusals::notReceiver);
     return;
   }
@@ -823,25 +849,25 @@ void remoteSensorIngestStatus(const uint8_t* senderMac, const char* senderName,
     remoteSensorRefuseFull(&RemoteSensorRefusals::noMemory, senderName, nowMs);
     return;
   }
-  // A status frame is always the sender's own (it is not forwarded).
-  ForwardOrigin origin = {};
-  memcpy(origin.mac, senderMac, 6);
-  origin.link = espnowfwd::kLinkMesh;
   SensorPeerRecord* peer = sensorPeerRecordFor(origin);
   if (!peer) {
-    remoteSensorRefuseFull(&RemoteSensorRefusals::noRecord, senderName, nowMs);
+    char who[72];
+    sensorRecordWords(origin, who, sizeof(who));
+    remoteSensorRefuseFull(&RemoteSensorRefusals::noRecord, who, nowMs);
     return;
   }
   if (!sensorPeerSlotsEnsure(peer)) {
     remoteSensorRefuseFull(&RemoteSensorRefusals::noMemory, senderName, nowMs);
     return;
   }
-  V4PayloadSensorStatus status;
-  memcpy(&status, payload, sizeof(status));
+  struct {
+    uint32_t presentMask;
+    uint32_t streamingMask;
+  } status = { frame.presentMask, frame.streamingMask };
   // Bits of types this firmware does not know are ignored, so nothing is
   // indexed with a number from the frame.
   taskENTER_CRITICAL(&gRemoteSensorMux);
-  strlcpy(peer->name, senderName ? senderName : "", sizeof(peer->name));
+  strlcpy(peer->name, origin.name, sizeof(peer->name));
   for (int i = 0; i < REMOTE_SENSOR_MAX; i++) {
     const uint32_t bit = espnowsensor::sensorBit((uint8_t)i);
     RemoteSensorData* entry = &peer->slots[i];
@@ -856,6 +882,19 @@ void remoteSensorIngestStatus(const uint8_t* senderMac, const char* senderName,
     }
   }
   taskEXIT_CRITICAL(&gRemoteSensorMux);
+  // A bond master hands its partner's status on (to the master it forwards
+  // readings to, with the sensors it forwards).
+  if (fromBond) sensorForwardStatus(senderMac, frame);
+}
+
+void remoteSensorIngestStatus(const uint8_t* senderMac, const char* senderName,
+                              const uint8_t* payload, size_t payloadLen) {
+  sensorStatusIngest(senderMac, senderName, payload, payloadLen, /*fromBond=*/false);
+}
+
+void remoteSensorIngestBondStatus(const uint8_t* senderMac, const char* senderName,
+                                  const uint8_t* payload, size_t payloadLen) {
+  sensorStatusIngest(senderMac, senderName, payload, payloadLen, /*fromBond=*/true);
 }
 
 // The slots are judged by 32-bit uptime differences, which come round again
@@ -1009,10 +1048,12 @@ static bool sensorControllerClearIfNoLeaseLocked(uint8_t previous[6]) {
 // lease just ended is told once more, so it sees the stream stop.
 static void announceSensorStatus(const uint8_t* alsoTo = nullptr) {
   // A bond worker tells nothing to a mesh master, not even a controller whose
-  // lease ended (its bond master has the bond status frame).
-  if (!espnowfwd::meshDataAllowed(sensorIsBondWorker())) return;
+  // lease ended: it tells its bond master (BOND_SENSOR_STATUS), which may
+  // forward it to the master it forwards readings to.
+  const bool bondWorker = sensorIsBondWorker();
+  if (!espnowfwd::meshDataAllowed(bondWorker)) alsoTo = nullptr;
   const espnowsensor::TargetChoice target = sensorReadingTarget(-1);
-  const bool haveTarget = target.why == espnowsensor::DropReason::None && !target.viaBond;
+  const bool haveTarget = target.why == espnowsensor::DropReason::None && target.viaBond == bondWorker;
   if (!haveTarget && !alsoTo) return;
   struct Item { bool connected; RemoteSensorType type; };
   // The connected globals are real driver state, or `false` from the disabled
@@ -1037,12 +1078,30 @@ static void announceSensorStatus(const uint8_t* alsoTo = nullptr) {
     if (gSensorStreamingEnabled[it.type]) streamingMask |= espnowsensor::sensorBit((uint8_t)it.type);
   }
   const uint32_t nowMs = (uint32_t)millis();
-  if (haveTarget && espnowSessionSettled(target.mac, nowMs)) {
+  if (haveTarget && target.viaBond) {
+    // Over the bond link only (the bond send rules wait for its session).
+    (void)v4_send_bond_sensor_status(target.mac, presentMask, streamingMask, sensorBootTag());
+  } else if (haveTarget && espnowSessionSettled(target.mac, nowMs)) {
     (void)v4_send_sensor_status(target.mac, presentMask, streamingMask, sensorBootTag());
   }
   if (alsoTo && !(haveTarget && memcmp(alsoTo, target.mac, 6) == 0) && espnowSessionSettled(alsoTo, nowMs)) {
     (void)v4_send_sensor_status(alsoTo, presentMask, streamingMask, sensorBootTag());
   }
+}
+
+// A bond worker tells its bond master which sensors it has once per bond
+// session (and on every change after that, announceSensorStatus), so the bond
+// master, and the master it forwards readings to, list them before any
+// reading. espnow_task (sensorLinkTick).
+static void sensorBondStatusTick(uint32_t nowMs) {
+  static uint16_t sStatusSessionId = 0;
+  if (!sensorIsBondWorker()) return;
+  const espnowsensor::TargetChoice target = sensorReadingTarget(-1);
+  const uint16_t sid =
+      target.why == espnowsensor::DropReason::None && target.viaBond ? espnowSessionIdOf(target.mac) : 0;
+  if (sid == 0 || sid == sStatusSessionId || !espnowSessionSettled(target.mac, nowMs)) return;
+  sStatusSessionId = sid;
+  announceSensorStatus();
 }
 
 void sensorPresenceChanged(RemoteSensorType sensorType, bool present) {
@@ -1079,6 +1138,8 @@ void startSensorDataStreaming(RemoteSensorType sensorType) {
   if (gSettings.bondModeEnabled && isBondMaster()) {
     DEBUG_ESPNOW_STREAMF("[SENSOR_STREAM] Bond master: sending STREAM_CTRL %s ON to worker", sensorTypeToString(sensorType));
     bool sent = sendBondStreamCtrl(sensorType, true);
+    // The user's stream now: the end of a mesh master's lease leaves it on.
+    bondForwardStreamByHand((uint8_t)sensorType, true);
     if (sent) {
       // Update local flag so UI reflects the requested streaming state
       gSensorStreamingEnabled[sensorType] = true;
@@ -1163,6 +1224,8 @@ void stopSensorDataStreaming(RemoteSensorType sensorType) {
   if (gSettings.bondModeEnabled && isBondMaster()) {
     DEBUG_ESPNOW_STREAMF("[SENSOR_STREAM] Bond master: sending STREAM_CTRL %s OFF to worker", sensorTypeToString(sensorType));
     sendBondStreamCtrl(sensorType, false);
+    // A stop by hand ends a mesh master's lease on it too.
+    bondForwardStreamByHand((uint8_t)sensorType, false);
     gSensorStreamingEnabled[sensorType] = false;
     xSemaphoreGive(gSensorBroadcasterLifecycleMutex);
     BROADCAST_PRINTF("[ESP-NOW] Requested worker to stop streaming %s sensor data", sensorTypeToString(sensorType));
@@ -1455,6 +1518,10 @@ void sensorLinkTick(uint32_t nowMs) {
   memcpy(mac, gSensorNeedSessionMac, 6);
   taskEXIT_CRITICAL(&gSensorBcastTaskMux);
   if (need && !espnowSessionUp(mac)) (void)espnowHandshakeAutoStart(mac);
+
+  // A bond worker tells its bond master which sensors it has once per bond
+  // session (sensorBondStatusTick).
+  sensorBondStatusTick(nowMs);
 
   // One line a minute per sensor while its readings are not sent.
   for (int i = 0; i < REMOTE_SENSOR_MAX; i++) {

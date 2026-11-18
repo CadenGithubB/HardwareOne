@@ -82,6 +82,9 @@ static bool bfMeshOn() { return meshEnabled(); }
 static int bfParseBool(const char* word) { return parseBoolArg(String(word)); }
 static uint8_t bfRole() { return gSettings.meshRole; }
 static void bfTargets(SensorReceiverTargets* out) { sensorReceiverTargets(out); }
+// `mac` is paired in this device's primary mesh (the default slot of
+// gSettings.meshes): only a master there gets the partner's data.
+static bool bfInPrimaryMesh(const uint8_t mac[6]) { return espnowPeerInPrimaryMesh(mac); }
 // The sessionId of the ACTIVE session with `mac` (0: none). A rekey keeps it.
 static uint16_t bfSessionId(const uint8_t mac[6]) { return espnowSessionIdOf(mac); }
 static bool bfSettled(const uint8_t mac[6], uint32_t nowMs) { return espnowSessionSettled(mac, nowMs); }
@@ -105,6 +108,32 @@ static bool bfSendPower(const uint8_t mac[6], const uint8_t* payload, uint16_t l
 static bool bfSendEvent(const uint8_t mac[6], const uint8_t* payload, uint16_t len) {
   return espnowtx::sendAead(mac, ESPNOW_V4_TYPE_EVENT_PUSH, 0, generateMessageId(), payload, len, 1);
 }
+static bool bfSendStatus(const uint8_t mac[6], const uint8_t* payload, uint16_t len) {
+  return espnowtx::sendAead(mac, ESPNOW_V4_TYPE_SENSOR_STATUS, 0, generateMessageId(), payload, len, 1);
+}
+// The bond-link control of the partner's sensors (BOND_STREAM_CTRL), the
+// same one 'bondstream' and the bond page use. False: not sent (the partner is
+// not synced, the queue is full).
+static bool bfStreamCtrl(uint8_t sensor, bool on) { return sendBondStreamCtrl((RemoteSensorType)sensor, on); }
+// The partner is connected and synced: a stream control can be sent.
+static bool bfPartnerOnline() { return isBondModeOnline() && isBondSynced(); }
+// The sensors this device's user chose to stream at the partner and that
+// start again with every bond session (the saved 'bondstream' settings, step
+// 9f). Not the runtime streaming flags: on a bond master with sensors of its
+// own they also say what a mesh master subscribed here, which is not the
+// partner's. What the user switched by hand this boot reaches the leases
+// through bondForwardStreamByHand.
+static uint16_t bfSavedStreams() {
+  uint16_t mask = 0;
+  for (uint8_t i = 0; i < REMOTE_SENSOR_MAX; ++i) {
+    const bool* saved = bondStreamSetting((RemoteSensorType)i);
+    if (saved && *saved) mask = (uint16_t)(mask | espnowsensor::sensorBit(i));
+  }
+  return mask;
+}
+static_assert(espnowfwd::kReqSubscribe == SENSOR_REQ_SUBSCRIBE && espnowfwd::kReqUnsubscribe == SENSOR_REQ_UNSUBSCRIBE &&
+                  espnowfwd::kReqOneshot == SENSOR_REQ_ONESHOT,
+              "the request modes of System_ESPNow_ForwardCore.h are those of SENSOR_REQ");
 static void bfName(const uint8_t mac[6], char* out, size_t cap) {
   strlcpy(out, getEspNowDeviceName(mac).c_str(), cap);
   if (!out[0]) macToDisplay(mac, out, cap);
@@ -140,6 +169,7 @@ struct BfCounts {
 struct BfTargetView {
   bool have;
   bool isPartner;
+  bool inPrimary;   // paired in this device's primary mesh
   bool session;
   uint8_t mac[6];
   espnowfwd::TState state;
@@ -154,8 +184,23 @@ struct BfView {
   BfTargetView targets[2];
 };
 
+// The mesh master's sensor requests for the partner. Under sBfMux.
+struct BfRequests {
+  espnowfwd::ReqLeases leases;
+  uint8_t partner[6];   // the partner the leases and the user's streams are on (set by the tick)
+  uint32_t applied;
+  uint32_t refused;
+  uint8_t lastRefused;  // espnowfwd::ReqVerdict (0: none)
+};
+
 struct BfState {
   // ---- espnow_task only ----
+  // The partner's last sensor status (BOND_SENSOR_STATUS), sent on to the
+  // primary when it accepts, so it lists the partner's sensors at once.
+  bool haveStatus;
+  uint8_t statusFrom[6];
+  espnowfwd::StatusFrame status;
+  WarnLimiter reqWarn;
   espnowfwd::StandingLink link;
   espnowfwd::AgreeMemo agree;
   uint8_t lastGen;                     // the last link number used in this boot (0: none)
@@ -172,6 +217,7 @@ struct BfState {
   // ---- under sBfMux ----
   BfCounts counts;
   BfView view;
+  BfRequests req;
 };
 
 EXT_RAM_BSS_ATTR static BfState sBf;  // PSRAM: tasks only, never the radio callback
@@ -224,7 +270,17 @@ static void bfSendWithdraw(const uint8_t to[6], uint8_t gen, const uint8_t partn
   bfSendFrame(to, f);
 }
 
-static espnowfwd::DecideInputs bfInputs(const BfBond& b, const SensorReceiverTargets& tg, bool agreementOk) {
+// Which named masters are paired in this device's primary mesh (bit 0 the
+// primary, bit 1 the backup). The pairing lookup runs outside the lock.
+static uint8_t bfInPrimaryMask(const SensorReceiverTargets& tg) {
+  uint8_t mask = 0;
+  if (tg.havePrimary && bfInPrimaryMesh(tg.primary)) mask |= 1;
+  if (tg.haveBackup && bfInPrimaryMesh(tg.backup)) mask |= 2;
+  return mask;
+}
+
+static espnowfwd::DecideInputs bfInputs(const BfBond& b, const SensorReceiverTargets& tg, bool agreementOk,
+                                        uint8_t inPrimary) {
   espnowfwd::DecideInputs in = {};
   in.settingOn = bfSettingOn();
   in.bondMaster = b.modeOn && b.havePartner && b.isMaster && b.partnerPaired;
@@ -233,7 +289,61 @@ static espnowfwd::DecideInputs bfInputs(const BfBond& b, const SensorReceiverTar
   in.meshRole = bfRole();
   in.masterNamed = tg.masterNamed || tg.backupNamed;
   in.targetsPaired = (uint8_t)((tg.havePrimary ? 1 : 0) + (tg.haveBackup ? 1 : 0));
+  in.targetsInPrimary = (uint8_t)(((inPrimary & 1) ? 1 : 0) + ((inPrimary & 2) ? 1 : 0));
   return in;
+}
+
+// The partner's sensors a lease switches on (and the bond session the "on"
+// went over, so a new session sends it again). espnow_task.
+static void bfLeaseOn(uint16_t on, uint16_t partnerSid) {
+  for (uint8_t i = 0; i < REMOTE_SENSOR_MAX; ++i) {
+    const uint16_t bit = espnowsensor::sensorBit(i);
+    if (!(on & bit)) continue;
+    const bool sent = bfStreamCtrl(i, true);
+    BF_LOCK();
+    sBf.req.leases.onSession[i] = sent ? partnerSid : 0;  // 0: sent again on the next tick
+    BF_UNLOCK();
+  }
+}
+
+// Every "off" a lease's end owes the partner; one that could not be sent
+// stays owed and goes again on the next tick. espnow_task.
+static void bfSendOwedOff() {
+  BF_LOCK();
+  const uint16_t owed = sBf.req.leases.offOwed;
+  BF_UNLOCK();
+  for (uint8_t i = 0; owed && i < REMOTE_SENSOR_MAX; ++i) {
+    const uint16_t bit = espnowsensor::sensorBit(i);
+    if (!(owed & bit) || !bfStreamCtrl(i, false)) continue;
+    BF_LOCK();
+    espnowfwd::leaseOffSent(sBf.req.leases, bit);
+    BF_UNLOCK();
+  }
+}
+
+// Every lease ends; what a lease switched on at the partner is switched off.
+// The leases are always on the partner there is now: the tick forgets them
+// first when the partner changed or this device is no longer its bond master.
+static void bfLeasesEnd() {
+  BF_LOCK();
+  (void)espnowfwd::leaseEndAll(sBf.req.leases);
+  BF_UNLOCK();
+  bfSendOwedOff();
+}
+
+// The partner's last sensor status, to the primary master when it carries
+// readings, with the sensors it accepted only and this link's number.
+static void bfSendPartnerStatus() {
+  const espnowfwd::TargetState& t = sBf.targets[espnowfwd::kTargetPrimary];
+  if (!sBf.haveStatus || !sBf.link.active || !espnowfwd::macSame(sBf.statusFrom, sBf.link.partner) || !t.have) return;
+  if (!espnowfwd::targetCarries(t, bfSessionId(t.mac), espnowfwd::kStreamReadings, -1)) return;
+  espnowfwd::StatusFrame g = sBf.status;
+  g.presentMask &= t.acceptedMask;
+  g.streamingMask &= t.acceptedMask;
+  g.fwdLink = sBf.link.linkGen;
+  uint8_t payload[espnowfwd::kStatusFrameLen];
+  espnowfwd::packStatusFrame(payload, g);
+  (void)bfSendStatus(t.mac, payload, (uint16_t)sizeof(payload));
 }
 
 void bondForwardTick(uint32_t nowMs) {
@@ -249,20 +359,37 @@ void bondForwardTick(uint32_t nowMs) {
   if (bfHeld(epoch) || b.epoch != epoch) return;  // a change began while it was read
   sBf.ticked = true;
   sBf.lastTickMs = nowMs;
+  // The leases, the "off" they owe and the user's streams belong to this
+  // device as bond master of one partner: with another partner, or no longer
+  // its bond master, they are forgotten (nothing is sent to anyone).
+  {
+    const bool masterOfPartner = b.modeOn && b.havePartner && b.isMaster;
+    uint8_t partnerNow[6] = {0};
+    if (masterOfPartner) memcpy(partnerNow, b.partner, 6);
+    BF_LOCK();
+    if (!espnowfwd::macSame(sBf.req.partner, partnerNow)) {
+      espnowfwd::leaseForgetPartner(sBf.req.leases);
+      memcpy(sBf.req.partner, partnerNow, 6);
+    }
+    BF_UNLOCK();
+  }
   SensorReceiverTargets tg = {};
   bfTargets(&tg);
   const bool agreementOk = espnowfwd::agreementAllows(sBf.agree, b.agreeState, b.roleConflict, b.epoch);
-  const espnowfwd::WhyNot why = espnowfwd::forwardDecide(bfInputs(b, tg, agreementOk));
+  const uint8_t inPrimary = bfInPrimaryMask(tg);
+  const espnowfwd::WhyNot why = espnowfwd::forwardDecide(bfInputs(b, tg, agreementOk, inPrimary));
   sBf.tickWhy = why;
   const bool want = why == espnowfwd::WhyNot::Forwards;
 
   // The standing link ends when forwarding stops, the partner or its key
-  // changed, or a partner change ran (the hold epoch moved).
+  // changed, or a partner change ran (the hold epoch moved). The mesh
+  // master's leases on the partner's sensors end with it.
   espnowfwd::StandingLink& link = sBf.link;
   if (link.active && (!want || !espnowfwd::macSame(link.partner, b.partner) || link.epoch != b.epoch ||
                       memcmp(link.partnerKey, b.partnerKey, sizeof(link.partnerKey)) != 0)) {
     for (auto& t : sBf.targets) espnowfwd::targetBeginWithdraw(t, link.linkGen, link.partner, nowMs);
     link.active = false;
+    bfLeasesEnd();
   }
   if (want && !link.active) {
     sBf.lastGen = espnowfwd::linkGenNext(sBf.lastGen);
@@ -275,6 +402,7 @@ void bondForwardTick(uint32_t nowMs) {
   }
 
   const uint16_t mask = bfSensorMask();
+  bool primaryGetsReadings = false;  // the primary target is wanted (the leases' master)
   BfTargetView views[2] = {};
   for (uint8_t kind = 0; kind < 2; ++kind) {
     espnowfwd::TargetState& t = sBf.targets[kind];
@@ -282,12 +410,14 @@ void bondForwardTick(uint32_t nowMs) {
     const uint8_t* mac = kind == espnowfwd::kTargetPrimary ? tg.primary : tg.backup;
     if (t.have && (!have || !espnowfwd::macSame(t.mac, mac))) {
       // Another master is named now: the one that was told about the link
-      // gets one withdrawal, if its session is up.
+      // gets one withdrawal, if its session is up. Its leases on the
+      // partner's sensors end.
       if ((t.state != espnowfwd::TState::Idle || t.wTries) && bfSessionId(t.mac) != 0) {
         bfSendWithdraw(t.mac, t.state != espnowfwd::TState::Idle ? t.linkGen : t.wGen,
                        t.state != espnowfwd::TState::Idle ? sBf.lastPartner : t.wPartner);
       }
       memset(&t, 0, sizeof(t));
+      if (kind == espnowfwd::kTargetPrimary) bfLeasesEnd();
     }
     if (!have) continue;
     if (!t.have) {
@@ -296,8 +426,10 @@ void bondForwardTick(uint32_t nowMs) {
       memcpy(t.mac, mac, 6);
     }
     const bool isPartner = b.havePartner && espnowfwd::macSame(mac, b.partner);
+    const bool inPrimaryMesh = (inPrimary & (1u << kind)) != 0;
     views[kind].have = true;
     views[kind].isPartner = isPartner;
+    views[kind].inPrimary = inPrimaryMesh;
     memcpy(views[kind].mac, mac, 6);
     const uint16_t sid = bfSessionId(mac);
     views[kind].session = sid != 0;
@@ -307,11 +439,17 @@ void bondForwardTick(uint32_t nowMs) {
     // master before it became the partner) and, once a session, that this
     // device forwards for nobody. No session is started with it: the bond owns
     // that session.
+    // A master paired in another mesh than this device's primary mesh gets
+    // nothing either: a link it was told of is withdrawn.
     espnowfwd::TargetWant w = {};
-    w.want = want && link.active && !isPartner;
+    w.want = want && link.active && !isPartner && inPrimaryMesh;
     w.linkGen = link.linkGen;
     w.streams = espnowfwd::streamsForTarget(kind);
     w.sensorMask = mask;
+    if (kind == espnowfwd::kTargetPrimary) primaryGetsReadings = w.want;
+    if (!w.want && link.active && t.state != espnowfwd::TState::Idle) {
+      espnowfwd::targetBeginWithdraw(t, link.linkGen, link.partner, nowMs);
+    }
     if (sid == 0) {
       if (!isPartner && (w.want || t.wTries)) (void)bfHandshake(mac);
       views[kind].state = t.state;
@@ -327,6 +465,24 @@ void bondForwardTick(uint32_t nowMs) {
     views[kind].lastResult = t.lastResult;
     views[kind].streams = t.acceptedStreams;
   }
+
+  // The mesh master's leases on the partner's sensors: those that ran out, or
+  // whose sensor is no longer forwarded, or whose master no longer gets the
+  // readings (it left the primary mesh), are switched off; those whose "on"
+  // went over an older bond session (the partner restarted) are switched on
+  // again. An "off" that could not be sent is sent again, also after the
+  // link ended, while this device is still the partner's bond master.
+  const bool online = bfPartnerOnline();
+  if (link.active) {
+    const uint16_t partnerSid = bfSessionId(link.partner);
+    BF_LOCK();
+    (void)espnowfwd::leaseExpire(sBf.req.leases, nowMs);
+    (void)espnowfwd::leaseKeepOnly(sBf.req.leases, primaryGetsReadings ? mask : 0);
+    const uint16_t on = online ? espnowfwd::leaseResend(sBf.req.leases, partnerSid) : 0;
+    BF_UNLOCK();
+    if (on) bfLeaseOn(on, partnerSid);
+  }
+  if (online) bfSendOwedOff();
 
   BF_LOCK();
   sBf.view.why = why;
@@ -357,7 +513,6 @@ bool bondForwardOnLinkFrame(const uint8_t src[6], const espnowfwd::LinkFrame& f)
       kind = k;
     }
   }
-  (void)kind;
   if (!t) {
     BF_LOCK();
     sBf.counts.answersIgnored++;
@@ -380,6 +535,8 @@ bool bondForwardOnLinkFrame(const uint8_t src[6], const espnowfwd::LinkFrame& f)
         bfConsole("[ESP-NOW] %s accepted: this device forwards %s's %s to it", master, partner,
                   (t->acceptedStreams & espnowfwd::kStreamReadings) ? "readings, battery state and events"
                                                                     : "battery state and events");
+        // The partner's sensors are listed there before its first reading.
+        if (kind == espnowfwd::kTargetPrimary) bfSendPartnerStatus();
       }
       break;
     case espnowfwd::AnswerEffect::Refused:
@@ -504,6 +661,75 @@ void bondForwardNotKept(uint8_t streamId) {
   bfCount(bfStreamOf(streamId), espnowfwd::WhyNot::NotKeptHere);
 }
 
+void bondForwardStatus(const uint8_t src[6], const espnowfwd::StatusFrame& f) {
+  if (!src) return;
+  sBf.haveStatus = true;
+  memcpy(sBf.statusFrom, src, 6);
+  sBf.status = f;
+  sBf.status.fwdLink = 0;
+  if (bfFrameCheck(src) != espnowfwd::WhyNot::Forwards) return;
+  bfSendPartnerStatus();
+}
+
+void bondForwardSensorRequest(const uint8_t src[6], uint8_t mode, uint32_t sensorMask, uint32_t intervalMs,
+                              uint32_t leaseMs, uint8_t fwdLink) {
+  if (!src) return;
+  const uint32_t nowMs = bfNow();
+  const uint32_t epoch = bfEpoch();
+  BfBond b;
+  bfBond(&b);
+  const espnowfwd::TargetState& t = sBf.targets[espnowfwd::kTargetPrimary];
+  espnowfwd::ReqInputs in = {};
+  in.settingOn = bfSettingOn();
+  in.bondMaster = b.modeOn && b.havePartner && b.isMaster && b.partnerPaired;
+  in.linkActive = sBf.link.active && !bfHeld(epoch) && sBf.link.epoch == epoch &&
+                  espnowfwd::macSame(sBf.link.partner, b.partner);
+  in.linkGen = sBf.link.linkGen;
+  in.fwdLink = fwdLink;
+  in.fromAcceptedPrimary = t.have && espnowfwd::macSame(t.mac, src) &&
+                           espnowfwd::targetCarries(t, bfSessionId(src), espnowfwd::kStreamReadings, -1);
+  in.mode = mode;
+  in.mask = (uint16_t)(sensorMask & espnowsensor::kSensorMaskAll);
+  in.forwardedMask = t.acceptedMask;
+  in.partnerOnline = bfPartnerOnline();
+  const espnowfwd::ReqVerdict verdict = espnowfwd::sensorReqDecide(in);
+  if (verdict != espnowfwd::ReqVerdict::Apply) {
+    BF_LOCK();
+    sBf.req.refused++;
+    sBf.req.lastRefused = (uint8_t)verdict;
+    BF_UNLOCK();
+    uint32_t held = 0;
+    if (warnLimiterTake(sBf.reqWarn, nowMs, 60000, &held)) {
+      char master[32];
+      bfName(src, master, sizeof(master));
+      bfConsole("[ESP-NOW] Sensor request from %s for the bond partner refused: %s (%lu more in the last minute)",
+                master, espnowfwd::reqVerdictText(verdict), (unsigned long)held);
+    }
+    return;
+  }
+  // The sensors X streams already (its status says so) or this device's user
+  // streams there (saved; by hand: the leases' byUser) are not started by the
+  // lease, and its end leaves them on.
+  uint16_t streaming = bfSavedStreams();
+  if (sBf.haveStatus && espnowfwd::macSame(sBf.statusFrom, sBf.link.partner)) {
+    streaming = (uint16_t)(streaming | (sBf.status.streamingMask & espnowsensor::kSensorMaskAll));
+  }
+  const uint16_t mask = mode == espnowfwd::kReqUnsubscribe ? in.mask : (uint16_t)(in.mask & in.forwardedMask);
+  BF_LOCK();
+  const espnowfwd::LeaseActs acts =
+      espnowfwd::leaseApply(sBf.req.leases, mode, mask, streaming, intervalMs, leaseMs, nowMs);
+  sBf.req.applied++;
+  BF_UNLOCK();
+  if (acts.on) bfLeaseOn(acts.on, bfSessionId(sBf.link.partner));
+  if (acts.off) bfSendOwedOff();
+}
+
+void bondForwardStreamByHand(uint8_t sensor, bool on) {
+  BF_LOCK();
+  espnowfwd::leaseByHand(sBf.req.leases, sensor, on);
+  BF_UNLOCK();
+}
+
 // ---- What is shown (cmd_exec, the web server) ------------------------------------
 
 static bool bfAppend(char* out, size_t cap, size_t* pos, const char* fmt, ...) {
@@ -535,7 +761,7 @@ static espnowfwd::WhyNot bfWhyNow(BfBond* bondOut) {
   espnowfwd::AgreeMemo memo = sBf.agree;  // a copy: the tick owns the real one
   const bool agreementOk = espnowfwd::agreementAllows(memo, b.agreeState, b.roleConflict, b.epoch);
   if (bondOut) *bondOut = b;
-  return espnowfwd::forwardDecide(bfInputs(b, tg, agreementOk));
+  return espnowfwd::forwardDecide(bfInputs(b, tg, agreementOk, bfInPrimaryMask(tg)));
 }
 
 static void bfSensorWords(uint16_t mask, char* out, size_t cap) {
@@ -620,6 +846,7 @@ static const char* bfDescribe(char* reply, size_t cap, const char* lead, bool li
       now[k].isPartner = b.havePartner && espnowfwd::macSame(mac, b.partner);
       now[k].state = espnowfwd::TState::Announcing;
     }
+    now[k].inPrimary = bfInPrimaryMesh(mac);
     now[k].session = bfSessionId(mac) != 0;
   }
   memcpy(view.targets, now, sizeof(now));
@@ -627,7 +854,7 @@ static const char* bfDescribe(char* reply, size_t cap, const char* lead, bool li
   const BfTargetView* other = nullptr;
   for (uint8_t k = 0; k < 2; ++k) {
     const BfTargetView& t = view.targets[k];
-    if (!t.have || t.isPartner) continue;
+    if (!t.have || t.isPartner || !t.inPrimary) continue;
     if (t.session && t.state == espnowfwd::TState::Accepted) accepted[k] = &t;
     else if (!other) other = &t;
   }
@@ -654,7 +881,7 @@ static const char* bfDescribe(char* reply, size_t cap, const char* lead, bool li
   bool first = true;
   for (uint8_t k = 0; k < 2; ++k) {
     const BfTargetView& t = view.targets[k];
-    if (!t.have || t.isPartner) continue;
+    if (!t.have || t.isPartner || !t.inPrimary) continue;
     char words[160];
     bfTargetWords(t, words, sizeof(words));
     const bool readings = k == espnowfwd::kTargetPrimary;
@@ -768,9 +995,11 @@ size_t bondForwardStatusJson(char* out, size_t cap) {
     bfName(t.mac, name, sizeof(name));
     espnowsensor::jsonTextEscape(name, nameJson, sizeof(nameJson));
     bfStreamsJson(espnowfwd::streamsForTarget(k), streams, sizeof(streams));
-    bfAppend(out, cap, &pos, "%s{\"kind\":\"%s\",\"mac\":\"" MAC_FMT "\",\"name\":\"%s\",\"isPartner\":%s,\"state\":\"%s\"",
+    bfAppend(out, cap, &pos,
+             "%s{\"kind\":\"%s\",\"mac\":\"" MAC_FMT "\",\"name\":\"%s\",\"isPartner\":%s,\"inPrimaryMesh\":%s,"
+             "\"state\":\"%s\"",
              first ? "" : ",", k == espnowfwd::kTargetPrimary ? "primary" : "backup", MAC_ARGS(t.mac), nameJson,
-             t.isPartner ? "true" : "false", espnowfwd::targetStateKey(t.state));
+             t.isPartner ? "true" : "false", t.inPrimary ? "true" : "false", espnowfwd::targetStateKey(t.state));
     if (t.lastResult) bfAppend(out, cap, &pos, ",\"result\":\"%s\"", espnowfwd::resultKey(t.lastResult));
     else bfAppend(out, cap, &pos, ",\"result\":null");
     bfAppend(out, cap, &pos, ",\"streams\":%s,\"session\":%s}", streams, t.session ? "true" : "false");
@@ -790,7 +1019,25 @@ size_t bondForwardStatusJson(char* out, size_t cap) {
     }
     bfAppend(out, cap, &pos, "}");
   }
-  const bool whole = bfAppend(out, cap, &pos, "},\"answersIgnored\":%lu}", (unsigned long)counts.answersIgnored);
+  BfRequests req;
+  BF_LOCK();
+  req = sBf.req;
+  BF_UNLOCK();
+  bfAppend(out, cap, &pos, "},\"answersIgnored\":%lu,\"sensorRequests\":{\"applied\":%lu,\"refused\":%lu,\"lastRefused\":",
+           (unsigned long)counts.answersIgnored, (unsigned long)req.applied, (unsigned long)req.refused);
+  if (req.lastRefused) {
+    bfAppend(out, cap, &pos, "\"%s\"", espnowfwd::reqVerdictKey((espnowfwd::ReqVerdict)req.lastRefused));
+  } else {
+    bfAppend(out, cap, &pos, "null");
+  }
+  bfAppend(out, cap, &pos, ",\"leased\":[");
+  first = true;
+  for (uint8_t k = 0; k < REMOTE_SENSOR_MAX; ++k) {
+    if (!(req.leases.leased & espnowsensor::sensorBit(k))) continue;
+    bfAppend(out, cap, &pos, "%s\"%s\"", first ? "" : ",", espnowsensor::sensorName(k));
+    first = false;
+  }
+  const bool whole = bfAppend(out, cap, &pos, "]}}");
   if (!whole) {
     out[0] = '\0';
     return 0;
@@ -824,6 +1071,19 @@ void bondForwardStatusLines(char* out, size_t cap) {
              espnowfwd::whyNotText((espnowfwd::WhyNot)topReason));
   }
   bfAppend(out, cap, &pos, ".");
+  BfRequests req;
+  BF_LOCK();
+  req = sBf.req;
+  BF_UNLOCK();
+  if (!req.applied && !req.refused) return;
+  char leased[160];
+  bfSensorWords(req.leases.leased, leased, sizeof(leased));
+  bfAppend(out, cap, &pos, "\n  Sensor requests for the partner: %lu applied, %lu refused",
+           (unsigned long)req.applied, (unsigned long)req.refused);
+  if (req.lastRefused) {
+    bfAppend(out, cap, &pos, " (last: %s)", espnowfwd::reqVerdictText((espnowfwd::ReqVerdict)req.lastRefused));
+  }
+  bfAppend(out, cap, &pos, "; leased now: %s.", leased);
 }
 
 // BOND_FORWARD_HOST_END

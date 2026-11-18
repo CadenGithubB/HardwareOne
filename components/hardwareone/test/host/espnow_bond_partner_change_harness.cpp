@@ -100,10 +100,25 @@ class String {
 struct Settings {
   bool bondModeEnabled = false;
   uint8_t bondRole = 0;
+  bool bondRoleChosen = false;
   String bondPeerMac;
   String espnowDeviceName{"this-device"};
 };
 static Settings gSettings;
+#if HW1_HAVE_AGREE
+// bondAutoRole (System_ESPNow.cpp, beside bondrole): this device's role was
+// automatic and the partner's user chose the same one. The production one
+// runs bondChangeRole (the role-dependent handshake reset); here the call and
+// the new role are recorded.
+static int gAutoRoleCalls = 0;
+static int gAutoRoleTo = -1;
+static void bondAutoRole(const uint8_t*, uint8_t newRole) {
+  if (gSettings.bondRoleChosen || newRole == gSettings.bondRole) return;  // as the production guard
+  ++gAutoRoleCalls;
+  gAutoRoleTo = newRole;
+  gSettings.bondRole = newRole;
+}
+#endif
 
 // What espnow_task does when it gets the CPU in the middle of a command. What
 // it runs (the handlers) does not preempt itself, and it does not get in
@@ -335,7 +350,7 @@ static void noteFrame(const uint8_t* mac, uint8_t type) {
 // Every BOND_REQUEST and BOND_NOTICE the device sends, with what it says
 // (request: role, flags; notice: reason, role). `direct` marks the one sent
 // from the command itself (v4_send_session_wrapped) instead of the send queue.
-struct AgreeFrame { uint8_t mac[6]; uint8_t type; uint8_t b0; uint8_t b1; uint16_t seq; bool held; bool direct; };
+struct AgreeFrame { uint8_t mac[6]; uint8_t type; uint8_t b0; uint8_t b1; uint16_t seq; uint8_t b4; bool held; bool direct; };
 static std::vector<AgreeFrame> gAgreeFrames;
 static void noteAgreeFrame(const uint8_t* mac, uint8_t type, const uint8_t* payload, uint16_t len, bool direct) {
   if (type != ESPNOW_V4_TYPE_BOND_REQUEST && type != ESPNOW_V4_TYPE_BOND_NOTICE) return;
@@ -347,6 +362,7 @@ static void noteAgreeFrame(const uint8_t* mac, uint8_t type, const uint8_t* payl
     f.b1 = payload[1];
     std::memcpy(&f.seq, payload + 2, 2);
   }
+  if (payload && len >= 5) f.b4 = payload[4];  // a notice's flags
   f.held = bondPartnerChanging();
   f.direct = direct;
   gAgreeFrames.push_back(f);
@@ -698,6 +714,10 @@ static void resetWorld(const uint8_t self[6]) {
   gCmdExecQ.clear();
   gFileSends.clear();
   gAgreeFrames.clear();
+#if HW1_HAVE_AGREE
+  gAutoRoleCalls = 0;
+  gAutoRoleTo = -1;
+#endif
   gEventLines.clear();
   gWatchedSends.clear();
   gAuthLines.clear();

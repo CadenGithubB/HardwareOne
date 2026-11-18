@@ -248,6 +248,42 @@ static void sensorNotKept(uint8_t sensorType) {
   notUnderLock();
   gNotKept.push_back(sensorType);
 }
+// The status frame's question (the byte alone, the status stream id), by the
+// same production rule.
+static ForwardResolve sensorStatusWhose(const uint8_t* src, const char* srcName, bool fromBond, uint8_t fwdLink,
+                                        ForwardOrigin* out) {
+  notUnderLock();
+  std::memset(out, 0, sizeof(*out));
+  std::memcpy(out->mac, src, 6);
+  out->link = fromBond ? espnowfwd::kLinkBond : espnowfwd::kLinkMesh;
+  std::snprintf(out->name, sizeof(out->name), "%s", srcName ? srcName : "");
+  const espnowfwd::ForwardLink* e = gLink.inUse && std::memcmp(gLink.via, src, 6) == 0 ? &gLink : nullptr;
+  const espnowfwd::Attribution a = espnowfwd::attribute(e, fromBond, false, false, fwdLink, espnowfwd::kStreamIdStatus);
+  switch (a.verdict) {
+    case espnowfwd::Verdict::Own: return ForwardResolve::Own;
+    case espnowfwd::Verdict::Malformed: return ForwardResolve::Malformed;
+    case espnowfwd::Verdict::Forwarded:
+      std::memcpy(out->mac, e->partner, 6);
+      std::memcpy(out->via, src, 6);
+      out->link = espnowfwd::kLinkForwarded;
+      std::memcpy(out->name, e->name, sizeof(out->name));
+      return ForwardResolve::Forwarded;
+    default:
+      return ForwardResolve::Refused;
+  }
+}
+struct ForwardedStatus {
+  uint8_t src[6];
+  espnowfwd::StatusFrame f;
+};
+static std::vector<ForwardedStatus> gForwardedStatus;
+static void sensorForwardStatus(const uint8_t src[6], const espnowfwd::StatusFrame& f) {
+  notUnderLock();
+  ForwardedStatus fs{};
+  std::memcpy(fs.src, src, 6);
+  fs.f = f;
+  gForwardedStatus.push_back(fs);
+}
 static void sensorViaName(const uint8_t mac[6], char* out, size_t cap) {
   std::snprintf(out, cap, "%s", mac[5] == 0x20 ? "glasses" : "via?");
 }
@@ -257,6 +293,13 @@ static int gTargetAskedFor = -99;
 static espnowsensor::TargetChoice sensorReadingTarget(int sensorType) {
   gTargetAskedFor = sensorType;
   return gTarget;
+}
+// A bond worker's sensor status to its bond master once per bond session
+// (System_ESPNow_Sensors.cpp, outside the host block).
+static unsigned gBondStatusTicks = 0;
+static void sensorBondStatusTick(uint32_t) {
+  notUnderLock();
+  ++gBondStatusTicks;
 }
 // The lookup of the named masters among the paired devices (espnow_task).
 static unsigned gTargetRefreshes = 0;
@@ -1411,6 +1454,78 @@ static void testForwarded() {
   gConsole.clear();
 }
 
+
+// The partner's sensor status: on the mesh master, forwarded by glasses (the
+// link byte alone) it lists the partner's sensors under (partner via glasses)
+// before any reading; on the bond master, over the bond link, it is kept under
+// the partner whatever the mesh role and handed to the forwarder.
+static void testForwardedStatus() {
+  resetAll();
+  pair(kGlasses);
+  gSettings.meshRole = 1;
+  gForwardedStatus.clear();
+  linkUp(3);
+  espnowfwd::StatusFrame f{};
+  f.presentMask = espnowsensor::sensorBit(REMOTE_SENSOR_TOF) | espnowsensor::sensorBit(REMOTE_SENSOR_GPS);
+  f.streamingMask = espnowsensor::sensorBit(REMOTE_SENSOR_TOF);
+  f.bootTag = 0xAAAA;
+  f.fwdLink = 3;
+  uint8_t frame[espnowfwd::kStatusFrameLen];
+  espnowfwd::packStatusFrame(frame, f);
+  remoteSensorIngestStatus(kGlasses, "glasses", frame, sizeof(frame));
+  RemoteSensorInfo info;
+  check(remoteSensorInfoFor(kPartner, kGlasses, REMOTE_SENSOR_TOF, &info) && info.enabled && !info.fresh &&
+        info.jsonLength == 0 && info.link == espnowfwd::kLinkForwarded && std::string(info.deviceName) == "porch" &&
+        remoteSensorInfoFor(kPartner, kGlasses, REMOTE_SENSOR_GPS, &info) && !info.enabled,
+        "a forwarded status lists the partner's sensors via glasses before any reading");
+  check(!remoteSensorInfoFor(kGlasses, nullptr, REMOTE_SENSOR_TOF, &info) &&
+        !remoteSensorInfoFor(kPartner, nullptr, REMOTE_SENSOR_TOF, &info), "never under glasses' own record or the partner's own");
+  check(gForwardedStatus.empty(), "the mesh master forwards nothing");
+  // An old link number: refused, nothing kept.
+  const uint32_t refusedBefore = gRemoteSensorRefusals.forwardRefused;
+  f.fwdLink = 2;
+  espnowfwd::packStatusFrame(frame, f);
+  remoteSensorIngestStatus(kGlasses, "glasses", frame, sizeof(frame));
+  check(gRemoteSensorRefusals.forwardRefused == refusedBefore + 1, "another link number: refused");
+  // glasses' own status (byte 0) stays its own.
+  f.fwdLink = 0;
+  f.presentMask = espnowsensor::sensorBit(REMOTE_SENSOR_IMU);
+  espnowfwd::packStatusFrame(frame, f);
+  remoteSensorIngestStatus(kGlasses, "glasses", frame, sizeof(frame));
+  check(remoteSensorInfoFor(kGlasses, nullptr, REMOTE_SENSOR_IMU, &info) &&
+        !remoteSensorInfoFor(kPartner, kGlasses, REMOTE_SENSOR_IMU, &info), "glasses' own status is its own");
+
+  // The bond master: over the bond link, whatever its mesh role.
+  resetAll();
+  gSettings.meshRole = 0;
+  pair(kShed);
+  gForwardedStatus.clear();
+  f.fwdLink = 0;
+  f.presentMask = espnowsensor::sensorBit(REMOTE_SENSOR_TOF);
+  espnowfwd::packStatusFrame(frame, f);
+  remoteSensorIngestBondStatus(kShed, "shed", frame, sizeof(frame));
+  check(remoteSensorInfoFor(kShed, nullptr, REMOTE_SENSOR_TOF, &info) && info.link == espnowfwd::kLinkBond,
+        "the bond partner's status is kept by a bond master that is a mesh worker");
+  check(gForwardedStatus.size() == 1 && std::memcmp(gForwardedStatus[0].src, kShed, 6) == 0 &&
+        gForwardedStatus[0].f.presentMask == f.presentMask && gForwardedStatus[0].f.bootTag == 0xAAAA,
+        "and handed to the forwarder");
+  // A link byte over the bond link is malformed; a short frame too.
+  const uint32_t malformedBefore = gRemoteSensorRefusals.malformed;
+  f.fwdLink = 1;
+  espnowfwd::packStatusFrame(frame, f);
+  remoteSensorIngestBondStatus(kShed, "shed", frame, sizeof(frame));
+  remoteSensorIngestBondStatus(kShed, "shed", frame, sizeof(frame) - 1);
+  check(gRemoteSensorRefusals.malformed == malformedBefore + 2 && gForwardedStatus.size() == 1,
+        "a link byte on the bond link, or a short frame: malformed, not forwarded");
+  // The same frame from the mesh (not the bond link) on a worker: refused by the role rule.
+  f.fwdLink = 0;
+  espnowfwd::packStatusFrame(frame, f);
+  const uint32_t notReceiverBefore = gRemoteSensorRefusals.notReceiver;
+  remoteSensorIngestStatus(kShed, "shed", frame, sizeof(frame));
+  check(gRemoteSensorRefusals.notReceiver == notReceiverBefore + 1 && gForwardedStatus.size() == 1,
+        "a mesh status on a worker: refused, nothing forwarded");
+}
+
 int main() {
   testBeforeTheTable();
   testRoles();
@@ -1427,6 +1542,7 @@ int main() {
   testStreamReply();
   testReviewFindings();
   testForwarded();
+  testForwardedStatus();
   check(gLockViolations == 0, "nothing that may block, print or allocate ran under a lock");
   check(gLockDepth == 0, "every lock was released");
   if (failures != 0) {

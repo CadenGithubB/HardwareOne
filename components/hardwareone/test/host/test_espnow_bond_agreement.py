@@ -53,7 +53,19 @@ espnow_bond_agreement_cases.cpp. Checks:
   made between the ENDED and the settings change;
 - bondconnect to the partner already set says how the bond stands when it is
   not agreed and asks again at once, at most every 5 s;
-- the agreement text the JSON answers carry.
+- the agreement text the JSON answers carry;
+- the role (owner decision 2026-11-18): bondconnect keeps a role chosen with
+  bondrole, the request and the notice say "chosen", a partner whose role is
+  automatic is not reported as a conflict, this device's automatic role yields
+  to a partner's choice from its request or its notice (answered with the new
+  role, asked again), both chose the same role is ROLE_CONFLICT, a peer's
+  earlier request decides bondconnect, the role words of bondstatus.
+
+Source rules (System_ESPNow.cpp is not host-compiled as a whole): bondrole
+master|worker sets the persisted "chosen" flag and tells the partner, bondrole
+auto clears it, both go through bondChangeRole, the flag's setting row is in
+the "bond" group and read-only, and bondstatus json says roleChosen and
+roleSource.
 
 The pure rules are also run on two modelled devices by
 test_espnow_bond_agree_core.cpp; the receive table rows by
@@ -67,6 +79,37 @@ sys.path.insert(0, str(HERE))
 import test_espnow_bond_partner_change as base  # noqa: E402
 
 
+def check_role_sources(component):
+    from test_web_batch_handlers import extract_block, require
+    source = (component / 'System_ESPNow.cpp').read_text()
+    role = extract_block(source, 'const char* cmd_bond_role(const String& argsInput)')
+    auto_at = role.index('if (args == "auto") {')
+    auto = role[auto_at:role.index('return getDebugBuffer();', auto_at)]
+    chosen = role[role.index('uint8_t newRole = 255;'):]
+    require('setSetting(gSettings.bondRoleChosen, false);' in auto and 'bondAgreementTellRole();' in auto,
+            "'bondrole auto' gives the choice up and tells the partner")
+    require('setSetting(gSettings.bondRoleChosen, true);' in chosen and 'bondChangeRole(newRole);' in chosen and
+            'bondAgreementTellRole();' in chosen and
+            chosen.index('setSetting(gSettings.bondRoleChosen, true);') < chosen.index('bondChangeRole(newRole);'),
+            "'bondrole master|worker' is a choice (set before the change) and the partner is told")
+    require('{ "bondRoleChosen", SETTING_BOOL, &gSettings.bondRoleChosen, false, 0, nullptr, 0, 1, "Bond Role Chosen", '
+            'nullptr, false, "bond", nullptr, true },' in source,
+            "the flag is persisted, in the 'bond' group (not remotely editable), shown and not edited")
+    connect = extract_block(source, 'const char* cmd_bond_connect(const String& argsInput)')
+    require('bondRoleForConnect(peerMac)' in connect and 'setSetting(gSettings.bondRole, role.role);' in connect and
+            'cmp > 0' not in connect, "bondconnect takes the role from roleForBond, not from the addresses alone")
+    status = extract_block(source, 'const char* cmd_bond_status(const String& argsInput)')
+    require('doc["roleChosen"] = gSettings.bondRoleChosen;' in status and
+            'doc["roleSource"] = bondagree::roleSourceKey(bondRoleSourceNow());' in status and
+            status.count('bondRoleWords(roleWords, sizeof(roleWords));') == 2,
+            "bondstatus and bondstatus json say whether the role was chosen and how it was decided")
+    request = source[source.index('V4PayloadBondRequest request = {};'):]
+    require('(gSettings.bondRoleChosen ? BOND_REQUEST_FLAG_ROLE_CHOSEN : 0)' in request[:400],
+            'the bond request carries the chosen flag')
+    settings = (component / 'System_Settings.h').read_text()
+    require('bool bondRoleChosen;' in settings and 'bondRoleChosen(false),' in settings, "the flag's field, false by default")
+
+
 def main():
     a = base.parse_args(__doc__)
     harness, have, read = base.assemble(a)
@@ -78,6 +121,7 @@ def main():
     if not base.build_and_run(a, unit, have, read, 'espnow_bond_agreement'):
         print('FAIL espnow_bond_agreement: checks reported failures', file=sys.stderr)
         sys.exit(1)
+    check_role_sources(a.component)
     print('PASS espnow_bond_agreement')
 
 

@@ -1,15 +1,15 @@
 // Host harness for the mesh master's side of forwarding for a bond partner:
 // the production code of System_ESPNow_ForwardRx.cpp between
 // FORWARD_RX_HOST_BEGIN and FORWARD_RX_HOST_END (the link table, the
-// FORWARD_LINK handler, espnowForwardResolve and the readers,
-// espnowforwardfrom and espnowforwardlinks), compiled as it is with the
-// production rules header System_ESPNow_ForwardCore.h.
+// FORWARD_LINK handler, espnowForwardResolve and the readers, where a sensor
+// request for a forwarded partner goes, and espnowforwardlinks), compiled as
+// it is with the production rules header System_ESPNow_ForwardCore.h.
 //
 // Host boundaries, all in this file: the uptime, the role, this device's
-// address and name, the paired devices (address, key, name), the setting
-// espnowforwardfrom, the radio (a recording queue), the console, the reply
-// buffer, the allocator and the lock (it records whether anything that may
-// block, print, send or allocate runs under it).
+// address and name, the paired devices (address, key, name), the radio (a
+// recording queue), the console, the reply buffer, the allocator and the lock
+// (it records whether anything that may block, print, send or allocate runs
+// under it).
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
@@ -49,8 +49,6 @@ static uint32_t gNowMs = 1000;
 static uint8_t gRole = 1;
 static const uint8_t kSelf[6] = { 0x02, 0xC0, 0, 0, 0, 0x01 };
 static std::string gSelfName = "hub";
-static std::string gAllowed;
-static unsigned gSettingWrites = 0;
 struct PairedPeer {
   uint8_t mac[6];
   uint8_t key[32];
@@ -79,12 +77,6 @@ static size_t gReplyCap = sizeof(gReply);
 static uint32_t fwdNow() { return gNowMs; }
 static uint8_t fwdRole() { return gRole; }
 static void fwdSelfMac(uint8_t out[6]) { std::memcpy(out, kSelf, 6); }
-static void fwdAllowedText(char* out, size_t cap) { std::snprintf(out, cap, "%s", gAllowed.c_str()); }
-static void fwdSetAllowedText(const char* text) {
-  notUnderLock();
-  gAllowed = text;
-  ++gSettingWrites;
-}
 static bool fwdPairedKey(const uint8_t mac[6], uint8_t key[32]) {
   notUnderLock();
   const PairedPeer* p = pairedOf(mac);
@@ -184,7 +176,6 @@ static void resetAll() {
   std::memset((void*)&sFwd, 0, sizeof(sFwd));
   gNowMs += 1000000;
   gRole = 1;
-  gAllowed.clear();
   gPaired.clear();
   pair(kGlasses, "glasses", 0x11);
   pair(kShed, "shed", 0x22);
@@ -233,27 +224,11 @@ static void testAnnounce() {
   check(gSent.size() == 1 && std::memcmp(gSent[0].dst, kGlasses, 6) == 0 && gSent[0].f.op == espnowfwd::kOpAnswer &&
         gSent[0].f.answers == espnowfwd::kOpAnnounce && lastResult() == espnowfwd::kResultNotReceiver,
         "a worker answers not_receiver");
-  // A master that lists nobody: not_allowed, and it says so (a minute later:
-  // refusals are said once a minute).
+  // A master accepts any paired device that announces (the receive table lets
+  // only paired devices' session frames through): no list is kept, nothing
+  // is stored in a setting, and the console says it once.
   gRole = 1;
   gNowMs += 60000;
-  rx(kGlasses, "glasses", announceOf(1, 7, kPorch, "porch"));
-  check(lastResult() == espnowfwd::kResultNotAllowed && !gConsole.empty() &&
-        has(gConsole.back(), "glasses asked to forward for porch (02:A0:00:00:00:01), refused: it does not accept"),
-        "by default nobody may forward: not_allowed, said on the console");
-  // espnowforwardfrom add glasses.
-  check(cmd(cmd_espnow_forwardfrom, "add glasses").rfind("OK: glasses may forward", 0) == 0 &&
-        gAllowed == "02:B0:00:00:00:01/1111111111111111", "espnowforwardfrom add stores the address and its key");
-  check(cmd(cmd_espnow_forwardfrom, "add glasses") == "OK: glasses may forward to this device already",
-        "adding it again says so");
-  check(cmd(cmd_espnow_forwardfrom, "add nobody") == "Error: no such device (use its name or its MAC address)",
-        "an unknown device is refused");
-  check(cmd(cmd_espnow_forwardfrom, "") ==
-            "OK: these devices may forward their bond partner's data to this device: glasses (02:B0:00:00:00:01)",
-        "no argument lists them");
-  check(cmd(cmd_espnow_forwardfrom, "bogus x") ==
-            "Usage: espnowforwardfrom [add <name_or_mac> | remove <name_or_mac> | clear]",
-        "a wrong word is the usage");
   gConsole.clear();
   rx(kGlasses, "glasses", announceOf(1, 7, kPorch, "porch"));
   const espnowfwd::LinkFrame a = gSent.back().f;
@@ -314,7 +289,6 @@ static void testAnnounce() {
 
 static void testResolveAndWithdraw() {
   resetAll();
-  gAllowed = "02:B0:00:00:00:01/1111111111111111,02:B0:00:00:00:02/2222222222222222";
   rx(kGlasses, "glasses", announceOf(3, 9, kPorch, "porch"));
   check(lastResult() == espnowfwd::kResultAccepted, "accepted");
   ForwardOrigin o;
@@ -332,6 +306,16 @@ static void testResolveAndWithdraw() {
         "the resume is taken once");
   check(resolve(kGlasses, false, 3, espnowfwd::kStreamIdBattery, &o, false) == ForwardResolve::Forwarded && o.resumePending,
         "the battery frame's byte alone");
+  // The partner's sensor status: the byte alone, filed under the partner via
+  // glasses, never a resume; with an old number refused; on the bond link
+  // malformed.
+  check(resolve(kGlasses, false, 3, espnowfwd::kStreamIdStatus, &o, false) == ForwardResolve::Forwarded &&
+        std::memcmp(o.mac, kPorch, 6) == 0 && std::memcmp(o.via, kGlasses, 6) == 0 && !o.resumePending &&
+        std::string(o.name) == "porch", "a forwarded sensor status: the partner via glasses");
+  check(resolve(kGlasses, false, 0, espnowfwd::kStreamIdStatus, &o, false) == ForwardResolve::Own &&
+        std::memcmp(o.mac, kGlasses, 6) == 0, "glasses' own sensor status");
+  check(espnowForwardResolve(kGlasses, "glasses", true, false, false, 3, espnowfwd::kStreamIdStatus, &o) ==
+            ForwardResolve::Malformed, "a link byte on the bond link is malformed");
   check(espnowForwardLinkActive(kGlasses, kPorch) && !espnowForwardLinkActive(kGlasses, kPorch2) &&
         !espnowForwardLinkActive(kShed, kPorch), "the link names its partner");
   // Malformed marks are counted here and refused.
@@ -394,24 +378,13 @@ static void testResolveAndWithdraw() {
         "a withdrawal of everything from B's next boot ends the link");
   check(espnowForwardLinkCount() == 0, "no active link");
 
-  // espnowforwardfrom remove: the link ends within a second.
+  // The tick ends nothing while this device keeps data.
   rx(kGlasses, "glasses", announceOf(1, 10, kPorch, "porch"));
   check(espnowForwardLinkActive(kGlasses, kPorch) && espnowForwardLinkCount() == 1, "active again");
-  check(cmd(cmd_espnow_forwardfrom, "remove glasses").rfind("OK: glasses may no longer forward", 0) == 0 &&
-        gAllowed == "02:B0:00:00:00:02/2222222222222222", "remove takes it off the list");
   tick();
-  check(!espnowForwardLinkActive(kGlasses, kPorch), "and its link ends");
-  // The setting changed by any editor is read again by the tick.
-  gAllowed = "02:B0:00:00:00:01/1111111111111111";
   tick();
-  rx(kGlasses, "glasses", announceOf(2, 10, kPorch, "porch"));
-  check(lastResult() == espnowfwd::kResultAccepted, "a list changed elsewhere is read once a second");
-  check(cmd(cmd_espnow_forwardfrom, "clear").rfind("OK: no device may forward", 0) == 0 && gAllowed.empty(), "clear empties it");
-  tick();
-  check(!espnowForwardLinkActive(kGlasses, kPorch), "and every link ends");
-  // Becoming a worker ends the links too.
-  gAllowed = "02:B0:00:00:00:01/1111111111111111";
-  tick();
+  check(espnowForwardLinkActive(kGlasses, kPorch), "a master's tick leaves its links alone");
+  // Becoming a worker ends the links.
   rx(kGlasses, "glasses", announceOf(3, 10, kPorch, "porch"));
   gRole = 0;
   tick();
@@ -421,31 +394,21 @@ static void testResolveAndWithdraw() {
 
 static void testTableAndReplies() {
   resetAll();
-  // Sixteen vias, each listed (four at most) - the table holds sixteen entries:
-  // a seventeenth is refused only while every holder is paired.
-  std::string allowed;
+  // Sixteen vias - the table holds sixteen entries: a seventeenth is refused
+  // only while every holder is paired.
   for (uint8_t i = 0; i < 4; ++i) {
     uint8_t mac[6] = { 0x02, 0xE0, 0, 0, 0, i };
     char name[16];
     std::snprintf(name, sizeof(name), "b%u", i);
     pair(mac, name, (uint8_t)(0x30 + i));
-    char text[18];
-    macToDisplay(mac, text, sizeof(text));
-    char key[20];
-    std::snprintf(key, sizeof(key), "/%02X%02X%02X%02X%02X%02X%02X%02X", 0x30 + i, 0x30 + i, 0x30 + i, 0x30 + i, 0x30 + i,
-                  0x30 + i, 0x30 + i, 0x30 + i);
-    allowed += (allowed.empty() ? "" : ",") + std::string(text) + key;
   }
-  gAllowed = allowed;
-  check(cmd(cmd_espnow_forwardfrom, "add glasses") == "Error: 4 devices are listed already; remove one first",
-        "at most four devices are listed");
   for (uint8_t i = 0; i < 4; ++i) {
     uint8_t mac[6] = { 0x02, 0xE0, 0, 0, 0, i };
     uint8_t partner[6] = { 0x02, 0xF0, 0, 0, 0, i };
     char name[16];
     std::snprintf(name, sizeof(name), "p%u", i);
     rx(mac, "b", announceOf(1, 1, partner, name));
-    check(lastResult() == espnowfwd::kResultAccepted, "each listed device gets its link");
+    check(lastResult() == espnowfwd::kResultAccepted, "each paired device gets its link");
   }
   // The rest of the table filled by devices that only sent forwarded data (queried).
   for (uint8_t i = 0; i < 12; ++i) {
@@ -477,7 +440,7 @@ static void testTableAndReplies() {
         has(gConsole[5], "sent forwarded data without a link; asked which link it has"),
         "the text form: one line per entry");
   const std::string json = cmd(cmd_espnow_forwardlinks, "json");
-  check(json.rfind("{\"schema\":1,\"role\":\"master\",\"allowed\":[\"02:E0:00:00:00:00\",", 0) == 0 &&
+  check(json.rfind("{\"schema\":1,\"role\":\"master\",\"refused\":{", 0) == 0 && !has(json, "\"allowed\"") &&
         has(json, "{\"via\":\"02:E0:00:00:00:00\",\"viaName\":\"b0\",\"partner\":\"02:F0:00:00:00:00\",\"name\":\"p0\","
                   "\"namePaired\":false,\"linkGen\":1,\"viaBootTag\":1,\"state\":\"active\",\"confirmed\":true,"
                   "\"streams\":[\"readings\",\"battery\",\"events\"],\"sensors\":[\"thermal\",\"tof\",\"imu\",\"gps\"") &&
@@ -513,64 +476,83 @@ static void testTableAndReplies() {
         "a worker keeps none");
   // No memory for the table: full, and nothing allocated twice per frame.
   gRole = 1;
-  gAllowed = "02:B0:00:00:00:01/1111111111111111";
   gAllocFails = true;
   rx(kGlasses, "glasses", announceOf(1, 1, kPorch, "porch"));
   check(lastResult() == espnowfwd::kResultFull, "no memory for the table: full");
   gAllocFails = false;
 }
 
-// Review findings of 2026-11-18.
+// Review findings of 2026-11-18, and the owner's decisions of the same day.
 static void testReviewCases() {
   // A refused announcement is said once a minute at most: any paired device
   // can send them at frame rate.
   resetAll();
-  for (int i = 0; i < 100; ++i) rx(kShed, "shed", announceOf((uint8_t)(i + 1), 3, kPorch, "porch"));
-  check(gSent.size() == 100 && lastResult() == espnowfwd::kResultNotAllowed, "every refused announcement is answered");
+  for (int i = 0; i < 100; ++i) rx(kShed, "shed", announceOf((uint8_t)(i + 1), 3, kPorch, "HUB"));
+  check(gSent.size() == 100 && lastResult() == espnowfwd::kResultNameTaken, "every refused announcement is answered");
   check(gConsole.size() == 1 && !has(gConsole[0], "more refused"), "but said once");
   gNowMs += 59999;
-  rx(kShed, "shed", announceOf(101, 3, kPorch, "porch"));
+  rx(kShed, "shed", announceOf(101, 3, kPorch, "hub"));
   check(gConsole.size() == 1, "not again within the minute");
   gNowMs += 1;
-  rx(kShed, "shed", announceOf(102, 3, kPorch, "porch"));
-  check(gConsole.size() == 2 && has(gConsole[1], "refused: it does not accept forwarded data from this device "
-                                                "(espnowforwardfrom there) (100 more refused since the last such line)"),
+  rx(kShed, "shed", announceOf(102, 3, kPorch, "hub"));
+  check(gConsole.size() == 2 && has(gConsole[1], "refused: the partner's name is taken by another device there "
+                                                "(100 more refused since the last such line)"),
         "then once more, with the count held back");
 
-  // The allow list names a device by its address and its key: another
-  // identity paired later under the same address is not allowed.
+  // No allow list: any paired device may announce, also one paired again
+  // under another key at the same address (its frames come over its own
+  // session; what it sends is shown via it, never merged with a direct record).
   resetAll();
-  check(cmd(cmd_espnow_forwardfrom, "add glasses").rfind("OK: glasses may forward", 0) == 0, "glasses listed");
-  rx(kGlasses, "glasses", announceOf(1, 7, kPorch, "porch"));
-  check(lastResult() == espnowfwd::kResultAccepted, "accepted under the key it was listed with");
-  gPaired.erase(gPaired.begin());  // unpaired ...
-  pair(kGlasses, "glasses", 0x99);  // ... and another identity paired under the same address
-  tick();
-  check(!espnowForwardLinkActive(kGlasses, kPorch), "the link of the listed identity ends when another holds its address");
-  rx(kGlasses, "glasses", announceOf(2, 7, kPorch, "porch"));
-  check(lastResult() == espnowfwd::kResultNotAllowed, "the new identity may not forward");
-  check(cmd(cmd_espnow_forwardfrom, "") ==
-            "OK: these devices may forward their bond partner's data to this device: glasses (02:B0:00:00:00:01), paired "
-            "again under another key: not allowed until added again",
-        "the list says why");
-  check(cmd(cmd_espnow_forwardfrom, "add glasses") == "OK: glasses is listed again under the key it is paired with now." &&
-            gAllowed == "02:B0:00:00:00:01/9999999999999999",
-        "adding it again lists it under its key now");
-  rx(kGlasses, "glasses", announceOf(3, 7, kPorch, "porch"));
-  check(lastResult() == espnowfwd::kResultAccepted, "and it may forward");
-  gPaired.erase(gPaired.end() - 1);
-  check(cmd(cmd_espnow_forwardfrom, "") ==
-            "OK: these devices may forward their bond partner's data to this device: 02:B0:00:00:00:01 (02:B0:00:00:00:01), "
-            "not paired",
-        "listed while unpaired, and said so");
-  rx(kGlasses, "glasses", announceOf(4, 7, kPorch, "porch"));
-  check(lastResult() == espnowfwd::kResultNotAllowed, "not paired: not allowed");
-  // An address alone (typed into the setting by hand) allows nobody.
+  rx(kShed, "shed", announceOf(1, 3, kPorch, "porch"));
+  check(lastResult() == espnowfwd::kResultAccepted && espnowForwardLinkActive(kShed, kPorch),
+        "any paired device's link is accepted");
+  gPaired.erase(gPaired.begin());   // glasses unpaired ...
+  pair(kGlasses, "glasses", 0x99);  // ... and paired again under another key
+  rx(kGlasses, "glasses", announceOf(1, 7, kPorch2, "porch2"));
+  check(lastResult() == espnowfwd::kResultAccepted, "a device paired again announces like any other");
+
+  // A sensor request for a forwarded partner goes to the device that forwards
+  // for it, with that link's number: by '<partner> via <device>', by the
+  // partner's name alone, or by its address.
   resetAll();
-  gAllowed = "02:B0:00:00:00:01";
-  tick();
-  rx(kGlasses, "glasses", announceOf(1, 7, kPorch, "porch"));
-  check(lastResult() == espnowfwd::kResultNotAllowed, "an address without its key allows nobody");
+  rx(kGlasses, "glasses", announceOf(5, 7, kPorch, "porch"));
+  uint8_t via[6] = {0}, origin[6] = {0};
+  uint8_t gen = 0;
+  check(espnowForwardRequestTarget("porch", "glasses", via, origin, &gen) == ForwardTarget::Found && gen == 5 &&
+        std::memcmp(via, kGlasses, 6) == 0 && std::memcmp(origin, kPorch, 6) == 0, "porch via glasses: link 5");
+  gen = 0;
+  check(espnowForwardRequestTarget("PORCH", nullptr, via, origin, &gen) == ForwardTarget::Found && gen == 5 &&
+        std::memcmp(via, kGlasses, 6) == 0, "the partner's name alone (any case)");
+  gen = 0;
+  check(espnowForwardRequestTarget("02:A0:00:00:00:01", "02:B0:00:00:00:01", via, origin, &gen) == ForwardTarget::Found &&
+        gen == 5, "by addresses");
+  check(espnowForwardRequestTarget("porch", "nobody", via, origin, &gen) == ForwardTarget::NoVia, "an unknown via");
+  check(espnowForwardRequestTarget("porch", "shed", via, origin, &gen) == ForwardTarget::NoLink,
+        "a device that forwards nothing for it");
+  check(espnowForwardRequestTarget("garden", nullptr, via, origin, &gen) == ForwardTarget::NoLink, "no link names it");
+  check(espnowForwardRequestTarget("", nullptr, via, origin, &gen) == ForwardTarget::NoLink &&
+        espnowForwardRequestTarget(nullptr, nullptr, via, origin, &gen) == ForwardTarget::NoLink, "no name");
+  // A new link number follows the link; an ended link names nothing.
+  rx(kGlasses, "glasses", announceOf(6, 7, kPorch, "porch"));
+  check(espnowForwardRequestTarget("porch", "glasses", via, origin, &gen) == ForwardTarget::Found && gen == 6,
+        "the request carries the current link number");
+  espnowfwd::LinkFrame w{};
+  w.op = espnowfwd::kOpWithdraw;
+  w.linkGen = 6;
+  w.viaBootTag = 7;
+  std::memcpy(w.partnerMac, kPorch, 6);
+  rx(kGlasses, "glasses", w);
+  check(espnowForwardRequestTarget("porch", "glasses", via, origin, &gen) == ForwardTarget::NoLink,
+        "an ended link takes no request");
+  // An announcement of link number 0 is malformed: never a link, so a request
+  // never goes out with the byte 0 (which asks for the via's own sensors).
+  resetAll();
+  rx(kGlasses, "glasses", announceOf(0, 7, kPorch, "porch"));
+  check(gSent.empty() && sFwd.refused.malformed == 1 && !espnowForwardLinkActive(kGlasses, kPorch),
+        "link number 0: malformed, not answered, no link");
+  gen = 9;
+  check(espnowForwardRequestTarget("porch", nullptr, via, origin, &gen) == ForwardTarget::NoLink && gen == 9,
+        "and no request target");
 }
 
 int main() {

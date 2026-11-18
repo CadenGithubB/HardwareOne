@@ -40,13 +40,32 @@ sessions with session ids and a recording radio:
     a sensor change while an announcement is out is announced at once and
     the older acceptance ignored; the longest bondstatus lines fit one
     console message each and the longest JSON object fits its cap;
+  * owner decisions 2026-11-18: a master paired in another mesh than the
+    primary one is never announced to and gets nothing (a link it had is
+    withdrawn); the partner's sensor status goes to the primary master on
+    acceptance and on change, with the forwarded sensors and the link byte;
+    the mesh master's sensor requests for the partner become bond-link stream
+    control with leases (every refusal, renewal, expiry, one-shot,
+    unsubscribe, a stream already running, by hand, a new bond session, a
+    failed send, forwarding off, a partner change), with their JSON and line;
+  * review of 2026-11-18: an "off" that could not be sent is sent again once
+    the partner is back, also after the link ended, and forgotten with a new
+    partner or the worker role; a stream switched on by hand is never touched
+    by a lease; leases end when their master leaves the primary mesh, another
+    master is named, or their sensor is no longer forwarded; bondforward waits
+    for the master of the primary mesh only;
   * nothing that may block, print or send runs under the lock.
 
 Source rules: the tick runs in the espnow_task loop of a bond build, the
 block reaches the device only through its bf* functions, the battery frame
 is acknowledged and watched, the setting rows are in the "bond" group
-(not remotely editable), the commands exist, and bondstatus and
-/api/bond/status carry the forward object.
+(not remotely editable), the commands exist, bondstatus and
+/api/bond/status carry the forward object, the primary mesh is the default
+slot of gSettings.meshes and the master's own pairing slot, the partner's
+sensors are switched with sendBondStreamCtrl, and this device's own
+'bondstream' on and off reach the leases; "the user streams it" is the saved
+bondstream setting, never this device's own streaming flags; a bond worker
+applies every stream switch of a loop, one per sensor.
 
 Options: --cxx <compiler>, --sanitize (ASan + UBSan), --component <dir>.
 """
@@ -134,6 +153,54 @@ def check_sources(component: Path) -> None:
             "GET /api/bond/status keeps the forward object in PSRAM, sized for the longest")
     bonded = (component / "System_BondedPeer.cpp").read_text()
     require('strcmp(moduleName, "bond") == 0' in bonded, "the 'bond' group is not remotely editable")
+    # Owner decisions 2026-11-18.
+    primary = strip_comments(extract_block(espnow, "bool espnowPeerInPrimaryMesh(const uint8_t* mac)"))
+    require("gSettings.meshes[i].enabled" in primary and "gSettings.meshes[i].isDefault" in primary and
+            "peerIdentityFindByMac(mac)" in primary and "pid->meshId" in primary and
+            "espnowfwd::primaryMeshSlot(enabled, isDefault, Settings::N_MESHES)" in primary,
+            "the primary mesh is the default slot of gSettings.meshes; a master counts when paired in it")
+    in_primary = strip_comments(extract_block(source, "static bool bfInPrimaryMesh(const uint8_t mac[6])"))
+    require("espnowPeerInPrimaryMesh(mac)" in in_primary, "bfInPrimaryMesh asks the pairing table")
+    ctrl = strip_comments(extract_block(source, "static bool bfStreamCtrl(uint8_t sensor, bool on)"))
+    require("sendBondStreamCtrl((RemoteSensorType)sensor, on)" in ctrl,
+            "the partner's sensors are switched by the bond-link stream control 'bondstream' uses")
+    online = strip_comments(extract_block(source, "static bool bfPartnerOnline()"))
+    require("isBondModeOnline()" in online and "isBondSynced()" in online, "a request needs the partner connected and synced")
+    status_tx = strip_comments(extract_block(source, "static bool bfSendStatus(const uint8_t mac[6], const uint8_t* payload, uint16_t len)"))
+    require("ESPNOW_V4_TYPE_SENSOR_STATUS" in status_tx and "espnowtx::sendAead" in status_tx,
+            "the partner's forwarded status is a 151 session unicast")
+    sensors = strip_comments((component / "System_ESPNow_Sensors.cpp").read_text())
+    start_at = sensors.index("void startSensorDataStreaming(RemoteSensorType sensorType) {")
+    stop_at = sensors.index("void stopSensorDataStreaming(RemoteSensorType sensorType) {")
+    start_src = sensors[start_at:stop_at]
+    stop_src = sensors[stop_at:sensors.index("bool isSensorDataStreamingEnabled(RemoteSensorType sensorType)")]
+    require("bondForwardStreamByHand((uint8_t)sensorType, true);" in start_src and
+            start_src.index("bondForwardStreamByHand((uint8_t)sensorType, true);") < start_src.index("startSensorBroadcasterLocked") and
+            "bondForwardStreamByHand((uint8_t)sensorType, false);" in stop_src,
+            "this device's own bondstream on and off (the bond master branch) reach the leases")
+    # Review 2026-11-18: what the user streams at the partner is the saved
+    # bondstream choice (and what reaches the leases by hand), never the
+    # runtime streaming flags, which on a bond master with sensors of its own
+    # also say what a mesh master subscribed there.
+    saved = strip_comments(extract_block(source, "static uint16_t bfSavedStreams()"))
+    require("bondStreamSetting((RemoteSensorType)i)" in saved, "bfSavedStreams reads the saved bondstream settings")
+    require("isSensorDataStreamingEnabled" not in code,
+            "the forward code never takes this device's own streaming flags for the partner's streams")
+    # The worker applies every stream switch of a loop: one per sensor, not
+    # the last frame only (a bond master switches several back to back).
+    ctrl_rx = strip_comments(extract_block(espnow, "static void v4h_stream_ctrl(const V4RxCtx& ctx)"))
+    require("espnowsensor::streamCtrlPut(gEspNow->bondDeferredStreamCtrl, ctx.payload[0], ctx.payload[1] != 0);" in ctrl_rx
+            and ctrl_rx.count("bondDeferredStreamCtrl") == 1,
+            "v4h_stream_ctrl adds the switch to the ones waiting, per sensor, and touches nothing else of them")
+    step = strip_comments(espnow[espnow.index("// 9f2. Bond: deferred STREAM_CTRL"):espnow.index("// 9h. Bond:")])
+    require("espnowsensor::streamCtrlTake(gEspNow->bondDeferredStreamCtrl, &ctrlOn, &ctrlOff);" in step and
+            re.search(r"for \(int t = 0; t < REMOTE_SENSOR_MAX; t\+\+\) \{", step) is not None and
+            "startSensorDataStreaming(sType);" in step and "stopSensorDataStreaming(sType);" in step,
+            "step 9f2 applies every pending switch, each sensor's own")
+    require("bondDeferredStreamCtrlSensor" not in espnow and "bondDeferredStreamCtrlPending" not in espnow,
+            "no single deferred stream-control slot is left")
+    status_rx = strip_comments(extract_block(espnow, "static void v4hBondSensorStatus(const V4RxCtx& ctx)"))
+    require("remoteSensorIngestBondStatus(ctx.recv_info->src_addr" in status_rx, "185 goes to the bond status ingest")
 
 
 def main() -> None:

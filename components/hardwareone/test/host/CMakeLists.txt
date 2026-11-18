@@ -2524,16 +2524,18 @@ add_test(
           ${CMAKE_CURRENT_LIST_DIR}/test_espnow_power_events.py
           ${SETUP_MQTT_TEST_ARGS})
 # Forwarding for a bond partner, the mesh master's side: the production link
-# table, FORWARD_LINK handler, whose a received frame is, espnowforwardfrom
-# and espnowforwardlinks of System_ESPNow_ForwardRx.cpp (README "ESP-NOW
-# forwarding for a bond partner").
+# table, FORWARD_LINK handler, whose a received frame is, where a sensor
+# request for a partner goes, and espnowforwardlinks of
+# System_ESPNow_ForwardRx.cpp (README "ESP-NOW forwarding for a bond partner").
 add_test(
   NAME espnow_forward_rx
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_espnow_forward_rx.py
           ${SETUP_MQTT_TEST_ARGS})
 # Forwarding for a bond partner, the bond master's side: the production tick,
-# answers, forward calls and 'bondforward' of System_ESPNow_BondForward.cpp.
+# answers, forward calls, the primary mesh, the partner's sensor status, the
+# mesh master's sensor requests with their leases, and 'bondforward' of
+# System_ESPNow_BondForward.cpp.
 add_test(
   NAME espnow_bond_forward
   COMMAND ${Python3_EXECUTABLE}

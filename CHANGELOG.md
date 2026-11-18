@@ -14,28 +14,61 @@ The version stays 0.99.99.1 until the 1.0 gate in `RELEASING.md` is met; this se
 everything user-visible since the v0.99.99.1 tag.
 
 ### Added
-- A bond master can forward its bond partner's readings, battery state and events to the mesh master named
-  on it. `bondforward on` (off by default; settings group "bond", so the partner cannot change it) makes the
-  bond master announce to each master named on it, in a new 96-byte session frame FORWARD_LINK (opcode
-  155, also through a relay), that it forwards for its partner, and forward once that master accepted:
-  readings to the primary master, battery state and events to the primary and the backup master.
-  `bondforward sensors <all|default|name,...>` (or `bondforwardsensors <mask>`) picks the sensors; input
-  is left out by default. The mesh master accepts only from devices it lists with
-  `espnowforwardfrom add <name_or_mac>` (up to four, each tied to the key it is paired under, so another
-  identity paired later under the same address is not allowed; empty by default, not remotely editable;
-  a refused announcement is said once a minute at most). There the
+- A bond master can forward its bond partner's readings, battery state, events and sensor list to the mesh
+  master named on it. A bonded pair is one device that shows as two on the mesh master, for logging.
+  `bondforward on` (off by default; settings group "bond", so the partner cannot change it; the one
+  deliberate switch) makes the bond master announce to the master named on it, in a new 96-byte session
+  frame FORWARD_LINK (opcode 155, also through a relay), that it forwards for its partner, and forward
+  once that master accepted: readings to the primary master, battery state and events to the primary and
+  the backup master. Only a master paired in the bond master's primary mesh (the default mesh of
+  `espnowmeshes`) gets anything: a bond master in several meshes never sends its partner's data to the
+  others, and `bondforward` says so. `bondforward sensors <all|default|name,...>` (or
+  `bondforwardsensors <mask>`) picks the sensors; input is left out by default. The mesh master accepts
+  the link from any paired device that names it as master, by the same rule as that device's own
+  readings (no list, no setting; a refused announcement is said once a minute at most). There the
   partner is its own sender "porch via glasses", with its own counters (the partner's numbers end to end,
   so a frame lost on either hop counts as lost), kept apart from the partner's own record and from the
-  bond master's; `espnowforwardlinks [json] [from <n>]` lists the links; `espnowsensorstatus json
-  <name_or_mac> [via <name_or_mac>]` shows one forwarded sender. Every JSON row of `espnowsensorstatus
-  json`, `espnowbattery json`, `espnowevents json` and `GET /api/sensors/remote` has `link`
-  (`mesh`, `bond`, `forwarded`) and `via`; `GET /api/sensors/remote` takes `&via=<MAC>`; `bondstatus`,
-  `bondstatus json` and `GET /api/bond/status` say whether and where the partner's data goes and why
-  not (`bondstatus` in up to three console lines, each one whole message). A rekey keeps forwarding; a new session, a partner change, a decline, a restart or a new named
-  master are handled by the bond master's tick; a frame of an old partner still on its way is refused by
-  its link number. Forwarded MQTT state is not published (MQTT is parked). Host-tested (rules, both sides
-  as production code, the receive gates, the reading and battery/event stores); syntax-checked for the
-  P4 (bond mode off) and the XIAO (bond mode on); not built or run on hardware.
+  bond master's, and never merged with a direct record; `espnowforwardlinks [json] [from <n>]` lists the
+  links; `espnowsensorstatus json <name_or_mac> [via <name_or_mac>]` shows one forwarded sender. The bond
+  worker sends its sensor list to its bond master only (new bond opcode 185 BOND_SENSOR_STATUS, the
+  151 payload, once per bond session and on every change), and the bond master forwards it in a 151
+  frame with a reserved byte as link byte, so the mesh master lists the partner's sensors before its
+  first reading. The mesh master can ask for the partner's readings as from any sender:
+  `espnowsensorreq <partner> via <bond master> <mask> <mode> <intervalMs> <leaseMs>` (or the
+  partner's name alone when it is not paired there) sends SENSOR_REQ (subscribe with a lease, one-shot,
+  unsubscribe) to the bond master with its link number in a reserved byte; the bond master, with
+  forwarding on and the link up, switches the partner's sensors over the bond link (the stream control
+  `bondstream` uses), ends them with the lease, and the readings come back forwarded. Only the master it
+  forwards readings to may ask, and only for the sensors it forwards; the partner still never takes a
+  sensor request from a mesh master. A lease also ends when its sensor is no longer forwarded or its
+  master leaves the primary mesh; an "off" that could not be sent (the partner out of range) is sent
+  again until it goes out. A stream the bond master's user started at the partner (`bondstream`, by hand
+  or saved) is never started or stopped by a lease; the bond master's own streams are not taken for the
+  partner's. Every JSON row of `espnowsensorstatus json`, `espnowbattery json`,
+  `espnowevents json` and `GET /api/sensors/remote` has `link` (`mesh`, `bond`, `forwarded`) and `via`;
+  `GET /api/sensors/remote` takes `&via=<MAC>`; `bondstatus`, `bondstatus json` and `GET
+  /api/bond/status` say whether and where the partner's data goes and why not, and what the mesh
+  master's sensor requests did (`bondstatus` in up to four console lines, each one whole message). A
+  rekey keeps forwarding; a new session, a partner change, a decline, a restart or a new named master
+  are handled by the bond master's tick; a frame of an old partner still on its way is refused by its
+  link number. No frame grew. Forwarded MQTT state is not published (MQTT is parked). Host-tested
+  (rules, both sides as production code, the receive gates, the reading and battery/event stores);
+  not built or run on hardware.
+- `bondrole master|worker` is now a choice that `bondconnect` keeps; before, `bondconnect` set the role
+  from the two addresses and silently overrode it. The choice travels in a flag bit of the bond request
+  (183) and of the bond notice (184, a byte that was reserved): a device whose role was not chosen takes
+  the other role than a partner whose user chose one, at `bondconnect` (from the partner's earlier
+  request) or as soon as the partner's request or answer says so. When neither chose, the higher address
+  is master, as before; when both chose the same role, the role conflict is reported, as before.
+  `bondrole auto` gives the choice up (the role stays until the partner chooses or the next
+  `bondconnect`). `bondrole`, `bondconnect` and `bondstatus` say whether the role was chosen or how it
+  was decided; `bondstatus json` has `roleChosen` and `roleSource` (`chosen`, `partner`, `address`,
+  `kept`). Every bond request also says that its sender yields (a third flag bit): only such a partner
+  is expected to take the other role, so a partner on older firmware with the same role is reported as
+  a role conflict at once, as before.
+- A bond worker applies every sensor stream switch its bond master sends; before, several switches that
+  arrived within one loop (a bond master switching two sensors back to back) left only the last one
+  applied.
 - ESP-NOW mesh time works. The mesh master sends its clock (UTC) to each paired device over that
   device's encrypted session: when the session has come up, every 10 minutes, when the master's own
   clock was set, and on `espnowtimesync`. A device that names that master and whose clock has no

@@ -1914,6 +1914,22 @@ static uint16_t fingerprintForPeer(const uint8_t* mac) {
   return 0;
 }
 
+// This device's primary mesh: the default slot (espnowfwd::primaryMeshSlot).
+// `mac` is paired in it. A bond master forwards its partner's data only to a
+// master paired there.
+bool espnowPeerInPrimaryMesh(const uint8_t* mac) {
+  if (!mac) return false;
+  bool enabled[Settings::N_MESHES];
+  bool isDefault[Settings::N_MESHES];
+  for (uint8_t i = 0; i < Settings::N_MESHES; i++) {
+    enabled[i] = gSettings.meshes[i].enabled;
+    isDefault[i] = gSettings.meshes[i].isDefault;
+  }
+  const PeerIdentity* pid = peerIdentityFindByMac(mac);
+  return espnowfwd::inPrimaryMesh(pid ? (int)pid->meshId : -1,
+                                  espnowfwd::primaryMeshSlot(enabled, isDefault, Settings::N_MESHES));
+}
+
 // ============================================================================
 // Phase 2 — Settings JSON persistence for multi-mesh fields
 // ============================================================================
@@ -3518,11 +3534,13 @@ bool v4_broadcast_topo_request(uint32_t reqId) {
 // time it could go out, and queuing it made a partner that is not there cost
 // a pending-frame warning plus a key exchange every 5 s (bench 2026-11-17,
 // step d2). Without a session these are dropped quietly.
-// The bond worker's battery state and events (180/182) are the same kind of
-// frame: their sender waits and sends again when the partner is back.
+// The bond worker's battery state, events and sensor status (180/182/185) are
+// the same kind of frame: their sender waits and sends again when the partner
+// is back.
 static bool bondFrameIsPeriodic(uint8_t type) {
   return type == ESPNOW_V4_TYPE_BOND_HEARTBEAT || type == ESPNOW_V4_TYPE_BOND_SENSOR_DATA ||
-         type == ESPNOW_V4_TYPE_BOND_POWER_STATUS || type == ESPNOW_V4_TYPE_BOND_EVENT_PUSH;
+         type == ESPNOW_V4_TYPE_BOND_POWER_STATUS || type == ESPNOW_V4_TYPE_BOND_EVENT_PUSH ||
+         type == ESPNOW_V4_TYPE_BOND_SENSOR_STATUS;
 }
 
 // THE bond send entry — enforces the two rules above (single-initiator +
@@ -3752,6 +3770,28 @@ bool v4_send_sensor_status(const uint8_t* dstMac, uint32_t presentMask, uint32_t
   payload.bootTag = bootTag;
   return espnowtx::sendAead(dstMac, ESPNOW_V4_TYPE_SENSOR_STATUS, 0, generateMessageId(),
                             (const uint8_t*)&payload, (uint16_t)sizeof(payload), 1);
+}
+
+// A bond worker's sensor status to its bond master only (BOND_SENSOR_STATUS,
+// 185, the 151 payload with the link byte 0). The bond send rules apply, as
+// for its battery state (v4_send_bond_power). False in a build without bond mode.
+bool v4_send_bond_sensor_status(const uint8_t* dstMac, uint32_t presentMask, uint32_t streamingMask,
+                                uint16_t bootTag) {
+#if ENABLE_BONDED_MODE
+  if (!dstMac) return false;
+  V4PayloadSensorStatus payload = {};
+  payload.presentMask = presentMask;
+  payload.streamingMask = streamingMask;
+  payload.bootTag = bootTag;
+  return bondSendEncryptedAsync(dstMac, ESPNOW_V4_TYPE_BOND_SENSOR_STATUS, 0, generateMessageId(),
+                                (const uint8_t*)&payload, (uint16_t)sizeof(payload));
+#else
+  (void)dstMac;
+  (void)presentMask;
+  (void)streamingMask;
+  (void)bootTag;
+  return false;
+#endif
 }
 
 // One part of a sensor reading, already built (V4PayloadSensorReading header
@@ -4320,6 +4360,14 @@ static void v4h_sensor_status(const V4RxCtx& ctx) {
   remoteSensorIngestStatus(ctx.recv_info->src_addr, ctx.deviceName, ctx.payload, ctx.payloadLen);
 }
 
+#if ENABLE_BONDED_MODE
+// BOND_SENSOR_STATUS: the bond worker's sensor status, to its bond master only
+// (the receive table's REQ_BOND_PEER). Kept and handed to the forwarder.
+static void v4hBondSensorStatus(const V4RxCtx& ctx) {
+  remoteSensorIngestBondStatus(ctx.recv_info->src_addr, ctx.deviceName, ctx.payload, ctx.payloadLen);
+}
+#endif
+
 // SENSOR_ENVELOPE: one part of a sensor reading from a paired sender over its
 // session (the receive table's gates). The range check, the role rule, the
 // counter rule and the store are in remoteSensorIngestPart.
@@ -4351,6 +4399,22 @@ static void v4h_sensor_req(const V4RxCtx& ctx) {
                        "decides what it streams (%lu more in the last minute)",
                        ctx.deviceName, (unsigned long)held);
     }
+    return;
+  }
+  // A request with the link byte set is for this device's bond partner: as
+  // its bond master this device turns it into its own control of the
+  // partner's sensors (System_ESPNow_BondForward.cpp). It is never applied to
+  // this device's own sensors.
+  if (ctx.payloadLen >= sizeof(V4PayloadSensorReq) &&
+      ((const V4PayloadSensorReq*)ctx.payload)->fwdLink != 0) {
+    const V4PayloadSensorReq* fwd = (const V4PayloadSensorReq*)ctx.payload;
+#if ENABLE_BONDED_MODE
+    bondForwardSensorRequest(ctx.recv_info->src_addr, fwd->mode, fwd->sensorMask, fwd->intervalMs, fwd->leaseMs,
+                             fwd->fwdLink);
+#else
+    (void)fwd;
+    DEBUG_ESPNOW_MESHF("[V4_RX_SENSOR_REQ] drop: a request for a bond partner, and this build has no bond mode");
+#endif
     return;
   }
   if (!gSettings.espnowAcceptSensorControl) {
@@ -4409,7 +4473,11 @@ static_assert((int)BOND_NOTICE_ACCEPTED == (int)bondagree::kReasonAccepted &&
               (int)BOND_NOTICE_BONDED_ELSEWHERE == (int)bondagree::kReasonBondedElsewhere &&
               (int)BOND_NOTICE_ENDED == (int)bondagree::kReasonEnded &&
               (int)BOND_NOTICE_ROLE_CONFLICT == (int)bondagree::kReasonRoleConflict &&
-              (int)BOND_REQUEST_FLAG_FRESH == (int)bondagree::kRequestFlagFresh,
+              (int)BOND_REQUEST_FLAG_FRESH == (int)bondagree::kRequestFlagFresh &&
+              (int)BOND_REQUEST_FLAG_ROLE_CHOSEN == (int)bondagree::kRequestFlagRoleChosen &&
+              (int)BOND_REQUEST_FLAG_ROLE_YIELDS == (int)bondagree::kRequestFlagRoleYields &&
+              (int)BOND_NOTICE_FLAG_ROLE_CHOSEN == (int)bondagree::kNoticeFlagRoleChosen &&
+              (int)BOND_ROLE_WORKER == (int)bondagree::kRoleWorker && (int)BOND_ROLE_MASTER == (int)bondagree::kRoleMaster,
               "the wire values in System_ESPNow_Wire.h mirror bondagree");
 static_assert((int)BOND_AGREEMENT_UNKNOWN == (int)bondagree::Agreement::Unknown &&
               (int)BOND_AGREEMENT_AGREED == (int)bondagree::Agreement::Agreed &&
@@ -4438,6 +4506,89 @@ static void bondAgreementReset() {
   portENTER_CRITICAL(&gBondAgreeLock);
   bondagree::reset(gBondAgree);
   portEXIT_CRITICAL(&gBondAgreeLock);
+}
+
+// This device's role was not chosen and the partner's user chose the same
+// one: this device takes `newRole` (defined with bondrole). espnow_task.
+static void bondAutoRole(const uint8_t* partner, uint8_t newRole);
+
+// The role bondconnect gives this device for `peer` (bondagree::roleForBond):
+// the one its user chose, else the other than the one the peer's user chose
+// (from its last request or notice), else by the two addresses. cmd_exec.
+static bondagree::RoleChoice bondRoleForConnect(const uint8_t* peer) {
+  uint8_t selfMac[6];
+  espnowSelfStaMac(selfMac);
+  bondagree::Local local = {};
+  local.bonded = bondPartnerMac(local.partner);
+  uint8_t peerRole = 0;
+  bool peerChose = false;
+  portENTER_CRITICAL(&gBondAgreeLock);
+  const bool known = bondagree::roleNoteOf(gBondAgree, local, peer, &peerRole, &peerChose);
+  portEXIT_CRITICAL(&gBondAgreeLock);
+  return bondagree::roleForBond(gSettings.bondRoleChosen, gSettings.bondRole, known, peerChose, peerRole,
+                                memcmp(selfMac, peer, 6) > 0);
+}
+
+// The user chose a role or gave the choice up: the partner is asked again
+// (at most every 5 s), so its next request answer carries the role and the
+// "chosen" flag, and a partner whose role is automatic yields at once.
+// cmd_exec.
+static void bondAgreementTellRole() {
+  portENTER_CRITICAL(&gBondAgreeLock);
+  gBondAgree.requestDue = false;  // askSoon plans a request only when none is due
+  bondagree::askSoon(gBondAgree, (uint32_t)millis());
+  portEXIT_CRITICAL(&gBondAgreeLock);
+}
+
+// How this device's role came about now (bondrole, bondstatus): chosen here,
+// the other than the partner's chosen one, the one the two addresses give, or
+// kept from earlier (none of these now).
+static bondagree::RoleSource bondRoleSourceNow() {
+  uint8_t selfMac[6];
+  uint8_t partner[6];
+  espnowSelfStaMac(selfMac);
+  const bool partnerKnown = bondPartnerMac(partner);
+  const bool selfHigher = partnerKnown && memcmp(selfMac, partner, 6) > 0;
+  portENTER_CRITICAL(&gBondAgreeLock);
+  const bondagree::RoleSource src = bondagree::roleSourceNow(gBondAgree, gSettings.bondRoleChosen, gSettings.bondRole,
+                                                             partnerKnown, selfHigher);
+  portEXIT_CRITICAL(&gBondAgreeLock);
+  return src;
+}
+
+// The role the partner's user chose (false: it chose none, or nothing is known).
+static bool bondPartnerChoseRole(uint8_t* role) {
+  portENTER_CRITICAL(&gBondAgreeLock);
+  const bool chose = gBondAgree.partnerRoleKnown && gBondAgree.partnerRoleChosen;
+  *role = gBondAgree.partnerRole;
+  portEXIT_CRITICAL(&gBondAgreeLock);
+  return chose;
+}
+
+// "master (chosen with bondrole)", "worker (porch chose master)", "master
+// (from the two addresses)": the role and how it came about.
+static void bondRoleWords(char* out, size_t cap) {
+  const char* role = isBondMaster() ? "master" : "worker";
+  const bondagree::RoleSource src = bondRoleSourceNow();
+  if (src == bondagree::RoleSource::Chosen) {
+    snprintf(out, cap, "%s (chosen with 'bondrole'; bondconnect keeps it)", role);
+    return;
+  }
+  uint8_t partner[6];
+  uint8_t partnerRole = 0;
+  if (src == bondagree::RoleSource::Partner && bondPartnerMac(partner) && bondPartnerChoseRole(&partnerRole)) {
+    String who = getEspNowDeviceName(partner);
+    if (who.length() == 0) who = macToDisplayStr(partner);
+    snprintf(out, cap, "%s (automatic: %s chose %s)", role, who.c_str(),
+             partnerRole == BOND_ROLE_MASTER ? "master" : "worker");
+    return;
+  }
+  if (src == bondagree::RoleSource::Kept) {
+    snprintf(out, cap, "%s (automatic: kept as it was set earlier; the next bondconnect gives the master role to the "
+                       "device with the higher address)", role);
+    return;
+  }
+  snprintf(out, cap, "%s (automatic: bondconnect gives the master role to the device with the higher address)", role);
 }
 
 // The bond online or offline event about the partner `mac`.
@@ -4572,12 +4723,17 @@ static void bondAgreementSay(bondagree::Line line, const uint8_t* mac, uint8_t r
 // partner (ACCEPTED, ROLE_CONFLICT). bondconnect derives it from the two
 // addresses, so to any other peer it would say on which side of this device's
 // address the partner lies, and BONDED_ELSEWHERE must not say who the partner is.
-static bool bondSendNotice(const uint8_t* mac, uint8_t reason, uint16_t seq) {
+//
+// `role`: this device's role as the answer states it (takeInbound: the role it
+// takes when it yields to a partner that chose). The "chosen" flag goes with
+// the role only.
+static bool bondSendNotice(const uint8_t* mac, uint8_t reason, uint16_t seq, uint8_t role) {
   if (!bondSessionActiveWith(mac)) return false;
   const bool toPartner = reason == BOND_NOTICE_ACCEPTED || reason == BOND_NOTICE_ROLE_CONFLICT;
   V4PayloadBondNotice notice = {};
   notice.reason = reason;
-  notice.role = toPartner ? gSettings.bondRole : 0;
+  notice.role = toPartner ? role : 0;
+  notice.flags = (toPartner && gSettings.bondRoleChosen) ? BOND_NOTICE_FLAG_ROLE_CHOSEN : 0;
   notice.seq = seq;
   return bondSendEncryptedAsync(mac, ESPNOW_V4_TYPE_BOND_NOTICE, 0, generateMessageId(),
                                 (const uint8_t*)&notice, (uint16_t)sizeof(notice));
@@ -4604,6 +4760,7 @@ static void bondTellPartnerEnded(const uint8_t* nextPartner) {
   V4PayloadBondNotice notice = {};
   notice.reason = BOND_NOTICE_ENDED;
   notice.role = gSettings.bondRole;
+  notice.flags = gSettings.bondRoleChosen ? BOND_NOTICE_FLAG_ROLE_CHOSEN : 0;
   portENTER_CRITICAL(&gBondAgreeLock);
   notice.seq = bondagree::beginEnding(gBondAgree, (uint32_t)millis());
   portEXIT_CRITICAL(&gBondAgreeLock);
@@ -4678,13 +4835,20 @@ static void bondAgreementTick(uint32_t now) {
   bondagree::Local local = {};
   local.bonded = bondPartnerMac(local.partner);
   local.role = gSettings.bondRole;
+  local.roleChosen = gSettings.bondRoleChosen;
 
   for (uint8_t i = 0; i < bondagree::kInboxSlots; i++) {
     portENTER_CRITICAL(&gBondAgreeLock);
     const bondagree::Outcome out = bondagree::takeInbound(gBondAgree, local, now);
     portEXIT_CRITICAL(&gBondAgreeLock);
     if (!out.handled) break;
-    if (out.sendNotice) (void)bondSendNotice(out.mac, out.noticeReason, out.noticeSeq);
+    if (out.sendNotice) (void)bondSendNotice(out.mac, out.noticeReason, out.noticeSeq, out.noticeRole);
+    // This device's role was not chosen and the partner's user chose the
+    // same one: it takes the other (after the answer, which states it).
+    if (out.switchRole) {
+      bondAutoRole(out.mac, out.newRole);
+      local.role = out.newRole;
+    }
     if (out.ignored || out.voided) {
       char from[18];
       macToDisplay(out.mac, from, sizeof(from));
@@ -4708,7 +4872,7 @@ static void bondAgreementTick(uint32_t now) {
     const bool owed = bondagree::takeOwedNotice(gBondAgree, local, now, to, &reason, &seq);
     portEXIT_CRITICAL(&gBondAgreeLock);
     if (!owed) break;
-    (void)bondSendNotice(to, reason, seq);
+    (void)bondSendNotice(to, reason, seq, 0);
   }
 
   const bool sessionActive = local.bonded && bondSessionActiveWith(local.partner);
@@ -4718,7 +4882,8 @@ static void bondAgreementTick(uint32_t now) {
   if (plan.send) {
     V4PayloadBondRequest request = {};
     request.role = gSettings.bondRole;
-    request.flags = plan.flags;
+    request.flags = (uint8_t)(plan.flags | BOND_REQUEST_FLAG_ROLE_YIELDS |
+                              (gSettings.bondRoleChosen ? BOND_REQUEST_FLAG_ROLE_CHOSEN : 0));
     request.seq = plan.seq;
     const uint32_t msgId = generateMessageId();
     const bool queued = bondSendEncryptedAsync(local.partner, ESPNOW_V4_TYPE_BOND_REQUEST,
@@ -4836,7 +5001,7 @@ static void v4h_bond_notice(const V4RxCtx& ctx) {
   memcpy(&notice, ctx.payload, sizeof(notice));
   portENTER_CRITICAL(&gBondAgreeLock);
   const bool kept = bondagree::pushInbound(gBondAgree, false, ctx.recv_info->src_addr, notice.role,
-                                           notice.reason, notice.seq);
+                                           notice.reason, notice.seq, notice.flags);
   portEXIT_CRITICAL(&gBondAgreeLock);
   DEBUG_ESPNOW_MESHF("[BOND_NOTICE_RX] from %s reason=%u seq=%u%s", ctx.deviceName,
                      (unsigned)notice.reason, (unsigned)notice.seq,
@@ -4939,12 +5104,12 @@ static void v4h_bond_heartbeat(const V4RxCtx& ctx) {
 }
 
 // STREAM_CTRL — bond mode master->worker: start/stop sensor streaming.
-// Deferred to task because startSensorDataStreaming creates tasks/mutexes.
+// Deferred to later in this loop (step 9f2) because startSensorDataStreaming
+// creates tasks/mutexes. Kept per sensor: a bond master switching several
+// sensors sends their frames back to back, and each one counts.
 static void v4h_stream_ctrl(const V4RxCtx& ctx) {
   if (ctx.payloadLen >= 2 && gEspNow) {
-    gEspNow->bondDeferredStreamCtrlSensor = ctx.payload[0];  // sensorType
-    gEspNow->bondDeferredStreamCtrlEnable = ctx.payload[1];  // enable
-    gEspNow->bondDeferredStreamCtrlPending = true;
+    espnowsensor::streamCtrlPut(gEspNow->bondDeferredStreamCtrl, ctx.payload[0], ctx.payload[1] != 0);
     DEBUG_ESPNOW_MESHF("[BOND_STREAM_CTRL_RX] sensor=%u enable=%u (deferred)",
            ctx.payload[0], ctx.payload[1]);
   }
@@ -7396,6 +7561,8 @@ static const V4OpcodeEntry kV4HandlerTable[] = {
   // (System_ESPNow_PowerEvents.cpp): never to a mesh master.
   { ESPNOW_V4_TYPE_BOND_POWER_STATUS, V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_PEER | V4_OPC_FLAG_REQ_SESSION_ENC,  v4hBondPowerStatus    },
   { ESPNOW_V4_TYPE_BOND_EVENT_PUSH,  V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_PEER | V4_OPC_FLAG_REQ_SESSION_ENC,   v4hBondEventPush      },
+  // The bond worker's sensor status, to its bond master only (never to a mesh master).
+  { ESPNOW_V4_TYPE_BOND_SENSOR_STATUS, V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_PEER | V4_OPC_FLAG_REQ_SESSION_ENC, v4hBondSensorStatus },
   { ESPNOW_V4_TYPE_SETTINGS_REQ,     V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_PEER | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_settings_req      },
   { ESPNOW_V4_TYPE_SCHEMA_REQ,       V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_PEER | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_schema_req        },
   { ESPNOW_V4_TYPE_BOND_STATUS_REQ,  V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_PEER | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_bond_status_req   },
@@ -12938,16 +13105,18 @@ void processMeshHeartbeats() {
     }
   }
 
-  // 9f2. Bond: deferred STREAM_CTRL received — worker applies stream control from master
-  if (gEspNow->bondDeferredStreamCtrlPending) {
-    gEspNow->bondDeferredStreamCtrlPending = false;
-    RemoteSensorType sType = (RemoteSensorType)gEspNow->bondDeferredStreamCtrlSensor;
-    bool enable = (gEspNow->bondDeferredStreamCtrlEnable != 0);
-    
-    BROADCAST_PRINTF("[BOND] STREAM_CTRL: %s %s (from master)",
-                     sensorTypeToString(sType), enable ? "ON" : "OFF");
-    
-    if (sType < REMOTE_SENSOR_MAX) {
+  // 9f2. Bond: deferred STREAM_CTRL received — worker applies stream control
+  // from master, every sensor switched since the last loop.
+  if (gEspNow->bondDeferredStreamCtrl.pending) {
+    uint16_t ctrlOn = 0, ctrlOff = 0;
+    espnowsensor::streamCtrlTake(gEspNow->bondDeferredStreamCtrl, &ctrlOn, &ctrlOff);
+    for (int t = 0; t < REMOTE_SENSOR_MAX; t++) {
+      const uint16_t bit = (uint16_t)espnowsensor::sensorBit((uint8_t)t);
+      if (!((ctrlOn | ctrlOff) & bit)) continue;
+      const RemoteSensorType sType = (RemoteSensorType)t;
+      const bool enable = (ctrlOn & bit) != 0;
+      BROADCAST_PRINTF("[BOND] STREAM_CTRL: %s %s (from master)",
+                       sensorTypeToString(sType), enable ? "ON" : "OFF");
       if (enable) {
         startSensorDataStreaming(sType);
       } else {
@@ -20346,15 +20515,17 @@ const char* cmd_bond_connect(const String& argsInput) {
     return getDebugBuffer();
   }
   
-  // Enable bond mode and set peer MAC
-  // Role is determined by MAC address comparison (higher MAC = master)
-  // This ensures deterministic role assignment when both devices run 'bondconnect'
+  // Enable bond mode and set peer MAC.
+  // The role (bondagree::roleForBond): the one the user chose with 'bondrole'
+  // is kept; else the other than the one the peer's user chose (its last
+  // request said so); else the higher address becomes the master, so both
+  // devices running 'bondconnect' agree without being told.
   // Role-based handshake sequencing:
   // - Master (role=1) waits for worker's data, then sends its own
   // - Worker (role=0) sends data first when entering each exchange state
   uint8_t ourMac[6];
   espnowSelfStaMac(ourMac);
-  int cmp = memcmp(ourMac, peerMac, 6);
+  const bondagree::RoleChoice role = bondRoleForConnect(peerMac);
   // A partner this replaces is told that its bond ended, before the change.
   bondTellPartnerEnded(peerMac);
   // Partner, role and bond mode change with bond frames held off (the old
@@ -20363,11 +20534,12 @@ const char* cmd_bond_connect(const String& argsInput) {
   // 2026-11-17, step c1; see bondWithFramesHeld).
   bondWithFramesHeld([&] {
     setSetting(gSettings.bondPeerMac, macToDisplayStr(peerMac));
-    setSetting(gSettings.bondRole, (uint8_t)((cmp > 0) ? 1 : 0));  // Higher MAC becomes MASTER
+    setSetting(gSettings.bondRole, role.role);
     setSetting(gSettings.bondModeEnabled, true);
     bondForgetPartnerState();
   });
-  INFO_ESPNOWF("[PAIR] Role assigned by MAC comparison: %s (our=" MAC_FMT ", peer=" MAC_FMT ")",
+  INFO_ESPNOWF("[PAIR] Role %s: %s (our=" MAC_FMT ", peer=" MAC_FMT ")",
+                bondagree::roleSourceKey(role.source),
                 isBondMaster() ? "MASTER" : "WORKER",
                 MAC_ARGS(ourMac),
                 MAC_ARGS(peerMac));
@@ -20380,12 +20552,26 @@ const char* cmd_bond_connect(const String& argsInput) {
   // The heartbeat handler will trigger capability/manifest exchange when peer is detected
   
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+  const char* roleName = isBondMaster() ? "master" : "worker";
+  char roleWhy[96];
+  switch (role.source) {
+    case bondagree::RoleSource::Chosen:
+      snprintf(roleWhy, sizeof(roleWhy), "chosen with 'bondrole', kept");
+      break;
+    case bondagree::RoleSource::Partner:
+      snprintf(roleWhy, sizeof(roleWhy), "%s chose %s", deviceName.c_str(),
+               role.role == BOND_ROLE_MASTER ? "worker" : "master");
+      break;
+    default:
+      snprintf(roleWhy, sizeof(roleWhy), "automatic: this device's address is the %s",
+               role.role == BOND_ROLE_MASTER ? "higher" : "lower");
+      break;
+  }
   snprintf(getDebugBuffer(), 1024, 
-           "Bond mode enabled. Waiting for peer: %s (%s)\nRole: %s\n"
+           "Bond mode enabled. Waiting for peer: %s (%s)\nRole: %s (%s)\n"
            "The peer is asked to confirm the bond; run 'bondconnect' there too if it has not been.\n"
            "Capabilities + manifest will be requested when peer comes online.",
-           deviceName.c_str(), macToDisplayStr(peerMac).c_str(),
-           isBondMaster() ? "master" : "worker");
+           deviceName.c_str(), macToDisplayStr(peerMac).c_str(), roleName, roleWhy);
   return getDebugBuffer();
 }
 
@@ -20421,6 +20607,10 @@ const char* cmd_bond_status(const String& argsInput) {
     doc["schema"]  = 1;
     doc["enabled"] = gSettings.bondModeEnabled;
     doc["role"]    = isBondMaster() ? "master" : "worker";
+    // Whether the user chose the role (bondrole) and else how it came about:
+    // "chosen", "partner" (the partner's user chose the other), "address".
+    doc["roleChosen"] = gSettings.bondRoleChosen;
+    doc["roleSource"] = bondagree::roleSourceKey(bondRoleSourceNow());
     if (gSettings.bondModeEnabled) {
       uint8_t pm[6];
       String pname = "";
@@ -20464,7 +20654,9 @@ const char* cmd_bond_status(const String& argsInput) {
   if (!gSettings.bondModeEnabled) {
     if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
     char* buf = getDebugBuffer();
-    snprintf(buf, 512, "Bond mode: DISABLED\nRole: %s", isBondMaster() ? "master" : "worker");
+    char roleWords[200];
+    bondRoleWords(roleWords, sizeof(roleWords));
+    snprintf(buf, 512, "Bond mode: DISABLED\nRole: %s", roleWords);
     return buf;
   }
   
@@ -20504,7 +20696,9 @@ const char* cmd_bond_status(const String& argsInput) {
   
   // Output each line separately to avoid DEBUG_MSG_SIZE (256 byte) truncation
   broadcastOutput("Bond mode: ENABLED");
-  BROADCAST_PRINTF("Role: %s", isBondMaster() ? "master (display/gamepad)" : "worker (compute/network)");
+  char roleWords[200];
+  bondRoleWords(roleWords, sizeof(roleWords));
+  BROADCAST_PRINTF("Role: %s", roleWords);
   BROADCAST_PRINTF("Peer: %s (%s)", deviceName.c_str(), gSettings.bondPeerMac.c_str());
   BROADCAST_PRINTF("Peer status: %s", peerStatus);
   BROADCAST_PRINTF("Agreement: %s", agreementLine);
@@ -20542,32 +20736,12 @@ const char* cmd_bond_status(const String& argsInput) {
 }
 
 /**
- * Set bond mode role: bondrole <master|worker>
+ * Change this device's bond role (bondrole, and bondAutoRole when the partner's
+ * user chose the same role and this device's was automatic). A role change on a
+ * running ESP-NOW resets the role-dependent handshake inside the frame hold.
  */
-const char* cmd_bond_role(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  
-  String args = argsInput;
-  args.trim();
-  args.toLowerCase();
-  
-  if (args.length() == 0) {
-    if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-    snprintf(getDebugBuffer(), 1024, "Current role: %s",
-             isBondMaster() ? "master" : "worker");
-    return getDebugBuffer();
-  }
-  
-  uint8_t newRole = 255;
-  if (args == "master" || args == "1") {
-    newRole = 1;
-  } else if (args == "worker" || args == "0") {
-    newRole = 0;
-  } else {
-    return "Error: invalid arguments — Usage: bondrole <master|worker>";
-  }
-  
-  bool changed = (newRole != gSettings.bondRole);
+static void bondChangeRole(uint8_t newRole) {
+  const bool changed = (newRole != gSettings.bondRole);
   // A role change on a running ESP-NOW is made inside the frame hold below.
   const bool resync = changed && gEspNow && gEspNow->initialized;
   if (!resync) setSetting(gSettings.bondRole, newRole);
@@ -20678,8 +20852,78 @@ const char* cmd_bond_role(const String& argsInput) {
     }
   }
   
+}
+
+// The partner's user chose the role this device has, and this device's role
+// was automatic: it takes the other one. espnow_task (the agreement tick).
+static void bondAutoRole(const uint8_t* partner, uint8_t newRole) {
+  if (gSettings.bondRoleChosen || newRole == gSettings.bondRole) return;
+  bondChangeRole(newRole);
+  String who = partner ? getEspNowDeviceName(partner) : String("");
+  if (who.length() == 0 && partner) who = macToDisplayStr(partner);
+  BROADCAST_PRINTF("[BOND] %s chose the %s role: this device is %s now (its role was automatic; "
+                   "'bondrole master|worker' chooses one)",
+                   who.c_str(), newRole == BOND_ROLE_MASTER ? "worker" : "master",
+                   newRole == BOND_ROLE_MASTER ? "master" : "worker");
+}
+
+/**
+ * Set bond mode role: bondrole [master|worker|auto]
+ * master or worker: the user's choice, kept by bondconnect, sent to the
+ * partner (a partner whose role is automatic takes the other one). auto: the
+ * role is no longer chosen; it stays as it is until the partner's user
+ * chooses the same one or the next bondconnect decides by the addresses.
+ */
+const char* cmd_bond_role(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  
+  String args = argsInput;
+  args.trim();
+  args.toLowerCase();
+  
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-  snprintf(getDebugBuffer(), 1024, "Bond role set to: %s%s",
+  char words[200];
+  if (args.length() == 0) {
+    bondRoleWords(words, sizeof(words));
+    snprintf(getDebugBuffer(), 1024, "Current role: %s", words);
+    return getDebugBuffer();
+  }
+
+  if (args == "auto") {
+    const bool wasChosen = gSettings.bondRoleChosen;
+    setSetting(gSettings.bondRoleChosen, false);
+    // A partner whose user chose this very role wins at once.
+    uint8_t partnerRole = 0;
+    bool switched = false;
+    if (gSettings.bondModeEnabled && bondPartnerChoseRole(&partnerRole) &&
+        bondagree::roleYields(false, gSettings.bondRole, true, partnerRole)) {
+      bondChangeRole(partnerRole == BOND_ROLE_MASTER ? BOND_ROLE_WORKER : BOND_ROLE_MASTER);
+      switched = true;
+    }
+    if (gSettings.bondModeEnabled && wasChosen) bondAgreementTellRole();
+    bondRoleWords(words, sizeof(words));
+    snprintf(getDebugBuffer(), 1024, "Bond role is automatic%s: %s%s", wasChosen ? " now" : " (unchanged)", words,
+             switched ? " (handshake reset)" : "");
+    return getDebugBuffer();
+  }
+  
+  uint8_t newRole = 255;
+  if (args == "master" || args == "1") {
+    newRole = 1;
+  } else if (args == "worker" || args == "0") {
+    newRole = 0;
+  } else {
+    return "Error: invalid arguments — Usage: bondrole [master|worker|auto]";
+  }
+  
+  const bool changed = (newRole != gSettings.bondRole);
+  // The user's choice: bondconnect keeps it, and the partner is told with
+  // every request and notice (asked again now).
+  setSetting(gSettings.bondRoleChosen, true);
+  bondChangeRole(newRole);
+  if (gSettings.bondModeEnabled) bondAgreementTellRole();
+  
+  snprintf(getDebugBuffer(), 1024, "Bond role set to: %s%s, chosen: bondconnect keeps it ('bondrole auto' undoes the choice)",
            newRole == 1 ? "master (display/gamepad)" : "worker (compute/network)",
            changed ? " (handshake reset)" : " (unchanged)");
   return getDebugBuffer();
@@ -21240,20 +21484,19 @@ extern const CommandEntry espNowCommands[] = {
   // Secure sensor fetcher (worker settings + Phase 1b test harness) — docs/ESPNOW_SENSOR_FETCHER_DESIGN.md
   { "espnowacceptsensorcontrol", "Worker: opt in to honor SENSOR_REQ from the configured master/backup: 'espnowacceptsensorcontrol <on|off>'.", true, cmd_espnow_acceptsensorcontrol, "Usage: espnowacceptsensorcontrol <on|off>" },
   { "espnowmasterfingerprint", "Name the mesh master on this device: its key as 'espnowidentity' shows it (64 hex), or 'clear' to name none.", true, cmd_espnow_masterfingerprint, "Usage: espnowmasterfingerprint [<64-hex-pubkey>|clear]\n       No argument shows it. The master named here gives this device mesh time, gets its readings,\n       battery state and events, and may ask it for readings. clear: no master is named (the reply says what that stops)." },
-  { "espnowforwardfrom", "Mesh master: name the devices that may forward their bond partner's readings, battery state and events to this device: 'espnowforwardfrom [add <name_or_mac> | remove <name_or_mac> | clear]'.", true, cmd_espnow_forwardfrom, "Usage: espnowforwardfrom [add <name_or_mac> | remove <name_or_mac> | clear]\n       No argument shows the list. Up to 4 paired devices, each under the key it is paired with (paired again: add it again).\n       Empty (the default): no device may forward to this one. The bond master also needs 'bondforward on' and this device named as its master." },
   { "espnowforwardlinks", "Mesh master: show the devices that forward their bond partner's data to this device: 'espnowforwardlinks [json] [from <n>]'.", false, cmd_espnow_forwardlinks, "Usage: espnowforwardlinks [json] [from <n>]\n       json: 'next' is the number to pass as 'from' when not every link fitted one reply." },
   { "espnowbackupfingerprint", "Name the backup master on this device: its key as 'espnowidentity' shows it (64 hex), or 'clear' to name none.", true, cmd_espnow_backupfingerprint, "Usage: espnowbackupfingerprint [<64-hex-pubkey>|clear]\n       No argument shows it. The backup named here gets this device's battery state and events, may ask it for readings,\n       and gives it mesh time while it acts as master. clear: no backup master is named." },
-  { "espnowsensorreq", "TEST (Phase 1b): hand-send a SENSOR_REQ to a paired worker.", true, cmd_espnow_sensorreq, "Usage: espnowsensorreq <MAC|name> <mask> <mode 0=sub|1=unsub|2=oneshot> <intervalMs> <leaseMs>" },
+  { "espnowsensorreq", "Hand-send a SENSOR_REQ to a paired worker, or to a bond partner through the bond master that forwards for it ('<partner> via <bond master>').", true, cmd_espnow_sensorreq, "Usage: espnowsensorreq <MAC|name> [via <MAC|name>] <mask> <mode 0=sub|1=unsub|2=oneshot> <intervalMs> <leaseMs>\n       A forwarded partner: its name and 'via' the bond master (espnowforwardlinks lists them); its name alone when it is not paired here.\n       The bond master needs 'bondforward on' and forwards only the sensors it names (bondforward sensors)." },
   { "espnowusersync", "Enable/disable user credential sync: 'espnowusersync [on|off]'.", true, cmd_espnow_usersync, "Usage: espnowusersync [on|off]", /*requiresSuperAdmin=*/true },
   { "espnowrequestmeta", "Request metadata from peer: 'espnowrequestmeta <name_or_mac>'. (async - updates cache; view with espnowdevices)", false, cmd_espnow_requestmeta, "Usage: espnowrequestmeta <name_or_mac>\n       Returns OK on delivery; the peer's name/room/zone/tags arrive later and update the local peer cache shown by 'espnowdevices' / 'espnowrooms' / 'espnowfind'." },
   
 #if ENABLE_BONDED_MODE
   // ---- Bond Mode Commands (1:1 handshake relationship) ----
-  { "bondconnect", "Connect to bonded peer device: 'bondconnect <mac_or_name>'. Run it on both devices. (async - bond establishes when peer is seen; watch bondstatus)", true, cmd_bond_connect, "Usage: bondconnect <mac_or_name>\n       Returns immediately; the bond completes when the peer appears via heartbeat - watch 'bondstatus'.\n       The peer is asked to confirm; until 'bondconnect' is run there too it answers that it is not bonded, and 'bondstatus' says so." },
+  { "bondconnect", "Connect to bonded peer device: 'bondconnect <mac_or_name>'. Run it on both devices. (async - bond establishes when peer is seen; watch bondstatus)", true, cmd_bond_connect, "Usage: bondconnect <mac_or_name>\n       Returns immediately; the bond completes when the peer appears via heartbeat - watch 'bondstatus'.\n       The peer is asked to confirm; until 'bondconnect' is run there too it answers that it is not bonded, and 'bondstatus' says so.\n       A role chosen with 'bondrole' is kept; else the other than the one the peer's user chose; else the higher address is master." },
   { "bonddisconnect", "Disconnect from bonded peer device. The peer is told that the bond ended.", true, cmd_bond_disconnect },
   { "bondstatus", "Show bond mode status and configuration, with what the peer answered about the bond (Agreement) and whether its data is forwarded to the mesh.", false, cmd_bond_status },
-  { "bondforward", "Bond master: forward the bond partner's readings, battery state and events to the mesh master named on this device: 'bondforward [on|off|sensors <all|default|name,name,...>]'.", true, cmd_bond_forward, "Usage: bondforward [on | off | sensors <all | default | name,name,...>]\n       No argument shows whether the partner's data is forwarded, and why not. Off by default.\n       The mesh master must list this device ('espnowforwardfrom add' there). Input is not forwarded unless named." },
-  { "bondrole", "Get/set bond mode role: 'bondrole [master|worker]' (no arg shows current role).", true, cmd_bond_role, "Usage: bondrole [master|worker]   (no arg shows current role)" },
+  { "bondforward", "Bond master: forward the bond partner's readings, battery state and events to the mesh master named on this device: 'bondforward [on|off|sensors <all|default|name,name,...>]'.", true, cmd_bond_forward, "Usage: bondforward [on | off | sensors <all | default | name,name,...>]\n       No argument shows whether the partner's data is forwarded, and why not. Off by default.\n       Only to the master named here, when it is paired in this device's primary mesh. Input is not forwarded unless named.\n       That master may ask for the partner's readings (espnowsensorreq <partner> via <this device> there)." },
+  { "bondrole", "Get/choose bond mode role: 'bondrole [master|worker|auto]' (no arg shows the role and whether it was chosen).", true, cmd_bond_role, "Usage: bondrole [master|worker|auto]   (no arg shows the role and how it was decided)\n       master or worker: your choice, kept by bondconnect; a partner whose role is automatic takes the other one.\n       auto: give the choice up (the role stays until the partner chooses or the next bondconnect)." },
   { "bondshowcap", "Show local device capability summary.", false, cmd_bond_showcap },
   { "bondrequestcap", "Request capability summary from bonded peer. (async - remote cap via GET /api/bond/status; note bondshowcap shows LOCAL cap)", true, cmd_bond_requestcap },
   { "bondshowmanifest", "Show local device manifest (UI apps + CLI commands).", false, cmd_bond_showmanifest },
@@ -21369,14 +21612,13 @@ static const SettingEntry espnowSettingEntries[] = {
   { "acceptSensorControl", SETTING_BOOL, &gSettings.espnowAcceptSensorControl, 0, 0, nullptr, 0, 0, "Accept Sensor Control", nullptr, false, "mesh", "espnowacceptsensorcontrol" },
   { "masterFingerprint", SETTING_STRING, &gSettings.espnowMasterFingerprint, 0, 0, "", 0, 0, "Master Fingerprint", nullptr, false, "mesh", "espnowmasterfingerprint" },
   { "backupMasterFingerprint", SETTING_STRING, &gSettings.espnowBackupMasterFingerprint, 0, 0, "", 0, 0, "Backup Master Fingerprint", nullptr, false, "mesh", "espnowbackupfingerprint" },
-  // The devices that may forward their bond partner's readings, battery state
-  // and events to this device (System_ESPNow_ForwardRx.cpp): up to four
-  // entries "<address>/<first 8 key bytes in hex>", written by
-  // 'espnowforwardfrom add'. Empty: none. Not remotely editable by a bond partner.
-  { "forwardFrom", SETTING_STRING, &gSettings.espnowForwardFrom, 0, 0, "", 0, 0, "Accept Forwarded Data From", nullptr, false, "mesh", "espnowforwardfrom" },
 #if ENABLE_BONDED_MODE
   { "bondModeEnabled", SETTING_BOOL, &gSettings.bondModeEnabled, false, 0, nullptr, 0, 1, "Bond Mode Enabled", nullptr, false, "bond", "espnowbondmodeenabled" },
   { "bondRole", SETTING_U8, &gSettings.bondRole, 0, 0, nullptr, 0, 1, "Bond Role", "0:Worker (compute/network),1:Master (display/gamepad)", false, "bond", "bondrole" },
+  // The user chose bondRole (set by 'bondrole master|worker', cleared by
+  // 'bondrole auto'; an edit of bondRole goes through bondrole and sets it).
+  // Shown, not edited: the command is the one way to change it.
+  { "bondRoleChosen", SETTING_BOOL, &gSettings.bondRoleChosen, false, 0, nullptr, 0, 1, "Bond Role Chosen", nullptr, false, "bond", nullptr, true },
   { "bondPeerMac", SETTING_STRING, &gSettings.bondPeerMac, 0, 0, "", 0, 0, "Bond Peer MAC", nullptr, false, "bond", "espnowbondpeermac" },
   { "bondStreamThermal", SETTING_BOOL, &gSettings.bondStreamThermal, false, 0, nullptr, 0, 1, "Auto-stream Thermal", nullptr, false, "bond", "bondstreamthermal" },
   { "bondStreamTof", SETTING_BOOL, &gSettings.bondStreamTof, false, 0, nullptr, 0, 1, "Auto-stream ToF", nullptr, false, "bond", "bondstreamtof" },
@@ -21498,33 +21740,68 @@ const char* cmd_espnow_backupfingerprint(const String& a) {
 // Phase 1b test harness: hand-send a SENSOR_REQ to a paired worker so the worker path
 // (fingerprint auth → lease → encrypted SENSOR_ENVELOPE reply) is exercisable before the
 // master auto-fetch tick (Phase 2) exists. Admin-gated; removed/kept as a diagnostic later.
+//
+// A bond partner whose bond master forwards its readings here is asked the
+// same way: 'espnowsensorreq <partner> via <bond master> ...', or the
+// partner's name alone when it is not paired with this device. The request
+// goes to the bond master with its link number (V4PayloadSensorReq.fwdLink);
+// the bond master switches the partner's sensors over the bond link, and the
+// readings come back forwarded ("porch via glasses").
 const char* cmd_espnow_sensorreq(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+  static const char kUsage[] =
+      "Usage: espnowsensorreq <MAC|name> [via <MAC|name>] <mask> <mode 0=sub|1=unsub|2=oneshot> <intervalMs> <leaseMs>";
   CommandArgs a(argsInput);
-  if (!a.hasMinArgs(5)) {
-    return "Usage: espnowsensorreq <MAC|name> <mask> <mode 0=sub|1=unsub|2=oneshot> <intervalMs> <leaseMs>";
-  }
+  if (!a.hasMinArgs(5)) return kUsage;
   uint8_t mac[6];
-  if (!resolveDeviceNameOrMac(a.arg(0), mac)) {
-    return "Error: peer not found (must be securely paired — try espnowpairsecure)";
+  uint8_t origin[6] = {0};
+  uint8_t linkGen = 0;
+  int at = 1;  // the first argument after the target
+  if (a.count() >= 7 && a.arg(1) == "via") {
+    // A forwarded partner, by the device that forwards for it.
+    switch (espnowForwardRequestTarget(a.arg(0).c_str(), a.arg(2).c_str(), mac, origin, &linkGen)) {
+      case ForwardTarget::Found:  break;
+      case ForwardTarget::NoVia:  return "Error: the device after 'via' is not known here";
+      case ForwardTarget::NoLink: return "Error: that device forwards nothing for that partner to this device "
+                                         "(espnowforwardlinks)";
+    }
+    at = 3;
+  } else if (!resolveDeviceNameOrMac(a.arg(0), mac)) {
+    // Not paired here: a partner a bond master forwards for, by its name.
+    if (espnowForwardRequestTarget(a.arg(0).c_str(), nullptr, mac, origin, &linkGen) != ForwardTarget::Found) {
+      return "Error: peer not found (must be securely paired — try espnowpairsecure — or forwarded here: "
+             "espnowforwardlinks)";
+    }
   }
+  if (a.count() != at + 4) return kUsage;
   V4PayloadSensorReq rq = {};
   rq.reqId      = (uint8_t)(generateMessageId() & 0xFF);
   uint8_t mode = 0;
   uint32_t intervalMs = 0;
   uint32_t leaseMs = 0;
-  if (!parseIntArg(a.arg(2), mode) || !parseIntArg(a.arg(3), intervalMs) ||
-      !parseIntArg(a.arg(4), leaseMs)) return kCommandReplyNotANumber;
+  if (!parseIntArg(a.arg(at + 1), mode) || !parseIntArg(a.arg(at + 2), intervalMs) ||
+      !parseIntArg(a.arg(at + 3), leaseMs)) return kCommandReplyNotANumber;
   rq.mode       = mode;
-  rq.sensorMask = (uint32_t)strtoul(a.arg(1).c_str(), nullptr, 0);  // accepts 0x.. or decimal
+  rq.sensorMask = (uint32_t)strtoul(a.arg(at).c_str(), nullptr, 0);  // accepts 0x.. or decimal
   rq.intervalMs = intervalMs;
   rq.leaseMs    = leaseMs;
+  rq.fwdLink    = linkGen;  // 0: for the device itself
   uint32_t msgId = generateMessageId();
   // cmd_exec task (NOT espnow_task) — sendAeadSync is safe here. encrypt-or-fail.
   bool sent = espnowtx::sendAeadSync(mac, ESPNOW_V4_TYPE_SENSOR_REQ, 0, msgId,
                                      (const uint8_t*)&rq, sizeof(rq), 1, 3000);
-  return sent ? "OK: SENSOR_REQ sent (wire-delivered; watch the worker's stream/logs)"
-              : "Error: send failed (no live session? not paired? peer offline?)";
+  if (!sent) return "Error: send failed (no live session? not paired? peer offline?)";
+  if (!linkGen) return "OK: SENSOR_REQ sent (wire-delivered; watch the worker's stream/logs)";
+  if (!ensureDebugBuffer()) return "OK: SENSOR_REQ sent to the bond master";
+  char partner[33];
+  espnowForwardOriginName(mac, origin, partner, sizeof(partner));
+  String via = getEspNowDeviceName(mac);
+  if (via.length() == 0) via = macToDisplayStr(mac);
+  snprintf(getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE,
+           "OK: SENSOR_REQ for %s sent to %s, its bond master, which switches %s's sensors itself; the readings "
+           "come back forwarded (espnowsensorstatus; 'bondforward' there shows what it did)",
+           partner[0] ? partner : "the partner", via.c_str(), partner[0] ? partner : "the partner");
+  return getDebugBuffer();
 }
 
 #if ENABLE_BONDED_MODE

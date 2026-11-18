@@ -44,12 +44,13 @@ static void rxRequest(const uint8_t* src, uint8_t role, uint8_t flags, uint16_t 
   v4h_bond_request(ctx);
 }
 
-static void rxNotice(const uint8_t* src, uint8_t reason, uint8_t role, uint16_t seq) {
+static void rxNotice(const uint8_t* src, uint8_t reason, uint8_t role, uint16_t seq, uint8_t flags = 0) {
   if (!bondSessionActiveWith(src)) return;
   V4PayloadBondNotice n = {};
   n.reason = reason;
   n.role = role;
   n.seq = seq;
+  n.flags = flags;
   esp_now_recv_info info{src};
   V4RxCtx ctx{&info, reinterpret_cast<const uint8_t*>(&n), sizeof(n), "peer"};
   v4h_bond_notice(ctx);
@@ -1049,6 +1050,125 @@ static void caseJsonText() {
         "no bond: %s / %s", bondAgreementKey(view), bondAgreementReasonKey(view));
 }
 
+
+// The role. bondconnect keeps a role the user chose (the addresses alone would
+// give the other); the request and the answer say "chosen". A partner whose
+// role is automatic and the same is not reported as a conflict: it takes the
+// other role on that answer. This device, automatic, takes the other role than
+// a partner that chose, from its request or its notice, answers with the new
+// role, and asks again; bondconnect to a peer that asked earlier uses what it
+// said.
+static void caseRoleChoice() {
+  // Chosen master on the lower address: kept by bondconnect.
+  resetWorld(kWorkerSelf);
+  gMaster.mac = kPeerC;
+  gSettings.bondRole = BOND_ROLE_MASTER;
+  gSettings.bondRoleChosen = true;
+  std::string reply = cmd_bond_connect(String(kMacA));
+  CHECK(gSettings.bondModeEnabled && gSettings.bondRole == BOND_ROLE_MASTER && gSettings.bondRoleChosen,
+        "bondconnect keeps the role the user chose (role %u)", (unsigned)gSettings.bondRole);
+  CHECK(reply.find("Role: master (chosen with 'bondrole', kept)") != std::string::npos, "reply: %s", reply.c_str());
+  sessionUpAndRequest(kPeerA);
+  const AgreeFrame* rq = lastAgreeFrame(kPeerA, ESPNOW_V4_TYPE_BOND_REQUEST);
+  CHECK(rq && rq->b0 == BOND_ROLE_MASTER && (rq->b1 & BOND_REQUEST_FLAG_ROLE_CHOSEN) &&
+        (rq->b1 & BOND_REQUEST_FLAG_ROLE_YIELDS), "the request carries the role, the chosen flag and 'I yield'");
+  // A, automatic and master too, asks: answered ACCEPTED as master, "chosen".
+  rxRequest(kPeerA, BOND_ROLE_MASTER, BOND_REQUEST_FLAG_FRESH | BOND_REQUEST_FLAG_ROLE_YIELDS, 9);
+  tick();
+  const AgreeFrame* answer = lastAgreeFrame(kPeerA, ESPNOW_V4_TYPE_BOND_NOTICE);
+  CHECK(answer && answer->b0 == BOND_NOTICE_ACCEPTED && answer->b1 == BOND_ROLE_MASTER &&
+        (answer->b4 & BOND_NOTICE_FLAG_ROLE_CHOSEN) && answer->seq == 9,
+        "a partner whose role is automatic is answered ACCEPTED with our chosen role");
+  CHECK(!bondAgreementView().roleConflict && linesWith("are both bond") == 0 && gAutoRoleCalls == 0 &&
+        gSettings.bondRole == BOND_ROLE_MASTER, "no conflict is reported: the partner takes the other role");
+
+  // The same partner on firmware from before role choice (no 'I yield'): it
+  // keeps its role, so the conflict is reported at once, as before.
+  rxRequest(kPeerA, BOND_ROLE_MASTER, BOND_REQUEST_FLAG_FRESH, 10);
+  tick();
+  answer = lastAgreeFrame(kPeerA, ESPNOW_V4_TYPE_BOND_NOTICE);
+  CHECK(answer && answer->b0 == BOND_NOTICE_ROLE_CONFLICT && answer->seq == 10 && bondAgreementView().roleConflict &&
+        linesWith("are both bond") == 1 && gSettings.bondRole == BOND_ROLE_MASTER,
+        "an older partner with the same role: ROLE_CONFLICT at once");
+
+  // Neither chose: the addresses decide, as before (the higher is master).
+  resetWorld(kWorkerSelf);
+  gMaster.mac = kPeerC;
+  gSettings.bondRole = BOND_ROLE_MASTER;
+  reply = cmd_bond_connect(String(kMacA));
+  CHECK(gSettings.bondRole == BOND_ROLE_WORKER && reply.find("automatic: this device's address is the lower") !=
+        std::string::npos, "neither chose: the lower address is worker (%s)", reply.c_str());
+
+  // Automatic on the higher address (master by the addresses); A chose master:
+  // this device takes worker and answers as worker, not "chosen".
+  bondedToA(kMasterSelf, BOND_ROLE_MASTER);
+  sessionUpAndRequest(kPeerA);
+  rq = lastAgreeFrame(kPeerA, ESPNOW_V4_TYPE_BOND_REQUEST);
+  CHECK(rq && !(rq->b1 & BOND_REQUEST_FLAG_ROLE_CHOSEN), "an automatic role is sent without the chosen flag");
+  rxRequest(kPeerA, BOND_ROLE_MASTER, BOND_REQUEST_FLAG_FRESH | BOND_REQUEST_FLAG_ROLE_CHOSEN, 11);
+  tick();
+  answer = lastAgreeFrame(kPeerA, ESPNOW_V4_TYPE_BOND_NOTICE);
+  CHECK(gAutoRoleCalls == 1 && gAutoRoleTo == BOND_ROLE_WORKER && gSettings.bondRole == BOND_ROLE_WORKER,
+        "an automatic role yields to the partner's choice (%d calls)", gAutoRoleCalls);
+  CHECK(answer && answer->b0 == BOND_NOTICE_ACCEPTED && answer->b1 == BOND_ROLE_WORKER &&
+        !(answer->b4 & BOND_NOTICE_FLAG_ROLE_CHOSEN), "the answer states the new role");
+  CHECK(!bondAgreementView().roleConflict && linesWith("are both bond") == 0, "no conflict is reported");
+  // Once yielded, the partner's next request changes nothing.
+  rxRequest(kPeerA, BOND_ROLE_MASTER, BOND_REQUEST_FLAG_ROLE_CHOSEN, 12);
+  tick();
+  CHECK(gAutoRoleCalls == 1 && gSettings.bondRole == BOND_ROLE_WORKER, "nothing more to yield");
+  char words[200];
+  bondRoleWords(words, sizeof(words));
+  CHECK(std::strstr(words, "worker (automatic: ") != nullptr && std::strstr(words, "chose master") != nullptr,
+        "role words: %s", words);
+  // A gives its choice up ('bondrole auto'): this device stays worker, and
+  // says the role was kept, not that the addresses gave it (they give master).
+  rxRequest(kPeerA, BOND_ROLE_MASTER, BOND_REQUEST_FLAG_ROLE_YIELDS, 20);
+  tick();
+  bondRoleWords(words, sizeof(words));
+  CHECK(gSettings.bondRole == BOND_ROLE_WORKER && std::strstr(words, "worker (automatic: kept as it was set earlier") !=
+        nullptr, "role words: %s", words);
+
+  // The same from A's notice (its request was lost): yield, then ask again.
+  bondedToA(kMasterSelf, BOND_ROLE_MASTER);
+  const uint16_t seq = sessionUpAndRequest(kPeerA);
+  const size_t asked = requestsTo(kPeerA);
+  rxNotice(kPeerA, BOND_NOTICE_ROLE_CONFLICT, BOND_ROLE_MASTER, seq, BOND_NOTICE_FLAG_ROLE_CHOSEN);
+  tick();
+  CHECK(gAutoRoleCalls == 1 && gSettings.bondRole == BOND_ROLE_WORKER && !bondAgreementView().roleConflict,
+        "an automatic role yields to the choice a notice states");
+  advance(bondagree::kRequestRetryMs + 200);
+  rq = lastAgreeFrame(kPeerA, ESPNOW_V4_TYPE_BOND_REQUEST);
+  CHECK(requestsTo(kPeerA) == asked + 1 && rq && rq->b0 == BOND_ROLE_WORKER,
+        "the partner is asked again with the new role (%zu requests)", requestsTo(kPeerA) - asked);
+
+  // A chosen role does not yield: both chose master is a conflict, reported.
+  bondedToA(kMasterSelf, BOND_ROLE_MASTER);
+  gSettings.bondRoleChosen = true;
+  sessionUpAndRequest(kPeerA);
+  rxRequest(kPeerA, BOND_ROLE_MASTER, BOND_REQUEST_FLAG_FRESH | BOND_REQUEST_FLAG_ROLE_CHOSEN, 13);
+  tick();
+  answer = lastAgreeFrame(kPeerA, ESPNOW_V4_TYPE_BOND_NOTICE);
+  CHECK(gAutoRoleCalls == 0 && gSettings.bondRole == BOND_ROLE_MASTER && answer &&
+        answer->b0 == BOND_NOTICE_ROLE_CONFLICT && bondAgreementView().roleConflict && linesWith("are both bond") == 1,
+        "both chose the same role: ROLE_CONFLICT, as before");
+
+  // bondconnect to a peer that asked before: the other role than the one its
+  // user chose (the addresses alone would make this lower address worker).
+  resetWorld(kWorkerSelf);
+  gMaster.mac = kPeerC;
+  rxRequest(kPeerA, BOND_ROLE_WORKER, BOND_REQUEST_FLAG_FRESH | BOND_REQUEST_FLAG_ROLE_CHOSEN, 3);
+  tick();
+  reply = cmd_bond_connect(String(kMacA));
+  CHECK(gSettings.bondRole == BOND_ROLE_MASTER && reply.find("chose worker") != std::string::npos,
+        "bondconnect takes the other role than the one the peer's user chose (%s)", reply.c_str());
+  // The bond status reply says how the role came about.
+  bondRoleWords(words, sizeof(words));
+  CHECK(std::strstr(words, "master (automatic: ") != nullptr, "role words: %s", words);
+  gSettings.bondRoleChosen = true;
+  bondRoleWords(words, sizeof(words));
+  CHECK(std::strstr(words, "master (chosen with 'bondrole'") != nullptr, "role words: %s", words);
+}
 int main() {
   caseMutual();
   caseRequestFromNonPartner();
@@ -1063,6 +1183,7 @@ int main() {
   caseEndedVoidsOlderRequest();
   caseConnectAgainAsksAgain();
   caseJsonText();
+  caseRoleChoice();
   std::printf("espnow_bond_agreement: %d checks, %d failed\n", gChecks, gFailures);
   return gFailures ? 1 : 0;
 }

@@ -649,22 +649,28 @@ What you see when something changes (console and event log, tagged `[EVENT][BOND
 - on the device that asked: `<name> accepted the bond`, or `<name> has bond mode off` / `is bonded to another device` with the command to run on the other device.
 - when the partner runs `bonddisconnect`, bonds to another device, turns bond mode off or unpairs this device: `<name> ended the bond`. This device still names it as partner and asks it again every minute, so the bond returns by itself if the partner runs `bondconnect` again; `bonddisconnect` here ends it on this side too.
 
+**Which device is master.** `bondrole master` or `bondrole worker` chooses the role, and `bondconnect` keeps a chosen role. A device whose role was not chosen (the default) takes the other role than a partner whose user chose one: at `bondconnect`, when the partner already asked to bond with this device, or as soon as the partner's request or answer arrives (the console says `<partner> chose the master role: this device is worker now`). When neither device chose, the one with the higher address is master. When both chose the same role, `bondstatus` shows *both are master* (or *worker*). `bondrole auto` gives the choice up; the role stays until the partner chooses or the next `bondconnect`. `bondrole` with no argument, `bondconnect` and `bondstatus` say whether the role was chosen or how it was decided (`kept as it was set earlier` when it is neither chosen nor the one the addresses give). A partner on older firmware never takes the other role: with a role chosen here that it has too, `bondstatus` shows the conflict until `bondrole` changes one of them.
+
 Running `bondconnect <mac_or_name>` again for the partner already set does not change anything on this device. While the partner has not agreed it asks the partner again at once (at most every 5 s) instead of at the next minute, and the reply says what the partner last answered; once the partner has agreed the reply is `Already connected to this device in bond mode.`
 
 A device never says which other device it is bonded to. The web Remote page and the OLED bond screen show the same state (`Bond Not Confirmed`, `No bond there`).
 
-**Your bond partner on the mesh master.** A bond is between two devices; the mesh is separate. The bond worker never sends its readings, battery state or events to a mesh master itself: they go to its bond master only (readings as before, battery state and events over the bond link too), whatever master is named on it, and it refuses sensor requests from a mesh master. The bond master can pass them on to the master named on the bond master:
+**Your bond partner on the mesh master.** A bonded pair is one device that shows as two on the mesh master, for logging. The bond worker never sends its readings, battery state, events or sensor list to a mesh master itself: they go to its bond master only, whatever master is named on it, and it refuses sensor requests from a mesh master. The bond master can pass them on to the master named on the bond master:
 
 ```
 bondforward on                     - on the bond master (off by default; the partner cannot change it)
-espnowforwardfrom add glasses      - on the mesh master: the bond master may forward to it (admin, up to four;
-                                     tied to glasses' key: if glasses is paired again, add it again)
 bondforward                        - where the partner's data goes now, or why not
 bondforward sensors tof,imu,gps    - which sensors (default: all but input; 'all', 'default')
 espnowforwardlinks                 - on the mesh master: who forwards for whom
+espnowsensorreq porch via glasses 0x2 0 1000 90000
+                                   - on the mesh master: ask for porch's ToF through glasses (a 90 s lease)
 ```
 
-The bond master announces the link to each master named on it and forwards once that master accepted: readings to the master, battery state and events to the master and the backup master. On the mesh master the partner then shows as its own device, `porch via glasses`, with its own counts: a reading lost between the partner and the bond master, or between the bond master and the mesh master, counts as lost. What the bond master forwards is kept apart from the partner's own record (if the partner is also in the mesh) and from the bond master's; a partner that is paired with the mesh master is shown under the mesh master's own name for it, and an announced name that another paired device already has is refused. `bondstatus` has "Forwarding to the mesh" lines (on a bond worker also the sensor requests from a mesh master it refused). When the bond master is itself the mesh master, it keeps its partner's data and sends nothing over the air. Data is not stored for later: what could not be forwarded (no session, not accepted yet, the send queue full) is counted on the bond master and shows as lost on the mesh master.
+`bondforward on` is the one switch: the mesh master accepts the link from any paired device that names it as master, as it accepts that device's own readings. Only a master paired in the bond master's primary mesh (the default mesh of `espnowmeshes`) gets the partner's data; a bond master in several meshes never sends it to the others, and `bondforward` says so. The bond master announces the link to that master and forwards once it accepted: readings to the master, battery state and events to the master and the backup master. The mesh master lists the partner's sensors (present, streaming) before its first reading.
+
+The mesh master asks for the partner's readings as it asks any sender: `espnowsensorreq <partner> via <bond master> <mask> <mode> <intervalMs> <leaseMs>` (mode 0 subscribe, 1 unsubscribe, 2 one-shot), or `espnowsensorreq <partner> ...` when the partner is not paired with the mesh master (the name `espnowforwardlinks` shows). The bond master switches the partner's sensors on over the bond link, switches them off when the lease ends, and the readings come back forwarded. Only the master that gets the readings may ask, only for forwarded sensors, and a sensor the partner (or the bond master's user, `bondstream`) streams already stays on after the lease. A lease ends early when `bondforward sensors` no longer forwards its sensor or the mesh master leaves the bond master's primary mesh; when the partner is out of range as a lease ends, the bond master switches the sensor off as soon as the partner is back. The bond master's `bondstatus` says how many requests it applied and refused, and which sensors are leased now.
+
+On the mesh master the partner shows as its own device, `porch via glasses`, with its own counts: a reading lost between the partner and the bond master, or between the bond master and the mesh master, counts as lost. What the bond master forwards is kept apart from the partner's own record (if the partner is also in the mesh) and from the bond master's; a partner that is paired with the mesh master is shown under the mesh master's own name for it, and an announced name that another paired device already has is refused. `bondstatus` has "Forwarding to the mesh" lines (on a bond worker also the sensor requests from a mesh master it refused). When the bond master is itself the mesh master, it keeps its partner's data and sends nothing over the air. Data is not stored for later: what could not be forwarded (no session, not accepted yet, the send queue full) is counted on the bond master and shows as lost on the mesh master.
 
 ### Metadata Sync
 Each device has a name, room, zone, and tags set in settings. The **Metadata** tab lets you pull this information from any peer. Set your own device metadata with (note: single words, no space after `espnow`):
@@ -1238,7 +1244,6 @@ espnowpowerinterval [0|10..3600]       - Seconds between this device's battery r
 espnoweventpush [off|alert|standard|verbose]  - Which of this device's events go to the master (default alert)
 espnowmasterfingerprint [64 hex|clear] - Name the mesh master on this device (its key fingerprint) (admin)
 espnowbackupfingerprint [64 hex|clear] - Name the backup master on this device (admin)
-espnowforwardfrom [add|remove <name_or_mac>|clear]  - Master: the bond masters that may forward their partner's data here (admin)
 espnowforwardlinks [json] [from <n>]   - Master: who forwards for which bond partner
 
 --- Security ---
@@ -1313,7 +1318,7 @@ bondconnect <mac_or_name>       - Connect to bonded peer
 bonddisconnect                  - Disconnect bonded peer
 bondstatus                      - Show bond mode status
 bondforward [on|off|sensors <list>] - Forward the partner's data to the mesh master named here
-bondrole <master|worker>        - Set bond mode role
+bondrole [master|worker|auto]   - Show, choose (kept by bondconnect) or give up the bond role
 bondshowcap                     - Show local capability summary
 bondrequestcap                  - Request capability summary from peer
 bondshowmanifest                - Show local manifest (UI apps + CLI commands)

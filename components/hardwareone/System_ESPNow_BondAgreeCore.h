@@ -30,11 +30,20 @@
 // is sent directly, so a request made just before the bond was ended can
 // arrive after the ENDED; without the number it would read as "bonded again".
 //
-// Neither frame changes the receiver's bond settings: bonding still takes the
-// command on each device. A request from a peer that is not the partner gets an
-// answer and one line for the user. A notice counts only when it comes from the
-// configured partner, and then only changes what this device knows about the
-// partner's side: the agreement.
+// Neither frame changes the receiver's bond settings, with one exception, the
+// role: bonding still takes the command on each device. A request from a peer
+// that is not the partner gets an answer and one line for the user. A notice
+// counts only when it comes from the configured partner, and then only changes
+// what this device knows about the partner's side: the agreement.
+//
+// The role. A user may choose a device's role (bondrole master|worker); the
+// choice is kept, also by bondconnect. A device whose role was not chosen
+// (the default, and after 'bondrole auto') takes the other role than a partner
+// whose user chose one: the request carries the sender's role and a "chosen"
+// flag, an ACCEPTED, ROLE_CONFLICT or ENDED notice the same (roleForBond,
+// takeInbound). When neither chose, bondconnect gives the device with the
+// higher address the master role, as before. When both chose the same role,
+// ROLE_CONFLICT says so, as before.
 //
 //   Unknown   no answer yet. The bond behaves as it did before these frames,
 //             so a partner whose firmware never sends them still bonds.
@@ -88,8 +97,19 @@ enum Reason : uint8_t {
 };
 
 // BOND_REQUEST flags. Fresh: the bond was just set up or the session just came
-// up; clear on the once-a-minute repeats.
+// up; clear on the once-a-minute repeats. RoleChosen: the sender's user chose
+// its role. RoleYields: the sender follows the role rules below (set on every
+// request of this firmware): when its role was not chosen and the receiver's
+// user chose the same one, it takes the other role. Firmware from before
+// never sets it and never yields.
 constexpr uint8_t kRequestFlagFresh = 0x01;
+constexpr uint8_t kRequestFlagRoleChosen = 0x02;
+constexpr uint8_t kRequestFlagRoleYields = 0x04;
+// BOND_NOTICE flags (sent with the role only: ACCEPTED, ROLE_CONFLICT, ENDED).
+constexpr uint8_t kNoticeFlagRoleChosen = 0x01;
+
+constexpr uint8_t kRoleWorker = 0;
+constexpr uint8_t kRoleMaster = 1;
 
 enum class Agreement : uint8_t { Unknown, Agreed, Declined };
 
@@ -98,6 +118,7 @@ struct Local {
   bool bonded;         // bond mode on and a partner configured
   uint8_t partner[6];  // valid when bonded
   uint8_t role;
+  bool roleChosen;     // this device's user chose the role (bondrole)
 };
 
 // A request or notice a handler received, kept until the owner's tick takes
@@ -109,6 +130,7 @@ struct Inbound {
   uint8_t mac[6];
   uint8_t role;
   uint8_t code;    // request: flags; notice: reason
+  uint8_t flags;   // notice: its flags (0 for a request)
   uint16_t seq;
   uint16_t order;  // arrival order
 };
@@ -124,6 +146,9 @@ struct PeerNote {
   uint32_t lastNoticeMs;  // 0 = none sent
   uint32_t lastAskLineMs; // 0 = none printed
   uint32_t touchedMs;
+  bool roleKnown;         // its last request: its role, and whether its user chose it
+  uint8_t role;           // (bondconnect to it uses them)
+  bool roleChosen;
 };
 
 struct State {
@@ -146,6 +171,9 @@ struct State {
   uint32_t noticesSent;
   uint32_t noticesIgnored;     // from a peer that is not the partner, or answering an old request
   uint32_t inboundDropped;     // inbox full
+  bool partnerRoleKnown;       // the partner's role as its last request or notice carried it ...
+  uint8_t partnerRole;
+  bool partnerRoleChosen;      // ... and whether its user chose it
   Inbound inbox[kInboxSlots];
   PeerNote peers[kPeerEntries]; // the last entry is the shared one (peerTouch)
 };
@@ -210,6 +238,65 @@ inline void reset(State& s) {
   s.nextRepeatMs = 0;
   s.endingSinceMs = 0;
   s.partnerVoidSet = false;   // the old partner's ENDED says nothing about the new one's requests
+  s.partnerRoleKnown = false;
+  s.partnerRole = 0;
+  s.partnerRoleChosen = false;
+}
+
+// ---- The role ---------------------------------------------------------------------
+enum class RoleSource : uint8_t {
+  Chosen,   // this device's user chose it (bondrole master|worker)
+  Partner,  // the partner's user chose the other role
+  Address,  // neither chose: the device with the higher address is the master
+  Kept,     // neither chose now, and the role is not the one the addresses give: it was
+            // set earlier (a partner's choice since given up, 'bondrole auto') and kept
+};
+
+struct RoleChoice {
+  uint8_t role;
+  RoleSource source;
+};
+
+// The role this device takes when it bonds (bondconnect). `chosen`, `role`:
+// this device's. `partnerKnown`, `partnerChose`, `partnerRole`: what the
+// partner's last request or notice said. `selfHigher`: this device's address
+// is the higher of the two.
+inline RoleChoice roleForBond(bool chosen, uint8_t role, bool partnerKnown, bool partnerChose, uint8_t partnerRole,
+                              bool selfHigher) {
+  if (chosen) return { role, RoleSource::Chosen };
+  if (partnerKnown && partnerChose && partnerRole <= kRoleMaster) {
+    return { partnerRole == kRoleMaster ? kRoleWorker : kRoleMaster, RoleSource::Partner };
+  }
+  return { selfHigher ? kRoleMaster : kRoleWorker, RoleSource::Address };
+}
+
+// Whether this device, bonded already, now takes the other role: its role was
+// not chosen, and the partner's user chose the same one. False otherwise
+// (both chose the same role: a conflict, which ROLE_CONFLICT reports).
+inline bool roleYields(bool chosen, uint8_t role, bool partnerChose, uint8_t partnerRole) {
+  return !chosen && partnerChose && partnerRole <= kRoleMaster && partnerRole == role;
+}
+
+// How this device's role came about now, for bondrole and bondstatus.
+// `role`: this device's; `selfHigher`: its address is the higher of the two
+// (`partnerKnown` false: no partner configured, the address rule is what
+// bondconnect will apply).
+inline RoleSource roleSourceNow(const State& s, bool chosen, uint8_t role, bool partnerKnown, bool selfHigher) {
+  if (chosen) return RoleSource::Chosen;
+  if (s.partnerRoleKnown && s.partnerRoleChosen && s.partnerRole <= kRoleMaster && s.partnerRole != role) {
+    return RoleSource::Partner;
+  }
+  if (!partnerKnown || role == (selfHigher ? kRoleMaster : kRoleWorker)) return RoleSource::Address;
+  return RoleSource::Kept;
+}
+
+inline const char* roleSourceKey(RoleSource src) {
+  switch (src) {
+    case RoleSource::Chosen:  return "chosen";
+    case RoleSource::Partner: return "partner";
+    case RoleSource::Kept:    return "kept";
+    default:                  return "address";
+  }
 }
 
 // Ask the partner (again) now, but not more often than every kRequestRetryMs.
@@ -276,7 +363,7 @@ enum class Line : uint8_t {
 // full (the frame is dropped: a request is repeated, an ignored bond frame
 // brings a notice again).
 inline bool pushInbound(State& s, bool isRequest, const uint8_t mac[6], uint8_t role, uint8_t code,
-                        uint16_t seq) {
+                        uint16_t seq, uint8_t flags = 0) {
   Inbound* slot = nullptr;
   for (auto& e : s.inbox) {
     if (!e.inUse || e.isRequest != isRequest || !macIs(e.mac, mac)) continue;
@@ -298,6 +385,7 @@ inline bool pushInbound(State& s, bool isRequest, const uint8_t mac[6], uint8_t 
   memcpy(slot->mac, mac, 6);
   slot->role = role;
   slot->code = code;
+  slot->flags = isRequest ? 0 : flags;
   slot->seq = seq;
   slot->order = s.nextOrder++;
   return true;
@@ -400,12 +488,27 @@ struct Outcome {
   bool ignored;          // a notice that did not count
   bool voided;           // the partner's request from before its ENDED: not used, not answered
   uint8_t mac[6];        // the sender
+  uint8_t noticeRole;    // the role the notice carries (this device's, after a switch below)
+  bool switchRole;       // this device's role was not chosen and the partner chose the same one:
+  uint8_t newRole;       // ... it takes this one (the owner changes the setting)
 };
 
-inline void setAgreed(State& s, const Local& local, uint8_t partnerRole, bool partnerSaysConflict,
+// What the partner's request or notice says about its role: kept, and
+// whether this device yields (takes the other role) worked out.
+inline void notePartnerRole(State& s, const Local& local, uint8_t role, bool chose, Outcome& out) {
+  s.partnerRoleKnown = true;
+  s.partnerRole = role;
+  s.partnerRoleChosen = chose;
+  if (roleYields(local.roleChosen, local.role, chose, role)) {
+    out.switchRole = true;
+    out.newRole = role == kRoleMaster ? kRoleWorker : kRoleMaster;
+  }
+}
+
+inline void setAgreed(State& s, uint8_t localRole, uint8_t partnerRole, bool partnerSaysConflict,
                       Outcome& out) {
   const bool wasAgreed = s.agreement == Agreement::Agreed;
-  const bool conflict = partnerSaysConflict || partnerRole == local.role;
+  const bool conflict = partnerSaysConflict || partnerRole == localRole;
   s.agreement = Agreement::Agreed;
   s.reason = kReasonNone;
   s.nextRepeatMs = 0;   // nothing is repeated while agreed, and a deadline is not kept for weeks
@@ -442,6 +545,7 @@ inline Outcome takeInbound(State& s, const Local& local, uint32_t nowMs) {
   next->inUse = false;
   out.handled = true;
   memcpy(out.mac, in.mac, 6);
+  out.noticeRole = local.role;
 
   if (in.isRequest) {
     out.noticeSeq = in.seq;
@@ -459,12 +563,29 @@ inline Outcome takeInbound(State& s, const Local& local, uint32_t nowMs) {
       }
       out.sendNotice = true;
       s.noticesSent++;
-      setAgreed(s, local, in.role, false, out);
+      // The partner's role and whether its user chose it. A device whose own
+      // role was not chosen takes the other role, and answers with it.
+      const bool partnerChose = (in.code & kRequestFlagRoleChosen) != 0;
+      notePartnerRole(s, local, in.role, partnerChose, out);
+      if (out.switchRole) out.noticeRole = out.newRole;
+      // This device's user chose the role the partner has, and the partner's
+      // role is automatic: the partner takes the other one on this answer
+      // (it carries "chosen"), so that is no conflict to report. Only a
+      // partner that says it follows the rule (RoleYields) does: older
+      // firmware keeps its role, and the conflict is reported as before.
+      const bool partnerYields = local.roleChosen && !partnerChose && (in.code & kRequestFlagRoleYields) != 0 &&
+                                 in.role == local.role && in.role <= kRoleMaster;
+      setAgreed(s, out.noticeRole, partnerYields ? (uint8_t)(kRoleMaster - in.role) : in.role, false, out);
       out.noticeReason = s.roleConflict ? kReasonRoleConflict : kReasonAccepted;
       return out;
     }
     out.noticeReason = local.bonded ? kReasonBondedElsewhere : kReasonNotBonded;
     PeerNote& p = peerTouch(s, in.mac, nowMs);
+    // Kept for a bondconnect to it: a device whose role was not chosen takes
+    // the other role than one its user chose.
+    p.roleKnown = true;
+    p.role = in.role;
+    p.roleChosen = (in.code & kRequestFlagRoleChosen) != 0;
     if (within(p.lastNoticeMs, nowMs, kAnswerGapMs)) {
       // It was told less than kAnswerGapMs ago. A device asks this often only
       // right after a bond command; anything faster is not answered frame for
@@ -504,10 +625,18 @@ inline Outcome takeInbound(State& s, const Local& local, uint32_t nowMs) {
     s.partnerVoidSet = true;
     s.partnerVoidSeq = in.seq;
   }
+  if (in.code == kReasonAccepted || in.code == kReasonRoleConflict || in.code == kReasonEnded) {
+    notePartnerRole(s, local, in.role, (in.flags & kNoticeFlagRoleChosen) != 0, out);
+    if (in.code == kReasonEnded) out.switchRole = false;  // the bond ends: nothing to take
+  }
   switch (in.code) {
     case kReasonAccepted:
     case kReasonRoleConflict:
-      setAgreed(s, local, in.role, in.code == kReasonRoleConflict, out);
+      // A conflict the partner reports is about this device's old role when
+      // it takes the other one now; it is asked again with the new one.
+      setAgreed(s, out.switchRole ? out.newRole : local.role, in.role,
+                in.code == kReasonRoleConflict && !out.switchRole, out);
+      if (out.switchRole) askSoon(s, nowMs);
       return out;
     case kReasonNotBonded:
     case kReasonBondedElsewhere:
@@ -546,6 +675,22 @@ inline Outcome takeInbound(State& s, const Local& local, uint32_t nowMs) {
       out.ignored = true;
       return out;
   }
+}
+
+// What `mac` said about its role in its last request or notice: the partner's
+// own, or a peer that asked to bond with this device. False: nothing known.
+inline bool roleNoteOf(State& s, const Local& local, const uint8_t mac[6], uint8_t* role, bool* chosen) {
+  if (isPartner(local, mac)) {
+    if (!s.partnerRoleKnown) return false;
+    *role = s.partnerRole;
+    *chosen = s.partnerRoleChosen;
+    return true;
+  }
+  const PeerNote* p = peerFind(s, mac);
+  if (!p || !p->roleKnown) return false;
+  *role = p->role;
+  *chosen = p->roleChosen;
+  return true;
 }
 
 // ---- The partner's bond heartbeat ------------------------------------------------

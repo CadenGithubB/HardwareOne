@@ -56,7 +56,8 @@ ZERO_FLAG_ALLOWED = ('KEY_EX_HELLO', 'KEY_EX_REPLY', 'KEY_EX_CONFIRM',
 # configured bond partner. A row added to or removed from that block must be
 # added here or removed, so it gets the partner cases.
 BOND_OPCODES = ('BOND_HEARTBEAT', 'BOND_STREAM_CTRL', 'BOND_CAP_REQ', 'BOND_CAP_RESP',
-                'BOND_SENSOR_DATA', 'BOND_POWER_STATUS', 'BOND_EVENT_PUSH', 'SETTINGS_REQ', 'SCHEMA_REQ',
+                'BOND_SENSOR_DATA', 'BOND_POWER_STATUS', 'BOND_EVENT_PUSH', 'BOND_SENSOR_STATUS', 'SETTINGS_REQ',
+                'SCHEMA_REQ',
                 'BOND_STATUS_REQ', 'BOND_STATUS_RESP', 'MANIFEST_REQ')
 # The rows of the table's second ENABLE_BONDED_MODE block, the bond agreement:
 # accepted from any paired peer over its session (no REQ_BOND_PEER), because

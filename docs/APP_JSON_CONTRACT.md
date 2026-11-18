@@ -373,9 +373,10 @@ contract in sec. 6 is **unchanged**.)
   most).
 
 ### 8.0.1 Forwarding for a bond partner (2026-11-18, additive)
-A bond master may forward its bond partner's readings, battery state and events to the mesh master
-named on it (`bondforward on`, `espnowforwardfrom add <bond master>` on the mesh master). A sender is
-then identified by its address **and** the device that forwarded it:
+A bond master may forward its bond partner's readings, battery state, events and sensor list to the
+mesh master named on it, when that master is paired in the bond master's primary mesh (`bondforward
+on` on the bond master; the mesh master accepts any paired device that announces). A sender is then
+identified by its address **and** the device that forwarded it:
 - Every device row gets `link` (`mesh`: the device sent it itself; `bond`: it came over the bond link
   to this device, its bond master; `forwarded`: a bond master forwarded it) and `via` (`null`, or
   `{"mac":"..","name":".."}`, the bond master). This holds for `devices` of
@@ -388,11 +389,11 @@ then identified by its address **and** the device that forwarded it:
 - `espnowsensorstatus json` adds `forwardLinks` (the number of active links on this device) and
   `table.forwardRefused` (forwarded frames no link named). `espnowsensorstatus json <name_or_mac>
   [via <name_or_mac>]` adds `link` and `via`; a forwarded partner is also found by its link's name.
+  A forwarded partner's sensors are listed (present, streaming) before its first reading, from the
+  sensor status the bond master forwards.
 - `refused` of `espnowbattery json` and `espnowevents json` adds `notBondMaster` and
   `forwardRefused`. `whyNot` adds `bond_offline` (a bond worker whose partner is not connected).
-- `espnowforwardlinks json [from <n>]`: `schema`, `role`, `allowed` (the addresses
-  `espnowforwardfrom` lists; each entry is tied to the key the device is paired under, so a listed
-  address that was paired again under another key is listed but not allowed), `refused` (`malformed`, `unannounced`, `staleLink`,
+- `espnowforwardlinks json [from <n>]`: `schema`, `role`, `refused` (`malformed`, `unannounced`, `staleLink`,
   `streamNotAnnounced`, `ignored`), `from`, `links` and `next` (`null`, or the number to pass as
   `from`). Each link: `via`, `viaName`, `partner`, `name`, `namePaired`, `linkGen`, `viaBootTag`,
   `state` (`active`, `ended`, `queried`), `confirmed` (`false` after 30 minutes without an
@@ -401,17 +402,27 @@ then identified by its address **and** the device that forwarded it:
   `streamNotAnnounced`).
 - `bondstatus json` and `GET /api/bond/status` add `forward`: `setting`, `sensors` (names),
   `forwards`, `whyNot` (`null` or `off`, `not_bond_master`, `bond_not_agreed`, `mesh_off`,
-  `is_master`, `no_master`, `master_not_paired`), `linkGen` (`null` without a link), `partner`
-  (`{"mac","name"}` or `null`), `targets` (per named master: `kind` `primary`/`backup`, `mac`,
-  `name`, `isPartner`, `state` `idle`/`announcing`/`accepted`/`refused`, `result` (`null` or the
-  master's last answer: `accepted`, `withdrawn`, `not_receiver`, `bad_partner`, `key_mismatch`,
-  `full`, `stale`, `not_allowed`, `name_taken`, `refused`), `streams`, `session`), `forwarded`
-  (`readings`, `battery`, `events`), `notForwarded` (per stream a count per reason: the `whyNot`
-  keys and `target_is_partner`, `no_session`, `not_accepted`, `refused`, `queue_full`, `too_long`,
-  `partner_changed`, `sensor_off`, `not_kept_here`) and `answersIgnored`. The object is at most
-  2560 bytes; the whole `bondstatus json` reply fits the 4 KB reply buffer.
+  `is_master`, `no_master`, `master_not_paired`, `not_primary_mesh`), `linkGen` (`null` without a
+  link), `partner` (`{"mac","name"}` or `null`), `targets` (per named master: `kind`
+  `primary`/`backup`, `mac`, `name`, `isPartner`, `inPrimaryMesh` (`false`: paired in another mesh
+  than this device's primary one, so it gets nothing), `state` `idle`/`announcing`/`accepted`/`refused`,
+  `result` (`null` or the master's last answer: `accepted`, `withdrawn`, `not_receiver`,
+  `bad_partner`, `key_mismatch`, `full`, `stale`, `name_taken`, `refused`), `streams`, `session`),
+  `forwarded` (`readings`, `battery`, `events`), `notForwarded` (per stream a count per reason: the
+  `whyNot` keys and `target_is_partner`, `no_session`, `not_accepted`, `refused`, `queue_full`,
+  `too_long`, `partner_changed`, `sensor_off`, `not_kept_here`), `answersIgnored` and
+  `sensorRequests` (the mesh master's sensor requests for the partner: `applied`, `refused`,
+  `lastRefused` (`null` or `off`, `not_bond_master`, `no_link`, `old_link`, `not_primary_master`,
+  `bad_mode`, `not_forwarded`, `partner_offline`), `leased` (the sensors a lease runs for now)). The
+  object is at most 2560 bytes; the whole `bondstatus json` reply fits the 4 KB reply buffer.
 - `bondstatus json` adds `sensorRequestsRefused`: the sensor requests a mesh master sent while this
   device is a bond worker (refused: its bond master decides what it streams).
+- `bondstatus json` adds `roleChosen` (`true`: the user chose `role` with `bondrole`, and
+  `bondconnect` keeps it) and `roleSource`: `chosen`, `partner` (not chosen; the partner's user chose
+  the other role), `address` (not chosen; the role is the one `bondconnect` gives by the two
+  addresses, the higher one master) or `kept` (not chosen, and not the one the addresses give: it was
+  set earlier, by a partner's choice since given up or before `bondrole auto`, and stays until the next
+  `bondconnect`).
 
 ### 8.1 Remote-device list - `sensors` changed from strings to objects (breaking)
 Returned by web `GET /api/sensors/remote` (no params) **and** nested verbatim under

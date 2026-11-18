@@ -101,11 +101,18 @@ bool remoteSensorTableEnsure();
 // One part of a reading: SENSOR_ENVELOPE, or BOND_SENSOR_DATA (fromBond).
 void remoteSensorIngestPart(const uint8_t* senderMac, const char* senderName,
                             const uint8_t* payload, size_t payloadLen, bool fromBond);
-// SENSOR_STATUS: which sensors the sender has and is streaming. It may make
-// the table and the sender's record (a full table and no memory are refused
-// as for a reading); it never changes a reading, its freshness or its counts.
+// SENSOR_STATUS: which sensors the sender has and is streaming (or, with the
+// link byte set, which ones its bond partner has: filed under the partner via
+// the sender). It may make the table and the sender's record (a full table
+// and no memory are refused as for a reading); it never changes a reading,
+// its freshness or its counts.
 void remoteSensorIngestStatus(const uint8_t* senderMac, const char* senderName,
                               const uint8_t* payload, size_t payloadLen);
+// BOND_SENSOR_STATUS: the bond partner's sensor status over the bond link (the
+// receive table's REQ_BOND_PEER). Kept whatever the mesh role, as a reading
+// over the bond link is, and handed to the forwarder.
+void remoteSensorIngestBondStatus(const uint8_t* senderMac, const char* senderName,
+                                  const uint8_t* payload, size_t payloadLen);
 
 // ---- Send ----
 // Sends one reading to `dst` now, in 1 to 4 frames (BOND_SENSOR_DATA when

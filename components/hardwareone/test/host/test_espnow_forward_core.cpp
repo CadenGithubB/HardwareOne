@@ -14,7 +14,16 @@
 //   * M: every announce check, the generation rule with late announcements in
 //     both orders and a late withdrawal of everything, every withdraw row,
 //     every attribution verdict and the resume once per stream, the query
-//     limit, which records may be given up, the allow list, names;
+//     limit, which records may be given up, names; any paired device may
+//     announce (no allow list);
+//   * the primary mesh: only a master paired in the default mesh slot gets
+//     forwarded data (forwardDecide, primaryMeshSlot, inPrimaryMesh);
+//   * the partner's sensor status: the 16-byte frame with its link byte, and
+//     whose it is on M (the readings stream, never a resume);
+//   * a sensor request for the partner on B: every row of sensorReqDecide,
+//     the leases (subscribe, renew, one-shot, unsubscribe, expiry, a stream
+//     X or B's user runs already, by hand on and off, the end of every lease,
+//     the "on" sent again on a new bond session);
 //   * end to end through the counter rule: X's numbers through B to M with a
 //     loss on each hop, forwarding off and on again (no false loss).
 #include <cstdint>
@@ -107,6 +116,16 @@ static void testFrame() {
     wire[0] = (uint8_t)op;
     CHECK(parseLinkFrame(wire, sizeof(wire), back) == (op >= 1 && op <= 4));
   }
+  // An announcement of link number 0 is malformed (0 marks "not forwarded",
+  // and a request with it would ask for the via's own sensors); the other
+  // ops may carry 0 (B's "I forward for nobody" before its first link).
+  wire[1] = 0;
+  for (int op = 1; op <= 4; ++op) {
+    wire[0] = (uint8_t)op;
+    CHECK(parseLinkFrame(wire, sizeof(wire), back) == (op != kOpAnnounce));
+  }
+  wire[0] = kOpAnnounce;
+  wire[1] = 7;
   // Hostile bytes: stream and sensor bits outside the tables are dropped.
   uint8_t hostile[kLinkFrameLen];
   std::memset(hostile, 0xFF, sizeof(hostile));
@@ -115,12 +134,14 @@ static void testFrame() {
         back.sensorMask == espnowsensor::kSensorMaskAll && back.result == 0xFF);
   // Results and their words.
   for (uint8_t r = 1; r < kResultCount; ++r) {
+    if (r == 8) continue;
     CHECK(!is(resultKey(r), "refused") && !is(resultText(r), "for a reason this firmware does not know"));
     for (uint8_t k = 1; k < r; ++k) CHECK(!is(resultKey(r), resultKey(k)));
   }
   CHECK(is(resultKey(0), "refused") && is(resultKey(200), "refused"));
-  CHECK(is(resultKey(kResultNotAllowed), "not_allowed") && is(resultKey(kResultStale), "stale") &&
-        is(resultKey(kResultNameTaken), "name_taken"));
+  // 8 is never sent: an answer with it is any refusal.
+  CHECK(is(resultKey(8), "refused") && is(resultText(8), "for a reason this firmware does not know") &&
+        is(resultKey(kResultStale), "stale") && is(resultKey(kResultNameTaken), "name_taken"));
   CHECK(kLinkFrameLen == 96 && kLinkFrameLen <= espnowsensor::kFrameCapRouted);
   // A name cut on a UTF-8 boundary by the sender's field rule.
   char name[kPartnerNameLen];
@@ -153,6 +174,9 @@ static void testDecide() {
   in.masterNamed = true;
   CHECK(forwardDecide(in) == WhyNot::MasterNotPaired);
   in.targetsPaired = 1;
+  // Paired, but in another mesh than this device's primary one: nothing goes.
+  CHECK(forwardDecide(in) == WhyNot::NotPrimaryMesh);
+  in.targetsInPrimary = 1;
   CHECK(forwardDecide(in) == WhyNot::Forwards);
   in.meshRole = espnowsensor::kRoleWorker;
   CHECK(forwardDecide(in) == WhyNot::Forwards);
@@ -160,8 +184,26 @@ static void testDecide() {
     CHECK(!is(whyNotKey((WhyNot)r), "?") && !is(whyNotText((WhyNot)r), "?"));
     for (size_t k = 0; k < r; ++k) CHECK(!is(whyNotKey((WhyNot)r), whyNotKey((WhyNot)k)));
   }
-  CHECK(is(whyNotKey(WhyNot::NotKeptHere), "not_kept_here") && is(whyNotKey(WhyNot::PartnerChanged), "partner_changed"));
+  CHECK(is(whyNotKey(WhyNot::NotKeptHere), "not_kept_here") && is(whyNotKey(WhyNot::PartnerChanged), "partner_changed") &&
+        is(whyNotKey(WhyNot::NotPrimaryMesh), "not_primary_mesh"));
   CHECK(meshDataAllowed(false) && !meshDataAllowed(true));
+
+  // The primary mesh: the default enabled slot, else the first enabled one,
+  // else slot 0 (the single-mesh settings).
+  {
+    bool en[4] = { true, true, true, false };
+    bool def[4] = { false, false, true, false };
+    CHECK(primaryMeshSlot(en, def, 4) == 2);
+    def[2] = false;
+    CHECK(primaryMeshSlot(en, def, 4) == 0);
+    en[0] = false;
+    CHECK(primaryMeshSlot(en, def, 4) == 1);
+    def[3] = true;  // a default that is not enabled does not count
+    CHECK(primaryMeshSlot(en, def, 4) == 1);
+    bool none[4] = { false, false, false, false };
+    CHECK(primaryMeshSlot(none, none, 4) == 0);
+    CHECK(inPrimaryMesh(1, 1) && !inPrimaryMesh(0, 1) && !inPrimaryMesh(-1, 0) && inPrimaryMesh(0, 0));
+  }
 
   // The agreement: unknown before the partner ever agreed does not allow; once
   // agreed, an unknown (the partner out of range) keeps the link.
@@ -271,8 +313,8 @@ static void testTarget() {
   TargetState r = t;
   targetQuery(r);
   CHECK(targetStep(r, wantGen(1), 0x9999, true, now) == kActAnnounce);
-  CHECK(targetAnswer(r, answer(kOpAnnounce, kResultNotAllowed, 1, kBoot), kBoot, now) == AnswerEffect::Refused);
-  CHECK(r.state == TState::Refused && r.lastResult == kResultNotAllowed && !targetCarries(r, 0x9999, kStreamBattery, -1));
+  CHECK(targetAnswer(r, answer(kOpAnnounce, kResultNameTaken, 1, kBoot), kBoot, now) == AnswerEffect::Refused);
+  CHECK(r.state == TState::Refused && r.lastResult == kResultNameTaken && !targetCarries(r, 0x9999, kStreamBattery, -1));
   CHECK(targetWhyNot(r, 0x9999, kStreamBattery, -1) == WhyNot::Refused);
   CHECK(targetStep(r, wantGen(1), 0x9999, true, now + kRefusedRetryMs - 1) == 0);
   CHECK(targetStep(r, wantGen(1), 0x9999, true, now + kRefusedRetryMs) == kActAnnounce && r.state == TState::Announcing);
@@ -318,7 +360,7 @@ static void testTarget() {
     d.have = true;
     targetStep(d, wantGen(1), 0x0303, true, 0);
     targetStep(d, all, 0x0303, true, 100);
-    CHECK(targetAnswer(d, answer(kOpAnnounce, kResultNotAllowed, 1, kBoot), kBoot, 150) == AnswerEffect::Refused);
+    CHECK(targetAnswer(d, answer(kOpAnnounce, kResultNameTaken, 1, kBoot), kBoot, 150) == AnswerEffect::Refused);
     // The backup master is announced no sensors and answers none.
     TargetState b = {};
     b.have = true;
@@ -383,27 +425,29 @@ static void testAnnounceOnM() {
   uint8_t self[6];
   std::memcpy(self, kM, 6);
   // Every check, first match.
-  CHECK(announceCheck(f, kB, self, false, false, false, false, false) == kResultNotReceiver);
-  CHECK(announceCheck(f, kB, self, true, false, false, false, false) == kResultNotAllowed);
+  // Any paired device may announce: only the role, the partner and the name
+  // are checked (there is no list of devices that may forward).
+  CHECK(announceCheck(f, kB, self, false, false, false, false) == kResultNotReceiver);
+  CHECK(announceCheck(f, kB, self, true, false, false, false) == 0);
   LinkFrame bad = f;
   std::memset(bad.partnerMac, 0, 6);
-  CHECK(announceCheck(bad, kB, self, true, true, false, false, false) == kResultBadPartner);
+  CHECK(announceCheck(bad, kB, self, true, false, false, false) == kResultBadPartner);
   bad = f;
   bad.partnerMac[0] = 0x01;  // multicast
-  CHECK(announceCheck(bad, kB, self, true, true, false, false, false) == kResultBadPartner);
+  CHECK(announceCheck(bad, kB, self, true, false, false, false) == kResultBadPartner);
   bad = f;
   std::memcpy(bad.partnerMac, kB, 6);  // itself
-  CHECK(announceCheck(bad, kB, self, true, true, false, false, false) == kResultBadPartner);
+  CHECK(announceCheck(bad, kB, self, true, false, false, false) == kResultBadPartner);
   bad = f;
   std::memcpy(bad.partnerMac, kM, 6);  // this device
-  CHECK(announceCheck(bad, kB, self, true, true, false, false, false) == kResultBadPartner);
+  CHECK(announceCheck(bad, kB, self, true, false, false, false) == kResultBadPartner);
   bad = f;
   std::memset(bad.partnerKey, 0, sizeof(bad.partnerKey));
-  CHECK(announceCheck(bad, kB, self, true, true, false, false, false) == kResultBadPartner);
-  CHECK(announceCheck(f, kB, self, true, true, true, false, false) == kResultKeyMismatch);
-  CHECK(announceCheck(f, kB, self, true, true, true, true, true) == 0);  // paired: this device's own name is used
-  CHECK(announceCheck(f, kB, self, true, true, false, false, true) == kResultNameTaken);
-  CHECK(announceCheck(f, kB, self, true, true, false, false, false) == 0);
+  CHECK(announceCheck(bad, kB, self, true, false, false, false) == kResultBadPartner);
+  CHECK(announceCheck(f, kB, self, true, true, false, false) == kResultKeyMismatch);
+  CHECK(announceCheck(f, kB, self, true, true, true, true) == 0);  // paired: this device's own name is used
+  CHECK(announceCheck(f, kB, self, true, false, false, true) == kResultNameTaken);
+  CHECK(announceCheck(f, kB, self, true, false, false, false) == 0);
 
   // Apply: a new link; a repeat; a new stream; another partner.
   ForwardLink e = entryFor(kB);
@@ -500,7 +544,14 @@ static void testAttribute() {
   backupOnly.streams = kStreamBattery | kStreamEvents;
   CHECK(attribute(&backupOnly, false, true, true, 3, REMOTE_SENSOR_GPS).verdict == Verdict::StreamNotAnnounced);
   CHECK(attribute(&backupOnly, false, true, true, 3, kStreamIdEvents).verdict == Verdict::Forwarded);
-  CHECK(attribute(&e, false, true, true, 3, 13).verdict == Verdict::StreamNotAnnounced);
+  CHECK(attribute(&e, false, true, true, 3, 14).verdict == Verdict::StreamNotAnnounced);
+  // The sensor status: the byte alone, the readings stream, any sensor, never a resume.
+  CHECK(attribute(&e, false, false, false, 3, kStreamIdStatus).verdict == Verdict::Forwarded &&
+        !attribute(&e, false, false, false, 3, kStreamIdStatus).resumePending);
+  CHECK(attribute(&backupOnly, false, false, false, 3, kStreamIdStatus).verdict == Verdict::StreamNotAnnounced);
+  CHECK(attribute(&e, false, false, false, 2, kStreamIdStatus).verdict == Verdict::StaleLink);
+  CHECK(attribute(&e, true, false, false, 3, kStreamIdStatus).verdict == Verdict::Malformed);  // over the bond link
+  CHECK(attribute(&e, false, false, false, 0, kStreamIdStatus).verdict == Verdict::Own);
   // Forwarded, with the resume once per stream (the owner clears the bit).
   Attribution a = attribute(&e, false, true, true, 3, REMOTE_SENSOR_GPS);
   CHECK(a.verdict == Verdict::Forwarded && a.resumePending);
@@ -528,55 +579,179 @@ static void testAttribute() {
   }
   CHECK(is(linkKey(kLinkMesh), "mesh") && is(linkKey(kLinkBond), "bond") && is(linkKey(kLinkForwarded), "forwarded"));
   CHECK(streamBitOf(0) == kStreamReadings && streamBitOf(10) == kStreamReadings && streamBitOf(11) == kStreamBattery &&
-        streamBitOf(12) == kStreamEvents && streamBitOf(13) == 0);
+        streamBitOf(12) == kStreamEvents && streamBitOf(kStreamIdStatus) == kStreamReadings && streamBitOf(14) == 0);
 }
 
-static void testAllowList() {
-  // Entries bind an address to the first 8 bytes of the key it was paired under.
-  uint8_t keyB[32];
-  uint8_t keyB2[32];  // another identity paired later under B's address
-  uint8_t keyM[32];
-  std::memset(keyB, 0xB1, sizeof(keyB));
-  std::memset(keyB2, 0xB1, sizeof(keyB2));
-  keyB2[7] = 0x00;
-  std::memset(keyM, 0xC1, sizeof(keyM));
-  AllowEntry list[kAllowedMax];
-  CHECK(allowListParse("", list) == 0 && allowListParse(nullptr, list) == 0);
-  CHECK(allowListParse("02:B0:00:00:00:01", list) == 0);  // an address alone allows nobody
-  CHECK(allowListParse("02:B0:00:00:00:01/b1b1b1b1b1b1b1b1", list) == 1 && std::memcmp(list[0].mac, kB, 6) == 0 &&
-        list[0].key[0] == 0xB1 && list[0].key[7] == 0xB1);
-  CHECK(allowListParse(" 02:b0:00:00:00:01/B1B1B1B1B1B1B1B1 , junk,02:C0:00:00:00:01/C1C1C1C1C1C1C1C1,"
-                       "02:B0:00:00:00:01/0000000000000000,02:D0:00:00:00:01/C1C1C1C1C1C1C1,"
-                       "02:D0:00:00:00:02-C1C1C1C1C1C1C1C1",
-                       list) == 2);
-  CHECK(allowListHas("02:C0:00:00:00:01/C1C1C1C1C1C1C1C1,02:b0:00:00:00:01/b1b1b1b1b1b1b1b1", kB, keyB));
-  CHECK(!allowListHas("02:B0:00:00:00:01/B1B1B1B1B1B1B1B1", kB, keyB2) && !allowListHas("02:B0:00:00:00:01/B1B1B1B1B1B1B1B1", kB, nullptr) &&
-        !allowListHas("02:C0:00:00:00:01/C1C1C1C1C1C1C1C1", kB, keyB));  // another key under that address, or not paired
-  CHECK(allowListParse("01:00:00:00:00:01/0000000000000001,01:00:00:00:00:02/0000000000000001,"
-                       "01:00:00:00:00:03/0000000000000001,01:00:00:00:00:04/0000000000000001,"
-                       "01:00:00:00:00:05/0000000000000001", list) == 4);
+static void testNamesAndStatusFrame() {
   uint8_t mac[6];
+  CHECK(macFromText("02:b0:00:00:00:01", 17, mac) && std::memcmp(mac, kB, 6) == 0);
   CHECK(!macFromText("02:B0:00:00:00:0", 16, mac) && !macFromText("02-B0-00-00-00-01", 17, mac) &&
         !macFromText("02:B0:00:00:00:0G", 17, mac));
-  char out[kAllowListTextCap];
-  CHECK(allowListEdit("", kB, keyB, true, out, sizeof(out)) == AllowEdit::Added && is(out, "02:B0:00:00:00:01/B1B1B1B1B1B1B1B1"));
-  CHECK(allowListEdit(out, kB, keyB, true, out, sizeof(out)) == AllowEdit::AlreadyThere);
-  char two[kAllowListTextCap];
-  CHECK(allowListEdit(out, kM, keyM, true, two, sizeof(two)) == AllowEdit::Added &&
-        is(two, "02:B0:00:00:00:01/B1B1B1B1B1B1B1B1,02:C0:00:00:00:01/C1C1C1C1C1C1C1C1"));
-  // Paired again under another key: listed again under the key it has now.
-  CHECK(allowListEdit(two, kB, keyB2, true, out, sizeof(out)) == AllowEdit::KeyUpdated &&
-        is(out, "02:B0:00:00:00:01/B1B1B1B1B1B1B100,02:C0:00:00:00:01/C1C1C1C1C1C1C1C1") &&
-        allowListHas(out, kB, keyB2) && !allowListHas(out, kB, keyB));
-  CHECK(allowListEdit(out, kB, nullptr, false, two, sizeof(two)) == AllowEdit::Removed && is(two, "02:C0:00:00:00:01/C1C1C1C1C1C1C1C1"));
-  CHECK(allowListEdit(two, kB, keyB, false, out, sizeof(out)) == AllowEdit::NotThere && is(out, "02:C0:00:00:00:01/C1C1C1C1C1C1C1C1"));
-  CHECK(allowListEdit(two, kB, nullptr, true, out, sizeof(out)) == AllowEdit::NotThere);  // only a paired device is added
-  char full[kAllowListTextCap] = "01:00:00:00:00:01/0000000000000001,01:00:00:00:00:02/0000000000000001,"
-                                 "01:00:00:00:00:03/0000000000000001,01:00:00:00:00:04/0000000000000001";
-  CHECK(std::strlen(full) + 1 == kAllowListTextCap);
-  CHECK(allowListEdit(full, kB, keyB, true, out, sizeof(out)) == AllowEdit::Full && is(out, full));
   CHECK(nameSameIgnoringCase("Porch", "pORCH") && !nameSameIgnoringCase("porch", "porch2") &&
         !nameSameIgnoringCase(nullptr, "a") && nameSameIgnoringCase("", ""));
+
+  // The sensor status frame: 16 bytes, the link byte at 10, the rest 0.
+  StatusFrame f = { 0x00000429u, 0x00000009u, 0xBEEF, 7 };
+  uint8_t out[kStatusFrameLen];
+  std::memset(out, 0xEE, sizeof(out));
+  packStatusFrame(out, f);
+  const uint8_t expect[kStatusFrameLen] = { 0x29, 0x04, 0, 0, 0x09, 0, 0, 0, 0xEF, 0xBE, 7, 0, 0, 0, 0, 0 };
+  CHECK(std::memcmp(out, expect, sizeof(out)) == 0);
+  StatusFrame back = {};
+  CHECK(parseStatusFrame(out, sizeof(out), back) && back.presentMask == f.presentMask &&
+        back.streamingMask == f.streamingMask && back.bootTag == 0xBEEF && back.fwdLink == 7);
+  CHECK(!parseStatusFrame(out, sizeof(out) - 1, back) && !parseStatusFrame(nullptr, 16, back));
+  CHECK(kStatusFrameLen <= espnowsensor::kFrameCapRouted);
+}
+
+static ReqInputs reqAll() {
+  ReqInputs in = {};
+  in.settingOn = true;
+  in.bondMaster = true;
+  in.linkActive = true;
+  in.linkGen = 4;
+  in.fwdLink = 4;
+  in.fromAcceptedPrimary = true;
+  in.mode = kReqSubscribe;
+  in.mask = espnowsensor::sensorBit(REMOTE_SENSOR_TOF);
+  in.forwardedMask = kSensorMaskDefault;
+  in.partnerOnline = true;
+  return in;
+}
+
+static void testSensorRequests() {
+  // Every row, first match.
+  ReqInputs in = reqAll();
+  CHECK(sensorReqDecide(in) == ReqVerdict::Apply);
+  in.partnerOnline = false;
+  CHECK(sensorReqDecide(in) == ReqVerdict::PartnerOffline);
+  in.mask = espnowsensor::sensorBit(REMOTE_SENSOR_INPUT);  // not forwarded by default
+  CHECK(sensorReqDecide(in) == ReqVerdict::NotForwarded);
+  in.mode = kReqUnsubscribe;  // an unsubscribe needs neither the sensors nor the partner
+  CHECK(sensorReqDecide(in) == ReqVerdict::Apply);
+  in.mode = 3;
+  CHECK(sensorReqDecide(in) == ReqVerdict::BadMode);
+  in.fromAcceptedPrimary = false;  // the backup master, another device, or not accepted yet
+  CHECK(sensorReqDecide(in) == ReqVerdict::NotPrimaryMaster);
+  in.fwdLink = 3;
+  CHECK(sensorReqDecide(in) == ReqVerdict::OldLink);
+  in.linkActive = false;
+  CHECK(sensorReqDecide(in) == ReqVerdict::NoLink);
+  in.bondMaster = false;
+  CHECK(sensorReqDecide(in) == ReqVerdict::NotBondMaster);
+  in.settingOn = false;
+  CHECK(sensorReqDecide(in) == ReqVerdict::Off);
+  for (size_t v = 0; v < kReqVerdictCount; ++v) {
+    CHECK(!is(reqVerdictKey((ReqVerdict)v), "?") && !is(reqVerdictText((ReqVerdict)v), "?"));
+    for (size_t k = 0; k < v; ++k) CHECK(!is(reqVerdictKey((ReqVerdict)v), reqVerdictKey((ReqVerdict)k)));
+  }
+
+  const uint16_t tof = espnowsensor::sensorBit(REMOTE_SENSOR_TOF);
+  const uint16_t imu = espnowsensor::sensorBit(REMOTE_SENSOR_IMU);
+  const uint16_t gps = espnowsensor::sensorBit(REMOTE_SENSOR_GPS);
+  ReqLeases l = {};
+  // Subscribe: on at once, once; a renewal sets the end anew and sends nothing.
+  LeaseActs a = leaseApply(l, kReqSubscribe, (uint16_t)(tof | imu), 0, 0, 90000, 1000);
+  CHECK(a.on == (tof | imu) && a.off == 0 && l.leased == (tof | imu) && l.started == (tof | imu));
+  a = leaseApply(l, kReqSubscribe, tof, 0, 0, 90000, 50000);
+  CHECK(a.on == 0 && a.off == 0 && l.untilMs[REMOTE_SENSOR_TOF] == 140000 && l.untilMs[REMOTE_SENSOR_IMU] == 91000);
+  // Expiry: IMU ran out at 91000 and is switched off; ToF runs on.
+  CHECK(leaseExpire(l, 90999) == 0);
+  CHECK(leaseExpire(l, 91000) == imu && l.leased == tof && l.started == tof);
+  // Unsubscribe: off for what the lease started; nothing for a sensor not leased.
+  a = leaseApply(l, kReqUnsubscribe, (uint16_t)(tof | gps), 0, 0, 0, 60000);
+  CHECK(a.off == tof && a.on == 0 && l.leased == 0 && l.started == 0);
+  // A stream X (or this device's user) runs already is not started by the
+  // lease, and its end leaves it on.
+  a = leaseApply(l, kReqSubscribe, gps, gps, 0, 1000, 70000);
+  CHECK(a.on == 0 && l.leased == gps && l.started == 0);
+  CHECK(leaseExpire(l, 71000) == 0 && l.leased == 0);
+  // One-shot: held 3 s at least, longer with a longer interval; it never cuts
+  // a running subscription short.
+  a = leaseApply(l, kReqOneshot, tof, 0, 500, 0, 100000);
+  CHECK(a.on == tof && l.untilMs[REMOTE_SENSOR_TOF] == 100000 + kReqOneshotHoldMs);
+  CHECK(leaseExpire(l, 100000 + kReqOneshotHoldMs) == tof);
+  a = leaseApply(l, kReqOneshot, tof, 0, 8000, 0, 200000);
+  CHECK(l.untilMs[REMOTE_SENSOR_TOF] == 208000);
+  a = leaseApply(l, kReqSubscribe, tof, 0, 0, 90000, 201000);
+  CHECK(a.on == 0 && l.untilMs[REMOTE_SENSOR_TOF] == 291000);
+  a = leaseApply(l, kReqOneshot, tof, 0, 500, 0, 202000);
+  CHECK(l.untilMs[REMOTE_SENSOR_TOF] == 291000);
+  // By hand: on, the stream is the user's (the lease's end leaves it on).
+  leaseByHand(l, REMOTE_SENSOR_TOF, true);
+  CHECK(l.leased == tof && l.started == 0 && l.byUser == tof && leaseExpire(l, 291000) == 0);
+  leaseByHand(l, REMOTE_SENSOR_TOF, false);  // and off again: no longer the user's
+  CHECK(l.byUser == 0 && l.leased == 0);
+  // By hand off ends the lease with it.
+  a = leaseApply(l, kReqSubscribe, imu, 0, 0, 90000, 300000);
+  leaseByHand(l, REMOTE_SENSOR_IMU, false);
+  CHECK(l.leased == 0 && l.started == 0 && leaseExpire(l, 400000) == 0);
+  leaseByHand(l, 200, true);  // out of range: nothing
+  // The "on" again on a new bond session, not on the one it went over; none
+  // without a session.
+  a = leaseApply(l, kReqSubscribe, (uint16_t)(tof | gps), 0, 0, 90000, 500000);
+  l.onSession[REMOTE_SENSOR_TOF] = 0x11;
+  l.onSession[REMOTE_SENSOR_GPS] = 0x11;
+  CHECK(leaseResend(l, 0x11) == 0 && leaseResend(l, 0) == 0 && leaseResend(l, 0x12) == (tof | gps));
+  l.onSession[REMOTE_SENSOR_GPS] = 0;  // its "on" was not sent
+  CHECK(leaseResend(l, 0x11) == gps);
+  // Every lease ends (the link ended): what a lease started is switched off.
+  CHECK(leaseEndAll(l) == (tof | gps) && l.leased == 0 && l.started == 0 && leaseEndAll(l) == 0);
+  // Across the wrap of the uptime clock.
+  a = leaseApply(l, kReqSubscribe, tof, 0, 0, 10000, 0xFFFFF000u);
+  CHECK(leaseExpire(l, 0xFFFFFFF0u) == 0 && leaseExpire(l, 0x00001710u) == tof);
+}
+
+// Review of 2026-11-18: the "off" a lease owes, the user's streams, the
+// leases that end when their sensor or their master goes, a shorter renewal.
+static void testLeaseEnds() {
+  const uint16_t tof = espnowsensor::sensorBit(REMOTE_SENSOR_TOF);
+  const uint16_t imu = espnowsensor::sensorBit(REMOTE_SENSOR_IMU);
+  const uint16_t gps = espnowsensor::sensorBit(REMOTE_SENSOR_GPS);
+  ReqLeases l = {};
+  // Every end of a lease that started its sensor owes the "off" until it was
+  // sent: expiry, unsubscribe, every lease at once.
+  LeaseActs a = leaseApply(l, kReqSubscribe, (uint16_t)(tof | imu | gps), 0, 0, 10000, 1000);
+  CHECK(a.on == (tof | imu | gps) && l.offOwed == 0);
+  a = leaseApply(l, kReqSubscribe, gps, 0, 0, 50000, 2000);
+  CHECK(leaseExpire(l, 11000) == (tof | imu) && l.offOwed == (tof | imu));
+  leaseOffSent(l, tof);
+  CHECK(l.offOwed == imu);  // the "off" for IMU could not be sent: still owed
+  a = leaseApply(l, kReqUnsubscribe, gps, 0, 0, 0, 12000);
+  CHECK(a.off == gps && l.offOwed == (imu | gps));
+  leaseOffSent(l, gps);
+  // IMU streams at X because its "off" did not go out, so X's status says it
+  // streams: a new lease takes it over (not "the user's"), and its end owes
+  // the "off" again.
+  a = leaseApply(l, kReqSubscribe, imu, imu, 0, 5000, 20000);
+  CHECK(a.on == imu && l.started == imu && l.offOwed == 0);
+  CHECK(leaseExpire(l, 25000) == imu && l.offOwed == imu);
+  // A stream the user switches by hand meanwhile is the user's: nothing owed.
+  leaseByHand(l, REMOTE_SENSOR_IMU, true);
+  CHECK(l.offOwed == 0 && l.byUser == imu);
+  // ... and no lease starts or stops it, whatever X's status says.
+  a = leaseApply(l, kReqSubscribe, imu, 0, 0, 5000, 30000);
+  CHECK(a.on == 0 && l.started == 0 && leaseExpire(l, 35000) == 0 && l.offOwed == 0);
+  leaseByHand(l, REMOTE_SENSOR_IMU, false);
+  a = leaseApply(l, kReqSubscribe, imu, 0, 0, 5000, 40000);
+  CHECK(a.on == imu && l.started == imu);
+  CHECK(leaseEndAll(l) == imu && l.offOwed == imu && l.leased == 0);
+  // Another partner, or no longer its bond master: everything is forgotten.
+  leaseByHand(l, REMOTE_SENSOR_GPS, true);
+  leaseForgetPartner(l);
+  CHECK(l.offOwed == 0 && l.byUser == 0 && l.leased == 0 && l.started == 0);
+  // Leases on sensors no longer forwarded end; with keep 0 (the master left
+  // the primary mesh) all of them. A lease that started nothing owes nothing.
+  a = leaseApply(l, kReqSubscribe, (uint16_t)(tof | imu), 0, 0, 90000, 50000);
+  a = leaseApply(l, kReqSubscribe, gps, gps, 0, 90000, 50000);
+  CHECK(leaseKeepOnly(l, (uint16_t)(tof | gps)) == imu && l.leased == (tof | gps) && l.offOwed == imu);
+  CHECK(leaseKeepOnly(l, (uint16_t)(tof | gps)) == 0);
+  CHECK(leaseKeepOnly(l, 0) == tof && l.leased == 0 && l.offOwed == (imu | tof));
+  // A renewal with a shorter lease moves the end earlier (a one-shot never does).
+  l = ReqLeases{};
+  a = leaseApply(l, kReqSubscribe, tof, 0, 0, 90000, 1000);
+  a = leaseApply(l, kReqSubscribe, tof, 0, 0, 10000, 2000);
+  CHECK(l.untilMs[REMOTE_SENSOR_TOF] == 12000 && leaseExpire(l, 12000) == tof);
 }
 
 // X's sequence through B to M by the counter rule, with B forwarding in
@@ -622,7 +797,9 @@ int main() {
   testTarget();
   testAnnounceOnM();
   testAttribute();
-  testAllowList();
+  testNamesAndStatusFrame();
+  testSensorRequests();
+  testLeaseEnds();
   testEndToEnd();
   std::printf("espnow_forward_core_tests: %u checks passed\n", gChecks);
   return 0;

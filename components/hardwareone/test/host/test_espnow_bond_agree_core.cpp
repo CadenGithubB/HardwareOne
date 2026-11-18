@@ -12,7 +12,12 @@
 // request timing (session wait, the side that answered the handshake, failed
 // send, declined partner with and without a session, a decline after weeks of
 // agreement, clock wrap), the heartbeat of a partner without these frames, and
-// the texts.
+// the texts. The role: bondconnect keeps a chosen role, a device whose role is
+// automatic takes the other role than a partner whose user chose (from its
+// request or its notice, also when a request is lost), both chose the same:
+// a conflict, neither chose: nothing changes, a partner without the flag
+// counts as not chosen, an ENDED says the role but changes nothing, a peer's
+// request is remembered for a later bondconnect to it.
 #include "System_ESPNow_BondAgreeCore.h"
 
 #include <cstdint>
@@ -35,14 +40,12 @@ static unsigned gChecks = 0;
 
 using namespace bondagree;
 
-static const uint8_t kRoleWorker = 0;
-static const uint8_t kRoleMaster = 1;
-
 struct Frame {
   bool isRequest;
   int from, to;
   uint8_t role, code;
   uint16_t seq;
+  uint8_t flags = 0;  // a notice's flags
 };
 
 struct Device {
@@ -53,7 +56,9 @@ struct Device {
   std::vector<uint8_t> lineReasons;
   int declinedEdges = 0;
   int handshakeKicks = 0;
+  int roleSwitches = 0;
   bool queueFull = false;
+  bool oldFirmware = false;  // firmware from before role choice: sends no role flags, never yields
 };
 
 static const int kDevices = 3;
@@ -110,7 +115,20 @@ static void tick(int who) {
     if (!out.handled) break;
     const int peer = indexOf(out.mac);
     if (out.sendNotice && gSession[who][peer]) {
-      send(who, peer, Frame{false, who, peer, d.local.role, out.noticeReason, out.noticeSeq});
+      const bool withRole = out.noticeReason == kReasonAccepted || out.noticeReason == kReasonRoleConflict;
+      if (d.oldFirmware) {
+        // Its answer: its own role, and a conflict whenever the roles match.
+        const uint8_t reason = out.noticeReason == kReasonAccepted && gDev[peer].local.role == d.local.role
+                                   ? kReasonRoleConflict : out.noticeReason;
+        send(who, peer, Frame{false, who, peer, d.local.role, reason, out.noticeSeq, 0});
+      } else {
+        send(who, peer, Frame{false, who, peer, out.noticeRole, out.noticeReason, out.noticeSeq,
+                              (uint8_t)(withRole && d.local.roleChosen ? kNoticeFlagRoleChosen : 0)});
+      }
+    }
+    if (out.switchRole && !d.oldFirmware) {
+      d.local.role = out.newRole;
+      d.roleSwitches++;
     }
     if (out.becameDeclined) d.declinedEdges++;
     if (out.line != Line::None) {
@@ -131,7 +149,10 @@ static void tick(int who) {
   const RequestPlan plan = planRequest(d.s, d.local, gNow, sessionActive);
   if (plan.send) {
     const bool queued = !d.queueFull;
-    if (queued) send(who, partner, Frame{true, who, partner, d.local.role, plan.flags, plan.seq});
+    const uint8_t flags = d.oldFirmware ? plan.flags
+                                        : (uint8_t)(plan.flags | kRequestFlagRoleYields |
+                                                    (d.local.roleChosen ? kRequestFlagRoleChosen : 0));
+    if (queued) send(who, partner, Frame{true, who, partner, d.local.role, flags, plan.seq});
     requestResult(d.s, gNow, queued);
   } else if (plan.kickHandshake) {
     d.handshakeKicks++;
@@ -143,7 +164,7 @@ static void deliver() {
   std::vector<Frame> air;
   air.swap(gAir);
   for (const Frame& f : air) {
-    pushInbound(gDev[f.to].s, f.isRequest, gDev[f.from].mac, f.role, f.code, f.seq);
+    pushInbound(gDev[f.to].s, f.isRequest, gDev[f.from].mac, f.role, f.code, f.seq, f.flags);
   }
 }
 
@@ -987,6 +1008,188 @@ static void caseTexts() {
         kReasonRoleConflict == 5 && kRequestFlagFresh == 1);
 }
 
+
+// ---- The role ------------------------------------------------------------------------
+
+// bondconnect on `who`: the role roleForBond gives it, from what it knows of
+// `partner`, then the reset of a partner change.
+static RoleChoice bondChosenOrAuto(int who, int partner, bool chosen, uint8_t role) {
+  Device& d = gDev[who];
+  uint8_t peerRole = 0;
+  bool peerChose = false;
+  const bool known = roleNoteOf(d.s, d.local, gDev[partner].mac, &peerRole, &peerChose);
+  const RoleChoice c =
+      roleForBond(chosen, role, known, peerChose, peerRole, std::memcmp(d.mac, gDev[partner].mac, 6) > 0);
+  d.local.roleChosen = chosen;
+  bond(who, partner, c.role);
+  return c;
+}
+
+static void caseRoleRules() {
+  // roleForBond: chosen, else the other than a partner that chose, else by address.
+  CHECK(roleForBond(true, kRoleWorker, true, true, kRoleWorker, true).role == kRoleWorker &&
+        roleForBond(true, kRoleWorker, true, true, kRoleWorker, true).source == RoleSource::Chosen);
+  CHECK(roleForBond(false, kRoleWorker, true, true, kRoleWorker, false).role == kRoleMaster &&
+        roleForBond(false, kRoleWorker, true, true, kRoleWorker, false).source == RoleSource::Partner);
+  CHECK(roleForBond(false, kRoleMaster, true, true, kRoleMaster, true).role == kRoleWorker);
+  CHECK(roleForBond(false, kRoleWorker, true, false, kRoleWorker, true).role == kRoleMaster &&
+        roleForBond(false, kRoleWorker, true, false, kRoleWorker, true).source == RoleSource::Address);
+  CHECK(roleForBond(false, kRoleMaster, false, true, kRoleMaster, false).role == kRoleWorker &&
+        roleForBond(false, kRoleMaster, false, true, kRoleMaster, false).source == RoleSource::Address);
+  CHECK(roleForBond(false, kRoleWorker, true, true, 7, true).source == RoleSource::Address);  // a role it does not know
+  // roleYields: only an automatic role, only to a partner that chose the same.
+  CHECK(roleYields(false, kRoleMaster, true, kRoleMaster) && roleYields(false, kRoleWorker, true, kRoleWorker));
+  CHECK(!roleYields(true, kRoleMaster, true, kRoleMaster) && !roleYields(false, kRoleMaster, false, kRoleMaster) &&
+        !roleYields(false, kRoleMaster, true, kRoleWorker) && !roleYields(false, kRoleMaster, true, 9));
+  CHECK(std::string(roleSourceKey(RoleSource::Chosen)) == "chosen" &&
+        std::string(roleSourceKey(RoleSource::Partner)) == "partner" &&
+        std::string(roleSourceKey(RoleSource::Address)) == "address" &&
+        std::string(roleSourceKey(RoleSource::Kept)) == "kept");
+  CHECK(kRequestFlagRoleChosen == 0x02 && kNoticeFlagRoleChosen == 0x01 && kRoleWorker == 0 && kRoleMaster == 1);
+  CHECK(kRequestFlagRoleYields == 0x04 && (kRequestFlagRoleYields & (kRequestFlagFresh | kRequestFlagRoleChosen)) == 0);
+  // roleSourceNow: chosen; the other than a partner's chosen role; the role
+  // the addresses give; else kept from earlier.
+  State st = {};
+  CHECK(roleSourceNow(st, true, kRoleWorker, true, true) == RoleSource::Chosen);
+  CHECK(roleSourceNow(st, false, kRoleMaster, true, true) == RoleSource::Address &&
+        roleSourceNow(st, false, kRoleWorker, true, false) == RoleSource::Address);
+  CHECK(roleSourceNow(st, false, kRoleWorker, true, true) == RoleSource::Kept &&
+        roleSourceNow(st, false, kRoleMaster, true, false) == RoleSource::Kept);
+  CHECK(roleSourceNow(st, false, kRoleWorker, false, false) == RoleSource::Address);  // no partner: the rule to come
+  st.partnerRoleKnown = true;
+  st.partnerRoleChosen = true;
+  st.partnerRole = kRoleMaster;
+  CHECK(roleSourceNow(st, false, kRoleWorker, true, true) == RoleSource::Partner);
+  CHECK(roleSourceNow(st, false, kRoleMaster, true, true) == RoleSource::Address);  // the same role: not from it
+  st.partnerRoleChosen = false;  // the partner gave its choice up ('bondrole auto')
+  CHECK(roleSourceNow(st, false, kRoleWorker, true, true) == RoleSource::Kept);
+}
+
+// Device 0's user chose master. Device 1 (higher address, automatic) took
+// master by the addresses. Device 0's request says "chosen": device 1 takes
+// worker, answers ACCEPTED as worker, and nobody reports a conflict.
+static void caseAutoYieldsToRequest() {
+  resetWorld();
+  CHECK(bondChosenOrAuto(0, 1, true, kRoleMaster).source == RoleSource::Chosen);
+  CHECK(bondChosenOrAuto(1, 0, false, kRoleWorker).role == kRoleMaster);  // higher address, nothing known yet
+  CHECK(gDev[0].local.role == kRoleMaster && gDev[1].local.role == kRoleMaster);
+  run(2000);
+  CHECK(gDev[1].local.role == kRoleWorker && gDev[1].roleSwitches == 1 && gDev[0].roleSwitches == 0);
+  CHECK(gDev[0].local.role == kRoleMaster);
+  for (int i = 0; i < 2; ++i) {
+    CHECK(gDev[i].s.agreement == Agreement::Agreed && !gDev[i].s.roleConflict);
+    CHECK(lineCount(i, Line::RoleConflict) == 0);
+  }
+  CHECK(roleSourceNow(gDev[1].s, false, gDev[1].local.role, true, true) == RoleSource::Partner &&
+        roleSourceNow(gDev[0].s, true, gDev[0].local.role, true, false) == RoleSource::Chosen);
+  CHECK(gDev[1].s.partnerRoleKnown && gDev[1].s.partnerRole == kRoleMaster && gDev[1].s.partnerRoleChosen);
+  // Device 0 knows device 1 did not choose: it never yields itself.
+  CHECK(gDev[0].s.partnerRoleKnown && !gDev[0].s.partnerRoleChosen);
+}
+
+// The same, with every request of device 0 lost: device 1 learns it from
+// device 0's answer (ACCEPTED as master, "chosen": device 0 knows device 1's
+// role is automatic and reports no conflict), takes worker, and asks again.
+static void caseAutoYieldsToNotice() {
+  resetWorld();
+  bondChosenOrAuto(0, 1, true, kRoleMaster);
+  bondChosenOrAuto(1, 0, false, kRoleWorker);
+  gLose = [](const Frame& f) { return f.from == 0 && f.isRequest; };
+  run(8000);
+  CHECK(gDev[1].local.role == kRoleWorker && gDev[1].roleSwitches == 1);
+  CHECK(sentCount(0, false, kReasonAccepted) >= 1 && sentCount(0, false, kReasonRoleConflict) == 0);
+  CHECK(lineCount(0, Line::RoleConflict) == 0);
+  CHECK(gDev[0].s.agreement == Agreement::Agreed && !gDev[0].s.roleConflict);
+  CHECK(gDev[1].s.agreement == Agreement::Agreed && !gDev[1].s.roleConflict);
+  CHECK(sentCount(1, true) >= 2);  // asked again with its new role
+  CHECK(lineCount(1, Line::RoleConflict) == 0);
+}
+
+// Both users chose master: nobody yields; ROLE_CONFLICT says so on both.
+// Neither chose and both are master (set by hand on old firmware): nothing
+// changes either, as before.
+static void caseBothChoseSameRole() {
+  resetWorld();
+  bondChosenOrAuto(0, 1, true, kRoleMaster);
+  bondChosenOrAuto(1, 0, true, kRoleMaster);
+  run(2000);
+  for (int i = 0; i < 2; ++i) {
+    CHECK(gDev[i].local.role == kRoleMaster && gDev[i].roleSwitches == 0);
+    CHECK(gDev[i].s.agreement == Agreement::Agreed && gDev[i].s.roleConflict && lineCount(i, Line::RoleConflict) == 1);
+  }
+  resetWorld();
+  bond(0, 1, kRoleMaster);
+  bond(1, 0, kRoleMaster);
+  run(2000);
+  CHECK(gDev[0].roleSwitches == 0 && gDev[1].roleSwitches == 0 && gDev[0].s.roleConflict && gDev[1].s.roleConflict);
+}
+
+// A peer that asked to bond before this device bonded is remembered: a later
+// bondconnect to it takes the other role than the one its user chose.
+static void caseBondconnectUsesPeerChoice() {
+  resetWorld();
+  bondChosenOrAuto(1, 0, true, kRoleWorker);  // device 1 (higher address) chose worker
+  run(1000);                                  // device 0, not bonded, answers NOT_BONDED and keeps the note
+  uint8_t role = 9;
+  bool chose = false;
+  CHECK(roleNoteOf(gDev[0].s, gDev[0].local, gDev[1].mac, &role, &chose) && role == kRoleWorker && chose);
+  const RoleChoice c = bondChosenOrAuto(0, 1, false, kRoleWorker);
+  CHECK(c.role == kRoleMaster && c.source == RoleSource::Partner);  // the addresses alone would make it worker
+  run(2000);
+  CHECK(gDev[0].s.agreement == Agreement::Agreed && gDev[1].s.agreement == Agreement::Agreed);
+  CHECK(!gDev[0].s.roleConflict && !gDev[1].s.roleConflict && gDev[0].roleSwitches == 0 && gDev[1].roleSwitches == 0);
+  // A peer that never asked: nothing known.
+  CHECK(!roleNoteOf(gDev[2].s, gDev[2].local, gDev[1].mac, &role, &chose));
+}
+
+// A partner whose firmware has no flag (or whose role was not chosen) says
+// nothing about a choice: an automatic device keeps the role bondconnect gave
+// it. An ENDED that carries a chosen role changes no role.
+static void caseNoChoiceNoSwitch() {
+  resetWorld();
+  bond(0, 1, kRoleMaster);
+  gDev[1].local.roleChosen = false;
+  bond(1, 0, kRoleWorker);
+  run(1000);
+  CHECK(gDev[0].roleSwitches == 0 && gDev[1].roleSwitches == 0 && !gDev[0].s.roleConflict);
+  Local local = gDev[1].local;
+  local.role = kRoleWorker;
+  pushInbound(gDev[1].s, false, gDev[0].mac, kRoleWorker, kReasonEnded, 0, kNoticeFlagRoleChosen);
+  const Outcome out = takeInbound(gDev[1].s, local, gNow);
+  CHECK(out.handled && !out.switchRole && gDev[1].s.agreement == Agreement::Declined);
+  CHECK(gDev[1].s.partnerRoleKnown && gDev[1].s.partnerRoleChosen && gDev[1].s.partnerRole == kRoleWorker);
+  // A partner change forgets what the old partner said.
+  reset(gDev[1].s);
+  CHECK(!gDev[1].s.partnerRoleKnown && roleSourceNow(gDev[1].s, false, kRoleMaster, true, true) == RoleSource::Address);
+}
+
+// The partner runs firmware from before role choice (no flags, never
+// yields). Device 0's user chose master; device 1 is master by its address.
+// Device 0 reports the conflict at once (ROLE_CONFLICT), as both devices did
+// before, and keeps reporting it: the old partner's requests never clear it.
+static void caseOldFirmwarePartner() {
+  resetWorld();
+  gDev[1].oldFirmware = true;
+  bondChosenOrAuto(0, 1, true, kRoleMaster);
+  bond(1, 0, kRoleMaster);
+  run(2000);
+  CHECK(gDev[0].local.role == kRoleMaster && gDev[1].local.role == kRoleMaster && gDev[1].roleSwitches == 0);
+  CHECK(gDev[0].s.agreement == Agreement::Agreed && gDev[0].s.roleConflict);
+  CHECK(lineCount(0, Line::RoleConflict) == 1);
+  const size_t before = gSentLog.size();
+  // The old partner's session comes up again: a fresh request, the same answer.
+  reset(gDev[1].s);
+  run(8000);
+  CHECK(gDev[0].s.roleConflict && lineCount(0, Line::RoleConflictOver) == 0 && lineCount(0, Line::RoleConflict) == 1);
+  CHECK(sentCount(0, false, kReasonRoleConflict, before) >= 1 && sentCount(0, false, kReasonAccepted, before) == 0);
+  // With this firmware on both, the same start ends with device 1 as worker.
+  resetWorld();
+  bondChosenOrAuto(0, 1, true, kRoleMaster);
+  bond(1, 0, kRoleMaster);
+  run(2000);
+  CHECK(gDev[1].local.role == kRoleWorker && !gDev[0].s.roleConflict && lineCount(0, Line::RoleConflict) == 0);
+}
+
 int main() {
   caseMutual();
   caseOneSided();
@@ -1007,6 +1210,13 @@ int main() {
   caseDeclineAfterWeeks();
   caseHeartbeat();
   caseTexts();
+  caseRoleRules();
+  caseAutoYieldsToRequest();
+  caseAutoYieldsToNotice();
+  caseBothChoseSameRole();
+  caseBondconnectUsesPeerChoice();
+  caseNoChoiceNoSwitch();
+  caseOldFirmwarePartner();
   std::printf("espnow_bond_agree_core: %u checks passed\n", gChecks);
   return 0;
 }

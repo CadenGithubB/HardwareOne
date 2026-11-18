@@ -4,7 +4,7 @@
 > Regenerate with `python3 tools/command_registry.py reference`.
 > Source of truth is the `CommandEntry` tables in `components/hardwareone/*.cpp`.
 
-1043 commands across 57 modules (1043 registry entries).
+1042 commands across 57 modules (1042 registry entries).
 
 Commands are matched case-insensitively, and lookup uses longest-prefix matching, so `automation list` resolves to the `automation` dispatcher with `list` as its argument.
 
@@ -16,7 +16,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 - [`system`](#system) — 26 commands
 - [`versions`](#versions) — 1 commands
 - [`wifi`](#wifi) — 21 commands
-- [`espnow`](#espnow) — 131 commands
+- [`espnow`](#espnow) — 130 commands
 - [`c6`](#c6) — 10 commands
 - [`mqtt`](#mqtt) — 27 commands
 - [`bluetooth`](#bluetooth) — 23 commands
@@ -158,16 +158,16 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 
 | Command | | Description |
 | ------- | :-: | ----------- |
-| `bondconnect` | A | Connect to bonded peer device: 'bondconnect <mac_or_name>'. Run it on both devices. (async - bond establishes when peer is seen; watch bondstatus)<br/>`Usage: bondconnect <mac_or_name> Returns immediately; the bond completes when the peer appears via heartbeat - watch 'bondstatus'. The peer is asked to confirm; until 'bondconnect' is run there too it answers that it is not bonded, and 'bondstatus' says so.` |
+| `bondconnect` | A | Connect to bonded peer device: 'bondconnect <mac_or_name>'. Run it on both devices. (async - bond establishes when peer is seen; watch bondstatus)<br/>`Usage: bondconnect <mac_or_name> Returns immediately; the bond completes when the peer appears via heartbeat - watch 'bondstatus'. The peer is asked to confirm; until 'bondconnect' is run there too it answers that it is not bonded, and 'bondstatus' says so. A role chosen with 'bondrole' is kept; else the other than the one the peer's user chose; else the higher address is master.` |
 | `bonddisconnect` | A | Disconnect from bonded peer device. The peer is told that the bond ended. |
-| `bondforward` | A | Bond master: forward the bond partner's readings, battery state and events to the mesh master named on this device: 'bondforward [on\|off\|sensors <all\|default\|name,name,...>]'.<br/>`Usage: bondforward [on \| off \| sensors <all \| default \| name,name,...>] No argument shows whether the partner's data is forwarded, and why not. Off by default. The mesh master must list this device ('espnowforwardfrom add' there). Input is not forwarded unless named.` |
+| `bondforward` | A | Bond master: forward the bond partner's readings, battery state and events to the mesh master named on this device: 'bondforward [on\|off\|sensors <all\|default\|name,name,...>]'.<br/>`Usage: bondforward [on \| off \| sensors <all \| default \| name,name,...>] No argument shows whether the partner's data is forwarded, and why not. Off by default. Only to the master named here, when it is paired in this device's primary mesh. Input is not forwarded unless named. That master may ask for the partner's readings (espnowsensorreq <partner> via <this device> there).` |
 | `bondforwardsensors` | A | Set the sensors a bond master forwards, as a mask: <0..2047><br/>`Usage: bondforwardsensors <0..2047> (bit i: sensor i; 'bondforward sensors <names>' sets it by name)` |
 | `bondrequestcap` | A | Request capability summary from bonded peer. (async - remote cap via GET /api/bond/status; note bondshowcap shows LOCAL cap) |
 | `bondrequestmanifest` | A | Request full manifest from bonded peer. (async - view with bondshowremotemanifest) |
 | `bondrequestschema` | A | Request settings schema from bonded peer. (async - cached; read via GET /api/bond/settings/schema) |
 | `bondrequestsettings` | A | Request settings file from bonded peer. (async - cached; read via GET /api/bond/settings) |
 | `bondresync` | A | Force re-sync of bond state (cap+manifest+settings+schema). Use when UI is stuck on 'Establishing Bond' or peer state looks stale. (async - results populate as they arrive)<br/>`Usage: bondresync [--cap\|--manifest\|--settings\|--schema\|--all] Returns OK on dispatch; results arrive over time - view via 'bondshowremotemanifest' and GET /api/bond/status, /api/bond/settings, /api/bond/settings/schema.` |
-| `bondrole` | A | Get/set bond mode role: 'bondrole [master\|worker]' (no arg shows current role).<br/>`Usage: bondrole [master\|worker] (no arg shows current role)` |
+| `bondrole` | A | Get/choose bond mode role: 'bondrole [master\|worker\|auto]' (no arg shows the role and whether it was chosen).<br/>`Usage: bondrole [master\|worker\|auto] (no arg shows the role and how it was decided) master or worker: your choice, kept by bondconnect; a partner whose role is automatic takes the other one. auto: give the choice up (the role stays until the partner chooses or the next bondconnect).` |
 | `bondshowcap` |  | Show local device capability summary. |
 | `bondshowmanifest` |  | Show local device manifest (UI apps + CLI commands). |
 | `bondshowremotemanifest` |  | Show cached remote manifest(s): 'bondshowremotemanifest [fwHash]'.<br/>`Usage: bondshowremotemanifest [<fwHash>]` |
@@ -207,7 +207,6 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `espnowfind` |  | Find devices by name, room, or tag: 'espnowfind <query>'.<br/>`Usage: espnowfind <query>` |
 | `espnowfirsttimesetup` | A | Set first time setup flag: <0\|1><br/>`Usage: espnowfirsttimesetup <0\|1>` |
 | `espnowforget` | A | Forget a peer's crypto identity + close its session: 'espnowforget <name_or_mac>'.<br/>`Usage: espnowforget <name_or_mac>` |
-| `espnowforwardfrom` | A | Mesh master: name the devices that may forward their bond partner's readings, battery state and events to this device: 'espnowforwardfrom [add <name_or_mac> \| remove <name_or_mac> \| clear]'.<br/>`Usage: espnowforwardfrom [add <name_or_mac> \| remove <name_or_mac> \| clear] No argument shows the list. Up to 4 paired devices, each under the key it is paired with (paired again: add it again). Empty (the default): no device may forward to this one. The bond master also needs 'bondforward on' and this device named as its master.` |
 | `espnowforwardlinks` |  | Mesh master: show the devices that forward their bond partner's data to this device: 'espnowforwardlinks [json] [from <n>]'.<br/>`Usage: espnowforwardlinks [json] [from <n>] json: 'next' is the number to pass as 'from' when not every link fitted one reply.` |
 | `espnowfriendlyname` |  | Get/set friendly display name: 'espnowfriendlyname [name]'.<br/>`Usage: espnowfriendlyname [<name>] (<=47 chars) espnowfriendlyname clear` |
 | `espnowgroupaccept` | A | Accept the room and tags a paired peer announces right now, for room and tag commands: 'espnowgroupaccept [json] <name_or_mac\|all>'.<br/>`Usage: espnowgroupaccept [json] <name_or_mac\|all> Records exactly what the peer announces at this moment; the reply states what was accepted. A name that more than one paired device has is refused: use the address espnowgroups shows. From then on espnowroomcmd and espnowtagcmd send that room's and those tags' commands, with the account password they carry, to this peer.` |
@@ -259,7 +258,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `espnowsendfile` | A | Send file: 'espnowsendfile <name_or_mac> "<filepath>"'. (synchronous send; fails if the receiver rejects/cancels mid-transfer)<br/>`Usage: espnowsendfile <name_or_mac> "<filepath>" Blocks until the file is sent. 'success' means every chunk was transmitted and the receiver did not cancel; final storage is confirmed by the receiver's CRC check, which is not reported back here.` |
 | `espnowsensorbroadcast` |  | Enable/disable all sensor ESP-NOW communication: 'espnowsensorbroadcast <on\|off>'.<br/>`Usage: espnowsensorbroadcast [on\|off]` |
 | `espnowsensorbroadcastinterval` | A | Set sensor broadcast interval: <100-10000 ms><br/>`Usage: espnowsensorbroadcastinterval <100..10000>` |
-| `espnowsensorreq` | A | TEST (Phase 1b): hand-send a SENSOR_REQ to a paired worker.<br/>`Usage: espnowsensorreq <MAC\|name> <mask> <mode 0=sub\|1=unsub\|2=oneshot> <intervalMs> <leaseMs>` |
+| `espnowsensorreq` | A | Hand-send a SENSOR_REQ to a paired worker, or to a bond partner through the bond master that forwards for it ('<partner> via <bond master>').<br/>`Usage: espnowsensorreq <MAC\|name> [via <MAC\|name>] <mask> <mode 0=sub\|1=unsub\|2=oneshot> <intervalMs> <leaseMs> A forwarded partner: its name and 'via' the bond master (espnowforwardlinks lists them); its name alone when it is not paired here. The bond master needs 'bondforward on' and forwards only the sensors it names (bondforward sensors).` |
 | `espnowsensorstatus` |  | Show what this device sends to the mesh master (readings, battery state, events) and why not, and what it received, lost and refused: 'espnowsensorstatus [json [<name_or_mac> [via <name_or_mac>]]]'.<br/>`Usage: espnowsensorstatus [json [<name_or_mac> [via <name_or_mac>]]] json <name_or_mac>: everything this device keeps of one sending device. via <name_or_mac>: the bond partner that device forwards for (also found by the name its link shows).` |
 | `espnowsensorstream` |  | Send one sensor's readings to the master named on this device: 'espnowsensorstream <sensor> <on\|off>'. (on this device only; the readings show on the master's espnowsensorstatus)<br/>`Usage: espnowsensorstream <thermal\|tof\|imu\|gps\|input\|fmradio\|camera\|microphone\|rtc\|presence\|apds> <on\|off> The readings go to the master named on this device (espnowmasterfingerprint), which must be paired with it. The reply says where they go, or why nothing is sent yet. On a bond master it asks the bond partner.` |
 | `espnowsessionopen` | A | Initiate SESSION handshake (requires prior espnowkeyex). (async - session goes ACTIVE later; check espnowsessions)<br/>`Usage: espnowsessionopen <name_or_mac> [<mesh>] Returns OK when SESSION_OPEN is sent; the session becomes ACTIVE when CONFIRM arrives - run 'espnowsessions'.` |

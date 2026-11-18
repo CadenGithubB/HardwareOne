@@ -92,7 +92,9 @@ static_assert(ESPNOW_V4_VERSION == 4,
 //                           session unicast to the masters named on it;
 //                           FORWARD_LINK=155 live: a bond master announces to the
 //                           masters named on it that it forwards its bond partner's
-//                           readings, battery state and events, and they answer)
+//                           readings, battery state, events and sensor status, and
+//                           they answer; a master's SENSOR_REQ with its link byte set
+//                           asks the bond master for its partner's readings)
 //   170–189  Bond          (BOND_*, MANIFEST_REQ, SETTINGS_REQ, SCHEMA_REQ, plus
 //                           BOND_STREAM_CTRL/BOND_SENSOR_DATA — moved in from
 //                           streaming/sensors because they were always bond-gated;
@@ -103,7 +105,10 @@ static_assert(ESPNOW_V4_VERSION == 4,
 //                           only. This reverses the 2026-11 decision that they "need
 //                           no bond": a bond worker never sends to a mesh master
 //                           itself (owner rule), so they travel over the bond link
-//                           with the 152/132 payloads unchanged)
+//                           with the 152/132 payloads unchanged;
+//                           BOND_SENSOR_STATUS=185: a bond worker's sensor status,
+//                           to its bond master only, the 151 payload unchanged; 181
+//                           keeps its earmark)
 //   190–199  Unallocated buffer (future whole category, or spill for a full one)
 //   200–255  User-defined  (plugin/experiment space — core NEVER allocates here)
 //
@@ -220,6 +225,7 @@ enum EspNowV4Type : uint8_t {
   ESPNOW_V4_TYPE_BOND_EVENT_PUSH = 182,  // bond worker → its bond master: one system event (same layout as 132)
   ESPNOW_V4_TYPE_BOND_REQUEST    = 183,  // "you are my bond partner": sent to the configured partner
   ESPNOW_V4_TYPE_BOND_NOTICE     = 184,  // how the sender's bond stands toward the receiver (BondNoticeReason)
+  ESPNOW_V4_TYPE_BOND_SENSOR_STATUS = 185,  // bond worker → its bond master: sensors present / streaming (same layout as 151)
 };
 
 // ---- Flag bits (16-bit in V4; was 8-bit in V3) -----------------------------
@@ -476,8 +482,12 @@ struct __attribute__((packed)) V4PayloadStreamCtrl {
 
 // BOND_REQUEST flags.
 enum BondRequestFlags : uint8_t {
-  BOND_REQUEST_FLAG_FRESH = 0x01,  // the bond was just set up or the session just came up
-                                   // (clear on the once-a-minute repeats)
+  BOND_REQUEST_FLAG_FRESH = 0x01,        // the bond was just set up or the session just came up
+                                         // (clear on the once-a-minute repeats)
+  BOND_REQUEST_FLAG_ROLE_CHOSEN = 0x02,  // the sender's user chose its role (bondrole): a partner
+                                         // that did not choose takes the other role
+  BOND_REQUEST_FLAG_ROLE_YIELDS = 0x04,  // the sender follows that rule itself (set on every request
+                                         // of firmware with role choice; older firmware never yields)
 };
 
 // BOND_REQUEST: "I have you configured as my bond partner."
@@ -512,9 +522,18 @@ struct __attribute__((packed)) V4PayloadBondNotice {
                          // BOND_REQUEST number (0: it sent none). Its requests up to that
                          // number were made before it ended the bond; the receiver ignores
                          // one that arrives after the ENDED
-  uint8_t  reserved[4];  // 0
+  uint8_t  flags;        // BondNoticeFlags, with the role only (ACCEPTED, ROLE_CONFLICT,
+                         // ENDED); 0 otherwise. Was reserved (0): firmware from before it
+                         // reads "not chosen"
+  uint8_t  reserved[3];  // 0
 };
 static_assert(sizeof(V4PayloadBondNotice) == 8, "V4PayloadBondNotice is 8 bytes on the wire");
+static_assert(offsetof(V4PayloadBondNotice, flags) == 4, "V4PayloadBondNotice.flags is the first byte that was reserved");
+
+// BOND_NOTICE flags.
+enum BondNoticeFlags : uint8_t {
+  BOND_NOTICE_FLAG_ROLE_CHOSEN = 0x01,  // the sender's user chose the role the notice carries
+};
 #endif // ENABLE_BONDED_MODE
 
 // ---- Sensor frames -----------------------------------------------------------
@@ -526,13 +545,22 @@ static_assert(sizeof(V4PayloadBondNotice) == 8, "V4PayloadBondNotice is 8 bytes 
 // A session unicast to the device that receives the sender's readings (row:
 // paired + session-encrypted), sent every 5 s while a stream runs and when a
 // stream starts or stops. Bits of types the receiver does not know are ignored.
+// A bond worker sends the same 16 bytes to its bond master only, as
+// BOND_SENSOR_STATUS (185); its bond master may forward them to the master
+// named on it with the link byte set (System_ESPNow_ForwardCore.h,
+// packStatusFrame / parseStatusFrame).
 struct __attribute__((packed)) V4PayloadSensorStatus {
   uint32_t presentMask;    // 0   bit i: sensor type i is connected on the sender
   uint32_t streamingMask;  // 4   bit i: the sender is sending readings of type i
   uint16_t bootTag;        // 8   as in the reading header
-  uint8_t  reserved[6];    // 10  0
+  uint8_t  fwdLink;        // 10  0, or the bond master's link number: the sender's bond partner's status
+  uint8_t  reserved[5];    // 11  0
 };
-static_assert(sizeof(V4PayloadSensorStatus) == 16, "V4PayloadSensorStatus is 16 bytes on the wire");
+static_assert(sizeof(V4PayloadSensorStatus) == 16 && sizeof(V4PayloadSensorStatus) == espnowfwd::kStatusFrameLen,
+              "V4PayloadSensorStatus is 16 bytes on the wire");
+static_assert(offsetof(V4PayloadSensorStatus, streamingMask) == 4 && offsetof(V4PayloadSensorStatus, bootTag) == 8 &&
+              offsetof(V4PayloadSensorStatus, fwdLink) == 10 && offsetof(V4PayloadSensorStatus, reserved) == 11,
+              "V4PayloadSensorStatus layout (espnowfwd::packStatusFrame writes these offsets)");
 
 // The header of one part of a sensor reading: SENSOR_ENVELOPE (154), and
 // BOND_SENSOR_DATA (179) to a bond partner. The part's bytes of the reading's
@@ -574,15 +602,23 @@ static_assert(SENSOR_READING_HEADER_LEN + SENSOR_READING_PART_MAX_ROUTED == ESPN
 // Sensor request payload (master -> worker): the secure fetcher's leased pull.
 // Mesh-legal (NOT bond-gated) — registered REQ_PAIRED|REQ_SESSION_ENC and authorized
 // in-handler by Ed25519 fingerprint against the worker's configured master/backup.
+// With fwdLink set the request is for the receiver's bond partner: the
+// receiver, its bond master, turns it into its own bond-link control of the
+// partner's sensors (System_ESPNow_ForwardCore.h, sensorReqDecide); a device
+// never applies such a request to its own sensors.
 struct __attribute__((packed)) V4PayloadSensorReq {
   uint8_t  reqId;       // app-level correlation / renewal generation
   uint8_t  mode;        // 0=subscribe, 1=unsubscribe, 2=oneshot (see SensorReqMode)
   uint32_t sensorMask;  // bitmask over RemoteSensorType (bit i = 1u<<i)
   uint32_t intervalMs;  // desired per-sensor cadence hint (worker floors at spec.minIntervalMs)
   uint32_t leaseMs;     // lease duration (ms); must exceed the renewal cadence (e.g. 90000 for a 30s tick)
-  uint8_t  reserved[2]; // 0
+  uint8_t  fwdLink;     // 14  0, or the receiver's link number: a request for the receiver's bond partner
+  uint8_t  reserved;    // 15  0
 };
 static_assert(sizeof(V4PayloadSensorReq) == 16, "V4PayloadSensorReq is 16 bytes on the wire");
+static_assert(offsetof(V4PayloadSensorReq, sensorMask) == 2 && offsetof(V4PayloadSensorReq, intervalMs) == 6 &&
+              offsetof(V4PayloadSensorReq, leaseMs) == 10 && offsetof(V4PayloadSensorReq, fwdLink) == 14,
+              "V4PayloadSensorReq layout");
 
 // POWER_STATUS (152): the sender's battery state. A session unicast to each
 // master named on the sender (row: paired + session-encrypted, no bond gate),

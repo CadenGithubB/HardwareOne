@@ -264,8 +264,15 @@ def assemble(a):
         dispatch = definition(source, 'static bool v4_dispatch_table_try(', 'System_ESPNow.cpp')
         assert '(!gSettings.bondModeEnabled || bondPartnerChanging())' in dispatch, \
             'the receive table does not drop bond opcodes quietly during a partner change'
+        # bondrole and the automatic role change share bondChangeRole.
+        role_cmd = definition(source, 'const char* cmd_bond_role(const String& argsInput)', 'System_ESPNow.cpp')
+        auto_role = definition(source, 'static void bondAutoRole(const uint8_t* partner, uint8_t newRole) {',
+                               'System_ESPNow.cpp')
+        assert 'bondChangeRole(newRole);' in role_cmd and 'bondChangeRole(newRole);' in auto_role and \
+            'resetBondSync();' not in role_cmd and 'resetBondSync();' not in auto_role, \
+            'bondrole and the automatic role change go through bondChangeRole'
         for marker, what in (('const char* cmd_bond_resync(const String& argsInput)', 'bondresync'),
-                             ('const char* cmd_bond_role(const String& argsInput)', 'bondrole')):
+                             ('static void bondChangeRole(uint8_t newRole)', 'bondrole')):
             body = definition(source, marker, 'System_ESPNow.cpp')
             assert 'bondWithFramesHeld(' in body and body.count('resetBondSync();') == 1, \
                 f'{what} resets the sync state outside the frame hold'

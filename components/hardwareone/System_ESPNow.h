@@ -932,9 +932,9 @@ struct EspNowState {
   // Deferred flags (set in ISR-like callback, consumed in task context)
   bool bondNeedsCapabilityRequest;  // Peer came online — master starts sync
   bool bondNeedsStreamingSetup;     // Apply saved streaming prefs after sync
-  bool bondDeferredStreamCtrlPending; // STREAM_CTRL received, needs processing
-  uint8_t bondDeferredStreamCtrlSensor;
-  uint8_t bondDeferredStreamCtrlEnable;
+  // STREAM_CTRL received, per sensor, applied by the task after the receive
+  // ring is drained (several in one loop all count). espnow_task only.
+  espnowsensor::StreamCtrlQueue bondDeferredStreamCtrl;
   bool bondNeedsCapabilityResponse; // Peer requested our capabilities
   bool bondNeedsManifestResponse;   // Peer requested our manifest
   bool bondNeedsSettingsResponse;   // Peer requested our settings
@@ -1108,9 +1108,7 @@ struct EspNowState {
     bondSyncLastAttemptMs(0),
     bondNeedsCapabilityRequest(false),
     bondNeedsStreamingSetup(false),
-    bondDeferredStreamCtrlPending(false),
-    bondDeferredStreamCtrlSensor(0),
-    bondDeferredStreamCtrlEnable(0),
+    bondDeferredStreamCtrl{0, 0},
     bondNeedsCapabilityResponse(false),
     bondNeedsManifestResponse(false),
     bondNeedsSettingsResponse(false),
@@ -1753,6 +1751,12 @@ bool isBondPeerMac(const uint8_t* mac);
 bool v4_send_sensor_status(const uint8_t* dstMac, uint32_t presentMask, uint32_t streamingMask, uint16_t bootTag);
 // One built part of a reading: SENSOR_ENVELOPE, or BOND_SENSOR_DATA to the bond partner.
 bool v4_send_sensor_part(const uint8_t* dstMac, bool viaBond, const uint8_t* part, uint16_t len);
+// A bond worker's sensor status to its bond partner as BOND_SENSOR_STATUS (185),
+// the 151 payload (false in a build without bond mode).
+bool v4_send_bond_sensor_status(const uint8_t* dstMac, uint32_t presentMask, uint32_t streamingMask, uint16_t bootTag);
+// `mac` is paired in this device's primary mesh (the default slot of
+// gSettings.meshes): a bond master forwards its partner's data only there.
+bool espnowPeerInPrimaryMesh(const uint8_t* mac);
 // A bond worker's battery state (180) and events (182) to its bond partner,
 // with the 152/132 payloads (false in a build without bond mode).
 bool v4_send_bond_power(const uint8_t* dstMac, const uint8_t* payload, uint16_t len);
