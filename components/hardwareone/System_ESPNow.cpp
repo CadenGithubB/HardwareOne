@@ -47,6 +47,7 @@
 #include "System_ESPNow_Sessions.h"  // Phase 3.4: per-peer-per-mesh session state
 #include "System_ESPNow_Deadline.h"  // wrap-safe pre-warm cooldown
 #include "System_ESPNow_PairCore.h"  // discover-then-confirm request/answer state + retransmit
+#include "System_ESPNow_BondAgreeCore.h"  // BOND_REQUEST / BOND_NOTICE: what the partner said about the bond
 #include "System_ESPNow_Sensors.h"
 #include "System_ESPNow_Tx.h"        // Single-sender TX dispatcher (Phase 1)
 #include "System_MemUtil.h"          // ps_alloc — heap copy of payload for async send
@@ -555,6 +556,11 @@ static uint32_t gBondHeartbeatSeqNum = 0;
 static const uint32_t BOND_SYNC_RETRY_MS = 3000;   // Retry sync request every 3s if stuck
 
 static void resetBondSync();
+// Bond agreement (BOND_REQUEST / BOND_NOTICE), defined with the bond handlers.
+static void bondAgreementReset();
+static bool bondAgreementSessionUp(const uint8_t* partner, bool* wasOffline, bool* wentOnline);
+static void bondAgreementPostOnline(const uint8_t* partner);
+static void bondTellPartnerEnded(const uint8_t* nextPartner);
 #endif
 
 // Forward declaration for v4_send_frame (implemented later).
@@ -1193,7 +1199,8 @@ static void bondWithFramesHeld(Fn&& fn) {
   gBondPartnerChanging.fetch_sub(1, std::memory_order_acq_rel);
 }
 
-// The partner (or bond mode) changed: nothing known about the old one applies.
+// The partner (or bond mode) changed: nothing known about the old one applies,
+// and the partner there is now is asked whether it agrees to the bond.
 // Call inside bondWithFramesHeld, after the settings changed.
 static void bondForgetPartnerState() {
   if (gEspNow) {
@@ -1201,13 +1208,17 @@ static void bondForgetPartnerState() {
     gEspNow->lastBondHeartbeatReceivedMs = 0;
   }
   resetBondSync();
+  bondAgreementReset();
 }
 
 // Ends the bond with the configured partner: bond mode off and no partner,
 // changed with bond frames held off, and nothing known about it kept. The
-// offline event names it when bond mode was on. bonddisconnect, and unpair of
-// the partner (or the partner's heartbeats key-exchange it again). cmd_exec.
+// partner is told first (BOND_NOTICE), while the session it can hear it over is
+// still there. The offline event names it when bond mode was on.
+// bonddisconnect, and unpair of the partner (or the partner's heartbeats
+// key-exchange it again). cmd_exec.
 static void bondEndPartnership() {
+  bondTellPartnerEnded(nullptr);
   const String prevPeer = gSettings.bondPeerMac;
   const bool wasOn = gSettings.bondModeEnabled;
   bondWithFramesHeld([&] {
@@ -3534,34 +3545,51 @@ void bondNotifySessionEstablished(const uint8_t* peerMac) {
   if (peerMac) espnowHandshakeBackoffClear(peerMac);
 #if ENABLE_BONDED_MODE
   if (!gEspNow || !isBondPeerMac(peerMac)) return;
-  bool wasOffline = !gEspNow->bondPeerOnline;
-  gEspNow->bondPeerOnline = true;
-  gEspNow->lastBondHeartbeatReceivedMs = millis();  // session ACTIVE counts as liveness
-  if (wasOffline) {
+  // The partner is asked whether it has this device as its partner too. One
+  // that already said it has not is not made online by the session: that was
+  // the round of online, ask, time out and clear the session every 20 s.
+  //
+  // The partner's answer arrives on espnow_task, which can take the CPU
+  // between any two statements here. So the question "has it declined?" and
+  // the online state are one step under the agreement's lock
+  // (bondAgreementSessionUp): a "not bonded" either comes first, and nothing
+  // is set, or comes after and takes all of it back (bondPartnerDeclined).
+  // What follows only reports that step and sets no state.
+  bool wasOffline = false;
+  bool wentOnline = false;
+  const bool partnerMayBeOnline = bondAgreementSessionUp(peerMac, &wasOffline, &wentOnline);
+  if (wentOnline) {
+    bondAgreementPostOnline(peerMac);
+    if (isBondMaster()) INFO_ESPNOWF("[BOND] session ACTIVE with peer — master kicking capability sync");
+  }
 #if ENABLE_HTTP_SERVER
+  if (wasOffline) {
     // Security audit: the bonded (RCE-capable) command channel just went live with
     // the configured peer. The bond token was derived during the encrypted
     // handshake; this transition is the point command-execution over the bond
     // becomes usable. One line per session (guarded by wasOffline, not per
     // heartbeat) and already filtered to the configured bond peer above. Fires on
     // both master and worker. Runs on cmd_exec — safe for the log file write.
+    // Written also for a partner that said it is not bonded to this device:
+    // the token of this session is valid all the same, and when that partner
+    // bonds again the bond goes live on this session without another record.
+    // The write is the last step: the file append blocks while espnow_task
+    // goes on, and nothing after it may depend on what the partner said before.
     String bondWho = getEspNowDeviceName(peerMac);
     if (bondWho.length() == 0) bondWho = macToDisplayStr(peerMac);
-    logAuthAttempt(true, "espnow/bond", bondWho, String("espnow"),
-                   isBondMaster() ? "Bond session active (role=master)"
-                                  : "Bond session active (role=worker)");
-#endif
-    {
-      String bondName = getEspNowDeviceName(peerMac);
-      systemEventPost(SYSEVT_BOND_ONLINE,
-                      bondName.length() ? bondName.c_str() : gSettings.bondPeerMac.c_str(),
-                      gSettings.bondPeerMac.c_str());
+    const char* what;
+    if (partnerMayBeOnline) {
+      what = isBondMaster() ? "Bond session active (role=master)" : "Bond session active (role=worker)";
+    } else {
+      what = isBondMaster() ? "Bond session active (role=master, partner says it is not bonded)"
+                            : "Bond session active (role=worker, partner says it is not bonded)";
     }
-    if (isBondMaster()) {
-      gEspNow->bondNeedsCapabilityRequest = true;
-      INFO_ESPNOWF("[BOND] session ACTIVE with peer — master kicking capability sync");
-    }
+    logAuthAttempt(true, "espnow/bond", bondWho, String("espnow"), what);
   }
+#else
+  (void)wasOffline;
+  (void)partnerMayBeOnline;
+#endif
 #else
   (void)peerMac;
 #endif
@@ -4295,6 +4323,470 @@ static void v4h_sensor_req(const V4RxCtx& ctx) {
 }
 
 #if ENABLE_BONDED_MODE
+// ============================================================================
+// Bond agreement (BOND_REQUEST / BOND_NOTICE)
+// ============================================================================
+// System_ESPNow_BondAgreeCore.h has the rules. This is the part that reads the
+// settings, sends the frames and tells the user. Nothing here changes the bond
+// settings: a received frame only changes what this device knows about the
+// partner's side. gBondAgree is touched from espnow_task (the two handlers, the
+// heartbeat handler, the receive table's drop path and the tick), from cmd_exec
+// (a partner change, a session coming up) and by the status readers, so every
+// call holds gBondAgreeLock; frames are sent and lines printed after it is
+// released.
+static bondagree::State gBondAgree = {};
+static portMUX_TYPE gBondAgreeLock = portMUX_INITIALIZER_UNLOCKED;
+
+// The online event of a session that came up is posted by cmd_exec, a moment
+// after it set the partner online. If the partner's "not bonded" is handled on
+// espnow_task in that moment, its offline event would be posted first and the
+// two would be read as "went offline, then online". While the online event is
+// still to come (gBondOnlinePostPending), the decline leaves its offline event
+// to cmd_exec (gBondOfflinePostOwed), which posts it right after the online
+// one. Both under gBondAgreeLock.
+static bool gBondOnlinePostPending = false;
+static bool gBondOfflinePostOwed = false;
+
+static_assert((int)BOND_NOTICE_ACCEPTED == (int)bondagree::kReasonAccepted &&
+              (int)BOND_NOTICE_NOT_BONDED == (int)bondagree::kReasonNotBonded &&
+              (int)BOND_NOTICE_BONDED_ELSEWHERE == (int)bondagree::kReasonBondedElsewhere &&
+              (int)BOND_NOTICE_ENDED == (int)bondagree::kReasonEnded &&
+              (int)BOND_NOTICE_ROLE_CONFLICT == (int)bondagree::kReasonRoleConflict &&
+              (int)BOND_REQUEST_FLAG_FRESH == (int)bondagree::kRequestFlagFresh,
+              "the wire values in System_ESPNow_Wire.h mirror bondagree");
+static_assert((int)BOND_AGREEMENT_UNKNOWN == (int)bondagree::Agreement::Unknown &&
+              (int)BOND_AGREEMENT_AGREED == (int)bondagree::Agreement::Agreed &&
+              (int)BOND_AGREEMENT_DECLINED == (int)bondagree::Agreement::Declined,
+              "BondAgreementState mirrors bondagree::Agreement");
+
+// The configured partner's address while bond mode is on. The DISPLAY form
+// bondconnect stores is read without an allocation (the tick asks often); a
+// setting typed by hand in another form goes through parseMacAddress, the
+// parser every bond sender uses.
+static bool bondPartnerMac(uint8_t out[6]) {
+  if (!gSettings.bondModeEnabled || gSettings.bondPeerMac.length() == 0) return false;
+  const char* stored = gSettings.bondPeerMac.c_str();
+  if (macParse(stored, out)) {
+    char text[18];
+    macToDisplay(out, text, sizeof(text));
+    if (strcmp(stored, text) == 0) return true;
+  }
+  return parseMacAddress(gSettings.bondPeerMac, out);
+}
+
+// The partner or bond mode changed (bondForgetPartnerState, inside the frame
+// hold): what the old partner said no longer applies, and the partner there is
+// now is asked. cmd_exec.
+static void bondAgreementReset() {
+  portENTER_CRITICAL(&gBondAgreeLock);
+  bondagree::reset(gBondAgree);
+  portEXIT_CRITICAL(&gBondAgreeLock);
+}
+
+// The bond online or offline event about the partner `mac`.
+static void bondPostLinkEvent(uint8_t kind, const uint8_t* mac) {
+  String bondName = getEspNowDeviceName(mac);
+  systemEventPost(kind, bondName.length() ? bondName.c_str() : gSettings.bondPeerMac.c_str(),
+                  gSettings.bondPeerMac.c_str());
+}
+
+// A session with the partner came up (bondNotifySessionEstablished): it is
+// asked whether it agrees. The side that answered the handshake (the lower
+// address) has its session up first and asks a moment later, when the other
+// side can read it. False when the partner already declined the bond; it is
+// then left offline. cmd_exec.
+//
+// Otherwise the partner is online from here on, and for the master the
+// capability request is due on the edge. That state is written inside the
+// same lock hold that reads the agreement. bondPeerOnline and the sync flags
+// are written by both tasks without a lock of their own, so what keeps them
+// right is the order: the decline is recorded under this lock too
+// (takeInbound), and bondPartnerDeclined clears the state after that. A
+// decline before this hold makes it set nothing; one after it finds the state
+// set and clears it. `wasOffline`: the partner was not online before (one
+// auth-log record per session). `wentOnline`: this call made it online; the
+// caller posts the event (bondAgreementPostOnline).
+static bool bondAgreementSessionUp(const uint8_t* partner, bool* wasOffline, bool* wentOnline) {
+  uint8_t selfMac[6];
+  espnowSelfStaMac(selfMac);
+  const bool answeredHandshake = sessionIsASide(selfMac, partner);
+  const bool master = isBondMaster();
+  const uint32_t now = (uint32_t)millis();
+  portENTER_CRITICAL(&gBondAgreeLock);
+  const bool mayBeOnline = bondagree::onSessionUp(gBondAgree, now, answeredHandshake);
+  *wasOffline = !gEspNow->bondPeerOnline;
+  *wentOnline = mayBeOnline && *wasOffline;
+  if (mayBeOnline) {
+    gEspNow->bondPeerOnline = true;
+    gEspNow->lastBondHeartbeatReceivedMs = now;   // session ACTIVE counts as liveness
+    if (*wentOnline) {
+      if (master) gEspNow->bondNeedsCapabilityRequest = true;
+      gBondOnlinePostPending = true;
+    }
+  }
+  portEXIT_CRITICAL(&gBondAgreeLock);
+  return mayBeOnline;
+}
+
+// Posts the online event for the edge bondAgreementSessionUp reported, and
+// after it the offline event of a decline that was handled in between (see
+// gBondOnlinePostPending). cmd_exec.
+static void bondAgreementPostOnline(const uint8_t* partner) {
+  bondPostLinkEvent(SYSEVT_BOND_ONLINE, partner);
+  portENTER_CRITICAL(&gBondAgreeLock);
+  gBondOnlinePostPending = false;
+  const bool offlineOwed = gBondOfflinePostOwed;
+  gBondOfflinePostOwed = false;
+  portEXIT_CRITICAL(&gBondAgreeLock);
+  if (offlineOwed) bondPostLinkEvent(SYSEVT_BOND_OFFLINE, partner);
+}
+
+// The partner went silent (heartbeat timeout). espnow_task.
+static void bondAgreementLinkLost() {
+  portENTER_CRITICAL(&gBondAgreeLock);
+  bondagree::onLinkLost(gBondAgree);
+  portEXIT_CRITICAL(&gBondAgreeLock);
+}
+
+// True while the partner's last word is that it has no bond with this device.
+static bool bondAgreementDeclined() {
+  portENTER_CRITICAL(&gBondAgreeLock);
+  const bool declined = gBondAgree.agreement == bondagree::Agreement::Declined;
+  portEXIT_CRITICAL(&gBondAgreeLock);
+  return declined;
+}
+
+// What the user types on the other device to name this one: its ESP-NOW
+// name, or its address when it has none.
+static String bondSelfName() {
+  if (gSettings.espnowDeviceName.length() > 0) return gSettings.espnowDeviceName;
+  uint8_t selfMac[6];
+  espnowSelfStaMac(selfMac);
+  return macToDisplayStr(selfMac);
+}
+
+// One line for the user and the event log when the agreement changes or a peer
+// asks to bond. Each is an edge or limited by the core, so the name lookups
+// may allocate.
+static void bondAgreementSay(bondagree::Line line, const uint8_t* mac, uint8_t reason) {
+  if (line == bondagree::Line::None) return;
+  String who = getEspNowDeviceName(mac);
+  if (who.length() == 0) who = macToDisplayStr(mac);
+  const char* name = who.c_str();
+  switch (line) {
+    case bondagree::Line::Accepted:
+      logSystemEvent("BOND", "%s accepted the bond", name);
+      break;
+    case bondagree::Line::Declined: {
+      if (reason == BOND_NOTICE_ENDED) {
+        logSystemEvent("BOND", "%s ended the bond. It stays the partner set here and is asked again every "
+                               "minute; 'bonddisconnect' ends the bond on this device too", name);
+        break;
+      }
+      const String self = bondSelfName();
+      logSystemEvent("BOND", "%s %s. Run 'bondconnect %s' on it to bond; it is asked again every minute",
+                     name, bondagree::reasonPhrase(reason), self.c_str());
+      break;
+    }
+    case bondagree::Line::RoleConflict:
+      logSystemEvent("BOND", "%s and this device are both bond %s. Run 'bondrole %s' on one of them",
+                     name, isBondMaster() ? "master" : "worker", isBondMaster() ? "worker" : "master");
+      break;
+    case bondagree::Line::RoleConflictOver:
+      logSystemEvent("BOND", "%s and this device have different bond roles again", name);
+      break;
+    case bondagree::Line::WantsBond:
+      if (reason == BOND_NOTICE_BONDED_ELSEWHERE) {
+        logSystemEvent("BOND", "%s wants to bond with this device, which is bonded to another device; "
+                               "'bondconnect %s' here moves the bond to it", name, name);
+      } else {
+        logSystemEvent("BOND", "%s wants to bond with this device; run 'bondconnect %s' here to accept",
+                       name, name);
+      }
+      break;
+    case bondagree::Line::None:
+      break;
+  }
+}
+
+// BOND_NOTICE to `mac` over its ACTIVE session, queued for espnow_tx. Without a
+// session nothing is sent and no handshake is started: the peer asks again, or
+// its next ignored bond frame brings the notice. The role goes only to the
+// partner (ACCEPTED, ROLE_CONFLICT). bondconnect derives it from the two
+// addresses, so to any other peer it would say on which side of this device's
+// address the partner lies, and BONDED_ELSEWHERE must not say who the partner is.
+static bool bondSendNotice(const uint8_t* mac, uint8_t reason, uint16_t seq) {
+  if (!bondSessionActiveWith(mac)) return false;
+  const bool toPartner = reason == BOND_NOTICE_ACCEPTED || reason == BOND_NOTICE_ROLE_CONFLICT;
+  V4PayloadBondNotice notice = {};
+  notice.reason = reason;
+  notice.role = toPartner ? gSettings.bondRole : 0;
+  notice.seq = seq;
+  return bondSendEncryptedAsync(mac, ESPNOW_V4_TYPE_BOND_NOTICE, 0, generateMessageId(),
+                                (const uint8_t*)&notice, (uint16_t)sizeof(notice));
+}
+
+// This device is about to end or move its bond: the partner it has now is told
+// ENDED, unless it stays the partner (`nextPartner`; nullptr when there will be
+// none). Sent here and now over the partner's ACTIVE session, before the
+// settings change and before an unpair removes that session: a notice left in
+// the send queue would go out after the unpair and start a key exchange with
+// the device just removed. Without a session nothing is sent and nothing
+// waits; the partner then learns it from the answer to its next bond frame.
+//
+// A BOND_REQUEST this device made just before may still be in the send queue
+// and reach the partner after this notice. The queue has no way to take a job
+// back, so the notice carries the number of the last request made, and the
+// partner takes the requests up to it as void. No further request is made
+// until the settings change that follows (bondagree::beginEnding). cmd_exec.
+static void bondTellPartnerEnded(const uint8_t* nextPartner) {
+  uint8_t partner[6];
+  if (!gEspNow || !gEspNow->initialized || !bondPartnerMac(partner)) return;
+  if (nextPartner && macEquals(partner, nextPartner)) return;
+  if (!bondSessionActiveWith(partner)) return;
+  V4PayloadBondNotice notice = {};
+  notice.reason = BOND_NOTICE_ENDED;
+  notice.role = gSettings.bondRole;
+  portENTER_CRITICAL(&gBondAgreeLock);
+  notice.seq = bondagree::beginEnding(gBondAgree, (uint32_t)millis());
+  portEXIT_CRITICAL(&gBondAgreeLock);
+  char err[48] = {0};
+  if (!v4_send_session_wrapped(partner, ESPNOW_V4_TYPE_BOND_NOTICE, 0, generateMessageId(),
+                               (const uint8_t*)&notice, (uint16_t)sizeof(notice), 1, err, sizeof(err))) {
+    DEBUG_ESPNOW_MESHF("[BOND] the partner was not told that the bond ended: %s", err);
+  }
+}
+
+// The partner said it has no bond with this device. The bond setting here
+// stays (only a command changes it), but everything that needs a willing
+// partner stops: it is not online, its sync state goes, and the heartbeat
+// pauses (processMeshHeartbeats). Its session is left alone. espnow_task.
+//
+// Runs after the decline was recorded under gBondAgreeLock (takeInbound). From
+// then on a session coming up sets nothing (bondAgreementSessionUp), so what is
+// cleared here stays cleared, also when cmd_exec is in the middle of reporting
+// a session that came up just before.
+static void bondPartnerDeclined(const uint8_t* mac) {
+  if (!gEspNow) return;
+  const bool wasOnline = gEspNow->bondPeerOnline;
+  gEspNow->bondPeerOnline = false;
+  gEspNow->lastBondHeartbeatReceivedMs = 0;
+  resetBondSync();
+  if (!wasOnline) return;
+  // The offline event follows the online one. While cmd_exec has still to
+  // post that, it posts this one too (bondAgreementPostOnline).
+  portENTER_CRITICAL(&gBondAgreeLock);
+  const bool leftToCmdExec = gBondOnlinePostPending;
+  if (leftToCmdExec) gBondOfflinePostOwed = true;
+  portEXIT_CRITICAL(&gBondAgreeLock);
+  if (!leftToCmdExec) bondPostLinkEvent(SYSEVT_BOND_OFFLINE, mac);
+}
+
+// The partner's bond heartbeat, before v4h_bond_heartbeat acts on it. False
+// when the partner declined the bond: the heartbeat is then left unused and the
+// partner is asked instead. espnow_task.
+static bool bondAgreementPartnerHeartbeat(const uint8_t* mac, uint8_t partnerRole) {
+  portENTER_CRITICAL(&gBondAgreeLock);
+  const bondagree::Beat beat = bondagree::onPartnerHeartbeat(gBondAgree, partnerRole, gSettings.bondRole,
+                                                             (uint32_t)millis());
+  portEXIT_CRITICAL(&gBondAgreeLock);
+  bondAgreementSay(beat.line, mac, 0);
+  return beat.proceed;
+}
+
+// The receive table ignored a bond frame from a paired peer that is not the
+// partner (or bond mode is off here). That peer believes it is bonded to this
+// device and would go on sending for good, so it is told why, at most once a
+// minute; the tick sends the notice. A frame that did not come over the peer's
+// session proves nothing about the peer and earns none. espnow_task.
+static void bondAgreementNoteIgnoredFrame(const uint8_t* src, bool sessionEncrypted) {
+  if (!src || !sessionEncrypted) return;
+  portENTER_CRITICAL(&gBondAgreeLock);
+  bondagree::noteIgnoredFrame(gBondAgree, src, (uint32_t)millis());
+  portEXIT_CRITICAL(&gBondAgreeLock);
+}
+
+// The bond agreement's part of the espnow_task loop: answers the requests and
+// notices the handlers kept, tells a peer whose bond frames were ignored why
+// (or that asked too often to be answered at once), and asks the partner
+// whether it agrees. The caller skips it while a partner change holds bond
+// frames off, so every answer comes from settled settings. Nothing here
+// waits. espnow_task.
+static void bondAgreementTick(uint32_t now) {
+  portENTER_CRITICAL(&gBondAgreeLock);
+  const bool work = bondagree::hasWork(gBondAgree, now);
+  portEXIT_CRITICAL(&gBondAgreeLock);
+  if (!work) return;
+
+  bondagree::Local local = {};
+  local.bonded = bondPartnerMac(local.partner);
+  local.role = gSettings.bondRole;
+
+  for (uint8_t i = 0; i < bondagree::kInboxSlots; i++) {
+    portENTER_CRITICAL(&gBondAgreeLock);
+    const bondagree::Outcome out = bondagree::takeInbound(gBondAgree, local, now);
+    portEXIT_CRITICAL(&gBondAgreeLock);
+    if (!out.handled) break;
+    if (out.sendNotice) (void)bondSendNotice(out.mac, out.noticeReason, out.noticeSeq);
+    if (out.ignored || out.voided) {
+      char from[18];
+      macToDisplay(out.mac, from, sizeof(from));
+      if (out.ignored) {
+        DEBUG_ESPNOW_MESHF("[BOND_NOTICE_RX] from %s not used: not the bond partner, an answer to an older "
+                           "request, or a reason this firmware does not know", from);
+      } else {
+        DEBUG_ESPNOW_MESHF("[BOND_REQUEST_RX] from %s not used: the partner made it before it ended the bond",
+                           from);
+      }
+    }
+    if (out.becameDeclined) bondPartnerDeclined(out.mac);
+    bondAgreementSay(out.line, out.mac, out.lineReason);
+  }
+
+  for (uint8_t i = 0; i < bondagree::kPeerEntries; i++) {
+    uint8_t to[6];
+    uint8_t reason = 0;
+    uint16_t seq = 0;
+    portENTER_CRITICAL(&gBondAgreeLock);
+    const bool owed = bondagree::takeOwedNotice(gBondAgree, local, now, to, &reason, &seq);
+    portEXIT_CRITICAL(&gBondAgreeLock);
+    if (!owed) break;
+    (void)bondSendNotice(to, reason, seq);
+  }
+
+  const bool sessionActive = local.bonded && bondSessionActiveWith(local.partner);
+  portENTER_CRITICAL(&gBondAgreeLock);
+  const bondagree::RequestPlan plan = bondagree::planRequest(gBondAgree, local, now, sessionActive);
+  portEXIT_CRITICAL(&gBondAgreeLock);
+  if (plan.send) {
+    V4PayloadBondRequest request = {};
+    request.role = gSettings.bondRole;
+    request.flags = plan.flags;
+    request.seq = plan.seq;
+    const uint32_t msgId = generateMessageId();
+    const bool queued = bondSendEncryptedAsync(local.partner, ESPNOW_V4_TYPE_BOND_REQUEST,
+                                               ESPNOW_V4_FLAG_ACK_REQ, msgId,
+                                               (const uint8_t*)&request, (uint16_t)sizeof(request));
+    // Where the plan says so, the request's acknowledgement is watched: with
+    // a partner that declined, nothing else is sent to it, so two requests in
+    // a row that nobody acknowledges are the only sign that it restarted and
+    // no longer has this session. The session is then dropped
+    // (sendStatusSweep) and the next turn starts a new one.
+    if (queued && plan.watchAck) sendStatusRegister(msgId, local.partner);
+    portENTER_CRITICAL(&gBondAgreeLock);
+    bondagree::requestResult(gBondAgree, now, queued);
+    portEXIT_CRITICAL(&gBondAgreeLock);
+  } else if (plan.kickHandshake) {
+    // A partner that declined gets no heartbeat, which is what brings a
+    // session up otherwise. The side that starts handshakes tries once a
+    // minute here, backed off like every automatic start.
+    uint8_t selfMac[6];
+    espnowSelfStaMac(selfMac);
+    if (!sessionIsASide(selfMac, local.partner)) (void)espnowHandshakeAutoStart(local.partner);
+  }
+}
+
+BondAgreementView bondAgreementView() {
+  BondAgreementView view = {};
+  if (!gSettings.bondModeEnabled || gSettings.bondPeerMac.length() == 0) return view;
+  portENTER_CRITICAL(&gBondAgreeLock);
+  view.state = (uint8_t)gBondAgree.agreement;
+  if (gBondAgree.agreement == bondagree::Agreement::Declined) view.reason = gBondAgree.reason;
+  view.roleConflict = gBondAgree.agreement == bondagree::Agreement::Agreed && gBondAgree.roleConflict;
+  portEXIT_CRITICAL(&gBondAgreeLock);
+  return view;
+}
+
+const char* bondAgreementKey(const BondAgreementView& view) {
+  return bondagree::agreementKey((bondagree::Agreement)view.state);
+}
+
+const char* bondAgreementReasonKey(const BondAgreementView& view) {
+  return bondagree::reasonKey(view.roleConflict ? (uint8_t)BOND_NOTICE_ROLE_CONFLICT : view.reason);
+}
+
+// 'bondconnect' was run for the partner this device already has. A partner
+// that has not confirmed the bond is asked again now instead of at the next
+// once-a-minute request, but not sooner than 5 s after the last request
+// (bondagree::askSoon). `waitMs` is how long that still is (0: the next turn
+// of espnow_task sends it, session permitting). An agreed partner is not
+// asked. cmd_exec.
+struct BondAskAgain {
+  BondAgreementView view;
+  uint32_t waitMs;
+};
+static BondAskAgain bondAgreementAskAgain() {
+  BondAskAgain ask = {};
+  const uint32_t now = (uint32_t)millis();
+  portENTER_CRITICAL(&gBondAgreeLock);
+  ask.view.state = (uint8_t)gBondAgree.agreement;
+  if (gBondAgree.agreement == bondagree::Agreement::Declined) ask.view.reason = gBondAgree.reason;
+  ask.view.roleConflict = gBondAgree.agreement == bondagree::Agreement::Agreed && gBondAgree.roleConflict;
+  if (gBondAgree.agreement != bondagree::Agreement::Agreed) {
+    bondagree::askSoon(gBondAgree, now);
+    if (deadlinePending(gBondAgree.requestNotBeforeMs, now)) ask.waitMs = gBondAgree.requestNotBeforeMs - now;
+  }
+  portEXIT_CRITICAL(&gBondAgreeLock);
+  return ask;
+}
+
+void bondAgreementDescribe(char* out, size_t outLen) {
+  if (!out || outLen == 0) return;
+  uint8_t partner[6];
+  if (!bondPartnerMac(partner)) {
+    snprintf(out, outLen, "no partner is set");
+    return;
+  }
+  const BondAgreementView view = bondAgreementView();
+  String who = getEspNowDeviceName(partner);
+  if (who.length() == 0) who = macToDisplayStr(partner);
+  if (view.state == BOND_AGREEMENT_DECLINED) {
+    snprintf(out, outLen, "%s %s (asked again every minute)", who.c_str(), bondagree::reasonPhrase(view.reason));
+  } else if (view.state == BOND_AGREEMENT_AGREED && view.roleConflict) {
+    snprintf(out, outLen, "%s is bonded to this device too, but both are %s (run 'bondrole' on one of them)",
+             who.c_str(), isBondMaster() ? "master" : "worker");
+  } else if (view.state == BOND_AGREEMENT_AGREED) {
+    snprintf(out, outLen, "%s is bonded to this device too", who.c_str());
+  } else {
+    snprintf(out, outLen, "no answer from %s yet", who.c_str());
+  }
+}
+
+// BOND_REQUEST — a paired peer says this device is its bond partner. Kept for
+// bondAgreementTick, which answers it from settings no partner change is in
+// the middle of. It never changes the bond here: accepting takes 'bondconnect'.
+static void v4h_bond_request(const V4RxCtx& ctx) {
+  if (ctx.payloadLen < sizeof(V4PayloadBondRequest)) return;
+  V4PayloadBondRequest request;
+  memcpy(&request, ctx.payload, sizeof(request));
+  if (request.seq == 0) return;   // 0 is "nobody asked" in a notice
+  portENTER_CRITICAL(&gBondAgreeLock);
+  const bool kept = bondagree::pushInbound(gBondAgree, true, ctx.recv_info->src_addr, request.role,
+                                           request.flags, request.seq);
+  portEXIT_CRITICAL(&gBondAgreeLock);
+  DEBUG_ESPNOW_MESHF("[BOND_REQUEST_RX] from %s role=%u seq=%u flags=0x%02X%s", ctx.deviceName,
+                     (unsigned)request.role, (unsigned)request.seq, (unsigned)request.flags,
+                     kept ? "" : " (dropped: too many waiting)");
+  (void)kept;
+}
+
+// BOND_NOTICE — a paired peer says how its bond stands toward this device.
+// Kept for bondAgreementTick, which uses it only when the sender is the
+// configured partner, and then only to update the agreement.
+static void v4h_bond_notice(const V4RxCtx& ctx) {
+  if (ctx.payloadLen < sizeof(V4PayloadBondNotice)) return;
+  V4PayloadBondNotice notice;
+  memcpy(&notice, ctx.payload, sizeof(notice));
+  portENTER_CRITICAL(&gBondAgreeLock);
+  const bool kept = bondagree::pushInbound(gBondAgree, false, ctx.recv_info->src_addr, notice.role,
+                                           notice.reason, notice.seq);
+  portEXIT_CRITICAL(&gBondAgreeLock);
+  DEBUG_ESPNOW_MESHF("[BOND_NOTICE_RX] from %s reason=%u seq=%u%s", ctx.deviceName,
+                     (unsigned)notice.reason, (unsigned)notice.seq,
+                     kept ? "" : " (dropped: too many waiting)");
+  (void)kept;
+}
+
 // BOND_HEARTBEAT — bond-mode keepalive from paired peer; updates bond peer
 // online state, boot counter, settings hash, RSSI; may trigger sync recovery.
 static void v4h_bond_heartbeat(const V4RxCtx& ctx) {
@@ -4304,6 +4796,10 @@ static void v4h_bond_heartbeat(const V4RxCtx& ctx) {
 
   const V4PayloadBondHeartbeat* hb = (const V4PayloadBondHeartbeat*)ctx.payload;
   if (!gEspNow) return;
+
+  // What the heartbeat says about the bond itself comes first: from a partner
+  // that declined the bond it is not acted on (bondAgreementPartnerHeartbeat).
+  if (!bondAgreementPartnerHeartbeat(ctx.recv_info->src_addr, hb->role)) return;
 
   bool bootChanged = (hb->bootCounter != 0 && gEspNow->bondPeerBootCounter != 0 &&
                       hb->bootCounter != gEspNow->bondPeerBootCounter);
@@ -6755,6 +7251,15 @@ static const V4OpcodeEntry kV4HandlerTable[] = {
   // (FS_LIST / FS_STAT / FS_GET rows are above, outside this block: no
   // REQ_BOND_PEER in the table; FsList serves requests to the bonded peer only.)
 #endif
+#if ENABLE_BONDED_MODE
+  // Bond agreement: "you are my bond partner" and the answer to it. Accepted
+  // from any paired peer over its session, with no REQ_BOND_PEER: the receiver
+  // may not have the sender as its partner, and saying so is what BOND_NOTICE
+  // is for. Neither handler changes the bond settings; a notice is used only
+  // when its sender is the configured partner (bondAgreementTick).
+  { ESPNOW_V4_TYPE_BOND_REQUEST,     V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_bond_request      },
+  { ESPNOW_V4_TYPE_BOND_NOTICE,      V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_bond_notice       },
+#endif
 };
 static constexpr size_t kV4HandlerTableSize = sizeof(kV4HandlerTable) / sizeof(kV4HandlerTable[0]);
 
@@ -6961,6 +7466,9 @@ static bool v4_dispatch_table_try(const esp_now_recv_info* recv_info, const EspN
     // When bond mode is off, drop silently (no other branch handles these types).
     // Also silent while bondconnect & co. change the partner: the frame is
     // neither from a wrong partner nor one to act on before the sync reset.
+    // With bond mode off the sender is told so (BOND_NOTICE, at most one a
+    // minute), or it would keep sending to a device that is not its partner.
+    if (!bondPartnerChanging()) bondAgreementNoteIgnoredFrame(recv_info->src_addr, isSessionEncrypted);
     v4_dispatch_post_cleanup(recv_info, h);
     return true;
   }
@@ -6971,7 +7479,9 @@ static bool v4_dispatch_table_try(const esp_now_recv_info* recv_info, const EspN
     // settings, schema, manifest and status or switch sensor streaming.
     // A peer whose own partner setting is stale (bonddisconnect is local) keeps
     // sending a heartbeat every few seconds, so the line is limited to one a
-    // minute and carries the count of the drops in between.
+    // minute and carries the count of the drops in between. The peer is told
+    // why with the same limit (BOND_NOTICE), which stops its sending.
+    bondAgreementNoteIgnoredFrame(recv_info->src_addr, isSessionEncrypted);
     static uint32_t sLastWarnMs = 0;
     static uint32_t sUnreported = 0;
     const uint32_t nowMs = millis();
@@ -11420,7 +11930,9 @@ void processMeshHeartbeats() {
   if (bondTickHeld(hbEpoch)) {
     // held: no heartbeat
   } else if (gSettings.bondModeEnabled && gSettings.bondPeerMac.length() > 0) {
-    if (now - gLastBondHeartbeatSentMs >= BOND_HEARTBEAT_INTERVAL_MS) {
+    // No heartbeat to a partner that said it has no bond with this device: it
+    // would ignore every one. bondAgreementTick asks it again once a minute.
+    if (now - gLastBondHeartbeatSentMs >= BOND_HEARTBEAT_INTERVAL_MS && !bondAgreementDeclined()) {
       gLastBondHeartbeatSentMs = now;
       uint8_t bondMac[6] = {};
       if (parseMacAddress(gSettings.bondPeerMac, bondMac)) {
@@ -11499,7 +12011,15 @@ void processMeshHeartbeats() {
         sessionClear(offS);
       }
     }
+    // What the partner last said about the bond may no longer hold: it is
+    // asked again when the session is back.
+    bondAgreementLinkLost();
   }
+
+  // 3a. Bond agreement: answer the bond requests and notices received, tell a
+  // peer whose bond frames were ignored why, and ask the partner whether it
+  // agrees (at once after a change, then once a minute while it has not).
+  if (!bondTickHeld(hbEpoch)) bondAgreementTick(now);
 #endif // ENABLE_BONDED_MODE
 
   // 3c. Log mesh peer online/offline transitions and reclaim stale slots.
@@ -18971,7 +19491,32 @@ const char* cmd_bond_connect(const String& argsInput) {
   if (gSettings.bondModeEnabled && 
       gSettings.bondPeerMac == macToDisplayStr(peerMac)) {
     bondStartHandshakeNow(peerMac);   // no-op while the session is up
-    return "Already connected to this device in bond mode.";
+    // "Connected" is only true when the partner has this device as its
+    // partner too. One that declined or has not answered is asked again now:
+    // the user who repeats the command has usually just run it on the other
+    // device and should not wait for the once-a-minute request.
+    const BondAskAgain ask = bondAgreementAskAgain();
+    if (ask.view.state == BOND_AGREEMENT_AGREED) return "Already connected to this device in bond mode.";
+    if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+    String partnerName = getEspNowDeviceName(peerMac);
+    if (partnerName.length() == 0) partnerName = macToDisplayStr(peerMac);
+    char asking[96];
+    if (!bondSessionActiveWith(peerMac)) {
+      snprintf(asking, sizeof(asking), "It is asked again as soon as it can be reached.");
+    } else if (ask.waitMs == 0) {
+      snprintf(asking, sizeof(asking), "It is being asked again now.");
+    } else {
+      snprintf(asking, sizeof(asking), "It was asked a moment ago and is asked again in %lu s.",
+               (unsigned long)((ask.waitMs + 999) / 1000));
+    }
+    snprintf(getDebugBuffer(), 1024,
+             "Bond mode is already set to %s (%s) on this device, but it %s.\n%s\n"
+             "Run 'bondconnect %s' on it if that has not been done; 'bondstatus' shows its answer.",
+             partnerName.c_str(), macToDisplayStr(peerMac).c_str(),
+             ask.view.state == BOND_AGREEMENT_DECLINED ? bondagree::reasonPhrase(ask.view.reason)
+                                                       : "has not answered yet",
+             asking, bondSelfName().c_str());
+    return getDebugBuffer();
   }
   
   // Enable bond mode and set peer MAC
@@ -18983,6 +19528,8 @@ const char* cmd_bond_connect(const String& argsInput) {
   uint8_t ourMac[6];
   espnowSelfStaMac(ourMac);
   int cmp = memcmp(ourMac, peerMac, 6);
+  // A partner this replaces is told that its bond ended, before the change.
+  bondTellPartnerEnded(peerMac);
   // Partner, role and bond mode change with bond frames held off (the old
   // partner's stop first), and the sync state is reset before frames are
   // accepted again, so nothing the new partner sends is wiped (bench
@@ -19007,7 +19554,9 @@ const char* cmd_bond_connect(const String& argsInput) {
   
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   snprintf(getDebugBuffer(), 1024, 
-           "Bond mode enabled. Waiting for peer: %s (%s)\nRole: %s\nCapabilities + manifest will be requested when peer comes online.",
+           "Bond mode enabled. Waiting for peer: %s (%s)\nRole: %s\n"
+           "The peer is asked to confirm the bond; run 'bondconnect' there too if it has not been.\n"
+           "Capabilities + manifest will be requested when peer comes online.",
            deviceName.c_str(), macToDisplayStr(peerMac).c_str(),
            isBondMaster() ? "master" : "worker");
   return getDebugBuffer();
@@ -19061,9 +19610,16 @@ const char* cmd_bond_status(const String& argsInput) {
       sync["settingsTx"] = gEspNow ? gEspNow->bondSettingsSent : false;
       doc["heartbeatsSent"]     = (unsigned long)(gEspNow ? gEspNow->bondHeartbeatsSent : 0UL);
       doc["heartbeatsReceived"] = (unsigned long)(gEspNow ? gEspNow->bondHeartbeatsReceived : 0UL);
-      uint32_t lastAgo = (gEspNow && gEspNow->lastBondHeartbeatReceivedMs > 0)
-                         ? (millis() - gEspNow->lastBondHeartbeatReceivedMs) / 1000 : 0;
+      // lastHeartbeatAgo is 0 both for "just now" and for "none"; heartbeatSeen
+      // tells them apart (none after a partner change or a decline).
+      const bool heartbeatSeen = gEspNow && gEspNow->lastBondHeartbeatReceivedMs > 0;
+      uint32_t lastAgo = heartbeatSeen ? (millis() - gEspNow->lastBondHeartbeatReceivedMs) / 1000 : 0;
       doc["lastHeartbeatAgo"] = lastAgo;
+      doc["heartbeatSeen"] = heartbeatSeen;
+      // What the partner said about its side of the bond.
+      const BondAgreementView agreement = bondAgreementView();
+      doc["agreement"] = bondAgreementKey(agreement);
+      doc["agreementReason"] = bondAgreementReasonKey(agreement);
     }
     serializeJson(doc, getDebugBuffer(), 1024);
     return getDebugBuffer();
@@ -19086,27 +19642,36 @@ const char* cmd_bond_status(const String& argsInput) {
   // Calculate heartbeat timing
   uint32_t now = millis();
   uint32_t lastRecvAgo = 0;
+  bool heartbeatSeen = false;
   const char* peerStatus = "UNKNOWN";
   
   if (gEspNow) {
     if (gEspNow->lastBondHeartbeatReceivedMs > 0) {
+      heartbeatSeen = true;
       lastRecvAgo = (now - gEspNow->lastBondHeartbeatReceivedMs) / 1000;
     }
     peerStatus = gEspNow->bondPeerOnline ? "ONLINE" : "OFFLINE";
   }
+  // A partner that said it has no bond with this device is not merely offline.
+  const BondAgreementView agreement = bondAgreementView();
+  const bool declined = agreement.state == BOND_AGREEMENT_DECLINED;
+  if (declined) peerStatus = "NOT BONDED TO THIS DEVICE";
+  char agreementLine[160];
+  bondAgreementDescribe(agreementLine, sizeof(agreementLine));
   
   // Compute sync status from helper
   bool capOk = gEspNow ? gEspNow->lastRemoteCapValid : false;
   bool manOk = gEspNow ? gEspNow->bondManifestReceived : false;
   bool setOk = gEspNow ? gEspNow->bondSettingsReceived : false;
   const char* syncLabel = isBondSynced() ? "SYNCED" : "SYNCING";
-  if (!gEspNow || !gEspNow->bondPeerOnline) syncLabel = "OFFLINE";
+  if (!gEspNow || !gEspNow->bondPeerOnline) syncLabel = declined ? "WAITING FOR THE PARTNER" : "OFFLINE";
   
   // Output each line separately to avoid DEBUG_MSG_SIZE (256 byte) truncation
   broadcastOutput("Bond mode: ENABLED");
   BROADCAST_PRINTF("Role: %s", isBondMaster() ? "master (display/gamepad)" : "worker (compute/network)");
   BROADCAST_PRINTF("Peer: %s (%s)", deviceName.c_str(), gSettings.bondPeerMac.c_str());
   BROADCAST_PRINTF("Peer status: %s", peerStatus);
+  BROADCAST_PRINTF("Agreement: %s", agreementLine);
   bool setSent = gEspNow ? gEspNow->bondSettingsSent : false;
   BROADCAST_PRINTF("Sync: %s (cap=%d manifest=%d settRx=%d settTx=%d)", syncLabel, (int)capOk, (int)manOk, (int)setOk, (int)setSent);
   BROADCAST_PRINTF("Flags: capSent=%d syncInFlight=%d retries=%d",
@@ -19115,7 +19680,14 @@ const char* cmd_bond_status(const String& argsInput) {
                    gEspNow ? (int)gEspNow->bondSyncRetryCount : 0);
   BROADCAST_PRINTF("Heartbeats sent: %lu", gEspNow ? (unsigned long)gEspNow->bondHeartbeatsSent : 0UL);
   BROADCAST_PRINTF("Heartbeats received: %lu", gEspNow ? (unsigned long)gEspNow->bondHeartbeatsReceived : 0UL);
-  BROADCAST_PRINTF("Last heartbeat: %lus ago", (unsigned long)lastRecvAgo);
+  // No time is shown for a heartbeat that never came (after a partner change
+  // or a decline): "0s ago" read as "just now".
+  if (heartbeatSeen) {
+    BROADCAST_PRINTF("Last heartbeat: %lus ago", (unsigned long)lastRecvAgo);
+  } else {
+    broadcastOutput(declined ? "Last heartbeat: none (the partner sends none while it has no bond with this device)"
+                             : "Last heartbeat: none yet");
+  }
   
   return "OK";
 }
@@ -19811,9 +20383,9 @@ extern const CommandEntry espNowCommands[] = {
   
 #if ENABLE_BONDED_MODE
   // ---- Bond Mode Commands (1:1 handshake relationship) ----
-  { "bondconnect", "Connect to bonded peer device: 'bondconnect <mac_or_name>'. (async - bond establishes when peer is seen; watch bondstatus)", true, cmd_bond_connect, "Usage: bondconnect <mac_or_name>\n       Returns immediately; the bond completes when the peer appears via heartbeat - watch 'bondstatus'." },
-  { "bonddisconnect", "Disconnect from bonded peer device.", true, cmd_bond_disconnect },
-  { "bondstatus", "Show bond mode status and configuration.", false, cmd_bond_status },
+  { "bondconnect", "Connect to bonded peer device: 'bondconnect <mac_or_name>'. Run it on both devices. (async - bond establishes when peer is seen; watch bondstatus)", true, cmd_bond_connect, "Usage: bondconnect <mac_or_name>\n       Returns immediately; the bond completes when the peer appears via heartbeat - watch 'bondstatus'.\n       The peer is asked to confirm; until 'bondconnect' is run there too it answers that it is not bonded, and 'bondstatus' says so." },
+  { "bonddisconnect", "Disconnect from bonded peer device. The peer is told that the bond ended.", true, cmd_bond_disconnect },
+  { "bondstatus", "Show bond mode status and configuration, with what the peer answered about the bond (Agreement).", false, cmd_bond_status },
   { "bondrole", "Get/set bond mode role: 'bondrole [master|worker]' (no arg shows current role).", true, cmd_bond_role, "Usage: bondrole [master|worker]   (no arg shows current role)" },
   { "bondshowcap", "Show local device capability summary.", false, cmd_bond_showcap },
   { "bondrequestcap", "Request capability summary from bonded peer. (async - remote cap via GET /api/bond/status; note bondshowcap shows LOCAL cap)", true, cmd_bond_requestcap },
@@ -20017,6 +20589,11 @@ static const char* bondSettingCommand(const char* jsonKey, const String& args) {
     }
   }
   if (!changes) return handleSettingCommand(entry, args);
+  // A partner this change drops (bond mode off, or another partner) is told
+  // that its bond ended, before the change.
+  uint8_t nextPartner[6];
+  const bool keepsPartner = entry->type == SETTING_STRING && parseMacAddress(value, nextPartner);
+  bondTellPartnerEnded(keepsPartner ? nextPartner : nullptr);
   const char* reply = nullptr;
   bondWithFramesHeld([&] {
     reply = handleSettingCommand(entry, args);

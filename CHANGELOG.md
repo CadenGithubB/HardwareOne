@@ -24,6 +24,40 @@ everything user-visible since the v0.99.99.1 tag.
   WiFi network that chip last joined. Refused over the web, Bluetooth and MQTT and while a new
   firmware is in OTA health probation. Plain `factoryreset` is unchanged. Host-tested and compiled
   for every board; not yet run on hardware (readiness G-80).
+- Bond mode: the two devices now tell each other how the bond stands. A bond is a setting on each
+  device, and nothing said so to the other one: a device bonded to a peer that was not bonded back
+  opened the session, showed the partner online, asked for its capabilities, timed out after 15 s,
+  cleared the session and started over about every 20 s, and when one side ran `bonddisconnect` or
+  unpaired the other, the other only saw silence. Two new session-encrypted messages fix that
+  (ESP-NOW types 183 `BOND_REQUEST` and 184 `BOND_NOTICE`). A bonded device asks its partner to
+  confirm: when the bond is set up, when their session comes up, once a minute while the partner has
+  not agreed, and when `bondconnect` is run again for the partner already set (at most every 5 s).
+  The partner answers that it is bonded too, that bond mode is off there, that it is bonded to
+  another device (it does not say which), or that both have the same role. A device that ends or
+  moves its bond (`bonddisconnect`, `bondconnect` to another device, bond mode off, `espnowunpair`)
+  tells the partner it drops that the bond ended. That message names the last request the device
+  made, so a request still on its way when the bond was ended is not taken for a new one. A peer
+  whose bond messages are being ignored is told why at most once a minute. A peer that is not the
+  partner is answered at most once every 5 s however often it asks, and learns nothing about this
+  device's role. No received message creates, changes or ends a bond: that still takes the command
+  on each device. A device whose partner declined keeps its own setting, shows the partner as not
+  bonded instead of cycling online/offline, stops the heartbeat and the capability requests and
+  leaves the session alone; it asks again once a minute, so the bond comes back by itself when
+  `bondconnect` is run on the other device. This also holds when the partner's answer arrives while
+  the session is still coming up. A session with such a partner still gets its `Bond session active`
+  record in the auth log, marked `partner says it is not bonded`. Each change prints one line:
+  `[EVENT][BOND] <name> wants to bond with this device; run 'bondconnect <name>' here to accept`,
+  `<name> accepted the bond`, `<name> has bond mode off`, `<name> is bonded to another device`,
+  `<name> ended the bond`, `<name> and this device are both bond master`. `bondstatus` has an
+  `Agreement:` line and no longer prints `Last heartbeat: 0s ago` when there was none. `bondconnect`
+  for the partner already set no longer answers `Already connected` unless that partner has agreed:
+  it says what the partner answered and that it is asked again. `bondstatus json` and
+  `/api/bond/status` carry `agreement` (`unknown`, `agreed` or `declined`) and `agreementReason`
+  (`not_bonded`, `bonded_elsewhere`, `ended`, `role_conflict` or empty); `bondstatus json` also has
+  `heartbeatSeen`, and the system status has the same `agreement` text under `connectivity.bond`.
+  The web Remote page and the OLED bond screen say when the partner has no bond with this device. A
+  partner running firmware from before this ignores the new messages, and the bond with it behaves
+  as it did (its bond heartbeat counts as its agreement). Host-tested; not yet run on hardware.
 
 ### Fixed
 - Waveshare ESP32-P4 board: speaker test tones were close to inaudible at ordinary volume values,

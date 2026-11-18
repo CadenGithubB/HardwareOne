@@ -6414,3 +6414,78 @@ reply and confirm, session up, authenticated frame, mesh online edge, unpair, ma
 (`espnowKeyExCancel`, `pendingFrameDropForPeer`) stops the HELLO retries to the peer, frees the entry one retry
 interval later without a warning, lets a new key exchange start at once and drops only that peer's queued frames,
 each reported failed. 5 of its 60 checks fail on 3c5dda31.
+
+## Bond agreement (BOND_REQUEST / BOND_NOTICE)
+
+A bond is a setting on each device. These tests cover the two frames with which the devices tell each other how
+it stands: a device bonded to a peer that is not bonded back, or whose partner ended the bond, is told so, keeps
+its own setting, stops the heartbeat, the capability requests and the 15 s timeout that cleared the session, and
+asks once a minute. No received frame changes a bond setting.
+
+`espnow_bond_agree_core_tests` compiles `System_ESPNow_BondAgreeCore.h` (the production dependency-free header) and
+runs modelled devices over a channel that can lose frames: two devices bonded to each other agree and then send
+nothing; a one-sided bond is declined, asked about once a minute for an hour and reported to the other user at most
+every 15 minutes, with no setting changed there; BONDED_ELSEWHERE; ENDED and bonding again; a request that its
+sender's ENDED overtook is not used or answered (the ENDED names the sender's last request; older and equal numbers
+are void, a newer one counts and ends the mark, the 16-bit numbers go round, a partner change and a new session
+forget the mark, an ENDED without a number voids nothing, and a waiting ENDED is not replaced in the inbox by the
+notice after it); the device that ends a bond makes no request between its ENDED and the settings change, and asks
+again after 5 s if that change never comes; the same role on both sides (answered, learnt and reported once on
+each); a notice from a peer that is not the partner, an answer to an older request and an unknown reason are not
+used, while ENDED counts with any number; lost requests and answers are made good by the repeat; the inbox keeps
+arrival order and drops what does not fit; one notice a minute per peer whose bond frames are ignored; more peers
+than the limit table has entries share its last entry and cannot start each other's limits over (six peers for ten
+minutes, six and ten askers for an hour); a peer that is not the partner and asks 1000 times in 10 s gets two
+answers, and a second request inside 5 s is answered when the 5 s are over, to its own number; the request timing
+(waits for the session, one second more on the side that answered the handshake, retry after a full send queue, no
+repeat once agreed, which requests have their acknowledgement watched, a handshake start a minute for a declined
+partner without a session also while a request is waiting, a decline after 30 days of agreement or of a waiting
+request, the clock wrap); the bond heartbeat of a partner without these frames stands for its agreement.
+
+`espnow_bond_agreement` (`test_espnow_bond_agreement.py`, cases in `espnow_bond_agreement_cases.cpp`) runs the
+production glue on the doubles of `espnow_bond_partner_change_harness.cpp`: the wire payloads and reason codes from
+`System_ESPNow_Wire.h`, `v4h_bond_request`, `v4h_bond_notice`, `bondAgreementTick`, `v4h_bond_heartbeat`,
+`bondNotifySessionEstablished`, the bond parts of the ESP-NOW loop and the bond commands. The partner is asked when
+its session comes up (a second later on the side that answered the handshake) and its request is answered ACCEPTED;
+a request from another paired peer is answered NOT_BONDED or BONDED_ELSEWHERE (the frame and the line never name
+the partner, and the frame does not carry this device's role), at most once per 5 s, printed for the user within
+the limits, and leaves bond mode, partner, role and link as they were; with ENDED or NOT_BONDED from the partner
+the setting stays, the partner goes offline once with its sync state cleared, and five minutes bring five frames,
+all of them the request with its acknowledgement watched (no heartbeat, no CAP_REQ, no cleared session); a session
+coming up or a late heartbeat does not bring a declined partner online, but the session gets its auth-log record; a
+declined partner whose session is lost is handshaken once a minute, also while a request is waiting; the bond
+returns when the partner bonds again. With no answer at all the bond behaves as before (sessions cleared about
+every 20 s for a partner that is not bonded, a normal sync for one that is and only sends heartbeats). Also:
+ROLE_CONFLICT on both paths and from the heartbeat after three in a row, the notice limits, the retry after a full
+send queue, no request without a session, and a partner change (the agreement is reset, nothing goes out while bond
+frames are held, a request received during the hold is answered from the new settings). A decline handled on
+espnow_task while cmd_exec is inside `bondNotifySessionEstablished` is tried at every point where espnow_task can
+get in (the doubles model the agreement's lock, the auth-log write and the moment before the online event): the
+partner ends up offline with no capability request due and no 15 s timeout to come, and an offline event never
+precedes its online event. The partner's request from before its ENDED does not agree the bond again, on the same
+turn or a later one, and its request 1 after a restart counts on the new session; this device's ENDED names its
+last request, and a request that the partner's late heartbeat sets off right after the ENDED is not made.
+`bondconnect` to the partner already set says how the bond stands when it is not agreed, asks again on the next
+turn and at most every 5 s, and still answers "Already connected" for an agreed partner. `bondAgreementKey` /
+`bondAgreementReasonKey` give the text every JSON carries.
+
+`espnow_bond_partner_change` (extended) checks the unasked ENDED: `bonddisconnect`, `bondconnect` to another
+device, `espnowbondmodeenabled 0`, `espnowbondpeermac` to another device and `espnowunpair` of the partner each
+tell the dropped partner once, from the command itself (a notice left in the send queue would go out after the
+unpair removed the session and start a key exchange with the removed device), before the frame hold and before the
+peer is deleted, with the number of the last request made and no request after it; the same partner in another
+spelling, a partner set while bond mode is off and a partner without a session are told nothing, and no handshake
+is started for it. Source rules pin those call sites, the agreement reset inside the hold, the tick skipped while a
+hold is up, handlers that never touch a setting, the online state of a session coming up written only in the lock
+hold that reads the agreement with the auth-log write as the last step, and the agreement as the same text in
+`bondstatus json`, `/api/bond/status` and the system status.
+
+`espnow_dispatch_policy` (extended) runs the two new table rows: BOND_REQUEST and BOND_NOTICE reach their handlers
+from any paired peer over its session, bond mode on or off, and are dropped from an unpaired source or in
+plaintext; the drop path notes a paired peer whose bond frame was ignored (not the partner, not an unpaired
+source) so that it can be sent a notice; with bonded mode compiled out the rows do not exist.
+
+```sh
+ctest --test-dir <build> -R 'espnow_bond_(agree_core_tests|agreement|partner_change)|espnow_dispatch_policy' \
+  --output-on-failure
+```

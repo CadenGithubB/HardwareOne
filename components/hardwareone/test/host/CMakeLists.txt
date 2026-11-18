@@ -164,6 +164,20 @@ target_compile_definitions(espnow_pair_core_tests PRIVATE
 target_compile_options(espnow_pair_core_tests PRIVATE
   -Wall -Wextra -Werror -pedantic)
 
+# Bond agreement rules (System_ESPNow_BondAgreeCore.h, the production
+# dependency-free header): modelled devices exchanging BOND_REQUEST and
+# BOND_NOTICE over a channel that can lose frames. Mutual and one-sided bonds,
+# a partner bonded elsewhere, ENDED and bonding again, a request overtaken by
+# its sender's ENDED, the same role on both sides, notices that must not
+# count, the inbox and per-peer limits, the request timing and the heartbeat
+# of a partner without these frames.
+add_executable(espnow_bond_agree_core_tests test_espnow_bond_agree_core.cpp)
+set_target_properties(espnow_bond_agree_core_tests PROPERTIES
+  CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+target_include_directories(espnow_bond_agree_core_tests PRIVATE ../..)
+target_compile_options(espnow_bond_agree_core_tests PRIVATE
+  -Wall -Wextra -Werror -pedantic)
+
 # Projection and pan math shared by MapCore::renderMap and the G2 map page.
 # The production header is dependency-light so geometry can be verified here
 # without Arduino, ESP-IDF, filesystem, or BLE mocks.
@@ -379,6 +393,10 @@ if(HW1_SANITIZE)
   target_compile_options(espnow_pair_core_tests PRIVATE
     -fsanitize=address,undefined -g)
   target_link_options(espnow_pair_core_tests PRIVATE
+    -fsanitize=address,undefined)
+  target_compile_options(espnow_bond_agree_core_tests PRIVATE
+    -fsanitize=address,undefined -g)
+  target_link_options(espnow_bond_agree_core_tests PRIVATE
     -fsanitize=address,undefined)
   target_compile_options(map_viewport_core_tests PRIVATE
     -fsanitize=address,undefined -g)
@@ -1265,6 +1283,7 @@ add_test(NAME memutil_no_psram COMMAND memutil_no_psram_tests)
 add_test(NAME memtracker_core_tests COMMAND memtracker_core_tests)
 add_test(NAME heap_low_core_tests COMMAND heap_low_core_tests)
 add_test(NAME espnow_pair_core_tests COMMAND espnow_pair_core_tests)
+add_test(NAME espnow_bond_agree_core_tests COMMAND espnow_bond_agree_core_tests)
 add_test(NAME map_viewport_core_tests COMMAND map_viewport_core_tests)
 add_test(NAME g2_health_graph_core_tests COMMAND g2_health_graph_core_tests)
 add_test(NAME g2_health_push_core_tests COMMAND g2_health_push_core_tests)
@@ -2565,6 +2584,19 @@ add_test(
   NAME espnow_bond_partner_change
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_espnow_bond_partner_change.py
+          ${ESPNOW_BOND_PARTNER_CHANGE_TEST_ARGS})
+
+# Bond agreement on the production code (BOND_REQUEST / BOND_NOTICE): a
+# partner that is not bonded back, or ended the bond, says so; this device
+# keeps its setting but stops the heartbeat, the capability requests and the
+# session clearing, and asks once a minute. Also a decline that lands while a
+# session is coming up, a request from before its sender's ENDED, and
+# bondconnect to the partner already set. Same doubles as
+# espnow_bond_partner_change, with its own cases.
+add_test(
+  NAME espnow_bond_agreement
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_espnow_bond_agreement.py
           ${ESPNOW_BOND_PARTNER_CHANGE_TEST_ARGS})
 
 # Automatic handshake starts to a peer that does not answer back off from 5 s

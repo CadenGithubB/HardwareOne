@@ -1590,6 +1590,9 @@ void buildSystemInfoJson(JsonDocument& doc, bool includeDeviceList) {
     bond["online"] = isBondModeOnline();
     bond["synced"] = isBondSynced();
     bond["peer"] = gSettings.bondPeerMac;
+    // What the partner said about its side: "unknown" (no answer yet),
+    // "agreed" or "declined", the same text as in bondstatus json.
+    bond["agreement"] = bondAgreementKey(bondAgreementView());
 #endif
   }
 #endif

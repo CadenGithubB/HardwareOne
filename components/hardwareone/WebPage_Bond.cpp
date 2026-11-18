@@ -197,7 +197,18 @@ void streamBondInner(httpd_req_t* req) {
     if (bondProgressStartMs === null) bondProgressStartMs = Date.now();
     const elapsedMs = Date.now() - bondProgressStartMs;
     let hint = '';
-    if (elapsedMs > 8000 && !data.peerOnline) {
+    const peerLabel = data.peerName && data.peerName !== 'Unknown' ? data.peerName : 'The other device';
+    if (data.agreement === 'declined') {
+      // The partner answered: it has no bond with this device. Waiting will
+      // not help; say what does.
+      if (data.agreementReason === 'ended') {
+        hint = peerLabel + ' ended the bond. Run bondconnect on it again to bond, or use Cancel / Unbond here.';
+      } else if (data.agreementReason === 'bonded_elsewhere') {
+        hint = peerLabel + ' is bonded to another device. Run bondconnect on it to bond it with this device, or use Cancel / Unbond here.';
+      } else {
+        hint = peerLabel + ' has bond mode off. Run bondconnect on it to bond, or use Cancel / Unbond here.';
+      }
+    } else if (elapsedMs > 8000 && !data.peerOnline) {
       hint = 'Waiting for the bonded peer to respond. Make sure the other device is powered on and within range.';
     } else if (elapsedMs > 15000 && data.peerOnline && !data.capabilities) {
       hint = 'Connected, but the peer has not sent its capabilities yet. It may be busy or running older firmware.';
@@ -207,7 +218,7 @@ void streamBondInner(httpd_req_t* req) {
 
     let html = '';
     html += '<div class="bond-progress-card">';
-    html += '<div class="bond-progress-title">Establishing Bond</div>';
+    html += '<div class="bond-progress-title">' + (data.agreement === 'declined' ? 'Bond Not Confirmed' : 'Establishing Bond') + '</div>';
     html += '<div class="bond-progress-sub">' + (data.peerName || 'Bonded device') + ' &middot; ' + (data.peerMac || '') + '</div>';
     html += '<div class="bond-progress-bar"><div class="bond-progress-fill" style="width:' + pct + '%"></div></div>';
     html += '<div class="bond-progress-pct">' + doneCount + ' of ' + steps.length + ' steps complete</div>';
@@ -325,6 +336,10 @@ void streamBondInner(httpd_req_t* req) {
     const localRole = data.role === 1 ? 'Master' : 'Worker';
     const remoteRole = data.role === 1 ? 'Worker' : 'Master';
     html += '<div class="remote-description">This device: ' + localRole + ' · Bonded device: ' + (data.peerName || 'Unknown') + ' (' + remoteRole + ')</div>';
+    if (data.agreementReason === 'role_conflict') {
+      // Both ends report the same role, so the line above cannot be right.
+      html += '<div class="remote-description" style="color:var(--danger,#c0392b)">Both devices are set to ' + localRole + '. Run bondrole on one of them so one is master and one is worker.</div>';
+    }
     html += '<div style="margin:8px 0;display:flex;gap:8px;flex-wrap:wrap" data-guest-hide><button class="btn" onclick="window.swapRoles()" style="font-size:0.8em;padding:4px 12px">Swap Roles</button><button class="btn" onclick="window.unbondDevice()" style="font-size:0.8em;padding:4px 12px">Unbond</button></div>';
 
     // Rows are grouped by concern, separated by a thin divider. Each group
@@ -1016,6 +1031,14 @@ static esp_err_t handleBondStatus(httpd_req_t* req) {
   webBondSendChunkf(req, "\"bonded\":%s,", bonded ? "true" : "false");
   webBondSendChunkf(req, "\"peerConfigured\":%s,", peerConfigured ? "true" : "false");
   webBondSendChunkf(req, "\"peerOnline\":%s,", peerOnline ? "true" : "false");
+  // What the partner said about its side of the bond: "unknown" (no answer
+  // yet), "agreed" or "declined", with the reason for a decline or a role
+  // conflict. The page explains a declined bond instead of waiting on it.
+  {
+    const BondAgreementView agreement = bondAgreementView();
+    webBondSendChunkf(req, "\"agreement\":\"%s\",", bondAgreementKey(agreement));
+    webBondSendChunkf(req, "\"agreementReason\":\"%s\",", bondAgreementReasonKey(agreement));
+  }
   webBondSendChunkf(req, "\"peerMac\":\"%s\",", macStr);
   webBondSendChunkf(req, "\"localMac\":\"%s\",", localMacStr.c_str());
   webBondSendChunkf(req, "\"peerName\":\"%s\",", peerName);

@@ -130,6 +130,16 @@ static uint32_t millis() { return gNowMs; }
 // own suites): no change under way, and hearing a peer has no effect here.
 [[maybe_unused]] static bool bondPartnerChanging() { return false; }
 [[maybe_unused]] static void espnowHandshakeHeard(const uint8_t*) {}
+// The bond agreement's hook in the drop path (test_espnow_bond_agreement.py
+// runs the real one): who was noted, and whether the frame came over a session.
+static unsigned gIgnoredNotes = 0;
+static uint8_t gIgnoredFrom[6] = {};
+static bool gIgnoredOverSession = false;
+[[maybe_unused]] static void bondAgreementNoteIgnoredFrame(const uint8_t* src, bool sessionEncrypted) {
+  ++gIgnoredNotes;
+  std::memcpy(gIgnoredFrom, src, 6);
+  gIgnoredOverSession = sessionEncrypted;
+}
 
 // INSERT_BOND_PEER
 
@@ -384,6 +394,12 @@ static unsigned runTextCases() {
 static const uint8_t kBondOpcodes[] = {
 // INSERT_BOND_OPCODES
 };
+// The bond agreement rows (the table's second ENABLE_BONDED_MODE block):
+// BOND_REQUEST and BOND_NOTICE, from any paired peer over its session. Empty
+// for a source from before them.
+static const std::vector<uint8_t> kBondAgreementOpcodes = {
+// INSERT_BOND_AGREEMENT_OPCODES
+};
 // Locally administered test addresses: gPartner is the configured bond partner,
 // gOtherPaired is a second paired mesh peer with a live session.
 static uint8_t gPartner[6] = {0x02, 0x11, 0x22, 0x33, 0x44, 0x02};
@@ -394,7 +410,7 @@ static uint8_t gOtherPaired[6] = {0x02, 0x11, 0x22, 0x33, 0x44, 0x03};
 static bool bondRun(uint8_t type, uint8_t* src, bool paired, bool enc, bool minuteLater = true) {
   if (minuteLater) gNowMs += 61000;
   gLastHandler.clear();
-  gHandlerCalls = gCleanups = gWarns = gParseCalls = 0;
+  gHandlerCalls = gCleanups = gWarns = gParseCalls = gIgnoredNotes = 0;
   esp_now_recv_info ri{src, nullptr, nullptr};
   EspNowV4Header h{};
   h.type = type;
@@ -483,10 +499,62 @@ static unsigned runBondCases() {
   check("stale peer, heartbeat a minute after the first: WARN again", gWarns == 1);
   expect("partner heartbeat between the stale ones is still accepted",
          bondRun(hb, gPartner, true, true, false), true);
+
+  // Bond agreement rows: the sender may not be the partner (saying so is what
+  // BOND_NOTICE is for), so there is no REQ_BOND_PEER; a paired peer's session
+  // is still required.
+  for (uint8_t op : kBondAgreementOpcodes) {
+    const std::string name = opcodeName(op);
+    const V4OpcodeEntry* row = v4_dispatch_lookup(op);
+    check(name + " row is REQ_PAIRED|REQ_SESSION_ENC without REQ_BOND_PEER",
+          row && row->flags == (V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC));
+    gSettings.bondModeEnabled = true;
+    gSettings.bondPeerMac = String(partnerText.c_str());
+    expect(name + " from the bond partner, session-encrypted", bondRun(op, gPartner, true, true), true);
+    expect(name + " from a second paired peer, session-encrypted (bond mode on)",
+           bondRun(op, gOtherPaired, true, true), true);
+    check(name + " from a second paired peer: no WARN, cleaned up once", gWarns == 0 && gCleanups == 1);
+    expect(name + " from a paired peer, plaintext", bondRun(op, gOtherPaired, true, false), false);
+    check(name + " plaintext: drop is logged (one WARN) and cleaned up", gWarns == 1 && gCleanups == 1);
+    expect(name + " from an unpaired source, session-encrypted", bondRun(op, gOtherPaired, false, true), false);
+    gSettings.bondModeEnabled = false;
+    gSettings.bondPeerMac = String("");
+    expect(name + " from a paired peer with bond mode off", bondRun(op, gOtherPaired, true, true), true);
+  }
+  if (!kBondAgreementOpcodes.empty()) {
+    // The drop path tells the agreement whose bond frame was ignored, so that
+    // peer can be sent a notice: a paired peer that is not the partner, with
+    // bond mode on or off. Not the partner, not an unpaired source.
+    gSettings.bondModeEnabled = true;
+    gSettings.bondPeerMac = String(partnerText.c_str());
+    bondRun(hb, gOtherPaired, true, true);
+    check("an ignored bond frame from a second paired peer is noted for a notice",
+          gIgnoredNotes == 1 && std::memcmp(gIgnoredFrom, gOtherPaired, 6) == 0 && gIgnoredOverSession);
+    bondRun(hb, gPartner, true, true);
+    check("the partner's bond frame is not noted", gIgnoredNotes == 0);
+    bondRun(hb, gOtherPaired, false, true);
+    check("an unpaired source's bond frame is not noted", gIgnoredNotes == 0);
+    bondRun(hb, gOtherPaired, true, false);
+    check("a plaintext bond frame is noted as not from a session (no notice follows)",
+          gIgnoredNotes == 1 && !gIgnoredOverSession);
+    gSettings.bondModeEnabled = false;
+    bondRun(hb, gOtherPaired, true, true);
+    check("with bond mode off an ignored bond frame is noted too",
+          gIgnoredNotes == 1 && std::memcmp(gIgnoredFrom, gOtherPaired, 6) == 0 && gIgnoredOverSession);
+    for (uint8_t op : kBondAgreementOpcodes) {
+      bondRun(op, gOtherPaired, true, true);
+      check(std::string(opcodeName(op)) + " itself is never noted as ignored", gIgnoredNotes == 0);
+    }
+  }
 #else
   // Bonded mode compiled out: no bond row exists, so the frames fall to the
   // unknown-type drop whatever the settings say.
   for (uint8_t op : kBondOpcodes) {
+    check(std::string(opcodeName(op)) + " has no table row (bonded mode compiled out)",
+          v4_dispatch_lookup(op) == nullptr && !bondRun(op, gPartner, true, true) &&
+              !bondRun(op, gOtherPaired, true, true));
+  }
+  for (uint8_t op : kBondAgreementOpcodes) {
     check(std::string(opcodeName(op)) + " has no table row (bonded mode compiled out)",
           v4_dispatch_lookup(op) == nullptr && !bondRun(op, gPartner, true, true) &&
               !bondRun(op, gOtherPaired, true, true));

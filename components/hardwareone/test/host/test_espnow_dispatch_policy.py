@@ -20,6 +20,10 @@ a second paired peer with a session is dropped with a WARN (one a minute),
 bond mode off drops silently, the stored partner text is matched without a
 parse when it is in the form bondconnect writes and through parseMacAddress
 when it was typed by hand, and with bonded mode compiled out no bond row exists.
+The two bond agreement rows (BOND_REQUEST, BOND_NOTICE) are the exception: any
+paired peer reaches them over its session, bond mode on or off, and the drop
+path tells the agreement whose bond frame was ignored (a paired peer that is
+not the partner; never the partner or an unpaired source).
 History, the event bus and the G2 push-kick are recording doubles; no radio or
 transport is accessed.
 
@@ -51,6 +55,11 @@ ZERO_FLAG_ALLOWED = ('KEY_EX_HELLO', 'KEY_EX_REPLY', 'KEY_EX_CONFIRM',
 BOND_OPCODES = ('BOND_HEARTBEAT', 'BOND_STREAM_CTRL', 'BOND_CAP_REQ', 'BOND_CAP_RESP',
                 'BOND_SENSOR_DATA', 'SETTINGS_REQ', 'SCHEMA_REQ', 'BOND_STATUS_REQ',
                 'BOND_STATUS_RESP', 'MANIFEST_REQ')
+# The rows of the table's second ENABLE_BONDED_MODE block, the bond agreement:
+# accepted from any paired peer over its session (no REQ_BOND_PEER), because
+# the receiver may not have the sender as its partner. A source from before
+# them has no second block.
+BOND_AGREEMENT_OPCODES = ('BOND_REQUEST', 'BOND_NOTICE')
 
 
 def main():
@@ -114,11 +123,16 @@ def main():
     # from before the partner gate has none; its dispatcher never calls one).
     bond_marker = 'bool isBondPeerMac(const uint8_t* mac)'
     bond_peer = extract_block(source, bond_marker) if bond_marker in source else ''
-    bond_block = re.search(r'#if ENABLE_BONDED_MODE\n(.*?)#endif', table, re.DOTALL)
-    assert bond_block, 'kV4HandlerTable has no ENABLE_BONDED_MODE block'
-    bond_rows = re.findall(r'\{\s*ESPNOW_V4_TYPE_(\w+)\s*,', bond_block.group(1))
+    bond_blocks = re.findall(r'#if ENABLE_BONDED_MODE\n(.*?)#endif', table, re.DOTALL)
+    assert bond_blocks, 'kV4HandlerTable has no ENABLE_BONDED_MODE block'
+    bond_rows = re.findall(r'\{\s*ESPNOW_V4_TYPE_(\w+)\s*,', bond_blocks[0])
     assert sorted(bond_rows) == sorted(BOND_OPCODES), f'bond rows changed, update BOND_OPCODES: {bond_rows}'
     bond_opcodes = '\n'.join(f'  ESPNOW_V4_TYPE_{name},' for name in BOND_OPCODES)
+    assert len(bond_blocks) <= 2, 'a third ENABLE_BONDED_MODE block in kV4HandlerTable: add its rows to this test'
+    agreement_rows = re.findall(r'\{\s*ESPNOW_V4_TYPE_(\w+)\s*,', bond_blocks[1]) if len(bond_blocks) == 2 else []
+    assert not agreement_rows or sorted(agreement_rows) == sorted(BOND_AGREEMENT_OPCODES), \
+        f'bond agreement rows changed, update BOND_AGREEMENT_OPCODES: {agreement_rows}'
+    agreement_opcodes = '\n'.join(f'  ESPNOW_V4_TYPE_{name},' for name in agreement_rows)
 
     handlers = sorted(set(re.findall(r'\{\s*ESPNOW_V4_TYPE_\w+\s*,[^,]*,\s*(\w+)\s*\}', table)))
     assert handlers, 'no handler rows found in kV4HandlerTable'
@@ -138,6 +152,7 @@ def main():
                        ('// INSERT_TEXT_QUEUE_ENTRY', queue_entry),
                        ('// INSERT_BOND_PEER', bond_peer),
                        ('// INSERT_BOND_OPCODES', bond_opcodes),
+                       ('// INSERT_BOND_AGREEMENT_OPCODES', agreement_opcodes),
                        ('// INSERT_POLICY', policy),
                        ('// INSERT_ORIGIN_KNOWN', origin_known),
                        ('// INSERT_TEXT_HANDLER', text_handler),

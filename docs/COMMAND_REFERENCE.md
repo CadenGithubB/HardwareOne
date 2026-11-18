@@ -158,8 +158,8 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 
 | Command | | Description |
 | ------- | :-: | ----------- |
-| `bondconnect` | A | Connect to bonded peer device: 'bondconnect <mac_or_name>'. (async - bond establishes when peer is seen; watch bondstatus)<br/>`Usage: bondconnect <mac_or_name> Returns immediately; the bond completes when the peer appears via heartbeat - watch 'bondstatus'.` |
-| `bonddisconnect` | A | Disconnect from bonded peer device. |
+| `bondconnect` | A | Connect to bonded peer device: 'bondconnect <mac_or_name>'. Run it on both devices. (async - bond establishes when peer is seen; watch bondstatus)<br/>`Usage: bondconnect <mac_or_name> Returns immediately; the bond completes when the peer appears via heartbeat - watch 'bondstatus'. The peer is asked to confirm; until 'bondconnect' is run there too it answers that it is not bonded, and 'bondstatus' says so.` |
+| `bonddisconnect` | A | Disconnect from bonded peer device. The peer is told that the bond ended. |
 | `bondrequestcap` | A | Request capability summary from bonded peer. (async - remote cap via GET /api/bond/status; note bondshowcap shows LOCAL cap) |
 | `bondrequestmanifest` | A | Request full manifest from bonded peer. (async - view with bondshowremotemanifest) |
 | `bondrequestschema` | A | Request settings schema from bonded peer. (async - cached; read via GET /api/bond/settings/schema) |
@@ -169,7 +169,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `bondshowcap` |  | Show local device capability summary. |
 | `bondshowmanifest` |  | Show local device manifest (UI apps + CLI commands). |
 | `bondshowremotemanifest` |  | Show cached remote manifest(s): 'bondshowremotemanifest [fwHash]'.<br/>`Usage: bondshowremotemanifest [<fwHash>]` |
-| `bondstatus` |  | Show bond mode status and configuration. |
+| `bondstatus` |  | Show bond mode status and configuration, with what the peer answered about the bond (Agreement). |
 | `bondstream` | A | Toggle bond sensor streaming (works on both roles): 'bondstream <sensor> <on\|off>'. WORKER streams its sensor to the bonded master; MASTER commands the bonded worker to start/stop. (local toggle; data lands on the master's espnowsensorstatus)<br/>`Usage: bondstream <sensor> <on\|off> bondstream (show status) On a WORKER: streams this device's sensor to the bonded master. On a MASTER: tells the bonded worker to start/stop that sensor. Streamed data is viewable on the master via 'espnowsensorstatus' / GET /api/sensors/remote.` |
 | `bondstreamfmradio` | A | Set auto-stream FM radio: <0\|1><br/>`Usage: bondstreamfmradio <0\|1>` |
 | `bondstreamgps` | A | Set auto-stream GPS: <0\|1><br/>`Usage: bondstreamgps <0\|1>` |

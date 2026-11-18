@@ -49,6 +49,19 @@ stream commands, the FS lock in the manifest lookup) ends that tick's work;
 and that a bond file answer queued on cmd_exec (runDeferredBondFileSend) is
 dropped when an unpair or partner change ran before it.
 
+Bond agreement (BOND_REQUEST / BOND_NOTICE), when the source has it: the wire
+payloads and reason codes (System_ESPNow_Wire.h), the agreement glue with its
+two handlers, v4h_bond_heartbeat and bondNotifySessionEstablished are pasted
+too, and System_ESPNow_BondAgreeCore.h is compiled as is. Checks here that the
+partner a command drops is told ENDED before the change and from the command
+itself, never while bond frames are held, and not without a session; that the
+ENDED names the last request this device made and no request follows it; and
+(source rules) that the session coming up sets the partner online in the same
+lock hold that reads the agreement, with the auth-log write as its last step,
+and that every JSON carries the agreement as the same text.
+test_espnow_bond_agreement.py runs the agreement's own cases on the same
+doubles (assemble() and build_and_run() below are shared with it).
+
 --source-dir replays other production sources (for example cca36fa9) against
 this suite.
 """
@@ -103,10 +116,25 @@ OLD_LINES = (
     'ESPNOW_SETTING_CMD(cmd_espnow_bondmodeenabled, "bondModeEnabled")',
     'ESPNOW_SETTING_CMD(cmd_espnow_bondpeermac, "bondPeerMac")',
 )
+# Bond agreement: its state line, the declarations ahead of the frame hold, the
+# glue (from its first comment line to the heartbeat handler's comment) and the
+# two receive paths that ask it.
+AGREE_LINE = 'static bondagree::State gBondAgree = {};'
+AGREE_FORWARD = ('static void bondAgreementReset();',
+                 'static bool bondAgreementSessionUp(const uint8_t* partner, bool* wasOffline, bool* wentOnline);',
+                 'static void bondAgreementPostOnline(const uint8_t* partner);',
+                 'static void bondTellPartnerEnded(const uint8_t* nextPartner);')
+AGREE_START = '// System_ESPNow_BondAgreeCore.h has the rules.'
+AGREE_END = '// BOND_HEARTBEAT — bond-mode keepalive from paired peer'
+AGREE_WIRE_START = '// BOND_REQUEST flags.'
+AGREE_HEADERS = ('System_ESPNow_BondAgreeCore.h', 'System_Deadline.h')
+HEARTBEAT_RX = 'static void v4h_bond_heartbeat(const V4RxCtx& ctx)'
+SESSION_UP = 'void bondNotifySessionEstablished(const uint8_t* peerMac)'
+CASES_LINE = '// ---- Cases ---'
 
 
-def main():
-    p = argparse.ArgumentParser(description=__doc__)
+def parse_args(doc):
+    p = argparse.ArgumentParser(description=doc)
     p.add_argument('--cxx', default=os.environ.get('CXX') or shutil.which('clang++') or shutil.which('c++'))
     p.add_argument('--sanitize', action='store_true')
     p.add_argument('--component', type=Path, default=HERE.parents[1])
@@ -115,6 +143,11 @@ def main():
     a = p.parse_args()
     if not a.cxx:
         p.error('a host C++17 compiler is required')
+    return a
+
+
+def assemble(a):
+    """The harness with the production code pasted in, and what the source has."""
     sys.path.insert(0, str(a.component / 'test/host'))
     from test_web_batch_handlers import extract_block
 
@@ -137,10 +170,25 @@ def main():
     have_ask = ASK in source
     have_kick = KICK in source
     have_setting_helper = SETTING_HELPER in source
+    have_agree = AGREE_LINE in source
 
     pieces = []
     types = [definition(header, 'enum BondSyncRequestType : uint8_t', 'System_ESPNow.h') + ';',
              definition(header, 'struct CapabilitySummary', 'System_ESPNow.h') + ';']
+    if have_agree:
+        # The payloads and reason codes as they are on the wire, the status
+        # view, and the declarations the frame hold's functions need.
+        wire = read('System_ESPNow_Wire.h')
+        if wire.count(AGREE_WIRE_START) != 1:
+            sys.exit(f'FAIL extraction: {AGREE_WIRE_START!r} in System_ESPNow_Wire.h')
+        at = wire.index(AGREE_WIRE_START)
+        types.append(wire[at:wire.index('#endif // ENABLE_BONDED_MODE', at)])
+        types += [definition(header, 'enum BondAgreementState : uint8_t', 'System_ESPNow.h') + ';',
+                  definition(header, 'struct BondAgreementView', 'System_ESPNow.h') + ';']
+        for line in AGREE_FORWARD:
+            if source.count(line) != 1:
+                sys.exit(f'FAIL extraction: {line!r}')
+            pieces.append(line)
     if have_hold:
         pieces.append(HOLD_LINE)
         for marker in HOLD:
@@ -154,6 +202,13 @@ def main():
         if have_end:
             pieces.append(definition(source, END, 'System_ESPNow.cpp'))
     pieces += [definition(source, m, 'System_ESPNow.cpp') for m in BASE]
+    if have_agree:
+        for marker in (AGREE_START, AGREE_END):
+            if source.count(marker) != 1:
+                sys.exit(f'FAIL extraction: {marker!r} found {source.count(marker)} times, expected 1')
+        pieces.append(source[source.index(AGREE_START):source.index(AGREE_END)])
+        pieces.append(definition(source, HEARTBEAT_RX, 'System_ESPNow.cpp'))
+        pieces.append(definition(source, SESSION_UP, 'System_ESPNow.cpp'))
     if have_ask:
         pieces.append(ASK_LINE)
         pieces.append(definition(source, ASK, 'System_ESPNow.cpp'))
@@ -237,6 +292,76 @@ def main():
         assert source.count('ESPNOW_SETTING_CMD(cmd_espnow_bondmodeenabled') == 0 and \
             source.count('ESPNOW_SETTING_CMD(cmd_espnow_bondpeermac') == 0, \
             'a bond setting command still bypasses the partner change'
+    if have_agree:
+        # Where the agreement is wired in, pinned in the source: the partner a
+        # command drops is told before the frame hold begins; the agreement is
+        # reset inside it; the tick part runs only while no hold is up; the
+        # receive table tells a peer whose bond frames it ignores, but not
+        # during a partner change.
+        for marker, what in ((END, 'bondEndPartnership'),
+                             ('const char* cmd_bond_connect(const String& argsInput)', 'bondconnect'),
+                             (SETTING_HELPER, 'espnowbondmodeenabled / espnowbondpeermac')):
+            body = definition(source, marker, 'System_ESPNow.cpp')
+            assert 0 <= body.find('bondTellPartnerEnded(') < body.find('bondWithFramesHeld('), \
+                f'{what}: the partner is not told that the bond ended before the frame hold'
+        forget = definition(source, 'static void bondForgetPartnerState()', 'System_ESPNow.cpp')
+        assert 'bondAgreementReset();' in forget, 'a partner change does not reset the bond agreement'
+        tick = definition(source, 'void processMeshHeartbeats()', 'System_ESPNow.cpp')
+        assert tick.count('bondAgreementTick(now);') == 1 and \
+            'if (!bondTickHeld(hbEpoch)) bondAgreementTick(now);' in tick, \
+            'the agreement tick is not skipped while a partner change holds bond frames'
+        dispatch = definition(source, 'static bool v4_dispatch_table_try(', 'System_ESPNow.cpp')
+        assert dispatch.count('bondAgreementNoteIgnoredFrame(recv_info->src_addr, isSessionEncrypted);') == 2 and \
+            'if (!bondPartnerChanging()) bondAgreementNoteIgnoredFrame(' in dispatch, \
+            'the receive table does not tell a peer whose bond frames it ignores (or does so during a change)'
+        for name in ('v4h_bond_request', 'v4h_bond_notice'):
+            body = definition(source, f'static void {name}(const V4RxCtx& ctx)', 'System_ESPNow.cpp')
+            assert 'setSetting(' not in body and 'gSettings.' not in body, \
+                f'{name} touches the bond settings: a received frame must never change the bond'
+        # A session coming up: the partner's "not bonded" arrives on
+        # espnow_task and must win wherever it lands. The online state is
+        # written only in the lock hold that reads the agreement, and the
+        # auth-log write (a blocking file append) comes after everything else.
+        up = definition(source, SESSION_UP, 'System_ESPNow.cpp')
+        assert 'bondPeerOnline' not in up and 'bondNeedsCapabilityRequest' not in up and \
+            'lastBondHeartbeatReceivedMs' not in up, \
+            'bondNotifySessionEstablished writes the online state outside the agreement lock'
+        assert up.rstrip().endswith('}') and 'logAuthAttempt(' in up and \
+            up.index('bondAgreementSessionUp(') < up.index('bondAgreementPostOnline(') < up.index('logAuthAttempt('), \
+            'bondNotifySessionEstablished: decide and set, post the event, then write the auth log'
+        after_write = up[up.index('logAuthAttempt('):]
+        assert 'gEspNow' not in after_write and 'systemEventPost' not in after_write, \
+            'bondNotifySessionEstablished does more than return after the auth-log write'
+        decide = definition(source, 'static bool bondAgreementSessionUp(const uint8_t* partner, bool* wasOffline,'
+                            ' bool* wentOnline) ', 'System_ESPNow.cpp')
+        held = decide[decide.index('portENTER_CRITICAL(&gBondAgreeLock);'):decide.index('portEXIT_CRITICAL(&gBondAgreeLock);')]
+        assert decide.count('portENTER_CRITICAL(') == 1 and 'bondagree::onSessionUp(' in held and \
+            'gEspNow->bondPeerOnline = true;' in held and 'bondNeedsCapabilityRequest = true;' in held and \
+            'gBondOnlinePostPending = true;' in held, \
+            'bondAgreementSessionUp: the agreement is read and the online state set in one lock hold'
+        # The ENDED carries the number of the last request, taken with the step
+        # that stops further requests.
+        tell = definition(source, 'static void bondTellPartnerEnded(const uint8_t* nextPartner) ', 'System_ESPNow.cpp')
+        assert 'notice.seq = bondagree::beginEnding(gBondAgree,' in tell and \
+            tell.index('bondagree::beginEnding(') < tell.index('v4_send_session_wrapped('), \
+            'bondTellPartnerEnded: the ENDED does not name the last request made'
+        # The agreement in JSON: one text everywhere (it was a number in the
+        # system status and text in the two bond status answers).
+        key = 'bondAgreementKey('
+        status = definition(source, 'const char* cmd_bond_status(const String& argsInput)', 'System_ESPNow.cpp')
+        utils = read('System_Utils.cpp')
+        web = read('WebPage_Bond.cpp')
+        assert 'doc["agreement"] = bondAgreementKey(agreement);' in status and \
+            'doc["agreementReason"] = bondAgreementReasonKey(agreement);' in status, \
+            'bondstatus json does not take the agreement text from bondAgreementKey'
+        assert 'bond["agreement"] = bondAgreementKey(bondAgreementView());' in utils, \
+            'the system status does not carry the agreement as text'
+        assert key in web and 'bondAgreementReasonKey(' in web and 'bondagree::' not in web, \
+            '/api/bond/status does not take the agreement text from bondAgreementKey'
+        for name, text in (('System_ESPNow.cpp', source), ('System_Utils.cpp', utils), ('WebPage_Bond.cpp', web)):
+            assert not re.search(r'\["agreement"\]\s*=\s*\(', text) and \
+                not re.search(r'agreement\\?":\s*%[du]', text), \
+                f'{name}: the agreement goes into a JSON as a number'
 
     harness = (HERE / 'espnow_bond_partner_change_harness.cpp').read_text()
     for tag, value in (('// INSERT_TYPES', '\n\n'.join(types)),
@@ -250,25 +375,39 @@ def main():
           f'bondconnect handshake kick: {"present" if have_kick else "absent"}; '
           f'bond setting commands: {"held" if have_setting_helper else "generic"}; '
           f'bond end helper: {"present" if have_end else "absent"}; '
-          f'hold counter: {"present" if have_epoch else "absent"}', flush=True)
-    with tempfile.TemporaryDirectory(prefix='hw1-espnow-bond-partner-') as tmp:
-        unit, exe = Path(tmp) / 'espnow_bond_partner_change.cpp', Path(tmp) / 'espnow_bond_partner_change'
+          f'hold counter: {"present" if have_epoch else "absent"}; '
+          f'bond agreement: {"present" if have_agree else "absent"}', flush=True)
+    have = {'HOLD': have_hold, 'ASK': have_ask, 'KICK': have_kick, 'AGREE': have_agree}
+    return harness, have, read
+
+
+def build_and_run(a, harness, have, read, name):
+    """Compiles the assembled harness and runs it; True when every check passed."""
+    with tempfile.TemporaryDirectory(prefix=f'hw1-{name}-') as tmp:
+        unit, exe = Path(tmp) / f'{name}.cpp', Path(tmp) / name
         unit.write_text(harness)
         shutil.copy(a.component / 'System_MacText.h', Path(tmp) / 'System_MacText.h')
+        if have['AGREE']:
+            for header in AGREE_HEADERS:
+                (Path(tmp) / header).write_text(read(header))
         # The pasted commands keep parameters this harness does not use (the
         # firmware builds without -Wextra).
         cmd = [a.cxx, '-std=c++17', '-Wall', '-Wextra', '-Werror', '-pedantic', '-Wno-unused-function',
-               '-Wno-unused-parameter',
-               f'-DHW1_HAVE_HOLD={1 if have_hold else 0}',
-               f'-DHW1_HAVE_ASK={1 if have_ask else 0}',
-               f'-DHW1_HAVE_KICK={1 if have_kick else 0}',
-               '-I', tmp, str(unit), '-o', str(exe)]
+               '-Wno-unused-parameter']
+        cmd += [f'-DHW1_HAVE_{key}={1 if value else 0}' for key, value in have.items()]
+        cmd += ['-I', tmp, str(unit), '-o', str(exe)]
         if a.sanitize:
             cmd[1:1] = ['-fsanitize=address,undefined', '-fno-sanitize-recover=undefined',
                         '-fno-omit-frame-pointer', '-g']
         subprocess.run(cmd, check=True, timeout=240)
         result = subprocess.run([str(exe)], timeout=60)
-    if result.returncode:
+    return result.returncode == 0
+
+
+def main():
+    a = parse_args(__doc__)
+    harness, have, read = assemble(a)
+    if not build_and_run(a, harness, have, read, 'espnow_bond_partner_change'):
         print('FAIL espnow_bond_partner_change: checks reported failures', file=sys.stderr)
         sys.exit(1)
     print('PASS espnow_bond_partner_change')

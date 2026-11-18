@@ -125,10 +125,15 @@ static void displayBondStatus() {
   bool online = gEspNow->bondPeerOnline;
   remoteDrawPeerNameRow(peerName, online);
   
-  // Line 2: Role + sync status
+  // Line 2: Role + sync status. A partner that said it has no bond with this
+  // device is not "Syncing": nothing will come until it is bonded there too.
   const char* role = (isBondMaster()) ? "Master" : "Worker";
   bool synced = isBondSynced();
-  snprintf(buf, sizeof(buf), "%s %s", role, synced ? "Synced" : "Syncing...");
+  const BondAgreementView agreement = bondAgreementView();
+  const char* syncText = synced ? "Synced" : "Syncing...";
+  if (agreement.state == BOND_AGREEMENT_DECLINED) syncText = "No bond there";
+  else if (agreement.roleConflict) syncText = "Same role!";
+  snprintf(buf, sizeof(buf), "%s %s", role, syncText);
   oledDisplay->println(buf);
   
   // Line 3: RSSI + heartbeats

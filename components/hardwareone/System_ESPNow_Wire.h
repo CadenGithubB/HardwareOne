@@ -83,7 +83,9 @@ static_assert(ESPNOW_V4_VERSION == 4,
 //                           POWER_STATUS=152 reserved)
 //   170–189  Bond          (BOND_*, MANIFEST_REQ, SETTINGS_REQ, SCHEMA_REQ, plus
 //                           BOND_STREAM_CTRL/BOND_SENSOR_DATA — moved in from
-//                           streaming/sensors because they were always bond-gated)
+//                           streaming/sensors because they were always bond-gated;
+//                           BOND_REQUEST=183 / BOND_NOTICE=184 are accepted from any
+//                           paired peer over its session, not only the bond partner)
 //   190–199  Unallocated buffer (future whole category, or spill for a full one)
 //   200–255  User-defined  (plugin/experiment space — core NEVER allocates here)
 //
@@ -192,6 +194,8 @@ enum EspNowV4Type : uint8_t {
   ESPNOW_V4_TYPE_BOND_STREAM_CTRL= 178,  // was STREAM_CTRL (51) — always bond-gated, now numbered and named with its policy family
   ESPNOW_V4_TYPE_BOND_SENSOR_DATA= 179,  // was SENSOR_DATA (81) — bond binary sensor streaming
   // 180–182 earmarked BOND_POWER_STATUS / BOND_SETTINGS_SYNC_ACK / BOND_EVENT_PUSH
+  ESPNOW_V4_TYPE_BOND_REQUEST    = 183,  // "you are my bond partner": sent to the configured partner
+  ESPNOW_V4_TYPE_BOND_NOTICE     = 184,  // how the sender's bond stands toward the receiver (BondNoticeReason)
 };
 
 // ---- Flag bits (16-bit in V4; was 8-bit in V3) -----------------------------
@@ -433,6 +437,55 @@ struct __attribute__((packed)) V4PayloadStreamCtrl {
   uint8_t enable;       // 1 = start streaming, 0 = stop streaming
   uint8_t reserved[2];  // Padding
 };
+
+// ---- Bond agreement (BOND_REQUEST / BOND_NOTICE) ------------------------------
+// A bond is a setting on each device; these two frames let the devices tell
+// each other how it stands (System_ESPNow_BondAgreeCore.h has the rules).
+// Neither changes the receiver's bond settings. Both rows are REQ_PAIRED +
+// REQ_SESSION_ENC without REQ_BOND_PEER: the receiver may not have the sender
+// as its partner, which is what the frames are there to say.
+
+// BOND_REQUEST flags.
+enum BondRequestFlags : uint8_t {
+  BOND_REQUEST_FLAG_FRESH = 0x01,  // the bond was just set up or the session just came up
+                                   // (clear on the once-a-minute repeats)
+};
+
+// BOND_REQUEST: "I have you configured as my bond partner."
+struct __attribute__((packed)) V4PayloadBondRequest {
+  uint8_t  role;         // sender's bond role (0 worker, 1 master)
+  uint8_t  flags;        // BondRequestFlags
+  uint16_t seq;          // request number, never 0, counted up from 1 since boot (16 bit, goes
+                         // round). The answering BOND_NOTICE carries it back; the sender's ENDED
+                         // names the last one it gave out
+  uint8_t  reserved[4];  // 0
+};
+static_assert(sizeof(V4PayloadBondRequest) == 8, "V4PayloadBondRequest is 8 bytes on the wire");
+
+// BOND_NOTICE reasons. A receiver ignores a value it does not know, so new
+// ones can be added; never reuse a number.
+enum BondNoticeReason : uint8_t {
+  BOND_NOTICE_ACCEPTED         = 1,  // you are my bond partner too
+  BOND_NOTICE_NOT_BONDED       = 2,  // bond mode is off here, or no partner is set
+  BOND_NOTICE_BONDED_ELSEWHERE = 3,  // my partner is another device (which one is not said)
+  BOND_NOTICE_ENDED            = 4,  // I just ended our bond (disconnect, partner change, bond mode off, unpair)
+  BOND_NOTICE_ROLE_CONFLICT    = 5,  // you are my partner too, but we both have the same role
+};
+
+// BOND_NOTICE: how the sender's bond stands toward the receiver.
+struct __attribute__((packed)) V4PayloadBondNotice {
+  uint8_t  reason;       // BondNoticeReason
+  uint8_t  role;         // sender's bond role (0 worker, 1 master) with ACCEPTED, ROLE_CONFLICT
+                         // and ENDED; 0 with NOT_BONDED and BONDED_ELSEWHERE, which go to
+                         // peers that are not the partner and must not hint at who is
+  uint16_t seq;          // the receiver's BOND_REQUEST this answers; 0 when nobody asked.
+                         // With ENDED, which is never an answer: the sender's own last
+                         // BOND_REQUEST number (0: it sent none). Its requests up to that
+                         // number were made before it ended the bond; the receiver ignores
+                         // one that arrives after the ENDED
+  uint8_t  reserved[4];  // 0
+};
+static_assert(sizeof(V4PayloadBondNotice) == 8, "V4PayloadBondNotice is 8 bytes on the wire");
 #endif // ENABLE_BONDED_MODE
 
 // Sensor status payload for mesh broadcast

@@ -70,7 +70,7 @@ With `ENABLE_BONDED_MODE=1`, two devices can bond into a paired set. One acts as
 3. Bring ESP-NOW up on both devices (`openespnow`) and give them the same mesh: `espnowsetpassphrase <mesh> <passphrase>`, using an identical mesh name and passphrase on each. Bonding runs over ESP-NOW, so this comes first.
 4. Pair them. Run `espnowpairmode` on both to open the discovery window, `espnowdiscovered` to see the other device, then `espnowpairrequest <mac_or_name>` on one and `espnowaccept` on the other. `espnowlist` should now show the peer on both sides.
 5. Run `bondconnect <mac_or_name>` on **both** devices. You do not choose the roles: they are assigned deterministically by comparing the two MAC addresses, and the higher MAC becomes the master. `bondstatus` reports which side you ended up on.
-6. `bondconnect` returns immediately - it only enables bond mode. The bond establishes once each device sees the other's heartbeat and the capability, manifest and settings exchange completes. Watch `bondstatus` until the peer reads `ONLINE` and sync reads `SYNCED`; the **Remote** tab is live at that point. If it stalls, `bondresync` re-runs the exchange.
+6. `bondconnect` returns immediately - it only enables bond mode. The device asks the other one to confirm the bond; until `bondconnect` has been run there too, the other device prints `<name> wants to bond with this device` and `bondstatus` here reads `Agreement: <name> has bond mode off`. The bond establishes once each device sees the other's heartbeat and the capability, manifest and settings exchange completes. Watch `bondstatus` until the peer reads `ONLINE` and sync reads `SYNCED`; the **Remote** tab is live at that point. If it stalls, `bondresync` re-runs the exchange.
 
 ---
 

@@ -14,7 +14,7 @@ keeps. Readiness item P0-7; keep this file in step with CHANGELOG `[Unreleased]`
 | Even R1 ring | advertised name `EVEN R1_XXXXXX` (six hex digits) | `classifyRingName` in `G2_Glasses.cpp`, mirrored in `G2_Ring.cpp` | Any other name is ignored by the ring scan. |
 | Arduino core | arduino-esp32 **3.3.5** (`11bc7ac1a`) plus the patches in `docs/arduino-local-patches/` | `tools/vendor_arduino.sh --check`, run by every build script | Not a runtime peer, but the build breaks silently without it (see `docs/arduino-local-patches/README.md`). |
 | ESP-IDF | **5.5.5** | `tools/p4/prepare_sdk.sh` (P4) and the build scripts | One IDF for every board. |
-| Other HardwareOne devices (ESP-NOW mesh) | **ESPNOW V1 (1.0)**: HardwareOne's mesh format within Espressif ESP-NOW v1's 250-byte frames (frame version byte 4) | every received frame's magic and version byte | Mesh devices must run releases with the same format; there is no negotiation. |
+| Other HardwareOne devices (ESP-NOW mesh) | **ESPNOW V1 (1.0)**: HardwareOne's mesh format within Espressif ESP-NOW v1's 250-byte frames (frame version byte 4) | every received frame's magic and version byte | Mesh devices must run releases with the same format; there is no negotiation. A message type added within the format (the bond agreement frames) is ignored by firmware from before it, and a bond with such a partner behaves as it did. |
 
 `versions` on the device lists these, as this image carries them, in one place: the firmware, the
 recovery updater and OTA layout, the ESP-NOW format and stack, the BLE console channel, the phone

@@ -234,6 +234,9 @@ static bool espnowSessionOpenInitiate(const uint8_t*, const char*) { return true
 // Bond partner change hold and the handshake back-off (both tested by their
 // own suites): no change under way, and hearing a peer has no effect here.
 [[maybe_unused]] static bool bondPartnerChanging() { return false; }
+// The bond agreement's hook in the drop path (test_espnow_bond_agreement.py and
+// test_espnow_dispatch_policy.py cover it).
+[[maybe_unused]] static void bondAgreementNoteIgnoredFrame(const uint8_t*, bool) {}
 [[maybe_unused]] static void espnowHandshakeHeard(const uint8_t*) {}
 static bool gBackupPromoted = false;
 static uint32_t gLastMasterHeartbeat = 0;

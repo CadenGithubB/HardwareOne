@@ -25,7 +25,20 @@
 // status steps 9j, 9j2 and 9k; runDeferredBondFileSend runs the jobs the tick
 // queued (gCmdExecQ) with sender doubles; gTickWait runs a command where a
 // step of the tick waits.
+//
+// When the source has the bond agreement (BOND_REQUEST / BOND_NOTICE,
+// HW1_HAVE_AGREE), System_ESPNow_BondAgreeCore.h is included as is and the
+// runner also pastes the wire payloads and reason codes, the agreement glue
+// with its two handlers, v4h_bond_heartbeat and bondNotifySessionEstablished.
+// The doubles record every request and notice sent (gAgreeFrames), every
+// event-log line (gEventLines) and every auth-log record (gAuthLines). The
+// agreement's lock is modelled too: espnow_task does not run while cmd_exec
+// holds it, and does run during the auth-log write, before an event is posted
+// and while a command's own send is on the radio. Everything above the "Cases"
+// line is also the base of test_espnow_bond_agreement.py, which appends its
+// own cases.
 #include <atomic>
+#include <cstdarg>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -36,6 +49,9 @@
 #include <vector>
 
 #include "System_MacText.h"
+#if HW1_HAVE_AGREE
+#include "System_ESPNow_BondAgreeCore.h"
+#endif
 
 static int gFailures = 0;
 static int gChecks = 0;
@@ -51,6 +67,7 @@ static int gChecks = 0;
   } while (0)
 
 #define ENABLE_BONDED_MODE 1
+#define ENABLE_HTTP_SERVER 1   // the auth-log record in bondNotifySessionEstablished
 #define RETURN_VALID_IF_VALIDATE_CSTR() do {} while (0)
 template <class... A> static void sink(A&&...) {}
 static void preempt();
@@ -84,15 +101,21 @@ struct Settings {
   bool bondModeEnabled = false;
   uint8_t bondRole = 0;
   String bondPeerMac;
+  String espnowDeviceName{"this-device"};
 };
 static Settings gSettings;
 
 // What espnow_task does when it gets the CPU in the middle of a command. What
-// it runs (the handlers) does not preempt itself.
+// it runs (the handlers) does not preempt itself, and it does not get in
+// while the command holds a spinlock (gLockDepth: portENTER_CRITICAL).
 static std::function<void()> gPreempt;
 static bool gInPreempt = false;
+static int gLockDepth = 0;
+static int gPreemptPoints = 0;    // points passed since a case last set this to 0
 static void preempt() {
-  if (!gPreempt || gInPreempt) return;
+  if (gInPreempt || gLockDepth > 0) return;
+  ++gPreemptPoints;
+  if (!gPreempt) return;
   gInPreempt = true;
   gPreempt();
   gInPreempt = false;
@@ -181,6 +204,12 @@ struct EspNowState {
   bool bondPeerOnline = false;
   uint32_t lastBondHeartbeatReceivedMs = 0;
   uint8_t bondPendingResponseMac[6] = {};
+  // v4h_bond_heartbeat
+  uint32_t bondPeerSettingsHash = 0;
+  uint32_t bondPeerUptime = 0;
+  int8_t bondRssiLast = -100;
+  int8_t bondRssiAvg = -100;
+  uint32_t bondLastRssiUpdateMs = 0;
 };
 static EspNowState gState;
 // Every use of gEspNow in a command is a point where espnow_task may run.
@@ -195,12 +224,14 @@ static constexpr uint8_t BOND_ROLE_MASTER = 1;
 inline bool isBondMaster() { return gSettings.bondRole == BOND_ROLE_MASTER; }
 inline bool isBondWorker() { return gSettings.bondRole == BOND_ROLE_WORKER; }
 
-struct esp_now_recv_info { const uint8_t* src_addr; };
+struct RxCtrl { int8_t rssi; };
+struct esp_now_recv_info { const uint8_t* src_addr; const RxCtrl* rx_ctrl = nullptr; };
 struct V4RxCtx {
   const esp_now_recv_info* recv_info;
   const uint8_t* payload;
   uint16_t payloadLen;
   const char* deviceName;
+  bool isPaired = true;
 };
 
 // ---- Platform doubles ----------------------------------------------------------
@@ -228,9 +259,11 @@ static bool bondPartnerChanging() { return false; }
 #endif
 static constexpr uint8_t SYSEVT_BOND_OFFLINE = 1;
 static constexpr uint8_t SYSEVT_PEER_UNPAIRED = 2;
+[[maybe_unused]] static constexpr uint8_t SYSEVT_BOND_ONLINE = 3;   // bondNotifySessionEstablished, v4h_bond_heartbeat
 struct PostedEvent { uint8_t type; std::string who; std::string detail; bool held; };
 static std::vector<PostedEvent> gPosted;
 static void systemEventPost(uint8_t type, const char* who = nullptr, const char* detail = nullptr) {
+  preempt();   // the state the event reports is set; the event is not posted yet
   gPosted.push_back({type, who ? who : "", detail ? detail : "", bondPartnerChanging()});
 }
 static uint32_t gNextMsgId = 100;
@@ -282,6 +315,8 @@ static constexpr uint8_t ESPNOW_V4_TYPE_BOND_CAP_RESP = 3;
 static constexpr uint8_t ESPNOW_V4_TYPE_MANIFEST_REQ = 4;
 static constexpr uint8_t ESPNOW_V4_TYPE_BOND_STATUS_REQ = 6;
 static constexpr uint8_t ESPNOW_V4_TYPE_BOND_STATUS_RESP = 7;
+static constexpr uint8_t ESPNOW_V4_TYPE_BOND_REQUEST = 8;
+static constexpr uint8_t ESPNOW_V4_TYPE_BOND_NOTICE = 9;
 static constexpr uint8_t kSentSettingsReq = 5;      // requestBondSettings
 static constexpr uint8_t kSentFileBase = 100;       // submitBondFileSend + kind
 static constexpr uint8_t kSentStreamCtrl = 200;     // sendBondStreamCtrl
@@ -297,12 +332,73 @@ static void noteFrame(const uint8_t* mac, uint8_t type) {
   f.held = bondPartnerChanging();
   gFrames.push_back(f);
 }
+// Every BOND_REQUEST and BOND_NOTICE the device sends, with what it says
+// (request: role, flags; notice: reason, role). `direct` marks the one sent
+// from the command itself (v4_send_session_wrapped) instead of the send queue.
+struct AgreeFrame { uint8_t mac[6]; uint8_t type; uint8_t b0; uint8_t b1; uint16_t seq; bool held; bool direct; };
+static std::vector<AgreeFrame> gAgreeFrames;
+static void noteAgreeFrame(const uint8_t* mac, uint8_t type, const uint8_t* payload, uint16_t len, bool direct) {
+  if (type != ESPNOW_V4_TYPE_BOND_REQUEST && type != ESPNOW_V4_TYPE_BOND_NOTICE) return;
+  AgreeFrame f{};
+  std::memcpy(f.mac, mac, 6);
+  f.type = type;
+  if (payload && len >= 4) {
+    f.b0 = payload[0];
+    f.b1 = payload[1];
+    std::memcpy(&f.seq, payload + 2, 2);
+  }
+  f.held = bondPartnerChanging();
+  f.direct = direct;
+  gAgreeFrames.push_back(f);
+}
+static bool gTxQueueFull = false;   // the send queue refuses the job
 [[maybe_unused]] static bool bondSendEncryptedAsync(const uint8_t* mac, uint8_t type, uint16_t, uint32_t,
-                                                    const uint8_t*, uint16_t) {
+                                                    const uint8_t* payload, uint16_t len) {
+  if (gTxQueueFull) return false;
   noteFrame(mac, type);
+  noteAgreeFrame(mac, type, payload, len, false);
   gSentTypes.push_back(type);
   if (type == ESPNOW_V4_TYPE_BOND_CAP_REQ) masterOnWorkerCapReq();
   return true;
+}
+// The send a command makes itself: it goes out now over an ACTIVE session or
+// not at all (no queue, no handshake). Recorded among the steps of a command
+// (gSteps), with whether bond mode still named a partner then.
+static void step(const char* name);
+[[maybe_unused]] static bool v4_send_session_wrapped(const uint8_t dst[6], uint8_t type, uint16_t, uint32_t,
+                                                     const uint8_t* payload, uint16_t len, uint8_t,
+                                                     char* err, size_t errLen) {
+  if (!bondSessionActiveWith(dst)) {
+    if (err && errLen) std::snprintf(err, errLen, "no active session");
+    return false;
+  }
+  noteFrame(dst, type);
+  noteAgreeFrame(dst, type, payload, len, true);
+  step("directSend");
+  preempt();   // the send waits for the radio; the command has not gone on yet
+  return true;
+}
+
+// ---- Doubles for the bond agreement glue ---------------------------------------
+struct portMUX_TYPE { int unused; };
+#define portMUX_INITIALIZER_UNLOCKED {0}
+#define portENTER_CRITICAL(lock) ((void)(lock), ++gLockDepth)
+#define portEXIT_CRITICAL(lock) ((void)(lock), --gLockDepth)
+[[maybe_unused]] static bool isBondSessionTokenValid() { return gSessionUp; }
+// Sends whose acknowledgement is watched (an unanswered run drops the session).
+static std::vector<uint32_t> gWatchedSends;
+[[maybe_unused]] static void sendStatusRegister(uint32_t msgId, const uint8_t*) { gWatchedSends.push_back(msgId); }
+[[maybe_unused]] static void v4_dedup_flush_origin(const uint8_t*) {}
+// The auth log: the reason text of every record (bondNotifySessionEstablished
+// writes one per bond session).
+static std::vector<std::string> gAuthLines;
+static bool gInAuthWrite = false;
+[[maybe_unused]] static void logAuthAttempt(bool, const char*, const String&, const String&, const char* reason) {
+  // A blocking file append: espnow_task runs meanwhile.
+  gInAuthWrite = true;
+  preempt();
+  gInAuthWrite = false;
+  gAuthLines.push_back(reason ? reason : "");
 }
 
 static void resetBondSync();   // declared ahead of its users, as in the source
@@ -383,7 +479,16 @@ struct EspClass { uint32_t getFreeHeap() const { return 100000; } };
 struct wifi_ap_record_t { int8_t rssi; };
 static constexpr int ESP_OK = 0;
 [[maybe_unused]] static int esp_wifi_sta_get_ap_info(wifi_ap_record_t* ap) { ap->rssi = -50; return ESP_OK; }
-[[maybe_unused]] static void logSystemEvent(const char*, const char*, ...) {}
+// The event log: every line, as "CATEGORY: text".
+static std::vector<std::string> gEventLines;
+[[maybe_unused]] static void logSystemEvent(const char* category, const char* fmt, ...) {
+  char text[256];
+  va_list args;
+  va_start(args, fmt);
+  std::vsnprintf(text, sizeof text, fmt, args);
+  va_end(args);
+  gEventLines.push_back(std::string(category ? category : "") + ": " + text);
+}
 struct PeerIdentity { uint8_t meshId; };
 static PeerIdentity gAnyIdentity{0};
 [[maybe_unused]] static const PeerIdentity* peerIdentityFindByMac(const uint8_t*) { return &gAnyIdentity; }
@@ -592,9 +697,20 @@ static void resetWorld(const uint8_t self[6]) {
   for (auto* w : gCmdExecQ) std::free(w);
   gCmdExecQ.clear();
   gFileSends.clear();
+  gAgreeFrames.clear();
+  gEventLines.clear();
+  gWatchedSends.clear();
+  gAuthLines.clear();
+  gTxQueueFull = false;
   gLastBondHeartbeatSentMs = 0;
   gBackoffClears = gAutoStarts = gManualStarts = 0;
   std::memcpy(gSelfMac, self, 6);
+#if HW1_HAVE_AGREE
+  gBondAgree = bondagree::State();
+  gBondOnlinePostPending = gBondOfflinePostOwed = false;
+#endif
+  gLockDepth = 0;
+  gPreemptPoints = 0;
 }
 
 static const uint8_t kWorkerSelf[6] = {0x02, 0x11, 0x22, 0x33, 0x44, 0x00};   // lower: worker, responder
@@ -1212,6 +1328,117 @@ static void caseQueuedBondFileAfterUnpair() {
         fileSendsTo(kPartnerA));
 }
 
+#if HW1_HAVE_AGREE
+// ---- The partner a command drops is told (BOND_NOTICE ENDED) ---------------------
+static size_t endedTo(const uint8_t* mac) {
+  size_t n = 0;
+  for (const auto& f : gAgreeFrames) {
+    n += f.type == ESPNOW_V4_TYPE_BOND_NOTICE && f.b0 == BOND_NOTICE_ENDED && macEquals(f.mac, mac);
+  }
+  return n;
+}
+static void bondedMasterOfA() {
+  resetWorld(kMasterSelf);
+  gSettings.bondModeEnabled = true;
+  gSettings.bondRole = BOND_ROLE_MASTER;
+  gSettings.bondPeerMac = "02:11:22:33:44:01";
+  gMaster.mac = kPartnerC;
+  gEspNow->bondPeerOnline = true;
+  gEspNow->lastBondHeartbeatReceivedMs = gNowMs;
+  gLastBondHeartbeatSentMs = gNowMs;
+}
+// One ENDED to `mac`: sent by the command itself (not left in the send queue,
+// where it would go out after an unpair removed the session), before the frame
+// hold, while bond mode still named the partner. It carries the number of the
+// last request this device made (0: none), and no request follows it: one
+// made before it may still be in the send queue, and the partner takes the
+// requests up to that number as void.
+static void checkEndedOnce(const uint8_t* mac, const char* what) {
+  const AgreeFrame* ended = nullptr;
+  uint16_t lastRequest = 0;
+  size_t requestsAfter = 0;
+  for (const auto& f : gAgreeFrames) {
+    if (f.type == ESPNOW_V4_TYPE_BOND_NOTICE && macEquals(f.mac, mac)) ended = &f;
+    if (f.type == ESPNOW_V4_TYPE_BOND_REQUEST && macEquals(f.mac, mac)) {
+      if (ended) ++requestsAfter; else lastRequest = f.seq;
+    }
+  }
+  CHECK(endedTo(mac) == 1 && ended && ended->direct && !ended->held,
+        "%s: the dropped partner was told ENDED %zu times (want once, by the command, before the hold)",
+        what, endedTo(mac));
+  CHECK(ended && ended->seq == lastRequest && requestsAfter == 0,
+        "%s: ENDED names request %u, the last one made was %u, and %zu requests followed it (want none)",
+        what, ended ? (unsigned)ended->seq : 0u, (unsigned)lastRequest, requestsAfter);
+  CHECK(stepSawBond("directSend"), "%s: ENDED went out after the bond setting was already changed", what);
+  size_t held = 0;
+  for (const auto& f : gAgreeFrames) held += f.held;
+  CHECK(held == 0, "%s: %zu requests or notices went out while bond frames were held", what, held);
+}
+
+static void caseEndedNotice() {
+  bondedMasterOfA();
+  preemptWithTicks(10);
+  cmd_bond_disconnect(String(""));
+  gPreempt = nullptr;
+  checkEndedOnce(kPartnerA, "bonddisconnect");
+
+  bondedMasterOfA();
+  preemptWithTicks(10);
+  cmd_bond_connect(String("02:11:22:33:44:02"));
+  gPreempt = nullptr;
+  checkEndedOnce(kPartnerA, "bondconnect to another device");
+  CHECK(endedTo(kPartnerB) == 0, "the new partner was told ENDED");
+
+  bondedMasterOfA();
+  cmd_bond_connect(String("02:11:22:33:44:01"));
+  CHECK(gAgreeFrames.empty(), "bondconnect to the partner it already has told it ENDED");
+
+  bondedMasterOfA();
+  preemptWithTicks(10);
+  cmd_espnow_bondmodeenabled(String("0"));
+  gPreempt = nullptr;
+  checkEndedOnce(kPartnerA, "espnowbondmodeenabled 0");
+
+  bondedMasterOfA();
+  preemptWithTicks(10);
+  cmd_espnow_bondpeermac(String("02:11:22:33:44:02"));
+  gPreempt = nullptr;
+  checkEndedOnce(kPartnerA, "espnowbondpeermac to another device");
+
+  // The same partner written another way is not a new partner.
+  bondedMasterOfA();
+  gSettings.bondPeerMac = "02:11:22:33:44:0A";
+  cmd_espnow_bondpeermac(String("02-11-22-33-44-0a"));
+  CHECK(endedTo(kPartnerA) == 0 && gAgreeFrames.empty(), "the same partner in another spelling was told ENDED");
+
+  // Unpair: the notice goes out before the peer, its session and its identity go.
+  bondedMasterOfA();
+  cmd_espnow_unpair(String("02:11:22:33:44:01"));
+  checkEndedOnce(kPartnerA, "espnowunpair of the partner");
+  CHECK(stepAt("directSend") < stepAt("deleteRuntime") && stepAt("directSend") < stepAt("forgetCrypto"),
+        "espnowunpair: ENDED was sent after the peer or its session was removed");
+  bondedMasterOfA();
+  cmd_espnow_unpair(String("02:11:22:33:44:03"));
+  CHECK(gAgreeFrames.empty(), "unpairing another device told someone ENDED");
+
+  // Bond mode off (a partner is set but is not a partner): nobody to tell.
+  resetWorld(kMasterSelf);
+  gSettings.bondPeerMac = "02:11:22:33:44:01";
+  cmd_bond_connect(String("02:11:22:33:44:02"));
+  cmd_espnow_unpair(String("02:11:22:33:44:01"));
+  CHECK(endedTo(kPartnerA) == 0, "a partner set while bond mode was off was told ENDED");
+
+  // No session with the partner: nothing is sent, nothing waits, and no
+  // handshake is started for it.
+  bondedMasterOfA();
+  gSessionDownFor = kPartnerA;
+  cmd_bond_disconnect(String(""));
+  CHECK(gAgreeFrames.empty() && gAutoStarts == 0 && gManualStarts == 0 && !gSettings.bondModeEnabled,
+        "bonddisconnect without a session: %zu frames, %d handshake starts (want none)", gAgreeFrames.size(),
+        gAutoStarts + gManualStarts);
+}
+#endif
+
 int main() {
   caseBenchOrder();
   caseSwitchPartner();
@@ -1231,6 +1458,9 @@ int main() {
   caseSwitchHoldsAnswersAndStatus();
   caseTickWaitsThroughSwitch();
   caseQueuedBondFileAfterUnpair();
+#if HW1_HAVE_AGREE
+  caseEndedNotice();
+#endif
   std::printf("espnow_bond_partner_change: %d checks, %d failed (%d frames accepted, %d dropped)\n",
               gChecks, gFailures, gAccepted, gDropped);
   return gFailures ? 1 : 0;

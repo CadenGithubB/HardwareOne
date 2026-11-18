@@ -1544,6 +1544,31 @@ bool sendBondedSensorData(uint8_t sensorType, const uint8_t* data, uint16_t data
 bool isBondModeOnline();
 // Check if bond mode is active, peer is online, AND fully synced (cap + manifest + settings)
 bool isBondSynced();
+
+// What the bond partner said about its side of the bond (BOND_REQUEST /
+// BOND_NOTICE, System_ESPNow_BondAgreeCore.h). The bond settings on this device
+// are not part of it: a partner that declined is still the configured partner.
+enum BondAgreementState : uint8_t {
+  BOND_AGREEMENT_UNKNOWN  = 0,  // no answer yet (or a partner whose firmware does not answer)
+  BOND_AGREEMENT_AGREED   = 1,  // the partner has this device as its partner
+  BOND_AGREEMENT_DECLINED = 2,  // the partner has no bond with this device; `reason` says why
+};
+struct BondAgreementView {
+  uint8_t state;        // BondAgreementState
+  uint8_t reason;       // BondNoticeReason while declined, else 0
+  bool    roleConflict; // agreed, but both devices have the same role
+};
+// Any task. All zero when bond mode is off or no partner is set.
+BondAgreementView bondAgreementView();
+// The agreement as every JSON carries it (bondstatus json, /api/bond/status,
+// the system status): "unknown", "agreed" or "declined", and why:
+// "not_bonded", "bonded_elsewhere" or "ended" while declined, "role_conflict"
+// while agreed with both devices in the same role, otherwise "".
+const char* bondAgreementKey(const BondAgreementView& view);
+const char* bondAgreementReasonKey(const BondAgreementView& view);
+// One line for a status page: the agreement in words, with the partner's name
+// ("no partner is set" without a bond).
+void bondAgreementDescribe(char* out, size_t outLen);
 #else
 // Stubs when bond mode is compiled out
 inline bool sendBondedSensorData(uint8_t, const uint8_t*, uint16_t) { return false; }

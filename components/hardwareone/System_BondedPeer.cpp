@@ -49,7 +49,12 @@ bool resolvePeerMac(uint8_t out[6]) {
 bool requireMasterOnlinePeer(uint8_t out[6]) {
   if (!resolvePeerMac(out)) return false;
   if (!isBondMaster()) return fail("Only master can pull from peer");
-  if (!gEspNow->bondPeerOnline) return fail("Peer offline");
+  if (!gEspNow->bondPeerOnline) {
+    // A partner that answered "no bond with you" is not merely out of range.
+    return fail(bondAgreementView().state == BOND_AGREEMENT_DECLINED
+                    ? "Peer has no bond with this device"
+                    : "Peer offline");
+  }
   return true;
 }
 } // namespace

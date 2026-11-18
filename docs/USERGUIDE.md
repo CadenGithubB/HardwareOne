@@ -634,6 +634,25 @@ capped at ~130 characters per piece.
 ### Bonding (Master/Worker)
 With `ENABLE_BONDED_MODE=1`, two devices can bond into a master/worker pair. The master gains a **Remote** tab in its web UI showing the worker's features, even if those features aren't compiled into the master.
 
+A bond is a setting on each device, so `bondconnect <mac_or_name>` is run on **both**. The two devices then tell each other how the bond stands, and `bondstatus` shows it on the `Agreement:` line:
+
+| Agreement | Meaning | What the device does |
+|-----------|---------|----------------------|
+| *is bonded to this device too* | the partner has this device as its partner | the bond runs: heartbeat, sync, Remote tab |
+| *no answer yet* | the partner has not answered (out of range, or firmware from before the agreement) | as before the agreement existed: it keeps trying, and a partner that sends bond heartbeats counts as agreed |
+| *has bond mode off* / *is bonded to another device* / *ended the bond* | the partner answered that it has no bond with this device | keeps its own bond setting, shows the partner as `NOT BONDED TO THIS DEVICE`, sends no heartbeat and asks again once a minute |
+| *... but both are master/worker* | both ends have the same role | the bond runs as it is; run `bondrole` on one device |
+
+What you see when something changes (console and event log, tagged `[EVENT][BOND]`):
+
+- on the device that was asked: `<name> wants to bond with this device; run 'bondconnect <name>' here to accept`. Nothing is bonded until you run it; a request never changes the bond settings of the device that receives it.
+- on the device that asked: `<name> accepted the bond`, or `<name> has bond mode off` / `is bonded to another device` with the command to run on the other device.
+- when the partner runs `bonddisconnect`, bonds to another device, turns bond mode off or unpairs this device: `<name> ended the bond`. This device still names it as partner and asks it again every minute, so the bond returns by itself if the partner runs `bondconnect` again; `bonddisconnect` here ends it on this side too.
+
+Running `bondconnect <mac_or_name>` again for the partner already set does not change anything on this device. While the partner has not agreed it asks the partner again at once (at most every 5 s) instead of at the next minute, and the reply says what the partner last answered; once the partner has agreed the reply is `Already connected to this device in bond mode.`
+
+A device never says which other device it is bonded to. The web Remote page and the OLED bond screen show the same state (`Bond Not Confirmed`, `No bond there`).
+
 ### Metadata Sync
 Each device has a name, room, zone, and tags set in settings. The **Metadata** tab lets you pull this information from any peer. Set your own device metadata with (note: single words, no space after `espnow`):
 ```
@@ -698,7 +717,7 @@ setting, regardless of which setting it was.
 | `peer_paired` | a peer is saved as paired (`espnowpair`, `espnowpairsecure`, or an accepted `espnowpairrequest`); pairing mode only discovers, it no longer auto-pairs | peer name / MAC |
 | `text_rx` | ESP-NOW text message received | sender / text preview |
 | `file_rx` | ESP-NOW file received | sender / filename |
-| `bond_online` / `bond_offline` | bonded peer session up / heartbeat timeout | peer name / MAC |
+| `bond_online` / `bond_offline` | bonded peer session up / heartbeat timeout, or the peer answered that it has no bond with this device | peer name / MAC |
 | `bond_reject` | unpaired device probed the bond channel (30s cooldown) | MAC / count |
 | `espnow_on` / `espnow_off` | ESP-NOW radio started / stopped | - |
 | `pair_window_open` / `pair_window_closed` | pairing mode opened / closed | seconds / - |

@@ -33,7 +33,7 @@ HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_PEER_PAIRED,         "peer_paired", SYSEVT_FAM
 HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_TEXT_RX,             "text_rx", SYSEVT_FAM_MESH)              /* ESP-NOW text message received    subject=sender detail=text */
 HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_FILE_RX,             "file_rx", SYSEVT_FAM_MESH)              /* ESP-NOW file received            subject=sender detail=filename */
 HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_BOND_ONLINE,         "bond_online", SYSEVT_FAM_MESH)          /* bond peer session/heartbeat up   subject=name  detail=mac */
-HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_BOND_OFFLINE,        "bond_offline", SYSEVT_FAM_MESH)         /* bond peer heartbeat timed out    subject=name  detail=mac */
+HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_BOND_OFFLINE,        "bond_offline", SYSEVT_FAM_MESH)         /* bond peer heartbeat timed out, or it said it has no bond with us  subject=name  detail=mac */
 HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_BOND_REJECT,         "bond_reject", SYSEVT_FAM_MESH)          /* unpaired sender probed bond channel  subject=mac detail=count (30s cooldown) */
 HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_ESPNOW_ON,           "espnow_on", SYSEVT_FAM_MESH)            /* ESP-NOW initialized */
 HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_ESPNOW_OFF,          "espnow_off", SYSEVT_FAM_MESH)           /* ESP-NOW deinitialized */
