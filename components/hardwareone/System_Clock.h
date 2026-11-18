@@ -133,10 +133,11 @@ size_t formatHHMMLocal(time_t t, char* out, size_t outSize);
 
 // ----- Clock-step chokepoint ----------------------------------------------
 //
-// Six things can set this system's clock: NTP, the DS3231 RTC, `timeset`,
+// Seven things can set this system's clock: NTP, the DS3231 RTC, `timeset`,
 // the R1 ring (dark-boot adoption), the CM5 carrier's battery-backed RTC
-// (SYNC_CM5, pushed over the UART host link), and lwIP's background SNTP
-// daemon. Each
+// (SYNC_CM5, pushed over the UART host link), the ESP-NOW mesh master
+// (SYNC_MESH, taken only by a device with no better source of its own;
+// System_ESPNow_TimeCore.h), and lwIP's background SNTP daemon. Each
 // step owes the same follow-up chores — post the TIME_SYNCED event on the
 // first valid clock, write/refresh the boot anchor, resolve pending user
 // timestamps, wake the automation scheduler, push the time into the RTC,
@@ -149,12 +150,28 @@ size_t formatHHMMLocal(time_t t, char* out, size_t outSize);
 // are pended and drained by clockDutiesTick() on the main loop (or
 // clockDutiesFlush() synchronously from big-stack contexts).
 
-enum SyncSource : uint8_t { SYNC_NONE = 0, SYNC_RTC, SYNC_NTP, SYNC_MANUAL, SYNC_RING, SYNC_CM5 };
+enum SyncSource : uint8_t { SYNC_NONE = 0, SYNC_RTC, SYNC_NTP, SYNC_MANUAL, SYNC_RING, SYNC_CM5, SYNC_MESH };
 
 // Last source that stepped the clock THIS boot. SYNC_NONE with isSynced()
 // true means the time was carried across a soft reboot in the RTC domain.
 SyncSource syncSource();
-const char* syncSourceName(SyncSource s);  // "none|rtc|ntp|manual|ring|cm5"
+const char* syncSourceName(SyncSource s);  // "none|rtc|ntp|manual|ring|cm5|mesh"
+
+// True for a source whose time may be written into the RTC chip. Not the
+// chip itself, not mesh time (after the next boot it would read back as
+// "rtc": the device would stop following the mesh for good, and as a master
+// pass the time on as a source of its own), and not a clock carried over a
+// soft restart (SYNC_NONE while set: it may have come from the mesh).
+constexpr bool sourceWritesRtc(SyncSource s) { return s != SYNC_NONE && s != SYNC_RTC && s != SYNC_MESH; }
+
+// Counts the clock steps of this boot (every clockStepped call). A reader
+// that decided something from the clock's state compares it before acting:
+// a changed number means another source set the clock meanwhile.
+uint32_t stepSerial();
+
+// The last step of this boot: which source, and how many seconds ago.
+// False when nothing has set the clock this boot.
+bool lastStep(SyncSource* src, uint32_t* agoSeconds);
 
 // Call immediately AFTER a successful settimeofday(), passing the pre-step
 // epoch. Inline-cheap; safe from any normal task. NOT for lwIP/BLE

@@ -119,7 +119,7 @@ static std::vector<std::string> hints;
 static void cliHint(const char* text) { hints.emplace_back(text); }
 struct String {};  // Command handlers only pass it through.
 #define RETURN_VALID_IF_VALIDATE_CSTR() do {} while (0)
-[[maybe_unused]] static void broadcastSensorStatus(int sensor, bool online) { meshStatuses.emplace_back(sensor, online); }
+[[maybe_unused]] static void sensorPresenceChanged(int sensor, bool online) { meshStatuses.emplace_back(sensor, online); }
 static void systemEventPost(int event, const char* name) { events.emplace_back(event, name); }
 static std::string format(const char* fmt, va_list args) {
   char buffer[1024]; const int n = std::vsnprintf(buffer, sizeof(buffer), fmt, args);

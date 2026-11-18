@@ -804,6 +804,12 @@ struct Settings {
                                        // paths, it just won't carry anyone else's frames — the
                                        // knob for a battery-tight or deliberately edge node.
   uint8_t meshPeerMax;                 // Max mesh peer slots (1-16, default: 8, changes on reboot)
+  bool meshTime;                       // Mesh time (default true): the master sends its clock; a device
+                                       // with no better source of its own takes it
+  uint16_t powerStatusInterval;        // Seconds between the battery frames sent to the mesh master
+                                       // (default 60; 0 = none, else 10-3600)
+  uint8_t eventPush;                   // Which system events go to the mesh master: 0 off, 1 alert
+                                       // (default), 2 standard, 3 verbose
   uint16_t sensorBroadcastIntervalMs;  // Sensor broadcast interval in ms (100-10000, default: 1000)
   // Secure sensor fetcher (worker role) — docs/ESPNOW_SENSOR_FETCHER_DESIGN.md
   bool   espnowAcceptSensorControl;       // opt-in: honor SENSOR_REQ from master/backup (default false)

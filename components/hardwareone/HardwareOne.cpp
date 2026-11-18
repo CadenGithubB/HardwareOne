@@ -74,6 +74,7 @@ void getClientIp(httpd_req_t* req, char* ipBuf, size_t bufSize);
 #include "System_SelfDevice.h"
 #include "System_Clock.h"
 #include "System_NTP.h"
+#include "System_ESPNow_MeshTime.h"  // espnowMeshTimeApplyTick (a no-op without ESP-NOW)
 #include "network/wifi/System_WiFiNetworks.h"
 #include "System_CLI.h"
 #include "System_Cm5Presence.h"
@@ -2574,6 +2575,7 @@ void hardwareone_loop() {
   cm5TimeSyncTick();    // CM5 carrier RTC: adopt when dark / correct after sync (authoritative)
   g2Tick();             // glasses: overlay auto-dismiss + adaptive clock/tz re-push (self-throttled)
   ntpSyncDrainTick();   // hand real SNTP replies to the clock-step chokepoint
+  espnowMeshTimeApplyTick(); // mesh time: after the SNTP report, so a fresh NTP reply is the better source
   Clock::clockDutiesTick(); // drain filesystem-touching clock-step chores
 #if ENABLE_LOCAL_STT
   sttWarmTick();        // free a kept-warm STT model once idle or PSRAM runs short

@@ -14,82 +14,117 @@ bool isEspNowInitialized();
 #include <Arduino.h>
 #include <stdint.h>
 
-// ==========================
-// Remote Sensor Data Structures
-// ==========================
+#include "System_ESPNow_SensorCore.h"  // RemoteSensorType (the one numbering) and the reading rules
 
-// Sensor types that can be streamed over ESP-NOW
-enum RemoteSensorType {
-  REMOTE_SENSOR_THERMAL = 0,
-  REMOTE_SENSOR_TOF = 1,
-  REMOTE_SENSOR_IMU = 2,
-  REMOTE_SENSOR_GPS = 3,
-  REMOTE_SENSOR_INPUT = 4,
-  REMOTE_SENSOR_FMRADIO = 5,
-  REMOTE_SENSOR_CAMERA = 6,
-  REMOTE_SENSOR_MICROPHONE = 7,
-  REMOTE_SENSOR_RTC = 8,
-  REMOTE_SENSOR_PRESENCE = 9,
-  REMOTE_SENSOR_APDS = 10,
-  REMOTE_SENSOR_MAX
-};
+// ==========================
+// Readings received from other devices
+// ==========================
+//
+// A receiver (a mesh master or backup master, or a bond master) keeps the
+// latest reading of each sensor of each sender, with its own arrival time
+// (UTC epoch when its clock is set, and its uptime), and counts per sender
+// and sensor what was received, lost, late and restarted
+// (System_ESPNow_SensorCore.h has the rules). Each paired sender has a record
+// with one slot per sensor type, so the table is full when sixteen paired
+// devices send, and never because one of them has many sensors. The table
+// lives in System_ESPNow_Sensors.cpp and is reached through the functions
+// below: every reader gets a copy taken under the table's lock, and no reader
+// changes the table.
 
-// Remote sensor status (broadcast when sensor starts/stops)
-struct RemoteSensorStatus {
+// The paired senders the receiver keeps readings of (the paired-device limit).
+#define REMOTE_SENSOR_PEERS_MAX 16
+// The slots of the table, one per sender and sensor type: sizes the index
+// arrays of the OLED and G2 lists. remoteSensorSlotCount() is this number
+// once the table exists, and 0 before.
+#define REMOTE_SENSOR_SLOTS_MAX (REMOTE_SENSOR_PEERS_MAX * REMOTE_SENSOR_MAX)
+static_assert(REMOTE_SENSOR_SLOTS_MAX <= 255, "slot indices are kept in uint8_t arrays");
+
+#define REMOTE_SENSOR_TTL_MS 30000  // a reading older than this is not fresh
+#define REMOTE_SENSOR_PRESENCE_TTL_MS 60000  // a sensor not heard from for this long is no longer listed
+
+// One slot without its text: small enough to copy onto a stack.
+struct RemoteSensorInfo {
   uint8_t deviceMac[6];
   char deviceName[32];
   RemoteSensorType sensorType;
-  bool enabled;
-  unsigned long timestamp;
+  bool enabled;             // the sender says it is streaming this sensor
+  bool fresh;               // a reading arrived within REMOTE_SENSOR_TTL_MS
+  uint16_t jsonLength;      // length of the latest reading's text (0: none yet)
+  uint32_t lastUpdate;      // this device's uptime (ms) when the latest reading arrived
+  uint32_t lastSeen;        // ... when a reading or a status frame last arrived
+  int64_t arrivalEpochMs;   // this device's UTC clock at that arrival; 0: the clock was not set
+  uint8_t arrivalClock;     // Clock::SyncSource of this device at that arrival
+  uint16_t counter;         // the sender's counter of the latest reading
 };
 
-// Remote sensor data cache entry
-// Uses fixed buffer to avoid heap churn from String allocations
-#define REMOTE_SENSOR_BUFFER_SIZE 256  // RX cap — never the binding limit: the 200 B TX gate
-                                       // (v4_send_sensor_envelope) rejects first, and the RX
-                                       // memcpy truncates safely. (Thermal handled separately.)
-
-struct RemoteSensorData {
-  uint8_t deviceMac[6];
-  char deviceName[32];
-  RemoteSensorType sensorType;
-  char jsonData[REMOTE_SENSOR_BUFFER_SIZE];  // Fixed buffer, no heap allocation
-  uint16_t jsonLength;                        // Actual data length in buffer
-  unsigned long lastUpdate;                   // millis() of last DATA arrival (drives `valid`/fresh)
-  unsigned long lastSeen;                     // millis() of last STATUS or DATA (drives presence aging)
-  // Three orthogonal states mirroring the LOCAL sensor model
-  // (compiled/connected/enabled). `connected` doubles as the slot-occupancy
-  // marker — a slot is free iff !connected. This fixes the prior overload of
-  // `valid` (which was simultaneously "fresh data", "enabled", AND "slot free",
-  // so a disabled sensor's slot could be silently reclaimed).
-  bool connected;                             // sensor present on the remote (slot in use)
-  bool enabled;                               // sensor currently running on the remote
-  bool valid;                                 // fresh data available (within REMOTE_SENSOR_TTL_MS)
-};
-
-// Maximum remote devices to track
-#define MAX_REMOTE_DEVICES 8
-#define MAX_SENSORS_PER_DEVICE 8
-#define REMOTE_SENSOR_TTL_MS 30000  // data-freshness TTL (drives `valid`/fresh)
-#define REMOTE_SENSOR_PRESENCE_TTL_MS 60000  // drop a present-but-silent sensor (device gone) after 60s
-
-// Total cache size: 8 devices * 8 sensors * ~310 bytes = ~20KB.
-// Allocated in initRemoteSensorSystem(), so builds with ESP-NOW compiled but
-// never started do not reserve the table in PSRAM .bss.
-
-// Remote sensor data cache (master only)
-extern RemoteSensorData* gRemoteSensorCache;
+// Number of slots in the table (0 while this device keeps no readings).
+int remoteSensorSlotCount();
+// The slot at `index`. False for a free slot and for one whose sensor has not
+// been heard from for REMOTE_SENSOR_PRESENCE_TTL_MS.
+bool remoteSensorInfoAt(int index, RemoteSensorInfo* out);
+// The slot of one sensor of one sender, by the same rule.
+bool remoteSensorInfoFor(const uint8_t* deviceMac, RemoteSensorType sensorType, RemoteSensorInfo* out);
+// Copies the latest reading's text of that sensor into `out`, terminated.
+// Returns its length; 0 when there is none or `out` is too small for it.
+size_t remoteSensorCopyText(const uint8_t* deviceMac, RemoteSensorType sensorType, char* out, size_t outSize);
 
 // ==========================
 // Remote Sensor Functions
 // ==========================
 
-// Initialize remote sensor system (master only). Idempotently allocates the
-// cache on first ESP-NOW start and clears it on each subsequent start.
+// Called at ESP-NOW start: forgets the readings listed so far and readies the
+// sender's broadcaster state. Allocates nothing.
 bool initRemoteSensorSystem();
+// The one place the receiver's table (the per-sender records) is made
+// (PSRAM). Called by the ingest for the first reading this device keeps, so
+// only a device that is sent readings and keeps them has one. True when it
+// exists. Safe to call again.
+bool remoteSensorTableEnsure();
 
-// Broadcast sensor status change (worker → master)
-void broadcastSensorStatus(RemoteSensorType sensorType, bool enabled);
+// ---- Receive (called by the frame handlers on espnow_task; the receive table
+// has already required a paired sender and a session-encrypted frame) ----
+// One part of a reading: SENSOR_ENVELOPE, or BOND_SENSOR_DATA (fromBond).
+void remoteSensorIngestPart(const uint8_t* senderMac, const char* senderName,
+                            const uint8_t* payload, size_t payloadLen, bool fromBond);
+// SENSOR_STATUS: which sensors the sender has and is streaming.
+void remoteSensorIngestStatus(const uint8_t* senderMac, const char* senderName,
+                              const uint8_t* payload, size_t payloadLen);
+
+// ---- Send ----
+// Sends one reading to `dst` now, in 1 to 4 frames (BOND_SENSOR_DATA when
+// viaBond). False with *why set when it was not sent. Any task but the radio
+// callback.
+bool sensorSendReadingTo(const uint8_t dst[6], bool viaBond, RemoteSensorType sensorType,
+                         const char* text, size_t len, espnowsensor::DropReason* why);
+// espnow_task loop: looks up the masters named on this device, starts a
+// session with the device readings go to when it has none, and prints why
+// readings are not being sent (one line a minute per sensor).
+void sensorLinkTick(uint32_t nowMs);
+
+// The masters named on this device (espnowmasterfingerprint,
+// espnowbackupfingerprint) that are paired with it, as addresses. They are
+// where a stream switched on by hand, the battery state and the events of
+// this device go. A copy; any task.
+struct SensorReceiverTargets {
+  bool masterNamed;     // a primary master fingerprint is set (well formed)
+  bool backupNamed;
+  bool havePrimary;     // ... and that device is paired: `primary` is its address
+  bool haveBackup;
+  uint8_t primary[6];
+  uint8_t backup[6];
+};
+void sensorReceiverTargets(SensorReceiverTargets* out);
+// Looks them up again (espnow_task only; sensorLinkTick does it once a second).
+void sensorReceiverTargetsRefresh();
+// The boot tag of every reading, status, battery and event frame this device
+// sends in this boot (the low 16 bits of the boot counter).
+uint16_t espnowSensorBootTag();
+// True when this firmware can read `sensorType` and send its readings.
+bool sensorTypeInThisBuild(RemoteSensorType sensorType);
+// A local sensor started or stopped: the receiver of this device's readings
+// is told at once (the whole SENSOR_STATUS frame goes out; the arguments say
+// what changed). Nothing is sent without a receiver.
+void sensorPresenceChanged(RemoteSensorType sensorType, bool present);
 
 // Start streaming sensor data (worker → master, opt-in)
 void startSensorDataStreaming(RemoteSensorType sensorType);
@@ -116,6 +151,11 @@ enum SensorReqMode : uint8_t {
 // worker's configured master OR backup-master fingerprint. This is the SOLE on-wire
 // authorization for sensor control. Empty/malformed configured fingerprints never match.
 bool espnowSensorControlAuthorized(const uint8_t mac[6]);
+// The same test with its answer: 0 = not a named master, 1 = the primary
+// master named on this device, 2 = the backup.
+int espnowNamedMasterKind(const uint8_t mac[6]);
+// True when a master or backup fingerprint is set on this device (well formed).
+bool espnowHasNamedMaster();
 
 // Apply a (previously authorized) SENSOR_REQ off the RX critical path: start/stop
 // streaming per mask, stamp the lease, and record the controller MAC as the
@@ -151,9 +191,6 @@ bool sensorTypeFromString(const char* str, RemoteSensorType& out);
 // or nullptr for a type that has none (camera, microphone, APDS).
 bool* bondStreamSetting(RemoteSensorType type);
 #endif
-
-// Find or create cache entry for a remote sensor (used by v3 handler)
-RemoteSensorData* findOrCreateCacheEntry(const uint8_t* deviceMac, const char* deviceName, RemoteSensorType sensorType);
 
 // ==========================
 // Sensor Broadcast Control
@@ -197,7 +234,6 @@ bool getRemoteGpsData(RemoteGpsData* outData);
 const char* cmd_espnow_sensorbroadcast(const String& argsInput);
 const char* cmd_espnow_sensorstatus(const String& argsInput);
 const char* cmd_espnow_sensorstream(const String& argsInput);
-void updateRemoteSensorStatus(const uint8_t* mac, const char* name, RemoteSensorType type, bool enabled);
 
 #endif // ENABLE_ESPNOW
 #endif // SYSTEM_ESPNOW_SENSORS_H

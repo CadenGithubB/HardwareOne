@@ -396,6 +396,29 @@ static void caseTableAndHeard() {
   mac[5] = 0;   // the oldest was given up for a newer peer
   CHECK(handshakeBackoffFind(t, mac) == nullptr, "a full table did not give up the oldest entry");
 
+  // One entry per paired device (MESH_PEER_MAX, 16): the mesh master offers
+  // a start to every paired device without a session, one start per 500 ms
+  // look. With sixteen silent devices every one of them still reaches its
+  // long wait; with fewer entries than devices the table gave one up every
+  // look and the master started 1.5 to 2 handshakes a second for good.
+  CHECK(kHandshakeBackoffSlots >= 16, "the table has %d entries, fewer than the 16 paired devices",
+        (int)kHandshakeBackoffSlots);
+  HandshakeBackoffTable silent = {};
+  unsigned starts = 0, lastTenMinutes = 0;
+  const uint32_t hourMs = 3600000u;
+  for (uint32_t at = 1000; at < 1000 + hourMs; at += 500) {
+    for (uint8_t i = 0; i < 16; ++i) {
+      mac[5] = (uint8_t)(0x40 + i);
+      if (!handshakeBackoffTake(silent, mac, at)) continue;
+      ++starts;
+      if (at >= 1000 + hourMs - 600000u) ++lastTenMinutes;
+      break;  // at most one start per look
+    }
+  }
+  CHECK(starts <= 16 * 20 && lastTenMinutes <= 16 * 3,
+        "sixteen silent paired devices cost %u starts in an hour (%u in the last ten minutes)", starts,
+        lastTenMinutes);
+
   // Heard: ends the wait only after a quiet spell.
   HandshakeBackoffTable h = {};
   uint8_t p[6] = {2, 0, 0, 0, 0, 7};

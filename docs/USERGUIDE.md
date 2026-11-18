@@ -1194,8 +1194,9 @@ espnowmeshroutes                - Show the route table (who's reachable, and via
 espnowmeshttl [1-10]            - Hops a message may travel (1 = direct only)
 espnowmeshrelay [0|1]           - Carry other nodes' traffic through this one
 espnowmeshtopo                  - Discover mesh topology (master only)
-espnowtimesync                  - Broadcast NTP time to mesh (master only)
-espnowtimestatus                - Show time sync status
+espnowtimesync                  - Master: send this device's clock to the paired devices now
+espnowtimestatus [json]         - Where this device's clock comes from; what was sent or last received
+espnowmeshtime [on|off]         - Mesh time on/off (default on)
 
 --- Device identity ---
 espnowsetname [name|clear]      - Get/set device name ('clear' while ESP-NOW is stopped)
@@ -1214,10 +1215,16 @@ espnowgroups [json] [name_or_mac]         - Per peer: announced, accepted and pe
 espnowgroupaccept [json] <name_or_mac|all> - Accept the room and tags a peer announces now
 espnowgroupdrop [json] <name_or_mac|all>   - Take back what was accepted for a peer
 
---- Sensor streaming ---
+--- What a master collects: readings, battery, events ---
 espnowworker [show|on|off|interval <ms>|fields <list>]  - Worker status reporting
-espnowsensorstream <sensor> <on|off>   - Stream sensor data to master (worker)
-espnowsensorstatus              - Show remote sensor cache (master) or worker streaming status
+espnowsensorstream <sensor> <on|off>   - Send one sensor's readings to the master named on this device
+espnowsensorstatus [json [<name_or_mac>]]  - What this device sends and why not; what it received, lost and refused
+espnowbattery [json] [<name_or_mac>] [from <n>]  - Master: the battery state other devices sent
+espnowevents [json] [since <rx>]       - Master: the system events other devices sent
+espnowpowerinterval [0|10..3600]       - Seconds between this device's battery reports (0 = none, default 60)
+espnoweventpush [off|alert|standard|verbose]  - Which of this device's events go to the master (default alert)
+espnowmasterfingerprint [64 hex]       - Name the mesh master on this device (its key fingerprint)
+espnowbackupfingerprint [64 hex]       - Name the backup master on this device
 
 --- Security ---
 espnowsetpassphrase "phrase"    - Set encryption passphrase
@@ -1228,6 +1235,46 @@ espnowpairsecure <mac> <name>   - Pair with encryption
 espnowrequestmeta <name_or_mac> - Pull metadata from a peer
 espnowusersync [on|off]         - Enable/disable credential sync across mesh
 ```
+
+**Mesh time.** The mesh master sends its clock to each paired device when their encrypted session
+starts, every 10 minutes and when its own clock is set. A device takes it when it has no better
+source of its own (RTC chip, NTP, `timeset`, CM5); `time` then shows the source "mesh". The master
+only sends a clock that comes from one of those four sources. When a master is named on a device
+(`espnowmasterfingerprint`), only that master's time is taken; while none is named, mesh time
+changes a clock that is already set at most once in 10 minutes. A time more than an hour away from
+a clock that is already set is applied when the master says it again: within about 15 seconds when
+the master's own clock was just set, else at its next 10-minute round. A device with mesh mode off
+takes no mesh time. The clock is good to a few seconds. Times are kept in UTC; the timezone only
+changes how they are shown.
+
+**What a master collects.** The mesh master (and a backup master) is the receiving end: it keeps the
+sensor readings, the battery state and the system events the other devices send it. A device sends
+to the master that is named on it, so name the master on each sending device
+(`espnowmasterfingerprint <fingerprint>`, the 64-character public key `espnowidentity` shows on the master;
+`espnowbackupfingerprint` for a backup master) and pair the two devices. Naming the master is the
+consent to send; nothing here needs a bond, and all of it works through a relay. The receiving
+device must have the master or backup master role (`espnowmeshrole`): a worker keeps nothing that
+is sent to it, counts what it refused and says so on its console. `espnowsensorstatus` shows on every device who it sends to, what was
+sent and why not, and what it received.
+
+**Sensor readings.** `espnowsensorstream <sensor> on` sends that sensor's readings to the named
+master, and the reply says where they go or why nothing is sent yet. A reading can be up to 472
+bytes and travels in up to four frames. The receiving device stamps each reading with its own clock
+when it arrives and counts lost readings per device and sensor
+(`GET /api/sensors/remote?device=<MAC>&sensor=<type>`). A reading that cannot be sent is counted
+with its reason, and the console says so once a minute. A master keeps the readings of up to
+sixteen sending devices; a seventeenth is refused and shown as refused.
+
+**Battery state.** A device with a battery monitor reports its battery to the named master every
+60 seconds and when its state changes (`espnowpowerinterval`). On the master, `espnowbattery` lists
+the devices with percentage, voltage, status, USB power and how long ago the report arrived.
+
+**Events.** A device sends its system events to the named master: by default only alerts (failed
+logins, lockouts, crashes, a factory reset, critical battery); `espnoweventpush standard` adds the
+everyday ones, `verbose` all, `off` none. On the master, `espnowevents` lists the newest 24 per
+mesh, each with the master's own arrival time. Long texts are cut to fit one frame; the full text
+is in the sending device's event log. A burst is limited (eight at once, then one every two
+seconds), and the next event says how many were left out.
 </details>
 
 <details>

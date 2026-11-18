@@ -298,6 +298,74 @@ This session reworked how a MASTER exposes its bonded/mesh **peers'** sensors. I
 consumes any of the remote-device endpoints below, it must update. (The LOCAL sensor
 contract in sec. 6 is **unchanged**.)
 
+### 8.0 Additions with the 1.0 reading format (2026-11-17, additive)
+- `GET /api/sensors/remote?device=<MAC>&sensor=<type>` keeps `connected`, `enabled`, `fresh` and
+  `data` and, once a reading has arrived, adds the receiver's own arrival stamp and counts:
+  `arrivalEpochMs` (UTC milliseconds, `null` while the receiving device's clock was not set),
+  `arrivalUptimeMs`, `agoMs`, `clock` (how the receiving device's clock was set: `rtc`, `ntp`,
+  `manual`, `ring`, `cm5`, `mesh`, `carried` for a clock kept over a restart, `none`), `bootTag` and
+  `counter` (the sender's: with its MAC and the sensor they name one reading), `received`, `lost`, `late`, `repeated`, `restarts`,
+  `resumes` and `incomplete`. `lost - late` is what never arrived; `incomplete` counts readings of
+  that sender (any sensor) of which a frame was missing, and is part of `lost`. `data` is at most
+  472 bytes.
+- `espnowsensorstatus json`: `role` is `worker`, `backup` or `master`. On every device: `targets`
+  (the masters named on this device that are paired: `kind` `primary` or `backup`, `mac`, `name`,
+  `session`), `masterNamed`, `battery` (`sends`, `whyNot`, `intervalS`, `sent`, `lastSentAgoS`),
+  `events` (`sends`, `whyNot`, `floor`, `sent`, `leftOut`) and `table` (`senders`, `sendersMax`,
+  `sensors`, `received`, `lost`, `late`, `incomplete`, `malformed`, `refusedFull`,
+  `refusedNoMemory`, `badType`, `notReceiver`). `whyNot` is `null` or one of `not_in_this_build`,
+  `off`, `mesh_off`, `is_master`, `no_master`, `master_not_paired`, `no_session`. On a device that
+  sends (worker, backup): `streaming` (all eleven sensor types) and `sent` (per sensor with
+  activity: `sent`, `notSent`, and a count per reason: `too_long`, `no_receiver`, `no_session`,
+  `queue_full`, `is_master`, `bond_offline`, `broadcast_off`, `mesh_off`, `not_in_this_build`,
+  `master_not_paired`). On a device that receives (master, backup, or any device that holds
+  readings): `devices` as in 8.1, each with `received`, `lost` and `late` added, and
+  `devicesMore`: `false`, or `true` when the reply (4 KB) could not hold every device and the rest
+  were left out. A reply that does not fit even without devices is
+  `{"schema":1,"error":"the reply does not fit its buffer"}`.
+- `espnowsensorstatus json <name_or_mac>`: everything kept of one sending device: `mac`, `name`,
+  `paired`, `incomplete`, `malformed`, `sensors` (per sensor name the keys of
+  `/api/sensors/remote` without `data`), `battery` (one row of `espnowbattery json`, or `null`)
+  and `events` (`received`, `stored`, `lost`, `late`, `restarts`, `resumes`, `senderSkipped`,
+  `refusedRate`, or `null`).
+- `espnowbattery json [<name_or_mac>] [from <n>]` (the battery state other devices sent; kept by
+  a mesh master or backup master): `schema`, `role`, `sends` (what this device sends itself, as in
+  `espnowsensorstatus json`), `refused` (`notReceiver`, `full`, `noMemory`, `malformed`), `from`,
+  `devices` and `next` (`null`, or the number to pass as `from` for the devices that did not fit
+  this reply). Each device: `mac`, `name`, `arrivalEpochMs` (the receiving device's UTC clock in
+  milliseconds, `null` while it was not set), `arrivalUptimeMs`, `agoMs`, `clock`, `bootTag`,
+  `counter`, `status` (`unknown`, `charging`, `full`, `discharging`, `low`, `critical`,
+  `not_present`, `high`, `good`, `medium`, `empty`), `backend` (`none`, `adc`, `fuelgauge`,
+  `unknown`), `voltage`, `percent`, `present`, `charging`, `usb`, `ratePctPerHr`, `sampleAgeMs`
+  (each `null` when the sending device did not know it), `percentEstimated`, `chargingEstimated`,
+  `statusEstimated`, `stale`, and the counts `received`, `lost`, `late`, `restarts`, `resumes`.
+- `espnowevents json [since <rx>]` (the system events other devices sent): `schema`, `role`,
+  `boot` (this device's boot counter: `rx` numbers start again at 1 after a restart), `latest`
+  (the newest `rx`), `since` (as used; a number above `latest` is read as 0), `overwritten` (events
+  after `since` that are no longer held), `sends`, `refused`, `senders` (per sending device `mac`,
+  `name`, `received`, `stored`, `lost`, `late`, `restarts`, `resumes`, `senderSkipped`,
+  `refusedRate`), `events` (oldest first) and `more` (`true`: ask again with `since` = the last
+  `rx` of this reply). Each event: `rx`, `mesh`, `mac`, `name`, `arrivalEpochMs` (`null` while the
+  receiving device's clock was not set), `arrivalUptimeMs`, `clock`, `ageMs` (how old the event was
+  when it was sent), `eventSeq` (its number on the sending device), `bootTag`, `counter`, `tier`
+  (`verbose`, `standard`, `alert`, `unknown`), `source` (`unknown`, `cli`, `oled`, `web`, `voice`,
+  `remote`, `system`, `g2`), `kind` (the kind's name), `subject`, `detail`, `who`, and `cut` (the
+  names of the fields that were cut to fit the frame). An event is identified by (`mac`,
+  `bootTag`, `counter`), also at a second master.
+- `GET /api/bond/status` adds `sensorBits` (sensor name to mask bit). The bits of
+  `sensorMask`, `sensorConnectedMask` and `sensorEnabledMask` changed to the one sensor numbering
+  (thermal 1, tof 2, imu 4, gps 8, input 16, fmradio 32, rtc 256, presence 512, apds 1024): read
+  the masks through `sensorBits`, not through numbers of your own.
+- `espnowtimestatus json`: `schema`, `meshTime`, `role`, `clockSet`, `clockSource`, `clockSetAgoS`,
+  `epoch`, `sends`, `sendsWhyNot`, `lastSentAgoS`, `framesSent`, `peersSent`, `peersReady`,
+  `peersPaired`, `lastFrame` (`mac`, `name`, `agoS`, `source`, `sinceSetMin`, `result`,
+  `differenceS`; `null` before any frame) and `counts`. `result` is one of `applied`, `agreed`,
+  `ignored_off`, `ignored_mesh_off`, `ignored_not_named`, `ignored_master`, `ignored_better_source`,
+  `ignored_weak_source`, `ignored_other_master`, `ignored_too_soon`, `refused_bad_time`,
+  `held_large_change`; `differenceS` is 0 for a frame whose time is not a real date. `counts.ignored`
+  also counts frames that found no room to wait for the main loop (four senders' frames wait at
+  most).
+
 ### 8.1 Remote-device list - `sensors` changed from strings to objects (breaking)
 Returned by web `GET /api/sensors/remote` (no params) **and** nested verbatim under
 `devices` in the BLE/CLI `espnowsensorstatus json` (master role):

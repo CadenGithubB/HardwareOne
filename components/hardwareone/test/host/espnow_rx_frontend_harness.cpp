@@ -264,10 +264,19 @@ static void systemEventPost(uint8_t, const char*, const char*) {}
 // INSERT_SLOTS
 
 // ---- Recording double for every table handler but the two real ones ---------
-struct HandlerCall { std::string name; uint8_t src[6]; uint32_t msgId; uint8_t fragIndex; bool authed, enc; };
+struct HandlerCall {
+  std::string name;
+  uint8_t src[6];
+  uint32_t msgId;
+  uint8_t fragIndex;
+  bool authed, enc;
+  bool paired;
+  uint16_t payloadLen;
+};
 static std::vector<HandlerCall> gCalls;
 static void noteHandler(const char* name, const V4RxCtx& ctx) {
-  HandlerCall c{name, {}, ctx.h->msgId, ctx.h->fragIndex, ctx.isAuthenticated, ctx.isSessionEncrypted};
+  HandlerCall c{name, {}, ctx.h->msgId, ctx.h->fragIndex, ctx.isAuthenticated, ctx.isSessionEncrypted,
+                ctx.isPaired, ctx.payloadLen};
   std::memcpy(c.src, ctx.recv_info->src_addr, 6);
   gCalls.push_back(c);
 }
@@ -835,6 +844,66 @@ static void testReplayedHeartbeatFromInventedSource() {
         health(sessionOnly) && health(sessionOnly)->heartbeatCount == 1 && health(gPeerB) == nullptr);
 }
 
+// Mesh time, the sensor frames, the battery frame and the event frame are
+// session unicasts that must work through a relay: the sealed frame, byte-identical inside a RELAY_DATA envelope, is
+// delivered to its handler with the origin as the source, and passes the
+// paired + session gates there. None of them is flooded.
+static void testTimeAndSensorFramesThroughRelay() {
+  // The envelope budgets of System_ESPNow_Wire.h (espnow_sensor_wire checks
+  // that the header has these numbers): 250 minus the outer header, the
+  // envelope and the outer tag; and what is left for a sealed frame's plaintext.
+  constexpr size_t ESPNOW_V4_RELAY_MAX_INNER_FRAME = 250 - 32 - 8 - 32;                            // 178
+  constexpr size_t ESPNOW_V4_RELAY_MAX_INNER_PLAINTEXT = ESPNOW_V4_RELAY_MAX_INNER_FRAME - 32 - 16;  // 130
+  struct Row { uint8_t type; const char* handler; size_t payloadLen; };
+  const Row rows[] = {
+    { ESPNOW_V4_TYPE_TIME_SYNC,       "v4hTimeSync",         16 },
+    { ESPNOW_V4_TYPE_SENSOR_STATUS,   "v4h_sensor_status",   16 },
+    { ESPNOW_V4_TYPE_SENSOR_REQ,      "v4h_sensor_req",      16 },
+    { ESPNOW_V4_TYPE_SENSOR_ENVELOPE, "v4h_sensor_envelope", 60 },
+    // A part of a reading at the routed size: header 12 + 118 bytes of text
+    // is exactly what one sealed frame carries inside the envelope.
+    { ESPNOW_V4_TYPE_SENSOR_ENVELOPE, "v4h_sensor_envelope", ESPNOW_V4_RELAY_MAX_INNER_PLAINTEXT },
+    // The battery frame (24 bytes) and the event frame (128 bytes, two under
+    // the routed budget): one frame each, also through a relay.
+    { ESPNOW_V4_TYPE_POWER_STATUS,    "v4hPowerStatus",      24 },
+    { ESPNOW_V4_TYPE_EVENT_PUSH,      "v4hEventPush",        128 },
+  };
+  uint32_t id = 300;
+  for (const Row& row : rows) {
+    reset(true);
+    const std::string what = std::string(row.handler) + " (" + std::to_string(row.payloadLen) + " B)";
+    const Frame inner = sealedFrame(gSessB, row.type, gPeerB, ++id, Frame(row.payloadLen, 0x5A), 0, 1, /*flags=*/0);
+    check((what + ": the sealed frame fits a relay envelope").c_str(), inner.size() <= ESPNOW_V4_RELAY_MAX_INNER_FRAME);
+    deliver(gRelayR, envelope(gRelayR, inner, id));
+    check((what + " through a relay: delivered once to its handler").c_str(),
+          calls(row.handler) == 1 && gCalls.size() == 1 && gRelayMetrics.routedDelivered == 1);
+    check((what + " through a relay: the handler sees the origin as the sender, paired and session-encrypted").c_str(),
+          !gCalls.empty() && std::memcmp(gCalls.back().src, gPeerB, 6) == 0 && gCalls.back().paired &&
+          gCalls.back().enc);
+    check((what + " through a relay: the payload arrives whole").c_str(),
+          !gCalls.empty() && gCalls.back().payloadLen == row.payloadLen);
+    check((what + ": nothing is flooded on").c_str(), gRelayMetrics.floodForwards == 0 && gFanouts == 0);
+  }
+  // One byte more than the routed budget does not fit an envelope: the sender
+  // plans its parts by that budget (espnow_sensor_core_tests).
+  reset(true);
+  const Frame tooBig = sealedFrame(gSessB, ESPNOW_V4_TYPE_SENSOR_ENVELOPE, gPeerB, ++id,
+                                   Frame(ESPNOW_V4_RELAY_MAX_INNER_PLAINTEXT + 1, 0x5A), 0, 1, 0);
+  check("a sealed frame one byte over the routed budget is larger than an envelope carries",
+        tooBig.size() > ESPNOW_V4_RELAY_MAX_INNER_FRAME);
+
+  // The same frames as a group-signed broadcast with hops left: not flooded
+  // on and not handed to a handler (a signed broadcast does not pass the gates).
+  for (uint8_t type : { (uint8_t)ESPNOW_V4_TYPE_TIME_SYNC, (uint8_t)ESPNOW_V4_TYPE_SENSOR_STATUS,
+                        (uint8_t)ESPNOW_V4_TYPE_SENSOR_ENVELOPE, (uint8_t)ESPNOW_V4_TYPE_POWER_STATUS,
+                        (uint8_t)ESPNOW_V4_TYPE_EVENT_PUSH }) {
+    reset(true);
+    deliver(gRelayR, groupFrame(type, gFar, ++id, Frame(16, 0x5A), 3));
+    check(("opcode " + std::to_string(type) + " as a signed broadcast: not flooded, no handler").c_str(),
+          gCalls.empty() && gRelayMetrics.floodForwards == 0 && gFanouts == 0);
+  }
+}
+
 int main() {
   std::setvbuf(stdout, nullptr, _IOLBF, 0);  // keep the case lines if a pre-fix tree aborts
   testForgedPlaintextDoesNotShadowSealed();
@@ -842,6 +911,7 @@ int main() {
   testSealedRetriesStillSuppressed();
   testFloodLoopSuppression();
   testRelayedLoopSuppression();
+  testTimeAndSensorFramesThroughRelay();
   testFragmentIndexConsistency();
   testHeartbeatPolicy();
   testSlotCreation();

@@ -1051,14 +1051,18 @@ static void publishMeshPeerDiscovery() {
   }
 }
 
-// Publish sensor data for all mesh peers from gRemoteSensorCache
+// Publish sensor data for all mesh peers from the table of received readings
 // Called periodically alongside local sensor publishing
 static void publishMeshPeerSensorData() {
   if (!mqttClient ||
       !mqttTofConnected.load(std::memory_order_acquire)) return;
   if (gSettings.meshRole != MESH_ROLE_MASTER) return;
   if (!gMeshPeerMeta) return;  // Not yet allocated
-  if (!gRemoteSensorCache) return;  // ESP-NOW runtime has not initialized
+  const int remoteSlots = remoteSensorSlotCount();
+  if (remoteSlots == 0) return;  // ESP-NOW runtime has not initialized
+  // One reading's text at a time, copied under the table's lock.
+  char* remoteText = (char*)ps_alloc(espnowsensor::kReadingMaxBytes + 1, AllocPref::PreferPsram, "mqtt.peer.reading");
+  if (!remoteText) return;
 
   for (int i = 0; i < gMeshPeerSlots; i++) {
     if (!gMeshPeerMeta[i].isActive) continue;
@@ -1074,20 +1078,21 @@ static void publishMeshPeerSensorData() {
     PSRAM_JSON_DOC(doc);
     bool hasData = false;
 
-    // Search gRemoteSensorCache for entries matching this peer's MAC
-    for (int s = 0; s < MAX_REMOTE_DEVICES * MAX_SENSORS_PER_DEVICE; s++) {
-      if (!gRemoteSensorCache[s].valid) continue;
-      if (memcmp(gRemoteSensorCache[s].deviceMac, peer.mac, 6) != 0) continue;
+    // The slots of this peer that hold a fresh reading
+    for (int s = 0; s < remoteSlots; s++) {
+      RemoteSensorInfo slot;
+      if (!remoteSensorInfoAt(s, &slot) || !slot.fresh) continue;
+      if (memcmp(slot.deviceMac, peer.mac, 6) != 0) continue;
+      const size_t textLen = remoteSensorCopyText(slot.deviceMac, slot.sensorType, remoteText,
+                                                  espnowsensor::kReadingMaxBytes + 1);
+      if (textLen == 0) continue;
 
-      // Check TTL
-      if (millis() - gRemoteSensorCache[s].lastUpdate > REMOTE_SENSOR_TTL_MS) continue;
-
-      // Parse the cached JSON data and merge into state
+      // Parse the reading and merge into state
       PSRAM_JSON_DOC(sensorDoc);
-      if (deserializeJson(sensorDoc, gRemoteSensorCache[s].jsonData, gRemoteSensorCache[s].jsonLength) == DeserializationError::Ok) {
+      if (deserializeJson(sensorDoc, remoteText, textLen) == DeserializationError::Ok) {
         // Determine key from sensor type
         const char* key = nullptr;
-        switch (gRemoteSensorCache[s].sensorType) {
+        switch (slot.sensorType) {
           case REMOTE_SENSOR_THERMAL: key = "thermal"; break;
           case REMOTE_SENSOR_TOF:     key = "tof"; break;
           case REMOTE_SENSOR_IMU:     key = "imu"; break;
@@ -1128,6 +1133,7 @@ static void publishMeshPeerSensorData() {
     String peerAvailTopic = gSettings.mqttBaseTopic + "/devices/hardwareone_" + macCompact + "/availability";
     esp_mqtt_client_publish(mqttClient, peerAvailTopic.c_str(), alive ? "online" : "offline", 0, 1, true);
   }
+  free(remoteText);
 }
 
 #endif // ENABLE_ESPNOW

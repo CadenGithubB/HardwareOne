@@ -205,7 +205,10 @@ def main():
         (d / 'esp_now.h').write_text(ESP_NOW)
         # Real headers, from the tree under test: wire structs, the receive
         # context and the MAC text helpers.
-        for name in ('System_ESPNow_Wire.h', 'System_ESPNow_RxCtx.h', 'System_MacText.h'):
+        # (the wire header includes the three dependency-free rules headers)
+        for name in ('System_ESPNow_Wire.h', 'System_ESPNow_RxCtx.h', 'System_MacText.h',
+                     'System_ESPNow_SensorCore.h', 'System_ESPNow_TimeCore.h',
+                     'System_ESPNow_PowerEventCore.h'):
             shutil.copyfile(path_of(name), d / name)
         unit, exe = d / 'espnow_file_transfer.cpp', d / 'espnow_file_transfer'
         unit.write_text(harness)

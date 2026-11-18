@@ -190,6 +190,40 @@ target_include_directories(espnow_group_core_tests PRIVATE ../..)
 target_compile_options(espnow_group_core_tests PRIVATE
   -Wall -Wextra -Werror -pedantic)
 
+# Rules of the sensor reading path over ESP-NOW (System_ESPNow_SensorCore.h,
+# the production dependency-free header): the one sensor table, the 12-byte
+# reading header, cutting a reading into 1 to 4 frames and putting it together
+# (lost, repeated, late and hostile parts), the receiver's counter rule (loss,
+# late, restart, stream start), the JSON text check, and where a reading goes.
+add_executable(espnow_sensor_core_tests test_espnow_sensor_core.cpp)
+set_target_properties(espnow_sensor_core_tests PROPERTIES
+  CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+target_include_directories(espnow_sensor_core_tests PRIVATE ../..)
+target_compile_options(espnow_sensor_core_tests PRIVATE
+  -Wall -Wextra -Werror -pedantic)
+
+# Rules of the battery and event frames (System_ESPNow_PowerEventCore.h, the
+# production dependency-free header): the 24-byte POWER_STATUS and the
+# 128-byte EVENT_PUSH frame byte by byte, when a battery frame is due, the
+# event floor, the rate limit, text from a frame that cannot be trusted, and
+# which entry a new event replaces in a full list.
+add_executable(espnow_power_event_core_tests test_espnow_power_event_core.cpp)
+set_target_properties(espnow_power_event_core_tests PROPERTIES
+  CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+target_include_directories(espnow_power_event_core_tests PRIVATE ../..)
+target_compile_options(espnow_power_event_core_tests PRIVATE
+  -Wall -Wextra -Werror -pedantic)
+
+# Rules of mesh time (System_ESPNow_TimeCore.h, the production dependency-free
+# header): the 16-byte TIME_SYNC frame, who sends and when, and what a
+# receiver does with a frame for every source of its own clock.
+add_executable(espnow_time_core_tests test_espnow_time_core.cpp)
+set_target_properties(espnow_time_core_tests PROPERTIES
+  CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+target_include_directories(espnow_time_core_tests PRIVATE ../..)
+target_compile_options(espnow_time_core_tests PRIVATE
+  -Wall -Wextra -Werror -pedantic)
+
 # Projection and pan math shared by MapCore::renderMap and the G2 map page.
 # The production header is dependency-light so geometry can be verified here
 # without Arduino, ESP-IDF, filesystem, or BLE mocks.
@@ -413,6 +447,18 @@ if(HW1_SANITIZE)
   target_compile_options(espnow_group_core_tests PRIVATE
     -fsanitize=address,undefined -g)
   target_link_options(espnow_group_core_tests PRIVATE
+    -fsanitize=address,undefined)
+  target_compile_options(espnow_sensor_core_tests PRIVATE
+    -fsanitize=address,undefined -g)
+  target_link_options(espnow_sensor_core_tests PRIVATE
+    -fsanitize=address,undefined)
+  target_compile_options(espnow_time_core_tests PRIVATE
+    -fsanitize=address,undefined -g)
+  target_link_options(espnow_time_core_tests PRIVATE
+    -fsanitize=address,undefined)
+  target_compile_options(espnow_power_event_core_tests PRIVATE
+    -fsanitize=address,undefined -g)
+  target_link_options(espnow_power_event_core_tests PRIVATE
     -fsanitize=address,undefined)
   target_compile_options(map_viewport_core_tests PRIVATE
     -fsanitize=address,undefined -g)
@@ -1301,6 +1347,9 @@ add_test(NAME heap_low_core_tests COMMAND heap_low_core_tests)
 add_test(NAME espnow_pair_core_tests COMMAND espnow_pair_core_tests)
 add_test(NAME espnow_bond_agree_core_tests COMMAND espnow_bond_agree_core_tests)
 add_test(NAME espnow_group_core_tests COMMAND espnow_group_core_tests)
+add_test(NAME espnow_sensor_core_tests COMMAND espnow_sensor_core_tests)
+add_test(NAME espnow_time_core_tests COMMAND espnow_time_core_tests)
+add_test(NAME espnow_power_event_core_tests COMMAND espnow_power_event_core_tests)
 add_test(NAME map_viewport_core_tests COMMAND map_viewport_core_tests)
 add_test(NAME g2_health_graph_core_tests COMMAND g2_health_graph_core_tests)
 add_test(NAME g2_health_push_core_tests COMMAND g2_health_push_core_tests)
@@ -2419,12 +2468,42 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_known_task_table.py
           ${SETUP_MQTT_TEST_ARGS})
-# `espnowtimestatus`: "Last sync" counts from the moment the last mesh
-# TIME_SYNC was applied (it used to read a stamp nothing wrote: the uptime).
+# Mesh time (TIME_SYNC): the production handler, apply tick, sender step and
+# both commands of System_ESPNow_MeshTime.cpp against a settable clock. The
+# master's clock reaches a device without a better source, through the clock
+# chokepoint; the status says the true source and age (README "ESP-NOW mesh
+# time").
 add_test(
   NAME espnow_time_status
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_espnow_time_status.py
+          ${SETUP_MQTT_TEST_ARGS})
+# Sensor readings over ESP-NOW: the wire layouts byte by byte, the one sensor
+# numbering, the gates of the receive table and who may read the receiver's
+# table (README "ESP-NOW sensor readings").
+add_test(
+  NAME espnow_sensor_wire
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_espnow_sensor_wire.py
+          ${SETUP_MQTT_TEST_ARGS})
+# ... and the production sender and receiver of System_ESPNow_Sensors.cpp end
+# to end: readings up to 472 bytes in parts, the receiver's arrival stamp and
+# loss counts, refusals, who keeps readings by mesh role, the status frame,
+# sixteen senders and a seventeenth, the reasons a reading is not sent, what
+# the stream command says.
+add_test(
+  NAME espnow_sensor_ingest
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_espnow_sensor_ingest.py
+          ${SETUP_MQTT_TEST_ARGS})
+# Battery state and system events over the mesh: the production sender and
+# receiver of System_ESPNow_PowerEvents.cpp, the per-sender records, the event
+# lists, espnowbattery and espnowevents (README "ESP-NOW battery state and
+# events").
+add_test(
+  NAME espnow_power_events
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_espnow_power_events.py
           ${SETUP_MQTT_TEST_ARGS})
 # MQTT page: the External Sensors table shows a received topic segment and
 # payload; both reach the page HTML-escaped (README "Untrusted names on web

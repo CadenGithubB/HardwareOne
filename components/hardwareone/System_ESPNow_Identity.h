@@ -117,12 +117,14 @@ struct PeerIdentity {
 // versions (peers will exchange bitmaps blind, so reordering is breaking).
 enum EspNowEventCategory : uint32_t {
   ESPNOW_EVT_HEARTBEAT       = 1u << 0,   // V4 heartbeat (type 30)
-  ESPNOW_EVT_SENSOR          = 1u << 1,   // sensor broadcast / bond sensor data (150, 179)
+  ESPNOW_EVT_SENSOR          = 1u << 1,   // was the sensor status broadcast (151), which is now a session
+                                          // unicast to the receiver of the readings — bit kept, no sender
   ESPNOW_EVT_TOPOLOGY        = 1u << 2,   // topo req/start/peer (32-34)
   ESPNOW_EVT_BOND_HEARTBEAT  = 1u << 3,   // bond heartbeat (170)
   ESPNOW_EVT_WORKER_STATUS   = 1u << 4,   // retired opcode (ex-WORKER_STATUS) — bit kept for bitmap stability
   ESPNOW_EVT_METADATA_PUSH   = 1u << 5,   // metadata push (55)
-  ESPNOW_EVT_TIME_SYNC       = 1u << 6,   // time sync (35)
+  ESPNOW_EVT_TIME_SYNC       = 1u << 6,   // was the time broadcast (35), which is now a session unicast
+                                          // from the master — bit kept, no sender
   // Add new categories here; preserve existing bit values.
   ESPNOW_EVT_ALL             = 0xFFFFFFFFu  // default for legacy / pre-Phase-5 peers
 };

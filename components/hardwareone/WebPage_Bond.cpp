@@ -398,7 +398,10 @@ void streamBondInner(httpd_req_t* req) {
     if (hasCaps) {
       const capSensorMask = data.capabilities.sensorMask || 0;
       const connected = data.sensorConnected || {};
-      const rDefs = [{m:0x01,n:'Thermal',k:'thermal'},{m:0x02,n:'ToF',k:'tof'},{m:0x04,n:'IMU',k:'imu'},{m:0x08,n:'Input',k:'input'},{m:0x10,n:'APDS',k:'apds'},{m:0x20,n:'GPS',k:'gps'},{m:0x40,n:'RTC',k:'rtc'},{m:0x80,n:'Presence',k:'presence'}];
+      // The mask bit of each sensor comes from the device (data.sensorBits, the
+      // firmware's one sensor numbering); no number is typed in this page.
+      const rBits = data.sensorBits || {};
+      const rDefs = [{n:'Thermal',k:'thermal'},{n:'ToF',k:'tof'},{n:'IMU',k:'imu'},{n:'Input',k:'input'},{n:'APDS',k:'apds'},{n:'GPS',k:'gps'},{n:'RTC',k:'rtc'},{n:'Presence',k:'presence'}].map(function(d){d.m = rBits[d.k] || 0; return d;});
       const rRows = rDefs.filter(function(d){return capSensorMask & d.m;});
       if (rRows.length > 0) {
         html += '<div style="border-top:1px solid var(--panel-border);margin-top:8px;padding-top:8px">';
@@ -461,21 +464,24 @@ void streamBondInner(httpd_req_t* req) {
                             : (remoteInputType === 1) ? 'Gamepad'
                             : 'Input';
 
-      // Sensor capability bit masks (must match System_ESPNow.h)
-      // mask values mirror CAP_SENSOR_* in System_ESPNow.h. streamable=false for
-      // sensors that have no bond streaming pipeline (APDS) — Enable still works,
-      // but the Stream toggle is shown disabled rather than dead.
+      // Each sensor's capability bit comes from the device (data.sensorBits,
+      // the firmware's one sensor numbering, keyed by the id below); no mask
+      // number is typed in this page. streamable=false for sensors that have
+      // no bond streaming pipeline (APDS) — Enable still works, but the Stream
+      // toggle is shown disabled rather than dead.
+      const sBits = data.sensorBits || {};
       const sensors = [
-        {id: 'thermal', name: 'Thermal',        mask: 0x01,  stream: data.streamThermal,  on: sc.thermalOn,  streamable: true},
-        {id: 'tof',     name: 'ToF',            mask: 0x02,  stream: data.streamTof,      on: sc.tofOn,      streamable: true},
-        {id: 'imu',     name: 'IMU',            mask: 0x04,  stream: data.streamImu,      on: sc.imuOn,      streamable: true},
-        {id: 'input',   name: remoteInputName,  mask: 0x08,  stream: data.streamInput,    on: sc.inputOn,    streamable: true},
-        {id: 'apds',    name: 'APDS',     mask: 0x10,  stream: false,               on: sc.apdsOn,     streamable: false},
-        {id: 'gps',     name: 'GPS',      mask: 0x20,  stream: data.streamGps,      on: sc.gpsOn,      streamable: true},
-        {id: 'rtc',     name: 'RTC',      mask: 0x40,  stream: data.streamRtc,      on: sc.rtcOn,      streamable: true},
-        {id: 'presence',name: 'Presence', mask: 0x80,  stream: data.streamPresence, on: sc.presenceOn, streamable: true},
-        {id: 'fmradio', name: 'FM Radio', mask: 0x100, stream: data.streamFmradio,  on: sc.fmradioOn,  streamable: true}
+        {id: 'thermal', name: 'Thermal',        stream: data.streamThermal,  on: sc.thermalOn,  streamable: true},
+        {id: 'tof',     name: 'ToF',            stream: data.streamTof,      on: sc.tofOn,      streamable: true},
+        {id: 'imu',     name: 'IMU',            stream: data.streamImu,      on: sc.imuOn,      streamable: true},
+        {id: 'input',   name: remoteInputName,  stream: data.streamInput,    on: sc.inputOn,    streamable: true},
+        {id: 'apds',    name: 'APDS',     stream: false,               on: sc.apdsOn,     streamable: false},
+        {id: 'gps',     name: 'GPS',      stream: data.streamGps,      on: sc.gpsOn,      streamable: true},
+        {id: 'rtc',     name: 'RTC',      stream: data.streamRtc,      on: sc.rtcOn,      streamable: true},
+        {id: 'presence',name: 'Presence', stream: data.streamPresence, on: sc.presenceOn, streamable: true},
+        {id: 'fmradio', name: 'FM Radio', stream: data.streamFmradio,  on: sc.fmradioOn,  streamable: true}
       ];
+      for (const s of sensors) s.mask = sBits[s.id] || 0;
       
       // Latch: if a sensor was ever connected or enabled, it's physically present
       if (hasLive) {
@@ -573,7 +579,8 @@ void streamBondInner(httpd_req_t* req) {
         const localInputName = (localInputType === 2) ? 'ANO Encoder'
                              : (localInputType === 1) ? 'Gamepad'
                              : 'Input';
-        const lDefs = [{m:0x01,n:'Thermal'},{m:0x02,n:'ToF'},{m:0x04,n:'IMU'},{m:0x08,n:localInputName},{m:0x10,n:'APDS'},{m:0x20,n:'GPS'},{m:0x40,n:'RTC'},{m:0x80,n:'Presence'},{m:0x100,n:'FM Radio'}];
+        const lBits = data.sensorBits || {};
+        const lDefs = [{k:'thermal',n:'Thermal'},{k:'tof',n:'ToF'},{k:'imu',n:'IMU'},{k:'input',n:localInputName},{k:'apds',n:'APDS'},{k:'gps',n:'GPS'},{k:'rtc',n:'RTC'},{k:'presence',n:'Presence'},{k:'fmradio',n:'FM Radio'}].map(function(d){d.m = lBits[d.k] || 0; return d;});
         const lRows = lDefs.filter(function(d){return localSensorMask & d.m;});
         if (lRows.length > 0) {
           html += '<div style="border-top:1px solid var(--panel-border);margin-top:8px;padding-top:8px">';
@@ -1043,6 +1050,14 @@ static esp_err_t handleBondStatus(httpd_req_t* req) {
   webBondSendChunkf(req, "\"localMac\":\"%s\",", localMacStr.c_str());
   webBondSendChunkf(req, "\"peerName\":\"%s\",", peerName);
   webBondSendChunkf(req, "\"role\":%d,", gSettings.bondRole);
+  // The mask bit of each sensor type, by name, from the one sensor table: the
+  // page takes every sensor mask from here and types no number of its own.
+  webBondSendChunk(req, "\"sensorBits\":{");
+  for (int i = 0; i < REMOTE_SENSOR_MAX; i++) {
+    webBondSendChunkf(req, "%s\"%s\":%lu", i ? "," : "", espnowsensor::kSensorTable[i].name,
+                      (unsigned long)espnowsensor::sensorBit((uint8_t)i));
+  }
+  webBondSendChunk(req, "},");
   webBondSendChunkf(req, "\"lastHeartbeat\":%lu,", lastHb);
   webBondSendChunkf(req, "\"lastHeartbeatAgeSec\":%lu,", (unsigned long)lastHeartbeatAgeSec);
   webBondSendChunkf(req, "\"heartbeatsRx\":%lu,", (unsigned long)hbRx);
@@ -1131,7 +1146,7 @@ static esp_err_t handleBondStatus(httpd_req_t* req) {
     localSensors |= CAP_SENSOR_PRESENCE;
 #endif
     String lFeatures = getCapabilityListLong(localFeatures, FEATURE_NAMES);
-    String lSensors = getCapabilityListLong(localSensors, SENSOR_NAMES);
+    String lSensors = sensorMaskNames(localSensors, /*longForm=*/true);
     webBondSendChunk(req, "\"localCapabilities\":{");
     webBondSendChunkf(req, "\"features\":\"%s\",", lFeatures.c_str());
     webBondSendChunkf(req, "\"sensors\":\"%s\",", lSensors.c_str());
@@ -1164,7 +1179,7 @@ static esp_err_t handleBondStatus(httpd_req_t* req) {
   if (gEspNow && gEspNow->lastRemoteCapValid) {
     CapabilitySummary& cap = gEspNow->lastRemoteCap;
     String features = getCapabilityListLong(cap.featureMask, FEATURE_NAMES);
-    String sensors = getCapabilityListLong(cap.sensorMask, SENSOR_NAMES);
+    String sensors = sensorMaskNames(cap.sensorMask, /*longForm=*/true);
     String services = getCapabilityListLong(cap.serviceMask, SERVICE_NAMES);
     
     webBondSendChunk(req, "\"capabilities\":{");

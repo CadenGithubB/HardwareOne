@@ -92,9 +92,14 @@ def measure(component: Path) -> tuple[int, list[str]]:
         failures.append(f"System_I2C_Manager.h: found only {len(devices)} I2cDeviceType values")
 
     remote = texts.get("System_ESPNow_Sensors.cpp", "")
-    if "static const char* const kRemoteSensorNames[] = {" not in remote or \
-            "== REMOTE_SENSOR_MAX" not in remote:
-        failures.append("System_ESPNow_Sensors.cpp: kRemoteSensorNames with its static_assert is missing")
+    # The remote sensor names have one owner: the table of
+    # System_ESPNow_SensorCore.h, sized by REMOTE_SENSOR_MAX so a type without
+    # a row does not compile (espnow_sensor_core_tests checks every row).
+    core = texts.get("System_ESPNow_SensorCore.h", "")
+    if "inline constexpr SensorRow kSensorTable[REMOTE_SENSOR_MAX] = {" not in core:
+        failures.append("System_ESPNow_SensorCore.h: kSensorTable[REMOTE_SENSOR_MAX] is missing")
+    if "return espnowsensor::sensorName((int)type);" not in remote or "kRemoteSensorNames" in remote:
+        failures.append("System_ESPNow_Sensors.cpp: sensorTypeToString must read the one sensor table")
     if remote.count("bool* bondStreamSetting(RemoteSensorType type) {") != 1:
         failures.append("System_ESPNow_Sensors.cpp must define bondStreamSetting(RemoteSensorType) once")
     for relative, code in sorted(texts.items()):

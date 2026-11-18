@@ -50,6 +50,10 @@ enum : uint8_t {
 };
 constexpr uint8_t NTIER_DEFAULT = NTIER_STANDARD;
 
+// The tier of an event kind (NTIER_*). Also what a device goes by when it
+// sends its events to the mesh master (EVENT_PUSH, the setting eventPush).
+uint8_t notifKindTier(uint8_t kind);
+
 struct NotifRule {
   uint8_t sinks;       // NSINK_* mask
   uint8_t level;       // 0=info 1=success 2=warning 3=error

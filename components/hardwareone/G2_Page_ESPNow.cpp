@@ -26,7 +26,7 @@
 
 #if ENABLE_ESPNOW
 #include "System_ESPNow.h"
-#include "System_ESPNow_Sensors.h"   // gRemoteSensorCache + formatRemoteSensorReadable (Bonded Device view)
+#include "System_ESPNow_Sensors.h"   // remoteSensorInfoAt + formatRemoteSensorReadable (Bonded Device view)
 #include "System_MemUtil.h"          // ps_alloc — chat head-record copy (PSRAM)
 #endif
 
@@ -497,7 +497,8 @@ static void showStatsMenu() {
 // -----------------------------------------------------------------------------
 // Bonded Device — remote sensors streamed across the bond/mesh
 // -----------------------------------------------------------------------------
-// Reads gRemoteSensorCache (populated by the espnow RX path whenever a worker
+// Reads the table of received readings through its accessors (copies taken
+// under the table's lock; the espnow RX path fills it whenever a worker
 // streams sensor data). The sensor list mirrors the OLED Remote-Sensors page;
 // the detail view reuses the shared formatRemoteSensorReadable() so any sensor
 // renders without per-type code on the lens.
@@ -508,29 +509,19 @@ static constexpr size_t kBondSensorDisplayMax = 15;
 
 // Collect valid cache indices in a stable order shared by renderer + tap
 // handler, so row N maps to the same entry in both. Returns count collected.
-static size_t collectBondSensorIdx(int* out, size_t maxN) {
-  if (!gRemoteSensorCache || !out) return 0;
+static size_t collectBondSensorIdx(uint8_t* out, size_t maxN) {
+  if (!out) return 0;
   size_t n = 0;
-  unsigned long now = millis();
-  for (int i = 0; i < MAX_REMOTE_DEVICES * MAX_SENSORS_PER_DEVICE && n < maxN; i++) {
-    // Full mirror: list every CONNECTED (present) remote sensor, streaming or not.
-    RemoteSensorData& e = gRemoteSensorCache[i];
-    if (!e.connected) continue;
-    // Age out a vanished device from the display path so its slot frees up.
-    if (now - e.lastSeen > REMOTE_SENSOR_PRESENCE_TTL_MS) { e.connected = false; continue; }
-    out[n++] = i;
+  const int slots = remoteSensorSlotCount();
+  for (int i = 0; i < slots && n < maxN; i++) {
+    // Full mirror: list every CONNECTED (present) remote sensor, streaming or
+    // not. A sensor not heard from for the presence time is left out; this
+    // page does not change the table.
+    RemoteSensorInfo e;
+    if (!remoteSensorInfoAt(i, &e)) continue;
+    out[n++] = (uint8_t)i;
   }
   return n;
-}
-
-// Re-find a cached entry by MAC+type (the detail view's stored identity).
-static RemoteSensorData* findBondSensorEntry(const uint8_t* mac, RemoteSensorType type) {
-  if (!gRemoteSensorCache || !mac) return nullptr;
-  for (int i = 0; i < MAX_REMOTE_DEVICES * MAX_SENSORS_PER_DEVICE; i++) {
-    RemoteSensorData& e = gRemoteSensorCache[i];
-    if (e.connected && e.sensorType == type && memcmp(e.deviceMac, mac, 6) == 0) return &e;
-  }
-  return nullptr;
 }
 #endif  // ENABLE_ESPNOW
 
@@ -544,10 +535,11 @@ static void showBondSensorsMenu() {
   ptrs[0] = rows[0];
   size_t n = 1;
 
-  int idx[MAX_REMOTE_DEVICES * MAX_SENSORS_PER_DEVICE];
+  uint8_t idx[REMOTE_SENSOR_SLOTS_MAX];
   size_t got = collectBondSensorIdx(idx, sizeof(idx) / sizeof(idx[0]));
   for (size_t i = 0; i < got && (n - 1) < kBondSensorDisplayMax; i++) {
-    const RemoteSensorData& e = gRemoteSensorCache[idx[i]];
+    RemoteSensorInfo e;
+    if (!remoteSensorInfoAt(idx[i], &e)) continue;  // gone since it was listed
     const char* dn = (e.deviceName[0]) ? e.deviceName : "?";
     // " (off)" marks a connected-but-not-streaming sensor (enabled = streaming).
     snprintf(rows[n], sizeof(rows[n]), "%s - %s%s", dn, sensorTypeToString(e.sensorType),
@@ -573,11 +565,14 @@ static void showBondDetailMenu() {
   setSub(ESPN_APP_SUB_BOND_DETAIL);
 
 #if ENABLE_ESPNOW
-  RemoteSensorData* e = findBondSensorEntry(gSelSensorMac, gSelSensorType);
-  if (!e) {            // entry expired / peer gone — bounce back to the list
+  // A copy of the slot (the detail view's stored identity is MAC + type) and,
+  // below, of its text: the table can change while this page is built.
+  RemoteSensorInfo info;
+  if (!remoteSensorInfoFor(gSelSensorMac, gSelSensorType, &info)) {  // expired / peer gone: back to the list
     showBondSensorsMenu();
     return;
   }
+  const RemoteSensorInfo* e = &info;
 
   EXT_RAM_BSS_ATTR static char hdr[40];  // PSRAM: deep-copied by g2ShowListPage
   EXT_RAM_BSS_ATTR static char body[200];
@@ -586,13 +581,15 @@ static void showBondDetailMenu() {
 
   // Only render live data when fresh; otherwise label the sensor's state so a
   // present-but-not-streaming sensor reads "Disabled" instead of a stale frame.
-  bool freshData = e->valid && (millis() - e->lastUpdate <= REMOTE_SENSOR_TTL_MS);
+  bool freshData = e->fresh;
   int nLines;
   if (!freshData) {
     snprintf(body, sizeof(body), "%s", e->enabled ? "Streaming starting..." : "Disabled (not streaming)");
     nLines = 1;
   } else {
-    nLines = formatRemoteSensorReadable(e->jsonData, body, sizeof(body), 8);
+    EXT_RAM_BSS_ATTR static char text[espnowsensor::kReadingMaxBytes + 1];  // PSRAM: this page's task only
+    remoteSensorCopyText(e->deviceMac, e->sensorType, text, sizeof(text));
+    nLines = formatRemoteSensorReadable(text, body, sizeof(body), 8);
   }
 
   // Split `body` (newline-separated "key: value" lines) into row pointers in
@@ -1205,14 +1202,15 @@ static void handleBondSensorsTap(uint32_t idx) {
   if (idx == 0) { showMainMenu(); return; }
 #if ENABLE_ESPNOW
   int sel = (int)idx - 1;
-  int list[MAX_REMOTE_DEVICES * MAX_SENSORS_PER_DEVICE];
+  uint8_t list[REMOTE_SENSOR_SLOTS_MAX];
   size_t got = collectBondSensorIdx(list, sizeof(list) / sizeof(list[0]));
   if (sel < 0 || (size_t)sel >= got) {
     DEBUG_G2F("[G2-ESP-NOW-APP] bond-sensors: idx=%u out of range (got=%u)",
               (unsigned)idx, (unsigned)got);
     return;
   }
-  const RemoteSensorData& e = gRemoteSensorCache[list[sel]];
+  RemoteSensorInfo e;
+  if (!remoteSensorInfoAt(list[sel], &e)) return;  // gone since it was listed
   memcpy(gSelSensorMac, e.deviceMac, 6);
   gSelSensorType = e.sensorType;
   showBondDetailMenu();

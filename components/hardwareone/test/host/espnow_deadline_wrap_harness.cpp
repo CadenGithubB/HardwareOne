@@ -206,7 +206,31 @@ static bool startSensorBroadcasterLocked() {
   gSensorBroadcasterTask = &gStarts;
   return true;
 }
-void broadcastSensorStatus(RemoteSensorType, bool) { ++gStatusFrames; }
+#ifdef HW1_SENSOR_CORE
+// The sender's stream-start bookkeeping (System_ESPNow_SensorCore.h, pasted
+// with the sensor types above) and the status frame, one per apply.
+static espnowsensor::StreamTarget gSensorTxTarget[REMOTE_SENSOR_MAX] = {};
+// A stream switched on by hand (it survives the end of a lease), and the
+// controller the status frame is sent to once more when its last lease ended.
+static bool gSensorByHand[REMOTE_SENSOR_MAX] = {false};
+static bool gStatusAlsoToController = false;
+static void announceSensorStatus(const uint8_t* alsoTo = nullptr) {
+  ++gStatusFrames;
+  gStatusAlsoToController = alsoTo != nullptr;
+}
+#else
+void broadcastSensorStatus(RemoteSensorType, bool) { ++gStatusFrames; }  // a tree from before the status frame
+#endif
+#ifdef HW1_SENSOR_TARGETS
+// The masters named on this device (kept by sensorReceiverTargetsRefresh),
+// and what the stop by hand needs besides.
+static SensorReceiverTargets gSensorTargets = {};
+#define ENABLE_BONDED_MODE 0
+#define portMAX_DELAY 0xFFFFFFFFu
+#define DEBUG_ESPNOWF(...) noteLog(__VA_ARGS__)
+#define BROADCAST_PRINTF(...) noteLog(__VA_ARGS__)
+static const char* sensorTypeToString(RemoteSensorType) { return "sensor"; }
+#endif
 
 // ---- Production: lease owner and subscription apply --------------------------------
 // INSERT_SENSOR_PRODUCTION
@@ -262,6 +286,94 @@ int main() {
   check(gSensorLeaseExpiresAt[imu] == 0 && !gSensorStreamingEnabled[imu], "L7", "UNSUBSCRIBE clears the lease");
   check(gStatusFrames == 5 && !gEspNow->meshSensorReqPending && !gLifecycleHeld, "L7b",
         "one status frame per apply, no deferred retry, lifecycle lock released");
+#ifdef HW1_SENSOR_CORE
+  // L8 — the controller goes with its last lease, and is told once more.
+  const uint8_t kNoController[6] = {0, 0, 0, 0, 0, 0};
+  check(std::memcmp(gSensorControllerMac, kNoController, 6) == 0 && gStatusAlsoToController, "L8",
+        "UNSUBSCRIBE of the last lease forgets the controller and tells it the stream stopped");
+  // L9 — a stream that was switched on by hand goes on when the lease ends.
+  subscribe(100, SENSOR_REQ_SUBSCRIBE, 1000, 5000);
+  gSensorByHand[imu] = true;
+  check(std::memcmp(gSensorControllerMac, kController, 6) == 0, "L9", "SUBSCRIBE records the controller again");
+  subscribe(200, SENSOR_REQ_UNSUBSCRIBE, 0, 0);
+  check(gSensorLeaseExpiresAt[imu] == 0 && gSensorStreamingEnabled[imu] &&
+            std::memcmp(gSensorControllerMac, kNoController, 6) == 0, "L9b",
+        "UNSUBSCRIBE ends the lease, keeps a stream switched on by hand, and forgets the controller");
+  // L10 — two leases: the controller stays until the last one ends.
+  gSensorByHand[imu] = false;
+  gNowMs = 300;
+  espnowApplySensorSubscription(SENSOR_REQ_SUBSCRIBE, (1u << REMOTE_SENSOR_IMU) | (1u << REMOTE_SENSOR_GPS), 1000, 5000,
+                                kController);
+  subscribe(400, SENSOR_REQ_UNSUBSCRIBE, 0, 0);
+  check(!gSensorStreamingEnabled[imu] && gSensorStreamingEnabled[REMOTE_SENSOR_GPS] &&
+            std::memcmp(gSensorControllerMac, kController, 6) == 0 && !gStatusAlsoToController, "L10",
+        "with another lease still running the controller is kept");
+  gSensorLeaseExpiresAt[REMOTE_SENSOR_GPS] = 0;
+  gSensorStreamingEnabled[REMOTE_SENSOR_GPS] = false;
+  // L11 — a subscription switches sensor sending on (a master's request was
+  // dropped as broadcast_off whenever it had been switched off).
+  gSensorBroadcastEnabled = false;
+  subscribe(500, SENSOR_REQ_SUBSCRIBE, 1000, 5000);
+  check(gSensorBroadcastEnabled, "L11", "SUBSCRIBE switches sensor sending on");
+  // L12 — a stream that starts with a subscription begins with the
+  // stream-start flag; the renewal of a running one does not.
+  check(espnowsensor::streamStartWanted(gSensorTxTarget[imu], kController), "L12",
+        "the first reading of a subscribed stream carries the stream-start flag");
+  espnowsensor::streamSentTo(gSensorTxTarget[imu], kController);  // that reading went out
+  subscribe(600, SENSOR_REQ_SUBSCRIBE, 1000, 5000);
+  check(!espnowsensor::streamStartWanted(gSensorTxTarget[imu], kController), "L12b",
+        "a lease renewal does not flag the next reading as a new stream");
+  subscribe(700, SENSOR_REQ_UNSUBSCRIBE, 0, 0);
+  subscribe(800, SENSOR_REQ_SUBSCRIBE, 1000, 5000);
+  check(espnowsensor::streamStartWanted(gSensorTxTarget[imu], kController), "L12c",
+        "a stream subscribed again after it stopped begins with the flag (to the same controller)");
+  subscribe(900, SENSOR_REQ_UNSUBSCRIBE, 0, 0);
+  gStatusFrames = 5;
+#endif
+#ifdef HW1_SENSOR_TARGETS
+  // T1 — where readings go while one sensor is leased and another runs by
+  // hand: the leased one to the controller, the other to the named master,
+  // the status frame to the controller (the controller counts for a sensor
+  // only while that sensor's own lease runs).
+  {
+    const uint8_t kHub[6] = {0x02, 0x00, 0x00, 0x00, 0x00, 0x10};
+    gSensorTargets = SensorReceiverTargets{};
+    gSensorTargets.masterNamed = gSensorTargets.havePrimary = true;
+    std::memcpy(gSensorTargets.primary, kHub, 6);
+    subscribe(1000, SENSOR_REQ_SUBSCRIBE, 1000, 5000);           // IMU leased by the controller
+    gSensorByHand[REMOTE_SENSOR_GPS] = true;                      // GPS switched on by hand
+    gSensorStreamingEnabled[REMOTE_SENSOR_GPS] = true;
+    auto target = [&](int sensor) {
+      espnowsensor::TargetInputs in = {};
+      in.broadcastOn = in.meshOn = true;
+      sensorTargetInputsLocked(sensor, in);
+      return espnowsensor::readingTarget(in);
+    };
+    check(std::memcmp(target(imu).mac, kController, 6) == 0, "T1", "the leased sensor goes to the controller");
+    check(target(REMOTE_SENSOR_GPS).why == espnowsensor::DropReason::None &&
+              std::memcmp(target(REMOTE_SENSOR_GPS).mac, kHub, 6) == 0, "T1b",
+          "a sensor switched on by hand goes to the named master, not to the controller of another sensor");
+    check(std::memcmp(target(-1).mac, kController, 6) == 0, "T1c", "the status frame goes to the controller");
+    gSensorTargets.havePrimary = false;
+    check(target(REMOTE_SENSOR_GPS).why == espnowsensor::DropReason::MasterNotPaired, "T1d",
+          "a named master that is not paired: master_not_paired");
+    // T2 — a stop by hand ends the stream whoever started it: the lease goes,
+    // and with the last lease the controller, which is told once more.
+    gSensorByHand[imu] = true;
+    gStatusAlsoToController = false;
+    stopSensorDataStreaming(REMOTE_SENSOR_IMU);
+    const uint8_t kNone[6] = {0, 0, 0, 0, 0, 0};
+    check(!gSensorStreamingEnabled[imu] && !gSensorByHand[imu] && gSensorLeaseExpiresAt[imu] == 0 &&
+              gSensorReqIntervalMs[imu] == 0, "T2", "a stop by hand ends the stream, its lease and the by-hand flag");
+    check(std::memcmp(gSensorControllerMac, kNone, 6) == 0 && gStatusAlsoToController && !gLifecycleHeld, "T2b",
+          "with the last lease the controller goes, and is told the stream stopped");
+    check(target(-1).why != espnowsensor::DropReason::None || std::memcmp(target(-1).mac, kController, 6) != 0, "T2c",
+          "the status frame no longer goes to the old controller");
+    stopSensorDataStreaming(REMOTE_SENSOR_GPS);
+    check(!gSensorStreamingEnabled[REMOTE_SENSOR_GPS] && !gSensorByHand[REMOTE_SENSOR_GPS], "T2d", "the GPS stream stops too");
+    gStatusFrames = 5;
+  }
+#endif
 
   // P1-P3 — pre-warm backoff armed 4 s before the wrap (60 s deadline wraps to 0xDA60).
   const uint8_t peer[6] = {0x02, 0x00, 0x00, 0x00, 0x00, 0x01};

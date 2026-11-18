@@ -74,10 +74,12 @@ def main():
                     deadline.replace('#include "System_Deadline.h"\n', ''))
     failures = []
 
-    def run_unit(unit, harness, label):
+    def run_unit(unit, harness, label, headers=None):
         with tempfile.TemporaryDirectory(prefix=f'hw1-espnow-deadline-{unit}-') as tmp:
             src, exe = Path(tmp) / 'test.cpp', Path(tmp) / 'test'
             src.write_text(harness)
+            for name, text in (headers or {}).items():
+                (Path(tmp) / name).write_text(text)
             cmd = [a.cxx, '-std=c++17', '-Wall', '-Wextra', '-Werror', '-pedantic', f'-DA16_UNIT={unit}',
                    str(src), '-o', str(exe)]
             if a.sanitize:
@@ -144,12 +146,35 @@ def main():
         failures.extend(missing)
     else:
         sensors_h = read('System_ESPNow_Sensors.h')
-        sensor_types = '\n'.join(one(sensors_h, marker, 'System_ESPNow_Sensors.h') + ';'
-                                 for marker in ('enum RemoteSensorType', 'enum SensorReqMode'))
+        # The sensor types live in the dependency-free System_ESPNow_SensorCore.h
+        # (included as it is: the subscription apply also uses its stream-start
+        # helper); a tree from before it has the enum in System_ESPNow_Sensors.h.
+        sensor_core = read_optional('System_ESPNow_SensorCore.h')
+        headers = {}
+        if sensor_core:
+            headers['System_ESPNow_SensorCore.h'] = sensor_core
+            sensor_types = ('#define HW1_SENSOR_CORE 1\n#include "System_ESPNow_SensorCore.h"\n' +
+                            one(sensors_h, 'enum SensorReqMode', 'System_ESPNow_Sensors.h') + ';')
+            if 'struct SensorReceiverTargets' in sensors_h:
+                sensor_types += ('\n#define HW1_SENSOR_TARGETS 1\n' +
+                                 one(sensors_h, 'struct SensorReceiverTargets', 'System_ESPNow_Sensors.h') + ';')
+        else:
+            sensor_types = '\n'.join(one(sensors_h, marker, 'System_ESPNow_Sensors.h') + ';'
+                                     for marker in ('enum RemoteSensorType', 'enum SensorReqMode'))
         lease_state = line(sensors, r'^static uint32_t gSensorLeaseExpiresAt\[REMOTE_SENSOR_MAX\] = .*;',
                            'gSensorLeaseExpiresAt')
-        sensor_production = '\n\n'.join(one(sensors, marker, 'System_ESPNow_Sensors.cpp') for marker in
-                                        ('static bool sensorLeaseLapsed(', 'void espnowApplySensorSubscription('))
+        # (the controller owner exists since streams can be switched on by hand;
+        # a tree from before it has no such function and does not call it)
+        owners = ['static bool sensorLeaseLapsed(']
+        if 'static bool sensorControllerClearIfNoLeaseLocked(' in sensors:
+            owners.append('static bool sensorControllerClearIfNoLeaseLocked(')
+        owners.append('void espnowApplySensorSubscription(')
+        # (the target inputs and the stop by hand, in a tree that has the
+        # targets: what goes where while a lease and a stream by hand run)
+        if 'static void sensorTargetInputsLocked(' in sensors:
+            owners.append('static void sensorTargetInputsLocked(')
+            owners.append('void stopSensorDataStreaming(')
+        sensor_production = '\n\n'.join(one(sensors, marker, 'System_ESPNow_Sensors.cpp') for marker in owners)
         constants = re.findall(r'^static constexpr \w+\s+kSessionPrewarm\w+\s*=\s*.*;', espnow, re.M)
         if len(constants) != 2:
             raise SystemExit('test_espnow_deadline_wrap: kSessionPrewarm* constants not found in System_ESPNow.cpp')
@@ -168,7 +193,7 @@ def main():
                           ('// INSERT_LEASE_STATE', lease_state),
                           ('// INSERT_SENSOR_PRODUCTION', sensor_production),
                           ('// INSERT_PREWARM_PRODUCTION', prewarm)]),
-                 'sensor leases, pre-warm cooldown')
+                 'sensor leases, pre-warm cooldown', headers)
 
     for failure in failures:
         print('FAIL', failure, file=sys.stderr)

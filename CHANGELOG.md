@@ -14,6 +14,76 @@ The version stays 0.99.99.1 until the 1.0 gate in `RELEASING.md` is met; this se
 everything user-visible since the v0.99.99.1 tag.
 
 ### Added
+- ESP-NOW mesh time works. The mesh master sends its clock (UTC) to each paired device over that
+  device's encrypted session: when the session has come up, every 10 minutes, when the master's own
+  clock was set, and on `espnowtimesync`. A device whose clock has no better source of its own (the
+  RTC chip, NTP, `timeset`, the CM5) sets its clock from it, and `time`, `status` and
+  `espnowtimestatus` then show the source `mesh`; a device that has a better source ignores it. The
+  master sends only when its own clock comes from one of those four sources, so a clock taken from
+  the mesh or the ring is never passed on. A time more than an hour away from a clock that is
+  already set is held and applied when the same sender says it again 10 s or more later (the master
+  repeats a changed clock after 15 s by itself). When a master is named on a device
+  (`espnowmasterfingerprint`, `espnowbackupfingerprint`), only that master's time is taken; while
+  none is named, any paired device that says it is the master may set the clock, and mesh time then
+  changes a clock that is already set at most once in 10 minutes. A device with mesh mode off
+  takes no mesh time. Mesh time is not written into the RTC chip, also not later by the RTC task
+  from a clock carried over a restart. New setting `espnowmeshtime <on|off>` (default on), and
+  `espnowtimestatus [json]` says where this device's clock comes from, when it was last set, and
+  what was sent or what happened to the last time frame. Before, `espnowtimesync` sent a frame the
+  receiver stored and never used, no clock was set, and `espnowtimestatus` said "Synced: Yes". The
+  clock is good to a few seconds; a device that is in the mesh but not paired with the master gets
+  no time. Host-tested (rules, the device side against a settable clock, the receive gates and a
+  relay hop); builds for the XIAO S3 and the P4; not yet run on hardware.
+- ESP-NOW sensor readings of up to 472 bytes arrive, and the receiver counts what was lost. A
+  reading over 200 bytes was refused in the sender with a debug line, so ToF and FM radio readings
+  never arrived. A reading now travels in 1 to 4 frames (also through a relay) and is put together
+  by the receiver; one over 472 bytes is not sent. Each reading carries the sender's count for that
+  sensor, so the receiver counts lost, late and repeated readings and notices a restarted sender.
+  The receiver stamps each reading with its own clock at arrival (UTC, in milliseconds; absent
+  while its clock is not set) and its uptime; a time carried by the sender is not trusted. An older
+  reading never replaces a newer one, also when it arrives late through a relay.
+  `GET /api/sensors/remote?device=<MAC>&sensor=<type>` gains `arrivalEpochMs`, `arrivalUptimeMs`,
+  `agoMs`, `clock`, `bootTag`, `counter`, `received`, `lost`, `late`, `repeated`, `restarts`,
+  `resumes` and `incomplete`. A reading that is not sent is counted with its reason and said on the console once
+  a minute per sensor (too long, no receiver, no session yet, send queue full, bond partner not
+  connected, sending switched off, mesh off, this device is the master, sensor not in this
+  firmware); `espnowsensorstatus` shows the counts, and lists all eleven sensor types.
+  `espnowsensorstream <sensor> on` refuses a sensor this firmware cannot read. Host-tested (rules,
+  the production sender and receiver end to end, the receive gates and a relay hop); builds for
+  the XIAO S3 and the P4; not yet run on hardware.
+- The mesh master sees the battery of the other devices. A device with a battery monitor that is
+  not the mesh master sends its battery state to the master named on it
+  (`espnowmasterfingerprint`, and to the backup master named with `espnowbackupfingerprint`) over
+  the encrypted session: every 60 s, and at once when the status, charging, USB power or battery
+  presence changes (never more often than every 5 s). `espnowpowerinterval <0|10..3600>` sets the
+  seconds, 0 switches it off. Nothing is sent while no master is named: naming the master is the
+  consent. The master and the backup master keep the latest state of up to sixteen paired devices
+  with their own clock at arrival (UTC) and count lost frames; `espnowbattery [json] [<device>]`
+  shows them, and what the sending device did not know is `null` in the json form. It needs no
+  bond and works through a relay. The frame asks for an acknowledgement: after two that nobody
+  acknowledged the device starts a new session, which is what brings a device back whose master
+  restarted out of direct radio reach. A device that is sent battery state without being a master
+  or backup master refuses it, counts it and says so once a minute. Host-tested (rules, the
+  production sender and receiver, the receive gates and a relay hop); not yet run on hardware.
+- The mesh master sees the system events of the other devices. A device that is not the mesh
+  master sends its own events (the ones `events` shows) to the masters named on it:
+  `espnoweventpush <off|alert|standard|verbose>` chooses which, default `alert` (security, safety
+  and faults: failed logins, lockouts, a crash, a factory reset, critical battery and the like);
+  the events below that level do not hold an alert back. At most eight at once and then one every 2 s; what is left out is counted and the count travels
+  with the next event. One event is one encrypted frame, also through a relay, with the kind as
+  its name and subject, detail and user cut to 32, 32 and 12 bytes (the full text stays in the
+  sending device's `events.log`, and the frame carries that event's number). The master and the
+  backup master keep the newest 24 events per mesh with their own clock at arrival, limit each
+  sending device to sixteen at once and one a second, and never let one busy device push out
+  another's events; a received event is not put into the master's own event list and triggers no
+  automation there. `espnowevents [json] [since <rx>]` shows them; the json form says how many
+  older ones are no longer held and pages with `more`. Nothing in a received frame is trusted to
+  be text. Host-tested (rules, the production sender and receiver with frames of arbitrary bytes,
+  the receive gates and a relay hop); not yet run on hardware.
+- `espnowsensorstatus` shows the whole picture on one page: the role, the masters this device
+  sends to and whether their session is up, per sensor what was sent and why not, whether battery
+  state and events are sent, and on a master one line per sending device with its sensors, counts,
+  battery and events. `espnowsensorstatus json <name_or_mac>` gives everything kept of one device.
 - `factoryreset all` prepares a device for a new owner. On the serial console, as a super admin, it
   does the ordinary factory reset and then, at the next start and before anything is mounted, erases
   the whole internal filesystem and NVS: saved WiFi networks, MQTT and LLM credentials, ESP-NOW
@@ -60,6 +130,19 @@ everything user-visible since the v0.99.99.1 tag.
   as it did (its bond heartbeat counts as its agreement). Host-tested; not yet run on hardware.
 
 ### Fixed
+- ESP-NOW sensor readings: a sensor type outside the known range in a received frame is refused
+  and counted (the mesh path used it unchecked); a reading whose text is not one valid JSON object
+  is refused, so a sender cannot add keys of its choosing to the receiver's `/api/sensors/remote`
+  reply or make it invalid JSON; the pages that list received readings (web, OLED, glasses, MQTT bridge) read copies and no
+  longer free table slots, so a radio outage of over a minute is counted as loss instead of being
+  forgotten; every sending device has its own place for each of its sensors, so the table is full
+  when sixteen paired devices send and not when a few devices have many sensors (64 places for all
+  were shared before, and a new sensor silently took the place of an old one): the seventeenth
+  device is refused, counted, shown by `espnowsensorstatus` and said on the console once a minute;
+  in a build without bonded mode a sensor request from the master was accepted and never applied.
+- ESP-NOW: a mesh master with nine or more paired devices that are away no longer starts a
+  handshake with one of them every half second, for good: the back-off table now has room for all
+  sixteen paired devices (it had eight, and a full table gave up an entry at every try).
 - Waveshare ESP32-P4 board: speaker test tones were close to inaudible at ordinary volume values,
   because the volume was applied twice (codec register and sample level). The codec now stays at
   0 dB and the volume scales the samples; volume 0 is silence. The camera module on this board faces
@@ -473,6 +556,37 @@ everything user-visible since the v0.99.99.1 tag.
   yet tested on hardware.
 
 ### Changed
+- ESP-NOW frame formats changed for the 1.0 format (a device with this firmware does not exchange
+  sensor readings, sensor status or time with a device on an earlier build; install all devices
+  together). Sensor readings (types 154, and 179 to a bond partner) have one 12-byte header with a
+  counter, a boot tag, a part number and reserved bytes. Sensor status (151) is one frame with two
+  masks, sent over the encrypted session to the device that receives the readings instead of as a
+  signed broadcast, so it now also reaches a master through a relay. The sensor request (153) has
+  two reserved bytes. Time (35) is a 16-byte frame over the encrypted session instead of a signed
+  broadcast that relays passed on. Battery state (152, 24 bytes) and events (132, 128 bytes) are
+  new. All of them are accepted only from a paired device over its session, and none needs a bond.
+- One numbering of the sensor types. The capability and bond status masks used another bit order
+  than the readings and requests (input, gesture, GPS, clock, presence and FM radio had different
+  bits); every mask now uses the order of the readings. The bond page and the OLED bond screen take
+  the bits from the firmware, and the capability lists name the input device "Input Device".
+- Who keeps sensor readings follows the mesh role. A backup master now keeps the readings, battery
+  state and events it is sent (it was treated like a worker) and still sends its own to the master
+  until it takes over. A worker that is sent readings refuses them, counts them and says so once a
+  minute; before, every device kept whatever a paired device sent it. A bond master keeps its bond
+  partner's readings whatever its mesh role, as before. The memory for received readings (about
+  15 KB, and 6 KB per sending device) is now taken only by a device that receives some, when the
+  first one arrives, and no longer by every device that starts ESP-NOW.
+- `espnowsensorstream <sensor> on` sends that sensor's readings to the master named on this device
+  (`espnowmasterfingerprint`), which must be paired with it. Before, a stream switched on by hand
+  went nowhere unless the master had asked for it first, and the command answered "streaming
+  started" either way. The reply now says where the readings go ("OK: tof readings are sent to
+  hub.") or why nothing is sent yet (no master named, the named master is not paired, no session
+  with it yet, mesh mode off). A stream switched on by hand is no longer stopped when a request of
+  the master for the same sensor runs out; a stream the master asked for still stops then. On the
+  mesh master the command says that the master receives readings and sends none.
+- A device that asked for readings is told why none come: without an encrypted session a reading is
+  no longer kept back for later (the next one is newer), the session is started in the background
+  with the usual back-off, and the drop is counted.
 - OLED feedback is one shared message box. It replaces the animated status ribbon, the error boxes
   that the login, password, Settings editor and Health screens drew themselves, and the results
   shown in footers. A refused command shows the command's own reason (the admin gate as "Admin

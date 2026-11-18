@@ -341,7 +341,7 @@ static esp_err_t handleEspNowRemoteCap(httpd_req_t* req) {
   // Get human-readable capability lists
   String featureList = getCapabilityListLong(cap.featureMask, FEATURE_NAMES);
   String serviceList = getCapabilityListLong(cap.serviceMask, SERVICE_NAMES);
-  String sensorList = getCapabilityListLong(cap.sensorMask, SENSOR_NAMES);
+  String sensorList = sensorMaskNames(cap.sensorMask, /*longForm=*/true);
   
   // Build fwHash hex string
   char fwHashHex[33];

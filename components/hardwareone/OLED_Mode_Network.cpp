@@ -1191,20 +1191,22 @@ void displayMeshStatusRendered() {
 EXT_RAM_BSS_ATTR static OledScrollState sRemoteSensorScroll;
 static bool sRemoteSensorScrollInitialized = false;
 
-static int collectConnectedRemoteSensors(int* outValidIndices, int maxOut) {
-  if (!gRemoteSensorCache || !outValidIndices || maxOut <= 0) return 0;
+// The latest reading's text of the sensor on screen: a copy taken under the
+// table's lock (PSRAM; the OLED task is the only user).
+EXT_RAM_BSS_ATTR static char sRemoteSensorText[espnowsensor::kReadingMaxBytes + 1];
+
+static int collectConnectedRemoteSensors(uint8_t* outValidIndices, int maxOut) {
+  if (!outValidIndices || maxOut <= 0) return 0;
   int validCount = 0;
-  unsigned long now = millis();
-  for (int i = 0; i < MAX_REMOTE_DEVICES * MAX_SENSORS_PER_DEVICE && validCount < maxOut; i++) {
+  const int slots = remoteSensorSlotCount();
+  for (int i = 0; i < slots && validCount < maxOut; i++) {
     // Full mirror: list every CONNECTED (present) remote sensor — including
     // disabled ones — not just the actively-streaming ones, matching the web.
-    RemoteSensorData& e = gRemoteSensorCache[i];
-    if (!e.connected) continue;
-    // Presence aging from the display path: a device we haven't heard from in a
-    // while is gone — free its slot so it drops off (keeps the cache healthy even
-    // when no web client is around to age it).
-    if (now - e.lastSeen > REMOTE_SENSOR_PRESENCE_TTL_MS) { e.connected = false; continue; }
-    outValidIndices[validCount++] = i;
+    // A sensor not heard from for the presence time is left out; this page
+    // does not change the table (the writer reuses such a slot).
+    RemoteSensorInfo e;
+    if (!remoteSensorInfoAt(i, &e)) continue;
+    outValidIndices[validCount++] = (uint8_t)i;
   }
   return validCount;
 }
@@ -1273,7 +1275,7 @@ void displayRemoteSensors() {
     return;
   }
 
-  int validIndices[MAX_REMOTE_DEVICES * MAX_SENSORS_PER_DEVICE];
+  uint8_t validIndices[REMOTE_SENSOR_SLOTS_MAX];
   int validCount = collectConnectedRemoteSensors(validIndices,
                      (int)(sizeof(validIndices) / sizeof(validIndices[0])));
 
@@ -1293,7 +1295,11 @@ void displayRemoteSensors() {
   int sel = sRemoteSensorScroll.selectedIndex;
   if (sel < 0 || sel >= validCount) sel = 0;
   int idx = validIndices[sel];
-  RemoteSensorData* entry = &gRemoteSensorCache[idx];
+  // A copy of the slot and of its text: the table can change while this draws.
+  RemoteSensorInfo entryInfo;
+  if (!remoteSensorInfoAt(idx, &entryInfo)) return;  // gone since the list was made
+  const RemoteSensorInfo* entry = &entryInfo;
+  remoteSensorCopyText(entry->deviceMac, entry->sensorType, sRemoteSensorText, sizeof(sRemoteSensorText));
 
   // Device name and sensor type
   oledDisplay->setCursor(0, 12);
@@ -1304,7 +1310,7 @@ void displayRemoteSensors() {
   // Streaming state (mirrors the web dot): only render live data when fresh.
   // A connected sensor that isn't streaming shows "Disabled" so present-but-off
   // is clearly distinct from active — rather than rendering a stale frame.
-  bool freshData = entry->valid && (millis() - entry->lastUpdate <= REMOTE_SENSOR_TTL_MS);
+  bool freshData = entry->fresh;
   if (!freshData) {
     oledDisplay->setCursor(0, 28);
     oledDisplay->println(entry->enabled ? "Streaming starting..." : "Disabled (not streaming)");
@@ -1314,7 +1320,7 @@ void displayRemoteSensors() {
   // Parse and display sensor data based on type
   if (entry->jsonLength > 0) {
     PSRAM_JSON_DOC(doc);
-    if (deserializeJson(doc, entry->jsonData) == DeserializationError::Ok) {
+    if (deserializeJson(doc, sRemoteSensorText) == DeserializationError::Ok) {
       switch (entry->sensorType) {
         case REMOTE_SENSOR_INPUT: {
           // Two distinct input devices both stream as REMOTE_SENSOR_INPUT:
@@ -1493,7 +1499,7 @@ void displayRemoteSensors() {
           // with whatever the producer emits. (Gamepad/IMU/GPS/ToF/FM keep their
           // bespoke layouts above.)
           char lines[128];
-          formatRemoteSensorReadable(entry->jsonData, lines, sizeof(lines), 4);
+          formatRemoteSensorReadable(sRemoteSensorText, lines, sizeof(lines), 4);
           oledDisplay->setCursor(0, 24);
           oledDisplay->print(lines);  // newline-separated; GFX advances on '\n'
           break;
@@ -1527,7 +1533,7 @@ static bool remoteSensorsAvailable(String* outReason) {
 
 static bool remoteSensorsInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t /*newlyPressed*/) {
   // Count valid entries; only enable nav if there are >=2 entries to switch between.
-  int dummy[MAX_REMOTE_DEVICES * MAX_SENSORS_PER_DEVICE];
+  uint8_t dummy[REMOTE_SENSOR_SLOTS_MAX];
   int validCount = collectConnectedRemoteSensors(dummy, (int)(sizeof(dummy) / sizeof(dummy[0])));
   if (validCount == 0) return false;
 

@@ -4045,7 +4045,7 @@ through it. It takes `--cxx`, `--sanitize` and `--component <directory>`.
 
 ## ESP-NOW dispatch policy
 
-`espnow_dispatch_policy` extracts the production V4 opcode table, its flag constants, the lookup, the dispatcher (`v4_dispatch_table_try`), `espnowOriginIsKnown`, `v4h_text` and the espnow_task text-queue drain from `System_ESPNow.cpp`. It also extracts `LogMessageType` and `TextQueueEntry` from `System_ESPNow.h`, the opcode/flag enums and header from `System_ESPNow_Wire.h`, and `V4RxCtx`. It generates one recording double per other handler named in the table and compiles the harness with `ENABLE_BONDED_MODE` 1 and 0. It checks the following. SUBSCRIBE_UPDATE needs a paired, session-encrypted frame. Once the device has a mesh passphrase, SENSOR_STATUS, TEXT and BOOT need an authenticated frame, and a plaintext one is dropped with one warning; a keyless device still accepts plaintext. Plaintext TEXT accepted on a keyless device is filed under its origin MAC, never a paired peer's name, and posts no `SYSEVT_TEXT_RX`. Authenticated text (BROADCAST_AUTH or session-encrypted, direct or relayed) keeps its registry name, encryption flag, per-fragment records and single bus event, and BOOT stays a system notice. The retired opcode 150 has no row. Every zero-flag row is on an explicit allow-list (handshakes, HEARTBEAT, TOPO_*, USER_SYNC); this is a subset check, so later items may only shrink the list. `--component <component-directory>` or `--source-dir <overlay>` replays the pre-fix sources. It uses ASan/UBSan when `HW1_SANITIZE` is enabled and mocks history, the event bus and the radio.
+`espnow_dispatch_policy` extracts the production V4 opcode table, its flag constants, the lookup, the dispatcher (`v4_dispatch_table_try`), `espnowOriginIsKnown`, `v4h_text` and the espnow_task text-queue drain from `System_ESPNow.cpp`. It also extracts `LogMessageType` and `TextQueueEntry` from `System_ESPNow.h`, the opcode/flag enums and header from `System_ESPNow_Wire.h`, and `V4RxCtx`. It generates one recording double per other handler named in the table and compiles the harness with `ENABLE_BONDED_MODE` 1 and 0. It checks the following. SUBSCRIBE_UPDATE needs a paired, session-encrypted frame. TIME_SYNC, SENSOR_STATUS, SENSOR_REQ and SENSOR_ENVELOPE need one too, on a keyed and a keyless device, with no bond partner required; a signed broadcast is not enough for them. Once the device has a mesh passphrase, TEXT and BOOT need an authenticated frame, and a plaintext one is dropped with one warning; a keyless device still accepts plaintext. Plaintext TEXT accepted on a keyless device is filed under its origin MAC, never a paired peer's name, and posts no `SYSEVT_TEXT_RX`. Authenticated text (BROADCAST_AUTH or session-encrypted, direct or relayed) keeps its registry name, encryption flag, per-fragment records and single bus event, and BOOT stays a system notice. The retired opcode 150 has no row. Every zero-flag row is on an explicit allow-list (handshakes, HEARTBEAT, TOPO_*, USER_SYNC); this is a subset check, so later items may only shrink the list. `--component <component-directory>` or `--source-dir <overlay>` replays the pre-fix sources. It uses ASan/UBSan when `HW1_SANITIZE` is enabled and mocks history, the event bus and the radio.
 
 ## ESP-NOW fragment reassembly
 
@@ -4115,16 +4115,196 @@ instead of comparing absolute times. `System_ESPNow_Deadline.h` is pasted when t
 (`espnow_session_replay` and `espnow_rekey_retry` paste it the same way); `--source-dir <component-directory>`
 replays the pre-fix sources. No radio is used.
 
-## ESP-NOW time status
+## ESP-NOW mesh time
 
-`espnow_time_status` compiles the production time-sync state, the TIME_SYNC handler `v4h_time_sync` and
-`cmd_espnow_timestatus` (`System_ESPNow.cpp`) with the production `V4PayloadTimeSync` and `V4RxCtx` against a
-settable 32-bit `millis()`. The reply's "Last sync: N seconds ago" must count from the moment the last sync was
-applied (it read a stamp nothing wrote, so it showed the uptime): no such line before a sync, 60 after 60 s on a
-device that had been up 100 s, a later sync restarts the count, a refused correction and a short payload leave
-the stamp, and the count is right across the `millis()` wrap. Source contract: the stamp is stored before
-`gTimeIsSynced` is set, and only that handler sets it. `--component <component-directory>` replays other
-sources. No radio is used.
+Mesh time was broken: `espnowtimesync` sent (epoch, the sender's `millis()`) in a signed broadcast, the receiver
+stored the sender's `millis()` as an "offset", set no clock, and `espnowtimestatus` said "Synced: Yes". It is now
+a session unicast from the mesh master to each paired device, and a device with no better source of its own sets
+its clock from it (`System_ESPNow_TimeCore.h` has the rules, `System_ESPNow_MeshTime.cpp` the device side).
+
+`espnow_time_core_tests` compiles `System_ESPNow_TimeCore.h` (the production dependency-free header): the 16-byte
+frame at its stated offsets; who sends, for every combination of setting, mesh mode, role, clock state and source
+(only the acting master with a set clock from rtc, ntp, manual or cm5 and no unconfirmed NTP jump); the rounds
+(at once, every 10 minutes, after a clock step and 15 s after that, by hand; a peer whose session came up, once
+it is 2 s old; the uptime wrap); and every row of the receiver's rule for every own source, with the frame's
+wait added, a change of more than an hour held and applied when the same sender confirms it (not by another
+sender, not within 10 s, not when it disagrees, not after 30 minutes), a second sender that cannot move the
+clock back and forth, the rank of a named primary over a master over an acting backup, and the 10 s gap after a
+step.
+
+`espnow_time_status` compiles the production code of `System_ESPNow_MeshTime.cpp` between `MESH_TIME_HOST_BEGIN`
+and `MESH_TIME_HOST_END` (what the handler keeps, the main-loop apply tick, the sender step, `espnowtimesync`
+and `espnowtimestatus` with its `json` form) with the real `Clock::isSynced` and `Clock::isValidEpoch`
+(`System_Clock.cpp`) against a settable clock. That block reaches the device only through the small `mt*`
+functions above it; the harness supplies its own versions (clock, step counter and chokepoint as a recording
+double, settings, paired devices with sessions, the radio queue, the console). An applied frame sets the clock
+to the frame's time plus its wait and goes through the chokepoint once with the mesh source; an ignored, refused
+or held frame sets nothing; a clock set by another source between the decision and the step is not overwritten;
+a master sends only from a set clock with a real source (not 55 hours after a boot without one); one device per
+half second; a full queue is tried again; the master starts a session with a paired device that has none; the
+status text and JSON say the true source and age in each state. Source rules: the old state and sender are gone
+from the component; row 35 asks for a paired sender and a session-encrypted frame and nothing else; TIME_SYNC is
+not flooded and may travel through a relay; the clock module names the mesh source, writes no mesh time into the
+RTC chip and takes it as no reference for the confirmed clock; the main loop applies mesh time after the SNTP
+report and before the clock duties. `--component <component-directory>` replays other sources. No radio is used.
+
+Since the review of 2026-11-18 both suites also check: a session stamped after the pass read the uptime is not
+settled; a hostile frame time (INT64_MAX, INT64_MIN) is refused with no difference computed from it; mesh mode off
+takes no time (`ignored_mesh_off`); with no master named a set clock changes at most once in 10 minutes, while an
+agreeing frame still agrees and a held claim waits; a paired device that floods TIME_SYNC cannot keep the named
+master's frame (or, unnamed, another sender's) from being judged, four senders' frames wait and the rest are
+counted; the "held" console line comes once a minute at most; the frame names the master's own source and the
+minutes since it was set; a master with mesh mode off starts no handshake; the json role of a backup;
+`Clock::sourceWritesRtc` (mesh time and a carried clock are not written into the RTC chip), and the source rule
+that the RTC task asks it before it calibrates an uncalibrated chip from the system clock.
+
+Not covered: `mtSetClock` itself (`settimeofday` and `Clock::clockStepped`; the source rule pins its two lines
+and their order), the real session table and send queue, and two real tasks at the kept frame at the same moment.
+
+## ESP-NOW sensor readings
+
+A reading is the sender's JSON text of one sensor. It used to be refused over 200 bytes with a debug line (ToF
+and FM radio readings never arrived), nothing counted a lost reading, the receiver kept only its uptime, two
+bit orders named the sensors, and the readers of the receiver's table freed its slots.
+
+`espnow_sensor_core_tests` compiles `System_ESPNow_SensorCore.h` (the production dependency-free header): the one
+sensor table (a name per type in order, both ways, the mask bit); the 12-byte reading header at its stated
+offsets; the part counts at the direct (202) and routed (130) frame budgets with every part inside its frame,
+472 bytes on both paths and 473 refused; the round trip of a reading through its parts with a part missing, out
+of order, repeated, of another reading, left open for more than 2 s, and hostile counts and lengths under ASan;
+the counter rule (first, new with and without a gap, repeat, late, the wrap, a restart by boot tag, eight late in
+a row, the stream-start flag, silence longer than the late window, two receivers of one sender); the JSON text
+check with the text that would put keys of the sender's choosing beside the receiver's own; where a reading
+goes (the bond partner, the controller of a running lease, the named master for a stream switched on by hand,
+and the reason when it goes nowhere); who sends and who keeps by mesh role (a worker keeps nothing, a backup
+master sends and keeps, the master only keeps); and that every reason not to send has a name and a sentence of
+its own.
+
+`espnow_sensor_wire` compiles `V4PayloadSensorReading`, `V4PayloadSensorStatus`, `V4PayloadSensorReq`,
+`V4PayloadTimeSync`, `V4PayloadPowerStatus` and `V4PayloadEventPush` as `System_ESPNow_Wire.h` declares them,
+with its frame budget constants, against the pack functions of the three rules headers: every size and offset,
+the bytes the code writes are the bytes the struct states, reserved bytes are 0, every frame fits one frame
+through a relay. Source rules: every `CAP_SENSOR_*` is
+`espnowsensor::sensorBit` of its `RemoteSensorType` and types no number; the OLED bond page and the bond web page
+type no sensor mask; `espnowsensorstatus` has no name list of its own; the old frames, limits and names are gone;
+rows 151, 153 and 154 ask for a paired sender and a session-encrypted frame and nothing else, 179 keeps its bond
+gate, the three mesh frames may travel through a relay and none is flooded; the status frame is a session
+unicast; the two task-loop steps for readings are outside the bonded-mode block; no file but
+`System_ESPNow_Sensors.cpp` touches the receiver's table; the sender plans its parts by the frame budget of its
+target, starts no handshake and prints nothing, and the broadcaster task prints nothing; ESP-NOW start allocates
+nothing for received readings, the ingest makes the table only after the role rule and a sender's slots only for
+a reading that is whole and well formed, and the status frame never makes the table; `espnowsensorstatus` asks
+the role rules; `espnowsensorstream` answers with the target of that sensor; a lease that lapses does not stop a
+stream switched on by hand.
+
+`espnow_sensor_ingest` compiles the production sender and receiver of `System_ESPNow_Sensors.cpp` (the blocks
+between its `SENSOR_*_HOST_BEGIN` and `_END` marks, `remoteSensorTableEnsure` and `getRemoteSensorDataJson`)
+with the rules header; the harness's radio queue hands every part the sender produces to the receiver. A reading
+of up to 472 bytes arrives whole, in 1 to 3 frames direct and up to 4 through a relay; 473 bytes are not sent,
+counted, and seen as a gap by the receiver. The receiver stamps a reading with its own UTC epoch (0, `null` in
+JSON, while its clock is not set) and its uptime, and says how its clock was set. Lost, late, repeated,
+restarted and resumed readings are counted per sender and sensor; a repeat or a late reading changes neither the
+stored text nor its stamp; an outage longer than the presence time is still counted. A part lost on the air or
+refused by the queue gives no stored reading. The bond frame and the mesh frame give the same slot. Types 11 to
+255, short payloads, hostile part counts and a text that is not one JSON object are refused and counted. A
+worker that is sent readings refuses them, counts them, says so once a minute and allocates nothing; a backup
+master and the master keep them; the bond partner's reading is kept whatever the mesh role. The first reading a
+receiver keeps makes the table and that sender's slots; a status frame lists and never makes data or the table.
+Sixteen senders with eleven sensors each are all kept; the seventeenth sender is refused, counted and said once
+a minute; a sender that is no longer paired gives its record and its slots, cleared, to the next one; no memory
+for the table or for a sender's slots is refused, counted and said. Without a session nothing is sent or parked
+and the task step starts the handshake; the stream-start flag goes on every change of target; every reason not
+to send is counted and said once a minute by the task step, which also looks up the named masters. The stream
+command's answers are checked word for word. The lock doubles record that nothing that may block, print or
+allocate runs under a lock.
+
+`espnow_dispatch_policy` runs frames 35, 132, 151, 152, 153 and 154 through the real receive gates (plaintext, a
+signed broadcast and an unpaired sender dropped; a paired session frame accepted, also from a peer that is not
+the bond partner), and `espnow_rx_frontend` delivers each of them through the real relay envelope path to its
+handler with the origin as the sender (a part of a reading at the full routed size and the 128-byte event frame
+included) and checks that none is flooded.
+
+Since the review of 2026-11-18: the counter rule keeps an older frame (256 or less behind) out however long the
+silence was; the text check is strict JSON (keys, values, escapes, numbers, UTF-8, no trailing comma) with a
+list of texts the structural check let through; `elapsedSinceMs` for a stamp ahead of the pass. In
+`espnow_sensor_ingest`: the clock that is not set reads 1970 in the harness and no arrival epoch is stored; a copy
+into a buffer with no room for the terminator copies nothing; a status frame that no longer names a sensor clears
+its streaming flag and never makes an old reading fresh; restarts and resumes in the JSON; 49.7 days after its
+last frame a sensor is not listed, and its old reading not fresh, again (the age step of `sensorLinkTick`); the
+4 KB reply of `espnowsensorstatus json` (`sensorStatusJsonFit`, compiled with the vendored ArduinoJson from
+`espnow_sensor_status_json_harness.cpp`) is whole JSON inside the buffer at every document size around it and
+`devicesMore` is true exactly when devices were left out; source rules: no hold of the table's spinlock clears
+memory in bulk or walks every sender's slots, the status frame's streaming bit, its settle wait and its boot tag,
+the part length guard, the target rule's lease inputs. `espnow_deadline_wrap` now also runs
+`sensorTargetInputsLocked` and `stopSensorDataStreaming`: a subscription switches sending on, a renewal sets no
+stream-start flag while a new stream does, a leased sensor goes to the controller while one switched on by hand
+goes to the named master, and a stop by hand ends the lease and forgets the controller.
+
+Not covered by any host suite: the broadcaster task loop itself (`sensorBroadcasterTask`, with its lease-lapse
+branch), `announceSensorStatus` and `sensorReceiverTargetsRefresh` (they read driver, bond and pairing state;
+source rules pin the status frame's parts), `startSensorDataStreaming`, the commands `espnowsensorstream` (its
+answers are covered) and `espnowsensorstatus` (its reply buffer is covered), the OLED, G2 and MQTT readers of the
+table, the transport below `v4_send_sensor_part`, and the real locks under two tasks.
+
+## ESP-NOW battery state and events
+
+POWER_STATUS (152) and EVENT_PUSH (132) were reserved numbers with no payload: a master could not see a worker's
+battery or its alerts.
+
+Since the review of 2026-11-18 `espnow_power_events` also checks: each of the 13 bits of the battery frame's
+`known` reaches the JSON key it names, alone and in pairs, against the frame's specification written out again;
+no arrival epoch is stored while the clock is not set (it reads 1970 in the harness); a mesh id outside the
+lists goes to list 0; the status line's event count; the text form's "[text cut]"; an event goes only to a
+named master whose session is ready; an event posted after the pass read the uptime is 0 ms old; a source
+outside the table goes out as unknown; a kind name longer than its field is cut and flagged; a full queue takes
+no token of the rate limit; events under the floor cost nothing of the four a look (an alert behind a ring of
+lesser ones goes out at once); both JSON replies are whole JSON inside reply buffers of 900 to 4096 bytes;
+source rules: no hold of the spinlock searches a full list or walks every list, the oldest event held and the
+battery sample's age come from the tested rules. `espnow_power_event_core_tests` adds `eventOldestHeld`.
+
+`espnow_power_event_core_tests` compiles `System_ESPNow_PowerEventCore.h` (the production dependency-free
+header): the 24-byte battery frame and the 128-byte event frame with every field at its stated offset, reserved
+bytes 0, the round trip, a payload that is too short; the battery values (every flag, nothing valid, a rate that
+is not a number or beyond 16 bits, a voltage and a percentage out of range); when a battery frame is due (at
+once, every interval, on a change of status, charging, USB or presence, never within 5 s, never with the
+interval 0, across the uptime wrap) and what the setting may hold; the event floor for every setting and tier; the
+token bucket (burst, refill, time spent full earns nothing, the wrap); whether a device sends and the order of the
+reasons why not; the text of a frame (a field with no terminator, control bytes, invalid and cut UTF-8, a frame
+of 0xFF under ASan) and the JSON escape; the sender's cut (flags, zero padding, never inside a UTF-8
+character); the event list (a free entry first, then the oldest entry of the sender that holds the most, walking
+by receive number, a `since` from before a restart).
+
+`espnow_power_events` compiles the production code of `System_ESPNow_PowerEvents.cpp` between
+`POWER_EVENTS_HOST_BEGIN` and `POWER_EVENTS_HOST_END` (the sender step, both receive paths, the per-sender
+records, the event lists, `espnowbattery` and `espnowevents` with their json forms) with the rules header against
+a host device: a battery, an event ring of 48, sessions, and a radio queue whose acknowledgement watch follows
+the production rule (two watched frames in a row that nobody acknowledges clear the session). Checked: the
+battery frame goes to each named master with one counter value, at once, every interval, on a change but not
+within 5 s, never with the interval 0, also with no valid sample, not over a session under 2 s old, with every
+frame's acknowledgement watched; a worker whose master lost the session has a new one within three battery
+intervals; the event floor per setting, the kind as its name, long texts cut with their flags, eight at once
+then one every 2 s with what was left out in `skipped` (which stops at 65535), the cursor waiting without a
+session and following the head when nothing is sent, a full queue; a worker refuses both frames (counted, said
+once a minute, nothing allocated) and a master and a backup master keep them, stamped with their own UTC clock
+(0 while it is not set) and uptime; lost, late, repeated and restarted frames by the counter rule of the
+readings; what the sender did not know is `null` in JSON; 24 and 128 bytes of 0xFF give valid JSON with
+`unknown` names and cleaned text, and quotes and control bytes are escaped (every JSON reply of the suite goes
+through a syntax check); sixteen senders with a seventeenth refused; 24 events per mesh with the 25th replacing
+the first, `since`, `overwritten`, a `since` from before a restart, mesh 1 not pushing out mesh 0, the
+receiver's rate limit per sender, a busy sender not pushing out a quiet one; both JSON replies page (`next`,
+`more`) and stay whole JSON inside the 4 KB reply; nothing that may block, print or allocate runs under the
+lock; and nothing is posted into the receiver's own event ring. Source rules: rows 132 and 152 ask for a paired
+sender and a session-encrypted frame and nothing else, both may travel through a relay and neither is flooded;
+the battery frame asks for an acknowledgement and has it watched; the role rule comes before any allocation; the
+task step runs once in the `espnow_task` loop, outside every bonded-mode block and after `sensorLinkTick`; the
+file names no bond symbol and never `systemEventPost`, and its tested block reaches the device only through its
+`pe*` functions; the two settings and the four commands exist.
+
+Not covered by any host suite: the `pe*` device functions themselves (`peBatteryInputs` copies `BatteryState`;
+`peSendPower` / `peSendEvent`, which the source rules pin; `peEventFetch` over the real event ring), the two
+thin handlers, `cmd_espnow_powerinterval` and `cmd_espnow_eventpush` (source rules only), the real
+`sendStatusSweep` that clears a session after two unacknowledged frames (the harness follows its rule), and the
+battery, event and target lines of `espnowsensorstatus`.
 
 ## Time: the millis() wrap and stored clock values
 
@@ -4218,9 +4398,11 @@ before it loads the store (validate-only included), and the `automation sanitize
 `automationSanitizeReply` and no longer spells "fixed duplicate IDs".
 
 `clock_set_question`: "is the clock set" has one owner, `Clock::isValidEpoch` (the year 2020 or later). The
-suite runs the production `cmd_espnow_timesync` (`System_ESPNow.cpp`) with the real `Clock::isValidEpoch`
-(`System_Clock.cpp`): it refuses and sends nothing while the clock counts from 1970, also 55 hours after boot
-(its old test `epoch < 100000` let a 1970 date out to the mesh from hour 28 on), and sends a set clock as it is.
+suite runs the real `Clock::isValidEpoch` and `Clock::isSynced` (`System_Clock.cpp`) against a settable clock:
+not set while the clock counts from 1970, also 55 hours after boot (the mesh time command's old test
+`epoch < 100000` let a 1970 date out to the mesh from hour 28 on), and set from 2020 on. The mesh time command
+itself is run as production code by `espnow_time_status` (it refuses and sends nothing while the clock is not
+set) and asks the owner through `mtClockSet`.
 Source rules: no comparison of a time with 100000 is left; `cmd_certinfo`, `cmd_certgen` and the expiry check
 at HTTPS start ask the owner; the scheduler pass asks it and takes its next run from `automationNextRunTime`;
 the due cache leaves a time-of-day trigger out while the clock is not set. Four own tests stay and are listed
@@ -6401,7 +6583,9 @@ manifest lookup) ends that tick's work; the status answer, push and poll wait ou
 pending requests are not answered after it; a bond file answer queued on cmd_exec before an unpair or partner
 change is dropped when it runs. 22 of its 66 checks fail on 3c5dda31.
 
-`espnow_handshake_backoff` runs `System_ESPNow_HandshakeBackoff.h`, the KEY_EX in-flight table and retry sweep, the
+`espnow_handshake_backoff` (since 2026-11-18 also: sixteen silent paired devices, offered a start every 500 ms
+for an hour, each reach their long wait; the table has one entry per paired device) runs
+`System_ESPNow_HandshakeBackoff.h`, the KEY_EX in-flight table and retry sweep, the
 pending-frame queue, the ESTABLISHING sweep, `v4_send_encrypted_or_queue` and `bondSendEncryptedAsync` through
 simulated hours: a partner that is not there (step d2) costs 4 warning lines and 17 key exchanges in the first hour
 instead of 1,439 and 720, and no heartbeat is queued; a partner that comes back is bonded within 15 s of being

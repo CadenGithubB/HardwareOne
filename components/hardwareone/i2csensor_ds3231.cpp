@@ -443,9 +443,13 @@ void rtcTask(void* pvParameters) {
   
   if (systemTimeValid) {
     // System already has valid time - if RTC is already calibrated, just verify;
-    // if not calibrated, this time likely came from NTP, so sync TO RTC
+    // if not calibrated, sync TO RTC, but only from a source that knows the
+    // time: not mesh time and not a clock carried over a soft restart (it may
+    // have come from the mesh), or the chip would read back as "rtc" at every
+    // later boot. Such a chip waits for the next ntp, timeset, ring or cm5
+    // step (Clock::clockStepped writes it then).
     if (!gSettings.rtcTimeHasBeenSet) {
-      if (rtcSyncFromSystem()) {
+      if (Clock::sourceWritesRtc(Clock::syncSource()) && rtcSyncFromSystem()) {
         broadcastOutput("[RTC] RTC calibrated from system time");
         setSetting(gSettings.rtcTimeHasBeenSet, true);
       }

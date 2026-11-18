@@ -145,6 +145,8 @@ static portMUX_TYPE sClockMux = portMUX_INITIALIZER_UNLOCKED;
 
 static SyncSource sSource   = SYNC_NONE;
 static long       sStepDelta = 0;      // seconds moved by the last step
+static uint32_t   sStepSerial = 0;     // steps this boot (stepSerial)
+static uint32_t   sLastStepMs = 0;     // millis() of the last step
 static int64_t    sProjRefUs = 0;      // epoch-us minus esp_timer at last step
 
 // Pend flags — set by clockStepped, drained by clockDutiesTick/Flush.
@@ -188,6 +190,25 @@ bool confirmedClockHeld() {
 
 SyncSource syncSource() { return sSource; }
 
+uint32_t stepSerial() {
+  portENTER_CRITICAL(&sClockMux);
+  const uint32_t serial = sStepSerial;
+  portEXIT_CRITICAL(&sClockMux);
+  return serial;
+}
+
+bool lastStep(SyncSource* src, uint32_t* agoSeconds) {
+  portENTER_CRITICAL(&sClockMux);
+  const uint32_t serial = sStepSerial;
+  const SyncSource source = sSource;
+  const uint32_t atMs = sLastStepMs;
+  portEXIT_CRITICAL(&sClockMux);
+  if (serial == 0) return false;
+  if (src) *src = source;
+  if (agoSeconds) *agoSeconds = ageSeconds(atMs);
+  return true;
+}
+
 const char* syncSourceName(SyncSource s) {
   switch (s) {
     case SYNC_RTC:    return "rtc";
@@ -195,6 +216,7 @@ const char* syncSourceName(SyncSource s) {
     case SYNC_MANUAL: return "manual";
     case SYNC_RING:   return "ring";
     case SYNC_CM5:    return "cm5";
+    case SYNC_MESH:   return "mesh";
     default:          return "none";
   }
 }
@@ -248,10 +270,12 @@ void clockStepped(SyncSource src, time_t before) {
 
   // The ring's clock: an SNTP step far from a clock already set this boot is
   // not passed on (System_ClockConfirmPolicy.h). A clock adopted from the ring is
-  // no reference for a later step, or the ring would vouch for itself.
+  // no reference for a later step, or the ring would vouch for itself. Nor is
+  // one taken from the mesh master: a weaker source must not make a later NTP
+  // reply look doubtful.
   int64_t wallUs = 0, monoUs = 0;
   if (wallAndMonotonicUs(wallUs, monoUs)) {
-    const bool reference = nowValid && src != SYNC_RING && src != SYNC_NONE;
+    const bool reference = nowValid && src != SYNC_RING && src != SYNC_MESH && src != SYNC_NONE;
     portENTER_CRITICAL(&sClockMux);
     const ClockConfirm::Verdict verdict =
         ClockConfirm::onStep(sConfirm, src == SYNC_NTP, reference, wallUs, monoUs);
@@ -264,7 +288,8 @@ void clockStepped(SyncSource src, time_t before) {
   if (!edge && beforeValid && (delta > 120 || delta < -120)) {
     pend |= PEND_STEPLOG | PEND_ANCHOR | PEND_RESOLVE;
   }
-  if (src != SYNC_RTC && nowValid) pend |= PEND_RTC_WRITEBACK;
+  // Mesh time is not written into the RTC chip (sourceWritesRtc says why).
+  if (sourceWritesRtc(src) && nowValid) pend |= PEND_RTC_WRITEBACK;
 
   // Labels and pend bits publish TOGETHER, unconditionally: the drain
   // snapshots them under the same mux, so a step that lands mid-drain can
@@ -274,6 +299,8 @@ void clockStepped(SyncSource src, time_t before) {
   sSource    = src;
   sStepDelta = delta;
   sPending  |= pend;
+  sStepSerial++;
+  sLastStepMs = (uint32_t)millis();
   portEXIT_CRITICAL(&sClockMux);
 }
 

@@ -596,18 +596,42 @@ int main() {
   expect("SUBSCRIBE_UPDATE paired plaintext unkeyed",
          run(ESPNOW_V4_TYPE_SUBSCRIBE_UPDATE, true, false, false, false), false);
 
-  // SENSOR_STATUS: authenticated once this device has a passphrase, plaintext
-  // still accepted on a keyless device.
-  expect("SENSOR_STATUS plaintext keyed",
-         run(ESPNOW_V4_TYPE_SENSOR_STATUS, false, false, false, true), false);
-  check("SENSOR_STATUS plaintext keyed drop is logged (one WARN) and cleaned up",
-        gWarns == 1 && gCleanups == 1);
-  expect("SENSOR_STATUS BROADCAST_AUTH keyed",
-         run(ESPNOW_V4_TYPE_SENSOR_STATUS, false, true, false, true), true);
-  expect("SENSOR_STATUS session-encrypted keyed",
-         run(ESPNOW_V4_TYPE_SENSOR_STATUS, true, true, true, true), true);
-  expect("SENSOR_STATUS plaintext unkeyed (bootstrap compatibility)",
-         run(ESPNOW_V4_TYPE_SENSOR_STATUS, false, false, false, false), true);
+  // Mesh time and the sensor frames: TIME_SYNC can set the clock, SENSOR_STATUS
+  // and SENSOR_ENVELOPE make and fill entries of the receiver's table,
+  // SENSOR_REQ starts a stream, POWER_STATUS and EVENT_PUSH fill the master's
+  // battery and event stores. Each needs a paired sender and a
+  // session-encrypted frame, on a keyed and on a keyless device; a signed
+  // broadcast is not enough (TIME_SYNC and SENSOR_STATUS were one). None is a
+  // bond frame: a paired peer that is not the bond partner reaches them.
+  const uint8_t kPairedMeshRows[] = { ESPNOW_V4_TYPE_TIME_SYNC, ESPNOW_V4_TYPE_SENSOR_STATUS,
+                                      ESPNOW_V4_TYPE_SENSOR_REQ, ESPNOW_V4_TYPE_SENSOR_ENVELOPE,
+                                      ESPNOW_V4_TYPE_POWER_STATUS, ESPNOW_V4_TYPE_EVENT_PUSH };
+  for (uint8_t op : kPairedMeshRows) {
+    const std::string name = opcodeName(op);
+    const V4OpcodeEntry* row = v4_dispatch_lookup(op);
+    check((name + " row is REQ_PAIRED|REQ_SESSION_ENC, nothing else (not bond-gated)").c_str(),
+          row && row->flags == (V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC));
+    for (bool keyed : { true, false }) {
+      const std::string on = keyed ? " keyed" : " unkeyed";
+      expect((name + " paired plaintext" + on).c_str(), run(op, true, false, false, keyed), false);
+      check((name + " paired plaintext" + on + ": drop is logged (one WARN) and cleaned up").c_str(),
+            gWarns == 1 && gCleanups == 1);
+      expect((name + " paired BROADCAST_AUTH-only" + on).c_str(), run(op, true, true, false, keyed), false);
+      expect((name + " unpaired BROADCAST_AUTH-only" + on).c_str(), run(op, false, true, false, keyed), false);
+      expect((name + " unpaired session-encrypted" + on).c_str(), run(op, false, true, true, keyed), false);
+      expect((name + " paired session-encrypted" + on).c_str(), run(op, true, true, true, keyed), true);
+    }
+#if ENABLE_BONDED_MODE
+    // Bond mode on with another device as partner: the sender (gSrc) is a
+    // paired peer that is not the partner, and still reaches the handler.
+    gSettings.bondModeEnabled = true;
+    gSettings.bondPeerMac = String("02:AA:AA:AA:AA:01");
+    expect((name + " from a paired peer that is not the bond partner (bond mode on)").c_str(),
+           run(op, true, true, true, true), true);
+    gSettings.bondModeEnabled = false;
+    gSettings.bondPeerMac = String("");
+#endif
+  }
 
   // HEARTBEAT records liveness that routing reads: same policy. Every sender
   // tags (periodic broadcast) or seals (unicast) it once a mesh key exists.
@@ -632,8 +656,6 @@ int main() {
   const V4OpcodeEntry* e = v4_dispatch_lookup(ESPNOW_V4_TYPE_SUBSCRIBE_UPDATE);
   check("SUBSCRIBE_UPDATE row requires REQ_PAIRED|REQ_SESSION_ENC",
         e && (e->flags & kPairedEnc) == kPairedEnc);
-  e = v4_dispatch_lookup(ESPNOW_V4_TYPE_SENSOR_STATUS);
-  check("SENSOR_STATUS row has non-zero flags", e && e->flags != 0);
 
   // Verifier's table-driven invariant: no state-mutating opcode has empty flags.
   bool zeroFlagOk = true;

@@ -44,7 +44,8 @@ static const char* bondMenuItems[] = {
 };
 static const int BOND_MENU_ITEMS = 3;
 
-// Sensor definitions matching capability masks in System_ESPNow.h
+// Sensor definitions. The masks are the CAP_SENSOR_* bits of System_ESPNow.h
+// (the one sensor numbering), never a number typed here.
 struct BondSensorDef {
   const char* name;
   const char* id;       // CLI command suffix (e.g. "thermal" for open/close)
@@ -53,17 +54,17 @@ struct BondSensorDef {
 };
 
 static const BondSensorDef bondSensorDefs[] = {
-  { "Thermal",  "thermal",  0x01, &gSettings.bondStreamThermal },
-  { "ToF",      "tof",      0x02, &gSettings.bondStreamTof },
-  { "IMU",      "imu",      0x04, &gSettings.bondStreamImu },
+  { "Thermal",  "thermal",  CAP_SENSOR_THERMAL,  &gSettings.bondStreamThermal },
+  { "ToF",      "tof",      CAP_SENSOR_TOF,      &gSettings.bondStreamTof },
+  { "IMU",      "imu",      CAP_SENSOR_IMU,      &gSettings.bondStreamImu },
 #if ENABLE_ANO_ENCODER
-  { "ANO Enc",  "input",    0x08, &gSettings.bondStreamInput },
+  { "ANO Enc",  "input",    CAP_SENSOR_INPUT,    &gSettings.bondStreamInput },
 #else
-  { "Gamepad",  "input",    0x08, &gSettings.bondStreamInput },
+  { "Gamepad",  "input",    CAP_SENSOR_INPUT,    &gSettings.bondStreamInput },
 #endif
-  { "GPS",      "gps",      0x20, &gSettings.bondStreamGps },
-  { "RTC",      "rtc",      0x40, &gSettings.bondStreamRtc },
-  { "Presence", "presence", 0x80, &gSettings.bondStreamPresence },
+  { "GPS",      "gps",      CAP_SENSOR_GPS,      &gSettings.bondStreamGps },
+  { "RTC",      "rtc",      CAP_SENSOR_RTC,      &gSettings.bondStreamRtc },
+  { "Presence", "presence", CAP_SENSOR_PRESENCE, &gSettings.bondStreamPresence },
 };
 static const int BOND_SENSOR_DEF_COUNT = sizeof(bondSensorDefs) / sizeof(bondSensorDefs[0]);
 
@@ -164,7 +165,7 @@ static void displayBondStatus() {
     CapabilitySummary& cap = gEspNow->lastRemoteCap;
     char sensorBuf[24];
     {
-      String sensors = getCapabilityListShort(cap.sensorMask, SENSOR_NAMES);
+      String sensors = sensorMaskNames(cap.sensorMask, /*longForm=*/false);
       strncpy(sensorBuf, sensors.c_str(), 20);
       sensorBuf[20] = '\0';
     }

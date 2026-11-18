@@ -658,8 +658,9 @@ int imuBuildDataJson(char* buf, size_t bufSize) {
   // Precision is matched to the hardware, not habit: accel LSB is 0.01 m/s²
   // (driver raw/100 — a third decimal is always '0'), gyro LSB is 0.0625 dps
   // ≈ 0.0011 rad/s (third decimal is real), temp is an int8_t from getTemp().
-  // Keeping the frame small matters: the mesh path drops readings > 200 B
-  // (v4_send_sensor_envelope), and motion widens every float's integer part.
+  // Keeping the reading small matters: up to 190 bytes travel in one frame
+  // (more is cut into up to four, System_ESPNow_SensorCore.h), and motion
+  // widens every float's integer part.
   int n = snprintf(buf + pos, bufSize - pos,
                    ",\"accel\":{\"x\":%.2f,\"y\":%.2f,\"z\":%.2f},"
                    "\"gyro\":{\"x\":%.3f,\"y\":%.3f,\"z\":%.3f},"

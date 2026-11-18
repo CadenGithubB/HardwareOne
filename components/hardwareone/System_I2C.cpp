@@ -2361,14 +2361,15 @@ static void finishSensorStops() {
     sSensorStopAwaitingCleanup[index] = false;
     const char* name = deviceTypeDisplayName(sensor);
 #if ENABLE_ESPNOW
-    // Broadcast status to mesh peers for sensors that have remote types
+    // Tell the receiver of this device's readings (SENSOR_STATUS) for sensors
+    // that have remote types
     switch (sensor) {
-      case I2C_DEVICE_THERMAL:  broadcastSensorStatus(REMOTE_SENSOR_THERMAL, false);  break;
-      case I2C_DEVICE_TOF:      broadcastSensorStatus(REMOTE_SENSOR_TOF, false);      break;
-      case I2C_DEVICE_IMU:      broadcastSensorStatus(REMOTE_SENSOR_IMU, false);      break;
-      case I2C_DEVICE_INPUT:  broadcastSensorStatus(REMOTE_SENSOR_INPUT, false);  break;
-      case I2C_DEVICE_GPS:      broadcastSensorStatus(REMOTE_SENSOR_GPS, false);      break;
-      case I2C_DEVICE_FMRADIO:  broadcastSensorStatus(REMOTE_SENSOR_FMRADIO, false);  break;
+      case I2C_DEVICE_THERMAL:  sensorPresenceChanged(REMOTE_SENSOR_THERMAL, false);  break;
+      case I2C_DEVICE_TOF:      sensorPresenceChanged(REMOTE_SENSOR_TOF, false);      break;
+      case I2C_DEVICE_IMU:      sensorPresenceChanged(REMOTE_SENSOR_IMU, false);      break;
+      case I2C_DEVICE_INPUT:  sensorPresenceChanged(REMOTE_SENSOR_INPUT, false);  break;
+      case I2C_DEVICE_GPS:      sensorPresenceChanged(REMOTE_SENSOR_GPS, false);      break;
+      case I2C_DEVICE_FMRADIO:  sensorPresenceChanged(REMOTE_SENSOR_FMRADIO, false);  break;
       default: break;  // APDS, RTC, Presence have no remote sensor type
     }
 #endif
@@ -2679,12 +2680,12 @@ static bool startSensorInternal(I2cDeviceType sensor) {
 static void broadcastStartedSensor(I2cDeviceType sensor) {
 #if ENABLE_ESPNOW
   switch (sensor) {
-    case I2C_DEVICE_THERMAL: broadcastSensorStatus(REMOTE_SENSOR_THERMAL, true); break;
-    case I2C_DEVICE_TOF: broadcastSensorStatus(REMOTE_SENSOR_TOF, true); break;
-    case I2C_DEVICE_IMU: broadcastSensorStatus(REMOTE_SENSOR_IMU, true); break;
-    case I2C_DEVICE_INPUT: broadcastSensorStatus(REMOTE_SENSOR_INPUT, true); break;
-    case I2C_DEVICE_GPS: broadcastSensorStatus(REMOTE_SENSOR_GPS, true); break;
-    case I2C_DEVICE_FMRADIO: broadcastSensorStatus(REMOTE_SENSOR_FMRADIO, true); break;
+    case I2C_DEVICE_THERMAL: sensorPresenceChanged(REMOTE_SENSOR_THERMAL, true); break;
+    case I2C_DEVICE_TOF: sensorPresenceChanged(REMOTE_SENSOR_TOF, true); break;
+    case I2C_DEVICE_IMU: sensorPresenceChanged(REMOTE_SENSOR_IMU, true); break;
+    case I2C_DEVICE_INPUT: sensorPresenceChanged(REMOTE_SENSOR_INPUT, true); break;
+    case I2C_DEVICE_GPS: sensorPresenceChanged(REMOTE_SENSOR_GPS, true); break;
+    case I2C_DEVICE_FMRADIO: sensorPresenceChanged(REMOTE_SENSOR_FMRADIO, true); break;
     default: break;
   }
 #else

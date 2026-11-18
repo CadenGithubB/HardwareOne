@@ -8,13 +8,16 @@ when HTTPS starts), which turns true after 28 hours of uptime without any time
 source, and `now > 0` in the automation scheduler, which is true one second
 after boot.
 
-Run as production code: cmd_espnow_timesync (System_ESPNow.cpp) with the real
-Clock::isValidEpoch (System_Clock.cpp) against a settable clock. It must refuse
-and send nothing while the clock is not set, 55 hours after boot included,
-and send the epoch once it is. The automation scheduler's part runs in
-automation_scheduler (its next-run computation and its due cache). Source
-rules: no comparison of a time with 100000 is left in the firmware, the four
-places ask Clock::isValidEpoch, and the scheduler pass takes its next run from
+Run as production code: the real Clock::isValidEpoch and Clock::isSynced
+(System_Clock.cpp) against a settable clock: not set at any time before 2020,
+55 hours after a boot without a time source included, and set from 2020 on.
+The mesh time command that used the weak test is run as production code by
+espnow_time_status (System_ESPNow_MeshTime.cpp: it refuses and sends nothing
+while the clock is not set, and asks the clock owner through mtClockSet). The
+automation scheduler's part runs in automation_scheduler (its next-run
+computation and its due cache). Source rules: no comparison of a time with
+100000 is left in the firmware, the places ask Clock::isValidEpoch or
+Clock::isSynced, and the scheduler pass takes its next run from
 automationNextRunTime with the clock owner's answer.
 
 The tests that stay, each for a stated reason, are listed in KEPT: a new one
@@ -38,11 +41,9 @@ from test_web_batch_handlers import extract_block, require
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
-TIMESYNC = "const char* cmd_espnow_timesync(const String& argsInput)"
 
 # (file, function, calls of Clock::isValidEpoch in it)
 ASKERS = (
-    ("System_ESPNow.cpp", TIMESYNC, 1),
     ("System_WiFi.cpp", "const char* cmd_certinfo(const String& argsInput)", 1),
     ("System_WiFi.cpp", "const char* cmd_certgen(const String& argsInput)", 1),
 )
@@ -67,37 +68,17 @@ HAND_TESTS = (
 HARNESS = r"""
 #include <cstdint>
 #include <cstdio>
-#include <cstring>
 #include <ctime>
 #include <string>
 
-class String {
- public:
-  String() = default;
-  String(const char* text) : text_(text ? text : "") {}
- private:
-  std::string text_;
-};
-
 static time_t gClock = 0;
 static time_t testTime(time_t*) { return gClock; }
-static uint32_t millis() { return 4242; }
-static bool gMesh = true;
-static bool meshEnabled() { return gMesh; }
-static unsigned gBroadcasts = 0;
-static uint32_t gSentEpoch = 0;
-static bool v4_broadcast_time_sync(uint32_t epochTime, int32_t) { ++gBroadcasts; gSentEpoch = epochTime; return true; }
-#define RETURN_VALID_IF_VALIDATE_CSTR() ((void)argsInput)
-#define DEBUG_ESPNOWF(...) ((void)0)
-#define BROADCAST_PRINTF(...) ((void)0)
 
 namespace Clock {
-// INSERT_CLOCK
-}  // namespace Clock
-
 #define time testTime
-// INSERT_COMMAND
+// INSERT_CLOCK
 #undef time
+}  // namespace Clock
 
 static int failures = 0, checks = 0;
 static void check(bool ok, const std::string& what) {
@@ -106,30 +87,21 @@ static void check(bool ok, const std::string& what) {
   ++failures;
   std::fprintf(stderr, "FAIL: %s\n", what.c_str());
 }
-static std::string run(time_t clock) {
-  gClock = clock;
-  gBroadcasts = 0;
-  gSentEpoch = 0;
-  return cmd_espnow_timesync(String(""));
-}
 
 int main() {
-  const std::string kRefusal = "Error: No valid NTP time available. Ensure WiFi is connected and NTP is synced.";
   // The clock counts from 1970 after a boot without a time source.
   for (time_t clock : {time_t{0}, time_t{5}, time_t{99999}, time_t{100000}, time_t{100001}, time_t{200000},
                        time_t{86400} * 365, time_t{946684800} /* 2000 */, time_t{1577836799} /* 2019-12-31 */}) {
-    const std::string reply = run(clock);
-    check(reply == kRefusal, "the time sync is refused with the clock at " + std::to_string(clock) + ": " + reply);
-    check(gBroadcasts == 0, "and nothing is sent with the clock at " + std::to_string(clock));
+    gClock = clock;
+    check(!Clock::isValidEpoch(clock), "isValidEpoch says not set at " + std::to_string(clock));
+    check(!Clock::isSynced(), "isSynced says not set with the clock at " + std::to_string(clock));
   }
-  // A set clock goes out as it is.
-  for (time_t clock : {time_t{1577836800} /* 2020-01-01 */, time_t{1763000000}, time_t{2200000000}}) {
-    check(run(clock) == "OK" && gBroadcasts == 1 && gSentEpoch == static_cast<uint32_t>(clock),
-          "the time sync sends a set clock of " + std::to_string(clock));
+  for (time_t clock : {time_t{1577923200} /* 2020-01-02 */, time_t{1763000000}, time_t{2200000000}}) {
+    gClock = clock;
+    check(Clock::isValidEpoch(clock), "isValidEpoch says set at " + std::to_string(clock));
+    check(Clock::isSynced(), "isSynced says set with the clock at " + std::to_string(clock));
   }
-  gMesh = false;
-  check(run(1763000000) == "Error: Mesh mode not enabled. Use 'espnowmode mesh' first." && gBroadcasts == 0,
-        "without mesh mode nothing is sent");
+  check(Clock::isValidEpoch(time_t{1577836800}), "2020-01-01 00:00 UTC is the first valid second");
   if (failures != 0) {
     std::fprintf(stderr, "%d of %d clock question checks failed\n", failures, checks);
     return 1;
@@ -157,6 +129,9 @@ def rule_failures(component: Path) -> list[str]:
         found = body.count("Clock::isValidEpoch(")
         if found != count:
             failures.append(f"{name}: {function} asks Clock::isValidEpoch {found} time(s), expected {count}")
+    mesh_time = (component / "System_ESPNow_MeshTime.cpp").read_text()
+    if "static bool mtClockSet() { return Clock::isSynced(); }" not in mesh_time:
+        failures.append("System_ESPNow_MeshTime.cpp: mesh time asks Clock::isSynced whether the clock is set")
     server = strip_comments((component / "WebServer_Server.cpp").read_text())
     if not re.search(r"time_t now = time\(NULL\);\s*if \(Clock::isValidEpoch\(now\)\) \{", server):
         failures.append("WebServer_Server.cpp: the certificate expiry check at HTTPS start asks Clock::isValidEpoch")
@@ -202,10 +177,9 @@ def main() -> None:
     clock = (component / "System_Clock.cpp").read_text()
     threshold = re.search(r"^static constexpr int kSyncedTmYearThreshold = \d+;", clock, re.M)
     require(threshold is not None, "System_Clock.cpp holds the year threshold")
-    espnow = (component / "System_ESPNow.cpp").read_text()
     harness = HARNESS.replace("// INSERT_CLOCK", threshold.group(0) + "\n" +
+                              extract_block(clock, "bool isSynced()") + "\n" +
                               extract_block(clock, "bool isValidEpoch(time_t t)"))
-    harness = harness.replace("// INSERT_COMMAND", definition(espnow, TIMESYNC))
     flags = ["-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic", "-Wno-unused-variable"]
     if args.sanitize:
         flags += ["-fsanitize=address,undefined", "-fno-sanitize-recover=all",

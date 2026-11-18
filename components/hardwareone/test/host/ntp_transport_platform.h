@@ -10,7 +10,7 @@
 #include <vector>
 
 namespace Clock {
-enum SyncSource : uint8_t { SYNC_NONE, SYNC_RTC, SYNC_NTP, SYNC_MANUAL, SYNC_RING, SYNC_CM5 };
+enum SyncSource : uint8_t { SYNC_NONE, SYNC_RTC, SYNC_NTP, SYNC_MANUAL, SYNC_RING, SYNC_CM5, SYNC_MESH };
 int tzOffsetMinutes();
 bool isValidEpoch(time_t value);
 SyncSource syncSource();

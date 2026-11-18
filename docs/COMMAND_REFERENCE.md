@@ -4,7 +4,7 @@
 > Regenerate with `python3 tools/command_registry.py reference`.
 > Source of truth is the `CommandEntry` tables in `components/hardwareone/*.cpp`.
 
-1034 commands across 57 modules (1034 registry entries).
+1039 commands across 57 modules (1039 registry entries).
 
 Commands are matched case-insensitively, and lookup uses longest-prefix matching, so `automation list` resolves to the `automation` dispatcher with `list` as its argument.
 
@@ -16,7 +16,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 - [`system`](#system) — 26 commands
 - [`versions`](#versions) — 1 commands
 - [`wifi`](#wifi) — 21 commands
-- [`espnow`](#espnow) — 122 commands
+- [`espnow`](#espnow) — 127 commands
 - [`c6`](#c6) — 10 commands
 - [`mqtt`](#mqtt) — 27 commands
 - [`bluetooth`](#bluetooth) — 23 commands
@@ -186,6 +186,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `espnowacceptsensorcontrol` | A | Worker: opt in to honor SENSOR_REQ from the configured master/backup: 'espnowacceptsensorcontrol <on\|off>'.<br/>`Usage: espnowacceptsensorcontrol <on\|off>` |
 | `espnowbackupenable` | A | Enable/disable backup master feature: 'espnowbackupenable [on\|off]'.<br/>`Usage: espnowbackupenable [on\|off]` |
 | `espnowbackupfingerprint` | A | Worker: set the authorized BACKUP-master Ed25519 fingerprint (64-hex; empty=deny).<br/>`Usage: espnowbackupfingerprint <64-hex-pubkey>` |
+| `espnowbattery` |  | Mesh master: show the battery state other devices sent: 'espnowbattery [json] [<name_or_mac>] [from <n>]'.<br/>`Usage: espnowbattery [json] [<name_or_mac>] [from <n>] A device sends its battery state to the master named on it (espnowpowerinterval). json: 'next' is the number to pass as 'from' when not every device fitted one reply.` |
 | `espnowbondmodeenabled` | A | Enable/disable bond mode: <0\|1><br/>`Usage: espnowbondmodeenabled <0\|1>` |
 | `espnowbondpeermac` | A | Set bond peer MAC address<br/>`Usage: espnowbondpeermac <AA:BB:CC:DD:EE:FF>` |
 | `espnowbroadcast` |  | Broadcast message: 'espnowbroadcast <message>'. (async send; delivery only, no reply)<br/>`Usage: espnowbroadcast <message> (single frame, <= 218 bytes; longer text is NOT fragmented and fails silently) Returns whether the single broadcast frame was transmitted to all peers, NOT a per-device delivery count; no per-device reply.` |
@@ -197,6 +198,8 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `espnowdiscovered` | A | List devices found during discovery: 'espnowdiscovered [clear]'. Pair one with 'espnowpairrequest <mac_or_name>'.<br/>`Usage: espnowdiscovered [clear] Lists same-mesh devices heard while your discovery window ('espnowpairmode') is open.` |
 | `espnowenabled` | A | Enable/disable ESP-NOW (0\|1, takes effect after reboot).<br/>`Usage: espnowenabled <0\|1>` |
 | `espnowencstatus` | A | Show ESP-NOW encryption status and key fingerprint. |
+| `espnoweventpush` | A | Which of this device's system events go to the mesh master: 'espnoweventpush [off\|alert\|standard\|verbose]'.<br/>`Usage: espnoweventpush [off\|alert\|standard\|verbose] alert: security, safety and faults only (the default). standard: also the everyday ones. verbose: all.` |
+| `espnowevents` |  | Mesh master: show the system events other devices sent: 'espnowevents [json] [since <rx>]'.<br/>`Usage: espnowevents [json] [since <rx>] A device sends its events to the master named on it (espnoweventpush). The master keeps the newest 24 per mesh. since <rx>: only events after that receive number. json: 'more' means ask again with since = the last rx.` |
 | `espnowfailovertimeout` | A | Set failover timeout: <5000-120000 ms><br/>`Usage: espnowfailovertimeout <5000..120000>` |
 | `espnowfetch` | A | Fetch a file from a peer; user/pass are an account ON THE TARGET: 'espnowfetch <target> <target-user> <target-pass> "<path>"'. (async - status via espnowmessages json; file saved on this device)<br/>`Usage: espnowfetch <target> <target-user> <target-pass> "<path>" Credentials are verified ON THE TARGET device, not this one. Returns OK on delivery; status lands in 'espnowmessages json'; the fetched file is written to this device's filesystem.` |
 | `espnowfind` |  | Find devices by name, room, or tag: 'espnowfind <query>'.<br/>`Usage: espnowfind <query>` |
@@ -222,6 +225,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `espnowmeshrole` | A | Get/set mesh role: 'espnowmeshrole [worker\|master\|backup]'.<br/>`Usage: espnowmeshrole [worker\|master\|backup]` |
 | `espnowmeshroutes` |  | Show the mesh route table: who this node can reach and via which neighbour.<br/>`Usage: espnowmeshroutes [clear] 'via (direct)' = in radio range. Anything else is reached over one or more relay hops. Multi-hop routes are learned from neighbours every 30s — allow a minute after boot.` |
 | `espnowmeshstatus` |  | Show mesh peer health (heartbeats & ACKs). |
+| `espnowmeshtime` | A | Mesh time on/off: the master sends its clock, other devices take it when they have no better source: 'espnowmeshtime [on\|off]'.<br/>`Usage: espnowmeshtime [on\|off]` |
 | `espnowmeshtopo` |  | Discover mesh topology (run on the master; role not enforced). (async - read results with espnowtoporesults) |
 | `espnowmeshttl` |  | Get/set the multi-hop budget: 'espnowmeshttl [1-10]'.<br/>`Usage: espnowmeshttl [<1..10>] How many hops this node's relay-eligible frames may travel. 1 = single hop (no multi-hop). Applies to broadcast text/time sync and to routed unicast; heartbeats and pairing are always single-hop.` |
 | `espnowmessages` |  | Buffered message history as JSON: 'espnowmessages json [sinceSeq] [mac]' — async results of espnowremote/browse/fetch.<br/>`Usage: espnowmessages [json] [<sinceSeq>] [<AA:BB:CC:DD:EE:FF>]` |
@@ -230,6 +234,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `espnowpairmode` | A | Open the discovery window: 'espnowpairmode [seconds\|off\|status]'. Open on BOTH same-mesh devices, then 'espnowdiscovered' to see + pair. No auto-pair.<br/>`Usage: espnowpairmode [<seconds>\|off\|status] Default 120s, max 600. Requires a mesh passphrase set on both devices (same mesh). While open, the device broadcasts a discovery beacon and RECORDS other same-mesh devices it hears (see 'espnowdiscovered') — it no longer auto-pairs. Pair from the list with 'espnowpairsecure <mac> <name>'.` |
 | `espnowpairrequest` | A | Request a pair with a discovered device: 'espnowpairrequest <mac_or_name>'. The other device must Accept.<br/>`Usage: espnowpairrequest <mac_or_name> (name/MAC from 'espnowdiscovered') Sends a request; the target shows an Accept prompt (or run 'espnowaccept' there).` |
 | `espnowpairsecure` | A | Pair device with encryption: 'espnowpairsecure <mac> <name> [mesh]'. (local pair is synchronous; secure channel completes async - see espnowsessions)<br/>`Usage: espnowpairsecure <mac_address> <device_name> [mesh] Requires a mesh passphrase first - run 'espnowsetpassphrase <mesh> <passphrase>'. The device is added synchronously; KEY_EX then runs asynchronously (~100ms) so the encrypted channel becomes usable shortly after - inspect with 'espnowsessions' / 'espnowencstatus'.` |
+| `espnowpowerinterval` | A | How often this device sends its battery state to the mesh master, in seconds: 'espnowpowerinterval [0\|10..3600]'. 0 = not sent.<br/>`Usage: espnowpowerinterval [0\|10..3600]` |
 | `espnowprobe` | A | Reachability probe via KEY_EX. Synchronous, bounded timeout. Reports alive+mesh+firmware in one shot (no plaintext on the wire).<br/>`Usage: espnowprobe <name_or_mac> [<timeoutMs (50-5000, default 500)>] [<mesh>]` |
 | `espnowread` |  | Read ESP-NOW status and configuration. |
 | `espnowregenidentity` | S | Regenerate Ed25519 identity. Requires '--confirm-wipe-all-bonds'.<br/>`Usage: espnowregenidentity --confirm-wipe-all-bonds` |
@@ -251,8 +256,8 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `espnowsensorbroadcast` |  | Enable/disable all sensor ESP-NOW communication: 'espnowsensorbroadcast <on\|off>'.<br/>`Usage: espnowsensorbroadcast [on\|off]` |
 | `espnowsensorbroadcastinterval` | A | Set sensor broadcast interval: <100-10000 ms><br/>`Usage: espnowsensorbroadcastinterval <100..10000>` |
 | `espnowsensorreq` | A | TEST (Phase 1b): hand-send a SENSOR_REQ to a paired worker.<br/>`Usage: espnowsensorreq <MAC\|name> <mask> <mode 0=sub\|1=unsub\|2=oneshot> <intervalMs> <leaseMs>` |
-| `espnowsensorstatus` |  | Show remote sensor cache (master) or worker streaming status (worker). |
-| `espnowsensorstream` |  | Enable/disable sensor data streaming to master (worker only): 'espnowsensorstream <sensor> <on\|off>'. (local toggle; streamed data lands on the master's espnowsensorstatus)<br/>`Usage: espnowsensorstream <thermal\|tof\|imu\|gps\|input\|fmradio\|camera\|microphone\|rtc\|presence\|apds> <on\|off> Local on/off toggle; the worker then streams to the master, viewable there via 'espnowsensorstatus' / GET /api/sensors/remote.` |
+| `espnowsensorstatus` |  | Show what this device sends to the mesh master (readings, battery state, events) and why not, and what it received, lost and refused: 'espnowsensorstatus [json [<name_or_mac>]]'.<br/>`Usage: espnowsensorstatus [json [<name_or_mac>]] json <name_or_mac>: everything this device keeps of one sending device.` |
+| `espnowsensorstream` |  | Send one sensor's readings to the master named on this device: 'espnowsensorstream <sensor> <on\|off>'. (on this device only; the readings show on the master's espnowsensorstatus)<br/>`Usage: espnowsensorstream <thermal\|tof\|imu\|gps\|input\|fmradio\|camera\|microphone\|rtc\|presence\|apds> <on\|off> The readings go to the master named on this device (espnowmasterfingerprint), which must be paired with it. The reply says where they go, or why nothing is sent yet. On a bond master it asks the bond partner.` |
 | `espnowsessionopen` | A | Initiate SESSION handshake (requires prior espnowkeyex). (async - session goes ACTIVE later; check espnowsessions)<br/>`Usage: espnowsessionopen <name_or_mac> [<mesh>] Returns OK when SESSION_OPEN is sent; the session becomes ACTIVE when CONFIRM arrives - run 'espnowsessions'.` |
 | `espnowsessions` |  | Show in-RAM session state (peer, sessionId, dir, age, counters). |
 | `espnowsessionsend` | A | DIAGNOSTIC: send an AEAD-encrypted CHAT message over an active session (exercises the session-crypto path). NOT executed on the peer and returns no reply - to RUN a command use 'espnowremote'.<br/>`Usage: espnowsessionsend <name_or_mac> <message> Delivers an encrypted CHAT message (lands in the peer's espnowmessages). It is NOT command execution and no reply comes back. To run a command on the peer: espnowremote <target> <target-user> <target-pass> <command>.` |
@@ -264,8 +269,8 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `espnowsubs` |  | List peers + their event-subscription bitmaps (what they want from us). |
 | `espnowtagcmd` | A | Run command on all devices accepted here as holders of a tag; user/pass must be valid on EACH target device. (async - replies via espnowmessages json)<br/>`Usage: espnowtagcmd <tag> <target-user> <target-pass> <command> Credentials are checked ON EACH target device, not this one. One tag per command: a tag list (a comma) is refused. Goes only to peers whose tag was accepted on this device (espnowgroups, espnowgroupaccept); a peer that only announces the tag is skipped and counted in the reply. Returns OK on dispatch; each device's reply arrives later in 'espnowmessages json'.` |
 | `espnowtags` |  | Get/set device tags: 'espnowtags [tag1,tag2,...]'.<br/>`Usage: espnowtags stationary,thermal espnowtags clear` |
-| `espnowtimestatus` |  | Show time synchronization status. |
-| `espnowtimesync` |  | Broadcast NTP time to mesh (intended for the master; role not enforced). (async broadcast; delivery only, no reply) |
+| `espnowtimestatus` |  | Show mesh time: where this device's clock comes from, what it sends or last received: 'espnowtimestatus [json]'.<br/>`Usage: espnowtimestatus [json]` |
+| `espnowtimesync` |  | Mesh master: send this device's clock to the paired devices now (it is also sent when a session starts and every 10 minutes).<br/>`Usage: espnowtimesync Only the mesh master sends time, and only when its own clock comes from rtc, ntp, timeset or cm5. A paired device takes it when it has no such source itself. See 'espnowtimestatus'.` |
 | `espnowtopoautorefresh` | A | Set auto refresh topology: <0\|1><br/>`Usage: espnowtopoautorefresh <0\|1>` |
 | `espnowtopodiscoveryinterval` | A | Set topology discovery interval: <0-300000 ms><br/>`Usage: espnowtopodiscoveryinterval <0..300000>` |
 | `espnowtoporesults` |  | Get topology results: 'espnowtoporesults [page] [request-id]'. |

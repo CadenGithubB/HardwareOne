@@ -42,6 +42,8 @@
 #include "System_ESPNow_Router.h"   // multi-hop: route table, relay policy, relay metrics
 #include <sodium.h>                 // Phase 3.5 task #32: sodium_memcmp (constant-time)
 #include "System_ESPNow_Handlers_Crypto.h"  // Phase 3.3: KEY_EX handlers + initiator
+#include "System_ESPNow_MeshTime.h"   // TIME_SYNC: handler, send tick, commands
+#include "System_ESPNow_PowerEvents.h" // POWER_STATUS, EVENT_PUSH: handlers, send tick, commands
 #include "System_ESPNow_Identity.h"  // Phase 3.0: long-term Ed25519 identity load/store
 #include "System_ESPNow_MeshKeys.h"  // Phase 3.1: per-mesh PBKDF2 hash + bootstrap/group key cache
 #include "System_ESPNow_Sessions.h"  // Phase 3.4: per-peer-per-mesh session state
@@ -627,11 +629,7 @@ bool v4_broadcast_topo_request(uint32_t reqId);
 bool v4_send_command_response(const uint8_t* dst, uint32_t cmdMsgId, bool success, const char* resultText, uint16_t textLen);
 bool v4_send_text(const uint8_t* dst, const char* text, uint16_t textLen);
 bool v4_broadcast_text(const char* text, uint16_t textLen);
-bool v4_broadcast_sensor_status(RemoteSensorType sensorType, bool enabled);
-// v4_broadcast_sensor_data (plaintext sensor broadcast) removed — D2 secure fetcher:
-// sensor data now travels only as encrypted-unicast SENSOR_ENVELOPE (v4_send_sensor_envelope).
-bool v4_send_sensor_envelope(const uint8_t* dstMac, RemoteSensorType sensorType,
-                             const char* jsonData, uint16_t jsonLen);
+// (The sensor senders v4_send_sensor_status / v4_send_sensor_part are declared in System_ESPNow.h.)
 bool v4_send_user_sync(const uint8_t* dst, const char* jsonPayload, uint16_t jsonLen);
 
 // Forward declaration for internal addEspNowPeerWithEncryption (different from extern version in .ino)
@@ -683,13 +681,8 @@ static constexpr size_t TOPO_OUTPUT_CAPACITY = CMD_RESULT_MAX;
 static constexpr int TOPO_STREAMS_PER_PAGE = 2;
 static char* gTopoOutputBuffer = nullptr;
 
-// Time synchronization state (exported for .ino access)
-int64_t gTimeOffset = 0;           // Offset to add to millis() to get epoch time (milliseconds)
-bool gTimeIsSynced = false;        // True if we have received time sync from master
-// millis() when the last TIME_SYNC was applied. v4h_time_sync stores it before
-// it sets gTimeIsSynced; `espnowtimestatus` reads it on the command task.
-static std::atomic<uint32_t> sLastTimeSyncMs{0};
-extern const unsigned long TIME_SYNC_INTERVAL = 600000; // Broadcast time sync every 10 minutes (master only)
+// (Mesh time, TIME_SYNC, has its state, sender, handler and commands in
+// System_ESPNow_MeshTime.cpp.)
 
 // Worker status configuration
 struct WorkerStatusConfig {
@@ -714,6 +707,8 @@ static const uint32_t METADATA_PUSH_SETTLE_MS = 1500;  // coalesce a burst of ed
 static uint32_t gLastMasterHeartbeat = 0;
 static uint32_t gLastBackupHeartbeat = 0;
 static bool gBackupPromoted = false;
+// True while a backup master carries the master role because the master is silent.
+bool espnowBackupPromoted() { return gBackupPromoted; }
 
 // --------------------------
 // Minimal mesh envelope support (fallback, unicast-only)
@@ -3467,22 +3462,8 @@ static bool v4_send_frag_ack(const uint8_t* dst, uint32_t msgId, uint8_t fragInd
 
 // V3 sender functions for mesh system messages
 
-// TIME_SYNC broadcast — 2026-05-19: route through v4_broadcast so BROADCAST_AUTH
-// HMAC is appended; receiver verifies group-key knowledge before applying the
-// clock update. Previously this called v4_send_time_sync(FF:...) which just
-// sent plaintext to the broadcast address — completely spoofable.
-static bool v4_broadcast_time_sync(uint32_t epochTime, int32_t timeOffset) {
-  V4PayloadTimeSync payload;
-  payload.epochTime = epochTime;
-  payload.timeOffset = timeOffset;
-  uint32_t msgId = generateMessageId();
-  DEBUG_ESPNOW_MESHF("[V4_TX_TIME_SYNC] Broadcasting (BROADCAST_AUTH) msgId=%lu ttl=%u",
-         (unsigned long)msgId, (unsigned)gSettings.meshTtl);
-  // Live meshTtl, not a literal: this is one of the two flood-relayed opcodes,
-  // so the setting is what decides how far a clock update travels.
-  return v4_broadcast(ESPNOW_V4_TYPE_TIME_SYNC, 0, msgId,
-                      (const uint8_t*)&payload, sizeof(payload), gSettings.meshTtl);
-}
+// (TIME_SYNC is sent by espnowMeshTimeSendTick in System_ESPNow_MeshTime.cpp:
+// a session unicast to each paired device, never a broadcast.)
 
 static bool v4_send_topo_request(const uint8_t* dst, uint32_t reqId) {
   V4PayloadTopoReq payload;
@@ -3544,7 +3525,7 @@ static bool bondFrameIsPeriodic(uint8_t type) {
 // internally (copies to a fresh PSRAM buffer; espnow_tx frees that copy).
 // On a false return there is no leak.
 //
-// Used by: sensor_bcast → sendBondedSensorData; the super-loop bond stages
+// Used by: sensor_bcast → v4_send_sensor_part; the super-loop bond stages
 // 9b/9j/9k + heartbeat + CAP/MANIFEST/STATUS (Step 2); the streaming-setup
 // path (Step 2 tight-fix: sendBondStreamCtrl, firePostSyncSideEffects);
 // requestBondSettings + requestBondSchema (Step 2/3a); the bond CLI commands
@@ -3616,6 +3597,28 @@ static bool bondSessionActiveWith(const uint8_t* mac) {
   const PeerIdentity* pid = peerIdentityFindByMac(mac);
   SessionState* s = pid ? sessionFindByPeer(mac, pid->meshId) : nullptr;
   return (s && s->state == SESSION_ACTIVE);
+}
+
+// The same question for any paired peer. *establishedAtMs (when given) is the
+// moment the session went ACTIVE; a rekey stamps it again.
+bool espnowSessionUp(const uint8_t* mac, uint32_t* establishedAtMs) {
+  if (!gEspNow || !mac) return false;
+  const PeerIdentity* pid = peerIdentityFindByMac(mac);
+  const SessionState* s = pid ? sessionFindByPeer(mac, pid->meshId) : nullptr;
+  if (!s || s->state != SESSION_ACTIVE) return false;
+  if (establishedAtMs) *establishedAtMs = s->establishedAtMs;
+  return true;
+}
+
+// A session a new sender's first frame can use: ACTIVE for at least
+// meshtime::kSettleMs. The side that answers a session open is ACTIVE before
+// the side that opened it, so a frame sent at once is dropped there as "no
+// active session" (the reason metadataRefreshTick waits as well). Mesh time,
+// the sensor status frame and the battery and event senders ask here.
+bool espnowSessionSettled(const uint8_t* mac, uint32_t nowMs) {
+  uint32_t establishedAtMs = 0;
+  return espnowSessionUp(mac, &establishedAtMs) &&
+         meshtime::sessionSettled(establishedAtMs, nowMs);
 }
 
 // Invoked from the session layer (cmd_exec) the moment a session with
@@ -3712,48 +3715,32 @@ static bool v4_send_topo_peer(const uint8_t* dst, uint32_t reqId, uint8_t peerIn
                        (const uint8_t*)&payload, sizeof(payload), 2);
 }
 
-// Broadcast sensor status to all mesh peers
-bool v4_broadcast_sensor_status(RemoteSensorType sensorType, bool enabled) {
-  V4PayloadSensorStatus payload;
-  payload.sensorType = (uint8_t)sensorType;
-  payload.enabled = enabled ? 1 : 0;
-  memset(payload.reserved, 0, sizeof(payload.reserved));
-  
-  uint32_t msgId = generateMessageId();
-  DEBUG_ESPNOW_MESHF("[V4_BROADCAST_SENSOR_STATUS] Broadcasting msgId=%lu", (unsigned long)msgId);
-  DEBUG_ESPNOW_MESHF("[V4_BROADCAST_SENSOR_STATUS] sensor=%s enabled=%s",
-         sensorTypeToString(sensorType), enabled ? "YES" : "NO");
-  // Phase 5: gate on per-peer SENSOR subscription.
-  bool result = v4_broadcast_category(ESPNOW_V4_TYPE_SENSOR_STATUS, 0, msgId,
-                                       (const uint8_t*)&payload, sizeof(payload), 2,
-                                       ESPNOW_EVT_SENSOR);
-  DEBUG_ESPNOW_MESHF("[V4_BROADCAST_SENSOR_STATUS] Result: %s", result ? "SUCCESS" : "FAILED");
-  return result;
+// SENSOR_STATUS (151): which sensors this device has and which it is
+// streaming, to the device that receives its readings. A session unicast
+// (sendAead is encrypt-or-fail), so it passes the same gates as a reading and
+// travels through a relay like one. Any task but the radio callback.
+bool v4_send_sensor_status(const uint8_t* dstMac, uint32_t presentMask, uint32_t streamingMask,
+                           uint16_t bootTag) {
+  if (!dstMac) return false;
+  V4PayloadSensorStatus payload = {};
+  payload.presentMask = presentMask;
+  payload.streamingMask = streamingMask;
+  payload.bootTag = bootTag;
+  return espnowtx::sendAead(dstMac, ESPNOW_V4_TYPE_SENSOR_STATUS, 0, generateMessageId(),
+                            (const uint8_t*)&payload, (uint16_t)sizeof(payload), 1);
 }
 
-// (v4_broadcast_sensor_data — the plaintext sensor-data broadcast — was removed here with
-//  the D2 secure fetcher. Sensor data now travels only as encrypted-unicast SENSOR_ENVELOPE;
-//  opcode 150 has no RX row either — nothing emits it.)
-
-// SENSOR_ENVELOPE (154) — the secure fetcher's data reply (D2): a session-encrypted
-// UNICAST of ONE sensor reading to the leasing controller. Replaces the retired plaintext
-// v4_broadcast_sensor_data for mesh sensor streaming. sendAead is encrypt-or-fail (never a
-// plaintext fallback) and RX-safe from any task, including the sensor broadcaster task.
-bool v4_send_sensor_envelope(const uint8_t* dstMac, RemoteSensorType sensorType,
-                             const char* jsonData, uint16_t jsonLen) {
-  if (!dstMac || !jsonData || jsonLen == 0 || jsonLen > 200) {
-    DEBUG_ESPNOW_MESHF("[V4_TX_SENSOR_ENVELOPE] invalid params (len=%u)", jsonLen);
-    return false;
-  }
-  uint8_t buffer[256];
-  V4PayloadSensorBroadcast* payload = (V4PayloadSensorBroadcast*)buffer;
-  payload->sensorType = (uint8_t)sensorType;
-  payload->dataLen    = jsonLen;
-  payload->reserved   = 0;
-  memcpy(payload->data, jsonData, jsonLen);
-  uint16_t totalLen = sizeof(V4PayloadSensorBroadcast) + jsonLen;
-  uint32_t msgId = generateMessageId();
-  return espnowtx::sendAead(dstMac, ESPNOW_V4_TYPE_SENSOR_ENVELOPE, 0, msgId, buffer, totalLen, 1);
+// One part of a sensor reading, already built (V4PayloadSensorReading header
+// and its bytes of text; sensorSendReadingTo in System_ESPNow_Sensors.cpp cuts
+// a reading into parts that each fit one frame to `dstMac`). SENSOR_ENVELOPE
+// (154) over the peer's session, or BOND_SENSOR_DATA (179) to the bond
+// partner. Encrypt-or-fail, never plaintext; the seal and the radio send
+// happen on espnow_tx. True when the frame was queued.
+bool v4_send_sensor_part(const uint8_t* dstMac, bool viaBond, const uint8_t* part, uint16_t len) {
+  if (!dstMac || !part || len <= SENSOR_READING_HEADER_LEN || len > ESPNOW_V4_MAX_PLAINTEXT) return false;
+  const uint32_t msgId = generateMessageId();
+  if (viaBond) return bondSendEncryptedAsync(dstMac, ESPNOW_V4_TYPE_BOND_SENSOR_DATA, 0, msgId, part, len);
+  return espnowtx::sendAead(dstMac, ESPNOW_V4_TYPE_SENSOR_ENVELOPE, 0, msgId, part, len, 1);
 }
 
 // Send user sync to specific device (JSON payload)
@@ -3966,43 +3953,6 @@ struct V4OpcodeEntry {
 };
 
 // ----- Per-opcode handlers (Phase 0 migrations) -----
-
-// TIME_SYNC — synchronous, updates gTimeOffset / gTimeIsSynced.
-static void v4h_time_sync(const V4RxCtx& ctx) {
-  DEBUG_ESPNOW_MESHF("[V4_RX_TIME_SYNC] Received from %s msgId=%lu payloadLen=%u",
-         ctx.deviceName, (unsigned long)ctx.h->msgId, ctx.payloadLen);
-  if (ctx.payloadLen >= sizeof(V4PayloadTimeSync)) {
-    const V4PayloadTimeSync* ts = (const V4PayloadTimeSync*)ctx.payload;
-    DEBUG_ESPNOW_MESHF("[V4_RX_TIME_SYNC] epochTime=%lu timeOffset=%ld",
-           (unsigned long)ts->epochTime, (long)ts->timeOffset);
-    DEBUG_ESPNOW_MESHF("[V4_RX_TIME_SYNC] Previous time state: synced=%s offset=%lld",
-           gTimeIsSynced ? "YES" : "NO", (long long)gTimeOffset);
-    // Multi-hop widens the replay window for this opcode. A TIME_SYNC used to
-    // be heard once, from a neighbour, within one hop-time; flooding means the
-    // same authenticated frame legitimately arrives seconds later having crossed
-    // the mesh — and a captured one can be re-injected by any group-key holder.
-    // Once we already have a clock, refuse a correction large enough to matter
-    // (an hour): real drift between mesh members is seconds, so anything bigger
-    // is a stale or replayed frame, and applying it would silently corrupt
-    // timestamps on logs and health data. The first sync of a dark boot is
-    // exempt — that is the case with nothing to protect and everything to gain.
-    const int64_t delta = (int64_t)ts->timeOffset - gTimeOffset;
-    const int64_t kMaxCorrectionMs = 3600LL * 1000LL;
-    if (gTimeIsSynced && (delta > kMaxCorrectionMs || delta < -kMaxCorrectionMs)) {
-      WARN_ESPNOWF("[V4_RX_TIME_SYNC] rejected implausible correction of %lld ms from %s "
-                   "(already synced) — stale or replayed frame",
-                   (long long)delta, ctx.deviceName);
-      return;
-    }
-    gTimeOffset = (int64_t)ts->timeOffset;
-    sLastTimeSyncMs.store((uint32_t)millis());
-    gTimeIsSynced = true;
-    DEBUG_ESPNOW_MESHF("[V4_RX_TIME_SYNC] Time sync applied successfully");
-  } else {
-    DEBUG_ESPNOW_MESHF("[V4_RX_TIME_SYNC] ERROR: Payload too small (%u < %u)",
-           ctx.payloadLen, (unsigned)sizeof(V4PayloadTimeSync));
-  }
-}
 
 // Is this MAC a node we have some independent reason to know about — a peer we
 // paired with, or one the route table learned from a neighbour's advert?
@@ -4312,66 +4262,18 @@ static void v4h_heartbeat(const V4RxCtx& ctx) {
   }
 }
 
-// SENSOR_STATUS — remote sensor enable/disable announcement (mesh broadcast).
+// SENSOR_STATUS: which sensors the sender has and is streaming. The receive
+// table has required a paired sender and a session-encrypted frame.
 static void v4h_sensor_status(const V4RxCtx& ctx) {
-  DEBUG_ESPNOW_MESHF("[V4_RX_SENSOR_STATUS] Received from %s msgId=%lu payloadLen=%u",
-         ctx.deviceName, (unsigned long)ctx.h->msgId, ctx.payloadLen);
-  if (ctx.payloadLen >= sizeof(V4PayloadSensorStatus)) {
-    const V4PayloadSensorStatus* ss = (const V4PayloadSensorStatus*)ctx.payload;
-    RemoteSensorType sensorType = (RemoteSensorType)ss->sensorType;
-    bool enabled = (ss->enabled != 0);
-    DEBUG_ESPNOW_MESHF("[V4_RX_SENSOR_STATUS] sensor=%s enabled=%s",
-           sensorTypeToString(sensorType), enabled ? "YES" : "NO");
-
-    DEBUG_ESPNOW_MESHF("[V4_RX_SENSOR_STATUS] Updating remote sensor status");
-    updateRemoteSensorStatus(ctx.recv_info->src_addr, ctx.deviceName, sensorType, enabled);
-    DEBUG_ESPNOW_MESHF("[V4_RX_SENSOR_STATUS] Status update complete");
-  } else {
-    DEBUG_ESPNOW_MESHF("[V4_RX_SENSOR_STATUS] ERROR: Payload too small (%u < %u)",
-           ctx.payloadLen, (unsigned)sizeof(V4PayloadSensorStatus));
-  }
+  remoteSensorIngestStatus(ctx.recv_info->src_addr, ctx.deviceName, ctx.payload, ctx.payloadLen);
 }
 
-// Shared ingest for a per-sensor reading frame (V4PayloadSensorBroadcast wire layout).
-// Used by the encrypted-unicast SENSOR_ENVELOPE path (the secure fetcher, D2).
-// Dispatch guarantees REQ_PAIRED|REQ_SESSION_ENC before this runs.
-static void v4_ingest_sensor_reading(const V4RxCtx& ctx, const char* tag) {
-  if (ctx.payloadLen < sizeof(V4PayloadSensorBroadcast)) {
-    DEBUG_ESPNOW_MESHF("[%s] ERROR: Payload too small (%u < %u)",
-           tag, ctx.payloadLen, (unsigned)sizeof(V4PayloadSensorBroadcast));
-    return;
-  }
-  const V4PayloadSensorBroadcast* sb = (const V4PayloadSensorBroadcast*)ctx.payload;
-  RemoteSensorType sensorType = (RemoteSensorType)sb->sensorType;
-  uint16_t dataLen = sb->dataLen;
-  if (dataLen == 0 || ctx.payloadLen < (sizeof(V4PayloadSensorBroadcast) + dataLen)) {
-    DEBUG_ESPNOW_MESHF("[%s] ERROR: Invalid data length (%u) or truncated payload", tag, dataLen);
-    return;
-  }
-  const char* jsonData = (const char*)sb->data;
-  RemoteSensorData* entry = findOrCreateCacheEntry(ctx.recv_info->src_addr, ctx.deviceName, sensorType);
-  if (!entry) {
-    DEBUG_ESPNOW_MESHF("[%s] ERROR: Failed to allocate cache entry", tag);
-    return;
-  }
-  size_t copyLen = (dataLen < REMOTE_SENSOR_BUFFER_SIZE - 1) ? dataLen : REMOTE_SENSOR_BUFFER_SIZE - 1;
-  memcpy(entry->jsonData, jsonData, copyLen);
-  entry->jsonData[copyLen] = '\0';
-  entry->jsonLength = (uint16_t)copyLen;
-  entry->lastUpdate = millis();
-  entry->lastSeen = entry->lastUpdate;
-  entry->valid = true;
-  entry->enabled = true;     // live data implies the sensor is running
-  entry->connected = true;
-  DEBUG_ESPNOW_MESHF("[%s] cached %s data (%u bytes)",
-         tag, sensorTypeToString(sensorType), (unsigned)copyLen);
-}
-
-// SENSOR_ENVELOPE — the secure fetcher's data reply (D2). Encrypted-unicast per-sensor
-// reading from a leased worker. Dispatch flags (REQ_PAIRED|REQ_SESSION_ENC) guarantee this
-// arrived AEAD-confidential from a paired peer before we reach here; same cache ingest.
+// SENSOR_ENVELOPE: one part of a sensor reading from a paired sender over its
+// session (the receive table's gates). The range check, the role rule, the
+// counter rule and the store are in remoteSensorIngestPart.
 static void v4h_sensor_envelope(const V4RxCtx& ctx) {
-  v4_ingest_sensor_reading(ctx, "V4_RX_SENSOR_ENVELOPE");
+  remoteSensorIngestPart(ctx.recv_info->src_addr, ctx.deviceName, ctx.payload, ctx.payloadLen,
+                         /*fromBond=*/false);
 }
 
 // SENSOR_REQ — worker RX: a master/backup asks this worker to (un)subscribe/one-shot a
@@ -5530,27 +5432,12 @@ static void v4h_bond_cap_resp(const V4RxCtx& ctx) {
   }
 }
 
-// SENSOR_DATA — bond mode binary sensor data; cache to remote sensor entry.
+// BOND_SENSOR_DATA: one part of a sensor reading from the bond partner. The
+// same layout and the same ingest as SENSOR_ENVELOPE; only the gate differs
+// (the row also requires the bond partner).
 static void v4h_sensor_data(const V4RxCtx& ctx) {
-  if (ctx.payloadLen < sizeof(V4PayloadSensorData)) return;
-  const V4PayloadSensorData* sd = (const V4PayloadSensorData*)ctx.payload;
-  size_t totalExpected = sizeof(V4PayloadSensorData) + sd->dataLen;
-  if (sd->dataLen == 0 || totalExpected > ctx.payloadLen) return;
-  RemoteSensorType sensorType = (RemoteSensorType)sd->sensorType;
-  if (sensorType >= REMOTE_SENSOR_MAX) return;
-  RemoteSensorData* entry = findOrCreateCacheEntry(ctx.recv_info->src_addr, ctx.deviceName, sensorType);
-  if (!entry) return;
-  size_t copyLen = (sd->dataLen < REMOTE_SENSOR_BUFFER_SIZE - 1) ? sd->dataLen : REMOTE_SENSOR_BUFFER_SIZE - 1;
-  memcpy(entry->jsonData, sd->data, copyLen);
-  entry->jsonData[copyLen] = '\0';
-  entry->jsonLength = (uint16_t)copyLen;
-  entry->lastUpdate = millis();
-  entry->lastSeen = entry->lastUpdate;
-  entry->valid = true;
-  entry->enabled = true;     // live data implies the sensor is running
-  entry->connected = true;
-  DEBUG_ESPNOW_MESHF("[BOND] Sensor %s from %s len=%u seq=%lu",
-         sensorTypeToString(sensorType), ctx.deviceName, (unsigned)copyLen, (unsigned long)sd->seqNum);
+  remoteSensorIngestPart(ctx.recv_info->src_addr, ctx.deviceName, ctx.payload, ctx.payloadLen,
+                         /*fromBond=*/true);
 }
 
 // SETTINGS_REQ — peer asks for our settings file. Defer to task.
@@ -6564,10 +6451,13 @@ static bool v4_flood_rate_ok() {
 // HEARTBEAT is absent by definition (it means "I am your direct neighbour").
 // PAIR_* is absent by doctrine: pairing is proximity-scoped consent, and a
 // relayed pairing request would let someone three rooms away join your mesh.
-// SENSOR_STATUS is absent because its handler attributes readings to the RADIO
-// sender — a relayed one would be filed as the relay's own data.
+// SENSOR_STATUS is absent: it is a session unicast to the receiver of the
+// sender's readings (routed like a reading, never flooded). POWER_STATUS and
+// EVENT_PUSH are session unicasts to the named masters, for the same reason.
+// TIME_SYNC is absent since it became a session unicast from the master to each
+// paired device: a flooded, group-signed clock could be replayed by any member.
 static inline bool v4_flood_type_allowed(uint8_t type) {
-  return type == ESPNOW_V4_TYPE_TEXT || type == ESPNOW_V4_TYPE_TIME_SYNC;
+  return type == ESPNOW_V4_TYPE_TEXT;
 }
 
 // Which opcodes may travel inside a RELAY_DATA envelope. Also a positive list.
@@ -6594,8 +6484,11 @@ static bool v4_routed_type_allowed(uint8_t type) {
     case ESPNOW_V4_TYPE_METADATA_PUSH:
     case ESPNOW_V4_TYPE_USER_SYNC:
     case ESPNOW_V4_TYPE_SUBSCRIBE_UPDATE:
+    case ESPNOW_V4_TYPE_SENSOR_STATUS:
     case ESPNOW_V4_TYPE_SENSOR_REQ:
     case ESPNOW_V4_TYPE_SENSOR_ENVELOPE:
+    case ESPNOW_V4_TYPE_POWER_STATUS:
+    case ESPNOW_V4_TYPE_EVENT_PUSH:
       return true;
     default:
       // Everything else is excluded for a reason worth stating once:
@@ -7306,11 +7199,11 @@ static const V4OpcodeEntry kV4HandlerTable[] = {
   // REQ_PAIRED — handler verifies Ed25519 sig against the peer's stored
   // long-term pubkey (same trust path as SESSION_OPEN/CONFIRM).
   { ESPNOW_V4_TYPE_SESSION_REKEY,    0,                                                    v4hSessionRekey       },
-  // TIME_SYNC moves the device clock — REQ_AUTHENTICATED to defend against
-  // on-air spoofing. Senders go through v4_send_encrypted_or_queue (unicast)
-  // or v4_broadcast (broadcast, BROADCAST_AUTH HMAC). Plaintext TIME_SYNC
-  // from any source is silently dropped here.
-  { ESPNOW_V4_TYPE_TIME_SYNC,        V4_OPC_FLAG_REQ_AUTHENTICATED,                        v4h_time_sync         },
+  // TIME_SYNC can move the device clock: only a paired sender over its own
+  // session reaches the handler (System_ESPNow_MeshTime.cpp), which then asks
+  // whether that sender is the master named here and whether this device has
+  // a better source. Not bond-gated: mesh time is a paired-mesh feature.
+  { ESPNOW_V4_TYPE_TIME_SYNC,        V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, v4hTimeSync           },
   // TEXT/BOOT: every legitimate sender seals (v4_send_text, meshSendBootToPeers
   // → v4_send_payload_smart, encrypt-or-fail) or signs (v4_broadcast_text →
   // BROADCAST_AUTH) once a mesh key exists, so a plaintext frame on a keyed
@@ -7354,17 +7247,23 @@ static const V4OpcodeEntry kV4HandlerTable[] = {
   { ESPNOW_V4_TYPE_PAIR_REQUEST,     V4_OPC_FLAG_REQ_AUTHENTICATED,                        v4h_pair_request      },
   { ESPNOW_V4_TYPE_PAIR_ACCEPT,      V4_OPC_FLAG_REQ_AUTHENTICATED,                        v4h_pair_accept       },
   { ESPNOW_V4_TYPE_PAIR_REJECT,      V4_OPC_FLAG_REQ_AUTHENTICATED,                        v4h_pair_reject       },
-  // SENSOR_STATUS: sender is v4_broadcast_category (BROADCAST_AUTH when a key exists).
-  // Plaintext is accepted only while this device has no passphrase, so a keyless fleet
-  // still sees status cards; a keyed device drops unsigned status.
-  { ESPNOW_V4_TYPE_SENSOR_STATUS,    V4_OPC_FLAG_REQ_AUTH_WHEN_KEYED,                      v4h_sensor_status     },
-  // Secure sensor fetcher (D1/D2): mesh-legal leased pull + encrypted reply. NOT bond-gated —
-  // REQ_PAIRED|REQ_SESSION_ENC only; the worker's v4h_sensor_req adds the Ed25519 fingerprint
-  // check (master/backup) so only designated controllers can drive streaming. SENSOR_ENVELOPE
-  // is the encrypted-unicast data reply replacing the retired plaintext SENSOR_BROADCAST
-  // (opcode 150, removed).
+  // The sensor frames. All three need a paired sender and a session-encrypted
+  // frame, and none is bond-gated: sending readings to the mesh master is a
+  // paired-mesh feature. SENSOR_STATUS makes and changes entries of the
+  // receiver's table, so a group-signed broadcast is not enough for it (it was
+  // one; a captured copy re-sent under a paired MAC passed). The worker's
+  // v4h_sensor_req adds the Ed25519 fingerprint check (master/backup), so only
+  // the named controllers can drive streaming. SENSOR_ENVELOPE is one part of
+  // a reading (opcode 150, the plaintext broadcast, is retired).
+  { ESPNOW_V4_TYPE_SENSOR_STATUS,    V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC,  v4h_sensor_status     },
   { ESPNOW_V4_TYPE_SENSOR_REQ,       V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC,  v4h_sensor_req        },
   { ESPNOW_V4_TYPE_SENSOR_ENVELOPE,  V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC,  v4h_sensor_envelope   },
+  // A sender's battery state and its system events, to the masters named on
+  // it (System_ESPNow_PowerEvents.cpp). The same gates as a reading, and no
+  // bond gate: this is a paired-mesh feature. The handlers keep the frame
+  // only on a master or backup master, and trust none of its text.
+  { ESPNOW_V4_TYPE_POWER_STATUS,     V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC,  v4hPowerStatus        },
+  { ESPNOW_V4_TYPE_EVENT_PUSH,       V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC,  v4hEventPush          },
   // Keep the topology opcodes compatible with the existing plaintext V4 wire
   // format. Their handlers enforce request IDs, deadlines, bounds and sender
   // stream ownership before accepting any data.
@@ -12975,16 +12874,6 @@ void processMeshHeartbeats() {
     }
   }
 
-  // 9f3. Mesh secure fetcher: deferred SENSOR_REQ — worker applies the leased
-  // subscription off the RX critical path (startSensorDataStreaming creates a task).
-  // Authorization already happened in v4h_sensor_req; this only applies it.
-  if (gEspNow->meshSensorReqPending) {
-    gEspNow->meshSensorReqPending = false;
-    espnowApplySensorSubscription(gEspNow->meshSensorReqMode, gEspNow->meshSensorReqMask,
-                                  gEspNow->meshSensorReqIntervalMs, gEspNow->meshSensorReqLeaseMs,
-                                  gEspNow->meshSensorReqSrcMac);
-  }
-
   // 9h. Bond: log any unpaired rejection events (deferred from ISR context)
   {
     static uint32_t sLastReportedRejectCount = 0;
@@ -13084,6 +12973,28 @@ void processMeshHeartbeats() {
   }
 #endif // ENABLE_BONDED_MODE
 
+  // The two sensor steps below are outside the bond block on purpose: sending
+  // readings to a mesh master needs no bond, and must work in a build without
+  // bonded mode (the SENSOR_REQ step used to sit inside it and was then never
+  // applied in such a build).
+  // 9f2b. Sensor readings: start a session with the device they go to when it
+  // has none, and say why readings are not being sent (one line a minute).
+  sensorLinkTick(now);
+
+  // 9f2c. Battery state and events: this device's own go to the masters named
+  // on it (after 9f2b, which looks those masters up). Needs no bond either.
+  espnowPowerEventsTick(now);
+
+  // 9f3. Mesh secure fetcher: deferred SENSOR_REQ — worker applies the leased
+  // subscription off the RX critical path (startSensorDataStreaming creates a task).
+  // Authorization already happened in v4h_sensor_req; this only applies it.
+  if (gEspNow->meshSensorReqPending) {
+    gEspNow->meshSensorReqPending = false;
+    espnowApplySensorSubscription(gEspNow->meshSensorReqMode, gEspNow->meshSensorReqMask,
+                                  gEspNow->meshSensorReqIntervalMs, gEspNow->meshSensorReqLeaseMs,
+                                  gEspNow->meshSensorReqSrcMac);
+  }
+
   // 9. Answer one peer that asked for our metadata (noted by v4h_metadata_req)
   {
     uint8_t replyMac[6];
@@ -13100,6 +13011,10 @@ void processMeshHeartbeats() {
   // 9b. Ask a paired peer whose session came up for its metadata, so a change
   // it made while we could not hear it is known here.
   metadataRefreshTick(now);
+
+  // 9c. Mesh time: the master sends its clock to the paired devices, and
+  // starts a session with a paired device that has none.
+  espnowMeshTimeSendTick(now);
 
   // 10. Handle one received metadata frame (registry record, then gMeshPeerMeta).
   metadataInboxHandleFrame();
@@ -13584,13 +13499,14 @@ static bool initEspNow() {
     }
   }
 
-  // Claim the master-side remote-sensor cache only when ESP-NOW is actually
-  // starting. This used to be a ~20 KB PSRAM .bss array paid by every build
-  // with ESP-NOW compiled, even when the runtime feature stayed disabled.
+  // The table of readings received from other devices is not made here: only
+  // a device that is sent readings and keeps them has one, and the first such
+  // reading makes it (remoteSensorIngestPart). This call forgets what was
+  // listed before a restart of ESP-NOW and readies the sender's state.
   if (!initRemoteSensorSystem()) {
     snprintf(gLastInitErrorReason, sizeof(gLastInitErrorReason),
-             "out of PSRAM (remote sensor cache)");
-    broadcastOutput("[ESP-NOW] ERROR: Failed to allocate remote sensor cache");
+             "sensor sender state could not be set up");
+    broadcastOutput("[ESP-NOW] ERROR: Failed to set up the sensor sender state");
     return false;
   }
 
@@ -16976,55 +16892,7 @@ const char* cmd_espnow_meshtopo(const String& argsInput) {
   return "Topology discovery initiated. Use 'espnowtoporesults' to view responses.";
 }
 
-// Time sync command
-const char* cmd_espnow_timesync(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  
-  if (!meshEnabled()) {
-    return "Error: Mesh mode not enabled. Use 'espnowmode mesh' first.";
-  }
-  
-  // System_Clock owns "is the clock set". `epoch < 100000` stopped refusing
-  // after 28 hours of uptime without any time source, and a 1970 date went
-  // out to the mesh.
-  const time_t now = time(nullptr);
-  if (!Clock::isValidEpoch(now)) {
-    return "Error: No valid NTP time available. Ensure WiFi is connected and NTP is synced.";
-  }
-  uint32_t epoch = (uint32_t)now;
-  
-  DEBUG_ESPNOWF("[TIME_SYNC] Broadcasting time sync: epoch=%lu", (unsigned long)epoch);
-  
-  // Use V4 binary protocol instead of V2 JSON
-  uint32_t millisAtEpoch = millis();
-  bool sent = v4_broadcast_time_sync(epoch, millisAtEpoch);
-  
-  if (sent) {
-    BROADCAST_PRINTF("Time sync broadcast sent (epoch: %lu)", (unsigned long)epoch);
-    return "OK";
-  } else {
-    return "Error: Failed to send time sync";
-  }
-}
-
-// Time status command
-const char* cmd_espnow_timestatus(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  
-  if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
-  
-  if (gTimeIsSynced) {
-    uint32_t epoch = (uint32_t)time(nullptr);
-    uint32_t secondsSinceSync = (uint32_t)((uint32_t)millis() - sLastTimeSyncMs.load()) / 1000;
-    snprintf(getDebugBuffer(), 1024, 
-             "Time Status:\n  Synced: Yes\n  Epoch: %lu\n  Last sync: %lu seconds ago",
-             (unsigned long)epoch, (unsigned long)secondsSinceSync);
-  } else {
-    snprintf(getDebugBuffer(), 1024, "Time Status:\n  Synced: No\n  Use 'espnowtimesync' on master to sync");
-  }
-  
-  return getDebugBuffer();
-}
+// (espnowtimesync and espnowtimestatus: System_ESPNow_MeshTime.cpp.)
 
 static bool appendTopologyOutput(char*& cursor, size_t& remaining,
                                  const char* format, ...) {
@@ -18826,59 +18694,9 @@ bool isBondSynced() {
   }
 }
 
-// Send binary sensor data to bonded master via v3 protocol
-// sensorType: RemoteSensorType enum value
-// data: JSON-encoded sensor data (will be sent as-is)
-// dataLen: length of data
-static uint32_t gBondSensorSeqNum = 0;
-
-bool sendBondedSensorData(uint8_t sensorType, const uint8_t* data, uint16_t dataLen) {
-  if (!isBondModeOnline()) return false;
-  
-  // Only workers should send sensor data to master
-  if (isBondMaster()) return false;
-  
-  // Get peer MAC
-  uint8_t peerMac[6];
-  if (!parseMacAddress(gSettings.bondPeerMac, peerMac)) return false;
-  
-  // Build payload: header + data
-  // V4PayloadSensorData is 8 bytes header; ESPNOW_V4_MAX_PAYLOAD is 218 (V4 — the old
-  // "226/218" numbers were V3), so max data is 210 bytes. Note this is a SECOND cap,
-  // separate from the 200 B gate in v4_send_sensor_envelope on the mesh path.
-  const uint16_t maxDataLen = ESPNOW_V4_MAX_PAYLOAD - sizeof(V4PayloadSensorData);
-  if (dataLen > maxDataLen) {
-    DEBUG_ESPNOW_MESHF("[V4_SENSOR_TX] Data too large: %u > %u", dataLen, maxDataLen);
-    return false;
-  }
-  
-  // Allocate payload on stack
-  uint8_t payloadBuf[ESPNOW_V4_MAX_PAYLOAD];
-  V4PayloadSensorData* sd = (V4PayloadSensorData*)payloadBuf;
-  sd->sensorType = sensorType;
-  sd->flags = 0x01;  // Valid flag
-  sd->dataLen = dataLen;
-  sd->seqNum = ++gBondSensorSeqNum;
-  
-  if (data && dataLen > 0) {
-    memcpy(sd->data, data, dataLen);
-  }
-  
-  uint16_t totalLen = sizeof(V4PayloadSensorData) + dataLen;
-  uint32_t msgId = generateMessageId();
-
-  // Async send: enqueue to espnow_tx. The AEAD seal + frame buffer + capture
-  // + esp_now_send all happen on espnow_tx's stack, not sensor_bcast's.
-  // `sent` here means "queued OK," not "made it to the air" — the V4 ACK
-  // mechanism is the delivery confirmation (same as before).
-  bool sent = bondSendEncryptedAsync(peerMac, ESPNOW_V4_TYPE_BOND_SENSOR_DATA, 0, msgId, payloadBuf, totalLen);
-
-  // Single concise debug line only on success/failure
-  DEBUG_ESPNOW_MESHF("[BOND] Sensor TX type=%u len=%u seq=%lu %s",
-         sensorType, dataLen, (unsigned long)sd->seqNum, sent ? "QUEUED" : "DROP");
-
-  return sent;
-}
+// (A reading to the bond partner goes out as BOND_SENSOR_DATA through
+// sensorSendReadingTo / v4_send_sensor_part, with the same header, counter and
+// parts as a mesh reading.)
 
 // Send stream control message to bonded peer (master -> worker)
 bool sendBondStreamCtrl(RemoteSensorType sensorType, bool enable) {
@@ -20778,8 +20596,9 @@ const char* cmd_bond_stream(const String& argsInput) {
     BROADCAST_PRINTF("  ESP-NOW init: %s", (gEspNow && gEspNow->initialized) ? "YES" : "NO");
     BROADCAST_PRINTF("  Peer online: %s", gEspNow ? (gEspNow->bondPeerOnline ? "YES" : "NO") : "N/A");
     BROADCAST_PRINTF("  isBondModeOnline(): %s", isBondModeOnline() ? "YES" : "NO");
-    BROADCAST_PRINTF("  V4PayloadSensorData size: %u bytes", (unsigned)sizeof(V4PayloadSensorData));
-    BROADCAST_PRINTF("  Max sensor data: %u bytes", (unsigned)(ESPNOW_V4_MAX_PAYLOAD - sizeof(V4PayloadSensorData)));
+    BROADCAST_PRINTF("  Reading header: %u bytes", (unsigned)sizeof(V4PayloadSensorReading));
+    BROADCAST_PRINTF("  Largest reading: %u bytes (in up to %u frames)", (unsigned)SENSOR_READING_MAX_BYTES,
+                     (unsigned)SENSOR_READING_MAX_PARTS);
     broadcastOutput("");
     broadcastOutput("  Sensor streaming (runtime / saved):");
     bool savedFlags[] = {gSettings.bondStreamThermal, gSettings.bondStreamTof, gSettings.bondStreamImu, 
@@ -20872,15 +20691,17 @@ const char* cmd_bond_testsensor(const String& argsInput) {
   
   BROADCAST_PRINTF("  Test payload (%u bytes): %s", (unsigned)testJson.length(), testJson.c_str());
   
-  bool sent = sendBondedSensorData((uint8_t)testType, 
-                                    (const uint8_t*)testJson.c_str(), 
-                                    (uint16_t)testJson.length());
+  uint8_t peerMac[6];
+  espnowsensor::DropReason why = espnowsensor::DropReason::NoReceiver;
+  const bool sent = parseMacAddress(gSettings.bondPeerMac, peerMac) &&
+                    sensorSendReadingTo(peerMac, /*viaBond=*/true, testType, testJson.c_str(),
+                                        testJson.length(), &why);
   
   if (sent) {
-    broadcastOutput("[BOND_TEST] SUCCESS: Test packet sent via v3");
+    broadcastOutput("[BOND_TEST] SUCCESS: Test reading queued for the bond partner");
     return "OK: Test sensor packet sent";
   } else {
-    broadcastOutput("[BOND_TEST] FAILED: sendBondedSensorData returned false");
+    BROADCAST_PRINTF("[BOND_TEST] FAILED: not sent (%s)", espnowsensor::dropReasonText(why));
     return "Error: FAILED: Could not send test packet (check debug output)";
   }
 }
@@ -20903,6 +20724,9 @@ const char* cmd_espnow_topoautorefresh(const String&);
 const char* cmd_espnow_heartbeatbroadcast(const String&);
 const char* cmd_espnow_meshrelay(const String&);
 const char* cmd_espnow_meshpeermax(const String&);
+const char* cmd_espnow_meshtime(const String&);
+const char* cmd_espnow_powerinterval(const String&);
+const char* cmd_espnow_eventpush(const String&);
 const char* cmd_espnow_sensorbroadcastinterval(const String&);
 // Secure sensor fetcher (docs/ESPNOW_SENSOR_FETCHER_DESIGN.md)
 const char* cmd_espnow_acceptsensorcontrol(const String&);
@@ -21262,8 +21086,9 @@ extern const CommandEntry espNowCommands[] = {
   { "espnowbackupenable", "Enable/disable backup master feature: 'espnowbackupenable [on|off]'.", true, cmd_espnow_backupenable, "Usage: espnowbackupenable [on|off]" },
   { "espnowmeshtopo", "Discover mesh topology (run on the master; role not enforced). (async - read results with espnowtoporesults)", false, cmd_espnow_meshtopo },
   { "espnowtoporesults", "Get topology results: 'espnowtoporesults [page] [request-id]'.", false, cmd_espnow_toporesults },
-  { "espnowtimesync", "Broadcast NTP time to mesh (intended for the master; role not enforced). (async broadcast; delivery only, no reply)", false, cmd_espnow_timesync },
-  { "espnowtimestatus", "Show time synchronization status.", false, cmd_espnow_timestatus },
+  { "espnowtimesync", "Mesh master: send this device's clock to the paired devices now (it is also sent when a session starts and every 10 minutes).", false, cmd_espnow_timesync, "Usage: espnowtimesync\n       Only the mesh master sends time, and only when its own clock comes from rtc, ntp, timeset or cm5.\n       A paired device takes it when it has no such source itself. See 'espnowtimestatus'." },
+  { "espnowtimestatus", "Show mesh time: where this device's clock comes from, what it sends or last received: 'espnowtimestatus [json]'.", false, cmd_espnow_timestatus, "Usage: espnowtimestatus [json]" },
+  { "espnowmeshtime", "Mesh time on/off: the master sends its clock, other devices take it when they have no better source: 'espnowmeshtime [on|off]'.", true, cmd_espnow_meshtime, "Usage: espnowmeshtime [on|off]" },
   
   // ---- Device Metadata ----
   { "espnowroom", "Get/set device room: 'espnowroom [name]'.", false, cmd_espnow_room, "Usage: espnowroom [Kitchen|Bedroom|...]\n       espnowroom clear" },
@@ -21293,8 +21118,12 @@ extern const CommandEntry espNowCommands[] = {
   { "openstream", "Start streaming all output to ESP-NOW caller (admin, remote only).", true, cmd_espnow_startstream },
   { "closestream", "Stop streaming output to ESP-NOW device (admin).", true, cmd_espnow_stopstream },
   { "espnowworker", "Configure worker status reporting: 'espnowworker [show|on|off|interval <ms>|fields <list>]'.", false, cmd_espnow_worker, "Usage: espnowworker [show|on|off|interval <ms>|fields <heap,rssi,thermal,imu>]" },
-  { "espnowsensorstream", "Enable/disable sensor data streaming to master (worker only): 'espnowsensorstream <sensor> <on|off>'. (local toggle; streamed data lands on the master's espnowsensorstatus)", false, cmd_espnow_sensorstream, "Usage: espnowsensorstream <thermal|tof|imu|gps|input|fmradio|camera|microphone|rtc|presence|apds> <on|off>\n       Local on/off toggle; the worker then streams to the master, viewable there via 'espnowsensorstatus' / GET /api/sensors/remote." },
-  { "espnowsensorstatus", "Show remote sensor cache (master) or worker streaming status (worker).", false, cmd_espnow_sensorstatus },
+  { "espnowsensorstream", "Send one sensor's readings to the master named on this device: 'espnowsensorstream <sensor> <on|off>'. (on this device only; the readings show on the master's espnowsensorstatus)", false, cmd_espnow_sensorstream, "Usage: espnowsensorstream <thermal|tof|imu|gps|input|fmradio|camera|microphone|rtc|presence|apds> <on|off>\n       The readings go to the master named on this device (espnowmasterfingerprint), which must be paired with it.\n       The reply says where they go, or why nothing is sent yet. On a bond master it asks the bond partner." },
+  { "espnowsensorstatus", "Show what this device sends to the mesh master (readings, battery state, events) and why not, and what it received, lost and refused: 'espnowsensorstatus [json [<name_or_mac>]]'.", false, cmd_espnow_sensorstatus, "Usage: espnowsensorstatus [json [<name_or_mac>]]\n       json <name_or_mac>: everything this device keeps of one sending device." },
+  { "espnowbattery", "Mesh master: show the battery state other devices sent: 'espnowbattery [json] [<name_or_mac>] [from <n>]'.", false, cmd_espnow_battery, "Usage: espnowbattery [json] [<name_or_mac>] [from <n>]\n       A device sends its battery state to the master named on it (espnowpowerinterval).\n       json: 'next' is the number to pass as 'from' when not every device fitted one reply." },
+  { "espnowevents", "Mesh master: show the system events other devices sent: 'espnowevents [json] [since <rx>]'.", false, cmd_espnow_events, "Usage: espnowevents [json] [since <rx>]\n       A device sends its events to the master named on it (espnoweventpush). The master keeps the newest 24 per mesh.\n       since <rx>: only events after that receive number. json: 'more' means ask again with since = the last rx." },
+  { "espnowpowerinterval", "How often this device sends its battery state to the mesh master, in seconds: 'espnowpowerinterval [0|10..3600]'. 0 = not sent.", true, cmd_espnow_powerinterval, "Usage: espnowpowerinterval [0|10..3600]" },
+  { "espnoweventpush", "Which of this device's system events go to the mesh master: 'espnoweventpush [off|alert|standard|verbose]'.", true, cmd_espnow_eventpush, "Usage: espnoweventpush [off|alert|standard|verbose]\n       alert: security, safety and faults only (the default). standard: also the everyday ones. verbose: all." },
   { "espnowsensorbroadcast", "Enable/disable all sensor ESP-NOW communication: 'espnowsensorbroadcast <on|off>'.", false, cmd_espnow_sensorbroadcast, "Usage: espnowsensorbroadcast [on|off]" },
   // Secure sensor fetcher (worker settings + Phase 1b test harness) — docs/ESPNOW_SENSOR_FETCHER_DESIGN.md
   { "espnowacceptsensorcontrol", "Worker: opt in to honor SENSOR_REQ from the configured master/backup: 'espnowacceptsensorcontrol <on|off>'.", true, cmd_espnow_acceptsensorcontrol, "Usage: espnowacceptsensorcontrol <on|off>" },
@@ -21410,6 +21239,15 @@ static const SettingEntry espnowSettingEntries[] = {
   { "channel", SETTING_U8, &gSettings.espnowChannel, 0, 0, nullptr, 0, 13, "Preferred Channel (0=auto)", nullptr, false, nullptr, "espnowchannel" },
   { "meshRelay", SETTING_BOOL, &gSettings.meshRelay, true, 0, nullptr, 0, 1, "Relay for peers", nullptr, false, "mesh", "espnowmeshrelay" },
   { "meshPeerMax", SETTING_U8, &gSettings.meshPeerMax, 8, 0, nullptr, 1, 16, "Max Peer Slots (reboot)", nullptr, false, "mesh", "espnowmeshpeermax" },
+  // Mesh time (System_ESPNow_MeshTime.cpp): the master sends its clock, other
+  // devices take it when they have no better source.
+  { "meshTime", SETTING_BOOL, &gSettings.meshTime, true, 0, nullptr, 0, 1, "Mesh Time", nullptr, false, "mesh", "espnowmeshtime" },
+  // Battery state and events to the masters named on this device
+  // (System_ESPNow_PowerEvents.cpp). powerStatusInterval: seconds between
+  // battery frames, 0 = none, else 10 to 3600 (espnowpowerinterval refuses 1
+  // to 9). eventPush: which of this device's events are sent.
+  { "powerStatusInterval", SETTING_U16, &gSettings.powerStatusInterval, 60, 0, nullptr, 0, 3600, "Battery State Interval (s, 0=off)", nullptr, false, "mesh", "espnowpowerinterval" },
+  { "eventPush", SETTING_U8, &gSettings.eventPush, 1, 0, nullptr, 0, 3, "Events Sent To Master", "0:Off,1:Alert,2:Standard,3:Verbose", false, "mesh", "espnoweventpush" },
   { "sensorBroadcastIntervalMs", SETTING_U16, &gSettings.sensorBroadcastIntervalMs, 1000, 0, nullptr, 100, 10000, "Sensor Broadcast Interval (ms)", nullptr, false, "mesh", "espnowsensorbroadcastinterval" },
   // Secure sensor fetcher (worker role) — fingerprints are PUBLIC identifiers (isSecret=false).
   { "acceptSensorControl", SETTING_BOOL, &gSettings.espnowAcceptSensorControl, 0, 0, nullptr, 0, 0, "Accept Sensor Control", nullptr, false, "mesh", "espnowacceptsensorcontrol" },
@@ -21454,7 +21292,49 @@ ESPNOW_SETTING_CMD(cmd_espnow_topoautorefresh, "topoAutoRefresh")
 ESPNOW_SETTING_CMD(cmd_espnow_heartbeatbroadcast, "heartbeatBroadcast")
 ESPNOW_SETTING_CMD(cmd_espnow_meshrelay, "meshRelay")
 ESPNOW_SETTING_CMD(cmd_espnow_meshpeermax, "meshPeerMax")
+ESPNOW_SETTING_CMD(cmd_espnow_meshtime, "meshTime")
 ESPNOW_SETTING_CMD(cmd_espnow_sensorbroadcastinterval, "sensorBroadcastIntervalMs")
+
+// espnowpowerinterval <0|10..3600>: seconds between the battery frames this
+// device sends to its master. The setting's own range is 0 to 3600; 1 to 9
+// are refused here (a frame is never sent within 5 s of the last one, and a
+// battery sample is taken every few seconds).
+const char* cmd_espnow_powerinterval(const String& a) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String value = a;
+  value.trim();
+  if (value.length() > 0) {
+    char* end = nullptr;
+    const unsigned long seconds = strtoul(value.c_str(), &end, 10);
+    if (end == value.c_str() || *end != '\0' || !espnowsensor::powerIntervalValid(seconds)) {
+      return "Error: use 0 (battery state is not sent) or 10 to 3600 seconds";
+    }
+  }
+  return handleSettingCommand(findEspNowEntry("powerStatusInterval"), a);
+}
+
+// espnoweventpush <off|alert|standard|verbose>: which of this device's system
+// events go to its master. Stored as a number (0 to 3); the words are what a
+// user types and sees.
+const char* cmd_espnow_eventpush(const String& a) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String value = a;
+  value.trim();
+  value.toLowerCase();
+  if (value.length() == 0) {
+    EXT_RAM_BSS_ATTR static char reply[96];
+    snprintf(reply, sizeof(reply), "eventPush = %s (off, alert, standard or verbose)",
+             espnowsensor::eventPushKey(gSettings.eventPush));
+    return reply;
+  }
+  uint8_t setting = 0;
+  if (value.length() == 1 && value[0] >= '0' && value[0] <= '3') {
+    setting = (uint8_t)(value[0] - '0');
+  } else if (!espnowsensor::eventPushFromName(value.c_str(), setting)) {
+    return "Error: use off, alert, standard or verbose";
+  }
+  return handleSettingCommand(findEspNowEntry("eventPush"), String((int)setting));
+}
 // Secure sensor fetcher (worker settings) — persist via real per-setting commands.
 ESPNOW_SETTING_CMD(cmd_espnow_acceptsensorcontrol, "acceptSensorControl")
 ESPNOW_SETTING_CMD(cmd_espnow_masterfingerprint, "masterFingerprint")
@@ -21473,7 +21353,7 @@ const char* cmd_espnow_sensorreq(const String& argsInput) {
   if (!resolveDeviceNameOrMac(a.arg(0), mac)) {
     return "Error: peer not found (must be securely paired — try espnowpairsecure)";
   }
-  V4PayloadSensorReq rq;
+  V4PayloadSensorReq rq = {};
   rq.reqId      = (uint8_t)(generateMessageId() & 0xFF);
   uint8_t mode = 0;
   uint32_t intervalMs = 0;

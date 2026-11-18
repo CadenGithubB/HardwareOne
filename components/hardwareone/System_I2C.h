@@ -507,9 +507,10 @@ String identifySensor(uint8_t address);
 // the closing '}'. ts = the cache's lastUpdate (millis; 0 = never sampled).
 // There is deliberately NO "age" key: local consumers derive it (millis()-ts,
 // same clock), and remote ones can't use a sender-relative age anyway — they
-// stamp arrival time instead. Dropping it also buys ~10 B toward the 200 B
-// TX gate in v4_send_sensor_envelope (the 256 B RX buffer never binds, the
-// gate rejects first). Returns bytes written
+// stamp arrival time instead. Dropping it also keeps a reading smaller: one
+// of up to 190 bytes travels in a single frame to a direct peer (118 through
+// a relay; the largest reading is 472 bytes in four frames,
+// System_ESPNow_SensorCore.h). Returns bytes written
 // (always < bufSize, leaving room for the caller's suffix), or 0 on
 // error/overflow — a 0 return means the caller must NOT append.
 int sensorEnvelopeBegin(char* buf, size_t bufSize, bool valid, bool connected,

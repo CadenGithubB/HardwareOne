@@ -32,8 +32,8 @@
 // the benefit. Notable holdouts that still build and send frames on their OWN
 // stack:
 //   * (RETIRED HOLDOUT) sensor_bcast's mesh path was migrated by the D2 secure
-//     fetcher: sensorBroadcasterTask → transmitSensorData → v4_send_sensor_envelope,
-//     which stacks only a uint8_t buffer[256] and hands off via sendAead — the
+//     fetcher: sensorBroadcasterTask → transmitSensorData → sensorSendReadingTo,
+//     which stacks only one 202-byte frame and hands off via sendAead — the
 //     AEAD seal, frame build, and capture now run on the dispatcher task.
 //   * Mesh heartbeats — call v4_send_payload_smart / v4_broadcast_category
 //     directly.

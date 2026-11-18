@@ -459,7 +459,7 @@ void notifViewerResolve(const char* username, NotifViewer& out) {
 // what keeps the everyday interrupt load small WITHOUT hard-limiting any one
 // surface: raise your floor to cut noise, lower it (or force-on a kind) to see
 // more — identically on OLED, web, and the glasses.
-static uint8_t notifKindTier(uint8_t kind) {
+uint8_t notifKindTier(uint8_t kind) {
   switch (kind) {
     // ALERT — security, safety, data-integrity faults. Always interrupts.
     case SYSEVT_BATTERY_CRITICAL:

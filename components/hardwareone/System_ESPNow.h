@@ -110,7 +110,6 @@ bool writeSettingsJson();
 #define PAYLOAD_TOPO_RESP "topoResp"
 #define PAYLOAD_QUERY "query"
 #define PAYLOAD_STATUS "status"
-#define PAYLOAD_TIME_SYNC "timeSync"
 
 // Bond roles (stored as uint8_t in gSettings.bondRole when ENABLE_BONDED_MODE).
 // When bonded mode is compiled out, helpers are false/"none" stubs so mesh-only
@@ -553,6 +552,7 @@ static_assert(sizeof(CapabilitySummary) == 76,
 
 // Periodic bond status snapshot — sent in response to BOND_STATUS_REQ (~30s interval)
 // Uses same CAP_SENSOR_* bitmask constants as CapabilitySummary
+static_assert(REMOTE_SENSOR_MAX <= 16, "BondPeerStatus keeps its two sensor masks in 16 bits");
 struct __attribute__((packed)) BondPeerStatus {
   uint32_t uptimeSec;          // Device uptime in seconds
   uint32_t freeHeap;           // Free heap bytes
@@ -589,16 +589,19 @@ struct __attribute__((packed)) BondPeerStatus {
 #define CAP_SERVICE_HTTP        (1 << 2)
 #define CAP_SERVICE_BLUETOOTH   (1 << 3)
 
-// Sensor mask bits (I2C sensors)
-#define CAP_SENSOR_THERMAL      (1 << 0)
-#define CAP_SENSOR_TOF          (1 << 1)
-#define CAP_SENSOR_IMU          (1 << 2)
-#define CAP_SENSOR_INPUT      (1 << 3)
-#define CAP_SENSOR_APDS         (1 << 4)
-#define CAP_SENSOR_GPS          (1 << 5)
-#define CAP_SENSOR_RTC          (1 << 6)
-#define CAP_SENSOR_PRESENCE     (1 << 7)
-#define CAP_SENSOR_FMRADIO      (1 << 8)
+// Sensor mask bits. One numbering for every mask that names sensors: the bit
+// of a sensor is espnowsensor::sensorBit() of its RemoteSensorType
+// (System_ESPNow_SensorCore.h), the same bit the SENSOR_REQ mask, the
+// SENSOR_STATUS masks and the receiver's table use. No number is typed here.
+#define CAP_SENSOR_THERMAL      espnowsensor::sensorBit(REMOTE_SENSOR_THERMAL)
+#define CAP_SENSOR_TOF          espnowsensor::sensorBit(REMOTE_SENSOR_TOF)
+#define CAP_SENSOR_IMU          espnowsensor::sensorBit(REMOTE_SENSOR_IMU)
+#define CAP_SENSOR_INPUT        espnowsensor::sensorBit(REMOTE_SENSOR_INPUT)
+#define CAP_SENSOR_APDS         espnowsensor::sensorBit(REMOTE_SENSOR_APDS)
+#define CAP_SENSOR_GPS          espnowsensor::sensorBit(REMOTE_SENSOR_GPS)
+#define CAP_SENSOR_RTC          espnowsensor::sensorBit(REMOTE_SENSOR_RTC)
+#define CAP_SENSOR_PRESENCE     espnowsensor::sensorBit(REMOTE_SENSOR_PRESENCE)
+#define CAP_SENSOR_FMRADIO      espnowsensor::sensorBit(REMOTE_SENSOR_FMRADIO)
 
 // Human-readable capability names (for UI display)
 struct CapabilityName {
@@ -631,23 +634,8 @@ static const CapabilityName SERVICE_NAMES[] = {
   { 0, nullptr, nullptr }
 };
 
-// Sensor names
-static const CapabilityName SENSOR_NAMES[] = {
-  { CAP_SENSOR_THERMAL,  "Therm",  "Thermal Camera" },
-  { CAP_SENSOR_TOF,      "ToF",    "Time-of-Flight" },
-  { CAP_SENSOR_IMU,      "IMU",    "IMU/Accelerometer" },
-#if ENABLE_ANO_ENCODER
-  { CAP_SENSOR_INPUT,    "ANO",    "ANO Rotary Encoder" },
-#else
-  { CAP_SENSOR_INPUT,    "Pad",    "Gamepad" },
-#endif
-  { CAP_SENSOR_APDS,     "APDS",   "Gesture/Color" },
-  { CAP_SENSOR_GPS,      "GPS",    "GPS" },
-  { CAP_SENSOR_RTC,      "RTC",    "Real-Time Clock" },
-  { CAP_SENSOR_PRESENCE, "Pres",   "Presence Sensor" },
-  { CAP_SENSOR_FMRADIO,  "FM",     "FM Radio" },
-  { 0, nullptr, nullptr }
-};
+// (The sensor names are in the one sensor table, System_ESPNow_SensorCore.h:
+// sensorMaskNames() below lists the sensors of a mask.)
 
 // Helper: Get comma-separated list of enabled capabilities (short names for OLED)
 inline String getCapabilityListShort(uint32_t mask, const CapabilityName* names) {
@@ -669,6 +657,19 @@ inline String getCapabilityListLong(uint32_t mask, const CapabilityName* names) 
       if (result.length() > 0) result += ", ";
       result += names[i].longName;
     }
+  }
+  return result.length() > 0 ? result : String("None");
+}
+
+// The sensors of a mask by name, from the one sensor table: short names
+// joined with "," (OLED) or long names joined with ", " (web/CLI); "None"
+// for an empty mask.
+inline String sensorMaskNames(uint32_t mask, bool longForm) {
+  String result;
+  for (int i = 0; i < REMOTE_SENSOR_MAX; i++) {
+    if (!(mask & espnowsensor::sensorBit((uint8_t)i))) continue;
+    if (result.length() > 0) result += longForm ? ", " : ",";
+    result += longForm ? espnowsensor::kSensorTable[i].longName : espnowsensor::kSensorTable[i].shortName;
   }
   return result.length() > 0 ? result : String("None");
 }
@@ -1250,9 +1251,13 @@ void     espnowPairModeClose();
 bool     espnowPairModeActive();
 uint32_t espnowPairModeRemainingMs();
 
-// Time sync
-const char* cmd_espnow_timesync(const String& originalCmd);
-const char* cmd_espnow_timestatus(const String& argsInput);
+// (Mesh time: System_ESPNow_MeshTime.h.)
+// True while a backup master carries the master role because the master is silent.
+bool espnowBackupPromoted();
+// An ACTIVE session with a paired peer; *establishedAtMs: when it went ACTIVE.
+bool espnowSessionUp(const uint8_t* mac, uint32_t* establishedAtMs = nullptr);
+// The same, and at least 2 s old: usable for a sender's first frame.
+bool espnowSessionSettled(const uint8_t* mac, uint32_t nowMs);
 
 // Helper functions
 const char* getMeshRoleString(uint8_t role);
@@ -1554,9 +1559,6 @@ FileSendResult sendFileToMacResult(const uint8_t* mac, const String& localPath);
 bool sendFileToMac(const uint8_t* mac, const String& localPath);
 
 #if ENABLE_BONDED_MODE
-// V3 binary sensor data streaming for bond mode (worker → master)
-bool sendBondedSensorData(uint8_t sensorType, const uint8_t* data, uint16_t dataLen);
-
 // Check if bond mode is active and peer is online
 bool isBondModeOnline();
 // Check if bond mode is active, peer is online, AND fully synced (cap + manifest + settings)
@@ -1588,7 +1590,6 @@ const char* bondAgreementReasonKey(const BondAgreementView& view);
 void bondAgreementDescribe(char* out, size_t outLen);
 #else
 // Stubs when bond mode is compiled out
-inline bool sendBondedSensorData(uint8_t, const uint8_t*, uint16_t) { return false; }
 inline bool isBondModeOnline() { return false; }
 inline bool isBondSynced() { return false; }
 #endif // ENABLE_BONDED_MODE
@@ -1696,7 +1697,6 @@ inline bool sendFileToMac(const uint8_t* mac, const String& localPath) {
   (void)mac; (void)localPath;
   return false;
 }
-inline bool sendBondedSensorData(uint8_t, const uint8_t*, uint16_t) { return false; }
 inline bool isBondModeOnline() { return false; }
 inline bool isBondSynced() { return false; }
 // Compiled out, ESP-NOW never claims the radio.
@@ -1737,9 +1737,13 @@ bool isBondSessionTokenValid();
 // the one owner of "is this our bond partner" (receive table, session hook,
 // bond magic files, file RPC). False when bonded mode is compiled out.
 bool isBondPeerMac(const uint8_t* mac);
-bool v4_broadcast_sensor_status(RemoteSensorType sensorType, bool enabled);
+// SENSOR_STATUS to the receiver of this device's readings (masks in the one sensor numbering).
+bool v4_send_sensor_status(const uint8_t* dstMac, uint32_t presentMask, uint32_t streamingMask, uint16_t bootTag);
+// One built part of a reading: SENSOR_ENVELOPE, or BOND_SENSOR_DATA to the bond partner.
+bool v4_send_sensor_part(const uint8_t* dstMac, bool viaBond, const uint8_t* part, uint16_t len);
+// Longest plaintext one frame to `dst` carries (202 direct, 130 through a relay).
+uint16_t v4_single_frame_cap(const uint8_t* dst);
 bool v4_send_encrypted_or_queue(const uint8_t dst[6], uint8_t type, uint16_t baseFlags, uint32_t msgId, const uint8_t* plaintext, uint16_t plaintextLen, uint8_t ttl, char* outStatus = nullptr, size_t outStatusLen = 0);
-bool v4_send_sensor_envelope(const uint8_t* dstMac, RemoteSensorType sensorType, const char* jsonData, uint16_t jsonLen);
 bool v4_send_session_wrapped(const uint8_t dst[6], uint8_t type, uint16_t baseFlags, uint32_t msgId, const uint8_t* plaintext, uint16_t plaintextLen, uint8_t ttl, char* errOut, size_t errOutLen);
 bool v4_send_user_sync(const uint8_t* dst, const char* jsonPayload, uint16_t jsonLen);
 

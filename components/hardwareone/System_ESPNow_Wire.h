@@ -19,6 +19,9 @@
 
 #include <Arduino.h>
 #include "System_BuildConfig.h"
+#include "System_ESPNow_SensorCore.h"  // the sensor numbering and the reading header's sizes
+#include "System_ESPNow_PowerEventCore.h"  // the battery and event frames' sizes
+#include "System_ESPNow_TimeCore.h"    // the TIME_SYNC frame's size and source numbers
 
 #if ENABLE_ESPNOW
 
@@ -75,17 +78,24 @@ static_assert(ESPNOW_V4_VERSION == 4,
 //   90–109   Streaming     (STREAM; 91–93 earmarked MEDIA_START/DATA/END)
 //   110–129  Files         (FILE_START/DATA/END/CANCEL live; FILE_ACK=113,
 //                           FILE_PROGRESS=114, FILE_NACK=116, FILE_RESUME_OK=117 reserved)
-//   130–149  Events        (SUBSCRIBE_UPDATE live; UNSUBSCRIBE_ALL/EVENT_PUSH/
-//                           SUB_LIST_REQ/SUB_LIST_REPLY reserved 131–134)
-//   150–169  Sensors       (SENSOR_STATUS live; SENSOR_REQ=153/SENSOR_ENVELOPE=154 live —
-//                           the secure fetcher's leased pull + encrypted reply;
+//   130–149  Events        (SUBSCRIBE_UPDATE live; EVENT_PUSH=132 live: one system
+//                           event of the sender, a session unicast to the masters
+//                           named on it; UNSUBSCRIBE_ALL=131, SUB_LIST_REQ=133,
+//                           SUB_LIST_REPLY=134 reserved)
+//   150–169  Sensors       (SENSOR_STATUS=151 live: which sensors the sender has and
+//                           streams, a session unicast to the device that receives its
+//                           readings; SENSOR_REQ=153/SENSOR_ENVELOPE=154 live —
+//                           the leased pull and the reading, in 1 to 4 frames;
 //                           150 retired (SENSOR_BROADCAST, removed — do not reuse);
-//                           POWER_STATUS=152 reserved)
+//                           POWER_STATUS=152 live: the sender's battery state, a
+//                           session unicast to the masters named on it)
 //   170–189  Bond          (BOND_*, MANIFEST_REQ, SETTINGS_REQ, SCHEMA_REQ, plus
 //                           BOND_STREAM_CTRL/BOND_SENSOR_DATA — moved in from
 //                           streaming/sensors because they were always bond-gated;
 //                           BOND_REQUEST=183 / BOND_NOTICE=184 are accepted from any
-//                           paired peer over its session, not only the bond partner)
+//                           paired peer over its session, not only the bond partner;
+//                           180 and 182 are free again: battery state and events are
+//                           mesh frames, 152 and 132, and need no bond)
 //   190–199  Unallocated buffer (future whole category, or spill for a full one)
 //   200–255  User-defined  (plugin/experiment space — core NEVER allocates here)
 //
@@ -127,7 +137,7 @@ enum EspNowV4Type : uint8_t {
   ESPNOW_V4_TYPE_TOPO_REQ        = 32,
   ESPNOW_V4_TYPE_TOPO_START      = 33,
   ESPNOW_V4_TYPE_TOPO_PEER       = 34,
-  ESPNOW_V4_TYPE_TIME_SYNC       = 35,
+  ESPNOW_V4_TYPE_TIME_SYNC       = 35,  // master → paired device, session unicast: the master's UTC clock
   ESPNOW_V4_TYPE_PAIR_BEACON     = 36,  // Discovery beacon — BROADCAST_AUTH FF broadcast sent while a discovery window is open
   // 37/38 earmarked CAP_REQ / CAP_RESP (mesh capability discovery)
   ESPNOW_V4_TYPE_PEER_LIST       = 39,  // Distance-vector route advertisement. BROADCAST_AUTH, ttl=1
@@ -171,16 +181,18 @@ enum EspNowV4Type : uint8_t {
 
   // --- Events (130–149) ---
   ESPNOW_V4_TYPE_SUBSCRIBE_UPDATE = 130,  // sender → receiver: "send me only these event categories"
-  // 131=UNSUBSCRIBE_ALL, 132=EVENT_PUSH, 133=SUB_LIST_REQ, 134=SUB_LIST_REPLY reserved
+  // 131=UNSUBSCRIBE_ALL reserved
+  ESPNOW_V4_TYPE_EVENT_PUSH      = 132,  // sender → the masters named on it: one system event (V4PayloadEventPush)
+  // 133=SUB_LIST_REQ, 134=SUB_LIST_REPLY reserved
   // 135 earmarked EVENT_SUB v2 (semantic-kind mask wider than 32 bits)
 
   // --- Sensors (150–169) ---
   // 150 retired — SENSOR_BROADCAST (plaintext sensor data). TX removed with the D2 secure
   //   fetcher, RX row removed afterwards; do not reuse the number.
-  ESPNOW_V4_TYPE_SENSOR_STATUS   = 151,
-  // 152=POWER_STATUS reserved (voltage/charging/USB/heap beacon — mesh report rank 8)
+  ESPNOW_V4_TYPE_SENSOR_STATUS   = 151,  // sender of readings → their receiver: sensors present / streaming (masks)
+  ESPNOW_V4_TYPE_POWER_STATUS    = 152,  // sender → the masters named on it: its battery state (V4PayloadPowerStatus)
   ESPNOW_V4_TYPE_SENSOR_REQ      = 153,  // master → worker: subscribe/oneshot/unsubscribe (leased pull)
-  ESPNOW_V4_TYPE_SENSOR_ENVELOPE = 154,  // worker → master: session-encrypted unicast sensor reading
+  ESPNOW_V4_TYPE_SENSOR_ENVELOPE = 154,  // worker → master: one part of a sensor reading (V4PayloadSensorReading)
 
   // --- Bond (170–189) ---
   ESPNOW_V4_TYPE_BOND_HEARTBEAT  = 170,
@@ -192,8 +204,9 @@ enum EspNowV4Type : uint8_t {
   ESPNOW_V4_TYPE_BOND_STATUS_RESP= 176,
   ESPNOW_V4_TYPE_SCHEMA_REQ      = 177,  // Master → worker: send your settings schema (response arrives as file _schema_out.json)
   ESPNOW_V4_TYPE_BOND_STREAM_CTRL= 178,  // was STREAM_CTRL (51) — always bond-gated, now numbered and named with its policy family
-  ESPNOW_V4_TYPE_BOND_SENSOR_DATA= 179,  // was SENSOR_DATA (81) — bond binary sensor streaming
-  // 180–182 earmarked BOND_POWER_STATUS / BOND_SETTINGS_SYNC_ACK / BOND_EVENT_PUSH
+  ESPNOW_V4_TYPE_BOND_SENSOR_DATA= 179,  // one part of a sensor reading to the bond partner (same layout as 154)
+  // 181 earmarked BOND_SETTINGS_SYNC_ACK. 180 and 182 are free: they were earmarked for a
+  //   bond battery frame and a bond event frame, which are the mesh frames 152 and 132.
   ESPNOW_V4_TYPE_BOND_REQUEST    = 183,  // "you are my bond partner": sent to the configured partner
   ESPNOW_V4_TYPE_BOND_NOTICE     = 184,  // how the sender's bond stands toward the receiver (BondNoticeReason)
 };
@@ -241,8 +254,9 @@ struct __attribute__((packed)) EspNowV4Header {
                              //         is delivered locally but never forwarded again. ttl=1 at TX
                              //         therefore means "single hop, never relayed" — that is the
                              //         correct value for anything link-local (HEARTBEAT, PEER_LIST,
-                             //         ACK, PAIR_*). Relay-eligible today: BROADCAST_AUTH TEXT and
-                             //         TIME_SYNC (flooded), and RELAY_DATA (routed). See
+                             //         ACK, PAIR_*). Relay-eligible today: BROADCAST_AUTH TEXT
+                             //         (flooded) and RELAY_DATA (routed; TIME_SYNC and the
+                             //         sensor frames travel in it, never flooded). See
                              //         docs/ESPNOW_MESH_SYSTEM.md.
   uint8_t  fragIndex;        // 19  — fragment index (0-based)
   uint8_t  fragCount;        // 20  — total fragment count (1 = not fragmented)
@@ -377,12 +391,23 @@ struct __attribute__((packed)) V4PayloadPairCtrl {
 };
 static_assert(sizeof(V4PayloadPairCtrl) == 28, "V4PayloadPairCtrl must be 28 bytes");
 
-// Time sync payload
+// TIME_SYNC (35): the mesh master's clock, sent to each paired device over
+// its session (System_ESPNow_TimeCore.h has the rules and the meaning of
+// every field). UTC; the timezone is applied only where a time is shown.
+// The code packs and parses with meshtime::packFrame / parseFrame; this
+// struct states the layout.
 struct __attribute__((packed)) V4PayloadTimeSync {
-  uint32_t epochTime;     // Unix epoch time
-  int64_t  timeOffset;    // Time offset in milliseconds
-  uint32_t senderUptime;  // Sender uptime in seconds
+  int64_t  epochMs;       // 0   UTC milliseconds since 1970, the sender's clock when it built the frame
+  uint8_t  source;        // 8   where the sender's clock came from (meshtime::kSrc*); never 0
+  uint8_t  flags;         // 9   bit 0: the sender is a backup master acting as master
+  uint16_t sinceSetMin;   // 10  minutes since that source set the sender's clock; 65535 = or longer
+  uint8_t  reserved[4];   // 12  0
 };
+static_assert(sizeof(V4PayloadTimeSync) == 16 && sizeof(V4PayloadTimeSync) == meshtime::kFrameLen,
+              "V4PayloadTimeSync is 16 bytes on the wire");
+static_assert(offsetof(V4PayloadTimeSync, source) == 8 && offsetof(V4PayloadTimeSync, flags) == 9 &&
+              offsetof(V4PayloadTimeSync, sinceSetMin) == 10 && offsetof(V4PayloadTimeSync, reserved) == 12,
+              "V4PayloadTimeSync layout (meshtime::packFrame writes these offsets)");
 
 // Topology request payload
 struct __attribute__((packed)) V4PayloadTopoReq {
@@ -421,15 +446,8 @@ struct __attribute__((packed)) V4PayloadBondHeartbeat {
   uint32_t settingsHash;   // Hash of local settings (exclude passwords)
 };
 
-// Binary sensor data payload for bond mode streaming (compact, no JSON overhead)
-// V4: header is 8 bytes, max V4 payload 218 bytes, leaving 210 bytes for sensor data.
-struct __attribute__((packed)) V4PayloadSensorData {
-  uint8_t  sensorType;     // RemoteSensorType enum value
-  uint8_t  flags;          // Bit 0: valid, Bit 1: streaming enabled
-  uint16_t dataLen;        // Length of data[] that follows
-  uint32_t seqNum;         // Sequence number for ordering
-  uint8_t  data[];         // Variable-length sensor data (flexible array member)
-};
+// (BOND_SENSOR_DATA carries V4PayloadSensorReading, below the bond block: one
+// reading layout for the mesh frame 154 and the bond frame 179.)
 
 // Stream control payload for bond mode (master -> worker)
 struct __attribute__((packed)) V4PayloadStreamCtrl {
@@ -488,24 +506,58 @@ struct __attribute__((packed)) V4PayloadBondNotice {
 static_assert(sizeof(V4PayloadBondNotice) == 8, "V4PayloadBondNotice is 8 bytes on the wire");
 #endif // ENABLE_BONDED_MODE
 
-// Sensor status payload for mesh broadcast
-struct __attribute__((packed)) V4PayloadSensorStatus {
-  uint8_t sensorType;   // RemoteSensorType enum value
-  uint8_t enabled;      // 1 if enabled, 0 if disabled
-  uint8_t reserved[2];  // Padding for alignment
-};
+// ---- Sensor frames -----------------------------------------------------------
+// One numbering of the sensor types everywhere: RemoteSensorType
+// (System_ESPNow_SensorCore.h). A mask bit is espnowsensor::sensorBit(type).
+// Every frame below fits one frame through a relay (130 bytes of plaintext).
 
-// Sensor broadcast payload (sensor data to mesh)
-// V4: header is 4 bytes, max V4 payload 218 bytes, leaving 214 bytes for JSON data.
-// NOTE (D2 secure fetcher): SENSOR_ENVELOPE=154 reuses THIS layout on the wire — same
-// per-sensor {sensorType,dataLen,data[]} shape — but is sent as a session-encrypted
-// UNICAST to the leasing controller instead of a plaintext broadcast (opcode 150).
-struct __attribute__((packed)) V4PayloadSensorBroadcast {
-  uint8_t  sensorType;  // RemoteSensorType enum value
-  uint16_t dataLen;     // Length of JSON data that follows
-  uint8_t  reserved;    // Padding for alignment
-  uint8_t  data[];      // Variable-length JSON data (flexible array member)
+// SENSOR_STATUS (151): which sensors the sender has and which it is streaming.
+// A session unicast to the device that receives the sender's readings (row:
+// paired + session-encrypted), sent every 5 s while a stream runs and when a
+// stream starts or stops. Bits of types the receiver does not know are ignored.
+struct __attribute__((packed)) V4PayloadSensorStatus {
+  uint32_t presentMask;    // 0   bit i: sensor type i is connected on the sender
+  uint32_t streamingMask;  // 4   bit i: the sender is sending readings of type i
+  uint16_t bootTag;        // 8   as in the reading header
+  uint8_t  reserved[6];    // 10  0
 };
+static_assert(sizeof(V4PayloadSensorStatus) == 16, "V4PayloadSensorStatus is 16 bytes on the wire");
+
+// The header of one part of a sensor reading: SENSOR_ENVELOPE (154), and
+// BOND_SENSOR_DATA (179) to a bond partner. The part's bytes of the reading's
+// JSON text follow it, with no terminator; their length is the frame's payload
+// length minus 12. System_ESPNow_SensorCore.h has the rules and the meaning of
+// every field; the code packs and parses with espnowsensor::packReadingHeader
+// / parseReadingHeader, and this struct states the layout.
+struct __attribute__((packed)) V4PayloadSensorReading {
+  uint8_t  sensorType;  // 0   RemoteSensorType
+  uint8_t  flags;       // 1   bit 0: ageMs is filled; bit 1: first reading of a stream to this target
+  uint16_t bootTag;     // 2   the same for every frame of one boot of the sender
+  uint16_t counter;     // 4   the sender's count of readings of this sensor (1 first, 0 after 65535)
+  uint8_t  parts;       // 6   low nibble: this part's index; high nibble: number of parts (1 to 4)
+  uint8_t  reserved;    // 7   0
+  uint32_t ageMs;       // 8   how old the reading was when sent; 0 today
+};
+static_assert(sizeof(V4PayloadSensorReading) == 12 &&
+              sizeof(V4PayloadSensorReading) == espnowsensor::kReadingHeaderLen,
+              "V4PayloadSensorReading is 12 bytes on the wire");
+static_assert(offsetof(V4PayloadSensorReading, bootTag) == 2 && offsetof(V4PayloadSensorReading, counter) == 4 &&
+              offsetof(V4PayloadSensorReading, parts) == 6 && offsetof(V4PayloadSensorReading, ageMs) == 8,
+              "V4PayloadSensorReading layout (espnowsensor::packReadingHeader writes these offsets)");
+
+#define SENSOR_READING_HEADER_LEN       12
+#define SENSOR_READING_MAX_PARTS        4
+#define SENSOR_READING_PART_MAX_DIRECT  (ESPNOW_V4_MAX_PLAINTEXT - SENSOR_READING_HEADER_LEN)              // 190
+#define SENSOR_READING_PART_MAX_ROUTED  (ESPNOW_V4_RELAY_MAX_INNER_PLAINTEXT - SENSOR_READING_HEADER_LEN)  // 118
+// The largest reading, the same on a direct and a routed path.
+#define SENSOR_READING_MAX_BYTES        (SENSOR_READING_MAX_PARTS * SENSOR_READING_PART_MAX_ROUTED)        // 472
+static_assert(espnowsensor::kFrameCapDirect == ESPNOW_V4_MAX_PLAINTEXT &&
+              espnowsensor::kFrameCapRouted == ESPNOW_V4_RELAY_MAX_INNER_PLAINTEXT &&
+              espnowsensor::kReadingMaxBytes == SENSOR_READING_MAX_BYTES &&
+              espnowsensor::kReadingMaxParts == SENSOR_READING_MAX_PARTS,
+              "System_ESPNow_SensorCore.h plans parts with the frame budgets of this file");
+static_assert(SENSOR_READING_HEADER_LEN + SENSOR_READING_PART_MAX_ROUTED == ESPNOW_V4_RELAY_MAX_INNER_PLAINTEXT,
+              "a part of a reading fills one routed frame exactly");
 
 // Sensor request payload (master -> worker): the secure fetcher's leased pull.
 // Mesh-legal (NOT bond-gated) — registered REQ_PAIRED|REQ_SESSION_ENC and authorized
@@ -516,9 +568,76 @@ struct __attribute__((packed)) V4PayloadSensorReq {
   uint32_t sensorMask;  // bitmask over RemoteSensorType (bit i = 1u<<i)
   uint32_t intervalMs;  // desired per-sensor cadence hint (worker floors at spec.minIntervalMs)
   uint32_t leaseMs;     // lease duration (ms); must exceed the renewal cadence (e.g. 90000 for a 30s tick)
+  uint8_t  reserved[2]; // 0
 };
-static_assert(sizeof(V4PayloadSensorReq) <= ESPNOW_V4_MAX_PLAINTEXT,
-              "V4PayloadSensorReq must fit a SESSION_FRAME plaintext budget (202 B)");
+static_assert(sizeof(V4PayloadSensorReq) == 16, "V4PayloadSensorReq is 16 bytes on the wire");
+
+// POWER_STATUS (152): the sender's battery state. A session unicast to each
+// master named on the sender (row: paired + session-encrypted, no bond gate),
+// sent with an acknowledgement request: two that nobody acknowledges clear a
+// session the master no longer has. System_ESPNow_PowerEventCore.h has the
+// rules and the meaning of every field; the code packs and parses with
+// espnowsensor::packPowerFrame / parsePowerFrame, and this struct states the
+// layout.
+struct __attribute__((packed)) V4PayloadPowerStatus {
+  uint16_t counter;      // 0   the sender's count of battery frames (1 first, 0 after 65535)
+  uint16_t bootTag;      // 2   as in the reading header
+  uint8_t  status;       // 4   BatteryStatus
+  uint8_t  backend;      // 5   0 none, 1 ADC, 2 fuel gauge
+  uint16_t known;        // 6   which of the values below are valid, and the yes/no states
+  uint16_t voltageMv;    // 8
+  uint16_t percentX10;   // 10  0 to 1000
+  int16_t  rateX10;      // 12  percent per hour x 10
+  uint16_t sampleAgeMs;  // 14  age of the battery sample when sent; 65535: that or more, or none
+  uint8_t  reserved[8];  // 16  0
+};
+static_assert(sizeof(V4PayloadPowerStatus) == 24 && sizeof(V4PayloadPowerStatus) == espnowsensor::kPowerFrameLen,
+              "V4PayloadPowerStatus is 24 bytes on the wire");
+static_assert(offsetof(V4PayloadPowerStatus, bootTag) == 2 && offsetof(V4PayloadPowerStatus, status) == 4 &&
+              offsetof(V4PayloadPowerStatus, backend) == 5 && offsetof(V4PayloadPowerStatus, known) == 6 &&
+              offsetof(V4PayloadPowerStatus, voltageMv) == 8 && offsetof(V4PayloadPowerStatus, percentX10) == 10 &&
+              offsetof(V4PayloadPowerStatus, rateX10) == 12 && offsetof(V4PayloadPowerStatus, sampleAgeMs) == 14 &&
+              offsetof(V4PayloadPowerStatus, reserved) == 16,
+              "V4PayloadPowerStatus layout (espnowsensor::packPowerFrame writes these offsets)");
+
+// EVENT_PUSH (132): one system event of the sender, with its text cut to fit
+// one frame through a relay. A session unicast to each master named on the
+// sender (row: paired + session-encrypted, no bond gate). The kind travels as
+// its name. The text fields are zero padded and have no terminator when full;
+// the receiver trusts none of them to be text.
+struct __attribute__((packed)) V4PayloadEventPush {
+  uint16_t counter;      // 0    the sender's count of event frames (1 first, 0 after 65535)
+  uint16_t bootTag;      // 2    as in the reading header
+  uint8_t  flags;        // 4    bit 0 subject cut, bit 1 detail cut, bit 2 who cut, bit 3 kind cut
+  uint8_t  tier;         // 5    0 verbose, 1 standard, 2 alert
+  uint8_t  source;       // 6    which interface caused the event (0 to 7)
+  uint8_t  reserved0;    // 7    0
+  uint16_t skipped;      // 8    events the sender left out since the last one it sent
+  uint16_t reserved1;    // 10   0
+  uint32_t eventSeq;     // 12   the event's number on the sender (#N of its events.log)
+  uint32_t ageMs;        // 16   how old the event was when sent
+  char     kind[32];     // 20
+  char     subject[32];  // 52
+  char     detail[32];   // 84
+  char     who[12];      // 116
+};
+static_assert(sizeof(V4PayloadEventPush) == 128 && sizeof(V4PayloadEventPush) == espnowsensor::kEventFrameLen,
+              "V4PayloadEventPush is 128 bytes on the wire");
+static_assert(offsetof(V4PayloadEventPush, flags) == 4 && offsetof(V4PayloadEventPush, tier) == 5 &&
+              offsetof(V4PayloadEventPush, source) == 6 && offsetof(V4PayloadEventPush, skipped) == 8 &&
+              offsetof(V4PayloadEventPush, eventSeq) == 12 && offsetof(V4PayloadEventPush, ageMs) == 16 &&
+              offsetof(V4PayloadEventPush, kind) == 20 && offsetof(V4PayloadEventPush, subject) == 52 &&
+              offsetof(V4PayloadEventPush, detail) == 84 && offsetof(V4PayloadEventPush, who) == 116,
+              "V4PayloadEventPush layout (espnowsensor::packEventFrame writes these offsets)");
+
+// Every frame of this block and TIME_SYNC travel inside a relay envelope
+// unchanged, in one frame each.
+static_assert(sizeof(V4PayloadTimeSync) <= ESPNOW_V4_RELAY_MAX_INNER_PLAINTEXT &&
+              sizeof(V4PayloadSensorStatus) <= ESPNOW_V4_RELAY_MAX_INNER_PLAINTEXT &&
+              sizeof(V4PayloadSensorReq) <= ESPNOW_V4_RELAY_MAX_INNER_PLAINTEXT &&
+              sizeof(V4PayloadPowerStatus) <= ESPNOW_V4_RELAY_MAX_INNER_PLAINTEXT &&
+              sizeof(V4PayloadEventPush) <= ESPNOW_V4_RELAY_MAX_INNER_PLAINTEXT,
+              "the time, sensor, battery and event frames must fit one routed frame");
 
 // Metadata payload for metadata exchange (REQ/RESP/PUSH)
 // Phase 3.5: trimmed tags 64→54 so the struct fits ESPNOW_V4_MAX_PLAINTEXT

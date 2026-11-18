@@ -19,7 +19,12 @@
 
 #include "System_Deadline.h"
 
-constexpr uint8_t  kHandshakeBackoffSlots   = 8;
+// One entry per paired device (16 identity slots, MESH_PEER_MAX): the mesh
+// master offers a handshake to every paired device without a session, and
+// with fewer entries than devices a full table gave up an entry every look,
+// so no device ever reached its longer wait (1.5 to 2 starts a second, for
+// good, with nine or more silent paired devices).
+constexpr uint8_t  kHandshakeBackoffSlots   = 16;
 constexpr uint32_t kHandshakeBackoffFirstMs = 5000;     // after the first unanswered start
 constexpr uint32_t kHandshakeBackoffMaxMs   = 300000;   // 5 minutes
 // Frames from a peer that is backing off end the wait only when the peer had

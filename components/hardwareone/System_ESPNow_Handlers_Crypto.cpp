@@ -661,7 +661,9 @@ WarnLimiter gKeyExGiveUpWarn = {};
 // Back-off table for automatic handshake starts. Taken on espnow_task (bond
 // heartbeat) and cmd_exec (bond commands); cleared from RX handlers on
 // espnow_task, session completion on cmd_exec and user commands. Every access
-// holds the spinlock: a few compares on 8 entries, no calls inside.
+// holds the spinlock: a few compares on 16 entries, no calls inside.
+static_assert(kHandshakeBackoffSlots >= MESH_PEER_MAX,
+              "one back-off entry per paired device, so a full table never gives up a waiting one");
 HandshakeBackoffTable gHandshakeBackoff = {};
 portMUX_TYPE gHandshakeBackoffLock = portMUX_INITIALIZER_UNLOCKED;
 
