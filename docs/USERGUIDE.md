@@ -666,6 +666,37 @@ espnowdeviceinfo                - Show all local metadata
 ```
 Called with no argument, each of these prints the current value.
 
+### Rooms, tags and group commands
+`espnowroomcmd <room> <user> <pass> <command>` and `espnowtagcmd <tag> <user> <pass> <command>` run a command on every device of a room or with a tag. The user and password are an account on the target devices and travel with the command, encrypted for each device.
+
+Room and tags are what each device says about itself, so they do not decide alone who gets that password. This device keeps, for every paired peer, the room and tags **accepted** here, next to what the peer **announces**:
+
+- A room or tag a peer newly announces is **pending**. It is shown and not used. The device prints one line when that happens: `[EVENT][ESPNOW] <name> says it is in room 'Kitchen'; not used for room commands until accepted here: espnowgroupaccept <name>`. A peer that keeps changing its room or tags is reported once a minute: the first change at once, then one line with the number of further changes and what is pending at the end of the minute.
+- A room or tag a peer stops announcing is dropped as soon as this device hears of it, without a confirm. A peer that moves from Garage to Kitchen no longer gets Garage commands from that moment and gets Kitchen commands once it is accepted. A peer tells the devices it has a session with when it changes its room or tags; a device that could not hear it then (restarting, out of range) asks for the peer's room and tags by itself when the session with it is up again.
+- This device's own room and tags need no acceptance.
+
+```
+espnowgroups [json] [name_or_mac]         - Per peer: announced, accepted and pending room and tags
+espnowgroupaccept [json] <name_or_mac|all> - Accept what the peer announces right now; the reply says what
+espnowgroupdrop [json] <name_or_mac|all>   - Take back what was accepted for the peer
+```
+All three need admin. A peer is named by the name it was paired under on this device, or by its MAC address. When two paired devices have the same name, the lists and notices call them by their MAC address and the three commands refuse the name. Example (replies indented):
+```
+espnowgroups
+    Fridge (AA:BB:CC:DD:EE:02)
+      announced: room 'Kitchen', tag 'cold'
+      accepted:  nothing
+      pending:   room 'Kitchen', tag 'cold'
+espnowgroupaccept Fridge
+    Fridge (AA:BB:CC:DD:EE:02): accepted room 'Kitchen', tag 'cold'
+espnowroomcmd Kitchen admin <pass> status
+      -> Fridge (AA:BB:CC:DD:EE:02)
+    Sent 'status' to 1 device(s) in Kitchen
+```
+A group command says how many devices it left out: `Skipped 1 device(s) whose room is pending (announced, not accepted here): Lamp. Accept with 'espnowgroupaccept <name_or_mac|all>'`. `espnowtagcmd` takes one tag; a list such as `light,door` is refused, run the command once per tag. Commands sent over MQTT to `room:<name>` or `tag:<name>` follow the same rules.
+
+What was accepted is stored on this device and survives a restart. It is cleared for a peer when the peer is unpaired, when `espnowforget` is run for it, and when a different identity key appears at its address. The lists that show a peer's room (`espnowdevices`, `espnowrooms`, `espnowfind`, the web Metadata tab, the OLED and glasses device lists) show the announced room and mark it (`[pending: ...]`, `(not accepted)` or `?`) while it is not accepted; the web Metadata tab has an **Accept** button.
+
 ### File Transfer
 Files can be transferred between paired devices via the web UI or CLI (`espnowsendfile <name_or_mac> "<filepath>"`). Used for syncing automations, settings, and manifests.
 
@@ -1177,8 +1208,11 @@ espnowdeviceinfo                - Show all local device metadata
 espnowdevices                   - List all mesh devices with metadata (master)
 espnowrooms                     - List rooms and their devices (master)
 espnowfind <query>              - Find devices by name, room, or tag
-espnowroomcmd <room> <cmd>      - Run command on all devices in a room
-espnowtagcmd <tag> <cmd>        - Run command on all devices with a tag
+espnowroomcmd <room> <user> <pass> <cmd>  - Run command on the devices accepted into a room
+espnowtagcmd <tag> <user> <pass> <cmd>    - Run command on the devices accepted for a tag
+espnowgroups [json] [name_or_mac]         - Per peer: announced, accepted and pending room and tags
+espnowgroupaccept [json] <name_or_mac|all> - Accept the room and tags a peer announces now
+espnowgroupdrop [json] <name_or_mac|all>   - Take back what was accepted for a peer
 
 --- Sensor streaming ---
 espnowworker [show|on|off|interval <ms>|fields <list>]  - Worker status reporting

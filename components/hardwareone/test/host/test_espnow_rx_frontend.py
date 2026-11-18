@@ -54,6 +54,14 @@ WIRE_DEFINES = re.compile(
     re.MULTILINE)
 RECLAIM = 'static int meshPeerMetaReclaimSlot(const uint8_t* forMac)'
 RELEASE = 'static void meshPeerSlotsRelease('
+GROUP_MARKERS = (
+    'static espnowgroup::Membership groupMembershipOf(',
+    'static void groupMembershipStore(',
+    'static EspNowDevice* groupRecordOf(',
+    'static bool groupSnapshotOf(',
+)
+ANNOUNCE_REGION = ('// ---- Room and tag membership: what a peer announces -----',
+                   '// ---- Room and tag membership: acceptance -----')
 UNPAIR_SLOT_COMMENT = "// Clear the peer's mesh-liveness slot regardless of mode."
 
 
@@ -142,6 +150,15 @@ def main():
              one(source, 'void removeEspNowDevice(')]
     if have_reclaim:
         slots.append('static int meshPeerMetaReclaimSlot(const uint8_t* forMac);')
+    # processMetadata hands a paired peer's room and tags to the announcement
+    # part of room and tag membership (test_espnow_group_membership.py); a tree
+    # before it has none.
+    if ANNOUNCE_REGION[0] in source:
+        if source.count(ANNOUNCE_REGION[0]) != 1 or source.count(ANNOUNCE_REGION[1]) != 1:
+            sys.exit('FAIL extraction: the announcement region is not unique in System_ESPNow.cpp')
+        slots.append('#include "System_ESPNow_GroupCore.h"  // production rules (copied beside this unit)')
+        slots += [one(source, marker) for marker in GROUP_MARKERS]
+        slots.append(source[source.index(ANNOUNCE_REGION[0]):source.index(ANNOUNCE_REGION[1])])
     slots += [one(source, 'static void processMetadata('),
               one(source, 'MeshPeerHealth* getMeshPeerHealth(const uint8_t mac[6], bool createIfMissing)'),
               one(source, 'MeshPeerMeta* getMeshPeerMeta(const uint8_t mac[6], bool createIfMissing)')]
@@ -189,6 +206,8 @@ def main():
     with tempfile.TemporaryDirectory(prefix='hw1-espnow-rx-frontend-') as tmp:
         unit, exe = Path(tmp) / 'test.cpp', Path(tmp) / 'test'
         (unit.parent / 'System_MacText.h').write_text((HERE.parents[1] / 'System_MacText.h').read_text())
+        (unit.parent / 'System_ESPNow_GroupCore.h').write_text(
+            (HERE.parents[1] / 'System_ESPNow_GroupCore.h').read_text())
         unit.write_text(harness)
         cmd = [a.cxx, '-std=c++17', '-Wall', '-Wextra', '-Werror',
                '-Wno-unused-function', '-Wno-unused-parameter',

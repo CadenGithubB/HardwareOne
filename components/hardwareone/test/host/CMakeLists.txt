@@ -178,6 +178,18 @@ target_include_directories(espnow_bond_agree_core_tests PRIVATE ../..)
 target_compile_options(espnow_bond_agree_core_tests PRIVATE
   -Wall -Wextra -Werror -pedantic)
 
+# Room and tag membership rules (System_ESPNow_GroupCore.h, the production
+# dependency-free header): a room or tag a peer announces is pending until
+# accepted, one it stops announcing leaves the accepted set at once, tags are
+# judged one by one, a repeated announcement reports nothing new, and a stored
+# record keeps nothing accepted that it does not announce.
+add_executable(espnow_group_core_tests test_espnow_group_core.cpp)
+set_target_properties(espnow_group_core_tests PROPERTIES
+  CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+target_include_directories(espnow_group_core_tests PRIVATE ../..)
+target_compile_options(espnow_group_core_tests PRIVATE
+  -Wall -Wextra -Werror -pedantic)
+
 # Projection and pan math shared by MapCore::renderMap and the G2 map page.
 # The production header is dependency-light so geometry can be verified here
 # without Arduino, ESP-IDF, filesystem, or BLE mocks.
@@ -397,6 +409,10 @@ if(HW1_SANITIZE)
   target_compile_options(espnow_bond_agree_core_tests PRIVATE
     -fsanitize=address,undefined -g)
   target_link_options(espnow_bond_agree_core_tests PRIVATE
+    -fsanitize=address,undefined)
+  target_compile_options(espnow_group_core_tests PRIVATE
+    -fsanitize=address,undefined -g)
+  target_link_options(espnow_group_core_tests PRIVATE
     -fsanitize=address,undefined)
   target_compile_options(map_viewport_core_tests PRIVATE
     -fsanitize=address,undefined -g)
@@ -1284,6 +1300,7 @@ add_test(NAME memtracker_core_tests COMMAND memtracker_core_tests)
 add_test(NAME heap_low_core_tests COMMAND heap_low_core_tests)
 add_test(NAME espnow_pair_core_tests COMMAND espnow_pair_core_tests)
 add_test(NAME espnow_bond_agree_core_tests COMMAND espnow_bond_agree_core_tests)
+add_test(NAME espnow_group_core_tests COMMAND espnow_group_core_tests)
 add_test(NAME map_viewport_core_tests COMMAND map_viewport_core_tests)
 add_test(NAME g2_health_graph_core_tests COMMAND g2_health_graph_core_tests)
 add_test(NAME g2_health_push_core_tests COMMAND g2_health_push_core_tests)
@@ -2598,6 +2615,22 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_espnow_bond_agreement.py
           ${ESPNOW_BOND_PARTNER_CHANGE_TEST_ARGS})
+
+# Room and tag membership on the production code (README "ESP-NOW room and tag
+# membership"): espnowroomcmd and espnowtagcmd carry an account password, so
+# they go only to peers whose room or tag was accepted on this device; what a
+# peer newly announces is pending, what it stops announcing is gone at once.
+# Also the stored record, unpair and identity changes, the notice once per
+# change, the three membership commands and the marks in the listings.
+set(ESPNOW_GROUP_MEMBERSHIP_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND ESPNOW_GROUP_MEMBERSHIP_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME espnow_group_membership
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_espnow_group_membership.py
+          ${ESPNOW_GROUP_MEMBERSHIP_TEST_ARGS})
 
 # Automatic handshake starts to a peer that does not answer back off from 5 s
 # to 5 min, periodic bond frames are not queued without a session, and the

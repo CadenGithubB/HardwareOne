@@ -4,7 +4,7 @@
 > Regenerate with `python3 tools/command_registry.py reference`.
 > Source of truth is the `CommandEntry` tables in `components/hardwareone/*.cpp`.
 
-1031 commands across 57 modules (1031 registry entries).
+1034 commands across 57 modules (1034 registry entries).
 
 Commands are matched case-insensitively, and lookup uses longest-prefix matching, so `automation list` resolves to the `automation` dispatcher with `list` as its argument.
 
@@ -16,7 +16,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 - [`system`](#system) — 26 commands
 - [`versions`](#versions) — 1 commands
 - [`wifi`](#wifi) — 21 commands
-- [`espnow`](#espnow) — 119 commands
+- [`espnow`](#espnow) — 122 commands
 - [`c6`](#c6) — 10 commands
 - [`mqtt`](#mqtt) — 27 commands
 - [`bluetooth`](#bluetooth) — 23 commands
@@ -193,7 +193,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `espnowbrowse` | A | Browse a peer's files; user/pass are an account ON THE TARGET: 'espnowbrowse <target> <target-user> <target-pass> ["path"]'. (async - result via espnowmessages json)<br/>`Usage: espnowbrowse <target> <target-user> <target-pass> ["path"] Credentials are verified ON THE TARGET device, not this one. Returns OK on delivery; the remote listing arrives later - read with 'espnowmessages json' (match the reqId).` |
 | `espnowchannel` | A | Get/set preferred ESP-NOW channel: 'espnowchannel [1-13\|auto\|resync]'. No arg shows a checker (actual vs expected). Set the SAME value on both devices to pair off-grid.<br/>`Usage: espnowchannel [<1..13>\|auto\|resync] (no arg) = show preference, actual radio channel, expected, and an OK/MISMATCH check. auto (0) = follow WiFi, pin fallback when offline. 1-13 = force this channel when not joined to WiFi. resync = force the radio back onto the correct channel now (no setting change). Two devices only hear each other on the same channel — set both the same for field use.` |
 | `espnowdeviceinfo` |  | Show all local device metadata. |
-| `espnowdevices` |  | List all mesh devices with room/zone/tags/status: espnowdevices [json]. |
+| `espnowdevices` |  | List all mesh devices with the room/zone/tags they announce and their status; [pending] marks a room or tags not accepted here: espnowdevices [json].<br/>`Usage: espnowdevices [json] json: pendingRoom / pendingTags per device say what of its room and tags is not accepted here; devices that do not fit one reply are counted in notShown.` |
 | `espnowdiscovered` | A | List devices found during discovery: 'espnowdiscovered [clear]'. Pair one with 'espnowpairrequest <mac_or_name>'.<br/>`Usage: espnowdiscovered [clear] Lists same-mesh devices heard while your discovery window ('espnowpairmode') is open.` |
 | `espnowenabled` | A | Enable/disable ESP-NOW (0\|1, takes effect after reboot).<br/>`Usage: espnowenabled <0\|1>` |
 | `espnowencstatus` | A | Show ESP-NOW encryption status and key fingerprint. |
@@ -203,6 +203,9 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `espnowfirsttimesetup` | A | Set first time setup flag: <0\|1><br/>`Usage: espnowfirsttimesetup <0\|1>` |
 | `espnowforget` | A | Forget a peer's crypto identity + close its session: 'espnowforget <name_or_mac>'.<br/>`Usage: espnowforget <name_or_mac>` |
 | `espnowfriendlyname` |  | Get/set friendly display name: 'espnowfriendlyname [name]'.<br/>`Usage: espnowfriendlyname [<name>] (<=47 chars) espnowfriendlyname clear` |
+| `espnowgroupaccept` | A | Accept the room and tags a paired peer announces right now, for room and tag commands: 'espnowgroupaccept [json] <name_or_mac\|all>'.<br/>`Usage: espnowgroupaccept [json] <name_or_mac\|all> Records exactly what the peer announces at this moment; the reply states what was accepted. A name that more than one paired device has is refused: use the address espnowgroups shows. From then on espnowroomcmd and espnowtagcmd send that room's and those tags' commands, with the account password they carry, to this peer.` |
+| `espnowgroupdrop` | A | Take back the room and tags accepted for a paired peer: 'espnowgroupdrop [json] <name_or_mac\|all>'.<br/>`Usage: espnowgroupdrop [json] <name_or_mac\|all> The peer is no longer a target of room or tag commands; what it announces is pending again.` |
+| `espnowgroups` | A | List paired peers with the room and tags each announces, what was accepted here and what is pending: 'espnowgroups [json] [name_or_mac]'.<br/>`Usage: espnowgroups [json] [<name_or_mac>] announced = what the peer says about itself; accepted = what room and tag commands go by; pending = announced and not accepted, so not used. A peer that stops announcing a room or tag leaves it at once; a new one waits for espnowgroupaccept.` |
 | `espnowhbmode` | A | Get/set heartbeat mode: 'espnowhbmode [public\|private]'.<br/>`Usage: espnowhbmode [public\|private]` |
 | `espnowheartbeatbroadcast` | A | Set heartbeat broadcast: <0\|1><br/>`Usage: espnowheartbeatbroadcast <0\|1>` |
 | `espnowheartbeatinterval` | A | Set master heartbeat interval: <1000-60000 ms><br/>`Usage: espnowheartbeatinterval <1000..60000>` |
@@ -238,8 +241,8 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `espnowrequestmeta` |  | Request metadata from peer: 'espnowrequestmeta <name_or_mac>'. (async - updates cache; view with espnowdevices)<br/>`Usage: espnowrequestmeta <name_or_mac> Returns OK on delivery; the peer's name/room/zone/tags arrive later and update the local peer cache shown by 'espnowdevices' / 'espnowrooms' / 'espnowfind'.` |
 | `espnowresetstats` | A | Reset ESP-NOW statistics counters. |
 | `espnowroom` |  | Get/set device room: 'espnowroom [name]'.<br/>`Usage: espnowroom [Kitchen\|Bedroom\|...] espnowroom clear` |
-| `espnowroomcmd` | A | Run command on all devices in a room; user/pass must be valid on EACH target device. (async - replies via espnowmessages json)<br/>`Usage: espnowroomcmd <room> <target-user> <target-pass> <command> Credentials are checked ON EACH target device, not this one. Returns OK on dispatch; each device's reply arrives later in 'espnowmessages json'.` |
-| `espnowrooms` |  | List rooms and their devices (aggregated from this node's cached peer metadata). |
+| `espnowroomcmd` | A | Run command on all devices accepted here as members of a room; user/pass must be valid on EACH target device. (async - replies via espnowmessages json)<br/>`Usage: espnowroomcmd <room> <target-user> <target-pass> <command> Credentials are checked ON EACH target device, not this one. Goes only to peers whose room was accepted on this device (espnowgroups, espnowgroupaccept); a peer that only announces the room is skipped and counted in the reply. Returns OK on dispatch; each device's reply arrives later in 'espnowmessages json'.` |
+| `espnowrooms` |  | List announced rooms and their devices (from this node's cached peer metadata); [pending] marks a membership not accepted here. |
 | `espnowrouterstats` |  | Show message router statistics and metrics. |
 | `espnowsaturation` |  | Show ESP-NOW link saturation: frames/sec, stream-queue depth, drops, ACK RTT (rolling 30s). |
 | `espnowsaturationreset` |  | Clear the saturation rolling window (use before a stress test). |
@@ -259,7 +262,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `espnowstats` |  | Show ESP-NOW statistics (messages, errors, etc.). |
 | `espnowstatus` |  | Show ESP-NOW status and configuration. |
 | `espnowsubs` |  | List peers + their event-subscription bitmaps (what they want from us). |
-| `espnowtagcmd` | A | Run command on all devices with a tag; user/pass must be valid on EACH target device. (async - replies via espnowmessages json)<br/>`Usage: espnowtagcmd <tag> <target-user> <target-pass> <command> Credentials are checked ON EACH target device, not this one. Returns OK on dispatch; each device's reply arrives later in 'espnowmessages json'.` |
+| `espnowtagcmd` | A | Run command on all devices accepted here as holders of a tag; user/pass must be valid on EACH target device. (async - replies via espnowmessages json)<br/>`Usage: espnowtagcmd <tag> <target-user> <target-pass> <command> Credentials are checked ON EACH target device, not this one. One tag per command: a tag list (a comma) is refused. Goes only to peers whose tag was accepted on this device (espnowgroups, espnowgroupaccept); a peer that only announces the tag is skipped and counted in the reply. Returns OK on dispatch; each device's reply arrives later in 'espnowmessages json'.` |
 | `espnowtags` |  | Get/set device tags: 'espnowtags [tag1,tag2,...]'.<br/>`Usage: espnowtags stationary,thermal espnowtags clear` |
 | `espnowtimestatus` |  | Show time synchronization status. |
 | `espnowtimesync` |  | Broadcast NTP time to mesh (intended for the master; role not enforced). (async broadcast; delivery only, no reply) |

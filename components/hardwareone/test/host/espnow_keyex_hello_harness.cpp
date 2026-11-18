@@ -56,6 +56,16 @@ static void noteLog(const char* level, const char* fmt, ...) {
 static unsigned gEvents = 0;
 static void logSystemEvent(const char*, const char*, ...) { ++gEvents; }
 
+// What a stored identity that is new for its MAC tells the registry: the room
+// and tags accepted for that MAC do not carry over (the clearing itself is run
+// by test_espnow_group_membership.py).
+static unsigned gAcceptClears = 0;
+static uint8_t gAcceptClearMac[6] = {};
+static void espnowGroupAcceptanceClear(const uint8_t mac[6], const char*) {
+  ++gAcceptClears;
+  std::memcpy(gAcceptClearMac, mac, 6);
+}
+
 // Two enabled meshes with different fingerprints and bootstrap keys.
 struct Settings {
   static constexpr uint8_t N_MESHES = 4;
@@ -250,6 +260,7 @@ static void reset() {
   gWindowOpen = false;
   gWindowUses = 0;
   gEvents = 0;
+  gAcceptClears = 0;
   for (auto& k : gKeyExInFlight) k = KeyExInFlight{};
   gNowMs += 100000;
   gNowSec += 100000;
@@ -287,6 +298,8 @@ int main() {
   check(replies() >= 2 && replies() - 1 <= (gNowMs - t0) / kLimitMs,
         "K2 and at most one REPLY per interval (FAILS ON BASE: one each)");
   check(gEvents == 1, "K2 no further 'paired' event (preserved)");
+  check(gAcceptClears == 1 && std::memcmp(gAcceptClearMac, a.mac, 6) == 0,
+        "K2 the first HELLO's new identity cleared the room and tags accepted for that MAC, the replays did not");
 
   // K3 — the initiator's own retry after a lost REPLY (kKeyExRetryMs later)
   // is answered, without a second write.
@@ -311,11 +324,13 @@ int main() {
         gOutbox.back().payload.size() == sizeof(V4PayloadKeyExConfirm) &&
         reinterpret_cast<const V4PayloadKeyExConfirm*>(gOutbox.back().payload.data())->status == 2,
         "K4 a changed key without the window: refused with CONFIRM status 2, no write (preserved)");
+  check(gAcceptClears == 1, "K4 the refused key leaves the accepted room and tags alone");
   gWindowOpen = true;
   gNowMs += kLimitMs;
   hello(a2);
   check(gWrites == 2 && replies() == 2 && storedKeyIs(a, 0xA2) && gWindowUses == 1,
         "K4 a changed key inside the window is stored: a HELLO with a changed key still writes (preserved)");
+  check(gAcceptClears == 2, "K4 the replaced identity does not inherit the accepted room and tags");
 
   // K5 — a HELLO dropped by the rate limit does not use up the re-key window.
   reset();
@@ -440,6 +455,8 @@ int main() {
   replyFrom(b);
   check(gWrites == 1 && storedKeyIs(b, 0xB7) && confirms() == 1,
         "K13 a REPLY to our HELLO is stored and confirmed (preserved)");
+  check(gAcceptClears == 1 && std::memcmp(gAcceptClearMac, b.mac, 6) == 0,
+        "K13 an identity learnt from a REPLY clears the accepted room and tags as one from a HELLO does");
   reset();
   keyExInFlightArm(b.mac, 0, true);           // HELLO out, then the user unpairs b
   espnowKeyExCancel(b.mac);

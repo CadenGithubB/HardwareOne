@@ -721,11 +721,14 @@ static void showEspNowDevices() {
       const char* label = d.friendlyName.length() > 0
           ? d.friendlyName.c_str()
           : (d.name.length() > 0 ? d.name.c_str() : "(unnamed)");
+      // '?' after the room: announced by the peer, not accepted on this device.
+      const bool roomPending = d.room.length() > 0 && !espnowGroupRoomAccepted(d.mac, d.room.c_str());
       snprintf(rows[1 + i], sizeof(rows[1 + i]),
-               "%s%s%s",
+               "%s%s%s%s",
                label,
                d.room.length() > 0 ? " @ " : "",
-               d.room.length() > 0 ? d.room.c_str() : "");
+               d.room.length() > 0 ? d.room.c_str() : "",
+               roomPending ? "?" : "");
       ptrs[n++] = rows[1 + i];
     }
   }

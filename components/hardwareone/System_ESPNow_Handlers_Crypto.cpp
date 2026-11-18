@@ -347,6 +347,9 @@ void v4hKeyExHello(const V4RxCtx& ctx) {
     if (identityNewOrReplaced) {
       logSystemEvent("ESPNOW", "paired: new peer identity persisted " MAC_FMT,
                      MAC_ARGS(msg->senderMac));
+      // Another key at this address may be another device: it does not
+      // inherit the room and tags accepted for the one before it.
+      espnowGroupAcceptanceClear(msg->senderMac, "its identity key is new");
     }
     logMac("KEY_EX_HELLO accepted from", msg->senderMac);
   }
@@ -455,6 +458,8 @@ void v4hKeyExReply(const V4RxCtx& ctx) {
   if (identityNewOrReplaced) {
     logSystemEvent("ESPNOW", "paired: new peer identity persisted " MAC_FMT,
                    MAC_ARGS(msg->responderMac));
+    // As for a HELLO: a new key does not inherit the accepted room and tags.
+    espnowGroupAcceptanceClear(msg->responderMac, "its identity key is new");
   }
   logMac("KEY_EX_REPLY accepted from", msg->responderMac);
 

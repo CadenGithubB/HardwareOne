@@ -3,12 +3,18 @@
 
 Extracts the production metadata types (EspNowInlineText, MeshPeerMeta,
 V4PayloadMetadata, V4RxCtx) and functions (the metadata text policy when the
-source has it, normalizeMetadataWireText, v4h_metadata_resp_push, processMetadata,
-metaGetSet) and runs them against host doubles for the registry, mesh cache,
+source has it, normalizeMetadataWireText, the per-sender metadata inbox with
+v4h_metadata_req, v4h_metadata_resp_push and metadataInboxHandleFrame,
+processMetadata with the room and tag membership functions it calls,
+metaGetSet; the rules header System_ESPNow_GroupCore.h is compiled as is) and
+runs them against host doubles for the registry, mesh cache, message history,
 settings writes, events and logging. Checks that hostile peer text is replaced
 before it reaches the mesh cache or the persisted registry, that the local
-setters reject control bytes and < > " ' & \\ before any write, and that clean
-ASCII/UTF-8 values are stored unchanged. --source-dir replays other production
+setters reject control bytes and < > " ' & \\ before any write, that clean
+ASCII/UTF-8 values are stored unchanged, and that the metadata frames of
+several peers received in one pass of the task are all handled (a frame is how
+a peer leaves a room or a tag), each sender's latest one, with a history line
+except for the answer to a refresh this device asked for by itself. --source-dir replays other production
 sources (for example the pre-fix tree) against this suite.
 """
 import argparse
@@ -37,6 +43,25 @@ FUNCTION_MARKERS = (
     'static void processMetadata(',
     'static const char* metaGetSet(',
 )
+# processMetadata hands a paired peer's room and tags to the announcement part
+# of room and tag membership (test_espnow_group_membership.py), and received
+# frames wait in a per-sender inbox. Absent on a tree before them, which keeps
+# one shared buffer in the state.
+GROUP_MARKERS = (
+    'static espnowgroup::Membership groupMembershipOf(',
+    'static void groupMembershipStore(',
+    'static EspNowDevice* groupRecordOf(',
+    'static bool groupSnapshotOf(',
+)
+ANNOUNCE_REGION = ('// ---- Room and tag membership: what a peer announces -----',
+                   '// ---- Room and tag membership: acceptance -----')
+INBOX_REGION = ('// ---- Metadata work waiting for espnow_task -----',
+                'static void v4h_metadata_req(const V4RxCtx& ctx) {')
+INBOX_MARKERS = (
+    'static void v4h_metadata_req(',
+    'static bool metadataInboxHandleFrame(',
+)
+GROUP_INCLUDES = '#include "System_ESPNow_GroupCore.h"\n#include "System_MacText.h"'
 
 
 def main():
@@ -81,7 +106,20 @@ def main():
     if normalize is None:
         sys.exit('FAIL extraction: no normalizeMetadataWireText definition in System_ESPNow.cpp')
     pieces.append(definition(source, normalize, 'System_ESPNow.cpp'))
+    def region(first, after):
+        if source.count(first) != 1 or source.count(after) != 1:
+            sys.exit(f'FAIL extraction: region {first!r} .. {after!r} is not unique in System_ESPNow.cpp')
+        return source[source.index(first):source.index(after)]
+
+    have_inbox = INBOX_REGION[0] in source
+    if have_inbox:
+        pieces.append(GROUP_INCLUDES)
+        pieces += [definition(source, marker, 'System_ESPNow.cpp') for marker in GROUP_MARKERS]
+        pieces.append(region(*ANNOUNCE_REGION))
+        pieces.append(region(*INBOX_REGION))
     pieces += [definition(source, marker, 'System_ESPNow.cpp') for marker in FUNCTION_MARKERS]
+    if have_inbox:
+        pieces += [definition(source, marker, 'System_ESPNow.cpp') for marker in INBOX_MARKERS]
 
     # The registry saver consults the load status before it writes anything, and
     # the loader records that status before its own migration save.
@@ -106,7 +144,9 @@ def main():
         # because production logs typed pointers with %p (fine on the target).
         cmd = [a.cxx, '-std=c++17', '-Wall', '-Wextra', '-Werror', '-pedantic', '-Wno-format-pedantic',
                f'-DHW1_HAVE_METADATA_POLICY={1 if have_policy else 0}',
-               '-I', str(a.component / 'test/host/web_batch_stubs'), str(unit), '-o', str(exe)]
+               f'-DHW1_HAVE_METADATA_INBOX={1 if have_inbox else 0}',
+               '-I', str(a.component / 'test/host/web_batch_stubs'), '-I', str(a.component),
+               str(unit), '-o', str(exe)]
         if a.sanitize:
             cmd[1:1] = ['-fsanitize=address,undefined', '-fno-sanitize-recover=undefined',
                         '-fno-omit-frame-pointer', '-g']

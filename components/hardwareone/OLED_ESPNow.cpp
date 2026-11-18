@@ -457,6 +457,7 @@ struct RoomDeviceEntry {
   char name[24];
   uint8_t mac[6];
   bool alive;
+  bool pending;  // says it is in this room; not accepted here, so room commands skip it
 };
 EXT_RAM_BSS_ATTR static RoomDeviceEntry sRoomDevices[ROOMS_DEVICES_MAX];
 static int sRoomDeviceCount = 0;
@@ -510,6 +511,7 @@ static void rebuildRoomDeviceList(const char* room) {
       sRoomDevices[sRoomDeviceCount].name[23] = '\0';
       memset(sRoomDevices[sRoomDeviceCount].mac, 0, 6);
       sRoomDevices[sRoomDeviceCount].alive = true;  // Local device is always alive
+      sRoomDevices[sRoomDeviceCount].pending = false;  // its own room needs no acceptance
       sRoomDeviceCount++;
     }
   }
@@ -525,6 +527,11 @@ static void rebuildRoomDeviceList(const char* room) {
     sRoomDevices[sRoomDeviceCount].name[23] = '\0';
     memcpy(sRoomDevices[sRoomDeviceCount].mac, gMeshPeerMeta[i].mac, 6);
     sRoomDevices[sRoomDeviceCount].alive = MeshPeers::isHealthy(gMeshPeerMeta[i].mac);
+    // The rooms shown are the ones peers announce. A peer whose room was not
+    // accepted on this device gets a '?' in its row; one without a room has
+    // nothing to accept.
+    sRoomDevices[sRoomDeviceCount].pending =
+        gMeshPeerMeta[i].room[0] != '\0' && !espnowGroupRoomAccepted(gMeshPeerMeta[i].mac, gMeshPeerMeta[i].room);
     sRoomDeviceCount++;
   }
 }
@@ -644,6 +651,7 @@ void oledEspNowDisplayRooms(Adafruit_SSD1306* display) {
       
       display->setCursor(2, y + 1);
       display->print(sRoomDevices[idx].alive ? "+" : "-");
+      if (sRoomDevices[idx].pending) display->print("?");
       // Device name in a bounded field after the fixed status glyph.
       {
         const bool selected = idx == gOledEspNowState.roomsDeviceSelection;
@@ -1629,8 +1637,11 @@ void oledEspNowRefreshDeviceList() {
     
     // Line 2: room + encrypted flag, or MAC if no room
     if (entry->meta && entry->meta->room[0]) {
-      snprintf(line2Bufs[i], sizeof(line2Bufs[0]), " %s%s",
-               entry->meta->room, entry->device->encrypted ? " E" : "");
+      // '?' after the room: announced by the peer, not accepted on this device.
+      snprintf(line2Bufs[i], sizeof(line2Bufs[0]), " %s%s%s",
+               entry->meta->room,
+               espnowGroupRoomAccepted(entry->device->mac, entry->meta->room) ? "" : "?",
+               entry->device->encrypted ? " E" : "");
     } else {
       snprintf(line2Bufs[i], sizeof(line2Bufs[0]), " %02X%02X%02X%s",
                entry->device->mac[3], entry->device->mac[4], entry->device->mac[5],

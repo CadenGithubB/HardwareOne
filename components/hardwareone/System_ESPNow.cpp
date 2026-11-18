@@ -48,6 +48,7 @@
 #include "System_ESPNow_Deadline.h"  // wrap-safe pre-warm cooldown
 #include "System_ESPNow_PairCore.h"  // discover-then-confirm request/answer state + retransmit
 #include "System_ESPNow_BondAgreeCore.h"  // BOND_REQUEST / BOND_NOTICE: what the partner said about the bond
+#include "System_ESPNow_GroupCore.h"  // room and tag membership: announced by the peer, accepted here
 #include "System_ESPNow_Sensors.h"
 #include "System_ESPNow_Tx.h"        // Single-sender TX dispatcher (Phase 1)
 #include "System_MemUtil.h"          // ps_alloc — heap copy of payload for async send
@@ -820,6 +821,88 @@ static const unsigned long STREAM_MIN_INTERVAL_MS = 100;  // Rate limit: max 10 
 // ============================================================================
 
 
+// ---- Room and tag membership of a paired peer ---------------------------------
+// The rules are in System_ESPNow_GroupCore.h. A device record holds what the
+// peer announces (room, tags) and what was accepted here (acceptedRoom,
+// acceptedTags); these two copy a record into the form the rules work on and
+// back.
+//
+// Two tasks work on these fields: espnow_task records what a peer announces,
+// and the command task accepts, drops, unpairs and reads them to pick the
+// targets of a group command. Each of those steps reads a record, decides and
+// writes it back, so each is done under this lock: an announcement that lands
+// in the middle of an accept or a drop can then neither bring back what the
+// admin just took away nor be stored into the record that moved into a removed
+// peer's place. A mutex and not a spinlock, because the records live in PSRAM.
+// It is held for copies and compares only and never taken twice by one task:
+// logging, formatting, saving and sending come after it is given back.
+static StaticSemaphore_t gGroupLockStorage;
+static SemaphoreHandle_t gGroupLock = xSemaphoreCreateMutexStatic(&gGroupLockStorage);
+struct GroupLockGuard {
+  GroupLockGuard() { if (gGroupLock) xSemaphoreTake(gGroupLock, portMAX_DELAY); }
+  ~GroupLockGuard() { if (gGroupLock) xSemaphoreGive(gGroupLock); }
+  GroupLockGuard(const GroupLockGuard&) = delete;
+  GroupLockGuard& operator=(const GroupLockGuard&) = delete;
+};
+
+static espnowgroup::Membership groupMembershipOf(const EspNowDevice& dev) {
+  espnowgroup::Membership m{};
+  espnowgroup::copyText(m.room, sizeof(m.room), dev.room.c_str());
+  espnowgroup::copyText(m.tags, sizeof(m.tags), dev.tags.c_str());
+  espnowgroup::copyText(m.acceptedRoom, sizeof(m.acceptedRoom), dev.acceptedRoom.c_str());
+  espnowgroup::copyText(m.acceptedTags, sizeof(m.acceptedTags), dev.acceptedTags.c_str());
+  return m;
+}
+
+static void groupMembershipStore(EspNowDevice& dev, const espnowgroup::Membership& m) {
+  dev.room = m.room;
+  dev.tags = m.tags;
+  dev.acceptedRoom = m.acceptedRoom;
+  dev.acceptedTags = m.acceptedTags;
+}
+
+// The registry record with this address, or nullptr.
+static EspNowDevice* groupRecordOf(const uint8_t* mac) {
+  if (!gEspNow || !mac) return nullptr;
+  for (int i = 0; i < gEspNow->deviceCount; i++) {
+    if (memcmp(gEspNow->devices[i].mac, mac, 6) == 0) return &gEspNow->devices[i];
+  }
+  return nullptr;
+}
+
+// A copy of what the record with this address holds, taken under the lock.
+// False when there is no such record; `m` is then empty.
+static bool groupSnapshotOf(const uint8_t* mac, espnowgroup::Membership& m) {
+  m = espnowgroup::Membership{};
+  GroupLockGuard lock;
+  const EspNowDevice* dev = groupRecordOf(mac);
+  if (!dev) return false;
+  m = groupMembershipOf(*dev);
+  return true;
+}
+
+// The accepted room and tags of one stored device record. Left out while
+// nothing is accepted, like the other optional fields.
+static void groupAcceptedToJson(JsonObject entry, const EspNowDevice& dev) {
+  if (dev.acceptedRoom.length()) entry["acceptedRoom"] = dev.acceptedRoom.c_str();
+  if (dev.acceptedTags.length()) entry["acceptedTags"] = dev.acceptedTags.c_str();
+}
+
+// Reads them back after the record's room and tags are in place. A record
+// written before these fields existed has neither: nothing is accepted, and
+// what the peer announces waits. Nothing stays accepted that the stored
+// announcement does not name. Returns false when a stored value did not fit
+// and was dropped.
+static bool groupAcceptedFromJson(JsonObjectConst entry, EspNowDevice& dev) {
+  const char* acceptedRoom = entry["acceptedRoom"] | "";
+  const char* acceptedTags = entry["acceptedTags"] | "";
+  const bool roomFits = dev.acceptedRoom.assign(acceptedRoom);
+  const bool tagsFit = dev.acceptedTags.assign(acceptedTags);
+  espnowgroup::Membership m = groupMembershipOf(dev);
+  if (espnowgroup::reconcile(m)) groupMembershipStore(dev, m);
+  return roomFits && tagsFit;
+}
+
 // Save named ESP-NOW devices (paired devices with names/keys) to filesystem.
 // Refuses while the registry on disk has not been read (sEspNowDevicesLoad). A
 // file with entries the load could not take is copied aside first.
@@ -893,6 +976,7 @@ static bool saveEspNowDevices() {
     if (dev.room.length())         entry["room"] = dev.room.c_str();
     if (dev.zone.length())         entry["zone"] = dev.zone.c_str();
     if (dev.tags.length())         entry["tags"] = dev.tags.c_str();
+    groupAcceptedToJson(entry, dev);
     if (dev.stationary)            entry["stationary"] = true;
     // Phase 2 multi-mesh — record which mesh this peer belongs to. Omit
     // the key when meshId==0 to keep the on-disk file compact for the
@@ -5597,27 +5681,104 @@ static void v4h_subscribe_update(const V4RxCtx& ctx) {
   // unwrap and clears ACK_REQ on its header copy — nothing to ACK here.
 }
 
-static void v4h_metadata_req(const V4RxCtx& ctx) {
-  bool isEncrypted = false;
-  if (gEspNow) {
-    for (int i = 0; i < gEspNow->deviceCount; i++) {
-      if (memcmp(gEspNow->devices[i].mac, ctx.recv_info->src_addr, 6) == 0) {
-        isEncrypted = gEspNow->devices[i].encrypted;
-        break;
-      }
+// ---- Metadata work waiting for espnow_task -------------------------------------
+// The receive handlers only note a metadata frame and a request for ours; the
+// loop of the same task acts on them a little later, off the receive path
+// (storing a frame saves the registry and writes the message history). There
+// is one entry per sender. With one shared buffer the frames of two peers that
+// arrived in the same pass left only the later one, and a peer's metadata
+// frame is how it leaves a room or a tag. A newer frame from the same peer
+// replaces its older one, which is the wanted result. Only paired peers get
+// here (the receive table requires it), so sixteen entries cover the registry.
+// The block is made at the first use, in PSRAM, and kept. espnow_task only.
+constexpr int kMetadataInboxSlots = 16;
+// How long an answer counts as the answer to a refresh this device asked for.
+// A peer that never answered must not make a later, asked-for answer silent.
+constexpr uint32_t kMetadataRefreshAnswerMs = 10000;
+struct MetadataInboxEntry {
+  uint8_t mac[6];
+  bool used;
+  bool frameWaiting;          // payload holds a frame the loop has not handled
+  bool frameQuiet;            // that frame answers a refresh this device asked for by itself
+  bool replyDue;              // the peer asked for this device's metadata
+  bool refreshAsked;          // a refresh was asked for the session that started at refreshSessionMs
+  bool refreshQuiet;          // and its answer, asked for at refreshAskedMs, has not come yet
+  uint32_t refreshSessionMs;
+  uint32_t refreshAskedMs;
+  uint8_t payload[sizeof(V4PayloadMetadata)];
+};
+static MetadataInboxEntry* sMetadataInbox = nullptr;
+static uint8_t sMetadataInboxNext = 0;  // where the next search for a waiting frame starts
+
+// The entry of `mac`, taking a free one (or one that holds nothing for a peer
+// heard earlier) when it has none. nullptr only without memory or when every
+// entry holds work of another sender.
+static MetadataInboxEntry* metadataInboxFor(const uint8_t* mac) {
+  if (!mac) return nullptr;
+  if (!sMetadataInbox) {
+    const size_t bytes = kMetadataInboxSlots * sizeof(MetadataInboxEntry);
+    sMetadataInbox = static_cast<MetadataInboxEntry*>(ps_alloc(bytes, AllocPref::PreferPsram, "espnow.metainbox"));
+    if (!sMetadataInbox) return nullptr;
+    memset(sMetadataInbox, 0, bytes);
+  }
+  MetadataInboxEntry* unused = nullptr;
+  MetadataInboxEntry* idle = nullptr;
+  for (int i = 0; i < kMetadataInboxSlots; i++) {
+    MetadataInboxEntry& e = sMetadataInbox[i];
+    if (e.used && memcmp(e.mac, mac, 6) == 0) return &e;
+    if (!e.used) {
+      if (!unused) unused = &e;
+    } else if (!e.frameWaiting && !e.replyDue && !idle) {
+      idle = &e;
     }
   }
-  DEBUG_ESPNOW_METADATAF("[METADATA] REQ received from %s (%s) msgId=%lu isPaired=%d isEncrypted=%d",
-    ctx.deviceName, MAC_STR(ctx.recv_info->src_addr), (unsigned long)ctx.h->msgId,
-    (int)ctx.isPaired, (int)isEncrypted);
-  if (gEspNow) {
-    memcpy(gEspNow->metadataPendingResponseMac, ctx.recv_info->src_addr, 6);
-    gEspNow->bondNeedsMetadataResponse = true;
-    DEBUG_ESPNOW_METADATAF("[METADATA] bondNeedsMetadataResponse=true, will RESP to %s",
-      MAC_STR(ctx.recv_info->src_addr));
-  } else {
-    WARN_ESPNOWF("[METADATA] REQ from %s ignored: gEspNow is null", ctx.deviceName);
+  MetadataInboxEntry* e = unused ? unused : idle;
+  if (!e) return nullptr;
+  memset(e, 0, sizeof(*e));
+  memcpy(e->mac, mac, 6);
+  e->used = true;
+  return e;
+}
+
+// The next waiting frame, senders taken in turn so that one peer's stream of
+// frames cannot keep another's from being handled. The entry's payload stays
+// as it is until that sender's next frame, which cannot arrive before the
+// caller is done (same task).
+static MetadataInboxEntry* metadataInboxTakeFrame() {
+  if (!sMetadataInbox) return nullptr;
+  for (int n = 0; n < kMetadataInboxSlots; n++) {
+    MetadataInboxEntry& e = sMetadataInbox[(sMetadataInboxNext + n) % kMetadataInboxSlots];
+    if (!e.used || !e.frameWaiting) continue;
+    e.frameWaiting = false;
+    sMetadataInboxNext = static_cast<uint8_t>((sMetadataInboxNext + n + 1) % kMetadataInboxSlots);
+    return &e;
   }
+  return nullptr;
+}
+
+// One peer that asked for this device's metadata and has not been answered.
+static bool metadataInboxTakeReply(uint8_t macOut[6]) {
+  if (!sMetadataInbox) return false;
+  for (int i = 0; i < kMetadataInboxSlots; i++) {
+    MetadataInboxEntry& e = sMetadataInbox[i];
+    if (!e.used || !e.replyDue) continue;
+    e.replyDue = false;
+    memcpy(macOut, e.mac, 6);
+    return true;
+  }
+  return false;
+}
+
+static void v4h_metadata_req(const V4RxCtx& ctx) {
+  DEBUG_ESPNOW_METADATAF("[METADATA] REQ received from %s (%s) msgId=%lu isPaired=%d",
+    ctx.deviceName, MAC_STR(ctx.recv_info->src_addr), (unsigned long)ctx.h->msgId, (int)ctx.isPaired);
+  MetadataInboxEntry* entry = gEspNow ? metadataInboxFor(ctx.recv_info->src_addr) : nullptr;
+  if (!entry) {
+    WARN_ESPNOWF("[METADATA] REQ from %s ignored: no place to note it", ctx.deviceName);
+    return;
+  }
+  // Answered by the loop (step 9), one peer per pass.
+  entry->replyDue = true;
 }
 
 // Metadata text policy: the one owner for the local setters (metaGetSet) and the
@@ -5681,17 +5842,22 @@ static void v4h_metadata_resp_push(const V4RxCtx& ctx) {
   }
 
   // Wire char arrays are fixed-width and are not trustworthy C strings. Copy
-  // into the PSRAM-backed deferred slot, then terminate every field before its
-  // first `%s`, strcmp/strncpy, String construction, or bounded registry
-  // assignment. Legitimate senders already reserve the final byte for NUL, so
-  // this is wire-compatible while making a fully occupied field safe without
-  // adding a 202-byte temporary to espnow_task's stack. The same step replaces
-  // bytes outside the metadata text policy, so processMetadata stores clean text.
-  bool wasPending = gEspNow->deferredMetadataPending;
-  memcpy(gEspNow->deferredMetadataSrcMac, ctx.recv_info->src_addr, 6);
-  memcpy(gEspNow->deferredMetadataPayload, ctx.payload, sizeof(V4PayloadMetadata));
-  V4PayloadMetadata* meta =
-      reinterpret_cast<V4PayloadMetadata*>(gEspNow->deferredMetadataPayload);
+  // into this sender's PSRAM-backed inbox entry, then terminate every field
+  // before its first `%s`, strcmp/strncpy, String construction, or bounded
+  // registry assignment. Legitimate senders already reserve the final byte for
+  // NUL, so this is wire-compatible while making a fully occupied field safe
+  // without adding a 202-byte temporary to espnow_task's stack. The same step
+  // replaces bytes outside the metadata text policy, so processMetadata stores
+  // clean text.
+  MetadataInboxEntry* entry = metadataInboxFor(ctx.recv_info->src_addr);
+  if (!entry) {
+    WARN_ESPNOWF("[METADATA] %s from %s dropped: no place to keep it until it is handled",
+      metaType, MAC_STR(ctx.recv_info->src_addr));
+    return;
+  }
+  bool wasPending = entry->frameWaiting;
+  memcpy(entry->payload, ctx.payload, sizeof(V4PayloadMetadata));
+  V4PayloadMetadata* meta = reinterpret_cast<V4PayloadMetadata*>(entry->payload);
   size_t scrubbed = normalizeMetadataWireText(*meta);
   if (scrubbed) {
     WARN_ESPNOWF("[METADATA] %s from %s: replaced %u disallowed byte(s) in metadata text",
@@ -5699,8 +5865,14 @@ static void v4h_metadata_resp_push(const V4RxCtx& ctx) {
   }
   DEBUG_ESPNOW_METADATAF("[METADATA] %s payload: name='%s' friendlyName='%s' room='%s' zone='%s' tags='%s' stationary=%d",
     metaType, meta->deviceName, meta->friendlyName, meta->room, meta->zone, meta->tags, (int)meta->stationary);
-  gEspNow->deferredMetadataPending = true;
-  DEBUG_ESPNOW_METADATAF("[METADATA] %s deferred for task processing (overwrote=%d)",
+  // The answer to a refresh this device asked for by itself is stored without
+  // a line in the message history; a frame the peer sent on its own gets one.
+  const bool isResponse = (ctx.h->type == ESPNOW_V4_TYPE_METADATA_RESP);
+  entry->frameQuiet = isResponse && entry->refreshQuiet &&
+                      static_cast<uint32_t>(millis() - entry->refreshAskedMs) < kMetadataRefreshAnswerMs;
+  if (isResponse) entry->refreshQuiet = false;
+  entry->frameWaiting = true;
+  DEBUG_ESPNOW_METADATAF("[METADATA] %s kept for task processing (replaced an older frame of this peer=%d)",
     metaType, (int)wasPending);
 }
 
@@ -10194,20 +10366,355 @@ static int metadataPushTick(uint32_t nowMs) {
 // not paired, for `forMac` to use. Returns the cleared slot's index, or -1.
 static int meshPeerMetaReclaimSlot(const uint8_t* forMac);
 
-/**
- * Process received metadata - store in gMeshPeerMeta
- */
-static void processMetadata(const uint8_t* srcMac, const V4PayloadMetadata* metadata) {
-  if (!srcMac || !metadata || !gMeshPeerMeta) {
-    WARN_ESPNOWF("[METADATA] processMetadata: null guard failed srcMac=%p metadata=%p gMeshPeerMeta=%p slots=%d",
-      srcMac, metadata, gMeshPeerMeta, gMeshPeerSlots);
+// ---- Room and tag membership: what a peer announces ---------------------------
+
+// A name the commands would read as an address: twelve hex digits, or hex
+// digits in groups with ':' or '-' between them.
+static bool groupNameReadsAsAddress(const char* name) {
+  uint8_t ignored[6];
+  if (macParse(name, ignored)) return true;
+  int separators = 0;
+  for (const char* p = name; *p; ++p) {
+    if (*p == ':' || *p == '-') {
+      separators++;
+    } else if (!isxdigit(static_cast<unsigned char>(*p))) {
+      return false;
+    }
+  }
+  return separators >= 5;
+}
+
+// Whether the accept and drop commands reach this record by the name it was
+// paired under. They do not when the name is empty, has a space, is the word
+// for every peer or for the JSON form, reads as an address, or is also the
+// name of another record (this device's own entry included): the commands take
+// the first record with a name, so a shared name would send the admin to
+// another peer than the one a line is about.
+static bool groupNameUsable(const EspNowDevice& dev) {
+  const char* name = dev.name.c_str();
+  if (!name[0] || strchr(name, ' ') || strcasecmp(name, "all") == 0 || strcasecmp(name, "json") == 0) return false;
+  if (groupNameReadsAsAddress(name)) return false;
+  for (int i = 0; gEspNow && i < gEspNow->deviceCount; i++) {
+    const EspNowDevice& other = gEspNow->devices[i];
+    if (memcmp(other.mac, dev.mac, 6) != 0 && strcasecmp(other.name.c_str(), name) == 0) return false;
+  }
+  return true;
+}
+
+// How a notice or a reply names a peer, and what the accept and drop commands
+// take for it: the name it was paired under on this device, never a name the
+// peer announces. A record those commands could not reach by its name is
+// called by its address.
+static void groupPeerLabel(const EspNowDevice& dev, char* out, size_t outLen) {
+  if (groupNameUsable(dev)) {
+    snprintf(out, outLen, "%s", dev.name.c_str());
+  } else {
+    macToDisplay(dev.mac, out, outLen);
+  }
+}
+
+// The same for an address; a peer that is no longer in the registry is called
+// by the address.
+static void groupLabelOf(const uint8_t* mac, char* out, size_t outLen) {
+  const EspNowDevice* dev = groupRecordOf(mac);
+  if (dev) {
+    groupPeerLabel(*dev, out, outLen);
+  } else {
+    macToDisplay(mac, out, outLen);
+  }
+}
+
+// The limit on the event lines one peer's announcements can cause (the rule:
+// espnowgroup::NoticeGate). One entry per peer address. espnow_task only.
+struct GroupNoticeSlot {
+  uint8_t mac[6];
+  bool used;
+  espnowgroup::NoticeGate gate;
+};
+constexpr int kGroupNoticeSlots = 16;
+EXT_RAM_BSS_ATTR static GroupNoticeSlot sGroupNotice[kGroupNoticeSlots];
+
+// The entry of `mac`, taking an unused one or one with nothing held back when
+// it has none. nullptr when every entry holds a report for another peer; the
+// caller then prints nothing, and the listings still show what waits.
+static espnowgroup::NoticeGate* groupNoticeGateFor(const uint8_t* mac) {
+  GroupNoticeSlot* unused = nullptr;
+  GroupNoticeSlot* idle = nullptr;
+  for (int i = 0; i < kGroupNoticeSlots; i++) {
+    GroupNoticeSlot& slot = sGroupNotice[i];
+    if (slot.used && memcmp(slot.mac, mac, 6) == 0) return &slot.gate;
+    if (!slot.used) {
+      if (!unused) unused = &slot;
+    } else if (slot.gate.held == 0 && !idle) {
+      idle = &slot;
+    }
+  }
+  GroupNoticeSlot* slot = unused ? unused : idle;
+  if (!slot) return nullptr;
+  memset(slot, 0, sizeof(*slot));
+  memcpy(slot->mac, mac, 6);
+  slot->used = true;
+  return &slot->gate;
+}
+
+// The event lines for what waits: a room and tags get a line each. One static
+// block, because only espnow_task prints them.
+static void groupNoticePrint(const char* who, const espnowgroup::Membership& m, const espnowgroup::Change& change) {
+  EXT_RAM_BSS_ATTR static char line[224];
+  espnowgroup::formatRoomNotice(line, sizeof(line), who, m, change, who);
+  if (line[0]) logSystemEvent("ESPNOW", "%s", line);
+  espnowgroup::formatTagNotice(line, sizeof(line), who, change, who);
+  if (line[0]) logSystemEvent("ESPNOW", "%s", line);
+}
+
+// A paired peer announced its room and tags. Records them exactly as sent,
+// also when cleared (a peer may always leave a group), takes what it no longer
+// announces out of the accepted set, and reports what newly waits for
+// acceptance. A repeat of the same announcement does nothing, so the report
+// comes once per change and not again after a restart; a peer that keeps
+// changing gets one report a minute (groupNoticeTick prints the rest). Returns
+// whether the record changed and has to be saved. espnow_task only.
+static bool groupNoteAnnouncement(const uint8_t* mac, const char* room, const char* tags) {
+  espnowgroup::Membership m{};
+  espnowgroup::Change change{};
+  {
+    // The record is looked up by address inside the lock: an unpair on the
+    // command task moves the records behind it down.
+    GroupLockGuard lock;
+    EspNowDevice* dev = groupRecordOf(mac);
+    if (dev) {
+      m = groupMembershipOf(*dev);
+      change = espnowgroup::announce(m, room, tags);
+      if (change.stored) groupMembershipStore(*dev, m);
+    }
+  }
+  if (!change.stored) return false;
+
+  char who[32];
+  groupLabelOf(mac, who, sizeof(who));
+  if (change.leftRoom[0]) {
+    INFO_ESPNOWF("[GROUP] %s no longer says it is in room '%s': not a target of commands to that room", who,
+                 change.leftRoom);
+  }
+  if (change.leftTags[0]) {
+    INFO_ESPNOWF("[GROUP] %s no longer announces '%s': not a target of commands to those tags", who,
+                 change.leftTags);
+  }
+  if (change.notice()) {
+    espnowgroup::NoticeGate* gate = groupNoticeGateFor(mac);
+    if (gate && espnowgroup::noticeNow(*gate, millis())) groupNoticePrint(who, m, change);
+  }
+  return true;
+}
+
+// Reports, for each peer whose changes were held back, how many there were and
+// what waits now, once its minute is over. Runs in the espnow_task loop; with
+// nothing held back it only looks at sixteen counters.
+static void groupNoticeTick(uint32_t nowMs) {
+  for (int i = 0; i < kGroupNoticeSlots; i++) {
+    GroupNoticeSlot& slot = sGroupNotice[i];
+    if (!slot.used) continue;
+    const uint16_t held = espnowgroup::noticeHeldDue(slot.gate, nowMs);
+    if (held == 0) continue;
+    espnowgroup::Membership m;
+    if (!groupSnapshotOf(slot.mac, m)) {
+      slot.used = false;  // unpaired meanwhile: nothing of it waits
+      continue;
+    }
+    char who[32];
+    groupLabelOf(slot.mac, who, sizeof(who));
+    const espnowgroup::Change waiting = espnowgroup::waitingNow(m);
+    EXT_RAM_BSS_ATTR static char heldLine[160];
+    espnowgroup::formatHeldNotice(heldLine, sizeof(heldLine), who, held, waiting.notice());
+    logSystemEvent("ESPNOW", "%s", heldLine);
+    groupNoticePrint(who, m, waiting);
+  }
+}
+
+// Registry saves caused by what peers announce. A change is saved at once when
+// the last such save is at least kAnnounceSaveGapMs old, which is the usual
+// case of one peer changing its room. A peer that keeps changing, or a room
+// full of peers that all change at once, then costs one flash write per gap
+// and not one per frame: the change applies in memory at once, and the state
+// at the end of the gap is what gets written. espnow_task only.
+constexpr uint32_t kAnnounceSaveGapMs = 10000;
+static bool sAnnounceSaveDue = false;
+static bool sAnnounceSaved = false;
+static uint32_t sAnnounceSavedMs = 0;
+
+static void announceSaveNow(uint32_t nowMs) {
+  sAnnounceSaveDue = false;
+  sAnnounceSaved = true;
+  sAnnounceSavedMs = nowMs;
+  (void)saveEspNowDevices();  // reports its own failure; the next change tries again
+}
+
+static void announceSaveRequest(uint32_t nowMs) {
+  if (sAnnounceSaved && static_cast<uint32_t>(nowMs - sAnnounceSavedMs) < kAnnounceSaveGapMs) {
+    sAnnounceSaveDue = true;
     return;
   }
-  
+  announceSaveNow(nowMs);
+}
+
+static void announceSaveTick(uint32_t nowMs) {
+  if (sAnnounceSaveDue && static_cast<uint32_t>(nowMs - sAnnounceSavedMs) >= kAnnounceSaveGapMs) announceSaveNow(nowMs);
+}
+
+// ---- Room and tag membership: acceptance ---------------------------------------
+
+// The record of a paired peer, or nullptr. This device's own entry is no peer:
+// its room and tags are its own settings and need no acceptance.
+static EspNowDevice* groupDeviceFor(const uint8_t* mac) {
+  if (!mac || isSelfMac(mac)) return nullptr;
+  return groupRecordOf(mac);
+}
+
+// Takes away what was accepted for one peer, without saving. Returns whether
+// anything was accepted.
+static bool groupAcceptedDrop(const uint8_t* mac) {
+  GroupLockGuard lock;
+  EspNowDevice* dev = groupRecordOf(mac);
+  if (!dev) return false;
+  espnowgroup::Membership m = groupMembershipOf(*dev);
+  if (!espnowgroup::dropAccepted(m)) return false;
+  dev->acceptedRoom = m.acceptedRoom;
+  dev->acceptedTags = m.acceptedTags;
+  return true;
+}
+
+void espnowGroupAcceptanceClear(const uint8_t mac[6], const char* why) {
+  if (!mac || isSelfMac(mac) || !groupAcceptedDrop(mac)) return;
+  // A group command sent while the old acceptance stood may still wait for a
+  // session with this address. It must not go to whoever answers now.
+  pendingFrameDropForPeer(mac);
+  char who[32];
+  groupLabelOf(mac, who, sizeof(who));
+  logSystemEvent("ESPNOW", "%s: accepted room and tags cleared (%s); accept them again with '%s %s'", who,
+                 why ? why : "its identity changed", espnowgroup::kAcceptCommand, who);
+  if (!saveEspNowDevices()) {
+    WARN_ESPNOWF("[GROUP] Cleared acceptance of %s is not saved; it comes back at a restart until a save works", who);
+  }
+}
+
+bool espnowGroupRoomAccepted(const uint8_t mac[6], const char* room) {
+  if (!mac || isSelfMac(mac)) return false;
+  espnowgroup::Membership m;
+  return groupSnapshotOf(mac, m) && espnowgroup::sameRoom(m.acceptedRoom, room);
+}
+
+static_assert(sizeof(EspNowGroupView::acceptedRoom) == espnowgroup::kRoomCap &&
+              sizeof(EspNowGroupView::pendingRoom) == espnowgroup::kRoomCap &&
+              sizeof(EspNowGroupView::acceptedTags) == espnowgroup::kTagsCap &&
+              sizeof(EspNowGroupView::pendingTags) == espnowgroup::kTagsCap,
+              "EspNowGroupView holds a room and a tag list of the registry's sizes");
+
+bool espnowGroupView(const uint8_t mac[6], const char* room, const char* tags, EspNowGroupView& out) {
+  memset(&out, 0, sizeof(out));
+  espnowgroup::Membership m;
+  const bool paired = mac && !isSelfMac(mac) && groupSnapshotOf(mac, m);
+  if (!paired) m = espnowgroup::Membership{};
+  // Judged against the text the caller shows, so a mark never disagrees with
+  // the value next to it.
+  espnowgroup::copyText(m.room, sizeof(m.room), room);
+  espnowgroup::copyText(m.tags, sizeof(m.tags), tags);
+  espnowgroup::copyText(out.acceptedRoom, sizeof(out.acceptedRoom), m.acceptedRoom);
+  espnowgroup::copyText(out.acceptedTags, sizeof(out.acceptedTags), m.acceptedTags);
+  if (espnowgroup::roomPending(m)) espnowgroup::copyText(out.pendingRoom, sizeof(out.pendingRoom), m.room);
+  espnowgroup::pendingTags(m, out.pendingTags, sizeof(out.pendingTags));
+  return paired;
+}
+
+// ---- Metadata refresh when a session comes up -----------------------------------
+// A peer sends its metadata once per change, to the peers it has a session
+// with at that moment, and nothing repeats it. A change made while this device
+// was restarting, out of reach or in the middle of a key change would stay
+// unknown here, and the peer would remain a member of a room it left. So each
+// time a session with a paired peer has come up (first time, set up again, or
+// with new keys), this device asks that peer once for its metadata. The
+// session is given kMetadataRefreshSettleMs first, because the side that
+// answers a session open is ready before the other side is; and the peers are
+// asked one per kMetadataRefreshGapMs, so a restart among many peers does not
+// send every request in one burst. Runs in the espnow_task loop.
+constexpr uint32_t kMetadataRefreshGapMs = 500;
+constexpr uint32_t kMetadataRefreshSettleMs = 2000;
+static uint32_t sMetadataRefreshLookMs = 0;
+
+static int metadataRefreshTick(uint32_t nowMs) {
+  if (!gEspNow || !gEspNow->initialized) return 0;
+  if (static_cast<uint32_t>(nowMs - sMetadataRefreshLookMs) < kMetadataRefreshGapMs) return 0;
+  sMetadataRefreshLookMs = nowMs;
+  const uint8_t slots = sessionSlotCount();
+  for (uint8_t i = 0; i < slots; i++) {
+    const SessionState* s = sessionAt(i);
+    if (!s || s->state != SESSION_ACTIVE) continue;
+    if (static_cast<uint32_t>(nowMs - s->establishedAtMs) < kMetadataRefreshSettleMs) continue;
+    if (!groupDeviceFor(s->peerMac)) continue;
+    MetadataInboxEntry* entry = metadataInboxFor(s->peerMac);
+    if (!entry) continue;
+    // Asked already for this session, or for a later one with the same peer.
+    if (entry->refreshAsked && static_cast<int32_t>(s->establishedAtMs - entry->refreshSessionMs) <= 0) continue;
+    entry->refreshAsked = true;
+    entry->refreshSessionMs = s->establishedAtMs;
+    entry->refreshQuiet = true;
+    entry->refreshAskedMs = nowMs;
+    requestMetadata(s->peerMac, true);
+    return 1;
+  }
+  return 0;
+}
+
+/**
+ * Process received metadata: the paired peer's registry record first, then the
+ * display copy in gMeshPeerMeta.
+ */
+static void processMetadata(const uint8_t* srcMac, const V4PayloadMetadata* metadata) {
+  if (!srcMac || !metadata) {
+    WARN_ESPNOWF("[METADATA] processMetadata: null guard failed srcMac=%p metadata=%p", srcMac, metadata);
+    return;
+  }
+
   DEBUG_ESPNOW_METADATAF("[METADATA] processMetadata: srcMac=%s slots=%d name='%s' room='%s' zone='%s' friendlyName='%s'",
     MAC_STR(srcMac), gMeshPeerSlots,
     metadata->deviceName, metadata->room, metadata->zone, metadata->friendlyName);
-  
+
+  // The registry record of a paired sender comes first and does not depend on
+  // the cache below. The cache has fewer slots than the registry has records;
+  // a peer that finds it full must still be able to leave a room or a tag,
+  // because group commands go by the registry.
+  if (gEspNow) {
+    bool paired = false;
+    bool changed = false;
+    {
+      // Looked up by address inside the lock: an unpair on the command task
+      // moves the records behind it down.
+      GroupLockGuard lock;
+      if (EspNowDevice* dev = groupRecordOf(srcMac)) {
+        paired = true;
+        if (metadata->friendlyName[0] && dev->friendlyName != metadata->friendlyName) {
+          dev->friendlyName = metadata->friendlyName; changed = true;
+        }
+        if (metadata->zone[0] && dev->zone != metadata->zone) {
+          dev->zone = metadata->zone; changed = true;
+        }
+        const bool newStationary = (metadata->stationary != 0);
+        if (dev->stationary != newStationary) {
+          dev->stationary = newStationary; changed = true;
+        }
+      }
+    }
+    // Room and tags decide who gets a group command, so the record follows
+    // the announcement exactly and what is new in it waits for acceptance.
+    if (paired && groupNoteAnnouncement(srcMac, metadata->room, metadata->tags)) changed = true;
+    if (changed) announceSaveRequest(millis());
+  }
+
+  if (!gMeshPeerMeta) {
+    WARN_ESPNOWF("[METADATA] processMetadata: no metadata cache (slots=%d), %s is not shown in the device lists",
+      gMeshPeerSlots, MAC_STR(srcMac));
+    return;
+  }
+
   // Find or create entry in gMeshPeerMeta
   int idx = -1;
   for (int i = 0; i < gMeshPeerSlots; i++) {
@@ -10247,8 +10754,20 @@ static void processMetadata(const uint8_t* srcMac, const V4PayloadMetadata* meta
   }
   
   if (idx == -1) {
-    WARN_ESPNOWF("[METADATA] processMetadata: ALL %d slots full, cannot store metadata from %s",
-      gMeshPeerSlots, MAC_STR(srcMac));
+    // With more paired peers than cache slots this is true for every frame of
+    // the peers without one (and each is asked for its metadata whenever its
+    // session comes up), so it is said once a minute at most. The registry
+    // record above was updated all the same.
+    static bool sFullSaid = false;
+    static uint32_t sFullSaidMs = 0;
+    const uint32_t nowMs = millis();
+    if (!sFullSaid || static_cast<uint32_t>(nowMs - sFullSaidMs) >= 60000UL) {
+      sFullSaid = true;
+      sFullSaidMs = nowMs;
+      WARN_ESPNOWF("[METADATA] processMetadata: ALL %d slots full, %s is not shown in the device lists "
+                   "(more slots: 'espnowmeshpeermax', from the next restart)",
+        gMeshPeerSlots, MAC_STR(srcMac));
+    }
     return;
   }
   
@@ -10270,37 +10789,40 @@ static void processMetadata(const uint8_t* srcMac, const V4PayloadMetadata* meta
     idx, MAC_STR(srcMac),
     meta->name, meta->friendlyName, meta->room, meta->zone, meta->tags,
     (int)meta->stationary, (int)meta->isActive);
-  
-  // Sync metadata into paired device entry (for persistence across reboots)
-  if (gEspNow) {
-    for (int i = 0; i < gEspNow->deviceCount; i++) {
-      if (memcmp(gEspNow->devices[i].mac, srcMac, 6) == 0) {
-        bool changed = false;
-        if (metadata->friendlyName[0] && gEspNow->devices[i].friendlyName != metadata->friendlyName) {
-          gEspNow->devices[i].friendlyName = metadata->friendlyName; changed = true;
-        }
-        if (metadata->room[0] && gEspNow->devices[i].room != metadata->room) {
-          gEspNow->devices[i].room = metadata->room; changed = true;
-        }
-        if (metadata->zone[0] && gEspNow->devices[i].zone != metadata->zone) {
-          gEspNow->devices[i].zone = metadata->zone; changed = true;
-        }
-        if (metadata->tags[0] && gEspNow->devices[i].tags != metadata->tags) {
-          gEspNow->devices[i].tags = metadata->tags; changed = true;
-        }
-        bool newStationary = (metadata->stationary != 0);
-        if (gEspNow->devices[i].stationary != newStationary) {
-          gEspNow->devices[i].stationary = newStationary; changed = true;
-        }
-        if (changed) {
-          saveEspNowDevices();
-        }
-        break;
-      }
-    }
-  }
 }
 
+
+// Step 10 of the espnow_task loop: handles one received metadata frame. One
+// sender per pass; the others keep their place in the inbox. Returns whether
+// there was one.
+static bool metadataInboxHandleFrame() {
+  MetadataInboxEntry* received = metadataInboxTakeFrame();
+  if (!received) return false;
+  const V4PayloadMetadata* meta = reinterpret_cast<const V4PayloadMetadata*>(received->payload);
+  DEBUG_ESPNOW_METADATAF("[METADATA] Task: calling processMetadata for %s gMeshPeerMeta=%p slots=%d",
+    MAC_STR(received->mac), gMeshPeerMeta, gMeshPeerSlots);
+  processMetadata(received->mac, meta);
+  DEBUG_ESPNOW_METADATAF("[METADATA] Task: processMetadata complete");
+
+  // The answer to a refresh this device asked for by itself gets no line in
+  // the message history: that would be a line per peer each time a session
+  // comes up. Every other frame is logged there for the web UI.
+  if (received->frameQuiet) return true;
+
+  // PSRAM-backed scratch: this runs only on espnow_task, so a single shared
+  // static buffer is race-free and keeps 384 B off that task's stack.
+  EXT_RAM_BSS_ATTR static char metaMsg[384];
+  snprintf(metaMsg, sizeof(metaMsg),
+           "Metadata: name=%s friendly=%s room=%s zone=%s tags=%s stationary=%d",
+           meta->deviceName, meta->friendlyName, meta->room, meta->zone,
+           meta->tags, (int)meta->stationary);
+
+  String devName = String(meta->deviceName);
+  if (devName.length() == 0) devName = macToDisplayStr(received->mac);
+  storeMessageInPeerHistory(received->mac, devName.c_str(),
+                            metaMsg, false, MSG_SYSTEM_EVENT);  // peer-metadata snapshot, not chat
+  return true;
+}
 
 // ==========================
 // Message Handler Implementations
@@ -10556,6 +11078,8 @@ static void addEspNowDevice(const uint8_t* mac, const String& name, bool encrypt
   newDev.room = "";
   newDev.zone = "";
   newDev.tags = "";
+  newDev.acceptedRoom = "";
+  newDev.acceptedTags = "";
   newDev.stationary = false;
   gEspNow->deviceCount++;
 }
@@ -10803,6 +11327,11 @@ static void loadEspNowDevices() {
       migrationBackupNeeded = true;
       WARN_ESPNOWF("[ESP-NOW] Oversized tags cache for %s cleared; metadata will be refreshed", macStr.c_str());
     }
+    if (!groupAcceptedFromJson(entry, dev)) {
+      migrationBackupNeeded = true;
+      WARN_ESPNOWF("[ESP-NOW] Oversized accepted room or tags for %s cleared; accept them again with '%s'",
+                   macStr.c_str(), espnowgroup::kAcceptCommand);
+    }
     dev.stationary   = entry["stationary"] | false;
     // Phase 2 multi-mesh — meshId persisted on save; default 0 (primary mesh)
     // when missing for backwards-compat with pre-Phase-2 devices.json files.
@@ -11039,15 +11568,18 @@ static void meshPeerSlotsRelease(const uint8_t* mac) {
   }
 }
 
-// Count active mesh peers whose room field matches `room` (case-sensitive,
-// exact match). Used by room-grouped UI views (OLED room menu, automation
-// scoping). NULL/empty `room` returns 0 — "no room" peers aren't aggregated.
+// Count the paired peers that are members of `room` as a room command sees
+// them: the room was accepted on this device (System_ESPNow_GroupCore.h), in
+// any letter case. A peer that only announces the room is not counted.
+// NULL/empty `room` returns 0: peers without a room are no group.
 int countMeshPeerMetaByRoom(const char* room) {
-  if (!gMeshPeerMeta || !room || !room[0]) return 0;
+  if (!gEspNow || !room || !room[0]) return 0;
   int count = 0;
-  for (int i = 0; i < gMeshPeerSlots; i++) {
-    if (gMeshPeerMeta[i].isActive && strcmp(gMeshPeerMeta[i].room, room) == 0)
-      count++;
+  for (int i = 0; i < gEspNow->deviceCount; i++) {
+    uint8_t mac[6];
+    memcpy(mac, gEspNow->devices[i].mac, 6);
+    espnowgroup::Membership m;
+    if (!isSelfMac(mac) && groupSnapshotOf(mac, m) && espnowgroup::sameRoom(m.acceptedRoom, room)) count++;
   }
   return count;
 }
@@ -11263,6 +11795,10 @@ void setMeshRole(MeshRole role, const char* reason) {
 // Remove a device from the paired device registry by MAC
 void removeEspNowDevice(const uint8_t* mac) {
   if (!gEspNow) return;
+  // The records behind the removed one move down. espnow_task stores what a
+  // peer announces into the record it finds by address under this lock, so it
+  // never writes into a record while it moves.
+  GroupLockGuard lock;
   for (int i = 0; i < gEspNow->deviceCount; i++) {
     if (memcmp(gEspNow->devices[i].mac, mac, 6) == 0) {
       for (int j = i; j < gEspNow->deviceCount - 1; j++)
@@ -12548,44 +13084,30 @@ void processMeshHeartbeats() {
   }
 #endif // ENABLE_BONDED_MODE
 
-  // 9. Process deferred metadata response (peer requested our metadata)
-  if (gEspNow->bondNeedsMetadataResponse) {
-    gEspNow->bondNeedsMetadataResponse = false;
-    DEBUG_ESPNOW_METADATAF("[METADATA] Task: sending deferred RESP to %s",
-      MAC_STR(gEspNow->metadataPendingResponseMac));
-    sendMetadata(gEspNow->metadataPendingResponseMac, false, true);
+  // 9. Answer one peer that asked for our metadata (noted by v4h_metadata_req)
+  {
+    uint8_t replyMac[6];
+    if (metadataInboxTakeReply(replyMac)) {
+      DEBUG_ESPNOW_METADATAF("[METADATA] Task: sending RESP to %s", MAC_STR(replyMac));
+      sendMetadata(replyMac, false, true);
+    }
   }
-  
+
   // 9a. Push our own metadata to session-active peers once a local command
   // changed it (settles METADATA_PUSH_SETTLE_MS so one editor save = one PUSH).
   metadataPushTick(now);
 
-  // 10. Process deferred received metadata (store in gMeshPeerMeta)
-  if (gEspNow->deferredMetadataPending) {
-    gEspNow->deferredMetadataPending = false;
-    DEBUG_ESPNOW_METADATAF("[METADATA] Task: calling processMetadata for %s gMeshPeerMeta=%p slots=%d",
-      MAC_STR(gEspNow->deferredMetadataSrcMac), gMeshPeerMeta, gMeshPeerSlots);
-    processMetadata(gEspNow->deferredMetadataSrcMac, (const V4PayloadMetadata*)gEspNow->deferredMetadataPayload);
-    DEBUG_ESPNOW_METADATAF("[METADATA] Task: processMetadata complete");
-    
-    // Log metadata to message history for web UI. PSRAM-backed scratch:
-    // processMeshHeartbeats is the espnow_task super-loop body, so this
-    // function runs only on that task — a single shared static buffer is
-    // race-free. Saves 384 B of espnow_task stack on every metadata-drain
-    // tick (helpful when running alongside an active SESSION_FRAME RX
-    // unwrap that's already burning stack via plainBuf and v4_send_frame).
-    const V4PayloadMetadata* meta = (const V4PayloadMetadata*)gEspNow->deferredMetadataPayload;
-    EXT_RAM_BSS_ATTR static char metaMsg[384];
-    snprintf(metaMsg, sizeof(metaMsg),
-             "Metadata: name=%s friendly=%s room=%s zone=%s tags=%s stationary=%d",
-             meta->deviceName, meta->friendlyName, meta->room, meta->zone,
-             meta->tags, (int)meta->stationary);
-    
-    String devName = String(meta->deviceName);
-    if (devName.length() == 0) devName = macToDisplayStr(gEspNow->deferredMetadataSrcMac);
-    storeMessageInPeerHistory(gEspNow->deferredMetadataSrcMac, devName.c_str(), 
-                              metaMsg, false, MSG_SYSTEM_EVENT);  // peer-metadata snapshot, not chat
-  }
+  // 9b. Ask a paired peer whose session came up for its metadata, so a change
+  // it made while we could not hear it is known here.
+  metadataRefreshTick(now);
+
+  // 10. Handle one received metadata frame (registry record, then gMeshPeerMeta).
+  metadataInboxHandleFrame();
+
+  // 10a. Room and tag membership: the report for peers whose changes were held
+  // back, and the registry save that a burst of announcements put off.
+  groupNoticeTick(now);
+  announceSaveTick(now);
   
   // 11. Drain text message queue
   {
@@ -14678,6 +15200,9 @@ const char* cmd_espnow_regenidentity(const String& argsInput) {
     uint8_t mac[6];
     memcpy(mac, pi->mac, 6);   // copy first — forget() clears the slot we are reading
     if (peerIdentityForget(mac)) bondsWiped++;
+    // Every peer has to pair again and is taken as new then: none keeps an
+    // accepted room or tags meanwhile.
+    espnowGroupAcceptanceClear(mac, "this device's identity was regenerated");
   }
 
   // New Ed25519 identity is committed — announce on the event bus before the
@@ -14821,6 +15346,8 @@ const char* cmd_espnow_pair(const String& argsInput) {
   gEspNow->devices[gEspNow->deviceCount].room = "";
   gEspNow->devices[gEspNow->deviceCount].zone = "";
   gEspNow->devices[gEspNow->deviceCount].tags = "";
+  gEspNow->devices[gEspNow->deviceCount].acceptedRoom = "";
+  gEspNow->devices[gEspNow->deviceCount].acceptedTags = "";
   gEspNow->deviceCount++;
 
   removeFromUnpairedList(mac);
@@ -15412,6 +15939,94 @@ const char* cmd_espnow_deviceinfo(const String& argsInput) {
 // Master Aggregation CLI Commands (Phase 3)
 // ==========================
 
+// ---- What the listings say about room and tag membership ---------------------
+
+// printf onto the end of a reply; a reply that is full stays as it is.
+__attribute__((format(printf, 4, 5)))
+static void groupTextAppend(char* out, size_t outLen, size_t& pos, const char* format, ...) {
+  if (!out || pos + 1 >= outLen) return;
+  va_list args;
+  va_start(args, format);
+  const int n = vsnprintf(out + pos, outLen - pos, format, args);
+  va_end(args);
+  if (n > 0) pos = (pos + (size_t)n < outLen) ? pos + (size_t)n : outLen - 1;
+}
+
+// The mark a listing puts after a peer whose announced room or tags were not
+// accepted on this device: " [pending: room, tags a,b]". Empty when all of it
+// is accepted. A listing shows what a peer announces; only this mark tells it
+// from what room and tag commands go by.
+static void groupPendingMark(const uint8_t* mac, const char* room, const char* tags, char* out, size_t outLen) {
+  out[0] = '\0';
+  EspNowGroupView view;
+  espnowGroupView(mac, room, tags, view);
+  if (view.pendingRoom[0] && view.pendingTags[0]) {
+    snprintf(out, outLen, " [pending: room, tags %s]", view.pendingTags);
+  } else if (view.pendingRoom[0]) {
+    snprintf(out, outLen, " [pending: room]");
+  } else if (view.pendingTags[0]) {
+    snprintf(out, outLen, " [pending: tags %s]", view.pendingTags);
+  }
+}
+constexpr size_t kGroupPendingMarkCap = 96;  // the longest mark: every announced tag pending
+
+// What of a listed peer's announced "room" and "tags" is not accepted here, as
+// JSON fields next to them: "pendingRoom" and "pendingTags", each only when
+// there is something. A listing of the whole mesh has to fit one command
+// result, so it carries no second copy of what is accepted (espnowgroups json
+// has all of it). The texts are handed over as plain pointers so that
+// ArduinoJson copies them: they live in a local view.
+static void groupPendingToJson(JsonObject o, const uint8_t* mac, const char* room, const char* tags) {
+  EspNowGroupView view;
+  espnowGroupView(mac, room, tags, view);
+  const char* pendingRoom = view.pendingRoom;
+  const char* pendingTags = view.pendingTags;
+  if (pendingRoom[0]) o["pendingRoom"] = pendingRoom;
+  if (pendingTags[0]) o["pendingTags"] = pendingTags;
+}
+
+// One block for the JSON listings and the replies of the membership commands,
+// made at the first use and kept. Sixteen peers with their rooms and tags do
+// not fit the 1 KB the text listings use; a command result may be this long.
+constexpr size_t kGroupReplyCap = CMD_RESULT_MAX;
+static char* groupReplyBuffer() {
+  static char* sReply = nullptr;
+  if (!sReply) sReply = (char*)ps_alloc(kGroupReplyCap, AllocPref::PreferPsram, "espnow.groups");
+  if (sReply) sReply[0] = '\0';
+  return sReply;
+}
+
+// Whether the document, with `tailBytes` kept for the fields that follow the
+// list, still fits the reply block.
+static bool groupJsonFits(JsonDocument& doc, size_t tailBytes) {
+  return measureJson(doc) + tailBytes <= kGroupReplyCap;
+}
+
+// A JSON reply has to fit the reply block with its last fields. When the entry
+// just added to `list` made it too long, that entry is taken out again and
+// counted; the reply then says how many are not shown.
+static void groupJsonKeepFit(JsonDocument& doc, JsonArray list, int& notShown, size_t tailBytes) {
+  if (groupJsonFits(doc, tailBytes)) return;
+  list.remove(list.size() - 1);
+  notShown++;
+}
+
+// Writes the JSON reply into the reply block. `tooLong` is the refusal for a
+// document that does not fit even so (or could not be built).
+static const char* groupJsonReply(JsonDocument& doc, char* reply, int notShown, const char* tooLong) {
+  if (notShown > 0) doc["notShown"] = notShown;
+  if (doc.overflowed() || measureJson(doc) >= kGroupReplyCap) return tooLong;
+  serializeJson(doc, reply, kGroupReplyCap);
+  return reply;
+}
+constexpr char kListingJsonTooLong[] =
+    "{\"schema\":1,\"ok\":false,\"error\":\"Out of memory for the reply\"}";
+constexpr char kListingJsonHint[] =
+    "a peer's value: run it remotely with 'espnowremote <peer> <target-user> <target-pass> <cmd>' then read the "
+    "reply with 'espnowmessages json'; a peer's name/room/tags: 'espnowrequestmeta <peer>'";
+// What a listing keeps free for "count", "notShown" and the hint after its list.
+constexpr size_t kListingJsonTailBytes = sizeof(kListingJsonHint) + 64;
+
 // Shared by the espnowdevices json CLI branch and the web metadata handler so
 // the per-peer metadata shape lives in exactly one place.
 void espnowSerializeMeshPeerMeta(JsonObject o, const MeshPeerMeta& m) {
@@ -15429,6 +16044,9 @@ void espnowSerializeMeshPeerMeta(JsonObject o, const MeshPeerMeta& m) {
   o["room"]         = m.room;
   o["zone"]         = m.zone;
   o["tags"]         = m.tags;
+  // room and tags are what the peer announces; what of it room and tag
+  // commands do not go by yet follows as pendingRoom / pendingTags.
+  groupPendingToJson(o, m.mac, m.room, m.tags);
   o["stationary"]   = m.stationary;
   o["online"]       = alive;
   o["lastSeenSec"]  = ageSec;
@@ -15444,26 +16062,30 @@ const char* cmd_espnow_devices(const String& argsInput) {
   // the web handler now uses. This is the on-device source; no per-peer
   // round-trip or creds, available whether or not the web is compiled in.
   if (argWantsJson(argsInput)) {
+    char* reply = groupReplyBuffer();
+    if (!reply) return kCommandReplyOutOfMemory;
     PSRAM_JSON_DOC(doc);
     doc["schema"] = 1;
     JsonArray devs = doc["devices"].to<JsonArray>();
+    // A full table with long names does not fit one command result. The count
+    // covers every device; the ones that did not fit are counted in notShown,
+    // so the reply always parses.
     int count = 0;
+    int notShown = 0;
     for (int i = 0; i < gMeshPeerSlots; i++) {
       if (!gMeshPeerMeta[i].isActive) continue;
-      espnowSerializeMeshPeerMeta(devs.add<JsonObject>(), gMeshPeerMeta[i]);
       count++;
+      espnowSerializeMeshPeerMeta(devs.add<JsonObject>(), gMeshPeerMeta[i]);
+      groupJsonKeepFit(doc, devs, notShown, kListingJsonTailBytes);
     }
     doc["count"] = count;
-    doc["hint"] = "a peer's value: run it remotely with 'espnowremote <peer> <target-user> <target-pass> <cmd>' then read the reply with 'espnowmessages json'; a peer's name/room/tags: 'espnowrequestmeta <peer>'";
-    static String out;
-    out = "";
-    serializeJson(doc, out);
-    return out.c_str();
+    doc["hint"] = kListingJsonHint;
+    return groupJsonReply(doc, reply, notShown, kListingJsonTooLong);
   }
 
   char* buf = getDebugBuffer();
-  int pos = 0;
-  pos += snprintf(buf + pos, 1024 - pos, "=== Mesh Devices ===\n");
+  size_t pos = 0;  // groupTextAppend keeps it inside the buffer
+  groupTextAppend(buf, 1024, pos, "=== Mesh Devices ===\n");
 
   int count = 0;
   for (int i = 0; i < gMeshPeerSlots; i++) {
@@ -15486,23 +16108,26 @@ const char* cmd_espnow_devices(const String& argsInput) {
 
     char zoneBuf[34] = "";
     if (gMeshPeerMeta[i].zone[0]) snprintf(zoneBuf, sizeof(zoneBuf), "/%s", gMeshPeerMeta[i].zone);
-    pos += snprintf(buf + pos, 1024 - pos, "  %s%s [%s%s] %s",
+    groupTextAppend(buf, 1024, pos, "  %s%s [%s%s] %s",
                     displayName,
                     gMeshPeerMeta[i].room[0] ? "" : "",
                     gMeshPeerMeta[i].room[0] ? gMeshPeerMeta[i].room : "unassigned",
                     zoneBuf,
                     alive ? "(online" : "(offline");
     if (alive && health) {
-      pos += snprintf(buf + pos, 1024 - pos, ", %lus ago", (unsigned long)ageSec);
+      groupTextAppend(buf, 1024, pos, ", %lus ago", (unsigned long)ageSec);
     }
-    pos += snprintf(buf + pos, 1024 - pos, ")\n");
-    if (pos >= 900) { pos += snprintf(buf + pos, 1024 - pos, "  ... (truncated)\n"); break; }
+    char pendingMark[kGroupPendingMarkCap];
+    groupPendingMark(gMeshPeerMeta[i].mac, gMeshPeerMeta[i].room, gMeshPeerMeta[i].tags, pendingMark,
+                     sizeof(pendingMark));
+    groupTextAppend(buf, 1024, pos, ")%s\n", pendingMark);
+    if (pos >= 900) { groupTextAppend(buf, 1024, pos, "  ... (truncated)\n"); break; }
   }
 
   if (count == 0) {
-    pos += snprintf(buf + pos, 1024 - pos, "  (no peer metadata received yet)\n");
+    groupTextAppend(buf, 1024, pos, "  (no peer metadata received yet)\n");
   }
-  pos += snprintf(buf + pos, 1024 - pos, "Total: %d devices", count);
+  groupTextAppend(buf, 1024, pos, "Total: %d devices", count);
   emitListingTrailer("discovered/paired mesh peers",
                      "a peer's value: run it remotely with 'espnowremote <peer> <target-user> <target-pass> <cmd>' then read the reply with 'espnowmessages json'; a peer's name/room/tags: 'espnowrequestmeta <peer>'");
   return buf;
@@ -15512,11 +16137,14 @@ const char* cmd_espnow_rooms(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   if (argWantsJson(argsInput)) {
+    char* reply = groupReplyBuffer();
+    if (!reply) return kCommandReplyOutOfMemory;
     PSRAM_JSON_DOC(doc);
     doc["schema"] = 1;
     JsonArray roomsArr = doc["rooms"].to<JsonArray>();
     const char* seen[MESH_PEER_MAX];
     int seenCount = 0;
+    int notShown = 0;  // devices left out because the reply would not fit
     for (int i = 0; i < gMeshPeerSlots; i++) {
       if (!gMeshPeerMeta[i].isActive) continue;
       const char* room = gMeshPeerMeta[i].room[0] ? gMeshPeerMeta[i].room : "Unassigned";
@@ -15537,17 +16165,27 @@ const char* cmd_espnow_rooms(const String& argsInput) {
         d["name"]   = String(dn[0] ? dn : MAC_STR(gMeshPeerMeta[j].mac));
         d["tags"]   = gMeshPeerMeta[j].tags;
         d["online"] = h ? isMeshPeerAlive(h) : false;
+        // The rooms are the announced ones. "accepted" says whether a command
+        // to this room reaches the device; "pendingTags", when there are any,
+        // which of its tags a tag command does not go by yet.
+        EspNowGroupView view;
+        espnowGroupView(gMeshPeerMeta[j].mac, gMeshPeerMeta[j].room, gMeshPeerMeta[j].tags, view);
+        const char* pendingTags = view.pendingTags;
+        d["accepted"] = gMeshPeerMeta[j].room[0] != '\0' && view.pendingRoom[0] == '\0';
+        if (pendingTags[0]) d["pendingTags"] = pendingTags;
+        groupJsonKeepFit(doc, devs, notShown, kListingJsonTailBytes);
       }
+      // A room none of whose devices fit is not shown as an empty room.
+      if (devs.size() == 0) roomsArr.remove(roomsArr.size() - 1);
     }
     doc["count"] = seenCount;
-    doc["hint"] = "a peer's value: run it remotely with 'espnowremote <peer> <target-user> <target-pass> <cmd>' then read the reply with 'espnowmessages json'; a peer's name/room/tags: 'espnowrequestmeta <peer>'";
-    serializeJson(doc, getDebugBuffer(), 1024);
-    return getDebugBuffer();
+    doc["hint"] = kListingJsonHint;
+    return groupJsonReply(doc, reply, notShown, kListingJsonTooLong);
   }
 
   char* buf = getDebugBuffer();
-  int pos = 0;
-  pos += snprintf(buf + pos, 1024 - pos, "=== Rooms ===\n");
+  size_t pos = 0;  // groupTextAppend keeps it inside the buffer
+  groupTextAppend(buf, 1024, pos, "=== Rooms ===\n");
 
   // Collect unique room names
   const char* rooms[MESH_PEER_MAX];
@@ -15563,7 +16201,7 @@ const char* cmd_espnow_rooms(const String& argsInput) {
   }
 
   for (int r = 0; r < roomCount; r++) {
-    pos += snprintf(buf + pos, 1024 - pos, "%s:\n", rooms[r]);
+    groupTextAppend(buf, 1024, pos, "%s:\n", rooms[r]);
     for (int i = 0; i < gMeshPeerSlots; i++) {
       if (!gMeshPeerMeta[i].isActive) continue;
       const char* room = gMeshPeerMeta[i].room[0] ? gMeshPeerMeta[i].room : "Unassigned";
@@ -15576,17 +16214,20 @@ const char* cmd_espnow_rooms(const String& argsInput) {
         ? gMeshPeerMeta[i].friendlyName : gMeshPeerMeta[i].name;
       if (!displayName[0]) displayName = MAC_STR(gMeshPeerMeta[i].mac);
 
-      pos += snprintf(buf + pos, 1024 - pos, "  %s [%s] (%s)\n",
+      char pendingMark[kGroupPendingMarkCap];
+      groupPendingMark(gMeshPeerMeta[i].mac, gMeshPeerMeta[i].room, gMeshPeerMeta[i].tags, pendingMark,
+                       sizeof(pendingMark));
+      groupTextAppend(buf, 1024, pos, "  %s [%s] (%s)%s\n",
                       displayName,
                       gMeshPeerMeta[i].tags[0] ? gMeshPeerMeta[i].tags : "-",
-                      alive ? "online" : "offline");
-      if (pos >= 900) { pos += snprintf(buf + pos, 1024 - pos, "  ...\n"); break; }
+                      alive ? "online" : "offline", pendingMark);
+      if (pos >= 900) { groupTextAppend(buf, 1024, pos, "  ...\n"); break; }
     }
     if (pos >= 900) break;
   }
 
   if (roomCount == 0) {
-    pos += snprintf(buf + pos, 1024 - pos, "  (no peer metadata received yet)");
+    groupTextAppend(buf, 1024, pos, "  (no peer metadata received yet)");
   }
   emitListingTrailer("discovered/paired mesh peers",
                      "a peer's value: run it remotely with 'espnowremote <peer> <target-user> <target-pass> <cmd>' then read the reply with 'espnowmessages json'; a peer's name/room/tags: 'espnowrequestmeta <peer>'");
@@ -15601,7 +16242,7 @@ const char* cmd_espnow_find(const String& argsInput) {
 
   query.toLowerCase();
   char* buf = getDebugBuffer();
-  int pos = 0;
+  size_t pos = 0;  // groupTextAppend keeps it inside the buffer
   int matches = 0;
 
   for (int i = 0; i < gMeshPeerSlots; i++) {
@@ -15620,11 +16261,14 @@ const char* cmd_espnow_find(const String& argsInput) {
       matches++;
       const char* displayName = gMeshPeerMeta[i].friendlyName[0]
         ? gMeshPeerMeta[i].friendlyName : gMeshPeerMeta[i].name;
-      pos += snprintf(buf + pos, 1024 - pos, "  %s [%s/%s] tags=%s\n",
+      char pendingMark[kGroupPendingMarkCap];
+      groupPendingMark(gMeshPeerMeta[i].mac, gMeshPeerMeta[i].room, gMeshPeerMeta[i].tags, pendingMark,
+                       sizeof(pendingMark));
+      groupTextAppend(buf, 1024, pos, "  %s [%s/%s] tags=%s%s\n",
                       displayName,
                       gMeshPeerMeta[i].room[0] ? gMeshPeerMeta[i].room : "-",
                       gMeshPeerMeta[i].zone[0] ? gMeshPeerMeta[i].zone : "-",
-                      gMeshPeerMeta[i].tags[0] ? gMeshPeerMeta[i].tags : "-");
+                      gMeshPeerMeta[i].tags[0] ? gMeshPeerMeta[i].tags : "-", pendingMark);
       if (pos >= 900) break;
     }
   }
@@ -15638,130 +16282,400 @@ const char* cmd_espnow_find(const String& argsInput) {
   return buf;
 }
 
+// ---- Group commands and the membership they go by -----------------------------
+
+// Which group a command goes to.
+enum class GroupKind : uint8_t { Room, Tag };
+
+// Sends "user:pass:command" to every paired peer that is a member of the group
+// and says in the reply how many were left out. A member is a peer whose room
+// or tag was accepted on this device. A peer that only announces it gets
+// nothing: the frame carries an account's password, and pairing gives a peer
+// an encrypted link, not that password.
+static const char* groupCommandRun(GroupKind kind, const String& target, const String& user, const String& pass,
+                                   const String& command) {
+  if (!gEspNow || !gEspNow->initialized) return "Error: ESP-NOW not initialized. Run 'openespnow' first.";
+  const bool isRoom = (kind == GroupKind::Room);
+  if (!isRoom) {
+    // A tag list would have to mean "all of them" or "any of them", and the
+    // frame carries a password either way. One tag, said exactly.
+    const char* oneTag;
+    size_t oneTagLen;
+    if (!espnowgroup::singleTag(target.c_str(), oneTag, oneTagLen)) {
+      return "Error: a tag command goes to one tag, and a tag has no comma. Run it once per tag: "
+             "espnowtagcmd <tag> <target-user> <target-pass> <command>";
+    }
+  }
+  const String safeCommand = redactCmdForAudit(command);
+
+  char payload[ESPNOW_V4_MAX_PLAINTEXT];
+  if (user.length() + pass.length() + command.length() + 2 >= sizeof(payload)) {
+    return "Error: command too long for one encrypted ESP-NOW frame (credentials and command must fit 201 bytes)";
+  }
+  snprintf(payload, sizeof(payload), "%s:%s:%s", user.c_str(), pass.c_str(), command.c_str());
+
+  if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
+  char* buf = getDebugBuffer();
+  const size_t cap = 1024;
+  size_t pos = 0;
+  buf[0] = '\0';
+  int sent = 0;
+  int listed = 0;
+  int skipped = 0;
+  char skippedNames[120] = "";
+  size_t skippedPos = 0;
+  bool skippedCut = false;
+
+  for (int i = 0; i < gEspNow->deviceCount; i++) {
+    // Records are added and removed on this task only, so `dev` stays this
+    // peer's; what it holds is copied under the lock, because espnow_task
+    // stores announcements into it.
+    const EspNowDevice& dev = gEspNow->devices[i];
+    if (isSelfMac(dev.mac)) continue;
+    espnowgroup::Membership m;
+    if (!groupSnapshotOf(dev.mac, m)) continue;
+    char who[32];
+    groupPeerLabel(dev, who, sizeof(who));
+    const bool member = isRoom ? espnowgroup::inRoom(m, target.c_str()) : espnowgroup::hasTag(m, target.c_str());
+    if (!member) {
+      const bool claims = isRoom ? espnowgroup::claimsRoom(m, target.c_str())
+                                 : espnowgroup::claimsTag(m, target.c_str());
+      if (claims) {
+        skipped++;
+        // Named while they fit; the count covers the rest.
+        if (skippedPos + strlen(who) + 2 < sizeof(skippedNames) - 6) {
+          groupTextAppend(skippedNames, sizeof(skippedNames), skippedPos, "%s%s", skippedPos ? ", " : "", who);
+        } else {
+          skippedCut = true;
+        }
+      }
+      continue;
+    }
+
+    // Encrypt-or-wait. The payload carries credentials, so it never goes out
+    // in plaintext. A peer without a session is not skipped: the frame is
+    // parked, the handshake is started and the frame goes out when the session
+    // is up (or its timeout drops it). So `sent` counts frames accepted for
+    // delivery, not frames on the air.
+    v4_send_encrypted_or_queue(dev.mac, ESPNOW_V4_TYPE_CMD, ESPNOW_V4_FLAG_ACK_REQ, generateMessageId(),
+                               (const uint8_t*)payload, (uint16_t)strlen(payload), 1, nullptr, 0);
+    sent++;
+    // Every member is sent to; the reply names as many as fit beside its last lines.
+    if (pos < 360) {
+      char macText[18];
+      macToDisplay(dev.mac, macText, sizeof(macText));
+      groupTextAppend(buf, cap, pos, "  -> %s (%s)\n", who, macText);
+      listed++;
+    }
+  }
+  if (sent > listed) groupTextAppend(buf, cap, pos, "  ... and %d more\n", sent - listed);
+
+  if (sent == 0) {
+    cliHint(isRoom ? "no device matched - list rooms and members with 'espnowgroups'"
+                   : "no device matched - list devices and their tags with 'espnowgroups'");
+    if (isRoom) {
+      groupTextAppend(buf, cap, pos, "No devices found in room '%s'", target.c_str());
+    } else {
+      groupTextAppend(buf, cap, pos, "No devices found with tag '%s'", target.c_str());
+    }
+  } else {
+    cliHint("each device's reply returns asynchronously - read them with 'espnowmessages json'");
+    if (isRoom) {
+      groupTextAppend(buf, cap, pos, "Sent '%s' to %d device(s) in %s", safeCommand.c_str(), sent, target.c_str());
+    } else {
+      groupTextAppend(buf, cap, pos, "Sent '%s' to %d device(s) with tag '%s'", safeCommand.c_str(), sent,
+                      target.c_str());
+    }
+  }
+  if (skipped > 0) {
+    if (skippedCut) groupTextAppend(skippedNames, sizeof(skippedNames), skippedPos, ", ...");
+    groupTextAppend(buf, cap, pos,
+                    "\nSkipped %d device(s) whose %s is pending (announced, not accepted here): %s. "
+                    "Accept with '%s <name_or_mac|all>'",
+                    skipped, isRoom ? "room" : "tag", skippedNames, espnowgroup::kAcceptCommand);
+  }
+  return buf;
+}
+
 const char* cmd_espnow_roomcmd(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   CommandArgs a(argsInput);
   if (!a.hasMinArgs(4)) return "Error: invalid arguments — Usage: espnow roomcmd <room> <user> <pass> <command>";
-
-  String targetRoom = a.arg(0);
-  String user = a.arg(1);
-  String pass = a.arg(2);
-  String command = a.remaining(2);
-  const String safeCommand = redactCmdForAudit(command);
-
-  char* buf = getDebugBuffer();
-  int pos = 0;
-  int sent = 0;
-
-  for (int i = 0; i < gMeshPeerSlots; i++) {
-    if (!gMeshPeerMeta[i].isActive) continue;
-    if (!gMeshPeerMeta[i].room[0]) continue;
-
-    String room = gMeshPeerMeta[i].room;
-    if (!room.equalsIgnoreCase(targetRoom)) continue;
-
-    // Send remote command directly — no String concat, no re-parse
-    char macStrBuf[18];
-    macToDisplay(gMeshPeerMeta[i].mac, macStrBuf, sizeof(macStrBuf));
-    char roomCmdPayload[ESPNOW_V4_MAX_PLAINTEXT];
-    if (user.length() + pass.length() + command.length() + 2 >= sizeof(roomCmdPayload)) {
-      return "Error: command too long for one encrypted ESP-NOW frame (credentials and command must fit 201 bytes)";
-    }
-    snprintf(roomCmdPayload, sizeof(roomCmdPayload), "%s:%s:%s", user.c_str(), pass.c_str(), command.c_str());
-    // Phase 3.5 task #6 — encrypt-or-wait. Payload carries credentials, so it
-    // never goes out in plaintext. A peer without a KEY_EX-derived identity is
-    // not skipped: the frame is parked in the pending ring, KEY_EX is kicked,
-    // and pendingFrameDrainForPeer delivers it once the session comes up (or
-    // the timeout sweep eats it). So `sent` below counts frames ACCEPTED for
-    // delivery, not frames on the wire.
-    v4_send_encrypted_or_queue(gMeshPeerMeta[i].mac, ESPNOW_V4_TYPE_CMD, ESPNOW_V4_FLAG_ACK_REQ,
-                                generateMessageId(),
-                                (const uint8_t*)roomCmdPayload, (uint16_t)strlen(roomCmdPayload), 1,
-                                nullptr, 0);
-    sent++;
-
-    const char* displayName = gMeshPeerMeta[i].friendlyName[0]
-      ? gMeshPeerMeta[i].friendlyName : gMeshPeerMeta[i].name;
-    pos += snprintf(buf + pos, 1024 - pos, "  -> %s (%s)\n", displayName, macStrBuf);
-    if (pos >= 900) break;
-  }
-
-  if (sent == 0) {
-    cliHint("no device matched - list rooms and members with 'espnowdevices'");
-    snprintf(buf, 1024, "No devices found in room '%s'", targetRoom.c_str());
-  } else {
-    cliHint("each device's reply returns asynchronously - read them with 'espnowmessages json'");
-    pos += snprintf(buf + pos, 1024 - pos, "Sent '%s' to %d device(s) in %s",
-                    safeCommand.c_str(), sent, targetRoom.c_str());
-  }
-  return buf;
+  return groupCommandRun(GroupKind::Room, a.arg(0), a.arg(1), a.arg(2), a.remaining(2));
 }
 
 const char* cmd_espnow_tagcmd(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   CommandArgs a(argsInput);
   if (!a.hasMinArgs(4)) return "Error: invalid arguments — Usage: espnow tagcmd <tag> <user> <pass> <command>";
+  return groupCommandRun(GroupKind::Tag, a.arg(0), a.arg(1), a.arg(2), a.remaining(2));
+}
 
-  String targetTag = a.arg(0);
-  String user = a.arg(1);
-  String pass = a.arg(2);
-  String command = a.remaining(2);
-  const String safeCommand = redactCmdForAudit(command);
+// "json" first, then the peer the command names (empty when none is given).
+static bool groupCommandArgs(const String& argsInput, String& target) {
+  const bool json = argLeadingTokenIsJson(argsInput);
+  CommandArgs a(argsInput);
+  target = a.arg(json ? 1 : 0);
+  return json;
+}
 
-  targetTag.toLowerCase();
-  char* buf = getDebugBuffer();
-  int pos = 0;
-  int sent = 0;
+// The records a membership command works on: the one peer `target` names, or
+// every paired peer for "all" (and for an empty target where the command
+// allows it). Returns the refusal to reply with when the target names no
+// peer, nullptr otherwise.
+static const char* groupCommandTarget(const String& target, bool& all, EspNowDevice*& one) {
+  all = (target.length() == 0) || target.equalsIgnoreCase("all");
+  one = nullptr;
+  if (all) return nullptr;
+  uint8_t mac[6];
+  if (!resolveDeviceNameOrMac(target, mac)) {
+    return "Error: No paired device with that name or address. List them with 'espnowgroups'.";
+  }
+  // A name two records share would silently mean the first of them, and
+  // accepting gives a peer the passwords sent to its room. The lists call
+  // such a peer by its address, and so must the admin.
+  int sameName = 0;
+  for (int i = 0; i < gEspNow->deviceCount; i++) {
+    if (gEspNow->devices[i].name.equalsIgnoreCase(target)) sameName++;
+  }
+  uint8_t asAddress[6];
+  const bool byAddress = parseMacAddress(target, asAddress) && memcmp(asAddress, mac, 6) == 0;
+  if (sameName > 1 && !byAddress) {
+    return "Error: More than one paired device has that name. Use the address; 'espnowgroups' lists them.";
+  }
+  one = groupDeviceFor(mac);
+  if (!one) return "Error: That is this device. Its own room and tags need no acceptance.";
+  return nullptr;
+}
 
-  for (int i = 0; i < gMeshPeerSlots; i++) {
-    if (!gMeshPeerMeta[i].isActive) continue;
-    if (!gMeshPeerMeta[i].tags[0]) continue;
+// What a membership command keeps free for its last fields after the peers.
+constexpr size_t kGroupJsonTailBytes = 200;
+constexpr char kGroupJsonTooLong[] =
+    "{\"schema\":1,\"ok\":false,\"error\":\"Out of memory for the reply. Name one peer instead of all of them\"}";
 
-    // Check if target tag is in the comma-separated list
-    String tags = gMeshPeerMeta[i].tags;
-    tags.toLowerCase();
-    bool match = false;
-    int start = 0;
-    while (start < (int)tags.length()) {
-      int end = tags.indexOf(',', start);
-      if (end < 0) end = tags.length();
-      String tag = tags.substring(start, end);
-      tag.trim();
-      if (tag == targetTag) { match = true; break; }
-      start = end + 1;
+// One peer of a membership command's JSON reply: what it announces, what is
+// accepted and what waits, all from the one copy `m` the command worked on.
+// The texts are handed over as plain pointers so that ArduinoJson copies them.
+static void groupPeerToJson(JsonObject o, const char* name, const char* mac, const espnowgroup::Membership& m) {
+  char pending[espnowgroup::kTagsCap];
+  espnowgroup::pendingTags(m, pending, sizeof(pending));
+  const char* room = m.room;
+  const char* tags = m.tags;
+  const char* acceptedRoom = m.acceptedRoom;
+  const char* acceptedTags = m.acceptedTags;
+  const char* pendingRoom = espnowgroup::roomPending(m) ? m.room : "";
+  const char* pendingTags = pending;
+  o["mac"] = mac;
+  o["name"] = name;
+  o["room"] = room;
+  o["tags"] = tags;
+  o["acceptedRoom"] = acceptedRoom;
+  o["acceptedTags"] = acceptedTags;
+  o["pendingRoom"] = pendingRoom;
+  o["pendingTags"] = pendingTags;
+}
+
+// List what every paired peer announces, what was accepted here and what waits.
+const char* cmd_espnow_groups(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  if (!gEspNow) return "Error: ESP-NOW not initialized. Run 'openespnow' first.";
+  String target;
+  const bool json = groupCommandArgs(argsInput, target);
+  bool all = true;
+  EspNowDevice* one = nullptr;
+  if (const char* refusal = groupCommandTarget(target, all, one)) return refusal;
+  char* reply = groupReplyBuffer();
+  if (!reply) return kCommandReplyOutOfMemory;
+
+  PSRAM_JSON_DOC(doc);
+  JsonArray peers;
+  if (json) {
+    doc["schema"] = 1;
+    peers = doc["peers"].to<JsonArray>();
+  }
+  size_t pos = 0;
+  if (!json) groupTextAppend(reply, kGroupReplyCap, pos, "=== Rooms and tags of paired peers ===\n");
+  int count = 0;
+  int pendingCount = 0;
+  int notShown = 0;
+  for (int i = 0; i < gEspNow->deviceCount; i++) {
+    EspNowDevice& dev = gEspNow->devices[i];
+    if (isSelfMac(dev.mac) || (!all && &dev != one)) continue;
+    espnowgroup::Membership m;
+    if (!groupSnapshotOf(dev.mac, m)) continue;
+    char pendingTags[espnowgroup::kTagsCap];
+    espnowgroup::pendingTags(m, pendingTags, sizeof(pendingTags));
+    const bool roomPending = espnowgroup::roomPending(m);
+    count++;
+    if (roomPending || pendingTags[0]) pendingCount++;
+    char who[32];
+    groupPeerLabel(dev, who, sizeof(who));
+    char macText[18];
+    macToDisplay(dev.mac, macText, sizeof(macText));
+    if (json) {
+      groupPeerToJson(peers.add<JsonObject>(), who, macText, m);
+      groupJsonKeepFit(doc, peers, notShown, kGroupJsonTailBytes);
+      continue;
     }
-    if (!match) continue;
-
-    // Send remote command directly — no String concat, no re-parse
-    char tagMacStrBuf[18];
-    macToDisplay(gMeshPeerMeta[i].mac, tagMacStrBuf, sizeof(tagMacStrBuf));
-    char tagCmdPayload[ESPNOW_V4_MAX_PLAINTEXT];
-    if (user.length() + pass.length() + command.length() + 2 >= sizeof(tagCmdPayload)) {
-      return "Error: command too long for one encrypted ESP-NOW frame (credentials and command must fit 201 bytes)";
+    // A peer takes up to about 450 bytes; the rest of the block is for the last lines.
+    if (pos + 450 + 260 > kGroupReplyCap) {
+      notShown++;
+      continue;
     }
-    snprintf(tagCmdPayload, sizeof(tagCmdPayload), "%s:%s:%s", user.c_str(), pass.c_str(), command.c_str());
-    // Phase 3.5 task #6 — encrypted-or-queue (credentials protection).
-    v4_send_encrypted_or_queue(gMeshPeerMeta[i].mac, ESPNOW_V4_TYPE_CMD, ESPNOW_V4_FLAG_ACK_REQ,
-                                generateMessageId(),
-                                (const uint8_t*)tagCmdPayload, (uint16_t)strlen(tagCmdPayload), 1,
-                                nullptr, 0);
-    sent++;
+    char text[espnowgroup::kDescribeCap];
+    groupTextAppend(reply, kGroupReplyCap, pos, "%s (%s)\n", who, macText);
+    espnowgroup::describe(text, sizeof(text), m.room, m.tags);
+    groupTextAppend(reply, kGroupReplyCap, pos, "  announced: %s\n", text);
+    espnowgroup::describe(text, sizeof(text), m.acceptedRoom, m.acceptedTags);
+    groupTextAppend(reply, kGroupReplyCap, pos, "  accepted:  %s\n", text);
+    espnowgroup::describe(text, sizeof(text), roomPending ? m.room : "", pendingTags);
+    groupTextAppend(reply, kGroupReplyCap, pos, "  pending:   %s\n", text);
+  }
+  if (json) {
+    doc["count"] = count;
+    doc["pendingCount"] = pendingCount;
+    return groupJsonReply(doc, reply, notShown, kGroupJsonTooLong);
+  }
+  if (count == 0) {
+    groupTextAppend(reply, kGroupReplyCap, pos, "  (no paired peers)\n");
+  }
+  if (notShown > 0) {
+    groupTextAppend(reply, kGroupReplyCap, pos, "... %d more peer(s) not shown; name one: %s <name_or_mac>\n", notShown,
+                    espnowgroup::kListCommand);
+  }
+  groupTextAppend(reply, kGroupReplyCap, pos,
+                  "%d peer(s), %d with pending room or tags. Room and tag commands go only by what is accepted.\n"
+                  "Accept what a peer announces: %s <name_or_mac|all>. Take it back: %s <name_or_mac|all>.",
+                  count, pendingCount, espnowgroup::kAcceptCommand, espnowgroup::kDropCommand);
+  return reply;
+}
 
-    const char* displayName = gMeshPeerMeta[i].friendlyName[0]
-      ? gMeshPeerMeta[i].friendlyName : gMeshPeerMeta[i].name;
-    pos += snprintf(buf + pos, 1024 - pos, "  -> %s (%s)\n", displayName, tagMacStrBuf);
-    if (pos >= 900) break;
+// Accept (accepting) what the named peers announce right now, or take back
+// (!accepting) what was accepted for them. The reply states the accepted room
+// and tags of each peer afterwards: an announcement may have changed since
+// the list was read.
+static const char* groupAcceptOrDrop(const String& argsInput, bool accepting) {
+  if (!gEspNow) return "Error: ESP-NOW not initialized. Run 'openespnow' first.";
+  String target;
+  const bool json = groupCommandArgs(argsInput, target);
+  if (target.length() == 0) {
+    return accepting ? "Error: invalid arguments — Usage: espnowgroupaccept [json] <name_or_mac|all>"
+                  : "Error: invalid arguments — Usage: espnowgroupdrop [json] <name_or_mac|all>";
+  }
+  bool all = false;
+  EspNowDevice* one = nullptr;
+  if (const char* refusal = groupCommandTarget(target, all, one)) return refusal;
+  char* reply = groupReplyBuffer();
+  if (!reply) return kCommandReplyOutOfMemory;
+
+  PSRAM_JSON_DOC(doc);
+  JsonArray peers;
+  if (json) {
+    doc["schema"] = 1;
+    peers = doc["peers"].to<JsonArray>();
+  }
+  size_t pos = 0;
+  int count = 0;
+  int changedCount = 0;
+  int notShown = 0;
+  for (int i = 0; i < gEspNow->deviceCount; i++) {
+    EspNowDevice& dev = gEspNow->devices[i];
+    if (isSelfMac(dev.mac) || (!all && &dev != one)) continue;
+    count++;
+    espnowgroup::Membership before;
+    espnowgroup::Membership m;
+    bool changed = false;
+    {
+      // Read, decide and write in one step: the peer's announcements are
+      // stored on another task, and one that lands now comes either before
+      // (and is what gets accepted) or after (and is judged against this).
+      GroupLockGuard lock;
+      before = groupMembershipOf(dev);
+      m = before;
+      changed = accepting ? espnowgroup::acceptAnnounced(m) : espnowgroup::dropAccepted(m);
+      if (changed) {
+        dev.acceptedRoom = m.acceptedRoom;
+        dev.acceptedTags = m.acceptedTags;
+      }
+    }
+    if (changed) changedCount++;
+    char who[32];
+    groupPeerLabel(dev, who, sizeof(who));
+    char macText[18];
+    macToDisplay(dev.mac, macText, sizeof(macText));
+    char text[espnowgroup::kDescribeCap];
+    if (accepting) {
+      espnowgroup::describe(text, sizeof(text), m.acceptedRoom, m.acceptedTags);
+      if (changed) logSystemEvent("ESPNOW", "%s: accepted for group commands: %s", who, text);
+    } else {
+      espnowgroup::describe(text, sizeof(text), before.acceptedRoom, before.acceptedTags);
+      if (changed) logSystemEvent("ESPNOW", "%s: no longer accepted for group commands: %s", who, text);
+    }
+    if (json) {
+      JsonObject o = peers.add<JsonObject>();
+      groupPeerToJson(o, who, macText, m);
+      o["changed"] = changed;
+      groupJsonKeepFit(doc, peers, notShown, kGroupJsonTailBytes);
+      continue;
+    }
+    // Every named peer is handled; the reply lists as many as fit and counts all.
+    if (pos + 260 + 320 > kGroupReplyCap) {
+      notShown++;
+      continue;
+    }
+    if (accepting) {
+      const bool announcesNothing = (m.room[0] == '\0' && m.tags[0] == '\0');
+      groupTextAppend(reply, kGroupReplyCap, pos, "%s (%s): %s %s%s\n", who, macText,
+                      announcesNothing ? "announces no room or tags; accepted" : "accepted", text,
+                      (changed || announcesNothing) ? "" : " (as before)");
+    } else {
+      groupTextAppend(reply, kGroupReplyCap, pos, "%s (%s): %s %s\n", who, macText,
+                      changed ? "no longer accepted:" : "nothing was accepted;", changed ? text : "no change");
+    }
   }
 
-  if (sent == 0) {
-    cliHint("no device matched - list devices and their tags with 'espnowdevices'");
-    snprintf(buf, 1024, "No devices found with tag '%s'", targetTag.c_str());
+  // Saved once for all peers, and only when something changed.
+  const bool saved = (changedCount == 0) || saveEspNowDevices();
+  if (json) {
+    doc["ok"] = saved;
+    doc["count"] = count;
+    doc["changed"] = changedCount;
+    doc["saved"] = saved;
+    if (!saved) doc["error"] = "The device registry could not be saved; the change is lost at a restart";
+    return groupJsonReply(doc, reply, notShown, kGroupJsonTooLong);
+  }
+  if (count == 0) {
+    groupTextAppend(reply, kGroupReplyCap, pos, "No paired peers.\n");
+  }
+  if (notShown > 0) {
+    groupTextAppend(reply, kGroupReplyCap, pos, "... %d more peer(s) not shown; see them with '%s'\n", notShown,
+                    espnowgroup::kListCommand);
+  }
+  if (accepting) {
+    groupTextAppend(reply, kGroupReplyCap, pos,
+                    "%d peer(s), %d changed. Room and tag commands go to a peer by what is accepted for it.", count,
+                    changedCount);
   } else {
-    cliHint("each device's reply returns asynchronously - read them with 'espnowmessages json'");
-    pos += snprintf(buf + pos, 1024 - pos, "Sent '%s' to %d device(s) with tag '%s'",
-                    safeCommand.c_str(), sent, targetTag.c_str());
+    groupTextAppend(reply, kGroupReplyCap, pos,
+                    "%d peer(s), %d changed. What such a peer announces waits until accepted again: %s <name_or_mac|all>.",
+                    count, changedCount, espnowgroup::kAcceptCommand);
   }
-  return buf;
+  if (!saved) {
+    groupTextAppend(reply, kGroupReplyCap, pos,
+                    "\nThe device registry could not be saved: the change holds until a restart. "
+                    "Check the filesystem and run the command again.");
+  }
+  return reply;
+}
+
+const char* cmd_espnow_groupaccept(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  return groupAcceptOrDrop(argsInput, true);
+}
+
+const char* cmd_espnow_groupdrop(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  return groupAcceptOrDrop(argsInput, false);
 }
 
 // ESP-NOW heartbeat mode command
@@ -17264,6 +18178,9 @@ static bool espnowForgetPeerCrypto(const uint8_t mac[6], bool* removedAny = null
   const bool forgot = peerIdentityForget(mac);
   if (removedAny) *removedAny = had || forgot;
   espnowHandshakeBackoffClear(mac);  // its handshake back-off entry goes too
+  // Whoever key-exchanges at this address next is taken as new. A record that
+  // stays paired (espnowforget) keeps no accepted room or tags for it.
+  espnowGroupAcceptanceClear(mac, "its identity was forgotten");
   return had;
 }
 
@@ -18367,6 +19284,9 @@ const char* cmd_espnow_pairsecure(const String& argsInput) {
     gEspNow->devices[gEspNow->deviceCount].encrypted = true;
     memcpy(gEspNow->devices[gEspNow->deviceCount].key, gEspNow->derivedKey, 16);
     gEspNow->devices[gEspNow->deviceCount].meshId = meshId;  // Phase 2.5
+    // A new pairing starts with no room or tags accepted.
+    gEspNow->devices[gEspNow->deviceCount].acceptedRoom = "";
+    gEspNow->devices[gEspNow->deviceCount].acceptedTags = "";
     gEspNow->deviceCount++;
   }
 
@@ -20354,11 +21274,14 @@ extern const CommandEntry espNowCommands[] = {
   { "espnowdeviceinfo", "Show all local device metadata.", false, cmd_espnow_deviceinfo },
   
   // ---- Master Aggregation ----
-  { "espnowdevices", "List all mesh devices with room/zone/tags/status: espnowdevices [json].", false, cmd_espnow_devices },
-  { "espnowrooms", "List rooms and their devices (aggregated from this node's cached peer metadata).", false, cmd_espnow_rooms },
+  { "espnowdevices", "List all mesh devices with the room/zone/tags they announce and their status; [pending] marks a room or tags not accepted here: espnowdevices [json].", false, cmd_espnow_devices, "Usage: espnowdevices [json]\n       json: pendingRoom / pendingTags per device say what of its room and tags is not accepted here;\n       devices that do not fit one reply are counted in notShown." },
+  { "espnowrooms", "List announced rooms and their devices (from this node's cached peer metadata); [pending] marks a membership not accepted here.", false, cmd_espnow_rooms },
   { "espnowfind", "Find devices by name, room, or tag: 'espnowfind <query>'.", false, cmd_espnow_find, "Usage: espnowfind <query>" },
-  { "espnowroomcmd", "Run command on all devices in a room; user/pass must be valid on EACH target device. (async - replies via espnowmessages json)", true, cmd_espnow_roomcmd, "Usage: espnowroomcmd <room> <target-user> <target-pass> <command>\n       Credentials are checked ON EACH target device, not this one.\n       Returns OK on dispatch; each device's reply arrives later in 'espnowmessages json'." },
-  { "espnowtagcmd", "Run command on all devices with a tag; user/pass must be valid on EACH target device. (async - replies via espnowmessages json)", true, cmd_espnow_tagcmd, "Usage: espnowtagcmd <tag> <target-user> <target-pass> <command>\n       Credentials are checked ON EACH target device, not this one.\n       Returns OK on dispatch; each device's reply arrives later in 'espnowmessages json'." },
+  { "espnowroomcmd", "Run command on all devices accepted here as members of a room; user/pass must be valid on EACH target device. (async - replies via espnowmessages json)", true, cmd_espnow_roomcmd, "Usage: espnowroomcmd <room> <target-user> <target-pass> <command>\n       Credentials are checked ON EACH target device, not this one.\n       Goes only to peers whose room was accepted on this device (espnowgroups, espnowgroupaccept);\n       a peer that only announces the room is skipped and counted in the reply.\n       Returns OK on dispatch; each device's reply arrives later in 'espnowmessages json'." },
+  { "espnowtagcmd", "Run command on all devices accepted here as holders of a tag; user/pass must be valid on EACH target device. (async - replies via espnowmessages json)", true, cmd_espnow_tagcmd, "Usage: espnowtagcmd <tag> <target-user> <target-pass> <command>\n       Credentials are checked ON EACH target device, not this one.\n       One tag per command: a tag list (a comma) is refused.\n       Goes only to peers whose tag was accepted on this device (espnowgroups, espnowgroupaccept);\n       a peer that only announces the tag is skipped and counted in the reply.\n       Returns OK on dispatch; each device's reply arrives later in 'espnowmessages json'." },
+  { "espnowgroups", "List paired peers with the room and tags each announces, what was accepted here and what is pending: 'espnowgroups [json] [name_or_mac]'.", true, cmd_espnow_groups, "Usage: espnowgroups [json] [<name_or_mac>]\n       announced = what the peer says about itself; accepted = what room and tag commands go by;\n       pending = announced and not accepted, so not used.\n       A peer that stops announcing a room or tag leaves it at once; a new one waits for espnowgroupaccept." },
+  { "espnowgroupaccept", "Accept the room and tags a paired peer announces right now, for room and tag commands: 'espnowgroupaccept [json] <name_or_mac|all>'.", true, cmd_espnow_groupaccept, "Usage: espnowgroupaccept [json] <name_or_mac|all>\n       Records exactly what the peer announces at this moment; the reply states what was accepted.\n       A name that more than one paired device has is refused: use the address espnowgroups shows.\n       From then on espnowroomcmd and espnowtagcmd send that room's and those tags' commands,\n       with the account password they carry, to this peer." },
+  { "espnowgroupdrop", "Take back the room and tags accepted for a paired peer: 'espnowgroupdrop [json] <name_or_mac|all>'.", true, cmd_espnow_groupdrop, "Usage: espnowgroupdrop [json] <name_or_mac|all>\n       The peer is no longer a target of room or tag commands; what it announces is pending again." },
   
   // ---- ESP-NOW Communication ----
   { "espnowsend", "Send message to one peer, relayed over multiple hops if it is out of radio range: 'espnowsend [json] <name_or_mac> <message>'. Requires ESP-NOW encryption enabled. (async send; delivery only, no reply)", false, cmd_espnow_send, "Usage: espnowsend [json] <name_or_mac> <message>\n       Requires ESP-NOW encryption (set a mesh passphrase first); plaintext send was removed.\n       Leading 'json' flag returns {schema,ok,msgId} for delivery-status polling.\n       Returns OK on delivery; one-way message, no result comes back.\n       Out-of-range peers are reached via relays when a route exists ('espnowmeshroutes');\n       a relayed message is split at ~130 chars per piece instead of ~200." },

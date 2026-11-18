@@ -667,6 +667,36 @@ everything user-visible since the v0.99.99.1 tag.
   `docs/COMMAND_REFERENCE.md` is unchanged. Host-tested and built for six configurations; not run
   on hardware.
 ### Security
+- ESP-NOW room and tag commands: `espnowroomcmd` and `espnowtagcmd` send a command together with an
+  account name and password to every device in a room or with a tag, and room and tags are what each
+  device says about itself. Any paired device that set its own room to `Kitchen` therefore got the
+  password sent to room Kitchen. This device now keeps, per paired peer, the room and tags its admin
+  accepted, and the two commands (also when they come in over MQTT as `room:` or `tag:`) go only by
+  those. A room or tag a peer newly announces is pending: shown, not used, and reported once with
+  `[EVENT][ESPNOW] <name> says it is in room 'Kitchen'; not used for room commands until accepted
+  here: espnowgroupaccept <name>` (a peer that keeps changing is reported once a minute, with the
+  number of changes in between). A room or tag a peer stops announcing is dropped at once, so a move
+  from Garage to Kitchen is out of Garage immediately and pending for Kitchen. So that such a change
+  is not missed, the metadata frames of several peers received at the same moment are all handled
+  (one shared buffer kept only the last), a peer's registry record follows its metadata also when
+  the metadata cache is full, and a device asks each paired peer for its metadata once when a
+  session with it has come up. `espnowtagcmd` takes one tag and refuses a list. New admin commands:
+  `espnowgroups [json] [name_or_mac]` lists what each peer announces, what is accepted and what is
+  pending; `espnowgroupaccept [json] <name_or_mac|all>` accepts what is announced at that moment and
+  says what it accepted; `espnowgroupdrop [json] <name_or_mac|all>` takes it back. The replies of
+  the two group commands say how many devices were sent to and how many were skipped as pending.
+  Unpairing, `espnowforget` and a new identity key for a peer's address clear what was accepted for
+  it. `espnowdevices`, `espnowrooms`, `espnowfind`, the web peer metadata panel (with an Accept
+  button), the web bond device list and the OLED and glasses device lists still show the announced
+  room and mark it when it is not accepted; `espnowdevices json` and `/api/espnow/metadata` carry
+  `pendingRoom` and `pendingTags` when something is pending, `espnowrooms json` has `accepted` per
+  device, and both listings now leave out and count (`notShown`) what does not fit one reply
+  (`espnowrooms json` was cut at 1 KB before). A name that two paired devices share is not used for
+  a peer: lists and notices give the MAC address and the three commands refuse the name. The
+  accepted room and tags are stored in the device registry (`acceptedRoom`, `acceptedTags`); after
+  an update nothing is accepted yet, so run `espnowgroups` and `espnowgroupaccept` once on a device
+  that sends room or tag commands. The registry now also records when a peer clears its room or
+  tags. Host-tested; not yet tested on hardware.
 - G2 glasses and R1 ring frames: one bounded protobuf reader for both parsers. A malformed frame whose
   declared length was near 2^64 passed the bounds check of the old skip and moved the read cursor
   backwards; it is now refused, as is a varint that overflows 64 bits. Well-formed frames are read as

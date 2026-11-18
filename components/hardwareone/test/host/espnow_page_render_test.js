@@ -159,7 +159,8 @@ check(cleanArgs && cleanArgs[0] === '02:00:00:00:00:07' && cleanArgs[1] === 'Nod
 var metaMac = '02:00:00:00:00:02';
 jsonReplies['/api/espnow/metadata?mac=' + encodeURIComponent(metaMac)] = {
   found: true, deviceName: 'B<b>', friendlyName: 'F"&', room: '<svg onload=alert(4)>', zone: 'z',
-  tags: 't1,<img src=x>', stationary: true, source: 'mesh'
+  tags: 't1,<img src=x>', stationary: true, source: 'mesh',
+  pendingRoom: '<svg onload=alert(4)>', pendingTags: '<img src=x>'
 };
 var panel = el('metadata-content-' + metaMac);
 win.loadPeerMetadata(metaMac);
@@ -194,11 +195,17 @@ settle(function () {
   check(p.indexOf('B<b>') < 0 && p.indexOf('B&lt;b&gt;') >= 0, 'R2 metadata device name is shown as literal text');
   check(p.indexOf('F&quot;&amp;') >= 0, 'R2 metadata friendly name is escaped once');
   check(p.indexOf('Mesh/Pairing Mode') >= 0 && p.indexOf('>Yes<') >= 0, 'R2 panel keeps its source and stationary lines');
+  /* R5: a room and tags not accepted on this device are marked, as literal text, with the accept button. */
+  check(p.indexOf('Not accepted here:') >= 0 && p.indexOf('room &lt;svg onload=alert(4)&gt;, tags &lt;img src=x&gt;') >= 0,
+        'R5 pending room and tags are marked as literal text');
+  check(p.indexOf('onclick="acceptPeerGroups(\'' + metaMac + '\')"') >= 0 && typeof win.acceptPeerGroups === 'function',
+        'R5 the pending mark carries the accept button');
 
   var c = cleanPanel.innerHTML;
   check(c.indexOf('>Living-Room 2<') >= 0 && c.indexOf('>Küche<') >= 0 && c.indexOf('>stationary,thermal<') >= 0 &&
         c.indexOf('>Upstairs<') >= 0 && c.indexOf('>peerB<') >= 0, 'R4 clean metadata renders unchanged');
   check(c.indexOf('Bonded Mode (Cached)') >= 0 && c.indexOf('>No<') >= 0, 'R4 clean panel keeps its source and stationary lines');
+  check(c.indexOf('Not accepted here') < 0 && c.indexOf('acceptPeerGroups') < 0, 'R5 an accepted room and tags carry no mark');
 
   var g = graph.innerHTML;
   check(g.indexOf('<img') < 0, 'R3 graph peer name is not rendered as an <img> element', g.indexOf('<img') >= 0 ? 'raw <img present' : '');

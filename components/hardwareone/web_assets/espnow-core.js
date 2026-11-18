@@ -1322,6 +1322,18 @@
             html += '<div style="padding:8px;background:var(--panel-bg);border-radius:4px;border:1px solid var(--border)">' + esc(data.tags) + '</div></div>';
           }
           
+          // Room and tags above are what the peer announces. Room and tag
+          // commands go only by what was accepted on this device; the rest is
+          // shown here with the button that accepts it.
+          var pendingParts = [];
+          if (data.pendingRoom) pendingParts.push('room ' + esc(data.pendingRoom));
+          if (data.pendingTags) pendingParts.push('tags ' + esc(data.pendingTags));
+          if (pendingParts.length) {
+            html += '<div style="padding:8px;border-radius:4px;border:1px solid var(--warning);color:var(--panel-fg)">';
+            html += '<strong>Not accepted here:</strong> ' + pendingParts.join(', ') + '. Room and tag commands skip this device until accepted. ';
+            html += '<button class="btn btn-small" data-guest-hide onclick="acceptPeerGroups(\'' + mac + '\')">Accept</button></div>';
+          }
+
           html += '<div><label style="font-weight:600;color:var(--panel-fg);display:block;margin-bottom:4px">Stationary</label>';
           html += '<div style="padding:8px;background:var(--panel-bg);border-radius:4px;border:1px solid var(--border)">' + (data.stationary ? 'Yes' : 'No') + '</div></div>';
           
@@ -1335,6 +1347,18 @@
         })
         .catch(e => {
           container.innerHTML = '<div style="text-align:center;color:var(--danger);padding:20px">Error loading metadata: ' + e.message + '</div>';
+        });
+    };
+    // Accept the room and tags this peer announces right now (admin command),
+    // then show the panel again with the result.
+    window.acceptPeerGroups = function(mac) {
+      hw.postFormText('/api/cli', { cmd: 'espnowgroupaccept ' + mac })
+        .then(function(text) {
+          appendLogLine('log-' + mac, 'RECEIVED', text, null);
+          window.loadPeerMetadata(mac);
+        })
+        .catch(function(error) {
+          console.error('[ESP-NOW] Accept error:', error);
         });
     };
     window.syncMetadata = function(mac) {

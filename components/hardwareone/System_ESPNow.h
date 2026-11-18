@@ -227,6 +227,11 @@ struct EspNowDevice {
   EspNowInlineText<32> room;          // Cached from mesh peer metadata
   EspNowInlineText<32> zone;          // Cached from mesh peer metadata
   EspNowInlineText<64> tags;          // Cached metadata (comma-separated)
+  // What this device's admin accepted of the room and tags above. Only these
+  // make the peer a target of a room or tag command; what the peer announces
+  // beyond them waits (System_ESPNow_GroupCore.h has the rules).
+  EspNowInlineText<32> acceptedRoom;
+  EspNowInlineText<64> acceptedTags;
   bool stationary;       // Cached from mesh peer metadata
   // Phase 2 (multi-mesh): which of gSettings.meshes[] this peer belongs to.
   // Defaults to 0 (the primary/default mesh) for existing-style pairings.
@@ -410,7 +415,30 @@ extern MeshPeerMeta* gMeshPeerMeta;  // Dynamically allocated [gMeshPeerSlots] a
 
 // Peer metadata helpers
 MeshPeerMeta* getMeshPeerMeta(const uint8_t mac[6], bool createIfMissing = false);
+// Paired peers that are members of `room` for a room command: the room was
+// accepted on this device, not merely announced by the peer.
 int countMeshPeerMetaByRoom(const char* room);
+
+// Room and tag membership of paired peers (System_ESPNow_GroupCore.h).
+// True when `room` is the room this device accepted for the paired peer `mac`.
+// A page that shows a peer's announced room marks it when this is false.
+bool espnowGroupRoomAccepted(const uint8_t mac[6], const char* room);
+// One paired peer's membership for a page or a JSON reply. `pendingRoom` and
+// `pendingTags` are what the peer announces and this device has not accepted.
+struct EspNowGroupView {
+  char acceptedRoom[32];
+  char acceptedTags[64];
+  char pendingRoom[32];
+  char pendingTags[64];
+};
+// `room` and `tags` are the announced values the caller shows. False when
+// `mac` is not a paired peer: nothing can be accepted for it, so all of
+// `room` and `tags` comes back as pending.
+bool espnowGroupView(const uint8_t mac[6], const char* room, const char* tags, EspNowGroupView& out);
+// The peer at `mac` may be another device from now on (its identity key was
+// forgotten or replaced): nothing stays accepted for it, and frames waiting
+// for a session with it are dropped. `why` goes into the event line.
+void espnowGroupAcceptanceClear(const uint8_t mac[6], const char* why);
 
 // ==========================
 // Mesh Deduplication
@@ -948,9 +976,6 @@ struct EspNowState {
   uint32_t bondSendWaitDeadlineMs;
 #endif // ENABLE_BONDED_MODE
   
-  bool bondNeedsMetadataResponse;   // flag to send metadata response (deferred from callback)
-  uint8_t metadataPendingResponseMac[6]; // Dedicated MAC for metadata response (separate from bond exchanges)
-
   // Secure sensor fetcher — deferred SENSOR_REQ apply (mesh-legal, NOT bond-gated).
   // v4h_sensor_req stashes here on the RX task; the super-loop (block 9f3) applies it
   // off the critical path because startSensorDataStreaming creates a task/mutex.
@@ -962,12 +987,9 @@ struct EspNowState {
   uint32_t meshSensorReqLeaseMs;      // lease duration (ms)
   uint8_t  meshSensorReqSrcMac[6];    // authorized controller MAC (encrypted-reply target)
   
-  // Deferred metadata processing (set in callback, handled in task)
-  bool deferredMetadataPending;
-  uint8_t deferredMetadataSrcMac[6];
-  uint8_t deferredMetadataPayload[216];  // V4PayloadMetadata is 202 B packed (Wire.h caps it at the 202 B
-                                         // plaintext budget) — this staging buffer has 14 B of slack
-  
+  // Received metadata frames and requests for ours wait for the task in a
+  // per-sender inbox of their own (System_ESPNow.cpp, metadataInboxFor).
+
   // Deferred message handling (ISR-safe pattern: callback sets flag, task processes)
   // TEXT message ring buffer. Deepened from 4 → 16: a long text now arrives as
   // N per-fragment entries (not one), so a multi-fragment burst needs headroom
@@ -1108,13 +1130,11 @@ struct EspNowState {
     bondLastStatusReqMs(0),
     bondSendWaitDeadlineMs(0),
 #endif
-    bondNeedsMetadataResponse(false),
     meshSensorReqPending(false),
     meshSensorReqMode(0),
     meshSensorReqMask(0),
     meshSensorReqIntervalMs(0),
     meshSensorReqLeaseMs(0),
-    deferredMetadataPending(false),
     textQueueHead(0),
     textQueueTail(0),
     deferredCmdRespPending(false),
@@ -1136,12 +1156,9 @@ struct EspNowState {
     memset(bondPendingResponseMac, 0, 6);
     memset(&bondPeerStatus, 0, sizeof(bondPeerStatus));
 #endif
-    memset(metadataPendingResponseMac, 0, 6);
     memset(meshSensorReqSrcMac, 0, 6);
     // Initialize deferred message buffers
     memset(textQueue, 0, sizeof(textQueue));
-    memset(deferredMetadataSrcMac, 0, 6);
-    memset(deferredMetadataPayload, 0, sizeof(deferredMetadataPayload));
     memset(deferredCmdRespSrcMac, 0, 6);
     memset(deferredCmdRespDeviceName, 0, sizeof(deferredCmdRespDeviceName));
     // deferredCmdRespResult is a pointer — zeroed after ps_alloc in initEspNow

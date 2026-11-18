@@ -872,7 +872,7 @@ void streamBondInner(httpd_req_t* req) {
         select.innerHTML = '<option value="">-- Select a device --</option>';
         data.devices.forEach(function(dev) {
           const label = dev.name + ' (' + dev.mac + ')' +
-                       (dev.room ? ' - ' + dev.room : '') +
+                       (dev.room ? ' - ' + dev.room + (dev.roomAccepted === false ? ' (not accepted)' : '') : '') +
                        (dev.zone ? '/' + dev.zone : '');
           const option = document.createElement('option');
           option.value = dev.mac;
@@ -1782,6 +1782,9 @@ static esp_err_t handleBondPairedDevices(httpd_req_t* req) {
     webBondSendChunkf(req, "\"name\":\"%s\",", sz(dev.name));
     webBondSendChunkf(req, "\"friendlyName\":\"%s\",", sz(dev.friendlyName));
     webBondSendChunkf(req, "\"room\":\"%s\",", sz(dev.room));
+    // The room is what the peer announces; false while this device has not accepted it.
+    webBondSendChunkf(req, "\"roomAccepted\":%s,",
+                      (dev.room.length() == 0 || espnowGroupRoomAccepted(dev.mac, dev.room.c_str())) ? "true" : "false");
     webBondSendChunkf(req, "\"zone\":\"%s\",", sz(dev.zone));
     webBondSendChunkf(req, "\"tags\":\"%s\",", sz(dev.tags));
     webBondSendChunkf(req, "\"stationary\":%s,", dev.stationary ? "true" : "false");

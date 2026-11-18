@@ -2,19 +2,26 @@
 //
 // The runner pastes the production metadata types (EspNowInlineText, MeshPeerMeta,
 // V4PayloadMetadata, V4RxCtx) at INSERT_TYPES and the production functions
-// (metadata text policy when present, normalizeMetadataWireText,
-// v4h_metadata_resp_push, processMetadata, metaGetSet) at INSERT_PRODUCTION.
-// Everything else here is a small double: the registry, the mesh cache, settings
-// writes, events, logging and the debug buffer. No transport or flash is touched.
+// (metadata text policy when present, normalizeMetadataWireText, the
+// per-sender metadata inbox with v4h_metadata_req, v4h_metadata_resp_push and
+// metadataInboxHandleFrame, processMetadata with the membership functions it
+// hands room and tags to, metaGetSet) at INSERT_PRODUCTION. A tree before the
+// inbox keeps one shared buffer in the state and is run through that
+// (HW1_HAVE_METADATA_INBOX=0). Everything else here is a small double: the
+// registry, the mesh cache, the message history, settings writes, events,
+// logging and the debug buffer. No transport or flash is touched.
 #include <Arduino.h>
 
+#include <cctype>
 #include <cstdarg>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <strings.h>
+#include <vector>
 
 void webBatchTestStringAppend() {}
 
@@ -52,6 +59,17 @@ __attribute__((format(printf, 1, 2))) static void discardDebug(const char* fmt, 
 }
 #define WARN_ESPNOWF(...) captureWarn(__VA_ARGS__)
 #define DEBUG_ESPNOW_METADATAF(...) discardDebug(__VA_ARGS__)
+// processMetadata hands the room and tags to the membership rules, which
+// report through these (run by test_espnow_group_membership.py).
+#define INFO_ESPNOWF(...) discardDebug(__VA_ARGS__)
+#define EXT_RAM_BSS_ATTR
+__attribute__((format(printf, 2, 3))) [[maybe_unused]] static void logSystemEvent(const char*, const char* fmt, ...) {
+  char line[512];
+  va_list ap;
+  va_start(ap, fmt);
+  std::vsnprintf(line, sizeof(line), fmt, ap);
+  va_end(ap);
+}
 
 static const char* MAC_STR(const uint8_t* m) {
   static char buf[18];
@@ -82,6 +100,8 @@ struct EspNowDevice {
   EspNowInlineText<32> room;
   EspNowInlineText<32> zone;
   EspNowInlineText<64> tags;
+  EspNowInlineText<32> acceptedRoom;  // room and tag membership, see test_espnow_group_membership.py
+  EspNowInlineText<64> acceptedTags;
   bool stationary;
 };
 struct EspNowState {
@@ -102,6 +122,29 @@ static bool saveEspNowDevices() {
   ++gSaves;
   return true;
 }
+
+// ---- Doubles for the inbox and the membership functions (a tree with them).
+// The membership lock: one task here, so taking it does nothing
+// (test_espnow_group_membership.py checks how it is used).
+struct GroupLockGuard {
+  GroupLockGuard() {}
+};
+enum class AllocPref : uint8_t { PreferPsram = 0 };
+[[maybe_unused]] static void* ps_alloc(size_t size, AllocPref, const char*) { return std::malloc(size); }
+// The message history: who each stored line is about, and the line.
+enum LogMessageType : uint8_t { MSG_SYSTEM_EVENT = 3 };
+struct HistoryLine {
+  std::string mac;
+  std::string name;
+  std::string text;
+};
+static std::vector<HistoryLine> gHistory;
+[[maybe_unused]] static bool storeMessageInPeerHistory(uint8_t* peerMac, const char* peerName, const char* message,
+                                                       bool, LogMessageType) {
+  gHistory.push_back({MAC_STR(peerMac), peerName, message});
+  return true;
+}
+[[maybe_unused]] static String macToDisplayStr(const uint8_t* mac) { return String(MAC_STR(mac)); }
 
 // ---- Settings / event doubles for metaGetSet.
 static bool gMetadataChanged = false;
@@ -159,11 +202,15 @@ static void receiveMetadata(const uint8_t mac[6], const V4PayloadMetadata& paylo
   ctx.isSessionEncrypted = true;
   ctx.deviceName = "peer";
   v4h_metadata_resp_push(ctx);
+#if HW1_HAVE_METADATA_INBOX
+  CHECK(metadataInboxHandleFrame(), "RX handler did not keep the metadata for espnow_task");
+#else
   CHECK(gEspNow->deferredMetadataPending, "RX handler did not queue the metadata for espnow_task");
   if (!gEspNow->deferredMetadataPending) return;
   gEspNow->deferredMetadataPending = false;
   processMetadata(gEspNow->deferredMetadataSrcMac,
                   reinterpret_cast<const V4PayloadMetadata*>(gEspNow->deferredMetadataPayload));
+#endif
 }
 
 static void resetSetterDoubles() {
@@ -337,6 +384,124 @@ static void testPolicyTable() {
 }
 #endif
 
+#if HW1_HAVE_METADATA_INBOX
+// The receive handler alone, as the receive drain calls it for each frame of a
+// pass; the loop's step 10 (metadataInboxHandleFrame) runs once per pass later.
+static void handlerOnly(const uint8_t mac[6], uint8_t type, const char* room, const char* tags, const char* name) {
+  V4PayloadMetadata p;
+  std::memset(&p, 0, sizeof(p));
+  std::snprintf(p.deviceName, sizeof(p.deviceName), "%s", name);
+  std::snprintf(p.room, sizeof(p.room), "%s", room);
+  std::snprintf(p.tags, sizeof(p.tags), "%s", tags);
+  esp_now_recv_info info{mac};
+  EspNowV4Header header{type, 43};
+  V4RxCtx ctx{};
+  ctx.recv_info = &info;
+  ctx.h = &header;
+  ctx.payload = reinterpret_cast<const uint8_t*>(&p);
+  ctx.payloadLen = static_cast<uint16_t>(sizeof(V4PayloadMetadata));
+  ctx.isPaired = true;
+  ctx.isAuthenticated = true;
+  ctx.isSessionEncrypted = true;
+  ctx.deviceName = "peer";
+  v4h_metadata_resp_push(ctx);
+}
+
+// M6: the frames of several peers received in one pass are all handled. With
+// one shared buffer only the last survived, and a frame is how a peer leaves a
+// room: the others stayed members of the room they had left.
+static void testFramesOfOnePass() {
+  const uint8_t macA[6] = {0x02, 0x00, 0x00, 0x00, 0x00, 0x0A};
+  const uint8_t macB[6] = {0x02, 0x00, 0x00, 0x00, 0x00, 0x0B};
+  const uint8_t macC[6] = {0x02, 0x00, 0x00, 0x00, 0x00, 0x0C};
+  for (auto& d : gState.devices) d = EspNowDevice{};
+  const uint8_t* macs[3] = {macA, macB, macC};
+  const char* names[3] = {"A", "B", "C"};
+  for (int i = 0; i < 3; ++i) {
+    std::memcpy(gState.devices[i].mac, macs[i], 6);
+    gState.devices[i].name = names[i];
+    gState.devices[i].room = "Kitchen";
+    gState.devices[i].acceptedRoom = "Kitchen";
+  }
+  gState.deviceCount = 3;
+  for (auto& slot : gMetaSlots) slot.clear();
+  gHistory.clear();
+  gNowMs += 120000;
+  gSaves = 0;
+
+  // Three members move to another room; their pushes arrive in one pass. The
+  // first sends twice (its room was edited twice): its last frame counts.
+  handlerOnly(macA, ESPNOW_V4_TYPE_METADATA_PUSH, "Hall", "", "node-a");
+  handlerOnly(macB, ESPNOW_V4_TYPE_METADATA_PUSH, "Garage", "", "node-b");
+  handlerOnly(macC, ESPNOW_V4_TYPE_METADATA_PUSH, "Garage", "", "node-c");
+  handlerOnly(macA, ESPNOW_V4_TYPE_METADATA_PUSH, "Garage", "", "node-a");
+  int passes = 0;
+  while (metadataInboxHandleFrame()) ++passes;
+  CHECK(passes == 3, "M6: %d frame(s) handled for three senders, expected one each", passes);
+  for (int i = 0; i < 3; ++i) {
+    CHECK(gState.devices[i].room == "Garage" && gState.devices[i].acceptedRoom == "",
+          "M6: peer %s after its move: room '%s', still accepted for '%s'", names[i], gState.devices[i].room.c_str(),
+          gState.devices[i].acceptedRoom.c_str());
+  }
+  CHECK(gHistory.size() == 3, "M6: %zu history line(s) for three frames a peer sent on its own", gHistory.size());
+  CHECK(!metadataInboxHandleFrame(), "M6: a frame was handled twice");
+  // The registry is written for the first of them at once and once more for
+  // the rest when the save gap is over, not once per peer.
+  groupNoticeTick(gNowMs);
+  announceSaveTick(gNowMs);
+  CHECK(gSaves == 1, "M6: three peers changing at once saved the registry %d time(s) right away, expected 1", gSaves);
+  gNowMs += kAnnounceSaveGapMs + 100;
+  announceSaveTick(gNowMs);
+  announceSaveTick(gNowMs);
+  CHECK(gSaves == 2, "M6: after the save gap the registry was saved %d time(s) in all, expected 2", gSaves);
+
+  // The answer to a refresh this device asked for by itself is stored without
+  // a history line; a push, and an answer nobody here marked, get theirs.
+  gHistory.clear();
+  MetadataInboxEntry* entryA = metadataInboxFor(macA);
+  CHECK(entryA != nullptr, "M6: no inbox entry for a known sender");
+  if (!entryA) return;
+  entryA->refreshAsked = true;
+  entryA->refreshQuiet = true;
+  entryA->refreshAskedMs = gNowMs;
+  gNowMs += 300;
+  handlerOnly(macA, ESPNOW_V4_TYPE_METADATA_RESP, "Attic", "", "node-a");
+  CHECK(metadataInboxHandleFrame() && gState.devices[0].room == "Attic" && gHistory.empty(),
+        "M6: the answer to an automatic refresh: room '%s', %zu history line(s)", gState.devices[0].room.c_str(),
+        gHistory.size());
+  handlerOnly(macA, ESPNOW_V4_TYPE_METADATA_RESP, "Attic", "", "node-a");  // a manual espnowrequestmeta afterwards
+  CHECK(metadataInboxHandleFrame() && gHistory.size() == 1 && gHistory[0].name == "node-a" &&
+            gHistory[0].text.find("room=Attic") != std::string::npos,
+        "M6: a later answer got %zu history line(s)", gHistory.size());
+  entryA->refreshQuiet = true;
+  entryA->refreshAskedMs = gNowMs;
+  handlerOnly(macA, ESPNOW_V4_TYPE_METADATA_PUSH, "Cellar", "", "node-a");
+  CHECK(metadataInboxHandleFrame() && gHistory.size() == 2, "M6: a push while an answer is awaited got no history line");
+  // The peer never answered the refresh; an answer much later was asked for by someone.
+  gNowMs += kMetadataRefreshAnswerMs + 1;
+  handlerOnly(macA, ESPNOW_V4_TYPE_METADATA_RESP, "Cellar", "", "node-a");
+  CHECK(metadataInboxHandleFrame() && gHistory.size() == 3, "M6: a late answer was stored without a history line");
+
+  // Two peers ask for this device's metadata in one pass: both are answered.
+  esp_now_recv_info infoB{macB};
+  esp_now_recv_info infoC{macC};
+  EspNowV4Header header{53, 44};
+  V4RxCtx ctx{};
+  ctx.h = &header;
+  ctx.isPaired = true;
+  ctx.deviceName = "peer";
+  ctx.recv_info = &infoB;
+  v4h_metadata_req(ctx);
+  ctx.recv_info = &infoC;
+  v4h_metadata_req(ctx);
+  uint8_t first[6], second[6], none[6];
+  CHECK(metadataInboxTakeReply(first) && metadataInboxTakeReply(second) && !metadataInboxTakeReply(none) &&
+            ((std::memcmp(first, macB, 6) == 0 && std::memcmp(second, macC, 6) == 0) ||
+             (std::memcmp(first, macC, 6) == 0 && std::memcmp(second, macB, 6) == 0)),
+        "M6: two requests of one pass are not both answered");
+}
+#endif
+
 int main() {
   testWireScrub();
   testCleanPayloadUnchanged();
@@ -344,6 +509,9 @@ int main() {
   testSetterPreserved();
 #if HW1_HAVE_METADATA_POLICY
   testPolicyTable();
+#endif
+#if HW1_HAVE_METADATA_INBOX
+  testFramesOfOnePass();
 #endif
   if (gFailures) {
     std::printf("%d metadata text check(s) failed\n", gFailures);

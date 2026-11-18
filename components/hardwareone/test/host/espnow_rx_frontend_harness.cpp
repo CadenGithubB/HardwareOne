@@ -45,6 +45,10 @@ template <class... A> static void warnSink(const char* fmt, A&&...) { ++gWarns; 
 #define BROADCAST_PRINTF(...) logSink(__VA_ARGS__)
 #define WARN_ESPNOWF(...) warnSink(__VA_ARGS__)
 #define ERROR_ESPNOWF(...) warnSink(__VA_ARGS__)
+// processMetadata hands room and tags to the membership rules, which report
+// through these two (run by test_espnow_group_membership.py).
+#define INFO_ESPNOWF(...) logSink(__VA_ARGS__)
+template <class... A> static void logSystemEvent(A&&...) {}
 static const char* MAC_STR(const uint8_t* m) {
   static char buf[18];
   macToDisplay(m, buf, sizeof buf);
@@ -70,6 +74,8 @@ struct EspNowDevice {
   EspNowInlineText<32> room;
   EspNowInlineText<32> zone;
   EspNowInlineText<64> tags;
+  EspNowInlineText<32> acceptedRoom;  // room and tag membership, see test_espnow_group_membership.py
+  EspNowInlineText<64> acceptedTags;
   bool stationary;
 };
 struct EspNowState {
@@ -111,6 +117,12 @@ MeshPeerMeta* getMeshPeerMeta(const uint8_t mac[6], bool createIfMissing = false
 
 static unsigned gRegistrySaves = 0;
 static bool saveEspNowDevices() { ++gRegistrySaves; return true; }
+// The membership lock around a registry record (removeEspNowDevice and the
+// announcement functions take it): one task here, so taking it does nothing.
+// test_espnow_group_membership.py checks how it is used.
+struct GroupLockGuard {
+  GroupLockGuard() {}
+};
 static bool meshEnabled() { return true; }
 
 // ---- Identity of this device and its mesh -----------------------------------
@@ -761,6 +773,16 @@ static void testMetadataTableFull() {
   check("a table full of paired peers refuses a ninth and keeps all eight", meta(extra) == nullptr && intact);
   check("that refusal is still reported (ALL slots full)",
         gWarns == 1 && gLastWarn.find("slots full") != std::string::npos);
+  // The table is the display copy. The ninth peer's registry record, which
+  // room and tag commands go by, follows its metadata all the same.
+  V4PayloadMetadata moved = metadataNamed("extra-node");
+  std::snprintf(moved.room, sizeof(moved.room), "Garage");
+  processMetadata(extra, &moved);
+  bool recorded = false;
+  for (int i = 0; i < gState.deviceCount; ++i) {
+    if (std::memcmp(gState.devices[i].mac, extra, 6) == 0) recorded = gState.devices[i].room == "Garage";
+  }
+  check("a paired peer without a table slot still has its room recorded in the registry", recorded);
 }
 
 static void testReplayedHeartbeatFromInventedSource() {

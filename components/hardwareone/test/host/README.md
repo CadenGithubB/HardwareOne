@@ -6489,3 +6489,74 @@ source) so that it can be sent a notice; with bonded mode compiled out the rows 
 ctest --test-dir <build> -R 'espnow_bond_(agree_core_tests|agreement|partner_change)|espnow_dispatch_policy' \
   --output-on-failure
 ```
+
+## ESP-NOW room and tag membership
+
+`espnowroomcmd` and `espnowtagcmd` send a command with an account name and password to every device of a room or
+with a tag. Room and tags are what each device says about itself, so any paired device that named a room got the
+password sent to it. A device now keeps, per paired peer, the room and tags accepted there, and the two commands go
+only by those.
+
+`espnow_group_core_tests` compiles `System_ESPNow_GroupCore.h` (the production dependency-free header): a newly
+announced room or tag is pending and no membership; accepting records what is announced at that moment; a room or
+tag the peer stops announcing leaves the accepted set with that announcement and waits again when it comes back; a
+change of room is out of the old room at once and pending for the new one; tags are judged one by one; a repeated
+announcement reports nothing new and a changed one only what newly waits; a stored record keeps nothing accepted
+that it does not announce; letter case, spaces, empty entries and repeats in a tag list; a tag command names one
+tag, and a list of tags matches nobody; a peer that keeps changing is reported once a minute with the number of
+changes in between; the notice and list texts, which fit a log line with the longest names; text longer than a
+field is cut.
+
+`espnow_group_membership` (`test_espnow_group_membership.py`, `espnow_group_membership_harness.cpp`) runs the
+production code with the vendored ArduinoJson: the record glue with its lock and the writer and reader of the stored
+fields, the per-sender metadata inbox, `processMetadata`, the announcement functions with the report limit and the
+save gap, the acceptance functions, the metadata refresh tick, `addEspNowDevice`, `removeEspNowDevice`,
+`resolveDeviceNameOrMac`, `countMeshPeerMetaByRoom`, the listing marks with `espnowSerializeMeshPeerMeta`,
+`cmd_espnow_devices` and `cmd_espnow_rooms`, and `espnowroomcmd`, `espnowtagcmd`, `espnowgroups`, `espnowgroupaccept` and `espnowgroupdrop`.
+The registry state and its save, the sessions, the encrypted send, the metadata request, the pending-frame queue,
+the mutex, events and logging are doubles. A
+peer that newly says it is in a room gets no frame and is counted in the reply with the accept command; an accepted
+peer gets the frame with the credentials while a pending one beside it does not; a move from Garage to Kitchen
+stops Garage commands with that frame and Kitchen commands wait for the accept; tags the same, one by one; the
+accept reply states what was accepted when the announcement changed after the list was read; `all`, drop, the JSON
+forms and the refusals; a registry that cannot be saved is said in the reply; unpairing removes the accepted state
+and a re-paired address starts empty; an identity change clears it, drops the frames waiting for a session and is
+said once; the stored record round trip, a record without the fields (nothing accepted), one that names as accepted
+what it does not announce, and values that do not fit; the notice comes once per change, not per frame and not
+again after a restart, and names the peer by its local name and never by a name the peer announces; with fifteen
+peers every member is sent to, the replies stay inside their buffers and say how many peers they leave out; the
+listings show the announced value with a mark. Further: with a metadata cache smaller than the registry (or none)
+a peer without a cache slot still has its room and tags recorded, above all when it leaves; fifty changing frames
+in five seconds print one report and save the registry once, each of them still takes effect at once, the state at
+the end of the gap is saved once and the report after the minute gives the count and what waits; the mutex double
+fails the run when it is taken twice or held while something is logged, saved or sent, and lets "the other task" in
+just before a critical section: an unpair before the announcement's store leaves the next record alone, a drop
+before an announcement stays dropped, an announcement before an accept is what gets accepted; a tag target with a
+comma is refused before anything is sent; `espnowdevices json` and `espnowrooms json` with fifteen peers stay under
+the result size and parse, with pending peers, accepted peers and the longest names (the rest counted in
+`notShown`); two peers with one name, a peer named like this device's own entry and a name that reads as an address
+are called by their address, and the name is refused by the three commands; the inbox keeps a frame per sender,
+serves senders in turn and answers every peer that asked; a session that came up gets its peer asked once, after it
+settled, one peer per look, again when the session is renewed, and never back and forth for two sessions with one
+peer. Source rules: `processMetadata` updates the registry record before it looks for a cache slot, the registry writer and reader call the two field
+functions, every place that fills a new record starts it empty, unpair removes the record, `espnowforget`,
+`espnowregenidentity` and both KEY_EX handlers clear the acceptance, `groupCommandRun` sends in one place after the
+membership check and does not read the mesh cache, and the five commands are admin rows.
+
+`espnow_metadata_text` and `espnow_rx_frontend` compile `processMetadata` with the announcement functions and the
+rules header. `espnow_metadata_text` also runs the receive handlers with the inbox: three peers that move to another
+room in one pass are all out of the old room afterwards (the sender that sent twice by its last frame), the registry
+is saved once at once and once after the gap, the answer to a refresh the device asked for by itself gets no line in
+the message history while a push does, and two requests of one pass are both answered. `espnow_rx_frontend` checks
+that a paired peer refused by a full metadata table still has its room recorded; `espnow_keyex_hello` checks that a new or replaced identity calls the clearing and a refused or repeated
+one does not; `espnow_page_render` checks the pending mark and the Accept button of the web metadata panel.
+
+```sh
+ctest --test-dir <build> \
+  -R 'espnow_group_(core_tests|membership)|espnow_(metadata_text|rx_frontend|keyex_hello|page_render)' \
+  --output-on-failure
+```
+
+Not covered: the radio, the real registry file on flash, and two real tasks at a device record at the same moment
+(the lock is a FreeRTOS mutex on the device; here its use is checked in one thread, with the other task's step run
+just before a critical section).

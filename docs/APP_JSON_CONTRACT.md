@@ -137,9 +137,11 @@ Note: read the global on/off via `automation system status json`, not from
 | `whereami` | `{"schema":1,"valid","road"?,"roadDistanceM"?,"area"?,"areaDistanceM"?}` |
 | `mqttexternalsensors` | `{"schema":1,"sensors":[{"name","value","ageSec"}],"count"}` |
 | **ESP-NOW** | |
-| `espnowdevices` *(v0.95.10)* | all peers: `{"schema":1,"devices":[{"mac","deviceName","friendlyName","room","zone","tags","stationary","online","lastSeenSec","source"}],"count"}` |
+| `espnowdevices` *(v0.95.10)* | all peers: `{"schema":1,"devices":[{"mac","deviceName","friendlyName","room","zone","tags","pendingRoom"?,"pendingTags"?,"stationary","online","lastSeenSec","source"}],"count","notShown"?}` |
 | `espnowdeviceinfo` *(v0.95.10)* | this device (self): `{"schema":1,"name","friendlyName","room","zone","tags","stationary","meshRole","mac"}` |
-| `espnowrooms` | `{"schema":1,"rooms":[{"room","devices":[{"name","tags","online"}]}],"count"}` |
+| `espnowrooms` | `{"schema":1,"rooms":[{"room","devices":[{"name","tags","online","accepted","pendingTags"?}]}],"count","notShown"?}` |
+| `espnowgroups` (or `espnowgroups json <name_or_mac>`; admin) | `{"schema":1,"peers":[{"mac","name","room","tags","acceptedRoom","acceptedTags","pendingRoom","pendingTags"}],"count","pendingCount","notShown"?}` |
+| `espnowgroupaccept json <name_or_mac\|all>` / `espnowgroupdrop json <name_or_mac\|all>` (admin; `json` leads) | `{"schema":1,"peers":[{"mac","name","room","tags","acceptedRoom","acceptedTags","pendingRoom","pendingTags","changed"}],"ok","count","changed","saved","error"?,"notShown"?}` |
 | `espnowsessions` | `{"schema":1,"sessions":[{"slot","mac","meshId","sessionId","dir","state","ageMs","txSeq","rxHwm"}]}` |
 | `espnowrouterstats` | `{"schema":1,"messagesSent","messagesReceived","messagesFailed","v4FragTx","v4FragRx","reassembled","reassemblyGc","reassemblyTimeouts","nextMessageId"}` |
 | `espnowsubs` | `{"schema":1,"peers":[{"mac","meshId","subs"}]}` - `subs` is a 32-bit bitmask int |
@@ -154,7 +156,41 @@ Note: read the global on/off via `automation system status json`, not from
 - The peer cache is refreshed on demand. To get a peer's *current* metadata: send
   `espnowrequestmeta <mac>`, wait ~1-2 s (or poll `espnowdevices json` until the
   fields populate), then read. This mirrors the web's "Sync Metadata" button.
+- The device also keeps it current by itself: a peer sends its metadata when it
+  changes, and the device asks each paired peer once when a session with it has come
+  up (after a restart of either side, and after a key change), so a change made while
+  the two could not hear each other arrives without a request from the app.
 - Do **not** look up the gateway's own MAC in the peer list - it's never there.
+
+### ESP-NOW room and tag membership
+- `room` and `tags` are what a peer **announces** about itself. `espnowroomcmd` and
+  `espnowtagcmd` go only by what was **accepted** on this device. `pendingRoom` and
+  `pendingTags` are the announced values that are not accepted. Rooms and tags compare
+  without regard to letter case.
+- `espnowdevices` and the web `/api/espnow/metadata?mac=` reply carry `pendingRoom` and
+  `pendingTags` only when there is something pending; a device without them has all of its
+  room and tags accepted (or announces none). They carry no copy of the accepted values:
+  `espnowgroups json` has `acceptedRoom` and `acceptedTags` (comma-separated) for every
+  paired peer, there with `pendingRoom` and `pendingTags` always present (empty when
+  nothing waits).
+- In `espnowrooms` the rooms are the announced ones; `accepted` says whether a room
+  command reaches the device, and `pendingTags` is present when some of its tags wait.
+- `espnowgroupaccept json <name_or_mac|all>` accepts what is announced at that moment
+  and returns the result per peer, so read `acceptedRoom`/`acceptedTags` from the reply
+  instead of assuming the values listed earlier. `ok` is false, with `error`, when the
+  change could not be saved; it then holds until a restart.
+- `name` is the name the peer was paired under on this device, or its MAC address when
+  that name cannot be used as a command argument or is not the name of this peer alone.
+  A name that more than one paired device has is refused by the three membership
+  commands; use the address.
+- `espnowtagcmd` takes one tag. A target with a comma is refused before anything is sent.
+- `count` covers every entry. When a reply would exceed the result budget (sec. 1), the
+  last entries are left out and `notShown` gives their number: in `espnowgroups` and the
+  accept and drop replies the peers left out of `peers` (name one peer to get it), in
+  `espnowdevices` the devices left out of `devices`, in `espnowrooms` the devices left out
+  of the rooms (a room none of whose devices fit is left out too, while `count` still
+  counts it). A reply is never cut in the middle.
+- `/api/bond/paired-devices` has `roomAccepted` per device.
 
 ---
 

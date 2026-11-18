@@ -77,9 +77,9 @@ int countHealthy();
 // up as nonsense like "1/0 devices" on the OLED status page.
 int countActive();
 
-// Count of mesh peers whose room metadata matches `room` exactly. Forwards
-// to countMeshPeerMetaByRoom for backward compatibility with existing
-// callers. NULL/empty room → 0.
+// Count of paired peers that are members of `room` for a room command: the
+// room was accepted on this device, not merely announced by the peer. Forwards
+// to countMeshPeerMetaByRoom. NULL/empty room → 0.
 int countByRoom(const char* room);
 
 } // namespace MeshPeers
