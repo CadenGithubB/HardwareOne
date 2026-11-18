@@ -66,6 +66,7 @@ CASES = (
     "redaction",
     "local_lines_untouched",
     "bond_not_ready",
+    "queued_or_refused_send",
 )
 
 
@@ -146,7 +147,7 @@ def generate(read) -> str:
     if "static bool authorizeRemoteCommand(" in utils:
         pieces.append(unique(utils, "static bool authorizeRemoteCommand(", "System_Utils.cpp"))
     constants = re.findall(r"^static constexpr char kRemoteSent\w+\[\] = .*;$", utils, re.M)
-    require(len(constants) == 2, "the remote reply owner's two constants")
+    require(len(constants) in (2, 3), "the remote reply owner's constants (sent, queued since 2026-11-18, reqId)")
     pieces += constants
     pieces += [
         unique(utils, "void formatRemoteCommandSent(", "System_Utils.cpp"),

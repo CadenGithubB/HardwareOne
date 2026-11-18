@@ -136,9 +136,10 @@ def remote_reply(read) -> str:
     if not all(marker in utils for marker in REPLY_FUNCTIONS):
         return "// this tree's remote: reply has no request id"
     constants = re.findall(r'(?m)^static constexpr char kRemoteSent\w+\[\] = "[^"\n]*";$', utils)
-    require(len(constants) == 2, "System_Utils.cpp: the remote: reply constants changed")
+    require(len(constants) in (2, 3), "System_Utils.cpp: the remote: reply constants changed")
+    queued = ["#define HW1_REMOTE_REPLY_QUEUED 1"] if "kRemoteSentQueuedPrefix" in utils else []
     return "\n".join([*constants, *(extract_block(utils, marker) for marker in REPLY_FUNCTIONS),
-                      "#define HW1_REMOTE_REPLY_OWNER 1"])
+                      "#define HW1_REMOTE_REPLY_OWNER 1", *queued])
 
 
 def remote(read) -> str:

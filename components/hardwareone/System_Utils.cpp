@@ -4174,25 +4174,34 @@ static constexpr char kReplyEmptyCommand[] =
 #if ENABLE_ESPNOW && ENABLE_BONDED_MODE
 // `remote:` reply owner (declared in System_Utils.h).
 static constexpr char kRemoteSentPrefix[] = "Remote command sent: ";
+// The frame waits for the session with the bonded peer to open (2026-11-18):
+// it goes out when the session opens, or is dropped after the pending-frame
+// timeout. The peer's answer still carries the same request id.
+static constexpr char kRemoteSentQueuedPrefix[] = "Remote command queued until the bond session opens: ";
 static constexpr char kRemoteSentReqId[] = " (reqId ";
 
 void formatRemoteCommandSent(char* out, size_t outSize, const char* safeCommand,
-                             uint32_t msgId) {
+                             uint32_t msgId, bool queued = false) {
   if (!out || outSize == 0) return;
+  const char* const prefix = queued ? kRemoteSentQueuedPrefix : kRemoteSentPrefix;
   char suffix[24];
   snprintf(suffix, sizeof(suffix), "%s%lu)", kRemoteSentReqId, (unsigned long)msgId);
-  const size_t fixed = (sizeof(kRemoteSentPrefix) - 1) + strlen(suffix);
+  const size_t fixed = strlen(prefix) + strlen(suffix);
   const char* echo = safeCommand ? safeCommand : "";
   size_t echoLen = strlen(echo);
   // Shorten the echo, never the request id.
   const size_t room = outSize > fixed ? outSize - 1 - fixed : 0;
   if (echoLen > room) echoLen = room;
-  snprintf(out, outSize, "%s%.*s%s", kRemoteSentPrefix, (int)echoLen, echo, suffix);
+  snprintf(out, outSize, "%s%.*s%s", prefix, (int)echoLen, echo, suffix);
 }
 
 bool parseRemoteCommandSentReqId(const char* reply, uint32_t* msgIdOut) {
-  const size_t prefixLen = sizeof(kRemoteSentPrefix) - 1;
-  if (!reply || !msgIdOut || strncmp(reply, kRemoteSentPrefix, prefixLen) != 0) return false;
+  if (!reply || !msgIdOut) return false;
+  size_t prefixLen = sizeof(kRemoteSentPrefix) - 1;
+  if (strncmp(reply, kRemoteSentPrefix, prefixLen) != 0) {
+    prefixLen = sizeof(kRemoteSentQueuedPrefix) - 1;
+    if (strncmp(reply, kRemoteSentQueuedPrefix, prefixLen) != 0) return false;
+  }
   // The id is the last tag and ends the reply; an echoed command cannot fake it.
   const char* tag = nullptr;
   for (const char* p = strstr(reply + prefixLen, kRemoteSentReqId); p;
@@ -4451,8 +4460,12 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
     // session is active (synced bond mode always has one) and otherwise queues +
     // kicks SESSION_OPEN — so the token is never on-air in plaintext. This is the
     // same path every other CMD send already uses; bond was the lone exception.
+    char sendStatus[64] = "";
     bool sent = v4_send_encrypted_or_queue(peerMac, ESPNOW_V4_TYPE_CMD, ESPNOW_V4_FLAG_ACK_REQ,
-                                           msgId, (const uint8_t*)payload.c_str(), payload.length(), 1);
+                                           msgId, (const uint8_t*)payload.c_str(), payload.length(), 1,
+                                           sendStatus, sizeof(sendStatus));
+    // Every status of a frame parked for the session starts with "queued".
+    const bool queued = sent && strncmp(sendStatus, "queued", 6) == 0;
     
     if (sent) {
       // SECURITY: echo the REDACTED form. actualCommand is the unwrapped inner
@@ -4462,11 +4475,15 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
       // executeCommand's logCommandExecution calls, so it never passed through
       // any redaction at all; it has to redact for itself. The reply carries
       // msgId, which the peer's CMD_RESP echoes as its reqId.
-      formatRemoteCommandSent(out, outSize, safeRemoteCommand.c_str(), msgId);
-      broadcastOutput("[REMOTE] Sent to bonded device: " + safeRemoteCommand);
+      formatRemoteCommandSent(out, outSize, safeRemoteCommand.c_str(), msgId, queued);
+      broadcastOutput((queued ? "[REMOTE] Queued for the bonded device (session opening): "
+                              : "[REMOTE] Sent to bonded device: ") + safeRemoteCommand);
       return true;
     } else {
-      strlcpy(out, "Error: Failed to send remote command", outSize);
+      // The send path's reason (a full waiting queue, no session, ...) and one
+      // next step.
+      snprintf(out, outSize, "Error: Failed to send remote command (%s). Retry in a few seconds.",
+               sendStatus[0] ? sendStatus : "send failed");
       return false;
     }
     #else

@@ -69,7 +69,11 @@ def json_ack_format(block: str) -> str:
     text = c_string(match[1])
     require('"reqId":%lu' in text and '"ok":true' in text,
             f"cmd_espnow_remote: JSON acknowledgement lost ok/reqId: {text}")
-    return text
+    # Since 2026-11-18 a command still waiting for the session adds
+    # ,"queued":true through one %s after the id; the format returned here is
+    # the acknowledgement of a command that went out (the %s left empty).
+    require(text.count("%s") <= 1, f"cmd_espnow_remote: JSON acknowledgement has more than the queued %s: {text}")
+    return text.replace("%s", "")
 
 
 def formatter_source(component: Path) -> str:
@@ -92,25 +96,34 @@ def formatter_source(component: Path) -> str:
 
 def render_text_acks(component: Path, cases, cxx: str, workdir: Path, size: int = 256,
                      flags=()) -> list[str]:
-    """cases: iterable of (command, target, 6 mac bytes, request id)."""
+    """cases: iterable of (command, target, 6 mac bytes, request id), each
+    optionally followed by queued (True: the command waits for the session to
+    open; the formatter's seventh argument, 2026-11-18)."""
     component = Path(component)
     rows = []
-    for command, target, mac, request in cases:
+    any_queued = False
+    for case in cases:
+        command, target, mac, request = case[:4]
+        queued = bool(case[4]) if len(case) > 4 else False
+        any_queued = any_queued or queued
         literal = lambda text: '"' + "".join("\\x%02x" % b for b in text.encode()) + '"'
-        rows.append("  {%s, %s, {%s}, %dUL}," % (literal(command), literal(target),
-                                                 ", ".join("0x%02X" % b for b in mac), request))
+        rows.append("  {%s, %s, {%s}, %dUL, %s}," % (literal(command), literal(target),
+                                                     ", ".join("0x%02X" % b for b in mac), request,
+                                                     "true" if queued else "false"))
+    call_tail = ", c.queued" if any_queued else ""
     unit = workdir / "espnow_remote_ack.cpp"
     unit.write_text(
         "#include <cstdint>\n#include <cstdio>\n#include <cstring>\n"
         f'#include "{(component / "System_MacText.h").resolve()}"\n'
         + formatter_source(component) + "\n"
-        "struct Case { const char* command; const char* target; uint8_t mac[6]; unsigned long request; };\n"
+        "struct Case { const char* command; const char* target; uint8_t mac[6]; unsigned long request; bool queued; };\n"
         "static const Case kCases[] = {\n" + "\n".join(rows) + "\n};\n"
         "int main() {\n"
         f"  char out[{size}];\n"
         "  for (const Case& c : kCases) {\n"
         "    std::memset(out, '#', sizeof(out));\n"
-        "    espnowFormatRemoteAck(out, sizeof(out), c.command, c.target, c.mac, (uint32_t)c.request);\n"
+        "    espnowFormatRemoteAck(out, sizeof(out), c.command, c.target, c.mac, (uint32_t)c.request"
+        + call_tail + ");\n"
         "    std::printf(\"%zu:%s\\n\", std::strlen(out), out);\n"
         "  }\n  return 0;\n}\n")
     executable = workdir / "espnow_remote_ack"

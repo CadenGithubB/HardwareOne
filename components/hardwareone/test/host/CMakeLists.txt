@@ -40,6 +40,16 @@ set_target_properties(clock_confirm_policy_tests PROPERTIES
 target_include_directories(clock_confirm_policy_tests PRIVATE ../..)
 target_compile_options(clock_confirm_policy_tests PRIVATE -Wall -Wextra -Werror -pedantic)
 
+# The frames that wait for an ESP-NOW session (System_ESPNow_PendingQueue.h):
+# up to 4 per peer, 16 in all, sent oldest first, the newest refused when full,
+# expiry across the millis() wrap (bench 2026-11-18: a second send evicted the
+# first). The production dependency-free header.
+add_executable(espnow_pending_queue_tests test_espnow_pending_queue.cpp)
+set_target_properties(espnow_pending_queue_tests PROPERTIES
+  CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+target_include_directories(espnow_pending_queue_tests PRIVATE ../..)
+target_compile_options(espnow_pending_queue_tests PRIVATE -Wall -Wextra -Werror -pedantic)
+
 # The one checked number parser for command arguments (System_ArgParse.h):
 # decimal whole tokens; only a bus address and a bit mask may be written in
 # hexadecimal.
@@ -1423,6 +1433,7 @@ add_test(NAME llm_utf8_tests COMMAND llm_utf8_tests)
 add_test(NAME dictation_policy_tests COMMAND dictation_policy_tests)
 add_test(NAME factory_wipe_policy_tests COMMAND factory_wipe_policy_tests)
 add_test(NAME clock_confirm_policy_tests COMMAND clock_confirm_policy_tests)
+add_test(NAME espnow_pending_queue_tests COMMAND espnow_pending_queue_tests)
 add_test(NAME arg_parse_tests COMMAND arg_parse_tests)
 add_test(NAME config_load_tests COMMAND config_load_tests)
 add_test(NAME g2_hold_gesture_tests COMMAND g2_hold_gesture_tests)

@@ -1079,6 +1079,10 @@ void runDeferredSessionOpen(void* arg) {
                 ESPNOW_V4_FLAG_HANDSHAKE | ESPNOW_V4_FLAG_ACK_REQ,
                 generateMessageId(),
                 reinterpret_cast<const uint8_t*>(&conf), sizeof(conf), 1);
+  // Frames this device queued for the peer (our own SESSION_OPEN lost the
+  // glare, or crossed this one) are not drained here: the initiator has not
+  // handled the CONFIRM yet and would drop them. The periodic tick sends them
+  // once the session is settled (pendingFrameDrainSettled).
   // Session is ACTIVE on our side (responder) — tell bond logic so it can drive
   // the bonded relationship over the encrypted session (discovery via session,
   // not plaintext heartbeat).

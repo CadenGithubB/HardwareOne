@@ -4787,7 +4787,9 @@ authorization) is not exercised here.
 python3 components/hardwareone/test/host/test_oled_remote_settings.py --sanitize
 ```
 
-`oled_remote_settings` compiles the production OLED remote-settings module (`OLED_RemoteSettings.cpp` whole: schema-driven module builder, non-blocking schema fetch, remote apply and peer-reply outcome), the settings editor's module source and commit routing (`OLED_SettingsEditor.cpp`), the remote-settings mode adapter (`OLED_Mode_RemoteSettings.cpp`), the ESP-NOW command-result record (`System_ESPNow`) and BondedPeer's schema sync and remote-edit policy, against doubles for the OLED command executor, the peer caches, the clock, PSRAM allocation and the display. It checks that the remote screen lists only the peer's schema rows that carry a setter (no read-only, secret or float rows, no `users`/`bond`/`wifi`, only `ntpServer`/`tzOffsetMinutes` from `clock`) with the cached values, sends `remote:<cmdKey> <value>`, reports the peer's CMD_RESP failure (`Peer: ...`) or silence (`No reply from peer` after 5 s) instead of the local "sent" result, ignores another device's reply, never runs a local setter from the remote screen, fetches a missing schema once without blocking (6 s budget), does not let the local screen keep editing a peer module, and releases every PSRAM block and String it allocated, also when an allocation fails. A static check confirms the CMD_RESP drain publishes the redacted result. `--component <dir>` runs the same cases against saved sources; the f4cc542 sources fail them (modules built from settings.json without setters, `remote:set <jsonKey>` reported as applied, the local setter run from the remote screen). The radio link and the real display are not exercised. System_Utils' `remote:` reply owner (`formatRemoteCommandSent` / `parseRemoteCommandSentReqId`) is spliced in and the executor double answers with it: "Remote command sent: <redacted command> (reqId <msgId>)", the echo shortened before the id. The commit waits for the CMD_RESP whose `reqId` is that msgId from the bonded peer, so the peer's reply to another `remote:` command (the web console's) does not decide it; a "sent" reply without an id is refused rather than left waiting; the parser accepts only the owner's shape and a non-zero 32-bit id (A13). The pre-fix tree fails these three cases. Since 2026-11-18 it also checks that the local commit sends an emptied master or backup fingerprint field as `<cmd> clear` (the bare command only shows the value, which the editor took for a save) and every other value or setting as typed.
+`oled_remote_settings` compiles the production OLED remote-settings module (`OLED_RemoteSettings.cpp` whole: schema-driven module builder, non-blocking schema fetch, remote apply and peer-reply outcome), the settings editor's module source and commit routing (`OLED_SettingsEditor.cpp`), the remote-settings mode adapter (`OLED_Mode_RemoteSettings.cpp`), the ESP-NOW command-result record (`System_ESPNow`) and BondedPeer's schema sync and remote-edit policy, against doubles for the OLED command executor, the peer caches, the clock, PSRAM allocation and the display. It checks that the remote screen lists only the peer's schema rows that carry a setter (no read-only, secret or float rows, no `users`/`bond`/`wifi`, only `ntpServer`/`tzOffsetMinutes` from `clock`) with the cached values, sends `remote:<cmdKey> <value>`, reports the peer's CMD_RESP failure (`Peer: ...`) or silence (`No reply from peer` after 5 s) instead of the local "sent" result, ignores another device's reply, never runs a local setter from the remote screen, fetches a missing schema once without blocking (6 s budget), does not let the local screen keep editing a peer module, and releases every PSRAM block and String it allocated, also when an allocation fails. A static check confirms the CMD_RESP drain publishes the redacted result. `--component <dir>` runs the same cases against saved sources; the f4cc542 sources fail them (modules built from settings.json without setters, `remote:set <jsonKey>` reported as applied, the local setter run from the remote screen). The radio link and the real display are not exercised. System_Utils' `remote:` reply owner (`formatRemoteCommandSent` / `parseRemoteCommandSentReqId`) is spliced in and the executor double answers with it: "Remote command sent: <redacted command> (reqId <msgId>)", the echo shortened before the id (since 2026-11-18 a
+command still waiting for the bond session reads "Remote command queued until the bond session opens: ... (reqId
+<msgId>)" and parses the same way). The commit waits for the CMD_RESP whose `reqId` is that msgId from the bonded peer, so the peer's reply to another `remote:` command (the web console's) does not decide it; a "sent" reply without an id is refused rather than left waiting; the parser accepts only the owner's shape and a non-zero 32-bit id (A13). The pre-fix tree fails these three cases. Since 2026-11-18 it also checks that the local commit sends an emptied master or backup fingerprint field as `<cmd> clear` (the bare command only shows the value, which the editor took for a save) and every other value or setting as typed.
 
 ## BLE output privacy and console mirror
 
@@ -6744,7 +6746,10 @@ re-reads the send status after its history record is written and stamps a state 
 (peer, msgId, delivered), never a pending one; a send whose
 handshake cannot be started fails instead of saying "try again"; a busy slot table never cancels a healthy
 receive; release and abort do no filesystem work under the slot lock; an abort under lock contention does not pin
-the slot.
+the slot. Since 2026-11-18 its pending store holds up to 4 frames per peer like the firmware: `espnowsend` before
+the session opens answers "Encrypted message queued until the session with <device> opens (ID: ...)" (json
+`"queued":true`), four in a row all go out in order when it opens, and a fifth is refused with "Error: 4 messages to
+<device> already wait for the session to open. Retry in a few seconds." (marked failed, not stored as sent).
 
 `espnow_command_privileges` (source) pins the admin flag on the ESP-NOW test commands that change live state and on
 both writers of the heartbeat mode. `espnow_history_depth` compiles the two `#if` blocks that set the message
@@ -6757,7 +6762,8 @@ password does not fit.
 
 `espnow_loop_not_paused` (source) keeps `gMeshActivitySuspended` out of the tree and the ESP-NOW loop's early
 return free of outside switches. `espnow_remote_ack` compiles the acknowledgement of `espnowremote`: a long
-command shortens the echo, never the request id. `oled_espnow_remote_actions` runs the OLED Device Config remote
+command shortens the echo, never the request id; a command still waiting for the session (2026-11-18) answers
+"Queued '<command>' until the session with <target> opens. ..." with the id still last. `oled_espnow_remote_actions` runs the OLED Device Config remote
 rows: they fill in and open the remote form, and no OLED ESP-NOW action sends a command line whose first word is
 not a registered command. The form shows a refusal that leads with "Error" as its reason and any other refusal as
 "Remote not sent". Outside ctest, `tools/webui/tests/test_espnow_remote_page.py` feeds the firmware's real
@@ -6877,7 +6883,22 @@ pending-frame warnings carry the count they held back. Source rules pin the call
 reply and confirm, session up, authenticated frame, mesh online edge, unpair, manual commands). An unpair
 (`espnowKeyExCancel`, `pendingFrameDropForPeer`) stops the HELLO retries to the peer, frees the entry one retry
 interval later without a warning, lets a new key exchange start at once and drops only that peer's queued frames,
-each reported failed. 5 of its 60 checks fail on 3c5dda31.
+each reported failed. 5 of its 60 checks fail on 3c5dda31. Since 2026-11-18 (bench: a second `espnowsend` before
+the session opened evicted the first) it runs the per-peer FIFO (`System_ESPNow_PendingQueue.h`, included whole):
+sends before a session wait and go out in order when it opens; a send over a session that is ACTIVE before its
+drain ran does not overtake the waiting frames; frames that waited across a session that opened and closed go out
+with the next; the fifth frame for a peer and the seventeenth in all are refused with their reason, marked failed,
+in one warning line a minute, nothing already waiting dropped; an unanswered peer's frames each time out failed
+in one line; `pendingFrameDropAll` (closeespnow) and an unpair drop and fail exactly theirs. Source rules pin the
+drop in `deinitEspNow` after the RX task stops and the drain before a fast-path send. Review of 2026-11-18: frames
+waiting for a session this device answered (the peer's SESSION_OPEN, a lost glare) go out in order from the tick
+(`pendingFrameDrainSettled`) once the session is 1 s old, not at once and not failed at 5 s, and a frame queued
+just after a drain goes out with the next tick; the bond request commands' send (`bondSendRequestForReply`)
+answers queued, sent or refused from what became of the frame (a fifth request refused, not "queued"; a
+responder without a session sends nothing). Source rules pin the tick's drain before its timeout sweep, no drain
+in the responder's SESSION_OPEN handler, and the four bond request commands and `bondresync` using that send.
+`espnow_pending_queue_tests` runs the header's rules alone (admission, order across slot reuse and counter wrap,
+expiry across the millis() wrap, the settle time).
 
 ## Bond agreement (BOND_REQUEST / BOND_NOTICE)
 
@@ -7005,7 +7026,10 @@ serves senders in turn and answers every peer that asked; a session that came up
 settled, one peer per look, again when the session is renewed, and never back and forth for two sessions with one
 peer; a group command follows the command reply contract: without encryption nothing is sent, a member whose frame
 is refused makes the reply an `Error:` that names it and the reason (the members it went to still listed), none sent
-is an `Error:` too, and an empty room answers `Error: No devices found ...` with `espnowgroups` as the next step.
+is an `Error:` too, and an empty room answers `Error: No devices found ...` with `espnowgroups` as the next step;
+since 2026-11-18 a member whose frame waits for its session is listed "queued until its session opens", the reply
+counts them ("(1 of them queued until their session opens)") and, when none went out yet, reads "Queued '<cmd>'
+for N device(s) in <room> until their sessions open".
 Source rules: `processMetadata` updates the registry record before it looks for a cache slot, the registry writer and reader call the two field
 functions, every place that fills a new record starts it empty, unpair removes the record, `espnowforget`,
 `espnowregenidentity` and both KEY_EX handlers clear the acceptance, `groupCommandRun` sends in one place after the

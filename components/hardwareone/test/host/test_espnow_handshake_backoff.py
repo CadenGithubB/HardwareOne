@@ -34,7 +34,10 @@ the pending-frame warnings carry the count they held back, and that an unpair
 (espnowKeyExCancel, pendingFrameDropForPeer) stops this device's HELLO
 retries to the peer, frees that entry one retry interval later without a
 warning, lets a new key exchange start at once and drops only that peer's
-queued frames, each reported failed (finding X4, round 3). The wiring that cannot run here (the
+queued frames, each reported failed (finding X4, round 3); since 2026-11-18 that frames waiting for a
+session this device answered go out in order once it has settled (pendingFrameDrainSettled, on the tick),
+and that the bond request commands' send (bondSendRequestForReply) answers queued, sent or refused from
+what became of the frame. The wiring that cannot run here (the
 calls from the receive handlers, the session hook, the mesh online edge, unpair
 and the manual commands) is pinned in the source.
 
@@ -51,6 +54,7 @@ import tempfile
 
 HERE = Path(__file__).resolve().parent
 BACKOFF_H = 'System_ESPNow_HandshakeBackoff.h'
+QUEUE_H = 'System_ESPNow_PendingQueue.h'
 
 
 def main():
@@ -71,7 +75,7 @@ def main():
         if overlay and overlay.exists():
             return overlay
         if a.source_dir:
-            return None if name == BACKOFF_H else a.component / name
+            return None if name in (BACKOFF_H, QUEUE_H) else a.component / name
         return a.component / name
 
     def read(name):
@@ -102,20 +106,40 @@ def main():
         'void sessionMarkUserStarted(const uint8_t peerMac[6])' in sessions
 
     # ---- System_ESPNow_Sessions.cpp ---------------------------------------
+    # Since 2026-11-18 the queue keeps several frames per peer, oldest first,
+    # with its rules in System_ESPNow_PendingQueue.h (included whole).
+    queue_path = path_of(QUEUE_H)
+    have_fifo = queue_path is not None and queue_path.exists() and f'#include "{QUEUE_H}"' in sessions_h
     pending = [line(sessions_h, r'^constexpr uint16_t kPendingFramePlaintextMax\s*=.*;', 'kPendingFramePlaintextMax'),
-               line(sessions_h, r'^constexpr uint32_t kPendingFrameTimeoutMs\s*=.*;', 'kPendingFrameTimeoutMs'),
-               line(sessions, r'^constexpr uint8_t kPendingFrameSlots = \d+;', 'kPendingFrameSlots'),
-               definition(sessions, 'struct PendingFrame', 'Sessions') + ';',
-               line(sessions, r'^PendingFrame\* gPending = nullptr;', 'gPending'),
-               definition(sessions, 'bool ensurePendingAllocated()', 'Sessions')]
+               line(sessions_h, r'^constexpr uint32_t kPendingFrameTimeoutMs\s*=.*;', 'kPendingFrameTimeoutMs')]
+    if not have_fifo:
+        pending.append(line(sessions, r'^constexpr uint8_t kPendingFrameSlots = \d+;', 'kPendingFrameSlots'))
+    pending += [definition(sessions, 'struct PendingFrame', 'Sessions') + ';',
+                line(sessions, r'^PendingFrame\* gPending = nullptr;', 'gPending')]
+    if have_fifo:
+        pending.append(line(sessions, r'^uint32_t gPendingSeq = 0;', 'gPendingSeq'))
+    pending.append(definition(sessions, 'bool ensurePendingAllocated()', 'Sessions'))
     if have_backoff:
         pending += [line(sessions, r'^constexpr uint32_t kPendingWarnWindowMs = \d+;', 'kPendingWarnWindowMs'),
-                    line(sessions, r'^WarnLimiter gPendingEvictWarn = \{\};', 'gPendingEvictWarn'),
+                    line(sessions, r'^WarnLimiter gPendingRefuseWarn = \{\};' if have_fifo else
+                         r'^WarnLimiter gPendingEvictWarn = \{\};', 'the pending warning limiter'),
                     line(sessions, r'^WarnLimiter gPendingTimeoutWarn = \{\};', 'gPendingTimeoutWarn')]
+    if have_fifo:
+        pending.append(definition(sessions, 'void pendingFrameRelease(PendingFrame& p, bool failed)', 'Sessions'))
     for marker in ('bool pendingFrameQueue(', 'void pendingFrameDrainForPeer(',
                    'uint8_t pendingFrameTimeoutSweep(', 'uint8_t pendingFrameCount()',
                    'bool pendingFrameHasForPeer('):
         pending.append(definition(sessions, marker, 'Sessions'))
+    if have_fifo:
+        for marker in ('uint8_t pendingFrameCountForPeer(const uint8_t peerMac[6])',
+                       'bool pendingFrameIsWaiting(uint32_t msgId, const uint8_t peerMac[6])',
+                       'uint8_t pendingFrameDropAll()'):
+            pending.append(definition(sessions, marker, 'Sessions'))
+    # The tick's drain of a settled session (review of 2026-11-18): frames that
+    # wait for a session this device answered.
+    have_settled = have_fifo and 'uint8_t pendingFrameDrainSettled(uint32_t nowMs)' in sessions
+    if have_settled:
+        pending.append(definition(sessions, 'uint8_t pendingFrameDrainSettled(uint32_t nowMs)', 'Sessions'))
     if have_drop:
         pending.append(definition(sessions, 'uint8_t pendingFrameDropForPeer(const uint8_t peerMac[6])', 'Sessions'))
     pending.append(line(sessions, r'^static constexpr uint32_t kSessionEstablishTimeoutMs = \d+;.*$',
@@ -165,6 +189,12 @@ def main():
                                    'uint16_t baseFlags,', 'ESPNow'))
     send.append(definition(espnow, 'static bool bondSendEncryptedAsync(const uint8_t* mac, uint8_t type, '
                                    'uint16_t flags,', 'ESPNow'))
+    # The bond request commands' send (review of 2026-11-18): it answers from
+    # what became of the frame, not from the session state before espnow_tx ran.
+    have_bond_reply = have_fifo and 'static bool bondSendRequestForReply(' in espnow
+    if have_bond_reply:
+        send.append(definition(espnow, 'static bool espnowSessionActiveWith(const uint8_t* mac)', 'ESPNow'))
+        send.append(definition(espnow, 'static bool bondSendRequestForReply(', 'ESPNow'))
 
     # ---- Wiring pinned in the source (counted as checks) ---------------------
     source_checks = []
@@ -218,6 +248,32 @@ def main():
     estab = body(sessions, 'uint8_t sessionEstablishingTimeoutSweep(')
     pin('logCooldownOk(sLastEstabWarnMs, 15UL * 60UL * 1000UL)' in estab and 'sEstabWarnHeld' in estab,
         'the ESTABLISHING timeout warning comes once per 15 minutes with the count held back')
+    if have_fifo:
+        deinit = body(espnow, 'static bool deinitEspNow(bool publishOffEvent)')
+        pin(0 < deinit.find('stopEspNowTask(5000)') < deinit.find('pendingFrameDropAll()'),
+            'closeespnow drops every waiting frame (marked failed) once the draining task is stopped')
+        sender = body(espnow, 'bool v4_send_encrypted_or_queue(const uint8_t dst[6], uint8_t type, uint16_t baseFlags,')
+        fast = sender[sender.find('if (s && s->state == SESSION_ACTIVE) {'):]
+        pin(0 <= fast.find('pendingFrameDrainForPeer(dst);') < fast.find('v4_send_session_wrapped('),
+            'a send over an ACTIVE session drains the frames still waiting first (no overtaking)')
+        pin(0 <= tick.find('pendingFrameDrainSettled((uint32_t)millis());') <
+            tick.find('pendingFrameTimeoutSweep((uint32_t)millis());'),
+            'the tick sends the frames waiting for a settled session before it times frames out')
+        for marker, what in (('const char* cmd_bond_requestcap(const String& argsInput)', 'bondrequestcap'),
+                             ('const char* cmd_bond_requestmanifest(const String& argsInput)', 'bondrequestmanifest'),
+                             ('const char* cmd_bond_requestsettings(const String& argsInput)', 'bondrequestsettings'),
+                             ('const char* cmd_bond_requestschema(const String& argsInput)', 'bondrequestschema')):
+            cmd = body(espnow, marker)
+            pin(cmd.count('bondSendRequestForReply(') == 1 and 'bondSendEncryptedAsync(' not in cmd and
+                'espnowSessionActiveWith(' not in cmd and 'queued ?' in cmd,
+                f'{what} answers "queued" or "sent" from what became of its frame')
+        resync = body(espnow, 'const char* cmd_bond_resync(const String& argsInput)')
+        pin(resync.count('bondSendRequestForReply(') == 4 and 'bondSendEncryptedAsync(' not in resync and
+            'espnowSessionActiveWith(' not in resync,
+            'bondresync (worker) answers "queued" or "sent" from what became of its four frames')
+        responder = body(crypto, 'void runDeferredSessionOpen(void* arg)')
+        pin('pendingFrameDrainForPeer(' not in responder,
+            'the responder does not drain at once (the initiator has not handled the CONFIRM yet)')
     hb = tick[tick.find('// 3. Send periodic paired-mode heartbeat if bonded'):]
     hb = hb[:hb.find('} else if (gSettings.bondModeEnabled && gSettings.bondPeerMac.length() == 0)')]
     pin('if (sent) {' in hb and 'gEspNow->bondHeartbeatsSent++;' in hb[hb.find('if (sent) {'):] and
@@ -233,7 +289,9 @@ def main():
 
     print(f'handshake back-off: {"present" if have_backoff else "absent"}; '
           f'unpair call-off: {"present" if have_cancel else "absent"}; '
-          f'pending drop: {"present" if have_drop else "absent"}', flush=True)
+          f'pending drop: {"present" if have_drop else "absent"}; '
+          f'pending FIFO: {"present" if have_fifo else "absent"}; '
+          f'settled-session drain: {"present" if have_settled else "absent"}', flush=True)
     with tempfile.TemporaryDirectory(prefix='hw1-espnow-hs-backoff-') as tmp:
         unit, exe = Path(tmp) / 'espnow_handshake_backoff.cpp', Path(tmp) / 'espnow_handshake_backoff'
         unit.write_text(harness)
@@ -241,6 +299,8 @@ def main():
         shutil.copy(a.component / 'System_Deadline.h', Path(tmp) / 'System_Deadline.h')
         if have_backoff:
             shutil.copy(backoff_path, Path(tmp) / BACKOFF_H)
+        if have_fifo:
+            shutil.copy(queue_path, Path(tmp) / QUEUE_H)
         # The pasted slices keep parameters and helpers this harness does not
         # use (the firmware builds without -Wextra).
         cmd = [a.cxx, '-std=c++17', '-Wall', '-Wextra', '-Werror', '-pedantic',
@@ -249,6 +309,9 @@ def main():
                f'-DHW1_HAVE_START_NOW={1 if have_start_now else 0}',
                f'-DHW1_HAVE_CANCEL={1 if have_cancel else 0}',
                f'-DHW1_HAVE_PENDING_DROP={1 if have_drop else 0}',
+               f'-DHW1_HAVE_PENDING_FIFO={1 if have_fifo else 0}',
+               f'-DHW1_HAVE_PENDING_SETTLED={1 if have_settled else 0}',
+               f'-DHW1_HAVE_BOND_REQUEST_REPLY={1 if have_bond_reply else 0}',
                '-I', tmp, str(unit), '-o', str(exe)]
         if a.sanitize:
             cmd[1:1] = ['-fsanitize=address,undefined', '-fno-sanitize-recover=undefined',

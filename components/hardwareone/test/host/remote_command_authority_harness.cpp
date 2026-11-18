@@ -211,10 +211,17 @@ bool isBondSessionTokenValid() { return gTokenValid; }
 String buildBondedCommandPayload(const String& command) {
   return String("@BOND:0123456789abcdef0123456789abcdef:") + command;
 }
+// What the send path answers: "" (no status, the default), "queued" (the
+// frame waits for the bond session to open) or a refusal reason with
+// gSendRefused (the waiting queue is full).
+static std::string gSendStatusText;
+static bool gSendRefused = false;
 bool v4_send_encrypted_or_queue(const uint8_t dst[6], uint8_t type, uint16_t baseFlags, uint32_t msgId,
                                 const uint8_t* plaintext, uint16_t plaintextLen, uint8_t ttl,
                                 char* outStatus = nullptr, size_t outStatusLen = 0) {  // defaults as in System_ESPNow.h
-  (void)dst; (void)outStatus; (void)outStatusLen;
+  (void)dst;
+  if (outStatus && outStatusLen) std::snprintf(outStatus, outStatusLen, "%s", gSendStatusText.c_str());
+  if (gSendRefused) return false;
   gFrames.push_back({type, baseFlags, msgId,
                      std::string(reinterpret_cast<const char*>(plaintext), plaintextLen), ttl});
   return true;
@@ -264,6 +271,8 @@ static void reset() {
   gTokenValid = true;
   gBondLive = true;
   gSettings.bondPeerMac = "bonded-peer";
+  gSendStatusText.clear();
+  gSendRefused = false;
 }
 struct Outcome { int result; std::string reply; };
 static Outcome run(AuthContext ctx, const char* line) {
@@ -520,6 +529,32 @@ static void caseBondNotReady() {
          describe("no peer", o));
 }
 
+// Bench 2026-11-18: a frame that waits for the session was answered "sent".
+// A remote: command parked for the bond session says queued (and its id still
+// parses); a refused one says why, with one next step.
+static void caseQueuedOrRefusedSend() {
+  reset();
+  gSendStatusText = "queued";
+  Outcome o = run(who(SOURCE_WEB, "root"), "remote:files");
+  checkd(o.result == 1 && gFrames.size() == 1, describe("queued", o));
+  checkd(o.reply.rfind("Remote command queued until the bond session opens: files (reqId ", 0) == 0, o.reply);
+  uint32_t parsed = 0;
+  check(parseRemoteCommandSentReqId(o.reply.c_str(), &parsed) && parsed == gFrames[0].msgId);
+  checkd(gBroadcasts.size() == 1 && contains(gBroadcasts[0], "Queued for the bonded device"), describe("queued", o));
+  reset();
+  gSendStatusText = "sent";
+  o = run(who(SOURCE_WEB, "root"), "remote:files");
+  checkd(o.result == 1 && o.reply.rfind("Remote command sent: files (reqId ", 0) == 0, o.reply);
+  reset();
+  gSendRefused = true;
+  gSendStatusText = "4 messages already wait for this device's session";
+  o = run(who(SOURCE_WEB, "root"), "remote:files");
+  checkd(o.result == 0 && gFrames.empty() &&
+             o.reply == "Error: Failed to send remote command (4 messages already wait for this device's session). "
+                        "Retry in a few seconds.",
+         describe("refused", o));
+}
+
 int main(int argc, char** argv) {
   if (argc != 2) {
     std::fprintf(stderr, "usage: %s <case>\n", argv[0]);
@@ -536,6 +571,7 @@ int main(int argc, char** argv) {
       {"redaction", caseRedaction},
       {"local_lines_untouched", caseLocalLinesUntouched},
       {"bond_not_ready", caseBondNotReady},
+      {"queued_or_refused_send", caseQueuedOrRefusedSend},
   };
   for (const Case& c : kCases) {
     if (std::strcmp(argv[1], c.name) != 0) continue;

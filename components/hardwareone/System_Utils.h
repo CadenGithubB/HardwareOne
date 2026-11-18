@@ -125,13 +125,17 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
 
 // `remote:<command>` reply. A bonded send that left answers
 //   "Remote command sent: <redacted command> (reqId <msgId>)"
+// and one that waits for the bond session to open (queued = true)
+//   "Remote command queued until the bond session opens: <redacted command> (reqId <msgId>)"
 // msgId is the CMD frame's id; the peer's CMD_RESP echoes it as
 // EspNowCmdResult::reqId, so a sender waiting for its answer can tell it from a
 // reply to anyone else's remote: command. The echo is shortened first, so the
 // id survives any result buffer that holds the prefix and the tag. The parser
-// accepts only that shape and a non-zero id. (ENABLE_ESPNOW && ENABLE_BONDED_MODE)
+// accepts only those two shapes and a non-zero id. (ENABLE_ESPNOW && ENABLE_BONDED_MODE)
+// (queued defaults to false at the definition in System_Utils.cpp, so the
+// host suites that paste that definition alone still call it with four.)
 void formatRemoteCommandSent(char* out, size_t outSize, const char* safeCommand,
-                             uint32_t msgId);
+                             uint32_t msgId, bool queued);
 bool parseRemoteCommandSentReqId(const char* reply, uint32_t* msgIdOut);
 
 // Validate-only (dry-run) state of the command running on the calling task,

@@ -588,6 +588,21 @@ static void case_remote_reply_format() {
   }
   EXPECT(!parseRemoteCommandSentReqId(nullptr, &id) && !parseRemoteCommandSentReqId(out, nullptr),
          "null arguments are refused");
+#ifdef HW1_REMOTE_REPLY_QUEUED
+  // A remote: command still waiting for the bond session to open (2026-11-18)
+  // says so, and its id parses the same way: the commit waits for that reply.
+  formatRemoteCommandSent(out, sizeof(out), "oledbrightness 7", 78, true);
+  EXPECT(std::string(out) == "Remote command queued until the bond session opens: oledbrightness 7 (reqId 78)",
+         "queued: prefix, redacted echo, request id: " + std::string(out));
+  EXPECT(parseRemoteCommandSentReqId(out, &id) && id == 78, "the queued reply's id parses back");
+  char mid[96];
+  formatRemoteCommandSent(mid, sizeof(mid), longCommand.c_str(), 4294967295u, true);
+  EXPECT(parseRemoteCommandSentReqId(mid, &id) && id == 4294967295u && std::strlen(mid) == sizeof(mid) - 1,
+         "a long queued echo is shortened, the id kept: " + std::string(mid));
+  id = 1234;
+  EXPECT(!parseRemoteCommandSentReqId("Remote command queued: x (reqId 5)", &id) && id == 1234,
+         "another 'queued' wording is rejected");
+#endif
 #else
   EXPECT(false, "System_Utils has no remote: reply owner (formatRemoteCommandSent / "
                 "parseRemoteCommandSentReqId): the reply carries no request id");

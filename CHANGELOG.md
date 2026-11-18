@@ -207,6 +207,22 @@ everything user-visible since the v0.99.99.1 tag.
   as it did (its bond heartbeat counts as its agreement). Host-tested; not yet run on hardware.
 
 ### Fixed
+- ESP-NOW: messages sent to a device before the encrypted session with it is open are no longer lost.
+  The waiting queue kept one message per device, so a second `espnowsend` right after a restart replaced
+  the first, which never arrived although both commands had answered "sent" (bench 2026-11-18). Up to 4
+  messages per device (16 in all) now wait and go out in the order they were sent when the session opens,
+  also when the other device opened it (they go out 1 s later, once that device can read them; before,
+  such messages waited until they failed).
+  A further message is refused with the reason ("4 messages to <device> already wait for the session to
+  open. Retry in a few seconds."), never one already waiting; a message that waits more than 5 s, or is
+  dropped by `closeespnow` or an unpair, is shown as failed in the message history at once. Each of these
+  is logged once a minute with a count. Replies now say "queued" for a message that has not left yet:
+  `espnowsend` ("Encrypted message queued until the session with <device> opens (ID: ...)", json
+  `"queued":true`), `espnowremote` ("Queued '<cmd>' until the session with <device> opens. ..."),
+  `espnowbrowse`, `espnowfetch`, `espnowrequestmeta`, `espnowsensorreq`, `remote:` on a bonded device,
+  room and tag commands (per device), and `bondrequestcap`/`manifest`/`settings`/`schema`/`bondresync`
+  (these now wait for the send's result, so a request refused because 4 already wait is reported as an error,
+  not as queued).
 - ESP-NOW message history: `espnowmessages json` and the web Messages page page through all peers in
   message-number order, so a busy peer no longer hides lower-numbered messages of other peers. A long
   `espnowsend` (or one acknowledged very quickly) that was delivered before its history record was

@@ -2841,14 +2841,22 @@ bool v4_send_session_wrapped(const uint8_t dst[6], uint8_t type, uint16_t baseFl
 // with a --mesh arg covers manual fan-out for new peers.
 //
 // Returns true on the happy paths (sent immediately, queued, OR queued+KEY_EX-kicked).
-// Returns false only on hard errors: invalid args, payload too large, queue full,
-// or no enabled mesh at all (espnowKeyExInitiate returns false).
+// Returns false only on hard errors: invalid args, payload too large, the
+// peer's waiting queue or the whole table full (System_ESPNow_PendingQueue.h:
+// the newest frame is refused, it is marked failed), or a failed wrap/send.
 //
 // `outStatus` (if non-null) is filled with a short status string:
 //   "sent"              — immediately wrapped & sent
-//   "queued"            — parked for drain after SESSION_OPEN completes
+//   "queued..."         — parked for drain after SESSION_OPEN completes (every
+//                         queued status starts with "queued"; a caller that
+//                         answers a user says "queued until the session opens",
+//                         not "sent")
 //   "queued; KEY_EX"    — parked + KEY_EX initiated (no peer identity yet)
 //   "<error>"           — failure reason on false return
+//
+// A frame sent while the session is ACTIVE but frames still wait for it (the
+// session came up and the drain has not run yet) drains them first, so a new
+// frame never overtakes the ones queued before it.
 bool v4_send_encrypted_or_queue(const uint8_t dst[6], uint8_t type, uint16_t baseFlags,
                                 uint32_t msgId,
                                 const uint8_t* plaintext, uint16_t plaintextLen,
@@ -2871,12 +2879,13 @@ bool v4_send_encrypted_or_queue(const uint8_t dst[6], uint8_t type, uint16_t bas
     return false;
   }
   const PeerIdentity* pid = peerIdentityFindByMac(dst);
+  PendingAdmit admit = PendingAdmit::Queued;
   if (!pid) {
     // Foundation behavior (encrypt-or-wait): no peer identity → queue + kick KEY_EX.
     // KEY_EX_REPLY's handler will see pending frames and kick SESSION_OPEN;
     // SESSION_CONFIRM will then drain via pendingFrameDrainForPeer.
-    if (!pendingFrameQueue(dst, type, baseFlags, msgId, ttl, plaintext, plaintextLen)) {
-      setStatus("pending queue full");
+    if (!pendingFrameQueue(dst, type, baseFlags, msgId, ttl, plaintext, plaintextLen, &admit)) {
+      setStatus(admit == PendingAdmit::Queued ? "could not queue the frame (no memory)" : pendingAdmitReason(admit));
       return false;
     }
     if (!keyExIsInFlight(dst)) {
@@ -2904,7 +2913,9 @@ bool v4_send_encrypted_or_queue(const uint8_t dst[6], uint8_t type, uint16_t bas
   }
   SessionState* s = sessionFindByPeer(dst, pid->meshId);
   if (s && s->state == SESSION_ACTIVE) {
-    // Fast path — already have an active session.
+    // Fast path — already have an active session. Frames that waited for it
+    // go out first (no-op when none wait).
+    if (pendingFrameHasForPeer(dst)) pendingFrameDrainForPeer(dst);
     char err[96] = {0};
     bool ok = v4_send_session_wrapped(dst, type, baseFlags, msgId,
                                       plaintext, plaintextLen, ttl, err, sizeof(err));
@@ -2917,8 +2928,8 @@ bool v4_send_encrypted_or_queue(const uint8_t dst[6], uint8_t type, uint16_t bas
   }
   // Slow path — no active session. Queue the frame, then kick a SESSION_OPEN
   // unless one is already in flight (s exists and is ESTABLISHING).
-  if (!pendingFrameQueue(dst, type, baseFlags, msgId, ttl, plaintext, plaintextLen)) {
-    setStatus("pending queue full");
+  if (!pendingFrameQueue(dst, type, baseFlags, msgId, ttl, plaintext, plaintextLen, &admit)) {
+    setStatus(admit == PendingAdmit::Queued ? "could not queue the frame (no memory)" : pendingAdmitReason(admit));
     return false;
   }
   if (!s || s->state == SESSION_FREE || s->state == SESSION_CLOSED) {
@@ -3548,10 +3559,11 @@ static bool bondFrameIsPeriodic(uint8_t type) {
 // Used by: sensor_bcast → v4_send_sensor_part; the super-loop bond stages
 // 9b/9j/9k + heartbeat + CAP/MANIFEST/STATUS (Step 2); the streaming-setup
 // path (Step 2 tight-fix: sendBondStreamCtrl, firePostSyncSideEffects);
-// requestBondSettings + requestBondSchema (Step 2/3a); the bond CLI commands
-// (Step 3a: cmd_bond_requestcap/manifest/settings/schema and cmd_bond_resync's
-// worker branch) — i.e. every bond sender in the file. There is no synchronous
-// sibling; this is the only bond send path.
+// requestBondSettings + requestBondSchema (Step 2/3a) — every bond sender in
+// the file but one. The one synchronous sibling is bondSendRequestForReply,
+// for the bond request commands (cmd_bond_requestcap/manifest/settings/schema
+// and cmd_bond_resync's worker branch): same rules, but it waits for
+// espnow_tx's result so the reply can say "sent", "queued" or refused.
 static bool bondSendEncryptedAsync(const uint8_t* mac, uint8_t type, uint16_t flags,
                                    uint32_t msgId, const uint8_t* payload, uint16_t len) {
   if (!gEspNow || !mac) return false;
@@ -10429,9 +10441,12 @@ static void buildMetadataPayload(V4PayloadMetadata* payload) {
 /**
  * Request metadata from peer - called after heartbeat confirmation or on-demand
  * @param force If true, bypass debounce (for explicit user requests)
+ * @param outQueued If non-null, set to true when the request waits for the
+ *        session to open (it goes out then) rather than having gone out
  * @return true when the request was sent or queued for the session to open
  */
-bool requestMetadata(const uint8_t* peerMac, bool force) {
+bool requestMetadata(const uint8_t* peerMac, bool force, bool* outQueued = nullptr) {
+  if (outQueued) *outQueued = false;
   if (!peerMac || !gEspNow) {
     WARN_ESPNOWF("[METADATA] requestMetadata: null peerMac=%p gEspNow=%p", peerMac, gEspNow);
     return false;
@@ -10459,6 +10474,8 @@ bool requestMetadata(const uint8_t* peerMac, bool force) {
                                           nullptr, 0, 1, status, sizeof(status));
 
   if (sent) {
+    // Every status of a frame parked for the session starts with "queued".
+    if (outQueued) *outQueued = strncmp(status, "queued", 6) == 0;
     DEBUG_ESPNOW_METADATAF("[METADATA] REQ sent OK to %s msgId=%lu (status=%s)",
       MAC_STR(peerMac), (unsigned long)msgId, status[0] ? status : "sent");
   } else {
@@ -12477,6 +12494,10 @@ void processMeshHeartbeats() {
 
   // 1b. Phase 3.5 — sweep expired pending encrypted frames (queued while
   // waiting for SESSION_OPEN that never completed). 5-second budget per slot.
+  // First, frames whose peer's session is up and settled go out (a session
+  // this device answered drains nothing when it opens; see
+  // pendingFrameDrainSettled), so none is timed out with its session there.
+  pendingFrameDrainSettled((uint32_t)millis());
   pendingFrameTimeoutSweep((uint32_t)millis());
   // 1b-2. Reset sessions stuck in ESTABLISHING (our SESSION_OPEN got no CONFIRM
   // because the peer was offline/booting when we kicked it). Clearing the slot
@@ -14522,6 +14543,18 @@ static bool deinitEspNow(bool publishOffEvent) {
       snprintf(msg, sizeof(msg), "[ESP-NOW] %u active file transfer%s cleaned up",
                (unsigned)active, active == 1 ? "" : "s");
       broadcastOutput(msg);
+    }
+  }
+
+  // Frames waiting for a session cannot go out any more (the task that drains
+  // them on SESSION_CONFIRM is stopped, and a later openespnow must not deliver
+  // what was queued before this close). Each is marked failed, so its history
+  // entry says so at once instead of waiting for the delivery timeout.
+  {
+    const uint8_t dropped = pendingFrameDropAll();
+    if (dropped > 0) {
+      BROADCAST_PRINTF("[ESP-NOW] %u message%s waiting for a session dropped (marked failed)",
+                       (unsigned)dropped, dropped == 1 ? "" : "s");
     }
   }
 
@@ -16832,6 +16865,7 @@ static const char* groupCommandRun(GroupKind kind, const String& target, const S
   buf[0] = '\0';
   int matched = 0;  // members of the group
   int sent = 0;     // members whose frame went out or was parked for their session
+  int queuedCount = 0;  // of those, parked: they go out when that member's session opens
   int listed = 0;
   int skipped = 0;
   char skippedNames[120] = "";
@@ -16889,11 +16923,15 @@ static const char* groupCommandRun(GroupKind kind, const String& target, const S
       continue;
     }
     sent++;
+    // Every queued status starts with "queued" (v4_send_encrypted_or_queue).
+    const bool queued = strncmp(status, "queued", 6) == 0;
+    if (queued) queuedCount++;
     // Every member is sent to; the reply names as many as fit beside its last lines.
     if (pos < 360) {
       char macText[18];
       macToDisplay(dev.mac, macText, sizeof(macText));
-      groupTextAppend(buf, cap, pos, "  -> %s (%s)\n", who, macText);
+      groupTextAppend(buf, cap, pos, "  -> %s (%s)%s\n", who, macText,
+                      queued ? " queued until its session opens" : "");
       listed++;
     }
   }
@@ -16920,19 +16958,35 @@ static const char* groupCommandRun(GroupKind kind, const String& target, const S
     char sentList[400];
     strlcpy(sentList, buf, sizeof(sentList));
     pos = 0;
+    char queuedNote[64] = "";
+    if (queuedCount > 0) {
+      snprintf(queuedNote, sizeof(queuedNote), " (%d of them queued until their session opens)", queuedCount);
+    }
     groupTextAppend(buf, cap, pos,
-                    "Error: Command sent to %d of %d device(s) %s '%s'; not sent to %s (%s). "
+                    "Error: Command sent to %d of %d device(s) %s '%s'%s; not sent to %s (%s). "
                     "Send it to those with 'espnowremote <device> <user> <pass> <command>'.\n%s",
-                    sent, matched, where, target.c_str(), refused, reason, sentList);
+                    sent, matched, where, target.c_str(), queuedNote, refused, reason, sentList);
     if (sent > listed) groupTextAppend(buf, cap, pos, "  ... and %d more\n", sent - listed);
   } else {
     if (sent > listed) groupTextAppend(buf, cap, pos, "  ... and %d more\n", sent - listed);
     cliHint("each device's reply returns asynchronously - read them with 'espnowmessages json'");
-    if (isRoom) {
+    if (queuedCount == sent) {
+      // None went out yet: each waits for its member's session to open.
+      if (isRoom) {
+        groupTextAppend(buf, cap, pos, "Queued '%s' for %d device(s) in %s until their sessions open",
+                        safeCommand.c_str(), sent, target.c_str());
+      } else {
+        groupTextAppend(buf, cap, pos, "Queued '%s' for %d device(s) with tag '%s' until their sessions open",
+                        safeCommand.c_str(), sent, target.c_str());
+      }
+    } else if (isRoom) {
       groupTextAppend(buf, cap, pos, "Sent '%s' to %d device(s) in %s", safeCommand.c_str(), sent, target.c_str());
     } else {
       groupTextAppend(buf, cap, pos, "Sent '%s' to %d device(s) with tag '%s'", safeCommand.c_str(), sent,
                       target.c_str());
+    }
+    if (queuedCount > 0 && queuedCount < sent) {
+      groupTextAppend(buf, cap, pos, " (%d of them queued until their session opens)", queuedCount);
     }
   }
   if (skipped > 0) {
@@ -18996,10 +19050,12 @@ FileSendResult sendFileToMacResult(const uint8_t* mac, const String& localPath) 
 
   // Every frame of a transfer goes through v4_send_payload_smart, one
   // SESSION_FRAME each (a FILE_DATA chunk is 200 data + 2 chunkIdx + 16 AEAD tag
-  // = 218 = MAX_PAYLOAD). Without an ACTIVE session smart parks a single frame
-  // in the pending store and returns true — fine for one frame, fatal for a
-  // file: each chunk replaces the one before it and the pump would report a
-  // send of which the peer saw at most a lone FILE_END. So a frame is only
+  // = 218 = MAX_PAYLOAD). Without an ACTIVE session smart parks a frame in the
+  // pending store (4 per peer, System_ESPNow_PendingQueue.h) and returns true —
+  // fine for a message, fatal for a file: the fifth chunk is refused, the first
+  // four wait at most 5 s, and the pump would report a send of which the peer
+  // saw at most the first few chunks (it used to be one frame per peer, each
+  // chunk replacing the one before it). So a frame is only
   // handed to smart while the session is ACTIVE; fileSendFrame refuses
   // otherwise, which the loops below treat as a failed send.
   auto fileSendFrame = [&](uint8_t type, uint16_t flags, uint32_t id,
@@ -19826,7 +19882,8 @@ const char* cmd_espnow_requestmeta(const String& argsInput) {
   }
   
   if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
-  if (!requestMetadata(targetMac, true)) {
+  bool queued = false;
+  if (!requestMetadata(targetMac, true, &queued)) {
     snprintf(getDebugBuffer(), 1024,
              "Error: Metadata request to %s could not be sent (send queue full, send failed or "
              "ESP-NOW closing). Retry in a few seconds.", args.c_str());
@@ -19834,7 +19891,11 @@ const char* cmd_espnow_requestmeta(const String& argsInput) {
   }
 
   cliHint("the peer's name/room/zone/tags arrive asynchronously - view them with 'espnowdevices'");
-  snprintf(getDebugBuffer(), 1024, "Metadata request sent to %s", args.c_str());
+  if (queued) {
+    snprintf(getDebugBuffer(), 1024, "Metadata request queued until the session with %s opens", args.c_str());
+  } else {
+    snprintf(getDebugBuffer(), 1024, "Metadata request sent to %s", args.c_str());
+  }
   return getDebugBuffer();
 }
 
@@ -19921,12 +19982,18 @@ const char* cmd_espnow_browse(const String& argsInput) {
 
   if (wantJson) {
     snprintf(browseBuffer, sizeof(browseBuffer),
-             "{\"schema\":1,\"ok\":true,\"reqId\":%lu,"
+             "{\"schema\":1,\"ok\":true,\"reqId\":%lu,%s"
              "\"hint\":\"the listing returns asynchronously - read it with 'espnowmessages json' (match this reqId)\"}",
-             (unsigned long)msgId);
+             (unsigned long)msgId, pendingFrameIsWaiting(msgId, targetMac) ? "\"queued\":true," : "");
     return browseBuffer;
   }
   cliHintf("the listing returns asynchronously - read it with 'espnowmessages json' (match reqId %lu)", (unsigned long)msgId);
+  if (pendingFrameIsWaiting(msgId, targetMac)) {
+    snprintf(browseBuffer, sizeof(browseBuffer),
+             "File browse request queued until the session with %s opens, for path: %s",
+             target.c_str(), path.c_str());
+    return browseBuffer;
+  }
   snprintf(browseBuffer, sizeof(browseBuffer), "File browse request sent to %s for path: %s",
            target.c_str(), path.c_str());
   return browseBuffer;
@@ -19999,12 +20066,17 @@ const char* cmd_espnow_fetch(const String& argsInput) {
 
   if (wantJson) {
     snprintf(fetchBuffer, sizeof(fetchBuffer),
-             "{\"schema\":1,\"ok\":true,\"reqId\":%lu,"
+             "{\"schema\":1,\"ok\":true,\"reqId\":%lu,%s"
              "\"hint\":\"transfer status returns asynchronously - read it with 'espnowmessages json'; the file is written to this device's filesystem\"}",
-             (unsigned long)msgId);
+             (unsigned long)msgId, pendingFrameIsWaiting(msgId, targetMac) ? "\"queued\":true," : "");
     return fetchBuffer;
   }
   cliHint("transfer status returns asynchronously - read it with 'espnowmessages json'; the file is saved to this device's filesystem");
+  if (pendingFrameIsWaiting(msgId, targetMac)) {
+    snprintf(fetchBuffer, sizeof(fetchBuffer), "File fetch request queued until the session with %s opens, for: %s",
+             target.c_str(), path.c_str());
+    return fetchBuffer;
+  }
   snprintf(fetchBuffer, sizeof(fetchBuffer), "File fetch request sent to %s for: %s",
            target.c_str(), path.c_str());
   return fetchBuffer;
@@ -20015,23 +20087,25 @@ const char* cmd_espnow_fetch(const String& argsInput) {
 // ("... (match reqId <n>)"); the web page and the OLED remote form read it from
 // there to tell an accepted command from a refusal and to find the answer. A
 // long command shortens the echo, never the id.
+// A command still waiting for the session with the peer to open says
+// "Queued '<cmd>' until the session with <target> opens" instead of "Sent".
 static void espnowFormatRemoteAck(char* out, size_t outSize, const char* safeCommand,
                                   const char* target, const uint8_t targetMac[6],
-                                  uint32_t msgId) {
+                                  uint32_t msgId, bool queued = false) {
   if (!out || outSize == 0) return;
   char tail[120];
   snprintf(tail, sizeof(tail),
-           ". Output is ASYNC - read it with:  espnowmessages json 0 " MAC_FMT "  (match reqId %lu)",
-           MAC_ARGS(targetMac), (unsigned long)msgId);
-  static const char kLead[] = "Sent '";
-  static const char kJoin[] = "' to ";
+           "%s. Output is ASYNC - read it with:  espnowmessages json 0 " MAC_FMT "  (match reqId %lu)",
+           queued ? " opens" : "", MAC_ARGS(targetMac), (unsigned long)msgId);
+  const char* const lead = queued ? "Queued '" : "Sent '";
+  const char* const join = queued ? "' until the session with " : "' to ";
   const char* echo = safeCommand ? safeCommand : "";
   const char* name = target ? target : "";
-  const size_t fixed = (sizeof(kLead) - 1) + (sizeof(kJoin) - 1) + strlen(name) + strlen(tail);
+  const size_t fixed = strlen(lead) + strlen(join) + strlen(name) + strlen(tail);
   size_t echoLen = strlen(echo);
   const size_t room = outSize > fixed ? outSize - 1 - fixed : 0;
   if (echoLen > room) echoLen = room;
-  snprintf(out, outSize, "%s%.*s%s%s%s", kLead, (int)echoLen, echo, kJoin, name, tail);
+  snprintf(out, outSize, "%s%.*s%s%s%s", lead, (int)echoLen, echo, join, name, tail);
 }
 
 // Remote command execution
@@ -20133,12 +20207,14 @@ const char* cmd_espnow_remote(const String& argsInput) {
   }
 #endif
 
+  const bool queued = pendingFrameIsWaiting(msgId, targetMac);
   if (wantJson) {
-    snprintf(remoteBuffer, sizeof(remoteBuffer), "{\"schema\":1,\"ok\":true,\"reqId\":%lu}", (unsigned long)msgId);
+    snprintf(remoteBuffer, sizeof(remoteBuffer), "{\"schema\":1,\"ok\":true,\"reqId\":%lu%s}", (unsigned long)msgId,
+             queued ? ",\"queued\":true" : "");
     return remoteBuffer;
   }
   espnowFormatRemoteAck(remoteBuffer, sizeof(remoteBuffer), safeCommand.c_str(),
-                        target.c_str(), targetMac, msgId);
+                        target.c_str(), targetMac, msgId, queued);
   return remoteBuffer;
 }
 
@@ -20325,8 +20401,10 @@ const char* cmd_espnow_send(const String& argsInput) {
     return getDebugBuffer();
   }
   // Step 3b: route through clerk (JOB_AEAD_SMART → v4_send_payload_smart →
-  // v4_send_encrypted_or_queue). The clerk's notification is OK/FAIL only, so
-  // the "sent" vs "queued for SESSION_OPEN" status-string distinction is dropped.
+  // v4_send_encrypted_or_queue). The clerk's notification is OK/FAIL only;
+  // whether the frame went out or waits for the session to open is read back
+  // from the pending queue after the send (pendingFrameIsWaiting), so the
+  // reply says "queued", not "sent", for a frame that has not left yet.
   // Smart path queues to the pending ring if session not yet ACTIVE; drain on
   // SESSION_CONFIRM reuses the same msgId so the bubble-flip still works.
   // Phase 3.5 task #49 — register the msgId so the web UI's polling loop can
@@ -20340,11 +20418,30 @@ const char* cmd_espnow_send(const String& argsInput) {
   if (!espnowtx::sendAeadSync(mac, ESPNOW_V4_TYPE_TEXT, ESPNOW_V4_FLAG_ACK_REQ, msgId,
                          (const uint8_t*)message.c_str(), (uint16_t)msgLen, 1, 2000)) {
     sendStatusMarkFailed(msgId, mac);  // don't leave an orphan PENDING entry
-    if (jsonMode) return "{\"schema\":1,\"ok\":false,\"error\":\"send failed\"}";
+    // A frame refused because messages already wait for this peer's session
+    // (or for sessions in all) says so: they clear within a few seconds.
+    const bool peerFull = pendingFrameCountForPeer(mac) >= kPendingFramesPerPeer;
+    const bool tableFull = !peerFull && pendingFrameCount() >= kPendingFrameSlots;
+    if (jsonMode) {
+      return (peerFull || tableFull) ? "{\"schema\":1,\"ok\":false,\"error\":\"waiting queue full\"}"
+                                     : "{\"schema\":1,\"ok\":false,\"error\":\"send failed\"}";
+    }
     if (!ensureDebugBuffer()) return "Error: encrypted send failed.";
-    snprintf(getDebugBuffer(), 1024, "Error: encrypted send failed (clerk timeout or queue full).");
+    if (peerFull) {
+      snprintf(getDebugBuffer(), 1024,
+               "Error: %u messages to %s already wait for the session to open. Retry in a few seconds.",
+               (unsigned)kPendingFramesPerPeer, target.c_str());
+    } else if (tableFull) {
+      snprintf(getDebugBuffer(), 1024,
+               "Error: %u messages already wait for sessions to open. Retry in a few seconds.",
+               (unsigned)kPendingFrameSlots);
+    } else {
+      snprintf(getDebugBuffer(), 1024, "Error: encrypted send failed (clerk timeout or queue full).");
+    }
     return getDebugBuffer();
   }
+  // Still in the pending queue: the session with the peer is not open yet.
+  const bool queued = pendingFrameIsWaiting(msgId, mac);
   // Record into this peer's shared sent[] history so EVERY interface (web/OLED/
   // BLE/G2) shows the same outgoing message — not just the UI that sent it. msgId
   // lets the web de-dupe its own optimistic bubble and lets on-device UIs poll
@@ -20361,10 +20458,19 @@ const char* cmd_espnow_send(const String& argsInput) {
   }
   if (jsonMode) {
     if (!ensureDebugBuffer()) return "{\"schema\":1,\"ok\":true}";
-    snprintf(getDebugBuffer(), 1024, "{\"schema\":1,\"ok\":true,\"msgId\":%lu}", (unsigned long)msgId);
+    snprintf(getDebugBuffer(), 1024, "{\"schema\":1,\"ok\":true,\"msgId\":%lu%s}", (unsigned long)msgId,
+             queued ? ",\"queued\":true" : "");
     return getDebugBuffer();
   }
-  if (!ensureDebugBuffer()) return "Encrypted message sent";
+  if (!ensureDebugBuffer()) return queued ? "Encrypted message queued" : "Encrypted message sent";
+  if (queued) {
+    // Delivery is not decided yet: it goes out when the session opens, or is
+    // dropped (and shown failed in the history) when it does not open in time.
+    snprintf(getDebugBuffer(), 1024,
+             "Encrypted message queued until the session with %s opens (ID: %lu, %u plaintext bytes)",
+             target.c_str(), (unsigned long)msgId, (unsigned)msgLen);
+    return getDebugBuffer();
+  }
   snprintf(getDebugBuffer(), 1024,
            "Encrypted message sent via SESSION_FRAME (ID: %lu, %u plaintext bytes)",
            (unsigned long)msgId, (unsigned)msgLen);
@@ -20420,6 +20526,28 @@ static void bondStartHandshakeNow(const uint8_t peerMac[6]) {
   (void)espnowHandshakeStartNow(peerMac);
 }
 
+// A bond request a command answers for (cmd_exec). The rules of
+// bondSendEncryptedAsync (a responder without a session sends nothing; these
+// request types are never periodic), then a send that waits for espnow_tx's
+// result, so the reply knows what became of the frame. False: not taken (no
+// session and this device does not start one, the partner's waiting queue
+// full, a send failure). True: *outQueued says whether it waits for the
+// session to open (System_ESPNow_PendingQueue.h: it goes out then, or is
+// dropped after kPendingFrameTimeoutMs with its delivery marked failed) or
+// went out. Bench 2026-11-18: "sent" for a frame that had not left; and a
+// reply read from the session state before espnow_tx ran the job said
+// "queued" for a request the full waiting queue then refused (a second
+// bondresync before the session opened; review of 2026-11-18).
+static bool bondSendRequestForReply(const uint8_t peerMac[6], uint8_t type, uint32_t msgId, bool* outQueued) {
+  if (outQueued) *outQueued = false;
+  if (!gEspNow || !peerMac) return false;
+  uint8_t selfMac[6];
+  espnowSelfStaMac(selfMac);
+  if (!espnowSessionActiveWith(peerMac) && sessionIsASide(selfMac, peerMac)) return false;  // the partner initiates
+  if (!espnowtx::sendAeadSync(peerMac, type, ESPNOW_V4_FLAG_ACK_REQ, msgId, nullptr, 0, 1, 2000)) return false;
+  if (outQueued) *outQueued = pendingFrameIsWaiting(msgId, peerMac);
+  return true;
+}
 
 /**
  * Request capability summary from bonded peer
@@ -20437,13 +20565,13 @@ const char* cmd_bond_requestcap(const String& argsInput) {
   }
 
   uint32_t reqId = generateMessageId();
-  bool sent = false;
-  for (int attempt = 0; attempt < 2; attempt++) {
-    sent = bondSendEncryptedAsync(peerMac, ESPNOW_V4_TYPE_BOND_CAP_REQ, ESPNOW_V4_FLAG_ACK_REQ, reqId, nullptr, 0);
-    if (sent) break;
-  }
+  bool queued = false;
+  const bool sent = bondSendRequestForReply(peerMac, ESPNOW_V4_TYPE_BOND_CAP_REQ, reqId, &queued);
   if (sent) cliHint("the peer's capabilities arrive asynchronously - read them from GET /api/bond/status (note 'bondshowcap' shows THIS device's capabilities)");
-  return sent ? "Capability request sent. Check output for response." : "Error: Failed to send capability request.";
+  if (!sent) return "Error: Failed to send capability request.";
+  return queued ? "Capability request queued until the session with the bond partner opens. "
+                  "Check output for response."
+                : "Capability request sent. Check output for response.";
 }
 
 /**
@@ -20521,9 +20649,12 @@ const char* cmd_bond_requestmanifest(const String& argsInput) {
   
   // Send v3 manifest request
   uint32_t msgId = generateMessageId();
-  if (bondSendEncryptedAsync(peerMac, ESPNOW_V4_TYPE_MANIFEST_REQ, ESPNOW_V4_FLAG_ACK_REQ, msgId, nullptr, 0)) {
+  bool queued = false;
+  if (bondSendRequestForReply(peerMac, ESPNOW_V4_TYPE_MANIFEST_REQ, msgId, &queued)) {
     cliHint("the manifest arrives asynchronously via file transfer - view it with 'bondshowremotemanifest'");
-    return "Manifest request sent (v3). Response will arrive via file transfer.";
+    return queued ? "Manifest request queued until the session with the bond partner opens (v3). "
+                    "Response will arrive via file transfer."
+                  : "Manifest request sent (v3). Response will arrive via file transfer.";
   } else {
     return "Error: Failed to send manifest request.";
   }
@@ -20548,14 +20679,13 @@ const char* cmd_bond_requestsettings(const String& argsInput) {
   }
 
   uint32_t msgId = generateMessageId();
-  bool sent = false;
-  for (int attempt = 0; attempt < 2; attempt++) {
-    sent = bondSendEncryptedAsync(peerMac, ESPNOW_V4_TYPE_SETTINGS_REQ, ESPNOW_V4_FLAG_ACK_REQ, msgId, nullptr, 0);
-    if (sent) break;
-  }
+  bool queued = false;
+  const bool sent = bondSendRequestForReply(peerMac, ESPNOW_V4_TYPE_SETTINGS_REQ, msgId, &queued);
   if (sent) cliHint("the peer's settings arrive asynchronously via file transfer - read them from GET /api/bond/settings");
-  return sent ? "Settings request sent. Response will arrive via file transfer."
-              : "Error: Failed to send settings request.";
+  if (!sent) return "Error: Failed to send settings request.";
+  return queued ? "Settings request queued until the session with the bond partner opens. "
+                  "Response will arrive via file transfer."
+                : "Settings request sent. Response will arrive via file transfer.";
 }
 
 /**
@@ -20575,14 +20705,13 @@ const char* cmd_bond_requestschema(const String& argsInput) {
   }
 
   uint32_t msgId = generateMessageId();
-  bool sent = false;
-  for (int attempt = 0; attempt < 2; attempt++) {
-    sent = bondSendEncryptedAsync(peerMac, ESPNOW_V4_TYPE_SCHEMA_REQ, ESPNOW_V4_FLAG_ACK_REQ, msgId, nullptr, 0);
-    if (sent) break;
-  }
+  bool queued = false;
+  const bool sent = bondSendRequestForReply(peerMac, ESPNOW_V4_TYPE_SCHEMA_REQ, msgId, &queued);
   if (sent) cliHint("the peer's settings schema arrives asynchronously via file transfer - read it from GET /api/bond/settings/schema");
-  return sent ? "Schema request sent. Response will arrive via file transfer."
-              : "Error: Failed to send schema request.";
+  if (!sent) return "Error: Failed to send schema request.";
+  return queued ? "Schema request queued until the session with the bond partner opens. "
+                  "Response will arrive via file transfer."
+                : "Schema request sent. Response will arrive via file transfer.";
 }
 
 /**
@@ -20690,10 +20819,12 @@ const char* cmd_bond_resync(const String& argsInput) {
   uint32_t msgIdMan   = generateMessageId();
   uint32_t msgIdSet   = generateMessageId();
   uint32_t msgIdSch   = generateMessageId();
-  bool capOk  = bondSendEncryptedAsync(peerMac, ESPNOW_V4_TYPE_BOND_CAP_REQ,  ESPNOW_V4_FLAG_ACK_REQ, msgIdCap, nullptr, 0);
-  bool manOk  = bondSendEncryptedAsync(peerMac, ESPNOW_V4_TYPE_MANIFEST_REQ,  ESPNOW_V4_FLAG_ACK_REQ, msgIdMan, nullptr, 0);
-  bool setOk  = bondSendEncryptedAsync(peerMac, ESPNOW_V4_TYPE_SETTINGS_REQ,  ESPNOW_V4_FLAG_ACK_REQ, msgIdSet, nullptr, 0);
-  bool schOk  = bondSendEncryptedAsync(peerMac, ESPNOW_V4_TYPE_SCHEMA_REQ,    ESPNOW_V4_FLAG_ACK_REQ, msgIdSch, nullptr, 0);
+  // Each reports whether it went out or waits for the session to open.
+  bool capQ = false, manQ = false, setQ = false, schQ = false;
+  bool capOk  = bondSendRequestForReply(peerMac, ESPNOW_V4_TYPE_BOND_CAP_REQ, msgIdCap, &capQ);
+  bool manOk  = bondSendRequestForReply(peerMac, ESPNOW_V4_TYPE_MANIFEST_REQ, msgIdMan, &manQ);
+  bool setOk  = bondSendRequestForReply(peerMac, ESPNOW_V4_TYPE_SETTINGS_REQ, msgIdSet, &setQ);
+  bool schOk  = bondSendRequestForReply(peerMac, ESPNOW_V4_TYPE_SCHEMA_REQ,   msgIdSch, &schQ);
 
   const bool allQueued = capOk && manOk && setOk && schOk;
   if (!ensureDebugBuffer()) {
@@ -20706,18 +20837,33 @@ const char* cmd_bond_resync(const String& argsInput) {
     // A request that was not queued is dropped, not kept for later.
     snprintf(getDebugBuffer(), 1024,
              "Error: Bond resync not sent in full (cap=%s, manifest=%s, settings=%s, schema=%s): "
-             "no active session with the bond partner, or the send queue is full. Wait until the "
-             "partner is online and run 'bondresync' again.",
+             "no active session with the bond partner, or the send queue or the queue of messages "
+             "waiting for its session is full. Wait until the partner is online and run 'bondresync' "
+             "again.",
              capOk ? "ok" : "FAIL",
              manOk ? "ok" : "FAIL",
              setOk ? "ok" : "FAIL",
              schOk ? "ok" : "FAIL");
     return getDebugBuffer();
   }
+  // Without an ACTIVE session the four requests wait in the pending queue
+  // (four per peer) and go out in order when it opens. A session that opened
+  // part way through sent the rest at once.
+  const int queuedCount = (int)capQ + (int)manQ + (int)setQ + (int)schQ;
+  char how[96];
+  if (queuedCount == 4) {
+    strlcpy(how, "queued until the session with the bond partner opens", sizeof(how));
+  } else if (queuedCount == 0) {
+    strlcpy(how, "sent", sizeof(how));
+  } else {
+    snprintf(how, sizeof(how), "sent (%d of them queued until the session with the bond partner opens)",
+             queuedCount);
+  }
   snprintf(getDebugBuffer(), 1024,
-           "Bond resync initiated (worker role) — requests sent: "
+           "Bond resync initiated (worker role) — requests %s: "
            "cap=%s, manifest=%s, settings=%s, schema=%s. "
            "Master will respond to each; bond flags will re-populate as data arrives.%s",
+           how,
            capOk ? "ok" : "FAIL",
            manOk ? "ok" : "FAIL",
            setOk ? "ok" : "FAIL",
@@ -21999,7 +22145,7 @@ extern const CommandEntry espNowCommands[] = {
   { "espnowgroupdrop", "Take back the room and tags accepted for a paired peer: 'espnowgroupdrop [json] <name_or_mac|all>'.", true, cmd_espnow_groupdrop, "Usage: espnowgroupdrop [json] <name_or_mac|all>\n       The peer is no longer a target of room or tag commands; what it announces is pending again." },
   
   // ---- ESP-NOW Communication ----
-  { "espnowsend", "Send message to one peer, relayed over multiple hops if it is out of radio range: 'espnowsend [json] <name_or_mac> <message>'. Requires ESP-NOW encryption enabled. (async send; delivery only, no reply)", false, cmd_espnow_send, "Usage: espnowsend [json] <name_or_mac> <message>\n       Requires ESP-NOW encryption (set a mesh passphrase first); plaintext send was removed.\n       Leading 'json' flag returns {schema,ok,msgId} for delivery-status polling.\n       Returns OK on delivery; one-way message, no result comes back.\n       Out-of-range peers are reached via relays when a route exists ('espnowmeshroutes');\n       a relayed message is split at ~130 chars per piece instead of ~200." },
+  { "espnowsend", "Send message to one peer, relayed over multiple hops if it is out of radio range: 'espnowsend [json] <name_or_mac> <message>'. Requires ESP-NOW encryption enabled. (async send; delivery only, no reply)", false, cmd_espnow_send, "Usage: espnowsend [json] <name_or_mac> <message>\n       Requires ESP-NOW encryption (set a mesh passphrase first); plaintext send was removed.\n       Leading 'json' flag returns {schema,ok,msgId} for delivery-status polling (\"queued\":true while it waits).\n       Returns OK when sent, or queued until the session with the peer opens (sent then, or failed after 5 s; up to 4 wait per peer); one-way message, no result comes back.\n       Out-of-range peers are reached via relays when a route exists ('espnowmeshroutes');\n       a relayed message is split at ~130 chars per piece instead of ~200." },
   { "espnowbroadcast", "Broadcast message: 'espnowbroadcast <message>'. (async send; delivery only, no reply)", false, cmd_espnow_broadcast, "Usage: espnowbroadcast <message>   (single frame, <= 186 bytes while any enabled mesh has a passphrase, 218 otherwise; longer text is refused)\n       Fails when the frame reached no peer. There is no per-device delivery count and no per-device reply." },
   { "espnowsendfile", "Send file: 'espnowsendfile <name_or_mac> \"<filepath>\"'. (synchronous send; fails if the receiver rejects/cancels mid-transfer)", true, cmd_espnow_sendfile, "Usage: espnowsendfile <name_or_mac> \"<filepath>\"\n       Blocks until the file is sent. 'success' means every chunk was transmitted and the receiver did not cancel; final storage is confirmed by the receiver's CRC check, which is not reported back here." },
   { "espnowbrowse", "Browse a peer's files; user/pass are an account ON THE TARGET: 'espnowbrowse <target> <target-user> <target-pass> [\"path\"]'. (async - result via espnowmessages json)", true, cmd_espnow_browse, "Usage: espnowbrowse <target> <target-user> <target-pass> [\"path\"] [json]\n       Credentials are verified ON THE TARGET device, not this one.\n       Returns OK on delivery; the remote listing arrives later - read with 'espnowmessages json' (match the reqId)." },
@@ -22379,6 +22525,14 @@ const char* cmd_espnow_sensorreq(const String& argsInput) {
   bool sent = espnowtx::sendAeadSync(mac, ESPNOW_V4_TYPE_SENSOR_REQ, 0, msgId,
                                      (const uint8_t*)&rq, sizeof(rq), 1, 3000);
   if (!sent) return "Error: send failed (no live session? not paired? peer offline?)";
+  if (pendingFrameIsWaiting(msgId, mac)) {
+    // Not on the air yet: it goes out when the session opens, or is dropped
+    // after kPendingFrameTimeoutMs.
+    return linkGen ? "OK: SENSOR_REQ queued until the session with the bond master opens; "
+                     "check 'espnowsensorstatus' in a few seconds"
+                   : "OK: SENSOR_REQ queued until the session with the device opens; "
+                     "watch the worker's stream/logs";
+  }
   if (!linkGen) return "OK: SENSOR_REQ sent (wire-delivered; watch the worker's stream/logs)";
   if (!ensureDebugBuffer()) return "OK: SENSOR_REQ sent to the bond master";
   char partner[33];

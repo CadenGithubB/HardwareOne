@@ -27,6 +27,9 @@
 #if HW1_HAVE_BACKOFF
 #include "System_ESPNow_HandshakeBackoff.h"
 #endif
+#if HW1_HAVE_PENDING_FIFO
+#include "System_ESPNow_PendingQueue.h"
+#endif
 
 static int gFailures = 0;
 static int gChecks = 0;
@@ -91,7 +94,11 @@ class EspNowRuntimeOpGuard {
   bool held() const { return true; }
 };
 static int gMarkedFailed = 0;
-static void sendStatusMarkFailed(uint32_t, const uint8_t*) { ++gMarkedFailed; }
+static std::vector<uint32_t> gFailedIds;   // msgIds marked failed, in order
+static void sendStatusMarkFailed(uint32_t msgId, const uint8_t*) {
+  ++gMarkedFailed;
+  gFailedIds.push_back(msgId);
+}
 
 struct EspNowState { bool initialized = true; };
 static EspNowState gState;
@@ -104,6 +111,8 @@ static constexpr uint8_t ESPNOW_V4_TYPE_BOND_SENSOR_DATA = 179;
 static constexpr uint8_t ESPNOW_V4_TYPE_BOND_POWER_STATUS = 180;
 static constexpr uint8_t ESPNOW_V4_TYPE_BOND_EVENT_PUSH = 182;
 static constexpr uint8_t ESPNOW_V4_TYPE_BOND_SENSOR_STATUS = 185;
+static constexpr uint8_t ESPNOW_V4_TYPE_MANIFEST_REQ = 172;
+static constexpr uint16_t ESPNOW_V4_FLAG_ACK_REQ = 0x0001;
 
 // Our address and the partner's.
 static uint8_t gSelf[6] = {0x02, 0x11, 0x22, 0x33, 0x44, 0x09};      // higher: initiator
@@ -127,6 +136,7 @@ enum : uint8_t { SESSION_FREE = 0, SESSION_ESTABLISHING = 1, SESSION_ACTIVE = 2,
                  SESSION_CLOSED = 4 };
 struct SessionState {
   uint8_t peerMac[6]; uint8_t meshId; uint8_t state; uint32_t lastUseMs; bool inUse; uint8_t userStarted;
+  uint32_t establishedAtMs;   // millis() when it went ACTIVE
 };
 constexpr uint8_t kSessionSlots = 8;
 static SessionState gSessionTable[kSessionSlots];
@@ -185,7 +195,8 @@ static bool espnowSessionOpenInitiate(const uint8_t peerMac[6], const char*, boo
 
 // Frames that went out over an ACTIVE session.
 static std::vector<uint8_t> gDelivered;
-bool v4_send_session_wrapped(const uint8_t dst[6], uint8_t type, uint16_t, uint32_t, const uint8_t*, uint16_t,
+static std::vector<uint32_t> gDeliveredIds;   // their msgIds, in the order they went out
+bool v4_send_session_wrapped(const uint8_t dst[6], uint8_t type, uint16_t, uint32_t msgId, const uint8_t*, uint16_t,
                              uint8_t, char* errOut, size_t errOutLen) {
   SessionState* s = sessionFindByPeer(dst, 0);
   if (!s || s->state != SESSION_ACTIVE) {
@@ -193,6 +204,7 @@ bool v4_send_session_wrapped(const uint8_t dst[6], uint8_t type, uint16_t, uint3
     return false;
   }
   gDelivered.push_back(type);
+  gDeliveredIds.push_back(msgId);
   return true;
 }
 
@@ -212,6 +224,8 @@ struct Job {
   void* completion;
 };
 static bool submit(const Job& job);
+static bool sendAeadSync(const uint8_t mac[6], uint8_t type, uint16_t flags, uint32_t msgId, const uint8_t* payload,
+                         uint16_t payloadLen, uint8_t ttl, uint32_t timeoutMs);
 }  // namespace espnowtx
 
 // Declarations the sources take from System_ESPNow_Handlers_Crypto.h.
@@ -243,6 +257,14 @@ static uint8_t pendingFrameDropForPeer(const uint8_t*) { return 0; }
 #endif
 
 namespace espnowtx {
+// sendAeadSync: the job runs at once and its result is the answer (one frame:
+// v4_send_payload_smart -> v4_send_encrypted_or_queue).
+static int gSyncSends = 0;
+static bool sendAeadSync(const uint8_t mac[6], uint8_t type, uint16_t flags, uint32_t msgId, const uint8_t* payload,
+                         uint16_t payloadLen, uint8_t ttl, uint32_t) {
+  ++gSyncSends;
+  return v4_send_encrypted_or_queue(mac, type, flags, msgId, payload, payloadLen, ttl, nullptr, 0);
+}
 static bool submit(const Job& job) {
   v4_send_encrypted_or_queue(job.peerMac, job.type, job.flags, job.msgId, job.payload, job.payloadLen,
                              job.ttl, nullptr, 0);
@@ -271,6 +293,7 @@ static void peerAnswered(const Event& e) {
     if (!s || s->state != SESSION_ESTABLISHING) return;
     s->state = SESSION_ACTIVE;
     s->lastUseMs = gNowMs;
+    s->establishedAtMs = gNowMs;
     ++gSessionsUp;
     gLastSessionUpMs = gNowMs;
     pendingFrameDrainForPeer(e.mac);
@@ -307,6 +330,9 @@ static void runFor(uint32_t ms) {
       }
     }
     keyExRetrySweep(gNowMs);
+#if HW1_HAVE_PENDING_SETTLED
+    pendingFrameDrainSettled(gNowMs);   // processMeshHeartbeats: before the timeout sweep
+#endif
     pendingFrameTimeoutSweep(gNowMs);
     sessionEstablishingTimeoutSweep(gNowMs);
     if ((int32_t)(gNowMs - gNextHeartbeatMs) >= 0) {
@@ -331,8 +357,10 @@ static void resetWorld() {
   gEvents.clear();
   gHellos = gPartnerHellos = gSessionOpens = gSessionsUp = 0;
   gMarkedFailed = 0;
+  gFailedIds.clear();
   gLastSessionUpMs = 0;
   gDelivered.clear();
+  gDeliveredIds.clear();
   gMaxPending = 0;
   std::memset(gIds, 0, sizeof gIds);
   std::memset(gSessionTable, 0, sizeof gSessionTable);
@@ -343,7 +371,11 @@ static void resetWorld() {
 #if HW1_HAVE_BACKOFF
   gHandshakeBackoff = HandshakeBackoffTable{};
   gKeyExGiveUpWarn = WarnLimiter{};
+#if HW1_HAVE_PENDING_FIFO
+  gPendingRefuseWarn = WarnLimiter{};
+#else
   gPendingEvictWarn = WarnLimiter{};
+#endif
   gPendingTimeoutWarn = WarnLimiter{};
 #endif
   const uint8_t initiator[6] = {0x02, 0x11, 0x22, 0x33, 0x44, 0x09};
@@ -683,6 +715,34 @@ static void casePendingWarnings() {
     v4_send_encrypted_or_queue(other, 1, 0, ++gMsgId, nullptr, 0, 1, nullptr, 0);
     gNowMs += 200;
   }
+#if HW1_HAVE_PENDING_FIFO
+  // Four wait (the first four, unchanged); the other 46 are refused, each
+  // marked failed at once, in one warning line.
+  const size_t refusals = warnsSince(w0, "pending: refused");
+  CHECK(pendingFrameCountForPeer(other) == kPendingFramesPerPeer && refusals == 1 && gMarkedFailed == 46,
+        "50 frames to one silent peer in 10 s: %u wait, %zu refusal lines, %d marked failed (want 4, 1, 46)",
+        (unsigned)pendingFrameCountForPeer(other), refusals, gMarkedFailed);
+  for (uint8_t i = 1; i < 4; ++i) {
+    uint8_t mac[6] = {0x02, 0x11, 0x22, 0x33, 0x55, i};
+    v4_send_encrypted_or_queue(mac, 1, 0, ++gMsgId, nullptr, 0, 1, nullptr, 0);
+  }
+  const size_t w1 = gWarnLines.size();
+  gNowMs += 6000;
+  CHECK(pendingFrameTimeoutSweep(gNowMs) == 7, "the 7 waiting frames did not all time out together");
+  CHECK(warnsSince(w1, "pending: timeout") == 1 && gMarkedFailed == 46 + 7,
+        "7 timeouts at once logged %zu lines and marked %d failed", warnsSince(w1, "pending: timeout"),
+        gMarkedFailed - 46);
+  gNowMs += 61000;
+  v4_send_encrypted_or_queue(other, 1, 0, ++gMsgId, nullptr, 0, 1, nullptr, 0);
+  const size_t w2 = gWarnLines.size();
+  gNowMs += 6000;
+  pendingFrameTimeoutSweep(gNowMs);
+  bool carries = false;
+  for (size_t i = w2; i < gWarnLines.size(); ++i) {
+    carries = carries || gWarnLines[i].find("(6 more in the last minute)") != std::string::npos;
+  }
+  CHECK(carries, "the next timeout warning does not carry the 6 held back");
+#else
   const size_t evicts = warnsSince(w0, "pending: evicting");
   CHECK(evicts <= 1, "50 frames to one silent peer in 10 s logged %zu evictions", evicts);
   // Four silent peers time out together.
@@ -706,6 +766,7 @@ static void casePendingWarnings() {
     carries = carries || gWarnLines[i].find("(3 more in the last minute)") != std::string::npos;
   }
   CHECK(carries, "the next timeout warning does not carry the 3 held back");
+#endif
 }
 
 // Unpair (finding X4, round 3): cmd_espnow_unpair calls off the key exchange
@@ -753,6 +814,233 @@ static void caseUnpairCallsOff() {
   CHECK(pendingFrameDropForPeer(kPartner) == 0 && gMarkedFailed == 0, "calling off nothing changed something");
 }
 
+
+#if HW1_HAVE_PENDING_FIFO
+// Bench 2026-11-18: two sends in a row before the session opened; the second
+// evicted the first. The queue now keeps up to 4 frames per peer, sends them
+// in order when the session opens, refuses (never evicts) when full, and
+// marks every frame it drops failed at once.
+static uint32_t sendTo(const uint8_t mac[6], char* status = nullptr, size_t statusLen = 0, bool* ok = nullptr) {
+  const uint32_t id = ++gMsgId;
+  const bool sent = v4_send_encrypted_or_queue(mac, 1, 0, id, nullptr, 0, 1, status, statusLen);
+  if (ok) *ok = sent;
+  return id;
+}
+
+static void caseQueueFifo() {
+  resetWorld();
+  gNextHeartbeatMs = gNowMs + 0x40000000u;   // no heartbeats
+  gPeerPresent = true;
+  char status[64];
+
+  // Three sends before there is even an identity: all wait, one KEY_EX.
+  const uint32_t a = sendTo(kPartner, status, sizeof status);
+  CHECK(std::strncmp(status, "queued", 6) == 0, "a parked frame's status does not start with 'queued' (%s)", status);
+  const uint32_t b = sendTo(kPartner);
+  const uint32_t c = sendTo(kPartner);
+  CHECK(pendingFrameCountForPeer(kPartner) == 3 && pendingFrameIsWaiting(a, kPartner) &&
+            pendingFrameIsWaiting(c, kPartner) && gPartnerHellos == 1,
+        "three sends before the session: %u wait, %d HELLOs (want 3, 1)",
+        (unsigned)pendingFrameCountForPeer(kPartner), gPartnerHellos);
+  const uint8_t other[6] = {0x02, 0x11, 0x22, 0x33, 0x44, 0x05};
+  CHECK(!pendingFrameIsWaiting(a, other) && !pendingFrameIsWaiting(0, kPartner),
+        "a waiting frame is found for another peer or msgId 0");
+  runFor(1000);
+  CHECK(gDeliveredIds == (std::vector<uint32_t>{a, b, c}) && gMarkedFailed == 0 &&
+            pendingFrameCountForPeer(kPartner) == 0 && !pendingFrameIsWaiting(a, kPartner),
+        "the three did not go out in order once the session opened (%zu out, %d failed)", gDeliveredIds.size(),
+        gMarkedFailed);
+
+  // Session up: a send goes out at once and says so.
+  const uint32_t d = sendTo(kPartner, status, sizeof status);
+  CHECK(std::strcmp(status, "sent") == 0 && gDeliveredIds.back() == d, "a send over the open session: %s", status);
+
+  // The session went ACTIVE but the drain has not run yet (another task):
+  // a new send must not overtake the frames still waiting.
+  SessionState* s = sessionFindByPeer(kPartner, 0);
+  sessionClear(s);
+  gPeerPresent = false;
+  const uint32_t e = sendTo(kPartner);
+  const uint32_t f = sendTo(kPartner);
+  s = sessionFindByPeer(kPartner, 0);
+  CHECK(s && s->state == SESSION_ESTABLISHING && pendingFrameCountForPeer(kPartner) == 2,
+        "a closed session: the next sends wait and a SESSION_OPEN is started");
+  s->state = SESSION_ACTIVE;   // CONFIRM handled, drain not yet run
+  const uint32_t g = sendTo(kPartner, status, sizeof status);
+  CHECK(gDeliveredIds.size() == 7 && gDeliveredIds[4] == e && gDeliveredIds[5] == f && gDeliveredIds[6] == g &&
+            std::strcmp(status, "sent") == 0,
+        "a send over a just-opened session overtook the frames waiting for it");
+
+  // A session that opens and closes again before its drain: the frames keep
+  // waiting (in order) and go out with the next session.
+  sessionClear(s);
+  const uint32_t h = sendTo(kPartner);
+  s = sessionFindByPeer(kPartner, 0);
+  s->state = SESSION_ACTIVE;
+  sessionClear(s);             // closed again before any drain
+  gPeerPresent = true;
+  const uint32_t i = sendTo(kPartner);   // re-kicks SESSION_OPEN, waits behind h
+  CHECK(pendingFrameCountForPeer(kPartner) == 2, "the frames waiting across a session that came and went: %u",
+        (unsigned)pendingFrameCountForPeer(kPartner));
+  runFor(500);
+  CHECK(gDeliveredIds.size() == 9 && gDeliveredIds[7] == h && gDeliveredIds[8] == i && gMarkedFailed == 0,
+        "the frames that waited across a session that opened and closed did not go out in order with the next");
+
+  // Full: the fifth frame for one peer is refused (newest), the four keep
+  // their place, the refused one is marked failed at once.
+  sessionClear(sessionFindByPeer(kPartner, 0));
+  gPeerPresent = false;
+  std::vector<uint32_t> four;
+  for (int n = 0; n < 4; ++n) four.push_back(sendTo(kPartner));
+  bool ok = true;
+  const size_t w0 = gWarnLines.size();
+  const uint32_t fifth = sendTo(kPartner, status, sizeof status, &ok);
+  CHECK(!ok && std::strcmp(status, "4 messages already wait for this device's session") == 0,
+        "the fifth frame was not refused with its reason (%s)", status);
+  CHECK(gFailedIds == (std::vector<uint32_t>{fifth}) && pendingFrameCountForPeer(kPartner) == 4 &&
+            pendingFrameIsWaiting(four[0], kPartner) && warnsSince(w0, "pending: refused") == 1,
+        "a full queue dropped a waiting frame or did not mark the refused one failed");
+  // Another peer still has room.
+  sendTo(other, nullptr, 0, &ok);
+  CHECK(ok && pendingFrameCountForPeer(other) == 1, "a full queue for one peer refused another peer");
+
+  // The table: 16 frames in all (4 peers x 4 here), then even a new peer is refused.
+  for (uint8_t p = 0; p < 2; ++p) {
+    const uint8_t mac[6] = {0x02, 0x11, 0x22, 0x33, 0x66, p};
+    for (int n = 0; n < 4; ++n) sendTo(mac);
+  }
+  for (int n = 0; n < 3; ++n) sendTo(other);
+  CHECK(pendingFrameCount() == kPendingFrameSlots, "the table holds %u, want %u", (unsigned)pendingFrameCount(),
+        (unsigned)kPendingFrameSlots);
+  const uint8_t fresh[6] = {0x02, 0x11, 0x22, 0x33, 0x77, 0x01};
+  sendTo(fresh, status, sizeof status, &ok);
+  CHECK(!ok && std::strcmp(status, "16 messages already wait for sessions") == 0 && pendingFrameCount() == 16,
+        "a full table: %s", status);
+
+  // A peer that never answers: every waiting frame times out after 5 s, each
+  // marked failed, in one warning line.
+  const int failedBefore = gMarkedFailed;
+  const size_t w1 = gWarnLines.size();
+  runFor(kPendingFrameTimeoutMs + 200);
+  CHECK(pendingFrameCount() == 0 && gMarkedFailed - failedBefore == 16 && warnsSince(w1, "pending: timeout") == 1,
+        "an unanswered peer: %u left waiting, %d marked failed, %zu timeout lines (want 0, 16, 1)",
+        (unsigned)pendingFrameCount(), gMarkedFailed - failedBefore, warnsSince(w1, "pending: timeout"));
+
+  // closeespnow: every waiting frame is dropped, each marked failed.
+  sendTo(kPartner);
+  sendTo(kPartner);
+  sendTo(other);
+  const int beforeClose = gMarkedFailed;
+  CHECK(pendingFrameDropAll() == 3 && pendingFrameCount() == 0 && gMarkedFailed - beforeClose == 3,
+        "closeespnow left frames waiting or did not mark them failed");
+  CHECK(pendingFrameDropAll() == 0, "a second drop found frames");
+
+  // Unpair: only that peer's frames go, all of them.
+  sendTo(kPartner);
+  sendTo(kPartner);
+  sendTo(other);
+  CHECK(pendingFrameDropForPeer(kPartner) == 2 && pendingFrameCountForPeer(other) == 1,
+        "unpair did not drop exactly the peer's two waiting frames");
+}
+#endif
+
+// This device answered the handshake (the peer's SESSION_OPEN won a glare, or
+// crossed ours): its session is ACTIVE, runDeferredSessionOpen drains nothing,
+// and the frames queued before stay waiting. They go out in order once the
+// session is settled, not at once (the initiator would drop them before it has
+// handled the CONFIRM), and not after a 5 s timeout as failed (review of
+// 2026-11-18). A frame queued just after a drain goes out the same way.
+static void caseAnsweredSessionDrains() {
+#if HW1_HAVE_PENDING_FIFO
+  resetWorld();
+  gNextHeartbeatMs = gNowMs + 0x40000000u;   // no heartbeats
+  addIdentity(kPartner);
+  gPeerPresent = false;                      // our own SESSION_OPEN gets no CONFIRM
+  const uint32_t a = sendTo(kPartner);
+  const uint32_t b = sendTo(kPartner);
+  SessionState* s = sessionFindByPeer(kPartner, 0);
+  CHECK(s && s->state == SESSION_ESTABLISHING && pendingFrameCountForPeer(kPartner) == 2,
+        "two sends before the session: they wait behind our SESSION_OPEN");
+  runFor(300);
+  // The peer's SESSION_OPEN is answered (B side of the glare): ACTIVE, no drain.
+  s->state = SESSION_ACTIVE;
+  s->establishedAtMs = gNowMs;
+  s->lastUseMs = gNowMs;
+  runFor(500);
+  CHECK(gDeliveredIds.empty() && pendingFrameCountForPeer(kPartner) == 2,
+        "frames went out before the session this device answered had settled (%zu out)", gDeliveredIds.size());
+  runFor(1000);
+  CHECK(gDeliveredIds == (std::vector<uint32_t>{a, b}) && gMarkedFailed == 0 &&
+            pendingFrameCountForPeer(kPartner) == 0,
+        "the frames waiting for a session this device answered did not go out in order once it settled "
+        "(%zu out, %d failed, %u waiting)",
+        gDeliveredIds.size(), gMarkedFailed, (unsigned)pendingFrameCountForPeer(kPartner));
+
+  // A frame queued after the session's drain had run (the send saw no session
+  // a moment before it opened) goes out with the next tick, not failed at 5 s.
+  const uint8_t payload[4] = {1, 2, 3, 4};
+  CHECK(pendingFrameQueue(kPartner, ESPNOW_V4_TYPE_BOND_CAP_REQ, 0, 4242, 1, payload, sizeof payload, nullptr),
+        "the late frame was not queued");
+  runFor(100);
+  CHECK(gDeliveredIds.size() == 3 && gDeliveredIds.back() == 4242 && gMarkedFailed == 0,
+        "a frame queued just after the drain of an open session waited for its timeout");
+#if HW1_HAVE_PENDING_SETTLED
+  CHECK(pendingFrameDrainSettled(gNowMs) == 0, "a settled drain with nothing waiting sent something");
+#endif
+#endif
+}
+
+// The bond request commands (bondrequestcap/manifest/settings/schema,
+// bondresync on a worker) answer from what became of their frame: queued while
+// it waits for the session, sent once it went out, refused when the partner's
+// waiting queue is full. They read the session state before espnow_tx had run
+// the job, so a second bondresync before the session opened answered "queued"
+// for four requests the full queue refused (review of 2026-11-18).
+static void caseBondRequestReply() {
+#if HW1_HAVE_BOND_REQUEST_REPLY
+  resetWorld();
+  gNextHeartbeatMs = gNowMs + 0x40000000u;   // no heartbeats
+  addIdentity(kPartner);
+  gPeerPresent = false;                      // the session does not open
+  bool queued = false;
+  std::vector<uint32_t> ids;
+  for (int n = 0; n < 4; ++n) {
+    ids.push_back(++gMsgId);
+    queued = false;
+    const bool ok = bondSendRequestForReply(kPartner, ESPNOW_V4_TYPE_BOND_CAP_REQ, ids.back(), &queued);
+    CHECK(ok && queued, "bond request %d before the session: ok=%d queued=%d (want queued)", n, ok, queued);
+  }
+  // bondresync again: the queue is full, the request is refused, not "queued".
+  const uint32_t fifth = ++gMsgId;
+  queued = true;
+  const bool fifthOk = bondSendRequestForReply(kPartner, ESPNOW_V4_TYPE_MANIFEST_REQ, fifth, &queued);
+  CHECK(!fifthOk && !queued && gFailedIds == (std::vector<uint32_t>{fifth}),
+        "a bond request the full waiting queue refused was answered as taken (ok=%d queued=%d)", fifthOk, queued);
+  // The session is up: the request goes out and is answered "sent".
+  pendingFrameDropAll();
+  SessionState* s = sessionFindByPeer(kPartner, 0);
+  CHECK(s != nullptr, "no session slot");
+  if (s) {
+    s->state = SESSION_ACTIVE;
+    s->establishedAtMs = gNowMs;
+  }
+  const uint32_t live = ++gMsgId;
+  queued = true;
+  CHECK(bondSendRequestForReply(kPartner, ESPNOW_V4_TYPE_BOND_CAP_REQ, live, &queued) && !queued &&
+            !gDeliveredIds.empty() && gDeliveredIds.back() == live,
+        "a bond request over the open session was not answered as sent");
+  // The responder (lower address) without a session sends nothing.
+  sessionClear(sessionFindByPeer(kPartner, 0));
+  const uint8_t lower[6] = {0x02, 0x11, 0x22, 0x33, 0x44, 0x00};
+  std::memcpy(gSelf, lower, 6);
+  const int syncBefore = espnowtx::gSyncSends;
+  queued = true;
+  CHECK(!bondSendRequestForReply(kPartner, ESPNOW_V4_TYPE_BOND_CAP_REQ, ++gMsgId, &queued) && !queued &&
+            espnowtx::gSyncSends == syncBefore && pendingFrameCount() == 0,
+        "the responder without a session sent or queued a bond request");
+#endif
+}
+
 int main() {
   caseSchedule();
   caseTableAndHeard();
@@ -766,6 +1054,11 @@ int main() {
   caseBondPowerEventsDropped();
   caseUserStartsReported();
   caseUnpairCallsOff();
+#if HW1_HAVE_PENDING_FIFO
+  caseQueueFifo();
+#endif
+  caseAnsweredSessionDrains();
+  caseBondRequestReply();
   std::printf("espnow_handshake_backoff: %d checks, %d failed\n", gChecks, gFailures);
   return gFailures ? 1 : 0;
 }

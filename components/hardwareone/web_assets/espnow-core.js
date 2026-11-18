@@ -1197,7 +1197,10 @@
       // Quote the path — espnowfetch requires a quoted path (quoted-path standard).
       var cmd = 'espnowfetch ' + mac + ' ' + u + ' ' + p + ' "' + remotePath + '"';
       hw.postFormText('/api/cli', { cmd: cmd }).then(function(text) {
-        if (!text.includes('File fetch request sent') && !text.includes('Receiving file')) {
+        // 'queued' (2026-11-18): the request waits for the session with the
+        // peer to open and goes out then.
+        if (!text.includes('File fetch request sent') && !text.includes('File fetch request queued') &&
+            !text.includes('Receiving file')) {
           if (statusDiv) {
             statusDiv.style.background = '#f8d7da';
             statusDiv.style.color = '#721c24';

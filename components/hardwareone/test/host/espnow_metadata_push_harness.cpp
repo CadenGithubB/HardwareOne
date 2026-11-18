@@ -125,7 +125,7 @@ bool v4_send_encrypted_or_queue(const uint8_t dst[6], uint8_t type, uint16_t, ui
                                 const uint8_t* plaintext, uint16_t len, uint8_t,
                                 char* outStatus, size_t outLen) {
   if (sendFails) {
-    if (outStatus && outLen) std::snprintf(outStatus, outLen, "pending queue full");
+    if (outStatus && outLen) std::snprintf(outStatus, outLen, "4 messages already wait for this device's session");
     return false;
   }
   CHECK(len == sizeof(V4PayloadMetadata));

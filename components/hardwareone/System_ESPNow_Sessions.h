@@ -29,6 +29,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "System_ESPNow_PendingQueue.h"  // the pending-frame queue rules
+
 enum SessionStateLifecycle : uint8_t {
   SESSION_FREE        = 0,  // empty slot
   SESSION_ESTABLISHING= 1,  // OPEN sent / received, awaiting CONFIRM
@@ -215,34 +217,53 @@ bool sessionUnwrapFrame(SessionState* s,
 // ---- Phase 3.5 step 3 — pending-frame queue ---------------------------------
 //
 // When the application sends to a peer that has no ACTIVE session, the send
-// path kicks a SESSION_OPEN and parks the frame here. On the SESSION_CONFIRM
-// initiator-side "established" event the queue is drained for that peer.
-// Slots cap is small (kPendingFrameSlots) — one slot per peer is the typical
-// usage; a second queued frame for the same peer evicts the older one with a
-// WARN log. Frames sit at most kPendingFrameTimeoutMs before being expired by
-// the periodic sweep.
+// path kicks a SESSION_OPEN (or KEY_EX) and parks the frame here. On the
+// SESSION_CONFIRM initiator-side "established" event the queue is drained for
+// that peer, oldest frame first. The rules (System_ESPNow_PendingQueue.h): up
+// to kPendingFramesPerPeer frames per peer, kPendingFrameSlots in all; a frame
+// that does not fit is refused (the newest, never one already queued), marked
+// failed and counted in a once-a-minute warning. Frames sit at most
+// kPendingFrameTimeoutMs before the periodic sweep drops them, each marked
+// failed.
 
 constexpr uint16_t kPendingFramePlaintextMax = 202;   // ESPNOW_V4_MAX_PAYLOAD - 16
 constexpr uint32_t kPendingFrameTimeoutMs    = 5000;  // SESSION_OPEN budget
 
-// Queue a frame for later send. Returns true on enqueue success, false if the
-// queue is full and the eviction policy could not free a slot.
+// Queue a frame for later send. Returns true when it was queued. False when it
+// was refused: bad arguments, the table could not be allocated (*outAdmit
+// left as the caller set it), or the peer's queue or the table is full
+// (*outAdmit says which; the frame's tracked send, if any, is marked failed
+// and a counted warning goes out once a minute).
 // `flags` should be the application's base flags WITHOUT SESSION_FRAME — the
 // drain path runs the frame through sessionWrapFrame which sets it.
 bool pendingFrameQueue(const uint8_t peerMac[6], uint8_t type, uint16_t flags,
                        uint32_t msgId, uint8_t ttl,
-                       const uint8_t* plaintext, uint16_t plaintextLen);
+                       const uint8_t* plaintext, uint16_t plaintextLen,
+                       PendingAdmit* outAdmit = nullptr);
 
-// Drain all pending frames for a peer. Called from the SESSION_CONFIRM
-// initiator-side "established" path. Each drained frame is wrap-and-sent via
-// the v4_send_session_wrapped path; on success the slot is freed. On failure
-// the slot is freed with an [ERROR] log (we don't re-queue — caller can retry
-// from the application layer).
+// Drain all pending frames for a peer, oldest first. Called from the
+// SESSION_CONFIRM initiator-side "established" path, the REKEY apply, the
+// KEY_EX_REPLY of a peer whose session is already up, and by a sender that
+// finds the session ACTIVE while frames still wait (so a new frame never
+// overtakes them), and the periodic tick for a settled session
+// (pendingFrameDrainSettled). Each drained frame is wrap-and-sent via the
+// v4_send_session_wrapped path; on success the slot is freed. On failure the
+// slot is freed with an [ERROR] log and the frame marked failed (we don't
+// re-queue — caller can retry from the application layer).
 void pendingFrameDrainForPeer(const uint8_t peerMac[6]);
 
-// Expire slots older than kPendingFrameTimeoutMs. Called from the periodic
-// espnow heartbeat tick. Returns count expired (for diagnostics).
+// Expire slots older than kPendingFrameTimeoutMs, each marked failed. Called
+// from the periodic espnow heartbeat tick. Returns count expired.
 uint8_t pendingFrameTimeoutSweep(uint32_t nowMs);
+
+// Send the frames that still wait for a peer whose session is ACTIVE and at
+// least kPendingSessionSettleMs old (pendingSessionSettled), oldest first: a
+// session this device answered (the responder of the peer's SESSION_OPEN, or
+// the B side of a glare) drains nothing when it opens, and a frame queued just
+// after a drain would otherwise wait for its timeout. Called from the periodic
+// espnow heartbeat tick, before the timeout sweep. Returns how many went to
+// the drain.
+uint8_t pendingFrameDrainSettled(uint32_t nowMs);
 
 // Reset sessions stuck in ESTABLISHING past a timeout (our SESSION_OPEN got no
 // CONFIRM — peer was offline/booting when we kicked it). Without this the slot
@@ -272,15 +293,29 @@ bool sessionHandshakeInFlight(const SessionState* s, uint32_t nowMs);
 // Inspector for the espnowsessions CLI / debugging.
 uint8_t pendingFrameCount();
 
+// Frames waiting for `peerMac`'s session.
+uint8_t pendingFrameCountForPeer(const uint8_t peerMac[6]);
+
 // True iff at least one pending frame is parked waiting for `peerMac`'s session.
 // Called from KEY_EX_REPLY's handler (initiator side, post-peerIdentityPersist)
 // to decide whether to auto-kick SESSION_OPEN — the "encrypt-or-wait" foundation.
 bool pendingFrameHasForPeer(const uint8_t peerMac[6]);
 
+// True while the frame `msgId` to `peerMac` waits in the queue. A command that
+// handed a frame to the send path asks this to answer "queued until the
+// session opens" instead of "sent". A frame drained in between reads false,
+// which is then true: it went out.
+bool pendingFrameIsWaiting(uint32_t msgId, const uint8_t peerMac[6]);
+
 // Unpair: drops the frames waiting for `peerMac`'s session (each is marked
 // failed in the tracked-send table), so a session that comes up later does
 // not deliver them to a device the user unpaired. Returns how many went.
 uint8_t pendingFrameDropForPeer(const uint8_t peerMac[6]);
+
+// closeespnow: drops every waiting frame (each marked failed), so a frame
+// queued before the close never goes out after a later openespnow. Returns
+// how many went.
+uint8_t pendingFrameDropAll();
 
 // ---- Phase 3.5 task #49 — tracked-send status (web-UI delivery confirmation)
 //

@@ -14,7 +14,10 @@ id and a small buffer:
 
 - the short form is byte-identical to the reply before the formatter existed;
 - a long command shortens the echo and keeps "(match reqId <n>)" at the end;
-- nothing is written past the buffer.
+- nothing is written past the buffer;
+- a command still waiting for the session with the peer to open (2026-11-18)
+  answers "Queued '<command>' until the session with <target> opens. Output is
+  ASYNC ... (match reqId <n>)", the id still last.
 
 --component points the suite at another component directory. A tree without
 the formatter runs the same cases on its inline snprintf (the pre-fix tree
@@ -58,6 +61,11 @@ def main() -> int:
         work = Path(directory)
         acks = replies.render_text_acks(args.component, cases, args.cxx, work, flags=flags)
         small = replies.render_text_acks(args.component, cases[:1], args.cxx, work, size=40, flags=flags)
+        # A command still waiting for the session to open (2026-11-18) says so.
+        queued = replies.render_text_acks(args.component,
+                                          [("reboot", "kitchen", MAC, 78, True),
+                                           (long_command, "kitchen", MAC, 4294967295, True)],
+                                          args.cxx, work, flags=flags)
 
     if acks[0] != "Sent 'reboot' to kitchen" + TAIL % 77:
         failures.append(f"the short acknowledgement changed: {acks[0]!r}")
@@ -76,8 +84,40 @@ def main() -> int:
             failures.append(f"the echo is not the start of the command: {echo!r}")
         if len(command) <= 100 and echo != command:
             failures.append(f"a short command was shortened: {echo!r}")
+    if queued[0] != "Queued 'reboot' until the session with kitchen opens" + TAIL % 78:
+        failures.append(f"the queued acknowledgement is not 'Queued ... until the session ... opens': {queued[0]!r}")
+    if not queued[1].endswith("(match reqId 4294967295)") or len(queued[1].encode()) > 255 or \
+            not queued[1].startswith("Queued 'espnowsend lab "):
+        failures.append(f"a long queued acknowledgement lost its lead or its id: {queued[1]!r}")
     if len(small[0]) > 39:
         failures.append(f"a 40-byte buffer received {len(small[0])} bytes")
+
+    # The call sites (review of 2026-11-18): each command that hands a frame to
+    # the send path reads back whether it waits for the session and answers
+    # with that, in text and json. The formatter cases above cannot see a call
+    # site that always passes "sent".
+    source = (args.component / "System_ESPNow.cpp").read_text()
+    if "espnowFormatRemoteAck(" in source and "bool queued = false" in source:
+        from test_web_batch_handlers import extract_block
+
+        def body(marker: str) -> str:
+            return extract_block(source, marker) if source.count(marker) == 1 else ""
+
+        remote = body("const char* cmd_espnow_remote(const String& argsInput)")
+        if "const bool queued = pendingFrameIsWaiting(msgId, targetMac);" not in remote or \
+                "targetMac, msgId, queued);" not in remote or 'queued ? ",\\"queued\\":true" : ""' not in remote:
+            failures.append("espnowremote does not answer from whether its frame waits for the session")
+        for marker, what in (("const char* cmd_espnow_browse(const String& argsInput)", "espnowbrowse"),
+                             ("const char* cmd_espnow_fetch(const String& argsInput)", "espnowfetch")):
+            cmd = body(marker)
+            if cmd.count("pendingFrameIsWaiting(msgId, targetMac)") != 2 or "request queued until the session" not in cmd:
+                failures.append(f"{what} does not answer from whether its frame waits for the session (text and json)")
+        sensor = body("const char* cmd_espnow_sensorreq(const String& argsInput)")
+        if "pendingFrameIsWaiting(msgId, mac)" not in sensor:
+            failures.append("espnowsensorreq does not answer from whether its frame waits for the session")
+        meta = body("const char* cmd_espnow_requestmeta(const String& argsInput)")
+        if "requestMetadata(targetMac, true, &queued)" not in meta or "if (queued)" not in meta:
+            failures.append("espnowrequestmeta does not answer from whether its request waits for the session")
 
     for failure in failures:
         print(f"FAIL: {failure}")

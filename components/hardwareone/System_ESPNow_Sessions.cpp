@@ -12,6 +12,7 @@
 #include "System_ESPNow_Crypto.h"
 #include "System_ESPNow_Deadline.h"  // wrap-safe prev-key window
 #include "System_ESPNow_HandshakeBackoff.h"  // WarnLimiter
+#include "System_ESPNow_Identity.h"  // peerIdentityFindByMac (pendingFrameDrainSettled)
 #include "System_ESPNow_Wire.h"  // EspNowV4Header, flag constants
 #include "System_MemUtil.h"      // ps_alloc, AllocPref
 #include "System_Mutex.h"        // EspNowTxGuard — serializes the session TX critical section
@@ -416,10 +417,13 @@ bool sessionUnwrapFrame(SessionState* s,
 // ============================================================================
 // Phase 3.5 step 3 — pending-frame queue
 // ============================================================================
+//
+// The rules are in System_ESPNow_PendingQueue.h (per-peer FIFO of
+// kPendingFramesPerPeer, kPendingFrameSlots in all, the newest refused when
+// full). This file owns the table, its lock (EspNowTxGuard, a mutex: the
+// table is PSRAM), the sends and the tracked-send updates.
 
 namespace {
-
-constexpr uint8_t kPendingFrameSlots = 4;
 
 struct PendingFrame {
   bool     inUse;
@@ -427,6 +431,7 @@ struct PendingFrame {
   uint8_t  type;
   uint16_t flags;
   uint32_t msgId;
+  uint32_t seq;            // queue order: a peer's frames go out oldest first
   uint8_t  ttl;
   uint16_t plaintextLen;
   uint32_t queuedAtMs;
@@ -434,12 +439,13 @@ struct PendingFrame {
 };
 
 PendingFrame* gPending = nullptr;
+uint32_t gPendingSeq = 0;
 
-// A peer that does not answer makes every frame sent to it evict the one
-// before it and then time out. One line a minute each, with the count held
+// A peer that does not answer makes the frames sent to it fill its queue, be
+// refused and then time out. One line a minute each, with the count held
 // back. Both are touched only under the EspNowTxGuard the queue holds.
 constexpr uint32_t kPendingWarnWindowMs = 60000;
-WarnLimiter gPendingEvictWarn = {};
+WarnLimiter gPendingRefuseWarn = {};
 WarnLimiter gPendingTimeoutWarn = {};
 
 bool ensurePendingAllocated() {
@@ -454,11 +460,22 @@ bool ensurePendingAllocated() {
   return true;
 }
 
+// Free a slot; a frame that did not go out is marked failed in the tracked-
+// send table (and so in the message history) at once. Caller holds the lock.
+void pendingFrameRelease(PendingFrame& p, bool failed) {
+  if (failed) sendStatusMarkFailed(p.msgId, p.peerMac);
+  sodium_memzero(p.plaintext, p.plaintextLen);
+  memset(&p, 0, sizeof(p));
+}
+
 }  // namespace
 
 bool pendingFrameQueue(const uint8_t peerMac[6], uint8_t type, uint16_t flags,
                        uint32_t msgId, uint8_t ttl,
-                       const uint8_t* plaintext, uint16_t plaintextLen) {
+                       const uint8_t* plaintext, uint16_t plaintextLen,
+                       PendingAdmit* outAdmit) {
+  // *outAdmit is set only once the table was looked at: left as the caller
+  // set it, a false return means bad arguments or no memory for the table.
   if (!peerMac || (plaintextLen > 0 && !plaintext)) return false;
   if (plaintextLen > kPendingFramePlaintextMax) {
     ERROR_ESPNOWF("pending: plaintext %u > max %u",
@@ -472,39 +489,29 @@ bool pendingFrameQueue(const uint8_t peerMac[6], uint8_t type, uint16_t flags,
 
   if (!ensurePendingAllocated()) return false;
 
-  // Eviction policy: if a slot already holds a pending frame for this peer,
-  // overwrite it (newest wins) — typical case is the app re-sending while the
-  // previous one is still mid-handshake. Otherwise grab any free slot.
-  PendingFrame* slot = nullptr;
-  for (uint8_t i = 0; i < kPendingFrameSlots; i++) {
-    PendingFrame& p = gPending[i];
-    if (p.inUse && memcmp(p.peerMac, peerMac, 6) == 0) {
-      uint32_t held = 0;
-      if (warnLimiterTake(gPendingEvictWarn, (uint32_t)millis(), kPendingWarnWindowMs, &held)) {
-        WARN_ESPNOWF("pending: evicting older pending frame for " MAC_FMT " "
-                     "(msgId=%lu→%lu; %lu more in the last minute)",
-                     MAC_ARGS(peerMac),
-                     (unsigned long)p.msgId, (unsigned long)msgId, (unsigned long)held);
-      }
-      slot = &p;
-      break;
+  int idx = -1;
+  const PendingAdmit admit = pendingAdmit(gPending, kPendingFrameSlots, peerMac, kPendingFramesPerPeer, &idx);
+  if (outAdmit) *outAdmit = admit;
+  if (admit != PendingAdmit::Queued || idx < 0) {
+    // The newest frame is refused; the ones already queued keep their place
+    // (each of them was answered "queued").
+    uint32_t held = 0;
+    if (warnLimiterTake(gPendingRefuseWarn, (uint32_t)millis(), kPendingWarnWindowMs, &held)) {
+      WARN_ESPNOWF("pending: refused msgId=%lu to " MAC_FMT " — %s "
+                   "(%lu more in the last minute)",
+                   (unsigned long)msgId, MAC_ARGS(peerMac), pendingAdmitReason(admit),
+                   (unsigned long)held);
     }
-  }
-  if (!slot) {
-    for (uint8_t i = 0; i < kPendingFrameSlots; i++) {
-      if (!gPending[i].inUse) { slot = &gPending[i]; break; }
-    }
-  }
-  if (!slot) {
-    ERROR_ESPNOWF("pending: queue full (%u slots), dropping msgId=%lu",
-                  (unsigned)kPendingFrameSlots, (unsigned long)msgId);
+    sendStatusMarkFailed(msgId, peerMac);
     return false;
   }
+  PendingFrame* slot = &gPending[idx];
   slot->inUse        = true;
   memcpy(slot->peerMac, peerMac, 6);
   slot->type         = type;
   slot->flags        = flags;
   slot->msgId        = msgId;
+  slot->seq          = ++gPendingSeq;
   slot->ttl          = ttl;
   slot->plaintextLen = plaintextLen;
   slot->queuedAtMs   = (uint32_t)millis();
@@ -518,11 +525,14 @@ void pendingFrameDrainForPeer(const uint8_t peerMac[6]) {
   // v4_send_session_wrapped — a SINGLE frame (≤202 B), which seals + queues to
   // the radio and returns WITHOUT waiting for an ACK. So we never block on
   // espnow_task while holding the lock (no ACK-wait deadlock), and the inner
-  // sessionWrapFrame take is a same-task reentrant no-op.
+  // sessionWrapFrame take is a same-task reentrant no-op. Holding it for the
+  // whole drain also keeps a sender on another task (which waits for this
+  // lock to seal) from putting a new frame on the air between two queued ones.
   EspNowTxGuard g("pendDrain");
-  for (uint8_t i = 0; i < kPendingFrameSlots; i++) {
+  // Oldest first, one slot freed per pass, so this ends.
+  for (int i = pendingOldestFor(gPending, kPendingFrameSlots, peerMac); i >= 0;
+       i = pendingOldestFor(gPending, kPendingFrameSlots, peerMac)) {
     PendingFrame& p = gPending[i];
-    if (!p.inUse || memcmp(p.peerMac, peerMac, 6) != 0) continue;
     char err[96] = {0};
     bool ok = v4_send_session_wrapped(p.peerMac, p.type, p.flags, p.msgId,
                                       p.plaintext, p.plaintextLen, p.ttl,
@@ -536,11 +546,9 @@ void pendingFrameDrainForPeer(const uint8_t peerMac[6]) {
                     (unsigned long)p.msgId,
                     MAC_ARGS(p.peerMac),
                     err[0] ? err : "(no detail)");
-      sendStatusMarkFailed(p.msgId, p.peerMac);
     }
-    // Wipe the slot regardless — we don't auto-retry.
-    sodium_memzero(p.plaintext, p.plaintextLen);
-    memset(&p, 0, sizeof(p));
+    // Free the slot regardless — we don't auto-retry.
+    pendingFrameRelease(p, /*failed=*/!ok);
   }
 }
 
@@ -553,7 +561,7 @@ uint8_t pendingFrameTimeoutSweep(uint32_t nowMs) {
   for (uint8_t i = 0; i < kPendingFrameSlots; i++) {
     PendingFrame& p = gPending[i];
     if (!p.inUse) continue;
-    if ((nowMs - p.queuedAtMs) < kPendingFrameTimeoutMs) continue;
+    if (!pendingExpired(p.queuedAtMs, nowMs, kPendingFrameTimeoutMs)) continue;
     uint32_t held = 0;
     if (warnLimiterTake(gPendingTimeoutWarn, nowMs, kPendingWarnWindowMs, &held)) {
       WARN_ESPNOWF("pending: timeout msgId=%lu to " MAC_FMT " "
@@ -565,12 +573,34 @@ uint8_t pendingFrameTimeoutSweep(uint32_t nowMs) {
     }
     // Phase 3.5 task #49 — propagate the drop into the tracked-send table
     // so the web UI flips the bubble to ✗ Failed instead of hanging at ✓ Sent.
-    sendStatusMarkFailed(p.msgId, p.peerMac);
-    sodium_memzero(p.plaintext, p.plaintextLen);
-    memset(&p, 0, sizeof(p));
+    pendingFrameRelease(p, /*failed=*/true);
     expired++;
   }
   return expired;
+}
+
+uint8_t pendingFrameDrainSettled(uint32_t nowMs) {
+  // Runs on every espnow_task pass: nothing waiting (the usual case) costs no
+  // lock. A frame queued just after this read is seen on the next pass.
+  if (!gPending || pendingCountAll(gPending, kPendingFrameSlots) == 0) return 0;
+  // Same lock as queue/drain/sweep; the drain below takes it again (reentrant).
+  // The session is looked up the way the send path finds it (identity, then
+  // its mesh's slot), so a frame is only handed to a drain that can send it.
+  EspNowTxGuard g("pendSettled");
+  uint8_t drained = 0;
+  for (uint8_t i = 0; i < kPendingFrameSlots; i++) {
+    if (!gPending[i].inUse) continue;
+    uint8_t mac[6];
+    memcpy(mac, gPending[i].peerMac, 6);
+    const PeerIdentity* pid = peerIdentityFindByMac(mac);
+    const SessionState* s = pid ? sessionFindByPeer(mac, pid->meshId) : nullptr;
+    if (!s || s->state != SESSION_ACTIVE || !pendingSessionSettled(s->establishedAtMs, nowMs)) continue;
+    // Every frame of this peer goes, the earlier slots included (a frame of
+    // this peer in an earlier slot would have been drained already).
+    drained = (uint8_t)(drained + pendingCountFor(gPending, kPendingFrameSlots, mac));
+    pendingFrameDrainForPeer(mac);
+  }
+  return drained;
 }
 
 // A session stuck in ESTABLISHING means our SESSION_OPEN never got a CONFIRM
@@ -644,20 +674,21 @@ bool sessionHandshakeInFlight(const SessionState* s, uint32_t nowMs) {
 }
 
 uint8_t pendingFrameCount() {
-  if (!gPending) return 0;
-  uint8_t n = 0;
-  for (uint8_t i = 0; i < kPendingFrameSlots; i++) {
-    if (gPending[i].inUse) n++;
-  }
-  return n;
+  return pendingCountAll(gPending, kPendingFrameSlots);
+}
+
+uint8_t pendingFrameCountForPeer(const uint8_t peerMac[6]) {
+  return pendingCountFor(gPending, kPendingFrameSlots, peerMac);
 }
 
 bool pendingFrameHasForPeer(const uint8_t peerMac[6]) {
+  return pendingCountFor(gPending, kPendingFrameSlots, peerMac) > 0;
+}
+
+bool pendingFrameIsWaiting(uint32_t msgId, const uint8_t peerMac[6]) {
   if (!gPending || !peerMac) return false;
-  for (uint8_t i = 0; i < kPendingFrameSlots; i++) {
-    if (gPending[i].inUse && memcmp(gPending[i].peerMac, peerMac, 6) == 0) return true;
-  }
-  return false;
+  EspNowTxGuard g("pendWaiting");   // a drain on another task frees slots
+  return pendingFind(gPending, kPendingFrameSlots, msgId, peerMac) >= 0;
 }
 
 uint8_t pendingFrameDropForPeer(const uint8_t peerMac[6]) {
@@ -668,9 +699,20 @@ uint8_t pendingFrameDropForPeer(const uint8_t peerMac[6]) {
   for (uint8_t i = 0; i < kPendingFrameSlots; i++) {
     PendingFrame& p = gPending[i];
     if (!p.inUse || memcmp(p.peerMac, peerMac, 6) != 0) continue;
-    sendStatusMarkFailed(p.msgId, p.peerMac);
-    sodium_memzero(p.plaintext, p.plaintextLen);
-    memset(&p, 0, sizeof(p));
+    pendingFrameRelease(p, /*failed=*/true);
+    dropped++;
+  }
+  return dropped;
+}
+
+uint8_t pendingFrameDropAll() {
+  if (!gPending) return 0;
+  EspNowTxGuard g("pendDropAll");
+  uint8_t dropped = 0;
+  for (uint8_t i = 0; i < kPendingFrameSlots; i++) {
+    PendingFrame& p = gPending[i];
+    if (!p.inUse) continue;
+    pendingFrameRelease(p, /*failed=*/true);
     dropped++;
   }
   return dropped;

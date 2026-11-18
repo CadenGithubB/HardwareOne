@@ -193,7 +193,7 @@ def main() -> None:
     require(len(reader_declarations) == 2, "shared reader declarations missing from WebServer_Utils.h")
     remote_sent_constants = re.findall(
         r'(?m)^static constexpr char kRemoteSent\w+\[\] = "[^"\n]*";$', utils)
-    require(args.baseline is not None or len(remote_sent_constants) == 2,
+    require(args.baseline is not None or len(remote_sent_constants) in (2, 3),
             "System_Utils.cpp: the remote: reply constants changed")
     definitions = [
         "#define HAVE_WEB_CONTEXT_HELPER " + str(int(not args.baseline)),

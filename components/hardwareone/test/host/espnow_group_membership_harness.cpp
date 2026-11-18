@@ -215,14 +215,20 @@ enum : uint16_t { ESPNOW_V4_FLAG_ACK_REQ = 0x0001 };
 // A destination whose frame is refused (no room to park it), as the real send
 // says with its status text.
 static std::string gRefusedDst;
+// Destinations whose frame is parked until their session opens (status
+// "queued", as the real send says it).
+static std::vector<std::string> gQueuedDst;
 static bool v4_send_encrypted_or_queue(const uint8_t dst[6], uint8_t type, uint16_t flags, uint32_t,
                                        const uint8_t* plaintext, uint16_t plaintextLen, uint8_t, char* status,
                                        size_t statusLen) {
   outsideLock("a frame is sent");
   if (!gRefusedDst.empty() && gRefusedDst == MAC_STR(dst)) {
-    if (status && statusLen) std::snprintf(status, statusLen, "pending queue full");
+    if (status && statusLen) std::snprintf(status, statusLen, "4 messages already wait for this device's session");
     return false;
   }
+  bool queued = false;
+  for (const auto& q : gQueuedDst) queued = queued || q == MAC_STR(dst);
+  if (status && statusLen) std::snprintf(status, statusLen, "%s", queued ? "queued" : "sent");
   gSent.push_back({MAC_STR(dst), std::string(reinterpret_cast<const char*>(plaintext), plaintextLen), type, flags});
   return true;
 }
@@ -321,6 +327,7 @@ static void resetAll() {
   gState.initialized = true;
   gState.encryptionEnabled = true;
   gRefusedDst.clear();
+  gQueuedDst.clear();
   for (auto& m : gMetaSlots) m.clear();
   gMeshPeerSlots = kMetaSlots;
   gSessions.clear();
@@ -1464,7 +1471,7 @@ static void testGroupSendVerdicts() {
   reply = run(cmd_espnow_roomcmd, "Kitchen u p status");
   CHECK(gSent.size() == 1 && sentTo(1) && commandReplyIsFailure(reply.c_str()) &&
             has(reply, "Error: Command sent to 1 of 2 device(s) in room 'Kitchen'; not sent to Oven "
-                       "(pending queue full).") &&
+                       "(4 messages already wait for this device's session).") &&
             has(reply, "  -> Fridge (") && has(reply, "Skipped 1 device(s) whose room is pending") &&
             has(reply, "Toaster"),
         "G19: one member refused: '%s'", reply.c_str());
@@ -1472,7 +1479,8 @@ static void testGroupSendVerdicts() {
   run(cmd_espnow_groupdrop, "Fridge");
   reply = run(cmd_espnow_roomcmd, "Kitchen u p status");
   CHECK(gSent.empty() && commandReplyIsFailure(reply.c_str()) &&
-            has(reply, "Error: Command not sent to any of 1 device(s) in room 'Kitchen' (pending queue full).") &&
+            has(reply, "Error: Command not sent to any of 1 device(s) in room 'Kitchen' "
+                       "(4 messages already wait for this device's session).") &&
             !has(reply, "->"),
         "G19: every member refused: '%s'", reply.c_str());
   gRefusedDst.clear();
@@ -1485,6 +1493,28 @@ static void testGroupSendVerdicts() {
   CHECK(gSent.empty() && commandReplyIsFailure(reply.c_str()) &&
             has(reply, "Error: No devices found in room 'Garage'. List rooms and members with 'espnowgroups'."),
         "G19: an empty room: '%s'", reply.c_str());
+
+  // A member without a session yet: its frame waits for the session to open,
+  // and the reply says queued, not sent (bench 2026-11-18).
+  run(cmd_espnow_groupaccept, "Fridge");
+  gQueuedDst = {macText(2)};
+  reply = run(cmd_espnow_roomcmd, "Kitchen u p status");
+  CHECK(gSent.size() == 2 && !commandReplyIsFailure(reply.c_str()) &&
+            has(reply, "  -> Oven (") && has(reply, ") queued until its session opens\n") &&
+            has(reply, "Sent 'status' to 2 device(s) in Kitchen (1 of them queued until their session opens)"),
+        "G19: one member queued: '%s'", reply.c_str());
+  gQueuedDst = {macText(1), macText(2)};
+  reply = run(cmd_espnow_roomcmd, "Kitchen u p status");
+  CHECK(gSent.size() == 2 && !commandReplyIsFailure(reply.c_str()) && !has(reply, "Sent '") &&
+            has(reply, "Queued 'status' for 2 device(s) in Kitchen until their sessions open"),
+        "G19: every member queued: '%s'", reply.c_str());
+  gQueuedDst = {macText(1)};
+  gRefusedDst = macText(2);
+  reply = run(cmd_espnow_roomcmd, "Kitchen u p status");
+  CHECK(commandReplyIsFailure(reply.c_str()) &&
+            has(reply, "Error: Command sent to 1 of 2 device(s) in room 'Kitchen' (1 of them queued until their "
+                       "session opens); not sent to Oven"),
+        "G19: one queued, one refused: '%s'", reply.c_str());
 }
 
 int main() {

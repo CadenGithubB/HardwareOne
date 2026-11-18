@@ -369,9 +369,22 @@ struct AirFrame {
   std::vector<uint8_t> payload;
 };
 static std::vector<AirFrame> air;        // frames that left the sender
-static bool pendingInUse = false;        // the pending-frame store: one frame per peer
-static AirFrame pendingFrame;
-static unsigned pendingEvictions = 0;
+// The pending-frame store (System_ESPNow_PendingQueue.h): up to 4 frames for
+// the one receiver, sent oldest first when the session opens; a fifth is
+// refused.
+constexpr uint8_t kPendingFramesPerPeer = 4;
+constexpr uint8_t kPendingFrameSlots = 16;
+static std::vector<AirFrame> pendingFrames;
+static unsigned pendingParked = 0;       // frames ever parked
+static bool pendingInUse() { return !pendingFrames.empty(); }
+bool pendingFrameIsWaiting(uint32_t msgId, const uint8_t*) {
+  for (const AirFrame& f : pendingFrames) {
+    if (f.msgId == msgId) return true;
+  }
+  return false;
+}
+uint8_t pendingFrameCountForPeer(const uint8_t*) { return static_cast<uint8_t>(pendingFrames.size()); }
+uint8_t pendingFrameCount() { return static_cast<uint8_t>(pendingFrames.size()); }
 static std::function<void(const AirFrame&)> onAirFrame;
 static void putOnAir(const AirFrame& f) {
   air.push_back(f);
@@ -379,8 +392,8 @@ static void putOnAir(const AirFrame& f) {
   if (loopback) rxFrame(f.type, kSender, f.msgId, f.payload.data(), static_cast<uint16_t>(f.payload.size()));
 }
 // v4_send_payload_smart for one frame to the receiver: session-wrapped at once
-// when the session is ACTIVE, else parked (newest wins) with a handshake kick
-// when none is in flight, and reported as accepted either way.
+// when the session is ACTIVE, else parked behind the frames already waiting
+// (refused when 4 wait) with a handshake kick when none is in flight.
 bool v4_send_payload_smart(const uint8_t* dst, uint8_t type, uint16_t, uint32_t msgId,
                            const uint8_t* payload, uint16_t len, uint8_t) {
   if (std::memcmp(dst, kReceiver, 6) != 0) check(false, "smart send: unexpected destination");
@@ -390,9 +403,9 @@ bool v4_send_payload_smart(const uint8_t* dst, uint8_t type, uint16_t, uint32_t 
     putOnAir(f);
     return true;
   }
-  if (pendingInUse) ++pendingEvictions;
-  pendingInUse = true;
-  pendingFrame = f;
+  if (pendingFrames.size() >= kPendingFramesPerPeer) return false;
+  pendingFrames.push_back(f);
+  ++pendingParked;
   if (!peerIdentityFindByMac(dst)) {
     if (!keyExIsInFlight(dst)) espnowKeyExInitiate(dst, nullptr);
   } else if (!s || s->state == SESSION_FREE || s->state == SESSION_CLOSED) {
@@ -401,16 +414,15 @@ bool v4_send_payload_smart(const uint8_t* dst, uint8_t type, uint16_t, uint32_t 
   return true;
 }
 // The command task is free again: the handshake job runs, the session becomes
-// ACTIVE and the one parked frame is sent.
+// ACTIVE and the parked frames are sent, oldest first.
 static void commandTaskCompletesHandshake() {
   receiverHasIdentity = true;
   receiverHasSessionSlot = true;
   keyExInFlight = false;
   receiverSession.state = SESSION_ACTIVE;
-  if (pendingInUse) {
-    pendingInUse = false;
-    putOnAir(pendingFrame);
-  }
+  std::vector<AirFrame> waiting;
+  waiting.swap(pendingFrames);
+  for (const AirFrame& f : waiting) putOnAir(f);
 }
 uint16_t v4_single_frame_cap(const uint8_t*) { return ESPNOW_V4_MAX_PLAINTEXT; }
 
@@ -594,7 +606,7 @@ static void resetWorld() {
   fsLockWaitsUnderSlotLock = fsCallsUnderSlotLock = 0;
   cmdExecRefuseNext = 0;
   cancels.clear(); acks.clear(); events.clear(); broadcasts.clear();
-  air.clear(); pendingInUse = false; pendingEvictions = 0;
+  air.clear(); pendingFrames.clear(); pendingParked = 0;
   loopback = false;
   gEspNowStorage = EspNowState{};
   receiverHasIdentity = true; receiverHasSessionSlot = true; keyExInFlight = false;
@@ -878,7 +890,7 @@ static void testSendWithSessionArrives() {
   check(air.size() == 2u + chunksOf(bytes.size()), "send with a session: START, every chunk and END left the sender");
   check(fake_vfs::fs().text(inboxPath(kSender, "report.bin")) == bytes,
         "send with a session: the receiver has the file byte for byte");
-  check(sessionOpenKicks == 0 && keyExKicks == 0 && !pendingInUse, "send with a session: no handshake, nothing parked");
+  check(sessionOpenKicks == 0 && keyExKicks == 0 && !pendingInUse(), "send with a session: no handshake, nothing parked");
   check(cancels.empty() && !gEspNow->fileSendInProgress, "send with a session: no cancel, the send flag is cleared");
 
   // A file large enough to stream on the receiver.
@@ -910,7 +922,7 @@ static void testSendWithoutSessionIsRefused() {
   const bool arrived = (fake_vfs::fs().text(inboxPath(kSender, "report.bin")) == bytes);
   check(!reportedSent || arrived, "a send started without a session must not report success for a file the receiver never got");
   check(result == FileSendResult::NoSession, "a send without an ACTIVE session is refused as NoSession");
-  check(air.empty() && pendingEvictions == 0, "a refused send puts no frame on air and none in the pending store");
+  check(air.empty() && pendingParked == 0, "a refused send puts no frame on air and none in the pending store");
   check(sessionOpenKicks == 1, "a refused send starts the session handshake once");
   check(nowMs == before, "a refused send does not wait on the command task");
   check(!gEspNow->fileSendInProgress && fake_vfs::fs().liveHandles() == 0, "a refused send leaves no send flag and no open file");
@@ -929,7 +941,7 @@ static void testSendWithoutSessionIsRefused() {
   receiverSession.state = SESSION_REKEYING;
   check(sendFileToMacResult(kReceiver, String(kFile)) == FileSendResult::NoSession, "rekey in flight: refused");
   check(sessionOpenKicks == 0 && receiverSession.state == SESSION_REKEYING, "rekey in flight: the working session is not reset");
-  check(air.empty() && !pendingInUse, "in-flight handshake: no frame on air or parked");
+  check(air.empty() && !pendingInUse(), "in-flight handshake: no frame on air or parked");
 
   // No session slot at all, and a closed one: each is kicked once.
   receiverHasSessionSlot = false;
@@ -947,7 +959,7 @@ static void testSendWithoutSessionIsRefused() {
         "no peer identity: refused, key exchange started");
   check(sendFileToMacResult(kReceiver, String(kFile)) == FileSendResult::NoSession && keyExKicks == 1,
         "no peer identity: a key exchange in flight is not started again");
-  check(air.empty() && !pendingInUse, "no peer identity: no frame on air or parked");
+  check(air.empty() && !pendingInUse(), "no peer identity: no frame on air or parked");
 
   // A handshake that cannot be started is a failure, not "try again": nothing
   // is being opened (no shared mesh key, no free session slot, radio failure).
@@ -960,7 +972,7 @@ static void testSendWithoutSessionIsRefused() {
   receiverHasIdentity = false;
   check(sendFileToMacResult(kReceiver, String(kFile)) == FileSendResult::Failed && keyExKicks == 1,
         "key exchange cannot be started: Failed, not NoSession");
-  check(air.empty() && !pendingInUse, "handshake cannot start: no frame on air or parked");
+  check(air.empty() && !pendingInUse(), "handshake cannot start: no frame on air or parked");
 
   // The bool form, which the bond document senders and the FS_GET server use.
   resetWorld();
@@ -997,7 +1009,7 @@ static void testSessionLostMidTransfer() {
   const bool arrived = (fake_vfs::fs().text(inboxPath(kSender, "report.bin")) == bytes);
   check(result != FileSendResult::Sent || arrived, "a session lost mid-transfer must not be reported as sent");
   check(result == FileSendResult::Failed, "a session lost mid-transfer is a failed send");
-  check(dataFrames == 5 && pendingEvictions == 0, "after the session is lost no further chunk is parked over another");
+  check(dataFrames == 5 && pendingParked == 0, "after the session is lost no further chunk is parked");
   check(sessionOpenKicks == 0, "the pump does not restart the session itself");
   check(!gEspNow->fileSendInProgress && fake_vfs::fs().liveHandles() == 0, "the aborted send closes its file and clears its flag");
   // The receiver's slot is left to its timeout sweep.
@@ -1095,15 +1107,54 @@ static void testCallersSayThereIsNoSession() {
             stampState == SEND_STATUS_DELIVERED && std::memcmp(stampMac, kReceiver, 6) == 0,
         "espnowsend: a state resolved during the send is stamped on the stored record (peer, msgId, delivered)");
 
-  // One frame still rides the pending store across the handshake, as before.
+  // One frame still rides the pending store across the handshake; the reply
+  // says it waits for the session, not that it was sent (bench 2026-11-18).
   resetWorld();
   receiverSession.state = SESSION_FREE;
   before = nowMs;
   reply = cmd_espnow_send(String("peerB hello"));
-  check(reply.rfind("Encrypted message sent via SESSION_FRAME", 0) == 0 && pendingInUse && nowMs == before,
-        "espnowsend (one frame) without a session: parked for the handshake, unchanged");
+  check(reply.rfind("Encrypted message queued until the session with peerB opens (ID: ", 0) == 0 &&
+            reply.find(", 5 plaintext bytes)") != std::string::npos && pendingInUse() && nowMs == before,
+        "espnowsend (one frame) without a session: parked for the handshake and reported queued");
+  check(historyStored == 1 && statusFailed == 0, "espnowsend (queued): stored in the history as a pending send");
   commandTaskCompletesHandshake();
   check(air.size() == 1 && air[0].type == ESPNOW_V4_TYPE_TEXT, "espnowsend (one frame): delivered when the session opens");
+  // With the session up the same send is reported sent.
+  reply = cmd_espnow_send(String("peerB hello"));
+  check(reply.rfind("Encrypted message sent via SESSION_FRAME", 0) == 0 && air.size() == 2,
+        "espnowsend with a session: reported sent");
+
+  // Bench 2026-11-18: two (and up to four) espnowsend in a row before the
+  // session opened; the second used to evict the first while both replied
+  // "sent". Each is kept, each says queued, and they go out in order.
+  resetWorld();
+  receiverSession.state = SESSION_FREE;
+  std::vector<uint32_t> ids;
+  for (int i = 0; i < 4; ++i) {
+    reply = cmd_espnow_send(String(("peerB m" + std::to_string(i)).c_str()));
+    check(reply.rfind("Encrypted message queued until the session with peerB opens", 0) == 0,
+          "espnowsend in a row before the session: each reply says queued");
+    ids.push_back(lastRegisteredMsgId);
+  }
+  check(pendingFrames.size() == 4 && sessionOpenKicks == 1, "four sends wait together; one handshake is started");
+  // A fifth is refused with the reason and one next step; nothing waiting is dropped.
+  reply = cmd_espnow_send(String("peerB m4"));
+  check(reply == "Error: 4 messages to peerB already wait for the session to open. Retry in a few seconds.",
+        "the fifth send while four wait: refused, says why and what to do");
+  check(statusFailed == 1 && historyStored == 4 && pendingFrames.size() == 4,
+        "the refused send is marked failed and not stored as sent; the four waiting stay");
+  reply = cmd_espnow_send(String("json peerB m5"));
+  check(reply == "{\"schema\":1,\"ok\":false,\"error\":\"waiting queue full\"}", "json: the refusal names the full queue");
+  commandTaskCompletesHandshake();
+  bool inOrder = air.size() == 4;
+  for (size_t i = 0; inOrder && i < 4; ++i) inOrder = air[i].msgId == ids[i];
+  check(inOrder, "the four queued messages go out in the order they were sent");
+  // json: a queued send carries "queued":true.
+  resetWorld();
+  receiverSession.state = SESSION_FREE;
+  reply = cmd_espnow_send(String("json peerB hi"));
+  check(reply.find("\"ok\":true") != std::string::npos && reply.find(",\"queued\":true}") != std::string::npos,
+        "json: a queued send says queued");
 }
 
 // Bench 2026-11-18: the bond's own sync files (the partner's settings and
