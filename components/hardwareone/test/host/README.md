@@ -2163,6 +2163,31 @@ void flush/close APIs do not expose every backend failure; this suite does not
 establish physical storage durability, microphone capture quality or task-race
 behavior.
 
+## G2 mic WAV power-cut checkpoint
+
+`g2_mic_wav_checkpoint` compiles the production `g2micwav` packet writer,
+checkpoint, header patch and close from `G2_Glasses.cpp` over a file double
+whose `flush()`/`close()` decide what survives a power cut. Captures are cut
+at random points (300 per seed, five seeds): the surviving file must parse as a
+16 kHz mono WAV whose RIFF and data sizes match the bytes on disk and hold every
+packet up to the last checkpoint (at most one interval lost). It also cuts
+between the two syncs of a checkpoint (the header never claims more than the
+disk holds), checks a normal stop, a LittleFS path (sync only, no header
+rewrite) and a failed seek back (the capture stops instead of overwriting
+data). Once per run it also writes a capture to the 16 MB cap: the cap closes
+the file inside the packet write, and the FS-lock double fails the run if the
+BLE notify path ever waits for the FS lock. Source checks cover the header sync
+at start, the SD choice made on the normalized path (as the open routes it) and
+no close in the notify path after the write. `--source <G2_Glasses.cpp>` runs
+the harness against another copy; the pre-fix file fails. Real SD durability
+and the BLE-task stall need a device.
+
+```sh
+python3 components/hardwareone/test/host/test_g2_mic_wav_checkpoint.py --sanitize
+ctest --test-dir /tmp/hw1-hardwareone-host \
+  -R '^g2_mic_wav_checkpoint$' --output-on-failure
+```
+
 ## Automation logging
 
 `automation_log` compiles the production logging owner, `autolog` command,
