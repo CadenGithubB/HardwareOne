@@ -179,10 +179,9 @@ inline void streamEdgeImpulseSensorJs(httpd_req_t* req) {
     "  var btn = hw.$('btn-ei-upload-model');\n"
     "  btn.disabled = true;\n"
     "  hw.setText(statusEl, 'Uploading ' + file.name + '...');\n"
-    "  var reader = new FileReader();\n"
-    "  reader.onload = function(e) {\n"
-    "    var b64 = btoa(String.fromCharCode.apply(null, new Uint8Array(e.target.result)));\n"
-    "    hw.postForm('/api/files/upload', {path:'/EI Models/'+file.name, binary:'1', content:b64})\n"
+    "  (function() {\n"
+    "    fetch('/api/files/upload?path=' + encodeURIComponent('/EI Models/'+file.name), {method:'POST', credentials:'include', cache:'no-store', headers:{'Content-Type':'application/octet-stream'}, body:file})\n"
+    "      .then(hw._auth401)\n"
     "      .then(function(r){ return r.json(); })\n"
     "      .then(function(data) {\n"
     "        btn.disabled = false;\n"
@@ -197,12 +196,7 @@ inline void streamEdgeImpulseSensorJs(httpd_req_t* req) {
     "        btn.disabled = false;\n"
     "        hw.setHTML(statusEl, '<span style=\"color:#dc3545\">Upload failed: ' + err + '</span>');\n"
     "      });\n"
-    "  };\n"
-    "  reader.onerror = function() {\n"
-    "    btn.disabled = false;\n"
-    "    hw.setHTML(statusEl, '<span style=\"color:#dc3545\">Failed to read file</span>');\n"
-    "  };\n"
-    "  reader.readAsArrayBuffer(file);\n"
+    "  })();\n"
     "};\n", HTTPD_RESP_USE_STRLEN);
 
   // Organize models button

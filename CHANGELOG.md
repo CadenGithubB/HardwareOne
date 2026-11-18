@@ -439,6 +439,14 @@ everything user-visible since the v0.99.99.1 tag.
   yet tested on hardware.
 
 ### Changed
+- Faster web file transfers. The file manager, maps upload and Edge Impulse model upload now send
+  the file's bytes as they are instead of base64 form text, and every board's TCP window and send
+  buffer go from 4 to 8 packets (11,520 bytes). The raw file download (`/api/files/read`) reads
+  4 KB at a time instead of 512 bytes. Measured on the P4X-EYE with Bluetooth idle: uploads to the
+  SD card about 190 -> 760 KB/s, SD downloads about 330 -> 410 KB/s; a transfer uses about 3 KB more
+  internal RAM. The form upload stays for the settings import. The model upload also no longer
+  fails on models over about 100 KB in the browser. While Bluetooth is scanning (for example
+  reconnecting to glasses), Wi-Fi transfers on the P4 run at about half speed; that is unchanged.
 - OLED feedback is one shared message box. It replaces the animated status ribbon, the error boxes
   that the login, password, Settings editor and Health screens drew themselves, and the results
   shown in footers. A refused command shows the command's own reason (the admin gate as "Admin
