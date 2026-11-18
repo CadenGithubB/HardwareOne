@@ -1083,7 +1083,11 @@ static void publishMeshPeerSensorData() {
       RemoteSensorInfo slot;
       if (!remoteSensorInfoAt(s, &slot) || !slot.fresh) continue;
       if (memcmp(slot.deviceMac, peer.mac, 6) != 0) continue;
-      const size_t textLen = remoteSensorCopyText(slot.deviceMac, slot.sensorType, remoteText,
+      // Only the device's own readings: what a bond master forwards for its
+      // partner is that bond master's statement and is not published as the
+      // device's state (MQTT is parked; see the forwarding design).
+      if (remoteSensorInfoVia(slot) != nullptr) continue;
+      const size_t textLen = remoteSensorCopyText(slot.deviceMac, remoteSensorInfoVia(slot), slot.sensorType, remoteText,
                                                   espnowsensor::kReadingMaxBytes + 1);
       if (textLen == 0) continue;
 

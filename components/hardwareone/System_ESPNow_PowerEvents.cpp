@@ -3,7 +3,11 @@
 // See System_ESPNow_PowerEvents.h for what this is and
 // System_ESPNow_PowerEventCore.h for the rules. Two tasks meet here:
 //   espnow_task  sends this device's battery state and events to the masters
-//                named on it, and receives the frames of other devices;
+//                named on it (a bond worker: to its bond master only, as
+//                180/182), and receives the frames of other devices: from a
+//                mesh peer (152/132, perhaps forwarded by a bond master for
+//                its partner: System_ESPNow_ForwardCore.h), or from this
+//                device's bond partner (180/182);
 //   cmd_exec     espnowbattery, espnowevents, espnowsensorstatus.
 // What they share is under sPeMux; the rest belongs to espnow_task.
 #include "System_BuildConfig.h"
@@ -23,6 +27,8 @@
 #include "System_CommandReply.h"      // kCommandReplyOutOfMemory
 #include "System_Debug.h"
 #include "System_ESPNow.h"
+#include "System_ESPNow_BondForward.h"      // the bond master forwards its partner's frames
+#include "System_ESPNow_ForwardRx.h"        // whose is a received frame
 #include "System_ESPNow_Handlers_Crypto.h"  // espnowHandshakeAutoStart
 #include "System_ESPNow_HandshakeBackoff.h" // WarnLimiter
 #include "System_ESPNow_Identity.h"
@@ -125,6 +131,32 @@ static void peBatteryInputs(espnowsensor::PowerInputs* in, uint32_t nowMs) {
 }
 // The masters named on this device that are paired (kept by sensorLinkTick).
 static void peTargets(SensorReceiverTargets* out) { sensorReceiverTargets(out); }
+// The bond: a bond worker sends its battery state and events to its bond
+// master only (espnowfwd::meshDataAllowed). Only the single-bond settings are
+// read.
+static bool peBondWorker() {
+#if ENABLE_BONDED_MODE
+  return gSettings.bondModeEnabled && isBondWorker();
+#else
+  return false;
+#endif
+}
+static bool peBondPartner(uint8_t mac[6]) {
+#if ENABLE_BONDED_MODE
+  return isBondModeOnline() && parseMacAddress(gSettings.bondPeerMac, mac);
+#else
+  (void)mac;
+  return false;
+#endif
+}
+// The receiving bond master of 180/182.
+static bool peIsBondMaster() {
+#if ENABLE_BONDED_MODE
+  return gSettings.bondModeEnabled && isBondMaster();
+#else
+  return false;
+#endif
+}
 static bool peSessionUp(const uint8_t mac[6]) { return espnowSessionUp(mac); }
 static bool peSessionSettled(const uint8_t mac[6], uint32_t nowMs) { return espnowSessionSettled(mac, nowMs); }
 static bool peHandshake(const uint8_t mac[6]) { return espnowHandshakeAutoStart(mac); }
@@ -142,6 +174,30 @@ static bool peSendPower(const uint8_t mac[6], const uint8_t* payload, uint16_t l
 }
 static bool peSendEvent(const uint8_t mac[6], const uint8_t* payload, uint16_t len) {
   return espnowtx::sendAead(mac, ESPNOW_V4_TYPE_EVENT_PUSH, 0, generateMessageId(), payload, len, 1);
+}
+// To the bond partner: BOND_POWER_STATUS / BOND_EVENT_PUSH over the bond
+// session (single initiator; the bond heartbeat owns that session).
+static bool peSendBondPower(const uint8_t mac[6], const uint8_t* payload, uint16_t len) {
+  return v4_send_bond_power(mac, payload, len);
+}
+static bool peSendBondEvent(const uint8_t mac[6], const uint8_t* payload, uint16_t len) {
+  return v4_send_bond_event(mac, payload, len);
+}
+// Whose is a received frame (System_ESPNow_ForwardRx.cpp).
+static ForwardResolve peWhose(const uint8_t src[6], const char* name, bool bondLink, bool hasBit, bool bitSet,
+                                uint8_t fwdLink, uint8_t streamId, ForwardOrigin* out) {
+  return espnowForwardResolve(src, name, bondLink, hasBit, bitSet, fwdLink, streamId, out);
+}
+static void peResumeTaken(const uint8_t via[6], uint8_t streamId) { espnowForwardResumeTaken(via, streamId); }
+static bool peLinkActive(const uint8_t via[6], const uint8_t origin[6]) { return espnowForwardLinkActive(via, origin); }
+// The bond master hands what it kept of its partner to its forwarder.
+static void peForwardPower(const uint8_t src[6], const espnowsensor::PowerFrame& f) { bondForwardPower(src, f); }
+static void peForwardEvent(const uint8_t src[6], const espnowsensor::EventFrame& f) { bondForwardEvent(src, f); }
+static void peNotKept(uint8_t streamId) { bondForwardNotKept(streamId); }
+// The name of the device that forwarded a record.
+static void peViaName(const uint8_t mac[6], char* out, size_t cap) {
+  strlcpy(out, getEspNowDeviceName(mac).c_str(), cap);
+  if (!out[0]) macToDisplay(mac, out, cap);
 }
 // One event after *cursor (oldest first); *skipped gains what the ring
 // overwrote before it could be read.
@@ -163,7 +219,12 @@ static uint8_t peMeshOf(const uint8_t mac[6]) {
   return pid ? pid->meshId : 0;
 }
 static void* peAlloc(size_t bytes, const char* tag) { return ps_alloc(bytes, AllocPref::PreferPsram, tag); }
-static bool peResolve(const char* who, uint8_t mac[6]) { return resolveDeviceNameOrMac(String(who), mac); }
+static bool peResolve(const char* who, uint8_t mac[6]) {
+  if (resolveDeviceNameOrMac(String(who), mac)) return true;
+  // A bond partner another device forwards for, by the name its link shows.
+  uint8_t via[6];
+  return espnowForwardFindOrigin(who, nullptr, mac, via);
+}
 static void peConsole(const char* fmt, ...) {
   char line[256];
   va_list args;
@@ -183,13 +244,17 @@ static char* peReply(size_t* cap) {
 
 // POWER_EVENTS_HOST_BEGIN
 
-// What a receiver keeps of one paired sender: its latest battery state with
-// this device's own arrival stamp, and the counter state and counts of its
-// battery frames and its events. A record is given up only for a sender that
-// is no longer paired.
+// What a receiver keeps of one sender: its latest battery state with this
+// device's own arrival stamp, and the counter state and counts of its battery
+// frames and its events. A sender is its origin and, for forwarded frames, the
+// bond master that forwarded them (origin, via): what a bond master says about
+// its partner is never filed under the partner's own record. A record is given
+// up only by espnowfwd::recordReusable.
 struct PeCollectPeer {
   bool inUse;
-  uint8_t mac[6];
+  uint8_t mac[6];            // the origin
+  uint8_t via[6];            // all zero, or the bond master that forwards for it
+  uint8_t link;              // espnowfwd::kLink*
   char name[32];
   bool havePower;
   espnowsensor::PowerFrame power;
@@ -211,7 +276,9 @@ struct PeRefusals {
   uint32_t notReceiver;  // this device's role does not keep them
   uint32_t noRecord;     // sixteen paired senders already send
   uint32_t noMemory;
-  uint32_t malformed;    // too short to be the frame
+  uint32_t malformed;    // too short to be the frame, or a forwarded mark that makes no sense
+  uint32_t notBondMaster;  // 180/182 on a device that is not a bond master
+  uint32_t forwardRefused; // forwarded, but no active link of the sender names it
 };
 
 struct PeState {
@@ -250,18 +317,30 @@ EXT_RAM_BSS_ATTR static PeState sPe;  // PSRAM: tasks only, never the radio call
 struct PeSendPlan {
   espnowsensor::PushWhyNot batteryWhy;
   espnowsensor::PushWhyNot eventsWhy;
-  uint8_t targetCount;       // named masters that are paired
+  uint8_t targetCount;       // named masters that are paired (a bond worker: its partner)
   uint8_t targetMac[2][6];   // the primary first
   bool targetReady[2];       // a session a frame can use now
+  bool viaBond;              // the one target is the bond partner (180/182)
 };
 
 static void pePlan(uint32_t nowMs, PeSendPlan* plan) {
   SensorReceiverTargets targets = {};
   peTargets(&targets);
   memset(plan, 0, sizeof(*plan));
-  if (targets.havePrimary) memcpy(plan->targetMac[plan->targetCount++], targets.primary, 6);
-  if (targets.haveBackup) memcpy(plan->targetMac[plan->targetCount++], targets.backup, 6);
   espnowsensor::PushInputs in = {};
+  in.bondWorker = !espnowfwd::meshDataAllowed(peBondWorker());
+  if (in.bondWorker) {
+    // A bond worker: its bond partner, and no mesh master whatever is named.
+    uint8_t partner[6];
+    in.bondOnline = peBondPartner(partner);
+    if (in.bondOnline) {
+      plan->viaBond = true;
+      memcpy(plan->targetMac[plan->targetCount++], partner, 6);
+    }
+  } else {
+    if (targets.havePrimary) memcpy(plan->targetMac[plan->targetCount++], targets.primary, 6);
+    if (targets.haveBackup) memcpy(plan->targetMac[plan->targetCount++], targets.backup, 6);
+  }
   in.meshOn = peMeshOn();
   in.meshRole = peRole();
   in.masterNamed = targets.masterNamed || targets.backupNamed;
@@ -296,7 +375,10 @@ static void pePowerStep(const PeSendPlan& plan, uint32_t nowMs) {
   espnowsensor::packPowerFrame(payload, frame);
   bool any = false;
   for (uint8_t i = 0; i < plan.targetCount; ++i) {
-    if (plan.targetReady[i] && peSendPower(plan.targetMac[i], payload, (uint16_t)sizeof(payload))) any = true;
+    if (!plan.targetReady[i]) continue;
+    const bool sent = plan.viaBond ? peSendBondPower(plan.targetMac[i], payload, (uint16_t)sizeof(payload))
+                                   : peSendPower(plan.targetMac[i], payload, (uint16_t)sizeof(payload));
+    if (sent) any = true;
   }
   if (!any) return;  // the send queue took none: the next look tries again, with the same number
   sPe.powerCounter = frame.counter;
@@ -318,8 +400,12 @@ static void pePowerStep(const PeSendPlan& plan, uint32_t nowMs) {
 static constexpr int kPeEventsPerLook = 4;
 static constexpr int kPeEventsExaminedPerLook = 64;  // more than the ring holds
 static void peEventStep(const PeSendPlan& plan, uint32_t nowMs) {
-  // No named master has a session yet: the cursor waits.
-  if (plan.eventsWhy == espnowsensor::PushWhyNot::NoSession) return;
+  // No named master has a session yet, or the bond partner is not connected:
+  // the cursor waits, and the events go later with their age.
+  if (plan.eventsWhy == espnowsensor::PushWhyNot::NoSession ||
+      plan.eventsWhy == espnowsensor::PushWhyNot::BondOffline) {
+    return;
+  }
   // Not sending at all (switched off, no master named, the master's role):
   // the cursor follows the head, so nothing old is sent once that changes.
   if (plan.eventsWhy != espnowsensor::PushWhyNot::Sends) {
@@ -394,7 +480,10 @@ static void peEventStep(const PeSendPlan& plan, uint32_t nowMs) {
     espnowsensor::packEventFrame(payload, frame);
     bool any = false;
     for (uint8_t i = 0; i < plan.targetCount; ++i) {
-      if (plan.targetReady[i] && peSendEvent(plan.targetMac[i], payload, (uint16_t)sizeof(payload))) any = true;
+      if (!plan.targetReady[i]) continue;
+      const bool sent = plan.viaBond ? peSendBondEvent(plan.targetMac[i], payload, (uint16_t)sizeof(payload))
+                                     : peSendEvent(plan.targetMac[i], payload, (uint16_t)sizeof(payload));
+      if (sent) any = true;
     }
     if (!any) break;  // the send queue took none: this event waits for the next look
     (void)espnowsensor::bucketTake(sPe.eventBucket, espnowsensor::kEventTxBurst, espnowsensor::kEventTxRefillMs, nowMs);
@@ -414,10 +503,12 @@ void espnowPowerEventsTick(uint32_t nowMs) {
   pePlan(nowMs, &plan);
   // A named master without a session gets a handshake start (one a look,
   // backed off like every automatic start): this is what brings a worker back
-  // whose master restarted where the heartbeat does not reach.
+  // whose master restarted where the heartbeat does not reach. Never the bond
+  // partner: the bond heartbeat owns that session, and only the higher
+  // address of a bond starts one (bondSendEncryptedAsync).
   const bool wants = plan.batteryWhy == espnowsensor::PushWhyNot::Sends || plan.batteryWhy == espnowsensor::PushWhyNot::NoSession ||
                      plan.eventsWhy == espnowsensor::PushWhyNot::Sends || plan.eventsWhy == espnowsensor::PushWhyNot::NoSession;
-  if (wants) {
+  if (wants && !plan.viaBond) {
     for (uint8_t i = 0; i < plan.targetCount; ++i) {
       if (plan.targetReady[i] || peSessionUp(plan.targetMac[i])) continue;
       if (peHandshake(plan.targetMac[i])) break;
@@ -435,35 +526,65 @@ static void peRefuse(uint32_t PeRefusals::*counter) {
   PE_UNLOCK();
 }
 
-// The record of a paired sender, made when there is none: a free one, else
-// one whose device is no longer paired. nullptr when all belong to paired
-// devices. Without the lock (the pairing lookup must not run under it).
-static PeCollectPeer* pePeerFor(const uint8_t mac[6]) {
+static const uint8_t kPeNoVia[6] = { 0, 0, 0, 0, 0, 0 };
+
+static bool peSameSender(const PeCollectPeer& peer, const uint8_t mac[6], const uint8_t* via) {
+  return memcmp(peer.mac, mac, 6) == 0 && memcmp(peer.via, via ? via : kPeNoVia, 6) == 0;
+}
+
+// The record of a sender (origin, via), made when there is none: a free one,
+// else one that may be given up (espnowfwd::recordReusable). nullptr when
+// none may. Without the lock (the pairing lookup must not run under it).
+static PeCollectPeer* pePeerFor(const ForwardOrigin& origin) {
+  const uint8_t* via = origin.link == espnowfwd::kLinkForwarded ? origin.via : kPeNoVia;
   PeCollectPeer* freeRecord = nullptr;
   for (uint8_t i = 0; i < kPePeerSlots; ++i) {
-    if (sPe.peers[i].inUse && memcmp(sPe.peers[i].mac, mac, 6) == 0) return &sPe.peers[i];
+    if (sPe.peers[i].inUse && peSameSender(sPe.peers[i], origin.mac, via)) {
+      // The same origin may come over the mesh and over the bond link.
+      if (sPe.peers[i].link != origin.link) {
+        PE_LOCK();
+        sPe.peers[i].link = origin.link;
+        PE_UNLOCK();
+      }
+      return &sPe.peers[i];
+    }
     if (!sPe.peers[i].inUse && !freeRecord) freeRecord = &sPe.peers[i];
   }
   if (!freeRecord) {
     for (uint8_t i = 0; i < kPePeerSlots; ++i) {
-      if (!peIsPaired(sPe.peers[i].mac)) { freeRecord = &sPe.peers[i]; break; }
+      const PeCollectPeer& r = sPe.peers[i];
+      const bool forwarded = r.link == espnowfwd::kLinkForwarded;
+      if (espnowfwd::recordReusable(r.link, forwarded ? false : peIsPaired(r.mac), forwarded ? peIsPaired(r.via) : false,
+                                    forwarded ? peLinkActive(r.via, r.mac) : false)) {
+        freeRecord = &sPe.peers[i];
+        break;
+      }
     }
   }
   if (!freeRecord) return nullptr;
   PE_LOCK();
   memset(freeRecord, 0, sizeof(*freeRecord));
-  memcpy(freeRecord->mac, mac, 6);
+  memcpy(freeRecord->mac, origin.mac, 6);
+  memcpy(freeRecord->via, via, 6);
+  freeRecord->link = origin.link;
   freeRecord->inUse = true;
   PE_UNLOCK();
   return freeRecord;
 }
 
 // The gate of both frames after the receive table's: this device's role must
-// keep them (a master or backup master), and it must have a record for the
-// sender. A refusal is counted, and said once a minute. nullptr: refused.
-static PeCollectPeer* peAccept(const uint8_t mac[6], const char* senderName, uint32_t nowMs) {
+// keep them (a master or backup master; for a frame over the bond link, this
+// device must be the bond master, whatever its mesh role), and it must have a
+// record for the sender. A refusal is counted, and said once a minute.
+// nullptr: refused.
+static PeCollectPeer* peAccept(const ForwardOrigin& origin, const char* senderName, uint32_t nowMs) {
   const char* name = senderName ? senderName : "?";
-  if (!espnowsensor::roleReceives(peRole())) {
+  if (origin.link == espnowfwd::kLinkBond) {
+    if (!peIsBondMaster()) {
+      peRefuse(&PeRefusals::notBondMaster);
+      return nullptr;
+    }
+  } else if (!espnowsensor::roleReceives(peRole())) {
     peRefuse(&PeRefusals::notReceiver);
     uint32_t held = 0;
     if (warnLimiterTake(sPe.roleWarn, nowMs, 60000, &held)) {
@@ -482,7 +603,7 @@ static PeCollectPeer* peAccept(const uint8_t mac[6], const char* senderName, uin
       PE_UNLOCK();
     }
   }
-  PeCollectPeer* peer = sPe.peers ? pePeerFor(mac) : nullptr;
+  PeCollectPeer* peer = sPe.peers ? pePeerFor(origin) : nullptr;
   if (peer) return peer;
   peRefuse(sPe.peers ? &PeRefusals::noRecord : &PeRefusals::noMemory);
   uint32_t held = 0;
@@ -498,54 +619,99 @@ static PeCollectPeer* peAccept(const uint8_t mac[6], const char* senderName, uin
   return nullptr;
 }
 
-// POWER_STATUS from a paired sender over its session. The receiver stamps it
-// with its own clock; an older frame never replaces a newer one.
-static void powerEventsIngestPower(const uint8_t* sender, const char* senderName, const uint8_t* payload, size_t len) {
+// Whose a frame is (its origin, and the bond master that forwarded it). False:
+// refused and counted.
+static bool peOriginOf(const uint8_t* sender, const char* senderName, bool bondLink, bool hasBit, bool bitSet,
+                       uint8_t fwdLink, uint8_t streamId, ForwardOrigin* origin) {
+  switch (peWhose(sender, senderName, bondLink, hasBit, bitSet, fwdLink, streamId, origin)) {
+    case ForwardResolve::Own:
+    case ForwardResolve::Forwarded:
+      return true;
+    case ForwardResolve::Refused:
+      peRefuse(&PeRefusals::forwardRefused);
+      return false;
+    case ForwardResolve::Malformed:
+      break;
+  }
+  peRefuse(&PeRefusals::malformed);
+  return false;
+}
+
+// POWER_STATUS from a paired sender over its session (`bondLink`: BOND_POWER_STATUS
+// from this device's bond partner). The receiver stamps it with its own
+// clock; an older frame never replaces a newer one. A bond master hands what
+// it kept of its partner to its forwarder.
+static void powerEventsIngestPower(const uint8_t* sender, const char* senderName, const uint8_t* payload, size_t len,
+                                   bool bondLink) {
   const uint32_t nowMs = peUptimeMs();
   espnowsensor::PowerFrame frame = {};
   if (!sender || !espnowsensor::parsePowerFrame(payload, len, frame)) {
     peRefuse(&PeRefusals::malformed);
     return;
   }
-  PeCollectPeer* peer = peAccept(sender, senderName, nowMs);
-  if (!peer) return;
+  ForwardOrigin origin;
+  if (!peOriginOf(sender, senderName, bondLink, false, frame.fwdLink != 0, frame.fwdLink, espnowfwd::kStreamIdBattery,
+                  &origin)) {
+    return;
+  }
+  PeCollectPeer* peer = peAccept(origin, origin.name, nowMs);
+  if (!peer) {
+    if (bondLink) peNotKept(espnowfwd::kStreamIdBattery);
+    return;
+  }
   const bool clockSet = peClockSet();
   const int64_t epochMs = clockSet ? peEpochMs() : 0;
   const uint8_t clock = peClockSource();
   PE_LOCK();
-  strlcpy(peer->name, senderName ? senderName : "", sizeof(peer->name));
-  const espnowsensor::CounterVerdict verdict =
-      espnowsensor::counterJudge(peer->powerTrack, peer->powerCounts, frame.bootTag, frame.counter, false, nowMs);
-  if (espnowsensor::counterVerdictKeeps(verdict)) {
+  strlcpy(peer->name, origin.name, sizeof(peer->name));
+  const espnowsensor::CounterVerdict verdict = espnowsensor::counterJudge(
+      peer->powerTrack, peer->powerCounts, frame.bootTag, frame.counter, origin.resumePending, nowMs);
+  const bool kept = espnowsensor::counterVerdictKeeps(verdict);
+  if (kept) {
     peer->power = frame;
+    peer->power.fwdLink = 0;
     peer->havePower = true;
     peer->powerEpochMs = epochMs;
     peer->powerUptimeMs = nowMs;
     peer->powerClock = clock;
   }
   PE_UNLOCK();
+  if (origin.resumePending) peResumeTaken(origin.via, espnowfwd::kStreamIdBattery);
+  if (bondLink && kept) peForwardPower(sender, frame);
 }
 
-// EVENT_PUSH from a paired sender over its session. Nothing in the frame is
+// EVENT_PUSH from a paired sender over its session (`bondLink`:
+// BOND_EVENT_PUSH from this device's bond partner). Nothing in the frame is
 // trusted to be text: every field is copied with its length and cleaned
-// before it is stored. The event goes into the list of the sender's mesh and
-// nowhere else: it is never posted into this device's own event ring.
-static void powerEventsIngestEvent(const uint8_t* sender, const char* senderName, const uint8_t* payload, size_t len) {
+// before it is stored. The event goes into the list of the sender's mesh (a
+// forwarded one: of the device that forwarded it) and nowhere else: it is
+// never posted into this device's own event ring.
+static void powerEventsIngestEvent(const uint8_t* sender, const char* senderName, const uint8_t* payload, size_t len,
+                                   bool bondLink) {
   const uint32_t nowMs = peUptimeMs();
   espnowsensor::EventFrame frame = {};
   if (!sender || !espnowsensor::parseEventFrame(payload, len, frame)) {
     peRefuse(&PeRefusals::malformed);
     return;
   }
-  PeCollectPeer* peer = peAccept(sender, senderName, nowMs);
-  if (!peer) return;
-  uint8_t mesh = peMeshOf(sender);
+  ForwardOrigin origin;
+  if (!peOriginOf(sender, senderName, bondLink, true, (frame.flags & espnowsensor::kEventFlagForwarded) != 0,
+                  frame.fwdLink, espnowfwd::kStreamIdEvents, &origin)) {
+    return;
+  }
+  PeCollectPeer* peer = peAccept(origin, origin.name, nowMs);
+  if (!peer) {
+    if (bondLink) peNotKept(espnowfwd::kStreamIdEvents);
+    return;
+  }
+  uint8_t mesh = peMeshOf(sender);  // a forwarded event: the mesh of the device that forwarded it
   if (mesh >= espnowsensor::kEventMeshes) mesh = 0;
   if (!sPe.lists[mesh]) {
     const size_t bytes = (size_t)espnowsensor::kEventListLen * sizeof(espnowsensor::StoredEvent);
     espnowsensor::StoredEvent* list = (espnowsensor::StoredEvent*)peAlloc(bytes, "espnow.events");
     if (!list) {
       peRefuse(&PeRefusals::noMemory);
+      if (bondLink) peNotKept(espnowfwd::kStreamIdEvents);
       return;
     }
     memset(list, 0, bytes);
@@ -554,10 +720,12 @@ static void powerEventsIngestEvent(const uint8_t* sender, const char* senderName
     PE_UNLOCK();
   }
   espnowsensor::StoredEvent stored = {};
-  memcpy(stored.senderMac, sender, 6);
+  memcpy(stored.senderMac, origin.mac, 6);
+  if (origin.link == espnowfwd::kLinkForwarded) memcpy(stored.via, origin.via, 6);
+  stored.link = origin.link;
   stored.tier = frame.tier;
   stored.source = frame.source;
-  stored.flags = (uint8_t)(frame.flags & 0x0F);
+  stored.flags = (uint8_t)(frame.flags & espnowsensor::kEventCutMask);
   stored.mesh = mesh;
   stored.counter = frame.counter;
   stored.bootTag = frame.bootTag;
@@ -572,10 +740,11 @@ static void powerEventsIngestEvent(const uint8_t* sender, const char* senderName
   espnowsensor::wireTextCopy(frame.who, sizeof(frame.who), stored.who, sizeof(stored.who));
   bool store = false;
   PE_LOCK();
-  strlcpy(peer->name, senderName ? senderName : "", sizeof(peer->name));
-  const espnowsensor::CounterVerdict verdict =
-      espnowsensor::counterJudge(peer->eventTrack, peer->eventCounts, frame.bootTag, frame.counter, false, nowMs);
-  if (espnowsensor::counterVerdictKeeps(verdict)) {
+  strlcpy(peer->name, origin.name, sizeof(peer->name));
+  const espnowsensor::CounterVerdict verdict = espnowsensor::counterJudge(
+      peer->eventTrack, peer->eventCounts, frame.bootTag, frame.counter, origin.resumePending, nowMs);
+  const bool kept = espnowsensor::counterVerdictKeeps(verdict);
+  if (kept) {
     peer->senderSkipped += frame.skipped;
     // One sender may fill at most its share: sixteen at once, then one a second.
     if (!espnowsensor::bucketTake(peer->eventBucket, espnowsensor::kEventRxBurst, espnowsensor::kEventRxRefillMs, nowMs)) {
@@ -586,6 +755,10 @@ static void powerEventsIngestEvent(const uint8_t* sender, const char* senderName
     }
   }
   PE_UNLOCK();
+  if (origin.resumePending) peResumeTaken(origin.via, espnowfwd::kStreamIdEvents);
+  // The bond master forwards what the counter rule kept, whatever its own
+  // list's rate limit did (that limit is about this device's list).
+  if (bondLink && kept) peForwardEvent(sender, frame);
   if (!store) return;
   // Which entry it takes is worked out without the lock (a full list costs
   // 24 x 24 compares over 3.6 KB of PSRAM): only this task writes the lists,
@@ -625,20 +798,43 @@ static bool pePeerCopyAt(uint8_t index, PeCollectPeer* out) {
   return have;
 }
 
-static bool pePeerCopyFor(const uint8_t mac[6], PeCollectPeer* out) {
+// The record of (mac, via); via nullptr: the origin's own record.
+static bool pePeerCopyFor(const uint8_t mac[6], const uint8_t* via, PeCollectPeer* out) {
   for (uint8_t i = 0; i < kPePeerSlots; ++i) {
-    if (pePeerCopyAt(i, out) && memcmp(out->mac, mac, 6) == 0) return true;
+    if (pePeerCopyAt(i, out) && peSameSender(*out, mac, via)) return true;
   }
   return false;
 }
 
-// The name to show for a sender: the one its frames came with, else its address.
+static bool peForwarded(const PeCollectPeer& peer) { return peer.link == espnowfwd::kLinkForwarded; }
+
+// The name to show for a sender: the one its frames came with, else its
+// address; a forwarded one with " via <device>".
 static void pePeerShownName(const PeCollectPeer& peer, char* out, size_t cap) {
-  if (peer.name[0]) {
-    strlcpy(out, peer.name, cap);
+  char base[33];
+  if (peer.name[0]) strlcpy(base, peer.name, sizeof(base));
+  else macToDisplay(peer.mac, base, sizeof(base));
+  if (!peForwarded(peer)) {
+    strlcpy(out, base, cap);
     return;
   }
-  macToDisplay(peer.mac, out, cap);
+  char via[32];
+  peViaName(peer.via, via, sizeof(via));
+  snprintf(out, cap, "%s via %s", base, via);
+}
+
+// `,"link":"..","via":{..}|null` of a JSON row.
+static void peLinkJson(uint8_t link, const uint8_t via[6], char* out, size_t cap) {
+  if (link != espnowfwd::kLinkForwarded) {
+    snprintf(out, cap, ",\"link\":\"%s\",\"via\":null", espnowfwd::linkKey(link));
+    return;
+  }
+  char name[32];
+  char nameJson[72];
+  peViaName(via, name, sizeof(name));
+  espnowsensor::jsonTextEscape(name, nameJson, sizeof(nameJson));
+  snprintf(out, cap, ",\"link\":\"forwarded\",\"via\":{\"mac\":\"" MAC_FMT "\",\"name\":\"%s\"}", MAC_ARGS(via),
+           nameJson);
 }
 
 void espnowPowerEventsSendView(PowerEventsSendView* out) {
@@ -662,12 +858,15 @@ void espnowPowerEventsSendView(PowerEventsSendView* out) {
 // is null. 0 when it does not fit `cap`.
 static size_t peBatteryRowJson(const PeCollectPeer& peer, uint32_t nowMs, char* out, size_t cap) {
   const espnowsensor::PowerFrame& f = peer.power;
-  char name[32];
+  char name[33];
   char nameJson[72];
-  pePeerShownName(peer, name, sizeof(name));
+  char linkJson[160];
+  if (peer.name[0]) strlcpy(name, peer.name, sizeof(name));
+  else macToDisplay(peer.mac, name, sizeof(name));
   espnowsensor::jsonTextEscape(name, nameJson, sizeof(nameJson));
+  peLinkJson(peer.link, peer.via, linkJson, sizeof(linkJson));
   size_t pos = 0;
-  peAppend(out, cap, &pos, "{\"mac\":\"" MAC_FMT "\",\"name\":\"%s\"", MAC_ARGS(peer.mac), nameJson);
+  peAppend(out, cap, &pos, "{\"mac\":\"" MAC_FMT "\",\"name\":\"%s\"%s", MAC_ARGS(peer.mac), nameJson, linkJson);
   if (peer.powerEpochMs != 0) peAppend(out, cap, &pos, ",\"arrivalEpochMs\":%lld", (long long)peer.powerEpochMs);
   else peAppend(out, cap, &pos, ",\"arrivalEpochMs\":null");
   peAppend(out, cap, &pos, ",\"arrivalUptimeMs\":%lu,\"agoMs\":%lu,\"clock\":\"%s\",\"bootTag\":%u,\"counter\":%u",
@@ -725,11 +924,14 @@ static size_t peEventCountsJson(const PeCollectPeer& peer, bool withName, char* 
   size_t pos = 0;
   peAppend(out, cap, &pos, "{");
   if (withName) {
-    char name[32];
+    char name[33];
     char nameJson[72];
-    pePeerShownName(peer, name, sizeof(name));
+    char linkJson[160];
+    if (peer.name[0]) strlcpy(name, peer.name, sizeof(name));
+    else macToDisplay(peer.mac, name, sizeof(name));
     espnowsensor::jsonTextEscape(name, nameJson, sizeof(nameJson));
-    peAppend(out, cap, &pos, "\"mac\":\"" MAC_FMT "\",\"name\":\"%s\",", MAC_ARGS(peer.mac), nameJson);
+    peLinkJson(peer.link, peer.via, linkJson, sizeof(linkJson));
+    peAppend(out, cap, &pos, "\"mac\":\"" MAC_FMT "\",\"name\":\"%s\"%s,", MAC_ARGS(peer.mac), nameJson, linkJson);
   }
   const espnowsensor::CounterCounts& c = peer.eventCounts;
   const bool whole = peAppend(out, cap, &pos,
@@ -749,22 +951,22 @@ static bool peSentEvents(const PeCollectPeer& peer) {
   return peer.eventCounts.received != 0 || peer.refusedRate != 0;
 }
 
-size_t espnowBatteryJsonFor(const uint8_t mac[6], char* out, size_t cap) {
+size_t espnowBatteryJsonFor(const uint8_t mac[6], const uint8_t* via, char* out, size_t cap) {
   PeCollectPeer peer;
   if (!out || cap == 0) return 0;
   out[0] = '\0';
-  if (!mac || !pePeerCopyFor(mac, &peer) || !peer.havePower) return 0;
+  if (!mac || !pePeerCopyFor(mac, via, &peer) || !peer.havePower) return 0;
   return peBatteryRowJson(peer, peUptimeMs(), out, cap);
 }
 
 bool espnowEventCountsVisible() { return peCallerIsAdmin(); }
 
-size_t espnowEventCountsJsonFor(const uint8_t mac[6], char* out, size_t cap) {
+size_t espnowEventCountsJsonFor(const uint8_t mac[6], const uint8_t* via, char* out, size_t cap) {
   PeCollectPeer peer;
   if (!out || cap == 0) return 0;
   out[0] = '\0';
   if (!espnowEventCountsVisible()) return 0;
-  if (!mac || !pePeerCopyFor(mac, &peer) || !peSentEvents(peer)) return 0;
+  if (!mac || !pePeerCopyFor(mac, via, &peer) || !peSentEvents(peer)) return 0;
   return peEventCountsJson(peer, false, out, cap);
 }
 
@@ -787,11 +989,11 @@ static void peBatteryWords(const espnowsensor::PowerFrame& f, char* out, size_t 
   if (f.known & espnowsensor::kPowerStale) peAppend(out, cap, &pos, ", its last sample was old");
 }
 
-size_t espnowPowerEventsPeerText(const uint8_t mac[6], char* out, size_t cap) {
+size_t espnowPowerEventsPeerText(const uint8_t mac[6], const uint8_t* via, char* out, size_t cap) {
   PeCollectPeer peer;
   if (!out || cap == 0) return 0;
   out[0] = '\0';
-  if (!mac || !pePeerCopyFor(mac, &peer)) return 0;
+  if (!mac || !pePeerCopyFor(mac, via, &peer)) return 0;
   size_t pos = 0;
   if (peer.havePower) {
     if (peer.power.known & espnowsensor::kPowerPercentValid) {
@@ -857,9 +1059,11 @@ static void peRefusedJson(char* reply, size_t cap, size_t* pos) {
   PE_LOCK();
   refused = sPe.refused;
   PE_UNLOCK();
-  peAppend(reply, cap, pos, ",\"refused\":{\"notReceiver\":%lu,\"full\":%lu,\"noMemory\":%lu,\"malformed\":%lu}",
+  peAppend(reply, cap, pos,
+           ",\"refused\":{\"notReceiver\":%lu,\"full\":%lu,\"noMemory\":%lu,\"malformed\":%lu,\"notBondMaster\":%lu,"
+           "\"forwardRefused\":%lu}",
            (unsigned long)refused.notReceiver, (unsigned long)refused.noRecord, (unsigned long)refused.noMemory,
-           (unsigned long)refused.malformed);
+           (unsigned long)refused.malformed, (unsigned long)refused.notBondMaster, (unsigned long)refused.forwardRefused);
 }
 
 const char* cmd_espnow_battery(const String& argsInput) {
@@ -923,7 +1127,7 @@ const char* cmd_espnow_battery(const String& argsInput) {
     if (!pePeerCopyAt(i, &peer) || !peer.havePower) continue;
     if (only && memcmp(peer.mac, onlyMac, 6) != 0) continue;
     if (shown++ == 0) peConsole("[ESP-NOW] Battery state received from other devices");
-    char name[32];
+    char name[72];
     char words[112];
     char when[48] = "this device's clock was not set";
     pePeerShownName(peer, name, sizeof(name));
@@ -967,11 +1171,12 @@ static bool peEventCopyNext(uint32_t after, espnowsensor::StoredEvent* out) {
   return have;
 }
 
-// The name of an event's sender, by its record; its address when there is none.
+// The name of an event's sender (without the via), by its record; its
+// address when there is none.
 static void peEventSenderName(const espnowsensor::StoredEvent& e, char* out, size_t cap) {
   PeCollectPeer peer;
-  if (pePeerCopyFor(e.senderMac, &peer)) {
-    pePeerShownName(peer, out, cap);
+  if (pePeerCopyFor(e.senderMac, e.link == espnowfwd::kLinkForwarded ? e.via : nullptr, &peer) && peer.name[0]) {
+    strlcpy(out, peer.name, cap);
     return;
   }
   macToDisplay(e.senderMac, out, cap);
@@ -985,15 +1190,17 @@ static size_t peEventJson(const espnowsensor::StoredEvent& e, char* out, size_t 
   char subject[2 * sizeof(e.subject)];
   char detail[2 * sizeof(e.detail)];
   char who[2 * sizeof(e.who)];
+  char linkJson[160];
   peEventSenderName(e, name, sizeof(name));
   espnowsensor::jsonTextEscape(name, nameJson, sizeof(nameJson));
+  peLinkJson(e.link, e.via, linkJson, sizeof(linkJson));
   espnowsensor::jsonTextEscape(e.kind, kind, sizeof(kind));
   espnowsensor::jsonTextEscape(e.subject, subject, sizeof(subject));
   espnowsensor::jsonTextEscape(e.detail, detail, sizeof(detail));
   espnowsensor::jsonTextEscape(e.who, who, sizeof(who));
   size_t pos = 0;
-  peAppend(out, cap, &pos, "{\"rx\":%lu,\"mesh\":%u,\"mac\":\"" MAC_FMT "\",\"name\":\"%s\"", (unsigned long)e.rx,
-           (unsigned)e.mesh, MAC_ARGS(e.senderMac), nameJson);
+  peAppend(out, cap, &pos, "{\"rx\":%lu,\"mesh\":%u,\"mac\":\"" MAC_FMT "\",\"name\":\"%s\"%s", (unsigned long)e.rx,
+           (unsigned)e.mesh, MAC_ARGS(e.senderMac), nameJson, linkJson);
   if (e.arrivalEpochMs != 0) peAppend(out, cap, &pos, ",\"arrivalEpochMs\":%lld", (long long)e.arrivalEpochMs);
   else peAppend(out, cap, &pos, ",\"arrivalEpochMs\":null");
   peAppend(out, cap, &pos,
@@ -1097,9 +1304,15 @@ const char* cmd_espnow_events(const String& argsInput) {
   unsigned shown = 0;
   for (uint32_t after = since; peEventCopyNext(after, &e); after = e.rx) {
     if (shown++ == 0) peConsole("[ESP-NOW] Events received from other devices (oldest first)");
-    char name[32];
+    char name[72];
     char when[48];
     peEventSenderName(e, name, sizeof(name));
+    if (e.link == espnowfwd::kLinkForwarded) {
+      char via[32];
+      peViaName(e.via, via, sizeof(via));
+      strlcat(name, " via ", sizeof(name));
+      strlcat(name, via, sizeof(name));
+    }
     if (e.arrivalEpochMs != 0) peFormatLocal(e.arrivalEpochMs, when, sizeof(when));
     else snprintf(when, sizeof(when), "clock not set, up %lu s", (unsigned long)(e.arrivalUptimeMs / 1000));
     char by[40];
@@ -1133,11 +1346,23 @@ const char* cmd_espnow_events(const String& argsInput) {
 // POWER_EVENTS_HOST_END
 
 void v4hPowerStatus(const V4RxCtx& ctx) {
-  powerEventsIngestPower(ctx.recv_info->src_addr, ctx.deviceName, ctx.payload, ctx.payloadLen);
+  powerEventsIngestPower(ctx.recv_info->src_addr, ctx.deviceName, ctx.payload, ctx.payloadLen, /*bondLink=*/false);
 }
 
 void v4hEventPush(const V4RxCtx& ctx) {
-  powerEventsIngestEvent(ctx.recv_info->src_addr, ctx.deviceName, ctx.payload, ctx.payloadLen);
+  powerEventsIngestEvent(ctx.recv_info->src_addr, ctx.deviceName, ctx.payload, ctx.payloadLen, /*bondLink=*/false);
 }
+
+#if ENABLE_BONDED_MODE
+// BOND_POWER_STATUS / BOND_EVENT_PUSH: the receive table let them through only
+// from the configured bond partner over its session (REQ_BOND_PEER).
+void v4hBondPowerStatus(const V4RxCtx& ctx) {
+  powerEventsIngestPower(ctx.recv_info->src_addr, ctx.deviceName, ctx.payload, ctx.payloadLen, /*bondLink=*/true);
+}
+
+void v4hBondEventPush(const V4RxCtx& ctx) {
+  powerEventsIngestEvent(ctx.recv_info->src_addr, ctx.deviceName, ctx.payload, ctx.payloadLen, /*bondLink=*/true);
+}
+#endif
 
 #endif  // ENABLE_ESPNOW

@@ -1299,11 +1299,13 @@ void displayRemoteSensors() {
   RemoteSensorInfo entryInfo;
   if (!remoteSensorInfoAt(idx, &entryInfo)) return;  // gone since the list was made
   const RemoteSensorInfo* entry = &entryInfo;
-  remoteSensorCopyText(entry->deviceMac, entry->sensorType, sRemoteSensorText, sizeof(sRemoteSensorText));
+  remoteSensorCopyText(entry->deviceMac, remoteSensorInfoVia(*entry), entry->sensorType, sRemoteSensorText,
+                       sizeof(sRemoteSensorText));
 
   // Device name and sensor type
   oledDisplay->setCursor(0, 12);
   oledDisplay->print(entry->deviceName);
+  if (remoteSensorInfoVia(*entry)) oledDisplay->print("*");  // forwarded by a bond master
   oledDisplay->print(" - ");
   oledDisplay->println(sensorTypeToString(entry->sensorType));
 

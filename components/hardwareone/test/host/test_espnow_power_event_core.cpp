@@ -87,6 +87,16 @@ static void testPowerFrame() {
   std::memcpy(longer, wire, sizeof(wire));
   CHECK(parsePowerFrame(longer, sizeof(longer), back) && back.voltageMv == 3912);
   CHECK(kPowerFrameLen == 24 && kPowerFrameLen <= kFrameCapRouted);
+  // Byte 16 is the forwarding bond master's link number (0: the sender's own
+  // frame); bytes 17 to 23 stay 0. `known` is not touched.
+  CHECK(back.fwdLink == 0);
+  f.known = kPowerKnownAll;
+  f.fwdLink = 0x42;
+  packPowerFrame(wire, f);
+  CHECK(wire[16] == 0x42 && wire[6] == 0xFF && wire[7] == 0x1F);
+  for (size_t i = 17; i < kPowerFrameLen; ++i) CHECK(wire[i] == 0);
+  CHECK(parsePowerFrame(wire, sizeof(wire), back) && back.fwdLink == 0x42 && back.known == kPowerKnownAll &&
+        back.voltageMv == 3912);
 
   // A snapshot with every flag set.
   PowerInputs in = {};
@@ -252,7 +262,15 @@ static void testEventFrame() {
   // Flag bits the frame has no meaning for are not sent.
   f.flags = 0xFF;
   packEventFrame(wire, f);
-  CHECK(wire[4] == 0x0F && wire[7] == 0 && wire[10] == 0 && wire[11] == 0);
+  // (bit 4 is the forwarded mark; bits 5 to 7 are never sent)
+  CHECK(wire[4] == 0x1F && wire[7] == 0 && wire[10] == 0 && wire[11] == 0);
+  // Byte 7 is the forwarding bond master's link number.
+  f.flags = (uint8_t)(kEventCutDetail | kEventFlagForwarded);
+  f.fwdLink = 9;
+  packEventFrame(wire, f);
+  CHECK(wire[4] == 0x12 && wire[7] == 9);
+  CHECK(parseEventFrame(wire, sizeof(wire), back) && back.fwdLink == 9 && back.flags == 0x12);
+  CHECK(kEventCutMask == 0x0F && kEventFlagForwarded == 0x10 && kEventFlagsSent == 0x1F);
   CHECK(kEventFrameLen == 128 && kEventFrameLen <= kFrameCapRouted);
   CHECK(eventSkippedField(0) == 0 && eventSkippedField(65535) == 65535 && eventSkippedField(65536) == 65535 &&
         eventSkippedField(0xFFFFFFFFu) == 65535);
@@ -386,6 +404,28 @@ static void testPushDecide() {
     for (uint8_t k = 1; k < i; ++k) CHECK(!is(pushWhyNotKey(why), pushWhyNotKey((PushWhyNot)k)));
   }
   CHECK(is(pushWhyNotKey(PushWhyNot::NoMaster), "no_master") && is(pushWhyNotKey(PushWhyNot::IsMaster), "is_master"));
+  // A bond worker: its bond partner, or nothing; never a named mesh master,
+  // whatever the mesh inputs say.
+  for (int mask = 0; mask < 64; ++mask) {
+    PushInputs b = {};
+    b.inBuild = true;
+    b.settingOn = true;
+    b.bondWorker = true;
+    b.meshOn = mask & 1;
+    b.meshRole = (mask & 2) ? kRoleMaster : kRoleWorker;
+    b.masterNamed = mask & 4;
+    b.targets = (mask & 8) ? 2 : 0;
+    b.targetsReady = (mask & 16) ? 2 : 0;
+    b.bondOnline = mask & 32;
+    CHECK(pushDecide(b) == (b.bondOnline ? PushWhyNot::Sends : PushWhyNot::BondOffline));
+    b.settingOn = false;
+    CHECK(pushDecide(b) == PushWhyNot::Off);
+    b.settingOn = true;
+    b.inBuild = false;
+    CHECK(pushDecide(b) == PushWhyNot::NotInBuild);
+  }
+  CHECK(is(pushWhyNotKey(PushWhyNot::BondOffline), "bond_offline") &&
+        is(pushWhyNotText(PushWhyNot::BondOffline), "the bond partner is not connected"));
 }
 
 static std::string copied(const std::string& field, size_t fieldLen) {
@@ -525,6 +565,29 @@ static void testEventList() {
   CHECK(eventOldestHeld(0, 48) == 1 && eventOldestHeld(1, 48) == 1 && eventOldestHeld(47, 48) == 1 &&
         eventOldestHeld(48, 48) == 1 && eventOldestHeld(49, 48) == 2 && eventOldestHeld(100, 48) == 53);
   CHECK(kEventListLen == 24 && kEventMeshes == 4);
+  // A sender is (origin, via): a bond partner forwarded by two devices, and
+  // the same partner's own events, are three senders for the fairness rule.
+  StoredEvent mixed[kEventListLen] = {};
+  for (uint8_t i = 0; i < kEventListLen; ++i) {
+    mixed[i] = ev(i + 1, 1);
+    if (i % 3 == 1) mixed[i].via[5] = 0x10;  // porch via glasses
+    if (i % 3 == 2) mixed[i].via[5] = 0x11;  // porch via shed
+  }
+  // Each holds 8; the one whose oldest entry is oldest gives one: (porch, none), rx 1.
+  CHECK(eventListSlot(mixed, kEventListLen) == 0);
+  mixed[0] = ev(100, 1);
+  mixed[0].via[5] = 0x10;  // (porch via glasses) now holds 9
+  CHECK(eventListSlot(mixed, kEventListLen) == 1);  // its own oldest goes next: rx 2
+  // The same origin under two vias is two senders: (porch, none) holds 16
+  // newer events, (porch via glasses) 8 older ones. The busier one gives its
+  // oldest; the other keeps all of its 8 (one sender would give the oldest
+  // of all, rx 17, from the forwarded ones).
+  StoredEvent split[kEventListLen] = {};
+  for (uint8_t i = 0; i < kEventListLen; ++i) {
+    split[i] = ev(i < 16 ? 100u + i : 1u + i, 1);
+    if (i >= 16) split[i].via[5] = 0x10;
+  }
+  CHECK(eventListSlot(split, kEventListLen) == 0);
 }
 
 int main() {

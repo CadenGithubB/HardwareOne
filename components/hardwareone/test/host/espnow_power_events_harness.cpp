@@ -23,6 +23,7 @@
 #include <string>
 #include <vector>
 
+#include "System_ESPNow_ForwardCore.h"
 #include "System_ESPNow_HandshakeBackoff.h"
 #include "System_ESPNow_PowerEventCore.h"
 #include "System_MacText.h"
@@ -169,6 +170,7 @@ struct SentFrame {
   bool power;
   uint8_t dst[6];
   std::vector<uint8_t> bytes;
+  bool bond;  // 180/182 to the bond partner
 };
 static std::vector<SentFrame> gSent;
 static bool gQueueFull = false;
@@ -221,6 +223,104 @@ static bool peSendEvent(const uint8_t mac[6], const uint8_t* payload, uint16_t l
   gSent.push_back(f);
   return true;
 }
+// ---- The bond (a bond worker sends to its bond partner only) -------------------------------
+static bool gBondWorker = false;
+static bool gBondOnline = false;
+static bool gBondMaster = false;
+static uint8_t gBondPartner[6] = { 0x02, 0xB0, 0x00, 0x00, 0x00, 0x01 };
+static bool peBondWorker() { return gBondWorker; }
+static bool peBondPartner(uint8_t mac[6]) {
+  if (!gBondOnline) return false;
+  std::memcpy(mac, gBondPartner, 6);
+  return true;
+}
+static bool peIsBondMaster() { return gBondMaster; }
+static bool peSendBondFrame(bool power, const uint8_t mac[6], const uint8_t* payload, uint16_t len) {
+  notUnderLock();
+  if (gQueueFull) return false;
+  SentFrame f{};
+  f.power = power;
+  f.bond = true;
+  std::memcpy(f.dst, mac, 6);
+  f.bytes.assign(payload, payload + len);
+  gSent.push_back(f);
+  return true;
+}
+static bool peSendBondPower(const uint8_t mac[6], const uint8_t* payload, uint16_t len) {
+  return peSendBondFrame(true, mac, payload, len);
+}
+static bool peSendBondEvent(const uint8_t mac[6], const uint8_t* payload, uint16_t len) {
+  return peSendBondFrame(false, mac, payload, len);
+}
+
+// ---- Forwarding for a bond partner: a link table of one entry, judged by the
+// production rule espnowfwd::attribute -------------------------------------------------------
+static espnowfwd::ForwardLink gLink = {};
+static unsigned gResumeTaken = 0;
+static ForwardResolve peWhose(const uint8_t src[6], const char* name, bool bondLink, bool hasBit, bool bitSet,
+                              uint8_t fwdLink, uint8_t streamId, ForwardOrigin* out) {
+  notUnderLock();
+  std::memset(out, 0, sizeof(*out));
+  std::memcpy(out->mac, src, 6);
+  out->link = bondLink ? espnowfwd::kLinkBond : espnowfwd::kLinkMesh;
+  std::snprintf(out->name, sizeof(out->name), "%s", name ? name : "");
+  const espnowfwd::ForwardLink* e = gLink.inUse && std::memcmp(gLink.via, src, 6) == 0 ? &gLink : nullptr;
+  const espnowfwd::Attribution a = espnowfwd::attribute(e, bondLink, hasBit, bitSet, fwdLink, streamId);
+  switch (a.verdict) {
+    case espnowfwd::Verdict::Own: return ForwardResolve::Own;
+    case espnowfwd::Verdict::Malformed: return ForwardResolve::Malformed;
+    case espnowfwd::Verdict::Forwarded:
+      std::memcpy(out->mac, e->partner, 6);
+      std::memcpy(out->via, src, 6);
+      out->link = espnowfwd::kLinkForwarded;
+      out->resumePending = a.resumePending;
+      std::memcpy(out->name, e->name, sizeof(out->name));
+      return ForwardResolve::Forwarded;
+    default:
+      return ForwardResolve::Refused;
+  }
+}
+static void peResumeTaken(const uint8_t via[6], uint8_t streamId) {
+  notUnderLock();
+  if (gLink.inUse && std::memcmp(gLink.via, via, 6) == 0) gLink.resumeMask = (uint16_t)(gLink.resumeMask & ~(1u << streamId));
+  ++gResumeTaken;
+}
+static bool peLinkActive(const uint8_t via[6], const uint8_t origin[6]) {
+  notUnderLock();
+  return gLink.inUse && gLink.state == espnowfwd::LState::Active && std::memcmp(gLink.via, via, 6) == 0 &&
+         std::memcmp(gLink.partner, origin, 6) == 0;
+}
+struct HandedOn {
+  bool power;
+  uint8_t src[6];
+  espnowsensor::PowerFrame p;
+  espnowsensor::EventFrame e;
+};
+static std::vector<HandedOn> gHandedOn;
+static std::vector<uint8_t> gNotKept;
+static void peForwardPower(const uint8_t src[6], const espnowsensor::PowerFrame& f) {
+  notUnderLock();
+  HandedOn h{};
+  h.power = true;
+  std::memcpy(h.src, src, 6);
+  h.p = f;
+  gHandedOn.push_back(h);
+}
+static void peForwardEvent(const uint8_t src[6], const espnowsensor::EventFrame& f) {
+  notUnderLock();
+  HandedOn h{};
+  std::memcpy(h.src, src, 6);
+  h.e = f;
+  gHandedOn.push_back(h);
+}
+static void peNotKept(uint8_t streamId) {
+  notUnderLock();
+  gNotKept.push_back(streamId);
+}
+static void peViaName(const uint8_t mac[6], char* out, size_t cap) {
+  std::snprintf(out, cap, "%s", mac[5] == 0x20 ? "glasses" : "via?");
+}
+
 // One event after *cursor, oldest first; *skipped gains what the ring
 // overwrote, and so does the ring's own count of silently lost events, as in
 // systemEventFetchSince. gRingRace: that many more events are overwritten
@@ -485,6 +585,11 @@ static void resetAll() {
   gHandshakeBringsSession = false;
   gSent.clear();
   gWatched.clear();
+  gBondWorker = gBondOnline = gBondMaster = false;
+  gLink = espnowfwd::ForwardLink{};
+  gResumeTaken = 0;
+  gHandedOn.clear();
+  gNotKept.clear();
   gQueueFull = false;
   gRing.clear();
   gRingSeq = 0;
@@ -577,11 +682,11 @@ static std::vector<uint8_t> eventBytes(uint16_t counter, uint16_t bootTag, const
   espnowsensor::packEventFrame(bytes.data(), f);
   return bytes;
 }
-static void rxPower(const uint8_t mac[6], const char* name, const std::vector<uint8_t>& bytes) {
-  powerEventsIngestPower(mac, name, bytes.data(), bytes.size());
+static void rxPower(const uint8_t mac[6], const char* name, const std::vector<uint8_t>& bytes, bool bondLink = false) {
+  powerEventsIngestPower(mac, name, bytes.data(), bytes.size(), bondLink);
 }
-static void rxEvent(const uint8_t mac[6], const char* name, const std::vector<uint8_t>& bytes) {
-  powerEventsIngestEvent(mac, name, bytes.data(), bytes.size());
+static void rxEvent(const uint8_t mac[6], const char* name, const std::vector<uint8_t>& bytes, bool bondLink = false) {
+  powerEventsIngestEvent(mac, name, bytes.data(), bytes.size(), bondLink);
 }
 
 // ---- The battery sender -------------------------------------------------------------------
@@ -977,9 +1082,9 @@ static void testReceiveRolesAndBattery() {
   check(jsonValid(j), "espnowbattery json is JSON");
   check(has(j, "{\"schema\":1,\"role\":\"master\",\"sends\":{\"sends\":false,\"whyNot\":\"is_master\",\"intervalS\":60,\"sent\":0,\"lastSentAgoS\":null}"),
         "it starts with the role and what this device sends itself");
-  check(has(j, "\"refused\":{\"notReceiver\":0,\"full\":0,\"noMemory\":0,\"malformed\":0}") && has(j, "\"from\":0,\"devices\":[") &&
+  check(has(j, "\"refused\":{\"notReceiver\":0,\"full\":0,\"noMemory\":0,\"malformed\":0,\"notBondMaster\":0,\"forwardRefused\":0}") && has(j, "\"from\":0,\"devices\":[") &&
         has(j, "],\"next\":null}"), "the refusals, the paging keys");
-  check(has(j, "{\"mac\":\"02:A0:00:00:00:01\",\"name\":\"porch\",\"arrivalEpochMs\":1763388202417,") &&
+  check(has(j, "{\"mac\":\"02:A0:00:00:00:01\",\"name\":\"porch\",\"link\":\"mesh\",\"via\":null,\"arrivalEpochMs\":1763388202417,") &&
         has(j, "\"agoMs\":12000,\"clock\":\"mesh\",\"bootTag\":7,\"counter\":1"), "the device, the receiver's stamp, the sender's tag and counter");
   check(has(j, "\"status\":\"unknown\",\"backend\":\"adc\",\"voltage\":null,\"percent\":null,\"percentEstimated\":false,"
                "\"present\":null,\"charging\":null,\"chargingEstimated\":false,\"usb\":null,\"ratePctPerHr\":null,"
@@ -1008,6 +1113,12 @@ static void testReceiveRolesAndBattery() {
   hostile[1] = 0;
   hostile[2] = 7;
   hostile[3] = 0;
+  // Byte 16 is the forwarded mark: a frame that sets it from a device with no
+  // link is refused; without it, the rest of the 0xFF bytes is read.
+  const uint32_t refusedBefore = sPe.refused.forwardRefused;
+  rxPower(kPorch, "porch", hostile);
+  check(sPe.refused.forwardRefused == refusedBefore + 1, "a set forwarded byte without a link: refused");
+  hostile[16] = 0;
   rxPower(kPorch, "porch", hostile);
   j = cmdBattery("json");
   check(jsonValid(j) && has(j, "\"status\":\"unknown\",\"backend\":\"unknown\",\"voltage\":65.535,\"percent\":100.0,") &&
@@ -1032,13 +1143,13 @@ static void testReceiveRolesAndBattery() {
         cmdBattery("from x") == "Usage: espnowbattery [json] [<name_or_mac>] [from <n>]" &&
         cmdBattery("since 3") == "Usage: espnowbattery [json] [<name_or_mac>] [from <n>]", "bad arguments give the usage");
   char one[640];
-  check(espnowBatteryJsonFor(kShed, one, sizeof(one)) > 0 && jsonValid(one) && has(one, "\"name\":\"shed\""),
+  check(espnowBatteryJsonFor(kShed, nullptr, one, sizeof(one)) > 0 && jsonValid(one) && has(one, "\"name\":\"shed\""),
         "one device's battery object, for espnowsensorstatus json <device>");
-  check(espnowBatteryJsonFor(kHub, one, sizeof(one)) == 0 && one[0] == '\0', "nothing kept of a device: empty");
+  check(espnowBatteryJsonFor(kHub, nullptr, one, sizeof(one)) == 0 && one[0] == '\0', "nothing kept of a device: empty");
   char tiny[40];
-  check(espnowBatteryJsonFor(kShed, tiny, sizeof(tiny)) == 0 && tiny[0] == '\0', "a buffer that is too small gets nothing, not half an object");
+  check(espnowBatteryJsonFor(kShed, nullptr, tiny, sizeof(tiny)) == 0 && tiny[0] == '\0', "a buffer that is too small gets nothing, not half an object");
   char words[96];
-  check(espnowPowerEventsPeerText(kShed, words, sizeof(words)) > 0 && std::string(words) == "battery 50.0 % 0 s ago",
+  check(espnowPowerEventsPeerText(kShed, nullptr, words, sizeof(words)) > 0 && std::string(words) == "battery 50.0 % 0 s ago",
         "the few words for the status line");
   gReplyFails = true;
   check(cmdBattery("json") == kCommandReplyOutOfMemory && cmdEvents("json") == kCommandReplyOutOfMemory, "no reply buffer: said");
@@ -1082,7 +1193,7 @@ static void testReceiveRolesAndBattery() {
   gAllocFails = false;
   std::vector<uint8_t> shortFrame(23, 0);
   rxPower(kPorch, "porch", shortFrame);
-  powerEventsIngestPower(kPorch, "porch", nullptr, 24);
+  powerEventsIngestPower(kPorch, "porch", nullptr, 24, false);
   rxEvent(kPorch, "porch", std::vector<uint8_t>(127, 0));
   check(sPe.refused.malformed == 3 && sPe.peers == nullptr, "frames that are too short are counted and make nothing");
 }
@@ -1103,9 +1214,9 @@ static void testEventStore() {
   check(has(j, "{\"schema\":1,\"role\":\"master\",\"boot\":77,\"latest\":1,\"since\":0,\"overwritten\":0,"
                "\"sends\":{\"sends\":false,\"whyNot\":\"is_master\",\"floor\":\"alert\",\"sent\":0,\"leftOut\":0}"),
         "boot, the newest receive number, and what this device sends itself");
-  check(has(j, "\"senders\":[{\"mac\":\"02:A0:00:00:00:01\",\"name\":\"porch\",\"received\":1,\"stored\":1,\"lost\":0,\"late\":0,"
+  check(has(j, "\"senders\":[{\"mac\":\"02:A0:00:00:00:01\",\"name\":\"porch\",\"link\":\"mesh\",\"via\":null,\"received\":1,\"stored\":1,\"lost\":0,\"late\":0,"
                "\"restarts\":0,\"resumes\":0,\"senderSkipped\":0,\"refusedRate\":0}]"), "the sender's counts, with late, resumes and refusedRate");
-  check(has(j, "\"events\":[{\"rx\":1,\"mesh\":0,\"mac\":\"02:A0:00:00:00:01\",\"name\":\"porch\",\"arrivalEpochMs\":1763388202417,"
+  check(has(j, "\"events\":[{\"rx\":1,\"mesh\":0,\"mac\":\"02:A0:00:00:00:01\",\"name\":\"porch\",\"link\":\"mesh\",\"via\":null,\"arrivalEpochMs\":1763388202417,"
                "\"arrivalUptimeMs\":" + std::to_string(t0) + ",\"clock\":\"ntp\",\"ageMs\":120,\"eventSeq\":41,\"bootTag\":7,\"counter\":1,"
                "\"tier\":\"alert\",\"source\":\"web\",\"kind\":\"login_fail\",\"subject\":\"admin\",\"detail\":\"3 attempts\","
                "\"who\":\"1.2.3.4\",\"cut\":[]}],\"more\":false}"), "the event: the receiver's stamp, the sender's numbers, the texts");
@@ -1123,6 +1234,13 @@ static void testEventStore() {
   hostile[1] = 0;
   hostile[2] = 7;
   hostile[3] = 0;
+  // Flag bit 4 and byte 7 are the forwarded mark: refused without a link;
+  // without them, the rest of the 0xFF bytes is read.
+  const uint32_t refusedEvents = sPe.refused.forwardRefused;
+  rxEvent(kPorch, "porch", hostile);
+  check(sPe.refused.forwardRefused == refusedEvents + 1, "a forwarded mark without a link: refused");
+  hostile[4] = (uint8_t)(0xFF & ~espnowsensor::kEventFlagForwarded);
+  hostile[7] = 0;
   rxEvent(kPorch, "porch", hostile);
   j = cmdEvents("json since 1");
   check(jsonValid(j) && has(j, "\"tier\":\"unknown\",\"source\":\"unknown\",\"kind\":\"" + std::string(32, '?') + "\"") &&
@@ -1217,13 +1335,13 @@ static void testEventStore() {
   }
   check(quietStill, "the quiet sender's event is still held after 40 more from the busy one");
   j = cmdEvents("json");
-  check(jsonValid(j) && has(j, "\"name\":\"porch\",\"received\":60,\"stored\":56,") && has(j, "\"refusedRate\":4}"),
+  check(jsonValid(j) && has(j, "\"name\":\"porch\",\"link\":\"mesh\",\"via\":null,\"received\":60,\"stored\":56,") && has(j, "\"refusedRate\":4}"),
         "the JSON has both senders' counts");
   char counts[320];
-  check(espnowEventCountsJsonFor(kPorch, counts, sizeof(counts)) > 0 && jsonValid(counts) &&
+  check(espnowEventCountsJsonFor(kPorch, nullptr, counts, sizeof(counts)) > 0 && jsonValid(counts) &&
         std::string(counts) == "{\"received\":60,\"stored\":56,\"lost\":0,\"late\":0,\"restarts\":0,\"resumes\":0,\"senderSkipped\":0,\"refusedRate\":4}",
         "one device's event counts, for espnowsensorstatus json <device>");
-  check(espnowEventCountsJsonFor(kHub, counts, sizeof(counts)) == 0, "a device that sent no event: nothing");
+  check(espnowEventCountsJsonFor(kHub, nullptr, counts, sizeof(counts)) == 0, "a device that sent no event: nothing");
   // Sixteen senders with events, each with a long name and large counts:
   // the senders' rows leave room for the events, so every page carries at
   // least one event and the paging ends.
@@ -1381,7 +1499,7 @@ static void testReviewFindings() {
   rxEvent(odd, "odd", eventBytes(2, 7, "login_fail", "y"));
   rxEvent(odd, "odd", eventBytes(3, 7, "login_fail", "z"));
   char words[96];
-  espnowPowerEventsPeerText(odd, words, sizeof(words));
+  espnowPowerEventsPeerText(odd, nullptr, words, sizeof(words));
   check(std::string(words) == "3 events", std::string("the status line counts 3 events: ") + words);
   // The text form marks a cut text.
   gConsole.clear();
@@ -1502,24 +1620,204 @@ static void testEventCountsAdminOnly() {
   char counts[320];
   gCallerAdmin = true;
   check(espnowEventCountsVisible(), "an admin sees the event counts");
-  check(espnowPowerEventsPeerText(kPorch, words, sizeof(words)) > 0 &&
+  check(espnowPowerEventsPeerText(kPorch, nullptr, words, sizeof(words)) > 0 &&
         std::string(words) == "battery 71.5 % 0 s ago, 2 events", "an admin's status line has the event count");
-  check(espnowEventCountsJsonFor(kPorch, counts, sizeof(counts)) > 0 && has(counts, "\"received\":2,"),
+  check(espnowEventCountsJsonFor(kPorch, nullptr, counts, sizeof(counts)) > 0 && has(counts, "\"received\":2,"),
         "an admin's json for the device has its event counts");
   gCallerAdmin = false;
   check(!espnowEventCountsVisible(), "a user who is not an admin does not");
-  check(espnowPowerEventsPeerText(kPorch, words, sizeof(words)) > 0 &&
+  check(espnowPowerEventsPeerText(kPorch, nullptr, words, sizeof(words)) > 0 &&
         std::string(words) == "battery 71.5 % 0 s ago", "the status line keeps the battery and leaves the events out");
-  check(espnowEventCountsJsonFor(kPorch, counts, sizeof(counts)) == 0 && counts[0] == '\0',
+  check(espnowEventCountsJsonFor(kPorch, nullptr, counts, sizeof(counts)) == 0 && counts[0] == '\0',
         "the json for the device gets no event counts");
   // A sender that sent events only: no words at all for that user.
   pair(kShed, "shed");
   rxEvent(kShed, "shed", eventBytes(1, 9, "login_fail", "root"));
-  check(espnowPowerEventsPeerText(kShed, words, sizeof(words)) == 0 && words[0] == '\0',
+  check(espnowPowerEventsPeerText(kShed, nullptr, words, sizeof(words)) == 0 && words[0] == '\0',
         "a sender with events and no battery state: nothing to say to that user");
   gCallerAdmin = true;
-  check(espnowPowerEventsPeerText(kShed, words, sizeof(words)) > 0 && std::string(words) == "1 events",
+  check(espnowPowerEventsPeerText(kShed, nullptr, words, sizeof(words)) > 0 && std::string(words) == "1 events",
         "and its count to an admin");
+}
+
+
+// ---- A bond worker, its bond master, and forwarding to the mesh master ---------------------
+static const uint8_t kGlasses[6] = { 0x02, 0xA0, 0x00, 0x00, 0x00, 0x20 };  // a bond master (the via)
+static const uint8_t kPartner[6] = { 0x02, 0xA0, 0x00, 0x00, 0x00, 0x30 };  // its partner, not paired with the master
+
+static void testBondAndForwarding() {
+  // A bond worker sends its battery state and events to its bond partner
+  // only, as 180/182, never to the masters named on it (with sessions up).
+  resetAll();
+  nameMasters(true, true);
+  addSession(kHub, true, gNowMs - 5000);
+  addSession(kBackup, true, gNowMs - 5000);
+  gBondWorker = true;
+  gBondOnline = false;
+  post(1, "admin", "3 attempts", "1.2.3.4");
+  run(3);
+  PowerEventsSendView view;
+  espnowPowerEventsSendView(&view);
+  check(gSent.empty() && view.batteryWhy == espnowsensor::PushWhyNot::BondOffline &&
+        view.eventsWhy == espnowsensor::PushWhyNot::BondOffline,
+        "a bond worker whose partner is offline sends nothing, to nobody");
+  check(gHandshakes.empty(), "and starts no handshake with the named masters");
+  addSession(gBondPartner, true, gNowMs - 5000);
+  gBondOnline = true;
+  run(1);
+  check(gSent.size() == 2 && gSent[0].bond && gSent[0].power && gSent[1].bond && !gSent[1].power,
+        "online: the battery frame and the waiting event go to the partner as bond frames");
+  for (const SentFrame& f : gSent) {
+    check(std::memcmp(f.dst, gBondPartner, 6) == 0, "to the bond partner, never a named master");
+  }
+  check(field(eventOf(gSent[1]).subject, 32) == "admin" && eventOf(gSent[1]).fwdLink == 0 &&
+        powerOf(gSent[0]).fwdLink == 0, "the event that waited, and nothing marked forwarded");
+  // Its session gone: no handshake from here (the bond heartbeat owns it).
+  sessionOf(gBondPartner)->up = false;
+  gHandshakes.clear();
+  post(1, "root", "locked", "");
+  run(70);
+  check(gHandshakes.empty(), "the battery step starts no session with the bond partner");
+
+  // The bond master keeps its partner's 180/182 whatever its mesh role, and
+  // hands what it kept to its forwarder.
+  resetAll();
+  gRole = 0;
+  gBondMaster = true;
+  pair(kShed, "shed");
+  rxPower(kShed, "shed", powerBytes(1, 0x0E0E, 500, espnowsensor::kPowerPercentValid), true);
+  PeCollectPeer* x = peerOf(kShed);
+  check(x && x->havePower && x->link == espnowfwd::kLinkBond && espnowfwd::macIsZero(x->via),
+        "a worker that is the bond master keeps its partner's battery state (link bond)");
+  check(gHandedOn.size() == 1 && gHandedOn[0].power && gHandedOn[0].p.counter == 1 &&
+        std::memcmp(gHandedOn[0].src, kShed, 6) == 0, "and hands it to its forwarder");
+  rxPower(kShed, "shed", powerBytes(1, 0x0E0E, 500, espnowsensor::kPowerPercentValid), true);
+  check(gHandedOn.size() == 1, "a repeat is not handed on");
+  rxEvent(kShed, "shed", eventBytes(1, 0x0E0E, "login_fail", "admin"), true);
+  check(gHandedOn.size() == 2 && !gHandedOn[1].power && gHandedOn[1].e.counter == 1, "an event is handed on too");
+  char one[640];
+  check(espnowBatteryJsonFor(kShed, nullptr, one, sizeof(one)) > 0 && has(one, "\"link\":\"bond\",\"via\":null"),
+        "its JSON says it came over the bond link");
+  // A mesh frame from the same device is refused on a worker (only the bond link is kept).
+  rxPower(kShed, "shed", powerBytes(2, 0x0E0E, 500, espnowsensor::kPowerPercentValid));
+  check(sPe.refused.notReceiver == 1, "over the mesh, a worker keeps nothing");
+  // Two workers: refused.
+  gBondMaster = false;
+  rxPower(kShed, "shed", powerBytes(3, 0x0E0E, 500, espnowsensor::kPowerPercentValid), true);
+  check(sPe.refused.notBondMaster == 1 && gHandedOn.size() == 2, "a bond worker refuses its partner's 180");
+  gBondMaster = true;
+  // A forwarded mark on the bond link: malformed (the partner never forwards).
+  std::vector<uint8_t> marked = powerBytes(4, 0x0E0E, 500, espnowsensor::kPowerPercentValid);
+  marked[16] = 3;
+  const uint32_t mal = sPe.refused.malformed;
+  rxPower(kShed, "shed", marked, true);
+  std::vector<uint8_t> markedEvent = eventBytes(2, 0x0E0E, "x", "y");
+  markedEvent[4] |= espnowsensor::kEventFlagForwarded;
+  markedEvent[7] = 3;
+  rxEvent(kShed, "shed", markedEvent, true);
+  check(sPe.refused.malformed == mal + 2 && gHandedOn.size() == 2, "a forwarded mark on 180/182 is malformed");
+  // Nothing could be kept: counted for the forwarder.
+  resetAll();
+  gBondMaster = true;
+  gAllocFails = true;
+  rxPower(kShed, "shed", powerBytes(1, 0x0E0E, 500, espnowsensor::kPowerPercentValid), true);
+  rxEvent(kShed, "shed", eventBytes(1, 0x0E0E, "x", "y"), true);
+  gAllocFails = false;
+  check(gNotKept.size() == 2 && gNotKept[0] == espnowfwd::kStreamIdBattery && gNotKept[1] == espnowfwd::kStreamIdEvents,
+        "a partner's frame the bond master could not keep is counted");
+  // The record is there, but no memory for the event list: counted too.
+  resetAll();
+  gBondMaster = true;
+  rxPower(kShed, "shed", powerBytes(1, 0x0E0E, 500, espnowsensor::kPowerPercentValid), true);
+  gAllocFails = true;
+  rxEvent(kShed, "shed", eventBytes(1, 0x0E0E, "x", "y"), true);
+  gAllocFails = false;
+  check(gNotKept.size() == 1 && gNotKept[0] == espnowfwd::kStreamIdEvents && gHandedOn.size() == 1,
+        "an event the bond master has no list for is counted not kept, and not handed on");
+
+  // The mesh master: what glasses forwards for its partner is kept under
+  // (partner via glasses), never under glasses or the partner's own record.
+  resetAll();
+  gRole = 1;
+  pair(kGlasses, "glasses", 2);
+  gLink.inUse = true;
+  std::memcpy(gLink.via, kGlasses, 6);
+  espnowfwd::LinkFrame f{};
+  f.op = espnowfwd::kOpAnnounce;
+  f.linkGen = 3;
+  f.viaBootTag = 9;
+  f.streams = espnowfwd::kStreamsAll;
+  f.sensorMask = espnowfwd::kSensorMaskDefault;
+  std::memcpy(f.partnerMac, kPartner, 6);
+  espnowfwd::linkApplyAnnounce(gLink, f, "porch", false, 0);
+  std::vector<uint8_t> fwd = powerBytes(1, 0xAAAA, 715, espnowsensor::kPowerPercentValid);
+  fwd[16] = 3;
+  rxPower(kGlasses, "glasses", fwd);
+  check(espnowBatteryJsonFor(kPartner, kGlasses, one, sizeof(one)) > 0 && jsonValid(one) &&
+        has(one, "\"name\":\"porch\",\"link\":\"forwarded\",\"via\":{\"mac\":\"02:A0:00:00:00:20\",\"name\":\"glasses\"}") &&
+        has(one, "\"percent\":71.5"), "a forwarded battery frame is the partner's, via glasses, named by the link");
+  check(espnowBatteryJsonFor(kPartner, nullptr, one, sizeof(one)) == 0 && espnowBatteryJsonFor(kGlasses, nullptr, one, sizeof(one)) == 0,
+        "not the partner's own record, not glasses' own");
+  check(gResumeTaken == 1 && !(gLink.resumeMask & (1u << espnowfwd::kStreamIdBattery)),
+        "the first battery frame of the link took the resume, once");
+  // An old link number, and the byte on a frame of a device with no link: refused.
+  fwd = powerBytes(2, 0xAAAA, 700, espnowsensor::kPowerPercentValid);
+  fwd[16] = 2;
+  rxPower(kGlasses, "glasses", fwd);
+  pair(kShed, "shed");
+  fwd[16] = 3;
+  rxPower(kShed, "shed", fwd);
+  check(sPe.refused.forwardRefused == 2, "a stale link number and a device without a link are refused");
+  // Events: the via's mesh list, marked in JSON and in the console.
+  std::vector<uint8_t> ev = eventBytes(1, 0xAAAA, "login_fail", "admin", "", "", 0, 77);
+  ev[4] |= espnowsensor::kEventFlagForwarded;
+  ev[7] = 3;
+  rxEvent(kGlasses, "glasses", ev);
+  check(sPe.lists[2] != nullptr && sPe.lists[0] == nullptr, "a forwarded event goes into the list of the via's mesh");
+  const std::string events = cmdEvents("json");
+  check(jsonValid(events) && has(events, "\"mac\":\"02:A0:00:00:00:30\",\"name\":\"porch\",\"link\":\"forwarded\",\"via\":{\"mac\":\"02:A0:00:00:00:20\",\"name\":\"glasses\"}") &&
+        has(events, "\"eventSeq\":77"), "espnowevents json: the event is the partner's, via glasses");
+  gConsole.clear();
+  cmdEvents("");
+  bool said = false;
+  for (const std::string& line : gConsole) said = said || has(line, "porch via glasses");
+  check(said, "espnowevents names it 'porch via glasses'");
+  // The first forwarded event of a link is judged a resume: the partner's
+  // counter moved on while nothing was forwarded (a pause is not loss).
+  check(gResumeTaken == 2 && !(gLink.resumeMask & (1u << espnowfwd::kStreamIdEvents)),
+        "the first event of the link took the resume, once");
+  f.linkGen = 4;
+  espnowfwd::linkApplyAnnounce(gLink, f, "porch", false, 0);  // a new link of glasses: every stream resumes
+  ev = eventBytes(10, 0xAAAA, "login_fail", "admin");
+  ev[4] |= espnowsensor::kEventFlagForwarded;
+  ev[7] = 4;
+  rxEvent(kGlasses, "glasses", ev);
+  gCallerAdmin = true;
+  char eventCounts[320];
+  check(espnowEventCountsJsonFor(kPartner, kGlasses, eventCounts, sizeof(eventCounts)) > 0 &&
+            has(eventCounts, "\"received\":2,") && has(eventCounts, "\"lost\":0,") && has(eventCounts, "\"resumes\":1,"),
+        std::string("events 2 to 9 not forwarded during the pause are not counted lost: ") + eventCounts);
+  check(gResumeTaken == 3, "and the new link's resume is taken");
+  // The bit without the byte, or the byte without the bit: malformed.
+  ev = eventBytes(2, 0xAAAA, "x", "y");
+  ev[4] |= espnowsensor::kEventFlagForwarded;
+  const uint32_t malformed = sPe.refused.malformed;
+  rxEvent(kGlasses, "glasses", ev);
+  ev = eventBytes(2, 0xAAAA, "x", "y");
+  ev[7] = 3;
+  rxEvent(kGlasses, "glasses", ev);
+  check(sPe.refused.malformed == malformed + 2, "the event's bit and byte must agree");
+  // The partner's own frames (it is paired later and sends itself): a separate record.
+  pair(kPartner, "porch");
+  rxPower(kPartner, "porch", powerBytes(1, 0xBBBB, 100, espnowsensor::kPowerPercentValid));
+  check(espnowBatteryJsonFor(kPartner, nullptr, one, sizeof(one)) > 0 && has(one, "\"link\":\"mesh\"") &&
+        espnowBatteryJsonFor(kPartner, kGlasses, one, sizeof(one)) > 0 && has(one, "\"percent\":71.5"),
+        "its own record and the forwarded one are two");
+  char words[96];
+  check(espnowPowerEventsPeerText(kPartner, kGlasses, words, sizeof(words)) > 0 && has(words, "battery 71.5 %"),
+        "the status words of the forwarded record");
+  const std::string battery = cmdBattery("json");
+  check(jsonValid(battery) && has(battery, "\"forwardRefused\":2"), "espnowbattery json counts the refused forwarded frames");
 }
 
 int main() {
@@ -1531,6 +1829,7 @@ int main() {
   testSenderView();
   testReviewFindings();
   testEventCountsAdminOnly();
+  testBondAndForwarding();
   check(gLockViolations == 0, "nothing that may block, print or allocate ran under the lock");
   check(gLockDepth == 0, "every lock was released");
   check(gLocalEventPosts == 0, "nothing was posted into this device's own event ring");

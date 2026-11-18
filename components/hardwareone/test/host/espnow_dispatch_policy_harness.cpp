@@ -603,9 +603,13 @@ int main() {
   // session-encrypted frame, on a keyed and on a keyless device; a signed
   // broadcast is not enough (TIME_SYNC and SENSOR_STATUS were one). None is a
   // bond frame: a paired peer that is not the bond partner reaches them.
+  // FORWARD_LINK (a bond master announcing to a mesh master that it forwards
+  // its partner's data) is the same: the master is not its bond partner, and
+  // a master built without bond mode must take it.
   const uint8_t kPairedMeshRows[] = { ESPNOW_V4_TYPE_TIME_SYNC, ESPNOW_V4_TYPE_SENSOR_STATUS,
                                       ESPNOW_V4_TYPE_SENSOR_REQ, ESPNOW_V4_TYPE_SENSOR_ENVELOPE,
-                                      ESPNOW_V4_TYPE_POWER_STATUS, ESPNOW_V4_TYPE_EVENT_PUSH };
+                                      ESPNOW_V4_TYPE_POWER_STATUS, ESPNOW_V4_TYPE_EVENT_PUSH,
+                                      ESPNOW_V4_TYPE_FORWARD_LINK };
   for (uint8_t op : kPairedMeshRows) {
     const std::string name = opcodeName(op);
     const V4OpcodeEntry* row = v4_dispatch_lookup(op);

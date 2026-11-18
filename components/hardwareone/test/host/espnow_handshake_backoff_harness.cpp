@@ -101,6 +101,8 @@ static EspNowState* gEspNow = &gState;
 static constexpr uint8_t ESPNOW_V4_TYPE_BOND_HEARTBEAT = 170;
 static constexpr uint8_t ESPNOW_V4_TYPE_BOND_CAP_REQ = 171;
 static constexpr uint8_t ESPNOW_V4_TYPE_BOND_SENSOR_DATA = 179;
+static constexpr uint8_t ESPNOW_V4_TYPE_BOND_POWER_STATUS = 180;
+static constexpr uint8_t ESPNOW_V4_TYPE_BOND_EVENT_PUSH = 182;
 
 // Our address and the partner's.
 static uint8_t gSelf[6] = {0x02, 0x11, 0x22, 0x33, 0x44, 0x09};      // higher: initiator
@@ -592,6 +594,20 @@ static void caseSensorDataDropped() {
         (unsigned)pendingFrameCount(), gSessionOpens);
 }
 
+// A bond worker's battery state and events (180/182) are periodic too: the
+// sender waits and sends again; nothing is queued and nothing is started.
+static void caseBondPowerEventsDropped() {
+  const uint8_t frame[24] = {};
+  for (uint8_t type : { ESPNOW_V4_TYPE_BOND_POWER_STATUS, ESPNOW_V4_TYPE_BOND_EVENT_PUSH }) {
+    resetWorld();
+    addIdentity(kPartner);
+    bondSendEncryptedAsync(kPartner, type, 0, ++gMsgId, frame, sizeof frame);
+    CHECK(pendingFrameCount() == 0 && gSessionOpens == 0 && gHellos == 0,
+          "bond frame %u without a session was queued or started a handshake (pending %u, opens %d, HELLOs %d)",
+          (unsigned)type, (unsigned)pendingFrameCount(), gSessionOpens, gHellos);
+  }
+}
+
 static bool warnedSince(size_t from, const char* text) {
   for (size_t i = from; i < gWarnLines.size(); ++i) {
     if (gWarnLines[i].find(text) != std::string::npos) return true;
@@ -744,6 +760,7 @@ int main() {
   caseRequestStillQueued();
   casePendingWarnings();
   caseSensorDataDropped();
+  caseBondPowerEventsDropped();
   caseUserStartsReported();
   caseUnpairCallsOff();
   std::printf("espnow_handshake_backoff: %d checks, %d failed\n", gChecks, gFailures);

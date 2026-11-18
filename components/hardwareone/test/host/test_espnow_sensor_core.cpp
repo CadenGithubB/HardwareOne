@@ -109,6 +109,16 @@ static void testHeader() {
   CHECK(!parseReadingHeader(raw, kReadingHeaderLen - 1, back));
   CHECK(!parseReadingHeader(nullptr, kReadingHeaderLen, back));
   CHECK(parseReadingHeader(raw, 250, back));
+  CHECK(back.fwdLink == 0);
+  // Byte 7 is the forwarding bond master's link number (bit 2 of the flags
+  // says the reading is its bond partner's); every other byte is unchanged.
+  h.flags = (uint8_t)(kReadingFlagStreamStart | kReadingFlagForwarded);
+  h.fwdLink = 0xA7;
+  packReadingHeader(raw, h);
+  CHECK(raw[1] == 0x06 && raw[7] == 0xA7 && raw[6] == 0x32 && raw[8] == 0x44);
+  CHECK(parseReadingHeader(raw, sizeof(raw), back) && back.fwdLink == 0xA7 && back.flags == 0x06 &&
+        back.counter == 0xC3D4 && back.ageMs == 0x11223344u);
+  CHECK(kReadingFlagForwarded == 0x04 && kReadingFlagAgeValid == 0x01 && kReadingFlagStreamStart == 0x02);
 }
 
 static void testPlanning() {

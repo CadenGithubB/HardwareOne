@@ -185,6 +185,9 @@ bool schemaSyncDone() {
 
 bool remoteEditAllowed(const char* moduleName, const char* key) {
   if (!moduleName) return false;
+  // Which devices may forward data to this one is this device's own consent,
+  // never the bond partner's to give.
+  if (key && strcmp(key, "forwardFrom") == 0) return false;
   if (strcmp(moduleName, "users") == 0 || strcmp(moduleName, "bond") == 0 ||
       strcmp(moduleName, "wifi") == 0) {
     return false;

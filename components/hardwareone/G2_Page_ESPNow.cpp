@@ -72,6 +72,8 @@ static int gStatsChannelRow = -1;
 // Stored as MAC+type (not a cache index) so the detail view re-finds the live
 // entry even if the cache reshuffles or the entry expires between renders.
 static uint8_t          gSelSensorMac[6] = {0};
+static uint8_t          gSelSensorVia[6] = {0};   // the bond master that forwards it (gSelSensorForwarded)
+static bool             gSelSensorForwarded = false;
 static RemoteSensorType gSelSensorType   = REMOTE_SENSOR_THERMAL;
 #endif
 
@@ -541,8 +543,11 @@ static void showBondSensorsMenu() {
     RemoteSensorInfo e;
     if (!remoteSensorInfoAt(idx[i], &e)) continue;  // gone since it was listed
     const char* dn = (e.deviceName[0]) ? e.deviceName : "?";
-    // " (off)" marks a connected-but-not-streaming sensor (enabled = streaming).
-    snprintf(rows[n], sizeof(rows[n]), "%s - %s%s", dn, sensorTypeToString(e.sensorType),
+    // " (off)" marks a connected-but-not-streaming sensor (enabled = streaming);
+    // a forwarded one names the bond master it came through.
+    const String via = remoteSensorInfoVia(e) ? getEspNowDeviceName(e.viaMac) : String("");
+    snprintf(rows[n], sizeof(rows[n]), "%s%s%s - %s%s", dn, remoteSensorInfoVia(e) ? " via " : "",
+             remoteSensorInfoVia(e) ? (via.length() ? via.c_str() : "?") : "", sensorTypeToString(e.sensorType),
              e.enabled ? "" : " (off)");
     ptrs[n] = rows[n];
     n++;
@@ -568,7 +573,8 @@ static void showBondDetailMenu() {
   // A copy of the slot (the detail view's stored identity is MAC + type) and,
   // below, of its text: the table can change while this page is built.
   RemoteSensorInfo info;
-  if (!remoteSensorInfoFor(gSelSensorMac, gSelSensorType, &info)) {  // expired / peer gone: back to the list
+  if (!remoteSensorInfoFor(gSelSensorMac, gSelSensorForwarded ? gSelSensorVia : nullptr, gSelSensorType,
+                           &info)) {  // expired / peer gone: back to the list
     showBondSensorsMenu();
     return;
   }
@@ -588,7 +594,7 @@ static void showBondDetailMenu() {
     nLines = 1;
   } else {
     EXT_RAM_BSS_ATTR static char text[espnowsensor::kReadingMaxBytes + 1];  // PSRAM: this page's task only
-    remoteSensorCopyText(e->deviceMac, e->sensorType, text, sizeof(text));
+    remoteSensorCopyText(e->deviceMac, remoteSensorInfoVia(*e), e->sensorType, text, sizeof(text));
     nLines = formatRemoteSensorReadable(text, body, sizeof(body), 8);
   }
 
@@ -1212,6 +1218,8 @@ static void handleBondSensorsTap(uint32_t idx) {
   RemoteSensorInfo e;
   if (!remoteSensorInfoAt(list[sel], &e)) return;  // gone since it was listed
   memcpy(gSelSensorMac, e.deviceMac, 6);
+  memcpy(gSelSensorVia, e.viaMac, 6);
+  gSelSensorForwarded = remoteSensorInfoVia(e) != nullptr;
   gSelSensorType = e.sensorType;
   showBondDetailMenu();
 #else

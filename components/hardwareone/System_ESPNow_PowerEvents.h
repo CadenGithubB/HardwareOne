@@ -27,6 +27,13 @@ struct V4RxCtx;
 // receive (a worker) refuses the frame and counts it.
 void v4hPowerStatus(const V4RxCtx& ctx);
 void v4hEventPush(const V4RxCtx& ctx);
+#if ENABLE_BONDED_MODE
+// BOND_POWER_STATUS (180) / BOND_EVENT_PUSH (182) from this device's bond
+// partner (the receive table's REQ_BOND_PEER): kept on a bond master whatever
+// its mesh role, and handed to its forwarder.
+void v4hBondPowerStatus(const V4RxCtx& ctx);
+void v4hBondEventPush(const V4RxCtx& ctx);
+#endif
 
 // espnow_task loop, after sensorLinkTick: sends this device's battery state
 // when it is due and its new events (at most four a second), and starts a
@@ -54,12 +61,13 @@ bool espnowEventCountsVisible();
 // What this device keeps of one sender, for 'espnowsensorstatus json <device>':
 // its latest battery state as one JSON object (the row of 'espnowbattery
 // json'), and its event counts as one JSON object (admin only). 0 when
-// nothing is kept (or the counts are not for this user).
-size_t espnowBatteryJsonFor(const uint8_t mac[6], char* out, size_t cap);
-size_t espnowEventCountsJsonFor(const uint8_t mac[6], char* out, size_t cap);
+// nothing is kept (or the counts are not for this user). `via`: nullptr for
+// the device's own record, else the bond master that forwards for it.
+size_t espnowBatteryJsonFor(const uint8_t mac[6], const uint8_t* via, char* out, size_t cap);
+size_t espnowEventCountsJsonFor(const uint8_t mac[6], const uint8_t* via, char* out, size_t cap);
 // The same in a few words ("battery 71.5 % 12 s ago, 3 events"; the events
 // for an admin only); 0 when nothing is kept.
-size_t espnowPowerEventsPeerText(const uint8_t mac[6], char* out, size_t cap);
+size_t espnowPowerEventsPeerText(const uint8_t mac[6], const uint8_t* via, char* out, size_t cap);
 
 const char* cmd_espnow_battery(const String& argsInput);
 const char* cmd_espnow_events(const String& argsInput);

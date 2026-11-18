@@ -238,6 +238,7 @@ struct Settings {
       espnowAcceptSensorControl(false),
       espnowMasterFingerprint(""),
       espnowBackupMasterFingerprint(""),
+      espnowForwardFrom(""),
 #if ENABLE_BONDED_MODE
       bondModeEnabled(false),
       bondRole(0),
@@ -250,6 +251,8 @@ struct Settings {
       bondStreamFmradio(false),
       bondStreamRtc(false),
       bondStreamPresence(false),
+      bondForwardToMesh(false),
+      bondForwardSensors(0x07EF),
 #endif
       automationEnabled(true),   // unconditional — see the field declaration
       i2cEnabled(true),
@@ -815,6 +818,10 @@ struct Settings {
   bool   espnowAcceptSensorControl;       // opt-in: honor SENSOR_REQ from master/backup (default false)
   String espnowMasterFingerprint;         // authorized PRIMARY-master Ed25519 pubkey (64-hex; empty=deny)
   String espnowBackupMasterFingerprint;   // authorized BACKUP-master Ed25519 pubkey (64-hex; empty=deny)
+  // The devices that may forward their bond partner's data to this device
+  // (espnowforwardfrom): up to 4 entries "<address>/<first 8 key bytes in
+  // hex>", comma separated; empty = none.
+  String espnowForwardFrom;
   // ============================================================================
   // Multi-mesh data model (Phase 2 of docs/ESPNOW_V4_PLAN.md)
   // ============================================================================
@@ -870,6 +877,11 @@ struct Settings {
   bool bondStreamFmradio;              // Auto-stream FM radio data to bonded peer
   bool bondStreamRtc;                  // Auto-stream RTC data to bonded peer
   bool bondStreamPresence;             // Auto-stream presence sensor data to bonded peer
+  // A bond master forwards its partner's readings, battery state and events
+  // to the master named on it (bondforward; off by default), these sensors only
+  // (bit i: sensor i; default every sensor but input).
+  bool bondForwardToMesh;
+  uint16_t bondForwardSensors;
 #endif
   // ESP-NOW buffer size settings (runtime tuning)
   // NOTE: kept OUTSIDE the #if ENABLE_AUTOMATION block so the always-compiled

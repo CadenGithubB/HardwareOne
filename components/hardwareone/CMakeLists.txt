@@ -229,6 +229,8 @@ set(hardwareone_srcs
         System_ESPNow_MeshKeys.cpp
         System_ESPNow_MeshTime.cpp
         System_ESPNow_PowerEvents.cpp
+        System_ESPNow_ForwardRx.cpp
+        System_ESPNow_BondForward.cpp
         System_ESPNow_Router.cpp
         System_ESPNow_Saturation.cpp
         System_ESPNow_Sensors.cpp

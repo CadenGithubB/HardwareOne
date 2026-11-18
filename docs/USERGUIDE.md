@@ -653,6 +653,19 @@ Running `bondconnect <mac_or_name>` again for the partner already set does not c
 
 A device never says which other device it is bonded to. The web Remote page and the OLED bond screen show the same state (`Bond Not Confirmed`, `No bond there`).
 
+**Your bond partner on the mesh master.** A bond is between two devices; the mesh is separate. The bond worker never sends its readings, battery state or events to a mesh master itself: they go to its bond master only (readings as before, battery state and events over the bond link too), whatever master is named on it, and it refuses sensor requests from a mesh master. The bond master can pass them on to the master named on the bond master:
+
+```
+bondforward on                     - on the bond master (off by default; the partner cannot change it)
+espnowforwardfrom add glasses      - on the mesh master: the bond master may forward to it (admin, up to four;
+                                     tied to glasses' key: if glasses is paired again, add it again)
+bondforward                        - where the partner's data goes now, or why not
+bondforward sensors tof,imu,gps    - which sensors (default: all but input; 'all', 'default')
+espnowforwardlinks                 - on the mesh master: who forwards for whom
+```
+
+The bond master announces the link to each master named on it and forwards once that master accepted: readings to the master, battery state and events to the master and the backup master. On the mesh master the partner then shows as its own device, `porch via glasses`, with its own counts: a reading lost between the partner and the bond master, or between the bond master and the mesh master, counts as lost. What the bond master forwards is kept apart from the partner's own record (if the partner is also in the mesh) and from the bond master's; a partner that is paired with the mesh master is shown under the mesh master's own name for it, and an announced name that another paired device already has is refused. `bondstatus` has "Forwarding to the mesh" lines (on a bond worker also the sensor requests from a mesh master it refused). When the bond master is itself the mesh master, it keeps its partner's data and sends nothing over the air. Data is not stored for later: what could not be forwarded (no session, not accepted yet, the send queue full) is counted on the bond master and shows as lost on the mesh master.
+
 ### Metadata Sync
 Each device has a name, room, zone, and tags set in settings. The **Metadata** tab lets you pull this information from any peer. Set your own device metadata with (note: single words, no space after `espnow`):
 ```
@@ -1218,13 +1231,15 @@ espnowgroupdrop [json] <name_or_mac|all>   - Take back what was accepted for a p
 --- What a master collects: readings, battery, events ---
 espnowworker [show|on|off|interval <ms>|fields <list>]  - Worker status reporting
 espnowsensorstream <sensor> <on|off>   - Send one sensor's readings to the master named on this device
-espnowsensorstatus [json [<name_or_mac>]]  - What this device sends and why not; what it received, lost and refused
+espnowsensorstatus [json [<name_or_mac> [via <name_or_mac>]]]  - What this device sends and why not; what it received, lost and refused
 espnowbattery [json] [<name_or_mac>] [from <n>]  - Master: the battery state other devices sent
 espnowevents [json] [since <rx>]       - Master: the system events other devices sent (admin)
 espnowpowerinterval [0|10..3600]       - Seconds between this device's battery reports (0 = none, default 60)
 espnoweventpush [off|alert|standard|verbose]  - Which of this device's events go to the master (default alert)
 espnowmasterfingerprint [64 hex|clear] - Name the mesh master on this device (its key fingerprint) (admin)
 espnowbackupfingerprint [64 hex|clear] - Name the backup master on this device (admin)
+espnowforwardfrom [add|remove <name_or_mac>|clear]  - Master: the bond masters that may forward their partner's data here (admin)
+espnowforwardlinks [json] [from <n>]   - Master: who forwards for which bond partner
 
 --- Security ---
 espnowsetpassphrase "phrase"    - Set encryption passphrase
@@ -1274,7 +1289,9 @@ bytes and travels in up to four frames. The receiving device stamps each reading
 when it arrives and counts lost readings per device and sensor
 (`GET /api/sensors/remote?device=<MAC>&sensor=<type>`). A reading that cannot be sent is counted
 with its reason, and the console says so once a minute. A master keeps the readings of up to
-sixteen sending devices; a seventeenth is refused and shown as refused.
+sixteen sending devices; a seventeenth is refused and shown as refused. A bond partner that a bond
+master forwards for (`bondforward`, see Bonding) counts as one of them and is listed as
+`porch via glasses`; `GET /api/sensors/remote?device=<MAC>&via=<MAC>` reads its readings.
 
 **Battery state.** A device with a battery monitor reports its battery to the named master every
 60 seconds and when its state changes (`espnowpowerinterval`). On the master, `espnowbattery` lists
@@ -1295,6 +1312,7 @@ seconds), and the next event says how many were left out.
 bondconnect <mac_or_name>       - Connect to bonded peer
 bonddisconnect                  - Disconnect bonded peer
 bondstatus                      - Show bond mode status
+bondforward [on|off|sensors <list>] - Forward the partner's data to the mesh master named here
 bondrole <master|worker>        - Set bond mode role
 bondshowcap                     - Show local capability summary
 bondrequestcap                  - Request capability summary from peer

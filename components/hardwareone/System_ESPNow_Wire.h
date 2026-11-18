@@ -21,6 +21,7 @@
 #include "System_BuildConfig.h"
 #include "System_ESPNow_SensorCore.h"  // the sensor numbering and the reading header's sizes
 #include "System_ESPNow_PowerEventCore.h"  // the battery and event frames' sizes
+#include "System_ESPNow_ForwardCore.h"     // the forward-link frame's size
 #include "System_ESPNow_TimeCore.h"    // the TIME_SYNC frame's size and source numbers
 
 #if ENABLE_ESPNOW
@@ -88,14 +89,21 @@ static_assert(ESPNOW_V4_VERSION == 4,
 //                           the leased pull and the reading, in 1 to 4 frames;
 //                           150 retired (SENSOR_BROADCAST, removed — do not reuse);
 //                           POWER_STATUS=152 live: the sender's battery state, a
-//                           session unicast to the masters named on it)
+//                           session unicast to the masters named on it;
+//                           FORWARD_LINK=155 live: a bond master announces to the
+//                           masters named on it that it forwards its bond partner's
+//                           readings, battery state and events, and they answer)
 //   170–189  Bond          (BOND_*, MANIFEST_REQ, SETTINGS_REQ, SCHEMA_REQ, plus
 //                           BOND_STREAM_CTRL/BOND_SENSOR_DATA — moved in from
 //                           streaming/sensors because they were always bond-gated;
 //                           BOND_REQUEST=183 / BOND_NOTICE=184 are accepted from any
 //                           paired peer over its session, not only the bond partner;
-//                           180 and 182 are free again: battery state and events are
-//                           mesh frames, 152 and 132, and need no bond)
+//                           BOND_POWER_STATUS=180 / BOND_EVENT_PUSH=182: a bond
+//                           worker's battery state and events, to its bond master
+//                           only. This reverses the 2026-11 decision that they "need
+//                           no bond": a bond worker never sends to a mesh master
+//                           itself (owner rule), so they travel over the bond link
+//                           with the 152/132 payloads unchanged)
 //   190–199  Unallocated buffer (future whole category, or spill for a full one)
 //   200–255  User-defined  (plugin/experiment space — core NEVER allocates here)
 //
@@ -193,6 +201,8 @@ enum EspNowV4Type : uint8_t {
   ESPNOW_V4_TYPE_POWER_STATUS    = 152,  // sender → the masters named on it: its battery state (V4PayloadPowerStatus)
   ESPNOW_V4_TYPE_SENSOR_REQ      = 153,  // master → worker: subscribe/oneshot/unsubscribe (leased pull)
   ESPNOW_V4_TYPE_SENSOR_ENVELOPE = 154,  // worker → master: one part of a sensor reading (V4PayloadSensorReading)
+  ESPNOW_V4_TYPE_FORWARD_LINK    = 155,  // bond master ⇄ the masters named on it: "I forward for my bond partner"
+                                         //   and the answer (V4PayloadForwardLink, System_ESPNow_ForwardCore.h)
 
   // --- Bond (170–189) ---
   ESPNOW_V4_TYPE_BOND_HEARTBEAT  = 170,
@@ -205,8 +215,9 @@ enum EspNowV4Type : uint8_t {
   ESPNOW_V4_TYPE_SCHEMA_REQ      = 177,  // Master → worker: send your settings schema (response arrives as file _schema_out.json)
   ESPNOW_V4_TYPE_BOND_STREAM_CTRL= 178,  // was STREAM_CTRL (51) — always bond-gated, now numbered and named with its policy family
   ESPNOW_V4_TYPE_BOND_SENSOR_DATA= 179,  // one part of a sensor reading to the bond partner (same layout as 154)
-  // 181 earmarked BOND_SETTINGS_SYNC_ACK. 180 and 182 are free: they were earmarked for a
-  //   bond battery frame and a bond event frame, which are the mesh frames 152 and 132.
+  ESPNOW_V4_TYPE_BOND_POWER_STATUS = 180,  // bond worker → its bond master: battery state (same layout as 152)
+  // 181 earmarked BOND_SETTINGS_SYNC_ACK.
+  ESPNOW_V4_TYPE_BOND_EVENT_PUSH = 182,  // bond worker → its bond master: one system event (same layout as 132)
   ESPNOW_V4_TYPE_BOND_REQUEST    = 183,  // "you are my bond partner": sent to the configured partner
   ESPNOW_V4_TYPE_BOND_NOTICE     = 184,  // how the sender's bond stands toward the receiver (BondNoticeReason)
 };
@@ -531,11 +542,12 @@ static_assert(sizeof(V4PayloadSensorStatus) == 16, "V4PayloadSensorStatus is 16 
 // / parseReadingHeader, and this struct states the layout.
 struct __attribute__((packed)) V4PayloadSensorReading {
   uint8_t  sensorType;  // 0   RemoteSensorType
-  uint8_t  flags;       // 1   bit 0: ageMs is filled; bit 1: first reading of a stream to this target
+  uint8_t  flags;       // 1   bit 0: ageMs is filled; bit 1: first reading of a stream to this target;
+                        //     bit 2: forwarded (the sender's bond partner's reading)
   uint16_t bootTag;     // 2   the same for every frame of one boot of the sender
   uint16_t counter;     // 4   the sender's count of readings of this sensor (1 first, 0 after 65535)
   uint8_t  parts;       // 6   low nibble: this part's index; high nibble: number of parts (1 to 4)
-  uint8_t  reserved;    // 7   0
+  uint8_t  fwdLink;     // 7   0, or the bond master's link number (set if and only if bit 2 is)
   uint32_t ageMs;       // 8   how old the reading was when sent; 0 today
 };
 static_assert(sizeof(V4PayloadSensorReading) == 12 &&
@@ -589,7 +601,8 @@ struct __attribute__((packed)) V4PayloadPowerStatus {
   uint16_t percentX10;   // 10  0 to 1000
   int16_t  rateX10;      // 12  percent per hour x 10
   uint16_t sampleAgeMs;  // 14  age of the battery sample when sent; 65535: that or more, or none
-  uint8_t  reserved[8];  // 16  0
+  uint8_t  fwdLink;      // 16  0, or the bond master's link number: the sender's bond partner's frame
+  uint8_t  reserved[7];  // 17  0
 };
 static_assert(sizeof(V4PayloadPowerStatus) == 24 && sizeof(V4PayloadPowerStatus) == espnowsensor::kPowerFrameLen,
               "V4PayloadPowerStatus is 24 bytes on the wire");
@@ -597,7 +610,7 @@ static_assert(offsetof(V4PayloadPowerStatus, bootTag) == 2 && offsetof(V4Payload
               offsetof(V4PayloadPowerStatus, backend) == 5 && offsetof(V4PayloadPowerStatus, known) == 6 &&
               offsetof(V4PayloadPowerStatus, voltageMv) == 8 && offsetof(V4PayloadPowerStatus, percentX10) == 10 &&
               offsetof(V4PayloadPowerStatus, rateX10) == 12 && offsetof(V4PayloadPowerStatus, sampleAgeMs) == 14 &&
-              offsetof(V4PayloadPowerStatus, reserved) == 16,
+              offsetof(V4PayloadPowerStatus, fwdLink) == 16 && offsetof(V4PayloadPowerStatus, reserved) == 17,
               "V4PayloadPowerStatus layout (espnowsensor::packPowerFrame writes these offsets)");
 
 // EVENT_PUSH (132): one system event of the sender, with its text cut to fit
@@ -608,10 +621,11 @@ static_assert(offsetof(V4PayloadPowerStatus, bootTag) == 2 && offsetof(V4Payload
 struct __attribute__((packed)) V4PayloadEventPush {
   uint16_t counter;      // 0    the sender's count of event frames (1 first, 0 after 65535)
   uint16_t bootTag;      // 2    as in the reading header
-  uint8_t  flags;        // 4    bit 0 subject cut, bit 1 detail cut, bit 2 who cut, bit 3 kind cut
+  uint8_t  flags;        // 4    bit 0 subject cut, bit 1 detail cut, bit 2 who cut, bit 3 kind cut,
+                         //      bit 4 forwarded (the sender's bond partner's event)
   uint8_t  tier;         // 5    0 verbose, 1 standard, 2 alert
   uint8_t  source;       // 6    which interface caused the event (0 to 7)
-  uint8_t  reserved0;    // 7    0
+  uint8_t  fwdLink;      // 7    0, or the bond master's link number (set if and only if bit 4 is)
   uint16_t skipped;      // 8    events the sender left out since the last one it sent
   uint16_t reserved1;    // 10   0
   uint32_t eventSeq;     // 12   the event's number on the sender (#N of its events.log)
@@ -630,14 +644,46 @@ static_assert(offsetof(V4PayloadEventPush, flags) == 4 && offsetof(V4PayloadEven
               offsetof(V4PayloadEventPush, detail) == 84 && offsetof(V4PayloadEventPush, who) == 116,
               "V4PayloadEventPush layout (espnowsensor::packEventFrame writes these offsets)");
 
+// FORWARD_LINK (155): a bond master tells a master named on it that it
+// forwards its bond partner's readings, battery state and events (announce),
+// that it no longer does (withdraw), and the master answers or asks again
+// (query). A session unicast both ways (row: paired + session-encrypted, no
+// bond gate: the receiver is not the sender's bond partner). Through a relay
+// in one frame. System_ESPNow_ForwardCore.h has the rules and the meaning of
+// every field; the code packs and parses with espnowfwd::packLinkFrame /
+// parseLinkFrame, and this struct states the layout.
+struct __attribute__((packed)) V4PayloadForwardLink {
+  uint8_t  op;              // 0   1 announce, 2 withdraw, 3 query, 4 answer
+  uint8_t  linkGen;         // 1   the bond master's link number (1..255)
+  uint16_t viaBootTag;      // 2   the bond master's boot tag
+  uint8_t  streams;         // 4   bit 0 readings, bit 1 battery, bit 2 events
+  uint8_t  result;          // 5   answer: 1 accepted ... 9 name_taken
+  uint8_t  answers;         // 6   answer: the op answered
+  uint8_t  reserved0;       // 7   0
+  uint8_t  partnerMac[6];   // 8   the bond partner; all zero: "for nobody" (withdraw) or a query
+  uint16_t sensorMask;      // 14  the sensors forwarded
+  uint8_t  partnerKey[32];  // 16  the partner's Ed25519 public key as the bond master holds it
+  char     partnerName[32]; // 48  the name the bond master shows for it
+  uint8_t  reserved1[16];   // 80  0
+};
+static_assert(sizeof(V4PayloadForwardLink) == 96 && sizeof(V4PayloadForwardLink) == espnowfwd::kLinkFrameLen,
+              "V4PayloadForwardLink is 96 bytes on the wire");
+static_assert(offsetof(V4PayloadForwardLink, linkGen) == 1 && offsetof(V4PayloadForwardLink, viaBootTag) == 2 &&
+              offsetof(V4PayloadForwardLink, streams) == 4 && offsetof(V4PayloadForwardLink, result) == 5 &&
+              offsetof(V4PayloadForwardLink, answers) == 6 && offsetof(V4PayloadForwardLink, partnerMac) == 8 &&
+              offsetof(V4PayloadForwardLink, sensorMask) == 14 && offsetof(V4PayloadForwardLink, partnerKey) == 16 &&
+              offsetof(V4PayloadForwardLink, partnerName) == 48 && offsetof(V4PayloadForwardLink, reserved1) == 80,
+              "V4PayloadForwardLink layout (espnowfwd::packLinkFrame writes these offsets)");
+
 // Every frame of this block and TIME_SYNC travel inside a relay envelope
 // unchanged, in one frame each.
 static_assert(sizeof(V4PayloadTimeSync) <= ESPNOW_V4_RELAY_MAX_INNER_PLAINTEXT &&
               sizeof(V4PayloadSensorStatus) <= ESPNOW_V4_RELAY_MAX_INNER_PLAINTEXT &&
               sizeof(V4PayloadSensorReq) <= ESPNOW_V4_RELAY_MAX_INNER_PLAINTEXT &&
               sizeof(V4PayloadPowerStatus) <= ESPNOW_V4_RELAY_MAX_INNER_PLAINTEXT &&
-              sizeof(V4PayloadEventPush) <= ESPNOW_V4_RELAY_MAX_INNER_PLAINTEXT,
-              "the time, sensor, battery and event frames must fit one routed frame");
+              sizeof(V4PayloadEventPush) <= ESPNOW_V4_RELAY_MAX_INNER_PLAINTEXT &&
+              sizeof(V4PayloadForwardLink) <= ESPNOW_V4_RELAY_MAX_INNER_PLAINTEXT,
+              "the time, sensor, battery, event and forward-link frames must fit one routed frame");
 
 // Metadata payload for metadata exchange (REQ/RESP/PUSH)
 // Phase 3.5: trimmed tags 64→54 so the struct fits ESPNOW_V4_MAX_PLAINTEXT

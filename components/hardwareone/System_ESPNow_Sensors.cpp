@@ -14,7 +14,9 @@
 #include "System_Command.h"
 #include "System_Debug.h"
 #include "System_ESPNow.h"
+#include "System_ESPNow_BondForward.h"  // the bond master forwards its partner's readings
 #include "System_ESPNow_Deadline.h"   // wrap-safe lease deadlines
+#include "System_ESPNow_ForwardRx.h"  // whose is a received reading
 #include "System_ESPNow_Handlers_Crypto.h"  // espnowHandshakeAutoStart
 #include "System_ESPNow_HandshakeBackoff.h" // WarnLimiter
 #include "System_ESPNow_Identity.h"   // peerIdentityFindByMac / espnowIdentityFormatPubHex — fingerprint auth
@@ -81,10 +83,15 @@ struct RemoteSensorData {
 // that was silent for a minute is no longer listed, and a radio outage is
 // exactly when the counter must be remembered. A record is given up only for
 // a sender that is no longer paired. (Battery state and events of a sender
-// are kept by System_ESPNow_PowerEvents.cpp.)
+// are kept by System_ESPNow_PowerEvents.cpp.) A sender is its origin and, for
+// readings a bond master forwards for its partner, that bond master (origin,
+// via): what a bond master says about its partner is never filed under the
+// partner's own record. espnowfwd::recordReusable says when a record may go.
 struct SensorPeerRecord {
   bool inUse;
-  uint8_t mac[6];
+  uint8_t mac[6];           // the origin
+  uint8_t via[6];           // all zero, or the bond master that forwards for it
+  uint8_t link;             // espnowfwd::kLink*
   char name[32];
   espnowsensor::CounterTrack track[REMOTE_SENSOR_MAX];
   espnowsensor::CounterCounts counts[REMOTE_SENSOR_MAX];
@@ -115,7 +122,8 @@ struct RemoteSensorRefusals {
   uint32_t noMemory;       // the table or a sender's slots could not be made
   uint32_t badType;        // a sensor type this firmware does not know
   uint32_t notReceiver;    // this device's role does not keep readings
-  uint32_t malformed;      // too short to be a reading or status frame
+  uint32_t malformed;      // too short to be a reading or status frame, or a forwarded mark that makes no sense
+  uint32_t forwardRefused; // forwarded, but no active link of the sender names it
 };
 static RemoteSensorRefusals gRemoteSensorRefusals = {};
 // One console line a minute while readings are refused for this device's
@@ -420,6 +428,30 @@ bool* bondStreamSetting(RemoteSensorType type) {
 }
 #endif  // ENABLE_BONDED_MODE
 
+// ---- What the receive path asks of the forwarding code (the host suite
+// espnow_sensor_ingest has its own versions) ----
+// Whose is a reading part from `src` (System_ESPNow_ForwardRx.cpp).
+static ForwardResolve sensorWhose(const uint8_t* src, const char* srcName, bool fromBond, bool bitSet, uint8_t fwdLink,
+                                  uint8_t sensorType, ForwardOrigin* out) {
+  return espnowForwardResolve(src, srcName, fromBond, /*hasBit=*/true, bitSet, fwdLink, sensorType, out);
+}
+static void sensorResumeTaken(const uint8_t via[6], uint8_t sensorType) { espnowForwardResumeTaken(via, sensorType); }
+static bool sensorLinkActive(const uint8_t via[6], const uint8_t origin[6]) {
+  return espnowForwardLinkActive(via, origin);
+}
+// A bond master hands a reading of its partner it kept to its forwarder, and
+// counts one it could not keep.
+static void sensorForwardReading(const uint8_t src[6], const espnowsensor::ReadingHeader& h, const uint8_t* text,
+                                 size_t len) {
+  bondForwardReading(src, h, text, len);
+}
+static void sensorNotKept(uint8_t sensorType) { bondForwardNotKept(sensorType); }
+static void sensorViaName(const uint8_t mac[6], char* out, size_t cap) {
+  String name = getEspNowDeviceName(mac);
+  if (name.length() == 0) name = macToDisplayStr(mac);
+  strlcpy(out, name.c_str(), cap);
+}
+
 // SENSOR_RX_HOST_BEGIN
 // ---- The table (every function named ...Locked runs under gRemoteSensorMux) ----
 
@@ -433,39 +465,65 @@ static bool slotFresh(const RemoteSensorData& e, uint32_t nowMs) {
   return e.valid && !e.aged && (uint32_t)(nowMs - e.lastUpdate) <= REMOTE_SENSOR_TTL_MS;
 }
 
-static SensorPeerRecord* findPeerRecordLocked(const uint8_t* mac) {
+static const uint8_t kSensorNoVia[6] = { 0, 0, 0, 0, 0, 0 };
+
+// The record is that of (mac, via); via nullptr: the origin's own record.
+static bool sensorRecordIs(const SensorPeerRecord& r, const uint8_t* mac, const uint8_t* via) {
+  return memcmp(r.mac, mac, 6) == 0 && memcmp(r.via, via ? via : kSensorNoVia, 6) == 0;
+}
+
+static SensorPeerRecord* findPeerRecordLocked(const uint8_t* mac, const uint8_t* via) {
   if (!gSensorPeers || !mac) return nullptr;
   for (int i = 0; i < REMOTE_SENSOR_PEERS_MAX; i++) {
-    if (gSensorPeers[i].inUse && memcmp(gSensorPeers[i].mac, mac, 6) == 0) return &gSensorPeers[i];
+    if (gSensorPeers[i].inUse && sensorRecordIs(gSensorPeers[i], mac, via)) return &gSensorPeers[i];
   }
   return nullptr;
 }
 
 // The slot of one sensor of one sender, or nullptr when the sender has none.
-static RemoteSensorData* findCacheEntryLocked(const uint8_t* deviceMac, RemoteSensorType sensorType,
+static RemoteSensorData* findCacheEntryLocked(const uint8_t* deviceMac, const uint8_t* via, RemoteSensorType sensorType,
                                               const SensorPeerRecord** peerOut = nullptr) {
   if (sensorType < 0 || sensorType >= REMOTE_SENSOR_MAX) return nullptr;
-  SensorPeerRecord* peer = findPeerRecordLocked(deviceMac);
+  SensorPeerRecord* peer = findPeerRecordLocked(deviceMac, via);
   if (!peer || !peer->slots) return nullptr;
   if (peerOut) *peerOut = peer;
   return &peer->slots[sensorType];
 }
 
-// The record of a paired sender, made when there is none: a free one, else
-// one whose device is no longer paired (its slots stay with the record and
-// are cleared for the new sender). nullptr when all sixteen belong to paired
-// devices. Called without the lock (the pairing lookup must not run under
-// it); espnow_task only.
-static SensorPeerRecord* sensorPeerRecordFor(const uint8_t* mac) {
-  if (!gSensorPeers || !mac) return nullptr;
+// The record of a sender (origin, via), made when there is none: a free one,
+// else one that may be given up (espnowfwd::recordReusable: an own record
+// whose device is no longer paired, a forwarded one whose via is no longer
+// paired or no longer forwards for it). Its slots stay with the record and
+// are cleared for the new sender. nullptr when none may be given up. Called
+// without the lock (the pairing lookup must not run under it); espnow_task
+// only.
+static SensorPeerRecord* sensorPeerRecordFor(const ForwardOrigin& origin) {
+  if (!gSensorPeers) return nullptr;
+  const uint8_t* mac = origin.mac;
+  const uint8_t* via = origin.link == espnowfwd::kLinkForwarded ? origin.via : kSensorNoVia;
   SensorPeerRecord* freeRecord = nullptr;
   for (int i = 0; i < REMOTE_SENSOR_PEERS_MAX; i++) {
-    if (gSensorPeers[i].inUse && memcmp(gSensorPeers[i].mac, mac, 6) == 0) return &gSensorPeers[i];
+    if (gSensorPeers[i].inUse && sensorRecordIs(gSensorPeers[i], mac, via)) {
+      // The same origin may come over the mesh and over the bond link.
+      if (gSensorPeers[i].link != origin.link) {
+        taskENTER_CRITICAL(&gRemoteSensorMux);
+        gSensorPeers[i].link = origin.link;
+        taskEXIT_CRITICAL(&gRemoteSensorMux);
+      }
+      return &gSensorPeers[i];
+    }
     if (!gSensorPeers[i].inUse && !freeRecord) freeRecord = &gSensorPeers[i];
   }
   if (!freeRecord) {
     for (int i = 0; i < REMOTE_SENSOR_PEERS_MAX; i++) {
-      if (!peerIdentityFindByMac(gSensorPeers[i].mac)) { freeRecord = &gSensorPeers[i]; break; }
+      const SensorPeerRecord& r = gSensorPeers[i];
+      const bool forwarded = r.link == espnowfwd::kLinkForwarded;
+      if (espnowfwd::recordReusable(r.link, forwarded ? false : peerIdentityFindByMac(r.mac) != nullptr,
+                                    forwarded ? peerIdentityFindByMac(r.via) != nullptr : false,
+                                    forwarded ? sensorLinkActive(r.via, r.mac) : false)) {
+        freeRecord = &gSensorPeers[i];
+        break;
+      }
     }
   }
   if (!freeRecord) return nullptr;
@@ -480,6 +538,8 @@ static SensorPeerRecord* sensorPeerRecordFor(const uint8_t* mac) {
   if (slots) memset(slots, 0, (size_t)REMOTE_SENSOR_MAX * sizeof(RemoteSensorData));
   freeRecord->slots = slots;
   memcpy(freeRecord->mac, mac, 6);
+  memcpy(freeRecord->via, via, 6);
+  freeRecord->link = origin.link;
   taskENTER_CRITICAL(&gRemoteSensorMux);
   freeRecord->inUse = true;
   taskEXIT_CRITICAL(&gRemoteSensorMux);
@@ -506,6 +566,8 @@ static void fillRemoteSensorInfo(const SensorPeerRecord& peer, RemoteSensorType 
                                  RemoteSensorInfo* out) {
   const RemoteSensorData& e = peer.slots[sensorType];
   memcpy(out->deviceMac, peer.mac, 6);
+  memcpy(out->viaMac, peer.via, 6);
+  out->link = peer.link;
   memcpy(out->deviceName, peer.name, sizeof(out->deviceName));
   out->sensorType = sensorType;
   out->enabled = e.enabled;
@@ -538,13 +600,14 @@ bool remoteSensorInfoAt(int index, RemoteSensorInfo* out) {
   return present;
 }
 
-bool remoteSensorInfoFor(const uint8_t* deviceMac, RemoteSensorType sensorType, RemoteSensorInfo* out) {
+bool remoteSensorInfoFor(const uint8_t* deviceMac, const uint8_t* via, RemoteSensorType sensorType,
+                         RemoteSensorInfo* out) {
   if (!out || !deviceMac) return false;
   const uint32_t nowMs = (uint32_t)millis();
   bool present = false;
   taskENTER_CRITICAL(&gRemoteSensorMux);
   const SensorPeerRecord* peer = nullptr;
-  const RemoteSensorData* e = findCacheEntryLocked(deviceMac, sensorType, &peer);
+  const RemoteSensorData* e = findCacheEntryLocked(deviceMac, via, sensorType, &peer);
   if (e && slotPresent(*e, nowMs)) {
     fillRemoteSensorInfo(*peer, sensorType, nowMs, out);
     present = true;
@@ -553,13 +616,14 @@ bool remoteSensorInfoFor(const uint8_t* deviceMac, RemoteSensorType sensorType, 
   return present;
 }
 
-size_t remoteSensorCopyText(const uint8_t* deviceMac, RemoteSensorType sensorType, char* out, size_t outSize) {
+size_t remoteSensorCopyText(const uint8_t* deviceMac, const uint8_t* via, RemoteSensorType sensorType, char* out,
+                            size_t outSize) {
   if (!out || outSize == 0) return 0;
   out[0] = '\0';
   if (!deviceMac) return 0;
   size_t n = 0;
   taskENTER_CRITICAL(&gRemoteSensorMux);
-  const RemoteSensorData* e = findCacheEntryLocked(deviceMac, sensorType);
+  const RemoteSensorData* e = findCacheEntryLocked(deviceMac, via, sensorType);
   if (e && e->valid && e->jsonLength > 0 && (size_t)e->jsonLength < outSize) {
     n = e->jsonLength;
     memcpy(out, e->jsonData, n);
@@ -575,6 +639,16 @@ static void remoteSensorRefuse(uint32_t RemoteSensorRefusals::*counter) {
   taskENTER_CRITICAL(&gRemoteSensorMux);
   (gRemoteSensorRefusals.*counter)++;
   taskEXIT_CRITICAL(&gRemoteSensorMux);
+}
+
+// "porch", or "porch via glasses" for a forwarded sender.
+static void sensorRecordWords(const ForwardOrigin& origin, char* out, size_t cap) {
+  strlcpy(out, origin.name[0] ? origin.name : "?", cap);
+  if (origin.link != espnowfwd::kLinkForwarded) return;
+  char via[32];
+  sensorViaName(origin.via, via, sizeof(via));
+  strlcat(out, " via ", cap);
+  strlcat(out, via, cap);
 }
 
 // Nothing more can be kept: sixteen paired senders already send, or there is
@@ -599,9 +673,12 @@ static void remoteSensorRefuseFull(uint32_t RemoteSensorRefusals::*counter, cons
 // text nor its arrival stamp. Returns true when the reading was stored.
 // (A later reading log, such as a file on the SD card, is fed from here, after
 // the lock is released: `verdict` and the stamp are what it needs.)
+// `resume`: the first reading of this sensor since a bond master's link
+// began (espnowfwd::attribute): judged as a stream start, so a pause of the
+// forwarding is not counted as loss.
 static bool remoteSensorCommit(SensorPeerRecord* peer, const char* senderName,
                                const espnowsensor::ReadingHeader& h, const uint8_t* text, size_t textLen,
-                               uint32_t nowMs, espnowsensor::CounterVerdict* verdictOut) {
+                               bool resume, uint32_t nowMs, espnowsensor::CounterVerdict* verdictOut) {
   const RemoteSensorType type = (RemoteSensorType)h.sensorType;
   // The receiver stamps the reading with its own clock; a time the sender
   // carries is not trusted. UTC, and 0 while this device's clock is not set.
@@ -614,7 +691,7 @@ static bool remoteSensorCommit(SensorPeerRecord* peer, const char* senderName,
   RemoteSensorData* entry = &peer->slots[type];
   strlcpy(peer->name, senderName ? senderName : "", sizeof(peer->name));
   verdict = espnowsensor::counterJudge(peer->track[type], peer->counts[type], h.bootTag, h.counter,
-                                       (h.flags & espnowsensor::kReadingFlagStreamStart) != 0, nowMs);
+                                       resume || (h.flags & espnowsensor::kReadingFlagStreamStart) != 0, nowMs);
   entry->connected = true;
   entry->lastSeen = nowMs;
   entry->enabled = true;   // a reading means the sensor is streaming
@@ -648,6 +725,22 @@ void remoteSensorIngestPart(const uint8_t* senderMac, const char* senderName,
     remoteSensorRefuse(&RemoteSensorRefusals::badType);
     return;
   }
+  // Whose reading it is: the sender's own, or its bond partner's that it
+  // forwards (refused unless a link of the sender names it). A forwarded
+  // mark on the bond link, or a bit and byte that disagree, is malformed.
+  ForwardOrigin origin;
+  switch (sensorWhose(senderMac, senderName, fromBond, (h.flags & espnowsensor::kReadingFlagForwarded) != 0,
+                      h.fwdLink, h.sensorType, &origin)) {
+    case ForwardResolve::Own:
+    case ForwardResolve::Forwarded:
+      break;
+    case ForwardResolve::Refused:
+      remoteSensorRefuse(&RemoteSensorRefusals::forwardRefused);
+      return;
+    case ForwardResolve::Malformed:
+      remoteSensorRefuse(&RemoteSensorRefusals::malformed);
+      return;
+  }
   // A bond master keeps its partner's readings whatever its mesh role; a mesh
   // frame is kept by the roles that receive (master and backup master).
   if (!fromBond && !espnowsensor::roleReceives(gSettings.meshRole)) {
@@ -662,12 +755,16 @@ void remoteSensorIngestPart(const uint8_t* senderMac, const char* senderName,
   }
   // Only now, on a device that keeps readings, is the table made.
   if (!remoteSensorTableEnsure()) {
+    if (fromBond) sensorNotKept(h.sensorType);
     remoteSensorRefuseFull(&RemoteSensorRefusals::noMemory, senderName, nowMs);
     return;
   }
-  SensorPeerRecord* peer = sensorPeerRecordFor(senderMac);
+  SensorPeerRecord* peer = sensorPeerRecordFor(origin);
   if (!peer) {
-    remoteSensorRefuseFull(&RemoteSensorRefusals::noRecord, senderName, nowMs);
+    if (fromBond) sensorNotKept(h.sensorType);
+    char who[72];
+    sensorRecordWords(origin, who, sizeof(who));
+    remoteSensorRefuseFull(&RemoteSensorRefusals::noRecord, who, nowMs);
     return;
   }
   const uint8_t* text = nullptr;
@@ -689,11 +786,18 @@ void remoteSensorIngestPart(const uint8_t* senderMac, const char* senderName,
   if (part.verdict != espnowsensor::PartVerdict::Complete || badText) return;
   // The sender's slots are made by its first reading that is whole and well formed.
   if (!sensorPeerSlotsEnsure(peer)) {
+    if (fromBond) sensorNotKept(h.sensorType);
     remoteSensorRefuseFull(&RemoteSensorRefusals::noMemory, senderName, nowMs);
     return;
   }
   espnowsensor::CounterVerdict verdict;
-  const bool stored = remoteSensorCommit(peer, senderName, h, text, textLen, nowMs, &verdict);
+  // The resume of a forwarded stream is taken by the reading the counter rule
+  // judges (the last part of a reading), and only once that rule ran.
+  const bool stored = remoteSensorCommit(peer, origin.name, h, text, textLen, origin.resumePending, nowMs, &verdict);
+  if (origin.resumePending) sensorResumeTaken(origin.via, h.sensorType);
+  // A bond master hands its partner's reading on while `text` is valid; only a
+  // reading it kept (a repeat or a late one is not forwarded).
+  if (fromBond && stored) sensorForwardReading(senderMac, h, text, textLen);
   DEBUG_ESPNOW_MESHF("[SENSOR_RX] %s %s counter=%u %s (%u bytes)%s", senderName ? senderName : "?",
                      sensorTypeToString((RemoteSensorType)h.sensorType), (unsigned)h.counter,
                      espnowsensor::counterVerdictName(verdict), (unsigned)textLen, stored ? "" : " not stored");
@@ -719,7 +823,11 @@ void remoteSensorIngestStatus(const uint8_t* senderMac, const char* senderName,
     remoteSensorRefuseFull(&RemoteSensorRefusals::noMemory, senderName, nowMs);
     return;
   }
-  SensorPeerRecord* peer = sensorPeerRecordFor(senderMac);
+  // A status frame is always the sender's own (it is not forwarded).
+  ForwardOrigin origin = {};
+  memcpy(origin.mac, senderMac, 6);
+  origin.link = espnowfwd::kLinkMesh;
+  SensorPeerRecord* peer = sensorPeerRecordFor(origin);
   if (!peer) {
     remoteSensorRefuseFull(&RemoteSensorRefusals::noRecord, senderName, nowMs);
     return;
@@ -844,6 +952,15 @@ static void sensorTargetInputsLocked(int sensorType, espnowsensor::TargetInputs&
   memcpy(in.primary, gSensorTargets.primary, 6);
 }
 
+// This device is a bond worker (bond mode on, role worker).
+static bool sensorIsBondWorker() {
+#if ENABLE_BONDED_MODE
+  return gSettings.bondModeEnabled && isBondWorker();
+#else
+  return false;
+#endif
+}
+
 // Where a reading of `sensorType` goes now (espnowsensor::readingTarget has
 // the rule). With sensorType < 0: where the status frame goes, which is the
 // controller while one is set, else the named master.
@@ -891,6 +1008,9 @@ static bool sensorControllerClearIfNoLeaseLocked(uint8_t previous[6]) {
 // before the session with it has settled. `alsoTo`: a controller whose last
 // lease just ended is told once more, so it sees the stream stop.
 static void announceSensorStatus(const uint8_t* alsoTo = nullptr) {
+  // A bond worker tells nothing to a mesh master, not even a controller whose
+  // lease ended (its bond master has the bond status frame).
+  if (!espnowfwd::meshDataAllowed(sensorIsBondWorker())) return;
   const espnowsensor::TargetChoice target = sensorReadingTarget(-1);
   const bool haveTarget = target.why == espnowsensor::DropReason::None && !target.viaBond;
   if (!haveTarget && !alsoTo) return;
@@ -1706,10 +1826,24 @@ static const char* arrivalClockName(int64_t arrivalEpochMs, uint8_t arrivalClock
   return Clock::syncSourceName((Clock::SyncSource)arrivalClock);
 }
 
-String getRemoteSensorDataJson(const uint8_t* deviceMac, RemoteSensorType sensorType) {
+// `,"link":"..","via":{"mac":"..","name":".."}|null` of a JSON row.
+static void sensorLinkJson(uint8_t link, const uint8_t via[6], char* out, size_t cap) {
+  if (link != espnowfwd::kLinkForwarded) {
+    snprintf(out, cap, ",\"link\":\"%s\",\"via\":null", espnowfwd::linkKey(link));
+    return;
+  }
+  char name[32];
+  char nameJson[72];
+  sensorViaName(via, name, sizeof(name));
+  espnowsensor::jsonTextEscape(name, nameJson, sizeof(nameJson));
+  snprintf(out, cap, ",\"link\":\"forwarded\",\"via\":{\"mac\":\"" MAC_FMT "\",\"name\":\"%s\"}", MAC_ARGS(via),
+           nameJson);
+}
+
+String getRemoteSensorDataJson(const uint8_t* deviceMac, const uint8_t* via, RemoteSensorType sensorType) {
   RemoteSensorInfo info;
   if (sensorType < 0 || sensorType >= REMOTE_SENSOR_MAX ||
-      !remoteSensorInfoFor(deviceMac, sensorType, &info)) {
+      !remoteSensorInfoFor(deviceMac, via, sensorType, &info)) {
     // Unknown to us = not connected. Mirrors a local sensor that isn't present.
     return "{\"connected\":false,\"enabled\":false,\"fresh\":false,\"data\":null}";
   }
@@ -1719,7 +1853,7 @@ String getRemoteSensorDataJson(const uint8_t* deviceMac, RemoteSensorType sensor
   uint16_t bootTag = 0;
   taskENTER_CRITICAL(&gRemoteSensorMux);
   for (int i = 0; gSensorPeers && i < REMOTE_SENSOR_PEERS_MAX; i++) {
-    if (gSensorPeers[i].inUse && memcmp(gSensorPeers[i].mac, deviceMac, 6) == 0) {
+    if (gSensorPeers[i].inUse && sensorRecordIs(gSensorPeers[i], deviceMac, via)) {
       counts = gSensorPeers[i].counts[sensorType];
       incomplete = gSensorPeers[i].incomplete;
       bootTag = gSensorPeers[i].track[sensorType].bootTag;
@@ -1732,10 +1866,12 @@ String getRemoteSensorDataJson(const uint8_t* deviceMac, RemoteSensorType sensor
   // enabled but momentarily stale, or connected + disabled (red dot, no data).
   const uint32_t now = (uint32_t)millis();
   String out;
-  out.reserve(info.jsonLength + 360);
-  char head[320];
-  int n = snprintf(head, sizeof(head), "{\"connected\":true,\"enabled\":%s,\"fresh\":%s",
-                   info.enabled ? "true" : "false", info.fresh ? "true" : "false");
+  out.reserve(info.jsonLength + 520);
+  char head[480];
+  char linkJson[160];
+  sensorLinkJson(info.link, info.viaMac, linkJson, sizeof(linkJson));
+  int n = snprintf(head, sizeof(head), "{\"connected\":true,\"enabled\":%s,\"fresh\":%s%s",
+                   info.enabled ? "true" : "false", info.fresh ? "true" : "false", linkJson);
   if (info.jsonLength > 0) {
     // The arrival is this device's own stamp: UTC epoch (null while its clock
     // was not set) and its uptime. bootTag and counter are the sender's: with
@@ -1761,7 +1897,7 @@ String getRemoteSensorDataJson(const uint8_t* deviceMac, RemoteSensorType sensor
     char* text = (char*)ps_alloc(SENSOR_READING_MAX_BYTES + 1, AllocPref::PreferPsram, "espnow.sensor.reply");
     if (text) {
       // The stored text was checked to be one JSON object when it arrived.
-      if (remoteSensorCopyText(deviceMac, sensorType, text, SENSOR_READING_MAX_BYTES + 1) > 0) {
+      if (remoteSensorCopyText(deviceMac, via, sensorType, text, SENSOR_READING_MAX_BYTES + 1) > 0) {
         out += text;
         haveText = true;
       }
@@ -1838,17 +1974,34 @@ String getRemoteDevicesListJson() {
     if (!remoteSensorInfoAt(i, &e)) continue;
     const bool fresh = e.fresh;
 
-    // Find or create device entry
+    // Find or create device entry: one per sender (origin, via).
     String macStr = macToDisplayStr(e.deviceMac);
+    const bool forwarded = e.link == espnowfwd::kLinkForwarded;
+    String viaStr = forwarded ? macToDisplayStr(e.viaMac) : String("");
     JsonObject deviceObj;
     bool found = false;
     for (JsonObject dev : devices) {
-      if (strcmp(dev["mac"], macStr.c_str()) == 0) { deviceObj = dev; found = true; break; }
+      const char* devVia = dev["via"].is<JsonObject>() ? (dev["via"]["mac"] | "") : "";
+      if (strcmp(dev["mac"], macStr.c_str()) == 0 && strcmp(devVia, viaStr.c_str()) == 0) {
+        deviceObj = dev;
+        found = true;
+        break;
+      }
     }
     if (!found) {
       deviceObj = devices.add<JsonObject>();
       deviceObj["mac"] = macStr;
       deviceObj["name"] = e.deviceName;
+      deviceObj["link"] = espnowfwd::linkKey(e.link);
+      if (forwarded) {
+        char viaName[32];
+        sensorViaName(e.viaMac, viaName, sizeof(viaName));
+        JsonObject via = deviceObj["via"].to<JsonObject>();
+        via["mac"] = viaStr;
+        via["name"] = viaName;
+      } else {
+        deviceObj["via"] = nullptr;
+      }
       deviceObj["sensors"].to<JsonArray>();
     }
 
@@ -2026,6 +2179,8 @@ static RemoteSensorTotals remoteSensorTotals() {
 // One sender as the receiver knows it, for the status lists.
 struct RemoteSensorPeerSummary {
   uint8_t mac[6];
+  uint8_t via[6];
+  uint8_t link;
   char name[32];
   uint16_t presentMask;    // sensors listed
   uint16_t streamingMask;  // ... that the sender says it streams
@@ -2045,6 +2200,8 @@ static bool remoteSensorPeerSummaryAt(int index, RemoteSensorPeerSummary* out) {
     const SensorPeerRecord& peer = gSensorPeers[index];
     have = true;
     memcpy(out->mac, peer.mac, 6);
+    memcpy(out->via, peer.via, 6);
+    out->link = peer.link;
     memcpy(out->name, peer.name, sizeof(out->name));
     out->incomplete = peer.incomplete;
     out->malformed = peer.malformed;
@@ -2064,9 +2221,15 @@ static bool remoteSensorPeerSummaryAt(int index, RemoteSensorPeerSummary* out) {
   return have;
 }
 
-static bool remoteSensorPeerSummaryFor(const uint8_t* mac, RemoteSensorPeerSummary* out) {
+static const uint8_t* summaryVia(const RemoteSensorPeerSummary& s) {
+  return s.link == espnowfwd::kLinkForwarded ? s.via : nullptr;
+}
+
+// The summary of (mac, via); via nullptr: the origin's own record.
+static bool remoteSensorPeerSummaryFor(const uint8_t* mac, const uint8_t* via, RemoteSensorPeerSummary* out) {
   for (int i = 0; i < REMOTE_SENSOR_PEERS_MAX; i++) {
-    if (remoteSensorPeerSummaryAt(i, out) && memcmp(out->mac, mac, 6) == 0) return true;
+    if (!remoteSensorPeerSummaryAt(i, out) || memcmp(out->mac, mac, 6) != 0) continue;
+    if (memcmp(out->via, via ? via : kSensorNoVia, 6) == 0) return true;
   }
   return false;
 }
@@ -2108,20 +2271,65 @@ static size_t sensorStatusJsonFit(JsonDocument& doc, JsonArray list, const char*
 
 static const char kSensorStatusTooLarge[] = "{\"schema\":1,\"error\":\"the reply does not fit its buffer\"}";
 
-// espnowsensorstatus json <name_or_mac>: everything this device keeps of one sender.
-static const char* sensorStatusOneDeviceJson(const String& who) {
+// espnowsensorstatus json <name_or_mac> [via <name_or_mac>]: everything this
+// device keeps of one sender. With 'via', the bond partner that device
+// forwards for (a forwarded partner is also found by the name its link shows).
+static const char* sensorStatusOneDeviceJson(const String& whoArgs) {
+  String who = whoArgs;
+  String viaWho;
+  const int viaAt = whoArgs.indexOf(" via ");
+  if (viaAt >= 0) {
+    who = whoArgs.substring(0, viaAt);
+    viaWho = whoArgs.substring(viaAt + 5);
+    who.trim();
+    viaWho.trim();
+    if (who.length() == 0 || viaWho.length() == 0) {
+      return "Usage: espnowsensorstatus [json [<name_or_mac> [via <name_or_mac>]]]";
+    }
+  }
   uint8_t mac[6];
-  if (!resolveDeviceNameOrMac(who, mac)) return "Error: no such device (use its name or its MAC address)";
+  uint8_t viaMac[6];
+  const uint8_t* via = nullptr;
+  if (viaWho.length() > 0) {
+    if (!resolveDeviceNameOrMac(viaWho, viaMac)) return "Error: no such device (use its name or its MAC address)";
+    uint8_t foundVia[6];
+    if (!resolveDeviceNameOrMac(who, mac) && !espnowForwardFindOrigin(who.c_str(), viaMac, mac, foundVia)) {
+      return "Error: no such device (use its name or its MAC address)";
+    }
+    via = viaMac;
+  } else if (!resolveDeviceNameOrMac(who, mac)) {
+    // A bond partner another device forwards for, by the name its link shows.
+    if (!espnowForwardFindOrigin(who.c_str(), nullptr, mac, viaMac)) {
+      return "Error: no such device (use its name or its MAC address)";
+    }
+    via = viaMac;
+  }
   EXT_RAM_BSS_ATTR static char jbuf[4096];
   PSRAM_JSON_DOC(doc);
   doc["schema"] = 1;
   doc["mac"] = macToDisplayStr(mac);
-  char name[32];
-  sensorPeerDisplayName(mac, name, sizeof(name));
+  char name[33];
+  if (via) {
+    espnowForwardOriginName(via, mac, name, sizeof(name));
+    if (!name[0]) sensorPeerDisplayName(mac, name, sizeof(name));
+  } else {
+    sensorPeerDisplayName(mac, name, sizeof(name));
+  }
   doc["name"] = name;
   doc["paired"] = peerIdentityFindByMac(mac) != nullptr;
+  doc["link"] = via ? "forwarded" : nullptr;
+  if (via) {
+    char viaName[32];
+    sensorViaName(via, viaName, sizeof(viaName));
+    JsonObject viaObj = doc["via"].to<JsonObject>();
+    viaObj["mac"] = macToDisplayStr(via);
+    viaObj["name"] = viaName;
+  } else {
+    doc["via"] = nullptr;
+  }
   RemoteSensorPeerSummary summary;
-  const bool known = remoteSensorPeerSummaryFor(mac, &summary);
+  const bool known = remoteSensorPeerSummaryFor(mac, via, &summary);
+  if (!via && known) doc["link"] = espnowfwd::linkKey(summary.link);
   doc["incomplete"] = known ? summary.incomplete : 0;
   doc["malformed"] = known ? summary.malformed : 0;
   // Per sensor: the keys of GET /api/sensors/remote without the reading's text.
@@ -2130,11 +2338,11 @@ static const char* sensorStatusOneDeviceJson(const String& who) {
   for (int i = 0; known && i < REMOTE_SENSOR_MAX; i++) {
     const RemoteSensorType type = (RemoteSensorType)i;
     RemoteSensorInfo info;
-    const bool listed = remoteSensorInfoFor(mac, type, &info);
+    const bool listed = remoteSensorInfoFor(mac, via, type, &info);
     espnowsensor::CounterCounts counts = {};
     uint16_t bootTag = 0;
     taskENTER_CRITICAL(&gRemoteSensorMux);
-    const SensorPeerRecord* peer = findPeerRecordLocked(mac);
+    const SensorPeerRecord* peer = findPeerRecordLocked(mac, via);
     if (peer) {
       counts = peer->counts[i];
       bootTag = peer->track[i].bootTag;
@@ -2163,13 +2371,13 @@ static const char* sensorStatusOneDeviceJson(const String& who) {
   }
   // Battery state and events of the same sender (null: nothing kept).
   EXT_RAM_BSS_ATTR static char part[640];
-  if (espnowBatteryJsonFor(mac, part, sizeof(part)) > 0) doc["battery"] = serialized(part);
+  if (espnowBatteryJsonFor(mac, via, part, sizeof(part)) > 0) doc["battery"] = serialized(part);
   else doc["battery"] = nullptr;
   // Its event counts for an admin only (as espnowevents); for anyone else
   // the key is left out and eventCounts says why.
   EXT_RAM_BSS_ATTR static char eventsPart[320];
   if (!espnowEventCountsVisible()) doc["eventCounts"] = "admin only";
-  else if (espnowEventCountsJsonFor(mac, eventsPart, sizeof(eventsPart)) > 0) doc["events"] = serialized(eventsPart);
+  else if (espnowEventCountsJsonFor(mac, via, eventsPart, sizeof(eventsPart)) > 0) doc["events"] = serialized(eventsPart);
   else doc["events"] = nullptr;
   if (sensorStatusJsonFit(doc, JsonArray(), nullptr, jbuf, sizeof(jbuf)) == 0) return kSensorStatusTooLarge;
   return jbuf;
@@ -2274,6 +2482,10 @@ const char* cmd_espnow_sensorstatus(const String& argsInput) {
     table["refusedNoMemory"] = totals.refusals.noMemory;
     table["badType"] = totals.refusals.badType;
     table["notReceiver"] = totals.refusals.notReceiver;
+    table["forwardRefused"] = totals.refusals.forwardRefused;
+    // Devices that forward their bond partner's data here
+    // ('espnowforwardlinks json' lists them).
+    doc["forwardLinks"] = (uint32_t)espnowForwardLinkCount();
     JsonArray devices;  // only on a device that keeps readings
     if (receives || totals.senders) {
       // The senders and their sensors ({"devices":[...]} as GET
@@ -2288,9 +2500,14 @@ const char* cmd_espnow_sensorstatus(const String& argsInput) {
       devices = doc["devices"].as<JsonArray>();
       for (JsonObject dev : devices) {
         uint8_t mac[6];
+        uint8_t viaMac[6];
         RemoteSensorPeerSummary summary;
         const char* macText = dev["mac"] | "";
-        if (!parseMacAddress(String(macText), mac) || !remoteSensorPeerSummaryFor(mac, &summary)) continue;
+        const bool forwarded = dev["via"].is<JsonObject>();
+        const char* viaText = forwarded ? (dev["via"]["mac"] | "") : "";
+        if (!parseMacAddress(String(macText), mac)) continue;
+        if (forwarded && !parseMacAddress(String(viaText), viaMac)) continue;
+        if (!remoteSensorPeerSummaryFor(mac, forwarded ? viaMac : nullptr, &summary)) continue;
         dev["received"] = summary.received;
         dev["lost"] = summary.lost;
         dev["late"] = summary.late;
@@ -2384,15 +2601,29 @@ const char* cmd_espnow_sensorstatus(const String& argsInput) {
     }
     if (pos == 0) strlcpy(line, "no sensor heard from in the last minute", sizeof(line));
     char more[96] = "";
-    espnowPowerEventsPeerText(summary.mac, more, sizeof(more));
+    espnowPowerEventsPeerText(summary.mac, summaryVia(summary), more, sizeof(more));
+    char who[80];
+    strlcpy(who, summary.name[0] ? summary.name : macToDisplayStr(summary.mac).c_str(), sizeof(who));
+    if (summary.link == espnowfwd::kLinkForwarded) {
+      char viaName[32];
+      sensorViaName(summary.via, viaName, sizeof(viaName));
+      strlcat(who, " via ", sizeof(who));
+      strlcat(who, viaName, sizeof(who));
+    }
     BROADCAST_PRINTF("  From %s: %s; %lu readings kept, %lu lost (%lu of them came late)%s%s",
-                     summary.name[0] ? summary.name : macToDisplayStr(summary.mac).c_str(), line,
+                     who, line,
                      (unsigned long)summary.received, (unsigned long)summary.lost, (unsigned long)summary.late,
                      more[0] ? "; " : "", more);
   }
   if (senderListed && !espnowEventCountsVisible()) broadcastOutput("  Event counts: admin only.");
+  const size_t forwardLinks = espnowForwardLinkCount();
+  if (forwardLinks) {
+    BROADCAST_PRINTF("  Forwarded by other devices: %u link%s (espnowforwardlinks)", (unsigned)forwardLinks,
+                     forwardLinks == 1 ? "" : "s");
+  }
   const uint32_t refusedAny = totals.refusals.noRecord + totals.refusals.noMemory + totals.refusals.badType +
-                              totals.refusals.notReceiver + totals.refusals.malformed + totals.malformed;
+                              totals.refusals.notReceiver + totals.refusals.malformed + totals.malformed +
+                              totals.refusals.forwardRefused;
   if (receives || totals.senders || refusedAny) {
     BROADCAST_PRINTF("  Received: %d of %d senders, %d sensors listed, %lu readings kept, %lu lost (%lu of them came late)",
                      totals.senders, REMOTE_SENSOR_PEERS_MAX, totals.sensors, (unsigned long)totals.received,
@@ -2400,11 +2631,11 @@ const char* cmd_espnow_sensorstatus(const String& argsInput) {
   }
   if (refusedAny) {
     BROADCAST_PRINTF("  Refused: %lu because %d devices already send, %lu for lack of memory, %lu of an unknown "
-                     "sensor type, %lu malformed, %lu because of this device's role",
+                     "sensor type, %lu malformed, %lu because of this device's role, %lu forwarded without a link",
                      (unsigned long)totals.refusals.noRecord, REMOTE_SENSOR_PEERS_MAX,
                      (unsigned long)totals.refusals.noMemory, (unsigned long)totals.refusals.badType,
                      (unsigned long)(totals.malformed + totals.refusals.malformed),
-                     (unsigned long)totals.refusals.notReceiver);
+                     (unsigned long)totals.refusals.notReceiver, (unsigned long)totals.refusals.forwardRefused);
   }
   if (receives) broadcastOutput("  Battery state and events it received: espnowbattery, espnowevents (admin only).");
 
@@ -2469,7 +2700,8 @@ bool getRemoteGpsData(RemoteGpsData* outData) {
 
   char* text = (char*)ps_alloc(SENSOR_READING_MAX_BYTES + 1, AllocPref::PreferPsram, "espnow.sensor.gps");
   if (!text) return false;
-  const size_t textLen = remoteSensorCopyText(best.deviceMac, REMOTE_SENSOR_GPS, text, SENSOR_READING_MAX_BYTES + 1);
+  const size_t textLen = remoteSensorCopyText(best.deviceMac, remoteSensorInfoVia(best), REMOTE_SENSOR_GPS, text,
+                                              SENSOR_READING_MAX_BYTES + 1);
   
   // Parse the JSON data: {"valid":true,"connected":true,"ts":..,"fix":1,"quality":1,"sats":8,"lat":37.123,"lon":-122.456,"alt":100.5,"speed":0.5}
   PSRAM_JSON_DOC(doc);

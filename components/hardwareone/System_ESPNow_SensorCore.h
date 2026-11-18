@@ -118,14 +118,17 @@ constexpr uint32_t elapsedSinceMs(uint32_t nowMs, uint32_t stampMs) {
 //
 //   0  sensorType   RemoteSensorType
 //   1  flags        bit 0: ageMs is filled; bit 1: first reading of a stream
-//                   to this target; other bits 0, ignored on receive
+//                   to this target; bit 2: forwarded (the reading is the
+//                   sender's bond partner's, System_ESPNow_ForwardCore.h);
+//                   other bits 0, ignored on receive
 //   2  bootTag      16 bit: the same for every frame the sender sends in one boot
 //   4  counter      16 bit: counts this sender's readings of this sensor. The
 //                   first after boot is 1; 65535 is followed by 0. All parts
 //                   of one reading carry the same value
 //   6  parts        low nibble: this part's index (0-based);
 //                   high nibble: number of parts (1 to 4)
-//   7  reserved     0
+//   7  fwdLink      the bond master's link number when bit 2 is set, else 0
+//                   (bit 2 set if and only if this byte is not 0)
 //   8  ageMs        32 bit: how old the reading already was when it was sent.
 //                   0 today (readings are built when they are sent); for a
 //                   later sender that keeps readings and sends them afterwards
@@ -143,6 +146,7 @@ constexpr uint16_t kReadingMaxBytes   = kReadingMaxParts * kPartMaxRouted;      
 
 constexpr uint8_t kReadingFlagAgeValid    = 0x01;
 constexpr uint8_t kReadingFlagStreamStart = 0x02;
+constexpr uint8_t kReadingFlagForwarded   = 0x04;
 
 struct ReadingHeader {
   uint8_t  sensorType;
@@ -152,6 +156,7 @@ struct ReadingHeader {
   uint8_t  partIndex;
   uint8_t  partCount;
   uint32_t ageMs;
+  uint8_t  fwdLink;  // byte 7: 0, or the link number of a forwarded reading
 };
 
 inline void packReadingHeader(uint8_t out[kReadingHeaderLen], const ReadingHeader& h) {
@@ -162,7 +167,7 @@ inline void packReadingHeader(uint8_t out[kReadingHeaderLen], const ReadingHeade
   out[4] = (uint8_t)(h.counter & 0xFF);
   out[5] = (uint8_t)(h.counter >> 8);
   out[6] = (uint8_t)((h.partIndex & 0x0F) | ((h.partCount & 0x0F) << 4));
-  out[7] = 0;
+  out[7] = h.fwdLink;
   out[8]  = (uint8_t)(h.ageMs & 0xFF);
   out[9]  = (uint8_t)((h.ageMs >> 8) & 0xFF);
   out[10] = (uint8_t)((h.ageMs >> 16) & 0xFF);
@@ -179,6 +184,7 @@ inline bool parseReadingHeader(const uint8_t* in, size_t len, ReadingHeader& h) 
   h.counter    = (uint16_t)(in[4] | ((uint16_t)in[5] << 8));
   h.partIndex  = (uint8_t)(in[6] & 0x0F);
   h.partCount  = (uint8_t)(in[6] >> 4);
+  h.fwdLink    = in[7];
   h.ageMs      = (uint32_t)in[8] | ((uint32_t)in[9] << 8) | ((uint32_t)in[10] << 16) |
                  ((uint32_t)in[11] << 24);
   return true;

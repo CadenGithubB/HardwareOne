@@ -87,7 +87,9 @@ inline bool bucketTake(TokenBucket& b, uint16_t cap, uint32_t refillMs, uint32_t
 //  12  rateX10      signed: percent per hour x 10, clamped to the field
 //  14  sampleAgeMs  how old the battery sample was when sent; 65535 = that
 //                   or more, or no sample yet
-//  16  reserved     8 bytes, 0
+//  16  fwdLink      0, or the bond master's link number: the frame is the
+//                   sender's bond partner's (System_ESPNow_ForwardCore.h)
+//  17  reserved     7 bytes, 0
 // ---------------------------------------------------------------------------
 constexpr size_t kPowerFrameLen = 24;
 
@@ -124,6 +126,7 @@ struct PowerFrame {
   uint16_t percentX10;
   int16_t  rateX10;
   uint16_t sampleAgeMs;
+  uint8_t  fwdLink;  // byte 16: 0, or the link number of a forwarded frame
 };
 
 inline void packPowerFrame(uint8_t out[kPowerFrameLen], const PowerFrame& f) {
@@ -140,7 +143,8 @@ inline void packPowerFrame(uint8_t out[kPowerFrameLen], const PowerFrame& f) {
   put16(10, f.percentX10);
   put16(12, (uint16_t)f.rateX10);
   put16(14, f.sampleAgeMs);
-  memset(out + 16, 0, 8);
+  out[16] = f.fwdLink;
+  memset(out + 17, 0, 7);
 }
 
 // False when the payload is shorter than the frame. A longer one is read up
@@ -157,6 +161,7 @@ inline bool parsePowerFrame(const uint8_t* in, size_t len, PowerFrame& f) {
   f.percentX10 = get16(10);
   f.rateX10 = (int16_t)get16(12);
   f.sampleAgeMs = get16(14);
+  f.fwdLink = in[16];
   return true;
 }
 
@@ -306,10 +311,11 @@ inline void powerSent(PowerSendState& s, const PowerFrame& f, uint32_t nowMs) {
 //   0  counter    16 bit: counts this sender's event frames, as above
 //   2  bootTag    16 bit
 //   4  flags      bit 0 subject was cut, bit 1 detail was cut, bit 2 who was
-//                 cut, bit 3 kind was cut; other bits 0
+//                 cut, bit 3 kind was cut; bit 4 forwarded (the event is the
+//                 sender's bond partner's); other bits 0
 //   5  tier       0 verbose, 1 standard, 2 alert: how the sender rates the kind
 //   6  source     which interface caused the event (kEventSource* below)
-//   7  reserved0  0
+//   7  fwdLink    the bond master's link number when bit 4 is set, else 0
 //   8  skipped    16 bit: events the sender left out since the last one it
 //                 sent (its rate limit, or overwritten in its ring before
 //                 they could be sent); 65535 = that or more
@@ -341,6 +347,9 @@ constexpr uint8_t kEventCutSubject = 0x01;
 constexpr uint8_t kEventCutDetail  = 0x02;
 constexpr uint8_t kEventCutWho     = 0x04;
 constexpr uint8_t kEventCutKind    = 0x08;
+constexpr uint8_t kEventCutMask    = 0x0F;  // the cut bits a receiver stores
+constexpr uint8_t kEventFlagForwarded = 0x10;
+constexpr uint8_t kEventFlagsSent  = 0x1F;  // what a sender may set
 
 constexpr uint8_t kEventTierVerbose  = 0;
 constexpr uint8_t kEventTierStandard = 1;
@@ -367,6 +376,7 @@ struct EventFrame {
   uint16_t skipped;
   uint32_t eventSeq;
   uint32_t ageMs;
+  uint8_t  fwdLink;                    // byte 7: 0, or the link number of a forwarded event
   char     kind[kEventKindLen];        // as on the wire: zero padded, not terminated when full
   char     subject[kEventSubjectLen];
   char     detail[kEventDetailLen];
@@ -384,10 +394,10 @@ inline void packEventFrame(uint8_t out[kEventFrameLen], const EventFrame& f) {
   };
   put16(0, f.counter);
   put16(2, f.bootTag);
-  out[4] = (uint8_t)(f.flags & 0x0F);
+  out[4] = (uint8_t)(f.flags & kEventFlagsSent);
   out[5] = f.tier;
   out[6] = f.source;
-  out[7] = 0;
+  out[7] = f.fwdLink;
   put16(8, f.skipped);
   put16(10, 0);
   put32(12, f.eventSeq);
@@ -408,6 +418,7 @@ inline bool parseEventFrame(const uint8_t* in, size_t len, EventFrame& f) {
   f.flags = in[4];
   f.tier = in[5];
   f.source = in[6];
+  f.fwdLink = in[7];
   f.skipped = get16(8);
   f.eventSeq = get32(12);
   f.ageMs = get32(16);
@@ -499,7 +510,10 @@ constexpr uint32_t kEventRxRefillMs   = 1000;
 // ---------------------------------------------------------------------------
 // Whether this device sends its battery state, or its events, and why not.
 // First match. Naming the master on a device is the consent to send to it;
-// the receiver needs no bond and no login.
+// the receiver needs no bond and no login. A bond worker is the exception:
+// it sends to its bond partner only (BOND_POWER_STATUS 180, BOND_EVENT_PUSH
+// 182) and never to a mesh master, whatever is named on it; the bond master
+// may forward them (System_ESPNow_ForwardCore.h).
 // ---------------------------------------------------------------------------
 enum class PushWhyNot : uint8_t {
   Sends = 0,
@@ -510,6 +524,7 @@ enum class PushWhyNot : uint8_t {
   NoMaster,         // no master is named on this device
   MasterNotPaired,  // one is named, none of them is paired
   NoSession,        // none of them has a session yet (one is being started)
+  BondOffline,      // a bond worker whose bond partner is not connected
   Count
 };
 
@@ -521,11 +536,14 @@ struct PushInputs {
   bool    masterNamed;     // a master or backup master fingerprint is set
   uint8_t targets;         // named masters that are paired (0 to 2)
   uint8_t targetsReady;    // ... with a session a frame can use now
+  bool    bondWorker;      // bond mode on and this device is the bond worker
+  bool    bondOnline;      // ... and its bond partner is connected
 };
 
 inline PushWhyNot pushDecide(const PushInputs& in) {
   if (!in.inBuild) return PushWhyNot::NotInBuild;
   if (!in.settingOn) return PushWhyNot::Off;
+  if (in.bondWorker) return in.bondOnline ? PushWhyNot::Sends : PushWhyNot::BondOffline;
   if (!in.meshOn) return PushWhyNot::MeshOff;
   if (!roleSends(in.meshRole)) return PushWhyNot::IsMaster;
   if (!in.masterNamed) return PushWhyNot::NoMaster;
@@ -545,6 +563,7 @@ inline const char* pushWhyNotKey(PushWhyNot why) {
     case PushWhyNot::NoMaster:        return "no_master";
     case PushWhyNot::MasterNotPaired: return "master_not_paired";
     case PushWhyNot::NoSession:       return "no_session";
+    case PushWhyNot::BondOffline:     return "bond_offline";
     case PushWhyNot::Count:           break;
   }
   return "?";
@@ -560,6 +579,7 @@ inline const char* pushWhyNotText(PushWhyNot why) {
     case PushWhyNot::NoMaster:        return "no master is named on this device (espnowmasterfingerprint)";
     case PushWhyNot::MasterNotPaired: return "the master named on this device is not paired with it";
     case PushWhyNot::NoSession:       return "the master has no session with this device yet";
+    case PushWhyNot::BondOffline:     return "the bond partner is not connected";
     case PushWhyNot::Count:           break;
   }
   return "?";
@@ -641,7 +661,8 @@ inline size_t jsonTextEscape(const char* text, char* out, size_t cap) {
 // ---------------------------------------------------------------------------
 // The receiver's recent events: one list of kEventListLen entries per mesh.
 // A new event takes a free entry; in a full list it replaces the oldest entry
-// of the sender that holds the most (of two that hold the same, the one whose
+// of the sender that holds the most (a sender is its origin and the device
+// that forwarded it, if any) (of two that hold the same, the one whose
 // oldest entry is older), so one busy sender cannot push out what the others
 // sent. Every stored event has a receive number `rx` that counts up from 1
 // since the receiver's boot, across all lists; 0 marks a free entry.
@@ -651,7 +672,9 @@ constexpr uint8_t kEventMeshes  = 4;
 
 struct StoredEvent {
   uint32_t rx;               // 0: free
-  uint8_t  senderMac[6];
+  uint8_t  senderMac[6];     // the event's origin
+  uint8_t  via[6];           // all zero, or the bond master that forwarded it
+  uint8_t  link;             // 0 mesh, 1 bond link, 2 forwarded (espnowfwd::kLink*)
   uint8_t  tier;
   uint8_t  source;
   uint8_t  flags;
@@ -681,7 +704,7 @@ inline uint8_t eventListSlot(const StoredEvent* list, uint8_t n) {
     uint8_t count = 0;
     uint8_t oldest = i;
     for (uint8_t k = 0; k < n; ++k) {
-      if (memcmp(list[k].senderMac, list[i].senderMac, 6) != 0) continue;
+      if (memcmp(list[k].senderMac, list[i].senderMac, 6) != 0 || memcmp(list[k].via, list[i].via, 6) != 0) continue;
       count++;
       if (list[k].rx < list[oldest].rx) oldest = k;
     }

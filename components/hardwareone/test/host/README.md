@@ -4338,6 +4338,65 @@ thin handlers, `cmd_espnow_powerinterval` and `cmd_espnow_eventpush` (source rul
 `sendStatusSweep` that clears a session after two unacknowledged frames (the harness follows its rule), and the
 battery, event and target lines of `espnowsensorstatus`.
 
+## ESP-NOW forwarding for a bond partner
+
+A bond worker never sends its readings, battery state or events to a mesh master itself; its bond master may
+forward them to the master named on the bond master (`bondforward on`), which accepts only from devices it lists
+(`espnowforwardfrom`). The bond master announces the link in FORWARD_LINK (155); a forwarded 154/152/132 frame
+carries the link number in a reserved byte (and, for readings and events, a reserved flag bit). Design and
+decisions: `/Volumes/hw1build/bond-agreement-build/forward/DESIGN.md` and `DESIGN_DECISIONS.md`.
+
+`espnow_forward_core_tests` compiles `System_ESPNow_ForwardCore.h` (the production dependency-free header): the
+96-byte frame byte by byte, unknown ops, short and hostile frames; `forwardDecide` row by row; the partner's
+agreement (unknown after agreed keeps the link, never agreed does not, a decline or a partner change forgets
+it); link numbers and their serial order; the bond master's state per master (announce, back-off, only a matching
+answer counts, stale, refused and its 10-minute retry, a new session id announces again while a rekey keeps
+forwarding, query, refresh, three withdraw tries, the withdrawal of everything once per session, which frames go
+to a target and why not); `forwardFrameAllowed` (the link's partner, the hold epoch, the setting, a decline);
+every announce check on the master; the generation rule with a late announcement in both orders, after a
+withdrawal, across the u8 wrap, and a late withdrawal of everything; every withdraw row; every `attribute`
+verdict and the resume once per stream; the query limit; `recordReusable`; the allow list; names; X's numbers
+through the bond master to the master with a loss on each hop and a pause that is not counted as loss.
+`espnow_sensor_core_tests` and `espnow_power_event_core_tests` add the link byte of the reading header, the
+battery frame and the event frame, bit 4 of the event flags, `pushDecide`'s bond branch for every mesh input,
+and the fairness of a full event list by (sender, via).
+
+`espnow_forward_rx` compiles the production code of `System_ESPNow_ForwardRx.cpp` between
+`FORWARD_RX_HOST_BEGIN` and `FORWARD_RX_HOST_END` against a host device (role, paired devices with keys and
+names, the setting, a recording radio): every answer of an announcement, the console lines, a replaced partner
+and a late announcement of the old one, whose a frame is (own, bond link, forwarded with the resume, malformed
+marks, unannounced and old link numbers refused with a query at most every 5 s), withdraw and the withdrawal of
+everything, the allow list read again once a second and tied to each device's key (another identity under the
+same address is not allowed), a refused announcement said once a minute, sixteen entries and the reuse of an
+unpaired one, `espnowforwardfrom` and `espnowforwardlinks` (text, JSON, paging, "not confirmed"), and nothing
+that may block, print, send or allocate under the lock. `espnow_bond_forward` compiles the production code of
+`System_ESPNow_BondForward.cpp` between `BOND_FORWARD_HOST_BEGIN` and `BOND_FORWARD_HOST_END` against a host bond,
+named masters and sessions with session ids: every reason with its `bondforward` reply, `bondforward sensors`,
+the announcement's bytes, readings cut for the master's path with the partner's header plus the bit and link
+number (four routed parts of 472 bytes), battery state acknowledged to both masters, events with bit and byte, a
+frame of another source or after a partner change began, off at once, a full queue, `not_kept_here`, the JSON
+object and the `bondstatus` lines (the longest of each proven to fit), a rekey, a new session, a query, the
+refresh, an absent partner, a decline, a partner change (the tick waits while it runs), another hold epoch, a
+sensor change while an announcement is out, stale, refused, a new named master, a handshake, promotion and
+demotion, the partner named as master (and a master that became the partner).
+
+The existing suites cover the rest: `espnow_sensor_ingest` (a forwarded reading kept under (partner, via), its
+JSON with `link` and `via`, the partner's own counters, a direct and a forwarded record side by side, refused
+link numbers and streams, bit and byte that disagree, the resume taken by the last part of a reading in four
+parts, a forwarded record whose link ended given to another sender, the bond master handing its partner's
+reading to its forwarder, a repeat not handed on, bit 2 on 179 malformed, `not_kept_here`),
+`espnow_power_events` (a bond worker sends 180/182 to its partner only and starts no handshake, the bond master
+keeps them whatever its role and hands them on, two workers refuse, a mark on 180/182 is malformed, forwarded
+battery state and events under (partner, via) with the resume, the via's mesh list, `link`/`via` in JSON, a
+0xFF frame now read as forwarded and refused), `espnow_dispatch_policy` (155 through the real gates; 180/182 from
+the partner only), `espnow_handshake_backoff` (180/182 without a session are dropped, not parked),
+`espnow_sensor_wire` (the layouts, rows, the routed list, the opcode map, `meshDataAllowed` at the three sites,
+the single-bond-field rule, every reader passes the via, MQTT publishes own readings only).
+
+Not compiled by any host test: the radio and the relay timing, `bondSendEncryptedAsync`, `espnowSessionIdOf`
+and the session table, the HTTP handlers, the web page script, and the G2, OLED and MQTT pages (source rules
+only).
+
 ## Time: the millis() wrap and stored clock values
 
 `millis()` is a 32-bit count that returns to 0 after 49.7 days. These suites put a settable 32-bit clock on both

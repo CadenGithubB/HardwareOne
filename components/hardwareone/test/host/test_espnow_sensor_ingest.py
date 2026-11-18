@@ -103,7 +103,8 @@ def pieces(component: Path) -> dict[str, str]:
         "// INSERT_WIRE": "\n".join(define(wire, name) for name in WIRE_DEFINES) + "\n" +
                           extract_block(wire, "struct __attribute__((packed)) V4PayloadSensorStatus") + ";",
         "// INSERT_SENSORS_H": "\n".join(define(sensors_h, name) for name in SENSORS_H_DEFINES) + "\n" +
-                               extract_block(sensors_h, "struct RemoteSensorInfo") + ";",
+                               extract_block(sensors_h, "struct RemoteSensorInfo") + ";\n" +
+                               extract_block(sensors_h, "inline const uint8_t* remoteSensorInfoVia(const RemoteSensorInfo& info)"),
         "// INSERT_RX_STATE": between(sensors, "SENSOR_RX_STATE"),
         "// INSERT_TX_STATE": between(sensors, "SENSOR_TX_STATE"),
         "// INSERT_HELPERS": extract_block(sensors, "const char* sensorTypeToString(RemoteSensorType type)") + "\n" +
@@ -111,7 +112,8 @@ def pieces(component: Path) -> dict[str, str]:
         "// INSERT_RX": between(sensors, "SENSOR_RX"),
         "// INSERT_TX": between(sensors, "SENSOR_TX"),
         "// INSERT_JSON": extract_block(sensors[json_at:], "static const char* arrivalClockName(") + "\n" +
-                          extract_block(sensors, "String getRemoteSensorDataJson(const uint8_t* deviceMac, RemoteSensorType sensorType)"),
+                          extract_block(sensors, "static void sensorLinkJson(uint8_t link, const uint8_t via[6], char* out, size_t cap)") + "\n" +
+                          extract_block(sensors, "String getRemoteSensorDataJson(const uint8_t* deviceMac, const uint8_t* via, RemoteSensorType sensorType)"),
     }
 
 

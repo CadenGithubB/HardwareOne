@@ -982,6 +982,7 @@ struct EspNowState {
   // off the critical path because startSensorDataStreaming creates a task/mutex.
   // docs/ESPNOW_SENSOR_FETCHER_DESIGN.md
   bool     meshSensorReqPending;      // SENSOR_REQ received + authorized, awaiting apply
+  uint32_t sensorReqRefusedBond;      // SENSOR_REQs refused because this device is a bond worker
   uint8_t  meshSensorReqMode;         // 0=subscribe, 1=unsubscribe, 2=oneshot
   uint32_t meshSensorReqMask;         // bitmask over RemoteSensorType
   uint32_t meshSensorReqIntervalMs;   // requested per-sensor cadence hint (ms)
@@ -1132,6 +1133,7 @@ struct EspNowState {
     bondSendWaitDeadlineMs(0),
 #endif
     meshSensorReqPending(false),
+    sensorReqRefusedBond(0),
     meshSensorReqMode(0),
     meshSensorReqMask(0),
     meshSensorReqIntervalMs(0),
@@ -1258,6 +1260,9 @@ bool espnowBackupPromoted();
 bool espnowSessionUp(const uint8_t* mac, uint32_t* establishedAtMs = nullptr);
 // The same, and at least 2 s old: usable for a sender's first frame.
 bool espnowSessionSettled(const uint8_t* mac, uint32_t nowMs);
+// The sessionId of the ACTIVE session with `mac` (0: none). A new one with
+// every session open; a rekey keeps it. Any task (a read).
+uint16_t espnowSessionIdOf(const uint8_t* mac);
 
 // Helper functions
 const char* getMeshRoleString(uint8_t role);
@@ -1579,6 +1584,13 @@ struct BondAgreementView {
 };
 // Any task. All zero when bond mode is off or no partner is set.
 BondAgreementView bondAgreementView();
+// Counts the partner changes begun (bondWithFramesHeld): what was decided
+// under another value may name a partner that changed.
+uint32_t bondHoldEpochNow();
+// True while a partner change runs (bond frames held off), or once one began
+// after `epoch` (bondHoldEpochNow) was read: the bond settings and the
+// agreement may be half old, half new. Any task.
+bool bondHeldSince(uint32_t epoch);
 // The agreement as every JSON carries it (bondstatus json, /api/bond/status,
 // the system status): "unknown", "agreed" or "declined", and why:
 // "not_bonded", "bonded_elsewhere" or "ended" while declined, "role_conflict"
@@ -1741,6 +1753,10 @@ bool isBondPeerMac(const uint8_t* mac);
 bool v4_send_sensor_status(const uint8_t* dstMac, uint32_t presentMask, uint32_t streamingMask, uint16_t bootTag);
 // One built part of a reading: SENSOR_ENVELOPE, or BOND_SENSOR_DATA to the bond partner.
 bool v4_send_sensor_part(const uint8_t* dstMac, bool viaBond, const uint8_t* part, uint16_t len);
+// A bond worker's battery state (180) and events (182) to its bond partner,
+// with the 152/132 payloads (false in a build without bond mode).
+bool v4_send_bond_power(const uint8_t* dstMac, const uint8_t* payload, uint16_t len);
+bool v4_send_bond_event(const uint8_t* dstMac, const uint8_t* payload, uint16_t len);
 // Longest plaintext one frame to `dst` carries (202 direct, 130 through a relay).
 uint16_t v4_single_frame_cap(const uint8_t* dst);
 bool v4_send_encrypted_or_queue(const uint8_t dst[6], uint8_t type, uint16_t baseFlags, uint32_t msgId, const uint8_t* plaintext, uint16_t plaintextLen, uint8_t ttl, char* outStatus = nullptr, size_t outStatusLen = 0);

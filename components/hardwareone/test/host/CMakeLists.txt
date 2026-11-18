@@ -214,6 +214,19 @@ target_include_directories(espnow_power_event_core_tests PRIVATE ../..)
 target_compile_options(espnow_power_event_core_tests PRIVATE
   -Wall -Wextra -Werror -pedantic)
 
+# Rules of forwarding a bond partner's data to the mesh master
+# (System_ESPNow_ForwardCore.h, the production dependency-free header): the
+# 96-byte FORWARD_LINK frame, whether the bond master forwards and why not,
+# its state per master (announce, answers, a new session, a rekey, withdraw),
+# the mesh master's link table, whose a forwarded frame is, and the counters
+# end to end.
+add_executable(espnow_forward_core_tests test_espnow_forward_core.cpp)
+set_target_properties(espnow_forward_core_tests PROPERTIES
+  CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+target_include_directories(espnow_forward_core_tests PRIVATE ../..)
+target_compile_options(espnow_forward_core_tests PRIVATE
+  -Wall -Wextra -Werror -pedantic)
+
 # Rules of mesh time (System_ESPNow_TimeCore.h, the production dependency-free
 # header): the 16-byte TIME_SYNC frame, who sends and when, and what a
 # receiver does with a frame for every source of its own clock.
@@ -459,6 +472,10 @@ if(HW1_SANITIZE)
   target_compile_options(espnow_power_event_core_tests PRIVATE
     -fsanitize=address,undefined -g)
   target_link_options(espnow_power_event_core_tests PRIVATE
+    -fsanitize=address,undefined)
+  target_compile_options(espnow_forward_core_tests PRIVATE
+    -fsanitize=address,undefined -g)
+  target_link_options(espnow_forward_core_tests PRIVATE
     -fsanitize=address,undefined)
   target_compile_options(map_viewport_core_tests PRIVATE
     -fsanitize=address,undefined -g)
@@ -1350,6 +1367,7 @@ add_test(NAME espnow_group_core_tests COMMAND espnow_group_core_tests)
 add_test(NAME espnow_sensor_core_tests COMMAND espnow_sensor_core_tests)
 add_test(NAME espnow_time_core_tests COMMAND espnow_time_core_tests)
 add_test(NAME espnow_power_event_core_tests COMMAND espnow_power_event_core_tests)
+add_test(NAME espnow_forward_core_tests COMMAND espnow_forward_core_tests)
 add_test(NAME map_viewport_core_tests COMMAND map_viewport_core_tests)
 add_test(NAME g2_health_graph_core_tests COMMAND g2_health_graph_core_tests)
 add_test(NAME g2_health_push_core_tests COMMAND g2_health_push_core_tests)
@@ -2504,6 +2522,22 @@ add_test(
   NAME espnow_power_events
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_espnow_power_events.py
+          ${SETUP_MQTT_TEST_ARGS})
+# Forwarding for a bond partner, the mesh master's side: the production link
+# table, FORWARD_LINK handler, whose a received frame is, espnowforwardfrom
+# and espnowforwardlinks of System_ESPNow_ForwardRx.cpp (README "ESP-NOW
+# forwarding for a bond partner").
+add_test(
+  NAME espnow_forward_rx
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_espnow_forward_rx.py
+          ${SETUP_MQTT_TEST_ARGS})
+# Forwarding for a bond partner, the bond master's side: the production tick,
+# answers, forward calls and 'bondforward' of System_ESPNow_BondForward.cpp.
+add_test(
+  NAME espnow_bond_forward
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_espnow_bond_forward.py
           ${SETUP_MQTT_TEST_ARGS})
 # MQTT page: the External Sensors table shows a received topic segment and
 # payload; both reach the page HTML-escaped (README "Untrusted names on web

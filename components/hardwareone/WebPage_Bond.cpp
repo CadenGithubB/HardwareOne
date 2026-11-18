@@ -15,6 +15,7 @@
 #include "WebServer_Utils.h"
 #include "System_ESPNow.h"
 #include "System_ESPNow_Sensors.h"
+#include "System_ESPNow_BondForward.h"  // the "forward" object of the bond status
 #include "System_Settings.h"
 #include "System_Filesystem.h"
 #include "System_MemUtil.h"       // ps_alloc / AllocPref for batch body buffer
@@ -1046,6 +1047,20 @@ static esp_err_t handleBondStatus(httpd_req_t* req) {
     webBondSendChunkf(req, "\"agreement\":\"%s\",", bondAgreementKey(agreement));
     webBondSendChunkf(req, "\"agreementReason\":\"%s\",", bondAgreementReasonKey(agreement));
   }
+#if ENABLE_BONDED_MODE
+  // Whether the partner's data is forwarded to the mesh master (the "forward"
+  // object of 'bondstatus json').
+  {
+    EXT_RAM_BSS_ATTR static char forward[espnowfwd::kStatusJsonCap];  // PSRAM: the longest forward object
+    if (bondForwardStatusJson(forward, sizeof(forward)) > 0) {
+      webBondSendChunk(req, "\"forward\":");
+      webBondSendChunk(req, forward);
+      webBondSendChunk(req, ",");
+    } else {
+      webBondSendChunk(req, "\"forward\":null,");
+    }
+  }
+#endif
   webBondSendChunkf(req, "\"peerMac\":\"%s\",", macStr);
   webBondSendChunkf(req, "\"localMac\":\"%s\",", localMacStr.c_str());
   webBondSendChunkf(req, "\"peerName\":\"%s\",", peerName);

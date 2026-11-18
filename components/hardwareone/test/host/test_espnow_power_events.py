@@ -62,7 +62,7 @@ import subprocess
 import tempfile
 
 from test_web_batch_handlers import extract_block, require
-from test_espnow_sensor_wire import definition, depth_in, strip_comments
+from test_espnow_sensor_wire import definition, depth_in, strip_comments  # noqa: F401
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
@@ -102,8 +102,15 @@ def check_sources(component: Path) -> None:
 
     source = (component / "System_ESPNow_PowerEvents.cpp").read_text()
     code = strip_comments(source)
-    for word in ("ENABLE_BONDED_MODE", "isBond", "bondPeer", "REQ_BOND"):
-        require(word not in code, f"battery state and events need no bond ({word})")
+    # A device that is not a bond worker needs no bond; a bond worker's
+    # battery state and events go to its bond master only (180/182). The bond
+    # is reached through the pe* functions, never from the host-tested block.
+    hosted_code = strip_comments(production(component))
+    for word in ("ENABLE_BONDED_MODE", "isBond", "bondPeer", "REQ_BOND", "gSettings.bond", "v4_send_bond",
+                 "bondForward", "espnowForward"):
+        require(word not in hosted_code, f"the host-tested block reaches the bond and forwarding only through pe* ({word})")
+    for word in ("bondModeEnabledMesh", "bondRoleMesh", "bondPeerMacMesh"):
+        require(word not in code, f"only the single-bond settings are read ({word})")
     require(re.search(r"\bsystemEventPost\b", code) is None,
             "a received event is never posted into this device's own event ring")
     hosted = strip_comments(production(component))
@@ -116,13 +123,30 @@ def check_sources(component: Path) -> None:
             "the battery frame is a session unicast that asks for an acknowledgement and has it watched")
     event_tx = strip_comments(extract_block(source, "static bool peSendEvent(const uint8_t mac[6], const uint8_t* payload, uint16_t len)"))
     require("espnowtx::sendAead(mac, ESPNOW_V4_TYPE_EVENT_PUSH, 0," in event_tx, "the event frame is a session unicast")
-    require("powerEventsIngestPower(ctx.recv_info->src_addr, ctx.deviceName, ctx.payload, ctx.payloadLen);" in
-            extract_block(source, "void v4hPowerStatus(const V4RxCtx& ctx)"), "v4hPowerStatus hands the frame to the ingest")
-    require("powerEventsIngestEvent(ctx.recv_info->src_addr, ctx.deviceName, ctx.payload, ctx.payloadLen);" in
-            extract_block(source, "void v4hEventPush(const V4RxCtx& ctx)"), "v4hEventPush hands the frame to the ingest")
+    for handler, ingest, bond in (("void v4hPowerStatus(const V4RxCtx& ctx)", "powerEventsIngestPower", "false"),
+                                  ("void v4hEventPush(const V4RxCtx& ctx)", "powerEventsIngestEvent", "false"),
+                                  ("void v4hBondPowerStatus(const V4RxCtx& ctx)", "powerEventsIngestPower", "true"),
+                                  ("void v4hBondEventPush(const V4RxCtx& ctx)", "powerEventsIngestEvent", "true")):
+        require(f"{ingest}(ctx.recv_info->src_addr, ctx.deviceName, ctx.payload, ctx.payloadLen, /*bondLink=*/{bond});" in
+                extract_block(source, handler), f"{handler.split('(')[0].split()[-1]} hands the frame to {ingest}")
+    require(depth_in(source, "void v4hBondPowerStatus(const V4RxCtx& ctx) {", "ENABLE_BONDED_MODE") == 1,
+            "the bond handlers exist in a bond build only")
+    for name, handler in (("BOND_POWER_STATUS", "v4hBondPowerStatus"), ("BOND_EVENT_PUSH", "v4hBondEventPush")):
+        require(name in rows and rows[name][0] == {"V4_OPC_FLAG_REQ_PAIRED", "V4_OPC_FLAG_REQ_BOND_PEER",
+                                                   "V4_OPC_FLAG_REQ_SESSION_ENC"} and rows[name][1] == handler,
+                f"the {name} row takes the frame from the bond partner over its session only, to {handler}")
     for ingest in ("static void powerEventsIngestPower(", "static void powerEventsIngestEvent("):
         body = strip_comments(extract_block(source[source.index(ingest):], ingest.rstrip("(")))
-        require("peAccept(sender, senderName, nowMs)" in body, f"{ingest.split()[2].rstrip('(')} asks the role rule and the record first")
+        require("peOriginOf(sender, senderName, bondLink," in body and "peAccept(origin, origin.name, nowMs)" in body and
+                body.index("peOriginOf(") < body.index("peAccept("),
+                f"{ingest.split()[2].rstrip('(')} asks whose the frame is, then the role rule and the record")
+        require("if (bondLink && kept) peForward" in body, f"{ingest.split()[2].rstrip('(')} hands what it kept of the partner on")
+    bond_tx = strip_comments(extract_block(espnow, "bool v4_send_bond_power(const uint8_t* dstMac, const uint8_t* payload, uint16_t len)"))
+    require("bondSendEncryptedAsync(dstMac, ESPNOW_V4_TYPE_BOND_POWER_STATUS, 0," in bond_tx,
+            "the bond battery frame goes through the bond send rules")
+    bond_tx = strip_comments(extract_block(espnow, "bool v4_send_bond_event(const uint8_t* dstMac, const uint8_t* payload, uint16_t len)"))
+    require("bondSendEncryptedAsync(dstMac, ESPNOW_V4_TYPE_BOND_EVENT_PUSH, 0," in bond_tx,
+            "the bond event frame goes through the bond send rules")
     # Every hold of sPeMux (a spinlock: interrupts are masked while it is held)
     # touches a small piece of PSRAM: a full list is not searched under it,
     # and a walk of the events takes one list per hold.
@@ -137,7 +161,7 @@ def check_sources(component: Path) -> None:
     require("espnowsensor::elapsedSinceMs(nowMs, state.lastReadMs)" in
             strip_comments(extract_block(source, "static void peBatteryInputs(espnowsensor::PowerInputs* in, uint32_t nowMs)")),
             "the battery sample's age is 0, not 49 days, when the sample is newer than the pass")
-    accept = strip_comments(extract_block(source, "static PeCollectPeer* peAccept(const uint8_t mac[6], const char* senderName, uint32_t nowMs)"))
+    accept = strip_comments(extract_block(source, "static PeCollectPeer* peAccept(const ForwardOrigin& origin, const char* senderName, uint32_t nowMs)"))
     require(accept.index("espnowsensor::roleReceives(peRole())") < accept.index("peAlloc("),
             "the role rule comes before anything is allocated")
 
@@ -169,7 +193,7 @@ def check_sources(component: Path) -> None:
     # as the caller's identity says; anyone else is told once.
     require("currentExecIsAdmin()" in strip_comments(extract_block(source, "static bool peCallerIsAdmin()")),
             "the event counts ask the identity the command runs under")
-    one_json = strip_comments(extract_block(sensors, "static const char* sensorStatusOneDeviceJson(const String& who)"))
+    one_json = strip_comments(extract_block(sensors, "static const char* sensorStatusOneDeviceJson(const String& whoArgs)"))
     require('if (!espnowEventCountsVisible()) doc["eventCounts"] = "admin only";' in one_json,
             "espnowsensorstatus json <device>: no events key for a user who is not an admin, and eventCounts says why")
     status_cmd = strip_comments(extract_block(sensors, "const char* cmd_espnow_sensorstatus(const String& argsInput)"))
@@ -185,8 +209,8 @@ def check_sources(component: Path) -> None:
     wire = (component / "System_ESPNow_Wire.h").read_text()
     require("ESPNOW_V4_TYPE_EVENT_PUSH      = 132," in wire and "ESPNOW_V4_TYPE_POWER_STATUS    = 152," in wire,
             "the two opcodes have their numbers")
-    require(re.search(r"\bBOND_POWER_STATUS\b|\bBOND_EVENT_PUSH\b", strip_comments(wire)) is None and
-            "180 and 182 are free" in wire, "the bond earmarks 180 and 182 are released")
+    require("ESPNOW_V4_TYPE_BOND_POWER_STATUS = 180," in wire and "ESPNOW_V4_TYPE_BOND_EVENT_PUSH = 182," in wire,
+            "a bond worker's battery state and events are the bond frames 180 and 182")
 
 
 def main() -> None:

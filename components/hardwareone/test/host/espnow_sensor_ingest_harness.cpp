@@ -22,7 +22,9 @@
 #include <string>
 #include <vector>
 
+#include "System_ESPNow_ForwardCore.h"
 #include "System_ESPNow_HandshakeBackoff.h"
+#include "System_ESPNow_PowerEventCore.h"  // jsonTextEscape (the via's name in a reply)
 #include "System_ESPNow_SensorCore.h"
 
 // ---- Arduino String, as far as the JSON reply uses it ---------------------------
@@ -40,6 +42,8 @@ class String {
 
 #define EXT_RAM_BSS_ATTR
 #define MESH_PEER_MAX 16
+#define MAC_FMT "%02X:%02X:%02X:%02X:%02X:%02X"
+#define MAC_ARGS(m) (m)[0], (m)[1], (m)[2], (m)[3], (m)[4], (m)[5]
 
 // ---- Locks: nothing that may block, print or allocate runs under one -------------
 using portMUX_TYPE = int;
@@ -186,6 +190,68 @@ static bool v4_send_sensor_part(const uint8_t* dstMac, bool viaBond, const uint8
 
 // INSERT_HELPERS
 
+// ---- What the receive path asks of the forwarding code -------------------------------
+// A link table of one entry (System_ESPNow_ForwardRx.cpp keeps sixteen): the
+// production rule espnowfwd::attribute decides, as on the device.
+static espnowfwd::ForwardLink gLink = {};
+static unsigned gResumeTaken = 0;
+struct ForwardedReading {
+  uint8_t src[6];
+  espnowsensor::ReadingHeader h;
+  std::string text;
+};
+static std::vector<ForwardedReading> gForwarded;
+static std::vector<uint8_t> gNotKept;
+static ForwardResolve sensorWhose(const uint8_t* src, const char* srcName, bool fromBond, bool bitSet, uint8_t fwdLink,
+                                  uint8_t sensorType, ForwardOrigin* out) {
+  notUnderLock();
+  std::memset(out, 0, sizeof(*out));
+  std::memcpy(out->mac, src, 6);
+  out->link = fromBond ? espnowfwd::kLinkBond : espnowfwd::kLinkMesh;
+  std::snprintf(out->name, sizeof(out->name), "%s", srcName ? srcName : "");
+  const espnowfwd::ForwardLink* e = gLink.inUse && std::memcmp(gLink.via, src, 6) == 0 ? &gLink : nullptr;
+  const espnowfwd::Attribution a = espnowfwd::attribute(e, fromBond, true, bitSet, fwdLink, sensorType);
+  switch (a.verdict) {
+    case espnowfwd::Verdict::Own: return ForwardResolve::Own;
+    case espnowfwd::Verdict::Malformed: return ForwardResolve::Malformed;
+    case espnowfwd::Verdict::Forwarded:
+      std::memcpy(out->mac, e->partner, 6);
+      std::memcpy(out->via, src, 6);
+      out->link = espnowfwd::kLinkForwarded;
+      out->resumePending = a.resumePending;
+      std::memcpy(out->name, e->name, sizeof(out->name));
+      return ForwardResolve::Forwarded;
+    default:
+      return ForwardResolve::Refused;
+  }
+}
+static void sensorResumeTaken(const uint8_t via[6], uint8_t sensorType) {
+  notUnderLock();
+  if (gLink.inUse && std::memcmp(gLink.via, via, 6) == 0) gLink.resumeMask = (uint16_t)(gLink.resumeMask & ~(1u << sensorType));
+  ++gResumeTaken;
+}
+static bool sensorLinkActive(const uint8_t via[6], const uint8_t origin[6]) {
+  notUnderLock();
+  return gLink.inUse && gLink.state == espnowfwd::LState::Active && std::memcmp(gLink.via, via, 6) == 0 &&
+         std::memcmp(gLink.partner, origin, 6) == 0;
+}
+static void sensorForwardReading(const uint8_t src[6], const espnowsensor::ReadingHeader& h, const uint8_t* text,
+                                 size_t len) {
+  notUnderLock();
+  ForwardedReading f{};
+  std::memcpy(f.src, src, 6);
+  f.h = h;
+  f.text.assign((const char*)text, len);
+  gForwarded.push_back(f);
+}
+static void sensorNotKept(uint8_t sensorType) {
+  notUnderLock();
+  gNotKept.push_back(sensorType);
+}
+static void sensorViaName(const uint8_t mac[6], char* out, size_t cap) {
+  std::snprintf(out, cap, "%s", mac[5] == 0x20 ? "glasses" : "via?");
+}
+
 static espnowsensor::TargetChoice gTarget = {};
 static int gTargetAskedFor = -99;
 static espnowsensor::TargetChoice sensorReadingTarget(int sensorType) {
@@ -299,7 +365,7 @@ static void deliver(const uint8_t sender[6], const char* name, uint8_t sensor, u
 static std::string textOf(const uint8_t mac[6], RemoteSensorType type) {
   // A buffer of exactly the stated size: a longer copy is an ASan error.
   std::vector<char> out(SENSOR_READING_MAX_BYTES + 1);
-  remoteSensorCopyText(mac, type, out.data(), out.size());
+  remoteSensorCopyText(mac, nullptr, type, out.data(), out.size());
   return out.data();
 }
 static espnowsensor::CounterCounts countsOf(const uint8_t mac[6], int sensor) {
@@ -322,7 +388,7 @@ static int usedSlots() {
   }
   return n;
 }
-static std::string json(const uint8_t mac[6], RemoteSensorType type) { return getRemoteSensorDataJson(mac, type).text(); }
+static std::string json(const uint8_t mac[6], RemoteSensorType type) { return getRemoteSensorDataJson(mac, nullptr, type).text(); }
 
 static void testBeforeTheTable() {
   // A worker keeps nothing: a status frame and a reading are refused and
@@ -342,7 +408,7 @@ static void testBeforeTheTable() {
         "and says so once a minute");
   check(remoteSensorSlotCount() == 0, "no slots while this device keeps no readings");
   RemoteSensorInfo info;
-  check(!remoteSensorInfoAt(0, &info) && !remoteSensorInfoFor(kPorch, REMOTE_SENSOR_GPS, &info), "readers find nothing");
+  check(!remoteSensorInfoAt(0, &info) && !remoteSensorInfoFor(kPorch, nullptr, REMOTE_SENSOR_GPS, &info), "readers find nothing");
   check(json(kPorch, REMOTE_SENSOR_GPS) == "{\"connected\":false,\"enabled\":false,\"fresh\":false,\"data\":null}",
         "the JSON reply of an unknown sensor");
   // A master, out of memory: a status frame is refused, counted and said as a
@@ -368,7 +434,7 @@ static void testBeforeTheTable() {
   remoteSensorIngestStatus(kPorch, "porch", (const uint8_t*)&status, sizeof(status));
   check(gSensorPeers != nullptr && gAllocs == before + 2 && usedSlots() == REMOTE_SENSOR_MAX,
         "the first status frame makes the table and the sender's slots, and lists its sensors");
-  check(remoteSensorInfoFor(kPorch, REMOTE_SENSOR_GPS, &info) && !info.enabled && !info.fresh && info.jsonLength == 0,
+  check(remoteSensorInfoFor(kPorch, nullptr, REMOTE_SENSOR_GPS, &info) && !info.enabled && !info.fresh && info.jsonLength == 0,
         "present, not streaming, no reading");
   check(countsOf(kPorch, REMOTE_SENSOR_GPS).received == 0 && countsOf(kPorch, REMOTE_SENSOR_GPS).lost == 0 &&
         textOf(kPorch, REMOTE_SENSOR_GPS).empty(), "nothing is counted or kept as a reading");
@@ -395,15 +461,15 @@ static void testRoles() {
     gSettings.meshRole = role;
     deliver(kPorch, "porch", REMOTE_SENSOR_GPS, 7, 1, "{\"lat\":1}");
     RemoteSensorInfo info;
-    const bool kept = remoteSensorInfoFor(kPorch, REMOTE_SENSOR_GPS, &info);
+    const bool kept = remoteSensorInfoFor(kPorch, nullptr, REMOTE_SENSOR_GPS, &info);
     check(kept == (role != 0), role == 0 ? "a worker refuses a mesh reading" : "a master or backup master keeps a mesh reading");
     check(gRemoteSensorRefusals.notReceiver == (role == 0 ? 1u : 0u), "counted when refused");
     deliver(kShed, "shed", REMOTE_SENSOR_GPS, 7, 1, "{\"lat\":2}", /*fromBond=*/true);
-    check(remoteSensorInfoFor(kShed, REMOTE_SENSOR_GPS, &info), "the bond partner's reading is kept whatever the mesh role");
+    check(remoteSensorInfoFor(kShed, nullptr, REMOTE_SENSOR_GPS, &info), "the bond partner's reading is kept whatever the mesh role");
     V4PayloadSensorStatus status{};
     status.presentMask = espnowsensor::sensorBit(REMOTE_SENSOR_IMU);
     remoteSensorIngestStatus(kPorch, "porch", (const uint8_t*)&status, sizeof(status));
-    check(remoteSensorInfoFor(kPorch, REMOTE_SENSOR_IMU, &info) == (role != 0), "the status frame follows the same role rule");
+    check(remoteSensorInfoFor(kPorch, nullptr, REMOTE_SENSOR_IMU, &info) == (role != 0), "the status frame follows the same role rule");
   }
 }
 
@@ -415,7 +481,7 @@ static void testArrivalStamp() {
   const std::string t1Text = std::to_string(t0 + 1000);
   deliver(kPorch, "porch", REMOTE_SENSOR_GPS, 7, 1, "{\"lat\":1.5}");
   RemoteSensorInfo info;
-  check(remoteSensorInfoFor(kPorch, REMOTE_SENSOR_GPS, &info), "the reading has a slot");
+  check(remoteSensorInfoFor(kPorch, nullptr, REMOTE_SENSOR_GPS, &info), "the reading has a slot");
   check(info.arrivalEpochMs == 0 && info.lastUpdate == t0 && info.fresh && info.enabled && info.counter == 1,
         "clock not set: epoch 0, the uptime is the stamp");
   check(std::string(info.deviceName) == "porch" && info.jsonLength == 11, "name and length");
@@ -432,7 +498,7 @@ static void testArrivalStamp() {
   Clock::gSource = Clock::SYNC_NTP;
   gNowMs += 1000;
   deliver(kPorch, "porch", REMOTE_SENSOR_GPS, 7, 2, "{\"lat\":1.6}");
-  remoteSensorInfoFor(kPorch, REMOTE_SENSOR_GPS, &info);
+  remoteSensorInfoFor(kPorch, nullptr, REMOTE_SENSOR_GPS, &info);
   check(info.arrivalEpochMs == 1763388202417LL && info.lastUpdate == t0 + 1000 && info.arrivalClock == Clock::SYNC_NTP,
         "clock set: the receiver's epoch in ms and its source");
   gNowMs += 310;
@@ -462,14 +528,14 @@ static void testCounterAndStore() {
   deliver(kPorch, "porch", REMOTE_SENSOR_IMU, 7, 13, "{\"a\":13}");  // 11 and 12 never came
   check(countsOf(kPorch, REMOTE_SENSOR_IMU).lost == 2 && textOf(kPorch, REMOTE_SENSOR_IMU) == "{\"a\":13}", "a gap is counted lost");
   RemoteSensorInfo before;
-  remoteSensorInfoFor(kPorch, REMOTE_SENSOR_IMU, &before);
+  remoteSensorInfoFor(kPorch, nullptr, REMOTE_SENSOR_IMU, &before);
   // A repeat and a late reading change neither the text nor the stamp.
   gNowMs += 200;
   gEpochMs += 200;
   deliver(kPorch, "porch", REMOTE_SENSOR_IMU, 7, 13, "{\"a\":\"again\"}");
   deliver(kPorch, "porch", REMOTE_SENSOR_IMU, 7, 12, "{\"a\":12}");
   RemoteSensorInfo after;
-  remoteSensorInfoFor(kPorch, REMOTE_SENSOR_IMU, &after);
+  remoteSensorInfoFor(kPorch, nullptr, REMOTE_SENSOR_IMU, &after);
   check(textOf(kPorch, REMOTE_SENSOR_IMU) == "{\"a\":13}", "a repeat and a late reading do not replace the newer text");
   check(after.lastUpdate == before.lastUpdate && after.arrivalEpochMs == before.arrivalEpochMs && after.counter == 13,
         "nor its arrival stamp");
@@ -500,13 +566,13 @@ static void testCounterAndStore() {
   }
   gNowMs += 120000;
   RemoteSensorInfo info;
-  check(!remoteSensorInfoFor(kPorch, REMOTE_SENSOR_TOF, &info) && usedSlots() == 0, "after two minutes of silence it is not listed");
+  check(!remoteSensorInfoFor(kPorch, nullptr, REMOTE_SENSOR_TOF, &info) && usedSlots() == 0, "after two minutes of silence it is not listed");
   check(json(kPorch, REMOTE_SENSOR_TOF) == "{\"connected\":false,\"enabled\":false,\"fresh\":false,\"data\":null}",
         "and the JSON reply says not connected");
   deliver(kPorch, "porch", REMOTE_SENSOR_TOF, 7, 20, "{\"d\":2}");
   check(countsOf(kPorch, REMOTE_SENSOR_TOF).lost == 14 && countsOf(kPorch, REMOTE_SENSOR_TOF).received == 6,
         "the outage is counted: 14 readings lost, the totals go on");
-  check(remoteSensorInfoFor(kPorch, REMOTE_SENSOR_TOF, &info) && info.fresh, "and the sensor is listed again");
+  check(remoteSensorInfoFor(kPorch, nullptr, REMOTE_SENSOR_TOF, &info) && info.fresh, "and the sensor is listed again");
 }
 
 static void testParts() {
@@ -537,7 +603,7 @@ static void testParts() {
   }
   check(textOf(kPorch, REMOTE_SENSOR_TOF) == big, "the whole reading is stored, byte for byte");
   RemoteSensorInfo info;
-  remoteSensorInfoFor(kPorch, REMOTE_SENSOR_TOF, &info);
+  remoteSensorInfoFor(kPorch, nullptr, REMOTE_SENSOR_TOF, &info);
   check(info.jsonLength == SENSOR_READING_MAX_BYTES && info.counter == 2, "length 472, counter 2");
   check(has(json(kPorch, REMOTE_SENSOR_TOF), big), "and comes back whole in the JSON reply");
   // A middle part is lost: nothing is stored, it is counted incomplete, and
@@ -582,7 +648,7 @@ static void testBondAndMeshTheSame() {
   deliver(kPorch, "porch", REMOTE_SENSOR_GPS, 7, 1, jsonOf(300), /*fromBond=*/false);
   deliver(kShed, "porch", REMOTE_SENSOR_GPS, 7, 1, jsonOf(300), /*fromBond=*/true);
   RemoteSensorInfo mesh, bond;
-  check(remoteSensorInfoFor(kPorch, REMOTE_SENSOR_GPS, &mesh) && remoteSensorInfoFor(kShed, REMOTE_SENSOR_GPS, &bond), "both stored");
+  check(remoteSensorInfoFor(kPorch, nullptr, REMOTE_SENSOR_GPS, &mesh) && remoteSensorInfoFor(kShed, nullptr, REMOTE_SENSOR_GPS, &bond), "both stored");
   check(std::strcmp(mesh.deviceName, bond.deviceName) == 0 && mesh.sensorType == bond.sensorType &&
         mesh.enabled == bond.enabled && mesh.fresh == bond.fresh && mesh.jsonLength == bond.jsonLength &&
         mesh.lastUpdate == bond.lastUpdate && mesh.lastSeen == bond.lastSeen &&
@@ -651,16 +717,16 @@ static void testStatusFrame() {
   remoteSensorIngestStatus(kPorch, "porch", (const uint8_t*)&status, sizeof(status));
   check(usedSlots() == 3, "a status frame lists the sensors the sender has; bits of unknown types are ignored");
   RemoteSensorInfo gps, imu;
-  check(remoteSensorInfoFor(kPorch, REMOTE_SENSOR_GPS, &gps) && remoteSensorInfoFor(kPorch, REMOTE_SENSOR_IMU, &imu), "both listed");
+  check(remoteSensorInfoFor(kPorch, nullptr, REMOTE_SENSOR_GPS, &gps) && remoteSensorInfoFor(kPorch, nullptr, REMOTE_SENSOR_IMU, &imu), "both listed");
   check(gps.enabled && !imu.enabled && !gps.fresh && gps.jsonLength == 0, "streaming or not; a status frame is never data");
-  check(json(kPorch, REMOTE_SENSOR_IMU) == "{\"connected\":true,\"enabled\":false,\"fresh\":false,\"data\":null}",
+  check(json(kPorch, REMOTE_SENSOR_IMU) == "{\"connected\":true,\"enabled\":false,\"fresh\":false,\"link\":\"mesh\",\"via\":null,\"data\":null}",
         "JSON: present, not streaming, no data and no stamp");
   // A reading makes it fresh; a later status that says "not streaming" does
   // not take the reading away (freshness is the reading's age alone).
   deliver(kPorch, "porch", REMOTE_SENSOR_GPS, 7, 1, "{\"lat\":2}");
   status.streamingMask = 0;
   remoteSensorIngestStatus(kPorch, "porch", (const uint8_t*)&status, sizeof(status));
-  remoteSensorInfoFor(kPorch, REMOTE_SENSOR_GPS, &gps);
+  remoteSensorInfoFor(kPorch, nullptr, REMOTE_SENSOR_GPS, &gps);
   check(!gps.enabled && gps.fresh && textOf(kPorch, REMOTE_SENSOR_GPS) == "{\"lat\":2}", "a status frame does not un-fresh a reading");
   // A sensor that is no longer present stops being marked streaming and ages out.
   status.presentMask = espnowsensor::sensorBit(REMOTE_SENSOR_IMU);
@@ -668,7 +734,7 @@ static void testStatusFrame() {
   gNowMs += REMOTE_SENSOR_PRESENCE_TTL_MS - 1000;
   remoteSensorIngestStatus(kPorch, "porch", (const uint8_t*)&status, sizeof(status));
   gNowMs += 2000;
-  check(!remoteSensorInfoFor(kPorch, REMOTE_SENSOR_GPS, &gps) && remoteSensorInfoFor(kPorch, REMOTE_SENSOR_IMU, &imu),
+  check(!remoteSensorInfoFor(kPorch, nullptr, REMOTE_SENSOR_GPS, &gps) && remoteSensorInfoFor(kPorch, nullptr, REMOTE_SENSOR_IMU, &imu),
         "a sensor the status no longer names ages out; one it names stays");
   // Too short.
   const uint32_t before = gRemoteSensorRefusals.malformed;
@@ -686,10 +752,10 @@ static void testStatusBeforeReadings() {
   status.streamingMask = 0;
   remoteSensorIngestStatus(kPorch, "porch", (const uint8_t*)&status, sizeof(status));
   RemoteSensorInfo info;
-  check(remoteSensorInfoFor(kPorch, REMOTE_SENSOR_TOF, &info) && !info.enabled && !info.fresh && info.jsonLength == 0 &&
+  check(remoteSensorInfoFor(kPorch, nullptr, REMOTE_SENSOR_TOF, &info) && !info.enabled && !info.fresh && info.jsonLength == 0 &&
         info.counter == 0 && info.arrivalEpochMs == 0 && std::string(info.deviceName) == "porch",
         "listed before any reading: present, not streaming, with the sender's name");
-  check(json(kPorch, REMOTE_SENSOR_TOF) == "{\"connected\":true,\"enabled\":false,\"fresh\":false,\"data\":null}",
+  check(json(kPorch, REMOTE_SENSOR_TOF) == "{\"connected\":true,\"enabled\":false,\"fresh\":false,\"link\":\"mesh\",\"via\":null,\"data\":null}",
         "its JSON: present, not streaming, no data");
   espnowsensor::CounterCounts c = countsOf(kPorch, REMOTE_SENSOR_TOF);
   check(c.received == 0 && c.lost == 0 && c.late == 0 && c.repeated == 0 && c.restarts == 0 && c.resumes == 0,
@@ -697,27 +763,27 @@ static void testStatusBeforeReadings() {
   // The stream starts: the status says so, still no reading and no freshness.
   status.streamingMask = espnowsensor::sensorBit(REMOTE_SENSOR_TOF);
   remoteSensorIngestStatus(kPorch, "porch", (const uint8_t*)&status, sizeof(status));
-  check(remoteSensorInfoFor(kPorch, REMOTE_SENSOR_TOF, &info) && info.enabled && !info.fresh && info.jsonLength == 0,
+  check(remoteSensorInfoFor(kPorch, nullptr, REMOTE_SENSOR_TOF, &info) && info.enabled && !info.fresh && info.jsonLength == 0,
         "streaming, and still no reading");
   // The first reading: kept, fresh, counted as the first (nothing lost).
   deliver(kPorch, "porch", REMOTE_SENSOR_TOF, 7, 5, "{\"mm\":1}");
   c = countsOf(kPorch, REMOTE_SENSOR_TOF);
-  check(c.received == 1 && c.lost == 0 && remoteSensorInfoFor(kPorch, REMOTE_SENSOR_TOF, &info) && info.fresh &&
+  check(c.received == 1 && c.lost == 0 && remoteSensorInfoFor(kPorch, nullptr, REMOTE_SENSOR_TOF, &info) && info.fresh &&
         info.counter == 5, "the first reading after it is kept and counted as the first");
   // More status frames change no count, no counter and no freshness.
   for (int i = 0; i < 5; ++i) remoteSensorIngestStatus(kPorch, "porch", (const uint8_t*)&status, sizeof(status));
   c = countsOf(kPorch, REMOTE_SENSOR_TOF);
-  check(c.received == 1 && c.lost == 0 && remoteSensorInfoFor(kPorch, REMOTE_SENSOR_TOF, &info) && info.fresh &&
+  check(c.received == 1 && c.lost == 0 && remoteSensorInfoFor(kPorch, nullptr, REMOTE_SENSOR_TOF, &info) && info.fresh &&
         info.counter == 5 && textOf(kPorch, REMOTE_SENSOR_TOF) == "{\"mm\":1}", "status frames leave the reading as it was");
   gNowMs += REMOTE_SENSOR_TTL_MS + 1000;
   remoteSensorIngestStatus(kPorch, "porch", (const uint8_t*)&status, sizeof(status));
-  check(remoteSensorInfoFor(kPorch, REMOTE_SENSOR_TOF, &info) && !info.fresh, "and never make an old reading fresh");
+  check(remoteSensorInfoFor(kPorch, nullptr, REMOTE_SENSOR_TOF, &info) && !info.fresh, "and never make an old reading fresh");
   // A worker still keeps nothing from a status frame.
   resetAll();
   gSettings.meshRole = 0;
   const uint32_t refusedBefore = gRemoteSensorRefusals.notReceiver;
   remoteSensorIngestStatus(kPorch, "porch", (const uint8_t*)&status, sizeof(status));
-  check(!remoteSensorInfoFor(kPorch, REMOTE_SENSOR_TOF, &info) && gRemoteSensorRefusals.notReceiver == refusedBefore + 1,
+  check(!remoteSensorInfoFor(kPorch, nullptr, REMOTE_SENSOR_TOF, &info) && gRemoteSensorRefusals.notReceiver == refusedBefore + 1,
         "a worker refuses it and counts it");
   // Full through status frames alone: sixteen paired senders listed by their
   // status, the seventeenth refused, counted and said, as for a reading; its
@@ -735,13 +801,13 @@ static void testStatusBeforeReadings() {
   mac[5] = 16;
   pair(mac);
   remoteSensorIngestStatus(mac, "late", (const uint8_t*)&status, sizeof(status));
-  check(gRemoteSensorRefusals.noRecord == 1 && !remoteSensorInfoFor(mac, REMOTE_SENSOR_TOF, &info) && usedSlots() == 32,
+  check(gRemoteSensorRefusals.noRecord == 1 && !remoteSensorInfoFor(mac, nullptr, REMOTE_SENSOR_TOF, &info) && usedSlots() == 32,
         "the seventeenth sender's status frame is refused and counted; the table is as it was");
   check(gConsole.size() == 1 &&
         has(gConsole[0], "Readings from late refused: this device already keeps the readings of 16 paired devices"),
         "and it is said");
   deliver(mac, "late", REMOTE_SENSOR_TOF, 1, 1, "{\"mm\":2}");
-  check(gRemoteSensorRefusals.noRecord == 2 && !remoteSensorInfoFor(mac, REMOTE_SENSOR_TOF, &info) && usedSlots() == 32 &&
+  check(gRemoteSensorRefusals.noRecord == 2 && !remoteSensorInfoFor(mac, nullptr, REMOTE_SENSOR_TOF, &info) && usedSlots() == 32 &&
         gConsole.size() == 1, "its reading is refused the same way (the line comes once a minute)");
 }
 
@@ -758,7 +824,7 @@ static void testTableFull() {
     for (uint8_t type = 0; type < REMOTE_SENSOR_MAX; ++type) {
       deliver(mac, "node", type, 1, 1, "{\"v\":1}");
       RemoteSensorInfo info;
-      if (remoteSensorInfoFor(mac, (RemoteSensorType)type, &info)) ++stored;
+      if (remoteSensorInfoFor(mac, nullptr, (RemoteSensorType)type, &info)) ++stored;
     }
   }
   check(stored == 176 && usedSlots() == 176, "sixteen senders with eleven sensors each: all 176 are kept");
@@ -771,7 +837,7 @@ static void testTableFull() {
   deliver(mac, "late", REMOTE_SENSOR_GPS, 1, 1, "{\"v\":1}");
   deliver(mac, "late", REMOTE_SENSOR_GPS, 1, 2, "{\"v\":2}");
   RemoteSensorInfo info;
-  check(gRemoteSensorRefusals.noRecord == 2 && !remoteSensorInfoFor(mac, REMOTE_SENSOR_GPS, &info) && usedSlots() == 176,
+  check(gRemoteSensorRefusals.noRecord == 2 && !remoteSensorInfoFor(mac, nullptr, REMOTE_SENSOR_GPS, &info) && usedSlots() == 176,
         "the seventeenth sender is refused and counted; the table is as it was");
   check(gConsole.size() == 1 && has(gConsole[0], "Readings from late refused: this device already keeps the readings of 16 paired devices"),
         "and it is said, once");
@@ -788,12 +854,12 @@ static void testTableFull() {
   }
   const unsigned allocs = gAllocs;
   deliver(mac, "late", REMOTE_SENSOR_GPS, 1, 9, "{\"v\":9}");
-  check(remoteSensorInfoFor(mac, REMOTE_SENSOR_GPS, &info) &&
+  check(remoteSensorInfoFor(mac, nullptr, REMOTE_SENSOR_GPS, &info) &&
         countsOf(mac, REMOTE_SENSOR_GPS).received == 1 && countsOf(mac, REMOTE_SENSOR_GPS).lost == 0,
         "an unpaired sender's record is reused, with clean counts");
   check(gRemoteSensorRefusals.noRecord == 3, "and nothing more was refused");
   check(gAllocs == allocs && std::string(info.deviceName) == "late", "its slots are reused, not made again");
-  check(!remoteSensorInfoFor(gone, REMOTE_SENSOR_GPS, &info) && !remoteSensorInfoFor(mac, REMOTE_SENSOR_IMU, &info) &&
+  check(!remoteSensorInfoFor(gone, nullptr, REMOTE_SENSOR_GPS, &info) && !remoteSensorInfoFor(mac, nullptr, REMOTE_SENSOR_IMU, &info) &&
         textOf(mac, REMOTE_SENSOR_IMU).empty() && usedSlots() == 176 - REMOTE_SENSOR_MAX + 1,
         "and none of the old sender's readings are left in them");
   // Full again (sixteen paired senders): the next one is refused, and the
@@ -812,20 +878,20 @@ static void testTableFull() {
   deliver(kPorch, "porch", REMOTE_SENSOR_GPS, 7, 1, "{\"v\":1}");
   gNowMs += REMOTE_SENSOR_PRESENCE_TTL_MS + 1000;
   for (uint8_t type = 0; type < REMOTE_SENSOR_MAX; ++type) deliver(kShed, "shed", type, 7, 1, "{\"v\":1}");
-  check(usedSlots() == REMOTE_SENSOR_MAX && !remoteSensorInfoFor(kPorch, REMOTE_SENSOR_GPS, &info), "a silent sensor is not listed");
+  check(usedSlots() == REMOTE_SENSOR_MAX && !remoteSensorInfoFor(kPorch, nullptr, REMOTE_SENSOR_GPS, &info), "a silent sensor is not listed");
   deliver(kPorch, "porch", REMOTE_SENSOR_GPS, 7, 2, "{\"v\":2}");
-  check(remoteSensorInfoFor(kPorch, REMOTE_SENSOR_GPS, &info) && info.fresh && textOf(kPorch, REMOTE_SENSOR_GPS) == "{\"v\":2}" &&
+  check(remoteSensorInfoFor(kPorch, nullptr, REMOTE_SENSOR_GPS, &info) && info.fresh && textOf(kPorch, REMOTE_SENSOR_GPS) == "{\"v\":2}" &&
         usedSlots() == REMOTE_SENSOR_MAX + 1, "its slot was not taken meanwhile");
   // No memory for a new sender's slots: refused and counted, the record stays usable.
   resetAll();
   gAllocFails = true;
   gConsole.clear();
   deliver(kPorch, "porch", REMOTE_SENSOR_GPS, 7, 1, "{\"v\":1}");
-  check(gRemoteSensorRefusals.noMemory == 1 && !remoteSensorInfoFor(kPorch, REMOTE_SENSOR_GPS, &info) &&
+  check(gRemoteSensorRefusals.noMemory == 1 && !remoteSensorInfoFor(kPorch, nullptr, REMOTE_SENSOR_GPS, &info) &&
         gConsole.size() == 1 && has(gConsole[0], "out of memory"), "no memory for a sender's slots: refused, counted, said");
   gAllocFails = false;
   deliver(kPorch, "porch", REMOTE_SENSOR_GPS, 7, 2, "{\"v\":2}");
-  check(remoteSensorInfoFor(kPorch, REMOTE_SENSOR_GPS, &info) && countsOf(kPorch, REMOTE_SENSOR_GPS).received == 1,
+  check(remoteSensorInfoFor(kPorch, nullptr, REMOTE_SENSOR_GPS, &info) && countsOf(kPorch, REMOTE_SENSOR_GPS).received == 1,
         "the next reading is kept once there is memory");
 }
 
@@ -1066,10 +1132,10 @@ static void testReviewFindings() {
   resetAll();
   deliver(kPorch, "porch", REMOTE_SENSOR_GPS, 7, 1, "{\"lat\":1.5}");  // 11 bytes
   std::vector<char> exact(11, 'X');
-  check(remoteSensorCopyText(kPorch, REMOTE_SENSOR_GPS, exact.data(), exact.size()) == 0 && exact[0] == '\0',
+  check(remoteSensorCopyText(kPorch, nullptr, REMOTE_SENSOR_GPS, exact.data(), exact.size()) == 0 && exact[0] == '\0',
         "a buffer of exactly the text's length gets nothing (it has no room for the terminator)");
   std::vector<char> room(12, 'X');
-  check(remoteSensorCopyText(kPorch, REMOTE_SENSOR_GPS, room.data(), room.size()) == 11 && room[11] == '\0',
+  check(remoteSensorCopyText(kPorch, nullptr, REMOTE_SENSOR_GPS, room.data(), room.size()) == 11 && room[11] == '\0',
         "one byte more: the whole text, terminated");
   // A status frame: a sensor it no longer names stops streaming at once; a
   // status frame never makes a reading fresh again.
@@ -1078,15 +1144,15 @@ static void testReviewFindings() {
   status.streamingMask = status.presentMask;
   remoteSensorIngestStatus(kPorch, "porch", (const uint8_t*)&status, sizeof(status));
   RemoteSensorInfo info;
-  check(remoteSensorInfoFor(kPorch, REMOTE_SENSOR_IMU, &info) && info.enabled, "the status frame says imu streams");
+  check(remoteSensorInfoFor(kPorch, nullptr, REMOTE_SENSOR_IMU, &info) && info.enabled, "the status frame says imu streams");
   status.presentMask = espnowsensor::sensorBit(REMOTE_SENSOR_GPS);
   status.streamingMask = status.presentMask;
   remoteSensorIngestStatus(kPorch, "porch", (const uint8_t*)&status, sizeof(status));
-  check(remoteSensorInfoFor(kPorch, REMOTE_SENSOR_IMU, &info) && !info.enabled, "a sensor it no longer names is no longer streaming");
+  check(remoteSensorInfoFor(kPorch, nullptr, REMOTE_SENSOR_IMU, &info) && !info.enabled, "a sensor it no longer names is no longer streaming");
   gNowMs += REMOTE_SENSOR_TTL_MS - 5000;
   remoteSensorIngestStatus(kPorch, "porch", (const uint8_t*)&status, sizeof(status));
   gNowMs += 10000;
-  check(remoteSensorInfoFor(kPorch, REMOTE_SENSOR_GPS, &info) && info.enabled && !info.fresh,
+  check(remoteSensorInfoFor(kPorch, nullptr, REMOTE_SENSOR_GPS, &info) && info.enabled && !info.fresh,
         "a status frame keeps the sensor listed but does not make its old reading fresh");
   // The reply names restarts and resumes each by its own count.
   resetAll();
@@ -1103,11 +1169,11 @@ static void testReviewFindings() {
   gNowMs += REMOTE_SENSOR_PRESENCE_TTL_MS + 20000;
   sensorLinkTick(gNowMs);
   gNowMs += (uint32_t)(0x100000000ull - REMOTE_SENSOR_PRESENCE_TTL_MS - 20000 + 5000);  // 2^32 + 5 s after the reading
-  check(!remoteSensorInfoFor(kPorch, REMOTE_SENSOR_GPS, &info) && usedSlots() == 0,
+  check(!remoteSensorInfoFor(kPorch, nullptr, REMOTE_SENSOR_GPS, &info) && usedSlots() == 0,
         "49.7 days after its last frame a sensor is not listed again");
   check(textOf(kPorch, REMOTE_SENSOR_GPS) == "{\"lat\":1}", "(its last text is still kept)");
   deliver(kPorch, "porch", REMOTE_SENSOR_GPS, 7, 2, "{\"lat\":2}");
-  check(remoteSensorInfoFor(kPorch, REMOTE_SENSOR_GPS, &info) && info.fresh, "its next reading lists it again, fresh");
+  check(remoteSensorInfoFor(kPorch, nullptr, REMOTE_SENSOR_GPS, &info) && info.fresh, "its next reading lists it again, fresh");
   // ... and a reading that aged while the sensor was still listed (status frames).
   resetAll();
   deliver(kPorch, "porch", REMOTE_SENSOR_GPS, 7, 1, "{\"lat\":1}");
@@ -1118,14 +1184,231 @@ static void testReviewFindings() {
     remoteSensorIngestStatus(kPorch, "porch", (const uint8_t*)&status, sizeof(status));
     sensorLinkTick(gNowMs);
   }
-  check(remoteSensorInfoFor(kPorch, REMOTE_SENSOR_GPS, &info) && !info.fresh, "a minute without a reading: listed, not fresh");
+  check(remoteSensorInfoFor(kPorch, nullptr, REMOTE_SENSOR_GPS, &info) && !info.fresh, "a minute without a reading: listed, not fresh");
   const uint32_t wrapTo = (uint32_t)(0x100000000ull - 60000 + 1000);  // 2^32 + 1 s after the reading
   gNowMs += wrapTo - 5000;
   remoteSensorIngestStatus(kPorch, "porch", (const uint8_t*)&status, sizeof(status));
   gNowMs += 5000;
-  check(remoteSensorInfoFor(kPorch, REMOTE_SENSOR_GPS, &info) && !info.fresh,
+  check(remoteSensorInfoFor(kPorch, nullptr, REMOTE_SENSOR_GPS, &info) && !info.fresh,
         "49.7 days after the reading it is not fresh again");
   check(json(kPorch, REMOTE_SENSOR_GPS).find("\"data\":null}") != std::string::npos, "and its old text is not sent as current");
+}
+
+
+// ---- Forwarding for a bond partner -------------------------------------------------------
+static const uint8_t kGlasses[6] = { 0x02, 0xA0, 0x00, 0x00, 0x00, 0x20 };  // a bond master (the via)
+static const uint8_t kPartner[6] = { 0x02, 0xA0, 0x00, 0x00, 0x00, 0x30 };  // its bond partner, not paired here
+
+static void linkUp(uint8_t gen) {
+  gLink = espnowfwd::ForwardLink{};
+  gLink.inUse = true;
+  std::memcpy(gLink.via, kGlasses, 6);
+  espnowfwd::LinkFrame f{};
+  f.op = espnowfwd::kOpAnnounce;
+  f.linkGen = gen;
+  f.viaBootTag = 7;
+  f.streams = espnowfwd::kStreamsAll;
+  f.sensorMask = espnowfwd::kSensorMaskDefault;
+  std::memcpy(f.partnerMac, kPartner, 6);
+  espnowfwd::linkApplyAnnounce(gLink, f, "porch", false, 0);
+}
+
+// One reading forwarded by kGlasses for kPartner: X's sensor, boot tag and
+// counter, bit 2 and the link number in byte 7.
+static void deliverForwarded(uint8_t sensor, uint16_t counter, const std::string& text, uint8_t fwdLink,
+                             uint8_t flags = espnowsensor::kReadingFlagForwarded, uint16_t cap = 130,
+                             bool fromBond = false, const uint8_t* src = kGlasses) {
+  espnowsensor::PartPlan plan;
+  if (!espnowsensor::planParts(text.size(), cap, plan)) std::exit(2);
+  for (uint8_t i = 0; i < plan.count; ++i) {
+    size_t offset = 0, n = 0;
+    espnowsensor::partSpan(plan, text.size(), i, offset, n);
+    espnowsensor::ReadingHeader h{};
+    h.sensorType = sensor;
+    h.flags = flags;
+    h.bootTag = 0xAAAA;
+    h.counter = counter;
+    h.partIndex = i;
+    h.partCount = plan.count;
+    h.fwdLink = fwdLink;
+    std::vector<uint8_t> frame(espnowsensor::kReadingHeaderLen + n);
+    espnowsensor::packReadingHeader(frame.data(), h);
+    std::memcpy(frame.data() + espnowsensor::kReadingHeaderLen, text.data() + offset, n);
+    remoteSensorIngestPart(src, "glasses", frame.data(), frame.size(), fromBond);
+  }
+}
+
+static espnowsensor::CounterCounts countsVia(const uint8_t mac[6], const uint8_t* via, int sensor) {
+  static const uint8_t none[6] = {};
+  for (int i = 0; i < REMOTE_SENSOR_PEERS_MAX; ++i) {
+    if (gSensorPeers[i].inUse && std::memcmp(gSensorPeers[i].mac, mac, 6) == 0 &&
+        std::memcmp(gSensorPeers[i].via, via ? via : none, 6) == 0) {
+      return gSensorPeers[i].counts[sensor];
+    }
+  }
+  return espnowsensor::CounterCounts{};
+}
+
+static void testForwarded() {
+  resetAll();
+  pair(kGlasses);
+  gLink = espnowfwd::ForwardLink{};
+  gResumeTaken = 0;
+  gSettings.meshRole = 1;
+  // No link of glasses: refused, nothing filed under glasses or the partner.
+  deliverForwarded(REMOTE_SENSOR_GPS, 1, "{\"v\":1}", 3);
+  RemoteSensorInfo info;
+  check(gRemoteSensorRefusals.forwardRefused == 1 && usedSlots() == 0, "forwarded data without a link: refused, nothing kept");
+  // With the link: kept under (partner via glasses), named as the link shows.
+  linkUp(3);
+  deliverForwarded(REMOTE_SENSOR_GPS, 1, "{\"v\":1}", 3);
+  check(remoteSensorInfoFor(kPartner, kGlasses, REMOTE_SENSOR_GPS, &info) && info.fresh &&
+        info.link == espnowfwd::kLinkForwarded && std::memcmp(info.viaMac, kGlasses, 6) == 0 &&
+        std::string(info.deviceName) == "porch" && remoteSensorInfoVia(info) != nullptr,
+        "a forwarded reading is kept under (partner, via glasses) with the name the link shows");
+  check(!remoteSensorInfoFor(kPartner, nullptr, REMOTE_SENSOR_GPS, &info) &&
+        !remoteSensorInfoFor(kGlasses, nullptr, REMOTE_SENSOR_GPS, &info),
+        "never under the partner's own record, never under glasses' own");
+  std::vector<char> out(SENSOR_READING_MAX_BYTES + 1);
+  check(remoteSensorCopyText(kPartner, kGlasses, REMOTE_SENSOR_GPS, out.data(), out.size()) == 7 &&
+        remoteSensorCopyText(kPartner, nullptr, REMOTE_SENSOR_GPS, out.data(), out.size()) == 0,
+        "the text is read with the via; without it there is none");
+  const std::string fj = getRemoteSensorDataJson(kPartner, kGlasses, REMOTE_SENSOR_GPS).text();
+  check(has(fj, "\"link\":\"forwarded\",\"via\":{\"mac\":\"02:A0:00:00:00:20\",\"name\":\"glasses\"}") &&
+        has(fj, "\"data\":{\"v\":1}"), "GET /api/sensors/remote with via: the forwarded record, marked so");
+  check(has(getRemoteSensorDataJson(kPartner, nullptr, REMOTE_SENSOR_GPS).text(), "\"connected\":false"),
+        "without via: the partner's own record, which this device does not have");
+  // The partner's own counters: X's numbers, end to end.
+  deliverForwarded(REMOTE_SENSOR_GPS, 2, "{\"v\":2}", 3);
+  deliverForwarded(REMOTE_SENSOR_GPS, 5, "{\"v\":5}", 3);  // 3 and 4 lost on one of the hops
+  espnowsensor::CounterCounts c = countsVia(kPartner, kGlasses, REMOTE_SENSOR_GPS);
+  check(c.received == 3 && c.lost == 2, "the partner's counter: lost readings show on the mesh master");
+  // The same partner also sends directly: a separate record.
+  pair(kPartner);
+  deliver(kPartner, "porch-direct", REMOTE_SENSOR_GPS, 0xBBBB, 1, "{\"d\":1}");
+  check(remoteSensorInfoFor(kPartner, nullptr, REMOTE_SENSOR_GPS, &info) && info.link == espnowfwd::kLinkMesh &&
+        textOf(kPartner, REMOTE_SENSOR_GPS) == "{\"d\":1}" &&
+        remoteSensorCopyText(kPartner, kGlasses, REMOTE_SENSOR_GPS, out.data(), out.size()) == 7,
+        "a direct reading of the partner and the forwarded one are two records");
+  // Another link number (an old partner's frame), a stream not announced
+  // (input is left out by default), a bit without the byte: refused.
+  const uint32_t refusedBefore = gRemoteSensorRefusals.forwardRefused;
+  deliverForwarded(REMOTE_SENSOR_GPS, 6, "{\"v\":6}", 2);
+  deliverForwarded(REMOTE_SENSOR_INPUT, 1, "{\"b\":1}", 3);
+  check(gRemoteSensorRefusals.forwardRefused == refusedBefore + 2 &&
+        countsVia(kPartner, kGlasses, REMOTE_SENSOR_GPS).received == 3 &&
+        !remoteSensorInfoFor(kPartner, kGlasses, REMOTE_SENSOR_INPUT, &info),
+        "an old link number and a stream that was not announced are refused");
+  const uint32_t malformedBefore = gRemoteSensorRefusals.malformed;
+  deliverForwarded(REMOTE_SENSOR_GPS, 7, "{\"v\":7}", 0);  // bit, no byte
+  deliverForwarded(REMOTE_SENSOR_GPS, 7, "{\"v\":7}", 3, 0);  // byte, no bit
+  check(gRemoteSensorRefusals.malformed == malformedBefore + 2, "a bit and a byte that disagree are malformed");
+
+  // A new link (forwarding was off for a while): the first reading of each
+  // stream is a resume, taken by the reading the counter rule judged: the
+  // last part of a reading in parts, not the first.
+  linkUp(4);
+  gResumeTaken = 0;
+  const std::string big = jsonOf(400);  // 4 routed parts
+  espnowsensor::PartPlan plan;
+  espnowsensor::planParts(big.size(), 130, plan);
+  check(plan.count == 4, "a 400-byte reading is four routed parts");
+  for (uint8_t i = 0; i < 3; ++i) {
+    size_t offset = 0, n = 0;
+    espnowsensor::partSpan(plan, big.size(), i, offset, n);
+    espnowsensor::ReadingHeader h{};
+    h.sensorType = REMOTE_SENSOR_GPS;
+    h.flags = espnowsensor::kReadingFlagForwarded;
+    h.bootTag = 0xAAAA;
+    h.counter = 40000;
+    h.partIndex = i;
+    h.partCount = plan.count;
+    h.fwdLink = 4;
+    std::vector<uint8_t> frame(espnowsensor::kReadingHeaderLen + n);
+    espnowsensor::packReadingHeader(frame.data(), h);
+    std::memcpy(frame.data() + espnowsensor::kReadingHeaderLen, big.data() + offset, n);
+    remoteSensorIngestPart(kGlasses, "glasses", frame.data(), frame.size(), false);
+  }
+  check(gResumeTaken == 0 && (gLink.resumeMask & (1u << REMOTE_SENSOR_GPS)), "the resume waits for the reading's last part");
+  {
+    size_t offset = 0, n = 0;
+    espnowsensor::partSpan(plan, big.size(), 3, offset, n);
+    espnowsensor::ReadingHeader h{};
+    h.sensorType = REMOTE_SENSOR_GPS;
+    h.flags = espnowsensor::kReadingFlagForwarded;
+    h.bootTag = 0xAAAA;
+    h.counter = 40000;
+    h.partIndex = 3;
+    h.partCount = plan.count;
+    h.fwdLink = 4;
+    std::vector<uint8_t> frame(espnowsensor::kReadingHeaderLen + n);
+    espnowsensor::packReadingHeader(frame.data(), h);
+    std::memcpy(frame.data() + espnowsensor::kReadingHeaderLen, big.data() + offset, n);
+    remoteSensorIngestPart(kGlasses, "glasses", frame.data(), frame.size(), false);
+  }
+  c = countsVia(kPartner, kGlasses, REMOTE_SENSOR_GPS);
+  check(gResumeTaken == 1 && !(gLink.resumeMask & (1u << REMOTE_SENSOR_GPS)) && c.resumes == 1 && c.lost == 2 &&
+        c.received == 4, "the pause is a resume, not 39995 lost readings; the resume is taken once");
+  deliverForwarded(REMOTE_SENSOR_GPS, 40002, "{\"v\":9}", 4);
+  c = countsVia(kPartner, kGlasses, REMOTE_SENSOR_GPS);
+  check(c.lost == 3 && c.resumes == 1, "after the resume the counter rule counts loss again");
+  // An ended link frees its records for a seventeenth sender.
+  gLink.state = espnowfwd::LState::Ended;
+  deliverForwarded(REMOTE_SENSOR_GPS, 40003, "{\"v\":10}", 4);
+  check(remoteSensorInfoFor(kPartner, kGlasses, REMOTE_SENSOR_GPS, &info), "the record stays until a sender needs it");
+  for (uint8_t k = 0; k < REMOTE_SENSOR_PEERS_MAX; ++k) {
+    uint8_t mac[6] = { 0x02, 0xD0, 0, 0, 0, k };
+    pair(mac);
+    deliver(mac, "node", REMOTE_SENSOR_TOF, 1, 1, "{\"t\":1}");
+  }
+  check(!remoteSensorInfoFor(kPartner, kGlasses, REMOTE_SENSOR_GPS, &info),
+        "a forwarded record whose link ended was given to another sender");
+
+  // The bond master's side: a reading of its partner it kept is handed to its
+  // forwarder with the header and text as they came; a repeat is not.
+  resetAll();
+  gLink = espnowfwd::ForwardLink{};
+  gForwarded.clear();
+  gNotKept.clear();
+  gSettings.meshRole = 0;  // a mesh worker that is a bond master
+  deliver(kShed, "shed", REMOTE_SENSOR_IMU, 0x1111, 9, jsonOf(300), true, espnowsensor::kReadingFlagStreamStart);
+  check(gForwarded.size() == 1 && std::memcmp(gForwarded[0].src, kShed, 6) == 0 &&
+        gForwarded[0].h.counter == 9 && gForwarded[0].h.bootTag == 0x1111 &&
+        gForwarded[0].h.flags == espnowsensor::kReadingFlagStreamStart && gForwarded[0].text == jsonOf(300),
+        "the bond master hands its partner's reading to its forwarder, whole, with its own header");
+  deliver(kShed, "shed", REMOTE_SENSOR_IMU, 0x1111, 9, jsonOf(300), true);
+  check(gForwarded.size() == 1, "a repeat is not forwarded");
+  deliver(kShed, "shed", REMOTE_SENSOR_IMU, 0x1111, 10, "{\"i\":1}");  // over the mesh: not a bond frame
+  check(gForwarded.size() == 1, "only frames over the bond link are forwarded");
+  // A forwarded mark on the bond link is malformed: the partner never forwards.
+  const uint32_t mal = gRemoteSensorRefusals.malformed;
+  deliverForwarded(REMOTE_SENSOR_IMU, 11, "{\"i\":2}", 3, espnowsensor::kReadingFlagForwarded, 202, true, kShed);
+  check(gRemoteSensorRefusals.malformed == mal + 1 && gForwarded.size() == 1, "bit 2 on 179 is malformed");
+  // What the bond master could not keep is counted for its forwarder.
+  resetAll();
+  gSettings.meshRole = 0;
+  gNotKept.clear();
+  for (int i = 0; gSensorPeers && i < REMOTE_SENSOR_PEERS_MAX; ++i) std::free(gSensorPeers[i].slots);
+  std::free(gSensorPeers);
+  gSensorPeers = nullptr;
+  gAllocFails = true;
+  deliver(kShed, "shed", REMOTE_SENSOR_IMU, 0x1111, 12, "{\"i\":3}", true);
+  gAllocFails = false;
+  check(gNotKept.size() == 1 && gNotKept[0] == REMOTE_SENSOR_IMU, "a partner's reading the bond master could not keep is counted");
+  // No record free (paired senders hold every one): counted as well.
+  resetAll();
+  gSettings.meshRole = 1;
+  for (uint8_t k = 0; k < REMOTE_SENSOR_PEERS_MAX; ++k) {
+    uint8_t mac[6] = { 0x02, 0xD1, 0, 0, 0, k };
+    pair(mac);
+    deliver(mac, "node", REMOTE_SENSOR_TOF, 1, 1, "{\"t\":1}");
+  }
+  gNotKept.clear();
+  gForwarded.clear();
+  deliver(kShed, "shed", REMOTE_SENSOR_IMU, 0x1111, 13, "{\"i\":4}", true);
+  check(gNotKept.size() == 1 && gNotKept[0] == REMOTE_SENSOR_IMU && gForwarded.empty(),
+        "a partner's reading with no record left is counted not kept, and not handed on");
+  gConsole.clear();
 }
 
 int main() {
@@ -1143,6 +1426,7 @@ int main() {
   testDropsAreSaid();
   testStreamReply();
   testReviewFindings();
+  testForwarded();
   check(gLockViolations == 0, "nothing that may block, print or allocate ran under a lock");
   check(gLockDepth == 0, "every lock was released");
   if (failures != 0) {

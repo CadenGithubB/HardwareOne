@@ -372,6 +372,47 @@ contract in sec. 6 is **unchanged**.)
   also counts frames that found no room to wait for the main loop (four senders' frames wait at
   most).
 
+### 8.0.1 Forwarding for a bond partner (2026-11-18, additive)
+A bond master may forward its bond partner's readings, battery state and events to the mesh master
+named on it (`bondforward on`, `espnowforwardfrom add <bond master>` on the mesh master). A sender is
+then identified by its address **and** the device that forwarded it:
+- Every device row gets `link` (`mesh`: the device sent it itself; `bond`: it came over the bond link
+  to this device, its bond master; `forwarded`: a bond master forwarded it) and `via` (`null`, or
+  `{"mac":"..","name":".."}`, the bond master). This holds for `devices` of
+  `espnowsensorstatus json` and `GET /api/sensors/remote` (one row per sender: the same `mac` can be
+  listed twice, once with `via: null` and once via a bond master), the `devices` of
+  `espnowbattery json`, `senders` and `events` of `espnowevents json`, and the reply of
+  `GET /api/sensors/remote?device=<MAC>&sensor=<type>&via=<MAC>` (without `via`: the device's own
+  record). `name` of a forwarded row is the partner's name (the mesh master's own name for a partner
+  paired with it, else the name the bond master announced). Treat (`mac`, `via.mac`) as the key.
+- `espnowsensorstatus json` adds `forwardLinks` (the number of active links on this device) and
+  `table.forwardRefused` (forwarded frames no link named). `espnowsensorstatus json <name_or_mac>
+  [via <name_or_mac>]` adds `link` and `via`; a forwarded partner is also found by its link's name.
+- `refused` of `espnowbattery json` and `espnowevents json` adds `notBondMaster` and
+  `forwardRefused`. `whyNot` adds `bond_offline` (a bond worker whose partner is not connected).
+- `espnowforwardlinks json [from <n>]`: `schema`, `role`, `allowed` (the addresses
+  `espnowforwardfrom` lists; each entry is tied to the key the device is paired under, so a listed
+  address that was paired again under another key is listed but not allowed), `refused` (`malformed`, `unannounced`, `staleLink`,
+  `streamNotAnnounced`, `ignored`), `from`, `links` and `next` (`null`, or the number to pass as
+  `from`). Each link: `via`, `viaName`, `partner`, `name`, `namePaired`, `linkGen`, `viaBootTag`,
+  `state` (`active`, `ended`, `queried`), `confirmed` (`false` after 30 minutes without an
+  announcement), `streams` (`readings`, `battery`, `events`), `sensors` (names), `acceptedAgoS`,
+  `lastDataAgoS` (`null`: no data yet), `frames`, `refused` (`unannounced`, `staleLink`,
+  `streamNotAnnounced`).
+- `bondstatus json` and `GET /api/bond/status` add `forward`: `setting`, `sensors` (names),
+  `forwards`, `whyNot` (`null` or `off`, `not_bond_master`, `bond_not_agreed`, `mesh_off`,
+  `is_master`, `no_master`, `master_not_paired`), `linkGen` (`null` without a link), `partner`
+  (`{"mac","name"}` or `null`), `targets` (per named master: `kind` `primary`/`backup`, `mac`,
+  `name`, `isPartner`, `state` `idle`/`announcing`/`accepted`/`refused`, `result` (`null` or the
+  master's last answer: `accepted`, `withdrawn`, `not_receiver`, `bad_partner`, `key_mismatch`,
+  `full`, `stale`, `not_allowed`, `name_taken`, `refused`), `streams`, `session`), `forwarded`
+  (`readings`, `battery`, `events`), `notForwarded` (per stream a count per reason: the `whyNot`
+  keys and `target_is_partner`, `no_session`, `not_accepted`, `refused`, `queue_full`, `too_long`,
+  `partner_changed`, `sensor_off`, `not_kept_here`) and `answersIgnored`. The object is at most
+  2560 bytes; the whole `bondstatus json` reply fits the 4 KB reply buffer.
+- `bondstatus json` adds `sensorRequestsRefused`: the sensor requests a mesh master sent while this
+  device is a bond worker (refused: its bond master decides what it streams).
+
 ### 8.1 Remote-device list - `sensors` changed from strings to objects (breaking)
 Returned by web `GET /api/sensors/remote` (no params) **and** nested verbatim under
 `devices` in the BLE/CLI `espnowsensorstatus json` (master role):

@@ -42,8 +42,11 @@
 #include "System_ESPNow_Router.h"   // multi-hop: route table, relay policy, relay metrics
 #include <sodium.h>                 // Phase 3.5 task #32: sodium_memcmp (constant-time)
 #include "System_ESPNow_Handlers_Crypto.h"  // Phase 3.3: KEY_EX handlers + initiator
+#include "System_ESPNow_HandshakeBackoff.h"  // WarnLimiter
 #include "System_ESPNow_MeshTime.h"   // TIME_SYNC: handler, send tick, commands
 #include "System_ESPNow_PowerEvents.h" // POWER_STATUS, EVENT_PUSH: handlers, send tick, commands
+#include "System_ESPNow_ForwardRx.h"   // FORWARD_LINK: the mesh master's side of forwarding for a bond partner
+#include "System_ESPNow_BondForward.h" // the bond master's side: bondforward, the forward tick
 #include "System_ESPNow_Identity.h"  // Phase 3.0: long-term Ed25519 identity load/store
 #include "System_ESPNow_MeshKeys.h"  // Phase 3.1: per-mesh PBKDF2 hash + bootstrap/group key cache
 #include "System_ESPNow_Sessions.h"  // Phase 3.4: per-peer-per-mesh session state
@@ -1269,6 +1272,12 @@ static uint32_t bondHoldEpoch() {
 static bool bondTickHeld(uint32_t epoch) {
   return bondPartnerChanging() || bondHoldEpoch() != epoch;
 }
+
+// The hold epoch for the bond master's forwarder (System_ESPNow_BondForward.cpp):
+// a link it made under another epoch names a partner that may have changed.
+uint32_t bondHoldEpochNow() { return bondHoldEpoch(); }
+// bondTickHeld for the forwarder: a partner change runs, or one began since `epoch`.
+bool bondHeldSince(uint32_t epoch) { return bondTickHeld(epoch); }
 
 template <typename Fn>
 static void bondWithFramesHeld(Fn&& fn) {
@@ -3509,8 +3518,11 @@ bool v4_broadcast_topo_request(uint32_t reqId) {
 // time it could go out, and queuing it made a partner that is not there cost
 // a pending-frame warning plus a key exchange every 5 s (bench 2026-11-17,
 // step d2). Without a session these are dropped quietly.
+// The bond worker's battery state and events (180/182) are the same kind of
+// frame: their sender waits and sends again when the partner is back.
 static bool bondFrameIsPeriodic(uint8_t type) {
-  return type == ESPNOW_V4_TYPE_BOND_HEARTBEAT || type == ESPNOW_V4_TYPE_BOND_SENSOR_DATA;
+  return type == ESPNOW_V4_TYPE_BOND_HEARTBEAT || type == ESPNOW_V4_TYPE_BOND_SENSOR_DATA ||
+         type == ESPNOW_V4_TYPE_BOND_POWER_STATUS || type == ESPNOW_V4_TYPE_BOND_EVENT_PUSH;
 }
 
 // THE bond send entry — enforces the two rules above (single-initiator +
@@ -3608,6 +3620,18 @@ bool espnowSessionUp(const uint8_t* mac, uint32_t* establishedAtMs) {
   if (!s || s->state != SESSION_ACTIVE) return false;
   if (establishedAtMs) *establishedAtMs = s->establishedAtMs;
   return true;
+}
+
+// The sessionId of the ACTIVE session with `mac`, 0 when there is none. Every
+// SESSION_OPEN makes a fresh random one; a REKEY keeps it (and resets
+// establishedAtMs). The bond master's forwarder tells a master its state
+// again on every new session, not on a rekey. Any task (a read).
+uint16_t espnowSessionIdOf(const uint8_t* mac) {
+  if (!gEspNow || !mac) return 0;
+  const PeerIdentity* pid = peerIdentityFindByMac(mac);
+  const SessionState* s = pid ? sessionFindByPeer(mac, pid->meshId) : nullptr;
+  if (!s || s->state != SESSION_ACTIVE) return 0;
+  return s->sessionId ? s->sessionId : 1;
 }
 
 // A session a new sender's first frame can use: ACTIVE for at least
@@ -3741,6 +3765,34 @@ bool v4_send_sensor_part(const uint8_t* dstMac, bool viaBond, const uint8_t* par
   const uint32_t msgId = generateMessageId();
   if (viaBond) return bondSendEncryptedAsync(dstMac, ESPNOW_V4_TYPE_BOND_SENSOR_DATA, 0, msgId, part, len);
   return espnowtx::sendAead(dstMac, ESPNOW_V4_TYPE_SENSOR_ENVELOPE, 0, msgId, part, len, 1);
+}
+
+// A bond worker's battery state (BOND_POWER_STATUS, 180) and events
+// (BOND_EVENT_PUSH, 182) to its bond partner, with the 152/132 payloads. The
+// bond send rules apply: only the higher address starts a session, and
+// without one the frame is dropped (bondFrameIsPeriodic); the sender waits.
+bool v4_send_bond_power(const uint8_t* dstMac, const uint8_t* payload, uint16_t len) {
+#if ENABLE_BONDED_MODE
+  if (!dstMac || !payload || len != sizeof(V4PayloadPowerStatus)) return false;
+  return bondSendEncryptedAsync(dstMac, ESPNOW_V4_TYPE_BOND_POWER_STATUS, 0, generateMessageId(), payload, len);
+#else
+  (void)dstMac;
+  (void)payload;
+  (void)len;
+  return false;
+#endif
+}
+
+bool v4_send_bond_event(const uint8_t* dstMac, const uint8_t* payload, uint16_t len) {
+#if ENABLE_BONDED_MODE
+  if (!dstMac || !payload || len != sizeof(V4PayloadEventPush)) return false;
+  return bondSendEncryptedAsync(dstMac, ESPNOW_V4_TYPE_BOND_EVENT_PUSH, 0, generateMessageId(), payload, len);
+#else
+  (void)dstMac;
+  (void)payload;
+  (void)len;
+  return false;
+#endif
 }
 
 // Send user sync to specific device (JSON payload)
@@ -4282,6 +4334,25 @@ static void v4h_sensor_envelope(const V4RxCtx& ctx) {
 // then defer the apply to the super-loop (startSensorDataStreaming creates a task/mutex —
 // unsafe on the RX task). This handler never reaches executeCommand: no RCE (D1/scope).
 static void v4h_sensor_req(const V4RxCtx& ctx) {
+  // A bond worker's bond master decides what it streams: a mesh master does
+  // not (espnowfwd::meshDataAllowed). Counted, and said once a minute.
+  bool bondWorker = false;
+#if ENABLE_BONDED_MODE
+  bondWorker = gSettings.bondModeEnabled && isBondWorker();
+#endif
+  if (!espnowfwd::meshDataAllowed(bondWorker)) {
+    static WarnLimiter sWarn = {};
+    static uint32_t sRefused = 0;
+    sRefused++;
+    if (gEspNow) gEspNow->sensorReqRefusedBond = sRefused;
+    uint32_t held = 0;
+    if (warnLimiterTake(sWarn, (uint32_t)millis(), 60000, &held)) {
+      BROADCAST_PRINTF("[ESP-NOW] Sensor request from %s refused: this device is a bond worker; its bond master "
+                       "decides what it streams (%lu more in the last minute)",
+                       ctx.deviceName, (unsigned long)held);
+    }
+    return;
+  }
   if (!gSettings.espnowAcceptSensorControl) {
     DEBUG_ESPNOW_MESHF("[V4_RX_SENSOR_REQ] drop: acceptSensorControl is off");
     return;
@@ -6489,6 +6560,7 @@ static bool v4_routed_type_allowed(uint8_t type) {
     case ESPNOW_V4_TYPE_SENSOR_ENVELOPE:
     case ESPNOW_V4_TYPE_POWER_STATUS:
     case ESPNOW_V4_TYPE_EVENT_PUSH:
+    case ESPNOW_V4_TYPE_FORWARD_LINK:
       return true;
     default:
       // Everything else is excluded for a reason worth stating once:
@@ -7264,6 +7336,12 @@ static const V4OpcodeEntry kV4HandlerTable[] = {
   // only on a master or backup master, and trust none of its text.
   { ESPNOW_V4_TYPE_POWER_STATUS,     V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC,  v4hPowerStatus        },
   { ESPNOW_V4_TYPE_EVENT_PUSH,       V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC,  v4hEventPush          },
+  // A bond master's announcement that it forwards its bond partner's
+  // readings, battery state and events to this device, and the answer
+  // (System_ESPNow_ForwardRx.cpp, System_ESPNow_ForwardCore.h). Paired +
+  // session, no bond gate: the receiver is not the sender's bond partner, and
+  // a mesh master built without bond mode still keeps forwarded data.
+  { ESPNOW_V4_TYPE_FORWARD_LINK,     V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC,  v4hForwardLink        },
   // Keep the topology opcodes compatible with the existing plaintext V4 wire
   // format. Their handlers enforce request IDs, deadlines, bounds and sender
   // stream ownership before accepting any data.
@@ -7314,6 +7392,10 @@ static const V4OpcodeEntry kV4HandlerTable[] = {
   { ESPNOW_V4_TYPE_BOND_CAP_REQ,     V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_PEER | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_bond_cap_req      },
   { ESPNOW_V4_TYPE_BOND_CAP_RESP,    V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_PEER | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_bond_cap_resp     },
   { ESPNOW_V4_TYPE_BOND_SENSOR_DATA, V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_PEER | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_sensor_data       },
+  // The bond worker's battery state and events, to its bond master only
+  // (System_ESPNow_PowerEvents.cpp): never to a mesh master.
+  { ESPNOW_V4_TYPE_BOND_POWER_STATUS, V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_PEER | V4_OPC_FLAG_REQ_SESSION_ENC,  v4hBondPowerStatus    },
+  { ESPNOW_V4_TYPE_BOND_EVENT_PUSH,  V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_PEER | V4_OPC_FLAG_REQ_SESSION_ENC,   v4hBondEventPush      },
   { ESPNOW_V4_TYPE_SETTINGS_REQ,     V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_PEER | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_settings_req      },
   { ESPNOW_V4_TYPE_SCHEMA_REQ,       V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_PEER | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_schema_req        },
   { ESPNOW_V4_TYPE_BOND_STATUS_REQ,  V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_PEER | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_bond_status_req   },
@@ -12984,6 +13066,14 @@ void processMeshHeartbeats() {
   // 9f2c. Battery state and events: this device's own go to the masters named
   // on it (after 9f2b, which looks those masters up). Needs no bond either.
   espnowPowerEventsTick(now);
+
+  // 9f2d. Forwarding for a bond partner: the mesh master's side (which devices
+  // may forward here) on every build, and the bond master's side (announce,
+  // withdraw, the answers) in a bond build.
+  espnowForwardRxTick(now);
+#if ENABLE_BONDED_MODE
+  bondForwardTick(now);
+#endif
 
   // 9f3. Mesh secure fetcher: deferred SENSOR_REQ — worker applies the leased
   // subscription off the RX critical path (startSensorDataStreaming creates a task).
@@ -20358,7 +20448,16 @@ const char* cmd_bond_status(const String& argsInput) {
       doc["agreement"] = bondAgreementKey(agreement);
       doc["agreementReason"] = bondAgreementReasonKey(agreement);
     }
-    serializeJson(doc, getDebugBuffer(), 1024);
+    // Sensor requests a mesh master sent while this device is a bond worker
+    // (refused: its bond master decides what it streams).
+    doc["sensorRequestsRefused"] = (unsigned long)(gEspNow ? gEspNow->sensorReqRefusedBond : 0UL);
+    // Whether the partner's data is forwarded to the mesh master
+    // (System_ESPNow_BondForward.cpp); its longest form fits espnowfwd::kStatusJsonCap,
+    // and the whole reply the 4 KB reply buffer.
+    EXT_RAM_BSS_ATTR static char forward[espnowfwd::kStatusJsonCap];
+    if (bondForwardStatusJson(forward, sizeof(forward)) > 0) doc["forward"] = serialized(forward);
+    else doc["forward"] = nullptr;
+    serializeJson(doc, getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE);
     return getDebugBuffer();
   }
 
@@ -20424,6 +20523,19 @@ const char* cmd_bond_status(const String& argsInput) {
   } else {
     broadcastOutput(declined ? "Last heartbeat: none (the partner sends none while it has no bond with this device)"
                              : "Last heartbeat: none yet");
+  }
+  if (!isBondMaster() && gEspNow && gEspNow->sensorReqRefusedBond) {
+    BROADCAST_PRINTF("Sensor requests from mesh masters refused: %lu (the bond master decides what this device streams)",
+                     (unsigned long)gEspNow->sensorReqRefusedBond);
+  }
+  // Forwarding to the mesh master: a few lines, each one console message.
+  EXT_RAM_BSS_ATTR static char forwardLines[espnowfwd::kStatusLinesCap];
+  bondForwardStatusLines(forwardLines, sizeof(forwardLines));
+  for (char* line = forwardLines; line && *line;) {
+    char* next = strchr(line, '\n');
+    if (next) *next++ = '\0';
+    broadcastOutput(line);
+    line = next;
   }
   
   return "OK";
@@ -20743,6 +20855,7 @@ const char* cmd_espnow_bondstreaminput(const String&);
 const char* cmd_espnow_bondstreamfmradio(const String&);
 const char* cmd_espnow_bondstreamrtc(const String&);
 const char* cmd_espnow_bondstreampresence(const String&);
+const char* cmd_bond_forwardsensors(const String&);
 #endif
 
 // Buffered ESP-NOW message history as JSON. This is what lets a BLE/CLI client
@@ -21118,7 +21231,7 @@ extern const CommandEntry espNowCommands[] = {
   { "closestream", "Stop streaming output to ESP-NOW device (admin).", true, cmd_espnow_stopstream },
   { "espnowworker", "Configure worker status reporting: 'espnowworker [show|on|off|interval <ms>|fields <list>]'.", false, cmd_espnow_worker, "Usage: espnowworker [show|on|off|interval <ms>|fields <heap,rssi,thermal,imu>]" },
   { "espnowsensorstream", "Send one sensor's readings to the master named on this device: 'espnowsensorstream <sensor> <on|off>'. (on this device only; the readings show on the master's espnowsensorstatus)", false, cmd_espnow_sensorstream, "Usage: espnowsensorstream <thermal|tof|imu|gps|input|fmradio|camera|microphone|rtc|presence|apds> <on|off>\n       The readings go to the master named on this device (espnowmasterfingerprint), which must be paired with it.\n       The reply says where they go, or why nothing is sent yet. On a bond master it asks the bond partner." },
-  { "espnowsensorstatus", "Show what this device sends to the mesh master (readings, battery state, events) and why not, and what it received, lost and refused: 'espnowsensorstatus [json [<name_or_mac>]]'.", false, cmd_espnow_sensorstatus, "Usage: espnowsensorstatus [json [<name_or_mac>]]\n       json <name_or_mac>: everything this device keeps of one sending device." },
+  { "espnowsensorstatus", "Show what this device sends to the mesh master (readings, battery state, events) and why not, and what it received, lost and refused: 'espnowsensorstatus [json [<name_or_mac> [via <name_or_mac>]]]'.", false, cmd_espnow_sensorstatus, "Usage: espnowsensorstatus [json [<name_or_mac> [via <name_or_mac>]]]\n       json <name_or_mac>: everything this device keeps of one sending device.\n       via <name_or_mac>: the bond partner that device forwards for (also found by the name its link shows)." },
   { "espnowbattery", "Mesh master: show the battery state other devices sent: 'espnowbattery [json] [<name_or_mac>] [from <n>]'.", false, cmd_espnow_battery, "Usage: espnowbattery [json] [<name_or_mac>] [from <n>]\n       A device sends its battery state to the master named on it (espnowpowerinterval).\n       json: 'next' is the number to pass as 'from' when not every device fitted one reply." },
   { "espnowevents", "Mesh master: show the system events other devices sent: 'espnowevents [json] [since <rx>]'.", true, cmd_espnow_events, "Usage: espnowevents [json] [since <rx>]\n       A device sends its events to the master named on it (espnoweventpush). The master keeps the newest 24 per mesh.\n       since <rx>: only events after that receive number. json: 'more' means ask again with since = the last rx." },
   { "espnowpowerinterval", "How often this device sends its battery state to the mesh master, in seconds: 'espnowpowerinterval [0|10..3600]'. 0 = not sent.", true, cmd_espnow_powerinterval, "Usage: espnowpowerinterval [0|10..3600]" },
@@ -21127,6 +21240,8 @@ extern const CommandEntry espNowCommands[] = {
   // Secure sensor fetcher (worker settings + Phase 1b test harness) — docs/ESPNOW_SENSOR_FETCHER_DESIGN.md
   { "espnowacceptsensorcontrol", "Worker: opt in to honor SENSOR_REQ from the configured master/backup: 'espnowacceptsensorcontrol <on|off>'.", true, cmd_espnow_acceptsensorcontrol, "Usage: espnowacceptsensorcontrol <on|off>" },
   { "espnowmasterfingerprint", "Name the mesh master on this device: its key as 'espnowidentity' shows it (64 hex), or 'clear' to name none.", true, cmd_espnow_masterfingerprint, "Usage: espnowmasterfingerprint [<64-hex-pubkey>|clear]\n       No argument shows it. The master named here gives this device mesh time, gets its readings,\n       battery state and events, and may ask it for readings. clear: no master is named (the reply says what that stops)." },
+  { "espnowforwardfrom", "Mesh master: name the devices that may forward their bond partner's readings, battery state and events to this device: 'espnowforwardfrom [add <name_or_mac> | remove <name_or_mac> | clear]'.", true, cmd_espnow_forwardfrom, "Usage: espnowforwardfrom [add <name_or_mac> | remove <name_or_mac> | clear]\n       No argument shows the list. Up to 4 paired devices, each under the key it is paired with (paired again: add it again).\n       Empty (the default): no device may forward to this one. The bond master also needs 'bondforward on' and this device named as its master." },
+  { "espnowforwardlinks", "Mesh master: show the devices that forward their bond partner's data to this device: 'espnowforwardlinks [json] [from <n>]'.", false, cmd_espnow_forwardlinks, "Usage: espnowforwardlinks [json] [from <n>]\n       json: 'next' is the number to pass as 'from' when not every link fitted one reply." },
   { "espnowbackupfingerprint", "Name the backup master on this device: its key as 'espnowidentity' shows it (64 hex), or 'clear' to name none.", true, cmd_espnow_backupfingerprint, "Usage: espnowbackupfingerprint [<64-hex-pubkey>|clear]\n       No argument shows it. The backup named here gets this device's battery state and events, may ask it for readings,\n       and gives it mesh time while it acts as master. clear: no backup master is named." },
   { "espnowsensorreq", "TEST (Phase 1b): hand-send a SENSOR_REQ to a paired worker.", true, cmd_espnow_sensorreq, "Usage: espnowsensorreq <MAC|name> <mask> <mode 0=sub|1=unsub|2=oneshot> <intervalMs> <leaseMs>" },
   { "espnowusersync", "Enable/disable user credential sync: 'espnowusersync [on|off]'.", true, cmd_espnow_usersync, "Usage: espnowusersync [on|off]", /*requiresSuperAdmin=*/true },
@@ -21136,7 +21251,8 @@ extern const CommandEntry espNowCommands[] = {
   // ---- Bond Mode Commands (1:1 handshake relationship) ----
   { "bondconnect", "Connect to bonded peer device: 'bondconnect <mac_or_name>'. Run it on both devices. (async - bond establishes when peer is seen; watch bondstatus)", true, cmd_bond_connect, "Usage: bondconnect <mac_or_name>\n       Returns immediately; the bond completes when the peer appears via heartbeat - watch 'bondstatus'.\n       The peer is asked to confirm; until 'bondconnect' is run there too it answers that it is not bonded, and 'bondstatus' says so." },
   { "bonddisconnect", "Disconnect from bonded peer device. The peer is told that the bond ended.", true, cmd_bond_disconnect },
-  { "bondstatus", "Show bond mode status and configuration, with what the peer answered about the bond (Agreement).", false, cmd_bond_status },
+  { "bondstatus", "Show bond mode status and configuration, with what the peer answered about the bond (Agreement) and whether its data is forwarded to the mesh.", false, cmd_bond_status },
+  { "bondforward", "Bond master: forward the bond partner's readings, battery state and events to the mesh master named on this device: 'bondforward [on|off|sensors <all|default|name,name,...>]'.", true, cmd_bond_forward, "Usage: bondforward [on | off | sensors <all | default | name,name,...>]\n       No argument shows whether the partner's data is forwarded, and why not. Off by default.\n       The mesh master must list this device ('espnowforwardfrom add' there). Input is not forwarded unless named." },
   { "bondrole", "Get/set bond mode role: 'bondrole [master|worker]' (no arg shows current role).", true, cmd_bond_role, "Usage: bondrole [master|worker]   (no arg shows current role)" },
   { "bondshowcap", "Show local device capability summary.", false, cmd_bond_showcap },
   { "bondrequestcap", "Request capability summary from bonded peer. (async - remote cap via GET /api/bond/status; note bondshowcap shows LOCAL cap)", true, cmd_bond_requestcap },
@@ -21192,6 +21308,7 @@ extern const CommandEntry espNowCommands[] = {
   { "bondstreamfmradio",             "Set auto-stream FM radio: <0|1>", true, cmd_espnow_bondstreamfmradio, "Usage: bondstreamfmradio <0|1>" },
   { "bondstreamrtc",                 "Set auto-stream RTC: <0|1>", true, cmd_espnow_bondstreamrtc, "Usage: bondstreamrtc <0|1>" },
   { "bondstreampresence",            "Set auto-stream presence: <0|1>", true, cmd_espnow_bondstreampresence, "Usage: bondstreampresence <0|1>" },
+  { "bondforwardsensors",            "Set the sensors a bond master forwards, as a mask: <0..2047>", true, cmd_bond_forwardsensors, "Usage: bondforwardsensors <0..2047>   (bit i: sensor i; 'bondforward sensors <names>' sets it by name)" },
 #endif
 };
 
@@ -21252,6 +21369,11 @@ static const SettingEntry espnowSettingEntries[] = {
   { "acceptSensorControl", SETTING_BOOL, &gSettings.espnowAcceptSensorControl, 0, 0, nullptr, 0, 0, "Accept Sensor Control", nullptr, false, "mesh", "espnowacceptsensorcontrol" },
   { "masterFingerprint", SETTING_STRING, &gSettings.espnowMasterFingerprint, 0, 0, "", 0, 0, "Master Fingerprint", nullptr, false, "mesh", "espnowmasterfingerprint" },
   { "backupMasterFingerprint", SETTING_STRING, &gSettings.espnowBackupMasterFingerprint, 0, 0, "", 0, 0, "Backup Master Fingerprint", nullptr, false, "mesh", "espnowbackupfingerprint" },
+  // The devices that may forward their bond partner's readings, battery state
+  // and events to this device (System_ESPNow_ForwardRx.cpp): up to four
+  // entries "<address>/<first 8 key bytes in hex>", written by
+  // 'espnowforwardfrom add'. Empty: none. Not remotely editable by a bond partner.
+  { "forwardFrom", SETTING_STRING, &gSettings.espnowForwardFrom, 0, 0, "", 0, 0, "Accept Forwarded Data From", nullptr, false, "mesh", "espnowforwardfrom" },
 #if ENABLE_BONDED_MODE
   { "bondModeEnabled", SETTING_BOOL, &gSettings.bondModeEnabled, false, 0, nullptr, 0, 1, "Bond Mode Enabled", nullptr, false, "bond", "espnowbondmodeenabled" },
   { "bondRole", SETTING_U8, &gSettings.bondRole, 0, 0, nullptr, 0, 1, "Bond Role", "0:Worker (compute/network),1:Master (display/gamepad)", false, "bond", "bondrole" },
@@ -21264,6 +21386,11 @@ static const SettingEntry espnowSettingEntries[] = {
   { "bondStreamFmradio", SETTING_BOOL, &gSettings.bondStreamFmradio, false, 0, nullptr, 0, 1, "Auto-stream FM Radio", nullptr, false, "bond", "bondstreamfmradio" },
   { "bondStreamRtc", SETTING_BOOL, &gSettings.bondStreamRtc, false, 0, nullptr, 0, 1, "Auto-stream RTC", nullptr, false, "bond", "bondstreamrtc" },
   { "bondStreamPresence", SETTING_BOOL, &gSettings.bondStreamPresence, false, 0, nullptr, 0, 1, "Auto-stream Presence", nullptr, false, "bond", "bondstreampresence" },
+  // A bond master forwards its partner's readings, battery state and events
+  // to the master named on it (System_ESPNow_BondForward.cpp). Off by
+  // default; group "bond", so the partner cannot change it.
+  { "bondForwardToMesh", SETTING_BOOL, &gSettings.bondForwardToMesh, false, 0, nullptr, 0, 1, "Forward Partner To Mesh Master", nullptr, false, "bond", "bondforward" },
+  { "bondForwardSensors", SETTING_U16, &gSettings.bondForwardSensors, 0x07EF, 0, nullptr, 0, 0x07FF, "Forwarded Sensors", "bitmask:1|Thermal,2|ToF,4|IMU,8|GPS,16|Input,32|FM Radio,64|Camera,128|Microphone,256|RTC,512|Presence,1024|APDS", false, "bond", "bondforwardsensors" },
 #endif
 };
 
@@ -21457,6 +21584,9 @@ ESPNOW_SETTING_CMD(cmd_espnow_bondstreaminput, "bondStreamInput")
 ESPNOW_SETTING_CMD(cmd_espnow_bondstreamfmradio, "bondStreamFmradio")
 ESPNOW_SETTING_CMD(cmd_espnow_bondstreamrtc, "bondStreamRtc")
 ESPNOW_SETTING_CMD(cmd_espnow_bondstreampresence, "bondStreamPresence")
+// The forwarded sensors as a mask (the settings editors); 'bondforward
+// sensors <names>' sets the same value by name.
+ESPNOW_SETTING_CMD(cmd_bond_forwardsensors, "bondForwardSensors")
 #endif
 
 bool isEspNowInitialized() {

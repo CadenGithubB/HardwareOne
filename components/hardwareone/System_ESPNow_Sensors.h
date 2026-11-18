@@ -15,6 +15,7 @@ bool isEspNowInitialized();
 #include <stdint.h>
 
 #include "System_ESPNow_SensorCore.h"  // RemoteSensorType (the one numbering) and the reading rules
+#include "System_ESPNow_ForwardCore.h"  // espnowfwd::kLink* of a record
 
 // ==========================
 // Readings received from other devices
@@ -42,9 +43,16 @@ static_assert(REMOTE_SENSOR_SLOTS_MAX <= 255, "slot indices are kept in uint8_t 
 #define REMOTE_SENSOR_TTL_MS 30000  // a reading older than this is not fresh
 #define REMOTE_SENSOR_PRESENCE_TTL_MS 60000  // a sensor not heard from for this long is no longer listed
 
-// One slot without its text: small enough to copy onto a stack.
+// One slot without its text: small enough to copy onto a stack. A slot
+// belongs to a sender: its origin (deviceMac) and, for readings a bond master
+// forwards for its partner, that bond master (viaMac). Every reader that
+// copies a slot's text or looks a slot up again passes the via it listed
+// (remoteSensorInfoVia), so a forwarded reading never shows as the origin's
+// own.
 struct RemoteSensorInfo {
   uint8_t deviceMac[6];
+  uint8_t viaMac[6];        // all zero, or the bond master that forwards for deviceMac
+  uint8_t link;             // espnowfwd::kLinkMesh, kLinkBond or kLinkForwarded
   char deviceName[32];
   RemoteSensorType sensorType;
   bool enabled;             // the sender says it is streaming this sensor
@@ -62,11 +70,18 @@ int remoteSensorSlotCount();
 // The slot at `index`. False for a free slot and for one whose sensor has not
 // been heard from for REMOTE_SENSOR_PRESENCE_TTL_MS.
 bool remoteSensorInfoAt(int index, RemoteSensorInfo* out);
-// The slot of one sensor of one sender, by the same rule.
-bool remoteSensorInfoFor(const uint8_t* deviceMac, RemoteSensorType sensorType, RemoteSensorInfo* out);
+// The via of a listed slot: nullptr for the origin's own record.
+inline const uint8_t* remoteSensorInfoVia(const RemoteSensorInfo& info) {
+  return info.link == espnowfwd::kLinkForwarded ? info.viaMac : nullptr;
+}
+// The slot of one sensor of one sender (origin, via; via nullptr: the
+// origin's own record), by the same rule.
+bool remoteSensorInfoFor(const uint8_t* deviceMac, const uint8_t* via, RemoteSensorType sensorType,
+                         RemoteSensorInfo* out);
 // Copies the latest reading's text of that sensor into `out`, terminated.
 // Returns its length; 0 when there is none or `out` is too small for it.
-size_t remoteSensorCopyText(const uint8_t* deviceMac, RemoteSensorType sensorType, char* out, size_t outSize);
+size_t remoteSensorCopyText(const uint8_t* deviceMac, const uint8_t* via, RemoteSensorType sensorType, char* out,
+                            size_t outSize);
 
 // ==========================
 // Remote Sensor Functions
@@ -166,8 +181,8 @@ void espnowApplySensorSubscription(uint8_t mode, uint32_t sensorMask,
                                    uint32_t intervalMs, uint32_t leaseMs,
                                    const uint8_t* controllerMac);
 
-// Get remote sensor data for web API
-String getRemoteSensorDataJson(const uint8_t* deviceMac, RemoteSensorType sensorType);
+// Get remote sensor data for web API (via nullptr: the device's own record).
+String getRemoteSensorDataJson(const uint8_t* deviceMac, const uint8_t* via, RemoteSensorType sensorType);
 
 // Format-agnostic readable renderer for a cached sensor's JSON. Walks the
 // top-level key:value pairs and writes up to `maxLines` newline-separated

@@ -14,6 +14,28 @@ The version stays 0.99.99.1 until the 1.0 gate in `RELEASING.md` is met; this se
 everything user-visible since the v0.99.99.1 tag.
 
 ### Added
+- A bond master can forward its bond partner's readings, battery state and events to the mesh master named
+  on it. `bondforward on` (off by default; settings group "bond", so the partner cannot change it) makes the
+  bond master announce to each master named on it, in a new 96-byte session frame FORWARD_LINK (opcode
+  155, also through a relay), that it forwards for its partner, and forward once that master accepted:
+  readings to the primary master, battery state and events to the primary and the backup master.
+  `bondforward sensors <all|default|name,...>` (or `bondforwardsensors <mask>`) picks the sensors; input
+  is left out by default. The mesh master accepts only from devices it lists with
+  `espnowforwardfrom add <name_or_mac>` (up to four, each tied to the key it is paired under, so another
+  identity paired later under the same address is not allowed; empty by default, not remotely editable;
+  a refused announcement is said once a minute at most). There the
+  partner is its own sender "porch via glasses", with its own counters (the partner's numbers end to end,
+  so a frame lost on either hop counts as lost), kept apart from the partner's own record and from the
+  bond master's; `espnowforwardlinks [json] [from <n>]` lists the links; `espnowsensorstatus json
+  <name_or_mac> [via <name_or_mac>]` shows one forwarded sender. Every JSON row of `espnowsensorstatus
+  json`, `espnowbattery json`, `espnowevents json` and `GET /api/sensors/remote` has `link`
+  (`mesh`, `bond`, `forwarded`) and `via`; `GET /api/sensors/remote` takes `&via=<MAC>`; `bondstatus`,
+  `bondstatus json` and `GET /api/bond/status` say whether and where the partner's data goes and why
+  not (`bondstatus` in up to three console lines, each one whole message). A rekey keeps forwarding; a new session, a partner change, a decline, a restart or a new named
+  master are handled by the bond master's tick; a frame of an old partner still on its way is refused by
+  its link number. Forwarded MQTT state is not published (MQTT is parked). Host-tested (rules, both sides
+  as production code, the receive gates, the reading and battery/event stores); syntax-checked for the
+  P4 (bond mode off) and the XIAO (bond mode on); not built or run on hardware.
 - ESP-NOW mesh time works. The mesh master sends its clock (UTC) to each paired device over that
   device's encrypted session: when the session has come up, every 10 minutes, when the master's own
   clock was set, and on `espnowtimesync`. A device that names that master and whose clock has no
@@ -567,6 +589,16 @@ everything user-visible since the v0.99.99.1 tag.
   yet tested on hardware.
 
 ### Changed
+- A bond worker sends its battery state and events to its bond master only, over the bond link as two
+  new bond opcodes (180 BOND_POWER_STATUS, 182 BOND_EVENT_PUSH, the 152/132 payloads unchanged), and never
+  to a mesh master, whatever master is named on it; it refuses sensor requests from a mesh master and
+  sends no sensor status frame to one (`bondstatus` and `bondstatus json` count the refused requests:
+  `sensorRequestsRefused`). Before, a bond worker that named a master sent its battery state
+  and events there. `espnowsensorstatus` and `espnowbattery` say `bond_offline` while the partner is not
+  connected. This reverses the earlier "battery state and events need no bond" for bond workers only.
+- Wire (1.0 format, the fleet is reflashed together): one reserved flag bit and the reserved byte 7 of
+  the reading header, byte 16 of the battery frame, and flag bit 4 and byte 7 of the event frame now mark
+  a frame a bond master forwards for its partner; a frame whose bit and byte disagree is refused.
 - `espnowmasterfingerprint` and `espnowbackupfingerprint` (admin) take `clear`, which names no
   master (or no backup master) on the device; before, the console could not empty them (an empty
   argument only shows the value). The reply says what that stops: with neither named the device

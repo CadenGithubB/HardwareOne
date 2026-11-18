@@ -477,7 +477,19 @@ esp_err_t handleRemoteSensors(httpd_req_t* req) {
       if (sscanf(deviceMac, "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx",
                  &mac[0], &mac[1], &mac[2], &mac[3], &mac[4], &mac[5]) == 6) {
         RemoteSensorType type = stringToSensorType(sensorType);
-        String jsonData = getRemoteSensorDataJson(mac, type);
+        // &via=<MAC>: the record of a bond partner that device forwards for;
+        // without it, the device's own record.
+        char viaText[32];
+        uint8_t viaMac[6];
+        const uint8_t* via = nullptr;
+        if (httpd_query_key_value(query, "via", viaText, sizeof(viaText)) == ESP_OK) {
+          String decodedVia = urlDecode(String(viaText));
+          if (sscanf(decodedVia.c_str(), "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx", &viaMac[0], &viaMac[1], &viaMac[2],
+                     &viaMac[3], &viaMac[4], &viaMac[5]) == 6) {
+            via = viaMac;
+          }
+        }
+        String jsonData = getRemoteSensorDataJson(mac, via, type);
 
         char dbg[121];
         size_t n = jsonData.length();

@@ -63,7 +63,7 @@ GONE = ("V4PayloadSensorBroadcast", "V4PayloadSensorData", "REMOTE_SENSOR_BUFFER
         "sendBondedSensorData", "gBondSensorSeqNum", "v4_broadcast_sensor_status", "broadcastSensorStatus",
         "findOrCreateCacheEntry", "updateRemoteSensorStatus")
 STRUCTS = ("V4PayloadTimeSync", "V4PayloadSensorStatus", "V4PayloadSensorReading", "V4PayloadSensorReq",
-           "V4PayloadPowerStatus", "V4PayloadEventPush")
+           "V4PayloadPowerStatus", "V4PayloadEventPush", "V4PayloadForwardLink")
 
 HARNESS = r"""
 #include <cstddef>
@@ -71,6 +71,7 @@ HARNESS = r"""
 #include <cstdio>
 #include <cstring>
 
+#include "System_ESPNow_ForwardCore.h"
 #include "System_ESPNow_PowerEventCore.h"
 #include "System_ESPNow_SensorCore.h"
 #include "System_ESPNow_TimeCore.h"
@@ -103,8 +104,8 @@ int main() {
   check(sizeof(V4PayloadSensorReading) == 12, "V4PayloadSensorReading is 12 bytes");
   check(offsetof(V4PayloadSensorReading, sensorType) == 0 && offsetof(V4PayloadSensorReading, flags) == 1 &&
         offsetof(V4PayloadSensorReading, bootTag) == 2 && offsetof(V4PayloadSensorReading, counter) == 4 &&
-        offsetof(V4PayloadSensorReading, parts) == 6 && offsetof(V4PayloadSensorReading, reserved) == 7 &&
-        offsetof(V4PayloadSensorReading, ageMs) == 8, "its offsets: 0 type, 1 flags, 2 boot tag, 4 counter, 6 parts, 7 reserved, 8 age");
+        offsetof(V4PayloadSensorReading, parts) == 6 && offsetof(V4PayloadSensorReading, fwdLink) == 7 &&
+        offsetof(V4PayloadSensorReading, ageMs) == 8, "its offsets: 0 type, 1 flags, 2 boot tag, 4 counter, 6 parts, 7 link number, 8 age");
   {
     V4PayloadSensorReading wire{};
     wire.sensorType = REMOTE_SENSOR_RTC;
@@ -129,6 +130,15 @@ int main() {
     check(espnowsensor::parseReadingHeader((const uint8_t*)&wire, sizeof(wire), back) && back.partIndex == 3 &&
           back.partCount == 4 && back.counter == 0xFFFE && back.bootTag == 0x1234 && back.ageMs == 0x89ABCDEFu &&
           back.flags == 0x03, "parseReadingHeader reads them back");
+    // A forwarded reading: flag bit 2 and the link number in byte 7, nothing
+    // else moves (the 12-byte header and the 472-byte reading are unchanged).
+    wire.flags = (uint8_t)(wire.flags | espnowsensor::kReadingFlagForwarded);
+    wire.fwdLink = 0x5C;
+    h.flags = (uint8_t)(h.flags | espnowsensor::kReadingFlagForwarded);
+    h.fwdLink = 0x5C;
+    espnowsensor::packReadingHeader(packed, h);
+    check(std::memcmp(packed, &wire, sizeof(wire)) == 0 && packed[1] == 0x07 && packed[7] == 0x5C,
+          "a forwarded reading's header: bit 2 of the flags, the link number in byte 7");
   }
 
   // The status frame: 16 bytes, two masks in the one numbering.
@@ -171,8 +181,9 @@ int main() {
         offsetof(V4PayloadPowerStatus, backend) == 5 && offsetof(V4PayloadPowerStatus, known) == 6 &&
         offsetof(V4PayloadPowerStatus, voltageMv) == 8 && offsetof(V4PayloadPowerStatus, percentX10) == 10 &&
         offsetof(V4PayloadPowerStatus, rateX10) == 12 && offsetof(V4PayloadPowerStatus, sampleAgeMs) == 14 &&
-        offsetof(V4PayloadPowerStatus, reserved) == 16 && sizeof(((V4PayloadPowerStatus*)nullptr)->reserved) == 8,
-        "V4PayloadPowerStatus: 0 counter, 2 boot tag, 4 status, 5 backend, 6 known, 8 mV, 10 percent x10, 12 rate x10, 14 sample age, 16 reserved[8]");
+        offsetof(V4PayloadPowerStatus, fwdLink) == 16 && offsetof(V4PayloadPowerStatus, reserved) == 17 &&
+        sizeof(((V4PayloadPowerStatus*)nullptr)->reserved) == 7,
+        "V4PayloadPowerStatus: 0 counter, 2 boot tag, 4 status, 5 backend, 6 known, 8 mV, 10 percent x10, 12 rate x10, 14 sample age, 16 link number, 17 reserved[7]");
   {
     V4PayloadPowerStatus wire{};
     wire.counter = 0xFFFE;
@@ -202,13 +213,18 @@ int main() {
     check(espnowsensor::parsePowerFrame((const uint8_t*)&wire, sizeof(wire), back) && back.counter == 0xFFFE &&
           back.rateX10 == -123 && back.known == espnowsensor::kPowerKnownAll && back.sampleAgeMs == 65535,
           "parsePowerFrame reads them back");
+    wire.fwdLink = 0x21;
+    f.fwdLink = 0x21;
+    espnowsensor::packPowerFrame(packed, f);
+    check(std::memcmp(packed, &wire, sizeof(wire)) == 0 && packed[16] == 0x21,
+          "a forwarded battery frame: the link number in byte 16, known untouched");
   }
 
   // The event frame: 128 bytes.
   check(sizeof(V4PayloadEventPush) == 128 && offsetof(V4PayloadEventPush, counter) == 0 &&
         offsetof(V4PayloadEventPush, bootTag) == 2 && offsetof(V4PayloadEventPush, flags) == 4 &&
         offsetof(V4PayloadEventPush, tier) == 5 && offsetof(V4PayloadEventPush, source) == 6 &&
-        offsetof(V4PayloadEventPush, reserved0) == 7 && offsetof(V4PayloadEventPush, skipped) == 8 &&
+        offsetof(V4PayloadEventPush, fwdLink) == 7 && offsetof(V4PayloadEventPush, skipped) == 8 &&
         offsetof(V4PayloadEventPush, reserved1) == 10 && offsetof(V4PayloadEventPush, eventSeq) == 12 &&
         offsetof(V4PayloadEventPush, ageMs) == 16 && offsetof(V4PayloadEventPush, kind) == 20 &&
         offsetof(V4PayloadEventPush, subject) == 52 && offsetof(V4PayloadEventPush, detail) == 84 &&
@@ -251,11 +267,59 @@ int main() {
     check(espnowsensor::parseEventFrame((const uint8_t*)&wire, sizeof(wire), back) && back.eventSeq == 0x01020304u &&
           back.ageMs == 0x89ABCDEFu && back.skipped == 300 && back.tier == 2 && back.source == 3,
           "parseEventFrame reads them back");
+    wire.flags = (uint8_t)(wire.flags | espnowsensor::kEventFlagForwarded);
+    wire.fwdLink = 0x33;
+    f.flags = (uint8_t)(f.flags | espnowsensor::kEventFlagForwarded);
+    f.fwdLink = 0x33;
+    espnowsensor::packEventFrame(packed, f);
+    check(std::memcmp(packed, &wire, sizeof(wire)) == 0 && packed[4] == 0x12 && packed[7] == 0x33,
+          "a forwarded event: bit 4 of the flags, the link number in byte 7");
+  }
+
+  // The forward-link frame: 96 bytes.
+  check(sizeof(V4PayloadForwardLink) == 96 && offsetof(V4PayloadForwardLink, op) == 0 &&
+        offsetof(V4PayloadForwardLink, linkGen) == 1 && offsetof(V4PayloadForwardLink, viaBootTag) == 2 &&
+        offsetof(V4PayloadForwardLink, streams) == 4 && offsetof(V4PayloadForwardLink, result) == 5 &&
+        offsetof(V4PayloadForwardLink, answers) == 6 && offsetof(V4PayloadForwardLink, reserved0) == 7 &&
+        offsetof(V4PayloadForwardLink, partnerMac) == 8 && offsetof(V4PayloadForwardLink, sensorMask) == 14 &&
+        offsetof(V4PayloadForwardLink, partnerKey) == 16 && offsetof(V4PayloadForwardLink, partnerName) == 48 &&
+        offsetof(V4PayloadForwardLink, reserved1) == 80 && sizeof(((V4PayloadForwardLink*)nullptr)->reserved1) == 16,
+        "V4PayloadForwardLink: 0 op, 1 link number, 2 boot tag, 4 streams, 5 result, 6 answers, 8 partner, "
+        "14 sensors, 16 key[32], 48 name[32], 80 reserved[16]");
+  {
+    V4PayloadForwardLink wire{};
+    wire.op = espnowfwd::kOpAnnounce;
+    wire.linkGen = 9;
+    wire.viaBootTag = 0xA1B2;
+    wire.streams = espnowfwd::kStreamsAll;
+    const uint8_t partner[6] = { 0x02, 0xA0, 0, 0, 0, 0x01 };
+    std::memcpy(wire.partnerMac, partner, 6);
+    wire.sensorMask = espnowfwd::kSensorMaskDefault;
+    std::memset(wire.partnerKey, 0x4B, sizeof(wire.partnerKey));
+    std::memcpy(wire.partnerName, "porch", 5);
+    espnowfwd::LinkFrame f{};
+    f.op = espnowfwd::kOpAnnounce;
+    f.linkGen = 9;
+    f.viaBootTag = 0xA1B2;
+    f.streams = espnowfwd::kStreamsAll;
+    std::memcpy(f.partnerMac, partner, 6);
+    f.sensorMask = espnowfwd::kSensorMaskDefault;
+    std::memset(f.partnerKey, 0x4B, sizeof(f.partnerKey));
+    std::memcpy(f.partnerName, "porch", 5);
+    uint8_t packed[96];
+    std::memset(packed, 0xEE, sizeof(packed));
+    espnowfwd::packLinkFrame(packed, f);
+    check(std::memcmp(packed, &wire, sizeof(wire)) == 0, "packLinkFrame writes the bytes the struct states, reserved 0");
+    espnowfwd::LinkFrame back{};
+    check(espnowfwd::parseLinkFrame((const uint8_t*)&wire, sizeof(wire), back) && back.linkGen == 9 &&
+          back.viaBootTag == 0xA1B2 && back.sensorMask == espnowfwd::kSensorMaskDefault, "parseLinkFrame reads them back");
   }
 
   // Every one of them travels inside a relay envelope in one frame.
   check(sizeof(V4PayloadPowerStatus) <= ESPNOW_V4_RELAY_MAX_INNER_PLAINTEXT &&
-        sizeof(V4PayloadEventPush) <= ESPNOW_V4_RELAY_MAX_INNER_PLAINTEXT, "the battery and the event frame fit one routed frame");
+        sizeof(V4PayloadEventPush) <= ESPNOW_V4_RELAY_MAX_INNER_PLAINTEXT &&
+        sizeof(V4PayloadForwardLink) <= ESPNOW_V4_RELAY_MAX_INNER_PLAINTEXT,
+        "the battery, the event and the forward-link frame fit one routed frame");
   check(sizeof(V4PayloadTimeSync) <= ESPNOW_V4_RELAY_MAX_INNER_PLAINTEXT &&
         sizeof(V4PayloadSensorStatus) <= ESPNOW_V4_RELAY_MAX_INNER_PLAINTEXT &&
         sizeof(V4PayloadSensorReq) <= ESPNOW_V4_RELAY_MAX_INNER_PLAINTEXT &&
@@ -358,6 +422,70 @@ def rule_failures(component: Path) -> list[str]:
         expect(f"case ESPNOW_V4_TYPE_{name}:" in routed, f"{name} may travel inside a relay envelope")
         expect(name not in flood, f"{name} is not flooded")
     expect("BOND_SENSOR_DATA" not in routed, "the bond reading stays one hop (the bond frames are not routed)")
+
+    # Forwarding for a bond partner (System_ESPNow_ForwardCore.h): FORWARD_LINK
+    # is a paired + session mesh frame, outside every bond block, routed and not
+    # flooded; the bond worker's battery and events are bond frames, one hop,
+    # dropped (not parked) without a session.
+    expect(rows.get("FORWARD_LINK") == paired_session,
+           f"the FORWARD_LINK row asks for a paired sender and a session-encrypted frame, nothing else: {rows.get('FORWARD_LINK')}")
+    expect(depth_in(espnow, "  { ESPNOW_V4_TYPE_FORWARD_LINK,", "ENABLE_BONDED_MODE") == 0,
+           "the FORWARD_LINK row is outside every ENABLE_BONDED_MODE block (a master built without bond mode takes it)")
+    for name in ("BOND_POWER_STATUS", "BOND_EVENT_PUSH"):
+        expect(rows.get(name) == paired_session | {"V4_OPC_FLAG_REQ_BOND_PEER"},
+               f"the {name} row is gated to the bond partner: {rows.get(name)}")
+        expect(name not in routed and name not in flood, f"{name} stays one hop")
+    expect("case ESPNOW_V4_TYPE_FORWARD_LINK:" in routed and "FORWARD_LINK" not in flood,
+           "FORWARD_LINK may travel inside a relay envelope and is not flooded")
+    periodic = strip_comments(extract_block(espnow, "static bool bondFrameIsPeriodic(uint8_t type)"))
+    expect("ESPNOW_V4_TYPE_BOND_POWER_STATUS" in periodic and "ESPNOW_V4_TYPE_BOND_EVENT_PUSH" in periodic,
+           "a bond battery or event frame without a session is dropped, not parked (bondFrameIsPeriodic)")
+    wire_text = files["System_ESPNow_Wire.h"]
+    expect("ESPNOW_V4_TYPE_FORWARD_LINK    = 155," in wire_text and "ESPNOW_V4_TYPE_BOND_POWER_STATUS = 180," in wire_text and
+           "ESPNOW_V4_TYPE_BOND_EVENT_PUSH = 182," in wire_text, "the opcodes 155, 180 and 182 have their numbers")
+    expect("FORWARD_LINK=155" in wire_text and "BOND_POWER_STATUS=180" in wire_text and "BOND_EVENT_PUSH=182" in wire_text
+           and "reverses" in wire_text, "the opcode map names 155, 180, 182 and says the earlier decision was reversed")
+    expect(depth_in(espnow, "  espnowForwardRxTick(now);", "ENABLE_BONDED_MODE") == 0 and
+           depth_in(espnow, "  bondForwardTick(now);", "ENABLE_BONDED_MODE") == 1 and
+           espnow.index("  espnowPowerEventsTick(now);") < espnow.index("  espnowForwardRxTick(now);") <
+           espnow.index("  bondForwardTick(now);"),
+           "the mesh master's forward step runs in every build, the bond master's in a bond build, after the battery step")
+    # One rule keeps a bond worker's data off the mesh.
+    power = strip_comments(files["System_ESPNow_PowerEvents.cpp"])
+    expect("espnowfwd::meshDataAllowed(peBondWorker())" in strip_comments(extract_block(files["System_ESPNow_PowerEvents.cpp"], "static void pePlan(uint32_t nowMs, PeSendPlan* plan)")),
+           "pePlan asks meshDataAllowed: a bond worker sends to its partner only")
+    expect("espnowfwd::meshDataAllowed(sensorIsBondWorker())" in strip_comments(extract_block(sensors, "static void announceSensorStatus(const uint8_t* alsoTo = nullptr)")),
+           "announceSensorStatus asks meshDataAllowed: a bond worker tells no mesh master")
+    sensor_req = strip_comments(extract_block(espnow, "static void v4h_sensor_req(const V4RxCtx& ctx)"))
+    refusal = re.search(r"\{\s*bool bondWorker = false;\s*#if ENABLE_BONDED_MODE\s*"
+                        r"bondWorker = gSettings\.bondModeEnabled && isBondWorker\(\);\s*#endif\s*"
+                        r"if \(!espnowfwd::meshDataAllowed\(bondWorker\)\) \{(.*?)\n  \}\n", sensor_req, re.S)
+    expect(refusal is not None and "return;" in refusal.group(1) and "gEspNow->sensorReqRefusedBond" in refusal.group(1),
+           "v4h_sensor_req first asks meshDataAllowed for a bond worker, counts the refusal and returns: a bond worker "
+           "takes no sensor request from a mesh master")
+    expect(refusal is not None and sensor_req.index("if (!espnowfwd::meshDataAllowed(bondWorker)) {") <
+           sensor_req.index("gSettings.espnowAcceptSensorControl"),
+           "the bond worker's refusal comes before anything else is looked at")
+    expect("if (wants && !plan.viaBond)" in power, "the battery step starts no handshake with the bond partner")
+    # A bond is 1:1: the forward code reads only the single-bond settings.
+    for name in ("System_ESPNow_BondForward.cpp", "System_ESPNow_ForwardRx.cpp", "System_ESPNow_PowerEvents.cpp",
+                 "System_ESPNow_Sensors.cpp"):
+        expect(re.search(r"\bbond(?:ModeEnabled|Role|PeerMac)Mesh\b", code[name]) is None,
+               f"{name}: reads only the single-bond settings (bondModeEnabled, bondRole, bondPeerMac)")
+    # Every reader outside the store names the record it means: the origin's
+    # own (nullptr) or the bond master that forwards for it.
+    for name in ("System_MQTT.cpp", "G2_Page_ESPNow.cpp", "OLED_Mode_Network.cpp", "WebPage_Sensors.cpp",
+                 "System_ESPNow_Sensors.cpp"):
+        for call in re.findall(r"remoteSensorCopyText\(([^;]*)\);", code[name]):
+            expect("remoteSensorInfoVia(" in call or name == "System_ESPNow_Sensors.cpp" and "via" in call,
+                   f"{name}: remoteSensorCopyText({call.strip()}) passes the via of the slot it listed")
+    expect("if (remoteSensorInfoVia(slot) != nullptr) continue;" in code["System_MQTT.cpp"],
+           "MQTT publishes a device's own readings only, never what a bond master forwards for it")
+    expect("gSelSensorForwarded ? gSelSensorVia : nullptr" in code["G2_Page_ESPNow.cpp"],
+           "the G2 detail view keeps the via of the row it opened")
+    expect("getRemoteSensorDataJson(mac, via, type)" in code["WebPage_Sensors.cpp"] and
+           'httpd_query_key_value(query, "via"' in code["WebPage_Sensors.cpp"],
+           "GET /api/sensors/remote takes &via=")
 
     # The handlers hand the frame to the one ingest.
     for handler, call in (("static void v4h_sensor_envelope(const V4RxCtx& ctx)", "/*fromBond=*/false"),

@@ -9,8 +9,8 @@ and header from System_ESPNow_Wire.h and V4RxCtx from System_ESPNow_RxCtx.h,
 generates one recording double per other handler named in the table, and
 compiles the harness once with ENABLE_BONDED_MODE 1 and once with 0. The cases
 check that SUBSCRIBE_UPDATE needs a paired, session-encrypted frame, that
-TIME_SYNC, SENSOR_STATUS, SENSOR_REQ, SENSOR_ENVELOPE, POWER_STATUS and
-EVENT_PUSH need one too (keyed or keyless device, a signed broadcast is not
+TIME_SYNC, SENSOR_STATUS, SENSOR_REQ, SENSOR_ENVELOPE, POWER_STATUS,
+EVENT_PUSH and FORWARD_LINK need one too (keyed or keyless device, a signed broadcast is not
 enough, no bond partner required), that
 HEARTBEAT, TEXT and BOOT need an authenticated frame once the device has a
 mesh passphrase (plaintext stays accepted on a keyless device), that plaintext
@@ -56,8 +56,8 @@ ZERO_FLAG_ALLOWED = ('KEY_EX_HELLO', 'KEY_EX_REPLY', 'KEY_EX_CONFIRM',
 # configured bond partner. A row added to or removed from that block must be
 # added here or removed, so it gets the partner cases.
 BOND_OPCODES = ('BOND_HEARTBEAT', 'BOND_STREAM_CTRL', 'BOND_CAP_REQ', 'BOND_CAP_RESP',
-                'BOND_SENSOR_DATA', 'SETTINGS_REQ', 'SCHEMA_REQ', 'BOND_STATUS_REQ',
-                'BOND_STATUS_RESP', 'MANIFEST_REQ')
+                'BOND_SENSOR_DATA', 'BOND_POWER_STATUS', 'BOND_EVENT_PUSH', 'SETTINGS_REQ', 'SCHEMA_REQ',
+                'BOND_STATUS_REQ', 'BOND_STATUS_RESP', 'MANIFEST_REQ')
 # The rows of the table's second ENABLE_BONDED_MODE block, the bond agreement:
 # accepted from any paired peer over its session (no REQ_BOND_PEER), because
 # the receiver may not have the sender as its partner. A source from before
