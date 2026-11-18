@@ -13,6 +13,9 @@
 //                restore (armHttpRestore, restartHttpServer, httpRestoreProc,
 //                httpRestoreTick), restoreUsers, recoverProc, holdProc,
 //                releaseProc (System_RadioCompanion.cpp)
+//   @UPDATE@     kUpdateChunk, kUpdateRebootWaitMs, struct UpdateJob, updateProc
+//                (System_RadioCompanion.cpp; validateImage is a fake)
+//   @BRIDGE@     the C6 bridge's SELF_CONFIRM_MS (esp_now_hosted_slave.c)
 //   @COMPANION@  submitOp, radioCompanionBeforeRestart, radioCompanionTick,
 //                radioCompanionBlocksRadio (System_RadioCompanion.cpp)
 // and the real System_RestartQuiesceCore.h / Radio_CompanionCore.h. Only the
@@ -26,6 +29,11 @@
 // (reset pulse, card init) whenever the state is below TX_ACTIVE. The
 // companion's radio users (Wi-Fi, HTTP, ESP-NOW, BLE) are a small fake network
 // whose `radiopower off`/`on` do what System_WiFi.cpp's do to the web server.
+// The Wi-Fi side has two views, as on the P4: the host's WiFi.isConnected()
+// flag and the companion's own association (esp_wifi_sta_get_ap_info). The
+// c6update transfer runs over a fake OTA (begin/write/end/activate) and the
+// companion's running slot.
+#include <algorithm>
 #include <atomic>
 #include <cinttypes>
 #include <cstdarg>
@@ -65,6 +73,9 @@ typedef int esp_err_t;
 #define ESP_FAIL -1
 #define ESP_ERR_INVALID_STATE 0x103
 #define ESP_ERR_WIFI_NOT_INIT 0x3001
+#define ESP_ERR_NO_MEM 0x101
+#define ESP_ERR_INVALID_SIZE 0x104
+#define ESP_ERR_WIFI_NOT_CONNECT 0x300A
 static const char* esp_err_to_name(esp_err_t) { return "err"; }
 #define ESP_LOGI(tag, fmt, ...) std::fprintf(stderr, "I %s: " fmt "\n", tag, ##__VA_ARGS__)
 #define ESP_LOGW(tag, fmt, ...) std::fprintf(stderr, "W %s: " fmt "\n", tag, ##__VA_ARGS__)
@@ -456,10 +467,8 @@ static esp_err_t radioHalHold(bool hold) {
   return ESP_OK;
 }
 static bool gCompanionAnswers = true;  // the C6 comes back from a reset
-static esp_err_t radioHalStartTransport() {
-  note("hal-start");
-  return gCompanionAnswers ? ESP_OK : ESP_FAIL;
-}
+static bool gLinkUpAfterStart = true;  // forward-declared use: the link comes up with the companion
+static esp_err_t radioHalStartTransport();
 static void applyPolicyFromSettings() {}
 static void reportIdentity() {}
 static bool popEvent(RadioHalEventData&) {
@@ -499,8 +508,15 @@ RadioUsers sHeldUsers;
 // (the handle stays set until then). `radiopower on` (radioPowerOn) restores
 // ESP-NOW and Wi-Fi from its snapshot and nothing else. `openhttp`
 // (cmd_httpstart) needs the Wi-Fi link.
+// `linked` is the companion's association (what esp_wifi_sta_get_ap_info
+// reports); `hostConnected` is the host's WiFi.isConnected() flag, which
+// `radiopower off` clears unless hostFlagSticks (bench 2026-11-18: the flag
+// survived a companion reset and read true with no association).
+// setupWifi joins when joinsOnSetup (false: the network is out of range).
 struct FakeNet {
   bool wifiOn = false, linked = false, joinsOnPowerOn = true;
+  bool hostConnected = false, hostFlagSticks = false, joinsOnSetup = true;
+  bool offClosesTransport = false;  // `radiopower off` leaves Hosted unused and Arduino deinits it
   bool http = false, httpStopPending = false, webWaiter = false;
   bool espnow = false, bleServer = false, g2 = false;
 };
@@ -514,18 +530,46 @@ static void shutDownBleForCompanionReset(const RadioUsers&) {
   gNet.bleServer = false;
   gNet.g2 = false;
 }
+static bool gLinkUp = true;  // radioHalTransportUp()
 static const char* cmd_radiopower(const char* arg) {
   note(std::string("radiopower ") + arg);
   if (std::strcmp(arg, "off") == 0) {
     gNet.espnow = false;
     gNet.wifiOn = gNet.linked = false;
+    if (!gNet.hostFlagSticks) gNet.hostConnected = false;
     if (gNet.webWaiter) gNet.httpStopPending = true;
     else gNet.http = false;
+    if (gNet.offClosesTransport) gLinkUp = false;
   } else {
     gNet.wifiOn = true;
     gNet.linked = gNet.joinsOnPowerOn;
+    if (gNet.linked) gNet.hostConnected = true;
   }
   return "OK";
+}
+// Arduino's WiFi.isConnected(): the host-side flag.
+struct FakeWiFiClass {
+  bool isConnected() const { return gNet.hostConnected; }
+} WiFi;
+// esp_wifi_sta_get_ap_info over wifi_remote: the companion's association.
+struct wifi_ap_record_t {
+  uint8_t bssid[6];
+};
+static esp_err_t esp_wifi_sta_get_ap_info(wifi_ap_record_t* ap) {
+  note("ap-info");
+  if (!gNet.linked) return ESP_ERR_WIFI_NOT_CONNECT;
+  std::memset(ap, 0, sizeof(*ap));
+  return ESP_OK;
+}
+struct FakeSettings {
+  bool wifiEnabled = true;
+};
+FakeSettings gSettings;
+static void setupWifi() {  // System_WiFi.cpp: start the radio and join the saved networks
+  note("setupWifi");
+  gNet.wifiOn = true;
+  gNet.linked = gNet.joinsOnSetup;
+  if (gNet.linked) gNet.hostConnected = true;
 }
 static const char* cmd_espnow_deinit(const char*) {
   gNet.espnow = false;
@@ -563,17 +607,132 @@ static void logSystemEvent(const char* category, const char* fmt, ...) {
   va_start(args, fmt);
   std::vsnprintf(text, sizeof(text), fmt, args);
   va_end(args);
-  if (std::strstr(text, "HTTP")) note(std::string("log ") + category + ": " + text);
+  if (std::strstr(text, "HTTP") || std::strstr(text, "radio users") || std::strstr(text, "companion update"))
+    note(std::string("log ") + category + ": " + text);
 }
-static void setLastResult(const char*) {}
-enum { SYSEVT_COMPANION_OFFLINE = 1 };
+static std::string gLastResult;
+static void setLastResult(const char* text) { gLastResult = text; }
+enum { SYSEVT_COMPANION_OFFLINE = 1, SYSEVT_COMPANION_UPDATED };
 static void systemEventPost(int, const char*, const char*) {}
-static bool radioHalTransportUp() { return true; }
-static void radioHalMarkTransportLost() {}
-static void radioHalStopTransport() { note("hal-stop"); }
+static bool radioHalTransportUp() { return gLinkUp; }
+static void radioHalMarkTransportLost() { note("hal-lost"); }
+// The c6update transfer: the image file, the OTA calls over the link, and the
+// companion's running slot. The companion runs slotAfter only once an
+// activated image was followed by a transport restart (its reboot).
+enum class RadioBridgeState : uint8_t { Unknown = 0, Present, PresentNoInfo, Absent, TransportError };
+struct RadioCompanionIdentity {
+  bool infoKnown;
+  uint8_t runningSlot;
+  RadioBridgeState bridge;
+  char build[17];
+  uint32_t major, minor, patch;
+};
+struct FakeUpdate {
+  bool valid = true;
+  size_t size = 3 * 4096 + 100;  // four chunks
+  size_t pos = 0;
+  esp_err_t beginErr = ESP_OK, endErr = ESP_OK, activateErr = ESP_OK;
+  int failWriteAt = 0;           // 1-based write that fails (0: none)
+  bool linkLostOnFail = false;   // the failed write took the SDIO link down
+  bool infoKnown = true;
+  uint8_t slotBefore = 0, slotAfter = 1;
+  RadioBridgeState bridgeAfter = RadioBridgeState::Present;
+  bool activated = false, rebooted = false;
+  int writes = 0;
+  size_t bytesWritten = 0;
+  uint32_t activatedAt = 0, stoppedAt = 0;
+};
+FakeUpdate gUpdate;
+static void radioHalStopTransport() {
+  note("hal-stop");
+  gUpdate.stoppedAt = gNow;
+}
 std::atomic<bool> sHttpRestorePending{false};
 std::atomic<uint32_t> sHttpRestoreArmedMs{0};
+static esp_err_t radioHalStartTransport() {
+  note("hal-start");
+  if (!gCompanionAnswers) return ESP_FAIL;
+  gLinkUp = gLinkUpAfterStart;
+  if (gUpdate.activated) gUpdate.rebooted = true;  // Hosted resets the companion on every start
+  return ESP_OK;
+}
 /*@USERS@*/
+
+// --- c6update boundaries ---------------------------------------------------------
+struct String {
+  std::string s;
+  String(const char* text = "") : s(text) {}
+  const char* c_str() const { return s.c_str(); }
+};
+struct AuthContext {};
+namespace AllocPref { enum Kind { PreferPsram }; }
+static void* ps_alloc(size_t size, AllocPref::Kind, const char*) { return std::malloc(size); }
+#define BROADCAST_PRINTF(...) ((void)0)
+struct File {
+  bool open = false;
+  explicit operator bool() const { return open; }
+  size_t size() const { return gUpdate.size; }
+  size_t read(uint8_t* buf, size_t n) {
+    const size_t take = std::min(n, gUpdate.size - gUpdate.pos);
+    std::memset(buf, 0xA5, take);
+    gUpdate.pos += take;
+    return take;
+  }
+  void close() { open = false; }
+};
+namespace VFS {
+static File openGuarded(const String&, const char*, const AuthContext&) { File f; f.open = true; return f; }
+}  // namespace VFS
+static bool validateImage(File&, size_t, char* why, size_t whyCap) {
+  if (!gUpdate.valid) std::snprintf(why, whyCap, "not a C6 image");
+  return gUpdate.valid;
+}
+static RadioCompanionIdentity gIdentity;
+static const RadioCompanionIdentity& radioHalIdentity() {
+  const bool newImage = gUpdate.activated && gUpdate.rebooted;
+  gIdentity = RadioCompanionIdentity();
+  gIdentity.infoKnown = gUpdate.infoKnown;
+  gIdentity.runningSlot = newImage ? gUpdate.slotAfter : gUpdate.slotBefore;
+  gIdentity.bridge = newImage ? gUpdate.bridgeAfter : RadioBridgeState::Present;
+  std::snprintf(gIdentity.build, sizeof(gIdentity.build), "%s", newImage ? "new" : "old");
+  gIdentity.major = 2;
+  gIdentity.minor = 12;
+  gIdentity.patch = 13;
+  return gIdentity;
+}
+static esp_err_t radioHalStartUpdateTransport() {
+  note("hal-start-update");
+  gLinkUp = true;
+  return ESP_OK;
+}
+static esp_err_t radioHalUpdateBegin() {
+  note("update-begin");
+  return gUpdate.beginErr;
+}
+static esp_err_t radioHalUpdateWrite(const uint8_t*, size_t len) {
+  ++gUpdate.writes;
+  if (gUpdate.failWriteAt == gUpdate.writes) {
+    note("update-write failed");
+    if (gUpdate.linkLostOnFail) gLinkUp = false;
+    return ESP_FAIL;
+  }
+  gUpdate.bytesWritten += len;
+  return ESP_OK;
+}
+static esp_err_t radioHalUpdateEnd() {
+  note("update-end");
+  return gUpdate.endErr;
+}
+static esp_err_t radioHalUpdateActivate() {
+  note("update-activate");
+  if (gUpdate.activateErr != ESP_OK) return gUpdate.activateErr;
+  gUpdate.activated = true;
+  gUpdate.activatedAt = gNow;
+  return ESP_OK;
+}
+static void confirmPendingImage() { note("confirm"); }
+/*@BRIDGE@*/
+/*@UPDATE@*/
 
 /*@COMPANION@*/
 }  // namespace comp
@@ -629,6 +788,11 @@ static void reset_world() {
   comp::sHttpRestoreArmedMs.store(0);
   comp::gDeferredFn = nullptr;
   comp::gCompanionAnswers = true;
+  comp::gLinkUp = true;
+  comp::gLinkUpAfterStart = true;
+  comp::gSettings = comp::FakeSettings();
+  comp::gUpdate = comp::FakeUpdate();
+  comp::gLastResult.clear();
 }
 
 // The main loop after the recovery: the web request drains, the deferred stop
@@ -1081,6 +1245,7 @@ static void an_op_inside_the_flush_is_refused() {
 // start it again.
 static void wifi_and_http_running() {
   comp::gNet.wifiOn = comp::gNet.linked = true;
+  comp::gNet.hostConnected = true;
   comp::gNet.http = true;
   comp::gNet.g2 = true;
 }
@@ -1135,9 +1300,10 @@ static void a_deferred_stop_is_followed_by_a_restart() {
 static void a_late_link_still_gets_the_web_server() {
   reset_world();
   wifi_and_http_running();
-  comp::gNet.joinsOnPowerOn = false;
+  comp::gNet.joinsOnPowerOn = comp::gNet.joinsOnSetup = false;  // out of range
   comp::sBootInitDone = true;
   comp::recoverProc(nullptr);
+  CHECK(sawEvent("setupWifi"));  // joined before the reset: one more join attempt
   CHECK(comp::gNet.wifiOn && !comp::gNet.linked && !comp::gNet.http);
   CHECK(comp::sHttpRestorePending.load());
   comp::radioCompanionTick();
@@ -1151,7 +1317,7 @@ static void a_late_link_still_gets_the_web_server() {
 
   reset_world();
   wifi_and_http_running();
-  comp::gNet.joinsOnPowerOn = false;
+  comp::gNet.joinsOnPowerOn = comp::gNet.joinsOnSetup = false;
   comp::sBootInitDone = true;
   comp::recoverProc(nullptr);
   advance(comp::kHttpRestoreWindowMs);
@@ -1166,12 +1332,182 @@ static void a_late_link_still_gets_the_web_server() {
 static void a_pending_restart_survives_another_reset() {
   reset_world();
   wifi_and_http_running();
-  comp::gNet.joinsOnPowerOn = false;
+  comp::gNet.joinsOnPowerOn = comp::gNet.joinsOnSetup = false;
   comp::recoverProc(nullptr);
   CHECK(comp::sHttpRestorePending.load() && !comp::gNet.http);
   comp::gNet.joinsOnPowerOn = true;
   comp::recoverProc(nullptr);
   CHECK(comp::gNet.http && !comp::sHttpRestorePending.load());
+}
+
+// ---- Wi-Fi after a companion reset ------------------------------------------
+// Bench 2026-11-18 (after c6update): the companion's Wi-Fi came back started
+// but not joined, `radiopower on` found the radio on and joined nothing, and
+// the host's WiFi.isConnected() still read true. restoreUsers asks the
+// companion and joins again when the device was on a network before.
+static void c6restart_rejoins_wifi_the_companion_lost() {
+  reset_world();
+  wifi_and_http_running();
+  comp::gNet.joinsOnPowerOn = false;  // radio back on, no association
+  comp::gNet.hostFlagSticks = true;   // the host flag still says connected
+  comp::recoverProc(nullptr);
+  CHECK(comp::gNet.linked && comp::gNet.http);
+  const size_t on = eventIndex("radiopower on"), ask = eventIndex("ap-info"), join = eventIndex("setupWifi"),
+               http = eventIndex("openhttp");
+  CHECK(on < ask && ask < join && join < http && http < gEvents.size());
+  CHECK(sawEvent("log C6: radio users: Wi-Fi not joined after the companion reset; joining again"));
+}
+
+static void a_joined_companion_is_not_joined_again() {
+  reset_world();
+  wifi_and_http_running();
+  comp::recoverProc(nullptr);
+  CHECK(sawEvent("ap-info") && !sawEvent("setupWifi"));
+  CHECK(comp::gNet.linked && comp::gNet.http);
+  // Both radiopower replies are logged as events.
+  CHECK(eventIndex("log C6: radio users: radiopower off -> OK") < eventIndex("log C6: radio users: radiopower on -> OK"));
+  CHECK(eventIndex("log C6: radio users: radiopower on -> OK") < gEvents.size());
+}
+
+static void off_network_or_wifi_disabled_is_not_joined() {
+  // The radio was on but not associated before the reset: nothing to rejoin.
+  reset_world();
+  comp::gNet.wifiOn = true;
+  comp::gNet.joinsOnPowerOn = false;
+  comp::recoverProc(nullptr);
+  CHECK(sawEvent("radiopower on") && !sawEvent("setupWifi") && !comp::gNet.linked);
+
+  // Joined before, but Wi-Fi is disabled in the settings.
+  reset_world();
+  wifi_and_http_running();
+  comp::gNet.joinsOnPowerOn = false;
+  comp::gSettings.wifiEnabled = false;
+  comp::recoverProc(nullptr);
+  CHECK(!sawEvent("setupWifi") && !comp::gNet.linked);
+
+  // Wi-Fi was off: no radiopower, no join.
+  reset_world();
+  comp::recoverProc(nullptr);
+  CHECK(!sawEvent("radiopower") && !sawEvent("setupWifi"));
+}
+
+// A boot connect can join between the snapshot and the stop; the stop samples
+// the host flag again so the join is not forgotten.
+static void the_stop_samples_the_join_again() {
+  reset_world();
+  comp::gNet.wifiOn = true;  // radio up, still hunting
+  comp::RadioUsers users = comp::snapshotUsers();
+  CHECK(users.wifi && !users.wifiJoined);
+  comp::gNet.linked = comp::gNet.hostConnected = true;  // the hunt joined
+  comp::stopUsers(users);
+  CHECK(users.wifiJoined && users.radioPoweredOff);
+}
+
+// ---- c6update: Wi-Fi down before the transfer, the wait, and the way back --------
+static void run_update() {
+  comp::sOpInFlight.store(true);
+  comp::UpdateJob* job = new comp::UpdateJob();
+  job->path = "/sd/c6.bin";
+  comp::updateProc(job);
+  CHECK(!comp::sOpInFlight.load());  // finishOp ran
+}
+static void radio_users_running() {
+  wifi_and_http_running();
+  comp::gNet.espnow = true;
+}
+
+static void c6update_powers_wifi_down_before_the_transfer_and_back_after() {
+  reset_world();
+  radio_users_running();
+  const uint32_t start = gNow;
+  run_update();
+  CHECK(comp::gLastResult == "update: companion updated and confirmed");
+  CHECK(comp::gUpdate.bytesWritten == comp::gUpdate.size && comp::gUpdate.writes == 4);
+  // Wi-Fi and the web server stop while the companion still answers, before
+  // the transfer; nothing touches the radio users between begin and activate.
+  const size_t off = eventIndex("radiopower off"), begin = eventIndex("update-begin"),
+               activate = eventIndex("update-activate"), stop = eventIndex("hal-stop"),
+               startT = eventIndex("hal-start"), on = eventIndex("radiopower on"), http = eventIndex("openhttp");
+  CHECK(off < begin && begin < activate && activate < stop && stop < startT && startT < on && on < http &&
+        http < gEvents.size());
+  CHECK(!sawEvent("hal-start-update"));  // the link stayed up
+  // The link is rebuilt (resetting the companion) only after the new image
+  // had time to reboot (~2 s), start (<1 s) and confirm itself (SELF_CONFIRM_MS).
+  CHECK(comp::kUpdateRebootWaitMs >= 2000 + 1000 + comp::kBridgeSelfConfirmMs);
+  CHECK(comp::gUpdate.stoppedAt - comp::gUpdate.activatedAt >= comp::kUpdateRebootWaitMs);
+  CHECK(gNow - start >= comp::kUpdateRebootWaitMs);
+  CHECK(sawEvent("confirm"));
+  // Everything that ran before is back.
+  CHECK(comp::gNet.linked && comp::gNet.http && comp::gNet.espnow && comp::gNet.g2);
+  CHECK(!sawEvent("setupWifi"));
+}
+
+static void c6update_rejoins_wifi_when_the_new_image_comes_back_unjoined() {
+  reset_world();
+  radio_users_running();
+  comp::gNet.joinsOnPowerOn = false;
+  comp::gNet.hostFlagSticks = true;
+  run_update();
+  CHECK(comp::gLastResult == "update: companion updated and confirmed");
+  CHECK(eventIndex("radiopower on") < eventIndex("setupWifi") && eventIndex("setupWifi") < eventIndex("openhttp"));
+  CHECK(comp::gNet.linked && comp::gNet.http);
+}
+
+static void c6update_reopens_a_transport_the_radio_stop_closed() {
+  reset_world();
+  radio_users_running();
+  comp::gNet.offClosesTransport = true;
+  run_update();
+  CHECK(comp::gLastResult == "update: companion updated and confirmed");
+  CHECK(eventIndex("radiopower off") < eventIndex("hal-start-update") &&
+        eventIndex("hal-start-update") < eventIndex("update-begin"));
+}
+
+static void c6update_reports_a_rollback_and_still_restores_wifi() {
+  reset_world();
+  radio_users_running();
+  comp::gUpdate.slotAfter = comp::gUpdate.slotBefore;  // the bootloader went back to the old image
+  run_update();
+  CHECK(comp::gLastResult.find("back on its previous image (slot 0)") != std::string::npos);
+  CHECK(!sawEvent("confirm"));
+  CHECK(sawEvent("log C6: companion update failed"));
+  CHECK(comp::gNet.linked && comp::gNet.http);
+}
+
+static void c6update_restarts_a_link_lost_mid_transfer_and_restores_wifi() {
+  reset_world();
+  radio_users_running();
+  comp::gUpdate.failWriteAt = 2;
+  comp::gUpdate.linkLostOnFail = true;
+  const uint32_t start = gNow;
+  run_update();
+  CHECK(comp::gLastResult.rfind("update: transfer failed after 8192 bytes", 0) == 0);
+  CHECK(!sawEvent("update-end") && !sawEvent("update-activate"));
+  const size_t failed = eventIndex("update-write failed"), lost = eventIndex("hal-lost"),
+               stop = eventIndex("hal-stop"), startT = eventIndex("hal-start"), on = eventIndex("radiopower on");
+  CHECK(failed < lost && lost < stop && stop < startT && startT < on && on < gEvents.size());
+  CHECK(gNow - start < comp::kUpdateRebootWaitMs);  // no activation, so no reboot wait
+  CHECK(comp::gNet.linked && comp::gNet.http && comp::gNet.espnow);
+
+  // The companion does not come back: the failure says so.
+  reset_world();
+  radio_users_running();
+  comp::gUpdate.failWriteAt = 2;
+  comp::gUpdate.linkLostOnFail = true;
+  comp::gCompanionAnswers = false;
+  run_update();
+  CHECK(comp::gLastResult.find("the companion did not come back") != std::string::npos);
+}
+
+static void c6update_failure_on_a_live_link_keeps_the_transport() {
+  reset_world();
+  radio_users_running();
+  comp::gUpdate.activateErr = ESP_FAIL;
+  run_update();
+  CHECK(comp::gLastResult.rfind("update: transfer failed", 0) == 0);
+  CHECK(!sawEvent("hal-stop") && !sawEvent("hal-start") && !sawEvent("hal-lost"));
+  CHECK(eventIndex("radiopower off") < eventIndex("update-begin") && sawEvent("radiopower on"));
+  CHECK(comp::gNet.linked && comp::gNet.http);
 }
 
 int main() {
@@ -1207,6 +1543,16 @@ int main() {
   a_deferred_stop_is_followed_by_a_restart();
   a_late_link_still_gets_the_web_server();
   a_pending_restart_survives_another_reset();
-  std::puts("restart SDMMC quiesce, Hosted TX fence, companion start wait and HTTP restore: all scenarios passed");
+  c6restart_rejoins_wifi_the_companion_lost();
+  a_joined_companion_is_not_joined_again();
+  off_network_or_wifi_disabled_is_not_joined();
+  the_stop_samples_the_join_again();
+  c6update_powers_wifi_down_before_the_transfer_and_back_after();
+  c6update_rejoins_wifi_when_the_new_image_comes_back_unjoined();
+  c6update_reopens_a_transport_the_radio_stop_closed();
+  c6update_reports_a_rollback_and_still_restores_wifi();
+  c6update_restarts_a_link_lost_mid_transfer_and_restores_wifi();
+  c6update_failure_on_a_live_link_keeps_the_transport();
+  std::puts("restart SDMMC quiesce, Hosted TX fence, companion start wait, HTTP restore, Wi-Fi rejoin and c6update: all scenarios passed");
   return 0;
 }

@@ -16,6 +16,7 @@
 #include <iostream>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <sys/types.h>
 #include <vector>
@@ -295,7 +296,31 @@ String jsonQuote(const String& text) {
   return String(out);
 }
 
+// ---------------------------------------------------------------------------
+// Allocation double: handleFileRead's 4 KB chunk buffer comes from ps_alloc
+// (PSRAM-preferred) and is released through free(). Records every request,
+// can fail one, and counts buffers still live after the handler returns.
+// ---------------------------------------------------------------------------
+namespace AllocPref { enum Kind { PreferPsram }; }
+struct AllocRecord { size_t size; std::string tag; };
+static std::vector<AllocRecord> gAllocs;
+static std::set<void*> gLiveAllocs;
+static bool gFailAlloc = false;
+static void* ps_alloc(size_t size, AllocPref::Kind, const char* tag) {
+  gAllocs.push_back({size, tag ? tag : ""});
+  if (gFailAlloc) return nullptr;
+  void* p = std::malloc(size);
+  if (p) gLiveAllocs.insert(p);
+  return p;
+}
+static void hw1TrackedFree(void* p) {
+  gLiveAllocs.erase(p);
+  std::free(p);
+}
+
+#define free hw1TrackedFree
 // INSERT_PRODUCTION_HERE
+#undef free
 
 // The runner defines this as 0 when the sources carry no streamFileChunks /
 // streamHtmlEscapedChecked (a tree from before the helper existed), so the
@@ -331,6 +356,8 @@ static void resetCounters() {
   gFsTouchesWithoutLock = 0;
   gClosed = 0;
   gAuthOk = true;
+  gAllocs.clear();
+  gFailAlloc = false;
 }
 
 static void checkQuiescent(const httpd_req_t& req, const char* scenario) {
@@ -341,32 +368,37 @@ static void checkQuiescent(const httpd_req_t& req, const char* scenario) {
   check(gPollDepth == 0, (tag + ": sensor polling still paused at the end").c_str());
   check(gPollUnderflow == 0, (tag + ": pollResume without a matching pollPause").c_str());
   check(gFsTouchesWithoutLock == 0, (tag + ": filesystem touched without the lock").c_str());
+  check(gLiveAllocs.empty(), (tag + ": chunk buffer not released").c_str());
 }
 
 static void testReadStreams() {
   resetCounters();
-  const std::string content = pattern(1300);
+  const std::string content = pattern(10000);
   addFile("/logs/a.txt", content);
   httpd_req_t req;
   req.query = "name=%2Flogs%2Fa.txt";
   check(handleFileRead(&req) == ESP_OK, "read: handler result");
   check(req.body == content, "read: body matches the file");
-  check(req.chunks.size() == 3 && req.chunks[0].size() == 512 && req.chunks[2].size() == 276,
-        "read: 512-byte chunks");
+  // A 4 KB PSRAM-preferred buffer (512 B on the httpd stack sent a 16 MB file as 32,768 chunks).
+  check(req.chunks.size() == 3 && req.chunks[0].size() == 4096 && req.chunks[1].size() == 4096 &&
+            req.chunks[2].size() == 1808,
+        "read: 4096-byte chunks");
+  check(gAllocs.size() == 1 && gAllocs[0].size == 4096 && gAllocs[0].tag == "http.file.read.chunk",
+        "read: one tagged 4 KB chunk buffer from ps_alloc");
   check(req.terminators == 1, "read: exactly one terminating chunk");
   check(req.contentType == "text/plain; charset=utf-8", "read: content type");
   check(gClosed == 1, "read: file closed once");
-  // Open, three reads, close: the lock is taken per step, never for the whole transfer.
-  check(gFsLockTakes >= 5, "read: lock taken per filesystem step");
+  // Open, three reads and the empty one, close: the lock is taken per step, never for the whole transfer.
+  check(gFsLockTakes >= 6, "read: lock taken per filesystem step");
   checkQuiescent(req, "read");
 }
 
 static void testReadStopsOnSendError() {
   resetCounters();
-  addFile("/logs/b.txt", pattern(5000));
+  addFile("/logs/b.txt", pattern(10000));
   httpd_req_t req;
   req.query = "name=/logs/b.txt";
-  req.failAt = 2;
+  req.failAt = 2;  // the second 4 KB chunk
   // ESP_FAIL is what httpd_uri.c uses to close the socket; ESP_OK would keep
   // the keep-alive session open behind an unterminated chunked body.
   check(handleFileRead(&req) == ESP_FAIL, "read-fail: handler returns ESP_FAIL so httpd closes the socket");
@@ -381,7 +413,7 @@ static void testReadTerminatorFails() {
   // The terminating chunk is the last send; when it fails the session is just
   // as unusable as after a failed body chunk.
   resetCounters();
-  const std::string content = pattern(1300);
+  const std::string content = pattern(10000);
   addFile("/logs/c.txt", content);
   httpd_req_t req;
   req.query = "name=/logs/c.txt";
@@ -394,6 +426,23 @@ static void testReadTerminatorFails() {
   checkQuiescent(req, "read-term-fail");
 }
 
+static void testReadAllocationFails() {
+  // No chunk buffer: the opened file is closed under the lock, a 500 goes out
+  // as one plain response, and nothing is streamed.
+  resetCounters();
+  addFile("/logs/d.txt", pattern(100));
+  httpd_req_t req;
+  req.query = "name=/logs/d.txt";
+  gFailAlloc = true;
+  check(handleFileRead(&req) == ESP_OK, "read-nomem: handler result");
+  check(gAllocs.size() == 1, "read-nomem: one allocation attempt");
+  check(req.status == "500 Internal Server Error", "read-nomem: 500 status");
+  check(req.plainResponse == "Memory allocation failed", "read-nomem: plain error body");
+  check(req.chunkCalls == 0, "read-nomem: nothing streamed");
+  check(gClosed == 1, "read-nomem: file closed");
+  checkQuiescent(req, "read-nomem");
+}
+
 static void testReadMissingAndRefused() {
   resetCounters();
   httpd_req_t req;
@@ -401,6 +450,7 @@ static void testReadMissingAndRefused() {
   check(handleFileRead(&req) == ESP_OK, "read-missing: handler result");
   check(req.plainResponse == "File not found", "read-missing: plain error body");
   check(req.chunkCalls == 0, "read-missing: no chunks");
+  check(gAllocs.empty(), "read-missing: no chunk buffer for a missing file");
   checkQuiescent(req, "read-missing");
 
   resetCounters();
@@ -512,6 +562,7 @@ int main() {
   testReadStreams();
   testReadStopsOnSendError();
   testReadTerminatorFails();
+  testReadAllocationFails();
   testReadMissingAndRefused();
 #if HW1_STREAM_HELPER_PRESENT
   testEscapedStreaming();

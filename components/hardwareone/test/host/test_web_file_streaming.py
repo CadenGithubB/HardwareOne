@@ -8,7 +8,9 @@ poll pause was held inside any chunk send, and that fails one send to prove
 each loop stops there. handleFileView is checked at source level: its non-JSON
 branches must stream through the helper, keep no function-scope lock and resume
 polling once before any transfer. The File/VFS stand-in is harness-local and
-tiny; persistence has its own suites.
+tiny; persistence has its own suites. The download path's 4 KB ps_alloc chunk
+buffer is driven too (sizes, release, allocation failure), and the TCP window
+the transfers run over is pinned in config/sdkconfig.defaults.
 """
 from __future__ import annotations
 
@@ -147,6 +149,39 @@ def check_sources() -> None:
             "streamViewerTail must stop at a failed tail chunk and return the terminator's result")
 
 
+REPO = COMPONENT.parents[1]
+TCP_MSS = 1440  # the IDF default; no defaults file sets CONFIG_LWIP_TCP_MSS
+
+
+def check_tcp_window() -> None:
+    """The web transfers run over an 8-segment TCP window and send buffer
+    (11520 = 8 x 1440) with a receive mailbox that holds the window's segments
+    plus slack, set once in config/sdkconfig.defaults for every board. No
+    per-target defaults file may override them."""
+    def settings(path: Path) -> dict[str, str]:
+        result = {}
+        for line in path.read_text().splitlines():
+            line = line.strip()
+            if line.startswith("CONFIG_") and "=" in line:
+                key, value = line.split("=", 1)
+                result[key] = value
+        return result
+
+    keys = ("CONFIG_LWIP_TCP_WND_DEFAULT", "CONFIG_LWIP_TCP_SND_BUF_DEFAULT",
+            "CONFIG_LWIP_TCP_RECVMBOX_SIZE", "CONFIG_LWIP_TCP_MSS")
+    shared = settings(REPO / "config" / "sdkconfig.defaults")
+    require(shared.get("CONFIG_LWIP_TCP_MSS", str(TCP_MSS)) == str(TCP_MSS), "TCP MSS stays at the 1440 default")
+    require(shared.get("CONFIG_LWIP_TCP_WND_DEFAULT") == str(8 * TCP_MSS),
+            "sdkconfig.defaults: TCP receive window is 8 segments (11520)")
+    require(shared.get("CONFIG_LWIP_TCP_SND_BUF_DEFAULT") == str(8 * TCP_MSS),
+            "sdkconfig.defaults: TCP send buffer is 8 segments (11520)")
+    require(int(shared.get("CONFIG_LWIP_TCP_RECVMBOX_SIZE", "0")) >= 8,
+            "sdkconfig.defaults: the receive mailbox holds at least the window's 8 segments")
+    for path in sorted((REPO / "config").glob("sdkconfig.defaults.*")):
+        overridden = sorted(set(keys) & set(settings(path)))
+        require(not overridden, f"{path.name} must not override the shared TCP window settings: {overridden}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cxx", default=os.environ.get("CXX") or shutil.which("c++"))
@@ -168,6 +203,7 @@ def main() -> None:
         subprocess.run([args.cxx, *flags, str(source), "-o", str(binary)], check=True, timeout=180)
         subprocess.run([str(binary)], check=True, timeout=60)
     check_sources()
+    check_tcp_window()
     print("web file streaming lock discipline passed", flush=True)
 
 

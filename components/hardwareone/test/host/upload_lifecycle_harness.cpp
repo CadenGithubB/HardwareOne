@@ -81,6 +81,7 @@ struct Controls {
   bool auth = true, guestAllowed = true, sd = true, import = true, admin = true;
   bool openFails = false, parentExists = true, shortWrite = false, cleanupUser = true, cleanupSystem = true;
   bool temporaryOpenFails = false;          // the backend refuses only the staged ".upload.tmp" open (full, transient, denied)
+  bool psram = true;                        // psramFound(): a raw upload takes a 16 KB receive buffer only with PSRAM
   bool magicMap = false, mapOrganization = true, replaceFails = false, writeAllowed = true;
   bool renameAllowed = true, createAllowed = true, deleteAllowed = true;  // the caller's rule-table bits at promotion
   bool requirePause = true;                 // the editor save never paused polling; the upload does
@@ -94,6 +95,8 @@ struct Metrics {
   unsigned allocations = 0, frees = 0, opens = 0, closes = 0, flushes = 0, writes = 0;
   unsigned posthooks = 0, mapProbes = 0, mapHooks = 0, waypointHooks = 0, mkdirs = 0;
   unsigned receives = 0, responses = 0, promotions = 0;
+  std::vector<size_t> allocationSizes;     // every ps_alloc request, in order
+  std::vector<size_t> writeSizes;          // every File::write request, in order
   bool badIoScope = false, badHookResources = false, badCloseScope = false;
   std::vector<std::string> cleanupUsers, openedUsers, openedPaths, promotedUsers, systemReasons;
   std::vector<int> snapshotInvalidations;  // tiers marked stale for status polls
@@ -105,6 +108,7 @@ static bool outerLock = false;
 static void io() { if (!ownsFs || (control.requirePause && !pauseDepth)) metrics.badIoScope = true; }
 namespace AllocPref { enum Kind { PreferPsram }; }
 static void* ps_alloc(size_t size, AllocPref::Kind) {
+  metrics.allocationSizes.push_back(size);
   if (++metrics.allocations == control.failAllocation) return nullptr;
   void* result = std::malloc(size); check(result != nullptr, "host allocation failed"); buffers.insert(result); return result;
 }
@@ -113,14 +117,17 @@ static void trackedFree(void* allocation) {
   if (allocation) { check(buffers.erase(allocation) == 1, "unowned buffer free"); ++metrics.frees; std::free(allocation); }
 }
 struct EspMock { uint32_t getFreeHeap() const { return 100000; } } ESP;
+static bool psramFound() { return control.psram; }
 static uint32_t millis() { return 1234; }
 static void delay(int) {}
 
 using esp_err_t = int;
 constexpr int ESP_OK = 0, ESP_FAIL = -1, HTTPD_SOCK_ERR_TIMEOUT = -2, HTTPD_RESP_USE_STRLEN = -1;
+constexpr int ESP_ERR_NOT_FOUND = 0x105, ESP_ERR_HTTPD_RESULT_TRUNC = 0xb004;
 struct httpd_req_t {
   size_t content_len = 0, position = 0;
   std::string body, query, response;
+  std::string contentType;                  // the Content-Type request header; empty = absent
 };
 struct AuthContext { String user = "alice", ip = "127.0.0.1"; };
 static AuthContext makeWebAuthCtx(httpd_req_t*) { return {}; }
@@ -145,6 +152,14 @@ static int httpd_query_key_value(const char* query, const char* key, char* outpu
   std::string text(query);
   if (text.rfind(prefix, 0) != 0 || text.size() - prefix.size() >= size) return ESP_FAIL;
   std::strcpy(output, text.c_str() + prefix.size()); return ESP_OK;
+}
+// esp_http_server: the header value, truncated to the buffer with RESULT_TRUNC, or NOT_FOUND.
+static int httpd_req_get_hdr_value_str(httpd_req_t* req, const char* field, char* output, size_t size) {
+  if (std::strcmp(field, "Content-Type") != 0 || req->contentType.empty()) return ESP_ERR_NOT_FOUND;
+  check(size > 0, "header buffer has room for the terminator");
+  const size_t count = std::min(req->contentType.size(), size - 1);
+  std::memcpy(output, req->contentType.data(), count); output[count] = 0;
+  return count < req->contentType.size() ? ESP_ERR_HTTPD_RESULT_TRUNC : ESP_OK;
 }
 static int httpd_req_recv(httpd_req_t* req, char* output, int length) {
   ++metrics.receives;
@@ -176,7 +191,7 @@ class File {
   explicit File(std::shared_ptr<Node> node) : handle_(std::make_shared<Handle>(std::move(node))) {}
   explicit operator bool() const { return handle_ && handle_->open; }
   size_t write(const uint8_t* bytes, size_t size) {
-    io(); check(bool(*this), "write closed file"); ++metrics.writes;
+    io(); check(bool(*this), "write closed file"); ++metrics.writes; metrics.writeSizes.push_back(size);
     size_t count = control.shortWrite && size ? size - 1 : size;
     handle_->node->bytes.append(reinterpret_cast<const char*>(bytes), count); return count;
   }
@@ -291,6 +306,15 @@ static std::string encodeURIComponent(const std::string& input) {
   }
   return result;
 }
+// hwUploadFile: xhr.open('POST', '/api/files/upload?path=' + encodeURIComponent(targetPath)),
+// Content-Type application/octet-stream, xhr.send(file): the body is the file's bytes.
+static httpd_req_t rawRequest(const std::string& path, const std::string& bytes) {
+  httpd_req_t req;
+  req.query = "path=" + encodeURIComponent(path);
+  req.contentType = "application/octet-stream";
+  req.body = bytes; req.content_len = bytes.size(); return req;
+}
+static std::string everyByte(size_t size) { std::string bytes; for (size_t i = 0; i < size; ++i) bytes += char(i % 256); return bytes; }
 // The Files editor save: hw.postForm('/api/files/write', { name, content }).
 static httpd_req_t editorRequest(const std::string& name, const std::string& bytes) {
   httpd_req_t req;
@@ -419,6 +443,68 @@ int main(int argc, char** argv) {
   add("map magic posthook", "maps", [] { control.magicMap = true; auto req = request("/user/map.bin"); succeeded(req, "/user/map.bin", "hello"); check(metrics.mapHooks == ENABLE_WEB_MAPS && metrics.mapProbes == ENABLE_WEB_MAPS, "map magic hook follows feature flag"); });
   add("legacy waypoint posthook", "maps", [] { auto req = request("/maps/waypoints_map.json"); succeeded(req, "/maps/waypoints_map.json", "hello"); check(metrics.waypointHooks == ENABLE_WEB_MAPS && metrics.mapProbes == 0, "waypoint hook follows feature flag"); });
   add("map organizer refusal preserves upload result", "maps", [] { control.mapOrganization = false; auto req = request("/user/map.hwmap"); succeeded(req, "/user/map.hwmap", "hello"); check(metrics.mapHooks == ENABLE_WEB_MAPS, "map organizer attempted once when enabled"); });
+  // Raw-body uploads (application/octet-stream, destination in ?path=): the file manager and maps upload.
+  // The output buffer (4 KB) is the first allocation, the receive buffer the second: 16 KB from PSRAM,
+  // 4 KB without PSRAM and for every form body. Each storage write is one full receive buffer.
+  add("raw body round-trips every byte value in 16 KB writes", "raw", [] {
+    control.chunkSize = 1460; const std::string bytes = everyByte(40000); auto req = rawRequest("/user/upload.bin", bytes);
+    succeeded(req, "/user/upload.bin", bytes);
+    check(metrics.allocationSizes == std::vector<size_t>({4096, 16384}), "a raw upload with PSRAM receives into 16 KB");
+    check(metrics.writeSizes == std::vector<size_t>({16384, 16384, 7232}), "each write is a filled 16 KB buffer, then the tail");
+    check(metrics.receives == 12 + 12 + 5, "each receive asks only for the room left in the buffer: 11 x 1460 + 324 per 16 KB, 5 for the tail"); });
+  add("raw body without PSRAM keeps a 4 KB receive buffer", "raw", [] {
+    control.psram = false; control.chunkSize = 1000; const std::string bytes = everyByte(10000); auto req = rawRequest("/user/upload.bin", bytes);
+    succeeded(req, "/user/upload.bin", bytes);
+    check(metrics.allocationSizes == std::vector<size_t>({4096, 4096}), "no PSRAM: 4 KB of internal RAM");
+    check(metrics.writeSizes == std::vector<size_t>({4096, 4096, 1808}), "4 KB writes, then the tail"); });
+  add("form body with PSRAM keeps a 4 KB receive buffer", "raw", [] {
+    auto req = request("/user/upload.txt", "hello"); req.contentType = "application/x-www-form-urlencoded";
+    succeeded(req, "/user/upload.txt", "hello");
+    check(metrics.allocationSizes == std::vector<size_t>({4096, 4096}), "the form path decodes per character and stays at 4 KB"); });
+  add("raw body bytes are not URL or base64 decoded", "raw", [] {
+    const std::string bytes = "path=/x&binary=1&content=a+b%20c=="; auto req = rawRequest("/user/literal.txt", bytes);
+    succeeded(req, "/user/literal.txt", bytes); });
+  add("raw body content type with a parameter is raw", "raw", [] {
+    auto req = rawRequest("/user/upload.bin", "abc"); req.contentType = "application/octet-stream; charset=binary";
+    succeeded(req, "/user/upload.bin", "abc"); });
+  add("raw body to SD through an encoded query", "raw", [] {
+    const std::string path = "/sd/dir name/a+b&c.bin"; auto req = rawRequest(path, everyByte(300)); succeeded(req, path, everyByte(300)); });
+  add("raw body on an unmounted SD is refused before resources", "raw", [] {
+    control.sd = false; auto req = rawRequest("/sd/upload.bin", "abc"); failed(req, "SD card not available"); check(metrics.allocations == 0, "SD rejected before allocation"); });
+  add("raw body without ?path= is refused before resources", "raw", [] {
+    auto req = rawRequest("/user/upload.bin", "abc"); req.query.clear(); failed(req, "Missing ?path= for a raw upload");
+    check(metrics.allocations == 0 && metrics.opens == 0 && metrics.receives == 0, "refused before allocation, open or receive"); });
+  add("raw body admission counts the body as the file size", "raw", [] {
+    control.freeBytes = 1000; auto req = rawRequest("/user/upload.bin", std::string(901, 'r')); failed(req, "File too large");
+    check(metrics.allocations == 0, "size rejected before allocation"); });
+  add("raw body that fits 90 % of free space is admitted", "raw", [] {
+    control.freeBytes = 1000; auto req = rawRequest("/user/upload.bin", std::string(900, 'r')); succeeded(req, "/user/upload.bin", std::string(900, 'r')); });
+  add("raw empty body creates an empty file", "raw", [] {
+    auto req = rawRequest("/user/empty.bin", ""); succeeded(req, "/user/empty.bin", ""); check(metrics.writes == 0 && metrics.receives == 0, "nothing to receive or write"); });
+  add("raw body denied path never opens", "raw", [] {
+    control.import = false; auto req = rawRequest("/user/upload.bin", "abc"); failed(req, "Invalid path"); check(metrics.opens == 0 && metrics.receives == 0, "denied before open or receive"); });
+  add("raw body refused temporary keeps the previous content", "raw", [] {
+    control.temporaryOpenFails = true; files["/user/upload.bin"] = original(); auto req = rawRequest("/user/upload.bin", "replacement"); failed(req, "Invalid path");
+    check(files.size() == 1 && files.at("/user/upload.bin")->bytes == "original" && metrics.receives == 0 && metrics.cleanupUsers.empty(), "destination untouched"); });
+  add("raw body disconnect before the first byte removes the staged copy", "raw", [] {
+    files["/user/upload.bin"] = original(); control.disconnectAt = 0; auto req = rawRequest("/user/upload.bin", "replacement"); failed(req, "Recv error");
+    check(files.size() == 1 && files.at("/user/upload.bin")->bytes == "original" && metrics.writes == 0 && metrics.cleanupUsers == std::vector<std::string>{"alice"}, "the raw path opens first, so the empty staged copy is removed"); });
+  add("raw body disconnect after a write keeps the previous content", "raw", [] {
+    files["/user/upload.bin"] = original(); control.chunkSize = 1000; control.disconnectAt = 20000; auto req = rawRequest("/user/upload.bin", everyByte(40000)); failed(req, "Recv error");
+    check(files.size() == 1 && files.at("/user/upload.bin")->bytes == "original" && metrics.writes == 1 && metrics.cleanupUsers == std::vector<std::string>{"alice"}, "partial staged copy removed, destination kept"); });
+  add("raw body single timeouts are retried", "raw", [] {
+    control.chunkSize = 1000; control.timeoutAt = {{0, 1}, {16384, 1}, {30000, 1}}; auto req = rawRequest("/user/upload.bin", everyByte(40000));
+    succeeded(req, "/user/upload.bin", everyByte(40000)); check(metrics.writeSizes == std::vector<size_t>({16384, 16384, 7232}), "an idle wait does not cut a write short"); });
+  add("raw body two consecutive timeouts abort and release the partial", "raw", [] {
+    control.chunkSize = 1000; control.timeoutAt = {{19384, 2}}; auto req = rawRequest("/user/upload.bin", everyByte(40000)); failed(req, "Recv timeout");
+    check(metrics.opens == 1 && metrics.closes == 1 && metrics.writes == 1 && files.empty() && metrics.cleanupUsers == std::vector<std::string>{"alice"}, "abandoned raw upload closes and removes its partial"); });
+  add("raw body short write", "raw", [] {
+    control.shortWrite = true; auto req = rawRequest("/user/upload.bin", everyByte(100)); failed(req, "short write"); check(files.empty() && metrics.closes == 1, "short write removed and closed"); });
+  add("raw body map upload runs the map hook", "raw", [] {
+    auto req = rawRequest("/user/map.hwmap", "HWMP"); succeeded(req, "/user/map.hwmap", "HWMP"); check(metrics.mapHooks == ENABLE_WEB_MAPS, "map extension hook follows feature flag"); });
+  add("raw body nested caller scopes", "raw", [] {
+    { PollPauseGuard poll; FsLockGuard lock("outer"); outerLock = true; auto req = rawRequest("/user/upload.bin", "abc"); check(handleFileUpload(&req) == ESP_OK && req.response == "{\"success\":true}", "nested raw success response"); balanced(1, true); }
+    outerLock = false; balanced(); });
   // /api/files/write (the Files editor save) through the same staged writer.
   auto editor = [&](const char* name, std::function<void()> test) { add(name, "filewrite", [test] { control.requirePause = control.hooksOutsideLock = false; test(); }); };
   const std::string alphabet = "a=b&c+d \xC3\xA9\t#%";  // the characters the old private decoder left as %XX

@@ -38,14 +38,26 @@ meets the held C6. It must leave Hosted's transport state up: below TX_ACTIVE,
 a Wi-Fi init or BLE open in the window would reset the C6 and rerun SDIO card
 init (review 2026-11-08). An op inside the flush is refused like one in the
 drain. Source checks cover the Hosted patch (every producer path goes through
-the fence, transport_drv_reconfigure still keys on the state) and updateProc's
-HTTP hand-over, which the harness does not compile. The real snapshotUsers, stopUsers,
+the fence, transport_drv_reconfigure still keys on the state). The real snapshotUsers, stopUsers,
 restoreUsers, recoverProc, holdProc and releaseProc and the HTTP restore run
 over a fake network whose `radiopower off` stops the server and whose
 `radiopower on` does not start it: after a c6restart or c6hold off the server
 must run again, also after a stop deferred past a web request or a late Wi-Fi
-link (main-loop tick, 60 s window). --source-dir points the suite at another
-copy of the component (the pre-fix tree fails).
+link (main-loop tick, 60 s window).
+
+Bench 2026-11-18 (c6update): the P4 reset the C6 before the new image was
+confirmed, so the rollback bootloader returned to the old one, and Wi-Fi did
+not come back. The fake network now has the host's WiFi.isConnected() flag
+next to the companion's association (esp_wifi_sta_get_ap_info): restoreUsers
+must join again when the device was joined before and the companion is not,
+whatever the host flag says, and log both radiopower replies. The real
+updateProc runs over a fake OTA and running slot: Wi-Fi and the web server
+stop before the transfer, the link is rebuilt only after a wait that covers
+the bridge's SELF_CONFIRM_MS (read from tools/p4/companion/bridge), a return
+to the same slot is reported as a rollback, a link lost mid-transfer is
+restarted, and every path that brings the companion back restores Wi-Fi and
+the web server. --source-dir points the suite at another copy of the
+component (the pre-fix tree fails).
 """
 from __future__ import annotations
 
@@ -75,7 +87,7 @@ def one(source: str, marker: str, name: str) -> str:
 
 
 def constant(source: str, name: str, where: str = "HAL_Radio.cpp") -> str:
-    match = re.search(r"constexpr (?:uint32_t|uint8_t|int) " + name + r" = [^;]+;", source)
+    match = re.search(r"constexpr (?:uint32_t|uint8_t|int|size_t) " + name + r" = [^;]+;", source)
     require(match is not None, f"{where} defines {name}")
     return match.group(0)
 
@@ -87,6 +99,8 @@ def main() -> None:
     parser.add_argument("--source-dir", "--component", dest="source_dir", type=Path, default=COMPONENT)
     parser.add_argument("--hosted-patch", type=Path, help="default: tools/p4/esp-hosted-2.12.13-hw1.patch "
                         "two levels above --source-dir")
+    parser.add_argument("--bridge-source", type=Path, help="default: tools/p4/companion/bridge/"
+                        "esp_now_hosted_slave.c two levels above --source-dir")
     args = parser.parse_args()
     src = args.source_dir
 
@@ -145,6 +159,12 @@ def main() -> None:
                 "void holdProc(void*)",
                 "void releaseProc(void*)",
             )]),
+        "/*@UPDATE@*/": "\n\n".join([
+            constant(companion, "kUpdateChunk", "System_RadioCompanion.cpp"),
+            constant(companion, "kUpdateRebootWaitMs", "System_RadioCompanion.cpp"),
+            one(companion, "struct UpdateJob ", "System_RadioCompanion.cpp") + ";",
+            one(companion, "void updateProc(void* arg)", "System_RadioCompanion.cpp"),
+        ]),
         "/*@COMPANION@*/": "\n\n".join([
             one(companion, "bool submitOp(Op op, ExecReq::DeferredFn fn, void* arg)", "System_RadioCompanion.cpp"),
             one(companion, "void radioCompanionBeforeRestart()", "System_RadioCompanion.cpp"),
@@ -164,14 +184,13 @@ def main() -> None:
     silence = strip_comments(blocks["/*@SILENCE@*/"])
     for forbidden in ("hostedDeinit", "esp_hosted_deinit", "radioHalStopTransport", "set_transport_state"):
         require(forbidden not in silence, f"radioHalSilenceForRestart must not call {forbidden}")
-    # The companion update's second reset hands the web server state on, as
-    # recoverProc's does (updateProc needs the file system and OTA, so the
-    # harness does not run it).
-    update = extract_block(strip_comments(companion), "void updateProc(void* arg)")
-    second = update.find("stopUsers(rest);")
-    require(second >= 0 and update.find("users.http = rest.http;", second) > second
-            and update.find("restoreUsers(users);", second) > update.find("users.http = rest.http;", second),
-            "updateProc carries rest.http from its second stopUsers into restoreUsers")
+    # The C6 bridge confirms a pending image itself after SELF_CONFIRM_MS; the
+    # harness checks updateProc's wait against it.
+    bridge = args.bridge_source or src.parent.parent / "tools" / "p4" / "companion" / "bridge" / "esp_now_hosted_slave.c"
+    require(bridge.is_file(), f"C6 bridge source at {bridge} (pass --bridge-source)")
+    confirm = re.findall(r"^#define SELF_CONFIRM_MS (\d+)\b", bridge.read_text(), re.M)
+    require(len(confirm) == 1, "the C6 bridge defines SELF_CONFIRM_MS once")
+    blocks["/*@BRIDGE@*/"] = f"constexpr uint32_t kBridgeSelfConfirmMs = {confirm[0]};"
     # The Hosted patch (tools/p4/esp-hosted-2.12.13-hw1.patch, the tree the P4
     # build uses): the fence gates every producer and leaves the state alone.
     patch = args.hosted_patch or src.parent.parent / "tools" / "p4" / "esp-hosted-2.12.13-hw1.patch"
