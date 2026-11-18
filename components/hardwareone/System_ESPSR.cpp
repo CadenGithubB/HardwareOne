@@ -1412,7 +1412,14 @@ static void onVoiceCommandDetected(int commandId, const char* phrase) {
     // Fallback: direct command execution (shouldn't happen in hierarchical mode)
     WARN_SYSTEMF("[HIER-DEBUG] Unexpected state: %s - falling back to direct execution", 
                  voiceStateToString(gVoiceState));
-    if (mappedValue) {
+    if (mappedValue && (strcmp(mappedValue, "voicecancel") == 0 || strcmp(mappedValue, "voicehelp") == 0)) {
+      // The two voice-only rows refuse every call, so they are never queued.
+      // "cancel" lands here when the state is IDLE while MultiNet still
+      // listens (srcmdssync inside the command window); "help" is taken by
+      // phrase above in every state.
+      broadcastOutput(strcmp(mappedValue, "voicecancel") == 0 ? "[Voice] Nothing to cancel."
+                                                              : "[Voice] Say the wake word first, then help.");
+    } else if (mappedValue) {
       INFO_SRF("Voice command %d ('%s') -> CLI: %s", commandId, phrase ? phrase : "", mappedValue);
       char cmdOut[128];
       bool ok = executeVoiceCommandAsArmedUser(mappedValue, cmdOut, sizeof(cmdOut));
@@ -1735,7 +1742,7 @@ static void srAutoTuneCheck() {
       broadcastOutput("");
       broadcastOutput("=== AUTO-TUNE COMPLETE ===");
       broadcastOutput(String("Tested ") + (int)kAutoTuneConfigCount + " configurations. Review logs above to find best settings.");
-      broadcastOutput("Apply best config with: sr tuning gain <value> and sr dyngain max <value>");
+      broadcastOutput("Apply best config with: srtuninggain <value> and srdyngain max <value>");
       return;
     }
     
@@ -3059,15 +3066,22 @@ void buildEspSrStatusJson(String& output) {
   else serializeJson(doc, output);
 }
 
+// Bare srenable reports the build flag; a value cannot change it.
 static const char* setEnabledFromArgs(const String& argsInput) {
-  (void)argsInput;
-  return "Error: ENABLE_ESP_SR is a compile-time flag";
+  String arg = argsInput;
+  arg.trim();
+  if (arg.length() == 0) {
+    return "ESP-SR is in this build (compile-time flag). Switch recognition at runtime with srenabled 0|1.";
+  }
+  return "Error: ESP-SR is a compile-time flag. Use srenabled 0|1 to switch speech recognition at runtime.";
 }
 
+// The registry matches whole words, so "sr status" lands here; the commands
+// are the one-word names.
 const char* cmd_sr(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   (void)argsInput;
-  return "Error: invalid arguments — Usage: sr <enable|start|stop|status|stack|cmds|debug|confidence|timeout|tuning|accept|dyngain|raw|autotune|snip>";
+  return "Error: sr is not a command by itself. Use srstart, srstop, srstatus, srcmdslist, srdebuglevel, srconfidence, srtimeout, srtuning, sraccept, srdyngain, srraw, srautotune or srsnipstatus.";
 }
 
 const char* cmd_sr_enable(const String& argsInput) {
@@ -3081,8 +3095,14 @@ const char* cmd_sr_start(const String& argsInput) {
   if (!gSettings.srEnabled) {
     return "Error: Speech recognition is disabled - run 'srenabled 1' first";
   }
-  bool ok = startEspSr();
-  if (!ok) {
+  // A running pipeline is not started again. Its arming is the part of
+  // srstart that may still be missing: the boot autostart runs as the system
+  // and cannot arm, and the web page's Start is how a user arms it then.
+  const bool alreadyRunning = gEspSrRunning.load(std::memory_order_acquire);
+  if (alreadyRunning && gVoiceArmed) {
+    return "Error: Speech recognition is already running. Stop it first with 'srstop' to restart it.";
+  }
+  if (!alreadyRunning && !startEspSr()) {
     static String error;
     error = String("Error: ") + (gSrError.load() ? gSrError.load() : "speech lifecycle is busy");
     return error.c_str();
@@ -3093,6 +3113,11 @@ const char* cmd_sr_start(const String& argsInput) {
   if (gVoiceArmMutex && xSemaphoreTake(gVoiceArmMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
     armed = voiceArmFromContextInternal(currentAuthContext());
     xSemaphoreGive(gVoiceArmMutex);
+  }
+  if (alreadyRunning && !armed) {
+    // Nothing started and nothing armed.
+    return "Error: Speech recognition is already running and this session cannot arm it. "
+           "Arm it with 'voicearm' from a signed-in console.";
   }
 
   if (armed) {
@@ -3120,15 +3145,13 @@ const char* cmd_sr_start(const String& argsInput) {
 const char* cmd_sr_stop(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   (void)argsInput;
+  // Running, or a stop still holding its workers or models. The stop below
+  // runs either way (it disarms voice and completes a pending stop).
+  const bool wasActive = gEspSrRunning.load(std::memory_order_acquire) || gSrTaskHandle ||
+                         gSrFeedTaskHandle || gAfeData || gSrModels;
+  // stopEspSr() disarms voice under gVoiceArmMutex before it stops the workers.
   if (!stopEspSr()) return "Error: speech stop incomplete; resources retained, retry srstop";
-
-  ensureVoiceArmMutex();
-  if (gVoiceArmMutex && xSemaphoreTake(gVoiceArmMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
-    voiceDisarmInternal();
-    xSemaphoreGive(gVoiceArmMutex);
-  } else {
-    return "Error: voice authority busy; retry";
-  }
+  if (!wasActive) return "Error: Speech recognition is not running. Start it with 'srstart'.";
   broadcastOutput("[VOICE] Disarmed (sr stopped)");
   return "OK";
 }
@@ -3154,12 +3177,15 @@ static const char* cmd_voice_disarm_cli(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   (void)argsInput;
   ensureVoiceArmMutex();
+  bool wasArmed = false;
   if (gVoiceArmMutex && xSemaphoreTake(gVoiceArmMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
+    wasArmed = gVoiceArmed;
     voiceDisarmInternal();
     xSemaphoreGive(gVoiceArmMutex);
   } else {
     return "Error: voice authority busy; retry";
   }
+  if (!wasArmed) return "Error: Voice commands are not armed. Arm them with 'voicearm'.";
   broadcastOutput("[VOICE] Disarmed");
   return "OK";
 }
@@ -3222,26 +3248,30 @@ static const char* cmd_sr_stack(const String& argsInput) {
   return buf;
 }
 
-// Voice control commands - these are handled specially in onVoiceCommandDetected
-// but registered here for consistency with the command registry system
+// Voice control commands: onVoiceCommandDetected does the work for the spoken
+// phrase and never runs these rows for it (by phrase in the stages, by name in
+// its fallback). The rows exist so kVoiceRoutes can name them; a typed call is
+// refused.
 static const char* cmd_voice_cancel(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   (void)argsInput;
-  // This is handled in onVoiceCommandDetected, not via CLI
-  return "Voice cancel - resets voice state to idle";
+  return "Error: voicecancel only works as a spoken command. Say cancel after the wake word.";
 }
 
 static const char* cmd_voice_help(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   (void)argsInput;
-  // This is handled in onVoiceCommandDetected, not via CLI
-  return "Voice help - shows available options for current state";
+  return "Error: voicehelp only works as a spoken command. Say help after the wake word.";
 }
+
+// Reply for a MultiNet command-table lock that was not taken in time.
+static constexpr char kSrCommandTableBusy[] =
+    "Error: Voice command table is busy. Retry in a few seconds.";
 
 static const char* cmd_sr_cmds(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   (void)argsInput;
-  return "Error: invalid arguments — Usage: sr cmds <list|add|del|clear|save|reload>";
+  return "Error: srcmds is not a command by itself. Use srcmdslist, srcmdsadd, srcmdsdel, srcmdsclear, srcmdssave, srcmdsreload or srcmdssync.";
 }
 
 static const char* cmd_sr_cmds_list(const String& argsInput) {
@@ -3255,7 +3285,7 @@ static const char* cmd_sr_cmds_list(const String& argsInput) {
   }
 
   if (!lockMn(2000)) {
-    return "Error: busy";
+    return kSrCommandTableBusy;
   }
 
   for (int i = 0; ; ++i) {
@@ -3285,10 +3315,10 @@ static const char* cmd_sr_cmds_list(const String& argsInput) {
 static const char* cmd_sr_cmds_add(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   CommandArgs a(argsInput);
-  if (!a.hasMinArgs(2)) return "Error: invalid arguments — Usage: sr cmds add <id> <phrase>";
+  if (!a.hasMinArgs(2)) return "Error: invalid arguments — Usage: srcmdsadd <id> <phrase>";
   String idStr = a.arg(0);
   String phrase = a.remaining(0);
-  if (!isAllDigits(idStr) || phrase.length() == 0) return "Error: invalid arguments — Usage: sr cmds add <id> <phrase>";
+  if (!isAllDigits(idStr) || phrase.length() == 0) return "Error: invalid arguments — Usage: srcmdsadd <id> <phrase>";
   int id = a.argInt(0, 0);
   if (id <= 0 || id > kSrMaxCommandId) return "Error: id must be 1-1023";
 
@@ -3296,7 +3326,7 @@ static const char* cmd_sr_cmds_add(const String& argsInput) {
     return "Error: MultiNet not initialized. Run: srstart";
   }
   if (!lockMn(4000)) {
-    return "Error: busy";
+    return kSrCommandTableBusy;
   }
 
   esp_err_t err = esp_mn_commands_add(id, phrase.c_str());
@@ -3307,7 +3337,11 @@ static const char* cmd_sr_cmds_add(const String& argsInput) {
   unlockMn();
 
   if (err != ESP_OK) {
-    return "Error: failed to add command";
+    static char buf[128];
+    snprintf(buf, sizeof(buf),
+             "Error: MultiNet refused the phrase (%s). Use lower-case words without digits or punctuation.",
+             esp_err_to_name(err));
+    return buf;
   }
   if (!updated) {
     return "Error: MultiNet rejected one or more commands";
@@ -3319,20 +3353,22 @@ static const char* cmd_sr_cmds_del(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String arg = argsInput;
   arg.trim();
-  if (arg.length() == 0) return "Error: invalid arguments — Usage: sr cmds del <phrase|id>";
+  if (arg.length() == 0) return "Error: invalid arguments — Usage: srcmdsdel <phrase|id>";
+  // Checked before the lock: no return may sit between lockMn() and unlockMn().
+  const bool byId = isAllDigits(arg);
+  int id = 0;
+  if (byId && !parseIntArg(arg, 1, kSrMaxCommandId, id)) return "Error: id must be 1-1023";
 
   if (!mnCommandsReady()) {
     return "Error: MultiNet not initialized. Run: srstart";
   }
   if (!lockMn(4000)) {
-    return "Error: busy";
+    return kSrCommandTableBusy;
   }
 
   const char* phrase = nullptr;
   String tmp;
-  if (isAllDigits(arg)) {
-    int id = 0;
-    if (!parseIntArg(arg, id)) return kCommandReplyNotANumber;
+  if (byId) {
     char* s = esp_mn_commands_get_string(id);
     if (s) {
       tmp = String(s);
@@ -3365,13 +3401,13 @@ static const char* cmd_sr_cmds_clear(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String arg = argsInput;
   arg.trim();
-  if (arg != "confirm") return "Error: invalid arguments — Usage: sr cmds clear confirm";
+  if (arg != "confirm") return "Error: invalid arguments — Usage: srcmdsclear confirm";
 
   if (!mnCommandsReady()) {
     return "Error: MultiNet not initialized. Run: srstart";
   }
   if (!lockMn(4000)) {
-    return "Error: busy";
+    return kSrCommandTableBusy;
   }
 
   esp_err_t err = esp_mn_commands_clear();
@@ -3381,7 +3417,13 @@ static const char* cmd_sr_cmds_clear(const String& argsInput) {
   }
   unlockMn();
 
-  if (err != ESP_OK) return "Error: failed";
+  if (err != ESP_OK) {
+    static char buf[128];
+    snprintf(buf, sizeof(buf),
+             "Error: MultiNet could not clear its command table (%s). Restart recognition with srstop and srstart.",
+             esp_err_to_name(err));
+    return buf;
+  }
   if (!updated) return "Error: MultiNet rejected one or more commands";
   return "OK";
 }
@@ -3393,12 +3435,12 @@ static const char* cmd_sr_cmds_reload(const String& argsInput) {
     return "Error: MultiNet not initialized. Run: srstart";
   }
   if (!lockMn(6000)) {
-    return "Error: busy";
+    return kSrCommandTableBusy;
   }
 
   // The clear must precede the load (loadCommandsFileLocked appends), so a failed
   // load leaves the LIVE table empty. Mark it untrusted for the duration so
-  // `sr cmds save` cannot serialise that emptiness over the commands file.
+  // `srcmdssave` cannot serialise that emptiness over the commands file.
   gMnTableTrusted = false;
   esp_mn_commands_clear();
   size_t added = 0;
@@ -3424,12 +3466,12 @@ static const char* cmd_sr_cmds_save(const String& argsInput) {
     return "Error: MultiNet not initialized. Run: srstart";
   }
   if (!lockMn(6000)) {
-    return "Error: busy";
+    return kSrCommandTableBusy;
   }
   if (!gMnTableTrusted) {
     unlockMn();
     return "Error: the live command table did not load cleanly - refusing to overwrite the "
-           "commands file. Reload with `sr cmds reload`, or fix the file first.";
+           "commands file. Reload with `srcmdsreload`, or fix the file first.";
   }
   size_t saved = 0;
   bool ok = saveCommandsFileLocked(saved);
@@ -3492,7 +3534,7 @@ static const char* cmd_sr_cmds_sync(const String& argsInput) {
 static const char* cmd_sr_debug(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   (void)argsInput;
-  return "Error: invalid arguments — Usage: sr debug <level|telem|stats|reset>";
+  return "Error: srdebug is not a command by itself. Use srdebuglevel, srdebugtelem, srdebugstats or srdebugreset.";
 }
 
 static const char* cmd_sr_debug_level(const String& argsInput) {
@@ -3505,9 +3547,7 @@ static const char* cmd_sr_debug_level(const String& argsInput) {
     return buf;
   }
   int lvl = 0;
-  if (!parseIntArg(arg, lvl)) return kCommandReplyNotANumber;
-  if (lvl < 0) lvl = 0;
-  if (lvl > 4) lvl = 4;
+  if (!parseIntArg(arg, 0, 4, lvl)) return "Error: debug level must be 0-4";
   gSrDebugLevel = (uint8_t)lvl;
   static char buf[64];
   snprintf(buf, sizeof(buf), "Debug level set to %u", gSrDebugLevel);
@@ -3524,8 +3564,7 @@ static const char* cmd_sr_debug_telem(const String& argsInput) {
     return buf;
   }
   int ms = 0;
-  if (!parseIntArg(arg, ms)) return kCommandReplyNotANumber;
-  if (ms < 0) ms = 0;
+  if (!parseIntArg(arg, 0, INT_MAX, ms)) return "Error: telemetry period must be 0 or more ms (0 = off)";
   gSrTelemetryPeriodMs = (uint32_t)ms;
   gSrLastTelemetryMs = millis();
   static char buf[96];
@@ -3554,7 +3593,7 @@ static const char* cmd_sr_confidence(const String& argsInput) {
   if (a.count() == 0) {
     static char buf[256];
     snprintf(buf, sizeof(buf),
-             "Category confidence threshold: %.2f\nTarget confidence threshold: %.2f (rejects: %lu)\nUsage: sr confidence [<0.0-1.0> | category <0.0-1.0> | target <0.0-1.0>]",
+             "Category confidence threshold: %.2f\nTarget confidence threshold: %.2f (rejects: %lu)\nUsage: srconfidence [<0.0-1.0> | category <0.0-1.0> | target <0.0-1.0>]",
              gSrMinCategoryConfidence, gSrMinCommandConfidence, (unsigned long)gSrLowConfidenceRejects);
     return buf;
   }
@@ -3563,16 +3602,17 @@ static const char* cmd_sr_confidence(const String& argsInput) {
   bool setCategoryOnly = (first == "category");
   bool setTargetOnly = (first == "target");
 
-  float val = 0.0f;
-  if (setCategoryOnly || setTargetOnly) {
-    if (!a.has(1)) return "Error: missing value";
-    val = a.argFloat(1, 0.0f);
-  } else {
-    val = a.argFloat(0, 0.0f);
+  // Junk must not read as 0: a threshold of 0 accepts every hypothesis.
+  const int valueIndex = (setCategoryOnly || setTargetOnly) ? 1 : 0;
+  if (!a.has(valueIndex)) {
+    return "Error: Missing value. Give a threshold from 0.0 to 1.0, for example srconfidence target 0.12.";
   }
-
-  if (val < 0.0f || val > 1.0f) {
-    return "Error: threshold must be 0.0-1.0";
+  if (a.count() != valueIndex + 1) {
+    return "Error: Too many arguments. Use srconfidence <0.0-1.0>, srconfidence category <0.0-1.0> or srconfidence target <0.0-1.0>.";
+  }
+  float val = 0.0f;
+  if (!parseFloatArg(a.arg(valueIndex), 0.0, 1.0, val)) {
+    return "Error: Threshold must be a number from 0.0 to 1.0, for example 0.15.";
   }
 
   if (setCategoryOnly) {
@@ -3606,7 +3646,7 @@ static const char* cmd_sr_accept(const String& argsInput) {
     out += gSrTargetRequireSpeech ? "1" : "0";
     out += "\n  gap_accepts=";
     out += String((unsigned)gSrGapAccepts);
-    out += "\nUsage: sr accept [on|off|floor <0.0-1.0>|gap <0.0-1.0>|speech <0|1>]";
+    out += "\nUsage: sraccept [on|off|floor <0.0-1.0>|gap <0.0-1.0>|speech <0|1>]";
     return out.c_str();
   }
 
@@ -3614,18 +3654,11 @@ static const char* cmd_sr_accept(const String& argsInput) {
   key.toLowerCase();
   String val = a.has(1) ? a.arg(1) : String();
 
-  if (key == "on") {
-    gSrGapAcceptEnabled = true;
-    return "OK (gap accept enabled)";
-  }
-  if (key == "off") {
-    gSrGapAcceptEnabled = false;
-    return "OK (gap accept disabled)";
-  }
   if (key == "floor") {
     if (val.length() == 0) return "Error: missing floor value";
-    float f = val.toFloat();
-    if (f < 0.0f || f > 1.0f) return "Error: floor must be 0.0-1.0";
+    if (a.count() > 2) return "Error: Too many arguments. Use sraccept floor <0.0-1.0> or sraccept gap <0.0-1.0>.";
+    float f = 0.0f;
+    if (!parseFloatArg(val, 0.0, 1.0, f)) return "Error: floor must be a number from 0.0 to 1.0, for example 0.12.";
     gSrGapAcceptFloor = f;
     static char buf[64];
     snprintf(buf, sizeof(buf), "OK (floor=%.2f)", gSrGapAcceptFloor);
@@ -3633,8 +3666,9 @@ static const char* cmd_sr_accept(const String& argsInput) {
   }
   if (key == "gap") {
     if (val.length() == 0) return "Error: missing gap value";
-    float g = val.toFloat();
-    if (g < 0.0f || g > 1.0f) return "Error: gap must be 0.0-1.0";
+    if (a.count() > 2) return "Error: Too many arguments. Use sraccept floor <0.0-1.0> or sraccept gap <0.0-1.0>.";
+    float g = 0.0f;
+    if (!parseFloatArg(val, 0.0, 1.0, g)) return "Error: gap must be a number from 0.0 to 1.0, for example 0.08.";
     gSrGapAcceptGap = g;
     static char buf[64];
     snprintf(buf, sizeof(buf), "OK (gap=%.2f)", gSrGapAcceptGap);
@@ -3642,13 +3676,25 @@ static const char* cmd_sr_accept(const String& argsInput) {
   }
   if (key == "speech" || key == "require_speech") {
     if (val.length() == 0) return "Error: missing speech value (0/1)";
+    if (a.count() > 2) return "Error: Too many arguments. Use sraccept speech <0|1>.";
     const int v = parseBoolArg(val);
     if (v < 0) return kCommandReplyNotOnOff;
     gSrTargetRequireSpeech = (v == 1);
     return gSrTargetRequireSpeech ? "OK (require_speech=1)" : "OK (require_speech=0)";
   }
+  // Every on/off spelling, after the named keys. The limits are their own keys.
+  const int on = parseBoolArg(key);
+  if (on >= 0) {
+    if (a.count() > 1) {
+      return on ? "Error: sraccept on takes no value. Set the limits with sraccept floor <0.0-1.0> and "
+                  "sraccept gap <0.0-1.0>."
+                : "Error: sraccept off takes no value. Run sraccept off.";
+    }
+    gSrGapAcceptEnabled = (on == 1);
+    return on ? "OK (gap accept enabled)" : "OK (gap accept disabled)";
+  }
 
-  return "Error: invalid arguments — Usage: sr accept [on|off|floor <0.0-1.0>|gap <0.0-1.0>|speech <0|1>]";
+  return "Error: invalid arguments — Usage: sraccept [on|off|floor <0.0-1.0>|gap <0.0-1.0>|speech <0|1>]";
 }
 
 static const char* cmd_sr_dyngain(const String& argsInput) {
@@ -3674,7 +3720,7 @@ static const char* cmd_sr_dyngain(const String& argsInput) {
     out += String((unsigned)gSrDynGainApplied);
     out += "\n  bypassed=";
     out += String((unsigned)gSrDynGainBypassed);
-    out += "\nUsage: sr dyngain [on|off|min <0.1-10>|max <0.1-10>|target <1000-30000>|alpha <0.0-1.0>|reset]";
+    out += "\nUsage: srdyngain [on|off|min <0.1-10>|max <0.1-10>|target <1000-30000>|alpha <0.0-1.0>|reset]";
     return out.c_str();
   }
 
@@ -3682,15 +3728,8 @@ static const char* cmd_sr_dyngain(const String& argsInput) {
   key.toLowerCase();
   String val = a.has(1) ? a.arg(1) : String();
 
-  if (key == "on") {
-    gSrDynGainEnabled = true;
-    return "OK (dyngain enabled)";
-  }
-  if (key == "off") {
-    gSrDynGainEnabled = false;
-    return "OK (dyngain disabled)";
-  }
   if (key == "reset") {
+    if (a.count() > 1) return "Error: srdyngain reset takes no value. Run srdyngain reset.";
     gSrDynGainCurrent = 1.0f;
     gSrDynGainApplied = 0;
     gSrDynGainBypassed = 0;
@@ -3698,8 +3737,8 @@ static const char* cmd_sr_dyngain(const String& argsInput) {
   }
   if (key == "min") {
     if (val.length() == 0) return "Error: missing min value";
-    float v = val.toFloat();
-    if (v < 0.1f || v > 10.0f) return "Error: min must be 0.1-10";
+    float v = 0.0f;
+    if (!parseFloatArg(val, 0.1, 10.0, v)) return "Error: min must be a number from 0.1 to 10, for example 0.5.";
     gSrDynGainMin = v;
     if (gSrDynGainMax < gSrDynGainMin) gSrDynGainMax = gSrDynGainMin;
     gSrDynGainCurrent = clampFloat(gSrDynGainCurrent, gSrDynGainMin, gSrDynGainMax);
@@ -3709,8 +3748,8 @@ static const char* cmd_sr_dyngain(const String& argsInput) {
   }
   if (key == "max") {
     if (val.length() == 0) return "Error: missing max value";
-    float v = val.toFloat();
-    if (v < 0.1f || v > 10.0f) return "Error: max must be 0.1-10";
+    float v = 0.0f;
+    if (!parseFloatArg(val, 0.1, 10.0, v)) return "Error: max must be a number from 0.1 to 10, for example 2.5.";
     gSrDynGainMax = v;
     if (gSrDynGainMin > gSrDynGainMax) gSrDynGainMin = gSrDynGainMax;
     gSrDynGainCurrent = clampFloat(gSrDynGainCurrent, gSrDynGainMin, gSrDynGainMax);
@@ -3720,24 +3759,34 @@ static const char* cmd_sr_dyngain(const String& argsInput) {
   }
   if (key == "target") {
     if (val.length() == 0) return "Error: missing target value";
-    float v = val.toFloat();
-    if (v < 1000.0f || v > 30000.0f) return "Error: target must be 1000-30000";
-    gSrDynGainTargetPeak = v;
+    float t = 0.0f;
+    if (!parseFloatArg(val, 1000.0, 30000.0, t)) return "Error: target must be a number from 1000 to 30000, for example 12000.";
+    gSrDynGainTargetPeak = t;
     static char buf[72];
     snprintf(buf, sizeof(buf), "OK (target_peak=%.0f)", gSrDynGainTargetPeak);
     return buf;
   }
   if (key == "alpha") {
     if (val.length() == 0) return "Error: missing alpha value";
-    float v = val.toFloat();
-    if (v < 0.0f || v > 1.0f) return "Error: alpha must be 0.0-1.0";
+    float v = 0.0f;
+    if (!parseFloatArg(val, 0.0, 1.0, v)) return "Error: alpha must be a number from 0.0 to 1.0, for example 0.06.";
     gSrDynGainAlpha = v;
     static char buf[64];
     snprintf(buf, sizeof(buf), "OK (alpha=%.2f)", gSrDynGainAlpha);
     return buf;
   }
+  // Every on/off spelling, after the named keys. The limit is its own key.
+  const int on = parseBoolArg(key);
+  if (on >= 0) {
+    if (a.count() > 1) {
+      return on ? "Error: srdyngain on takes no value. Set the limit with srdyngain max <0.1-10>."
+                : "Error: srdyngain off takes no value. Run srdyngain off.";
+    }
+    gSrDynGainEnabled = (on == 1);
+    return on ? "OK (dyngain enabled)" : "OK (dyngain disabled)";
+  }
 
-  return "Error: invalid arguments — Usage: sr dyngain [on|off|min <0.1-10>|max <0.1-10>|target <1000-30000>|alpha <0.0-1.0>|reset]";
+  return "Error: invalid arguments — Usage: srdyngain [on|off|min <0.1-10>|max <0.1-10>|target <1000-30000>|alpha <0.0-1.0>|reset]";
 }
 
 static const char* cmd_sr_raw(const String& argsInput) {
@@ -3747,7 +3796,7 @@ static const char* cmd_sr_raw(const String& argsInput) {
   
   if (args.length() == 0) {
     static char buf[128];
-    snprintf(buf, sizeof(buf), "Raw output mode: %s\nShows ALL MultiNet detections regardless of confidence.\nUsage: sr raw [on|off]",
+    snprintf(buf, sizeof(buf), "Raw output mode: %s\nShows ALL MultiNet detections regardless of confidence.\nUsage: srraw [on|off]",
              gSrRawOutputEnabled ? "ON" : "OFF");
     return buf;
   }
@@ -3761,7 +3810,7 @@ static const char* cmd_sr_raw(const String& argsInput) {
     return "OK (raw output disabled)";
   }
   
-  return "Error: invalid arguments — Usage: sr raw [on|off]";
+  return "Error: invalid arguments — Usage: srraw [on|off]";
 }
 
 static const char* cmd_sr_autotune(const String& argsInput) {
@@ -3775,19 +3824,19 @@ static const char* cmd_sr_autotune(const String& argsInput) {
       uint32_t remaining = (elapsed < kAutoTuneStepDurationMs) ? (kAutoTuneStepDurationMs - elapsed) / 1000 : 0;
       EXT_RAM_BSS_ATTR static char buf[256];
       snprintf(buf, sizeof(buf), 
-               "Auto-tune ACTIVE: step %d/%d\n  Config: %s\n  %lu sec remaining\n  Say test phrases now!\nUsage: sr autotune [start|stop]",
+               "Auto-tune ACTIVE: step %d/%d\n  Config: %s\n  %lu sec remaining\n  Say test phrases now!\nUsage: srautotune [start|stop]",
                gSrAutoTuneStep + 1, (int)kAutoTuneConfigCount,
                kAutoTuneConfigs[gSrAutoTuneStep].description,
                (unsigned long)remaining);
       return buf;
     } else {
-      return "Auto-tune: INACTIVE\nCycles through gain configurations to find best settings.\nUsage: sr autotune [start|stop]";
+      return "Auto-tune: INACTIVE\nCycles through gain configurations to find best settings.\nUsage: srautotune [start|stop]";
     }
   }
   
   if (args == "start") {
     if (gSrAutoTuneActive) {
-      return "Auto-tune already running. Use 'srautotune stop' to cancel.";
+      return "Error: Auto-tune is already running. Stop it first with 'srautotune stop' to restart it.";
     }
     gSrAutoTuneActive = true;
     gSrAutoTuneStep = 0;
@@ -3814,7 +3863,7 @@ static const char* cmd_sr_autotune(const String& argsInput) {
   
   if (args == "stop") {
     if (!gSrAutoTuneActive) {
-      return "Error: Auto-tune not running.";
+      return "Error: Auto-tune is not running. Start it with 'srautotune start'.";
     }
     gSrAutoTuneActive = false;
     gSrRawOutputEnabled = false;
@@ -3823,7 +3872,7 @@ static const char* cmd_sr_autotune(const String& argsInput) {
     return "Auto-tune stopped. Review the results above to pick best config.";
   }
   
-  return "Error: invalid arguments — Usage: sr autotune [start|stop|status]";
+  return "Error: invalid arguments — Usage: srautotune [start|stop|status]";
 }
 
 static const char* cmd_sr_timeout(const String& argsInput) {
@@ -3833,7 +3882,7 @@ static const char* cmd_sr_timeout(const String& argsInput) {
   
   if (args.length() == 0) {
     static char buf[96];
-    snprintf(buf, sizeof(buf), "Command timeout: %d ms (%.1f sec)\nUsage: sr timeout <1000-30000>",
+    snprintf(buf, sizeof(buf), "Command timeout: %d ms (%.1f sec)\nUsage: srtimeout <1000-30000>",
              gSettings.srCommandTimeout, gSettings.srCommandTimeout / 1000.0f);
     return buf;
   }
@@ -3910,14 +3959,14 @@ static const char* cmd_sr_tuning_swgain(const String& argsInput) {
     static char buf[100];
     int mg = gSettings.microphoneGain;
     float swgain = 24.0f * ((float)mg / 50.0f);
-    snprintf(buf, sizeof(buf), "micgain: %d%% (swgain: %.1f, DC offset: %d)\nUsage: sr tuning swgain <1.0-50.0>",
+    snprintf(buf, sizeof(buf), "micgain: %d%% (swgain: %.1f, DC offset: %d)\nUsage: srtuningswgain <1.0-50.0>",
              mg, swgain, (int)getMicDcOffset());
     return buf;
   }
   
-  float val = args.toFloat();
-  if (val < 1.0f || val > 50.0f) {
-    return "Error: swgain must be 1.0-50.0";
+  float val = 0.0f;
+  if (!parseFloatArg(args, 1.0, 50.0, val)) {
+    return "Error: swgain must be a number from 1.0 to 50.0, for example 24.";
   }
 
   int mg = (int)lroundf((val / 24.0f) * 50.0f);
@@ -3940,13 +3989,13 @@ static const char* cmd_sr_tuning_gain(const String& argsInput) {
   
   if (args.length() == 0) {
     static char buf[80];
-    snprintf(buf, sizeof(buf), "AFE linear gain: %.1f\nUsage: sr tuning gain <0.1-10.0>", gSettings.srAfeGain);
+    snprintf(buf, sizeof(buf), "AFE linear gain: %.1f\nUsage: srtuninggain <0.1-10.0>", gSettings.srAfeGain);
     return buf;
   }
   
-  float val = args.toFloat();
-  if (val < 0.1f || val > 10.0f) {
-    return "Error: gain must be 0.1-10.0";
+  float val = 0.0f;
+  if (!parseFloatArg(args, 0.1, 10.0, val)) {
+    return "Error: gain must be a number from 0.1 to 10.0, for example 2.5.";
   }
   
   setSetting(gSettings.srAfeGain, val);
@@ -3962,7 +4011,7 @@ static const char* cmd_sr_tuning_agc(const String& argsInput) {
   
   if (args.length() == 0) {
     static char buf[100];
-    snprintf(buf, sizeof(buf), "AGC mode: %d (0=off, 1=-9dB, 2=-6dB, 3=-3dB)\nUsage: sr tuning agc <0-3>", gSettings.srAgcMode);
+    snprintf(buf, sizeof(buf), "AGC mode: %d (0=off, 1=-9dB, 2=-6dB, 3=-3dB)\nUsage: srtuningagc <0-3>", gSettings.srAgcMode);
     return buf;
   }
   
@@ -3986,7 +4035,7 @@ static const char* cmd_sr_tuning_vad(const String& argsInput) {
   
   if (args.length() == 0) {
     static char buf[100];
-    snprintf(buf, sizeof(buf), "VAD mode: %d (0-4, higher=more restrictive)\nUsage: sr tuning vad <0-4>", gSettings.srVadMode);
+    snprintf(buf, sizeof(buf), "VAD mode: %d (0-4, higher=more restrictive)\nUsage: srtuningvad <0-4>", gSettings.srVadMode);
     return buf;
   }
   
@@ -4012,7 +4061,7 @@ static const char* cmd_sr_tuning_filters(const String& argsInput) {
     snprintf(buf, sizeof(buf), 
       "Audio filters: %s (high-pass + pre-emphasis)\n"
       "When OFF: only DC offset removal + gain applied\n"
-      "Usage: sr tuning filters <on|off>",
+      "Usage: srtuningfilters <on|off>",
       gSrFiltersEnabled ? "ON" : "OFF");
     return buf;
   }
@@ -4024,13 +4073,13 @@ static const char* cmd_sr_tuning_filters(const String& argsInput) {
     gSrFiltersEnabled = false;
     return "Audio filters DISABLED (DC offset + gain only)";
   }
-  return "Error: invalid arguments — Usage: sr tuning filters <on|off>";
+  return "Error: invalid arguments — Usage: srtuningfilters <on|off>";
 }
 
 static const char* cmd_sr_snip(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   (void)argsInput;
-  return "Error: invalid arguments — Usage: sr snip <on|off|start|stop|status|config>";
+  return "Error: srsnip is not a command by itself. Use srsnipon, srsnipoff, srsnipstart, srsnipstop, srsnipstatus or srsnipconfig.";
 }
 
 static const char* cmd_sr_snip_on(const String& argsInput) {
@@ -4040,7 +4089,11 @@ static const char* cmd_sr_snip_on(const String& argsInput) {
     return "Error: SR not running. Run: srstart";
   }
   if (!srSnipInit()) {
-    return "Error: failed to initialize snippet capture";
+    return "Error: Snippet writer could not start. Free memory and run srsnipon again.";
+  }
+  // srSnipInit() succeeds without the pre-trigger ring; wake-word capture needs it.
+  if (!srSnipInitRingBuffer()) {
+    return "Error: Snippet buffer could not be allocated. Free memory and run srsnipon again.";
   }
   gSrSnipEnabled = true;
   return "Snippet capture enabled (will trigger on wake word)";
@@ -4059,8 +4112,12 @@ static const char* cmd_sr_snip_start(const String& argsInput) {
   if (!gEspSrRunning) {
     return "Error: SR not running. Run: srstart";
   }
+  // A running session (manual or wake-word) would be ended and replaced.
+  if (gSrSnipSessionActive) {
+    return "Error: A snippet capture is already running. Stop it first with 'srsnipstop' to restart it.";
+  }
   if (!srSnipInit()) {
-    return "Error: failed to initialize snippet capture";
+    return "Error: Snippet writer could not start. Free memory and run srsnipstart again.";
   }
   gSrSnipManualStartRequested = true;
   return "Manual snippet capture started";
@@ -4070,7 +4127,7 @@ static const char* cmd_sr_snip_stop(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   (void)argsInput;
   if (!gSrSnipSessionActive) {
-    return "Error: No active snippet session";
+    return "Error: No snippet session is active. Start one with 'srsnipstart'.";
   }
   gSrSnipManualStopRequested = true;
   return "Manual snippet capture stopped";
@@ -4120,29 +4177,27 @@ static const char* cmd_sr_snip_config(const String& argsInput) {
     out += String((unsigned)gSrSnipMaxMs);
     out += " (max duration)\n  dest=";
     out += (gSrSnipDest == SrSnipDest::Auto) ? "auto" : ((gSrSnipDest == SrSnipDest::SD) ? "sd" : "internal");
-    out += "\nUsage: sr snip config <pre_ms|max_ms|dest> <value>";
+    out += "\nUsage: srsnipconfig <pre_ms|max_ms|dest> <value>";
     return out.c_str();
   }
-  if (!a.hasMinArgs(2)) return "Error: invalid arguments — Usage: sr snip config <pre_ms|max_ms|dest> <value>";
+  if (!a.hasMinArgs(2)) return "Error: invalid arguments — Usage: srsnipconfig <pre_ms|max_ms|dest> <value>";
   String key = a.arg(0);
   key.toLowerCase();
   String val = a.arg(1);
   if (key == "pre_ms") {
     int v = 0;
-    if (!parseIntArg(val, v)) return kCommandReplyNotANumber;
-    if (v < 100) v = 100;
-    if (v > 5000) v = 5000;
+    if (!parseIntArg(val, 100, 5000, v)) return "Error: pre_ms must be 100-5000";
     gSrSnipPreMs = (uint32_t)v;
     srSnipFreeRingBuffer();
-    if (gSrSnipEnabled) srSnipInitRingBuffer();
+    if (gSrSnipEnabled && !srSnipInitRingBuffer()) {
+      return "Error: pre_ms saved, but the snippet buffer could not be allocated. Free memory and run srsnipon.";
+    }
     static char buf[64];
     snprintf(buf, sizeof(buf), "pre_ms set to %u", (unsigned)gSrSnipPreMs);
     return buf;
   } else if (key == "max_ms") {
     int v = 0;
-    if (!parseIntArg(val, v)) return kCommandReplyNotANumber;
-    if (v < 1000) v = 1000;
-    if (v > 30000) v = 30000;
+    if (!parseIntArg(val, 1000, 30000, v)) return "Error: max_ms must be 1000-30000";
     gSrSnipMaxMs = (uint32_t)v;
     static char buf[64];
     snprintf(buf, sizeof(buf), "max_ms set to %u", (unsigned)gSrSnipMaxMs);
@@ -4165,8 +4220,8 @@ static const char* cmd_sr_snip_config(const String& argsInput) {
 
 // Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
 const CommandEntry espsrCommands[] = {
-  { "sr", "ESP-SR speech recognition commands.", false, cmd_sr, "Usage: sr <enable|start|stop|status|stack|cmds|debug|confidence|timeout|tuning|accept|dyngain|raw|autotune|snip>" },
-  { "srenable", "ESP-SR enable is a compile-time flag (cannot be toggled at runtime).", true, cmd_sr_enable, "Usage: srenable   (informational; ESP-SR is set at compile time, any 0|1 argument is ignored)" },
+  { "sr", "ESP-SR speech recognition commands.", false, cmd_sr, "Usage: srstart | srstop | srstatus | srstack | srcmdslist | srdebuglevel | srconfidence | srtimeout | srtuning | sraccept | srdyngain | srraw | srautotune | srsnipstatus" },
+  { "srenable", "ESP-SR enable is a compile-time flag (cannot be toggled at runtime).", true, cmd_sr_enable, "Usage: srenable   (informational; runtime switch is srenabled 0|1)" },
   { "opensr", "Start ESP-SR pipeline and arm voice as the current user.", false, cmd_sr_start, "Usage: opensr" },
   { "closesr", "Stop ESP-SR pipeline.", false, cmd_sr_stop, "Usage: closesr" },
   { "srstatus", "Show ESP-SR status.", false, cmd_sr_status, "Usage: srstatus" },
@@ -4176,7 +4231,7 @@ const CommandEntry espsrCommands[] = {
   { "voicearm", "Arm voice command execution as the current authenticated user.", false, cmd_voice_arm_cli, "Usage: voicearm" },
   { "voicedisarm", "Disarm voice command execution.", false, cmd_voice_disarm_cli, "Usage: voicedisarm" },
   { "voicestatus", "Show voice arming status.", false, cmd_voice_status_cli, "Usage: voicestatus" },
-  { "srcmds", "Manage MultiNet command phrases.", true, cmd_sr_cmds, "Usage: srcmds <list|add|del|clear|save|reload|sync>" },
+  { "srcmds", "Manage MultiNet command phrases.", true, cmd_sr_cmds, "Usage: srcmdslist | srcmdsadd <id> <phrase> | srcmdsdel <phrase|id> | srcmdsclear confirm | srcmdssave | srcmdsreload | srcmdssync" },
   { "srcmdslist", "List current MultiNet commands.", true, cmd_sr_cmds_list, "Usage: srcmdslist" },
   { "srcmdsadd", "Add or update a MultiNet command.", true, cmd_sr_cmds_add, "Usage: srcmdsadd <id> <phrase>" },
   { "srcmdsdel", "Delete a MultiNet command (by phrase or id).", true, cmd_sr_cmds_del, "Usage: srcmdsdel <phrase|id>" },
@@ -4184,7 +4239,7 @@ const CommandEntry espsrCommands[] = {
   { "srcmdsreload", "Reload commands from SD file.", true, cmd_sr_cmds_reload, "Usage: srcmdsreload" },
   { "srcmdssave", "Save current commands to SD file.", true, cmd_sr_cmds_save, "Usage: srcmdssave" },
   { "srcmdssync", "Sync voice commands from CLI registry.", true, cmd_sr_cmds_sync, "Usage: srcmdssync" },
-  { "srdebug", "SR debug/telemetry commands.", false, cmd_sr_debug, "Usage: srdebug <level|telem|stats|reset>" },
+  { "srdebug", "SR debug/telemetry commands.", false, cmd_sr_debug, "Usage: srdebuglevel [0-4] | srdebugtelem [ms] | srdebugstats | srdebugreset" },
   { "srdebuglevel", "Set debug verbosity (0-4).", false, cmd_sr_debug_level, "Usage: srdebuglevel [0-4]" },
   { "srdebugtelem", "Set periodic telemetry interval (ms, 0=off).", false, cmd_sr_debug_telem, "Usage: srdebugtelem [ms]" },
   { "srdebugstats", "Print current SR statistics.", false, cmd_sr_debug_stats, "Usage: srdebugstats" },
@@ -4201,16 +4256,16 @@ const CommandEntry espsrCommands[] = {
   { "srtuningagc", "Set AGC mode (0=off, 1-3=levels).", false, cmd_sr_tuning_agc, "Usage: srtuningagc <0-3>" },
   { "srtuningvad", "Set VAD sensitivity (0-4).", false, cmd_sr_tuning_vad, "Usage: srtuningvad <0-4>" },
   { "srtuningfilters", "Toggle audio filters (high-pass + pre-emphasis).", false, cmd_sr_tuning_filters, "Usage: srtuningfilters <on|off>" },
-  { "srsnip", "Voice snippet capture commands.", false, cmd_sr_snip, "Usage: srsnip <on|off|start|stop|status|config>" },
+  { "srsnip", "Voice snippet capture commands.", false, cmd_sr_snip, "Usage: srsnipon | srsnipoff | srsnipstart | srsnipstop | srsnipstatus | srsnipconfig" },
   { "srsnipon", "Enable auto-capture on wake word.", false, cmd_sr_snip_on, "Usage: srsnipon" },
   { "srsnipoff", "Disable auto-capture.", false, cmd_sr_snip_off, "Usage: srsnipoff" },
   { "srsnipstart", "Start manual snippet capture now.", false, cmd_sr_snip_start, "Usage: srsnipstart" },
   { "srsnipstop", "Stop manual snippet capture and save.", false, cmd_sr_snip_stop, "Usage: srsnipstop" },
   { "srsnipstatus", "Show snippet capture status.", false, cmd_sr_snip_status, "Usage: srsnipstatus" },
-  { "srsnipconfig", "Configure snippet capture params.", false, cmd_sr_snip_config, "Usage: srsnipconfig [pre_ms|max_ms|dest] [value]" },
+  { "srsnipconfig", "Configure snippet capture params.", false, cmd_sr_snip_config, "Usage: srsnipconfig [pre_ms <100-5000> | max_ms <1000-30000> | dest <auto|sd|internal>]" },
   // Voice-only helper commands; their "*" (all-stages) phrases live in kVoiceRoutes
-  { "voicecancel", "Cancel current voice command sequence.", false, cmd_voice_cancel },
-  { "voicehelp", "Show available voice options for current state.", false, cmd_voice_help },
+  { "voicecancel", "Spoken only: say cancel (or nevermind) after the wake word. Typed, it answers an error.", false, cmd_voice_cancel },
+  { "voicehelp", "Spoken only: say help after the wake word. Typed, it answers an error.", false, cmd_voice_help },
 };
 
 const size_t espsrCommandsCount = sizeof(espsrCommands) / sizeof(espsrCommands[0]);

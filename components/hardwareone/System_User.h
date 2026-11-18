@@ -318,8 +318,11 @@ bool loginTransportFromNamedSession(CommandSource target,
 uint32_t publishUartAccountSession(const String& username,
                                    uint32_t* transportEpochOut = nullptr);
 void logoutTransport(CommandSource transport);
-// Refuses (with *denialOut set when given) to sign out a target session whose
-// account outranks the source account, the rank rule the user mutations use.
+// Signs out the target session on behalf of the source session. *denialOut,
+// when given, gets the reply of a refusal that has its own reason: storage
+// busy, a source account that may not control other sessions, or a target
+// account that outranks the source (the rank rule the user mutations use).
+// It stays unset when the source session ended or changed.
 bool logoutTransportFromNamedSession(CommandSource target,
                                      CommandSource source,
                                      const String& sourceUser,

@@ -274,8 +274,7 @@ const char* cmd_apdsstart(const String& argsInput) {
 // Stop APDS sensor (all modes)
 const char* cmd_apdsstop(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!requestSensorStop(I2C_DEVICE_APDS)) return "Error: [APDS] Could not queue stop";
-  return "[APDS] Stop requested; cleanup will complete asynchronously";
+  return cmd_sensorstop_queued(I2C_DEVICE_APDS, "APDS");
 }
 
 // Runtime mode control (once sensor is running)
@@ -299,9 +298,16 @@ const char* cmd_apdsmode(const String& argsInput) {
     return getDebugBuffer();
   }
 
+  if (a.count() > 2) return "Error: Too many arguments. Use apdsmode <color|proximity|gesture> [on|off].";
   String mode = a.arg(0);
   mode.toLowerCase();
-  bool enable = a.argBool(1, true);  // default to "on" if not specified
+  // On when no value is given; text that is neither on nor off is refused.
+  bool enable = true;
+  if (a.has(1)) {
+    const int onOff = parseBoolArg(a.arg(1));
+    if (onOff < 0) return kCommandReplyNotOnOff;
+    enable = (onOff == 1);
+  }
   
   // Writes go through apdsDeviceWrite: one bus transaction, driver pinned.
   static const char* const kModeWriteFailed = "Error: [APDS] Sensor busy or stopping; mode unchanged";

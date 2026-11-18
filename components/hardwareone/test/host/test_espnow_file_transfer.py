@@ -89,6 +89,7 @@ def main():
         p.error('a host C++17 compiler is required')
     sys.path.insert(0, str(HERE))
     from test_web_batch_handlers import extract_block
+    from reply_words_source import module_reply_constants
 
     def path_of(name):
         overlay = a.source_dir / name if a.source_dir else None
@@ -191,6 +192,7 @@ def main():
         result_types += '\n' + fmt.group(0)
 
     commands = '\n\n'.join((
+        module_reply_constants(a.component),  # cmd_imagesend returns kFileReplyMissingOrDenied
         body(command_h, 'class CommandArgs', 'System_Command.h', ';'),
         'const String CommandArgs::empty_;',
         body(command_cpp, 'CommandArgs::CommandArgs(', 'System_Command.cpp'),

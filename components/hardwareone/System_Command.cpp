@@ -149,7 +149,8 @@ String executeCommandThroughRegistry(const String& argsInput) {
   command.trim();
 
   if (command.length() == 0) {
-    return "Empty command";
+    // The same text as the queued executor's kReplyEmptyCommand (System_Utils.cpp).
+    return "Error: Empty command. Type a command, or help for the list.";
   }
 
   // Reject binary/non-printable input — garbled bytes from a torn-down connection
@@ -447,13 +448,68 @@ String CommandArgs::remaining(int afterIndex) const {
   return raw_.substring(pos);
 }
 
-String CommandArgs::value(const String& key) const {
-  String needle = key + "=";
-  int pos = raw_.indexOf(needle);
-  if (pos < 0) return String();
+// One token of a key=value line, starting at `pos` (not white space): a bare
+// word, a "quoted text", or key=value where a value in double quotes runs to
+// its closing quote (\" does not close it). Returns the position after the
+// token; `eq` is the position of the '=' that ends the key, or -1 for a token
+// without one.
+static int scanKeyValueToken(const String& raw, int pos, int& eq) {
+  const int len = (int)raw.length();
+  eq = -1;
+  if (raw[pos] == '"') {
+    pos++;
+    while (pos < len && raw[pos] != '"') pos++;
+    if (pos < len) pos++;  // closing quote
+  } else {
+    while (pos < len && raw[pos] != '=' &&
+           !isspace(static_cast<unsigned char>(raw[pos]))) pos++;
+    if (pos < len && raw[pos] == '=') {
+      eq = pos++;
+      if (pos < len && raw[pos] == '"') {
+        pos++;
+        while (pos < len && raw[pos] != '"') {
+          pos += (raw[pos] == '\\' && pos + 1 < len && raw[pos + 1] == '"') ? 2 : 1;
+        }
+        if (pos < len) pos++;  // closing quote
+      }
+    }
+  }
+  // Text glued to the token belongs to it; the next token starts after white space.
+  while (pos < len && !isspace(static_cast<unsigned char>(raw[pos]))) pos++;
+  return pos;
+}
 
-  int start = pos + needle.length();
-  if (start >= (int)raw_.length()) return String();
+bool CommandArgs::nextKeyToken(int& cursor, int& start, int& keyLen) const {
+  const int len = (int)raw_.length();
+  int pos = cursor < 0 ? 0 : cursor;
+  while (pos < len && isspace(static_cast<unsigned char>(raw_[pos]))) pos++;
+  if (pos >= len) {
+    cursor = len;
+    return false;
+  }
+  int eq = -1;
+  start = pos;
+  cursor = scanKeyValueToken(raw_, pos, eq);
+  keyLen = eq > start ? eq - start : 0;
+  return true;
+}
+
+// The offset right after "<key>=" of the first token with that key, or -1.
+static int keyValueStart(const CommandArgs& args, const String& key) {
+  const int wanted = (int)key.length();
+  if (wanted <= 0) return -1;
+  int cursor = 0, start = 0, keyLen = 0;
+  while (args.nextKeyToken(cursor, start, keyLen)) {
+    if (keyLen == wanted && strncmp(args.raw().c_str() + start, key.c_str(), wanted) == 0) {
+      return start + keyLen + 1;
+    }
+  }
+  return -1;
+}
+
+String CommandArgs::value(const String& key) const {
+  int start = keyValueStart(*this, key);
+  if (start < 0 || start >= (int)raw_.length()) return String();
 
   // quoted value? Honor backslash-escaped quotes (\") — the web UI emits
   // them for nested JSON (secondarytriggers=), quoted text inside commands=,
@@ -486,8 +542,7 @@ String CommandArgs::value(const String& key) const {
 }
 
 bool CommandArgs::hasKey(const String& key) const {
-  String needle = key + "=";
-  return raw_.indexOf(needle) >= 0;
+  return keyValueStart(*this, key) >= 0;
 }
 
 // ============================================================================

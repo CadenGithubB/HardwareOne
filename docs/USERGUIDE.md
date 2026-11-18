@@ -651,7 +651,7 @@ What you see when something changes (console and event log, tagged `[EVENT][BOND
 
 **Which device is master.** `bondrole master` or `bondrole worker` chooses the role, and `bondconnect` keeps a chosen role. A device whose role was not chosen (the default) takes the other role than a partner whose user chose one: at `bondconnect`, when the partner already asked to bond with this device, or as soon as the partner's request or answer arrives (the console says `<partner> chose the master role: this device is worker now`). When neither device chose, the one with the higher address is master. When both chose the same role, `bondstatus` shows *both are master* (or *worker*). `bondrole auto` gives the choice up; the role stays until the partner chooses or the next `bondconnect`. `bondrole` with no argument, `bondconnect` and `bondstatus` say whether the role was chosen or how it was decided (`kept as it was set earlier` when it is neither chosen nor the one the addresses give). A partner on older firmware never takes the other role: with a role chosen here that it has too, `bondstatus` shows the conflict until `bondrole` changes one of them.
 
-Running `bondconnect <mac_or_name>` again for the partner already set does not change anything on this device. While the partner has not agreed it asks the partner again at once (at most every 5 s) instead of at the next minute, and the reply says what the partner last answered; once the partner has agreed the reply is `Already connected to this device in bond mode.`
+Running `bondconnect <mac_or_name>` again for the partner already set does not change anything on this device. While the partner has not agreed it asks the partner again at once (at most every 5 s) instead of at the next minute, and the reply says what the partner last answered; once the partner has agreed the reply is `Error: The bond with this device is already running. Refresh it with 'bondresync'.` (or, while there is no session with it, that its handshake started).
 
 A device never says which other device it is bonded to. The web Remote page and the OLED bond screen show the same state (`Bond Not Confirmed`, `No bond there`).
 
@@ -1126,6 +1126,12 @@ Two things about lookup that explain most surprises:
 - Matching is **case-insensitive**, so `MQTTHOST` and `mqtthost` are the same command. Every command is registered in lower case without separators (`mqtthost`, `httpautostart`); a family of sub-commands puts a space between its words (`phone pair new`, `ring panel on`).
 - Lookup is **longest-prefix**, so `automation list` resolves to the `automation` dispatcher with `list` as an argument rather than needing its own entry. This is why some features appear as one command with subcommands and others as a family of single words.
 
+A command that cannot do what it was asked answers `Error: <reason>. <next step>.`, and the web
+API, automations and the displays count it as failed. That includes stopping something that is
+not running and starting something that is already running: `closehttp` with no server answers
+`Error: HTTP server is not running. Start it with 'openhttp'.`, and `openhttp` while the server
+runs answers `Error: HTTP server is already running. Stop it first with 'closehttp' to restart it.`
+
 <details>
 <summary><strong>core - System commands</strong></summary>
 
@@ -1235,7 +1241,6 @@ espnowgroupaccept [json] <name_or_mac|all> - Accept the room and tags a peer ann
 espnowgroupdrop [json] <name_or_mac|all>   - Take back what was accepted for a peer
 
 --- What a master collects: readings, battery, events ---
-espnowworker [show|on|off|interval <ms>|fields <list>]  - Worker status reporting
 espnowsensorstream <sensor> <on|off>   - Send one sensor's readings to the master named on this device
 espnowsensorstatus [json [<name_or_mac> [via <name_or_mac>]]]  - What this device sends and why not; what it received, lost and refused
 espnowbattery [json] [<name_or_mac>] [from <n>]  - Master: the battery state other devices sent
@@ -1247,7 +1252,7 @@ espnowbackupfingerprint [64 hex|clear] - Name the backup master on this device (
 espnowforwardlinks [json] [from <n>]   - Master: who forwards for which bond partner
 
 --- Security ---
-espnowsetpassphrase "phrase"    - Set encryption passphrase
+espnowsetpassphrase <mesh> "<passphrase>"  - Set a mesh's encryption passphrase (double quotes when it has spaces)
 espnowencstatus                 - Show encryption status and key fingerprint
 espnowpairsecure <mac> <name>   - Pair with encryption
 
@@ -1406,7 +1411,7 @@ filerename "<oldpath>" "<newname>"  - Rename file
 ```
 sdmount                         - Mount SD card
 sdunmount                       - Unmount SD card
-sdformat                        - Format SD card as FAT32
+sdformat confirm                - Format SD card as FAT32 (erases the card; without confirm it answers an error and formats nothing)
 sdinfo                          - Show SD card information
 sddiag                          - SD card hardware diagnostics
 ```
@@ -1425,12 +1430,10 @@ oledanim <name>                 - Select animation, or: oledanim fps <1-60>
 oledclear                       - Clear display
 oledbrightness <0-255>          - Set brightness
 oledupdateinterval <ms>         - Display update interval (10-1000ms)
-oledbootmode <logo|status|thermal|off>   - Mode shown at boot
 oleddefaultmode <status|thermal|off>     - Mode after boot animation
 oledbootduration <ms>           - Boot animation duration (500-10000ms)
 oledenabled <0|1>               - Enable/disable OLED
 oledthermalscale <1.0-10.0>     - Thermal image scale on OLED
-oledthermalcolormode <3level|grayscale|binary>  - Thermal color mode on OLED
 setgamepadpassword              - Set gamepad joystick unlock pattern
 ```
 </details>
@@ -1446,8 +1449,8 @@ ledeffect <effect>              - Run a NeoPixel effect
 ledbrightness <0-100>           - Set LED brightness
 ledstartupenabled [0|1]         - Enable/disable startup effect
 ledstartupeffect <none|rainbow|pulse|fade|blink|strobe>  - Set startup effect
-ledstartupcolor <color>         - Set startup primary color
-ledstartupcolor2 <color>        - Set startup secondary color
+ledstartupcolor <color>         - Set startup primary color (an unknown name is refused)
+ledstartupcolor2 <color>        - Set startup secondary color (an unknown name is refused)
 ledstartupduration <ms>         - Startup effect duration
 ```
 </details>
@@ -1647,12 +1650,15 @@ mapunload                       - Unload current map and free PSRAM
 map                             - Show current map info and GPS position
 whereami                        - Show current location context (map, room, zone)
 search <name>                   - Search map for a named feature
-waypoint list                   - List all waypoints
-waypoint add <name>             - Add waypoint at current GPS location
-waypoint del <name>             - Delete waypoint
-waypoint goto <name>            - Navigate to waypoint
-waypoint clear                  - Clear all waypoints
-waypointfile <file> <wpName>    - Link a file to a waypoint
+waypoint list                   - List all waypoints with their index
+waypoint add <lat> <lon> [name] - Add a waypoint at the given coordinates (decimal degrees)
+waypoint del <index>            - Delete a waypoint (index from waypoint list)
+waypoint goto <index>           - Navigate to a waypoint
+waypoint clear                  - Clear the navigation target
+waypoint clearall               - Delete all waypoints
+waypoint rename <index> <name>  - Rename a waypoint
+waypoint notes <index> <notes>  - Set a waypoint's notes
+waypointfile "<file>" <wpName>  - Link a file to a waypoint (quoted path; or "<file>" <lat> <lon> [wpName])
 waypointfiles <name> [del <idx>] - List or remove waypoint file attachments
 gpstrack status                 - Show GPS track log status
 gpstrack load                   - Load a saved GPS track
@@ -1689,7 +1695,7 @@ its target.
 ```
 batterystatus                   - Show voltage, charge level, and status
 batterycalibrate                - Reinitialize ADC calibration or re-probe the fuel gauge
-batterylog [on|off|interval <s>|tail|clear]  - Battery time-series CSV log
+batterylog [status|on|off|interval <s>|tail|clear]  - Battery time-series CSV log
 ```
 
 Use `batterystatus json` for the measured voltage, validity flags and estimate
@@ -1802,8 +1808,8 @@ srautotune                      - Auto-cycle gain configs to find best settings
 voicearm                        - Arm voice command execution as current user
 voicedisarm                     - Disarm voice command execution
 voicestatus                     - Show arming status
-voicecancel                     - Cancel current voice command sequence
-voicehelp                       - Show available voice options for current state
+voicecancel                     - Spoken only: say cancel after the wake word
+voicehelp                       - Spoken only: say help after the wake word
 
 --- Command phrases ---
 srcmdslist                      - List current MultiNet command phrases
@@ -2020,7 +2026,7 @@ gpslog [interval_ms]            - Start GPS track logging (persists across boots
 openrtc                         - Start RTC
 closertc                        - Stop RTC
 rtcread [status|temp]           - Read time or temperature compensation
-rtcset <datetime|timestamp>     - Set RTC time
+rtcset <datetime|timestamp>     - Set RTC time (UTC, years 2020-2099)
 rtcsync [to|from]               - Sync time to/from system clock
 rtcautostart [on|off]           - Auto-start on boot
 ```

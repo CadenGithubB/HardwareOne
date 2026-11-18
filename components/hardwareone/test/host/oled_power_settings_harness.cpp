@@ -71,6 +71,10 @@ static char gDebugBuffer[1024];
 static bool ensureDebugBuffer() { return true; }
 static char* getDebugBuffer() { return gDebugBuffer; }
 
+// ---- validate pass of the command executor (System_Utils.h) --------------------------
+bool gCliValidateOnly = false;
+#define RETURN_VALID_IF_VALIDATE_CSTR() do { if (::gCliValidateOnly) return "VALID"; } while (0)
+
 // ---- production: the powersave command handler (System_Power.cpp) -------------------
 // INSERT_CMD_POWERSAVE
 

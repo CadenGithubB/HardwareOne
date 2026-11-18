@@ -300,6 +300,9 @@ static void busOutcomes() {
   }
 }
 #endif
+static const char kCpuFrequencyChangeFailed[] =
+    "Error: CPU frequency change failed. Another clock change or an I2C transfer was in progress, "
+    "or the switch did not take effect. Retry the command.";
 static void consumerOutcomes() {
   reset(); assert(getPowerCpuFrequencyCount() == 3);
   const uint32_t choices[] = {POWER_INTERACTIVE_FLOOR_MHZ, POWER_CPU_BALANCED_MHZ, POWER_CPU_PERFORMANCE_MHZ};
@@ -310,18 +313,18 @@ static void consumerOutcomes() {
     reset(); halResult = result; assert(!applyPowerMode(POWER_MODE_BALANCED));
     assert(events.empty() && battery.empty() && !brightnessCalls && !settingWrites); released();
     reset(); halResult = result;
-    assert(std::string(cmd_cpufreq(String(std::to_string(POWER_CPU_BALANCED_MHZ)))) == "Error: CPU frequency change failed");
+    assert(std::string(cmd_cpufreq(String(std::to_string(POWER_CPU_BALANCED_MHZ)))) == kCpuFrequencyChangeFailed);
     noPresentation(); released();
   }
   reset(); sCpuFrequencyMutex->holder = 2;
   assert(!applyPowerMode(POWER_MODE_PERFORMANCE)); // Busy no-op cannot publish success.
-  assert(std::string(cmd_cpufreq(String(std::to_string(current)))) == "Error: CPU frequency change failed");
+  assert(std::string(cmd_cpufreq(String(std::to_string(current)))) == kCpuFrequencyChangeFailed);
   noPresentation(); sCpuFrequencyMutex->holder = 0; released();
 #if ENABLE_I2C_SYSTEM
   reset(); buses[1].refuse = true;
   assert(!applyPowerMode(POWER_MODE_BALANCED)); assert(!halCalls); noPresentation(); released();
   reset(); buses[1].refuse = true;
-  assert(std::string(cmd_cpufreq(String(std::to_string(POWER_CPU_BALANCED_MHZ)))) == "Error: CPU frequency change failed");
+  assert(std::string(cmd_cpufreq(String(std::to_string(POWER_CPU_BALANCED_MHZ)))) == kCpuFrequencyChangeFailed);
   assert(!halCalls); noPresentation(); released();
 #endif
   for (uint8_t mode = 0; mode < POWER_MODE_COUNT; ++mode) {
@@ -423,6 +426,13 @@ int main() {
   bool changed = true;
   assert(!powerSetCpuFrequencyMhz(POWER_CPU_BALANCED_MHZ, &changed));
   assert(!changed && !halCalls); released();
+  // The command names this cause itself, before it asks for the change: the
+  // owner's refusal would get the retry text, and a retry cannot help here.
+  reset(); displayClockRequired = true;
+  assert(std::string(cmd_cpufreq(String(std::to_string(POWER_CPU_BALANCED_MHZ)))) ==
+         "Error: The display needs full CPU speed while it is on. "
+         "Run closeoled, then set the frequency.");
+  assert(!halCalls); noPresentation(); released();
   assert(applyPowerMode(POWER_MODE_ADAPTIVE, false));
   assert(current == POWER_CPU_PERFORMANCE_MHZ);
   displayClockRequired = false;

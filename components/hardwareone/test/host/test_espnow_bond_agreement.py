@@ -96,7 +96,7 @@ def check_role_sources(component):
             'nullptr, false, "bond", nullptr, true },' in source,
             "the flag is persisted, in the 'bond' group (not remotely editable), shown and not edited")
     connect = extract_block(source, 'const char* cmd_bond_connect(const String& argsInput)')
-    require('bondRoleForConnect(peerMac)' in connect and 'setSetting(gSettings.bondRole, role.role);' in connect and
+    require('bondRoleForConnect(peerMac)' in connect and 'gSettings.bondRole = role.role;' in connect and
             'cmp > 0' not in connect, "bondconnect takes the role from roleForBond, not from the addresses alone")
     status = extract_block(source, 'const char* cmd_bond_status(const String& argsInput)')
     require('doc["roleChosen"] = gSettings.bondRoleChosen;' in status and

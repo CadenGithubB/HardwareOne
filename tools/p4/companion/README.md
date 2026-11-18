@@ -180,11 +180,15 @@ c6update "/sd/network_adapter.bin"
 The P4 checks the file before sending anything (an ESP32-C6 application image
 of at most 1920 KB that contains the bridge marker `HW1-ESPNOW-BRIDGE/1`),
 pauses ESP-NOW and Bluetooth, streams the image into the inactive ota slot
-through ESP-Hosted's OTA requests, activates it, waits for the C6 to reboot,
-rebuilds the transport and asks the bridge again. Only when the bridge
-answers from the new image is it confirmed; if it does not, the C6 falls back
-to the previous image on its next reset (with the rollback-enabled
-bootloader) and `c6status` reports what happened. Wi-Fi stays up during the
+through ESP-Hosted's OTA requests and activates it. The C6 reboots into the
+new image, which confirms itself after running four seconds without a reset
+(Hosted resets the C6 whenever the P4 starts the transport, so the P4 cannot
+confirm it in time: an unconfirmed image would roll back at that reset). The
+P4 waits ten seconds, rebuilds the transport, asks the bridge again and checks
+that the C6 runs the other slot; if it is back on the old slot the update is
+reported as failed. An image that crashes on its first boot still rolls back;
+one that boots but then misbehaves stays, and is replaced with `c6update` or
+the programmer. `c6status` reports what happened. Wi-Fi stays up during the
 transfer when it was up; the paused features return afterwards. `c6confirm`
 accepts a pending image by hand and `c6restart` restarts the companion in
 place.
@@ -194,9 +198,8 @@ no bridge yet, to replace the bootloader or partition table, and to take or
 restore full backups.
 
 Restart, hold and release ran on the board on 2026-10-03. The update path
-has not: the bench device's LittleFS had less free space than the image
-needs (about 1.3 MB), so the transfer and the rollback confirmation remain
-to be exercised.
+first ran on 2026-11-18: before the self-confirm, every update rolled back
+at the transport reset that followed it.
 
 ## Changing the pin
 

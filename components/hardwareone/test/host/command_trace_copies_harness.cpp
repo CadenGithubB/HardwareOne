@@ -37,6 +37,7 @@ static constexpr BaseType_t pdFALSE = 0;
 #define configASSERT(x) check(x)
 static inline uint32_t millis() { return 0; }
 #include "System_CommandTypes.h"
+#include "System_CommandReply.h"
 
 #define ENABLE_HTTP_SERVER 1
 #define MSG_ROUTE_SERIAL 0x01
@@ -184,6 +185,7 @@ static void submitCases() {
   check(redactions == 1 && traces.size() == 2);
   check(traces[1] == format("[submitSync] queue full for '%.40s'", redacted.c_str()));
   check(broadcasts.size() == 1 && broadcasts[0] == "[ERROR] Command queue full - try again");
+  check(std::strcmp(out.c_str(), "Error: Command queue full. Try again in a few seconds.") == 0);
   // The same, trace off: no redaction.
   reset();
   exec.queueAccepts = false;
@@ -195,7 +197,8 @@ static void submitCases() {
   reset();
   exec.timeout = true;
   check(!submitAndExecuteSync(cmd, out, &completed));
-  check(std::strcmp(out.c_str(), "[ERROR] Command timed out") == 0);
+  check(std::strcmp(out.c_str(), "Error: Command timed out after 60 s. It may still finish; check the "
+                                 "result before repeating it.") == 0);
   check(redactions == 1 && traces.empty() && errors.size() == 1);
   check(errors[0] == format("sync command timed out after 60000 ms; command execution may continue; "
                             "line='%.60s'", redacted.c_str()));

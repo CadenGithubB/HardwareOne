@@ -81,6 +81,7 @@ volatile UBaseType_t gGamepadWatermarkNow = (UBaseType_t)0;
 // ============================================================================
 
 const char* cmd_gamepad(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
   if (argWantsJson(argsInput)) {
     if (!ensureDebugBuffer()) return SENSOR_JSON_NOBUF;
     int n = gamepadBuildDataJson(getDebugBuffer(), 1024);  // shared builder (also feeds sensors json)
@@ -93,8 +94,12 @@ const char* cmd_gamepad(const String& argsInput) {
       return "Error: [Gamepad] Not connected - check wiring";
     }
   }
-  gamepadPoll();
-  return "[Gamepad] Data read complete";
+  if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
+  uint32_t buttons = 0;
+  int16_t x = 0, y = 0;
+  if (!gamepadPoll(buttons, x, y)) return "Error: [Gamepad] Read failed. Check wiring and retry.";
+  snprintf(getDebugBuffer(), 1024, "[Gamepad] Buttons: 0x%lX, X: %d, Y: %d", (unsigned long)buttons, x, y);
+  return getDebugBuffer();
 }
 
 // cmd_openinput / cmd_closeinput / cmd_inputautostart / cmd_inputdevicepollms
@@ -346,14 +351,17 @@ bool gamepadInitConnection() {
   return false;
 }
 
-void gamepadPoll() {
-  if (!gInputConnected || !gGamepadSeesaw) {
-    broadcastOutput("Gamepad not connected. Check wiring.");
-    return;
-  }
+// One read of the raw gamepad state. False when the gamepad is not connected
+// or the read did not run; prints nothing, the caller reports the outcome.
+bool gamepadPoll(uint32_t& buttons, int16_t& x, int16_t& y) {
+  buttons = 0;
+  x = 0;
+  y = 0;
+  if (!gInputConnected || !gGamepadSeesaw) return false;
 
-  uint32_t buttons = 0;
-  int16_t x = 0, y = 0;
+  // Set as the last step of the read: the wrapper returns without running it
+  // when the bus is stopped or the device lock is not taken.
+  bool ran = false;
 
   // Bus-aware transaction wrapper to prevent bus contention. The gamepad's
   // bus is fixed at gamepadInit time and stored in gSettings.inputBus.
@@ -362,9 +370,9 @@ void gamepadPoll() {
     buttons = gGamepadSeesaw->digitalReadBulk(GAMEPAD_BUTTON_MASK);
     x = gGamepadSeesaw->analogRead(14);
     y = gGamepadSeesaw->analogRead(15);
+    ran = true;
   });
-
-  BROADCAST_PRINTF("Buttons: 0x%lX, X: %d, Y: %d", (unsigned long)buttons, x, y);
+  return ran;
 }
 
 // ============================================================================

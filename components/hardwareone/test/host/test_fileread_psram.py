@@ -43,8 +43,8 @@ def main() -> None:
             "fileread must not restore String output/base64 temporaries")
     for contract in (
         "RETURN_VALID_IF_VALIDATE_CSTR();", "CommandArgs a(argsInput);",
-        "requireQuotedPath(a, 0, path)", "a.has(1) ? a.argInt(1, 0) : 0",
-        "a.has(2) ? a.argInt(2, 0) : 0", "for (int i = 3; i < a.count(); i++)",
+        "requireQuotedPath(a, 0, path)", "a.has(1) && !parseIntArg(a.arg(1), offset)",
+        "a.has(2) && !parseIntArg(a.arg(2), reqLen)", "for (int i = 3; i < a.count(); i++)",
         'VFS::openGuarded(path, "r", ctx)', 'FsLockGuard _g("fileread")',
         "if (offset > 0) f.seek((uint32_t)offset);", "got = f.read(buf, want);",
         "ctx.transport == SOURCE_BLUETOOTH", "bleSessionConfidential(connId, epoch)",
@@ -86,8 +86,9 @@ def main() -> None:
         harness = harness.replace(marker, production)
     with tempfile.TemporaryDirectory(prefix="hw1-fileread-host-") as temp:
         generated = Path(temp) / "fileread.cpp"
-        (Path(temp) / "System_CommandReply.h").write_text(read("System_CommandReply.h"))
-        generated.write_text('#include "System_CommandReply.h"\n' + harness)
+        for header in ("System_CommandReply.h", "System_ArgParse.h"):
+            (Path(temp) / header).write_text(read(header))
+        generated.write_text('#include "System_CommandReply.h"\n#include "System_ArgParse.h"\n' + harness)
         for bluetooth in (0, 1):
             executable = Path(temp) / f"fileread_ble{bluetooth}"
             command = [args.cxx, "-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic",

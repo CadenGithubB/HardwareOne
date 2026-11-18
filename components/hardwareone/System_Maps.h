@@ -481,8 +481,10 @@ protected:
 
 class MapCore {
 public:
-  // Load a map file from filesystem
-  static bool loadMapFile(const char* path);
+  // Load a map file from filesystem. A file that is missing or not a map this
+  // firmware reads leaves the loaded map in place; a load that fails later has
+  // unloaded it. On false, `why` (when given) receives a few words on the reason.
+  static bool loadMapFile(const char* path, const char** why = nullptr);
   
   // Unload current map
   static void unloadMap();
@@ -490,8 +492,9 @@ public:
   // Check if position is within loaded map bounds
   static bool isPositionInMap(float lat, float lon);
   
-  // Get list of available maps
-  static int getAvailableMaps(char maps[][96], int maxMaps);
+  // Get list of available maps. `more` (when given) is set when the device
+  // holds further maps that did not fit into `maxMaps`.
+  static int getAvailableMaps(char maps[][96], int maxMaps, bool* more = nullptr);
   
   // Render map with explicit parameters (thread-safe — no global reads during render)
   static void renderMap(MapRenderer* renderer, float centerLat, float centerLon,
@@ -834,20 +837,30 @@ public:
   static int addWaypoint(float lat, float lon, const char* name);
   static int addWaypoint(float lat, float lon, const char* name, const char* notes);
 
+  // Outcome of a change to one waypoint. NotSaved: the waypoints file could
+  // not be written (see kNotSaved); the change is then undone, so memory
+  // matches the file.
+  enum class Change : uint8_t { Ok, Invalid, NotSaved };
+  // The command reply for Change::NotSaved.
+  static constexpr char kReplyChangeNotSaved[] =
+      "Error: Waypoint change not saved (no map loaded or write failed). Load the map and retry.";
+
   // Set notes for an existing waypoint
-  static bool setNotes(int index, const char* notes);
+  static Change setNotes(int index, const char* notes);
 
   // Set name for an existing waypoint
-  static bool setName(int index, const char* name);
+  static Change setName(int index, const char* name);
 
-  // File attachment management
-  static bool addFile(int waypointIndex, const char* filePath);
-  static bool removeFile(int waypointIndex, int fileIndex);
+  // File attachment management. Invalid: no such waypoint or file index, an
+  // empty path, a full list, or a file that is already linked.
+  static Change addFile(int waypointIndex, const char* filePath);
+  static Change removeFile(int waypointIndex, int fileIndex);
   static int getFileCount(int waypointIndex);
   static const char* getFile(int waypointIndex, int fileIndex);
   static int findWaypointByName(const char* name);
 
-  // Clear all waypoints
+  // Clear all waypoints. False when the write failed; the waypoints and the
+  // navigation target are then kept.
   static bool clearAll();
   
   // Delete waypoint by index. False for an empty/invalid index, or when the
@@ -860,8 +873,9 @@ public:
   // Get count of active waypoints
   static int getActiveCount();
   
-  // Select waypoint as navigation target (-1 = none)
-  static void selectTarget(int index);
+  // Select waypoint as navigation target (-1 = none). The target is set in
+  // memory either way; false when the waypoints file could not be written.
+  static bool selectTarget(int index);
   static int getSelectedTarget() { return _selectedTarget; }
   
   // Calculate distance (meters) and bearing (degrees) from position to selected target
@@ -916,6 +930,9 @@ const char* cmd_mapload(const String& argsInput);
 const char* cmd_mapunload(const String& argsInput);
 const char* cmd_maplist(const String& argsInput);
 const char* cmd_waypoint(const String& argsInput);
+// The index in the reply of a completed `waypoint add` ("Added waypoint N: name",
+// with or without the "OK: " stamp); -1 for any other reply.
+int waypointAddedIndex(const char* reply);
 const char* cmd_whereami(const String& argsInput);
 const char* cmd_search(const String& argsInput);
 const char* cmd_maporganize(const String& argsInput);

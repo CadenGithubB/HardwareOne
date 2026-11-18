@@ -856,7 +856,9 @@ struct EspNowState {
   uint32_t streamReceivedCount;
   unsigned long lastStreamSendTime;
 
-  // List output buffer (PSRAM-allocated at init)
+  // List output buffer (PSRAM-allocated at init). Sized for the espnowlist
+  // document with all 16 devices: a row is up to 100 bytes, the fixed part 260.
+  static constexpr size_t kListBufferSize = 2048;
   char* listBuffer;
   
   // Message Router
@@ -1376,7 +1378,7 @@ void macFromHexString(const String& s, uint8_t out[6]);
      (const char*)_macbuf; })
 
 // Topology helpers (moved from .ino)
-void requestTopologyDiscovery();
+int requestTopologyDiscovery();  // peers that took the request; -1 when none was started
 void sendTopologyResponse(uint32_t reqId, const uint8_t masterMac[6], JsonArray requestPath);
 void checkTopologyCollectionWindow();  // Check collection window and finalize when timeout expires
 

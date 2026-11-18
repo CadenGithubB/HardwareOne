@@ -13,6 +13,7 @@
 #define FAKE_VFS_EXTERNAL_AUTH_CONTEXT
 #include <Arduino.h>
 
+#include <arpa/inet.h>  // inet_pton, inet_ntop: `ban` parses its address
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
@@ -422,6 +423,18 @@ static void targetedLogoutFollowsTheRankRule() {
   transportUsers[SOURCE_UART] = "carol";
   check(LOGOUT_TARGET(SOURCE_UART, SOURCE_SERIAL, "owner", 7, &denial));
   check(logoutCalls.size() == 3);
+
+  // The other two refusals give their own reason: a caller that may not
+  // control other sessions, and a users lock that could not be taken.
+  denial = nullptr;
+  check(!LOGOUT_TARGET(SOURCE_LOCAL_DISPLAY, SOURCE_SERIAL, "", 7, &denial));
+  check(denial && std::strstr(denial, "may not sign out other sessions"));
+  denial = nullptr;
+  gFsMutex = nullptr;
+  check(!LOGOUT_TARGET(SOURCE_LOCAL_DISPLAY, SOURCE_SERIAL, "alice", 7, &denial));
+  gFsMutex = &gFakeFsSemaphore;
+  check(denial && std::strstr(denial, "Storage is busy"));
+  check(logoutCalls.size() == 3);
 }
 
 static void accountBansWorkWithoutHttp() {
@@ -527,6 +540,20 @@ static void listRepliesAreTerminatedOrRefused() {
   check(terminatedInPlace(reply));
   check(startsWith(reply, "Error:"));
 #endif
+
+  // A users or pending file that is there and cannot be parsed is an error in
+  // both forms of the list, never an empty list. A missing users file is empty.
+  fs.put(USERS_JSON_FILE, "{\"users\":[");
+  for (const char* form : {"json", ""}) {
+    check(std::string(cmd_user_list(form)) == "Error: Users file is malformed. Restore it, then retry userlist.");
+  }
+  fs.remove(USERS_JSON_FILE, fake_vfs::Fs::Auth{});
+  check(std::string(cmd_user_list("json")) == "{\"schema\":1,\"users\":[]}");
+  fs.put(PENDING_USERS_FILE, "[{");
+  for (const char* form : {"json", ""}) {
+    check(std::string(cmd_pending_list(form)) ==
+          "Error: Pending users file is malformed. Restore or delete it, then retry pendinglist.");
+  }
 }
 
 static void rosterSnapshotKeepsFullNames() {

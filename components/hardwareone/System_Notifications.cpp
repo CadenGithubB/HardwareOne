@@ -21,6 +21,7 @@
 #include "System_ConfigLoad.h"    // ConfigLoad::Status — gates the policy file writer
 #include "System_Debug.h"         // BROADCAST_PRINTF, broadcastOutput, cliHint
 #include "System_Utils.h"         // RETURN_VALID_IF_VALIDATE_CSTR, readText/writeTextAtomic
+#include "System_Command.h"       // CommandArgs — the words of a `set <kind> <on|off>` line
 #include "System_User.h"          // isAdminUser, getUserIdByUsername, gLocalDisplay*
 #include "System_UserSettings.h"  // loadUserSettings / mergeAndSaveUserSettings
 #include "System_AuthIdentity.h"  // currentExecUser (notifyusermute acts on the caller)
@@ -659,10 +660,21 @@ const char* cmd_notifydevicekind(const String& argsInput) {
   else if (level == "off")   { off = true;  adm = false; }
   else return "Error: level must be all, admin, or off";
 
-  (void)eventKindMaskSet(gNotifOffMask, (uint8_t)k, off);
-  (void)eventKindMaskSet(gNotifAdminMask, (uint8_t)k, adm);
-  gNotifPrefsGen++;
-  if (!notifPolicySave()) return "Error: failed to write " NOTIF_POLICY_FILE;
+  // The level takes effect in RAM and is then saved. A failed save puts the
+  // previous level back: otherwise the device would run a policy the caller
+  // was told is not set, and lose it again at the next restart.
+  const bool wasOff = eventKindMaskTest(gNotifOffMask, (uint8_t)k);
+  const bool wasAdm = eventKindMaskTest(gNotifAdminMask, (uint8_t)k);
+  auto setLevel = [k](bool offBit, bool admBit) {
+    (void)eventKindMaskSet(gNotifOffMask, (uint8_t)k, offBit);
+    (void)eventKindMaskSet(gNotifAdminMask, (uint8_t)k, admBit);
+    gNotifPrefsGen++;
+  };
+  setLevel(off, adm);
+  if (!notifPolicySave()) {
+    setLevel(wasOff, wasAdm);
+    return "Error: Could not save the notification policy. Check free space with 'files stats' and retry.";
+  }
   systemEventPost(SYSEVT_SETTING_CHANGED, kindName.c_str(), level.c_str());
   BROADCAST_PRINTF("%s = %s", kindName.c_str(), level.c_str());
   return "[Settings] Configuration updated";
@@ -853,20 +865,33 @@ static const char* notifUserKindListCmd(const String& argsInput, const char* key
   if (args.length() == 0) {
     PSRAM_JSON_DOC(doc);
     String cur;
-    if (loadUserSettings(uid, doc)) {
-      JsonArrayConst arr = doc[key].as<JsonArrayConst>();
-      if (!arr.isNull()) {
-        for (JsonVariantConst v : arr) {
-          const char* n = v.as<const char*>();
-          if (!n) continue;
-          if (cur.length()) cur += ", ";
-          cur += n;
-        }
+    // A missing file loads as empty; false is a file that could not be read.
+    if (!loadUserSettings(uid, doc)) {
+      return "Error: user settings are unreadable. Retry, or check the filesystem.";
+    }
+    JsonArrayConst arr = doc[key].as<JsonArrayConst>();
+    if (!arr.isNull()) {
+      for (JsonVariantConst v : arr) {
+        const char* n = v.as<const char*>();
+        if (!n) continue;
+        if (cur.length()) cur += ", ";
+        cur += n;
       }
     }
     BROADCAST_PRINTF("%s's %s kinds: %s", user.c_str(), noun, cur.length() ? cur.c_str() : "(none)");
     cliHint(hint);
     return "OK";
+  }
+
+  // `set <kind> <state>`: the state takes the on/off spellings every command
+  // takes (parseBoolArg); the core reads the two words on and off.
+  {
+    CommandArgs words(args);
+    if (words.count() == 3 && words.arg(0).equalsIgnoreCase("set")) {
+      const int state = parseBoolArg(words.arg(2));
+      if (state < 0) return kCommandReplyNotOnOff;
+      args = words.arg(0) + " " + words.arg(1) + (state == 1 ? " on" : " off");
+    }
   }
 
   notif_kind_core::PreparedMutation prepared;
@@ -935,7 +960,11 @@ const char* cmd_notifylevel(const String& argsInput) {
   if (a.length() == 0) {
     PSRAM_JSON_DOC(doc);
     uint8_t lv = NTIER_DEFAULT;
-    if (loadUserSettings(uid, doc) && doc["notifyLevel"].is<int>()) {
+    // A missing file loads as empty; false is a file that could not be read.
+    if (!loadUserSettings(uid, doc)) {
+      return "Error: user settings are unreadable. Retry, or check the filesystem.";
+    }
+    if (doc["notifyLevel"].is<int>()) {
       int v = doc["notifyLevel"].as<int>();
       if (v >= (int)NTIER_VERBOSE && v <= (int)NTIER_ALERT) lv = (uint8_t)v;
     }

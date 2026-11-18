@@ -9,8 +9,11 @@ whoever opened it, and nothing would hand it back when the exchange ends (R15).
 """
 import argparse
 from pathlib import Path
+import re
 import subprocess
 import tempfile
+
+from text_form_owners_source import mic_preference
 
 HERE = Path(__file__).resolve().parent
 SOURCE = HERE.parents[1]
@@ -43,8 +46,16 @@ static AudioSource audioGetSource() { return active; }
 static bool micRecordingBusy() { return busy; }
 static const char* micSourceName() { return "fake"; }
 static bool stopMicrophone() { ++stops; return stopOK; }
+// The micsource words and micPreferredSource() as shipped, then the refusal
+// replies and micStartRefused().
+MIC_PREFERENCE
+static AudioSource micPreferredAvailableSource() {
+  const AudioSource wanted = micPreferredSource();
+  return (wanted != AUDIO_SRC_NONE && audioSourceAvailable(wanted)) ? wanted : AUDIO_SRC_NONE;
+}
+REFUSAL_BLOCK
 // initMicrophone(): the real selection, then the HAL's PDM-first start.
-static bool initSelect(AudioSource preferred) {
+static bool initSelect(AudioSource preferred, const char** why = nullptr) {
 INIT_BLOCK
   return true;
 }
@@ -56,7 +67,7 @@ static bool initMicrophone(AudioSource preferred = AUDIO_SRC_NONE) {
   return true;
 }
 // startRecordingInternal(): setting re-resolve and request check, before the claim.
-static bool recorderSelect(AudioSource preferred) {
+static bool recorderSelect(AudioSource preferred, const char** why = nullptr) {
 RECORDER_BLOCK
   return true;
 }
@@ -79,6 +90,16 @@ int main() {
   reset("pdm", AUDIO_SRC_NONE); assert(initSelect(AUDIO_SRC_G2_LEFT) && active == AUDIO_SRC_G2_LEFT);
   reset("g2", AUDIO_SRC_NONE); assert(initSelect(AUDIO_SRC_LOCAL_PDM) && active == AUDIO_SRC_LOCAL_PDM);
   reset("auto", AUDIO_SRC_NONE); g2 = false; assert(!initSelect(AUDIO_SRC_G2_LEFT) && active == AUDIO_SRC_NONE);
+  // A refused start hands a caller that asks the reply for its command.
+  const char* why = nullptr;
+  reset("auto", AUDIO_SRC_NONE); g2 = false;
+  assert(!initSelect(AUDIO_SRC_G2_LEFT, &why) && why == kMicStartSourceUnavailable);
+  why = nullptr; reset("g2", AUDIO_SRC_LOCAL_PDM); initOK = false;
+  assert(!recorderSelect(AUDIO_SRC_NONE, &why) && why == kRecStartRestartFailed);
+  why = nullptr; reset("auto", AUDIO_SRC_LOCAL_PDM);
+  assert(!recorderSelect(AUDIO_SRC_G2_LEFT, &why) && why == kRecStartWrongSource);
+  why = nullptr; reset("auto", AUDIO_SRC_LOCAL_PDM);
+  assert(recorderSelect(AUDIO_SRC_LOCAL_PDM, &why) && why == nullptr);
 
   // Recorder, NONE: only a g2 setting re-resolves (an absent G2 never takes PDM away).
   reset("g2", AUDIO_SRC_LOCAL_PDM); assert(recorderSelect(AUDIO_SRC_NONE) && stops == 1 && inits == 1);
@@ -114,13 +135,19 @@ def main():
     mic = (SOURCE / 'System_Microphone.cpp').read_text()
     init_block = between(mic, '  if (preferred != AUDIO_SRC_NONE && !audioSourceAvailable(preferred)) {',
                          '  if (!audioCaptureStart("mic"')
-    recorder_block = between(mic, '  if (preferred == AUDIO_SRC_NONE &&\n      gSettings.micSource == "g2"',
+    recorder_block = between(mic, '  if (preferred == AUDIO_SRC_NONE &&\n      micPreferredSource() == AUDIO_SRC_G2_LEFT',
                              '\n  // This claim MUST precede every write')
+    # The reply constants are unused in a unit that splices only two blocks.
+    refusal_block = re.sub(r'(?m)^static constexpr ', '[[maybe_unused]] static constexpr ',
+                           between(mic, '// Reply texts for a microphone or recording start',
+                                   'static bool startRecordingInternal('))
     # The spliced blocks must stay ahead of the hardware start and the claim.
-    init_body = mic[mic.index('bool initMicrophone(AudioSource preferred) {'):]
+    init_body = mic[mic.index('bool initMicrophone(AudioSource preferred, const char** why) {'):]
     assert init_body.index(init_block) < init_body.index('audioCaptureStart("mic"')
     assert 'micRecordingClaimStart' not in recorder_block
-    unit = HARNESS.replace('INIT_BLOCK', init_block).replace('RECORDER_BLOCK', recorder_block)
+    unit = (HARNESS.replace('MIC_PREFERENCE', mic_preference(SOURCE))
+            .replace('REFUSAL_BLOCK', refusal_block)
+            .replace('INIT_BLOCK', init_block).replace('RECORDER_BLOCK', recorder_block))
     with tempfile.TemporaryDirectory(prefix='hw1-mic-requested-') as tmp:
         cpp, exe = Path(tmp) / 'test.cpp', Path(tmp) / 'test'
         cpp.write_text(unit)

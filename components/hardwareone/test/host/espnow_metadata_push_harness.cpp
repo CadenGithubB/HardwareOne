@@ -12,6 +12,7 @@
 #include <cstring>
 #include <vector>
 #include <Arduino.h>  // test/host/web_batch_stubs String (shared, read-only)
+#include "System_CommandReply.h"  // the shared on/off refusal
 void webBatchTestStringAppend() {}
 
 static unsigned checks = 0, failures = 0;
@@ -53,6 +54,12 @@ void systemEventPost(int, const char*, const char*) { ++events; }
 static char debugBuf[1024];
 char* getDebugBuffer() { return debugBuf; }
 #define RETURN_VALID_IF_VALIDATE_CSTR() do {} while (false)
+// On/off reading (System_Utils.h in production): 1, 0, or -1 for neither.
+static int parseBoolArg(const String& arg) {
+  if (arg == "1" || arg == "on" || arg == "true") return 1;
+  if (arg == "0" || arg == "off" || arg == "false") return 0;
+  return -1;
+}
 class CommandArgs {
   String a_;
  public:
@@ -227,6 +234,15 @@ int main() {
   CHECK(gSettings.espnowStationary);
   CHECK(gMetadataChanged);
   CHECK(settleAndTick() == 1 && sentAt(0).payload.stationary == 1);
+
+  reset("P5b espnowstationary refuses a word that is neither on nor off");
+  addSession(0x11, SESSION_ACTIVE);
+  gSettings.espnowStationary = true;
+  CHECK(std::strcmp(cmd_espnow_stationary(String("maybe")), kCommandReplyNotOnOff) == 0);
+  CHECK(gSettings.espnowStationary);                             // not read as "off"
+  CHECK(!gMetadataChanged);
+  CHECK(std::strcmp(cmd_espnow_stationary(String("off")), "Stationary set to: false") == 0);
+  CHECK(!gSettings.espnowStationary && gMetadataChanged);
 
   reset("P6 espnowsetname marks metadata dirty");
   addSession(0x11, SESSION_ACTIVE);

@@ -80,6 +80,52 @@
 
 static String redactAutomationCommandForAudit(const String& command);
 
+// What automationStepDone needs about a queued step once the run that queued
+// it has moved on: the automation's name and the redacted command.
+struct AutomationStepTrace {
+  char automation[64];
+  char command[160];
+};
+
+// How `automation run` answers a run that its own condition held back. The
+// direct caller gets it as a failure (docs/APP_JSON_CONTRACT.md).
+static const char kAutomationConditionSkipLead[] = "Error: Automation not run, its condition is not met";
+
+static bool automationReplyIsConditionSkip(const char* reply) {
+  return reply && strncmp(reply, kAutomationConditionSkipLead, sizeof(kAutomationConditionSkipLead) - 1) == 0;
+}
+
+// Completion of a queued automation step (runs on cmd_exec). A step that
+// failed leaves a FAILED line in the automation log and posts
+// SYSEVT_AUTOMATION_ACTION_DROPPED with the reason, at most one event per 5 s.
+// A step `automation run id=N` whose target is held back by its condition is
+// not a dropped action: a closed gate is the normal state of such a chain, and
+// the target's run writes its own AUTO_SKIP line when the automation log is on.
+static void automationStepDone(bool ok, const char* result, void* userData) {
+  AutomationStepTrace* trace = static_cast<AutomationStepTrace*>(userData);
+  if (!trace) return;
+  if (!ok && !automationReplyIsConditionSkip(result)) {
+    const String safeReply = redactOutputForLog(String(result ? result : ""));
+    const char* reply = safeReply.c_str();
+    const int replyLine = (int)strcspn(reply, "\r\n");
+    char line[360];
+    snprintf(line, sizeof(line), "[%s] %s: %.*s", trace->automation, trace->command,
+             replyLine > 120 ? 120 : replyLine, reply);
+    appendAutoLogEntry("FAILED", line);
+    static uint32_t sLastFailEventMs = 0;
+    const uint32_t nowMs = millis();
+    if (sLastFailEventMs == 0 || (nowMs - sLastFailEventMs) >= 5000) {
+      const char* reason = commandReplyReason(reply);
+      const int reasonLine = (int)strcspn(reason, "\r\n");
+      char detail[SYSEVT_DETAIL_LEN];
+      snprintf(detail, sizeof(detail), "failed: %.*s", reasonLine, reason);
+      systemEventPost(SYSEVT_AUTOMATION_ACTION_DROPPED, trace->automation, detail);
+      sLastFailEventMs = nowMs;
+    }
+  }
+  ps_free(trace);
+}
+
 // Queue an automation sub-command through the FreeRTOS command queue (async, non-blocking).
 // This avoids deadlock when already on cmd_exec task and avoids blocking the main loop.
 // `owner` is the automation's createdBy user — stamped into cmd.ctx.auth so VFS permission
@@ -87,7 +133,9 @@ static String redactAutomationCommandForAudit(const String& command);
 // `autoName` is the automation's display name — stamped into ctx.automationName so
 // executeCommand can write COMMAND/OUTPUT autolog entries attributed to this automation,
 // with no race against the scheduler advancing to the next automation before the command runs.
-static void queueAutomationSubCommand(const char* cmd, const char* owner, const char* autoName = nullptr) {
+// Returns false when the step was not submitted (executor queue unavailable, or
+// the command is over the input limit).
+static bool queueAutomationSubCommand(const char* cmd, const char* owner, const char* autoName = nullptr) {
   const String safeCmd = redactAutomationCommandForAudit(
       String(cmd ? cmd : ""));
   Command uc;
@@ -113,7 +161,17 @@ static void queueAutomationSubCommand(const char* cmd, const char* owner, const 
   }
   const bool inputLengthAccepted =
       commandInputLengthAccepted(uc.line.length());
-  if (!submitCommandAsync(uc, nullptr, nullptr)) {
+  // The step's own outcome comes back through automationStepDone. Without the
+  // trace copy the step still runs; only its failure line is lost.
+  AutomationStepTrace* trace = static_cast<AutomationStepTrace*>(
+      ps_alloc(sizeof(AutomationStepTrace), AllocPref::PreferPsram, "auto.step"));
+  if (trace) {
+    snprintf(trace->automation, sizeof(trace->automation), "%s",
+             (autoName && autoName[0]) ? autoName : "?");
+    snprintf(trace->command, sizeof(trace->command), "%s", safeCmd.c_str());
+  }
+  if (!submitCommandAsync(uc, trace ? automationStepDone : nullptr, trace)) {
+    if (trace) ps_free(trace);
     const char* dropReason = inputLengthAccepted
                                  ? "exec queue unavailable"
                                  : "command exceeds input limit";
@@ -158,9 +216,10 @@ static void queueAutomationSubCommand(const char* cmd, const char* owner, const 
     } else {
       sDropsSuppressed++;
     }
-  } else {
-    DEBUG_AUTOMATIONSF("[autos] Queued sub-command: %s", safeCmd.c_str());
+    return false;
   }
+  DEBUG_AUTOMATIONSF("[autos] Queued sub-command: %s", safeCmd.c_str());
+  return true;
 }
 
 // Locate a whole-word conditional keyword outside quoted text. Automation
@@ -481,6 +540,7 @@ const char* validateConditionSyntax(const char* condition);
 const char* validateConditionalChain(const char* chainStr);
 const char* validateConditionalCommand(const char* command);
 bool automationIdExistsInJson(const String& json, unsigned long id);
+static int automationIdPosInJson(const String& json, unsigned long id);
 // jsonEscape now provided by system_utils.h
 void findAutomationsArrayBounds(const String& json, int& arrStart, int& arrEnd);
 
@@ -560,11 +620,22 @@ void findAutomationsArrayBounds(const String& json, int& arrStart, int& arrEnd) 
   }
 }
 
+// The offset of `"id": <id>` in the stored automations text, or -1. The number
+// has to end there: id 12 is not found inside 123456.
+static int automationIdPosInJson(const String& json, unsigned long id) {
+  char needle[32];
+  const int needleLen = snprintf(needle, sizeof(needle), "\"id\": %lu", id);
+  const char* text = json.c_str();
+  for (const char* hit = strstr(text, needle); hit; hit = strstr(hit + 1, needle)) {
+    const char next = hit[needleLen];
+    if (next < '0' || next > '9') return (int)(hit - text);
+  }
+  return -1;
+}
+
 // Helper: Check if automation ID exists in JSON (stack-based)
 bool automationIdExistsInJson(const String& json, unsigned long id) {
-  char needle[32];
-  snprintf(needle, sizeof(needle), "\"id\": %lu", id);
-  return strstr(json.c_str(), needle) != nullptr;
+  return automationIdPosInJson(json, id) >= 0;
 }
 
 // Sanitize the IDs in the automations array using ArduinoJson: a duplicate,
@@ -1869,7 +1940,7 @@ void resumeAutomationSystem() {
 
 // Execute automation command (queues through FreeRTOS command queue, non-blocking)
 void runAutomationCommandUnified(const String& argsInput) {
-  queueAutomationSubCommand(argsInput.c_str(), "");
+  (void)queueAutomationSubCommand(argsInput.c_str(), "");
 }
 
 // Automation command handlers
@@ -1883,9 +1954,97 @@ const char* cmd_automation_list(const String& argsInput) {
   if (!safeJson.length()) {
     return "Error: malformed automations.json";
   }
-  broadcastOutput(safeJson);
-  cliHint("to run one of these now, use 'automation run id=<id>'; to enable or disable one, use 'automation enable id=<id>' / 'automation disable id=<id>'");
-  return "OK";
+  // The document is the reply and nothing is printed (OUTPUT CONTRACT in
+  // System_Utils.cpp): a printed line is cut at 255 B.
+  PSRAM_STATIC_BUF(listJson, CMD_RESULT_MAX);
+  if (safeJson.length() >= listJson_SIZE) {
+    snprintf(listJson, listJson_SIZE,
+             "Error: The automation list is %u B, over the %u B reply limit. Read it on the web Automations page.",
+             (unsigned)safeJson.length(), (unsigned)(listJson_SIZE - 1));
+    return listJson;
+  }
+  memcpy(listJson, safeJson.c_str(), safeJson.length() + 1);
+  return listJson;
+}
+
+// The keys `automation add` takes.
+static const char* const kAutomationAddKeys[] = {
+  "name", "type", "time", "recurrence", "days", "weekinterval", "dayofmonth", "month",
+  "secondarytriggers", "delayms", "intervalms", "runatboot", "bootdelayms", "command",
+  "commands", "condition", "enabled", "on", "match", "id",
+};
+
+// Appends ` name, type, ..., id.` (the keys above) to a reply.
+static void automationAddAppendKeys(char* reply, size_t replySize) {
+  const char* lead = " ";
+  for (const char* key : kAutomationAddKeys) {
+    const size_t used = strlen(reply);
+    if (used + 1 >= replySize) return;
+    snprintf(reply + used, replySize - used, "%s%s", lead, key);
+    lead = ", ";
+  }
+  const size_t used = strlen(reply);
+  if (used + 1 < replySize) snprintf(reply + used, replySize - used, ".");
+}
+
+// Refuses an `automation add` line that holds a key the command does not take
+// or a word that is no key=value (the rest of an unquoted value with spaces).
+// nullptr when every token is one of its keys. The reply repeats nothing of
+// the line but a key the command takes: a value may be a command with a
+// secret in it, and a bare word of it that holds '=' reads as a key. The
+// reply lists the keys itself, `help automation` does not name them all.
+static const char* automationAddRefuseToken(const CommandArgs& a) {
+  EXT_RAM_BSS_ATTR static char reply[384];
+  const char* line = a.raw().c_str();
+  int cursor = 0, start = 0, keyLen = 0;
+  int lastKeyStart = -1, lastKeyLen = 0;
+  while (a.nextKeyToken(cursor, start, keyLen)) {
+    const int shown = lastKeyLen > 24 ? 24 : lastKeyLen;
+    if (keyLen == 0) {
+      if (lastKeyStart < 0) {
+        snprintf(reply, sizeof(reply),
+                 "Error: Unexpected text before the first argument. Give key=value arguments. The keys are");
+        automationAddAppendKeys(reply, sizeof(reply));
+        return reply;
+      }
+      snprintf(reply, sizeof(reply),
+               "Error: Unexpected text after %.*s=. Put a value with spaces in quotes, for example %.*s=\"two words\".",
+               shown, line + lastKeyStart, shown, line + lastKeyStart);
+      return reply;
+    }
+    bool known = false;
+    for (const char* key : kAutomationAddKeys) {
+      if (strlen(key) == (size_t)keyLen && strncmp(line + start, key, (size_t)keyLen) == 0) {
+        known = true;
+        break;
+      }
+    }
+    if (!known) {
+      if (lastKeyStart < 0) {
+        snprintf(reply, sizeof(reply), "Error: The first argument is not a key of automation add. The keys are");
+      } else {
+        snprintf(reply, sizeof(reply),
+                 "Error: Unknown argument after %.*s=. Put a value with spaces in quotes. The keys are",
+                 shown, line + lastKeyStart);
+      }
+      automationAddAppendKeys(reply, sizeof(reply));
+      return reply;
+    }
+    lastKeyStart = start;
+    lastKeyLen = keyLen;
+  }
+  return nullptr;
+}
+
+// A whole-number argument of `automation add` inside [low, high]: nullptr when
+// `text` is one (then `value` holds it), else the reply that names the key and
+// its range.
+static const char* automationAddNumber(const char* key, const String& text, long long low,
+                                       long long high, long long& value) {
+  if (parseIntArg(text, low, high, value)) return nullptr;
+  EXT_RAM_BSS_ATTR static char reply[96];
+  snprintf(reply, sizeof(reply), "Error: %s must be a whole number from %lld to %lld.", key, low, high);
+  return reply;
 }
 
 const char* cmd_automation_add(const String& argsInput) {
@@ -1893,6 +2052,7 @@ const char* cmd_automation_add(const String& argsInput) {
   bool validateOnly = gCliValidateOnly;
   
   CommandArgs a(argsInput);
+  if (const char* refusal = automationAddRefuseToken(a)) return refusal;
 
   String name = a.value("name");
   String type = a.value("type");
@@ -1914,7 +2074,10 @@ const char* cmd_automation_add(const String& argsInput) {
   String eventOn = a.value("on");
   String eventMatch = a.value("match");
   
-  bool enabled = (argIsOn(enabledStr) || enabledStr.equalsIgnoreCase("yes"));
+  // No enabled= stores the automation disabled.
+  const int enabledArg = enabledStr.length() ? parseBoolArg(enabledStr) : 0;
+  if (enabledArg < 0) return kCommandReplyNotOnOff;
+  bool enabled = enabledArg == 1;
   
   String typeNorm = type;
   typeNorm.trim();
@@ -1988,29 +2151,35 @@ const char* cmd_automation_add(const String& argsInput) {
     }
   }
   
-  auto isNumeric = [&](const String& s) {
-    if (!s.length()) return false;
-    for (size_t i = 0; i < s.length(); ++i) {
-      char c = s[i];
-      if (c < '0' || c > '9') return false;
-    }
-    return true;
-  };
+  // The numbers the stored trigger takes. The form sends the time, delay and
+  // interval fields with every type, so each is checked for the type that
+  // uses it; the others are checked whenever they are given.
+  long long delayMsValue = 0, intervalMsValue = 0, bootDelayMsValue = 0;
+  long long weekIntervalValue = 1, dayOfMonthValue = 0, monthValue = 0;
   
   if (typeNorm == "attime") {
     timeS.trim();
     if (timeS.length() == 0) {
       return "Error: atTime requires time=HH:MM";
     }
-    if (!(timeS.length() == 5 && timeS[2] == ':' && isdigit(timeS[0]) && isdigit(timeS[1]) && isdigit(timeS[3]) && isdigit(timeS[4]))) {
-      return "Error: time must be HH:MM";
+    const bool timeForm = timeS.length() == 5 && timeS[2] == ':' &&
+                          isdigit(static_cast<unsigned char>(timeS[0])) &&
+                          isdigit(static_cast<unsigned char>(timeS[1])) &&
+                          isdigit(static_cast<unsigned char>(timeS[3])) &&
+                          isdigit(static_cast<unsigned char>(timeS[4]));
+    // The scheduler takes 00:00 to 23:59; another time would be stored and never fire.
+    if (!timeForm || (timeS[0] - '0') * 10 + (timeS[1] - '0') > 23 ||
+        (timeS[3] - '0') * 10 + (timeS[4] - '0') > 59) {
+      return "Error: time must be HH:MM from 00:00 to 23:59. Example: time=07:30.";
     }
   } else if (typeNorm == "afterdelay") {
-    if (!isNumeric(delayMs)) {
+    if (delayMs.length() == 0) {
       return "Error: afterDelay requires numeric delayms (milliseconds)";
     }
+    // 0 is what the form sends for its On Boot type.
+    if (const char* error = automationAddNumber("delayms", delayMs, 0, 2147483647LL, delayMsValue)) return error;
   } else if (typeNorm == "interval") {
-    if (!isNumeric(intervalMs)) {
+    if (!parseIntArg(intervalMs, intervalMsValue)) {
       return "Error: interval requires numeric intervalms (milliseconds)";
     }
     // Reject sub-second (and 0) rather than clamping: the scheduler stores
@@ -2018,8 +2187,12 @@ const char* cmd_automation_add(const String& argsInput) {
     // the same second and rewrite automations.json on every main-loop pass —
     // real flash wear. 0 is a permanently-inert trigger. The web UI's delay
     // unit defaults to milliseconds, so this is easy to hit by accident.
-    if (intervalMs.toInt() < 1000) {
+    if (intervalMsValue < 1000) {
       return "Error: intervalms must be at least 1000 (1 second)";
+    }
+    // The scheduler reads the interval as 32 bits.
+    if (intervalMsValue > 4294967295LL) {
+      return "Error: intervalms must be a whole number from 1000 to 4294967295.";
     }
   } else if (typeNorm == "event") {
     eventOn.trim();
@@ -2038,8 +2211,33 @@ const char* cmd_automation_add(const String& argsInput) {
   }
   
   // Validate boot delay if provided
-  if (bootDelayMsStr.length() > 0 && !isNumeric(bootDelayMsStr)) {
-    return "Error: bootdelayms must be numeric (milliseconds)";
+  if (bootDelayMsStr.length() > 0) {
+    if (const char* error = automationAddNumber("bootdelayms", bootDelayMsStr, 0, 2147483647LL, bootDelayMsValue)) return error;
+  }
+
+  // The schedule of a time trigger. A value outside its range is refused:
+  // left out, it would store a monthly or yearly trigger that never fires.
+  if (weekInterval.length() > 0) {
+    if (const char* error = automationAddNumber("weekinterval", weekInterval, 1, 52, weekIntervalValue)) return error;
+  }
+  if (dayOfMonth.length() > 0) {
+    if (const char* error = automationAddNumber("dayofmonth", dayOfMonth, 1, 31, dayOfMonthValue)) return error;
+  }
+  if (monthOfYear.length() > 0) {
+    if (const char* error = automationAddNumber("month", monthOfYear, 1, 12, monthValue)) return error;
+  }
+  if (recurrence.length() > 0) {
+    // Stored in lower case, the spelling the scheduler compares with.
+    recurrence.toLowerCase();
+    if (recurrence != "daily" && recurrence != "weekly" && recurrence != "monthly" && recurrence != "yearly") {
+      return "Error: Unknown recurrence. Use daily, weekly, monthly or yearly.";
+    }
+    if (typeNorm == "attime" && recurrence != "daily" && recurrence != "weekly" && dayOfMonth.length() == 0) {
+      return "Error: recurrence=monthly and recurrence=yearly need dayofmonth=1..31.";
+    }
+    if (typeNorm == "attime" && recurrence == "yearly" && monthOfYear.length() == 0) {
+      return "Error: recurrence=yearly needs month=1..12.";
+    }
   }
 
   // id= adds or replaces the automation with that id. Only an id the scheduler
@@ -2051,7 +2249,42 @@ const char* cmd_automation_add(const String& argsInput) {
     return "Error: id must be a whole number from 1 to 2147483647";
   }
   
-  bool runAtBoot = (argIsOn(runAtBootStr) || runAtBootStr.equalsIgnoreCase("yes"));
+  const int runAtBootArg = runAtBootStr.length() ? parseBoolArg(runAtBootStr) : 0;
+  if (runAtBootArg < 0) return kCommandReplyNotOnOff;
+  bool runAtBoot = runAtBootArg == 1;
+
+  // Secondary triggers are checked whole before the store is loaded: one that
+  // cannot be stored refuses the add instead of being left out.
+  PSRAM_JSON_DOC(secDoc);
+  JsonArrayConst secArr;
+  const int primaryTriggerCount = runAtBoot ? 2 : 1;
+  if (secondaryTriggersJson.length() > 0) {
+    if (deserializeJson(secDoc, secondaryTriggersJson) || !secDoc.is<JsonArrayConst>()) {
+      return "Error: secondarytriggers is not a JSON array. Send a list of trigger objects, or leave it out.";
+    }
+    secArr = secDoc.as<JsonArrayConst>();
+    if (primaryTriggerCount + (int)secArr.size() > 4) {
+      return "Error: Too many triggers. An automation takes at most 4.";
+    }
+    for (JsonVariantConst sv : secArr) {
+      const char* stype = sv["type"] | "";
+      const bool isEvent = strcmp(stype, "event") == 0;
+      if (!isEvent && strcmp(stype, "time") != 0 && strcmp(stype, "interval") != 0 &&
+          strcmp(stype, "manual") != 0 && strcmp(stype, "boot") != 0) {
+        if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
+        snprintf(getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE,
+                 "Error: Unknown trigger type '%.40s'. Use time, interval, manual, boot or event.", stype);
+        return getDebugBuffer();
+      }
+      const char* onKind = sv["on"] | "";
+      if (isEvent && systemEventKindFromName(onKind) <= 0) {
+        if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
+        snprintf(getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE,
+                 "Error: Unknown event kind '%.40s'. List the kinds with 'events kinds'.", onKind);
+        return getDebugBuffer();
+      }
+    }
+  }
   
   String json;
   if (!loadAutomationsStoreForEdit(json, !validateOnly)) {
@@ -2061,11 +2294,8 @@ const char* cmd_automation_add(const String& argsInput) {
   // If a specific id= was provided and that entry already exists, remove it first
   if (idOverrideStr.length() > 0) {
     unsigned long overrideId = strtoul(idOverrideStr.c_str(), nullptr, 10);
-    if (automationIdExistsInJson(json, overrideId)) {
-      char needleBuf[32];
-      snprintf(needleBuf, sizeof(needleBuf), "\"id\": %lu", overrideId);
-      String needle = needleBuf;
-      int idPos = json.indexOf(needle);
+    const int idPos = automationIdPosInJson(json, overrideId);
+    if (idPos >= 0) {
       int aS = json.indexOf('[');
       int aE = json.lastIndexOf(']');
       if (idPos >= 0 && aS >= 0 && aE >= 0) {
@@ -2190,21 +2420,15 @@ const char* cmd_automation_add(const String& argsInput) {
       if (timeS.length() > 0) b += ",\n      \"time\": \"" + jsonEscape(timeS) + "\"";
       if (recurrence.length() > 0) b += ",\n      \"recurrence\": \"" + jsonEscape(recurrence) + "\"";
       if (days.length() > 0) b += ",\n      \"days\": \"" + jsonEscape(days) + "\"";
-      if (weekInterval.length() > 0 && weekInterval.toInt() > 1) b += ",\n      \"weekInterval\": " + String(weekInterval.toInt());
-      if (dayOfMonth.length() > 0) {
-        int dom = dayOfMonth.toInt();
-        if (dom >= 1 && dom <= 31) b += ",\n      \"dayOfMonth\": " + String(dom);
-      }
-      if (monthOfYear.length() > 0) {
-        int moy = monthOfYear.toInt();
-        if (moy >= 1 && moy <= 12) b += ",\n      \"month\": " + String(moy);
-      }
+      if (weekIntervalValue > 1) b += ",\n      \"weekInterval\": " + String((long)weekIntervalValue);
+      if (dayOfMonth.length() > 0) b += ",\n      \"dayOfMonth\": " + String((long)dayOfMonthValue);
+      if (monthOfYear.length() > 0) b += ",\n      \"month\": " + String((long)monthValue);
     } else if (tt == "manual") {
-      if (delayMs.length() > 0) b += ",\n      \"delayMs\": " + delayMs;
+      if (delayMs.length() > 0) b += ",\n      \"delayMs\": " + String((long)delayMsValue);
     } else if (tt == "interval") {
-      if (intervalMs.length() > 0) b += ",\n      \"intervalMs\": " + intervalMs;
+      if (intervalMs.length() > 0) b += ",\n      \"intervalMs\": " + String((unsigned long)intervalMsValue);
     } else if (tt == "boot") {
-      if (bootDelayMsStr.length() > 0) b += ",\n      \"bootDelayMs\": " + bootDelayMsStr;
+      if (bootDelayMsStr.length() > 0) b += ",\n      \"bootDelayMs\": " + String((long)bootDelayMsValue);
     } else if (tt == "event") {
       b += ",\n      \"on\": \"" + jsonEscape(eventOn) + "\"";
       if (eventMatch.length() > 0) b += ",\n      \"match\": \"" + jsonEscape(eventMatch) + "\"";
@@ -2240,63 +2464,51 @@ const char* cmd_automation_add(const String& argsInput) {
     DEBUG_AUTOMATIONSF("[autos add] added synthesized boot trigger from runAtBoot");
   }
 
-  // Parse and append secondary triggers (from the UI's + Add Trigger rows).
-  // Each secondary is a JSON object in the same shape as the primary trigger
+  // Append the secondary triggers (from the UI's + Add Trigger rows), checked
+  // above. Each is a JSON object in the same shape as the primary trigger
   // would produce — we just serialize it back in and compute nextAt per entry.
-  if (secondaryTriggersJson.length() > 0) {
-    PSRAM_JSON_DOC(secDoc);
-    if (!deserializeJson(secDoc, secondaryTriggersJson)) {
-      JsonArrayConst secArr = secDoc.as<JsonArrayConst>();
-      if (!secArr.isNull()) {
-        time_t nowSec = time(nullptr);
-        int primaryCount = 1 + ((runAtBoot && triggerType != "boot") ? 1 : 0);
-        int addedSec = 0;
-        for (JsonVariantConst sv : secArr) {
-          if (primaryCount + addedSec >= 4) break;  // cap at 4 total
-          const char* stype = sv["type"] | "";
-          if (!stype[0]) continue;
-          String body;
-          body += "      \"type\": \"" + String(stype) + "\"";
-          if (strcmp(stype, "time") == 0) {
-            const char* tval = sv["time"] | "";
-            if (tval[0]) body += ",\n      \"time\": \"" + String(tval) + "\"";
-            const char* rec = sv["recurrence"] | "";
-            if (rec[0]) body += ",\n      \"recurrence\": \"" + String(rec) + "\"";
-            const char* daysV = sv["days"] | "";
-            if (daysV[0]) body += ",\n      \"days\": \"" + String(daysV) + "\"";
-          } else if (strcmp(stype, "interval") == 0) {
-            const uint32_t ims = sv["intervalMs"] | uint32_t(0);
-            if (ims > 0) body += ",\n      \"intervalMs\": " + String(ims);
-          } else if (strcmp(stype, "manual") == 0) {
-            long dms = sv["delayMs"] | 0;
-            body += ",\n      \"delayMs\": " + String(dms);
-          } else if (strcmp(stype, "boot") == 0) {
-            long bms = sv["bootDelayMs"] | 0;
-            body += ",\n      \"bootDelayMs\": " + String(bms);
-          } else if (strcmp(stype, "event") == 0) {
-            const char* onV = sv["on"] | "";
-            if (systemEventKindFromName(onV) <= 0) continue;  // unknown kind, skip
-            body += ",\n      \"on\": \"" + jsonEscape(String(onV)) + "\"";
-            const char* matchV = sv["match"] | "";
-            if (matchV[0]) body += ",\n      \"match\": \"" + jsonEscape(String(matchV)) + "\"";
-          } else {
-            continue;  // unknown type, skip
-          }
-          // Compute initial nextAt for this secondary trigger.
-          time_t snext = 0;
-          if (nowSec > 0) {
-            String tmp = "{\"triggers\":[{\n" + body + "\n    }]}";
-            snext = computeNextRunTime(tmp.c_str(), nowSec);
-          }
-          if (snext > 0) body += ",\n      \"nextAt\": " + String((unsigned long)snext);
-          else              body += ",\n      \"nextAt\": null";
-          triggersJson += ",\n    {\n" + body + "\n    }";
-          addedSec++;
-        }
-        if (addedSec > 0) {
-          DEBUG_AUTOMATIONSF("[autos add] appended %d secondary trigger(s)", addedSec);
-        }
+  if (!secArr.isNull()) {
+    time_t nowSec = time(nullptr);
+    int addedSec = 0;
+    for (JsonVariantConst sv : secArr) {
+      const char* stype = sv["type"] | "";
+      String body;
+      body += "      \"type\": \"" + String(stype) + "\"";
+      if (strcmp(stype, "time") == 0) {
+        const char* tval = sv["time"] | "";
+        if (tval[0]) body += ",\n      \"time\": \"" + String(tval) + "\"";
+        const char* rec = sv["recurrence"] | "";
+        if (rec[0]) body += ",\n      \"recurrence\": \"" + String(rec) + "\"";
+        const char* daysV = sv["days"] | "";
+        if (daysV[0]) body += ",\n      \"days\": \"" + String(daysV) + "\"";
+      } else if (strcmp(stype, "interval") == 0) {
+        const uint32_t ims = sv["intervalMs"] | uint32_t(0);
+        if (ims > 0) body += ",\n      \"intervalMs\": " + String(ims);
+      } else if (strcmp(stype, "manual") == 0) {
+        long dms = sv["delayMs"] | 0;
+        body += ",\n      \"delayMs\": " + String(dms);
+      } else if (strcmp(stype, "boot") == 0) {
+        long bms = sv["bootDelayMs"] | 0;
+        body += ",\n      \"bootDelayMs\": " + String(bms);
+      } else {  // event
+        const char* onV = sv["on"] | "";
+        body += ",\n      \"on\": \"" + jsonEscape(String(onV)) + "\"";
+        const char* matchV = sv["match"] | "";
+        if (matchV[0]) body += ",\n      \"match\": \"" + jsonEscape(String(matchV)) + "\"";
       }
+      // Compute initial nextAt for this secondary trigger.
+      time_t snext = 0;
+      if (nowSec > 0) {
+        String tmp = "{\"triggers\":[{\n" + body + "\n    }]}";
+        snext = computeNextRunTime(tmp.c_str(), nowSec);
+      }
+      if (snext > 0) body += ",\n      \"nextAt\": " + String((unsigned long)snext);
+      else              body += ",\n      \"nextAt\": null";
+      triggersJson += ",\n    {\n" + body + "\n    }";
+      addedSec++;
+    }
+    if (addedSec > 0) {
+      DEBUG_AUTOMATIONSF("[autos add] appended %d secondary trigger(s)", addedSec);
     }
   }
 
@@ -2340,6 +2552,11 @@ const char* cmd_automation_add(const String& argsInput) {
   return "OK";
 }
 
+// The reply of enable, disable, delete and run to an id= that is not an id.
+static_assert(kAutomationIdMax == 2147483647u, "the reply below names the id range");
+static const char kAutomationIdArgReply[] =
+    "Error: id must be a whole number from 1 to 2147483647. List the ids with 'automation list'.";
+
 const char* cmd_automation_enable_disable(const String& argsInput, bool enable) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
@@ -2348,15 +2565,16 @@ const char* cmd_automation_enable_disable(const String& argsInput, bool enable) 
   if (idStr.length() == 0) {
     return enable ? "Usage: automation enable id=<id>" : "Usage: automation disable id=<id>";
   }
+  long id = 0;
+  if (!parseIntArg(idStr, 1, kAutomationIdMax, id)) return kAutomationIdArgReply;
   
   String json;
   if (!readAutomationsJson(json)) {
     return automationsReadErrorReply();
   }
   
-  char needleBuf[32];
-  snprintf(needleBuf, sizeof(needleBuf), "\"id\": %s", idStr.c_str());
-  int idPos = json.indexOf(needleBuf);
+  // The automation with exactly this id, not the first whose id starts with it.
+  int idPos = automationIdPosInJson(json, (unsigned long)id);
   if (idPos < 0) {
     return "Error: automation id not found";
   }
@@ -2404,7 +2622,7 @@ const char* cmd_automation_enable_disable(const String& argsInput, bool enable) 
     return "Error: failed to write automations.json";
   }
   
-  BROADCAST_PRINTF("%s automation id=%s", enable ? "Enabled" : "Disabled", idStr.c_str());
+  BROADCAST_PRINTF("%s automation id=%ld", enable ? "Enabled" : "Disabled", id);
   return "OK";
 }
 
@@ -2416,15 +2634,16 @@ const char* cmd_automation_delete(const String& argsInput) {
   if (idStr.length() == 0) {
     return "Usage: automation delete id=<id>";
   }
+  long id = 0;
+  if (!parseIntArg(idStr, 1, kAutomationIdMax, id)) return kAutomationIdArgReply;
   
   String json;
   if (!readAutomationsJson(json)) {
     return automationsReadErrorReply();
   }
 
-  char needleBuf[32];
-  snprintf(needleBuf, sizeof(needleBuf), "\"id\": %s", idStr.c_str());
-  int idPos = json.indexOf(needleBuf);
+  // The automation with exactly this id, not the first whose id starts with it.
+  int idPos = automationIdPosInJson(json, (unsigned long)id);
   if (idPos < 0) {
     return "Error: automation id not found";
   }
@@ -2511,7 +2730,7 @@ const char* cmd_automation_delete(const String& argsInput) {
   // SYSTEM-EVENT: automation removed and the change persisted.
   systemEventPost(SYSEVT_AUTOMATION_DELETED, deletedNameBuf);
 
-  BROADCAST_PRINTF("Deleted automation id=%s", idStr.c_str());
+  BROADCAST_PRINTF("Deleted automation id=%ld", id);
   return "OK";
 }
 
@@ -2523,15 +2742,18 @@ const char* cmd_automation_run(const String& argsInput) {
   if (idStr.length() == 0) {
     return "Usage: automation run id=<id>";
   }
+  long id = 0;
+  if (!parseIntArg(idStr, 1, kAutomationIdMax, id)) return kAutomationIdArgReply;
+  // The id in the form the lines below print.
+  idStr = String(id);
   
   String json;
   if (!readAutomationsJson(json)) {
     return automationsReadErrorReply();
   }
   
-  char needleBuf[32];
-  snprintf(needleBuf, sizeof(needleBuf), "\"id\": %s", idStr.c_str());
-  int idPos = json.indexOf(needleBuf);
+  // The automation with exactly this id, not the first whose id starts with it.
+  int idPos = automationIdPosInJson(json, (unsigned long)id);
   if (idPos < 0) {
     return "Error: automation id not found";
   }
@@ -2683,12 +2905,12 @@ const char* cmd_automation_run(const String& argsInput) {
         snprintf(skipBuf, sizeof(skipBuf), "Automation skipped: ID=%s Name=%s Condition not met: %s", idStr.c_str(), autoName.c_str(), condition.c_str());
         appendAutoLogEntry("AUTO_SKIP", skipBuf);
       }
-      {
-        char skipBroadcast[160];
-        snprintf(skipBroadcast, sizeof(skipBroadcast), "Automation skipped - condition not met: %.120s", condition.c_str());
-        broadcastOutput(skipBroadcast);
-      }
-      return "OK";
+      // Nothing ran: the caller is told so, with the condition that held it back.
+      EXT_RAM_BSS_ATTR static char skipReply[224];
+      snprintf(skipReply, sizeof(skipReply),
+               "%s (%.120s). Run it again when the condition holds.",
+               kAutomationConditionSkipLead, condition.c_str());
+      return skipReply;
     }
   }
   
@@ -2700,17 +2922,21 @@ const char* cmd_automation_run(const String& argsInput) {
   if (!currentExecIsAdmin() && String(_createdByBuf) != currentExecUser()) {
     DEBUG_AUTOMATIONSF("[autos run] AUTHORIZATION DENIED: user='%s' isAdmin=%d tried to run automation created by '%s'",
            currentExecUser().c_str(), currentExecIsAdmin(), _createdByBuf);
-    {
-      char authErr[120];
-      snprintf(authErr, sizeof(authErr), "Error: Admin required to trigger automation created by %s", _createdByBuf);
-      broadcastOutput(authErr);
-    }
-    return "Error: Admin required";
+    // Leads with the executor's admin refusal, so callers treat it as one.
+    EXT_RAM_BSS_ATTR static char authReply[192];
+    snprintf(authReply, sizeof(authReply),
+             "%s to run an automation created by %s. Ask an admin or its creator to run it.",
+             kCommandReplyAdminRequired, _createdByBuf);
+    return authReply;
   }
   DEBUG_AUTOMATIONSF("[autos run] AUTHORIZATION OK: user='%s' isAdmin=%d running automation created by '%s'",
          currentExecUser().c_str(), currentExecIsAdmin(), _createdByBuf);
 
   // Execute all commands (with conditional logic support)
+  int notRun = 0;
+  // The reason of the first step that did not run. The step's reply lives in
+  // a static buffer that the next step overwrites, so it is copied here.
+  char firstReason[128] = "";
   for (int ci = 0; ci < cmdsCount; ++ci) {
     const String safeRunCmd = redactAutomationCommandForAudit(cmdsList[ci]);
     DEBUG_AUTOMATIONSF("[autos run] id=%s cmd[%d]='%s'", idStr.c_str(), ci, safeRunCmd.c_str());
@@ -2723,6 +2949,14 @@ const char* cmd_automation_run(const String& argsInput) {
     
     // Queue command for execution (async, non-blocking)
     const char* result = executeConditionalCommand(cmdsList[ci].c_str(), _createdByBuf, autoName.c_str());
+    // A step that did not run: it never reached the executor, or the stored
+    // step itself is not a usable command (a chain without THEN, a branch over
+    // the length limit). Its reason is printed below and the first one goes
+    // back to the caller, who does not get the printed lines.
+    if (commandReplyIsFailure(result)) {
+      if (notRun == 0) snprintf(firstReason, sizeof(firstReason), "%s", commandReplyReason(result));
+      notRun++;
+    }
     
     // Output the result (skip internal status messages - actual output comes from queue)
     if (!isAutoInternalResult(result)) {
@@ -2740,7 +2974,7 @@ const char* cmd_automation_run(const String& argsInput) {
   // Advance nextAt after manual execution via the unified post-fire helper.
   // Without a set clock `now` is the uptime and the uptime schedule advances.
   const time_t now = automationScheduleNow();
-  rescheduleAfterFire(idStr.toInt(), obj.c_str(), now, true);
+  rescheduleAfterFire(id, obj.c_str(), now, true);
   
   // Log automation end if logging is active
   if (automationLogActive()) {
@@ -2749,6 +2983,14 @@ const char* cmd_automation_run(const String& argsInput) {
     appendAutoLogEntry("AUTO_END", endBuf);
   }
   
+  if (notRun > 0) {
+    EXT_RAM_BSS_ATTR static char partialReply[256];
+    snprintf(partialReply, sizeof(partialReply),
+             "Error: %d of %d commands did not run. First reason: %s",
+             notRun, cmdsCount, firstReason);
+    return partialReply;
+  }
+
   char resultBuf[128];
   snprintf(resultBuf, sizeof(resultBuf), "Ran automation id=%s (%d command%s)", idStr.c_str(), cmdsCount, cmdsCount == 1 ? "" : "s");
   broadcastOutput(resultBuf);
@@ -2766,6 +3008,11 @@ const char* cmd_automation_trigger(const String& argsInput) {
   String idStr = a.value("id");
   if (idStr.length() == 0) {
     return "Usage: automation trigger id=<id>";
+  }
+  // The scheduler does not run while the master switch is off, so an armed
+  // timer would never fire.
+  if (!gSettings.automationEnabled) {
+    return "Error: Automations are switched off. Run 'automation system enable' first.";
   }
 
   String json;
@@ -2792,6 +3039,13 @@ const char* cmd_automation_trigger(const String& argsInput) {
   }
   if (target.isNull()) {
     return "Error: automation id not found";
+  }
+  EXT_RAM_BSS_ATTR static char reply[160];
+  // The scheduler skips a disabled automation, armed or not.
+  if (!(target["enabled"] | false)) {
+    snprintf(reply, sizeof(reply),
+             "Error: Automation %ld is disabled. Run 'automation enable id=%ld' first.", id, id);
+    return reply;
   }
 
   // Find the first manual trigger in the automation's triggers array.
@@ -2842,11 +3096,9 @@ const char* cmd_automation_trigger(const String& argsInput) {
   // the scheduler notices.
   notifyAutomationScheduler();
 
-  char msg[160];
-  snprintf(msg, sizeof(msg), "Armed automation id=%ld (fires in %d ms)", id, delayMs);
-  broadcastOutput(msg);
+  snprintf(reply, sizeof(reply), "Armed automation id=%ld (fires in %d ms)", id, delayMs);
   cliHint("the commands run later when the timer elapses, not now - to capture what they output, start 'autolog start <file>' first and read it back with 'fileview \"<file>\"'");
-  return "OK";
+  return reply;
 }
 
 // The reply of `automation sanitize` when it changed the file: what it fixed,
@@ -2874,12 +3126,15 @@ static const char* automationSanitizeReply(const AutomationSanitizeCounts& count
 
 // Main automation command dispatcher
 const char* cmd_automation(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-
   CommandArgs a(argsInput);
   String subCmd = a.arg(0);
   subCmd.toLowerCase();
   String subArgs = a.remaining(0);
+
+  // `add` checks its arguments in a validate pass and answers VALID itself;
+  // every other sub-command validates as VALID here.
+  if (subCmd == "add") return cmd_automation_add(subArgs);
+  RETURN_VALID_IF_VALIDATE_CSTR();
 
   // Handle "system" subcommand: enable | disable | status, with an optional trailing `json` token.
   // Parse the action as the FIRST token (not the whole tail): the companion app sends
@@ -2917,8 +3172,6 @@ const char* cmd_automation(const String& argsInput) {
   // Handle regular automation commands
   if (subCmd == "list") {
     return cmd_automation_list(subArgs);
-  } else if (subCmd == "add") {
-    return cmd_automation_add(subArgs);
   } else if (subCmd == "enable") {
     return cmd_automation_enable_disable(subArgs, true);
   } else if (subCmd == "disable") {
@@ -4439,6 +4692,10 @@ const char* evaluateConditionalChain(const char* chainStr, char* outBuf, size_t 
 // `autoName` is the automation's display name for autolog COMMAND/OUTPUT attribution.
 const char* executeConditionalCommand(const char* command, const char* owner, const char* autoName) {
   EXT_RAM_BSS_ATTR static char errorBuf[128];  // Static buffer for error messages
+  // The step never reached the executor. The text must not hold the word the
+  // callers use to recognise an accepted step (isAutoInternalResult).
+  static const char kNotSubmitted[] =
+      "Error: Command not submitted (executor busy or command too long). Run the automation again.";
   const char* cmdStr = command;
   size_t cmdLen = strlen(command);
   
@@ -4594,14 +4851,14 @@ const char* executeConditionalCommand(const char* command, const char* owner, co
         if (thenCmdStart[0] != '\0') {
           const String safeThenCmd = redactAutomationCommandForAudit(String(thenCmdStart));
           DEBUG_AUTOMATIONSF("[conditional] queuing THEN: %s", safeThenCmd.c_str());
-          queueAutomationSubCommand(thenCmdStart, owner, autoName);
+          if (!queueAutomationSubCommand(thenCmdStart, owner, autoName)) return kNotSubmitted;
           return "Conditional THEN queued";
         }
       } else {
         if (elseBuf[0] != '\0') {
           const String safeElseCmd = redactAutomationCommandForAudit(String(elseBuf));
           DEBUG_AUTOMATIONSF("[conditional] queuing ELSE: %s", safeElseCmd.c_str());
-          queueAutomationSubCommand(elseBuf, owner, autoName);
+          if (!queueAutomationSubCommand(elseBuf, owner, autoName)) return kNotSubmitted;
           return "Conditional ELSE queued";
         }
       }
@@ -4611,7 +4868,7 @@ const char* executeConditionalCommand(const char* command, const char* owner, co
   }
   
   // Regular command - queue through FreeRTOS command queue (async, non-blocking)
-  queueAutomationSubCommand(command, owner, autoName);
+  if (!queueAutomationSubCommand(command, owner, autoName)) return kNotSubmitted;
   return "Command queued";
 }
 
@@ -4650,7 +4907,7 @@ const char* validateConditionalHierarchy(const char* conditions) {
     switch (state) {
       case EXPECTING_IF:
         if (!foundIf) {
-          return "Error: Expected IF statement at beginning";
+          return "Error: The chain must start with IF. Write IF <condition> THEN <command>.";
         }
         state = EXPECTING_ELSE_OR_END;
         position += 3;
@@ -4666,7 +4923,7 @@ const char* validateConditionalHierarchy(const char* conditions) {
         } else {
           const char* thenPos = strstr(input + position, "THEN");
           if (!thenPos) {
-            return "Error: Missing THEN keyword";
+            return "Error: Missing THEN keyword. Write IF <condition> THEN <command>.";
           }
           position = (thenPos - input) + 4;
           while (position < len && 
@@ -4680,7 +4937,7 @@ const char* validateConditionalHierarchy(const char* conditions) {
 
       case EXPECTING_END:
         if (foundIf || foundElseIf || foundElse) {
-          return "Error: No additional conditions allowed after ELSE";
+          return "Error: Nothing may follow the ELSE branch. Remove the conditions after ELSE.";
         }
         position++;
         break;
@@ -4724,13 +4981,15 @@ const char* cmd_autolog(const String& argsInput) {
   if (action == "stop") {
     String filename;
     const auto result = stopAutomationLog(filename);
-    if (result == AutomationLogStopResult::Inactive) return "Error: Automation logging is not active";
+    if (result == AutomationLogStopResult::Inactive) {
+      return "Error: Automation logging is not running. Start it with 'autolog start <filename>'.";
+    }
     if (result == AutomationLogStopResult::Unavailable) {
       return "Error: Filesystem lock unavailable; automation logging unchanged";
     }
     snprintf(getDebugBuffer(), 1024, result == AutomationLogStopResult::Stopped
         ? "Automation logging stopped: %s"
-        : "Error: Automation logging stopped, but failed to write LOG_STOP: %s", filename.c_str());
+        : "Automation logging stopped: %s (its LOG_STOP marker could not be written)", filename.c_str());
     return getDebugBuffer();
   }
   if (action == "status") {
@@ -4746,14 +5005,13 @@ const char* cmd_autolog(const String& argsInput) {
 const char* cmd_validate_conditions(const String& argsInput) {
   String conditions = argsInput;
   conditions.trim();
-  const char* validationResult = validateConditionalHierarchy(conditions.c_str());
-  // If we're in validation mode and validation passes, return "VALID"
-  // Otherwise return the actual validation result (which could be an error)
-  if (gCliValidateOnly && validationResult && strcmp(validationResult, "VALID") == 0) {
-    return "VALID";
+  if (!conditions.length()) {
+    return "Usage: validateconditions IF <condition> THEN <command> [ELSE <command>]";
   }
-  broadcastOutput(validationResult);
-  return "OK";
+  // The verdict is the reply: an invalid chain answers its reason.
+  const char* validationResult = validateConditionalHierarchy(conditions.c_str());
+  if (commandReplyIsFailure(validationResult)) return validationResult;
+  return gCliValidateOnly ? "VALID" : "Conditions are valid";
 }
 
 // Automation scheduler (runs from main loop)

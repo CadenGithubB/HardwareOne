@@ -78,7 +78,7 @@ inline void streamEdgeImpulseSensorCard(httpd_req_t* req) {
 
 // Stream button bindings for Edge Impulse
 inline void streamEdgeImpulseSensorBindButtons(httpd_req_t* req) {
-  httpd_resp_send_chunk(req, "bind('btn-ei-enable','ei enable 1');bind('btn-ei-disable','ei enable 0');bind('btn-ei-detect','ei detect');bind('btn-ei-continuous-start','ei continuous 1');bind('btn-ei-continuous-stop','ei continuous 0');", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "bind('btn-ei-enable','eienable 1');bind('btn-ei-disable','eienable 0');bind('btn-ei-detect','eidetect');bind('btn-ei-continuous-start','eicontinuous 1');bind('btn-ei-continuous-stop','eicontinuous 0');", HTTPD_RESP_USE_STRLEN);
 }
 
 // Stream Edge Impulse-specific JavaScript
@@ -108,7 +108,7 @@ inline void streamEdgeImpulseSensorJs(httpd_req_t* req) {
     "if(slider && valSpan) {\n"
     "  slider.oninput = function() { valSpan.textContent = parseFloat(this.value).toFixed(2); };\n"
     "  slider.onchange = function() {\n"
-    "    hw.postFormText('/api/cli', {cmd:'ei confidence '+this.value});\n"
+    "    hw.postFormText('/api/cli', {cmd:'eiconfidence '+this.value});\n"
     "  };\n"
     "}\n"
     "})();\n", HTTPD_RESP_USE_STRLEN);
@@ -131,7 +131,7 @@ inline void streamEdgeImpulseSensorJs(httpd_req_t* req) {
     "window._eiLoadModels = function() {\n"
     "  var select = hw.$('ei-model-select');\n"
     "  if(!select) return;\n"
-    "  hw.postFormText('/api/cli', {cmd:'ei model list'})\n"
+    "  hw.postFormText('/api/cli', {cmd:'eimodellist'})\n"
     "    .then(function(txt) {\n"
     "      select.innerHTML = '<option value=\"\">-- Select Model --</option>';\n"
     "      var lines = txt.split('\\n');\n"
@@ -154,10 +154,14 @@ inline void streamEdgeImpulseSensorJs(httpd_req_t* req) {
     "hw.$('btn-ei-load-model').onclick = function() {\n"
     "  var select = hw.$('ei-model-select');\n"
     "  if(!select || !select.value) { alert('Select a model first'); return; }\n"
-    "  hw.postFormText('/api/cli', {cmd:'ei model load '+select.value})\n"
+    "  hw.postFormText('/api/cli', {cmd:'eimodelload \"'+select.value+'\"'})\n"
     "    .then(function(txt) {\n"
     "      console.log('[EI] Load result:', txt);\n"
     "      window._eiLoadModels();\n"
+    "      window._eiUpdateStatus();\n"
+    "    })\n"
+    "    .catch(function(e) {\n"  // a refused load is a 400; e.message is the reply without its Error: lead
+    "      alert(e && e.message ? e.message : 'Model not loaded');\n"
     "      window._eiUpdateStatus();\n"
     "    });\n"
     "};\n", HTTPD_RESP_USE_STRLEN);
@@ -179,10 +183,9 @@ inline void streamEdgeImpulseSensorJs(httpd_req_t* req) {
     "  var btn = hw.$('btn-ei-upload-model');\n"
     "  btn.disabled = true;\n"
     "  hw.setText(statusEl, 'Uploading ' + file.name + '...');\n"
-    "  var reader = new FileReader();\n"
-    "  reader.onload = function(e) {\n"
-    "    var b64 = btoa(String.fromCharCode.apply(null, new Uint8Array(e.target.result)));\n"
-    "    hw.postForm('/api/files/upload', {path:'/EI Models/'+file.name, binary:'1', content:b64})\n"
+    "  (function() {\n"
+    "    fetch('/api/files/upload?path=' + encodeURIComponent('/EI Models/'+file.name), {method:'POST', credentials:'include', cache:'no-store', headers:{'Content-Type':'application/octet-stream'}, body:file})\n"
+    "      .then(hw._auth401)\n"
     "      .then(function(r){ return r.json(); })\n"
     "      .then(function(data) {\n"
     "        btn.disabled = false;\n"
@@ -197,12 +200,7 @@ inline void streamEdgeImpulseSensorJs(httpd_req_t* req) {
     "        btn.disabled = false;\n"
     "        hw.setHTML(statusEl, '<span style=\"color:#dc3545\">Upload failed: ' + err + '</span>');\n"
     "      });\n"
-    "  };\n"
-    "  reader.onerror = function() {\n"
-    "    btn.disabled = false;\n"
-    "    hw.setHTML(statusEl, '<span style=\"color:#dc3545\">Failed to read file</span>');\n"
-    "  };\n"
-    "  reader.readAsArrayBuffer(file);\n"
+    "  })();\n"
     "};\n", HTTPD_RESP_USE_STRLEN);
 
   // Organize models button
@@ -231,7 +229,7 @@ inline void streamEdgeImpulseSensorJs(httpd_req_t* req) {
   // Status update function
   httpd_resp_send_chunk(req,
     "window._eiUpdateStatus = function() {\n"
-    "  hw.postFormText('/api/cli', {cmd:'ei status'})\n"
+    "  hw.postFormText('/api/cli', {cmd:'eistatus'})\n"
     "    .then(function(txt) {\n"
     "      var modelMatch = txt.match(/Model path:\\s*(.+)/i);\n"
     "      var modelEl = hw.$('eiModelPath');\n"

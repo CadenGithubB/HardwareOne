@@ -56,7 +56,7 @@ Preview failures use the shared error toast with an eight-second minimum.
 `i2csensor_mlx90640_oled.h` already demonstrates mode registration, snapshot
 ownership, unavailable states and authorized start/stop commands. Its current
 image renderer uses three temperature bands: off, a checkerboard of whole
-sensor cells, and on. It ignores `oledThermalColorMode` and clips drawing to
+sensor cells, and on. It has no colour-mode setting and clips drawing to
 the literal height 64. Its per-frame min/max mapping can also change contrast
 as a hot/cold extreme enters the scene. Reuse its integration pattern, rather
 than copying these rendering restrictions into camera preview.

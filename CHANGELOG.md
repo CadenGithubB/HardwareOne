@@ -196,8 +196,9 @@ everything user-visible since the v0.99.99.1 tag.
   `<name> accepted the bond`, `<name> has bond mode off`, `<name> is bonded to another device`,
   `<name> ended the bond`, `<name> and this device are both bond master`. `bondstatus` has an
   `Agreement:` line and no longer prints `Last heartbeat: 0s ago` when there was none. `bondconnect`
-  for the partner already set no longer answers `Already connected` unless that partner has agreed:
-  it says what the partner answered and that it is asked again. `bondstatus json` and
+  for the partner already set says, while that partner has not agreed, what the partner answered and
+  that it is asked again; once it has agreed, the reply is the command replies' Error for a bond
+  that already runs (or, with no session, that the handshake started). `bondstatus json` and
   `/api/bond/status` carry `agreement` (`unknown`, `agreed` or `declined`) and `agreementReason`
   (`not_bonded`, `bonded_elsewhere`, `ended`, `role_conflict` or empty); `bondstatus json` also has
   `heartbeatSeen`, and the system status has the same `agreement` text under `connectivity.bond`.
@@ -248,6 +249,18 @@ everything user-visible since the v0.99.99.1 tag.
 - ESP-NOW: a mesh master with nine or more paired devices that are away no longer starts a
   handshake with one of them every half second, for good: the back-off table now has room for all
   sixteen paired devices (it had eight, and a full table gave up an entry at every try).
+- P4 boards: `c6update` now keeps the new radio-chip (C6) firmware. Before, the P4 reset the C6 to
+  rebuild the link before the new image was confirmed, so the C6 always rolled back to its old
+  image while the P4 still reported "companion updated". The new C6 image confirms itself after
+  running four seconds; the P4 waits for that, then checks which slot the C6 runs and reports a
+  rollback as a failed update. Wi-Fi and the web server are now powered down before the transfer
+  and come back afterwards; before, the device often stayed off the network until a reboot after an
+  update or a failed transfer. An image that crashes on its first boot still rolls back; one that
+  boots but misbehaves stays (replace it with `c6update` or the programmer). The image being
+  installed must carry the self-confirm, so updating from an older C6 image works, but installing
+  an older image this way still rolls back. Ran on the P4X-EYE bench four times in both slot
+  directions. Bluetooth can stay off after an update until a restart when the
+  ring or glasses do not close cleanly; that is unchanged.
 - Waveshare ESP32-P4 board: speaker test tones were close to inaudible at ordinary volume values,
   because the volume was applied twice (codec register and sample level). The codec now stays at
   0 dB and the volume scales the samples; volume 0 is silence. The camera module on this board faces
@@ -734,11 +747,71 @@ everything user-visible since the v0.99.99.1 tag.
   started" either way. The reply now says where the readings go ("OK: tof readings are sent to
   hub.") or why nothing is sent yet (no master named, the named master is not paired, no session
   with it yet, mesh mode off). A stream switched on by hand is no longer stopped when a request of
-  the master for the same sensor runs out; a stream the master asked for still stops then. On the
-  mesh master the command says that the master receives readings and sends none.
+  the master for the same sensor runs out; a stream the master asked for still stops then, and
+  `espnowsensorstream <sensor> on` for it makes it a stream switched on by hand (switching on a
+  stream already switched on by hand, or off one that does not run, is an Error under the command
+  reply contract). On the mesh master the command says that the master receives readings and sends
+  none.
 - A device that asked for readings is told why none come: without an encrypted session a reading is
   no longer kept back for later (the next one is newer), the session is started in the background
   with the usual back-off, and the drop is counted.
+- MQTT publishes the state every 30 s by default instead of every 10 s. Devices that already saved
+  their settings keep the interval they had; change it with `mqttpublishintervalms`.
+- Command replies: a command that failed or was refused answers `Error: <reason>. <next action>.`
+  and the executor reports it as failed on every interface. A reply counts as failed when it starts
+  with `Error`/`ERROR`, `Usage:` or `Unknown command:` (`commandReplyIsFailure()` in
+  `System_CommandReply.h`). Over Bluetooth the app gets only the text and applies the same three
+  leads. More than 600 replies changed. What a script or an app has to expect:
+  - Loose arguments are refused instead of guessed. A number has to be the whole token and in
+    range: text that was read as 0 or as its leading digits, and a value that was clamped to the
+    nearest limit, now answer `Error: Not a whole number. Give the value in digits, for example
+    250.`, `Error: Not a number. Give the value in digits, for example 0.5.` (a value with a
+    fraction) or the command's own range message. An on/off argument that is none of `on`/`off`,
+    `1`/`0`, `true`/`false`, `enable`/`disable` answers `Error: Not an on/off value. Use on or
+    off.` instead of being taken as off or as a status query. Most commands now also refuse
+    unknown words and extra words that were ignored. Examples: `waypoint del Home` (used to delete waypoint 0),
+    `wifiadd <ssid> <pass> abc`, `wifitxpower 99`, `lightsleep 99999`, `opencamera now`.
+  - Failures that used to read as success are reported, for example `lightsleep` that did not
+    sleep, `closewifi` whose radio stayed on, `automation run` held back by its condition or with
+    steps that did not run, `automation trigger` while automations are switched off,
+    `micdelete all` that left recordings behind, `espnowroomcmd` that reached no device, and
+    `sdformat` without `confirm`.
+  - JSON commands: when the reply cannot be built (out of memory, or larger than the reply buffer)
+    `status`, `versions`, `devices`, `sensors`, `batterystatus`, `power`, `controls`, `banlist`,
+    `c6status` and `mqttexternalsensors` with `json`, the `llm...` `json` reads and `cameraread`
+    answer an `Error: ...` text instead of an `{"error":...}` object or a cut document, and
+    `cameravideolist` without an SD card is an error. Test for the failure leads before parsing a
+    reply as JSON. `espnowstatus json` before the first start of a boot answers
+    `{"schema":1,"initialized":false}` instead of `{"schema":1,"ok":false,"error":...}`.
+  - Reply shapes: `maplist json` adds `"truncated":true` when the device holds more than the 8
+    maps listed; `images json` reports `usedBytes` and `totalBytes` as 64-bit values, so a card
+    above 4 GB shows its real size.
+  - Web API: `POST /api/cli` answers HTTP 400 for every failed reply and 403 for an admin or
+    super-admin refusal, so the calls above that answered 200 now answer 400. `POST /api/cli/batch`
+    still answers 200 with each reply in `results`. The new `failed` array holds the indexes into
+    `results` of the commands the executor reported as failed. `POST /api/bond/exec` adds
+    `"pending":true,"reqId":<n>` when the command was sent to the bonded device: `success` says
+    only that the frame left, and the bonded device's answer arrives later under that request id.
+  - Stopping, closing, unloading or disconnecting something that is not running, and starting,
+    opening or loading something that is already running, answer an Error with the next step
+    instead of a success, for example `closehttp` with no server: `Error: HTTP server is not
+    running. Start it with 'openhttp'.` This covers the services' open/close and start/stop
+    commands (Wi-Fi, HTTP, Bluetooth, sensors, camera, microphone, speech, MQTT, ESP-NOW, the SD
+    card, maps, Edge Impulse, the glasses and the ring); `llmunload` and `llmstop` answer
+    `{"ok":false,...}`. Saving `<x>enabled 0` for a stopped service stays a normal save. Removed
+    because nothing read them: `espnowworker`, `espnowworkerstatusinterval`, `oledbootmode` and
+    `oledthermalcolormode` with their settings. `ledstartupcolor` and `ledstartupcolor2` refuse an
+    unknown colour name instead of saving it, and `oledthermalscale` refuses values below 1.0.
+  `docs/APP_JSON_CONTRACT.md` carries the changed rows. Host-tested and built; not yet tested on
+  hardware.
+- Faster web file transfers. The file manager, maps upload and Edge Impulse model upload now send
+  the file's bytes as they are instead of base64 form text, and every board's TCP window and send
+  buffer go from 4 to 8 packets (11,520 bytes). The raw file download (`/api/files/read`) reads
+  4 KB at a time instead of 512 bytes. Measured on the P4X-EYE with Bluetooth idle: file manager
+  uploads to the SD card about 180 -> 650 KB/s, SD downloads about 330 -> 600 KB/s; a transfer uses
+  about 3 KB more internal RAM. The form upload stays for the settings import. The model upload also no longer
+  fails on models over about 100 KB in the browser. While Bluetooth is scanning (for example
+  reconnecting to glasses), Wi-Fi transfers on the P4 run at about half speed; that is unchanged.
 - OLED feedback is one shared message box. It replaces the animated status ribbon, the error boxes
   that the login, password, Settings editor and Health screens drew themselves, and the results
   shown in footers. A refused command shows the command's own reason (the admin gate as "Admin

@@ -456,6 +456,18 @@ WifiScanResult wifiScanForEach(bool includeHidden, WifiScanVisitor visitor,
 // WiFi Command Handlers
 // ============================================================================
 
+// Serializes a json reply into the debug buffer. serializeJson writes no NUL
+// when the output fills the buffer, so a document that does not fit becomes
+// `tooLarge`, never a cut or unterminated reply. A document that could not
+// allocate (overflowed) is out of memory, not too large.
+static const char* wifiJsonReply(const JsonDocument& doc, const char* tooLarge) {
+  if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
+  if (doc.overflowed()) return kCommandReplyOutOfMemory;
+  const size_t n = serializeJson(doc, getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE);
+  if (n == 0 || n >= GLOBAL_DEBUG_BUFFER_SIZE) return tooLarge;
+  return getDebugBuffer();
+}
+
 const char* cmd_wifiinfo(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   // The saved list is copied only where it is shown (not connected). A failed
@@ -484,8 +496,7 @@ const char* cmd_wifiinfo(const String& argsInput) {
     doc["radioOn"] = wifiRadioOn();  // RADIO axis (power) — separate from `connected` (association)
     doc["radioHeldForEspnow"] = (wifiRadioState() == WIFI_RADIO_UP_FOR_ESPNOW);
     doc["mac"] = WiFi.macAddress();
-    serializeJson(doc, getDebugBuffer(), 1024);
-    return getDebugBuffer();
+    return wifiJsonReply(doc, "Error: Status does not fit in one reply. Retry wifistatus json.");
   }
 
   // Two separate axes, always shown: RADIO power, then WiFi connection.
@@ -536,8 +547,8 @@ const char* cmd_wifilist(const String& argsInput) {
     }
     doc["count"] = saved.count;
     doc["hint"] = "current connection: 'wifistatus'; connect: 'openwifi'";
-    serializeJson(doc, getDebugBuffer(), 1024);
-    return getDebugBuffer();
+    return wifiJsonReply(doc, "Error: Network list does not fit in one reply. "
+                              "Remove a saved network with wifirm.");
   }
 
   // Networks already loaded from settings.json by readSettingsJson()
@@ -578,17 +589,28 @@ const char* cmd_wifiadd(const String& originalCmd) {
   
   // wifiadd <ssid> <pass> [priority] [hidden0|1]
   CommandArgs a(originalCmd);
-  if (!a.hasMinArgs(2)) return "Error: invalid arguments — Usage: wifiadd <ssid> <pass> [priority] [hidden0|1]";
+  if (!a.hasMinArgs(2) || a.count() > 4) {
+    return "Error: invalid arguments — Usage: wifiadd <ssid> <pass> [priority] [hidden0|1]";
+  }
   String ssid = a.arg(0);
   String pass = a.arg(1);
-  int pri = a.argInt(2, 0);
-  if (pri <= 0 && a.has(2)) pri = 1;
-  bool hid = a.argBool(3, ssid.length() == 0);
+  int pri = 0;  // 0: not given
+  if (a.has(2)) {
+    if (!parseIntArg(a.arg(2), pri)) return kCommandReplyNotANumber;
+    if (pri < 1) return "Error: Priority must be 1 or higher. Give 1 for the first network to try.";
+  }
+  bool hid = ssid.length() == 0;
+  if (a.has(3)) {
+    const int hidden = parseBoolArg(a.arg(3));
+    if (hidden < 0) return kCommandReplyNotOnOff;
+    hid = (hidden == 1);
+  }
   // Networks already in memory from settings.json. upsert fails for several
   // distinct reasons — distinguish them, or a full list shows the blank-SSID text
   // (the real "list full" line only went to broadcastOutput, which G2/web
   // callers reading the return value never see).
-  if (!upsertWifiNetwork(ssid, pass, pri, hid)) {
+  WifiUpsertOutcome outcome;
+  if (!upsertWifiNetwork(ssid, pass, pri, hid, a.has(3), &outcome)) {
     if (ssid.length() == 0) return "Error: cannot add a WiFi network with a blank SSID";
     // Mirror upsertWifiNetwork's length guards. Without these the caller would
     // fall through to the list-full text and report the wrong reason.
@@ -623,8 +645,9 @@ const char* cmd_wifiadd(const String& originalCmd) {
     return getDebugBuffer();
   }
   systemEventPost(SYSEVT_WIFI_NET_ADDED, ssid.c_str());
-  snprintf(getDebugBuffer(), 1024, "Saved network '%s' with priority %d%s",
-           ssid.c_str(), pri == 0 ? 1 : pri, hid ? " (hidden)" : "");
+  snprintf(getDebugBuffer(), 1024, "Saved network '%s' with priority %d%s%s",
+           ssid.c_str(), outcome.priority, outcome.hidden ? " (hidden)" : "",
+           outcome.keptPassword ? " (stored password kept; to replace it run wifirm, then wifiadd)" : "");
   return getDebugBuffer();
 }
 
@@ -689,10 +712,15 @@ const char* cmd_wifipromote(const String& originalCmd) {
   
   // wifipromote <ssid> [newPriority]
   CommandArgs a(originalCmd);
-  if (!a.hasMinArgs(1)) return "Error: invalid arguments — Usage: wifipromote <ssid> [newPriority]";
+  if (!a.hasMinArgs(1) || a.count() > 2) {
+    return "Error: invalid arguments — Usage: wifipromote <ssid> [newPriority]";
+  }
   String ssid = a.arg(0);
-  int newPri = a.argInt(1, 1);
-  if (newPri <= 0) newPri = 1;
+  int newPri = 1;
+  if (a.has(1)) {
+    if (!parseIntArg(a.arg(1), newPri)) return kCommandReplyNotANumber;
+    if (newPri < 1) return "Error: Priority must be 1 or higher. Give 1 to make the network primary.";
+  }
   // Networks already in memory from settings.json
   if (!setWifiNetworkPriority(ssid, newPri)) {
     snprintf(getDebugBuffer(), 1024, "Error: Network not found: '%s'", ssid.c_str());
@@ -949,6 +977,7 @@ const char* cmd_wificonnect(const String& originalCmd) {
     if (!wifiNetworkConnectionById(id, selected)) return "Error: selected WiFi network no longer exists; refresh the list";
     useSavedId = true;
   } else if (firstArg == "--index") {
+    if (wifiNetworkCount() == 0) return "Error: No saved Wi-Fi networks. Add one in Wi-Fi settings.";
     index1 = a.argInt(1, 0);
     if (index1 <= 0 || index1 > wifiNetworkCount()) {
       if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
@@ -958,8 +987,10 @@ const char* cmd_wificonnect(const String& originalCmd) {
   } else {
     // Legacy: numeric positional index
     int sel = 0;
-    if (parseIntArg(firstArg, sel) && sel > 0) index1 = sel;
-    else {
+    if (parseIntArg(firstArg, sel) && sel > 0) {
+      if (wifiNetworkCount() == 0) return "Error: No saved Wi-Fi networks. Add one in Wi-Fi settings.";
+      index1 = sel;
+    } else {
       if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
       snprintf(getDebugBuffer(), 1024, "Usage: openwifi [--best | --index <1..%d> | --saved-id <id>]", wifiNetworkCount());
       return getDebugBuffer();
@@ -1010,8 +1041,14 @@ const char* cmd_wificonnect(const String& originalCmd) {
   return "Error: Could not join a saved network. Check signal and password.";
 }
 
+static bool wifiRehuntWanted();  // below, beside the rehunt state
+
 const char* cmd_closewifi(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+
+  // A boot connect or a rehunt still trying counts as WiFi in use: closewifi
+  // stops it, which is a real action even before any association.
+  const bool hadAttempt = wifiBackgroundConnectActive() || wifiRehuntWanted();
 
   // Stop a boot connect still hunting in the background before closing.
   if (!wifiSupersedeBackgroundConnect()) {
@@ -1021,7 +1058,9 @@ const char* cmd_closewifi(const String& argsInput) {
   // Check if WiFi is initialized before attempting disconnect
   wifi_mode_t mode;
   if (esp_wifi_get_mode(&mode) != ESP_OK) {
-    return "Error: WiFi is not initialized";
+    // No driver and no radio: there is nothing to close.
+    if (!wifiRadioOn()) return "Error: WiFi is not running. Start it with 'openwifi'.";
+    return "Error: WiFi is not initialized. Start it with 'openwifi'.";
   }
 
   WifiRadioMutationGuard radioGuard;
@@ -1041,6 +1080,22 @@ const char* cmd_closewifi(const String& argsInput) {
   // under them would esp_wifi_deinit() beneath a live esp_now_send(). The
   // owner's predicate counts that state as holding the radio.
   const bool espnowHoldsRadio = espnowOwnsRadio();
+  // With ESP-NOW holding the radio, closewifi only drops the association. With
+  // none and no attempt to stop, WiFi is not running from the user's side: the
+  // not-running Error (the owner's 2026-11-18 rule), and no
+  // SYSEVT_WIFI_DISCONNECTED for a link that never was. The HTTP server is
+  // still stopped when it runs, since closewifi promises that.
+  const bool wasAssociated = WiFi.isConnected();
+  if (espnowHoldsRadio && !wasAssociated && !hadAttempt) {
+    radioGuard.release();
+ #if ENABLE_HTTP_SERVER
+    if (isHttpServerRunning()) {
+      httpServerStopSafe();
+      return "WiFi was not connected (radio held for ESP-NOW). HTTP server stopped, web output off.";
+    }
+ #endif
+    return "Error: WiFi is not connected (radio held for ESP-NOW). Connect with 'openwifi'.";
+  }
   if (espnowHoldsRadio) {
     // ESP-NOW owns the radio — drop the association but KEEP the radio up (mode,
     // driver, PS untouched). The WIFI_STA_DISCONNECTED event re-pins the ESP-NOW
@@ -1091,6 +1146,12 @@ const char* cmd_closewifi(const String& argsInput) {
     if (mgr) mgr->resumePolling();
   }
   radioGuard.release();
+
+  // The power-down is skipped when the link does not drop in time; answer from
+  // the radio, and leave the HTTP server up for the retry.
+  if (!espnowHoldsRadio && wifiRadioOn()) {
+    return "Error: WiFi radio did not power down. Check wifistatus and retry closewifi.";
+  }
 
   // Stop HTTP only after the guarded radio mutation succeeds. A BUSY result
   // above must leave the existing network service usable, not partially close
@@ -1365,6 +1426,7 @@ static bool radioPowerOn() {
 const char* cmd_radiopower(const String& originalCmd) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   CommandArgs a(originalCmd);
+  if (a.count() > 1) return "Usage: radiopower [on|off|toggle]";
   String arg = a.arg(0);
   arg.toLowerCase();
 
@@ -1372,17 +1434,23 @@ const char* cmd_radiopower(const String& originalCmd) {
   // in the moments its own mode changes leave wifiRadioOn() false.
   const bool radioOn = wifiRadioOn() || wifiBackgroundConnectActive();
   bool wantOn;
-  if (arg == "on")                                wantOn = true;
-  else if (arg == "off")                          wantOn = false;
-  else if (arg == "toggle" || arg.length() == 0)  wantOn = !radioOn;
-  else return "Usage: radiopower [on|off|toggle]";
+  if (arg == "toggle" || arg.length() == 0) {
+    wantOn = !radioOn;
+  } else {
+    const int parsed = parseBoolArg(arg);
+    if (parsed < 0) return kCommandReplyNotOnOff;
+    wantOn = (parsed == 1);
+  }
 
   if (wantOn) {
     if (radioOn) {
       // Treat an explicit ON as cancellation of a failed OFF transaction. The
-      // radio never went down, so there is nothing to restore later.
+      // radio never went down, so there is nothing to restore later. That
+      // cancellation is the one thing an ON does here.
+      const bool cancelledOff = gRadioPowerOffPending;
       clearRadioRestoreSnapshot();
-      return "Radio already on.";
+      if (cancelledOff) return "Radio stays on. The unfinished radiopower off was cancelled.";
+      return "Error: The radio is already on. Turn it off first with 'radiopower off'.";
     }
     if (!radioPowerOn()) {
       return wifiStartFailure(!(gRadioForcedOff && gRadioPrevEspNow),
@@ -1396,7 +1464,11 @@ const char* cmd_radiopower(const String& originalCmd) {
   if (!wifiSupersedeBackgroundConnect()) {
     return "Error: WiFi boot connect is still stopping; radio remains on. Retry radiopower off.";
   }
-  if (!wifiRadioOn() && !gRadioPowerOffPending) return "Radio already off.";
+  if (!wifiRadioOn() && !gRadioPowerOffPending) {
+    // A boot connect stopped just above was the radio being on.
+    if (radioOn) return "Radio off. The WiFi boot connect was stopped (runtime only; radio returns on next boot).";
+    return "Error: The radio is already off. Turn it on with 'radiopower on'.";
+  }
   const RadioPowerOffResult offResult = radioPowerOff();
   if (offResult == RadioPowerOffResult::ESPNOW_BUSY) {
     return "Error: ESP-NOW did not quiesce; radio remains on. Retry radiopower off.";
@@ -1413,6 +1485,9 @@ const char* cmd_radiopower(const String& originalCmd) {
 // and reconnect/scan to another without re-enabling WiFi.
 const char* cmd_wifidisconnect(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+  // A boot connect or a rehunt still trying is a connection this command
+  // stops, even before any association.
+  const bool hadAttempt = wifiBackgroundConnectActive() || wifiRehuntWanted();
   // Stop a boot connect still hunting in the background before dropping.
   if (!wifiSupersedeBackgroundConnect()) {
     return "Error: WiFi boot connect is still stopping; retry wifidisconnect";
@@ -1422,16 +1497,34 @@ const char* cmd_wifidisconnect(const String& argsInput) {
   wifiRehuntCancel();
   wifi_mode_t mode;
   if (esp_wifi_get_mode(&mode) != ESP_OK) {
-    return "Error: WiFi is not initialized";
+    // No driver and no radio: there is no association to drop.
+    if (!wifiRadioOn()) {
+      return hadAttempt ? "WiFi connect attempt stopped (radio off)."
+                        : "Error: WiFi is not connected (radio off). Connect with 'openwifi'.";
+    }
+    return "Error: WiFi is not initialized. Connect with 'openwifi'.";
   }
   WifiRadioMutationGuard radioGuard;
   if (!radioGuard.acquired()) {
     return "Error: WiFi radio busy (scan or connection in progress); retry wifidisconnect";
   }
+  // Read before the drop: an attempt still in flight is cancelled below either
+  // way, but with no association the command did not disconnect anything.
+  const bool wasConnected = WiFi.isConnected();
   WiFi.disconnect(false);   // false = do NOT power down the radio
+  // The driver reports the drop through an event; give a slow one up to half
+  // a second before the answer is read from the link.
+  for (int i = 0; i < 10 && WiFi.isConnected(); ++i) vTaskDelay(pdMS_TO_TICKS(50));
   radioGuard.release();
+  if (WiFi.isConnected()) {
+    return "Error: WiFi did not disconnect. Check wifistatus and retry wifidisconnect.";
+  }
+  if (!wasConnected) {
+    return hadAttempt ? "WiFi connect attempt stopped (radio still on)."
+                      : "Error: WiFi is not connected. Connect with 'openwifi'.";
+  }
   systemEventPost(SYSEVT_WIFI_DISCONNECTED);
-  return "WiFi disconnected (radio still on).";
+  return wifiRadioOn() ? "WiFi disconnected (radio still on)." : "WiFi disconnected.";
 }
 
 namespace {
@@ -1488,6 +1581,14 @@ static bool emitWifiScanText(const WifiScanRecord& record, uint16_t index,
   return true;
 }
 
+// The reply for a scan that did not run, in both forms: the status is the reason.
+static const char* wifiScanFailureReply(const WifiScanResult& scan) {
+  if (!ensureDebugBuffer()) return "Error: WiFi scan failed. Retry wifiscan.";
+  snprintf(getDebugBuffer(), 1024, "Error: WiFi scan failed (%s). Retry wifiscan.",
+           wifiScanStatusText(scan.status));
+  return getDebugBuffer();
+}
+
 }  // namespace
 
 const char* cmd_wifiscan(const String& argsInput) {
@@ -1495,7 +1596,7 @@ const char* cmd_wifiscan(const String& argsInput) {
   
   // Ensure WiFi is initialized (lazy init) before scanning
   if (!ensureWifiInitialized()) {
-    return "Error: Failed to initialize WiFi";
+    return wifiStartFailure(true, "Error: WiFi could not start. Check radiopower, then retry wifiscan.");
   }
   
   String args = argsInput;
@@ -1519,14 +1620,9 @@ const char* cmd_wifiscan(const String& argsInput) {
     WifiScanJsonContext context{nets};
     const WifiScanResult scan = wifiScanForEach(
         /*includeHidden=*/true, appendWifiScanJson, &context);
-    if (!scan.ok()) {
-      // Preserve a valid JSON response on BUSY/driver failures so API callers
-      // can distinguish "scan unavailable" from a genuinely empty RF
-      // environment. Discard any prefix delivered before a cursor error.
-      nets.clear();
-      doc["error"] = wifiScanStatusText(scan.status);
-      doc["driverError"] = scan.driverError;
-    }
+    // A scan that did not run is a failure with its reason, as in the text
+    // form, so a caller can tell it from an empty RF environment.
+    if (!scan.ok()) return wifiScanFailureReply(scan);
 
     PSRAM_STATIC_BUF(jbuf, CMD_RESULT_MAX);
     // Trim the array to fit BEFORE serializing the wrapper. The reserve covers
@@ -1542,7 +1638,7 @@ const char* cmd_wifiscan(const String& argsInput) {
     WifiScanTextContext context{false};
     const WifiScanResult scan = wifiScanForEach(
         /*includeHidden=*/true, emitWifiScanText, &context);
-    if (!scan.ok()) return "Error: WiFi scan failed";
+    if (!scan.ok()) return wifiScanFailureReply(scan);
     if (!context.headerPrinted) {
       snprintf(getDebugBuffer(), 1024, "%u networks found:",
                (unsigned)scan.found);
@@ -1562,14 +1658,19 @@ const char* cmd_wifitxpower(const String& argsInput) {
 
   String valStr = argsInput;
   valStr.trim();
-  if (valStr.length() == 0) return "Error: invalid arguments — Usage: wifitxpower <dBm>";
-  float dBm = valStr.toFloat();
-  int q = (int)roundf(dBm * 4.0f);
-  if (q < 8) q = 8;    // ~2 dBm
-  if (q > 84) q = 84;  // ~21 dBm (hardware dependent)
+  if (valStr.length() == 0) return "Error: invalid arguments — Usage: wifitxpower <2..21>";
+  float dBm = 0.0f;
+  if (!parseFloatArg(valStr, dBm)) return kCommandReplyNotADecimal;
+  // The driver takes quarter-dBm steps from 8 (2 dBm) to 84 (21 dBm, hardware dependent).
+  if (dBm < 2.0f || dBm > 21.0f) {
+    return "Error: TX power must be 2 to 21 dBm. Give a value in that range.";
+  }
+  const int q = (int)roundf(dBm * 4.0f);
   esp_err_t err = esp_wifi_set_max_tx_power((int8_t)q);
   if (err != ESP_OK) {
-    snprintf(getDebugBuffer(), 1024, "Error: Failed to set tx power: %d", err);
+    snprintf(getDebugBuffer(), 1024,
+             "Error: TX power not set (%s). Turn the radio on with radiopower on, then retry.",
+             esp_err_to_name(err));
     return getDebugBuffer();
   }
   snprintf(getDebugBuffer(), 1024, "TX power set to %.2f dBm (raw=%d)", q / 4.0f, q);
@@ -1594,7 +1695,9 @@ const char* cmd_wifigettxpower(const String& argsInput) {
   int8_t q = 0;
   esp_err_t err = wifiFormatTxPower(txt, sizeof(txt), &q);
   if (err != ESP_OK) {
-    snprintf(getDebugBuffer(), 1024, "Error: Failed to get tx power: %d", err);
+    snprintf(getDebugBuffer(), 1024,
+             "Error: TX power not read (%s). Turn the radio on with radiopower on, then retry.",
+             esp_err_to_name(err));
     return getDebugBuffer();
   }
   snprintf(getDebugBuffer(), 1024, "TX power: %s (raw=%d)", txt, (int)q);
@@ -2210,23 +2313,30 @@ bool connectWifiSsid(const String& ssid, unsigned long timeoutMs) {
 const char* cmd_ntpsync(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   // Allow any authenticated user to sync NTP
+  if (!WiFi.isConnected()) return "Error: WiFi not connected. Run openwifi, then ntpsync.";
   NtpSyncOutcome outcome = NtpSyncOutcome::Failed;
   bool ok = syncNtpAndResolve(&outcome);
   if (!ok) {
     cliHint("NTP needs an internet connection - check 'wifistatus' and connect with 'openwifi' if offline");
-    return "Error: NTP sync failed";
+    return "Error: No NTP reply and no other time source. "
+           "Check internet access and UDP port 123, then run ntpsync again.";
   }
+  // No server reply is a failed sync, whatever kept the clock usable.
   const NtpRuntimeStatus runtime = getNtpRuntimeStatus();
   switch (outcome) {
     case NtpSyncOutcome::Reply:       return "NTP sync complete (server replied)";
     case NtpSyncOutcome::KeptPrior:
       return runtime.clientArmed
-                 ? "No NTP reply within wait window — clock kept; SNTP client remains armed"
-                 : "No NTP reply within wait window — clock kept; SNTP client is stopped";
+                 ? "Error: No NTP reply within the wait window. The clock kept its time and "
+                   "the SNTP client keeps trying; check ntpstatus later."
+                 : "Error: No NTP reply within the wait window. The clock kept its time; "
+                   "check internet access and run ntpsync again.";
     case NtpSyncOutcome::RtcFallback:
       return runtime.clientArmed
-                 ? "No NTP reply within wait window — time taken from RTC; SNTP client remains armed"
-                 : "No NTP reply within wait window — time taken from RTC; SNTP client is stopped";
+                 ? "Error: No NTP reply within the wait window. Time was taken from the RTC and "
+                   "the SNTP client keeps trying; check ntpstatus later."
+                 : "Error: No NTP reply within the wait window. Time was taken from the RTC; "
+                   "check internet access and run ntpsync again.";
     default:                          return "NTP sync complete";
   }
 }
@@ -2325,10 +2435,9 @@ const char* cmd_httpstart(const String& argsInput) {
   }
 
   if (server != NULL) {
-    if (gServerIsHttps) {
-      return "Error: HTTPS server is already running. Stop it first with 'closehttp'.";
-    }
-    return "HTTP server is already running";
+    return gServerIsHttps
+        ? "Error: HTTPS server is already running. Stop it first with 'closehttp' to restart it."
+        : "Error: HTTP server is already running. Stop it first with 'closehttp' to restart it.";
   }
 
   startHttpServer();
@@ -2344,7 +2453,7 @@ const char* cmd_httpstop(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   if (server == NULL) {
-    return "Error: HTTP server is not running";
+    return "Error: HTTP server is not running. Start it with 'openhttp'.";
   }
 
   bool wasHttps = gServerIsHttps;
@@ -2460,6 +2569,9 @@ const char* cmd_certgen(const String& argsInput) {
   // Parse key type: default ECDSA P-256, optional "rsa" for RSA-2048
   String arg = argsInput;
   arg.trim();
+  if (arg.length() && !arg.equalsIgnoreCase("rsa")) {
+    return "Error: Unknown key type. Use certgen or certgen rsa.";
+  }
   bool useRsa = (arg.equalsIgnoreCase("rsa"));
 
   if (useRsa) {
@@ -2675,13 +2787,17 @@ cleanup:
 }
 
 #else
-const char* cmd_certinfo(const String& argsInput) { (void)argsInput; RETURN_VALID_IF_VALIDATE_CSTR(); return "HTTPS disabled at build time"; }
-const char* cmd_certgen(const String& argsInput) { (void)argsInput; RETURN_VALID_IF_VALIDATE_CSTR(); return "HTTPS disabled at build time"; }
+static constexpr char kHttpsNotInBuild[] =
+    "Error: HTTPS is not in this build. Rebuild with HTTPS enabled to use it.";
+const char* cmd_certinfo(const String& argsInput) { (void)argsInput; RETURN_VALID_IF_VALIDATE_CSTR(); return kHttpsNotInBuild; }
+const char* cmd_certgen(const String& argsInput) { (void)argsInput; RETURN_VALID_IF_VALIDATE_CSTR(); return kHttpsNotInBuild; }
 #endif
 
 #if !ENABLE_HTTP_SERVER
-const char* cmd_httpstart(const String& argsInput) { (void)argsInput; RETURN_VALID_IF_VALIDATE_CSTR(); return "HTTP server disabled at build time"; }
-const char* cmd_httpstop(const String& argsInput) { (void)argsInput; RETURN_VALID_IF_VALIDATE_CSTR(); return "HTTP server disabled at build time"; }
+static constexpr char kHttpServerNotInBuild[] =
+    "Error: The HTTP server is not in this build. Rebuild with the HTTP server enabled to use it.";
+const char* cmd_httpstart(const String& argsInput) { (void)argsInput; RETURN_VALID_IF_VALIDATE_CSTR(); return kHttpServerNotInBuild; }
+const char* cmd_httpstop(const String& argsInput) { (void)argsInput; RETURN_VALID_IF_VALIDATE_CSTR(); return kHttpServerNotInBuild; }
 const char* cmd_httpstatus(const String& argsInput) { RETURN_VALID_IF_VALIDATE_CSTR(); return argWantsJson(argsInput) ? "{\"schema\":1,\"running\":false,\"compiled\":false}" : "HTTP server: DISABLED"; }
 #endif
 
@@ -2852,6 +2968,15 @@ void wifiRehuntCancel() {
   portENTER_CRITICAL(&sRehuntMux);
   sRehunt.clear();
   portEXIT_CRITICAL(&sRehuntMux);
+}
+
+// A lost connection the device is still trying to get back (waiting for or
+// running a hunt). wifidisconnect reports stopping it.
+static bool wifiRehuntWanted() {
+  portENTER_CRITICAL(&sRehuntMux);
+  const bool wanted = sRehunt.wanted || sRehunt.hunting;
+  portEXIT_CRITICAL(&sRehuntMux);
+  return wanted;
 }
 
 static void wifiRehuntTask(void*) {

@@ -617,11 +617,11 @@ def rule_failures(component: Path) -> list[str]:
     stream_cmd = strip_comments(definition(sensors, "const char* cmd_espnow_sensorstream(const String& argsInput)"))
     expect("sensorStreamOnReply(sensorType, target, sessionUp, targetName, reply, sizeof(reply));" in stream_cmd and
            "sensorReadingTarget((int)sensorType)" in stream_cmd and
-           '"Error: this device is the mesh master. It receives readings and does not send its own."' in stream_cmd,
+           '"Error: This device is the mesh master. It receives readings and does not send its own."' in stream_cmd,
            "espnowsensorstream answers with the target of that sensor, or why nothing is sent")
     expect("Master devices receive sensor data, they don't stream it" not in sensors and
            "Sensor streaming started" not in sensors, "the old stream command texts are gone")
-    expect("gSensorByHand[sensorType] = true;" in strip_comments(definition(sensors, "void startSensorDataStreaming(RemoteSensorType sensorType)")),
+    expect("gSensorByHand[sensorType] = true;" in strip_comments(definition(sensors, "bool tryStartSensorDataStreaming(RemoteSensorType sensorType)")),
            "a stream switched on by hand is marked so")
     task_code = strip_comments(extract_block(sensors, "static void sensorBroadcasterTask(void* param)"))
     expect("espnowsensor::streamSurvivesLeaseEnd(gSensorByHand[i])" in task_code and

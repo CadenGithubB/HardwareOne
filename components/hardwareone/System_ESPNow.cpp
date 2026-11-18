@@ -688,17 +688,6 @@ static char* gTopoOutputBuffer = nullptr;
 // (Mesh time, TIME_SYNC, has its state, sender, handler and commands in
 // System_ESPNow_MeshTime.cpp.)
 
-// Worker status configuration
-struct WorkerStatusConfig {
-  bool enabled = true;              // Master switch for worker status reporting
-  uint16_t intervalMs = 30000;      // Send interval in milliseconds (default 30s)
-  bool includeHeap = true;          // Include heap memory stats
-  bool includeRssi = false;         // Include WiFi RSSI
-  bool includeThermal = false;      // Include thermal sensor status
-  bool includeImu = false;          // Include IMU sensor status
-};
-static WorkerStatusConfig gWorkerStatusConfig;
-
 // Metadata transmission tracking. gMetadataChanged is set by every command that
 // edits a V4PayloadMetadata field (espnowroom/zone/tags/friendlyname/stationary/
 // setname — the settings editors reach them through their cmdKey) and consumed
@@ -4176,6 +4165,19 @@ static void v4h_cmd(const V4RxCtx& ctx) {
     // commands are rejected unless this is true — a plaintext token = RCE.
     gEspNow->deferredCmdWasEncrypted = ctx.isSessionEncrypted;
     gEspNow->deferredCmdPending = true;
+  } else if (gEspNow && gEspNow->deferredCmdPending && ctx.isSessionEncrypted && ctx.payloadLen > 0 &&
+             !(gEspNow->deferredCmdMsgId == ctx.h->msgId &&
+               memcmp(gEspNow->deferredCmdSrcMac, ctx.recv_info->src_addr, 6) == 0)) {
+    // The one slot still holds a command the task has not run yet. Tell the
+    // sender, which was already told "sent", that this one was not taken. A
+    // second copy of the pending command itself gets no answer: it will run.
+    static const char kBusy[] = "Error: Device busy with another remote command. Send it again.";
+    uint8_t resp[1 + sizeof(kBusy)];
+    resp[0] = 0;
+    memcpy(resp + 1, kBusy, sizeof(kBusy));
+    // RX-handler context: queued send, never a blocking one.
+    espnowtx::sendAead(ctx.recv_info->src_addr, ESPNOW_V4_TYPE_CMD_RESP, ESPNOW_V4_FLAG_ACK_REQ,
+                       ctx.h->msgId, resp, sizeof(resp), 1);
   }
 }
 
@@ -4190,6 +4192,13 @@ static void v4h_cmd_resp(const V4RxCtx& ctx) {
     // The alloc is V4_REASM_MAX_MSG + 1 for the NUL written below.
     if (resultLen > V4_REASM_MAX_MSG) resultLen = V4_REASM_MAX_MSG;
     if (!gEspNow->deferredCmdRespResult) { gEspNow->deferredCmdRespPending = false; return; }
+    if (gEspNow->deferredCmdRespPending) {
+      // One slot: an answer the task has not shown yet is replaced by this
+      // one. Leave a line so that answer does not vanish without a trace.
+      BROADCAST_PRINTF("[ESP-NOW] Command result #%lu from %s was replaced by a newer result before it was shown",
+                       (unsigned long)gEspNow->deferredCmdRespReqId,
+                       gEspNow->deferredCmdRespDeviceName[0] ? gEspNow->deferredCmdRespDeviceName : "a peer");
+    }
     memcpy(gEspNow->deferredCmdRespResult, resp->result, resultLen);
     gEspNow->deferredCmdRespResult[resultLen] = '\0';
     memcpy(gEspNow->deferredCmdRespSrcMac, ctx.recv_info->src_addr, 6);
@@ -8405,10 +8414,19 @@ static void v4CmdResultCallback(bool ok, const char* result, void* userData) {
   if (result && resultLen > 0) {
     safeResult = redactEspNowCommandResult(String(result));
   }
-  const char* resultText = safeResult.length() > 0
-                               ? safeResult.c_str()
-                               : (ctx->cmdName[0] ? ctx->cmdName
-                                                  : (ok ? "OK" : "FAIL"));
+  // A command that failed without a text still tells the requester that it
+  // failed; a success without a text answers with the command's name.
+  char noReply[96];
+  const char* resultText;
+  if (safeResult.length() > 0) {
+    resultText = safeResult.c_str();
+  } else if (!ok) {
+    snprintf(noReply, sizeof(noReply), "Error: %s failed without a reply. Check the peer's log.",
+             ctx->cmdName[0] ? ctx->cmdName : "The command");
+    resultText = noReply;
+  } else {
+    resultText = ctx->cmdName[0] ? ctx->cmdName : "OK";
+  }
   size_t textLen = strlen(resultText);
   // Transmit bound, derived rather than hand-typed. In practice CMD_RESULT_MAX
   // binds first — `result` is ExecReq::out, so textLen is already <= 4095 and
@@ -8439,10 +8457,12 @@ static void v4CmdResultCallback(bool ok, const char* result, void* userData) {
                            ctx->cmdMsgId, respPayload, payloadLen, 1, 2000);
     free(respPayload);
   } else {
-    // Fallback: send just command name if malloc fails
+    // No memory for the result text: a success answers with the command's
+    // name, a failure with the out-of-memory reply.
     uint8_t fallback[64];
     fallback[0] = ok ? 1 : 0;
-    const char* name = ctx->cmdName[0] ? ctx->cmdName : (ok ? "OK" : "FAIL");
+    const char* name = !ok ? kCommandReplyOutOfMemory
+                           : (ctx->cmdName[0] ? ctx->cmdName : "OK");
     size_t nameLen = strlen(name) + 1;
     if (nameLen > sizeof(fallback) - 1) nameLen = sizeof(fallback) - 1;
     memcpy(fallback + 1, name, nameLen);
@@ -8491,9 +8511,9 @@ static void v4_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_
     ERROR_ESPNOWF("[ESP-NOW] REJECTED plaintext remote command from %s — session "
                   "encryption required (credential exposure / replay)", deviceName);
     BROADCAST_PRINTF("[ESP-NOW] SECURITY: rejected unencrypted remote command from %s", deviceName);
-    uint8_t respPayload[64];
+    uint8_t respPayload[80];
     respPayload[0] = 0;
-    const char* errMsg = "Remote command must be session-encrypted";
+    const char* errMsg = "Error: Remote command must be session-encrypted. Pair the devices again.";
     memcpy(respPayload + 1, errMsg, strlen(errMsg) + 1);
     // Step 3c: espnow_task RX-handler context — MUST NOT block (would stall
     // the RX drainer per the processMeshHeartbeats architecture invariant).
@@ -8554,9 +8574,9 @@ static void v4_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_
       // login_fail parity with web/CLI/MQTT — closes the event-register
       // visibility hole for remote-command auth failures.
       systemEventPost(SYSEVT_LOGIN_FAIL, deviceName, "espnow");
-      uint8_t respPayload[48];
+      uint8_t respPayload[80];
       respPayload[0] = 0;
-      const char* errMsg = "Session token auth failed";
+      const char* errMsg = "Error: Bond session token refused. Check the passphrase on both devices.";
       memcpy(respPayload + 1, errMsg, strlen(errMsg) + 1);
       // Step 3c: espnow_task RX-handler context — fire-and-forget.
       // Echo the request's msgId so the requester can correlate this failure.
@@ -8570,9 +8590,9 @@ static void v4_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_
   // the token validators) and fall through to username:password auth.
   if (strncmp(cmdPayload, "@BOND:", 6) == 0) {
     BROADCAST_PRINTF("[ESP-NOW] Rejected bonded command from %s (bond mode not compiled)", deviceName);
-    uint8_t respPayload[48];
+    uint8_t respPayload[88];
     respPayload[0] = 0;
-    const char* errMsg = "Bond mode not available";
+    const char* errMsg = "Error: Bond mode is not in this build. Use 'espnowremote' with a login instead.";
     memcpy(respPayload + 1, errMsg, strlen(errMsg) + 1);
     espnowtx::sendAead(srcMac, ESPNOW_V4_TYPE_CMD_RESP, ESPNOW_V4_FLAG_ACK_REQ,
                        msgId, respPayload, 1 + strlen(errMsg) + 1, 1);
@@ -8628,10 +8648,10 @@ static void v4_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_
                        username, deviceName);
       // Same CMD_RESP shape and msgId echo as the failure below; the text is
       // formatted in place to keep espnow_task's frame small.
-      uint8_t respPayload[40];
+      uint8_t respPayload[56];
       respPayload[0] = 0;
       char* errMsg = reinterpret_cast<char*>(respPayload + 1);
-      snprintf(errMsg, sizeof(respPayload) - 1, "Auth locked out. Retry in %lus",
+      snprintf(errMsg, sizeof(respPayload) - 1, "Error: Login locked out. Retry in %lus.",
                (lockoutRetryMs + 999UL) / 1000UL);
       espnowtx::sendAead(srcMac, ESPNOW_V4_TYPE_CMD_RESP, ESPNOW_V4_FLAG_ACK_REQ,
                          msgId, respPayload, 1 + strlen(errMsg) + 1, 1);
@@ -8639,9 +8659,9 @@ static void v4_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_
     } else {
       BROADCAST_PRINTF("[ESP-NOW] Auth failed for user '%s' from %s", username, deviceName);
       systemEventPost(SYSEVT_LOGIN_FAIL, username, "espnow");
-      uint8_t respPayload[32];
+      uint8_t respPayload[80];
       respPayload[0] = 0;
-      const char* errMsg = "Auth failed";
+      const char* errMsg = "Error: Login failed. Check the user name and password of the target device.";
       memcpy(respPayload + 1, errMsg, strlen(errMsg) + 1);
       // Step 3c: espnow_task RX-handler context — fire-and-forget.
       // Echo the request's msgId so the requester can correlate this failure.
@@ -8657,9 +8677,9 @@ static void v4_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_
   StreamSession* sess = createStreamSession(srcMac, msgId);
   if (!sess) {
     BROADCAST_PRINTF("[ESP-NOW] CMD handler: no stream session slots");
-    uint8_t respPayload[32];
+    uint8_t respPayload[80];
     respPayload[0] = 0;
-    const char* errMsg = "No session slots";
+    const char* errMsg = "Error: No free command session on the target. Send the command again shortly.";
     memcpy(respPayload + 1, errMsg, strlen(errMsg) + 1);
     // Step 3c: espnow_task RX-handler context — fire-and-forget.
     espnowtx::sendAead(srcMac, ESPNOW_V4_TYPE_CMD_RESP, ESPNOW_V4_FLAG_ACK_REQ,
@@ -8733,10 +8753,11 @@ static void v4_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_
                                          : "command exceeds input limit");
     destroyStreamSession(msgId);
     free(asyncCtx);
-    uint8_t respPayload[32];
+    uint8_t respPayload[72];
     respPayload[0] = 0;
-    const char* errMsg = inputLengthAccepted ? "Queue failed"
-                                             : "Command too long";
+    const char* errMsg = inputLengthAccepted
+                             ? "Error: The target could not queue the command. Send it again shortly."
+                             : "Error: Command too long for the target. Shorten the command.";
     memcpy(respPayload + 1, errMsg, strlen(errMsg) + 1);
     // Step 3c: espnow_task RX-handler context — fire-and-forget.
     espnowtx::sendAead(srcMac, ESPNOW_V4_TYPE_CMD_RESP, ESPNOW_V4_FLAG_ACK_REQ,
@@ -10408,11 +10429,12 @@ static void buildMetadataPayload(V4PayloadMetadata* payload) {
 /**
  * Request metadata from peer - called after heartbeat confirmation or on-demand
  * @param force If true, bypass debounce (for explicit user requests)
+ * @return true when the request was sent or queued for the session to open
  */
-void requestMetadata(const uint8_t* peerMac, bool force) {
+bool requestMetadata(const uint8_t* peerMac, bool force) {
   if (!peerMac || !gEspNow) {
     WARN_ESPNOWF("[METADATA] requestMetadata: null peerMac=%p gEspNow=%p", peerMac, gEspNow);
-    return;
+    return false;
   }
   
   uint32_t now = millis();
@@ -10420,7 +10442,7 @@ void requestMetadata(const uint8_t* peerMac, bool force) {
     DEBUG_ESPNOW_METADATAF("[METADATA] REQ debounced (%lums < %lums) for %s",
       (unsigned long)(now - sLastMetadataRequestMs), (unsigned long)METADATA_DEBOUNCE_MS,
       MAC_STR(peerMac));
-    return;
+    return false;
   }
   sLastMetadataRequestMs = now;
   
@@ -10443,6 +10465,7 @@ void requestMetadata(const uint8_t* peerMac, bool force) {
     WARN_ESPNOWF("[METADATA] REQ FAILED to send to %s: %s",
       MAC_STR(peerMac), status[0] ? status : "encrypted send failed");
   }
+  return sent;
 }
 
 /**
@@ -11158,39 +11181,38 @@ const char* getMeshRoleString(uint8_t role) {
   }
 }
 
-// Helper: Parse MAC address from string (flexible format)
+// Helper: Parse MAC address from string. Six bytes of two hex digits each,
+// separated by ':', '-' or a space, in either case; nothing may follow the
+// sixth byte. `mac` is written only on success.
 bool parseMacAddress(const String& macStr, uint8_t mac[6]) {
   String cleanMac = macStr;
+  cleanMac.trim();
   cleanMac.toUpperCase();
 
   // Handle different separators
   cleanMac.replace("-", ":");
   cleanMac.replace(" ", ":");
 
-  // Split by colons and parse each byte
-  int byteIndex = 0;
-  int startPos = 0;
+  // "AA:BB:CC:DD:EE:FF": anything shorter or longer is not a MAC.
+  if (cleanMac.length() != 17) return false;
 
-  for (int i = 0; i <= cleanMac.length() && byteIndex < 6; i++) {
-    if (i == cleanMac.length() || cleanMac[i] == ':') {
-      if (byteIndex >= 6) return false;
-
-      String byteStr = cleanMac.substring(startPos, i);
-      byteStr.trim();
-
-      if (byteStr.length() == 0 || byteStr.length() > 2) return false;
-
-      char* endPtr;
-      long val = strtol(byteStr.c_str(), &endPtr, 16);
-      if (*endPtr != '\0' || val < 0 || val > 255) return false;
-
-      mac[byteIndex] = (uint8_t)val;
-      byteIndex++;
-      startPos = i + 1;
-    }
+  auto hexValue = [](char c) -> int {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+  };
+  uint8_t parsed[6];
+  for (int byteIndex = 0; byteIndex < 6; byteIndex++) {
+    const int at = byteIndex * 3;
+    const int hi = hexValue(cleanMac[at]);
+    const int lo = hexValue(cleanMac[at + 1]);
+    if (hi < 0 || lo < 0) return false;
+    if (byteIndex < 5 && cleanMac[at + 2] != ':') return false;
+    parsed[byteIndex] = (uint8_t)((hi << 4) | lo);
   }
 
-  return (byteIndex == 6);
+  memcpy(mac, parsed, sizeof(parsed));
+  return true;
 }
 
 // Helper: Resolve device name or MAC address to MAC bytes
@@ -12134,8 +12156,10 @@ static void formatEspNowSystemNotice(const char* text, size_t textCap, const cha
 }
 
 // Send topology discovery requests to a stable snapshot of active peers.
-void requestTopologyDiscovery() {
-  if (!gEspNow || !gEspNow->initialized || !gMeshPeers) return;
+// Returns how many peers took the request; -1 when no request was started
+// (ESP-NOW not running, or the topology state is busy).
+int requestTopologyDiscovery() {
+  if (!gEspNow || !gEspNow->initialized || !gMeshPeers) return -1;
 
   uint8_t targets[MESH_PEER_MAX][6];
   uint8_t sentTargets[MESH_PEER_MAX][6];
@@ -12151,7 +12175,7 @@ void requestTopologyDiscovery() {
     TopoStreamsGuard guard("requestTopologyDiscovery");
     if (gTopoStreamsMutex && !guard.held) {
       WARN_ESPNOWF("[TOPO] State busy; discovery request not started");
-      return;
+      return -1;
     }
     // A new request owns the complete table. This explicitly cancels any old
     // streams so late frames cannot be rendered under the new request ID.
@@ -12193,6 +12217,7 @@ void requestTopologyDiscovery() {
   }
   DEBUG_ESPNOW_TOPOF("[TOPO] Discovery request sent to %d/%d peers (reqId=%lu)",
          sentCount, targetCount, (unsigned long)requestId);
+  return sentCount;
 }
 
 // Check if the topology collection window has expired; finalize any open streams
@@ -13673,6 +13698,10 @@ void espnowAppPingClear() {
 // usable from any context. Cleared on each new init attempt.
 EXT_RAM_BSS_ATTR static char gLastInitErrorReason[96];
 
+// What kept the last deinitEspNow() from finishing, for cmd_espnow_deinit's
+// reply. Empty after a stop that ran to its end.
+EXT_RAM_BSS_ATTR static char gLastDeinitErrorReason[64];
+
 // Used by the heartbeat-create failure path to unwind a fully registered radio
 // instance. False suppresses an ESP-NOW-OFF event because ON was never posted.
 static bool deinitEspNow(bool publishOffEvent = true);
@@ -13782,9 +13811,9 @@ static bool initEspNow() {
     gEspNow = new (stateStorage) EspNowState();
 
     // Allocate small PSRAM buffers pulled out of the EspNowState struct
-    gEspNow->listBuffer = (char*)ps_alloc(1024, AllocPref::PreferPsram, "espnow.listBuf");
+    gEspNow->listBuffer = (char*)ps_alloc(EspNowState::kListBufferSize, AllocPref::PreferPsram, "espnow.listBuf");
     if (gEspNow->listBuffer) {
-      memset(gEspNow->listBuffer, 0, 1024);
+      memset(gEspNow->listBuffer, 0, EspNowState::kListBufferSize);
     } else {
       BROADCAST_PRINTF("[ESP-NOW] WARNING: Failed to allocate listBuffer");
     }
@@ -14312,7 +14341,7 @@ const char* cmd_espnow_init(const String& argsInput) {
     return "Error: ESP-NOW is disabled - run 'espnowenabled 1' first";
   }
   if (gEspNow && gEspNow->initialized) {
-    return "ESP-NOW already initialized";
+    return "Error: ESP-NOW is already running. Stop it first with 'closeespnow' to restart it.";
   }
 #if ENABLE_WIFI
   // The boot Wi-Fi connect hunts on its own task and switches the radio mode
@@ -14349,6 +14378,9 @@ const char* cmd_espnow_init(const String& argsInput) {
   // not ride the WiFi STA link, and callers like OLED expect ESP-NOW ready on
   // return.
   if (currentAuthContext().transport == SOURCE_WEB) {
+    // 'espnowstatus' shows the last start error while ESP-NOW is down; the
+    // error of an earlier attempt is not the outcome of this one.
+    gLastInitErrorReason[0] = '\0';
     if (submitDeferredToCmdExec(deferredEspNowInitFn, nullptr)) {
       return "ESP-NOW initializing — poll 'espnowstatus' for completion";
     }
@@ -14383,6 +14415,7 @@ static bool deinitEspNow(bool publishOffEvent) {
   }
 
   gEspNowDeinitInProgress.store(true, std::memory_order_release);
+  gLastDeinitErrorReason[0] = '\0';
   size_t heapBefore = ESP.getFreeHeap();
 
   // Reject the high-level producers that use the public initialized gate, but
@@ -14400,6 +14433,7 @@ static bool deinitEspNow(bool publishOffEvent) {
   // UI/lease flags so re-init starts from a clean streaming state.
   if (!shutdownSensorDataStreamingForEspNowClose()) {
     broadcastOutput("[ESP-NOW] ERROR: sensor broadcaster did not quiesce; shutdown remains pending");
+    strlcpy(gLastDeinitErrorReason, "the sensor broadcaster did not stop", sizeof(gLastDeinitErrorReason));
     return false;
   }
 
@@ -14408,6 +14442,7 @@ static bool deinitEspNow(bool publishOffEvent) {
   // finish. The queue/task/pool are deleted only after the explicit join.
   if (!espnowtx::stop(20000)) {
     broadcastOutput("[ESP-NOW] ERROR: TX dispatcher did not quiesce; shutdown remains pending");
+    strlcpy(gLastDeinitErrorReason, "the TX dispatcher did not stop", sizeof(gLastDeinitErrorReason));
     return false;
   }
 
@@ -14418,6 +14453,7 @@ static bool deinitEspNow(bool publishOffEvent) {
   setEspNowRuntimeEnabled(false);
   if (!waitForEspNowRuntimeOps(5000)) {
     broadcastOutput("[ESP-NOW] ERROR: ESP-NOW send paths did not quiesce; shutdown remains pending");
+    strlcpy(gLastDeinitErrorReason, "sends in progress did not finish", sizeof(gLastDeinitErrorReason));
     return false;
   }
   setEspNowCallbacksEnabled(false);
@@ -14439,6 +14475,7 @@ static bool deinitEspNow(bool publishOffEvent) {
   }
   if (!stopEspNowTask(5000)) {
     broadcastOutput("[ESP-NOW] ERROR: heartbeat/RX task did not quiesce; shutdown remains pending");
+    strlcpy(gLastDeinitErrorReason, "the heartbeat/RX task did not stop", sizeof(gLastDeinitErrorReason));
     return false;
   }
   broadcastOutput("[ESP-NOW] Heartbeat task stopped");
@@ -14449,6 +14486,7 @@ static bool deinitEspNow(bool publishOffEvent) {
     TopoStreamsGuard guard("deinitEspNow.topology");
     if (gTopoStreamsMutex && !guard.held) {
       broadcastOutput("[ESP-NOW] ERROR: topology state did not quiesce; shutdown remains pending");
+      strlcpy(gLastDeinitErrorReason, "the topology state stayed busy", sizeof(gLastDeinitErrorReason));
       return false;
     }
     memset(gTopoStreams, 0, sizeof(gTopoStreams));
@@ -14495,12 +14533,15 @@ static bool deinitEspNow(bool publishOffEvent) {
     if (err != ESP_OK && err != ESP_ERR_ESPNOW_NOT_INIT) {
       BROADCAST_PRINTF("[ESP-NOW] ERROR: esp_now_deinit returned %s; shutdown remains pending",
                        esp_err_to_name(err));
+      snprintf(gLastDeinitErrorReason, sizeof(gLastDeinitErrorReason),
+               "esp_now_deinit returned %s", esp_err_to_name(err));
       return false;
     }
     gEspNowRadioDeinitialized = true;
   }
   if (!waitForEspNowCallbacks(2000)) {
     broadcastOutput("[ESP-NOW] ERROR: ESP-NOW callbacks did not quiesce; resources retained");
+    strlcpy(gLastDeinitErrorReason, "radio callbacks did not finish", sizeof(gLastDeinitErrorReason));
     return false;
   }
   setEspNowSelfMacCache(nullptr, nullptr);
@@ -14564,14 +14605,20 @@ const char* cmd_espnow_deinit(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!gEspNow || (!gEspNow->initialized &&
                    !gEspNowDeinitInProgress.load(std::memory_order_acquire))) {
-    return "Error: ESP-NOW is not initialized";
+    // Nothing to stop: ESP-NOW is not running (the owner's 2026-11-18 rule).
+    return "Error: ESP-NOW is not running. Start it with 'openespnow'.";
   }
 
   if (deinitEspNow()) {
     return "ESP-NOW deinitialized successfully";
-  } else {
-    return "Error: Failed to deinitialize ESP-NOW";
   }
+  // The stop is left half done and stays pending; running the command again
+  // resumes it.
+  EXT_RAM_BSS_ATTR static char pendingMsg[160];  // PSRAM: the reply is copied by the executor
+  snprintf(pendingMsg, sizeof(pendingMsg),
+           "Error: ESP-NOW shutdown did not finish: %s. Run 'closeespnow' again.",
+           gLastDeinitErrorReason[0] ? gLastDeinitErrorReason : "a part of it did not stop in time");
+  return pendingMsg;
 }
 
 // ESP-NOW status command
@@ -14579,13 +14626,18 @@ const char* cmd_espnow_status(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   // Read-only status: report "idle" instead of erroring when not initialized
   // (dashboard polls this; classifier sees no "Error:" prefix -> logs OK).
+  // ESP-NOW that was never started this boot is the same state as a closed one.
+  const bool initialized = gEspNow && gEspNow->initialized;
+  // Why the last start failed, while ESP-NOW is still down. A web caller's
+  // 'openespnow' returns before the start runs and is told to poll here.
+  const char* startError = (!initialized && gLastInitErrorReason[0])
+                               ? commandReplyReason(gLastInitErrorReason) : nullptr;
   if (argWantsJson(argsInput)) {
     if (!ensureDebugBuffer()) return "{\"schema\":1,\"ok\":false,\"error\":\"buffer\"}";
     PSRAM_JSON_DOC(doc);
     doc["schema"] = 1;
-    if (!gEspNow) { doc["ok"] = false; doc["error"] = "ESP-NOW not initialized"; }
-    else {
-      doc["initialized"] = gEspNow->initialized;
+    doc["initialized"] = initialized;
+    if (gEspNow) {
       doc["channel"]     = gEspNow->channel;
       doc["channelPref"] = gSettings.espnowChannel;  // 0=auto, 1-13=pinned when offline
       if (gEspNow->initialized) {
@@ -14596,10 +14648,10 @@ const char* cmd_espnow_status(const String& argsInput) {
         doc["pairedDevices"] = (gEspNow->deviceCount > 0) ? (gEspNow->deviceCount - 1) : 0;
       }
     }
+    if (startError) doc["lastInitError"] = startError;
     serializeJson(doc, getDebugBuffer(), 1024);
     return getDebugBuffer();
   }
-  if (!gEspNow) return "Error: ESP-NOW not initialized (run 'openespnow' first)";
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   
   char* p = getDebugBuffer();
@@ -14609,9 +14661,16 @@ const char* cmd_espnow_status(const String& argsInput) {
   p += n;
   remaining -= n;
 
-  n = snprintf(p, remaining, "  Initialized: %s\n", gEspNow->initialized ? "Yes" : "No");
+  n = snprintf(p, remaining, "  Initialized: %s\n", initialized ? "Yes" : "No");
   p += n;
   remaining -= n;
+
+  if (startError) {
+    n = snprintf(p, remaining, "  Last start error: %s\n", startError);
+    p += n;
+    remaining -= n;
+  }
+  if (!gEspNow) return getDebugBuffer();
 
   if (gSettings.espnowChannel == 0) {
     n = snprintf(p, remaining, "  Channel: %d (pref: auto)\n", gEspNow->channel);
@@ -14749,7 +14808,9 @@ const char* cmd_espnow_relayblock(const String& argsInput) {
     return getDebugBuffer();
   }
   if (sub.equalsIgnoreCase("clear")) {
-    if (!gRelayBlockActive) return "OK: relay block was not active";
+    if (!gRelayBlockActive) {
+      return "Error: No relay block is active. Set one with 'espnowrelayblock <mac>'.";
+    }
     gRelayBlockActive = false;
     if (!ensureDebugBuffer()) return "OK";
     snprintf(getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE,
@@ -14769,11 +14830,13 @@ const char* cmd_espnow_relayblock(const String& argsInput) {
   gRelayBlockDrops = 0;
   gRelayBlockActive = true;
   if (!ensureDebugBuffer()) return "OK";
+  char macBuf[18];
+  macToDisplay(mac, macBuf, sizeof(macBuf));
   snprintf(getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE,
            "OK: dropping ALL inbound ESP-NOW frames from %s. The peer will show "
            "offline within ~30s (heartbeats are dropped too). RAM-only — "
            "'espnowrelayblock clear' or reboot lifts it.",
-           sub.c_str());
+           macBuf);
   return getDebugBuffer();
 }
 
@@ -14833,7 +14896,16 @@ const char* cmd_espnow_broadcaststats(const String& argsInput) {
 const char* cmd_espnow_saturation(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!gEspNow) return "Error: ESP-NOW not initialized (run 'openespnow' first)";
-  espnowSaturationReport();
+  if (!espnowSaturationReport()) {
+    // The samples are taken on the ESP-NOW task. While ESP-NOW is closed (or
+    // a start failed) none arrive, so waiting does not help.
+    if (!gEspNow->initialized) {
+      return "Error: ESP-NOW is not running, so there are no saturation samples. "
+             "Run 'openespnow' first.";
+    }
+    return "Error: No saturation report yet. The window needs 2 s of samples. "
+           "Run 'espnowsaturation' again in a few seconds.";
+  }
   return "OK";
 }
 
@@ -14906,7 +14978,7 @@ const char* cmd_espnow_routerstats(const String& argsInput) {
 // ESP-NOW reset statistics command
 const char* cmd_espnow_resetstats(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gEspNow) return "Error: ESP-NOW not initialized";
+  if (!gEspNow) return "Error: ESP-NOW not initialized. Run 'openespnow' first.";
   
   gEspNow->heartbeatsSent = 0;
   gEspNow->heartbeatsReceived = 0;
@@ -14978,6 +15050,69 @@ const char* cmd_espnow_identity(const String& argsInput) {
   return getDebugBuffer();
 }
 
+// The mesh a key exchange started here would run on: the enabled mesh with
+// this label; with no label the enabled default mesh, else the first enabled
+// one. -1 when there is none. The key exchange makes the same choice; the
+// handlers ask first so that a mistyped label is named in the reply.
+static int enabledMeshSlotFor(const String& label) {
+  int first = -1;
+  for (uint8_t i = 0; i < Settings::N_MESHES; i++) {
+    const Settings::MeshIdentity& m = gSettings.meshes[i];
+    if (!m.enabled) continue;
+    if (label.length() > 0) {
+      if (m.label == label) return i;
+      continue;
+    }
+    if (m.isDefault) return i;
+    if (first < 0) first = i;
+  }
+  return first;
+}
+
+static const char* noEnabledMeshReply(const String& label) {
+  if (label.length() == 0) {
+    return "Error: No mesh is enabled. Add or enable one with 'espnowmeshes'.";
+  }
+  if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
+  snprintf(getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE,
+           "Error: No enabled mesh is named '%s'. List meshes with 'espnowmeshes'.", label.c_str());
+  return getDebugBuffer();
+}
+
+// A key exchange is signed with keys made from the mesh passphrase. A mesh
+// that 'espnowmeshes add' created has none until a passphrase is set, and the
+// key exchange would stop there before any frame. nullptr when the mesh has
+// its keys.
+static const char* meshWithoutKeysReply(int meshSlot) {
+  if (meshKeysGet((uint8_t)meshSlot)) return nullptr;
+  if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
+  const char* label = gSettings.meshes[meshSlot].label.c_str();
+  if (!*label) {
+    // Only a settings file edited by hand holds an enabled mesh with no name.
+    snprintf(getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE,
+             "Error: The mesh in slot %d has no name and no key. Add a mesh with "
+             "'espnowmeshes add <label>' and set its passphrase with 'espnowsetpassphrase'.",
+             meshSlot);
+    return getDebugBuffer();
+  }
+  snprintf(getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE,
+           "Error: Mesh '%s' has no key. Set its passphrase with "
+           "'espnowsetpassphrase %s <passphrase>'.", label, label);
+  return getDebugBuffer();
+}
+
+// The mesh exists and has its keys, so what failed is the first frame of the
+// key exchange.
+static const char* keyExNotSentReply(const uint8_t mac[6]) {
+  if (!ensureDebugBuffer()) {
+    return "Error: KEY_EX_HELLO could not be sent. Check 'espnowstatus' and retry.";
+  }
+  snprintf(getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE,
+           "Error: KEY_EX_HELLO could not be sent to " MAC_FMT ". Check 'espnowstatus' and retry.",
+           MAC_ARGS(mac));
+  return getDebugBuffer();
+}
+
 // Phase 3.3: initiate KEY_EX handshake with a paired-or-unpaired peer MAC.
 // Additive command — does not interact with the existing espnowpair /
 // espnowpairsecure LMK flows. Once the REPLY + CONFIRM round-trip completes,
@@ -15004,12 +15139,13 @@ const char* cmd_espnow_keyex(const String& argsInput) {
   if (!resolveDeviceNameOrMac(macStr, mac) && !parseMacAddress(macStr, mac)) {
     return "Error: not a paired device name and not a valid MAC.";
   }
+  const int meshSlot = enabledMeshSlotFor(meshLabel);
+  if (meshSlot < 0) return noEnabledMeshReply(meshLabel);
+  if (const char* noKeys = meshWithoutKeysReply(meshSlot)) return noKeys;
 
   // Asked for by the user: starts now and ends any back-off for this peer.
   bool ok = espnowKeyExInitiateManual(mac, meshLabel.length() > 0 ? meshLabel.c_str() : nullptr);
-  if (!ok) {
-    return "Error: KEY_EX initiate failed (see [ERROR][ESP-NOW] log).";
-  }
+  if (!ok) return keyExNotSentReply(mac);
 
   cliHint("the handshake completes asynchronously - check progress with 'espnowsessions'");
   if (!ensureDebugBuffer()) return "KEY_EX_HELLO sent. Watch logs for REPLY/CONFIRM.";
@@ -15044,19 +15180,48 @@ const char* cmd_espnow_sessionopen(const String& argsInput) {
     return "Error: not a paired device name and not a valid MAC.";
   }
   String meshLabel = (a.count() >= 2) ? a.arg(1) : String("");
+  if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
+  // A session runs on the mesh of the peer's stored identity, which the key
+  // exchange wrote. Without that record there is nothing to open one with.
+  const PeerIdentity* stored = peerIdentityFindByMac(mac);
+  if (!stored) {
+    snprintf(getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE,
+             "Error: No stored identity for " MAC_FMT ". Run 'espnowkeyex " MAC_FMT "' first.",
+             MAC_ARGS(mac), MAC_ARGS(mac));
+    return getDebugBuffer();
+  }
+  if (meshLabel.length() > 0) {
+    // The mesh argument cannot move the session to another mesh; a label that
+    // is not the stored one is refused instead of being ignored.
+    const uint8_t storedSlot = stored->meshId;
+    const String storedLabel =
+        storedSlot < Settings::N_MESHES ? gSettings.meshes[storedSlot].label : String("");
+    if (storedLabel != meshLabel) {
+      if (enabledMeshSlotFor(meshLabel) < 0) return noEnabledMeshReply(meshLabel);
+      snprintf(getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE,
+               "Error: " MAC_FMT " is paired on mesh '%s', not '%s'. "
+               "Leave the mesh argument out or use that label.",
+               MAC_ARGS(mac), storedLabel.length() > 0 ? storedLabel.c_str() : "(unnamed)",
+               meshLabel.c_str());
+      return getDebugBuffer();
+    }
+  }
   bool alreadyInFlight = false;
   espnowHandshakeBackoffClear(mac);  // asked for by the user
   bool ok = espnowSessionOpenInitiate(mac, meshLabel.length() > 0 ? meshLabel.c_str() : nullptr,
                                       &alreadyInFlight);
   if (!ok) {
-    return "Error: SESSION_OPEN initiate failed (see [ERROR][ESP-NOW] log).";
+    snprintf(getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE,
+             "Error: SESSION_OPEN could not be started with " MAC_FMT ". "
+             "Check 'espnowsessions' and retry.",
+             MAC_ARGS(mac));
+    return getDebugBuffer();
   }
   sessionMarkUserStarted(mac);   // its timeout is printed, not rate-limited
   if (alreadyInFlight) {
-    return "A handshake with this peer is already in flight - SESSION_OPEN not sent again. "
-           "Run 'espnowsessions' to inspect.";
+    return "Error: A handshake with this peer is already running, so SESSION_OPEN was not sent again. "
+           "Check it with 'espnowsessions'.";
   }
-  if (!ensureDebugBuffer()) return "SESSION_OPEN sent.";
   snprintf(getDebugBuffer(), 1024,
            "SESSION_OPEN sent to " MAC_FMT ". Handshake completes "
            "asynchronously — watch for 'SESSION established (initiator)' log line. "
@@ -15074,15 +15239,17 @@ const char* cmd_espnow_sessionopen(const String& argsInput) {
 //
 // Outcomes:
 //   "alive on mesh '<label>' (<rtt>ms)"      — REPLY received within timeout
-//   "no response within <N>ms"               — silent timeout (out of range,
+//   "Error: No response from <mac> ..."      — silent timeout (out of range,
 //                                              powered off, OR different mesh —
 //                                              indistinguishable from sender's
 //                                              side, since wrong-mesh peers
 //                                              silently drop our HELLO at the
 //                                              HMAC check)
-//   "rejected: <reason>"                     — in-flight cleared without
+//   "Error: <mac> rejected the key exchange" — in-flight cleared without
 //                                              creating identity (e.g., peer
 //                                              sent CONFIRM with status=2)
+// The probe is also the key exchange, so a peer that did not answer or that
+// refused is a failed command, not a successful report of a negative result.
 const char* cmd_espnow_probe(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!gEspNow || !gEspNow->initialized) {
@@ -15112,6 +15279,9 @@ const char* cmd_espnow_probe(const String& argsInput) {
     }
   }
   String meshLabel = (a.count() >= 3) ? a.arg(2) : String("");
+  const int meshSlot = enabledMeshSlotFor(meshLabel);
+  if (meshSlot < 0) return noEnabledMeshReply(meshLabel);
+  if (const char* noKeys = meshWithoutKeysReply(meshSlot)) return noKeys;
 
   // Snapshot pre-probe state so we can distinguish "newly resolved" from
   // "was already paired before this probe."
@@ -15120,9 +15290,7 @@ const char* cmd_espnow_probe(const String& argsInput) {
 
   uint32_t kickMs = (uint32_t)millis();
   bool ok = espnowKeyExInitiateManual(mac, meshLabel.length() > 0 ? meshLabel.c_str() : nullptr);
-  if (!ok) {
-    return "Error: KEY_EX initiate failed (no enabled mesh? see [ERROR][ESP-NOW] log).";
-  }
+  if (!ok) return keyExNotSentReply(mac);
 
   // Poll until the in-flight slot clears (REPLY landed OR rejected) or timeout.
   // 10ms tick is fine — KEY_EX RTT in a healthy mesh is typically 50-200ms.
@@ -15136,20 +15304,20 @@ const char* cmd_espnow_probe(const String& argsInput) {
   const PeerIdentity* postProbe = peerIdentityFindByMac(mac);
 
   if (!ensureDebugBuffer()) {
-    if (stillInFlight) return "No response (timeout)";
+    if (stillInFlight) return "Error: No response within the timeout. Run 'espnowprobe' again later.";
     if (postProbe) return "Peer is alive";
-    return "Peer rejected the probe";
+    return "Error: Peer rejected the key exchange. On both devices run 'espnowforget' for the "
+           "other one, then pair again.";
   }
   char* buf = getDebugBuffer();
 
   if (stillInFlight) {
     snprintf(buf, 1024,
-             "no response within %ums from " MAC_FMT " — "
-             "peer offline, out of range, or on a different mesh "
-             "(indistinguishable from this side). KEY_EX will keep retrying in "
-             "background; run 'espnowprobe' again later or check the log.",
-             (unsigned)timeoutMs,
-             MAC_ARGS(mac));
+             "Error: No response from " MAC_FMT " within %u ms (peer offline, out of range "
+             "or on a different mesh). The key exchange keeps retrying; run 'espnowprobe' "
+             "again later.",
+             MAC_ARGS(mac),
+             (unsigned)timeoutMs);
     return buf;
   }
 
@@ -15173,9 +15341,9 @@ const char* cmd_espnow_probe(const String& argsInput) {
   // (e.g., pubkey conflict on responder side). Caller likely needs espnowforget
   // or espnowpairsecure to break the deadlock.
   snprintf(buf, 1024,
-           "rejected by " MAC_FMT " — peer refused our pubkey "
-           "(typically a stale identity from a prior pairing). Try 'espnowforget' "
-           "on both sides + re-pair.",
+           "Error: " MAC_FMT " rejected the key exchange (usually a stale identity from "
+           "an earlier pairing). On both devices run 'espnowforget' for the other one, "
+           "then pair again.",
            MAC_ARGS(mac));
   return buf;
 }
@@ -15294,13 +15462,12 @@ const char* cmd_espnow_requestevents(const String& argsInput) {
   if (!resolveDeviceNameOrMac(a.arg(0), mac) && !parseMacAddress(a.arg(0), mac)) {
     return "Error: not a paired device name and not a valid MAC.";
   }
+  // The mask changes what the peer sends us, so the whole token has to be a
+  // number: junk read as 0 would silence the peer.
   uint32_t mask = 0;
-  String maskStr = a.arg(1);
-  maskStr.trim();
-  if (maskStr.startsWith("0x") || maskStr.startsWith("0X")) {
-    mask = (uint32_t)strtoul(maskStr.c_str() + 2, nullptr, 16);
-  } else {
-    mask = (uint32_t)strtoul(maskStr.c_str(), nullptr, 10);
+  if (!parseMaskArg(a.arg(1), mask)) {
+    return "Error: Not a bitmask. Give 0 to 0xFFFFFFFF in decimal or as 0x and hex digits, "
+           "for example 0x01.";
   }
 
   V4PayloadSubscribe p{};
@@ -15460,7 +15627,8 @@ const char* cmd_espnow_regenidentity(const String& argsInput) {
 
   EspNowIdentity fresh = {};
   if (!espnowIdentityRegenerate(fresh)) {
-    return "Error: identity regeneration failed (see [ERROR][ESP-NOW] log lines)";
+    return "Error: New identity could not be generated or saved; the current identity and "
+           "all pairings are unchanged. Check storage with 'fsusage' and retry.";
   }
   // Honour --confirm-wipe-all-bonds: drop every stored peer trust record.
   // Regenerating leaves each peer holding our OLD pubkey, so the trust is dead
@@ -15469,7 +15637,10 @@ const char* cmd_espnow_regenidentity(const String& argsInput) {
   // findFreeSlot() hands out the first !valid slot, so a full table of stale
   // entries locks out every future pairing. Wipe after the regenerate succeeds:
   // a failed regenerate returns above and leaves the bonds intact.
+  // A stored record that will not go away loads again at the next start;
+  // those peers are counted for the reply.
   uint8_t bondsWiped = 0;
+  uint8_t recordsLeft = 0;
   for (uint8_t i = 0; i < peerIdentitySlotCount(); i++) {
     const PeerIdentity* pi = peerIdentityAt(i);
     if (!pi || !pi->valid) continue;
@@ -15479,6 +15650,7 @@ const char* cmd_espnow_regenidentity(const String& argsInput) {
     // Every peer has to pair again and is taken as new then: none keeps an
     // accepted room or tags meanwhile.
     espnowGroupAcceptanceClear(mac, "this device's identity was regenerated");
+    if (peerIdentityFileStored(mac)) recordsLeft++;
   }
 
   // New Ed25519 identity is committed — announce on the event bus before the
@@ -15492,10 +15664,23 @@ const char* cmd_espnow_regenidentity(const String& argsInput) {
     systemEventPost(SYSEVT_IDENTITY_REGEN, regenPub, regenDet);
   }
 
-  if (!ensureDebugBuffer()) return "OK (regenerated, but debug buffer unavailable for echo)";
+  if (!ensureDebugBuffer()) {
+    return recordsLeft
+               ? "Error: Identity regenerated, but a stored peer record could not be deleted. "
+                 "After a restart run 'espnowforget <mac>' for each peer 'espnowsubs' still lists."
+               : "OK (regenerated, but debug buffer unavailable for echo)";
+  }
   char pubHex[65];
   espnowIdentityFormatPubHex(fresh.pub, pubHex, sizeof(pubHex));
   char* p = getDebugBuffer();
+  if (recordsLeft) {
+    snprintf(p, 1024,
+             "Error: Identity regenerated (regenCount %u), but %u stored peer record(s) could not "
+             "be deleted and will load again at the next start. After a restart run "
+             "'espnowforget <mac>' for each peer 'espnowsubs' still lists.",
+             (unsigned)fresh.regenCount, (unsigned)recordsLeft);
+    return getDebugBuffer();
+  }
   snprintf(p, 1024,
            "ESP-NOW identity regenerated.\n"
            "  Ed25519 pub:  %s\n"
@@ -15561,7 +15746,7 @@ static uint8_t meshSlotForPairing(const String& arg) {
 
 const char* cmd_espnow_pair(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gEspNow) return "Error: ESP-NOW not initialized";
+  if (!gEspNow) return "Error: ESP-NOW not initialized. Run 'openespnow' first.";
   if (!gEspNow->initialized) {
     return "Error: ESP-NOW not initialized. Run 'openespnow' first.";
   }
@@ -15584,7 +15769,8 @@ const char* cmd_espnow_pair(const String& argsInput) {
   if (meshId == Settings::N_MESHES) {
     return "Error: Invalid mesh. Use the label or slot number (0..3) of a configured mesh; see 'espnowmeshes'.";
   }
-  String macStr = a.arg(0);
+  // The address as it is stored and shown, not as it was typed.
+  const String macStr = macToDisplayStr(mac);
   // Prevent pairing with self MAC (STA or AP interface)
   {
     uint8_t selfSta[6];
@@ -15599,7 +15785,15 @@ const char* cmd_espnow_pair(const String& argsInput) {
   for (int i = 0; i < gEspNow->deviceCount; i++) {
     if (memcmp(gEspNow->devices[i].mac, mac, 6) == 0) {
       if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-      snprintf(getDebugBuffer(), 1024, "Device already paired. Use 'espnowunpair %s' first.", macStr.c_str());
+      const auto& paired = gEspNow->devices[i];
+      if (paired.name == name && paired.meshId == meshId && !paired.encrypted) {
+        // Asked for exactly what is stored: nothing to change.
+        snprintf(getDebugBuffer(), 1024, "Already paired: %s (%s)", name.c_str(), macStr.c_str());
+      } else {
+        snprintf(getDebugBuffer(), 1024,
+                 "Error: %s is already paired as '%s'. Run 'espnowunpair %s' first.",
+                 macStr.c_str(), paired.name.c_str(), macStr.c_str());
+      }
       return getDebugBuffer();
     }
   }
@@ -15609,7 +15803,12 @@ const char* cmd_espnow_pair(const String& argsInput) {
   }
 
   if (!addEspNowPeerWithEncryption(mac, false, nullptr)) {
-    return "Error: Failed to add unencrypted peer to ESP-NOW.";
+    if (!ensureDebugBuffer()) return "Error: Failed to add unencrypted peer to ESP-NOW.";
+    snprintf(getDebugBuffer(), 1024,
+             "Error: The radio did not accept %s as a peer (peer table full or radio busy). "
+             "Check 'espnowlist' and retry.",
+             macStr.c_str());
+    return getDebugBuffer();
   }
 
   memcpy(gEspNow->devices[gEspNow->deviceCount].mac, mac, 6);
@@ -15654,9 +15853,12 @@ const char* cmd_espnow_pair(const String& argsInput) {
 
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   if (!devicesOk) {
+    // The pairing holds until the next restart only. A second 'espnowpair'
+    // would find the device in the table, so the way out is unpair and pair.
     snprintf(getDebugBuffer(), 1024,
-      "Paired %s (%s) but failed to encrypt and save peer data — device encryption key unavailable. "
-      "Peer will not persist across reboot.", name.c_str(), macStr.c_str());
+      "Error: Paired %s (%s) for this session only: the device list could not be saved. "
+      "Check storage with 'fsusage', then run 'espnowunpair %s' and pair again.",
+      name.c_str(), macStr.c_str(), macStr.c_str());
   } else {
     snprintf(getDebugBuffer(), 1024, "Unencrypted device paired successfully: %s (%s)", name.c_str(), macStr.c_str());
   }
@@ -15835,7 +16037,8 @@ const char* cmd_espnow_channel(const String& argsInput) {
       return "Error: ESP-NOW not running (run 'openespnow' first)";
     uint8_t want = espnowComputeChannel();
     if (!espnowApplyChannel(want, 250)) {
-      return "Error: WiFi radio busy; ESP-NOW channel re-sync is pending. Retry shortly.";
+      return "Error: ESP-NOW channel re-sync did not complete; it stays pending. "
+             "Run 'espnowchannel resync' again shortly.";
     }
     uint8_t hwCh = 0; wifi_second_chan_t sec2;
     if (esp_wifi_get_channel(&hwCh, &sec2) != ESP_OK) hwCh = 0;
@@ -15864,7 +16067,7 @@ const char* cmd_espnow_channel(const String& argsInput) {
   // Apply live so the change takes effect without a re-init.
   if (gEspNow && gEspNow->initialized) {
     if (!espnowApplyChannel(espnowComputeChannel(), 250)) {
-      return "ESP-NOW channel preference saved; live re-sync is pending because the WiFi radio is busy.";
+      return "ESP-NOW channel preference saved; the live re-sync is pending and is retried automatically.";
     }
     radioCh = (int)gEspNow->channel;
   }
@@ -16014,6 +16217,11 @@ const char* cmd_espnow_setname(const String& argsInput) {
     }
     return getDebugBuffer();
   }
+  // The name is one token; a second one would be dropped without a word.
+  if (a.count() > 1) {
+    return "Error: Device name must be one word of letters, numbers, hyphens and underscores. "
+           "Use for example Living_Room.";
+  }
 
   String name = a.arg(0);
   if (name == "clear") {
@@ -16151,7 +16359,9 @@ const char* cmd_espnow_stationary(const String& argsInput) {
     snprintf(getDebugBuffer(), 1024, "Stationary: %s", gSettings.espnowStationary ? "true" : "false");
     return getDebugBuffer();
   }
-  bool val = a.argBool(0, false);
+  const int onOff = parseBoolArg(a.arg(0));
+  if (onOff < 0) return kCommandReplyNotOnOff;
+  const bool val = (onOff == 1);
   setSetting(gSettings.espnowStationary, val);
   gMetadataChanged = true;  // Mark metadata as dirty
   snprintf(getDebugBuffer(), 1024, "Stationary set to: %s", val ? "true" : "false");
@@ -16327,6 +16537,14 @@ void espnowSerializeMeshPeerMeta(JsonObject o, const MeshPeerMeta& m) {
   o["source"]       = "mesh";
 }
 
+// Bounded reply appender, defined with the topology results below: the
+// cursor never passes the end of the buffer, whatever a row needs.
+static bool appendTopologyOutput(char*& cursor, size_t& remaining,
+                                 const char* format, ...);
+// A list stops taking rows below this much room, so that its closing lines
+// are always written.
+static constexpr size_t kListTailReserve = 512;
+
 const char* cmd_espnow_devices(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
@@ -16358,13 +16576,21 @@ const char* cmd_espnow_devices(const String& argsInput) {
   }
 
   char* buf = getDebugBuffer();
-  size_t pos = 0;  // groupTextAppend keeps it inside the buffer
-  groupTextAppend(buf, 1024, pos, "=== Mesh Devices ===\n");
+  char* cursor = buf;
+  size_t remaining = GLOBAL_DEBUG_BUFFER_SIZE;
+  appendTopologyOutput(cursor, remaining, "=== Mesh Devices ===\n");
 
   int count = 0;
+  bool listFull = false;
   for (int i = 0; i < gMeshPeerSlots; i++) {
     if (!gMeshPeerMeta[i].isActive) continue;
     count++;
+    if (listFull) continue;
+    if (remaining < kListTailReserve) {
+      listFull = true;
+      appendTopologyOutput(cursor, remaining, "  ... (truncated)\n");
+      continue;
+    }
 
     // Determine online status from MeshPeerHealth
     MeshPeerHealth* health = getMeshPeerHealth(gMeshPeerMeta[i].mac, false);
@@ -16382,26 +16608,25 @@ const char* cmd_espnow_devices(const String& argsInput) {
 
     char zoneBuf[34] = "";
     if (gMeshPeerMeta[i].zone[0]) snprintf(zoneBuf, sizeof(zoneBuf), "/%s", gMeshPeerMeta[i].zone);
-    groupTextAppend(buf, 1024, pos, "  %s%s [%s%s] %s",
-                    displayName,
-                    gMeshPeerMeta[i].room[0] ? "" : "",
-                    gMeshPeerMeta[i].room[0] ? gMeshPeerMeta[i].room : "unassigned",
-                    zoneBuf,
-                    alive ? "(online" : "(offline");
+    appendTopologyOutput(cursor, remaining, "  %s%s [%s%s] %s",
+                         displayName,
+                         gMeshPeerMeta[i].room[0] ? "" : "",
+                         gMeshPeerMeta[i].room[0] ? gMeshPeerMeta[i].room : "unassigned",
+                         zoneBuf,
+                         alive ? "(online" : "(offline");
     if (alive && health) {
-      groupTextAppend(buf, 1024, pos, ", %lus ago", (unsigned long)ageSec);
+      appendTopologyOutput(cursor, remaining, ", %lus ago", (unsigned long)ageSec);
     }
     char pendingMark[kGroupPendingMarkCap];
     groupPendingMark(gMeshPeerMeta[i].mac, gMeshPeerMeta[i].room, gMeshPeerMeta[i].tags, pendingMark,
                      sizeof(pendingMark));
-    groupTextAppend(buf, 1024, pos, ")%s\n", pendingMark);
-    if (pos >= 900) { groupTextAppend(buf, 1024, pos, "  ... (truncated)\n"); break; }
+    appendTopologyOutput(cursor, remaining, ")%s\n", pendingMark);
   }
 
   if (count == 0) {
-    groupTextAppend(buf, 1024, pos, "  (no peer metadata received yet)\n");
+    appendTopologyOutput(cursor, remaining, "  (no peer metadata received yet)\n");
   }
-  groupTextAppend(buf, 1024, pos, "Total: %d devices", count);
+  appendTopologyOutput(cursor, remaining, "Total: %d devices", count);
   emitListingTrailer("discovered/paired mesh peers",
                      "a peer's value: run it remotely with 'espnowremote <peer> <target-user> <target-pass> <cmd>' then read the reply with 'espnowmessages json'; a peer's name/room/tags: 'espnowrequestmeta <peer>'");
   return buf;
@@ -16458,8 +16683,9 @@ const char* cmd_espnow_rooms(const String& argsInput) {
   }
 
   char* buf = getDebugBuffer();
-  size_t pos = 0;  // groupTextAppend keeps it inside the buffer
-  groupTextAppend(buf, 1024, pos, "=== Rooms ===\n");
+  char* cursor = buf;
+  size_t remaining = GLOBAL_DEBUG_BUFFER_SIZE;
+  appendTopologyOutput(cursor, remaining, "=== Rooms ===\n");
 
   // Collect unique room names
   const char* rooms[MESH_PEER_MAX];
@@ -16474,8 +16700,9 @@ const char* cmd_espnow_rooms(const String& argsInput) {
     if (!found && roomCount < MESH_PEER_MAX) rooms[roomCount++] = room;
   }
 
-  for (int r = 0; r < roomCount; r++) {
-    groupTextAppend(buf, 1024, pos, "%s:\n", rooms[r]);
+  bool listFull = false;
+  for (int r = 0; r < roomCount && !listFull; r++) {
+    appendTopologyOutput(cursor, remaining, "%s:\n", rooms[r]);
     for (int i = 0; i < gMeshPeerSlots; i++) {
       if (!gMeshPeerMeta[i].isActive) continue;
       const char* room = gMeshPeerMeta[i].room[0] ? gMeshPeerMeta[i].room : "Unassigned";
@@ -16488,20 +16715,23 @@ const char* cmd_espnow_rooms(const String& argsInput) {
         ? gMeshPeerMeta[i].friendlyName : gMeshPeerMeta[i].name;
       if (!displayName[0]) displayName = MAC_STR(gMeshPeerMeta[i].mac);
 
+      if (remaining < kListTailReserve) {
+        listFull = true;
+        appendTopologyOutput(cursor, remaining, "  ...\n");
+        break;
+      }
       char pendingMark[kGroupPendingMarkCap];
       groupPendingMark(gMeshPeerMeta[i].mac, gMeshPeerMeta[i].room, gMeshPeerMeta[i].tags, pendingMark,
                        sizeof(pendingMark));
-      groupTextAppend(buf, 1024, pos, "  %s [%s] (%s)%s\n",
-                      displayName,
-                      gMeshPeerMeta[i].tags[0] ? gMeshPeerMeta[i].tags : "-",
-                      alive ? "online" : "offline", pendingMark);
-      if (pos >= 900) { groupTextAppend(buf, 1024, pos, "  ...\n"); break; }
+      appendTopologyOutput(cursor, remaining, "  %s [%s] (%s)%s\n",
+                           displayName,
+                           gMeshPeerMeta[i].tags[0] ? gMeshPeerMeta[i].tags : "-",
+                           alive ? "online" : "offline", pendingMark);
     }
-    if (pos >= 900) break;
   }
 
   if (roomCount == 0) {
-    groupTextAppend(buf, 1024, pos, "  (no peer metadata received yet)");
+    appendTopologyOutput(cursor, remaining, "  (no peer metadata received yet)");
   }
   emitListingTrailer("discovered/paired mesh peers",
                      "a peer's value: run it remotely with 'espnowremote <peer> <target-user> <target-pass> <cmd>' then read the reply with 'espnowmessages json'; a peer's name/room/tags: 'espnowrequestmeta <peer>'");
@@ -16569,6 +16799,12 @@ enum class GroupKind : uint8_t { Room, Tag };
 static const char* groupCommandRun(GroupKind kind, const String& target, const String& user, const String& pass,
                                    const String& command) {
   if (!gEspNow || !gEspNow->initialized) return "Error: ESP-NOW not initialized. Run 'openespnow' first.";
+  // Same rule as 'espnowremote': the frame carries a login and is only ever
+  // sent encrypted, which needs a mesh passphrase.
+  if (!gEspNow->encryptionEnabled) {
+    return "Error: ESP-NOW encryption required. Set a passphrase with "
+           "'espnowsetpassphrase <mesh> <passphrase>' and pair securely.";
+  }
   const bool isRoom = (kind == GroupKind::Room);
   if (!isRoom) {
     // A tag list would have to mean "all of them" or "any of them", and the
@@ -16576,11 +16812,12 @@ static const char* groupCommandRun(GroupKind kind, const String& target, const S
     const char* oneTag;
     size_t oneTagLen;
     if (!espnowgroup::singleTag(target.c_str(), oneTag, oneTagLen)) {
-      return "Error: a tag command goes to one tag, and a tag has no comma. Run it once per tag: "
+      return "Error: A tag command goes to one tag, and a tag has no comma. Run it once per tag: "
              "espnowtagcmd <tag> <target-user> <target-pass> <command>";
     }
   }
   const String safeCommand = redactCmdForAudit(command);
+  const char* const where = isRoom ? "in room" : "with tag";
 
   char payload[ESPNOW_V4_MAX_PLAINTEXT];
   if (user.length() + pass.length() + command.length() + 2 >= sizeof(payload)) {
@@ -16593,12 +16830,17 @@ static const char* groupCommandRun(GroupKind kind, const String& target, const S
   const size_t cap = 1024;
   size_t pos = 0;
   buf[0] = '\0';
-  int sent = 0;
+  int matched = 0;  // members of the group
+  int sent = 0;     // members whose frame went out or was parked for their session
   int listed = 0;
   int skipped = 0;
   char skippedNames[120] = "";
   size_t skippedPos = 0;
   bool skippedCut = false;
+  char refused[160] = "";  // names of the members that did not take the command
+  size_t refusedPos = 0;
+  bool refusedCut = false;
+  char reason[64] = "";  // why the first of them did not
 
   for (int i = 0; i < gEspNow->deviceCount; i++) {
     // Records are added and removed on this task only, so `dev` stays this
@@ -16625,14 +16867,27 @@ static const char* groupCommandRun(GroupKind kind, const String& target, const S
       }
       continue;
     }
+    matched++;
 
     // Encrypt-or-wait. The payload carries credentials, so it never goes out
     // in plaintext. A peer without a session is not skipped: the frame is
     // parked, the handshake is started and the frame goes out when the session
     // is up (or its timeout drops it). So `sent` counts frames accepted for
     // delivery, not frames on the air.
-    v4_send_encrypted_or_queue(dev.mac, ESPNOW_V4_TYPE_CMD, ESPNOW_V4_FLAG_ACK_REQ, generateMessageId(),
-                               (const uint8_t*)payload, (uint16_t)strlen(payload), 1, nullptr, 0);
+    char status[64] = "";
+    if (!v4_send_encrypted_or_queue(dev.mac, ESPNOW_V4_TYPE_CMD, ESPNOW_V4_FLAG_ACK_REQ, generateMessageId(),
+                                    (const uint8_t*)payload, (uint16_t)strlen(payload), 1, status,
+                                    sizeof(status))) {
+      if (!reason[0]) strlcpy(reason, status[0] ? status : "send failed", sizeof(reason));
+      // A name goes in whole or not at all; ", ..." stands for the rest.
+      if (refusedPos + strlen(who) + 8 <= sizeof(refused)) {
+        groupTextAppend(refused, sizeof(refused), refusedPos, "%s%s", refusedPos ? ", " : "", who);
+      } else if (!refusedCut) {
+        refusedCut = true;
+        groupTextAppend(refused, sizeof(refused), refusedPos, ", ...");
+      }
+      continue;
+    }
     sent++;
     // Every member is sent to; the reply names as many as fit beside its last lines.
     if (pos < 360) {
@@ -16642,17 +16897,36 @@ static const char* groupCommandRun(GroupKind kind, const String& target, const S
       listed++;
     }
   }
-  if (sent > listed) groupTextAppend(buf, cap, pos, "  ... and %d more\n", sent - listed);
 
-  if (sent == 0) {
-    cliHint(isRoom ? "no device matched - list rooms and members with 'espnowgroups'"
-                   : "no device matched - list devices and their tags with 'espnowgroups'");
+  if (matched == 0) {
+    // Nothing went out: the reply is the failure alone.
+    pos = 0;
     if (isRoom) {
-      groupTextAppend(buf, cap, pos, "No devices found in room '%s'", target.c_str());
+      groupTextAppend(buf, cap, pos,
+                      "Error: No devices found in room '%s'. List rooms and members with '%s'.", target.c_str(),
+                      espnowgroup::kListCommand);
     } else {
-      groupTextAppend(buf, cap, pos, "No devices found with tag '%s'", target.c_str());
+      groupTextAppend(buf, cap, pos,
+                      "Error: No devices found with tag '%s'. List devices and their tags with '%s'.",
+                      target.c_str(), espnowgroup::kListCommand);
     }
+  } else if (sent == 0) {
+    pos = 0;
+    groupTextAppend(buf, cap, pos,
+                    "Error: Command not sent to any of %d device(s) %s '%s' (%s). Check 'espnowstatus' and retry.",
+                    matched, where, target.c_str(), reason);
+  } else if (sent < matched) {
+    // Leads with the failure; the members it went to stay listed below.
+    char sentList[400];
+    strlcpy(sentList, buf, sizeof(sentList));
+    pos = 0;
+    groupTextAppend(buf, cap, pos,
+                    "Error: Command sent to %d of %d device(s) %s '%s'; not sent to %s (%s). "
+                    "Send it to those with 'espnowremote <device> <user> <pass> <command>'.\n%s",
+                    sent, matched, where, target.c_str(), refused, reason, sentList);
+    if (sent > listed) groupTextAppend(buf, cap, pos, "  ... and %d more\n", sent - listed);
   } else {
+    if (sent > listed) groupTextAppend(buf, cap, pos, "  ... and %d more\n", sent - listed);
     cliHint("each device's reply returns asynchronously - read them with 'espnowmessages json'");
     if (isRoom) {
       groupTextAppend(buf, cap, pos, "Sent '%s' to %d device(s) in %s", safeCommand.c_str(), sent, target.c_str());
@@ -17030,101 +17304,15 @@ const char* cmd_espnow_meshrole(const String& argsInput) {
 }
 
 
-// Worker status configuration
-const char* cmd_espnow_worker(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-
-  CommandArgs a(argsInput);
-  String subcmd = a.arg(0);
-  subcmd.toLowerCase();
-
-  // Show current configuration
-  if (a.count() == 0 || subcmd == "show" || subcmd == "json") {
-    if (argWantsJson(argsInput)) {
-      snprintf(getDebugBuffer(), 1024,
-               "{\"schema\":1,\"enabled\":%s,\"intervalMs\":%u,"
-               "\"fields\":{\"heap\":%s,\"rssi\":%s,\"thermal\":%s,\"imu\":%s}}",
-               gWorkerStatusConfig.enabled ? "true" : "false",
-               gWorkerStatusConfig.intervalMs,
-               gWorkerStatusConfig.includeHeap ? "true" : "false",
-               gWorkerStatusConfig.includeRssi ? "true" : "false",
-               gWorkerStatusConfig.includeThermal ? "true" : "false",
-               gWorkerStatusConfig.includeImu ? "true" : "false");
-      return getDebugBuffer();
-    }
-    snprintf(getDebugBuffer(), 1024,
-             "Worker Status Config:\n"
-             "  enabled: %s\n"
-             "  interval: %u ms\n"
-             "  fields: heap=%s rssi=%s thermal=%s imu=%s",
-             gWorkerStatusConfig.enabled ? "on" : "off",
-             gWorkerStatusConfig.intervalMs,
-             gWorkerStatusConfig.includeHeap ? "on" : "off",
-             gWorkerStatusConfig.includeRssi ? "on" : "off",
-             gWorkerStatusConfig.includeThermal ? "on" : "off",
-             gWorkerStatusConfig.includeImu ? "on" : "off");
-    return getDebugBuffer();
-  }
-  
-  // Enable/disable worker status
-  if (argIsOn(subcmd)) {
-    gWorkerStatusConfig.enabled = true;
-    return "Worker status reporting enabled";
-  }
-  if (argIsOff(subcmd)) {
-    gWorkerStatusConfig.enabled = false;
-    return "Worker status reporting disabled";
-  }
-
-  // Set interval
-  if (subcmd == "interval") {
-    long interval = a.argInt(1, 0);
-    if (interval < 1000) return "Error: interval must be >= 1000 ms";
-    if (interval > 300000) return "Error: interval must be <= 300000 ms (5 min)";
-    gWorkerStatusConfig.intervalMs = (uint16_t)interval;
-    snprintf(getDebugBuffer(), 1024, "Worker status interval set to %u ms", gWorkerStatusConfig.intervalMs);
-    return getDebugBuffer();
-  }
-  
-  // Configure fields
-  if (subcmd == "fields") {
-    String fields = a.remaining(0);
-    fields.toLowerCase();
-    
-    // Reset all fields to off
-    gWorkerStatusConfig.includeHeap = false;
-    gWorkerStatusConfig.includeRssi = false;
-    gWorkerStatusConfig.includeThermal = false;
-    gWorkerStatusConfig.includeImu = false;
-    
-    // Parse comma-separated field list
-    int start = 0;
-    while (start < fields.length()) {
-      int comma = fields.indexOf(',', start);
-      String field = (comma >= 0) ? fields.substring(start, comma) : fields.substring(start);
-      field.trim();
-      
-      if (field == "heap") gWorkerStatusConfig.includeHeap = true;
-      else if (field == "rssi") gWorkerStatusConfig.includeRssi = true;
-      else if (field == "thermal") gWorkerStatusConfig.includeThermal = true;
-      else if (field == "imu") gWorkerStatusConfig.includeImu = true;
-      else if (field.length() > 0) {
-        snprintf(getDebugBuffer(), 1024, "Error: unknown field '%s'", field.c_str());
-        return getDebugBuffer();
-      }
-      
-      if (comma < 0) break;
-      start = comma + 1;
-    }
-    
-    return "Worker status fields updated";
-  }
-  
-  return "Error: invalid arguments — Usage: espnow worker [show|on|off|interval <ms>|fields <heap,rssi,thermal,imu>]";
-}
-
 // V2 fragmentation is now mandatory - command removed
+
+// True when `mac` is this device's own STA or AP address. An address the
+// radio cannot report matches nothing.
+static bool macIsOwnAddress(const uint8_t mac[6]) {
+  uint8_t own[6];
+  if (espnowSelfStaMac(own) == ESP_OK && memcmp(mac, own, 6) == 0) return true;
+  return espnowSelfApMac(own) == ESP_OK && memcmp(mac, own, 6) == 0;
+}
 
 // Mesh master command
 const char* cmd_espnow_meshmaster(const String& argsInput) {
@@ -17140,20 +17328,16 @@ const char* cmd_espnow_meshmaster(const String& argsInput) {
     return "OK";
   }
 
-  String mac = a.arg(0);
-  if (mac.length() != 17) {
+  uint8_t mac[6];
+  if (!a.argMac(0, mac)) {
     return "Error: Invalid MAC address format. Use: XX:XX:XX:XX:XX:XX";
   }
-
-  uint8_t myMac[6];
-  espnowSelfStaMac(myMac);
-  String myMacStr = macToDisplayStr(myMac);
-  if (mac.equalsIgnoreCase(myMacStr)) {
+  if (macIsOwnAddress(mac)) {
     return "Error: Cannot set your own MAC as master MAC";
   }
 
-  mac.toUpperCase();
-  setSetting(gSettings.meshMasterMac, mac);
+  // Stored in the one written form, whichever separators were typed.
+  setSetting(gSettings.meshMasterMac, macToDisplayStr(mac));
   BROADCAST_PRINTF("[MESH] Master MAC set to %s", gSettings.meshMasterMac.c_str());
   return "OK";
 }
@@ -17172,20 +17356,16 @@ const char* cmd_espnow_meshbackup(const String& argsInput) {
     return "OK";
   }
 
-  String mac = a.arg(0);
-  if (mac.length() != 17) {
+  uint8_t mac[6];
+  if (!a.argMac(0, mac)) {
     return "Error: Invalid MAC address format. Use: XX:XX:XX:XX:XX:XX";
   }
-
-  uint8_t myMac[6];
-  espnowSelfStaMac(myMac);
-  String myMacStr = macToDisplayStr(myMac);
-  if (mac.equalsIgnoreCase(myMacStr)) {
+  if (macIsOwnAddress(mac)) {
     return "Error: Cannot set your own MAC as backup MAC";
   }
 
-  mac.toUpperCase();
-  setSetting(gSettings.meshBackupMac, mac);
+  // Stored in the one written form, whichever separators were typed.
+  setSetting(gSettings.meshBackupMac, macToDisplayStr(mac));
   BROADCAST_PRINTF("[MESH] Backup MAC set to %s", gSettings.meshBackupMac.c_str());
   return "OK";
 }
@@ -17220,6 +17400,9 @@ const char* cmd_espnow_meshtopo(const String& argsInput) {
   if (!meshEnabled()) {
     return "Error: Mesh mode not enabled. Use 'espnowmode mesh' first.";
   }
+  if (!gEspNow || !gEspNow->initialized) {
+    return "Error: ESP-NOW not initialized. Run 'openespnow' first.";
+  }
   
   int peerCount = 0;
   for (int i = 0; i < gMeshPeerSlots; i++) {
@@ -17246,7 +17429,18 @@ const char* cmd_espnow_meshtopo(const String& argsInput) {
   }
   
   BROADCAST_PRINTF("[TOPO] Initiating topology discovery for %d peer(s)...", peerCount);
-  requestTopologyDiscovery();
+  const int admitted = requestTopologyDiscovery();
+  if (admitted < 0) {
+    return "Error: Topology state is busy. Run 'espnowmeshtopo' again shortly.";
+  }
+  if (admitted == 0) {
+    if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
+    snprintf(getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE,
+             "Error: Topology request was not sent to any of %d peer(s). "
+             "Check 'espnowmeshstatus' and retry.",
+             peerCount);
+    return getDebugBuffer();
+  }
   return "Topology discovery initiated. Use 'espnowtoporesults' to view responses.";
 }
 
@@ -17277,7 +17471,7 @@ const char* cmd_espnow_toporesults(const String& argsInput) {
 
   TopoStreamsGuard guard("cmd_espnow_toporesults");
   if (gTopoStreamsMutex && !guard.held) {
-    return "Topology results are busy; try again shortly.";
+    return "Error: Topology results are busy. Try again shortly.";
   }
 
   const uint32_t now = (uint32_t)millis();
@@ -17293,6 +17487,8 @@ const char* cmd_espnow_toporesults(const String& argsInput) {
     gTopoRequestTimeout = 0;
   }
   if (gTopoRequestId != 0) {
+    // A progress reply, not a failure: the web page polls this command while a
+    // discovery runs and stops polling at the first failed reply.
     return "Still collecting topology responses; run espnowtoporesults again shortly.";
   }
   if (gTopoCompletedRequestId == 0) {
@@ -17689,11 +17885,12 @@ const char* cmd_espnow_list(const String& argsInput) {
   doc["count"] = listedCount;
   doc["hint"] = "a peer's value: run it remotely with 'espnowremote <peer> <target-user> <target-pass> <cmd>' then read the reply with 'espnowmessages json'; a peer's name/room/tags: 'espnowrequestmeta <peer>'";
 
-  size_t needed = measureJson(doc) + 1;
-  static const size_t bufSize = 1024;
-  if (needed > bufSize) needed = bufSize;
-  if (!gEspNow->listBuffer) return "{}";
-  serializeJson(doc, gEspNow->listBuffer, needed);
+  if (!gEspNow->listBuffer) return "{\"schema\":1,\"ok\":false,\"error\":\"out of memory\"}";
+  // A document that does not fit is refused whole: a cut one cannot be parsed.
+  if (measureJson(doc) + 1 > EspNowState::kListBufferSize) {
+    return "{\"schema\":1,\"ok\":false,\"error\":\"response too large\"}";
+  }
+  serializeJson(doc, gEspNow->listBuffer, EspNowState::kListBufferSize);
 
   DEBUG_HTTPF("[ESP-NOW] list: %d devices", gEspNow->deviceCount);
   return gEspNow->listBuffer;
@@ -17752,12 +17949,12 @@ const char* cmd_espnow_meshstatus(const String& argsInput) {
   doc["activeRetries"] = 0;
 
   // Serialize to gDebugBuffer
-  if (!ensureDebugBuffer()) return "{\"error\":\"Buffer unavailable\"}";
+  if (!ensureDebugBuffer()) return "{\"schema\":1,\"ok\":false,\"error\":\"out of memory\"}";
 
   // Full buffer, not 1024: 16 peers × ~260 B of rows (+linkRssi as of Phase 0)
   // plus unpaired/retry lists overflowed the old cap on larger meshes.
   size_t len = serializeJson(doc, getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE);
-  if (len >= GLOBAL_DEBUG_BUFFER_SIZE) return "{\"error\":\"Response too large\"}";
+  if (len >= GLOBAL_DEBUG_BUFFER_SIZE) return "{\"schema\":1,\"ok\":false,\"error\":\"response too large\"}";
 
   return getDebugBuffer();
 }
@@ -17918,17 +18115,23 @@ static const char* meshesCmd_add(const String& label) {
   if (slot < 0) {
     return "Error: All mesh slots are in use. Free one with 'espnowmeshes delete <label>' first.";
   }
-  setSetting(gSettings.meshes[slot].label, label);
-  setSetting(gSettings.meshes[slot].passphrase, String(""));
+  if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
+  // Stage the whole mesh in RAM and write the settings file once, so the file
+  // never holds the label without its fingerprint.
+  gSettings.meshes[slot].label = label;
+  gSettings.meshes[slot].passphrase = "";
   gSettings.meshes[slot].fingerprint = fp;
-  setSetting(gSettings.meshes[slot].enabled, true);
+  gSettings.meshes[slot].enabled = true;
   // First mesh added becomes default if no other is flagged
   bool anyDefault = false;
   for (uint8_t i = 0; i < Settings::N_MESHES; i++) {
     if (gSettings.meshes[i].enabled && gSettings.meshes[i].isDefault) { anyDefault = true; break; }
   }
-  if (!anyDefault) setSetting(gSettings.meshes[slot].isDefault, true);
-  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+  if (!anyDefault) gSettings.meshes[slot].isDefault = true;
+  if (!requestSettingsPersist()) {
+    return "Error: Mesh added in RAM, but the change could not be persisted."
+           " Check storage with 'fsusage'; the save is retried automatically.";
+  }
   snprintf(getDebugBuffer(), 1024,
            "Added mesh '%s' in slot %d (fp=0x%04X)%s. "
            "No passphrase set yet — run 'espnowsetpassphrase %s <passphrase>' to enable encryption.",
@@ -18147,6 +18350,7 @@ static const char* meshesCmd_enable(const String& label) {
       // Stage both fields before persisting. Writing enabled first would put a
       // stale fingerprint beside an enabled mesh in settings.json until some
       // unrelated later save.
+      if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
       const int8_t inUseBefore = espnowPassphraseInUse();
       gSettings.meshes[i].enabled = true;
       gSettings.meshes[i].fingerprint = meshFingerprintForLabel(label);
@@ -18160,12 +18364,19 @@ static const char* meshesCmd_enable(const String& label) {
         }
         gSettings.meshes[i].isDefault = !otherDefault;
       }
+      // A mesh that was disabled when the device started has no derived keys
+      // yet (start-up skips a disabled mesh). Derive them now, so its frames are
+      // signed and its key exchange works without a restart. The slow stretch
+      // runs only when no stretched key is cached.
+      if (gSettings.meshes[i].passphrase.length() > 0 && !meshKeysGet(i)) {
+        if (!gSettings.meshes[i].passphraseStretchedKeyValid) meshKeysStretchPassphrase(i);
+        meshKeysDerive(i);
+      }
       // A keyed mesh that became the default brings its passphrase into use.
       espnowLoadLivePassphrase();
       if (!requestSettingsPersist()) {
         return "Error: Mesh enabled in RAM, but its fingerprint could not be persisted.";
       }
-      if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
       snprintf(getDebugBuffer(), 1024,
                "Enabled mesh '%s' (fp=0x%04X). Paired peers in this mesh "
                "will start exchanging frames again.",
@@ -18184,13 +18395,18 @@ static const char* meshesCmd_setdefault(const String& label) {
       if (!gSettings.meshes[i].enabled) {
         return "Error: Cannot set a disabled mesh as default. Enable it first.";
       }
-      // Clear isDefault on all, then set on target
+      if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
+      // The flag moves to the target in RAM and the settings file is written
+      // once, for an unchanged default too: a repeat after a failed save saves.
       for (uint8_t j = 0; j < Settings::N_MESHES; j++) {
-        setSetting(gSettings.meshes[j].isDefault, j == i);
+        gSettings.meshes[j].isDefault = (j == i);
       }
       // The default mesh's passphrase, when it has one, is the one in use.
       espnowLoadLivePassphrase();
-      if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+      if (!requestSettingsPersist()) {
+        return "Error: Default mesh changed in RAM, but the change could not be persisted."
+               " Check storage with 'fsusage'; the save is retried automatically.";
+      }
       snprintf(getDebugBuffer(), 1024, "Set '%s' as default mesh.", label.c_str());
       appendLivePassphraseNote();
       return getDebugBuffer();
@@ -18222,6 +18438,7 @@ static const char* meshesCmd_setpassphrase(const String& label, const String& pa
           gSettings.meshes[0].isDefault && meshOtherEnabledExists(0)) {
         return meshDefaultInUseReply();
       }
+      if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
       // Stage in RAM; persist only after the label-salted stretched key and
       // validity flag below are coherent with this passphrase.
       if (i == 0) {
@@ -18248,7 +18465,6 @@ static const char* meshesCmd_setpassphrase(const String& label, const String& pa
       if (!requestSettingsPersist()) {
         return "Error: Mesh passphrase changed in RAM, but the coherent key state could not be persisted.";
       }
-      if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
       if (passphrase.length() == 0) {
         // Clearing slot 0's passphrase also disables that mesh (setEspNowPassphrase);
         // the other slots stay enabled. Say what happened, with the mesh's own label.
@@ -18308,6 +18524,7 @@ static const char* meshesCmd_rename(const String& oldLabel, const String& newLab
   }
   for (uint8_t i = 0; i < Settings::N_MESHES; i++) {
     if (gSettings.meshes[i].label == oldLabel) {
+      if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
       // Stage the label in RAM; its fingerprint and label-salted stretched
       // key must be recomputed before any settings snapshot reaches disk.
       gSettings.meshes[i].label = newLabel;
@@ -18325,7 +18542,6 @@ static const char* meshesCmd_rename(const String& oldLabel, const String& newLab
       if (!requestSettingsPersist()) {
         return "Error: Mesh renamed in RAM, but the coherent key state could not be persisted.";
       }
-      if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
       snprintf(getDebugBuffer(), 1024,
                "Renamed mesh '%s' -> '%s' (new fp=0x%04X). WARNING: peers in this mesh "
                "must also rename or comms will break — the fingerprint changed.",
@@ -18340,6 +18556,8 @@ static const char* meshesCmd_rename(const String& oldLabel, const String& newLab
 const char* cmd_espnow_meshes(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   CommandArgs a(argsInput);
+  // remove, delete, enable and setdefault take one label and nothing after it.
+  static const char kMeshesOneLabelReply[] = "Error: Too many arguments. This subcommand takes one label.";
 
   if (a.count() == 0) return meshesCmd_list();
 
@@ -18362,26 +18580,36 @@ const char* cmd_espnow_meshes(const String& argsInput) {
   }
   if (sub == "remove" || sub == "disable") {
     if (!a.hasMinArgs(2)) return "Error: invalid arguments — Usage: espnowmeshes remove <label>";
+    if (a.count() > 2) return kMeshesOneLabelReply;
     return meshesCmd_remove(a.arg(1));
   }
   if (sub == "delete") {
     if (!a.hasMinArgs(2)) return "Error: invalid arguments — Usage: espnowmeshes delete <label>";
+    if (a.count() > 2) return kMeshesOneLabelReply;
     return meshesCmd_delete(a.arg(1));
   }
   if (sub == "enable") {
     if (!a.hasMinArgs(2)) return "Error: invalid arguments — Usage: espnowmeshes enable <label>";
+    if (a.count() > 2) return kMeshesOneLabelReply;
     return meshesCmd_enable(a.arg(1));
   }
   if (sub == "setdefault") {
     if (!a.hasMinArgs(2)) return "Error: invalid arguments — Usage: espnowmeshes setdefault <label>";
+    if (a.count() > 2) return kMeshesOneLabelReply;
     return meshesCmd_setdefault(a.arg(1));
   }
   if (sub == "setpassphrase") {
     if (!a.hasMinArgs(3)) return "Error: invalid arguments — Usage: espnowmeshes setpassphrase <label> <passphrase>";
+    // Words after the first would be dropped and a shorter passphrase stored.
+    if (a.count() > 3 || a.unterminatedQuote()) {
+      return "Error: Passphrase must be one argument. Put it in double quotes: "
+             "espnowmeshes setpassphrase <label> \"<passphrase>\".";
+    }
     return meshesCmd_setpassphrase(a.arg(1), a.arg(2));
   }
   if (sub == "rename") {
     if (!a.hasMinArgs(3)) return "Error: invalid arguments — Usage: espnowmeshes rename <oldlabel> <newlabel>";
+    if (a.count() > 3) return "Error: Too many arguments. Usage: espnowmeshes rename <oldlabel> <newlabel>.";
     return meshesCmd_rename(a.arg(1), a.arg(2));
   }
   return "Error: invalid arguments — Usage: espnowmeshes [list|add|remove|delete|enable|setdefault|setpassphrase|rename] ...";
@@ -18470,7 +18698,7 @@ static void formatUnpairFilesLine(char* out, size_t outLen, bool hadIdentity,
 
 const char* cmd_espnow_unpair(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gEspNow) return "Error: ESP-NOW not initialized";
+  if (!gEspNow) return "Error: ESP-NOW not initialized. Run 'openespnow' first.";
   if (!gEspNow->initialized) {
     return "Error: ESP-NOW not initialized. Run 'openespnow' first.";
   }
@@ -18490,6 +18718,9 @@ const char* cmd_espnow_unpair(const String& argsInput) {
 
   String deviceName = getEspNowDeviceName(mac);
 
+  // The reply buffer is claimed before anything changes.
+  if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
+
   // Unpairing the bond partner ends the bond first, as bonddisconnect does
   // (the OLED and G2 peer pages run only this command). Otherwise its
   // heartbeats key-exchange it again within seconds and its identity and
@@ -18507,7 +18738,6 @@ const char* cmd_espnow_unpair(const String& argsInput) {
   const char* bondSep = bondNote[0] ? "\n" : "";
 
   if (!espnowDeletePeerRuntime(mac)) {
-    if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
     snprintf(getDebugBuffer(), 1024,
              "Error: Failed to unpair device (ESP-NOW closing or peer delete failed)%s%s",
              bondNote[0] ? ". " : "", bondNote);
@@ -18569,11 +18799,15 @@ const char* cmd_espnow_unpair(const String& argsInput) {
 
   bool devicesOk = saveEspNowDevices();
 
-  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   if (!devicesOk) {
+    // The device is gone in RAM, but the registry file still holds it. A
+    // second 'espnowunpair' cannot help in this session: the name and the MAC
+    // no longer resolve, so it stops before the save. The command works again
+    // once a restart has loaded the device from the file.
     snprintf(getDebugBuffer(), 1024,
-      "Unpaired device but failed to encrypt and save the registry — device encryption key "
-      "unavailable. The pairing may not persist across reboot.\n%s%s%s", bondNote, bondSep, filesLine);
+      "Unpaired device for this session only: the device list could not be saved, so it is paired "
+      "again after a restart. Check storage with 'fsusage'. If the device is listed again after a "
+      "restart, run 'espnowunpair <name_or_mac>' again.\n%s%s%s", bondNote, bondSep, filesLine);
     return getDebugBuffer();
   }
   if (deviceName.length() > 0) {
@@ -18598,14 +18832,14 @@ const char* cmd_espnow_forget(const String& argsInput) {
   CommandArgs a(argsInput);
   if (!a.hasMinArgs(1)) return "Error: invalid arguments — Usage: espnowforget <name_or_mac>";
   String target = a.arg(0);
+  if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
 
   uint8_t mac[6];
   // Try a raw MAC first (works even if the peer is no longer in the registry),
   // then fall back to name resolution.
   if (!parseMacAddress(target, mac) && !resolveDeviceNameOrMac(target, mac)) {
-    if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
     snprintf(getDebugBuffer(), 1024,
-             "Could not resolve '%s'. Pass a MAC (AA:BB:CC:DD:EE:FF) or a paired device name.",
+             "Error: Could not resolve '%s'. Pass a MAC (AA:BB:CC:DD:EE:FF) or a paired device name.",
              target.c_str());
     return getDebugBuffer();
   }
@@ -18618,7 +18852,6 @@ const char* cmd_espnow_forget(const String& argsInput) {
     systemEventPost(SYSEVT_PEER_UNPAIRED, getEspNowDeviceName(mac).c_str(), macToDisplayStr(mac).c_str());
   }
 
-  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   snprintf(getDebugBuffer(), 1024,
            "%s %s. Re-pair with 'espnowpairsecure %s <name>' on BOTH devices.",
            had ? "Forgot crypto identity + closed session for"
@@ -18634,14 +18867,31 @@ const char* cmd_espnow_forget(const String& argsInput) {
 // Broadcast command
 const char* cmd_espnow_broadcast(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gEspNow) return "Error: ESP-NOW not initialized";
+  if (!gEspNow) return "Error: ESP-NOW not initialized. Run 'openespnow' first.";
   if (!gEspNow->initialized) {
     return "Error: ESP-NOW not initialized. Run 'openespnow' first.";
   }
 
   CommandArgs a(argsInput);
-  if (!a.hasMinArgs(1)) return "Error: invalid arguments — Usage: espnow broadcast <message>";
+  if (!a.hasMinArgs(1)) return "Error: invalid arguments — Usage: espnowbroadcast <message>";
   String message = a.raw();
+  // A broadcast is one frame; longer text is refused, not cut.
+  if (message.length() > ESPNOW_V4_MAX_PAYLOAD) {
+    return "Error: Message too long for a broadcast (max 218 bytes). Shorten it or use espnowsend.";
+  }
+  // A mesh with a passphrase signs its broadcasts, and the 32-byte tag comes
+  // out of the same frame (v4_send_frame_ex drops a longer one for every peer
+  // of such a mesh). Refused here so the reply names the limit, not the peers.
+  // The test is per device, not per receiver: one limit, whichever peers are
+  // active, and the reply says so.
+  if (message.length() > ESPNOW_V4_MAX_BROADCAST_AUTHED_PLAINTEXT) {
+    for (uint8_t i = 0; i < Settings::N_MESHES; i++) {
+      if (gSettings.meshes[i].enabled && meshKeysGet(i)) {
+        return "Error: Message too long. A broadcast is limited to 186 bytes while any enabled mesh "
+               "has a passphrase. Shorten it or use espnowsend.";
+      }
+    }
+  }
 
   // The payload is the raw message either way — nothing is wrapped or
   // re-encoded here. The JSON test and its branch are inert: both arms assign
@@ -18656,22 +18906,13 @@ const char* cmd_espnow_broadcast(const String& argsInput) {
     payload = message;
   }
 
-  // Send to all mesh peers as a V4 TEXT broadcast
-  bool result = v4_broadcast_text(payload.c_str(), payload.length());
-  int sent = result ? 1 : 0;
-  int failed = result ? 0 : 1;
-
-  if (sent == 0 && failed == 0) {
-    return "Error: No paired devices to broadcast to";
+  // Send to all mesh peers as a V4 TEXT broadcast. The result is one bool for
+  // the whole broadcast: true when at least one peer was sent the frame.
+  if (!v4_broadcast_text(payload.c_str(), payload.length())) {
+    return "Error: Broadcast reached no device (no active peer, or every send failed). "
+           "Check 'espnowdevices' and retry.";
   }
-
-  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-  if (failed > 0) {
-    snprintf(getDebugBuffer(), 1024, "Broadcast sent to %d device(s) (%d failed)", sent, failed);
-  } else {
-    snprintf(getDebugBuffer(), 1024, "Broadcast sent to %d device(s)", sent);
-  }
-  return getDebugBuffer();
+  return "Broadcast sent";
 }
 
 // Helper function to send a file to a specific MAC address via v3 binary protocol
@@ -19089,7 +19330,7 @@ bool sendBondStreamCtrl(RemoteSensorType sensorType, bool enable) {
 // Sendfile command
 const char* cmd_espnow_sendfile(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gEspNow) return "Error: ESP-NOW not initialized";
+  if (!gEspNow) return "Error: ESP-NOW not initialized. Run 'openespnow' first.";
   if (!gEspNow->initialized) {
     return "Error: ESP-NOW not initialized. Run 'openespnow' first.";
   }
@@ -19185,7 +19426,8 @@ const char* cmd_espnow_sendfile(const String& argsInput) {
     // history, and an espnowfetch's sending side is the remote peer's FS_GET
     // handler, which never runs this command.)
     snprintf(sendfileBuffer, sizeof(sendfileBuffer),
-             "Error: Failed to send file '%s' — transfer aborted or receiver cancelled",
+             "Error: Failed to send file '%s' — not started or aborted (no secure session could be "
+             "opened, the receiver cancelled, or a frame failed). Check 'espnowsessions' and retry.",
              filename.c_str());
     return sendfileBuffer;
   }
@@ -19214,7 +19456,7 @@ static int meshSlotByLabel(const String& label) {
 
 const char* cmd_espnow_setpassphrase(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gEspNow) return "Error: ESP-NOW not initialized";
+  if (!gEspNow) return "Error: ESP-NOW not initialized. Run 'openespnow' first.";
   if (!gEspNow->initialized) {
     return "Error: ESP-NOW not initialized. Run 'openespnow' first.";
   }
@@ -19231,29 +19473,29 @@ const char* cmd_espnow_setpassphrase(const String& argsInput) {
            "Run 'espnowmeshes list' to see available mesh labels.";
   }
 
+  // The passphrase is one argument, stored exactly as given. Joining several
+  // words back together would lose spacing and every word past the argument
+  // limit, and the other devices would then derive a different key.
+  if (a.unterminatedQuote()) {
+    return "Error: Unmatched quote. Put the passphrase in one pair of double quotes.";
+  }
+  if (a.count() > 2) {
+    return "Error: Passphrase must be one argument. Put it in double quotes; it cannot contain a double quote.";
+  }
+
   String meshLabel = a.arg(0);
   String passphrase = a.arg(1);
-  // Allow extra tokens to flow in (e.g. unquoted passphrases with spaces)
-  for (uint8_t i = 2; i < a.count(); i++) {
-    passphrase += " ";
-    passphrase += a.arg(i);
-  }
 
-  bool clearing = (passphrase == "clear");
+  // The bare word clears; "clear" in quotes is read as a passphrase.
+  bool clearing = !a.argWasQuoted(1) && passphrase == "clear";
   if (clearing) passphrase = "";
-
-  // Strip surrounding quotes if present
-  if (passphrase.length() >= 2 &&
-      passphrase.startsWith("\"") && passphrase.endsWith("\"")) {
-    passphrase = passphrase.substring(1, passphrase.length() - 1);
-  }
 
   // Resolve mesh
   int slot = meshSlotByLabel(meshLabel);
   if (slot < 0) {
     if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
     snprintf(getDebugBuffer(), 1024,
-             "Mesh '%s' not found. Run 'espnowmeshes add %s' first, "
+             "Error: Mesh '%s' not found. Run 'espnowmeshes add %s' first, "
              "or 'espnowmeshes list' to see configured meshes.",
              meshLabel.c_str(), meshLabel.c_str());
     return getDebugBuffer();
@@ -19389,7 +19631,7 @@ bool espnowConsumePairingWindow(const uint8_t mac[6]) {
 // Secure pairing command
 const char* cmd_espnow_pairsecure(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gEspNow) return "Error: ESP-NOW not initialized";
+  if (!gEspNow) return "Error: ESP-NOW not initialized. Run 'openespnow' first.";
   if (!gEspNow->initialized) {
     return "Error: ESP-NOW not initialized. Run 'openespnow' first.";
   }
@@ -19440,6 +19682,9 @@ const char* cmd_espnow_pairsecure(const String& argsInput) {
     if (memcmp(gEspNow->devices[i].mac, mac, 6) == 0) { existingIdx = i; break; }
   }
   const bool wasUpdate = (existingIdx >= 0);
+
+  // The reply buffer is claimed before anything changes.
+  if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
 
   if (wasUpdate) {
     // Rename / refresh in place. The radio peer already exists from the prior
@@ -19519,16 +19764,21 @@ const char* cmd_espnow_pairsecure(const String& argsInput) {
                                  : nullptr;
   bool keyExKicked = espnowKeyExInitiateManual(mac, meshLabelArg);
   if (!keyExKicked) {
-    WARN_ESPNOWF("[pairsecure] KEY_EX initiate failed for %s — encrypted "
-                 "unicast will fail until the user runs espnowkeyex manually",
+    WARN_ESPNOWF("[pairsecure] KEY_EX initiate failed for %s — it starts with the "
+                 "next message to this device, or with espnowkeyex",
                  macStr.c_str());
   }
 
-  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   if (!devicesOk) {
+    // The pairing holds until the next restart only. A second run finds the
+    // device in the table, updates it in place and saves again. The mesh is
+    // part of the command: without it the second run would move the device to
+    // the default mesh. The slot number is given because it always reads back
+    // as this slot (a label made of one or two digits is taken as a number).
     snprintf(getDebugBuffer(), 1024,
-      "Paired %s (%s) but failed to encrypt and save peer data — device encryption key unavailable. "
-      "Peer will not persist across reboot.", deviceName.c_str(), macStr.c_str());
+      "Error: Paired %s (%s) for this session only: the device list could not be saved. "
+      "Check storage with 'fsusage', then run 'espnowpairsecure %s %s %u' again.",
+      deviceName.c_str(), macStr.c_str(), macStr.c_str(), deviceName.c_str(), (unsigned)meshId);
   } else {
     snprintf(getDebugBuffer(), 1024,
              "Encrypted device %s successfully: %s (%s)\n"
@@ -19540,7 +19790,8 @@ const char* cmd_espnow_pairsecure(const String& argsInput) {
              keyExKicked
                  ? "KEY_EX_HELLO sent; peer identity will land in ~100ms — "
                    "encrypted unicast (espnowsend, espnowsessionsend) is now usable."
-                 : "WARN: KEY_EX kick failed; run 'espnowkeyex <mac>' manually before encrypted unicast.");
+                 : "Key exchange not started yet; it starts with the next message to this device, "
+                   "or run 'espnowkeyex <mac>' now.");
   }
   return getDebugBuffer();
 }
@@ -19551,11 +19802,11 @@ const char* cmd_espnow_pairsecure(const String& argsInput) {
 
 const char* cmd_espnow_requestmeta(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gEspNow || !gEspNow->initialized) return "Error: ESP-NOW not initialized";
+  if (!gEspNow || !gEspNow->initialized) return "Error: ESP-NOW not initialized. Run 'openespnow' first.";
   
   String args = argsInput;
   args.trim();
-  if (args.length() == 0) return "Error: invalid arguments — Usage: espnow requestmeta <name_or_mac>";
+  if (args.length() == 0) return "Error: invalid arguments — Usage: espnowrequestmeta <name_or_mac>";
   
   uint8_t targetMac[6];
   if (!resolveDeviceNameOrMac(args, targetMac)) {
@@ -19574,9 +19825,14 @@ const char* cmd_espnow_requestmeta(const String& argsInput) {
     }
   }
   
-  requestMetadata(targetMac, true);
+  if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
+  if (!requestMetadata(targetMac, true)) {
+    snprintf(getDebugBuffer(), 1024,
+             "Error: Metadata request to %s could not be sent (send queue full, send failed or "
+             "ESP-NOW closing). Retry in a few seconds.", args.c_str());
+    return getDebugBuffer();
+  }
 
-  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   cliHint("the peer's name/room/zone/tags arrive asynchronously - view them with 'espnowdevices'");
   snprintf(getDebugBuffer(), 1024, "Metadata request sent to %s", args.c_str());
   return getDebugBuffer();
@@ -19598,24 +19854,27 @@ static inline const char* espnowAckErr(bool wantJson, const char* text, const ch
 const char* cmd_espnow_browse(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   const bool wantJson = argWantsJson(argsInput);
-  if (!gEspNow) return espnowAckErr(wantJson, "Error: ESP-NOW not initialized", "{\"schema\":1,\"ok\":false,\"error\":\"not initialized\"}");
+  if (!gEspNow) return espnowAckErr(wantJson, "Error: ESP-NOW not initialized. Run 'openespnow' first.", "{\"schema\":1,\"ok\":false,\"error\":\"not initialized\"}");
   if (!gEspNow->initialized) {
-    return espnowAckErr(wantJson, "ESP-NOW not initialized. Run 'openespnow' first.", "{\"schema\":1,\"ok\":false,\"error\":\"not initialized\"}");
+    return espnowAckErr(wantJson, "Error: ESP-NOW not initialized. Run 'openespnow' first.", "{\"schema\":1,\"ok\":false,\"error\":\"not initialized\"}");
   }
 
   if (!gEspNow->encryptionEnabled) {
-    return espnowAckErr(wantJson, "ESP-NOW encryption required. Set a passphrase with 'espnowsetpassphrase <mesh> <passphrase>' and pair securely.", "{\"schema\":1,\"ok\":false,\"error\":\"encryption required\"}");
+    return espnowAckErr(wantJson, "Error: ESP-NOW encryption required. Set a passphrase with 'espnowsetpassphrase <mesh> <passphrase>' and pair securely.", "{\"schema\":1,\"ok\":false,\"error\":\"encryption required\"}");
   }
 
   CommandArgs a(argsInput);
-  if (!a.hasMinArgs(3)) return espnowAckErr(wantJson, "Usage: espnow browse <target> <username> <password> [\"path\"]", "{\"schema\":1,\"ok\":false,\"error\":\"usage\"}");
+  if (!a.hasMinArgs(3)) return espnowAckErr(wantJson, "Usage: espnowbrowse <target> <target-user> <target-pass> [\"path\"] [json]", "{\"schema\":1,\"ok\":false,\"error\":\"usage\"}");
 
   String target = a.arg(0);
   String username = a.arg(1);
   String password = a.arg(2);
   String path = "/";
-  if (a.has(3)) {
-    const char* qerr = requireQuotedToken(a, 3, path);
+  // The path is optional, and a bare json in front of it (or in its place) is
+  // the output flag, not a path.
+  const int pathIdx = (wantJson && !a.argWasQuoted(3) && a.arg(3) == "json") ? 4 : 3;
+  if (a.has(pathIdx)) {
+    const char* qerr = requireQuotedToken(a, pathIdx, path);
     if (qerr) return espnowAckErr(wantJson, qerr, "{\"schema\":1,\"ok\":false,\"error\":\"bad path arg\"}");
   }
   if (path.length() == 0) path = "/";
@@ -19625,7 +19884,7 @@ const char* cmd_espnow_browse(const String& argsInput) {
     if (wantJson) return "{\"schema\":1,\"ok\":false,\"error\":\"not paired\"}";
     EXT_RAM_BSS_ATTR static char browseBuffer[256];
     snprintf(browseBuffer, sizeof(browseBuffer),
-             "Target device '%s' not found or not paired. Pair the device first (prefer 'espnowpairsecure').",
+             "Error: Target device '%s' not found or not paired. Pair the device first (prefer 'espnowpairsecure').",
              target.c_str());
     return browseBuffer;
   }
@@ -19637,14 +19896,10 @@ const char* cmd_espnow_browse(const String& argsInput) {
                             username.c_str(), password.c_str(), path.c_str());
   if (payloadLen >= (int)sizeof(cmdPayload)) {
     // Never send a prefix: a cut command would run as something else on the peer.
-    return "Error: command too long for one ESP-NOW frame (credentials and command must fit 217 bytes)";
+    return espnowAckErr(wantJson, "Error: Command too long for one ESP-NOW frame (credentials and command must fit 217 bytes). Shorten the path.", "{\"schema\":1,\"ok\":false,\"error\":\"command too long\"}");
   }
 
   if (isMeshMode()) {
-    if (!isPairedDevice(targetMac)) {
-      BROADCAST_PRINTF("[ESP-NOW][mesh] browse send rejected: not paired MAC=%s", macToDisplayStr(targetMac).c_str());
-      return espnowAckErr(wantJson, "Rejected (mesh): device not paired. Use 'espnowpair' first.", "{\"schema\":1,\"ok\":false,\"error\":\"not paired (mesh)\"}");
-    }
     if (!espnowPeerExists(targetMac)) {
       BROADCAST_PRINTF("[ESP-NOW][mesh] browse send rejected: no peer entry MAC=%s", macToDisplayStr(targetMac).c_str());
       return espnowAckErr(wantJson, "Error: Rejected (mesh): destination not in ESP-NOW peer table.", "{\"schema\":1,\"ok\":false,\"error\":\"no peer entry\"}");
@@ -19661,7 +19916,7 @@ const char* cmd_espnow_browse(const String& argsInput) {
 
   EXT_RAM_BSS_ATTR static char browseBuffer[256];
   if (!sent) {
-    return espnowAckErr(wantJson, "Failed to send V3 browse request", "{\"schema\":1,\"ok\":false,\"error\":\"send failed\"}");
+    return espnowAckErr(wantJson, "Error: Failed to send the browse request (send queue full or timeout). Retry in a few seconds.", "{\"schema\":1,\"ok\":false,\"error\":\"send failed\"}");
   }
 
   if (wantJson) {
@@ -19681,17 +19936,17 @@ const char* cmd_espnow_browse(const String& argsInput) {
 const char* cmd_espnow_fetch(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   const bool wantJson = argWantsJson(argsInput);
-  if (!gEspNow) return espnowAckErr(wantJson, "Error: ESP-NOW not initialized", "{\"schema\":1,\"ok\":false,\"error\":\"not initialized\"}");
+  if (!gEspNow) return espnowAckErr(wantJson, "Error: ESP-NOW not initialized. Run 'openespnow' first.", "{\"schema\":1,\"ok\":false,\"error\":\"not initialized\"}");
   if (!gEspNow->initialized) {
-    return espnowAckErr(wantJson, "ESP-NOW not initialized. Run 'openespnow' first.", "{\"schema\":1,\"ok\":false,\"error\":\"not initialized\"}");
+    return espnowAckErr(wantJson, "Error: ESP-NOW not initialized. Run 'openespnow' first.", "{\"schema\":1,\"ok\":false,\"error\":\"not initialized\"}");
   }
 
   if (!gEspNow->encryptionEnabled) {
-    return espnowAckErr(wantJson, "ESP-NOW encryption required. Set a passphrase with 'espnowsetpassphrase <mesh> <passphrase>' and pair securely.", "{\"schema\":1,\"ok\":false,\"error\":\"encryption required\"}");
+    return espnowAckErr(wantJson, "Error: ESP-NOW encryption required. Set a passphrase with 'espnowsetpassphrase <mesh> <passphrase>' and pair securely.", "{\"schema\":1,\"ok\":false,\"error\":\"encryption required\"}");
   }
 
   CommandArgs a(argsInput);
-  if (!a.hasMinArgs(4)) return espnowAckErr(wantJson, "Usage: espnow fetch <target> <username> <password> \"<path>\"", "{\"schema\":1,\"ok\":false,\"error\":\"usage\"}");
+  if (!a.hasMinArgs(4)) return espnowAckErr(wantJson, "Usage: espnowfetch <target> <target-user> <target-pass> \"<path>\"", "{\"schema\":1,\"ok\":false,\"error\":\"usage\"}");
 
   String target = a.arg(0);
   String username = a.arg(1);
@@ -19705,7 +19960,7 @@ const char* cmd_espnow_fetch(const String& argsInput) {
     if (wantJson) return "{\"schema\":1,\"ok\":false,\"error\":\"not paired\"}";
     EXT_RAM_BSS_ATTR static char fetchBuffer[256];
     snprintf(fetchBuffer, sizeof(fetchBuffer),
-             "Target device '%s' not found or not paired. Pair the device first (prefer 'espnowpairsecure').",
+             "Error: Target device '%s' not found or not paired. Pair the device first (prefer 'espnowpairsecure').",
              target.c_str());
     return fetchBuffer;
   }
@@ -19721,14 +19976,10 @@ const char* cmd_espnow_fetch(const String& argsInput) {
                             gSettings.espnowDeviceName.c_str(), path.c_str());
   if (payloadLen >= (int)sizeof(cmdPayload)) {
     // Never send a prefix: a cut command would run as something else on the peer.
-    return "Error: command too long for one ESP-NOW frame (credentials and command must fit 217 bytes)";
+    return espnowAckErr(wantJson, "Error: Command too long for one ESP-NOW frame (credentials and command must fit 217 bytes). Shorten the path.", "{\"schema\":1,\"ok\":false,\"error\":\"command too long\"}");
   }
 
   if (isMeshMode()) {
-    if (!isPairedDevice(targetMac)) {
-      BROADCAST_PRINTF("[ESP-NOW][mesh] fetch send rejected: not paired MAC=%s", macToDisplayStr(targetMac).c_str());
-      return espnowAckErr(wantJson, "Rejected (mesh): device not paired. Use 'espnowpair' first.", "{\"schema\":1,\"ok\":false,\"error\":\"not paired (mesh)\"}");
-    }
     if (!espnowPeerExists(targetMac)) {
       BROADCAST_PRINTF("[ESP-NOW][mesh] fetch send rejected: no peer entry MAC=%s", macToDisplayStr(targetMac).c_str());
       return espnowAckErr(wantJson, "Error: Rejected (mesh): destination not in ESP-NOW peer table.", "{\"schema\":1,\"ok\":false,\"error\":\"no peer entry\"}");
@@ -19743,7 +19994,7 @@ const char* cmd_espnow_fetch(const String& argsInput) {
 
   EXT_RAM_BSS_ATTR static char fetchBuffer[256];
   if (!sent) {
-    return espnowAckErr(wantJson, "Failed to send V3 fetch request", "{\"schema\":1,\"ok\":false,\"error\":\"send failed\"}");
+    return espnowAckErr(wantJson, "Error: Failed to send the fetch request (send queue full or timeout). Retry in a few seconds.", "{\"schema\":1,\"ok\":false,\"error\":\"send failed\"}");
   }
 
   if (wantJson) {
@@ -19787,13 +20038,13 @@ static void espnowFormatRemoteAck(char* out, size_t outSize, const char* safeCom
 const char* cmd_espnow_remote(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   const bool wantJson = argWantsJson(argsInput);
-  if (!gEspNow) return espnowAckErr(wantJson, "Error: ESP-NOW not initialized", "{\"schema\":1,\"ok\":false,\"error\":\"not initialized\"}");
+  if (!gEspNow) return espnowAckErr(wantJson, "Error: ESP-NOW not initialized. Run 'openespnow' first.", "{\"schema\":1,\"ok\":false,\"error\":\"not initialized\"}");
   if (!gEspNow->initialized) {
-    return espnowAckErr(wantJson, "ESP-NOW not initialized. Run 'openespnow' first.", "{\"schema\":1,\"ok\":false,\"error\":\"not initialized\"}");
+    return espnowAckErr(wantJson, "Error: ESP-NOW not initialized. Run 'openespnow' first.", "{\"schema\":1,\"ok\":false,\"error\":\"not initialized\"}");
   }
 
   if (!gEspNow->encryptionEnabled) {
-    return espnowAckErr(wantJson, "ESP-NOW encryption required. Set a passphrase with "
+    return espnowAckErr(wantJson, "Error: ESP-NOW encryption required. Set a passphrase with "
            "'espnowsetpassphrase <mesh> <passphrase>' and pair securely.", "{\"schema\":1,\"ok\":false,\"error\":\"encryption required\"}");
   }
 
@@ -19811,7 +20062,7 @@ const char* cmd_espnow_remote(const String& argsInput) {
     if (wantJson) return "{\"schema\":1,\"ok\":false,\"error\":\"not paired\"}";
     EXT_RAM_BSS_ATTR static char remoteBuffer[256];
     snprintf(remoteBuffer, sizeof(remoteBuffer),
-             "Target device '%s' not found or not paired. Pair the device first (prefer 'espnowpairsecure').",
+             "Error: Target device '%s' not found or not paired. Pair the device first (prefer 'espnowpairsecure').",
              target.c_str());
     return remoteBuffer;
   }
@@ -19833,7 +20084,7 @@ const char* cmd_espnow_remote(const String& argsInput) {
                             username.c_str(), password.c_str(), command.c_str());
   if (payloadLen >= (int)sizeof(cmdPayload)) {
     // Never send a prefix: a cut command would run as something else on the peer.
-    return "Error: command too long for one ESP-NOW frame (credentials and command must fit 217 bytes)";
+    return espnowAckErr(wantJson, "Error: Command too long for one ESP-NOW frame (credentials and command must fit 217 bytes). Shorten the command.", "{\"schema\":1,\"ok\":false,\"error\":\"command too long\"}");
   }
 
   uint32_t msgId = generateMessageId();
@@ -19848,7 +20099,7 @@ const char* cmd_espnow_remote(const String& argsInput) {
 
   EXT_RAM_BSS_ATTR static char remoteBuffer[256];
   if (!success) {
-    return espnowAckErr(wantJson, "Failed to send remote command", "{\"schema\":1,\"ok\":false,\"error\":\"send failed\"}");
+    return espnowAckErr(wantJson, "Error: Failed to send remote command (send queue full or timeout). Retry in a few seconds.", "{\"schema\":1,\"ok\":false,\"error\":\"send failed\"}");
   }
 
   // Bus event: a remote command was sent from this device (wire-delivery
@@ -19894,14 +20145,21 @@ const char* cmd_espnow_remote(const String& argsInput) {
 // Start stream command
 const char* cmd_espnow_startstream(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gEspNow) return "Error: ESP-NOW not initialized";
+  if (!gEspNow) return "Error: ESP-NOW not initialized. Run 'openespnow' first.";
 
   if (!currentAuthContext().ip.startsWith("espnow:")) {
-    return "Error: 'startstream' only works via ESP-NOW remote execution.\n"
-           "Usage from Device A: espnow remote DeviceB admin pass startstream";
+    return "Error: 'openstream' only works via ESP-NOW remote execution.\n"
+           "Usage from Device A: espnowremote DeviceB admin pass openstream";
   }
 
   const uint8_t* senderMac = (const uint8_t*)currentAuthContext().opaque;
+
+  // A stream to this same caller is already running. A stream to another
+  // peer is handed over to this caller below.
+  if (gEspNow->streamActive && memcmp(gEspNow->streamTarget, senderMac, 6) == 0) {
+    return "Error: The output stream to this device is already running. "
+           "Stop it first with 'closestream' to restart it.";
+  }
 
   memcpy(gEspNow->streamTarget, senderMac, 6);
   gEspNow->streamActive = true;
@@ -19925,7 +20183,7 @@ const char* cmd_espnow_startstream(const String& argsInput) {
            "Stream started - all output will be sent to %s\n"
            "Rate limited to 10 messages/second.\n"
            "Large messages (>200 bytes) use chunked transmission for complete delivery.\n"
-           "Use 'espnowremote %s admin pass stopstream' to stop.",
+           "Use 'espnowremote %s admin pass closestream' to stop.",
            senderName.c_str(), senderName.c_str());
   return streamBuffer;
 }
@@ -19933,10 +20191,10 @@ const char* cmd_espnow_startstream(const String& argsInput) {
 // Stop stream command
 const char* cmd_espnow_stopstream(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gEspNow) return "Error: ESP-NOW not initialized";
+  if (!gEspNow) return "Error: ESP-NOW not initialized. Run 'openespnow' first.";
 
   if (!gEspNow->streamActive) {
-    return "Error: No active stream to stop.";
+    return "Error: No active stream to stop. Start one from the peer with 'openstream'.";
   }
 
   // Get target info before clearing
@@ -19975,7 +20233,7 @@ const char* cmd_espnow_stopstream(const String& argsInput) {
 const char* cmd_espnow_send(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  if (!gEspNow) return "Error: ESP-NOW not initialized";
+  if (!gEspNow) return "Error: ESP-NOW not initialized. Run 'openespnow' first.";
   if (!gEspNow->initialized) {
     return "Error: ESP-NOW not initialized. Run 'openespnow' first.";
   }
@@ -20437,10 +20695,24 @@ const char* cmd_bond_resync(const String& argsInput) {
   bool setOk  = bondSendEncryptedAsync(peerMac, ESPNOW_V4_TYPE_SETTINGS_REQ,  ESPNOW_V4_FLAG_ACK_REQ, msgIdSet, nullptr, 0);
   bool schOk  = bondSendEncryptedAsync(peerMac, ESPNOW_V4_TYPE_SCHEMA_REQ,    ESPNOW_V4_FLAG_ACK_REQ, msgIdSch, nullptr, 0);
 
+  const bool allQueued = capOk && manOk && setOk && schOk;
   if (!ensureDebugBuffer()) {
-    return (capOk && manOk && setOk && schOk)
+    return allQueued
         ? "Bond resync initiated (worker): CAP+MANIFEST+SETTINGS+SCHEMA requests sent."
-        : "Bond resync (worker): some requests failed to send — see log.";
+        : "Error: Bond resync requests could not be sent. Wait until the bond partner is online "
+          "and run 'bondresync' again.";
+  }
+  if (!allQueued) {
+    // A request that was not queued is dropped, not kept for later.
+    snprintf(getDebugBuffer(), 1024,
+             "Error: Bond resync not sent in full (cap=%s, manifest=%s, settings=%s, schema=%s): "
+             "no active session with the bond partner, or the send queue is full. Wait until the "
+             "partner is online and run 'bondresync' again.",
+             capOk ? "ok" : "FAIL",
+             manOk ? "ok" : "FAIL",
+             setOk ? "ok" : "FAIL",
+             schOk ? "ok" : "FAIL");
+    return getDebugBuffer();
   }
   snprintf(getDebugBuffer(), 1024,
            "Bond resync initiated (worker role) — requests sent: "
@@ -20532,6 +20804,7 @@ const char* cmd_bond_showremotemanifest(const String& argsInput) {
   const char* err = nullptr;
   const size_t len = espnowReadCachedManifest(args.c_str(), currentAuthContext(), &manifest, &err);
   if (len == 0) {
+    if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
     snprintf(getDebugBuffer(), 1024,
              "Error: Manifest %s (%s). Use 'bondshowremotemanifest' to list available.", args.c_str(), err);
     return getDebugBuffer();
@@ -20559,7 +20832,7 @@ const char* cmd_bond_showmanifest(const String& argsInput) {
     manifest = serializeBondJson(doc, &len, "bond.manifest.show");
   }
   if (!manifest) {
-    return "Error: Manifest could not be built (see log).";
+    return "Error: Manifest could not be built (too large or out of memory). Free memory and retry.";
   }
   
   broadcastOutput("=== Device Manifest ===");
@@ -20592,7 +20865,8 @@ const char* cmd_bond_connect(const String& argsInput) {
     return "Error: Device not found. Use 'espnowlist' to see paired devices.";
   }
   
-  // Check if already connected
+  // Already the bond partner. With its session up there is nothing to
+  // connect (the owner's 2026-11-18 rule); without it, the handshake starts now.
   if (gSettings.bondModeEnabled && 
       gSettings.bondPeerMac == macToDisplayStr(peerMac)) {
     bondStartHandshakeNow(peerMac);   // no-op while the session is up
@@ -20601,8 +20875,13 @@ const char* cmd_bond_connect(const String& argsInput) {
     // the user who repeats the command has usually just run it on the other
     // device and should not wait for the once-a-minute request.
     const BondAskAgain ask = bondAgreementAskAgain();
-    if (ask.view.state == BOND_AGREEMENT_AGREED) return "Already connected to this device in bond mode.";
-    if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+    if (ask.view.state == BOND_AGREEMENT_AGREED) {
+      if (bondSessionActiveWith(peerMac)) {
+        return "Error: The bond with this device is already running. Refresh it with 'bondresync'.";
+      }
+      return "Bond mode is already set for this device; its handshake started. Watch it with 'bondstatus'.";
+    }
+    if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
     String partnerName = getEspNowDeviceName(peerMac);
     if (partnerName.length() == 0) partnerName = macToDisplayStr(peerMac);
     char asking[96];
@@ -20623,6 +20902,7 @@ const char* cmd_bond_connect(const String& argsInput) {
              asking, bondSelfName().c_str());
     return getDebugBuffer();
   }
+  if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
   
   // Enable bond mode and set peer MAC.
   // The role (bondagree::roleForBond): the one the user chose with 'bondrole'
@@ -20640,13 +20920,25 @@ const char* cmd_bond_connect(const String& argsInput) {
   // Partner, role and bond mode change with bond frames held off (the old
   // partner's stop first), and the sync state is reset before frames are
   // accepted again, so nothing the new partner sends is wiped (bench
-  // 2026-11-17, step c1; see bondWithFramesHeld).
+  // 2026-11-17, step c1; see bondWithFramesHeld). The three settings are
+  // staged in RAM and written to the settings file once. setSetting would
+  // write the file three times, but it also tells the rest of the firmware
+  // (the setting_changed event, the OLED repaint), so that is done here for
+  // each value that changed, once the hold is over.
+  const String oldPeer = gSettings.bondPeerMac;
+  const uint8_t oldRole = gSettings.bondRole;
+  const bool oldMode = gSettings.bondModeEnabled;
+  bool persisted = true;
   bondWithFramesHeld([&] {
-    setSetting(gSettings.bondPeerMac, macToDisplayStr(peerMac));
-    setSetting(gSettings.bondRole, role.role);
-    setSetting(gSettings.bondModeEnabled, true);
+    gSettings.bondPeerMac = macToDisplayStr(peerMac);
+    gSettings.bondRole = role.role;
+    gSettings.bondModeEnabled = true;
+    persisted = requestSettingsPersist();
     bondForgetPartnerState();
   });
+  if (gSettings.bondPeerMac != oldPeer) notifySettingChanged(&gSettings.bondPeerMac);
+  if (gSettings.bondRole != oldRole) notifySettingChanged(&gSettings.bondRole);
+  if (gSettings.bondModeEnabled != oldMode) notifySettingChanged(&gSettings.bondModeEnabled);
   INFO_ESPNOWF("[PAIR] Role %s: %s (our=" MAC_FMT ", peer=" MAC_FMT ")",
                 bondagree::roleSourceKey(role.source),
                 isBondMaster() ? "MASTER" : "WORKER",
@@ -20660,7 +20952,10 @@ const char* cmd_bond_connect(const String& argsInput) {
   // Don't request capabilities/manifest here - wait for peer to come online via heartbeat
   // The heartbeat handler will trigger capability/manifest exchange when peer is detected
   
-  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+  if (!persisted) {
+    return "Error: Bond mode set in RAM, but the change could not be persisted."
+           " Check storage with 'fsusage'; the save is retried automatically.";
+  }
   const char* roleName = isBondMaster() ? "master" : "worker";
   char roleWhy[96];
   switch (role.source) {
@@ -20691,14 +20986,14 @@ const char* cmd_bond_disconnect(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (!gSettings.bondModeEnabled) {
-    return "Error: Not currently in bond mode.";
+    return "Error: Bond mode is not running. Start it with 'bondconnect <mac_or_name>'.";
   }
+  if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
   
   // Announced with the same event the heartbeat timeout fires.
   const String prevPeer = gSettings.bondPeerMac;
   bondEndPartnership();
 
-  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   snprintf(getDebugBuffer(), 1024, "Disconnected from bonded device: %s", prevPeer.c_str());
   return getDebugBuffer();
 }
@@ -20990,7 +21285,7 @@ const char* cmd_bond_role(const String& argsInput) {
   args.trim();
   args.toLowerCase();
   
-  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+  if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
   char words[200];
   if (args.length() == 0) {
     bondRoleWords(words, sizeof(words));
@@ -21108,17 +21403,78 @@ const char* cmd_bond_stream(const String& argsInput) {
     return "Error: invalid arguments — Usage: bondstream <sensor> <on|off>";
   }
   
+  // A worker sends its own sensors. The broadcaster skips a sensor without a
+  // data builder, so its stream would be saved and started and never send.
+  if (enable && !isBondMaster() && !sensorCanStream(sensorType)) return sensorCannotStreamReply();
+
+  // A worker whose stream and saved setting are already as asked: nothing to
+  // start or stop (the owner's 2026-11-18 rule). A master's flag does not say
+  // what the worker does, so a master always asks.
+  if (!isBondMaster()) {
+    const bool* savedNow = bondStreamSetting(sensorType);
+    const bool savedMatches = savedNow ? (*savedNow == enable) : true;
+    if (savedMatches && isSensorDataStreamingEnabled(sensorType) == enable) {
+      return enable
+          ? "Error: This sensor is already streaming to the bond partner. "
+            "Stop it first with 'bondstream <sensor> off' to restart it."
+          : "Error: This sensor is not streaming to the bond partner. "
+            "Start it with 'bondstream <sensor> on'.";
+    }
+  }
+
+  // Whether this start took effect (a master: the request to the worker was
+  // queued). The runtime flag does not say it: on a master it stays set from
+  // an earlier start.
+  bool started = false;
   if (enable) {
-    startSensorDataStreaming(sensorType);
+    started = tryStartSensorDataStreaming(sensorType);
   } else {
     stopSensorDataStreaming(sensorType);
   }
   
-  // Update persistent settings
-  if (bool* saved = bondStreamSetting(sensorType)) setSetting(*saved, enable);
+  // Update persistent settings. A plain assignment and one write; the event
+  // and the OLED repaint that setSetting gives are asked for here.
+  bool* saved = bondStreamSetting(sensorType);
+  if (saved && *saved != enable) {
+    *saved = enable;
+    notifySettingChanged(saved);
+    if (!requestSettingsPersist()) {
+      return "Error: Stream setting changed in RAM, but the change could not be persisted."
+             " Check storage with 'fsusage'; the save is retried automatically.";
+    }
+  }
+  if (enable && !started) {
+    if (isBondMaster()) {
+      // A master pushes its saved stream settings to the worker once, when
+      // the bond syncs. That later request comes only for a sensor that has a
+      // saved setting (camera, microphone and apds have none), and only while
+      // the sync is still ahead. Asked after the save: a sync that completed
+      // meanwhile may have pushed before the setting was set.
+      if (!saved) {
+        return "Error: The stream request was not sent to the worker, and this sensor has no saved "
+               "stream setting to send later. Run the command again when 'bondstatus' shows the "
+               "bond synced.";
+      }
+      if (isBondSynced()) {
+        return "Error: The stream request could not be queued for the worker. The setting is saved. "
+               "Run the command again.";
+      }
+      // The saved settings are pushed once per sync cycle. A bond that is only
+      // fetching the worker's settings again has had its push already.
+      if (gEspNow && gEspNow->bondStatusReqSentOnce) {
+        return "Error: The stream request was not sent to the worker, the bond is syncing again. "
+               "The setting is saved. Run the command again when 'bondstatus' shows the bond synced.";
+      }
+      return "Saved. The worker is asked to stream this sensor as soon as the bond is synced.";
+    }
+    return "Error: Streaming was not started (ESP-NOW not running, or no memory for the sender task); "
+           "the setting is saved. Run 'openespnow' and retry.";
+  }
   BROADCAST_PRINTF("[ESP-NOW] %s streaming %s sensor data", enable ? "Started" : "Stopped", sensorName.c_str());
   
-  return enable ? "OK: Started streaming sensor data to bonded master" : "OK: Stopped streaming sensor data";
+  if (!enable) return "OK: Stopped streaming sensor data";
+  return isBondMaster() ? "OK: Asked the bonded worker to stream this sensor"
+                        : "OK: Started streaming sensor data to bonded master";
 }
 
 /**
@@ -21134,12 +21490,20 @@ const char* cmd_bond_testsensor(const String& argsInput) {
   
   String args = argsInput;
   args.trim();
+  args.toLowerCase();
 
   // Default to thermal sensor for testing
   RemoteSensorType testType = REMOTE_SENSOR_THERMAL;
-  if (args.length() > 0) {
-    testType = stringToSensorType(args.c_str());
+  if (args.length() > 0 && !sensorTypeFromString(args.c_str(), testType)) {
+    return "Error: Unknown sensor. Valid: thermal, tof, imu, gps, input, fmradio, rtc, presence";
   }
+  // The causes the send below would only report as "not sent".
+  if (!gEspNow || !gEspNow->initialized) return "Error: ESP-NOW not initialized. Run 'openespnow' first.";
+  if (isBondMaster()) {
+    return "Error: This device is the bond master; only the worker sends sensor data. "
+           "Run bondtestsensor on the worker.";
+  }
+  if (!isBondModeOnline()) return "Error: Bond partner is offline. Wait for it and retry.";
   
   broadcastOutput("[BOND_TEST] Testing v3 sensor data transmission...");
   BROADCAST_PRINTF("  Sensor type: %s (%d)", sensorTypeToString(testType), (int)testType);
@@ -21166,7 +21530,10 @@ const char* cmd_bond_testsensor(const String& argsInput) {
     return "OK: Test sensor packet sent";
   } else {
     BROADCAST_PRINTF("[BOND_TEST] FAILED: not sent (%s)", espnowsensor::dropReasonText(why));
-    return "Error: FAILED: Could not send test packet (check debug output)";
+    if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
+    snprintf(getDebugBuffer(), 1024, "Error: Test packet was not queued (%s). Retry in a few seconds.",
+             espnowsensor::dropReasonText(why));
+    return getDebugBuffer();
   }
 }
 
@@ -21182,7 +21549,6 @@ const char* cmd_espnow_usersync(const String& argsInput);
 const char* cmd_espnow_firsttimesetup(const String&);
 const char* cmd_espnow_heartbeatinterval(const String&);
 const char* cmd_espnow_failovertimeout(const String&);
-const char* cmd_espnow_workerstatusinterval(const String&);
 const char* cmd_espnow_topodiscoveryinterval(const String&);
 const char* cmd_espnow_topoautorefresh(const String&);
 const char* cmd_espnow_heartbeatbroadcast(const String&);
@@ -21229,8 +21595,20 @@ const char* cmd_espnow_messages(const String& argsInput) {
   for (int i = 0; i < a.count(); i++) {
     const String& t = a.arg(i);
     if (t.equalsIgnoreCase("json")) continue;
-    if (parseMacAddress(t, mac)) hasMac = true;          // looks like a MAC
-    else since = (uint32_t)strtoul(t.c_str(), nullptr, 10);  // else a seq number
+    if (parseMacAddress(t, mac)) {                       // looks like a MAC
+      hasMac = true;
+      continue;
+    }
+    // Anything else has to be a sequence number: a mistyped MAC read as 0
+    // would return every peer's messages.
+    uint32_t seq = 0;
+    if (!parseIntArg(t, seq)) {
+      return argWantsJson(argsInput)
+          ? "{\"schema\":1,\"ok\":false,\"error\":\"bad argument\"}"
+          : "Error: Not a sequence number or MAC address. "
+            "Usage: espnowmessages [json] [<sinceSeq>] [<AA:BB:CC:DD:EE:FF>]";
+    }
+    since = seq;
   }
 
   // Page size capped at 8: keeps the serialized JSON comfortably under the 4096-byte async
@@ -21241,7 +21619,7 @@ const char* cmd_espnow_messages(const String& argsInput) {
   static ReceivedTextMessage* msgs = nullptr;
   if (!msgs) msgs = (ReceivedTextMessage*)ps_alloc(sizeof(ReceivedTextMessage) * MAXM,
                                                    AllocPref::PreferPsram, "espnow.msgs.cli");
-  if (!msgs) return argWantsJson(argsInput) ? "{\"schema\":1,\"ok\":false,\"error\":\"oom\"}" : "OOM";
+  if (!msgs) return argWantsJson(argsInput) ? "{\"schema\":1,\"ok\":false,\"error\":\"oom\"}" : kCommandReplyOutOfMemory;
   int n = hasMac ? getPeerMessages(mac, msgs, MAXM, since)
                  : getAllMessages(msgs, MAXM, since);
 
@@ -21371,6 +21749,7 @@ const char* cmd_espnow_pairrequest(const String& argsInput) {
     return "Error: not in the discovered list. Run 'espnowdiscovered' (both devices need discovery open).";
   }
   if (name[0] == '\0') snprintf(name, sizeof(name), "peer_%02X%02X%02X", mac[3], mac[4], mac[5]);
+  if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
 
   // Pending first, so an answer to this first copy finds it; the heartbeat
   // sweep re-sends it until answered (PairCore).
@@ -21379,7 +21758,6 @@ const char* cmd_espnow_pairrequest(const String& argsInput) {
   portEXIT_CRITICAL(&gPairLock);
   sendPairCtrl(mac, ESPNOW_V4_TYPE_PAIR_REQUEST);
 
-  if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
   snprintf(getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE,
            "Pair request sent to '%s'. Waiting for them to Accept (they need discovery open)...", name);
   return getDebugBuffer();
@@ -21418,16 +21796,53 @@ static const char* takePendingIn(const String& argsInput, espnowpair::Answer ans
 const char* cmd_espnow_accept(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!gEspNow || !gEspNow->initialized) return "Error: ESP-NOW not initialized.";
+  // What the local pairing below is known to refuse (no encryption, a full
+  // device table) is refused before the request is answered, so no Accept is
+  // recorded or sent for a pairing that cannot follow. The other side pairs
+  // when it gets the Accept. A refusal that only shows while pairing (the
+  // radio does not take the peer) still comes after the Accept; the reply
+  // below says so.
+  if (!gEspNow->encryptionEnabled) {
+    return "Error: Encryption not enabled. Run 'espnowsetpassphrase <mesh> <passphrase>' first.";
+  }
+  if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
+  {
+    portENTER_CRITICAL(&gPairLock);
+    const espnowpair::Request pending = gPair.in;
+    portEXIT_CRITICAL(&gPairLock);
+    if (pending.active && pendingInMatchesArg(argsInput, pending) && gEspNow->deviceCount >= 16) {
+      // A requester that is already in the table is updated in place and
+      // needs no free slot.
+      bool inTable = false;
+      for (int i = 0; i < gEspNow->deviceCount && !inTable; i++) {
+        inTable = macEquals(gEspNow->devices[i].mac, pending.mac);
+      }
+      if (!inTable) {
+        return "Error: Maximum number of devices (16) already paired. Unpair one with "
+               "'espnowunpair <name_or_mac>', then run 'espnowaccept' again.";
+      }
+    }
+  }
   espnowpair::Request req = {};
   const char* err = takePendingIn(argsInput, espnowpair::Answer::Accept,
-                                  "No pending pair request. (Open discovery with 'espnowpairmode' on both.)", req);
+                                  "Error: No pending pair request. Open discovery with 'espnowpairmode' "
+                                  "on both devices and send the request again.", req);
   if (err) return err;
 
   sendPairCtrl(req.mac, ESPNOW_V4_TYPE_PAIR_ACCEPT);   // re-sent by the heartbeat sweep (PairCore)
   char macStr[18]; macToDisplay(req.mac, macStr, sizeof(macStr));
   String pairArgs = String(macStr) + " " + req.name;
   String resCopy = cmd_espnow_pairsecure(pairArgs);  // copy: pairsecure may reuse the debug buffer
-  if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
+  if (commandReplyIsFailure(resCopy.c_str())) {
+    // The other side was already told Accept, and the local pairing answered
+    // with an error. That is not always "did not pair": with a device list
+    // that could not be saved the device is paired for this session. The lead
+    // says only what is true in both cases and the pairing's own text follows.
+    snprintf(getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE,
+             "Error: Accepted '%s', but the pairing on this device reported: %s",
+             req.name, commandReplyReason(resCopy.c_str()));
+    return getDebugBuffer();
+  }
   snprintf(getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE, "Accepted '%s'. %s", req.name, resCopy.c_str());
   return getDebugBuffer();
 }
@@ -21436,12 +21851,13 @@ const char* cmd_espnow_accept(const String& argsInput) {
 const char* cmd_espnow_reject(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!gEspNow || !gEspNow->initialized) return "Error: ESP-NOW not initialized.";
+  if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
   espnowpair::Request req = {};
-  const char* err = takePendingIn(argsInput, espnowpair::Answer::Reject, "No pending pair request.", req);
+  const char* err = takePendingIn(argsInput, espnowpair::Answer::Reject,
+                                  "Error: No pending pair request. Nothing to reject.", req);
   if (err) return err;
   sendPairCtrl(req.mac, ESPNOW_V4_TYPE_PAIR_REJECT);
 
-  if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
   snprintf(getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE, "Rejected pair request from '%s'.", req.name);
   return getDebugBuffer();
 }
@@ -21455,8 +21871,12 @@ const char* cmd_espnow_pairmode(const String& argsInput) {
   String sub = a.count() > 0 ? a.arg(0) : "";
   sub.toLowerCase();
 
-  if (sub == "off" || sub == "stop") {
-    espnowPairModeClose();
+  if (argIsOff(sub) || sub == "stop") {
+    const bool wasOpen = espnowPairModeActive();
+    espnowPairModeClose();  // also drops candidates left by a window that expired
+    if (!wasOpen) {
+      return "Error: Discovery is not running. Open it with 'espnowpairmode [seconds]'.";
+    }
     return "Pairing mode off.";
   }
   if (sub == "status") {
@@ -21491,15 +21911,13 @@ const char* cmd_espnow_pairmode(const String& argsInput) {
   if (!gEspNow->encryptionEnabled) {
     return "Error: Set a mesh passphrase first (espnowsetpassphrase). Pairing needs the shared mesh key.";
   }
+  // A number is the duration; an on word opens the window for the default time.
   uint32_t secs = 120;
-  if (sub.length() > 0) {
-    long v = 0;
-    if (!parseIntArg(sub, v)) return kCommandReplyNotANumber;
-    if (v > 0) secs = (uint32_t)v;
+  if (sub.length() > 0 && !parseIntArg(sub, 1, 600, secs) && !argIsOn(sub)) {
+    return "Error: Duration must be 1 to 600 seconds. Use 'espnowpairmode off' to close the window.";
   }
-  if (secs > 600) secs = 600;
+  if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
   espnowPairModeOpen(secs);
-  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   snprintf(getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE,
            "Discovery ON for %lus on channel %u. Open discovery on the other device too "
            "(same mesh, same channel), then run 'espnowdiscovered' to see it and pair. "
@@ -21582,14 +22000,13 @@ extern const CommandEntry espNowCommands[] = {
   
   // ---- ESP-NOW Communication ----
   { "espnowsend", "Send message to one peer, relayed over multiple hops if it is out of radio range: 'espnowsend [json] <name_or_mac> <message>'. Requires ESP-NOW encryption enabled. (async send; delivery only, no reply)", false, cmd_espnow_send, "Usage: espnowsend [json] <name_or_mac> <message>\n       Requires ESP-NOW encryption (set a mesh passphrase first); plaintext send was removed.\n       Leading 'json' flag returns {schema,ok,msgId} for delivery-status polling.\n       Returns OK on delivery; one-way message, no result comes back.\n       Out-of-range peers are reached via relays when a route exists ('espnowmeshroutes');\n       a relayed message is split at ~130 chars per piece instead of ~200." },
-  { "espnowbroadcast", "Broadcast message: 'espnowbroadcast <message>'. (async send; delivery only, no reply)", false, cmd_espnow_broadcast, "Usage: espnowbroadcast <message>   (single frame, <= 218 bytes; longer text is NOT fragmented and fails silently)\n       Returns whether the single broadcast frame was transmitted to all peers, NOT a per-device delivery count; no per-device reply." },
+  { "espnowbroadcast", "Broadcast message: 'espnowbroadcast <message>'. (async send; delivery only, no reply)", false, cmd_espnow_broadcast, "Usage: espnowbroadcast <message>   (single frame, <= 186 bytes while any enabled mesh has a passphrase, 218 otherwise; longer text is refused)\n       Fails when the frame reached no peer. There is no per-device delivery count and no per-device reply." },
   { "espnowsendfile", "Send file: 'espnowsendfile <name_or_mac> \"<filepath>\"'. (synchronous send; fails if the receiver rejects/cancels mid-transfer)", true, cmd_espnow_sendfile, "Usage: espnowsendfile <name_or_mac> \"<filepath>\"\n       Blocks until the file is sent. 'success' means every chunk was transmitted and the receiver did not cancel; final storage is confirmed by the receiver's CRC check, which is not reported back here." },
-  { "espnowbrowse", "Browse a peer's files; user/pass are an account ON THE TARGET: 'espnowbrowse <target> <target-user> <target-pass> [\"path\"]'. (async - result via espnowmessages json)", true, cmd_espnow_browse, "Usage: espnowbrowse <target> <target-user> <target-pass> [\"path\"]\n       Credentials are verified ON THE TARGET device, not this one.\n       Returns OK on delivery; the remote listing arrives later - read with 'espnowmessages json' (match the reqId)." },
+  { "espnowbrowse", "Browse a peer's files; user/pass are an account ON THE TARGET: 'espnowbrowse <target> <target-user> <target-pass> [\"path\"]'. (async - result via espnowmessages json)", true, cmd_espnow_browse, "Usage: espnowbrowse <target> <target-user> <target-pass> [\"path\"] [json]\n       Credentials are verified ON THE TARGET device, not this one.\n       Returns OK on delivery; the remote listing arrives later - read with 'espnowmessages json' (match the reqId)." },
   { "espnowfetch", "Fetch a file from a peer; user/pass are an account ON THE TARGET: 'espnowfetch <target> <target-user> <target-pass> \"<path>\"'. (async - status via espnowmessages json; file saved on this device)", true, cmd_espnow_fetch, "Usage: espnowfetch <target> <target-user> <target-pass> \"<path>\"\n       Credentials are verified ON THE TARGET device, not this one.\n       Returns OK on delivery; status lands in 'espnowmessages json'; the fetched file is written to this device's filesystem." },
   { "espnowremote", "Execute a command on a peer: 'espnowremote <target> <target-user> <target-pass> <cmd>'. user/pass are an account ON THE TARGET (verified there), not this device. (async - result via espnowmessages json)", true, cmd_espnow_remote, "Usage: espnowremote <target> <target-user> <target-pass> <command>\n       <target-user>/<target-pass> are credentials ON THE TARGET device, not this one.\n       Async: returns a reqId on delivery; read the output later with 'espnowmessages json 0 <target-mac>' (match the reqId)." },
   { "openstream", "Start streaming all output to ESP-NOW caller (admin, remote only).", true, cmd_espnow_startstream },
   { "closestream", "Stop streaming output to ESP-NOW device (admin).", true, cmd_espnow_stopstream },
-  { "espnowworker", "Configure worker status reporting: 'espnowworker [show|on|off|interval <ms>|fields <list>]'.", false, cmd_espnow_worker, "Usage: espnowworker [show|on|off|interval <ms>|fields <heap,rssi,thermal,imu>]" },
   { "espnowsensorstream", "Send one sensor's readings to the master named on this device: 'espnowsensorstream <sensor> <on|off>'. (on this device only; the readings show on the master's espnowsensorstatus)", false, cmd_espnow_sensorstream, "Usage: espnowsensorstream <thermal|tof|imu|gps|input|fmradio|camera|microphone|rtc|presence|apds> <on|off>\n       The readings go to the master named on this device (espnowmasterfingerprint), which must be paired with it.\n       The reply says where they go, or why nothing is sent yet. On a bond master it asks the bond partner." },
   { "espnowsensorstatus", "Show what this device sends to the mesh master (readings, battery state, events) and why not, and what it received, lost and refused: 'espnowsensorstatus [json [<name_or_mac> [via <name_or_mac>]]]'.", false, cmd_espnow_sensorstatus, "Usage: espnowsensorstatus [json [<name_or_mac> [via <name_or_mac>]]]\n       json <name_or_mac>: everything this device keeps of one sending device.\n       via <name_or_mac>: the bond partner that device forwards for (also found by the name its link shows)." },
   { "espnowbattery", "Mesh master: show the battery state other devices sent: 'espnowbattery [json] [<name_or_mac>] [from <n>]'.", false, cmd_espnow_battery, "Usage: espnowbattery [json] [<name_or_mac>] [from <n>]\n       A device sends its battery state to the master named on it (espnowpowerinterval).\n       json: 'next' is the number to pass as 'from' when not every device fitted one reply." },
@@ -21649,7 +22066,6 @@ extern const CommandEntry espNowCommands[] = {
   { "espnowfirsttimesetup",          "Set first time setup flag: <0|1>", true, cmd_espnow_firsttimesetup, "Usage: espnowfirsttimesetup <0|1>" },
   { "espnowheartbeatinterval",       "Set master heartbeat interval: <1000-60000 ms>", true, cmd_espnow_heartbeatinterval, "Usage: espnowheartbeatinterval <1000..60000>" },
   { "espnowfailovertimeout",         "Set failover timeout: <5000-120000 ms>", true, cmd_espnow_failovertimeout, "Usage: espnowfailovertimeout <5000..120000>" },
-  { "espnowworkerstatusinterval",    "Set worker status interval: <5000-120000 ms>", true, cmd_espnow_workerstatusinterval, "Usage: espnowworkerstatusinterval <5000..120000>" },
   { "espnowtopodiscoveryinterval",   "Set topology discovery interval: <0-300000 ms>", true, cmd_espnow_topodiscoveryinterval, "Usage: espnowtopodiscoveryinterval <0..300000>" },
   { "espnowtopoautorefresh",         "Set auto refresh topology: <0|1>", true, cmd_espnow_topoautorefresh, "Usage: espnowtopoautorefresh <0|1>" },
   { "espnowheartbeatbroadcast",      "Set heartbeat broadcast: <0|1>", true, cmd_espnow_heartbeatbroadcast, "Usage: espnowheartbeatbroadcast <0|1>" },
@@ -21705,7 +22121,6 @@ static const SettingEntry espnowSettingEntries[] = {
   { "backupEnabled", SETTING_BOOL, &gSettings.meshBackupEnabled, false, 0, nullptr, 0, 1, "Backup Master Enabled", nullptr, false, "mesh", "espnowbackupenable" },
   { "masterHeartbeatInterval", SETTING_INT, &gSettings.meshMasterHeartbeatInterval, 10000, 0, nullptr, 1000, 60000, "Heartbeat Interval (ms)", nullptr, false, "mesh", "espnowheartbeatinterval" },
   { "failoverTimeout", SETTING_INT, &gSettings.meshFailoverTimeout, 20000, 0, nullptr, 5000, 120000, "Failover Timeout (ms)", nullptr, false, "mesh", "espnowfailovertimeout" },
-  { "workerStatusInterval", SETTING_INT, &gSettings.meshWorkerStatusInterval, 30000, 0, nullptr, 5000, 120000, "Worker Status Interval (ms)", nullptr, false, "mesh", "espnowworkerstatusinterval" },
   { "topoDiscoveryInterval", SETTING_INT, &gSettings.meshTopoDiscoveryInterval, 0, 0, nullptr, 0, 300000, "Topo Discovery Interval (ms)", nullptr, false, "mesh", "espnowtopodiscoveryinterval" },
   { "topoAutoRefresh", SETTING_BOOL, &gSettings.meshTopoAutoRefresh, false, 0, nullptr, 0, 1, "Auto Refresh Topology", nullptr, false, "mesh", "espnowtopoautorefresh" },
   { "heartbeatBroadcast", SETTING_BOOL, &gSettings.meshHeartbeatBroadcast, true, 0, nullptr, 0, 1, "Heartbeat Broadcast", nullptr, false, "mesh", "espnowheartbeatbroadcast" },
@@ -21777,7 +22192,6 @@ static const SettingEntry* findEspNowEntry(const char* key) {
 ESPNOW_SETTING_CMD(cmd_espnow_firsttimesetup, "firstTimeSetup")
 ESPNOW_SETTING_CMD(cmd_espnow_heartbeatinterval, "masterHeartbeatInterval")
 ESPNOW_SETTING_CMD(cmd_espnow_failovertimeout, "failoverTimeout")
-ESPNOW_SETTING_CMD(cmd_espnow_workerstatusinterval, "workerStatusInterval")
 ESPNOW_SETTING_CMD(cmd_espnow_topodiscoveryinterval, "topoDiscoveryInterval")
 ESPNOW_SETTING_CMD(cmd_espnow_topoautorefresh, "topoAutoRefresh")
 ESPNOW_SETTING_CMD(cmd_espnow_heartbeatbroadcast, "heartbeatBroadcast")
@@ -21902,9 +22316,9 @@ const char* cmd_espnow_sensorreq(const String& argsInput) {
     // A forwarded partner, by the device that forwards for it.
     switch (espnowForwardRequestTarget(a.arg(0).c_str(), a.arg(2).c_str(), mac, origin, &linkGen)) {
       case ForwardTarget::Found:  break;
-      case ForwardTarget::NoVia:  return "Error: the device after 'via' is not known here";
-      case ForwardTarget::NoLink: return "Error: that device forwards nothing for that partner to this device "
-                                         "(espnowforwardlinks)";
+      case ForwardTarget::NoVia:  return "Error: The device after 'via' is not known here. List paired devices with 'espnowlist'.";
+      case ForwardTarget::NoLink: return "Error: That device forwards nothing for that partner to this device. "
+                                         "See what it forwards with 'espnowforwardlinks'.";
     }
     at = 3;
   } else if (!resolveDeviceNameOrMac(a.arg(0), mac)) {
@@ -21932,26 +22346,26 @@ const char* cmd_espnow_sensorreq(const String& argsInput) {
     char* out = getDebugBuffer();
     if (!espnowsensor::parseSensorList(sensorsArg.c_str(), sensorMask, bad, sizeof(bad))) {
       if (!bad[0]) {
-        snprintf(out, GLOBAL_DEBUG_BUFFER_SIZE, "Error: an empty sensor name in '%s' (names, comma separated: tof,imu)",
+        snprintf(out, GLOBAL_DEBUG_BUFFER_SIZE, "Error: An empty sensor name in '%s'. Give the names comma separated, for example tof,imu.",
                  sensorsArg.c_str());
       } else if (bad[0] >= '0' && bad[0] <= '9') {
-        snprintf(out, GLOBAL_DEBUG_BUFFER_SIZE, "Error: '%s' is not a sensor mask (1..0x%lX, e.g. 0x6)", bad,
+        snprintf(out, GLOBAL_DEBUG_BUFFER_SIZE, "Error: '%s' is not a sensor mask. Give 1..0x%lX, for example 0x6.", bad,
                  (unsigned long)espnowsensor::kSensorMaskAll);
       } else {
-        size_t pos = (size_t)snprintf(out, GLOBAL_DEBUG_BUFFER_SIZE, "Error: '%s' is not a sensor (", bad);
+        size_t pos = (size_t)snprintf(out, GLOBAL_DEBUG_BUFFER_SIZE, "Error: '%s' is not a sensor. Use one of: ", bad);
         for (uint8_t i = 0; i < REMOTE_SENSOR_MAX && pos < GLOBAL_DEBUG_BUFFER_SIZE; ++i) {
           pos += (size_t)snprintf(out + pos, GLOBAL_DEBUG_BUFFER_SIZE - pos, "%s%s", i ? ", " : "",
                                   espnowsensor::kSensorTable[i].name);
         }
-        if (pos < GLOBAL_DEBUG_BUFFER_SIZE) snprintf(out + pos, GLOBAL_DEBUG_BUFFER_SIZE - pos, "; or all, or a mask)");
+        if (pos < GLOBAL_DEBUG_BUFFER_SIZE) snprintf(out + pos, GLOBAL_DEBUG_BUFFER_SIZE - pos, "; or all, or a mask.");
       }
     } else if (!espnowsensor::parseRequestMode(modeArg.c_str(), mode)) {
       snprintf(out, GLOBAL_DEBUG_BUFFER_SIZE,
-               "Error: '%s' is not a mode (subscribe|sub|0, unsubscribe|unsub|1, oneshot|once|2)", modeArg.c_str());
+               "Error: '%s' is not a mode. Use subscribe|sub|0, unsubscribe|unsub|1 or oneshot|once|2.", modeArg.c_str());
     } else if (!parseIntArg(a.arg(at + 2), intervalMs)) {
-      snprintf(out, GLOBAL_DEBUG_BUFFER_SIZE, "Error: intervalMs '%s' is not a number", a.arg(at + 2).c_str());
+      snprintf(out, GLOBAL_DEBUG_BUFFER_SIZE, "Error: intervalMs '%s' is not a whole number. Give it in digits, for example 1000.", a.arg(at + 2).c_str());
     } else {
-      snprintf(out, GLOBAL_DEBUG_BUFFER_SIZE, "Error: leaseMs '%s' is not a number", a.arg(at + 3).c_str());
+      snprintf(out, GLOBAL_DEBUG_BUFFER_SIZE, "Error: leaseMs '%s' is not a whole number. Give it in digits, for example 60000.", a.arg(at + 3).c_str());
     }
     return out;
   }
@@ -22024,6 +22438,17 @@ const char* cmd_espnow_bondmodeenabled(const String& a) {
 
 const char* cmd_espnow_bondpeermac(const String& a) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+  // A value has to be a MAC address, and it is stored in the display form the
+  // bond commands compare with. No value shows the current partner.
+  String value = a;
+  value.trim();
+  if (value.length() > 0) {
+    uint8_t mac[6];
+    if (!parseMacAddress(value, mac)) {
+      return "Error: Not a MAC address. Use AA:BB:CC:DD:EE:FF, or 'bondconnect <name>' to bond by name.";
+    }
+    return bondSettingCommand("bondPeerMac", macToDisplayStr(mac));
+  }
   return bondSettingCommand("bondPeerMac", a);
 }
 
@@ -22581,8 +23006,11 @@ bool storeMessageInPeerHistory(
 ) {
   if (!gEspNow || !peerMac) return false;
   if (!message) message = "";
-  // Reads at most one byte past a record, so an unterminated buffer is safe.
-  const size_t len = strnlen(message, espnowhist::kTextMax + 1);
+  // Stops at the terminator or one byte past the longest record, whichever
+  // comes first (a loop, not strnlen: callers pass buffers shorter than the
+  // bound, which GCC's stringop-overread check rejects for strnlen).
+  size_t len = 0;
+  while (len <= espnowhist::kTextMax && message[len] != '\0') ++len;
   bool unattributed = attribution == HistoryAttribution::Unattributed;
   if (attribution == HistoryAttribution::FromName) {
     char macText[18];

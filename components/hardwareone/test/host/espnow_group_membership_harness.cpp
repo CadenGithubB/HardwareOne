@@ -131,6 +131,7 @@ static uint32_t millis() { return gNowMs; }
 // ---- Registry state: the production device record in a small state double.
 struct EspNowState {
   bool initialized = true;
+  bool encryptionEnabled = true;  // the group commands carry a login: encrypted only
   EspNowDevice devices[16];
   int deviceCount = 0;
 };
@@ -211,9 +212,17 @@ static std::vector<SentFrame> gSent;
 enum : uint8_t { ESPNOW_V4_TYPE_CMD = 50 };
 enum : uint16_t { ESPNOW_V4_FLAG_ACK_REQ = 0x0001 };
 // INSERT_WIRE
+// A destination whose frame is refused (no room to park it), as the real send
+// says with its status text.
+static std::string gRefusedDst;
 static bool v4_send_encrypted_or_queue(const uint8_t dst[6], uint8_t type, uint16_t flags, uint32_t,
-                                       const uint8_t* plaintext, uint16_t plaintextLen, uint8_t, char*, size_t) {
+                                       const uint8_t* plaintext, uint16_t plaintextLen, uint8_t, char* status,
+                                       size_t statusLen) {
   outsideLock("a frame is sent");
+  if (!gRefusedDst.empty() && gRefusedDst == MAC_STR(dst)) {
+    if (status && statusLen) std::snprintf(status, statusLen, "pending queue full");
+    return false;
+  }
   gSent.push_back({MAC_STR(dst), std::string(reinterpret_cast<const char*>(plaintext), plaintextLen), type, flags});
   return true;
 }
@@ -226,7 +235,8 @@ static uint32_t generateMessageId() {
 static String redactCmdForAudit(const String& command) { return command; }
 
 // ---- Command plumbing.
-static char gDebugBuffer[1024];
+static constexpr size_t GLOBAL_DEBUG_BUFFER_SIZE = 4096;
+static char gDebugBuffer[GLOBAL_DEBUG_BUFFER_SIZE];
 static char* getDebugBuffer() { return gDebugBuffer; }
 static bool ensureDebugBuffer() { return true; }
 enum class AllocPref : uint8_t { PreferPsram = 0 };
@@ -309,6 +319,8 @@ static void resetAll() {
   for (auto& d : gState.devices) d = EspNowDevice{};
   gState.deviceCount = 0;
   gState.initialized = true;
+  gState.encryptionEnabled = true;
+  gRefusedDst.clear();
   for (auto& m : gMetaSlots) m.clear();
   gMeshPeerSlots = kMetaSlots;
   gSessions.clear();
@@ -1427,6 +1439,54 @@ static void testInboxAndRefresh() {
   CHECK(metadataRefreshTick(gNowMs) == 0 && gMetaRequests.size() == 3, "G18: asked while ESP-NOW is stopped");
 }
 
+// G19: the command reply contract on a group command. Without encryption
+// nothing is sent; a member whose frame is refused makes the reply an Error
+// that names it and why, with the members it went to still listed; with every
+// member refused the reply says none was sent. Pending peers are still counted.
+static void testGroupSendVerdicts() {
+  resetAll();
+  pair(1, "Fridge");
+  pair(2, "Oven");
+  pair(3, "Toaster");
+  announce(1, "Kitchen", "");
+  announce(2, "Kitchen", "");
+  announce(3, "Kitchen", "");
+  run(cmd_espnow_groupaccept, "Fridge");
+  run(cmd_espnow_groupaccept, "Oven");
+
+  gState.encryptionEnabled = false;
+  std::string reply = run(cmd_espnow_roomcmd, "Kitchen u p status");
+  CHECK(gSent.empty() && commandReplyIsFailure(reply.c_str()) && has(reply, "ESP-NOW encryption required"),
+        "G19: sent without encryption: '%s'", reply.c_str());
+  gState.encryptionEnabled = true;
+
+  gRefusedDst = macText(2);
+  reply = run(cmd_espnow_roomcmd, "Kitchen u p status");
+  CHECK(gSent.size() == 1 && sentTo(1) && commandReplyIsFailure(reply.c_str()) &&
+            has(reply, "Error: Command sent to 1 of 2 device(s) in room 'Kitchen'; not sent to Oven "
+                       "(pending queue full).") &&
+            has(reply, "  -> Fridge (") && has(reply, "Skipped 1 device(s) whose room is pending") &&
+            has(reply, "Toaster"),
+        "G19: one member refused: '%s'", reply.c_str());
+
+  run(cmd_espnow_groupdrop, "Fridge");
+  reply = run(cmd_espnow_roomcmd, "Kitchen u p status");
+  CHECK(gSent.empty() && commandReplyIsFailure(reply.c_str()) &&
+            has(reply, "Error: Command not sent to any of 1 device(s) in room 'Kitchen' (pending queue full).") &&
+            !has(reply, "->"),
+        "G19: every member refused: '%s'", reply.c_str());
+  gRefusedDst.clear();
+
+  reply = run(cmd_espnow_roomcmd, "Kitchen u p status");
+  CHECK(gSent.size() == 1 && sentTo(2) && !commandReplyIsFailure(reply.c_str()) &&
+            has(reply, "Sent 'status' to 1 device(s) in Kitchen"),
+        "G19: all members sent: '%s'", reply.c_str());
+  reply = run(cmd_espnow_roomcmd, "Garage u p status");
+  CHECK(gSent.empty() && commandReplyIsFailure(reply.c_str()) &&
+            has(reply, "Error: No devices found in room 'Garage'. List rooms and members with 'espnowgroups'."),
+        "G19: an empty room: '%s'", reply.c_str());
+}
+
 int main() {
   testNewClaimNotTargeted();
   testAcceptedTargeted();
@@ -1446,6 +1506,7 @@ int main() {
   testFullTableJson();
   testSharedNames();
   testInboxAndRefresh();
+  testGroupSendVerdicts();
   std::printf("espnow_group_membership: %d checks, %d failed\n", gChecks, gFailures);
   return gFailures ? 1 : 0;
 }

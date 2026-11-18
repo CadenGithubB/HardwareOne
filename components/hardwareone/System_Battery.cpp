@@ -439,14 +439,17 @@ void buildBatteryJson(JsonDocument& doc) {
 }
 
 const char* cmd_battery_status(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
   if (argWantsJson(argsInput)) {
     PSRAM_JSON_DOC(doc);
     buildBatteryJson(doc);
     static char* jbuf = nullptr;
     constexpr size_t size = 1536;
     if (!jbuf) jbuf = (char*)ps_alloc(size, AllocPref::PreferPsram, "battery.json");
-    if (!jbuf) return "{\"error\":\"oom\"}";
-    if (measureJson(doc) >= size) return "{\"error\":\"battery_json_too_large\"}";
+    if (!jbuf) return kCommandReplyOutOfMemory;
+    if (measureJson(doc) >= size) {
+      return "Error: Battery status does not fit the reply buffer. Report this firmware build.";
+    }
     serializeJson(doc, jbuf, size);
     return jbuf;
   }
@@ -468,22 +471,25 @@ const char* cmd_battery_status(const String& argsInput) {
 }
 
 const char* cmd_battery_calibrate(const String&) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
   BatteryGuard guard;
-  if (!guard.held || !sBackendInitialized) return "Battery monitor is not initialized.";
+  if (!guard.held || !sBackendInitialized) {
+    return "Error: Battery monitor is not initialized. Restart the device.";
+  }
 #if ENABLE_BATTERY_MONITOR && BATTERY_BACKEND_ADC
   const esp_err_t err = adcBackendInit();
   updateBatteryLocked();
   if (err != ESP_OK || !storedSnapshot().voltageValid)
-    return "Battery ADC calibration/read failed; telemetry is unavailable. See batterystatus json.";
+    return "Error: Battery ADC calibration or read failed. Check the divider wiring, then run batterystatus json.";
   return "Battery ADC calibration reloaded and reading refreshed. Divider accuracy still requires comparison with a meter.";
 #elif ENABLE_BATTERY_MONITOR && BATTERY_BACKEND_FUEL_GAUGE
   sFuelGaugePresent = false;
   updateBatteryLocked();
   return storedSnapshot().voltageValid
     ? "Battery: MAX17048 re-probed; readings refreshed."
-    : "Battery: MAX17048 unavailable or read failed.";
+    : "Error: MAX17048 did not answer. Check the gauge wiring and run batterycalibrate again.";
 #else
-  return "Battery: no measurement hardware enabled; calibration unavailable.";
+  return "Error: This build has no battery measurement hardware. Nothing to calibrate.";
 #endif
 }
 
@@ -617,14 +623,15 @@ void batteryLogEvent(const char* event) {
 
 // CLI: batterylog [status|on|off|interval <s>|tail|clear]
 const char* cmd_batterylog(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   String a = argsInput; a.trim();
   // CLI handler: act as the invoking user (per-task identity) so battery-log
   // file reads/clears are permission-checked against the caller, not system.
   const AuthContext& ctx = currentAuthContext();
 
-  if (a.equalsIgnoreCase("on"))  { setSetting(gSettings.batteryLogEnabled, true);  return "Battery log: ON"; }
-  if (a.equalsIgnoreCase("off")) { setSetting(gSettings.batteryLogEnabled, false); return "Battery log: OFF"; }
+  if (argIsOn(a))  { setSetting(gSettings.batteryLogEnabled, true);  return "Battery log: ON"; }
+  if (argIsOff(a)) { setSetting(gSettings.batteryLogEnabled, false); return "Battery log: OFF"; }
 
   if (a.startsWith("interval")) {
     String v = a.substring(8); v.trim();
@@ -661,9 +668,20 @@ const char* cmd_batterylog(const String& argsInput) {
   }
 
   if (a.equalsIgnoreCase("tail")) {
+    // A refused read and a failed open are not an empty log.
+    if (!canRead(String(kBatteryLogPath), ctx)) {
+      return "Error: Battery log not shown: permission denied. Sign in as a user who may read /battery.csv.";
+    }
     fsLock("batlog.tail");
+    if (!VFS::existsGuarded(String(kBatteryLogPath), ctx)) {
+      fsUnlock();
+      return "Battery log: empty (no file yet).";
+    }
     File f = VFS::openGuarded(String(kBatteryLogPath), "r", ctx, false);
-    if (!f) { fsUnlock(); return "Battery log: empty (no file yet)."; }
+    if (!f) {
+      fsUnlock();
+      return "Error: Battery log could not be opened. Check the filesystem with fsusage and retry.";
+    }
     const size_t sz = f.size();
     // Print roughly the last ~2KB; drop the first (partial) line when seeking.
     bool dropPartial = false;
@@ -681,7 +699,13 @@ const char* cmd_batterylog(const String& argsInput) {
     return shown ? "[Battery] log tail shown" : "Battery log: empty.";
   }
 
-  // Default / "status": summarize state + current reading.
+  // Only the bare command and "status" are the status query; any other word
+  // is refused instead of answered with an unchanged summary.
+  if (a.length() && !a.equalsIgnoreCase("status")) {
+    return "Usage: batterylog [status|on|off|interval <s>|tail|clear]";
+  }
+
+  // Summarize state + current reading.
   size_t sz = 0;
   fsLock("batlog.stat");
   File f = VFS::openGuarded(String(kBatteryLogPath), "r", ctx, false);

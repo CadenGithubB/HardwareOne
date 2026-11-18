@@ -65,6 +65,8 @@ int main() {
   assert(!resolve(kRight, nullptr, kSavedRight, "00:00:00:00:00:00").ok);
   assert(!resolve(kRight, nullptr, kSavedRight, "02:11:22:33:44").ok);
   assert(!resolve(kRight, nullptr, kSavedRight, "02:11:22:33:44:zz").ok);
+  assert(!resolve(kRight, nullptr, kSavedRight, "02:11:22:33:44:02:99").ok);
+  assert(!resolve(kRight, nullptr, kSavedRight, "02:11:22:33:44:02xx").ok);
   // A partly parsed address is never sent for the temple that is down.
   assert(!resolve(nullptr, kLeft, "02:11:22:33:44:zz", kSavedLeft).ok);
   assert(!resolve(nullptr, nullptr, "", "").ok);

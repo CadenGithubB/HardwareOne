@@ -162,6 +162,10 @@ bool peerIdentityWantsEvent(const uint8_t mac[6], uint32_t category);
 // not load); false for a peer with neither.
 bool peerIdentityForget(const uint8_t mac[6]);
 
+// True when an identity.json is stored for the peer. After peerIdentityForget
+// it says the file would not go away: the peer loads again at the next start.
+bool peerIdentityFileStored(const uint8_t mac[6]);
+
 // What peerFilesRemove took away.
 struct PeerFilesRemoved {
   uint16_t files;       // files removed from the peer's folder

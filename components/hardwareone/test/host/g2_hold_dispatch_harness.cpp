@@ -1016,8 +1016,8 @@ static void test_sim() {
   CHECK(lastEventIs(SYSEVT_G2_LONG_RELEASE, "ring", "1500ms"),
         "sim release pairs with the sim press");
   CHECK(std::string(g2HoldSim(String("abort"), 0)) ==
-            "G2 hold sim abort: no press was open",
-        "sim abort with nothing open says so");
+            "Error: No sim press is open. Start one with 'g2hold sim press'.",
+        "sim abort with nothing open is refused with the next step");
   gNowMs += 1000;   // leave the event rate window of the previous hold
   (void)g2HoldSim(String("press"), 2);
   const std::string aborted = g2HoldSim(String("abort"), 0);

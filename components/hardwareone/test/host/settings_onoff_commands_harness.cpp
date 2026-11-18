@@ -51,10 +51,17 @@ static void finishSettingChange(const void* field, const SettingEntry*) {
 }
 static bool ensureDebugBuffer() { return bufferAvailable; }
 static char* getDebugBuffer() { return debugBuffer; }
+static const char* stopReply;  // what closeespnow answers
 [[maybe_unused]] static String executeCommandThroughRegistry(const char* line) {
   executed.emplace_back(line);
-  return String("OK");
+  return String(stopReply);
 }
+// ESP-NOW state before closeespnow runs (System_ESPNow.cpp).
+static bool espNowRunning;
+[[maybe_unused]] static bool isEspNowInitialized() { return espNowRunning; }
+// An earlier stop that did not finish: no longer initialized, not stopped yet.
+static bool espNowStopPending;
+[[maybe_unused]] static bool espnowShutdownPending() { return espNowStopPending; }
 static void broadcastPrintf(const char* format, ...) {
   char line[256];
   va_list args; va_start(args, format);
@@ -127,6 +134,9 @@ static void reset(const Command& command, bool initial, const char* category,
   for (size_t i = 0; i < std::size(commands); ++i) gSettings.*commands[i].field = (i % 2) != 0;
   gSettings.*command.field = initial;
   gCliValidateOnly = false;
+  espNowRunning = false;
+  espNowStopPending = false;
+  stopReply = "OK";
   bufferAvailable = true;
   persistCalls = notifyCalls = 0;
   notifiedField = nullptr;
@@ -234,11 +244,48 @@ static void noReplyBuffer() {
   }
 }
 
+static void espNowStopFailed() {
+  // espnowenabled off stores the setting either way. A running ESP-NOW, or
+  // one with an earlier stop still pending, whose stop failed is answered with
+  // an error that carries the stop's reason; an error from closeespnow with
+  // nothing running is a normal save.
+  const Command& command = commands[0];
+  struct Case { bool running; bool pending; const char* stop; bool fails; };
+  const Case stops[] = {
+    {true, false, "ESP-NOW deinitialized successfully", false},
+    {true, false, "Error: ESP-NOW shutdown did not finish: the TX dispatcher did not stop. Run 'closeespnow' again.", true},
+    {false, true, "ESP-NOW deinitialized successfully", false},
+    {false, true, "Error: ESP-NOW shutdown did not finish: the TX dispatcher did not stop. Run 'closeespnow' again.", true},
+    {false, false, "Error: ESP-NOW is not initialized", false},
+  };
+  for (const Case& stop : stops) {
+    reset(command, true, "stop outcome", stop.stop);
+    espNowRunning = stop.running;
+    espNowStopPending = stop.pending;
+    stopReply = stop.stop;
+    const std::string reply = command.handler("off");
+    check(!gSettings.espnowEnabled && persistCalls == 1, "the setting is stored as off");
+    if (!ENABLE_ESPNOW) {
+      check(executed.empty() && reply == command.setOff, "without ESP-NOW compiled there is nothing to stop");
+      continue;
+    }
+    check(executed == std::vector<std::string>{"closeespnow"}, "closeespnow runs");
+    if (stop.fails) {
+      check(reply == "Error: espnowenabled saved as 0, but ESP-NOW did not stop. ESP-NOW shutdown did not "
+                     "finish: the TX dispatcher did not stop. Run 'closeespnow' again.",
+            "a failed stop is not reported as stopped");
+    } else {
+      check(reply == command.setOff, "the reply for a stop that worked or had nothing to do changed");
+    }
+  }
+}
+
 int main() {
   static_assert(std::size(commands) == 5, "the five commands that had their own parser");
   acceptedWords();
   refusals();
   noReplyBuffer();
+  espNowStopFailed();
   std::printf("settings on/off commands (ESP-NOW %s): %d cases, %d checks, %d failures\n",
               ENABLE_ESPNOW ? "compiled" : "not compiled", cases, checks, failures);
   return failures ? 1 : 0;

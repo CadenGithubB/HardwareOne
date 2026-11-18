@@ -196,7 +196,7 @@ static void systemEventPost(int, const char*, const char*) { ++events; }
 // upload state machine. Source guards ensure otawrite performs this allocation
 // before upload mutations and passes response_SIZE at all five callsites.
 static const char* invokeBleReply(bool success, bool final, const char* error = nullptr) {
-  PSRAM_STATIC_BUF(response, 320);
+  PSRAM_STATIC_BUF(response, 512);
   return bleUploadJson(response, response_SIZE, success, final, error);
 }
 static JsonDocument decoded(const char* text) {
@@ -267,7 +267,7 @@ static void testBleReply() {
         "BLE reply macro fails cleanly on first allocation");
   check(jsonAllocator.calls == jsonCalls, "missing BLE buffer prevents serializer work");
   const char* reply = invokeBleReply(true, false);
-  expectCapacity(reply, 320);
+  expectCapacity(reply, 512);
   auto doc = decoded(reply);
   check(doc["success"] == true && doc["size"] == 12 && doc["chunkMax"] == 477,
         "BLE reply contents and chunk limit remain unchanged");
@@ -278,7 +278,14 @@ static void testBleReply() {
   auto changed = decoded(next);
   check(changed["size"] == 32 && changed["final"] == true && changed["error"] == "explicit test error",
         "BLE response rewrites current fields without pointer-size truncation");
-  expectCapacity(next, 320);
+  expectCapacity(next, 512);
+  // A reply that does not fit the caller's buffer is refused whole: the
+  // serializer leaves a full buffer without a terminator.
+  char small[24];
+  std::memset(small, '#', sizeof(small));
+  check(std::string(bleUploadJson(small, sizeof(small), true, false)) ==
+        "Error: OTA upload reply does not fit. Run otawrite status again.",
+        "a BLE reply that does not fit is refused whole");
   jsonAllocator.failNext = true;
   check(std::string(invokeBleReply(true, true)) ==
         "Error: OTA response allocation failed; upload state may have changed",

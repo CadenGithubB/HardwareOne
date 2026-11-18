@@ -170,7 +170,8 @@ def check_sources(component: Path) -> None:
     require("ESPNOW_V4_TYPE_SENSOR_STATUS" in status_tx and "espnowtx::sendAead" in status_tx,
             "the partner's forwarded status is a 151 session unicast")
     sensors = strip_comments((component / "System_ESPNow_Sensors.cpp").read_text())
-    start_at = sensors.index("void startSensorDataStreaming(RemoteSensorType sensorType) {")
+    # The start with its result (main 2026-11-18); startSensorDataStreaming calls it.
+    start_at = sensors.index("bool tryStartSensorDataStreaming(RemoteSensorType sensorType) {")
     stop_at = sensors.index("void stopSensorDataStreaming(RemoteSensorType sensorType) {")
     start_src = sensors[start_at:stop_at]
     stop_src = sensors[stop_at:sensors.index("bool isSensorDataStreamingEnabled(RemoteSensorType sensorType)")]

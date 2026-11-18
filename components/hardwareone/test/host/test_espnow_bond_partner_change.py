@@ -402,7 +402,8 @@ def build_and_run(a, harness, have, read, name):
     with tempfile.TemporaryDirectory(prefix=f'hw1-{name}-') as tmp:
         unit, exe = Path(tmp) / f'{name}.cpp', Path(tmp) / name
         unit.write_text(harness)
-        shutil.copy(a.component / 'System_MacText.h', Path(tmp) / 'System_MacText.h')
+        for name in ('System_MacText.h', 'System_CommandReply.h'):
+            shutil.copy(a.component / name, Path(tmp) / name)
         if have['AGREE']:
             for header in AGREE_HEADERS:
                 (Path(tmp) / header).write_text(read(header))

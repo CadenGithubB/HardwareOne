@@ -196,10 +196,12 @@ String ImageManager::generateFilename() {
   return String(filename);
 }
 
-String ImageManager::captureAndSave(ImageStorageLocation location) {
+String ImageManager::captureAndSave(ImageStorageLocation location, ImageSaveReport* report) {
+  if (report) *report = ImageSaveReport();
 #if ENABLE_CAMERA_SENSOR
   if (!gCameraRunning) {
     ERROR_CAMERAF("[ImageManager] Camera not enabled");
+    if (report) report->capture = ImageSaveFailure::CameraOff;
     return "";
   }
   
@@ -207,15 +209,17 @@ String ImageManager::captureAndSave(ImageStorageLocation location) {
   uint8_t* data = captureFrame(&len);
   if (!data || len == 0) {
     ERROR_CAMERAF("[ImageManager] Failed to capture frame");
+    if (report) report->capture = ImageSaveFailure::NoFrame;
     return "";
   }
   
-  String result = saveImage(data, len, location);
+  String result = saveImage(data, len, location, report);
   free(data);
   
   return result;
 #else
   ERROR_CAMERAF("[ImageManager] Camera not compiled in");
+  if (report) report->capture = ImageSaveFailure::NoCamera;
   return "";
 #endif
 }
@@ -223,32 +227,44 @@ String ImageManager::captureAndSave(ImageStorageLocation location) {
 // Minimum free space required before saving (100KB safety margin)
 #define MIN_FREE_SPACE_BYTES (100 * 1024)
 
-String ImageManager::saveImage(const uint8_t* data, size_t len, ImageStorageLocation location) {
-  if (!data || len == 0 || len > SIZE_MAX - MIN_FREE_SPACE_BYTES) return "";
+String ImageManager::saveImage(const uint8_t* data, size_t len, ImageStorageLocation location,
+                               ImageSaveReport* report) {
+  ImageSaveReport unread;
+  ImageSaveReport& outcome = report ? *report : unread;
+  outcome = ImageSaveReport();
+  if (!data || len == 0 || len > SIZE_MAX - MIN_FREE_SPACE_BYTES) {
+    outcome.capture = ImageSaveFailure::NoFrame;
+    return "";
+  }
 
   const size_t requiredSpace = len + MIN_FREE_SPACE_BYTES;
   const String filename = generateFilename();
   auto saveTo = [&](ImageStorageLocation target) -> String {
     const bool isSd = target == IMAGE_STORAGE_SD;
     const char* storageName = isSd ? "SD" : "LittleFS";
+    // Notes why this tier got no copy.
+    auto refused = [&](ImageSaveFailure why) -> String {
+      (isSd ? outcome.sd : outcome.internal) = why;
+      return "";
+    };
     if (!tierAvailable(isSd)) {
       ERROR_STORAGEF("[ImageManager] %s not available", storageName);
-      return "";
+      return refused(ImageSaveFailure::TierUnavailable);
     }
 
     String path = getCaptureFolder(target);
-    if (!path.concat("/") || !path.concat(filename)) return "";
+    if (!path.concat("/") || !path.concat(filename)) return refused(ImageSaveFailure::WriteFailed);
     String normalizedPath;
     const VFS::StorageType storage = isSd ? VFS::SDCARD : VFS::INTERNAL;
     if (!normalizeFsPath(path, normalizedPath) || VFS::getStorageType(normalizedPath) != storage) {
       ERROR_STORAGEF("[ImageManager] Invalid capture path for %s: %s (cameraCaptureFolder=\"%s\" must be a "
                      "folder inside the tier cameraStorageLocation selects)",
                      storageName, path.c_str(), gSettings.cameraCaptureFolder.c_str());
-      return "";
+      return refused(ImageSaveFailure::FolderOutsideTier);
     }
     path = normalizedPath;
     String temporary = path;
-    if (temporary.length() != path.length() || !temporary.concat(".tmp")) return "";
+    if (temporary.length() != path.length() || !temporary.concat(".tmp")) return refused(ImageSaveFailure::WriteFailed);
     // trusted: the file and its ".tmp" sibling sit in this tier's capture folder.
     AuthContext sys = VFS::systemAuth(getCaptureFolder(target).c_str(),
                                       isSd ? "imgmgr.save_sd" : "imgmgr.save_image_lfs");
@@ -256,21 +272,21 @@ String ImageManager::saveImage(const uint8_t* data, size_t len, ImageStorageLoca
     uint64_t total = 0, used = 0, free = 0;
     if (!VFS::getStats(storage, total, used, free)) {
       ERROR_STORAGEF("[ImageManager] %s storage statistics unavailable", storageName);
-      return "";
+      return refused(ImageSaveFailure::WriteFailed);
     }
     if (free < requiredSpace) {
       ERROR_STORAGEF("[ImageManager] %s low on space: %llu free, need %u",
                      storageName, (unsigned long long)free, (unsigned)requiredSpace);
-      return "";
+      return refused(ImageSaveFailure::LowSpace);
     }
-    if (!ensureCaptureFolder(target)) return "";
+    if (!ensureCaptureFolder(target)) return refused(ImageSaveFailure::WriteFailed);
     if (VFS::existsGuarded(temporary, sys)) {
       ERROR_STORAGEF("[ImageManager] Temporary image already exists: %s", temporary.c_str());
-      return "";
+      return refused(ImageSaveFailure::WriteFailed);
     }
 
     File f = VFS::openGuarded(temporary, "w", sys, /*create=*/true);
-    if (!f || f.isDirectory()) return "";
+    if (!f || f.isDirectory()) return refused(ImageSaveFailure::WriteFailed);
     const size_t written = f.write(data, len);
     f.flush();
     // Match checked text saves: Arduino exposes no flush/close result, so
@@ -292,7 +308,7 @@ String ImageManager::saveImage(const uint8_t* data, size_t len, ImageStorageLoca
       if (!VFS::removeGuarded(temporary, sys)) {
         ERROR_STORAGEF("[ImageManager] Failed to remove temporary image: %s", temporary.c_str());
       }
-      return "";
+      return refused(ImageSaveFailure::WriteFailed);
     }
     INFO_STORAGEF("[ImageManager] Saved to %s: %s (%u bytes)", storageName, path.c_str(), (unsigned)len);
     return path;
@@ -442,14 +458,27 @@ uint8_t* ImageManager::getImage(const String& path, size_t* outLen) {
   return buf;
 }
 
-bool ImageManager::deleteImage(const String& path, const AuthContext& ctx) {
+bool ImageManager::deleteImage(const String& path, const AuthContext& ctx, const char** why) {
+  auto refused = [&](const char* reply) {
+    if (why) *why = reply;
+    return false;
+  };
   String normalizedPath;
   bool isSd = false;
-  if (!managedImagePath(path, normalizedPath, isSd)) return false;
-  if (!tierAvailable(isSd)) return false;
+  if (!managedImagePath(path, normalizedPath, isSd)) {
+    // images lists bare file names under a Folder line; the path is both.
+    return refused("Error: Not a photo in the capture folder. Give the full path: the folder that images "
+                   "(or images sd) shows, then a file name from its list.");
+  }
+  if (!tierAvailable(isSd)) {
+    return refused(isSd ? "Error: SD card not available. Run sdmount and retry."
+                        : "Error: Internal storage not available. Check it with fsusage.");
+  }
 
   FsLockGuard guard("ImageManager.deleteImage");
-  return VFS::removeGuarded(normalizedPath, ctx);
+  if (VFS::removeGuarded(normalizedPath, ctx)) return true;
+  return refused("Error: Photo not found or delete not permitted. Check the full path: the folder that images "
+                 "(or images sd) shows, then a file name from its list.");
 }
 
 bool ImageManager::deleteOldestImages(int count, ImageStorageLocation location) {
@@ -534,15 +563,21 @@ const char* cmd_capture(const String& argsInput) {
     }
   }
 
-  String result = gImageManager.captureAndSave(location);
+  ImageSaveReport report;
+  String result = gImageManager.captureAndSave(location, &report);
   
   if (result.length() > 0) {
-    EXT_RAM_BSS_ATTR static char buf[128];
-    snprintf(buf, sizeof(buf), "Captured: %s", result.c_str());
+    EXT_RAM_BSS_ATTR static char buf[192];
+    const char* tier = nullptr;
+    const char* reason = nullptr;
+    if (report.missingCopy(tier, reason)) {
+      snprintf(buf, sizeof(buf), "Captured: %s (%s copy not saved: %s)", result.c_str(), tier, reason);
+    } else {
+      snprintf(buf, sizeof(buf), "Captured: %s", result.c_str());
+    }
     return buf;
   }
-  cliHint("if the camera is not started, run 'opencamera' first; for storage/space errors check 'sdinfo'");
-  return "Error: Capture failed";
+  return report.failureReply();
 }
 
 const char* cmd_images(const String& argsInput) {
@@ -581,8 +616,8 @@ const char* cmd_images(const String& argsInput) {
     doc["available"] = stats.available;
     JsonArray arr;
     if (stats.available) {
-      doc["usedBytes"]  = (unsigned long)stats.usedBytes;
-      doc["totalBytes"] = (unsigned long)stats.totalBytes;
+      doc["usedBytes"]  = (unsigned long long)stats.usedBytes;
+      doc["totalBytes"] = (unsigned long long)stats.totalBytes;
       doc["imageCount"] = stats.imageCount;
       arr = doc["images"].to<JsonArray>();
       for (const auto& img : gImageManager.listImages(location)) {
@@ -594,7 +629,7 @@ const char* cmd_images(const String& argsInput) {
     // More photos than the buffer holds: the last-listed entries are dropped
     // and the reply says "truncated"; imageCount still gives the total.
     const char* reply = serializeJsonListToDebugBuffer(doc, arr);
-    return reply ? reply : "{\"schema\":1,\"error\":\"images_json_too_large\"}";
+    return reply ? reply : kCommandReplyOutOfMemory;
   }
 
   if (!stats.available) {
@@ -603,9 +638,11 @@ const char* cmd_images(const String& argsInput) {
   }
   
   pos += snprintf(buf + pos, 1024 - pos, "=== Images on %s ===\n", locName);
-  pos += snprintf(buf + pos, 1024 - pos, "Storage: %lu/%lu KB (%d images)\n\n",
-                  (unsigned long)(stats.usedBytes / 1024),
-                  (unsigned long)(stats.totalBytes / 1024),
+  // The list below holds bare file names; imagedelete and imagesend take this folder plus a name.
+  pos += snprintf(buf + pos, 1024 - pos, "Folder: %s\n", gImageManager.getCaptureFolder(location).c_str());
+  pos += snprintf(buf + pos, 1024 - pos, "Storage: %llu/%llu KB (%d images)\n\n",
+                  (unsigned long long)(stats.usedBytes / 1024),
+                  (unsigned long long)(stats.totalBytes / 1024),
                   stats.imageCount);
   
   std::vector<ImageInfo> images = gImageManager.listImages(location);
@@ -622,7 +659,8 @@ const char* cmd_images(const String& argsInput) {
       pos += snprintf(buf + pos, 1024 - pos, "  %s (%lu bytes)\n",
                       img.filename.c_str(), (unsigned long)img.size);
       if (pos >= 900) {
-        pos += snprintf(buf + pos, 1024 - pos, "  ... (%d more)\n", (int)(images.size() - (&img - &images[0])));
+        const int left = (int)(images.size() - (&img - &images[0])) - 1;
+        if (left > 0) pos += snprintf(buf + pos, 1024 - pos, "  ... (%d more)\n", left);
         break;
       }
     }
@@ -640,14 +678,16 @@ const char* cmd_imagedelete(const String& argsInput) {
   if (qerr) return qerr;
   if (a.has(1)) return "Error: unexpected argument — usage: imagedelete \"<path>\"";
 
-  if (gImageManager.deleteImage(path, currentAuthContext())) {
+  const char* why = nullptr;
+  if (gImageManager.deleteImage(path, currentAuthContext(), &why)) {
     // A user delete: status polls show the internal capacity reading at any
     // age, so mark it stale for one fresh re-read. Not in deleteImage itself,
     // which retention also calls on every capture that rotates old photos.
     if (VFS::getStorageType(path) != VFS::SDCARD) VFS::invalidateStatsSnapshot(VFS::INTERNAL);
     return "Image deleted";
   }
-  return "Error: Failed to delete image";
+  return why ? why : "Error: Photo not deleted. Check the full path: the folder that images (or images sd) shows, "
+                     "then a file name from its list.";
 }
 
 const char* cmd_imagesend(const String& argsInput) {
@@ -664,14 +704,25 @@ const char* cmd_imagesend(const String& argsInput) {
   String path;
   const char* qerr = requireQuotedToken(a, 1, path);
   if (qerr) return qerr;
+  if (a.has(2)) return "Error: unexpected argument — usage: imagesend <device> \"<path>\"";
 
-  // Use ESP-NOW file send (stubs return false when ESP-NOW disabled)
+#if ENABLE_ESPNOW
+  // Without a running ESP-NOW no device resolves.
+  if (!gEspNow || !gEspNow->initialized) return "Error: ESP-NOW not initialized. Run 'openespnow' first.";
+#else
+  // No openespnow in this build either, so the reply does not name it.
+  return "Error: imagesend needs ESP-NOW, which is not in this firmware build. "
+         "Build the firmware with ESP-NOW to send photos to another device.";
+#endif
+
   uint8_t mac[6];
   if (!resolveDeviceNameOrMac(device, mac)) {
-    EXT_RAM_BSS_ATTR static char errBuf[128];
-    snprintf(errBuf, sizeof(errBuf), "Error: Device '%s' not found", device.c_str());
+    EXT_RAM_BSS_ATTR static char errBuf[160];
+    snprintf(errBuf, sizeof(errBuf), "Error: Device '%s' not found. Use 'espnowdevices' to see paired devices.",
+             device.c_str());
     return errBuf;
   }
+  if (!VFS::existsGuarded(path, currentAuthContext())) return kFileReplyMissingOrDenied;
   
   const FileSendResult result = sendFileToMacResult(mac, path);
   if (result == FileSendResult::Sent) {

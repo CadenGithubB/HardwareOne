@@ -156,6 +156,17 @@ int main() {
   CHECK(parseSystemLogFlags(String("15"), parsed) && parsed == DebugFlagMask(0x15));
   CHECK(parseSystemLogFlags(String("0x1:0x2"), parsed) && parsed == DebugFlagMask(2, 1, 0, 0));
   CHECK(!parseSystemLogFlags(String(""), parsed) && !parseSystemLogFlags(String("0x"), parsed));
+  CHECK(parseSystemLogFlags(String("1:2:3:4"), parsed) && parsed == DebugFlagMask(4, 3, 2, 1));
+  CHECK(parseSystemLogFlags(String(" 0x15 "), parsed) && parsed == DebugFlagMask(0x15));
+  // Text that is not a hex mask is refused and leaves the output alone: a
+  // character that is not a hex digit, an empty word, a fifth word, a colon
+  // word over 16 digits, a plain mask over 64 digits.
+  for (const char* junk : {"zz", "15zz", "0x15:", ":", ":15", "1::2", "1:2:3:4:5", "0x0x15", "-1", "1 5",
+                           "11111111111111111:0",
+                           "11111111111111111111111111111111111111111111111111111111111111111"}) {
+    parsed = DebugFlagMask(0xDEAD);
+    CHECK(!parseSystemLogFlags(String(junk), parsed) && parsed == DebugFlagMask(0xDEAD));
+  }
 
   // Persisted restore: empty or prefix-only text leaves the live flags alone.
   const DebugFlagMask live(0x77, 0, 0, 1);
@@ -166,11 +177,11 @@ int main() {
   }
   gSettings.systemLogFlags = "0x0000000000000000:0000000000000000:0000000000000001:0000000000000000";
   CHECK(systemLogApplyPersistedFlags() && gDebugFlags == DEBUG_BIT(64));
-  // Current behavior, pinned so a change is deliberate: non-hex text parses as
-  // zero (strtoull) and clears the live flags.
+  // Saved text that is not a hex mask is refused too; it does not clear the
+  // live flags.
   gDebugFlags = live;
   gSettings.systemLogFlags = "zz";
-  CHECK(systemLogApplyPersistedFlags() && gDebugFlags == DebugFlagMask(0));
+  CHECK(!systemLogApplyPersistedFlags() && gDebugFlags == live);
 
   // A persistent per-flag change follows into the saved mask, so the next
   // boot's autostart does not bring a cleared category back.

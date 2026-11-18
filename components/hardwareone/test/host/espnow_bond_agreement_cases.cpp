@@ -1004,13 +1004,14 @@ static void caseConnectAgainAsksAgain() {
   tick();
   CHECK(requestsTo(kPeerA) == 1, "... and the partner is asked when the session is there (%zu)", requestsTo(kPeerA));
 
-  // Agreed: connected is the truth, and nothing is asked.
+  // Agreed, with the session up: the bond runs (an Error under the command
+  // reply contract: starting what runs), and nothing is asked.
   rxRequest(kPeerA, BOND_ROLE_WORKER, BOND_REQUEST_FLAG_FRESH, 4);
   tick();
   const size_t agreedFrames = gAgreeFrames.size();
   reply = cmd_bond_connect(String(kMacA));
   advance(10000);
-  CHECK(std::strcmp(reply, "Already connected to this device in bond mode.") == 0 &&
+  CHECK(std::strcmp(reply, "Error: The bond with this device is already running. Refresh it with 'bondresync'.") == 0 &&
         requestsTo(kPeerA) == 1 && gAgreeFrames.size() == agreedFrames,
         "bondconnect to an agreed partner: %s", reply);
 }

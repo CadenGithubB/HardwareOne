@@ -96,7 +96,8 @@ def commands(command_header: str, command_source: str, user: str) -> str:
     pieces += [extract_block(command_source, marker) for marker in (
         "CommandArgs::CommandArgs(", "void CommandArgs::parse(", "const String& CommandArgs::arg(",
         "String CommandArgs::remaining(")]
-    for marker in ("const char* cmd_ban(const String& argsInput)",
+    for marker in ("static bool ipBanText(const String& typed, char* out, size_t outSize)",
+                   "const char* cmd_ban(const String& argsInput)",
                    "const char* cmd_unban(const String& argsInput)"):
         require(user.count(marker) == 1, f"System_User.cpp: one {marker}")
         pieces.append(extract_block(user, marker))

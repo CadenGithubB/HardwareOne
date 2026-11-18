@@ -24,12 +24,18 @@ SCENARIOS = (
     "normal", "rollover", "cutoff", "cutoff-odd", "wide", "cutoff-wrap",
     "empty-before", "empty-after", "zero-time", "no-visible", "zero-tasks",
     "fail-first", "fail-second", "validate", "states", "stats-null",
-    "stats-cache", "stats-empty", "stats-fail", "stats-zero",
+    "stats-cache", "stats-empty", "stats-fail", "stats-zero", "stats-overflow",
 )
+# A saved older source cuts an oversized reply instead of refusing it; these
+# run against the current source only.
+CURRENT_ONLY = ("stats-overflow",)
 
 
 def generate(source: str) -> str:
     helpers = [extract_block(source, "const char* taskStateLabel(")]
+    # The serialize-or-refuse step of the json forms (a saved older source has none).
+    if "static const char* jsonDocReply(" in source:
+        helpers.append(extract_block(source, "static const char* jsonDocReply("))
     # The shared task-CPU sampler (System_TaskUtils) that perftop now reads.
     header = (COMPONENT / "System_TaskUtils.h").read_text()
     utils = (COMPONENT / "System_TaskUtils.cpp").read_text()
@@ -67,23 +73,24 @@ def main() -> None:
                        "-Wno-unused-function", "-DARDUINOJSON_ENABLE_ARDUINO_STRING=1",
                        "-DARDUINOJSON_ENABLE_ARDUINO_STREAM=0", "-DARDUINOJSON_ENABLE_ARDUINO_PRINT=0",
                        "-DARDUINOJSON_ENABLE_PROGMEM=0", "-I", str(HERE / "web_batch_stubs"),
-                       "-I", str(JSON_INCLUDE), str(unit), "-o", str(binary)]
+                       "-I", str(JSON_INCLUDE), "-I", str(COMPONENT), str(unit), "-o", str(binary)]
             if args.sanitize:
                 command[1:1] = ["-fsanitize=address,undefined", "-fno-sanitize-recover=all",
                                 "-fno-omit-frame-pointer", "-g"]
             subprocess.run(command, check=True, timeout=120)
             transcripts[label] = {}
             assertions = 0
-            for scenario in SCENARIOS:
+            ran = [scenario for scenario in SCENARIOS if label == "current" or scenario not in CURRENT_ONLY]
+            for scenario in ran:
                 result = subprocess.run([str(binary), scenario], capture_output=True, text=True, timeout=30)
                 require(result.returncode == 0, f"{label}/{scenario} failed:\n{result.stdout}\n{result.stderr}")
                 count = re.search(r"(?m)^checks=(\d+)$", result.stderr)
                 require(count is not None, f"{label}/{scenario}: missing completed assertion count")
                 assertions += int(count[1])
                 transcripts[label][scenario] = result.stdout
-            print(f"task reporting {label}: {len(SCENARIOS)} scenarios, {assertions} assertions passed", flush=True)
+            print(f"task reporting {label}: {len(ran)} scenarios, {assertions} assertions passed", flush=True)
         if args.baseline:
-            for scenario in SCENARIOS:
+            for scenario in transcripts["baseline"]:
                 require(transcripts["current"][scenario] == transcripts["baseline"][scenario],
                         f"changed command output for {scenario}:\ncurrent:\n{transcripts['current'][scenario]}"
                         f"\nbaseline:\n{transcripts['baseline'][scenario]}")

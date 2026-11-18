@@ -46,6 +46,7 @@
 #include "System_ESPNow_Sensors.h"
 #endif
 #include "System_WiFi.h"
+#include <esp_wifi.h>
 
 namespace {
 
@@ -88,6 +89,7 @@ bool sHardRebootAllowed = true;  // one companion reboot per power cycle
 struct RadioUsers {
   bool espnow = false;
   bool wifi = false;              // radio on for Wi-Fi (also true while ESP-NOW runs)
+  bool wifiJoined = false;        // associated to a network when the snapshot was taken
   bool bleServer = false;
   bool g2Client = false;          // the shared client stack is up (glasses, ring and phone open on it)
   bool radioPoweredOff = false;   // stopUsers ran `radiopower off`; `radiopower on` replays its snapshot
@@ -183,6 +185,7 @@ RadioUsers snapshotUsers() {
 #endif
 #if ENABLE_WIFI
   u.wifi = wifiRadioOn();
+  u.wifiJoined = WiFi.isConnected();
 #endif
 #if ENABLE_BLUETOOTH
   u.bleServer = isBleServerInitialized();
@@ -294,7 +297,9 @@ void stopUsers(RadioUsers& users) {
   // `radiopower off` stops ESP-NOW, the HTTP server and Wi-Fi in order and
   // keeps a snapshot of ESP-NOW and Wi-Fi, which `radiopower on` replays.
   if (users.wifi) {
-    cmd_radiopower("off");
+    users.wifiJoined = users.wifiJoined || WiFi.isConnected();
+    const char* reply = cmd_radiopower("off");
+    logSystemEvent("C6", "radio users: radiopower off -> %s", reply ? reply : "(null)");
     users.radioPoweredOff = true;
   }
 #endif
@@ -361,10 +366,27 @@ void httpRestoreTick(uint32_t now) {
 
 void restoreUsers(const RadioUsers& users) {
 #if ENABLE_WIFI
-  if (users.radioPoweredOff) cmd_radiopower("on");  // ESP-NOW first, then Wi-Fi, from its snapshot
+  if (users.radioPoweredOff) {  // ESP-NOW first, then Wi-Fi, from its snapshot
+    const char* reply = cmd_radiopower("on");
+    logSystemEvent("C6", "radio users: radiopower on -> %s", reply ? reply : "(null)");
+  }
 #endif
 #if ENABLE_ESPNOW
   if (users.espnow && !isEspNowInitialized()) cmd_espnow_init("");
+#endif
+#if ENABLE_WIFI
+  // After the companion resets, its Wi-Fi driver can come back started but
+  // not joined, and `radiopower on` then finds the radio already on and joins
+  // nothing (bench 2026-11-18, after c6update: no network until a reboot).
+  // Join again when the device was on a network before the reset. Ask the
+  // companion, not WiFi.isConnected(): the host-side connected flag survives
+  // the companion reset and still reads true here.
+  wifi_ap_record_t ap;
+  const bool joinedNow = esp_wifi_sta_get_ap_info(&ap) == ESP_OK;
+  if (users.wifiJoined && gSettings.wifiEnabled && !joinedNow) {
+    logSystemEvent("C6", "radio users: Wi-Fi not joined after the companion reset; joining again");
+    setupWifi();
+  }
 #endif
 #if ENABLE_BLUETOOTH
   if (users.bleServer) {
@@ -613,6 +635,11 @@ bool validateImage(File& file, size_t size, char* why, size_t whyCap) {
   return true;
 }
 
+// After activate: the companion reboots after about 2 s, starts in under 1 s
+// and confirms itself 4 s later (the bridge's SELF_CONFIRM_MS). 10 s covers it
+// with margin; the link is down for that time either way.
+constexpr uint32_t kUpdateRebootWaitMs = 10000;
+
 void updateProc(void* arg) {
   UpdateJob* job = static_cast<UpdateJob*>(arg);
   char why[128] = {};
@@ -633,6 +660,9 @@ void updateProc(void* arg) {
 #if ENABLE_WIFI
     stopBootWifiConnect();
 #endif
+    // The slot the companion runs now; after the update it must run the other one.
+    const RadioCompanionIdentity& before = radioHalIdentity();
+    const uint8_t slotBefore = before.infoKnown ? before.runningSlot : 0xff;
     RadioUsers users = snapshotUsers();
 #if ENABLE_BLUETOOTH
     shutDownBleForCompanionReset(users);  // the companion reboots into the new image
@@ -640,7 +670,25 @@ void updateProc(void* arg) {
 #if ENABLE_ESPNOW
     if (users.espnow) cmd_espnow_deinit("");
 #endif
-    // Closing BLE while Wi-Fi is off closes the transport too (Arduino deinits
+    // Power Wi-Fi (and the web server) down before the transfer, while the
+    // companion still answers, as c6restart does. Two orders failed on the
+    // bench (2026-11-18): stopping them after activate, when the companion had
+    // already rebooted itself, left the host's Wi-Fi state stale (the radio
+    // counted as on, re-joining failed with "failed to re-arm STA mode", no
+    // network until a reboot); stopping them between the transfer and
+    // activate could close the transport, and reopening it reset the
+    // companion and lost the activation. Wi-Fi is down for the transfer; it
+    // drops during the companion's reboot anyway.
+    {
+      RadioUsers rest = users;  // ESP-NOW and BLE are already down
+      rest.espnow = false;
+      rest.bleServer = false;
+      rest.g2Client = false;
+      stopUsers(rest);
+      users.radioPoweredOff = rest.radioPoweredOff;
+      users.http = rest.http;
+    }
+    // Closing the radio users can close the transport too (Arduino deinits
     // Hosted when nothing uses it); the transfer needs it up.
     esp_err_t err = radioHalTransportUp() ? ESP_OK : radioHalStartUpdateTransport();
     BROADCAST_PRINTF("[C6] Updating companion firmware from %s (%u bytes)", job->path.c_str(),
@@ -667,25 +715,32 @@ void updateProc(void* arg) {
     if (err == ESP_OK) err = radioHalUpdateEnd();
     if (err == ESP_OK) err = radioHalUpdateActivate();
     if (err != ESP_OK) {
-      if (!radioHalTransportUp()) radioHalStopTransport();
       snprintf(why, sizeof(why), "transfer failed after %u bytes: %s", static_cast<unsigned>(sent),
                esp_err_to_name(err));
+      if (!radioHalTransportUp()) {
+        // The link failed during the transfer (bench 2026-11-18: SDIO write
+        // timeouts at 10 %). Restart it: the companion resets onto its old
+        // image (the new one was never activated), and restoreUsers below
+        // powers Wi-Fi up again from the snapshot taken before the transfer.
+        radioHalMarkTransportLost();
+        radioHalStopTransport();
+        if (radioHalStartTransport() != ESP_OK) {
+          snprintf(why, sizeof(why), "transfer failed after %u bytes: %s; the companion did not come back",
+                   static_cast<unsigned>(sent), esp_err_to_name(err));
+        }
+      }
       withMonitor([&](CompanionMonitor& m) { m.onUpdateFinished(millis(), radioHalTransportUp()); });
       restoreUsers(users);  // after the state change: the radio gate reads it
     } else {
       // The companion reboots into the new image two seconds after activate.
-      // Tear the host side down as lost, then rebuild the link, which resets
-      // the companion once more and brings it up on the new image.
-      BROADCAST_PRINTF("[C6] Image accepted; restarting the companion");
-      vTaskDelay(pdMS_TO_TICKS(2500));
-      radioHalMarkTransportLost();
-      RadioUsers rest = users;  // ESP-NOW and BLE are already down
-      rest.espnow = false;
-      rest.bleServer = false;
-      rest.g2Client = false;
-      stopUsers(rest);
-      users.radioPoweredOff = rest.radioPoweredOff;
-      users.http = rest.http;
+      // Rebuilding the link resets it once more (Hosted resets the companion on
+      // every transport start), and a reset before the new image is confirmed
+      // makes the rollback bootloader return to the old image. The bridge
+      // therefore confirms its own image once it has run a few seconds after a
+      // pending boot (SELF_CONFIRM_MS in esp_now_hosted_slave.c); wait past that point first.
+      BROADCAST_PRINTF("[C6] Image accepted; waiting for the companion to start it");
+      vTaskDelay(pdMS_TO_TICKS(kUpdateRebootWaitMs));
+      radioHalMarkTransportLost();  // the radio users were stopped before activate
       radioHalStopTransport();
       ok = radioHalStartTransport() == ESP_OK;
       // State first, then the users: the radio gate must not refuse them.
@@ -693,7 +748,13 @@ void updateProc(void* arg) {
       if (ok) {
         applyPolicyFromSettings();
         const RadioCompanionIdentity& id = radioHalIdentity();
-        if (id.bridge == RadioBridgeState::Present || id.bridge == RadioBridgeState::PresentNoInfo) {
+        if (id.infoKnown && slotBefore != 0xff && id.runningSlot == slotBefore) {
+          // Same slot as before the transfer: the new image did not stay.
+          snprintf(why, sizeof(why),
+                   "the companion is back on its previous image (slot %u); the new one did not start or was not confirmed",
+                   static_cast<unsigned>(slotBefore));
+          ok = false;
+        } else if (id.bridge == RadioBridgeState::Present || id.bridge == RadioBridgeState::PresentNoInfo) {
           confirmPendingImage();
           systemEventPost(SYSEVT_COMPANION_UPDATED, id.build, "running");
           logSystemEvent("C6", "companion updated to %s (Hosted %" PRIu32 ".%" PRIu32 ".%" PRIu32 ")", id.build,
@@ -964,9 +1025,14 @@ const char* cmd_c6status(const String& argsInput) {
     JsonObject root = doc.to<JsonObject>();
     root["schema"] = 1;
     fillStatus(root, true);
+    // A document that lost fields, or one the buffer would cut, is not returned.
+    if (doc.overflowed()) return kCommandReplyOutOfMemory;
+    if (measureJson(doc) >= 2048) {
+      return "Error: Companion status too large for the reply. Run c6status without json.";
+    }
     static char* buf = nullptr;
     if (!buf) buf = static_cast<char*>(ps_alloc(2048, AllocPref::PreferPsram, "c6status.json"));
-    if (!buf) return "{\"error\":\"oom\"}";
+    if (!buf) return kCommandReplyOutOfMemory;
     serializeJson(doc, buf, 2048);
     return buf;
   }
@@ -1064,13 +1130,16 @@ const char* cmd_c6hold(const String& argsInput) {
   String arg = a.arg(0);
   arg.toLowerCase();
   const bool held = radioHalHeld();
-  bool wantHold;
-  if (arg == "on") wantHold = true;
-  else if (arg == "off") wantHold = false;
-  else if (arg.length() == 0) {
+  if (arg.length() == 0) {
     return held ? "C6 is held in reset (c6hold off to release)" : "C6 is running (c6hold on to hold it in reset)";
-  } else return "Usage: c6hold [on|off]";
-  if (wantHold == held) return wantHold ? "C6 already held" : "C6 already released";
+  }
+  const int want = parseBoolArg(arg);
+  if (want < 0) return kCommandReplyNotOnOff;
+  const bool wantHold = want == 1;
+  if (wantHold == held) {
+    return wantHold ? "Error: The C6 is already held in reset. Release it with 'c6hold off'."
+                    : "Error: The C6 is already running. Hold it in reset with 'c6hold on'.";
+  }
   if (monitorState() == CompanionState::Updating) return "Error: a companion update is in progress";
   if (wantHold) {
     if (!submitOp(Op::Hold, holdProc, nullptr)) return "Error: another companion operation is running";
@@ -1126,10 +1195,9 @@ const char* setBoolSetting(const String& argsInput, bool& field, const char* lab
     snprintf(getDebugBuffer(), 1024, "%s: %s", label, field ? "on" : "off");
     return getDebugBuffer();
   }
-  bool value;
-  if (argIsOn(arg)) value = true;
-  else if (argIsOff(arg)) value = false;
-  else return "Usage: [on|off]";
+  const int want = parseBoolArg(arg);
+  if (want < 0) return kCommandReplyNotOnOff;
+  const bool value = want == 1;
   setSetting(field, value);
   applyPolicyFromSettings();
   if (!ensureDebugBuffer()) return "OK";
@@ -1146,15 +1214,17 @@ const char* cmd_c6console(const String& argsInput) {
     return radioHalConsoleMirrorOn() ? "C6 console mirror: on (the companion's log appears as C6> lines)"
                                      : "C6 console mirror: off";
   }
-  if (arg != "on" && arg != "off") return "Usage: c6console [on|off]";
-  const esp_err_t err = radioHalConsoleMirror(arg == "on");
+  const int want = parseBoolArg(arg);
+  if (want < 0) return kCommandReplyNotOnOff;
+  const bool on = want == 1;
+  const esp_err_t err = radioHalConsoleMirror(on);
   if (err != ESP_OK) {
     if (!ensureDebugBuffer()) return "Error: console mirror failed";
     snprintf(getDebugBuffer(), 1024, "Error: console mirror failed: %s", esp_err_to_name(err));
     return getDebugBuffer();
   }
-  return arg == "on" ? "C6 console mirror on: the companion's own log appears as C6> lines"
-                     : "C6 console mirror off";
+  return on ? "C6 console mirror on: the companion's own log appears as C6> lines"
+            : "C6 console mirror off";
 }
 
 const char* cmd_c6autorecover(const String& argsInput) {

@@ -639,13 +639,18 @@ async function startLogging() {
     alert('Error: File path must start with / (e.g., /logging_captures/sensors.csv)');
     return;
   }
+  if (path.indexOf('"') >= 0) {
+    alert('Error: File path cannot contain a double quote.');
+    return;
+  }
 
   if (!await hwConfirm('Start logging to ' + path + ' every ' + interval + 'ms?')) {
     console.log('[LOGGING] Section 6c: Start cancelled by user');
     return;
   }
   
-  const cmd = 'sensorlog start ' + path + ' ' + interval;
+  // The path goes in double quotes so that one with a space stays one argument.
+  const cmd = 'sensorlog start "' + path + '" ' + interval;
   console.log('[LOGGING] Section 6d: Executing command:', cmd);
 
   hw.postFormText('/api/cli', { cmd: cmd })

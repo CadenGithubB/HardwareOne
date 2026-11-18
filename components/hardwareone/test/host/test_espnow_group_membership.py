@@ -91,6 +91,12 @@ FUNCTIONS = (
 )
 LISTING_REGION = ('// ---- What the listings say about room and tag membership -----',
                   '// Shared by the espnowdevices json CLI branch and the web metadata handler so')
+# The bounded appender the text listings write with: its declaration with the
+# row reserve, and its definition (with the topology results).
+APPENDER_REGION = ('// Bounded reply appender, defined with the topology results below',
+                   'const char* cmd_espnow_devices(')
+APPENDER_DEFINITION = ('static bool appendTopologyOutput(char*& cursor, size_t& remaining,\n'
+                       '                                 const char* format, ...) {')
 LISTING_FUNCTIONS = ('void espnowSerializeMeshPeerMeta(JsonObject o, const MeshPeerMeta& m)',
                      'const char* cmd_espnow_devices(',
                      'const char* cmd_espnow_rooms(')
@@ -145,6 +151,10 @@ def main():
     pieces = [region(*r) for r in REGIONS]
     pieces += [one(source, marker) for marker in FUNCTIONS]
     pieces.append(region(*LISTING_REGION))
+    pieces.append(region(*APPENDER_REGION))
+    if source.count(APPENDER_DEFINITION) != 1:
+        sys.exit('FAIL extraction: the appendTopologyOutput definition is not unique in System_ESPNow.cpp')
+    pieces.append(extract_block(source[source.index(APPENDER_DEFINITION):], 'static bool appendTopologyOutput('))
     pieces += [one(source, marker) for marker in LISTING_FUNCTIONS]
     pieces.append(region(*COMMAND_REGION))
 

@@ -62,12 +62,16 @@ bool rtcStartInternal();  // For sensor queue processor
 // Read/Write functions
 bool rtcReadDateTime(RtcDateTime* dt);
 bool rtcWriteDateTime(const RtcDateTime* dt);
+// rtcReadTemperature() returns this when the register read failed.
+constexpr float kRtcTemperatureUnavailable = -999.0f;
 float rtcReadTemperature();
 
 // Time sync with ESP32 system time
 bool rtcEarlyBootSync();     // Called at boot before NTP - syncs system time from RTC
-bool rtcSyncToSystem();      // RTC -> ESP32 system time
-bool rtcSyncFromSystem();    // ESP32 system time -> RTC
+// A command passes `whyNot` and gets the failure as its reply text; without it
+// the reason is printed on the output stream.
+bool rtcSyncToSystem(const char** whyNot = nullptr);      // RTC -> ESP32 system time
+bool rtcSyncFromSystem(const char** whyNot = nullptr);    // ESP32 system time -> RTC
 
 // Utility functions
 uint32_t rtcToUnixTime(const RtcDateTime* dt);

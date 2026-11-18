@@ -1380,7 +1380,7 @@ static const char* cmd_openphone(const String&) {
     snprintf(text,sizeof(text),"Error: phone link could not open (%s)",statusText());
     return text;
   }
-  if(ready.load())return "Phone: open and connected";
+  if(ready.load())return "Error: The phone link is already open and connected. Stop it first with 'closephone' to restart it.";
   BlePeerConnectRequest wanted;
   if(!blePeerBeginManualConnectRequest(BLE_PEER_PHONE,wanted))
     return "Phone: open on the client stack (no enrolled phone to connect; 'phone pair new' enrols one)";
@@ -1393,7 +1393,7 @@ static const char* cmd_closephone(const String&) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   // Closed already (a stack close or `openconsole` did it without the user's
   // stamp): the user's close still means "stay down until openphone".
-  if(!active.load()){blePeerNoteUserDisconnect(BLE_PEER_PHONE);return "Phone: already closed (auto-reconnect stays quiet until openphone)";}
+  if(!active.load()){blePeerNoteUserDisconnect(BLE_PEER_PHONE);return "Error: The phone link is not open. Open it with 'openphone'.";}
   if(!phoneLinkClose(/*userInitiated=*/true))return "Error: phone link did not close (role transition busy or pipe cleanup incomplete); retry closephone";
   return "Phone: closed (link dropped, pipe stopped; glasses, ring and Bluetooth stay up)";
 }
@@ -1561,7 +1561,7 @@ static const char* relayStatusCommand(const String&) {
   return text;
 }
 static const char* phoneUsage(const String&) {
-  return "Error: invalid arguments — Usage: phone <status|start|stop|connect|disconnect|pair [new]|forget|scan|stats|secret>";
+  return "Error: invalid arguments — Usage: phone <status|pair [new]|forget|scan|stats|secret> (openphone and closephone open and close the link)";
 }
 static const char* relayUsage(const String&){return "Error: invalid arguments — Usage: relay status";}
 

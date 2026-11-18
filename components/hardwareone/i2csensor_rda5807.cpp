@@ -535,8 +535,7 @@ const char* cmd_fmradio_start(const String& argsInput) {
 
 const char* cmd_fmradio_stop(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!requestSensorStop(I2C_DEVICE_FMRADIO)) return "Error: [FM Radio] Could not queue stop";
-  return "[FM Radio] Stop requested; cleanup will complete asynchronously";
+  return cmd_sensorstop_queued(I2C_DEVICE_FMRADIO, "FM Radio");
 }
 
 const char* cmd_fmradio_tune(const String& argsInput) {
@@ -547,7 +546,7 @@ const char* cmd_fmradio_tune(const String& argsInput) {
   freqStr.trim();
   
   if (freqStr.length() == 0) {
-    return "Error: invalid arguments — Usage: fmradio tune <frequency> (e.g., 103.9 or 10390)";
+    return "Error: invalid arguments — Usage: fmradiotune <frequency> (e.g., 103.9 or 10390)";
   }
   
   char* end = nullptr;
@@ -570,7 +569,7 @@ const char* cmd_fmradio_tune(const String& argsInput) {
   }
   if (!gFmRadioConnected || !gRadioInitialized) {
     if (!fmRadioInit()) {
-      return "Error: [FM Radio] Not initialized - use 'fmradio start' first";
+      return "Error: [FM Radio] Not initialized - use 'openfmradio' first";
     }
   }
   
@@ -601,9 +600,9 @@ const char* cmd_fmradio_seek(const String& argsInput) {
   dir.trim();
   dir.toLowerCase();
   if (dir.length() && dir != "up" && dir != "down")
-    return "Error: invalid arguments — Usage: fmradio seek [up|down]";
+    return "Error: invalid arguments — Usage: fmradioseek [up|down]";
   if (!gFmRadioConnected || !gRadioInitialized)
-    return "Error: [FM Radio] Not initialized - use 'fmradio start' first";
+    return "Error: [FM Radio] Not initialized - use 'openfmradio' first";
   const bool seekUp = dir != "down";
   uint16_t frequency = 0;
   bool issued = false, busy = false;
@@ -696,12 +695,14 @@ const char* cmd_fmradio_mute(const String& argsInput) {
   String arg = argsInput;
   arg.trim();
   arg.toLowerCase();
-  if (arg.length() && arg != "on" && arg != "mute" && arg != "off" && arg != "unmute") {
-    return "Error: invalid arguments — Usage: fmradio mute [on|off|mute|unmute]";
-  }
-  const bool shouldMute = arg != "off" && arg != "unmute";
+  // No argument mutes; otherwise mute/unmute or any on/off spelling.
+  const int onOff = parseBoolArg(arg);
+  bool shouldMute;
+  if (arg.length() == 0 || arg == "mute" || onOff == 1) shouldMute = true;
+  else if (arg == "unmute" || onOff == 0) shouldMute = false;
+  else return kCommandReplyNotOnOff;
   if (!gFmRadioConnected || !gRadioInitialized) {
-    return "Error: [FM Radio] Not initialized - use 'fmradio start' first";
+    return "Error: [FM Radio] Not initialized - use 'openfmradio' first";
   }
   
   bool issued = false;

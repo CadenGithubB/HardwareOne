@@ -35,6 +35,8 @@ static void hostLog(const char*, ...) {}
 #define WARN_STORAGEF(...) hostWarn(__VA_ARGS__)
 #define INFO_STORAGEF(...) hostLog(__VA_ARGS__)
 static void logSystemEvent(const char*, const char*, ...) {}
+static bool gCliValidateOnly = false;
+#define RETURN_VALID_IF_VALIDATE_CSTR() do { if (gCliValidateOnly) return "VALID"; } while (0)
 static String currentExecUser() { return String("admin"); }
 
 enum { SYSEVT_SD_UNMOUNTED = 1, SYSEVT_STORAGE_FORMATTED = 2 };
@@ -45,7 +47,8 @@ static void systemEventPost(int kind, const char* = nullptr, const char* = nullp
 
 static struct FakeSd {
   unsigned ends = 0, formats = 0;
-  bool end() { ++ends; return true; }
+  bool endOk = true;  // false: the driver keeps the card
+  bool end() { ++ends; return endOk; }
   bool format() { ++formats; return true; }
 } SD;
 
@@ -83,10 +86,28 @@ static int run(const std::string& name) {
     CHECK(refusals == 1 && refusalsUnlocked == 0, "the refusal is decided under the filesystem lock");
     VFS::sdInUseEnd(kRecorder);
     CHECK(VFS::sdInUseOwner() == nullptr, "registration ended");
+    gCliValidateOnly = true;
+    CHECK(std::strcmp(cmd_sdunmount(String("")), "VALID") == 0 && SD.ends == 0 && VFS::gSdMounted,
+          "a validate pass does not unmount");
+    gCliValidateOnly = false;
     CHECK(std::strstr(cmd_sdunmount(String("")), "unmounted successfully"), "sdunmount works after release");
     CHECK(SD.ends == 1 && !VFS::gSdMounted && unmountedEvents == 1, "the card is unmounted");
+    CHECK(std::strcmp(cmd_sdunmount(String("")), "Error: SD card is not mounted. Mount it with 'sdmount'.") == 0 && SD.ends == 1,
+          "sdunmount with nothing mounted is an error with guidance");
+    // A driver that does not let go is the one failure sdunmount reports.
+    VFS::gSdMounted = true;
+    SD.endOk = false;
+    CHECK(std::strcmp(cmd_sdunmount(String("")),
+                      "Error: SD driver did not release the card. Restart the device before removing the card.") == 0,
+          "a driver that keeps the card is an error");
+    CHECK(SD.ends == 2 && unmountedEvents == 1 && !VFS::gSdMounted,
+          "the failed release posts no unmount event");
+    SD.endOk = true;
   } else if (name == "remount") {
     VFS::gSdMounted = false;
+    gCliValidateOnly = true;
+    CHECK(std::strcmp(cmd_sdmount(String("")), "VALID") == 0 && VFS::mounts == 0, "a validate pass does not mount");
+    gCliValidateOnly = false;
     CHECK(VFS::sdInUseBegin(kRecorder), "recorder registers");
     CHECK(std::strstr(cmd_sdmount(String("")), "in use by video recording"), "sdmount names the holder");
     CHECK(!VFS::remountSd() && SD.ends == 0 && VFS::mounts == 0, "remountSD refuses while registered");
@@ -95,10 +116,17 @@ static int run(const std::string& name) {
     CHECK(VFS::mounts == 1 && VFS::gSdMounted, "the card is mounted");
   } else if (name == "format") {
     CHECK(VFS::sdInUseBegin(kRecorder), "recorder registers");
-    CHECK(std::strstr(cmd_sdformat(String("")), "sdformat confirm"), "the confirmation prompt is unchanged");
+    CHECK(std::strstr(cmd_sdformat(String("")), "sdformat confirm"), "sdformat without confirm names the command to run");
+    CHECK(std::strcmp(cmd_sdformat(String("")), cmd_sdformat(String("confrim"))) == 0 &&
+          std::strstr(cmd_sdformat(String("confirm now")), "not formatted") && SD.formats == 0,
+          "anything but exactly confirm is refused and formats nothing");
     CHECK(std::strstr(cmd_sdformat(String("confirm")), "in use by video recording"), "sdformat names the holder");
     CHECK(!VFS::formatSd() && SD.formats == 0, "formatSD refuses while registered");
     VFS::sdInUseEnd(kRecorder);
+    gCliValidateOnly = true;
+    CHECK(std::strcmp(cmd_sdformat(String("confirm")), "VALID") == 0 && SD.formats == 0,
+          "a validate pass does not format the card");
+    gCliValidateOnly = false;
     CHECK(std::strstr(cmd_sdformat(String("confirm")), "formatted successfully"), "sdformat works after release");
     CHECK(SD.formats == 1, "the card is formatted");
   } else if (name == "slots") {

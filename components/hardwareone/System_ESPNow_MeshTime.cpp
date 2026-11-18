@@ -470,25 +470,26 @@ const char* cmd_espnow_timesync(const String& argsInput) {
     case meshtime::SendWhyNot::Sends:
       break;
     case meshtime::SendWhyNot::Off:
-      return "Error: mesh time is switched off (espnowmeshtime on).";
+      return "Error: Mesh time is switched off. Switch it on with 'espnowmeshtime on'.";
     case meshtime::SendWhyNot::MeshOff:
       return "Error: Mesh mode not enabled. Use 'espnowmode mesh' first.";
     case meshtime::SendWhyNot::NotMaster:
-      snprintf(reply, cap, "Error: only the mesh master sends time. This device's role is %s.",
+      snprintf(reply, cap, "Error: Only the mesh master sends time; this device's role is %s. "
+                           "Run 'espnowtimesync' on the mesh master.",
                meshTimeRoleName(mtRole()));
       return reply;
     case meshtime::SendWhyNot::ClockNotSet:
-      return "Error: this device's clock is not set. Nothing sent.";
+      return "Error: This device's clock is not set, so nothing was sent. Set it with NTP or 'timeset' and retry.";
     case meshtime::SendWhyNot::SourceNotReal:
       snprintf(reply, cap,
-               "Error: this device's clock is %s, which is not a real source (rtc, ntp, manual, cm5). "
-               "Nothing sent.",
+               "Error: This device's clock is %s, which is not a real source (rtc, ntp, manual, cm5), "
+               "so nothing was sent. Set it with NTP or 'timeset' and retry.",
                in.source == meshtime::OwnSource::None ? "carried over a restart"
                                                       : meshTimeOwnSourceText(true, in.source));
       return reply;
     case meshtime::SendWhyNot::ClockUnconfirmed:
-      return "Error: an NTP reply moved this device's clock by more than a day and nothing has "
-             "confirmed it yet. Nothing sent.";
+      return "Error: An NTP reply moved this device's clock by more than a day and nothing has "
+             "confirmed it yet, so nothing was sent. Confirm the time with 'timeset' and retry.";
   }
 
   unsigned paired = 0, ready = 0;
@@ -496,7 +497,10 @@ const char* cmd_espnow_timesync(const String& argsInput) {
   MESH_TIME_LOCK();
   sMeshTime.roundAsked = true;
   MESH_TIME_UNLOCK();
-  if (paired == 0) return "OK: no paired devices to send time to.";
+  if (paired == 0) {
+    return "Error: Time sync was not sent to any mesh peer: no device is paired. "
+           "Pair one with 'espnowpairsecure' and retry.";
+  }
   if (ready == paired) {
     snprintf(reply, cap, "OK: time is being sent to %u of %u paired devices", ready, paired);
   } else {

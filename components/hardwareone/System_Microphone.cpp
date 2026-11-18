@@ -1676,11 +1676,50 @@ static void recordingTask(void* param) {
   vTaskDelete(NULL);
 }
 
+// Reply texts for a microphone or recording start that was refused. A caller
+// that passes `why` gets the one that applies and returns it as its reply.
+static constexpr char kMicStartFinalizing[] =
+    "Error: A recording is still finalizing. Wait a moment and run openmic again.";
+static constexpr char kMicStartInUse[] =
+    "Error: The microphone is in use by speech recognition or transcription. "
+    "Run closesr or stop the transcription first.";
+static constexpr char kMicStartNoSource[] =
+    "Error: No microphone is available. Connect the glasses or use a board with a microphone.";
+static constexpr char kMicStartSourceUnavailable[] =
+    "Error: The selected microphone is not available. Choose another with micsource.";
+static constexpr char kMicStartCaptureFailed[] =
+    "Error: Microphone capture could not start. Run openmic again; check the microphone if it repeats.";
+static constexpr char kMicStartSwitching[] =
+    "Error: The microphone is busy switching source. Retry in a moment.";
+static constexpr char kRecStartMicOff[] =
+    "Error: Microphone not enabled. Use 'openmic' first.";
+static constexpr char kRecStartBusy[] =
+    "Error: A recording is still active or finalizing. Run micrecord stop and retry.";
+static constexpr char kRecStartIdUsed[] =
+    "Error: Recording ID already used. Start with a new ID.";
+static constexpr char kRecStartRestartFailed[] =
+    "Error: The microphone could not restart on the preferred source. Run openmic and retry.";
+static constexpr char kRecStartWrongSource[] =
+    "Error: The requested microphone is not the one running. Run closemic, then start again.";
+static constexpr char kRecStartSourceStopped[] =
+    "Error: The microphone stopped while the recording was starting. Run openmic and retry.";
+static constexpr char kRecStartFile[] =
+    "Error: The recording file could not be created. Check the SD card and free space, then start again.";
+static constexpr char kRecStartTask[] =
+    "Error: The recording task could not start. Free memory and start again.";
+
+// Hands `reply` to a caller that asked why; the start itself answers false.
+static bool micStartRefused(const char** why, const char* reply) {
+  if (why) *why = reply;
+  return false;
+}
+
 static bool startRecordingInternal(MicRecordingOwner owner,
                                    uint32_t silenceStopMs, bool trim,
                                    uint32_t admissionSessionEpoch,
                                    const LiveAudioRecorderAuthorization& shadowAuth,
-                                   AudioSource preferred = AUDIO_SRC_NONE) {
+                                   AudioSource preferred = AUDIO_SRC_NONE,
+                                   const char** why = nullptr) {
   DEBUG_MIC_LIFECYCLEF("[MIC_START_REC] ========== startRecording() ENTRY ==========");
   DEBUG_MIC_LIFECYCLEF("[MIC_START_REC] gMicRunning=%d state=%s", gMicRunning,
                        micRecordingStateName(getMicRecordingState()));
@@ -1689,7 +1728,7 @@ static bool startRecordingInternal(MicRecordingOwner owner,
   if (!gMicRunning) {
     DEBUG_MIC_LIFECYCLEF("[MIC_START_REC] FAILED: mic not enabled");
     INFO_MIC_LIFECYCLEF("Cannot record - mic not enabled");
-    return false;
+    return micStartRefused(why, kRecStartMicOff);
   }
 
   // Re-resolve the source preference against what is connected NOW.
@@ -1729,7 +1768,7 @@ static bool startRecordingInternal(MicRecordingOwner owner,
         // recording that has no capture behind it.
         WARN_SYSTEMF("[MIC_START_REC] re-resolve could not restart the mic");
         INFO_MIC_LIFECYCLEF("Mic source re-resolve failed");
-        return false;
+        return micStartRefused(why, kRecStartRestartFailed);
       }
       WARN_SYSTEMF("[MIC_START_REC] source re-resolved to %s", micSourceName());
     } else {
@@ -1741,7 +1780,7 @@ static bool startRecordingInternal(MicRecordingOwner owner,
     WARN_SYSTEMF("[MIC_START_REC] requested source is not the running mic "
                  "(active=%s) — refusing", micSourceName());
     INFO_MIC_LIFECYCLEF("Requested mic source not active");
-    return false;
+    return micStartRefused(why, kRecStartWrongSource);
   }
 
   // This claim MUST precede every write to the capture globals below. A start
@@ -1751,7 +1790,10 @@ static bool startRecordingInternal(MicRecordingOwner owner,
     DEBUG_MIC_LIFECYCLEF("[MIC_START_REC] FAILED: lifecycle busy (%s)",
                          micRecordingStateName(getMicRecordingState()));
     INFO_MIC_LIFECYCLEF("Already recording/finalizing");
-    return false;
+    // The claim is refused for a busy recorder and for an owner ID that
+    // already has a completed capture.
+    return micStartRefused(why, micRecordingBusy() || owner == MIC_RECORDING_OWNER_MANUAL
+                                    ? kRecStartBusy : kRecStartIdUsed);
   }
 
   // Latch after ownership is claimed and before any file/header work. The HAL
@@ -1773,8 +1815,9 @@ static bool startRecordingInternal(MicRecordingOwner owner,
     g2MicKickStream();
   }
 
-  auto failStart = [&](const char* reason) -> bool {
+  auto failStart = [&](const char* reason, const char* reply) -> bool {
     DEBUG_MIC_LIFECYCLEF("[MIC_START_REC] setup failed: %s", reason ? reason : "unknown");
+    if (why) *why = reply;
     if (gRecWasG2Source) {
       g2MicLinkFastRelease();           // latched no-ops if never acquired
       g2MicReleaseCaptureContainer();
@@ -1822,7 +1865,7 @@ static bool startRecordingInternal(MicRecordingOwner owner,
   // closemic/source loss may race the claim. Preserve the ownership invariant
   // and unwind through FINALIZING rather than starting against a dead HAL.
   if (!gMicRunning || micRecordingStopRequested()) {
-    return failStart("audio source stopped during setup");
+    return failStart("audio source stopped during setup", kRecStartSourceStopped);
   }
   
   String recDir = micPrimaryRecordingsFolder();
@@ -1861,7 +1904,7 @@ static bool startRecordingInternal(MicRecordingOwner owner,
   if (!recordingFile) {
     DEBUG_MIC_LIFECYCLEF("[MIC_START_REC] *** FAILED to create file! ***");
     INFO_MIC_LIFECYCLEF("Failed to create recording file");
-    return failStart("failed to create recording file");
+    return failStart("failed to create recording file", kRecStartFile);
   }
   DEBUG_MIC_LIFECYCLEF("[MIC_START_REC] File opened successfully");
   
@@ -1872,7 +1915,7 @@ static bool startRecordingInternal(MicRecordingOwner owner,
     FsLockGuard fsGuard("mic.record.header");
     placeholderOk = writeWavHeader(recordingFile, 0, gRecSampleRate);
   }
-  if (!placeholderOk) return failStart("failed to write placeholder WAV header");
+  if (!placeholderOk) return failStart("failed to write placeholder WAV header", kRecStartFile);
   DEBUG_MIC_LIFECYCLEF("[MIC_START_REC] Header written, file position: %lu", recordingFile.position());
   
   recordingStartTime = millis();
@@ -1893,7 +1936,7 @@ static bool startRecordingInternal(MicRecordingOwner owner,
   
   if (taskCreated != pdPASS) {
     DEBUG_MIC_LIFECYCLEF("[MIC_START_REC] *** TASK CREATION FAILED! ***");
-    return failStart("recording task creation failed");
+    return failStart("recording task creation failed", kRecStartTask);
   }
   
   DEBUG_MIC_LIFECYCLEF("[MIC_START_REC] ========== startRecording() SUCCESS ==========");
@@ -1901,7 +1944,7 @@ static bool startRecordingInternal(MicRecordingOwner owner,
   return true;
 }
 
-bool startRecording(uint32_t silenceStopMs, bool trim) {
+bool startRecording(uint32_t silenceStopMs, bool trim, const char** why) {
   uint32_t admissionSessionEpoch = 0;
   const AuthContext& ctx = currentAuthContext();
   if (ctx.transport == SOURCE_UART)
@@ -1909,7 +1952,8 @@ bool startRecording(uint32_t silenceStopMs, bool trim) {
   return startRecordingInternal(MIC_RECORDING_OWNER_MANUAL,
                                 silenceStopMs, trim,
                                 admissionSessionEpoch,
-                                LiveAudioRecorderAuthorization{});
+                                LiveAudioRecorderAuthorization{},
+                                AUDIO_SRC_NONE, why);
 }
 
 bool startRecordingOwned(MicRecordingOwner owner,
@@ -2124,9 +2168,16 @@ bool deleteRecording(const char* filename) {
   return false;
 }
 
-bool initMicrophone(AudioSource preferred) {
+// True while a recording of that name is in either recordings folder.
+static bool recordingExists(const char* filename) {
+  FsLockGuard fsGuard("mic.record.exists");
+  return VFS::existsGuarded(String(kMicRecSd) + "/" + filename, currentAuthContext()) ||
+         VFS::existsGuarded(String(kMicRecLittleFs) + "/" + filename, currentAuthContext());
+}
+
+bool initMicrophone(AudioSource preferred, const char** why) {
   MicSourceOpGuard sourceOp;
-  if (!sourceOp) return false;
+  if (!sourceOp) return micStartRefused(why, kMicStartSwitching);
 
   WARN_SYSTEMF("[MIC_INIT] ########## initMicrophone() BEGIN ##########");
   WARN_SYSTEMF("[MIC_INIT] Heap: free=%u, PSRAM_free=%u", 
@@ -2140,7 +2191,7 @@ bool initMicrophone(AudioSource preferred) {
   if (!gMicRunning && micRecordingBusy()) {
     WARN_SYSTEMF("[MIC_INIT] refusing start while recording is %s",
                  micRecordingStateName(getMicRecordingState()));
-    return false;
+    return micStartRefused(why, kMicStartFinalizing);
   }
 
   I2sMicLockGuard i2sGuard("mic.init");
@@ -2158,7 +2209,7 @@ bool initMicrophone(AudioSource preferred) {
     WARN_SYSTEMF("[MIC_INIT] refusing locked start while recording=%s HAL owner='%s'",
                  micRecordingStateName(getMicRecordingState()),
                  audioCaptureOwner());
-    return false;
+    return micStartRefused(why, micRecordingBusy() ? kMicStartFinalizing : kMicStartInUse);
   }
 
   // Only the caller that is actually about to start a fresh source may reset
@@ -2190,12 +2241,12 @@ bool initMicrophone(AudioSource preferred) {
   if (!audioAnySourceAvailable()) {
     WARN_SYSTEMF("[MIC_INIT] no mic source available (no PDM, no G2 connected) — cannot start");
     INFO_MIC_LIFECYCLEF("No mic source available");
-    return false;
+    return micStartRefused(why, kMicStartNoSource);
   }
   if (preferred != AUDIO_SRC_NONE && !audioSourceAvailable(preferred)) {
     WARN_SYSTEMF("[MIC_INIT] requested source is not available — cannot start");
     INFO_MIC_LIFECYCLEF("Requested mic source unavailable");
-    return false;
+    return micStartRefused(why, kMicStartSourceUnavailable);
   }
   // AUDIO_SRC_NONE for auto or an unavailable preference: resolve afresh.
   audioSetSource(micPreferredAvailableSource());
@@ -2207,19 +2258,19 @@ bool initMicrophone(AudioSource preferred) {
   if (preferred != AUDIO_SRC_NONE && !audioSetSource(preferred)) {
     WARN_SYSTEMF("[MIC_INIT] requested source refused — cannot start");
     INFO_MIC_LIFECYCLEF("Requested mic source unavailable");
-    return false;
+    return micStartRefused(why, kMicStartSourceUnavailable);
   }
   if (!audioCaptureStart("mic", (uint32_t)micSampleRate)) {
     WARN_SYSTEMF("[MIC_INIT] *** audioCaptureStart(\"mic\") FAILED at rate=%d Hz ***", micSampleRate);
     INFO_MIC_LIFECYCLEF("Failed to start microphone capture");
-    return false;
+    return micStartRefused(why, kMicStartCaptureFailed);
   }
   gMicRunning = true;
   micReconcileState();  // set micConnected from live HAL state (source + capture)
   if (!gMicRunning || !micConnected) {
     WARN_SYSTEMF("[MIC_INIT] source disappeared while capture startup completed");
     audioCaptureStop("mic");
-    return false;
+    return micStartRefused(why, kMicStartCaptureFailed);
   }
   WARN_SYSTEMF("[MIC_INIT] source=%s", micSourceName());
   sensorStatusBumpWith("openmic");
@@ -2552,14 +2603,26 @@ const char* cmd_micstart(const String& argsInput) {
   if (!gSettings.micEnabled) {
     return "Error: Microphone is disabled - run 'micenabled 1' first";
   }
-  if (initMicrophone()) {
+  // initMicrophone() answers true for a running microphone (other owners rely
+  // on that); the command reports it as the refusal it is.
+  if (gMicRunning) {
+    return "Error: The microphone is already running. Stop it first with 'closemic' to restart it.";
+  }
+  const char* why = nullptr;
+  if (initMicrophone(AUDIO_SRC_NONE, &why)) {
     return "Microphone started successfully";
   }
-  return "Error: Failed to start microphone";
+  return why ? why : kMicStartCaptureFailed;
 }
 
 const char* cmd_micstop(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+  // The same idle test stopMicrophone() makes under its lock: no source, no
+  // recording, no capture owned by the mic. stopMicrophone() answers true for
+  // it; the command reports it as an Error.
+  if (!gMicRunning && !micRecordingBusy() && !audioCaptureOwnedBy("mic")) {
+    return "Error: The microphone is not running. Start it with 'openmic'.";
+  }
   if (!stopMicrophone()) {
     snprintf(gMicCmdBuffer, sizeof(gMicCmdBuffer),
              "Error: Microphone source stopped but recording is still %s",
@@ -2615,9 +2678,9 @@ static bool micParseDecimalMs(const String& input, uint32_t* out) {
   return true;
 }
 
-// Strict machine grammar: empty, `vad`, `vad trim`, `vad <200..10000>`, or
-// `vad <200..10000> trim`. Unlike the legacy human parser this rejects every
-// unknown/partial token rather than silently falling back to 1200 ms.
+// Strict grammar for `micrecord start` and `startid`: empty, `vad`, `vad trim`,
+// `vad <200..10000>`, or `vad <200..10000> trim`. Every unknown or partial
+// token is rejected; nothing falls back to 1200 ms silently.
 static bool micParseOwnedRecordOptions(String options,
                                        uint32_t* silenceMs, bool* trim) {
   if (!silenceMs || !trim) return false;
@@ -2671,6 +2734,28 @@ static const char* micOwnedOpError(MicRecordingOwnedOp op) {
   return "Error: recording owner operation failed";
 }
 
+// The last recording result a "micrecord stop" has already handed back, so a
+// second stop does not report the same finished recording again. Identified by
+// its path, sample count and failure bit (a result has no sequence number).
+static char sMicStopReportedPath[sizeof(MicRecordingResult::path)] = "";
+static uint32_t sMicStopReportedSamples = 0;
+static bool sMicStopReportedFailed = false;
+static bool sMicStopReportedValid = false;
+
+static bool micStopResultAlreadyReported(const MicRecordingResult& r) {
+  return sMicStopReportedValid && r.valid && r.samples == sMicStopReportedSamples &&
+         r.failed == sMicStopReportedFailed &&
+         strncmp(r.path, sMicStopReportedPath, sizeof(sMicStopReportedPath)) == 0;
+}
+
+static void micStopResultMarkReported(const MicRecordingResult& r) {
+  if (!r.valid) return;
+  strlcpy(sMicStopReportedPath, r.path, sizeof(sMicStopReportedPath));
+  sMicStopReportedSamples = r.samples;
+  sMicStopReportedFailed = r.failed;
+  sMicStopReportedValid = true;
+}
+
 const char* cmd_micrecord(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
@@ -2708,10 +2793,10 @@ const char* cmd_micrecord(const String& argsInput) {
     uint32_t silenceMs = 0;
     bool trim = false;
     if (!micParseOwnerId(idToken, &owner)) {
-      return "Error: usage: micrecord startid <16hex> [vad <200..10000>] [trim]";
+      return "Error: usage: micrecord startid <16hex> [vad [<200..10000>] [trim]]";
     }
     if (!micParseOwnedRecordOptions(options, &silenceMs, &trim)) {
-      return "Error: usage: micrecord startid <16hex> [vad <200..10000>] [trim]";
+      return "Error: usage: micrecord startid <16hex> [vad [<200..10000>] [trim]]";
     }
     if (!gMicRunning) {
       return "Error: Microphone not enabled. Use 'openmic' first.";
@@ -2751,9 +2836,11 @@ const char* cmd_micrecord(const String& argsInput) {
     // never become live shadow producers.
     LiveAudioRecorderAuthorization shadowAuth{};
     (void)liveAudioRecorderCaptureEligible(owner, &shadowAuth);
+    const char* why = nullptr;
     if (!startRecordingInternal(owner, silenceMs, trim,
-                                admissionSessionEpoch, shadowAuth)) {
-      return "Error: Failed to start owned recording (busy or ID already consumed)";
+                                admissionSessionEpoch, shadowAuth,
+                                AUDIO_SRC_NONE, &why)) {
+      return why ? why : kRecStartBusy;
     }
     char ownerHex[17];
     micRecordingOwnerHex(owner, ownerHex);
@@ -2829,9 +2916,6 @@ const char* cmd_micrecord(const String& argsInput) {
     return gMicCmdBuffer;
   }
   if (arg == "1" || a == "start" || a.startsWith("start ")) {
-    if (!gMicRunning) {
-      return "Error: Microphone not enabled. Use 'openmic' first.";
-    }
     // `micrecord start`                 → fixed window (unchanged; every other caller)
     // `micrecord start vad [ms]`        → opt-in: auto-stop after `ms` of trailing
     //                                     silence (default 1200), for the CM5/STT flow.
@@ -2841,21 +2925,22 @@ const char* cmd_micrecord(const String& argsInput) {
     //                                     byte-exact WAV for tools/vad_replay.py.
     uint32_t silenceMs = 0;
     bool trim = false;
-    int vadIdx = a.indexOf("vad");
-    if (vadIdx >= 0) {
-      silenceMs = 1200;
-      String rest = a.substring(vadIdx + 3); rest.trim();
-      int trimIdx = rest.indexOf("trim");
-      if (trimIdx >= 0) { trim = true; rest = rest.substring(0, trimIdx); rest.trim(); }
-      if (rest.length()) { long v = rest.toInt(); if (v >= 200 && v <= 10000) silenceMs = (uint32_t)v; }
+    // The text after `start`, in the strict grammar startid uses: an unknown
+    // word or a value outside 200..10000 is refused, never dropped.
+    const String options = a.startsWith("start ") ? a.substring(6) : String("");
+    if (!micParseOwnedRecordOptions(options, &silenceMs, &trim)) {
+      return "Error: invalid arguments — Usage: micrecord start [vad [<200..10000>] [trim]]";
     }
-    if (startRecording(silenceMs, trim)) {
+    if (!gMicRunning) {
+      return kRecStartMicOff;
+    }
+    const char* why = nullptr;
+    if (startRecording(silenceMs, trim, &why)) {
       return silenceMs ? (trim ? "Recording started (auto-stop on silence, trimmed)"
                               : "Recording started (auto-stop on silence)")
                        : "Recording started";
-    } else {
-      return "Error: Failed to start recording";
     }
+    return why ? why : kRecStartBusy;
   } else if (arg == "0" || arg.equalsIgnoreCase("stop")) {
     bool wasRecording = micRecordingBusy();
     if (!stopRecording()) {
@@ -2865,15 +2950,23 @@ const char* cmd_micrecord(const String& argsInput) {
       return gMicCmdBuffer;
     }
     const MicRecordingResult last = micRecordingLastResult();
+    // A stop with no recording running reports a result once: the recording
+    // that ended on its own (silence) since the last stop. A second stop, or
+    // one with no recording since boot, has nothing to stop or report: the
+    // not-running Error (the owner's 2026-11-18 rule).
+    if (!wasRecording && (!last.valid || micStopResultAlreadyReported(last))) {
+      return "Error: No recording is running. Start one with 'micrecord start'.";
+    }
+    micStopResultMarkReported(last);
     if (last.valid && last.failed) {
       snprintf(gMicCmdBuffer, sizeof(gMicCmdBuffer), "Error: Recording failed: %s",
                last.failure);
       return gMicCmdBuffer;
     }
     if (!wasRecording) {
-      // It may have already auto-stopped on silence — hand back the path so the
-      // caller (CM5) can voicefetch it, exactly like an explicit stop would.
-      if (last.valid && last.path[0]) {
+      // It already auto-stopped on silence: hand back the path so the caller
+      // (CM5) can voicefetch it, exactly like an explicit stop would.
+      if (last.path[0]) {
         snprintf(gMicCmdBuffer, sizeof(gMicCmdBuffer), "Recording stopped — %s%s",
                  last.path, micDegradedSuffixFor(last));
         return gMicCmdBuffer;
@@ -2893,6 +2986,11 @@ const char* cmd_micrecord(const String& argsInput) {
   
   return "Error: invalid arguments — Usage: micrecord <start|stop|1|0|startid|statusid|stopid> ...";
 }
+
+// miclist answers in one reply buffer; a longer list is refused whole.
+static constexpr char kMicListTooLarge[] =
+    "Error: Recording list too large for one reply. Delete old recordings or open the "
+    "recordings folder in the file browser.";
 
 const char* cmd_miclist(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
@@ -2922,8 +3020,14 @@ const char* cmd_miclist(const String& argsInput) {
       start = comma + 1;
     }
     doc["count"] = count;  // in-place update: keeps "count" first in the object
-    serializeJson(doc, getDebugBuffer(), 1024);
-    return getDebugBuffer();
+    char* buf = getDebugBuffer();
+    if (!buf) return kCommandReplyOutOfMemory;
+    // A cut document does not parse: refuse a list the reply buffer cannot hold.
+    // The document lives in PSRAM: overflowed() is a failed allocation, not a long list.
+    if (doc.overflowed()) return kCommandReplyOutOfMemory;
+    if (measureJson(doc) >= GLOBAL_DEBUG_BUFFER_SIZE) return kMicListTooLarge;
+    serializeJson(doc, buf, GLOBAL_DEBUG_BUFFER_SIZE);
+    return buf;
   }
 
   // Single walk; entries are comma-joined, so the count follows from the string.
@@ -2934,8 +3038,11 @@ const char* cmd_miclist(const String& argsInput) {
 
   int count = 1;
   for (int i = 0; i < (int)list.length(); i++) if (list[i] == ',') count++;
-  snprintf(gMicCmdBuffer, sizeof(gMicCmdBuffer), "Recordings (%d):\n%s", count, list.c_str());
-  return gMicCmdBuffer;
+  char* buf = getDebugBuffer();
+  if (!buf) return kCommandReplyOutOfMemory;
+  const int written = snprintf(buf, GLOBAL_DEBUG_BUFFER_SIZE, "Recordings (%d):\n%s", count, list.c_str());
+  if (written < 0 || written >= (int)GLOBAL_DEBUG_BUFFER_SIZE) return kMicListTooLarge;
+  return buf;
 }
 
 const char* cmd_micdelete(const String& argsInput) {
@@ -2952,21 +3059,27 @@ const char* cmd_micdelete(const String& argsInput) {
   if (!isAll) {
     const char* qerr = requireQuotedToken(a, 0, arg);
     if (qerr) return qerr;
-    if (a.has(1)) return "Error: unexpected argument — micdelete \"<filename>\" or micdelete all";
   }
+  if (a.has(1)) return "Error: unexpected argument — micdelete \"<filename>\" or micdelete all";
 
   if (isAll) {
-    auto wipeWavs = [](const char* folder) -> int {
+    int seen = 0;             // .wav files found in both folders
+    bool unreadable = false;  // a folder that exists could not be opened
+    auto wipeWavs = [&seen, &unreadable](const char* folder) -> int {
       int deleted = 0;
       if (!VFS::existsGuarded(folder, currentAuthContext())) return 0;
       File dir = VFS::openGuarded(String(folder), "r", currentAuthContext());
-      if (!dir || !dir.isDirectory()) return 0;
+      if (!dir || !dir.isDirectory()) {
+        unreadable = true;
+        return 0;
+      }
       File f = dir.openNextFile();
       while (f) {
         String name = f.name();
         bool isWav = name.endsWith(".wav");
         f.close();
         if (isWav) {
+          ++seen;
           String path = String(folder) + "/" + name;
           if (VFS::removeGuarded(path, currentAuthContext())) deleted++;
         }
@@ -2980,7 +3093,20 @@ const char* cmd_micdelete(const String& argsInput) {
     // for the whole wipe, so the next reader takes one fresh reading.
     if (flashDeleted > 0) VFS::invalidateStatsSnapshot(VFS::INTERNAL);
     int deleted = sdDeleted + flashDeleted;
-    if (deleted == 0) {
+    // A wipe that left recordings behind is a failure, with the count.
+    if (unreadable) {
+      snprintf(gMicCmdBuffer, sizeof(gMicCmdBuffer),
+               "Error: A recordings folder could not be read (%d recording(s) deleted). "
+               "Check the SD card and run micdelete all again.", deleted);
+      return gMicCmdBuffer;
+    }
+    if (deleted < seen) {
+      snprintf(gMicCmdBuffer, sizeof(gMicCmdBuffer),
+               "Error: %d of %d recordings could not be deleted. "
+               "Check the SD card and run micdelete all again.", seen - deleted, seen);
+      return gMicCmdBuffer;
+    }
+    if (seen == 0) {
       return "No recordings found";
     }
     snprintf(gMicCmdBuffer, sizeof(gMicCmdBuffer), "Deleted %d recording(s)", deleted);
@@ -2991,7 +3117,11 @@ const char* cmd_micdelete(const String& argsInput) {
     snprintf(gMicCmdBuffer, sizeof(gMicCmdBuffer), "Deleted: %s", arg.c_str());
     return gMicCmdBuffer;
   }
-  return "Error: File not found";
+  // deleteRecording() answers false for a missing file and for a failed remove.
+  if (recordingExists(arg.c_str())) {
+    return "Error: The recording could not be deleted. Check the SD card and retry.";
+  }
+  return "Error: No recording with that name. List the names with miclist.";
 }
 
 const char* cmd_micdeleteid(const String& argsInput) {
@@ -3272,8 +3402,12 @@ const char* cmd_micviz(const String& argsInput) {
   // can run wherever the scheduler has cycles.
   // APP_CORE: waveform-render compute; keep it off the Wi-Fi/BLE core.
   taskStackRecord("mic_viz", MIC_VIZ_STACK_WORDS);
-  xTaskCreatePinnedToCore(micVisualizerTaskFunc, "mic_viz", MIC_VIZ_STACK_WORDS, nullptr, TASK_PRIORITY_NORMAL, &gMicVisualizerTask, APP_CORE);
-  return "Visualizer started (press any key to stop)";
+  if (xTaskCreatePinnedToCore(micVisualizerTaskFunc, "mic_viz", MIC_VIZ_STACK_WORDS, nullptr,
+                              TASK_PRIORITY_NORMAL, &gMicVisualizerTask, APP_CORE) != pdPASS) {
+    gMicVisualizerRunning = false;
+    return "Error: Visualizer task could not start. Free memory and run micviz again.";
+  }
+  return "Visualizer started on the serial console (press any key there to stop)";
 }
 
 const char* cmd_micautostart(const String& argsInput) {
@@ -3343,8 +3477,8 @@ const CommandEntry micCommands[] = {
   { "miclevel", "Get current audio level.", false, cmd_miclevel, "Usage: miclevel [json]" },
   { "micviz", "Real-time audio level visualizer.", false, cmd_micviz, "Usage: micviz (press any key to stop)" },
   { "micrecord", "Start/stop recording to WAV file (bare = show recording status).", false, cmd_micrecord,
-    "Usage: micrecord [start [vad <200..10000>] [trim] | stop | 1 | 0]\n"
-    "       micrecord startid <16hex> [vad <200..10000>] [trim]\n"
+    "Usage: micrecord [start [vad [<200..10000>] [trim]] | stop | 1 | 0]\n"
+    "       micrecord startid <16hex> [vad [<200..10000>] [trim]]\n"
     "       micrecord statusid <16hex>\n"
     "       micrecord stopid <16hex> [discard]" },
   { "miclist", "List saved recordings.", false, cmd_miclist, "Usage: miclist [json]" },

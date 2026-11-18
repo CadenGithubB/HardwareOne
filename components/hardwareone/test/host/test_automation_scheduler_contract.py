@@ -233,7 +233,7 @@ assert "if (notify) writeAutomationsJsonAtomic(json);" in reschedule
 assert "else writeTextAtomic(AUTOMATIONS_JSON_FILE, json, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, \"automation.state\"));" in reschedule
 assert tick.count("rescheduleAfterFire(") == 3
 assert tick.count("rescheduleAfterFire(id, obj.c_str(), now, false)") == 3
-assert "rescheduleAfterFire(idStr.toInt(), obj.c_str(), now, true);" in automation
+assert "rescheduleAfterFire(id, obj.c_str(), now, true);" in automation
 
 # Without a set clock interval and armed-delay triggers count uptime
 # (AutomationUptimeSchedule; behavior in automation_scheduler). The pass takes

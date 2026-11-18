@@ -1008,11 +1008,13 @@ console.log('[AUTOMATIONS] Part 1: Complete');
 
   // Part 7: CLI helper and createAutomation function (large, split into sub-parts)
   httpd_resp_send_chunk(req, R"AUTOPART7(<script>
+// Both resolve with the reply text, also for a refused command (HTTP 400):
+// the callers show the device's "Error: ..." line.
 function postCLI(cmd){
-  return hw.postFormText('/api/cli', { cmd: cmd });
+  return hw.postForm('/api/cli', { cmd: cmd }).then(function(r){ return r.text(); });
 }
 function postCLIValidate(cmd){
-  return hw.postFormText('/api/cli', { cmd: cmd, validate: '1' });
+  return hw.postForm('/api/cli', { cmd: cmd, validate: '1' }).then(function(r){ return r.text(); });
 }
 // ============================================================================
 // Secondary trigger row management
@@ -1278,9 +1280,11 @@ async function createAutomation(){
     cmds.push(conditionalChain.join(' ')); 
   } 
   const cmdsParam=cmds.join(';'); 
+  // The command parser reads a backslash before the closing quote as an escaped quote.
+  if(/\\$/.test(name)){ hw.$('a_error').textContent='Name cannot end with a backslash.'; hw.$('a_error').style.display='block'; return; }
   const buildParts=(time,idx)=>{ 
     let parts=['automation add']; 
-    parts.push('name='+name+(time!==null && times.length>1?' #'+(idx+1):'')); 
+    parts.push('name="'+(name+(time!==null && times.length>1?' #'+(idx+1):'')).replace(/"/g,'\\"')+'"'); 
     if(type==='onBoot'){
       parts.push('type=afterDelay');
       parts.push('delayms=0');

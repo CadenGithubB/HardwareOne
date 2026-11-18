@@ -118,6 +118,8 @@ static bool llmResolveModelId(const char* id, LlmModelDesc* out) {
 
 static LlmBackendKind sActiveKind = LlmBackendKind::None;
 static LlmModelDesc sActiveDesc;
+// cmd_llm_unload asks the backend whether a model is loaded.
+static LlmBackendKind llmBackendActiveKind() { return sActiveKind; }
 static char llmCmdBuf[1024];
 
 // INSERT_BACKEND
@@ -244,6 +246,20 @@ static void caseAdminUnloadThroughCommand() {
   CHECK(contains(req.reply, "\"ok\":true"));
 }
 
+// Nothing loaded: the unload is refused with the next step (the owner's
+// 2026-11-18 rule) and the backend is not asked to unload.
+static void caseUnloadWithNothingLoaded() {
+  reset();
+  sActiveKind = LlmBackendKind::None;
+  gReady = true;
+  httpd_req_t req = request("root", true, "{}");
+  CHECK(handleLlmUnload(&req) == ESP_OK);
+  CHECK(gSubmitted.size() == 1 && gSubmitted[0] == "llmunload");
+  CHECK(gUnloads == 0);
+  CHECK(contains(req.reply, "\"ok\":false"));
+  CHECK(contains(req.reply, "No model is loaded. Load one with 'llmload <model id>'."));
+}
+
 // An id that cannot travel as one quoted command token is refused before
 // anything is submitted.
 static void caseBadIdRejected() {
@@ -317,6 +333,7 @@ int main(int argc, char** argv) {
     {"user_unload_refused", caseUserUnloadRefused},
     {"admin_load_through_command", caseAdminLoadThroughCommand},
     {"admin_unload_through_command", caseAdminUnloadThroughCommand},
+    {"unload_with_nothing_loaded", caseUnloadWithNothingLoaded},
     {"bad_id_rejected", caseBadIdRejected},
     {"select_applies_setting", caseSelectAppliesSetting},
     {"command_context_argument", caseCommandContextArgument},

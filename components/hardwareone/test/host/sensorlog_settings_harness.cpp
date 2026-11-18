@@ -373,7 +373,12 @@ static void healthTransitions() {
       startResult = failure;
       const std::string result = healthLoggingSet(on);
       check(!gSensorLoggingRunning && starts.size() == 1, "failed restart retained running state");
-      check(result == (failure ? failure : on ? "Error: Health logging failed to start sensorlog" : "SUCCESS: Health logging OFF"), "restart failure response changed");
+      const std::string reason = failure ? "start failed" : "no reason given";
+      check(result == (on ? "Error: Health logging is switched on, but the log did not start (" + reason +
+                                "). Fix that, then run 'healthlogging on' again."
+                          : "Error: Health logging is off, but sensor logging did not restart for the other sensors (" +
+                                reason + "). Run 'sensorlog start <file>' again."),
+            "restart failure response changed");
       check(gSettings.healthLoggingEnabled == on && sensorLogSelectedMask() == (on ? LOG_TOF | LOG_R1 : LOG_TOF), "restart failure unexpectedly rolled back settings");
     }
   }

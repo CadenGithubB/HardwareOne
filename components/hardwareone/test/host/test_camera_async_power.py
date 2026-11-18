@@ -55,6 +55,9 @@ class String {
 static bool gCliValidateOnly = false;
 #define RETURN_VALID_IF_VALIDATE_CSTR() do { if (gCliValidateOnly) return "VALID"; } while (0)
 static struct { bool cameraEnabled = true; } gSettings;
+// The synchronous forms refuse a start of a running camera and answer a stop
+// of a stopped one with the not-running Error (the owner's 2026-11-18 rule).
+static bool gCameraRunning = false;
 
 // cam_power admission doubles: what reached the owner's power requests.
 static bool queueAccepts = true, syncResult = true;
@@ -77,6 +80,7 @@ static void reset() {
   gCliValidateOnly = false;
   gSettings.cameraEnabled = true;
   queueAccepts = syncResult = true;
+  gCameraRunning = false;
   startAsync = stopAsync = startSync = stopSync = 0;
   lastWaitMs = 0;
 }
@@ -104,12 +108,26 @@ int main() {
   queueAccepts = false;
   reply = cmd_camerastart("async");
   CHECK(startAsync == 1 && startsWith(reply, "Error"));
+  // Asynchronous start of a running camera: refused, nothing requested.
+  reset();
+  gCameraRunning = true;
+  reply = cmd_camerastart("async");
+  CHECK(requests() == 0 &&
+        std::strcmp(reply, "Error: Camera is already running. Stop it first with 'closecamera' to restart it.") == 0);
   // Asynchronous stop: allowed while disabled, refused only by admission.
   reset();
   gSettings.cameraEnabled = false;
+  gCameraRunning = true;
   reply = cmd_camerastop("async");
   CHECK(stopAsync == 1 && requests() == 1 && !startsWith(reply, "Error"));
+  // Asynchronous stop of a stopped camera: still queued (it holds the camera
+  // off), answered with the not-running Error.
   reset();
+  reply = cmd_camerastop("async");
+  CHECK(stopAsync == 1 && requests() == 1 &&
+        std::strcmp(reply, "Error: Camera is not running. Start it with 'opencamera'.") == 0);
+  reset();
+  gCameraRunning = true;
   queueAccepts = false;
   reply = cmd_camerastop("async");
   CHECK(stopAsync == 1 && startsWith(reply, "Error"));
@@ -129,8 +147,22 @@ int main() {
   syncResult = false;
   CHECK(std::strcmp(cmd_camerastart(""), "Error: Camera not detected. Check the cable and retry.") == 0);
   reset();
+  gCameraRunning = true;
+  CHECK(std::strcmp(cmd_camerastart(""),
+                    "Error: Camera is already running. Stop it first with 'closecamera' to restart it.") == 0);
+  CHECK(requests() == 0);
+  reset();
+  gCameraRunning = true;
   CHECK(std::strcmp(cmd_camerastop(""), "Camera stopped") == 0);
   CHECK(stopSync == 1 && lastWaitMs == 30000 && requests() == 1);
+  // Not running: the stop still holds the camera off; the reply says so.
+  reset();
+  CHECK(std::strcmp(cmd_camerastop(""), "Error: Camera is not running. Start it with 'opencamera'.") == 0);
+  CHECK(stopSync == 1 && requests() == 1);
+  // Any other argument is refused before a power request, never ignored.
+  reset();
+  CHECK(startsWith(cmd_camerastart("asnyc"), "Error: Unknown argument") && requests() == 0);
+  CHECK(startsWith(cmd_camerastop("off"), "Error: Unknown argument") && requests() == 0);
   std::printf("camera async power: %d checks passed\n", checks);
   return 0;
 }

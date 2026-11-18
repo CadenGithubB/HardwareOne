@@ -778,14 +778,17 @@ keeps the new ban in force in memory, and that banning again retries the save;
 that a failed unban save keeps the ban; that an encryption failure never saves
 a list missing an entry; that 16 bans with 39-character IPs and 79-character
 reasons list as complete JSON and round-trip through the file; that a list too
-large for the 4 KB reply buffer is an explicit `{"error":...}` rather than a
-truncated document; and that the lookup takes the ban-table lock while no file
-I/O runs under it. It also checks that the ban's session kick reads the session
-table under the session fence (a counting double), and runs the real
-`ban`/`unban` adapters (`cmd_ban`, `cmd_unban` with `CommandArgs`): a ban or
-unban whose save failed is reported as not saved, distinct from a full list or
-an address that is not banned. Not covered: real task interleaving and the
-device AES helpers. Run with
+large for the 4 KB reply buffer is refused with a reply the executor reads as a
+failed command (`Error: Ban list too large for one reply. Remove entries with
+unban.`) rather than a truncated document; and that the lookup takes the
+ban-table lock while no file I/O runs under it. It also checks that the ban's
+session kick reads the session table under the session fence (a counting
+double), and runs the real `ban`/`unban` adapters (`cmd_ban`, `cmd_unban` with
+`CommandArgs`): a ban or unban whose save failed is reported as not saved,
+distinct from a full list or an address that is not banned; a host name or a
+short IPv4 form (`192.168.1`) is refused with `Error: Not an IP address. Give
+it as 192.168.1.100.`, bans nothing and leaves the file unwritten. Not covered:
+real task interleaving and the device AES helpers. Run with
 `ctest --test-dir build -R '^ip_ban_store$' --output-on-failure`.
 
 ## Migration restore
@@ -1459,9 +1462,10 @@ Remote command and admin-check cases (C8/D3):
 - Password remote commands and USER_SYNC's admin check share ESP-NOW's one
   key, whichever peer sends them.
 - The sixth attempt is refused before the password is checked. Its CMD_RESP
-  (`Auth locked out. Retry in 30s` or `Admin authentication locked out. Retry
-  in 30s`) echoes the msgId. The existing `Auth failed` and `Admin
-  authentication failed` texts stay.
+  (`Error: Login locked out. Retry in 30s.` or `Admin authentication locked
+  out. Retry in 30s`) echoes the msgId. A refused login answers `Error: Login
+  failed. Check the user name and password of the target device.`; USER_SYNC's
+  `Admin authentication failed` stays.
 - A plaintext command is refused before any check.
 - Bad bond tokens still reach `logBondAuthFailure` and do not count. A live
   bond token still runs its command while passwords are locked.
@@ -4516,7 +4520,17 @@ allowed; no sign, fraction, 0, overflow or value above the range). Source rules:
 the owner, the scheduler pass leaves an automation with an id above the range out and queues the sanitizer,
 `automation add` refuses an `id=` outside the range with "Error: id must be a whole number from 1 to 2147483647"
 before it loads the store (validate-only included), and the `automation sanitize` branch replies through
-`automationSanitizeReply` and no longer spells "fixed duplicate IDs".
+`automationSanitizeReply` and no longer spells "fixed duplicate IDs". `automationIdPosInJson`, which the
+commands that take `id=<n>` use to find their automation, finds an id only as a whole number: 12 is not found
+inside 123456, and the exact id is found behind a longer one that starts with the same digits.
+
+`command_args_keys` compiles the production `CommandArgs` (`System_Command.h`) with its constructor, `parse`,
+`nextKeyToken`, `value` and `hasKey` and their helpers (`System_Command.cpp`) on a small String. A key is read
+only at the start of a token (the start of the line or after white space) and outside a quoted value:
+`dayofmonth=5` is not `month=5`, `bootdelayms=` is not `delayms=`, `condition=` is not `on=`, and an `id=` inside
+`commands="..."` is not the id of the line. Quoted values keep their spaces and unescape `\"`. The token walk
+(`nextKeyToken`) tells a key=value token from a bare word, so the rest of an unquoted value with a space shows
+as a bare word. It takes `--cxx`, `--sanitize` and `--component <directory>`.
 
 `clock_set_question`: "is the clock set" has one owner, `Clock::isValidEpoch` (the year 2020 or later). The
 suite runs the real `Clock::isValidEpoch` and `Clock::isSynced` (`System_Clock.cpp`) against a settable clock:
@@ -4947,7 +4961,7 @@ verbs over them by `ble_server_stop`, `ble_info_status`, `ble_recycle_phone`,
 
 ## Bluetooth commands and status
 
-`ble_info_status` (see "Bluetooth status coverage") also runs the production `blesend`, `blestream` and `bleevent` handlers with the real `CommandArgs` parser and stream-flag helpers, and runs the data-service push functions against a fake directed GATT sender. Every keyword and the interval pair come from the dispatcher's arguments. `blestream sensors off` clears only that stream. Bad tokens and non-positive intervals are usage errors. `blesend` forwards the whole message. Sensor, system and event frames reach only the console-mirror recipients, by directed notify and never characteristic-wide. The checks also cover stale sessions, congestion, a missing GATT interface, a refused lifecycle lock and secure-required mode. On the G2 client host, which serves no data service, `blestream` and `bleevent` refuse with the phone-link reason before touching a flag or a recipient. `--component <dir>` points the suite at another copy of the BLE sources; the pre-fix tree fails at the `blestream on` case.
+`ble_info_status` (see "Bluetooth status coverage") also runs the production `blesend`, `blestream` and `bleevent` handlers with the real `CommandArgs` parser and stream-flag helpers, and runs the data-service push functions against a fake directed GATT sender. Every keyword and the interval pair come from the dispatcher's arguments. `blestream sensors off` clears only that stream. An unknown first word and intervals that are missing, not a number or not positive are usage errors; a toggle that is not an on/off word is refused with the shared on/off reply (`kCommandReplyNotOnOff`) and changes nothing. `blesend` forwards the whole message. Sensor, system and event frames reach only the console-mirror recipients, by directed notify and never characteristic-wide. The checks also cover stale sessions, congestion, a missing GATT interface, a refused lifecycle lock and secure-required mode. On the G2 client host, which serves no data service, `blestream` and `bleevent` refuse with the phone-link reason before touching a flag or a recipient. `--component <dir>` points the suite at another copy of the BLE sources; the pre-fix tree fails at the `blestream on` case.
 
 It also runs the production `bledisconnect` command and its owner functions (`bleDisconnectConnection`, `bleDisconnectAppClients`) against a recording GATT-server double. `bledisconnect <connId>` closes exactly that app client. The bare form, which the page-level button and the OLED and G2 items use, closes every app client and never a paired R1 ring or G2 temple link. Unknown ids, peer links and malformed ids (`abc`, `-1`, `1x`, `0x1`, `70000`) are refused without a close. The close is issued with the lifecycle guard released, and a missing BLE state, server or lifecycle lock closes nothing. A Node-free check reads `WebPage_Bluetooth.h`: each client's Kick button must pass that client's `connId` to `bledisconnect`. `--component <dir>` also points these reads at another tree; the pre-fix tree fails at the first per-id case.
 
@@ -5151,7 +5165,7 @@ python3 components/hardwareone/test/host/test_g2_page_api_contract.py --sanitize
 python3 components/hardwareone/test/host/test_file_kind.py --sanitize
 ```
 
-`file_kind` compiles the shared classifier `System_FileKind.h` and, over one table of names, the production G2 Files page file-tap branch (the `else` block of `g2FilesHandleTap` with the classification it calls, `showFileChooser` recording the chooser kind) beside the OLED browser's "View" decision (its `sFbActionViewable` assignment). The lens must offer a text or JSON view exactly when the OLED offers View: `.log`, `.md`, `.ini`, `.yaml`, `.html`, `.c` and the other OLED text types open in both, BMP/JPEG open only on the lens, and png, bin, `.tar.gz` and names without an extension get Info/Rename/Delete only. A second harness runs the OLED browser's rename/delete helpers (`fbRenameSelected`, `fbDeleteSelected`, `fbSubmitMutate`) against FileManager and executor doubles: both submit the user-level `filerename` and one-shot `filedelete ... confirm` commands with the selected entry's full path (a 70-byte SD name), re-scan only after the executor's `OK`, report the executor's admin refusal, give the handlers' path-policy refusal ("File does not exist or access denied") its own result and the toast "Not found or denied" (through `fbToastMutate`, which the harness also compiles), and submit nothing for an unresolved selection or a quote. Source contracts check that the OLED browser no longer calls `FileManager::renameItem`/`deleteItem`, that its prepare pass routes Rename/Delete through those helpers under the identity guard, that guests are still stopped on the input path, and that neither browser keeps a private extension list. `--component <dir>` reads the production sources from another tree; the f4cc542 sources fail the agreement checks (the lens gives `.log` and `.md` no viewer while the OLED offers View) and the contracts (direct FileManager rename/delete). No device, executor or FileManager is run.
+`file_kind` compiles the shared classifier `System_FileKind.h` and, over one table of names, the production G2 Files page file-tap branch (the `else` block of `g2FilesHandleTap` with the classification it calls, `showFileChooser` recording the chooser kind) beside the OLED browser's "View" decision (its `sFbActionViewable` assignment). The lens must offer a text or JSON view exactly when the OLED offers View: `.log`, `.md`, `.ini`, `.yaml`, `.html`, `.c` and the other OLED text types open in both, BMP/JPEG open only on the lens, and png, bin, `.tar.gz` and names without an extension get Info/Rename/Delete only. A second harness runs the OLED browser's rename/delete helpers (`fbRenameSelected`, `fbDeleteSelected`, `fbSubmitMutate`) against FileManager and executor doubles: both submit the user-level `filerename` and one-shot `filedelete ... confirm` commands with the selected entry's full path (a 70-byte SD name), re-scan only after the executor's `OK`, report the executor's admin refusal, give the handlers' path-policy refusal ("File does not exist or access denied") its own result and the toast "Not found or denied" (through `fbToastMutate`, which the harness also compiles), toast the handler's reason for any other failed rename or delete (the caller's "Rename failed"/"Delete failed" only when the reply carries none), and submit nothing for an unresolved selection or a quote. Source contracts check that the OLED browser no longer calls `FileManager::renameItem`/`deleteItem`, that its prepare pass routes Rename/Delete through those helpers under the identity guard, that guests are still stopped on the input path, and that neither browser keeps a private extension list. `--component <dir>` reads the production sources from another tree; the f4cc542 sources fail the agreement checks (the lens gives `.log` and `.md` no viewer while the OLED offers View) and the contracts (direct FileManager rename/delete). No device, executor or FileManager is run.
 
 ## Shared JSON Pretty view
 
@@ -5442,8 +5456,10 @@ The checks:
 - Accept and Reject name the shown sender's MAC. If another sender replaced the
   request while the dialog was up, Accept does not pair it; the newer request
   opens next under its own name.
-- A re-sent request (new arrival time) opens once more; an expired one answers
-  quietly.
+- A re-sent request (new arrival time) opens once more; for an expired one the
+  owner refuses the answer and its reason ("No pending pair request. Open
+  discovery with 'espnowpairmode' on both devices and send the request again.")
+  is toasted once.
 - A session boundary drops the dialog without an answer and the next session
   sees the request once.
 - Idle frames make no role query, and the prompt never reads `users.json`.
@@ -6743,7 +6759,8 @@ password does not fit.
 return free of outside switches. `espnow_remote_ack` compiles the acknowledgement of `espnowremote`: a long
 command shortens the echo, never the request id. `oled_espnow_remote_actions` runs the OLED Device Config remote
 rows: they fill in and open the remote form, and no OLED ESP-NOW action sends a command line whose first word is
-not a registered command. Outside ctest, `tools/webui/tests/test_espnow_remote_page.py` feeds the firmware's real
+not a registered command. The form shows a refusal that leads with "Error" as its reason and any other refusal as
+"Remote not sent". Outside ctest, `tools/webui/tests/test_espnow_remote_page.py` feeds the firmware's real
 replies to the web page's remote file browser.
 
 `espnow_mesh_slots` runs the production `espnowmeshes` subcommands, the meshes settings writer and reader (with the
@@ -6913,7 +6930,8 @@ precedes its online event. The partner's request from before its ENDED does not 
 turn or a later one, and its request 1 after a restart counts on the new session; this device's ENDED names its
 last request, and a request that the partner's late heartbeat sets off right after the ENDED is not made.
 `bondconnect` to the partner already set says how the bond stands when it is not agreed, asks again on the next
-turn and at most every 5 s, and still answers "Already connected" for an agreed partner. `bondAgreementKey` /
+turn and at most every 5 s, and for an agreed partner answers the command replies' Error "already running" while
+the session is up. `bondAgreementKey` /
 `bondAgreementReasonKey` give the text every JSON carries.
 
 `espnow_bond_partner_change` (extended) checks the unasked ENDED: `bonddisconnect`, `bondconnect` to another
@@ -6985,7 +7003,10 @@ the result size and parse, with pending peers, accepted peers and the longest na
 are called by their address, and the name is refused by the three commands; the inbox keeps a frame per sender,
 serves senders in turn and answers every peer that asked; a session that came up gets its peer asked once, after it
 settled, one peer per look, again when the session is renewed, and never back and forth for two sessions with one
-peer. Source rules: `processMetadata` updates the registry record before it looks for a cache slot, the registry writer and reader call the two field
+peer; a group command follows the command reply contract: without encryption nothing is sent, a member whose frame
+is refused makes the reply an `Error:` that names it and the reason (the members it went to still listed), none sent
+is an `Error:` too, and an empty room answers `Error: No devices found ...` with `espnowgroups` as the next step.
+Source rules: `processMetadata` updates the registry record before it looks for a cache slot, the registry writer and reader call the two field
 functions, every place that fills a new record starts it empty, unpair removes the record, `espnowforget`,
 `espnowregenidentity` and both KEY_EX handlers clear the acceptance, `groupCommandRun` sends in one place after the
 membership check and does not read the mesh cache, and the five commands are admin rows.

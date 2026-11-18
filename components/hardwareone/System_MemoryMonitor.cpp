@@ -434,27 +434,32 @@ void sampleMemoryState(bool forceFullScan) {
 const char* cmd_memsample(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  // Check for allocation tracking subcommands
   String args = argsInput;
   args.trim();
-  
-  if (args.startsWith("track ")) {
-    String trackCmd = args.substring(6);
+
+  // Anything after the command name is an allocation tracking subcommand; a
+  // word that is not one is refused instead of answered with a sample.
+  if (args.length() > 0) {
+    static const char* const kTrackUsage =
+        "Error: invalid arguments — Usage: memsample track [on|off|reset|status]";
+    const int space = args.indexOf(' ');
+    if (space < 0 || !args.substring(0, space).equalsIgnoreCase("track")) return kTrackUsage;
+    String trackCmd = args.substring(space + 1);
     trackCmd.trim();
-    
-    if (trackCmd == "on") {
+
+    if (argIsOn(trackCmd)) {
       return memTrackerSetEnabled(true)
           ? "Allocation tracking enabled (cumulative window preserved)"
           : "Error: allocation tracker unavailable";
-    } else if (trackCmd == "off") {
+    } else if (argIsOff(trackCmd)) {
       return memTrackerSetEnabled(false)
           ? "Allocation tracking disabled (cumulative window preserved)"
           : "Error: allocation tracker unavailable";
-    } else if (trackCmd == "reset") {
+    } else if (trackCmd.equalsIgnoreCase("reset")) {
       return memTrackerReset()
           ? "Allocation tracker cumulative window reset"
           : "Error: allocation tracker unavailable";
-    } else if (trackCmd == "status") {
+    } else if (trackCmd.equalsIgnoreCase("status")) {
       MemTrackerSnapshot tracker{};
       if (!memTrackerSnapshot(tracker)) {
         return "Error: allocation tracker unavailable";
@@ -480,11 +485,11 @@ const char* cmd_memsample(const String& argsInput) {
                        (unsigned)tracker.generation);
       return "[Memory] Tracking status displayed";
     } else {
-      return "Error: invalid arguments — Usage: memsample track [on|off|reset|status]";
+      return kTrackUsage;
     }
   }
-  
-  // Default: show memory sample (force full task scan for manual CLI requests)
+
+  // Bare command: show memory sample (force full task scan for manual CLI requests)
   sampleMemoryState(true);
   return "[Memory] Sample displayed";
 }

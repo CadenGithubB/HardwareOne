@@ -1465,11 +1465,11 @@ const char* banListJson() {
     }
   }
   doc["count"] = (int)arr.size();
-  if (doc.overflowed()) return "{\"error\":\"out of memory building the ban list\"}";
-  if (!ensureDebugBuffer()) return "{\"error\":\"reply buffer unavailable\"}";
+  if (doc.overflowed()) return kCommandReplyOutOfMemory;
+  if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
   // Whole document or an explicit error; never a truncated one.
   if (measureJson(doc) >= GLOBAL_DEBUG_BUFFER_SIZE) {
-    return "{\"error\":\"ban list too large for the reply buffer\"}";
+    return "Error: Ban list too large for one reply. Remove entries with unban.";
   }
   serializeJson(doc, getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE);
   return getDebugBuffer();
@@ -2018,10 +2018,25 @@ esp_err_t handleFileRead(httpd_req_t* req) {
   DEBUG_STORAGEF("[handleFileRead] File opened successfully, size: %d bytes", fileSize);
 
   httpd_resp_set_type(req, "text/plain; charset=utf-8");
-  char buf[512];
+  // 4 KB like the view and upload paths: 512 B sent a 16 MB file as 32,768 chunks.
+  // PSRAM-preferred; the httpd task stack (7.5-11 KB) cannot hold it.
+  constexpr size_t kReadBufSize = 4096;
+  std::unique_ptr<char[], void (*)(void*)> readBuf(
+      (char*)ps_alloc(kReadBufSize, AllocPref::PreferPsram, "http.file.read.chunk"), free);
+  char* buf = readBuf.get();
+  if (!buf) {
+    {
+      FsLockGuard fsGuard("handleFileRead");
+      f.close();
+    }
+    httpd_resp_set_status(req, "500 Internal Server Error");
+    httpd_resp_set_type(req, "text/plain");
+    httpd_resp_send(req, "Memory allocation failed", HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+  }
   size_t totalSent = 0;
   int chunkCount = 0;
-  esp_err_t sendErr = streamFileChunks(req, f, buf, sizeof(buf), false, "handleFileRead",
+  esp_err_t sendErr = streamFileChunks(req, f, buf, kReadBufSize, false, "handleFileRead",
                                        &totalSent, &chunkCount);
   if (sendErr == ESP_OK) sendErr = httpd_resp_send_chunk(req, NULL, 0);
   DEBUG_STORAGEF("[handleFileRead] COMPLETE: Sent %d bytes in %d chunks, err=%d",
@@ -2156,7 +2171,13 @@ esp_err_t handleFileWrite(httpd_req_t* req) {
   return ESP_OK;
 }
 
-// Upload file via x-www-form-urlencoded (streamed): path=<fullpath>&binary=<0|1>&content=<urlencoded or base64-urlencoded>
+// Upload a file, streamed. Two body formats:
+//  - raw (Content-Type: application/octet-stream): the body is the file's bytes,
+//    the destination is ?path=. The web file manager and maps upload use this.
+//  - form (x-www-form-urlencoded): path=<fullpath>&binary=<0|1>&content=<urlencoded
+//    or base64-urlencoded>. Kept for the settings import and the model upload.
+// Raw is about 5x faster for SD uploads (no base64/URL decode per character, 27 %
+// fewer bytes on the wire); measured on the P4X-EYE 2026-11-18.
 esp_err_t handleFileUpload(httpd_req_t* req) {
   DEBUG_STORAGEF("[handleFileUpload] START (streaming)");
   uint32_t tStart = millis();
@@ -2188,14 +2209,27 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
   // Falls back to LittleFS if no query param is present (backward-compatible).
   // httpd_query_key_value does NOT percent-decode, so urlDecode() is required.
   VFS::StorageType uploadStorage = VFS::INTERNAL;
+  String queryPath;
   {
     char uploadQuery[256];
     if (httpd_req_get_url_query_str(req, uploadQuery, sizeof(uploadQuery)) == ESP_OK) {
       char pathVal[128];
       if (httpd_query_key_value(uploadQuery, "path", pathVal, sizeof(pathVal)) == ESP_OK) {
-        uploadStorage = VFS::getStorageType(urlDecode(String(pathVal)));
+        queryPath = urlDecode(String(pathVal));
+        uploadStorage = VFS::getStorageType(queryPath);
       }
     }
+  }
+  bool rawBody = false;
+  {
+    char ctype[48] = { 0 };
+    if (httpd_req_get_hdr_value_str(req, "Content-Type", ctype, sizeof(ctype)) == ESP_OK) {
+      rawBody = strncmp(ctype, "application/octet-stream", 24) == 0;
+    }
+  }
+  if (rawBody && queryPath.length() == 0) {
+    sendJsonResponse(req, "{\"success\":false,\"error\":\"Missing ?path= for a raw upload\"}");
+    return ESP_OK;
   }
 
   // If the destination is SD but it isn't mounted, reject early with a clear message.
@@ -2212,7 +2246,7 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
   }
   size_t freeBytes = (size_t)freeBytes64;
   // Estimate actual file size from content length (remove ~33% base64 + URL-encoding overhead)
-  size_t estimatedFileSize = (contentLen * 3) / 4;
+  size_t estimatedFileSize = rawBody ? contentLen : (contentLen * 3) / 4;
   // Dynamic limit: 90% of free space (leave headroom for filesystem metadata)
   size_t maxFileSize = (freeBytes * 9) / 10;
 
@@ -2377,7 +2411,11 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
   };
 
   // Stream receive and parse - use PSRAM for larger buffer (better throughput)
-  const size_t RECV_BUF_SIZE = 4096;  // 4KB instead of 512 bytes
+  // A raw upload writes the buffer to storage as it fills; on the SD card 16 KB
+  // writes measured 760 KB/s against 560 KB/s for 4 KB (P4X-EYE, 2026-11-18).
+  // The 16 KB comes from PSRAM only; boards without PSRAM keep 4 KB of
+  // internal RAM. The form path decodes per character and stays at 4 KB.
+  const size_t RECV_BUF_SIZE = (rawBody && psramFound()) ? 16384 : 4096;
   std::unique_ptr<char[], void (*)(void*)> uploadRecvBuf(
       (char*)ps_alloc(RECV_BUF_SIZE, AllocPref::PreferPsram), free);
   if (!uploadRecvBuf) {
@@ -2397,6 +2435,35 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
 
   // All receive/write exits return here, so finalization has one owner.
   const char* uploadError = [&]() -> const char* {
+    if (rawBody) {
+      path = queryPath;
+      if (!openFileIfNeeded()) return "Invalid path";
+      while (received < contentLen) {
+        // Fill the whole buffer before each write: one receive returns only
+        // what the socket holds (often one or two packets).
+        size_t have = 0;
+        while (have < RECV_BUF_SIZE && received < contentLen) {
+          int toRead = (int)min((size_t)(contentLen - received), RECV_BUF_SIZE - have);
+          int ret = httpd_req_recv(req, buf + have, toRead);
+          if (ret <= 0) {
+            if (ret == HTTPD_SOCK_ERR_TIMEOUT) {
+              if (++idleTimeouts >= 2) return "Recv timeout";
+              continue;
+            }
+            return "Recv error";
+          }
+          idleTimeouts = 0;
+          have += (size_t)ret;
+          received += (size_t)ret;
+        }
+        size_t w = save.file().write((const uint8_t*)buf, have);
+        totalWritten += w;
+        if (w != have) return "Write failed (short write)";
+        if (totalWritten > freeLimit) return "Insufficient storage space";
+        delay(0);
+      }
+      return nullptr;
+    }
     while (received < contentLen) {
       attempts++;
       int toRead = (int)min((size_t)(contentLen - received), RECV_BUF_SIZE);
@@ -3519,7 +3586,7 @@ esp_err_t handleCliCommand(httpd_req_t* req) {
     httpd_resp_set_status(req, "401 Unauthorized");
   } else if (!ok && commandReplyIsAdminRefusal(redactedOut.c_str())) {
     httpd_resp_set_status(req, "403 Forbidden");
-  } else if (!ok || redactedOut.startsWith("Empty command")) {
+  } else if (!ok) {
     httpd_resp_set_status(req, "400 Bad Request");
   }
   httpd_resp_send(req, directOut.c_str(), HTTPD_RESP_USE_STRLEN);
@@ -5173,8 +5240,7 @@ class SettingsBatchRequestCleanup {
     bool completed = false;
     const bool commandSucceeded =
         submitAndExecuteSync(finalizer, output, &completed);
-    succeeded_ = completed && commandSucceeded &&
-                 !output.startsWith("[ERROR]");
+    succeeded_ = completed && commandSucceeded;
     if (!succeeded_) {
       // A submitted command may still complete after a synchronous timeout;
       // otherwise the settings-batch expiry tick is the bounded fallback.
@@ -5301,7 +5367,11 @@ esp_err_t handleCliBatch(httpd_req_t* req) {
   respDoc["ok"] = false;
   respDoc["count"] = 0;
   JsonArray results = respDoc["results"].to<JsonArray>();
-  bool resultsBuffered = !results.isNull() && !respDoc.overflowed();
+  // Indexes into results[] of the commands the executor reported as failed,
+  // so that a page does not have to judge a reply by its text.
+  JsonArray failed = respDoc["failed"].to<JsonArray>();
+  bool resultsBuffered =
+      !results.isNull() && !failed.isNull() && !respDoc.overflowed();
   bool batchCommandsCompleted = true;
   bool terminalSettingsSaveConfirmed = false;
   bool batchSessionStillLive =
@@ -5352,6 +5422,7 @@ esp_err_t handleCliBatch(httpd_req_t* req) {
       // Do not retain earlier results after this cookie generation loses
       // authority; a later command in the batch may have revoked it.
       results.clear();
+      failed.clear();
       if (resultsBuffered &&
           !results.add("Error: web session changed before command result delivery.")) {
         resultsBuffered = false;
@@ -5369,11 +5440,30 @@ esp_err_t handleCliBatch(httpd_req_t* req) {
     const String directOut = redactWebCommandResult(
         out, batchSessionStillLive && ctx.sid.length() != 0);
     if (resultsBuffered && !results.add(directOut)) resultsBuffered = false;
+    const bool commandFailed = !commandCompleted || !commandSucceeded;
+    if (commandFailed && resultsBuffered &&
+        !failed.add(static_cast<uint32_t>(results.size() - 1))) {
+      resultsBuffered = false;
+    }
 
     count++;
 
     // If the command killed the HTTP server (e.g. closewifi), bail out
     if (server == NULL) break;
+
+    // An interactive pair whose command was refused, or did not open a
+    // confirmation prompt, ends here: the answer is not run as a command of
+    // its own, and its slot repeats the command's reply.
+    if (interactiveBatch && count == 1 &&
+        (!commandSucceeded ||
+         !cliModeOwnedBySession(ctx.transport, batchSessionEpoch))) {
+      if (resultsBuffered && !results.add(directOut)) resultsBuffered = false;
+      if (commandFailed && resultsBuffered &&
+          !failed.add(static_cast<uint32_t>(results.size() - 1))) {
+        resultsBuffered = false;
+      }
+      break;
+    }
 
     vTaskDelay(pdMS_TO_TICKS(2));
   }
@@ -5402,7 +5492,7 @@ esp_err_t handleCliBatch(httpd_req_t* req) {
     return ESP_OK;
   }
 
-  // Build response: {"ok":true,"count":N,"results":["out0","out1",...]}
+  // Build response: {"ok":true,"count":N,"results":["out0","out1",...],"failed":[i,...]}
   // Use ArduinoJson to safely serialize the output strings (handles escaping)
   respDoc["ok"] = settingsBatchFinalized && batchCommandsCompleted;
   if (!settingsBatchFinalized) {

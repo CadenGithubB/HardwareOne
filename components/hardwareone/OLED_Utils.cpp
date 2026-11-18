@@ -3148,14 +3148,10 @@ bool submitOledCommandForSession(const String& line, TransportSessionEpoch epoch
   return submitCommandAsync(command, callback, context);
 }
 
+// For an action whose caller needs no verdict: a refused or failed command
+// still shows its reason on the toast, as oledRunCommand does.
 void executeOledCommand(const String& argsInput) {
-  Command uc = buildOledCommand(argsInput);
-  String out;
-  bool success = submitAndExecuteSync(uc, out);
-
-  if (!success && out.length() > 0) {
-    DEBUG_DISPLAYF("[OLED_CMD] Command failed: %s", out.c_str());
-  }
+  (void)oledRunCommand(argsInput);
 }
 
 // True when `epoch` is still the live display session, checked under the
@@ -4259,7 +4255,9 @@ const char* cmd_oled_enabled(const String& argsInput) {
       if (initOledDisplay()) {
         broadcastOutput("OLED display started");
       } else {
-        return "Error: Failed to initialize OLED display. Check wiring.";
+        // The setting was stored above and stays on; the reply says so.
+        return "Error: Failed to initialize OLED display. Check wiring, then run oledstart. "
+               "The setting is stored as on.";
       }
     } else {
       gOledRunning = true;
@@ -4285,32 +4283,15 @@ const char* cmd_oled_enabled(const String& argsInput) {
   return getDebugBuffer();
 }
 
-const char* cmd_oled_bootmode(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-  String _arg = argsInput; _arg.trim();
-  if (_arg.length() == 0) return "Error: invalid arguments — Usage: oledbootmode <logo|status|sensors|thermal|network|mesh|off>";
-  const char* p = _arg.c_str();
-  // Case-insensitive compare for mode names
-  if (strncasecmp(p, "logo", 4) == 0) {
-    setSetting(gSettings.oledBootMode, "logo");
-  } else if (strncasecmp(p, "status", 6) == 0) {
-    setSetting(gSettings.oledBootMode, "status");
-  } else if (strncasecmp(p, "sensors", 7) == 0) {
-    setSetting(gSettings.oledBootMode, "sensors");
-  } else if (strncasecmp(p, "thermal", 7) == 0) {
-    setSetting(gSettings.oledBootMode, "thermal");
-  } else if (strncasecmp(p, "network", 7) == 0) {
-    setSetting(gSettings.oledBootMode, "network");
-  } else if (strncasecmp(p, "mesh", 4) == 0) {
-    setSetting(gSettings.oledBootMode, "mesh");
-  } else if (strncasecmp(p, "off", 3) == 0) {
-    setSetting(gSettings.oledBootMode, "off");
-  } else {
-    return "Error: OLED boot mode must be logo|status|sensors|thermal|network|mesh|off";
+// The mode words oleddefaultmode stores. Returns the stored
+// spelling for one whole word in any letter case, nullptr for anything else.
+static const char* oledStartModeWord(const String& arg) {
+  static const char* const kWords[] = {"logo", "status", "sensors", "thermal",
+                                       "network", "mesh", "off"};
+  for (const char* word : kWords) {
+    if (strcasecmp(arg.c_str(), word) == 0) return word;
   }
-  snprintf(getDebugBuffer(), 1024, "OLED boot mode set to %s", gSettings.oledBootMode.c_str());
-  return getDebugBuffer();
+  return nullptr;
 }
 
 const char* cmd_oled_defaultmode(const String& argsInput) {
@@ -4318,25 +4299,9 @@ const char* cmd_oled_defaultmode(const String& argsInput) {
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   String _arg = argsInput; _arg.trim();
   if (_arg.length() == 0) return "Error: invalid arguments — Usage: oleddefaultmode <logo|status|sensors|thermal|network|mesh|off>";
-  const char* p = _arg.c_str();
-  // Case-insensitive compare for mode names
-  if (strncasecmp(p, "logo", 4) == 0) {
-    setSetting(gSettings.oledDefaultMode, "logo");
-  } else if (strncasecmp(p, "status", 6) == 0) {
-    setSetting(gSettings.oledDefaultMode, "status");
-  } else if (strncasecmp(p, "sensors", 7) == 0) {
-    setSetting(gSettings.oledDefaultMode, "sensors");
-  } else if (strncasecmp(p, "thermal", 7) == 0) {
-    setSetting(gSettings.oledDefaultMode, "thermal");
-  } else if (strncasecmp(p, "network", 7) == 0) {
-    setSetting(gSettings.oledDefaultMode, "network");
-  } else if (strncasecmp(p, "mesh", 4) == 0) {
-    setSetting(gSettings.oledDefaultMode, "mesh");
-  } else if (strncasecmp(p, "off", 3) == 0) {
-    setSetting(gSettings.oledDefaultMode, "off");
-  } else {
-    return "Error: OLED default mode must be logo|status|sensors|thermal|network|mesh|off";
-  }
+  const char* word = oledStartModeWord(_arg);
+  if (!word) return "Error: OLED default mode must be logo|status|sensors|thermal|network|mesh|off";
+  setSetting(gSettings.oledDefaultMode, word);
   snprintf(getDebugBuffer(), 1024, "OLED default mode set to %s", gSettings.oledDefaultMode.c_str());
   return getDebugBuffer();
 }
@@ -4407,29 +4372,12 @@ const char* cmd_oled_thermalscale(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   String _arg = argsInput; _arg.trim();
-  if (_arg.length() == 0) return "Error: invalid arguments — Usage: oledthermalscale <0.1..10.0>";
-  const char* p = _arg.c_str();
-  float f = strtof(p, nullptr);
-  if (f < 0.1 || f > 10.0) return "Error: OLED thermal scale must be 0.1..10.0";
+  if (_arg.length() == 0) return "Error: invalid arguments — Usage: oledthermalscale <1.0..10.0>";
+  float f = 0.0f;
+  if (!parseFloatArg(_arg, f)) return kCommandReplyNotADecimal;
+  if (f < 1.0f || f > 10.0f) return "Error: OLED thermal scale must be 1.0..10.0. Example: oledthermalscale 2.5";
   setSetting(gSettings.oledThermalScale, f);
   snprintf(getDebugBuffer(), 1024, "OLED thermal scale set to %.2f", f);
-  return getDebugBuffer();
-}
-
-const char* cmd_oled_thermalcolormode(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-  String _arg = argsInput; _arg.trim();
-  if (_arg.length() == 0) return "Error: invalid arguments — Usage: oledthermalcolormode <3level|grayscale>";
-  const char* p = _arg.c_str();
-  if (strncasecmp(p, "3level", 6) == 0) {
-    setSetting(gSettings.oledThermalColorMode, "3level");
-  } else if (strncasecmp(p, "grayscale", 9) == 0) {
-    setSetting(gSettings.oledThermalColorMode, "grayscale");
-  } else {
-    return "Error: OLED thermal color mode must be 3level|grayscale";
-  }
-  snprintf(getDebugBuffer(), 1024, "OLED thermal color mode set to %s", gSettings.oledThermalColorMode.c_str());
   return getDebugBuffer();
 }
 
@@ -4442,7 +4390,7 @@ const char* cmd_oledstart(const String& argsInput) {
 
   if (oledConnected) {
     broadcastOutput("OLED display already running");
-    return "OK";
+    return "Error: The OLED display is already running. Stop it first with 'closeoled' to restart it.";
   }
 
   if (initOledDisplay()) {
@@ -4456,10 +4404,10 @@ const char* cmd_oledstop(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   const bool wasConnected = oledConnected;
-  stopOledDisplay();
+  stopOledDisplay();  // also clears a display session left without a display
   broadcastOutput(wasConnected ? "OLED display stopped"
                                : "OLED display not running; session cleared");
-  return "OK";
+  return wasConnected ? "OK" : "Error: The OLED display is not running. Start it with 'openoled'.";
 }
 
 // =============================================================================
@@ -4647,12 +4595,6 @@ const char* cmd_oledmode(const String& argsInput) {
 
   mode.toLowerCase();
 
-  // If boot sequence is still running, mark that user overrode it
-  if (oledBootModeActive) {
-    userOverrodeBootMode = true;
-    DEBUG_DISPLAYF("[OLED_MODE] User overrode boot sequence - will not auto-transition");
-  }
-
   // Slug -> enum lookup (validates the slug in one place).
   OledMode target = modeFromSlug(mode);
   if ((int)target == -1) {
@@ -4668,6 +4610,12 @@ const char* cmd_oledmode(const String& argsInput) {
     return getDebugBuffer();
   }
 
+  // If boot sequence is still running, mark that user overrode it
+  if (oledBootModeActive) {
+    userOverrodeBootMode = true;
+    DEBUG_DISPLAYF("[OLED_MODE] User overrode boot sequence - will not auto-transition");
+  }
+
   // The owner task applies the transition (auth gating + debug log inside
   // requestOledMode) and the per-mode side effects (oledRunOwnerRequest). CLI
   // transitions do not push to the back-nav stack (explicit user destination).
@@ -4680,7 +4628,7 @@ const char* cmd_oledmode(const String& argsInput) {
   // Reports the requested mode; a display-auth or guest gate, or the mode's own
   // entry rule, may redirect it when the owner applies it.
   if (ensureDebugBuffer()) {
-    snprintf(getDebugBuffer(), 1024, "OLED mode: %s", getOledModeName(target));
+    snprintf(getDebugBuffer(), 1024, "OLED mode requested: %s", getOledModeName(target));
     broadcastOutput(getDebugBuffer());
   }
   updateOledDisplay();
@@ -6715,14 +6663,12 @@ const CommandEntry oledCommands[] = {
   { "oledclear", "Clear OLED display.", false, cmd_oledclear },
   { "oledstatus", "Show OLED status. (add 'json' for JSON output)", false, cmd_oledstatus },
   { "oledenabled", "Enable/disable OLED: <0|1>", false, cmd_oled_enabled, "Usage: oledenabled <0|1>" },
-  { "oledbootmode", "OLED boot mode: <logo|status|sensors|thermal|network|mesh|off>", false, cmd_oled_bootmode, "Usage: oledbootmode <logo|status|sensors|thermal|network|mesh|off>" },
   { "oleddefaultmode", "OLED default mode: <logo|status|sensors|thermal|network|mesh|off>", false, cmd_oled_defaultmode, "Usage: oleddefaultmode <logo|status|sensors|thermal|network|mesh|off>" },
   { "oledbootduration", "Boot animation duration (ms): <500-10000>", false, cmd_oled_bootduration, "Usage: oledbootduration <500..10000>" },
   { "oledupdateinterval", "Display update interval (ms): <10-1000>", false, cmd_oled_updateinterval, "Usage: oledupdateinterval <10..1000>" },
   { "oledbrightness", "Display brightness: <0-255>", false, cmd_oled_brightness, "Usage: oledbrightness <0..255>" },
   { "oledflip",       "Flip display 180°: [on|off|toggle]", false, cmd_oled_flip, "Usage: oledflip [on|off|toggle]" },
-  { "oledthermalscale", "Thermal image scale: <0.1-10.0>", false, cmd_oled_thermalscale, "Usage: oledthermalscale <0.1..10.0>" },
-  { "oledthermalcolormode", "Thermal color mode: <3level|grayscale>", false, cmd_oled_thermalcolormode, "Usage: oledthermalcolormode <3level|grayscale>" },
+  { "oledthermalscale", "Thermal image scale: <1.0-10.0>", false, cmd_oled_thermalscale, "Usage: oledthermalscale <1.0..10.0>" },
 };
 
 const size_t oledCommandsCount = sizeof(oledCommands) / sizeof(oledCommands[0]);

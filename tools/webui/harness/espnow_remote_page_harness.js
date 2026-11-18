@@ -1,6 +1,7 @@
 /* Behavioral harness for the remote-command parts of the shipping
  * web_assets/espnow-core.js: espnowRemoteAck, doRemoteExec and the remote file
- * browser (browseRemoteFiles).
+ * browser (browseRemoteFiles), and one command sent with hw.postFormText
+ * (doBroadcast) for the shape of a refused command.
  *
  * The page talks to a fake device. What the fake device answers to
  * `espnowremote` is not written here: tools/webui/tests/test_espnow_remote_page.py
@@ -93,10 +94,18 @@ var hw = {
         device.posted.push(form && form.cmd);
         return P(cliResponse());
     },
+    /* As the shipped hw.postFormText (WebServer_Utils.cpp): a refused command
+     * (HTTP 400) rejects with the reply as the message, its "Error: " lead
+     * taken off, and carries the status and the whole reply. */
     postFormText: function (url, form) {
         device.posted.push(form && form.cmd);
         var r = cliResponse();
-        return r.ok ? P(device.cliReply) : P(new Error('HTTP ' + r.status), true);
+        if (r.ok) return P(device.cliReply);
+        var m = String(device.cliReply || '').trim().replace(/^Error:\s*/, '');
+        var e = new Error(m || ('HTTP ' + r.status));
+        e.status = r.status;
+        e.reply = device.cliReply;
+        return P(e, true);
     },
     fetchJSON: function (url) {
         device.fetches.push(url);
@@ -287,9 +296,10 @@ check('C2 a text acknowledgement leads to the listing as well', explorerCalls.le
 resetScenario();
 device.cliReply = ack.text;
 browse('/');
-device.store = [record(MAC, ack.reqId, 'Auth failed')];
+var refusal = 'Error: Login failed. Check the user name and password of the target device.';
+device.store = [record(MAC, ack.reqId, refusal)];
 advance(5000);
-check('C3 the peer\'s refusal is shown', has(panel(), 'Auth failed') && has(status(), 'Auth failed') &&
+check('C3 the peer\'s refusal is shown', has(panel(), refusal) && has(status(), refusal) &&
       explorerCalls.length === 0, panel() + ' // ' + status());
 check('C3 the wait ends after the peer\'s answer', timers.length === 0, timers.length);
 
@@ -391,6 +401,23 @@ el('remote-pass-' + MAC).value = '';
 browse('/');
 check('C13 a missing password sends nothing', device.posted.length === 0 && has(status(), 'username and password'),
       status());
+
+/* ---- D: a command sent with hw.postFormText ------------------------------- */
+/* D1: a refused command reaches the page as a rejection that carries the
+ * firmware's reason; the page shows that reason, not the HTTP status. */
+resetScenario();
+var refused = fixture.httpRefusals[0];
+device.cliReply = refused;
+device.cliStatus = 400;
+el('broadcast-msg').value = 'hello';
+el('broadcast-status').textContent = '';
+win.doBroadcast();
+check('D1 a refused broadcast shows the firmware reason',
+      device.posted.length === 1 && device.posted[0] === 'espnowbroadcast hello' &&
+      /^Error: \S/.test(refused) &&
+      el('broadcast-status').textContent === 'Broadcast failed: ' + refused.replace(/^Error:\s*/, '') &&
+      el('broadcast-msg').value === 'hello',
+      el('broadcast-status').textContent);
 
 check('no page callback threw', absorbed.length === 0, absorbed.join(' | '));
 check('no console errors', consoleErrors.length === 0, consoleErrors.join(' | '));

@@ -8,7 +8,9 @@
 // entry's full path that FileManager resolves (not the bounded display name);
 // re-scan only after the executor's "OK"; submit nothing for an unresolved
 // selection or a quote the command line cannot carry. The handlers' path-policy
-// refusal gets its own toast instead of the generic failure.
+// refusal gets its own toast; any other failure toasts the handler's reason.
+#include "OLED_MessageText.h"  // the real toast constants and oled_message::reason()
+
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -61,13 +63,27 @@ static bool executeOledCommandWithResult(const String& line, char* out, size_t o
 }
 
 // OLED toast (OLED_UI.cpp): keeps the last message shown.
-namespace oled_message { constexpr uint32_t kErrorDurationMs = 8000; }
 enum class OledUiIcon : uint8_t { NONE, INFO, WARNING, ERROR, SUCCESS, QUESTION };
 static std::string lastToast;
 static void oledToastShow(const char* message, uint32_t /*durationMs*/ = 3000,
                           OledUiIcon /*icon*/ = OledUiIcon::NONE) {
   lastToast = message ? message : "";
 }
+
+// oledCommandReplyText (OLED_Utils.cpp) for a failed command, on the real
+// oled_message::reason(): the reply loses its error token and keeps its first
+// line, and a reply without a reason gets the fallback. The admin gate's fixed
+// text is not reached from the file browser (AdminOnly has its own toast); the
+// real function has its cases in oled_command_feedback_harness.cpp.
+[[maybe_unused]] static void oledCommandReplyText(bool, const char* reply, const char*, const char* failText,
+                                                  char* out, size_t outSize) {
+  const char* reason = oled_message::reason(reply ? reply : "");
+  const size_t lineLength = std::strcspn(reason, "\r\n");
+  if (lineLength == 0) std::snprintf(out, outSize, "%s", failText ? failText : "");
+  else std::snprintf(out, outSize, "%.*s", static_cast<int>(lineLength), reason);
+}
+// The kept reply of the last rename or delete (OLED_Mode_FileBrowser.cpp).
+[[maybe_unused]] static char sFbMutateReply[96] = {0};
 
 // INSERT_OLED_FILE_COMMANDS
 
@@ -160,10 +176,22 @@ static void pathPolicyRefusal() {
   CHECK(lastToast == "Not found or denied");
   fbToastMutate(FbMutateResult::AdminOnly, "Deleted", "Delete failed");
   CHECK(lastToast == "Admin only");
+  // A failure toasts the kept reply of the delete above.
   fbToastMutate(FbMutateResult::Failed, "Deleted", "Delete failed");
-  CHECK(lastToast == "Delete failed");
+  CHECK(lastToast == "Failed to delete file (denied or fs error): File does not exist or access denied");
   fbToastMutate(FbMutateResult::Done, "Deleted", "Delete failed");
   CHECK(lastToast == "Deleted");
+
+  // A reply without a reason (none, or one that does not lead with "Error")
+  // gets the caller's text.
+  reset("/notes/a.txt", false, "");
+  CHECK(fbDeleteSelected() == FbMutateResult::Failed);
+  fbToastMutate(FbMutateResult::Failed, "Deleted", "Delete failed");
+  CHECK(lastToast == "Delete failed");
+  reset("/notes/a.txt", true, "Deleted file: /notes/a.txt");
+  CHECK(fbDeleteSelected() == FbMutateResult::Failed);
+  fbToastMutate(FbMutateResult::Failed, "Deleted", "Delete failed");
+  CHECK(lastToast == "Delete failed");
 }
 
 static void refusedBeforeSubmit() {

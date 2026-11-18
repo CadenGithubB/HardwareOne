@@ -305,10 +305,12 @@ static void oledRefusalToast() {
          "a super-admin refusal is toasted as 'Admin required', toast: '" + gToast + "'");
 
   oledBegin("oled_refusal_toast");
-  gReplies = {{false, "[ERROR] Command timed out"}};
+  gReplies = {{false, "Error: Command timed out after 60 s. It may still finish; check the result "
+                      "before repeating it."}};
   oledManualAdd("HomeNet", "secret12");
-  EXPECT(gToast == "Command timed out",
-         "an [ERROR] reply is toasted without its token, toast: '" + gToast + "'");
+  EXPECT(gToast == "Command timed out after 60 s. It may still finish; check the result before "
+                   "repeating it.",
+         "the executor's timeout is toasted without its token, toast: '" + gToast + "'");
 
   oledBegin("oled_refusal_toast");
   gReplies = {{true, "OK: Saved network 'HomeNet' with priority 1"},

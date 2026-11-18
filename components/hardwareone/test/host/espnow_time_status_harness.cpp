@@ -470,9 +470,11 @@ static void testSender() {
   // The command on a worker, without a clock, with a clock that is not from a real source.
   resetAll();
   addPeer(kPorch, "porch", true);
-  check(sync() == "Error: only the mesh master sends time. This device's role is worker.", "a worker does not send");
+  check(sync() == "Error: Only the mesh master sends time; this device's role is worker. "
+                  "Run 'espnowtimesync' on the mesh master.", "a worker does not send");
   gRole = 2;
-  check(sync() == "Error: only the mesh master sends time. This device's role is backup master.",
+  check(sync() == "Error: Only the mesh master sends time; this device's role is backup master. "
+                  "Run 'espnowtimesync' on the mesh master.",
         "a backup that is not promoted does not send");
   gRole = 1;
   // 55 hours after a boot without a time source the clock reads 1970-01-03:
@@ -480,30 +482,31 @@ static void testSender() {
   for (int64_t clockMs : { int64_t{0}, int64_t{5000}, int64_t{99999000}, int64_t{100001000}, int64_t{200000000},
                            int64_t{946684800000LL}, int64_t{1577836799000LL} }) {
     gClockMs = clockMs;
-    check(sync() == "Error: this device's clock is not set. Nothing sent.", "no time is sent from a clock that is not set");
+    check(sync() == "Error: This device's clock is not set, so nothing was sent. Set it with NTP or 'timeset' and retry.",
+          "no time is sent from a clock that is not set");
     runSender(3000);
     check(gSent.empty(), "and the sender step sends nothing");
     gClockMs = 0;
   }
   check(has(status(), "Role: master. Not sending: this device's clock is not set."), "status: master, clock not set");
   gClockMs = kT0;  // carried over a restart
-  check(has(sync(), "Error: this device's clock is carried over a restart, which is not a real source"),
+  check(has(sync(), "Error: This device's clock is carried over a restart, which is not a real source"),
         "a clock carried over a restart is not passed on");
   check(has(status("json"), "\"sends\":false,\"sendsWhyNot\":\"source_not_real\""), "json: source_not_real");
   otherSourceSets(meshtime::OwnSource::Ring, kT0);
-  check(has(sync(), "Error: this device's clock is ring, which is not a real source (rtc, ntp, manual, cm5)"),
+  check(has(sync(), "Error: This device's clock is ring, which is not a real source (rtc, ntp, manual, cm5)"),
         "ring time is not passed on");
   otherSourceSets(meshtime::OwnSource::Mesh, kT0);
-  check(has(sync(), "this device's clock is mesh, which is not a real source"), "mesh time is not passed on");
+  check(has(sync(), "This device's clock is mesh, which is not a real source"), "mesh time is not passed on");
   runSender(3000);
   check(gSent.empty(), "nothing went out for any of these");
   otherSourceSets(meshtime::OwnSource::Ntp, kT0);
   gClockHeld = true;
-  check(has(sync(), "Error: an NTP reply moved this device's clock by more than a day"), "an unconfirmed NTP jump is not sent");
+  check(has(sync(), "Error: An NTP reply moved this device's clock by more than a day"), "an unconfirmed NTP jump is not sent");
   check(has(status("json"), "\"sendsWhyNot\":\"clock_unconfirmed\""), "json: clock_unconfirmed");
   gClockHeld = false;
   gSettingOn = false;
-  check(sync() == "Error: mesh time is switched off (espnowmeshtime on).", "switched off: nothing is sent");
+  check(sync() == "Error: Mesh time is switched off. Switch it on with 'espnowmeshtime on'.", "switched off: nothing is sent");
   gSettingOn = true;
   gMeshOn = false;
   check(sync() == "Error: Mesh mode not enabled. Use 'espnowmode mesh' first.", "without mesh mode nothing is sent");
@@ -574,7 +577,9 @@ static void testSender() {
   resetAll();
   gRole = 1;
   otherSourceSets(meshtime::OwnSource::Rtc, kT0);
-  check(sync() == "OK: no paired devices to send time to.", "no paired devices");
+  check(sync() == "Error: Time sync was not sent to any mesh peer: no device is paired. "
+                 "Pair one with 'espnowpairsecure' and retry.",
+        "no paired devices is an Error (the command reply contract)");
   // The step is driven by the 32-bit uptime across its wrap.
   resetAll();
   gRole = 1;

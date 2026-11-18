@@ -1301,10 +1301,11 @@ const char* cmd_outg2(const String& argsInput) {
   a.trim();
   int v = -1;
   if (a.length()) {
-    v = parseBoolArg(a);  // anything else shows the status
+    v = parseBoolArg(a);
+    if (v < 0) return kCommandReplyNotOnOff;
   }
   if (v < 0) {
-    // Show current status
+    // Bare command: show current status
     bool enabled = (gOutputFlags & MSG_ROUTE_G2) != 0;
     bool connected = isG2Connected();
     EXT_RAM_BSS_ATTR static char buf[128];
@@ -1331,7 +1332,8 @@ const char* cmd_outble(const String& argsInput) {
   a.trim();
   int v = -1;
   if (a.length()) {
-    v = parseBoolArg(a);  // anything else shows the status
+    v = parseBoolArg(a);
+    if (v < 0) return kCommandReplyNotOnOff;
   }
   if (v < 0) {
     bool enabled = (gOutputFlags & MSG_ROUTE_BLE) != 0;
@@ -1351,7 +1353,7 @@ const char* cmd_outble(const String& argsInput) {
     return "BLE broadcast output disabled";
   }
   #else
-  return "Bluetooth not compiled (ENABLE_BLUETOOTH=0)";
+  return "Error: Bluetooth is not in this build. Use a build with ENABLE_BLUETOOTH.";
   #endif
 }
 
@@ -1388,8 +1390,8 @@ const char* cmd_debugverbose(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   CommandArgs ca(argsInput);
   if (ca.count() == 0) return gDebugVerbose ? "debugVerbose is ON" : "debugVerbose is OFF";
-  int v = ca.argInt(0, -1);
-  if (v != 0 && v != 1) return "Error: invalid arguments — Usage: debugverbose <0|1>";
+  const int v = parseBoolArg(ca.arg(0));
+  if (v < 0) return kCommandReplyNotOnOff;
   gDebugVerbose = (v == 1);
   return gDebugVerbose ? "debugVerbose enabled" : "debugVerbose disabled";
 }
@@ -1415,7 +1417,7 @@ const char* cmd_memorysampleintervalsec(const String& argsInput) {
   }
   int v = 0;
   if (!parseIntArg(valStr, v)) return kCommandReplyNotANumber;
-  if (v < 0 || v > 300) return "Interval must be 0-300 seconds (0=disabled)";
+  if (v < 0 || v > 300) return "Error: Interval must be 0 to 300 seconds. Use 0 to turn sampling off.";
   setDebugSetting(gSettings.memorySampleIntervalSec, v);
   snprintf(gDebugBuffer, 1024, "Memory sample interval set to %d sec%s", v, v == 0 ? " (disabled)" : "");
   return gDebugBuffer;
@@ -1619,8 +1621,9 @@ void dbgRecomputeAllParents() {
 // dispatchers. dbgFlagCmd()/dbgSubCmd() reproduce the pre-C3 handler bodies
 // exactly (temp = live mask bit only; persist = gSettings + bit; bitless subs
 // always write their gDebugSubFlags runtime bool and recompute the family
-// parent) with ONE deliberate change: a STRICT 0|1 contract — any other int is
-// rejected with the same error shape the already-strict handlers used. The
+// parent) with ONE deliberate change: a STRICT 0|1 contract — a missing value
+// or anything that is not 0/1 (on/off) is rejected with the same error shape
+// the already-strict handlers used. The
 // non-uniform side effects (HTTPS TLS log levels; the SR level-sync; the
 // LLM/SR/Bluetooth family recomputes) live in dbgApplyHook(), keyed by
 // DbgFlagIdx. Bespoke handlers that do something non-mechanical stay
@@ -1697,6 +1700,10 @@ static void dbgApplyHook(DbgFlagIdx idx, bool modeTemp, int v, bool* settingPtr)
   }
 }
 
+// A second word other than temp or runtime is refused; it is not read as "save".
+static constexpr char kDbgUnknownMode[] =
+    "Error: Unknown mode. Use temp or runtime, or leave it out to save the change.";
+
 // Shared dispatcher for every flag-backed debug command (parent or bit-sub).
 // Reproduces cmd_debugsubflag_impl exactly, plus the strict 0|1 contract and
 // the dbgApplyHook side effect.
@@ -1706,11 +1713,14 @@ static const char* dbgFlagCmd(DbgFlagIdx idx, const String& argsInput) {
   CommandArgs ca(argsInput);
   String mode = ca.arg(1);
   bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  if (v != 0 && v != 1) {
+  // A missing value or one that is not 0/1 (on/off) is refused: it never
+  // switches the flag off.
+  const int v = ca.has(0) ? parseBoolArg(ca.arg(0)) : -1;
+  if (v < 0) {
     snprintf(buf, sizeof(buf), "Error: invalid arguments — Usage: %s <0|1> [temp|runtime]", kDbgCmdIdent[idx]);
     return buf;
   }
+  if (ca.count() > 2 || (ca.has(1) && !modeTemp)) return kDbgUnknownMode;
   const DebugFlagMask flagBit = kDbgMask[idx];
   bool* settingPtr = kDbgSettingPtr[idx];
   const char* name = kDbgCmdRetName[idx];
@@ -1738,11 +1748,12 @@ static const char* dbgSubCmd(DbgSubIdx sidx, const String& argsInput) {
   CommandArgs ca(argsInput);
   String mode = ca.arg(1);
   bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  if (v != 0 && v != 1) {
+  const int v = ca.has(0) ? parseBoolArg(ca.arg(0)) : -1;
+  if (v < 0) {
     snprintf(buf, sizeof(buf), "Error: invalid arguments — Usage: %s <0|1> [temp|runtime]", kDbgSubCmdIdent[sidx]);
     return buf;
   }
+  if (ca.count() > 2 || (ca.has(1) && !modeTemp)) return kDbgUnknownMode;
   *kDbgSubRuntimePtr[sidx] = (v != 0);
   if (!modeTemp) setDebugSetting(*kDbgSubSettingPtr[sidx], (bool)(v != 0));
   dbgRecomputeParent(kDbgSubParentIdx[sidx]);
@@ -1855,31 +1866,45 @@ static String generateSystemLogFilename() {
 }
 
 // Parse a flags= mask string into a DebugFlagMask. Accepts either a single hex
-// string (up to 64 digits) or colon-separated 64-bit words high-to-low.
+// string (up to 64 digits) or one to four colon-separated 64-bit words
+// high-to-low (up to 16 digits each). A word may lead with 0x. Anything else
+// (an empty word, a character that is not a hex digit, too many digits or
+// words) fails and leaves `out` untouched.
 bool parseSystemLogFlags(const String& flagsStr, DebugFlagMask& out) {
-  auto stripHexPrefix = [](const String& s) -> String {
-    return (s.startsWith("0x") || s.startsWith("0X")) ? s.substring(2) : s;
+  auto hexValue = [](char c) -> int {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
   };
-  auto parseHex64 = [](const String& s) -> uint64_t {
-    return strtoull(s.c_str(), nullptr, 16);
-  };
+  const char* begin = flagsStr.c_str();
+  const char* end = begin + strlen(begin);
+  while (begin < end && (*begin == ' ' || *begin == '\t')) ++begin;
+  while (end > begin && (end[-1] == ' ' || end[-1] == '\t')) --end;
+  const bool colonForm = memchr(begin, ':', (size_t)(end - begin)) != nullptr;
+  const size_t maxDigits = colonForm ? 16 : 64;
   uint64_t w[4] = {0, 0, 0, 0};  // w[0] = bits 0-63 ... w[3] = bits 192-255
-  if (flagsStr.indexOf(':') >= 0) {
-    String rest = flagsStr;
-    for (int wi = 0; wi < 4 && rest.length() > 0; ++wi) {
-      int colon = rest.lastIndexOf(':');
-      w[wi] = parseHex64(stripHexPrefix(colon >= 0 ? rest.substring(colon + 1) : rest));
-      if (colon < 0) break;
-      rest = rest.substring(0, colon);
+  // Walk the words from the last (lowest) to the first.
+  const char* wordEnd = end;
+  for (int word = 0;; ++word) {
+    if (word >= 4) return false;
+    const char* wordBegin = begin;
+    if (colonForm) {
+      wordBegin = wordEnd;
+      while (wordBegin > begin && wordBegin[-1] != ':') --wordBegin;
     }
-  } else {
-    String hex = stripHexPrefix(flagsStr);
-    if (hex.length() == 0) return false;
-    for (int wi = 0; wi < 4 && hex.length() > 0; ++wi) {
-      unsigned cut = hex.length() > 16 ? hex.length() - 16 : 0;
-      w[wi] = parseHex64(hex.substring(cut));
-      hex = hex.substring(0, cut);
+    const char* digits = wordBegin;
+    if (wordEnd - digits >= 2 && digits[0] == '0' && (digits[1] == 'x' || digits[1] == 'X')) digits += 2;
+    const size_t count = (size_t)(wordEnd - digits);
+    if (count == 0 || count > maxDigits) return false;
+    for (size_t i = 0; i < count; ++i) {
+      const int value = hexValue(*(wordEnd - 1 - i));
+      if (value < 0) return false;
+      const size_t nibble = (size_t)word * 16 + i;
+      w[nibble / 16] |= (uint64_t)value << (4 * (nibble % 16));
     }
+    if (wordBegin == begin) break;
+    wordEnd = wordBegin - 1;  // step over the colon
   }
   out = ((DebugFlagMask)w[3] << 192) | ((DebugFlagMask)w[2] << 128) |
         ((DebugFlagMask)w[1] << 64)  | (DebugFlagMask)w[0];
@@ -2005,7 +2030,7 @@ const char* cmd_log(const String& argsInput) {
   // Handle 'stop' subcommand
   if (subCmd == "stop") {
     if (!gSystemLogRunning) {
-      return "Error: System logging is not running";
+      return "Error: System logging is not running. Start it with 'log start'.";
     }
     
     // Close the handle and retire the path under ONE lock hold. The debug
@@ -2036,7 +2061,7 @@ const char* cmd_log(const String& argsInput) {
       return "Error: system logging is disabled - run 'systemlogenabled 1' first";
     }
     if (gSystemLogRunning) {
-      return "System logging already running. Use 'log stop' first.";
+      return "Error: System logging is already running. Run log stop first.";
     }
     
     // Ensure any previous file handle is closed (safety check)
@@ -2064,12 +2089,13 @@ const char* cmd_log(const String& argsInput) {
       String token = ca.arg(i);
       if (token.startsWith("flags=")) {
         if (!parseSystemLogFlags(token.substring(6), debugFlags)) {
-          return "Error: invalid flags= mask";
+          return "Error: flags= is not a hex mask. Give up to 64 hex digits, for example flags=0x15.";
         }
         flagsSet = true;
       } else if (token.startsWith("tags=")) {
-        String tagsStr = token.substring(5);
-        if (!parseIntArg(tagsStr, categoryTags)) return kCommandReplyNotANumber;
+        const int tags = parseBoolArg(token.substring(5));
+        if (tags < 0) return kCommandReplyNotOnOff;
+        categoryTags = tags;
       } else if (token.length() > 0 && !hasFilepath) {
         // The log path must be a quoted token (uniform quoted-path rule); a bare
         // token here is almost certainly an unquoted path.
@@ -2077,6 +2103,8 @@ const char* cmd_log(const String& argsInput) {
           return "Error: log path must be in quotes, e.g. log start \"/logging_captures/system/sys.txt\"";
         filepath = token;
         hasFilepath = true;
+      } else {
+        return "Error: Unknown log start argument. Use a quoted path, flags=0x... or tags=0|1.";
       }
     }
 
@@ -2094,27 +2122,6 @@ const char* cmd_log(const String& argsInput) {
     if (!VFS::pathInCaptureTree(filepath)) {
       return "Error: Filepath must be inside " CAPTURE_DIR " or /sd" CAPTURE_DIR
              " (e.g., " CAPTURE_DIR_SYSTEM "/system.log)";
-    }
-    
-    // Apply debug flags if specified; otherwise restore last-used system-log mask
-    if (flagsSet) {
-      gDebugFlags = debugFlags;
-      setSetting(gSettings.systemLogFlags, formatSystemLogFlags(debugFlags));
-      char flagsText[80];
-      formatSystemLogFlags(gDebugFlags, flagsText, sizeof(flagsText));
-      char flagsMsg[160];
-      snprintf(flagsMsg, sizeof(flagsMsg), "Debug flags set to: %s", flagsText);
-      broadcastOutput(flagsMsg);
-    } else {
-      systemLogApplyPersistedFlags();
-    }
-    
-    // Apply category tags setting (arg overrides, otherwise use persisted setting)
-    if (categoryTags >= 0) {
-      gSystemLogCategoryTags = (categoryTags != 0);
-      setSetting(gSettings.systemLogCategoryTags, gSystemLogCategoryTags);
-    } else {
-      gSystemLogCategoryTags = gSettings.systemLogCategoryTags;
     }
     
     // Ensure directory exists. RECURSIVE (matching sensorlog's setup path):
@@ -2158,6 +2165,29 @@ const char* cmd_log(const String& argsInput) {
       f.close();
     }
     fsUnlock();
+
+    // The file exists: only now change the live and saved mask and the tags
+    // setting, so a start that failed above leaves them as they were.
+    // Apply debug flags if specified; otherwise restore last-used system-log mask
+    if (flagsSet) {
+      gDebugFlags = debugFlags;
+      setSetting(gSettings.systemLogFlags, formatSystemLogFlags(debugFlags));
+      char flagsText[80];
+      formatSystemLogFlags(gDebugFlags, flagsText, sizeof(flagsText));
+      char flagsMsg[160];
+      snprintf(flagsMsg, sizeof(flagsMsg), "Debug flags set to: %s", flagsText);
+      broadcastOutput(flagsMsg);
+    } else {
+      systemLogApplyPersistedFlags();
+    }
+    
+    // Apply category tags setting (arg overrides, otherwise use persisted setting)
+    if (categoryTags >= 0) {
+      gSystemLogCategoryTags = (categoryTags != 0);
+      setSetting(gSettings.systemLogCategoryTags, gSystemLogCategoryTags);
+    } else {
+      gSystemLogCategoryTags = gSettings.systemLogCategoryTags;
+    }
     
     gSystemLogPath = filepath;
     gSystemLogRunning = true;
@@ -2197,7 +2227,8 @@ const char* cmd_log(const String& argsInput) {
                (unsigned)systemLogMaxSizeBytes());
       return gDebugBuffer;
     }
-    const long newSize = ca.argInt(1, 0);
+    long newSize = 0;
+    if (!parseIntArg(ca.arg(1), newSize)) return kCommandReplyNotANumber;
     if (newSize < 10240) return "Error: Max size must be at least 10240 bytes (10KB)";
     if (newSize > 10485760) return "Error: Max size cannot exceed 10485760 bytes (10MB)";
     setSetting(gSettings.systemLogMaxSize, (int)newSize);
@@ -2211,7 +2242,8 @@ const char* cmd_log(const String& argsInput) {
                systemLogMaxRotations());
       return gDebugBuffer;
     }
-    const int count = ca.argInt(1, -1);
+    int count = 0;
+    if (!parseIntArg(ca.arg(1), count)) return kCommandReplyNotANumber;
     if (count < 0 || count > 9) return "Error: Rotation count must be 0-9";
     setSetting(gSettings.systemLogMaxRotations, count);
     if (count == 0) return "Rotation disabled - the log starts over at the size limit";
@@ -2238,6 +2270,7 @@ const char* cmd_debugstack(const String& argsInput) {
     gDebugStackTraceEnabled = false;
     return "debugstack OFF";
   }
+  if (ca.count() > 0) return kCommandReplyNotOnOff;
   return gDebugStackTraceEnabled ? "debugstack is currently ON" : "debugstack is currently OFF";
 }
 

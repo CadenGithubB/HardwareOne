@@ -50,7 +50,10 @@ I2cDeviceManager* I2cDeviceManager::instance = nullptr;
 I2cDeviceManager* I2cDeviceManager::getInstance() { return instance; }
 void I2cDeviceManager::checkBusRecoveryNeeded() { ++recoveryChecks; }
 bool I2cDeviceManager::busRecoveryThrottled(uint8_t) const { return true; }
-void I2cDeviceManager::performBusRecovery(uint8_t) { assert(!"throttled in this harness"); }
+I2cBusRecovery I2cDeviceManager::performBusRecovery(uint8_t) {
+  assert(!"throttled in this harness");
+  return I2cBusRecovery::Done;
+}
 
 struct Posted {
   uint8_t kind;

@@ -91,6 +91,7 @@ public:
   float toFloat() const { return std::strtof(text.c_str(),nullptr); }
   int toInt() const { return std::atoi(text.c_str()); }
   bool operator!=(const char* rhs) const { return text!=rhs; }
+  bool operator==(const char* rhs) const { return text==rhs; }
 };
 struct RADIO_INFO { int rssi=35, snr=8; bool stereo=true, tuned=true; } radioInfo;
 static struct Radio {
@@ -301,7 +302,7 @@ static void invalidCommandTests() {
     rejectedCommand(cmd_fmradio_volume,input);
   }
   for (const char* input : {"sideways", "up down", "down 1"}) rejectedCommand(cmd_fmradio_seek,input);
-  for (const char* input : {"moot", "of", "on off", "0", "1"}) rejectedCommand(cmd_fmradio_mute,input);
+  for (const char* input : {"moot", "of", "on off", "2", "-1"}) rejectedCommand(cmd_fmradio_mute,input);
   for (const char* input : {"on", "off", "garbage"}) rejectedCommand(cmd_fmradio_unmute,input);
 }
 static void blockedCommandTests() {
@@ -344,7 +345,8 @@ static void acceptedArgumentTests() {
   reset(); assert(std::string(cmd_fmradio_volume("  "))=="OK");
   assert(broadcasts==std::vector<std::string>{"Current volume: 6"} && busCalls==0 && banners.empty());
   for (const auto& [input,muted] : std::vector<std::pair<const char*,bool>>{
-         {"",true},{" on ",true},{"MUTE",true},{" OFF ",false},{"unmute",false}}) {
+         {"",true},{" on ",true},{"MUTE",true},{" OFF ",false},{"unmute",false},
+         {"1",true},{"true",true},{"enable",true},{"0",false},{"false",false},{"disable",false}}) {
     reset(); DATA.muted=!muted; assert(std::string(cmd_fmradio_mute(input))=="OK");
     assert(radio.muteCalls==1 && radio.muted==muted && DATA.muted==muted);
     assert(broadcasts==std::vector<std::string>{muted ? "FM Radio mute command sent" : "FM Radio unmute command sent"});

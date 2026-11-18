@@ -466,11 +466,32 @@ const char* cmd_sensorstart_queued(I2cDeviceType sensor, const char* displayName
     case SensorStartRefusal::StopPending:
       snprintf(getDebugBuffer(), 1024, "Error: [%s] Stop/cleanup is still pending; retry open shortly", displayName);
       break;
-    case SensorStartRefusal::AlreadyRunning:
-      snprintf(getDebugBuffer(), 1024, "%s sensor already running", displayName);
+    case SensorStartRefusal::AlreadyRunning: {
+      // The stop command that pairs with this start (kept in this function:
+      // the host test extracts it on its own).
+      const char* closeCmd = "the close command";
+      switch (sensor) {
+        case I2C_DEVICE_THERMAL:  closeCmd = "closethermal"; break;
+        case I2C_DEVICE_TOF:      closeCmd = "closetof"; break;
+        case I2C_DEVICE_IMU:      closeCmd = "closeimu"; break;
+        case I2C_DEVICE_INPUT:    closeCmd = "closeinput"; break;
+        case I2C_DEVICE_GPS:      closeCmd = "closegps"; break;
+        case I2C_DEVICE_FMRADIO:  closeCmd = "closefmradio"; break;
+        case I2C_DEVICE_APDS:     closeCmd = "closeapds"; break;
+        case I2C_DEVICE_RTC:      closeCmd = "closertc"; break;
+        case I2C_DEVICE_PRESENCE: closeCmd = "closepresence"; break;
+        default: break;
+      }
+      snprintf(getDebugBuffer(), 1024,
+               "Error: %s sensor is already running. Stop it first with '%s' to restart it.",
+               displayName, closeCmd);
       break;
+    }
     case SensorStartRefusal::AlreadyQueued:
-      snprintf(getDebugBuffer(), 1024, "%s sensor already queued (position %d)", displayName, getQueuePosition(sensor));
+      snprintf(getDebugBuffer(), 1024,
+               "Error: %s sensor is already queued for start (position %d). "
+               "Check it in a moment with 'sensors json brief'.",
+               displayName, getQueuePosition(sensor));
       break;
     case SensorStartRefusal::NoAck:
       snprintf(getDebugBuffer(), 1024, "Error: [%s] No acknowledgement from device on I2C bus", displayName);
@@ -482,6 +503,73 @@ const char* cmd_sensorstart_queued(I2cDeviceType sensor, const char* displayName
     case SensorStartRefusal::None:
       snprintf(getDebugBuffer(), 1024, "Error: Could not queue %s sensor (queue unavailable/full or stop pending)", displayName);
       break;
+  }
+  return getDebugBuffer();
+}
+
+// The start command that pairs with a sensor's stop, for the not-running reply.
+static const char* sensorOpenCommand(I2cDeviceType sensor) {
+  switch (sensor) {
+    case I2C_DEVICE_THERMAL:  return "openthermal";
+    case I2C_DEVICE_TOF:      return "opentof";
+    case I2C_DEVICE_IMU:      return "openimu";
+    case I2C_DEVICE_INPUT:    return "openinput";
+    case I2C_DEVICE_GPS:      return "opengps";
+    case I2C_DEVICE_FMRADIO:  return "openfmradio";
+    case I2C_DEVICE_APDS:     return "openapds";
+    case I2C_DEVICE_RTC:      return "openrtc";
+    case I2C_DEVICE_PRESENCE: return "openpresence";
+    default:                  return "the open command";
+  }
+}
+
+// A stop has something to do: the sensor runs, still has a task, has a start
+// admitted or queued, or was initialized without a task (FM tune/boot, RTC).
+// The same set applySensorStop() counts as active.
+static bool sensorStopHasWork(I2cDeviceType sensor) {
+  if (sensor < 0 || sensor >= I2C_DEVICE_COUNT) return false;
+  // The outstanding mark first: the worker clears it only after the start
+  // settled, so a start that completes between the reads is still seen.
+  if (sSensorStartOutstanding[sensor].load()) return true;
+  if (sensorIsRunning(sensor) || sensorHasTask(sensor) || isInQueue(sensor)) return true;
+#if ENABLE_FM_RADIO
+  if (sensor == I2C_DEVICE_FMRADIO && gRadioInitialized) return true;
+#endif
+#if ENABLE_RTC_SENSOR
+  if (sensor == I2C_DEVICE_RTC && gRtcConnected) return true;
+#endif
+  return false;
+}
+
+// Command wrapper for a queued stop: the one place that renders its outcome.
+// A sensor that is not running (the bus disabled at boot, or nothing open,
+// starting or queued) answers an Error naming the command that starts it.
+// After that a refused request means the manager or its queue does not exist.
+const char* cmd_sensorstop_queued(I2cDeviceType sensor, const char* displayName) {
+  const bool busDisabled = !gI2cBusRunning;
+  const bool idle = !busDisabled && !sensorStopHasWork(sensor);
+  const bool queued = !busDisabled && !idle && requestSensorStop(sensor);
+  if (!ensureDebugBuffer()) {
+    if (busDisabled) {
+      return "Error: The sensor is not running: the I2C bus is disabled. "
+             "Enable it with 'i2cbusenabled 1', then reboot.";
+    }
+    if (idle) return "Error: The sensor is not running. Start it with its open command.";
+    return queued ? "Stop requested; cleanup will complete asynchronously"
+                  : "Error: Sensor request queue is unavailable. Reboot the device and retry.";
+  }
+  if (busDisabled) {
+    snprintf(getDebugBuffer(), 1024,
+             "Error: %s sensor is not running: the I2C bus is disabled. "
+             "Enable it with 'i2cbusenabled 1', then reboot.", displayName);
+  } else if (idle) {
+    snprintf(getDebugBuffer(), 1024, "Error: %s sensor is not running. Start it with '%s'.",
+             displayName, sensorOpenCommand(sensor));
+  } else if (!queued) {
+    snprintf(getDebugBuffer(), 1024,
+             "Error: [%s] Sensor request queue is unavailable. Reboot the device and retry.", displayName);
+  } else {
+    snprintf(getDebugBuffer(), 1024, "[%s] Stop requested; cleanup will complete asynchronously", displayName);
   }
   return getDebugBuffer();
 }
@@ -827,9 +915,14 @@ String identifySensor(uint8_t address) {
 // commands derive their upper bound from this so the limit tracks the running
 // board instead of a hardcoded cap that was only correct for one chip.
 #define HW_GPIO_MAX (SOC_GPIO_PIN_COUNT - 1)
-#if SOC_GPIO_PIN_COUNT >= 49
+// The same bound as text, for the help and usage rows of the command table
+// (the pin commands print the number itself). A pin count this list does not
+// know is named in words, never as another chip's number.
+#if SOC_GPIO_PIN_COUNT == 55      // ESP32-P4
+  #define HW_GPIO_MAX_STR "54"
+#elif SOC_GPIO_PIN_COUNT == 49    // ESP32-S3
   #define HW_GPIO_MAX_STR "48"
-#elif SOC_GPIO_PIN_COUNT >= 40
+#elif SOC_GPIO_PIN_COUNT == 40    // classic ESP32
   #define HW_GPIO_MAX_STR "39"
 #else
   #define HW_GPIO_MAX_STR "max GPIO"
@@ -848,36 +941,44 @@ const char* cmd_i2cbusenabled(const String& argsInput) {
   if (v && CAMERA_SCCB_I2C_PORT == 1 && !CAMERA_SCCB_SHARED)
     return "Error: I2C1/Wire1 controller is reserved for the camera in this build; select camera SCCB I2C0 to use the primary sensor bus.";
   setSetting(gSettings.i2cEnabled, v);
-  snprintf(getDebugBuffer(), 1024, "i2cBusEnabled set to %d (reboot required)", (int)v);
+  return v ? "i2cBusEnabled set to 1 (reboot required)" : "i2cBusEnabled set to 0 (reboot required)";
+}
+
+// One body for the four bus pin commands: usage, whole-number parse, range
+// check, save and report. `low` is 0 for bus 0 and -1 for bus 1, where -1
+// marks the bus as unavailable on the board. A pin outside low..HW_GPIO_MAX is
+// refused. Does not contain RETURN_VALID_IF_VALIDATE_CSTR (it returns from its
+// caller), so that stays at each cmd_* entry point.
+static const char* i2cSetPinAndReport(int& target, const String& argsInput, const char* settingName, int low) {
+  if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
+  String valStr = argsInput;
+  valStr.trim();
+  if (valStr.length() == 0) {
+    snprintf(getDebugBuffer(), 1024,
+             "Error: invalid arguments — Usage: %s <%d..%d> (%smax GPIO for this board; reboot required)",
+             settingName, low, (int)HW_GPIO_MAX, low < 0 ? "-1=unavailable; " : "");
+    return getDebugBuffer();
+  }
+  int v = 0;
+  if (!parseIntArg(valStr, v)) return kCommandReplyNotANumber;
+  if (v < low || v > HW_GPIO_MAX) {
+    snprintf(getDebugBuffer(), 1024, "Error: %s must be %d..%d%s. Give a GPIO number of this board.",
+             settingName, low, (int)HW_GPIO_MAX, low < 0 ? " (-1 = unavailable)" : "");
+    return getDebugBuffer();
+  }
+  setSetting(target, v);
+  snprintf(getDebugBuffer(), 1024, "%s set to %d (reboot required)", settingName, v);
   return getDebugBuffer();
 }
 
 const char* cmd_i2csdapin(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String valStr = argsInput;
-  valStr.trim();
-  if (valStr.length() == 0) return "Error: invalid arguments — Usage: i2cSdaPin <0.." HW_GPIO_MAX_STR "> (max GPIO for this board; reboot required)";
-  int v = 0;
-  if (!parseIntArg(valStr, v)) return kCommandReplyNotANumber;
-  if (v < 0) v = 0;
-  if (v > HW_GPIO_MAX) v = HW_GPIO_MAX;
-  setSetting(gSettings.i2cSdaPin, v);
-  snprintf(getDebugBuffer(), 1024, "i2cSdaPin set to %d (reboot required)", v);
-  return getDebugBuffer();
+  return i2cSetPinAndReport(gSettings.i2cSdaPin, argsInput, "i2cSdaPin", 0);
 }
 
 const char* cmd_i2csclpin(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String valStr = argsInput;
-  valStr.trim();
-  if (valStr.length() == 0) return "Error: invalid arguments — Usage: i2cSclPin <0.." HW_GPIO_MAX_STR "> (max GPIO for this board; reboot required)";
-  int v = 0;
-  if (!parseIntArg(valStr, v)) return kCommandReplyNotANumber;
-  if (v < 0) v = 0;
-  if (v > HW_GPIO_MAX) v = HW_GPIO_MAX;
-  setSetting(gSettings.i2cSclPin, v);
-  snprintf(getDebugBuffer(), 1024, "i2cSclPin set to %d (reboot required)", v);
-  return getDebugBuffer();
+  return i2cSetPinAndReport(gSettings.i2cSclPin, argsInput, "i2cSclPin", 0);
 }
 
 // ---- Bus 1 (I2C2) variants ----
@@ -886,7 +987,8 @@ const char* cmd_i2csclpin(const String& argsInput) {
 //     (sentinel used on XIAO / QT Py / Feather V2 where there is no second I2C
 //     port). Settings page surfaces this as the "(-1=unavailable)" hint.
 //   * Upper bound is HW_GPIO_MAX (the SoC's highest GPIO: 39 on classic ESP32,
-//     48 on ESP32-S3), shared with the bus-0 commands so both track the board.
+//     48 on ESP32-S3, 54 on ESP32-P4), shared with the bus-0 commands so both
+//     track the board.
 const char* cmd_i2c2busenabled(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String valStr = argsInput;
@@ -898,44 +1000,25 @@ const char* cmd_i2c2busenabled(const String& argsInput) {
   if (v && CAMERA_SCCB_I2C_PORT == 0 && !CAMERA_SCCB_SHARED)
     return "Error: I2C2/Wire controller is reserved for the camera in this build; use I2C1/Wire1.";
   setSetting(gSettings.i2c2Enabled, v);
-  snprintf(getDebugBuffer(), 1024, "i2c2BusEnabled set to %d (reboot required)", (int)v);
-  return getDebugBuffer();
+  return v ? "i2c2BusEnabled set to 1 (reboot required)" : "i2c2BusEnabled set to 0 (reboot required)";
 }
 
 const char* cmd_i2c2sdapin(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String valStr = argsInput;
-  valStr.trim();
-  if (valStr.length() == 0) return "Error: invalid arguments — Usage: i2c2SdaPin <-1.." HW_GPIO_MAX_STR "> (-1=unavailable; max GPIO for this board; reboot required)";
-  int v = 0;
-  if (!parseIntArg(valStr, v)) return kCommandReplyNotANumber;
-  if (v < -1) v = -1;
-  if (v > HW_GPIO_MAX) v = HW_GPIO_MAX;
-  setSetting(gSettings.i2c2SdaPin, v);
-  snprintf(getDebugBuffer(), 1024, "i2c2SdaPin set to %d (reboot required)", v);
-  return getDebugBuffer();
+  return i2cSetPinAndReport(gSettings.i2c2SdaPin, argsInput, "i2c2SdaPin", -1);
 }
 
 const char* cmd_i2c2sclpin(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String valStr = argsInput;
-  valStr.trim();
-  if (valStr.length() == 0) return "Error: invalid arguments — Usage: i2c2SclPin <-1.." HW_GPIO_MAX_STR "> (-1=unavailable; max GPIO for this board; reboot required)";
-  int v = 0;
-  if (!parseIntArg(valStr, v)) return kCommandReplyNotANumber;
-  if (v < -1) v = -1;
-  if (v > HW_GPIO_MAX) v = HW_GPIO_MAX;
-  setSetting(gSettings.i2c2SclPin, v);
-  snprintf(getDebugBuffer(), 1024, "i2c2SclPin set to %d (reboot required)", v);
-  return getDebugBuffer();
+  return i2cSetPinAndReport(gSettings.i2c2SclPin, argsInput, "i2c2SclPin", -1);
 }
 
 // ---- Per-device bus assignment commands ----
 // Each lets the user route a specific sensor to bus 0 (Wire1 / I2C1) or
-// bus 1 (Wire / I2C2). All clamp to 0..NUM_BUSES-1 and require a reboot
-// for the sensor's task to pick up the new value (drivers cache the bus
-// at init time + the library object is constructed with the chosen Wire).
-// One helper handles validate + parse + clamp + setSetting + report so the
+// bus 1 (Wire / I2C2). A bus outside 0..NUM_BUSES-1 is refused. The change
+// needs a reboot for the sensor's task to pick up the new value (drivers cache
+// the bus at init time + the library object is constructed with the chosen Wire).
+// One helper handles parse + range check + setSetting + report so the
 // per-command stub is one line. The helper does NOT include the
 // RETURN_VALID_IF_VALIDATE_CSTR macro because that returns from its caller
 // — must stay at each cmd_* entry point.
@@ -952,8 +1035,13 @@ const char* i2cSetDeviceBusAndReport(int& target, const String& argsInput, const
   }
   int v = 0;
   if (!parseIntArg(valStr, v)) return kCommandReplyNotANumber;
-  if (v < 0) v = 0;
-  if (v >= (int)I2cDeviceManager::NUM_BUSES) v = I2cDeviceManager::NUM_BUSES - 1;
+  if (v < 0 || v >= (int)I2cDeviceManager::NUM_BUSES) {
+    static_assert(I2cDeviceManager::NUM_BUSES == 2, "update the bus range messages");
+    if (!ensureDebugBuffer()) return "Error: Bus number out of range. Use 0 or 1.";
+    snprintf(getDebugBuffer(), 1024, "Error: %s must be 0..%d. Use 0 for I2C1 or 1 for I2C2.",
+             settingName, (int)(I2cDeviceManager::NUM_BUSES - 1));
+    return getDebugBuffer();
+  }
   setSetting(target, v);
   if (ensureDebugBuffer()) {
     snprintf(getDebugBuffer(), 1024, "%s set to %d (reboot required)", settingName, v);
@@ -983,9 +1071,12 @@ const char* cmd_i2cscan(const String& originalCmd) {
   broadcastOutput("I2C Bus Scan (address-table labels):\n========================================");
 
   int totalCount = 0;
+  int busesScanned = 0;
+  bool bus1NotInitialized = false;
 
   // Bus 0 (I2C1, Wire1) — always scanned when initialized.
   if (mgr && mgr->isBusInitialized(0)) {
+    busesScanned++;
     BROADCAST_PRINTF("I2C1 / Wire1 (bus 0, SDA=%d SCL=%d):",
                      gSettings.i2cSdaPin, gSettings.i2cSclPin);
     PollPauseGuard pollGuard(0);
@@ -1006,6 +1097,7 @@ const char* cmd_i2cscan(const String& originalCmd) {
   // Bus 1 (I2C2, Wire) — only when enabled + initialized. Boards without a
   // second port (XIAO, QT Py, Feather V2) skip this block entirely.
   if (mgr && mgr->isBusInitialized(1)) {
+    busesScanned++;
     broadcastOutput("");
     BROADCAST_PRINTF("I2C2 / Wire (bus 1, SDA=%d SCL=%d):",
                      gSettings.i2c2SdaPin, gSettings.i2c2SclPin);
@@ -1025,9 +1117,14 @@ const char* cmd_i2cscan(const String& originalCmd) {
     totalCount += count;
   } else if (gSettings.i2c2Enabled) {
     // User asked for bus 1 but it didn't initialize (probably bad pins).
+    bus1NotInitialized = true;
     broadcastOutput("");
     broadcastOutput("I2C2 / Wire (bus 1): NOT INITIALIZED — check i2c2SdaPin/i2c2SclPin settings");
   }
+
+  // No bus was probed: that is not a scan that found nothing.
+  if (busesScanned == 0)
+    return "Error: No I2C bus is initialized. Enable the 'i2c' feature and check the pin settings, then reboot.";
 
   BROADCAST_PRINTF(
     "\nTotal devices found: %d\n"
@@ -1040,7 +1137,12 @@ const char* cmd_i2cscan(const String& originalCmd) {
   emitListingTrailer("detected I2C hardware",
                      "battery: run 'batterystatus'; a sensor: 'open<sensor>' then '<sensor>read'");
   if (ensureDebugBuffer()) {
-    snprintf(getDebugBuffer(), 1024, "[i2cscan] %d device(s) found", totalCount);
+    if (bus1NotInitialized) {
+      snprintf(getDebugBuffer(), 1024,
+               "[i2cscan] %d device(s) found on bus 0; bus 1 is enabled but not initialized", totalCount);
+    } else {
+      snprintf(getDebugBuffer(), 1024, "[i2cscan] %d device(s) found", totalCount);
+    }
     return getDebugBuffer();
   }
   return "[i2cscan] done";
@@ -1275,9 +1377,12 @@ ApplyResult applyDetectedHardware(const DetectionResult& r) {
 }
 
 const char* cmd_detect(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
   CommandArgs a(argsInput);
   String sub = a.arg(0); sub.toLowerCase();
   const bool apply = (sub == "apply");
+  if (a.count() > 1 || (a.count() == 1 && !apply))
+    return "Error: invalid arguments — Usage: detect [apply]";
 
   if (apply && !currentExecIsAdmin())
     return "Error: [detect] 'apply' changes config — admin login required.";
@@ -1545,7 +1650,7 @@ const char* cmd_devices(const String& originalCmd) {
     static const size_t kDevJsonSize = 2048;
     static char* devJsonBuf = nullptr;
     if (!devJsonBuf) devJsonBuf = (char*)ps_alloc(kDevJsonSize, AllocPref::PreferPsram, "devices.json");
-    if (!devJsonBuf) return "{\"error\":\"oom\"}";
+    if (!devJsonBuf) return kCommandReplyOutOfMemory;
     size_t len = serializeJson(doc, devJsonBuf, kDevJsonSize);
     if (len == 0 || len >= kDevJsonSize - 1) return "Error: device list outgrew the response buffer";
     return devJsonBuf;
@@ -1559,6 +1664,9 @@ const char* cmd_devices(const String& originalCmd) {
 
 const char* cmd_discover(const String& originalCmd) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+  // discoverI2cDevices() skips a disabled bus without a word to the caller.
+  if (!gI2cBusRunning)
+    return "Error: I2C bus is disabled. Enable the 'i2c' feature and reboot, then run discover.";
   discoverI2cDevices();
 
   BROADCAST_PRINTF("Device discovery completed. Found %d devices.", connectedDeviceCount);
@@ -1601,9 +1709,8 @@ const char* cmd_devicefile(const String& originalCmd) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   // Serialize from in-memory connectedDevices[] instead of reading disk
-  broadcastOutput("Device Registry (from memory):");
-
   if (connectedDeviceCount == 0) {
+    broadcastOutput("Device Registry (from memory):");
     broadcastOutput("  No devices discovered. Run 'discover' first.");
     return "[I2C] Registry empty";
   }
@@ -1617,13 +1724,9 @@ const char* cmd_devicefile(const String& originalCmd) {
   if (!regBuf) return "Error: [I2C] Out of memory";
   size_t len = serializeJson(doc, regBuf, kRegBufSize);
   if (len == 0 || len >= kRegBufSize - 1) return "Error: device registry outgrew the response buffer";
-  // NOTE: this still BROADCASTS the document and returns a human string, so the
-  // JSON is clipped to 255 B ([CUT]) on every sink and no transport gets it as
-  // an addressed reply. Same JSON-contract violation `events kinds json` had —
-  // the fit check above is correct but does not fix that; it needs the same
-  // return-the-document treatment.
-  broadcastOutput(regBuf);
-  return "[I2C] Registry JSON displayed";
+  // The document is the reply (output contract channel 2): whole, and nothing
+  // on the stream, where one line is cut at 255 B.
+  return regBuf;
 }
 
 // ---- Live sensor view (Phase 2: state + live `data` readings) -------------
@@ -1756,7 +1859,7 @@ const char* cmd_sensors(const String& argsInput) {
     static const size_t kSensorsJsonSize = 4096;
     static char* sensorsJsonBuf = nullptr;
     if (!sensorsJsonBuf) sensorsJsonBuf = (char*)ps_alloc(kSensorsJsonSize, AllocPref::PreferPsram, "sensors.json");
-    if (!sensorsJsonBuf) return "{\"error\":\"oom\"}";
+    if (!sensorsJsonBuf) return kCommandReplyOutOfMemory;
     size_t len = serializeJson(doc, sensorsJsonBuf, kSensorsJsonSize);
     if (len == 0 || len >= kSensorsJsonSize - 1) return "Error: sensor list outgrew the response buffer";
     return sensorsJsonBuf;
@@ -2013,7 +2116,7 @@ static const char* cmd_sensorautostart(const String& argsInput) {
   bool disable = argIsOff(value);
   
   if (!enable && !disable) {
-    return "Error: Value must be on/off, true/false, or 1/0";
+    return kCommandReplyNotOnOff;
   }
   
   // Find sensor in cost table
@@ -2030,6 +2133,10 @@ static const char* cmd_sensorautostart(const String& argsInput) {
     // Set all sensors and show total heap impact
     uint32_t totalCost = 0;
     for (size_t i = 0; i < sensorHeapCostCount; i++) {
+      // Enabling leaves out a sensor whose driver is not compiled in, as the
+      // single form refuses it. Disabling clears every row.
+      const FeatureEntry* rowFeature = getFeatureById(sensorHeapCosts[i].shortName);
+      if (enable && rowFeature && !isFeatureCompiled(rowFeature)) continue;
       *sensorHeapCosts[i].autoStartFlag = enable;
       if (enable) totalCost += sensorHeapCosts[i].heapCostKb;
     }
@@ -2048,7 +2155,19 @@ static const char* cmd_sensorautostart(const String& argsInput) {
   }
   
   if (!found) {
-    return "Error: Unknown sensor. Options: thermal, tof, imu, gps, fmradio, apds, input, all";
+    return "Error: Unknown sensor. Use thermal, tof, imu, gps, fmradio, apds, input, rtc, presence or all.";
+  }
+
+  // A sensor whose driver is not compiled in can never start, so enabling it
+  // is refused. Disabling it is a plain success: it clears a flag left on by
+  // the defaults or by a settings file from another build.
+  const FeatureEntry* feature = getFeatureById(found->shortName);
+  if (enable && feature && !isFeatureCompiled(feature)) {
+    EXT_RAM_BSS_ATTR static char notBuilt[128];
+    snprintf(notBuilt, sizeof(notBuilt),
+             "Error: %s is not in this build. Run 'sensors json brief' to list the sensors this firmware has.",
+             found->name);
+    return notBuilt;
   }
   
   bool wasEnabled = *found->autoStartFlag;
@@ -2080,12 +2199,16 @@ static const char* cmd_sensorautostart(const String& argsInput) {
 
 const char* cmd_i2creset(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+  static const char kInUse[] = "Error: I2C is in use by the camera. Stop camera before resetting the bus.";
+  static const char kNotInitialized[] =
+      "Error: I2C bus is not initialized. Enable the 'i2c' feature and reboot, then retry i2creset.";
   auto* manager = I2cDeviceManager::existingInstance();
-  if (manager && manager->busHasClients(0))
-    return "Error: I2C is in use by the camera. Stop camera before resetting the bus.";
+  if (manager && manager->busHasClients(0)) return kInUse;
   
   I2cDeviceManager* mgr = I2cDeviceManager::getInstance();
   if (!mgr) return "Error: I2C manager not initialized";
+  // Refuse a bus that was never brought up before any step is announced.
+  if (!mgr->isBusInitialized(0)) return kNotInitialized;
   
   broadcastOutput("[I2C] Starting bus reset...");
   broadcastOutput("[I2C] Step 1/3: Pausing sensor polling...");
@@ -2093,10 +2216,24 @@ const char* cmd_i2creset(const String& argsInput) {
   vTaskDelay(pdMS_TO_TICKS(200));
   
   broadcastOutput("[I2C] Step 2/3: Performing bus recovery (clock toggle + reinit)...");
-  mgr->performBusRecovery();
+  const I2cBusRecovery recovery = mgr->performBusRecovery();
   
   broadcastOutput("[I2C] Step 3/3: Resuming sensor polling...");
   mgr->resumePolling();
+  
+  // A recovery that was skipped left the bus as it was: name the cause.
+  switch (recovery) {
+    case I2cBusRecovery::Done:
+      break;
+    case I2cBusRecovery::NotInitialized:
+      return kNotInitialized;
+    case I2cBusRecovery::PinsInvalid:
+      return "Error: I2C pin settings are invalid. Set i2csdapin and i2csclpin, then reboot.";
+    case I2cBusRecovery::Busy:
+      return "Error: I2C bus is busy and could not be locked. Retry i2creset in a few seconds.";
+    case I2cBusRecovery::InUse:
+      return kInUse;
+  }
   
   broadcastOutput("[I2C] Bus reset complete. Run 'i2chealth' to check device status.");
   return "[I2C] Bus reset complete";
@@ -2109,7 +2246,7 @@ const char* cmd_i2cpause(const String& argsInput) {
   if (!mgr) return "Error: I2C manager not initialized";
   
   if (mgr->isPollingPaused()) {
-    return "[I2C] Polling already paused";
+    return "Error: I2C sensor polling is already paused. Resume it with 'i2cresume'.";
   }
   
   mgr->pausePolling();
@@ -2123,7 +2260,7 @@ const char* cmd_i2cresume(const String& argsInput) {
   if (!mgr) return "Error: I2C manager not initialized";
   
   if (!mgr->isPollingPaused()) {
-    return "[I2C] Polling already running";
+    return "Error: I2C sensor polling is not paused. Pause it with 'i2cpause' first.";
   }
   
   mgr->resumePolling();
@@ -2152,11 +2289,11 @@ const char* cmd_i2crecover(const String& argsInput) {
   if (!mgr) return "Error: I2C manager not initialized";
   
   // The command takes an address only, so resolve across buses — otherwise
-  // `i2crecover` reports "not registered" for every device on bus 1.
+  // `i2crecover` finds no registered device for anything on bus 1.
   I2cDevice* dev = mgr->getDeviceAnyBus(address);
   if (!dev || !dev->isInitialized()) {
-    EXT_RAM_BSS_ATTR static char result[64];
-    snprintf(result, sizeof(result), "[I2C] Device 0x%02X not registered", address);
+    EXT_RAM_BSS_ATTR static char result[96];
+    snprintf(result, sizeof(result), "Error: No registered device at 0x%02X. Run 'i2chealth' to list devices.", address);
     return result;
   }
 
@@ -2214,7 +2351,7 @@ const CommandEntry i2cCommands[] = {
   { "devicefile", "Show device registry JSON file.", false, cmd_devicefile },
   
   // Sensor Auto-Start
-  { "sensorautostart", "Sensor auto-start: [sensor] [on|off]", true, cmd_sensorautostart, "Usage: sensorautostart [sensor] [on|off]\n       sensorautostart all [on|off]\nSensors: thermal, tof, imu, gps, fmradio, apds, input" }
+  { "sensorautostart", "Sensor auto-start: [sensor] [on|off]", true, cmd_sensorautostart, "Usage: sensorautostart [sensor] [on|off]\n       sensorautostart all [on|off]\nSensors: thermal, tof, imu, gps, fmradio, apds, input, rtc, presence" }
 };
 
 const size_t i2cCommandsCount = sizeof(i2cCommands) / sizeof(i2cCommands[0]);

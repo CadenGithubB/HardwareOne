@@ -77,6 +77,14 @@ WifiFieldProblem wifiNetworkFieldProblem(const char* text);
 WifiFieldProblem wifiAddCommandLine(const String& ssid, const String& password,
                                     int priority, bool hidden, String& line);
 
+// What an accepted upsertWifiNetwork() left in the list for that SSID.
+struct WifiUpsertOutcome {
+  bool existed = false;       // the SSID was already saved
+  bool keptPassword = false;  // empty password given: the stored one stays
+  int priority = 0;           // the entry's priority after the call
+  bool hidden = false;        // the entry's hidden flag after the call
+};
+
 #if ENABLE_WIFI
 // Boot only: construct internal-RAM storage before settings are loaded and
 // before other tasks can use this service. False is a fatal boot allocation error.
@@ -86,7 +94,10 @@ bool wifiNetworkSnapshot(WifiNetworkSnapshot& out);
 
 // These operations own synchronization. Callers never retain storage pointers.
 // Mutation does not persist until saveWifiNetworks() is called.
-bool upsertWifiNetwork(const String& ssid, const String& password, int priority, bool hidden);
+// An existing entry keeps its priority when priority <= 0 and its hidden flag
+// when hiddenGiven is false.
+bool upsertWifiNetwork(const String& ssid, const String& password, int priority, bool hidden,
+                       bool hiddenGiven = true, WifiUpsertOutcome* outcome = nullptr);
 bool removeWifiNetwork(const String& ssid);
 bool removeWifiNetworkById(uint32_t id, String* removedSsid = nullptr);
 bool setWifiNetworkPriority(const String& ssid, int priority);
@@ -109,7 +120,8 @@ unsigned wifiNetworksReadJson(const JsonDocument& doc);
 inline bool initWifiNetworks() { return false; }
 inline int wifiNetworkCount() { return 0; }
 inline bool wifiNetworkSnapshot(WifiNetworkSnapshot& out) { out = {}; return false; }
-inline bool upsertWifiNetwork(const String&, const String&, int, bool) { return false; }
+inline bool upsertWifiNetwork(const String&, const String&, int, bool, bool = true,
+                              WifiUpsertOutcome* = nullptr) { return false; }
 inline bool removeWifiNetwork(const String&) { return false; }
 inline bool removeWifiNetworkById(uint32_t, String* = nullptr) { return false; }
 inline bool setWifiNetworkPriority(const String&, int) { return false; }

@@ -16,7 +16,9 @@ wifi_networks). Checked: every written line parses back to exactly the fields
 it was given, for names with spaces, edge spaces, backslashes and quotes of
 the other kind; refused fields write nothing; and when the store refuses a
 name or password with a control character, cmd_wifiadd says so instead of
-reporting a full list. --component replays against another tree.
+reporting a full list; and a priority or hidden value that does not parse, a
+priority below 1 or a fifth argument is refused before the store is called.
+--component replays against another tree.
 """
 from __future__ import annotations
 
@@ -77,14 +79,28 @@ class String {
 // INSERT_TOKENIZER
 
 // The saved-network store behind cmd_wifiadd: records what reached it.
-struct Added { std::string ssid, pass; int priority; bool hidden; };
+struct Added { std::string ssid, pass; int priority; bool hidden; bool hiddenGiven; };
 static std::vector<Added> added;
 static bool storeAccepts = true;
 // INSERT_OWNER_TYPES
-bool upsertWifiNetwork(const String& ssid, const String& pass, int priority, bool hidden) {
-  added.push_back({ssid.c_str(), pass.c_str(), priority, hidden});
+#if HAVE_UPSERT_OUTCOME
+// What the double says the list holds after the call; unset, the given fields.
+static const WifiUpsertOutcome* storeOutcome = nullptr;
+bool upsertWifiNetwork(const String& ssid, const String& pass, int priority, bool hidden,
+                       bool hiddenGiven = true, WifiUpsertOutcome* outcome = nullptr) {
+  added.push_back({ssid.c_str(), pass.c_str(), priority, hidden, hiddenGiven});
+  if (outcome) {
+    *outcome = storeOutcome ? *storeOutcome
+                            : WifiUpsertOutcome{false, false, priority > 0 ? priority : 1, hidden};
+  }
   return storeAccepts;
 }
+#else
+bool upsertWifiNetwork(const String& ssid, const String& pass, int priority, bool hidden) {
+  added.push_back({ssid.c_str(), pass.c_str(), priority, hidden, true});
+  return storeAccepts;
+}
+#endif
 void sortWifiByPriority() {}
 bool saveWifiNetworks() { return true; }
 enum { SYSEVT_WIFI_NET_ADDED = 1 };
@@ -122,6 +138,10 @@ int main() {
     const bool fourArguments = f.priority > 0 || f.hidden;
     CHECK(added[0].priority == (fourArguments ? (f.priority > 0 ? f.priority : 1) : 0));
     CHECK(added[0].hidden == f.hidden);
+#if HAVE_UPSERT_OUTCOME
+    // Only the four-argument form states the hidden flag.
+    CHECK(added[0].hiddenGiven == fourArguments);
+#endif
   }
   // A field the line cannot carry writes nothing.
   for (const Fields f : {Fields{"x\" \"y", "secret", 1, false}, Fields{"home", "pa\"ss", 0, false},
@@ -130,6 +150,20 @@ int main() {
     String line = "stale";
     CHECK(wifiAddCommandLine(f.ssid, f.pass, f.priority, f.hidden, line) != WifiFieldProblem::None);
     CHECK(line.length() == 0);
+  }
+#endif
+#if HAVE_UPSERT_OUTCOME
+  // The reply states what the list holds, not what the line asked for.
+  {
+    const WifiUpsertOutcome kept{true, true, 3, true};
+    storeOutcome = &kept;
+    added.clear();
+    storeAccepts = true;
+    const char* saved = cmd_wifiadd("\"Home\" \"\"");
+    storeOutcome = nullptr;
+    CHECK(added.size() == 1 && !added[0].hiddenGiven);
+    CHECK(saved && std::strcmp(saved, "Saved network 'Home' with priority 3 (hidden) (stored password kept; "
+                                      "to replace it run wifirm, then wifiadd)") == 0);
   }
 #endif
   // The store refuses a control character: the reply names that reason.
@@ -143,6 +177,19 @@ int main() {
   // The other refusals keep their own replies.
   CHECK(std::strstr(cmd_wifiadd("x a\"b"), "double-quote") != nullptr);  // bare token keeps the quote
   CHECK(std::strstr(cmd_wifiadd("\"home\" \"secret\""), "list is full") != nullptr);
+#if HAVE_UPSERT_OUTCOME
+  // Junk in the optional arguments is refused before the store is called: a
+  // priority that is no whole number or is below 1, a hidden value that is
+  // neither on nor off, a fifth argument.
+  added.clear();
+  storeAccepts = true;
+  CHECK(std::strcmp(cmd_wifiadd("\"home\" \"secret\" abc"), kCommandReplyNotANumber) == 0);
+  CHECK(std::strstr(cmd_wifiadd("\"home\" \"secret\" 0"), "Priority must be 1 or higher") != nullptr);
+  CHECK(std::strstr(cmd_wifiadd("\"home\" \"secret\" -3"), "Priority must be 1 or higher") != nullptr);
+  CHECK(std::strcmp(cmd_wifiadd("\"home\" \"secret\" 2 maybe"), kCommandReplyNotOnOff) == 0);
+  CHECK(std::strstr(cmd_wifiadd("\"home\" \"secret\" 2 1 extra"), "Usage: wifiadd") != nullptr);
+  CHECK(added.empty());
+#endif
   std::printf("wifi structured add: %d checks passed\n", checks);
   return 0;
 }
@@ -162,7 +209,7 @@ def tokenizer(component: Path) -> str:
     return "\n\n".join(pieces)
 
 
-def owner(component: Path) -> tuple[str, str, bool]:
+def owner(component: Path) -> tuple[str, str, bool, bool]:
     header = (component / "network/wifi/System_WiFiNetworks.h").read_text()
     source = (component / "network/wifi/System_WiFiNetworks.cpp").read_text()
     capacity = re.search(r"(?m)^#define MAX_WIFI_NETWORKS \d+", header)
@@ -174,10 +221,13 @@ def owner(component: Path) -> tuple[str, str, bool]:
         types += "\n" + extract_block(header, "enum class WifiFieldProblem") + ";"
         functions = [extract_block(source, "WifiFieldProblem wifiNetworkFieldProblem("),
                      extract_block(source, "WifiFieldProblem wifiAddCommandLine(")]
+    outcome = "struct WifiUpsertOutcome" in header
+    if outcome:
+        types += "\n" + extract_block(header, "struct WifiUpsertOutcome") + ";"
     wifi = (component / "System_WiFi.cpp").read_text()
     require(wifi.count("const char* cmd_wifiadd(") == 1, "System_WiFi.cpp: one cmd_wifiadd")
     functions.append(extract_block(wifi, "const char* cmd_wifiadd("))
-    return types, "\n\n".join(functions), structured
+    return types, "\n\n".join(functions), structured, outcome
 
 
 def main() -> None:
@@ -189,8 +239,9 @@ def main() -> None:
                         help="components/hardwareone directory to read production sources from")
     args = parser.parse_args()
     require(bool(args.cxx), "a host C++17 compiler is required")
-    types, production, structured = owner(args.component)
-    unit_text = (f"#define HAVE_STRUCTURED_ADD {int(structured)}\n" +
+    types, production, structured, outcome = owner(args.component)
+    unit_text = (f"#define HAVE_STRUCTURED_ADD {int(structured)}\n"
+                 f"#define HAVE_UPSERT_OUTCOME {int(outcome)}\n" +
                  HARNESS.replace("// INSERT_TOKENIZER", tokenizer(args.component))
                         .replace("// INSERT_OWNER_TYPES", types)
                         .replace("// INSERT_PRODUCTION", production))

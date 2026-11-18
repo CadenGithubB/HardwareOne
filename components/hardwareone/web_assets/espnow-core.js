@@ -851,14 +851,15 @@
       }
       var id = /\(match reqId (\d+)\)$/.exec(text);
       if (id && Number(id[1]) > 0) return { sent: true, reqId: Number(id[1]), error: '' };
-      return { sent: false, reqId: 0, error: text.replace(/^OK: /, '') || 'this device gave no reply' };
+      return { sent: false, reqId: 0, error: text.replace(/^(?:OK|Error): /, '') || 'this device gave no reply' };
     };
     // Collects a peer's answer to one remote command from /api/espnow/messages
     // records: the records received from that peer that carry the request id.
     // What the command returned is stored in 200-byte pieces ("piece k of n");
     // it is whole when all n are here. Lines the command printed while it ran,
-    // and a short answer such as "Auth failed", are single records with the same
-    // id. `cursor` is the highest sequence number seen, for the next request.
+    // and a short refusal such as "Error: Login failed. ...", are single records
+    // with the same id. `cursor` is the highest sequence number seen, for the
+    // next request.
     window.espnowRemoteAnswer = function(mac, reqId) {
       var target = String(mac || '').toUpperCase();
       var pieces = {};      // piece number -> text of a multi-piece answer
@@ -1350,11 +1351,14 @@
         });
     };
     // Accept the room and tags this peer announces right now (admin command),
-    // then show the panel again with the result.
+    // then show the panel again with the result. postForm, not postFormText:
+    // a refusal (not admin, nothing pending) comes back as HTTP 400/403 with
+    // the reason in the body, and the reason is what the user needs to see.
     window.acceptPeerGroups = function(mac) {
-      hw.postFormText('/api/cli', { cmd: 'espnowgroupaccept ' + mac })
-        .then(function(text) {
-          appendLogLine('log-' + mac, 'RECEIVED', text, null);
+      hw.postForm('/api/cli', { cmd: 'espnowgroupaccept ' + mac })
+        .then(function(r) { return r.text().then(function(text) { return { ok: r.ok, text: text }; }); })
+        .then(function(res) {
+          appendLogLine('log-' + mac, res.ok ? 'RECEIVED' : 'ERROR', res.text, null);
           window.loadPeerMetadata(mac);
         })
         .catch(function(error) {

@@ -21,7 +21,7 @@ numbers are approximate; the files are being edited by several sessions.
 - `ring status` text no longer prints `addr=`.
 - `ring status json` and `/api/ble/status` `ring` have no `addr` key (no `addrKnown` either), and the web Bluetooth page's ring-MAC row is gone.
 - The `ring-status` SSE/BLE event has no `a` field.
-- The `ring connect <mac>` reply no longer echoes the address.
+- The `openring <mac>` reply no longer echoes the address.
 - The ring identity copy is name-only (`g2RingSetIdentity(name)`).
 - Guard: `test_ring_info_status` checks for no address and pins the event and the connect reply.
 

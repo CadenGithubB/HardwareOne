@@ -343,7 +343,7 @@ static const SettingEntry mqttSettingEntries[] = {
   { "mqttPassword", SETTING_STRING, &gSettings.mqttPassword, 0, 0, "", 0, 0, "Password", nullptr, true, "broker", "mqttpassword" },
   { "mqttBaseTopic", SETTING_STRING, &gSettings.mqttBaseTopic, 0, 0, "", 0, 0, "Base Topic", nullptr, false, "topics", "mqttbasetopic" },
   { "mqttDiscoveryPrefix", SETTING_STRING, &gSettings.mqttDiscoveryPrefix, 0, 0, "homeassistant", 0, 0, "Discovery Prefix", nullptr, false, "topics", "mqttdiscoveryprefix" },
-  { "mqttPublishIntervalMs", SETTING_INT, &gSettings.mqttPublishIntervalMs, 10000, 0, nullptr, 1000, 300000, "Publish Interval (ms)", nullptr, false, "publish", "mqttpublishintervalms" },
+  { "mqttPublishIntervalMs", SETTING_INT, &gSettings.mqttPublishIntervalMs, 30000, 0, nullptr, 1000, 300000, "Publish Interval (ms)", nullptr, false, "publish", "mqttpublishintervalms" },
   { "mqttPublishWiFi", SETTING_BOOL, &gSettings.mqttPublishWifi, false, 0, nullptr, 0, 1, "Publish WiFi info", nullptr, false, "publish", "mqttpublishwifi" },
   { "mqttPublishSystem", SETTING_BOOL, &gSettings.mqttPublishSystem, false, 0, nullptr, 0, 1, "Publish system info", nullptr, false, "publish", "mqttpublishsystem" },
   { "mqttPublishThermal", SETTING_BOOL, &gSettings.mqttPublishThermal, false, 0, nullptr, 0, 1, "Publish thermal data", nullptr, false, "publish", "mqttpublishthermal" },
@@ -1692,7 +1692,7 @@ const char* cmd_openmqtt(const String& argsInput) {
   }
   
   if (mqttClientRunning.load(std::memory_order_acquire)) {
-    return "[MQTT] Already running";
+    return "Error: MQTT client is already running. Stop it first with 'closemqtt' to restart it.";
   }
   
   if (startMqtt()) {
@@ -1712,7 +1712,7 @@ const char* cmd_closemqtt(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   if (!stopMqtt()) {
-    return "[MQTT] Not running";
+    return "Error: MQTT client is not running. Start it with 'openmqtt'.";
   }
   return "[MQTT] Client stop scheduled";
 }
@@ -1723,6 +1723,18 @@ const char* cmd_closemqtt(const String& argsInput) {
 static uint32_t mqttMsUntilNextPublish(uint32_t lastPublishMs, uint32_t intervalMs, uint32_t nowMs) {
   const uint32_t elapsedMs = nowMs - lastPublishMs;
   return elapsedMs < intervalMs ? intervalMs - elapsedMs : 0;
+}
+
+// Serializes a json reply into the debug buffer. serializeJson writes no NUL
+// when the output fills the buffer, so a document that does not fit becomes
+// `tooLarge`, never a cut or unterminated reply. A document that could not
+// allocate (overflowed) is out of memory, not too large.
+static const char* mqttJsonReply(const JsonDocument& doc, const char* tooLarge) {
+  if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
+  if (doc.overflowed()) return kCommandReplyOutOfMemory;
+  const size_t n = serializeJson(doc, getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE);
+  if (n == 0 || n >= GLOBAL_DEBUG_BUFFER_SIZE) return tooLarge;
+  return getDebugBuffer();
 }
 
 const char* cmd_mqttstatus(const String& argsInput) {
@@ -1743,8 +1755,8 @@ const char* cmd_mqttstatus(const String& argsInput) {
     doc["baseTopic"] = gSettings.mqttBaseTopic;
     doc["publishIntervalMs"] = gSettings.mqttPublishIntervalMs;
     if (lastError.length() > 0) doc["lastError"] = lastError;
-    serializeJson(doc, getDebugBuffer(), 1024);
-    return getDebugBuffer();
+    return mqttJsonReply(doc, "Error: Status does not fit in one reply. "
+                              "Shorten the MQTT host, user or base topic.");
   }
 
   // Output each line separately to avoid DEBUG_MSG_SIZE (256 byte) truncation
@@ -1788,7 +1800,7 @@ const char* cmd_mqttclientenabled(const String& argsInput) {
     return gSettings.mqttEnabled ? "MQTT client: enabled" : "MQTT client: disabled";
   }
   const int parsed = parseBoolArg(arg);
-  if (parsed < 0) return "Error: Use 0/1, true/false, on/off, or enable/disable";
+  if (parsed < 0) return kCommandReplyNotOnOff;
   const bool enable = (parsed == 1);
   setSetting(gSettings.mqttEnabled, enable);
   if (!enable) {
@@ -1808,7 +1820,7 @@ const char* cmd_mqttautostart(const String& argsInput) {
     return gSettings.mqttAutoStart ? "MQTT auto-start: ON" : "MQTT auto-start: OFF";
   }
   const int parsed = parseBoolArg(arg);
-  if (parsed < 0) return "Error: Use 0/1, true/false, on/off, or enable/disable";
+  if (parsed < 0) return kCommandReplyNotOnOff;
   setSetting(gSettings.mqttAutoStart, parsed == 1);
   return gSettings.mqttAutoStart ? "MQTT auto-start enabled" : "MQTT auto-start disabled";
 }
@@ -1938,7 +1950,7 @@ const char* cmd_mqttcacertpath(const String& argsInput) {
     return getDebugBuffer();
   }
   setSetting(gSettings.mqttCaCertPath, arg);
-  if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
+  if (!ensureDebugBuffer()) return "MQTT CA cert path updated";
   snprintf(getDebugBuffer(), 1024, "MQTT CA cert path set to: %s", arg.c_str());
   return getDebugBuffer();
 }
@@ -2049,7 +2061,7 @@ const char* cmd_mqttsubscribe(const String& argsInput) {
       "MQTT external subscriptions: enabled" : "MQTT external subscriptions: disabled";
   }
   const int parsed = parseBoolArg(arg);
-  if (parsed < 0) return "Error: Use 0/1, true/false, on/off, or enable/disable";
+  if (parsed < 0) return kCommandReplyNotOnOff;
   setSetting(gSettings.mqttSubscribeExternal, parsed == 1);
   return parsed == 1 ?
       "MQTT external subscriptions enabled - restart MQTT to apply" :
@@ -2077,16 +2089,23 @@ const char* cmd_mqtttopics(const String& argsInput) {
   return getDebugBuffer();
 }
 
+static constexpr char kMqttExternalSensorsBusy[] =
+    "Error: External sensor list is busy. Retry mqttexternalsensors.";
+
 const char* cmd_mqttexternalsensors(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   if (argWantsJson(argsInput)) {
-    if (!ensureDebugBuffer()) return "{\"schema\":1,\"error\":\"buffer\"}";
+    if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
     PSRAM_JSON_DOC(doc);
     doc["schema"] = 1;
     JsonArray arr = doc["sensors"].to<JsonArray>();
-    if (externalSensorMutex &&
-        xSemaphoreTake(externalSensorMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+    // No mutex yet means no subscription has run: an empty list. A mutex that
+    // is held is a failure, not an empty list.
+    if (externalSensorMutex) {
+      if (xSemaphoreTake(externalSensorMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+        return kMqttExternalSensorsBusy;
+      }
       if (externalSensors && externalSensorCount > 0) {
         unsigned long now = millis();
         for (int i = 0; i < externalSensorCount; i++) {
@@ -2099,8 +2118,8 @@ const char* cmd_mqttexternalsensors(const String& argsInput) {
       xSemaphoreGive(externalSensorMutex);
     }
     doc["count"] = (int)arr.size();
-    serializeJson(doc, getDebugBuffer(), 1024);
-    return getDebugBuffer();
+    return mqttJsonReply(doc, "Error: External sensor list does not fit in one reply. "
+                              "Reduce the topics in mqttsubscribetopics.");
   }
 
   if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
@@ -2128,7 +2147,7 @@ const char* cmd_mqttexternalsensors(const String& argsInput) {
     }
     xSemaphoreGive(externalSensorMutex);
   } else {
-    return "Error: Could not acquire lock";
+    return kMqttExternalSensorsBusy;
   }
   
   return buf;
@@ -2149,7 +2168,7 @@ const char* cmd_mqttpublish##name(const String& argsInput) { \
     return gSettings.setting ? "MQTT publish " label ": ON" : "MQTT publish " label ": OFF"; \
   } \
   const int parsed = parseBoolArg(arg); \
-  if (parsed < 0) return "Error: Use 0/1, true/false, on/off, or enable/disable"; \
+  if (parsed < 0) return kCommandReplyNotOnOff; \
   setSetting(gSettings.setting, parsed == 1); \
   return gSettings.setting ? "MQTT publish " label " enabled" : "MQTT publish " label " disabled"; \
 }

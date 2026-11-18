@@ -1,6 +1,7 @@
-// The one checked number parser for command arguments (System_ArgParse.h).
+// The checked number parsers for command arguments (System_ArgParse.h).
 // Numbers are decimal and the whole token has to be the number. Only a bus
-// address (parseAddressArg) may also be written as 0x and hexadecimal digits.
+// address (parseAddressArg) and a bit mask (parseMaskArg) may also be written
+// as 0x and hexadecimal digits.
 #include "System_ArgParse.h"
 
 #include <cassert>
@@ -58,6 +59,65 @@ int main() {
     assert(address == 1);
   }
   assert(!parseAddressArg(std::string("0x5A\0x", 6), 1, 127, address));
+
+  // A 32-bit bit mask: decimal or hexadecimal, 0 to 0xFFFFFFFF.
+  uint32_t mask = 7;
+  assert(parseMaskArg("0x05", mask) && mask == 0x05);
+  assert(parseMaskArg("0XffFFffFF", mask) && mask == 0xFFFFFFFFu);
+  assert(parseMaskArg("4294967295", mask) && mask == 0xFFFFFFFFu);
+  assert(parseMaskArg("0", mask) && mask == 0);
+  assert(parseMaskArg("0x0", mask) && mask == 0);
+  assert(parseMaskArg(" 18 ", mask) && mask == 18);
+  assert(parseMaskArg(std::string(" 0x7F "), mask) && mask == 0x7F);
+  for (const char* text : {"", " ", "0x", "0xZZ", "5A", "ff", "all", "-1", "-0x1", "4294967296",
+                           "0x100000000", "0x05 junk", "0x0.5", "1e3", "0b101"}) {
+    mask = 3;
+    assert(!parseMaskArg(text, mask));
+    assert(mask == 3);
+  }
+  assert(!parseMaskArg(static_cast<const char*>(nullptr), mask));
+  assert(!parseMaskArg(std::string("0x05\0x", 6), mask) && mask == 3);
+
+  // A decimal number: sign, digits, at most one decimal point.
+  float f = -7.0f;
+  assert(parseFloatArg("0.5", f) && f == 0.5f);
+  assert(parseFloatArg("-12.25", f) && f == -12.25f);
+  assert(parseFloatArg("+3", f) && f == 3.0f);
+  assert(parseFloatArg(".5", f) && f == 0.5f);
+  assert(parseFloatArg("5.", f) && f == 5.0f);
+  assert(parseFloatArg("  47.6062\t", f) && f > 47.606f && f < 47.607f);
+  assert(parseFloatArg("0", f) && f == 0.0f);
+  assert(parseFloatArg("-0.0", f) && f == 0.0f);
+  double d = 0.0;
+  assert(parseFloatArg("-122.3321", d) && d == -122.3321);
+
+  // Refused, and the value is left alone.
+  f = -7.0f;
+  for (const char* text : {"", " ", "abc", "0.5x", "12abc", "1e3", "1E3", "nan", "inf",
+                           "-inf", "infinity", "0x10", "0x1p3", "1.2.3", ".", "-", "+", "-.",
+                           "1 2", "--1", "1,5", "\"0.5\"", "high"}) {
+    assert(!parseFloatArg(text, f));
+    assert(f == -7.0f);
+  }
+  assert(!parseFloatArg(static_cast<const char*>(nullptr), f));
+
+  // The given range and the target type bound the value.
+  assert(parseFloatArg("1.0", 0.0, 1.0, f) && f == 1.0f);
+  assert(!parseFloatArg("1.01", 0.0, 1.0, f) && f == 1.0f);
+  assert(!parseFloatArg("-0.1", 0.0, 1.0, f));
+  assert(parseFloatArg("90", -90, 90, d) && d == 90.0);
+  assert(!parseFloatArg("90.0001", -90, 90, d) && d == 90.0);
+  const std::string huge(400, '9');
+  assert(!parseFloatArg(huge.c_str(), f));
+  assert(!parseFloatArg(huge.c_str(), d));
+  assert(!parseFloatArg("1000000000000000000000000000000000000000", f));  // 1e39 > float max
+  assert(parseFloatArg("1000000000000000000000000000000000000000", d));
+
+  // Text objects: the same rules, and text behind an embedded NUL is refused.
+  assert(parseFloatArg(std::string(" 0.25 "), f) && f == 0.25f);
+  assert(parseFloatArg(std::string("0.75"), 0.0, 1.0, f) && f == 0.75f);
+  assert(!parseFloatArg(std::string("0.5x"), f) && f == 0.75f);
+  assert(!parseFloatArg(std::string("0.5\0junk", 8), f) && f == 0.75f);
 
   std::puts("arg parse: ok");
   return 0;

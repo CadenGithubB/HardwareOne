@@ -1150,23 +1150,28 @@ void sensorPresenceChanged(RemoteSensorType sensorType, bool present) {
 static bool startSensorBroadcasterLocked();
 static bool stopSensorBroadcasterLocked(uint32_t timeoutMs);
 
-void startSensorDataStreaming(RemoteSensorType sensorType) {
+// The start with its result: true when this call took effect. For a bond
+// master that is "the request to the worker was queued". The stream flag
+// cannot say it: it stays set from an earlier start when a later request to
+// the worker is not sent (the partner went away), and nothing but a stop or
+// closeespnow clears it.
+bool tryStartSensorDataStreaming(RemoteSensorType sensorType) {
   DEBUG_ESPNOW_STREAMF("[SENSOR_STREAM] startSensorDataStreaming() called with type=%d (%s)", sensorType, sensorTypeToString(sensorType));
   
   if (sensorType >= REMOTE_SENSOR_MAX) {
     DEBUG_ESPNOW_STREAMF("[SENSOR_STREAM] ERROR: Invalid sensor type %d (max=%d)", sensorType, REMOTE_SENSOR_MAX);
-    return;
+    return false;
   }
   // Serialize every flag update and the full task create/publish transaction
   // against closeespnow's stop/join/free transaction.
   if (!gSensorBroadcasterLifecycleMutex ||
       xSemaphoreTake(gSensorBroadcasterLifecycleMutex, portMAX_DELAY) != pdTRUE) {
-    return;
+    return false;
   }
   if (gSensorStreamingShutdown.load(std::memory_order_acquire)) {
     xSemaphoreGive(gSensorBroadcasterLifecycleMutex);
     DEBUG_ESPNOW_STREAMF("[SENSOR_STREAM] start rejected during ESP-NOW shutdown");
-    return;
+    return false;
   }
 
 #if ENABLE_BONDED_MODE
@@ -1184,7 +1189,7 @@ void startSensorDataStreaming(RemoteSensorType sensorType) {
       BROADCAST_PRINTF("[ESP-NOW] Failed to send stream request to worker (peer offline?)");
     }
     xSemaphoreGive(gSensorBroadcasterLifecycleMutex);
-    return;
+    return sent;
   }
 #endif
   
@@ -1223,7 +1228,7 @@ void startSensorDataStreaming(RemoteSensorType sensorType) {
       taskEXIT_CRITICAL(&gSensorBcastTaskMux);
       xSemaphoreGive(gSensorBroadcasterLifecycleMutex);
       BROADCAST_PRINTF("[ESP-NOW] ERROR: Failed to start sensor broadcaster task");
-      return;
+      return false;
     }
   }
   xSemaphoreGive(gSensorBroadcasterLifecycleMutex);
@@ -1239,6 +1244,11 @@ void startSensorDataStreaming(RemoteSensorType sensorType) {
          sensorTypeToString(sensorType));
   
   BROADCAST_PRINTF("[ESP-NOW] Started streaming %s sensor data", sensorTypeToString(sensorType));
+  return true;
+}
+
+void startSensorDataStreaming(RemoteSensorType sensorType) {
+  (void)tryStartSensorDataStreaming(sensorType);
 }
 
 void stopSensorDataStreaming(RemoteSensorType sensorType) {
@@ -1314,6 +1324,20 @@ void stopSensorDataStreaming(RemoteSensorType sensorType) {
    if (sensorType >= REMOTE_SENSOR_MAX) return false;
    return gSensorStreamingEnabled[sensorType];
  }
+
+// Switched on by hand on this device (espnowsensorstream), not only by a
+// master's request.
+static bool sensorStreamingByHand(RemoteSensorType sensorType) {
+  if (sensorType >= REMOTE_SENSOR_MAX) return false;
+  taskENTER_CRITICAL(&gSensorBcastTaskMux);
+  const bool byHand = gSensorStreamingEnabled[sensorType] && gSensorByHand[sensorType];
+  taskEXIT_CRITICAL(&gSensorBcastTaskMux);
+  return byHand;
+}
+
+bool sensorCanStream(RemoteSensorType sensorType) {
+  return sensorTypeInThisBuild(sensorType);
+}
 
 // ==========================
 // Secure sensor fetcher — authorization + subscription apply (worker side)
@@ -2175,6 +2199,24 @@ static void sensorPeerDisplayName(const uint8_t* mac, char* out, size_t cap) {
   strlcpy(out, name.c_str(), cap);
 }
 
+// The refusal for a sensor the broadcaster has no data for, with the sensors
+// that do stream in this build.
+const char* sensorCannotStreamReply() {
+  if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
+  char* buf = getDebugBuffer();
+  int pos = snprintf(buf, 1024,
+                     "Error: This sensor cannot stream over ESP-NOW in this build. Streamable: ");
+  bool any = false;
+  for (int type = 0; type < REMOTE_SENSOR_MAX; type++) {
+    if (!sensorCanStream((RemoteSensorType)type)) continue;
+    pos += snprintf(buf + pos, 1024 - pos, "%s%s", any ? ", " : "",
+                    sensorTypeToString((RemoteSensorType)type));
+    any = true;
+  }
+  snprintf(buf + pos, 1024 - pos, "%s.", any ? "" : "none");
+  return buf;
+}
+
 const char* cmd_espnow_sensorstream(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
@@ -2187,7 +2229,7 @@ const char* cmd_espnow_sensorstream(const String& argsInput) {
            "the secure fetcher (SENSOR_REQ), not remote command execution.";
   }
 
-  // Parse: <sensor> <on|off>
+  // Parse: <sensor> <on|off>  (the dispatcher strips the command name)
   CommandArgs a(argsInput);
   if (!a.hasMinArgs(2)) return "Error: invalid arguments — Usage: espnowsensorstream <sensor> <on|off>";
 
@@ -2198,41 +2240,57 @@ const char* cmd_espnow_sensorstream(const String& argsInput) {
     return "Error: invalid arguments — Usage: espnowsensorstream <sensor> <on|off>";
   }
   int boolResult = parseBoolArg(a.arg(1));
-  if (boolResult < 0) return "Error: invalid arguments — Usage: espnowsensorstream <sensor> <on|off>";
+  if (boolResult < 0) return kCommandReplyNotOnOff;
   const bool enable = (boolResult == 1);
   DEBUG_ESPNOW_STREAMF("[SENSOR_STREAM_CMD] %s %s", sensorTypeToString(sensorType), enable ? "on" : "off");
 
   // The acting master receives readings and sends none of its own.
   if (gSettings.meshRole == MESH_ROLE_MASTER) {
-    return "Error: this device is the mesh master. It receives readings and does not send its own.";
+    return "Error: This device is the mesh master. It receives readings and does not send its own.";
   }
 
-  // A sensor this firmware cannot read would stream nothing: say so now. (A
-  // bond master switches its partner's sensor on, not its own.)
+  // A bond master switches its partner's sensor on and off, not its own, and
+  // its stream flag does not say what the partner does: it asks every time.
   bool asksPartner = false;
 #if ENABLE_BONDED_MODE
   asksPartner = gSettings.bondModeEnabled && isBondMaster();
 #endif
   EXT_RAM_BSS_ATTR static char reply[200];
-  if (enable && !asksPartner && !sensorTypeInThisBuild(sensorType)) {
-    snprintf(reply, sizeof(reply), "Error: this firmware cannot read the %s sensor, so it has no readings to send",
-             sensorTypeToString(sensorType));
-    return reply;
-  }
 
   if (!enable) {
+    // Nothing to stop on this device (a stream a master asked for counts).
+    if (!asksPartner && !isSensorDataStreamingEnabled(sensorType)) {
+      return "Error: This sensor is not streaming. Start it with 'espnowsensorstream <sensor> on'.";
+    }
     stopSensorDataStreaming(sensorType);
     snprintf(reply, sizeof(reply), asksPartner ? "OK: the bond partner was asked to stop sending %s readings."
                                                : "OK: %s streaming is off.",
              sensorTypeToString(sensorType));
     return reply;
   }
-  startSensorDataStreaming(sensorType);
+  if (!isEspNowInitialized()) {
+    return "Error: ESP-NOW not initialized. Run 'openespnow' first.";
+  }
+  // A sensor this firmware cannot read would stream nothing: say so now.
+  if (!asksPartner && !sensorTypeInThisBuild(sensorType)) return sensorCannotStreamReply();
+  // Already switched on by hand (the owner's 2026-11-18 rule: starting what
+  // runs is an Error). A stream only a master's request runs is taken over:
+  // switched on by hand, it outlives that request.
+  if (!asksPartner && sensorStreamingByHand(sensorType)) {
+    return "Error: This sensor is already streaming. Stop it first with "
+           "'espnowsensorstream <sensor> off' to restart it.";
+  }
+  // The result of this start, not the stream flag: on a bond master the flag
+  // stays set from an earlier start when this request could not be sent.
+  if (!tryStartSensorDataStreaming(sensorType)) {
+    return asksPartner ? "Error: The stream request could not be sent to the bond partner. "
+                         "Check 'bondstatus' and retry."
+                       : "Error: Sensor streaming could not be started. Check 'espnowstatus' and retry.";
+  }
   if (asksPartner) {
     snprintf(reply, sizeof(reply), "OK: the bond partner was asked to send %s readings.", sensorTypeToString(sensorType));
     return reply;
   }
-  if (!isSensorDataStreamingEnabled(sensorType)) return "Error: the stream could not be started";
   // Where its readings go now, or why nothing is sent yet.
   const espnowsensor::TargetChoice target = sensorReadingTarget((int)sensorType);
   char targetName[32] = "";
@@ -2757,7 +2815,7 @@ const char* cmd_espnow_sensorstatus(const String& argsInput) {
 const char* cmd_espnow_sensorbroadcast(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  // Parse: <on|off>  (dispatcher strips "espnow sensorbroadcast" prefix)
+  // Parse: <on|off>  (the dispatcher strips the command name)
   String args = argsInput;
   normalizeCliArg(args);
   
@@ -2777,7 +2835,7 @@ const char* cmd_espnow_sensorbroadcast(const String& argsInput) {
     broadcastOutput("[ESP-NOW] Sensor broadcast DISABLED - no sensor data will be sent");
     return "OK: Sensor broadcast disabled";
   } else {
-    return "Error: invalid arguments — Usage: espnow sensorbroadcast <on|off>";
+    return kCommandReplyNotOnOff;
   }
 }
 

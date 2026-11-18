@@ -2,7 +2,7 @@
 //
 // System_AutomationId.h is included as it is (test_automation_ids.py puts the
 // component directory on the include path). The driver inserts the production
-// automationIdExistsInJson, sanitizeAutomationsJson and the reply of
+// automationIdPosInJson, automationIdExistsInJson, sanitizeAutomationsJson and the reply of
 // `automation sanitize`, automationSanitizeReply (System_Automation.cpp), with
 // the AutomationSanitizeCounts struct from System_Automation.h.
 // ArduinoJson is the real library. Host boundaries: the Arduino String stub, a
@@ -195,6 +195,19 @@ int main() {
 
   // automationIdExistsInJson finds what the add path writes.
   check(automationIdExistsInJson(String("{\n  \"id\": 852516352,\n"), 852516352ul), "the add path's own id form is found");
+
+  // An id is found as a whole number: the commands that take id=<n> must not
+  // act on another automation whose id starts with the same digits.
+  const String twoIds("[{\n  \"id\": 123456,\n  \"name\": \"a\"\n},\n{\n  \"id\": 12,\n  \"name\": \"b\"\n}]");
+  check(!automationIdExistsInJson(String("{\n  \"id\": 123456,\n"), 12ul), "id 12 is not found inside 123456");
+  check(!automationIdExistsInJson(String("{\n  \"id\": 123456,\n"), 1234ul), "id 1234 is not found inside 123456");
+  check(automationIdExistsInJson(String("{\"id\": 12}"), 12ul), "an id at the end of an object is found");
+  check(automationIdPosInJson(twoIds, 12ul) == (int)std::string(twoIds.c_str()).find("\"id\": 12,"),
+        "the exact id is found behind an id that starts with the same digits");
+  check(automationIdPosInJson(twoIds, 123456ul) == (int)std::string(twoIds.c_str()).find("\"id\": 123456"),
+        "the longer id is found at its own place");
+  check(automationIdPosInJson(twoIds, 1ul) < 0 && automationIdPosInJson(twoIds, 1234567ul) < 0,
+        "an id that is only part of a stored one, or longer than it, is not found");
 
   if (failures != 0) {
     std::fprintf(stderr, "%d of %d automation id checks failed\n", failures, checks);

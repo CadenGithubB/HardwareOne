@@ -266,18 +266,19 @@ static void testPresetCompletion() {
   drainUi();
   CHECK(rowHas(0, "Back") && rowHas(2, "[X]"));
 
-  // The executor's verdict decides. A reply that says "refused" is a refusal
-  // even with ok=true, and an empty false reply still gets a useful row.
-  struct { bool ok; const char* result; } failures[] = {
-      {false, "Error: denied"}, {false, "ERROR: denied"}, {true, "operation refused"}, {false, ""}};
-  for (const auto& failure : failures) {
-    const char* result = failure.result;
+  // The executor's verdict decides: the words of an ok=true reply are not
+  // read, and an empty false reply still gets a useful row.
+  for (const char* result : {"Error: denied", "ERROR: denied", ""}) {
     command = submitPreset();
-    complete(command, failure.ok, result);
+    complete(command, false, result);
     drainUi();
     CHECK(!rowHas(0, "Back"));
     CHECK(shownRows[0][3] != '\0');
   }
+  command = submitPreset();
+  complete(command, true, "operation refused");
+  drainUi();
+  CHECK(rowHas(0, "Back"));
   command = submitPreset();
   complete(command, false, nullptr);
   drainUi();
@@ -310,8 +311,10 @@ static void testDestructiveCompletions() {
   home();
   g2PowerHandleTap(4); g2PowerHandleTap(1);
   Command command = takeCommand();
-  // Deep-sleep cooldown historically returns non-Error text.
-  complete(command, true, "Sleep refused");
+  // The deep-sleep cooldown refusal, as the handler returns it.
+  complete(command, false,
+           "Error: Deep sleep refused, the power cooldown is active. Retry in 4000 ms "
+           "(powercooldown changes the wait).");
   drainUi();
   CHECK(shownCount == 5 && rowHas(0, "refused"));
 

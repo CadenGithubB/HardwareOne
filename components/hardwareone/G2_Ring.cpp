@@ -6797,6 +6797,29 @@ static const char* ringYieldRefusal() {
 
 static const char* cmd_openring(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+  // The arguments are checked before the ring owner opens and before the
+  // pairing stamp is written, so a mistyped word changes nothing.
+  CommandArgs ca(args);
+  String a0 = ca.arg(0);
+  a0.toLowerCase();
+  if (ca.count() > 1) {
+    return "Error: invalid arguments — Usage: openring [saved|reconnect|<mac>]";
+  }
+  if (ca.count() == 1 && a0 != "saved" && a0 != "reconnect") {
+    // An address is aa:bb:cc:dd:ee:ff. The reply does not echo the token.
+    const String& token = ca.arg(0);
+    uint8_t parsed[6];
+    char canonical[18];
+    bool isAddress = token.length() == 17 && macParse(token.c_str(), parsed);
+    if (isAddress) {
+      macToDisplay(parsed, canonical, sizeof(canonical));
+      isAddress = strcasecmp(token.c_str(), canonical) == 0;
+    }
+    if (!isAddress) {
+      return "Error: Not a ring address. Use openring, openring saved, openring reconnect or "
+             "openring aa:bb:cc:dd:ee:ff.";
+    }
+  }
   if (bleCentralRingShouldYield()) return ringYieldRefusal();
   if (!g2RingOpen()) {
     if (bleStackReady()) return "Error: RING: open failed (the ring owner task could not start)";
@@ -6808,12 +6831,11 @@ static const char* cmd_openring(const String& args) {
   // Automatic reconnect and passive MAC persistence must never manufacture
   // owner authority on their own.
   bleStampPairedByIfBlank(BLE_PEER_R1_RING);
-  CommandArgs ca(args);
-  String a0 = ca.arg(0);
-  a0.toLowerCase();
 
   if (a0 == "saved") {
-    if (g2RingIsConnected()) return "RING: already connected";
+    if (g2RingIsConnected()) {
+      return "Error: The ring is already connected. Close it first with closering to reconnect.";
+    }
     if (!g2RingConnectSaved()) {
       if (bleCentralRingShouldYield()) return ringYieldRefusal();
       return "Error: RING: saved-address connect not started (no saved ring, one already running, or BLE not ready)";
@@ -6836,8 +6858,10 @@ static const char* cmd_openring(const String& args) {
     }
     if (!g2RingConnect()) {
       if (bleCentralRingShouldYield()) return ringYieldRefusal();  // pipe started meanwhile
-      return g2RingIsConnected() ? "RING: already connected"
-                                 : "Error: RING: reconnect failed to start connect task";
+      return g2RingIsConnected()
+                 ? "Error: The ring is still connected, so the reconnect did not start. "
+                   "Check ring status, then retry openring reconnect."
+                 : "Error: RING: reconnect failed to start connect task";
     }
     return "RING: reconnect queued — use ring status to watch";
   }
@@ -6846,6 +6870,9 @@ static const char* cmd_openring(const String& args) {
     String mac = ca.arg(0);
     if (!g2RingConnectMac(mac)) {
       if (bleCentralRingShouldYield()) return ringYieldRefusal();
+      if (g2RingIsConnected()) {
+        return "Error: The ring is already connected. Close it first with closering to reconnect.";
+      }
       return "Error: RING: direct-MAC connect failed (already running? MAC format?)";
     }
     // The address the caller typed is not echoed: no output carries it.
@@ -6853,7 +6880,8 @@ static const char* cmd_openring(const String& args) {
   }
   if (!g2RingConnect()) {
     if (bleCentralRingShouldYield()) return ringYieldRefusal();
-    return gRing.connected ? "RING: already connected"
+    return gRing.connected ? "Error: The ring is already connected. "
+                             "Close it first with closering to reconnect."
                            : "Error: RING: connect not started (one already running, BLE not ready, "
                              "or no ring owner)";
   }
@@ -6866,7 +6894,7 @@ static const char* cmd_closering(const String& /*args*/) {
     // Closed already (a stack close or `openconsole` did it without the user's
     // stamp): the user's close still means "stay down until openring".
     blePeerNoteUserDisconnect(BLE_PEER_R1_RING);
-    return "RING: already closed (auto-reconnect stays quiet until openring)";
+    return "Error: The ring is not open. Open it with openring; auto-reconnect stays off until then.";
   }
   if (!g2RingClose(/*userInitiated=*/true)) {
     return "Error: RING: close deferred (owner busy or link still settling); retry closering";
@@ -6893,10 +6921,13 @@ static const char* cmd_ringcontrol(const String& args) {
     return "Error: invalid arguments — Usage: ring control <collection|lowpower> <preserve|on|off>";
   }
   G2RingDesiredState desired;
-  if (value == "preserve") desired = G2_RING_PRESERVE;
-  else if (value == "off") desired = G2_RING_OFF;
-  else if (value == "on") desired = G2_RING_ON;
-  else return "Error: value must be preserve, off, or on";
+  if (value == "preserve") {
+    desired = G2_RING_PRESERVE;
+  } else {
+    const int want = parseBoolArg(value);
+    if (want < 0) return "Error: value must be preserve, off, or on";
+    desired = want ? G2_RING_ON : G2_RING_OFF;
+  }
   const bool accepted = collection ? g2RingSetHealthCollectionDesired(desired)
                                    : g2RingSetLowPowerDesired(desired);
   if (!accepted) return "Error: desired policy not accepted";
@@ -6918,20 +6949,21 @@ static const char* cmd_ringcontrol(const String& args) {
 // callback during an in-flight create-connection.
 static const char* cmd_ringscan(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (bleCentralRingShouldYield()) return ringYieldRefusal();
   CommandArgs ca(args);
   uint32_t seconds = 30;
-  if (ca.count() >= 1) {
-    long n = ca.argInt(0, 30);
-    if (n > 0 && n <= 300) seconds = (uint32_t)n;
+  if (ca.count() > 1) return "Error: invalid arguments — Usage: ring scan [seconds]";
+  if (ca.count() == 1 && !parseIntArg(ca.arg(0), 1, 300, seconds)) {
+    return "Error: Scan length must be a whole number of seconds from 1 to 300.";
   }
+  if (bleCentralRingShouldYield()) return ringYieldRefusal();
   if (!g2RingScanAsync(seconds)) {
     if (bleCentralRingShouldYield()) return ringYieldRefusal();
-    return "Error: RING: scan already queued/running or BLE worker unavailable";
+    return "Error: A ring scan is already running, or the Bluetooth worker is not available. "
+           "Check ring status, then retry ring scan.";
   }
   EXT_RAM_BSS_ATTR static char buf[128];
   snprintf(buf, sizeof(buf),
-           "RING: %us scan queued — use ring status, then ring connect",
+           "RING: %us scan queued — use ring status, then openring",
            (unsigned)seconds);
   return buf;
 }
@@ -7002,7 +7034,7 @@ static const char* cmd_ringquery(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   EXT_RAM_BSS_ATTR static char ret[200];
   if (!gRing.connected || !gRing.writeChar) {
-    return "Error: RING: not connected (run 'ring connect' first)";
+    return "Error: Ring not connected. Run openring first.";
   }
 
   CommandArgs ca(args);
@@ -7084,12 +7116,17 @@ static const char* cmd_ringquery(const String& args) {
             if (val.length() == 0 || val.length() > 2) {
               return "Error: ring query raw: status=NN must be 1-2 hex digits (00..FF)";
             }
+            // The whole value has to be hex digits: no sign, nothing after them.
             char* end = nullptr;
             long parsed = strtol(val.c_str(), &end, 16);
-            if (end == val.c_str() || parsed < 0 || parsed > 0xFF) {
+            if (!isxdigit((unsigned char)val[0]) || end == val.c_str() || *end != '\0' ||
+                parsed < 0 || parsed > 0xFF) {
               return "Error: ring query raw: status=NN must be a hex byte 00..FF";
             }
             statusByte = (uint8_t)parsed;
+          } else {
+            // A misspelt option is not sent as payload bytes.
+            return "Error: ring query raw: unknown option. Use status=NN.";
           }
         }
         if (!isStatusToken) {
@@ -7102,14 +7139,17 @@ static const char* cmd_ringquery(const String& args) {
       // verified at a glance instead of guessing.
     DEBUG_RING_DUMPF("[RING] raw-args: count=%d payloadHex='%s' statusByte=0x%02X",
                 ca.count(), raw.c_str(), (unsigned)statusByte);
-      // Pass 2: parse the hex payload from whatever remains. Strip everything
-      // that isn't a hex digit (handles "0x", spaces, colons in the input).
+      // Pass 2: parse the hex payload from whatever remains. Colons and spaces
+      // between bytes are skipped ("0x" went above); any other character
+      // refuses the command.
       String clean;
       for (size_t i = 0; i < raw.length(); i++) {
         char c = raw.charAt(i);
         if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
             (c >= 'A' && c <= 'F')) {
           clean += c;
+        } else if (c != ':' && c != ' ') {
+          return "Error: ring query raw: payload must be hex digits, for example 01FF.";
         }
       }
       if (clean.length() > 0) {
@@ -7209,7 +7249,10 @@ static const char* cmd_ringquery(const String& args) {
     tag = subject.c_str();
   }
 
-  if (!queued) return "Error: RING: transaction was not queued";
+  if (!queued) {
+    return "Error: Ring query not queued: the active ring profile does not support it, or the ring "
+           "is busy. Check ring health, then retry.";
+  }
   DEBUG_RING_TXNF("[RING] query queued '%s' tx=%lu gen=%lu",
             tag, (unsigned long)handle.id, (unsigned long)handle.generation);
   snprintf(ret, sizeof(ret),
@@ -7232,7 +7275,12 @@ static const char* cmd_ringhealth(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 #if ENABLE_R1_HEALTH
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-  if (argWantsJson(args)) return buildHealthStatusJson(getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE);
+  if (argWantsJson(args)) {
+    bool complete = false;
+    const char* json = buildHealthStatusJson(getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE, &complete);
+    return complete ? json
+                    : "Error: Ring health status too large for the reply. Run ring health without json.";
+  }
   G2RingTelemetry t = {};
   g2RingGetTelemetry(t);
   G2RingControlStatus control = {};
@@ -7294,7 +7342,7 @@ static const char* cmd_ringpoll(const String& /*args*/) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 #if ENABLE_R1_HEALTH
   if (healthStartPollBurst()) return "R1 health refresh started";
-  if (!g2RingIsConnected()) return "Error: ring not connected (run 'ring connect' first)";
+  if (!g2RingIsConnected()) return "Error: Ring not connected. Run openring first.";
   G2RingControlStatus control{};
   g2RingGetControlStatus(control);
   return control.protocolProfileKnown && !g2RingHealthPageRefreshSupported()
@@ -7341,12 +7389,26 @@ static const char* cmd_ringhistoryforce(const String& /*args*/) {
 // no proven GET and stays Unknown.
 static const char* cmd_ringcontrolrefresh(const String& /*args*/) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!g2RingRefreshControlStatus()) return "Error: ring control refresh not queued";
-  return "ring control refresh queued";
+  if (g2RingRefreshControlStatus()) return "ring control refresh queued";
+  // Three refusals: the active profile has no low-power read, the intent queue
+  // is full, or there is no ring with a finished setup. The first two leave
+  // their reason in the control status. A disconnect replaces it, so an old
+  // one does not outlive the link.
+  G2RingControlStatus status{};
+  g2RingGetControlStatus(status);
+  if (status.lowPowerLastError == G2_RING_ERR_FEATURE_UNSUPPORTED) {
+    return "Error: Low-power status is not supported on the active ring profile, nothing was sent.";
+  }
+  if (status.lowPowerLastError == G2_RING_ERR_QUEUE_FULL) {
+    return "Error: Ring control refresh not queued: the ring is busy. Retry in a moment.";
+  }
+  return "Error: Ring control refresh not queued: the ring is not connected or its setup is not "
+         "finished. Run openring, then retry.";
 }
 
 static const char* cmd_ring(const String& /*args*/) {
-  return "Error: invalid arguments — Usage: ring <status|scan|connect|disconnect|health|poll|history|query|control|panel>";
+  return "Error: invalid arguments — Usage: ring <status|scan|health|poll|history|query|control|panel> "
+         "(openring / closering connect and disconnect)";
 }
 
 // One row per verb, so each keeps its own tier; longest prefix picks a verb
@@ -7386,7 +7448,7 @@ extern const CommandEntry g2RingCommands[] = {
     "Usage: ring panel history [minutes 10-1440]  (default 30)" },
 #endif
   { "ring",            "Even R1 ring.",                                false, cmd_ring,
-    "Usage: ring <status|scan|connect|disconnect|health|poll|history|query|control|panel>" },
+    "Usage: ring <status|scan|health|poll|history|query|control|panel>  (openring / closering connect and disconnect)" },
   // The glasses' built-in Health panel is fed by the phone, not the ring: the
   // Even app pushes a sid 0x0E HealthDataPackage to the right temple, which
   // `ring panel` reproduces. The earlier sid 0x90 RingDataPackage push and

@@ -96,6 +96,7 @@ def generated(component: Path = COMPONENT, source_dir: Path | None = None,
                   *optional(web, "static esp_err_t healthCommandReply("),
                   extract_block(web, "esp_err_t handleR1HealthAction("),
                   extract_macro(read("System_Utils.h"), "RETURN_VALID_IF_VALIDATE_CSTR"),
+                  extract_block(read("System_Utils.h"), "inline int parseBoolArg("),
                   *optional(ring, "static const char* cmd_ringcontrol("),
                   # The ring history and control-refresh rows and the `ring` root.
                   extract_block(ring, "static const char* cmd_ringhistory("),

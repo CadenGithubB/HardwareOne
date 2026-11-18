@@ -43,7 +43,7 @@ def main() -> None:
     source = (COMPONENT / "System_OTA.cpp").read_text()
     memory = (COMPONENT / "System_MemUtil.h").read_text()
     capacities = {
-        "cmdOtaWrite": {"error": 192, "response": 320},
+        "cmdOtaWrite": {"error": 192, "response": 512},
         "cmdOtaStatus": {"output": 1536},
         "cmdOtaPin": {"error": 160},
         "cmdOtaStage": {"response": 240},
@@ -54,8 +54,8 @@ def main() -> None:
         "cmdOtaAcknowledge": {"response": 192},
     }
     handlers = {name: extract_block(source, f"const char* {name}(") for name in capacities}
-    require(sum(sum(items.values()) for items in capacities.values()) == 3484,
-            "expected ten original response capacities totaling 3484 bytes")
+    require(sum(sum(items.values()) for items in capacities.values()) == 3676,
+            "expected ten response capacities totaling 3676 bytes")
     require(source.count("PSRAM_STATIC_BUF(") == 10,
             "OTA reply migration must retain exactly ten lazy buffer sites")
     for name, buffers in capacities.items():
@@ -75,7 +75,7 @@ def main() -> None:
         require(first_buffer < handler.index(mutation_boundary),
                 f"{name} lazy allocation occurs after an OTA state/secret-copy boundary")
     write = handlers["cmdOtaWrite"]
-    require(write.index("PSRAM_STATIC_BUF(response, 320)") < write.index("currentSecureBleConnection("),
+    require(write.index("PSRAM_STATIC_BUF(response, 512)") < write.index("currentSecureBleConnection("),
             "BLE response storage must be allocated before upload work, not inside reply formatter")
     require(len(re.findall(r"bleUploadJson\(\s*response\s*,\s*response_SIZE\s*,", write)) == 5,
             "every BLE reply call must pass explicit response pointer and original capacity")

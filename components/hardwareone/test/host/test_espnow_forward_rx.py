@@ -119,8 +119,9 @@ def check_sources(component: Path) -> None:
             "rq.sensorMask = sensorMask;" in sensorreq and "strtoul(" not in sensorreq and
             "kCommandReplyNotANumber" not in sensorreq,
             "espnowsensorreq takes sensor names, 'all' or a mask, and the mode as a word or a number")
-    for text in ("is not a sensor (", "is not a sensor mask (", "an empty sensor name in", "is not a mode (subscribe|sub|0",
-                 "Error: intervalMs '%s' is not a number", "Error: leaseMs '%s' is not a number"):
+    for text in ("is not a sensor. Use one of: ", "is not a sensor mask. Give 1..0x", "An empty sensor name in",
+                 "is not a mode. Use subscribe|sub|0", "Error: intervalMs '%s' is not a whole number",
+                 "Error: leaseMs '%s' is not a whole number"):
         require(text in sensorreq, f"espnowsensorreq names the bad token ({text})")
     usage = "Usage: espnowsensorreq <MAC|name> [via <MAC|name>] <sensors> <mode> <intervalMs> <leaseMs>"
     require(espnow.count(usage) == 2 and "mode: subscribe|sub|0, unsubscribe|unsub|1, oneshot|once|2." in sensorreq,

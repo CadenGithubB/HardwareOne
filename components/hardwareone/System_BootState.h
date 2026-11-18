@@ -38,8 +38,9 @@ uint32_t bootStateGetBootCount();
 uint32_t bootStateGetPowerOnCount();
 uint32_t bootStateGetOrderingDomain();
 
-// Reset the persisted boot counter to 0. Diagnostics only.
-void bootStateResetBootCount();
+// Reset the persisted boot counter to 0. Diagnostics only. False when NVS is
+// unavailable or the write or its commit failed.
+bool bootStateResetBootCount();
 
 // Account-id high-water mark: the highest account id this device has ever
 // issued. It lives here, outside users.json, so neither a factory reset (which

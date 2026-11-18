@@ -543,11 +543,11 @@ static void manual() {
   CHECK(std::strncmp(cmd_g2recover(""), "Error: G2 recovery:", 19) == 0 && status() == "held");
   gManualLearnOk = true;
   gR.connected = true;
-  CHECK(std::strcmp(cmd_g2recover(""), "G2: both temples already connected") == 0);
+  CHECK(std::strcmp(cmd_g2recover(""), "Error: Both temples are already connected, so there is nothing to repair. Check them with g2status.") == 0);
   gL.connected = gR.connected = false;
   CHECK(std::strncmp(cmd_g2recover(""), "Error: G2: both temples down", 28) == 0);
   gClientUp = false;
-  CHECK(std::strcmp(cmd_g2recover(""), "Error: G2: client not initialized") == 0);
+  CHECK(std::strcmp(cmd_g2recover(""), "Error: The glasses are not open. Open them with openg2.") == 0);
 }
 
 // The reconnect ladder defers while one temple is up.

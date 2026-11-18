@@ -432,6 +432,12 @@ int main(int argc, char** argv) {
     for (const auto& message : messages) assert(message.indexOf("original-secret") < 0);
     assert(!upsertWifiNetwork("home", std::string(65, 'p'), 9, false));
     expect(0, "home", "original-secret", 7, true);
+    // No hidden flag given: the entry stays hidden, and the outcome reports
+    // what is stored.
+    WifiUpsertOutcome outcome;
+    assert(upsertWifiNetwork("home", "new", 0, false, false, &outcome));
+    expect(0, "home", "new", 7, true);
+    assert(outcome.existed && !outcome.keptPassword && outcome.priority == 7 && outcome.hidden);
     assert(upsertWifiNetwork("home", "replacement", 3, false));
     expect(0, "home", "replacement", 3);
     assert(removeWifiNetwork("home"));

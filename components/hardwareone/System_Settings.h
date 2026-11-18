@@ -227,7 +227,6 @@ struct Settings {
       meshBackupEnabled(false),
       meshMasterHeartbeatInterval(10000),
       meshFailoverTimeout(20000),
-      meshWorkerStatusInterval(30000),
       meshTopoDiscoveryInterval(0),
       meshTopoAutoRefresh(false),
       meshHeartbeatBroadcast(true),
@@ -277,7 +276,6 @@ struct Settings {
 #endif
       oledEnabled(false),
       localDisplayRequireAuth(true),
-      oledBootMode("logo"),
       oledDefaultMode("status"),
       oledBootDuration(2000),
       oledUpdateInterval(125),
@@ -285,7 +283,6 @@ struct Settings {
       oledLandscape(false),
       oledFlipped(false),         // false → setRotation(0) normal; true → setRotation(2) 180°
       oledThermalScale(2.5f),
-      oledThermalColorMode("3level"),
       inputAutoStart(false),
       anoEncoderI2cAddr(0x49),
       anoEncoderInvert(false),
@@ -451,7 +448,7 @@ struct Settings {
       mqttPassword(""),
       mqttBaseTopic(""),
       mqttDiscoveryPrefix("homeassistant"),
-      mqttPublishIntervalMs(10000),
+      mqttPublishIntervalMs(30000),
       mqttPublishWifi(false),
       mqttPublishSystem(false),
       mqttPublishThermal(false),
@@ -795,7 +792,6 @@ struct Settings {
   bool meshBackupEnabled;              // Show/use backup master feature (default: false)
   uint32_t meshMasterHeartbeatInterval;  // Master heartbeat interval (ms, default: 10000)
   uint32_t meshFailoverTimeout;        // Backup promotes after this timeout (ms, default: 20000)
-  uint32_t meshWorkerStatusInterval;   // Worker status report interval (ms, default: 30000)
   uint32_t meshTopoDiscoveryInterval;  // Topology discovery interval (ms, 0=disabled)
   bool meshTopoAutoRefresh;            // Enable automatic topology refresh
   bool meshHeartbeatBroadcast;         // Broadcast heartbeats to FF:FF:FF:FF:FF:FF (public mode)
@@ -951,7 +947,6 @@ struct Settings {
   // OLED Display settings
   bool oledEnabled;             // Enable/disable OLED at boot
   bool localDisplayRequireAuth; // Require login before accessing display modes
-  String oledBootMode;          // Initial mode during boot: logo, status, sensors, thermal, off
   String oledDefaultMode;       // Mode to switch to after boot completes
   int oledBootDuration;         // Milliseconds to show boot mode before switching to default
   int oledUpdateInterval;       // Update interval in milliseconds (8 Hz = 125ms)
@@ -959,7 +954,6 @@ struct Settings {
   bool oledLandscape;           // Waveshare: 90-degree surface with right-side controls
   bool oledFlipped;             // Rotate display 180° (true → setRotation(2), false → setRotation(0))
   float oledThermalScale;       // Scaling factor for thermal image (2.5 = 80x60)
-  String oledThermalColorMode;  // Visualization style: 3level, 2level, gradient
   // Sensor Auto-Start settings (all I2C sensors)
   bool inputAutoStart;          // Auto-start the input device (gamepad or ANO) after boot
   int  anoEncoderI2cAddr;       // ANO I2C address override (default 0x49 = I2C_ADDR_ANO_ENCODER)
@@ -1240,7 +1234,7 @@ struct Settings {
   String mqttPassword;          // MQTT password - stored encrypted (default: "")
   String mqttBaseTopic;         // Base topic for publishing (default: hardwareone/<mac>, auto-generated if empty)
   String mqttDiscoveryPrefix;   // HA discovery prefix (default: "homeassistant")
-  int mqttPublishIntervalMs;    // Sensor data publish interval in ms (default: 10000)
+  int mqttPublishIntervalMs;    // Sensor data publish interval in ms (default: 30000)
   // MQTT publish data configuration
   bool mqttPublishWifi;         // Include WiFi info in published data (default: false)
   bool mqttPublishSystem;       // Include system info (uptime, heap, etc.) (default: false)
@@ -1537,13 +1531,11 @@ const char* cmd_espnowenabled(const String& argsInput);
 
 // OLED Settings
 const char* cmd_oled_enabled(const String& argsInput);
-const char* cmd_oled_bootmode(const String& argsInput);
 const char* cmd_oled_defaultmode(const String& argsInput);
 const char* cmd_oled_bootduration(const String& argsInput);
 const char* cmd_oled_updateinterval(const String& argsInput);
 const char* cmd_oled_brightness(const String& argsInput);
 const char* cmd_oled_thermalscale(const String& argsInput);
-const char* cmd_oled_thermalcolormode(const String& argsInput);
 
 // CLI Settings
 const char* cmd_webclihistorysize(const String& argsInput);

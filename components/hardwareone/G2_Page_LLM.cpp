@@ -520,7 +520,9 @@ static void llmMenuSubmit(int entityIdx) {
 
 // cmd_exec completion for llmload / llmunload. Same JSON {"ok":...} shape as
 // the web / CLI; admin denial is an Error: line (executeCommand returns false).
-static void llmMenuModelCmdDone(bool ok, const char* result, const G2CmdCookie& c, void* /*ud*/) {
+// userData is 1 for llmunload, 0 for llmload: a JSON refusal names the step.
+static void llmMenuModelCmdDone(bool ok, const char* result, const G2CmdCookie& c, void* ud) {
+  const bool unload = ((uintptr_t)ud) != 0;
   if (ok && commandReplyJsonOk(result)) {
     sLlmResume = LLM_MENU_HOME;   // guided resume is stale after a model swap
     (void)g2EnqueueRedraw(c, g2ShowLlmMenu, "LLM model-ok");
@@ -530,8 +532,10 @@ static void llmMenuModelCmdDone(bool ok, const char* result, const G2CmdCookie& 
     snprintf(sLlmMsg, sizeof(sLlmMsg), "Admin required");
   else if (result && strstr(result, "clear chat before"))
     snprintf(sLlmMsg, sizeof(sLlmMsg), "New chat before changing agent source");
+  else if (unload && result && strstr(result, "No model is loaded"))
+    snprintf(sLlmMsg, sizeof(sLlmMsg), "No model loaded");
   else if (commandReplyJsonFailed(result))
-    snprintf(sLlmMsg, sizeof(sLlmMsg), "Load failed");
+    snprintf(sLlmMsg, sizeof(sLlmMsg), unload ? "Unload failed" : "Load failed");
   else
     snprintf(sLlmMsg, sizeof(sLlmMsg), "Command failed");
   (void)g2EnqueueRedraw(c, llmMenuMsgRender, "LLM model-err");
@@ -545,7 +549,8 @@ static void llmMenuSubmitModelCmd(const char* line, const char* waitMsg) {
   cookie.targetPage   = g2GetHijackPage();
   cookie.targetNetSub = (uint8_t)LLM_MENU_MODELS;
   DEBUG_G2F("[G2-LLM] model cmd '%s'", line);
-  if (!g2SubmitHijackCommand(line, cookie, llmMenuModelCmdDone, nullptr)) {
+  const bool unload = strcmp(line, "llmunload") == 0;
+  if (!g2SubmitHijackCommand(line, cookie, llmMenuModelCmdDone, (void*)(uintptr_t)(unload ? 1 : 0))) {
     DEBUG_G2F("[G2-LLM] model submit failed (queue full)");
     llmMenuShowMsg("Busy - try again");
   }
@@ -562,8 +567,12 @@ static void llmMenuModelTap(uint32_t idx) {
   }
   const size_t mi = (size_t)item - 1;
   if (mi >= sLlmModelCount) return;
+  // The id travels as one quoted token, so a name with a space stays whole.
   char line[112];
-  snprintf(line, sizeof(line), "llmload %s", sLlmModels[mi].id);
+  if (!llmBuildLoadCommand(sLlmModels[mi].id, 0, line, sizeof(line))) {
+    llmMenuShowMsg("Model name not usable");
+    return;
+  }
   llmMenuSubmitModelCmd(line, "Loading model...");
 }
 

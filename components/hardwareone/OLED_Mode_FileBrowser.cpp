@@ -225,11 +225,15 @@ static int fbBuildActionRows(const char* labels[FB_ACTION_ROWS_MAX]) {
 // VFS, so these run in the prepare pass under OledFileBrowserCtxGuard.
 enum class FbMutateResult : uint8_t { Done, Unresolved, QuoteInName, AdminOnly, NoAccess, Failed };
 
+// The reply of the last rename or delete, kept for the failure toast. Display
+// task only.
+static char sFbMutateReply[96] = {0};
+
 static FbMutateResult fbSubmitMutate(const String& line) {
-  char out[96] = {};
+  char* const out = sFbMutateReply;
   // The executor stamps "OK" on a handler success; refusals and handler
   // errors start with "Error".
-  if (executeOledCommandWithResult(line, out, sizeof(out)) && commandReplyHasOkStamp(out)) {
+  if (executeOledCommandWithResult(line, out, sizeof(sFbMutateReply)) && commandReplyHasOkStamp(out)) {
     gOledFileManager->forceRescan();   // refresh() is generation-gated
     return FbMutateResult::Done;
   }
@@ -264,7 +268,14 @@ static void fbToastMutate(FbMutateResult result, const char* done, const char* f
     case FbMutateResult::QuoteInName: oledToastShow("Quote in name", oled_message::kErrorDurationMs, OledUiIcon::ERROR); break;
     case FbMutateResult::AdminOnly:   oledToastShow("Admin only", oled_message::kErrorDurationMs, OledUiIcon::ERROR); break;
     case FbMutateResult::NoAccess:    oledToastShow("Not found or denied", oled_message::kErrorDurationMs, OledUiIcon::ERROR); break;
-    case FbMutateResult::Failed:      oledToastShow(failed, oled_message::kErrorDurationMs, OledUiIcon::ERROR); break;
+    case FbMutateResult::Failed: {
+      // The handler's reason; the caller's text when the reply carries none.
+      char text[oled_message::kMessageBytes];
+      oledCommandReplyText(false, commandReplyIsError(sFbMutateReply) ? sFbMutateReply : "",
+                           nullptr, failed, text, sizeof(text));
+      oledToastShow(text, oled_message::kErrorDurationMs, OledUiIcon::ERROR);
+      break;
+    }
   }
 }
 
@@ -296,6 +307,7 @@ void oledFileBrowserResetSessionState() {
   sFbRenameActive = false;
   memset(sFbActionName, 0, sizeof(sFbActionName));
   memset(sFbDeletePrompt, 0, sizeof(sFbDeletePrompt));
+  memset(sFbMutateReply, 0, sizeof(sFbMutateReply));
   memset(sFbViewBody, 0, sizeof(sFbViewBody));
   memset(sFbViewLineOff, 0, sizeof(sFbViewLineOff));
   sFbViewLineCount = 0;

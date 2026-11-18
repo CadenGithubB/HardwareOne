@@ -48,17 +48,17 @@ static uint32_t readKey(const char* key) {
 
 static uint32_t readCountLocked() { return readKey(kKeyBootCount); }
 
-static void writeCount(uint32_t v) {
+// True only when the value was written and committed.
+static bool writeCount(uint32_t v) {
   nvs_handle_t h;
   esp_err_t err = nvs_open(kNvsNamespace, NVS_READWRITE, &h);
   if (err != ESP_OK) {
     ERROR_SYSTEMF("[BootState] nvs_open(rw) failed: 0x%x", err);
-    return;
+    return false;
   }
-  if (nvs_set_u32(h, kKeyBootCount, v) == ESP_OK) {
-    nvs_commit(h);
-  }
+  const bool ok = nvs_set_u32(h, kKeyBootCount, v) == ESP_OK && nvs_commit(h) == ESP_OK;
   nvs_close(h);
+  return ok;
 }
 
 // The power-on counter and the ordering domain ride the same once-per-boot
@@ -86,7 +86,7 @@ uint32_t bootStateIncrementBootCount() {
   bootStateInit();
   if (!sNvsReady) return 0;
   uint32_t next = readCountLocked() + 1;
-  writeCount(next);
+  (void)writeCount(next);
   advanceOrderingLocked(esp_reset_reason() == ESP_RST_POWERON);
   DEBUG_SYSTEMF("[BootState] boot count -> %lu (power-on %lu, domain %08lx)", (unsigned long)next,
                 (unsigned long)readKey(kKeyPowerOnCount), (unsigned long)readKey(kKeyOrderingDomain));
@@ -109,11 +109,11 @@ uint32_t bootStateGetBootCount() {
   return readCountLocked();
 }
 
-void bootStateResetBootCount() {
+bool bootStateResetBootCount() {
   bootStateInit();
-  if (!sNvsReady) return;
-  writeCount(0);
+  if (!sNvsReady || !writeCount(0)) return false;
   DEBUG_SYSTEMF("[BootState] boot count reset to 0");
+  return true;
 }
 
 // A missing key reads as 0; any other error is a failed read.

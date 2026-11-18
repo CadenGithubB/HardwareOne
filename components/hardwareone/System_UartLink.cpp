@@ -1096,6 +1096,17 @@ static void uartProcessLine(String& cmd, uint32_t admittedTransportEpoch) {
   if (!hostHousekeeping) cm5PresenceCommandStarted(commandSessionEpoch);
   bool ok = submitAndExecuteSync(uc, out);
   bool replyAdmitted = false;
+  // A failure goes out as one status line that leads with Error, the framing
+  // the host parses: a refused "Usage: ..." or "Unknown command: ..." reply has
+  // no such lead of its own. A structured reply states its own verdict.
+  if (!ok && out.length() && out[0] != '{') {
+    out.trim();
+    out.replace('\r', ' ');
+    out.replace('\n', ' ');
+    if (out.length() && !commandReplyIsError(out.c_str())) {
+      out = String(kCommandReplyErrorLead) + out;
+    }
+  }
   if (out.length()) {
     // ONE write call for blob + newline: with cross-task frame writers live
     // (voicefetch), a two-call reply could be split mid-message.
