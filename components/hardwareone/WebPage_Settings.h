@@ -944,12 +944,17 @@ window.SchemaPanel.render({
       updates[key] = val;
     });
     
+    // An emptied master fingerprint is sent as 'clear' (no master named):
+    // the command shows the value when it is given nothing.
+    var clearWhenEmpty = { espnowmasterfingerprint: true, espnowbackupfingerprint: true };
     var cmds = [];
     for (var k in updates) {
       var el = container.querySelector('#net-' + k.replace(/\./g, '-'));
       var cmd = el && el.getAttribute('data-cmd');
       if (!cmd) continue;  // no setter in the schema; never derive one from the key
-      cmds.push(cmd + ' ' + updates[k]);
+      var v = updates[k];
+      if (clearWhenEmpty[cmd] && String(v).trim() === '') v = 'clear';
+      cmds.push(cmd + ' ' + v);
     }
 
     if (cmds.length === 0) { alert('No changes to save.'); return; }

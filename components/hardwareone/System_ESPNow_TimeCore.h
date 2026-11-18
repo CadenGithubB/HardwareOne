@@ -233,6 +233,8 @@ inline void peerSent(PeerSendState& p, const RoundState& r, uint32_t established
 // ---------------------------------------------------------------------------
 // What a receiver does with a frame. First match:
 //
+//    0  (before every row) the masters named here changed   the sender
+//       followed and a held claim are dropped
 //    1  the setting meshTime is off                         ignored_off
 //   1b  mesh mode is off                                    ignored_mesh_off
 //    2  this device is the acting master                    ignored_master
@@ -252,6 +254,13 @@ inline void peerSent(PeerSendState& p, const RoundState& r, uint32_t established
 // The time judged is the frame's time plus how long the frame waited here.
 // A frame whose own time is not a real date is refused before anything is
 // computed from it.
+//
+// 0: a fingerprint set, changed or cleared (espnowmasterfingerprint,
+// espnowbackupfingerprint; console, web page or a settings file) changes
+// FollowerInputs::namedTag. The follower then forgets the sender it follows
+// (7) and the claim it holds (12) before it judges the frame, whatever the
+// verdict: a newly named master is followed with its first frame, not after
+// kStickyMs, and a claim from a master no longer named is never confirmed.
 //
 // 3: mesh time comes only from the master named on this device: the primary
 // (espnowmasterfingerprint), or the backup (espnowbackupfingerprint), which
@@ -324,7 +333,26 @@ constexpr bool verdictIsIgnored(Verdict v) {
          v == Verdict::IgnoredOtherMaster || v == Verdict::IgnoredTooSoon;
 }
 
+// The masters named on this device as one number (namedTag below): it
+// changes when either fingerprint is set, changed or cleared. Letters count
+// the same in either case, as the fingerprint match does. FNV-1a, each text
+// closed by a byte no fingerprint holds, so ("ab", "") and ("a", "b") differ.
+inline uint64_t namedMastersTag(const char* primary, const char* backup) {
+  uint64_t h = 1469598103934665603ULL;
+  const char* const texts[2] = { primary, backup };
+  for (const char* text : texts) {
+    for (const char* c = text; c && *c; ++c) {
+      uint8_t b = (uint8_t)*c;
+      if (b >= 'A' && b <= 'Z') b = (uint8_t)(b - 'A' + 'a');
+      h = (h ^ b) * 1099511628211ULL;
+    }
+    h = (h ^ 0xFFu) * 1099511628211ULL;
+  }
+  return h;
+}
+
 struct FollowerInputs {
+  uint64_t  namedTag;              // namedMastersTag of the two fingerprints set here
   bool      settingOn;
   bool      meshOn;                // mesh mode
   bool      hasNamedMaster;        // a master or backup fingerprint is set on this device
@@ -344,6 +372,7 @@ struct Received {
 };
 
 struct FollowerState {
+  uint64_t namedTag;               // the namedTag the state below was built under
   bool    holdHave;
   uint8_t holdMac[6];
   int64_t holdEpochMs;
@@ -361,6 +390,14 @@ struct Decision {
   int64_t candidateEpochMs;  // what the clock is set to when applied
   int64_t differenceMs;      // candidate minus the own clock (0 when that is not set)
 };
+
+// Row 0: forgets the sender followed and the claim held. The 10 s gap after
+// a step (appliedHave) is about this device's clock and stays.
+inline void followerNamedChanged(FollowerState& st, uint64_t namedTag) {
+  st.namedTag = namedTag;
+  st.stickyHave = false;
+  st.holdHave = false;
+}
 
 // Only a named master gets this far: the primary outranks the backup.
 inline uint8_t senderRank(const FollowerInputs& in) { return in.senderIsNamedPrimary ? 1 : 0; }
@@ -381,6 +418,7 @@ inline Decision followerDecide(FollowerState& st, const FollowerInputs& in, cons
     if (in.clockSet) d.differenceMs = d.candidateEpochMs - in.nowEpochMs;
   }
 
+  if (st.namedTag != in.namedTag) followerNamedChanged(st, in.namedTag);
   if (!in.settingOn) { d.verdict = Verdict::IgnoredOff; return d; }
   if (!in.meshOn) { d.verdict = Verdict::IgnoredMeshOff; return d; }
   if (in.actingMaster) { d.verdict = Verdict::IgnoredMaster; return d; }

@@ -1223,8 +1223,8 @@ espnowbattery [json] [<name_or_mac>] [from <n>]  - Master: the battery state oth
 espnowevents [json] [since <rx>]       - Master: the system events other devices sent (admin)
 espnowpowerinterval [0|10..3600]       - Seconds between this device's battery reports (0 = none, default 60)
 espnoweventpush [off|alert|standard|verbose]  - Which of this device's events go to the master (default alert)
-espnowmasterfingerprint [64 hex]       - Name the mesh master on this device (its key fingerprint)
-espnowbackupfingerprint [64 hex]       - Name the backup master on this device
+espnowmasterfingerprint [64 hex|clear] - Name the mesh master on this device (its key fingerprint) (admin)
+espnowbackupfingerprint [64 hex|clear] - Name the backup master on this device (admin)
 
 --- Security ---
 espnowsetpassphrase "phrase"    - Set encryption passphrase
@@ -1241,7 +1241,9 @@ starts, every 10 minutes and when its own clock is set. A device takes it only f
 named on it (`espnowmasterfingerprint`, or the backup master named with `espnowbackupfingerprint`
 while it acts as master), and only when it has no better source of its own (RTC chip, NTP,
 `timeset`, CM5); `time` then shows the source "mesh". A device that names no master takes no mesh
-time; `espnowtimestatus` says so. The master only sends a clock that comes from one of those four
+time; `espnowtimestatus` says so. A master named in place of another (or a fingerprint cleared)
+counts at once: the device no longer follows the master it followed and takes the newly named
+one's next time. The master only sends a clock that comes from one of those four
 sources. A time more than an hour away from
 a clock that is already set is applied when the master says it again: within about 15 seconds when
 the master's own clock was just set, else at its next 10-minute round. A device with mesh mode off
@@ -1252,11 +1254,17 @@ changes how they are shown.
 sensor readings, the battery state and the system events the other devices send it. A device sends
 to the master that is named on it, so name the master on each sending device
 (`espnowmasterfingerprint <fingerprint>`, the 64-character public key `espnowidentity` shows on the master;
-`espnowbackupfingerprint` for a backup master) and pair the two devices. Naming the master is the
+`espnowbackupfingerprint` for a backup master) and pair the two devices. Anything but 64
+hexadecimal characters is refused. `espnowmasterfingerprint clear` (and `espnowbackupfingerprint
+clear`) names none again, and the reply says what that stops; with neither named the device takes
+no mesh time, sends its readings, battery state and events to no device and refuses sensor
+requests. On the web settings page and in the OLED settings editor, emptying the field does the
+same. Naming the master is the
 consent to send; nothing here needs a bond, and all of it works through a relay. The receiving
 device must have the master or backup master role (`espnowmeshrole`): a worker keeps nothing that
 is sent to it, counts what it refused and says so on its console. `espnowsensorstatus` shows on every device who it sends to, what was
-sent and why not, and what it received.
+sent and why not, and what it received; the event counts of the sending devices are shown to an
+admin only (anyone else sees "Event counts: admin only.").
 
 **Sensor readings.** `espnowsensorstream <sensor> on` sends that sensor's readings to the named
 master, and the reply says where they go or why nothing is sent yet. The master lists a device's

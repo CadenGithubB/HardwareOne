@@ -30,6 +30,8 @@ System_Clock.cpp against a settable clock:
   * time is taken only from the master named on the device (primary, or the
     backup acting as master); with no master named no frame sets the clock,
     and the status says so and names espnowmasterfingerprint;
+  * a master named in place of the one followed sets the clock with its
+    first frame (the fingerprints reach the follower as one tag);
   * a paired device that sends TIME_SYNC all the time cannot keep the named
     master's frame from being judged; mesh mode off takes no time; a hostile
     time is refused with no difference computed; the "held" console line
@@ -125,6 +127,14 @@ def check_sources(component: Path) -> None:
     require("meshTimeKeepFrame(ctx.recv_info->src_addr, ctx.payload, ctx.payloadLen);" in handler and
             "settimeofday" not in handler, "the handler only keeps the frame for the main loop")
     hosted = strip_comments(production(component))
+    # A fingerprint set, changed or cleared by any path reaches the follower:
+    # the tag is read from the two settings themselves with every frame.
+    tag = strip_comments(extract_block(mesh, "static uint64_t mtNamedTag()"))
+    require("meshtime::namedMastersTag(gSettings.espnowMasterFingerprint.c_str()," in tag and
+            "gSettings.espnowBackupMasterFingerprint.c_str()" in tag,
+            "the named-master tag is made from both fingerprint settings")
+    require("in.namedTag = mtNamedTag();" in extract_block(hosted, "static meshtime::FollowerInputs meshTimeFollowerInputs("),
+            "every frame is judged with the tag of the masters named now")
     for direct in ("Clock::", "gSettings", "millis()", "esp_timer", "peerIdentity", "espnowtx::", "time(nullptr)"):
         require(direct not in hosted, f"the host-tested block reaches the device only through its mt* functions ({direct})")
 

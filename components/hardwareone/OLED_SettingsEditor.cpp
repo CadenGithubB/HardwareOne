@@ -20,6 +20,7 @@ static constexpr int kSeValueMaxW = 60;
 #include "OLED_UI.h"
 #include "System_Debug.h"
 #include "System_I2C.h"
+#include "System_ESPNow_SensorCore.h"  // fingerprintEditorArg: an emptied fingerprint is 'clear'
 #include "System_Settings.h"
 #include "System_SettingsEditorCore.h"
 #include "System_Utils.h"
@@ -240,7 +241,10 @@ static bool setSettingValueStr(const SettingEntry* entry, const String& value) {
   }
   if (editorIsRemote()) return commitRemoteSettingValue(entry, value);
   char out[128];
-  bool ok = executeOledCommandWithResult(String(cmdName) + " " + value, out, sizeof(out));
+  // An emptied master fingerprint goes as 'clear' (no master named): an
+  // empty argument would only show the value and report it saved.
+  bool ok = executeOledCommandWithResult(
+      String(cmdName) + " " + espnowsensor::fingerprintEditorArg(cmdName, value.c_str()), out, sizeof(out));
   if (!ok) {
     settingsEditorShowError((out[0] != '\0') ? String(out) : String("Save failed"), 2500);
     return false;

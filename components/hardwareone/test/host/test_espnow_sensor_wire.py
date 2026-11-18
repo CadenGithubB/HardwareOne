@@ -33,7 +33,10 @@ Source rules:
   * the stream command says where the readings go;
   * the task-loop steps for sensor readings are outside the bonded-mode block
     (sending readings to a mesh master needs no bond);
-  * the status frame is sent as a session unicast.
+  * the status frame is sent as a session unicast;
+  * espnowmasterfingerprint and espnowbackupfingerprint take 'clear' and a
+    checked 64-hex value (rules in System_ESPNow_SensorCore.h), and the web
+    settings page sends an emptied field as 'clear'.
 
 Options: --cxx <compiler>, --sanitize, --component <dir>.
 """
@@ -460,6 +463,29 @@ def rule_failures(component: Path) -> list[str]:
     tick = strip_comments(extract_block(sensors, "void sensorLinkTick(uint32_t nowMs)"))
     expect("espnowHandshakeAutoStart(mac)" in tick and "warnLimiterTake(" in tick,
            "sensorLinkTick starts the handshake and limits the console line with WarnLimiter")
+
+    # The masters named on this device: both commands take 'clear', check a
+    # value by the rule of the core, and the web page sends an emptied field
+    # as 'clear' (an empty argument only shows the value).
+    fp_cmd = strip_comments(extract_block(espnow, "static const char* espnowFingerprintCommand(const String& a, const char* jsonKey, bool backup)"))
+    expect("espnowsensor::fingerprintArgKind(value.c_str(), value.length())" in fp_cmd and
+           "espnowsensor::kFingerprintBadReply" in fp_cmd and
+           "setSetting(*((String*)entry->valuePtr), String(), entry);" in fp_cmd and
+           "espnowsensor::fingerprintClearedReply(backup," in fp_cmd,
+           "espnowmasterfingerprint / espnowbackupfingerprint: show, clear, a checked value, or refused")
+    for name, key, backup in (("cmd_espnow_masterfingerprint", "masterFingerprint", "false"),
+                              ("cmd_espnow_backupfingerprint", "backupMasterFingerprint", "true")):
+        body = strip_comments(extract_block(espnow, f"const char* {name}(const String& a)"))
+        expect(f'espnowFingerprintCommand(a, "{key}", {backup})' in body, f"{name} goes through espnowFingerprintCommand")
+    expect(re.search(r"ESPNOW_SETTING_CMD\(cmd_espnow_(?:master|backup)fingerprint", espnow) is None,
+           "the fingerprint commands are not the generic setting command")
+    for name in ("espnowmasterfingerprint", "espnowbackupfingerprint"):
+        row = re.search(rf'\{{ "{name}", "[^"]*", true, cmd_espnow_\w+, "Usage: {name} \[<64-hex-pubkey>\|clear\]', espnow)
+        expect(row is not None, f"{name} is admin and its usage names 'clear'")
+    page = files["WebPage_Settings.h"]
+    expect("var clearWhenEmpty = { espnowmasterfingerprint: true, espnowbackupfingerprint: true };" in page and
+           "if (clearWhenEmpty[cmd] && String(v).trim() === '') v = 'clear';" in page,
+           "the web settings page sends an emptied fingerprint field as 'clear'")
     return failures
 
 

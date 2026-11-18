@@ -36,7 +36,10 @@ production rules header System_ESPNow_PowerEventCore.h against a host device
     one; both JSON replies page (`next`, `more`) and are whole JSON within
     the reply buffer;
   * nothing that may block, print or allocate runs under the lock, and a
-    received event is never posted into the receiver's own event ring.
+    received event is never posted into the receiver's own event ring;
+  * the event counts of other devices (the status line words and the json of
+    one device for espnowsensorstatus) are for an admin caller only; the
+    battery state is for every user.
 
 Source rules: rows 132 and 152 of the receive table ask for a paired sender
 and a session-encrypted frame and nothing else (no bond gate); both may travel
@@ -162,6 +165,17 @@ def check_sources(component: Path) -> None:
     sensors = (component / "System_ESPNow_Sensors.cpp").read_text()
     require('"  Battery state and events it received: espnowbattery, espnowevents (admin only)."' in sensors,
             "espnowsensorstatus points to espnowevents as admin only")
+    # The event counts of other devices in espnowsensorstatus: an admin only,
+    # as the caller's identity says; anyone else is told once.
+    require("currentExecIsAdmin()" in strip_comments(extract_block(source, "static bool peCallerIsAdmin()")),
+            "the event counts ask the identity the command runs under")
+    one_json = strip_comments(extract_block(sensors, "static const char* sensorStatusOneDeviceJson(const String& who)"))
+    require('if (!espnowEventCountsVisible()) doc["eventCounts"] = "admin only";' in one_json,
+            "espnowsensorstatus json <device>: no events key for a user who is not an admin, and eventCounts says why")
+    status_cmd = strip_comments(extract_block(sensors, "const char* cmd_espnow_sensorstatus(const String& argsInput)"))
+    require(status_cmd.count('broadcastOutput("  Event counts: admin only.");') == 1 and
+            "if (senderListed && !espnowEventCountsVisible())" in status_cmd,
+            "espnowsensorstatus says once that event counts are for an admin")
     notif_h = (component / "System_Notifications.h").read_text()
     notif = (component / "System_Notifications.cpp").read_text()
     require("uint8_t notifKindTier(uint8_t kind);" in notif_h and "static uint8_t notifKindTier" not in notif,

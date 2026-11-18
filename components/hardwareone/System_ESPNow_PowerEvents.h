@@ -47,12 +47,18 @@ struct PowerEventsSendView {
 };
 void espnowPowerEventsSendView(PowerEventsSendView* out);
 
+// Whether the user the current command runs for may see the event counts of
+// other devices: an admin only, as espnowevents (events carry logins and
+// failures). The two functions below leave the counts out for anyone else.
+bool espnowEventCountsVisible();
 // What this device keeps of one sender, for 'espnowsensorstatus json <device>':
 // its latest battery state as one JSON object (the row of 'espnowbattery
-// json'), and its event counts as one JSON object. 0 when nothing is kept.
+// json'), and its event counts as one JSON object (admin only). 0 when
+// nothing is kept (or the counts are not for this user).
 size_t espnowBatteryJsonFor(const uint8_t mac[6], char* out, size_t cap);
 size_t espnowEventCountsJsonFor(const uint8_t mac[6], char* out, size_t cap);
-// The same in a few words ("battery 71.5 % 12 s ago, 3 events"); 0 when nothing is kept.
+// The same in a few words ("battery 71.5 % 12 s ago, 3 events"; the events
+// for an admin only); 0 when nothing is kept.
 size_t espnowPowerEventsPeerText(const uint8_t mac[6], char* out, size_t cap);
 
 const char* cmd_espnow_battery(const String& argsInput);

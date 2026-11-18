@@ -4163,6 +4163,15 @@ set, with or without the acting-backup bit), that the status says so and names `
 acting-backup bit neither names a device nor ranks it, and that a named master's frames step the clock after 10 s
 every time (the old one-step-in-10-minutes limit for an unnamed sender is gone with the unnamed sender).
 
+Since the bench of 2026-11-18 both suites also check that a fingerprint set, changed or cleared drops the sender
+followed and the claim held at once (row 0 of the receiver's rule, `FollowerInputs::namedTag` from
+`meshtime::namedMastersTag`): a master named in place of the one followed, or the two swapped, sets the clock
+with its next frame instead of after 25 minutes; a claim held from a master that stays named as the backup is
+not confirmed by its repeat; clearing both drops both with the frame that finds no master; the 10 s gap after a
+step stays; the tag is the same in either letter case and differs for a swap and a cleared field. The source
+rule pins that the device reads the tag from both fingerprint settings with every frame (any path that writes
+them: console, web page, settings file).
+
 Not covered: `mtSetClock` itself (`settimeofday` and `Clock::clockStepped`; the source rule pins its two lines
 and their order), the real session table and send queue, and two real tasks at the kept frame at the same moment.
 
@@ -4183,7 +4192,13 @@ check with the text that would put keys of the sender's choosing beside the rece
 goes (the bond partner, the controller of a running lease, the named master for a stream switched on by hand,
 and the reason when it goes nowhere); who sends and who keeps by mesh role (a worker keeps nothing, a backup
 master sends and keeps, the master only keeps); and that every reason not to send has a name and a sentence of
-its own.
+its own. It also checks the argument of `espnowmasterfingerprint` / `espnowbackupfingerprint`: none shows,
+`clear` (any case) empties, exactly 64 hex characters set, anything else (63 or 65 characters, a letter that is
+not hex, a space, other words) is refused, and the reply to `clear` in each of its four cases (which of the two,
+the other one named or not) says what is then true. `espnow_sensor_wire` pins that both commands go through that
+rule and are admin with `clear` in their usage, and that the web settings page sends an emptied field as `clear`.
+The same suite checks `fingerprintEditorArg` (an emptied fingerprint field becomes `clear`, any other text or
+setting goes as it is); `oled_remote_settings` checks that the OLED settings editor's local commit uses it.
 
 `espnow_sensor_wire` compiles `V4PayloadSensorReading`, `V4PayloadSensorStatus`, `V4PayloadSensorReq`,
 `V4PayloadTimeSync`, `V4PayloadPowerStatus` and `V4PayloadEventPush` as `System_ESPNow_Wire.h` declares them,
@@ -4260,6 +4275,12 @@ table, the transport below `v4_send_sensor_part`, and the real locks under two t
 
 POWER_STATUS (152) and EVENT_PUSH (132) were reserved numbers with no payload: a master could not see a worker's
 battery or its alerts.
+
+Since the bench of 2026-11-18 `espnow_power_events` also checks that the event counts of other devices
+(`espnowPowerEventsPeerText`, `espnowEventCountsJsonFor`, read by `espnowsensorstatus`) are for an admin caller
+only (`peCallerIsAdmin`, `currentExecIsAdmin` on the device): the status line keeps the battery and leaves the
+events out, the json of one device gets no counts; source rules pin that `espnowsensorstatus` says "Event
+counts: admin only." once and its json for one device has `"eventCounts":"admin only"` instead of `events`.
 
 Since the review of 2026-11-18 `espnow_power_events` also checks: each of the 13 bits of the battery frame's
 `known` reaches the JSON key it names, alone and in pairs, against the frame's specification written out again;
@@ -4525,7 +4546,7 @@ authorization) is not exercised here.
 python3 components/hardwareone/test/host/test_oled_remote_settings.py --sanitize
 ```
 
-`oled_remote_settings` compiles the production OLED remote-settings module (`OLED_RemoteSettings.cpp` whole: schema-driven module builder, non-blocking schema fetch, remote apply and peer-reply outcome), the settings editor's module source and commit routing (`OLED_SettingsEditor.cpp`), the remote-settings mode adapter (`OLED_Mode_RemoteSettings.cpp`), the ESP-NOW command-result record (`System_ESPNow`) and BondedPeer's schema sync and remote-edit policy, against doubles for the OLED command executor, the peer caches, the clock, PSRAM allocation and the display. It checks that the remote screen lists only the peer's schema rows that carry a setter (no read-only, secret or float rows, no `users`/`bond`/`wifi`, only `ntpServer`/`tzOffsetMinutes` from `clock`) with the cached values, sends `remote:<cmdKey> <value>`, reports the peer's CMD_RESP failure (`Peer: ...`) or silence (`No reply from peer` after 5 s) instead of the local "sent" result, ignores another device's reply, never runs a local setter from the remote screen, fetches a missing schema once without blocking (6 s budget), does not let the local screen keep editing a peer module, and releases every PSRAM block and String it allocated, also when an allocation fails. A static check confirms the CMD_RESP drain publishes the redacted result. `--component <dir>` runs the same cases against saved sources; the f4cc542 sources fail them (modules built from settings.json without setters, `remote:set <jsonKey>` reported as applied, the local setter run from the remote screen). The radio link and the real display are not exercised. System_Utils' `remote:` reply owner (`formatRemoteCommandSent` / `parseRemoteCommandSentReqId`) is spliced in and the executor double answers with it: "Remote command sent: <redacted command> (reqId <msgId>)", the echo shortened before the id. The commit waits for the CMD_RESP whose `reqId` is that msgId from the bonded peer, so the peer's reply to another `remote:` command (the web console's) does not decide it; a "sent" reply without an id is refused rather than left waiting; the parser accepts only the owner's shape and a non-zero 32-bit id (A13). The pre-fix tree fails these three cases.
+`oled_remote_settings` compiles the production OLED remote-settings module (`OLED_RemoteSettings.cpp` whole: schema-driven module builder, non-blocking schema fetch, remote apply and peer-reply outcome), the settings editor's module source and commit routing (`OLED_SettingsEditor.cpp`), the remote-settings mode adapter (`OLED_Mode_RemoteSettings.cpp`), the ESP-NOW command-result record (`System_ESPNow`) and BondedPeer's schema sync and remote-edit policy, against doubles for the OLED command executor, the peer caches, the clock, PSRAM allocation and the display. It checks that the remote screen lists only the peer's schema rows that carry a setter (no read-only, secret or float rows, no `users`/`bond`/`wifi`, only `ntpServer`/`tzOffsetMinutes` from `clock`) with the cached values, sends `remote:<cmdKey> <value>`, reports the peer's CMD_RESP failure (`Peer: ...`) or silence (`No reply from peer` after 5 s) instead of the local "sent" result, ignores another device's reply, never runs a local setter from the remote screen, fetches a missing schema once without blocking (6 s budget), does not let the local screen keep editing a peer module, and releases every PSRAM block and String it allocated, also when an allocation fails. A static check confirms the CMD_RESP drain publishes the redacted result. `--component <dir>` runs the same cases against saved sources; the f4cc542 sources fail them (modules built from settings.json without setters, `remote:set <jsonKey>` reported as applied, the local setter run from the remote screen). The radio link and the real display are not exercised. System_Utils' `remote:` reply owner (`formatRemoteCommandSent` / `parseRemoteCommandSentReqId`) is spliced in and the executor double answers with it: "Remote command sent: <redacted command> (reqId <msgId>)", the echo shortened before the id. The commit waits for the CMD_RESP whose `reqId` is that msgId from the bonded peer, so the peer's reply to another `remote:` command (the web console's) does not decide it; a "sent" reply without an id is refused rather than left waiting; the parser accepts only the owner's shape and a non-zero 32-bit id (A13). The pre-fix tree fails these three cases. Since 2026-11-18 it also checks that the local commit sends an emptied master or backup fingerprint field as `<cmd> clear` (the bare command only shows the value, which the editor took for a save) and every other value or setting as typed.
 
 ## BLE output privacy and console mirror
 

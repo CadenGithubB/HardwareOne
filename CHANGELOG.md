@@ -26,7 +26,10 @@ everything user-visible since the v0.99.99.1 tag.
   the device: the one named with `espnowmasterfingerprint`, or the backup master named with
   `espnowbackupfingerprint` while it acts as master. A device that names no master takes no mesh
   time at all, and `espnowtimestatus` says so and names `espnowmasterfingerprint` (the json form has
-  `masterNamed`, and a frame it did not use has the result `ignored_no_master`). A device with mesh
+  `masterNamed`, and a frame it did not use has the result `ignored_no_master`). When either
+  fingerprint is set, changed or cleared (console, web page or settings file), the device stops
+  following the master it followed and drops a time change it held back, so a newly named master's
+  next frame is taken at once instead of after up to 25 minutes. A device with mesh
   mode off takes no mesh time. Mesh time is not written into the RTC chip, also not later by the RTC task
   from a clock carried over a restart. New setting `espnowmeshtime <on|off>` (default on), and
   `espnowtimestatus [json]` says where this device's clock comes from, when it was last set, and
@@ -86,7 +89,9 @@ everything user-visible since the v0.99.99.1 tag.
   sends to and whether their session is up, per sensor what was sent and why not, whether battery
   state and events are sent, and on a master one line per sending device with its sensors, counts,
   battery and events. `espnowsensorstatus json <name_or_mac>` gives everything kept of one device.
-  The master lists a device's sensors (present, streaming or not) from the device's sensor status
+  The event counts of the sending devices are shown to an admin only, as `espnowevents` is: anyone
+  else gets the lines without them and one line "Event counts: admin only." (the json form for one
+  device leaves out `events` and has `"eventCounts":"admin only"`). The master lists a device's sensors (present, streaming or not) from the device's sensor status
   frame, before any reading arrives (a sensor that streams but has sent no reading yet shows
   "streaming, no reading yet"); a status frame never makes a reading fresh or counts one, and
   a seventeenth sending device is refused, counted and said as for a reading.
@@ -562,6 +567,15 @@ everything user-visible since the v0.99.99.1 tag.
   yet tested on hardware.
 
 ### Changed
+- `espnowmasterfingerprint` and `espnowbackupfingerprint` (admin) take `clear`, which names no
+  master (or no backup master) on the device; before, the console could not empty them (an empty
+  argument only shows the value). The reply says what that stops: with neither named the device
+  takes no mesh time, sends its readings, battery state and events to no device and refuses sensor
+  requests (a lease already running runs out). A value must be exactly 64 hexadecimal characters
+  (the key `espnowidentity` shows on that master); anything else is refused with an error instead
+  of being stored as a fingerprint that never matches. On the web settings page and in the OLED
+  settings editor an emptied field is saved as `clear` (both reported a save and kept the old
+  value); an empty value in a settings file also names none.
 - ESP-NOW frame formats changed for the 1.0 format (a device with this firmware does not exchange
   sensor readings, sensor status or time with a device on an earlier build; install all devices
   together). Sensor readings (types 154, and 179 to a bond partner) have one 12-byte header with a

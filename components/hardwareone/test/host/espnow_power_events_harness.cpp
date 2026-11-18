@@ -309,6 +309,9 @@ static void peConsole(const char* fmt, ...) {
   va_end(args);
   gConsole.push_back(line);
 }
+// The user the command runs for (currentExecIsAdmin on the device).
+static bool gCallerAdmin = true;
+static bool peCallerIsAdmin() { return gCallerAdmin; }
 static char gReply[4096];
 static size_t gReplyCap = sizeof(gReply);  // a case may hand out less of it
 static bool gReplyFails = false;
@@ -1485,6 +1488,40 @@ static void testReviewFindings() {
   check(allWhole, "every reply is whole JSON within buffers of 900 to 4096 bytes" + (firstBad.empty() ? "" : ": " + firstBad));
 }
 
+// The event counts of other devices are for an admin, as espnowevents is:
+// espnowsensorstatus (its sender lines and its json for one device) leaves
+// them out for anyone else; the battery state stays for every user.
+static void testEventCountsAdminOnly() {
+  resetAll();
+  gRole = 1;
+  pair(kPorch, "porch");
+  rxPower(kPorch, "porch", powerBytes(1, 3, 715, espnowsensor::kPowerPercentValid));
+  rxEvent(kPorch, "porch", eventBytes(1, 7, "login_fail", "admin", "3 attempts"));
+  rxEvent(kPorch, "porch", eventBytes(2, 7, "login_fail", "admin", "4 attempts"));
+  char words[96];
+  char counts[320];
+  gCallerAdmin = true;
+  check(espnowEventCountsVisible(), "an admin sees the event counts");
+  check(espnowPowerEventsPeerText(kPorch, words, sizeof(words)) > 0 &&
+        std::string(words) == "battery 71.5 % 0 s ago, 2 events", "an admin's status line has the event count");
+  check(espnowEventCountsJsonFor(kPorch, counts, sizeof(counts)) > 0 && has(counts, "\"received\":2,"),
+        "an admin's json for the device has its event counts");
+  gCallerAdmin = false;
+  check(!espnowEventCountsVisible(), "a user who is not an admin does not");
+  check(espnowPowerEventsPeerText(kPorch, words, sizeof(words)) > 0 &&
+        std::string(words) == "battery 71.5 % 0 s ago", "the status line keeps the battery and leaves the events out");
+  check(espnowEventCountsJsonFor(kPorch, counts, sizeof(counts)) == 0 && counts[0] == '\0',
+        "the json for the device gets no event counts");
+  // A sender that sent events only: no words at all for that user.
+  pair(kShed, "shed");
+  rxEvent(kShed, "shed", eventBytes(1, 9, "login_fail", "root"));
+  check(espnowPowerEventsPeerText(kShed, words, sizeof(words)) == 0 && words[0] == '\0',
+        "a sender with events and no battery state: nothing to say to that user");
+  gCallerAdmin = true;
+  check(espnowPowerEventsPeerText(kShed, words, sizeof(words)) > 0 && std::string(words) == "1 events",
+        "and its count to an admin");
+}
+
 int main() {
   testPowerSend();
   testStaleSessionHeals();
@@ -1493,6 +1530,7 @@ int main() {
   testEventStore();
   testSenderView();
   testReviewFindings();
+  testEventCountsAdminOnly();
   check(gLockViolations == 0, "nothing that may block, print or allocate ran under the lock");
   check(gLockDepth == 0, "every lock was released");
   check(gLocalEventPosts == 0, "nothing was posted into this device's own event ring");

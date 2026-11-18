@@ -329,7 +329,8 @@ contract in sec. 6 is **unchanged**.)
   `paired`, `incomplete`, `malformed`, `sensors` (per sensor name the keys of
   `/api/sensors/remote` without `data`), `battery` (one row of `espnowbattery json`, or `null`)
   and `events` (`received`, `stored`, `lost`, `late`, `restarts`, `resumes`, `senderSkipped`,
-  `refusedRate`, or `null`).
+  `refusedRate`, or `null`). `events` is there for an admin only: for any other user the key is
+  left out and `eventCounts` is `"admin only"` (it is absent for an admin).
 - `espnowbattery json [<name_or_mac>] [from <n>]` (the battery state other devices sent; kept by
   a mesh master or backup master): `schema`, `role`, `sends` (what this device sends itself, as in
   `espnowsensorstatus json`), `refused` (`notReceiver`, `full`, `noMemory`, `malformed`), `from`,

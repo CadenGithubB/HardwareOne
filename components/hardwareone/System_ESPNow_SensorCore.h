@@ -793,4 +793,96 @@ inline TargetChoice readingTarget(const TargetInputs& in) {
 // the lease, to the named master.
 constexpr bool streamSurvivesLeaseEnd(bool byHand) { return byHand; }
 
+// ---------------------------------------------------------------------------
+// The masters named on this device: espnowmasterfingerprint and
+// espnowbackupfingerprint <64-hex | clear>. Each holds the device key that
+// 'espnowidentity' shows on that master, exactly 64 hexadecimal characters
+// (either case), or nothing: an empty setting names no device (also when it
+// comes so from the web page or a settings file). No argument shows the
+// value; "clear" (either case) empties it; anything else is refused.
+// ---------------------------------------------------------------------------
+constexpr size_t kFingerprintHexLen = 64;
+
+inline bool fingerprintTextValid(const char* text, size_t len) {
+  if (!text || len != kFingerprintHexLen) return false;
+  for (size_t i = 0; i < len; ++i) {
+    const char c = text[i];
+    if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) return false;
+  }
+  return true;
+}
+
+enum class FingerprintArg : uint8_t { Show, Clear, Set, Bad };
+
+// `arg` is the command's argument with the spaces around it removed.
+inline FingerprintArg fingerprintArgKind(const char* arg, size_t len) {
+  if (!arg || len == 0) return FingerprintArg::Show;
+  if (len == 5) {
+    static const char kClear[] = "clear";
+    bool same = true;
+    for (size_t i = 0; i < 5 && same; ++i) {
+      char c = arg[i];
+      if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+      same = c == kClear[i];
+    }
+    if (same) return FingerprintArg::Clear;
+  }
+  return fingerprintTextValid(arg, len) ? FingerprintArg::Set : FingerprintArg::Bad;
+}
+
+// What a settings editor (the web page, the OLED editor) sends as the
+// argument of `cmd` for the field text `value`: an emptied fingerprint field
+// is 'clear', since an empty argument only shows the value; anything else as
+// it is. `cmd` is the command name the setting declares (either case).
+inline const char* fingerprintEditorArg(const char* cmd, const char* value) {
+  if (!value) value = "";
+  if (!cmd) return value;
+  static const char* const kNames[2] = { "espnowmasterfingerprint", "espnowbackupfingerprint" };
+  bool isFingerprint = false;
+  for (const char* name : kNames) {
+    size_t i = 0;
+    for (; name[i] && cmd[i]; ++i) {
+      char c = cmd[i];
+      if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+      if (c != name[i]) break;
+    }
+    if (!name[i] && !cmd[i]) isFingerprint = true;
+  }
+  if (!isFingerprint) return value;
+  for (const char* c = value; *c; ++c) {
+    if (*c != ' ' && *c != '\t' && *c != '\r' && *c != '\n') return value;
+  }
+  return "clear";
+}
+
+constexpr const char* kFingerprintBadReply =
+    "Error: a fingerprint is exactly 64 hexadecimal characters (the key 'espnowidentity' shows on that device), "
+    "or 'clear' to name none";
+
+// What "clear" did. `backup`: the backup master's fingerprint was cleared;
+// `otherNamed`: the other one is still set (well formed). The effects are
+// those of the rules this device follows: mesh time only from a named master
+// (System_ESPNow_TimeCore.h), readings switched on by hand only to the named
+// primary (readingTarget above), battery state and events to the named
+// primary and backup (System_ESPNow_PowerEventCore.h), and sensor requests
+// only from a named master (a lease already running runs out on its own).
+inline const char* fingerprintClearedReply(bool backup, bool otherNamed) {
+  if (!backup && !otherNamed) {
+    return "OK: no master is named on this device now: it takes no mesh time, sends its readings, battery state "
+           "and events to no device, and refuses sensor requests (a lease already running runs out).";
+  }
+  if (!backup) {
+    return "OK: no master is named on this device now. Readings switched on by hand go to no device. The backup "
+           "master named here (espnowbackupfingerprint) still gets its battery state and events, may ask it for "
+           "readings, and gives it mesh time while it acts as master.";
+  }
+  if (!otherNamed) {
+    return "OK: no backup master is named on this device now, and no master is either: it takes no mesh time, "
+           "sends its readings, battery state and events to no device, and refuses sensor requests (a lease "
+           "already running runs out).";
+  }
+  return "OK: no backup master is named on this device now: battery state and events go to the master named here "
+         "(espnowmasterfingerprint) alone, and only that master gives it mesh time and may ask it for readings.";
+}
+
 }  // namespace espnowsensor

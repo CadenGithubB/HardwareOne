@@ -149,6 +149,13 @@ static bool mtMeshOn() { return gMeshOn; }
 static uint8_t mtRole() { return gRole; }
 static bool mtBackupPromoted() { return gBackupPromoted; }
 static bool mtHasNamedMaster() { return gHaveNamedPrimary || gHaveNamedBackup; }
+// The fingerprints the harness names are the addresses as text: a change of
+// either named master changes the tag, as a change of a fingerprint does.
+static uint64_t mtNamedTag() {
+  const std::string primary = gHaveNamedPrimary ? macText(gNamedPrimary) : std::string();
+  const std::string backup = gHaveNamedBackup ? macText(gNamedBackup) : std::string();
+  return meshtime::namedMastersTag(primary.c_str(), backup.c_str());
+}
 static int mtNamedKind(const uint8_t mac[6]) {
   if (gHaveNamedPrimary && std::memcmp(mac, gNamedPrimary, 6) == 0) return 1;
   if (gHaveNamedBackup && std::memcmp(mac, gNamedBackup, 6) == 0) return 2;
@@ -757,10 +764,28 @@ static void testHardening() {
         !Clock::sourceWritesRtc(Clock::SYNC_RTC), "mesh time, a carried clock and the chip's own are not");
 }
 
+// A master named in place of the one followed is followed with its first
+// frame (it used to wait out the 25 minutes the old one was followed for).
+static void testRenamedMaster() {
+  resetAll();
+  addPeer(kHub, "hub", true);
+  addPeer(kShed, "shed", true);
+  receive(kHub, kT0);
+  espnowMeshTimeApplyTick();
+  check(gMeshSteps == 1, "hub, the master named here, sets the clock and is followed");
+  pass(60000);
+  std::memcpy(gNamedPrimary, kShed, 6);  // espnowmasterfingerprint <shed's key>
+  receive(kShed, gClockMs + 120000);
+  espnowMeshTimeApplyTick();
+  check(gMeshSteps == 2 && has(status("json"), "\"result\":\"applied\""),
+        "shed, named in hub's place, sets the clock with its first frame");
+}
+
 int main() {
   testFollower();
   testSender();
   testHardening();
+  testRenamedMaster();
   if (failures != 0) {
     std::fprintf(stderr, "%d of %d mesh time checks failed\n", failures, checks);
     return 1;

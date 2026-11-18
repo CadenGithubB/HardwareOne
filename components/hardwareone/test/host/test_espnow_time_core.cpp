@@ -14,7 +14,9 @@
 //     at all with no master named; the frame's wait is added; a change of
 //     more than an hour is held and applied when the same sender confirms it;
 //     the primary and the backup cannot move the clock back and forth; the
-//     10 s gap after a step.
+//     10 s gap after a step;
+//   * a fingerprint set, changed or cleared drops the sender followed and the
+//     claim held at once: the newly named master's next frame applies.
 #include "System_ESPNow_TimeCore.h"
 
 #include <cstdio>
@@ -222,6 +224,13 @@ struct Follower {
     rx.receiptMonoMs = in.nowMonoMs - waitedMs;
     const bool isPrimary = primary && std::memcmp(sender, primary, 6) == 0;
     const bool isBackup = backup && std::memcmp(sender, backup, 6) == 0;
+    // The fingerprints are the addresses as text here.
+    char primaryText[16] = "", backupText[16] = "";
+    if (primary) std::snprintf(primaryText, sizeof(primaryText), "%02x%02x%02x%02x%02x%02x", primary[0], primary[1],
+                               primary[2], primary[3], primary[4], primary[5]);
+    if (backup) std::snprintf(backupText, sizeof(backupText), "%02x%02x%02x%02x%02x%02x", backup[0], backup[1],
+                              backup[2], backup[3], backup[4], backup[5]);
+    in.namedTag = namedMastersTag(primaryText, backupText);
     in.hasNamedMaster = primary || backup;
     in.senderIsNamed = isPrimary || isBackup;
     in.senderIsNamedPrimary = isPrimary;
@@ -562,6 +571,82 @@ static void testTwoSenders() {
   }
 }
 
+// Row 0: the masters named here changed.
+static void testNamedChange() {
+  // The tag: one for each pair of fingerprints, the same in either case.
+  const char* a = "6e9c0f7a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6";
+  const char* aUpper = "6E9C0F7A1B2C3D4E5F60718293A4B5C6D7E8F90A1B2C3D4E5F60718293A4B5C6";
+  const char* b = "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0";
+  CHECK(namedMastersTag(a, "") == namedMastersTag(aUpper, ""));
+  CHECK(namedMastersTag(a, "") == namedMastersTag(a, nullptr) && namedMastersTag("", "") == namedMastersTag(nullptr, nullptr));
+  CHECK(namedMastersTag(a, "") != namedMastersTag(b, ""));
+  CHECK(namedMastersTag(a, "") != namedMastersTag("", ""));    // cleared
+  CHECK(namedMastersTag(a, b) != namedMastersTag(b, a));       // swapped
+  CHECK(namedMastersTag(a, "") != namedMastersTag("", a));     // primary made backup
+  CHECK(namedMastersTag("ab", "") != namedMastersTag("a", "b"));
+
+  // A followed (sticky); the primary renamed to B: B's next frame applies.
+  for (const uint8_t* renamed : { kOther, kBackup }) {
+    Follower f;
+    CHECK(f.frame(kHub, kNow + 60000).verdict == Verdict::Applied && std::memcmp(f.st.stickyMac, kHub, 6) == 0);
+    f.pass(60000);
+    f.in.nowEpochMs = kNow + 60000 + 60000;
+    f.primary = renamed;           // espnowmasterfingerprint <B>
+    if (renamed == kBackup) f.backup = kHub;  // ... or the two swapped
+    const Decision d = f.frame(renamed, f.in.nowEpochMs + 120000);
+    CHECK(d.verdict == Verdict::Applied);
+    CHECK(f.st.stickyHave && std::memcmp(f.st.stickyMac, renamed, 6) == 0 && f.st.stickyRank == 1);
+  }
+  // The same without a change: the sender followed keeps the other one out
+  // (control for the case above).
+  {
+    Follower f;
+    CHECK(f.frame(kHub, kNow + 60000).verdict == Verdict::Applied);
+    f.pass(60000);
+    f.in.nowEpochMs = kNow + 60000 + 60000;
+    CHECK(f.frame(kBackup, f.in.nowEpochMs + 120000).verdict == Verdict::IgnoredOtherMaster);
+  }
+  // A claim held from A is discarded when the names change, even while A
+  // stays named (as the backup): A's repeat is a new claim, not a confirmation.
+  {
+    const int64_t wrong = kNow + 7200000;
+    Follower f;
+    CHECK(f.frame(kHub, wrong).verdict == Verdict::HeldLargeChange && f.st.holdHave);
+    f.primary = kOther;
+    f.backup = kHub;
+    f.pass(15000);
+    CHECK(f.frame(kHub, wrong + 15000).verdict == Verdict::HeldLargeChange);
+    CHECK(f.st.holdHave && f.st.holdReceiptMonoMs == f.in.nowMonoMs);
+    f.pass(15000);
+    CHECK(f.frame(kHub, wrong + 30000).verdict == Verdict::Applied);  // confirmed under the new names
+  }
+  // Cleared: both go at once, with the frame that finds no master named.
+  {
+    const int64_t wrong = kNow + 7200000;
+    Follower f;
+    CHECK(f.frame(kHub, kNow + 100).verdict == Verdict::Agreed && f.st.stickyHave);
+    f.pass(1000);
+    CHECK(f.frame(kHub, wrong).verdict == Verdict::HeldLargeChange && f.st.holdHave);
+    f.primary = f.backup = nullptr;  // espnowmasterfingerprint clear, espnowbackupfingerprint clear
+    f.pass(15000);
+    CHECK(f.frame(kHub, wrong + 15000).verdict == Verdict::IgnoredNoMaster);
+    CHECK(!f.st.stickyHave && !f.st.holdHave);
+    f.primary = kHub;                // named again: its claim starts over
+    f.pass(1000);
+    CHECK(f.frame(kHub, wrong + 16000).verdict == Verdict::HeldLargeChange);
+  }
+  // The 10 s gap after a step is about this device's clock: it stays.
+  {
+    Follower f;
+    CHECK(f.frame(kHub, kNow + 121000).verdict == Verdict::Applied);
+    f.pass(1000);
+    f.primary = kOther;
+    CHECK(f.frame(kOther, f.in.nowEpochMs + 60000).verdict == Verdict::IgnoredTooSoon);
+    f.pass(kApplyGapMs);
+    CHECK(f.frame(kOther, f.in.nowEpochMs + 60000).verdict == Verdict::Applied);
+  }
+}
+
 int main() {
   testFrame();
   testSender();
@@ -569,6 +654,7 @@ int main() {
   testFollowerRows();
   testLargeChange();
   testTwoSenders();
+  testNamedChange();
   std::printf("espnow_time_core_tests: %u checks passed\n", gChecks);
   return 0;
 }

@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "System_AuthIdentity.h"       // currentExecIsAdmin: event counts are for an admin
 #include "System_Battery.h"
 #include "System_Clock.h"
 #include "System_CommandReply.h"      // kCommandReplyOutOfMemory
@@ -171,6 +172,9 @@ static void peConsole(const char* fmt, ...) {
   va_end(args);
   broadcastOutput(line);
 }
+// The user the command runs for is an admin (the events other devices sent
+// are theirs to read: espnowevents is admin-only, and so are their counts).
+static bool peCallerIsAdmin() { return currentExecIsAdmin(); }
 static char* peReply(size_t* cap) {
   if (!ensureDebugBuffer()) return nullptr;
   *cap = GLOBAL_DEBUG_BUFFER_SIZE;
@@ -753,10 +757,13 @@ size_t espnowBatteryJsonFor(const uint8_t mac[6], char* out, size_t cap) {
   return peBatteryRowJson(peer, peUptimeMs(), out, cap);
 }
 
+bool espnowEventCountsVisible() { return peCallerIsAdmin(); }
+
 size_t espnowEventCountsJsonFor(const uint8_t mac[6], char* out, size_t cap) {
   PeCollectPeer peer;
   if (!out || cap == 0) return 0;
   out[0] = '\0';
+  if (!espnowEventCountsVisible()) return 0;
   if (!mac || !pePeerCopyFor(mac, &peer) || !peSentEvents(peer)) return 0;
   return peEventCountsJson(peer, false, out, cap);
 }
@@ -796,7 +803,7 @@ size_t espnowPowerEventsPeerText(const uint8_t mac[6], char* out, size_t cap) {
                (unsigned long)((uint32_t)(peUptimeMs() - peer.powerUptimeMs) / 1000));
     }
   }
-  if (peSentEvents(peer)) {
+  if (peSentEvents(peer) && espnowEventCountsVisible()) {
     peAppend(out, cap, &pos, "%s%lu events", pos ? ", " : "", (unsigned long)peer.eventCounts.received);
   }
   return pos;

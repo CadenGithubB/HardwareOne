@@ -698,6 +698,32 @@ static void case_editor_commits_local_otherwise() {
   EXPECT(gToast.empty(), "an accepted local save shows no error");
 }
 
+// An emptied master fingerprint field is saved as 'clear' (no master named):
+// the bare command only shows the value, and the editor took that reply for
+// a save. A value goes as typed; another string setting keeps its empty text.
+static void case_editor_clears_fingerprint() {
+  gCase = "editor_clears_fingerprint";
+  static String master, backup, other;
+  const SettingEntry entries[] = {
+    {"masterFingerprint", SETTING_STRING, &master, 0, 0, "", 0, 0, "Master Fingerprint", nullptr, false, "mesh",
+     "espnowmasterfingerprint"},
+    {"backupMasterFingerprint", SETTING_STRING, &backup, 0, 0, "", 0, 0, "Backup Master Fingerprint", nullptr, false,
+     "mesh", "espnowbackupfingerprint"},
+    {"ntpServer", SETTING_STRING, &other, 0, 0, "", 0, 0, "NTP", nullptr, false, "wifi", "ntpserver"},
+  };
+  const std::string hex = "6e9c0f7a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6";
+  resetWorld();
+  currentOledMode = OLED_SETTINGS;
+  gExecText = "OK";
+  setSettingValueStr(&entries[0], "");
+  setSettingValueStr(&entries[1], "  ");
+  setSettingValueStr(&entries[0], String(hex.c_str()));
+  setSettingValueStr(&entries[2], "");
+  EXPECT(commandsAre(gWithResult, {"espnowmasterfingerprint clear", "espnowbackupfingerprint clear",
+                                   "espnowmasterfingerprint " + hex, "ntpserver "}),
+         "an emptied fingerprint goes as 'clear', ran: " + joined(gWithResult));
+}
+
 // The slider (INT/BOOL) and INT pick-list commit through setSettingValue: a
 // refused local save shows the executor's reply on the editor line like the
 // STRING path instead of vanishing into the log.
@@ -883,6 +909,7 @@ int main() {
   case_load_step_fetches_schema_once();
   case_editor_commits_remote_in_remote_mode();
   case_editor_commits_local_otherwise();
+  case_editor_clears_fingerprint();
   case_editor_local_int_refusal_shown();
   case_editor_module_source_follows_mode();
   case_editor_drops_foreign_module();

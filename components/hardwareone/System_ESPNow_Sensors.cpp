@@ -2165,8 +2165,11 @@ static const char* sensorStatusOneDeviceJson(const String& who) {
   EXT_RAM_BSS_ATTR static char part[640];
   if (espnowBatteryJsonFor(mac, part, sizeof(part)) > 0) doc["battery"] = serialized(part);
   else doc["battery"] = nullptr;
+  // Its event counts for an admin only (as espnowevents); for anyone else
+  // the key is left out and eventCounts says why.
   EXT_RAM_BSS_ATTR static char eventsPart[320];
-  if (espnowEventCountsJsonFor(mac, eventsPart, sizeof(eventsPart)) > 0) doc["events"] = serialized(eventsPart);
+  if (!espnowEventCountsVisible()) doc["eventCounts"] = "admin only";
+  else if (espnowEventCountsJsonFor(mac, eventsPart, sizeof(eventsPart)) > 0) doc["events"] = serialized(eventsPart);
   else doc["events"] = nullptr;
   if (sensorStatusJsonFit(doc, JsonArray(), nullptr, jbuf, sizeof(jbuf)) == 0) return kSensorStatusTooLarge;
   return jbuf;
@@ -2361,10 +2364,13 @@ const char* cmd_espnow_sensorstatus(const String& argsInput) {
     BROADCAST_PRINTF("  Events: not sent: %s.", espnowsensor::pushWhyNotText(sending.eventsWhy));
   }
 
-  // What this device keeps, one line per sender.
+  // What this device keeps, one line per sender (its event count for an
+  // admin only, as espnowevents; said once for anyone else).
+  bool senderListed = false;
   for (int i = 0; i < REMOTE_SENSOR_PEERS_MAX; i++) {
     RemoteSensorPeerSummary summary;
     if (!remoteSensorPeerSummaryAt(i, &summary)) continue;
+    senderListed = true;
     char line[200];
     size_t pos = 0;
     for (int k = 0; k < REMOTE_SENSOR_MAX && pos + 24 < sizeof(line); k++) {
@@ -2384,6 +2390,7 @@ const char* cmd_espnow_sensorstatus(const String& argsInput) {
                      (unsigned long)summary.received, (unsigned long)summary.lost, (unsigned long)summary.late,
                      more[0] ? "; " : "", more);
   }
+  if (senderListed && !espnowEventCountsVisible()) broadcastOutput("  Event counts: admin only.");
   const uint32_t refusedAny = totals.refusals.noRecord + totals.refusals.noMemory + totals.refusals.badType +
                               totals.refusals.notReceiver + totals.refusals.malformed + totals.malformed;
   if (receives || totals.senders || refusedAny) {

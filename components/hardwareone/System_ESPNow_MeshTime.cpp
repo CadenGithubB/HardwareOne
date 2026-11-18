@@ -91,6 +91,12 @@ static bool mtMeshOn() { return meshEnabled(); }
 static uint8_t mtRole() { return gSettings.meshRole; }
 static bool mtBackupPromoted() { return espnowBackupPromoted(); }
 static bool mtHasNamedMaster() { return espnowHasNamedMaster(); }
+// The two fingerprints as one number: a change of either drops the sender
+// followed and the claim held (TimeCore row 0), by whatever path it came.
+static uint64_t mtNamedTag() {
+  return meshtime::namedMastersTag(gSettings.espnowMasterFingerprint.c_str(),
+                                   gSettings.espnowBackupMasterFingerprint.c_str());
+}
 // 0: not a named master, 1: the primary, 2: the backup.
 static int mtNamedKind(const uint8_t mac[6]) { return espnowNamedMasterKind(mac); }
 // The paired devices: every stored identity.
@@ -222,6 +228,7 @@ static void meshTimeKeepFrame(const uint8_t sender[6], const uint8_t* payload, s
 
 static meshtime::FollowerInputs meshTimeFollowerInputs(const uint8_t sender[6]) {
   meshtime::FollowerInputs in = {};
+  in.namedTag = mtNamedTag();
   in.settingOn = mtSettingOn();
   in.meshOn = mtMeshOn();
   in.hasNamedMaster = mtHasNamedMaster();

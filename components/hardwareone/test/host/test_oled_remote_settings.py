@@ -259,7 +259,11 @@ def main() -> None:
         (work / "Arduino.h").write_text("// ArduinoJson includes <Arduino.h>; String is the harness's.\n")
         unit, executable = work / "test.cpp", work / "test"
         (work / "System_CommandReply.h").write_text(read("System_CommandReply.h"))
-        unit.write_text('#include "System_CommandReply.h"\n#include "' + str(args.component / "OLED_MessageText.h") + '"\n' + generated(read))
+        # The editor's commit sends an emptied master fingerprint as 'clear'
+        # (espnowsensor::fingerprintEditorArg, a pure rule header).
+        (work / "System_ESPNow_SensorCore.h").write_text(read("System_ESPNow_SensorCore.h"))
+        unit.write_text('#include "System_CommandReply.h"\n#include "System_ESPNow_SensorCore.h"\n#include "' +
+                        str(args.component / "OLED_MessageText.h") + '"\n' + generated(read))
         subprocess.run([args.cxx, *flags, "-I", str(work), "-I", str(JSON_INCLUDE),
                         str(unit), "-o", str(executable)], check=True, timeout=300)
         run = subprocess.run([str(executable)], timeout=60)

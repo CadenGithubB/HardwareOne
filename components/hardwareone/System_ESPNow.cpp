@@ -21126,8 +21126,8 @@ extern const CommandEntry espNowCommands[] = {
   { "espnowsensorbroadcast", "Enable/disable all sensor ESP-NOW communication: 'espnowsensorbroadcast <on|off>'.", false, cmd_espnow_sensorbroadcast, "Usage: espnowsensorbroadcast [on|off]" },
   // Secure sensor fetcher (worker settings + Phase 1b test harness) — docs/ESPNOW_SENSOR_FETCHER_DESIGN.md
   { "espnowacceptsensorcontrol", "Worker: opt in to honor SENSOR_REQ from the configured master/backup: 'espnowacceptsensorcontrol <on|off>'.", true, cmd_espnow_acceptsensorcontrol, "Usage: espnowacceptsensorcontrol <on|off>" },
-  { "espnowmasterfingerprint", "Worker: set the authorized PRIMARY-master Ed25519 fingerprint (64-hex; empty=deny).", true, cmd_espnow_masterfingerprint, "Usage: espnowmasterfingerprint <64-hex-pubkey>" },
-  { "espnowbackupfingerprint", "Worker: set the authorized BACKUP-master Ed25519 fingerprint (64-hex; empty=deny).", true, cmd_espnow_backupfingerprint, "Usage: espnowbackupfingerprint <64-hex-pubkey>" },
+  { "espnowmasterfingerprint", "Name the mesh master on this device: its key as 'espnowidentity' shows it (64 hex), or 'clear' to name none.", true, cmd_espnow_masterfingerprint, "Usage: espnowmasterfingerprint [<64-hex-pubkey>|clear]\n       No argument shows it. The master named here gives this device mesh time, gets its readings,\n       battery state and events, and may ask it for readings. clear: no master is named (the reply says what that stops)." },
+  { "espnowbackupfingerprint", "Name the backup master on this device: its key as 'espnowidentity' shows it (64 hex), or 'clear' to name none.", true, cmd_espnow_backupfingerprint, "Usage: espnowbackupfingerprint [<64-hex-pubkey>|clear]\n       No argument shows it. The backup named here gets this device's battery state and events, may ask it for readings,\n       and gives it mesh time while it acts as master. clear: no backup master is named." },
   { "espnowsensorreq", "TEST (Phase 1b): hand-send a SENSOR_REQ to a paired worker.", true, cmd_espnow_sensorreq, "Usage: espnowsensorreq <MAC|name> <mask> <mode 0=sub|1=unsub|2=oneshot> <intervalMs> <leaseMs>" },
   { "espnowusersync", "Enable/disable user credential sync: 'espnowusersync [on|off]'.", true, cmd_espnow_usersync, "Usage: espnowusersync [on|off]", /*requiresSuperAdmin=*/true },
   { "espnowrequestmeta", "Request metadata from peer: 'espnowrequestmeta <name_or_mac>'. (async - updates cache; view with espnowdevices)", false, cmd_espnow_requestmeta, "Usage: espnowrequestmeta <name_or_mac>\n       Returns OK on delivery; the peer's name/room/zone/tags arrive later and update the local peer cache shown by 'espnowdevices' / 'espnowrooms' / 'espnowfind'." },
@@ -21336,8 +21336,37 @@ const char* cmd_espnow_eventpush(const String& a) {
 }
 // Secure sensor fetcher (worker settings) — persist via real per-setting commands.
 ESPNOW_SETTING_CMD(cmd_espnow_acceptsensorcontrol, "acceptSensorControl")
-ESPNOW_SETTING_CMD(cmd_espnow_masterfingerprint, "masterFingerprint")
-ESPNOW_SETTING_CMD(cmd_espnow_backupfingerprint, "backupMasterFingerprint")
+
+// espnowmasterfingerprint / espnowbackupfingerprint <64-hex | clear>: the
+// masters named on this device (espnowsensor::fingerprintArgKind). No
+// argument shows the value, "clear" empties it (none named), a value must be
+// 64 hex characters. A change by any path reaches mesh time with its next
+// frame (TimeCore row 0) and the reading targets with their next refresh.
+static const char* espnowFingerprintCommand(const String& a, const char* jsonKey, bool backup) {
+  String value = a;
+  if (value.length() != a.length()) return "Error: Not enough memory to update setting";
+  value.trim();
+  const SettingEntry* entry = findEspNowEntry(jsonKey);
+  switch (espnowsensor::fingerprintArgKind(value.c_str(), value.length())) {
+    case espnowsensor::FingerprintArg::Show: return handleSettingCommand(entry, a);
+    case espnowsensor::FingerprintArg::Bad:  return espnowsensor::kFingerprintBadReply;
+    case espnowsensor::FingerprintArg::Set:  return handleSettingCommand(entry, value);
+    case espnowsensor::FingerprintArg::Clear: break;
+  }
+  if (!entry || !entry->valuePtr || entry->type != SETTING_STRING) return "Error: Setting unavailable";
+  setSetting(*((String*)entry->valuePtr), String(), entry);
+  BROADCAST_PRINTF("%s cleared", entry->jsonKey);
+  const String& other = backup ? gSettings.espnowMasterFingerprint : gSettings.espnowBackupMasterFingerprint;
+  return espnowsensor::fingerprintClearedReply(backup, espnowsensor::fingerprintTextValid(other.c_str(), other.length()));
+}
+const char* cmd_espnow_masterfingerprint(const String& a) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  return espnowFingerprintCommand(a, "masterFingerprint", false);
+}
+const char* cmd_espnow_backupfingerprint(const String& a) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  return espnowFingerprintCommand(a, "backupMasterFingerprint", true);
+}
 
 // Phase 1b test harness: hand-send a SENSOR_REQ to a paired worker so the worker path
 // (fingerprint auth → lease → encrypted SENSOR_ENVELOPE reply) is exercisable before the

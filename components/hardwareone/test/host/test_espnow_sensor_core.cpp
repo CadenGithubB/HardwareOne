@@ -18,7 +18,10 @@
 //   * the text check, with the text that would forge the receiver's own keys;
 //   * where a reading goes (the bond partner, the controller of a running
 //     lease, the named master for a stream switched on by hand), who sends
-//     and who keeps by mesh role, and that every reason not to send has a name.
+//     and who keeps by mesh role, and that every reason not to send has a name;
+//   * the argument of espnowmasterfingerprint / espnowbackupfingerprint: none
+//     shows, 'clear' empties, 64 hex characters set, anything else is
+//     refused; what the reply to 'clear' says in each of the four cases.
 #include "System_ESPNow_SensorCore.h"
 
 #include <cstdio>
@@ -731,7 +734,65 @@ static void testEndToEnd() {
   CHECK(counted.c.lost == damaged);  // incomplete readings are part of lost
 }
 
+static void testFingerprintArg() {
+  using espnowsensor::FingerprintArg;
+  using espnowsensor::fingerprintArgKind;
+  const std::string hex = "6e9c0f7a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6";
+  const std::string upper = "6E9C0F7A1B2C3D4E5F60718293A4B5C6D7E8F90A1B2C3D4E5F60718293A4B5C6";
+  auto kind = [](const std::string& arg) { return fingerprintArgKind(arg.c_str(), arg.size()); };
+  CHECK(kind("") == FingerprintArg::Show && fingerprintArgKind(nullptr, 0) == FingerprintArg::Show);
+  for (const char* word : { "clear", "CLEAR", "Clear" }) CHECK(kind(word) == FingerprintArg::Clear);
+  CHECK(kind(hex) == FingerprintArg::Set && kind(upper) == FingerprintArg::Set);
+  CHECK(espnowsensor::fingerprintTextValid(hex.c_str(), hex.size()));
+  // Refused: too short, too long, a letter that is not hex, a space inside,
+  // other words (an empty value is never stored by the command).
+  CHECK(kind(hex.substr(0, 63)) == FingerprintArg::Bad);
+  CHECK(kind(hex + "0") == FingerprintArg::Bad);
+  std::string notHex = hex;
+  notHex[10] = 'g';
+  CHECK(kind(notHex) == FingerprintArg::Bad);
+  std::string spaced = hex;
+  spaced[32] = ' ';
+  CHECK(kind(spaced) == FingerprintArg::Bad);
+  for (const char* word : { "none", "off", "0", "clear!", "clea", "\"\"" }) CHECK(kind(word) == FingerprintArg::Bad);
+  CHECK(!espnowsensor::fingerprintTextValid(nullptr, 64) && !espnowsensor::fingerprintTextValid("", 0));
+  CHECK(std::string(espnowsensor::kFingerprintBadReply).rfind("Error: ", 0) == 0);
+
+  // A settings editor sends an emptied fingerprint field as 'clear', and
+  // every other text (and every other setting) as it is.
+  using espnowsensor::fingerprintEditorArg;
+  CHECK(std::string(fingerprintEditorArg("espnowmasterfingerprint", "")) == "clear");
+  CHECK(std::string(fingerprintEditorArg("espnowbackupfingerprint", " \t")) == "clear");
+  CHECK(std::string(fingerprintEditorArg("EspNowMasterFingerprint", nullptr)) == "clear");
+  CHECK(std::string(fingerprintEditorArg("espnowmasterfingerprint", hex.c_str())) == hex);
+  CHECK(std::string(fingerprintEditorArg("ntpserver", "")).empty());
+  CHECK(std::string(fingerprintEditorArg("espnowmasterfingerprintx", "")).empty());
+  CHECK(std::string(fingerprintEditorArg("espnowmaster", "")).empty());
+  CHECK(std::string(fingerprintEditorArg(nullptr, "x")) == "x");
+
+  // The reply to 'clear' says what is true in each case.
+  const std::string none = espnowsensor::fingerprintClearedReply(false, false);
+  CHECK(none.rfind("OK: no master is named on this device now", 0) == 0);
+  CHECK(none.find("takes no mesh time") != std::string::npos &&
+        none.find("readings, battery state and events to no device") != std::string::npos &&
+        none.find("refuses sensor requests") != std::string::npos);
+  const std::string backupLeft = espnowsensor::fingerprintClearedReply(false, true);
+  CHECK(backupLeft.rfind("OK: no master is named on this device now", 0) == 0);
+  CHECK(backupLeft.find("Readings switched on by hand go to no device") != std::string::npos &&
+        backupLeft.find("espnowbackupfingerprint") != std::string::npos &&
+        backupLeft.find("battery state and events") != std::string::npos &&
+        backupLeft.find("takes no mesh time") == std::string::npos);
+  const std::string backupNone = espnowsensor::fingerprintClearedReply(true, false);
+  CHECK(backupNone.rfind("OK: no backup master is named on this device now, and no master is either", 0) == 0 &&
+        backupNone.find("takes no mesh time") != std::string::npos);
+  const std::string masterLeft = espnowsensor::fingerprintClearedReply(true, true);
+  CHECK(masterLeft.rfind("OK: no backup master is named on this device now", 0) == 0 &&
+        masterLeft.find("espnowmasterfingerprint") != std::string::npos &&
+        masterLeft.find("no mesh time") == std::string::npos);
+}
+
 int main() {
+  testFingerprintArg();
   testSensorTable();
   testHeader();
   testPlanning();
