@@ -30,6 +30,7 @@
 #include "BLE_Server.h"
 #include "OLED_SettingsEditor.h"  // openSettingsEditorForModule
 #include "OLED_UI.h"              // oledToastShow (boot role, ring refusals, pairing)
+#include "OLED_MessageText.h"     // oled_message::kMessageBytes (a refusal's reason on the toast)
 #if ENABLE_G2_GLASSES
 #include "G2_Glasses.h"
 #include "G2_Ring.h"      // R1 ring telemetry + poll (submenu below, mirrors G2)
@@ -687,7 +688,11 @@ static bool r1InputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed
         if (!g2RingIsConnected()) {
           char out[96];
           if (!executeOledCommandWithResult("openring", out, sizeof(out))) {
-            oledToastShow(bleCentralRingShouldYield() ? "Ring paused: pipe on" : "Ring connect refused", 8000, OledUiIcon::ERROR);
+            // The pause for the phone pipe keeps its short text; any other
+            // refusal shows the command's own reason.
+            char text[oled_message::kMessageBytes];
+            oledCommandReplyText(false, out, nullptr, "Ring connect refused", text, sizeof(text));
+            oledToastShow(bleCentralRingShouldYield() ? "Ring paused: pipe on" : text, 8000, OledUiIcon::ERROR);
           }
         }
         break;

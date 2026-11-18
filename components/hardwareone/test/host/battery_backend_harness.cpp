@@ -133,6 +133,9 @@ static bool gaugeProbeOk=true, gaugeReadOk=true;
 static int gaugeProbes=0;
 bool fuelGaugeProbe() { ++gaugeProbes; return gaugeProbeOk; }
 bool fuelGaugeRead(FuelGaugeReading* result) { if (!gaugeReadOk) return false; *result=gaugeReading; return true; }
+// The validate pass of the command executor (System_Utils.h).
+bool gCliValidateOnly=false;
+#define RETURN_VALID_IF_VALIDATE_CSTR() do { if (::gCliValidateOnly) return "VALID"; } while (0)
 
 // INSERT_PRODUCTION_BACKEND_AND_ACCESSORS
 // INSERT_PRODUCTION_CALIBRATION
@@ -358,7 +361,12 @@ int main() {
   assert(getBatterySnapshot().lastReadMs==5000);
   // No valid calibrated conversion means unavailable, never raw/4095*3.3V.
   calibrationFail=true;
-  assert(strstr(cmd_battery_calibrate(""), "failed"));
+  // A validate pass answers VALID and leaves the backend alone.
+  gCliValidateOnly=true;
+  assert(!strcmp(cmd_battery_calibrate(""), "VALID") && getBatterySnapshot().voltageValid);
+  gCliValidateOnly=false;
+  const char* failedReply=cmd_battery_calibrate("");
+  assert(!strncmp(failedReply, "Error: ", 7) && strstr(failedReply, "failed"));
   checkUnknown(); assert(!unitLive && !calibrationLive);
   calibrationFail=false; mappingFail=true;
   cmd_battery_calibrate(""); checkUnknown(); assert(!unitLive);

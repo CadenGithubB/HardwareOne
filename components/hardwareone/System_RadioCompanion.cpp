@@ -964,9 +964,14 @@ const char* cmd_c6status(const String& argsInput) {
     JsonObject root = doc.to<JsonObject>();
     root["schema"] = 1;
     fillStatus(root, true);
+    // A document that lost fields, or one the buffer would cut, is not returned.
+    if (doc.overflowed()) return kCommandReplyOutOfMemory;
+    if (measureJson(doc) >= 2048) {
+      return "Error: Companion status too large for the reply. Run c6status without json.";
+    }
     static char* buf = nullptr;
     if (!buf) buf = static_cast<char*>(ps_alloc(2048, AllocPref::PreferPsram, "c6status.json"));
-    if (!buf) return "{\"error\":\"oom\"}";
+    if (!buf) return kCommandReplyOutOfMemory;
     serializeJson(doc, buf, 2048);
     return buf;
   }
@@ -1064,13 +1069,16 @@ const char* cmd_c6hold(const String& argsInput) {
   String arg = a.arg(0);
   arg.toLowerCase();
   const bool held = radioHalHeld();
-  bool wantHold;
-  if (arg == "on") wantHold = true;
-  else if (arg == "off") wantHold = false;
-  else if (arg.length() == 0) {
+  if (arg.length() == 0) {
     return held ? "C6 is held in reset (c6hold off to release)" : "C6 is running (c6hold on to hold it in reset)";
-  } else return "Usage: c6hold [on|off]";
-  if (wantHold == held) return wantHold ? "C6 already held" : "C6 already released";
+  }
+  const int want = parseBoolArg(arg);
+  if (want < 0) return kCommandReplyNotOnOff;
+  const bool wantHold = want == 1;
+  if (wantHold == held) {
+    return wantHold ? "Error: The C6 is already held in reset. Release it with 'c6hold off'."
+                    : "Error: The C6 is already running. Hold it in reset with 'c6hold on'.";
+  }
   if (monitorState() == CompanionState::Updating) return "Error: a companion update is in progress";
   if (wantHold) {
     if (!submitOp(Op::Hold, holdProc, nullptr)) return "Error: another companion operation is running";
@@ -1126,10 +1134,9 @@ const char* setBoolSetting(const String& argsInput, bool& field, const char* lab
     snprintf(getDebugBuffer(), 1024, "%s: %s", label, field ? "on" : "off");
     return getDebugBuffer();
   }
-  bool value;
-  if (argIsOn(arg)) value = true;
-  else if (argIsOff(arg)) value = false;
-  else return "Usage: [on|off]";
+  const int want = parseBoolArg(arg);
+  if (want < 0) return kCommandReplyNotOnOff;
+  const bool value = want == 1;
   setSetting(field, value);
   applyPolicyFromSettings();
   if (!ensureDebugBuffer()) return "OK";
@@ -1146,15 +1153,17 @@ const char* cmd_c6console(const String& argsInput) {
     return radioHalConsoleMirrorOn() ? "C6 console mirror: on (the companion's log appears as C6> lines)"
                                      : "C6 console mirror: off";
   }
-  if (arg != "on" && arg != "off") return "Usage: c6console [on|off]";
-  const esp_err_t err = radioHalConsoleMirror(arg == "on");
+  const int want = parseBoolArg(arg);
+  if (want < 0) return kCommandReplyNotOnOff;
+  const bool on = want == 1;
+  const esp_err_t err = radioHalConsoleMirror(on);
   if (err != ESP_OK) {
     if (!ensureDebugBuffer()) return "Error: console mirror failed";
     snprintf(getDebugBuffer(), 1024, "Error: console mirror failed: %s", esp_err_to_name(err));
     return getDebugBuffer();
   }
-  return arg == "on" ? "C6 console mirror on: the companion's own log appears as C6> lines"
-                     : "C6 console mirror off";
+  return on ? "C6 console mirror on: the companion's own log appears as C6> lines"
+            : "C6 console mirror off";
 }
 
 const char* cmd_c6autorecover(const String& argsInput) {

@@ -164,7 +164,8 @@ void sortWifiByPriority() {
   if (guard) sortLocked();
 }
 
-bool upsertWifiNetwork(const String& ssid, const String& password, int priority, bool hidden) {
+bool upsertWifiNetwork(const String& ssid, const String& password, int priority, bool hidden,
+                       bool hiddenGiven, WifiUpsertOutcome* outcome) {
   // Block blank SSIDs at the source: a network with no name can only fail to
   // connect (and previously crashed the connect path), so never store one. This
   // validates interactive additions and setup; restore keeps its legacy policy.
@@ -228,7 +229,8 @@ bool upsertWifiNetwork(const String& ssid, const String& password, int priority,
         sNetworks[index].password = std::move(copy);
       }
       if (priority > 0) sNetworks[index].priority = priority;
-      sNetworks[index].hidden = hidden;
+      if (hiddenGiven) sNetworks[index].hidden = hidden;
+      if (outcome) *outcome = {true, keptPassword, sNetworks[index].priority, sNetworks[index].hidden};
     } else if (sCount >= MAX_WIFI_NETWORKS || sNextId == 0) {
       full = true;
     } else {
@@ -239,6 +241,7 @@ bool upsertWifiNetwork(const String& ssid, const String& password, int priority,
       network.priority = priority > 0 ? priority : 1;
       network.hidden = hidden;
       network.id = sNextId++;
+      if (outcome) *outcome = {false, false, network.priority, network.hidden};
       sNetworks[sCount++] = std::move(network);
     }
   }
@@ -437,7 +440,7 @@ WifiFieldProblem wifiAddCommandLine(const String& ssid, const String& password,
   WifiFieldProblem problem = wifiNetworkFieldProblem(ssid.c_str());
   if (problem == WifiFieldProblem::None) problem = wifiNetworkFieldProblem(password.c_str());
   if (problem != WifiFieldProblem::None) return problem;
-  // cmd_wifiadd reads an explicit priority of 0 as 1, so "keep the stored
+  // cmd_wifiadd refuses a priority below 1, so "keep the stored
   // priority" (priority <= 0 and not hidden) is the two-argument form.
   char tail[24] = "";
   if (priority > 0 || hidden)

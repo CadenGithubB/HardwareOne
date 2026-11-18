@@ -27,9 +27,12 @@ static unsigned gQueues = 0;
 static bool gConditionMet = true;
 static void broadcastOutput(const char* message) { gPrinted = message; }
 static bool evaluateCondition(const char* condition) { gEvaluated = condition; return gConditionMet; }
-static void queueAutomationSubCommand(const char* cmd, const char*, const char* = nullptr) {
+static bool gQueueAccepts = true;
+static bool queueAutomationSubCommand(const char* cmd, const char*, const char* = nullptr) {
+  if (!gQueueAccepts) return false;
   gQueued = cmd;
   ++gQueues;
+  return true;
 }
 
 // INSERT_PRODUCTION
@@ -108,6 +111,19 @@ int main() {
         "and its command is queued when the condition is false");
   check(run("ledon") == "Command queued" && gQueued == "ledon", "a plain command is queued");
   check(run("PRINT hello") == "Message printed" && gPrinted == "hello", "PRINT prints");
+
+  // A step the executor did not take is a failure, for a plain command and for
+  // either branch, and its text is not mistaken for an accepted step.
+  const char kNotSubmitted[] =
+      "Error: Command not submitted (executor busy or command too long). Run the automation again.";
+  gQueueAccepts = false;
+  check(run("ledon") == kNotSubmitted && gQueues == 0, "a plain command that is not submitted is an error");
+  gConditionMet = true;
+  check(run("IF A=1 THEN on ELSE of") == kNotSubmitted, "a THEN command that is not submitted is an error");
+  gConditionMet = false;
+  check(run("IF A=1 THEN on ELSE of") == kNotSubmitted, "an ELSE command that is not submitted is an error");
+  check(std::strstr(kNotSubmitted, "queued") == nullptr, "the error does not read as an accepted step");
+  gQueueAccepts = true;
 
   // ---- validateConditionSyntax ------------------------------------------------
   for (const char* shortCondition : {"IF ", "IF x", "  IF y", "IF  "}) {

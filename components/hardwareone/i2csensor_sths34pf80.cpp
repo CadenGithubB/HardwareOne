@@ -185,8 +185,7 @@ const char* cmd_presencestart(const String& argsInput) {
 
 const char* cmd_presencestop(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!requestSensorStop(I2C_DEVICE_PRESENCE)) return "Error: [Presence] Could not queue stop";
-  return "[Presence] Stop requested; cleanup will complete asynchronously";
+  return cmd_sensorstop_queued(I2C_DEVICE_PRESENCE, "Presence");
 }
 
 const char* cmd_presenceread(const String& argsInput) {
@@ -206,6 +205,8 @@ const char* cmd_presenceread(const String& argsInput) {
   
   PresenceCache presence;
   if (presenceCacheSnapshot(presence, 100)) {
+    // No sample since the sensor was opened: the cache holds zeros.
+    if (!presence.dataValid) return "Error: [PRESENCE] No reading yet. Retry shortly.";
     snprintf(getDebugBuffer(), 1024,
       "[PRESENCE] Ambient: %.2f°C | Presence: %d %s | Motion: %d %s | TShock: %d %s",
       presence.ambientTemp,

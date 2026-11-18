@@ -50,7 +50,7 @@ COMPONENT = pathlib.Path(os.environ.get("HW1_COMPONENT_DIR") or REPO_ROOT / "com
 CORE = COMPONENT / "web_assets" / "espnow-core.js"
 HARNESS = REPO_ROOT / "tools" / "webui" / "harness" / "espnow_remote_page_harness.js"
 CXX = os.environ.get("CXX") or shutil.which("c++") or shutil.which("clang++")
-EXPECTED_CHECKS = 50
+EXPECTED_CHECKS = 51
 
 MAC_TEXT = "02:00:00:00:00:01"
 MAC = bytes([0x02, 0x00, 0x00, 0x00, 0x00, 0x01])
@@ -89,7 +89,9 @@ def build_fixture(workdir: pathlib.Path) -> dict:
         if text is not None:
             reply = replies.stamped(text.replace("%s", "kitchen"), stamp)
             (http_ok if reply.startswith(stamp) else http_bad).append(reply)
-        if json_text is not None:
+        # Several refusals share one JSON document; each is kept once, so the
+        # harness's fixed slices of this list hold different replies.
+        if json_text is not None and json_text not in http_ok:
             http_ok.append(json_text)
     http_bad.append("Error: Admin access required for command 'espnowremote'. Contact an administrator.")
     return {
@@ -160,8 +162,10 @@ class EspNowRemotePageBehaviorTests(unittest.TestCase):
                         "an acknowledgement lost its request id")
         self.assertIn('"reqId":305419896', fixture["jsonAck"]["text"])
         self.assertGreaterEqual(len(fixture["refusals"]), 6)
+        self.assertEqual(len(fixture["refusals"]), len(set(fixture["refusals"])),
+                         "a refusal is in the list twice: the harness would run one input as two cases")
         self.assertGreaterEqual(len(fixture["httpRefusals"]), 4)
-        self.assertTrue(any("Failed to send remote command" in text for text in fixture["refusals"]))
+        self.assertTrue(any("Failed to send remote command" in text for text in fixture["httpRefusals"]))
 
     def test_harness_reported_one_verdict(self) -> None:
         verdicts = [line for line in self.lines if line.startswith("HARNESS_RESULT ")]

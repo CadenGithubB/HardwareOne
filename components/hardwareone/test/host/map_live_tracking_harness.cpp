@@ -270,6 +270,7 @@ static const char* borrowed(const char* text) {
   if (!text) return nullptr;
   std::snprintf(debugBuffer, sizeof(debugBuffer), "%s", text); return debugBuffer;
 }
+static bool gGpsRunning;  // the GPS was open before the live start
 static const char* cmd_gpsstart(const String&) {
   boundary("GPS request"); actions.emplace_back("gps"); return borrowed(gpsReply);
 }
@@ -350,6 +351,9 @@ static void reset() {
   gpsReply = "[GPS] Start queued; initialization is pending";
   formatReply = "Log format set to TRACK"; startReply = "SUCCESS: Sensor logging started";
   loseLoggerAfterStart = false;
+#if ENABLE_GPS_SENSOR
+  gGpsRunning = false;
+#endif
   fileExists = fileOpen = true; mapAvailable = false; failedAllocationName = nullptr;
   inputLines = {"1000,37.000000,-122.000000", "2000,37.001000,-122.000000"};
   boundaryHook = {};
@@ -436,8 +440,11 @@ int main() {
     check(actions == kLiveStartActions, "single owner startup has no redundant settings calls");
     check(std::string(cmd_gpstrack("status")).find("waiting for GPS fix") != std::string::npos,
           "live status before first indoor fix remains active");
-    check(success(cmd_gpstrack("live start")) && actions.size() == kLiveStartActions.size(),
-          "repeated start preserves active capture");
+    check(error(cmd_gpstrack("live start")) &&
+          std::strcmp(cmd_gpstrack("live start"),
+                      "Error: Live tracking is already running. Stop it first with 'gpstrack live stop' to restart it.") == 0 &&
+          actions.size() == kLiveStartActions.size(),
+          "repeated start is refused with the next step and preserves active capture");
     String why;
     check(!GpsTrackManager::clearTrack() && !load("/logs/another.csv", why),
           "clear/load cannot replace an active live track");
@@ -449,8 +456,11 @@ int main() {
           !GpsTrackManager::isLiveTracking() && GpsTrackManager::readStatus().pointCount == 2,
           "toggle stops owned capture and preserves points");
     const unsigned stops = stopEvents;
-    check(success(cmd_gpstrack("live stop")) && stopEvents == stops,
-          "repeated stop has no duplicate logger event");
+    check(error(cmd_gpstrack("live stop")) &&
+          std::strcmp(cmd_gpstrack("live stop"),
+                      "Error: Live tracking is not running. Start it with 'gpstrack live start'.") == 0 &&
+          stopEvents == stops,
+          "repeated stop is refused with the next step and has no duplicate logger event");
 #if !BASELINE
     check(restores == 1, "ending the transient capture restored the saved logger selection exactly once");
 #endif
@@ -468,6 +478,26 @@ int main() {
 #if !BASELINE
   check(restores == 1, "only the transient capture's own end restores the saved selection");
 #endif
+  reset(); gGpsRunning = true;
+  gpsReply = "Error: GPS sensor is already running. Stop it first with 'closegps' to restart it.";
+  {
+    const std::string reply = cmd_gpstrack("live start");
+    check(success(reply.c_str()) && GpsTrackManager::isLiveTracking() &&
+          reply.find("GPS sensor already running") != std::string::npos,
+          "live start with the GPS already open starts the capture and says the GPS was running");
+  }
+  reset(); gGpsRunning = false;
+  gpsReply = "Error: GPS sensor is already queued for start (position 2). Check it in a moment with 'sensors json brief'.";
+  {
+    const std::string reply = cmd_gpstrack("live start");
+    check(success(reply.c_str()) && GpsTrackManager::isLiveTracking() &&
+          reply.find("GPS sensor start already queued") != std::string::npos,
+          "live start with the GPS start already queued starts the capture and says so");
+  }
+  reset(); gGpsRunning = true;
+  gpsReply = "Error: GPS stop is still pending. Retry opengps in a moment.";
+  check(error(cmd_gpstrack("live start")) && !GpsTrackManager::isLiveTracking(),
+        "another refusal of a running GPS still fails live start");
   reset(); check(success(cmd_gpstrack("live start")), "first capture starts before external stop");
   check(GpsTrackManager::appendPoint(37, -122), "old capture contains points before restart");
   sensorLogMarkStopped();
@@ -483,8 +513,11 @@ int main() {
         "GPS-disabled live requests preserve offline track with no effects");
   sensorLogPublishStarted();
   const auto unrelated = sensorLogCurrentSessionId();
-  check(success(cmd_gpstrack("live stop")) && sensorLogCurrentSessionId() == unrelated,
-        "GPS-disabled stop does not affect unrelated logger");
+  check(error(cmd_gpstrack("live stop")) &&
+        std::strcmp(cmd_gpstrack("live stop"),
+                    "Error: Live tracking is not running. This build has no GPS support to start it.") == 0 &&
+        sensorLogCurrentSessionId() == unrelated,
+        "GPS-disabled stop is refused and does not affect unrelated logger");
   unchangedPreferences(false, false);
 #endif
   snapshotTests();

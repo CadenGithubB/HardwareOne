@@ -120,6 +120,12 @@ static BLEAdvertising* pAdvertising = nullptr;
 // below the maximum re-arms it. Before, one app link (or a stale one) left the
 // device invisible until every link was gone.
 static std::atomic<bool> sBleAdvertising{false};
+// Why initBluetooth() or deinitBluetooth() last returned false, and the reply
+// for a startBleAdvertising() that returned false. The command that asked
+// returns them: its caller gets only the reply, not the lines printed on the
+// way. They point at fixed text only.
+static const char* sBleServerRefusal = "";
+static const char* sBleAdvertiseRefusal = "";
 // The console server is up, for status reads that must not touch gBleState
 // (deinit frees it). Set once init completes; cleared when teardown starts.
 static std::atomic<bool> sBleServerUp{false};
@@ -2057,22 +2063,26 @@ static void bleBuildCommandService() {
 bool initBluetooth() {
   BleRoleTransitionClaim role(BleRoleTransition::SERVER_START);
   if (!role) {
+    sBleServerRefusal = "another Bluetooth role change is running";
     broadcastOutput("[BLE] Server start deferred: another BLE role transition is active");
     return false;
   }
   if (bleStackLifecycleFaulted() &&
       bleRoleTransitionState() != BleRoleTransition::RECOVERING) {
+    sBleServerRefusal = "the earlier Bluetooth host teardown was incomplete; reboot the device";
     broadcastOutput("[BLE] Server start blocked: prior host teardown was incomplete; reboot required");
     return false;
   }
   {
     const char* companionReason = nullptr;
     if (radioCompanionBlocksRadio(&companionReason)) {
+      sBleServerRefusal = companionReason ? companionReason : "the radio companion is not ready";
       BROADCAST_PRINTF("[BLE] Server start blocked: %s", companionReason);
       return false;
     }
   }
   if (!bleInitLifecycleMutex()) {
+    sBleServerRefusal = "the Bluetooth lifecycle lock could not be created";
     broadcastOutput("[BLE] Failed to create lifecycle mutex");
     return false;
   }
@@ -2090,6 +2100,7 @@ bool initBluetooth() {
     BLE_DEBUGF(DEBUG_BLE_CORE, "Closing the glasses first");
     broadcastOutput("[BLE] Closing the glasses first");
     if (!deinitG2Client()) {
+      sBleServerRefusal = "the glasses did not close";
       broadcastOutput("[BLE] Cannot start server mode: G2 control owner did not stop");
       return false;
     }
@@ -2097,16 +2108,20 @@ bool initBluetooth() {
   }
 #endif
   if (g2RingIsOpen() && !g2RingClose(/*userInitiated=*/false)) {
+    sBleServerRefusal = "the ring did not close";
     broadcastOutput("[BLE] Cannot start server mode: Ring owner did not stop");
     return false;
   }
 #if ENABLE_BLE_PHONE_PIPE
   if (phonePipeActive() && !phoneLinkClose(/*userInitiated=*/false)) {
+    sBleServerRefusal = "the phone link did not close";
     broadcastOutput("[BLE] Cannot start server mode: phone pipe did not stop");
     return false;
   }
 #endif
   if (!bluetoothHalStatus().hostAbsent() && !bleStackDown()) {
+    const char* stackRefusal = bleStackLastRefusal();
+    sBleServerRefusal = (stackRefusal && *stackRefusal) ? stackRefusal : "the client stack did not stop";
     BROADCAST_PRINTF("[BLE] Cannot start server mode: %s", bleStackLastRefusal());
     return false;
   }
@@ -2114,6 +2129,7 @@ bool initBluetooth() {
 
   // Check memory before initializing BLE stack (52KB floor; BLE init measured at ~43KB + headroom)
   if (!checkMemoryAvailable("bluetooth", nullptr)) {
+    sBleServerRefusal = "not enough free internal memory (52 KB needed)";
     if (sBleToggleCount > 0) {
       broadcastOutput("[BLE] Insufficient memory for Bluetooth (need 52KB DRAM)");
       broadcastOutput("[BLE] Free internal DRAM before restarting Bluetooth.");
@@ -2128,12 +2144,14 @@ bool initBluetooth() {
   
   BleSystemState* state = bleNewState();
   if (!state) {
+    sBleServerRefusal = "out of memory for the server state";
     broadcastOutput("[BLE] Failed to allocate state");
     return false;
   }
   {
     BleLifecycleGuard lifecycle;
     if (!lifecycle) {
+      sBleServerRefusal = "the Bluetooth lifecycle lock was not taken";
       ps_delete(state);
       return false;
     }
@@ -2151,6 +2169,7 @@ bool initBluetooth() {
   const bool stackReady = bluetoothHalInit(deviceName);
 
   if (!stackReady) {
+    sBleServerRefusal = "the Bluetooth host or controller did not start";
     broadcastOutput("[BLE] Init failed (host/controller incomplete)");
     const BluetoothHalShutdownResult rollback = bluetoothHalDeinit();
     if (rollback.success) bleCentralClientsTerminalTeardownAcknowledged();
@@ -2262,7 +2281,10 @@ bool initBluetooth() {
 
   {
     BleLifecycleGuard lifecycle;
-    if (!lifecycle || !gBleState) return false;
+    if (!lifecycle || !gBleState) {
+      sBleServerRefusal = "the Bluetooth lifecycle lock was not taken";
+      return false;
+    }
     gBleState->initialized = true;
     sBleServerStateInitialized.store(true);
     gBleState->connectionState = BLE_STATE_IDLE;
@@ -2285,6 +2307,7 @@ bool initBluetooth() {
 bool deinitBluetooth() {
   BleRoleTransitionClaim role(BleRoleTransition::SERVER_STOP);
   if (!role) {
+    sBleServerRefusal = "another Bluetooth role change is running";
     broadcastOutput("[BLE] Server stop deferred: another BLE role transition is active");
     return false;
   }
@@ -2299,6 +2322,7 @@ bool deinitBluetooth() {
   // This runs while app sessions and advertising are still open, so a
   // deferred stop leaves the server's sessions and advertising as they were.
   if (!g2RingPrepareForStackTeardown(2000)) {
+    sBleServerRefusal = "the ring owner did not stop in time";
     broadcastOutput("[BLE] Server stop deferred: Ring owner did not quiesce");
     // A companion reset (the RECOVERING claim this nested claim joined) honours
     // this result: it retries the stop a bounded number of times and never
@@ -2346,6 +2370,7 @@ bool deinitBluetooth() {
   const BluetoothHalShutdownResult deinitResult = bluetoothHalDeinit();
   if (!deinitResult.success) {
     bleStackSetLifecycleFault(true);
+    sBleServerRefusal = "the Bluetooth host teardown was incomplete";
     char buf[196];
     snprintf(buf, sizeof(buf),
              "[BLE] Server teardown incomplete (phase=%u host=%ld->%ld "
@@ -2569,18 +2594,24 @@ void bleConsoleHostTeardownEnd(bool stopped) {
 
 bool startBleAdvertising() {
   // gBleState is read under the lifecycle lock (isBleConnected).
-  bool up = false, started = false;
+  bool up = false, started = false, full = false;
   {
     BleLifecycleGuard lifecycle;
     up = lifecycle && gBleState && gBleState->initialized;
     started = up && bleAdvertiseIfRoomLocked();
+    full = up && !started && gBleState->activeConnectionCount >= BLE_MAX_CONNECTIONS;
   }
   if (!up) {
-    broadcastOutput("[BLE] Not initialized");
+    sBleAdvertiseRefusal = "Error: App console server is not running. Run openconsole first.";
     return false;
   }
   if (!started) {
-    BLE_DEBUGF(DEBUG_BLE_CORE, "No room for another app, not advertising");
+    sBleAdvertiseRefusal = full
+        ? "Error: Advertising not started: all app connections are in use. "
+          "Run bledisconnect to free one."
+        : "Error: Advertising not started: the Bluetooth host refused it. "
+          "Run closeconsole, then openconsole.";
+    BLE_DEBUGF(DEBUG_BLE_CORE, "Not advertising (%s)", full ? "console full" : "start refused");
     return false;
   }
   BLE_DEBUGF(DEBUG_BLE_CORE, "Advertising started");
@@ -3449,6 +3480,9 @@ static const char* cmd_openconsole(const String& argsInput) {
   if (!gSettings.bleEnabled) {
     return "Error: Bluetooth is disabled - run 'bleenabled 1' first";
   }
+  if (isBleServerInitialized()) {
+    return "Error: App console server is already running. Stop it first with 'closeconsole' to restart it.";
+  }
   // Record server as the desired boot role before initBluetooth(); setSetting
   // persists it. A start that fails puts the saved role back below: the switch
   // did not happen.
@@ -3484,11 +3518,18 @@ static const char* cmd_openconsole(const String& argsInput) {
   if (hadPhone) blePeerRequestReseek(BLE_PEER_PHONE);
 
   if (!initOk) {
-    return stackBack ? "Error: Failed to start the app console server (the client stack is up; closed devices reconnect)"
-                     : "Error: Failed to start the app console server; Bluetooth is down ('openble' brings the client stack back)";
+    const char* state = stackBack ? "The client stack is up and closed devices reconnect."
+                                  : "Bluetooth is down; run openble to bring the client stack back.";
+    if (!ensureDebugBuffer()) {
+      return stackBack ? "Error: App console server did not start. The client stack is up and closed devices reconnect."
+                       : "Error: App console server did not start. Bluetooth is down; run openble to bring the client stack back.";
+    }
+    snprintf(getDebugBuffer(), 1024, "Error: App console server did not start: %s. %s",
+             sBleServerRefusal, state);
+    return getDebugBuffer();
   }
   if (!advOk) {
-    return "Error: Failed to start advertising";
+    return sBleAdvertiseRefusal;
   }
   BLE_DEBUGF(DEBUG_BLE_CORE, "App console server started and advertising");
   return "App console server started and advertising (glasses, ring and phone closed until 'openble')";
@@ -3496,11 +3537,16 @@ static const char* cmd_openconsole(const String& argsInput) {
 
 static const char* cmd_closeconsole(const String& argsInput) {
   if (!isBleServerInitialized()) {
-    return "App console server not running";
+    return "Error: App console server is not running. Start it with 'openconsole'.";
   }
-  // deinitBluetooth() has broadcast why a stop did not finish; the stored
-  // role stays as it is while the server is still up.
-  if (!deinitBluetooth()) return "Error: [BLE] App console server did not stop; mode unchanged";
+  // The stored role stays as it is while the server is still up.
+  if (!deinitBluetooth()) {
+    if (!ensureDebugBuffer()) return "Error: App console server did not stop; mode unchanged";
+    snprintf(getDebugBuffer(), 1024, "Error: App console server did not stop: %s. %s",
+             sBleServerRefusal,
+             bleStackLifecycleFaulted() ? "Reboot the device." : "Retry closeconsole.");
+    return getDebugBuffer();
+  }
   // Return to the role this build can use by default. Client builds select
   // client so the devices can auto-reconnect; server-only builds must not
   // persist the unavailable client role (which also suppresses the server
@@ -3524,6 +3570,11 @@ static const char* cmd_openble(const String& /*argsInput*/) {
   if (isBleServerInitialized()) {
     return "Error: the app console server owns the Bluetooth host; run 'closeconsole' first";
   }
+  // bleStackUp()'s own "already up" test: a stack whose host was lost is
+  // brought back by the call below.
+  if (bleStackReady() && bluetoothHalStatus().ready()) {
+    return "Error: Bluetooth is already running. Stop it first with 'closeble' to restart it.";
+  }
   PollPauseGuard pollGuard;
   vTaskDelay(pdMS_TO_TICKS(50));
   if (!bleStackUp()) {
@@ -3541,6 +3592,11 @@ static const char* cmd_closeble(const String& /*argsInput*/) {
   // cannot be reopened before the stack goes down.
   BleRoleTransitionClaim role(BleRoleTransition::STACK_DOWN);
   if (!role) return "Error: BLE role transition busy";
+  // Nothing up: no device, no server, no client stack and no host of any
+  // generation. The teardown below still runs (it releases a parked worker),
+  // but the reply says nothing was running.
+  const bool wasRunning = bleSubsystemActive() || g2RingIsOpen() ||
+                          !bluetoothHalStatus().hostAbsent();
 #if ENABLE_G2_GLASSES
   if (isG2ClientInitialized()) {
     g2Disconnect(/*userInitiated=*/false);
@@ -3564,6 +3620,7 @@ static const char* cmd_closeble(const String& /*argsInput*/) {
              bleStackLifecycleFaulted() ? " (reboot required)" : "");
     return getDebugBuffer();
   }
+  if (!wasRunning) return "Error: Bluetooth is not running. Start it with 'openble'.";
   BLE_DEBUGF(DEBUG_BLE_CORE, "Bluetooth off");
   return "Bluetooth off (devices closed, host stopped, workers released)";
 }
@@ -3938,9 +3995,9 @@ static const char* cmd_blesecure(const String& argsInput) {
     return gSettings.bleRequireSecureChannel ? "BLE secure channel: REQUIRED"
                                              : "BLE secure channel: optional (plaintext allowed)";
   }
-  bool on  = (argIsOn(a) || a == "yes");
-  bool off = (argIsOff(a) || a == "no");
-  if (!on && !off) return "Error: invalid arguments — Usage: blesecure [on|off]";
+  const int want = parseBoolArg(a);
+  if (want < 0) return kCommandReplyNotOnOff;
+  const bool on = want == 1;
   if (on && gSettings.bleSecureChannelSecret.length() == 0)
     return "Error: Set a secret first: blesecret <passphrase>";
   setSetting(gSettings.bleRequireSecureChannel, on);
@@ -3986,7 +4043,7 @@ static const char* cmd_bledisconnect(const String& argsInput) {
     blePipeConsoleIdentity(&pipeRow);
     const bool phoneLink = bleConsoleClientHost() || pipeRow.bound;
     const int count = bleDisconnectAppClients();
-    if (count == 0) return "Error: No client connected";
+    if (count == 0) return "Error: No app client is connected. Check connections with 'blestatus'.";
     if (phoneLink) return kSessionEnded;
     if (count == 1) return "Disconnecting client...";
     if (!ensureDebugBuffer()) return "Disconnecting clients...";
@@ -4006,7 +4063,7 @@ static const char* cmd_bledisconnect(const String& argsInput) {
       snprintf(getDebugBuffer(), 1024, "Disconnecting client %lu...", id);
       return getDebugBuffer();
     case BleDisconnectResult::NOT_FOUND:
-      return "Error: No client with that connection id";
+      return "Error: No client with that connection id. List the connection ids with 'blestatus'.";
     case BleDisconnectResult::PEER_LINK:
       return "Error: That connection is a paired peer link, not an app client";
     case BleDisconnectResult::SESSION_ENDED:
@@ -4040,6 +4097,15 @@ static const char* cmd_bleadv(const String& argsInput) {
   if (bleConsoleClientHost()) return kBlePhoneLinkNoAdvertising;
   // Optional argument: start (default) / stop / toggle.
   String a = argsInput; a.trim(); a.toLowerCase();
+  if (a.length() && a != "start" && a != "stop" && a != "toggle") {
+    return "Error: Unknown bleadv argument. Use start, stop or toggle.";
+  }
+  if (a == "stop" && !bleAdvertising()) {
+    return "Error: BLE advertising is not running. Start it with 'bleadv start'.";
+  }
+  if ((a.length() == 0 || a == "start") && bleAdvertising()) {
+    return "Error: BLE advertising is already running. Stop it first with 'bleadv stop' to restart it.";
+  }
   if (a == "stop" || (a == "toggle" && bleAdvertising())) {
     stopBleAdvertising();
     BLE_DEBUGF(DEBUG_BLE_CORE, "bleadv stop");
@@ -4050,7 +4116,7 @@ static const char* cmd_bleadv(const String& argsInput) {
     return "Advertising started";
   }
   BLE_DEBUGF(DEBUG_BLE_CORE, "bleadv manual trigger failed");
-  return "Error: Failed to start advertising";
+  return sBleAdvertiseRefusal;
 }
 
 static const char* cmd_blesend(const String& argsInput) {
@@ -4076,20 +4142,19 @@ static const char* cmd_blesend(const String& argsInput) {
 }
 
 // One stream selector for `blestream <sensors|system|events> [on|off]`:
-// no second token or "on" enables, "off" disables, anything else is a usage
-// error. Exact tokens, so a word such as "offset" is not read as "off".
+// no second token or an on value enables, an off value disables, anything
+// else is refused. Whole words, so "offset" is not read as "off".
 static const char* bleStreamSelect(const CommandArgs& a, uint8_t flag,
                                    const char* enabled, const char* disabled) {
   const String& toggle = a.arg(1);
-  if (toggle.length() == 0 || toggle.equalsIgnoreCase("on")) {
+  const int want = toggle.length() == 0 ? 1 : parseBoolArg(toggle);
+  if (want < 0) return kCommandReplyNotOnOff;
+  if (want) {
     bleEnableStream(flag);
     return enabled;
   }
-  if (toggle.equalsIgnoreCase("off")) {
-    bleDisableStream(flag);
-    return disabled;
-  }
-  return "Error: invalid arguments — Usage: blestream <sensors|system|events> [on|off]";
+  bleDisableStream(flag);
+  return disabled;
 }
 
 static const char* cmd_blestream(const String& argsInput) {
@@ -4121,26 +4186,26 @@ static const char* cmd_blestream(const String& argsInput) {
       events = gBleState->eventCount;
     }
     char* buf = getDebugBuffer();
-    snprintf(buf, 1024, "Streaming: sensors=%s system=%s events=%s",
+    snprintf(buf, 1024,
+             "Streaming: sensors=%s system=%s events=%s\n"
+             "Intervals: sensor=%lums system=%lums\n"
+             "Stats: sensors=%lu system=%lu events=%lu",
              (flags & BLE_STREAM_SENSORS) ? "ON" : "OFF",
              (flags & BLE_STREAM_SYSTEM) ? "ON" : "OFF",
-             (flags & BLE_STREAM_EVENTS) ? "ON" : "OFF");
-    broadcastOutput(buf);
-    snprintf(buf, 1024, "Intervals: sensor=%lums system=%lums",
-             (unsigned long)sensorMs, (unsigned long)systemMs);
-    broadcastOutput(buf);
-    snprintf(buf, 1024, "Stats: sensors=%lu system=%lu events=%lu",
+             (flags & BLE_STREAM_EVENTS) ? "ON" : "OFF",
+             (unsigned long)sensorMs, (unsigned long)systemMs,
              (unsigned long)sensors, (unsigned long)systems, (unsigned long)events);
     return buf;
   }
   
   const String& sub = a.arg(0);
-  if (sub.equalsIgnoreCase("on")) {
+  const int all = parseBoolArg(sub);
+  if (all == 1) {
     bleEnableStream(BLE_STREAM_ALL);
     BLE_DEBUGF(DEBUG_BLE_DATA, "blestream all=ON");
     return "All streams enabled";
   }
-  if (sub.equalsIgnoreCase("off")) {
+  if (all == 0) {
     bleDisableStream(BLE_STREAM_ALL);
     BLE_DEBUGF(DEBUG_BLE_DATA, "blestream all=OFF");
     return "All streams disabled";

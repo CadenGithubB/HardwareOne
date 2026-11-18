@@ -111,6 +111,7 @@ static void bleRoleTransitionEnd() {
 static BleRoleTransition bleRoleTransitionState() { return roleState; }
 static bool bleRoleTransitionHeldByCurrentTask() { return roleDepth > 0; }
 static void bleStackSetLifecycleFault(bool faulted) { boundary.fault = faulted; }
+static bool bleStackLifecycleFaulted() { return boundary.fault; }
 static void bleCentralClientsTerminalTeardownAcknowledged() { ++boundary.centralAcks; }
 
 static void broadcastOutput(const char* line) { boundary.messages.emplace_back(line ? line : ""); }
@@ -251,6 +252,7 @@ struct esp_ble_gatts_cb_param_t {
 };
 static std::atomic<int> sBleGattsIf{ESP_GATT_IF_NONE};
 static std::atomic<bool> sBleAdvertising{false};
+static const char* sBleServerRefusal = "";
 
 // Arduino BLE objects: each records what the console builds on the host.
 struct BLE2902 {};
@@ -1150,6 +1152,9 @@ int main() {
   const char* reply = cmd_closeconsole("");
   EXPECT(isError(reply),
          "closeble reported success although the Ring owner deferred the server stop");
+  EXPECT(std::strcmp(reply, "Error: App console server did not stop: the ring owner did not stop "
+                            "in time. Retry closeconsole.") == 0,
+         "a deferred stop's reply does not carry the reason and the next action");
   EXPECT(gSettings.bleMode == BLE_MODE_SERVER && boundary.settingWrites == 0,
          "closeble persisted the default role although the server is still running");
   EXPECT(isBleServerInitialized(), "a deferred stop dropped the server state");
@@ -1227,6 +1232,9 @@ int main() {
   boundary.roleBusy = true;
   reply = cmd_closeconsole("");
   EXPECT(isError(reply), "closeble reported success while another role transition was active");
+  EXPECT(std::strcmp(reply, "Error: App console server did not stop: another Bluetooth role change "
+                            "is running. Retry closeconsole.") == 0,
+         "a busy role transition's reply does not carry the reason and the next action");
   EXPECT(gSettings.bleMode == BLE_MODE_SERVER && boundary.settingWrites == 0,
          "closeble persisted the default role while another role transition was active");
   EXPECT(sessionsLive() && boundary.ringPrepares == 0 && boundary.advStops == 0,
@@ -1242,6 +1250,9 @@ int main() {
   boundary.halStops = false;
   reply = cmd_closeconsole("");
   EXPECT(isError(reply), "closeble reported success although the host teardown failed");
+  EXPECT(std::strcmp(reply, "Error: App console server did not stop: the Bluetooth host teardown "
+                            "was incomplete. Reboot the device.") == 0,
+         "a failed teardown's reply does not carry the reason and the reboot");
   EXPECT(gSettings.bleMode == BLE_MODE_SERVER && boundary.settingWrites == 0,
          "closeble persisted the default role although the host teardown failed");
   EXPECT(boundary.fault && said("reboot required"), "teardown failure was not latched and broadcast");
@@ -1274,11 +1285,11 @@ int main() {
   EXPECT(session < adv && adv < hal, "sessions, advertising and host stop order changed");
   expectReleased();
 
-  // S5: nothing running: closeconsole says so and changes nothing (the saved
+  // S5: nothing running: closeconsole refuses with the next step and changes nothing (the saved
   // boot role is the user's; only a real stop resets it).
   resetWorld("S5 closeconsole, server not running");
   reply = cmd_closeconsole("");
-  EXPECT(std::strcmp(reply, "App console server not running") == 0 &&
+  EXPECT(std::strcmp(reply, "Error: App console server is not running. Start it with 'openconsole'.") == 0 &&
          gSettings.bleMode == BLE_MODE_SERVER && boundary.settingWrites == 0,
          "closeconsole without a server changed the saved role");
   EXPECT(boundary.ringPrepares == 0 && boundary.halDeinits == 0,
@@ -1294,7 +1305,7 @@ int main() {
   boundary.g2Client = true;
   boundary.pipeBesideGlasses = true;
   reply = cmd_closeconsole("");
-  EXPECT(!isError(reply) && std::strcmp(reply, "App console server not running") == 0,
+  EXPECT(isError(reply) && std::strcmp(reply, "Error: App console server is not running. Start it with 'openconsole'.") == 0,
          "closeconsole beside the glasses did not say the server is not running");
   EXPECT(boundary.phoneStopCalls == 0 && boundary.g2Client && boundary.ringPrepares == 0 &&
          boundary.halDeinits == 0 && boundary.settingWrites == 0,

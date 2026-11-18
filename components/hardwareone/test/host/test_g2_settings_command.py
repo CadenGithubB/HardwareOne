@@ -48,14 +48,18 @@ def main():
         'static bool g2BothFirmwareExact(',
         'static const char* cmd_g2glasses(',
     )]
+    # cmd_g2glasses reads on/off with the shared argument helpers.
+    utils = (COMPONENT / 'System_Utils.h').read_text()
+    functions[:0] = [extract_block(utils, name) for name in (
+        'inline int parseBoolArg(', 'inline bool argIsOn(', 'inline bool argIsOff(')]
     state = owner[owner.index('static G2SettingsEcho gSettingsEcho;'):owner.index('enum class G2PolicyFeature')]
     knobs = owner[owner.index('struct G2GlassesKnob {'):owner.index('// Read the current value of a knob')]
     types = extract_block(owner, 'struct G2LinkSnapshot') + ';\n' + knobs
     # All ordinary BASIC callers must share the rotating ID allocator; the
     # fresh-read helper allocates its named transaction token before sending.
     basic_calls = re.findall(r'g2BuildSettingBasicRequest\([^;]+;', owner)
-    assert len(basic_calls) == 4
-    assert sum('g2NextSettingsMagic()' in call for call in basic_calls) == 3
+    assert len(basic_calls) == 5
+    assert sum('g2NextSettingsMagic()' in call for call in basic_calls) == 4
     template = (HERE / 'g2_settings_command_harness.cpp').read_text()
     source = template.replace('// INSERT_PROTOCOL', header + '\n' + protocol)
     source = source.replace('// INSERT_TYPES_STATE', types + '\n' + state)

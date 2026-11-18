@@ -68,8 +68,11 @@ def generate(baseline: Path | None) -> str:
     sweep = "void ImageManager::sweepStaleTemporaries(" in source
     if sweep:
         markers.append("void ImageManager::sweepStaleTemporaries(")
+    # A save reports why a tier got no copy.
+    report = "struct ImageSaveReport" in header
     methods = (f"#define HAS_FOLDER_VALIDATOR {int(validator)}\n"
-               f"#define HAS_STALE_SWEEP {int(sweep)}\n" + "\n\n".join(
+               f"#define HAS_STALE_SWEEP {int(sweep)}\n"
+               f"#define HAS_SAVE_REPORT {int(report)}\n" + "\n\n".join(
         extract_block(source, marker) for marker in markers))
     constant = re.search(r"(?m)^#define MIN_FREE_SPACE_BYTES[^\n]+", source)[0]
     harness = (HERE / "image_writes_harness.cpp").read_text()

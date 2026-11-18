@@ -200,7 +200,9 @@ const char* cmd_capturecrypt(const String& argsInput);
 
 // Snapshot vitals + Track into buf (JSON object). Returns buf, or "{}" on failure.
 // Shared by `ring health json` CLI/BLE and GET /api/health/status.
-const char* buildHealthStatusJson(char* buf, size_t cap);
+// `complete`, when given, is false if the document did not fit and the text
+// returned is the short error object instead.
+const char* buildHealthStatusJson(char* buf, size_t cap, bool* complete = nullptr);
 
 // Kick the exact-2.2.9 one-shot refresh (DAILY HR/HRV/SpO2/sleep/activity,
 // followed by deviceStatus). Advances in healthLoggingTick; returns false if

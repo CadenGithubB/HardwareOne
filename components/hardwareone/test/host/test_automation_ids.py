@@ -15,6 +15,8 @@ whose ids are in range, 2147483647 included, is not touched. The sanitizer
 counts what it fixed, and `automation sanitize` says so (automationSanitizeReply,
 compiled from the firmware): duplicate ids, out-of-range ids or both, with
 counts. automationIdTextInRange is what `automation add id=<n>` accepts.
+An id is found in the stored text only as a whole number (automationIdPosInJson):
+id 12 is not the automation 123456.
 Source rules: both places that make an id use the owner, the scheduler pass
 leaves an automation whose id is above the range out and queues the
 sanitizer, `automation add` refuses an id= outside 1..2147483647 with an error
@@ -39,7 +41,8 @@ from test_web_batch_handlers import extract_block, require
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
-FUNCTIONS = ("bool automationIdExistsInJson(const String& json, unsigned long id)",
+FUNCTIONS = ("static int automationIdPosInJson(const String& json, unsigned long id)",
+             "bool automationIdExistsInJson(const String& json, unsigned long id)",
              "bool sanitizeAutomationsJson(String& jsonRef, AutomationSanitizeCounts* counts)",
              "static const char* automationSanitizeReply(const AutomationSanitizeCounts& counts)")
 ADD = "const char* cmd_automation_add(const String& argsInput)"

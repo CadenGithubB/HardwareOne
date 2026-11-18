@@ -30,6 +30,11 @@ class String : public std::string {
   String() = default;
   String(const std::string& s): std::string(s) {}
   void toLowerCase() { for (auto& c : *this) c = char(std::tolower((unsigned char)c)); }
+  void trim() {
+    const char* blanks = " \t\r\n";
+    erase(0, find_first_not_of(blanks));
+    erase(find_last_not_of(blanks) + 1);
+  }
 };
 class CommandArgs {
   std::vector<String> args;
@@ -85,6 +90,9 @@ static uint32_t nativeTerminalEpoch = 73;
 static bool g2NativeTerminalGuardMatches(uint32_t epoch, const G2Temple& temple) {
   return epoch && epoch == nativeTerminalEpoch && temple.side == 'R';
 }
+// The sender takes an optional native-notes context; no case here passes one.
+struct G2NoteContext;
+static bool g2NativeNotesContextLive(const G2NoteContext&) { return true; }
 static bool g2LinkIsSlow(const G2Temple*) { return false; }
 static void statsBoundary(uint8_t sid, uint8_t flag, size_t len) { g2statsRecordTx(sid, flag, len); if (onStats) onStats(); }
 #define g2statsRecordTx statsBoundary
@@ -108,6 +116,7 @@ static bool sendEnvelopeAtGeneration(G2Temple& t, const uint8_t* data, size_t le
 struct Reply {
   bool send = true, fullVersions = true, asyncAfter = false;
   int wear = 0; // -1 = absent nanopb scalar
+  int brightness = -1, autoBrightness = -1; // -1 = absent
   uint8_t flag = G2_FLAG_RESPONSE;
   int magicDelta = 0;
   char side = 'R';
@@ -144,11 +153,14 @@ static void replyRead(uint8_t magic, const Reply& reply) {
   assert(g2PbWriteUint32(body, sizeof(body), &pos, 2, uint8_t(magic + reply.magicDelta)));
   assert(g2PbBeginNested(body, sizeof(body), &pos, 4, &inner));
   assert(g2PbWriteUint32(body, sizeof(body), &pos, 1, 1));
+  if (reply.brightness >= 0) assert(g2PbWriteUint32(body, sizeof(body), &pos, 2, reply.brightness));
   if (reply.fullVersions) {
     assert(g2PbWriteString(body, sizeof(body), &pos, 5, reply.version));
     assert(g2PbWriteString(body, sizeof(body), &pos, 6, reply.version));
   }
   if (reply.wear >= 0) assert(g2PbWriteUint32(body, sizeof(body), &pos, 10, reply.wear));
+  if (reply.autoBrightness >= 0)
+    assert(g2PbWriteUint32(body, sizeof(body), &pos, 18, reply.autoBrightness));
   assert(g2PbEndNested(body, sizeof(body), &pos, inner));
   receive(body, pos, reply.flag, reply.side, reply.generationDelta);
   if (reply.asyncAfter) {
@@ -212,6 +224,8 @@ static void reset(const char* version = "2.3.2.14") {
 }
 static bool has(const std::string& text, const char* fragment) { return text.find(fragment) != std::string::npos; }
 static std::string run(const char* command = "weardetect off") { return cmd_g2glasses(String(command)); }
+// The executor reads a reply that leads with "Error" as a failed command.
+static bool failed(const std::string& text) { return text.rfind("Error", 0) == 0; }
 
 int main() {
   reset(); gR.pluginDead = true;
@@ -236,15 +250,45 @@ int main() {
   assert(has(run("weardetect"), "not reported"));
 
   // Scalar absence is unknown in partial replies, not silently false.
+  // Writing off again: the glasses send no ACK for a value they already hold
+  // and leave an off scalar out of the answered read. That is a plain report.
+  const char* const kNoOpReport =
+      "G2 glasses: weardetect = 0 sent, unconfirmed. No matching ACK came and the fresh readback "
+      "does not report this setting. The glasses do not acknowledge a value they already hold.";
   reset(); replies[1].wear = -1; replies[1].fullVersions = false; sendAck = false;
-  assert(has(run(), "unconfirmed"));
+  assert(run() == kNoOpReport);
   assert(has(run("weardetect"), "not reported"));
   reset(); replies[1].wear = -1; replies[1].version = "2.2.6.10"; sendAck = false;
-  assert(has(run(), "unconfirmed"));
+  assert(run() == kNoOpReport);
+  reset("2.2.6.10"); replies[0].version = replies[1].version = "2.2.6.10";
+  replies[1].wear = -1; sendAck = false;
+  assert(run() == kNoOpReport && writes == 1);
+  // The same answered read is a failure for a value that is not 0, and so is a
+  // read the glasses did not answer.
+  reset(); replies[1].wear = -1; replies[1].fullVersions = false; sendAck = false;
+  { const auto result = run("weardetect on"); assert(failed(result) && has(result, "unconfirmed") && has(result, "does not report this setting") && writes == 1); }
+  reset(); replies[1].send = false; sendAck = false;
+  { const auto result = run(); assert(failed(result) && has(result, "unconfirmed") && writes == 1); }
   reset(); replies[1].send = false;
   assert(has(run(), "acked by RIGHT glasses; fresh readback unavailable"));
   reset(); replies[1].wear = 1;
-  assert(has(run(), "fresh readback is 1 despite matching ACK"));
+  { const auto result = run(); assert(failed(result) && has(result, "fresh readback is 1 despite matching ACK")); }
+
+  // The glasses move the brightness level themselves while auto brightness is
+  // on. An acknowledged level that reads back as another one is then a plain
+  // report. Without the ACK, or with auto brightness off, it is a failure.
+  auto brightnessCase = [](int autoBrightness, bool ack) {
+    reset("2.2.4.34"); replies[0].version = replies[1].version = "2.2.4.34";
+    replies[1].brightness = 78; replies[1].autoBrightness = autoBrightness; sendAck = ack;
+    const std::string result = run("brightness 80"); assert(writes == 1);
+    return result;
+  };
+  assert(brightnessCase(1, true) ==
+         "G2 glasses: brightness = 80 acked by RIGHT glasses. Fresh readback is 78: "
+         "auto brightness is on and moves the level by itself.");
+  assert(failed(brightnessCase(0, true)) && failed(brightnessCase(-1, true)));
+  assert(has(brightnessCase(0, true), "requested 80, fresh readback is 78 despite matching ACK"));
+  assert(failed(brightnessCase(1, false)));
 
   // Bad first responses must never admit a candidate write.
   for (unsigned fault = 0; fault < 7; ++fault) {
@@ -280,6 +324,11 @@ int main() {
   assert(!g2SettingsEchoSnapshot(&cached, nullptr));
   reset(); rolloverAtReadback = true;
   assert(has(run(), "connection changed during readback; result unconfirmed"));
+
+  // An on/off setting takes the shared on/off words; any other word sends nothing.
+  reset();
+  assert(has(run("weardetect disable"), "confirmed by fresh RIGHT readback and matching ACK") && writes == 1);
+  reset(); assert(has(run("weardetect maybe"), "Error:") && writes == 0);
 
   reset(); gR.sessionReadyGeneration = 0;
   assert(has(run(), "right native session not ready") && writes == 0);

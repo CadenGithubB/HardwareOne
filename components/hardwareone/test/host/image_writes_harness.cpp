@@ -573,6 +573,43 @@ static void bothPromotion(unsigned failedTier) {
   check(!files.count(std::string(pathFor(false)) + ".tmp") && !files.count(std::string(pathFor(true)) + ".tmp"), "BOTH leaves no owned temporary after handled promotion failure");
   hooks(result, IMAGE_STORAGE_BOTH); balanced();
 }
+#if HAS_SAVE_REPORT
+// The report names the reason a tier got no copy: the reply of a failed save,
+// and the note behind the path when one of two copies is missing.
+static void saveReports() {
+  const char* tier = nullptr; const char* reason = nullptr;
+  ImageSaveReport report;
+  { auto owner = setup();
+    check(owner.saveImage(jpeg, sizeof(jpeg), IMAGE_STORAGE_BOTH, &report).length() && !report.missingCopy(tier, reason),
+          "two written copies report nothing missing");
+    balanced(); }
+  { auto owner = setup(); sdMounted = false;
+    const auto result = owner.saveImage(jpeg, sizeof(jpeg), IMAGE_STORAGE_BOTH, &report);
+    check(result == pathFor(false) && report.missingCopy(tier, reason) && std::string(tier) == "SD" &&
+          std::string(reason) == "card not available", "BOTH without a card names the missing SD copy");
+    check(!owner.saveImage(jpeg, sizeof(jpeg), IMAGE_STORAGE_SD, &report).length() &&
+          std::strstr(report.failureReply(), "SD card not available"),
+          "an SD save without a card fails with that reason");
+    balanced(); }
+  { auto owner = setup(); tiers[0].free = reserveBytes + sizeof(jpeg) - 1;
+    const auto both = owner.saveImage(jpeg, sizeof(jpeg), IMAGE_STORAGE_BOTH, &report);
+    check(both == pathFor(true) && report.missingCopy(tier, reason) && std::string(tier) == "internal" &&
+          std::string(reason) == "low on space", "BOTH with a full internal tier names the missing internal copy");
+    check(!owner.saveImage(jpeg, sizeof(jpeg), IMAGE_STORAGE_LITTLEFS, &report).length() &&
+          std::strstr(report.failureReply(), "low on space"), "a save refused for space says so");
+    balanced(); }
+  { auto owner = setup(); gSettings.cameraCaptureFolder = "/sd/photos";
+    check(!owner.saveImage(jpeg, sizeof(jpeg), IMAGE_STORAGE_LITTLEFS, &report).length() &&
+          std::strstr(report.failureReply(), "cameraCaptureFolder"), "a folder outside the tier is named as the reason");
+    balanced(); }
+  { auto owner = setup(); tiers[1].fault = Fault::Open;
+    check(!owner.saveImage(jpeg, sizeof(jpeg), IMAGE_STORAGE_SD, &report).length() &&
+          std::strstr(report.failureReply(), "write failed"), "a failed write is named as the reason");
+    check(!owner.saveImage(nullptr, 0, IMAGE_STORAGE_SD, &report).length() &&
+          std::strstr(report.failureReply(), "no frame"), "no image data is named as the reason");
+    balanced(); }
+}
+#endif
 int main(int argc, char** argv) {
   const std::string selected = argc > 1 ? argv[1] : "all";
   unsigned scenarios = 0, failures = 0;
@@ -637,6 +674,9 @@ int main(int argc, char** argv) {
     run("configured traversal refused", [] { configuredPath("/../photos", IMAGE_STORAGE_BOTH, ""); });
 #if HAS_FOLDER_VALIDATOR
     run("capture folder setting validator", folderValidator);
+#endif
+#if HAS_SAVE_REPORT
+    run("save report reasons", saveReports);
 #endif
     run("nested filesystem guard", nestedSave);
     run("counter/clock/event/retention compatibility", filenameAndRetention);

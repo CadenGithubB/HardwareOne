@@ -278,6 +278,10 @@ static std::string syncJson(const char* adminPass, const char* user, const char*
   return syncJsonAs("root", adminPass, user, pass, role);
 }
 
+// v4_handle_cmd's answer to a login that is not accepted.
+static const char kLoginFailed[] =
+    "Error: Login failed. Check the user name and password of the target device.";
+
 static bool lastReply(uint32_t msgId, bool ok, const char* text) {
   return !replies.empty() && replies.back().msgId == msgId && replies.back().ok == ok &&
          replies.back().text == text;
@@ -305,14 +309,14 @@ static void scenarioRemoteLockout() {
   begin();
   for (uint32_t id = 1; id <= 5; ++id) {
     remoteCommand(kPeerA, id, "carol:wrong:status");
-    check(lastReply(id, false, "Auth failed"), name, "a wrong password answers Auth failed with its msgId");
+    check(lastReply(id, false, kLoginFailed), name, "a wrong password answers Login failed with its msgId");
   }
   check(passwordChecks == 5 && countEvents(SYSEVT_LOGIN_FAIL) == 5, name,
         "five checks, five SYSEVT_LOGIN_FAIL posts");
   remoteCommand(kPeerB, 6, "root:root-pass:status");
   check(passwordChecks == 5, name, "another peer's right password is not checked while locked");
   check(accepted.empty(), name, "and runs nothing");
-  check(lastReply(6, false, "Auth locked out. Retry in 30s"), name,
+  check(lastReply(6, false, "Error: Login locked out. Retry in 30s."), name,
         "the lockout answers in the same CMD_RESP shape with the msgId echoed");
   check(countEvents(SYSEVT_LOGIN_LOCKED) == 1 && countEvents(SYSEVT_LOGIN_FAIL) == 5, name,
         "one lock event; the refusal is not a login failure");
@@ -328,12 +332,12 @@ static void scenarioPlaintextAndBond() {
   begin();
   for (uint32_t id = 1; id <= 6; ++id) remoteCommand(kPeerA, id, "carol:wrong:status", false);
   check(passwordChecks == 0, name, "a plaintext command is refused before any check");
-  check(lastReply(6, false, "Remote command must be session-encrypted"), name,
+  check(lastReply(6, false, "Error: Remote command must be session-encrypted. Pair the devices again."), name,
         "with its existing refusal");
   for (uint32_t id = 10; id <= 15; ++id) {
     remoteCommand(kPeerA, id, "@BOND:ffffffffffffffffffffffffffffffff:status");
   }
-  check(bondFailures == 6 && lastReply(15, false, "Session token auth failed"), name,
+  check(bondFailures == 6 && lastReply(15, false, "Error: Bond session token refused. Check the passphrase on both devices."), name,
         "bad bond tokens still go to logBondAuthFailure with their own reply");
   check(credentialAttemptFailures(SOURCE_ESPNOW, "espnow") == 0, name,
         "bond-token failures do not count toward the password lock");
@@ -457,7 +461,7 @@ static void scenarioRemoteCredentialLength() {
   remoteCommand(kPeerA, 2, (user + "x:" + pass + ":status").c_str());
   check(accepted.size() == 1, name,
         "a longer name is not cut to the account its first 31 bytes spell");
-  check(lastReply(2, false, "Auth failed"), name, "it answers Auth failed with its msgId");
+  check(lastReply(2, false, kLoginFailed), name, "it answers Login failed with its msgId");
   check(passwordChecks == checks, name, "no password is checked for it");
   check(credentialAttemptFailures(SOURCE_ESPNOW, "espnow") == 1, name,
         "it counts as one failed attempt under ESP-NOW's key");
@@ -469,7 +473,7 @@ static void scenarioRemoteCredentialLength() {
 
   checks = passwordChecks;
   remoteCommand(kPeerA, 4, (user + ":" + pass + "x:status").c_str());
-  check(accepted.size() == 2 && lastReply(4, false, "Auth failed"), name,
+  check(accepted.size() == 2 && lastReply(4, false, kLoginFailed), name,
         "a longer password is not cut to the 31 bytes that would match");
   check(passwordChecks == checks && credentialAttemptFailures(SOURCE_ESPNOW, "espnow") == 2,
         name, "it is refused unchecked and counted");
@@ -477,15 +481,15 @@ static void scenarioRemoteCredentialLength() {
   const std::string longName(64, 'n');
   for (uint32_t id = 5; id <= 7; ++id) {
     remoteCommand(kPeerB, id, (longName + ":" + pass + ":status").c_str());
-    check(lastReply(id, false, "Auth failed"), name, "each further over-long name is refused");
+    check(lastReply(id, false, kLoginFailed), name, "each further over-long name is refused");
   }
   check(countEvents(SYSEVT_LOGIN_LOCKED) == 1, name, "the fifth refusal locks ESP-NOW's key");
   checks = passwordChecks;
   remoteCommand(kPeerB, 8, (longName + ":" + pass + ":status").c_str());
-  check(lastReply(8, false, "Auth locked out. Retry in 30s"), name,
+  check(lastReply(8, false, "Error: Login locked out. Retry in 30s."), name,
         "a locked key answers an over-long name with the lockout");
   remoteCommand(kPeerA, 9, "root:root-pass:status");
-  check(lastReply(9, false, "Auth locked out. Retry in 30s") && passwordChecks == checks &&
+  check(lastReply(9, false, "Error: Login locked out. Retry in 30s.") && passwordChecks == checks &&
             accepted.size() == 2,
         name, "and the lock they set holds for a right password");
   finish(name);

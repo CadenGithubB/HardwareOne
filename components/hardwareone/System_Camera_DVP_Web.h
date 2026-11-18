@@ -151,8 +151,13 @@ inline void streamCameraSensorBindButtons(httpd_req_t* req) {
     "bind('btn-camera-stop','closecamera');"
     // Video recording — bind directly rather than via CLI so we can refresh
     // the recordings list right after stop.
-    "(function(){var b=hw.$('btn-camera-record');if(b){b.onclick=function(){hw.postFormText('/api/cli',{cmd:'camerarecord start'});};}"
-    "var s=hw.$('btn-camera-record-stop');if(s){s.onclick=function(){hw.postFormText('/api/cli',{cmd:'camerarecord stop'}).then(function(){setTimeout(loadCameraRecordings,500);});};}"
+    // A refused start or stop is a 400 and postFormText rejects: show the
+    // reason. The list is reloaded after a failed stop too, because a recorder
+    // that was still finishing leaves its clip on the card a moment later.
+    "(function(){var why=function(e){alert(e&&e.message?e.message:e);};"
+    "var b=hw.$('btn-camera-record');if(b){b.onclick=function(){hw.postFormText('/api/cli',{cmd:'camerarecord start'}).catch(why);};}"
+    "var s=hw.$('btn-camera-record-stop');if(s){s.onclick=function(){hw.postFormText('/api/cli',{cmd:'camerarecord stop'})"
+    ".then(function(){setTimeout(loadCameraRecordings,500);},function(e){why(e);setTimeout(loadCameraRecordings,2000);});};}"
     "var t=hw.$('btn-camera-recordings-toggle');var d=hw.$('camera-recordings');if(t&&d){t.onclick=function(){if(d.style.display==='none'){d.style.display='block';loadCameraRecordings();}else{d.style.display='none';}};}"
     "})();",
     HTTPD_RESP_USE_STRLEN);

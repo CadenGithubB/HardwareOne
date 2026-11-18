@@ -11,6 +11,7 @@
 #if ENABLE_HTTP_SERVER
   #include "WebServer_Server.h"
 #include "WebServer_Utils.h"
+#include <lwip/sockets.h>  // inet_pton, inet_ntop: the address text of an IP ban
 #endif
 #include "System_Utils.h"  // For CommandEntry
 #include "System_Command.h"
@@ -1745,8 +1746,17 @@ bool logoutTransportFromNamedSession(CommandSource target,
       (target != SOURCE_SERIAL && target != SOURCE_UART &&
        target != SOURCE_LOCAL_DISPLAY)) return false;
   FsLockGuard authGuard("users.cross_transport_logout");
-  if (!authGuard.held && !isFsLockedByCurrentTask()) return false;
-  if (!userMayControlOtherSessions(sourceUser)) return false;
+  if (!authGuard.held && !isFsLockedByCurrentTask()) {
+    if (denialOut) *denialOut = "Error: Storage is busy. Retry the logout.";
+    return false;
+  }
+  if (!userMayControlOtherSessions(sourceUser)) {
+    if (denialOut) {
+      *denialOut = "Error: This account may not sign out other sessions. "
+                   "Sign in with an account that is not a guest.";
+    }
+    return false;
+  }
   // The rank rule of the user mutations (ban, unban, sessionrevoke): an
   // account may not sign out a session of a higher-privileged account.
   {
@@ -3006,7 +3016,8 @@ bool approvePendingUserInternal(const String& username, String& errorOut) {
   // a duplicate) or deny clears it.
   pendingArray.remove(approvedIndex);
   if (!writePendingUsers(pending, "user.approve", errorOut)) {
-    errorOut = "User approved, but the pending list could not be updated";
+    errorOut = String("User approved, but the request is still listed. Run userdeny ") +
+               username + " to clear it";
     return false;
   }
 
@@ -3626,14 +3637,20 @@ const char* cmd_user_resetpassword(const String& argsInput) {
   if (!filesystemReady) return "Error: LittleFS not ready";
   
   // Parse: "<username> <newPassword> [0|1]" — optional 1 = require new password on next login
+  // A fourth token means the password held a space and was not quoted.
   CommandArgs a(argsInput);
-  if (!a.hasMinArgs(2)) {
+  if (!a.hasMinArgs(2) || a.count() > 3) {
     return "Error: invalid arguments — Usage: user resetpassword <username> <newPassword> [0|1]\nOptional: 1 = require password change on next login, 0 = omit";
   }
 
   String username = a.arg(0);
   String rest = a.arg(1);
-  bool mustChange = a.argBool(2, false);
+  bool mustChange = false;
+  if (a.has(2)) {
+    const int flag = parseBoolArg(a.arg(2));
+    if (flag < 0) return kCommandReplyNotOnOff;
+    mustChange = (flag == 1);
+  }
 
   // A password reset is account takeover, so gate it like the other user
   // mutations (promote/demote/delete/ban): a caller may not reset the password
@@ -3693,7 +3710,7 @@ const char* cmd_user_add(const String& argsInput) {
   if (!filesystemReady) return "Error: LittleFS not ready";
 
   CommandArgs a(argsInput);
-  if (!a.hasMinArgs(2)) {
+  if (!a.hasMinArgs(2) || a.count() > 4) {
     return "Error: invalid arguments — Usage: useradd <username> <password> [0|1] [guest|user|admin|superadmin]\n"
            "  0|1: 1 = require a new password on next login\n"
            "  role: defaults to user; you cannot grant a role above your own";
@@ -3708,12 +3725,13 @@ const char* cmd_user_add(const String& argsInput) {
     String t = a.arg(i);
     if (t.length() == 0) continue;
     t.toLowerCase();
-    if (t == "0" || t == "1")        mustChange = (t == "1");
+    const int flag = parseBoolArg(t);
+    if (flag >= 0)                   mustChange = (flag == 1);
     else if (isKnownUserRole(t))     role = t;
     else {
       if (!ensureDebugBuffer()) return "Error: unrecognised argument";
       snprintf(getDebugBuffer(), 1024,
-               "Error: unrecognised argument '%s' - expected 0|1 or guest|user|admin|superadmin",
+               "Error: unrecognised argument '%s' - expected on|off or guest|user|admin|superadmin",
                t.c_str());
       return getDebugBuffer();
     }
@@ -3872,6 +3890,16 @@ static void userListTextVisit(const UserRosterEntry& entry, const char*, void* c
   BROADCAST_PRINTF("  %s (%s)%s", entry.username, entry.role, entry.banned ? " [banned]" : "");
 }
 
+// A users or pending file that is there and cannot be used is a failure in
+// both forms of the list, never an empty list.
+static constexpr char kUsersFileUnreadable[] = "Error: Users file could not be read. Retry userlist.";
+static constexpr char kUsersFileMalformed[] =
+    "Error: Users file is malformed. Restore it, then retry userlist.";
+static constexpr char kPendingFileUnreadable[] =
+    "Error: Pending users file could not be read. Retry pendinglist.";
+static constexpr char kPendingFileMalformed[] =
+    "Error: Pending users file is malformed. Restore or delete it, then retry pendinglist.";
+
 const char* cmd_user_list(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!filesystemReady) return "Error: LittleFS not ready";
@@ -3887,9 +3915,10 @@ const char* cmd_user_list(const String& argsInput) {
     out["schema"] = 1;
     JsonArray users = out["users"].to<JsonArray>();
     const RosterReadResult read = visitUserRoster(userListJsonVisit, &users);
+    if (read == RosterReadResult::Missing) return "{\"schema\":1,\"users\":[]}";
     if (read != RosterReadResult::Ok) {
-      if (read != RosterReadResult::Missing) ERROR_SESSIONF("userlist: users file unreadable or malformed");
-      return "{\"schema\":1,\"users\":[]}";
+      ERROR_SESSIONF("userlist: users file unreadable or malformed");
+      return read == RosterReadResult::Malformed ? kUsersFileMalformed : kUsersFileUnreadable;
     }
     static char* jsonBuf = nullptr;
     return listJsonReply(out, jsonBuf, "user.list.json",
@@ -3902,8 +3931,7 @@ const char* cmd_user_list(const String& argsInput) {
   const RosterReadResult read = visitUserRoster(userListTextVisit, &userCount);
   if (read == RosterReadResult::Missing) return "No users found";
   if (read != RosterReadResult::Ok) {
-    return read == RosterReadResult::Malformed ? "Error: Malformed users file"
-                                               : "Error: Failed to read users file";
+    return read == RosterReadResult::Malformed ? kUsersFileMalformed : kUsersFileUnreadable;
   }
   if (userCount == 0) {
     broadcastOutput("Users:");
@@ -3928,9 +3956,8 @@ const char* cmd_pending_list(const String& argsInput) {
   // Open and parse pending users file with ArduinoJson
   File file = VFS::openGuarded(PENDING_USERS_FILE, "r", VFS::systemAuth(VFS::Scopes::USERS, "user.pending.list"));
   if (!file) {
-    if (jsonOutput) return "{\"schema\":1,\"pending\":[]}";
     ERROR_SESSIONF("Failed to read pending users file");
-    return "Error: Failed to read pending users file";
+    return kPendingFileUnreadable;
   }
 
   // Parse JSON array (1KB should be enough for pending users)
@@ -3939,9 +3966,8 @@ const char* cmd_pending_list(const String& argsInput) {
   file.close();
 
   if (error) {
-    if (jsonOutput) return "{\"schema\":1,\"pending\":[]}";
     ERROR_SESSIONF("Malformed pending users file");
-    return "Error: Malformed pending users file";
+    return kPendingFileMalformed;
   }
 
   JsonArray pending = doc.as<JsonArray>();
@@ -4017,7 +4043,8 @@ const char* cmd_session_list(const String& argsInput) {
 const char* cmd_session_list(const String& originalCmd) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (argWantsJson(originalCmd)) return "{\"schema\":1,\"available\":false,\"reason\":\"http server disabled\"}";
-  return "Session management requires HTTP server to be enabled";
+  return "Error: sessionlist needs the HTTP server, which is not in this build. "
+         "Use sessionrevoke user <name> to sign an account out.";
 }
 #endif // ENABLE_HTTP_SERVER
 
@@ -4033,6 +4060,9 @@ const char* cmd_session_revoke(const String& argsInput) {
   subcmd.toLowerCase();
 
   auto defaultReason = String("Your session has been signed out by an administrator.");
+  static constexpr char kUsage[] = "Error: invalid arguments — Usage:\n"
+                                   "  sessionrevoke sid <sid> [reason]\n"
+                                   "  sessionrevoke user <username> [reason]";
 
   int revoked = 0;
 
@@ -4045,7 +4075,7 @@ const char* cmd_session_revoke(const String& argsInput) {
     if (!reason.length()) reason = defaultReason;
     String who;
     if (!webRevokeSessionBySid(sid, reason, &who)) {
-      return "Error: Session not found for given SID.";
+      return "Error: Session not found for given SID. List the sessions with 'sessionlist'.";
     }
     // Admin audit broadcast
     {
@@ -4063,6 +4093,7 @@ const char* cmd_session_revoke(const String& argsInput) {
 
   if (subcmd == "user") {
     String username = a.arg(1);
+    if (!username.length()) return kUsage;
     String reason = a.has(2) ? a.remaining(1) : String();
     if (!reason.length()) reason = defaultReason;
 
@@ -4099,8 +4130,18 @@ const char* cmd_session_revoke(const String& argsInput) {
       }
     }
     if (revoked == 0) {
-      if (!ensureDebugBuffer()) return "No active sessions found";
-      snprintf(getDebugBuffer(), 1024, "No active sessions found for user '%s'.", username.c_str());
+      // An account that is signed in nowhere has no session to end; a name
+      // that is no account is a mistake. Both are refusals.
+      uint32_t accountId = 0;
+      const bool known = getUserIdByUsername(username, accountId);
+      if (!ensureDebugBuffer()) {
+        return known ? "Error: That user has no active sessions. List the sessions with 'sessionlist'."
+                     : "Error: No account or session with that name. Check the name with userlist.";
+      }
+      snprintf(getDebugBuffer(), 1024,
+               known ? "Error: User '%s' has no active sessions. List the sessions with 'sessionlist'."
+                     : "Error: No account or session named '%s'. Check the name with userlist.",
+               username.c_str());
       return getDebugBuffer();
     }
     if (!ensureDebugBuffer()) return "Revoked";
@@ -4108,13 +4149,39 @@ const char* cmd_session_revoke(const String& argsInput) {
     return getDebugBuffer();
   }
 
-  return "Error: invalid arguments — Usage:\n"
-         "  sessionrevoke sid <sid> [reason]\n"
-         "  sessionrevoke user <username> [reason]";
+  return kUsage;
 }
 
 // The IP ban list lives in the web server (sIpBans).
 #if ENABLE_HTTP_SERVER
+// The text the web server has for a client at this address, which is what a
+// ban is compared with (getClientIp, isIpBanned). false when `typed` is not an
+// address. An IPv4 address must be a dotted quad: lwIP also reads short and
+// hexadecimal forms (192.168.1). With IPv6 in the build the server listens on
+// one dual-stack socket and an IPv4 client arrives as ::FFFF:a.b.c.d, so that
+// is the form a ban takes. `out` needs 46 bytes, which hold either family
+// (INET6_ADDRSTRLEN is only defined with IPv6).
+static bool ipBanText(const String& typed, char* out, size_t outSize) {
+  uint8_t parsed[16] = {0};
+  char quad[16] = {0};  // "255.255.255.255"
+  if (inet_pton(AF_INET, typed.c_str(), parsed) == 1) {
+    if (!inet_ntop(AF_INET, parsed, quad, sizeof(quad)) || typed != quad) return false;
+#if LWIP_IPV6
+    snprintf(out, outSize, "::FFFF:%s", quad);
+#else
+    snprintf(out, outSize, "%s", quad);
+#endif
+    return true;
+  }
+#if LWIP_IPV6
+  if (inet_pton(AF_INET6, typed.c_str(), parsed) == 1 &&
+      inet_ntop(AF_INET6, parsed, out, outSize)) {
+    return true;
+  }
+#endif
+  return false;
+}
+
 const char* cmd_ban(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   CommandArgs a(argsInput);
@@ -4122,10 +4189,12 @@ const char* cmd_ban(const String& argsInput) {
 
   String ip = a.arg(0);
   String reason = a.has(1) ? a.remaining(0) : String();
-  // Basic format check — must contain a dot (IPv4) or colon (IPv6)
-  if (ip.indexOf('.') < 0 && ip.indexOf(':') < 0) {
-    return "Error: invalid IP address format (expected e.g. 192.168.1.100)";
+  // The ban is stored, and reported, in the form the server compares with.
+  char stored[46] = {0};
+  if (!ipBanText(ip, stored, sizeof(stored))) {
+    return "Error: Not an IP address. Give it as 192.168.1.100.";
   }
+  ip = stored;
 
   if (banIp(ip.c_str(), reason.length() ? reason.c_str() : nullptr)) {
     EXT_RAM_BSS_ATTR static char buf[140];
@@ -4148,15 +4217,22 @@ const char* cmd_unban(const String& argsInput) {
   ip.trim();
   if (ip.length() == 0) return "Error: invalid arguments — Usage: unban <ip>";
 
-  if (unbanIp(ip.c_str())) {
+  // cmd_ban stores the server's form of the address (ipBanText), so that form
+  // is looked up first. The typed text is the fallback whether or not it
+  // parses: a list saved by older firmware holds addresses as they were typed.
+  char stored[46] = {0};
+  const bool parsed = ipBanText(ip, stored, sizeof(stored));
+  const char* key = (parsed && isIpBanned(stored)) ? stored : ip.c_str();
+
+  if (unbanIp(key)) {
     EXT_RAM_BSS_ATTR static char buf[80];
-    snprintf(buf, sizeof(buf), "Unbanned %s", ip.c_str());
+    snprintf(buf, sizeof(buf), "Unbanned %s", key);
     return buf;
   }
   // unbanIp restores the ban when the save failed.
-  if (isIpBanned(ip.c_str())) {
+  if (isIpBanned(key)) {
     EXT_RAM_BSS_ATTR static char notSaved[120];
-    snprintf(notSaved, sizeof(notSaved), "Error: unban of %s not saved; the ban stays", ip.c_str());
+    snprintf(notSaved, sizeof(notSaved), "Error: unban of %s not saved; the ban stays", key);
     return notSaved;
   }
   return "Error: IP not found in ban list";
@@ -4166,21 +4242,24 @@ const char* cmd_banlist(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (argWantsJson(argsInput)) return banListJson();  // built in WebServer_Server.cpp where sIpBans lives
   broadcastBanList();
-  return "";
+  return "OK";
 }
 #else
+static constexpr char kIpBansNeedHttp[] =
+    "Error: IP bans need the HTTP server, which is not in this build. "
+    "Use banuser to block an account.";
 const char* cmd_ban(const String& originalCmd) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  return "Ban management requires HTTP server to be enabled";
+  return kIpBansNeedHttp;
 }
 const char* cmd_unban(const String& originalCmd) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  return "Ban management requires HTTP server to be enabled";
+  return kIpBansNeedHttp;
 }
 const char* cmd_banlist(const String& originalCmd) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (argWantsJson(originalCmd)) return "{\"schema\":1,\"available\":false,\"reason\":\"http server disabled\"}";
-  return "Ban management requires HTTP server to be enabled";
+  return kIpBansNeedHttp;
 }
 #endif // ENABLE_HTTP_SERVER
 
@@ -4926,7 +5005,7 @@ const char* cmd_user_sync(const String& argsInput) {
   
   // Check if ESP-NOW is enabled
   if (!gEspNow || !gEspNow->initialized) {
-    return "Error: ESP-NOW not initialized";
+    return "Error: ESP-NOW not initialized. Run 'openespnow' first.";
   }
   
   // Check if user sync is enabled

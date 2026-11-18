@@ -427,7 +427,11 @@ bool applyRemoteSettingChange(const SettingEntry* entry, const String& value, St
   }
 
   const uint32_t seqBefore = espnowCmdResultSeq();
-  char out[128];
+  // The sent reply echoes the command and ends with its request id. The copy
+  // must reach that id for any value the keyboard can produce: 21 for the lead,
+  // the setter name, a space, OLED_KEYBOARD_MAX_LENGTH for the value, 19 for
+  // the id (this size leaves 86 for the setter name).
+  char out[256];
   out[0] = '\0';
   const String cmd = String("remote:") + entry->cmdKey + " " + trimmed;
   if (!executeOledCommandWithResult(cmd, out, sizeof(out))) {

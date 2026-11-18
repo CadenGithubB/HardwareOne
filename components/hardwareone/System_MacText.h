@@ -47,8 +47,9 @@ inline bool macEquals(const uint8_t* a, const uint8_t* b) {
 }
 
 // Lenient inbound parser. Accepts ':' '-' or ' ' separators or none; any
-// case. Requires exactly 12 hex digits. Returns true and fills mac[6] on
-// success, false on any malformed input.
+// case. Requires exactly 12 hex digits and nothing but separators after them.
+// Returns true and fills mac[6] on success, false on any malformed input
+// (mac[] may then be partly written).
 inline bool macParse(const char* s, uint8_t mac[6]) {
   if (!s) return false;
   auto nyb = [](char c) -> int {
@@ -59,7 +60,8 @@ inline bool macParse(const char* s, uint8_t mac[6]) {
   };
   int byteIdx = 0;
   int hi = -1;
-  for (const char* p = s; *p && byteIdx < 6; ++p) {
+  const char* p = s;
+  for (; *p && byteIdx < 6; ++p) {
     char c = *p;
     if (c == ':' || c == '-' || c == ' ') continue;  // skip separators
     int v = nyb(c);
@@ -67,5 +69,6 @@ inline bool macParse(const char* s, uint8_t mac[6]) {
     if (hi < 0) { hi = v; }
     else { mac[byteIdx++] = (uint8_t)((hi << 4) | v); hi = -1; }
   }
-  return (byteIdx == 6 && hi < 0);
+  while (*p == ':' || *p == '-' || *p == ' ') ++p;  // trailing separators
+  return byteIdx == 6 && hi < 0 && *p == '\0';
 }

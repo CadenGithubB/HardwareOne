@@ -4,7 +4,11 @@ Audience: the Android app AI. This documents the device's JSON command surface a
 the conventions for consuming it, as of firmware v0.99.98.5 (last revised with that
 release, 2026-10-25). Dated notes in the text mark when a field was added; the
 peer-metadata commands date from v0.95.10. Changes after v0.99.98.5 are recorded in
-`CHANGELOG.md`, not here.
+`CHANGELOG.md`, not here, with one exception: the rows that the command reply change
+of 2026-11-17 touched (failure detection in sec. 1, automation in sec. 3, `blepeers`
+and `versions` in sec. 4, `images`, `maplist`, `cameravideolist` and `espnowstatus`
+in sec. 5, `cameraread` in sec. 6, and the action list in sec. 7) are corrected in place, and the `CHANGELOG.md`
+entry "Command replies" under Unreleased states what changed.
 
 ---
 
@@ -18,9 +22,15 @@ peer-metadata commands date from v0.95.10. Changes after v0.99.98.5 are recorded
   you already call.
 - **Shape.** Most replies are `{"schema":1, ...}`. Some sensor replies use `"valid"`
   instead (see sec. 6).
-- **Failure detection (unchanged).** A command failed if its result string starts
-  with `Error` / `ERROR` (the firmware sets `ok=false` on that prefix). On success,
-  status/data commands return their object; action commands return `OK`.
+- **Failure detection.** A command failed if its result string starts with
+  `Error` / `ERROR`, `Usage:` or `Unknown command:` (`commandReplyIsFailure()` in
+  `System_CommandReply.h`; the firmware sets `ok=false` on these leads, and the
+  web `/api/cli` answers HTTP 400, or 403 for an admin refusal). Over BLE you get
+  only the text, so apply the same three leads there. On success, status/data
+  commands return their object; action commands return `OK`, `OK: <text>` or, where
+  the handler confirms the action itself (sensor logging, health logging, live
+  tracking), `SUCCESS: <text>`. Judge success by the absence of the three failure
+  leads, not by an `OK` lead.
 - **No console spam.** JSON replies are returned only to the caller - they are *not*
   broadcast to other consoles. Plain (non-json) calls behave exactly as before.
 - **Transport.** Over the BLE secure channel, responses are chunked by the
@@ -63,7 +73,7 @@ peer-metadata commands date from v0.95.10. Changes after v0.99.98.5 are recorded
 4. **Web-off stub hardening** - `banlist`/`httpstatus`/`sessionlist` stubs now emit
    `available:false` JSON instead of text.
 5. **Deferred set** - `memreport`, `banlist`, `miclist`, `cameravideolist`, `ring status`.
-6. **Second-ring diagnostics** - `espnowidentity`, `espnowmeshmetrics`, `espnowworker`,
+6. **Second-ring diagnostics** - `espnowidentity`, `espnowmeshmetrics`,
    `i2chealth`, `i2cmetrics`, `servolist`, `mqttexternalsensors`, `logtier`, `map`,
    `whereami`.
 7. **Sensors** - every live sensor read now has JSON, and `sensors json` is the
@@ -91,8 +101,9 @@ peer-metadata commands date from v0.95.10. Changes after v0.99.98.5 are recorded
 |---|---|
 | `automation system status json` | `{"schema":1,"enabled":<bool>}` |
 | `automation system enable json` / `disable json` | sets, then returns `{"schema":1,"enabled":<bool>}` (the resulting state - toggle + read in one call) |
-| `automation run id=<id>` | success `OK`; failure is now a descriptive `Error: ...` string (e.g. `Error: automation id 6073722 not found (it may have been deleted)`), `ok=false` |
-| `automationlist json` | (pre-existing) raw `{"version":1,"automations":[...]}` document |
+| `automation run id=<id>` | success `OK`; failure is a descriptive `Error: ...` string (e.g. `Error: automation id not found`), `ok=false`. Two cases that are failures too: a run held back by its condition (`Error: Automation not run, its condition is not met (<condition>). Run it again when the condition holds.`) and a run with steps that did not run (`Error: <k> of <n> commands did not run. First reason: <reason of the first such step>`). A queued step `automation run id=<id>` that its target's condition holds back is not logged as a failed step and posts no dropped-action event. A missing `id=` answers `Usage: automation run id=<id>`, also a failure (sec. 1) |
+| `automation trigger id=<id>` | arms the automation's manual delay timer; success `OK: Armed automation id=<id> (fires in <n> ms)`; failure `Error: ...`, `ok=false`, also when automations are switched off (`Error: Automations are switched off. Run 'automation system enable' first.`) or the automation is disabled (`Error: Automation <id> is disabled. Run 'automation enable id=<id>' first.`). A missing `id=` answers `Usage: automation trigger id=<id>`, also a failure (sec. 1) |
+| `automationlist json` | (pre-existing) raw `{"version":1,"automations":[...]}` document; the document is the whole reply. A list over the reply limit answers `Error: The automation list is <n> B, over the <m> B reply limit. Read it on the web Automations page.` |
 
 Note: read the global on/off via `automation system status json`, not from
 `automationlist`. The list is the automation documents; the flag is a system setting.
@@ -118,9 +129,9 @@ Note: read the global on/off via `automation system status json`, not from
 | `voltage` | `{"schema":1,"measured":false,"estimatedCurrentMa","estimatedPowerW","note"}` - estimate only; use `batterystatus json` for measured power |
 | `i2chealth` | `{"schema":1,"deviceCount","devices":[{"address","name","consecutiveErrors","totalErrors","degraded","nack","timeout","busError","adaptiveTimeoutMs"}]}` |
 | `i2cmetrics` | `{"schema":1,"uptimeSec","totalTransactions","mutexTimeouts","busContentions","totalBytes"}` |
-| `blepeers` | `{"schema":1,"peers":[{"name","displayName","connectable","connected","autoReconnect","mac1","mac2"?,"pairedBy"}],"count"}` |
+| `blepeers` | `{"schema":1,"peers":[{"name","displayName","connectable","connected","autoReconnect","mac1","mac2"?,"pairedBy"}],"count"}`. Errors (text, not JSON): `Error: Out of memory. Free memory and retry the command.`, `Error: Peer list too large for the reply. Run blepeers without json.` |
 | `banlist` | `{"schema":1,"bans":[{"ip","reason"}],"count"}` (stub: `available:false`). IP bans are web-only. |
-| `versions` | `{"schema":1,"firmware",...,"idf","arduino"}`: every value a string, keys in this order and present only where the build compiles that part. `firmware`; OTA layouts: `ota_layout`, `updater` (`unavailable` without a factory updater), `ota_manifest_format`, `ota_data_schema`; ESP-NOW: `espnow` (`ESPNOW V1 (1.0)`), `espnow_wire` (the frame version byte, JSON only), `espnow_stack` (`v1`/`v2`, `unknown` until ESP-NOW has started), `espnow_identity_file`, `espnow_peer_file`; automations: `automations_file`; migration tool: `backup_format`; Bluetooth: `ble_console_channel`; phone pipe: `phone_link`, `phone_pipe_channel`, `phone_console_records`; CM5 host control: `cm5_control`; C6 companion: `c6_hosted`, `c6_hosted_qualified`, `c6_bridge_wire`, `c6_bridge_wire_expected` (reported values `unknown` until the companion answers); local STT: `stt_model`; then `idf`, `arduino`. `status json` carries the same keys, without `schema`, as `versions`. Errors: `{"error":"oom"}`, `{"error":"versions too large"}` |
+| `versions` | `{"schema":1,"firmware",...,"idf","arduino"}`: every value a string, keys in this order and present only where the build compiles that part. `firmware`; OTA layouts: `ota_layout`, `updater` (`unavailable` without a factory updater), `ota_manifest_format`, `ota_data_schema`; ESP-NOW: `espnow` (`ESPNOW V1 (1.0)`), `espnow_wire` (the frame version byte, JSON only), `espnow_stack` (`v1`/`v2`, `unknown` until ESP-NOW has started), `espnow_identity_file`, `espnow_peer_file`; automations: `automations_file`; migration tool: `backup_format`; Bluetooth: `ble_console_channel`; phone pipe: `phone_link`, `phone_pipe_channel`, `phone_console_records`; CM5 host control: `cm5_control`; C6 companion: `c6_hosted`, `c6_hosted_qualified`, `c6_bridge_wire`, `c6_bridge_wire_expected` (reported values `unknown` until the companion answers); local STT: `stt_model`; then `idf`, `arduino`. `status json` carries the same keys, without `schema`, as `versions`. Errors (text, not JSON): `Error: Out of memory. Free memory and retry the command.`, `Error: The version list does not fit one reply. Run versions without json.` |
 
 ---
 
@@ -128,15 +139,16 @@ Note: read the global on/off via `automation system status json`, not from
 
 | Command (+`json`) | Reply shape |
 |---|---|
-| `images` (or `images sd`) | `{"schema":1,"location","available","usedBytes","totalBytes","imageCount","images":[{"filename","size"}]}` |
-| `maplist` | `{"schema":1,"maps":["/maps/..."],"count"}` |
+| `images` (or `images sd`) | `{"schema":1,"location","available","usedBytes","totalBytes","imageCount","images":[{"filename","size"}]}`. `usedBytes` and `totalBytes` are 64-bit values: an SD card above 4 GB reports its real size, so do not read them as 32-bit integers |
+| `maplist` | `{"schema":1,"maps":["/maps/..."],"count","truncated"?}`; `"truncated":true` is present only when the device holds more than the 8 maps listed |
 | `miclist` | `{"schema":1,"count","recordings":[{"filename","size"}]}` |
-| `cameravideolist` | `{"schema":1,"count","recordings":[{"filename","size"}]}` |
+| `cameravideolist` | `{"schema":1,"count","recordings":[{"filename","size"}]}`; without an SD card the reply is the text `Error: SD card not available. Insert a card or run sdmount, then retry.` (non-JSON, see sec. 1) |
 | `servolist` | `{"schema":1,"servos":[{"channel","name","minPulse","maxPulse","centerPulse"}],"count"}` |
 | `map` | `{"schema":1,"valid","filename","region","featureCount","fileSize","bounds":{"minLat","minLon","maxLat","maxLon"}}` |
 | `whereami` | `{"schema":1,"valid","road"?,"roadDistanceM"?,"area"?,"areaDistanceM"?}` |
 | `mqttexternalsensors` | `{"schema":1,"sensors":[{"name","value","ageSec"}],"count"}` |
 | **ESP-NOW** | |
+| `espnowstatus` | `{"schema":1,"initialized","channel"?,"channelPref"?,"mac"?,"pairedDevices"?,"lastInitError"?}`. Before the first start of a boot only `initialized:false` (plus `lastInitError` after a failed start). `channel` and `channelPref` (0 = auto, 1-13 = pinned when offline) appear once a start has set up the ESP-NOW state and stay after `closeespnow`; `mac` and `pairedDevices` are present only while `initialized`; `lastInitError` is the reason the last start failed, present only while ESP-NOW is down |
 | `espnowdevices` *(v0.95.10)* | all peers: `{"schema":1,"devices":[{"mac","deviceName","friendlyName","room","zone","tags","stationary","online","lastSeenSec","source"}],"count"}` |
 | `espnowdeviceinfo` *(v0.95.10)* | this device (self): `{"schema":1,"name","friendlyName","room","zone","tags","stationary","meshRole","mac"}` |
 | `espnowrooms` | `{"schema":1,"rooms":[{"room","devices":[{"name","tags","online"}]}],"count"}` |
@@ -145,7 +157,6 @@ Note: read the global on/off via `automation system status json`, not from
 | `espnowsubs` | `{"schema":1,"peers":[{"mac","meshId","subs"}]}` - `subs` is a 32-bit bitmask int |
 | `espnowidentity` | `{"schema":1,"valid","mac","pub","createdAtSec","regenCount"}` |
 | `espnowmeshmetrics` | `{"schema":1,"mode","activePeers","ttl","adaptiveTtl"}` |
-| `espnowworker` (or `espnowworker show`) | `{"schema":1,"enabled","intervalMs","fields":{"heap","rssi","thermal","imu"}}` |
 | `ring status` | `{"schema":1,"connected","name","mtu","rx","upMs","scanFound"}` (no address) |
 | `espnowmeshstatus` / `espnowlist` / `espnowstats` | already JSON (pre-existing) |
 
@@ -225,7 +236,7 @@ field of `sensors json` - that object uses a `valid` flag (and often
 | `thermalread` | envelope + `{"min","avg","max"}` (summary; the 768-px frame is a separate shape) |
 | `micread` | `{"schema":1,"enabled","connected","recording","sampleRate","bitDepth","channels","level"}` |
 | `miclevel` | `{"schema":1,"enabled","level"}` |
-| `cameraread` | camera status JSON (already JSON; returns unconditionally) |
+| `cameraread` | camera status JSON (already JSON, no `json` token needed); when the camera is busy, out of memory or the status does not fit, an `Error: ...` text instead (treat as unavailable, sec. 1) |
 | `temperature`, `voltage` | see sec. 4 |
 
 **(Corrected 2026-07-28 - the examples below previously showed pre-envelope shapes.
@@ -252,7 +263,7 @@ feature is compiled out). Treat accordingly.
 - **Edge data not yet covered** (ask if you need them): `imuactions` (IMU action
   detection), `sensorinfo <name>` (static chip catalog), `sensorlog` (logging status).
 - **Actions / setters / help:** `banuser`, `espnowforget`, `blestream`, `bondstream`,
-  `oledbootmode`, `oleddefaultmode`, `voicehelp`, `g2` toggles, module summaries.
+  `oleddefaultmode`, `g2` toggles, module summaries.
 
 ---
 

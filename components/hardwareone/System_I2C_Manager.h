@@ -151,6 +151,15 @@ enum I2cDeviceType : int {
 
 enum class I2cDeviceRequestAction { Start, Stop };
 
+// How performBusRecovery() ended. Everything but Done left the bus untouched.
+enum class I2cBusRecovery : uint8_t {
+  Done,            // bus torn down, clocked free and begun again
+  NotInitialized,  // the bus was never brought up
+  PinsInvalid,     // the SDA/SCL pin settings do not name a usable pair
+  Busy,            // the bus mutex was not free within 2 s
+  InUse,           // a client (the camera) holds a lease on the bus
+};
+
 struct I2cDeviceRequest {
   I2cDeviceType device;
   unsigned long queuedAt;
@@ -277,7 +286,7 @@ public:
   // Bus recovery — targets a specific bus's mutex + pins + Wire instance.
   // performBusRecovery() defaults to bus 0 for legacy callers; the bus-aware
   // overload is used when the failing device is on bus 1.
-  void performBusRecovery(uint8_t busIdx = 0);
+  I2cBusRecovery performBusRecovery(uint8_t busIdx = 0);
   void checkBusRecoveryNeeded();  // Event-driven recovery check (called when device degrades)
   // True while a bus is inside its cooldown after an error-driven recovery.
   // Guards the automatic (BUS_ERROR) path only — explicit operator-initiated

@@ -413,6 +413,10 @@ static void discardFailedStart() {
   VFS::sdInUseEnd(VIDEO_SD_OWNER);
 }
 
+// Whether the last recorder task saved its clip. Written by the task before
+// it clears s_task; stopVideoRecording reads it once s_task is clear.
+static bool s_lastSaved = false;
+
 static void recordingTask(void* /*arg*/) {
   // gSettings.cameraStreamFps is 1..20; convert to ms per frame for the
   // pacing delay. Fall back to ~10 fps if the setting is somehow zero.
@@ -448,7 +452,7 @@ static void recordingTask(void* /*arg*/) {
     vTaskDelayUntil(&loopStart, pdMS_TO_TICKS(intervalMs));
   }
 
-  (void)finalizeAndClose(recordedOk, millis() - s_startMs);
+  s_lastSaved = finalizeAndClose(recordedOk, millis() - s_startMs);
   videoRecording = false;  // in case we exited via MAX_FRAMES
   cameraSessionEnd(CameraSessionKind::Recording);
   VFS::sdInUseEnd(VIDEO_SD_OWNER);
@@ -457,16 +461,21 @@ static void recordingTask(void* /*arg*/) {
 }
 
 // ── Public API ──────────────────────────────────────────────────────────────
-bool startVideoRecording() {
+bool startVideoRecording(const char** why) {
   STACK_TRACEF("startVideoRecording.enter");
+  // Each refusal names its cause and the next action for the caller's reply.
+  auto refuse = [&](const char* reason) {
+    if (why) *why = reason;
+    return false;
+  };
   SemaphoreHandle_t ctrl = getRecCtrl();
   if (!ctrl) {
     ERROR_CAMERAF("[Video] Cannot create recorder control mutex");
-    return false;
+    return refuse("out of memory for the recorder lock. Free memory and retry.");
   }
   if (xSemaphoreTake(ctrl, pdMS_TO_TICKS(5000)) != pdTRUE) {
     INFO_CAMERA_VIDEOF("Cannot record — recorder control busy");
-    return false;
+    return refuse("the recorder is busy. Retry in a few seconds.");
   }
 
   auto unlock = [&]() {
@@ -477,14 +486,16 @@ bool startVideoRecording() {
     INFO_CAMERA_VIDEOF("Cannot record — camera not enabled");
     STACK_TRACEF("startVideoRecording.camera_disabled_exit");
     unlock();
-    return false;
+    return refuse("camera not enabled. Run opencamera first.");
   }
   // videoRecording OR a still-finalizing task — reject a second start.
   if (videoRecording || s_task) {
     INFO_CAMERA_VIDEOF("Already recording");
     STACK_TRACEF("startVideoRecording.already_recording_exit");
+    const bool active = videoRecording;
     unlock();
-    return false;
+    return refuse(active ? "a recording is already active. Run camerarecord stop first."
+                         : "the previous recording is still being saved. Retry in a few seconds.");
   }
   // Gate on WRITABLE not just mounted — a card can be mounted but have
   // the underlying SD write fail on the actual file create (flaky card,
@@ -496,12 +507,12 @@ bool startVideoRecording() {
   if (!sdWritable) {
     INFO_CAMERA_VIDEOF("Cannot record — SD card not writable");
     unlock();
-    return false;
+    return refuse("SD card not writable. Check sdinfo and retry.");
   }
   if (!ensureVideosFolder()) {
     STACK_TRACEF("startVideoRecording.ensure_folder_failed");
     unlock();
-    return false;
+    return refuse("the videos folder could not be created on the SD card. Check sdinfo and retry.");
   }
   STACK_TRACEF("startVideoRecording.folder_ok");
 
@@ -512,7 +523,7 @@ bool startVideoRecording() {
   if (!VFS::sdInUseBegin(VIDEO_SD_OWNER)) {
     ERROR_STORAGEF("[Video] Cannot register SD use");
     unlock();
-    return false;
+    return refuse("too many features hold the SD card. Stop another recording or log and retry.");
   }
 
   // Route the recording handle through VFS (shared FsLockGuard + permission
@@ -534,7 +545,7 @@ bool startVideoRecording() {
     VFS::noteSdWriteFailure("video recording file create");
     VFS::sdInUseEnd(VIDEO_SD_OWNER);
     unlock();
-    return false;
+    return refuse("the file could not be created on the SD card. Check sdinfo and retry.");
   }
 
   // Allocate index buffer in PSRAM.
@@ -561,7 +572,7 @@ bool startVideoRecording() {
       discardFailedStart();
       VFS::noteSdWriteFailure("video header write");
       unlock();
-      return false;
+      return refuse("the SD card write failed. Check sdinfo and retry.");
     }
   }
 
@@ -571,6 +582,7 @@ bool startVideoRecording() {
   s_maxFrameBytes = 0;
   s_moviPayloadBytes = 0;
   s_startMs = millis();
+  s_lastSaved = false;
   videoRecording = true;
   // The recorder task ends this session when it exits.
   cameraSessionBegin(CameraSessionKind::Recording);
@@ -586,7 +598,7 @@ bool startVideoRecording() {
     discardFailedStart();
     s_task = nullptr;
     unlock();
-    return false;
+    return refuse("out of memory for the recorder task. Free memory and retry.");
   }
 
   INFO_CAMERA_VIDEOF("Recording started: %s", s_path);
@@ -598,24 +610,24 @@ bool startVideoRecording() {
   return true;
 }
 
-void stopVideoRecording() {
+VideoStopResult stopVideoRecording() {
   SemaphoreHandle_t ctrl = getRecCtrl();
   if (!ctrl) {
     // startVideoRecording also refuses to proceed without this mutex, so
     // clearing the task's poll flag is the only safe fallback required here.
     videoRecording = false;
-    return;
+    return VideoStopResult::NotRecording;
   }
   if (xSemaphoreTake(ctrl, pdMS_TO_TICKS(5000)) != pdTRUE) {
     // Still clear the flag so a stuck ctrl can't leave recording orphaned;
     // the task loop polls videoRecording.
     videoRecording = false;
-    return;
+    return VideoStopResult::StillFinishing;
   }
 
   if (!videoRecording && !s_task) {
     xSemaphoreGive(ctrl);
-    return;
+    return VideoStopResult::NotRecording;
   }
   videoRecording = false;
   // Release ctrl before waiting so finalize isn't blocked on a nested
@@ -627,6 +639,8 @@ void stopVideoRecording() {
   while (s_task && waits-- > 0) {
     vTaskDelay(pdMS_TO_TICKS(20));
   }
+  if (s_task) return VideoStopResult::StillFinishing;
+  return s_lastSaved ? VideoStopResult::Saved : VideoStopResult::NotSaved;
 }
 
 // Path + frame count of the most recently finalized recording. Valid until the

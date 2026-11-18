@@ -5,10 +5,16 @@
 #define FAKE_VFS_PROVIDE_VFS_NAMESPACE
 #define FAKE_VFS_LOCK_DOUBLE
 #include <Arduino.h>
+#include <arpa/inet.h>   // inet_pton, inet_ntop: cmd_ban parses the address
+#include <sys/socket.h>  // AF_INET, AF_INET6
+// The shipped builds have IPv6 (CONFIG_LWIP_IPV6=y): the server listens on one
+// dual-stack socket and gives an IPv4 client as ::FFFF:a.b.c.d.
+#define LWIP_IPV6 1
 #include "fake_vfs.h"
 #include <ArduinoJson.h>
 #include "System_PollPause.h"
 #include "System_ConfigLoad.h"
+#include "System_CommandReply.h"  // the shared refusals banListJson returns
 
 #include <atomic>
 #include <cstdarg>
@@ -234,10 +240,8 @@ static void caseOversizeJsonIsAnError() {
   const std::string reason(79, '\x01');
   for (int i = 0; i < 16; ++i) check(banIp(ipv6(i).c_str(), reason.c_str()));
   const char* json = banListJson();
-  JsonDocument doc;
-  check(!deserializeJson(doc, json));           // never a truncated document
-  check(doc["error"].is<const char*>());
-  check(doc["bans"].isNull());
+  check(commandReplyIsFailure(json));           // a refusal the executor reports as failed
+  check(json[0] != '{');                        // never a truncated document
 }
 
 static void caseLookupHoldsTheBanLock() {
@@ -276,10 +280,11 @@ static void caseCommandRepliesOnFailedSave() {
   auto& fs = resetStore(true);
   failBanWrites(fs);
   std::string reply = cmd_ban("10.2.2.2 probe");
-  check(reply == "Error: banned 10.2.2.2, not saved (ends at reboot)");
-  check(isIpBanned("10.2.2.2"));
+  check(reply == "Error: banned ::FFFF:10.2.2.2, not saved (ends at reboot)");
+  check(isIpBanned("::FFFF:10.2.2.2"));
   reply = cmd_ban("10.2.2.2");                 // the retry fails the same way
-  check(reply == "Error: banned 10.2.2.2, not saved (ends at reboot)");
+  check(reply == "Error: banned ::FFFF:10.2.2.2, not saved (ends at reboot)");
+  // kPrevious holds 10.1.1.1 as older firmware stored it: as it was typed.
   reply = cmd_unban("10.1.1.1");
   check(reply == "Error: unban of 10.1.1.1 not saved; the ban stays");
   check(isIpBanned("10.1.1.1"));
@@ -287,7 +292,7 @@ static void caseCommandRepliesOnFailedSave() {
   check(std::string(cmd_unban("10.7.7.7")) == "Error: IP not found in ban list");
 
   fs.faults.clear();
-  check(std::string(cmd_ban("10.2.2.2 probe")) == "Banned 10.2.2.2 — probe");
+  check(std::string(cmd_ban("10.2.2.2 probe")) == "Banned ::FFFF:10.2.2.2 — probe");
   check(std::string(cmd_unban("10.1.1.1")) == "Unbanned 10.1.1.1");
   check(!isIpBanned("10.1.1.1"));
 
@@ -295,7 +300,53 @@ static void caseCommandRepliesOnFailedSave() {
   resetStore(false);
   for (int i = 0; i < 16; ++i) check(banIp(ipv6(i).c_str(), nullptr));
   check(std::string(cmd_ban("10.9.9.9")) == "Error: could not ban IP (ban list full)");
-  check(!isIpBanned("10.9.9.9"));
+  check(!isIpBanned("::FFFF:10.9.9.9") && !isIpBanned("10.9.9.9"));
+
+  // A host name is not an address, and an IPv4 address counts only as a
+  // dotted quad: nothing is banned and the file is not written. The host
+  // parser refuses the short form itself and reads the two forms with a
+  // leading zero, so those two are refused by the comparison with the
+  // canonical text, as the short form is on the device (lwIP reads it).
+  auto& unwritten = resetStore(true);
+  for (const char* notAnIp : {"host.local", "192.168.1", "192.168.01.1", "010.1.1.1"}) {
+    check(std::string(cmd_ban(notAnIp)) == "Error: Not an IP address. Give it as 192.168.1.100.");
+    check(!isIpBanned(notAnIp));
+  }
+  check(!isIpBanned("::FFFF:192.168.1.1") && !isIpBanned("::FFFF:10.1.1.1"));
+  check(unwritten.text(kBanFile) == kPrevious);
+}
+
+// A ban is stored in the text the server has for a client. An IPv4 client of
+// the dual-stack listener is ::FFFF:a.b.c.d, so a dotted quad is stored in
+// that form: the lookup the httpd task runs matches it and the address's web
+// sessions are signed out. unban takes the address in any spelling that parses
+// to the stored one, and still removes an entry stored as it was typed.
+static void caseCommandStoresTheServersForm() {
+  resetStore(true);
+  sessionStorage[2] = SessionEntry{String("sid-two"), String("::FFFF:192.168.1.100")};
+  check(std::string(cmd_ban("192.168.1.100")) == "Banned ::FFFF:192.168.1.100");
+  check(isIpBanned("::FFFF:192.168.1.100"));    // what getClientIp gives for that client
+  check(!isIpBanned("192.168.1.100"));
+  check(revoked.size() == 1 && revoked[0] == 2);
+  check(std::string(cmd_unban("192.168.1.100")) == "Unbanned ::FFFF:192.168.1.100");
+  check(!isIpBanned("::FFFF:192.168.1.100"));
+  check(std::string(cmd_unban("192.168.1.100")) == "Error: IP not found in ban list");
+
+  // IPv6: the stored text is the parser's (lower case on this host, upper case
+  // on lwIP), whatever case was typed, and unban finds it from either.
+  check(std::string(cmd_ban("2001:DB8::1")) == "Banned 2001:db8::1");
+  check(isIpBanned("2001:db8::1"));
+  check(std::string(cmd_unban("2001:DB8:0::1")) == "Unbanned 2001:db8::1");
+  check(!isIpBanned("2001:db8::1"));
+
+  // An entry stored as typed by older firmware (kPrevious: 10.1.1.1) is
+  // removed by the same text, although that text now parses to another form.
+  check(isIpBanned("10.1.1.1") && !isIpBanned("::FFFF:10.1.1.1"));
+  check(std::string(cmd_unban("10.1.1.1")) == "Unbanned 10.1.1.1");
+  check(!isIpBanned("10.1.1.1"));
+  // Text that is no address is still looked up as typed.
+  check(banIp("legacy-entry", nullptr));
+  check(std::string(cmd_unban("legacy-entry")) == "Unbanned legacy-entry");
 }
 
 // ---------------------------------------------------------------------------
@@ -421,6 +472,7 @@ int main(int argc, char** argv) {
       {"lookup-lock", caseLookupHoldsTheBanLock},
       {"kick-under-fence", caseKickUnderSessionFence},
       {"command-replies", caseCommandRepliesOnFailedSave},
+      {"command-stored-form", caseCommandStoresTheServersForm},
       {"damaged-file", caseDamagedFileIsMovedAside},
       {"unread-file", caseUnreadFileIsNeverReplaced},
       {"partial-file", casePartialFileIsKeptBeforeSave},

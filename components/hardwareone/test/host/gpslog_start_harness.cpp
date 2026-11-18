@@ -303,12 +303,22 @@ static void invalidAndGuards() {
 }
 static void acceptedStarts() {
   for (const char* arg : {"", " \t ", "100", "1000", "3600000", " 500 \r\n", "+200", "000300"}) {
-    for (bool alreadyRunning : {false, true}) {
-      context = std::string("accepted interval ") + arg + (alreadyRunning ? " ready" : " pending");
+    for (int gpsState : {0, 1, 2}) {  // 0 start queued now, 1 already open, 2 start already queued
+      const bool alreadyRunning = gpsState == 1;
+      context = std::string("accepted interval ") + arg +
+                (gpsState == 1 ? " ready" : gpsState == 2 ? " queued" : " pending");
       reset();
       gGpsRunning = alreadyRunning;
-      queueReply = alreadyRunning ? "[GPS] Already running" : "[GPS] Start queued; initialization is pending";
-      const std::string queueText = queueReply;
+      // An open GPS or one already queued: opengps answers an Error (the
+      // owner's 2026-11-18 rule) and gpslog reports the GPS state instead.
+      queueReply = gpsState == 1
+          ? "Error: GPS sensor is already running. Stop it first with 'closegps' to restart it."
+          : gpsState == 2
+          ? "Error: GPS sensor is already queued for start (position 1). Check it in a moment with 'sensors json brief'."
+          : "[GPS] Start queued; initialization is pending";
+      const std::string queueText = gpsState == 1 ? "GPS sensor already running"
+                                    : gpsState == 2 ? "GPS sensor start already queued"
+                                                    : queueReply;
       const std::string result = cmd_gpslog(arg);
       String trimmed(arg); trimmed.trim();
       const unsigned expected = trimmed.length() ? static_cast<unsigned>(trimmed.toInt()) : 1000;
@@ -520,12 +530,19 @@ static void admissionFailuresAndAdapter() {
     context = "explicit command adapter";
     reset();
     const String command = String("start \"/logging_captures/logs/literal path.csv\"") + interval;
-    check(std::string(commandStart(command)).rfind("SUCCESS:", 0) == 0, "command start adapter failed");
+    const std::string reply = commandStart(command);
+    // An interval that is not a whole number in range is refused before anything starts.
+    if (*interval && std::strcmp(interval, " 777")) {
+      check(reply == "Error: Interval is not a whole number from 100 to 3600000. "
+                     "Give the poll interval in milliseconds, for example 5000.",
+            "bad explicit interval not refused");
+      check(!gSensorLoggingRunning && gSensorLogIntervalMs == 5000 && resolvedCalls == 0 && persistCalls == 0,
+            "refused interval reached the filesystem or changed the session");
+      continue;
+    }
+    check(reply.rfind("SUCCESS:", 0) == 0, "command start adapter failed");
     check(resolvedPath == "/logging_captures/logs/literal path.csv", "command adapter changed quoted path");
-    const unsigned expected = !std::strcmp(interval, " 99") ? 100 :
-        (!std::strcmp(interval, " 3600001") || !std::strcmp(interval, " -1")) ? 3600000 :
-        !std::strcmp(interval, " 777") ? 777 : 5000;
-    check(gSensorLogIntervalMs == expected, "explicit command parsing/clamping changed");
+    check(gSensorLogIntervalMs == (*interval ? 777u : 5000u), "explicit command interval changed");
   }
   context = "explicit command error precedence";
   reset();

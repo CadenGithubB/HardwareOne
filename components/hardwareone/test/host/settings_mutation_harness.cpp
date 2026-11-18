@@ -131,10 +131,11 @@ static void broadcastPrintf(const char* format, ...) {
   broadcasts.emplace_back(buffer);
 }
 #define BROADCAST_PRINTF(...) broadcastPrintf(__VA_ARGS__)
+static const char* stopReply = "SUCCESS";
 static const char* executeCommandThroughRegistry(const char* command) {
   stopRequests.emplace_back(command);
   effectOrder.emplace_back("stop");
-  return "SUCCESS";
+  return stopReply;
 }
 using SettingsBatchCore = hw1_settings_batch::Core<16>;
 using SettingsBatchOwner = hw1_settings_batch::Owner;
@@ -209,7 +210,7 @@ static void check(bool good, const char* message) {
   }
 }
 static void clearEffects() {
-  events.clear(); broadcasts.clear(); stopRequests.clear();
+  events.clear(); broadcasts.clear(); stopRequests.clear(); stopReply = "SUCCESS";
   effectOrder.clear(); persistedBoolValues.clear();
   oledDirtyCount = writeCalls = retainedRetryMask = 0;
 }
@@ -321,6 +322,21 @@ static void booleanAndStopPolicy() {
     reset(); boolField = true; context = std::string("invalid boolean ") + input;
     check(error(command(5, input)) && boolField, "invalid bool changed state");
     noMutationEffects(); check(stopRequests.empty(), "invalid boolean stopped service");
+  }
+  // A service that is simply stopped: its stop answers the not-running Error
+  // (the owner's 2026-11-18 rule). The save is still a plain success with no
+  // warning; the stop still ran.
+  reset(); boolField = true; context = "disable of a stopped service";
+  stopReply = "Error: ToF sensor is not running. Start it with 'opentof'.";
+  {
+    const std::string reply = command(5, "0");
+    check(!error(reply) && !boolField, "save of a stopped service failed");
+    check(stopRequests == std::vector<std::string>{"closetof"}, "save of a stopped service skipped the stop");
+    bool warned = reply.find("not running") != std::string::npos;
+    for (const auto& line : broadcasts) {
+      if (line.find("Error") != std::string::npos || line.find("not running") != std::string::npos) warned = true;
+    }
+    check(!warned, "save of a stopped service warned about the stop");
   }
   reset(); context = "BLE dual teardown";
   SettingEntry ble = entries[5]; ble.cmdKey = "bleenabled";
@@ -508,7 +524,8 @@ static void oledEnabledCommand() {
     }
   }
   prepareOled("1", false, false, false); oledInitSucceeds = false;
-  check(cmd_oled_enabled("1") == std::string("Error: Failed to initialize OLED display. Check wiring."),
+  check(cmd_oled_enabled("1") == std::string("Error: Failed to initialize OLED display. Check wiring, "
+                                             "then run oledstart. The setting is stored as on."),
         "init failure reply changed");
   check(effectOrder == Effects{"persist", "display init"}, "init failure lost persist/report order");
   prepareOled("1", false, true, false);

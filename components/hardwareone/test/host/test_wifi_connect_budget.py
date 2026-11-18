@@ -124,7 +124,7 @@ def check_boot_callers(component: Path = COMPONENT) -> None:
                     f"{name} supersedes a background boot connect and reports a timeout")
         # Ordering the plain presence check above cannot see.
         power = extract_block(wifi, "const char* cmd_radiopower(")
-        require(power.index("wifiSupersedeBackgroundConnect()") < power.index('"Radio already off."'),
+        require(power.index("wifiSupersedeBackgroundConnect()") < power.index('"Error: The radio is already off. Turn it on with \'radiopower on\'."'),
                 "radiopower off stops the boot connect before deciding the radio is already off")
         connect = extract_block(wifi, "const char* cmd_wificonnect(")
         require(connect.index('"Usage: openwifi [--best') < connect.index("wifiSupersedeBackgroundConnect()"),

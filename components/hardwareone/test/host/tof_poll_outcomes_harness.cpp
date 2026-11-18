@@ -61,7 +61,9 @@ static void assertBusesReleased() {
 }
 void I2cDeviceManager::checkBusRecoveryNeeded() { assertBusesReleased(); ++recoveries; }
 bool I2cDeviceManager::busRecoveryThrottled(uint8_t) const { assertBusesReleased(); return false; }
-void I2cDeviceManager::performBusRecovery(uint8_t) { assertBusesReleased(); ++recoveries; }
+I2cBusRecovery I2cDeviceManager::performBusRecovery(uint8_t) {
+  assertBusesReleased(); ++recoveries; return I2cBusRecovery::Done;
+}
 static void logI2cRecovery(uint8_t, const char*, uint16_t) { assertBusesReleased(); }
 static void logI2cError(uint8_t, const char*, uint8_t, uint16_t, bool) { assertBusesReleased(); }
 

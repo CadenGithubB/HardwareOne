@@ -583,8 +583,7 @@ const char* cmd_webclihistorysize(const String& argsInput) {
   if (valStr.length() == 0) return "Error: invalid arguments — Usage: webclihistorysize <1..100>";
   int v = 0;
   if (!parseIntArg(valStr, v)) return kCommandReplyNotANumber;
-  if (v < 1) v = 1;
-  if (v > 100) v = 100;
+  if (v < 1 || v > 100) return "Error: History size must be 1 to 100 lines. Give a value in that range.";
   setSetting(gSettings.webCliHistorySize, v);
   snprintf(getDebugBuffer(), 1024, "webCliHistorySize set to %d", v);
   return getDebugBuffer();
@@ -599,8 +598,8 @@ const char* cmd_oledclihistorysize(const String& argsInput) {
   if (valStr.length() == 0) return "Error: invalid arguments — Usage: oledclihistorysize <10..100>";
   int v = 0;
   if (!parseIntArg(valStr, v)) return kCommandReplyNotANumber;
-  if (v < 10) v = 10;  // Minimum 10 lines for OLED
-  if (v > 100) v = 100;
+  // Minimum 10 lines for OLED
+  if (v < 10 || v > 100) return "Error: History size must be 10 to 100 lines. Give a value in that range.";
   setSetting(gSettings.oledCliHistorySize, v);
   snprintf(getDebugBuffer(), 1024, "oledCliHistorySize set to %d (requires reboot)", v);
   return getDebugBuffer();
@@ -614,15 +613,22 @@ const char* cmd_outserial(const String& argsInput) {
   bool modeTemp = false;
   // 0/off -> 0, 1/on -> 1, anything else or missing -> -1 (error)
   auto parseBit = [](const String& s) -> int { return parseBoolArg(s); };
+  static const char* const kUsage = "Error: invalid arguments — Usage: outserial <0|1> [persist|temp]";
+  if (ca.count() > 2) return kUsage;
   int v = -1;
-  if (t1.length() && (t1 == "temp" || t1 == "persist")) {
-    modeTemp = (t1 == "temp");
+  if (t1.equalsIgnoreCase("temp") || t1.equalsIgnoreCase("persist")) {
+    modeTemp = t1.equalsIgnoreCase("temp");
     if (t2.length()) v = parseBit(t2);
   } else {
     if (t1.length()) v = parseBit(t1);
-    if (t2.length()) { modeTemp = (t2 == "temp"); }
+    // A second word that is neither mode is refused; read as persist it would
+    // silence the serial console across boots.
+    if (t2.length()) {
+      if (t2.equalsIgnoreCase("temp")) modeTemp = true;
+      else if (!t2.equalsIgnoreCase("persist")) return kUsage;
+    }
   }
-  if (v < 0) return "Error: invalid arguments — Usage: outserial <0|1> [persist|temp]";
+  if (v < 0) return kUsage;
   if (!v) {
     // The drain gates the UART on this bit, so once it clears, the command's
     // own reply can no longer reach a serial console. Print the confirmation
@@ -669,7 +675,7 @@ const CommandEntry settingsCommands[] = {
   { "controls", "Per-module control descriptor (JSON): controls json [module]", false, cmd_controls, "Usage: controls json <module>  (e.g. 'controls json imu'); 'controls json' lists modules" },
 #if ENABLE_WIFI
   // ---- WiFi Network Settings ----
-  { "wifitxpower", "Set WiFi TX power: <dBm>", true, cmd_wifitxpower, "Usage: wifitxpower <dBm>" },
+  { "wifitxpower", "Set WiFi TX power: <dBm>", true, cmd_wifitxpower, "Usage: wifitxpower <2..21>" },
   { "wifiautoreconnect", "Keep hunting for the AP after an unexpected drop: <0|1>", true, cmd_wifiautoreconnect,
     "Usage: wifiautoreconnect <0|1>\n  Separate from wifiautostart: this is about recovering a dropped link, not connecting at boot." },
   
@@ -2260,7 +2266,18 @@ const char* cmd_espnowenabled(const String& argsInput) {
   setSetting(gSettings.espnowEnabled, enabled);
   if (!enabled) {
 #if ENABLE_ESPNOW
-    (void)executeCommandThroughRegistry("closeespnow");
+    // The setting is stored either way. When ESP-NOW was running, or an
+    // earlier stop is still pending, and the stop failed, the reply says so
+    // with the stop's own reason (its first line) instead of "stopped".
+    // Nothing running is a normal save.
+    const bool wasRunning = isEspNowInitialized() || espnowShutdownPending();
+    const String stopReply = executeCommandThroughRegistry("closeespnow");
+    if (wasRunning && commandReplyIsFailure(stopReply.c_str())) {
+      const char* reason = commandReplyReason(stopReply.c_str());
+      snprintf(getDebugBuffer(), 1024, "Error: espnowenabled saved as 0, but ESP-NOW did not stop. %.*s",
+               (int)strcspn(reason, "\n"), reason);
+      return getDebugBuffer();
+    }
 #endif
     snprintf(getDebugBuffer(), 1024, "espnowenabled set to 0 (ESP-NOW stopped)");
   } else {
@@ -3515,6 +3532,13 @@ static void applyMasterEnableDisable(const char* cmdKey) {
     { "systemlogenabled",  "log stop" },
   };
 
+  // The stop always runs (several still clean up a stopped service: closeble
+  // releases a parked worker, closecamera holds the camera off). Its reply is
+  // not read: a stop of a service that is simply not running answers
+  // "Error: <thing> is not running. ..." (the owner's 2026-11-18 rule), and
+  // saving <x>enabled 0 for a stopped service is a normal save, not a failure.
+  // A warning for a stop that really failed would need each service's running
+  // state read before the stop, as cmd_espnowenabled does.
   for (size_t i = 0; i < sizeof(kStops) / sizeof(kStops[0]); ++i) {
     if (strcmp(cmdKey, kStops[i].key) != 0) continue;
     (void)executeCommandThroughRegistry(kStops[i].stopCmd);
@@ -3802,8 +3826,16 @@ static const char* cmd_set_systemlogflags(const String& a) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   const SettingEntry* e = findSettingByCmdKey("systemlogflags");
   if (!e) return "Error: setting not found for this command";
+  String value = a;
+  value.trim();
+  if (value.length() == 0) return handleSettingCommand(e, a);  // query: the live mask stays
+  // Only a mask the parser accepts is stored, and only a stored mask is applied.
+  DebugFlagMask mask = (DebugFlagMask)0;
+  if (!parseSystemLogFlags(value, mask)) {
+    return "Error: Not a hex mask. Give up to 64 hex digits, for example 0x15.";
+  }
   const char* r = handleSettingCommand(e, a);
-  systemLogApplyPersistedFlags();
+  if (!commandReplyIsFailure(r)) systemLogApplyPersistedFlags();
   return r;
 }
 
@@ -3923,7 +3955,8 @@ const size_t settingEditorCommandsCount = sizeof(settingEditorCommands) / sizeof
 // camelCase jsonKey works directly as the command. Scoped to ONE module; the
 // full settings surface across all modules would exceed the return/BLE buffer.
 // Contract: docs/BLE_SENSOR_CONTROLS_CONTRACT.md.
-static void buildModuleControlsJson(JsonDocument& doc, const char* moduleName) {
+// Returns false when no module has that name.
+static bool buildModuleControlsJson(JsonDocument& doc, const char* moduleName) {
   doc["schema"] = 1;
   doc["module"] = moduleName;
   JsonArray entries = doc["entries"].to<JsonArray>();
@@ -3967,9 +4000,9 @@ static void buildModuleControlsJson(JsonDocument& doc, const char* moduleName) {
       if (e->readOnly) o["readOnly"] = true;
       if (e->group)    o["group"]    = e->group;
     }
-    return;  // module found + emitted
+    return true;  // module found + emitted
   }
-  doc["error"] = "unknown module";
+  return false;
 }
 
 // `controls json <module>` -> that module's controls (metadata + current value).
@@ -4004,14 +4037,20 @@ const char* cmd_controls(const String& argsInput) {
     for (size_t mi = 0; mi < modCount; mi++) {
       if (mods[mi] && mods[mi]->name) arr.add(mods[mi]->name);
     }
-  } else {
-    buildModuleControlsJson(doc, module.c_str());
+  } else if (!buildModuleControlsJson(doc, module.c_str())) {
+    return "Error: Unknown module. Run controls json to list the modules.";
   }
+  if (doc.overflowed()) return kCommandReplyOutOfMemory;
 
   static char* controlsJsonBuf = nullptr;
   if (!controlsJsonBuf) controlsJsonBuf = (char*)ps_alloc(4096, AllocPref::PreferPsram, "controls.json");
-  if (!controlsJsonBuf) return "{\"error\":\"oom\"}";
-  serializeJson(doc, controlsJsonBuf, 4096);
+  if (!controlsJsonBuf) return kCommandReplyOutOfMemory;
+  // serializeJson cuts the text off in silence and leaves a full buffer
+  // without a terminator, so a list that does not fit is refused.
+  const size_t len = serializeJson(doc, controlsJsonBuf, 4096);
+  if (len == 0 || len >= 4096 - 1) {
+    return "Error: The control list of this module does not fit one reply. Use the web settings page for it.";
+  }
   return controlsJsonBuf;
 }
 

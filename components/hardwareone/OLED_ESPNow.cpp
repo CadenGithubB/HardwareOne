@@ -131,8 +131,9 @@ static void oledEspNowOpenRemoteFormWith(const String& command) {
 // `espnowremote` acknowledges a command it handed to the radio with the request
 // id the peer's answer will carry: the reply ends "(match reqId <n>)", or is
 // {"schema":1,"ok":true,"reqId":<n>} when the typed command holds a `json`
-// word. Several of its refusals do not lead with "Error", so the executor
-// reports them as done; the id is what says a command left this device.
+// word. Its refusals lead with "Error", or with "Usage:" for too few
+// arguments (a JSON one says "ok":false); the id is the proof that a command
+// left this device.
 static bool oledEspNowRemoteAcknowledged(const char* reply) {
   if (!reply) return false;
   if (reply[0] == '{') return commandReplyJsonOk(reply) && strstr(reply, "\"reqId\":") != nullptr;
@@ -1172,6 +1173,7 @@ bool oledEspNowHandleInput(int deltaX, int deltaY, uint32_t newlyPressed) {
           if (memcmp(sRoomDevices[sel].mac, zeroMac, 6) != 0) {
             memcpy(gOledEspNowState.selectedDeviceMac, sRoomDevices[sel].mac, 6);
             gOledEspNowState.selectedDeviceName = sRoomDevices[sel].name;
+            gOledEspNowState.textMessageBuffer = "";  // an unsent message was for the previous device
             gOledEspNowState.currentView = ESPNOW_VIEW_DEVICE_DETAIL;
             gOledEspNowState.needsRefresh = true;
             oledEspNowRefreshMessages();
@@ -1322,8 +1324,8 @@ bool oledEspNowHandleInput(int deltaX, int deltaY, uint32_t newlyPressed) {
         // A button: Open text keyboard
         if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
           gOledEspNowState.currentView = ESPNOW_VIEW_TEXT_KEYBOARD;
-          gOledEspNowState.textMessageBuffer = "";
-          oledKeyboardInit("Send Message:", "", 128,
+          // A message whose send failed is offered again; a sent one was cleared.
+          oledKeyboardInit("Send Message:", gOledEspNowState.textMessageBuffer.c_str(), 128,
                            OledKeyboardDictationPolicy::ALLOW_PLAINTEXT);
           return true;
         }
@@ -1442,6 +1444,7 @@ void oledEspNowSelectDevice() {
   EspNowDevice* device = (EspNowDevice*)selected->userData;
   memcpy(gOledEspNowState.selectedDeviceMac, device->mac, 6);
   gOledEspNowState.selectedDeviceName = String(device->name);
+  gOledEspNowState.textMessageBuffer = "";  // an unsent message was for the previous device
   
   // Switch to device detail view
   gOledEspNowState.currentView = ESPNOW_VIEW_DEVICE_DETAIL;
@@ -1976,11 +1979,20 @@ void oledEspNowSendTextMessage() {
   char cmdBuf[256];
   snprintf(cmdBuf, sizeof(cmdBuf), "espnowsend json %s %s", macStr, gOledEspNowState.textMessageBuffer.c_str());
   char resp[96];
-  if (executeOledCommandWithResult(cmdBuf, resp, sizeof(resp))) {
-    const char* p = strstr(resp, "\"msgId\":");  // cheap strstr — avoids a JSON parse
-    if (p && (uint32_t)strtoul(p + 8, nullptr, 10) != 0) {
-      oledMarkDirtyUntil(millis() + 13000);
-    }
+  const bool sent = executeOledCommandWithResult(cmdBuf, resp, sizeof(resp)) &&
+                    !commandReplyJsonFailed(resp);
+  if (!sent) {
+    // Nothing was stored in the history. Say so and keep the typed message for
+    // the next try; a structured refusal gets the fixed text.
+    char text[oled_message::kMessageBytes];
+    oledCommandReplyText(false, resp[0] == '{' ? "" : resp, nullptr, "Send failed",
+                         text, sizeof(text));
+    oledToastShow(text, oled_message::kErrorDurationMs, OledUiIcon::ERROR);
+    return;
+  }
+  const char* p = strstr(resp, "\"msgId\":");  // cheap strstr — avoids a JSON parse
+  if (p && (uint32_t)strtoul(p + 8, nullptr, 10) != 0) {
+    oledMarkDirtyUntil(millis() + 13000);
   }
 
   // Clear buffer
@@ -1993,8 +2005,8 @@ void oledEspNowSendTextMessage() {
 // Hand the form to `espnowremote` and show its verdict. Returns false only
 // when a field is still empty: nothing was sent and the form stays as typed.
 // Otherwise the form is scrubbed, whether the command left or was refused; the
-// peer's own answer (its result, or "Auth failed") arrives later as a row of
-// the conversation.
+// peer's own answer (its result, or a refusal such as "Error: Login failed.
+// ...") arrives later as a row of the conversation.
 bool oledEspNowSendRemoteCommand() {
   if (!gEspNow) return true;
   
@@ -2028,10 +2040,13 @@ bool oledEspNowSendRemoteCommand() {
   volatile char* vcmd = cmdBuf;
   for (size_t i = 0; i < sizeof(cmdBuf); i++) vcmd[i] = 0;
 
-  // The toast box fits ~17 columns: two fixed strings, as for the other owner
-  // commands of this screen.
+  // A refusal shows its reason, as for the other owner commands of this
+  // screen; a reply without one (lost, structured, usage) gets the fixed text.
   if (!executed || !oledEspNowRemoteAcknowledged(reply)) {
-    oledToastShow(commandReplyIsAdminRefusal(reply) ? "Admin required" : "Remote not sent", 2500);
+    char text[oled_message::kMessageBytes];
+    oledCommandReplyText(false, commandReplyIsError(reply) ? reply : "", nullptr,
+                         "Remote not sent", text, sizeof(text));
+    oledToastShow(text, oled_message::kErrorDurationMs, OledUiIcon::ERROR);
   }
 
   // Clear form (scrubbing, not just truncating)

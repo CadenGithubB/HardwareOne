@@ -160,7 +160,7 @@ bool rtcWriteDateTime(const RtcDateTime* dt) {
 float rtcReadTemperature() {
   uint8_t buffer[2];
   if (!rtcReadRegisters(DS3231_REG_TEMP_MSB, buffer, 2)) {
-    return -999.0f;
+    return kRtcTemperatureUnavailable;
   }
   
   // Temperature is in 0.25°C resolution
@@ -239,14 +239,16 @@ bool rtcEarlyBootSync() {
   return true;
 }
 
-bool rtcSyncToSystem() {
+bool rtcSyncToSystem(const char** whyNot) {
   RtcDateTime dt;
   if (!rtcReadDateTime(&dt)) {
-    broadcastOutput("[RTC] Failed to read RTC for sync");
+    if (whyNot) *whyNot = "Error: [RTC] Could not read the RTC. Check wiring and retry.";
+    else broadcastOutput("[RTC] Failed to read RTC for sync");
     return false;
   }
   if (!rtcDateTimePlausible(&dt)) {
-    broadcastOutput("[RTC] RTC time implausible (dead battery?) — not adopting");
+    if (whyNot) *whyNot = "Error: [RTC] RTC time is implausible (dead battery?). Set it with 'rtcset', or with 'rtcsync from' once the system clock is right.";
+    else broadcastOutput("[RTC] RTC time implausible (dead battery?) — not adopting");
     return false;
   }
 
@@ -260,7 +262,7 @@ bool rtcSyncToSystem() {
   return true;
 }
 
-bool rtcSyncFromSystem() {
+bool rtcSyncFromSystem(const char** whyNot) {
   time_t now;
   time(&now);
   struct tm timeinfo;
@@ -274,9 +276,19 @@ bool rtcSyncFromSystem() {
   dt.minute = timeinfo.tm_min;
   dt.second = timeinfo.tm_sec;
   dt.dayOfWeek = timeinfo.tm_wday + 1;  // tm_wday is 0-6, RTC uses 1-7
-  
+
+  // A system clock that was never set still counts from 1970. The chip keeps
+  // two year digits, so that year would be stored as a 20xx year the boot code
+  // adopts. The same gate as for reading the chip, and the range rtcset takes.
+  if (!rtcDateTimePlausible(&dt)) {
+    if (whyNot) *whyNot = "Error: [RTC] System time is not set, so the RTC was not written. Set the RTC with 'rtcset', or sync the clock over the network and retry.";
+    else broadcastOutput("[RTC] System time not set, RTC not written");
+    return false;
+  }
+
   if (!rtcWriteDateTime(&dt)) {
-    broadcastOutput("[RTC] Failed to write system time to RTC");
+    if (whyNot) *whyNot = "Error: [RTC] Could not write the RTC. Check wiring and retry.";
+    else broadcastOutput("[RTC] Failed to write system time to RTC");
     return false;
   }
   
@@ -658,8 +670,13 @@ const char* cmd_rtc(const String& argsInput) {
       Clock::formatTzOffsetLabel(tzBuf, sizeof(tzBuf));
       response = "[RTC] " + rtcDateTimeToString(&local);
       char tempBuf[64];
-      snprintf(tempBuf, sizeof(tempBuf), " %s | Temp: %.1f°C | Unix: %lu",
-               tzBuf, temp, (unsigned long)rtcToUnixTime(&utc));
+      if (temp == kRtcTemperatureUnavailable) {
+        snprintf(tempBuf, sizeof(tempBuf), " %s | Temp: n/a | Unix: %lu",
+                 tzBuf, (unsigned long)rtcToUnixTime(&utc));
+      } else {
+        snprintf(tempBuf, sizeof(tempBuf), " %s | Temp: %.1f°C | Unix: %lu",
+                 tzBuf, temp, (unsigned long)rtcToUnixTime(&utc));
+      }
       response += tempBuf;
     } else {
       response = "Error: [RTC] Failed to read time";
@@ -673,6 +690,7 @@ const char* cmd_rtc(const String& argsInput) {
       return "Error: [RTC] Not connected";
     }
     float temp = rtcReadTemperature();
+    if (temp == kRtcTemperatureUnavailable) return "Error: [RTC] Temperature read failed. Check wiring and retry.";
     char tempBuf[32];
     snprintf(tempBuf, sizeof(tempBuf), "[RTC] Temperature: %.2f°C", temp);
     response = tempBuf;
@@ -696,9 +714,11 @@ const char* cmd_rtcset(const String& argsInput) {
   String arg = argsInput;
   arg.trim();
 
-  // Parse: YYYY-MM-DD HH:MM:SS or unix timestamp
+  // Parse: YYYY-MM-DD HH:MM:SS or unix timestamp. The chip keeps UTC, so the
+  // typed date and time are taken as UTC. Only 2020..2099 is accepted, the
+  // years the boot code adopts from the chip (rtcDateTimePlausible).
   if (arg.length() == 0) {
-    return "Error: invalid arguments — Usage: rtcset YYYY-MM-DD HH:MM:SS  or  rtcset <unix_timestamp>";
+    return "Error: invalid arguments — Usage: rtcset YYYY-MM-DD HH:MM:SS (UTC)  or  rtcset <unix_timestamp>";
   }
   
   RtcDateTime dt;
@@ -713,17 +733,37 @@ const char* cmd_rtcset(const String& argsInput) {
   }
   
   if (isUnix) {
+    // All digits, so the only way this fails is the range.
     uint32_t unixTime = 0;
-    if (!parseIntArg(arg, unixTime)) return kCommandReplyNotANumber;
+    if (!parseIntArg(arg, 1577836800LL, 4102444799LL, unixTime)) {
+      return "Error: [RTC] Timestamp out of range. Use a Unix time from 1577836800 (year 2020) to 4102444799 (year 2099).";
+    }
     unixTimeToRtc(unixTime, &dt);
   } else {
-    // Parse YYYY-MM-DD HH:MM:SS
-    int year, month, day, hour, minute, second;
-    if (sscanf(arg.c_str(), "%d-%d-%d %d:%d:%d", 
-               &year, &month, &day, &hour, &minute, &second) != 6) {
+    // Exactly YYYY-MM-DD HH:MM:SS: digits everywhere but the five separators,
+    // nothing before or after.
+    static const char kShape[] = "dddd-dd-dd dd:dd:dd";
+    bool shapeOk = (arg.length() == sizeof(kShape) - 1);
+    for (size_t i = 0; shapeOk && i < sizeof(kShape) - 1; i++) {
+      shapeOk = (kShape[i] == 'd') ? isDigit(arg[i]) : (arg[i] == kShape[i]);
+    }
+    if (!shapeOk) {
       return "Error: [RTC] Invalid format. Use: YYYY-MM-DD HH:MM:SS";
     }
-    
+    auto twoDigits = [&arg](unsigned int at) { return (arg[at] - '0') * 10 + (arg[at + 1] - '0'); };
+    const int year = twoDigits(0) * 100 + twoDigits(2);
+    const int month = twoDigits(5);
+    const int day = twoDigits(8);
+    const int hour = twoDigits(11);
+    const int minute = twoDigits(14);
+    const int second = twoDigits(17);
+    // Month before day: rtcDaysInMonth() indexes its table by the month.
+    if (year < 2020 || year > 2099 || month < 1 || month > 12 ||
+        day < 1 || day > rtcDaysInMonth(month, year) ||
+        hour > 23 || minute > 59 || second > 59) {
+      return "Error: [RTC] Date or time out of range. Use YYYY-MM-DD HH:MM:SS (UTC) with a year from 2020 to 2099.";
+    }
+
     dt.year = year;
     dt.month = month;
     dt.day = day;
@@ -741,7 +781,7 @@ const char* cmd_rtcset(const String& argsInput) {
   }
   
   if (rtcWriteDateTime(&dt)) {
-    response = "[RTC] Time set to: " + rtcDateTimeToString(&dt);
+    response = "[RTC] Time set to: " + rtcDateTimeToString(&dt) + " UTC";
     // Mark RTC as calibrated so future boots trust RTC first
     if (!gSettings.rtcTimeHasBeenSet) {
       setSetting(gSettings.rtcTimeHasBeenSet, true);
@@ -766,22 +806,24 @@ const char* cmd_rtcsync(const String& argsInput) {
 
   if (arg == "tosystem" || arg == "to" || arg.length() == 0) {
     // RTC -> System (default)
-    if (rtcSyncToSystem()) {
+    const char* whyNot = "Error: [RTC] Sync failed";
+    if (rtcSyncToSystem(&whyNot)) {
       return "[RTC] System time updated from RTC";
     }
-    return "Error: [RTC] Sync failed";
+    return whyNot;
   }
   
   if (arg == "fromsystem" || arg == "from") {
     // System -> RTC
-    if (rtcSyncFromSystem()) {
+    const char* whyNot = "Error: [RTC] Sync failed";
+    if (rtcSyncFromSystem(&whyNot)) {
       // Mark RTC as calibrated so future boots trust RTC first
       if (!gSettings.rtcTimeHasBeenSet) {
         setSetting(gSettings.rtcTimeHasBeenSet, true);
       }
       return "[RTC] RTC updated from system time";
     }
-    return "Error: [RTC] Sync failed";
+    return whyNot;
   }
 
   return "Error: invalid arguments — Usage: rtcsync [to|from]  (to=RTC->system, from=system->RTC)";
@@ -794,8 +836,7 @@ const char* cmd_rtcstart(const String& argsInput) {
 
 const char* cmd_rtcstop(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!requestSensorStop(I2C_DEVICE_RTC)) return "Error: [RTC] Could not queue stop";
-  return "[RTC] Stop requested; cleanup will complete asynchronously";
+  return cmd_sensorstop_queued(I2C_DEVICE_RTC, "RTC");
 }
 
 // ============================================================================
@@ -907,7 +948,7 @@ const CommandEntry rtcCommands[] = {
   { "openrtc",  "Start DS3231 RTC sensor.",                    false, cmd_rtcstart },
   { "closertc", "Stop DS3231 RTC sensor.",                     false, cmd_rtcstop },
   { "rtcread",   "Read RTC status [status|temp]",               false, cmd_rtc,      "Usage: rtcread [status|temp] [json]" },
-  { "rtcset",   "Set RTC time: <datetime|timestamp>",          true,  cmd_rtcset,   "Usage: rtcset YYYY-MM-DD HH:MM:SS  or  rtcset <unix_timestamp>" },
+  { "rtcset",   "Set RTC time: <datetime|timestamp>",          true,  cmd_rtcset,   "Usage: rtcset YYYY-MM-DD HH:MM:SS (UTC)  or  rtcset <unix_timestamp>" },
   { "rtcsync",  "Sync time: [to|from]",                        true,  cmd_rtcsync,  "Usage: rtcsync [to|from] (to=RTC->system, from=system->RTC)" },
   
   // Auto-start

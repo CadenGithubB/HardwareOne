@@ -1582,6 +1582,7 @@ AuthContext systemAuth(const char* scope, const char* reason) {
 // ============================================================================
 
 static const char* cmd_sdmount(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
   EXT_RAM_BSS_ATTR static char buf[128];
   
 #if !ENABLE_SD_CARD
@@ -1589,7 +1590,7 @@ static const char* cmd_sdmount(const String& argsInput) {
   return buf;
 #else
   if (VFS::isSdAvailable()) {
-    snprintf(buf, sizeof(buf), "SD card already mounted at /sd");
+    snprintf(buf, sizeof(buf), "Error: SD card is already mounted at /sd. Unmount it first with 'sdunmount' to remount it.");
     return buf;
   }
   if (const char* owner = VFS::sdInUseOwner()) {
@@ -1613,6 +1614,7 @@ static const char* cmd_sdmount(const String& argsInput) {
 }
 
 static const char* cmd_sdunmount(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
   EXT_RAM_BSS_ATTR static char buf[128];
   
 #if !ENABLE_SD_CARD
@@ -1624,16 +1626,24 @@ static const char* cmd_sdunmount(const String& argsInput) {
     return buf;
   }
   // Release a stale mount too (e.g. an accidentally removed SDMMC card).
+  // unmountSd() also returns false when nothing was mounted, so the state
+  // before the call tells that case from a driver that did not let go.
+  const bool wasMounted = VFS::gSdMounted;
   if (VFS::unmountSd()) {
     snprintf(buf, sizeof(buf), "SD card unmounted successfully");
+  } else if (const char* owner = VFS::sdInUseOwner()) {
+    snprintf(buf, sizeof(buf), "Error: SD card in use by %s; stop it first", owner);
+  } else if (!wasMounted) {
+    snprintf(buf, sizeof(buf), "Error: SD card is not mounted. Mount it with 'sdmount'.");
   } else {
-    snprintf(buf, sizeof(buf), "Error: Failed to unmount SD card");
+    snprintf(buf, sizeof(buf), "Error: SD driver did not release the card. Restart the device before removing the card.");
   }
   return buf;
 #endif
 }
 
 static const char* cmd_sdformat(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
   EXT_RAM_BSS_ATTR static char buf[256];
   
 #if !ENABLE_SD_CARD
@@ -1644,10 +1654,7 @@ static const char* cmd_sdformat(const String& argsInput) {
   String confirmation = argsInput;
   confirmation.trim();
   if (confirmation != "confirm") {
-    snprintf(buf, sizeof(buf), 
-      "WARNING: This will ERASE ALL DATA on the SD card!\n"
-      "Run 'sdformat confirm' to proceed.");
-    return buf;
+    return "Error: SD card not formatted. This erases ALL data on the card: run 'sdformat confirm' to proceed.";
   }
   if (const char* owner = VFS::sdInUseOwner()) {
     snprintf(buf, sizeof(buf), "Error: SD card in use by %s; stop it first", owner);
@@ -1669,6 +1676,7 @@ static const char* cmd_sdformat(const String& argsInput) {
 }
 
 static const char* cmd_sdinfo(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
   EXT_RAM_BSS_ATTR static char buf[512];
   const bool wantJson = argWantsJson(argsInput);
 
@@ -1790,6 +1798,7 @@ static uint8_t testSdPins(int cs, int sck, int miso, int mosi, char* buf, int* p
 
 // Transport-aware diagnostics; SDMMC mode never resets the C6 or LCD bus.
 static const char* cmd_sddiag(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
   PSRAM_STATIC_BUF(buf, 4096);
   int pos = 0;
   

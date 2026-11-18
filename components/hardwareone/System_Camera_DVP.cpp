@@ -3,6 +3,7 @@
 #include "System_TaskUtils.h"
 #include "System_Events.h"
 #include "System_Filesystem.h"
+#include "System_VFS.h"
 #include <esp_attr.h>
 #include "System_Camera_Video.h"
 #include "System_BuildConfig.h"
@@ -280,10 +281,16 @@ uint8_t* captureFrameAtResolution(CameraFrameSize size, int quality, size_t* out
 }
 uint8_t* captureTinyFrame(size_t* outLen) { return captureFrameAtResolution(CameraFrameSize::QQVGA, 40, outLen); }
 
+// What buildCameraStatusJson() returns when it has no status to give. The web
+// status callers pass these on as JSON; cameraread answers with an error.
+static const char kCameraStatusBusyJson[] = "{\"error\":\"Camera busy\"}";
+static const char kCameraStatusNoBufferJson[] = "{}";
+static const char kCameraStatusOverflowJson[] = "{\"error\":\"Camera status overflow\"}";
+
 const char* buildCameraStatusJson() {
-  if (!lockCameraMutex(15000)) return "{\"error\":\"Camera busy\"}";
+  if (!lockCameraMutex(15000)) return kCameraStatusBusyJson;
   if (!cameraStatusBuffer) cameraStatusBuffer = static_cast<char*>(ps_alloc(kStatusBufSize, AllocPref::PreferPsram, "camera.status.json"));
-  if (!cameraStatusBuffer) { unlockCameraMutex(); return "{}"; }
+  if (!cameraStatusBuffer) { unlockCameraMutex(); return kCameraStatusNoBufferJson; }
   const auto caps = cameraBackend().capabilities();
   const auto state = cameraBackend().info();
   PSRAM_JSON_DOC(doc);
@@ -325,7 +332,7 @@ const char* buildCameraStatusJson() {
     if (gCameraRunning && cameraBackend().getControl(c, value)) values[cameraControlName(c)] = value;
   }
   if (doc.overflowed() || measureJson(doc) >= kStatusBufSize) {
-    unlockCameraMutex(); return "{\"error\":\"Camera status overflow\"}";
+    unlockCameraMutex(); return kCameraStatusOverflowJson;
   }
   serializeJson(doc, cameraStatusBuffer, kStatusBufSize);
   unlockCameraMutex();
@@ -778,7 +785,12 @@ bool cameraPowerRequestRestartSync(uint32_t waitMs) {
 // Command handlers
 const char* cmd_camera(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  return buildCameraStatusJson();
+  const char* status = buildCameraStatusJson();
+  if (status == kCameraStatusBusyJson) return "Error: Camera busy. Retry cameraread in a few seconds.";
+  if (status == kCameraStatusNoBufferJson) return kCommandReplyOutOfMemory;
+  if (status == kCameraStatusOverflowJson)
+    return "Error: Camera status does not fit its buffer. Report this with the cameradump output.";
+  return status;
 }
 
 static const char* const kCameraDisabledError =
@@ -800,8 +812,18 @@ static bool cameraAsyncForm(const String& argsInput) {
 
 static const char* cameraPowerAsyncCommand(bool start) {
   if (start && !gSettings.cameraEnabled) return kCameraDisabledError;
-  if (start ? cameraPowerRequestStartAsync() : cameraPowerRequestStopAsync())
-    return start ? "Camera start queued" : "Camera stop queued";
+  // Same verdicts as the sync forms (the owner's 2026-11-18 rule). A stop is
+  // still queued when the camera is not running: it holds the camera off and
+  // ends a failed start that kept its resources.
+  if (start && gCameraRunning) {
+    return "Error: Camera is already running. Stop it first with 'closecamera' to restart it.";
+  }
+  const bool wasRunning = gCameraRunning;
+  if (start ? cameraPowerRequestStartAsync() : cameraPowerRequestStopAsync()) {
+    if (start) return "Camera start queued";
+    return wasRunning ? "Camera stop queued"
+                      : "Error: Camera is not running. Start it with 'opencamera'.";
+  }
   return start ? "Error: camera start not queued (camera power worker unavailable)"
                : "Error: camera stop not queued (camera power worker unavailable)";
 }
@@ -826,8 +848,15 @@ static const char* cameraCommandFailure(const char* fallback) {
 const char* cmd_camerastart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (cameraAsyncForm(argsInput)) return cameraPowerAsyncCommand(true);
+  // "async" is the only argument: anything else is refused, not ignored.
+  String extra = argsInput;
+  extra.trim();
+  if (!(extra == "")) return "Error: Unknown argument. Use opencamera or opencamera async.";
   if (!gSettings.cameraEnabled) {
     return kCameraDisabledError;
+  }
+  if (gCameraRunning) {
+    return "Error: Camera is already running. Stop it first with 'closecamera' to restart it.";
   }
   if (cameraPowerRequestStartSync(60000)) {
     return "Camera started successfully";
@@ -838,9 +867,16 @@ const char* cmd_camerastart(const String& argsInput) {
 const char* cmd_camerastop(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (cameraAsyncForm(argsInput)) return cameraPowerAsyncCommand(false);
-  return cameraPowerRequestStopSync(30000)
-             ? "Camera stopped"
-             : "Error: Camera stop failed or timed out";
+  String extra = argsInput;
+  extra.trim();
+  if (!(extra == "")) return "Error: Unknown argument. Use closecamera or closecamera async.";
+  // The stop still runs when the camera is not running: it holds the camera
+  // off and ends a failed start that kept its resources. The reply is the
+  // not-running Error then (the owner's 2026-11-18 rule).
+  const bool wasRunning = gCameraRunning;
+  if (!cameraPowerRequestStopSync(30000)) return "Error: Camera stop failed or timed out";
+  return wasRunning ? "Camera stopped"
+                    : "Error: Camera is not running. Start it with 'opencamera'.";
 }
 
 const char* cmd_cameracapture(const String& argsInput) {
@@ -867,21 +903,40 @@ static const char* applyCameraResolutionSetting(CameraFrameSize size) {
   if (!cameraSupportsResolution(size)) return "Error: Resolution unsupported by this camera backend; see cameraread";
   // A recording has one fixed geometry in its AVI header. Finish it before a
   // live resolution change, without waiting for its task under the camera lock.
-  if (videoRecording) stopVideoRecording();
-  if (!lockCameraMutex(15000)) return "Error: Camera busy; resolution not saved";
+  const bool stoppedRecording = videoRecording;
+  const char* recordingNote = "";
+  if (stoppedRecording) {
+    switch (stopVideoRecording()) {
+      case VideoStopResult::NotSaved:
+        recordingNote = " The video recording was stopped but not saved (SD write failed); check sdinfo.";
+        break;
+      case VideoStopResult::StillFinishing:
+        recordingNote = " The video recording is still being saved; run cameravideolist in a few seconds.";
+        break;
+      default:
+        recordingNote = " The video recording was stopped; see cameravideolist.";
+        break;
+    }
+  }
+  if (!lockCameraMutex(15000)) {
+    return stoppedRecording ? "Error: Camera busy; resolution not saved. The video recording was stopped."
+                            : "Error: Camera busy; resolution not saved";
+  }
   const bool wasRunning = gCameraRunning;
   if (wasRunning && !setCameraResolution(size)) {
     unlockCameraMutex();
-    return "Error: Failed to apply resolution; setting not saved";
+    return stoppedRecording ? "Error: Failed to apply resolution; setting not saved. The video recording was stopped."
+                            : "Error: Failed to apply resolution; setting not saved";
   }
   setSetting(gSettings.cameraFramesize, int(size));
   // Live streams keep running and pick up the new size with their next frame.
   const auto* dims = cameraFrameSizeInfo(size);
-  EXT_RAM_BSS_ATTR static char result[160];
-  snprintf(result, sizeof(result), "Resolution set to %ux%u (saved). %s",
+  EXT_RAM_BSS_ATTR static char result[192];
+  snprintf(result, sizeof(result), "Resolution set to %ux%u (saved). %s%s",
            unsigned(wasRunning ? cameraWidth : dims->width),
            unsigned(wasRunning ? cameraHeight : dims->height),
-           wasRunning ? "Applied live." : "Will apply on next camera start.");
+           wasRunning ? "Applied live." : "Will apply on next camera start.",
+           recordingNote);
   unlockCameraMutex();
   return result;
 }
@@ -1083,10 +1138,34 @@ const char* cmd_cameraagcgain(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   return cameraManualCommand(argsInput, CameraControl::AutoGain, CameraControl::Gain, 30);
 }
+// One camerareg value: hexadecimal digits, with or without 0x, up to 0xFFFF.
+// A token without 0x is hexadecimal too, so 3824 names register 0x3824.
+static bool parseCameraRegisterValue(const String& token, unsigned& value) {
+  const char* p = token.c_str();
+  if (strlen(p) != token.length()) return false;
+  if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) p += 2;
+  if (!*p) return false;
+  unsigned parsed = 0;
+  for (; *p; ++p) {
+    unsigned digit;
+    if (*p >= '0' && *p <= '9') digit = unsigned(*p - '0');
+    else if (*p >= 'a' && *p <= 'f') digit = unsigned(*p - 'a') + 10;
+    else if (*p >= 'A' && *p <= 'F') digit = unsigned(*p - 'A') + 10;
+    else return false;
+    parsed = parsed * 16 + digit;
+    if (parsed > 0xFFFF) return false;
+  }
+  value = parsed;
+  return true;
+}
 const char* cmd_camerareg(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  unsigned address, mask, value;
-  if (sscanf(argsInput.c_str(), "%x %x %x", &address, &mask, &value) != 3) return "Error: Usage: camerareg <address> <mask> <value>";
+  unsigned address = 0, mask = 0, value = 0;
+  CommandArgs a(argsInput);
+  if (a.count() != 3 || !parseCameraRegisterValue(a.arg(0), address) ||
+      !parseCameraRegisterValue(a.arg(1), mask) || !parseCameraRegisterValue(a.arg(2), value)) {
+    return "Error: camerareg needs three hexadecimal values up to 0xFFFF. Example: camerareg 0x3824 0x1f 0x04.";
+  }
   if (!lockCameraMutex(15000)) return "Error: Camera busy";
   bool ok = gCameraRunning && cameraBackend().capabilities().registerAccess && cameraBackend().writeRegister && cameraBackend().writeRegister(address, mask, value);
   unlockCameraMutex();
@@ -1111,8 +1190,12 @@ const char* cmd_camerafx(const String& argsInput) {
     snprintf(result, sizeof(result), "camerafx: bri=%d con=%d sat=%d. Usage: camerafx <bri> <con> <sat>", bri, con, sat);
     return result;
   }
-  int bri, con, sat;
-  if (sscanf(arg.c_str(), "%d %d %d", &bri, &con, &sat) != 3 || bri < -2 || bri > 2 || con < -2 || con > 2 || sat < -2 || sat > 2) return "Error: Each value must be -2..2";
+  int bri = 0, con = 0, sat = 0;
+  CommandArgs a(arg);
+  if (a.count() != 3 || !parseIntArg(a.arg(0), -2, 2, bri) || !parseIntArg(a.arg(1), -2, 2, con) ||
+      !parseIntArg(a.arg(2), -2, 2, sat)) {
+    return "Error: camerafx needs three whole numbers from -2 to 2. Example: camerafx 1 0 -1.";
+  }
   if (!lockCameraMutex(15000)) return "Error: Camera busy";
   bool ok = setCameraControl(CameraControl::Contrast, con) && setCameraControl(CameraControl::Brightness, bri) && setCameraControl(CameraControl::Saturation, sat);
   if (ok) {
@@ -1235,7 +1318,7 @@ const char* cmd_cameramaxstoredimages(const String& argsInput) {
   }
   int val = 0;
   if (!parseIntArg(valStr, val)) return kCommandReplyNotANumber;
-  if (val < 0 || val > 1000) return "Error: cameraMaxStoredImages must be 0-1200";
+  if (val < 0 || val > 1000) return "Error: cameraMaxStoredImages must be 0-1000 (0 = unlimited).";
   setSetting(gSettings.cameraMaxStoredImages, val);
   EXT_RAM_BSS_ATTR static char buf[48];
   snprintf(buf, sizeof(buf), "cameraMaxStoredImages set to %d", val);
@@ -1259,15 +1342,20 @@ const char* cmd_camerasave(const String& argsInput) {
   }
   
   // Capture and save
-  String savedPath = gImageManager.captureAndSave(loc);
+  ImageSaveReport report;
+  String savedPath = gImageManager.captureAndSave(loc, &report);
   if (savedPath.length() > 0) {
-    EXT_RAM_BSS_ATTR static char result[128];
-    snprintf(result, sizeof(result), "Saved: %s", savedPath.c_str());
+    EXT_RAM_BSS_ATTR static char result[192];
+    const char* tier = nullptr;
+    const char* reason = nullptr;
+    if (report.missingCopy(tier, reason)) {
+      snprintf(result, sizeof(result), "Saved: %s (%s copy not saved: %s)", savedPath.c_str(), tier, reason);
+    } else {
+      snprintf(result, sizeof(result), "Saved: %s", savedPath.c_str());
+    }
     return result;
   }
-  cliHint("cameraStorageLocation picks the tier and cameraCaptureFolder a folder inside it "
-          "(no /sd prefix); the system log names the rejected path");
-  return "Error: Failed to save image";
+  return report.failureReply();
 }
 
 // ── Video recording commands ────────────────────────────────────────────────
@@ -1285,13 +1373,28 @@ const char* cmd_camerarecord(const String& argsInput) {
     return videoRecording ? "Recording: active" : "Recording: stopped";
   }
   if (arg == "1" || arg.equalsIgnoreCase("start")) {
-    return startVideoRecording() ? "Recording started"
-                                 : "Error: Failed to start recording (SD card available?)";
+    if (videoRecording) {
+      return "Error: Recording is already running. Stop it first with 'camerarecord stop' to restart it.";
+    }
+    if (!VFS::isSdWritable()) return "Error: Recording not started: SD card not writable. Check sdinfo and retry.";
+    // The recorder names the cause and the next action of a refused start.
+    const char* why = nullptr;
+    if (startVideoRecording(&why)) return "Recording started";
+    EXT_RAM_BSS_ATTR static char refused[160];
+    snprintf(refused, sizeof(refused), "Error: Recording not started: %s",
+             why ? why : "unknown cause. Check sdinfo and retry.");
+    return refused;
   }
   if (arg == "0" || arg.equalsIgnoreCase("stop")) {
     bool wasRecording = videoRecording;
-    stopVideoRecording();
-    if (!wasRecording) return "Recording stopped";
+    const VideoStopResult stopped = stopVideoRecording();
+    if (stopped == VideoStopResult::StillFinishing) {
+      return "Error: Recorder is still finishing. Run cameravideolist in a few seconds.";
+    }
+    if (stopped == VideoStopResult::NotSaved) {
+      return "Error: Recording stopped but the file was not saved (SD write failed). Check the card with sdinfo.";
+    }
+    if (!wasRecording) return "Error: No recording is running. Start one with 'camerarecord start'.";
     EXT_RAM_BSS_ATTR static char out[160];
     snprintf(out, sizeof(out), "Recording stopped — %s (%lu frames)",
              videoLastRecordingPath(), (unsigned long)videoLastRecordingFrames());
@@ -1302,6 +1405,9 @@ const char* cmd_camerarecord(const String& argsInput) {
 
 const char* cmd_cameravideolist(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+
+  // Recordings live on the card only: without one there is no list to give.
+  if (!VFS::isSdAvailable()) return "Error: SD card not available. Insert a card or run sdmount, then retry.";
 
   if (argWantsJson(argsInput)) {
     PSRAM_JSON_DOC(doc);
@@ -1330,7 +1436,7 @@ const char* cmd_cameravideolist(const String& argsInput) {
     // Entries beyond the debug buffer are dropped and the reply says
     // "truncated"; "count" still gives the total.
     const char* reply = serializeJsonListToDebugBuffer(doc, arr);
-    return reply ? reply : "{\"schema\":1,\"error\":\"recordings_json_too_large\"}";
+    return reply ? reply : kCommandReplyOutOfMemory;
   }
 
   // Single walk; entries are newline-joined, so the count follows from the string.
@@ -1416,7 +1522,7 @@ const CommandEntry cameraCommands[] = {
   {"cameraautostart",  "Auto-start: <on|off>",            true,  cmd_cameraautostart, "Usage: cameraautostart <on|off|1|0|true|false>"},
   {"camerastoragelocation", "Storage location: <0-2>",    true,  cmd_camerastoragelocation, "Usage: camerastoragelocation <0..2> (0=LittleFS,1=SD,2=Both)"},
   {"cameracapturefolder",   "Photo folder: <path>",       true,  cmd_cameracapturefolder, "Usage: cameracapturefolder <path>"},
-  {"cameramaxstoredimages", "Max stored: <0-1200>",       true,  cmd_cameramaxstoredimages, "Usage: cameramaxstoredimages <0..1200> (0=unlimited)"},
+  {"cameramaxstoredimages", "Max stored: <0-1000>",       true,  cmd_cameramaxstoredimages, "Usage: cameramaxstoredimages <0..1000> (0=unlimited)"},
   {"camerarecord",          "Start/stop MJPEG-AVI recording (SD only): <start|stop>", false, cmd_camerarecord, "Usage: camerarecord <start|stop|1|0>"},
   {"cameravideolist",       "List AVI recordings on SD (add 'json' for JSON output)",  false, cmd_cameravideolist},
   {"cameravideodelete",     "Delete recording: \"<filename>\"", true, cmd_cameravideodelete, "Usage: cameravideodelete \"<filename>\""},

@@ -199,6 +199,9 @@ struct { int captureEncryptMode = 0; } gSettings;
 static bool gSensorLoggingRunning = false, gSensorLogSealed = false;
 static const char* captureEncryptModeName(int) { return "off"; }
 static bool captureCryptoKeyReady() { return false; }
+// The export loads this device's key before it opens its output; a case can make the load fail.
+static bool keyLoads = true;
+static bool captureCryptoEnsureKey() { return keyLoads; }
 static void setSetting(int& value, int next) { value = next; }
 static constexpr const char* CAPCRYPT_UNDECRYPTABLE = "[UNDECRYPTABLE]";
 static bool captureCryptoRevealLine(String& line) {
@@ -219,7 +222,7 @@ static void reset() {
   bodyWrites = separatorWrites = failBody = failSeparator = failReadAt = 0;
   partialBody = 0; failReadPath.clear(); failedReadResult = 0;
   printError = sizeError = removeFail = failLineRead = false; renameCalls = 0; renameFailures.clear(); directories.clear();
-  bufferReady = true; denyWrite = gCliValidateOnly = false;
+  bufferReady = true; denyWrite = gCliValidateOnly = false; keyLoads = true;
   std::memset(debugBuffer, 0x55, sizeof(debugBuffer));
 }
 static bool seen(const std::string& event) {
@@ -274,7 +277,11 @@ static void normalCases() {
   for (int i = 0; i < 9; ++i) args += " \"/one\"";
   check(invoke("max-nine", args) == success(9, 36), "nine inputs accepted");
   reset(); disk["/one"] = "row\n";
-  check(invoke("extra-token", args + " \"/missing\"") == success(9, 36), "existing parser truncates beyond ten tokens");
+  // Both merges refuse a tenth input; the parser would drop it without a word.
+  disk[outputPath()] = "keep";
+  const std::string extra = invoke("extra-token", args + " \"/missing\"");
+  check(extra == "Error: Too many inputs. Merge at most 9 files per call.", "tenth input refused");
+  check(disk.at(outputPath()) == "keep" && bodyWrites == 0, "refused merge leaves the output alone");
 }
 
 static void errorCases() {
@@ -515,6 +522,33 @@ static void exportCases() {
       if (!fault) std::cout << "export:" << path << ' ' << std::quoted(result) << '\n' << std::quoted(disk.at(path)) << '\n';
     }
     if (HAS_STAGED) check(disk.count(path + ".tmp") == (fault == 8 ? 1U : 0U), "export cleanup only leaves a failed-cleanup temp");
+  }
+  {
+    // No row decrypts: the export is refused and the earlier export stays.
+    reset(); ++scenarios;
+    const std::string path = "/logging_captures/plain.txt";
+    disk["/sealed"] = "#HW1ENC v1\n# columns\ncipher:bad\ncipher:bad\n";
+    disk[path] = "prior";
+    const std::string result = cmd_capturecrypt(String(("export \"/sealed\" \"" + path + "\"").c_str()));
+    check(lockDepth == 0 && liveFiles == 0, "refused export releases all handles and lock");
+    check(result == "Error: No row could be decrypted, the file was sealed with another key. "
+                    "Export it on the device that recorded it.", "export without a readable row is refused");
+    check(disk.at(path) == "prior" && disk.count(path + ".tmp") == 0, "refused export keeps the earlier output and no temporary");
+  }
+  {
+    // The device key does not load: refused before any output is opened, so
+    // the rows are not written out as undecryptable under another key's name.
+    reset(); ++scenarios; keyLoads = false;
+    const std::string path = "/logging_captures/plain.txt";
+    disk["/sealed"] = "#HW1ENC v1\n# columns\ncipher:good\n";
+    disk[path] = "prior";
+    const std::string result = cmd_capturecrypt(String(("export \"/sealed\" \"" + path + "\"").c_str()));
+    check(lockDepth == 0 && liveFiles == 0, "export without the key releases all handles and lock");
+    check(result.rfind("Error:", 0) == 0 && result.find("key") != std::string::npos &&
+          result.find("another key") == std::string::npos, "export without the device key says the key did not load");
+    check(disk.at(path) == "prior" && disk.count(path + ".tmp") == 0, "export without the key keeps the earlier output and no temporary");
+    check(std::none_of(events.begin(), events.end(), [](const std::string& e) { return e.rfind("open:w:", 0) == 0; }),
+          "export without the key opens no output");
   }
 #if HAS_STAGED
   for (const auto& separator : {"/", "/./", "//"}) for (const auto& suffix : {"", ".tmp", ".bak"}) {

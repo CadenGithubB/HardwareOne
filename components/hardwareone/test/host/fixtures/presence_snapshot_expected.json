@@ -54,7 +54,7 @@
   "Presence\n",
   "(reading...)\n",
   "{\"error\":\"no_data\"}\n",
-  "[PRESENCE] Ambient: -12.50°C | Presence: 321 [DETECTED] | Motion: -44 [DETECTED] | TShock: 7 [DETECTED]\n",
+  "Error: [PRESENCE] No reading yet. Retry shortly.\n",
   "== PRESENCE ==\n",
   "Ambient: -12.5C\n",
   "Presence: 321 [!]\n",

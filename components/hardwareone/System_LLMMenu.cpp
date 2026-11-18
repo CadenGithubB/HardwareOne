@@ -344,9 +344,11 @@ const char* cmd_llm_menu(const String& args) {
     if (sub == "tpl" || sub == "ent") {
       const bool wantTpl = (sub == "tpl");
       int g   = ca.argInt(2, -1);
-      int off = ca.argInt(3, 0);
-      if (g < 0 || off < 0)
+      int off = 0;
+      if (g < 0)
         return "Error: invalid arguments — Usage: llmmenu json tpl|ent <group> <offset>";
+      if (ca.has(3) && !parseIntArg(ca.arg(3), 0, INT_MAX, off))
+        return "Error: Offset must be a whole number, 0 or more. Use 0 for the first page.";
       LlmMenuGroupInfo gi;
       if (gc == 0 || g >= (int)gc || !llmMenuGroupInfo((uint8_t)g, &gi))
         return "Error: no such group (llmmenu json)";
@@ -372,10 +374,13 @@ const char* cmd_llm_menu(const String& args) {
       }
       static char* jbuf = nullptr;
       if (!jbuf) jbuf = (char*)ps_alloc(3200, AllocPref::PreferPsram, "llmmenu_list.json");
-      if (!jbuf) return "{\"error\":\"oom\"}";
+      if (!jbuf) return kCommandReplyOutOfMemory;
       serializeJson(doc, jbuf, 3200);
       return jbuf;
     }
+    if (sub.length())
+      return "Error: Unknown list. Use llmmenu json, llmmenu json tpl <group> <offset> "
+             "or llmmenu json ent <group> <offset>.";
 
     // Default json form: the group list.
     PSRAM_JSON_DOC(doc);
@@ -394,7 +399,7 @@ const char* cmd_llm_menu(const String& args) {
     }
     static char* gbuf = nullptr;
     if (!gbuf) gbuf = (char*)ps_alloc(1536, AllocPref::PreferPsram, "llmmenu_groups.json");
-    if (!gbuf) return "{\"error\":\"oom\"}";
+    if (!gbuf) return kCommandReplyOutOfMemory;
     serializeJson(doc, gbuf, 1536);
     return gbuf;
   }
@@ -472,30 +477,35 @@ const char* cmd_llm_ask(const String& args) {
     return menuCmdBuf;
   }
 
-  // Parse indices.
+  // Parse indices. Each one is a whole number inside the range of the type it
+  // is handed on as. e is -1 for "no entity" (a slotless template): that is
+  // its value when the argument is left out, and a client may also send it.
   uint16_t gen = 0;
-  int g, t, e;
+  int g = -1, t = -1, e = -1;
   if (json) {
     // json <gen> <g> <t> [e] — gen is REQUIRED on the json form.
     if (!ca.has(1) || !ca.has(2) || !ca.has(3))
       return "{\"schema\":1,\"ok\":false,\"error\":\"usage: llmask json <gen> <g> <t> [e]\"}";
-    gen = (uint16_t)ca.argInt(1, 0);
-    g   = ca.argInt(2, -1);
-    t   = ca.argInt(3, -1);
-    e   = ca.has(4) ? ca.argInt(4, -1) : -1;
+    // A generation that is not a number 0..65535 cannot be the current one.
+    // It gets the stale-generation reply, which tells the client to refetch
+    // the menu, and not "bad index", which names another argument.
+    if (!parseIntArg(ca.arg(1), 0, 65535, gen)) return menuAskErr(-1, true);
   } else {
     // <g> <t> [e] — human form reads the CURRENT gen; llmMenuAsk still errors
     // cleanly (-1) if a model swap raced between this read and the compose.
     if (!ca.has(0) || !ca.has(1))
       return "Error: invalid arguments — Usage: llmask <group> <template> [entity]";
     gen = llmMenuGeneration();
-    g   = ca.argInt(0, -1);
-    t   = ca.argInt(1, -1);
-    e   = ca.has(2) ? ca.argInt(2, -1) : -1;
   }
-  if (g < 0 || t < 0)
+  const int at = json ? 2 : 0;               // position of <g>
+  const bool indicesOk =
+      parseIntArg(ca.arg(at), 0, 255, g) &&
+      parseIntArg(ca.arg(at + 1), 0, 65535, t) &&
+      (!ca.has(at + 2) || parseIntArg(ca.arg(at + 2), -1, 65535, e));
+  if (!indicesOk)
     return json ? "{\"schema\":1,\"ok\":false,\"error\":\"bad index\"}"
-                : "Error: bad index (see llmmenu)";
+                : "Error: Index is not a whole number in range. "
+                  "List the valid indices with 'llmmenu json'.";
 
   // Compose the display question up-front so success can echo it. The ask
   // re-validates gen under the lock, so a raced swap still fails cleanly there.
@@ -514,7 +524,12 @@ const char* cmd_llm_ask(const String& args) {
     doc["hint"]    = "the reply streams in asynchronously - read it with 'llmresult json 0'";
     static char* abuf = nullptr;
     if (!abuf) abuf = (char*)ps_alloc(768, AllocPref::PreferPsram, "llmask.json");
-    if (!abuf) return "{\"error\":\"oom\"}";
+    if (!abuf) {
+      // The ask is already running: report the start without the question echo.
+      snprintf(menuCmdBuf, sizeof(menuCmdBuf),
+               "{\"schema\":1,\"ok\":true,\"session\":%d}", sid);
+      return menuCmdBuf;
+    }
     serializeJson(doc, abuf, 768);
     return abuf;
   }

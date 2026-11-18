@@ -56,6 +56,10 @@ def generate(component: Path) -> str:
         extract_block(utils, "bool submitCommandAsync(const Command& cmd,"),
         extract_block(utils, "String redactOutputForLog(const String& output)"),
     ]
+    # The empty-line reply the submit function names (a tree before it has none).
+    empty = re.search(r'static constexpr char kReplyEmptyCommand\[\] =\s*"[^"\n]*";', utils)
+    if empty:
+        pieces.insert(0, empty[0])
     # broadcastOutput's body, which takes the route mask; a tree before it has none.
     routed = "static void broadcastOutputRouted(const String& s, const CommandContext& ctx,"
     if routed in main:

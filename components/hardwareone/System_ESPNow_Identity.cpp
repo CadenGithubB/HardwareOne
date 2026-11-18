@@ -600,6 +600,12 @@ bool peerIdentityForget(const uint8_t mac[6]) {
   return idx >= 0 || fileRemoved;
 }
 
+bool peerIdentityFileStored(const uint8_t mac[6]) {
+  auto auth = VFS::systemAuth(VFS::Scopes::ESPNOW_STATE, "espnow.peer_identity_stored");
+  char path[80];
+  return buildPeerPath(mac, "identity.json", path, sizeof(path)) && VFS::existsGuarded(path, auth);
+}
+
 namespace {
 
 // Removes what is in `dir`, counting the files into `out`; subfolders `depth`

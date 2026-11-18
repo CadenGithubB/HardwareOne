@@ -29,7 +29,7 @@ HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
 
 STATE_START = "// Time synchronization state"
-STATE_END = "// Worker status configuration"
+STATE_END = "// Metadata transmission tracking"
 HANDLER = "static void v4h_time_sync(const V4RxCtx& ctx)"
 COMMAND = "const char* cmd_espnow_timestatus(const String& argsInput)"
 

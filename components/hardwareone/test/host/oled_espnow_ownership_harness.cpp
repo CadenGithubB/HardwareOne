@@ -165,8 +165,9 @@ int main() {
 
   // U5: the owner's save-warning reply is not an error: the peer is gone in RAM.
   beginCase("U5 unpair save warning", ESPNOW_VIEW_DEVICE_CONFIG);
-  execReply = "Unpaired device but failed to encrypt and save the registry - device encryption key "
-              "unavailable. The pairing may not persist across reboot.";
+  execReply = "Unpaired device for this session only: the device list could not be saved, so it is "
+              "paired again after a restart. Check storage with 'fsusage'. If the device is listed "
+              "again after a restart, run 'espnowunpair <name_or_mac>' again.";
   oledEspNowUnpairDevice();
   CHECK(commands.size() == 1 && commands[0] == kUnpairCommand, "the OLED submits 'espnowunpair <MAC>'");
   CHECK(noOwnerCalls(), "the OLED never deletes the peer or the registry entry itself");

@@ -830,7 +830,8 @@ namespace {
     // a ROLE, and masking everything after the username made "useradd bob *** 0 user"
     // and "... 0 superadmin" identical in the audit log — the one detail most worth
     // auditing was the one hidden. Same shape and reasoning as `login <user> <pass>`
-    // above; CommandArgs splits on spaces, so a password can't contain one here.
+    // above. A password with a space arrives quoted, and the quote-aware token
+    // walk (nthTokenBounds) masks the whole quoted token.
     { "useradd ",            MASK_TOKEN_AT_POS,    3, nullptr },  // <username> <password> [0|1] [role]
     // usersync <username> <userPass> <device> <targetAdminUser> <targetAdminPass> <yourAdminPass>
     { "usersync ",           CALL_HANDLER,         0, &redactUserSyncCmd },  // mask pw tokens 3,6,7
@@ -1151,40 +1152,44 @@ const char* cmd_voltage(const String& originalCmd) {
   // We can read from an ADC pin if voltage divider is connected
   // For now, provide system power estimates based on operation
 
-  broadcastOutput("Power Supply Information:");
-  broadcastOutput("========================");
+  // The json form prints nothing: its reply is the whole answer.
+  const bool wantJson = argWantsJson(originalCmd);
+  if (!wantJson) {
+    broadcastOutput("Power Supply Information:");
+    broadcastOutput("========================");
+  }
 
   // Estimate power consumption based on active components
   float estimatedCurrent = 80;  // Base ESP32 current in mA
 
   if (WiFi.isConnected()) {
     estimatedCurrent += 120;  // WiFi active
-    broadcastOutput("WiFi: Active (+120mA)");
-  } else {
+    if (!wantJson) broadcastOutput("WiFi: Active (+120mA)");
+  } else if (!wantJson) {
     broadcastOutput("WiFi: Inactive");
   }
 
   if (gThermalConnected && gThermalRunning) {
     estimatedCurrent += 23;  // MLX90640 typical
-    broadcastOutput("Thermal Sensor: Active (+23mA)");
+    if (!wantJson) broadcastOutput("Thermal Sensor: Active (+23mA)");
   }
 
   if (gImuConnected && gImuRunning) {
     estimatedCurrent += 12;  // BNO055 typical
-    broadcastOutput("IMU Sensor: Active (+12mA)");
+    if (!wantJson) broadcastOutput("IMU Sensor: Active (+12mA)");
   }
 
   if (gTofConnected && gTofRunning) {
     estimatedCurrent += 20;  // VL53L4CX typical
-    broadcastOutput("ToF Sensor: Active (+20mA)");
+    if (!wantJson) broadcastOutput("ToF Sensor: Active (+20mA)");
   }
 
   if (gApdsConnected) {
     estimatedCurrent += 3;  // APDS9960 typical
-    broadcastOutput("APDS Sensor: Active (+3mA)");
+    if (!wantJson) broadcastOutput("APDS Sensor: Active (+3mA)");
   }
 
-  if (argWantsJson(originalCmd)) {
+  if (wantJson) {
     snprintf(getDebugBuffer(), 1024,
       "{\"schema\":1,\"measured\":false,\"estimatedCurrentMa\":%.0f,\"estimatedPowerW\":%.2f,"
       "\"note\":\"estimate only — see batterystatus json for measured\"}",
@@ -1203,6 +1208,9 @@ const char* cmd_voltage(const String& originalCmd) {
 }
 
 #include "System_Power.h"  // shared target CPU clock choices
+// Included here by name: OLED_Display.h brings it in only in a build with a
+// display, and cmd_cpufreq is compiled in every build.
+#include "HAL_Display.h"   // displayRequiresFullSpeed (inline false without a display)
 
 const char* cmd_cpufreq(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
@@ -1236,8 +1244,13 @@ const char* cmd_cpufreq(const String& argsInput) {
     if (!isPowerCpuFrequencySupported(newFreq)) {
       return "Error: Unsupported CPU frequency; run cpufreq for supported values";
     }
+    if (displayRequiresFullSpeed() && newFreq < POWER_CPU_PERFORMANCE_MHZ) {
+      return "Error: The display needs full CPU speed while it is on. "
+             "Run closeoled, then set the frequency.";
+    }
     if (!powerSetCpuFrequencyMhz(newFreq)) {
-      return "Error: CPU frequency change failed";
+      return "Error: CPU frequency change failed. Another clock change or an I2C transfer was in "
+             "progress, or the switch did not take effect. Retry the command.";
     }
     {
       char ev[24];
@@ -1272,7 +1285,8 @@ const char* cmd_lightsleep(const String& argsInput) {
   unsigned long cooldownRemain = 0;
   if (!powerSleepTransitionAllowed(&cooldownRemain)) {
     snprintf(getDebugBuffer(), 1024,
-             "Sleep refused: cooldown active — try again in %lu ms (powercooldown to tune)",
+             "Error: Sleep refused, the power cooldown is active. Retry in %lu ms "
+             "(powercooldown changes the wait).",
              cooldownRemain);
     return getDebugBuffer();
   }
@@ -1282,11 +1296,17 @@ const char* cmd_lightsleep(const String& argsInput) {
   String arg = argsInput;
   arg.trim();
   if (arg.length() > 0) {
-    int val = 0;
-    if (!parseIntArg(arg, val)) return kCommandReplyNotANumber;
-    if (val > 0 && val <= 3600) {
-      seconds = val;
+    long long any = 0;
+    if (!parseWholeNumber(arg.c_str(), any)) return kCommandReplyNotANumber;
+    if (!parseIntArg(arg, 1, 3600, seconds)) {
+      return "Error: Sleep time out of range. Use 1 to 3600 seconds.";
     }
+  }
+
+  // Wake-up source: timer, counted from the moment sleep starts. Set before
+  // the display goes dark so a refusal leaves nothing to undo.
+  if (esp_sleep_enable_timer_wakeup((uint64_t)seconds * 1000000ULL) != ESP_OK) {
+    return "Error: The wake timer could not be set, so the device did not sleep. Retry the command.";
   }
 
   BROADCAST_PRINTF("Entering light sleep for %d seconds...", seconds);
@@ -1311,42 +1331,63 @@ const char* cmd_lightsleep(const String& argsInput) {
     batteryLogEvent(ev);
   }
 
-  // Configure wake-up source: timer
-  esp_sleep_enable_timer_wakeup((uint64_t)seconds * 1000000ULL);
-
   // The radio companion follows the main processor: its heartbeat watchdog
   // pauses so the silence of sleep is not mistaken for an outage.
   radioCompanionBeforeLightSleep();
-  // Enter light sleep (preserves RAM, resumes here when woken)
-  esp_light_sleep_start();
+  // Enter light sleep (preserves RAM, resumes here when woken). A refusal
+  // returns at once without having slept.
+  const esp_err_t slept = esp_light_sleep_start();
   radioCompanionAfterLightSleep();
+  // The wake timer stays armed in ESP-IDF until it is disabled, and a later
+  // deep sleep would wake on it. Disarm it whether or not the sleep started.
+  (void)esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_TIMER);
 
   // Execution resumes here after wake-up
-  DEBUG_SYSTEMF("Woke from light sleep!");
-  batteryLogEvent("wake:light");
+  if (slept == ESP_OK) {
+    DEBUG_SYSTEMF("Woke from light sleep!");
+    batteryLogEvent("wake:light");
+  } else {
+    batteryLogEvent("sleep:light:refused");
+  }
 
   // oledResumeFromSleep supersedes oledDisplayOn: on bus-1 + power-gated
   // builds it raises LDO2, waits for the rail to stabilise, re-runs the
   // SSD1306 init (registers were lost on the power cycle), and reapplies
   // rotation + brightness so the panel comes back exactly as it was.
   oledResumeFromSleep();
-  
+
+  if (slept != ESP_OK) {
+    snprintf(getDebugBuffer(), 1024,
+             "Error: Light sleep did not start (%s). A wake source may already be active. "
+             "Retry after the power cooldown (powercooldown shows its length).",
+             esp_err_to_name(slept));
+    return getDebugBuffer();
+  }
   return "Woke from light sleep";
 }
 
 // Deep sleep with no wake source — closest ESP32 analogue to "power off".
 // Wake only via the physical reset button. Used by G2 Power Off (and CLI).
-const char* cmd_deepsleep(const String& /*argsInput*/) {
+const char* cmd_deepsleep(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   if (otaSafetyIsPendingVerification()) {
     return "Error: Deep sleep refused while the new firmware is in OTA health probation";
   }
+  // Deep sleep has no wake timer: a number here would power the device off
+  // until reset, not for that many seconds.
+  String arg = argsInput;
+  arg.trim();
+  if (arg.length() > 0) {
+    return "Error: deepsleep takes no argument and has no timed wake. "
+           "Use lightsleep <seconds> for a timed sleep.";
+  }
 
   unsigned long cooldownRemain = 0;
   if (!powerSleepTransitionAllowed(&cooldownRemain)) {
     snprintf(getDebugBuffer(), 1024,
-             "Deep sleep refused: cooldown active — try again in %lu ms (powercooldown to tune)",
+             "Error: Deep sleep refused, the power cooldown is active. Retry in %lu ms "
+             "(powercooldown changes the wait).",
              cooldownRemain);
     return getDebugBuffer();
   }
@@ -1363,7 +1404,10 @@ const char* cmd_deepsleep(const String& /*argsInput*/) {
   // The radio companion follows: stop what uses it and hold the C6 in reset
   // through deep sleep (no-op with an on-chip radio).
   radioCompanionBeforeDeepSleep();
-  // No wake source: ~10 µA until physical reset.
+  // No wake source: ~10 µA until physical reset. Clear every wake source
+  // first, so nothing armed earlier in this boot (the light sleep timer) can
+  // wake the device and reboot it.
+  (void)esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
   esp_deep_sleep_start();
   return "Deep sleep";  // unreachable
 }
@@ -1414,6 +1458,18 @@ bool argLeadingTokenIsJson(const String& args) {
   String a = args;
   a.trim();
   return a == "json" || a.startsWith("json ");
+}
+
+// The json reply of a command, serialized into `buf`. A document that ran out
+// of memory or does not fit is refused whole: a cut reply is not JSON, and a
+// full buffer is left without its terminator.
+static const char* jsonDocReply(const JsonDocument& doc, char* buf, size_t size) {
+  if (!buf || doc.overflowed()) return kCommandReplyOutOfMemory;
+  const size_t len = serializeJson(doc, buf, size);
+  if (len == 0 || len >= size) {
+    return "Error: The JSON reply does not fit one message. Run the command without json.";
+  }
+  return buf;
 }
 
 // Reset reason labels matching esp_reset_reason_t (shared by both output paths).
@@ -1726,13 +1782,16 @@ const char* cmd_status(const String& argsInput) {
     // `versions json`'s keys. Here rather than in buildSystemInfoJson, whose
     // periodic web/SSE telemetry has no use for them.
     versionsAddJson(doc["versions"].to<JsonObject>());
-    if (doc.overflowed()) return "{\"error\":\"oom\"}";
-    if (measureJson(doc) >= kStatusJsonCap) return "{\"error\":\"status too large\"}";
+    static const char kStatusTooLarge[] =
+        "Error: The status document does not fit one reply. "
+        "Ask for versions json and memreport json separately.";
+    if (doc.overflowed()) return kCommandReplyOutOfMemory;
+    if (measureJson(doc) >= kStatusJsonCap) return kStatusTooLarge;
     static char* statusJsonBuf = nullptr;
     if (!statusJsonBuf) {
       statusJsonBuf = (char*)ps_alloc(kStatusJsonCap, AllocPref::PreferPsram, "status.json");
     }
-    if (!statusJsonBuf) return "{\"error\":\"oom\"}";
+    if (!statusJsonBuf) return kCommandReplyOutOfMemory;
     serializeJson(doc, statusJsonBuf, kStatusJsonCap);
     return statusJsonBuf;
   }
@@ -1771,7 +1830,7 @@ const char* cmd_uptime(const String& argsInput) {
   if (argWantsJson(argsInput)) {
     static char* buf = nullptr;
     if (!buf) buf = (char*)ps_alloc(192, AllocPref::PreferPsram, "uptime.json");
-    if (!buf) return "{\"error\":\"oom\"}";
+    if (!buf) return kCommandReplyOutOfMemory;
     snprintf(buf, 192,
       "{\"schema\":1,\"uptime_s\":%lu,\"uptime_ms\":%lu,\"uptime_hms\":\"%luh %lum %lus\"}",
       (unsigned long)seconds, (unsigned long)millis(),
@@ -1807,7 +1866,9 @@ const char* cmd_time(const String& argsInput) {
         RtcDateTime local = rtcLocalTime(&dt);
         snprintf(timeBuf, sizeof(timeBuf), "%04d-%02d-%02dT%02d:%02d:%02d",
                  local.year, local.month, local.day, local.hour, local.minute, local.second);
-        haveTime = true; haveTemp = true; temp = rtcReadTemperature();
+        haveTime = true;
+        temp = rtcReadTemperature();
+        haveTemp = (temp != kRtcTemperatureUnavailable);
       }
     }
 #endif
@@ -1823,7 +1884,7 @@ const char* cmd_time(const String& argsInput) {
     // means the time was carried across a soft reboot in the RTC domain.
     static char* buf = nullptr;
     if (!buf) buf = (char*)ps_alloc(256, AllocPref::PreferPsram, "time.json");
-    if (!buf) return "{\"error\":\"oom\"}";
+    if (!buf) return kCommandReplyOutOfMemory;
     int p = snprintf(buf, 256,
       "{\"schema\":1,\"synced\":%s,\"source\":\"%s\",\"time\":\"%s\",\"uptime_ms\":%lu",
       Clock::isSynced() ? "true" : "false",
@@ -1855,7 +1916,12 @@ const char* cmd_time(const String& argsInput) {
       snprintf(timeBuf, sizeof(timeBuf), "%04d-%02d-%02dT%02d:%02d:%02d",
                local.year, local.month, local.day, local.hour, local.minute, local.second);
       BROADCAST_PRINTF("Time: %s (RTC)", timeBuf);
-      BROADCAST_PRINTF("Temp: %.1f C", rtcReadTemperature());
+      const float temp = rtcReadTemperature();
+      if (temp == kRtcTemperatureUnavailable) {
+        broadcastOutput("Temp: n/a");
+      } else {
+        BROADCAST_PRINTF("Temp: %.1f C", temp);
+      }
       return "OK";
     }
   }
@@ -1911,11 +1977,18 @@ const char* cmd_timeset(const String& argsInput) {
     }
     t = (time_t)v;
   } else {
-    // Parse YYYY-MM-DD HH:MM:SS
-    int year, month, day, hour, minute, second;
-    if (sscanf(arg.c_str(), "%d-%d-%d %d:%d:%d",
-               &year, &month, &day, &hour, &minute, &second) != 6) {
+    // Parse YYYY-MM-DD HH:MM:SS: the whole text, nothing after the seconds.
+    static const char kNotADateTime[] =
+        "Error: Not a valid date and time. Use YYYY-MM-DD HH:MM:SS, for example 2026-11-17 14:30:00.";
+    int year, month, day, hour, minute, second, used = 0;
+    if (sscanf(arg.c_str(), "%d-%d-%d %d:%d:%d%n",
+               &year, &month, &day, &hour, &minute, &second, &used) != 6 ||
+        used != (int)arg.length()) {
       return "Error: Invalid format. Use: YYYY-MM-DD HH:MM:SS or unix timestamp";
+    }
+    if (month < 1 || month > 12 || day < 1 || day > 31 || hour < 0 || hour > 23 ||
+        minute < 0 || minute > 59 || second < 0 || second > 59) {
+      return kNotADateTime;
     }
 
     timeinfo.tm_year = year - 1900;
@@ -1926,6 +1999,9 @@ const char* cmd_timeset(const String& argsInput) {
     timeinfo.tm_sec = second;
     timeinfo.tm_isdst = -1;
     t = mktime(&timeinfo);
+    // mktime turns a day the month does not have (31 February) into a later
+    // date; that is not the time the user typed.
+    if (timeinfo.tm_mday != day || timeinfo.tm_mon != month - 1) return kNotADateTime;
   }
 
   // Plausibility gate on BOTH branches: isValidEpoch alone has no upper
@@ -1964,7 +2040,8 @@ const char* cmd_fsusage(const String& argsInput) {
 
   uint64_t total = 0, used = 0, free = 0;
   if (!VFS::getStats(VFS::INTERNAL, total, used, free)) {
-    return wantJson ? "{\"schema\":1,\"ready\":false}" : "Error: filesystem stats unavailable";
+    // The filesystem is mounted; only the statistics call failed.
+    return "Error: Filesystem statistics unavailable. Retry the command.";
   }
   size_t totalBytes = (size_t)total;
   size_t usedBytes = (size_t)used;
@@ -2006,7 +2083,11 @@ const char* cmd_testencryption(const String& argsInput) {
   BROADCAST_PRINTF("Input length: %u", (unsigned)args.length());
   BROADCAST_PRINTF("Match: %s", (args == decrypted) ? "YES" : "NO");
 
-  return "[System] Encryption test complete";
+  if (args != decrypted) {
+    return "Error: Encryption round trip did not return the input. "
+           "Check the device key (see the boot log).";
+  }
+  return "Encryption test passed";
 }
 
 const char* cmd_testpassword(const String& argsInput) {
@@ -2029,7 +2110,10 @@ const char* cmd_testpassword(const String& argsInput) {
   BROADCAST_PRINTF("Verify Wrong:   %s", wrongVerified ? "YES" : "NO");
   BROADCAST_PRINTF("System Status: %s", (verified && !wrongVerified) ? "WORKING" : "ERROR");
 
-  return "[System] Password test complete";
+  if (!verified || wrongVerified) {
+    return "Error: Password hashing self-test failed. Do not create accounts until this passes.";
+  }
+  return "Password test passed";
 }
 
 // Reboot helpers — see System_Utils.h. Every intentional restart routes through
@@ -2391,8 +2475,11 @@ static const char* factoryreset_confirmed(void* userData) {
     .name = "factoryreset_reboot",
     .skip_unhandled_events = false,
   };
-  esp_timer_create(&timerArgs, &timer);
-  esp_timer_start_once(timer, 1000ULL * 1000ULL);  // 1 s expressed in microseconds
+  // The accounts are already gone here, so a timer that cannot be set up
+  // changes only what the reply tells the user to do next.
+  const bool restartScheduled =
+      esp_timer_create(&timerArgs, &timer) == ESP_OK &&
+      esp_timer_start_once(timer, 1000ULL * 1000ULL) == ESP_OK;  // 1 s expressed in microseconds
 
   // Record the imminent restart: stash the reason for the next boot's SYSEVT_REBOOT
   // and write the durable REBOOT audit line. Deferred via the esp_timer above, so we
@@ -2410,18 +2497,22 @@ static const char* factoryreset_confirmed(void* userData) {
 
   if (wipeAll) {
     snprintf(respBuf, sizeof(respBuf),
-             "Factory reset complete. Accounts and their data deleted.%s Rebooting in 1 second: the "
+             "Factory reset complete. Accounts and their data deleted.%s %s the "
              "filesystem and NVS are erased during the restart (up to a few minutes; it resumes if "
              "power is lost), then the setup wizard starts.",
-             sdSkipped ? " SD card not mounted: its /sd/stt folders were kept." : "");
+             sdSkipped ? " SD card not mounted: its /sd/stt folders were kept." : "",
+             restartScheduled ? "Rebooting in 1 second:"
+                              : "The restart could not be scheduled. Run reboot now:");
     return respBuf;
   }
   snprintf(respBuf, sizeof(respBuf),
            "Factory reset complete. Accounts, pending requests, user settings and account "
-           "transcripts/notes deleted.%s%s Rebooting in 1 second to start setup wizard...",
+           "transcripts/notes deleted.%s%s %s",
            sdSkipped ? " SD card not mounted: its /sd/stt folders were kept." : "",
            settingsLeft.length() ? " Some user settings files could not be removed."
-           : keptLeft.length() ? " A kept copy of a damaged account file could not be removed." : "");
+           : keptLeft.length() ? " A kept copy of a damaged account file could not be removed." : "",
+           restartScheduled ? "Rebooting in 1 second to start setup wizard..."
+                            : "The restart could not be scheduled. Run reboot now.");
   return respBuf;
 }
 
@@ -2503,8 +2594,13 @@ const char* cmd_wait(const String& argsInput) {
   val.trim();
   if (val.length() == 0) return "Error: invalid arguments — Usage: wait <ms>";
   int ms = 0;
-  if (!parseIntArg(val, ms)) return kCommandReplyNotANumber;
-  if (ms > 0 && ms <= 60000) delay(ms);
+  long long any = 0;
+  if (!parseWholeNumber(val.c_str(), any)) return kCommandReplyNotANumber;
+  if (!parseIntArg(val, 1, 60000, ms)) {
+    return "Error: Wait time out of range. Use 1 to 60000 ms; split a longer wait into several "
+           "wait commands.";
+  }
+  delay(ms);
   return "[System] Wait complete";
 }
 
@@ -2534,9 +2630,14 @@ const char* cmd_bootcount(const String& argsInput) {
 
   if (a.equalsIgnoreCase("reset")) {
     if (!currentExecIsAdmin()) return "Error: admin required to reset the boot counter";
-    bootStateResetBootCount();
+    if (!bootStateResetBootCount()) {
+      return "Error: Boot counter store (NVS) is unavailable. Restart and retry.";
+    }
     logSystemEvent("BOOT", "boot counter reset to 0 by %s", currentExecUser().c_str());
     return "OK: boot counter reset to 0";
+  }
+  if (a.length() && !a.equalsIgnoreCase("json")) {
+    return "Error: Unknown argument. Use bootcount, bootcount reset or bootcount json.";
   }
 
   uint32_t bootCount = bootStateGetBootCount();
@@ -2553,9 +2654,7 @@ const char* cmd_bootcount(const String& argsInput) {
     doc["reset_reason_code"] = (unsigned long)reason;
     static char* buf = nullptr;
     if (!buf) buf = (char*)ps_alloc(256, AllocPref::PreferPsram, "bootcount.json");
-    if (!buf) return "{\"error\":\"oom\"}";
-    serializeJson(doc, buf, 256);
-    return buf;
+    return jsonDocReply(doc, buf, 256);
   }
 
   BROADCAST_PRINTF("Boot count:   %lu  (NVS — survives power loss & FS erase)", (unsigned long)bootCount);
@@ -2594,9 +2693,7 @@ const char* cmd_crashlog(const String& argsInput) {
       pcs.add(crashRecordBacktrace()[i]);
     static char* buf = nullptr;
     if (!buf) buf = (char*)ps_alloc(1024, AllocPref::PreferPsram, "crashlog.json");
-    if (!buf) return "{\"error\":\"oom\"}";
-    serializeJson(doc, buf, 1024);
-    return buf;
+    return jsonDocReply(doc, buf, 1024);
   }
 
   // Static + PSRAM rather than a stack buffer: command handlers run on
@@ -2638,8 +2735,8 @@ static const char* cmd_memdiag(const String& args) {
 extern const CommandEntry commands[] = {
   // ---- Core / General ----
 #if HW1_BENCH_MEMDIAG
-  { "memdiag", "Bench memory diagnostics: [status|check|arm|disarm|dump|noabort]", true, cmd_memdiag,
-    "Usage: memdiag [status|check|arm|disarm|dump|noabort]" },
+  { "memdiag", "Bench memory diagnostics: [status|check|arm|disarm|dump|wptest|psramtest [seconds]|noabort]", true, cmd_memdiag,
+    "Usage: memdiag [status|check|arm|disarm|dump|wptest|psramtest [seconds]|noabort]" },
 #endif
   { "status", "Show system status (WiFi, FS, memory). (add 'json' for JSON output)", false, cmd_status },
   { "crashlog", "Show the last recorded crash (panic text, core/PC, boot phase, repeat count). (add 'json')", false, cmd_crashlog,
@@ -2712,7 +2809,7 @@ extern const size_t commandsCount = sizeof(commands) / sizeof(commands[0]);
 extern const CommandEntry batteryCommands[] = {
   {"batterystatus", "Show battery voltage, charge level, and status", false, cmd_battery_status},
   {"batterycalibrate", "Reinitialize ADC calibration or re-probe the fuel gauge", true, cmd_battery_calibrate},
-  {"batterylog", "Battery time-series CSV log (on/off/interval/tail/clear)", false, cmd_batterylog, "Usage: batterylog [on|off|interval <s>|tail|clear]"}
+  {"batterylog", "Battery time-series CSV log (status/on/off/interval/tail/clear)", false, cmd_batterylog, "Usage: batterylog [status|on|off|interval <s>|tail|clear]"}
 };
 
 extern const size_t batteryCommandsCount = sizeof(batteryCommands) / sizeof(batteryCommands[0]);
@@ -3454,8 +3551,7 @@ const char* cmd_memreport(const String& argsInput) {
       at["invalidTagEvents"] = (unsigned long long)tracker.invalidTagEvents;
       at["overflowEvents"] = (unsigned long long)tracker.overflowEvents;
     }
-    serializeJson(doc, getDebugBuffer(), 1024);
-    return getDebugBuffer();
+    return jsonDocReply(doc, getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE);
   }
   printMemoryReport();
   return "Memory report printed to serial";
@@ -3554,8 +3650,7 @@ const char* cmd_taskstats(const String& originalCmd) {
       uint32_t stackTotal = taskStackLookup(taskArray[i].pcTaskName);
       if (stackTotal > 0) t["stackSize"] = (unsigned)stackTotal;
     }
-    serializeJson(doc, getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE);
-    return getDebugBuffer();
+    return jsonDocReply(doc, getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE);
   }
 
   BROADCAST_PRINTF(
@@ -3621,8 +3716,7 @@ const char* cmd_perftop(const String& originalCmd) {
     doc["cpuValid"] = haveShares;
     doc["windowMs"] = (unsigned long)windowMs;  // 0 while the sampler is arming
 
-    serializeJson(doc, getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE);
-    return getDebugBuffer();
+    return jsonDocReply(doc, getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE);
   }
 
   broadcastOutput("");
@@ -4062,11 +4156,17 @@ static void stampOkStatus(char* out, size_t outSize, bool success) {
       (out[2] == '\0' || out[2] == ':')) return;         // bare "OK" sentinel or already "OK:"
   if (commandReplyConfirms(out)) return;           // existing success token — no double-stamp
   const size_t pfx = sizeof(kCommandReplyOkStamp) - 1;
-  size_t keep = (n + pfx <= outSize - 1) ? n : (outSize - 1 - pfx);
-  memmove(out + pfx, out, keep);
+  // A reply that fills the buffer stays unstamped; the stamp does not cost it
+  // its last bytes.
+  if (n + pfx > outSize - 1) return;
+  memmove(out + pfx, out, n);
   memcpy(out, kCommandReplyOkStamp, pfx);
-  out[pfx + keep] = '\0';
+  out[pfx + n] = '\0';
 }
+
+// The executor's reply to a line with no command in it.
+static constexpr char kReplyEmptyCommand[] =
+    "Error: Empty command. Type a command, or help for the list.";
 
 #if ENABLE_ESPNOW && ENABLE_BONDED_MODE
 // `remote:` reply owner (declared in System_Utils.h).
@@ -4257,7 +4357,7 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
   }
 
   if (command.length() == 0) {
-    strlcpy(out, "Empty command", outSize);
+    strlcpy(out, kReplyEmptyCommand, outSize);
     return false;
   }
 
@@ -4527,7 +4627,7 @@ bool submitAndExecuteSync(const Command& cmd, String& out,
   const size_t inputLength = cmd.line.length();
   if (!commandInputLengthAccepted(inputLength)) {
     if (inputLength == 0) {
-      out = "Error: Empty command";
+      out = kReplyEmptyCommand;
       broadcastOutput("[ERROR] Empty command");
     } else {
       out = "Error: Command exceeds input limit";
@@ -4562,7 +4662,7 @@ bool submitAndExecuteSync(const Command& cmd, String& out,
     // a moment later. Transient PSRAM, freed below.
     char* outBuf = (char*)ps_alloc(CMD_RESULT_MAX, AllocPref::PreferPsram, "cmd.out.direct");
     if (!outBuf) {
-      out = "Error: Out of memory for command output";
+      out = kCommandReplyOutOfMemory;
       return false;
     }
     // executeCommand installs the command identity via ExecIdentityGuard, so
@@ -4589,6 +4689,7 @@ bool submitAndExecuteSync(const Command& cmd, String& out,
     DEBUG_CMD_FLOWF("[submitSync] FAILED alloc ExecReq heap=%lu psram=%lu",
                     (unsigned long)ESP.getFreeHeap(), (unsigned long)ESP.getFreePsram());
     broadcastOutput("[ERROR] Out of memory - cannot create request");
+    out = kCommandReplyOutOfMemory;
     return false;
   }
   // Initialize the structure (placement new for C++ objects)
@@ -4603,6 +4704,7 @@ bool submitAndExecuteSync(const Command& cmd, String& out,
     r->~ExecReq();
     free(r);
     broadcastOutput("[ERROR] Out of memory - cannot create semaphore");
+    out = kCommandReplyOutOfMemory;
     return false;
   }
   r->ok = false;
@@ -4613,6 +4715,7 @@ bool submitAndExecuteSync(const Command& cmd, String& out,
     r->~ExecReq();
     free(r);
     broadcastOutput("[ERROR] Command queue is NULL");
+    out = "Error: Command executor is not running. Restart the device.";
     return false;
   }
 
@@ -4643,6 +4746,7 @@ bool submitAndExecuteSync(const Command& cmd, String& out,
     r->~ExecReq();
     free(r);
     broadcastOutput("[ERROR] Command queue full - try again");
+    out = "Error: Command queue full. Try again in a few seconds.";
     return false;
   }
   
@@ -4667,7 +4771,8 @@ bool submitAndExecuteSync(const Command& cmd, String& out,
     releaseSyncExecReqOwner(r);
     ERROR_COMMANDF("sync command timed out after 60000 ms; command execution may continue; line='%.60s'",
                    traceLine());
-    out = "[ERROR] Command timed out";
+    out = "Error: Command timed out after 60 s. It may still finish; check the result before "
+          "repeating it.";
     return false;
   }
 
@@ -5043,7 +5148,11 @@ const char* cmd_logout(const String& originalCmd) {
     if (!commandCtx || !logoutTransportFromNamedSession(
             transport, caller.transport, caller.user,
             commandCtx->transportSessionEpoch, &denial)) {
-      return denial ? denial : "Error: submitting session changed before logout.";
+      // A refusal without its own text: the submitting session ended or
+      // changed.
+      return denial ? denial
+                    : "Error: The submitting session changed before logout. "
+                      "Sign in again and retry.";
     }
   } else {
     logoutTransport(transport);

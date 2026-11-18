@@ -37,7 +37,8 @@ COMPONENT = HERE.parents[1]
 JSON_INCLUDE = COMPONENT.parent / "hardwareone_libs" / "ArduinoJson" / "src"
 
 CASES = ["user_load_refused", "user_unload_refused", "admin_load_through_command",
-         "admin_unload_through_command", "bad_id_rejected", "select_applies_setting",
+         "admin_unload_through_command", "unload_with_nothing_loaded", "bad_id_rejected",
+         "select_applies_setting",
          "command_context_argument", "build_load_command"]
 
 

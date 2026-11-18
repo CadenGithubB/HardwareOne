@@ -450,16 +450,26 @@ inline void streamSpeechInner(httpd_req_t* req) {
       setStatus(out);
       setTimeout(refreshStatus, 500);
       startPolling();
-    });
+    }).catch(showRefusal);
   }
-  
+
   function stopSR(){
     setStatus('Stopping speech recognition...');
     postCli('srstop').then(function(out){
       setStatus(out);
       setTimeout(refreshStatus, 500);
       stopPolling();
-    });
+    }).catch(showRefusal);
+  }
+
+  // A refused start or stop (already running, not running) rejects with the
+  // device's reply: show it, then follow the device's real state.
+  function showRefusal(e){
+    setStatus((e && e.reply) || ('Error: ' + (e && e.message)));
+    hw.fetchJSON('/api/speech/status').then(function(data){
+      if(data && data.running) startPolling(); else stopPolling();
+    }).catch(function(){});
+    setTimeout(refreshStatus, 500);
   }
   
   function startPolling(){
@@ -508,7 +518,7 @@ inline void streamSpeechInner(httpd_req_t* req) {
          contract emits "Error: ". So an error line was NOT skipped — it was
          split on whitespace and its last token pushed as a filename:
          "Error: Permission denied" became a selectable model called "denied",
-         reported as "Found 1 file(s)", and fed straight into `sr loadwake`.
+         reported as "Found 1 file(s)" and offered in the model list.
          Bail on a failed response instead of parsing it as a listing. */
       if(out && /^\s*(Error|ERROR)\b/.test(out)){
         setFileStatus(out.trim());
@@ -565,20 +575,13 @@ inline void streamSpeechInner(httpd_req_t* req) {
       return;
     }
     var filename = select.value;
-    setFileStatus('Loading ' + filename + '...');
-    // For now, just show info - actual loading depends on model type
-    if(filename.endsWith('.wn')){
-      postCli('sr loadwake /sd/ESP-SR Models/' + filename).then(function(out){
-        setFileStatus(out);
-        setTimeout(refreshStatus, 500);
-      }).catch(function(e){ setFileStatus('Error: ' + e.message); });
+    // No command loads a single file from this folder: say where each kind is read from.
+    if(filename === 'srmodels.bin'){
+      setFileStatus('srmodels.bin is read at srstart when srmodelsource is 1 (SD). Run srstop, then srstart.');
     } else if(filename === 'commands.txt'){
-      postCli('sr loadcmds /sd/ESP-SR Models/' + filename).then(function(out){
-        setFileStatus(out);
-        setTimeout(refreshStatus, 500);
-      }).catch(function(e){ setFileStatus('Error: ' + e.message); });
+      setFileStatus('The command list is read from /sd/ESPSR/commands.txt. Put the file there and run srcmdsreload.');
     } else {
-      setFileStatus('Selected: ' + filename + ' (use sr commands to load)');
+      setFileStatus('Selected: ' + filename + ' (no command loads this file; models are read from srmodels.bin at srstart)');
     }
   }
   
@@ -662,6 +665,11 @@ inline void streamSpeechInner(httpd_req_t* req) {
       autotuneActive = !autotuneActive;
       updateAutotuneButton();
       updateTuningStatus();
+    }).catch(function(e){
+      // Auto-tune ends by itself, so the button can be stale: the refusal
+      // says so, and the status read sets the button from the device.
+      hw.setText('sr-tuning-status', (e && e.reply) || ('Error: ' + (e && e.message)));
+      refreshStatus();
     });
   };
   
@@ -671,14 +679,18 @@ inline void streamSpeechInner(httpd_req_t* req) {
     
     // Apply AFE gain via tuning command
     postCli('srtuninggain ' + afeGain).then(function(){
-      // Apply dynamic gain
+      // Apply dynamic gain: the limit is its own command, then the switch.
       if(dynMax === '0'){
         return postCli('srdyngain off');
       } else {
-        return postCli('srdyngain on ' + dynMax);
+        return postCli('srdyngain max ' + dynMax).then(function(){
+          return postCli('srdyngain on');
+        });
       }
     }).then(function(){
       updateTuningStatus();
+    }).catch(function(e){
+      hw.setText('sr-tuning-status', 'Gain settings not fully applied: ' + e.message);
     });
   };
   

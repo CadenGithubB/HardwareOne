@@ -2232,7 +2232,8 @@ records image identities and hardware scope separately from earlier tests.
 The Bluetooth page previously issued the retired `g2mic` command, assumed
 server mode when a duplicate startup request failed, and changed mode/reconnect
 controls without confirming the device's result. A rejected reconnect command
-can contain `NOT enabled`, so checking for the word `enabled` was also unsafe.
+is an Error reply (HTTP 400) that can contain `not enabled`, so checking for
+the word `enabled` was also unsafe.
 
 The page now starts with mode unknown and keeps dependent controls unavailable
 until its normal status request succeeds. That response is the single source

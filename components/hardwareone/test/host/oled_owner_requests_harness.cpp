@@ -433,7 +433,7 @@ static void caseModeMenu() {
         "off-owner oledmode must not write currentOLEDMode before the owner frame");
   check(gOnEnterCalls == 0, "off-owner oledmode must not run the target's onEnter hook");
   check(gInputAutoStarts == 0, "off-owner oledmode must not auto-start input on cmd_exec");
-  check(broadcastSaid("OLED mode: Menu"), "oledmode reports the requested mode");
+  check(broadcastSaid("OLED mode requested: Menu"), "oledmode reports the requested mode");
   checkNothingOffOwner("oledmode menu");
   ownerFrame();
   check(currentOledMode == OLED_MENU, "the owner frame enters the requested mode");

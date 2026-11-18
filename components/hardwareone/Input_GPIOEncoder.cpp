@@ -159,17 +159,18 @@ void inputTask(void*) {
   }
 }
 
-bool inputStartInternal() {
+GpioEncoderStart gpioEncoderStart() {
   if (!GPIO_IS_VALID_GPIO(GPIO_ENCODER_PIN_A) || !GPIO_IS_VALID_GPIO(GPIO_ENCODER_PIN_B) ||
-      !GPIO_IS_VALID_GPIO(GPIO_ENCODER_PIN_BUTTON)) return false;
+      !GPIO_IS_VALID_GPIO(GPIO_ENCODER_PIN_BUTTON)) return GpioEncoderStart::PinsInvalid;
 #if ENABLE_GPIO_ENCODER_BUTTONS
-  if (!auxiliaryPinsValid()) return false;
+  if (!auxiliaryPinsValid()) return GpioEncoderStart::PinsInvalid;
 #endif
-  if (!inputCacheInit()) return false;
+  if (!inputCacheInit()) return GpioEncoderStart::CacheMissing;
   if (!sGpioStateMutex) sGpioStateMutex = xSemaphoreCreateMutex();
-  if (!sGpioStateMutex || xSemaphoreTake(sGpioStateMutex, pdMS_TO_TICKS(100)) != pdTRUE) return false;
-  if (gInputRunning) { xSemaphoreGive(sGpioStateMutex); return true; }
-  if (!clearCacheLocked()) { xSemaphoreGive(sGpioStateMutex); return false; }
+  if (!sGpioStateMutex) return GpioEncoderStart::OutOfMemory;
+  if (xSemaphoreTake(sGpioStateMutex, pdMS_TO_TICKS(100)) != pdTRUE) return GpioEncoderStart::Busy;
+  if (gInputRunning) { xSemaphoreGive(sGpioStateMutex); return GpioEncoderStart::Started; }
+  if (!clearCacheLocked()) { xSemaphoreGive(sGpioStateMutex); return GpioEncoderStart::Busy; }
   pinMode(GPIO_ENCODER_PIN_A, INPUT_PULLUP);
   pinMode(GPIO_ENCODER_PIN_B, INPUT_PULLUP);
   pinMode(GPIO_ENCODER_PIN_BUTTON, GPIO_ENCODER_BUTTON_ACTIVE_LOW ? INPUT_PULLUP : INPUT_PULLDOWN);
@@ -195,12 +196,12 @@ bool inputStartInternal() {
                                        tskNO_AFFINITY) != pdPASS) {
     stopLocked(true);
     xSemaphoreGive(sGpioStateMutex);
-    return false;
+    return GpioEncoderStart::TaskNotCreated;
   }
   if (!inputPublishState(UINT32_MAX, JOYSTICK_CENTER, JOYSTICK_CENTER, 0, false, millis())) {
     stopLocked(true);
     xSemaphoreGive(sGpioStateMutex);
-    return false;
+    return GpioEncoderStart::Busy;
   }
   gInputRunning = gInputConnected = true;
   xSemaphoreGive(sGpioStateMutex);
@@ -209,8 +210,10 @@ bool inputStartInternal() {
 #if ENABLE_GPIO_ENCODER_BUTTONS
   INFO_INPUT_LIFECYCLEF("GPIO encoder auxiliary buttons enabled (%u keys)", static_cast<unsigned>(kAuxButtonCount));
 #endif
-  return true;
+  return GpioEncoderStart::Started;
 }
+
+bool inputStartInternal() { return gpioEncoderStart() == GpioEncoderStart::Started; }
 
 void gpioEncoderStop() {
   if (!sGpioStateMutex || xSemaphoreTake(sGpioStateMutex, pdMS_TO_TICKS(100)) != pdTRUE) return;

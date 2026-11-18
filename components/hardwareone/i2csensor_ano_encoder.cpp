@@ -343,6 +343,7 @@ int anoEncoderBuildDataJson(char* buf, size_t bufSize) {
 // Command handlers
 // ============================================================================
 const char* cmd_anoencoder(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
   if (argWantsJson(argsInput)) {
     if (!ensureDebugBuffer()) return SENSOR_JSON_NOBUF;
     int n = anoEncoderBuildDataJson(getDebugBuffer(), 1024);  // shared builder (also feeds web + ESP-NOW)
@@ -356,6 +357,8 @@ const char* cmd_anoencoder(const String& argsInput) {
   }
   AnoEncoderCache reading;
   if (!anoEncoderCacheSnapshot(reading, 50)) return "Error: [ANO] Snapshot unavailable";
+  // The cache holds a reading only after the polling task's first good poll.
+  if (!reading.dataValid) return "Error: [ANO] No reading yet. Run 'openinput' and retry.";
   const long pos = reading.encoderPosition;
   const unsigned axis = reading.currentAxis;
   const unsigned long buttons = reading.buttons;

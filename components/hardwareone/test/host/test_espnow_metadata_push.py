@@ -93,7 +93,7 @@ def main():
         unit, exe = Path(tmp) / 'espnow_metadata_push.cpp', Path(tmp) / 'espnow_metadata_push'
         unit.write_text(harness)
         cmd = [a.cxx, '-std=c++17', '-Wall', '-Wextra', '-Werror', '-pedantic',
-               '-I', str(HERE / 'web_batch_stubs'), str(unit), '-o', str(exe)]
+               '-I', str(HERE / 'web_batch_stubs'), '-I', str(a.component), str(unit), '-o', str(exe)]
         if len(policy) == len(POLICY_MARKERS):
             cmd.insert(1, '-DHW1_HAVE_METADATA_POLICY')
         if a.sanitize:

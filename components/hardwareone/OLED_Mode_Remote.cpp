@@ -458,12 +458,14 @@ static void swapRolesConfirmed(void* userData) {
   // If we're master, peer becomes master and we become worker (and vice versa)
   bool wasMaster = (isBondMaster());
   char cmd[48];
-  // Remote first (so peer is ready before local handshake restarts)
+  // Remote first (so peer is ready before local handshake restarts). A refused
+  // or unsent remote step ends the swap with its reason on the toast: this
+  // device keeps its role.
   snprintf(cmd, sizeof(cmd), "remote:bondrole %s", wasMaster ? "master" : "worker");
-  executeOledCommand(cmd);
+  if (!oledRunCommand(cmd)) return;
   // Then local
   snprintf(cmd, sizeof(cmd), "bondrole %s", wasMaster ? "worker" : "master");
-  executeOledCommand(cmd);
+  (void)oledRunCommand(cmd);
 }
 
 static void executeBondAction() {

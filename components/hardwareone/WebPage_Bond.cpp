@@ -1309,7 +1309,12 @@ static esp_err_t handleBondStream(httpd_req_t* req) {
     webBondSendChunkf(req, "{\"success\":true,\"sensor\":\"%s\",\"enabled\":%s}",
                       sensorParam, newState ? "true" : "false");
   } else {
-    webBondSendChunk(req, "{\"success\":false,\"error\":\"Stream command failed\"}");
+    // The command's own reason: an admin refusal, bond not ready, unknown sensor.
+    String body = "{\"success\":false,\"error\":";
+    body += jsonQuote(cmdOut.length() ? commandReplyReason(cmdOut.c_str())
+                                      : "Stream command failed");
+    body += "}";
+    webBondSendChunk(req, body.c_str());
   }
   httpd_resp_send_chunk(req, NULL, 0);
   return ESP_OK;
@@ -1391,7 +1396,14 @@ static esp_err_t handleBondExec(httpd_req_t* req) {
       webBondSendChunk(req, c);
     }
   }
-  webBondSendChunk(req, "\"}");
+  // "success" of a sent command says only that the frame left. The request id
+  // lets the caller match the bonded device's answer in the message history.
+  uint32_t reqId = 0;
+  if (success && parseRemoteCommandSentReqId(resultStr.c_str(), &reqId)) {
+    webBondSendChunkf(req, "\",\"pending\":true,\"reqId\":%lu}", (unsigned long)reqId);
+  } else {
+    webBondSendChunk(req, "\"}");
+  }
   
   httpd_resp_send_chunk(req, NULL, 0);
   return ESP_OK;
@@ -1424,7 +1436,10 @@ static esp_err_t handleBondRole(httpd_req_t* req) {
   
   if (!remoteOk) {
     // Abort — don't change local role if peer didn't change, or we get split-brain
-    webBondSendChunkf(req, "{\"success\":false,\"error\":\"Remote role change failed: %s\"}", remoteResult.c_str());
+    String body = "{\"success\":false,\"error\":";
+    body += jsonQuote(String("Remote role change failed: ") + remoteResult);
+    body += "}";
+    webBondSendChunk(req, body.c_str());
     httpd_resp_send_chunk(req, NULL, 0);
     return ESP_OK;
   }
@@ -1433,7 +1448,24 @@ static esp_err_t handleBondRole(httpd_req_t* req) {
   String localCmd = "bondrole ";
   localCmd += localNewRole;
   String localResult;
-  executeUnifiedWebCommand(req, ctx, localCmd, localResult);
+  if (!executeUnifiedWebCommand(req, ctx, localCmd, localResult)) {
+    // The bonded device was already sent its new role: say which side is left.
+    String error = "The bonded device was sent its new role, but this device did not change its own";
+    if (localResult.length()) {
+      error += ": ";
+      error += commandReplyReason(localResult.c_str());
+    }
+    if (!error.endsWith(".")) error += ".";
+    error += " Run bondrole ";
+    error += localNewRole;
+    error += " here.";
+    String body = "{\"success\":false,\"error\":";
+    body += jsonQuote(error);
+    body += "}";
+    webBondSendChunk(req, body.c_str());
+    httpd_resp_send_chunk(req, NULL, 0);
+    return ESP_OK;
+  }
   
   uint8_t newRole = gSettings.bondRole;
   const char* roleName = (newRole == 1) ? "master" : "worker";
@@ -1540,7 +1572,8 @@ static esp_err_t handleBondCliBatch(httpd_req_t* req) {
       return ESP_OK;
     }
     if (!ok && out.length() == 0) out = "Error: command delivery failed";
-    if (ok && out.startsWith("Remote command sent:")) {
+    uint32_t sentReqId = 0;
+    if (ok && parseRemoteCommandSentReqId(out.c_str(), &sentReqId)) {
       out = "Pending: remote deletion accepted for delivery; verify the bonded device state.";
     }
     if (resultsBuffered && !results.add("OK: confirmed in the local browser")) {
@@ -1571,7 +1604,9 @@ static esp_err_t handleBondCliBatch(httpd_req_t* req) {
         results.clear();
         break;
       }
-      if (!ok && out.length() == 0) out = "command failed";
+      if (!ok && out.length() == 0) {
+        out = "Error: Command was not sent to the bonded device. Retry.";
+      }
       // Keep execution order unchanged even if response buffering fails.
       if (resultsBuffered && !results.add(out)) resultsBuffered = false;
       count++;

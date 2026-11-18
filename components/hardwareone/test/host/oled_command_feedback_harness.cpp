@@ -255,7 +255,10 @@ static void case_helper_error_replies() {
   const struct { const char* reply; const char* toast; } kCases[] = {
     {"Error: Not connected to WiFi", "Not connected to WiFi"},
     {"ERROR: sensor busy", "sensor busy"},
-    {"[ERROR] Command timed out", "Command timed out"},
+    {"[ERROR] list full", "list full"},
+    {"Error: Command timed out after 60 s. It may still finish; check the result before "
+     "repeating it.",
+     "Command timed out after 60 s. It may still finish; check the result before repeating it."},
     {"Error: first line\nsecond line", "first line"},
     {"Unknown command: frob\nType 'help' for available commands", "Unknown command: frob"},
     {"ERROR", "Command failed. Check logs."},
@@ -300,7 +303,11 @@ static void case_reply_text() {
     {false, "Error: Admin access required for command 'wifiadd'. Contact an administrator.",
      "Admin required"},
     {false, "Error: Super-admin access required for command 'factoryreset'.", "Admin required"},
-    {false, "[ERROR] Command timed out", "Command timed out"},
+    {false, "[ERROR] list full", "list full"},
+    // The executor's timeout reply, cut to the caller's 40-byte buffer.
+    {false, "Error: Command timed out after 60 s. It may still finish; check the result before "
+            "repeating it.",
+     "Command timed out after 60 s. It may st"},
     {false, "ERROR: list full\nsecond line", "list full"},
     {false, "Unknown command: frob", "Unknown command: frob"},
     {false, "ERROR", "Add failed"},

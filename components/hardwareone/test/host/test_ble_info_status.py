@@ -55,7 +55,10 @@ def stream_definitions(owner: str) -> list[str]:
     """The stream CLI handlers, their parser/flag helpers and the push functions."""
     command_header = (COMPONENT / "System_Command.h").read_text()
     command_source = (COMPONENT / "System_Command.cpp").read_text()
-    out = [extract_block(command_header, "class CommandArgs") + ";",
+    # The on/off parser the stream toggles use.
+    utils = (COMPONENT / "System_Utils.h").read_text()
+    out = [extract_block(utils, "inline int parseBoolArg("),
+           extract_block(command_header, "class CommandArgs") + ";",
            "const String CommandArgs::empty_;"]
     out += [extract_block(command_source, marker) for marker in
             ("CommandArgs::CommandArgs(", "void CommandArgs::parse()",

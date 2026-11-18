@@ -487,8 +487,10 @@ int main(int argc, char** argv) {
                          "/sd/.\\stt/u2/a.txt","/sd/stt/u2~1/a.txt"}) {
       fixture("private spoken words");tokens={String(path)};broadcasts.clear();
       const unsigned beforeExists=existsCalls,beforeRead=viewReads;
-      check(std::strcmp(cmd_fileview(""),"Use fileread or the file browser to read private transcripts")==0,
+      const char* refusal=cmd_fileview("");
+      check(std::strcmp(refusal,"Error: fileview does not show private transcripts. Use fileread or the file browser.")==0,
             "private fileview redirects to owner-scoped readers");
+      check(commandReplyIsFailure(refusal),"a refused view is a failed command");
       check(existsCalls==beforeExists&&viewReads==beforeRead&&broadcasts.empty(),
             "private fileview cannot read or broadcast content");
     }
@@ -587,6 +589,21 @@ int main(int argc, char** argv) {
     check(invoke() == "{\"success\":false,\"error\":\"Not found or access denied\"}", "guarded missing/denied response remains unchanged");
     fileExists = true; fileDirectory = true;
     check(invoke() == "{\"success\":false,\"error\":\"Not found or access denied\"}", "directories remain rejected");
+
+    // An offset or length that is not a whole number is refused before the
+    // file is opened, not read as 0.
+    fileDirectory = false; fixture("0123456789");
+    const unsigned opensBeforeJunk = openCalls;
+    const char kNotNumbers[] =
+        "Error: offset and length must be whole numbers. Usage: fileread \"<path>\" [offset] [len] [b64|bin].";
+    for (const std::vector<String>& line : {std::vector<String>{"/a", "40x6"}, {"/a", "b64"}, {"/a", "0", "4k"},
+                                           {"/a", "", "4"}, {"/a", "1.5", "4"}, {"/a", "0", "0x10"}}) {
+      tokens = line;
+      const char* reply = cmd_fileread(String("mock tokenization boundary"));
+      check(std::strcmp(reply, kNotNumbers) == 0 && commandReplyIsFailure(reply), "a junk offset or length is refused");
+      check(fsDepth == 0 && openCalls == opensBeforeJunk, "a refused read does not touch VFS");
+    }
+    checkPayload(invoke("/a", 3, 4), "3456", "/a", 3, false);
 
     {
       PsramBuffer tiny(16, "fileread.test");

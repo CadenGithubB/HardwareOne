@@ -452,7 +452,27 @@ static const char* inputDeviceLabel() {
 static const char* cmd_openinput(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 #if ENABLE_GPIO_ENCODER
-  return inputStartInternal() ? "[Input] GPIO encoder started" : "Error: GPIO encoder start failed";
+  // gpioEncoderStart() reports a running encoder as Started; the command
+  // answers it as a refusal.
+  if (gInputRunning) {
+    return "Error: GPIO encoder is already running. Stop it first with 'closeinput' to restart it.";
+  }
+  switch (gpioEncoderStart()) {
+    case GpioEncoderStart::Started:
+      break;
+    case GpioEncoderStart::PinsInvalid:
+      return "Error: GPIO encoder pins are not valid on this board. "
+             "Correct the encoder pins in the board profile and rebuild.";
+    case GpioEncoderStart::CacheMissing:
+      return "Error: Input cache is not available. Reboot the device and retry openinput.";
+    case GpioEncoderStart::OutOfMemory:
+      return kCommandReplyOutOfMemory;
+    case GpioEncoderStart::Busy:
+      return "Error: GPIO encoder is busy. Retry openinput in a few seconds.";
+    case GpioEncoderStart::TaskNotCreated:
+      return "Error: GPIO encoder task could not be created. Free memory and retry openinput.";
+  }
+  return "[Input] GPIO encoder started";
 #else
   // The device starts asynchronously and this command returns no button state —
   // point at the driver read command so the next step is to read live input.
@@ -471,11 +491,15 @@ static const char* cmd_closeinput(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   INFO_INPUT_LIFECYCLEF("cmd_closeinput: Stop requested");
 #if ENABLE_GPIO_ENCODER
+  if (!gInputRunning) {
+    return "Error: GPIO encoder is not running. Start it with 'openinput'.";
+  }
   gpioEncoderStop();
   return gInputRunning ? "Error: GPIO encoder is busy; retry closeinput" : "[Input] GPIO encoder stopped";
 #else
-  if (!requestSensorStop(I2C_DEVICE_INPUT)) return "Error: Input stop queue unavailable";
-  return "[Input] Stop requested; cleanup will complete asynchronously";
+  // Same replies as every sensor stop: an Error when the input is not running
+  // (bus disabled or nothing open), an Error when the request queue is missing.
+  return cmd_sensorstop_queued(I2C_DEVICE_INPUT, "Input");
 #endif
 }
 
@@ -500,8 +524,14 @@ static const char* cmd_inputautostart(const String& argsInput) {
 static const char* cmd_inputdevicepollms(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 #if ENABLE_GT911_TOUCH
+  if (CommandArgs(argsInput).count() > 0) {
+    return "Error: The poll interval is fixed at 20 ms on the GT911 touch input. Nothing to set.";
+  }
   return "[Input] GT911 uses a fixed 20 ms sample interval";
 #elif ENABLE_GPIO_ENCODER
+  if (CommandArgs(argsInput).count() > 0) {
+    return "Error: The GPIO encoder has no poll interval. Nothing to set.";
+  }
   return "[Input] GPIO encoder uses interrupts and a fixed 5 ms switch sample; poll interval applies to I2C input only";
 #else
   CommandArgs a(argsInput);

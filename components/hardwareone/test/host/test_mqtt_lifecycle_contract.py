@@ -206,7 +206,7 @@ assert "sMqttBeforeConnectSeen.store(true" in mqtt
 close_command = function_body(mqtt, "const char* cmd_closemqtt(")
 enabled_command = function_body(mqtt, "const char* cmd_mqttclientenabled(")
 not_running_branch = function_body(close_command, "if (!stopMqtt())")
-assert 'return "[MQTT] Not running";' in not_running_branch
+assert 'return "Error: MQTT client is not running. Start it with \'openmqtt\'.";' in not_running_branch
 assert close_command.index(not_running_branch) < close_command.index(
     'return "[MQTT] Client stop scheduled";'
 )

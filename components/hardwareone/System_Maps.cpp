@@ -331,15 +331,17 @@ MapFeatureStyle MapRenderer::getFeatureStyle(MapFeatureType type) {
 // MapCore - Map File Loading (Display-Agnostic)
 // =============================================================================
 
-bool MapCore::loadMapFile(const char* path) {
+bool MapCore::loadMapFile(const char* path, const char** why) {
+  // Hands the reason of a failed load to the caller that asked for it.
+  auto refused = [&](const char* reason) {
+    if (why) *why = reason;
+    return false;
+  };
   // Hold the map lock across the WHOLE load: the unloadMap + fresh pool/slots/
   // tileDir allocation below must be atomic w.r.t. any concurrent renderMap, or
   // a render could see valid=true with a half-built cache. Taken before the FS
   // lock (global order: map -> FS). unloadMap's own guard no-ops (reentrant).
   MapCacheGuard mapGuard("MapCore.loadMapFile");
-
-  // Unload any existing map
-  unloadMap();
 
   // Pause sensor polling during file I/O to prevent I2C contention
   pollPause();
@@ -350,14 +352,14 @@ bool MapCore::loadMapFile(const char* path) {
   if (!VFS::existsGuarded(path, currentAuthContext())) {
     WARN_MAPSF("Map file not found: %s", path);
     pollResume();
-    return false;
+    return refused("file not found");
   }
 
   File f = VFS::openGuarded(path, "r", currentAuthContext());
   if (!f) {
     ERROR_MAPSF("Failed to open map file: %s", path);
     pollResume();
-    return false;
+    return refused("file cannot be opened");
   }
   
   size_t fileSize = f.size();
@@ -365,7 +367,7 @@ bool MapCore::loadMapFile(const char* path) {
     ERROR_MAPSF("Map file too small: %zu bytes", fileSize);
     f.close();
     pollResume();
-    return false;
+    return refused("file is too small to be a map");
   }
   
   // Read header first
@@ -374,7 +376,7 @@ bool MapCore::loadMapFile(const char* path) {
     ERROR_MAPSF("Failed to read map header");
     f.close();
     pollResume();
-    return false;
+    return refused("file header could not be read");
   }
   
   // Validate magic
@@ -382,7 +384,7 @@ bool MapCore::loadMapFile(const char* path) {
     ERROR_MAPSF("Invalid map magic: %.4s", header.magic);
     f.close();
     pollResume();
-    return false;
+    return refused("not a map file");
   }
   
   // Validate version (v6 only)
@@ -390,8 +392,12 @@ bool MapCore::loadMapFile(const char* path) {
     ERROR_MAPSF("Unsupported map version: %u (need v6)", header.version);
     f.close();
     pollResume();
-    return false;
+    return refused("unsupported map version (need v6)");
   }
+
+  // The file is a map this firmware reads. Only now give up the loaded map,
+  // so a wrong path or a foreign file leaves it in place.
+  unloadMap();
   
   // Store basic info (cache allocated after tile directory is parsed)
   _currentMap.valid = true;
@@ -473,7 +479,7 @@ bool MapCore::loadMapFile(const char* path) {
       f.close();
       pollResume();
       unloadMap();
-      return false;
+      return refused("the name table could not be read");
     }
   }
   if (header.nameCount > 0 && header.nameCount <= MAX_MAP_NAMES) {
@@ -638,7 +644,7 @@ bool MapCore::loadMapFile(const char* path) {
     ERROR_MAPSF("Failed to allocate tile cache pool in PSRAM");
     pollResume();
     unloadMap();
-    return false;
+    return refused("not enough memory for the tile cache");
   }
 
   // Distribute pool budget proportionally to each tier's weighted need
@@ -700,7 +706,7 @@ bool MapCore::loadMapFile(const char* path) {
     ERROR_MAPSF("Failed to allocate %u tile cache slot entries", totalSlots);
     pollResume();
     unloadMap();
-    return false;
+    return refused("not enough memory for the tile cache");
   }
   // Initialize all slots as empty, with correct tier assignment
   for (uint8_t t = 0; t < numTiers; t++) {
@@ -1046,8 +1052,9 @@ bool MapCore::isPositionInMap(float lat, float lon) {
           lonMicro <= _currentMap.header.maxLon);
 }
 
-int MapCore::getAvailableMaps(char maps[][96], int maxMaps) {
+int MapCore::getAvailableMaps(char maps[][96], int maxMaps, bool* more) {
   int count = 0;
+  if (more) *more = false;
 
   FsLockGuard fsGuard("MapCore.getAvailableMaps");
   
@@ -1062,7 +1069,8 @@ int MapCore::getAvailableMaps(char maps[][96], int maxMaps) {
   }
   
   File entry = dir.openNextFile();
-  while (entry && count < maxMaps) {
+  // With `more`, the scan goes on past a full list until one further map is found.
+  while (entry && (count < maxMaps || (more && !*more))) {
     if (entry.isDirectory()) {
       String dirName = String(entry.name());
       if (dirName.startsWith("/maps/")) dirName = dirName.substring(6);
@@ -1091,7 +1099,9 @@ int MapCore::getAvailableMaps(char maps[][96], int maxMaps) {
             f = sub.openNextFile();
           }
           sub.close();
-          if (found.length() > 0) {
+          if (found.length() > 0 && count >= maxMaps) {
+            if (more) *more = true;
+          } else if (found.length() > 0) {
             String rel = dirName + "/" + found;
             strncpy(maps[count], rel.c_str(), 95);
             maps[count][95] = '\0';
@@ -2074,22 +2084,29 @@ const char* cmd_mapload(const String& argsInput) {
   if (qerr) return qerr;
   if (a.has(1)) return "Error: unexpected argument — usage: mapload \"<path>\"";
 
-  if (MapCore::loadMapFile(path.c_str())) {
+  const char* why = nullptr;
+  if (MapCore::loadMapFile(path.c_str(), &why)) {
     const LoadedMap& currentMap = MapCore::getCurrentMap();
     if (!ensureDebugBuffer()) return "Map loaded";
     snprintf(getDebugBuffer(), 1024, "Loaded: %s (%lu features)", 
              currentMap.filename, currentMap.header.featureCount);
     return getDebugBuffer();
   }
-  
-  return "Error: Failed to load map";
+
+  // A file that is not a readable map leaves the loaded map in place; a load
+  // that failed later has already given it up.
+  const char* state = MapCore::hasValidMap() ? "The previous map is still loaded."
+                                             : "No map is loaded now; pick one from maplist.";
+  if (!ensureDebugBuffer()) return "Error: Map not loaded. Pick one from maplist.";
+  snprintf(getDebugBuffer(), 1024, "Error: Map not loaded: %s. %s", why ? why : "load failed", state);
+  return getDebugBuffer();
 }
 
 const char* cmd_mapunload(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   (void)argsInput;
   if (!MapCore::hasValidMap()) {
-    return "Error: No map loaded on device.";
+    return "Error: No map is loaded. Load one with 'mapload \"<path>\"'.";
   }
   MapCore::unloadMap();
   return "Map unloaded (PSRAM/cache freed on device).";
@@ -2197,7 +2214,8 @@ const char* cmd_maplist(const String& argsInput) {
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
 
   char maps[8][96];
-  int count = MapCore::getAvailableMaps(maps, 8);
+  bool more = false;  // the device holds more maps than the list
+  int count = MapCore::getAvailableMaps(maps, 8, &more);
 
   if (argWantsJson(argsInput)) {
     PSRAM_JSON_DOC(doc);
@@ -2205,6 +2223,7 @@ const char* cmd_maplist(const String& argsInput) {
     JsonArray arr = doc["maps"].to<JsonArray>();
     for (int i = 0; i < count; i++) arr.add(String("/maps/") + maps[i]);
     doc["count"] = count;
+    if (more) doc["truncated"] = true;
     serializeJson(doc, getDebugBuffer(), 1024);
     return getDebugBuffer();
   }
@@ -2218,6 +2237,9 @@ const char* cmd_maplist(const String& argsInput) {
 
   for (int i = 0; i < count && offset < 900; i++) {
     offset += snprintf(buf + offset, 1024 - offset, "  /maps/%s\n", maps[i]);
+  }
+  if (more && offset < 960) {
+    snprintf(buf + offset, 1024 - offset, "  ... (more maps not shown; the list holds %d)\n", count);
   }
 
   cliHint("to load one of these, use 'mapload \"<path>\"'");
@@ -2471,55 +2493,75 @@ int WaypointManager::addWaypoint(float lat, float lon, const char* name, const c
   return -1;  // No free slots
 }
 
-bool WaypointManager::setNotes(int index, const char* notes) {
-  if (!_waypoints) return false;
-  if (index < 0 || index >= MAX_WAYPOINTS) return false;
-  if (!_waypoints[index].active) return false;
+WaypointManager::Change WaypointManager::setNotes(int index, const char* notes) {
+  if (!_waypoints) return Change::Invalid;
+  if (index < 0 || index >= MAX_WAYPOINTS) return Change::Invalid;
+  if (!_waypoints[index].active) return Change::Invalid;
+  char previous[WAYPOINT_NOTES_LEN];
+  strlcpy(previous, _waypoints[index].notes, sizeof(previous));
   sanitizeWaypointTextCopy(_waypoints[index].notes, WAYPOINT_NOTES_LEN, notes ? notes : "", "", true);
-  saveWaypoints();
-  return true;
+  if (!saveWaypoints()) {
+    // Not on disk: keep the notes the file holds.
+    strlcpy(_waypoints[index].notes, previous, WAYPOINT_NOTES_LEN);
+    return Change::NotSaved;
+  }
+  return Change::Ok;
 }
 
-bool WaypointManager::setName(int index, const char* name) {
-  if (!_waypoints) return false;
-  if (index < 0 || index >= MAX_WAYPOINTS) return false;
-  if (!_waypoints[index].active) return false;
+WaypointManager::Change WaypointManager::setName(int index, const char* name) {
+  if (!_waypoints) return Change::Invalid;
+  if (index < 0 || index >= MAX_WAYPOINTS) return Change::Invalid;
+  if (!_waypoints[index].active) return Change::Invalid;
+  char previous[WAYPOINT_NAME_LEN];
+  strlcpy(previous, _waypoints[index].name, sizeof(previous));
   sanitizeWaypointTextCopy(_waypoints[index].name, WAYPOINT_NAME_LEN, name ? name : "WP", "WP", false);
-  saveWaypoints();
-  return true;
+  if (!saveWaypoints()) {
+    // Not on disk: keep the name the file holds.
+    strlcpy(_waypoints[index].name, previous, WAYPOINT_NAME_LEN);
+    return Change::NotSaved;
+  }
+  return Change::Ok;
 }
 
 // File attachment management methods
-bool WaypointManager::addFile(int waypointIndex, const char* filePath) {
-  if (!_waypoints) return false;
-  if (waypointIndex < 0 || waypointIndex >= MAX_WAYPOINTS) return false;
-  if (!_waypoints[waypointIndex].active) return false;
-  if (!filePath || !filePath[0]) return false;
-  if (_waypoints[waypointIndex].fileCount >= MAX_WAYPOINT_FILES) return false;
+WaypointManager::Change WaypointManager::addFile(int waypointIndex, const char* filePath) {
+  if (!_waypoints) return Change::Invalid;
+  if (waypointIndex < 0 || waypointIndex >= MAX_WAYPOINTS) return Change::Invalid;
+  if (!_waypoints[waypointIndex].active) return Change::Invalid;
+  if (!filePath || !filePath[0]) return Change::Invalid;
+  if (_waypoints[waypointIndex].fileCount >= MAX_WAYPOINT_FILES) return Change::Invalid;
 
   char sanitized[WAYPOINT_FILE_PATH_LEN];
   sanitizeWaypointTextCopy(sanitized, sizeof(sanitized), filePath, "", false);
-  if (!sanitized[0]) return false;
+  if (!sanitized[0]) return Change::Invalid;
   
   // Check if file already exists
   for (int i = 0; i < _waypoints[waypointIndex].fileCount; i++) {
     if (strcmp(_waypoints[waypointIndex].files[i], sanitized) == 0) {
-      return false;  // Already linked
+      return Change::Invalid;  // Already linked
     }
   }
   
   strlcpy(_waypoints[waypointIndex].files[_waypoints[waypointIndex].fileCount], 
           sanitized, WAYPOINT_FILE_PATH_LEN);
   _waypoints[waypointIndex].fileCount++;
-  saveWaypoints();
-  return true;
+  if (!saveWaypoints()) {
+    // Not on disk: drop the link again.
+    _waypoints[waypointIndex].fileCount--;
+    _waypoints[waypointIndex].files[_waypoints[waypointIndex].fileCount][0] = '\0';
+    return Change::NotSaved;
+  }
+  return Change::Ok;
 }
 
-bool WaypointManager::removeFile(int waypointIndex, int fileIndex) {
-  if (!_waypoints) return false;
-  if (waypointIndex < 0 || waypointIndex >= MAX_WAYPOINTS) return false;
-  if (!_waypoints[waypointIndex].active) return false;
-  if (fileIndex < 0 || fileIndex >= _waypoints[waypointIndex].fileCount) return false;
+WaypointManager::Change WaypointManager::removeFile(int waypointIndex, int fileIndex) {
+  if (!_waypoints) return Change::Invalid;
+  if (waypointIndex < 0 || waypointIndex >= MAX_WAYPOINTS) return Change::Invalid;
+  if (!_waypoints[waypointIndex].active) return Change::Invalid;
+  if (fileIndex < 0 || fileIndex >= _waypoints[waypointIndex].fileCount) return Change::Invalid;
+
+  char removed[WAYPOINT_FILE_PATH_LEN];
+  strlcpy(removed, _waypoints[waypointIndex].files[fileIndex], sizeof(removed));
   
   // Shift remaining files down
   for (int i = fileIndex; i < _waypoints[waypointIndex].fileCount - 1; i++) {
@@ -2528,8 +2570,17 @@ bool WaypointManager::removeFile(int waypointIndex, int fileIndex) {
   }
   _waypoints[waypointIndex].fileCount--;
   _waypoints[waypointIndex].files[_waypoints[waypointIndex].fileCount][0] = '\0';
-  saveWaypoints();
-  return true;
+  if (!saveWaypoints()) {
+    // Not on disk: put the link back where it was.
+    for (int i = _waypoints[waypointIndex].fileCount; i > fileIndex; i--) {
+      strlcpy(_waypoints[waypointIndex].files[i],
+              _waypoints[waypointIndex].files[i - 1], WAYPOINT_FILE_PATH_LEN);
+    }
+    strlcpy(_waypoints[waypointIndex].files[fileIndex], removed, WAYPOINT_FILE_PATH_LEN);
+    _waypoints[waypointIndex].fileCount++;
+    return Change::NotSaved;
+  }
+  return Change::Ok;
 }
 
 int WaypointManager::getFileCount(int waypointIndex) {
@@ -2563,15 +2614,23 @@ bool WaypointManager::clearAll() {
     _selectedTarget = -1;
     return true;
   }
+  bool wasActive[MAX_WAYPOINTS];
+  const int previousTarget = _selectedTarget;
   bool hadAny = false;
   for (int i = 0; i < MAX_WAYPOINTS; i++) {
+    wasActive[i] = _waypoints[i].active;
     if (_waypoints[i].active) {
       _waypoints[i].active = false;
       hadAny = true;
     }
   }
   _selectedTarget = -1;
-  if (hadAny) saveWaypoints();
+  if (hadAny && !saveWaypoints()) {
+    // The file still holds them: keep the waypoints (and target) in memory too.
+    for (int i = 0; i < MAX_WAYPOINTS; i++) _waypoints[i].active = wasActive[i];
+    _selectedTarget = previousTarget;
+    return false;
+  }
   return true;
 }
 
@@ -2608,10 +2667,10 @@ int WaypointManager::getActiveCount() {
   return count;
 }
 
-void WaypointManager::selectTarget(int index) {
+bool WaypointManager::selectTarget(int index) {
   if (!_waypoints) {
     _selectedTarget = -1;
-    return;
+    return true;
   }
   if (index < 0 || index >= MAX_WAYPOINTS) {
     _selectedTarget = -1;
@@ -2620,7 +2679,7 @@ void WaypointManager::selectTarget(int index) {
   } else {
     _selectedTarget = -1;
   }
-  saveWaypoints();
+  return saveWaypoints();
 }
 
 bool WaypointManager::getDistanceBearingToIndex(int index, float fromLat, float fromLon,
@@ -3168,7 +3227,9 @@ const char* GpsTrackManager::startLiveTracking() {
 #else
   TrackOperationGuard operation;
   if (!operation) return "Error: Another track operation is in progress";
-  if (isLiveTracking()) return "SUCCESS: Live tracking already active";
+  if (isLiveTracking()) {
+    return "Error: Live tracking is already running. Stop it first with 'gpstrack live stop' to restart it.";
+  }
   if (!gSettings.sensorLogEnabled) return "Error: Sensor logging is disabled";
   if (gSensorLoggingRunning) return "Error: Stop the existing sensor log before starting a live track";
   if (gSettings.healthLoggingEnabled) return "Error: Disable health logging before starting a live track";
@@ -3190,8 +3251,19 @@ const char* GpsTrackManager::startLiveTracking() {
 
   const char* result = cmd_gpsstart("");
   if (!result) return "Error: GPS startup returned no result";
-  if (commandReplyIsFailure(result)) return result;
-  const String gpsStatus(result);  // command replies share a borrowed buffer
+  // An open GPS, or one whose start is already queued, is what the track
+  // needs. opengps answers both with an Error (already running / already
+  // queued), which is not a failure here; any other refusal (a stop still
+  // pending) stays one. Same rule as gpslog.
+  const bool gpsRefused = commandReplyIsFailure(result);
+  const bool gpsAlreadyRunning = gpsRefused && gGpsRunning &&
+                                 strstr(result, "already running") != nullptr;
+  const bool gpsAlreadyQueued = gpsRefused && strstr(result, "already queued") != nullptr;
+  if (gpsRefused && !gpsAlreadyRunning && !gpsAlreadyQueued) return result;
+  // Command replies share a borrowed buffer.
+  const String gpsStatus(gpsAlreadyRunning ? "GPS sensor already running"
+                         : gpsAlreadyQueued ? "GPS sensor start already queued"
+                                            : result);
 
   // A transient GPS-only TRACK capture at the literal path: the logger keeps
   // the user's saved session (path, interval, sensors, format) untouched and
@@ -3228,6 +3300,16 @@ const char* GpsTrackManager::stopLiveTracking() {
   uint32_t sessionId;
   {
     TrackStateGuard state;
+    // Never started, or already stopped: nothing to stop (the owner's
+    // 2026-11-18 rule). A live track whose logger session another owner ended
+    // is still live state here and is cleaned up below.
+    if (!_liveTracking) {
+#if ENABLE_GPS_SENSOR
+      return "Error: Live tracking is not running. Start it with 'gpstrack live start'.";
+#else
+      return "Error: Live tracking is not running. This build has no GPS support to start it.";
+#endif
+    }
     _liveTracking = false;
     sessionId = _liveLogSessionId;
     _liveLogSessionId = 0;
@@ -3509,7 +3591,12 @@ const char* cmd_gpstrackmerge(const String& argsInput) {
   CommandArgs a(argsInput);
   if (a.count() < 2) {
     return "Error: invalid arguments — Usage: gpstrackmerge \"<output>\" \"<in1>\" \"<in2>\" [...] "
-           "(output first, then inputs in stitch order)";
+           "(output first, then inputs in stitch order; max 9 inputs)";
+  }
+  // The parser stops at ten tokens (1 output + 9 inputs); text left after the
+  // tenth is an input that would be dropped without a word (healthlogmerge twin).
+  if (a.count() == 10 && a.remaining(9).length() > 0) {
+    return "Error: Too many inputs. Merge at most 9 files per call.";
   }
 
   // Output (arg 0): a bare name lands in /logging_captures/tracks/ so the map
@@ -3657,12 +3744,18 @@ const char* cmd_waypoint(const String& argsInput) {
 
   if (sub == "add") {
     if (!a.hasMinArgs(3)) return "Error: invalid arguments — Usage: waypoint add <lat> <lon> [name]";
-    float lat = a.argFloat(1);
-    float lon = a.argFloat(2);
-    String name = a.has(3) ? a.arg(3) : String("WP");
+    float lat = 0.0f, lon = 0.0f;
+    if (!parseFloatArg(a.arg(1), -90.0, 90.0, lat) || !parseFloatArg(a.arg(2), -180.0, 180.0, lon)) {
+      return "Error: Latitude and longitude must be decimal degrees (-90..90, -180..180). "
+             "Example: waypoint add 47.6062 -122.3321 Home.";
+    }
+    // One token is taken as parsed (a quoted name loses its quotes, as the
+    // name lookups read it); several words are taken as typed.
+    String name = !a.has(3) ? String("WP") : (a.count() == 4 ? a.arg(3) : a.remaining(2));
     if (name.length() == 0) name = "WP";
     int idx = WaypointManager::addWaypoint(lat, lon, name.c_str());
     if (idx >= 0) {
+      // waypointAddedIndex() reads the index back from this line.
       snprintf(buf, 1024, "Added waypoint %d: %s", idx, name.c_str());
     } else if (idx == WaypointManager::kNotSaved) {
       return "Error: Waypoint not saved (no map loaded or write failed)";
@@ -3674,7 +3767,8 @@ const char* cmd_waypoint(const String& argsInput) {
 
   if (sub == "del") {
     if (!a.hasMinArgs(2)) return "Error: invalid arguments — Usage: waypoint del <index>";
-    const int idx = a.argInt(1);
+    int idx = 0;
+    if (!parseIntArg(a.arg(1), idx)) return kCommandReplyNotANumber;
     if (!WaypointManager::getWaypoint(idx)) return "Error: Invalid waypoint index";
     if (WaypointManager::deleteWaypoint(idx)) {
       snprintf(buf, 1024, "Deleted waypoint %d", idx);
@@ -3686,11 +3780,14 @@ const char* cmd_waypoint(const String& argsInput) {
 
   if (sub == "goto") {
     if (!a.hasMinArgs(2)) return "Error: invalid arguments — Usage: waypoint goto <index>";
-    int idx = a.argInt(1);
+    int idx = 0;
+    if (!parseIntArg(a.arg(1), idx)) return kCommandReplyNotANumber;
     const Waypoint* wp = WaypointManager::getWaypoint(idx);
     if (wp) {
-      WaypointManager::selectTarget(idx);
-      snprintf(buf, 1024, "Navigation target: %s", wp->name);
+      // The target is set in memory even when the file could not be written.
+      const bool saved = WaypointManager::selectTarget(idx);
+      snprintf(buf, 1024, "Navigation target: %s%s", wp->name,
+               saved ? "" : " (not saved: no map loaded or write failed)");
     } else {
       return "Error: Invalid waypoint index";
     }
@@ -3698,40 +3795,67 @@ const char* cmd_waypoint(const String& argsInput) {
   }
 
   if (sub == "clearall") {
-    WaypointManager::clearAll();
+    if (!WaypointManager::clearAll()) {
+      return "Error: Waypoints not cleared (no map loaded or write failed). Load the map and retry.";
+    }
     return "All waypoints cleared";
   }
 
   if (sub == "clear") {
-    WaypointManager::selectTarget(-1);
+    const bool hadTarget = WaypointManager::getSelectedTarget() >= 0;
+    if (!WaypointManager::selectTarget(-1) && hadTarget) {
+      return "Navigation target cleared (not saved: no map loaded or write failed)";
+    }
     return "Navigation target cleared";
   }
 
   if (sub == "rename") {
     if (!a.hasMinArgs(3)) return "Error: invalid arguments — Usage: waypoint rename <index> <name>";
-    int idx = a.argInt(1);
+    int idx = 0;
+    if (!parseIntArg(a.arg(1), idx)) return kCommandReplyNotANumber;
     String name = a.remaining(1);  // everything after the index arg
-    if (WaypointManager::setName(idx, name.c_str())) {
-      snprintf(buf, 1024, "Renamed waypoint %d: %s", idx, name.c_str());
-    } else {
-      return "Error: Invalid waypoint index";
+    switch (WaypointManager::setName(idx, name.c_str())) {
+      case WaypointManager::Change::Ok:
+        snprintf(buf, 1024, "Renamed waypoint %d: %s", idx, name.c_str());
+        break;
+      case WaypointManager::Change::NotSaved:
+        return WaypointManager::kReplyChangeNotSaved;
+      case WaypointManager::Change::Invalid:
+        return "Error: Invalid waypoint index";
     }
     return buf;
   }
 
   if (sub == "notes") {
     if (!a.hasMinArgs(3)) return "Error: invalid arguments — Usage: waypoint notes <index> <notes>";
-    int idx = a.argInt(1);
+    int idx = 0;
+    if (!parseIntArg(a.arg(1), idx)) return kCommandReplyNotANumber;
     String notes = a.remaining(1);  // everything after the index arg
-    if (WaypointManager::setNotes(idx, notes.c_str())) {
-      snprintf(buf, 1024, "Set notes for waypoint %d", idx);
-    } else {
-      return "Error: Invalid waypoint index";
+    switch (WaypointManager::setNotes(idx, notes.c_str())) {
+      case WaypointManager::Change::Ok:
+        snprintf(buf, 1024, "Set notes for waypoint %d", idx);
+        break;
+      case WaypointManager::Change::NotSaved:
+        return WaypointManager::kReplyChangeNotSaved;
+      case WaypointManager::Change::Invalid:
+        return "Error: Invalid waypoint index";
     }
     return buf;
   }
 
   return "Error: invalid arguments — Usage: waypoint [list|add|del|goto|clear|clearall|rename|notes]";
+}
+
+int waypointAddedIndex(const char* reply) {
+  static const char kLead[] = "Added waypoint ";
+  const char* text = commandReplyBody(reply);
+  if (strncmp(text, kLead, sizeof(kLead) - 1) != 0) return -1;
+  const char* digits = text + sizeof(kLead) - 1;
+  if (*digits < '0' || *digits > '9') return -1;
+  char* end = nullptr;
+  const long index = strtol(digits, &end, 10);
+  if (*end != ':' || index >= MAX_WAYPOINTS) return -1;
+  return (int)index;
 }
 
 // Link a file to a waypoint by GPS coordinates (creates waypoint if needed, or finds nearest)
@@ -3752,16 +3876,21 @@ const char* cmd_waypointfile(const String& argsInput) {
   char filepath[WAYPOINT_FILE_PATH_LEN];
   strlcpy(filepath, filePathStr.c_str(), sizeof(filepath));
 
-  // Determine format: is arg(1) a numeric latitude?
-  // strtof returns endptr == start if no conversion was performed.
+  // Determine format: a number in arg(1) with a further token is a latitude.
   const String& arg1 = a.arg(1);
-  char* endp;
-  float lat = strtof(arg1.c_str(), &endp);
-  bool hasLatLon = (endp != arg1.c_str() && *endp == '\0') && a.hasMinArgs(3);
+  float lat = 0.0f;
+  bool hasLatLon = parseFloatArg(arg1, lat) && a.hasMinArgs(3);
 
   if (hasLatLon) {
     // Format: <filepath> <lat> <lon> [wpName]
-    float lon = a.argFloat(2);
+    float lon = 0.0f;
+    if (!parseFloatArg(a.arg(2), lon)) {
+      return "Error: Longitude is not a decimal number. "
+             "Example: waypointfile \"/photos/a.jpg\" 47.6062 -122.3321 Cabin.";
+    }
+    if (lat < -90.0f || lat > 90.0f || lon < -180.0f || lon > 180.0f) {
+      return "Error: Latitude and longitude must be decimal degrees (-90..90, -180..180).";
+    }
     char wpName[WAYPOINT_NAME_LEN] = "";
     strlcpy(wpName, a.arg(3).c_str(), sizeof(wpName));
 
@@ -3799,10 +3928,13 @@ const char* cmd_waypointfile(const String& argsInput) {
       if (wpIndex < 0) return "Error: No nearby waypoint. Provide a name to create one.";
     }
 
-    if (WaypointManager::addFile(wpIndex, filepath)) {
+    const WaypointManager::Change linked = WaypointManager::addFile(wpIndex, filepath);
+    if (linked == WaypointManager::Change::Ok) {
       const Waypoint* wp = WaypointManager::getWaypoint(wpIndex);
       snprintf(buf, 1024, "Linked %s to '%s' (%d files)",
                filepath, wp ? wp->name : "?", WaypointManager::getFileCount(wpIndex));
+    } else if (linked == WaypointManager::Change::NotSaved) {
+      return WaypointManager::kReplyChangeNotSaved;
     } else {
       const Waypoint* wp = WaypointManager::getWaypoint(wpIndex);
       if (wp && wp->fileCount >= MAX_WAYPOINT_FILES) {
@@ -3829,9 +3961,12 @@ const char* cmd_waypointfile(const String& argsInput) {
     return buf;
   }
 
-  if (WaypointManager::addFile(wpIndex, filepath)) {
+  const WaypointManager::Change linked = WaypointManager::addFile(wpIndex, filepath);
+  if (linked == WaypointManager::Change::Ok) {
     snprintf(buf, 1024, "Linked %s to '%s' (%d files)",
              filepath, wpNameOnly, WaypointManager::getFileCount(wpIndex));
+  } else if (linked == WaypointManager::Change::NotSaved) {
+    return WaypointManager::kReplyChangeNotSaved;
   } else {
     const Waypoint* wp = WaypointManager::getWaypoint(wpIndex);
     if (wp && wp->fileCount >= MAX_WAYPOINT_FILES) {
@@ -3861,16 +3996,24 @@ const char* cmd_waypointfiles(const String& argsInput) {
   }
 
   // Delete action: waypointfiles <wpName> del <index>
-  if (a.arg(1) == "del") {
+  if (a.arg(1).equalsIgnoreCase("del")) {
     if (!a.hasMinArgs(3)) return "Error: invalid arguments — Usage: waypointfiles <wpName> del <index>";
-    int fileIdx = a.argInt(2);
-    if (WaypointManager::removeFile(wpIndex, fileIdx)) {
-      snprintf(buf, 1024, "Removed file %d from '%s'", fileIdx, wpName.c_str());
-    } else {
-      snprintf(buf, 1024, "Error: Invalid file index %d for '%s'", fileIdx, wpName.c_str());
+    int fileIdx = 0;
+    if (!parseIntArg(a.arg(2), fileIdx)) return kCommandReplyNotANumber;
+    switch (WaypointManager::removeFile(wpIndex, fileIdx)) {
+      case WaypointManager::Change::Ok:
+        snprintf(buf, 1024, "Removed file %d from '%s'", fileIdx, wpName.c_str());
+        break;
+      case WaypointManager::Change::NotSaved:
+        return WaypointManager::kReplyChangeNotSaved;
+      case WaypointManager::Change::Invalid:
+        snprintf(buf, 1024, "Error: Invalid file index %d for '%s'", fileIdx, wpName.c_str());
+        break;
     }
     return buf;
   }
+  // Any other second word is not a listing request.
+  if (a.has(1)) return "Error: invalid arguments — Usage: waypointfiles <wpName> [del <index>]";
 
   // List files
   int count = WaypointManager::getFileCount(wpIndex);
@@ -4004,8 +4147,9 @@ const char* cmd_maporganize(const String& argsInput) {
     entry = dir.openNextFile();
   }
   dir.close();
-  if (failed > 0 && failDetails.length() > 0) {
-    snprintf(buf, 1024, "Map organize: moved=%d skipped=%d failed=%d [%s]",
+  if (failed > 0) {
+    snprintf(buf, 1024, "Error: Map organize incomplete: moved=%d skipped=%d failed=%d [%s]. "
+                        "Fix the listed files and run maporganize again.",
              moved, skipped, failed, failDetails.c_str());
   } else {
     snprintf(buf, 1024, "Map organize: moved=%d skipped=%d failed=%d", moved, skipped, failed);
@@ -4270,9 +4414,10 @@ static const char* cmd_mapzoom(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String v = argsInput; v.trim();
   if (v.length() == 0) return "Error: invalid arguments — Usage: mapzoom <0.5..20.0>";
-  float f = v.toFloat();
-  if (f < 0.5f) f = 0.5f;
-  if (f > 20.0f) f = 20.0f;
+  float f = 0.0f;
+  if (!parseFloatArg(v, 0.5, 20.0, f)) {
+    return "Error: mapzoom must be a decimal number from 0.5 to 20.0, for example 2.5.";
+  }
   setSetting(gSettings.mapZoom, f);
   gMapZoom = f;
   snprintf(getDebugBuffer(), 1024, "mapZoom set to %.2f", f);
@@ -4285,8 +4430,7 @@ static const char* cmd_maplayers(const String& argsInput) {
   if (v.length() == 0) return "Error: invalid arguments — Usage: maplayers <bitmask 0..1023>";
   int n = 0;
   if (!parseIntArg(v, n)) return kCommandReplyNotANumber;
-  if (n < 0) n = 0;
-  if (n > 0x3FF) n = 0x3FF;
+  if (n < 0 || n > 0x3FF) return "Error: maplayers must be 0-1023.";
   setSetting(gSettings.mapVisibleLayers, n);
   gVisibleLayers = (uint16_t)n;
   snprintf(getDebugBuffer(), 1024, "mapVisibleLayers set to 0x%03X", n);
@@ -4299,8 +4443,7 @@ static const char* cmd_mapcachekb(const String& argsInput) {
   if (v.length() == 0) return "Error: invalid arguments — Usage: mapcachekb <256..4096>";
   int n = 0;
   if (!parseIntArg(v, n)) return kCommandReplyNotANumber;
-  if (n < 256) n = 256;
-  if (n > 4096) n = 4096;
+  if (n < 256 || n > 4096) return "Error: mapcachekb must be 256-4096.";
   setSetting(gSettings.mapCacheSizeKb, n);
   snprintf(getDebugBuffer(), 1024, "mapCacheSizeKB set to %d (effective on next map load)", n);
   return getDebugBuffer();

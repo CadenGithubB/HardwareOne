@@ -274,6 +274,10 @@ const char* sensorStartRefusalText(SensorStartRefusal why);
 const char* cmd_sensorstart_queued(I2cDeviceType sensor, const char* displayName,
                                    const char* eventTag, const char* hint = nullptr);
 
+// Command wrapper for requestSensorStop(): the stop commands return its reply.
+// `displayName` is the tag the reply carries in brackets ("ToF", "FM Radio").
+const char* cmd_sensorstop_queued(I2cDeviceType sensor, const char* displayName);
+
 // Display name for I2cDeviceType (e.g., I2C_DEVICE_IMU → "IMU")
 const char* deviceTypeDisplayName(I2cDeviceType device);
 
@@ -345,12 +349,12 @@ inline uint8_t i2cGetConsecutiveErrors(uint8_t address, uint8_t bus) {
   return dev ? dev->getHealth().consecutiveErrors : 0;
 }
 
-// Recover a specific bus, or bus 0 when the caller has no bus context.
+// Recover a specific bus, or bus 0 when the caller has no bus context. True
+// only when the recovery ran; a refused one left the bus untouched.
 inline bool i2cBusRecovery(uint8_t busIdx = 0) {
   I2cDeviceManager* mgr = I2cDeviceManager::getInstance();
   if (!mgr) return false;
-  mgr->performBusRecovery(busIdx);
-  return true;
+  return mgr->performBusRecovery(busIdx) == I2cBusRecovery::Done;
 }
 
 // ============================================================================
@@ -589,8 +593,9 @@ const char* cmd_devices(const String& argsInput);
 const char* cmd_devicefile(const String& argsInput);
 
 // Shared bus-routing helper for the per-device `<device>bus` commands. Each
-// sensor module's own cmd_<sensor>bus calls this so the parse/clamp/persist/
-// report behaviour stays in one place. Does NOT contain
+// sensor module's own cmd_<sensor>bus calls this so the parse/range check/
+// persist/report behaviour stays in one place (a bus that does not exist is
+// refused). Does NOT contain
 // RETURN_VALID_IF_VALIDATE_CSTR — that must stay at each cmd_* entry point,
 // because it returns from its caller.
 const char* i2cSetDeviceBusAndReport(int& target, const String& argsInput,

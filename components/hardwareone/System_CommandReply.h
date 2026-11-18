@@ -20,13 +20,17 @@
 constexpr char kCommandReplyOutOfMemory[] =
     "Error: Out of memory. Free memory and retry the command.";
 
-// Replies for an argument that does not parse: a number that is not one
+// Replies for an argument that does not parse: a whole number that is not one
 // (parseIntArg() in System_ArgParse.h) and an on/off value that is neither
 // (parseBoolArg() in System_Utils.h).
 constexpr char kCommandReplyNotANumber[] =
     "Error: Not a whole number. Give the value in digits, for example 250.";
 constexpr char kCommandReplyNotOnOff[] =
     "Error: Not an on/off value. Use on or off.";
+// A value with a fraction that is not a plain decimal number (parseFloatArg()
+// in System_ArgParse.h).
+constexpr char kCommandReplyNotADecimal[] =
+    "Error: Not a number. Give the value in digits, for example 0.5.";
 
 // ---- The words a reply leads with ------------------------------------------
 // This header is the only place that spells them to read a reply (host test

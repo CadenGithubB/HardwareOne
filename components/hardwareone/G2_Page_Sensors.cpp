@@ -1458,11 +1458,16 @@ void g2SensorsHandleTap(uint32_t idx) {
     if (cameraRuntime) skipImmediateRedraw = true;
 #endif
 #if ENABLE_MICROPHONE
-    // Mic runtime is async on cmd_exec — redraw only after openmic/closemic
-    // completes (see onMicAutostartRuntimeDone).
-    if (r.kind == G2SensorKind::Microphone) {
-      skipImmediateRedraw = true;
-    }
+    // Like the camera: only a change of the live state runs openmic/closemic
+    // (async on cmd_exec, redraw after it completes, see
+    // onMicAutostartRuntimeDone). A microphone already in the wanted state
+    // would make them answer the not-running / already-running Error, and
+    // the preference would never be saved; it just saves the preference below.
+    // The live test is the one closemic and openmic make.
+    const bool micLive = gMicRunning || micRecordingBusy() || audioCaptureOwnedBy("mic");
+    const bool micRuntime = r.kind == G2SensorKind::Microphone &&
+                            (next ? !gMicRunning : micLive);
+    if (micRuntime) skipImmediateRedraw = true;
 #endif
 
     // A preference-only toggle re-renders now; a runtime change redraws from
@@ -1490,7 +1495,7 @@ void g2SensorsHandleTap(uint32_t idx) {
     // Mic: open/close first; micautostart only on success (callback).
     // executeCommand returns ok=true even for "Error: …" handler strings,
     // so the callback also inspects the result text.
-    if (r.kind == G2SensorKind::Microphone) {
+    if (micRuntime) {
       const char* runtime = next ? "openmic" : "closemic";
       if (!g2SubmitHijackCommand(runtime, cookie, onMicAutostartRuntimeDone,
                                  (void*)(uintptr_t)(next ? 1 : 0))) {
@@ -1522,11 +1527,13 @@ void g2SensorsHandleTap(uint32_t idx) {
     char line[80];
     if (r.kind == G2SensorKind::Camera) {
       snprintf(line, sizeof(line), "cameraautostart %s", next ? "on" : "off");
+    } else if (r.kind == G2SensorKind::Microphone) {
+      snprintf(line, sizeof(line), "micautostart %s", next ? "on" : "off");
     } else {
       // Falls through to the generic per-sensor command, which covers
       // thermal/tof/imu/gps/fmradio/apds/gamepad. Unknown featureIds will
-      // get a "Value must be on/off..." or similar error from the
-      // command, which the cmd_exec log will surface.
+      // get an "Unknown sensor" error from the command, which the
+      // cmd_exec log will surface.
       snprintf(line, sizeof(line), "sensorautostart %s %s",
                r.featureId, next ? "on" : "off");
     }

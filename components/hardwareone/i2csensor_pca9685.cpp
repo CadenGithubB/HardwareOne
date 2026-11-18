@@ -11,6 +11,7 @@
 #include "i2csensor_pca9685.h"
 #include "System_Utils.h"
 #include "System_Debug.h"  // For BROADCAST_PRINTF macro
+#include "System_DebugJson.h"  // serializeJsonListToDebugBuffer (servolist json)
 #include "System_Command.h"
 #include "System_MemUtil.h"  // PSRAM_JSON_DOC, ps_alloc, ps_delete
 #include <ArduinoJson.h>
@@ -170,8 +171,9 @@ const char* cmd_servolist(const String& argsInput) {
       o["centerPulse"] = servoProfiles[i].centerPulse;
     }
     doc["count"] = (int)arr.size();
-    serializeJson(doc, getDebugBuffer(), 1024);
-    return getDebugBuffer();
+    // Sized to the whole debug buffer; all 16 profiles fit, so nothing is cut.
+    const char* reply = serializeJsonListToDebugBuffer(doc, arr);
+    return reply ? reply : kCommandReplyOutOfMemory;
   }
 
   broadcastOutput("Configured Servos:");

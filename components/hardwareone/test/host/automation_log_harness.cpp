@@ -294,8 +294,9 @@ static void failures() {
                             Fault::FlushError, Fault::SizeMismatch, Fault::Directory}) {
     reset(); start(); fault = failure;
     CHECK(!appendAutoLogEntry("EVENT", "incomplete"));
+    // The stop happened: a success that names the marker it could not write.
     const auto result = command("stop");
-    CHECK(result.rfind("Error:", 0) == 0 && result.find("LOG_STOP") != result.npos);
+    CHECK(result == "Automation logging stopped: /logs/alice.log (its LOG_STOP marker could not be written)");
     CHECK(!automationLogActive()); balanced();
   }
   reset(); start(); deniedUsers.insert("alice"); caller = identity("bob");

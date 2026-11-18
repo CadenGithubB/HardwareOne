@@ -206,6 +206,7 @@ struct BLEAdvertising {
 static BLEAdvertising advertisingObject;
 static BLEAdvertising* pAdvertising = &advertisingObject;
 static std::atomic<bool> sBleAdvertising{false};
+static const char* sBleAdvertiseRefusal = "";
 static bool bleServerUp() { return gBleState && gBleState->initialized; }  // the shipped flag's meaning
 // The console view's never-blocking fallback copy.
 using portMUX_TYPE = std::mutex;
@@ -549,8 +550,14 @@ static void writerChecks() {
   state.activeConnectionCount = BLE_MAX_CONNECTIONS;
   check(!startBleAdvertising() && !sBleAdvertising && advertisingStarts == 2,
         "a full console does not advertise");
+  check(std::strcmp(sBleAdvertiseRefusal, "Error: Advertising not started: all app connections "
+                                          "are in use. Run bledisconnect to free one.") == 0,
+        "a full console says why it does not advertise and what frees a place");
   state.initialized = false;
   check(!startBleAdvertising(), "uninitialized advertising remains refused");
+  check(std::strcmp(sBleAdvertiseRefusal,
+                    "Error: App console server is not running. Run openconsole first.") == 0,
+        "uninitialized advertising names openconsole");
   stopBleAdvertising();
   populate();
 }
@@ -1558,7 +1565,6 @@ static void streamCase(const char* label, uint8_t before, const char* args,
 
 static void streamCliChecks() {
   const char* usage = "Error: invalid arguments — Usage: blestream <on|off|sensors|system|events|interval>";
-  const char* streamUsage = "Error: invalid arguments — Usage: blestream <sensors|system|events> [on|off]";
   const char* intervalUsage = "Error: invalid arguments — Usage: blestream interval <sensor_ms> <system_ms>";
   const uint8_t all = static_cast<uint8_t>(BLE_STREAM_ALL);
   const uint8_t sen = static_cast<uint8_t>(BLE_STREAM_SENSORS);
@@ -1585,10 +1591,15 @@ static void streamCliChecks() {
              "System stream disabled", static_cast<uint8_t>(sen | evt));
   streamCase("C3 events on", 0, "events on", "Event stream enabled", evt);
 
-  // C6: a leading unknown word or a non-exact toggle is a usage error.
+  // C6: a leading unknown word is a usage error; a toggle that is not a whole
+  // on/off word is refused and changes nothing. The shared on/off spellings work.
   streamCase("C6 unknown word", 0, "x on", usage, 0);
-  streamCase("C6 offset is not off", all, "sensors offset", streamUsage, all);
-  streamCase("C6 bad toggle", all, "events foo", streamUsage, all);
+  streamCase("C6 offset is not off", all, "sensors offset", kCommandReplyNotOnOff, all);
+  streamCase("C6 bad toggle", all, "events foo", kCommandReplyNotOnOff, all);
+  streamCase("C6 shared off spelling", all, "sensors 0", "Sensor stream disabled",
+             static_cast<uint8_t>(all & ~sen));
+  streamCase("C6 shared on spelling", 0, "events enable", "Event stream enabled", evt);
+  streamCase("C6 all, shared spelling", all, "disable", "All streams disabled", 0);
 
   // C4/C5: the web page's Apply interval button and its error paths.
   state.sensorStreamInterval = 2000; state.systemStreamInterval = 9000;
@@ -1626,8 +1637,9 @@ static void streamCliChecks() {
   // C8/C9: status path and the not-initialized refusal stay as they were.
   state.streamFlags = sen;
   got = cmd_blestream("");
-  expect(got && std::strncmp(got, "Stats: sensors=", 15) == 0 && state.streamFlags == sen,
-         "C8 bare `blestream` returns the status lines; got " + shown(got));
+  expect(got && std::strncmp(got, "Streaming: sensors=ON system=OFF events=OFF\nIntervals: sensor=", 62) == 0 &&
+         std::strstr(got, "\nStats: sensors=") && state.streamFlags == sen,
+         "C8 bare `blestream` returns the three status lines in the reply; got " + shown(got));
   debugAvailable = false;
   got = cmd_blestream("");
   expect(same(got, "Error: Debug buffer unavailable"),
@@ -1880,14 +1892,14 @@ static void disconnectTable(bool apps, bool peers) {
 
 static void disconnectChecks() {
   const char* usage = "Error: invalid arguments — Usage: bledisconnect [connId]";
-  const char* notFound = "Error: No client with that connection id";
+  const char* notFound = "Error: No client with that connection id. List the connection ids with 'blestatus'.";
   const char* peerLink = "Error: That connection is a paired peer link, not an app client";
   // No app console: say what `openble` does in the role that runs (nothing
   // here: the state is gone). The console role with its server or lock
   // unavailable has nothing to switch to: it is busy.
   const char* unavailable = "Error: App console not running; to start the app console, run 'openconsole'.";
   const char* busy = "Error: App console busy; retry";
-  const char* none = "Error: No client connected";
+  const char* none = "Error: No app client is connected. Check connections with 'blestatus'.";
 
   // K1: the web Kick on the second client (conn 1) closes conn 1 only.
   disconnectTable(true, true);

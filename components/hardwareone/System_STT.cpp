@@ -193,6 +193,10 @@ static bool sttMatchesLocked(SttOwner owner, SttToken token) {
   return token && gStt.snapshot.token == token && sttSameOwner(owner, gStt.owner);
 }
 
+// The admission refusal while another run holds STT. cmd_stt adds its next
+// action; the lens and display surfaces show the reason alone.
+static constexpr char kSttBusyReason[] = "STT is busy or a result belongs to another session";
+
 static bool sttError(char* error, size_t cap, const char* reason) {
   if (error && cap) snprintf(error, cap, "%s", reason);
   return false;
@@ -2888,7 +2892,7 @@ static bool sttBeginMode(SttOwner owner, uint32_t captureMs, bool continuous,
     admitted = true;
   }
   portEXIT_CRITICAL(&gSttMux);
-  if (!admitted) return sttError(error, errorCap, "STT is busy or a result belongs to another session");
+  if (!admitted) return sttError(error, errorCap, kSttBusyReason);
 #if defined(HW1_STT_HEAP_WATCH) && HW1_STT_HEAP_WATCH   // diagnostic builds (stt/stt_internal_memory.h)
   hw1::stt::heapWatchBegin();
 #endif
@@ -3224,6 +3228,10 @@ static const char* sttPhaseName(SttLocalPhase phase) {
   return "unknown";
 }
 
+// The id given (or the session, for draft) has no run to read.
+static constexpr char kSttNoRunForSession[] =
+    "Error: no STT run belongs to this session. Start one with stt start or stt record.";
+
 static const char* cmd_stt(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   static String reply;
@@ -3249,10 +3257,13 @@ static const char* cmd_stt(const String& argsInput) {
       }
     }
     SttToken token = 0;
-    char error[96] = {};
+    char error[192] = {};  // holds the model-file refusal with its full path
     if (!(continuous ? sttBeginContinuous(owner, &token, error, sizeof(error))
                      : sttBegin(owner, seconds * 1000, &token, error, sizeof(error)))) {
       reply = String("Error: ") + error;
+      if (strcmp(error, kSttBusyReason) == 0) {
+        reply += ". Retry when the current run ends (see 'stt status').";
+      }
       return reply.c_str();
     }
     char id[17];
@@ -3283,13 +3294,13 @@ static const char* cmd_stt(const String& argsInput) {
     if (!token) return "Error: Usage: stt stop|cancel <id>";
     const bool accepted = op == "stop" ? sttRequestFinish(owner, token) : sttCancel(owner, token);
     return accepted ? "OK: STT request accepted; poll status until terminal"
-                    : "Error: no matching STT run accepts that operation";
+                    : "Error: No matching STT run accepts that operation. Check the run with 'stt status <id>'.";
   }
   SttSnapshot snap;
   if (op == "draft") {
     if (args.count() != 2 || !token) return "Error: Usage: stt draft <id>";
     SttDraft draft;
-    if (!sttReadDraft(owner, token, &draft)) return "Error: no STT run belongs to this session";
+    if (!sttReadDraft(owner, token, &draft)) return kSttNoRunForSession;
     PSRAM_JSON_DOC(doc);
     doc["sequence"] = draft.sequence;
     doc["version"] = draft.version;
@@ -3301,7 +3312,11 @@ static const char* cmd_stt(const String& argsInput) {
   if (op != "status" && op != "result" && op != "next")
     return "Error: Usage: stt start | record [seconds] | status [id] | stop|cancel|result|next <id> | ack <id> <sequence>";
   if ((op == "result" || op == "next") && !token) return "Error: Usage: stt result <id>";
-  if (!sttSnapshot(owner, token, &snap)) return "Error: no STT run belongs to this session";
+  if (!sttSnapshot(owner, token, &snap)) {
+    // A status query without an id, from a session with no run, is the idle state.
+    if (op == "status" && !token) return "{\"id\":\"\",\"state\":\"idle\",\"backend\":\"local\"}";
+    return kSttNoRunForSession;
+  }
   PSRAM_JSON_DOC(doc);
   char id[17];
   snprintf(id, sizeof(id), "%08lx%08lx", static_cast<unsigned long>(snap.token >> 32),
@@ -3450,21 +3465,27 @@ static const char* cmd_sttperf(const String& argsInput) {
   STT_PERF_TEXT_ATTR static char out[16 * 440 + 256];
   CommandArgs args(argsInput);
   const String op = args.count() ? args.arg(0) : "show";
+  static constexpr char kUsage[] = "Error: Usage: sttperf [show|clear|log on|off|stages [all|clear]]";
   if (op == "log") {
+    if (args.count() > 2) return kUsage;
     const String v = args.count() > 1 ? args.arg(1) : "";
-    if (v == "on") gSttPerfLog = true;
-    else if (v == "off") gSttPerfLog = false;
-    else if (v.length()) return "Error: Usage: sttperf log on|off";
+    const int on = parseBoolArg(v);
+    if (v.length() && on < 0) return kCommandReplyNotOnOff;
+    if (on >= 0) gSttPerfLog = (on == 1);
     snprintf(out, sizeof(out), "STT perf live log: %s", gSttPerfLog ? "ON" : "OFF");
     return out;
   }
 #if defined(CONFIG_IDF_TARGET_ESP32P4)
   if (op == "stages") {
+    if (args.count() > 2) return kUsage;
     const String v = args.count() > 1 ? args.arg(1) : "";
     if (v == "clear") { hw1::stt::stageProfileReset(); return "OK: STT stage profile cleared"; }
+    if (v.length() && v != "all") return kUsage;
     return v == "all" ? sttStageDump(out, sizeof(out)) : sttStageReport(out, sizeof(out));
   }
 #endif
+  // show and clear take no further word.
+  if ((op == "clear" || op == "show") && args.count() > 1) return kUsage;
   if (op == "clear") {
     portENTER_CRITICAL(&gSttMux);
     for (auto& r : gSttPerf) r = SttPerfRecord{};
@@ -3472,7 +3493,7 @@ static const char* cmd_sttperf(const String& argsInput) {
     portEXIT_CRITICAL(&gSttMux);
     return "OK: STT perf records cleared";
   }
-  if (op != "show") return "Error: Usage: sttperf [show|clear|log on|off|stages [all|clear]]";
+  if (op != "show") return kUsage;
   SttPerfRecord copy[kPerfRecords];
   uint32_t count;
   portENTER_CRITICAL(&gSttMux);

@@ -88,6 +88,7 @@ struct Scenario {
   bool authenticated = true, guestAllowed = true, live = true, stateful = true;
   bool bondMaster = true, finalizerSucceeded = true, revokeOnSerialize = false;
   bool revokeOnFinalizer = false;
+  bool promptOpen = false;  // a confirmation prompt is waiting for this session's answer
   size_t stepIndex = 0;
   int finalizers = 0, interactions = 0, delays = 0, captures = 0, feedEntries = 0;
   size_t allocLimit = SIZE_MAX;   // ps_alloc returns nullptr above this size
@@ -173,7 +174,7 @@ static AuthContext systemIdentity(const char*) {
 #define ERROR_WEBF(...) ((void)0)
 static void appendCommandToFeed(const char*, const String&, const String&, const String&) { ++scenario.feedEntries; }
 static String redactCmdForAudit(const String& text) { return text; }
-static bool cliModeOwnedBySession(int, TransportSessionEpoch) { return false; }
+static bool cliModeOwnedBySession(int, TransportSessionEpoch) { return scenario.promptOpen; }
 static void broadcastOutput(const String& output, const CommandContext&) {
   scenario.broadcasts.emplace_back(output.c_str());
 }
@@ -268,6 +269,14 @@ static JsonDocument decode(const httpd_req_t& req) {
   JsonDocument result;
   check(!deserializeJson(result, req.output), "handler response is valid JSON");
   return result;
+}
+// /api/cli/batch names the commands the executor reported as failed by their
+// index in results[].
+static void expectFailed(const JsonDocument& doc, const std::vector<unsigned>& indexes,
+                         const char* message) {
+  const JsonArrayConst failed = doc["failed"].as<JsonArrayConst>();
+  check(doc["failed"].is<JsonArrayConst>() && failed.size() == indexes.size(), message);
+  for (size_t i = 0; i < indexes.size(); i++) check(failed[i] == indexes[i], message);
 }
 static void expectError(const httpd_req_t& req, const char* status, const char* error) {
   check(req.status.rfind(status, 0) == 0, "expected HTTP error status");
@@ -382,6 +391,7 @@ static void testNormalAndOwnership() {
     check(replies[2].as<std::string>() == special, "JSON escaping preserves reply text");
     check(replies[3] == "Error: command refused", "command error remains in result slot");
     check(replies[4].as<std::string>() == std::string(4095, 'x'), "large reply survives");
+    if (!bond) expectFailed(doc, {3}, "a failed command is listed by its results[] index");
     check(scenario.executed.size() == 3, "all nonempty commands execute exactly once");
     check(scenario.executed[0].line == (bond ? "remote:first" : "first"), "routing stays unchanged");
     check(responseAllocator.calls > 0, "actual response uses supplied JSON allocator");
@@ -398,6 +408,7 @@ static void testSettingsAndTimeouts() {
   resetScenario();
   auto saved = decode(invoke(false, {"beginwrite", "set 1", "savesettings"}));
   check(saved["ok"] == true && scenario.finalizers == 0, "confirmed save disarms finalizer");
+  expectFailed(saved, {}, "a batch without a failed command lists none");
   for (const auto& cmd : scenario.executed)
     check(cmd.ctx.settingsBatchId == 73, "one settings token covers every request command");
   resetScenario();
@@ -408,6 +419,7 @@ static void testSettingsAndTimeouts() {
   check(scenario.executed.size() == 3, "timeout does not suppress later commands");
   check(timeout["results"][1] == "Error: command was not accepted by the executor",
         "empty executor failure receives placeholder");
+  expectFailed(timeout, {1}, "a command the executor did not accept is listed as failed");
   resetScenario(); scenario.finalizerSucceeded = false;
   scenario.steps = {{"begin OK"}, {"set OK"}, {"Error: save failed", false}};
   auto failed = decode(invoke(false, {"beginwrite", "set 1", "savesettings"}));
@@ -423,16 +435,39 @@ static void testSettingsAndTimeouts() {
 }
 static void testInteractive() {
   resetScenario(); scenario.steps = {{"Confirm?"}, {"OK: deleted"}};
+  scenario.promptOpen = true;
   auto local = decode(invoke(false, {"userdelete bob", " YES "}, true));
   check(local["count"] == 2 && local["results"][1] == "OK: deleted", "local interactive has paired results");
   check(scenario.interactions == 1, "local interactive refreshes live session once");
   for (const auto& cmd : scenario.executed)
     check((cmd.ctx.behaviorFlags & COMMAND_CONTEXT_MODE_INDEPENDENT) == 0,
           "interactive commands can reach confirmation mode");
+  // A refused command opens no prompt: the answer is not run as a command and
+  // both slots carry the refusal.
+  resetScenario(); scenario.steps = {{"Error: File not found or access denied", false}};
+  auto refused = decode(invoke(false, {"filedelete \"/gone.txt\"", "yes"}, true));
+  check(scenario.executed.size() == 1, "a refused interactive command does not run its answer");
+  check(refused["results"].as<JsonArrayConst>().size() == 2 &&
+        refused["results"][0] == "Error: File not found or access denied" &&
+        refused["results"][1] == "Error: File not found or access denied",
+        "a refused interactive command reports its reason in both slots");
+  expectFailed(refused, {0, 1}, "a refused interactive command fails both slots");
+  // The same with a prompt of this session already open: only the command's
+  // verdict keeps the answer from being run against that older prompt.
+  resetScenario(); scenario.promptOpen = true;
+  scenario.steps = {{"Error: File not found or access denied", false}};
+  auto refusedOpen = decode(invoke(false, {"filedelete \"/gone.txt\"", "yes"}, true));
+  check(scenario.executed.size() == 1, "a refused command does not run its answer even with a prompt open");
+  expectFailed(refusedOpen, {0, 1}, "a refused command with a prompt open fails both slots");
+  resetScenario(); scenario.steps = {{"OK: deleted"}};
+  auto unprompted = decode(invoke(false, {"userdelete bob confirm", "yes"}, true));
+  check(scenario.executed.size() == 1 && unprompted["results"][1] == "OK: deleted",
+        "a command that asked nothing is not followed by its answer");
+  expectFailed(unprompted, {}, "an unprompted interactive command that succeeded lists no failure");
   resetScenario(); scenario.stateful = false;
   expectError(invoke(false, {"userdelete bob", "yes"}, true), "401", "stateful_web_session_required");
   check(scenario.executed.empty(), "stateless interactive rejected before execution");
-  resetScenario(); scenario.steps = {{"Remote command sent: userdelete bob confirm"}};
+  resetScenario(); scenario.steps = {{"Remote command sent: userdelete bob confirm (reqId 7)"}};
   auto remote = decode(invoke(true, {"userdelete bob", "yes"}, true));
   check(scenario.executed.size() == 1 && scenario.executed[0].line == "remote:userdelete bob confirm",
         "bond confirmation translates to one remote one-shot");
@@ -440,6 +475,14 @@ static void testInteractive() {
         "bond preserves two-slot UI contract");
   check(remote["results"][1].as<std::string>().rfind("Pending:", 0) == 0,
         "bond ACK remains pending instead of claiming remote completion");
+  resetScenario(); scenario.steps = {{"Error: No session token - bond not ready or passphrase mismatch", false}};
+  auto unsent = decode(invoke(true, {"userdelete bob", "yes"}, true));
+  check(unsent["results"][1] == "Error: No session token - bond not ready or passphrase mismatch",
+        "a bond confirmation that was not sent keeps its reason");
+  resetScenario(); scenario.steps = {{"", false}};
+  auto silent = decode(invoke(true, {"tz 480"}));
+  check(silent["results"][0] == "Error: Command was not sent to the bonded device. Retry.",
+        "a bond batch command that failed without a reply says it was not sent");
   resetScenario();
   const auto invalid = invoke(true, {"status", "yes"}, true);
   check(invalid.status.rfind("400", 0) == 0 && scenario.executed.empty(), "unsupported bond confirmation rejected");
@@ -603,11 +646,29 @@ static void testSingleCommandBodyLimits() {
   check(handleCliCommand(&stalled) == ESP_FAIL && stalled.status.rfind("400", 0) == 0 && stalled.sends == 1,
         "stalled body answers 400");
   check(scenario.recvCalls == 2 && scenario.executed.empty(), "stalled body ends after two idle timeouts");
-  // An empty body still reaches the executor's own "Empty command" reply.
+  // An empty body still reaches the executor's own "Empty command" reply,
+  // which is a failure and answers 400 like any other.
   resetScenario();
+  scenario.steps = {{"Error: Empty command. Type a command, or help for the list.", false}};
   httpd_req_t empty;
-  check(handleCliCommand(&empty) == ESP_OK && scenario.executed.size() == 1 && scenario.recvCalls == 0,
-        "empty body keeps the previous executor path");
+  check(handleCliCommand(&empty) == ESP_OK && scenario.executed.size() == 1 && scenario.recvCalls == 0 &&
+        empty.status.rfind("400", 0) == 0,
+        "empty body keeps the previous executor path and answers 400");
+  // The status follows the executor's verdict: 200 for a completed command,
+  // 400 for a failed one, 403 for its admin and super-admin refusals. The
+  // pages' hw.postFormText rejects on this status.
+  struct StatusCase { const char* reply; bool ok; const char* status; };
+  for (const StatusCase& c : {
+           StatusCase{"OK: done", true, "200"},
+           StatusCase{"Error: command refused", false, "400"},
+           StatusCase{"Usage: status", false, "400"},
+           StatusCase{"Error: Admin access required for command 'status'. Contact an administrator.", false, "403"},
+           StatusCase{"Error: Super-admin access required for command 'status'.", false, "403"}}) {
+    resetScenario(); scenario.steps = {{c.reply, c.ok}};
+    httpd_req_t one; one.input = "cmd=status"; one.content_len = one.input.size();
+    check(handleCliCommand(&one) == ESP_OK && one.status.rfind(c.status, 0) == 0 && one.output == c.reply,
+          "single command answers 200, 400 or 403 by the executor's verdict");
+  }
 }
 
 int main() {

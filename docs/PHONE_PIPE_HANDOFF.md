@@ -100,15 +100,19 @@ the live scheduler. Nothing else is needed in G2-client or phone-client mode: at
 boot the selected client role starts and admits the enrolled phone, and after
 link loss or Service Changed it reconnects on the paced schedule. This needs
 owner authority. Wi-Fi state does not start or stop the pipe. Turning it off
-still works: `bleautoreconnect phone off`, `phone disconnect` (suppressed
+still works: `bleautoreconnect phone off`, `closephone` (suppressed
 until the next connect), Forget, or Bluetooth disabled.
 
 Boot registers a metadata-only phone peer so `blepeers` lists it early. When
-the pipe starts, its connectable spec replaces that entry in place
-(`bleRegisterPeer`). Boot reconnect, the reconnect tick and name lookup all walk
-the ordered list, so until the first pipe start in a boot,
-`bleautoreconnect phone` still reports metadata-only. The `ble_peer_registry`
-host test runs this order against the real dispatch loops.
+the Bluetooth client stack first comes up in a boot (`openble`, or the first
+`openg2`, `openring` or `openphone`), the pipe's connectable spec replaces that
+entry in place (`bleRegisterPeer`). Boot reconnect, the reconnect tick and name
+lookup all walk the ordered list, so until then,
+`bleautoreconnect phone` shows the saved state and `bleautoreconnect phone
+on|off` is refused ("Error: Peer 'phone' has no connect support yet, so
+auto-reconnect was not changed. Run openble and retry. A build without the
+phone link cannot set it."). The `ble_peer_registry` host test runs this order against the real
+dispatch loops.
 
 There is no migration code. An enrollment made by an earlier image keeps its
 stored `autoReconnect` value. Re-enroll, or run `bleautoreconnect phone on`

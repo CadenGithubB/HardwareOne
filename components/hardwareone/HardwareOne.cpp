@@ -573,8 +573,10 @@ static void commandExecTask(void* pv) {
             size_t retLen = strlen(r->out);
             size_t maxOut = sizeof(r->out) - 1;
             if (capLen + retLen > maxOut) {
-              // Truncate return portion to fit
-              retLen = (capLen < maxOut) ? maxOut - capLen : 0;
+              // The reply carries the verdict's reason and stays whole: the
+              // printed lines are cut instead, at the end of a line.
+              capLen = maxOut - retLen;
+              while (capLen > 0 && captureBuf[capLen - 1] != '\n') --capLen;
             }
             memmove(r->out + capLen, r->out, retLen);
             memcpy(r->out, captureBuf, capLen);
@@ -2221,9 +2223,15 @@ void hardwareone_setup() {
   // start command). Loading is heavy (PSRAM + time), so it's opt-in (default off).
 #if ENABLE_LLM_SOURCE_ONBOARD
   if (gSettings.llmEnabled && ramFlushResolve(RF_LLM, gSettings.llmAutoStart)) {
-    broadcastOutput("Auto-loading on-device LLM model...");
-    String llmAutoCmd = "llmload " + gSettings.llmDefaultModel;
-    runUnifiedSystemCommand(llmAutoCmd);
+    // The model id travels as one quoted token, so a name with a space stays whole.
+    char llmAutoCmd[160];
+    if (llmBuildLoadCommand(gSettings.llmDefaultModel.c_str(), 0, llmAutoCmd, sizeof(llmAutoCmd))) {
+      broadcastOutput("Auto-loading on-device LLM model...");
+      runUnifiedSystemCommand(llmAutoCmd);
+    } else {
+      broadcastOutput("[Boot] LLM auto-load skipped. The default model name is empty, too long "
+                      "or holds a quote. Set llmdefaultmodel.");
+    }
   }
 #endif
 

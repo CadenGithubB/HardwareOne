@@ -17,9 +17,10 @@ only when the command succeeded. The Quick Settings rows submit without
 waiting: the executor double finishes each command only when a case says so,
 and the reply is delivered by the display-task poll (one request at a time, a
 refused queue toasts, a reply from a replaced display session is dropped). Static checks cover the call sites the harness
-does not run: the Logging, WiFi and Web screens, the Quick Settings section and the
-unavailable-page actions (OLED_Utils.cpp handleOledActionButton) no longer fire
-commands whose reply is dropped, and their success lines are conditional; the
+does not run: executeOledCommand reports through oledRunCommand, so no screen
+drops a reply; the Quick Settings section never waits on a command; the
+unavailable-page actions (OLED_Utils.cpp handleOledActionButton) print their
+success lines only when the command succeeded; the
 Bluetooth menu's on/off row runs openble, not the role-aware Quick Settings
 toggle. `--component <dir>` runs the same cases against saved sources (the
 base tree has no helper and shows success texts for refused commands).
@@ -71,29 +72,23 @@ def strip_comments(text: str) -> str:
     return re.sub(r"(?m)(^|\s)//[^\n]*", r"\1", text)
 
 
-def fire_and_forget_calls(text: str) -> list[str]:
-    return [" ".join(call.split())
-            for call in re.findall(r"\bexecuteOLEDCommand\(([^;]*)\);", strip_comments(text))]
-
-
 def static_checks(read) -> list[str]:
     failures = []
-    for name in ("OLED_Mode_Automations.cpp", "OLED_Mode_Logging.cpp", "OLED_Mode_Network.cpp"):
-        calls = fire_and_forget_calls(read(name))
-        if calls:
-            failures.append(f"{name} drops the reply of {len(calls)} user action(s): "
-                            + ", ".join(calls))
+    utils = read("OLED_Utils.cpp")
+    # An action that needs no verdict still toasts a refusal: executeOledCommand
+    # reports as oledRunCommand does.
+    execute = "void executeOledCommand("
+    if execute in utils and "oledRunCommand(" not in strip_comments(extract_block(utils, execute)):
+        failures.append("executeOledCommand does not report through oledRunCommand: "
+                        "its callers drop the reply")
     editor = read("OLED_SettingsEditor.cpp")
     start = editor.index("// Quick Settings - Dynamic item registry")
     quick = editor[start:editor.index("static void initQuickItems(", start)]
-    calls = fire_and_forget_calls(quick)
-    if calls:
-        failures.append("Quick Settings drops the reply of: " + ", ".join(calls))
-    waits = re.findall(r"\boledRunCommand\(([^;]*)\)", strip_comments(quick))
+    # Both helpers wait for cmd_exec; the Quick Settings rows submit instead.
+    waits = re.findall(r"\b(?:oledRunCommand|executeOledCommand)\(([^;]*)\)", strip_comments(quick))
     if waits:
         failures.append("Quick Settings waits on cmd_exec in the frame loop for: " +
                         ", ".join(" ".join(w.split()) for w in waits))
-    utils = read("OLED_Utils.cpp")
     if ASYNC[1] in utils and "oledDeliverCommandReply();" not in strip_comments(
             extract_block(utils, "void updateOledDisplay(")):
         failures.append("updateOledDisplay never delivers oledRunCommandAsync replies")
