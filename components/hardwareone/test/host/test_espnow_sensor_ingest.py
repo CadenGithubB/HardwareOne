@@ -34,9 +34,12 @@ receiver. Checked:
   * who keeps: a worker that is sent readings refuses them, counts them, says
     so once a minute and allocates nothing; a backup master and the master
     keep them; the bond partner's reading is kept whatever the mesh role;
-  * the table is made by the first reading a receiver keeps, a sender's slots
-    by its first reading that is whole and well formed; a status frame lists
-    and never makes data, ignores unknown bits, and never makes the table;
+  * the table is made by the first reading or status frame a receiver keeps,
+    a sender's slots by its first status frame or its first reading that is
+    whole and well formed; a status frame lists the sender's sensors before
+    any reading, never makes data, never counts a reading or makes an old one
+    fresh, ignores unknown bits, and is refused as a reading is when the table
+    is full (also when filled by status frames alone) or memory is out;
   * every sender has its own slots: sixteen senders with eleven sensors each
     are all kept; the seventeenth sender is refused, counted and said once a
     minute; a sender that is no longer paired gives its record and its slots,

@@ -345,33 +345,45 @@ static void testBeforeTheTable() {
   check(!remoteSensorInfoAt(0, &info) && !remoteSensorInfoFor(kPorch, REMOTE_SENSOR_GPS, &info), "readers find nothing");
   check(json(kPorch, REMOTE_SENSOR_GPS) == "{\"connected\":false,\"enabled\":false,\"fresh\":false,\"data\":null}",
         "the JSON reply of an unknown sensor");
-  // A master: a status frame alone never makes the table.
+  // A master, out of memory: a status frame is refused, counted and said as a
+  // reading is; nothing is half made.
   gSettings.meshRole = 1;
-  remoteSensorIngestStatus(kPorch, "porch", (const uint8_t*)&status, sizeof(status));
-  check(gSensorPeers == nullptr && gAllocs == 0 && gRemoteSensorRefusals.statusNotKept == 1,
-        "a status frame never makes the table; it is counted as not kept");
-  // Out of memory: the reading is refused, counted and said; nothing is half made.
   gConsole.clear();
   gAllocFails = true;
-  deliver(kPorch, "porch", REMOTE_SENSOR_GPS, 7, 3, jsonOf(60));
-  check(gSensorPeers == nullptr && gRemoteSensorRefusals.noMemory == 1, "no memory: the reading is refused and counted");
+  remoteSensorIngestStatus(kPorch, "porch", (const uint8_t*)&status, sizeof(status));
+  check(gSensorPeers == nullptr && gRemoteSensorRefusals.noMemory == 1, "no memory: the status frame is refused and counted");
   check(gConsole.size() == 2 && has(gConsole[0], "Failed to allocate") &&
         has(gConsole[1], "Readings from porch refused: this device cannot keep readings, it is out of memory"),
         "and the failure is said");
+  // ... and a reading the same way (the refusal line comes once a minute).
+  deliver(kPorch, "porch", REMOTE_SENSOR_GPS, 7, 3, jsonOf(60));
+  check(gSensorPeers == nullptr && gRemoteSensorRefusals.noMemory == 2, "no memory: the reading is refused and counted");
+  check(gConsole.size() == 3 && has(gConsole[2], "Failed to allocate"), "and its refusal line waits for the minute");
   check(!remoteSensorTableEnsure(), "no table without memory");
   gAllocFails = false;
-  // The first reading a master keeps makes the table, and that sender's slots.
+  // The first status frame a master keeps makes the table and that sender's
+  // slots: its sensors are listed, present and not streaming, before any
+  // reading arrives, and no reading is counted.
   const unsigned before = gAllocs;
+  remoteSensorIngestStatus(kPorch, "porch", (const uint8_t*)&status, sizeof(status));
+  check(gSensorPeers != nullptr && gAllocs == before + 2 && usedSlots() == REMOTE_SENSOR_MAX,
+        "the first status frame makes the table and the sender's slots, and lists its sensors");
+  check(remoteSensorInfoFor(kPorch, REMOTE_SENSOR_GPS, &info) && !info.enabled && !info.fresh && info.jsonLength == 0,
+        "present, not streaming, no reading");
+  check(countsOf(kPorch, REMOTE_SENSOR_GPS).received == 0 && countsOf(kPorch, REMOTE_SENSOR_GPS).lost == 0 &&
+        textOf(kPorch, REMOTE_SENSOR_GPS).empty(), "nothing is counted or kept as a reading");
+  // The first reading after it uses the same table and slots and is kept.
   deliver(kPorch, "porch", REMOTE_SENSOR_GPS, 7, 4, jsonOf(60));
-  check(gSensorPeers != nullptr && gAllocs == before + 2 && textOf(kPorch, REMOTE_SENSOR_GPS) == jsonOf(60),
-        "the first reading makes the table and the sender's slots, and is kept");
+  check(gAllocs == before + 2 && textOf(kPorch, REMOTE_SENSOR_GPS) == jsonOf(60) &&
+        countsOf(kPorch, REMOTE_SENSOR_GPS).received == 1 && countsOf(kPorch, REMOTE_SENSOR_GPS).lost == 0,
+        "the first reading makes nothing new, is kept and counted as the first");
   deliver(kPorch, "porch", REMOTE_SENSOR_IMU, 7, 1, jsonOf(60));
   check(gAllocs == before + 2 && remoteSensorTableEnsure() && gAllocs == before + 2, "a second sensor of that sender makes nothing new");
   check(remoteSensorSlotCount() == REMOTE_SENSOR_SLOTS_MAX && REMOTE_SENSOR_SLOTS_MAX == 176, "one slot per sender and sensor type");
   // The slots of a sender are made by its first reading that is whole and well formed.
   pair(kShed);
   deliver(kShed, "shed", REMOTE_SENSOR_GPS, 7, 1, "not json");
-  check(gAllocs == before + 2 && usedSlots() == 2, "a malformed first reading makes no slots");
+  check(gAllocs == before + 2 && usedSlots() == REMOTE_SENSOR_MAX, "a malformed first reading makes no slots");
 }
 
 static void testRoles() {
@@ -662,6 +674,75 @@ static void testStatusFrame() {
   const uint32_t before = gRemoteSensorRefusals.malformed;
   remoteSensorIngestStatus(kPorch, "porch", (const uint8_t*)&status, sizeof(status) - 1);
   check(gRemoteSensorRefusals.malformed == before + 1, "a short status frame is refused and counted");
+}
+
+static void testStatusBeforeReadings() {
+  // A status frame from a paired sender makes its entry, so the receiver
+  // lists that device's sensors before any reading arrives. It never changes
+  // a reading's freshness or its counts.
+  resetAll();
+  V4PayloadSensorStatus status{};
+  status.presentMask = espnowsensor::sensorBit(REMOTE_SENSOR_TOF) | espnowsensor::sensorBit(REMOTE_SENSOR_GPS);
+  status.streamingMask = 0;
+  remoteSensorIngestStatus(kPorch, "porch", (const uint8_t*)&status, sizeof(status));
+  RemoteSensorInfo info;
+  check(remoteSensorInfoFor(kPorch, REMOTE_SENSOR_TOF, &info) && !info.enabled && !info.fresh && info.jsonLength == 0 &&
+        info.counter == 0 && info.arrivalEpochMs == 0 && std::string(info.deviceName) == "porch",
+        "listed before any reading: present, not streaming, with the sender's name");
+  check(json(kPorch, REMOTE_SENSOR_TOF) == "{\"connected\":true,\"enabled\":false,\"fresh\":false,\"data\":null}",
+        "its JSON: present, not streaming, no data");
+  espnowsensor::CounterCounts c = countsOf(kPorch, REMOTE_SENSOR_TOF);
+  check(c.received == 0 && c.lost == 0 && c.late == 0 && c.repeated == 0 && c.restarts == 0 && c.resumes == 0,
+        "no reading is counted");
+  // The stream starts: the status says so, still no reading and no freshness.
+  status.streamingMask = espnowsensor::sensorBit(REMOTE_SENSOR_TOF);
+  remoteSensorIngestStatus(kPorch, "porch", (const uint8_t*)&status, sizeof(status));
+  check(remoteSensorInfoFor(kPorch, REMOTE_SENSOR_TOF, &info) && info.enabled && !info.fresh && info.jsonLength == 0,
+        "streaming, and still no reading");
+  // The first reading: kept, fresh, counted as the first (nothing lost).
+  deliver(kPorch, "porch", REMOTE_SENSOR_TOF, 7, 5, "{\"mm\":1}");
+  c = countsOf(kPorch, REMOTE_SENSOR_TOF);
+  check(c.received == 1 && c.lost == 0 && remoteSensorInfoFor(kPorch, REMOTE_SENSOR_TOF, &info) && info.fresh &&
+        info.counter == 5, "the first reading after it is kept and counted as the first");
+  // More status frames change no count, no counter and no freshness.
+  for (int i = 0; i < 5; ++i) remoteSensorIngestStatus(kPorch, "porch", (const uint8_t*)&status, sizeof(status));
+  c = countsOf(kPorch, REMOTE_SENSOR_TOF);
+  check(c.received == 1 && c.lost == 0 && remoteSensorInfoFor(kPorch, REMOTE_SENSOR_TOF, &info) && info.fresh &&
+        info.counter == 5 && textOf(kPorch, REMOTE_SENSOR_TOF) == "{\"mm\":1}", "status frames leave the reading as it was");
+  gNowMs += REMOTE_SENSOR_TTL_MS + 1000;
+  remoteSensorIngestStatus(kPorch, "porch", (const uint8_t*)&status, sizeof(status));
+  check(remoteSensorInfoFor(kPorch, REMOTE_SENSOR_TOF, &info) && !info.fresh, "and never make an old reading fresh");
+  // A worker still keeps nothing from a status frame.
+  resetAll();
+  gSettings.meshRole = 0;
+  const uint32_t refusedBefore = gRemoteSensorRefusals.notReceiver;
+  remoteSensorIngestStatus(kPorch, "porch", (const uint8_t*)&status, sizeof(status));
+  check(!remoteSensorInfoFor(kPorch, REMOTE_SENSOR_TOF, &info) && gRemoteSensorRefusals.notReceiver == refusedBefore + 1,
+        "a worker refuses it and counts it");
+  // Full through status frames alone: sixteen paired senders listed by their
+  // status, the seventeenth refused, counted and said, as for a reading; its
+  // reading is refused the same way, and nothing of the others changes.
+  resetAll();
+  gPaired.clear();
+  gConsole.clear();
+  uint8_t mac[6] = { 0x02, 0xC0, 0, 0, 0, 0 };
+  for (uint8_t i = 0; i < 16; ++i) {
+    mac[5] = i;
+    pair(mac);
+    remoteSensorIngestStatus(mac, "node", (const uint8_t*)&status, sizeof(status));
+  }
+  check(usedSlots() == 32 && gRemoteSensorRefusals.noRecord == 0, "sixteen senders listed by their status frames");
+  mac[5] = 16;
+  pair(mac);
+  remoteSensorIngestStatus(mac, "late", (const uint8_t*)&status, sizeof(status));
+  check(gRemoteSensorRefusals.noRecord == 1 && !remoteSensorInfoFor(mac, REMOTE_SENSOR_TOF, &info) && usedSlots() == 32,
+        "the seventeenth sender's status frame is refused and counted; the table is as it was");
+  check(gConsole.size() == 1 &&
+        has(gConsole[0], "Readings from late refused: this device already keeps the readings of 16 paired devices"),
+        "and it is said");
+  deliver(mac, "late", REMOTE_SENSOR_TOF, 1, 1, "{\"mm\":2}");
+  check(gRemoteSensorRefusals.noRecord == 2 && !remoteSensorInfoFor(mac, REMOTE_SENSOR_TOF, &info) && usedSlots() == 32 &&
+        gConsole.size() == 1, "its reading is refused the same way (the line comes once a minute)");
 }
 
 static void testTableFull() {
@@ -1056,6 +1137,7 @@ int main() {
   testBondAndMeshTheSame();
   testRefusals();
   testStatusFrame();
+  testStatusBeforeReadings();
   testTableFull();
   testSend();
   testDropsAreSaid();

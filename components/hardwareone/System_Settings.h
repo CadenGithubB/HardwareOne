@@ -805,7 +805,7 @@ struct Settings {
                                        // knob for a battery-tight or deliberately edge node.
   uint8_t meshPeerMax;                 // Max mesh peer slots (1-16, default: 8, changes on reboot)
   bool meshTime;                       // Mesh time (default true): the master sends its clock; a device
-                                       // with no better source of its own takes it
+                                       // that names it as its master and has no better source takes it
   uint16_t powerStatusInterval;        // Seconds between the battery frames sent to the mesh master
                                        // (default 60; 0 = none, else 10-3600)
   uint8_t eventPush;                   // Which system events go to the mesh master: 0 off, 1 alert

@@ -26,8 +26,9 @@ Source rules:
     three mesh frames may travel through a relay and none is flooded;
   * the readers of the receiver's table (OLED, G2, MQTT, web) reach it only
     through the copying accessors;
-  * the table is made by the first reading a device keeps, after the role
-    rule, and never by ESP-NOW start or by a status frame; a worker keeps
+  * the table is made by the first reading or status frame a device keeps,
+    after the role rule, and never by ESP-NOW start; the status frame writes
+    no reading's text, freshness, counter state or counts; a worker keeps
     nothing the mesh sends it;
   * the stream command says where the readings go;
   * the task-loop steps for sensor readings are outside the bonded-mode block
@@ -388,8 +389,8 @@ def rule_failures(component: Path) -> list[str]:
            "gRemoteSensorCache" not in code["System_ESPNow_Sensors.cpp"],
            "the table is private to its file: one record per paired sender, each with its own slots")
 
-    # S14: who has a table. Not ESP-NOW start, not a status frame: the first
-    # reading a device keeps, after the role rule.
+    # S14: who has a table. Not ESP-NOW start: the first reading or status
+    # frame a device keeps, after the role rule.
     init = strip_comments(definition(sensors, "bool initRemoteSensorSystem()"))
     expect("remoteSensorTableEnsure" not in init and "ps_alloc" not in init,
            "ESP-NOW start allocates nothing for readings received from other devices")
@@ -400,8 +401,24 @@ def rule_failures(component: Path) -> list[str]:
     expect(ingest.index("readingTextIsObject") < ingest.index("sensorPeerSlotsEnsure(peer)"),
            "a sender's slots are made by a reading that is whole and well formed")
     status_rx = strip_comments(extract_block(sensors, "void remoteSensorIngestStatus(const uint8_t* senderMac, const char* senderName,"))
-    expect("remoteSensorTableEnsure" not in status_rx and "espnowsensor::roleReceives(gSettings.meshRole)" in status_rx,
-           "the status frame never makes the table, and follows the role rule")
+    expect("espnowsensor::roleReceives(gSettings.meshRole)" in status_rx and "remoteSensorTableEnsure()" in status_rx and
+           status_rx.index("espnowsensor::roleReceives(gSettings.meshRole)") < status_rx.index("remoteSensorTableEnsure()"),
+           "the status frame may make the table, only after the role rule")
+    expect("statusNotKept" not in sensors, "no status frame is refused for want of a table any more")
+    for field in ("valid", "lastUpdate", "jsonLength", "arrivalEpochMs", "counter", "aged"):
+        expect(re.search(rf"entry->{field}\b", status_rx) is None,
+               f"the status frame never writes a reading's {field}")
+    expect("counterJudge" not in status_rx and "->track" not in status_rx and "->counts" not in status_rx,
+           "the status frame never touches a reading's counter state or counts")
+    # A sensor listed by its sender's status frame before any reading: the
+    # master's line says it streams and has no reading yet, not that its
+    # reading is 30 s old.
+    summary_at = strip_comments(definition(sensors, "static bool remoteSensorPeerSummaryAt(int index, RemoteSensorPeerSummary* out)"))
+    status_cmd = strip_comments(definition(sensors, "const char* cmd_espnow_sensorstatus(const String& argsInput)"))
+    expect("if (e.valid) out->readMask |= (uint16_t)(1u << k);" in summary_at and
+           re.search(r'\(summary\.readMask & \(1u << k\)\) \? "no reading for 30 s" : "streaming, no reading yet"',
+                     status_cmd) is not None,
+           "a streaming sensor with no reading kept is listed as 'streaming, no reading yet'")
     core = files["System_ESPNow_SensorCore.h"]
     expect("constexpr bool roleReceives(uint8_t role) { return role == kRoleMaster || role == kRoleBackup; }" in core and
            "constexpr bool roleSends(uint8_t role) { return role != kRoleMaster; }" in core,

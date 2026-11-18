@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Mesh time (TIME_SYNC): the master sends its clock, a device without a better source takes it.
+"""Mesh time (TIME_SYNC): the master sends its clock, a device that names it and has no better source takes it.
 
 It used to be broken: `espnowtimesync` sent (epoch, the sender's millis()) in a
 signed broadcast, the receiver stored the sender's millis() as an "offset", set
@@ -27,11 +27,13 @@ System_Clock.cpp against a settable clock:
     device per half second; a full queue is tried again;
   * the master starts a session with a paired device that has none;
   * the status text and JSON say the true source and age in each state;
+  * time is taken only from the master named on the device (primary, or the
+    backup acting as master); with no master named no frame sets the clock,
+    and the status says so and names espnowmasterfingerprint;
   * a paired device that sends TIME_SYNC all the time cannot keep the named
-    master's frame (or, with no master named, another sender's) from being
-    judged; mesh mode off takes no time; with no master named a set clock is
-    changed at most once in 10 minutes; a hostile time is refused with no
-    difference computed; the "held" console line comes once a minute at most;
+    master's frame from being judged; mesh mode off takes no time; a hostile
+    time is refused with no difference computed; the "held" console line
+    comes once a minute at most;
   * the frame names the master's own source and the minutes since it was set;
   * which sources may be written into the RTC chip (Clock::sourceWritesRtc).
 
@@ -162,6 +164,14 @@ def check_sources(component: Path) -> None:
     settings = (component / "System_Settings.h").read_text()
     require("bool meshTime;" in settings, "the setting meshTime exists")
     require('{ "meshTime", SETTING_BOOL, &gSettings.meshTime, true,' in espnow, "meshTime is on by default")
+    # The help of the commands says time is taken only from the named master.
+    meshtime_row = re.search(r'\{ "espnowmeshtime", "([^"]*)"', espnow)
+    timesync_row = re.search(r'\{ "espnowtimesync", "[^"]*", false, cmd_espnow_timesync, "([^"]*)"', espnow)
+    require(meshtime_row is not None and "devices that name it as their master take it" in meshtime_row.group(1) and
+            "other devices take it" not in meshtime_row.group(1),
+            "espnowmeshtime's help says only devices that name the master take its time")
+    require(timesync_row is not None and "when it names this device as its master (espnowmasterfingerprint)" in
+            timesync_row.group(1), "espnowtimesync's usage says a device takes it when it names this master")
 
 
 def main() -> None:

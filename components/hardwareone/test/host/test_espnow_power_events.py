@@ -152,6 +152,16 @@ def check_sources(component: Path) -> None:
                           ("espnowpowerinterval", "cmd_espnow_powerinterval"), ("espnoweventpush", "cmd_espnow_eventpush")):
         require(re.search(rf'\{{ "{name}", "[^\n]*, {handler}, "Usage: {name}', espnow) is not None,
                 f"the command {name} is registered with its usage")
+    # Who may read them: the events other devices sent (logins, failures) are
+    # for an admin; the battery state is for any user. The local 'events'
+    # command is a separate row and keeps its own flag.
+    for name, handler, admin in (("espnowevents", "cmd_espnow_events", "true"),
+                                 ("espnowbattery", "cmd_espnow_battery", "false")):
+        require(re.search(rf'\{{ "{name}", "[^\n]*", {admin}, {handler}, "Usage: {name}', espnow) is not None,
+                f"{name} is registered with admin = {admin}")
+    sensors = (component / "System_ESPNow_Sensors.cpp").read_text()
+    require('"  Battery state and events it received: espnowbattery, espnowevents (admin only)."' in sensors,
+            "espnowsensorstatus points to espnowevents as admin only")
     notif_h = (component / "System_Notifications.h").read_text()
     notif = (component / "System_Notifications.cpp").read_text()
     require("uint8_t notifKindTier(uint8_t kind);" in notif_h and "static uint8_t notifKindTier" not in notif,

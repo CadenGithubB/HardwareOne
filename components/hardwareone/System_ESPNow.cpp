@@ -13501,7 +13501,8 @@ static bool initEspNow() {
 
   // The table of readings received from other devices is not made here: only
   // a device that is sent readings and keeps them has one, and the first such
-  // reading makes it (remoteSensorIngestPart). This call forgets what was
+  // reading or sensor status frame makes it (remoteSensorIngestPart,
+  // remoteSensorIngestStatus). This call forgets what was
   // listed before a restart of ESP-NOW and readies the sender's state.
   if (!initRemoteSensorSystem()) {
     snprintf(gLastInitErrorReason, sizeof(gLastInitErrorReason),
@@ -21084,9 +21085,9 @@ extern const CommandEntry espNowCommands[] = {
   { "espnowbackupenable", "Enable/disable backup master feature: 'espnowbackupenable [on|off]'.", true, cmd_espnow_backupenable, "Usage: espnowbackupenable [on|off]" },
   { "espnowmeshtopo", "Discover mesh topology (run on the master; role not enforced). (async - read results with espnowtoporesults)", false, cmd_espnow_meshtopo },
   { "espnowtoporesults", "Get topology results: 'espnowtoporesults [page] [request-id]'.", false, cmd_espnow_toporesults },
-  { "espnowtimesync", "Mesh master: send this device's clock to the paired devices now (it is also sent when a session starts and every 10 minutes).", false, cmd_espnow_timesync, "Usage: espnowtimesync\n       Only the mesh master sends time, and only when its own clock comes from rtc, ntp, timeset or cm5.\n       A paired device takes it when it has no such source itself. See 'espnowtimestatus'." },
+  { "espnowtimesync", "Mesh master: send this device's clock to the paired devices now (it is also sent when a session starts and every 10 minutes).", false, cmd_espnow_timesync, "Usage: espnowtimesync\n       Only the mesh master sends time, and only when its own clock comes from rtc, ntp, timeset or cm5.\n       A paired device takes it when it names this device as its master (espnowmasterfingerprint) and has no such source itself. See 'espnowtimestatus'." },
   { "espnowtimestatus", "Show mesh time: where this device's clock comes from, what it sends or last received: 'espnowtimestatus [json]'.", false, cmd_espnow_timestatus, "Usage: espnowtimestatus [json]" },
-  { "espnowmeshtime", "Mesh time on/off: the master sends its clock, other devices take it when they have no better source: 'espnowmeshtime [on|off]'.", true, cmd_espnow_meshtime, "Usage: espnowmeshtime [on|off]" },
+  { "espnowmeshtime", "Mesh time on/off: the master sends its clock, devices that name it as their master take it when they have no better source: 'espnowmeshtime [on|off]'.", true, cmd_espnow_meshtime, "Usage: espnowmeshtime [on|off]" },
   
   // ---- Device Metadata ----
   { "espnowroom", "Get/set device room: 'espnowroom [name]'.", false, cmd_espnow_room, "Usage: espnowroom [Kitchen|Bedroom|...]\n       espnowroom clear" },
@@ -21119,7 +21120,7 @@ extern const CommandEntry espNowCommands[] = {
   { "espnowsensorstream", "Send one sensor's readings to the master named on this device: 'espnowsensorstream <sensor> <on|off>'. (on this device only; the readings show on the master's espnowsensorstatus)", false, cmd_espnow_sensorstream, "Usage: espnowsensorstream <thermal|tof|imu|gps|input|fmradio|camera|microphone|rtc|presence|apds> <on|off>\n       The readings go to the master named on this device (espnowmasterfingerprint), which must be paired with it.\n       The reply says where they go, or why nothing is sent yet. On a bond master it asks the bond partner." },
   { "espnowsensorstatus", "Show what this device sends to the mesh master (readings, battery state, events) and why not, and what it received, lost and refused: 'espnowsensorstatus [json [<name_or_mac>]]'.", false, cmd_espnow_sensorstatus, "Usage: espnowsensorstatus [json [<name_or_mac>]]\n       json <name_or_mac>: everything this device keeps of one sending device." },
   { "espnowbattery", "Mesh master: show the battery state other devices sent: 'espnowbattery [json] [<name_or_mac>] [from <n>]'.", false, cmd_espnow_battery, "Usage: espnowbattery [json] [<name_or_mac>] [from <n>]\n       A device sends its battery state to the master named on it (espnowpowerinterval).\n       json: 'next' is the number to pass as 'from' when not every device fitted one reply." },
-  { "espnowevents", "Mesh master: show the system events other devices sent: 'espnowevents [json] [since <rx>]'.", false, cmd_espnow_events, "Usage: espnowevents [json] [since <rx>]\n       A device sends its events to the master named on it (espnoweventpush). The master keeps the newest 24 per mesh.\n       since <rx>: only events after that receive number. json: 'more' means ask again with since = the last rx." },
+  { "espnowevents", "Mesh master: show the system events other devices sent: 'espnowevents [json] [since <rx>]'.", true, cmd_espnow_events, "Usage: espnowevents [json] [since <rx>]\n       A device sends its events to the master named on it (espnoweventpush). The master keeps the newest 24 per mesh.\n       since <rx>: only events after that receive number. json: 'more' means ask again with since = the last rx." },
   { "espnowpowerinterval", "How often this device sends its battery state to the mesh master, in seconds: 'espnowpowerinterval [0|10..3600]'. 0 = not sent.", true, cmd_espnow_powerinterval, "Usage: espnowpowerinterval [0|10..3600]" },
   { "espnoweventpush", "Which of this device's system events go to the mesh master: 'espnoweventpush [off|alert|standard|verbose]'.", true, cmd_espnow_eventpush, "Usage: espnoweventpush [off|alert|standard|verbose]\n       alert: security, safety and faults only (the default). standard: also the everyday ones. verbose: all." },
   { "espnowsensorbroadcast", "Enable/disable all sensor ESP-NOW communication: 'espnowsensorbroadcast <on|off>'.", false, cmd_espnow_sensorbroadcast, "Usage: espnowsensorbroadcast [on|off]" },

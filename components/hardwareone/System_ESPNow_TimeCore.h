@@ -2,9 +2,11 @@
 //
 // The mesh master sends its clock to each paired device over that device's
 // session: when the session has come up, every 10 minutes, and when its own
-// clock was set. A device that has no better source of its own (RTC, NTP,
-// timeset, CM5) sets its clock from it. Times are UTC. Pure logic on
-// caller-owned state: no heap, no OS, no logging
+// clock was set. A device that names that master (espnowmasterfingerprint,
+// or espnowbackupfingerprint for the backup acting as master) and has no
+// better source of its own (RTC, NTP, timeset, CM5) sets its clock from it;
+// a device that names no master takes no mesh time. Times are UTC. Pure
+// logic on caller-owned state: no heap, no OS, no logging
 // (test/host/test_espnow_time_core.cpp). The owner (System_ESPNow.cpp) holds
 // the state, reads the clock and sets it.
 //
@@ -15,7 +17,8 @@
 //                   clock when it built the frame
 //   8  source       where the sender's clock came from (kSrc* below); never 0
 //   9  flags        bit 0: the sender is a backup master acting as master;
-//                   other bits 0, ignored on receive
+//                   other bits 0. The receiver judges the sender by the
+//                   fingerprint named on it, not by this bit
 //  10  sinceSetMin  16 bit: minutes since that source last set the sender's
 //                   clock; 65535 = that long or longer
 //  12  reserved     4 bytes, 0 (room for a later two-way exchange)
@@ -232,16 +235,15 @@ inline void peerSent(PeerSendState& p, const RoundState& r, uint32_t established
 //
 //    1  the setting meshTime is off                         ignored_off
 //   1b  mesh mode is off                                    ignored_mesh_off
-//    2  a master is named here and the sender is not one    ignored_not_named
-//    3  this device is the acting master                    ignored_master
+//    2  this device is the acting master                    ignored_master
+//    3  no master is named on this device                   ignored_no_master
+//   3b  the sender is not the master named here             ignored_not_named
 //    4  source 0, or the time is not within 2020-2099       refused_bad_time
 //    5  own clock set from rtc, ntp, manual or cm5          ignored_better_source
 //    6  a weak source while the own clock is set            ignored_weak_source
 //    7  another sender's time is being followed             ignored_other_master
 //    8  own clock not set                                   applied
 //    9  a step was applied under 10 s ago                   ignored_too_soon
-//       (a step of rules 11 and 12: under 10 minutes ago
-//       when no master is named here)
 //   10  difference under 5 s                                agreed
 //   11  difference up to 1 hour                             applied
 //   12  difference over 1 hour                              held_large_change,
@@ -251,18 +253,16 @@ inline void peerSent(PeerSendState& p, const RoundState& r, uint32_t established
 // A frame whose own time is not a real date is refused before anything is
 // computed from it.
 //
-// 9: with no master named, any paired peer may claim to be the master. It
-// can then change this device's clock at most once in 10 minutes (each
-// change of more than 2 minutes writes the boot anchor and a line in the
-// events log): a step that would come sooner is ignored_too_soon, a held
-// claim stays held until then. A frame that agrees is still agreed, and the
-// first time, while the clock is not set, is not limited.
+// 3: mesh time comes only from the master named on this device: the primary
+// (espnowmasterfingerprint), or the backup (espnowbackupfingerprint), which
+// sends time only while it acts as master. With neither named, no frame is
+// taken, whoever sends it.
 //
 // 7: after a frame from S was applied or agreed, S is followed for
-// kStickyMs. A frame from another sender is ignored meanwhile unless it
-// outranks S: the primary master named on this device (rank 2) over a master
-// by its own word (rank 1) over a backup acting as master (rank 0). Two
-// devices that both send time cannot step a third back and forth.
+// kStickyMs. A frame from the other named master is ignored meanwhile unless
+// it outranks S: the primary (rank 1) over the backup (rank 0). The primary
+// and a backup that both act as master cannot step this device back and
+// forth, and a returning primary takes over from the backup at once.
 //
 // 12: the first such frame is remembered with its sender. A later frame from
 // the same sender, kHoldConfirmMinMs to kHoldMaxMs after it, that claims the
@@ -274,7 +274,6 @@ constexpr int64_t kAgreeBandMs      = 5000;
 constexpr int64_t kLargeChangeMs    = 3600LL * 1000;
 constexpr int64_t kStickyMs         = 25LL * 60 * 1000;
 constexpr int64_t kApplyGapMs       = 10000;
-constexpr int64_t kUnnamedApplyGapMs = 10LL * 60 * 1000;
 constexpr int64_t kHoldConfirmMinMs = 10000;
 constexpr int64_t kHoldMaxMs        = 30LL * 60 * 1000;
 constexpr int64_t kHoldAgreeMs      = 5000;
@@ -284,6 +283,7 @@ enum class Verdict : uint8_t {
   Agreed,
   IgnoredOff,
   IgnoredMeshOff,
+  IgnoredNoMaster,
   IgnoredNotNamed,
   IgnoredMaster,
   IgnoredBetterSource,
@@ -302,6 +302,7 @@ inline const char* verdictKey(Verdict v) {
     case Verdict::Agreed:              return "agreed";
     case Verdict::IgnoredOff:          return "ignored_off";
     case Verdict::IgnoredMeshOff:      return "ignored_mesh_off";
+    case Verdict::IgnoredNoMaster:     return "ignored_no_master";
     case Verdict::IgnoredNotNamed:     return "ignored_not_named";
     case Verdict::IgnoredMaster:       return "ignored_master";
     case Verdict::IgnoredBetterSource: return "ignored_better_source";
@@ -316,7 +317,8 @@ inline const char* verdictKey(Verdict v) {
 }
 
 constexpr bool verdictIsIgnored(Verdict v) {
-  return v == Verdict::IgnoredOff || v == Verdict::IgnoredMeshOff || v == Verdict::IgnoredNotNamed ||
+  return v == Verdict::IgnoredOff || v == Verdict::IgnoredMeshOff || v == Verdict::IgnoredNoMaster ||
+         v == Verdict::IgnoredNotNamed ||
          v == Verdict::IgnoredMaster ||
          v == Verdict::IgnoredBetterSource || v == Verdict::IgnoredWeakSource ||
          v == Verdict::IgnoredOtherMaster || v == Verdict::IgnoredTooSoon;
@@ -360,10 +362,8 @@ struct Decision {
   int64_t differenceMs;      // candidate minus the own clock (0 when that is not set)
 };
 
-inline uint8_t senderRank(const FollowerInputs& in, const Frame& f) {
-  if (in.senderIsNamedPrimary) return 2;
-  return (f.flags & kFlagActingBackup) ? 0 : 1;
-}
+// Only a named master gets this far: the primary outranks the backup.
+inline uint8_t senderRank(const FollowerInputs& in) { return in.senderIsNamedPrimary ? 1 : 0; }
 
 // Judges one frame and updates `st`. The caller sets the clock when the
 // verdict is Applied; it works on a copy of `st` and keeps the copy only when
@@ -383,8 +383,9 @@ inline Decision followerDecide(FollowerState& st, const FollowerInputs& in, cons
 
   if (!in.settingOn) { d.verdict = Verdict::IgnoredOff; return d; }
   if (!in.meshOn) { d.verdict = Verdict::IgnoredMeshOff; return d; }
-  if (in.hasNamedMaster && !in.senderIsNamed) { d.verdict = Verdict::IgnoredNotNamed; return d; }
   if (in.actingMaster) { d.verdict = Verdict::IgnoredMaster; return d; }
+  if (!in.hasNamedMaster) { d.verdict = Verdict::IgnoredNoMaster; return d; }
+  if (!in.senderIsNamed) { d.verdict = Verdict::IgnoredNotNamed; return d; }
   if (f.source == 0 || !frameTimeReal || !epochMsPlausible(d.candidateEpochMs)) {
     d.verdict = Verdict::RefusedBadTime;
     return d;
@@ -392,7 +393,7 @@ inline Decision followerDecide(FollowerState& st, const FollowerInputs& in, cons
   if (in.clockSet && ownSourceIsReal(in.ownSource)) { d.verdict = Verdict::IgnoredBetterSource; return d; }
   if (in.clockSet && f.source >= kSrcWeakFirst) { d.verdict = Verdict::IgnoredWeakSource; return d; }
 
-  const uint8_t rank = senderRank(in, f);
+  const uint8_t rank = senderRank(in);
   const bool sameSticky = st.stickyHave && memcmp(st.stickyMac, rx.sender, 6) == 0;
   if (st.stickyHave && !sameSticky && (in.nowMonoMs - st.stickyMonoMs) < kStickyMs &&
       rank <= st.stickyRank) {
@@ -426,14 +427,7 @@ inline Decision followerDecide(FollowerState& st, const FollowerInputs& in, cons
     d.verdict = Verdict::Agreed;
     return d;
   }
-  // A step. With no master named, at most one in kUnnamedApplyGapMs.
-  const bool stepAllowed =
-      in.hasNamedMaster || !st.appliedHave || (in.nowMonoMs - st.appliedMonoMs) >= kUnnamedApplyGapMs;
-  auto tooSoon = [&]() {
-    d.verdict = Verdict::IgnoredTooSoon;
-    return d;
-  };
-  if (diff <= kLargeChangeMs) return stepAllowed ? apply() : tooSoon();
+  if (diff <= kLargeChangeMs) return apply();
 
   // Over an hour.
   if (sameHold) {
@@ -441,7 +435,7 @@ inline Decision followerDecide(FollowerState& st, const FollowerInputs& in, cons
     int64_t drift = (f.epochMs - st.holdEpochMs) - apart;
     if (drift < 0) drift = -drift;
     if (apart >= kHoldConfirmMinMs && apart <= kHoldMaxMs && drift <= kHoldAgreeMs) {
-      return stepAllowed ? apply() : tooSoon();  // (the claim stays held)
+      return apply();
     }
     // Said again too early: the first claim stands and is confirmed later.
     if (apart < kHoldConfirmMinMs && drift <= kHoldAgreeMs) {

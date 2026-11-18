@@ -116,7 +116,6 @@ struct RemoteSensorRefusals {
   uint32_t badType;        // a sensor type this firmware does not know
   uint32_t notReceiver;    // this device's role does not keep readings
   uint32_t malformed;      // too short to be a reading or status frame
-  uint32_t statusNotKept;  // a status frame before this device kept any reading (it makes no table)
 };
 static RemoteSensorRefusals gRemoteSensorRefusals = {};
 // One console line a minute while readings are refused for this device's
@@ -342,9 +341,9 @@ bool remoteSensorTableEnsure() {
 
 bool initRemoteSensorSystem() {
   // A new ESP-NOW start begins with no reading listed. Nothing is allocated
-  // here: the table is made by the first reading this device keeps. The
-  // per-sender counter state is kept: the senders' counters did not restart
-  // with this device's radio.
+  // here: the table is made by the first reading or status frame this device
+  // keeps. The per-sender counter state is kept: the senders' counters did
+  // not restart with this device's radio.
   // One sender per hold, and only the flags that list a slot (the text stays
   // behind them, unread).
   for (int i = 0; gSensorPeers && i < REMOTE_SENSOR_PEERS_MAX; i++) {
@@ -711,13 +710,15 @@ void remoteSensorIngestStatus(const uint8_t* senderMac, const char* senderName,
     remoteSensorRefuse(&RemoteSensorRefusals::notReceiver);
     return;
   }
-  // It never makes the table: a device that has kept no reading yet keeps no
-  // status either. Once the table is there, it lists the sender's sensors.
-  if (!gSensorPeers) {
-    remoteSensorRefuse(&RemoteSensorRefusals::statusNotKept);
+  // It makes the table and the sender's record as a reading does, so the
+  // receiver lists a device's sensors (present, streaming or not) before any
+  // reading arrives. A full table or no memory is refused, counted and said
+  // as for a reading. It never touches a reading, its freshness or its counts.
+  const uint32_t nowMs = (uint32_t)millis();
+  if (!remoteSensorTableEnsure()) {
+    remoteSensorRefuseFull(&RemoteSensorRefusals::noMemory, senderName, nowMs);
     return;
   }
-  const uint32_t nowMs = (uint32_t)millis();
   SensorPeerRecord* peer = sensorPeerRecordFor(senderMac);
   if (!peer) {
     remoteSensorRefuseFull(&RemoteSensorRefusals::noRecord, senderName, nowMs);
@@ -2029,6 +2030,7 @@ struct RemoteSensorPeerSummary {
   uint16_t presentMask;    // sensors listed
   uint16_t streamingMask;  // ... that the sender says it streams
   uint16_t freshMask;      // ... with a reading within REMOTE_SENSOR_TTL_MS
+  uint16_t readMask;       // ... with a reading kept at all (a status frame alone lists a sensor)
   uint32_t received, lost, late, incomplete, malformed;
 };
 
@@ -2055,6 +2057,7 @@ static bool remoteSensorPeerSummaryAt(int index, RemoteSensorPeerSummary* out) {
       out->presentMask |= (uint16_t)(1u << k);
       if (e.enabled) out->streamingMask |= (uint16_t)(1u << k);
       if (slotFresh(e, nowMs)) out->freshMask |= (uint16_t)(1u << k);
+      if (e.valid) out->readMask |= (uint16_t)(1u << k);
     }
   }
   taskEXIT_CRITICAL(&gRemoteSensorMux);
@@ -2366,8 +2369,10 @@ const char* cmd_espnow_sensorstatus(const String& argsInput) {
     size_t pos = 0;
     for (int k = 0; k < REMOTE_SENSOR_MAX && pos + 24 < sizeof(line); k++) {
       if (!(summary.presentMask & (1u << k))) continue;
+      // A sensor listed by the sender's status frame alone has no reading yet.
       const char* state = !(summary.streamingMask & (1u << k)) ? "present"
-                        : ((summary.freshMask & (1u << k)) ? "fresh" : "no reading for 30 s");
+                        : (summary.freshMask & (1u << k)) ? "fresh"
+                        : (summary.readMask & (1u << k)) ? "no reading for 30 s" : "streaming, no reading yet";
       pos += (size_t)snprintf(line + pos, sizeof(line) - pos, "%s%s %s", pos ? ", " : "",
                               sensorTypeToString((RemoteSensorType)k), state);
     }
@@ -2394,7 +2399,7 @@ const char* cmd_espnow_sensorstatus(const String& argsInput) {
                      (unsigned long)(totals.malformed + totals.refusals.malformed),
                      (unsigned long)totals.refusals.notReceiver);
   }
-  if (receives) broadcastOutput("  Battery state and events it received: espnowbattery, espnowevents.");
+  if (receives) broadcastOutput("  Battery state and events it received: espnowbattery, espnowevents (admin only).");
 
   return "OK: sensor status displayed";
 }

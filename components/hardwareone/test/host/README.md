@@ -4119,8 +4119,8 @@ replays the pre-fix sources. No radio is used.
 
 Mesh time was broken: `espnowtimesync` sent (epoch, the sender's `millis()`) in a signed broadcast, the receiver
 stored the sender's `millis()` as an "offset", set no clock, and `espnowtimestatus` said "Synced: Yes". It is now
-a session unicast from the mesh master to each paired device, and a device with no better source of its own sets
-its clock from it (`System_ESPNow_TimeCore.h` has the rules, `System_ESPNow_MeshTime.cpp` the device side).
+a session unicast from the mesh master to each paired device, and a device that names that master and has no
+better source of its own sets its clock from it (a device that names no master takes none) (`System_ESPNow_TimeCore.h` has the rules, `System_ESPNow_MeshTime.cpp` the device side).
 
 `espnow_time_core_tests` compiles `System_ESPNow_TimeCore.h` (the production dependency-free header): the 16-byte
 frame at its stated offsets; who sends, for every combination of setting, mesh mode, role, clock state and source
@@ -4128,9 +4128,9 @@ frame at its stated offsets; who sends, for every combination of setting, mesh m
 (at once, every 10 minutes, after a clock step and 15 s after that, by hand; a peer whose session came up, once
 it is 2 s old; the uptime wrap); and every row of the receiver's rule for every own source, with the frame's
 wait added, a change of more than an hour held and applied when the same sender confirms it (not by another
-sender, not within 10 s, not when it disagrees, not after 30 minutes), a second sender that cannot move the
-clock back and forth, the rank of a named primary over a master over an acting backup, and the 10 s gap after a
-step.
+sender, not within 10 s, not when it disagrees, not after 30 minutes), the named primary and backup that cannot
+move the clock back and forth, the rank of the primary over the backup, no time at all with no master named, and
+the 10 s gap after a step.
 
 `espnow_time_status` compiles the production code of `System_ESPNow_MeshTime.cpp` between `MESH_TIME_HOST_BEGIN`
 and `MESH_TIME_HOST_END` (what the handler keeps, the main-loop apply tick, the sender step, `espnowtimesync`
@@ -4150,13 +4150,18 @@ report and before the clock duties. `--component <component-directory>` replays 
 
 Since the review of 2026-11-18 both suites also check: a session stamped after the pass read the uptime is not
 settled; a hostile frame time (INT64_MAX, INT64_MIN) is refused with no difference computed from it; mesh mode off
-takes no time (`ignored_mesh_off`); with no master named a set clock changes at most once in 10 minutes, while an
-agreeing frame still agrees and a held claim waits; a paired device that floods TIME_SYNC cannot keep the named
-master's frame (or, unnamed, another sender's) from being judged, four senders' frames wait and the rest are
-counted; the "held" console line comes once a minute at most; the frame names the master's own source and the
+takes no time (`ignored_mesh_off`); a paired device that floods TIME_SYNC cannot keep the named master's frame
+from being judged, four senders' frames wait and the rest are counted; the "held" console line comes once a minute at most; the frame names the master's own source and the
 minutes since it was set; a master with mesh mode off starts no handshake; the json role of a backup;
 `Clock::sourceWritesRtc` (mesh time and a carried clock are not written into the RTC chip), and the source rule
 that the RTC task asks it before it calibrates an uncalibrated chip from the system clock.
+
+Since the owner's decision of 2026-11-18 mesh time comes only from the master named on the device: both suites
+check that with no master named no frame is taken from anyone (`ignored_no_master`, also while the clock is not
+set, with or without the acting-backup bit), that the status says so and names `espnowmasterfingerprint`
+(`masterNamed` in the json), that a named backup is taken by its fingerprint and ranks below the primary, that the
+acting-backup bit neither names a device nor ranks it, and that a named master's frames step the clock after 10 s
+every time (the old one-step-in-10-minutes limit for an unnamed sender is gone with the unnamed sender).
 
 Not covered: `mtSetClock` itself (`settimeofday` and `Clock::clockStepped`; the source rule pins its two lines
 and their order), the real session table and send queue, and two real tasks at the kept frame at the same moment.
@@ -4193,7 +4198,9 @@ unicast; the two task-loop steps for readings are outside the bonded-mode block;
 `System_ESPNow_Sensors.cpp` touches the receiver's table; the sender plans its parts by the frame budget of its
 target, starts no handshake and prints nothing, and the broadcaster task prints nothing; ESP-NOW start allocates
 nothing for received readings, the ingest makes the table only after the role rule and a sender's slots only for
-a reading that is whole and well formed, and the status frame never makes the table; `espnowsensorstatus` asks
+a reading that is whole and well formed, the status frame makes the table only after the role rule and never
+writes a reading's text, freshness, counter state or counts, and `statusNotKept` is gone; a sensor listed by its
+status alone that streams reads "streaming, no reading yet" on the master's line; `espnowsensorstatus` asks
 the role rules; `espnowsensorstream` answers with the target of that sensor; a lease that lapses does not stop a
 stream switched on by hand.
 
@@ -4208,8 +4215,11 @@ stored text nor its stamp; an outage longer than the presence time is still coun
 refused by the queue gives no stored reading. The bond frame and the mesh frame give the same slot. Types 11 to
 255, short payloads, hostile part counts and a text that is not one JSON object are refused and counted. A
 worker that is sent readings refuses them, counts them, says so once a minute and allocates nothing; a backup
-master and the master keep them; the bond partner's reading is kept whatever the mesh role. The first reading a
-receiver keeps makes the table and that sender's slots; a status frame lists and never makes data or the table.
+master and the master keep them; the bond partner's reading is kept whatever the mesh role. The first reading or
+status frame a receiver keeps makes the table and that sender's slots (owner's decision 2026-11-18: the master
+lists a device's sensors before any reading); a status frame lists, never makes data, never counts a reading and
+never makes an old one fresh; no memory and a seventeenth sender are refused for a status frame as for a reading,
+also when sixteen senders were listed by their status alone.
 Sixteen senders with eleven sensors each are all kept; the seventeenth sender is refused, counted and said once
 a minute; a sender that is no longer paired gives its record and its slots, cleared, to the next one; no memory
 for the table or for a sender's slots is refused, counted and said. Without a session nothing is sent or parked
@@ -4298,7 +4308,8 @@ sender and a session-encrypted frame and nothing else, both may travel through a
 the battery frame asks for an acknowledgement and has it watched; the role rule comes before any allocation; the
 task step runs once in the `espnow_task` loop, outside every bonded-mode block and after `sensorLinkTick`; the
 file names no bond symbol and never `systemEventPost`, and its tested block reaches the device only through its
-`pe*` functions; the two settings and the four commands exist.
+`pe*` functions; the two settings and the four commands exist; `espnowevents` is admin only and `espnowbattery`
+is not (owner's decision 2026-11-18).
 
 Not covered by any host suite: the `pe*` device functions themselves (`peBatteryInputs` copies `BatteryState`;
 `peSendPower` / `peSendEvent`, which the source rules pin; `peEventFetch` over the real event ring), the two

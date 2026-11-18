@@ -319,7 +319,9 @@ contract in sec. 6 is **unchanged**.)
   activity: `sent`, `notSent`, and a count per reason: `too_long`, `no_receiver`, `no_session`,
   `queue_full`, `is_master`, `bond_offline`, `broadcast_off`, `mesh_off`, `not_in_this_build`,
   `master_not_paired`). On a device that receives (master, backup, or any device that holds
-  readings): `devices` as in 8.1, each with `received`, `lost` and `late` added, and
+  readings): `devices` as in 8.1 (a device's sensors are listed from its sensor status frame before
+  its first reading: `connected` true, `enabled` as the device says, `fresh` false, `data` null),
+  each with `received`, `lost` and `late` added, and
   `devicesMore`: `false`, or `true` when the reply (4 KB) could not hold every device and the rest
   were left out. A reply that does not fit even without devices is
   `{"schema":1,"error":"the reply does not fit its buffer"}`.
@@ -339,7 +341,8 @@ contract in sec. 6 is **unchanged**.)
   `unknown`), `voltage`, `percent`, `present`, `charging`, `usb`, `ratePctPerHr`, `sampleAgeMs`
   (each `null` when the sending device did not know it), `percentEstimated`, `chargingEstimated`,
   `statusEstimated`, `stale`, and the counts `received`, `lost`, `late`, `restarts`, `resumes`.
-- `espnowevents json [since <rx>]` (the system events other devices sent): `schema`, `role`,
+- `espnowevents json [since <rx>]` (the system events other devices sent; admin only, a user
+  without admin gets the command layer's refusal): `schema`, `role`,
   `boot` (this device's boot counter: `rx` numbers start again at 1 after a restart), `latest`
   (the newest `rx`), `since` (as used; a number above `latest` is read as 0), `overwritten` (events
   after `since` that are no longer held), `sends`, `refused`, `senders` (per sending device `mac`,
@@ -356,11 +359,13 @@ contract in sec. 6 is **unchanged**.)
   `sensorMask`, `sensorConnectedMask` and `sensorEnabledMask` changed to the one sensor numbering
   (thermal 1, tof 2, imu 4, gps 8, input 16, fmradio 32, rtc 256, presence 512, apds 1024): read
   the masks through `sensorBits`, not through numbers of your own.
-- `espnowtimestatus json`: `schema`, `meshTime`, `role`, `clockSet`, `clockSource`, `clockSetAgoS`,
+- `espnowtimestatus json`: `schema`, `meshTime`, `role`, `masterNamed` (`false`: no master is named
+  on this device, so it takes no mesh time), `clockSet`, `clockSource`, `clockSetAgoS`,
   `epoch`, `sends`, `sendsWhyNot`, `lastSentAgoS`, `framesSent`, `peersSent`, `peersReady`,
   `peersPaired`, `lastFrame` (`mac`, `name`, `agoS`, `source`, `sinceSetMin`, `result`,
   `differenceS`; `null` before any frame) and `counts`. `result` is one of `applied`, `agreed`,
-  `ignored_off`, `ignored_mesh_off`, `ignored_not_named`, `ignored_master`, `ignored_better_source`,
+  `ignored_off`, `ignored_mesh_off`, `ignored_master`, `ignored_no_master`, `ignored_not_named`,
+  `ignored_better_source`,
   `ignored_weak_source`, `ignored_other_master`, `ignored_too_soon`, `refused_bad_time`,
   `held_large_change`; `differenceS` is 0 for a frame whose time is not a real date. `counts.ignored`
   also counts frames that found no room to wait for the main loop (four senders' frames wait at

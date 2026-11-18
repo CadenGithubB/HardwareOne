@@ -244,7 +244,10 @@ static void resetAll() {
   gMeshOn = true;
   gRole = 0;
   gBackupPromoted = false;
-  gHaveNamedPrimary = gHaveNamedBackup = false;
+  // The usual set-up: hub is the master named on this device.
+  gHaveNamedPrimary = true;
+  std::memcpy(gNamedPrimary, kHub, 6);
+  gHaveNamedBackup = false;
   gPeers.clear();
   gSent.clear();
   gHandshakes.clear();
@@ -303,14 +306,16 @@ static void testFollower() {
   check(gMeshSteps == 1, "a frame is applied once");
   std::string s = status();
   check(has(s, "This device's clock: set, from mesh, last set 0 s ago"), "status: set, from mesh");
-  check(has(s, "Role: worker. Takes time from the mesh master"), "status: role worker");
+  check(has(s, "Role: worker. Takes time from the master named on this device when it has no better source"),
+        "status: role worker");
   check(has(s, "Last time frame: 0 s ago from hub (its source: ntp). Applied."), "status: last frame applied");
   check(has(s, "Frames: 1 applied, 0 agreed, 0 held, 0 not used, 0 refused"), "status: counts");
   pass(42000);
   s = status();
   check(has(s, "last set 42 s ago") && has(s, "Last time frame: 42 s ago"), "status counts from the step, not from boot");
   std::string j = status("json");
-  check(has(j, "\"schema\":1,\"meshTime\":true,\"role\":\"worker\",\"clockSet\":true,\"clockSource\":\"mesh\",\"clockSetAgoS\":42"),
+  check(has(j, "\"schema\":1,\"meshTime\":true,\"role\":\"worker\",\"masterNamed\":true,\"clockSet\":true,"
+               "\"clockSource\":\"mesh\",\"clockSetAgoS\":42"),
         "json: clock set from mesh, 42 s ago");
   check(has(j, "\"sends\":false,\"sendsWhyNot\":\"not_master\""), "json: a worker does not send");
   check(has(j, "\"lastFrame\":{\"mac\":\"AA:BB:CC:00:00:01\",\"name\":\"hub\",\"agoS\":42,\"source\":\"ntp\",\"sinceSetMin\":3,"
@@ -432,10 +437,12 @@ static void testFollower() {
   check(gSource == meshtime::OwnSource::Manual && gClockMs == kT0 + 500000, "the other source's time stands");
   check(has(status("json"), "\"result\":\"ignored_better_source\""), "and the frame is recorded as not used");
 
-  // Two senders: the second cannot move the clock back.
+  // The primary and the backup both send: the second cannot move the clock back.
   resetAll();
   addPeer(kHub, "hub", true);
   addPeer(kShed, "shed", true);
+  gHaveNamedBackup = true;
+  std::memcpy(gNamedBackup, kShed, 6);
   receive(kHub, kT0);
   espnowMeshTimeApplyTick();
   pass(30000);
@@ -603,11 +610,12 @@ static void testHardening() {
   espnowMeshTimeApplyTick();
   check(gMeshSteps == 1 && gClockMs == kT0, "four kept frames of others do not keep the named master's frame out");
   check(has(status("json"), "\"ignored\":6,"), "every frame that was not judged is counted as not used");
-  // With no master named, two senders 2 ms apart are both judged, in order:
-  // the first is applied, the second (same rank) is not followed.
+  // The primary's first and the backup's 2 ms later: the backup is not followed.
   resetAll();
   addPeer(kHub, "hub", true);
   addPeer(kShed, "shed", true);
+  gHaveNamedBackup = true;
+  std::memcpy(gNamedBackup, kShed, 6);
   receive(kHub, kT0);
   pass(2);
   receive(kShed, kT0 + 900000);
@@ -627,27 +635,51 @@ static void testHardening() {
         "and the status says so, truly");
   check(has(status("json"), "\"result\":\"ignored_mesh_off\""), "json: ignored_mesh_off");
 
-  // No master named: a paired device that claims to be the master can change
-  // a set clock once in 10 minutes, not with every frame.
-  resetAll();
-  addPeer(kShed, "shed", true);
-  otherSourceSets(meshtime::OwnSource::Ring, kT0);
-  for (int i = 0; i < 60; ++i) {  // ten minutes, a frame every 10 s, 59 minutes off each time
-    receive(kShed, gClockMs + 59LL * 60 * 1000);
-    espnowMeshTimeApplyTick();
-    pass(10000);
+  // No master named: no mesh time at all, from any paired device, also while
+  // the clock is not set; the status says so and names the command.
+  for (bool clockSet : { false, true }) {
+    resetAll();
+    gHaveNamedPrimary = false;
+    addPeer(kHub, "hub", true);
+    addPeer(kShed, "shed", true);
+    if (clockSet) otherSourceSets(meshtime::OwnSource::Ring, kT0);
+    const int64_t clockBefore = gClockMs;
+    check(has(status(), "Role: worker. Takes no mesh time: no master is named on this device. "
+                        "Name it with 'espnowmasterfingerprint <64-hex-pubkey>'."),
+          "status: no master named, and the command that names it");
+    check(has(status("json"), "\"role\":\"worker\",\"masterNamed\":false,"), "json: masterNamed false");
+    for (int i = 0; i < 60; ++i) {  // ten minutes, a frame every 10 s, 59 minutes off each time
+      receive((i % 2) ? kShed : kHub, (clockSet ? gClockMs : kT0) + 59LL * 60 * 1000, meshtime::kSrcNtp,
+              (i % 3) ? 0 : meshtime::kFlagActingBackup);
+      espnowMeshTimeApplyTick();
+      pass(10000);
+    }
+    check(gMeshSteps == 0 && (clockSet ? gClockMs == clockBefore + 600000 : gClockMs < 1000000),
+          "no frame sets the clock");
+    check(has(status(), "Not used: no master is named on this device (espnowmasterfingerprint)."),
+          "the last frame says why");
+    check(has(status("json"), "\"result\":\"ignored_no_master\"") && has(status("json"), "\"ignored\":60,"),
+          "json: ignored_no_master, every frame counted as not used");
+    check(gConsole.empty(), "and nothing is said on the console");
   }
-  check(gMeshSteps == 1, "one change in ten minutes, however many frames");
-  check(has(status(), "Not used: mesh time changed this device's clock less than 10 minutes ago, and no master is "
-                      "named on this device (espnowmasterfingerprint)."), "the status says why");
-  receive(kShed, gClockMs + 59LL * 60 * 1000);
+  // gRole 2 (backup, not promoted) with no master named likewise.
+  resetAll();
+  gHaveNamedPrimary = false;
+  gRole = 2;
+  check(has(status(), "Role: backup master. Takes no mesh time: no master is named on this device."), "a backup likewise");
+  // Only the backup master named: its frames are taken.
+  resetAll();
+  gHaveNamedPrimary = false;
+  gHaveNamedBackup = true;
+  std::memcpy(gNamedBackup, kShed, 6);
+  addPeer(kShed, "shed", true);
+  check(has(status(), "Role: worker. Takes time from the master named on this device"), "a named backup is a named master");
+  receive(kShed, kT0, meshtime::kSrcNtp, meshtime::kFlagActingBackup);
   espnowMeshTimeApplyTick();
-  check(gMeshSteps == 2, "the next one after 10 minutes");
-  // A named master's frame steps after 10 s as before.
+  check(gMeshSteps == 1 && gClockMs == kT0, "the named backup acting as master sets the clock");
+  // A named master's frame steps after 10 s, every time.
   resetAll();
   addPeer(kHub, "hub", true);
-  gHaveNamedPrimary = true;
-  std::memcpy(gNamedPrimary, kHub, 6);
   otherSourceSets(meshtime::OwnSource::Ring, kT0);
   receive(kHub, gClockMs + 120000);
   espnowMeshTimeApplyTick();
@@ -672,16 +704,16 @@ static void testHardening() {
   // The "held" line: a sender that takes turns between two times prints at
   // most one line a minute (it printed every second frame).
   resetAll();
-  addPeer(kShed, "shed", true);
+  addPeer(kHub, "hub", true);
   otherSourceSets(meshtime::OwnSource::Ring, kT0);
   for (int i = 0; i < 200; ++i) {
-    receive(kShed, (i % 2) ? gClockMs : gClockMs + 7200000);
+    receive(kHub, (i % 2) ? gClockMs : gClockMs + 7200000);
     espnowMeshTimeApplyTick();
     pass(5);
   }
   check(gConsole.size() == 1, "200 frames in a second: one console line, not 100");
   pass(60000);
-  receive(kShed, gClockMs + 7200000);
+  receive(kHub, gClockMs + 7200000);
   espnowMeshTimeApplyTick();
   check(gConsole.size() == 2, "and the next a minute later");
 

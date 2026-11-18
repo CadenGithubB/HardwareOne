@@ -1220,7 +1220,7 @@ espnowworker [show|on|off|interval <ms>|fields <list>]  - Worker status reportin
 espnowsensorstream <sensor> <on|off>   - Send one sensor's readings to the master named on this device
 espnowsensorstatus [json [<name_or_mac>]]  - What this device sends and why not; what it received, lost and refused
 espnowbattery [json] [<name_or_mac>] [from <n>]  - Master: the battery state other devices sent
-espnowevents [json] [since <rx>]       - Master: the system events other devices sent
+espnowevents [json] [since <rx>]       - Master: the system events other devices sent (admin)
 espnowpowerinterval [0|10..3600]       - Seconds between this device's battery reports (0 = none, default 60)
 espnoweventpush [off|alert|standard|verbose]  - Which of this device's events go to the master (default alert)
 espnowmasterfingerprint [64 hex]       - Name the mesh master on this device (its key fingerprint)
@@ -1237,11 +1237,12 @@ espnowusersync [on|off]         - Enable/disable credential sync across mesh
 ```
 
 **Mesh time.** The mesh master sends its clock to each paired device when their encrypted session
-starts, every 10 minutes and when its own clock is set. A device takes it when it has no better
-source of its own (RTC chip, NTP, `timeset`, CM5); `time` then shows the source "mesh". The master
-only sends a clock that comes from one of those four sources. When a master is named on a device
-(`espnowmasterfingerprint`), only that master's time is taken; while none is named, mesh time
-changes a clock that is already set at most once in 10 minutes. A time more than an hour away from
+starts, every 10 minutes and when its own clock is set. A device takes it only from the master
+named on it (`espnowmasterfingerprint`, or the backup master named with `espnowbackupfingerprint`
+while it acts as master), and only when it has no better source of its own (RTC chip, NTP,
+`timeset`, CM5); `time` then shows the source "mesh". A device that names no master takes no mesh
+time; `espnowtimestatus` says so. The master only sends a clock that comes from one of those four
+sources. A time more than an hour away from
 a clock that is already set is applied when the master says it again: within about 15 seconds when
 the master's own clock was just set, else at its next 10-minute round. A device with mesh mode off
 takes no mesh time. The clock is good to a few seconds. Times are kept in UTC; the timezone only
@@ -1258,7 +1259,9 @@ is sent to it, counts what it refused and says so on its console. `espnowsensors
 sent and why not, and what it received.
 
 **Sensor readings.** `espnowsensorstream <sensor> on` sends that sensor's readings to the named
-master, and the reply says where they go or why nothing is sent yet. A reading can be up to 472
+master, and the reply says where they go or why nothing is sent yet. The master lists a device's
+sensors (present, streaming or not) as soon as that device's sensor status arrives, before the
+first reading. A reading can be up to 472
 bytes and travels in up to four frames. The receiving device stamps each reading with its own clock
 when it arrives and counts lost readings per device and sensor
 (`GET /api/sensors/remote?device=<MAC>&sensor=<type>`). A reading that cannot be sent is counted
@@ -1271,8 +1274,8 @@ the devices with percentage, voltage, status, USB power and how long ago the rep
 
 **Events.** A device sends its system events to the named master: by default only alerts (failed
 logins, lockouts, crashes, a factory reset, critical battery); `espnoweventpush standard` adds the
-everyday ones, `verbose` all, `off` none. On the master, `espnowevents` lists the newest 24 per
-mesh, each with the master's own arrival time. Long texts are cut to fit one frame; the full text
+everyday ones, `verbose` all, `off` none. On the master, `espnowevents` (admin only) lists the
+newest 24 per mesh, each with the master's own arrival time. Long texts are cut to fit one frame; the full text
 is in the sending device's event log. A burst is limited (eight at once, then one every two
 seconds), and the next event says how many were left out.
 </details>

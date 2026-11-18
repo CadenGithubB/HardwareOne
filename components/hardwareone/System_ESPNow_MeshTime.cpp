@@ -539,6 +539,7 @@ const char* cmd_espnow_timestatus(const String& argsInput) {
   const bool haveSetAgo = mtLastSetAgo(&setAgoS);
   unsigned paired = 0, ready = 0;
   meshTimeCountPeers(nowMs, &paired, &ready);
+  const bool masterNamed = mtHasNamedMaster();
 
   MeshTimeLast last;
   uint32_t counts[meshtime::kVerdictCount];
@@ -574,9 +575,11 @@ const char* cmd_espnow_timestatus(const String& argsInput) {
     meshTimeJsonText(lastName, nameJson, sizeof(nameJson));
     const char* whyKey = meshtime::sendWhyNotKey(why);
     meshTimeAppend(reply, cap, &pos,
-                   "{\"schema\":1,\"meshTime\":%s,\"role\":\"%s\",\"clockSet\":%s,\"clockSource\":\"%s\"",
+                   "{\"schema\":1,\"meshTime\":%s,\"role\":\"%s\",\"masterNamed\":%s,\"clockSet\":%s,"
+                   "\"clockSource\":\"%s\"",
                    in.settingOn ? "true" : "false", role == 1 ? "master" : (role == 2 ? "backup" : "worker"),
-                   in.clockSet ? "true" : "false", meshTimeOwnSourceKey(in.clockSet, in.source));
+                   masterNamed ? "true" : "false", in.clockSet ? "true" : "false",
+                   meshTimeOwnSourceKey(in.clockSet, in.source));
     if (haveSetAgo) meshTimeAppend(reply, cap, &pos, ",\"clockSetAgoS\":%lu", (unsigned long)setAgoS);
     else meshTimeAppend(reply, cap, &pos, ",\"clockSetAgoS\":null");
     if (in.clockSet) meshTimeAppend(reply, cap, &pos, ",\"epoch\":%lld", (long long)(mtEpochMs() / 1000));
@@ -658,9 +661,15 @@ const char* cmd_espnow_timestatus(const String& argsInput) {
     }
   } else if (!in.meshOn) {
     meshTimeAppend(reply, cap, &pos, "  Mesh mode is off: no time is sent or taken.\n");
+  } else if (!masterNamed) {
+    meshTimeAppend(reply, cap, &pos,
+                   "  Role: %s. Takes no mesh time: no master is named on this device. "
+                   "Name it with 'espnowmasterfingerprint <64-hex-pubkey>'.\n",
+                   meshTimeRoleName(role));
   } else {
     meshTimeAppend(reply, cap, &pos,
-                   "  Role: %s. Takes time from the mesh master when it has no better source (rtc, ntp, manual, cm5).\n",
+                   "  Role: %s. Takes time from the master named on this device when it has no better source "
+                   "(rtc, ntp, manual, cm5).\n",
                    meshTimeRoleName(role));
   }
 
@@ -682,6 +691,9 @@ const char* cmd_espnow_timestatus(const String& argsInput) {
       case meshtime::Verdict::IgnoredMeshOff:
         meshTimeAppend(reply, cap, &pos, "Not used: mesh mode is off.\n");
         break;
+      case meshtime::Verdict::IgnoredNoMaster:
+        meshTimeAppend(reply, cap, &pos, "Not used: no master is named on this device (espnowmasterfingerprint).\n");
+        break;
       case meshtime::Verdict::IgnoredNotNamed:
         meshTimeAppend(reply, cap, &pos, "Not used: %s is not the master named on this device.\n", lastName);
         break;
@@ -700,13 +712,7 @@ const char* cmd_espnow_timestatus(const String& argsInput) {
         meshTimeAppend(reply, cap, &pos, "Not used: this device follows the time of another sender.\n");
         break;
       case meshtime::Verdict::IgnoredTooSoon:
-        if (mtHasNamedMaster()) {
-          meshTimeAppend(reply, cap, &pos, "Not used: this device's clock was set a moment before.\n");
-        } else {
-          meshTimeAppend(reply, cap, &pos,
-                         "Not used: mesh time changed this device's clock less than 10 minutes ago, and no master "
-                         "is named on this device (espnowmasterfingerprint).\n");
-        }
+        meshTimeAppend(reply, cap, &pos, "Not used: this device's clock was set a moment before.\n");
         break;
       case meshtime::Verdict::RefusedBadTime:
         meshTimeAppend(reply, cap, &pos, "Refused: the time in the frame is not a real date.\n");

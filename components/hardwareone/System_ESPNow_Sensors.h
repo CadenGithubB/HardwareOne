@@ -76,9 +76,9 @@ size_t remoteSensorCopyText(const uint8_t* deviceMac, RemoteSensorType sensorTyp
 // sender's broadcaster state. Allocates nothing.
 bool initRemoteSensorSystem();
 // The one place the receiver's table (the per-sender records) is made
-// (PSRAM). Called by the ingest for the first reading this device keeps, so
-// only a device that is sent readings and keeps them has one. True when it
-// exists. Safe to call again.
+// (PSRAM). Called by the ingest for the first reading or status frame this
+// device keeps, so only a device that is sent readings and keeps them has
+// one. True when it exists. Safe to call again.
 bool remoteSensorTableEnsure();
 
 // ---- Receive (called by the frame handlers on espnow_task; the receive table
@@ -86,7 +86,9 @@ bool remoteSensorTableEnsure();
 // One part of a reading: SENSOR_ENVELOPE, or BOND_SENSOR_DATA (fromBond).
 void remoteSensorIngestPart(const uint8_t* senderMac, const char* senderName,
                             const uint8_t* payload, size_t payloadLen, bool fromBond);
-// SENSOR_STATUS: which sensors the sender has and is streaming.
+// SENSOR_STATUS: which sensors the sender has and is streaming. It may make
+// the table and the sender's record (a full table and no memory are refused
+// as for a reading); it never changes a reading, its freshness or its counts.
 void remoteSensorIngestStatus(const uint8_t* senderMac, const char* senderName,
                               const uint8_t* payload, size_t payloadLen);
 

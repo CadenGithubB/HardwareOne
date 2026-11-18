@@ -136,7 +136,8 @@ size_t formatHHMMLocal(time_t t, char* out, size_t outSize);
 // Seven things can set this system's clock: NTP, the DS3231 RTC, `timeset`,
 // the R1 ring (dark-boot adoption), the CM5 carrier's battery-backed RTC
 // (SYNC_CM5, pushed over the UART host link), the ESP-NOW mesh master
-// (SYNC_MESH, taken only by a device with no better source of its own;
+// (SYNC_MESH, taken only from the master named on the device, by a device
+// with no better source of its own;
 // System_ESPNow_TimeCore.h), and lwIP's background SNTP daemon. Each
 // step owes the same follow-up chores — post the TIME_SYNCED event on the
 // first valid clock, write/refresh the boot anchor, resolve pending user

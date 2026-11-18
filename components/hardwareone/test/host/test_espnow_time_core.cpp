@@ -10,9 +10,11 @@
 //     clock step and once more 15 s later, by hand; one frame to a peer whose
 //     session came up, only after the session has settled; the uptime wrap;
 //   * what a receiver does with a frame: every row of the rule, for every own
-//     source; the frame's wait is added; a change of more than an hour is
-//     held and applied when the same sender confirms it; a second sender
-//     cannot move the clock back and forth; the 10 s gap after a step.
+//     source; time only from the master named here (primary or backup), none
+//     at all with no master named; the frame's wait is added; a change of
+//     more than an hour is held and applied when the same sender confirms it;
+//     the primary and the backup cannot move the clock back and forth; the
+//     10 s gap after a step.
 #include "System_ESPNow_TimeCore.h"
 
 #include <cstdio>
@@ -193,10 +195,14 @@ static void testRounds() {
   CHECK(!peerDue(PeerSendState{}, round, true, 50300, 50000));
 }
 
-// A follower with settable state.
+// A follower with settable state. kHub is named on it as the primary and
+// kBackup as the backup master; either can be unnamed (nullptr). kOther is
+// paired and named as neither.
 struct Follower {
   FollowerState st;
   FollowerInputs in;
+  const uint8_t* primary = kHub;
+  const uint8_t* backup = kBackup;
   Follower() : st{}, in{} {
     in.settingOn = true;
     in.meshOn = true;
@@ -214,6 +220,11 @@ struct Follower {
     rx.frame.flags = flags;
     std::memcpy(rx.sender, sender, 6);
     rx.receiptMonoMs = in.nowMonoMs - waitedMs;
+    const bool isPrimary = primary && std::memcmp(sender, primary, 6) == 0;
+    const bool isBackup = backup && std::memcmp(sender, backup, 6) == 0;
+    in.hasNamedMaster = primary || backup;
+    in.senderIsNamed = isPrimary || isBackup;
+    in.senderIsNamedPrimary = isPrimary;
     return followerDecide(st, in, rx);
   }
   void pass(int64_t ms) {
@@ -223,25 +234,51 @@ struct Follower {
 };
 
 static void testFollowerRows() {
-  // 1 to 4: off, not the named master, this device is the master, a bad time.
+  // 1 to 4: off, this device is the master, no master named, not the named
+  // master, a bad time.
   {
     Follower f;
     f.in.settingOn = false;
     CHECK(f.frame(kHub, kNow + 60000).verdict == Verdict::IgnoredOff);
     f.in.settingOn = true;
-    f.in.hasNamedMaster = true;
-    CHECK(f.frame(kHub, kNow + 60000).verdict == Verdict::IgnoredNotNamed);
-    f.in.senderIsNamed = true;
+    CHECK(f.frame(kOther, kNow + 60000).verdict == Verdict::IgnoredNotNamed);
+    // The acting-backup bit does not make a device that is not named a master.
+    CHECK(f.frame(kOther, kNow + 60000, 0, kSrcNtp, kFlagActingBackup).verdict == Verdict::IgnoredNotNamed);
+    CHECK(!f.st.stickyHave && !f.st.appliedHave);
     CHECK(f.frame(kHub, kNow + 60000).verdict == Verdict::Applied);
     Follower m;
     m.in.actingMaster = true;
     CHECK(m.frame(kHub, kNow + 60000).verdict == Verdict::IgnoredMaster);
+    m.primary = m.backup = nullptr;
+    CHECK(m.frame(kHub, kNow + 60000).verdict == Verdict::IgnoredMaster);  // the master is named first
+    // 3: no master named on this device: no frame is taken, from anyone, also
+    // while the clock is not set; nothing is followed or held.
+    for (bool clockSet : { true, false }) {
+      Follower none;
+      none.primary = none.backup = nullptr;
+      none.in.clockSet = clockSet;
+      for (const uint8_t* sender : { kHub, kBackup, kOther }) {
+        for (uint8_t flags : { (uint8_t)0, kFlagActingBackup }) {
+          for (int64_t claim : { kNow + 60000, kNow + 7200000, kNow + 100 }) {
+            CHECK(none.frame(sender, claim, 0, kSrcNtp, flags).verdict == Verdict::IgnoredNoMaster);
+          }
+        }
+      }
+      CHECK(!none.st.stickyHave && !none.st.appliedHave && !none.st.holdHave);
+    }
+    // Only a backup named: its frames are taken, the primary's are not.
+    Follower onlyBackup;
+    onlyBackup.primary = nullptr;
+    CHECK(onlyBackup.frame(kHub, kNow + 60000).verdict == Verdict::IgnoredNotNamed);
+    CHECK(onlyBackup.frame(kBackup, kNow + 60000, 0, kSrcNtp, kFlagActingBackup).verdict == Verdict::Applied);
+    // The named backup is taken by its fingerprint, as is the primary.
+    Follower bk;
+    CHECK(bk.frame(kBackup, kNow + 60000, 0, kSrcNtp, kFlagActingBackup).verdict == Verdict::Applied);
     // 1b: mesh mode off: no time is taken (the status says so), whatever else.
     Follower off;
     off.in.meshOn = false;
     CHECK(off.frame(kHub, kNow + 60000).verdict == Verdict::IgnoredMeshOff);
     off.in.clockSet = false;
-    off.in.hasNamedMaster = off.in.senderIsNamed = off.in.senderIsNamedPrimary = true;
     CHECK(off.frame(kHub, kNow).verdict == Verdict::IgnoredMeshOff && !off.st.stickyHave && !off.st.appliedHave);
     off.in.settingOn = false;
     CHECK(off.frame(kHub, kNow).verdict == Verdict::IgnoredOff);  // the setting is named first
@@ -258,9 +295,12 @@ static void testFollowerRows() {
       Decision bad = b.frame(kHub, hostile, 100);
       CHECK(bad.verdict == Verdict::RefusedBadTime && bad.candidateEpochMs == 0 && bad.differenceMs == 0);
       Follower named;
-      named.in.hasNamedMaster = true;
-      bad = named.frame(kHub, hostile, 100);
+      bad = named.frame(kOther, hostile, 100);
       CHECK(bad.verdict == Verdict::IgnoredNotNamed && bad.candidateEpochMs == 0 && bad.differenceMs == 0);
+      Follower none;
+      none.primary = none.backup = nullptr;
+      bad = none.frame(kHub, hostile, 100);
+      CHECK(bad.verdict == Verdict::IgnoredNoMaster && bad.candidateEpochMs == 0 && bad.differenceMs == 0);
     }
     // A bad frame is refused also by a device whose clock is not set.
     Follower dark;
@@ -337,6 +377,8 @@ static void testFollowerRows() {
   CHECK(is(verdictKey(Verdict::Applied), "applied") && is(verdictKey(Verdict::HeldLargeChange), "held_large_change") &&
         is(verdictKey(Verdict::IgnoredOtherMaster), "ignored_other_master"));
   CHECK(is(verdictKey(Verdict::IgnoredMeshOff), "ignored_mesh_off") && verdictIsIgnored(Verdict::IgnoredMeshOff));
+  CHECK(is(verdictKey(Verdict::IgnoredNoMaster), "ignored_no_master") && verdictIsIgnored(Verdict::IgnoredNoMaster));
+  CHECK(is(verdictKey(Verdict::IgnoredNotNamed), "ignored_not_named") && verdictIsIgnored(Verdict::IgnoredNotNamed));
   CHECK(verdictIsIgnored(Verdict::IgnoredTooSoon) && verdictIsIgnored(Verdict::IgnoredWeakSource) &&
         !verdictIsIgnored(Verdict::Applied) && !verdictIsIgnored(Verdict::Agreed) &&
         !verdictIsIgnored(Verdict::RefusedBadTime) && !verdictIsIgnored(Verdict::HeldLargeChange));
@@ -362,14 +404,14 @@ static void testLargeChange() {
     f.pass(2000);  // 11 s after the first
     CHECK(f.frame(kHub, wrong + 11000).verdict == Verdict::Applied);
   }
-  // Not confirmed: by another sender. Its frames do not clear the memory either.
+  // Not confirmed: by the other named master. Its frames do not clear the memory either.
   {
     Follower f;
     f.frame(kHub, wrong);
     f.pass(15000);
-    CHECK(f.frame(kOther, wrong + 15000).verdict == Verdict::HeldLargeChange);
+    CHECK(f.frame(kBackup, wrong + 15000).verdict == Verdict::HeldLargeChange);
     CHECK(std::memcmp(f.st.holdMac, kHub, 6) == 0);
-    CHECK(f.frame(kOther, kNow + 15000 + 100, 0, 0).verdict == Verdict::RefusedBadTime);
+    CHECK(f.frame(kBackup, kNow + 15000 + 100, 0, 0).verdict == Verdict::RefusedBadTime);
     CHECK(f.st.holdHave && std::memcmp(f.st.holdMac, kHub, 6) == 0);
     f.pass(1000);
     CHECK(f.frame(kHub, wrong + 16000).verdict == Verdict::Applied);
@@ -402,12 +444,12 @@ static void testLargeChange() {
     CHECK(f.frame(kHub, wrong + kHoldMaxMs + 1000).verdict == Verdict::HeldLargeChange);
     f.pass(15000);
     CHECK(f.frame(kHub, wrong + kHoldMaxMs + 16000).verdict == Verdict::Applied);
-    // Another sender may take a claim that has run out.
+    // The other named master may take a claim that has run out.
     Follower g;
     g.frame(kHub, wrong);
     g.pass(kHoldMaxMs + 1);
-    CHECK(g.frame(kOther, wrong).verdict == Verdict::HeldLargeChange);
-    CHECK(std::memcmp(g.st.holdMac, kOther, 6) == 0);
+    CHECK(g.frame(kBackup, wrong).verdict == Verdict::HeldLargeChange);
+    CHECK(std::memcmp(g.st.holdMac, kBackup, 6) == 0);
   }
   // A frame from the same sender that is no large change settles it.
   {
@@ -426,57 +468,54 @@ static void testLargeChange() {
 }
 
 static void testTwoSenders() {
-  // Two devices both send time, 20 s apart. The follower takes the first and
-  // does not step back and forth.
+  // The primary and the backup both send time (both act as master), 20 s
+  // apart. The follower takes the first and does not step back and forth.
   {
     Follower f;
     CHECK(f.frame(kHub, kNow + 60000).verdict == Verdict::Applied);
     f.pass(30000);
     f.in.nowEpochMs = kNow + 60000 + 30000;  // the clock was set
-    CHECK(f.frame(kOther, f.in.nowEpochMs + 20000).verdict == Verdict::IgnoredOtherMaster);
+    CHECK(f.frame(kBackup, f.in.nowEpochMs + 20000, 0, kSrcNtp, kFlagActingBackup).verdict ==
+          Verdict::IgnoredOtherMaster);
     f.pass(30000);
     CHECK(f.frame(kHub, f.in.nowEpochMs + 100).verdict == Verdict::Agreed);
     f.pass(30000);
-    CHECK(f.frame(kOther, f.in.nowEpochMs + 20000).verdict == Verdict::IgnoredOtherMaster);
-    // When the first sender falls silent for 25 minutes, the other is taken.
+    CHECK(f.frame(kBackup, f.in.nowEpochMs + 20000, 0, kSrcNtp, kFlagActingBackup).verdict ==
+          Verdict::IgnoredOtherMaster);
+    // When the primary falls silent for 25 minutes, the backup is taken.
     f.pass(kStickyMs);
-    CHECK(f.frame(kOther, f.in.nowEpochMs + 20000).verdict == Verdict::Applied);
-    CHECK(std::memcmp(f.st.stickyMac, kOther, 6) == 0);
+    CHECK(f.frame(kBackup, f.in.nowEpochMs + 20000, 0, kSrcNtp, kFlagActingBackup).verdict == Verdict::Applied);
+    CHECK(std::memcmp(f.st.stickyMac, kBackup, 6) == 0);
   }
-  // Rank: the primary named here beats a master by its own word, which beats
-  // a backup acting as master.
+  // Rank: the primary named here beats the backup.
   {
     Follower f;
     CHECK(f.frame(kBackup, kNow + 60000, 0, kSrcNtp, kFlagActingBackup).verdict == Verdict::Applied);
     CHECK(f.st.stickyRank == 0);
-    f.pass(kUnnamedApplyGapMs);  // (no master is named: one step in 10 minutes)
-    f.in.nowEpochMs = kNow + 60000 + kUnnamedApplyGapMs;
-    // The master is back and says another time: it outranks the acting backup.
+    f.pass(60000);
+    f.in.nowEpochMs = kNow + 60000 + 60000;
+    // The primary is back and says another time: it outranks the backup at once.
     CHECK(f.frame(kHub, f.in.nowEpochMs + 30000).verdict == Verdict::Applied && f.st.stickyRank == 1);
     f.pass(60000);
     f.in.nowEpochMs += 30000;
-    // The backup, still acting, is now ignored.
+    // The backup, still acting, is now ignored, with its acting bit or without.
     CHECK(f.frame(kBackup, f.in.nowEpochMs + 60000, 0, kSrcNtp, kFlagActingBackup).verdict ==
           Verdict::IgnoredOtherMaster);
-    // Equal rank does not replace.
-    CHECK(f.frame(kOther, f.in.nowEpochMs + 60000).verdict == Verdict::IgnoredOtherMaster);
-    // The primary named on this device outranks both.
-    f.in.hasNamedMaster = true;
-    f.in.senderIsNamed = true;
-    f.in.senderIsNamedPrimary = true;
-    CHECK(f.frame(kOther, f.in.nowEpochMs + 60000).verdict == Verdict::Applied && f.st.stickyRank == 2);
+    CHECK(f.frame(kBackup, f.in.nowEpochMs + 60000).verdict == Verdict::IgnoredOtherMaster);
+    // The bit does not rank the backup up either.
+    Follower g;
+    CHECK(g.frame(kBackup, kNow + 60000).verdict == Verdict::Applied && g.st.stickyRank == 0);
   }
   // A frame that agrees also makes its sender the one followed.
   {
     Follower f;
     CHECK(f.frame(kHub, kNow + 100).verdict == Verdict::Agreed && f.st.stickyHave);
     f.pass(1000);
-    CHECK(f.frame(kOther, f.in.nowEpochMs + 60000).verdict == Verdict::IgnoredOtherMaster);
+    CHECK(f.frame(kBackup, f.in.nowEpochMs + 60000).verdict == Verdict::IgnoredOtherMaster);
   }
   // After a step, another step waits 10 s (a peer cannot step the clock at radio rate).
   {
     Follower f;
-    f.in.hasNamedMaster = f.in.senderIsNamed = true;
     CHECK(f.frame(kHub, kNow + 121000).verdict == Verdict::Applied);
     f.pass(1000);
     f.in.nowEpochMs = kNow + 122000;
@@ -491,54 +530,35 @@ static void testTwoSenders() {
     CHECK(dark.frame(kHub, kNow).verdict == Verdict::Applied);
     CHECK(dark.frame(kHub, kNow).verdict == Verdict::Applied);
   }
-  // With no master named, any paired peer that claims to be the master can
-  // change the clock at most once in 10 minutes (each change of more than
-  // 2 minutes writes the boot anchor and the events log). A frame every 10 s,
-  // 59 minutes off each time, moved such a clock once every 10 s before.
+  // The named master is the only gate: its frames step the clock after 10 s
+  // every time (no longer wait), and a held change is applied as soon as it
+  // is confirmed. With no master named, an hour of frames that are each 59
+  // minutes off, one every 10 s, changes nothing.
   {
-    Follower f;
-    int steps = 0;
-    for (int i = 0; i < 360; ++i) {  // an hour of frames, one every 10 s
-      const Decision d = f.frame(kOther, f.in.nowEpochMs + 59LL * 60 * 1000);
-      if (d.verdict == Verdict::Applied) {
-        ++steps;
-        f.in.nowEpochMs = d.candidateEpochMs;
-      } else {
-        CHECK(d.verdict == Verdict::IgnoredTooSoon);
-      }
-      f.pass(10000);
-    }
-    CHECK(steps == 6);
-    // Agreeing frames are still agreed meanwhile, and keep the sender followed.
-    Follower g;
-    CHECK(g.frame(kHub, kNow + 60000).verdict == Verdict::Applied);
-    g.in.nowEpochMs = kNow + 60000;
-    g.pass(60000);
-    CHECK(g.frame(kHub, g.in.nowEpochMs + 100).verdict == Verdict::Agreed);
-    CHECK(g.frame(kHub, g.in.nowEpochMs + 120000).verdict == Verdict::IgnoredTooSoon);
-    g.pass(kUnnamedApplyGapMs - 60000 - 1);
-    CHECK(g.frame(kHub, g.in.nowEpochMs + 120000).verdict == Verdict::IgnoredTooSoon);
-    g.pass(1);
-    CHECK(g.frame(kHub, g.in.nowEpochMs + 120000).verdict == Verdict::Applied);
-    // A large change confirmed too soon stays held and is applied when the 10
-    // minutes are over and the sender says it again.
-    Follower h;
-    CHECK(h.frame(kHub, kNow + 60000).verdict == Verdict::Applied);
-    h.in.nowEpochMs = kNow + 60000;
-    const int64_t wrong = h.in.nowEpochMs + 7200000;
-    h.pass(30000);
-    CHECK(h.frame(kHub, wrong + 30000).verdict == Verdict::HeldLargeChange);
-    h.pass(15000);
-    CHECK(h.frame(kHub, wrong + 45000).verdict == Verdict::IgnoredTooSoon && h.st.holdHave);
-    h.pass(kUnnamedApplyGapMs);
-    CHECK(h.frame(kHub, wrong + 45000 + kUnnamedApplyGapMs).verdict == Verdict::Applied && !h.st.holdHave);
-    // With a master named, its frames step the clock after 10 s as before.
     Follower n;
-    n.in.hasNamedMaster = n.in.senderIsNamed = true;
     CHECK(n.frame(kHub, kNow + 60000).verdict == Verdict::Applied);
     n.in.nowEpochMs = kNow + 60000;
     n.pass(kApplyGapMs);
     CHECK(n.frame(kHub, n.in.nowEpochMs + 120000).verdict == Verdict::Applied);
+    n.in.nowEpochMs += 120000;
+    const int64_t wrong = n.in.nowEpochMs + 7200000;
+    n.pass(30000);
+    CHECK(n.frame(kHub, wrong + 30000).verdict == Verdict::HeldLargeChange);
+    n.pass(15000);
+    CHECK(n.frame(kHub, wrong + 45000).verdict == Verdict::Applied && !n.st.holdHave);
+    for (bool clockSet : { true, false }) {
+      Follower none;
+      none.primary = none.backup = nullptr;
+      none.in.clockSet = clockSet;
+      int steps = 0;
+      for (int i = 0; i < 360; ++i) {
+        const Decision d = none.frame(kOther, none.in.nowEpochMs + 59LL * 60 * 1000);
+        if (d.verdict == Verdict::Applied) ++steps;
+        CHECK(d.verdict == Verdict::IgnoredNoMaster);
+        none.pass(10000);
+      }
+      CHECK(steps == 0);
+    }
   }
 }
 

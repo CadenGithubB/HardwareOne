@@ -1,8 +1,8 @@
 // System_ESPNow_MeshTime.h - mesh time (TIME_SYNC, opcode 35)
 //
 // The mesh master sends its UTC clock to each paired device over that
-// device's session; a device with no better source of its own sets its clock
-// from it. The rules are in System_ESPNow_TimeCore.h. This part reads the
+// device's session; a device that names that master and has no better source
+// of its own sets its clock from it (one that names no master takes none). The rules are in System_ESPNow_TimeCore.h. This part reads the
 // settings and the clock, sends the frames and sets the clock.
 #ifndef SYSTEM_ESPNOW_MESHTIME_H
 #define SYSTEM_ESPNOW_MESHTIME_H

@@ -16,17 +16,18 @@ everything user-visible since the v0.99.99.1 tag.
 ### Added
 - ESP-NOW mesh time works. The mesh master sends its clock (UTC) to each paired device over that
   device's encrypted session: when the session has come up, every 10 minutes, when the master's own
-  clock was set, and on `espnowtimesync`. A device whose clock has no better source of its own (the
-  RTC chip, NTP, `timeset`, the CM5) sets its clock from it, and `time`, `status` and
-  `espnowtimestatus` then show the source `mesh`; a device that has a better source ignores it. The
+  clock was set, and on `espnowtimesync`. A device that names that master and whose clock has no
+  better source of its own (the RTC chip, NTP, `timeset`, the CM5) sets its clock from it, and
+  `time`, `status` and `espnowtimestatus` then show the source `mesh`; a device that has a better source ignores it. The
   master sends only when its own clock comes from one of those four sources, so a clock taken from
   the mesh or the ring is never passed on. A time more than an hour away from a clock that is
   already set is held and applied when the same sender says it again 10 s or more later (the master
-  repeats a changed clock after 15 s by itself). When a master is named on a device
-  (`espnowmasterfingerprint`, `espnowbackupfingerprint`), only that master's time is taken; while
-  none is named, any paired device that says it is the master may set the clock, and mesh time then
-  changes a clock that is already set at most once in 10 minutes. A device with mesh mode off
-  takes no mesh time. Mesh time is not written into the RTC chip, also not later by the RTC task
+  repeats a changed clock after 15 s by itself). Mesh time is taken only from the master named on
+  the device: the one named with `espnowmasterfingerprint`, or the backup master named with
+  `espnowbackupfingerprint` while it acts as master. A device that names no master takes no mesh
+  time at all, and `espnowtimestatus` says so and names `espnowmasterfingerprint` (the json form has
+  `masterNamed`, and a frame it did not use has the result `ignored_no_master`). A device with mesh
+  mode off takes no mesh time. Mesh time is not written into the RTC chip, also not later by the RTC task
   from a clock carried over a restart. New setting `espnowmeshtime <on|off>` (default on), and
   `espnowtimestatus [json]` says where this device's clock comes from, when it was last set, and
   what was sent or what happened to the last time frame. Before, `espnowtimesync` sent a frame the
@@ -76,14 +77,19 @@ everything user-visible since the v0.99.99.1 tag.
   backup master keep the newest 24 events per mesh with their own clock at arrival, limit each
   sending device to sixteen at once and one a second, and never let one busy device push out
   another's events; a received event is not put into the master's own event list and triggers no
-  automation there. `espnowevents [json] [since <rx>]` shows them; the json form says how many
-  older ones are no longer held and pages with `more`. Nothing in a received frame is trusted to
+  automation there. `espnowevents [json] [since <rx>]` (admin only) shows them; the json form says
+  how many older ones are no longer held and pages with `more`. `espnowbattery` is open to every
+  user; the local `events` command is unchanged. Nothing in a received frame is trusted to
   be text. Host-tested (rules, the production sender and receiver with frames of arbitrary bytes,
   the receive gates and a relay hop); not yet run on hardware.
 - `espnowsensorstatus` shows the whole picture on one page: the role, the masters this device
   sends to and whether their session is up, per sensor what was sent and why not, whether battery
   state and events are sent, and on a master one line per sending device with its sensors, counts,
   battery and events. `espnowsensorstatus json <name_or_mac>` gives everything kept of one device.
+  The master lists a device's sensors (present, streaming or not) from the device's sensor status
+  frame, before any reading arrives (a sensor that streams but has sent no reading yet shows
+  "streaming, no reading yet"); a status frame never makes a reading fresh or counts one, and
+  a seventeenth sending device is refused, counted and said as for a reading.
 - `factoryreset all` prepares a device for a new owner. On the serial console, as a super admin, it
   does the ordinary factory reset and then, at the next start and before anything is mounted, erases
   the whole internal filesystem and NVS: saved WiFi networks, MQTT and LLM credentials, ESP-NOW
