@@ -14,6 +14,11 @@ The version stays 0.99.99.1 until the 1.0 gate in `RELEASING.md` is met; this se
 everything user-visible since the v0.99.99.1 tag.
 
 ### Added
+- `espnowhistorykb [<0..32>]` (admin, settings group "mesh"): the ESP-NOW message history per peer and per
+  direction, in KB. 0 (the default) means 16 KB on boards with PSRAM and 2 KB without; the board maximum is
+  32 KB (4 KB without PSRAM), and a cap over all peer slots (1 MB and at most a quarter of the PSRAM found;
+  64 KB without PSRAM) can lower it. The size is set when ESP-NOW starts, so a change applies after a
+  restart; with no argument the command shows the saved and the active value.
 - A bond master can forward its bond partner's readings, battery state, events and sensor list to the mesh
   master named on it. A bonded pair is one device that shows as two on the mesh master, for logging.
   `bondforward on` (off by default; settings group "bond", so the partner cannot change it; the one
@@ -201,6 +206,15 @@ everything user-visible since the v0.99.99.1 tag.
   as it did (its bond heartbeat counts as its agreement). Host-tested; not yet run on hardware.
 
 ### Fixed
+- ESP-NOW message history: `espnowmessages json` and the web Messages page page through all peers in
+  message-number order, so a busy peer no longer hides lower-numbered messages of other peers. A long
+  `espnowsend` (or one acknowledged very quickly) that was delivered before its history record was
+  written no longer stays "pending" on the OLED. A damaged history is cleared (and said once a minute)
+  instead of hiding newer messages. The message number stops at its maximum instead of wrapping (the
+  history then refuses new records until a restart, with a line once a minute). On the OLED and glasses
+  conversation views, a remote command's chunked result that follows its streamed output (same request
+  id) is its own row showing the result; it used to be folded into the first output line's row, and the
+  glasses never showed it.
 - Bond sync no longer posts a `file_rx` event for its own files. The partner's settings, manifest, schema
   and automation list (`_settings_out.json`, `_manifest_out.json`, `_schema_out.json`, `automations.json`),
   received from the bond partner with bond mode on, raise no `file_rx` / `file_rx_failed` event, no
@@ -486,9 +500,10 @@ everything user-visible since the v0.99.99.1 tag.
   `thermalinterpolationenabled`). They accept the same on/off words as every other setting command
   and refuse anything else. Host-tested; `espnowenabled on` and `off` checked on two bench boards.
 - ESP32-P4: the ESP-NOW message history kept 16 messages per peer instead of 250, so a long remote
-  command result lost its beginning. The P4 now gets the PSRAM depth (about 158 KB per peer, in
-  PSRAM); other boards are unchanged. Host-tested; the P4X-EYE reports a depth of 250 when ESP-NOW
-  starts.
+  command result lost its beginning. The P4 now gets the PSRAM history (since the change under Changed:
+  16 KB per peer and direction by default, in PSRAM, allocated with the peer's first message); other
+  boards are unchanged. Host-tested; the P4X-EYE showed the PSRAM depth before the history moved to
+  packed per-peer rings, which are not yet tested on hardware.
 - ESP-NOW pairing and sessions: a long send while a handshake or a key rotation with the same peer
   was in flight restarted it and wiped the session being set up; a handshake in flight is now left
   alone. `espnowsessionopen` says so instead of sending a second request. Host-tested; not yet
@@ -647,6 +662,23 @@ everything user-visible since the v0.99.99.1 tag.
   yet tested on hardware.
 
 ### Changed
+- The ESP-NOW message history takes no memory until a peer has a message. It used to take about 791 KB
+  of PSRAM at every ESP-NOW start (five peers' worth), and about 158 KB for each further peer. A peer's
+  history is now 32 KB by default (16 KB received, 16 KB sent; 4 KB in all without PSRAM), kept in PSRAM
+  only (in internal RAM only on boards without PSRAM, and only while 48 KB of 8-bit-capable internal RAM
+  stays free; the classic ESP32's IRAM-only heap does not count). Records are
+  packed, so how many messages a peer keeps depends on their length: about 270 forty-character messages
+  per direction at the default (250 records of any length before), fewer long ones; the oldest whole
+  messages make room. Records no longer carry a copy of the sender's name: readers show the peer's current
+  name (the MAC text for a message whose sender was not proven, as before). File events in the history
+  (file received, file failed, send failed) now show the paired peer's current name too, where they showed
+  its MAC text. The on-device conversation views (OLED, glasses) show the newest messages when there are
+  more than they hold; a received and a sent message of the same millisecond are ordered by message
+  number; a fragment that arrives after more than 64 other messages of the same peer and direction starts
+  a new row. The start line names the ring size in bytes when the cap lowers it below a whole KB. The
+  history lines are new: the start line, one line per peer whose history is allocated, and the no memory,
+  full and damaged lines at most once a minute instead of on every refused message. `text_rx` automations and their "Msg from" toast fire even when the history could not
+  keep the message. A chunked history store keeps at most 255 pieces (51,000 bytes).
 - `espnowsensorreq` takes words: the sensors as names from the one sensor table, comma separated
   (`tof,imu`, any case), `all`, or a mask as before (`0x6`, `6`; 1..0x7FF); the mode as
   `subscribe|sub|0`, `unsubscribe|unsub|1` or `oneshot|once|2`. A bad sensor, mask, mode, interval or

@@ -112,7 +112,7 @@ STRNCPY_ALLOWED: dict[str, int] = {
     "System_Automation.cpp": 10,
     "System_CLIConfirm.cpp": 1,
     "System_Cm5Presence.cpp": 1,
-    "System_ESPNow.cpp": 32,
+    "System_ESPNow.cpp": 31,
     "System_ESPNow_Files.cpp": 2,
     "System_ESPNow_PairCore.h": 1,
     "System_ESPSR.cpp": 2,

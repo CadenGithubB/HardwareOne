@@ -455,9 +455,32 @@ static char debugBuffer[1024];
 bool ensureDebugBuffer() { return true; }
 char* getDebugBuffer() { return debugBuffer; }
 static unsigned statusRegistered = 0, statusFailed = 0, historyStored = 0;
-void sendStatusRegister(uint32_t, const uint8_t*) { ++statusRegistered; }
+static uint32_t lastRegisteredMsgId = 0;
+static unsigned historyStoredAtStamp = 0;  // historyStored when the last delivery stamp came
+void sendStatusRegister(uint32_t msgId, const uint8_t*) { ++statusRegistered; lastRegisteredMsgId = msgId; }
 void sendStatusMarkFailed(uint32_t, const uint8_t*) { ++statusFailed; }
 bool storeSentMessageInPeerHistory(uint8_t*, const char*, uint32_t) { ++historyStored; return true; }
+// After the sent record is written, espnowsend re-reads the send status and
+// stamps a state that resolved before the record existed.
+enum SendStatusState : uint8_t { SEND_STATUS_PENDING = 0, SEND_STATUS_DELIVERED = 1 };
+struct SendStatus { bool inUse; uint8_t state; uint8_t peerMac[6]; uint32_t msgId; uint32_t registeredAtMs;
+                    uint32_t resolvedAtMs; };
+static unsigned statusReads = 0, deliveryStamps = 0;
+static uint8_t statusState = SEND_STATUS_PENDING;  // what the status table says when re-read
+static uint32_t stampMsgId = 0;
+static uint8_t stampState = 0xFF, stampMac[6] = {};
+bool sendStatusGet(uint32_t msgId, SendStatus* out) {
+  ++statusReads;
+  if (out) *out = SendStatus{true, statusState, {}, msgId, 0, 0};
+  return true;
+}
+void espnowUpdateSentDeliveryState(const uint8_t* mac, uint32_t msgId, uint8_t state) {
+  ++deliveryStamps;
+  historyStoredAtStamp = historyStored;
+  stampMsgId = msgId;
+  stampState = state;
+  if (mac) std::memcpy(stampMac, mac, 6);
+}
 // The tx dispatcher's synchronous send of a TEXT message: one frame goes the
 // smart single-frame way; a longer one needs an ACTIVE session, and without it
 // the smart path starts a handshake (restarting one that is in flight) and fails.
@@ -581,6 +604,11 @@ static void resetWorld() {
   readAllowed = true;
   hints.clear(); toasts.clear();
   statusRegistered = statusFailed = historyStored = aeadSyncCalls = 0;
+  statusReads = deliveryStamps = historyStoredAtStamp = 0;
+  statusState = SEND_STATUS_PENDING;
+  lastRegisteredMsgId = stampMsgId = 0;
+  stampState = 0xFF;
+  std::memset(stampMac, 0, sizeof(stampMac));
   nowMs += 60000;  // clear of every rate limit of the case before
 }
 
@@ -1055,6 +1083,17 @@ static void testCallersSayThereIsNoSession() {
   reply = cmd_espnow_send(String(("peerB " + longText).c_str()));
   check(reply.rfind("Encrypted message sent via SESSION_FRAME", 0) == 0 && aeadSyncCalls == 1 && historyStored == 1,
         "espnowsend (multi-frame) with a session: sent as before");
+  check(statusReads == 1 && deliveryStamps == 0,
+        "espnowsend: the status is re-read after the sent record, and a pending one is not stamped");
+  // The chunked send resolved the msgId (delivered) before the sent record
+  // existed: the re-read stamps it onto the record, after the record is stored.
+  statusState = SEND_STATUS_DELIVERED;
+  reply = cmd_espnow_send(String(("peerB " + longText).c_str()));
+  check(reply.rfind("Encrypted message sent via SESSION_FRAME", 0) == 0 && historyStored == 2 && statusReads == 2,
+        "espnowsend (multi-frame, delivered during the send): sent");
+  check(deliveryStamps == 1 && historyStoredAtStamp == 2 && stampMsgId == lastRegisteredMsgId && stampMsgId != 0 &&
+            stampState == SEND_STATUS_DELIVERED && std::memcmp(stampMac, kReceiver, 6) == 0,
+        "espnowsend: a state resolved during the send is stamped on the stored record (peer, msgId, delivered)");
 
   // One frame still rides the pending store across the handshake, as before.
   resetWorld();

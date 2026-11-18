@@ -8,6 +8,7 @@
 #include "OLED_TextField.h"
 #include "OLED_UI.h"                  // oledToastShow — owner refusals on unpair/discovery
 #include "System_ESPNow.h"
+#include "System_ESPNow_HistoryNames.h"  // per-refresh name cache for conversation rows
 #include "System_ESPNow_Sessions.h"   // sendStatusGet / SendStatusState — post-send delivery indicator
 #include "System_MeshPeers.h"
 #include "System_Utils.h"
@@ -44,7 +45,7 @@ OledEspNowState gOledEspNowState;
 EXT_RAM_BSS_ATTR static OledScrollState sEspNowDeviceListScroll;
 EXT_RAM_BSS_ATTR static OledScrollState sEspNowMessageListScroll;
 
-// Sent text is now recorded in the SHARED per-peer history (sent[] ring) at the
+// Sent text is now recorded in the SHARED per-peer history (sent ring) at the
 // cmd_espnow_send chokepoint, so the OLED no longer keeps a private sent ring —
 // it reads the unified conversation via espnowGetConversation(). This is what
 // lets the OLED see messages sent from the web/BLE too, not just ones typed here.
@@ -1687,20 +1688,29 @@ void oledEspNowRefreshMessages() {
   // messages sent from the web or BLE, not just ones typed here. Sent rows carry
   // msgId (the head record's reqId) for the live delivery-status indicator;
   // received rows show the sender name + part count. Each row's head record is
-  // copied out of the store (espnowCopyCollapsedHead); a ref whose record was
-  // overwritten since the collapse is skipped.
+  // copied out of the store (espnowCopyCollapsedHead), which resolves the ref by
+  // its seq number (never by a raw ring offset); a ref whose record the peer's
+  // own newer messages evicted since the collapse is refused and skipped.
   uint8_t* mac = gOledEspNowState.selectedDeviceMac;
 
-  static EXT_RAM_BSS_ATTR CollapsedMsgRef refs[2 * MESSAGES_PER_DEVICE];
-  int rc = espnowGetConversation(mac, refs, 2 * MESSAGES_PER_DEVICE);
+  // The conversation keeps the NEWEST ESPNOW_HISTORY_VIEW_MAX logical messages
+  // (older ones are dropped by the collapse); only the last CAP are shown below.
+  static EXT_RAM_BSS_ATTR CollapsedMsgRef refs[ESPNOW_HISTORY_VIEW_MAX];
+  int rc = espnowGetConversation(mac, refs, ESPNOW_HISTORY_VIEW_MAX);
 
   // The scroll list keeps pointers, so row strings live in these persistent
   // buffers until the next refresh. Line 1 holds 23 chars: the renderer
   // (oledEspNowDisplayDeviceDetail) prints at most 19 plus '~'; widen this if a
-  // renderer ever prints more. Sender names keep their whole 32-byte field.
+  // renderer ever prints more. Sender names keep the whole display-name size.
   static EXT_RAM_BSS_ATTR char metaBuf[OLED_SCROLL_MAX_ITEMS][24];  // persistent "name (k/n)" labels
   static EXT_RAM_BSS_ATTR char textBuf[OLED_SCROLL_MAX_ITEMS][24];  // message text, line 1
-  static EXT_RAM_BSS_ATTR char nameBuf[OLED_SCROLL_MAX_ITEMS][sizeof(ReceivedTextMessage::senderName)];
+  static EXT_RAM_BSS_ATTR char nameBuf[OLED_SCROLL_MAX_ITEMS][ESPNOW_HISTORY_NAME_CAP];
+  // Records carry no name: received rows are named by espnowHistoryDisplayName
+  // (the peer's current name, or the MAC text for an unattributed record),
+  // resolved once per kind per refresh: one peer, so two entries (attributed,
+  // unattributed). Constant-initialised (all zero), OLED task only.
+  static EXT_RAM_BSS_ATTR espnowhist::BasicNameCache<2> nameCache;
+  nameCache.clear();
   const int CAP = OLED_SCROLL_MAX_ITEMS;
   ReceivedTextMessage head;
 
@@ -1708,7 +1718,7 @@ void oledEspNowRefreshMessages() {
   int start = (rc > CAP) ? (rc - CAP) : 0;
   int m = 0;
   for (int i = start; i < rc && m < CAP; i++) {
-    if (!espnowCopyCollapsedHead(refs[i], &head)) continue;  // overwritten since the collapse
+    if (!espnowCopyCollapsedHead(refs[i], &head)) continue;  // evicted since the collapse
 
     gOledRowMeta[m].isSent    = refs[i].isSent;
     gOledRowMeta[m].msgId     = refs[i].isSent ? head.reqId : 0;
@@ -1717,16 +1727,20 @@ void oledEspNowRefreshMessages() {
     const char* meta;
     if (refs[i].isSent) {
       meta = nullptr;  // sent rows: delivery status drawn live by the renderer
-    } else if (refs[i].partsTotal > 1) {
-      const char* who = (head.senderName[0]) ? head.senderName : "Unknown";
-      snprintf(metaBuf[m], sizeof(metaBuf[m]), "%s (%u/%u)", who,
-               refs[i].partsPresent, refs[i].partsTotal);
-      meta = metaBuf[m];
-    } else if (head.senderName[0]) {
-      strlcpy(nameBuf[m], head.senderName, sizeof(nameBuf[m]));
-      meta = nameBuf[m];
     } else {
-      meta = "Unknown";
+      // Called after espnowCopyCollapsedHead returned: no store lock is held.
+      const char* who = nameCache.get(head.peerMac, head.isSent, head.unattributed,
+          [&head](char* out, size_t cap) { espnowHistoryDisplayName(head, out, cap); });
+      if (refs[i].partsTotal > 1) {
+        snprintf(metaBuf[m], sizeof(metaBuf[m]), "%s (%u/%u)", who[0] ? who : "Unknown",
+                 refs[i].partsPresent, refs[i].partsTotal);
+        meta = metaBuf[m];
+      } else if (who[0]) {
+        strlcpy(nameBuf[m], who, sizeof(nameBuf[m]));
+        meta = nameBuf[m];
+      } else {
+        meta = "Unknown";  // unreachable: the resolver never gives "" for a received record
+      }
     }
 
     strlcpy(textBuf[m], head.message, sizeof(textBuf[m]));

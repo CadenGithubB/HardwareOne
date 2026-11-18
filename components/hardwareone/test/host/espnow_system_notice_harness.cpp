@@ -68,12 +68,19 @@ static String macToDisplayStr(const uint8_t* mac) {  // System_Utils.h
   macToDisplay(mac, b, sizeof b);
   return String(b);
 }
-struct StoredMessage { std::string name, content; bool encrypted; int type; uint32_t reqId; uint8_t piece, of; };
+// System_ESPNow.h: how a received record's sender is shown.
+enum class HistoryAttribution : uint8_t { FromName = 0, Attributed = 1, Unattributed = 2 };
+struct StoredMessage {
+  std::string name, content; bool encrypted; int type; uint32_t reqId; uint8_t piece, of;
+  HistoryAttribution attribution;
+};
 static std::vector<StoredMessage> gStored;
 static bool storeMessageInPeerHistory(uint8_t*, const char* name, const char* message, bool encrypted,
                                       LogMessageType type, uint32_t reqId = 0, uint8_t piece = 1,
-                                      uint8_t pieceTotal = 1) {
-  gStored.push_back({name ? name : "", message ? message : "", encrypted, (int)type, reqId, piece, pieceTotal});
+                                      uint8_t pieceTotal = 1,
+                                      HistoryAttribution attribution = HistoryAttribution::FromName) {
+  gStored.push_back({name ? name : "", message ? message : "", encrypted, (int)type, reqId, piece, pieceTotal,
+                     attribution});
   return true;
 }
 static unsigned gPushKicks = 0;

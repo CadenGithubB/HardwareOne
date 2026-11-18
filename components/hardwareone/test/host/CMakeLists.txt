@@ -190,6 +190,32 @@ target_include_directories(espnow_group_core_tests PRIVATE ../..)
 target_compile_options(espnow_group_core_tests PRIVATE
   -Wall -Wextra -Werror -pedantic)
 
+# ESP-NOW message history byte ring (System_ESPNow_HistoryCore.h, the production
+# dependency-free header; README "ESP-NOW peer message store"): the record header
+# and its check, ring placement against a deque model, refusals, the validated
+# walk, hostile text with fake headers, findBySeq and stale references, delivery
+# stamps, reassembly and the collapsed views against ports of the old ring code,
+# corrupted ring states, damage met while evicting, and decode budgets.
+add_executable(espnow_history_core_tests test_espnow_history_core.cpp)
+set_target_properties(espnow_history_core_tests PROPERTIES
+  CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+target_include_directories(espnow_history_core_tests PRIVATE ../..)
+target_compile_options(espnow_history_core_tests PRIVATE
+  -Wall -Wextra -Werror -pedantic)
+
+# Randomized stress and adversarial run of the same header: a deque model in
+# lockstep with the core for about a million steps (random lengths and ring
+# sizes, wraps, refusals, finds, stale references, stamps, reassembly, merge,
+# collapse and paging over up to 32 rings), plus byte flips, consistent header
+# forgeries and broken RingStates on exactly sized copies. -O1 keeps the default
+# run near 20 s under ASan; `--long` runs 20 million steps.
+add_executable(espnow_history_stress_tests test_espnow_history_stress.cpp)
+set_target_properties(espnow_history_stress_tests PROPERTIES
+  CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+target_include_directories(espnow_history_stress_tests PRIVATE ../..)
+target_compile_options(espnow_history_stress_tests PRIVATE
+  -O1 -Wall -Wextra -Werror -pedantic)
+
 # Rules of the sensor reading path over ESP-NOW (System_ESPNow_SensorCore.h,
 # the production dependency-free header): the one sensor table, the 12-byte
 # reading header, cutting a reading into 1 to 4 frames and putting it together
@@ -460,6 +486,14 @@ if(HW1_SANITIZE)
   target_compile_options(espnow_group_core_tests PRIVATE
     -fsanitize=address,undefined -g)
   target_link_options(espnow_group_core_tests PRIVATE
+    -fsanitize=address,undefined)
+  target_compile_options(espnow_history_core_tests PRIVATE
+    -fsanitize=address,undefined -g)
+  target_link_options(espnow_history_core_tests PRIVATE
+    -fsanitize=address,undefined)
+  target_compile_options(espnow_history_stress_tests PRIVATE
+    -fsanitize=address,undefined -fno-sanitize-recover=undefined -g)
+  target_link_options(espnow_history_stress_tests PRIVATE
     -fsanitize=address,undefined)
   target_compile_options(espnow_sensor_core_tests PRIVATE
     -fsanitize=address,undefined -g)
@@ -790,8 +824,10 @@ add_test(
           ${ESPNOW_DEADLINE_WRAP_TEST_ARGS})
 
 # ESP-NOW peer message store (README "ESP-NOW peer message store"): the production
-# slot table, rings, merged/collapsed reads and copy accessor with FreeRTOS mutex,
-# allocation and clock doubles; refs survive peer growth, reads never allocate.
+# slot table, per-peer byte rings allocated on first use, merged/collapsed reads
+# and seq-anchored copy accessor with FreeRTOS mutex, allocation, heap and clock
+# doubles; refusals said once a minute, damaged rings cleared, one peer never
+# touches another's block, reads never allocate.
 set(ESPNOW_MESSAGE_STORE_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
 if(HW1_SANITIZE)
   list(APPEND ESPNOW_MESSAGE_STORE_TEST_ARGS --sanitize)
@@ -839,6 +875,42 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_espnow_metadata_push.py
           ${ESPNOW_METADATA_PUSH_TEST_ARGS})
+
+# ESP-NOW history readers (README "ESP-NOW history readers"): the readers' name
+# cache (System_ESPNow_HistoryNames.h, dependency-free) as a unit, and the
+# production web /api/espnow/messages handler, OLED conversation and G2 chat rows
+# against a fake store and resolver, for both PSRAM settings: JSON keys and
+# order, names looked up per peer and kind, refused refs skipped, newest rows.
+add_executable(espnow_history_names_tests test_espnow_history_names.cpp)
+set_target_properties(espnow_history_names_tests PROPERTIES
+  CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+target_include_directories(espnow_history_names_tests PRIVATE ../..)
+target_compile_options(espnow_history_names_tests PRIVATE
+  -Wall -Wextra -Werror -pedantic)
+set(ESPNOW_HISTORY_READERS_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  target_compile_options(espnow_history_names_tests PRIVATE
+    -fsanitize=address,undefined -fno-sanitize-recover=undefined -g)
+  target_link_options(espnow_history_names_tests PRIVATE
+    -fsanitize=address,undefined)
+  list(APPEND ESPNOW_HISTORY_READERS_TEST_ARGS --sanitize)
+endif()
+add_test(NAME espnow_history_names_tests COMMAND espnow_history_names_tests)
+add_test(
+  NAME espnow_history_readers
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_espnow_history_readers.py
+          ${ESPNOW_HISTORY_READERS_TEST_ARGS})
+
+# ESP-NOW history display name (README "ESP-NOW history display name"): the
+# production espnowHistoryDisplayName resolver against doubles of the mesh
+# metadata table, the paired registry and GroupLockGuard: lookup order, sent /
+# unattributed rows, unterminated names, caps, null tables, clamped loops.
+add_test(
+  NAME espnow_history_display_name
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_espnow_history_display_name.py
+          ${ESPNOW_HISTORY_READERS_TEST_ARGS})
 
 # OLED ESP-NOW unpair and discovery ownership (README "OLED ESP-NOW unpair and
 # discovery ownership"): the production OLED unpair adapter and discovery input
@@ -1364,6 +1436,8 @@ add_test(NAME heap_low_core_tests COMMAND heap_low_core_tests)
 add_test(NAME espnow_pair_core_tests COMMAND espnow_pair_core_tests)
 add_test(NAME espnow_bond_agree_core_tests COMMAND espnow_bond_agree_core_tests)
 add_test(NAME espnow_group_core_tests COMMAND espnow_group_core_tests)
+add_test(NAME espnow_history_core_tests COMMAND espnow_history_core_tests)
+add_test(NAME espnow_history_stress_tests COMMAND espnow_history_stress_tests)
 add_test(NAME espnow_sensor_core_tests COMMAND espnow_sensor_core_tests)
 add_test(NAME espnow_time_core_tests COMMAND espnow_time_core_tests)
 add_test(NAME espnow_power_event_core_tests COMMAND espnow_power_event_core_tests)
@@ -2630,9 +2704,11 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_espnow_command_privileges.py)
 
-# ESP-NOW message depth (README "ESP-NOW message depth"): MESSAGES_PER_DEVICE and
-# the web poll count follow CONFIG_SPIRAM, so the ESP32-P4 gets the PSRAM depth
-# and esp32/esp32s3 keep theirs. Compiles the two production #if blocks.
+# ESP-NOW message depth (README "ESP-NOW message depth"): the history budget
+# (ESPNOW_HISTORY_KB_DEFAULT/_KB_MAX/_TOTAL_KB/_VIEW_MAX) and the web poll count
+# follow CONFIG_SPIRAM, so the ESP32-P4 gets the PSRAM budget and esp32/esp32s3
+# keep theirs. Compiles the two production #if blocks; ESP-NOW start allocates
+# no history and says the budget once.
 add_test(
   NAME espnow_history_depth
   COMMAND ${Python3_EXECUTABLE}

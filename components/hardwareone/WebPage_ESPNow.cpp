@@ -32,6 +32,7 @@ static esp_err_t handleEspNowPage(httpd_req_t* req) {
 #if ENABLE_ESPNOW
 
 #include "System_ESPNow.h"
+#include "System_ESPNow_HistoryNames.h"  // per-request name cache for the history rows
 #include "System_ESPNow_Sessions.h"  // SendStatus snapshot for delivery-tracking JSON
 #include "System_MemUtil.h"
 
@@ -87,27 +88,28 @@ static esp_err_t webEspNowSendJsonEscapedString(httpd_req_t* req, const char* s)
 // over one tracked 15-min window — the page is only open, and only polling, for
 // part of any such window). Static buffer eliminates that churn.
 //
-// Sizing is PSRAM-aware to match the underlying per-peer ring capacity. Note
-// PeerMessageHistory holds TWO rings of MESSAGES_PER_DEVICE (received + sent),
-// so a peer's population is twice the depth quoted below:
-//   PSRAM build:    MESSAGES_PER_DEVICE = 250, so a SINGLE peer can hold 500
-//                   records — 10× this cap on its own, before any second peer.
-//                   Cap at 50 per poll → ~15.8 KB in PSRAM. A backlog drains
-//                   across polls via the existing ?since= cursor, but only
-//                   losslessly in the single-peer case — see the caveat below.
-//   No-PSRAM build: MESSAGES_PER_DEVICE = 16, so one peer holds up to 32
-//                   records and the cap of 15 sits BELOW even a single ring's
-//                   depth. Cap at 15 → ~4.7 KB. PreferPsram falls back to DRAM
-//                   here; smaller cap keeps DRAM commitment modest (~1.5% of
-//                   326 KB internal heap).
+// Sizing is PSRAM-aware. The history keeps, per peer, a received and a sent
+// byte ring (System_ESPNow.h, espnowhistorykb), so how many records a peer holds
+// depends on their length: a ring of R bytes holds at most R/20 records (empty
+// texts), about R/60 forty-character ones. ReceivedTextMessage is a ~288 B
+// copied-out view:
+//   PSRAM build:    16 KB rings by default (32 KB maximum), so ONE peer can hold
+//                   hundreds of records, far more than this cap. Cap at 50 per
+//                   poll -> ~14.4 KB in PSRAM.
+//   No-PSRAM build: 2 KB rings by default (4 KB maximum), still above the cap
+//                   for short messages. Cap at 15 -> ~4.3 KB. PreferPsram falls
+//                   back to DRAM here; the smaller cap keeps the DRAM commitment
+//                   modest.
+// A backlog drains across polls via the ?since= cursor without loss:
+// getAllMessages is a k-way merge by seq across ALL peers and returns the
+// lowest seqs above `since` first, ascending, so the client's lastSeqNum (the
+// largest seq of the batch) never skips a lower seq of another peer.
+// getPeerMessages (?mac=) is ascending by seq for that one peer.
 //
-// Cursor caveat (multi-peer): getAllMessages fills peer-by-peer until the cap,
-// then sorts only the subset it returned — it can miss the true global-newest
-// (its own comment in System_ESPNow.cpp concedes this). The client advances
-// lastSeqNum to the MAX seq it saw in the batch, so when the cap truncates a
-// later peer's lower-seq records those records fall permanently below the
-// cursor and are never fetched. Pagination is lossless only when the capped set
-// is seq-contiguous — i.e. one peer, or the ?mac= filtered path.
+// Names: records carry no name. Each row's "name" comes from
+// espnowHistoryDisplayName (the peer's current name, the MAC text for an
+// unattributed record, "" for a sent one), resolved once per distinct peer and
+// kind per request through a name cache on the handler's stack.
 //
 // Concurrency: ESP-IDF httpd runs handlers sequentially on a single worker task
 // (see comment at WebServer_Server.cpp:274), so no mutex is needed — only one
@@ -117,11 +119,11 @@ static esp_err_t webEspNowSendJsonEscapedString(httpd_req_t* req, const char* s)
 // Failure mode: if the lazy ps_alloc fails (PSRAM exhausted, fragmented, etc.),
 // the handler sends an empty {"messages":[]} response and the next request will
 // retry the allocation. Once it succeeds, it sticks.
-// Same PSRAM test as MESSAGES_PER_DEVICE (System_ESPNow.h): CONFIG_SPIRAM.
+// Same PSRAM test as ESPNOW_HISTORY_VIEW_MAX (System_ESPNow.h): CONFIG_SPIRAM.
 #if defined(CONFIG_SPIRAM) && CONFIG_SPIRAM
-  static constexpr int kWebMessagesBufCount = 50;  // ~15.8 KB in PSRAM
+  static constexpr int kWebMessagesBufCount = 50;  // ~14.4 KB in PSRAM
 #else
-  static constexpr int kWebMessagesBufCount = 15;  // ~4.7 KB DRAM (no-PSRAM fallback)
+  static constexpr int kWebMessagesBufCount = 15;  // ~4.3 KB DRAM (no-PSRAM fallback)
 #endif
 static ReceivedTextMessage* gWebMessagesBuf = nullptr;
 
@@ -231,12 +233,17 @@ static esp_err_t handleEspNowMessages(httpd_req_t* req) {
     msgCount = getAllMessages(messages, kWebMessagesBufCount, sinceSeq);
   }
 
+  // Resolve names after the store call returned (the resolver takes the group
+  // lock; the history lock is not held here). Once per distinct peer and kind
+  // of this request; ~330 B on the httpd stack, nothing kept between polls.
+  espnowhist::NameCache names;
+
   esp_err_t err = webEspNowSendChunk(req, "{\"messages\":[");
   for (int i = 0; i < msgCount && err == ESP_OK; i++) {
     ReceivedTextMessage& msg = messages[i];
 
     char macStr[18];
-    macToDisplay(msg.senderMac, macStr, sizeof(macStr));
+    macToDisplay(msg.peerMac, macStr, sizeof(macStr));
 
     if (i > 0) err = webEspNowSendChunk(req, ",");
     if (err != ESP_OK) break;
@@ -255,7 +262,13 @@ static esp_err_t handleEspNowMessages(httpd_req_t* req) {
 
     err = webEspNowSendChunk(req, "\"name\":");
     if (err != ESP_OK) break;
-    err = webEspNowSendJsonEscapedString(req, msg.senderName);
+    {
+      // "" for sent rows, the MAC text for unattributed ones, else the peer's
+      // current name (the record itself stores no name).
+      const char* name = names.get(msg.peerMac, msg.isSent, msg.unattributed,
+          [&msg](char* out, size_t cap) { espnowHistoryDisplayName(msg, out, cap); });
+      err = webEspNowSendJsonEscapedString(req, name);
+    }
     if (err != ESP_OK) break;
     err = webEspNowSendChunk(req, ",\"msg\":");
     if (err != ESP_OK) break;

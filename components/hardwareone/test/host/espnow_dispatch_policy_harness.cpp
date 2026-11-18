@@ -94,13 +94,22 @@ static String getEspNowDeviceName(const uint8_t* mac) {
   }
   return String();
 }
-struct StoredMessage { std::string mac, name, content; bool encrypted; int type; uint32_t reqId; uint8_t piece, of; };
+// System_ESPNow.h: how a received record's sender is shown (the drain passes
+// Attributed for authenticated frames, Unattributed otherwise).
+enum class HistoryAttribution : uint8_t { FromName = 0, Attributed = 1, Unattributed = 2 };
+struct StoredMessage {
+  std::string mac, name, content; bool encrypted; int type; uint32_t reqId; uint8_t piece, of;
+  HistoryAttribution attribution;
+};
 static std::vector<StoredMessage> gStored;
+static bool gStoreRefuses = false;  // the history refused the record (full, no memory)
 static bool storeMessageInPeerHistory(uint8_t* mac, const char* name, const char* message, bool encrypted,
                                       LogMessageType type, uint32_t reqId = 0, uint8_t piece = 1,
-                                      uint8_t pieceTotal = 1) {
+                                      uint8_t pieceTotal = 1,
+                                      HistoryAttribution attribution = HistoryAttribution::FromName) {
+  if (gStoreRefuses) return false;
   gStored.push_back({macToDisplayStr(mac).c_str(), name ? name : "", message ? message : "",
-                     encrypted, (int)type, reqId, piece, pieceTotal});
+                     encrypted, (int)type, reqId, piece, pieceTotal, attribution});
   return true;
 }
 static unsigned gPushKicks = 0;
@@ -222,6 +231,7 @@ static void resetText(bool keyed) {
   gState.deviceCount = 1;
   gState.encryptionEnabled = keyed;
   gStored.clear();
+  gStoreRefuses = false;
   gEvents.clear();
   gWarns = gPrints = gPushKicks = gCleanups = gHandlerCalls = 0;
   gLastHandler.clear();
@@ -287,6 +297,8 @@ static unsigned runTextCases() {
   check("TEXT BROADCAST_AUTH keyed: stored as chat under the registry name",
         gStored.size() == 1 && gStored[0].name == "alpha" && !gStored[0].encrypted &&
         gStored[0].type == MSG_TEXT);
+  check("TEXT BROADCAST_AUTH keyed: stored as Attributed",
+        gStored.size() == 1 && gStored[0].attribution == HistoryAttribution::Attributed);
   check("TEXT BROADCAST_AUTH keyed: posts SYSEVT_TEXT_RX(subject=name, detail=text)",
         gEvents.size() == 1 && gEvents[0].kind == SYSEVT_TEXT_RX && gEvents[0].subject == "alpha" &&
         gEvents[0].detail == "hi all");
@@ -301,6 +313,19 @@ static unsigned runTextCases() {
   drainTextQueueForTest();
   check("TEXT session-encrypted keyed: stored encrypted and posts SYSEVT_TEXT_RX",
         gStored.size() == 1 && gStored[0].encrypted && gEvents.size() == 1);
+
+  // The history refuses the record (full, or no memory for the peer's block):
+  // the message still arrived, so text_rx still fires; there is nothing new to
+  // draw, so no push-kick.
+  resetText(true);
+  check("TEXT session-encrypted, history refuses: claimed",
+        deliver(ESPNOW_V4_TYPE_TEXT, gPeerA, gPeerA, "kept?", true, true));
+  gStoreRefuses = true;
+  drainTextQueueForTest();
+  check("TEXT session-encrypted, history refuses: SYSEVT_TEXT_RX still posted",
+        gStored.empty() && gEvents.size() == 1 && gEvents[0].kind == SYSEVT_TEXT_RX && gEvents[0].detail == "kept?");
+  check("TEXT session-encrypted, history refuses: no G2 push-kick, console line still printed",
+        gPushKicks == 0 && gPrints == 1);
 
   // Keyless device (bootstrap): plaintext is still accepted, but a spoofed
   // paired MAC never borrows the paired name and never reaches the event bus.
@@ -318,6 +343,8 @@ static unsigned runTextCases() {
   check("TEXT plaintext keyless from a paired MAC: stored as chat under the MAC string",
         gStored.size() == 1 && gStored[0].name == macText(gPeerA) && gStored[0].mac == macText(gPeerA) &&
         gStored[0].type == MSG_TEXT);
+  check("TEXT plaintext keyless from a paired MAC: stored as Unattributed (shown under the MAC text)",
+        gStored.size() == 1 && gStored[0].attribution == HistoryAttribution::Unattributed);
   check("TEXT plaintext keyless from a paired MAC: no SYSEVT_TEXT_RX posted", gEvents.empty());
   check("TEXT plaintext keyless from a paired MAC: G2 push-kick and console line still happen",
         gPushKicks == 1 && gPrints == 1);

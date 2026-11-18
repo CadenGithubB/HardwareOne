@@ -234,6 +234,7 @@ struct Settings {
       meshTtl(3),
       meshRelay(true),
       meshPeerMax(8),
+      espnowHistoryKb(0),
       sensorBroadcastIntervalMs(1000),
       espnowAcceptSensorControl(false),
       espnowMasterFingerprint(""),
@@ -807,6 +808,8 @@ struct Settings {
                                        // paths, it just won't carry anyone else's frames — the
                                        // knob for a battery-tight or deliberately edge node.
   uint8_t meshPeerMax;                 // Max mesh peer slots (1-16, default: 8, changes on reboot)
+  uint8_t espnowHistoryKb;             // ESP-NOW message history per peer and direction, KB (0 = board default:
+                                       // 16 with PSRAM, 2 without; board maximum 32/4; latched at ESP-NOW start, reboot)
   bool meshTime;                       // Mesh time (default true): the master sends its clock; a device
                                        // that names it as its master and has no better source takes it
   uint16_t powerStatusInterval;        // Seconds between the battery frames sent to the mesh master

@@ -26,6 +26,7 @@
 
 #if ENABLE_ESPNOW
 #include "System_ESPNow.h"
+#include "System_ESPNow_HistoryNames.h"  // per-build name cache for chat rows
 #include "System_ESPNow_Sensors.h"   // remoteSensorInfoAt + formatRemoteSensorReadable (Bonded Device view)
 #include "System_MemUtil.h"          // ps_alloc — chat head-record copy (PSRAM)
 #endif
@@ -162,6 +163,23 @@ static constexpr int kChatCols = 48;
 // reassembled message (ESPNOW_TEXT_MAX_LEN-ish) plus the label.
 static EXT_RAM_BSS_ATTR char gChatReasm[1152];
 
+// History records carry no name: received rows are labelled with
+// espnowHistoryDisplayName (the peer's current name, or the MAC text for an
+// unattributed record). One page build (chatBuildPages) resolves each distinct
+// peer and kind once through this cache; it is cleared at the start of every
+// build so renames show on the next one. Constant-initialised (all zero); used
+// only by the page builder, like gInboxRefs.
+static EXT_RAM_BSS_ATTR espnowhist::NameCache gChatNames;
+
+// The label of a received row: never empty ("?" only if the resolver ever gave
+// ""). Valid until the next chatWho call; callers copy or print it at once.
+// Called with no store lock held (after espnowCopyCollapsedHead returned).
+static const char* chatWho(const ReceivedTextMessage& head) {
+  const char* who = gChatNames.get(head.peerMac, head.isSent, head.unattributed,
+      [&head](char* out, size_t cap) { espnowHistoryDisplayName(head, out, cap); });
+  return who[0] ? who : "?";
+}
+
 // Build the UNWRAPPED, labelled, sanitized text for one collapsed message:
 //   sent     -> "me: <text>"
 //   received -> "<name>: <text>"
@@ -180,7 +198,7 @@ static void chatLogicalLine(char* out, size_t cap, const CollapsedMsgRef& ref,
   const char* suffix = "";
   if (ref.partsTotal > 1) {
     bool complete = false;
-    int n = espnowReassembleByReqId(head.senderMac, ref.reqId, ref.isSent,
+    int n = espnowReassembleByReqId(head.peerMac, ref.reqId, ref.isSent,
                                     gChatReasm, sizeof(gChatReasm), &complete);
     if (n > 0) { body = gChatReasm; if (!complete) suffix = " ..."; }
     // else: fall back to the first fragment (body unchanged)
@@ -188,8 +206,7 @@ static void chatLogicalLine(char* out, size_t cap, const CollapsedMsgRef& ref,
   if (ref.isSent) {
     snprintf(out, cap, "me: %s%s", body, suffix);
   } else {
-    const char* who = head.senderName[0] ? head.senderName : "?";
-    snprintf(out, cap, "%s: %s%s", who, body, suffix);
+    snprintf(out, cap, "%s: %s%s", chatWho(head), body, suffix);
   }
   for (char* c = out; *c; c++) {
     if ((unsigned char)*c < 0x20 || (unsigned char)*c > 0x7E) *c = ' ';
@@ -650,7 +667,9 @@ static void showBondDetailMenu() {
 
 #if ENABLE_ESPNOW
 // Shared collapse buffer for both inbox views (they never render simultaneously).
-static EXT_RAM_BSS_ATTR CollapsedMsgRef gInboxRefs[2 * MESSAGES_PER_DEVICE];
+// Holds the NEWEST ESPNOW_HISTORY_VIEW_MAX logical messages (the collapse drops
+// older ones when a history holds more).
+static EXT_RAM_BSS_ATTR CollapsedMsgRef gInboxRefs[ESPNOW_HISTORY_VIEW_MAX];
 // Full wrapped conversation (PSRAM — DRAM is tight); paged for display.
 static EXT_RAM_BSS_ATTR char     gChatBuf[CHAT_BUF_SIZE];              // wrapped conversation
 static EXT_RAM_BSS_ATTR char     gChatPageBuf[CHAT_PAGE_BUDGET + 96];  // header + slice + marker
@@ -678,7 +697,7 @@ static void exitPeerInboxToDetail() { showPeerDetail(); }
 // Rough wrapped-byte estimate for one message — used to pick the newest tail
 // that fits gChatBuf.
 static size_t chatEstBytes(const CollapsedMsgRef& ref, const ReceivedTextMessage& head) {
-  size_t lbl     = ref.isSent ? 4 : (strlen(head.senderName[0] ? head.senderName : "?") + 2);
+  size_t lbl     = ref.isSent ? 4 : (strlen(chatWho(head)) + 2);
   // Multi-fragment messages reassemble to ~partsTotal*200 B; estimate that so the
   // newest-tail fit below doesn't overflow gChatBuf mid-build.
   size_t textLen = (ref.partsTotal > 1) ? ((size_t)ref.partsTotal * 200)
@@ -689,9 +708,12 @@ static size_t chatEstBytes(const CollapsedMsgRef& ref, const ReceivedTextMessage
 }
 
 // Build gChatBuf from the newest messages that fit, then page it. Leaves the
-// current page on the newest (last) page. A ref whose record the ring overwrote
-// since the collapse is skipped.
+// current page on the newest (last) page. Each ref is resolved by
+// espnowCopyCollapsedHead by its seq number, never by a raw ring offset; a ref
+// whose record the peer's own newer messages evicted since the collapse is
+// refused and skipped.
 static void chatBuildPages(int rc) {
+  gChatNames.clear();
   if (!gChatHead) {
     void* mem = ps_alloc(sizeof(ReceivedTextMessage), AllocPref::PreferPsram, "g2.espnow.chatHead");
     if (mem) gChatHead = new (mem) ReceivedTextMessage();
@@ -753,7 +775,7 @@ static void chatNavPage(G2TapKind kind) {
 static void showInboxMenu() {
   setSub(ESPN_APP_SUB_INBOX);
 #if ENABLE_ESPNOW
-  int rc = espnowCollapsedAllMessages(gInboxRefs, 2 * MESSAGES_PER_DEVICE);
+  int rc = espnowCollapsedAllMessages(gInboxRefs, ESPNOW_HISTORY_VIEW_MAX);
   snprintf(gChatTitle, sizeof(gChatTitle), "Inbox");
   gChatExitFn = exitInboxToMain;
   chatBuildPages(rc);
@@ -773,7 +795,7 @@ static void showPeerInboxMenu() {
     return;
   }
   EspNowDevice& d = gEspNow->devices[gSelectedPeer];
-  int rc = espnowGetConversation(d.mac, gInboxRefs, 2 * MESSAGES_PER_DEVICE);
+  int rc = espnowGetConversation(d.mac, gInboxRefs, ESPNOW_HISTORY_VIEW_MAX);
   snprintf(gChatTitle, sizeof(gChatTitle), "%s", d.name.length() ? d.name.c_str() : "peer");
   gChatExitFn = exitPeerInboxToDetail;
   chatBuildPages(rc);
@@ -1297,7 +1319,7 @@ void g2EspNowAppHandleTap(uint32_t idx) {
 // next tap-driven render will pick it up. Keeping the kick tight to the
 // pages that actually change visually keeps redraw bandwidth honest.
 
-void g2EspNowAppOnRxText(const uint8_t* senderMac) {
+void g2EspNowAppOnRxText(const uint8_t* fromMac) {
   if (g2GetHijackPage() != G2_HIJACK_PAGE_ESPNOW_APP) return;
 
   void (*renderFn)() = nullptr;
@@ -1308,8 +1330,8 @@ void g2EspNowAppOnRxText(const uint8_t* senderMac) {
     // Only repaint if the message is from the peer whose inbox we're viewing.
     if (!gEspNow || !gEspNow->initialized ||
         gSelectedPeer < 0 || gSelectedPeer >= gEspNow->deviceCount) return;
-    if (!senderMac ||
-        memcmp(senderMac, gEspNow->devices[gSelectedPeer].mac, 6) != 0) return;
+    if (!fromMac ||
+        memcmp(fromMac, gEspNow->devices[gSelectedPeer].mac, 6) != 0) return;
     renderFn = &showPeerInboxMenu;
 #else
     return;
