@@ -26,6 +26,18 @@ everything user-visible since the v0.99.99.1 tag.
   for every board; not yet run on hardware (readiness G-80).
 
 ### Fixed
+- P4 boards: `c6update` now keeps the new radio-chip (C6) firmware. Before, the P4 reset the C6 to
+  rebuild the link before the new image was confirmed, so the C6 always rolled back to its old
+  image while the P4 still reported "companion updated". The new C6 image confirms itself after
+  running four seconds; the P4 waits for that, then checks which slot the C6 runs and reports a
+  rollback as a failed update. Wi-Fi and the web server are now powered down before the transfer
+  and come back afterwards; before, the device often stayed off the network until a reboot after an
+  update or a failed transfer. An image that crashes on its first boot still rolls back; one that
+  boots but misbehaves stays (replace it with `c6update` or the programmer). The image being
+  installed must carry the self-confirm, so updating from an older C6 image works, but installing
+  an older image this way still rolls back. Ran on the P4X-EYE bench four times in both slot
+  directions. Bluetooth can stay off after an update until a restart when the
+  ring or glasses do not close cleanly; that is unchanged.
 - Waveshare ESP32-P4 board: speaker test tones were close to inaudible at ordinary volume values,
   because the volume was applied twice (codec register and sample level). The codec now stays at
   0 dB and the volume scales the samples; volume 0 is silence. The camera module on this board faces

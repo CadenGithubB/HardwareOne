@@ -456,6 +456,30 @@ static void slave_req_cb(uint32_t msg_id, const uint8_t *data, size_t len, void 
     ESP_LOGW(TAG, "request dropped (queue/memory full); host will time out");
 }
 
+/* A new image arrives through Hosted OTA and boots once in PENDING_VERIFY.
+ * The host cannot confirm it in time: Hosted resets this chip whenever the
+ * host starts the transport, and a reset before confirmation makes the
+ * rollback bootloader return to the previous image. So the image confirms
+ * itself after running this long without a reset (Hosted and this bridge
+ * started, no panic). An image that crashes on its first boot still rolls
+ * back; the host checks afterwards which slot runs. */
+#define SELF_CONFIRM_MS 4000
+
+static void self_confirm_task(void *argument)
+{
+    (void)argument;
+    vTaskDelay(pdMS_TO_TICKS(SELF_CONFIRM_MS));
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    esp_ota_img_states_t state;
+    if (running && esp_ota_get_state_partition(running, &state) == ESP_OK &&
+        state == ESP_OTA_IMG_PENDING_VERIFY) {
+        esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
+        ESP_LOGW(TAG, "new image in %s confirmed after %d ms: %s", running->label, SELF_CONFIRM_MS,
+                 esp_err_to_name(err));
+    }
+    vTaskDelete(NULL);
+}
+
 esp_err_t esp_now_hosted_slave_init(void)
 {
     /* The host's c6update scans a candidate image for this marker before it
@@ -471,6 +495,8 @@ esp_err_t esp_now_hosted_slave_init(void)
      * c6update reports OTA progress on the P4. Safe before the scheduler
      * starts: the log lock is a no-op then and the heap is up. */
     esp_log_level_set("slave_rpc", ESP_LOG_WARN);
+    if (xTaskCreate(self_confirm_task, "hw1_confirm", 3072, NULL, 1, NULL) != pdPASS)
+        ESP_LOGE(TAG, "self-confirm task not started; a new image rolls back at the next reset");
     esp_err_t err = esp_hosted_register_custom_callback(ESP_NOW_HOSTED_MSG_REQ, slave_req_cb, NULL);
     if (err != ESP_OK) ESP_LOGE(TAG, "CustomRpc handler registration failed: %s", esp_err_to_name(err));
     else ESP_LOGI(TAG, "HardwareOne ESP-NOW bridge registered; awaiting host init");
