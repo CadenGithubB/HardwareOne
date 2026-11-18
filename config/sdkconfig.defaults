@@ -116,6 +116,17 @@ CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
 # (CONFIG_LWIP_MAX_ACTIVE_TCP already defaults to 16, which covers 8 sockets.)
 CONFIG_LWIP_MAX_SOCKETS=16
 
+# LWIP - TCP window and send buffer at 8 segments (default 4 = 5760 bytes).
+# These are ceilings, not reservations: memory is used only while a transfer
+# runs. Measured on the P4X-EYE with Bluetooth idle (2026-11-18): receive
+# 625 -> 855 KB/s, raw SD upload 540 -> 760 KB/s, SD download 333 -> 413 KB/s,
+# for about +3 KB internal RAM and +12 KB PSRAM during a transfer. 23040 gave
+# +70 % for +13 KB internal and 65535 +130 % for +50-68 KB internal, so the
+# smaller step was chosen. The mailbox holds the window's segments (8 + slack).
+CONFIG_LWIP_TCP_WND_DEFAULT=11520
+CONFIG_LWIP_TCP_SND_BUF_DEFAULT=11520
+CONFIG_LWIP_TCP_RECVMBOX_SIZE=16
+
 # SNTP - make the two backup servers setupNTP() passes actually exist (the
 # default is ONE slot, which silently dropped them), and stop waiting a random
 # 0-5 s before the first request — boot's foreground sync polls for the reply,

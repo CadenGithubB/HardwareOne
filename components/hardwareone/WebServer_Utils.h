@@ -729,53 +729,39 @@ inline const char* getFileBrowserScript() {
     return window.createFileExplorer(config);
   };
   
-  // Shared upload utility — reads file, encodes, and POSTs with XHR progress
+  // Shared upload utility: POSTs the file's bytes as they are (raw body,
+  // destination in ?path=) with XHR progress. No base64 or URL encoding; the
+  // board writes the body straight to storage.
   // opts: { onProgress(pct, label), onDone(ok, msg) }
   window.hwUploadFile = function(file, targetPath, opts) {
     opts = opts || {};
-    var isText = /\.(txt|json|csv|xml|html|htm|css|js|md|log|ini|cfg|conf|yaml|yml|sh|py|c|cpp|h|hpp|crt|pem|key|pub)$/i.test(file.name);
-    var isBinary = !isText;
-    if (opts.onProgress) opts.onProgress(0, 'Reading ' + file.name + '...');
-    var reader = new FileReader();
-    reader.onload = function(evt) {
-      var content = evt.target.result;
-      if (isBinary) content = content.split(',')[1]; // strip data URL prefix
-      var body = 'path=' + encodeURIComponent(targetPath) + '&binary=' + (isBinary ? '1' : '0') + '&content=' + encodeURIComponent(content);
-      var xhr = new XMLHttpRequest();
-      xhr.open('POST', '/api/files/upload?path=' + encodeURIComponent(targetPath), true);
-      xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
-      xhr.upload.onprogress = function(e) {
-        if (e.lengthComputable && opts.onProgress) {
-          var pct = Math.round(e.loaded / e.total * 100);
-          opts.onProgress(pct, 'Uploading ' + file.name + '... (' + pct + '%)');
-        }
-      };
-      xhr.onload = function() {
-        try {
-          var j = JSON.parse(xhr.responseText);
-          if (j.success) {
-            if (opts.onProgress) opts.onProgress(100, 'Done');
-            if (opts.onDone) opts.onDone(true, 'Uploaded: ' + file.name);
-          } else {
-            if (opts.onDone) opts.onDone(false, 'Upload failed: ' + (j.error || 'Unknown'));
-          }
-        } catch(e) {
-          if (opts.onDone) opts.onDone(false, 'Upload error: bad response');
-        }
-      };
-      xhr.onerror = function() {
-        if (opts.onDone) opts.onDone(false, 'Upload error: network failure');
-      };
-      xhr.send(body);
+    if (opts.onProgress) opts.onProgress(0, 'Uploading ' + file.name + '...');
+    var xhr = new XMLHttpRequest();
+    xhr.open('POST', '/api/files/upload?path=' + encodeURIComponent(targetPath), true);
+    xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+    xhr.upload.onprogress = function(e) {
+      if (e.lengthComputable && opts.onProgress) {
+        var pct = Math.round(e.loaded / e.total * 100);
+        opts.onProgress(pct, 'Uploading ' + file.name + '... (' + pct + '%)');
+      }
     };
-    reader.onerror = function() {
-      if (opts.onDone) opts.onDone(false, 'Error reading file');
+    xhr.onload = function() {
+      try {
+        var j = JSON.parse(xhr.responseText);
+        if (j.success) {
+          if (opts.onProgress) opts.onProgress(100, 'Done');
+          if (opts.onDone) opts.onDone(true, 'Uploaded: ' + file.name);
+        } else {
+          if (opts.onDone) opts.onDone(false, 'Upload failed: ' + (j.error || 'Unknown'));
+        }
+      } catch(e) {
+        if (opts.onDone) opts.onDone(false, 'Upload error: bad response');
+      }
     };
-    if (isBinary) {
-      reader.readAsDataURL(file);
-    } else {
-      reader.readAsText(file);
-    }
+    xhr.onerror = function() {
+      if (opts.onDone) opts.onDone(false, 'Upload error: network failure');
+    };
+    xhr.send(file);
   };
 
   // Full-featured file manager with action buttons
