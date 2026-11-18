@@ -444,7 +444,7 @@ struct Settings {
       mqttPassword(""),
       mqttBaseTopic(""),
       mqttDiscoveryPrefix("homeassistant"),
-      mqttPublishIntervalMs(10000),
+      mqttPublishIntervalMs(30000),
       mqttPublishWifi(false),
       mqttPublishSystem(false),
       mqttPublishThermal(false),
@@ -1212,7 +1212,7 @@ struct Settings {
   String mqttPassword;          // MQTT password - stored encrypted (default: "")
   String mqttBaseTopic;         // Base topic for publishing (default: hardwareone/<mac>, auto-generated if empty)
   String mqttDiscoveryPrefix;   // HA discovery prefix (default: "homeassistant")
-  int mqttPublishIntervalMs;    // Sensor data publish interval in ms (default: 10000)
+  int mqttPublishIntervalMs;    // Sensor data publish interval in ms (default: 30000)
   // MQTT publish data configuration
   bool mqttPublishWifi;         // Include WiFi info in published data (default: false)
   bool mqttPublishSystem;       // Include system info (uptime, heap, etc.) (default: false)

@@ -343,7 +343,7 @@ static const SettingEntry mqttSettingEntries[] = {
   { "mqttPassword", SETTING_STRING, &gSettings.mqttPassword, 0, 0, "", 0, 0, "Password", nullptr, true, "broker", "mqttpassword" },
   { "mqttBaseTopic", SETTING_STRING, &gSettings.mqttBaseTopic, 0, 0, "", 0, 0, "Base Topic", nullptr, false, "topics", "mqttbasetopic" },
   { "mqttDiscoveryPrefix", SETTING_STRING, &gSettings.mqttDiscoveryPrefix, 0, 0, "homeassistant", 0, 0, "Discovery Prefix", nullptr, false, "topics", "mqttdiscoveryprefix" },
-  { "mqttPublishIntervalMs", SETTING_INT, &gSettings.mqttPublishIntervalMs, 10000, 0, nullptr, 1000, 300000, "Publish Interval (ms)", nullptr, false, "publish", "mqttpublishintervalms" },
+  { "mqttPublishIntervalMs", SETTING_INT, &gSettings.mqttPublishIntervalMs, 30000, 0, nullptr, 1000, 300000, "Publish Interval (ms)", nullptr, false, "publish", "mqttpublishintervalms" },
   { "mqttPublishWiFi", SETTING_BOOL, &gSettings.mqttPublishWifi, false, 0, nullptr, 0, 1, "Publish WiFi info", nullptr, false, "publish", "mqttpublishwifi" },
   { "mqttPublishSystem", SETTING_BOOL, &gSettings.mqttPublishSystem, false, 0, nullptr, 0, 1, "Publish system info", nullptr, false, "publish", "mqttpublishsystem" },
   { "mqttPublishThermal", SETTING_BOOL, &gSettings.mqttPublishThermal, false, 0, nullptr, 0, 1, "Publish thermal data", nullptr, false, "publish", "mqttpublishthermal" },
