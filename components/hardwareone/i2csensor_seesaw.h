@@ -79,12 +79,11 @@ extern unsigned long gGamepadLastStopTime;
 bool inputStartInternal();
 
 // Gamepad control functions
-void gamepadPoll();
+bool gamepadPoll(uint32_t& buttons, int16_t& x, int16_t& y);
 
 // Gamepad initialization functions
 bool gamepadInit();
 bool gamepadInitConnection();
-void gamepadPoll();
 
 // Accessor functions (for MQTT and other modules)
 int gamepadGetX();

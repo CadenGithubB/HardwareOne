@@ -184,8 +184,12 @@ inline void streamMicrophoneSensorJs(httpd_req_t* req) {
     "        btn.onclick = async function(){\n"
     "          var name = this.getAttribute('data-name');\n"
     "          if(await hwConfirm('Delete ' + name + '?')){\n"
-    "            hw.postFormText('/api/cli',{cmd:'micdelete '+name})\n"
-    "              .then(function(){window.__lastRecCount=-1;window.loadMicRecordings();});\n"
+    // micdelete takes the name as a quoted token. A refusal comes back as
+    // HTTP 400/403 with the reason in the body, so read it from the Response.
+    "            hw.postForm('/api/cli',{cmd:'micdelete \"'+name+'\"'})\n"
+    "              .then(function(r){return r.text().then(function(t){if(!r.ok)throw new Error(t||('HTTP '+r.status));});})\n"
+    "              .then(function(){window.__lastRecCount=-1;window.loadMicRecordings();})\n"
+    "              .catch(function(e){alert(e.message);});\n"
     "          }\n"
     "        };\n"
     "      });\n"

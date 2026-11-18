@@ -308,6 +308,7 @@ def main():
         stub = stub.replace(anchor, '  long toInt() const { return std::strtol(text_.c_str(), nullptr, 10); }\n' + anchor)
         stub = stub.replace('#include <string>', '#include <cstdlib>\n#include <string>', 1)
         (Path(tmp) / 'Arduino.h').write_text(stub)
+        shutil.copy(a.component / 'System_CommandReply.h', Path(tmp) / 'System_CommandReply.h')
         cmd = [a.cxx, '-std=c++17', '-Wall', '-Wextra', '-Werror', '-pedantic', '-Wno-unused-function',
                '-DARDUINOJSON_ENABLE_ARDUINO_STRING=1', '-DARDUINOJSON_ENABLE_ARDUINO_STREAM=0',
                '-DARDUINOJSON_ENABLE_ARDUINO_PRINT=0', '-DARDUINOJSON_ENABLE_PROGMEM=0',

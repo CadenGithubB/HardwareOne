@@ -37,7 +37,8 @@ def generate(overlay: Path | None) -> str:
     parser = extract_block(read("System_Command.h"), "class CommandArgs") + ";\n"
     parser += "const String CommandArgs::empty_;\n"
     parser += "\n".join(extract_block(command, marker) for marker in (
-        "CommandArgs::CommandArgs(", "void CommandArgs::parse(", "const String& CommandArgs::arg("))
+        "CommandArgs::CommandArgs(", "void CommandArgs::parse(", "const String& CommandArgs::arg(",
+        "String CommandArgs::remaining("))
     parser += "\n" + "\n".join(extract_block(filesystem, marker) for marker in (
         "bool normalizeFsPath(", "const char* requireQuotedPath(", "const char* requireQuotedToken("))
     scope = read("System_VFS.h")

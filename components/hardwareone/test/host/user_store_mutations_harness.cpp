@@ -683,7 +683,7 @@ static void approveReportsPendingListFailure() {
   fs.faults.rename.add(std::string(PENDING_USERS_FILE) + ".tmp");
   // The account exists and was announced; the stale request is reported, not hidden.
   check(!approvePendingUserInternal("erin", err));
-  check(err == "User approved, but the pending list could not be updated");
+  check(err == "User approved, but the request is still listed. Run userdeny erin to clear it");
   check(rosterHas("erin") && fs.exists(settingsPath(5)) && contains(output, "Approved user: erin"));
   check(pendingHas("erin") && pendingHas("frank"));
   // A retry is refused as a duplicate and publishes nothing new.

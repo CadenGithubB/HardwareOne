@@ -168,6 +168,10 @@ static void runApplier() {
 // --- Camera, microphone, audio, settings, registry --------------------------
 bool gCameraRunning = false;
 bool gMicRunning = false;
+// The rest of closemic's live test: a recording or a capture the mic owns.
+static bool micRecording = false, micCaptureOwned = false;
+bool micRecordingBusy() { return micRecording; }
+bool audioCaptureOwnedBy(const char*) { return micCaptureOwned; }
 // Camera power requested by the page itself on the tap task (no command:
 // no authorization, enable gate or audit). Must stay zero.
 static unsigned camStarts = 0, camStops = 0;
@@ -244,6 +248,7 @@ static void reset() {
   lensQueue.clear();
   gCameraRunning = false;
   gMicRunning = false;
+  micRecording = micCaptureOwned = false;
   camAuto = false;
   micAuto = false;
   camStarts = camStops = 0;
@@ -458,6 +463,24 @@ static void testMicCompletionRefreshes() {
   CHECK(submitted.size() == commands);
 }
 
+// The microphone already in the wanted state (opened by hand with Auto Start
+// off): openmic would answer the already-running Error and the preference
+// would never be saved, so the toggle saves it directly.
+static void testMicToggleWithoutRuntimeChange() {
+  reset();
+  openMicDetail();
+  gMicRunning = true;
+  tap(1);
+  CHECK(submitted == std::vector<std::string>{"micautostart on"});
+  // Off with a recording still running: closemic has work, so it runs first.
+  reset();
+  openMicDetail();
+  micAuto = true;
+  micRecording = true;
+  tap(1);
+  CHECK(submitted == std::vector<std::string>{"closemic"} && lastCallback != nullptr);
+}
+
 // A list tap past the last row does nothing.
 static void testOutOfRangeListTap() {
   reset();
@@ -568,6 +591,7 @@ int main() {
   testHookIgnoredOffDetail();
   testMicCompletionVsBackToList();
   testMicCompletionRefreshes();
+  testMicToggleWithoutRuntimeChange();
   testOutOfRangeListTap();
   testLiveLevelCommittedAfterStart();
   testCameraToggleIsACommand();

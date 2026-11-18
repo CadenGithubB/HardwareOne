@@ -220,8 +220,7 @@ const char* cmd_tofstart(const String& argsInput) {
 
 const char* cmd_tofstop(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!requestSensorStop(I2C_DEVICE_TOF)) return "Error: [ToF] Could not queue stop";
-  return "[ToF] Stop requested; cleanup will complete asynchronously";
+  return cmd_sensorstop_queued(I2C_DEVICE_TOF, "ToF");
 }
 
 const char* cmd_toftransitionms(const String& argsInput) {
@@ -588,8 +587,8 @@ const char* cmd_tofdevicepollms(const String& argsInput) {
   if (valStr.length() == 0) return "Error: invalid arguments — Usage: tofDevicePollMs <100..2000>";
   int v = 0;
   if (!parseIntArg(valStr, v)) return kCommandReplyNotANumber;
-  if (v < 100) v = 100;
-  if (v > 2000) v = 2000;
+  if (v < 100 || v > 2000) return "Error: [ToF] Device poll interval must be 100-2000 ms. Give a value in that range.";
+  if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
   setSetting(gSettings.tofDevicePollMs, v);
   snprintf(getDebugBuffer(), 1024, "tofDevicePollMs set to %d", v);
   return getDebugBuffer();

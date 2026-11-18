@@ -87,7 +87,9 @@ extern int micGain;
 // Microphone initialization. `preferred` (a capture that asked for one
 // microphone) replaces the micsource setting for this start and is strict:
 // unavailable fails instead of opening another source. NONE = the setting.
-bool initMicrophone(AudioSource preferred = AUDIO_SRC_NONE);
+// On a refused start `why`, when given, receives the command reply that says
+// why and what to do next ("Error: <reason>. <next action>.").
+bool initMicrophone(AudioSource preferred = AUDIO_SRC_NONE, const char** why = nullptr);
 
 // The words of the micSource setting (`micsource <auto|pdm|g2>`).
 constexpr char kMicSourceAuto[] = "auto";
@@ -128,7 +130,8 @@ const char* buildMicrophoneStatusJson();
 // the FILE without shortening the detection window — a separate opt-in so
 // tools/vad_replay.py can still get a byte-exact WAV.
 // Both default off, so every other recorder is unchanged and needs no edit.
-bool startRecording(uint32_t silenceStopMs = 0, bool trim = false);
+// `why` as for initMicrophone().
+bool startRecording(uint32_t silenceStopMs = 0, bool trim = false, const char** why = nullptr);
 // Requests STOPPING and waits through FINALIZING. False means the bounded wait
 // expired; callers must not treat the current path as fetchable in that case.
 bool stopRecording(uint32_t timeoutMs = 3000);

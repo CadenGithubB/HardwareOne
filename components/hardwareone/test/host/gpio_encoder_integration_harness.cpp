@@ -188,12 +188,12 @@ int main() {
   gInputTaskHandle = nullptr;
   fixture::busyAfterTaskCreate = true;
   fixture::failTaskCreate = true;
-  assert(!inputStartInternal());
+  assert(gpioEncoderStart() == GpioEncoderStart::TaskNotCreated);
   assert(!gInputRunning && !gInputConnected);
   assert(!fixture::interrupts[48] && !fixture::interrupts[47]);
   fixture::cacheBusy = false;
   fixture::failTaskCreate = false;
-  assert(!inputStartInternal());
+  assert(gpioEncoderStart() == GpioEncoderStart::Busy);
   assert(!gInputRunning && !gInputConnected);
   assert(!fixture::interrupts[48] && !fixture::interrupts[47]);
   fixture::cacheBusy = false;

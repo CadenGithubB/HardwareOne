@@ -684,7 +684,33 @@ const char* cmd_files(const String& argsInput) {
     return getDebugBuffer();
   }
 
-  broadcastOutput(buffer.c_str());
+  // One broadcastOutput call is cut at 255 B, so the listing goes out as whole
+  // lines batched into chunks of at most 240 B (as cmd_fileview prints a page).
+  // A line longer than a chunk (a very long name) is printed in pieces.
+  const char* listing = buffer.c_str();
+  const size_t listingLen = buffer.length();
+  char chunk[241];
+  size_t cl = 0;
+  for (size_t i = 0; i < listingLen; ) {
+    size_t le = i;
+    while (le < listingLen && listing[le] != '\n') le++;
+    const size_t lineLen = le - i;              // excl. '\n'
+    const size_t take = lineLen > sizeof(chunk) - 1 ? sizeof(chunk) - 1 : lineLen;
+    if (cl > 0 && cl + 1 + take > sizeof(chunk) - 1) {
+      chunk[cl] = '\0';
+      broadcastOutput(chunk);
+      cl = 0;
+    }
+    if (cl > 0) chunk[cl++] = '\n';
+    memcpy(chunk + cl, listing + i, take);
+    cl += take;
+    if (take < lineLen) i += take;              // the rest of the line comes next
+    else i = (le < listingLen) ? le + 1 : le;
+  }
+  if (cl > 0) {
+    chunk[cl] = '\0';
+    broadcastOutput(chunk);
+  }
   emitListingTrailer("files and directories", "read a file's contents with 'fileview' or 'fileread'");
   return "[FS] Listing complete";
 }
@@ -823,7 +849,7 @@ const char* cmd_fileview(const String& argsInput) {
 
   // This legacy viewer broadcasts untagged page chunks to shared sinks.
   if (filePathIsPrivateTranscript(path))
-    return "Use fileread or the file browser to read private transcripts";
+    return "Error: fileview does not show private transcripts. Use fileread or the file browser.";
 
   const AuthContext& ctx = currentAuthContext();
   // existsGuarded gates by canRead — combines the previous canRead +
@@ -1092,8 +1118,14 @@ const char* cmd_fileread(const String& argsInput) {
   if (requireQuotedPath(a, 0, path) != nullptr)
     return "{\"success\":false,\"error\":\"path must be a quoted token\"}";
   const bool privateTranscript = filePathIsPrivateTranscript(path);
-  long offset = a.has(1) ? a.argInt(1, 0) : 0;
-  long reqLen = a.has(2) ? a.argInt(2, 0) : 0;
+  // A given offset or length has to be a whole number: junk is refused, not
+  // read as 0. A negative offset and one past the end are still clamped below.
+  long offset = 0;
+  long reqLen = 0;
+  if ((a.has(1) && !parseIntArg(a.arg(1), offset)) ||
+      (a.has(2) && !parseIntArg(a.arg(2), reqLen))) {
+    return "Error: offset and length must be whole numbers. Usage: fileread \"<path>\" [offset] [len] [b64|bin].";
+  }
   bool forceB64 = false;
   for (int i = 3; i < a.count(); i++) if (a.arg(i) == "b64") forceB64 = true;
 #if ENABLE_BLUETOOTH
@@ -1229,6 +1261,26 @@ const char* cmd_fileread(const String& argsInput) {
   return s_readJson.c_str();
 }
 
+// True when `text` is base64 as base64Decode() reads it without dropping
+// anything: only alphabet characters, at most two '=' and only at the end, and
+// a count of alphabet characters that decodes to whole bytes (padded or not).
+// An empty chunk is valid.
+static bool base64ChunkIsValid(const String& text) {
+  size_t symbols = 0, padding = 0;
+  for (size_t i = 0; i < text.length(); i++) {
+    const char c = text[i];
+    if (c == '=') {
+      padding++;
+      continue;
+    }
+    const bool symbol = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                        (c >= '0' && c <= '9') || c == '+' || c == '/';
+    if (!symbol || padding > 0) return false;  // foreign character, or text after '='
+    symbols++;
+  }
+  return padding <= 2 && symbols % 4 != 1;
+}
+
 // Chunked, permission-guarded file write for the companion app. BLE inbound is
 // capped at one ~512-byte command per frame with no reassembly, so the app
 // uploads a file as a sequence of small base64 chunks: offset 0 truncates/creates,
@@ -1248,7 +1300,11 @@ const char* cmd_filewrite(const String& argsInput) {
   long offset = a.argInt(1, -1);
   String b64 = a.arg(2);
   bool isFinal = false;
-  for (int i = 3; i < a.count(); i++) if (a.arg(i) == "final") isFinal = true;
+  for (int i = 3; i < a.count(); i++) {
+    // A mistyped `final` would skip the post-save hooks without a word.
+    if (a.arg(i) != "final") return "Error: Unknown option. Use final after the chunk to finish the file.";
+    isFinal = true;
+  }
 
   if (offset < 0) {
     snprintf(respBuf, sizeof(respBuf), "{\"success\":false,\"error\":\"Bad offset\"}");
@@ -1265,6 +1321,10 @@ const char* cmd_filewrite(const String& argsInput) {
     return respBuf;
   }
 
+  // A damaged chunk is refused before the file is opened: offset 0 truncates it.
+  if (!base64ChunkIsValid(b64)) {
+    return "Error: Chunk is not valid base64. Send the chunk again from the same offset.";
+  }
   String bytes = base64Decode(b64);
   // No artificial size ceiling — a BLE upload streams one append at a time and never buffers the
   // whole file, so the only real limit is free storage (same policy as the web upload). The app

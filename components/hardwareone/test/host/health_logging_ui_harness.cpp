@@ -186,7 +186,7 @@ static String redactOutputForLog(const String& value) { return value; }
 static void broadcastOutput(const String& value, const CommandContext&) { broadcasts.emplace_back(value.c_str()); }
 
 enum G2RingDesiredState { G2_RING_PRESERVE, G2_RING_OFF, G2_RING_ON };
-enum { G2_RING_ERR_NONE, G2_RING_ERR_FEATURE_UNSUPPORTED };
+enum { G2_RING_ERR_NONE, G2_RING_ERR_FEATURE_UNSUPPORTED, G2_RING_ERR_QUEUE_FULL };
 struct G2RingControlStatus {
   bool protocolProfileKnown = true;
   int lowPowerLastError = G2_RING_ERR_NONE, healthLastError = G2_RING_ERR_NONE;
@@ -564,7 +564,18 @@ int main() {
   CHECK(registryExecute(serial, "ring history", out) && out == "OK: R1 typed history refresh queued");
   CHECK(ringChanges.empty() && ringMutations == mutationsBefore + 2);
   ringAccepted = false;
-  CHECK(!registryExecute(serial, "ring control refresh", out) && out == "Error: ring control refresh not queued");
+  CHECK(!registryExecute(serial, "ring control refresh", out) &&
+        out == "Error: Ring control refresh not queued: the ring is not connected or its setup is not "
+               "finished. Run openring, then retry.");
+  // The two refusals with their own reason: a profile without the low-power
+  // read, and a full ring queue.
+  ringStatus.lowPowerLastError = G2_RING_ERR_FEATURE_UNSUPPORTED;
+  CHECK(!registryExecute(serial, "ring control refresh", out) &&
+        out == "Error: Low-power status is not supported on the active ring profile, nothing was sent.");
+  ringStatus.lowPowerLastError = G2_RING_ERR_QUEUE_FULL;
+  CHECK(!registryExecute(serial, "ring control refresh", out) &&
+        out == "Error: Ring control refresh not queued: the ring is busy. Retry in a moment.");
+  ringStatus.lowPowerLastError = G2_RING_ERR_NONE;
   ringAccepted = true;
   audit.clear();
   // Only the registry's text is an admin refusal (403); any other refusal is

@@ -49,7 +49,12 @@ window._settingsTarget = 'local';
 // /api/bond/exec (which routes through the bond session to the worker) and
 // unwraps the JSON envelope to return the same plain-text shape — callers
 // don't need to know which path was taken.
-window.postSettingsCli = function(cmd) {
+// A bonded command that was sent has no answer yet: it rejects with
+// e.pending set and the request id in e.reqId.
+// keepRefusal: a command the device refused (HTTP 400, or success:false with
+// a result in bonded mode) resolves to its reply text, which holds the reason,
+// instead of rejecting. For a caller that shows that reason.
+window.postSettingsCli = function(cmd, keepRefusal) {
   if (window._settingsTarget === 'bonded') {
     return hw.postForm('/api/bond/exec', { cmd: cmd })
     .then(function(r) { return r.json(); })
@@ -57,10 +62,27 @@ window.postSettingsCli = function(cmd) {
       // /api/bond/exec returns {success, result}; collapse to a string so
       // callers see the same plain-text contract as /api/cli.
       if (!j || !j.success) {
+        if (keepRefusal && j && j.result) return j.result;
         var msg = (j && (j.result || j.error)) || 'bond command failed';
         throw new Error(msg);
       }
+      if (j.pending) {
+        // Sent, and nothing more is known here: the bonded device answers
+        // later in the message history. Rejects so that no caller reports
+        // the command as done.
+        var sent = new Error('Sent to the bonded device, not confirmed (request ' + j.reqId + ').');
+        sent.pending = true;
+        sent.reqId = j.reqId;
+        throw sent;
+      }
       return j.result || '';
+    });
+  }
+  if (keepRefusal) {
+    return hw.postForm('/api/cli', { cmd: cmd })
+    .then(function(r) {
+      if (!r.ok && r.status !== 400) throw new Error('HTTP ' + r.status);
+      return r.text();
     });
   }
   return hw.postFormText('/api/cli', { cmd: cmd });
@@ -121,15 +143,25 @@ window.sendSequential = function(cmds, onDone, onFail) {
 
     var results = (j && Array.isArray(j.results)) ? j.results : [];
     var firstError = null;
-    for (var i = 0; i < results.length; i++) {
-      var out = String(results[i] || '');
-      var low = out.toLowerCase();
-      if (low.indexOf('unknown command') >= 0 ||
-          low.indexOf('error:') >= 0 ||
-          low.indexOf('failed') >= 0 ||
-          low.indexOf('not found') >= 0) {
-        firstError = { index: i, output: out };
-        break;
+    if (j && Array.isArray(j.failed)) {
+      // The endpoint lists the slots the executor reported as failed.
+      if (j.failed.length) {
+        firstError = { index: j.failed[0], output: String(results[j.failed[0]] || '') };
+      }
+    } else {
+      // A reply without that list (a bonded peer, older firmware) is judged
+      // by its text.
+      for (var i = 0; i < results.length; i++) {
+        var out = String(results[i] || '');
+        var low = out.toLowerCase();
+        if (low.indexOf('unknown command') >= 0 ||
+            low.indexOf('error:') >= 0 ||
+            low.indexOf('usage:') === 0 ||
+            low.indexOf('failed') >= 0 ||
+            low.indexOf('not found') >= 0) {
+          firstError = { index: i, output: out };
+          break;
+        }
       }
     }
 
@@ -1657,7 +1689,7 @@ function loadNotifPolicy() {
      keep the accurate message for THAT case only. The old code showed it for
      every failure, which is why a real delivery bug read as an auth problem. */
   .catch(function(e) {
-    var msg = (e && e.message && e.message.indexOf('403') !== -1)
+    var msg = (e && (e.status === 403 || e.message === 'HTTP 403'))
       ? 'Not available (admin access required).'
       : 'Error: ' + (e && e.message ? e.message : 'unknown');
     hw.$('notif-policy-list').textContent = msg;
@@ -2710,16 +2742,18 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
       console.log('[SETTINGS] scanNetworks called');
       var container = hw.$('wifi-scan-results');
       container.innerHTML = 'Scanning...';
-      postSettingsCli('wifiscan json')
+      postSettingsCli('wifiscan json', true)
       .then(function(txt) {
         console.log('[SETTINGS] WiFi scan result length:', (txt||'').length);
-        var data = [], scanError = '';
+        var data = [], scanError = '', refusal = '';
         try {
           var raw = JSON.parse(txt || '{}');
           data = Array.isArray(raw) ? raw : (raw && raw.networks) || [];
           scanError = (!Array.isArray(raw) && raw && raw.error) ? String(raw.error) : '';
         } catch(_) {
+          // A scan the device refused replies with its reason as text.
           data = [];
+          refusal = String(txt || '');
         }
         if (!Array.isArray(data)) {
           data = [];
@@ -2742,7 +2776,9 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
         if (hiddenCount > 0) {
           html += '<div style="color:var(--panel-fg);font-size:0.85rem;margin-top:4px">' + hiddenCount + ' hidden network' + (hiddenCount > 1 ? 's' : '') + ' detected</div>';
         }
-        if (scanError) {
+        if (refusal) {
+          html += '<div style="color:#dc3545">' + escapeUserHtml(refusal) + '</div>';
+        } else if (scanError) {
           html += '<div style="color:#dc3545">Scan ' + escapeUserHtml(scanError) + '; retry shortly.</div>';
         } else if (visible.length === 0) {
           html += '<div style="color:var(--panel-fg)">No networks found.</div>';
@@ -2968,9 +3004,11 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
       if (!username) { hwAlert('Enter a username'); return; }
       if (pass.length < 6) { hwAlert('Password must be at least 6 characters'); return; }
       if (pass !== pass2) { hwAlert('Passwords do not match'); return; }
+      // The command line quotes both fields and has no escape for a quote.
+      if (username.indexOf('"') >= 0 || pass.indexOf('"') >= 0) { hwAlert('Username and password cannot contain a double quote (")'); return; }
       var roleSel = hw.$('add-user-role');
       var role = (roleSel && roleSel.value) ? roleSel.value : 'user';
-      var cmd = 'useradd ' + username + ' ' + pass + ' ' + (mustCh ? '1' : '0') + ' ' + role;
+      var cmd = 'useradd "' + username + '" "' + pass + '" ' + (mustCh ? '1' : '0') + ' ' + role;
       postSettingsCli(cmd)
         .then(function(t) {
           if (t && t.indexOf('Error') >= 0) {
@@ -3009,7 +3047,9 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
       if (!username) { hwAlert('Username required'); return; }
       if (pass.length < 6) { hwAlert('Password must be at least 6 characters'); return; }
       if (pass !== pass2) { hwAlert('Passwords do not match'); return; }
-      var cmd = 'userresetpassword ' + username + ' ' + pass + ' ' + (mustCh ? '1' : '0');
+      // The command line quotes both fields and has no escape for a quote.
+      if (username.indexOf('"') >= 0 || pass.indexOf('"') >= 0) { hwAlert('Username and password cannot contain a double quote (")'); return; }
+      var cmd = 'userresetpassword "' + username + '" "' + pass + '" ' + (mustCh ? '1' : '0');
       postSettingsCli(cmd)
         .then(function(t) {
           if (t && t.indexOf('Error') >= 0) {
@@ -3451,6 +3491,11 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
                              r >= R.user ? ' (User)' : ' (Guest)');
           sel.appendChild(opt);
         });
+      })
+      .catch(function() {
+        /* The list could not be read (the device refused or did not answer). */
+        var sel = hw.$('usersync-user');
+        if (sel) sel.innerHTML = '<option value="">Users unavailable</option>';
       });
     };
     

@@ -1644,14 +1644,8 @@ const char* cmd_bleautoreconnect(const String& argsInput) {
   const BlePeerSpec* p = bleFindPeerByName(name.c_str());
   if (!p) {
     snprintf(buf, sizeof(buf),
-             "[BLE] Unknown peer '%s'. Use `blepeers` to list.",
+             "Error: Unknown peer '%s'. Run blepeers for the peer names.",
              name.c_str());
-    return buf;
-  }
-  if (!p->connectable) {
-    snprintf(buf, sizeof(buf),
-             "[BLE] Peer '%s' is metadata-only (no connect implemented)",
-             p->name);
     return buf;
   }
 
@@ -1675,6 +1669,18 @@ const char* cmd_bleautoreconnect(const String& argsInput) {
   if (on < 0) {
     snprintf(buf, sizeof(buf),
              "Usage: bleautoreconnect %s [on|off]", p->name);
+    return buf;
+  }
+  // The saved state above is readable for every peer; only a peer with
+  // connect support can have it changed. That is a property of the registered
+  // spec, not of an open link: the phone starts with the built-in spec (no
+  // connect ops) and gets the pipe's spec when the stack comes up, in a build
+  // that has the phone link. openble exists in every Bluetooth build.
+  if (!p->connectable) {
+    snprintf(buf, sizeof(buf),
+             "Error: Peer '%s' has no connect support yet, so auto-reconnect was not changed. "
+             "Run openble and retry. A build without the phone link cannot set it.",
+             p->name);
     return buf;
   }
   if (!on) {
@@ -1728,14 +1734,15 @@ const char* cmd_bleautoreconnect(const String& argsInput) {
         (void)requestSettingsPersist();
       }
       snprintf(buf, sizeof(buf),
-               "[BLE] %s auto-reconnect NOT enabled — owner authority is "
-               "unavailable (log in and retry, or create the device owner first)",
+               "Error: %s auto-reconnect not enabled: no owner authority. "
+               "Log in and retry, or create the device owner first.",
                p->displayName ? p->displayName : p->name);
       return buf;
     }
     if (!config.applied) {
       snprintf(buf, sizeof(buf),
-               "[BLE] %s auto-reconnect update failed",
+               "Error: %s auto-reconnect not changed: the peer owner changed "
+               "during the command. Retry the command.",
                p->displayName ? p->displayName : p->name);
       return buf;
     }
@@ -1909,6 +1916,10 @@ const char* cmd_blepeers(const String& argsInput) {
     }
     doc["count"] = (int)gPeerCount;
     doc["hint"] = "to see a bonded peer's data, run 'bondstatus' (or 'bondrequestcap' for its capabilities)";
+    if (doc.overflowed()) return kCommandReplyOutOfMemory;
+    if (measureJson(doc) >= 1024) {
+      return "Error: Peer list too large for the reply. Run blepeers without json.";
+    }
     serializeJson(doc, getDebugBuffer(), 1024);
     return getDebugBuffer();
   }

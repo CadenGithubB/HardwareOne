@@ -495,6 +495,7 @@ esp_err_t handleWaypointsApi(httpd_req_t* req) {
     PSRAM_JSON_DOC(doc);
     
     if (action == "add") {
+      notes.trim();  // blank notes are no notes: "waypoint notes N" alone is a usage error
       float lat = latStr.toFloat();
       float lon = lonStr.toFloat();
       if (name.length() == 0 || latStr.length() == 0 || lonStr.length() == 0) {
@@ -505,20 +506,20 @@ esp_err_t handleWaypointsApi(httpd_req_t* req) {
         String addOut;
         bool ok = executeUnifiedWebCommand(req, ctx, addCmd, addOut);
         if (ok) {
-          // Tolerate the uniform "OK: " status-token stamp before the anchored parse.
-          addOut = String(commandReplyBody(addOut.c_str()));
-          // Parse returned index from "Added waypoint N: ..." output
-          int addedIdx = -1;
-          if (addOut.startsWith("Added waypoint ")) {
-            addedIdx = addOut.substring(15).toInt();
-          }
+          const int addedIdx = waypointAddedIndex(addOut.c_str());
           doc["success"] = true;
           if (addedIdx >= 0) doc["index"] = addedIdx;
           // If notes provided, set them via a second command
           if (notes.length() > 0 && addedIdx >= 0) {
             String notesCmd = "waypoint notes " + String(addedIdx) + " " + notes;
             String notesOut;
-            executeUnifiedWebCommand(req, ctx, notesCmd, notesOut);
+            if (!executeUnifiedWebCommand(req, ctx, notesCmd, notesOut)) {
+              doc["success"] = false;
+              doc["error"] = String("Waypoint added, notes not saved: ") + commandReplyReason(notesOut.c_str());
+            }
+          } else if (notes.length() > 0) {
+            doc["success"] = false;
+            doc["error"] = "Waypoint added, notes not saved: index unknown";
           }
         } else {
           doc["success"] = false;
@@ -539,6 +540,7 @@ esp_err_t handleWaypointsApi(httpd_req_t* req) {
       String cmdOut;
       bool ok = executeUnifiedWebCommand(req, ctx, "waypoint clearall", cmdOut);
       doc["success"] = ok;
+      if (!ok) doc["error"] = cmdOut.length() ? String(commandReplyReason(cmdOut.c_str())) : String("Command failed");
     } else if (action == "delete") {
       String cmdOut;
       bool ok = executeUnifiedWebCommand(req, ctx, "waypoint del " + indexStr, cmdOut);
@@ -553,6 +555,7 @@ esp_err_t handleWaypointsApi(httpd_req_t* req) {
       String cmdOut;
       bool ok = executeUnifiedWebCommand(req, ctx, "waypoint clear", cmdOut);
       doc["success"] = ok;
+      if (!ok) doc["error"] = cmdOut.length() ? String(commandReplyReason(cmdOut.c_str())) : String("Command failed");
     } else {
       doc["success"] = false;
       doc["error"] = "Unknown action";

@@ -34,8 +34,10 @@ void espnowSaturationTick();
 void espnowSaturationNoteAckRtt(uint32_t rttMs);
 
 // Prints a human-readable report via BROADCAST_PRINTF. Safe to call from the
-// CLI thread (atomically reads uint32_t counters; never writes).
-void espnowSaturationReport();
+// CLI thread (atomically reads uint32_t counters; never writes). Returns false
+// when there is no report: ESP-NOW not started, the sampler state not
+// available, or fewer than two samples in the window.
+bool espnowSaturationReport();
 
 // Clears the ring + the in-progress accumulators. Useful before a stress test
 // so window peaks/avgs reflect only the test, not boot warmup.
@@ -45,7 +47,7 @@ void espnowSaturationReset();
 
 inline void espnowSaturationTick() {}
 inline void espnowSaturationNoteAckRtt(uint32_t) {}
-inline void espnowSaturationReport() {}
+inline bool espnowSaturationReport() { return false; }
 inline void espnowSaturationReset() {}
 
 #endif

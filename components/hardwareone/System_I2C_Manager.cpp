@@ -365,18 +365,18 @@ void I2cDeviceManager::releaseBus(uint8_t busIdx) {
   xSemaphoreGive(mutex);
 }
 
-void I2cDeviceManager::performBusRecovery(uint8_t busIdx) {
+I2cBusRecovery I2cDeviceManager::performBusRecovery(uint8_t busIdx) {
   if (busIdx >= NUM_BUSES) busIdx = 0;
   if (!busInitialized[busIdx]) {
     WARN_I2CF("Bus recovery skipped: bus %u not initialized", busIdx);
-    return;
+    return I2cBusRecovery::NotInitialized;
   }
   TwoWire* wire = wires[busIdx];
   SemaphoreHandle_t mutex = busMutexes[busIdx];
   int sdaPin, sclPin;
   if (!busPinsFromSettings(busIdx, &sdaPin, &sclPin)) {
     ERROR_I2CF("Bus recovery skipped: bus %u pins invalid", busIdx);
-    return;
+    return I2cBusRecovery::PinsInvalid;
   }
 
   WARN_I2CF("Performing bus %u recovery (SDA=%d SCL=%d)", busIdx, sdaPin, sclPin);
@@ -392,14 +392,14 @@ void I2cDeviceManager::performBusRecovery(uint8_t busIdx) {
   if (!locked) {
     pollResume(busIdx);
     ERROR_I2CF("Bus %u recovery failed - couldn't acquire mutex", busIdx);
-    return;
+    return I2cBusRecovery::Busy;
   }
 
   if (busHasClients(busIdx)) {
     xSemaphoreGive(mutex);
     pollResume(busIdx);
     WARN_I2CF("Bus %u recovery refused: active client; stop camera first", busIdx);
-    return;
+    return I2cBusRecovery::InUse;
   }
 
   // 1. End the bus session
@@ -462,6 +462,7 @@ void I2cDeviceManager::performBusRecovery(uint8_t busIdx) {
   lastRecoveryMs[busIdx] = millis();
 
   INFO_I2CF("Bus %u recovery complete", busIdx);
+  return I2cBusRecovery::Done;
 }
 
 // Minimum gap between two error-driven recoveries of the same bus. The

@@ -215,6 +215,8 @@ static void llmCommandDone(bool ok, const char* result, void* userData) {
   char reason[sizeof(sCmdReplyReason)] = {0};
   if (commandReplyIsAdminRefusal(r)) {
     status = "admin required";
+  } else if (op == LLM_CMD_UNLOAD && strstr(r, "No model is loaded")) {
+    status = "no model loaded";   // the Unload row with nothing loaded
   } else if (!ok || commandReplyJsonFailed(r)) {
     status = (op == LLM_CMD_LOAD) ? "load failed" : "unload failed";
     // The backend's reason (a remote host's message, a missing model) is the

@@ -50,13 +50,29 @@ static int scrubs = 0;
   return execOk && !commandReplyIsFailure(out);
 }
 // Shared OLED feedback (OLED_UI.h, OLED_MessageText.h, oledCommandReplyText in
-// OLED_Utils.cpp): the admin gate's short form, else the reply, else the fallback.
+// OLED_Utils.cpp) for a refusal, as the device shows it: the admin gate's
+// short form, else the reply's reason (its "Error: " lead taken off) up to the
+// first line break, else the fallback.
 namespace oled_message { constexpr size_t kMessageBytes = 192; constexpr uint32_t kErrorDurationMs = 8000; }
 enum class OledUiIcon : uint8_t { NONE, INFO, WARNING, ERROR, SUCCESS, QUESTION };
 [[maybe_unused]] static void oledCommandReplyText(bool, const char* reply, const char*, const char* failText,
                                                   char* out, size_t outSize) {
-  if (reply && commandReplyIsAdminRefusal(reply)) std::snprintf(out, outSize, "Admin required");
-  else std::snprintf(out, outSize, "%s", (reply && reply[0]) ? reply : (failText ? failText : ""));
+  if (!reply) reply = "";
+  if (commandReplyIsAdminRefusal(reply)) {
+    std::snprintf(out, outSize, "Admin required");
+    return;
+  }
+  const char* reason = commandReplyReason(reply);
+  const size_t lineLength = std::strcspn(reason, "\r\n");
+  if (lineLength == 0) std::snprintf(out, outSize, "%s", failText ? failText : "");
+  else std::snprintf(out, outSize, "%.*s", (int)lineLength, reason);
+}
+// The toast for a refusal of `espnowremote` that leads with "Error": its reason,
+// first line only, as much as the toast text holds.
+static std::string shownReason(const char* reply) {
+  std::string reason = commandReplyReason(reply);
+  reason = reason.substr(0, reason.find_first_of("\r\n"));
+  return reason.substr(0, oled_message::kMessageBytes - 1);
 }
 [[maybe_unused]] static void oledToastShow(const char* message, uint32_t = 3000, OledUiIcon = OledUiIcon::NONE) { toasts.emplace_back(message); }
 static void secureClearString(String& text) { ++scrubs; text.clear(); }
@@ -251,15 +267,31 @@ int main() {
   expectSentAndClosed("files json \"/\"");
   CHECK(toasts.empty(), "a JSON acknowledgement shows no refusal");
 
-  // S3: every refusal the owner returns is shown as a refusal, including the
-  // ones the executor reports as done because they do not lead with "Error".
+  // S3: every refusal the owner returns is shown as a refusal: one that leads
+  // with "Error" as its reason (no "Error: " lead, first line), a usage or
+  // JSON one as the fixed text.
+  size_t errorRefusals = 0;
   for (size_t i = 0; i < sizeof(kRefusals) / sizeof(kRefusals[0]); i++) {
     beginCase("S3 owner refusal", ESPNOW_VIEW_REMOTE_FORM);
     execReply = kRefusals[i];
     sendForm("reboot");
     expectSentAndClosed("reboot");
-    CHECK(toasts.size() == 1 && toasts[0] == "Remote not sent", kRefusals[i]);
+    const bool isError = commandReplyIsError(kRefusals[i]);
+    if (isError) errorRefusals++;
+    const std::string shown = isError ? shownReason(kRefusals[i]) : "Remote not sent";
+    CHECK(toasts.size() == 1 && toasts[0] == shown, kRefusals[i]);
+    CHECK(toasts.size() == 1 && toasts[0].compare(0, 5, "Error") != 0 && !toasts[0].empty(),
+          "the toast does not repeat the error lead");
   }
+  CHECK(errorRefusals > 0, "the owner has refusals that lead with Error (the reason path is reached)");
+
+  // S3b: a refusal of more than one line shows its first line only.
+  beginCase("S3b two-line refusal", ESPNOW_VIEW_REMOTE_FORM);
+  execReply = "Error: Target device 'lab' not found or not paired.\nPair the device first.";
+  sendForm("reboot");
+  expectSentAndClosed("reboot");
+  CHECK(toasts.size() == 1 && toasts[0] == "Target device 'lab' not found or not paired.",
+        "a refusal of two lines toasts its reason up to the line break");
 
   // S4: the executor's admin gate.
   beginCase("S4 admin refusal", ESPNOW_VIEW_REMOTE_FORM);

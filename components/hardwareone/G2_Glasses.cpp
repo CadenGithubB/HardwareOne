@@ -8209,7 +8209,7 @@ static const char* g2HoldSim(const String& what, uint8_t src) {
                  /*profileBypass=*/true);
   } else if (what == "abort") {
     if (!g2HoldAbort(G2HoldReason::Sim, 'R')) {
-      return "G2 hold sim abort: no press was open";
+      return "Error: No sim press is open. Start one with 'g2hold sim press'.";
     }
   } else {
     return "Error: invalid arguments — Usage: g2hold sim <press [ring|right|left|unknown]|release|abort>";
@@ -25367,6 +25367,10 @@ static const char* cmd_g2connect(const String& argsInput) {
   CommandArgs ca(argsInput);
   String arg = ca.arg(0);
   arg.toLowerCase();
+  // An unknown word is refused before the role setting and the pair stamp.
+  const bool knownWord = arg.length() == 0 || arg == "auto" || arg == "left" ||
+                         arg == "right" || arg == "saved" || arg == "mac";
+  if (!knownWord) return "Usage: openg2 [left|right|auto|saved]";
 
   // `openg2` means "be a G2 central." Record client as the desired BLE role so
   // the loop's reconnect tick keeps the radio in client mode (and never yanks it
@@ -25385,13 +25389,24 @@ static const char* cmd_g2connect(const String& argsInput) {
   // Stamping eagerly means even if the actual BLE connect fails, we've
   // captured intent. Idempotent: helper no-ops if already owned.
   bleStampPairedByIfBlank(BLE_PEER_G2_GLASSES);
+  // Both temples already up: nothing to connect (the owner's 2026-11-18 rule).
+  // One temple up is a repair, so it still goes ahead.
+  if (g2PublishedPairConnected()) {
+    return "Error: The glasses are already connected. Close them first with closeg2 to reconnect.";
+  }
   // `openg2 saved` — boot/glasses "Reconnect G2" path: connect by persisted
   // peer MACs (no name scan). Same as g2ConnectSaved() used at boot.
   if (arg == "saved" || arg == "mac") {
     if (!g2ConnectSaved()) {
-      return gConnectTaskActive
-             ? "G2: connect already in progress — wait or use closeg2"
-             : "Error: G2: saved-MAC connect failed (no MACs / worker busy)";
+      if (gConnectTaskActive) return "Error: A glasses connect is already running. Watch it with g2status.";
+      // A connect is also refused while the glasses have no owner on this
+      // device (the stamp above found no user). Bluetooth is fine then.
+      BlePeerReconnectSnapshot peer;
+      if (blePeerReconnectSnapshot(BLE_PEER_G2_GLASSES, peer) && !peer.ownerAuthorityAvailable)
+        return "Error: G2 connect could not start: the glasses have no owner on this device. "
+               "Log in as an admin and run openg2 again.";
+      return "Error: G2 saved-MAC connect could not start: no saved glasses, or Bluetooth is busy. "
+             "Run openg2 to scan for them, or check blestatus and retry.";
     }
     return "G2: saved-MAC connect started in background — use g2status to watch";
   }
@@ -25401,9 +25416,13 @@ static const char* cmd_g2connect(const String& argsInput) {
   else if (arg == "right") eye = G2_EYE_RIGHT;
 
   if (!g2Connect(eye)) {
-    return gConnectTaskActive
-           ? "G2: connect already in progress — wait or use closeg2"
-           : "Error: G2: failed to start connect task";
+    if (gConnectTaskActive) return "Error: A glasses connect is already running. Watch it with g2status.";
+    BlePeerReconnectSnapshot peer;
+    if (blePeerReconnectSnapshot(BLE_PEER_G2_GLASSES, peer) && !peer.ownerAuthorityAvailable)
+      return "Error: G2 connect could not start: the glasses have no owner on this device. "
+             "Log in as an admin and run openg2 again.";
+    return "Error: G2 connect could not start. Check Bluetooth with blestatus, "
+           "wait a few seconds and run openg2 again.";
   }
   return "G2: scan/connect started in background — use g2status to watch";
 }
@@ -25415,6 +25434,13 @@ static const char* cmd_g2disconnect(const String& /*argsInput*/) {
   // goes with them — the per-temple GATT mirrors (~15 KB each), the control
   // owner, the session, page-swap, tap and notes workers. The ring, the phone
   // and the shared Bluetooth stack stay up; `closeble` turns Bluetooth off.
+  if (!isG2ClientInitialized() && !gConnectTaskActive) {
+    // Closed already (a stack close or `openconsole` did it without the
+    // user's stamp): the user's close still means "stay down until openg2",
+    // as closering does, and the reply is the not-running Error.
+    blePeerNoteUserDisconnect(BLE_PEER_G2_GLASSES);
+    return "Error: The glasses are not open. Open them with openg2; auto-reconnect stays off until then.";
+  }
   if (!g2Disconnect(/*userInitiated=*/true)) {
     return "Error: G2 disconnected, but a control/connect worker still owns temple runtime; retry closeg2";
   }
@@ -25634,9 +25660,13 @@ static const char* cmd_g2settings(const String& argsInput) {
   String sub = ca.arg(0); sub.toLowerCase();
   String val = ca.arg(1); val.toLowerCase();
   if (sub == "verbose") {
-    if (val == "on")       gG2SettingsVerbose = true;
-    else if (val == "off") gG2SettingsVerbose = false;
-    else                   gG2SettingsVerbose = !gG2SettingsVerbose;
+    if (val.length() == 0) {
+      gG2SettingsVerbose = !gG2SettingsVerbose;
+    } else {
+      const int b = parseBoolArg(val);
+      if (b < 0) return kCommandReplyNotOnOff;
+      gG2SettingsVerbose = (b == 1);
+    }
     return gG2SettingsVerbose
            ? "G2 settings verbose: ON (every field of every sid=0x09 push)"
            : "G2 settings verbose: OFF";
@@ -25644,9 +25674,30 @@ static const char* cmd_g2settings(const String& argsInput) {
   return "Error: invalid arguments — Usage: g2settings verbose [on|off]";
 }
 
+// The reply for a text, card or clear command the glasses did not take: the
+// cause the send path only traces. `lensSurface` is true for the commands that
+// go through g2ShowText / g2ClearDisplay, which an interactive lens page blocks.
+static const char* g2LensSendFailureReply(bool lensSurface, const char* otherwise) {
+  if (lensSurface && interactiveLensLeaseHeld()) {
+    return "Error: A lens page is using the display. Close it on the glasses and retry.";
+  }
+  if (!gR.connected && !gL.connected) {
+    return "Error: Glasses not connected. Run openg2 and retry.";
+  }
+  if (!((gR.connected && !gR.pluginDead) || (gL.connected && !gL.pluginDead))) {
+    return "Error: The glasses are not answering. Put them on or reconnect with openg2.";
+  }
+  return otherwise;
+}
+
+static constexpr char kG2ReplyTextNotTaken[] =
+    "Error: The glasses did not take the text. Check g2status and retry.";
+
 static const char* cmd_g2show(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  return g2ShowText(argsInput.c_str()) ? "G2: text sent" : "Error: G2: send failed";
+  if (argsInput.length() == 0) return "Usage: g2show <text>";
+  if (g2ShowText(argsInput.c_str())) return "G2: text sent";
+  return g2LensSendFailureReply(/*lensSurface=*/true, kG2ReplyTextNotTaken);
 }
 
 // Live-update probe cadence — read by Q13 (image-tile streaming) and Q14
@@ -25743,6 +25794,7 @@ static const char* cmd_g2liveloop(const String& argsInput) {
              gG2LiveLoopKeepAlive ? "ON" : "OFF");
     return out;
   }
+  if (sub.length() && sub != "status") return "Usage: g2liveloop keep [on|off]";
   // Status (no args, or 'status').
   snprintf(out, sizeof(out),
            "G2 live-loop: rate=%u ms, keep-alive=%s",
@@ -25902,8 +25954,16 @@ bool g2ShowEvenAiReplyDirect(const char* body) {
   return g2ShowEvenAiReplyDirect(nullptr, body);
 }
 
+// g2BuildEvenAiAsk and g2BuildEvenAiReply cut their text at this many bytes;
+// a longer text is refused here instead of shown cut short.
+static constexpr size_t kG2EvenAiTextMaxBytes = 250;
+static constexpr char kG2ReplyEvenAiTextTooLong[] =
+    "Error: Text is longer than 250 bytes. Shorten it and retry.";
+
 static const char* cmd_g2ai(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+  if (argsInput.length() == 0) return "Usage: g2ai <text>";
+  if (argsInput.length() > kG2EvenAiTextMaxBytes) return kG2ReplyEvenAiTextTooLong;
   // Default `g2ai <text>` uses the No-ASK pipeline so the lens shows just
   // the answer card with no phantom question heading. Verified on hardware
   // 2026-04-26 — ANALYSE alone transitions the FSM out of LISTEN so REPLY
@@ -25911,21 +25971,25 @@ static const char* cmd_g2ai(const String& argsInput) {
   // card with a separate heading panel.
   return g2ShowEvenAiReplyNoAsk(argsInput.c_str())
          ? "G2: AI reply sent (CTRL+ANALYSE+REPLY — no question panel)"
-         : "Error: G2: AI reply failed";
+         : g2LensSendFailureReply(/*lensSurface=*/false, kG2ReplyTextNotTaken);
 }
 
 static const char* cmd_g2ai_noask(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+  if (argsInput.length() == 0) return "Usage: g2ainoask <text>";
+  if (argsInput.length() > kG2EvenAiTextMaxBytes) return kG2ReplyEvenAiTextTooLong;
   return g2ShowEvenAiReplyNoAsk(argsInput.c_str())
          ? "G2: AI reply sent (CTRL+ANALYSE+REPLY — skip ASK)"
-         : "Error: G2: AI reply failed";
+         : g2LensSendFailureReply(/*lensSurface=*/false, kG2ReplyTextNotTaken);
 }
 
 static const char* cmd_g2ai_direct(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+  if (argsInput.length() == 0) return "Usage: g2aidirect <text>";
+  if (argsInput.length() > kG2EvenAiTextMaxBytes) return kG2ReplyEvenAiTextTooLong;
   return g2ShowEvenAiReplyDirect(argsInput.c_str())
          ? "G2: AI reply sent (CTRL+REPLY — original failing path)"
-         : "Error: G2: AI reply failed";
+         : g2LensSendFailureReply(/*lensSurface=*/false, kG2ReplyTextNotTaken);
 }
 
 // Push text into the LIVE native "Hey Even" session — the one the glasses open
@@ -26086,6 +26150,10 @@ static const char* cmd_g2evenai(const String& argsInput) {
   if (sub == "capabilities") {
     return "OK: EvenAI exchange-id-v1 verbs=askid,replyid,replypartid,replyendid,exitid legacy=fail-closed";
   }
+  if (sub.length() && sub != "status") {
+    return "Error: Unknown g2evenai verb. Use askid, replyid, replypartid, replyendid, "
+           "exitid, capabilities or status.";
+  }
   // bare / "status"
   EXT_RAM_BSS_ATTR static char buf[384];
   const G2EvenAiSessionState s = g2EvenAiSessionSnapshot();
@@ -26191,6 +26259,7 @@ static const char* cmd_g2protostats(const String& argsInput) {
 // mutation-capable sids that now have typed, firmware-gated senders, plus
 // 0x80 dev_config (documented in the reference's gotchas as having
 // non-terminally bricked a pair during RE work).
+#if ENABLE_G2_TESTSUITE   // wire-probe CLI: reverse-engineering tooling, not a user feature
 static int parseHexNibble(char c) {
   if (c >= '0' && c <= '9') return c - '0';
   if (c >= 'a' && c <= 'f') return 10 + (c - 'a');
@@ -26211,7 +26280,6 @@ static size_t parseHexBytes(const char* s, uint8_t* out, size_t outCap) {
   return got;
 }
 
-#if ENABLE_G2_TESTSUITE   // wire-probe CLI: reverse-engineering tooling, not a user feature
 static const char* cmd_g2probe(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   EXT_RAM_BSS_ATTR static char ret[160];
@@ -26223,20 +26291,35 @@ static const char* cmd_g2probe(const String& argsInput) {
            "           g2probe 07 10 6A07080010A0012000 -- EvenAI CONFIG voice=0,speed=160,duplex=0\n"
            "  Mutation sids 01/03/04/09 and dev_config sid=80 are blocked; use typed commands.";
   }
-  const uint8_t sid = (uint8_t)strtoul(ca.arg(0).c_str(), nullptr, 16);
-  const uint32_t cmd = (uint32_t)ca.argInt(1, 0);
+  // sid is one or two hexadecimal digits without a 0x lead (07, 80, e0).
+  const String& sidText = ca.arg(0);
+  const int sidHi = sidText.length() == 2 ? parseHexNibble(sidText.charAt(0)) : 0;
+  const int sidLo = (sidText.length() == 1 || sidText.length() == 2)
+                        ? parseHexNibble(sidText.charAt(sidText.length() - 1)) : -1;
+  if (sidHi < 0 || sidLo < 0) {
+    return "Error: sid must be 1 or 2 hex digits. Example: g2probe 07 9.";
+  }
+  const uint8_t sid = (uint8_t)((sidHi << 4) | sidLo);
+  uint32_t cmd = 0;
+  if (!parseIntArg(ca.arg(1), 0, 0x7FFFFFFF, cmd)) {
+    return "Error: cmd must be a whole number from 0 to 2147483647. Example: g2probe 07 9.";
+  }
 
   if (sid == 0x01 || sid == 0x03 || sid == 0x04 || sid == 0x09 ||
       sid == 0x80) {
     return "Error: G2: probe denied — mutation-capable sid; use the typed firmware/generation-gated command.";
   }
 
-  uint8_t body[200];
+  // One byte more than the limit, so a longer body is seen and not cut short.
+  uint8_t body[201];
   size_t bodyLen = 0;
   if (ca.count() >= 3) {
     String hex = ca.arg(2);
     bodyLen = parseHexBytes(hex.c_str(), body, sizeof(body));
     if (bodyLen == SIZE_MAX) return "Error: G2: probe — bad hex body (need pairs of nibbles)";
+    if (bodyLen > 200) {
+      return "Error: G2: probe body is longer than 200 bytes. Send a shorter body.";
+    }
   }
 
   // Build pb: f1 cmd, f2 magic=250, then raw body.
@@ -26319,7 +26402,7 @@ static const char* cmd_g2devcfg(const String& argsInput) {
                           env, sizeof(env));
     cmd = G2_DEVCFG_CMD_AUTHENTICATION;
   } else if (sub == "role") {
-    if (ca.count() < 2) return "G2 devcfg: usage — g2devcfg role <both|right|left>";
+    if (ca.count() != 2) return "Usage: g2devcfg role <both|right|left>";
     String r = ca.arg(1); r.toLowerCase();
     uint8_t roleVal;
     if (r == "both")       roleVal = G2_DEVCFG_ROLE_BOTH;
@@ -26330,23 +26413,35 @@ static const char* cmd_g2devcfg(const String& argsInput) {
                                     roleVal, env, sizeof(env));
     cmd = G2_DEVCFG_CMD_PIPE_ROLE_CHANGE;
   } else if (sub == "time") {
-    int32_t tzQ = (ca.count() >= 2) ? (int32_t)ca.argInt(1, 0) : 0;
+    if (ca.count() > 2) return "Usage: g2devcfg time [tzQuarterHours]";
+    int32_t tzQ = 0;
+    if (ca.count() >= 2 && !parseIntArg(ca.arg(1), -56, 56, tzQ)) {
+      return "Error: tz must be a whole number of quarter-hours from -56 to 56. "
+             "Example: g2devcfg time -32.";
+    }
     uint32_t now = (uint32_t)time(nullptr);
     n = g2BuildDevCfgTimeSync(allocSeq(), G2_MAGIC_DEVCFG_TIME_SYNC,
                               now, tzQ, env, sizeof(env));
     cmd = G2_DEVCFG_CMD_TIME_SYNC;
     if (n == 0) {
+      // tz was range-checked above, so the builder refused the timestamp.
       snprintf(ret, sizeof(ret),
-               "G2 devcfg: time rejected (ts=%u, tzQ=%d) — RTC unsynced or tz out of ±56 quarter-hours",
-               (unsigned)now, (int)tzQ);
+               "Error: G2 devcfg: time not sent, the device clock is not set (ts=%u). "
+               "Set the clock, then run g2devcfg time again.",
+               (unsigned)now);
       return ret;
     }
   } else if (sub == "ring") {
-    if (ca.count() < 3) return "G2 devcfg: usage — g2devcfg ring <mac> <name>";
+    if (ca.count() != 3) {
+      return "Usage: g2devcfg ring <mac> <name>  (quote a name with spaces)";
+    }
+    // Exactly the two documented forms: aa:bb:cc:dd:ee:ff or aabbccddeeff.
     uint8_t macBle[6];
-    String macStr = ca.arg(1);
-    size_t macLen = parseHexBytes(macStr.c_str(), macBle, sizeof(macBle));
-    if (macLen != 6) return "Error: G2 devcfg: ring mac must be 6 bytes (aa:bb:cc:dd:ee:ff)";
+    const String& macStr = ca.arg(1);
+    if ((macStr.length() != 17 && macStr.length() != 12) ||
+        !macParse(macStr.c_str(), macBle)) {
+      return "Error: G2 devcfg: ring mac must be 6 bytes (aa:bb:cc:dd:ee:ff)";
+    }
     String name = ca.arg(2);
     n = g2BuildDevCfgRingConnect(allocSeq(), G2_MAGIC_DEVCFG_RING_CONNECT,
                                  /*connect=*/true,
@@ -26540,12 +26635,14 @@ static const char* cmd_g2glasses(const String& argsInput) {
       // Keep this request's response even if an async push replaces the cache
       // before formatting. Only its correlated full reply can supply default OFF.
       if (!g2SettingsReadFresh(*arm, generation, &echo, &fullWearProfile))
-        return "G2 glasses: no matching fresh RIGHT settings response";
+        return "Error: G2 glasses: the glasses did not answer the settings read. "
+               "Run g2glasses refresh again.";
       echoMs = millis();
     } else {
       g2SettingsPrimeIfNeeded(*arm, generation);
       if (!g2SettingsEchoSnapshot(&echo, &echoMs, generation, &fullWearProfile))
-        return "G2 glasses: no settings snapshot yet — glasses did not answer the read";
+        return "Error: G2 glasses: no settings snapshot yet, the glasses did not answer the read. "
+               "Run g2glasses refresh.";
     }
     BROADCAST_PRINTF("G2 glasses settings (device-reported, %lu ms old):",
                      (unsigned long)(millis() - echoMs));
@@ -26578,12 +26675,13 @@ static const char* cmd_g2glasses(const String& argsInput) {
     if (sub == kG2GlassesKnobs[i].name) { knob = &kG2GlassesKnobs[i]; break; }
   }
   if (!knob) {
-    BROADCAST_PRINTF("G2 glasses: unknown setting '%s'. Available:", sub.c_str());
-    for (size_t i = 0; i < kG2GlassesKnobCount; i++) {
-      BROADCAST_PRINTF("  g2glasses %s", kG2GlassesKnobs[i].help);
+    // The names go into the reply itself: most callers see only the reply.
+    size_t used = (size_t)snprintf(ret, sizeof(ret), "Error: G2 glasses: unknown setting. Use ");
+    for (size_t i = 0; i < kG2GlassesKnobCount && used < sizeof(ret); i++) {
+      used += (size_t)snprintf(ret + used, sizeof(ret) - used, "%s, ", kG2GlassesKnobs[i].name);
     }
-    BROADCAST_PRINTF("  g2glasses show | refresh");
-    return "Error: G2 glasses: unknown setting (see list above)";
+    if (used < sizeof(ret)) snprintf(ret + used, sizeof(ret) - used, "show or refresh.");
+    return ret;
   }
 
   // No value given → report just this knob.
@@ -26591,12 +26689,16 @@ static const char* cmd_g2glasses(const String& argsInput) {
     uint8_t cur = 0;
     G2SettingsEcho echo;
     bool fullWearProfile = false;
-    if (g2SettingsEchoSnapshot(&echo, nullptr, generation, &fullWearProfile) &&
-        g2GlassesEchoValue(echo, *knob, &cur, fullWearProfile)) {
+    const bool haveEcho =
+        g2SettingsEchoSnapshot(&echo, nullptr, generation, &fullWearProfile);
+    if (haveEcho && g2GlassesEchoValue(echo, *knob, &cur, fullWearProfile)) {
       if (knob->isBool)
         snprintf(ret, sizeof(ret), "G2 glasses: %s = %s", knob->name, cur ? "on" : "off");
       else
         snprintf(ret, sizeof(ret), "G2 glasses: %s = %u", knob->name, (unsigned)cur);
+    } else if (!haveEcho && knob->echoField != 0) {
+      // The setting has a read-back, but nothing has been read yet.
+      return "Error: G2 glasses: no settings snapshot yet. Run g2glasses refresh first.";
     } else {
       snprintf(ret, sizeof(ret),
                "G2 glasses: %s — not reported by this firmware; set it to see the ack",
@@ -26696,7 +26798,8 @@ static const char* cmd_g2glasses(const String& argsInput) {
   }
   g2SettingsAckClear();
   if (!g2TempleReadyAtGeneration(*arm, generation))
-    return "G2 glasses: connection changed after send; result unconfirmed";
+    return "Error: G2 glasses: connection changed after send; result unconfirmed. "
+           "Reconnect and run g2glasses refresh to check.";
 
   // A correlated readback can confirm a no-op even when firmware omits its
   // write ACK. Missing scalars remain unknown except wear's qualified full
@@ -26704,21 +26807,66 @@ static const char* cmd_g2glasses(const String& argsInput) {
   G2SettingsEcho afterEcho;
   bool fullWearProfile = false;
   uint8_t observed = 0;
-  const bool haveAfter = g2SettingsReadFresh(*arm, generation, &afterEcho, &fullWearProfile) &&
+  // readOk: the glasses answered this read. haveAfter: the answer also carries
+  // the setting. The two differ when the glasses leave the field out.
+  const bool readOk = g2SettingsReadFresh(*arm, generation, &afterEcho, &fullWearProfile);
+  const bool haveAfter = readOk &&
       g2GlassesEchoValue(afterEcho, *knob, &observed, candidateWear && fullWearProfile);
   if (!g2TempleReadyAtGeneration(*arm, generation))
-    return "G2 glasses: connection changed during readback; result unconfirmed";
+    return "Error: G2 glasses: connection changed during readback; result unconfirmed. "
+           "Reconnect and run g2glasses refresh to check.";
   if (haveAfter && observed == value) {
     snprintf(ret, sizeof(ret), "G2 glasses: %s = %u confirmed by fresh RIGHT readback%s",
              knob->name, (unsigned)value, acked ? " and matching ACK" : " (no matching ACK)");
+  } else if (haveAfter && acked && knob->innerField == G2_SETW_F_BRIGHTNESS &&
+             knob->leafField == G2_SETW_BRIGHT_F_LEVEL &&
+             G2_ECHO_HAS(afterEcho, 18) && afterEcho.autoBrightness) {
+    // The glasses took the level (matching ACK). With auto brightness on they
+    // move it again on their own, so another level in the readback is not a
+    // failed write.
+    snprintf(ret, sizeof(ret),
+             "G2 glasses: %s = %u acked by RIGHT glasses. Fresh readback is %u: "
+             "auto brightness is on and moves the level by itself.",
+             knob->name, (unsigned)value, (unsigned)observed);
   } else if (haveAfter) {
-    snprintf(ret, sizeof(ret), "G2 glasses: %s requested %u, fresh readback is %u%s; requested value unconfirmed",
-             knob->name, (unsigned)value, (unsigned)observed, acked ? " despite matching ACK" : "");
+    // The glasses hold another value than the one written. headangle is the
+    // exception: it is a raw value the glasses may restore as another number,
+    // so its differing readback stays a plain report.
+    const bool rawAngle = knob->innerField == G2_SETW_F_HEAD_UP &&
+                          knob->leafField == G2_SETW_HEADUP_F_ANGLE;
+    snprintf(ret, sizeof(ret),
+             "%sG2 glasses: %s requested %u, fresh readback is %u%s; requested value unconfirmed%s",
+             rawAngle ? "" : "Error: ", knob->name, (unsigned)value, (unsigned)observed,
+             acked ? " despite matching ACK" : "",
+             rawAngle ? "" : ". Run g2glasses refresh to check.");
   } else if (acked) {
     snprintf(ret, sizeof(ret), "G2 glasses: %s = %u acked by RIGHT glasses; fresh readback unavailable",
              knob->name, (unsigned)value);
-  } else {
+  } else if (knob->echoField == 0) {
+    // No read-back exists for this setting, and the glasses do not acknowledge
+    // a value they already have, so this is also the answer for a no-op.
     snprintf(ret, sizeof(ret), "G2 glasses: %s = %u sent without matching ACK or fresh readback; unconfirmed",
+             knob->name, (unsigned)value);
+  } else if (readOk && value == 0) {
+    // The glasses answered the read and left the setting out, which is how they
+    // report off or 0, and they do not acknowledge a value they already have.
+    // So this is the answer for writing off or 0 again. It is not a failure.
+    snprintf(ret, sizeof(ret),
+             "G2 glasses: %s = %u sent, unconfirmed. No matching ACK came and the fresh readback "
+             "does not report this setting. The glasses do not acknowledge a value they already hold.",
+             knob->name, (unsigned)value);
+  } else if (readOk) {
+    // The read was answered and left the setting out, which reports off or 0,
+    // and the value written is not 0.
+    snprintf(ret, sizeof(ret),
+             "Error: G2 glasses: %s = %u unconfirmed. No matching ACK came and the fresh readback does "
+             "not report this setting, which is how the glasses report off or 0. Retry the command.",
+             knob->name, (unsigned)value);
+  } else {
+    // The read was not answered.
+    snprintf(ret, sizeof(ret),
+             "Error: G2 glasses: %s = %u sent without matching ACK or fresh readback; unconfirmed. "
+             "Run g2glasses refresh to check.",
              knob->name, (unsigned)value);
   }
   return ret;
@@ -26800,10 +26948,13 @@ static const char* cmd_g2control(const String& argsInput) {
       return "Error: Usage: g2control <headup|notifications> <preserve|off|on>";
     String value = ca.arg(1); value.toLowerCase();
     G2ControlDesired desired;
-    if (value == "preserve") desired = G2_CONTROL_PRESERVE;
-    else if (value == "off") desired = G2_CONTROL_OFF;
-    else if (value == "on") desired = G2_CONTROL_ON;
-    else return "Error: G2 control value must be preserve|off|on";
+    if (value == "preserve") {
+      desired = G2_CONTROL_PRESERVE;
+    } else {
+      const int b = parseBoolArg(value);
+      if (b < 0) return "Error: G2 control value must be preserve|off|on";
+      desired = b ? G2_CONTROL_ON : G2_CONTROL_OFF;
+    }
 
     if (feature == "headup") {
       setSetting(gSettings.g2HeadUpDesired, (uint8_t)desired);
@@ -26878,6 +27029,8 @@ static const char* cmd_g2nativeconfig(const String& argsInput) {
     if (ca.count() < 2)
       return "Error: Usage: g2nativeconfig menu <id,id,...> (1..10 numeric IDs)";
     String idsText = ca.arg(1);
+    if (idsText.endsWith(","))
+      return "Error: G2 native-config menu IDs must be comma-separated unsigned integers";
     uint32_t ids[10];
     size_t count = 0;
     int from = 0;
@@ -26890,9 +27043,10 @@ static const char* cmd_g2nativeconfig(const String& argsInput) {
       for (size_t i = 0; numeric && i < token.length(); i++) {
         if (!isdigit((unsigned char)token[i])) numeric = false;
       }
-      if (!numeric)
+      uint32_t id = 0;
+      if (!numeric || !parseIntArg(token, id))
         return "Error: G2 native-config menu IDs must be comma-separated unsigned integers";
-      ids[count++] = (uint32_t)strtoul(token.c_str(), nullptr, 10);
+      ids[count++] = id;
       if (comma < 0) { from = (int)idsText.length(); break; }
       from = comma + 1;
     }
@@ -26937,9 +27091,12 @@ static const char* cmd_g2imgprobe(const String& argsInput) {
 
   size_t sizeBytes = 1024;
   if (ca.count() >= 1) {
-    int v = ca.argInt(0, (int)sizeBytes);
-    if (v > 0 && v <= 4096) sizeBytes = (size_t)v;
-    else return "Error: G2: imgprobe — size must be 1..4096 bytes";
+    int v = 0;
+    if (!parseIntArg(ca.arg(0), 1, 4096, v)) {
+      return "Error: G2: imgprobe size must be a whole number from 1 to 4096. "
+             "Example: g2imgprobe 1024.";
+    }
+    sizeBytes = (size_t)v;
   }
 
   // Build the test pattern on the heap; 4 KB on stack would crowd the
@@ -27050,6 +27207,17 @@ static const char* cmd_g2conversate(const String& argsInput) {
   }
   if ((op == "stop" || op == "off") && ca.count() == 1) {
     portENTER_CRITICAL(&gConversateMux);
+    // Nothing running and nothing queued: stop has no session to end, and off
+    // has nothing to disable either (the owner's 2026-11-18 rule).
+    const bool idle = !gConversate.active() && gConversateRequest == 0;
+    const bool enabled = gConversate.enabled;
+    if (idle && (op == "stop" || !enabled)) {
+      portEXIT_CRITICAL(&gConversateMux);
+      if (op == "off") return "Error: Conversate is not enabled. Turn it on with 'g2conversate on'.";
+      return enabled
+          ? "Error: No Conversate session is running. To stop waiting for one, run 'g2conversate off'."
+          : "Error: No Conversate session is running. Start one with 'g2conversate on'.";
+    }
     // A later stop must not weaken an already queued explicit disable.
     if (op == "off" || gConversateRequest != -2)
       gConversateRequest = op == "off" ? -2 : -1;
@@ -27079,9 +27247,14 @@ static const char* cmd_g2conversate(const String& argsInput) {
   if (!g2ControlWorkerEnsure()) return "Error: G2 control worker unavailable";
   portENTER_CRITICAL(&gConversateMux);
   const bool busy = gConversate.active() || gConversateRequest != 0;
-  if (!busy) gConversateRequest = seconds ? int32_t(seconds) : -3;
+  // User-ended mode already on and idle: `on` would change nothing (the
+  // owner's 2026-11-18 rule). A timed test still replaces its limit.
+  const bool alreadyOn = !busy && seconds == 0 && gConversate.enabled &&
+                         gConversate.limitSeconds == 0;
+  if (!busy && !alreadyOn) gConversateRequest = seconds ? int32_t(seconds) : -3;
   portEXIT_CRITICAL(&gConversateMux);
   if (busy) return "Error: Conversate session/close/request active; use stop and wait for idle";
+  if (alreadyOn) return "Error: Conversate is already on. Turn it off first with 'g2conversate off' to restart it.";
   g2ControlWake();
   return seconds
       ? "G2 Conversate: timed test queued. Open Conversate; Skip & Start if offered. Reopen for another timed run. Use status to confirm."
@@ -27097,7 +27270,7 @@ static const char* cmd_g2terminal(const String& argsInput) {
 #if ENABLE_LOCAL_STT && ENABLE_LLM_BACKEND && ENABLE_LLM_SOURCE_HTTP
   if (op == "close") {
     gNativeTerminalMenuTicket.store(0, std::memory_order_release);
-    if (!g2NativeTerminalActive()) return "G2 Terminal is closed";
+    if (!g2NativeTerminalActive()) return "Error: G2 Terminal is not open. Open it with 'g2terminal open'.";
     gNativeTerminalSubmitGate.store(0, std::memory_order_release);
     gNativeTerminalReason.store("user-close", std::memory_order_release);
     gNativeTerminalCloseRequested.store(true, std::memory_order_release);
@@ -27112,7 +27285,9 @@ static const char* cmd_g2terminal(const String& argsInput) {
     return status;
   }
 #else
-  if (op == "status" || op == "close") return "G2 Terminal unavailable: this build needs local STT and HTTP source";
+  if (op == "status" || op == "close") {
+    return "Error: G2 Terminal is not in this build. It needs local STT and the HTTP agent source.";
+  }
 #endif
   return "Usage: g2terminal open | status | close";
 }
@@ -27123,9 +27298,12 @@ static const char* cmd_g2micon(const String& argsInput) {
   if (g2ConversateActive()) return "Error: native mic owned by Conversate; use g2conversate stop";
   EXT_RAM_BSS_ATTR static char ret[200];
   CommandArgs ca(argsInput);
-  String armArg = ca.count() > 0 ? ca.arg(0) : String("");
-  char first = armArg.length() > 0 ? armArg.charAt(0) : '\0';
-  bool preferLeft = !(first == 'r' || first == 'R');
+  String armArg = ca.arg(0);
+  armArg.toLowerCase();
+  bool preferLeft;
+  if (armArg.length() == 0 || armArg == "l" || armArg == "left") preferLeft = true;
+  else if (armArg == "r" || armArg == "right") preferLeft = false;
+  else return "Usage: g2micon [l|r]";
   G2Temple* arm = pickMicArm("g2micon", preferLeft);
   if (!arm) return "Error: G2 mic: no reachable temple";
 
@@ -27218,10 +27396,9 @@ static const char* cmd_g2micverbose(const String& argsInput) {
   EXT_RAM_BSS_ATTR static char ret[80];
   CommandArgs ca(argsInput);
   if (ca.count() > 0) {
-    String v = ca.arg(0);
-    char c = v.length() > 0 ? v.charAt(0) : '\0';
-    gMicProbeVerbose = (c == '1' || c == 'o' || c == 'O' ||
-                        c == 'y' || c == 'Y' || c == 't' || c == 'T');
+    const int b = parseBoolArg(ca.arg(0));
+    if (b < 0) return kCommandReplyNotOnOff;
+    gMicProbeVerbose = (b == 1);
   } else {
     gMicProbeVerbose = !gMicProbeVerbose;
   }
@@ -27251,6 +27428,9 @@ static const char* cmd_g2micrec(const String& argsInput) {
   CommandArgs ca(argsInput);
   String sub = ca.count() > 0 ? ca.arg(0) : String("");
   sub.toLowerCase();
+  if (sub.length() && sub != "start" && sub != "stop" && sub != "status") {
+    return "Usage: g2micrec start [\"path\"] | stop | status";
+  }
 
   ensureMicRecMutex();
   if (!gMicRecMutex || !gMicRecDrainMutex)
@@ -27286,7 +27466,9 @@ static const char* cmd_g2micrec(const String& argsInput) {
     if (!f || !*f) {
       delete f;
       xSemaphoreGive(gMicRecDrainMutex);
-      snprintf(ret, sizeof(ret), "G2 mic rec: failed to open %s", path.c_str());
+      snprintf(ret, sizeof(ret),
+               "Error: G2 mic rec: cannot open %s for writing. Check the path and the SD card.",
+               path.c_str());
       return ret;
     }
     // Reset the staging ring so a previous run's residue can't leak into
@@ -27315,7 +27497,7 @@ static const char* cmd_g2micrec(const String& argsInput) {
     xSemaphoreTake(gMicRecDrainMutex, portMAX_DELAY);
     if (!gMicRecFile) {
       xSemaphoreGive(gMicRecDrainMutex);
-      return "Error: G2 mic rec: not recording";
+      return "Error: G2 mic rec is not running. Start it with 'g2micrec start'.";
     }
     // Flush everything still staged before closing — this is the lossless
     // half of the 2026-08-10 rework. cmd_exec context: a generous FS wait is
@@ -27346,7 +27528,7 @@ static const char* cmd_g2micrec(const String& argsInput) {
 
   // status (default)
   if (xSemaphoreTake(gMicRecDrainMutex, pdMS_TO_TICKS(500)) != pdTRUE)
-    return "G2 mic rec: busy (drain in progress) — retry";
+    return "Error: G2 mic rec: busy writing to the card. Retry in a moment.";
   if (!gMicRecFile) {
     xSemaphoreGive(gMicRecDrainMutex);
     return "G2 mic rec: idle (use g2micrec start [\"path\"])";
@@ -27391,6 +27573,9 @@ static const char* cmd_g2micwav(const String& argsInput) {
   CommandArgs ca(argsInput);
   String sub = ca.count() > 0 ? ca.arg(0) : String("");
   sub.toLowerCase();
+  if (sub.length() && sub != "start" && sub != "stop" && sub != "status") {
+    return "Usage: g2micwav start [\"path\"] | stop | status";
+  }
 
   ensureMicWavMutex();
   if (!gMicWavMutex) return "Error: G2 mic wav: mutex alloc failed";
@@ -27419,8 +27604,7 @@ static const char* cmd_g2micwav(const String& argsInput) {
     void* mem = ps_alloc(decSize, AllocPref::PreferPsram, "g2.mic.wav.lc3dec");
     if (!mem) {
       xSemaphoreGive(gMicWavMutex);
-      snprintf(ret, sizeof(ret), "G2 mic wav: decoder alloc %u B failed", decSize);
-      return ret;
+      return kCommandReplyOutOfMemory;
     }
     lc3_decoder_t dec = lc3_setup_decoder(kMicLc3FrameUs, kMicLc3SampleHz,
                                           /*sr_pcm_hz*/ 0, mem);
@@ -27450,7 +27634,9 @@ static const char* cmd_g2micwav(const String& argsInput) {
       delete f;
       free(mem);
       xSemaphoreGive(gMicWavMutex);
-      snprintf(ret, sizeof(ret), "G2 mic wav: failed to open %s", path.c_str());
+      snprintf(ret, sizeof(ret),
+               "Error: G2 mic wav: cannot open %s for writing. Check the path and the SD card.",
+               path.c_str());
       return ret;
     }
     micWavWriteHeader(*f, /*pcmBytes*/ 0);
@@ -27476,7 +27662,7 @@ static const char* cmd_g2micwav(const String& argsInput) {
     xSemaphoreTake(gMicWavMutex, portMAX_DELAY);
     if (!gMicWavFile) {
       xSemaphoreGive(gMicWavMutex);
-      return "Error: G2 mic wav: not recording";
+      return "Error: G2 mic wav is not running. Start it with 'g2micwav start'.";
     }
     String path     = gMicWavPath;
     uint32_t bytes  = gMicWavBytes;
@@ -27584,20 +27770,26 @@ static const char* cmd_g2aiconfig(const String& argsInput) {
 // pane card a custom title above the body, e.g. "Weather|72 °F sunny".
 static const char* cmd_g2aih(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+  if (argsInput.length() == 0) return "Usage: g2aih <heading>|<body>";
   int sep = argsInput.indexOf('|');
   if (sep < 0) {
     // No separator: treat the whole input as the body, default heading.
+    if (argsInput.length() > kG2EvenAiTextMaxBytes) return kG2ReplyEvenAiTextTooLong;
     return g2ShowEvenAiReply(argsInput.c_str())
            ? "G2: AI reply sent"
-           : "Error: G2: AI reply failed";
+           : g2LensSendFailureReply(/*lensSurface=*/false, kG2ReplyTextNotTaken);
   }
   String heading = argsInput.substring(0, sep);
   String body    = argsInput.substring(sep + 1);
   heading.trim();
   body.trim();
+  if (body.length() == 0) return "Usage: g2aih <heading>|<body>";
+  if (heading.length() > kG2EvenAiTextMaxBytes || body.length() > kG2EvenAiTextMaxBytes) {
+    return kG2ReplyEvenAiTextTooLong;
+  }
   return g2ShowEvenAiReply(heading.c_str(), body.c_str())
          ? "G2: AI reply sent (custom heading)"
-         : "Error: G2: AI reply failed";
+         : g2LensSendFailureReply(/*lensSurface=*/false, kG2ReplyTextNotTaken);
 }
 
 // Generic page-display helper. Looks up a page in the registry, builds
@@ -27611,11 +27803,11 @@ static const char* cmd_g2page_run(const char* pageName) {
   EXT_RAM_BSS_ATTR static char buf[80];
   const G2PageModule* p = g2FindPageByName(pageName);
   if (!p) {
-    snprintf(buf, sizeof(buf), "[G2] Page '%s' not registered", pageName);
+    snprintf(buf, sizeof(buf), "Error: Page '%s' is not in this build.", pageName);
     return buf;
   }
   if (!p->buildText) {
-    snprintf(buf, sizeof(buf), "[G2] Page '%s' has no text renderer", pageName);
+    snprintf(buf, sizeof(buf), "Error: Page '%s' has no text view.", pageName);
     return buf;
   }
   char content[512];
@@ -27626,9 +27818,9 @@ static const char* cmd_g2page_run(const char* pageName) {
     return buf;
   }
   snprintf(buf, sizeof(buf),
-           "[G2] %s page send failed (not connected?)",
+           "Error: %s page not sent. Check the glasses with g2status.",
            p->hijackLabel ? p->hijackLabel : p->name);
-  return buf;
+  return g2LensSendFailureReply(/*lensSurface=*/true, buf);
 }
 
 #define G2_PAGE_CMD(cmdsuffix, pageName)                              \
@@ -27731,11 +27923,18 @@ static const char* cmd_g2nativenotify(const String& argsInput) {
   if (title.length() == 0 || body.length() == 0)
     return "Error: both title and body are required";
 
+  // The same test g2SendNativeNotificationAsync refuses on, so the reply can
+  // name the command that enables the cards on this connection.
+  if (!gR.connected || gNotifPrimedGenerationR != gR.connectionGeneration) {
+    return "Error: Native notifications are not enabled on this connection. "
+           "Run g2notifenable first.";
+  }
+
   // Single app_identifier for now (Phase 1 test); per-family packages come later.
   bool ok = g2SendNativeNotificationAsync("one.hardware", displayName.c_str(),
                                           title.c_str(), "", body.c_str());
   return ok ? "G2 native-notify: queued (native card)"
-            : "Error: G2 native-notify: enqueue failed";
+            : "Error: G2 native-notify: could not queue the card. Retry.";
 }
 
 // Placeholder notification: shows text for a fixed duration then clears.
@@ -27760,29 +27959,45 @@ static const char* cmd_g2notify(const String& argsInput) {
     for (size_t i = 0; i < maybeDur.length(); i++) {
       if (!isdigit((unsigned char)maybeDur[i])) { allDigits = false; break; }
     }
-    if (allDigits) {
-      const long secs = maybeDur.toInt();
-      if (secs > 0 && secs < 600) {  // sanity-cap at 10 minutes
-        duration = (uint32_t)secs * 1000;
-        args = args.substring(firstSpace + 1);
-        args.trim();
-      }
+    // A leading number outside 1..599 (10 minutes) is part of the text.
+    long secs = 0;
+    if (allDigits && parseIntArg(maybeDur, 1, 599, secs)) {
+      duration = (uint32_t)secs * 1000;
+      args = args.substring(firstSpace + 1);
+      args.trim();
     }
   }
   if (args.length() == 0) return "Error: invalid arguments — Usage: g2notify [<seconds>] <text>";
   return g2ShowNotification(args.c_str(), duration)
          ? "G2 notify: shown (placeholder — not a real overlay, full-screen)"
-         : "Error: G2 notify: show failed";
+         : g2LensSendFailureReply(/*lensSurface=*/true, kG2ReplyTextNotTaken);
 }
 
 static const char* cmd_g2clear(const String& /*argsInput*/) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  return g2ClearDisplay() ? "G2: cleared" : "Error: G2: clear failed";
+  if (g2ClearDisplay()) return "G2: cleared";
+  return g2LensSendFailureReply(
+      /*lensSurface=*/true,
+      "Error: The glasses did not clear the display. Check g2status and retry.");
 }
 
 static const char* cmd_g2scan(const String& /*argsInput*/) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  return g2Connect(G2_EYE_AUTO) ? "G2: found" : "Error: G2: not found";
+  if (g2PublishedPairConnected()) {
+    return "Error: The glasses are already connected. Close them first with closeg2 to scan again.";
+  }
+  // g2Connect only queues the background scan/connect; nothing is found yet.
+  if (!g2Connect(G2_EYE_AUTO)) {
+    if (gConnectTaskActive) return "Error: A glasses connect is already running. Watch it with g2status.";
+    // g2Connect also refuses while the glasses have no owner on this device.
+    // This command sets none (openg2 does), so Bluetooth is fine and a retry
+    // fails the same way.
+    BlePeerReconnectSnapshot peer;
+    if (blePeerReconnectSnapshot(BLE_PEER_G2_GLASSES, peer) && !peer.ownerAuthorityAvailable)
+      return "Error: The glasses have no owner on this device. Log in as an admin and run openg2.";
+    return "Error: G2 scan could not start. Check Bluetooth with blestatus and retry.";
+  }
+  return "G2: scan/connect started in background — use g2status to watch";
 }
 
 static const char* cmd_g2battery(const String& /*argsInput*/) {
@@ -27792,17 +28007,23 @@ static const char* cmd_g2battery(const String& /*argsInput*/) {
   // and update gBatteryL/gBatteryR. Print whatever we have cached now — the
   // fresh response will show up on subsequent status queries.
   uint8_t buf[64];
+  bool requested = false;
   if (gL.connected) {
     uint8_t seq = allocSeq();
     size_t n = g2BuildSettingBasicRequest(seq, g2NextSettingsMagic(),
                                           buf, sizeof(buf));
-    if (n) sendEnvelope(gL, buf, n);
+    if (n && sendEnvelope(gL, buf, n)) requested = true;
   }
   if (gR.connected) {
     uint8_t seq = allocSeq();
     size_t n = g2BuildSettingBasicRequest(seq, g2NextSettingsMagic(),
                                           buf, sizeof(buf));
-    if (n) sendEnvelope(gR, buf, n);
+    if (n && sendEnvelope(gR, buf, n)) requested = true;
+  }
+  // No request went out: the cached values would be reported with a refresh
+  // that is not happening.
+  if (!requested) {
+    return "Error: G2 battery request not sent. Check the link with g2status and retry.";
   }
   EXT_RAM_BSS_ATTR static char out[64];
   snprintf(out, sizeof(out), "G2 battery: L=%s R=%s (refresh in progress)",
@@ -27839,13 +28060,15 @@ static const char* cmd_g2streamres(const String& argsInput) {
   if (xi <= 0) {
     return "Error: invalid arguments — Usage: g2streamres <W>x<H>  (examples: 96x96, 160x120, 288x144)";
   }
-  int w = 0;  // text that is not a number stays 0 and is refused below
+  int w = 0;
   int h = 0;
-  parseIntArg(s.substring(0, xi), w);
-  parseIntArg(s.substring(xi + 1), h);
+  if (!parseIntArg(s.substring(0, xi), w) || !parseIntArg(s.substring(xi + 1), h)) {
+    return kCommandReplyNotANumber;
+  }
   if (w < 16 || w > 288 || h < 16 || h > 144) {
     snprintf(ret, sizeof(ret),
-             "Bad dims %dx%d (allowed 16..288 x 16..144)", w, h);
+             "Error: Resolution %dx%d is outside 16..288 x 16..144. Example: g2streamres 160x120.",
+             w, h);
     return ret;
   }
   const int wEff = w & ~1;  // 4-bpp packs 2 px/byte
@@ -27949,9 +28172,13 @@ static const char* cmd_g2nav(const String& argsInput) {
   // Bare command = report current state (used by the web UI on page
   // load to populate the toggle without flipping it). on/off sets,
   // toggle flips.
-  if (a == "on")          gG2MenuNavEnabled = true;
-  else if (a == "off")    gG2MenuNavEnabled = false;
-  else if (a == "toggle") gG2MenuNavEnabled = !gG2MenuNavEnabled;
+  if (a == "toggle") {
+    gG2MenuNavEnabled = !gG2MenuNavEnabled;
+  } else if (a.length() != 0) {
+    const int b = parseBoolArg(a);
+    if (b < 0) return kCommandReplyNotOnOff;
+    gG2MenuNavEnabled = (b == 1);
+  }
   return gG2MenuNavEnabled ? "G2 nav: on" : "G2 nav: off";
 }
 
@@ -27959,9 +28186,13 @@ static const char* cmd_g2verbose(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   CommandArgs ca(argsInput);
   String a = ca.arg(0); a.toLowerCase();
-  if (a == "on")          gG2ScanVerbose = true;
-  else if (a == "off")    gG2ScanVerbose = false;
-  else if (a == "toggle") gG2ScanVerbose = !gG2ScanVerbose;
+  if (a == "toggle") {
+    gG2ScanVerbose = !gG2ScanVerbose;
+  } else if (a.length() != 0) {
+    const int b = parseBoolArg(a);
+    if (b < 0) return kCommandReplyNotOnOff;
+    gG2ScanVerbose = (b == 1);
+  }
   return gG2ScanVerbose ? "G2 scan-verbose: on" : "G2 scan-verbose: off";
 }
 
@@ -27984,8 +28215,10 @@ static const char* cmd_g2hijacktest(const String& /*argsInput*/) {
 // back to attempt 1. It also clears a user disconnect (manual intent).
 static const char* cmd_g2recover(const String& /*argsInput*/) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!isG2ClientInitialized()) return "Error: G2: client not initialized";
-  if (gL.connected && gR.connected) return "G2: both temples already connected";
+  if (!isG2ClientInitialized()) return "Error: The glasses are not open. Open them with openg2.";
+  if (gL.connected && gR.connected) {
+    return "Error: Both temples are already connected, so there is nothing to repair. Check them with g2status.";
+  }
   if (!gL.connected && !gR.connected) {
     return "Error: G2: both temples down — use 'openg2 auto' for a full reconnect";
   }
@@ -28036,6 +28269,11 @@ static const char* cmd_g2reopen(const String& /*argsInput*/) {
 // disconnect, plugin-dead transition, any EvenCore res != 0 response.
 static const char* cmd_g2dumpframes(const String& /*argsInput*/) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+  // g2RingDump prints only at debug log level with the G2 debug flag set.
+  if (!(getLogLevel() >= LOG_LEVEL_DEBUG && isDebugFlagSet(DEBUG_G2))) {
+    return "Error: G2 debug logging is off, nothing was dumped. "
+           "Run loglevel debug and debugg2 1, then retry.";
+  }
   g2RingDump("manual dump");
   return "G2: frame ring dumped to log";
 }
@@ -28087,7 +28325,7 @@ extern const CommandEntry g2Commands[] = {
 #if ENABLE_G2_TESTSUITE
   { "g2imgprobe",   "Probe Cmd=3 multi-frag wire path: g2imgprobe [size_bytes]",                            false, cmd_g2imgprobe, "Usage: g2imgprobe [size_bytes]  (1..4096, default 1024)" },
 #endif
-  { "g2micon",      "G2 mic probe: AudioCtrCmd{en=1} on LEFT (or 'r' for RIGHT)",                           false, cmd_g2micon, "Usage: g2micon [r]  (default LEFT; arg starting r = RIGHT)" },
+  { "g2micon",      "G2 mic probe: AudioCtrCmd{en=1} on LEFT (or 'r' for RIGHT)",                           false, cmd_g2micon, "Usage: g2micon [l|r]  (default LEFT)" },
   { "g2micoff",     "G2 mic probe: AudioCtrCmd{en=0} (stop stream)",                                        false, cmd_g2micoff },
   { "g2micstats",   "G2 mic probe: dump per-arm frame counters",                                            false, cmd_g2micstats },
   { "g2conversate", "Native Conversate mic keepalive (no STT or file)", false, cmd_g2conversate, "Usage: g2conversate on | test [seconds 10..3600, default 300] | status | stop | off" },
@@ -28605,8 +28843,8 @@ static const char* cmd_g2connpri(const String& argsInput) {
   // measure the wrong thing, so say so instead of producing a bogus reading.
   if (depth > 0) {
     snprintf(ret, sizeof(ret),
-             "OK: g2connpri HIGH=%u-%u set, but NOT applied - arbiter is holding "
-             "BALANCED (depth=%d). Re-run once the holder releases.",
+             "Error: Range %u-%u stored but not requested: BALANCED is held (depth=%d). "
+             "Run g2connpri again when the holder releases.",
              (unsigned)wantMin, (unsigned)wantMax, depth);
     return ret;
   }
@@ -28618,8 +28856,8 @@ static const char* cmd_g2connpri(const String& argsInput) {
   const bool busyR = gR.connected && connReqBusy(gR, &ageR);
   if (busyL || busyR) {
     snprintf(ret, sizeof(ret),
-             "OK: g2connpri HIGH=%u-%u set, but NOT applied - a conn-params request is "
-             "still in flight on %s (%u ms old). Re-run in a few seconds.",
+             "Error: Range %u-%u stored but not requested: a request is still in flight "
+             "on %s (%u ms old). Run g2connpri again in a few seconds.",
              (unsigned)wantMin, (unsigned)wantMax,
              busyL && busyR ? "both temples" : busyL ? "the left temple" : "the right temple",
              (unsigned)(busyL ? ageL : ageR));
@@ -28681,14 +28919,17 @@ static const char* cmd_g2connpri(const String& argsInput) {
                         : (noopL ? " !! NO-OP on L (already at these params)"
                                  : " !! NO-OP on R (already at these params)"))
       : "";
+  // Without an event of our own request the values below are the old ones.
   snprintf(ret, sizeof(ret),
-           "OK: g2connpri HIGH=%u-%u ticks (%u.%02u-%u.%02u ms) on %d link(s), "
-           "settled in %u ms%s%s; %s %s",
+           "%sg2connpri HIGH=%u-%u ticks (%u.%02u-%u.%02u ms) on %d link(s), "
+           "settled in %u ms%s; %s %s",
+           timedOut ? "Error: No answer from the controller in 5 s, values are stale. "
+                      "Run g2connpri to read the links. "
+                    : "OK: ",
            (unsigned)wantMin, (unsigned)wantMax,
            (unsigned)(wantMin * 5 / 4), (unsigned)((wantMin * 125) % 100),
            (unsigned)(wantMax * 5 / 4), (unsigned)((wantMax * 125) % 100),
            changed, (unsigned)waitedMs,
-           timedOut ? " (TIMED OUT - no self-attributed event; values stale)" : "",
            noopWarn, lbuf, rbuf);
   return ret;
 }
@@ -30113,15 +30354,15 @@ static const char* cmd_g2bmp(const String& argsInput) {
   int brightness = 0;
   int contrast = 0;
   int holdSeconds = 3;
-  if (ca.count() >= 2 && !parseIntArg(ca.arg(1), brightness)) return kCommandReplyNotANumber;
-  if (ca.count() >= 3 && !parseIntArg(ca.arg(2), contrast)) return kCommandReplyNotANumber;
-  if (ca.count() >= 4 && !parseIntArg(ca.arg(3), holdSeconds)) return kCommandReplyNotANumber;
-  if (brightness < -100) brightness = -100;
-  if (brightness > 100)  brightness = 100;
-  if (contrast < -100)   contrast = -100;
-  if (contrast > 100)    contrast = 100;
-  if (holdSeconds < 0)   holdSeconds = 0;
-  if (holdSeconds > 120) holdSeconds = 120;
+  if (ca.count() >= 2 && !parseIntArg(ca.arg(1), -100, 100, brightness)) {
+    return "Error: brightness must be a whole number from -100 to 100.";
+  }
+  if (ca.count() >= 3 && !parseIntArg(ca.arg(2), -100, 100, contrast)) {
+    return "Error: contrast must be a whole number from -100 to 100.";
+  }
+  if (ca.count() >= 4 && !parseIntArg(ca.arg(3), 0, 120, holdSeconds)) {
+    return "Error: holdSeconds must be a whole number from 0 to 120.";
+  }
 
   G2Temple* arm = pickEvenAiArm("g2bmp");
   if (!arm) return "Error: G2 BMP: no reachable temple";
@@ -30134,7 +30375,9 @@ static const char* cmd_g2bmp(const String& argsInput) {
   int32_t bmpH = 0;
   if (!readBmpFromVfs(path, &bmp, &bmpLen, &bmpW, &bmpH, &loadErr)) {
     EXT_RAM_BSS_ATTR static char err[160];
-    snprintf(err, sizeof(err), "G2 BMP: %s", loadErr ? loadErr : "failed to load BMP");
+    snprintf(err, sizeof(err),
+             "Error: G2 BMP: %s. Check the path; the file must be a 288x144 4-bpp BMP.",
+             loadErr && loadErr[0] ? loadErr : "failed to load BMP");
     return err;
   }
   applyBmpPaletteTuningInPlace(bmp, bmpLen, brightness, contrast);
@@ -30168,8 +30411,9 @@ static const char* cmd_g2bmp(const String& argsInput) {
   EXT_RAM_BSS_ATTR static char out[220];
   if (!ok) {
     snprintf(out, sizeof(out),
-             "G2 BMP: push incomplete (%u/%u fragments, bright=%d contrast=%d hold=%ds)",
-             okFrags, totalFrags, brightness, contrast, holdSeconds);
+             "Error: G2 BMP: push incomplete (%u/%u fragments). "
+             "Check the link with g2status and retry.",
+             okFrags, totalFrags);
     return out;
   }
   snprintf(out, sizeof(out),

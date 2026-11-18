@@ -66,6 +66,11 @@ struct Status {
   uint32_t sendFailures;
   uint32_t acks;
   uint32_t lastSendMs;
+  // The policy's own pair, which the tick tests before a manual send: the last
+  // write that was sent or tried on this link. lastSendMs above only moves
+  // when a write succeeded, and sends is never reset for a new link.
+  uint32_t lastAttemptMs;
+  bool attemptedThisLink;
   uint32_t lastAckMs;
   uint8_t lastMagic;
   bool awaitingAck;
@@ -195,6 +200,8 @@ void publishStatus(bool ready, bool busy) {
   sStatus.linkReady = ready;
   sStatus.busy = busy;
   sStatus.awaitingAck = sPolicy.awaitingAck;
+  sStatus.lastAttemptMs = sPolicy.lastSendMs;
+  sStatus.attemptedThisLink = sPolicy.sentThisLink;
   portEXIT_CRITICAL(&sStatusMux);
 }
 
@@ -466,6 +473,28 @@ const char* cmd_ringpanelsend(const String& args) {
   a.trim();
   if (a.length() && a != "test")
     return "Error: invalid arguments — Usage: ring panel send [test]";
+  // g2HealthPushTick drops a request it cannot send and only counts it, so the
+  // cases that are known now are refused here with their reason.
+  if (!g2HealthRightLink(nullptr, nullptr)) {
+    return "Error: Right temple is not ready, nothing sent. Run openg2, then retry.";
+  }
+  hp::Snapshot current;
+  bool haveCurrent, attemptedThisLink;
+  uint32_t lastAttemptMs;
+  portENTER_CRITICAL(&sStatusMux);
+  current = sStatus.current;
+  haveCurrent = sStatus.haveCurrent;
+  attemptedThisLink = sStatus.attemptedThisLink;
+  lastAttemptMs = sStatus.lastAttemptMs;
+  portEXIT_CRITICAL(&sStatusMux);
+  if (a != "test" && (!haveCurrent || !hp::hasRingData(current))) {
+    return "Error: No ring data yet, nothing sent. Run ring poll and retry, "
+           "or run ring panel send test.";
+  }
+  // The same test g2HealthPushTick makes: a failed write counts as well.
+  if (attemptedThisLink && (uint32_t)(millis() - lastAttemptMs) < kManualFloorMs) {
+    return "Error: A snapshot was sent or tried less than a second ago. Wait a second and retry.";
+  }
   sForce.store(a == "test" ? 2 : 1);
   return a == "test"
              ? "Queued one test snapshot (1234 steps, 210 kcal, sleep score 80 / 7h30m, 72 bpm, 98%) "

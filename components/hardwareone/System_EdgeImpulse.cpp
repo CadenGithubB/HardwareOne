@@ -577,6 +577,14 @@ static void freeModelResources() {
   DEBUG_SYSTEMF("[EI_DEBUG]   Heap after cleanup: %lu free", (unsigned long)ESP.getFreeHeap());
 }
 
+// Why the last model load failed, for the eimodelload reply: the reason and
+// the next action. Written under the lifecycle lock.
+static const char* gEiLoadFailure = nullptr;
+static bool loadRefused(const char* why) {
+  gEiLoadFailure = why;
+  return false;
+}
+
 // Holds: inference lock, with no continuous task running.
 static bool loadModelLocked(const char* path) {
   DEBUG_SYSTEMF("[EI_DEBUG] ========== loadModelFromFile() START ==========");
@@ -596,7 +604,7 @@ static bool loadModelLocked(const char* path) {
     File modelFile = VFS::openGuarded(path, "r", VFS::systemAuth(VFS::Scopes::EI_MODELS, "edge.model_load"));
     if (!modelFile) {
       ERROR_SYSTEMF("[EdgeImpulse] Failed to open model file: %s", path);
-      return false;
+      return loadRefused("the file cannot be opened. Check the name with eimodellist.");
     }
 
     fileSize = modelFile.size();
@@ -605,12 +613,12 @@ static bool loadModelLocked(const char* path) {
     if (fileSize == 0) {
       ERROR_SYSTEMF("[EdgeImpulse] Model file is empty");
       modelFile.close();
-      return false;
+      return loadRefused("the file is empty. Upload the model again.");
     }
     if (fileSize > kMaxModelSize) {
       ERROR_SYSTEMF("[EdgeImpulse] Model too large: %zu bytes (max %zu)", fileSize, kMaxModelSize);
       modelFile.close();
-      return false;
+      return loadRefused("the file is too large for this device. Use a smaller model.");
     }
 
     DEBUG_SYSTEMF("[EI_DEBUG] Allocating model buffer: %zu bytes", fileSize);
@@ -621,7 +629,7 @@ static bool loadModelLocked(const char* path) {
                     (unsigned long)ESP.getFreeHeap(),
                     (unsigned long)(psramFound() ? ESP.getFreePsram() : 0));
       modelFile.close();
-      return false;
+      return loadRefused("not enough memory. Free memory and retry.");
     }
     DEBUG_SYSTEMF("[EI_DEBUG] Model buffer allocated at %p", gModelBuffer);
 
@@ -640,7 +648,7 @@ static bool loadModelLocked(const char* path) {
     ERROR_SYSTEMF("[EdgeImpulse] Failed to read model: got %zu of %zu bytes", bytesRead, fileSize);
     free(gModelBuffer);
     gModelBuffer = nullptr;
-    return false;
+    return loadRefused("the file could not be read completely. Upload the model again.");
   }
   gModelSize = fileSize;
   
@@ -654,7 +662,7 @@ static bool loadModelLocked(const char* path) {
                   gModelBuffer[4], gModelBuffer[5], gModelBuffer[6], gModelBuffer[7]);
     free(gModelBuffer);
     gModelBuffer = nullptr;
-    return false;
+    return loadRefused("the file is not a TFLite model. Upload a .tflite export.");
   }
   
   // Check model version
@@ -667,7 +675,7 @@ static bool loadModelLocked(const char* path) {
     free(gModelBuffer);
     gModelBuffer = nullptr;
     gTflModel = nullptr;
-    return false;
+    return loadRefused("the TFLite schema version is not supported. Export the model again.");
   }
   
   // Setup op resolver
@@ -676,7 +684,7 @@ static bool loadModelLocked(const char* path) {
     free(gModelBuffer);
     gModelBuffer = nullptr;
     gTflModel = nullptr;
-    return false;
+    return loadRefused("not enough memory. Free memory and retry.");
   }
   DEBUG_SYSTEMF("[EI_DEBUG] Op resolver ready");
   
@@ -691,7 +699,7 @@ static bool loadModelLocked(const char* path) {
     free(gModelBuffer);
     gModelBuffer = nullptr;
     gTflModel = nullptr;
-    return false;
+    return loadRefused("not enough memory. Free memory and retry.");
   }
   DEBUG_SYSTEMF("[EI_DEBUG] Tensor arena allocated at %p", gTensorArena);
   
@@ -704,7 +712,7 @@ static bool loadModelLocked(const char* path) {
   if (!gInterpreter) {
     ERROR_SYSTEMF("[EdgeImpulse] Failed to create interpreter");
     freeModelResources();
-    return false;
+    return loadRefused("not enough memory. Free memory and retry.");
   }
   DEBUG_SYSTEMF("[EI_DEBUG] Interpreter created at %p", gInterpreter);
   
@@ -717,7 +725,7 @@ static bool loadModelLocked(const char* path) {
   if (allocStatus != kTfLiteOk) {
     ERROR_SYSTEMF("[EdgeImpulse] Failed to allocate tensors (status=%d)", allocStatus);
     freeModelResources();
-    return false;
+    return loadRefused("the model does not fit the tensor arena or uses an unsupported operation. Use a smaller model.");
   }
   DEBUG_SYSTEMF("[EI_DEBUG] Tensors allocated in %lu ms", allocTime);
   DEBUG_SYSTEMF("[EI_DEBUG] Arena used: %zu / %zu bytes (%.1f%%)",
@@ -733,7 +741,7 @@ static bool loadModelLocked(const char* path) {
   if (!gInputTensor) {
     ERROR_SYSTEMF("[EdgeImpulse] Failed to get input tensor");
     freeModelResources();
-    return false;
+    return loadRefused("unsupported input tensor. The model needs an HxWx1 or HxWx3 image input.");
   }
   
   // Log input tensor details
@@ -750,7 +758,7 @@ static bool loadModelLocked(const char* path) {
                   "float32/uint8/int8, sides up to %d",
                   gInputTensor->type, gInputTensor->bytes, kMaxModelInputSide);
     freeModelResources();
-    return false;
+    return loadRefused("unsupported input tensor. The model needs an HxWx1 or HxWx3 image input.");
   }
   DEBUG_SYSTEMF("[EI_DEBUG] Input geometry: %dx%dx%d",
                 gModelInputWidth, gModelInputHeight, gModelInputChannels);
@@ -771,7 +779,7 @@ static bool loadModelLocked(const char* path) {
   if (!configureOutputShape(gOutputTensor)) {
     ERROR_SYSTEMF("[EdgeImpulse] Unsupported output tensor: need float32/uint8/int8 class scores");
     freeModelResources();
-    return false;
+    return loadRefused("unsupported output tensor. The model needs float32, uint8 or int8 class scores.");
   }
 
   // The resize buffer holds one RGB888 frame at the model's input geometry.
@@ -780,7 +788,7 @@ static bool loadModelLocked(const char* path) {
   if (!gResizedBuffer) {
     ERROR_SYSTEMF("[EdgeImpulse] Failed to allocate %zu-byte resize buffer", gResizedBufferSize);
     freeModelResources();
-    return false;
+    return loadRefused("not enough memory. Free memory and retry.");
   }
 
   gLoadedModelPath = path;
@@ -791,7 +799,7 @@ static bool loadModelLocked(const char* path) {
   if (gSettings.edgeImpulseRequireLabels && !haveLabels) {
     ERROR_SYSTEMF("[EdgeImpulse] Labels are required but no labels file was found for: %s", path);
     freeModelResources();
-    return false;
+    return loadRefused("the labels file <model>.labels.txt is missing. Upload it next to the model or run eirequirelabels 0.");
   }
   
   DEBUG_SYSTEMF("[EI_DEBUG] ========== loadModelFromFile() SUCCESS ==========");
@@ -819,7 +827,7 @@ bool loadModelFromFile(const char* path) {
   const bool resume = gEiContinuousTask != nullptr && gEiContinuousRunning;
   if (!joinContinuousTaskLocked()) {
     ERROR_SYSTEMF("[EdgeImpulse] Model not loaded: continuous inference did not stop");
-    return false;
+    return loadRefused("continuous inference did not stop. Retry in a few seconds.");
   }
   bool loaded = false;
   {
@@ -1482,11 +1490,12 @@ bool startContinuousInference() {
   return true;
 }
 
-void stopContinuousInference() {
+bool stopContinuousInference() {
   DEBUG_SYSTEMF("[EI_DEBUG] stopContinuousInference() called");
   EiLifecycleLock lifecycle;
-  joinContinuousTaskLocked();
+  const bool stopped = joinContinuousTaskLocked();
   setSetting(gSettings.edgeImpulseContinuous, false);
+  return stopped;
 }
 
 bool isContinuousInferenceRunning() {
@@ -1698,21 +1707,46 @@ esp_err_t handleEdgeImpulseDetect(httpd_req_t* req) {
 
 EXT_RAM_BSS_ATTR static char gEiCmdBuffer[512];
 
+// ei, eimodel and eitrack only print help. Words after them are a subcommand
+// in a spelling that runs nothing ("ei enable 1"), so they are refused.
+static const char* eiHelpArgumentRefusal(const String& argsInput) {
+  String trimmed = argsInput;
+  trimmed.trim();
+  if (trimmed.length() == 0) return nullptr;
+  return "Error: Unknown Edge Impulse subcommand. The commands are single words, for example "
+         "eienable 1, eidetect, eimodelload \"<file>\". Run ei for the list.";
+}
+
 const char* cmd_ei(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+  if (const char* refusal = eiHelpArgumentRefusal(argsInput)) return refusal;
   
   snprintf(gEiCmdBuffer, sizeof(gEiCmdBuffer),
     "Edge Impulse Commands:\n"
-    "  ei enable <0|1>     - Enable/disable inference\n"
-    "  ei detect           - Run single inference (from camera)\n"
-    "  ei file <path>      - Run inference on stored JPEG file\n"
-    "  ei continuous <0|1> - Start/stop continuous mode\n"
-    "  ei confidence <val> - Set min confidence (0.0-1.0)\n"
-    "  ei status           - Show current status\n"
-    "  ei model ...        - Model management (list/load/info/unload)\n"
-    "  ei track ...        - State change tracking (status/enable/clear)\n"
+    "  eienable <0|1>      - Enable/disable inference\n"
+    "  eidetect            - Run single inference (from camera)\n"
+    "  eifile \"<path>\"     - Run inference on stored JPEG file\n"
+    "  eicontinuous <0|1>  - Start/stop continuous mode\n"
+    "  eiconfidence <val>  - Set min confidence (0.0-1.0)\n"
+    "  eistatus            - Show current status\n"
+    "  eimodel             - Model management (list/load/info/unload)\n"
+    "  eitrack             - State change tracking (status/enable/clear)\n"
   );
   return gEiCmdBuffer;
+}
+
+// The detection reply of eidetect and eifile: the whole JSON in the shared
+// debug buffer, never a cut one.
+static const char* detectionReply(const EiResults& results) {
+  if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
+  PSRAM_JSON_DOC(doc);
+  appendDetectionJson(results, doc);
+  if (doc.overflowed() || measureJson(doc) >= GLOBAL_DEBUG_BUFFER_SIZE) {
+    return "Error: Detection result does not fit the reply buffer. Raise eiconfidence to get fewer detections.";
+  }
+  char* reply = getDebugBuffer();
+  serializeJson(doc, reply, GLOBAL_DEBUG_BUFFER_SIZE);
+  return reply;
 }
 
 const char* cmd_ei_enable(const String& argsInput) {
@@ -1764,10 +1798,7 @@ const char* cmd_ei_detect(const String& argsInput) {
     return gEiCmdBuffer;
   }
   
-  String output;
-  buildDetectionJson(results, output);
-  snprintf(gEiCmdBuffer, sizeof(gEiCmdBuffer), "%s", output.c_str());
-  return gEiCmdBuffer;
+  return detectionReply(results);
 }
 
 const char* cmd_ei_file(const String& argsInput) {
@@ -1777,7 +1808,7 @@ const char* cmd_ei_file(const String& argsInput) {
   String path;
   const char* qerr = requireQuotedPath(a, 0, path);
   if (qerr) return qerr;
-  if (a.has(1)) return "Error: unexpected argument — usage: ei file \"<path>\"";
+  if (a.has(1)) return "Error: unexpected argument — usage: eifile \"<path>\"";
 
   // Check file exists
   if (!VFS::existsGuarded(path, currentAuthContext())) {
@@ -1799,10 +1830,7 @@ const char* cmd_ei_file(const String& argsInput) {
     return gEiCmdBuffer;
   }
   
-  String output;
-  buildDetectionJson(results, output);
-  snprintf(gEiCmdBuffer, sizeof(gEiCmdBuffer), "%s", output.c_str());
-  return gEiCmdBuffer;
+  return detectionReply(results);
 }
 
 const char* cmd_ei_continuous(const String& argsInput) {
@@ -1820,12 +1848,25 @@ const char* cmd_ei_continuous(const String& argsInput) {
   const int val = parseBoolArg(trimmed);
   if (val < 0) return kCommandReplyNotOnOff;
   if (val) {
+    if (gEiContinuousRunning) {
+      return "Error: Continuous inference is already running. Stop it first with 'eicontinuous 0' to restart it.";
+    }
     if (startContinuousInference()) {
       return "Continuous inference started";
     }
-    return "Error: cannot start continuous inference (load a model first with eimodelload)";
+    if (!gEiModelLoaded) return "Error: No model loaded. Load one with eimodelload \"<file>\" first.";
+    return "Error: Continuous inference not started (previous run still stopping or no memory for the task). "
+           "Retry in a few seconds.";
   } else {
-    stopContinuousInference();
+    // Nothing to stop: no task, and the saved mode is already off. A saved
+    // mode that is on (its start failed or waits for a model) is still turned
+    // off below, so the settings editors can save Continuous Mode off.
+    if (!gEiContinuousRunning && !gEiContinuousTask && !gSettings.edgeImpulseContinuous) {
+      return "Error: Continuous inference is not running. Start it with 'eicontinuous 1'.";
+    }
+    if (!stopContinuousInference()) {
+      return "Error: Continuous inference is still finishing a frame. Retry eicontinuous 0 in a few seconds.";
+    }
     return "Continuous inference stopped";
   }
 }
@@ -1842,9 +1883,10 @@ const char* cmd_ei_confidence(const String& argsInput) {
     return gEiCmdBuffer;
   }
   
-  float val = trimmed.toFloat();
-  if (val < 0.0f) val = 0.0f;
-  if (val > 1.0f) val = 1.0f;
+  float val = 0.0f;
+  if (!parseFloatArg(trimmed, 0.0, 1.0, val)) {
+    return "Error: eiconfidence must be a decimal number from 0.0 to 1.0, for example 0.6.";
+  }
   
   setSetting(gSettings.edgeImpulseMinConfidence, val);
   snprintf(gEiCmdBuffer, sizeof(gEiCmdBuffer), "Min confidence set to %.2f", val);
@@ -1879,13 +1921,14 @@ const char* cmd_ei_status(const String& argsInput) {
 // Model management commands
 const char* cmd_ei_model(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+  if (const char* refusal = eiHelpArgumentRefusal(argsInput)) return refusal;
   
   snprintf(gEiCmdBuffer, sizeof(gEiCmdBuffer),
     "Model Commands:\n"
-    "  ei model list       - List available models in %s\n"
-    "  ei model load <name>- Load a .tflite model\n"
-    "  ei model info       - Show loaded model details\n"
-    "  ei model unload     - Unload current model",
+    "  eimodellist           - List available models in %s\n"
+    "  eimodelload \"<name>\"  - Load a .tflite model\n"
+    "  eimodelinfo           - Show loaded model details\n"
+    "  eimodelunload         - Unload current model",
     MODEL_DIR
   );
   return gEiCmdBuffer;
@@ -1896,8 +1939,27 @@ const char* cmd_ei_model_list(const String& argsInput) {
   
   String output;
   listAvailableModels(output);
-  snprintf(gEiCmdBuffer, sizeof(gEiCmdBuffer), "%s", output.c_str());
-  return gEiCmdBuffer;
+  if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
+  // Whole lines only; lines that do not fit are counted, never cut.
+  char* buf = getDebugBuffer();
+  constexpr size_t kMoreNote = 24;  // "  ... (<n> more)\n" and its terminator
+  size_t pos = 0;
+  int left = 0;
+  const char* line = output.c_str();
+  while (*line) {
+    const char* nl = strchr(line, '\n');
+    const size_t len = nl ? (size_t)(nl - line) + 1 : strlen(line);
+    if (left || pos + len + kMoreNote >= GLOBAL_DEBUG_BUFFER_SIZE) {
+      ++left;
+    } else {
+      memcpy(buf + pos, line, len);
+      pos += len;
+    }
+    line += len;
+  }
+  buf[pos] = '\0';
+  if (left) snprintf(buf + pos, GLOBAL_DEBUG_BUFFER_SIZE - pos, "  ... (%d more)\n", left);
+  return buf;
 }
 
 const char* cmd_ei_model_load(const String& argsInput) {
@@ -1907,7 +1969,7 @@ const char* cmd_ei_model_load(const String& argsInput) {
   String trimmed;
   const char* qerr = requireQuotedToken(a, 0, trimmed);
   if (qerr) return qerr;
-  if (a.has(1)) return "Error: unexpected argument — usage: ei model load \"<filename>\"";
+  if (a.has(1)) return "Error: unexpected argument — usage: eimodelload \"<filename>\"";
 
   // Build full path if just filename given
   String path = trimmed;
@@ -1933,7 +1995,8 @@ const char* cmd_ei_model_load(const String& argsInput) {
       path.c_str(), gModelInputWidth, gModelInputHeight, gModelInputChannels,
       gInterpreter ? gInterpreter->arena_used_bytes() : 0);
   } else {
-    snprintf(gEiCmdBuffer, sizeof(gEiCmdBuffer), "Error: Failed to load model: %s", path.c_str());
+    snprintf(gEiCmdBuffer, sizeof(gEiCmdBuffer), "Error: Model not loaded: %s",
+             gEiLoadFailure ? gEiLoadFailure : "see the system log. Check the file with eimodellist.");
   }
   return gEiCmdBuffer;
 }
@@ -1943,7 +2006,7 @@ const char* cmd_ei_model_info(const String& argsInput) {
 
   EiInferenceLock inference(portMAX_DELAY);  // the model cannot be freed while read
   if (!gEiModelLoaded || !gInterpreter) {
-    return "Error: No model loaded. Use 'ei model load <filename>' to load one.";
+    return "Error: No model loaded. Load one with eimodelload \"<file>\".";
   }
   
   const char* inputType = "unknown";
@@ -1986,7 +2049,7 @@ const char* cmd_ei_model_unload(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (!gEiModelLoaded) {
-    return "Error: No model is currently loaded.";
+    return "Error: No model is loaded. Load one with 'eimodelload \"<file>\"'.";
   }
   
   String oldPath = gLoadedModelPath;
@@ -1998,12 +2061,13 @@ const char* cmd_ei_model_unload(const String& argsInput) {
 // State tracking commands
 const char* cmd_ei_track(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+  if (const char* refusal = eiHelpArgumentRefusal(argsInput)) return refusal;
   
   snprintf(gEiCmdBuffer, sizeof(gEiCmdBuffer),
     "State Tracking Commands:\n"
-    "  ei track status     - Show tracked objects\n"
-    "  ei track enable <0|1> - Enable/disable tracking\n"
-    "  ei track clear      - Clear tracked objects"
+    "  eitrackstatus         - Show tracked objects\n"
+    "  eitrackenable <0|1>   - Enable/disable tracking\n"
+    "  eitrackclear          - Clear tracked objects"
   );
   return gEiCmdBuffer;
 }
@@ -2013,7 +2077,7 @@ const char* cmd_ei_track_status(const String& argsInput) {
   
   EiInferenceLock inference(portMAX_DELAY);  // tracking table is updated per frame
   if (!gStateTrackingEnabled) {
-    return "Error: State tracking is disabled. Use 'ei track enable 1' to enable.";
+    return "Error: State tracking is disabled. Enable it with eitrackenable 1.";
   }
 
   if (gTrackedObjectCount == 0) {
@@ -2093,19 +2157,19 @@ const char* cmd_ei_track_clear(const String& argsInput) {
 
 // Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
 const CommandEntry edgeImpulseCommands[] = {
-  { "ei", "Edge Impulse ML inference commands.", false, cmd_ei, "Usage: ei <subcommand>" },
+  { "ei", "List the Edge Impulse commands.", false, cmd_ei, "Usage: ei" },
   { "eienable", "Enable/disable Edge Impulse inference.", false, cmd_ei_enable, "Usage: eienable <0|1>" },
   { "eidetect", "Run single object detection inference.", false, cmd_ei_detect, "Usage: eidetect" },
   { "eifile", "Run inference on stored JPEG image.", false, cmd_ei_file, "Usage: eifile \"<path>\"" },
   { "eicontinuous", "Start/stop continuous inference mode.", false, cmd_ei_continuous, "Usage: eicontinuous <0|1>" },
   { "eiconfidence", "Set minimum detection confidence.", false, cmd_ei_confidence, "Usage: eiconfidence <0.0-1.0>" },
   { "eistatus", "Show Edge Impulse status.", false, cmd_ei_status, "Usage: eistatus" },
-  { "eimodel", "Model management commands.", false, cmd_ei_model, "Usage: eimodel <subcommand>" },
+  { "eimodel", "List the model management commands.", false, cmd_ei_model, "Usage: eimodel" },
   { "eimodellist", "List available .tflite models.", false, cmd_ei_model_list, "Usage: eimodellist" },
   { "eimodelload", "Load a TFLite model from LittleFS.", false, cmd_ei_model_load, "Usage: eimodelload \"<filename>\"" },
   { "eimodelinfo", "Show loaded model information.", false, cmd_ei_model_info, "Usage: eimodelinfo" },
   { "eimodelunload", "Unload the current model.", false, cmd_ei_model_unload, "Usage: eimodelunload" },
-  { "eitrack", "State tracking commands.", false, cmd_ei_track, "Usage: eitrack <subcommand>" },
+  { "eitrack", "List the state tracking commands.", false, cmd_ei_track, "Usage: eitrack" },
   { "eitrackstatus", "Show currently tracked objects.", false, cmd_ei_track_status, "Usage: eitrackstatus" },
   { "eitrackenable", "Enable/disable state tracking.", false, cmd_ei_track_enable, "Usage: eitrackenable <0|1>" },
   { "eitrackclear", "Clear all tracked objects.", false, cmd_ei_track_clear, "Usage: eitrackclear" }

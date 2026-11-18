@@ -346,7 +346,7 @@ async function addMapWaypoint(canvasX, canvasY) {
   const name = await hwPrompt('Waypoint name:', 'WP' + (waypoints.length + 1));
   if (name !== null && name.trim()) {
     const notes = (await hwPrompt('Notes (optional, max 255 chars):', '')) || '';
-    addWaypointViaAPI(name.trim().substring(0, 11), lat, lon, notes.substring(0, 255)).catch((err) => {
+    addWaypointViaAPI(name.trim().substring(0, 11), lat, lon, notes.trim().substring(0, 255)).catch((err) => {
       hwAlert('Error: ' + (err && err.message ? err.message : err));
     });
   }
@@ -2178,12 +2178,20 @@ async function addWaypoint() {
     hw.$('wp-notes').value = '';
   } catch (e) {
     wpError('addWaypoint() failed:', e);
+    if (e && e.waypointAdded) {
+      // Added without its notes: clear the fields a retry would add again.
+      hw.$('wp-name').value = '';
+      hw.$('wp-lat').value = '';
+      hw.$('wp-lon').value = '';
+      alert(e.message);
+      return;
+    }
     alert('Failed to add waypoint: ' + (e && e.message ? e.message : e));
   }
 }
 
 async function addWaypointViaAPI(name, lat, lon, notes) {
-  const form = { action: 'add', name, lat: String(lat), lon: String(lon) };
+  const form = { action: 'add', name, lat: Number(lat).toFixed(7), lon: Number(lon).toFixed(7) };
   if (notes) form.notes = notes;
   wpLog('addWaypointViaAPI() POST form:', form);
   const resp = await hw.postForm('/api/waypoints', form);
@@ -2198,7 +2206,14 @@ async function addWaypointViaAPI(name, lat, lon, notes) {
   wpLog('addWaypointViaAPI() response:', JSON.stringify(data));
   if (!data.success) {
     wpError('addWaypointViaAPI() server error:', data.error);
-    throw new Error(data.error || 'Failed to add waypoint');
+    const err = new Error(data.error || 'Failed to add waypoint');
+    if (typeof data.index === 'number') {
+      // The waypoint exists and only its notes were refused: show it, and tell
+      // the caller so a retry does not add it a second time.
+      err.waypointAdded = true;
+      try { await loadWaypoints(); } catch (_) { renderMap(); }
+    }
+    throw err;
   }
   try {
     await loadWaypoints();

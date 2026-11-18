@@ -94,6 +94,10 @@ void broadcastSensorStatus(RemoteSensorType sensorType, bool enabled);
 // Start streaming sensor data (worker → master, opt-in)
 void startSensorDataStreaming(RemoteSensorType sensorType);
 
+// The same start with its result: true when this call took effect (a bond
+// master: the request to the worker was queued).
+bool tryStartSensorDataStreaming(RemoteSensorType sensorType);
+
 // Stop streaming sensor data
 void stopSensorDataStreaming(RemoteSensorType sensorType);
 
@@ -103,6 +107,14 @@ void stopSensorDataStreaming(RemoteSensorType sensorType);
 bool shutdownSensorDataStreamingForEspNowClose();
 
 bool isSensorDataStreamingEnabled(RemoteSensorType sensorType);
+
+// True when this build has data to send for the sensor: the broadcaster skips
+// a sensor without a data builder, so a stream of it would never send.
+bool sensorCanStream(RemoteSensorType sensorType);
+
+// The command reply for a sensor that fails sensorCanStream: the refusal with
+// the sensors that do stream in this build.
+const char* sensorCannotStreamReply();
 
 // ---- Secure sensor fetcher (docs/ESPNOW_SENSOR_FETCHER_DESIGN.md) ----
 // Sensor-request modes carried in V4PayloadSensorReq.mode.

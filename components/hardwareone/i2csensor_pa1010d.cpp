@@ -206,8 +206,7 @@ const char* cmd_gpsstart(const String& argsInput) {
 
 const char* cmd_gpsstop(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!requestSensorStop(I2C_DEVICE_GPS)) return "Error: [GPS] Could not queue stop";
-  return "[GPS] Stop requested; cleanup will complete asynchronously";
+  return cmd_sensorstop_queued(I2C_DEVICE_GPS, "GPS");
 }
 
 const char* cmd_gps(const String& argsInput) {
@@ -234,13 +233,10 @@ const char* cmd_gps(const String& argsInput) {
   // Read from the GPS cache — the sensor_gps is the sole reader of the device;
   // every consumer goes through the cache, like the other sensors.
   GpsCache gps;
-  if (!gpsCacheSnapshot(gps)) {
-    broadcastOutput("GPS Data:");
-    broadcastOutput("=========");
-    broadcastOutput("Reading GPS...");
-    snprintf(getDebugBuffer(), 1024, "GPS Data:\n=========\nReading GPS...");
-    return getDebugBuffer();
-  }
+  if (!gpsCacheSnapshot(gps)) return "Error: [GPS] Reading cache busy. Retry shortly.";
+  // Nothing parsed since the GPS was opened: a zeroed cache is not a reading.
+  // A parsed sentence without a fix is one and is reported below.
+  if (!gps.dataValid) return "Error: [GPS] No reading yet. Retry shortly.";
 
   // Use BROADCAST_PRINTF for each line (zero String churn)
   broadcastOutput("GPS Data:");
@@ -675,8 +671,21 @@ const char* cmd_gpslog(const String& argsInput) {
   }
 
   const char* gpsResult = cmd_gpsstart("");
-  if (const char* error = gpsLogStepError(gpsResult)) return error;
-  const String gpsStatus(gpsResult);  // retain queued/already-running outcome
+  // An open GPS, or one whose start is already queued, is what the track
+  // needs. opengps answers both with an Error (already running / already
+  // queued), which is not a failure of this command; any other refusal (a
+  // stop still pending) stays one.
+  const bool gpsRefused = commandReplyIsFailure(gpsResult);
+  const bool gpsAlreadyRunning = gpsRefused && gGpsRunning &&
+                                 strstr(gpsResult, "already running") != nullptr;
+  const bool gpsAlreadyQueued = gpsRefused && strstr(gpsResult, "already queued") != nullptr;
+  if (!gpsAlreadyRunning && !gpsAlreadyQueued) {
+    if (const char* error = gpsLogStepError(gpsResult)) return error;
+  }
+  // Retain the queued outcome, or say the GPS was already running or queued.
+  const String gpsStatus(gpsAlreadyRunning ? "GPS sensor already running"
+                         : gpsAlreadyQueued ? "GPS sensor start already queued"
+                                            : gpsResult);
 
   if (const char* error = gpsLogStepError(cmd_sensorlog("format track"))) return error;
   const String intervalCmd = String("interval ") + String(intervalMs);

@@ -29,9 +29,9 @@
 // Usage:
 //   1. Train a FOMO model on Edge Impulse Studio
 //   2. Export as TensorFlow Lite (.tflite) and upload to /littlefs/EI Models/
-//   3. Load model: ei model load mymodel.tflite
-//   4. Enable: ei enable 1
-//   5. Run inference: ei detect
+//   3. Load model: eimodelload "mymodel.tflite"
+//   4. Enable: eienable 1
+//   5. Run inference: eidetect
 // ============================================================================
 
 // Longest class label kept, including the terminator (longer lines in a
@@ -80,9 +80,10 @@ struct AuthContext;
 EiResults runInferenceFromFile(const char* imagePath, const AuthContext& ctx);
 
 // Start/stop continuous inference mode. Stop returns once the continuous task
-// has finished its current frame and exited.
+// has finished its current frame and exited, or false when it did not within
+// the join timeout (a later stop joins it again).
 bool startContinuousInference();  // returns true if running on exit, false if it could not start
-void stopContinuousInference();
+bool stopContinuousInference();
 bool isContinuousInferenceRunning();
 
 // Build JSON from detection results

@@ -439,6 +439,53 @@ everything user-visible since the v0.99.99.1 tag.
   yet tested on hardware.
 
 ### Changed
+- Command replies: a command that failed or was refused answers `Error: <reason>. <next action>.`
+  and the executor reports it as failed on every interface. A reply counts as failed when it starts
+  with `Error`/`ERROR`, `Usage:` or `Unknown command:` (`commandReplyIsFailure()` in
+  `System_CommandReply.h`). Over Bluetooth the app gets only the text and applies the same three
+  leads. More than 600 replies changed. What a script or an app has to expect:
+  - Loose arguments are refused instead of guessed. A number has to be the whole token and in
+    range: text that was read as 0 or as its leading digits, and a value that was clamped to the
+    nearest limit, now answer `Error: Not a whole number. Give the value in digits, for example
+    250.`, `Error: Not a number. Give the value in digits, for example 0.5.` (a value with a
+    fraction) or the command's own range message. An on/off argument that is none of `on`/`off`,
+    `1`/`0`, `true`/`false`, `enable`/`disable` answers `Error: Not an on/off value. Use on or
+    off.` instead of being taken as off or as a status query. Most commands now also refuse
+    unknown words and extra words that were ignored. Examples: `waypoint del Home` (used to delete waypoint 0),
+    `wifiadd <ssid> <pass> abc`, `wifitxpower 99`, `lightsleep 99999`, `opencamera now`.
+  - Failures that used to read as success are reported, for example `lightsleep` that did not
+    sleep, `closewifi` whose radio stayed on, `automation run` held back by its condition or with
+    steps that did not run, `automation trigger` while automations are switched off,
+    `micdelete all` that left recordings behind, `espnowroomcmd` that reached no device, and
+    `sdformat` without `confirm`.
+  - JSON commands: when the reply cannot be built (out of memory, or larger than the reply buffer)
+    `status`, `versions`, `devices`, `sensors`, `batterystatus`, `power`, `controls`, `banlist`,
+    `c6status` and `mqttexternalsensors` with `json`, the `llm...` `json` reads and `cameraread`
+    answer an `Error: ...` text instead of an `{"error":...}` object or a cut document, and
+    `cameravideolist` without an SD card is an error. Test for the failure leads before parsing a
+    reply as JSON. `espnowstatus json` before the first start of a boot answers
+    `{"schema":1,"initialized":false}` instead of `{"schema":1,"ok":false,"error":...}`.
+  - Reply shapes: `maplist json` adds `"truncated":true` when the device holds more than the 8
+    maps listed; `images json` reports `usedBytes` and `totalBytes` as 64-bit values, so a card
+    above 4 GB shows its real size.
+  - Web API: `POST /api/cli` answers HTTP 400 for every failed reply and 403 for an admin or
+    super-admin refusal, so the calls above that answered 200 now answer 400. `POST /api/cli/batch`
+    still answers 200 with each reply in `results`. The new `failed` array holds the indexes into
+    `results` of the commands the executor reported as failed. `POST /api/bond/exec` adds
+    `"pending":true,"reqId":<n>` when the command was sent to the bonded device: `success` says
+    only that the frame left, and the bonded device's answer arrives later under that request id.
+  - Stopping, closing, unloading or disconnecting something that is not running, and starting,
+    opening or loading something that is already running, answer an Error with the next step
+    instead of a success, for example `closehttp` with no server: `Error: HTTP server is not
+    running. Start it with 'openhttp'.` This covers the services' open/close and start/stop
+    commands (Wi-Fi, HTTP, Bluetooth, sensors, camera, microphone, speech, MQTT, ESP-NOW, the SD
+    card, maps, Edge Impulse, the glasses and the ring); `llmunload` and `llmstop` answer
+    `{"ok":false,...}`. Saving `<x>enabled 0` for a stopped service stays a normal save. Removed
+    because nothing read them: `espnowworker`, `espnowworkerstatusinterval`, `oledbootmode` and
+    `oledthermalcolormode` with their settings. `ledstartupcolor` and `ledstartupcolor2` refuse an
+    unknown colour name instead of saving it, and `oledthermalscale` refuses values below 1.0.
+  `docs/APP_JSON_CONTRACT.md` carries the changed rows. Host-tested and built; not yet tested on
+  hardware.
 - OLED feedback is one shared message box. It replaces the animated status ribbon, the error boxes
   that the login, password, Settings editor and Health screens drew themselves, and the results
   shown in footers. A refused command shows the command's own reason (the admin gate as "Admin

@@ -64,23 +64,21 @@ STRNCPY = re.compile(r"(?<![\w.])strncpy\s*\(")
 
 # Remaining uses per file. Regenerate with --print-allowances after removing some.
 LOOSE_NUMBER_ALLOWED: dict[str, int] = {
-    "G2_Glasses.cpp": 1,
     "OLED_FirstTimeSetup.cpp": 1,
     "OLED_Mode_Automations.cpp": 2,
     "OLED_RemoteSettings.cpp": 1,
     "OLED_SettingsEditor.cpp": 1,
     "OLED_SetupWizard.cpp": 2,
-    "System_Automation.cpp": 9,
+    "System_Automation.cpp": 3,
     "System_Camera_DVP.cpp": 1,
     "System_ESPNow.cpp": 1,
     "System_ESPSR.cpp": 1,
     "System_FirstTimeSetup.cpp": 2,
-    "System_Microphone.cpp": 2,
+    "System_Microphone.cpp": 1,
     "System_SetupWizard.cpp": 3,
     "System_SetupWizardMode.cpp": 3,
     "WebPage_Bond.cpp": 1,
     "WebPage_LLM.cpp": 4,
-    "WebPage_Maps.cpp": 1,
     "WebServer_Server.cpp": 1,
 }
 ON_OFF_LIST_ALLOWED: dict[str, int] = {

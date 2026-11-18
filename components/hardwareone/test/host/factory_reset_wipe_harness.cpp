@@ -87,16 +87,20 @@ static FakeTimer timerObject;
 static unsigned timersCreated = 0, timersStarted = 0;
 static uint64_t timerDelayUs = 0;
 static esp_timer_cb_t timerCallback = nullptr;
+enum { ESP_OK = 0, ESP_ERR_NO_MEM = 0x101 };
+static bool timerCreateOk = true, timerStartOk = true;
 static int esp_timer_create(const esp_timer_create_args_t* args, esp_timer_handle_t* out) {
+  if (!timerCreateOk) return ESP_ERR_NO_MEM;
   ++timersCreated;
   timerCallback = args->callback;
   *out = &timerObject;
-  return 0;
+  return ESP_OK;
 }
 static int esp_timer_start_once(esp_timer_handle_t, uint64_t us) {
+  if (!timerStartOk) return ESP_ERR_NO_MEM;
   ++timersStarted;
   timerDelayUs = us;
-  return 0;
+  return ESP_OK;
 }
 
 static unsigned rebootIntents = 0;
@@ -271,6 +275,7 @@ static fake_vfs::Fs& populate() {
   quiesces = 0;
   restartsAtQuiesce = 0;
   timersCreated = timersStarted = 0; timerDelayUs = 0; timerCallback = nullptr;
+  timerCreateOk = timerStartOk = true;
   rebootIntents = 0; events.clear(); logLines.clear();
   idRecords = 0; idRecordAt = 0; idRecordOk = true;
   wipeArmed = false; wipeArmOk = true; otaPending = false; wipeArms = wipeDisarms = 0; wipeArmAt = 0;
@@ -422,6 +427,28 @@ static void leftoverSettingsStillReboots() {
   check(fs.liveHandles() == 0);
 }
 
+// The accounts are gone before the restart timer is set up: when it cannot
+// be, the reply says so and names the command that restarts.
+static void unscheduledRestartIsReported() {
+  auto& fs = populate();
+  timerCreateOk = false;
+  const char* reply = factoryreset_confirmed(nullptr);
+  check(startsWith(reply, "Factory reset complete") && !fs.exists(USERS_JSON_FILE));
+  check(std::strstr(reply, "The restart could not be scheduled. Run reboot now.") != nullptr);
+  check(std::strstr(reply, "Rebooting in 1 second") == nullptr);
+  check(timersStarted == 0 && timerCallback == nullptr && ESP.restarts == 0);
+
+  populate();
+  timerStartOk = false;
+  commandContext.origin = ORIGIN_SERIAL;
+  check(std::strcmp(cmd_factoryreset(String("all")), "prompt") == 0);
+  reply = factoryreset_confirmed(capturedUserData);
+  check(startsWith(reply, "Factory reset complete") && wipeArmed);
+  check(std::strstr(reply, "The restart could not be scheduled. Run reboot now:") != nullptr);
+  check(std::strstr(reply, "Rebooting in 1 second") == nullptr && std::strlen(reply) < 319);
+  check(timersCreated == 1 && timersStarted == 0);
+}
+
 static void micDrainFailureTouchesNothing() {
   auto& fs = populate();
   micFinalizeOk = false;
@@ -559,6 +586,7 @@ static const Case kCases[] = {
   {"sdNotMountedKeepsSdFolders", sdNotMountedKeepsSdFolders},
   {"accountDataFailureStopsBeforeRoster", accountDataFailureStopsBeforeRoster},
   {"leftoverSettingsStillReboots", leftoverSettingsStillReboots},
+  {"unscheduledRestartIsReported", unscheduledRestartIsReported},
   {"micDrainFailureTouchesNothing", micDrainFailureTouchesNothing},
   {"promptNamesWhatIsDeleted", promptNamesWhatIsDeleted},
   {"fullWipePromptAndGates", fullWipePromptAndGates},

@@ -254,7 +254,8 @@ def main():
     with tempfile.TemporaryDirectory(prefix='hw1-espnow-bond-partner-') as tmp:
         unit, exe = Path(tmp) / 'espnow_bond_partner_change.cpp', Path(tmp) / 'espnow_bond_partner_change'
         unit.write_text(harness)
-        shutil.copy(a.component / 'System_MacText.h', Path(tmp) / 'System_MacText.h')
+        for name in ('System_MacText.h', 'System_CommandReply.h'):
+            shutil.copy(a.component / name, Path(tmp) / name)
         # The pasted commands keep parameters this harness does not use (the
         # firmware builds without -Wextra).
         cmd = [a.cxx, '-std=c++17', '-Wall', '-Wextra', '-Werror', '-pedantic', '-Wno-unused-function',

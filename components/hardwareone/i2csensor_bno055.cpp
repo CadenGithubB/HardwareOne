@@ -166,7 +166,7 @@ const char* cmd_imu(const String& argsInput) {
                          reading.gyroX, reading.gyroY, reading.gyroZ);
         BROADCAST_PRINTF("Temperature: %.1f°C", reading.imuTemp);
       } else {
-        broadcastOutput("IMU data not yet available");
+        return "Error: IMU data not available yet. Wait a second after openimu and retry.";
       }
     } else {
       return "Error: Failed to access sensor cache";
@@ -283,8 +283,7 @@ const char* cmd_imustart(const String& argsInput) {
 
 const char* cmd_imustop(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!requestSensorStop(I2C_DEVICE_IMU)) return "Error: [IMU] Could not queue stop";
-  return "[IMU] Stop requested; cleanup will complete asynchronously";
+  return cmd_sensorstop_queued(I2C_DEVICE_IMU, "IMU");
 }
 
 const char* cmd_imuactions(const String& argsInput) {
@@ -968,7 +967,8 @@ const char* cmd_imuewmafactor(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String _arg = argsInput; _arg.trim();
   if (_arg.length() == 0) return "Error: invalid arguments — Usage: imuewmafactor <0.0..1.0>";
-  float f = strtof(_arg.c_str(), nullptr);
+  float f = 0;
+  if (!parseFloatArg(_arg, f)) return kCommandReplyNotADecimal;
   if (f < 0.0f || f > 1.0f) return "Error: imuEWMAFactor must be 0..1";
   setSetting(gSettings.imuEwmaFactor, f);
   BROADCAST_PRINTF("imuEWMAFactor set to %.3f", f);
@@ -1010,8 +1010,7 @@ const char* cmd_imudevicepollms(const String& argsInput) {
   if (valStr.length() == 0) return "Error: invalid arguments — Usage: imuDevicePollMs <50..1000>";
   int v = 0;
   if (!parseIntArg(valStr, v)) return kCommandReplyNotANumber;
-  if (v < 50) v = 50;
-  if (v > 1000) v = 1000;
+  if (v < 50 || v > 1000) return "Error: imuDevicePollMs must be 50..1000";
   setSetting(gSettings.imuDevicePollMs, v);
   snprintf(getDebugBuffer(), 1024, "imuDevicePollMs set to %d", v);
   return getDebugBuffer();
@@ -1054,7 +1053,9 @@ const char* cmd_imupitchoffset(const String& argsInput) {
     snprintf(getDebugBuffer(), 1024, "Current imuPitchOffset: %.2f", gSettings.imuPitchOffset);
     return getDebugBuffer();
   }
-  float v = valStr.toFloat();
+  float v = 0;
+  if (!parseFloatArg(valStr, v)) return kCommandReplyNotADecimal;
+  if (v < -180.0f || v > 180.0f) return "Error: imuPitchOffset must be -180..180 degrees.";
   setSetting(gSettings.imuPitchOffset, v);
   snprintf(getDebugBuffer(), 1024, "imuPitchOffset set to %.2f", v);
   return getDebugBuffer();
@@ -1068,7 +1069,9 @@ const char* cmd_imurolloffset(const String& argsInput) {
     snprintf(getDebugBuffer(), 1024, "Current imuRollOffset: %.2f", gSettings.imuRollOffset);
     return getDebugBuffer();
   }
-  float v = valStr.toFloat();
+  float v = 0;
+  if (!parseFloatArg(valStr, v)) return kCommandReplyNotADecimal;
+  if (v < -180.0f || v > 180.0f) return "Error: imuRollOffset must be -180..180 degrees.";
   setSetting(gSettings.imuRollOffset, v);
   snprintf(getDebugBuffer(), 1024, "imuRollOffset set to %.2f", v);
   return getDebugBuffer();
@@ -1082,7 +1085,9 @@ const char* cmd_imuyawoffset(const String& argsInput) {
     snprintf(getDebugBuffer(), 1024, "Current imuYawOffset: %.2f", gSettings.imuYawOffset);
     return getDebugBuffer();
   }
-  float v = valStr.toFloat();
+  float v = 0;
+  if (!parseFloatArg(valStr, v)) return kCommandReplyNotADecimal;
+  if (v < -180.0f || v > 180.0f) return "Error: imuYawOffset must be -180..180 degrees.";
   setSetting(gSettings.imuYawOffset, v);
   getDebugBuffer()[0] = '\0';
   snprintf(getDebugBuffer(), 1024, "imuYawOffset set to %.2f", v);
@@ -1135,9 +1140,9 @@ const CommandEntry imuCommands[] = {
   { "imudevicepollms", "IMU device poll interval: <50..1000>", true, cmd_imudevicepollms, "Usage: imuDevicePollMs <50..1000>" },
   { "imuorientationmode", "IMU orientation mode: <0..8>", true, cmd_imuorientationmode, "Usage: imuorientationmode <0..8>" },
   { "imuorientationcorrection", "IMU orientation correction: <0|1>", true, cmd_imuorientationcorrection, "Usage: imuorientationcorrection <0|1>" },
-  { "imupitchoffset", "IMU pitch offset in degrees (recommended -180..180)", true, cmd_imupitchoffset, "Usage: imupitchoffset <degrees>  (recommended -180..180)" },
-  { "imurolloffset", "IMU roll offset in degrees (recommended -180..180)", true, cmd_imurolloffset, "Usage: imurolloffset <degrees>  (recommended -180..180)" },
-  { "imuyawoffset", "IMU yaw offset in degrees (recommended -180..180)", true, cmd_imuyawoffset, "Usage: imuyawoffset <degrees>  (recommended -180..180)" },
+  { "imupitchoffset", "IMU pitch offset in degrees: <-180..180>", true, cmd_imupitchoffset, "Usage: imupitchoffset <-180..180>" },
+  { "imurolloffset", "IMU roll offset in degrees: <-180..180>", true, cmd_imurolloffset, "Usage: imurolloffset <-180..180>" },
+  { "imuyawoffset", "IMU yaw offset in degrees: <-180..180>", true, cmd_imuyawoffset, "Usage: imuyawoffset <-180..180>" },
   
   // Auto-start
   { "imuautostart", "Enable/disable IMU auto-start after boot [on|off]", false, cmd_imuautostart, "Usage: imuautostart [on|off]" },

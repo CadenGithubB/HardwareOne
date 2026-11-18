@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
+#include "System_CommandReply.h"
 #include <algorithm>
 #include <cassert>
 #include <cstdarg>
@@ -325,10 +326,17 @@ static void statsBoundaryCase(const std::string& scenario) {
   snapshots={{{task(1,"worker",0)},0}};
   if(scenario=="stats-empty") snapshots[0].rows.clear();
   if(scenario=="stats-fail") failAllocation=1;
+  if(scenario=="stats-overflow") {
+    // More rows than the reply buffer holds.
+    snapshots[0].rows.assign(80,task(1,"unknown-task-with-long-name",0)); reportedCount=80;
+  }
   const char* result=cmd_taskstats("taskstats json");
   if(scenario=="stats-zero" || scenario=="stats-fail") {
     CHECK(std::string(result)=="Error: Unable to allocate memory for task statistics");
     CHECK(snapshotCalls==0 && live.empty() && allocCalls==(scenario=="stats-zero" ? 0u : 1u));
+  } else if(scenario=="stats-overflow") {
+    // Refused whole: a cut document is not JSON and has no terminator.
+    CHECK(std::string(result)=="Error: The JSON reply does not fit one message. Run the command without json.");
   } else {
     const auto doc=parse(result); CHECK(doc["total"]==2);
     CHECK(doc["tasks"].size()==(scenario=="stats-empty" ? 0u : 1u));

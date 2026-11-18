@@ -995,7 +995,7 @@ static const char* prepareInteractiveHelp(bool interactive,
     return nullptr;
   }
   if (cliInModeActive()) {
-    return "Error: another interactive session is already active.";
+    return "Error: another interactive session is already active. Type 'exit' or 'cancel' first.";
   }
   HelpModeEntryState copy = entry;
   if (!cliEnterModePrepared(&kHelpMode, commitHelpModeEntry, &copy)) {
@@ -1135,7 +1135,7 @@ static const char* cmd_back(const String& argsInput) {
     gInHelpRender = false;
     return "OK";
   }
-  return "Not in help mode.";
+  return "Error: Not in help mode. Type help first.";
 }
 
 static const char* cmd_exit(const String& argsInput) {
@@ -1147,7 +1147,7 @@ static const char* cmd_exit(const String& argsInput) {
     helpSuppressedPrintAndReset();
     return "OK";
   }
-  return "Already in normal CLI mode.";
+  return "Error: Not in help mode. Type help to open it.";
 }
 
 static const char* cmd_clear(const String& argsInput) {

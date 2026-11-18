@@ -857,7 +857,11 @@ const char* bleUploadJson(char* response, size_t responseSize, bool success,
   if (doc.overflowed()) {
     return "Error: OTA response allocation failed; upload state may have changed";
   }
-  serializeJson(doc, response, responseSize);
+  // serializeJson writes no NUL when the output fills the buffer.
+  const size_t n = serializeJson(doc, response, responseSize);
+  if (n == 0 || n >= responseSize) {
+    return "Error: OTA upload reply does not fit. Run otawrite status again.";
+  }
   return response;
 }
 
@@ -884,7 +888,7 @@ const char* cmdOtaWrite(const String& argsInput) {
   // Allocate both persistent replies before any upload mutation. In particular,
   // finishing an upload must not first try to allocate its reply afterwards.
   PSRAM_STATIC_BUF(error, 192);
-  PSRAM_STATIC_BUF(response, 320);
+  PSRAM_STATIC_BUF(response, 512);
   uint16_t connId = 0;
   if (!currentSecureBleConnection(connId, error, error_SIZE)) return error;
   if (!ensureBleUploadMutex()) return "Error: OTA Bluetooth upload mutex unavailable";
@@ -1073,6 +1077,12 @@ const char* cmdOtaWrite(const String& argsInput) {
     const char* result = bleUploadJson(response, response_SIZE, true, false);
     xSemaphoreGive(gBleUploadMutex);
     return result;
+  }
+
+  // An unknown action or an extra argument is refused whether or not an
+  // upload is active.
+  if (args.count() != 1 || (action != "status" && action != "abort" && action != "finish")) {
+    return "Error: Usage: otawrite begin <candidate|manifest> <size> <sha256> | status | finish | abort";
   }
 
   xSemaphoreTake(gBleUploadMutex, portMAX_DELAY);
@@ -1565,6 +1575,7 @@ const char* cmdOtaStage(const String& argsInput) {
   }
 
   PSRAM_STATIC_BUF(response, 240);
+  response[0] = '\0';  // the buffer keeps the previous call's text
   hw1_ota_record_t record{};
   if (!loadRecord(record, nullptr, true, response, response_SIZE)) return response;
   if (hw1_ota_result_pending(&record)) {
@@ -1609,9 +1620,12 @@ const char* cmdOtaStage(const String& argsInput) {
 
   CandidateInfo promoted{};
   if (!validateCandidate(kCandidatePath, kManifestPath, allowDowngrade,
-                         promoted, response, response_SIZE) ||
-      memcmp(promoted.digest, candidate.digest, sizeof(candidate.digest)) != 0) {
-    return response[0] ? response : "Error: promoted candidate changed during staging";
+                         promoted, response, response_SIZE)) {
+    return response[0] ? response
+                       : "Error: Staged image failed its check after promotion. Upload both .part files again.";
+  }
+  if (memcmp(promoted.digest, candidate.digest, sizeof(candidate.digest)) != 0) {
+    return "Error: Staged image changed while staging. Upload both .part files again.";
   }
 
   uint64_t operationId = (static_cast<uint64_t>(esp_random()) << 32) | esp_random();
@@ -1666,6 +1680,7 @@ const char* cmdOtaUpdate(const String& argsInput) {
   }
 
   PSRAM_STATIC_BUF(response, 240);
+  response[0] = '\0';  // the buffer keeps the previous call's text
   hw1_ota_record_t record{};
   if (!loadRecord(record, nullptr, false, response, response_SIZE)) return response;
   if (record.phase != HW1_OTA_PHASE_REQUESTED || !record.candidate_present ||
@@ -1690,7 +1705,12 @@ const char* cmdOtaUpdate(const String& argsInput) {
       char ignored[96];
       (void)transitionAndCommit(record, HW1_OTA_EVENT_FAIL, &failure,
                                 ignored, sizeof(ignored));
-      return response[0] ? response : "Error: staged candidate no longer matches journal";
+      // The FAIL above leaves a result to acknowledge, and staging renamed
+      // the .part files away, so both come before the next otastage.
+      return response[0] ? response
+                         : "Error: Staged candidate no longer matches the journal. Run otastatus, "
+                           "acknowledge the result with otaack <result-sequence> confirm, upload both "
+                           ".part files again, then run otastage confirm.";
     }
   }
 
@@ -1757,7 +1777,14 @@ const char* cmdOtaCancel(const String& argsInput) {
   hw1_ota_record_t record{};
   if (!loadRecord(record, nullptr, false, response, response_SIZE)) return response;
   if (record.phase != HW1_OTA_PHASE_REQUESTED) {
-    return "Error: only a staged/requested OTA can be canceled safely";
+    const bool nothingStaged = record.phase == HW1_OTA_PHASE_IDLE ||
+                               record.phase == HW1_OTA_PHASE_SUCCEEDED ||
+                               record.phase == HW1_OTA_PHASE_FAILED ||
+                               record.phase == HW1_OTA_PHASE_CANCELED;
+    return nothingStaged
+        ? "Error: No staged OTA request to cancel. Check the OTA state with 'otastatus'."
+        : "Error: Only a staged OTA request can be canceled safely; this update is past that step. "
+          "Check its state with 'otastatus'.";
   }
   hw1_ota_transition_args_t canceled{
       .verified_manifest = nullptr,
@@ -1827,7 +1854,9 @@ const char* cmdOtaAcknowledge(const String& argsInput) {
   PSRAM_STATIC_BUF(response, 192);
   hw1_ota_record_t record{};
   if (!loadRecord(record, nullptr, false, response, response_SIZE)) return response;
-  if (!hw1_ota_result_pending(&record)) return "No pending OTA result to acknowledge";
+  if (!hw1_ota_result_pending(&record)) {
+    return "Error: No pending OTA result to acknowledge. Check otastatus.";
+  }
   if (record.last_result.sequence != sequence) {
     snprintf(response, response_SIZE,
              "Error: pending OTA result is sequence %" PRIu32
@@ -1853,7 +1882,10 @@ const char* unavailable(const String&) {
   return "Error: OTA recovery is unavailable in this build. Rebuild with HW_OTA_LAYOUT=1 on a board in the recovery-OTA registry (feathers3, feathers3_fe, feather_esp32_v2).";
 }
 
-const char* unavailableStatus(const String&) {
+const char* unavailableStatus(const String& argsInput) {
+  String args = argsInput;
+  args.trim();
+  if (args.equalsIgnoreCase("json")) return "{\"v\":1,\"available\":false}";
   return "OTA recovery is unavailable in this build. Rebuild with HW_OTA_LAYOUT=1 on a board in the recovery-OTA registry (feathers3, feathers3_fe, feather_esp32_v2).";
 }
 

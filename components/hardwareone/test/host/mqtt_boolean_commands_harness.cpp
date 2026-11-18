@@ -5,6 +5,8 @@
 #include <string>
 #include <vector>
 
+#include "System_CommandReply.h"  // the shared on/off refusal
+
 // Arduino String storage boundary; parsing remains the real production helper.
 class String : public std::string {
  public:
@@ -151,7 +153,7 @@ static void queryAndInvalid() {
       for (const auto& input : invalid) {
         reset(command, initial, "invalid", input);
         const auto before = gSettings;
-        check(std::string(command.handler(input)) == "Error: Use 0/1, true/false, on/off, or enable/disable",
+        check(std::string(command.handler(input)) == kCommandReplyNotOnOff,
               "invalid input did not return the shared error");
         noEffects(command, before);
       }

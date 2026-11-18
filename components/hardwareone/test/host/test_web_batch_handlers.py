@@ -191,6 +191,10 @@ def main() -> None:
     reader_declarations = re.findall(r"^(?:WebBodyStatus webRecvRequestBody|esp_err_t webSendBodyReadError)\(.*;$",
                                      web_utils_header, re.MULTILINE)
     require(len(reader_declarations) == 2, "shared reader declarations missing from WebServer_Utils.h")
+    remote_sent_constants = re.findall(
+        r'(?m)^static constexpr char kRemoteSent\w+\[\] = "[^"\n]*";$', utils)
+    require(args.baseline is not None or len(remote_sent_constants) == 2,
+            "System_Utils.cpp: the remote: reply constants changed")
     definitions = [
         "#define HAVE_WEB_CONTEXT_HELPER " + str(int(not args.baseline)),
         cmd_input_max.group(0),
@@ -205,6 +209,9 @@ def main() -> None:
         extract_block(web_utils, "esp_err_t webSendBodyReadError("),
         *([] if args.baseline else [extract_block(utils, "CommandContext makeWebCommandContext(")]),
         extract_block(utils, "String redactOutputForLog("),
+        # The remote: reply owner; the bond batch asks its parser for the request id.
+        *([] if args.baseline else [*remote_sent_constants,
+                                    extract_block(utils, "bool parseRemoteCommandSentReqId(")]),
         extract_block(local, "static String redactWebCommandResult("),
         extract_block(local, "esp_err_t handleCliCommand("),
         extract_block(local, "static bool cliBatchCommandEquals("),

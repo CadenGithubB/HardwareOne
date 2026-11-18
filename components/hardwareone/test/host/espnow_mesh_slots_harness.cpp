@@ -25,6 +25,8 @@
 #include <string>
 #include <vector>
 
+#include "System_CommandReply.h"
+
 void webBatchTestStringAppend() {}
 
 static int gFailures = 0;
@@ -146,6 +148,11 @@ static bool meshKeysStretchPassphrase(uint8_t i) {
 static bool meshKeysDerive(uint8_t i) {
   gDerivedValid[i] = true;
   return true;
+}
+struct MeshDerivedKeys {};
+static const MeshDerivedKeys* meshKeysGet(uint8_t i) {
+  static const MeshDerivedKeys keys;
+  return gDerivedValid[i] ? &keys : nullptr;
 }
 static void sodium_memzero(void* p, size_t n) { std::memset(p, 0, n); }
 
@@ -698,6 +705,18 @@ static void testDeleteFreesTheSlot() {
   CHECK(isError(meshesCmd_delete(String("bench"))), "D5 a failed save was reported as success");
   gPersistOk = true;
   CHECK(isError(meshesCmd_delete(String("nosuch"))), "D5 unknown label");
+  // 'add' and 'setdefault' write the settings file once and report a failed save.
+  resetAll();
+  startEspNow();
+  int persistsAtD5 = gPersists;
+  CHECK(!isError(meshesCmd_add(String("lab"))) && gPersists == persistsAtD5 + 1, "D5 'add' did not save once");
+  gPersistOk = false;
+  CHECK(isError(meshesCmd_add(String("work"))), "D5 a failed save of 'add' was reported as success");
+  CHECK(isError(meshesCmd_setdefault(String("lab"))), "D5 a failed save of 'setdefault' was reported as success");
+  gPersistOk = true;
+  persistsAtD5 = gPersists;
+  CHECK(!isError(meshesCmd_setdefault(String("lab"))) && gPersists == persistsAtD5 + 1,
+        "D5 a repeated 'setdefault' did not save after the failed save");
 
   // D6: an empty label (a quoted "" on the command line) matches no mesh, also
   // not an emptied slot: nothing is created, deleted or changed.
@@ -843,8 +862,23 @@ static void testOneDefault() {
   makeBenchLeftover();  // slot 0 disabled, flag left behind by an older firmware's passphrase clear
   CHECK(!isError(meshesCmd_add(String("work"))), "E1 add");
   CHECK(gSettings.meshes[slotOf("work")].isDefault, "E1 the first enabled mesh did not become the default");
+  // A mesh that was disabled at start-up has a passphrase and no derived keys.
+  // Enabling it derives them, so no restart is needed before it signs frames.
+  const bool benchKeyed = gSettings.meshes[0].passphrase.length() > 0;
+  gDerivedValid[0] = false;
   CHECK(!isError(meshesCmd_enable(String("bench"))), "E1 enable");
   CHECK(enabledDefaults() == 1 && gSettings.meshes[slotOf("work")].isDefault, "E1 two enabled defaults, or the default moved");
+  CHECK(gDerivedValid[0] == benchKeyed, "E1 enable did not derive the keys of a mesh with a passphrase (keyed=%d)", (int)benchKeyed);
+
+  // E1b: the same with a passphrase in place, as after a start-up that skipped
+  // the disabled mesh: enable derives the keys.
+  resetAll();
+  CHECK(!isError(meshesCmd_setpassphrase(String("primary"), String("correct-horse"))), "E1b set passphrase");
+  CHECK(!isError(meshesCmd_remove(String("primary"))), "E1b remove");
+  gDerivedValid[0] = false;
+  CHECK(!isError(meshesCmd_enable(String("primary"))), "E1b enable");
+  CHECK(gSettings.meshes[0].passphrase.length() > 0 && gDerivedValid[0],
+        "E1b enable left a mesh with a passphrase without derived keys");
 
   // E2: enabling the only mesh makes it the default again.
   resetAll();

@@ -41,7 +41,8 @@ target_include_directories(clock_confirm_policy_tests PRIVATE ../..)
 target_compile_options(clock_confirm_policy_tests PRIVATE -Wall -Wextra -Werror -pedantic)
 
 # The one checked number parser for command arguments (System_ArgParse.h):
-# decimal whole tokens; only a bus address may be written in hexadecimal.
+# decimal whole tokens; only a bus address and a bit mask may be written in
+# hexadecimal.
 add_executable(arg_parse_tests test_arg_parse.cpp)
 set_target_properties(arg_parse_tests PROPERTIES
   CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
@@ -1661,6 +1662,20 @@ foreach(reader_suite g2_evenai_local g2_llm_reader g2_llm_reader_runtime g2_text
             ${CMAKE_CURRENT_LIST_DIR}/test_${reader_suite}.py
             ${G2_LLM_READER_TEST_ARGS})
 endforeach()
+# g2glasses: the production settings command, RX owner and exact-generation
+# sender against simulated BLE boundaries, with the verdict of each reply.
+add_test(
+  NAME g2_settings_command
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_g2_settings_command.py
+          ${SETUP_MQTT_TEST_ARGS})
+# Recorder and microphone source choice for a requested source: it is used or
+# refused, never swapped for another microphone.
+add_test(
+  NAME mic_requested_source
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_mic_requested_source.py
+          ${G2_LLM_READER_TEST_ARGS})
 # Host-side Terminal projection includes the namespaced ask_user regression.
 find_program(HW1_NODE_EXECUTABLE NAMES node)
 if(HW1_NODE_EXECUTABLE)
@@ -2768,6 +2783,13 @@ add_test(
   NAME automation_ids
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_automation_ids.py
+          ${SETUP_MQTT_TEST_ARGS})
+# CommandArgs key=value reader: a key counts at the start of a token and
+# outside a quoted value.
+add_test(
+  NAME command_args_keys
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_command_args_keys.py
           ${SETUP_MQTT_TEST_ARGS})
 # "Is the clock set" is asked of System_Clock: the mesh time-sync command with
 # the real Clock::isValidEpoch, and source rules for the certificate sites and

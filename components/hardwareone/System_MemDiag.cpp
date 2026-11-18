@@ -7,6 +7,8 @@
 #include <string.h>
 #include <initializer_list>
 
+#include "System_ArgParse.h"
+#include "System_CommandReply.h"
 #include "sdkconfig.h"
 #include "esp_cache.h"
 #include "esp_cpu.h"
@@ -553,42 +555,54 @@ void memDiagVfsWriteEnd() {
 const char* memDiagCommand(const char* args) {
   while (args && *args == ' ') ++args;
   const char* op = (args && *args) ? args : "status";
-  if (!strncmp(op, "arm", 3)) {
+  // The sub-command is the whole first word ("armed" is not "arm").
+  const size_t opLen = strcspn(op, " ");
+  auto opIs = [op, opLen](const char* name) { return strlen(name) == opLen && !strncmp(op, name, opLen); };
+  if (opIs("arm")) {
     sWpWanted = true;
     setArmed(true);
-  } else if (!strncmp(op, "disarm", 6)) {
+  } else if (opIs("disarm")) {
     sWpWanted = false;
     setArmed(false);
-  } else if (!strncmp(op, "check", 5)) {
+  } else if (opIs("check")) {
     memDiagCheckpoint("cmd");
-  } else if (!strncmp(op, "dump", 4)) {
+  } else if (opIs("dump")) {
     logRegistry("cmd");
     logFirstPsramBlocks("cmd");
-  } else if (!strncmp(op, "wptest", 6)) {
+  } else if (opIs("wptest")) {
     // End-to-end check of the watchpoint -> panic -> coredump path: store the same value back into the
     // watched registry. Armed, this panics at the store below; disarmed, it is a no-op.
     if (sVfs && sWpArmed && sWpSize) {
       volatile VfsEntryMirror* e = (volatile VfsEntryMirror*)sBase[0];
       esp_rom_printf("MEMDIAG wptest: storing into slot 0's entry %08x with the watchpoint armed\n", (unsigned)sBase[0]);
       e->offset = e->offset;
-      return "wptest: watchpoint did not fire";
+      return "Error: wptest watchpoint did not fire. Run memdiag status and check wp and armed.";
     }
-    return "wptest: not armed";
-  } else if (!strncmp(op, "psramtest", 9)) {
+    return "Error: wptest needs the watchpoint armed. Run memdiag arm first.";
+  } else if (opIs("psramtest")) {
     unsigned seconds = 60;
-    sscanf(op + 9, "%u", &seconds);
-    if (sPsTestRunning) return "psramtest: already running";
+    const char* arg = op + opLen;
+    while (*arg == ' ') ++arg;
+    if (*arg) {
+      long requested = 0;
+      if (!parseIntArg(arg, requested)) return kCommandReplyNotANumber;
+      if (requested < 1 || requested > 86400) {
+        return "Error: psramtest runs for 1 to 86400 seconds. Give a value in that range.";
+      }
+      seconds = (unsigned)requested;
+    }
+    if (sPsTestRunning) return "Error: psramtest is already running. Wait for it to end.";
     sPsTestRunning = true;
     if (xTaskCreatePinnedToCore(psramTestTask, "psramtest", 3072, (void*)(uintptr_t)seconds, 1, nullptr,
                                 tskNO_AFFINITY) != pdPASS) {
       sPsTestRunning = false;
-      return "psramtest: task create failed";
+      return "Error: psramtest task could not be created. Free memory and retry.";
     }
     return "psramtest: started";
-  } else if (!strncmp(op, "noabort", 7)) {
+  } else if (opIs("noabort")) {
     sAbortOnCorruption = false;
-  } else if (strncmp(op, "status", 6)) {
-    return "Usage: memdiag [status|check|arm|disarm|dump|wptest|psramtest <s>|noabort]";
+  } else if (!opIs("status")) {
+    return "Usage: memdiag [status|check|arm|disarm|dump|wptest|psramtest [seconds]|noabort]";
   }
   int n = snprintf(sReply, sizeof(sReply),
                    "{\"located\":%s,\"s_vfs\":\"%08x\",\"upper_addr\":\"%08x\",\"upper\":%u,\"wp\":\"%08x/%u\","

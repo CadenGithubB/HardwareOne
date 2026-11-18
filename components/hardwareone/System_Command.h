@@ -106,9 +106,18 @@ public:
   // remaining(-1) = the full raw input.
   String remaining(int afterIndex) const;
 
-  // Key=value access (searches raw string for key=...)
+  // Key=value access. A key counts only at the start of a token (start of the
+  // line or after white space) and outside a quoted value: dayofmonth=5 is not
+  // month=5, and an id= inside commands="..." is not this command's id=.
   String value(const String& key)  const;
   bool   hasKey(const String& key) const;
+
+  // Walks the line token by token with the grammar value() reads: a bare
+  // word, a "quoted text", or key=value where the value may be in double
+  // quotes. `cursor` starts at 0. Returns false at the end of the line;
+  // otherwise `start` is the token's offset in raw() and `keyLen` the length
+  // of its key (0 for a token that is not key=value).
+  bool   nextKeyToken(int& cursor, int& start, int& keyLen) const;
 
   // Raw input (trimmed)
   const String& raw() const { return raw_; }

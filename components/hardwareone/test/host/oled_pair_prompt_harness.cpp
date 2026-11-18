@@ -80,9 +80,10 @@ static bool ownerRun(const std::string& line, std::string& reply) {
   }
   if (!pending.active) {
     reply = verb == "espnowaccept"
-                ? "No pending pair request. (Open discovery with 'espnowpairmode' on both.)"
-                : "No pending pair request.";
-    return true;
+                ? "Error: No pending pair request. Open discovery with 'espnowpairmode' on both "
+                  "devices and send the request again."
+                : "Error: No pending pair request. Nothing to reject.";
+    return false;
   }
   if (!arg.empty()) {   // pendingInMatchesArg: a MAC or the name must match the pending request
     uint8_t m[6];
@@ -325,14 +326,19 @@ int main() {
   CHECK(commands.size() == 2 && toasts.size() == 2, "each request is answered and refused once (%zu, %zu)",
         commands.size(), toasts.size());
 
-  // A5: the request expired while the dialog was up: the owner says so, no toast.
+  // A5: the request expired while the dialog was up: the owner refuses the
+  // answer and its reason is toasted once.
   beginCase("A5 expired while open", true, true, OLED_MENU);
   request(kMacX, "peerX");
   frame();
   pending.active = false;           // the owner's 45 s TTL
   pressYes();
   for (int i = 0; i < 10; ++i) frame();
-  CHECK(toasts.empty() && opens == 1 && accepted.empty(), "an expired request answers quietly");
+  CHECK(opens == 1 && accepted.empty(), "an expired request pairs nothing and does not reopen (%d)", opens);
+  CHECK(toasts.size() == 1 &&
+            toasts[0] == "No pending pair request. Open discovery with 'espnowpairmode' on both "
+                         "devices and send the request again.",
+        "an expired request toasts the owner's reason once (%zu)", toasts.size());
 
   // S1: a session boundary drops the dialog without an answer: the next admin
   // session still sees the request, once.

@@ -1584,7 +1584,7 @@ const char* cmd_sensorlog(const String& argsInput) {
   // Handle 'stop' subcommand
   if (subCmd == "stop") {
     if (!sensorLogMarkStopped()) {
-      return "Error: Sensor logging is not running";
+      return "Error: Sensor logging is not running. Start it with 'sensorlog start <filepath>'.";
     }
     systemEventPost(SYSEVT_SENSOR_STOPPED, "Logging");
     broadcastOutput("Sensor logging stop requested; will stop safely");
@@ -1601,9 +1601,23 @@ const char* cmd_sensorlog(const String& argsInput) {
              "Example: sensorlog start /logging_captures/sensors/sensors.txt 1000";
     }
 
+    // A path with a space that is not quoted arrives split: its second half
+    // sits where the interval belongs, or pushes the interval to a fourth
+    // place. Those two get the reason that fits them, not the interval's.
+    if (a.count() > 3) {
+      return "Error: Too many arguments. Put a file path that contains spaces in double quotes: "
+             "sensorlog start \"<filepath>\" [interval_ms].";
+    }
     uint32_t interval = gSensorLogIntervalMs;
-    if (a.has(2)) {
-      interval = sensorLogClampInterval(a.argInt(2, (int)gSensorLogIntervalMs));
+    if (a.has(2) && !parseIntArg(a.arg(2), 100, 3600000, interval)) {
+      long long anyNumber = 0;
+      if (!a.argWasQuoted(1) && !parseIntArg(a.arg(2), anyNumber)) {
+        return "Error: The text after the file path is not an interval in milliseconds. "
+               "If the path contains a space, put it in double quotes: "
+               "sensorlog start \"<filepath>\" [interval_ms].";
+      }
+      return "Error: Interval is not a whole number from 100 to 3600000. "
+             "Give the poll interval in milliseconds, for example 5000.";
     }
     return sensorLogStart(a.arg(1), interval);
   }
@@ -1651,10 +1665,10 @@ const char* cmd_sensorlog(const String& argsInput) {
       return getDebugBuffer();
     }
 
-    size_t newSize = a.argInt(1, 0);
-
-    if (newSize < 10240) return "Error: Max size must be at least 10240 bytes (10KB)";
-    if (newSize > 10485760) return "Error: Max size cannot exceed 10485760 bytes (10MB)";
+    size_t newSize = 0;
+    if (!parseIntArg(a.arg(1), 10240, 10485760, newSize)) {
+      return "Error: Max size is not a whole number from 10240 to 10485760. Give the size in bytes.";
+    }
 
     gSensorLogMaxSize = newSize;
     setSetting(gSettings.sensorLogMaxSize, (int)newSize);
@@ -1673,9 +1687,13 @@ const char* cmd_sensorlog(const String& argsInput) {
       return getDebugBuffer();
     }
 
-    int count = a.argInt(1, 0);
-
-    if (count < 0 || count > 9) return "Error: Rotation count must be 0-9";
+    // 0 deletes the active file at the size cap, so text that is not a number
+    // must never be read as 0.
+    int count = 0;
+    if (!parseIntArg(a.arg(1), 0, 9, count)) {
+      return "Error: Rotation count is not a whole number from 0 to 9. "
+             "Use 1-9 to keep old logs, 0 to keep none.";
+    }
 
     gSensorLogMaxRotations = (uint8_t)count;
     setSetting(gSettings.sensorLogMaxRotations, count);
@@ -1699,9 +1717,11 @@ const char* cmd_sensorlog(const String& argsInput) {
                (unsigned long)gSensorLogIntervalMs);
       return getDebugBuffer();
     }
-    uint32_t ms = (uint32_t)a.argInt(1, (int)gSensorLogIntervalMs);
-    if (ms < 100) ms = 100;
-    if (ms > 3600000) ms = 3600000;
+    uint32_t ms = 0;
+    if (!parseIntArg(a.arg(1), 100, 3600000, ms)) {
+      return "Error: Interval is not a whole number from 100 to 3600000. "
+             "Give the poll interval in milliseconds, for example 5000.";
+    }
     gSensorLogIntervalMs = ms;
     setSetting(gSettings.sensorLogIntervalMs, (int)ms);
     snprintf(getDebugBuffer(), 1024, "Sensor log interval set to %lums", (unsigned long)ms);
@@ -1716,7 +1736,9 @@ const char* cmd_sensorlog(const String& argsInput) {
       setSetting(gSettings.sensorLogAutoStart, newVal);
       return newVal ? "Sensor logging auto-start ENABLED" : "Sensor logging auto-start DISABLED";
     }
-    bool enable = a.argBool(1, false);
+    const int v = parseBoolArg(a.arg(1));
+    if (v < 0) return kCommandReplyNotOnOff;
+    const bool enable = (v == 1);
     setSetting(gSettings.sensorLogAutoStart, enable);
     return enable ? "Sensor logging auto-start ENABLED" : "Sensor logging auto-start DISABLED";
   }
@@ -1794,7 +1816,8 @@ bool healthPollBurstActive(void) {
 #endif
 }
 
-const char* buildHealthStatusJson(char* buf, size_t cap) {
+const char* buildHealthStatusJson(char* buf, size_t cap, bool* complete) {
+  if (complete) *complete = false;
   if (!buf || cap < 3) return "{}";
 #if ENABLE_R1_HEALTH
   G2RingTelemetry t = {};
@@ -1903,9 +1926,11 @@ const char* buildHealthStatusJson(char* buf, size_t cap) {
     snprintf(buf, cap, "{\"schema\":1,\"error\":\"status_overflow\"}");
     return buf;
   }
+  if (complete) *complete = true;
   return j.c_str();
 #else
   snprintf(buf, cap, "{\"schema\":1,\"featureEnabled\":false}");
+  if (complete) *complete = true;
   return buf;
 #endif
 }
@@ -2194,6 +2219,18 @@ static const char* healthLoggingRestartWithCurrentMask() {
 static const char* healthLoggingSet(bool on) {
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
 
+  // A refused restart leaves the change made here in place and the previous
+  // session stopped; the reply says so and carries the logger's reason. The
+  // reason is copied first because it can sit in the debug buffer itself.
+  auto restartRefused = [](const char* state, const char* result, const char* next) -> const char* {
+    char reason[200];
+    snprintf(reason, sizeof(reason), "%s", result ? commandReplyReason(result) : "no reason given");
+    const size_t length = strlen(reason);
+    if (length > 0 && reason[length - 1] == '.') reason[length - 1] = '\0';
+    snprintf(getDebugBuffer(), 1024, "Error: %s (%s). %s", state, reason, next);
+    return getDebugBuffer();
+  };
+
   if (on) {
     if (!gSettings.sensorLogEnabled) {
       return "Error: sensor logging is disabled — run 'sensorlogenabled 1' first";
@@ -2248,7 +2285,8 @@ static const char* healthLoggingSet(bool on) {
                gSensorLogPath.c_str());
       return getDebugBuffer();
     }
-    return result ? result : "Error: Health logging failed to start sensorlog";
+    return restartRefused("Health logging is switched on, but the log did not start", result,
+                          "Fix that, then run 'healthlogging on' again.");
   }
 
   // Off
@@ -2274,7 +2312,8 @@ static const char* healthLoggingSet(bool on) {
   if (commandReplyConfirms(result)) {
     return "SUCCESS: Health logging OFF — R1 removed; other sensors still logging";
   }
-  return result ? result : "SUCCESS: Health logging OFF";
+  return restartRefused("Health logging is off, but sensor logging did not restart for the other sensors",
+                        result, "Run 'sensorlog start <file>' again.");
 }
 
 const char* cmd_healthlogging(const String& argsInput) {
@@ -2313,9 +2352,9 @@ const char* cmd_healthlogging(const String& argsInput) {
                (unsigned)gSettings.healthLoggingPollIntervalSec);
       return getDebugBuffer();
     }
-    int sec = a.argInt(1, 0);
-    if (sec < 60 || sec > 86400) {
-      return "Error: healthlogging interval must be 60..86400 seconds";
+    int sec = 0;
+    if (!parseIntArg(a.arg(1), 60, 86400, sec)) {
+      return "Error: Interval is not a whole number from 60 to 86400. Give the poll interval in seconds.";
     }
     setSetting(gSettings.healthLoggingPollIntervalSec, sec);
     // Reschedule next mine from now so a shorter interval takes effect promptly.
@@ -2344,8 +2383,10 @@ const char* cmd_healthlogmerge(const String& argsInput) {
     return "Error: invalid arguments — Usage: healthlogmerge \"<output>\" \"<in1>\" \"<in2>\" [...] "
            "(output first, then inputs in stitch order; max 9 inputs)";
   }
-  if (a.count() > 10) {  // 1 output + 9 inputs
-    return "Error: too many inputs — max 9 files";
+  // The parser stops at ten tokens (1 output + 9 inputs); text left after the
+  // tenth is an input that would be dropped without a word.
+  if (a.count() == 10 && a.remaining(9).length() > 0) {
+    return "Error: Too many inputs. Merge at most 9 files per call.";
   }
 
   String outName;
@@ -2577,6 +2618,12 @@ const char* cmd_capturecrypt(const String& argsInput) {
       in.close();
       return "Error: input is not a sealed capture (no #HW1ENC magic on line 1)";
     }
+    // Without this device's key every sealed row would come out as the
+    // undecryptable marker, and the reply below would blame another key.
+    if (!captureCryptoEnsureKey()) {
+      in.close();
+      return "Error: This device could not load its capture encryption key (NVS). Retry the export.";
+    }
     // A temporary already at this name is the leftover of an interrupted
     // export; this command owns the name under the lock, so "w" truncates it.
     File out = VFS::openGuarded(temporary, "w", sysCtx, true);
@@ -2625,6 +2672,13 @@ const char* cmd_capturecrypt(const String& argsInput) {
     out.flush();
     const bool complete = inputComplete && !out.getWriteError() && out.size() == expectedBytes;
     out.close();
+    // Nothing readable came out: keep the previous export instead of replacing
+    // it with a file of markers.
+    if (complete && rows > 0 && failedRows == rows) {
+      VFS::removeGuarded(temporary, sysCtx);
+      return "Error: No row could be decrypted, the file was sealed with another key. "
+             "Export it on the device that recorded it.";
+    }
     if (!complete || !VFS::replaceFileGuarded(temporary, outPath, sysCtx)) {
       VFS::removeGuarded(temporary, sysCtx);
       snprintf(buf, 1024, "Error: could not complete output: %s (check .bak on SD after a failed restore)", outPath.c_str());

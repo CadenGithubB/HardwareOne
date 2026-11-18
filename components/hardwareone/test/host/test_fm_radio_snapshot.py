@@ -13,7 +13,7 @@ import re
 import shutil
 import subprocess
 import tempfile
-from test_web_batch_handlers import extract_block, require
+from test_web_batch_handlers import extract_block, require, with_arg_text
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
@@ -54,9 +54,11 @@ def generated(component: Path, baseline: bool) -> str:
         functions += [extract_block(owner, marker) for marker in [
             'void updateFmRadio() ', 'const char* cmd_fmradio_tune(', 'const char* cmd_fmradio_seek(',
             'const char* cmd_fmradio_volume(', 'const char* cmd_fmradio_mute(', 'const char* cmd_fmradio_unmute(']]
-    return ((HERE / 'fm_radio_snapshot_harness.cpp').read_text()
+    unit = ((HERE / 'fm_radio_snapshot_harness.cpp').read_text()
             .replace('// INSERT_TYPES', types).replace('// INSERT_STATE', state)
             .replace('// INSERT_FUNCTIONS', '\n\n'.join(functions)))
+    # The mute command reads its on/off value with the shared parser.
+    return with_arg_text(unit, COMPONENT, on_off="double")
 
 
 def main() -> None:

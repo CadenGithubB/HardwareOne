@@ -1296,7 +1296,7 @@ static void admissionTests() {
   assert(!std::strcmp(cmd_openphone(""),"Error: phone link could not open (configure phone secret first)"));
   assert(pipeStarts==1&&!job&&claimCalls==0);}
  // An already-open pipe that is connected says so, with no new job.
- {reset();ready=true;assert(!std::strcmp(cmd_openphone(""),"Phone: open and connected")&&!job&&claimCalls==0);}
+ {reset();ready=true;assert(!std::strcmp(cmd_openphone(""),"Error: The phone link is already open and connected. Stop it first with 'closephone' to restart it.")&&!job&&claimCalls==0);}
  // `phone pair`: local admin, cooldown before the intent bump, claim
  // before the intent bump, cancel the claim when learning or publishing fails.
  {reset();execAdmin=false;assert(!std::strcmp(phonePairCommand(""),"Error: phone pairing requires an authenticated local admin"));

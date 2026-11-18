@@ -63,6 +63,7 @@ def main():
             executable = Path(temp) / f"commands-{encoder}"
             command = [args.cxx, "-std=c++17", "-Wall", "-Wextra", "-Werror",
                        "-pedantic", f"-DENABLE_ANO_ENCODER={encoder}",
+                       "-I", str(source_dir), "-I", str(COMPONENT),
                        str(unit), "-o", str(executable)]
             if args.sanitize:
                 command[1:1] = ["-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-g"]

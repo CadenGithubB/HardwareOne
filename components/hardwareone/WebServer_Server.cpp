@@ -1465,11 +1465,11 @@ const char* banListJson() {
     }
   }
   doc["count"] = (int)arr.size();
-  if (doc.overflowed()) return "{\"error\":\"out of memory building the ban list\"}";
-  if (!ensureDebugBuffer()) return "{\"error\":\"reply buffer unavailable\"}";
+  if (doc.overflowed()) return kCommandReplyOutOfMemory;
+  if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
   // Whole document or an explicit error; never a truncated one.
   if (measureJson(doc) >= GLOBAL_DEBUG_BUFFER_SIZE) {
-    return "{\"error\":\"ban list too large for the reply buffer\"}";
+    return "Error: Ban list too large for one reply. Remove entries with unban.";
   }
   serializeJson(doc, getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE);
   return getDebugBuffer();
@@ -3519,7 +3519,7 @@ esp_err_t handleCliCommand(httpd_req_t* req) {
     httpd_resp_set_status(req, "401 Unauthorized");
   } else if (!ok && commandReplyIsAdminRefusal(redactedOut.c_str())) {
     httpd_resp_set_status(req, "403 Forbidden");
-  } else if (!ok || redactedOut.startsWith("Empty command")) {
+  } else if (!ok) {
     httpd_resp_set_status(req, "400 Bad Request");
   }
   httpd_resp_send(req, directOut.c_str(), HTTPD_RESP_USE_STRLEN);
@@ -5173,8 +5173,7 @@ class SettingsBatchRequestCleanup {
     bool completed = false;
     const bool commandSucceeded =
         submitAndExecuteSync(finalizer, output, &completed);
-    succeeded_ = completed && commandSucceeded &&
-                 !output.startsWith("[ERROR]");
+    succeeded_ = completed && commandSucceeded;
     if (!succeeded_) {
       // A submitted command may still complete after a synchronous timeout;
       // otherwise the settings-batch expiry tick is the bounded fallback.
@@ -5301,7 +5300,11 @@ esp_err_t handleCliBatch(httpd_req_t* req) {
   respDoc["ok"] = false;
   respDoc["count"] = 0;
   JsonArray results = respDoc["results"].to<JsonArray>();
-  bool resultsBuffered = !results.isNull() && !respDoc.overflowed();
+  // Indexes into results[] of the commands the executor reported as failed,
+  // so that a page does not have to judge a reply by its text.
+  JsonArray failed = respDoc["failed"].to<JsonArray>();
+  bool resultsBuffered =
+      !results.isNull() && !failed.isNull() && !respDoc.overflowed();
   bool batchCommandsCompleted = true;
   bool terminalSettingsSaveConfirmed = false;
   bool batchSessionStillLive =
@@ -5352,6 +5355,7 @@ esp_err_t handleCliBatch(httpd_req_t* req) {
       // Do not retain earlier results after this cookie generation loses
       // authority; a later command in the batch may have revoked it.
       results.clear();
+      failed.clear();
       if (resultsBuffered &&
           !results.add("Error: web session changed before command result delivery.")) {
         resultsBuffered = false;
@@ -5369,11 +5373,30 @@ esp_err_t handleCliBatch(httpd_req_t* req) {
     const String directOut = redactWebCommandResult(
         out, batchSessionStillLive && ctx.sid.length() != 0);
     if (resultsBuffered && !results.add(directOut)) resultsBuffered = false;
+    const bool commandFailed = !commandCompleted || !commandSucceeded;
+    if (commandFailed && resultsBuffered &&
+        !failed.add(static_cast<uint32_t>(results.size() - 1))) {
+      resultsBuffered = false;
+    }
 
     count++;
 
     // If the command killed the HTTP server (e.g. closewifi), bail out
     if (server == NULL) break;
+
+    // An interactive pair whose command was refused, or did not open a
+    // confirmation prompt, ends here: the answer is not run as a command of
+    // its own, and its slot repeats the command's reply.
+    if (interactiveBatch && count == 1 &&
+        (!commandSucceeded ||
+         !cliModeOwnedBySession(ctx.transport, batchSessionEpoch))) {
+      if (resultsBuffered && !results.add(directOut)) resultsBuffered = false;
+      if (commandFailed && resultsBuffered &&
+          !failed.add(static_cast<uint32_t>(results.size() - 1))) {
+        resultsBuffered = false;
+      }
+      break;
+    }
 
     vTaskDelay(pdMS_TO_TICKS(2));
   }
@@ -5402,7 +5425,7 @@ esp_err_t handleCliBatch(httpd_req_t* req) {
     return ESP_OK;
   }
 
-  // Build response: {"ok":true,"count":N,"results":["out0","out1",...]}
+  // Build response: {"ok":true,"count":N,"results":["out0","out1",...],"failed":[i,...]}
   // Use ArduinoJson to safely serialize the output strings (handles escaping)
   respDoc["ok"] = settingsBatchFinalized && batchCommandsCompleted;
   if (!settingsBatchFinalized) {

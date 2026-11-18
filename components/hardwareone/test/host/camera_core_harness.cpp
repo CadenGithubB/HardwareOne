@@ -36,7 +36,12 @@ void systemEventPost(int kind, const char*, const char* = nullptr) {
 }
 #include "camera_core_types.inc"
 bool videoRecording = false;
-void stopVideoRecording() { videoRecording = false; }
+enum class VideoStopResult : uint8_t { NotRecording, Saved, NotSaved, StillFinishing };
+VideoStopResult stopVideoRecording() {
+  const bool was = videoRecording;
+  videoRecording = false;
+  return was ? VideoStopResult::Saved : VideoStopResult::NotRecording;
+}
 class String {
   std::string s;
 public:

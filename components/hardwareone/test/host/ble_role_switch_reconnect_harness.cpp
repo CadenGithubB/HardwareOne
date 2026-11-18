@@ -90,6 +90,7 @@ static struct World {
   bool server = false, client = false, pipeActive = false;
   bool failServerStart = false;  // initBluetooth refuses before any teardown
   bool failServerHost = false;   // initBluetooth closes the client side, then its host start fails
+  bool failAdvStart = false;     // the server is up and the host refuses to advertise
   unsigned clientStarts = 0, serverStarts = 0;
 } world;
 static bool isBleServerInitialized() { return world.server; }
@@ -247,17 +248,33 @@ static bool deinitG2Client() {
   world.client = false;
   return true;
 }
+// The reason a refused server start leaves for the openconsole reply, the
+// reply of a refused advertising start, and the buffer the reply is built in.
+static const char* sBleServerRefusal = "";
+static const char* sBleAdvertiseRefusal = "";
+static char gDebugBuffer[1024];
+static bool ensureDebugBuffer() { return true; }
+static char* getDebugBuffer() { return gDebugBuffer; }
 bool initBluetooth() {
   ++world.serverStarts;
+  sBleServerRefusal = "another Bluetooth role change is running";
   if (world.failServerStart) return false;
   if (!phonePipeStop()) return false;
   if (!deinitG2Client()) return false;
   if (!g2RingClose(/*userInitiated=*/false)) return false;  // the ring owner, as production closes it
+  sBleServerRefusal = "the Bluetooth host or controller did not start";
   if (world.failServerHost) return false;
   world.server = true;
   return true;
 }
-static bool startBleAdvertising() { return true; }
+static bool startBleAdvertising() {
+  if (world.failAdvStart) {
+    sBleAdvertiseRefusal = "Error: Advertising not started: the Bluetooth host refused it. "
+                           "Run closeconsole, then openconsole.";
+    return false;
+  }
+  return true;
+}
 struct PollPauseGuard {};
 bool initG2Client() {
   ++world.clientStarts;
@@ -441,9 +458,10 @@ int main() {
     if (!duringServer) CHECK(std::strcmp(cmd_closering(String()), kRingClosed) == 0);
     openconsole();
     // The server switch closed the ring without the user's stamp; a user's
-    // closering on the closed owner says so and still stamps the intent.
+    // closering on the closed owner refuses with the next step and still
+    // stamps the intent.
     if (duringServer) CHECK(std::strcmp(cmd_closering(String()),
-                                        "RING: already closed (auto-reconnect stays quiet until openring)") == 0);
+                                        "Error: The ring is not open. Open it with openring; auto-reconnect stays off until then.") == 0);
     CHECK(sReconnect[BLE_PEER_R1_RING].userDisconnect && !sReconnect[BLE_PEER_R1_RING].wantReconnect);
     serverMinutes();
     const unsigned admits = pipe::admits;
@@ -524,7 +542,8 @@ int main() {
     glassesUp(); ringUp(); phoneUp();
     world.failServerStart = true;
     CHECK(std::strcmp(cmd_openconsole(String()),
-                      "Error: Failed to start the app console server (the client stack is up; closed devices reconnect)") == 0);
+                      "Error: App console server did not start: another Bluetooth role change is running. "
+                      "The client stack is up and closed devices reconnect.") == 0);
     CHECK(world.client && !world.server && world.pipeActive && gPhoneReady);
     CHECK(gSettings.bleMode == BLE_MODE_G2_CLIENT);  // the saved role is back
     tick(20000);
@@ -545,11 +564,23 @@ int main() {
     glassesUp(); ringUp();
     world.failServerHost = true;
     CHECK(std::strcmp(cmd_openconsole(String()),
-                      "Error: Failed to start the app console server (the client stack is up; closed devices reconnect)") == 0);
+                      "Error: App console server did not start: the Bluetooth host or controller did not start. "
+                      "The client stack is up and closed devices reconnect.") == 0);
     CHECK(!world.server && world.client && gSettings.bleMode == BLE_MODE_G2_CLIENT);
     tick(20000);
     CHECK(jobs(BleConnectKind::RING_SAVED) == 1 && jobs(BleConnectKind::G2_SAVED) == 1);
     std::puts("failed openconsole host start: the glasses and ring it took down come back");
+  }
+  {
+    // The server comes up and the host refuses to advertise: openconsole
+    // answers the advertising refusal, not the started text.
+    world.failServerHost = false;
+    world.failAdvStart = true;
+    const char* reply = cmd_openconsole(String());
+    CHECK(std::strcmp(reply, "Error: Advertising not started: the Bluetooth host refused it. "
+                             "Run closeconsole, then openconsole.") == 0);
+    world.failAdvStart = false;
+    std::puts("openconsole with a refused advertising start answers the refusal");
   }
   std::printf("BLE role switch reconnect: %ld checks passed\n", gChecks);
   return 0;

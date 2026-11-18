@@ -411,9 +411,13 @@ async function ready(mode = 'server', g2Reconnect = false, ringReconnect = false
     await f.advance(100);
     const requestCommand = command + (saved ? ' off' : ' on');
     equal(f.countCommand(requestCommand), 1, 'repeated reconnect events send one command');
-    const reply = saved ? 'Error: change refused; auto-reconnect remains enabled'
-      : 'Auto-reconnect NOT enabled: change refused';
-    f.pendingCommand(requestCommand).resolve(reply);
+    // The device answers a refusal with HTTP 400 and the reply as the body:
+    // `on` without an owner, `off` for a peer that is not registered. The page
+    // itself turns that response into the text it shows.
+    const reply = saved ? "Error: Unknown peer 'r1-ring'. Run blepeers for the peer names."
+      : 'Error: G2 Glasses auto-reconnect not enabled: no owner authority. ' +
+        'Log in and retry, or create the device owner first.';
+    f.pendingCommand(requestCommand).resolve({status: 400, text: reply});
     await flush();
     equal(cb.checked, saved, 'enabled substring in refusal never changes checkbox');
     await f.answerAllStatus(status('client', false, true));

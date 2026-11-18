@@ -43,6 +43,7 @@ struct World {
   std::string connectedSubject, connectedDetail;
   // Radio: advertising, GATT closes, the central TX gate, directed sends.
   unsigned advStarts = 0, advStops = 0, advCommandStarts = 0, serverCloses = 0;
+  bool advStartRefused = false;  // startBleAdvertising() refuses and leaves its reason
   bool gateBusy = false, accessoryPressure = false;
   int gateHeld = 0;
   unsigned gateTries = 0, gateBypasses = 0, activity = 0;
@@ -338,7 +339,18 @@ static void processBleCommandLine(uint16_t, TransportSessionEpoch, const char* d
 static void bleScPoolRelease(BleScDeferred*) { ++w.poolReleases; }
 
 // Server-mode advertising behind `bleadv` and the main loop's stream work.
-static bool startBleAdvertising() { ++w.advCommandStarts; return true; }
+// A refused start leaves its reason in sBleAdvertiseRefusal, as the production
+// function does on each of its false paths. bleadv answers with that text.
+static const char* sBleAdvertiseRefusal = "";
+static const char kAdvHostRefused[] =
+    "Error: Advertising not started: the Bluetooth host refused it. "
+    "Run closeconsole, then openconsole.";
+static bool startBleAdvertising() {
+  ++w.advCommandStarts;
+  if (!w.advStartRefused) return true;
+  sBleAdvertiseRefusal = kAdvHostRefused;
+  return false;
+}
 static void stopBleAdvertising() {}
 static bool bleAdvertising() { return false; }
 static void otaBleUploadHousekeeping() {}
@@ -800,10 +812,10 @@ static void commands() {
   mainLoop();
   // A slot no app has joined is no client: nothing to end.
   const char* reply = cmd_bledisconnect("3");
-  EXPECT(std::strcmp(reply, "Error: No client with that connection id") == 0 && slotIs(5, kPhone),
+  EXPECT(std::strcmp(reply, "Error: No client with that connection id. List the connection ids with 'blestatus'.") == 0 && slotIs(5, kPhone),
          "bledisconnect ended a slot no app had joined");
   reply = cmd_bledisconnect("");
-  EXPECT(std::strcmp(reply, "Error: No client connected") == 0 && slotIs(5, kPhone),
+  EXPECT(std::strcmp(reply, "Error: No app client is connected. Check connections with 'blestatus'.") == 0 && slotIs(5, kPhone),
          "bare bledisconnect ended a slot no app had joined");
   EXPECT(write(kPhone), "test setup: the app joins");
   const TransportSessionEpoch epoch = bleSessionEpochForConnection(kPhone);
@@ -818,14 +830,14 @@ static void commands() {
          "the phone link did not get a fresh session waiting for the app after bledisconnect");
   EXPECT(write(kPhone), "test setup: the app joins again");
   reply = cmd_bledisconnect("0");
-  EXPECT(std::strcmp(reply, "Error: No client with that connection id") == 0 && slotIs(5, kPhone),
+  EXPECT(std::strcmp(reply, "Error: No client with that connection id. List the connection ids with 'blestatus'.") == 0 && slotIs(5, kPhone),
          "bledisconnect on a temple's id touched the console or claimed it");
   reply = cmd_bledisconnect("");
   EXPECT(std::strcmp(reply, kSessionEndedText) == 0 &&
              slots() == 0 && w.serverCloses == 0,
          "bare bledisconnect did not end the phone-link session");
   reply = cmd_bledisconnect("");
-  EXPECT(std::strcmp(reply, "Error: No client connected") == 0, "bare bledisconnect without a slot");
+  EXPECT(std::strcmp(reply, "Error: No app client is connected. Check connections with 'blestatus'.") == 0, "bare bledisconnect without a slot");
   expectInvariants("S5");
 
   // No console host to ask (no server object) and the debug buffer never
@@ -856,6 +868,18 @@ static void commands() {
   sBleConsoleMode.store(hw1console::Mode::Server);
   EXPECT(std::strcmp(cmd_bleadv(""), "Advertising started") == 0 && w.advCommandStarts == 1,
          "server-mode bleadv changed");
+  for (const char* args : {"off", "0", "stpo", "start now"}) {
+    reply = cmd_bleadv(args);
+    EXPECT(std::strcmp(reply, "Error: Unknown bleadv argument. Use start, stop or toggle.") == 0 &&
+               w.advCommandStarts == 1,
+           "bleadv with an unknown argument started advertising");
+  }
+  // A refused start is answered with the reason the start left behind.
+  w.advStartRefused = true;
+  reply = cmd_bleadv("start");
+  EXPECT(std::strcmp(reply, kAdvHostRefused) == 0 && w.advCommandStarts == 2,
+         "bleadv did not answer a refused start with its reason");
+  w.advStartRefused = false;
 }
 
 // S7: bleconsole and its persisted setting.
@@ -1017,7 +1041,7 @@ static void serverMode() {
   EXPECT(w.sessionTicks == 1 && !sBleConsoleAttach.slot.present, "server mode reconciled a console slot");
   disconnect(kRing);
   EXPECT(slots() == 0 && w.disconnectedEvents == 1, "server mode no longer ends an app on its disconnect");
-  EXPECT(std::strcmp(cmd_bledisconnect(""), "Error: No client connected") == 0, "server-mode bledisconnect");
+  EXPECT(std::strcmp(cmd_bledisconnect(""), "Error: No app client is connected. Check connections with 'blestatus'.") == 0, "server-mode bledisconnect");
   connect(kLeft);
   EXPECT(std::strcmp(cmd_bledisconnect(""), "Disconnecting client...") == 0 && w.serverCloses == 1,
          "server-mode bledisconnect no longer closes the app's link");

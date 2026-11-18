@@ -28,13 +28,22 @@ extern bool videoRecording;
 // Start a new recording. Creates /sd/videos/ if missing, opens an AVI file,
 // writes the header skeleton, and spawns the recorder task.
 // Returns false if: camera disabled, SD unavailable, already recording, or
-// file/task creation fails.
-bool startVideoRecording();
+// file/task creation fails. On false, *why (when given) points to a literal
+// "<reason>. <next action>." for the caller's reply.
+bool startVideoRecording(const char** why = nullptr);
+
+// How a stop ended.
+enum class VideoStopResult : uint8_t {
+  NotRecording,    // nothing was recording
+  Saved,           // the clip was finalized on the card
+  NotSaved,        // the recorder stopped but the clip could not be saved
+  StillFinishing,  // the recorder had not finished when the wait ran out
+};
 
 // Stop the active recording. Signals the task to exit, waits for it to
 // finalize the AVI header/index, and closes the file. Safe to call when not
-// recording (no-op).
-void stopVideoRecording();
+// recording (NotRecording).
+VideoStopResult stopVideoRecording();
 
 // Path + frame count of the most recently finalized recording (valid until the
 // next startVideoRecording()). Used for the camerarecord-stop confirmation.

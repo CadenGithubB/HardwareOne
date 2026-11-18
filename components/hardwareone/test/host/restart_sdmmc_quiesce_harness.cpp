@@ -548,7 +548,7 @@ static void mainLoopHttpStopTick() {  // httpServerStopPendingTick once the wait
 static const char* cmd_httpstart(const char*) {
   note("openhttp");
   if (!gNet.linked) return "ERROR: WiFi not connected. Connect to WiFi before starting HTTP server.";
-  if (gNet.http) return "HTTP server is already running";
+  if (gNet.http) return "Error: HTTP server is already running. Stop it first with 'closehttp' to restart it.";
   gNet.http = true;
   return "HTTP server started";
 }

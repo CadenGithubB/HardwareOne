@@ -47,7 +47,7 @@ HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
 # Copied beside the harness, so their own includes find the empty stand-ins.
 REAL = ("OLED_Mode_Bluetooth.cpp", "BLE_LinkStatus.cpp", "BLE_LinkStatus.h", "BLE_LinkStatusCore.h",
-        "OLED_Layout.h", "BLE_PhonePairCode.h",
+        "OLED_Layout.h", "BLE_PhonePairCode.h", "OLED_MessageText.h",
         # The list-label policy the screen's rows draw through (dependency free).
         "OLED_TextFieldCore.h", "OLED_ConsoleCore.h", "System_LLMUtf8.h")
 SYSTEM = {"cstdarg", "cstddef", "cstdint", "cstdio", "cstring", "stddef.h", "stdint.h", "string.h"}

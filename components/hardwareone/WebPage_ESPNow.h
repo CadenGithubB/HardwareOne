@@ -376,7 +376,8 @@ inline void streamEspNowInner(httpd_req_t* req) {
           hw.$('btn-espnow-toggle-mode').style.display = 'none';
           hw.$('en-not-init').style.display = 'flex';
           hw.$('en-panels').style.display = 'none';
-          hw.$('espnow-status-data').style.display = 'none';
+          // The status text stays visible when it says why the last start failed.
+          hw.$('espnow-status-data').style.display = /Last start error:/.test(output) ? 'block' : 'none';
           if (typeof window.espnowStopPolling === 'function') { window.espnowStopPolling(); }
         }
       })
@@ -425,7 +426,7 @@ inline void streamEspNowInner(httpd_req_t* req) {
         }
       })
       .catch(error => {
-        hw.$('espnow-status-data').textContent = 'Error: ' + error;
+        hw.$('espnow-status-data').textContent = 'Error: ' + (error && error.message ? error.message : error);
       });
     };
 
@@ -464,7 +465,8 @@ inline void streamEspNowInner(httpd_req_t* req) {
           hw.$('btn-espnow-toggle-mode').style.display = 'none';
           hw.$('en-not-init').style.display = 'flex';
           hw.$('en-panels').style.display = 'none';
-          hw.$('espnow-status-data').style.display = 'none';
+          // The status text stays visible when it says why the last start failed.
+          hw.$('espnow-status-data').style.display = /Last start error:/.test(output) ? 'block' : 'none';
           if (typeof window.espnowStopPolling === 'function') window.espnowStopPolling();
         }
 
@@ -919,7 +921,9 @@ inline void streamEspNowInner(httpd_req_t* req) {
         btn.style.color = '';
       } else {
         window.autoTopoInterval = setInterval(function() {
-          hw.postFormText('/api/cli', { cmd: 'espnowmeshtopo' });
+          // A refused run (topology busy, no peer took the request) is an
+          // HTTP 400 and rejects. The next run is the retry.
+          hw.postFormText('/api/cli', { cmd: 'espnowmeshtopo' }).catch(function() {});
         }, 30000); // Every 30 seconds
         btn.textContent = 'Auto-Discover: ON';
         btn.style.background = '';
@@ -996,7 +1000,7 @@ inline void streamEspNowInner(httpd_req_t* req) {
       .catch(error => {
         console.error('[ESP-NOW] Mesh role fetch error:', error);
         var statusDiv = hw.$('mesh-role-status');
-        hw.setHTML(statusDiv, '<span style="color:var(--danger);">Error: ' + error + '</span>');
+        hw.setHTML(statusDiv, '<span style="color:var(--danger);">Error: ' + window.topologyEscapeHtml(error && error.message ? error.message : String(error)) + '</span>');
       });
     };
     
@@ -1107,14 +1111,19 @@ inline void streamEspNowInner(httpd_req_t* req) {
             }
           })
           .catch(function() {
-            clearInterval(window.__topoDiscoveryInterval);
-            window.__topoDiscoveryInterval = null;
+            // A refused read (results busy) is retried with the next poll.
+            if (pollCount >= 5) {
+              clearInterval(window.__topoDiscoveryInterval);
+              window.__topoDiscoveryInterval = null;
+            }
           });
         }, 2000);
       })
       .catch(error => {
         console.error('[ESP-NOW] Topology discovery error:', error);
-        hw.setHTML(resultsDiv, '<span style="color:var(--danger);">Error: ' + error + '</span>');
+        // A refused command rejects with the firmware's reason as the message
+        // (its "Error: " lead already taken off).
+        hw.setHTML(resultsDiv, '<span style="color:var(--danger);">Error: ' + window.topologyEscapeHtml(error && error.message ? error.message : String(error)) + '</span>');
       });
     };
     
@@ -1155,7 +1164,7 @@ inline void streamEspNowInner(httpd_req_t* req) {
           }
         })
         .catch(error => {
-          hw.$('espnow-status-data').textContent = 'Error: ' + error;
+          hw.$('espnow-status-data').textContent = 'Error: ' + (error && error.message ? error.message : error);
         });
       });
       hw.$('btn-espnow-disable').addEventListener('click', async function() {
@@ -1168,7 +1177,7 @@ inline void streamEspNowInner(httpd_req_t* req) {
           refreshStatus();
         })
         .catch(error => {
-          hw.$('espnow-status-data').textContent = 'Error: ' + error;
+          hw.$('espnow-status-data').textContent = 'Error: ' + (error && error.message ? error.message : error);
         });
       });
       hw.$('btn-espnow-refresh').addEventListener('click', refreshStatus);
@@ -1213,6 +1222,8 @@ inline void streamEspNowInner(httpd_req_t* req) {
         })
         .catch(error => {
           console.error('[ESP-NOW] Pair error:', error);
+          // A refused pair can leave the device paired until restart: show it.
+          listDevices();
         });
       });
       hw.$('btn-pair-secure').addEventListener('click', function() {
@@ -1232,6 +1243,8 @@ inline void streamEspNowInner(httpd_req_t* req) {
         })
         .catch(error => {
           console.error('[ESP-NOW] Secure pair error:', error);
+          // A refused pair can leave the device paired until restart: show it.
+          listDevices();
         });
       });
       hw.$('btn-refresh-mesh').addEventListener('click', function() {
@@ -1345,7 +1358,7 @@ inline void streamEspNowInner(httpd_req_t* req) {
           }
         })
         .catch(error => {
-          errorDiv.textContent = 'Error: ' + error;
+          errorDiv.textContent = 'Error: ' + (error && error.message ? error.message : error);
           errorDiv.style.display = 'block';
         });
       });
@@ -1441,7 +1454,7 @@ inline void streamEspNowInner(httpd_req_t* req) {
       })
       .catch(function(error) {
         var statusDiv = hw.$('channel-status');
-        hw.setHTML(statusDiv, '<span style="color:var(--danger);">Error: ' + error + '</span>');
+        hw.setHTML(statusDiv, '<span style="color:var(--danger);">Error: ' + window.topologyEscapeHtml(error && error.message ? error.message : String(error)) + '</span>');
       });
     };
 
@@ -1590,17 +1603,33 @@ inline void streamEspNowInner(httpd_req_t* req) {
     // ---- CLI command bridge -------------------------------------------------
     // All mesh management actions go through this — fires the CLI command,
     // logs the response, then refreshes the meshes table.
+    // A refused command is an HTTP 400 and arrives as a rejection: its reason
+    // is shown here and the tables are refreshed all the same, because a
+    // command that failed at the save has still changed the mesh in RAM. The
+    // rejection is passed on so a caller's .then does not run; every caller
+    // ends its chain with .catch(meshCmdFailureShown).
     function fireMeshCmd(cmd, logTag) {
-      return hw.postFormText('/api/cli', { cmd: cmd })
-      .then(function(text) {
-        console.log('[MESH] ' + (logTag || '') + ': ' + text);
+      function refreshTables() {
         if (typeof window.loadMeshes === 'function') window.loadMeshes();
         // Refresh device list too — meshId stamping or mesh enable state may
         // change which peers are reachable / how badges render.
         if (typeof window.listDevices === 'function') window.listDevices();
+      }
+      return hw.postFormText('/api/cli', { cmd: cmd })
+      .then(function(text) {
+        console.log('[MESH] ' + (logTag || '') + ': ' + text);
+        refreshTables();
         return text;
+      }, function(e) {
+        console.warn('[MESH] ' + (logTag || '') + ' failed:', e);
+        // The page is on its way to the login screen: nothing to show.
+        if (e && e.message === 'auth_required') throw e;
+        refreshTables();
+        alert((e && e.reply) ? String(e.reply).trim() : ('Error: ' + (e && e.message ? e.message : e)));
+        throw e;
       });
     }
+    function meshCmdFailureShown() {}
 
     // ---- Per-row inline action panel ---------------------------------------
     function renderActionPanel(slot, label, isDefault, hasPassphrase) {
@@ -1728,23 +1757,21 @@ inline void streamEspNowInner(httpd_req_t* req) {
           if (!lbl) { alert('Please enter a mesh label'); return; }
           fireMeshCmd('espnowmeshes add ' + lbl, 'MESH_ADD').then(function() {
             if (inp) inp.value = '';
-          });
+          }).catch(meshCmdFailureShown);
           return;
         }
         // Re-enable a disabled mesh
         if (t.classList.contains('btn-mesh-enable')) {
           if (!label) return;
-          fireMeshCmd('espnowmeshes enable ' + label, 'MESH_ENABLE');
+          fireMeshCmd('espnowmeshes enable ' + label, 'MESH_ENABLE').catch(meshCmdFailureShown);
           return;
         }
         // Delete a disabled mesh: frees its slot. The firmware refuses while
-        // paired devices still belong to it, so show its answer.
+        // paired devices still belong to it; fireMeshCmd shows that answer.
         if (t.classList.contains('btn-mesh-delete')) {
           if (!label) return;
           if (!confirm('Delete mesh "' + label + '"? Its label and passphrase are erased and the slot becomes free.')) return;
-          fireMeshCmd('espnowmeshes delete ' + label, 'MESH_DELETE').then(function(text) {
-            if (/^Error/.test(String(text || ''))) alert(text);
-          });
+          fireMeshCmd('espnowmeshes delete ' + label, 'MESH_DELETE').catch(meshCmdFailureShown);
           return;
         }
         // Open/close action panel
@@ -1767,11 +1794,14 @@ inline void streamEspNowInner(httpd_req_t* req) {
           var pw = passInp ? passInp.value : '';
           if (!pw) { alert('Please enter a passphrase'); return; }
           if (pw.length < 8) { alert('Passphrase must be at least 8 characters'); return; }
+          // The passphrase is sent in double quotes and the CLI has no escape
+          // for one inside them, so the firmware refuses such a passphrase.
+          if (pw.indexOf('"') >= 0) { alert('The passphrase cannot contain a double quote'); return; }
           // Wrap in quotes so the CLI parser keeps it as a single token. The
           // answer says what applies now and what other devices need, so show it.
           fireMeshCmd('espnowsetpassphrase ' + label + ' "' + pw + '"', 'MESH_PASS').then(function(text) {
             if (text) alert(text);
-          });
+          }).catch(meshCmdFailureShown);
           return;
         }
         // Clear passphrase
@@ -1784,7 +1814,7 @@ inline void streamEspNowInner(httpd_req_t* req) {
           if (!confirm(clearMsg)) return;
           fireMeshCmd('espnowsetpassphrase ' + label + ' clear', 'MESH_PASS_CLEAR').then(function(text) {
             if (text) alert(text);
-          });
+          }).catch(meshCmdFailureShown);
           return;
         }
         // Rename — opens inline form
@@ -1799,7 +1829,7 @@ inline void streamEspNowInner(httpd_req_t* req) {
           var newLabel = nameInp ? nameInp.value.trim() : '';
           if (!newLabel) { alert('Please enter a new label'); return; }
           if (newLabel === oldLabel) { clearSubform(slot); return; }
-          fireMeshCmd('espnowmeshes rename ' + oldLabel + ' ' + newLabel, 'MESH_RENAME');
+          fireMeshCmd('espnowmeshes rename ' + oldLabel + ' ' + newLabel, 'MESH_RENAME').catch(meshCmdFailureShown);
           return;
         }
         // Cancel sub-form
@@ -1809,13 +1839,13 @@ inline void streamEspNowInner(httpd_req_t* req) {
         }
         // Set as default
         if (t.classList.contains('btn-mesh-setdefault')) {
-          fireMeshCmd('espnowmeshes setdefault ' + label, 'MESH_DEFAULT');
+          fireMeshCmd('espnowmeshes setdefault ' + label, 'MESH_DEFAULT').catch(meshCmdFailureShown);
           return;
         }
         // Disable (alias for remove — soft delete)
         if (t.classList.contains('btn-mesh-disable')) {
           if (!confirm('Disable mesh "' + label + '"? Paired peers in this mesh will stop receiving frames until you re-enable it.')) return;
-          fireMeshCmd('espnowmeshes disable ' + label, 'MESH_DISABLE');
+          fireMeshCmd('espnowmeshes disable ' + label, 'MESH_DISABLE').catch(meshCmdFailureShown);
           return;
         }
       });

@@ -105,7 +105,7 @@ def delete_takes_ctx(baseline: Path | None) -> bool:
     """True when deleteImage takes the caller's AuthContext (saved sources may predate it)."""
     path = baseline / "System_ImageManager.h" if baseline and (baseline / "System_ImageManager.h").exists() \
         else COMPONENT / "System_ImageManager.h"
-    return "deleteImage(const String& path, const AuthContext& ctx)" in path.read_text()
+    return "deleteImage(const String& path, const AuthContext& ctx" in path.read_text()
 
 
 def main() -> None:
@@ -124,6 +124,7 @@ def main() -> None:
                    "-Wno-unused-function", "-Wno-unused-parameter",
                    f"-DIMAGE_DELETE_TAKES_CTX={int(delete_takes_ctx(args.baseline))}",
                    "-I", str(COMPONENT.parent / "hardwareone_libs/ArduinoJson/src"),
+                   "-I", str(COMPONENT),  # System_CommandReply.h
                    str(source), "-o", str(binary)]
         if args.sanitize:
             command[1:1] = ["-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-g"]

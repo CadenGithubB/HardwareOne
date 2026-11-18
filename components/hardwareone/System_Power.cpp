@@ -18,7 +18,7 @@
 #include "System_Events.h"  // systemEventPost — event register producer
 #include "System_MemUtil.h"    // ps_alloc / PSRAM_JSON_DOC — `power json` blob
 #include "System_OTASafety.h"  // otaSafetyIsPendingVerification — sleep gate
-#include "System_Utils.h"      // argWantsJson() — opt-in JSON output
+#include "System_Utils.h"      // RETURN_VALID_IF_VALIDATE_CSTR, parseIntArg
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <freertos/task.h>
@@ -443,8 +443,10 @@ const char* cmd_power(const String& argsInput) {
 
   // Structured path: the whole power snapshot as one verbatim JSON blob, no
   // broadcastOutput (interleaving the stream and the blob makes it
-  // unparseable). Same builder the web /api/power/status uses.
-  if (argWantsJson(argsInput)) {
+  // unparseable). Same builder the web /api/power/status uses. Only when json
+  // stands alone: with a sub-command the sub-command runs and judges the rest.
+  CommandArgs a(argsInput);
+  if (a.count() == 1 && a.arg(0).equalsIgnoreCase("json")) {
     PSRAM_JSON_DOC(doc);
     buildPowerJson(doc);
     // Worst case (widest numbers, longest mode names, "recording" boost)
@@ -455,7 +457,7 @@ const char* cmd_power(const String& argsInput) {
     // fails below 64 B of headroom.
     static char* jbuf = nullptr;
     if (!jbuf) jbuf = (char*)ps_alloc(1024, AllocPref::PreferPsram, "power.json");
-    if (!jbuf) return "{\"error\":\"oom\"}";
+    if (!jbuf) return kCommandReplyOutOfMemory;
     serializeJson(doc, jbuf, 1024);
     return jbuf;
   }
@@ -463,8 +465,7 @@ const char* cmd_power(const String& argsInput) {
   DEBUG_SYSTEMF("[POWER_CMD] cmd_power called with: '%s'", argsInput.c_str());
   
   
-  // Parse command args: "" or "mode [name]" or "auto [on|off]"
-  CommandArgs a(argsInput);
+  // Command args: "" or "mode [name]" or "auto [on|off]"
   DEBUG_SYSTEMF("[POWER_CMD] args after trim: '%s'", a.raw().c_str());
 
   if (a.count() == 0) {
@@ -777,6 +778,7 @@ void powerPolicyTick() {
 //   no arg → print current value
 //   ms     → set new cooldown (0..60000); persisted via setSetting
 static const char* cmd_powercooldown(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   String arg = argsInput; arg.trim();
   if (arg.length() == 0) {
@@ -803,6 +805,7 @@ static const char* cmd_powercooldown(const String& argsInput) {
 //             up (CPU drops to its mode-dependent idle floor) so the device stays
 //             reachable while the screen is dark.
 static const char* cmd_powersave(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   String arg = argsInput; arg.trim();
   if (arg.length() == 0) {
@@ -825,11 +828,29 @@ static const char* cmd_powersave(const String& argsInput) {
 
 // Immediate normal display-idle path, not MCU light/deep sleep.
 static const char* cmd_powersleep(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
   String arg = argsInput; arg.trim();
   if (arg.length()) return "Error: Usage: powersleep";
-  if (!powerRequestDisplayIdle())
-    return "Error: idle unavailable (display absent/asleep, busy, cooldown or OTA probation)";
+#if ENABLE_OLED_DISPLAY
+  // Name the one cause that applies; powerRequestDisplayIdle() runs the same
+  // tests in the same order.
+  if (!powerLocalDisplayAwake()) {
+    return "Error: The display is already idle. Wake it with a touch or a button press (there is no wake command).";
+  }
+  if (powerWorkloadBoost()) {
+    return "Error: A transcription, camera or recording is running. Retry when it ends.";
+  }
+  if (!powerSleepTransitionAllowed(nullptr)) {
+    return "Error: Sleep cooldown is active. Retry in a few seconds, or tune it with powercooldown.";
+  }
+  if (otaSafetyIsPendingVerification()) {
+    return "Error: An update is waiting to be confirmed. Retry after it is confirmed.";
+  }
+  if (!powerRequestDisplayIdle()) return "Error: Display idle was refused. Retry powersleep.";
   return "Display idle requested; touch or local input wakes it. Timeout unchanged.";
+#else
+  return "Error: This build has no local display. Use powersave for the idle timeout.";
+#endif
 }
 
 // Command table

@@ -164,12 +164,17 @@ const char* cmd_versions(const String& argsInput) {
   const bool json = argWantsJson(argsInput);
   PSRAM_STATIC_BUF(reply, 3072);
   hw1versions::List* list = newList();
-  if (!list) return json ? "{\"error\":\"oom\"}" : "Error: out of memory. Try again.";
+  if (!list) return kCommandReplyOutOfMemory;
   versionsCollect(*list);
   const size_t written = json ? hw1versions::formatJson(*list, reply, reply_SIZE)
                               : hw1versions::formatText(*list, reply, reply_SIZE);
   freeList(list);
-  if (!written) return json ? "{\"error\":\"versions too large\"}" : "Error: versions too large.";
+  // A list that does not fit is refused whole, as an Error in both forms: a
+  // reply that leads with '{' reads as a success.
+  if (!written) {
+    return json ? "Error: The version list does not fit one reply. Run versions without json."
+                : "Error: The version list does not fit one reply. Run versions json.";
+  }
   return reply;
 }
 

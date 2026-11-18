@@ -129,10 +129,10 @@ void espnowSaturationReset() {
   gAckRttMaxMs = 0;
 }
 
-void espnowSaturationReport() {
+bool espnowSaturationReport() {
   if (!gEspNow) {
     BROADCAST_PRINTF("ESP-NOW not initialized");
-    return;
+    return false;
   }
 
   Sample ringSnapshot[kWindowSamples];
@@ -142,7 +142,7 @@ void espnowSaturationReport() {
     StateGuard guard;
     if (!guard.held()) {
       BROADCAST_PRINTF("ESP-NOW Saturation: state unavailable");
-      return;
+      return false;
     }
     memcpy(ringSnapshot, gRing, sizeof(ringSnapshot));
     ringHead = gRingHead;
@@ -151,7 +151,7 @@ void espnowSaturationReport() {
 
   if (ringFill < 2) {
     BROADCAST_PRINTF("ESP-NOW Saturation: not enough samples yet (need ≥2s; have %us)", ringFill);
-    return;
+    return false;
   }
 
   // Oldest sample in window = the slot just past head when full, or slot 0 when
@@ -233,6 +233,7 @@ void espnowSaturationReport() {
   } else {
     BROADCAST_PRINTF("  ACK RTT:   (no broadcast RTTs sampled in window)");
   }
+  return true;
 }
 
 #endif  // ENABLE_ESPNOW

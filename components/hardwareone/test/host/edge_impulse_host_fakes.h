@@ -71,6 +71,12 @@ struct FakeEsp {
 };
 inline FakeEsp ESP;
 inline bool psramFound() { return true; }
+
+// The shared 4 KB reply buffer of System_Debug.
+constexpr size_t GLOBAL_DEBUG_BUFFER_SIZE = 4096;
+inline char gEiTestDebugBuffer[GLOBAL_DEBUG_BUFFER_SIZE];
+inline bool ensureDebugBuffer() { return true; }
+inline char* getDebugBuffer() { return gEiTestDebugBuffer; }
 inline int xPortGetCoreID() { return 1; }
 
 inline std::atomic<uint32_t> gFakeMillis{1000};

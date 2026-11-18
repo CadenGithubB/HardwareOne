@@ -405,8 +405,19 @@ const char* cmd_ledeffect(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   CommandArgs a(argsInput);
+  static const char* const kTooManyArgs =
+      "Error: Too many arguments. Usage: ledeffect <fade|pulse|blink|rainbow|strobe|off> [color] [color2] [duration 100..60000]";
 
-  if (a.count() == 0 || a.arg(0) == "off" || a.arg(0) == "none") {
+  if (a.count() == 0) {
+    return "Usage: ledeffect <fade|pulse|blink|rainbow|strobe|off> [color] [color2] [duration 100..60000]";
+  }
+
+  // Parse effect type
+  String effectType = a.arg(0);
+  effectType.toLowerCase();
+
+  if (effectType == "off" || effectType == "none") {
+    if (a.count() > 1) return kTooManyArgs;
     // Genuinely cancels now — with the old blocking engine this branch could
     // never run mid-effect because cmd_exec was busy inside the delay loop.
     ledEffectStop(false);
@@ -414,62 +425,28 @@ const char* cmd_ledeffect(const String& argsInput) {
     return "LED effect: off";
   }
 
-  // Parse effect type
-  String effectType = a.arg(0);
-  effectType.toLowerCase();
-
-  String remaining = a.remaining(0);
-
   // Default values
   RGB color1 = {255, 0, 0};     // Red
   RGB color2 = {0, 0, 255};     // Blue
   unsigned long duration = 3000;  // 3 seconds
 
-  // Parse optional color and duration arguments
-  if (remaining.length() > 0) {
-    int secondSpace = remaining.indexOf(' ');
-    String firstArg = (secondSpace >= 0) ? remaining.substring(0, secondSpace) : remaining;
-    firstArg.trim();
-
-    if (firstArg.length() > 0 && isdigit(firstArg.charAt(0))) {
-      if (!parseIntArg(firstArg, duration)) return kCommandReplyNotANumber;
-      if (duration < 100) duration = 100;
-      if (duration > 60000) duration = 60000;
-    } else {
-      if (!getRgbFromName(firstArg, color1)) {
-        if (!ensureDebugBuffer()) return "Error: Unknown color";
-        snprintf(getDebugBuffer(), 1024, "Error: Unknown color '%s'", firstArg.c_str());
-        return getDebugBuffer();
-      }
-
-      // Parse second color or duration
-      if (secondSpace >= 0) {
-        String rest = remaining.substring(secondSpace + 1);
-        rest.trim();
-        int thirdSpace = rest.indexOf(' ');
-        String secondArg = (thirdSpace >= 0) ? rest.substring(0, thirdSpace) : rest;
-
-        if (secondArg.length() > 0 && !isdigit(secondArg.charAt(0))) {
-          if (!getRgbFromName(secondArg, color2)) {
-            if (!ensureDebugBuffer()) return "Error: Unknown color";
-            snprintf(getDebugBuffer(), 1024, "Error: Unknown color '%s'", secondArg.c_str());
-            return getDebugBuffer();
-          }
-
-          if (thirdSpace >= 0) {
-            String durationStr = rest.substring(thirdSpace + 1);
-            if (!parseIntArg(durationStr, duration)) return kCommandReplyNotANumber;
-            if (duration < 100) duration = 100;
-            if (duration > 60000) duration = 60000;
-          }
-        } else if (secondArg.length() > 0) {
-          if (!parseIntArg(secondArg, duration)) return kCommandReplyNotANumber;
-          if (duration < 100) duration = 100;
-          if (duration > 60000) duration = 60000;
-        }
-      }
+  // Optional arguments: up to two color names, then a duration. A token that
+  // starts with a digit is the duration and has to be the last one.
+  RGB* const colors[2] = { &color1, &color2 };
+  int next = 1;
+  for (int c = 0; c < 2 && next < a.count() && !isdigit(a.arg(next).charAt(0)); ++c, ++next) {
+    if (!getRgbFromName(a.arg(next), *colors[c])) {
+      if (!ensureDebugBuffer()) return "Error: Unknown color";
+      snprintf(getDebugBuffer(), 1024, "Error: Unknown color '%s'", a.arg(next).c_str());
+      return getDebugBuffer();
     }
   }
+  if (next < a.count()) {
+    if (!parseIntArg(a.arg(next), duration)) return kCommandReplyNotANumber;
+    if (duration < 100 || duration > 60000) return "Error: LED effect duration must be 100..60000 ms";
+    ++next;
+  }
+  if (next < a.count()) return kTooManyArgs;
 
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
 
@@ -477,7 +454,7 @@ const char* cmd_ledeffect(const String& argsInput) {
   // G2 pickers render, so the surfaces can't drift from the parser).
   const int effectCode = ledEffectCodeForName(effectType);
   if (effectCode == EFFECT_NONE) {
-    snprintf(getDebugBuffer(), 1024, "Error: Unknown effect: %s. Options: fade, pulse, blink, rainbow, strobe", effectType.c_str());
+    snprintf(getDebugBuffer(), 1024, "Error: Unknown effect: %s. Options: fade, pulse, blink, rainbow, strobe, off", effectType.c_str());
     return getDebugBuffer();
   }
 
@@ -554,7 +531,14 @@ static const char* cmd_hardwareled_startupcolor(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   String arg = argsInput; arg.trim();
-  if (arg.length() == 0) return "Error: invalid arguments — Usage: ledstartupcolor <color name|off>  (any of ~80 named colors; unknown names default to cyan)";
+  if (arg.length() == 0) return "Error: invalid arguments — Usage: ledstartupcolor <color name|off>  (any of ~80 named colors)";
+  RGB unused;
+  if (!getRgbFromName(arg, unused)) {
+    snprintf(getDebugBuffer(), 1024,
+             "Error: Unknown color '%.40s'. Use a named color such as red, cyan, orange, gold or off.",
+             arg.c_str());
+    return getDebugBuffer();
+  }
   setSetting(gSettings.ledStartupColor, arg.c_str());
   snprintf(getDebugBuffer(), 1024, "LED startup color set to %s", gSettings.ledStartupColor.c_str());
   return getDebugBuffer();
@@ -564,7 +548,14 @@ static const char* cmd_hardwareled_startupcolor2(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   String arg = argsInput; arg.trim();
-  if (arg.length() == 0) return "Error: invalid arguments — Usage: ledstartupcolor2 <color name|off>  (any of ~80 named colors; unknown names default to magenta)";
+  if (arg.length() == 0) return "Error: invalid arguments — Usage: ledstartupcolor2 <color name|off>  (any of ~80 named colors)";
+  RGB unused;
+  if (!getRgbFromName(arg, unused)) {
+    snprintf(getDebugBuffer(), 1024,
+             "Error: Unknown color '%.40s'. Use a named color such as red, cyan, orange, gold or off.",
+             arg.c_str());
+    return getDebugBuffer();
+  }
   setSetting(gSettings.ledStartupColor2, arg.c_str());
   snprintf(getDebugBuffer(), 1024, "LED startup color 2 set to %s", gSettings.ledStartupColor2.c_str());
   return getDebugBuffer();
@@ -592,8 +583,8 @@ extern const CommandEntry ledCommands[] = {
   { "ledbrightness",        "Set LED brightness 0-100.",                      false, cmd_hardwareled_brightness,    "Usage: ledbrightness <0..100>" },
   { "ledstartupenabled",    "Enable/disable LED startup effect [0|1].",        false, cmd_hardwareled_startupenabled,"Usage: ledstartupenabled <0|1>" },
   { "ledstartupeffect",     "Set LED startup effect [none|rainbow|pulse|fade|blink|strobe].",   false, cmd_hardwareled_startupeffect, "Usage: ledstartupeffect <none|rainbow|pulse|fade|blink|strobe>" },
-  { "ledstartupcolor",      "Set LED startup primary color (any of ~80 named colors or 'off'; unknown defaults to cyan).",                  false, cmd_hardwareled_startupcolor,  "Usage: ledstartupcolor <color name|off>  (any of ~80 named colors; unknown names default to cyan)" },
-  { "ledstartupcolor2",     "Set LED startup secondary color (any of ~80 named colors or 'off'; unknown defaults to magenta).",                false, cmd_hardwareled_startupcolor2, "Usage: ledstartupcolor2 <color name|off>  (any of ~80 named colors; unknown names default to magenta)" },
+  { "ledstartupcolor",      "Set LED startup primary color (any of ~80 named colors or 'off'; an unknown name is refused).",                  false, cmd_hardwareled_startupcolor,  "Usage: ledstartupcolor <color name|off>  (any of ~80 named colors)" },
+  { "ledstartupcolor2",     "Set LED startup secondary color (any of ~80 named colors or 'off'; an unknown name is refused).",                false, cmd_hardwareled_startupcolor2, "Usage: ledstartupcolor2 <color name|off>  (any of ~80 named colors)" },
   { "ledstartupduration",   "Set LED startup effect duration in ms.",         false, cmd_hardwareled_startupduration,"Usage: ledstartupduration <100..10000>" },
 };
 

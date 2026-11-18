@@ -35,6 +35,7 @@
 #include <string>
 #include <vector>
 
+#include "System_CommandReply.h"
 #include "System_MacText.h"
 
 static int gFailures = 0;
@@ -119,6 +120,19 @@ static void setSetting(T& field, const T& value, const SettingEntry* = nullptr) 
 }
 static void setSetting(String& field, const String& value, const SettingEntry* = nullptr) {
   if (field != value) { field = value; gSettingsTouched = true; preempt(); }
+}
+
+// bondconnect tells the firmware which of its staged settings changed.
+static std::vector<const void*> gSettingsNotified;
+static void notifySettingChanged(const void* field, const SettingEntry* = nullptr) {
+  gSettingsNotified.push_back(field);
+}
+
+// bondconnect stages its settings in RAM and asks for one write of the file.
+static bool requestSettingsPersist() {
+  gSettingsTouched = true;
+  preempt();
+  return true;
 }
 
 static int parseBoolArg(const String& arg) {
@@ -615,9 +629,19 @@ static void caseBenchOrder() {
       workerTick();
     }
   };
+  gSettingsNotified.clear();
   const char* reply = cmd_bond_connect(String("02:11:22:33:44:01"));
   gPreempt = nullptr;
   CHECK(std::strncmp(reply, "Bond mode enabled", 17) == 0, "bondconnect reply: %s", reply);
+  {
+    auto notified = [](const void* field) {
+      for (const void* f : gSettingsNotified) if (f == field) return true;
+      return false;
+    };
+    CHECK(notified(&gSettings.bondPeerMac) && notified(&gSettings.bondModeEnabled),
+          "bondconnect did not report the settings it changed (%u notified)",
+          (unsigned)gSettingsNotified.size());
+  }
   CHECK(gSettings.bondModeEnabled && isBondWorker(), "bondconnect: bond on, worker role");
   if (acceptedDuring) {
     CHECK(gEspNow->bondCapSent && gEspNow->lastRemoteCapValid,
@@ -733,6 +757,15 @@ static void caseSameValueSave() {
   CHECK(deliver(kPartnerA, RX_CAP_REQ), "the partner is not accepted after an unchanged save");
   const char* q = cmd_espnow_bondpeermac(String(""));
   CHECK(std::strcmp(q, "query") == 0, "a query went somewhere else: %s", q);
+  // A value that is not a MAC address is refused and changes nothing.
+  const char* refused = cmd_espnow_bondpeermac(String("kitchen"));
+  CHECK(commandReplyIsFailure(refused), "a name was taken as the partner address: %s", refused);
+  CHECK(gSettings.bondPeerMac == String("02:11:22:33:44:01") && gEspNow->lastRemoteCapValid,
+        "a refused partner address changed the bond");
+  // A MAC written in lower case is stored in the display form bondconnect compares with.
+  cmd_espnow_bondpeermac(String("02:11:22:33:44:0a"));
+  CHECK(gSettings.bondPeerMac == String("02:11:22:33:44:0A"), "the partner is not stored in display form: %s",
+        gSettings.bondPeerMac.c_str());
 }
 
 // bonddisconnect: the partner's frames stop and its state goes.

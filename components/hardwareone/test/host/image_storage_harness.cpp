@@ -249,6 +249,7 @@ ImageManager gImageManager;
 // Command boundaries: the 4 KB debug buffer, ArduinoJson, hints, the camera
 // frame source and the video recordings walk.
 #include <ArduinoJson.h>
+#include "System_CommandReply.h"
 #define EXT_RAM_BSS_ATTR
 #define PSRAM_JSON_DOC(name) JsonDocument name
 constexpr size_t GLOBAL_DEBUG_BUFFER_SIZE = 4096;
@@ -260,8 +261,13 @@ static void cliHint(const char*) {}
 // INSERT_ARG_WANTS_JSON
 static ImageStorageLocation capturedTo = IMAGE_STORAGE_LITTLEFS;
 static unsigned captures = 0;
-String ImageManager::captureAndSave(ImageStorageLocation location) {
+// What the save reports back, and whether it wrote no copy at all; a case sets both.
+static ImageSaveReport nextReport;
+static bool captureFails = false;
+String ImageManager::captureAndSave(ImageStorageLocation location, ImageSaveReport* report) {
   ++captures; capturedTo = location;
+  if (report) *report = nextReport;
+  if (captureFails) return "";
   return location == IMAGE_STORAGE_SD ? "/sd/photos/new.jpg" : "/photos/new.jpg";
 }
 static std::string recordings;
@@ -290,6 +296,7 @@ static void reset(bool sd = false, bool internal = true) {
   sdMounted = sd; filesystemReady = internal; gSettings.cameraCaptureFolder = "/photos";
   if (sd) ++VFS::sdGeneration;
   gSettings.cameraStorageLocation = 0; captures = 0; capturedTo = IMAGE_STORAGE_LITTLEFS; recordings.clear();
+  nextReport = ImageSaveReport(); captureFails = false; callerLookups = 0;
   failOpen = failMkdir = failRemove = failStats = failAlloc = false; largestBlock = 4096;
   metadataUnlocked = closesUnlocked = directoryOpens = closeCalls = statCalls = mtimeCalls = 0;
   takes = gives = 0; lastStatType = -1; VFS::internalStatusMarks = VFS::sdStatusMarks = 0;
@@ -371,7 +378,7 @@ static void callerIdentity(bool sd) {
 static void commandPath() {
   reset(); add("/photos", true); add("/photos/a.jpg"); add("/photos/b.jpg"); add("/system/settings.json");
   gImageManager.init(); accesses.clear(); statCalls = 0; takes = gives = 0; callerLookups = 0;
-  check(std::strcmp(cmd_imagedelete("\"/system/settings.json\""), "Error: Failed to delete image") == 0 && nodes.count("/system/settings.json") && accesses.empty(),
+  check(std::strcmp(cmd_imagedelete("\"/system/settings.json\""), "Error: Not a photo in the capture folder. Give the full path: the folder that images (or images sd) shows, then a file name from its list.") == 0 && nodes.count("/system/settings.json") && accesses.empty(),
         "imagedelete refuses a path outside the capture folder and the file stays");
   check(VFS::internalStatusMarks == 0, "a refused imagedelete leaves the status storage figure alone");
   check(std::strcmp(cmd_imagedelete("\"/photos/a.jpg\""), "Image deleted") == 0 && !nodes.count("/photos/a.jpg"), "imagedelete removes a managed photo");
@@ -379,7 +386,7 @@ static void commandPath() {
   expectIdentity("remove", "cli", "admin");
   check(callerLookups == 2, "the command supplies its caller identity on every delete");
   accesses.clear(); deniedUsers.insert("admin");
-  check(std::strcmp(cmd_imagedelete("\"/photos/b.jpg\""), "Error: Failed to delete image") == 0 && nodes.count("/photos/b.jpg"), "a caller the filesystem rules deny cannot delete through imagedelete");
+  check(std::strcmp(cmd_imagedelete("\"/photos/b.jpg\""), "Error: Photo not found or delete not permitted. Check the full path: the folder that images (or images sd) shows, then a file name from its list.") == 0 && nodes.count("/photos/b.jpg"), "a caller the filesystem rules deny cannot delete through imagedelete");
   check(VFS::internalStatusMarks == 1, "a denied imagedelete adds no mark");
   deniedUsers.clear(); accesses.clear();
   // The command stays a parser: quoting, argument count and validate-only are unchanged.
@@ -560,6 +567,19 @@ static void captureArguments() {
   captures = 0;
   check(std::strncmp(cmd_capture("tape"), "Error: unknown storage", 22) == 0 && captures == 0, "an unknown tier is refused, not replaced by the default");
   check(std::strncmp(cmd_capture("sd both"), "Error: unexpected argument", 26) == 0 && captures == 0, "a second token is refused");
+  // The reply is built from what the save reports: one copy of two missing is
+  // a success with a note, no copy at all is the report's own refusal.
+  nextReport.sd = ImageSaveFailure::TierUnavailable;
+  check(std::strcmp(cmd_capture("both"), "Captured: /photos/new.jpg (SD copy not saved: card not available)") == 0,
+        "a capture that wrote one copy of two names the missing copy and why");
+  captureFails = true;
+  check(std::strcmp(cmd_capture("sd"), "Error: Photo not saved: SD card not available. Run sdmount or change camerastoragelocation.") == 0,
+        "a capture that wrote nothing answers with the reason the save reported");
+  nextReport = ImageSaveReport(); nextReport.capture = ImageSaveFailure::NoFrame;
+  check(std::strcmp(cmd_capture(""), "Error: Photo not saved: no frame from the camera. Check cameraread and retry.") == 0,
+        "a capture with no frame says so");
+  nextReport = ImageSaveReport(); captureFails = false;
+  check(std::strcmp(cmd_capture("both"), "Captured: /photos/new.jpg") == 0, "a complete capture carries no note");
   balanced();
 }
 static void imagesArguments() {
@@ -578,6 +598,13 @@ static void imagesArguments() {
   }
   check(std::strstr(cmd_images("sd"), "=== Images on SD ===") != nullptr, "images sd lists the SD card as text");
   check(std::strstr(cmd_images(""), "=== Images on LittleFS ===") != nullptr, "images lists internal storage as text");
+  // The list holds bare file names; the Folder line is what makes a path for
+  // imagedelete out of one (its refusals point here).
+  check(std::strstr(cmd_images("sd"), "\nFolder: /sd/photos\n") != nullptr && std::strstr(cmd_images("sd"), "  card.jpg (") != nullptr,
+        "images sd prints the folder its file names live in");
+  check(std::strstr(cmd_images(""), "\nFolder: /photos\n") != nullptr && std::strstr(cmd_images(""), "  in.jpg (") != nullptr,
+        "images prints the folder its file names live in");
+  check(std::strcmp(cmd_imagedelete("\"/photos/in.jpg\""), "Image deleted") == 0, "the folder plus a listed name is a path imagedelete takes");
   check(std::strncmp(cmd_images("sd extra"), "Error: unexpected argument", 26) == 0, "images refuses an unknown token");
   balanced();
 }
@@ -608,8 +635,13 @@ static void photoListings() {
   }
 }
 static void recordingListings() {
+  reset(); recordings = "rec_20261013_120000.avi:1234567";
+  for (const char* form : {"", "json"}) {
+    check(std::strncmp(cmd_cameravideolist(form), "Error: SD card not available", 28) == 0,
+          "without a card the recording listing is an error, not an empty list");
+  }
   for (int count : {10, 40, 200}) {
-    reset(); recordings.clear();
+    reset(true); recordings.clear();
     for (int i = 0; i < count; ++i) {
       char line[48]; std::snprintf(line, sizeof(line), "%srec_20261013_%06d.avi:1234567", i ? "\n" : "", 120000 + i);
       recordings += line;

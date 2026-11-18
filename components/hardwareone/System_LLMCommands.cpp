@@ -185,7 +185,7 @@ static const char* cmd_llm_status(const String& argsInput) {
 #endif
     static char* jbuf = nullptr;
     if (!jbuf) jbuf = (char*)ps_alloc(640, AllocPref::PreferPsram, "llmstatus.json");
-    if (!jbuf) return "{\"error\":\"oom\"}";
+    if (!jbuf) return kCommandReplyOutOfMemory;
     serializeJson(doc, jbuf, 640);
     return jbuf;
   }
@@ -229,8 +229,16 @@ static const char* cmd_llm_load(const String& args) {
   }
   String a = ca.arg(0);   // optional model id / filename
   // Optional context ceiling (the web body's max_ctx). The backend applies
-  // llmMaxContext and lets this only lower it.
-  const int maxCtx = ca.argInt(1, 0);
+  // llmMaxContext and lets this only lower it; 0 means no ceiling from here.
+  int maxCtx = 0;
+  if (ca.has(1) && !parseIntArg(ca.arg(1), 0, INT_MAX, maxCtx)) {
+    return "{\"schema\":1,\"ok\":false,\"error\":\"maxctx is not a whole number - "
+           "use digits, and quote a model id that contains spaces\"}";
+  }
+  if (ca.count() > 2) {
+    return "{\"schema\":1,\"ok\":false,\"error\":\"too many arguments - "
+           "quote a model id that contains spaces\"}";
+  }
 
   // Selection now goes through the registry, which owns every id→source rule:
   // "onboard:model.bin", "cm5:Qwen3-1.7B-Q4_0.gguf", a bare filename, or an
@@ -265,6 +273,9 @@ static const char* cmd_llm_unload(const String&) {
   // llmUnload() already stops a live generation and waits for it before freeing
   // the weights, so there is nothing to add here. The generation worker stays
   // parked on its notify holding its stack — see gLLMWorkerStack.
+  if (llmBackendActiveKind() == LlmBackendKind::None) {
+    return "{\"schema\":1,\"ok\":false,\"error\":\"No model is loaded. Load one with 'llmload <model id>'.\"}";
+  }
   llmBackendUnload();
   return "{\"schema\":1,\"ok\":true}";   // mirror POST /api/llm/unload
 }
@@ -292,7 +303,7 @@ static const char* cmd_llm_models(const String& argsInput) {
     }
     static char* jbuf = nullptr;
     if (!jbuf) jbuf = (char*)ps_alloc(1536, AllocPref::PreferPsram, "llmmodels.json");
-    if (!jbuf) return "{\"error\":\"oom\"}";
+    if (!jbuf) return kCommandReplyOutOfMemory;
     serializeJson(out, jbuf, 1536);
     return jbuf;
   }
@@ -374,7 +385,7 @@ static const char* cmd_llm_generate(const String& args) {
   if (!llmBackendIsReady()) return "Error: no model loaded";
 
   CommandArgs ca(args);
-  if (ca.count() == 0) return "Error: invalid arguments — Usage: llm generate <prompt>";
+  if (ca.count() == 0) return "Error: No prompt given. Usage: llmgenerate <question>";
   String a = ca.raw();  // full prompt text
 
   // This path drives the engine directly instead of going through chatBeginTurn,
@@ -406,16 +417,14 @@ static const char* cmd_llm_generate(const String& args) {
          "then 'llmresult json 0'";
 #endif
 
-  if (result < 0) {
-    snprintf(llmCmdBuf, sizeof(llmCmdBuf), "Generation error");
-  } else {
-    // Truncate if needed
-    if (output.length() >= sizeof(llmCmdBuf) - 32) {
-      output = output.substring(0, sizeof(llmCmdBuf) - 32);
-      output += "\n[truncated]";
-    }
-    snprintf(llmCmdBuf, sizeof(llmCmdBuf), "%s\n(%d tokens)", output.c_str(), result);
+  if (result < 0) return "Error: Generation failed. Check 'llmstatus' and retry.";
+
+  // Truncate if needed
+  if (output.length() >= sizeof(llmCmdBuf) - 32) {
+    output = output.substring(0, sizeof(llmCmdBuf) - 32);
+    output += "\n[truncated]";
   }
+  snprintf(llmCmdBuf, sizeof(llmCmdBuf), "%s\n(%d tokens)", output.c_str(), result);
   return llmCmdBuf;
 }
 
@@ -435,8 +444,10 @@ static const char* cmd_llm_result(const String& args) {
   int offset = 0;
   if (a.startsWith("json ")) {
     String rest = a.substring(5); rest.trim();
-    if (rest.length() && !parseIntArg(rest, offset)) return kCommandReplyNotANumber;
-    if (offset < 0) offset = 0;
+    if (rest.length() && !parseIntArg(rest, 0, INT_MAX, offset)) {
+      return "Error: Offset must be a whole number, 0 or more. "
+             "Use the next value from the previous reply.";
+    }
   }
 
   // 512-byte read window mirrors the web poller. The app polls ~every 350 ms
@@ -476,12 +487,16 @@ static const char* cmd_llm_result(const String& args) {
   // cap. Real LLM text escapes to ~1.1× so the typical blob is ~550 B.
   static char* jbuf = nullptr;
   if (!jbuf) jbuf = (char*)ps_alloc(3200, AllocPref::PreferPsram, "llmresult.json");
-  if (!jbuf) return "{\"error\":\"oom\"}";
+  if (!jbuf) return kCommandReplyOutOfMemory;
   serializeJson(doc, jbuf, 3200);
   return jbuf;
 }
 
 static const char* cmd_llm_stop(const String&) {
+  // Nothing selected also reads as done (llmBackendIsDone).
+  if (llmBackendIsDone()) {
+    return "{\"schema\":1,\"ok\":false,\"error\":\"No reply is being generated. Start one with 'llmgenerate <prompt>'.\"}";
+  }
   llmBackendStop();
   return "{\"schema\":1,\"ok\":true}";   // mirror POST /api/llm/stop
 }
@@ -510,7 +525,7 @@ static const char* cmd_llm_retry(const String&) {
   // Like llmgenerate, this only kicks off the regeneration; the new reply
   // streams in separately via the result poller.
   snprintf(llmCmdBuf, sizeof(llmCmdBuf),
-           "{\"schema\":1,\"session\":%d,"
+           "{\"schema\":1,\"ok\":true,\"session\":%d,"
            "\"hint\":\"the new reply streams in asynchronously - read it with 'llmresult json 0'\"}",
            session);
   return llmCmdBuf;
@@ -534,10 +549,11 @@ static const char* cmd_llm_turns(const String& args) {
   CommandArgs ca(a);
   int index = 0;
   int offset = 0;
-  if (ca.has(1) && !parseIntArg(ca.arg(1), index)) return kCommandReplyNotANumber;
-  if (ca.has(2) && !parseIntArg(ca.arg(2), offset)) return kCommandReplyNotANumber;
-  if (index < 0) index = 0;
-  if (offset < 0) offset = 0;
+  if ((ca.has(1) && !parseIntArg(ca.arg(1), 0, INT_MAX, index)) ||
+      (ca.has(2) && !parseIntArg(ca.arg(2), 0, INT_MAX, offset))) {
+    return "Error: Index and offset must be whole numbers, 0 or more. "
+           "Use the next value from the previous reply.";
+  }
 
   int count = chatGetTurnCount();
   PSRAM_JSON_DOC(doc);
@@ -550,7 +566,7 @@ static const char* cmd_llm_turns(const String& args) {
     doc["end"] = true;
     static char* ebuf = nullptr;
     if (!ebuf) ebuf = (char*)ps_alloc(96, AllocPref::PreferPsram, "llmturns_end.json");
-    if (!ebuf) return "{\"error\":\"oom\"}";
+    if (!ebuf) return kCommandReplyOutOfMemory;
     serializeJson(doc, ebuf, 96);
     return ebuf;
   }
@@ -560,7 +576,7 @@ static const char* cmd_llm_turns(const String& args) {
   constexpr size_t kTurnWindow = 2048;
   static char* turnBuf = nullptr;
   if (!turnBuf) turnBuf = (char*)ps_alloc(kTurnWindow, AllocPref::PreferPsram, "llmturn.txt");
-  if (!turnBuf) return "{\"error\":\"oom\"}";
+  if (!turnBuf) return kCommandReplyOutOfMemory;
   int n = chatReadTurn(index, offset, turnBuf, kTurnWindow);
   n = utf8TrimPartialTail(turnBuf, n);
   turnBuf[n] = '\0';
@@ -586,10 +602,10 @@ static const char* cmd_llm_turns(const String& args) {
     doc["next"] = offset + n;
     doc["more"] = n > 0 && offset + n < static_cast<int>(info.textLen);
   }
-  if (doc.overflowed() || measureJson(doc) >= 4096) return "{\"error\":\"oom\"}";
+  if (doc.overflowed() || measureJson(doc) >= 4096) return kCommandReplyOutOfMemory;
   static char* jbuf = nullptr;
   if (!jbuf) jbuf = (char*)ps_alloc(4096, AllocPref::PreferPsram, "llmturns.json");
-  if (!jbuf) return "{\"error\":\"oom\"}";
+  if (!jbuf) return kCommandReplyOutOfMemory;
   serializeJson(doc, jbuf, 4096);
   return jbuf;
 }

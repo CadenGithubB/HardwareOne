@@ -156,10 +156,19 @@ static int gMarks = 0;
 static void oledMarkDirty() { ++gMarks; }
 static bool oledRunCommand(const char* cmd) { gCommands.push_back(cmd); return true; }
 static void executeOledCommand(const char* cmd) { gCommands.push_back(cmd); }
+// A refusal the next command answers with (nullptr: the command succeeds).
+static const char* gCommandRefusal = nullptr;
 static bool executeOledCommandWithResult(const char* cmd, char* out, size_t n) {
   gCommands.push_back(cmd);
-  std::snprintf(out, n, "OK");
-  return true;
+  std::snprintf(out, n, "%s", gCommandRefusal ? gCommandRefusal : "OK");
+  return gCommandRefusal == nullptr;
+}
+// oledCommandReplyText (OLED_Utils.cpp), refusal side: the reason without its
+// "Error: " lead, or failText for an empty reply.
+static void oledCommandReplyText(bool, const char* reply, const char*, const char* failText,
+                                 char* out, size_t n) {
+  if (reply && std::strncmp(reply, "Error: ", 7) == 0) reply += 7;
+  std::snprintf(out, n, "%s", (reply && *reply) ? reply : failText);
 }
 static std::vector<std::string> gToasts;  // every toast, for the code's no-toast check
 // Shared feedback (OLED_UI.h is a stand-in here): the icon is recorded with
@@ -789,6 +798,18 @@ static void peerMenus() {
   sR1MenuScroll.selectedIndex = 1;
   CHECK(modeEntry(OLED_BLUETOOTH_R1).inputFunc(0, 0, INPUT_BUTTON_A));
   CHECK(gCommands.size() == 1 && gCommands.back() == "bleautoreconnect r1-ring on");
+  // A refused Connect shows the command's own reason; an empty reply falls
+  // back to the fixed text.
+  gCommands.clear();
+  sR1MenuScroll.selectedIndex = 0;
+  gCommandRefusal = "Error: RING: open failed (the ring owner task could not start)";
+  CHECK(modeEntry(OLED_BLUETOOTH_R1).inputFunc(0, 0, INPUT_BUTTON_A));
+  CHECK(gCommands.size() == 1 && gCommands.back() == "openring");
+  CHECK(gToast == "RING: open failed (the ring owner task could not start)");
+  gCommandRefusal = "";
+  CHECK(modeEntry(OLED_BLUETOOTH_R1).inputFunc(0, 0, INPUT_BUTTON_A));
+  CHECK(gToast == "Ring connect refused");
+  gCommandRefusal = nullptr;
   w.ring = true;
   render(OLED_BLUETOOTH_R1);
   CHECK(rowIndex(sR1MenuScroll, "Reconnect") == 0 && rowIndex(sR1MenuScroll, "Disconnect") == 1);

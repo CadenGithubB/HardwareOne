@@ -260,14 +260,10 @@ static void powerQueueResult(const G2CmdCookie& cookie, PowerLevel level,
   }
 }
 
-static bool powerCommandFailed(bool ok, const char* result) {
-  return !ok || (result && strstr(result, "refused"));
-}
-
 static void onPowerCmdDone(bool ok, const char* result,
                            const G2CmdCookie& cookie, void* /*userData*/) {
   // reboot / ramflush / deepsleep success paths do not return to us.
-  if (!powerCommandFailed(ok, result)) return;
+  if (ok) return;
   DEBUG_G2F("[G2] Power: command failed: %s", result ? result : "no result");
   powerQueueResult(cookie, POWER_LEVEL_ACTIONS,
                    result && result[0] ? result : "Command failed");
@@ -277,7 +273,7 @@ static void onPowerCmdDone(bool ok, const char* result,
 // reads the actual power setting when the lens worker renders it.
 static void onPowerPresetDone(bool ok, const char* result,
                               const G2CmdCookie& cookie, void* /*userData*/) {
-  const bool failed = powerCommandFailed(ok, result);
+  const bool failed = !ok;
   if (failed) DEBUG_G2F("[G2] Power: preset failed: %s", result ? result : "no result");
   powerQueueResult(cookie, POWER_LEVEL_CPU,
                    failed ? (result && result[0] ? result : "Set failed") : nullptr);

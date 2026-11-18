@@ -791,8 +791,10 @@ R"JS(
     var discBtn  = el('btn-bt-disconnect');
     hw.toggle(openBtn, !(isOn));
     hw.toggle(closeBtn, (isOn));
-    // Advertise / Disconnect-client are server-only.
-    hw.toggle(advBtn, (bleMode === 'server' && isOn && state !== 'connected'));
+    // Advertise / Disconnect-client are server-only. Advertise shows only while
+    // the server is up and neither advertising nor connected: bleadv refuses a
+    // start while advertising is already running.
+    hw.toggle(advBtn, (bleMode === 'server' && isOn && state !== 'connected' && state !== 'advertising'));
     hw.toggle(discBtn, (bleMode === 'server' && state === 'connected'));
   }
 
@@ -1044,8 +1046,15 @@ R"JS(
   // Per-client Kick: closes only the connection with this id.
   window.btDisconnect = function(connId){
     if(typeof connId !== 'number' || !isFinite(connId)) return;
-    cli('bledisconnect ' + connId).then(function(out){ showStatusText(out); setTimeout(refresh, 400); });
+    cli('bledisconnect ' + connId).then(function(out){ showStatusText(out); setTimeout(refresh, 400); })
+      .catch(function(e){ showStatusText(cliFailText(e)); setTimeout(refresh, 400); });
   };
+
+  // A refused command rejects with its reply in e.reply (cli above): that text
+  // is what the status line shows, not the HTTP status.
+  function cliFailText(e){
+    return (e && e.reply) || ('Error: ' + (e && e.message));
+  }
 
   function runAndRefresh(cmd, statusEl, msg){
     if(statusEl) setText(statusEl, msg || 'Running…');
@@ -1053,8 +1062,18 @@ R"JS(
       if(statusEl) setText(statusEl, out || 'Done');
       setTimeout(refresh, 400);
     }).catch(function(e){
-      if(statusEl) setText(statusEl, 'Error: ' + e.message);
+      // A refusal (already running, not running) also means the buttons
+      // were stale: show it and read the state again.
+      if(statusEl) setText(statusEl, cliFailText(e));
+      else showStatusText(cliFailText(e));
+      setTimeout(refresh, 400);
     });
+  }
+
+  // Runs a command and shows its reply, or its refusal, in one status line.
+  function cliInto(cmd, statusEl){
+    cli(cmd).then(function(o){ setText(statusEl, o); })
+            .catch(function(e){ setText(statusEl, cliFailText(e)); });
   }
 
   // Mode and reconnect settings are owned by the device. A CLI reply is shown
@@ -1102,8 +1121,11 @@ R"JS(
     bind('btn-bt-open',       function(){ runAndRefresh(openCmd(),  null, null); });
     bind('btn-bt-open2',      function(){ runAndRefresh(openCmd(),  null, null); });
     bind('btn-bt-close',      function(){ runAndRefresh(closeCmd(), null, null); });
-    bind('btn-bt-adv',        function(){ cli('bleadv').then(function(out){ showStatusText(out); }); });
-    bind('btn-bt-disconnect', function(){ cli('bledisconnect').then(function(){ setTimeout(refresh,400); }); });
+    // A refusal (advertising already on, no client left) is shown, not dropped.
+    bind('btn-bt-adv',        function(){ cli('bleadv').then(function(out){ showStatusText(out); setTimeout(refresh,400); })
+                                            .catch(function(e){ showStatusText(cliFailText(e)); setTimeout(refresh,400); }); });
+    bind('btn-bt-disconnect', function(){ cli('bledisconnect').then(function(){ setTimeout(refresh,400); })
+                                            .catch(function(e){ showStatusText(cliFailText(e)); setTimeout(refresh,400); }); });
     bind('btn-bt-refresh',    function(){ refresh(); });
 
     // Mode toggle (only present when G2 is compiled in): switches the saved mode.
@@ -1195,7 +1217,7 @@ R"JS(
         // g2battery only *kicks* an async request — the actual %-values arrive
         // in BLE notifications some hundreds of ms later. Poll g2status a few
         // times so the UI picks up the update whenever it lands.
-        cli('g2battery').then(function(o){ setText('g2-conn-status', o); });
+        cliInto('g2battery', 'g2-conn-status');
         setTimeout(refresh, 500);
         setTimeout(refresh, 1500);
         setTimeout(refresh, 3000);
@@ -1205,13 +1227,13 @@ R"JS(
         var inp = el('g2-text'); if(!inp) return;
         var txt = (inp.value || '').trim();
         if(!txt){ setText('g2-display-status', 'Enter text to send'); return; }
-        cli('g2show ' + txt).then(function(o){ setText('g2-display-status', o); });
+        cliInto('g2show ' + txt, 'g2-display-status');
       });
       bind('btn-g2-ai', function(){
         var inp = el('g2-ai-text'); if(!inp) return;
         var txt = (inp.value || '').trim();
         if(!txt){ setText('g2-display-status', 'Enter text to send'); return; }
-        cli('g2ai ' + txt).then(function(o){ setText('g2-display-status', o); });
+        cliInto('g2ai ' + txt, 'g2-display-status');
       });
       bind('btn-g2-notify', function(){
         var inp  = el('g2-notify-text');
@@ -1224,9 +1246,7 @@ R"JS(
         // g2notify CLI parses a leading integer as duration seconds, then
         // the remaining tokens as the body text. No quoting issues because
         // the shell doesn't re-parse — cmd_g2notify takes the raw args.
-        cli('g2notify ' + s + ' ' + txt).then(function(o){
-          setText('g2-display-status', o);
-        });
+        cliInto('g2notify ' + s + ' ' + txt, 'g2-display-status');
       });
       bind('btn-g2-bmp', function(){
         var inp = el('g2-bmp-path');
@@ -1242,13 +1262,13 @@ R"JS(
         if(!(b >= -100 && b <= 100)) b = 0;
         if(!(c >= -100 && c <= 100)) c = 0;
         if(!(h >= 0 && h <= 120)) h = 3;
-        cli('g2bmp ' + p + ' ' + b + ' ' + c + ' ' + h).then(function(o){ setText('g2-display-status', o); });
+        cliInto('g2bmp ' + p + ' ' + b + ' ' + c + ' ' + h, 'g2-display-status');
       });
       bind('btn-g2-clear', function(){
-        cli('g2clear').then(function(o){ setText('g2-display-status', o); });
+        cliInto('g2clear', 'g2-display-status');
       });
       bind('btn-g2-reopen', function(){
-        cli('g2reopen').then(function(o){ setText('g2-display-status', o); });
+        cliInto('g2reopen', 'g2-display-status');
       });
 
       // R1 ring controls. Connect spawns a background task server-side so
