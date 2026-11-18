@@ -59,6 +59,7 @@
 #include "System_MemUtil.h"          // ps_alloc — heap copy of payload for async send
 #include "G2_Page_ESPNow.h"        // g2ESPNowAppOnRxText push-kick (inline no-op when BT/G2 off)
 #include "System_MemUtil.h"
+#include <esp_heap_caps.h>           // history: internal-heap floor, PSRAM size
 #include "System_MemoryMonitor.h"
 #include "System_Mutex.h"
 #include "System_ConfigLoad.h"
@@ -10800,8 +10801,10 @@ static bool metadataInboxHandleFrame() {
 
   String devName = String(meta->deviceName);
   if (devName.length() == 0) devName = macToDisplayStr(received->mac);
+  // Metadata frames need pairing and a session, so the sender is proven.
   storeMessageInPeerHistory(received->mac, devName.c_str(),
-                            metaMsg, false, MSG_SYSTEM_EVENT);  // peer-metadata snapshot, not chat
+                            metaMsg, false, MSG_SYSTEM_EVENT,  // peer-metadata snapshot, not chat
+                            0, 1, 1, HistoryAttribution::Attributed);
   return true;
 }
 
@@ -11680,6 +11683,65 @@ String getEspNowDeviceName(const uint8_t* mac) {
     }
   }
   return "";
+}
+
+// The name a reader shows for a copied history record (contract in
+// System_ESPNow.h): "" for a sent record, the MAC text for an unattributed
+// received one, else the peer's current name in getEspNowDeviceName's order
+// (mesh metadata, then the paired registry), else the MAC text. The lookup
+// runs under gGroupLock (removeEspNowDevice shifts records under it) and
+// copies only fixed char storage, bounded; never under the history lock.
+void espnowHistoryDisplayName(const ReceivedTextMessage& m, char* out, size_t cap) {
+  if (!out || cap == 0) return;
+  char macText[18];
+  macToDisplay(m.peerMac, macText, sizeof(macText));
+  char current[ESPNOW_HISTORY_NAME_CAP] = "";
+  if (!m.isSent && !m.unattributed) {
+    GroupLockGuard groupLock;
+    bool found = false;
+    if (gMeshPeerMeta) {
+      const int slots = gMeshPeerSlots < MESH_PEER_MAX ? gMeshPeerSlots : MESH_PEER_MAX;
+      for (int i = 0; i < slots; i++) {
+        const MeshPeerMeta& meta = gMeshPeerMeta[i];
+        if (!meta.isActive || memcmp(meta.mac, m.peerMac, 6) != 0) continue;
+        if (meta.name[0]) {
+          espnowhist::boundedCopy(current, sizeof(current), meta.name, sizeof(meta.name));
+          found = true;
+        }
+        break;
+      }
+    }
+    if (!found && gEspNow) {
+      const int maxDevices = (int)(sizeof(gEspNow->devices) / sizeof(gEspNow->devices[0]));
+      int count = gEspNow->deviceCount;
+      if (count > maxDevices) count = maxDevices;
+      for (int i = 0; i < count; i++) {
+        const EspNowDevice& dev = gEspNow->devices[i];
+        if (memcmp(dev.mac, m.peerMac, 6) != 0) continue;
+        espnowhist::boundedCopy(current, sizeof(current), dev.name.c_str(), dev.name.capacity());
+        break;
+      }
+    }
+  }
+  espnowhist::displayName(m.isSent, m.unattributed, current, sizeof(current), macText, out, cap);
+}
+
+// Names for a page of copied records (espnowmessages): looked up once per
+// distinct attributed peer of the page and reused for its other attributed
+// rows; sent rows get "", unattributed rows the MAC text. Never under the
+// history lock (the records are copies).
+static void espnowHistoryPageNames(const ReceivedTextMessage* msgs, int n, char (*names)[ESPNOW_HISTORY_NAME_CAP]) {
+  if (!msgs || !names) return;
+  for (int i = 0; i < n; i++) {
+    int same = -1;
+    if (!msgs[i].isSent && !msgs[i].unattributed) {
+      for (int j = 0; j < i && same < 0; j++) {
+        if (!msgs[j].isSent && !msgs[j].unattributed && memcmp(msgs[j].peerMac, msgs[i].peerMac, 6) == 0) same = j;
+      }
+    }
+    if (same >= 0) memcpy(names[i], names[same], sizeof(names[i]));
+    else espnowHistoryDisplayName(msgs[i], names[i], sizeof(names[i]));
+  }
 }
 
 static void fillMeshStatusPeerJsonObject(JsonObject peer, uint32_t now, const uint8_t* mac,
@@ -12632,7 +12694,8 @@ void processMeshHeartbeats() {
                                   safeStreamContent.c_str(),
                                   true,
                                   MSG_CMD_RESULT,   // remote-command stream output, not chat
-                                  entry.cmdMsgId);
+                                  entry.cmdMsgId, 1, 1,
+                                  HistoryAttribution::Attributed);  // stream frames need a session
         BROADCAST_PRINTF("[STREAM:%s] %s", devName.c_str(), safeStreamContent.c_str());
         entry.used = false;
       }
@@ -12664,7 +12727,8 @@ void processMeshHeartbeats() {
                                 safeDeferredResult.c_str(),
                                 true,
                                 MSG_CMD_RESULT,   // remote-command result, not chat — preserve the CMD_RESP class
-                                gEspNow->deferredCmdRespReqId);
+                                gEspNow->deferredCmdRespReqId,
+                                HistoryAttribution::Attributed);  // CMD_RESP needs a session
     
     if (gEspNow->deferredCmdRespSuccess) {
       BROADCAST_PRINTF("[ESP-NOW] Command result from %s: %s", deviceName.c_str(), safeDeferredResult.c_str());
@@ -13123,6 +13187,10 @@ void processMeshHeartbeats() {
       if (entry.used) {
         String devName = String(entry.deviceName);
         if (devName.length() == 0) devName = macToDisplayStr(entry.srcMac);
+        // A frame that was not authenticated is shown under its MAC text in the
+        // history, whatever name it claims.
+        const HistoryAttribution attribution =
+            entry.authenticated ? HistoryAttribution::Attributed : HistoryAttribution::Unattributed;
         bool stored;
         if (entry.msgType == MSG_SYSTEM_EVENT) {
           // A system notice (BOOT) is stored and printed as a readable line,
@@ -13134,7 +13202,7 @@ void processMeshHeartbeats() {
           formatEspNowSystemNotice(entry.content, sizeof(entry.content), devName.c_str(),
                                    noticeText, sizeof(noticeText), noticeLine, sizeof(noticeLine));
           stored = storeMessageInPeerHistory(entry.srcMac, devName.c_str(), noticeText,
-                                             entry.encrypted, entry.msgType, 0, 1, 1);
+                                             entry.encrypted, entry.msgType, 0, 1, 1, attribution);
           BROADCAST_PRINTF("%s", noticeLine);
         } else {
           // Store this piece as its own record. Group = msgId; piece = fragIndex+1
@@ -13143,7 +13211,8 @@ void processMeshHeartbeats() {
           stored = storeMessageInPeerHistory(entry.srcMac, devName.c_str(),
                                              entry.content, entry.encrypted,
                                              entry.msgType, entry.msgId,
-                                             (uint8_t)(entry.fragIndex + 1), entry.fragCount);
+                                             (uint8_t)(entry.fragIndex + 1), entry.fragCount,
+                                             attribution);
           if (entry.fragCount > 1) {
             BROADCAST_PRINTF("[%s%s] (part %u/%u) %s", devName.c_str(),
                              entry.encrypted ? " [enc]" : "",
@@ -13159,20 +13228,23 @@ void processMeshHeartbeats() {
         // active or the user is on a non-message sub-mode; safe to call
         // from this task (the lens applier queue is thread-safe). When
         // BT/G2 are compiled out the header provides an inline no-op.
+        // Only for a stored record: there is nothing new to draw otherwise.
         if (stored) {
           g2EspNowAppOnRxText(entry.srcMac);
-          // Bus event once per message (last fragment), not per fragment —
-          // the device never assembles the full text, so the event carries
-          // the final fragment's content as its (truncated) preview. Chat
-          // only: BOOT/system notices ride this queue as MSG_SYSTEM_EVENT
-          // and must not fire text_rx automations or "Msg from" toasts.
-          // Authenticated only: a plaintext message (accepted on a keyless
-          // device, filed under its MAC) must not drive a text_rx automation
-          // or a "Msg from" toast as if a known peer had sent it.
-          if (entry.msgType == MSG_TEXT && entry.authenticated &&
-              (entry.fragCount <= 1 || (uint8_t)(entry.fragIndex + 1) == entry.fragCount)) {
-            systemEventPost(SYSEVT_TEXT_RX, devName.c_str(), entry.content);
-          }
+        }
+        // Bus event once per message (last fragment), not per fragment —
+        // the device never assembles the full text, so the event carries
+        // the final fragment's content as its (truncated) preview. Posted
+        // whether or not the history kept the record (it can refuse when
+        // full or out of memory; the message still arrived). Chat
+        // only: BOOT/system notices ride this queue as MSG_SYSTEM_EVENT
+        // and must not fire text_rx automations or "Msg from" toasts.
+        // Authenticated only: a plaintext message (accepted on a keyless
+        // device, filed under its MAC) must not drive a text_rx automation
+        // or a "Msg from" toast as if a known peer had sent it.
+        if (entry.msgType == MSG_TEXT && entry.authenticated &&
+            (entry.fragCount <= 1 || (uint8_t)(entry.fragIndex + 1) == entry.fragCount)) {
+          systemEventPost(SYSEVT_TEXT_RX, devName.c_str(), entry.content);
         }
         entry.used = false;
       }
@@ -13410,9 +13482,10 @@ EXT_RAM_BSS_ATTR static char gLastInitErrorReason[96];
 static bool deinitEspNow(bool publishOffEvent = true);
 
 // Message store setup (message buffer section at the end of this file): the
-// store lock, the slot table and the first history blocks. Returns the bytes
-// allocated; 0 when the table could not be allocated.
-static size_t peerHistoryStoreInit();
+// store lock, an empty slot table and the ring size from espnowhistorykb,
+// latched once per boot. Allocates nothing; blocks come with a peer's first
+// message.
+static void peerHistoryStoreInit(uint8_t settingKb);
 
 // Helper: Initialize ESP-NOW subsystem (static - internal use only)
 static bool initEspNow() {
@@ -13566,12 +13639,12 @@ static bool initEspNow() {
                     gEspNow->streamDrainMax);
     }
 
-    // Per-device message history: slot table sized to gMeshPeerSlots plus the
-    // first PEER_HISTORY_INITIAL_CAPACITY blocks; further blocks are allocated
-    // per new peer. Failure is non-fatal (messaging is limited, ESP-NOW works).
-    size_t histSize = peerHistoryStoreInit();
+    // Per-device message history: nothing is allocated here. This latches the
+    // ring size (espnowhistorykb) and says it; each peer's block is allocated by
+    // its first message (failure only refuses that store, ESP-NOW works).
+    peerHistoryStoreInit(gSettings.espnowHistoryKb);
 
-    size_t totalBytes = sizeof(EspNowState) + histSize +
+    size_t totalBytes = sizeof(EspNowState) +
                         sizeof(MeshPeerHealth) * gMeshPeerSlots +
                         sizeof(MeshPeerMeta) * gMeshPeerSlots;
     BROADCAST_PRINTF("[ESP-NOW] Allocated state (%u bytes, %d peer slots)", (unsigned)totalBytes, gMeshPeerSlots);
@@ -14019,9 +14092,9 @@ static bool initEspNow() {
 }
 
 // ESP-NOW init command
-// Deferred ESP-NOW init for web callers. initEspNow() is heavy (~855 KB alloc
-// at the default meshPeerMax=8 — the per-peer message history dominates at
-// 5 slots × ~158 KB — plus task spin-up) and perturbs the WiFi radio — and a
+// Deferred ESP-NOW init for web callers. initEspNow() is heavy (the state,
+// queues and task spin-up; the message history allocates nothing here, only
+// when a peer first has a message) and perturbs the WiFi radio — and a
 // web "Initialize" request rides that same WiFi link. Running it
 // synchronously while the browser's fetch
 // is held open races the HTTPS connection against the radio reconfiguration,
@@ -19823,6 +19896,15 @@ const char* cmd_espnow_send(const String& argsInput) {
   // lets the web de-dupe its own optimistic bubble and lets on-device UIs poll
   // delivery status. Recorded on accept (queued sends reuse this msgId on drain).
   storeSentMessageInPeerHistory(mac, message.c_str(), msgId);
+  // A chunked send (or a fast ACK) can resolve msgId before the record above
+  // existed, and the stamp is find-only: re-read the status now, outside every
+  // lock, so the durable delivery state is not left pending.
+  {
+    SendStatus st;
+    if (sendStatusGet(msgId, &st) && st.state != SEND_STATUS_PENDING) {
+      espnowUpdateSentDeliveryState(mac, msgId, st.state);
+    }
+  }
   if (jsonMode) {
     if (!ensureDebugBuffer()) return "{\"schema\":1,\"ok\":true}";
     snprintf(getDebugBuffer(), 1024, "{\"schema\":1,\"ok\":true,\"msgId\":%lu}", (unsigned long)msgId);
@@ -20835,6 +20917,7 @@ const char* cmd_espnow_topoautorefresh(const String&);
 const char* cmd_espnow_heartbeatbroadcast(const String&);
 const char* cmd_espnow_meshrelay(const String&);
 const char* cmd_espnow_meshpeermax(const String&);
+const char* cmd_espnow_historykb(const String&);
 const char* cmd_espnow_meshtime(const String&);
 const char* cmd_espnow_powerinterval(const String&);
 const char* cmd_espnow_eventpush(const String&);
@@ -20891,6 +20974,12 @@ const char* cmd_espnow_messages(const String& argsInput) {
   int n = hasMac ? getPeerMessages(mac, msgs, MAXM, since)
                  : getAllMessages(msgs, MAXM, since);
 
+  // Names are looked up now (the history keeps none), after the store lock,
+  // once per distinct peer of this page: sent rows "" , unattributed rows the
+  // MAC text, the rest the peer's current name.
+  char names[MAXM][ESPNOW_HISTORY_NAME_CAP];
+  espnowHistoryPageNames(msgs, n, names);
+
   if (argWantsJson(argsInput)) {
     PSRAM_JSON_DOC(doc);
     doc["schema"] = 1;
@@ -20898,13 +20987,13 @@ const char* cmd_espnow_messages(const String& argsInput) {
     for (int i = 0; i < n; i++) {
       JsonObject o = arr.add<JsonObject>();
       char macStr[18];
-      macToDisplay(msgs[i].senderMac, macStr, sizeof(macStr));
+      macToDisplay(msgs[i].peerMac, macStr, sizeof(macStr));
       o["seq"]   = (unsigned long)msgs[i].seqNum;
       o["reqId"] = (unsigned long)msgs[i].reqId;
       o["piece"] = msgs[i].piece;
       o["of"]    = msgs[i].pieceTotal;
       o["mac"]  = String(macStr);
-      o["name"] = msgs[i].senderName;
+      o["name"] = (const char*)names[i];  // copied by ArduinoJson 7
       o["msg"]  = msgs[i].message;
       o["enc"]  = msgs[i].encrypted;
       o["ts"]   = (unsigned long)msgs[i].timestamp;
@@ -20923,10 +21012,10 @@ const char* cmd_espnow_messages(const String& argsInput) {
   if (n == 0) return "No ESP-NOW messages";
   for (int i = 0; i < n; i++) {
     char macStr[18];
-    macToDisplay(msgs[i].senderMac, macStr, sizeof(macStr));
+    macToDisplay(msgs[i].peerMac, macStr, sizeof(macStr));
     BROADCAST_PRINTF("[#%lu] %s%s: %s",
                      (unsigned long)msgs[i].seqNum,
-                     msgs[i].senderName[0] ? msgs[i].senderName : macStr,
+                     names[i][0] ? names[i] : macStr,
                      msgs[i].encrypted ? " [enc]" : "",
                      msgs[i].message);
   }
@@ -21296,6 +21385,7 @@ extern const CommandEntry espNowCommands[] = {
   { "espnowheartbeatbroadcast",      "Set heartbeat broadcast: <0|1>", true, cmd_espnow_heartbeatbroadcast, "Usage: espnowheartbeatbroadcast <0|1>" },
   { "espnowmeshrelay",               "Carry other nodes' mesh traffic: <0|1>", true, cmd_espnow_meshrelay, "Usage: espnowmeshrelay <0|1>\n       1 (default) = act as a relay so out-of-range peers can reach each other through this node.\n       0 = stop forwarding for others. This node still uses multi-hop for its OWN traffic\n       (set espnowmeshttl 1 for that), and stops advertising routes so nobody sends via it." },
   { "espnowmeshpeermax",             "Set max peer slots: <1-16> (reboot required)", true, cmd_espnow_meshpeermax, "Usage: espnowmeshpeermax <1..16>" },
+  { "espnowhistorykb", "Message history per peer and direction in KB: [<0-32>] (0 = board default; no argument shows saved and active; reboot required)", true, cmd_espnow_historykb, "Usage: espnowhistorykb [<0..32>]" },
   { "espnowsensorbroadcastinterval", "Set sensor broadcast interval: <100-10000 ms>", true, cmd_espnow_sensorbroadcastinterval, "Usage: espnowsensorbroadcastinterval <100..10000>" },
 #if ENABLE_BONDED_MODE
   { "espnowbondmodeenabled",         "Enable/disable bond mode: <0|1>", true, cmd_espnow_bondmodeenabled, "Usage: espnowbondmodeenabled <0|1>" },
@@ -21355,6 +21445,12 @@ static const SettingEntry espnowSettingEntries[] = {
   { "channel", SETTING_U8, &gSettings.espnowChannel, 0, 0, nullptr, 0, 13, "Preferred Channel (0=auto)", nullptr, false, nullptr, "espnowchannel" },
   { "meshRelay", SETTING_BOOL, &gSettings.meshRelay, true, 0, nullptr, 0, 1, "Relay for peers", nullptr, false, "mesh", "espnowmeshrelay" },
   { "meshPeerMax", SETTING_U8, &gSettings.meshPeerMax, 8, 0, nullptr, 1, 16, "Max Peer Slots (reboot)", nullptr, false, "mesh", "espnowmeshpeermax" },
+  // Message history per peer and direction, KB. 0 = the board default (16 with
+  // PSRAM, 2 without); values above the board maximum (32 / 4) are clamped and
+  // the start line says so. Latched at ESP-NOW start: a change applies after a
+  // reboot.
+  { "historyKB", SETTING_U8, &gSettings.espnowHistoryKb, 0, 0, nullptr, 0, ESPNOW_HISTORY_SETTING_KB_MAX,
+    "Message History per Peer and Direction (KB, 0=auto, reboot)", nullptr, false, "mesh", "espnowhistorykb" },
   // Mesh time (System_ESPNow_MeshTime.cpp): the master sends its clock, other
   // devices take it when they have no better source.
   { "meshTime", SETTING_BOOL, &gSettings.meshTime, true, 0, nullptr, 0, 1, "Mesh Time", nullptr, false, "mesh", "espnowmeshtime" },
@@ -21420,6 +21516,22 @@ ESPNOW_SETTING_CMD(cmd_espnow_meshrelay, "meshRelay")
 ESPNOW_SETTING_CMD(cmd_espnow_meshpeermax, "meshPeerMax")
 ESPNOW_SETTING_CMD(cmd_espnow_meshtime, "meshTime")
 ESPNOW_SETTING_CMD(cmd_espnow_sensorbroadcastinterval, "sensorBroadcastIntervalMs")
+
+// espnowhistorykb [<0..32>]: KB of message history per peer and direction.
+// With no argument it shows the saved value and the one active since ESP-NOW
+// started (the size is latched once per boot), so a pending change is not
+// mistaken for a live one.
+const char* cmd_espnow_historykb(const String& a) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String arg = a;
+  arg.trim();
+  if (arg.length() == 0) {
+    if (!ensureDebugBuffer()) return "Error: no buffer";
+    espnowHistoryStatusLine(getDebugBuffer(), 1024);
+    return getDebugBuffer();
+  }
+  return handleSettingCommand(findEspNowEntry("historyKB"), a);
+}
 
 // espnowpowerinterval <0|10..3600>: seconds between the battery frames this
 // device sends to its master. The setting's own range is 0 to 3600; 1 to 9
@@ -21643,18 +21755,19 @@ const char* cmd_espnow_usersync(const String& argsInput) {
 // Per-Device Message Buffer Management (merged from espnow_message_buffer.cpp)
 // ============================================================================
 
-// gEspNow->peerMessageHistories is a table of peerHistoryCapacity slot
-// pointers. A slot's PeerMessageHistory block is allocated once (the first
-// PEER_HISTORY_INITIAL_CAPACITY at init, the rest on first contact with a new
-// peer) and never moved or freed. Every store and read below runs under
-// gPeerHistoryLock; readers get copies or handles, never live pointers.
+// gEspNow->peerMessageHistories[] holds peerHistoryCapacity slot pointers.
+// Blocks are allocated by a peer's first store (outside the lock) and are
+// never moved or freed. Each holds a received and a sent byte ring
+// (System_ESPNow_HistoryCore.h). Every store and read below runs under
+// gPeerHistoryLock; readers get copies or seq-anchored handles, never live
+// pointers. The store is initialised iff peerHistoryCapacity > 0.
 
 static StaticSemaphore_t gPeerHistoryLockStorage;
 static SemaphoreHandle_t gPeerHistoryLock = nullptr;
 
-// Leaf lock for the peer message store: slot creation, ring writes and every
-// read. Nothing else is taken while it is held and no logging runs inside;
-// callers log after the guard's scope ends.
+// Leaf lock for the peer message store: slot lookup, ring writes and every
+// read. Nothing else is taken while it is held, and no logging, allocation or
+// free runs inside; callers log and free after the guard's scope ends.
 struct PeerHistoryGuard {
   bool held;
   explicit PeerHistoryGuard(TickType_t timeout = pdMS_TO_TICKS(PEER_HISTORY_LOCK_TIMEOUT_MS))
@@ -21664,120 +21777,289 @@ struct PeerHistoryGuard {
   PeerHistoryGuard& operator=(const PeerHistoryGuard&) = delete;
 };
 
-// What one locked store did. peerHistoryStoreReport logs it after the lock is
-// released.
-struct PeerHistoryStoreOutcome {
-  bool busy = false;         // lock not taken within PEER_HISTORY_LOCK_TIMEOUT_MS
-  bool stored = false;       // the record(s) were written
-  bool blockFailed = false;  // a new peer's block could not be allocated
-  int  newSlot = -1;         // slot activated for a peer seen for the first time
-  bool newBlock = false;     // that slot's block was allocated by this store
-  int  activeCount = 0;      // peerHistoryCount after the slot was activated
-  int  capacity = 0;         // slot table length
+// Merge, collapse-chain and reassembly scratch. Allocated with the first block
+// (same policy, same failure path), never freed; used only under the lock.
+struct PeerHistoryScratch {
+  espnowhist::MergeScratch merge;
+  espnowhist::Source src[espnowhist::kMaxSources];
+  uint32_t chain[ESPNOW_HISTORY_VIEW_MAX];
+  uint16_t pieces[256];
+};
+static PeerHistoryScratch* sHistScratch = nullptr;
+
+// Latched by peerHistoryStoreInit (before peerHistoryCapacity is published).
+static AllocPref sHistPolicy = AllocPref::RequirePsram;
+static bool sHistPsram = false;
+
+// The history lines, each said at most once per PEER_HISTORY_SAY_INTERVAL_MS
+// with the count of the events folded into it, except line D: an allocation
+// happens at most once per slot per boot, so each one is said. Decided under
+// the lock, printed after it.
+enum PeerHistorySayLine : uint8_t {
+  kHistSayAllocated = 0,  // D: a block was allocated
+  kHistSayNoMemory  = 1,  // A: allocation failed or held off
+  kHistSayFull      = 2,  // B: no slot left
+  kHistSayDamaged   = 3,  // C: a damaged ring was cleared
+  kHistSaySeqUsedUp = 4,  // E: message numbers used up
+  kHistSayCount     = 5
+};
+static struct {
+  uint32_t lastMs[kHistSayCount];
+  bool     said[kHistSayCount];
+  uint32_t count[kHistSayCount];
+  uint32_t lastAllocFailMs;
+  bool     allocFailedOnce;
+} sHistSay = {};
+
+// Line state of one locked call (store or read). The say flags and counts are
+// decided under the lock; peerHistorySay prints them after it.
+struct PeerHistorySayNote {
+  bool     say[kHistSayCount] = {};
+  uint32_t count[kHistSayCount] = {};
+  uint8_t  mac[kHistSayCount][6] = {};
 };
 
-// Allocate and construct the block for table entry `slot`. Called with the
-// lock held. No logging: the caller reports a failure after unlocking.
-static PeerMessageHistory* peerHistoryAllocateBlock(int slot) {
-  void* mem = ps_alloc(sizeof(PeerMessageHistory), AllocPref::PreferPsram, "espnow.msgHist");
-  if (!mem) return nullptr;
-  PeerMessageHistory* block = new (mem) PeerMessageHistory();
-  gEspNow->peerMessageHistories[slot] = block;
-  return block;
+// Counts one event of line k and says whether the line is due now (under the lock).
+static void peerHistorySayDue(PeerHistorySayNote& note, int k, const uint8_t* mac) {
+  const uint32_t now = (uint32_t)millis();
+  sHistSay.count[k]++;
+  if (k != kHistSayAllocated && sHistSay.said[k] &&
+      (uint32_t)(now - sHistSay.lastMs[k]) < PEER_HISTORY_SAY_INTERVAL_MS) {
+    return;
+  }
+  sHistSay.said[k] = true;
+  sHistSay.lastMs[k] = now;
+  note.say[k] = true;
+  note.count[k] = sHistSay.count[k];
+  sHistSay.count[k] = 0;
+  if (mac) memcpy(note.mac[k], mac, 6);
 }
 
-// Find the active slot for `mac`. With `create`, activate a slot for a new
-// peer: the first allocated-but-inactive block, else a new block in the first
-// empty table entry. Called with the lock held. Returns nullptr when the peer
-// has no slot (find) or none can be had (create; `outcome` records why).
-static PeerMessageHistory* peerHistorySlotLocked(const uint8_t* mac, bool create,
-                                                 PeerHistoryStoreOutcome* outcome = nullptr) {
-  if (!gEspNow || !gEspNow->peerMessageHistories || !mac) return nullptr;
-  PeerMessageHistory** table = gEspNow->peerMessageHistories;
+static uint32_t peerHistoryBlockBytes() {
+  return (uint32_t)sizeof(PeerMessageHistory) + 2u * gEspNow->peerHistoryRingBytes;
+}
+
+// Bytes the history holds now: blocks plus the scratch. Int reads only.
+static uint32_t peerHistoryBytesInUse() {
+  if (!gEspNow || gEspNow->peerHistoryCapacity <= 0) return 0;
+  return (uint32_t)gEspNow->peerHistoryCount * peerHistoryBlockBytes() +
+         (sHistScratch ? (uint32_t)sizeof(PeerHistoryScratch) : 0u);
+}
+
+static uint32_t peerHistoryKbUp(uint32_t bytes) { return (bytes + 1023u) / 1024u; }
+
+// A ring size as said in the lines: "16 KB" when it is whole KB, else "2728 bytes"
+// (the total cap can lower a ring to a size that is not).
+static void peerHistorySizeText(char* out, size_t cap, uint32_t bytes) {
+  if (bytes % 1024u == 0) snprintf(out, cap, "%u KB", (unsigned)(bytes / 1024u));
+  else snprintf(out, cap, "%u bytes", (unsigned)bytes);
+}
+
+// What one store did. peerHistoryStoreReport logs it after the lock is released.
+struct PeerHistoryStoreOutcome {
+  bool busy = false;          // lock not taken within PEER_HISTORY_LOCK_TIMEOUT_MS
+  bool stored = false;        // every record of the call was written
+  bool allocFailed = false;   // the peer's block could not be had (no memory, or held off)
+  bool noSlot = false;        // every slot belongs to another peer
+  bool seqExhausted = false;  // message numbers used up
+  bool ringReset = false;     // a damaged ring was cleared on the way
+  bool truncated = false;     // text longer than a record (or 255 pieces) was cut
+  int  newSlot = -1;          // slot activated for a peer seen for the first time
+  int  activeCount = 0;       // peerHistoryCount after that
+  int  capacity = 0;          // slot count
+  uint32_t newBlockBytes = 0; // bytes of the block allocated by this store
+  uint32_t bytesInUse = 0;    // history bytes after this store
+  PeerHistorySayNote note;
+};
+
+// A history line of one call, after unlock.
+static void peerHistorySay(const PeerHistorySayNote& note, uint32_t blockBytes, int activeCount,
+                           int capacity, uint32_t bytesInUse) {
+  char mac[18];
+  if (note.say[kHistSayAllocated]) {
+    macToDisplay(note.mac[kHistSayAllocated], mac, sizeof(mac));
+    BROADCAST_PRINTF("[ESP-NOW] Message history allocated for %s: %u KB (%d/%d peers, %u KB in use)",
+                     mac, (unsigned)peerHistoryKbUp(blockBytes), activeCount, capacity,
+                     (unsigned)peerHistoryKbUp(bytesInUse));
+  }
+  if (note.say[kHistSayNoMemory]) {
+    macToDisplay(note.mac[kHistSayNoMemory], mac, sizeof(mac));
+    BROADCAST_PRINTF("[ESP-NOW] Message history for %s not kept: no memory for %u KB in %s "
+                     "(%u message(s) not kept since the last notice; ESP-NOW keeps working)",
+                     mac, (unsigned)peerHistoryKbUp(blockBytes), sHistPsram ? "PSRAM" : "internal RAM",
+                     (unsigned)note.count[kHistSayNoMemory]);
+  }
+  if (note.say[kHistSayFull]) {
+    macToDisplay(note.mac[kHistSayFull], mac, sizeof(mac));
+    BROADCAST_PRINTF("[ESP-NOW] Message history full: %d peers have one; %s not kept "
+                     "(%u message(s) since the last notice; more: 'espnowmeshpeermax', from the next restart)",
+                     activeCount, mac, (unsigned)note.count[kHistSayFull]);
+  }
+  if (note.say[kHistSayDamaged]) {
+    macToDisplay(note.mac[kHistSayDamaged], mac, sizeof(mac));
+    BROADCAST_PRINTF("[ESP-NOW] Message history for %s was damaged and was cleared", mac);
+  }
+  if (note.say[kHistSaySeqUsedUp]) {
+    BROADCAST_PRINTF("[ESP-NOW] Message history stopped: message numbers used up; %u message(s) not kept "
+                     "since the last notice; restart to keep history",
+                     (unsigned)note.count[kHistSaySeqUsedUp]);
+  }
+}
+
+// ---- ring checks (DESIGN 3.10) ----------------------------------------------
+
+static espnowhist::RingState& historyRing(PeerMessageHistory& b, bool sent) {
+  return sent ? b.sent : b.received;
+}
+static uint8_t* historyBuf(PeerMessageHistory& b, bool sent) {
+  return sent ? b.sentBuf() : b.receivedBuf();
+}
+
+// The ring may be handed to the core: the block's size is the latched one, the
+// state agrees with it and passes the O(1) check. Under the lock.
+static bool historyRingOk(const PeerMessageHistory& b, bool sent) {
+  const espnowhist::RingState& r = sent ? b.sent : b.received;
+  return b.ringBytes == gEspNow->peerHistoryRingBytes && r.size == b.ringBytes &&
+         r.sent == (sent ? 1 : 0) && espnowhist::stateSane(r);
+}
+
+// Clear a damaged ring in place (keeps the stats, resets + 1) and count line C.
+// The block's size is put back to the latched one first, so the other ring's
+// position is right again. Under the lock.
+static void historyRingRepair(PeerMessageHistory& b, bool sent, PeerHistorySayNote& note) {
+  b.ringBytes = gEspNow->peerHistoryRingBytes;
+  espnowhist::RingState& r = historyRing(b, sent);
+  const uint32_t evicted = r.evicted, resets = r.resets;
+  espnowhist::ringInit(r, b.ringBytes, sent);
+  r.evicted = evicted;
+  r.resets = resets + 1;
+  peerHistorySayDue(note, kHistSayDamaged, b.peerMac);
+}
+
+// historyRingOk, else repair. Afterwards the ring is sane (maybe empty).
+static void historyRingCheck(PeerMessageHistory& b, bool sent, PeerHistorySayNote& note) {
+  if (!historyRingOk(b, sent)) historyRingRepair(b, sent, note);
+}
+
+// ---- slots and allocation -----------------------------------------------------
+
+// Find-only: the active block for `mac`, or nullptr; `firstEmpty` (optional)
+// gets the first slot without a block (-1: none). Never allocates. Under the lock.
+static PeerMessageHistory* peerHistorySlotLocked(const uint8_t* mac, int* firstEmpty = nullptr) {
+  if (firstEmpty) *firstEmpty = -1;
+  if (!gEspNow || gEspNow->peerHistoryCapacity <= 0 || !mac) return nullptr;
   const int capacity = gEspNow->peerHistoryCapacity;
   for (int i = 0; i < capacity; i++) {
-    PeerMessageHistory* h = table[i];
-    if (h && h->active && memcmp(h->peerMac, mac, 6) == 0) return h;
-  }
-  if (!create) return nullptr;
-
-  int slot = -1;
-  for (int i = 0; i < capacity && slot < 0; i++) {
-    if (table[i] && !table[i]->active) slot = i;
-  }
-  bool newBlock = false;
-  if (slot < 0) {
-    for (int i = 0; i < capacity && slot < 0; i++) {
-      if (!table[i]) slot = i;
+    PeerMessageHistory* h = gEspNow->peerMessageHistories[i];
+    if (!h) {
+      if (firstEmpty && *firstEmpty < 0) *firstEmpty = i;
+      continue;
     }
-    if (slot < 0) return nullptr;  // every slot belongs to a peer
-    if (!peerHistoryAllocateBlock(slot)) {
-      if (outcome) outcome->blockFailed = true;
-      return nullptr;
-    }
-    newBlock = true;
+    if (h->active && memcmp(h->peerMac, mac, 6) == 0) return h;
   }
+  return nullptr;
+}
 
-  PeerMessageHistory* h = table[slot];
+// Slot index of a block in the table (the block was found through the table,
+// so it is there). Under the lock.
+static uint8_t peerHistorySlotIndex(const PeerMessageHistory* history) {
+  for (int i = 0; i < gEspNow->peerHistoryCapacity; i++) {
+    if (gEspNow->peerMessageHistories[i] == history) return (uint8_t)i;
+  }
+  return 0;
+}
+
+// Install a block allocated outside the lock. Re-finds first (another task may
+// have installed one for this MAC meanwhile: that one is used and ours is
+// freed by the caller). `block` / `scratch` are set to nullptr when taken.
+// Under the lock; no allocation, no logging.
+static PeerMessageHistory* peerHistoryInstallLocked(const uint8_t* mac, void*& block, void*& scratch,
+                                                    PeerHistoryStoreOutcome& o) {
+  int empty = -1;
+  PeerMessageHistory* found = peerHistorySlotLocked(mac, &empty);
+  if (found) return found;
+  if (empty < 0) {
+    o.noSlot = true;
+    return nullptr;
+  }
+  if (!sHistScratch && !scratch) {
+    o.allocFailed = true;
+    return nullptr;
+  }
+  PeerMessageHistory* h = new (block) PeerMessageHistory();
   memcpy(h->peerMac, mac, 6);
-  h->head = 0;
-  h->tail = 0;
-  h->count = 0;
-  h->sentHead = 0;
-  h->sentTail = 0;
-  h->sentCount = 0;
-  h->active = true;
-  gEspNow->peerHistoryCount++;
-  if (outcome) {
-    outcome->newSlot = slot;
-    outcome->newBlock = newBlock;
-    outcome->activeCount = gEspNow->peerHistoryCount;
-    outcome->capacity = capacity;
+  h->ringBytes = gEspNow->peerHistoryRingBytes;
+  if (!espnowhist::ringInit(h->received, h->ringBytes, false) ||
+      !espnowhist::ringInit(h->sent, h->ringBytes, true)) {
+    o.allocFailed = true;
+    return nullptr;
   }
+  if (!sHistScratch) {
+    sHistScratch = new (scratch) PeerHistoryScratch();
+    scratch = nullptr;
+  }
+  h->active = true;
+  gEspNow->peerMessageHistories[empty] = h;
+  block = nullptr;
+  gEspNow->peerHistoryCount++;
+  o.newSlot = empty;
+  o.activeCount = gEspNow->peerHistoryCount;
+  o.capacity = gEspNow->peerHistoryCapacity;
+  o.newBlockBytes = peerHistoryBlockBytes();
+  peerHistorySayDue(o.note, kHistSayAllocated, mac);
   return h;
 }
 
-// Create the store lock, the slot table (gMeshPeerSlots entries) and the first
-// PEER_HISTORY_INITIAL_CAPACITY blocks. Returns the bytes allocated; 0 when the
-// table could not be allocated (messaging limited, ESP-NOW still works).
-static size_t peerHistoryStoreInit() {
-  if (!gEspNow) return 0;
+// Set up the store: the lock, an empty slot table and the ring size, latched
+// once per boot (idempotent). Allocates nothing: a peer's block comes with its
+// first message. settingKb is espnowhistorykb (0 = board default).
+static void peerHistoryStoreInit(uint8_t settingKb) {
+  if (!gEspNow || gEspNow->peerHistoryCapacity > 0) return;
   if (!gPeerHistoryLock) {
     gPeerHistoryLock = xSemaphoreCreateMutexStatic(&gPeerHistoryLockStorage);
   }
+  for (int i = 0; i < MESH_PEER_MAX; i++) gEspNow->peerMessageHistories[i] = nullptr;
+  gEspNow->peerHistoryCount = 0;
 
-  const int capacity = gMeshPeerSlots;
-  int eager = PEER_HISTORY_INITIAL_CAPACITY;
-  if (eager > capacity) eager = capacity;  // Cap at configured max
-  const size_t tableBytes = sizeof(PeerMessageHistory*) * (size_t)(capacity > 0 ? capacity : 0);
-  bool tableOk = false;
-  int blocks = 0;
-  {
-    PeerHistoryGuard g;
-    if (g.held && !gEspNow->peerMessageHistories && capacity > 0) {
-      PeerMessageHistory** table = (PeerMessageHistory**)ps_alloc(tableBytes, AllocPref::PreferPsram,
-                                                                  "espnow.msgHist.table");
-      if (table) {
-        memset(table, 0, tableBytes);
-        gEspNow->peerMessageHistories = table;
-        gEspNow->peerHistoryCapacity = capacity;
-        gEspNow->peerHistoryCount = 0;
-        tableOk = true;
-        while (blocks < eager && peerHistoryAllocateBlock(blocks)) blocks++;
-      }
-    }
+  // PSRAM is what was found at runtime, not only CONFIG_SPIRAM: a PSRAM build
+  // whose PSRAM is missing gets the no-PSRAM budget and internal RAM.
+  const bool psram = psramAvailableRuntime();
+  uint32_t kbDefault = ESPNOW_HISTORY_KB_DEFAULT_NOPSRAM;
+  uint32_t kbMax = ESPNOW_HISTORY_KB_MAX_NOPSRAM;
+  uint32_t totalCap = (uint32_t)ESPNOW_HISTORY_TOTAL_KB_NOPSRAM * 1024u;
+  if (psram) {
+    kbDefault = ESPNOW_HISTORY_KB_DEFAULT;
+    kbMax = ESPNOW_HISTORY_KB_MAX;
+    totalCap = (uint32_t)ESPNOW_HISTORY_TOTAL_KB * 1024u;
+    const size_t quarter = heap_caps_get_total_size(MALLOC_CAP_SPIRAM) / 4;
+    if (quarter < totalCap) totalCap = (uint32_t)quarter;
   }
+  int capacity = gMeshPeerSlots < MESH_PEER_MAX ? gMeshPeerSlots : MESH_PEER_MAX;
+  if (capacity < 0) capacity = 0;
+  const espnowhist::Budget budget = espnowhist::ringBudget(settingKb, kbDefault, kbMax, totalCap, capacity);
+  sHistPsram = psram;
+  sHistPolicy = psram ? AllocPref::RequirePsram : AllocPref::RequireInternal;
+  gEspNow->peerHistoryRingBytes = budget.ringBytes;
+  gEspNow->peerHistoryCapacity = capacity;  // last: the store is initialised from here on
 
-  const size_t blockBytes = sizeof(PeerMessageHistory) * (size_t)blocks;
-  if (!tableOk) {
-    BROADCAST_PRINTF("[ESP-NOW] WARNING: Failed to allocate message history (%u bytes)", (unsigned)tableBytes);
-    return 0;
+  char ringText[24], peerText[24];
+  peerHistorySizeText(ringText, sizeof(ringText), budget.ringBytes);
+  peerHistorySizeText(peerText, sizeof(peerText), 2u * budget.ringBytes);
+  const uint32_t maxBytes = (uint32_t)capacity * peerHistoryBlockBytes() + (uint32_t)sizeof(PeerHistoryScratch);
+  char notes[128] = "";
+  size_t used = 0;
+  if (budget.clampedToBoardMax) {
+    used += (size_t)snprintf(notes + used, sizeof(notes) - used, " (espnowhistorykb %u is above this board's %u)",
+                             (unsigned)settingKb, (unsigned)kbMax);
   }
-  BROADCAST_PRINTF("[ESP-NOW] Message history allocated: %d slots (~%u KB, grows to %d max)",
-                   blocks, (unsigned)(blockBytes / 1024), capacity);
-  BROADCAST_PRINTF("[ESP-NOW] Message history depth: %d per peer in each direction (~%u KB per peer)",
-                   (int)MESSAGES_PER_DEVICE, (unsigned)(sizeof(PeerMessageHistory) / 1024));
-  return tableBytes + blockBytes;
+  if (budget.loweredForTotalCap && used < sizeof(notes)) {
+    snprintf(notes + used, sizeof(notes) - used, " (lowered to fit the %u KB history cap)",
+             (unsigned)(totalCap / 1024u));
+  }
+  BROADCAST_PRINTF("[ESP-NOW] Message history: %s per peer (%s received + %s sent) in %s, "
+                   "allocated when a peer first has a message; up to %d peers, at most %u KB%s",
+                   peerText, ringText, ringText,
+                   psram ? "PSRAM" : "internal RAM", capacity, (unsigned)peerHistoryKbUp(maxBytes), notes);
 }
 
 // Log what a store did (lock released) and return whether it stored.
@@ -21787,85 +22069,164 @@ static bool peerHistoryStoreReport(const PeerHistoryStoreOutcome& o, const uint8
                   MAC_ARGS(peerMac));
     return false;
   }
-  if (o.blockFailed) {
-    ERROR_ESPNOWF("[ESP-NOW] Failed to allocate peer history block (%u bytes)",
-                  (unsigned)sizeof(PeerMessageHistory));
+  peerHistorySay(o.note, o.newBlockBytes ? o.newBlockBytes : peerHistoryBlockBytes(), o.activeCount,
+                 o.capacity, o.bytesInUse);
+  if (o.truncated) {
+    DEBUG_ESPNOWF("[ESP-NOW] history record from " MAC_FMT " cut to fit", MAC_ARGS(peerMac));
   }
-  if (!o.stored) {
-    broadcastOutput("[ESP-NOW] ERROR: No free peer history slots");
+  return o.stored;
+}
+
+// ---- writes -------------------------------------------------------------------
+
+// Append one record (one fragment's text) to a ring of block `h`. Under the lock.
+static bool historyAppendLocked(PeerMessageHistory& h, bool sent, const char* text, size_t len,
+                                bool encrypted, bool unattributed, LogMessageType msgType,
+                                uint32_t reqId, uint8_t piece, uint8_t pieceTotal,
+                                PeerHistoryStoreOutcome& o) {
+  historyRingCheck(h, sent, o.note);
+  if (gEspNow->globalMessageSeqNum == UINT32_MAX) {  // saturated: no seq is reused (DESIGN 5.2)
+    o.seqExhausted = true;
+    peerHistorySayDue(o.note, kHistSaySeqUsedUp, nullptr);
     return false;
   }
-  if (o.newSlot >= 0) {
-    DEBUG_ESPNOWF("[ESP-NOW] Created peer history slot %d/%d for " MAC_FMT,
-                  o.activeCount, o.capacity,
-                  MAC_ARGS(peerMac));
-    if (o.newBlock) {
-      BROADCAST_PRINTF("[ESP-NOW] Peer history slot %d/%d allocated (~%u KB)",
-                       o.newSlot + 1, o.capacity, (unsigned)(sizeof(PeerMessageHistory) / 1024));
+  espnowhist::Header hd{};
+  hd.seq = ++gEspNow->globalMessageSeqNum;
+  hd.reqId = reqId;
+  hd.timestamp = (uint32_t)millis();
+  hd.type = (uint8_t)msgType;
+  hd.piece = piece;
+  hd.pieceTotal = pieceTotal;
+  hd.sendState = 0;  // SEND_STATUS_PENDING; terminal state stamped later for sent rows
+  hd.encrypted = encrypted;
+  hd.unattributed = !sent && unattributed;
+  espnowhist::RingState& r = historyRing(h, sent);
+  uint8_t* buf = historyBuf(h, sent);
+  espnowhist::AppendResult res = espnowhist::append(r, buf, hd, text, len);
+  if (res.insane) {  // not reachable after historyRingCheck; kept as the 3.10 rule
+    historyRingRepair(h, sent, o.note);
+    res = espnowhist::append(r, buf, hd, text, len);
+  }
+  if (res.reset) {  // the evictor met damage and cleared the ring first
+    o.ringReset = true;
+    peerHistorySayDue(o.note, kHistSayDamaged, h.peerMac);
+  }
+  if (res.truncated) o.truncated = true;
+  return res.ok;
+}
+
+// Split `message` into <=200 B pieces sharing `reqId` (at most 255 pieces;
+// pieceTotal is computed after that clamp) and append each. A short message is
+// a single 1-of-1 piece. Under the lock. True when every piece was stored.
+static bool espnowStoreChunked(PeerMessageHistory& h, bool sent, const char* message,
+                               bool encrypted, bool unattributed, LogMessageType msgType,
+                               uint32_t reqId, PeerHistoryStoreOutcome& o) {
+  const size_t kFrag = espnowhist::kChunkText;
+  const size_t kAll = espnowhist::kChunkText * espnowhist::kChunkPiecesMax;
+  size_t total = message ? strnlen(message, kAll + 1) : 0;
+  if (total > kAll) {
+    total = kAll;
+    o.truncated = true;
+  }
+  const size_t pieces = total <= kFrag ? 1 : (total + kFrag - 1) / kFrag;
+  const uint8_t pieceTotal = (uint8_t)pieces;
+  bool all = true;
+  for (size_t p = 0; p < pieces; p++) {
+    const size_t off = p * kFrag;
+    const size_t len = (total - off) < kFrag ? (total - off) : kFrag;
+    if (!historyAppendLocked(h, sent, message ? message + off : "", len, encrypted, unattributed, msgType,
+                             reqId, (uint8_t)(p + 1), pieceTotal, o)) {
+      all = false;
     }
   }
-  return true;
+  return all;
 }
 
-// Store a message in the per-device buffer
-// Fill one ring slot and advance head/tail/count. Shared by the received-store
-// and sent-store paths so the two rings behave identically (only the ring +
-// direction differ). `keyMac` becomes the record's senderMac — the conversation
-// key reported as the JSON `mac` (the peer on both directions); `fragment`/
-// `fragLen` is ONE fragment's text. Called with the store lock held.
-static void espnowStoreInRing(
-  ReceivedTextMessage* ring, uint8_t& head, uint8_t& tail, uint8_t& count,
-  const uint8_t* keyMac, const char* name,
-  const char* fragment, size_t fragLen,
-  bool encrypted, LogMessageType msgType,
-  uint32_t reqId, uint8_t piece, uint8_t pieceTotal, bool isSent
-) {
-  ReceivedTextMessage& slot = ring[head];
-
-  memcpy(slot.senderMac, keyMac, 6);
-  strncpy(slot.senderName, name ? name : "", 31);
-  slot.senderName[31] = '\0';
-
-  size_t copyLen = fragLen < sizeof(slot.message) - 1 ? fragLen : sizeof(slot.message) - 1;
-  memcpy(slot.message, fragment, copyLen);
-  slot.message[copyLen] = '\0';
-
-  slot.timestamp = millis();
-  slot.encrypted = encrypted;
-  slot.seqNum = ++gEspNow->globalMessageSeqNum;
-  slot.reqId = reqId;
-  slot.piece = piece;
-  slot.pieceTotal = pieceTotal;
-  slot.msgType = msgType;
-  slot.active = true;
-  slot.isSent = isSent;
-  slot.sendState = 0;  // SEND_STATUS_PENDING; terminal state stamped later for sent rows
-
-  head = (head + 1) % MESSAGES_PER_DEVICE;
-  if (count < MESSAGES_PER_DEVICE) count++;       // grow until full
-  else tail = (tail + 1) % MESSAGES_PER_DEVICE;   // then drop oldest
-}
-
-// Split `message` into <=200 B pieces sharing `reqId` and store each into `ring`
-// with piece/of set. The slot caps at 256 B, so a single store of long content
-// (a command result, a long send) would truncate; chunking lets the client
-// reassemble by reqId. Shared by the sent and received chunked-store wrappers.
-// A short message is a single 1-of-1 piece. Called with the store lock held.
-static void espnowStoreChunked(
-  ReceivedTextMessage* ring, uint8_t& head, uint8_t& tail, uint8_t& count,
-  const uint8_t* keyMac, const char* name, const char* message,
-  bool encrypted, LogMessageType msgType, uint32_t reqId, bool isSent
-) {
-  const size_t FRAG = 200;  // slot holds 256; keep a margin
-  size_t total = message ? strlen(message) : 0;
-  uint8_t pieceTotal = (total <= FRAG) ? 1 : (uint8_t)((total + FRAG - 1) / FRAG);
-  if (pieceTotal == 0) pieceTotal = 1;
-  for (uint8_t p = 0; p < pieceTotal; p++) {
-    size_t off = (size_t)p * FRAG;
-    size_t len = (total - off) < FRAG ? (total - off) : FRAG;
-    espnowStoreInRing(ring, head, tail, count, keyMac, name, message + off, len,
-                      encrypted, msgType, reqId, (uint8_t)(p + 1), pieceTotal, isSent);
+// The common store path (DESIGN 5.5): find the block under the lock and write;
+// a peer without one gets its block allocated OUTSIDE the lock, installed on a
+// second lock hold, then the write. A refused store changes nothing and says
+// why at most once a minute. `write(block, outcome)` runs under the lock and
+// returns whether everything was stored.
+template <class Write>
+static bool peerHistoryStore(const uint8_t* peerMac, Write&& write) {
+  if (!gEspNow || !peerMac || gEspNow->peerHistoryCapacity <= 0) return false;
+  PeerHistoryStoreOutcome o;
+  bool needAlloc = false, needScratch = false;
+  {
+    PeerHistoryGuard guard;
+    if (!guard.held) {
+      o.busy = true;
+    } else {
+      int empty = -1;
+      PeerMessageHistory* h = peerHistorySlotLocked(peerMac, &empty);
+      if (h) {
+        o.stored = write(*h, o);
+      } else if (empty < 0) {
+        o.noSlot = true;
+      } else if (sHistSay.allocFailedOnce &&
+                 (uint32_t)((uint32_t)millis() - sHistSay.lastAllocFailMs) < PEER_HISTORY_ALLOC_RETRY_MS) {
+        o.allocFailed = true;  // held off after a recent failure
+      } else {
+        needAlloc = true;
+        needScratch = sHistScratch == nullptr;
+      }
+      if (o.noSlot) peerHistorySayDue(o.note, kHistSayFull, peerMac);
+      if (o.allocFailed) peerHistorySayDue(o.note, kHistSayNoMemory, peerMac);
+      o.activeCount = gEspNow->peerHistoryCount;
+      o.capacity = gEspNow->peerHistoryCapacity;
+      o.bytesInUse = peerHistoryBytesInUse();
+    }
   }
+
+  void* block = nullptr;
+  void* scratch = nullptr;
+  if (needAlloc) {
+    const size_t blockBytes = peerHistoryBlockBytes();
+    const size_t scratchBytes = needScratch ? sizeof(PeerHistoryScratch) : 0;
+    bool roomy = true;
+    if (sHistPolicy == AllocPref::RequireInternal) {
+      // The caps ps_alloc(RequireInternal) allocates with: on the classic ESP32
+      // the IRAM-only heap (INTERNAL, 32-bit only) cannot hold the block, so it
+      // must not count toward the floor.
+      const uint32_t caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+      roomy = heap_caps_get_free_size(caps) >= blockBytes + scratchBytes + (size_t)ESPNOW_HISTORY_INTERNAL_FLOOR &&
+              heap_caps_get_largest_free_block(caps) >= blockBytes;
+    }
+    if (roomy) {
+      block = ps_alloc(blockBytes, sHistPolicy, "espnow.msgHist");
+      if (block && needScratch) scratch = ps_alloc(scratchBytes, sHistPolicy, "espnow.msgHistScratch");
+    }
+    PeerHistoryGuard guard;
+    if (!guard.held) {
+      o.busy = true;
+    } else {
+      PeerMessageHistory* h = nullptr;
+      if (block && (!needScratch || scratch || sHistScratch)) {
+        h = peerHistoryInstallLocked(peerMac, block, scratch, o);
+      } else {
+        o.allocFailed = true;
+      }
+      if (h) {
+        o.stored = write(*h, o);
+      } else {
+        if (o.allocFailed) {
+          sHistSay.allocFailedOnce = true;
+          sHistSay.lastAllocFailMs = (uint32_t)millis();
+          peerHistorySayDue(o.note, kHistSayNoMemory, peerMac);
+        }
+        if (o.noSlot) peerHistorySayDue(o.note, kHistSayFull, peerMac);
+      }
+      if (o.newSlot < 0) {
+        o.activeCount = gEspNow->peerHistoryCount;
+        o.capacity = gEspNow->peerHistoryCapacity;
+      }
+      o.bytesInUse = peerHistoryBytesInUse();
+    }
+  }
+  // Whatever the install did not take is freed outside the lock.
+  if (block) ps_free(block);
+  if (scratch) ps_free(scratch);
+  return peerHistoryStoreReport(o, peerMac);
 }
 
 bool storeMessageInPeerHistory(
@@ -21876,79 +22237,52 @@ bool storeMessageInPeerHistory(
   LogMessageType msgType,
   uint32_t reqId,
   uint8_t piece,
-  uint8_t pieceTotal
+  uint8_t pieceTotal,
+  HistoryAttribution attribution
 ) {
   if (!gEspNow || !peerMac) return false;
-
-  PeerHistoryStoreOutcome outcome;
-  {
-    PeerHistoryGuard guard;
-    outcome.busy = !guard.held;
-    PeerMessageHistory* history = guard.held ? peerHistorySlotLocked(peerMac, true, &outcome) : nullptr;
-    if (history) {
-      espnowStoreInRing(history->messages, history->head, history->tail, history->count,
-                        peerMac, peerName, message, strlen(message),
-                        encrypted, msgType, reqId, piece, pieceTotal, /*isSent=*/false);
-      outcome.stored = true;
-    }
+  if (!message) message = "";
+  // Reads at most one byte past a record, so an unterminated buffer is safe.
+  const size_t len = strnlen(message, espnowhist::kTextMax + 1);
+  bool unattributed = attribution == HistoryAttribution::Unattributed;
+  if (attribution == HistoryAttribution::FromName) {
+    char macText[18];
+    macToDisplay(peerMac, macText, sizeof(macText));
+    unattributed = espnowhist::unattributedName(peerName, macText);
   }
-  return peerHistoryStoreReport(outcome, peerMac);
+  return peerHistoryStore(peerMac, [&](PeerMessageHistory& h, PeerHistoryStoreOutcome& o) {
+    return historyAppendLocked(h, /*sent=*/false, message, len, encrypted, unattributed, msgType,
+                               reqId, piece, pieceTotal, o);
+  });
 }
 
 bool storeSentMessageInPeerHistory(uint8_t* peerMac, const char* message, uint32_t msgId) {
   if (!gEspNow || !peerMac || !message) return false;
-
-  PeerHistoryStoreOutcome outcome;
-  {
-    PeerHistoryGuard guard;
-    outcome.busy = !guard.held;
-    PeerMessageHistory* history = guard.held ? peerHistorySlotLocked(peerMac, true, &outcome) : nullptr;
-    if (history) {
-      // Split into ≤200 B pieces sharing msgId (shared chunker) so the collapse view
-      // reassembles sent the same way and long sends aren't truncated. name empty
-      // (sent rows show delivery status, not a sender name); sends are always
-      // encrypted post-2026.
-      espnowStoreChunked(history->sent, history->sentHead, history->sentTail, history->sentCount,
-                         peerMac, "", message, /*encrypted=*/true, MSG_TEXT, msgId, /*isSent=*/true);
-      outcome.stored = true;
-    }
-  }
-  return peerHistoryStoreReport(outcome, peerMac);
+  // Split into ≤200 B pieces sharing msgId (shared chunker) so the collapse view
+  // reassembles sent the same way and long sends aren't truncated. Sent rows
+  // show delivery status, not a sender name; sends are always encrypted post-2026.
+  return peerHistoryStore(peerMac, [&](PeerMessageHistory& h, PeerHistoryStoreOutcome& o) {
+    return espnowStoreChunked(h, /*sent=*/true, message, /*encrypted=*/true, /*unattributed=*/false,
+                              MSG_TEXT, msgId, o);
+  });
 }
 
 bool storeReceivedMessageChunked(uint8_t* peerMac, const char* peerName, const char* message,
-                                 bool encrypted, LogMessageType msgType, uint32_t reqId) {
+                                 bool encrypted, LogMessageType msgType, uint32_t reqId,
+                                 HistoryAttribution attribution) {
   if (!gEspNow || !peerMac || !message) return false;
-
-  PeerHistoryStoreOutcome outcome;
-  {
-    PeerHistoryGuard guard;
-    outcome.busy = !guard.held;
-    PeerMessageHistory* history = guard.held ? peerHistorySlotLocked(peerMac, true, &outcome) : nullptr;
-    if (history) {
-      // Received long content (e.g. a remote command's result) chunked the same way
-      // as sent text, so a multi-hundred-byte result isn't truncated at the 256 B
-      // slot. The client reassembles by reqId.
-      espnowStoreChunked(history->messages, history->head, history->tail, history->count,
-                         peerMac, peerName, message, encrypted, msgType, reqId, /*isSent=*/false);
-      outcome.stored = true;
-    }
+  bool unattributed = attribution == HistoryAttribution::Unattributed;
+  if (attribution == HistoryAttribution::FromName) {
+    char macText[18];
+    macToDisplay(peerMac, macText, sizeof(macText));
+    unattributed = espnowhist::unattributedName(peerName, macText);
   }
-  return peerHistoryStoreReport(outcome, peerMac);
-}
-
-void espnowUpdateSentDeliveryState(const uint8_t* peerMac, uint32_t msgId, uint8_t state) {
-  if (!gEspNow || !peerMac || msgId == 0) return;
-  PeerHistoryGuard guard;
-  if (!guard.held) return;
-  // Don't create a peer slot just to update — only stamp if history exists.
-  PeerMessageHistory* history = peerHistorySlotLocked(peerMac, false);
-  if (!history) return;
-  // Stamp every fragment of this message (all share msgId in reqId).
-  for (int i = 0; i < MESSAGES_PER_DEVICE; i++) {
-    ReceivedTextMessage& slot = history->sent[i];
-    if (slot.active && slot.isSent && slot.reqId == msgId) slot.sendState = state;
-  }
+  // Received long content (e.g. a remote command's result) chunked the same way
+  // as sent text, so a multi-hundred-byte result isn't truncated at one record.
+  // The client reassembles by reqId.
+  return peerHistoryStore(peerMac, [&](PeerMessageHistory& h, PeerHistoryStoreOutcome& o) {
+    return espnowStoreChunked(h, /*sent=*/false, message, encrypted, unattributed, msgType, reqId, o);
+  });
 }
 
 // Log a file transfer event to the message buffer
@@ -21982,7 +22316,9 @@ void logFileTransferEvent(
       return;
   }
   
-  storeMessageInPeerHistory(peerMac, peerName, message, false, eventType);
+  // File frames need pairing and a session, so the sender is proven.
+  storeMessageInPeerHistory(peerMac, peerName, message, false, eventType, 0, 1, 1,
+                            HistoryAttribution::Attributed);
   
   // Also broadcast to serial/web for immediate visibility
   String deviceName = String(peerName);
@@ -21991,7 +22327,7 @@ void logFileTransferEvent(
   }
   BROADCAST_PRINTF("[ESP-NOW] %s: %s", deviceName.c_str(), message);
 
-  // Durable record of inbound files only. The peer-history ring above is
+  // Durable record of inbound files only. The peer history is
   // RAM-only (lost on reboot); a file arriving on the device is a real "state
   // changed" event worth keeping. Sends are user-initiated (covered elsewhere)
   // and deliberately not duplicated here.
@@ -22007,260 +22343,243 @@ void logFileTransferEvent(
   }
 }
 
-// Get all messages for a specific peer (for web UI API). Merges the received and
-// sent rings into one seqNum-ordered timeline; each record's isSent gives direction.
-// Two-pointer merge of one peer's received + sent rings by seqNum, appending to
-// out[] from index `copied` up to maxMessages, keeping only seq > sinceSeq.
-// Both rings are stored oldest→newest (tail→head) in strictly ascending global
-// seq, so a linear merge yields ascending output. CRITICAL: the page cap is
-// applied AFTER interleaving — never by draining the received ring first — so a
-// sent row never gets starved by a received row of higher seq. (The old code
-// filled the cap from messages[] first, advancing the poller's cursor past the
-// sent rows below that high-water; those sent messages — your own 2/4/6 sends —
-// then sat permanently below `sinceSeq` and never came back.) Returns new count.
-static int mergePeerRingsBySeq(const PeerMessageHistory& h, ReceivedTextMessage* out,
-                               int copied, int maxMessages, uint32_t sinceSeq) {
-  int ri = 0, si = 0;
-  while (copied < maxMessages) {
-    // Advance each cursor to its next live, newer-than-sinceSeq record. Stale /
-    // already-seen rows are the low-seq ones at the front, so this is O(1) after
-    // the first call.
-    while (ri < h.count) {
-      uint8_t idx = (h.tail + ri) % MESSAGES_PER_DEVICE;
-      if (h.messages[idx].active && h.messages[idx].seqNum > sinceSeq) break;
-      ri++;
-    }
-    while (si < h.sentCount) {
-      uint8_t idx = (h.sentTail + si) % MESSAGES_PER_DEVICE;
-      if (h.sent[idx].active && h.sent[idx].seqNum > sinceSeq) break;
-      si++;
-    }
-    bool haveR = ri < h.count, haveS = si < h.sentCount;
-    if (!haveR && !haveS) break;
+// ---- reads --------------------------------------------------------------------
 
-    const ReceivedTextMessage* pick;
-    if (haveR && haveS) {
-      uint8_t ridx = (h.tail + ri) % MESSAGES_PER_DEVICE;
-      uint8_t sidx = (h.sentTail + si) % MESSAGES_PER_DEVICE;
-      if (h.messages[ridx].seqNum <= h.sent[sidx].seqNum) { pick = &h.messages[ridx]; ri++; }
-      else                                                { pick = &h.sent[sidx];     si++; }
-    } else if (haveR) {
-      uint8_t ridx = (h.tail + ri) % MESSAGES_PER_DEVICE; pick = &h.messages[ridx]; ri++;
-    } else {
-      uint8_t sidx = (h.sentTail + si) % MESSAGES_PER_DEVICE; pick = &h.sent[sidx]; si++;
-    }
-    memcpy(&out[copied++], pick, sizeof(ReceivedTextMessage));
+// Hold time and line state of one read; peerHistoryReadDone prints after unlock.
+struct PeerHistoryReadNote {
+  PeerHistorySayNote say;
+  uint32_t t0 = 0;
+  uint32_t d0 = 0;
+  uint32_t holdUs = 0;
+  uint32_t decodes = 0;
+  void start() {
+    t0 = (uint32_t)micros();
+    d0 = espnowhist::decodeCount();
   }
+  void stop() {
+    holdUs = (uint32_t)micros() - t0;
+    decodes = espnowhist::decodeCount() - d0;
+  }
+};
+
+static void peerHistoryReadDone(const PeerHistoryReadNote& n, const char* what) {
+  if (n.say.say[kHistSayDamaged]) {
+    char mac[18];
+    macToDisplay(n.say.mac[kHistSayDamaged], mac, sizeof(mac));
+    BROADCAST_PRINTF("[ESP-NOW] Message history for %s was damaged and was cleared", mac);
+  }
+  if (n.holdUs > 20000) {
+    DEBUG_ESPNOWF("[ESP-NOW] history %s held %lu us (%lu decodes)", what, (unsigned long)n.holdUs,
+                  (unsigned long)n.decodes);
+  }
+}
+
+// Copy one record out of a ring into a reader's view. Under the lock.
+static void historyFillView(const PeerMessageHistory& b, const uint8_t* buf, uint32_t off,
+                            const espnowhist::Header& h, ReceivedTextMessage& out) {
+  memcpy(out.peerMac, b.peerMac, 6);
+  out.piece = h.piece;
+  out.pieceTotal = h.pieceTotal;
+  out.seqNum = h.seq;
+  out.reqId = h.reqId;
+  out.timestamp = h.timestamp;
+  out.msgType = (LogMessageType)h.type;
+  out.encrypted = h.encrypted;
+  out.isSent = h.sent;
+  out.unattributed = h.unattributed;
+  out.sendState = h.sendState;
+  out.length = (uint8_t)espnowhist::copyText(buf, off, h, out.message, sizeof(out.message));
+}
+
+// Add both rings of block `b` (slot `slot`) as merge sources, after checking
+// them. Returns the new source count. Under the lock.
+static int historyAddSources(PeerMessageHistory& b, uint8_t slot, bool withSent, espnowhist::Source* src,
+                             int n, PeerHistorySayNote& note) {
+  historyRingCheck(b, false, note);
+  src[n++] = espnowhist::Source{&b.received, b.receivedBuf(), slot};
+  if (withSent) {
+    historyRingCheck(b, true, note);
+    src[n++] = espnowhist::Source{&b.sent, b.sentBuf(), slot};
+  }
+  return n;
+}
+
+// After a merge or collapse: clear every ring whose walk ended at damage, so a
+// damaged header never hides later stores (DESIGN 3.10). Under the lock.
+static void historyRepairBadSources(const espnowhist::Source* src, int n, PeerHistorySayNote& note) {
+  for (int i = 0; i < n; i++) {
+    if (!sHistScratch->merge.cur[i].bad) continue;
+    PeerMessageHistory* b = gEspNow->peerMessageHistories[src[i].slot];
+    if (b) historyRingRepair(*b, src[i].ring->sent != 0, note);
+  }
+}
+
+// Merge `n` sources by seq into out[], only seq > sinceSeq, until maxMessages.
+// Under the lock. Returns records copied.
+static int historyMergeInto(const espnowhist::Source* src, int n, ReceivedTextMessage* out, int maxMessages,
+                            uint32_t sinceSeq, PeerHistorySayNote& note) {
+  int copied = 0;
+  espnowhist::mergeBySeq(src, n, sinceSeq, sHistScratch->merge,
+                         [&](int i, uint32_t off, const espnowhist::Header& h) -> bool {
+    const PeerMessageHistory* b = gEspNow->peerMessageHistories[src[i].slot];
+    historyFillView(*b, src[i].buf, off, h, out[copied++]);
+    return copied < maxMessages;
+  });
+  historyRepairBadSources(src, n, note);
   return copied;
 }
 
+// Records of one peer, both rings merged ascending by seq. The page cap is
+// applied AFTER interleaving, so a sent row is never starved by received rows
+// of higher seq (and the reverse).
 int getPeerMessages(uint8_t* peerMac, ReceivedTextMessage* outMessages, int maxMessages, uint32_t sinceSeq) {
-  if (!gEspNow || !outMessages) return 0;
-
-  PeerHistoryGuard guard;
-  if (!guard.held) return 0;
-  // Find-only: reading a peer that has no history creates nothing.
-  PeerMessageHistory* history = peerHistorySlotLocked(peerMac, false);
-  if (!history) return 0;
-
-  // One peer = one interleaved timeline; output is already ascending by seqNum.
-  return mergePeerRingsBySeq(*history, outMessages, 0, maxMessages, sinceSeq);
-}
-
-// Get all messages from all peers (for global view)
-int getAllMessages(ReceivedTextMessage* outMessages, int maxMessages, uint32_t sinceSeq) {
-  if (!gEspNow || !outMessages) return 0;
-
+  if (!gEspNow || !outMessages || !peerMac || maxMessages <= 0) return 0;
+  PeerHistoryReadNote note;
   int copied = 0;
   {
     PeerHistoryGuard guard;
-    if (!guard.held || !gEspNow->peerMessageHistories) return 0;
-
-    // Per peer, interleave its received + sent rings by seq via the shared merge
-    // (so a peer's sent rows aren't starved by its received rows — same fix as
-    // getPeerMessages). The cross-peer cap still fills peer-by-peer, so a very
-    // large multi-peer history can still miss the true global-newest — documented
-    // limitation, fine for small meshes.
-    for (int p = 0; p < gEspNow->peerHistoryCapacity && copied < maxMessages; p++) {
-      const PeerMessageHistory* history = gEspNow->peerMessageHistories[p];
-      if (!history || !history->active) continue;
-      copied = mergePeerRingsBySeq(*history, outMessages, copied, maxMessages, sinceSeq);
+    if (!guard.held || gEspNow->peerHistoryCapacity <= 0 || !sHistScratch) return 0;
+    note.start();
+    // Find-only: reading a peer that has no history creates nothing.
+    PeerMessageHistory* history = peerHistorySlotLocked(peerMac);
+    if (history) {
+      espnowhist::Source* src = sHistScratch->src;
+      const int n = historyAddSources(*history, peerHistorySlotIndex(history), true, src, 0, note.say);
+      copied = historyMergeInto(src, n, outMessages, maxMessages, sinceSeq, note.say);
     }
+    note.stop();
   }
-
-  // Sort the caller's copies by sequence number (simple bubble sort, good enough
-  // for small arrays; runs after the lock is released)
-  for (int i = 0; i < copied - 1; i++) {
-    for (int j = 0; j < copied - i - 1; j++) {
-      if (outMessages[j].seqNum > outMessages[j + 1].seqNum) {
-        ReceivedTextMessage temp = outMessages[j];
-        outMessages[j] = outMessages[j + 1];
-        outMessages[j + 1] = temp;
-      }
-    }
-  }
-
+  peerHistoryReadDone(note, "peer read");
   return copied;
 }
 
-// Collapse a peer's per-fragment records into one handle per logical message
-// (see CollapsedMsgRef in the header for the contract + rationale). Walks
-// the ring chronologically; fragments of one message share a reqId and are stored
-// consecutively, so a linear group-merge is correct. No text is copied — each
-// output entry names the message's first present fragment by slot, ring index
-// and seqNum, and carries its timestamp for ordering.
-// Collapse one ring (received or sent) into logical-message refs, appending to
-// out[] starting at index `startW`. Group-merge only searches refs added by THIS
-// call (>= startW) and also gates on isSent and slot, so a received and a sent
-// fragment that happen to share a reqId never merge. Called with the store lock
-// held. Returns the new write count.
-static int espnowCollapseRing(const ReceivedTextMessage* ring, uint8_t tail, uint8_t count,
-                              uint8_t slot, bool isSent,
-                              CollapsedMsgRef* out, int startW, int maxN) {
-  int w = startW;
-  for (int i = 0; i < count; i++) {
-    uint8_t idx = (tail + i) % MESSAGES_PER_DEVICE;
-    const ReceivedTextMessage& msg = ring[idx];
-    if (!msg.active) continue;
-
-    // Multi-fragment text: merge into an existing group with the same reqId.
-    // reqId == 0 (unsolicited / file events) and single-frame text never merge —
-    // each is its own logical message.
-    if (msg.reqId != 0 && msg.pieceTotal > 1) {
-      int g = -1;
-      for (int k = startW; k < w; k++) {
-        if (out[k].reqId == msg.reqId && out[k].isSent == isSent &&
-            out[k].slot == slot) { g = k; break; }
-      }
-      if (g >= 0) {
-        if (out[g].partsPresent < 255) out[g].partsPresent++;
-        // Prefer the lowest-numbered present fragment as the preview head, so the
-        // truncated list line shows the true start of the message.
-        if (msg.piece < ring[out[g].index].piece) {
-          out[g].index = idx;
-          out[g].seqNum = msg.seqNum;
-          out[g].timestamp = msg.timestamp;
-        }
-        if (msg.pieceTotal > out[g].partsTotal) out[g].partsTotal = msg.pieceTotal;
-        continue;
-      }
+// Records of every peer: one k-way merge by seq over both rings of every block,
+// so the output is ascending by seq across peers and the lowest seqs above
+// sinceSeq come first (a busy peer no longer hides other peers' lower seqs).
+// A ring with nothing above sinceSeq costs one compare.
+int getAllMessages(ReceivedTextMessage* outMessages, int maxMessages, uint32_t sinceSeq) {
+  if (!gEspNow || !outMessages || maxMessages <= 0) return 0;
+  PeerHistoryReadNote note;
+  int copied = 0;
+  {
+    PeerHistoryGuard guard;
+    if (!guard.held || gEspNow->peerHistoryCapacity <= 0 || !sHistScratch) return 0;
+    note.start();
+    espnowhist::Source* src = sHistScratch->src;
+    int n = 0;
+    for (int p = 0; p < gEspNow->peerHistoryCapacity; p++) {
+      PeerMessageHistory* history = gEspNow->peerMessageHistories[p];
+      if (!history || !history->active) continue;
+      n = historyAddSources(*history, (uint8_t)p, true, src, n, note.say);
     }
-
-    // Caller buffer full. The walk is oldest→newest (idx starts at `tail`), so
-    // what gets dropped here is the NEWEST messages — the opposite of what a
-    // "most recent N" caller wants. Callers that show the tail for recency
-    // (espnowCollapsedAllMessages) must size maxN to cover the whole ring.
-    if (w >= maxN) break;
-    out[w].seqNum = msg.seqNum;
-    out[w].reqId = msg.reqId;
-    out[w].timestamp = msg.timestamp;
-    out[w].slot = slot;
-    out[w].index = idx;
-    out[w].partsPresent = 1;
-    out[w].partsTotal = (msg.pieceTotal > 1) ? msg.pieceTotal : 1;
-    out[w].isSent = isSent;
-    w++;
+    copied = historyMergeInto(src, n, outMessages, maxMessages, sinceSeq, note.say);
+    note.stop();
   }
+  peerHistoryReadDone(note, "all read");
+  return copied;
+}
+
+static int historyClampViewMax(int maxN) {
+  return maxN > ESPNOW_HISTORY_VIEW_MAX ? ESPNOW_HISTORY_VIEW_MAX : maxN;
+}
+
+// Collapse `n` sources into the newest maxN logical messages. Under the lock.
+static int historyCollapse(const espnowhist::Source* src, int n, CollapsedMsgRef* out, int maxN,
+                           PeerHistorySayNote& note) {
+  const int w = espnowhist::collapseNewest(src, n, out, maxN, sHistScratch->merge, sHistScratch->chain,
+                                           ESPNOW_HISTORY_VIEW_MAX);
+  historyRepairBadSources(src, n, note);
   return w;
 }
 
-// Slot index of a block in the table (the block was found through the table,
-// so it is there). Called with the store lock held.
-static uint8_t peerHistorySlotIndex(const PeerMessageHistory* history) {
-  for (int i = 0; i < gEspNow->peerHistoryCapacity; i++) {
-    if (gEspNow->peerMessageHistories[i] == history) return (uint8_t)i;
-  }
-  return 0;
-}
-
-// Order refs oldest→newest by the timestamp copied at collapse time. Runs on
-// the caller's array after the lock is released.
-static void espnowSortCollapsedByTime(CollapsedMsgRef* out, int w) {
-  for (int i = 0; i < w - 1; i++) {
-    for (int j = 0; j < w - i - 1; j++) {
-      if (out[j].timestamp > out[j + 1].timestamp) {
-        CollapsedMsgRef temp = out[j];
-        out[j] = out[j + 1];
-        out[j + 1] = temp;
-      }
-    }
-  }
-}
-
+// Received-only collapse of one peer: chronological, no time sort (as before).
 int espnowCollapsedPeerMessages(uint8_t* peerMac, CollapsedMsgRef* out, int maxN) {
-  if (!gEspNow || !out || maxN <= 0) return 0;
-
-  PeerHistoryGuard guard;
-  if (!guard.held) return 0;
-  PeerMessageHistory* history = peerHistorySlotLocked(peerMac, false);  // find-only
-  if (!history || history->count == 0) return 0;
-
-  return espnowCollapseRing(history->messages, history->tail, history->count,
-                            peerHistorySlotIndex(history), /*isSent=*/false, out, 0, maxN);
-}
-
-int espnowGetConversation(uint8_t* peerMac, CollapsedMsgRef* out, int maxN) {
-  if (!gEspNow || !out || maxN <= 0) return 0;
-
+  if (!gEspNow || !out || !peerMac || maxN <= 0) return 0;
+  maxN = historyClampViewMax(maxN);
+  PeerHistoryReadNote note;
   int w = 0;
   {
     PeerHistoryGuard guard;
-    if (!guard.held) return 0;
-    PeerMessageHistory* history = peerHistorySlotLocked(peerMac, false);  // find-only
-    if (!history) return 0;
-    const uint8_t slot = peerHistorySlotIndex(history);
-
-    // Collapse both rings into one buffer, then order the combined set oldest→newest
-    // by timestamp so callers see a single interleaved sent/received conversation.
-    w = espnowCollapseRing(history->messages, history->tail, history->count,
-                           slot, /*isSent=*/false, out, 0, maxN);
-    w = espnowCollapseRing(history->sent, history->sentTail, history->sentCount,
-                           slot, /*isSent=*/true, out, w, maxN);
+    if (!guard.held || gEspNow->peerHistoryCapacity <= 0 || !sHistScratch) return 0;
+    note.start();
+    PeerMessageHistory* history = peerHistorySlotLocked(peerMac);  // find-only
+    if (history) {
+      espnowhist::Source* src = sHistScratch->src;
+      const int n = historyAddSources(*history, peerHistorySlotIndex(history), false, src, 0, note.say);
+      w = historyCollapse(src, n, out, maxN, note.say);
+    }
+    note.stop();
   }
+  peerHistoryReadDone(note, "peer collapse");
+  return w;
+}
 
-  espnowSortCollapsedByTime(out, w);
+int espnowGetConversation(uint8_t* peerMac, CollapsedMsgRef* out, int maxN) {
+  if (!gEspNow || !out || !peerMac || maxN <= 0) return 0;
+  maxN = historyClampViewMax(maxN);
+  PeerHistoryReadNote note;
+  int w = 0;
+  {
+    PeerHistoryGuard guard;
+    if (!guard.held || gEspNow->peerHistoryCapacity <= 0 || !sHistScratch) return 0;
+    note.start();
+    PeerMessageHistory* history = peerHistorySlotLocked(peerMac);  // find-only
+    if (history) {
+      // Both rings merged by seq, the newest maxN logical messages kept; then
+      // ordered oldest→newest by timestamp after unlock.
+      espnowhist::Source* src = sHistScratch->src;
+      const int n = historyAddSources(*history, peerHistorySlotIndex(history), true, src, 0, note.say);
+      w = historyCollapse(src, n, out, maxN, note.say);
+    }
+    note.stop();
+  }
+  peerHistoryReadDone(note, "conversation");
+  espnowhist::sortByTime(out, w);
   return w;
 }
 
 // All-peers collapsed read: the global-inbox analogue of espnowGetConversation.
-// Collapses every active peer's received + sent rings into logical-message refs,
-// then orders the combined set oldest→newest by timestamp (callers show the tail
-// for "most recent"). reqId+isSent+slot gating in espnowCollapseRing means
-// fragments from different peers never false-merge. Caps at maxN during
-// collection — fine for small meshes; logs if it truncates.
+// Every peer's received + sent rings merged by seq, the newest maxN logical
+// messages kept, then ordered oldest→newest by timestamp. Fragments of
+// different peers or directions never merge (a group is looked up per source).
 int espnowCollapsedAllMessages(CollapsedMsgRef* out, int maxN) {
   if (!gEspNow || !out || maxN <= 0) return 0;
-
+  maxN = historyClampViewMax(maxN);
+  PeerHistoryReadNote note;
   int w = 0;
+  uint32_t records = 0;
   {
     PeerHistoryGuard guard;
-    if (!guard.held || !gEspNow->peerMessageHistories) return 0;
-    for (int p = 0; p < gEspNow->peerHistoryCapacity && w < maxN; p++) {
-      const PeerMessageHistory* history = gEspNow->peerMessageHistories[p];
+    if (!guard.held || gEspNow->peerHistoryCapacity <= 0 || !sHistScratch) return 0;
+    note.start();
+    espnowhist::Source* src = sHistScratch->src;
+    int n = 0;
+    for (int p = 0; p < gEspNow->peerHistoryCapacity; p++) {
+      PeerMessageHistory* history = gEspNow->peerMessageHistories[p];
       if (!history || !history->active) continue;
-      w = espnowCollapseRing(history->messages, history->tail, history->count,
-                             (uint8_t)p, /*isSent=*/false, out, w, maxN);
-      w = espnowCollapseRing(history->sent, history->sentTail, history->sentCount,
-                             (uint8_t)p, /*isSent=*/true, out, w, maxN);
+      n = historyAddSources(*history, (uint8_t)p, true, src, n, note.say);
     }
+    w = historyCollapse(src, n, out, maxN, note.say);
+    for (int i = 0; i < n; i++) records += src[i].ring->count;
+    note.stop();
   }
+  peerHistoryReadDone(note, "inbox");
+  espnowhist::sortByTime(out, w);
 
-  espnowSortCollapsedByTime(out, w);
-
-  if (w >= maxN) {
+  if (w >= maxN && records > (uint32_t)maxN) {
     DEBUG_ESPNOWF("[ESPNOW] collapsedAll hit cap maxN=%d; older logical messages dropped", maxN);
   }
   return w;
 }
 
 // Reassemble the full text of a (possibly multi-fragment) message into `out`.
-// Walks the peer's received (isSent=false) or sent (isSent=true) ring, gathers
-// the records sharing `reqId`, and concatenates their fragments in piece order —
-// the reader-side equivalent of the reqId-stitching the web/BLE UIs do, so
-// on-device displays (G2/OLED) can show the whole message, not just fragment 1.
+// Walks the peer's received (isSent=false) or sent (isSent=true) ring once,
+// gathers the records sharing `reqId` and concatenates their fragments in
+// piece order — the reader-side equivalent of the reqId-stitching the web/BLE
+// UIs do, so on-device displays (G2/OLED) can show the whole message.
 // `reqId == 0` (unsolicited / single-frame) returns 0 — the caller should use
-// the record's own text then. `complete` (if non-null) is set true only when all
-// pieceTotal fragments were found. Returns bytes written (excluding NUL).
+// the record's own text then. `complete` (if non-null) is set true only when
+// all pieceTotal fragments were found. Returns bytes written (excluding NUL).
 int espnowReassembleByReqId(const uint8_t* peerMac, uint32_t reqId, bool isSent,
                             char* out, size_t cap, bool* complete) {
   if (complete) *complete = false;
@@ -22268,73 +22587,119 @@ int espnowReassembleByReqId(const uint8_t* peerMac, uint32_t reqId, bool isSent,
   out[0] = '\0';
   if (!gEspNow || !peerMac || reqId == 0) return 0;
 
-  PeerHistoryGuard guard;
-  if (!guard.held) return 0;
-  const PeerMessageHistory* h = peerHistorySlotLocked(peerMac, false);  // find-only
-  if (!h) return 0;
-
-  const ReceivedTextMessage* ring = isSent ? h->sent : h->messages;
-  uint8_t tail = isSent ? h->sentTail : h->tail;
-  uint8_t cnt  = isSent ? h->sentCount : h->count;
-
-  // Determine the fragment count from any matching record.
-  uint8_t total = 0;
-  for (int i = 0; i < cnt; i++) {
-    const ReceivedTextMessage& m = ring[(tail + i) % MESSAGES_PER_DEVICE];
-    if (m.active && m.reqId == reqId) { total = m.pieceTotal ? m.pieceTotal : 1; break; }
-  }
-  if (total == 0) return 0;
-
-  // Concatenate fragments in piece order (1..total).
-  size_t pos = 0;
-  uint8_t found = 0;
-  for (uint8_t p = 1; p <= total; p++) {
-    for (int i = 0; i < cnt; i++) {
-      const ReceivedTextMessage& m = ring[(tail + i) % MESSAGES_PER_DEVICE];
-      if (!m.active || m.reqId != reqId || m.piece != p) continue;
-      size_t l = strlen(m.message);
-      if (pos + l >= cap) l = (cap > pos + 1) ? (cap - 1 - pos) : 0;
-      if (l) { memcpy(out + pos, m.message, l); pos += l; }
-      found++;
-      break;
+  PeerHistoryReadNote note;
+  int len = 0;
+  {
+    PeerHistoryGuard guard;
+    if (!guard.held || gEspNow->peerHistoryCapacity <= 0 || !sHistScratch) return 0;
+    note.start();
+    PeerMessageHistory* h = peerHistorySlotLocked(peerMac);  // find-only
+    if (h) {
+      historyRingCheck(*h, isSent, note.say);
+      bool damaged = false;
+      len = espnowhist::reassemble(historyRing(*h, isSent), historyBuf(*h, isSent), reqId, out, cap, complete,
+                                   sHistScratch->pieces, &damaged);
+      if (damaged) historyRingRepair(*h, isSent, note.say);
     }
-    if (pos >= cap - 1) break;
+    note.stop();
   }
-  out[pos] = '\0';
-  if (complete) *complete = (found >= total);
-  return (int)pos;
+  peerHistoryReadDone(note, "reassembly");
+  return len;
 }
 
+// Resolve a ref by its seq: refused unless that seq is still live in the ring
+// the ref names; the offset is only a hint, checked before it is read
+// (espnowhist::findBySeq). A slot belongs to one peer for the whole boot.
 bool espnowCopyCollapsedHead(const CollapsedMsgRef& ref, ReceivedTextMessage* out) {
-  if (!gEspNow || !out || ref.index >= MESSAGES_PER_DEVICE) return false;
+  if (!gEspNow || !out) return false;
+  PeerHistoryReadNote note;
+  bool found = false;
+  {
+    PeerHistoryGuard guard;
+    if (!guard.held || gEspNow->peerHistoryCapacity <= 0 || ref.slot >= gEspNow->peerHistoryCapacity) {
+      return false;
+    }
+    note.start();
+    PeerMessageHistory* h = gEspNow->peerMessageHistories[ref.slot];
+    if (h && h->active) {
+      const bool sent = ref.isSent;
+      historyRingCheck(*h, sent, note.say);
+      uint32_t off = 0;
+      espnowhist::Header hd{};
+      bool damaged = false;
+      found = espnowhist::findBySeq(historyRing(*h, sent), historyBuf(*h, sent), ref.seqNum, ref.offset, off, hd,
+                                    &damaged);
+      if (found) historyFillView(*h, historyBuf(*h, sent), off, hd, *out);
+      if (damaged) historyRingRepair(*h, sent, note.say);
+    }
+    note.stop();
+  }
+  peerHistoryReadDone(note, "head copy");
+  return found;
+}
 
-  PeerHistoryGuard guard;
-  if (!guard.held || !gEspNow->peerMessageHistories ||
-      ref.slot >= gEspNow->peerHistoryCapacity) return false;
-  const PeerMessageHistory* h = gEspNow->peerMessageHistories[ref.slot];
-  if (!h || !h->active) return false;
-  const ReceivedTextMessage& rec = ref.isSent ? h->sent[ref.index] : h->messages[ref.index];
-  // The ring reuses indices: only the record the ref was taken from qualifies.
-  if (!rec.active || rec.seqNum != ref.seqNum) return false;
-  memcpy(out, &rec, sizeof(ReceivedTextMessage));
-  return true;
+void espnowUpdateSentDeliveryState(const uint8_t* peerMac, uint32_t msgId, uint8_t state) {
+  if (!gEspNow || !peerMac || msgId == 0 || state > espnowhist::kSendStateMax) return;
+  PeerHistoryReadNote note;
+  {
+    PeerHistoryGuard guard;
+    if (!guard.held || gEspNow->peerHistoryCapacity <= 0) return;
+    note.start();
+    // Don't create a peer slot just to update — only stamp if history exists.
+    PeerMessageHistory* h = peerHistorySlotLocked(peerMac);
+    if (h) {
+      // Stamp every fragment of this message (all share msgId in reqId).
+      historyRingCheck(*h, true, note.say);
+      bool damaged = false;
+      espnowhist::setSendState(h->sent, h->sentBuf(), msgId, state, &damaged);
+      if (damaged) historyRingRepair(*h, true, note.say);
+    }
+    note.stop();
+  }
+  peerHistoryReadDone(note, "delivery stamp");
 }
 
 int espnowHistoryMessageCount(const uint8_t* mac) {
   if (!gEspNow) return 0;
-
-  PeerHistoryGuard guard;
-  if (!guard.held || !gEspNow->peerMessageHistories) return 0;
-  if (mac) {
-    const PeerMessageHistory* h = peerHistorySlotLocked(mac, false);  // find-only
-    return h ? h->count : 0;
-  }
+  PeerHistoryReadNote note;
   int total = 0;
-  for (int i = 0; i < gEspNow->peerHistoryCapacity; i++) {
-    const PeerMessageHistory* h = gEspNow->peerMessageHistories[i];
-    if (h && h->active) total += h->count;
+  {
+    PeerHistoryGuard guard;
+    if (!guard.held || gEspNow->peerHistoryCapacity <= 0) return 0;
+    if (mac) {
+      PeerMessageHistory* h = peerHistorySlotLocked(mac);  // find-only
+      if (h) {
+        historyRingCheck(*h, false, note.say);
+        total = h->received.count;
+      }
+    } else {
+      for (int i = 0; i < gEspNow->peerHistoryCapacity; i++) {
+        PeerMessageHistory* h = gEspNow->peerMessageHistories[i];
+        if (!h || !h->active) continue;
+        historyRingCheck(*h, false, note.say);
+        total += h->received.count;
+      }
+    }
   }
+  peerHistoryReadDone(note, "count");
   return total;
+}
+
+// "espnowhistorykb" with no argument. Int reads only, no lock.
+void espnowHistoryStatusLine(char* out, size_t cap) {
+  if (!out || cap == 0) return;
+  const unsigned saved = gSettings.espnowHistoryKb;
+  if (!gEspNow || gEspNow->peerHistoryCapacity <= 0) {
+    snprintf(out, cap, "Message history: saved %u KB (0 = auto); ESP-NOW not started, nothing active", saved);
+    return;
+  }
+  char active[24];
+  peerHistorySizeText(active, sizeof(active), gEspNow->peerHistoryRingBytes);
+  snprintf(out, cap,
+           "Message history: saved %u KB (0 = auto), active %s per ring, %d/%d peers, %u KB in use"
+           " (a change applies at the next restart)",
+           saved, active, gEspNow->peerHistoryCount, gEspNow->peerHistoryCapacity,
+           (unsigned)peerHistoryKbUp(peerHistoryBytesInUse()));
 }
 
 #else // !ENABLE_ESPNOW

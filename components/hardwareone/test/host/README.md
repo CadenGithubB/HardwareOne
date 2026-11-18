@@ -4516,25 +4516,104 @@ ones included, behave as before. Source rule: no `for` in the file has a `size_t
 ## ESP-NOW peer message store
 
 `espnow_message_store` compiles the whole message-buffer section of
-`System_ESPNow.cpp` (slot table, received and sent rings, chunked store, merged
-reads, collapsed views, `espnowCopyCollapsedHead`, delivery stamps) with the
-store's types and declarations from `System_ESPNow.h` and FreeRTOS mutex,
-allocation, clock and logging doubles. Each case runs in its own process. The
-cases check that a collapsed ref taken before new peers arrive still reads its
-own record, that reads for unknown MACs create no slot and allocate nothing,
-that history blocks never move, that the 17th peer is refused, that a ref whose
-ring index was reused is refused, and that a refused or contended store lock
-changes nothing and is never left held. A storing thread also races the readers
-under ASan/UBSan; `--thread-sanitize` reruns that race under ThreadSanitizer.
-Every case checks that no log line is written while the store lock is held.
-Source contracts confirm that the OLED and G2 screens copy records through
-`espnowCopyCollapsedHead` and hold no pointers into the history.
-`--source-dir <component-directory>` replays the former use-after-free. No
-radio, display or filesystem is touched.
+`System_ESPNow.cpp` (slot table, allocation on a peer's first store, the
+received and sent byte rings of `System_ESPNow_HistoryCore.h`, chunked stores,
+merged reads, collapsed views, `espnowCopyCollapsedHead`, delivery stamps, the
+`espnowhistorykb` status line) with the store's macros, types, declarations and
+constructor items from `System_ESPNow.h` and FreeRTOS mutex, allocation, heap,
+clock, settings and logging doubles (`ps_alloc` fills new memory with `0xA5`
+and counts bytes and the policy per tag). Each case runs in its own process
+(23 cases). They check: the real constructor items on `0xA5` memory leave the
+store empty, nothing works or allocates before `peerHistoryStoreInit`, which
+allocates nothing, says one start line and latches once, and reads before the
+first block return nothing; merged reads, paging,
+chunking, collapse, reassembly and delivery stamps; a 16 KB ring keeps a
+contiguous suffix ending at the newest; a ref taken before new peers arrive
+still reads its record; reads for unknown MACs create no slot and allocate
+nothing; blocks come with a peer's first message (`RequirePsram`, or
+`RequireInternal` without PSRAM at runtime and only above the internal-heap
+floor, counted in 8-bit-capable internal RAM: an IRAM-only heap of the classic
+ESP32 does not count), never move and stay within the memory bound; each
+allocation is said in its own line; the 17th peer, a failed allocation (held
+off 5 s from the failure, no slot, no seq used) and used-up message numbers are
+refused with their line at most once a minute and the count folded in; the total
+cap and the board maximum lower the ring, a ring lowered below a whole KB is
+said in bytes (start and status lines), and more mesh slots than
+`MESH_PEER_MAX` give `MESH_PEER_MAX` slots; a view asked for more than
+`ESPNOW_HISTORY_VIEW_MAX` entries gets the newest `ESPNOW_HISTORY_VIEW_MAX`;
+the conversation and all-peers views are ordered by the head's time when
+pieces arrive out of order; a block installed by another store in
+between is used and ours freed after unlock; one peer's stores leave every other
+block byte-identical; a damaged header, `RingState` field or ring size is
+cleared by the next reader, which returns what was before the damage, and a
+store right after is visible (a sane ring of the wrong size is put back before a
+store writes; `ringBytes` moved together with both ring sizes clears both; a
+delivery stamp that meets damage clears the sent ring); the attribution of each record; an unterminated
+300-byte buffer and a 52,000-byte chunked text; `getAllMessages` paging through
+three peers in seq order with an idle poll that decodes nothing; refs resolve
+by seq (corrupted offsets by the walk; dropped records, the other ring and
+out-of-range slots are refused); and that a refused or contended store lock
+changes nothing and is never left held. A storing thread also races the
+readers, which also copy heads of stale refs, under ASan/UBSan;
+`--thread-sanitize` reruns that race under ThreadSanitizer. Every case checks
+that no log line, allocation or free happens while the store lock is held.
+Source contracts confirm that the OLED, G2 and web readers and
+`cmd_espnow_messages` copy records through the store API, hold no pointers
+into the history and name rows through `espnowHistoryDisplayName` (the CLI
+through `espnowHistoryPageNames`; the resolver takes `GroupLockGuard` and uses
+no `String`), and that `peerHistoryStoreInit` allocates nothing; that
+`espnowmessages json` keeps its keys, in order, with `name`, `sendState`,
+`sent`, `seq`, `reqId`, `piece` and `of` taken from the page; and that ESP-NOW
+start latches the size from `gSettings.espnowHistoryKb`, the `historyKB` row is
+U8 0..`ESPNOW_HISTORY_SETTING_KB_MAX` with default 0, the `espnowhistorykb`
+help and usage name the same range, the command shows the status line with no
+argument and sets `historyKB` with one, and `Settings()` defaults it to 0. A
+UBSan report fails the case under `--sanitize`. `--source-dir <component-directory>` overlays production
+sources. No radio, display or filesystem is touched.
 
 ```sh
 ctest --test-dir /tmp/hw1-hardwareone-host -R '^espnow_message_store$' --output-on-failure
 python3 test_espnow_message_store.py --thread-sanitize
+```
+
+`espnow_history_core_tests` compiles `System_ESPNow_HistoryCore.h` (the production dependency-free header: a
+peer's received and sent byte rings of packed records, a 20-byte header plus the text) as is. It checks the header
+round trip, that every single changed header byte is refused, and that a reserved flag bit, a nonzero byte 7, type 8
+and seq 0 are refused; the ring budget, the attribution guess and the bounded name copies (cap 0/1/2, unterminated
+32-byte names); placement against an independent deque model on several ring sizes (exact fit at the end, the wrap
+marker, eviction across the wrap, cut texts, utilisation after eviction); refusals that leave the ring byte-identical;
+that the validated walk stops at the first changed byte and at a damaged wrap marker; text full of valid fake headers;
+`findBySeq` with every hint, including hints in the last 16 bytes of a segment that ends the allocation; stale
+references, which resolve exactly while their record is live even when a fake header carrying their seq sits at their
+old offset; delivery stamps that change only the flags and check bytes; reassembly and the collapsed views against
+ports of the old ring-of-structs code, the newest-`maxN` window and the 64-entry same-source look-back; a remote
+command's streamed lines (single records) and its chunked result under one reqId, where each line keeps its row and
+the result is its own row that reassembles to the result alone; every corrupted `RingState` field refused by every
+operation, and coordinated damage past the end (head, tail or `wrapAt` beyond the size with the other fields kept
+consistent) refused before `append` writes; damage met while evicting, which clears the ring and keeps
+the new record; and the decode counts at the largest configuration (32 rings of 32 KB). Buffers are exactly sized or
+guarded by canaries and the suite runs under ASan/UBSan with `HW1_SANITIZE=ON`.
+
+`espnow_history_stress_tests` (`test_espnow_history_stress.cpp`) drives the same header with random operations and
+compares it after every step with a reference model: a deque of records per ring, with its own placement rules and
+its own header encoder written from the design. Each episode picks 1 to 16 peers (up to 32 rings), ring sizes from
+1024 bytes to 64 KB (also odd multiples of 4, the received and sent ring in one block or apart), and text lengths
+from 0 to 300 aimed at exact fits and wraps. The operations are appends (with refusals that must leave the ring
+byte-identical), `findBySeq` with right, wrong, stale and out-of-segment hints, references kept from long ago (new text
+plants a valid header with a dead reference's seq at its old offset; it must be refused), valid headers with live seqs
+planted in free space, delivery stamps by reqId, reassembly, `mergeBySeq` with `sinceSeq` paging, `collapseNewest`,
+`sortByTime` and bad arguments. After a step the touched ring must match the model: every `RingState` field, every
+record byte (header layout, check byte, text, zero padding, wrap marker), the validated walk and `checkRing`. The
+corruption part works on an exactly sized copy of a ring: with one changed byte or one consistent header forgery
+(right check byte, wrong direction, seq, type or flag bits) every reader must return exactly the records before the
+damage and report it, and an append that evicts into it must clear the ring; with many changed bytes, broken
+`RingState` fields or made-up rings it checks bounds only, under ASan with UBSan aborting on the first error. The
+default run is 1,000,000 steps (about 2.5 million appends, 20 s); a failure prints an episode seed:
+
+```sh
+/tmp/hw1-hardwareone-host/espnow_history_stress_tests --episode-seed 0x...   # replay one episode
+/tmp/hw1-hardwareone-host/espnow_history_stress_tests --long                 # 20 million steps
+/tmp/hw1-hardwareone-host/espnow_history_stress_tests --ops 5000000 --seed 7
 ```
 
 ## ESP-NOW FS RPC locking
@@ -4578,6 +4657,65 @@ ctest --test-dir /tmp/hw1-hardwareone-host -R '^espnow_metadata_push$' --output-
 ```
 
 This check does not exchange real ESP-NOW frames.
+
+## ESP-NOW history readers
+
+History records carry no name and references are (slot, direction, seq, offset
+hint), so the readers name rows with `espnowHistoryDisplayName` and resolve
+refs only through `espnowCopyCollapsedHead`. `espnow_history_names_tests`
+compiles `System_ESPNow_HistoryNames.h` (the per-call name cache the readers
+share) as is: one resolve per peer and kind, `clear()` between calls, round-robin
+replacement past eight keys with the right name every time, a resolver that
+writes nothing or every byte, and the null-MAC key. `espnow_history_readers`
+(`test_espnow_history_readers.py`, harness `espnow_history_readers_harness.cpp`)
+extracts the production `handleEspNowMessages` with its JSON helpers
+(`WebPage_ESPNow.cpp`), `oledEspNowRefreshMessages` (`OLED_ESPNow.cpp`) and
+`chatWho` / `chatLogicalLine` / `chatEstBytes` (`G2_Page_ESPNow.cpp`), plus the
+history types and the reader API declarations of `System_ESPNow.h`, and runs
+them against a fake store and resolver, built with and without `CONFIG_SPIRAM`.
+The web body is parsed in Python: every message has exactly the keys `seq reqId
+piece of mac name msg enc ts type sent sendState` in that order; `name` is the
+peer's current name, the MAC text for an unattributed record and `""` for a
+sent one; the `?mac=` path, a rename between polls, 50/15 rows per poll and
+the `deliveries` array. The OLED asks for `ESPNOW_HISTORY_VIEW_MAX` refs, shows
+the newest 32, skips refs the store refuses (evicted), labels parts as
+`name (k/n)` and keeps the sent rows' msgId and durable `sendState`. The G2 rows
+are labelled `me:` / `<name>:`, reassemble by the record's own peer MAC and
+estimate their size from the shown name. Source contracts: both G2 views pass
+`ESPNOW_HISTORY_VIEW_MAX`, a G2 page build clears its cache, and no reader
+names `MESSAGES_PER_DEVICE`, `senderName`, `senderMac`, the history blocks or a
+ref offset. `--source-dir <dir>` overlays production sources. ASan/UBSan under
+`HW1_SANITIZE=ON`.
+
+```sh
+ctest --test-dir /tmp/hw1-hardwareone-host -R '^espnow_history_(names_tests|readers)$' --output-on-failure
+```
+
+## ESP-NOW history display name
+
+`espnow_history_display_name` (`test_espnow_history_display_name.py`, harness
+`espnow_history_display_name_harness.cpp`) extracts the production
+`espnowHistoryDisplayName` (`System_ESPNow.cpp`) with `ReceivedTextMessage`
+from `System_ESPNow.h` and runs it against doubles of `gMeshPeerMeta`,
+`gEspNow->devices` and `GroupLockGuard`: the active metadata name first, then
+the registry name, else the MAC text (an empty or inactive metadata slot falls
+through; a rename shows at once); `""` for a sent record and the MAC text for an
+unattributed one, neither taking the lock; the lock taken once and released
+otherwise; 32-byte names with no NUL read bounded; cap 0 and a null `out` write
+nothing, caps 1-3 truncate and terminate; null tables and ESP-NOW closed; and
+`gMeshPeerSlots` / `deviceCount` past their arrays clamped (ASan reports a read
+past either allocation). It also runs `espnowHistoryPageNames`, which names an
+`espnowmessages` page: one lookup per distinct attributed peer, a name reused
+only between attributed received rows of the same peer, sent and unattributed
+rows never lending or borrowing one. Source contracts: the doubles' name and
+array sizes match the header, the resolver takes `GroupLockGuard` and uses no
+`String`, and `cmd_espnow_messages` names its page through
+`espnowHistoryPageNames`.
+ASan/UBSan under `HW1_SANITIZE=ON`.
+
+```sh
+ctest --test-dir /tmp/hw1-hardwareone-host -R '^espnow_history_display_name$' --output-on-failure
+```
 
 ## OLED ESP-NOW unpair and discovery ownership
 
@@ -6555,14 +6693,18 @@ REPLY to a key exchange an unpair called off stores nothing, so the unpaired pee
 and a new key exchange afterwards is stored as usual.
 
 `espnow_file_transfer` compiles the receive slot table, the FILE_* handlers, the sender pump and the commands
-that report a send (12 cases): a send without an ACTIVE session is refused and every caller says so; a send whose
+that report a send (12 cases): a send without an ACTIVE session is refused and every caller says so; `espnowsend`
+re-reads the send status after its history record is written and stamps a state that resolved during the send
+(peer, msgId, delivered), never a pending one; a send whose
 handshake cannot be started fails instead of saying "try again"; a busy slot table never cancels a healthy
 receive; release and abort do no filesystem work under the slot lock; an abort under lock contention does not pin
 the slot.
 
 `espnow_command_privileges` (source) pins the admin flag on the ESP-NOW test commands that change live state and on
-both writers of the heartbeat mode. `espnow_history_depth` compiles the two `#if` blocks that size the message
-history and the web poll: they follow `CONFIG_SPIRAM`, so the ESP32-P4 gets the PSRAM depth.
+both writers of the heartbeat mode. `espnow_history_depth` compiles the two `#if` blocks that set the message
+history budget (default, maximum and total KB per ring, refs per on-device view) and the web poll: they follow
+`CONFIG_SPIRAM`, so the ESP32-P4 gets the PSRAM budget; it also checks that ESP-NOW start allocates no history,
+decides the budget from the PSRAM found at runtime and says it in one line.
 `settings_onoff_commands` runs five `<0|1>` setting commands: every word the shared parser accepts, any other word
 refused, side effects kept. `espnow_user_credentials` (extended) refuses a remote command whose user name or
 password does not fit.

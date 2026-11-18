@@ -4,7 +4,7 @@
 > Regenerate with `python3 tools/command_registry.py reference`.
 > Source of truth is the `CommandEntry` tables in `components/hardwareone/*.cpp`.
 
-1043 commands across 57 modules (1043 registry entries).
+1044 commands across 57 modules (1044 registry entries).
 
 Commands are matched case-insensitively, and lookup uses longest-prefix matching, so `automation list` resolves to the `automation` dispatcher with `list` as its argument.
 
@@ -16,7 +16,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 - [`system`](#system) — 26 commands
 - [`versions`](#versions) — 1 commands
 - [`wifi`](#wifi) — 21 commands
-- [`espnow`](#espnow) — 131 commands
+- [`espnow`](#espnow) — 132 commands
 - [`c6`](#c6) — 10 commands
 - [`mqtt`](#mqtt) — 27 commands
 - [`bluetooth`](#bluetooth) — 23 commands
@@ -216,6 +216,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `espnowhbmode` | A | Get/set heartbeat mode: 'espnowhbmode [public\|private]'.<br/>`Usage: espnowhbmode [public\|private]` |
 | `espnowheartbeatbroadcast` | A | Set heartbeat broadcast: <0\|1><br/>`Usage: espnowheartbeatbroadcast <0\|1>` |
 | `espnowheartbeatinterval` | A | Set master heartbeat interval: <1000-60000 ms><br/>`Usage: espnowheartbeatinterval <1000..60000>` |
+| `espnowhistorykb` | A | Message history per peer and direction in KB: [<0-32>] (0 = board default; no argument shows saved and active; reboot required)<br/>`Usage: espnowhistorykb [<0..32>]` |
 | `espnowidentity` |  | Show long-term Ed25519 identity (MAC, pub key, createdAtSec, regenCount). |
 | `espnowkeyex` | A | Initiate KEY_EX handshake with a peer (runs alongside legacy pairing). (async - handshake completes later; check espnowsessions)<br/>`Usage: espnowkeyex <name_or_mac> [<mesh>] Returns OK when KEY_EX_HELLO is sent; the handshake completes asynchronously - inspect with 'espnowsessions' / 'espnowencstatus'.` |
 | `espnowlist` |  | List all paired ESP-NOW devices. |

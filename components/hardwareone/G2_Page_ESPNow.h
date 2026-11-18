@@ -48,7 +48,7 @@ void g2ShowEspNowAppMenu();
 void g2EspNowAppHandleTap(uint32_t idx);
 
 // Push-kick: called from the espnow_task RX drain after a new TEXT message
-// is stored in PeerMessageHistory. No-op unless the user is currently on
+// is stored in the peer's message history. No-op unless the user is currently on
 // one of the ESP-NOW App page's message-displaying sub-modes (merged Inbox
 // or matching per-peer Inbox); in that case it enqueues a Redraw via the
 // lens applier so the list picks up the new entry within one tick of the
@@ -56,7 +56,7 @@ void g2EspNowAppHandleTap(uint32_t idx);
 //
 // Safe to call from any task — only touches read-only globals and the lens
 // job queue (which is itself thread-safe).
-void g2EspNowAppOnRxText(const uint8_t* senderMac);
+void g2EspNowAppOnRxText(const uint8_t* fromMac);
 
 #else  // stubs when BLE / G2 disabled
 
@@ -65,7 +65,7 @@ inline void g2BuildEspNowAppInfo(char* out, size_t cap) {
 }
 inline void g2ShowEspNowAppMenu() {}
 inline void g2EspNowAppHandleTap(uint32_t /*idx*/) {}
-inline void g2EspNowAppOnRxText(const uint8_t* /*senderMac*/) {}
+inline void g2EspNowAppOnRxText(const uint8_t* /*fromMac*/) {}
 
 #endif  // ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
 

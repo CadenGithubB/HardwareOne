@@ -133,15 +133,20 @@ enum class AllocPref : uint8_t { PreferPsram = 0 };
 [[maybe_unused]] static void* ps_alloc(size_t size, AllocPref, const char*) { return std::malloc(size); }
 // The message history: who each stored line is about, and the line.
 enum LogMessageType : uint8_t { MSG_SYSTEM_EVENT = 3 };
+// System_ESPNow.h: how a received record's sender is shown.
+enum class HistoryAttribution : uint8_t { FromName = 0, Attributed = 1, Unattributed = 2 };
 struct HistoryLine {
   std::string mac;
   std::string name;
   std::string text;
+  HistoryAttribution attribution;
 };
 static std::vector<HistoryLine> gHistory;
 [[maybe_unused]] static bool storeMessageInPeerHistory(uint8_t* peerMac, const char* peerName, const char* message,
-                                                       bool, LogMessageType) {
-  gHistory.push_back({MAC_STR(peerMac), peerName, message});
+                                                       bool, LogMessageType, uint32_t = 0, uint8_t = 1,
+                                                       uint8_t = 1,
+                                                       HistoryAttribution attribution = HistoryAttribution::FromName) {
+  gHistory.push_back({MAC_STR(peerMac), peerName, message, attribution});
   return true;
 }
 [[maybe_unused]] static String macToDisplayStr(const uint8_t* mac) { return String(MAC_STR(mac)); }
@@ -475,7 +480,8 @@ static void testFramesOfOnePass() {
         gHistory.size());
   handlerOnly(macA, ESPNOW_V4_TYPE_METADATA_RESP, "Attic", "", "node-a");  // a manual espnowrequestmeta afterwards
   CHECK(metadataInboxHandleFrame() && gHistory.size() == 1 && gHistory[0].name == "node-a" &&
-            gHistory[0].text.find("room=Attic") != std::string::npos,
+            gHistory[0].text.find("room=Attic") != std::string::npos &&
+            gHistory[0].attribution == HistoryAttribution::Attributed,
         "M6: a later answer got %zu history line(s)", gHistory.size());
   entryA->refreshQuiet = true;
   entryA->refreshAskedMs = gNowMs;
