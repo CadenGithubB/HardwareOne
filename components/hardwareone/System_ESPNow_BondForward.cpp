@@ -191,6 +191,11 @@ struct BfRequests {
   uint32_t applied;
   uint32_t refused;
   uint8_t lastRefused;  // espnowfwd::ReqVerdict (0: none)
+  uint32_t refusedBy[espnowfwd::kReqVerdictCount];  // per reason (Apply unused)
+  // Requests that asked for a sensor the partner does not list: refused
+  // whole (partner_lacks_sensor) or with those sensors left out.
+  uint32_t lacking;
+  uint16_t lastLacking;  // the sensors the last such request asked for in vain
 };
 
 struct BfState {
@@ -201,6 +206,8 @@ struct BfState {
   uint8_t statusFrom[6];
   espnowfwd::StatusFrame status;
   WarnLimiter reqWarn;
+  WarnLimiter lackWarn;  // "... left out: the partner does not have it running"
+
   espnowfwd::StandingLink link;
   espnowfwd::AgreeMemo agree;
   uint8_t lastGen;                     // the last link number used in this boot (0: none)
@@ -671,6 +678,9 @@ void bondForwardStatus(const uint8_t src[6], const espnowfwd::StatusFrame& f) {
   bfSendPartnerStatus();
 }
 
+static void bfSensorWords(uint16_t mask, char* out, size_t cap);
+static void bfRequestLines(char* out, size_t cap, size_t* pos);
+
 void bondForwardSensorRequest(const uint8_t src[6], uint8_t mode, uint32_t sensorMask, uint32_t intervalMs,
                               uint32_t leaseMs, uint8_t fwdLink) {
   if (!src) return;
@@ -692,18 +702,40 @@ void bondForwardSensorRequest(const uint8_t src[6], uint8_t mode, uint32_t senso
   in.mask = (uint16_t)(sensorMask & espnowsensor::kSensorMaskAll);
   in.forwardedMask = t.acceptedMask;
   in.partnerOnline = bfPartnerOnline();
+  // The partner's own sensor list (BOND_SENSOR_STATUS, kept by
+  // bondForwardStatus): a sensor it does not list is never leased.
+  in.partnerStatusKnown = sBf.haveStatus && espnowfwd::macSame(sBf.statusFrom, b.partner);
+  in.partnerPresent =
+      in.partnerStatusKnown ? (uint16_t)(sBf.status.presentMask & espnowsensor::kSensorMaskAll) : (uint16_t)0;
   const espnowfwd::ReqVerdict verdict = espnowfwd::sensorReqDecide(in);
+  const uint16_t lacking = verdict == espnowfwd::ReqVerdict::PartnerLacksSensor
+                               ? (uint16_t)(in.mask & in.forwardedMask)
+                               : (verdict == espnowfwd::ReqVerdict::Apply ? espnowfwd::reqLeftOut(in) : (uint16_t)0);
+  if (lacking) {
+    BF_LOCK();
+    sBf.req.lacking++;
+    sBf.req.lastLacking = lacking;
+    BF_UNLOCK();
+  }
   if (verdict != espnowfwd::ReqVerdict::Apply) {
     BF_LOCK();
     sBf.req.refused++;
     sBf.req.lastRefused = (uint8_t)verdict;
+    sBf.req.refusedBy[(size_t)verdict]++;
     BF_UNLOCK();
     uint32_t held = 0;
     if (warnLimiterTake(sBf.reqWarn, nowMs, 60000, &held)) {
       char master[32];
       bfName(src, master, sizeof(master));
-      bfConsole("[ESP-NOW] Sensor request from %s for the bond partner refused: %s (%lu more in the last minute)",
-                master, espnowfwd::reqVerdictText(verdict), (unsigned long)held);
+      char words[160] = "";
+      if (lacking) {
+        words[0] = ' ';
+        words[1] = '(';
+        bfSensorWords(lacking, words + 2, sizeof(words) - 3);
+        strlcat(words, ")", sizeof(words));
+      }
+      bfConsole("[ESP-NOW] Sensor request from %s for the bond partner refused: %s%s (%lu more in the last minute)",
+                master, espnowfwd::reqVerdictText(verdict), words, (unsigned long)held);
     }
     return;
   }
@@ -714,7 +746,19 @@ void bondForwardSensorRequest(const uint8_t src[6], uint8_t mode, uint32_t senso
   if (sBf.haveStatus && espnowfwd::macSame(sBf.statusFrom, sBf.link.partner)) {
     streaming = (uint16_t)(streaming | (sBf.status.streamingMask & espnowsensor::kSensorMaskAll));
   }
-  const uint16_t mask = mode == espnowfwd::kReqUnsubscribe ? in.mask : (uint16_t)(in.mask & in.forwardedMask);
+  const uint16_t mask = espnowfwd::reqApplyMask(in);
+  if (lacking) {
+    uint32_t held = 0;
+    if (warnLimiterTake(sBf.lackWarn, nowMs, 60000, &held)) {
+      char master[32];
+      bfName(src, master, sizeof(master));
+      char words[160];
+      bfSensorWords(lacking, words, sizeof(words));
+      bfConsole("[ESP-NOW] Sensor request from %s for the bond partner: %s left out: %s (%lu more in the last minute)",
+                master, words, espnowfwd::reqVerdictText(espnowfwd::ReqVerdict::PartnerLacksSensor),
+                (unsigned long)held);
+    }
+  }
   BF_LOCK();
   const espnowfwd::LeaseActs acts =
       espnowfwd::leaseApply(sBf.req.leases, mode, mask, streaming, intervalMs, leaseMs, nowMs);
@@ -908,7 +952,12 @@ const char* cmd_bond_forward(const String& argsInput) {
   char* arg = verb ? strtok_r(nullptr, " \t", &save) : nullptr;
   char* extra = arg ? strtok_r(nullptr, " \t", &save) : nullptr;
   static const char kUsage[] = "Usage: bondforward [on | off | sensors <all | default | name,name,...>]";
-  if (!verb) return bfDescribe(reply, cap, kBfLeadCommand);
+  if (!verb) {
+    bfDescribe(reply, cap, kBfLeadCommand);
+    size_t pos = strnlen(reply, cap);
+    bfRequestLines(reply, cap, &pos);
+    return reply;
+  }
   const int onOff = strcmp(verb, "sensors") == 0 ? -1 : bfParseBool(verb);
   if (onOff >= 0) {
     if (arg) return kUsage;
@@ -1030,7 +1079,22 @@ size_t bondForwardStatusJson(char* out, size_t cap) {
   } else {
     bfAppend(out, cap, &pos, "null");
   }
-  bfAppend(out, cap, &pos, ",\"leased\":[");
+  bfAppend(out, cap, &pos, ",\"refusedBy\":{");
+  first = true;
+  for (size_t r = 1; r < espnowfwd::kReqVerdictCount; ++r) {
+    if (!req.refusedBy[r]) continue;
+    bfAppend(out, cap, &pos, "%s\"%s\":%lu", first ? "" : ",", espnowfwd::reqVerdictKey((espnowfwd::ReqVerdict)r),
+             (unsigned long)req.refusedBy[r]);
+    first = false;
+  }
+  bfAppend(out, cap, &pos, "},\"partnerLacks\":{\"count\":%lu,\"last\":[", (unsigned long)req.lacking);
+  first = true;
+  for (uint8_t k = 0; k < REMOTE_SENSOR_MAX; ++k) {
+    if (!(req.lastLacking & espnowsensor::sensorBit(k))) continue;
+    bfAppend(out, cap, &pos, "%s\"%s\"", first ? "" : ",", espnowsensor::sensorName(k));
+    first = false;
+  }
+  bfAppend(out, cap, &pos, "]},\"leased\":[");
   first = true;
   for (uint8_t k = 0; k < REMOTE_SENSOR_MAX; ++k) {
     if (!(req.leases.leased & espnowsensor::sensorBit(k))) continue;
@@ -1043,6 +1107,36 @@ size_t bondForwardStatusJson(char* out, size_t cap) {
     return 0;
   }
   return pos;
+}
+
+// The mesh master's sensor requests for the partner, as lines of 'bondstatus'
+// and 'bondforward': nothing before the first request.
+static void bfRequestLines(char* out, size_t cap, size_t* pos) {
+  BfRequests req;
+  BF_LOCK();
+  req = sBf.req;
+  BF_UNLOCK();
+  if (!req.applied && !req.refused) return;
+  char leased[160];
+  bfSensorWords(req.leases.leased, leased, sizeof(leased));
+  bfAppend(out, cap, pos, "\n  Sensor requests for the partner: %lu applied, %lu refused",
+           (unsigned long)req.applied, (unsigned long)req.refused);
+  if (req.lastRefused) {
+    bfAppend(out, cap, pos, " (last: %s)", espnowfwd::reqVerdictText((espnowfwd::ReqVerdict)req.lastRefused));
+  }
+  bfAppend(out, cap, pos, "; leased now: %s.", leased);
+  const uint32_t unknown = req.refusedBy[(size_t)espnowfwd::ReqVerdict::PartnerStatusUnknown];
+  if (!req.lacking && !unknown) return;
+  if (req.lacking) {
+    char lacking[160];
+    bfSensorWords(req.lastLacking, lacking, sizeof(lacking));
+    bfAppend(out, cap, pos, "\n  Sensors the partner does not have running, asked for %lu times (last: %s): never leased",
+             (unsigned long)req.lacking, lacking);
+    if (unknown) bfAppend(out, cap, pos, "; %lu requests came before its sensor list was known", (unsigned long)unknown);
+  } else {
+    bfAppend(out, cap, pos, "\n  %lu requests came before the partner's sensor list was known", (unsigned long)unknown);
+  }
+  bfAppend(out, cap, pos, ".");
 }
 
 void bondForwardStatusLines(char* out, size_t cap) {
@@ -1071,19 +1165,7 @@ void bondForwardStatusLines(char* out, size_t cap) {
              espnowfwd::whyNotText((espnowfwd::WhyNot)topReason));
   }
   bfAppend(out, cap, &pos, ".");
-  BfRequests req;
-  BF_LOCK();
-  req = sBf.req;
-  BF_UNLOCK();
-  if (!req.applied && !req.refused) return;
-  char leased[160];
-  bfSensorWords(req.leases.leased, leased, sizeof(leased));
-  bfAppend(out, cap, &pos, "\n  Sensor requests for the partner: %lu applied, %lu refused",
-           (unsigned long)req.applied, (unsigned long)req.refused);
-  if (req.lastRefused) {
-    bfAppend(out, cap, &pos, " (last: %s)", espnowfwd::reqVerdictText((espnowfwd::ReqVerdict)req.lastRefused));
-  }
-  bfAppend(out, cap, &pos, "; leased now: %s.", leased);
+  bfRequestLines(out, cap, &pos);
 }
 
 // BOND_FORWARD_HOST_END

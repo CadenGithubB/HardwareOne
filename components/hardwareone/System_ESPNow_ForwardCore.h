@@ -381,9 +381,9 @@ constexpr bool meshDataAllowed(bool bondWorker) { return !bondWorker; }
 // espnow_bond_forward proves it). The forwarding lines of 'bondstatus' go to
 // the console one by one, which takes at most kStatusLineMax bytes per line
 // (DEBUG_MSG_SIZE - 1); kStatusLinesCap holds all of them.
-constexpr size_t kStatusJsonCap = 2560;
+constexpr size_t kStatusJsonCap = 3072;
 constexpr size_t kStatusLineMax = 255;
-constexpr size_t kStatusLinesCap = 1024;  // four lines
+constexpr size_t kStatusLinesCap = 1280;  // five lines
 
 // ---------------------------------------------------------------------------
 // B's standing link: the partner it names, that partner's key, and the bond
@@ -714,6 +714,8 @@ enum class ReqVerdict : uint8_t {
   BadMode,           // a mode this firmware does not know
   NotForwarded,      // none of the sensors asked for is forwarded (bondforward sensors)
   PartnerOffline,    // the partner is not connected and synced: nothing can be switched
+  PartnerStatusUnknown,  // the partner has not sent its sensor list (BOND_SENSOR_STATUS) yet
+  PartnerLacksSensor,    // the partner lists none of the sensors asked for that are forwarded
   Count
 };
 constexpr size_t kReqVerdictCount = (size_t)ReqVerdict::Count;
@@ -729,6 +731,8 @@ inline const char* reqVerdictKey(ReqVerdict v) {
     case ReqVerdict::BadMode:          return "bad_mode";
     case ReqVerdict::NotForwarded:     return "not_forwarded";
     case ReqVerdict::PartnerOffline:   return "partner_offline";
+    case ReqVerdict::PartnerStatusUnknown: return "partner_status_unknown";
+    case ReqVerdict::PartnerLacksSensor:   return "partner_lacks_sensor";
     case ReqVerdict::Count:            break;
   }
   return "?";
@@ -745,6 +749,8 @@ inline const char* reqVerdictText(ReqVerdict v) {
     case ReqVerdict::BadMode:          return "the request's mode is not known";
     case ReqVerdict::NotForwarded:     return "none of those sensors is forwarded (bondforward sensors)";
     case ReqVerdict::PartnerOffline:   return "the partner is not connected";
+    case ReqVerdict::PartnerStatusUnknown: return "the partner has not said yet which sensors it has";
+    case ReqVerdict::PartnerLacksSensor:   return "the partner does not have that sensor running";
     case ReqVerdict::Count:            break;
   }
   return "?";
@@ -761,10 +767,18 @@ struct ReqInputs {
   uint16_t mask;                // the sensors asked for
   uint16_t forwardedMask;       // the sensors the target accepted
   bool     partnerOnline;
+  bool     partnerStatusKnown;  // the partner's sensor list (BOND_SENSOR_STATUS) came on this link's partner
+  uint16_t partnerPresent;      // the sensors that list names (present and running at the partner)
 };
 
 // First match. An unsubscribe needs neither the sensors nor the partner: it
 // only ends leases (what is still on at X is switched off when it can be).
+// A subscribe or one-shot is judged against the partner's own sensor list: a
+// sensor X does not list is never leased (X would stream nothing, and the
+// lease would say it does). Before X sent its list (it does once per bond
+// session, within seconds of the link) nothing is known, so the request is
+// refused rather than guessed; the master asks again. Sensors X lacks among
+// several asked for are left out (reqLeftOut) and the rest applied.
 inline ReqVerdict sensorReqDecide(const ReqInputs& in) {
   if (!in.settingOn) return ReqVerdict::Off;
   if (!in.bondMaster) return ReqVerdict::NotBondMaster;
@@ -775,7 +789,23 @@ inline ReqVerdict sensorReqDecide(const ReqInputs& in) {
   if (in.mode == kReqUnsubscribe) return ReqVerdict::Apply;
   if (!(in.mask & in.forwardedMask)) return ReqVerdict::NotForwarded;
   if (!in.partnerOnline) return ReqVerdict::PartnerOffline;
+  if (!in.partnerStatusKnown) return ReqVerdict::PartnerStatusUnknown;
+  if (!(in.mask & in.forwardedMask & in.partnerPresent)) return ReqVerdict::PartnerLacksSensor;
   return ReqVerdict::Apply;
+}
+
+// The sensors an applied request leases or ends: an unsubscribe ends any it
+// names; a subscribe or one-shot only those forwarded that X lists.
+inline uint16_t reqApplyMask(const ReqInputs& in) {
+  if (in.mode == kReqUnsubscribe) return in.mask;
+  return (uint16_t)(in.mask & in.forwardedMask & in.partnerPresent);
+}
+
+// The forwarded sensors a subscribe or one-shot asked for that X does not
+// list: left out of the lease (counted as partner_lacks_sensor).
+inline uint16_t reqLeftOut(const ReqInputs& in) {
+  if (in.mode == kReqUnsubscribe || !in.partnerStatusKnown) return 0;
+  return (uint16_t)(in.mask & in.forwardedMask & (uint16_t)~in.partnerPresent);
 }
 
 // B's leases on X's sensors, one per sensor. `started`: B switched the sensor

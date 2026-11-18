@@ -134,8 +134,12 @@ def check_sources(component: Path) -> None:
         require("memset(" not in span, "nothing is cleared in bulk under gRemoteSensorMux")
         require(not ("REMOTE_SENSOR_PEERS_MAX" in span and "slots" in span),
                 "no hold of gRemoteSensorMux walks the slots of every sender")
+    # (the masks come from sensorPresentMask, which a master's request is also
+    # checked against: espnowSensorReqKeepPresent)
     announce = strip_comments(extract_block(sensors, "static void announceSensorStatus(const uint8_t* alsoTo = nullptr)"))
-    require("if (gSensorStreamingEnabled[it.type]) streamingMask |= espnowsensor::sensorBit((uint8_t)it.type);" in announce,
+    present = strip_comments(extract_block(sensors, "static uint32_t sensorPresentMask(uint32_t* streaming = nullptr)"))
+    require("sensorPresentMask(&streamingMask)" in announce and
+            "if (gSensorStreamingEnabled[it.type]) streamingMask |= espnowsensor::sensorBit((uint8_t)it.type);" in present,
             "the status frame's streaming bit is that sensor's own")
     require("haveTarget && espnowSessionSettled(target.mac, nowMs)" in announce and
             "espnowSessionSettled(alsoTo, nowMs)" in announce, "the status frame waits until the session has settled")

@@ -198,6 +198,7 @@ static espnowsensor::StreamTarget gSensorTxTarget[REMOTE_SENSOR_MAX] = {};
 struct SensorTxStats {
   uint32_t sent;
   uint32_t notSent[espnowsensor::kDropReasonCount];
+  uint32_t reqLacking;  // a master asked for it while it was not running here (espnowSensorReqKeepPresent)
 };
 EXT_RAM_BSS_ATTR static SensorTxStats gSensorTxStats[REMOTE_SENSOR_MAX];  // PSRAM: tasks only
 // For the "not sent" console line: the broadcaster only counts here, and
@@ -840,6 +841,12 @@ static void sensorStatusIngest(const uint8_t* senderMac, const char* senderName,
     remoteSensorRefuse(&RemoteSensorRefusals::notReceiver);
     return;
   }
+  // A bond master hands its partner's status on (to the master it forwards
+  // readings to, with the sensors it forwards) and keeps it for the partner
+  // sensor check of a forwarded request (bondForwardSensorRequest). Before
+  // its own table: a full table or no memory here must not leave every
+  // forwarded request refused as "the partner has not said yet".
+  if (fromBond) sensorForwardStatus(senderMac, frame);
   // It makes the table and the sender's record as a reading does, so the
   // receiver lists a device's sensors (present, streaming or not) before any
   // reading arrives. A full table or no memory is refused, counted and said
@@ -882,9 +889,6 @@ static void sensorStatusIngest(const uint8_t* senderMac, const char* senderName,
     }
   }
   taskEXIT_CRITICAL(&gRemoteSensorMux);
-  // A bond master hands its partner's status on (to the master it forwards
-  // readings to, with the sensors it forwards).
-  if (fromBond) sensorForwardStatus(senderMac, frame);
 }
 
 void remoteSensorIngestStatus(const uint8_t* senderMac, const char* senderName,
@@ -1039,22 +1043,10 @@ static bool sensorControllerClearIfNoLeaseLocked(uint8_t previous[6]) {
   return true;
 }
 
-// Tells the device that receives this device's readings which sensors are
-// here and which are streaming (SENSOR_STATUS, one frame with two masks),
-// so it can list a sensor that is present but not streaming. Sent when a
-// stream starts or stops and every 5 s by the broadcaster. Nothing is sent
-// to a bond partner (it has the bond status frame), without a receiver, or
-// before the session with it has settled. `alsoTo`: a controller whose last
-// lease just ended is told once more, so it sees the stream stop.
-static void announceSensorStatus(const uint8_t* alsoTo = nullptr) {
-  // A bond worker tells nothing to a mesh master, not even a controller whose
-  // lease ended: it tells its bond master (BOND_SENSOR_STATUS), which may
-  // forward it to the master it forwards readings to.
-  const bool bondWorker = sensorIsBondWorker();
-  if (!espnowfwd::meshDataAllowed(bondWorker)) alsoTo = nullptr;
-  const espnowsensor::TargetChoice target = sensorReadingTarget(-1);
-  const bool haveTarget = target.why == espnowsensor::DropReason::None && target.viaBond == bondWorker;
-  if (!haveTarget && !alsoTo) return;
+// The sensors this device has running (their driver is started), the
+// "present" mask of its SENSOR_STATUS; `streaming`: those of them that stream.
+// What a master's request may lease here (espnowSensorReqKeepPresent).
+static uint32_t sensorPresentMask(uint32_t* streaming = nullptr) {
   struct Item { bool connected; RemoteSensorType type; };
   // The connected globals are real driver state, or `false` from the disabled
   // branch of the sensor's header, so naming them without a condition is safe.
@@ -1077,6 +1069,50 @@ static void announceSensorStatus(const uint8_t* alsoTo = nullptr) {
     // is the only axis the receiver can observe.
     if (gSensorStreamingEnabled[it.type]) streamingMask |= espnowsensor::sensorBit((uint8_t)it.type);
   }
+  if (streaming) *streaming = streamingMask;
+  return presentMask;
+}
+
+static void sensorPeerDisplayName(const uint8_t* mac, char* out, size_t cap);
+
+uint32_t espnowSensorReqKeepPresent(uint8_t mode, uint32_t sensorMask, const uint8_t* controllerMac) {
+  const espnowsensor::ReqSplit split = espnowsensor::sensorReqSplit(mode, sensorMask, sensorPresentMask());
+  if (!split.lacking) return split.apply;
+  for (int i = 0; i < REMOTE_SENSOR_MAX; i++) {
+    if (split.lacking & espnowsensor::sensorBit((uint8_t)i)) gSensorTxStats[i].reqLacking++;
+  }
+  static WarnLimiter sWarn = {};
+  uint32_t held = 0;
+  if (warnLimiterTake(sWarn, (uint32_t)millis(), 60000, &held)) {
+    char names[96];
+    espnowsensor::sensorMaskNames(split.lacking, false, names, sizeof(names));
+    char who[32];
+    sensorPeerDisplayName(controllerMac, who, sizeof(who));
+    BROADCAST_PRINTF("[ESP-NOW] Sensor request from %s: %s left out: this device does not have %s running "
+                     "(%lu more in the last minute)",
+                     who, names, (split.lacking & (split.lacking - 1)) ? "them" : "it", (unsigned long)held);
+  }
+  return split.apply;
+}
+
+// Tells the device that receives this device's readings which sensors are
+// here and which are streaming (SENSOR_STATUS, one frame with two masks),
+// so it can list a sensor that is present but not streaming. Sent when a
+// stream starts or stops and every 5 s by the broadcaster. Nothing is sent
+// to a bond partner (it has the bond status frame), without a receiver, or
+// before the session with it has settled. `alsoTo`: a controller whose last
+// lease just ended is told once more, so it sees the stream stop.
+static void announceSensorStatus(const uint8_t* alsoTo = nullptr) {
+  // A bond worker tells nothing to a mesh master, not even a controller whose
+  // lease ended: it tells its bond master (BOND_SENSOR_STATUS), which may
+  // forward it to the master it forwards readings to.
+  const bool bondWorker = sensorIsBondWorker();
+  if (!espnowfwd::meshDataAllowed(bondWorker)) alsoTo = nullptr;
+  const espnowsensor::TargetChoice target = sensorReadingTarget(-1);
+  const bool haveTarget = target.why == espnowsensor::DropReason::None && target.viaBond == bondWorker;
+  if (!haveTarget && !alsoTo) return;
+  uint32_t streamingMask = 0;
+  const uint32_t presentMask = sensorPresentMask(&streamingMask);
   const uint32_t nowMs = (uint32_t)millis();
   if (haveTarget && target.viaBond) {
     // Over the bond link only (the bond send rules wait for its session).
@@ -2509,10 +2545,12 @@ const char* cmd_espnow_sensorstatus(const String& argsInput) {
         const SensorTxStats stats = gSensorTxStats[i];
         uint32_t notSent = 0;
         for (size_t r = 1; r < espnowsensor::kDropReasonCount; r++) notSent += stats.notSent[r];
-        if (stats.sent == 0 && notSent == 0) continue;
+        if (stats.sent == 0 && notSent == 0 && stats.reqLacking == 0) continue;
         JsonObject row = sent[name].to<JsonObject>();
         row["sent"] = stats.sent;
         row["notSent"] = notSent;
+        // Requests from a master left out: the sensor was not running here.
+        if (stats.reqLacking) row["requestsLeftOut"] = stats.reqLacking;
         for (size_t r = 1; r < espnowsensor::kDropReasonCount; r++) {
           if (stats.notSent[r]) row[espnowsensor::dropReasonKey((espnowsensor::DropReason)r)] = stats.notSent[r];
         }
@@ -2616,15 +2654,21 @@ const char* cmd_espnow_sensorstatus(const String& argsInput) {
         notSent += stats.notSent[r];
         if (stats.notSent[r] > stats.notSent[topReason]) topReason = r;
       }
+      // A master asked for it while it was not running here (left out).
+      char asked[64] = "";
+      if (stats.reqLacking) {
+        snprintf(asked, sizeof(asked), "; requested %lu times while not running here", (unsigned long)stats.reqLacking);
+      }
       if (!sensorTypeInThisBuild(type)) {
-        BROADCAST_PRINTF("    %s: not in this firmware", sensorTypeToString(type));
+        BROADCAST_PRINTF("    %s: not in this firmware%s", sensorTypeToString(type), asked);
       } else if (notSent) {
-        BROADCAST_PRINTF("    %s: %s, sent %lu, not sent %lu (mostly: %s)", sensorTypeToString(type),
+        BROADCAST_PRINTF("    %s: %s, sent %lu, not sent %lu (mostly: %s)%s", sensorTypeToString(type),
                          isSensorDataStreamingEnabled(type) ? "on" : "off", (unsigned long)stats.sent,
-                         (unsigned long)notSent, espnowsensor::dropReasonText((espnowsensor::DropReason)topReason));
+                         (unsigned long)notSent, espnowsensor::dropReasonText((espnowsensor::DropReason)topReason),
+                         asked);
       } else {
-        BROADCAST_PRINTF("    %s: %s, sent %lu", sensorTypeToString(type),
-                         isSensorDataStreamingEnabled(type) ? "on" : "off", (unsigned long)stats.sent);
+        BROADCAST_PRINTF("    %s: %s, sent %lu%s", sensorTypeToString(type),
+                         isSensorDataStreamingEnabled(type) ? "on" : "off", (unsigned long)stats.sent, asked);
       }
     }
   }

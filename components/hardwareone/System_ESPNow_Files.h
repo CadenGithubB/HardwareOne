@@ -100,6 +100,28 @@ constexpr uint32_t kFileSlotMaxStreamSize = 4u * 1024u * 1024u;  // 4 MB sanity 
 // Stale-slot reclaim threshold. No frame received in this window → drop.
 constexpr uint32_t kFileSlotTimeoutMs = 30000;
 
+// The files of the bond's own sync: the partner's settings, manifest and
+// schema (parsed in RAM, never stored as received files) and its automation
+// list, which sendBondSettings sends after the settings on every resync. They
+// arrive from the bond partner while bond mode is on, every time the
+// partner's settings change. Such a file is not a file a person sent: its
+// arrival raises no file_rx / file_rx_failed event (which eventpush would
+// carry to the mesh master), no message-history line and no toast, only a
+// debug line (logFileTransferEvent). The same name from any other device, or
+// with bond mode off, is an ordinary received file.
+inline bool fileRxIsBondSync(bool bondModeOn, bool fromBondPartner, const char* filename) {
+  if (!bondModeOn || !fromBondPartner || !filename) return false;
+  static const char* const kNames[] = { "_settings_out.json", "_manifest_out.json", "_schema_out.json",
+                                        "automations.json" };
+  for (const char* name : kNames) {
+    const char* a = name;
+    const char* b = filename;
+    while (*a && *a == *b) { ++a; ++b; }
+    if (*a == '\0' && *b == '\0') return true;
+  }
+  return false;
+}
+
 // One-time allocation of the gFileSlots table in PSRAM + the slot-table mutex.
 // Idempotent. Returns false on allocation failure (caller should disable
 // file-transfer functionality).

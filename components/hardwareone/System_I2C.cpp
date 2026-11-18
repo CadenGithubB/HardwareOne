@@ -2370,7 +2370,9 @@ static void finishSensorStops() {
       case I2C_DEVICE_INPUT:  sensorPresenceChanged(REMOTE_SENSOR_INPUT, false);  break;
       case I2C_DEVICE_GPS:      sensorPresenceChanged(REMOTE_SENSOR_GPS, false);      break;
       case I2C_DEVICE_FMRADIO:  sensorPresenceChanged(REMOTE_SENSOR_FMRADIO, false);  break;
-      default: break;  // APDS, RTC, Presence have no remote sensor type
+      case I2C_DEVICE_RTC:      sensorPresenceChanged(REMOTE_SENSOR_RTC, false);      break;
+      case I2C_DEVICE_PRESENCE: sensorPresenceChanged(REMOTE_SENSOR_PRESENCE, false); break;
+      default: break;  // APDS has no remote sensor type
     }
 #endif
 
@@ -2686,7 +2688,12 @@ static void broadcastStartedSensor(I2cDeviceType sensor) {
     case I2C_DEVICE_INPUT: sensorPresenceChanged(REMOTE_SENSOR_INPUT, true); break;
     case I2C_DEVICE_GPS: sensorPresenceChanged(REMOTE_SENSOR_GPS, true); break;
     case I2C_DEVICE_FMRADIO: sensorPresenceChanged(REMOTE_SENSOR_FMRADIO, true); break;
-    default: break;
+    // RTC and presence are remote types too: their status frame lists them,
+    // and a bond master leases only what its partner's list names, so a start
+    // after the bond session's first list must be told as well.
+    case I2C_DEVICE_RTC: sensorPresenceChanged(REMOTE_SENSOR_RTC, true); break;
+    case I2C_DEVICE_PRESENCE: sensorPresenceChanged(REMOTE_SENSOR_PRESENCE, true); break;
+    default: break;  // APDS has no remote sensor type
   }
 #else
   (void)sensor;

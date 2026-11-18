@@ -1509,6 +1509,29 @@ static void testForwardedStatus() {
   check(gForwardedStatus.size() == 1 && std::memcmp(gForwardedStatus[0].src, kShed, 6) == 0 &&
         gForwardedStatus[0].f.presentMask == f.presentMask && gForwardedStatus[0].f.bootTag == 0xAAAA,
         "and handed to the forwarder");
+  // The forwarder's copy does not depend on this device's own table: with
+  // no memory for the partner's slots (or a full table) the status is still
+  // handed on, so a forwarded request is judged by the partner's real list
+  // and not refused as "the partner has not said yet" forever.
+  resetAll();
+  gSettings.meshRole = 0;
+  pair(kShed);
+  gForwardedStatus.clear();
+  f.presentMask = espnowsensor::sensorBit(REMOTE_SENSOR_IMU);
+  espnowfwd::packStatusFrame(frame, f);
+  gAllocFails = true;
+  const uint32_t noMemoryBefore = gRemoteSensorRefusals.noMemory;
+  remoteSensorIngestBondStatus(kShed, "shed", frame, sizeof(frame));
+  gAllocFails = false;
+  check(gRemoteSensorRefusals.noMemory == noMemoryBefore + 1 && !remoteSensorInfoFor(kShed, nullptr, REMOTE_SENSOR_IMU, &info) &&
+            gForwardedStatus.size() == 1 && gForwardedStatus[0].f.presentMask == f.presentMask,
+        "no memory for the partner's record here: refused for the table, still handed to the forwarder");
+  // Back to the bond master's own frame for the cases below.
+  gForwardedStatus.clear();
+  f.presentMask = espnowsensor::sensorBit(REMOTE_SENSOR_TOF);
+  espnowfwd::packStatusFrame(frame, f);
+  remoteSensorIngestBondStatus(kShed, "shed", frame, sizeof(frame));
+  check(gForwardedStatus.size() == 1, "kept and handed on once memory is there");
   // A link byte over the bond link is malformed; a short frame too.
   const uint32_t malformedBefore = gRemoteSensorRefusals.malformed;
   f.fwdLink = 1;

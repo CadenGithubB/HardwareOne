@@ -318,7 +318,8 @@ contract in sec. 6 is **unchanged**.)
   sends (worker, backup): `streaming` (all eleven sensor types) and `sent` (per sensor with
   activity: `sent`, `notSent`, and a count per reason: `too_long`, `no_receiver`, `no_session`,
   `queue_full`, `is_master`, `bond_offline`, `broadcast_off`, `mesh_off`, `not_in_this_build`,
-  `master_not_paired`). On a device that receives (master, backup, or any device that holds
+  `master_not_paired`; and `requestsLeftOut` when a master's sensor request named it while it was not
+  running here: it is left out of the lease). On a device that receives (master, backup, or any device that holds
   readings): `devices` as in 8.1 (a device's sensors are listed from its sensor status frame before
   its first reading: `connected` true, `enabled` as the device says, `fresh` false, `data` null),
   each with `received`, `lost` and `late` added, and
@@ -413,8 +414,13 @@ identified by its address **and** the device that forwarded it:
   `too_long`, `partner_changed`, `sensor_off`, `not_kept_here`), `answersIgnored` and
   `sensorRequests` (the mesh master's sensor requests for the partner: `applied`, `refused`,
   `lastRefused` (`null` or `off`, `not_bond_master`, `no_link`, `old_link`, `not_primary_master`,
-  `bad_mode`, `not_forwarded`, `partner_offline`), `leased` (the sensors a lease runs for now)). The
-  object is at most 2560 bytes; the whole `bondstatus json` reply fits the 4 KB reply buffer.
+  `bad_mode`, `not_forwarded`, `partner_offline`, `partner_status_unknown`: the partner has not sent
+  its sensor list yet, `partner_lacks_sensor`: the partner's list names none of the forwarded sensors
+  asked for), `refusedBy` (a count per refusal reason, the same keys, only those above 0),
+  `partnerLacks` (`count`: requests that asked for a sensor the partner does not have running, refused
+  or with it left out; `last`: those sensors of the last such request), `leased` (the sensors a lease
+  runs for now)). The object is at most 3072 bytes; the whole `bondstatus json` reply fits the 4 KB
+  reply buffer.
 - `bondstatus json` adds `sensorRequestsRefused`: the sensor requests a mesh master sent while this
   device is a bond worker (refused: its bond master decides what it streams).
 - `bondstatus json` adds `roleChosen` (`true`: the user chose `role` with `bondrole`, and

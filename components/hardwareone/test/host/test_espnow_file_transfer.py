@@ -124,6 +124,23 @@ def main():
         if not re.search(r'\bsendFileToMac(Result)?\(', text):
             failures.append(f'{marker[:-1]} no longer sends through sendFileToMac, '
                             'so it does not inherit the session gate')
+    # The bond's own sync files raise no user-visible file event (bench
+    # 2026-11-18): logFileTransferEvent returns with a debug line before the
+    # history line, the console line and the file_rx / file_rx_failed post,
+    # and the two toasts skip them.
+    log = body(main_cpp, 'void logFileTransferEvent(', E)
+    quiet = log.find('fileRxBondSync(peerMac, filename)')
+    if not (0 <= quiet < log.find('storeMessageInPeerHistory(') and quiet < log.find('systemEventPost(SYSEVT_FILE_RX') and
+            quiet < log.find('BROADCAST_PRINTF(') and
+            'eventType == MSG_FILE_RECV_SUCCESS || eventType == MSG_FILE_RECV_FAILED' in log[:quiet + 200]):
+        failures.append('logFileTransferEvent does not keep the bond sync files out of the events and history')
+    glue = body(main_cpp, 'static bool fileRxBondSync(', E)
+    if ('fileRxIsBondSync(gSettings.bondModeEnabled, fromPartner, filename)' not in glue or
+            'parseMacAddress(gSettings.bondPeerMac, partner)' not in glue):
+        failures.append('fileRxBondSync does not ask the rule with bond mode and the bond partner')
+    for marker in ('static void fileWriterFinalizeJob(', 'static void v4h_file_end('):
+        if 'if (!fileRxBondSync(sndMac, filename)) {' not in body(main_cpp, marker, E):
+            failures.append(f'{marker[12:-1]} shows a toast for a bond sync file')
     fslist = read('System_ESPNow_FsList.cpp')
     get_marker = 'static void processGetDeferred('   # a forward declaration comes first
     fs_get = extract_block(fslist[fslist.rindex(get_marker):], get_marker)

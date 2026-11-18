@@ -543,7 +543,12 @@ static std::vector<ManifestHit> gManifestHits;
   gManifestHits.push_back(h);
   return true;
 }
-[[maybe_unused]] static void requestBondSettings(const uint8_t* mac) { noteFrame(mac, kSentSettingsReq); }
+// As production: the request is in flight from the tick's `now` on.
+[[maybe_unused]] static void requestBondSettings(const uint8_t* mac, uint32_t nowMs) {
+  gEspNow->bondSyncInFlight = BOND_SYNC_SETTINGS;
+  gEspNow->bondSyncLastAttemptMs = nowMs;
+  noteFrame(mac, kSentSettingsReq);
+}
 [[maybe_unused]] static bool espnowInboundFileActiveFrom(const uint8_t*) { return false; }
 struct PostSync { uint8_t mac[6]; bool held; };
 static std::vector<PostSync> gPostSync;
@@ -1459,7 +1464,37 @@ static void caseEndedNotice() {
 }
 #endif
 
+// Bench 2026-11-18: every settings fetch sent SETTINGS_REQ twice ("Requesting
+// SETTINGS" and "Retry SETTINGS_REQ (2/3)" in the same millisecond): the
+// request was stamped later than the tick's `now`. One request per fetch; the
+// retry comes BOND_SYNC_RETRY_MS later.
+static void caseSettingsRequestOnce() {
+  resetWorld(kMasterSelf);
+  gSettings.bondModeEnabled = true;
+  gSettings.bondRole = BOND_ROLE_MASTER;
+  gSettings.bondPeerMac = "02:11:22:33:44:01";
+  gMaster.mac = kPartnerC;
+  gEspNow->bondPeerOnline = true;
+  gEspNow->lastRemoteCapValid = true;
+  gEspNow->bondManifestReceived = true;
+  gEspNow->bondSettingsReceived = false;   // the partner's settings hash changed
+  gEspNow->lastBondHeartbeatReceivedMs = gNowMs;
+  gFrames.clear();
+  syncTickProduction(gNowMs);
+  CHECK(framesTo(kPartnerA, kSentSettingsReq, false) == 1, "one tick sent %zu SETTINGS_REQ, not 1",
+        framesTo(kPartnerA, kSentSettingsReq, false));
+  gNowMs += BOND_SYNC_RETRY_MS - 1;
+  gEspNow->lastBondHeartbeatReceivedMs = gNowMs;
+  syncTickProduction(gNowMs);
+  CHECK(framesTo(kPartnerA, kSentSettingsReq, false) == 1, "the retry came before BOND_SYNC_RETRY_MS");
+  gNowMs += 1;
+  syncTickProduction(gNowMs);
+  CHECK(framesTo(kPartnerA, kSentSettingsReq, false) == 2 && gEspNow->bondSyncRetryCount == 2,
+        "no retry after BOND_SYNC_RETRY_MS (%zu requests)", framesTo(kPartnerA, kSentSettingsReq, false));
+}
+
 int main() {
+  caseSettingsRequestOnce();
   caseBenchOrder();
   caseSwitchPartner();
   casePeerMacSetting();

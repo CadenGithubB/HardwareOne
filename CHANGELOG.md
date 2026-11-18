@@ -34,13 +34,16 @@ everything user-visible since the v0.99.99.1 tag.
   151 payload, once per bond session and on every change), and the bond master forwards it in a 151
   frame with a reserved byte as link byte, so the mesh master lists the partner's sensors before its
   first reading. The mesh master can ask for the partner's readings as from any sender:
-  `espnowsensorreq <partner> via <bond master> <mask> <mode> <intervalMs> <leaseMs>` (or the
+  `espnowsensorreq <partner> via <bond master> <sensors> <mode> <intervalMs> <leaseMs>` (or the
   partner's name alone when it is not paired there) sends SENSOR_REQ (subscribe with a lease, one-shot,
   unsubscribe) to the bond master with its link number in a reserved byte; the bond master, with
   forwarding on and the link up, switches the partner's sensors over the bond link (the stream control
   `bondstream` uses), ends them with the lease, and the readings come back forwarded. Only the master it
-  forwards readings to may ask, and only for the sensors it forwards; the partner still never takes a
-  sensor request from a mesh master. A lease also ends when its sensor is no longer forwarded or its
+  forwards readings to may ask, and only for the sensors it forwards and the partner's own sensor list
+  names (present and running there): a sensor the partner lacks is never leased (refused
+  `partner_lacks_sensor`, or left out of a request for several, said once a minute); before the partner
+  sent its list the request is refused `partner_status_unknown` (the list comes within seconds of the
+  bond session; ask again). The partner still never takes a sensor request from a mesh master. A lease also ends when its sensor is no longer forwarded or its
   master leaves the primary mesh; an "off" that could not be sent (the partner out of range) is sent
   again until it goes out. A stream the bond master's user started at the partner (`bondstream`, by hand
   or saved) is never started or stopped by a lease; the bond master's own streams are not taken for the
@@ -48,7 +51,9 @@ everything user-visible since the v0.99.99.1 tag.
   `espnowevents json` and `GET /api/sensors/remote` has `link` (`mesh`, `bond`, `forwarded`) and `via`;
   `GET /api/sensors/remote` takes `&via=<MAC>`; `bondstatus`, `bondstatus json` and `GET
   /api/bond/status` say whether and where the partner's data goes and why not, and what the mesh
-  master's sensor requests did (`bondstatus` in up to four console lines, each one whole message). A
+  master's sensor requests did: counts per refusal reason (`refusedBy`), the sensors asked for that the
+  partner lacks (`partnerLacks`), and the sensors leased now (`bondstatus` in up to five console lines,
+  each one whole message; `bondforward` without an argument shows the same request lines). A
   rekey keeps forwarding; a new session, a partner change, a decline, a restart or a new named master
   are handled by the bond master's tick; a frame of an old partner still on its way is refused by its
   link number. No frame grew. Forwarded MQTT state is not published (MQTT is parked). Host-tested
@@ -196,6 +201,26 @@ everything user-visible since the v0.99.99.1 tag.
   as it did (its bond heartbeat counts as its agreement). Host-tested; not yet run on hardware.
 
 ### Fixed
+- Bond sync no longer posts a `file_rx` event for its own files. The partner's settings, manifest, schema
+  and automation list (`_settings_out.json`, `_manifest_out.json`, `_schema_out.json`, `automations.json`),
+  received from the bond partner with bond mode on, raise no `file_rx` / `file_rx_failed` event, no
+  message-history line and no OLED toast, only a debug line. Each change of the partner's settings
+  makes the bond master fetch them again (by design: one fetch per change, seen at the next 5 s
+  heartbeat), and with `espnoweventpush verbose` or `standard` every fetch put two `file_rx` events in
+  the mesh master's event list. A file a person sends, also one of these names from any other device,
+  still raises its event.
+- A bond master sent every settings fetch's SETTINGS_REQ twice ("Requesting SETTINGS" and "Retry
+  SETTINGS_REQ (2/3)" in the same millisecond): the request was stamped with a later uptime than the
+  sync tick's own, the unsigned difference wrapped, and the retry fired at once. The request now
+  carries the tick's time; a retry comes 3 s later as intended.
+- Starting or stopping the RTC or the presence sensor now sends this device's sensor status at once, as
+  every other remote sensor type does (the I2C start/stop said nothing for them since they became remote
+  types). A bond master leases only what its partner's list names, so an RTC or presence sensor started
+  after the bond session began was refused `partner_lacks_sensor` until some other change resent the
+  list; the mesh master's listing of them was late the same way.
+- A bond master keeps its partner's sensor list for forwarding (and for the partner-list check of a
+  forwarded sensor request) even when its own reading table refuses the partner's record (full, or out
+  of memory); before, such a request was refused `partner_status_unknown` for as long as that lasted.
 - ESP-NOW sensor readings: a sensor type outside the known range in a received frame is refused
   and counted (the mesh path used it unchecked); a reading whose text is not one valid JSON object
   is refused, so a sender cannot add keys of its choosing to the receiver's `/api/sensors/remote`
@@ -622,6 +647,16 @@ everything user-visible since the v0.99.99.1 tag.
   yet tested on hardware.
 
 ### Changed
+- `espnowsensorreq` takes words: the sensors as names from the one sensor table, comma separated
+  (`tof,imu`, any case), `all`, or a mask as before (`0x6`, `6`; 1..0x7FF); the mode as
+  `subscribe|sub|0`, `unsubscribe|unsub|1` or `oneshot|once|2`. A bad sensor, mask, mode, interval or
+  lease is refused with an error that names the token (the sensor error lists the names).
+- A device that takes sensor requests (`espnowacceptsensorcontrol on`) leases only the sensors it has
+  running, the ones its sensor status lists: a subscribe or one-shot for a sensor it lacks (not in the
+  build, or not started) leaves that sensor out, said once a minute ("Sensor request from hub: tof left
+  out: this device does not have it running") and counted per sensor in `espnowsensorstatus`
+  ("requested N times while not running here", JSON `requestsLeftOut`). Before, the lease was taken and
+  the sensor streamed nothing. The same rule as the bond master applies to its partner.
 - A bond worker sends its battery state and events to its bond master only, over the bond link as two
   new bond opcodes (180 BOND_POWER_STATUS, 182 BOND_EVENT_PUSH, the 152/132 payloads unchanged), and never
   to a mesh master, whatever master is named on it; it refuses sensor requests from a mesh master and

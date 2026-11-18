@@ -826,7 +826,69 @@ static void testStreamCtrlQueue() {
   CHECK(on == sensorBit(REMOTE_SENSOR_IMU) && off == sensorBit(REMOTE_SENSOR_TOF));
 }
 
+// A master's request on this device: only the sensors it has running are
+// leased (bench 2026-11-18: ToF was leased where there is none).
+static void testReqSplit() {
+  const uint32_t tof = sensorBit(REMOTE_SENSOR_TOF), imu = sensorBit(REMOTE_SENSOR_IMU);
+  ReqSplit r = sensorReqSplit(0, tof | imu, imu);
+  CHECK(r.apply == imu && r.lacking == tof);
+  r = sensorReqSplit(2, tof, 0);
+  CHECK(r.apply == 0 && r.lacking == tof);
+  r = sensorReqSplit(0, tof | imu, tof | imu);
+  CHECK(r.apply == (tof | imu) && r.lacking == 0);
+  r = sensorReqSplit(1, tof | imu, 0);  // an unsubscribe ends whatever it names
+  CHECK(r.apply == (tof | imu) && r.lacking == 0);
+  r = sensorReqSplit(7, tof, 0);  // an unknown mode is passed on (the apply refuses it)
+  CHECK(r.apply == tof && r.lacking == 0);
+  r = sensorReqSplit(0, 0xFFFFFFFFu, 0xFFFFFFFFu);  // bits above the table are never applied
+  CHECK(r.apply == kSensorMaskAll && r.lacking == 0);
+}
+
+// espnowsensorreq's words (bench 2026-11-18: only numbers were taken).
+static void testRequestWords() {
+  uint32_t m = 99;
+  char bad[16];
+  CHECK(parseSensorList("tof", m, bad, sizeof(bad)) && m == sensorBit(REMOTE_SENSOR_TOF));
+  CHECK(parseSensorList("tof,IMU", m, bad, sizeof(bad)) && m == (sensorBit(REMOTE_SENSOR_TOF) | sensorBit(REMOTE_SENSOR_IMU)));
+  CHECK(parseSensorList("all", m, bad, sizeof(bad)) && m == kSensorMaskAll);
+  CHECK(parseSensorList("ALL", m, bad, sizeof(bad)) && m == kSensorMaskAll);
+  CHECK(parseSensorList("0x6", m, bad, sizeof(bad)) && m == 6);
+  CHECK(parseSensorList("6", m, bad, sizeof(bad)) && m == 6);
+  CHECK(parseSensorList("0X7ff", m, bad, sizeof(bad)) && m == kSensorMaskAll);
+  for (uint8_t i = 0; i < REMOTE_SENSOR_MAX; ++i) {
+    CHECK(parseSensorList(kSensorTable[i].name, m, bad, sizeof(bad)) && m == sensorBit(i));
+  }
+  m = 99;
+  CHECK(!parseSensorList("tof,lidar", m, bad, sizeof(bad)) && m == 99 && strcmp(bad, "lidar") == 0);
+  CHECK(!parseSensorList("subscribe", m, bad, sizeof(bad)) && strcmp(bad, "subscribe") == 0);
+  CHECK(!parseSensorList("tof,", m, bad, sizeof(bad)) && bad[0] == '\0');
+  CHECK(!parseSensorList(",tof", m, bad, sizeof(bad)) && bad[0] == '\0');
+  CHECK(!parseSensorList("", m, bad, sizeof(bad)) && bad[0] == '\0');
+  CHECK(!parseSensorList("0x800", m, bad, sizeof(bad)) && strcmp(bad, "0x800") == 0);  // above the table
+  CHECK(!parseSensorList("0", m, bad, sizeof(bad)) && strcmp(bad, "0") == 0);          // no sensor
+  CHECK(!parseSensorList("0x", m, bad, sizeof(bad)) && !parseSensorList("6x", m, bad, sizeof(bad)) &&
+        !parseSensorList("0xg", m, bad, sizeof(bad)) && !parseSensorList("99999999999", m, bad, sizeof(bad)));
+  // Hex digits only after 0x: a decimal number with letters is junk, not read as hex or cut short.
+  CHECK(!parseSensorList("1a", m, bad, sizeof(bad)) && strcmp(bad, "1a") == 0 && !parseSensorList("6f", m, bad, sizeof(bad)) &&
+        !parseSensorList("2tof", m, bad, sizeof(bad)) && !parseSensorList("0x6,tof", m, bad, sizeof(bad)) &&
+        !parseSensorList("6 ", m, bad, sizeof(bad)) && !parseSensorList("-1", m, bad, sizeof(bad)));
+  CHECK(!parseSensorList("a-very-long-sensor-name", m, bad, sizeof(bad)) && strlen(bad) == sizeof(bad) - 1);
+  CHECK(m == 99);
+  uint8_t mode = 9;
+  CHECK(parseRequestMode("subscribe", mode) && mode == 0 && parseRequestMode("sub", mode) && mode == 0 &&
+        parseRequestMode("0", mode) && mode == 0);
+  CHECK(parseRequestMode("unsubscribe", mode) && mode == 1 && parseRequestMode("UNSUB", mode) && mode == 1 &&
+        parseRequestMode("1", mode) && mode == 1);
+  CHECK(parseRequestMode("oneshot", mode) && mode == 2 && parseRequestMode("once", mode) && mode == 2 &&
+        parseRequestMode("2", mode) && mode == 2);
+  mode = 9;
+  CHECK(!parseRequestMode("3", mode) && !parseRequestMode("subs", mode) && !parseRequestMode("", mode) &&
+        !parseRequestMode(nullptr, mode) && mode == 9);
+}
+
 int main() {
+  testRequestWords();
+  testReqSplit();
   testFingerprintArg();
   testSensorTable();
   testHeader();

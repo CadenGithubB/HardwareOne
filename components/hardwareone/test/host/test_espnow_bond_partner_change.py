@@ -252,6 +252,15 @@ def assemble(a):
         '\n\nstatic void hbTickProduction(uint32_t now) {\n' + hb_slice + '}\n'
         '\nstatic void syncTickProduction(uint32_t now) {\n' + sync_slice + '}\n')
 
+    # The settings request is stamped with the tick's `now` (a later millis()
+    # made the retry fire in the same tick: two SETTINGS_REQ per fetch).
+    request = definition(source, 'static void requestBondSettings(const uint8_t* peerMac, uint32_t nowMs)',
+                         'System_ESPNow.cpp')
+    assert 'gEspNow->bondSyncLastAttemptMs = nowMs;' in request and 'millis()' not in request, \
+        'requestBondSettings stamps the request with its own millis(), not the tick\'s now'
+    assert sync_slice.count('requestBondSettings(peerMac, now);') == 2, \
+        'the sync tick does not pass its now to requestBondSettings'
+
     # What runs on espnow_task in processMeshHeartbeats is pinned in the source:
     # the worker branch of the sync tick asks for a missing capability, and the
     # receive table drops bond opcodes while a partner change holds them.

@@ -3939,7 +3939,7 @@ static void            manifestCacheRecordUse(const uint8_t* peerMac, const uint
 #if ENABLE_BONDED_MODE
 static void            processBondSettings(const uint8_t* srcMac, const String& deviceName, const String& settingsStr);
 static void            processBondSchema(const uint8_t* srcMac, const String& deviceName, const char* schema, size_t len);
-static void            requestBondSettings(const uint8_t* peerMac);
+static void            requestBondSettings(const uint8_t* peerMac, uint32_t nowMs);
 
 // A received bond JSON file (manifest, schema) is checked in place, in the
 // buffer the file transfer filled, never copied into a String: an Arduino
@@ -6199,6 +6199,21 @@ static void v4h_file_data(const V4RxCtx& ctx) {
 // drain is never blocked on flash. arg = the FileTransferSlot* (stable until released
 // here; the slot is COMPLETING, so nothing else touches it). Mirrors the old inline
 // FILE_END streaming publish, just moved to cmd_exec.
+// A file of the bond's own sync from the bond partner (fileRxIsBondSync):
+// its arrival is not a user-visible file event.
+static bool fileRxBondSync(const uint8_t* mac, const char* filename) {
+#if ENABLE_BONDED_MODE
+  uint8_t partner[6];
+  const bool fromPartner = mac && gSettings.bondPeerMac.length() > 0 &&
+                           parseMacAddress(gSettings.bondPeerMac, partner) && memcmp(partner, mac, 6) == 0;
+  return fileRxIsBondSync(gSettings.bondModeEnabled, fromPartner, filename);
+#else
+  (void)mac;
+  (void)filename;
+  return false;
+#endif
+}
+
 static void fileWriterFinalizeJob(void* arg) {
   FileTransferSlot* slot = (FileTransferSlot*)arg;
   if (!slot) return;
@@ -6233,7 +6248,7 @@ static void fileWriterFinalizeJob(void* arg) {
     BROADCAST_PRINTF("[V4_FILE] Complete (streamed): %s (%lu bytes)", filename, (unsigned long)recvBytes);
     logFileTransferEvent(sndMac, senderMacStr.c_str(), filename, MSG_FILE_RECV_SUCCESS);
 #if ENABLE_OLED_DISPLAY
-    {
+    if (!fileRxBondSync(sndMac, filename)) {
       char toastMsg[40];
       snprintf(toastMsg, sizeof(toastMsg), "Received: %.28s", filename);
       oledToastShow(toastMsg);
@@ -6549,10 +6564,10 @@ static void v4h_file_end(const V4RxCtx& ctx) {
 
     logFileTransferEvent((uint8_t*)sndMac, senderMacStr.c_str(), filename, MSG_FILE_RECV_SUCCESS);
 #if ENABLE_OLED_DISPLAY
-    {
+    if (!fileRxBondSync(sndMac, filename)) {
       // On-device confirmation for any inbound file (OLED FS_GET download, push, etc.).
       // oledToastShow is thread-safe + self-marks dirty, so it surfaces regardless of
-      // which screen is showing.
+      // which screen is showing. Not for the bond's own sync files.
       char toastMsg[40];
       snprintf(toastMsg, sizeof(toastMsg), "Received: %.28s", filename);
       oledToastShow(toastMsg);
@@ -9494,13 +9509,18 @@ static const uint32_t SETTINGS_MIN_HEAP = 20000;    // Minimum 20KB heap require
  * Request settings from bonded peer (master only).
  * Called from the sync tick — timing/retry is owned by the sync tick.
  */
-static void requestBondSettings(const uint8_t* peerMac) {
+static void requestBondSettings(const uint8_t* peerMac, uint32_t nowMs) {
   if (!peerMac || !gEspNow || !gSettings.bondModeEnabled) return;
   if (!isBondMaster()) return;
 
-  uint32_t now = millis();
+  // Stamped with the tick's own `now`, which the retry check below compares
+  // against. A fresh uptime read here is later than that `now` (the tick ran a
+  // while before it got here, e.g. the manifest cache lookup), the unsigned
+  // difference wrapped, and the retry fired in the same tick: every settings
+  // fetch sent two SETTINGS_REQ ("Requesting SETTINGS" + "Retry SETTINGS_REQ
+  // (2/3)" in the same millisecond, bench 2026-11-18).
   gEspNow->bondSyncInFlight = BOND_SYNC_SETTINGS;
-  gEspNow->bondSyncLastAttemptMs = now;
+  gEspNow->bondSyncLastAttemptMs = nowMs;
   // NOTE: retry count is managed by the sync tick retry block — don't increment here
   
   uint32_t msgId = generateMessageId();
@@ -12942,7 +12962,7 @@ void processMeshHeartbeats() {
         }
       } else if (!haveSettings) {
         // Have cap + manifest, need settings
-        requestBondSettings(peerMac);
+        requestBondSettings(peerMac, now);
         gEspNow->bondSyncRetryCount = 1;
         BROADCAST_PRINTF("[BOND_SYNC] Requesting SETTINGS");
       }
@@ -12969,7 +12989,7 @@ void processMeshHeartbeats() {
           bondSendEncryptedAsync(peerMac, ESPNOW_V4_TYPE_MANIFEST_REQ, ESPNOW_V4_FLAG_ACK_REQ, generateMessageId(), nullptr, 0);
           BROADCAST_PRINTF("[BOND_SYNC] Retry MANIFEST_REQ (%d/3)", (int)gEspNow->bondSyncRetryCount);
         } else if (gEspNow->bondSyncInFlight == BOND_SYNC_SETTINGS) {
-          requestBondSettings(peerMac);
+          requestBondSettings(peerMac, now);
           BROADCAST_PRINTF("[BOND_SYNC] Retry SETTINGS_REQ (%d/3)", (int)gEspNow->bondSyncRetryCount);
         }
       } else {
@@ -13249,9 +13269,16 @@ void processMeshHeartbeats() {
   // Authorization already happened in v4h_sensor_req; this only applies it.
   if (gEspNow->meshSensorReqPending) {
     gEspNow->meshSensorReqPending = false;
-    espnowApplySensorSubscription(gEspNow->meshSensorReqMode, gEspNow->meshSensorReqMask,
-                                  gEspNow->meshSensorReqIntervalMs, gEspNow->meshSensorReqLeaseMs,
-                                  gEspNow->meshSensorReqSrcMac);
+    // Only the sensors this device has running are leased (the others are
+    // counted and said). The kept mask is staged back, so an apply that is
+    // retried on the next lap neither counts them again nor leases them.
+    gEspNow->meshSensorReqMask = espnowSensorReqKeepPresent(
+        gEspNow->meshSensorReqMode, gEspNow->meshSensorReqMask, gEspNow->meshSensorReqSrcMac);
+    if (gEspNow->meshSensorReqMask || gEspNow->meshSensorReqMode == SENSOR_REQ_UNSUBSCRIBE) {
+      espnowApplySensorSubscription(gEspNow->meshSensorReqMode, gEspNow->meshSensorReqMask,
+                                    gEspNow->meshSensorReqIntervalMs, gEspNow->meshSensorReqLeaseMs,
+                                    gEspNow->meshSensorReqSrcMac);
+    }
   }
 
   // 9. Answer one peer that asked for our metadata (noted by v4h_metadata_req)
@@ -21486,7 +21513,7 @@ extern const CommandEntry espNowCommands[] = {
   { "espnowmasterfingerprint", "Name the mesh master on this device: its key as 'espnowidentity' shows it (64 hex), or 'clear' to name none.", true, cmd_espnow_masterfingerprint, "Usage: espnowmasterfingerprint [<64-hex-pubkey>|clear]\n       No argument shows it. The master named here gives this device mesh time, gets its readings,\n       battery state and events, and may ask it for readings. clear: no master is named (the reply says what that stops)." },
   { "espnowforwardlinks", "Mesh master: show the devices that forward their bond partner's data to this device: 'espnowforwardlinks [json] [from <n>]'.", false, cmd_espnow_forwardlinks, "Usage: espnowforwardlinks [json] [from <n>]\n       json: 'next' is the number to pass as 'from' when not every link fitted one reply." },
   { "espnowbackupfingerprint", "Name the backup master on this device: its key as 'espnowidentity' shows it (64 hex), or 'clear' to name none.", true, cmd_espnow_backupfingerprint, "Usage: espnowbackupfingerprint [<64-hex-pubkey>|clear]\n       No argument shows it. The backup named here gets this device's battery state and events, may ask it for readings,\n       and gives it mesh time while it acts as master. clear: no backup master is named." },
-  { "espnowsensorreq", "Hand-send a SENSOR_REQ to a paired worker, or to a bond partner through the bond master that forwards for it ('<partner> via <bond master>').", true, cmd_espnow_sensorreq, "Usage: espnowsensorreq <MAC|name> [via <MAC|name>] <mask> <mode 0=sub|1=unsub|2=oneshot> <intervalMs> <leaseMs>\n       A forwarded partner: its name and 'via' the bond master (espnowforwardlinks lists them); its name alone when it is not paired here.\n       The bond master needs 'bondforward on' and forwards only the sensors it names (bondforward sensors)." },
+  { "espnowsensorreq", "Hand-send a SENSOR_REQ to a paired worker, or to a bond partner through the bond master that forwards for it ('<partner> via <bond master>').", true, cmd_espnow_sensorreq, "Usage: espnowsensorreq <MAC|name> [via <MAC|name>] <sensors> <mode> <intervalMs> <leaseMs>\n       sensors: names, comma separated (tof,imu), 'all', or a mask (0x6). mode: subscribe|sub|0, unsubscribe|unsub|1, oneshot|once|2.\n       A forwarded partner: its name and 'via' the bond master (espnowforwardlinks lists them); its name alone when it is not paired here.\n       The bond master needs 'bondforward on' and forwards only the sensors it names (bondforward sensors)." },
   { "espnowusersync", "Enable/disable user credential sync: 'espnowusersync [on|off]'.", true, cmd_espnow_usersync, "Usage: espnowusersync [on|off]", /*requiresSuperAdmin=*/true },
   { "espnowrequestmeta", "Request metadata from peer: 'espnowrequestmeta <name_or_mac>'. (async - updates cache; view with espnowdevices)", false, cmd_espnow_requestmeta, "Usage: espnowrequestmeta <name_or_mac>\n       Returns OK on delivery; the peer's name/room/zone/tags arrive later and update the local peer cache shown by 'espnowdevices' / 'espnowrooms' / 'espnowfind'." },
   
@@ -21750,7 +21777,9 @@ const char* cmd_espnow_backupfingerprint(const String& a) {
 const char* cmd_espnow_sensorreq(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   static const char kUsage[] =
-      "Usage: espnowsensorreq <MAC|name> [via <MAC|name>] <mask> <mode 0=sub|1=unsub|2=oneshot> <intervalMs> <leaseMs>";
+      "Usage: espnowsensorreq <MAC|name> [via <MAC|name>] <sensors> <mode> <intervalMs> <leaseMs>\n"
+      "       sensors: names, comma separated (tof,imu), 'all', or a mask (0x6). "
+      "mode: subscribe|sub|0, unsubscribe|unsub|1, oneshot|once|2.";
   CommandArgs a(argsInput);
   if (!a.hasMinArgs(5)) return kUsage;
   uint8_t mac[6];
@@ -21776,13 +21805,46 @@ const char* cmd_espnow_sensorreq(const String& argsInput) {
   if (a.count() != at + 4) return kUsage;
   V4PayloadSensorReq rq = {};
   rq.reqId      = (uint8_t)(generateMessageId() & 0xFF);
+  // The sensors and the mode in words or as numbers (System_ESPNow_SensorCore.h).
+  uint32_t sensorMask = 0;
   uint8_t mode = 0;
   uint32_t intervalMs = 0;
   uint32_t leaseMs = 0;
-  if (!parseIntArg(a.arg(at + 1), mode) || !parseIntArg(a.arg(at + 2), intervalMs) ||
-      !parseIntArg(a.arg(at + 3), leaseMs)) return kCommandReplyNotANumber;
+  const String sensorsArg = a.arg(at);
+  const String modeArg = a.arg(at + 1);
+  char bad[32];
+  if (!espnowsensor::parseSensorList(sensorsArg.c_str(), sensorMask, bad, sizeof(bad)) ||
+      !espnowsensor::parseRequestMode(modeArg.c_str(), mode) || !parseIntArg(a.arg(at + 2), intervalMs) ||
+      !parseIntArg(a.arg(at + 3), leaseMs)) {
+    if (!ensureDebugBuffer()) return kUsage;
+    char* out = getDebugBuffer();
+    if (!espnowsensor::parseSensorList(sensorsArg.c_str(), sensorMask, bad, sizeof(bad))) {
+      if (!bad[0]) {
+        snprintf(out, GLOBAL_DEBUG_BUFFER_SIZE, "Error: an empty sensor name in '%s' (names, comma separated: tof,imu)",
+                 sensorsArg.c_str());
+      } else if (bad[0] >= '0' && bad[0] <= '9') {
+        snprintf(out, GLOBAL_DEBUG_BUFFER_SIZE, "Error: '%s' is not a sensor mask (1..0x%lX, e.g. 0x6)", bad,
+                 (unsigned long)espnowsensor::kSensorMaskAll);
+      } else {
+        size_t pos = (size_t)snprintf(out, GLOBAL_DEBUG_BUFFER_SIZE, "Error: '%s' is not a sensor (", bad);
+        for (uint8_t i = 0; i < REMOTE_SENSOR_MAX && pos < GLOBAL_DEBUG_BUFFER_SIZE; ++i) {
+          pos += (size_t)snprintf(out + pos, GLOBAL_DEBUG_BUFFER_SIZE - pos, "%s%s", i ? ", " : "",
+                                  espnowsensor::kSensorTable[i].name);
+        }
+        if (pos < GLOBAL_DEBUG_BUFFER_SIZE) snprintf(out + pos, GLOBAL_DEBUG_BUFFER_SIZE - pos, "; or all, or a mask)");
+      }
+    } else if (!espnowsensor::parseRequestMode(modeArg.c_str(), mode)) {
+      snprintf(out, GLOBAL_DEBUG_BUFFER_SIZE,
+               "Error: '%s' is not a mode (subscribe|sub|0, unsubscribe|unsub|1, oneshot|once|2)", modeArg.c_str());
+    } else if (!parseIntArg(a.arg(at + 2), intervalMs)) {
+      snprintf(out, GLOBAL_DEBUG_BUFFER_SIZE, "Error: intervalMs '%s' is not a number", a.arg(at + 2).c_str());
+    } else {
+      snprintf(out, GLOBAL_DEBUG_BUFFER_SIZE, "Error: leaseMs '%s' is not a number", a.arg(at + 3).c_str());
+    }
+    return out;
+  }
   rq.mode       = mode;
-  rq.sensorMask = (uint32_t)strtoul(a.arg(at).c_str(), nullptr, 0);  // accepts 0x.. or decimal
+  rq.sensorMask = sensorMask;
   rq.intervalMs = intervalMs;
   rq.leaseMs    = leaseMs;
   rq.fwdLink    = linkGen;  // 0: for the device itself
@@ -22236,7 +22298,18 @@ void logFileTransferEvent(
   LogMessageType eventType
 ) {
   if (!gEspNow) return;
-  
+
+  // The bond's own sync files (the partner's settings and automation list on
+  // every resync, its manifest): a debug line, no event, no history line.
+  // eventpush would otherwise carry a file_rx event to the mesh master each
+  // time the partner's settings change.
+  if ((eventType == MSG_FILE_RECV_SUCCESS || eventType == MSG_FILE_RECV_FAILED) &&
+      fileRxBondSync(peerMac, filename)) {
+    DEBUG_ESPNOWF("[BOND_SYNC] %s %s from the bond partner", filename ? filename : "?",
+                  eventType == MSG_FILE_RECV_SUCCESS ? "received" : "not received");
+    return;
+  }
+
   char message[128];
   
   switch (eventType) {

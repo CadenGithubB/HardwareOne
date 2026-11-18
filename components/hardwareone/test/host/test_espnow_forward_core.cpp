@@ -616,6 +616,8 @@ static ReqInputs reqAll() {
   in.mask = espnowsensor::sensorBit(REMOTE_SENSOR_TOF);
   in.forwardedMask = kSensorMaskDefault;
   in.partnerOnline = true;
+  in.partnerStatusKnown = true;
+  in.partnerPresent = (uint16_t)espnowsensor::kSensorMaskAll;
   return in;
 }
 
@@ -623,6 +625,46 @@ static void testSensorRequests() {
   // Every row, first match.
   ReqInputs in = reqAll();
   CHECK(sensorReqDecide(in) == ReqVerdict::Apply);
+  // The partner's own sensor list (bench 2026-11-18: ToF was leased at a
+  // worker whose build has none). A sensor it does not list is never leased;
+  // among several, it is left out and the rest applied.
+  {
+    const uint16_t tofBit = (uint16_t)espnowsensor::sensorBit(REMOTE_SENSOR_TOF);
+    const uint16_t imuBit = (uint16_t)espnowsensor::sensorBit(REMOTE_SENSOR_IMU);
+    ReqInputs p = reqAll();
+    p.partnerPresent = imuBit;
+    CHECK(sensorReqDecide(p) == ReqVerdict::PartnerLacksSensor);
+    CHECK(reqLeftOut(p) == tofBit);
+    p.partnerPresent = 0;  // the bench worker: it lists no sensor at all
+    CHECK(sensorReqDecide(p) == ReqVerdict::PartnerLacksSensor);
+    p.partnerPresent = imuBit;
+    p.mask = (uint16_t)(tofBit | imuBit);
+    CHECK(sensorReqDecide(p) == ReqVerdict::Apply && reqApplyMask(p) == imuBit && reqLeftOut(p) == tofBit);
+    p.mode = kReqOneshot;
+    CHECK(sensorReqDecide(p) == ReqVerdict::Apply && reqApplyMask(p) == imuBit && reqLeftOut(p) == tofBit);
+    // Input asked for but not forwarded: neither applied nor "lacking".
+    p.mask = (uint16_t)(imuBit | espnowsensor::sensorBit(REMOTE_SENSOR_INPUT));
+    p.partnerPresent = 0;
+    CHECK(sensorReqDecide(p) == ReqVerdict::PartnerLacksSensor && reqLeftOut(p) == imuBit);
+    // Before the partner sent its list: refused, nothing guessed.
+    p = reqAll();
+    p.partnerStatusKnown = false;
+    p.partnerPresent = 0;
+    CHECK(sensorReqDecide(p) == ReqVerdict::PartnerStatusUnknown && reqLeftOut(p) == 0);
+    // An unsubscribe needs no list: it ends whatever it names.
+    p.mode = kReqUnsubscribe;
+    p.mask = (uint16_t)(tofBit | imuBit);
+    CHECK(sensorReqDecide(p) == ReqVerdict::Apply && reqApplyMask(p) == (tofBit | imuBit) && reqLeftOut(p) == 0);
+    p.partnerStatusKnown = true;
+    CHECK(sensorReqDecide(p) == ReqVerdict::Apply && reqApplyMask(p) == (tofBit | imuBit) && reqLeftOut(p) == 0);
+    // An offline partner is said first (its list may be old).
+    p = reqAll();
+    p.partnerOnline = false;
+    p.partnerStatusKnown = false;
+    CHECK(sensorReqDecide(p) == ReqVerdict::PartnerOffline);
+    CHECK(is(reqVerdictKey(ReqVerdict::PartnerLacksSensor), "partner_lacks_sensor") &&
+          is(reqVerdictKey(ReqVerdict::PartnerStatusUnknown), "partner_status_unknown"));
+  }
   in.partnerOnline = false;
   CHECK(sensorReqDecide(in) == ReqVerdict::PartnerOffline);
   in.mask = espnowsensor::sensorBit(REMOTE_SENSOR_INPUT);  // not forwarded by default

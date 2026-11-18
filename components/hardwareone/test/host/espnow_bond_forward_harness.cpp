@@ -357,6 +357,10 @@ static void upAndAccepted() {
   answer(kHub, espnowfwd::kOpAnnounce, espnowfwd::kResultAccepted, 1);
   answer(kSpare, espnowfwd::kOpAnnounce, espnowfwd::kResultAccepted, 1, kPorch,
          espnowfwd::kStreamBattery | espnowfwd::kStreamEvents, 0);
+  // The partner's sensor list: every sensor there, none streaming.
+  espnowfwd::StatusFrame st{};
+  st.presentMask = espnowsensor::kSensorMaskAll;
+  bondForwardStatus(kPorch, st);
   gSent.clear();
 }
 
@@ -820,6 +824,9 @@ static void testReviewCases() {
   sBf.req.applied = sBf.req.refused = 0xFFFFFFFFu;
   sBf.req.lastRefused = (uint8_t)espnowfwd::ReqVerdict::NotBondMaster;
   sBf.req.leases.leased = (uint16_t)espnowsensor::kSensorMaskAll;
+  for (auto& n : sBf.req.refusedBy) n = 0xFFFFFFFFu;
+  sBf.req.lacking = 0xFFFFFFFFu;
+  sBf.req.lastLacking = (uint16_t)espnowsensor::kSensorMaskAll;
   gLongNames = true;
   char lines[espnowfwd::kStatusLinesCap];
   bondForwardStatusLines(lines, sizeof(lines));
@@ -829,7 +836,7 @@ static void testReviewCases() {
     split.emplace_back(p, nl ? (size_t)(nl - p) : std::strlen(p));
     p = nl ? nl + 1 : p + std::strlen(p);
   }
-  bool fit = split.size() == 4;
+  bool fit = split.size() == 5;
   size_t longest = 0;
   for (const auto& l : split) {
     fit = fit && l.size() <= espnowfwd::kStatusLineMax && !l.empty() && l.back() != ' ';
@@ -840,13 +847,18 @@ static void testReviewCases() {
             split[2].back() == '.' &&
             split[3] == "  Sensor requests for the partner: 4294967295 applied, 4294967295 refused "
                         "(last: only a bond master with a paired partner takes requests for it); leased now: thermal, "
-                        "tof, imu, gps, input, fmradio, camera, microphone, rtc, presence, apds.",
+                        "tof, imu, gps, input, fmradio, camera, microphone, rtc, presence, apds." &&
+            split[4] == "  Sensors the partner does not have running, asked for 4294967295 times (last: thermal, tof, "
+                        "imu, gps, input, fmradio, camera, microphone, rtc, presence, apds): never leased; 4294967295 "
+                        "requests came before its sensor list was known.",
         std::string("every bondstatus line is whole and fits one console message: ") + lines);
   char json[espnowfwd::kStatusJsonCap];
   const size_t len = bondForwardStatusJson(json, sizeof(json));
   check(len > 0 && len < sizeof(json) && has(json, "\"answersIgnored\":4294967295,") && has(json, "\\\"long-device") &&
             has(json, "\"sensorRequests\":{\"applied\":4294967295,\"refused\":4294967295,\"lastRefused\":\"not_bond_master\","
-                      "\"leased\":[\"thermal\",") && has(json, "\"apds\"]}}"),
+                      "\"refusedBy\":{\"off\":4294967295,") &&
+            has(json, "\"partner_lacks_sensor\":4294967295},\"partnerLacks\":{\"count\":4294967295,\"last\":[\"thermal\",") &&
+            has(json, "\"leased\":[\"thermal\",") && has(json, "\"apds\"]}}"),
         "the longest forward object fits espnowfwd::kStatusJsonCap (" + std::to_string(len) + " bytes)");
   std::printf("longest forward object: %zu of %zu bytes; longest bondstatus line: %zu of %zu\n", len, sizeof(json),
               longest, espnowfwd::kStatusLineMax);
@@ -1064,7 +1076,9 @@ static void testStatusAndRequests() {
   request(kSpare, espnowfwd::kReqSubscribe, tof, 60000);
   char json[espnowfwd::kStatusJsonCap];
   check(bondForwardStatusJson(json, sizeof(json)) > 0 &&
-        has(json, "\"sensorRequests\":{\"applied\":1,\"refused\":1,\"lastRefused\":\"not_primary_master\",\"leased\":[\"tof\"]}}"),
+        has(json, "\"sensorRequests\":{\"applied\":1,\"refused\":1,\"lastRefused\":\"not_primary_master\","
+                  "\"refusedBy\":{\"not_primary_master\":1},\"partnerLacks\":{\"count\":0,\"last\":[]},"
+                  "\"leased\":[\"tof\"]}}"),
         std::string("the JSON: ") + json);
   char lines[espnowfwd::kStatusLinesCap];
   bondForwardStatusLines(lines, sizeof(lines));
@@ -1180,6 +1194,102 @@ static void testLeaseReview() {
         "bondforward waits for the backup in the primary mesh, not the master in another mesh: " + describe(""));
 }
 
+// Bench 2026-11-18: a forwarded request leased ToF at a worker whose build
+// has none. The partner's own sensor list decides: a sensor it does not list
+// is never leased, counted as partner_lacks_sensor; before the list came
+// nothing is guessed (partner_status_unknown).
+static void testPartnerSensorList() {
+  const uint32_t tof = espnowsensor::sensorBit(REMOTE_SENSOR_TOF);
+  const uint32_t imu = espnowsensor::sensorBit(REMOTE_SENSOR_IMU);
+  // No list from the partner yet.
+  resetAll();
+  gSetting = true;
+  run(1);
+  answer(kHub, espnowfwd::kOpAnnounce, espnowfwd::kResultAccepted, 1);
+  gCtrl.clear();
+  gConsole.clear();
+  request(kHub, espnowfwd::kReqSubscribe, tof, 30000);
+  check(gCtrl.empty() && sBf.req.leases.leased == 0 && sBf.req.refused == 1 &&
+            sBf.req.lastRefused == (uint8_t)espnowfwd::ReqVerdict::PartnerStatusUnknown &&
+            sBf.req.refusedBy[(size_t)espnowfwd::ReqVerdict::PartnerStatusUnknown] == 1,
+        "no sensor list from the partner yet: refused, nothing switched");
+  check(gConsole.size() == 1 &&
+            has(gConsole[0], "Sensor request from hub for the bond partner refused: the partner has not said yet which "
+                             "sensors it has (0 more in the last minute)"),
+        "said on the console: " + (gConsole.empty() ? std::string() : gConsole[0]));
+  // The bench worker: it lists no sensor at all.
+  espnowfwd::StatusFrame st{};
+  bondForwardStatus(kPorch, st);
+  gConsole.clear();
+  gNowMs += 61000;  // a new minute for the console line
+  request(kHub, espnowfwd::kReqSubscribe, tof, 30000);
+  check(gCtrl.empty() && sBf.req.leases.leased == 0 &&
+            sBf.req.lastRefused == (uint8_t)espnowfwd::ReqVerdict::PartnerLacksSensor &&
+            sBf.req.refusedBy[(size_t)espnowfwd::ReqVerdict::PartnerLacksSensor] == 1 && sBf.req.lacking == 1 &&
+            sBf.req.lastLacking == tof && sBf.req.applied == 0,
+        "the partner lists no ToF: refused partner_lacks_sensor, no lease");
+  check(gConsole.size() == 1 &&
+            has(gConsole[0], "refused: the partner does not have that sensor running (tof) (0 more in the last minute)"),
+        "the console names the sensor: " + (gConsole.empty() ? std::string() : gConsole[0]));
+  // The partner has IMU only: of ToF and IMU, IMU is leased, ToF left out.
+  st.presentMask = imu;
+  bondForwardStatus(kPorch, st);
+  gConsole.clear();
+  request(kHub, espnowfwd::kReqSubscribe, tof | imu, 30000);
+  check(ctrlCount(REMOTE_SENSOR_IMU, true) == 1 && ctrlCount(REMOTE_SENSOR_TOF, true) == 0 &&
+            sBf.req.leases.leased == imu && sBf.req.applied == 1 && sBf.req.lacking == 2 && sBf.req.lastLacking == tof,
+        "IMU leased, ToF left out and counted");
+  check(gConsole.size() == 1 &&
+            has(gConsole[0], "Sensor request from hub for the bond partner: tof left out: the partner does not have that "
+                             "sensor running (0 more in the last minute)"),
+        "the left-out sensor is said: " + (gConsole.empty() ? std::string() : gConsole[0]));
+  // An unsubscribe needs no list.
+  request(kHub, espnowfwd::kReqUnsubscribe, tof | imu, 0);
+  check(ctrlCount(REMOTE_SENSOR_IMU, false) == 1 && sBf.req.leases.leased == 0 && sBf.req.lacking == 2,
+        "unsubscribe: IMU off, nothing counted as lacking");
+  // bondstatus, bondforward and the JSON say it.
+  char lines[espnowfwd::kStatusLinesCap];
+  bondForwardStatusLines(lines, sizeof(lines));
+  check(has(lines, "\n  Sensor requests for the partner: 2 applied, 2 refused (last: the partner does not have that "
+                   "sensor running); leased now: none.\n  Sensors the partner does not have running, asked for 2 times "
+                   "(last: tof): never leased; 1 requests came before its sensor list was known."),
+        std::string("bondstatus: ") + lines);
+  const std::string fwd = describe("");
+  check(fwd.rfind("OK: forwarding is on", 0) == 0 && has(fwd, ".\n  Sensor requests for the partner: 2 applied, 2 refused") &&
+            has(fwd, "\n  Sensors the partner does not have running, asked for 2 times (last: tof)"),
+        "bondforward: " + fwd);
+  char json[espnowfwd::kStatusJsonCap];
+  check(bondForwardStatusJson(json, sizeof(json)) > 0 &&
+            has(json, "\"refusedBy\":{\"partner_status_unknown\":1,\"partner_lacks_sensor\":1},"
+                      "\"partnerLacks\":{\"count\":2,\"last\":[\"tof\"]}"),
+        std::string("the JSON: ") + json);
+  // The partner starts its ToF later and says so (its next list): the next
+  // request for it is leased; nothing of the earlier refusals sticks.
+  st.presentMask = tof | imu;
+  bondForwardStatus(kPorch, st);
+  gCtrl.clear();
+  request(kHub, espnowfwd::kReqSubscribe, tof, 30000);
+  check(ctrlCount(REMOTE_SENSOR_TOF, true) == 1 && sBf.req.leases.leased == tof && sBf.req.applied == 3 &&
+            sBf.req.lacking == 2,
+        "a sensor the partner lists later is leased");
+  // ... and stops it again: the next request is refused once more.
+  request(kHub, espnowfwd::kReqUnsubscribe, tof, 0);
+  st.presentMask = imu;
+  bondForwardStatus(kPorch, st);
+  gCtrl.clear();
+  request(kHub, espnowfwd::kReqSubscribe, tof, 30000);
+  check(gCtrl.empty() && sBf.req.leases.leased == 0 && sBf.req.lacking == 3 &&
+            sBf.req.lastRefused == (uint8_t)espnowfwd::ReqVerdict::PartnerLacksSensor,
+        "and one it no longer lists is refused again");
+  // A list from another device (not the partner) is not the partner's.
+  static const uint8_t kStranger[6] = { 0x02, 0x99, 0, 0, 0, 1 };
+  st.presentMask = tof | imu;
+  bondForwardStatus(kStranger, st);
+  request(kHub, espnowfwd::kReqSubscribe, tof, 30000);
+  check(gCtrl.empty() && sBf.req.lastRefused == (uint8_t)espnowfwd::ReqVerdict::PartnerStatusUnknown,
+        "a list from another device does not count as the partner's");
+}
+
 int main() {
   testOffAndReasons();
   testAnnounceAndForward();
@@ -1188,6 +1298,7 @@ int main() {
   testPrimaryMesh();
   testStatusAndRequests();
   testLeaseReview();
+  testPartnerSensorList();
   check(gLockViolations == 0, "nothing that may block, print or send ran under the lock");
   check(gLockDepth == 0, "every lock was released");
   if (failures != 0) {

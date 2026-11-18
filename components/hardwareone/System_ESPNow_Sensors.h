@@ -188,6 +188,12 @@ void espnowApplySensorSubscription(uint8_t mode, uint32_t sensorMask,
                                    uint32_t intervalMs, uint32_t leaseMs,
                                    const uint8_t* controllerMac);
 
+// Before that apply (block 9f3): a subscribe or one-shot keeps only the
+// sensors this device has running (what its SENSOR_STATUS lists,
+// espnowsensor::sensorReqSplit). The others are counted per sensor
+// (espnowsensorstatus) and said once a minute. Returns the mask to apply.
+uint32_t espnowSensorReqKeepPresent(uint8_t mode, uint32_t sensorMask, const uint8_t* controllerMac);
+
 // Get remote sensor data for web API (via nullptr: the device's own record).
 String getRemoteSensorDataJson(const uint8_t* deviceMac, const uint8_t* via, RemoteSensorType sensorType);
 

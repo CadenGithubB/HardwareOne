@@ -669,6 +669,28 @@ def rule_failures(component: Path) -> list[str]:
     expect("var clearWhenEmpty = { espnowmasterfingerprint: true, espnowbackupfingerprint: true };" in page and
            "if (clearWhenEmpty[cmd] && String(v).trim() === '') v = 'clear';" in page,
            "the web settings page sends an emptied fingerprint field as 'clear'")
+
+    # A master's request leases only the sensors this device has running (bench
+    # 2026-11-18): the same list its SENSOR_STATUS sends, before the apply, the
+    # kept mask staged back for a retried apply.
+    keep = strip_comments(definition(sensors, "uint32_t espnowSensorReqKeepPresent(uint8_t mode, uint32_t sensorMask, "
+                                              "const uint8_t* controllerMac)"))
+    expect("espnowsensor::sensorReqSplit(mode, sensorMask, sensorPresentMask())" in keep and
+           "gSensorTxStats[i].reqLacking++" in keep and "warnLimiterTake(" in keep,
+           "espnowSensorReqKeepPresent splits the request by the sensors present, counts and says what it left out")
+    expect(keep.count("return ") == 2 and keep.count("return split.apply;") == 2 and
+           "if (split.lacking & espnowsensor::sensorBit((uint8_t)i))" in keep,
+           "espnowSensorReqKeepPresent returns only the kept sensors (split.apply), on both ways out, and counts "
+           "only those left out")
+    announce = strip_comments(extract_block(sensors, "static void announceSensorStatus(const uint8_t* alsoTo = nullptr)"))
+    expect("sensorPresentMask(&streamingMask)" in announce and "gTofConnected" not in announce,
+           "the status frame lists the sensors from the same sensorPresentMask")
+    pending = espnow.index("if (gEspNow->meshSensorReqPending) {")
+    step = strip_comments(extract_block(espnow[pending:], "if (gEspNow->meshSensorReqPending)"))
+    expect("gEspNow->meshSensorReqMask = espnowSensorReqKeepPresent(" in step and
+           0 <= step.find("espnowSensorReqKeepPresent(") < step.find("espnowApplySensorSubscription(") and
+           "if (gEspNow->meshSensorReqMask || gEspNow->meshSensorReqMode == SENSOR_REQ_UNSUBSCRIBE)" in step,
+           "step 9f3 keeps only the present sensors before the apply, and applies nothing when none is left")
     return failures
 
 

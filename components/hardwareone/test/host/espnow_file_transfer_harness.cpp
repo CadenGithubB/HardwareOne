@@ -1067,6 +1067,23 @@ static void testCallersSayThereIsNoSession() {
   check(air.size() == 1 && air[0].type == ESPNOW_V4_TYPE_TEXT, "espnowsend (one frame): delivered when the session opens");
 }
 
+// Bench 2026-11-18: the bond's own sync files (the partner's settings and
+// automation list on every resync, its manifest) raised a file_rx event each
+// time; eventpush flooded the mesh master's event list with them. Only these
+// names, only from the bond partner, only with bond mode on.
+static void testBondSyncFilesAreQuiet() {
+  for (const char* name : {"_settings_out.json", "_manifest_out.json", "_schema_out.json", "automations.json"}) {
+    check(fileRxIsBondSync(true, true, name), "a bond sync file from the partner is quiet");
+    check(!fileRxIsBondSync(true, false, name), "the same name from another device is a received file");
+    check(!fileRxIsBondSync(false, true, name), "with bond mode off it is a received file");
+  }
+  for (const char* name : {"notes.txt", "settings_out.json", "_settings_out.json.bak", "automations.jsonx",
+                           "Automations.json", "", "a/_settings_out.json"}) {
+    check(!fileRxIsBondSync(true, true, name), "a file a person sends from the partner raises its event");
+  }
+  check(!fileRxIsBondSync(true, true, nullptr), "no name: not quiet");
+}
+
 int main(int argc, char** argv) {
   // With a case name, only that case runs (a case that leaves a slot behind on
   // a broken tree would otherwise blur the ones after it).
@@ -1087,6 +1104,7 @@ int main(int argc, char** argv) {
     {"send-without-session", testSendWithoutSessionIsRefused},
     {"session-lost", testSessionLostMidTransfer},
     {"callers", testCallersSayThereIsNoSession},
+    {"bond-sync-quiet", testBondSyncFilesAreQuiet},
   };
   check(fileSlotsInit(), "slot table initialised");
   liveAllocations = 0;  // count transfer buffers only, not the table

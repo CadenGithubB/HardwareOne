@@ -112,6 +112,19 @@ def check_sources(component: Path) -> None:
     require(sensorreq.index("resolveDeviceNameOrMac(a.arg(0), mac)") <
             sensorreq.index("espnowForwardRequestTarget(a.arg(0).c_str(), nullptr"),
             "a device paired here is asked directly; a forwarded partner only when no paired device has that name")
+    # Bench 2026-11-18: the sensors and the mode in words too, by the rules of
+    # the core (parseSensorList, parseRequestMode); every bad token is named.
+    require("espnowsensor::parseSensorList(sensorsArg.c_str(), sensorMask, bad, sizeof(bad))" in sensorreq and
+            "espnowsensor::parseRequestMode(modeArg.c_str(), mode)" in sensorreq and
+            "rq.sensorMask = sensorMask;" in sensorreq and "strtoul(" not in sensorreq and
+            "kCommandReplyNotANumber" not in sensorreq,
+            "espnowsensorreq takes sensor names, 'all' or a mask, and the mode as a word or a number")
+    for text in ("is not a sensor (", "is not a sensor mask (", "an empty sensor name in", "is not a mode (subscribe|sub|0",
+                 "Error: intervalMs '%s' is not a number", "Error: leaseMs '%s' is not a number"):
+        require(text in sensorreq, f"espnowsensorreq names the bad token ({text})")
+    usage = "Usage: espnowsensorreq <MAC|name> [via <MAC|name>] <sensors> <mode> <intervalMs> <leaseMs>"
+    require(espnow.count(usage) == 2 and "mode: subscribe|sub|0, unsubscribe|unsub|1, oneshot|once|2." in sensorreq,
+            "the usage (command and registry row) names the words")
     cmake = (component / "CMakeLists.txt").read_text()
     require("System_ESPNow_ForwardRx.cpp" in cmake and "System_ESPNow_BondForward.cpp" in cmake,
             "the new sources are in the component's build list")

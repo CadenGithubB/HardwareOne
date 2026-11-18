@@ -102,6 +102,105 @@ inline size_t sensorMaskNames(uint32_t mask, bool longForm, char* out, size_t ca
 }
 
 // ---------------------------------------------------------------------------
+// The words of 'espnowsensorreq' (System_ESPNow.cpp). The sensors: names of
+// the table above, comma separated, any case ("tof,imu"), "all", or a mask
+// as a number ("0x6", "6"; 1..kSensorMaskAll). False for a bad list;
+// `bad`/`badCap` then hold the token that is wrong (a name, the number, or
+// "" for an empty name in the list), and `mask` is left alone.
+// ---------------------------------------------------------------------------
+inline bool sensorWordEquals(const char* a, size_t len, const char* b) {
+  if (strlen(b) != len) return false;
+  for (size_t i = 0; i < len; ++i) {
+    char x = a[i], y = b[i];
+    if (x >= 'A' && x <= 'Z') x = (char)(x - 'A' + 'a');
+    if (y >= 'A' && y <= 'Z') y = (char)(y - 'A' + 'a');
+    if (x != y) return false;
+  }
+  return true;
+}
+
+inline void sensorWordCopy(const char* from, size_t len, char* out, size_t cap) {
+  if (!out || cap == 0) return;
+  const size_t n = len < cap - 1 ? len : cap - 1;
+  memcpy(out, from, n);
+  out[n] = '\0';
+}
+
+inline bool parseSensorList(const char* text, uint32_t& mask, char* bad, size_t badCap) {
+  if (bad && badCap) bad[0] = '\0';
+  if (!text) return false;
+  const size_t len = strlen(text);
+  if (len > 0 && text[0] >= '0' && text[0] <= '9') {
+    // A number: decimal or 0x hex, the whole word, 1..kSensorMaskAll.
+    uint32_t v = 0;
+    size_t i = 0;
+    bool hex = len > 2 && text[0] == '0' && (text[1] == 'x' || text[1] == 'X');
+    if (hex) i = 2;
+    bool ok = i < len;
+    for (; ok && i < len; ++i) {
+      const char c = text[i];
+      uint32_t d;
+      if (c >= '0' && c <= '9') d = (uint32_t)(c - '0');
+      else if (hex && c >= 'a' && c <= 'f') d = (uint32_t)(c - 'a' + 10);
+      else if (hex && c >= 'A' && c <= 'F') d = (uint32_t)(c - 'A' + 10);
+      else { ok = false; break; }
+      v = v * (hex ? 16u : 10u) + d;
+      if (v > kSensorMaskAll) ok = false;
+    }
+    if (!ok || v == 0) {
+      sensorWordCopy(text, len, bad, badCap);
+      return false;
+    }
+    mask = v;
+    return true;
+  }
+  if (sensorWordEquals(text, len, "all")) {
+    mask = kSensorMaskAll;
+    return true;
+  }
+  uint32_t m = 0;
+  const char* p = text;
+  for (;;) {
+    const char* comma = strchr(p, ',');
+    const size_t n = comma ? (size_t)(comma - p) : strlen(p);
+    bool found = false;
+    for (uint8_t id = 0; id < REMOTE_SENSOR_MAX && n > 0; ++id) {
+      if (sensorWordEquals(p, n, kSensorTable[id].name)) {
+        m |= sensorBit(id);
+        found = true;
+        break;
+      }
+    }
+    if (!found) {
+      sensorWordCopy(p, n, bad, badCap);
+      return false;
+    }
+    if (!comma) break;
+    p = comma + 1;
+  }
+  mask = m;
+  return true;
+}
+
+// The request's mode: subscribe|sub|0, unsubscribe|unsub|1, oneshot|once|2
+// (any case). False for anything else; `mode` is then left alone.
+inline bool parseRequestMode(const char* text, uint8_t& mode) {
+  if (!text) return false;
+  static const struct { const char* word; uint8_t mode; } kWords[] = {
+    { "subscribe", 0 }, { "sub", 0 }, { "0", 0 },
+    { "unsubscribe", 1 }, { "unsub", 1 }, { "1", 1 },
+    { "oneshot", 2 }, { "once", 2 }, { "2", 2 },
+  };
+  for (const auto& w : kWords) {
+    if (sensorWordEquals(text, strlen(text), w.word)) {
+      mode = w.mode;
+      return true;
+    }
+  }
+  return false;
+}
+
+// ---------------------------------------------------------------------------
 // How long ago a millis() stamp was. A task loop reads the uptime once and
 // hands it to its steps, so a stamp another task took after that read is a
 // little ahead of `nowMs`: such a stamp (up to a minute ahead) is 0 ms old,
@@ -798,6 +897,23 @@ inline TargetChoice readingTarget(const TargetInputs& in) {
 // stream it started. A stream that was switched on by hand goes on without
 // the lease, to the named master.
 constexpr bool streamSurvivesLeaseEnd(bool byHand) { return byHand; }
+
+// A master's SENSOR_REQ on this device (the worker): a subscribe or one-shot
+// leases only the sensors this device has running, the ones its
+// SENSOR_STATUS lists (`present`). The others are left out (`lacking`),
+// counted and said, as a bond master leaves out what its partner lacks
+// (partner_lacks_sensor, System_ESPNow_ForwardCore.h): a lease on a sensor
+// that is not there streams nothing and would say it does. An unsubscribe
+// ends whatever it names. Modes 0 subscribe, 1 unsubscribe, 2 one-shot; an
+// unknown mode is passed on whole (the apply refuses it).
+struct ReqSplit {
+  uint32_t apply;
+  uint32_t lacking;
+};
+constexpr ReqSplit sensorReqSplit(uint8_t mode, uint32_t mask, uint32_t present) {
+  return (mode == 0 || mode == 2) ? ReqSplit{ mask & present & kSensorMaskAll, mask & ~present & kSensorMaskAll }
+                                  : ReqSplit{ mask, 0u };
+}
 
 // ---------------------------------------------------------------------------
 // The masters named on this device: espnowmasterfingerprint and

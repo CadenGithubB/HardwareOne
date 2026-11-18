@@ -85,8 +85,11 @@ static struct {
 } gSettings;
 
 enum { DEBUG_MEMORY, SYSEVT_SENSOR_STARTED, SYSEVT_SENSOR_START_FAILED, SYSEVT_SENSOR_STOPPED };
+// Numbered as the I2C device types here, so a notice names its device. RTC
+// and presence are remote types too (their start/stop is told, the APDS's not).
 enum { REMOTE_SENSOR_THERMAL, REMOTE_SENSOR_TOF, REMOTE_SENSOR_IMU,
-       REMOTE_SENSOR_INPUT, REMOTE_SENSOR_GPS, REMOTE_SENSOR_FMRADIO };
+       REMOTE_SENSOR_INPUT, REMOTE_SENSOR_GPS, REMOTE_SENSOR_FMRADIO,
+       REMOTE_SENSOR_RTC = 7, REMOTE_SENSOR_PRESENCE = 8 };
 static std::vector<std::string> statuses, broadcasts, logs;
 static std::vector<std::pair<int, std::string>> events;
 static std::vector<std::pair<int, bool>> meshStatuses;
@@ -286,7 +289,7 @@ static void workerOutcomeCases() {
     assert(eventCount(SYSEVT_SENSOR_STARTED) == 1 && eventCount(SYSEVT_SENSOR_START_FAILED) == 0);
     assert(pauseCalls == 1 && pauseDepth == 1 && graceResets.size() == 1);
 #if ENABLE_ESPNOW
-    assert(meshStatuses.size() == static_cast<size_t>(index <= I2C_DEVICE_FMRADIO));
+    assert(meshStatuses.size() == static_cast<size_t>(sensor != I2C_DEVICE_APDS));
     if (!meshStatuses.empty()) assert(meshStatuses[0].first == index && meshStatuses[0].second);
 #else
     assert(meshStatuses.empty());
@@ -364,6 +367,11 @@ static void cleanupCases() {
     assert(enqueueDeviceStart(sensor)); f.worker();
     assert(events.size() == 2 && events[0].first == SYSEVT_SENSOR_STOPPED && events[1].first == SYSEVT_SENSOR_STARTED);
     assert(starts[sensor] == 1 && !sSensorStopAwaitingCleanup[sensor]);
+#if ENABLE_ESPNOW
+    // The stop and the new start are both told, for every remote type.
+    if (sensor == I2C_DEVICE_APDS) assert(meshStatuses.empty());
+    else assert((meshStatuses == std::vector<std::pair<int, bool>>{{index, false}, {index, true}}));
+#endif
   }
   // The bus-running flag is fixed at boot. With the bus disabled a stop is
   // refused like a start: nothing is queued and no manager is allocated.
