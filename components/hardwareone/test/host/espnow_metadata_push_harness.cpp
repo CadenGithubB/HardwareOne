@@ -1,6 +1,6 @@
 // Host harness for the ESP-NOW metadata push (test_espnow_metadata_push.py).
 // The runner compiles the production metadata setters (metaGetSet,
-// cmd_espnow_stationary, cmd_espnow_setname), the payload builder, the
+// cmd_espnow_stationary, espnowDeviceNameApplied), the payload builder, the
 // encrypted sender and the push tick beside these doubles; the session table,
 // identity subscriptions, the encrypted transport, settings and the clock are
 // the boundaries. A failed CHECK is reported and the run continues, so one run
@@ -13,6 +13,7 @@
 #include <vector>
 #include <Arduino.h>  // test/host/web_batch_stubs String (shared, read-only)
 #include "System_CommandReply.h"  // the shared on/off refusal
+#include "System_DeviceName.h"    // devicename::putField (buildMetadataPayload)
 void webBatchTestStringAppend() {}
 
 static unsigned checks = 0, failures = 0;
@@ -78,7 +79,7 @@ struct EspNowState {
   bool initialized = true;
   int deviceCount = 0;
   EspNowDevice devices[4];
-  String deviceName;  // read by 'espnowsetname clear' (run by test_espnow_mesh_slots.py)
+  String deviceName;  // the device name ('devicename')
 };
 static EspNowState state;
 static EspNowState* gEspNow = &state;
@@ -117,13 +118,36 @@ bool peerIdentityWantsEvent(const uint8_t mac[6], uint32_t category) {
   return true;
 }
 
-// Transport double: records every encrypted send.
-struct Sent { uint8_t dst[6]; uint8_t type; V4PayloadMetadata payload; };
+// Transport double: records every encrypted send. A peer whose last MAC byte
+// is kRoutedPeer is reached through a relay: 146 bytes a frame, and the single
+// sealed-frame path refuses more (as v4_relay_wrap_and_send does on a device);
+// v4_send_payload_smart splits it.
+struct Sent { uint8_t dst[6]; uint8_t type; V4PayloadMetadata payload; bool split; };
 static std::vector<Sent> sent;
 static bool sendFails = false;
+static const uint8_t kRoutedPeer = 0x99;
+static unsigned relayRefused = 0;
+uint16_t v4_single_frame_cap(const uint8_t* dst) { return dst[5] == kRoutedPeer ? 146 : 202; }
+bool v4_send_payload_smart(const uint8_t* dst, uint8_t type, uint16_t, uint32_t,
+                           const uint8_t* plaintext, uint16_t len, uint8_t) {
+  if (sendFails) return false;
+  CHECK(len == sizeof(V4PayloadMetadata));
+  Sent s;
+  std::memset(&s, 0, sizeof s);
+  std::memcpy(s.dst, dst, 6);
+  s.type = type;
+  s.split = len > v4_single_frame_cap(dst);
+  std::memcpy(&s.payload, plaintext, len < sizeof s.payload ? len : sizeof s.payload);
+  sent.push_back(s);
+  return true;
+}
 bool v4_send_encrypted_or_queue(const uint8_t dst[6], uint8_t type, uint16_t, uint32_t,
                                 const uint8_t* plaintext, uint16_t len, uint8_t,
                                 char* outStatus, size_t outLen) {
+  if (len > v4_single_frame_cap(dst)) {  // the relay wrap refuses an oversized sealed frame
+    ++relayRefused;
+    return true;                           // queued as far as the caller can tell, never delivered
+  }
   if (sendFails) {
     if (outStatus && outLen) std::snprintf(outStatus, outLen, "4 messages already wait for this device's session");
     return false;
@@ -244,10 +268,12 @@ int main() {
   CHECK(std::strcmp(cmd_espnow_stationary(String("off")), "Stationary set to: false") == 0);
   CHECK(!gSettings.espnowStationary && gMetadataChanged);
 
-  reset("P6 espnowsetname marks metadata dirty");
+  reset("P6 a new device name marks metadata dirty");
   addSession(0x11, SESSION_ACTIVE);
-  CHECK(std::strcmp(cmd_espnow_setname(String("bench-2")), "Device name set to: bench-2") == 0);
-  CHECK(gSettings.espnowDeviceName == String("bench-2") && state.deviceCount == 1);
+  // 'devicename' (System_DeviceName.cpp) stores the name, then hands it to ESP-NOW.
+  gSettings.espnowDeviceName = String("bench-2");
+  espnowDeviceNameApplied(String("bench-2"));
+  CHECK(state.deviceCount == 1);
   CHECK(gMetadataChanged);
   CHECK(settleAndTick() == 1 && std::strcmp(sentAt(0).payload.deviceName, "bench-2") == 0);
 
@@ -287,6 +313,18 @@ int main() {
     CHECK(sent.size() == 2 && sentAt(0).type == ESPNOW_V4_TYPE_METADATA_RESP && pushes() == 0);
     sendMetadata(peer, false, false);                              // debounced
     CHECK(sent.size() == 2);
+  }
+
+  reset("P10b METADATA to a peer behind a relay is split, not sent as one unroutable frame");
+  {
+    const uint8_t routed[6] = {0x02, 0, 0, 0, 0, kRoutedPeer};
+    relayRefused = 0;
+    sendMetadata(routed, false, true);
+    CHECK(relayRefused == 0);
+    CHECK(sent.size() == 1 && sentAt(0).type == ESPNOW_V4_TYPE_METADATA_RESP && sentAt(0).split);
+    addSession(kRoutedPeer, SESSION_ACTIVE);
+    metaGetSet(String("Shed"), gSettings.espnowRoom, "Room", 31);
+    CHECK(settleAndTick() == 1 && relayRefused == 0 && pushes() == 1 && sent.back().split);
   }
 
   reset("P11 a clear is pushed; a rejected value is not");

@@ -17,8 +17,8 @@ compiled with the production rules header System_ESPNow_SensorCore.h. The
 radio queue of the harness hands every part the sender produces to the
 receiver. Checked:
 
-  * a reading of up to 472 bytes arrives whole, in 1 to 3 frames direct and up
-    to 4 through a relay, every frame within its budget; 473 bytes are not
+  * a reading of up to 536 bytes arrives whole, in 1 to 3 frames direct and up
+    to 4 through a relay, every frame within its budget; 537 bytes are not
     sent, with the reason counted, and the receiver sees the gap;
   * the receiver stamps a reading with its own UTC epoch (0, null in JSON,
     while its clock is not set) and its uptime, and says how its clock was set;

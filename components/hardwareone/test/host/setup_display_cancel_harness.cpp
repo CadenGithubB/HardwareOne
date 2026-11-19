@@ -1,4 +1,5 @@
 #include <algorithm>
+#include "System_DeviceName.h"  // the device-name rule (oledAskDeviceName)
 #include <cassert>
 #include <cctype>
 #include <cstdint>
@@ -188,6 +189,11 @@ static const char* paintAfterTransition() {
   return sWizard.subMode == WizardSubMode::PAGE_DEVICE_NAME ? "Device Name [fixture]: " : "";
 }
 static char* getWizardDeviceNameBuf() { return deviceName; }
+// The wizard's checked name setter (System_SetupWizard.cpp; the rule is System_DeviceName.h).
+[[maybe_unused]] static const char* wizardSetDeviceName(const char* typed) {
+  std::snprintf(getWizardDeviceNameBuf(), 21, "%s", typed);
+  return nullptr;
+}
 static const char* getWizardDeviceName() { return deviceName; }
 static int getWizardCurrentSelection() { return currentSelection; }
 static SetupWizardPage getWizardCurrentPage() { return currentPage; }

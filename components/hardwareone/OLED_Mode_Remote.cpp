@@ -49,7 +49,7 @@ static const int BOND_MENU_ITEMS = 3;
 struct BondSensorDef {
   const char* name;
   const char* id;       // CLI command suffix (e.g. "thermal" for open/close)
-  uint16_t mask;         // CAP_SENSOR_* bit mask
+  uint32_t mask;         // CAP_SENSOR_* bit mask (32 bits, as on the wire)
   bool* streamSetting;   // Pointer to gSettings.bondStream* field
 };
 
@@ -72,7 +72,7 @@ static const int BOND_SENSOR_DEF_COUNT = sizeof(bondSensorDefs) / sizeof(bondSen
 static int getVisibleSensors(int* indices, int maxCount) {
   int count = 0;
   if (!gEspNow || !gEspNow->lastRemoteCapValid) return 0;
-  uint16_t remoteMask = gEspNow->lastRemoteCap.sensorMask;
+  uint32_t remoteMask = gEspNow->lastRemoteCap.sensorMask;
   for (int i = 0; i < BOND_SENSOR_DEF_COUNT && count < maxCount; i++) {
     if (remoteMask & bondSensorDefs[i].mask) {
       indices[count++] = i;
@@ -82,13 +82,13 @@ static int getVisibleSensors(int* indices, int maxCount) {
 }
 
 // Check if remote sensor is enabled (running) from live peer status
-static bool isRemoteSensorEnabled(uint16_t mask) {
+static bool isRemoteSensorEnabled(uint32_t mask) {
   if (!gEspNow || !gEspNow->bondPeerStatusValid) return false;
   return (gEspNow->bondPeerStatus.sensorEnabledMask & mask) != 0;
 }
 
 // Check if remote sensor is connected (hardware detected) from live peer status
-static bool isRemoteSensorConnected(uint16_t mask) {
+static bool isRemoteSensorConnected(uint32_t mask) {
   if (!gEspNow || !gEspNow->bondPeerStatusValid) return false;
   return (gEspNow->bondPeerStatus.sensorConnectedMask & mask) != 0;
 }
@@ -113,7 +113,7 @@ static void displayBondStatus() {
   if (!gEspNow) return;
   
   // Get peer name
-  char peerName[24];
+  char peerName[32];  // a device name (31 bytes) + NUL
   // BondedPeer::peerName() does the parse + name resolution and falls back
   // to the raw MAC string when no friendly name is known. Truncate to fit.
   String displayName = BondedPeer::peerName();
@@ -361,7 +361,7 @@ void displayRemoteMode() {
   
   // Show peer name and status on first line for context
   bool online = gEspNow->bondPeerOnline;
-  char peerName[24];
+  char peerName[32];  // a device name (31 bytes) + NUL
   // BondedPeer::peerName() does the parse + name resolution and falls back
   // to the raw MAC string when no friendly name is known. Truncate to fit.
   String displayName = BondedPeer::peerName();

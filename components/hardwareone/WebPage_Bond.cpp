@@ -1218,8 +1218,8 @@ static esp_err_t handleBondStatus(httpd_req_t* req) {
     // Sensor connectivity from live BondPeerStatus cache (updated every ~30s)
     // Falls back to compiled sensorMask from capabilities if no live status yet
     bool hasLiveStatus = gEspNow->bondPeerStatusValid;
-    uint16_t enabledMask = hasLiveStatus ? gEspNow->bondPeerStatus.sensorEnabledMask : 0;
-    uint16_t connectedMask = hasLiveStatus ? gEspNow->bondPeerStatus.sensorConnectedMask : 0;
+    uint32_t enabledMask = hasLiveStatus ? gEspNow->bondPeerStatus.sensorEnabledMask : 0;
+    uint32_t connectedMask = hasLiveStatus ? gEspNow->bondPeerStatus.sensorConnectedMask : 0;
     
     // sensorConnected: per-sensor booleans for UI rendering
     //   valid       = have we received at least one live status from the peer?

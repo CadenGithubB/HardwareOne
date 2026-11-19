@@ -7,6 +7,8 @@
  */
 
 #include "System_SetupWizard.h"
+#include "System_DeviceName.h"   // the device-name rule, the suggestion from a label
+#include "System_SelfDevice.h"   // SelfDevice::deviceName: the name in use (or the fallback)
 #include "BLE_LinkStatusCore.h"  // Bluetooth mode labels
 #include "System_Utils.h"  // waitForSerialInputBlocking
 #include "System_MemUtil.h"
@@ -203,7 +205,7 @@ static int timezoneSelection = 1;  // EDT default (index 1 — US Eastern Daylig
 static int logLevelSelection = 3;  // DEBUG default (all logging enabled)
 static int ntpSelection = 0;       // pool.ntp.org default
 static int ledEffectSelection = 1; // rainbow default
-static char wizardDeviceName[20] = "";  // 19-byte name + NUL (matches V4 identity fields)
+static char wizardDeviceName[devicename::kFieldLen] = "";  // a device name (31 bytes) + NUL
 
 // Ordinary page rows share one model. This storage is dormant after setup.
 // Capacity failures invalidate the draft and are reported; no feature is silently
@@ -248,7 +250,6 @@ struct WizardStringBinding {
 };
 static const WizardStringBinding kWizardStringBindings[] = {
   { &gSettings.espnowDeviceName, &SetupWizardResult::deviceName },
-  { &gSettings.bleDeviceName, &SetupWizardResult::bleDeviceName },
   { &gSettings.espnowFriendlyName, &SetupWizardResult::espnowFriendlyName },
   { &gSettings.espnowRoom, &SetupWizardResult::espnowRoom },
   { &gSettings.espnowZone, &SetupWizardResult::espnowZone },
@@ -619,9 +620,10 @@ void initSetupWizard() {
   memset(wizardRowCounts, 0, sizeof(wizardRowCounts));
 
   const auto& draft = getWizardDraftValues();
-  const char* curName = draft.deviceName.length() > 0 ? draft.deviceName.c_str()
-                      : draft.bleDeviceName.length() > 0 ? draft.bleDeviceName.c_str()
-                      : "HardwareOne";
+  // The device name the wizard starts from: the stored one when it passes the
+  // rule, else the name in use (HardwareOne-XXXXXX).
+  const String inUse = SelfDevice::deviceName();
+  const char* curName = devicename::valid(draft.deviceName.c_str()) ? draft.deviceName.c_str() : inUse.c_str();
   strlcpy(wizardDeviceName, curName, sizeof(wizardDeviceName));
   memcpy(sWizardDraft.deviceNameBaseline, wizardDeviceName, sizeof(wizardDeviceName));
 
@@ -717,13 +719,37 @@ bool wizardShouldShowMqtt() {
 #endif
 }
 
+const char* wizardSetDeviceName(const char* typed) {
+  const devicename::Fault fault = devicename::check(typed);
+  if (fault != devicename::Fault::None) return devicename::faultText(fault);
+  strlcpy(wizardDeviceName, typed, sizeof(wizardDeviceName));
+  return nullptr;
+}
+
+void wizardSuggestDeviceName(const char* label, char (&out)[32]) {
+  devicename::suggestFromLabel(label, out);
+  if (out[0]) return;
+  const String current = getWizardDraftValues().deviceName;
+  if (devicename::valid(current.c_str())) {
+    strlcpy(out, current.c_str(), sizeof(out));
+  } else {
+    strlcpy(out, SelfDevice::deviceName().c_str(), sizeof(out));
+  }
+}
+
 bool wizardStageEspNowSettings(const SetupWizardResult& result) {
   if (!sWizardDraft.active) return false;
   auto& draft = sWizardDraft.values;
-  const String& name = result.espnowFriendlyName.length() > 0
-      ? result.espnowFriendlyName : draft.deviceName;
-  copyWizardString(draft.bleDeviceName, name.length() ? name.c_str() : "HardwareOne");
-  copyWizardString(draft.deviceName, draft.bleDeviceName);
+  // The device name and the display label are separate: the name is the one
+  // the page confirmed (it passed the rule there), never derived from the
+  // label here. A page finished early keeps the name it had, and a draft with
+  // no valid name gets the one in use (HardwareOne-XXXXXX), so ESP-NOW can start.
+  if (result.deviceName.length() > 0) {
+    if (!devicename::valid(result.deviceName.c_str())) return false;
+    copyWizardString(draft.deviceName, result.deviceName);
+  } else if (!devicename::valid(draft.deviceName.c_str())) {
+    copyWizardString(draft.deviceName, SelfDevice::deviceName());
+  }
   if (result.espnowFriendlyName.length()) copyWizardString(draft.espnowFriendlyName, result.espnowFriendlyName);
   if (result.espnowRoom.length()) copyWizardString(draft.espnowRoom, result.espnowRoom);
   if (result.espnowZone.length()) copyWizardString(draft.espnowZone, result.espnowZone);
@@ -970,8 +996,13 @@ static void wizardCollectDeviceName() {
   auto& draft = sWizardDraft.values;
   if (wizardDeviceName[0] &&
       strcmp(wizardDeviceName, sWizardDraft.deviceNameBaseline) != 0) {
+    // Every input path checks the name (wizardSetDeviceName); a buffer edited
+    // past it is not taken.
+    if (!devicename::valid(wizardDeviceName)) {
+      memcpy(wizardDeviceName, sWizardDraft.deviceNameBaseline, sizeof(wizardDeviceName));
+      return;
+    }
     copyWizardString(draft.deviceName, wizardDeviceName);
-    copyWizardString(draft.bleDeviceName, draft.deviceName);
     memcpy(sWizardDraft.deviceNameBaseline, wizardDeviceName, sizeof(wizardDeviceName));
   }
 }
@@ -1117,29 +1148,57 @@ static void handleSerialEspNowPage(SetupWizardResult& result, bool& running) {
   Serial.println("All fields optional. Enter to skip field, 'n' to finish, 'b' to go back.");
   Serial.println("----------------------------------------");
 
-  String currentName = getWizardDraftValues().deviceName.length() > 0 ? getWizardDraftValues().deviceName : "HardwareOne";
+  result.deviceName = "";
+  String friendlyInput;
   if (introChoice.equalsIgnoreCase("c") || introChoice.equalsIgnoreCase("configure")) {
-    Serial.printf("Device Name (for Bluetooth + ESP-NOW) [%s]: ", currentName.c_str());
-    deviceName = waitForWizardInput();
-    deviceName.trim();
-    if (deviceName.equalsIgnoreCase("b") || deviceName.equalsIgnoreCase("back")) {
+    const String currentLabel = getWizardDraftValues().espnowFriendlyName;
+    Serial.printf("Display label (free text, e.g. 'My Kitchen') [%s]: ", currentLabel.c_str());
+    friendlyInput = waitForWizardInput();
+    friendlyInput.trim();
+    if (friendlyInput.equalsIgnoreCase("b") || friendlyInput.equalsIgnoreCase("back")) {
       wizardPrevPage(); return;
     }
-    if (deviceName.equalsIgnoreCase("n")) {
-      result.espnowFriendlyName = "";  // Early finish keeps the current name, not an earlier draft.
+    if (friendlyInput.equalsIgnoreCase("n")) {
+      result.espnowFriendlyName = "";  // Early finish keeps the current name and label.
       goto espnow_done;
     }
-    if (deviceName.length() == 0) deviceName = currentName;
+    if (friendlyInput.length() == 0) friendlyInput = currentLabel;
   } else {
-    // Not b/n/c — the user almost certainly typed their device name directly
-    // at the Choice: prompt instead of answering the c/n/b menu. Treat it as
-    // the name and continue into the configure flow rather than silently
+    // Not b/n/c — the user almost certainly typed a name directly at the
+    // Choice: prompt instead of answering the c/n/b menu. Treat it as the
+    // label and continue into the configure flow rather than silently
     // skipping (which used to also disable ESP-NOW) on what's very likely a
     // menu mix-up, not an intentional skip.
-    deviceName = introChoice;
-    Serial.printf("Device Name (for Bluetooth + ESP-NOW): %s\n", deviceName.c_str());
+    friendlyInput = introChoice;
+    Serial.printf("Display label: %s\n", friendlyInput.c_str());
   }
-  result.espnowFriendlyName = deviceName;
+  result.espnowFriendlyName = friendlyInput;
+  {
+    // The device name (ESP-NOW, Bluetooth, Wi-Fi hostname), offered from the
+    // label; Enter accepts it. A name the rule refuses is asked again.
+    char suggested[32];
+    wizardSuggestDeviceName(friendlyInput.c_str(), suggested);
+    for (;;) {
+      Serial.printf("Device name (1-31 letters, digits, '-') [%s]: ", suggested);
+      deviceName = waitForWizardInput();
+      deviceName.trim();
+      if (isWizardCancelRequested()) goto espnow_done;
+      if (deviceName.equalsIgnoreCase("b") || deviceName.equalsIgnoreCase("back")) {
+        wizardPrevPage(); return;
+      }
+      // Enter, or 'n' (finish), takes the offered name.
+      const bool finish = deviceName.equalsIgnoreCase("n");
+      if (deviceName.length() == 0 || finish) deviceName = suggested;
+      if (finish) {
+        result.deviceName = deviceName;
+        goto espnow_done;
+      }
+      const devicename::Fault fault = devicename::check(deviceName.c_str());
+      if (fault == devicename::Fault::None) break;
+      Serial.printf("%s %s\n", devicename::faultText(fault), devicename::kRuleText);
+    }
+    result.deviceName = deviceName;
+  }
 
   { Serial.print("Room (e.g. 'Living Room'): ");
   String room = waitForWizardInput();
@@ -1667,11 +1726,13 @@ SetupWizardResult runSetupWizard() {
           const WizardMenuItem* item = getWizardMenuItem(currentPage, (int)number - 1);
           setWizardCurrentSelection((int)number - 1);
           if (item->type == WIZARD_ITEM_DEVICE_NAME) {
-            Serial.printf("Device Name [%s]: ", wizardDeviceName);
+            Serial.printf("Device Name (1-31 letters, digits, '-') [%s]: ", wizardDeviceName);
             String newName = waitForWizardInput();
             newName.trim();
             if (!isWizardCancelRequested() && newName.length() > 0) {
-              strlcpy(wizardDeviceName, newName.c_str(), sizeof(wizardDeviceName));
+              if (const char* refused = wizardSetDeviceName(newName.c_str())) {
+                Serial.printf("Not changed: %s\n", refused);
+              }
             }
           } else {
             wizardActivateCurrentItem();
@@ -1784,6 +1845,14 @@ bool wizardSaveAndApplySettings(SetupWizardResult& result) {
   // These live actions happen only after successful draft acceptance. A failed
   // disk write retains the accepted live values and the Settings owner's retry.
   applySettings();
+  // A new device name goes to ESP-NOW and to Wi-Fi as the hostname before the
+  // setup connects (the boot set the hostname before the wizard ran), with the
+  // warning when another device this one knows has the name.
+  if (draft.deviceName != initial.deviceName) {
+    char warn[200];
+    deviceNameApply(gSettings.espnowDeviceName, warn, sizeof(warn));
+    if (warn[0]) broadcastOutput(String("Device name set to ") + gSettings.espnowDeviceName + "." + warn);
+  }
 #if ENABLE_WIFI
   if (WiFi.isConnected()) setupNtp();
 #endif

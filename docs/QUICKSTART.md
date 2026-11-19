@@ -267,7 +267,7 @@ network feature compiled in.
 | 2 | **WiFi Setup** | WiFi enabled on page 1 | Scan and join. Select by number, type an SSID directly, `rescan`, or `skip` |
 | 3 | **Web Mode** | Web Interface enabled and HTTPS compiled in | `HTTP` or `HTTPS` (HTTPS costs ~20 KB more RAM; picking it generates a self-signed cert) |
 | 4 | **Bluetooth Mode** | Bluetooth enabled and the G2 client compiled in | `App console` (the phone/app server) or `Glasses` (`Glasses+pipe` on phone-pipe builds; ~10 KB more RAM) |
-| 5 | **ESP-NOW Identity** | ESP-NOW enabled on page 1 | Device name (used for **both** Bluetooth and ESP-NOW, default `HardwareOne`), room, zone, mobile/stationary. All optional |
+| 5 | **ESP-NOW Identity** | ESP-NOW enabled on page 1 | Display label (free text), then the device name (ESP-NOW name, Bluetooth name and Wi-Fi hostname; 1-31 letters, digits and `-`), offered from the label so Enter accepts it; room, zone, mobile/stationary. All optional |
 | 6 | **MQTT Broker** | MQTT enabled **and** MQTT auto-start on, both on page 1 | Broker host, port, username, password |
 | 7 | **Display & Controls** | a display, LED, G2, input or I2C feature is compiled in | Local display, NeoPixel LED (with its startup effect), G2 Glasses, the input device and the I2C bus |
 | 8 | **Sensors** | a sensor feature is compiled in | Each compiled sensor and audio/camera feature; most rows are auto-start choices |
@@ -278,7 +278,7 @@ On any page, `b` / `back` returns to the previous one.
 > **Skipping the ESP-NOW Identity page turns ESP-NOW off.** Answering `n` (or
 > pressing Enter) at that page's prompt sets `espnowEnabled = false`, because the
 > mesh cannot start without a device name. If you want ESP-NOW, answer `c` and
-> at minimum accept the default name. You can set it later with `espnowsetname`
+> at minimum accept the offered name. You can set it later with `devicename`
 > and re-enable with `espnowenabled 1`.
 
 The theme is not one of the nine pages. On builds with the web server compiled

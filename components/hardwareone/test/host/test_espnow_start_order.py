@@ -38,8 +38,7 @@ HERE = Path(__file__).resolve().parent
 
 # Each marker stops before the opening brace: extract_block takes the first "{" after it.
 BASE = (
-    'static uint16_t meshFingerprintForLabel(const String& label) ',
-    'static void recomputeAllMeshFingerprints()',
+    'static void meshIdRefreshAll()',
     'static void initPrimaryMeshFromLegacySettings()',
 )
 BOOTSTRAP = 'class PrimaryMeshBootstrap '
@@ -100,7 +99,8 @@ def main():
     check('A2 the device-name check refuses the start before anything is allocated',
           init.count('checkEspNowFirstTimeSetup()') == 1 and name_check < first_alloc and name_check < cache_clear)
     check('A3 initEspNow does not run the slot 0 bootstrap outside the guard',
-          'initPrimaryMeshFromLegacySettings()' not in init and 'recomputeAllMeshFingerprints()' not in init)
+          'initPrimaryMeshFromLegacySettings()' not in init and 'recomputeAllMeshFingerprints()' not in init and
+          'meshIdRefreshAll()' not in init)
     check('A4 the guard runs after esp_now_init and before the callbacks are registered',
           init.count('PrimaryMeshBootstrap meshBootstrap;') == 1 and
           at(init, 'esp_now_init()') < guard < at(init, 'esp_now_register_recv_cb('))

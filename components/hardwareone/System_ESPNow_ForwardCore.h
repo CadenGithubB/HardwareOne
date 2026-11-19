@@ -26,8 +26,11 @@
 #include <string.h>
 
 #include "System_ESPNow_SensorCore.h"  // sensorBit, kSensorMaskAll, roleSends / roleReceives
+#include "System_DeviceName.h"         // the device-name rule; names compare ignoring case
 
 namespace espnowfwd {
+
+using espnowsensor::SensorMask;
 
 inline bool macIsZero(const uint8_t m[6]) {
   for (int i = 0; i < 6; ++i) {
@@ -62,8 +65,8 @@ constexpr uint8_t kStreamsAll     = 0x07;
 constexpr uint8_t kStreamIdBattery = REMOTE_SENSOR_MAX;      // 11
 constexpr uint8_t kStreamIdEvents  = REMOTE_SENSOR_MAX + 1;  // 12
 constexpr uint8_t kStreamIdCount   = REMOTE_SENSOR_MAX + 2;
-constexpr uint16_t kResumeAll = (uint16_t)((1u << kStreamIdCount) - 1u);
-static_assert(kStreamIdCount <= 16, "the resume mask holds every stream");
+constexpr SensorMask kResumeAll = (SensorMask)((1ull << kStreamIdCount) - 1u);
+static_assert(kStreamIdCount <= 32, "the resume mask holds every stream");
 // The sensor status frame (which sensors the partner has and streams): part
 // of the readings stream, for no sensor in particular, never a resume.
 constexpr uint8_t kStreamIdStatus  = kStreamIdCount;          // 13
@@ -75,8 +78,8 @@ constexpr uint8_t streamBitOf(uint8_t streamId) {
 
 // Which sensors B forwards: every one but the input device by default (10 Hz,
 // meant for the bond master's own screen).
-constexpr uint16_t kSensorMaskDefault =
-    (uint16_t)(espnowsensor::kSensorMaskAll & ~espnowsensor::sensorBit(REMOTE_SENSOR_INPUT));
+constexpr SensorMask kSensorMaskDefault =
+    (SensorMask)(espnowsensor::kSensorMaskAll & ~espnowsensor::sensorBit(REMOTE_SENSOR_INPUT));
 
 // The streams B forwards to a receiving master: readings to the primary only
 // (B's own rule for readings switched on by hand), battery and events to both.
@@ -99,18 +102,26 @@ constexpr uint8_t streamsForTarget(uint8_t kind) {
 //   4  streams     bit 0 readings, bit 1 battery, bit 2 events (echoed)
 //   5  result      answer only (kResult*)
 //   6  answers     answer only: the op answered (1 or 2)
-//   7  reserved    0
+//   7  reserved    sent 0, ignored
 //   8  partnerMac  X's address; all zero in a withdrawal of everything and in
 //                  a query
-//  14  sensorMask  bit i: sensor i is forwarded (with streams bit 0); echoed
-//  16  partnerKey  X's Ed25519 public key as B holds it (announce)
-//  48  partnerName the name B shows for X, zero padded, not terminated when
-//                  full, cut on a UTF-8 boundary (announce)
-//  80  reserved    16 bytes, 0
+//  14  reserved    2 bytes, sent 0, ignored
+//  16  sensorMask  32 bits; bit i: sensor i is forwarded (with streams bit 0); echoed
+//  20  partnerKey  X's Ed25519 public key as B holds it (announce)
+//  52  partnerName the name B shows for X (announce): a device name under
+//                  System_DeviceName.h's rule, NUL always present, the rest 0;
+//                  empty when B has no valid name for X. The receiver reads it
+//                  with devicename::getField and shows X's address otherwise.
+//  84  reserved    12 bytes, sent 0, ignored
 // ---------------------------------------------------------------------------
 constexpr size_t kLinkFrameLen = 96;
 constexpr size_t kPartnerKeyLen = 32;
-constexpr size_t kPartnerNameLen = 32;
+constexpr size_t kPartnerNameLen = devicename::kFieldLen;
+constexpr size_t kLinkOffMask = 16;
+constexpr size_t kLinkOffKey  = 20;
+constexpr size_t kLinkOffName = 52;
+static_assert(kLinkOffKey == kLinkOffMask + 4 && kLinkOffName == kLinkOffKey + kPartnerKeyLen &&
+              kLinkOffName + kPartnerNameLen <= kLinkFrameLen, "FORWARD_LINK field offsets");
 
 constexpr uint8_t kOpAnnounce = 1;
 constexpr uint8_t kOpWithdraw = 2;
@@ -139,7 +150,7 @@ struct LinkFrame {
   uint8_t  result;
   uint8_t  answers;
   uint8_t  partnerMac[6];
-  uint16_t sensorMask;
+  SensorMask sensorMask;
   uint8_t  partnerKey[kPartnerKeyLen];
   char     partnerName[kPartnerNameLen];  // as on the wire
 };
@@ -154,10 +165,12 @@ inline void packLinkFrame(uint8_t out[kLinkFrameLen], const LinkFrame& f) {
   out[5] = f.result;
   out[6] = f.answers;
   memcpy(out + 8, f.partnerMac, 6);
-  out[14] = (uint8_t)(f.sensorMask & 0xFF);
-  out[15] = (uint8_t)(f.sensorMask >> 8);
-  memcpy(out + 16, f.partnerKey, kPartnerKeyLen);
-  memcpy(out + 48, f.partnerName, kPartnerNameLen);
+  out[kLinkOffMask + 0] = (uint8_t)(f.sensorMask & 0xFF);
+  out[kLinkOffMask + 1] = (uint8_t)((f.sensorMask >> 8) & 0xFF);
+  out[kLinkOffMask + 2] = (uint8_t)((f.sensorMask >> 16) & 0xFF);
+  out[kLinkOffMask + 3] = (uint8_t)((f.sensorMask >> 24) & 0xFF);
+  memcpy(out + kLinkOffKey, f.partnerKey, kPartnerKeyLen);
+  memcpy(out + kLinkOffName, f.partnerName, kPartnerNameLen);
 }
 
 // False for a payload shorter than the frame, an op this firmware does not
@@ -177,9 +190,11 @@ inline bool parseLinkFrame(const uint8_t* in, size_t len, LinkFrame& f) {
   f.result = in[5];
   f.answers = in[6];
   memcpy(f.partnerMac, in + 8, 6);
-  f.sensorMask = (uint16_t)((in[14] | ((uint16_t)in[15] << 8)) & espnowsensor::kSensorMaskAll);
-  memcpy(f.partnerKey, in + 16, kPartnerKeyLen);
-  memcpy(f.partnerName, in + 48, kPartnerNameLen);
+  const uint8_t* m = in + kLinkOffMask;
+  f.sensorMask = ((SensorMask)m[0] | ((SensorMask)m[1] << 8) | ((SensorMask)m[2] << 16) | ((SensorMask)m[3] << 24)) &
+                 espnowsensor::kSensorMaskAll;
+  memcpy(f.partnerKey, in + kLinkOffKey, kPartnerKeyLen);
+  memcpy(f.partnerName, in + kLinkOffName, kPartnerNameLen);
   return true;
 }
 
@@ -243,7 +258,7 @@ enum class WhyNot : uint8_t {
   NotAccepted,      // announced, no answer yet
   Refused,          // the master refused the link
   QueueFull,        // the send queue took no more
-  TooLong,          // a reading over 472 bytes (cannot happen: B keeps at most that)
+  TooLong,          // a reading over 536 bytes (cannot happen: B keeps at most that)
   PartnerChanged,   // the frame came from another device than the link's partner, or a partner change ran
   SensorOff,        // this sensor is not forwarded (bondforward sensors)
   NotKeptHere,      // this device could not keep the frame (no record, no memory)
@@ -276,6 +291,8 @@ inline const char* whyNotKey(WhyNot why) {
   return "?";
 }
 
+static_assert(espnowsensor::kReadingMaxBytes == 536, "whyNotText names the 536-byte limit");
+
 inline const char* whyNotText(WhyNot why) {
   switch (why) {
     case WhyNot::Forwards:        return "forwarded";
@@ -292,7 +309,7 @@ inline const char* whyNotText(WhyNot why) {
     case WhyNot::NotAccepted:     return "the master has not accepted yet";
     case WhyNot::Refused:         return "the master refused";
     case WhyNot::QueueFull:       return "the send queue is full";
-    case WhyNot::TooLong:         return "the reading is over the 472-byte limit";
+    case WhyNot::TooLong:         return "the reading is over the 536-byte limit";
     case WhyNot::PartnerChanged:  return "it came from another device than the partner the link names";
     case WhyNot::SensorOff:       return "that sensor is not forwarded (bondforward sensors)";
     case WhyNot::NotKeptHere:     return "this device could not keep it (no record or no memory left)";
@@ -446,9 +463,9 @@ struct TargetState {
   uint16_t toldSessionId;   // the session on which the target was told this device's state
   uint8_t  linkGen;
   uint8_t  streams;         // what is announced
-  uint16_t sensorMask;
+  SensorMask sensorMask;
   uint8_t  acceptedStreams; // what the answer echoed, within what was announced
-  uint16_t acceptedMask;
+  SensorMask acceptedMask;
   uint8_t  lastResult;      // of the last answer to an announcement (0: none)
   uint8_t  backoff;
   bool     queried;
@@ -465,7 +482,7 @@ struct TargetWant {
   bool     want;        // the link is to be announced to this target
   uint8_t  linkGen;
   uint8_t  streams;
-  uint16_t sensorMask;
+  SensorMask sensorMask;
 };
 
 constexpr uint8_t kActAnnounce    = 0x01;
@@ -568,8 +585,8 @@ inline uint8_t targetStep(TargetState& t, const TargetWant& w, uint16_t sessionI
 
 // The sensor mask an announcement to this target carries: the sensors only
 // when it carries readings.
-constexpr uint16_t announcedMask(const TargetState& t) {
-  return (t.streams & kStreamReadings) ? t.sensorMask : (uint16_t)0;
+constexpr SensorMask announcedMask(const TargetState& t) {
+  return (t.streams & kStreamReadings) ? t.sensorMask : (SensorMask)0;
 }
 
 enum class AnswerEffect : uint8_t { Ignored, Accepted, Refused, Stale, WithdrawDone, Noted };
@@ -591,7 +608,7 @@ inline AnswerEffect targetAnswer(TargetState& t, const LinkFrame& a, uint16_t my
     if (a.result == kResultAccepted) {
       t.state = TState::Accepted;
       t.acceptedStreams = (uint8_t)(a.streams & t.streams);
-      t.acceptedMask = (uint16_t)(a.sensorMask & t.sensorMask);
+      t.acceptedMask = (SensorMask)(a.sensorMask & t.sensorMask);
       return AnswerEffect::Accepted;
     }
     t.acceptedStreams = 0;
@@ -764,11 +781,11 @@ struct ReqInputs {
   uint8_t  fwdLink;             // the request's link byte (not 0)
   bool     fromAcceptedPrimary; // the sender is the primary target, accepted on its ACTIVE session, with readings
   uint8_t  mode;
-  uint16_t mask;                // the sensors asked for
-  uint16_t forwardedMask;       // the sensors the target accepted
+  SensorMask mask;                // the sensors asked for
+  SensorMask forwardedMask;       // the sensors the target accepted
   bool     partnerOnline;
   bool     partnerStatusKnown;  // the partner's sensor list (BOND_SENSOR_STATUS) came on this link's partner
-  uint16_t partnerPresent;      // the sensors that list names (present and running at the partner)
+  SensorMask partnerPresent;      // the sensors that list names (present and running at the partner)
 };
 
 // First match. An unsubscribe needs neither the sensors nor the partner: it
@@ -796,16 +813,16 @@ inline ReqVerdict sensorReqDecide(const ReqInputs& in) {
 
 // The sensors an applied request leases or ends: an unsubscribe ends any it
 // names; a subscribe or one-shot only those forwarded that X lists.
-inline uint16_t reqApplyMask(const ReqInputs& in) {
+inline SensorMask reqApplyMask(const ReqInputs& in) {
   if (in.mode == kReqUnsubscribe) return in.mask;
-  return (uint16_t)(in.mask & in.forwardedMask & in.partnerPresent);
+  return (SensorMask)(in.mask & in.forwardedMask & in.partnerPresent);
 }
 
 // The forwarded sensors a subscribe or one-shot asked for that X does not
 // list: left out of the lease (counted as partner_lacks_sensor).
-inline uint16_t reqLeftOut(const ReqInputs& in) {
+inline SensorMask reqLeftOut(const ReqInputs& in) {
   if (in.mode == kReqUnsubscribe || !in.partnerStatusKnown) return 0;
-  return (uint16_t)(in.mask & in.forwardedMask & (uint16_t)~in.partnerPresent);
+  return (SensorMask)(in.mask & in.forwardedMask & (SensorMask)~in.partnerPresent);
 }
 
 // B's leases on X's sensors, one per sensor. `started`: B switched the sensor
@@ -819,26 +836,26 @@ inline uint16_t reqLeftOut(const ReqInputs& in) {
 // until the "off" went out (leaseOffSent): a failed "off" is sent again, as a
 // failed "on" is.
 struct ReqLeases {
-  uint16_t leased;
-  uint16_t started;
-  uint16_t byUser;
-  uint16_t offOwed;
+  SensorMask leased;
+  SensorMask started;
+  SensorMask byUser;
+  SensorMask offOwed;
   uint32_t untilMs[REMOTE_SENSOR_MAX];
   uint16_t onSession[REMOTE_SENSOR_MAX];
 };
 
 struct LeaseActs {
-  uint16_t on;   // send "on" for these sensors
-  uint16_t off;  // send "off" for these (they are owed until sent)
+  SensorMask on;   // send "on" for these sensors
+  SensorMask off;  // send "off" for these (they are owed until sent)
 };
 
 // A lease ends: when it started the sensor, the "off" is owed.
-inline uint16_t leaseEndOne(ReqLeases& l, uint16_t bit) {
+inline SensorMask leaseEndOne(ReqLeases& l, SensorMask bit) {
   const bool started = (l.started & bit) != 0;
-  l.leased = (uint16_t)(l.leased & ~bit);
-  l.started = (uint16_t)(l.started & ~bit);
+  l.leased = (SensorMask)(l.leased & ~bit);
+  l.started = (SensorMask)(l.started & ~bit);
   if (!started) return 0;
-  l.offOwed = (uint16_t)(l.offOwed | bit);
+  l.offOwed = (SensorMask)(l.offOwed | bit);
   return bit;
 }
 
@@ -848,15 +865,15 @@ inline uint16_t leaseEndOne(ReqLeases& l, uint16_t bit) {
 // settings); `l.byUser` counts as well. A sensor whose "off" is still owed
 // streams because of the lease that ended, not by anyone's choice: a new
 // lease takes it over (and sends "on" again, which costs nothing).
-inline LeaseActs leaseApply(ReqLeases& l, uint8_t mode, uint16_t mask, uint16_t streaming, uint32_t intervalMs,
+inline LeaseActs leaseApply(ReqLeases& l, uint8_t mode, SensorMask mask, SensorMask streaming, uint32_t intervalMs,
                             uint32_t leaseMs, uint32_t nowMs) {
   LeaseActs a = { 0, 0 };
   for (uint8_t i = 0; i < REMOTE_SENSOR_MAX; ++i) {
-    const uint16_t bit = espnowsensor::sensorBit(i);
+    const SensorMask bit = espnowsensor::sensorBit(i);
     if (!(mask & bit)) continue;
     if (mode == kReqUnsubscribe) {
       if (!(l.leased & bit)) continue;
-      a.off = (uint16_t)(a.off | leaseEndOne(l, bit));
+      a.off = (SensorMask)(a.off | leaseEndOne(l, bit));
       continue;
     }
     uint32_t forMs = leaseMs;
@@ -865,12 +882,12 @@ inline LeaseActs leaseApply(ReqLeases& l, uint8_t mode, uint16_t mask, uint16_t 
     // never cuts a running subscription short.
     const uint32_t until = nowMs + forMs;
     if (!(l.leased & bit) || mode != kReqOneshot || (int32_t)(until - l.untilMs[i]) > 0) l.untilMs[i] = until;
-    l.leased = (uint16_t)(l.leased | bit);
+    l.leased = (SensorMask)(l.leased | bit);
     const bool owed = (l.offOwed & bit) != 0;
-    l.offOwed = (uint16_t)(l.offOwed & ~bit);
+    l.offOwed = (SensorMask)(l.offOwed & ~bit);
     if (!(l.started & bit) && !(l.byUser & bit) && (owed || !(streaming & bit))) {
-      l.started = (uint16_t)(l.started | bit);
-      a.on = (uint16_t)(a.on | bit);
+      l.started = (SensorMask)(l.started | bit);
+      a.on = (SensorMask)(a.on | bit);
     }
   }
   return a;
@@ -878,12 +895,12 @@ inline LeaseActs leaseApply(ReqLeases& l, uint8_t mode, uint16_t mask, uint16_t 
 
 // Leases that ran out: their sensors, when a lease started them, are
 // switched off.
-inline uint16_t leaseExpire(ReqLeases& l, uint32_t nowMs) {
-  uint16_t off = 0;
+inline SensorMask leaseExpire(ReqLeases& l, uint32_t nowMs) {
+  SensorMask off = 0;
   for (uint8_t i = 0; i < REMOTE_SENSOR_MAX; ++i) {
-    const uint16_t bit = espnowsensor::sensorBit(i);
+    const SensorMask bit = espnowsensor::sensorBit(i);
     if (!(l.leased & bit) || (int32_t)(nowMs - l.untilMs[i]) < 0) continue;
-    off = (uint16_t)(off | leaseEndOne(l, bit));
+    off = (SensorMask)(off | leaseEndOne(l, bit));
   }
   return off;
 }
@@ -891,11 +908,11 @@ inline uint16_t leaseExpire(ReqLeases& l, uint32_t nowMs) {
 // Leases on sensors outside `keep` end at once: the sensor is no longer
 // forwarded (bondforward sensors), or the master that asked no longer gets
 // the readings (keep 0: it left the primary mesh, or became the partner).
-inline uint16_t leaseKeepOnly(ReqLeases& l, uint16_t keep) {
-  uint16_t off = 0;
+inline SensorMask leaseKeepOnly(ReqLeases& l, SensorMask keep) {
+  SensorMask off = 0;
   for (uint8_t i = 0; i < REMOTE_SENSOR_MAX; ++i) {
-    const uint16_t bit = espnowsensor::sensorBit(i);
-    if ((l.leased & bit) && !(keep & bit)) off = (uint16_t)(off | leaseEndOne(l, bit));
+    const SensorMask bit = espnowsensor::sensorBit(i);
+    if ((l.leased & bit) && !(keep & bit)) off = (SensorMask)(off | leaseEndOne(l, bit));
   }
   return off;
 }
@@ -906,29 +923,29 @@ inline uint16_t leaseKeepOnly(ReqLeases& l, uint16_t keep) {
 // user's own "off" is the one a lease owed).
 inline void leaseByHand(ReqLeases& l, uint8_t sensor, bool on) {
   if (sensor >= REMOTE_SENSOR_MAX) return;
-  const uint16_t bit = espnowsensor::sensorBit(sensor);
-  l.started = (uint16_t)(l.started & ~bit);
-  l.offOwed = (uint16_t)(l.offOwed & ~bit);
+  const SensorMask bit = espnowsensor::sensorBit(sensor);
+  l.started = (SensorMask)(l.started & ~bit);
+  l.offOwed = (SensorMask)(l.offOwed & ~bit);
   if (on) {
-    l.byUser = (uint16_t)(l.byUser | bit);
+    l.byUser = (SensorMask)(l.byUser | bit);
   } else {
-    l.byUser = (uint16_t)(l.byUser & ~bit);
-    l.leased = (uint16_t)(l.leased & ~bit);
+    l.byUser = (SensorMask)(l.byUser & ~bit);
+    l.leased = (SensorMask)(l.leased & ~bit);
   }
 }
 
 // Every lease ends (the link ended, forwarding was switched off, another
 // master is named). Returns the sensors a lease started (their "off" is owed).
-inline uint16_t leaseEndAll(ReqLeases& l) {
-  const uint16_t off = l.started;
-  l.offOwed = (uint16_t)(l.offOwed | l.started);
+inline SensorMask leaseEndAll(ReqLeases& l) {
+  const SensorMask off = l.started;
+  l.offOwed = (SensorMask)(l.offOwed | l.started);
   l.leased = 0;
   l.started = 0;
   return off;
 }
 
 // The "off" for `bit` went out.
-inline void leaseOffSent(ReqLeases& l, uint16_t bit) { l.offOwed = (uint16_t)(l.offOwed & ~bit); }
+inline void leaseOffSent(ReqLeases& l, SensorMask bit) { l.offOwed = (SensorMask)(l.offOwed & ~bit); }
 
 // This device is no longer the bond master of the partner the leases were
 // on (another partner, the bond ended, the worker role): nothing is owed to
@@ -942,12 +959,12 @@ inline void leaseForgetPartner(ReqLeases& l) {
 
 // The sensors a lease started whose "on" went over another bond session than
 // `sessionNow` (0: none now, nothing to send).
-inline uint16_t leaseResend(const ReqLeases& l, uint16_t sessionNow) {
+inline SensorMask leaseResend(const ReqLeases& l, uint16_t sessionNow) {
   if (sessionNow == 0) return 0;
-  uint16_t on = 0;
+  SensorMask on = 0;
   for (uint8_t i = 0; i < REMOTE_SENSOR_MAX; ++i) {
-    const uint16_t bit = espnowsensor::sensorBit(i);
-    if ((l.started & bit) && l.onSession[i] != sessionNow) on = (uint16_t)(on | bit);
+    const SensorMask bit = espnowsensor::sensorBit(i);
+    if ((l.started & bit) && l.onSession[i] != sessionNow) on = (SensorMask)(on | bit);
   }
   return on;
 }
@@ -984,13 +1001,13 @@ struct ForwardLink {
   uint16_t viaBootTag;
   uint8_t  linkGen;
   uint8_t  streams;
-  uint16_t sensorMask;
+  SensorMask sensorMask;
   LState   state;
   bool     haveLast;
   uint16_t lastBootTag;
   uint8_t  lastGen;
   bool     queriedOnce;
-  uint16_t resumeMask;
+  SensorMask resumeMask;
   uint32_t acceptedMs;
   uint32_t confirmedMs;
   uint32_t lastDataMs;
@@ -1003,7 +1020,7 @@ struct ForwardLink {
 };
 
 // The resume bits of the sensors in `mask`.
-constexpr uint16_t resumeBitsOfSensors(uint16_t mask) { return (uint16_t)(mask & espnowsensor::kSensorMaskAll); }
+constexpr SensorMask resumeBitsOfSensors(SensorMask mask) { return (SensorMask)(mask & espnowsensor::kSensorMaskAll); }
 
 inline void linkNoteLast(ForwardLink& e, uint16_t bootTag, uint8_t gen) {
   if (!e.haveLast || bootTag != e.lastBootTag) {
@@ -1074,7 +1091,7 @@ inline AnnounceEffect linkApplyAnnounce(ForwardLink& e, const LinkFrame& f, cons
   };
   if (repeat) {
     copyName();
-    e.resumeMask = (uint16_t)(e.resumeMask | resumeBitsOfSensors((uint16_t)(f.sensorMask & ~e.sensorMask)));
+    e.resumeMask = (SensorMask)(e.resumeMask | resumeBitsOfSensors((SensorMask)(f.sensorMask & ~e.sensorMask)));
     e.streams = f.streams;
     e.sensorMask = f.sensorMask;
     e.confirmedMs = nowMs;
@@ -1198,16 +1215,10 @@ inline bool macFromText(const char* text, size_t len, uint8_t out[6]) {
   return true;
 }
 
-// Two names compare equal ignoring ASCII case.
+// Two names compare equal ignoring ASCII case (the device-name rule's
+// comparison, System_DeviceName.h). Null equals nothing.
 inline bool nameSameIgnoringCase(const char* a, const char* b) {
-  if (!a || !b) return false;
-  for (;; ++a, ++b) {
-    char x = *a, y = *b;
-    if (x >= 'A' && x <= 'Z') x = (char)(x - 'A' + 'a');
-    if (y >= 'A' && y <= 'Z') y = (char)(y - 'A' + 'a');
-    if (x != y) return false;
-    if (!x) return true;
-  }
+  return a && b && devicename::sameIgnoringCase(a, b);
 }
 
 }  // namespace espnowfwd

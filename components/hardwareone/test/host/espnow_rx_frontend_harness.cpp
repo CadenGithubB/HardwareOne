@@ -17,8 +17,10 @@
 #include <cstring>
 #include <string>
 #include <strings.h>
+#include <type_traits>
 #include <vector>
 #include "System_MacText.h"  // production MAC text helpers (copied beside this unit)
+#include "System_DeviceName.h"  // the device-name rule (copied beside this unit)
 
 #ifndef ENABLE_BONDED_MODE
 #error "ENABLE_BONDED_MODE must be defined by the runner"
@@ -57,6 +59,12 @@ static const char* MAC_STR(const uint8_t* m) {
 
 static uint32_t gNowMs = 100000;
 static uint32_t millis() { return gNowMs; }
+// System_Debug.cpp's limiter: true at most once per window.
+[[maybe_unused]] static bool logCooldownOk(uint32_t& lastMs, uint32_t windowMs) {
+  if (lastMs != 0 && (uint32_t)(gNowMs - lastMs) < windowMs) return false;
+  lastMs = gNowMs ? gNowMs : 1;
+  return true;
+}
 
 struct wifi_pkt_rx_ctrl_t { int8_t rssi; };
 struct esp_now_recv_info { uint8_t* src_addr; uint8_t* des_addr; wifi_pkt_rx_ctrl_t* rx_ctrl; };
@@ -154,6 +162,7 @@ static bool espnowCryptoHmacSha256(uint8_t out[32], const uint8_t* key, size_t k
   return true;
 }
 static int sodium_memcmp(const void* a, const void* b, size_t n) { return std::memcmp(a, b, n); }
+static void sodium_memzero(void* p, size_t n) { std::memset(p, 0, n); }
 
 // ---- Session double ---------------------------------------------------------
 enum SessionStateLifecycle : uint8_t {
@@ -228,9 +237,20 @@ static uint16_t gUnknownSessionLastId = 0;
 static unsigned gAcksSent = 0, gFragAcksSent = 0, gFanouts = 0, gCleanups = 0, gRelayForwards = 0;
 static bool v4_send_ack(const uint8_t*, uint32_t) { ++gAcksSent; return true; }
 static bool v4_send_frag_ack(const uint8_t*, uint32_t, uint8_t, uint8_t) { ++gFragAcksSent; return true; }
-static void v4_relay_fanout(const uint8_t*, size_t, const uint8_t*, const uint8_t*, uint16_t) { ++gFanouts; }
+static size_t gLastFanoutLen = 0;
+static void v4_relay_fanout(const uint8_t*, size_t len, const uint8_t*, const uint8_t*, uint16_t) {
+  ++gFanouts;
+  gLastFanoutLen = len;
+}
 static bool v4_flood_rate_ok() { return true; }
-static bool meshRouterLookup(const uint8_t*, uint8_t*, uint8_t*) { return false; }
+// No route unless a case names the next hop.
+static const uint8_t* gRouteNext = nullptr;
+static bool meshRouterLookup(const uint8_t*, uint8_t* nextHop, uint8_t* hops) {
+  if (!gRouteNext) return false;
+  std::memcpy(nextHop, gRouteNext, 6);
+  *hops = 1;
+  return true;
+}
 static bool v4_relay_wrap_and_send(const uint8_t*, const uint8_t*, const uint8_t*, size_t, uint8_t, uint8_t,
                                    uint32_t) { ++gRelayForwards; return true; }
 static void broadcast_tracker_record_ack(uint32_t, const uint8_t*) {}
@@ -292,6 +312,9 @@ static void noteHandler(const char* name, const V4RxCtx& ctx) {
   gCalls.push_back(c);
 }
 
+// The receive-drop counters of System_ESPNow.cpp (espnowstats).
+static uint32_t gEspNowRxLenDrops = 0;
+
 // INSERT_POLICY
 
 static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uint8_t* data, int len);
@@ -315,6 +338,15 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
 static V4ReasmOutcome v4_reasm_accept(const esp_now_recv_info*, const EspNowV4Header*, const uint8_t*&,
                                       uint16_t&) { return V4ReasmOutcome::Dropped; }
 
+// The mesh gate's counter and its WARN (production), with the registry lookup
+// it asks whether the sender is paired.
+static bool pairModeIsPaired(const uint8_t* mac) {
+  for (int i = 0; i < gState.deviceCount; i++) {
+    if (std::memcmp(gState.devices[i].mac, mac, 6) == 0) return true;
+  }
+  return false;
+}
+// INSERT_MESH_ID_GATE
 // INSERT_INCOMING
 
 // ============================================================================
@@ -368,8 +400,10 @@ static void reset(bool keyed) {
   gUnwrapCalls = gReplayRejects = gRegistrySaves = 0;
   gUnknownSessionAsks = 0;
   gUnknownSessionLastId = 0;
+  gEspNowRxUnknownMeshIdDrops = 0;
   gLastWarn.clear();
   gEspNowInRelayDelivery = false;
+  gRouteNext = nullptr;
   gNowMs += 60000;  // every ring entry of an earlier case is past its TTL
   addDevice(gPeerB, "bravo");
   addDevice(gPeerC, "charlie");
@@ -401,10 +435,13 @@ static Frame assemble(EspNowV4Header h, const Frame& payload, bool crc) {
   if (!payload.empty()) std::memcpy(f.data() + sizeof h, payload.data(), payload.size());
   return f;
 }
-// What anyone in range can build: no key, fingerprint 0, optional payload.
+// What anyone in range can build: no key, optional payload. It carries the
+// mesh id, which is on the air in every frame of the mesh (a frame with id 0
+// or another mesh's id stops at the mesh gate: testMeshIdGate).
 static Frame plainFrame(uint8_t type, const uint8_t* origin, uint32_t msgId, const Frame& payload = {},
                         uint8_t fragIndex = 0, uint8_t fragCount = 1, uint16_t flags = 0) {
   EspNowV4Header h = baseHeader(type, origin, msgId);
+  h.meshFingerprint = kMeshFp;
   h.flags = flags;
   h.fragIndex = fragIndex;
   h.fragCount = fragCount;
@@ -458,6 +495,8 @@ static Frame heartbeatPayload() {
   return f;
 }
 static Frame text(const char* s) { return Frame(s, s + std::strlen(s)); }
+// A KEY_EX_HELLO payload of its exact length (the receive table admits no other).
+static Frame helloPayload() { return Frame(ESPNOW_V4_MINLEN_KEY_EX_HELLO, 0x48); }
 
 static bool deliver(uint8_t* radioSrc, const Frame& frame) {
   wifi_pkt_rx_ctrl_t ctrl{-55};
@@ -524,7 +563,7 @@ static void testForgedPlaintextDoesNotShadowSealed() {
   reset(true);
   for (uint32_t id = 100; id < 140; ++id) deliver(gAttacker, plainFrame(ESPNOW_V4_TYPE_TEXT, gPeerB, id));
   for (uint32_t id = 100; id < 104; ++id) {
-    deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_METADATA_PUSH, gPeerB, id, text("m")));
+    deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_METADATA_PUSH, gPeerB, id, Frame(sizeof(V4PayloadMetadata), 0)));
   }
   check("forty forged ids: all four genuine sealed frames with those ids are dispatched",
         calls("v4h_metadata_resp_push") == 4);
@@ -603,7 +642,7 @@ static void testFloodLoopSuppression() {
 static void testRelayedLoopSuppression() {
   // Routed handshake frame: plaintext inner frame, group-tagged envelope.
   reset(true);
-  const Frame hello = plainFrame(ESPNOW_V4_TYPE_KEY_EX_HELLO, gFar, 90, text("hello-payload"));
+  const Frame hello = plainFrame(ESPNOW_V4_TYPE_KEY_EX_HELLO, gFar, 90, helloPayload());
   const Frame env = envelope(gRelayR, hello, 90);
   deliver(gRelayR, env);
   check("relayed KEY_EX_HELLO: delivered once, source rewritten to the origin",
@@ -619,7 +658,7 @@ static void testRelayedLoopSuppression() {
   reset(true);
   deliver(gFar, plainFrame(ESPNOW_V4_TYPE_KEY_EX_HELLO, gFar, 91));
   const unsigned forgedCalls = calls("v4hKeyExHello");
-  deliver(gRelayR, envelope(gRelayR, plainFrame(ESPNOW_V4_TYPE_KEY_EX_HELLO, gFar, 91, text("hello-payload")), 91));
+  deliver(gRelayR, envelope(gRelayR, plainFrame(ESPNOW_V4_TYPE_KEY_EX_HELLO, gFar, 91, helloPayload()), 91));
   check("forged direct KEY_EX_HELLO with the same origin and msgId: the relayed one is still delivered",
         calls("v4hKeyExHello") == forgedCalls + 1);
 
@@ -865,19 +904,23 @@ static void testTimeAndSensorFramesThroughRelay() {
   // The envelope budgets of System_ESPNow_Wire.h (espnow_sensor_wire checks
   // that the header has these numbers): 250 minus the outer header, the
   // envelope and the outer tag; and what is left for a sealed frame's plaintext.
-  constexpr size_t ESPNOW_V4_RELAY_MAX_INNER_FRAME = 250 - 32 - 8 - 32;                            // 178
-  constexpr size_t ESPNOW_V4_RELAY_MAX_INNER_PLAINTEXT = ESPNOW_V4_RELAY_MAX_INNER_FRAME - 32 - 16;  // 130
+  constexpr size_t ESPNOW_V4_RELAY_MAX_INNER_FRAME = 250 - 32 - 8 - ESPNOW_V4_BROADCAST_AUTH_TAG_LEN;  // 194
+  constexpr size_t ESPNOW_V4_RELAY_MAX_INNER_PLAINTEXT =
+      ESPNOW_V4_RELAY_MAX_INNER_FRAME - 32 - ESPNOW_V4_AEAD_TAG_LEN;                                    // 146
+  check("the routed budgets: 194-byte inner frame, 146 bytes of sealed plaintext (16-byte group tag)",
+        ESPNOW_V4_RELAY_MAX_INNER_FRAME == 194 && ESPNOW_V4_RELAY_MAX_INNER_PLAINTEXT == 146);
   struct Row { uint8_t type; const char* handler; size_t payloadLen; };
   const Row rows[] = {
     { ESPNOW_V4_TYPE_TIME_SYNC,       "v4hTimeSync",         16 },
     { ESPNOW_V4_TYPE_SENSOR_STATUS,   "v4h_sensor_status",   16 },
     { ESPNOW_V4_TYPE_SENSOR_REQ,      "v4h_sensor_req",      16 },
     { ESPNOW_V4_TYPE_SENSOR_ENVELOPE, "v4h_sensor_envelope", 60 },
-    // A part of a reading at the routed size: header 12 + 118 bytes of text
+    // A part of a reading at the routed size: header 12 + 134 bytes of text
     // is exactly what one sealed frame carries inside the envelope.
     { ESPNOW_V4_TYPE_SENSOR_ENVELOPE, "v4h_sensor_envelope", ESPNOW_V4_RELAY_MAX_INNER_PLAINTEXT },
-    // The battery frame (24 bytes) and the event frame (128 bytes, two under
+    // The battery frame (24 bytes) and the event frame (128 bytes, 18 under
     // the routed budget): one frame each, also through a relay.
+    { ESPNOW_V4_TYPE_FORWARD_LINK,    "v4hForwardLink",      96 },
     { ESPNOW_V4_TYPE_POWER_STATUS,    "v4hPowerStatus",      24 },
     { ESPNOW_V4_TYPE_EVENT_PUSH,      "v4hEventPush",        128 },
   };
@@ -921,6 +964,50 @@ static void testTimeAndSensorFramesThroughRelay() {
 // 2026-11-18): it is not opened, acknowledged or handed on, and the receive
 // path asks the SESSION_UNKNOWN rule once per such frame, so the sender learns
 // it must open a new session. A frame under a live session asks nothing.
+// The group (BROADCAST_AUTH) tag is 16 bytes since 1.0: a frame with it is
+// accepted, a one-bit change of it is dropped, a frame that carries the old
+// 32-byte tag is dropped, and a flooded frame goes on with a 16-byte tag.
+static void testGroupTagIs16Bytes() {
+  check("ESPNOW_V4_BROADCAST_AUTH_TAG_LEN is 16", ESPNOW_V4_BROADCAST_AUTH_TAG_LEN == 16);
+  reset(true);
+  const Frame payload = text("hello mesh");
+  const Frame good = groupFrame(ESPNOW_V4_TYPE_TEXT, gFar, 700, payload, 1);
+  check("a group-signed frame is header + payload + 16 bytes", good.size() == 32 + payload.size() + 16);
+  deliver(gRelayR, good);
+  check("a frame with the 16-byte group tag is accepted",
+        calls("v4h_text") == 1 && gCalls.back().authed);
+  reset(true);
+  Frame flipped = groupFrame(ESPNOW_V4_TYPE_TEXT, gFar, 701, payload, 1);
+  flipped[flipped.size() - 1] ^= 0x01;
+  // keep the transport CRC right so only the tag decides
+  {
+    EspNowV4Header h;
+    std::memcpy(&h, flipped.data(), sizeof h);
+    h.crc16 = v4_crc16_ccitt(flipped.data() + sizeof h, flipped.size() - sizeof h);
+    std::memcpy(flipped.data(), &h, sizeof h);
+  }
+  deliver(gRelayR, flipped);
+  check("one bit changed in the group tag: dropped", gCalls.empty());
+  reset(true);
+  {
+    // The pre-1.0 form: the full 32-byte HMAC appended.
+    EspNowV4Header h = baseHeader(ESPNOW_V4_TYPE_TEXT, gFar, 702);
+    h.flags = ESPNOW_V4_FLAG_BROADCAST_AUTH;
+    h.meshFingerprint = kMeshFp;
+    h.ttl = 1;
+    uint8_t tag[32];
+    toyMac(tag, gGroup.groupKey, 32, reinterpret_cast<const uint8_t*>(&h), 30, payload.data(), payload.size());
+    Frame body = payload;
+    body.insert(body.end(), tag, tag + 32);
+    deliver(gRelayR, assemble(h, body, true));
+  }
+  check("a frame carrying the old 32-byte group tag: dropped", gCalls.empty());
+  reset(true);
+  deliver(gRelayR, groupFrame(ESPNOW_V4_TYPE_TEXT, gFar, 703, payload, 3));
+  check("a flooded frame is forwarded as header + payload + a 16-byte tag",
+        gFanouts == 1 && gLastFanoutLen == 32 + payload.size() + 16);
+}
+
 static void testUnknownSessionAsksForHint() {
   reset(true);
   SessionState lost{};
@@ -946,14 +1033,151 @@ static void testUnknownSessionAsksForHint() {
         calls("v4h_text") == 1 && gUnknownSessionAsks == 0);
 }
 
+// The mesh gate: every 1.0 sender stamps its mesh's key-derived id, never 0
+// (System_ESPNow_MeshIdCore.h). Id 0 and ids of no mesh here are dropped
+// before ACK and dispatch, and counted; a paired sender (a device of our mesh
+// with another passphrase or label) also gets one WARN a minute.
+static void testMeshIdGate() {
+  reset(true);
+  Frame zero = plainFrame(ESPNOW_V4_TYPE_TOPO_REQ, gAttacker, 2001, Frame(8, 0));
+  reinterpret_cast<EspNowV4Header*>(zero.data())->meshFingerprint = 0;
+  deliver(gAttacker, zero);
+  check("a frame with mesh id 0 reaches no handler and is counted (FAILS ON BASE: 0 was 'unscoped')",
+        gCalls.empty() && gEspNowRxUnknownMeshIdDrops == 1 && gEspNowRxUnknownMeshIdLast == 0);
+  check("an unpaired sender's drop is only counted", gWarns == 0);
+
+  Frame foreign = plainFrame(ESPNOW_V4_TYPE_TEXT, gAttacker, 2002, text("x"));
+  reinterpret_cast<EspNowV4Header*>(foreign.data())->meshFingerprint = 0x1234;
+  deliver(gAttacker, foreign);
+  check("another mesh's id is dropped and counted, with no WARN",
+        gCalls.empty() && gEspNowRxUnknownMeshIdDrops == 2 && gEspNowRxUnknownMeshIdLast == 0x1234 && gWarns == 0);
+
+  Frame fromPaired = plainFrame(ESPNOW_V4_TYPE_TEXT, gPeerC, 2003, text("y"));
+  reinterpret_cast<EspNowV4Header*>(fromPaired.data())->meshFingerprint = 0x4321;
+  deliver(gPeerC, fromPaired);
+  check("a paired device with another mesh id is dropped, counted and named in one WARN",
+        gCalls.empty() && gEspNowRxUnknownMeshIdDrops == 3 && gWarns == 1 &&
+        std::memcmp(gEspNowRxUnknownMeshIdLastMac, gPeerC, 6) == 0);
+  reinterpret_cast<EspNowV4Header*>(fromPaired.data())->msgId = 2004;
+  deliver(gPeerC, fromPaired);
+  check("the WARN is limited to one a minute per address", gEspNowRxUnknownMeshIdDrops == 4 && gWarns == 1);
+  gNowMs += 61000;
+  reinterpret_cast<EspNowV4Header*>(fromPaired.data())->msgId = 2005;
+  deliver(gPeerC, fromPaired);
+  check("a minute later it is said again", gWarns == 2);
+
+  uint8_t stranger[6] = {0x02, 0xEE, 0x00, 0x00, 0x00, 0x77};
+  Frame hello = plainFrame(ESPNOW_V4_TYPE_KEY_EX_HELLO, stranger, 2006, Frame(8, 0));
+  reinterpret_cast<EspNowV4Header*>(hello.data())->meshFingerprint = 0x2222;
+  deliver(stranger, hello);
+  check("a key exchange with another mesh id (wrong passphrase) gets a WARN", gWarns == 3);
+}
+
+// Header flag classes (1.0): a bit in 0xF000 this firmware does not know drops
+// the frame before it is opened, acknowledged, remembered or forwarded by
+// flooding, and is counted; any other unknown bit is ignored. A relay does
+// not look inside a routed envelope; the final receiver checks the inner frame.
+static void testMustUnderstandFlags() {
+#ifdef HW1_MUST_UNDERSTAND
+  check("the must-understand class is 0xF000 and 1.0 knows none of it",
+        ESPNOW_V4_FLAGS_MUST_UNDERSTAND == 0xF000 && ESPNOW_V4_FLAGS_KNOWN_MUST_UNDERSTAND == 0 &&
+        ESPNOW_V4_FLAGS_UNKNOWN_MUST_UNDERSTAND == 0xF000);
+  uint32_t id = 700;
+  for (uint16_t bit : {0x1000, 0x2000, 0x4000, 0x8000}) {
+    reset(true);
+    const uint32_t drops = gEspNowRxMustUnderstandDrops;
+    const uint32_t msgId = ++id;
+    deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_TEXT, gPeerB, msgId, text("hi"), 0, 1,
+                                (uint16_t)(ESPNOW_V4_FLAG_ACK_REQ | bit)));
+    char what[160];
+    std::snprintf(what, sizeof what, "flag 0x%04X on a sealed frame: no handler, no ACK, not opened, counted once "
+                  "(FAILS WITHOUT THE RULE)", (unsigned)bit);
+    check(what, gCalls.empty() && gAcksSent == 0 && gUnwrapCalls == 0 &&
+                gEspNowRxMustUnderstandDrops == drops + 1);
+    // Not remembered: the same msgId without the bit is a new frame.
+    deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_TEXT, gPeerB, msgId, text("hi")));
+    std::snprintf(what, sizeof what, "flag 0x%04X: the frame left no duplicate entry (the same msgId is "
+                  "delivered without the bit)", (unsigned)bit);
+    check(what, calls("v4h_text") == 1 && gAcksSent == 1);
+  }
+
+  // A group-tagged broadcast with the bit is not flooded on.
+  reset(true);
+  {
+    const Frame plain = groupFrame(ESPNOW_V4_TYPE_TEXT, gFar, 750, text("hello mesh"), 3);
+    Frame f = plain;
+    EspNowV4Header h;
+    std::memcpy(&h, f.data(), sizeof h);
+    h.flags = (uint16_t)(h.flags | 0x1000);
+    std::memcpy(f.data(), &h, sizeof h);
+    deliver(gRelayR, f);
+    check("a flooded broadcast with flag 0x1000: not dispatched, not forwarded",
+          calls("v4h_text") == 0 && gRelayMetrics.floodForwards == 0 && gFanouts == 0);
+  }
+
+  // Unknown bits outside the class are ignored (the old ENCRYPTED, COMPRESS,
+  // STREAM_END, HANDSHAKE and PRIORITY_HIGH values among them).
+  for (uint16_t bit : {0x0002, 0x0004, 0x0010, 0x0020, 0x0040, 0x0400, 0x0800}) {
+    reset(true);
+    const uint32_t drops = gEspNowRxMustUnderstandDrops;
+    deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_TEXT, gPeerB, ++id, text("hi"), 0, 1,
+                                (uint16_t)(ESPNOW_V4_FLAG_ACK_REQ | bit)));
+    char what[120];
+    std::snprintf(what, sizeof what, "flag 0x%04X outside the class: ignored, the frame is delivered and ACKed",
+                  (unsigned)bit);
+    check(what, calls("v4h_text") == 1 && gAcksSent == 1 && gEspNowRxMustUnderstandDrops == drops);
+  }
+
+  // Routed: the final receiver checks the inner frame when it re-enters.
+  reset(true);
+  {
+    const uint32_t drops = gEspNowRxMustUnderstandDrops;
+    const Frame inner = sealedFrame(gSessB, ESPNOW_V4_TYPE_TIME_SYNC, gPeerB, 760, Frame(16, 0x5A), 0, 1, 0x1000);
+    deliver(gRelayR, envelope(gRelayR, inner, 760));
+    check("a routed inner frame with flag 0x1000: the envelope is taken, the inner frame dropped at the final "
+          "receiver and counted",
+          calls("v4hTimeSync") == 0 && gEspNowRxMustUnderstandDrops == drops + 1);
+  }
+  // A relay forwards an envelope for someone else without looking inside it.
+  reset(true);
+  {
+    const Frame inner = sealedFrame(gSessB, ESPNOW_V4_TYPE_TIME_SYNC, gPeerB, 770, Frame(16, 0x5A), 0, 1, 0x1000);
+    V4PayloadRelayData env{};
+    std::memcpy(env.finalDst, gFar, 6);
+    env.hopsUsed = 1;
+    Frame body(sizeof env + inner.size());
+    std::memcpy(body.data(), &env, sizeof env);
+    std::memcpy(body.data() + sizeof env, inner.data(), inner.size());
+    const uint32_t drops = gEspNowRxMustUnderstandDrops;
+    gRouteNext = gRelayR2;
+    deliver(gRelayR, groupFrame(ESPNOW_V4_TYPE_RELAY_DATA, gRelayR, 770, body, 2));
+    check("a relay forwards an envelope whose inner frame carries 0x1000, unopened and uncounted",
+          gRelayForwards == 1 && gEspNowRxMustUnderstandDrops == drops);
+  }
+
+  // One line a minute for the drops.
+  reset(true);
+  gNowMs += 120000;
+  const unsigned warnsBefore = gWarns;
+  deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_TEXT, gPeerB, 780, text("a"), 0, 1, 0x2000));
+  deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_TEXT, gPeerB, 781, text("b"), 0, 1, 0x2000));
+  check("two drops inside a minute print one warning", gWarns == warnsBefore + 1 &&
+        gLastWarn.find("must be understood") != std::string::npos);
+#else
+  check("the tree has the must-understand header flag drop (gEspNowRxMustUnderstandDrops)", false);
+#endif
+}
+
 int main() {
   std::setvbuf(stdout, nullptr, _IOLBF, 0);  // keep the case lines if a pre-fix tree aborts
+  testMeshIdGate();
   testForgedPlaintextDoesNotShadowSealed();
   testAuthenticatedFramesDoNotShadowEachOther();
   testSealedRetriesStillSuppressed();
   testFloodLoopSuppression();
   testRelayedLoopSuppression();
   testTimeAndSensorFramesThroughRelay();
+  testGroupTagIs16Bytes();
   testFragmentIndexConsistency();
   testHeartbeatPolicy();
   testSlotCreation();
@@ -961,6 +1185,7 @@ int main() {
   testMetadataTableFull();
   testReplayedHeartbeatFromInventedSource();
   testUnknownSessionAsksForHint();
+  testMustUnderstandFlags();
   std::printf("espnow_rx_frontend: %u failure%s\n", gFailures, gFailures == 1 ? "" : "s");
   return gFailures ? 1 : 0;
 }

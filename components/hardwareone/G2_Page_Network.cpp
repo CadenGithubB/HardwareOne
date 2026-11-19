@@ -4,9 +4,10 @@
 // See header for the contract. Top-level Network chooser drills into one
 // of three subsystem submenus (WiFi / ESP-NOW / Bluetooth) plus several
 // list sub-pages. Tap-only — anything in the OLED that needs text input
-// (e.g. wifiadd <ssid> <password>, espnowsetname) is omitted.
+// (e.g. wifiadd <ssid> <password>, devicename) is omitted.
 
 #include "WebServer_Handle.h"
+#include "System_DeviceName.h"  // devicename::kMaxLen (the device name's 31 bytes)
 #include "G2_Page_Network.h"
 
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
@@ -1785,7 +1786,7 @@ static void handleWifiSavedActionTap(uint32_t idx) {
 }
 
 #if ENABLE_ESPNOW
-// onCommit for the ESPNow name editor — submits `espnowsetname "<name>"`
+// onCommit for the ESPNow name editor — submits `devicename "<name>"`
 // through cmd_exec so the rename runs as the paired-by user and goes
 // through the same auth+log path as the CLI form. Completion callback
 // re-renders the ESPNow submenu so the "Name:" row reflects the new
@@ -1801,7 +1802,7 @@ static void espnowNameCommit(const char* text) {
   // Quoted like the login/filerename submits: the keyboard has a Space row
   // but no double-quote, so wrapping keeps a spaced name as one arg (the
   // handler then rejects it with its charset error instead of mangling).
-  String line = String("espnowsetname \"") + text + "\"";
+  String line = String("devicename \"") + text + "\"";
   G2CmdCookie cookie{};
   cookie.targetPage   = g2GetHijackPage();
   cookie.targetNetSub = (uint8_t)gNetSub;
@@ -1818,12 +1819,12 @@ static void espnowNameCancel() {
 }
 
 // Shared keyboard launch for the Name row and the unnamed OFF→ON tap.
-  // maxLen 19 matches the V4 wire field (20 bytes including NUL).
+  // maxLen is the device name's 31 bytes (System_DeviceName.h).
 static bool beginEspNowNameEntry(TextEntryCommitFn onCommit) {
   TextEntryConfig cfg = {};
   cfg.prompt   = "ESPNow Name";
   cfg.initial  = gSettings.espnowDeviceName.c_str();
-  cfg.maxLen   = 19;
+  cfg.maxLen   = devicename::kMaxLen;
   cfg.onCommit = onCommit;
   cfg.onCancel = espnowNameCancel;
   if (!g2BeginTextEntry(cfg)) {
@@ -1841,7 +1842,7 @@ static void espnowNameThenOpenCommit(const char* text) {
     showEspNowMenu();
     return;
   }
-  String line = String("espnowsetname \"") + text + "\"";
+  String line = String("devicename \"") + text + "\"";
   G2CmdCookie cookie{};
   cookie.targetPage   = g2GetHijackPage();
   cookie.targetNetSub = (uint8_t)gNetSub;

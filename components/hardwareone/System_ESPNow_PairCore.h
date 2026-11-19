@@ -36,7 +36,7 @@ constexpr uint32_t kResendMs = 1500;               // control-frame retransmit i
 constexpr uint8_t kAnswerResends = 2;              // unsolicited extra copies of an answer
 constexpr uint32_t kAnswerMemoryMs = kRequestTtlMs; // a repeated request gets the same answer
 constexpr uint32_t kOutcomeShowMs = 30000;         // how long a UI shows a finished request
-constexpr size_t kNameCap = 24;
+constexpr size_t kNameCap = 32;                // a device name (31 bytes, System_DeviceName.h) + NUL
 
 enum class Answer : uint8_t { None, Accept, Reject };
 // What the target's REQUEST handler does: nothing, send an answer, or record

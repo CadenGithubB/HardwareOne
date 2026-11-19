@@ -1,7 +1,7 @@
 // Host harness for test_espnow_start_order.py.
 //
 // The runner pastes the production Settings::MeshIdentity record into the
-// Settings double, and meshFingerprintForLabel, recomputeAllMeshFingerprints,
+// Settings double, and meshIdRefreshAll,
 // initPrimaryMeshFromLegacySettings and (when the tree has it) the
 // PrimaryMeshBootstrap guard at the production marker. ENABLE_BONDED_MODE comes
 // from the command line (compiled once per value). A "start" here is what
@@ -64,15 +64,13 @@ static bool requestSettingsPersist() {
 }
 static void sodium_memzero(void* p, size_t n) { std::memset(p, 0, n); }
 
-// CRC16-CCITT (0xFFFF start), as System_ESPNow_Wire.
-static uint16_t v4_crc16_ccitt(const uint8_t* data, size_t len) {
-  uint16_t crc = 0xFFFF;
-  for (size_t i = 0; i < len; ++i) {
-    crc ^= (uint16_t)data[i] << 8;
-    for (int b = 0; b < 8; ++b) crc = (crc & 0x8000) ? (uint16_t)((crc << 1) ^ 0x1021) : (uint16_t)(crc << 1);
-  }
-  return crc;
-}
+// The mesh id (System_ESPNow_MeshIdCore.h) comes from the mesh key, which a
+// start never derives: the ids stand as stored (crypto is "not ready" here, so
+// meshIdRefreshAll leaves them), and a mesh without a passphrase has none (0).
+static bool espnowCryptoReady() { return false; }
+static uint8_t meshKeysRefreshIds() { return 0; }
+// The clash pass that follows the refresh (espnow_mesh_slots runs the real one).
+static void meshIdResolveClashes() {}
 
 // INSERT_PRODUCTION
 
@@ -83,9 +81,6 @@ static void resetSettings() {
 
 static bool same(const String& a, const char* b) { return std::strcmp(a.c_str(), b) == 0; }
 
-static uint16_t fp(const char* label) {
-  return v4_crc16_ccitt(reinterpret_cast<const uint8_t*>(label), std::strlen(label));
-}
 
 // What a start may do to slot 0 between the bootstrap and its end: stretch
 // the passphrase under the label slot 0 has then.
@@ -107,7 +102,7 @@ static void startAttempt(bool succeeds, bool stretch = false, During during = nu
 #else
 static void startAttempt(bool, bool stretch = false, During during = nullptr) {
   initPrimaryMeshFromLegacySettings();
-  recomputeAllMeshFingerprints();
+  meshIdRefreshAll();
   if (stretch) stretchSlot0();
   if (during) during();
 }
@@ -115,8 +110,7 @@ static void startAttempt(bool, bool stretch = false, During during = nullptr) {
 
 // Commands a user can run during the start (what each does to the settings).
 static void renamePrimaryToHome() {
-  gSettings.meshes[0].label = "home";
-  gSettings.meshes[0].fingerprint = meshFingerprintForLabel(String("home"));
+  gSettings.meshes[0].label = "home";  // a rename of a mesh without a passphrase keeps its id (none)
   gSettings.meshes[0].passphraseStretchedKeyValid = false;
 }
 static void setPrimaryPassphrase() {
@@ -131,7 +125,7 @@ static void setPrimaryPassphraseStretchFailed() {
 }
 static void addLabInSlot1() {
   gSettings.meshes[1].label = "lab";
-  gSettings.meshes[1].fingerprint = meshFingerprintForLabel(String("lab"));
+  gSettings.meshes[1].fingerprint = 0;  // added without a passphrase: no mesh id
   gSettings.meshes[1].enabled = true;
 }
 static void disablePrimary() {
@@ -146,7 +140,7 @@ static void bondOnPrimary() {
 #endif
 static bool primaryAsMade() {
   const Settings::MeshIdentity& m0 = gSettings.meshes[0];
-  return same(m0.label, "primary") && m0.enabled && m0.isDefault && m0.fingerprint == fp("primary");
+  return same(m0.label, "primary") && m0.enabled && m0.isDefault && m0.fingerprint == 0;  // no passphrase: no id
 }
 
 static bool slot0Empty() {
@@ -169,7 +163,8 @@ int main() {
   startAttempt(true);
   CHECK(same(gSettings.meshes[0].label, "primary") && gSettings.meshes[0].enabled && gSettings.meshes[0].isDefault,
         "S2 slot 0 after a good start: '%s'", gSettings.meshes[0].label.c_str());
-  CHECK(gSettings.meshes[0].fingerprint == fp("primary"), "S2 fingerprint 0x%04X", gSettings.meshes[0].fingerprint);
+  CHECK(gSettings.meshes[0].fingerprint == 0, "S2 a mesh without a passphrase got mesh id 0x%04X (FAILS ON BASE: CRC of the label)",
+        gSettings.meshes[0].fingerprint);
 
   // S3: failed starts, then a good one: "primary" appears once, as the default.
   resetSettings();
@@ -180,21 +175,23 @@ int main() {
   CHECK(same(gSettings.meshes[0].label, "primary") && gSettings.meshes[0].isDefault,
         "S3 the good start after failures did not create primary");
 
-  // S4: a configured slot 0 is left alone by a failed start (its fingerprint is
-  // only recomputed from its label).
+  // S4: a configured slot 0 is left alone by a failed start (its stored mesh
+  // id stays; only its key could change it).
   resetSettings();
   gSettings.meshes[0].label = "work";
+  gSettings.meshes[0].fingerprint = 0x1234;
   gSettings.meshes[0].passphrase = "pw-work";
   gSettings.meshes[0].enabled = true;
   gSettings.meshes[0].isDefault = true;
   startAttempt(false);
   CHECK(same(gSettings.meshes[0].label, "work") && same(gSettings.meshes[0].passphrase, "pw-work") &&
         gSettings.meshes[0].enabled && gSettings.meshes[0].isDefault, "S4 a configured slot 0 was changed");
-  CHECK(gSettings.meshes[0].fingerprint == fp("work"), "S4 fingerprint 0x%04X", gSettings.meshes[0].fingerprint);
+  CHECK(gSettings.meshes[0].fingerprint == 0x1234, "S4 mesh id 0x%04X", gSettings.meshes[0].fingerprint);
 
   // S5: slot 0 emptied with another mesh in use: no start creates "primary".
   resetSettings();
   gSettings.meshes[2].label = "bench";
+  gSettings.meshes[2].fingerprint = 0x2345;
   gSettings.meshes[2].enabled = true;
   gSettings.meshes[2].isDefault = true;
   startAttempt(false);
@@ -202,7 +199,7 @@ int main() {
   startAttempt(true);
   CHECK(slot0Empty(), "S5 good start: slot 0 is '%s'", gSettings.meshes[0].label.c_str());
   CHECK(same(gSettings.meshes[2].label, "bench") && gSettings.meshes[2].isDefault &&
-        gSettings.meshes[2].fingerprint == fp("bench"), "S5 slot 2 changed");
+        gSettings.meshes[2].fingerprint == 0x2345, "S5 slot 2 changed");
 
   // S6: an unlabelled slot 0 that already holds a passphrase keeps it, and a
   // failed start puts its flags back.
@@ -261,7 +258,7 @@ int main() {
   resetSettings();
   startAttempt(false, false, renamePrimaryToHome);
   CHECK(same(gSettings.meshes[0].label, "home") && gSettings.meshes[0].enabled && gSettings.meshes[0].isDefault &&
-            gSettings.meshes[0].fingerprint == fp("home") && gPersists == 0,
+            gSettings.meshes[0].fingerprint == 0 && gPersists == 0,
         "S10 a rename during the start was undone: slot 0 '%s' enabled=%d default=%d",
         gSettings.meshes[0].label.c_str(), (int)gSettings.meshes[0].enabled, (int)gSettings.meshes[0].isDefault);
   resetSettings();

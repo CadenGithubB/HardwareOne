@@ -94,6 +94,10 @@ enum Reason : uint8_t {
   kReasonBondedElsewhere = 3,
   kReasonEnded = 4,
   kReasonRoleConflict = 5,
+  // Local only, never sent (outside the wire range 1-5): the partner's session
+  // capability word lacks the bond bit, so its firmware was built without bond
+  // mode and cannot be a bond partner (System_ESPNow_SessionCapsCore.h).
+  kReasonNoBondBuild = 0x80,
 };
 
 // BOND_REQUEST flags. Fresh: the bond was just set up or the session just came
@@ -119,6 +123,12 @@ struct Local {
   uint8_t partner[6];  // valid when bonded
   uint8_t role;
   bool roleChosen;     // this device's user chose the role (bondrole)
+  // The partner's session capability word lacks the bond bit (its build has
+  // no bond mode): no request is sent to it. `partnerNoBondConfirmed`: that
+  // word is its current one (SessionCapsCore.h), so the user is told and the
+  // agreement says so; otherwise the request only waits.
+  bool partnerNoBond;
+  bool partnerNoBondConfirmed;
 };
 
 // A request or notice a handler received, kept until the owner's tick takes
@@ -192,6 +202,7 @@ inline const char* reasonPhrase(uint8_t reason) {
     case kReasonBondedElsewhere: return "is bonded to another device";
     case kReasonEnded:           return "ended the bond";
     case kReasonRoleConflict:    return "is bonded to this device with the same role";
+    case kReasonNoBondBuild:     return "was built without bond mode, so it cannot be a bond partner";
     default:                     return "gave no answer";
   }
 }
@@ -204,6 +215,7 @@ inline const char* reasonKey(uint8_t reason) {
     case kReasonBondedElsewhere: return "bonded_elsewhere";
     case kReasonEnded:           return "ended";
     case kReasonRoleConflict:    return "role_conflict";
+    case kReasonNoBondBuild:     return "no_bond_build";
     default:                     return "";
   }
 }
@@ -319,8 +331,22 @@ inline void askSoon(State& s, uint32_t nowMs) {
 // ENDED belongs to the session before this one. And a partner that restarted
 // counts its requests from 1 again: held against the old number, they would
 // all be void, and it can only reach this device over a new session.
-inline bool onSessionUp(State& s, uint32_t nowMs, bool answeredHandshake) {
+//
+// `partnerCanBond` false: the session's capability word says the partner's
+// build has no bond mode. It is not online and is not asked (planRequest holds
+// the request and tells the user). A session whose word has the bond bit ends
+// a kReasonNoBondBuild decline: the partner was reflashed, and is asked as new.
+inline bool onSessionUp(State& s, uint32_t nowMs, bool answeredHandshake, bool partnerCanBond = true) {
   s.partnerVoidSet = false;
+  if (!partnerCanBond) {
+    s.requestDue = false;
+    s.requestNotBeforeMs = 0;
+    return false;
+  }
+  if (s.agreement == Agreement::Declined && s.reason == kReasonNoBondBuild) {
+    s.agreement = Agreement::Unknown;
+    s.reason = kReasonNone;
+  }
   const bool declined = s.agreement == Agreement::Declined;
   if (declined) {
     askSoon(s, nowMs);
@@ -757,9 +783,29 @@ struct RequestPlan {
   bool send;           // BOND_REQUEST to the partner with seq and flags
   bool watchAck;       // ... and count a missing acknowledgement against the session
   bool kickHandshake;  // declined partner, no session: one backed-off handshake start
+  bool noBondBuildLine; // the partner just became "built without bond mode": tell the user once
   uint16_t seq;
   uint8_t flags;
 };
+
+// The partner's session says its build has no bond mode (Local.partnerNoBond).
+// Nothing is sent; looked at again in a minute. With a confirmed word the
+// agreement becomes Declined with kReasonNoBondBuild; true when that is new,
+// so the user is told once, not on every session. reset() clears the reason,
+// so a settings change tells the user again.
+inline bool holdForNoBondBuild(State& s, uint32_t nowMs, bool confirmed) {
+  s.requestDue = false;
+  s.requestNotBeforeMs = 0;
+  s.nextRepeatMs = deadlineAfter(nowMs, kRequestRepeatMs);
+  if (!confirmed) return false;
+  if (s.agreement == Agreement::Declined && s.reason == kReasonNoBondBuild) return false;
+  s.agreement = Agreement::Declined;
+  s.reason = kReasonNoBondBuild;
+  s.roleConflict = false;
+  s.announcedAgreed = false;
+  s.sameRoleBeats = 0;
+  return true;
+}
 
 // Cheap test for the tick: is there anything to take or send?
 inline bool hasWork(const State& s, uint32_t nowMs) {
@@ -803,7 +849,22 @@ inline RequestPlan planRequest(State& s, const Local& local, uint32_t nowMs, boo
   const bool repeat = !s.requestDue && s.agreement != Agreement::Agreed &&
                       !deadlinePending(s.nextRepeatMs, nowMs);
   if (!asked && !repeat) return plan;
+  // The owner's rule: no BOND_REQUEST to a partner whose session says its build
+  // has no bond mode. Checked here, at send time, so neither a turn of the tick
+  // between the session going ACTIVE and onSessionUp nor a reset() can send one.
+  if (sessionActive && local.partnerNoBond) {
+    plan.noBondBuildLine = holdForNoBondBuild(s, nowMs, local.partnerNoBondConfirmed);
+    return plan;
+  }
   if (!sessionActive) {
+    if (s.agreement == Agreement::Declined && s.reason == kReasonNoBondBuild) {
+      // No handshake is started for a partner without bond mode: a new
+      // session (the partner's own traffic, or after a reflash) asks again.
+      s.requestDue = false;
+      s.requestNotBeforeMs = 0;
+      s.nextRepeatMs = deadlineAfter(nowMs, kRequestRepeatMs);
+      return plan;
+    }
     if (s.agreement == Agreement::Declined) {
       s.requestDue = false;
       s.requestNotBeforeMs = 0;

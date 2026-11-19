@@ -93,8 +93,8 @@ def snapshot(runner: MeshRunner) -> dict:
         state["boots"][key] = boot
         autostart = autostart_value(runner.command(key, "espnowautostart"))
         require(autostart, f"{key}: ESP-NOW autostart must already be enabled")
-        name_output = runner.command(key, "espnowsetname")
-        name = re.search(r"Device name: ([A-Za-z0-9_-]+)", name_output)
+        name_output = runner.command(key, "devicename")
+        name = re.search(r"Device name: ([A-Za-z0-9-]+)", name_output)
         require(name is not None and name.group(1) == spec["name"], f"{key}: stored device name differs from expected")
         meshes = runner.json_command(key, "espnowmeshes listjson", "meshes", schema=False)
         mesh = next(row for row in meshes["meshes"] if row["label"] == runner.credentials["mesh_label"])

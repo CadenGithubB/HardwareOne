@@ -160,7 +160,7 @@ def main():
                     key = job['board']
                     responses = []
                     for command in (
-                        f'blename HW1_{key.upper()}_BLE',
+                        f'devicename HW1-{key.upper()}-BLE',
                         f'blesecret {raw_ble_secret(credentials["ble_secret"])}',
                         'blesecure on', 'openble',
                         f'probeap HW1_{key.upper()}_TEST {command_token(credentials["ap_password"])}',

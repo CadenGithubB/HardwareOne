@@ -50,6 +50,10 @@
 
 #include "System_CommandReply.h"
 #include "System_MacText.h"
+#include "System_DeviceName.h"  // the device-name rule (capability receive)
+#if HW1_HAVE_CAPS
+#include "System_ESPNow_SessionCapsCore.h"   // the session capability word (copied beside this unit)
+#endif
 #if HW1_HAVE_AGREE
 #include "System_ESPNow_BondAgreeCore.h"
 #endif
@@ -261,6 +265,13 @@ struct V4RxCtx {
   uint16_t payloadLen;
   const char* deviceName;
   bool isPaired = true;
+  // As System_ESPNow_RxCtx.h: copy what the frame has, zero the rest.
+  template <class T>
+  void read(T& out) const {
+    std::memset(&out, 0, sizeof(T));
+    const size_t n = payloadLen < sizeof(T) ? payloadLen : sizeof(T);
+    if (payload && n) std::memcpy(&out, payload, n);
+  }
 };
 
 // ---- Platform doubles ----------------------------------------------------------
@@ -315,6 +326,18 @@ static bool gSessionUp = true;
 static const uint8_t* gSessionDownFor = nullptr;   // this peer's session is not ACTIVE
 [[maybe_unused]] static bool bondSessionActiveWith(const uint8_t* mac) {
   return gSessionUp && !(gSessionDownFor && std::memcmp(mac, gSessionDownFor, 6) == 0);
+}
+// The capability word a peer's session handshake carried (production:
+// System_ESPNow.cpp). Unknown (false) unless a case sets gCapsFor: the older
+// cases model peers whose word does not gate anything.
+static const uint8_t* gCapsFor = nullptr;
+static uint32_t gCapsWord = 0;
+static bool gCapsConfirmed = true;
+[[maybe_unused]] static bool espnowPeerSessionCaps(const uint8_t* mac, uint32_t* caps, bool* confirmed = nullptr) {
+  if (!gCapsFor || !mac || std::memcmp(mac, gCapsFor, 6) != 0 || !bondSessionActiveWith(mac)) return false;
+  if (caps) *caps = gCapsWord;
+  if (confirmed) *confirmed = gCapsConfirmed;
+  return true;
 }
 
 enum RxKind { RX_CAP_REQ, RX_CAP_RESP, RX_STATUS_REQ, RX_SETTINGS_REQ };
@@ -614,7 +637,7 @@ static void noteFileSend(const uint8_t* mac, uint8_t kind) {
   noteFileSend(mac, BOND_FILE_KIND_SCHEMA);
 }
 // Status (processMeshHeartbeats 9j / 9j2).
-struct BondPeerStatus { uint16_t sensorEnabledMask; uint16_t sensorConnectedMask; uint32_t freeHeap; };
+struct BondPeerStatus { uint32_t sensorEnabledMask; uint32_t sensorConnectedMask; uint32_t freeHeap; };
 [[maybe_unused]] static void buildLocalBondStatus(BondPeerStatus& st) { st = BondPeerStatus{1, 1, 100000}; }
 enum RemoteSensorType { REMOTE_SENSOR_THERMAL = 0, REMOTE_SENSOR_TOF = 1, REMOTE_SENSOR_MAX = 2 };
 static bool gStreamThermal = true;
@@ -723,6 +746,9 @@ static void resetWorld(const uint8_t self[6]) {
   gSettingsTouched = false;
   gSessionUp = true;
   gSessionDownFor = nullptr;
+  gCapsFor = nullptr;
+  gCapsWord = 0;
+  gCapsConfirmed = true;
   gSentTypes.clear();
   gFrames.clear();
   gPosted.clear();
@@ -995,6 +1021,22 @@ static void caseCapRespInFlight() {
   deliver(kPartnerA, RX_CAP_RESP);
   CHECK(gEspNow->bondSyncInFlight == BOND_SYNC_NONE && gEspNow->bondSyncRetryCount == 0,
         "the answer to CAP_REQ did not end the request");
+  // A CAP_RESP from a later sender (a field appended after 1.0): read up to the
+  // fields known here and cached (it used to need exactly sizeof).
+  gEspNow->lastRemoteCapValid = false;
+  {
+    uint8_t longer[sizeof(CapabilitySummary) + 8];
+    std::memset(longer, 0, sizeof longer);
+    CapabilitySummary sent = {};
+    sent.sensorMask = 0x80000001u;
+    std::memcpy(longer, &sent, sizeof sent);
+    std::memset(longer + sizeof sent, 0x77, 8);
+    esp_now_recv_info info{kPartnerA};
+    V4RxCtx ctx{&info, longer, (uint16_t)sizeof longer, "partner"};
+    v4h_bond_cap_resp(ctx);
+  }
+  CHECK(gEspNow->lastRemoteCapValid && gEspNow->lastRemoteCap.sensorMask == 0x80000001u,
+        "a CAP_RESP longer than the struct was not cached (valid=%d)", (int)gEspNow->lastRemoteCapValid);
 }
 
 // bondconnect starts the handshake at once on the initiator side, as a manual
@@ -1529,7 +1571,33 @@ static void caseSettingsRequestOnce() {
         "no retry after BOND_SYNC_RETRY_MS (%zu requests)", framesTo(kPartnerA, kSentSettingsReq, false));
 }
 
+// BOND_CAP_RESP's device name follows the one rule (System_DeviceName.h): an
+// invalid or unterminated name is stored as none, so every page that prints
+// lastRemoteCap.deviceName gets a valid name or "".
+static void caseCapRespName() {
+  resetWorld(kWorkerSelf);
+  gSettings.bondModeEnabled = true;
+  gSettings.bondPeerMac = "02:11:22:33:44:01";
+  esp_now_recv_info info{kPartnerA};
+  auto send = [&](const char* name, size_t len) {
+    CapabilitySummary cap = {};
+    std::memcpy(cap.deviceName, name, len);
+    V4RxCtx ctx{&info, reinterpret_cast<const uint8_t*>(&cap), sizeof(cap), "partner"};
+    v4h_bond_cap_resp(ctx);
+  };
+  send("bad name!", 9);
+  CHECK(gEspNow->lastRemoteCapValid && gEspNow->lastRemoteCap.deviceName[0] == '\0',
+        "an invalid capability name is stored as none (got '%.32s')", gEspNow->lastRemoteCap.deviceName);
+  const std::string n31(31, 'q');
+  send(n31.c_str(), 31);
+  CHECK(n31 == gEspNow->lastRemoteCap.deviceName, "a 31-byte capability name is stored whole");
+  const std::string full(sizeof(CapabilitySummary::deviceName), 'x');
+  send(full.c_str(), full.size());
+  CHECK(gEspNow->lastRemoteCap.deviceName[0] == '\0', "a name field without its NUL is stored as none");
+}
+
 int main() {
+  caseCapRespName();
   caseSettingsRequestOnce();
   caseBenchOrder();
   caseSwitchPartner();

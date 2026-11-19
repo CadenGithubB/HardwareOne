@@ -100,6 +100,8 @@ def main():
     defines = [m.group(0) for m in WIRE_DEFINES.finditer(wire)]
     if len(defines) != 6:
         sys.exit(f'FAIL extraction: expected six ESPNOW_V4_* #defines, found {len(defines)}')
+    # The receive table's minimum lengths (one per opcode).
+    defines += re.findall(r'^#define ESPNOW_V4_MINLEN_\w+\b.*$', wire, re.MULTILINE)
     hops = re.search(r'^#define MESH_ROUTE_MAX_HOPS\b.*$', router, re.MULTILINE)
     if not hops:
         sys.exit('FAIL extraction: MESH_ROUTE_MAX_HOPS not found in System_ESPNow_Router.h')
@@ -136,7 +138,7 @@ def main():
               + one(source, 'struct V4OpcodeEntry') + ';')
     table = one(source, 'static const V4OpcodeEntry kV4HandlerTable[]') + ';'
     size = 'static constexpr size_t kV4HandlerTableSize = sizeof(kV4HandlerTable) / sizeof(kV4HandlerTable[0]);'
-    handlers = sorted(set(re.findall(r'\{\s*ESPNOW_V4_TYPE_\w+\s*,[^,]*,\s*(\w+)\s*\}', table)))
+    handlers = sorted(set(re.findall(r'\{\s*ESPNOW_V4_TYPE_\w+\s*,[^,]*,\s*ESPNOW_V4_MINLEN_\w+\s*,\s*(\w+)\s*\}', table)))
     for name in REAL_HANDLERS:
         if name not in handlers:
             sys.exit(f'FAIL extraction: kV4HandlerTable does not name {name}')
@@ -176,13 +178,25 @@ def main():
     slots += [one(source, 'void noteMeshPeerRxActivity(const uint8_t* mac, EspNowMeshRxKind kind, int8_t hbRssi, int8_t linkRssi'),
               release]
 
-    relay = [one(source, 'static inline bool v4_flood_type_allowed('),
+    relay = [one(source, 'static bool v4_group_tag('),
+             one(source, 'static inline bool v4_flood_type_allowed('),
              last(source, 'static bool v4_routed_type_allowed('),
              one(source, 'static void v4_relay_maybe_forward('),
              one(source, 'static void v4h_relay_data(')]
     incoming = source[source.rindex('static bool v4_try_handle_incoming('):]
     incoming = extract_block(incoming, 'static bool v4_try_handle_incoming(')
+    # The must-understand drop counter (1.0 header flag classes), where the tree has it.
+    must = re.search(r'^static uint32_t gEspNowRxMustUnderstandDrops = 0;', source, re.MULTILINE)
+    if must:
+        incoming = '#define HW1_MUST_UNDERSTAND 1\n' + must.group(0) + '\n\n' + incoming
 
+    # The mesh gate's counters and the function that counts and warns.
+    counters_at = source.find('static uint32_t gEspNowRxUnknownMeshIdDrops')
+    counters_end = source.find('static uint8_t gEspNowRxUnknownMeshIdLastMac[6] = {};')
+    if counters_at < 0 or counters_end < counters_at:
+        sys.exit('FAIL extraction: the unknown-mesh-id counters are not in System_ESPNow.cpp')
+    gate = (source[counters_at:counters_end] + 'static uint8_t gEspNowRxUnknownMeshIdLastMac[6] = {};\n\n'
+            + one(source, 'static void espnowNoteUnknownMeshId('))
     harness = (HERE / 'espnow_rx_frontend_harness.cpp').read_text()
     for tag, value in [('// INSERT_WIRE', wire_types),
                        ('// INSERT_PEER_TYPES', peer_types),
@@ -197,6 +211,7 @@ def main():
                        ('// INSERT_LOOKUP', one(source, 'static const V4OpcodeEntry* v4_dispatch_lookup(')),
                        ('// INSERT_DISPATCH', one(source, 'static bool v4_dispatch_table_try(')),
                        ('// INSERT_OUTCOME', one(source, 'enum class V4ReasmOutcome') + ';'),
+                       ('// INSERT_MESH_ID_GATE', gate),
                        ('// INSERT_INCOMING', incoming)]:
         if harness.count(tag) != 1:
             sys.exit(f'FAIL: harness marker {tag} must appear exactly once')
@@ -206,6 +221,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix='hw1-espnow-rx-frontend-') as tmp:
         unit, exe = Path(tmp) / 'test.cpp', Path(tmp) / 'test'
         (unit.parent / 'System_MacText.h').write_text((HERE.parents[1] / 'System_MacText.h').read_text())
+        (unit.parent / 'System_DeviceName.h').write_text((HERE.parents[1] / 'System_DeviceName.h').read_text())
         (unit.parent / 'System_ESPNow_GroupCore.h').write_text(
             (HERE.parents[1] / 'System_ESPNow_GroupCore.h').read_text())
         unit.write_text(harness)
@@ -224,6 +240,15 @@ def main():
     # predates the helpers).
     if 'v4_dedup_frame_seen(recv_info->src_addr, h, wasAuthenticated' not in incoming:
         failures.append('v4_try_handle_incoming does not choose the duplicate ring by what the frame proved')
+    # Secrets are compared in constant time: the group tag (the harness maps
+    # sodium_memcmp to memcmp, so only the source can show which one is called)
+    # and the bond session token.
+    if 'sodium_memcmp(expectedTag, receivedTag, ESPNOW_V4_BROADCAST_AUTH_TAG_LEN) != 0' not in incoming:
+        failures.append('v4_try_handle_incoming does not compare the group tag with sodium_memcmp')
+    token = source[source.find('static bool validateBondSessionToken('):]
+    token = token[:token.find('\n}\n')]
+    if 'sodium_memcmp(token, s->bondToken, 16)' not in token or re.search(r'(?<!sodium_)memcmp\(token', token):
+        failures.append('validateBondSessionToken does not compare the bond token with sodium_memcmp')
     if 'meshPeerSlotsRelease(mac)' not in unpair:
         failures.append('cmd_espnow_unpair does not release the peer slots through meshPeerSlotsRelease')
     for line in failures:

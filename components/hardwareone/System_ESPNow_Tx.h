@@ -66,7 +66,7 @@
 //     through the existing ACK state machine.
 //   * Fragmentation (v4_send_encrypted_chunked) runs on the dispatcher only
 //     for short jobs. A submitSync() job from cmd_exec whose payload is over
-//     v4_single_frame_cap() for its destination (202 B direct, 130 B routed)
+//     v4_single_frame_cap() for its destination (202 B direct, 146 B routed)
 //     runs the fragment loop on cmd_exec, so the long per-fragment ACK waits
 //     of a command result or FS listing never hold up other senders' queued
 //     jobs. Every other job is queued: fire-and-forget producers are capped at

@@ -18,6 +18,7 @@
 
 static const int kWizardRowsTag = 0;  // text-field owner for the wizard rows
 #include "System_SetupWizard.h"
+#include "System_DeviceName.h"   // the device-name rule
 #include "System_FirstTimeSetup.h"
 #include "HAL_Input.h"
 #include "i2csensor_seesaw.h"
@@ -289,16 +290,32 @@ static bool wizardNextRequested(uint32_t buttons, const JoystickNav& nav) {
   return false;
 }
 
+// Ask a device name until it passes the rule (System_DeviceName.h), starting
+// from `initial` (empty input keeps it). False when cancelled.
+static bool oledAskDeviceName(const char* initial, String& out, bool* cancelled) {
+  String text = initial;
+  const char* title = "Device Name:";
+  for (;;) {
+    String typed = getOledTextInput(title, false, text.c_str(), devicename::kMaxLen, cancelled);
+    if (*cancelled || isWizardCancelRequested()) return false;
+    if (typed.length() == 0) typed = initial;
+    if (devicename::valid(typed.c_str())) {
+      out = typed;
+      return true;
+    }
+    text = typed;
+    title = "Use A-Z 0-9 -:";  // the rule, short enough for the title row
+  }
+}
+
 bool handleWizardPageInput(uint32_t buttons, JoystickNav& nav, SetupWizardResult& result) {
   if (buttons & INPUT_MASK(INPUT_BUTTON_A)) {
     const WizardMenuItem* item = getWizardMenuItem(getWizardCurrentPage(), getWizardCurrentSelection());
     if (item && item->type == WIZARD_ITEM_DEVICE_NAME) {
       bool cancelled = false;
-      String newName = getOledTextInput("Device Name:", false, getWizardDeviceName(), 19, &cancelled);
-      if (!cancelled && !isWizardCancelRequested() && newName.length() > 0) {
-        char* buf = getWizardDeviceNameBuf();
-        strncpy(buf, newName.c_str(), 19);
-        buf[19] = '\0';
+      String newName;
+      if (oledAskDeviceName(getWizardDeviceName(), newName, &cancelled)) {
+        (void)wizardSetDeviceName(newName.c_str());  // valid: oledAskDeviceName checked it
       }
     } else {
       wizardActivateCurrentItem();
@@ -419,18 +436,29 @@ void handleOledEspNowPage(SetupWizardResult& result, bool& running) {
 
   bool cancelled = false;
   result.espnowFriendlyName = "";
+  result.deviceName = "";
   result.espnowRoom = "";
   result.espnowZone = "";
   result.espnowStationary = getWizardDraftValues().espnowStationary;
 
-  // Device Name (used for Bluetooth + ESP-NOW identity)
-  const String& draftName = getWizardDraftValues().deviceName;
-  String currentName = draftName.length() > 0 ? draftName : "HardwareOne";
-  String deviceName = getOledTextInput("Device Name:", false, currentName.c_str(), 19, &cancelled);
+  // Display label (free text), then the device name (ESP-NOW, Bluetooth,
+  // Wi-Fi hostname) offered from it: one press accepts the offer.
+  const String currentLabel = getWizardDraftValues().espnowFriendlyName;
+  String label = getOledTextInput("Label:", false, currentLabel.c_str(), 47, &cancelled);
   if (isWizardCancelRequested()) { result.completed = false; running = false; return; }
   if (cancelled) { wizardPrevPage(); return; }
-  if (deviceName.length() == 0) deviceName = currentName;
-  result.espnowFriendlyName = deviceName;
+  if (label.length() == 0) label = currentLabel;
+  result.espnowFriendlyName = label;
+  {
+    char suggested[32];
+    wizardSuggestDeviceName(label.c_str(), suggested);
+    String deviceName;
+    if (!oledAskDeviceName(suggested, deviceName, &cancelled)) {
+      if (isWizardCancelRequested()) { result.completed = false; running = false; return; }
+      wizardPrevPage(); return;
+    }
+    result.deviceName = deviceName;
+  }
 
   // Room
   String room = getOledTextInput("Room:", false, getWizardDraftValues().espnowRoom.c_str(), 20, &cancelled);

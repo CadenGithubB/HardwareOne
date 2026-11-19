@@ -27,6 +27,7 @@
 #include "OLED_TextField.h"
 #include "HAL_Input.h"
 #include "System_Settings.h"
+#include "System_SelfDevice.h"  // SelfDevice::deviceName
 #include "BLE_Server.h"
 #include "OLED_SettingsEditor.h"  // openSettingsEditorForModule
 #include "OLED_UI.h"              // oledToastShow (boot role, ring refusals, pairing)
@@ -284,7 +285,8 @@ static void displayBluetoothStatusDetail() {
 
   if (!gBleState || !gBleState->initialized) return;  // stopped since the snapshot
   // Device name (truncate if needed)
-  const char* name = gSettings.bleDeviceName.length() > 0 ? gSettings.bleDeviceName.c_str() : "HardwareOne";
+  const String deviceName = SelfDevice::deviceName();  // the device name, as Bluetooth uses it
+  const char* name = deviceName.c_str();
   char truncated[13];
   if (strlen(name) > 12) {
     memcpy(truncated, name, 11);

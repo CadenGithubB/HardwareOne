@@ -4,11 +4,55 @@
 // ============================================================================
 // ESPNOW V4 wire schema — opcode enum, flags, 32-byte header, payload structs.
 //
-// Phase 1 of docs/ESPNOW_V4_PLAN.md cutover. Wire format is incompatible
-// with V3 — magic is the same (0x3148) but version byte is 4 and the header
-// grows from 24 → 32 bytes to make room for fields Phases 2/3 fill in
-// (meshFingerprint, sessionId, frameSeq). Opcodes are renumbered into
-// category-based ranges with reserved slots for future phases.
+// Wire format version byte 4 (magic 0x3148, 32-byte header). Opcodes are in
+// category-based ranges with reserved slots.
+//
+// Frame rules (1.0). 1.0 is a full-erase install; after it a format only
+// grows at its end.
+//   - Every multi-byte field is little-endian (asserted below).
+//   - Every payload is a packed struct in this file, with a static_assert on
+//     its size and on every field offset.
+//   - Each opcode has a minimum payload length, ESPNOW_V4_MINLEN_<OPCODE>
+//     below, used by its kV4HandlerTable row. It is measured after the
+//     session unwrap, the group-tag strip and reassembly. The dispatcher drops
+//     a shorter frame and counts it (espnowstats rxLengthDrops); a longer one
+//     reaches the handler, which reads the fields it knows and ignores the
+//     rest. After 1.0 fields are only appended, and a minimum never rises:
+//     its static_assert against sizeof() becomes ">=" for a grown struct and
+//     the receiver zero-fills the fields an older sender left out.
+//   - The six handshake frames (KEY_EX_HELLO/REPLY/CONFIRM, SESSION_OPEN/
+//     CONFIRM/REKEY) are the exception: exact length (signed transcripts),
+//     so they cannot grow after 1.0.
+//   - Fixed-header frames cannot grow either. Their payload ends in data
+//     that runs to the end of the frame or in entries at a fixed stride, so an
+//     older receiver would read an appended field as data. Neither their
+//     header nor an entry struct gains a field after 1.0; more needs a new
+//     opcode. They are RELAY_DATA (V4PayloadRelayData, then the inner frame),
+//     PEER_LIST (V4PayloadPeerListHeader, V4PayloadPeerListEntry),
+//     SENSOR_ENVELOPE and BOND_SENSOR_DATA (V4PayloadSensorReading, then a
+//     part of the reading), CMD_RESP (V4PayloadCmdRespHeader, then text),
+//     FILE_DATA (V4PayloadFileData), FS_LIST_REPLY (V4PayloadFsListReplyHeader,
+//     V4PayloadFsEntry), and the text-only TEXT, STREAM, BOOT, CMD and
+//     USER_SYNC. Each of those structs is marked "Fixed header: cannot grow".
+//   - Reserved bytes are sent as 0 and ignored by the receiver.
+//   - A receiver reads a payload with V4RxCtx::read(struct) (zero-fills what
+//     the frame lacks), a tail with V4RxCtx::tail(offset), or a Core parse*()
+//     helper whose offsets the asserts here pin. Never by a pointer cast.
+//   - The group (BROADCAST_AUTH) tag is 16 bytes.
+//   - Sensor masks are 32 bits (espnowsensor::SensorMask).
+//   - Device names travel in ESPNOW_V4_NAME_LEN (32) byte fields.
+//   - Header flags in 0xF000 are must-understand: a receiver drops a frame
+//     with a bit there it does not know (rxMustUnderstandDrops); it ignores
+//     unknown bits elsewhere (see the flag enum).
+//   - SESSION_OPEN and SESSION_CONFIRM carry each side's u32 capability
+//     word inside the signed transcript (System_ESPNow_SessionCapsCore.h).
+//   - An ACK means "received", not "accepted": the ACK goes out before the
+//     dispatcher, so a frame dropped for its length is visible only in
+//     rxLengthDrops on the receiver.
+//   - METADATA is exactly the 202-byte sealed budget, so it cannot grow (to a
+//     peer behind a relay it goes as sealed fragments: sendMetadata);
+//     FS_STAT_REPLY (164) has 38 bytes left, the routed frames their margins
+//     against ESPNOW_V4_RELAY_MAX_INNER_PLAINTEXT.
 //
 // Restrictions on contents of this file:
 //   - Value-typed declarations only (enums, packed structs, constants).
@@ -23,10 +67,18 @@
 #include "System_ESPNow_PowerEventCore.h"  // the battery and event frames' sizes
 #include "System_ESPNow_ForwardCore.h"     // the forward-link frame's size
 #include "System_ESPNow_TimeCore.h"    // the TIME_SYNC frame's size and source numbers
+#include "System_DeviceName.h"        // the device-name rule and its 32-byte wire field
 
 #if ENABLE_ESPNOW
 
+static_assert(__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__,
+              "the wire format is little-endian and its structs are copied as they are");
+
 // ---- Protocol constants ----------------------------------------------------
+
+// Width of every device-name field on the wire: up to 31 bytes of name and a
+// zero (a full field may have no terminator; receivers bound their reads).
+#define ESPNOW_V4_NAME_LEN     32
 
 #define ESPNOW_V4_MAGIC        0x3148u       // 'H1' little-endian (unchanged from V3)
 #define ESPNOW_V4_VERSION      4             // Protocol version
@@ -52,13 +104,15 @@ static_assert(ESPNOW_V4_VERSION == 4,
 #define ESPNOW_V4_AEAD_TAG_LEN 16
 #define ESPNOW_V4_MAX_PLAINTEXT (ESPNOW_V4_MAX_PAYLOAD - ESPNOW_V4_AEAD_TAG_LEN)  // 202 bytes
 
-// Phase 3.5 task #32 — BROADCAST_AUTH tag is HMAC-SHA256 (32 bytes) appended
-// to the broadcast payload. Receivers verify against the mesh group key (the
-// "esp-grup" subkey from Phase 3.1's mesh-key derivation). Auth-only — the
-// payload stays plaintext; only forge-resistance, not confidentiality.
-#define ESPNOW_V4_BROADCAST_AUTH_TAG_LEN 32
+// BROADCAST_AUTH (group-signed) tag: the first 16 bytes of
+// HMAC-SHA256(groupKey, header[0..29] || payload), appended to the payload and
+// compared in constant time over those 16 bytes. The key is the mesh group key
+// (the "esp-grup" subkey of the mesh-key derivation). Authentication only: the
+// payload stays plaintext. 16 bytes, like the AEAD tag, since 1.0 (was 32).
+#define ESPNOW_V4_BROADCAST_AUTH_TAG_LEN 16
 #define ESPNOW_V4_MAX_BROADCAST_AUTHED_PLAINTEXT \
-            (ESPNOW_V4_MAX_PAYLOAD - ESPNOW_V4_BROADCAST_AUTH_TAG_LEN)  // 186 bytes
+            (ESPNOW_V4_MAX_PAYLOAD - ESPNOW_V4_BROADCAST_AUTH_TAG_LEN)  // 202 bytes
+static_assert(ESPNOW_V4_MAX_BROADCAST_AUTHED_PLAINTEXT == 202, "group-signed payload budget");
 
 // ---- Opcode enum -----------------------------------------------------------
 // Category-based numbering, 20 slots per category. Renumbered 2026-07 from the
@@ -246,24 +300,42 @@ enum EspNowV4Type : uint8_t {
 };
 
 // ---- Flag bits (16-bit in V4; was 8-bit in V3) -----------------------------
+//
+// Two classes of bit (1.0 rule):
+//   * 0xF000 is must-understand. A receiver drops a frame that carries a bit
+//     there it does not know (ESPNOW_V4_FLAGS_MUST_UNDERSTAND minus
+//     ESPNOW_V4_FLAGS_KNOWN_MUST_UNDERSTAND), before it is acknowledged,
+//     remembered, authenticated or forwarded by flooding, and counts it
+//     (espnowstats "RX Must-Understand Drops"). A relay forwarding a routed
+//     envelope does not look inside it; the final receiver checks on delivery.
+//   * Every other bit is ignored by a receiver that does not know it.
+// A new bit that changes how the payload is read goes in 0xF000, and a sender
+// sets it only on a sealed frame to a peer whose session capability word
+// (System_ESPNow_SessionCapsCore.h) advertises the matching capability: never
+// on handshake, group-signed or plaintext frames, which no session vouches for.
+// BROADCAST_AUTH and SESSION_FRAME also change how the payload is read, but
+// sit outside 0xF000 because every 1.0 receiver knows them; moving them would
+// spend two of the four must-understand bits.
+// Bits are only defined when something both sets and reads them
+// (test_espnow_header_flags.py). Removed at 1.0, never set or never read:
+// 0x0002 ENCRYPTED, 0x0004 COMPRESS, 0x0010 STREAM_BEGIN, 0x0020 STREAM_END,
+// 0x0400 HANDSHAKE, 0x0800 PRIORITY_HIGH. Those values are free again.
 
 enum EspNowV4Flags : uint16_t {
   ESPNOW_V4_FLAG_ACK_REQ        = 0x0001,  // Request ACK from receiver
-  ESPNOW_V4_FLAG_ENCRYPTED      = 0x0002,  // DEPRECATED/VESTIGIAL — legacy LMK-era bit, never set since
-                                           // the Phase 3.5 LMK rip (task #47). AEAD confidentiality is
-                                           // signalled by ESPNOW_V4_FLAG_SESSION_FRAME on the wire and by
-                                           // V4RxCtx::isSessionEncrypted on RX. DO NOT gate on this bit
-                                           // (doing so silently broke USER_SYNC — it always read 0).
-  ESPNOW_V4_FLAG_COMPRESS       = 0x0004,  // Payload is compressed (future)
-  ESPNOW_V4_FLAG_STREAM_BEGIN   = 0x0010,  // First chunk of stream
-  ESPNOW_V4_FLAG_STREAM_END     = 0x0020,  // Last chunk of stream
-  // Phase 3+ reserved:
-  ESPNOW_V4_FLAG_BROADCAST_AUTH = 0x0100,  // Phase 3: HMAC'd with mesh group key
-  ESPNOW_V4_FLAG_SESSION_FRAME  = 0x0200,  // Phase 3: AEAD-wrapped with session key
-  ESPNOW_V4_FLAG_HANDSHAKE      = 0x0400,  // Phase 3: key-exchange / session message
-  ESPNOW_V4_FLAG_PRIORITY_HIGH  = 0x0800,  // Phase 5: bump above retry queue (events)
-  // 0x1000–0x8000 reserved
+  ESPNOW_V4_FLAG_BROADCAST_AUTH = 0x0100,  // payload ends in the mesh group key's tag
+  ESPNOW_V4_FLAG_SESSION_FRAME  = 0x0200,  // payload is AEAD-sealed with the session key
+  ESPNOW_V4_FLAGS_MUST_UNDERSTAND       = 0xF000,  // class mask, not a flag
+  ESPNOW_V4_FLAGS_KNOWN_MUST_UNDERSTAND = 0x0000,  // must-understand bits this firmware knows
+  // The must-understand bits a receiver of this firmware drops a frame for.
+  ESPNOW_V4_FLAGS_UNKNOWN_MUST_UNDERSTAND =
+      ESPNOW_V4_FLAGS_MUST_UNDERSTAND & ~ESPNOW_V4_FLAGS_KNOWN_MUST_UNDERSTAND,
 };
+static_assert(((ESPNOW_V4_FLAG_ACK_REQ | ESPNOW_V4_FLAG_BROADCAST_AUTH | ESPNOW_V4_FLAG_SESSION_FRAME) &
+               ESPNOW_V4_FLAGS_MUST_UNDERSTAND) == 0,
+              "the 1.0 flags are outside the must-understand class");
+static_assert((ESPNOW_V4_FLAGS_KNOWN_MUST_UNDERSTAND & ~ESPNOW_V4_FLAGS_MUST_UNDERSTAND) == 0,
+              "known must-understand bits lie inside the class");
 
 // ---- Frame header (32 bytes) -----------------------------------------------
 //
@@ -278,7 +350,7 @@ struct __attribute__((packed)) EspNowV4Header {
   uint8_t  type;             // 3   — EspNowV4Type
   uint16_t flags;            // 4–5 — EspNowV4Flags (16-bit)
   uint8_t  headerLen;        // 6   — ESPNOW_V4_HEADER_LEN (32)
-  uint8_t  reserved1;        // 7   — alignment padding, must be 0
+  uint8_t  reserved1;        // 7   — sent 0, ignored
   uint32_t msgId;            // 8–11
   uint8_t  origin[6];        // 12–17 — original sender MAC. NOT the radio sender once a frame has
                              //         been relayed: every forwarder preserves origin verbatim so
@@ -294,8 +366,10 @@ struct __attribute__((packed)) EspNowV4Header {
                              //         docs/ESPNOW_MESH_SYSTEM.md.
   uint8_t  fragIndex;        // 19  — fragment index (0-based)
   uint8_t  fragCount;        // 20  — total fragment count (1 = not fragmented)
-  uint8_t  reserved2;        // 21  — alignment padding, must be 0
-  uint16_t meshFingerprint;  // 22–23 — Phase 2 (zero in Phase 1)
+  uint8_t  reserved2;        // 21  — sent 0, ignored
+  uint16_t meshFingerprint;  // 22–23 — the mesh id: derived from the mesh key (System_ESPNow_MeshIdCore.h:
+                             //         KDF subkey 3, context "esp-mid1", first nonzero LE u16), never 0;
+                             //         a receiver drops 0 and any id none of its enabled meshes has
   uint16_t sessionId;        // 24–25 — Phase 3 (zero in Phase 1)
   uint32_t frameSeq;         // 26–29 — Phase 3 (zero in Phase 1)
   uint16_t crc16;            // 30–31 — CRC16-CCITT of payload
@@ -303,6 +377,15 @@ struct __attribute__((packed)) EspNowV4Header {
   // recv_info's `data_len` minus headerLen — saves 2 bytes on the wire.
 };
 static_assert(sizeof(EspNowV4Header) == 32, "EspNowV4Header must be 32 bytes");
+static_assert(offsetof(EspNowV4Header, magic) == 0 && offsetof(EspNowV4Header, ver) == 2 &&
+              offsetof(EspNowV4Header, type) == 3 && offsetof(EspNowV4Header, flags) == 4 &&
+              offsetof(EspNowV4Header, headerLen) == 6 && offsetof(EspNowV4Header, reserved1) == 7 &&
+              offsetof(EspNowV4Header, msgId) == 8 && offsetof(EspNowV4Header, origin) == 12 &&
+              offsetof(EspNowV4Header, ttl) == 18 && offsetof(EspNowV4Header, fragIndex) == 19 &&
+              offsetof(EspNowV4Header, fragCount) == 20 && offsetof(EspNowV4Header, reserved2) == 21 &&
+              offsetof(EspNowV4Header, meshFingerprint) == 22 && offsetof(EspNowV4Header, sessionId) == 24 &&
+              offsetof(EspNowV4Header, frameSeq) == 26 && offsetof(EspNowV4Header, crc16) == 30,
+              "EspNowV4Header layout");
 
 // ---- Payload structs -------------------------------------------------------
 
@@ -316,10 +399,10 @@ static_assert(sizeof(EspNowV4Header) == 32, "EspNowV4Header must be 32 bytes");
 //                                   msgId  = the inner frame's msgId (so the outer
 //                                            frame dedups per end-to-end message)
 //   [ V4PayloadRelayData     8 B ]  finalDst + hopsUsed
-//   [ inner V4 frame     ≤ 178 B ]  BYTE-IDENTICAL — header and payload exactly as
+//   [ inner V4 frame     ≤ 194 B ]  BYTE-IDENTICAL — header and payload exactly as
 //                                   the originator built them, including its own
 //                                   origin, sessionId, frameSeq, crc16 and AEAD tag
-//   [ outer HMAC tag        32 B ]  BROADCAST_AUTH over (outer hdr[0..29] || the two
+//   [ outer group tag       16 B ]  BROADCAST_AUTH over (outer hdr[0..29] || the two
 //                                   blocks above), keyed by the mesh group key
 //
 // Why an envelope instead of new header fields: ttl and origin live INSIDE both
@@ -331,25 +414,31 @@ static_assert(sizeof(EspNowV4Header) == 32, "EspNowV4Header must be 32 bytes");
 // their normal KEY_EX / SESSION handshake straight through it.
 //
 // hopsUsed is advisory (diagnostics + a hard depth stop); ttl is the enforcement.
+// Fixed header: cannot grow (see the frame rules at the top of this file).
 struct __attribute__((packed)) V4PayloadRelayData {
   uint8_t finalDst[6];   // ultimate destination MAC — the only node that unwraps
   uint8_t hopsUsed;      // forwards taken so far; 0 as emitted by the originator
-  uint8_t reserved;      // pad, must be 0
+  uint8_t reserved;      // sent 0, ignored
 };
 static_assert(sizeof(V4PayloadRelayData) == 8, "V4PayloadRelayData must be 8 bytes");
+static_assert(offsetof(V4PayloadRelayData, finalDst) == 0 && offsetof(V4PayloadRelayData, hopsUsed) == 6 &&
+              offsetof(V4PayloadRelayData, reserved) == 7, "V4PayloadRelayData layout");
 
 // Byte budget for what an envelope can carry. 250 (radio MTU) minus the outer
 // header, the envelope, and the outer HMAC tag.
 #define ESPNOW_V4_RELAY_MAX_INNER_FRAME \
-            (250 - ESPNOW_V4_HEADER_LEN - 8 - ESPNOW_V4_BROADCAST_AUTH_TAG_LEN)   // 178
+            (250 - ESPNOW_V4_HEADER_LEN - 8 - ESPNOW_V4_BROADCAST_AUTH_TAG_LEN)   // 194
 #define ESPNOW_V4_RELAY_MAX_INNER_PAYLOAD \
-            (ESPNOW_V4_RELAY_MAX_INNER_FRAME - ESPNOW_V4_HEADER_LEN)              // 146
+            (ESPNOW_V4_RELAY_MAX_INNER_FRAME - ESPNOW_V4_HEADER_LEN)              // 162
 // …and what fits once the inner frame is itself AEAD-sealed end-to-end.
 #define ESPNOW_V4_RELAY_MAX_INNER_PLAINTEXT \
-            (ESPNOW_V4_RELAY_MAX_INNER_PAYLOAD - ESPNOW_V4_AEAD_TAG_LEN)          // 130
-static_assert(ESPNOW_V4_RELAY_MAX_INNER_PLAINTEXT == 130,
-              "routed-unicast plaintext budget changed — re-check the handshake "
-              "payloads below, which are sized to travel over a relay");
+            (ESPNOW_V4_RELAY_MAX_INNER_PAYLOAD - ESPNOW_V4_AEAD_TAG_LEN)          // 146
+static_assert(ESPNOW_V4_RELAY_MAX_INNER_FRAME == 194 && ESPNOW_V4_RELAY_MAX_INNER_PAYLOAD == 162,
+              "routed-unicast budgets changed — re-check the handshake payloads below, "
+              "which travel plaintext over a relay");
+static_assert(ESPNOW_V4_RELAY_MAX_INNER_PLAINTEXT == 146,
+              "routed sealed budget changed — re-check the sensor, time, battery, event and "
+              "forward-link frames below and the reading part size, which are sized to it");
 
 // ---- Multi-hop: distance-vector advertisement (ESPNOW_V4_TYPE_PEER_LIST) ---
 //
@@ -361,54 +450,72 @@ static_assert(ESPNOW_V4_RELAY_MAX_INNER_PLAINTEXT == 130,
 // `metric` is the worst measured link RSSI along the advertised path — the
 // bottleneck link. Listeners compare min(metric, their own link to the
 // advertiser) so a route is only as good as its weakest hop.
+// Fixed header: cannot grow (see the frame rules at the top of this file).
 struct __attribute__((packed)) V4PayloadPeerListHeader {
   uint8_t entryCount;   // number of V4PayloadPeerListEntry records that follow
   uint8_t role;         // sender MESH_ROLE_* (informational)
   uint8_t seq;          // advertisement generation, wraps — diagnostics only
-  uint8_t reserved;     // pad, must be 0
+  uint8_t reserved;     // sent 0, ignored
 };
 static_assert(sizeof(V4PayloadPeerListHeader) == 4, "V4PayloadPeerListHeader must be 4 bytes");
+static_assert(offsetof(V4PayloadPeerListHeader, entryCount) == 0 && offsetof(V4PayloadPeerListHeader, role) == 1 &&
+              offsetof(V4PayloadPeerListHeader, seq) == 2 && offsetof(V4PayloadPeerListHeader, reserved) == 3,
+              "V4PayloadPeerListHeader layout");
 
+// Fixed header: cannot grow (see the frame rules at the top of this file).
 struct __attribute__((packed)) V4PayloadPeerListEntry {
   uint8_t mac[6];       // a destination the advertiser can reach
   uint8_t hops;         // advertiser's hop count to it (1 = advertiser's direct neighbour)
   int8_t  metric;       // worst link RSSI (dBm) along the advertiser's path; -128 = unknown
 };
 static_assert(sizeof(V4PayloadPeerListEntry) == 8, "V4PayloadPeerListEntry must be 8 bytes");
+static_assert(offsetof(V4PayloadPeerListEntry, mac) == 0 && offsetof(V4PayloadPeerListEntry, hops) == 6 &&
+              offsetof(V4PayloadPeerListEntry, metric) == 7, "V4PayloadPeerListEntry layout");
 
-// How many entries fit one BROADCAST_AUTH frame (186 B of authed plaintext).
+// How many entries fit one BROADCAST_AUTH frame (202 B of authed plaintext).
 #define ESPNOW_V4_PEER_LIST_MAX_ENTRIES \
-            ((ESPNOW_V4_MAX_BROADCAST_AUTHED_PLAINTEXT - 4) / 8)                  // 22
+            ((ESPNOW_V4_MAX_BROADCAST_AUTHED_PLAINTEXT - 4) / 8)                  // 24
 static_assert(sizeof(V4PayloadPeerListHeader)
                 + ESPNOW_V4_PEER_LIST_MAX_ENTRIES * sizeof(V4PayloadPeerListEntry)
               <= ESPNOW_V4_MAX_BROADCAST_AUTHED_PLAINTEXT,
               "a full PEER_LIST must fit one broadcast-authed frame");
 
+// HEARTBEAT (30). Every sender builds it with v4FillHeartbeat (the app ping too).
 struct __attribute__((packed)) V4PayloadHeartbeat {
-  uint8_t  role;
-  uint8_t  peerCount;
-  int8_t   rssi;
-  uint8_t  reserved;
-  uint32_t uptimeSec;
-  uint32_t freeHeap;
-  char     deviceName[20];
+  uint8_t  role;          // 0
+  uint8_t  peerCount;     // 1
+  int8_t   rssi;          // 2
+  uint8_t  reserved;      // 3   sent 0, ignored
+  uint32_t uptimeSec;     // 4
+  uint32_t freeHeap;      // 8
+  char     deviceName[32];  // 12  the sender's device name (System_DeviceName.h); NUL always present, rest 0
 };
-static_assert(sizeof(V4PayloadHeartbeat) == 32, "V4PayloadHeartbeat must be 32 bytes");
+static_assert(sizeof(V4PayloadHeartbeat) == 44, "V4PayloadHeartbeat must be 44 bytes");
+static_assert(offsetof(V4PayloadHeartbeat, role) == 0 && offsetof(V4PayloadHeartbeat, peerCount) == 1 &&
+              offsetof(V4PayloadHeartbeat, rssi) == 2 && offsetof(V4PayloadHeartbeat, reserved) == 3 &&
+              offsetof(V4PayloadHeartbeat, uptimeSec) == 4 && offsetof(V4PayloadHeartbeat, freeHeap) == 8 &&
+              offsetof(V4PayloadHeartbeat, deviceName) == 12, "V4PayloadHeartbeat layout");
+static_assert(sizeof(V4PayloadHeartbeat::deviceName) == devicename::kFieldLen, "V4PayloadHeartbeat name field");
 
-// WPS-style pairing beacon (ESPNOW_V4_TYPE_PAIR_BEACON). Sent PLAINTEXT to the
-// FF broadcast address (flags=0) every ~1.5s while a device's pairing window is
-// open. Same-mesh scoping is enforced for free by the header meshFingerprint
-// gate (RX drops beacons whose fingerprint matches no enabled local mesh), so
-// no fingerprint is carried here. All fields are attacker-controllable — the
-// receiver must sanitize deviceName and never trust it beyond a display label;
-// real trust comes from the subsequent KEY_EX (mesh-passphrase HMAC).
+// WPS-style pairing beacon (ESPNOW_V4_TYPE_PAIR_BEACON). Sent group-signed
+// (BROADCAST_AUTH) to the FF broadcast address every ~1.5s while a device's
+// pairing window is open; the row requires the tag. Same-mesh scoping comes
+// from the header meshFingerprint gate (RX drops beacons whose mesh id matches
+// no enabled local mesh) and the tag, so no mesh id is carried here. The
+// receiver reads deviceName with devicename::getField (an invalid name is
+// absent and shown as "peer-XXXXXX") and never trusts it beyond a display
+// label; real trust comes from the subsequent KEY_EX (mesh-passphrase HMAC).
 struct __attribute__((packed)) V4PayloadPairBeacon {
-  uint8_t  role;            // sender MESH_ROLE_* (informational)
-  uint8_t  flags;           // reserved (0)
-  uint8_t  reserved[2];     // pad, 0
-  char     deviceName[20];  // sender's espnowDeviceName (not guaranteed NUL-terminated)
+  uint8_t  role;            // 0  sender MESH_ROLE_* (informational)
+  uint8_t  flags;           // 1  sent 0, ignored
+  uint8_t  reserved[2];     // 2  sent 0, ignored
+  char     deviceName[32];  // 4  sender's device name (System_DeviceName.h); NUL always present, rest 0
 };
-static_assert(sizeof(V4PayloadPairBeacon) == 24, "V4PayloadPairBeacon must be 24 bytes");
+static_assert(sizeof(V4PayloadPairBeacon) == 36, "V4PayloadPairBeacon must be 36 bytes");
+static_assert(offsetof(V4PayloadPairBeacon, role) == 0 && offsetof(V4PayloadPairBeacon, flags) == 1 &&
+              offsetof(V4PayloadPairBeacon, reserved) == 2 && offsetof(V4PayloadPairBeacon, deviceName) == 4,
+              "V4PayloadPairBeacon layout");
+static_assert(sizeof(V4PayloadPairBeacon::deviceName) == devicename::kFieldLen, "V4PayloadPairBeacon name field");
 
 // Discover-then-confirm control frame (PAIR_REQUEST / PAIR_ACCEPT / PAIR_REJECT).
 // Sent as a BROADCAST_AUTH FF broadcast — same proven path as the beacon — because
@@ -416,14 +523,18 @@ static_assert(sizeof(V4PayloadPairBeacon) == 24, "V4PayloadPairBeacon must be 24
 // and fingerprintForPeer() of an unknown MAC yields no mesh key so the HMAC would
 // be skipped). `targetMac` addresses the intended recipient; every other same-mesh
 // device that hears the broadcast ignores it. All fields attacker-controllable
-// except targetMac's match against our own MAC (sanitize deviceName).
+// except targetMac's match against our own MAC (deviceName via devicename::getField).
 struct __attribute__((packed)) V4PayloadPairCtrl {
-  uint8_t targetMac[6];     // intended recipient — receivers drop if != own MAC
-  uint8_t role;             // sender MESH_ROLE_* (informational)
-  uint8_t reserved;         // pad, 0
-  char    deviceName[20];   // sender's espnowDeviceName (display label; not NUL-guaranteed)
+  uint8_t targetMac[6];     // 0  intended recipient — receivers drop if != own MAC
+  uint8_t role;             // 6  sender MESH_ROLE_* (informational)
+  uint8_t reserved;         // 7  sent 0, ignored
+  char    deviceName[32];   // 8  sender's device name (System_DeviceName.h); NUL always present, rest 0
 };
-static_assert(sizeof(V4PayloadPairCtrl) == 28, "V4PayloadPairCtrl must be 28 bytes");
+static_assert(sizeof(V4PayloadPairCtrl) == 40, "V4PayloadPairCtrl must be 40 bytes");
+static_assert(offsetof(V4PayloadPairCtrl, targetMac) == 0 && offsetof(V4PayloadPairCtrl, role) == 6 &&
+              offsetof(V4PayloadPairCtrl, reserved) == 7 && offsetof(V4PayloadPairCtrl, deviceName) == 8,
+              "V4PayloadPairCtrl layout");
+static_assert(sizeof(V4PayloadPairCtrl::deviceName) == devicename::kFieldLen, "V4PayloadPairCtrl name field");
 
 // TIME_SYNC (35): the mesh master's clock, sent to each paired device over
 // its session (System_ESPNow_TimeCore.h has the rules and the meaning of
@@ -439,56 +550,77 @@ struct __attribute__((packed)) V4PayloadTimeSync {
 };
 static_assert(sizeof(V4PayloadTimeSync) == 16 && sizeof(V4PayloadTimeSync) == meshtime::kFrameLen,
               "V4PayloadTimeSync is 16 bytes on the wire");
-static_assert(offsetof(V4PayloadTimeSync, source) == 8 && offsetof(V4PayloadTimeSync, flags) == 9 &&
+static_assert(offsetof(V4PayloadTimeSync, epochMs) == 0 && offsetof(V4PayloadTimeSync, source) == 8 && offsetof(V4PayloadTimeSync, flags) == 9 &&
               offsetof(V4PayloadTimeSync, sinceSetMin) == 10 && offsetof(V4PayloadTimeSync, reserved) == 12,
               "V4PayloadTimeSync layout (meshtime::packFrame writes these offsets)");
 
 // Topology request payload
 struct __attribute__((packed)) V4PayloadTopoReq {
-  uint32_t reqId;       // Request ID for correlation
-  uint8_t  reserved[4]; // Padding for alignment
+  uint32_t reqId;       // 0  Request ID for correlation
+  uint8_t  reserved[4]; // 4  sent 0, ignored
 };
+static_assert(sizeof(V4PayloadTopoReq) == 8, "V4PayloadTopoReq layout");
+static_assert(offsetof(V4PayloadTopoReq, reqId) == 0 && offsetof(V4PayloadTopoReq, reserved) == 4,
+              "V4PayloadTopoReq layout");
 
 // Topology start payload (first message in topology response)
 struct __attribute__((packed)) V4PayloadTopoStart {
-  uint32_t reqId;       // Matches request ID
-  uint8_t  peerCount;   // Number of TOPO_PEER messages to follow
-  uint8_t  reserved[3];
+  uint32_t reqId;       // 0  Matches request ID
+  uint8_t  peerCount;   // 4  Number of TOPO_PEER messages to follow
+  uint8_t  reserved[3]; // 5  sent 0, ignored
 };
+static_assert(sizeof(V4PayloadTopoStart) == 8, "V4PayloadTopoStart layout");
+static_assert(offsetof(V4PayloadTopoStart, reqId) == 0 && offsetof(V4PayloadTopoStart, peerCount) == 4 &&
+              offsetof(V4PayloadTopoStart, reserved) == 5, "V4PayloadTopoStart layout");
 
 // Topology peer entry (one per peer)
 struct __attribute__((packed)) V4PayloadTopoPeer {
-  uint32_t reqId;       // Matches request ID
-  uint8_t  peerIndex;   // Which peer (0-based)
-  uint8_t  isLast;      // 1 if this is the last peer
-  uint8_t  mac[6];      // Peer MAC
-  int8_t   rssi;        // Last RSSI
-  uint8_t  encrypted;   // 1 if encrypted
-  char     name[32];    // Peer name
+  uint32_t reqId;       // 0   Matches request ID
+  uint8_t  peerIndex;   // 4   Which peer (0-based)
+  uint8_t  isLast;      // 5   1 if this is the last peer
+  uint8_t  mac[6];      // 6   Peer MAC
+  int8_t   rssi;        // 12  Last RSSI
+  uint8_t  encrypted;   // 13  1 if encrypted
+  char     name[32];    // 14  Peer name (System_DeviceName.h rule; empty = no name, the receiver shows the MAC)
 };
+static_assert(sizeof(V4PayloadTopoPeer) == 46, "V4PayloadTopoPeer layout");
+static_assert(offsetof(V4PayloadTopoPeer, reqId) == 0 && offsetof(V4PayloadTopoPeer, peerIndex) == 4 &&
+              offsetof(V4PayloadTopoPeer, isLast) == 5 && offsetof(V4PayloadTopoPeer, mac) == 6 &&
+              offsetof(V4PayloadTopoPeer, rssi) == 12 && offsetof(V4PayloadTopoPeer, encrypted) == 13 &&
+              offsetof(V4PayloadTopoPeer, name) == 14, "V4PayloadTopoPeer layout");
+static_assert(sizeof(V4PayloadTopoPeer::name) == devicename::kFieldLen, "TOPO_PEER name field");
 
 #if ENABLE_BONDED_MODE
 // Bond mode heartbeat payload (lightweight)
 struct __attribute__((packed)) V4PayloadBondHeartbeat {
-  uint8_t  role;           // Bond role (master/worker)
-  int8_t   rssi;           // WiFi RSSI
-  uint8_t  reserved[2];    // Padding for alignment
-  uint32_t uptimeSec;      // Uptime in seconds
-  uint32_t freeHeap;       // Free heap bytes
-  uint32_t seqNum;         // Sequence number for tracking
-  uint32_t bootCounter;    // Persistent boot counter
-  uint32_t settingsHash;   // Hash of local settings (exclude passwords)
+  uint8_t  role;           // 0   Bond role (master/worker)
+  int8_t   rssi;           // 1   WiFi RSSI
+  uint8_t  reserved[2];    // 2   sent 0, ignored
+  uint32_t uptimeSec;      // 4   Uptime in seconds
+  uint32_t freeHeap;       // 8   Free heap bytes
+  uint32_t seqNum;         // 12  Sequence number for tracking
+  uint32_t bootCounter;    // 16  Persistent boot counter
+  uint32_t settingsHash;   // 20  Hash of local settings (exclude passwords)
 };
+static_assert(sizeof(V4PayloadBondHeartbeat) == 24, "V4PayloadBondHeartbeat layout");
+static_assert(offsetof(V4PayloadBondHeartbeat, role) == 0 && offsetof(V4PayloadBondHeartbeat, rssi) == 1 &&
+              offsetof(V4PayloadBondHeartbeat, reserved) == 2 && offsetof(V4PayloadBondHeartbeat, uptimeSec) == 4 &&
+              offsetof(V4PayloadBondHeartbeat, freeHeap) == 8 && offsetof(V4PayloadBondHeartbeat, seqNum) == 12 &&
+              offsetof(V4PayloadBondHeartbeat, bootCounter) == 16 &&
+              offsetof(V4PayloadBondHeartbeat, settingsHash) == 20, "V4PayloadBondHeartbeat layout");
 
 // (BOND_SENSOR_DATA carries V4PayloadSensorReading, below the bond block: one
 // reading layout for the mesh frame 154 and the bond frame 179.)
 
 // Stream control payload for bond mode (master -> worker)
 struct __attribute__((packed)) V4PayloadStreamCtrl {
-  uint8_t sensorType;   // RemoteSensorType enum value
-  uint8_t enable;       // 1 = start streaming, 0 = stop streaming
-  uint8_t reserved[2];  // Padding
+  uint8_t sensorType;   // 0  RemoteSensorType enum value
+  uint8_t enable;       // 1  1 = start streaming, 0 = stop streaming
+  uint8_t reserved[2];  // 2  sent 0, ignored
 };
+static_assert(sizeof(V4PayloadStreamCtrl) == 4, "V4PayloadStreamCtrl layout");
+static_assert(offsetof(V4PayloadStreamCtrl, sensorType) == 0 && offsetof(V4PayloadStreamCtrl, enable) == 1 &&
+              offsetof(V4PayloadStreamCtrl, reserved) == 2, "V4PayloadStreamCtrl layout");
 
 // ---- Bond agreement (BOND_REQUEST / BOND_NOTICE) ------------------------------
 // A bond is a setting on each device; these two frames let the devices tell
@@ -514,9 +646,12 @@ struct __attribute__((packed)) V4PayloadBondRequest {
   uint16_t seq;          // request number, never 0, counted up from 1 since boot (16 bit, goes
                          // round). The answering BOND_NOTICE carries it back; the sender's ENDED
                          // names the last one it gave out
-  uint8_t  reserved[4];  // 0
+  uint8_t  reserved[4];  // 4  sent 0, ignored
 };
 static_assert(sizeof(V4PayloadBondRequest) == 8, "V4PayloadBondRequest is 8 bytes on the wire");
+static_assert(offsetof(V4PayloadBondRequest, role) == 0 && offsetof(V4PayloadBondRequest, flags) == 1 &&
+              offsetof(V4PayloadBondRequest, seq) == 2 && offsetof(V4PayloadBondRequest, reserved) == 4,
+              "V4PayloadBondRequest layout");
 
 // BOND_NOTICE reasons. A receiver ignores a value it does not know, so new
 // ones can be added; never reuse a number.
@@ -542,10 +677,12 @@ struct __attribute__((packed)) V4PayloadBondNotice {
   uint8_t  flags;        // BondNoticeFlags, with the role only (ACCEPTED, ROLE_CONFLICT,
                          // ENDED); 0 otherwise. Was reserved (0): firmware from before it
                          // reads "not chosen"
-  uint8_t  reserved[3];  // 0
+  uint8_t  reserved[3];  // 5  sent 0, ignored
 };
 static_assert(sizeof(V4PayloadBondNotice) == 8, "V4PayloadBondNotice is 8 bytes on the wire");
-static_assert(offsetof(V4PayloadBondNotice, flags) == 4, "V4PayloadBondNotice.flags is the first byte that was reserved");
+static_assert(offsetof(V4PayloadBondNotice, reason) == 0 && offsetof(V4PayloadBondNotice, role) == 1 &&
+              offsetof(V4PayloadBondNotice, seq) == 2 && offsetof(V4PayloadBondNotice, flags) == 4 &&
+              offsetof(V4PayloadBondNotice, reserved) == 5, "V4PayloadBondNotice layout");
 
 // BOND_NOTICE flags.
 enum BondNoticeFlags : uint8_t {
@@ -553,10 +690,63 @@ enum BondNoticeFlags : uint8_t {
 };
 #endif // ENABLE_BONDED_MODE
 
+// BOND_CAP_RESP (172): the capability summary a bond partner sends on bonding
+// (buildCapabilitySummary). Declared in every build (a value type); only bond
+// builds send or receive it.
+struct __attribute__((packed)) CapabilitySummary {
+  uint8_t  protoVersion;       // 0   sent 1, ignored
+  uint8_t  role;               // 1   0=worker, 1=master
+  uint8_t  inputDeviceType;    // 2   INPUT_DEVICE_TYPE: 0 none, 1 Seesaw gamepad, 2 ANO encoder
+  uint8_t  chipModel;          // 3   esp_chip_info model
+  uint32_t featureMask;        // 4   compile-time features (CAP_FEATURE_*)
+  uint32_t serviceMask;        // 8   runtime services (CAP_SERVICE_*)
+  uint32_t sensorMask;         // 12  sensors (CAP_SENSOR_*), 32 bits
+  uint8_t  mac[6];             // 16  device MAC address
+  uint8_t  wifiChannel;        // 22  current Wi-Fi channel
+  uint8_t  reserved0;          // 23  sent 0, ignored
+  uint32_t flashSizeMb;        // 24
+  uint32_t psramSizeMb;        // 28
+  uint32_t uptimeSeconds;      // 32
+  uint8_t  fwHash[16];         // 36  first 16 bytes of the firmware SHA-256
+  char     deviceName[32];     // 52  device name (System_DeviceName.h): devicename::putField / getField
+};
+static_assert(sizeof(CapabilitySummary) == 84, "CapabilitySummary layout");
+static_assert(offsetof(CapabilitySummary, protoVersion) == 0 && offsetof(CapabilitySummary, role) == 1 &&
+              offsetof(CapabilitySummary, inputDeviceType) == 2 && offsetof(CapabilitySummary, chipModel) == 3 &&
+              offsetof(CapabilitySummary, featureMask) == 4 && offsetof(CapabilitySummary, serviceMask) == 8 &&
+              offsetof(CapabilitySummary, sensorMask) == 12 && offsetof(CapabilitySummary, mac) == 16 &&
+              offsetof(CapabilitySummary, wifiChannel) == 22 && offsetof(CapabilitySummary, reserved0) == 23 &&
+              offsetof(CapabilitySummary, flashSizeMb) == 24 && offsetof(CapabilitySummary, psramSizeMb) == 28 &&
+              offsetof(CapabilitySummary, uptimeSeconds) == 32 && offsetof(CapabilitySummary, fwHash) == 36 &&
+              offsetof(CapabilitySummary, deviceName) == 52, "CapabilitySummary layout");
+
+// BOND_STATUS_RESP (176): the periodic bond status snapshot, the answer to
+// BOND_STATUS_REQ (~30 s). The masks use the CAP_SENSOR_* bits of
+// CapabilitySummary, 32 bits. Declared in every build (a value type).
+struct __attribute__((packed)) BondPeerStatus {
+  uint32_t uptimeSec;          // 0   device uptime in seconds
+  uint32_t freeHeap;           // 4   free heap bytes
+  uint32_t minFreeHeap;        // 8   minimum free heap since boot
+  uint32_t sensorEnabledMask;  // 12  CAP_SENSOR_* bits for sensors currently running
+  uint32_t sensorConnectedMask;// 16  CAP_SENSOR_* bits for sensors currently connected
+  uint8_t  wifiConnected;      // 20  Wi-Fi STA connected (0/1)
+  uint8_t  bluetoothActive;    // 21  Bluetooth active (0/1)
+  uint8_t  httpActive;         // 22  HTTP server running (0/1)
+  uint8_t  bondHandshakeState; // 23  current handshake state
+  uint8_t  reserved[4];        // 24  sent 0, ignored
+};
+static_assert(sizeof(BondPeerStatus) == 28, "BondPeerStatus layout");
+static_assert(offsetof(BondPeerStatus, uptimeSec) == 0 && offsetof(BondPeerStatus, freeHeap) == 4 &&
+              offsetof(BondPeerStatus, minFreeHeap) == 8 && offsetof(BondPeerStatus, sensorEnabledMask) == 12 &&
+              offsetof(BondPeerStatus, sensorConnectedMask) == 16 && offsetof(BondPeerStatus, wifiConnected) == 20 &&
+              offsetof(BondPeerStatus, bluetoothActive) == 21 && offsetof(BondPeerStatus, httpActive) == 22 &&
+              offsetof(BondPeerStatus, bondHandshakeState) == 23 && offsetof(BondPeerStatus, reserved) == 24,
+              "BondPeerStatus layout");
+
 // ---- Sensor frames -----------------------------------------------------------
 // One numbering of the sensor types everywhere: RemoteSensorType
 // (System_ESPNow_SensorCore.h). A mask bit is espnowsensor::sensorBit(type).
-// Every frame below fits one frame through a relay (130 bytes of plaintext).
+// Every frame below fits one frame through a relay (146 bytes of plaintext).
 
 // SENSOR_STATUS (151): which sensors the sender has and which it is streaming.
 // A session unicast to the device that receives the sender's readings (row:
@@ -575,7 +765,7 @@ struct __attribute__((packed)) V4PayloadSensorStatus {
 };
 static_assert(sizeof(V4PayloadSensorStatus) == 16 && sizeof(V4PayloadSensorStatus) == espnowfwd::kStatusFrameLen,
               "V4PayloadSensorStatus is 16 bytes on the wire");
-static_assert(offsetof(V4PayloadSensorStatus, streamingMask) == 4 && offsetof(V4PayloadSensorStatus, bootTag) == 8 &&
+static_assert(offsetof(V4PayloadSensorStatus, presentMask) == 0 && offsetof(V4PayloadSensorStatus, streamingMask) == 4 && offsetof(V4PayloadSensorStatus, bootTag) == 8 &&
               offsetof(V4PayloadSensorStatus, fwdLink) == 10 && offsetof(V4PayloadSensorStatus, reserved) == 11,
               "V4PayloadSensorStatus layout (espnowfwd::packStatusFrame writes these offsets)");
 
@@ -585,6 +775,7 @@ static_assert(offsetof(V4PayloadSensorStatus, streamingMask) == 4 && offsetof(V4
 // length minus 12. System_ESPNow_SensorCore.h has the rules and the meaning of
 // every field; the code packs and parses with espnowsensor::packReadingHeader
 // / parseReadingHeader, and this struct states the layout.
+// Fixed header: cannot grow (see the frame rules at the top of this file).
 struct __attribute__((packed)) V4PayloadSensorReading {
   uint8_t  sensorType;  // 0   RemoteSensorType
   uint8_t  flags;       // 1   bit 0: ageMs is filled; bit 1: first reading of a stream to this target;
@@ -598,16 +789,20 @@ struct __attribute__((packed)) V4PayloadSensorReading {
 static_assert(sizeof(V4PayloadSensorReading) == 12 &&
               sizeof(V4PayloadSensorReading) == espnowsensor::kReadingHeaderLen,
               "V4PayloadSensorReading is 12 bytes on the wire");
-static_assert(offsetof(V4PayloadSensorReading, bootTag) == 2 && offsetof(V4PayloadSensorReading, counter) == 4 &&
+static_assert(offsetof(V4PayloadSensorReading, sensorType) == 0 && offsetof(V4PayloadSensorReading, flags) == 1 &&
+              offsetof(V4PayloadSensorReading, fwdLink) == 7 &&
+              offsetof(V4PayloadSensorReading, bootTag) == 2 && offsetof(V4PayloadSensorReading, counter) == 4 &&
               offsetof(V4PayloadSensorReading, parts) == 6 && offsetof(V4PayloadSensorReading, ageMs) == 8,
               "V4PayloadSensorReading layout (espnowsensor::packReadingHeader writes these offsets)");
 
 #define SENSOR_READING_HEADER_LEN       12
 #define SENSOR_READING_MAX_PARTS        4
 #define SENSOR_READING_PART_MAX_DIRECT  (ESPNOW_V4_MAX_PLAINTEXT - SENSOR_READING_HEADER_LEN)              // 190
-#define SENSOR_READING_PART_MAX_ROUTED  (ESPNOW_V4_RELAY_MAX_INNER_PLAINTEXT - SENSOR_READING_HEADER_LEN)  // 118
+#define SENSOR_READING_PART_MAX_ROUTED  (ESPNOW_V4_RELAY_MAX_INNER_PLAINTEXT - SENSOR_READING_HEADER_LEN)  // 134
 // The largest reading, the same on a direct and a routed path.
-#define SENSOR_READING_MAX_BYTES        (SENSOR_READING_MAX_PARTS * SENSOR_READING_PART_MAX_ROUTED)        // 472
+#define SENSOR_READING_MAX_BYTES        (SENSOR_READING_MAX_PARTS * SENSOR_READING_PART_MAX_ROUTED)        // 536
+static_assert(SENSOR_READING_PART_MAX_DIRECT == 190 && SENSOR_READING_PART_MAX_ROUTED == 134 &&
+              SENSOR_READING_MAX_BYTES == 536, "sensor reading budgets (docs/APP_JSON_CONTRACT.md)");
 static_assert(espnowsensor::kFrameCapDirect == ESPNOW_V4_MAX_PLAINTEXT &&
               espnowsensor::kFrameCapRouted == ESPNOW_V4_RELAY_MAX_INNER_PLAINTEXT &&
               espnowsensor::kReadingMaxBytes == SENSOR_READING_MAX_BYTES &&
@@ -633,7 +828,9 @@ struct __attribute__((packed)) V4PayloadSensorReq {
   uint8_t  reserved;    // 15  0
 };
 static_assert(sizeof(V4PayloadSensorReq) == 16, "V4PayloadSensorReq is 16 bytes on the wire");
-static_assert(offsetof(V4PayloadSensorReq, sensorMask) == 2 && offsetof(V4PayloadSensorReq, intervalMs) == 6 &&
+static_assert(offsetof(V4PayloadSensorReq, reqId) == 0 && offsetof(V4PayloadSensorReq, mode) == 1 &&
+              offsetof(V4PayloadSensorReq, reserved) == 15 &&
+              offsetof(V4PayloadSensorReq, sensorMask) == 2 && offsetof(V4PayloadSensorReq, intervalMs) == 6 &&
               offsetof(V4PayloadSensorReq, leaseMs) == 10 && offsetof(V4PayloadSensorReq, fwdLink) == 14,
               "V4PayloadSensorReq layout");
 
@@ -659,7 +856,7 @@ struct __attribute__((packed)) V4PayloadPowerStatus {
 };
 static_assert(sizeof(V4PayloadPowerStatus) == 24 && sizeof(V4PayloadPowerStatus) == espnowsensor::kPowerFrameLen,
               "V4PayloadPowerStatus is 24 bytes on the wire");
-static_assert(offsetof(V4PayloadPowerStatus, bootTag) == 2 && offsetof(V4PayloadPowerStatus, status) == 4 &&
+static_assert(offsetof(V4PayloadPowerStatus, counter) == 0 && offsetof(V4PayloadPowerStatus, bootTag) == 2 && offsetof(V4PayloadPowerStatus, status) == 4 &&
               offsetof(V4PayloadPowerStatus, backend) == 5 && offsetof(V4PayloadPowerStatus, known) == 6 &&
               offsetof(V4PayloadPowerStatus, voltageMv) == 8 && offsetof(V4PayloadPowerStatus, percentX10) == 10 &&
               offsetof(V4PayloadPowerStatus, rateX10) == 12 && offsetof(V4PayloadPowerStatus, sampleAgeMs) == 14 &&
@@ -690,7 +887,9 @@ struct __attribute__((packed)) V4PayloadEventPush {
 };
 static_assert(sizeof(V4PayloadEventPush) == 128 && sizeof(V4PayloadEventPush) == espnowsensor::kEventFrameLen,
               "V4PayloadEventPush is 128 bytes on the wire");
-static_assert(offsetof(V4PayloadEventPush, flags) == 4 && offsetof(V4PayloadEventPush, tier) == 5 &&
+static_assert(offsetof(V4PayloadEventPush, counter) == 0 && offsetof(V4PayloadEventPush, bootTag) == 2 &&
+              offsetof(V4PayloadEventPush, fwdLink) == 7 && offsetof(V4PayloadEventPush, reserved1) == 10 &&
+              offsetof(V4PayloadEventPush, flags) == 4 && offsetof(V4PayloadEventPush, tier) == 5 &&
               offsetof(V4PayloadEventPush, source) == 6 && offsetof(V4PayloadEventPush, skipped) == 8 &&
               offsetof(V4PayloadEventPush, eventSeq) == 12 && offsetof(V4PayloadEventPush, ageMs) == 16 &&
               offsetof(V4PayloadEventPush, kind) == 20 && offsetof(V4PayloadEventPush, subject) == 52 &&
@@ -714,18 +913,24 @@ struct __attribute__((packed)) V4PayloadForwardLink {
   uint8_t  answers;         // 6   answer: the op answered
   uint8_t  reserved0;       // 7   0
   uint8_t  partnerMac[6];   // 8   the bond partner; all zero: "for nobody" (withdraw) or a query
-  uint16_t sensorMask;      // 14  the sensors forwarded
-  uint8_t  partnerKey[32];  // 16  the partner's Ed25519 public key as the bond master holds it
-  char     partnerName[32]; // 48  the name the bond master shows for it
-  uint8_t  reserved1[16];   // 80  0
+  uint16_t reserved1;       // 14  sent 0, ignored
+  uint32_t sensorMask;      // 16  the sensors forwarded (32 bits)
+  uint8_t  partnerKey[32];  // 20  the partner's Ed25519 public key as the bond master holds it
+  char     partnerName[32]; // 52  the partner's device name (System_DeviceName.h; empty = none, shown as its MAC)
+  uint8_t  reserved2[12];   // 84  sent 0, ignored
 };
 static_assert(sizeof(V4PayloadForwardLink) == 96 && sizeof(V4PayloadForwardLink) == espnowfwd::kLinkFrameLen,
               "V4PayloadForwardLink is 96 bytes on the wire");
-static_assert(offsetof(V4PayloadForwardLink, linkGen) == 1 && offsetof(V4PayloadForwardLink, viaBootTag) == 2 &&
+static_assert(offsetof(V4PayloadForwardLink, op) == 0 && offsetof(V4PayloadForwardLink, reserved0) == 7 &&
+              offsetof(V4PayloadForwardLink, linkGen) == 1 && offsetof(V4PayloadForwardLink, viaBootTag) == 2 &&
               offsetof(V4PayloadForwardLink, streams) == 4 && offsetof(V4PayloadForwardLink, result) == 5 &&
               offsetof(V4PayloadForwardLink, answers) == 6 && offsetof(V4PayloadForwardLink, partnerMac) == 8 &&
-              offsetof(V4PayloadForwardLink, sensorMask) == 14 && offsetof(V4PayloadForwardLink, partnerKey) == 16 &&
-              offsetof(V4PayloadForwardLink, partnerName) == 48 && offsetof(V4PayloadForwardLink, reserved1) == 80,
+              offsetof(V4PayloadForwardLink, reserved1) == 14 &&
+              offsetof(V4PayloadForwardLink, sensorMask) == espnowfwd::kLinkOffMask &&
+              offsetof(V4PayloadForwardLink, partnerKey) == espnowfwd::kLinkOffKey &&
+              offsetof(V4PayloadForwardLink, partnerName) == espnowfwd::kLinkOffName &&
+              offsetof(V4PayloadForwardLink, reserved2) == 84 &&
+              espnowfwd::kLinkOffMask == 16 && espnowfwd::kLinkOffKey == 20 && espnowfwd::kLinkOffName == 52,
               "V4PayloadForwardLink layout (espnowfwd::packLinkFrame writes these offsets)");
 
 // Every frame of this block and TIME_SYNC travel inside a relay envelope
@@ -741,34 +946,36 @@ static_assert(sizeof(V4PayloadTimeSync) <= ESPNOW_V4_RELAY_MAX_INNER_PLAINTEXT &
 // Metadata payload for metadata exchange (REQ/RESP/PUSH)
 // Phase 3.5: trimmed tags 64→54 so the struct fits ESPNOW_V4_MAX_PLAINTEXT
 // (202 B) for future SESSION_FRAME wrapping. Total now exactly 202.
+// It is exactly the sealed single-frame budget (202 B), so it cannot grow.
 struct __attribute__((packed)) V4PayloadMetadata {
-  char    deviceName[32];
-  char    friendlyName[48];
-  char    room[32];
-  char    zone[32];
-  char    tags[54];       // was 64 — trimmed to fit encrypted-frame budget
-  uint8_t stationary;
-  uint8_t reserved[3];    // Padding for future fields
+  char    deviceName[32];    // 0   the sender's device name (System_DeviceName.h); NUL always present, rest 0
+  char    friendlyName[48];  // 32
+  char    room[32];          // 80
+  char    zone[32];          // 112
+  char    tags[54];          // 144
+  uint8_t stationary;        // 198
+  uint8_t reserved[3];       // 199  sent 0, ignored
 };
-static_assert(sizeof(V4PayloadMetadata) <= ESPNOW_V4_MAX_PLAINTEXT,
-              "V4PayloadMetadata must fit a SESSION_FRAME plaintext budget "
-              "(MAX_PAYLOAD - AEAD_TAG = 202 B). For larger payloads, route "
-              "through v4_send_payload_smart or v4_send_encrypted_chunked "
-              "(Phase 3.5 task #51 — shipped).");
+static_assert(sizeof(V4PayloadMetadata) == ESPNOW_V4_MAX_PLAINTEXT && sizeof(V4PayloadMetadata) == 202,
+              "V4PayloadMetadata is exactly one SESSION_FRAME plaintext budget (202 B)");
+static_assert(offsetof(V4PayloadMetadata, deviceName) == 0 && offsetof(V4PayloadMetadata, friendlyName) == 32 &&
+              offsetof(V4PayloadMetadata, room) == 80 && offsetof(V4PayloadMetadata, zone) == 112 &&
+              offsetof(V4PayloadMetadata, tags) == 144 && offsetof(V4PayloadMetadata, stationary) == 198 &&
+              offsetof(V4PayloadMetadata, reserved) == 199, "V4PayloadMetadata layout");
+static_assert(sizeof(V4PayloadMetadata::deviceName) == devicename::kFieldLen &&
+              sizeof(V4PayloadForwardLink::partnerName) == devicename::kFieldLen,
+              "every frame that carries the device name has a 32-byte field");
 
-// Command response payload — V4 keeps the V3 semantics for Phase 1
-// (single buffer, truncated). Phase 1.5 / Phase 2 may refactor to streaming
-// for unlimited output; for now, the cap is whatever ESPNOW_V4_MAX_PLAINTEXT
-// allows minus the success byte (so the response fits even when wrapped in
-// SESSION_FRAME — single-frame encrypted CMD_RESP). Larger responses go
-// through v4_send_payload_smart which prefers encrypted-chunked (Phase 3.5
-// task #51, shipped) and falls back to plaintext fragmented if no session.
-struct __attribute__((packed)) V4PayloadCmdResp {
-  uint8_t success;                            // 1=success, 0=failure
-  char    result[ESPNOW_V4_MAX_PLAINTEXT - 1]; // Null-terminated, 201 bytes — fits a SESSION_FRAME
+// CMD_RESP (51): one success byte, then the command's output text to the end
+// of the payload, with no terminator (a receiver strips one trailing NUL that
+// a sender may still add). Larger outputs go through v4_send_payload_smart,
+// which seals and fragments them.
+// Fixed header: cannot grow (see the frame rules at the top of this file).
+struct __attribute__((packed)) V4PayloadCmdRespHeader {
+  uint8_t success;           // 0  1=success, 0=failure
 };
-static_assert(sizeof(V4PayloadCmdResp) <= ESPNOW_V4_MAX_PLAINTEXT,
-              "V4PayloadCmdResp must fit a SESSION_FRAME plaintext budget");
+static_assert(sizeof(V4PayloadCmdRespHeader) == 1, "V4PayloadCmdRespHeader layout");
+static_assert(offsetof(V4PayloadCmdRespHeader, success) == 0, "V4PayloadCmdRespHeader layout");
 
 // ---- Phase 3.3 — KEY_EX handshake payloads ---------------------------------
 //
@@ -779,7 +986,6 @@ static_assert(sizeof(V4PayloadCmdResp) <= ESPNOW_V4_MAX_PLAINTEXT,
 // a valid HMAC.
 //
 // On wire, each frame carries:
-//   ESPNOW_V4_FLAG_HANDSHAKE  (so RX path knows it's plaintext-but-authenticated)
 //   header.type               (KEY_EX_HELLO / KEY_EX_REPLY / KEY_EX_CONFIRM)
 //   header.meshFingerprint    (RX dispatches mesh lookup off this)
 //
@@ -802,6 +1008,9 @@ struct __attribute__((packed)) V4PayloadKeyExHello {
                                 //   keyed by mesh bootstrap key
 };
 static_assert(sizeof(V4PayloadKeyExHello) == 72, "V4PayloadKeyExHello layout");
+static_assert(offsetof(V4PayloadKeyExHello, meshFingerprint) == 0 && offsetof(V4PayloadKeyExHello, senderMac) == 2 &&
+              offsetof(V4PayloadKeyExHello, senderPubEd25519) == 8 && offsetof(V4PayloadKeyExHello, hmac) == 40,
+              "V4PayloadKeyExHello layout");
 
 struct __attribute__((packed)) V4PayloadKeyExReply {
   uint16_t meshFingerprint;
@@ -810,15 +1019,21 @@ struct __attribute__((packed)) V4PayloadKeyExReply {
   uint8_t  hmac[32];            // same construction as HELLO, with responder fields
 };
 static_assert(sizeof(V4PayloadKeyExReply) == 72, "V4PayloadKeyExReply layout");
+static_assert(offsetof(V4PayloadKeyExReply, meshFingerprint) == 0 && offsetof(V4PayloadKeyExReply, responderMac) == 2 &&
+              offsetof(V4PayloadKeyExReply, responderPubEd25519) == 8 && offsetof(V4PayloadKeyExReply, hmac) == 40,
+              "V4PayloadKeyExReply layout");
 
 struct __attribute__((packed)) V4PayloadKeyExConfirm {
   uint16_t meshFingerprint;
   uint8_t  confirmerMac[6];
   uint8_t  status;              // 0 = paired OK, 1 = HMAC fail, 2 = already-paired-different-key
-  uint8_t  _pad;
+  uint8_t  reserved;            // sent 0, ignored
   uint8_t  pubFingerprint[8];   // first 8 bytes of own pub key (for OOB display verification)
 };
 static_assert(sizeof(V4PayloadKeyExConfirm) == 18, "V4PayloadKeyExConfirm layout");
+static_assert(offsetof(V4PayloadKeyExConfirm, meshFingerprint) == 0 && offsetof(V4PayloadKeyExConfirm, confirmerMac) == 2 &&
+              offsetof(V4PayloadKeyExConfirm, status) == 8 && offsetof(V4PayloadKeyExConfirm, reserved) == 9 &&
+              offsetof(V4PayloadKeyExConfirm, pubFingerprint) == 10, "V4PayloadKeyExConfirm layout");
 
 // ---- Phase 3.4 — SESSION establishment payloads -----------------------------
 //
@@ -828,22 +1043,41 @@ static_assert(sizeof(V4PayloadKeyExConfirm) == 18, "V4PayloadKeyExConfirm layout
 // negotiates fresh ephemeral X25519 keys, signs them under the long-term
 // identity, and derives forward-secret AEAD session keys.
 //
-// Transcript signed:
+// Transcript signed (integers little endian):
 //   OPEN:    "v4-sopen:" || sessionId(2) || initMac(6) || respMac(6) ||
-//                          ephX25519Pub(32) || nonceA(16)
+//                          ephX25519Pub(32) || nonceA(16) || sessionCaps(4)
 //   CONFIRM: "v4-sconf:" || sessionId(2) || respMac(6) || initMac(6) ||
-//                          ephX25519Pub(32) || nonceA(16) || nonceB(16)
+//                          ephX25519Pub(32) || nonceA(16) || nonceB(16) || sessionCaps(4)
 //
 // nonceA is sent in OPEN and echoed back inside the CONFIRM signature input
 // — that's the freshness binding from A to B. nonceB is added on the B side.
-// Total signed length: OPEN = 9 + 2 + 6 + 6 + 32 + 16 = 71 bytes;
-//                      CONFIRM = 9 + 2 + 6 + 6 + 32 + 16 + 16 = 87 bytes.
+// Total signed length: OPEN = 9 + 2 + 6 + 6 + 32 + 16 + 4 = 75 bytes;
+//                      CONFIRM = 9 + 2 + 6 + 6 + 32 + 16 + 16 + 4 = 91 bytes.
 // Sign exactly those byte counts — a transcript padded to any other length
 // verifies against nothing and every handshake fails.
 //
+// sessionCaps (1.0): the sender's capability word, signed by its owner
+// (System_ESPNow_SessionCapsCore.h has the bits and the rules). The
+// initiator's word is not echoed in CONFIRM: it is already bound to nonceA,
+// which CONFIRM signs. The responder takes the initiator's word from an OPEN,
+// whose signature covers nothing fresh from the responder: a recorded OPEN
+// replayed after the responder restarted carries its old word, so the
+// responder counts that word as confirmed only after the first sealed frame of
+// the session opens. REKEY carries no word: the session keeps the one from its
+// handshake, since a word is fixed for the sender's boot.
+//
+// In SESSION_OPEN and SESSION_CONFIRM the Ed25519 signature is the last 64
+// bytes and the capability word sits right before it. SESSION_REKEY is signed
+// too, but the field before its signature is prevTxSeqAtRekey (no word), and
+// the three KEY_EX frames carry a 32-byte HMAC instead of a signature. These
+// six handshake frames (KEY_EX HELLO/REPLY/CONFIRM, SESSION OPEN/CONFIRM/REKEY)
+// are the one exception to "longer frames are read up to the known fields":
+// each is taken only at its exact length, because its signature or HMAC
+// covers the whole frame.
+//
 // Flow:
-//   A → B: SESSION_OPEN    (sessionId, ephPub_A, nonceA, sig over OPEN transcript)
-//   B → A: SESSION_CONFIRM (sessionId, ephPub_B, nonceB, sig over CONFIRM transcript)
+//   A → B: SESSION_OPEN    (sessionId, ephPub_A, nonceA, caps_A, sig over OPEN transcript)
+//   B → A: SESSION_CONFIRM (sessionId, ephPub_B, nonceB, caps_B, sig over CONFIRM transcript)
 // On success both sides hold matching aeadKeyAtoB / aeadKeyBtoA derived via
 // Blake2b KDF (contexts "esp-AtoB" / "esp-BtoA") from the X25519 shared secret.
 
@@ -853,9 +1087,18 @@ struct __attribute__((packed)) V4PayloadSessionOpen {
   uint8_t  responderMac[6];
   uint8_t  ephX25519Pub[32];
   uint8_t  nonceA[16];
-  uint8_t  signature[64];        // Ed25519 over "v4-sopen:"||sessionId||initMac||respMac||eph||nonceA
+  uint32_t sessionCaps;          // the initiator's capability word (SessionCapsCore.h)
+  uint8_t  signature[64];        // Ed25519 over the OPEN transcript above
 };
-static_assert(sizeof(V4PayloadSessionOpen) == 126, "V4PayloadSessionOpen layout");
+static_assert(sizeof(V4PayloadSessionOpen) == 130, "V4PayloadSessionOpen layout");
+static_assert(offsetof(V4PayloadSessionOpen, sessionId) == 0 &&
+              offsetof(V4PayloadSessionOpen, initiatorMac) == 2 &&
+              offsetof(V4PayloadSessionOpen, responderMac) == 8 &&
+              offsetof(V4PayloadSessionOpen, ephX25519Pub) == 14 &&
+              offsetof(V4PayloadSessionOpen, nonceA) == 46 &&
+              offsetof(V4PayloadSessionOpen, sessionCaps) == 62 &&
+              offsetof(V4PayloadSessionOpen, signature) == 66,
+              "V4PayloadSessionOpen field offsets");
 
 struct __attribute__((packed)) V4PayloadSessionConfirm {
   uint16_t sessionId;            // mirrors initiator's choice
@@ -864,9 +1107,19 @@ struct __attribute__((packed)) V4PayloadSessionConfirm {
   uint8_t  ephX25519Pub[32];
   uint8_t  nonceA[16];           // echoed from OPEN — freshness binding
   uint8_t  nonceB[16];
-  uint8_t  signature[64];        // Ed25519 over "v4-sconf:"||sessionId||respMac||initMac||eph||nonceA||nonceB
+  uint32_t sessionCaps;          // the responder's capability word (SessionCapsCore.h)
+  uint8_t  signature[64];        // Ed25519 over the CONFIRM transcript above
 };
-static_assert(sizeof(V4PayloadSessionConfirm) == 142, "V4PayloadSessionConfirm layout");
+static_assert(sizeof(V4PayloadSessionConfirm) == 146, "V4PayloadSessionConfirm layout");
+static_assert(offsetof(V4PayloadSessionConfirm, sessionId) == 0 &&
+              offsetof(V4PayloadSessionConfirm, responderMac) == 2 &&
+              offsetof(V4PayloadSessionConfirm, initiatorMac) == 8 &&
+              offsetof(V4PayloadSessionConfirm, ephX25519Pub) == 14 &&
+              offsetof(V4PayloadSessionConfirm, nonceA) == 46 &&
+              offsetof(V4PayloadSessionConfirm, nonceB) == 62 &&
+              offsetof(V4PayloadSessionConfirm, sessionCaps) == 78 &&
+              offsetof(V4PayloadSessionConfirm, signature) == 82,
+              "V4PayloadSessionConfirm field offsets");
 
 // ---- Phase 3.6 — SESSION_REKEY (forward-secrecy rotation) -------------------
 //
@@ -907,8 +1160,12 @@ struct __attribute__((packed)) V4PayloadSessionRekey {
   uint8_t  signature[64];        // Ed25519 over the transcript above
 };
 static_assert(sizeof(V4PayloadSessionRekey) == 130, "V4PayloadSessionRekey layout");
-static_assert(sizeof(V4PayloadSessionRekey) <= ESPNOW_V4_MAX_PLAINTEXT,
-              "REKEY must fit a SESSION_FRAME budget; rekey messages are sent inside the existing session");
+static_assert(offsetof(V4PayloadSessionRekey, sessionId) == 0 && offsetof(V4PayloadSessionRekey, senderMac) == 2 &&
+              offsetof(V4PayloadSessionRekey, receiverMac) == 8 && offsetof(V4PayloadSessionRekey, newEphX25519Pub) == 14 &&
+              offsetof(V4PayloadSessionRekey, nonceRekey) == 46 && offsetof(V4PayloadSessionRekey, prevTxSeqAtRekey) == 62 &&
+              offsetof(V4PayloadSessionRekey, signature) == 66, "V4PayloadSessionRekey layout");
+static_assert(sizeof(V4PayloadSessionRekey) <= ESPNOW_V4_MAX_PAYLOAD,
+              "REKEY is sent plaintext, signed under the identity key: it must fit one frame");
 
 // ---- Phase 5 — event subscription registry (opcode 130) ------------------
 //
@@ -923,19 +1180,25 @@ static_assert(sizeof(V4PayloadSessionRekey) <= ESPNOW_V4_MAX_PLAINTEXT,
 // BROADCAST_AUTH-only frame never reaches the handler.
 struct __attribute__((packed)) V4PayloadSubscribe {
   uint32_t requestedEvents;  // bitmask of EspNowEventCategory bits
-  uint8_t  reserved[12];     // reserved for future flags / scope hints; must be 0
+  uint8_t  reserved[12];     // 4  sent 0, ignored
 };
 static_assert(sizeof(V4PayloadSubscribe) == 16, "V4PayloadSubscribe layout");
+static_assert(offsetof(V4PayloadSubscribe, requestedEvents) == 0 && offsetof(V4PayloadSubscribe, reserved) == 4,
+              "V4PayloadSubscribe layout");
 static_assert(sizeof(V4PayloadSubscribe) <= ESPNOW_V4_MAX_PLAINTEXT,
               "SUBSCRIBE_UPDATE must fit a SESSION_FRAME budget");
 
 // File transfer payloads
 struct __attribute__((packed)) V4PayloadFileStart {
-  uint32_t fileSize;      // Total file size in bytes
-  uint16_t chunkCount;    // Total number of chunks
-  uint16_t chunkSize;     // Size of each chunk (except last)
-  char     filename[64];  // Destination filename
+  uint32_t fileSize;      // 0  Total file size in bytes
+  uint16_t chunkCount;    // 4  Total number of chunks
+  uint16_t chunkSize;     // 6  Size of each chunk (except last)
+  char     filename[64];  // 8  Destination filename
 };
+static_assert(sizeof(V4PayloadFileStart) == 72, "V4PayloadFileStart layout");
+static_assert(offsetof(V4PayloadFileStart, fileSize) == 0 && offsetof(V4PayloadFileStart, chunkCount) == 4 &&
+              offsetof(V4PayloadFileStart, chunkSize) == 6 && offsetof(V4PayloadFileStart, filename) == 8,
+              "V4PayloadFileStart layout");
 
 // Phase 3.5: chunk data sized for ESPNOW_V4_MAX_PLAINTEXT so encrypted
 // file transfers don't silently truncate every chunk by 16 bytes. Per-chunk
@@ -948,12 +1211,15 @@ struct __attribute__((packed)) V4PayloadFileStart {
 // v4_send_payload_smart, so each chunk is session-encrypted when a session
 // exists and plaintext otherwise. Old firmware reading
 // V4PayloadFileStart.chunkSize adapts automatically.
+// Fixed header: cannot grow (see the frame rules at the top of this file).
 struct __attribute__((packed)) V4PayloadFileData {
   uint16_t chunkIndex;    // Chunk index (0-based)
   uint8_t  data[ESPNOW_V4_MAX_PLAINTEXT - 2];  // 200 bytes — fits a SESSION_FRAME
 };
-static_assert(sizeof(V4PayloadFileData) <= ESPNOW_V4_MAX_PLAINTEXT,
+static_assert(sizeof(V4PayloadFileData) == ESPNOW_V4_MAX_PLAINTEXT && sizeof(V4PayloadFileData) == 202,
               "V4PayloadFileData must fit a SESSION_FRAME plaintext budget");
+static_assert(offsetof(V4PayloadFileData, chunkIndex) == 0 && offsetof(V4PayloadFileData, data) == 2,
+              "V4PayloadFileData layout (a chunk's bytes follow the index; the last chunk is shorter)");
 
 struct __attribute__((packed)) V4PayloadFileEnd {
   uint32_t crc32;         // CRC32 of the entire file, computed with esp_crc32_le
@@ -964,6 +1230,9 @@ struct __attribute__((packed)) V4PayloadFileEnd {
                           // transfer fails.
   uint8_t  success;       // 1=transfer complete, 0=sender aborted mid-transfer
 };
+static_assert(sizeof(V4PayloadFileEnd) == 5, "V4PayloadFileEnd layout");
+static_assert(offsetof(V4PayloadFileEnd, crc32) == 0 && offsetof(V4PayloadFileEnd, success) == 4,
+              "V4PayloadFileEnd layout");
 
 // Phase 4: FILE_CANCEL — the receiver tells the sender a transfer it started
 // will not complete. The header's msgId correlates to the original FILE_START.
@@ -981,8 +1250,10 @@ enum EspNowFileCancelReason : uint8_t {
                                  // transfer — receiver never had/lost the slot
 };
 struct __attribute__((packed)) V4PayloadFileCancel {
-  uint8_t reason;         // EspNowFileCancelReason
+  uint8_t reason;         // 0  EspNowFileCancelReason
 };
+static_assert(sizeof(V4PayloadFileCancel) == 1 && offsetof(V4PayloadFileCancel, reason) == 0,
+              "V4PayloadFileCancel layout");
 
 // ---- FS LIST request/reply (ESPNOW_V4_TYPE_FS_LIST_REQ / _REPLY) ----------
 //
@@ -1002,8 +1273,9 @@ struct __attribute__((packed)) V4PayloadFileCancel {
 //     typical OLED listings (140 B header + ≤ 32 entries × 76 B = 2572 B →
 //     13 fragments, well under the 32-fragment / 6400 B message limit)
 //
-// Request fits a single SESSION_FRAME (144 B < 202 B plaintext budget) so
-// it doesn't need fragmentation on the way out. Reply is sent via
+// Request fits a single SESSION_FRAME (144 B < 202 B plaintext budget), so it
+// doesn't need fragmentation. FS_* frames are never relayed
+// (v4_routed_type_allowed), so only the direct budget applies. Reply is sent via
 // v4_send_payload_smart which negotiates encrypted-chunked under a session.
 
 struct __attribute__((packed)) V4PayloadFsListReq {
@@ -1014,9 +1286,12 @@ struct __attribute__((packed)) V4PayloadFsListReq {
   uint16_t startIndex;     // Pagination — first entry to return (0 = start)
   uint16_t maxEntries;     // Cap; receiver may return fewer. Hard cap: 32.
   char     path[128];      // Null-terminated VFS path on receiver
-  uint8_t  reserved[8];    // Must be zero
+  uint8_t  reserved[8];    // sent 0, ignored
 };
 static_assert(sizeof(V4PayloadFsListReq) == 144, "V4PayloadFsListReq layout");
+static_assert(offsetof(V4PayloadFsListReq, reqId) == 0 && offsetof(V4PayloadFsListReq, startIndex) == 4 &&
+              offsetof(V4PayloadFsListReq, maxEntries) == 6 && offsetof(V4PayloadFsListReq, path) == 8 &&
+              offsetof(V4PayloadFsListReq, reserved) == 136, "V4PayloadFsListReq layout");
 static_assert(sizeof(V4PayloadFsListReq) <= ESPNOW_V4_MAX_PLAINTEXT,
               "V4PayloadFsListReq must fit single SESSION_FRAME");
 
@@ -1046,31 +1321,42 @@ enum FsListStatus : uint8_t {
   FS_LIST_STATUS_NOT_READY   = 6,
 };
 
+// Fixed header: cannot grow (see the frame rules at the top of this file).
 struct __attribute__((packed)) V4PayloadFsListReplyHeader {
   uint32_t reqId;          // Echoes request
   uint8_t  status;         // FsListStatus
   uint8_t  entryCount;     // Number of V4PayloadFsEntry records that follow
   uint8_t  hasMore;        // 1 if more entries available beyond this batch
-  uint8_t  reserved;       // Must be zero
+  uint8_t  reserved;       // sent 0, ignored
   uint16_t totalEntries;   // Total entries in directory (for UI "of N")
   uint16_t nextStartIndex; // Pass to follow-up request when hasMore=1
   char     path[128];      // Echoes (normalized) request path
 };
 static_assert(sizeof(V4PayloadFsListReplyHeader) == 140,
               "V4PayloadFsListReplyHeader layout");
+static_assert(offsetof(V4PayloadFsListReplyHeader, reqId) == 0 && offsetof(V4PayloadFsListReplyHeader, status) == 4 &&
+              offsetof(V4PayloadFsListReplyHeader, entryCount) == 5 && offsetof(V4PayloadFsListReplyHeader, hasMore) == 6 &&
+              offsetof(V4PayloadFsListReplyHeader, reserved) == 7 &&
+              offsetof(V4PayloadFsListReplyHeader, totalEntries) == 8 &&
+              offsetof(V4PayloadFsListReplyHeader, nextStartIndex) == 10 &&
+              offsetof(V4PayloadFsListReplyHeader, path) == 12, "V4PayloadFsListReplyHeader layout");
 
 // One entry in a FS_LIST_REPLY. Layout intentionally matches the spirit of
 // FileEntry in System_FileManager.h so the OLED render path can copy fields
 // near-1:1 from the wire into its FileEntry cache.
+// Fixed header: cannot grow (see the frame rules at the top of this file).
 struct __attribute__((packed)) V4PayloadFsEntry {
   char     name[64];       // Null-terminated filename (no path prefix)
   uint32_t size;           // Bytes (0 for folders)
   uint8_t  isFolder;       // 0 or 1
   uint8_t  perms;          // Bitmask matching FileEntry::permissions
                            //   bit 0 = READ, bit 1 = WRITE, bit 2 = DELETE
-  uint8_t  reserved[6];    // Must be zero
+  uint8_t  reserved[6];    // sent 0, ignored
 };
 static_assert(sizeof(V4PayloadFsEntry) == 76, "V4PayloadFsEntry layout");
+static_assert(offsetof(V4PayloadFsEntry, name) == 0 && offsetof(V4PayloadFsEntry, size) == 64 &&
+              offsetof(V4PayloadFsEntry, isFolder) == 68 && offsetof(V4PayloadFsEntry, perms) == 69 &&
+              offsetof(V4PayloadFsEntry, reserved) == 70, "V4PayloadFsEntry layout");
 
 // Hard cap on entries per reply — fits comfortably under the 6400 B
 // fragmented message limit (140 + 32 × 76 = 2572 B).
@@ -1087,9 +1373,11 @@ static_assert(sizeof(V4PayloadFsEntry) == 76, "V4PayloadFsEntry layout");
 struct __attribute__((packed)) V4PayloadFsStatReq {
   uint32_t reqId;          // Client-chosen correlation ID (nonzero)
   char     path[128];      // Root path on the peer (e.g. "/" or "/sd")
-  uint8_t  reserved[8];    // Must be zero
+  uint8_t  reserved[8];    // sent 0, ignored
 };
 static_assert(sizeof(V4PayloadFsStatReq) == 140, "V4PayloadFsStatReq layout");
+static_assert(offsetof(V4PayloadFsStatReq, reqId) == 0 && offsetof(V4PayloadFsStatReq, path) == 4 &&
+              offsetof(V4PayloadFsStatReq, reserved) == 132, "V4PayloadFsStatReq layout");
 static_assert(sizeof(V4PayloadFsStatReq) <= ESPNOW_V4_MAX_PLAINTEXT,
               "V4PayloadFsStatReq must fit single SESSION_FRAME");
 
@@ -1106,6 +1394,11 @@ struct __attribute__((packed)) V4PayloadFsStatReply {
   char     path[128];      // Echoes (normalized) request path
 };
 static_assert(sizeof(V4PayloadFsStatReply) == 164, "V4PayloadFsStatReply layout");
+static_assert(offsetof(V4PayloadFsStatReply, reqId) == 0 && offsetof(V4PayloadFsStatReply, status) == 4 &&
+              offsetof(V4PayloadFsStatReply, reserved1) == 5 && offsetof(V4PayloadFsStatReply, totalBytes) == 8 &&
+              offsetof(V4PayloadFsStatReply, usedBytes) == 16 && offsetof(V4PayloadFsStatReply, freeBytes) == 24 &&
+              offsetof(V4PayloadFsStatReply, percentUsedX10) == 32 && offsetof(V4PayloadFsStatReply, reserved2) == 34 &&
+              offsetof(V4PayloadFsStatReply, path) == 36, "V4PayloadFsStatReply layout");
 static_assert(sizeof(V4PayloadFsStatReply) <= ESPNOW_V4_MAX_PLAINTEXT,
               "V4PayloadFsStatReply must fit single SESSION_FRAME");
 
@@ -1136,6 +1429,8 @@ struct __attribute__((packed)) V4PayloadFsGetReq {
   uint8_t  reserved[8];
 };
 static_assert(sizeof(V4PayloadFsGetReq) == 140, "V4PayloadFsGetReq layout");
+static_assert(offsetof(V4PayloadFsGetReq, reqId) == 0 && offsetof(V4PayloadFsGetReq, path) == 4 &&
+              offsetof(V4PayloadFsGetReq, reserved) == 132, "V4PayloadFsGetReq layout");
 static_assert(sizeof(V4PayloadFsGetReq) <= ESPNOW_V4_MAX_PLAINTEXT,
               "V4PayloadFsGetReq must fit single SESSION_FRAME");
 
@@ -1149,6 +1444,9 @@ struct __attribute__((packed)) V4PayloadFsGetAck {
   char     path[128];      // Echoes (normalized) request path
 };
 static_assert(sizeof(V4PayloadFsGetAck) == 140, "V4PayloadFsGetAck layout");
+static_assert(offsetof(V4PayloadFsGetAck, reqId) == 0 && offsetof(V4PayloadFsGetAck, status) == 4 &&
+              offsetof(V4PayloadFsGetAck, reserved) == 5 && offsetof(V4PayloadFsGetAck, fileSize) == 8 &&
+              offsetof(V4PayloadFsGetAck, path) == 12, "V4PayloadFsGetAck layout");
 static_assert(sizeof(V4PayloadFsGetAck) <= ESPNOW_V4_MAX_PLAINTEXT,
               "V4PayloadFsGetAck must fit single SESSION_FRAME");
 
@@ -1179,12 +1477,15 @@ static_assert(sizeof(V4PayloadFsGetAck) <= ESPNOW_V4_MAX_PLAINTEXT,
 // that is no longer live and does nothing.
 struct __attribute__((packed)) V4PayloadSessionUnknown {
   uint16_t sessionId;    // 0  the header sessionId of the frame that could not be opened
-  uint8_t  reserved[2];  // 2  0
+  uint8_t  reserved[2];  // 2  sent 0, ignored
   uint32_t frameSeq;     // 4  its header frameSeq
   uint32_t msgId;        // 8  its header msgId (lets the sender mark that send failed at once)
 };
 static_assert(sizeof(V4PayloadSessionUnknown) == 12,
-              "V4PayloadSessionUnknown layout (12 B + the 32 B group tag: one frame)");
+              "V4PayloadSessionUnknown layout (12 B + the 16 B group tag: one frame)");
+static_assert(offsetof(V4PayloadSessionUnknown, sessionId) == 0 && offsetof(V4PayloadSessionUnknown, reserved) == 2 &&
+              offsetof(V4PayloadSessionUnknown, frameSeq) == 4 && offsetof(V4PayloadSessionUnknown, msgId) == 8,
+              "V4PayloadSessionUnknown layout");
 
 // ---- Multi-hop reachability invariants -------------------------------------
 //
@@ -1204,9 +1505,148 @@ static_assert(sizeof(V4PayloadSessionOpen)    <= ESPNOW_V4_RELAY_MAX_INNER_PAYLO
               "SESSION_OPEN must fit a RELAY_DATA envelope (far-peer sessions)");
 static_assert(sizeof(V4PayloadSessionConfirm) <= ESPNOW_V4_RELAY_MAX_INNER_PAYLOAD,
               "SESSION_CONFIRM must fit a RELAY_DATA envelope (far-peer sessions)");
-// REKEY travels SEALED, so it spends the AEAD tag too — an exact 130+16 fit.
-static_assert(sizeof(V4PayloadSessionRekey) <= ESPNOW_V4_RELAY_MAX_INNER_PLAINTEXT,
-              "SESSION_REKEY must fit a SEALED frame inside a RELAY_DATA envelope");
+// REKEY travels plaintext, signed under the identity key (like OPEN/CONFIRM):
+// 130 of the 162 bytes.
+static_assert(sizeof(V4PayloadSessionRekey) <= ESPNOW_V4_RELAY_MAX_INNER_PAYLOAD,
+              "SESSION_REKEY must fit a RELAY_DATA envelope (plaintext, signed under the identity key)");
+
+// Every name field is ESPNOW_V4_NAME_LEN bytes (the structs spell 32 so the
+// host tests that copy one struct need no macro).
+static_assert(sizeof(V4PayloadHeartbeat::deviceName) == ESPNOW_V4_NAME_LEN &&
+              sizeof(V4PayloadPairBeacon::deviceName) == ESPNOW_V4_NAME_LEN &&
+              sizeof(V4PayloadPairCtrl::deviceName) == ESPNOW_V4_NAME_LEN &&
+              sizeof(V4PayloadTopoPeer::name) == ESPNOW_V4_NAME_LEN &&
+              sizeof(V4PayloadForwardLink::partnerName) == ESPNOW_V4_NAME_LEN &&
+              sizeof(V4PayloadMetadata::deviceName) == ESPNOW_V4_NAME_LEN &&
+              sizeof(CapabilitySummary::deviceName) == ESPNOW_V4_NAME_LEN,
+              "device names travel in ESPNOW_V4_NAME_LEN-byte fields");
+static_assert(ESPNOW_V4_NAME_LEN == devicename::kFieldLen,
+              "the wire name width is the device-name field (System_DeviceName.h)");
+
+// ---- Receive minimum lengths (kV4HandlerTable's minLen column) --------------
+//
+// The smallest payload a legitimate 1.0 sender sends for each opcode, after
+// the session unwrap, the group-tag strip and reassembly. The dispatcher drops
+// a shorter frame (counted in rxLengthDrops) and hands a longer one to the
+// handler unchanged. These numbers are FROZEN at their 1.0 values: a struct
+// that grows after 1.0 keeps its minimum (change its "==" assert below to
+// ">="), and the receiver zero-fills the fields an older sender left out.
+// The six handshake rows are exact (V4_OPC_LEN_EXACT): their transcripts are
+// signed, so they never grow. Each row names the constant for its opcode.
+#define ESPNOW_V4_MINLEN_KEY_EX_HELLO        72   // exact
+#define ESPNOW_V4_MINLEN_KEY_EX_REPLY        72   // exact
+#define ESPNOW_V4_MINLEN_KEY_EX_CONFIRM      18   // exact
+#define ESPNOW_V4_MINLEN_SESSION_OPEN        130  // exact
+#define ESPNOW_V4_MINLEN_SESSION_CONFIRM     146  // exact
+#define ESPNOW_V4_MINLEN_SESSION_REKEY       130  // exact
+#define ESPNOW_V4_MINLEN_SESSION_UNKNOWN     12
+#define ESPNOW_V4_MINLEN_TIME_SYNC           16
+#define ESPNOW_V4_MINLEN_TEXT                1    // text, no terminator
+#define ESPNOW_V4_MINLEN_BOOT                1    // JSON envelope
+#define ESPNOW_V4_MINLEN_RELAY_DATA          40   // envelope 8 + an inner header 32
+#define ESPNOW_V4_MINLEN_PEER_LIST           4    // header; entries follow (count checked by the handler)
+#define ESPNOW_V4_MINLEN_CMD                 1
+#define ESPNOW_V4_MINLEN_CMD_RESP            1    // success byte; text follows
+#define ESPNOW_V4_MINLEN_HEARTBEAT           44
+#define ESPNOW_V4_MINLEN_PAIR_BEACON         36
+#define ESPNOW_V4_MINLEN_PAIR_REQUEST        40
+#define ESPNOW_V4_MINLEN_PAIR_ACCEPT         40
+#define ESPNOW_V4_MINLEN_PAIR_REJECT         40
+#define ESPNOW_V4_MINLEN_SENSOR_STATUS       16
+#define ESPNOW_V4_MINLEN_SENSOR_REQ          16
+#define ESPNOW_V4_MINLEN_SENSOR_ENVELOPE     13   // reading header 12 + at least one byte of the part
+#define ESPNOW_V4_MINLEN_POWER_STATUS        24
+#define ESPNOW_V4_MINLEN_EVENT_PUSH          128
+#define ESPNOW_V4_MINLEN_FORWARD_LINK        96
+#define ESPNOW_V4_MINLEN_TOPO_REQ            8
+#define ESPNOW_V4_MINLEN_TOPO_START          8
+#define ESPNOW_V4_MINLEN_TOPO_PEER           46
+#define ESPNOW_V4_MINLEN_USER_SYNC           1
+#define ESPNOW_V4_MINLEN_METADATA_REQ        0    // senders send no payload
+#define ESPNOW_V4_MINLEN_METADATA_RESP       202
+#define ESPNOW_V4_MINLEN_METADATA_PUSH       202
+#define ESPNOW_V4_MINLEN_STREAM              1    // stream data; the empty BEGIN/END markers are gone
+#define ESPNOW_V4_MINLEN_FILE_START          72
+#define ESPNOW_V4_MINLEN_FILE_DATA           3    // chunk index 2 + at least one byte
+#define ESPNOW_V4_MINLEN_FILE_END            5
+#define ESPNOW_V4_MINLEN_FILE_CANCEL         1
+#define ESPNOW_V4_MINLEN_SUBSCRIBE_UPDATE    16
+#define ESPNOW_V4_MINLEN_FS_LIST_REQ         144
+#define ESPNOW_V4_MINLEN_FS_LIST_REPLY       140  // header; entries follow (count checked by the handler)
+#define ESPNOW_V4_MINLEN_FS_STAT_REQ         140
+#define ESPNOW_V4_MINLEN_FS_STAT_REPLY       164
+#define ESPNOW_V4_MINLEN_FS_GET_REQ          140
+#define ESPNOW_V4_MINLEN_FS_GET_ACK          140
+#define ESPNOW_V4_MINLEN_BOND_HEARTBEAT      24
+#define ESPNOW_V4_MINLEN_BOND_STREAM_CTRL    4
+#define ESPNOW_V4_MINLEN_BOND_CAP_REQ        0    // senders send no payload
+#define ESPNOW_V4_MINLEN_BOND_CAP_RESP       84
+#define ESPNOW_V4_MINLEN_BOND_SENSOR_DATA    13   // as SENSOR_ENVELOPE
+#define ESPNOW_V4_MINLEN_BOND_POWER_STATUS   24
+#define ESPNOW_V4_MINLEN_BOND_EVENT_PUSH     128
+#define ESPNOW_V4_MINLEN_BOND_SENSOR_STATUS  16
+#define ESPNOW_V4_MINLEN_SETTINGS_REQ        0    // senders send no payload
+#define ESPNOW_V4_MINLEN_SCHEMA_REQ          0    // senders send no payload
+#define ESPNOW_V4_MINLEN_BOND_STATUS_REQ     0    // senders send no payload
+#define ESPNOW_V4_MINLEN_BOND_STATUS_RESP    28
+#define ESPNOW_V4_MINLEN_MANIFEST_REQ        0    // senders send no payload
+#define ESPNOW_V4_MINLEN_BOND_REQUEST        8
+#define ESPNOW_V4_MINLEN_BOND_NOTICE         8
+
+// Until the 1.0 cut every fixed frame's minimum is its struct's size.
+static_assert(sizeof(V4PayloadKeyExHello) == ESPNOW_V4_MINLEN_KEY_EX_HELLO &&
+              sizeof(V4PayloadKeyExReply) == ESPNOW_V4_MINLEN_KEY_EX_REPLY &&
+              sizeof(V4PayloadKeyExConfirm) == ESPNOW_V4_MINLEN_KEY_EX_CONFIRM &&
+              sizeof(V4PayloadSessionOpen) == ESPNOW_V4_MINLEN_SESSION_OPEN &&
+              sizeof(V4PayloadSessionConfirm) == ESPNOW_V4_MINLEN_SESSION_CONFIRM &&
+              sizeof(V4PayloadSessionRekey) == ESPNOW_V4_MINLEN_SESSION_REKEY,
+              "a handshake frame is exact-length: its minimum is its size, and it never grows");
+static_assert(sizeof(V4PayloadSessionUnknown) == ESPNOW_V4_MINLEN_SESSION_UNKNOWN &&
+              sizeof(V4PayloadTimeSync) == ESPNOW_V4_MINLEN_TIME_SYNC &&
+              sizeof(V4PayloadRelayData) + ESPNOW_V4_HEADER_LEN == ESPNOW_V4_MINLEN_RELAY_DATA &&
+              sizeof(V4PayloadPeerListHeader) == ESPNOW_V4_MINLEN_PEER_LIST &&
+              sizeof(V4PayloadCmdRespHeader) == ESPNOW_V4_MINLEN_CMD_RESP &&
+              sizeof(V4PayloadHeartbeat) == ESPNOW_V4_MINLEN_HEARTBEAT &&
+              sizeof(V4PayloadPairBeacon) == ESPNOW_V4_MINLEN_PAIR_BEACON &&
+              sizeof(V4PayloadPairCtrl) == ESPNOW_V4_MINLEN_PAIR_REQUEST &&
+              sizeof(V4PayloadPairCtrl) == ESPNOW_V4_MINLEN_PAIR_ACCEPT &&
+              sizeof(V4PayloadPairCtrl) == ESPNOW_V4_MINLEN_PAIR_REJECT &&
+              sizeof(V4PayloadSensorStatus) == ESPNOW_V4_MINLEN_SENSOR_STATUS &&
+              sizeof(V4PayloadSensorReq) == ESPNOW_V4_MINLEN_SENSOR_REQ &&
+              sizeof(V4PayloadSensorReading) + 1 == ESPNOW_V4_MINLEN_SENSOR_ENVELOPE &&
+              sizeof(V4PayloadPowerStatus) == ESPNOW_V4_MINLEN_POWER_STATUS &&
+              sizeof(V4PayloadEventPush) == ESPNOW_V4_MINLEN_EVENT_PUSH &&
+              sizeof(V4PayloadForwardLink) == ESPNOW_V4_MINLEN_FORWARD_LINK &&
+              sizeof(V4PayloadTopoReq) == ESPNOW_V4_MINLEN_TOPO_REQ &&
+              sizeof(V4PayloadTopoStart) == ESPNOW_V4_MINLEN_TOPO_START &&
+              sizeof(V4PayloadTopoPeer) == ESPNOW_V4_MINLEN_TOPO_PEER &&
+              sizeof(V4PayloadMetadata) == ESPNOW_V4_MINLEN_METADATA_RESP &&
+              sizeof(V4PayloadMetadata) == ESPNOW_V4_MINLEN_METADATA_PUSH &&
+              sizeof(V4PayloadFileStart) == ESPNOW_V4_MINLEN_FILE_START &&
+              offsetof(V4PayloadFileData, data) + 1 == ESPNOW_V4_MINLEN_FILE_DATA &&
+              sizeof(V4PayloadFileEnd) == ESPNOW_V4_MINLEN_FILE_END &&
+              sizeof(V4PayloadFileCancel) == ESPNOW_V4_MINLEN_FILE_CANCEL &&
+              sizeof(V4PayloadSubscribe) == ESPNOW_V4_MINLEN_SUBSCRIBE_UPDATE &&
+              sizeof(V4PayloadFsListReq) == ESPNOW_V4_MINLEN_FS_LIST_REQ &&
+              sizeof(V4PayloadFsListReplyHeader) == ESPNOW_V4_MINLEN_FS_LIST_REPLY &&
+              sizeof(V4PayloadFsStatReq) == ESPNOW_V4_MINLEN_FS_STAT_REQ &&
+              sizeof(V4PayloadFsStatReply) == ESPNOW_V4_MINLEN_FS_STAT_REPLY &&
+              sizeof(V4PayloadFsGetReq) == ESPNOW_V4_MINLEN_FS_GET_REQ &&
+              sizeof(V4PayloadFsGetAck) == ESPNOW_V4_MINLEN_FS_GET_ACK &&
+              sizeof(CapabilitySummary) == ESPNOW_V4_MINLEN_BOND_CAP_RESP &&
+              sizeof(V4PayloadSensorReading) + 1 == ESPNOW_V4_MINLEN_BOND_SENSOR_DATA &&
+              sizeof(V4PayloadPowerStatus) == ESPNOW_V4_MINLEN_BOND_POWER_STATUS &&
+              sizeof(V4PayloadEventPush) == ESPNOW_V4_MINLEN_BOND_EVENT_PUSH &&
+              sizeof(V4PayloadSensorStatus) == ESPNOW_V4_MINLEN_BOND_SENSOR_STATUS &&
+              sizeof(BondPeerStatus) == ESPNOW_V4_MINLEN_BOND_STATUS_RESP,
+              "minLen never rises: a fixed frame's 1.0 minimum is its struct size (after 1.0: >=)");
+#if ENABLE_BONDED_MODE
+static_assert(sizeof(V4PayloadBondHeartbeat) == ESPNOW_V4_MINLEN_BOND_HEARTBEAT &&
+              sizeof(V4PayloadStreamCtrl) == ESPNOW_V4_MINLEN_BOND_STREAM_CTRL &&
+              sizeof(V4PayloadBondRequest) == ESPNOW_V4_MINLEN_BOND_REQUEST &&
+              sizeof(V4PayloadBondNotice) == ESPNOW_V4_MINLEN_BOND_NOTICE,
+              "minLen never rises: a fixed frame's 1.0 minimum is its struct size (after 1.0: >=)");
+#endif
 
 #endif // ENABLE_ESPNOW
 

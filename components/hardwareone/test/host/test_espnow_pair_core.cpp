@@ -401,9 +401,33 @@ static void sourceContract() {
   // No KEY_EX_HELLO-as-accept hook: HELLO is also sent for unrelated traffic.
   CHECK(!has(crypto, "espnowPairNoteKeyExHello") && !has(owner, "espnowPairNoteKeyExHello"));
   CHECK(has(oled, "espnowGetPairRequestOutcome(outName, sizeof(outName))"));
+  // Received pairing names go through the device-name rule, never a cleaner:
+  // an invalid name becomes "peer-XXXXXX" from the sender's address.
+  CHECK(!has(owner, "pairModeSanitizeName") && !has(owner, "peer_%02X"));
+  CHECK(has(owner, "pairModeNameFromField(b.deviceName, mac, name);"));
+  CHECK(has(owner, "pairModeNameFromField(p.deviceName, senderMac, nameOut);"));
+  CHECK(has(owner, "devicename::formatWithMacSuffix(devicename::kPeerPrefix, mac, out);"));
+  CHECK(has(owner, "devicename::putField(beacon.deviceName, gSettings.espnowDeviceName.c_str());"));
+  CHECK(has(owner, "devicename::putField(p.deviceName, gSettings.espnowDeviceName.c_str());"));
+}
+
+// A device name is up to 31 bytes (System_DeviceName.h): the request and its
+// outcome keep it whole (the old 24-byte copy cut it to 23).
+static void longNamesSurvive() {
+  const char n31[] = "abcdefghijklmnopqrstuvwxyz-1234";
+  static_assert(sizeof(n31) == 32, "31-byte name");
+  const uint8_t mac[6] = {2, 0, 0, 0, 0, 9};
+  State initiator{};
+  startRequest(initiator, mac, n31, 100);
+  CHECK(std::strcmp(initiator.out.name, n31) == 0);
+  State target{};
+  CHECK(onRequest(target, mac, n31, 100, false, true) == Reply::Prompt);
+  CHECK(std::strcmp(target.in.name, n31) == 0);
+  CHECK(sizeof(target.in.name) == 32 && sizeof(initiator.outcomeName) == 32);
 }
 
 int main() {
+  longNamesSurvive();
   happyPath();
   lostFirstRequest();
   lostAcceptRetransmit();

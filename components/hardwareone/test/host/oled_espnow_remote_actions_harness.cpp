@@ -207,7 +207,7 @@ int main() {
   struct ValueRow { const char* label; const char* value; const char* command; };
   const ValueRow valueRows[] = {
       {"Set Role", "backup", "espnowmeshrole backup"},
-      {"Set Name", "bench2", "espnowsetname bench2"},
+      {"Set Name", "bench2", "devicename bench2"},
       {"Set Room", "Kitchen", "espnowroom Kitchen"},
       {"Set Zone", "Door", "espnowzone Door"},
       {"Set Pretty Name", "Bench Two", "espnowfriendlyname Bench Two"},

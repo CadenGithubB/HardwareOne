@@ -10,6 +10,8 @@
 #define SYSTEM_ESPNOW_RXCTX_H
 
 #include <esp_now.h>
+#include <string.h>
+#include <type_traits>
 #include "System_ESPNow_Wire.h"  // EspNowV4Header
 
 struct V4RxCtx {
@@ -28,10 +30,34 @@ struct V4RxCtx {
   // `isSessionEncrypted` is the narrower signal: true ONLY when the frame
   // arrived AEAD-wrapped in a SESSION_FRAME (confidential). A BROADCAST_AUTH
   // frame is authenticated-but-plaintext, so it sets isAuthenticated=true but
-  // isSessionEncrypted=false. Use this (not the legacy, now-never-set
-  // ESPNOW_V4_FLAG_ENCRYPTED header bit) for any "was this encrypted?" report.
+  // isSessionEncrypted=false. Use this (the old ENCRYPTED header bit was never
+  // set and is gone at 1.0) for any "was this encrypted?" report.
   bool                     isSessionEncrypted;
   const char*              deviceName;
+
+  // The one receive style (System_ESPNow_Wire.h, "Frame rules"). The
+  // dispatcher has already dropped a frame shorter than the row's minLen, so
+  // a fixed frame is complete; a longer frame (a later sender) is read up to
+  // the fields this firmware knows. Fields the frame lacks read as 0 (an
+  // older sender, or a direct call that bypasses the table).
+  template <class T>
+  void read(T& out) const {
+    static_assert(std::is_trivially_copyable<T>::value, "read() copies wire structs only");
+    memset(&out, 0, sizeof(T));
+    const size_t n = payloadLen < sizeof(T) ? payloadLen : sizeof(T);
+    if (payload && n) memcpy(&out, payload, n);
+  }
+  // The bytes after the first `off` (a header-plus-tail frame: text, entries,
+  // file data). nullptr and *len 0 when the payload has no bytes past `off`,
+  // so a handler never subtracts from payloadLen itself.
+  const uint8_t* tail(size_t off, size_t* len) const {
+    if (!payload || payloadLen <= off) {
+      if (len) *len = 0;
+      return nullptr;
+    }
+    if (len) *len = (size_t)payloadLen - off;
+    return payload + off;
+  }
 };
 
 #endif // SYSTEM_ESPNOW_RXCTX_H

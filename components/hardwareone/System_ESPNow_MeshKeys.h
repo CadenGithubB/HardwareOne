@@ -37,11 +37,13 @@
 #include <stddef.h>
 #include <stdint.h>
 
+class String;  // Arduino's; meshKeysStretchInto takes the label and passphrase by reference
+
 struct MeshDerivedKeys {
   bool     valid;
-  uint16_t fingerprint;        // mirrors gSettings.meshes[i].fingerprint at
-                               //   the time the keys were derived; stale
-                               //   if a rename happens without re-derivation
+  uint16_t fingerprint;        // the mesh id (System_ESPNow_MeshIdCore.h), from
+                               //   the same stretched key; meshKeysDerive sets
+                               //   it and gSettings.meshes[i].fingerprint together
   uint8_t  bootstrapKey[32];   // KDF subkey for KEY_EX HMAC (Phase 3.3)
   uint8_t  groupKey[32];       // KDF subkey for mesh broadcast AEAD (Phase 3.5)
 };
@@ -58,8 +60,25 @@ struct MeshDerivedKeys {
 // passphrase clear case).
 bool meshKeysStretchPassphrase(uint8_t meshIdx);
 
+// The PBKDF2 stretch of `passphrase` under `label`'s salt into `out`, without
+// touching any mesh slot: the mesh commands stage a new key (and its mesh id)
+// this way and change nothing when the id is refused. False (out zeroed) when
+// crypto is not ready, the passphrase is empty or the stretch fails.
+bool meshKeysStretchInto(const String& label, const String& passphrase, uint8_t out[32]);
+
+// The mesh id of a stretched key: KDF subkey meshid::kSubkeyId with context
+// meshid::kKdfContext, then meshid::pick (System_ESPNow_MeshIdCore.h). 0 only
+// when the derivation fails or the subkey is all zero.
+uint16_t meshKeysIdFor(const uint8_t stretched[32]);
+
+// Set the mesh id of every labelled slot with a valid stretched key, enabled
+// or not, from that key (a stored id that differs is replaced, with a WARN). A
+// slot without a key keeps its stored id. Returns how many ids changed.
+uint8_t meshKeysRefreshIds();
+
 // Derive bootstrapKey + groupKey from the cached stretched key into
-// gMeshDerivedKeys[meshIdx]. No-op if the mesh has no valid key.
+// gMeshDerivedKeys[meshIdx], and set the mesh id (meshKeysIdFor) in both the
+// slot and the cache. No-op if the mesh has no valid key.
 bool meshKeysDerive(uint8_t meshIdx);
 
 // Convenience: stretch (if needed) AND derive for every configured mesh.

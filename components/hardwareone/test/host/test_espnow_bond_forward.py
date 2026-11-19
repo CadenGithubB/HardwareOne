@@ -20,7 +20,7 @@ sessions with session ids and a recording radio:
     back-off; a wrong answer ignored; acceptance said once; nothing forwarded
     before it;
   * readings with X's header plus the bit and the link number, to the
-    primary only, cut for the master's path (four routed parts of 472
+    primary only, cut for the master's path (four routed parts of 536
     bytes); input left out; battery state to both, acknowledged, the byte;
     events to both, bit and byte; a frame from another source or after a
     partner change began is not filed under the link; off stops at once; a
@@ -127,8 +127,9 @@ def check_sources(component: Path) -> None:
     require(depth_in(espnow, "  bondForwardTick(now);", "ENABLE_BONDED_MODE") == 1, "the tick runs in a bond build")
     sid_def = strip_comments(extract_block(espnow, "uint16_t espnowSessionIdOf(const uint8_t* mac)"))
     require("s->state != SESSION_ACTIVE" in sid_def and "s->sessionId" in sid_def, "espnowSessionIdOf: the ACTIVE session's id")
-    for key, kind, default in (("bondForwardToMesh", "SETTING_BOOL", "false"), ("bondForwardSensors", "SETTING_U16", "0x07EF")):
-        row = re.search(rf'\{{ "{key}", {kind}, &gSettings\.{key}, {default}, [^\n]*"bond", "(\w+)" \}}', espnow)
+    for key, kind, default in (("bondForwardToMesh", "SETTING_BOOL", "false"),
+                               ("bondForwardSensors", "SETTING_U32", "(int)espnowfwd::kSensorMaskDefault")):
+        row = re.search(rf'\{{ "{key}", {kind}, &gSettings\.{key}, {re.escape(default)}, [^\n]*"bond", "(\w+)" \}}', espnow)
         require(row is not None, f"the setting {key} is in the 'bond' group with default {default}")
     for name, handler in (("bondforward", "cmd_bond_forward"), ("bondforwardsensors", "cmd_bond_forwardsensors")):
         require(re.search(rf'\{{ "{name}",\s*"[^\n]*", true, {handler}, "Usage: {name}', espnow) is not None,
@@ -183,14 +184,14 @@ def check_sources(component: Path) -> None:
     # bondstream choice (and what reaches the leases by hand), never the
     # runtime streaming flags, which on a bond master with sensors of its own
     # also say what a mesh master subscribed there.
-    saved = strip_comments(extract_block(source, "static uint16_t bfSavedStreams()"))
+    saved = strip_comments(extract_block(source, "static espnowsensor::SensorMask bfSavedStreams()"))
     require("bondStreamSetting((RemoteSensorType)i)" in saved, "bfSavedStreams reads the saved bondstream settings")
     require("isSensorDataStreamingEnabled" not in code,
             "the forward code never takes this device's own streaming flags for the partner's streams")
     # The worker applies every stream switch of a loop: one per sensor, not
     # the last frame only (a bond master switches several back to back).
     ctrl_rx = strip_comments(extract_block(espnow, "static void v4h_stream_ctrl(const V4RxCtx& ctx)"))
-    require("espnowsensor::streamCtrlPut(gEspNow->bondDeferredStreamCtrl, ctx.payload[0], ctx.payload[1] != 0);" in ctrl_rx
+    require("espnowsensor::streamCtrlPut(gEspNow->bondDeferredStreamCtrl, sc.sensorType, sc.enable != 0);" in ctrl_rx
             and ctrl_rx.count("bondDeferredStreamCtrl") == 1,
             "v4h_stream_ctrl adds the switch to the ones waiting, per sensor, and touches nothing else of them")
     step = strip_comments(espnow[espnow.index("// 9f2. Bond: deferred STREAM_CTRL"):espnow.index("// 9h. Bond:")])

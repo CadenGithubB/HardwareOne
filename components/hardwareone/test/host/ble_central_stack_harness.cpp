@@ -49,6 +49,8 @@ class String {
 };
 
 void broadcastOutput(const char* line);
+// The device name (System_SelfDevice.cpp): the client host's GAP name.
+namespace SelfDevice { static String deviceName() { return String("Porch-Cam"); } }
 // System_Debug.h formats into a stack buffer and broadcasts the line.
 #define BROADCAST_PRINTF(fmt, ...)                        \
   do {                                                    \
@@ -405,7 +407,7 @@ static const Events kPeers = {
 static const Events kAdmit = {"tx-init", "mem blestack"};
 // The host init through the observers; `power` is the TX power step.
 static Events hostUp(const Events& power = {"tx-power 3"}) {
-  return cat({{"hal-init HardwareOne"}, power, {"mtu 244"}, kObservers});
+  return cat({{"hal-init Porch-Cam"}, power, {"mtu 244"}, kObservers});
 }
 // The client-role bring-up after the memory check.
 static Events bringUp(const Events& power = {"tx-power 3"}) {
@@ -740,7 +742,7 @@ int main() {
   startCase("S6 host init fails");
   world.halInitOk = false;
   EXPECT(!UP());
-  EXPECT_EVENTS(cat({{kUp}, kAdmit, {"hal-init HardwareOne"}, kRollback, {kEnd}}));
+  EXPECT_EVENTS(cat({{kUp}, kAdmit, {"hal-init Porch-Cam"}, kRollback, {kEnd}}));
   EXPECT_REFUSAL("BLE host initialization failed");
   EXPECT(logged("[BLE] BLE host initialization failed (rolled back)"));
   EXPECT(world.hal.stopped() && !world.fault && !bleStackReady());
@@ -754,7 +756,7 @@ int main() {
   world.halInitOk = false;
   world.halDeinitOk = false;
   EXPECT(!UP());
-  EXPECT_EVENTS(cat({{kUp}, kAdmit, {"hal-init HardwareOne", "gap-handler null", "hal-deinit", "fault 1", kEnd}}));
+  EXPECT_EVENTS(cat({{kUp}, kAdmit, {"hal-init Porch-Cam", "gap-handler null", "hal-deinit", "fault 1", kEnd}}));
   EXPECT_REFUSAL("BLE host initialization failed");
   EXPECT(logged("[BLE] BLE host initialization failed (teardown incomplete - reboot required)"));
   EXPECT(world.fault && !bleStackReady());

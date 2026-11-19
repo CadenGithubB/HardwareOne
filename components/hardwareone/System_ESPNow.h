@@ -88,6 +88,7 @@ uint16_t v4_single_frame_cap(const uint8_t* dst);
 #include "System_CommandRegistry.h"
 #include "System_ESPNow_Sensors.h"  // RemoteSensorType
 #include "System_ESPNow_HistoryCore.h"  // per-peer message-history byte rings (espnowhist::)
+#include "System_ESPNow_Wire.h"  // CapabilitySummary, BondPeerStatus (wire structs)
 
 // Settings persistence (broadcastOutput is provided by System_Debug.h).
 bool writeSettingsJson();
@@ -497,76 +498,8 @@ struct UnpairedDevice {
 // Bond Mode Structures
 // ==========================
 
-// Capability summary - small binary report exchanged on bonding.
-// Actual size: 76 bytes (verified by static_assert below). Well under the
-// 250-byte ESP-NOW payload ceiling so there's headroom to grow, but BOTH
-// peers must agree on sizeof — the receiver rejects packets whose length
-// doesn't match (System_ESPNow.cpp ~L3434). To extend without a flag day:
-// reuse the in-place reserve bytes (offset 19 implicit pad, reserved2 at
-// offset 39, reserved3[3] at offset 49 — 5 bytes total), or bump
-// protoVersion and accept both lengths.
-struct CapabilitySummary {
-  uint8_t protoVersion;        // Protocol version (1)
-  uint8_t fwHash[16];          // Firmware hash (first 16 bytes of SHA256)
-  uint8_t role;                // 0=worker, 1=master
-  // Reclaimed from `reserved1`: which physical input device the peer has
-  // compiled in. Mirrors INPUT_DEVICE_TYPE in System_BuildConfig.h:
-  //   0 = none / unknown (also what pre-v0.94 firmware sends — zero-init)
-  //   1 = Seesaw gamepad (0x50)
-  //   2 = ANO rotary encoder (0x49)
-  // Backwards-compatible: the old `reserved1` byte was always memset(0),
-  // so legacy peers report 0 and the UI falls back to a generic "Input"
-  // label. New peers report 1/2 and the UI shows "Gamepad" or "ANO" so
-  // you can tell at a glance what's bonded — important on mixed setups
-  // where the master might be a gamepad and the worker an encoder.
-  uint8_t inputDeviceType;
-  
-  // Feature masks (32 bits each)
-  uint32_t featureMask;        // Compile-time features (WiFi, BT, MQTT, etc.)
-  uint32_t serviceMask;        // Runtime services (HTTP, ESP-NOW, etc.)
-  uint32_t sensorMask;         // I2C sensors (thermal, ToF, IMU, etc.)
-  
-  // Hardware info
-  uint8_t mac[6];              // Device MAC address
-  uint8_t chipModel;           // ESP32 chip model
-  uint8_t reserved2;
-  
-  uint32_t flashSizeMb;        // Flash size in MB
-  uint32_t psramSizeMb;        // PSRAM size in MB
-  uint8_t wifiChannel;         // Current WiFi channel
-  uint8_t reserved3[3];
-  
-  char deviceName[20];         // Device name (null-terminated)
-  uint32_t uptimeSeconds;      // Uptime in seconds
-};
-
-// Compile-time guard: if anyone adds/removes a field without thinking about
-// wire compatibility, this fires and they have to consciously update the
-// expected size AND coordinate a firmware flag day (or use one of the
-// reserved bytes instead). Keeps the header comment honest.
-static_assert(sizeof(CapabilitySummary) == 76,
-              "CapabilitySummary size changed — wire format is incompatible "
-              "with peers on the old size. Use reserved bytes or bump "
-              "protoVersion + accept both lengths in the RX path.");
-
-#if ENABLE_BONDED_MODE
-
-// Periodic bond status snapshot — sent in response to BOND_STATUS_REQ (~30s interval)
-// Uses same CAP_SENSOR_* bitmask constants as CapabilitySummary
-static_assert(REMOTE_SENSOR_MAX <= 16, "BondPeerStatus keeps its two sensor masks in 16 bits");
-struct __attribute__((packed)) BondPeerStatus {
-  uint32_t uptimeSec;          // Device uptime in seconds
-  uint32_t freeHeap;           // Free heap bytes
-  uint32_t minFreeHeap;        // Minimum free heap since boot
-  uint16_t sensorEnabledMask;  // CAP_SENSOR_* bits for sensors currently running (xxxEnabled)
-  uint16_t sensorConnectedMask;// CAP_SENSOR_* bits for sensors currently connected (xxxConnected)
-  uint8_t  wifiConnected;      // WiFi STA connected (0/1)
-  uint8_t  bluetoothActive;    // Bluetooth active (0/1)
-  uint8_t  httpActive;         // HTTP server running (0/1)
-  uint8_t  bondHandshakeState; // Current handshake state
-  uint8_t  reserved[4];        // Future use
-};
-#endif // ENABLE_BONDED_MODE
+// CapabilitySummary (BOND_CAP_RESP) and BondPeerStatus (BOND_STATUS_RESP) are
+// wire structs: System_ESPNow_Wire.h.
 
 // ==========================
 // Capability Bit Definitions
@@ -1223,7 +1156,18 @@ const char* cmd_test_filelock(const String& argsInput);
 
 // Configuration
 const char* cmd_espnow_mode(const String& originalCmd);
-const char* cmd_espnow_setname(const String& originalCmd);
+// After meshKeysInitAll at boot: every keyed mesh's id from its key, and a
+// clash between two meshes' ids keeps the lower slot's (the higher one is off
+// the air for this boot, with a WARN). System_ESPNow_MeshIdCore.h.
+void espnowMeshIdsAfterKeyInit();
+
+// The device name's ESP-NOW side ('devicename', System_DeviceName.cpp, is the setter).
+const char* espnowDeviceNameClearRefusal();
+void espnowDeviceNameApplied(const String& name);
+// Another device this one knows by `name` (ignoring case), other than the one at
+// `exceptMac`: a paired device's alias or a name a peer announces. `who` gets
+// "<name> (<address>)".
+bool espnowNameInUseBy(const char* name, const uint8_t* exceptMac, char* who, size_t whoCap);
 const char* cmd_espnow_hbmode(const String& originalCmd);
 
 // Streaming. broadcastOutput asks espnowStreamOutputWanted() first: true while
@@ -1266,6 +1210,12 @@ bool espnowSessionSettled(const uint8_t* mac, uint32_t nowMs);
 // The sessionId of the ACTIVE session with `mac` (0: none). A new one with
 // every session open; a rekey keeps it. Any task (a read).
 uint16_t espnowSessionIdOf(const uint8_t* mac);
+// The capability word the peer `mac` sent in its session handshake
+// (System_ESPNow_SessionCapsCore.h). False when no session with it is ACTIVE
+// or REKEYING: unknown caps gate nothing. *confirmed: the word is the peer's
+// current one (we opened the session, or a sealed frame of it has opened).
+// Any task (a read).
+bool espnowPeerSessionCaps(const uint8_t* mac, uint32_t* caps, bool* confirmed = nullptr);
 
 // Helper functions
 const char* getMeshRoleString(uint8_t role);
@@ -1790,7 +1740,7 @@ bool espnowPeerInPrimaryMesh(const uint8_t* mac);
 // with the 152/132 payloads (false in a build without bond mode).
 bool v4_send_bond_power(const uint8_t* dstMac, const uint8_t* payload, uint16_t len);
 bool v4_send_bond_event(const uint8_t* dstMac, const uint8_t* payload, uint16_t len);
-// Longest plaintext one frame to `dst` carries (202 direct, 130 through a relay).
+// Longest plaintext one frame to `dst` carries (202 direct, 146 through a relay).
 uint16_t v4_single_frame_cap(const uint8_t* dst);
 bool v4_send_encrypted_or_queue(const uint8_t dst[6], uint8_t type, uint16_t baseFlags, uint32_t msgId, const uint8_t* plaintext, uint16_t plaintextLen, uint8_t ttl, char* outStatus = nullptr, size_t outStatusLen = 0);
 bool v4_send_session_wrapped(const uint8_t dst[6], uint8_t type, uint16_t baseFlags, uint32_t msgId, const uint8_t* plaintext, uint16_t plaintextLen, uint8_t ttl, char* errOut, size_t errOutLen);

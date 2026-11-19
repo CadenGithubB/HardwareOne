@@ -629,7 +629,27 @@ exchange and encrypted session setup do travel through relays, so a paired peer
 that moves out of range stays reachable, and pairing by MAC
 (`espnowpairsecure <mac> <name>`) with a device that shares the mesh passphrase
 completes through relays too. The passphrase, not distance, controls who can join. Messages and remote commands relay fine, but a relayed message is
-capped at ~130 characters per piece.
+capped at ~146 characters per piece.
+
+### What a peer's firmware can do (capabilities)
+When two paired devices open an encrypted session, each says what its firmware build can do: bond mode,
+remote file access, receiving files, sending sensor readings, collecting, relaying, sending mesh time,
+and understanding "I restarted" answers. This describes the build, not your settings (turning the relay
+off on a device does not change it). `espnowsessions` shows it per peer, and this device's own on the
+first line:
+
+```
+espnowsessions
+  ESP-NOW Sessions:
+    This device: caps=bond,remote_fs,file_receive,sensor_send,relay_forward,time_master,session_unknown
+    [0] peer=AA:BB:CC:DD:EE:FF meshSlot=0 sessionId=4711 dir=A state=ACTIVE ... caps=remote_fs,file_receive,...
+```
+
+A device uses it to avoid asking for what the other cannot do: it never asks a device built without
+bond mode to bond (see Bonding), and `espnowsensorreq` refuses a device built without sensors. A bit
+shown as `+0x...` comes from newer firmware. `espnowstats` counts frames dropped because they carry a
+header flag this firmware must understand and does not (`RX Must-Understand Drops`; newer firmware on
+that device).
 
 ### Bonding (Master/Worker)
 With `ENABLE_BONDED_MODE=1`, two devices can bond into a master/worker pair. The master gains a **Remote** tab in its web UI showing the worker's features, even if those features aren't compiled into the master.
@@ -642,6 +662,7 @@ A bond is a setting on each device, so `bondconnect <mac_or_name>` is run on **b
 | *no answer yet* | the partner has not answered (out of range, or firmware from before the agreement) | as before the agreement existed: it keeps trying, and a partner that sends bond heartbeats counts as agreed |
 | *has bond mode off* / *is bonded to another device* / *ended the bond* | the partner answered that it has no bond with this device | keeps its own bond setting, shows the partner as `NOT BONDED TO THIS DEVICE`, sends no heartbeat and asks again once a minute |
 | *... but both are master/worker* | both ends have the same role | the bond runs as it is; run `bondrole` on one device |
+| *was built without bond mode, so it cannot be a bond partner* | the partner's firmware has no bond mode (its session says so; the P4X-EYE glasses build, for one) | never asks it to bond and starts no handshake for it; run `bonddisconnect`, or install a build with bond mode on the partner: its next session asks again at once. `bondconnect` to such a device is refused |
 
 What you see when something changes (console and event log, tagged `[EVENT][BOND]`):
 
@@ -675,7 +696,7 @@ On the mesh master the partner shows as its own device, `porch via glasses`, wit
 ### Metadata Sync
 Each device has a name, room, zone, and tags set in settings. The **Metadata** tab lets you pull this information from any peer. Set your own device metadata with (note: single words, no space after `espnow`):
 ```
-espnowsetname [name|clear]      - Device name (<=19 bytes; letters, numbers, - and _)
+devicename [name|clear]         - The device name (see "Device name" below); 'clear' while ESP-NOW is stopped
 espnowroom [name]               - Room, e.g. Kitchen. 'espnowroom clear' to unset
 espnowzone [name]               - Zone, e.g. Counter. 'espnowzone clear' to unset
 espnowtags [tag1,tag2,...]      - Tags. 'espnowtags clear' to unset
@@ -684,6 +705,45 @@ espnowstationary [on|off|0|1]   - Mark the device fixed or mobile
 espnowdeviceinfo                - Show all local metadata
 ```
 Called with no argument, each of these prints the current value.
+
+### Device name
+A device has one name. It is its ESP-NOW name (in every frame that carries a name), its Bluetooth
+name and its Wi-Fi hostname, and it is set with `devicename <name>` (also in the setup wizard, the
+web ESP-NOW and Bluetooth pages and the display's ESP-NOW menu). The rule, checked in one place:
+
+- 1 to 31 bytes of ASCII letters, digits and `-`; it does not start or end with `-` (a hostname label);
+- not one of the command words `clear`, `all`, `json` or `none`;
+- not something that reads as a MAC address (twelve hex digits, with or without separators).
+
+Names are kept as typed and compared ignoring case. When another device this one knows (a paired
+device's name here, or a name a peer announces) already has the name, `devicename` sets it and warns
+(so does the setup wizard when it saves a new name): both are then shown by address, and commands need
+the MAC to reach either. The warning knows only the devices loaded while ESP-NOW has run since the
+device started. A peer's name given to
+`espnowpairsecure` / `espnow pair` follows the same rule, with the same warning.
+
+Bluetooth takes a new name at its next start and Wi-Fi at its next connection (a name chosen in the
+setup wizard is already used for the connection the wizard makes). Without a stored name, Bluetooth and
+Wi-Fi use `HardwareOne-XXXXXX` (the last three bytes of the chip's address; on a P4 board that is the
+P4's own address, not the radio address of its C6 that ESP-NOW shows); ESP-NOW does not start until a
+name is set. A Bluetooth advertisement carries up to 29 bytes of the name (a longer
+name is advertised shortened); a connected phone reads the whole name. A received name that breaks the
+rule is not used or cleaned: the sender is shown by its address (an unpaired sender in the pairing list
+as `peer-XXXXXX`). The free-text display label is separate: `espnowfriendlyname` (up to 47 bytes).
+
+### Mesh id
+Every ESP-NOW frame carries a 16-bit mesh id, which a receiver matches against its own meshes. The id
+comes from the mesh key (the label and the passphrase), so a mesh has none until its passphrase is set,
+and a mesh without an id sends nothing. `espnowmeshes` shows it. Changing a mesh's passphrase or label
+gives it a new id, and its frames and the other devices' are dropped at each other's mesh gate until
+they have the same passphrase and label: `espnowstats` counts those frames (`RX Unknown Mesh Id Drops`,
+with the last id and sender), and a paired device or a key exchange that sends another id gets one
+warning a minute. Clearing a passphrase keeps the id, so paired devices keep exchanging frames. Two
+meshes on one device never share an id: `espnowsetpassphrase`, `espnowmeshes rename` and
+`espnowmeshes enable` refuse a change that would give one the id of another and change nothing (pick
+another passphrase or label). If two meshes have one id anyway (an edited or restored settings file), the
+one in the higher slot sends and receives nothing until its passphrase or label changes, with one warning
+at each start of the device.
 
 ### Rooms, tags and group commands
 `espnowroomcmd <room> <user> <pass> <command>` and `espnowtagcmd <tag> <user> <pass> <command>` run a command on every device of a room or with a tag. The user and password are an account on the target devices and travel with the command, encrypted for each device.
@@ -1200,7 +1260,7 @@ found no network at boot is not retried: run `openwifi`.
 openespnow                      - Initialize ESP-NOW
 closeespnow                     - Deinitialize ESP-NOW and free resources
 espnowstatus                    - Show ESP-NOW status and configuration
-espnowstats                     - Show message/error counters
+espnowstats                     - Show message/error counters (RX Length Drops: frames shorter than their type allows)
 espnowlist                      - List all paired peers
 espnowpair <mac> <name>         - Pair with a device
 espnowunpair <name_or_mac>      - Remove a paired peer
@@ -1224,7 +1284,7 @@ espnowtimestatus [json]         - Where this device's clock comes from; what was
 espnowmeshtime [on|off]         - Mesh time on/off (default on)
 
 --- Device identity ---
-espnowsetname [name|clear]      - Get/set device name ('clear' while ESP-NOW is stopped)
+devicename [name|clear]         - Get/set the device name (ESP-NOW, Bluetooth, hostname; 'clear' while ESP-NOW is stopped)
 espnowroom [name]               - Get/set room
 espnowzone [name]               - Get/set zone
 espnowtags [tag1,tag2,...]      - Get/set tags
@@ -1294,7 +1354,7 @@ admin only (anyone else sees "Event counts: admin only.").
 **Sensor readings.** `espnowsensorstream <sensor> on` sends that sensor's readings to the named
 master, and the reply says where they go or why nothing is sent yet. The master lists a device's
 sensors (present, streaming or not) as soon as that device's sensor status arrives, before the
-first reading. A reading can be up to 472
+first reading. A reading can be up to 536
 bytes and travels in up to four frames. The receiving device stamps each reading with its own clock
 when it arrives and counts lost readings per device and sensor
 (`GET /api/sensors/remote?device=<MAC>&sensor=<type>`). A reading that cannot be sent is counted
@@ -1377,7 +1437,6 @@ openconsole                     - Start the app console server for a direct app 
 closeconsole                    - Stop the app console server
 blestatus                       - Show connection status
 bleinfo                         - Show BLE configuration and settings
-blename [name]                  - Get/set BLE device name
 bletxpower [0-7]                - Get/set TX power
 bleadv                          - Start advertising
 bledisconnect                   - Disconnect current BLE client

@@ -8,6 +8,8 @@
 #include <string>
 #include <vector>
 
+#include "System_DeviceName.h"  // the device-name rule the ESP-NOW page checks
+
 // Arduino storage/input boundary; application and handler control flow are real.
 class String : public std::string {
  public:
@@ -100,6 +102,22 @@ static void broadcastOutput(const char*) {}
 static void appendPromptTo(char*, size_t) {}
 static void clearWizardWifiChoices() { ++clearCalls; }
 static char* getWizardDeviceNameBuf() { return deviceName; }
+// The wizard's checked name setter (System_SetupWizard.cpp; the rule is System_DeviceName.h).
+[[maybe_unused]] static const char* wizardSetDeviceName(const char* typed) {
+  std::snprintf(getWizardDeviceNameBuf(), 21, "%s", typed);
+  return nullptr;
+}
+// System_SetupWizard.cpp's offer: the label made into a name, else the
+// draft's name, else the name in use (here a fixed fallback).
+static void wizardSuggestDeviceName(const char* label, char (&out)[32]) {
+  devicename::suggestFromLabel(label, out);
+  if (out[0]) return;
+  if (devicename::valid(draftValues.deviceName.c_str())) {
+    std::snprintf(out, sizeof(out), "%s", draftValues.deviceName.c_str());
+  } else {
+    std::snprintf(out, sizeof(out), "HardwareOne-A1B2C3");
+  }
+}
 static void delay(int) { unchanged(); assert(++drawLoops < 20); }
 struct DisplayBoundary {
   void clearDisplay() {} void setCursor(int, int) {} void print(const char*) {}
@@ -134,6 +152,7 @@ static void reset() {
   gSettings = {"old-ble", "old-device", "old-friendly", "old-room", "old-zone", true, true};
   beforeInput = gSettings;
   draftValues = {}; draftValues.deviceName = "old-device";
+  draftValues.espnowFriendlyName = "old-label";
   draftValues.espnowRoom = "old-room"; draftValues.espnowZone = "old-zone";
   draftValues.espnowStationary = true;
   staged.clear(); draftEnabled = stageSucceeds = true;
@@ -144,49 +163,63 @@ static void reset() {
   currentPage = WIZARD_PAGE_ESPNOW;
   sWizard = {}; sWizard.subMode = WizardSubMode::ESPNOW_INTRO;
 }
-static void patch(const char* name, const char* room = "", const char* zone = "",
+// The staged page: the display label and the device name are separate fields
+// (the name is confirmed on its own prompt, offered from the label).
+static void patch(const char* label, const char* name, const char* room = "", const char* zone = "",
                   bool stationary = true) {
   unchanged(); assert(gSettings.espnowEnabled);
   assert(staged.size() == 1);
-  assert(staged[0].espnowFriendlyName == name);
+  if (staged[0].espnowFriendlyName != label || staged[0].deviceName != name) {
+    std::fprintf(stderr, "staged label='%s' name='%s', expected '%s' / '%s'\n",
+                 staged[0].espnowFriendlyName.c_str(), staged[0].deviceName.c_str(), label, name);
+  }
+  assert(staged[0].espnowFriendlyName == label);
+  assert(staged[0].deviceName == name);
+  assert(staged[0].deviceName.empty() || devicename::valid(staged[0].deviceName.c_str()));
   assert(staged[0].espnowRoom == room && staged[0].espnowZone == zone);
-  if (staged[0].espnowStationary != stationary) std::fprintf(stderr, "stationary mismatch name=%s actual=%d expected=%d\n", name, staged[0].espnowStationary, stationary);
+  if (staged[0].espnowStationary != stationary) std::fprintf(stderr, "stationary mismatch label=%s actual=%d expected=%d\n", label, staged[0].espnowStationary, stationary);
   assert(staged[0].espnowStationary == stationary);
 }
 static CliModeInputResult cli(const char* line) {
-  char output[128] = {}; return wizardMode_onInput(line, nullptr, output, sizeof(output));
+  char output[256] = {}; return wizardMode_onInput(line, nullptr, output, sizeof(output));
 }
 
 static void serialCases() {
   SetupWizardResult result{}; bool running = true;
-  reset(); inputs = {"c", " new-device ", " new-room ", " new-zone ", "stationary"};
+  reset(); inputs = {"c", " new-label ", " new-device ", " new-room ", " new-zone ", "stationary"};
   handleSerialEspNowPage(result, running);
-  patch("new-device", "new-room", "new-zone", true);
-  assert(nextCalls == 1 && running && inputIndex == 5);
-  reset(); result = {}; inputs = {"direct-name", "", "", ""}; hasNextPage = false;
+  patch("new-label", "new-device", "new-room", "new-zone", true);
+  assert(nextCalls == 1 && running && inputIndex == 6);
+  reset(); result = {}; inputs = {"direct-name", "", "", "", ""}; hasNextPage = false;
   handleSerialEspNowPage(result, running);
-  patch("direct-name"); assert(!running && nextCalls == 1 && result.completed);
-  reset(); result = {}; running = true; inputs = {"c", "", "", "", ""};
-  handleSerialEspNowPage(result, running); patch("old-device");
+  patch("direct-name", "direct-name"); assert(!running && nextCalls == 1 && result.completed);
+  reset(); result = {}; running = true; inputs = {"c", "", "", "", "", ""};
+  handleSerialEspNowPage(result, running); patch("old-label", "old-label");
+  // The name is offered from the label and checked: "bad name" is asked again,
+  // and Enter then takes the offer ("My Kitchen" -> "My-Kitchen").
+  reset(); result = {}; running = true; inputs = {"c", "My Kitchen", "bad name", "", "", "", ""};
+  handleSerialEspNowPage(result, running); patch("My Kitchen", "My-Kitchen");
+  assert(inputIndex == 7);
 
-  // Early finish at each field keeps unsubmitted room/zone values. Name-stage
-  // finish uses the current device name even when an earlier draft exists.
-  for (int finish = 1; finish <= 3; ++finish) {
+  // Early finish at each field keeps unsubmitted values; at the label it keeps
+  // the current name and label, at the name it takes the offered name.
+  for (int finish = 1; finish <= 4; ++finish) {
     reset(); result = {}; running = true; result.espnowFriendlyName = "stale-name";
-    inputs = {"c", "new-device", "new-room", "new-zone", "s"}; inputs[finish] = "n";
+    inputs = {"c", "new-label", "new-device", "new-room", "new-zone", "s"}; inputs[finish] = "n";
     handleSerialEspNowPage(result, running);
-    patch(finish == 1 ? "" : "new-device", finish == 3 ? "new-room" : "", "", true);
+    patch(finish == 1 ? "" : "new-label", finish == 1 ? "" : finish == 2 ? "new-label" : "new-device",
+          finish == 4 ? "new-room" : "", "", true);
     assert(nextCalls == 1 && inputIndex == static_cast<size_t>(finish + 1));
   }
-  for (int back = 0; back < 5; ++back) {
+  for (int back = 0; back < 6; ++back) {
     reset(); result = {}; running = true;
-    inputs = {"c", "new-device", "new-room", "new-zone", "s"}; inputs[back] = "back";
+    inputs = {"c", "new-label", "new-device", "new-room", "new-zone", "s"}; inputs[back] = "back";
     handleSerialEspNowPage(result, running);
     unchanged(); assert(gSettings.espnowEnabled && previousCalls == 1 && nextCalls == 0 && running);
   }
-  for (int timeout = 1; timeout < 5; ++timeout) {
+  for (int timeout = 1; timeout < 6; ++timeout) {
     reset(); result = {}; running = true;
-    inputs = {"c", "new-device", "new-room", "new-zone", "s"}; cancelInput = timeout;
+    inputs = {"c", "new-label", "new-device", "new-room", "new-zone", "s"}; cancelInput = timeout;
     handleSerialEspNowPage(result, running);
     unchanged(); assert(!running && nextCalls == 0 && gSettings.espnowEnabled);
   }
@@ -196,35 +229,38 @@ static void serialCases() {
     unchanged(); assert(!draftEnabled && gSettings.espnowEnabled && nextCalls == 1);
   }
   reset(); result = {}; running = true; stageSucceeds = false;
-  inputs = {"c", "new-device", "", "", "s"}; handleSerialEspNowPage(result, running);
-  patch("new-device"); assert(nextCalls == 0 && running);
+  inputs = {"c", "new-label", "new-device", "", "", "s"}; handleSerialEspNowPage(result, running);
+  patch("new-label", "new-device"); assert(nextCalls == 0 && running);
 }
 
 static void oledCases() {
   SetupWizardResult result{}; bool running = true;
-  reset(); inputs = {"new-device", "new-room", "new-zone", "s"};
-  handleOledEspNowPage(result, running); patch("new-device", "new-room", "new-zone", true);
-  assert(nextCalls == 1 && running && inputIndex == 4);
-  reset(); result = {}; inputs = {"", "", "", ""}; hasNextPage = false;
-  handleOledEspNowPage(result, running); patch("old-device");
+  reset(); inputs = {"new-label", "new-device", "new-room", "new-zone", "s"};
+  handleOledEspNowPage(result, running); patch("new-label", "new-device", "new-room", "new-zone", true);
+  assert(nextCalls == 1 && running && inputIndex == 5);
+  reset(); result = {}; inputs = {"", "", "", "", ""}; hasNextPage = false;
+  handleOledEspNowPage(result, running); patch("old-label", "old-label");
   assert(!running && nextCalls == 1 && result.completed);
-  for (int cancel = 0; cancel < 3; ++cancel) {
-    reset(); result = {}; running = true; inputs = {"new-device", "new-room", "new-zone", "s"};
+  // A name the rule refuses is asked again; empty then takes the offer.
+  reset(); result = {}; running = true; inputs = {"My Kitchen", "bad name", "", "", "", "s"};
+  handleOledEspNowPage(result, running); patch("My Kitchen", "My-Kitchen");
+  for (int cancel = 0; cancel < 4; ++cancel) {
+    reset(); result = {}; running = true; inputs = {"new-label", "new-device", "new-room", "new-zone", "s"};
     cancelInput = cancel; handleOledEspNowPage(result, running);
     unchanged(); assert(previousCalls == 0 && nextCalls == 0 && !running && gSettings.espnowEnabled);
   }
-  reset(); result = {}; running = true; inputs = {"new-device", "new-room", "new-zone", "back"};
+  reset(); result = {}; running = true; inputs = {"new-label", "new-device", "new-room", "new-zone", "back"};
   handleOledEspNowPage(result, running);
   unchanged(); assert(previousCalls == 1 && nextCalls == 0 && running);
   reset(); result = {}; running = true; stationarySerial = false;
-  inputs = {"new-device", "new-room", "new-zone"}; nextButtons = INPUT_MASK(INPUT_BUTTON_B);
+  inputs = {"new-label", "new-device", "new-room", "new-zone"}; nextButtons = INPUT_MASK(INPUT_BUTTON_B);
   handleOledEspNowPage(result, running);
   unchanged(); assert(previousCalls == 1 && nextCalls == 0 && running);
   for (bool toggle : {false, true}) {
     reset(); result = {}; running = true; stationarySerial = false; nextDown = toggle;
-    inputs = {"new-device", "", ""}; nextButtons = INPUT_MASK(INPUT_BUTTON_A);
+    inputs = {"new-label", "new-device", "", ""}; nextButtons = INPUT_MASK(INPUT_BUTTON_A);
     handleOledEspNowPage(result, running);
-    patch("new-device", "", "", !toggle);
+    patch("new-label", "new-device", "", "", !toggle);
   }
   for (int intro : {-1, 0}) {
     reset(); result = {}; running = true; introChoice = intro;
@@ -236,40 +272,47 @@ static void oledCases() {
 
 static void cliCases() {
   reset();
-  for (const char* value : {"c", "new-device", "new-room", "new-zone"}) {
+  for (const char* value : {"c", "new-label", "new-device", "new-room", "new-zone"}) {
     assert(cli(value) == CLI_MODE_HANDLED); unchanged();
   }
   hasNextPage = false;
   assert(cli("stationary") == CLI_MODE_HANDLED_AND_EXIT);
-  patch("new-device", "new-room", "new-zone", true);
+  patch("new-label", "new-device", "new-room", "new-zone", true);
   assert(nextCalls == 1 && sWizard.result.completed);
-  reset(); for (const char* value : {"direct-name", "", "", ""}) cli(value);
-  patch("direct-name"); assert(nextCalls == 1);
-  reset(); for (const char* value : {"c", "", "", "", ""}) cli(value);
-  patch("old-device");
-  for (int finish = 1; finish <= 3; ++finish) {
+  reset(); for (const char* value : {"direct-name", "", "", "", ""}) cli(value);
+  patch("direct-name", "direct-name"); assert(nextCalls == 1);
+  reset(); for (const char* value : {"c", "", "", "", "", ""}) cli(value);
+  patch("old-label", "old-label");
+  reset(); for (const char* value : {"c", "My Kitchen", "bad name"}) cli(value);
+  assert(sWizard.subMode == WizardSubMode::ESPNOW_DEVNAME && staged.empty());  // refused, asked again
+  for (const char* value : {"", "", "", ""}) cli(value);
+  patch("My Kitchen", "My-Kitchen");
+  for (int finish = 1; finish <= 4; ++finish) {
     reset(); sWizard.result.espnowFriendlyName = "stale-name";
-    const char* prefix[] = {"c", "new-device", "new-room"};
+    const char* prefix[] = {"c", "new-label", "new-device", "new-room"};
     for (int i = 0; i < finish; ++i) { cli(prefix[i]); unchanged(); }
     cli("next");
-    patch(finish == 1 ? "" : "new-device", finish == 3 ? "new-room" : "", "", true);
+    patch(finish == 1 ? "" : "new-label", finish == 1 ? "" : finish == 2 ? "new-label" : "new-device",
+          finish == 4 ? "new-room" : "", "", true);
     assert(nextCalls == 1);
   }
-  for (int field = 0; field < 5; ++field) {
-    const char* prefix[] = {"c", "new-device", "new-room", "new-zone"};
+  for (int field = 0; field < 6; ++field) {
+    const char* prefix[] = {"c", "new-label", "new-device", "new-room", "new-zone"};
     reset(); for (int i = 0; i < field; ++i) cli(prefix[i]);
     cli("b"); unchanged(); assert(nextCalls == 0 && gSettings.espnowEnabled);
     reset(); for (int i = 0; i < field; ++i) cli(prefix[i]);
     assert(cli("cancel") == CLI_MODE_HANDLED_AND_EXIT);
     unchanged(); assert(!sWizard.result.completed && clearCalls == 1 && nextCalls == 0);
   }
-  reset(); cli("c"); cli("draft-name"); cli("b"); cli("n");
-  patch("");
-  reset(); draftValues.deviceName = ""; cli("c"); cli(""); cli(""); cli(""); cli("");
-  patch("HardwareOne");
+  reset(); cli("c"); cli("draft-label"); cli("b"); cli("n");
+  patch("", "");
+  // No label and no valid name in the draft: the offer is the name in use.
+  reset(); draftValues.deviceName = ""; draftValues.espnowFriendlyName = "";
+  cli("c"); cli(""); cli(""); cli(""); cli(""); cli("");
+  patch("", "HardwareOne-A1B2C3");
   reset(); stageSucceeds = false;
-  for (const char* value : {"c", "new-device", "new-room", "new-zone", "s"}) cli(value);
-  patch("new-device", "new-room", "new-zone"); assert(nextCalls == 0);
+  for (const char* value : {"c", "new-label", "new-device", "new-room", "new-zone", "s"}) cli(value);
+  patch("new-label", "new-device", "new-room", "new-zone"); assert(nextCalls == 0);
   for (const char* skip : {"", "n", "next"}) {
     reset(); cli(skip); unchanged(); assert(!draftEnabled && gSettings.espnowEnabled && nextCalls == 1);
   }

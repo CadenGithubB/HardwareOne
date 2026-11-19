@@ -97,15 +97,40 @@ static void testFrame() {
   CHECK(wire[0] == 1 && wire[1] == 7 && wire[2] == 0xEF && wire[3] == 0xBE && wire[4] == 0x07 && wire[5] == 0 &&
         wire[6] == 0 && wire[7] == 0);
   CHECK(std::memcmp(wire + 8, kX, 6) == 0);
-  CHECK(wire[14] == (kSensorMaskDefault & 0xFF) && wire[15] == (kSensorMaskDefault >> 8));
-  CHECK(wire[16] == 0x41 && wire[47] == (uint8_t)(0x40 + 31 + 1));
-  CHECK(std::memcmp(wire + 48, "porch", 5) == 0 && wire[53] == 0 && wire[79] == 0);
-  for (size_t i = 80; i < kLinkFrameLen; ++i) CHECK(wire[i] == 0);
+  // 1.0 layout: 14..15 reserved, the 32-bit sensor mask at 16, key at 20, name at 52.
+  CHECK(kLinkOffMask == 16 && kLinkOffKey == 20 && kLinkOffName == 52);
+  CHECK(wire[14] == 0 && wire[15] == 0);
+  CHECK(wire[16] == (kSensorMaskDefault & 0xFF) && wire[17] == ((kSensorMaskDefault >> 8) & 0xFF) &&
+        wire[18] == ((kSensorMaskDefault >> 16) & 0xFF) && wire[19] == ((kSensorMaskDefault >> 24) & 0xFF));
+  CHECK(wire[20] == 0x41 && wire[51] == (uint8_t)(0x40 + 31 + 1));
+  CHECK(std::memcmp(wire + 52, "porch", 5) == 0 && wire[57] == 0 && wire[83] == 0);
+  for (size_t i = 84; i < kLinkFrameLen; ++i) CHECK(wire[i] == 0);
   LinkFrame back = {};
   CHECK(parseLinkFrame(wire, sizeof(wire), back));
   CHECK(back.op == 1 && back.linkGen == 7 && back.viaBootTag == 0xBEEF && back.streams == kStreamsAll &&
         back.sensorMask == kSensorMaskDefault && std::memcmp(back.partnerMac, kX, 6) == 0 &&
         std::memcmp(back.partnerKey, f.partnerKey, 32) == 0 && std::memcmp(back.partnerName, f.partnerName, 32) == 0);
+  // The mask is 32 bits on the wire: bit 31 lands in byte 19, and a sensor
+  // this firmware does not know is ignored on reading.
+  {
+    LinkFrame wide = f;
+    wide.sensorMask = 0x80000000u | espnowsensor::sensorBit(REMOTE_SENSOR_APDS);
+    uint8_t w2[kLinkFrameLen];
+    packLinkFrame(w2, wide);
+    CHECK(w2[19] == 0x80 && w2[17] == (uint8_t)(espnowsensor::sensorBit(REMOTE_SENSOR_APDS) >> 8));
+    LinkFrame wideBack = {};
+    CHECK(parseLinkFrame(w2, sizeof(w2), wideBack));
+    CHECK(wideBack.sensorMask == espnowsensor::sensorBit(REMOTE_SENSOR_APDS));
+  }
+  static_assert(sizeof(LinkFrame::sensorMask) == 4 && sizeof(TargetState::sensorMask) == 4 &&
+                sizeof(TargetState::acceptedMask) == 4 && sizeof(TargetWant::sensorMask) == 4 &&
+                sizeof(ReqInputs::mask) == 4 && sizeof(ReqInputs::forwardedMask) == 4 &&
+                sizeof(ReqInputs::partnerPresent) == 4 && sizeof(ReqLeases::leased) == 4 &&
+                sizeof(ReqLeases::started) == 4 && sizeof(ReqLeases::byUser) == 4 &&
+                sizeof(ReqLeases::offOwed) == 4 && sizeof(LeaseActs::on) == 4 && sizeof(LeaseActs::off) == 4 &&
+                sizeof(ForwardLink::sensorMask) == 4 && sizeof(ForwardLink::resumeMask) == 4 &&
+                sizeof(kSensorMaskDefault) == 4 && sizeof(kResumeAll) == 4,
+                "sensor masks are 32 bits everywhere");
   // Short, null, unknown ops; a longer payload is read up to 96.
   CHECK(!parseLinkFrame(wire, kLinkFrameLen - 1, back) && !parseLinkFrame(nullptr, kLinkFrameLen, back));
   uint8_t longer[kLinkFrameLen + 30];
@@ -457,7 +482,7 @@ static void testAnnounceOnM() {
         is(e.name, "porch") && std::memcmp(e.partner, kX, 6) == 0);
   e.resumeMask = 0;
   LinkFrame more = f;
-  more.sensorMask = (uint16_t)(f.sensorMask | espnowsensor::sensorBit(REMOTE_SENSOR_INPUT));
+  more.sensorMask = (espnowsensor::SensorMask)(f.sensorMask | espnowsensor::sensorBit(REMOTE_SENSOR_INPUT));
   CHECK(announceFresh(e, more) && linkApplyAnnounce(e, more, "porch2", false, 200) == AnnounceEffect::Repeat);
   CHECK(e.resumeMask == espnowsensor::sensorBit(REMOTE_SENSOR_INPUT) && e.confirmedMs == 200 && is(e.name, "porch2"));
   const LinkFrame f2 = announce(2, 10);
@@ -557,7 +582,7 @@ static void testAttribute() {
   CHECK(a.verdict == Verdict::Forwarded && a.resumePending);
   // A refused frame does not take the resume.
   CHECK(attribute(&e, false, true, true, 2, REMOTE_SENSOR_GPS).resumePending == false);
-  e.resumeMask = (uint16_t)(e.resumeMask & ~(1u << REMOTE_SENSOR_GPS));
+  e.resumeMask = (espnowsensor::SensorMask)(e.resumeMask & ~(1u << REMOTE_SENSOR_GPS));
   CHECK(!attribute(&e, false, true, true, 3, REMOTE_SENSOR_GPS).resumePending);
   CHECK(attribute(&e, false, true, true, 3, REMOTE_SENSOR_IMU).resumePending);
   CHECK(attribute(&e, false, false, false, 3, kStreamIdBattery).resumePending);
@@ -617,7 +642,7 @@ static ReqInputs reqAll() {
   in.forwardedMask = kSensorMaskDefault;
   in.partnerOnline = true;
   in.partnerStatusKnown = true;
-  in.partnerPresent = (uint16_t)espnowsensor::kSensorMaskAll;
+  in.partnerPresent = (espnowsensor::SensorMask)espnowsensor::kSensorMaskAll;
   return in;
 }
 
@@ -816,7 +841,7 @@ static void testEndToEnd() {
     const Attribution a = attribute(&e, false, true, true, e.linkGen, REMOTE_SENSOR_GPS);
     CHECK(a.verdict == Verdict::Forwarded);
     counterJudge(onM, cM, 0xAAAA, counter, a.resumePending, now);
-    if (a.resumePending) e.resumeMask = (uint16_t)(e.resumeMask & ~(1u << REMOTE_SENSOR_GPS));
+    if (a.resumePending) e.resumeMask = (espnowsensor::SensorMask)(e.resumeMask & ~(1u << REMOTE_SENSOR_GPS));
   };
   for (uint16_t c = 1; c <= 100; ++c) send(c, c == 30, c == 60);
   CHECK(cB.received == 99 && cB.lost == 1 && cM.received == 98 && cM.lost == 2);

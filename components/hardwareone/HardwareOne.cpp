@@ -1308,7 +1308,7 @@ static void bootAutostartEspNow(bool wanted) {
     if (setupError && strlen(setupError) > 0) {
       broadcastOutput("[ESP-NOW] Auto-init skipped - first-time setup required:");
       broadcastOutput(setupError);
-      broadcastOutput("[ESP-NOW] Set device name with: espnowsetname <name>");
+      broadcastOutput("[ESP-NOW] Set device name with: devicename <name>");
     } else {
       broadcastOutput("[ESP-NOW] Initializing...");
       const char* result = cmd_espnow_init("");
@@ -1612,6 +1612,11 @@ void hardwareone_setup() {
   // gSettings.tzOffsetMinutes — idempotent, no I/O — so the later call in
   // applySettings() stays exactly as it is.
   Clock::applyTimezone();
+
+  // The device name is the Wi-Fi station hostname: hand it to the Wi-Fi stack
+  // now, before anything starts the station interface (the stack applies it
+  // when the station starts). Bluetooth reads it when it starts.
+  SelfDevice::applyHostname();
 
   // TEMP DEBUG (2026-04-03): force debug flags on AFTER file load to diagnose
   // Command system init — single call after settings are resolved
@@ -2345,6 +2350,9 @@ void hardwareone_setup() {
     }
     uint8_t derivedCount = meshKeysInitAll();
     (void)derivedCount;  // logged inside meshKeysInitAll on a per-mesh basis
+    // Every keyed mesh's id from its key (disabled ones too), and a clash
+    // between two meshes' ids keeps the lower slot (System_ESPNow_MeshIdCore.h).
+    espnowMeshIdsAfterKeyInit();
 
     // Phase 3.2 — walk /system/espnow/peers/*/identity.json and populate the
     // in-memory peer identity cache. Empty on a fresh boot; populates once

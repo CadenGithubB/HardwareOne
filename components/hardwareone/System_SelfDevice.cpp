@@ -8,8 +8,15 @@
 #include <cstdio>
 #include <cstring>
 
+#include <esp_mac.h>          // esp_efuse_mac_get_default
+#include "System_BuildConfig.h"
+#include "System_Debug.h"     // WARN_SYSTEMF
+#include "System_DeviceName.h" // the device-name rule and the fallback
 #include "System_MacText.h"   // macToDisplay
 #include "System_Settings.h"  // gSettings.espnowDeviceName
+#if ENABLE_WIFI
+#include <WiFi.h>             // WiFi.setHostname, WiFi.STA
+#endif
 
 namespace SelfDevice {
 
@@ -69,12 +76,30 @@ String macString() {
 }
 
 String deviceName() {
-  // Settings name is the user-set label. Fall back to MAC so the result is
-  // always non-empty and uniquely identifies the device on the network.
-  if (gSettings.espnowDeviceName.length() > 0) {
-    return gSettings.espnowDeviceName;
+  const char* stored = gSettings.espnowDeviceName.c_str();
+  const devicename::Fault fault = devicename::check(stored);
+  if (fault == devicename::Fault::None) return gSettings.espnowDeviceName;
+  if (stored[0]) {
+    static bool sWarned = false;
+    if (!sWarned) {
+      sWarned = true;
+      WARN_SYSTEMF("[Device] stored device name is not valid (%s); using the fallback. Set it with 'devicename <name>'.",
+                   devicename::faultText(fault));
+    }
   }
-  return macString();
+  uint8_t mac[6] = {0};
+  (void)esp_efuse_mac_get_default(mac);
+  char fallback[devicename::kFieldLen];
+  devicename::formatWithMacSuffix(devicename::kFallbackPrefix, mac, fallback);
+  return String(fallback);
+}
+
+void applyHostname() {
+#if ENABLE_WIFI
+  const String name = deviceName();
+  WiFi.setHostname(name.c_str());
+  if (WiFi.STA.started()) (void)WiFi.STA.setHostname(name.c_str());
+#endif
 }
 
 const char* firmwareVersion() {

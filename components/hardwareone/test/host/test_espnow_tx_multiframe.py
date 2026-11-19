@@ -6,9 +6,9 @@ completion pool, submit/submitSync, sendAead/sendAeadSync, the dispatcher task
 body and stop()) and compiles it against single-threaded FreeRTOS doubles and a
 stubbed radio whose multi-frame path models the per-fragment ACK wait. It checks
 that a synchronous payload from cmd_exec over its destination's single-frame cap
-(202 B direct, 130 B routed) runs on cmd_exec while fire-and-forget producers
+(202 B direct, 146 B routed) runs on cmd_exec while fire-and-forget producers
 keep draining (no queue drops), that another task's synchronous multi-frame job
-(httpd's 144 B FS request to a routed peer) stays dispatcher work, and that
+(httpd's 160 B FS request to a routed peer) stays dispatcher work, and that
 single-frame jobs, the self-deadlock guard, lifecycle refusal, stop() and
 failure accounting are unchanged.
 
@@ -123,16 +123,21 @@ def stream_target_contract(read) -> list[str]:
                         "(the harness mirrors them)")
     handle = extract_block(espnow, "static void v4_handle_cmd(const uint8_t* srcMac, const char* deviceName, "
                                    "uint32_t msgId, const char* cmdPayload")
-    begin, submit = handle.find("ESPNOW_V4_FLAG_STREAM_BEGIN"), handle.find("submitCommandAsync(")
     if not ("cmd.ctx.origin = ORIGIN_ESPNOW;" in handle and "cmd.ctx.id = msgId;" in handle):
         failures.append("v4_handle_cmd no longer queues origin ORIGIN_ESPNOW with ctx.id = msgId")
-    if not 0 <= begin < submit:
-        failures.append("v4_handle_cmd: STREAM_BEGIN is no longer sent before the command is submitted")
+    if "submitCommandAsync(" not in handle:
+        failures.append("v4_handle_cmd no longer submits the command")
     callback = extract_block(espnow, "static void v4CmdResultCallback(")
-    end, resp, destroy = (callback.find("ESPNOW_V4_FLAG_STREAM_END"), callback.find("ESPNOW_V4_TYPE_CMD_RESP"),
-                          callback.find("destroyStreamSession("))
-    if not 0 <= end < resp < destroy:
-        failures.append("v4CmdResultCallback: expected STREAM_END, then CMD_RESP, then destroyStreamSession")
+    resp, destroy = callback.find("ESPNOW_V4_TYPE_CMD_RESP"), callback.find("destroyStreamSession(")
+    if not 0 <= resp < destroy:
+        failures.append("v4CmdResultCallback: expected CMD_RESP, then destroyStreamSession")
+    # 1.0: no empty STREAM_BEGIN / STREAM_END frames (the receiver never read
+    # them, and a 1.0 receiver counts a frame shorter than its row as short).
+    for name, text in (("v4_handle_cmd", handle), ("v4CmdResultCallback", callback)):
+        if "STREAM_BEGIN" in text or "STREAM_END" in text or "nullptr, 0, ESPNOW_V4_FLAG" in text:
+            failures.append(f"{name} still sends an empty STREAM_BEGIN / STREAM_END frame")
+    if "sendSessionStreamFrame(" in espnow:
+        failures.append("sendSessionStreamFrame (the empty STREAM frame sender) is back")
     main_source = read("HardwareOne.cpp")
     task = "static void commandExecTask(void* pv)"  # also forward-declared; take the definition
     require(main_source.count(task + " {") == 1, "expected one commandExecTask definition")
@@ -152,8 +157,8 @@ def wire_contract(wire: str) -> None:
             "ESPNOW_V4_AEAD_TAG_LEN is no longer 16")
     require(re.search(r"#define ESPNOW_V4_MAX_PLAINTEXT\s+\(ESPNOW_V4_MAX_PAYLOAD - ESPNOW_V4_AEAD_TAG_LEN\)",
                       wire) is not None, "ESPNOW_V4_MAX_PLAINTEXT is no longer MAX_PAYLOAD - AEAD_TAG_LEN")
-    require("static_assert(ESPNOW_V4_RELAY_MAX_INNER_PLAINTEXT == 130" in wire,
-            "ESPNOW_V4_RELAY_MAX_INNER_PLAINTEXT is no longer pinned to 130")
+    require("static_assert(ESPNOW_V4_RELAY_MAX_INNER_PLAINTEXT == 146" in wire,
+            "ESPNOW_V4_RELAY_MAX_INNER_PLAINTEXT is no longer pinned to 146")
     require(re.search(r"ESPNOW_V4_TYPE_STREAM\s*=\s*90,", wire) is not None,
             "ESPNOW_V4_TYPE_STREAM is no longer 90")
 

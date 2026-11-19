@@ -144,6 +144,15 @@ def build_crypto(crypto, crypto_h):
                 line(crypto, r'^constexpr const char\*\s+kConfirmLabel\s*=[^;]*;', 'kConfirmLabel'),
                 line(crypto, r'^constexpr const char\*\s+kRekeyLabel\s*=[^;]*;', 'kRekeyLabel'),
                 line(crypto, r'^constexpr size_t\s+kLabelLen\s*=[^;]*;', 'kLabelLen')]
+    # The 1.0 transcript lengths and their cursor (absent on a tree before the
+    # session capability word, which the harness is told by HW1_SESSION_CAPS).
+    if 'struct TranscriptCursor' in crypto:
+        internal.append('#define HW1_SESSION_CAPS 1')
+        for const in ('kOpenTranscriptLen', 'kConfirmTranscriptLen'):
+            internal.append(line(crypto, r'^constexpr size_t\s+' + const + r'\s*=[^;]*;', const))
+        for const in ('kOpenTranscriptLen == 75', 'kConfirmTranscriptLen == 91'):
+            internal.append(line(crypto, r'^static_assert\(' + re.escape(const) + r'[^;]*;', const))
+        internal.append(one(crypto, 'struct TranscriptCursor', name) + ';')
     for marker in ('void buildOpenTranscript(', 'void buildConfirmTranscript(',
                    'void buildRekeyTranscript(', 'static uint16_t sessionRejectLogCount('):
         internal.append(one(crypto, marker, name))

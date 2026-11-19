@@ -29,6 +29,7 @@
 #include "System_SetupWizardMode.h"
 #include "HAL_Input.h"
 #include "System_SetupWizard.h"   // existing state mutators + renderers
+#include "System_DeviceName.h"    // the device-name rule (the ESP-NOW page's name step)
 #include "System_CLIMode.h"
 #include "System_Debug.h"
 #include "System_CLI.h"            // gInHelpRender
@@ -56,7 +57,8 @@ enum class WizardSubMode : uint8_t {
 
   // ESP-NOW identity page (linear field walk)
   ESPNOW_INTRO,             // c=Configure / n=Skip / b=Back
-  ESPNOW_NAME,
+  ESPNOW_NAME,               // the display label (free text)
+  ESPNOW_DEVNAME,            // the device name, offered from the label
   ESPNOW_ROOM,
   ESPNOW_ZONE,
   ESPNOW_STATIONARY,
@@ -216,11 +218,17 @@ static const char* paintAfterTransition() {
       return "Choice: ";
     }
     case WizardSubMode::ESPNOW_NAME: {
-      static char prompt[80];
-      const String& savedName = getWizardDraftValues().deviceName;
-      String cur = savedName.length() > 0 ? savedName : String("HardwareOne");
+      static char prompt[112];
       snprintf(prompt, sizeof(prompt),
-               "Device Name (for Bluetooth + ESP-NOW) [%s]: ", cur.c_str());
+               "Display label (free text, e.g. 'My Kitchen') [%s]: ",
+               getWizardDraftValues().espnowFriendlyName.c_str());
+      return prompt;
+    }
+    case WizardSubMode::ESPNOW_DEVNAME: {
+      static char prompt[112];
+      char suggested[32];
+      wizardSuggestDeviceName(sWizard.result.espnowFriendlyName.c_str(), suggested);
+      snprintf(prompt, sizeof(prompt), "Device name (1-31 letters, digits, '-') [%s]: ", suggested);
       return prompt;
     }
     case WizardSubMode::ESPNOW_ROOM: {
@@ -370,9 +378,11 @@ static CliModeInputResult wizardMode_onInput(const String& line, void* /*ud*/,
       String name = line;
       name.trim();
       if (name.length() > 0) {
-        char* buf = getWizardDeviceNameBuf();
-        strncpy(buf, name.c_str(), 19);
-        buf[19] = '\0';
+        if (const char* refused = wizardSetDeviceName(name.c_str())) {
+          snprintf(out, outSize, "Not changed: %s\n", refused);
+          appendPromptTo(out, outSize);
+          return CLI_MODE_HANDLED;
+        }
       }
       sWizard.subMode = subModeForPage(getWizardCurrentPage());
       appendPromptTo(out, outSize);
@@ -381,6 +391,7 @@ static CliModeInputResult wizardMode_onInput(const String& line, void* /*ud*/,
 
     case WizardSubMode::ESPNOW_INTRO:
     case WizardSubMode::ESPNOW_NAME:
+    case WizardSubMode::ESPNOW_DEVNAME:
     case WizardSubMode::ESPNOW_ROOM:
     case WizardSubMode::ESPNOW_ZONE:
     case WizardSubMode::ESPNOW_STATIONARY:
@@ -526,6 +537,7 @@ static CliModeInputResult dispatchEspNow(const String& line,
       if (isBack)         { goBack(); appendPromptTo(out, outSize); return CLI_MODE_HANDLED; }
       if (lc == "c" || lc == "configure") {
         sWizard.result.espnowFriendlyName = "";
+        sWizard.result.deviceName = "";
         sWizard.result.espnowRoom = "";
         sWizard.result.espnowZone = "";
         sWizard.result.espnowStationary = getWizardDraftValues().espnowStationary;
@@ -554,7 +566,8 @@ static CliModeInputResult dispatchEspNow(const String& line,
       sWizard.result.espnowZone = "";
       sWizard.result.espnowStationary = getWizardDraftValues().espnowStationary;
       sWizard.result.espnowFriendlyName = raw;
-      sWizard.subMode = WizardSubMode::ESPNOW_ROOM;
+      sWizard.result.deviceName = "";
+      sWizard.subMode = WizardSubMode::ESPNOW_DEVNAME;
       broadcastOutput("----------------------------------------");
       broadcastOutput("All fields optional. Enter to skip field, "
                       "'n' to finish, 'b' to go back.");
@@ -569,15 +582,36 @@ static CliModeInputResult dispatchEspNow(const String& line,
         appendPromptTo(out, outSize);
         return sWizard.subMode == WizardSubMode::DONE ? CLI_MODE_HANDLED_AND_EXIT : CLI_MODE_HANDLED;
       }
-      // Empty -> keep current. Non-empty -> use as friendly name.
-      if (raw.length() > 0) sWizard.result.espnowFriendlyName = raw;
-      else                  sWizard.result.espnowFriendlyName = getWizardDraftValues().deviceName.length() > 0
-                                                                ? getWizardDraftValues().deviceName : String("HardwareOne");
-      sWizard.subMode = WizardSubMode::ESPNOW_ROOM;
+      // Empty -> keep the current label. Non-empty -> the new label.
+      sWizard.result.espnowFriendlyName = raw.length() > 0 ? raw : getWizardDraftValues().espnowFriendlyName;
+      sWizard.subMode = WizardSubMode::ESPNOW_DEVNAME;
       appendPromptTo(out, outSize); return CLI_MODE_HANDLED;
 
-    case WizardSubMode::ESPNOW_ROOM:
+    case WizardSubMode::ESPNOW_DEVNAME: {
       if (isBack) { sWizard.subMode = WizardSubMode::ESPNOW_NAME; appendPromptTo(out, outSize); return CLI_MODE_HANDLED; }
+      // Empty, or 'n' (finish), -> the offered name. A name the rule refuses is
+      // asked again.
+      char suggested[32];
+      wizardSuggestDeviceName(sWizard.result.espnowFriendlyName.c_str(), suggested);
+      const String name = (raw.length() > 0 && !isNext) ? raw : String(suggested);
+      const devicename::Fault fault = devicename::check(name.c_str());
+      if (fault != devicename::Fault::None) {
+        snprintf(out, outSize, "%s %s\n", devicename::faultText(fault), devicename::kRuleText);
+        appendPromptTo(out, outSize);
+        return CLI_MODE_HANDLED;
+      }
+      sWizard.result.deviceName = name;
+      if (isNext) {
+        stageAndAdvance();
+        appendPromptTo(out, outSize);
+        return sWizard.subMode == WizardSubMode::DONE ? CLI_MODE_HANDLED_AND_EXIT : CLI_MODE_HANDLED;
+      }
+      sWizard.subMode = WizardSubMode::ESPNOW_ROOM;
+      appendPromptTo(out, outSize); return CLI_MODE_HANDLED;
+    }
+
+    case WizardSubMode::ESPNOW_ROOM:
+      if (isBack) { sWizard.subMode = WizardSubMode::ESPNOW_DEVNAME; appendPromptTo(out, outSize); return CLI_MODE_HANDLED; }
       if (isNext) {
         stageAndAdvance();
         appendPromptTo(out, outSize);

@@ -33,6 +33,9 @@ class String : public std::string {
 };
 #define EXT_RAM_BSS_ATTR
 #define WARN_STORAGEF(...) operations.emplace_back("storage.warn")
+#include "System_DeviceName.h"  // the device-name rule the wizard checks
+// The name in use when none valid is stored (System_SelfDevice.cpp's fallback).
+namespace SelfDevice { static String deviceName() { return String("HardwareOne-A1B2C3"); } }
 // INSERT_TYPES
 
 static struct SettingsBoundary {
@@ -41,7 +44,7 @@ static struct SettingsBoundary {
   bool automationEnabled, oledEnabled, i2cEnabled, tofAutoStart;
   bool ledEnabled;
   int bleMode, tzOffsetMinutes, logLevel, mqttPort, unrelated;
-  String espnowDeviceName, bleDeviceName, espnowFriendlyName, espnowRoom, espnowZone;
+  String espnowDeviceName, espnowFriendlyName, espnowRoom, espnowZone;
   bool espnowStationary;
   String ntpServer, mqttHost, mqttUser, mqttPassword;
 #if ENABLE_NEOPIXEL
@@ -102,6 +105,17 @@ static void broadcastOutput(const String& line) { output.emplace_back(line); }
 static bool writeSettingsJson() { ++mainWrites; operations.emplace_back("main.write"); return mainSave; }
 static bool writeDebugJson() { ++debugWrites; operations.emplace_back("debug.write"); return debugSave; }
 static void applySettings() { ++applyCalls; operations.emplace_back("settings.apply"); }
+// The one hand-on of a new name (System_DeviceName.cpp's deviceNameApply):
+// ESP-NOW, the Wi-Fi hostname and the "same name" warning.
+static std::vector<std::string> nameApplies;
+static std::string nameClash;  // non-empty: another device this one knows has the name
+static void deviceNameApply(const String& name, char* warn, size_t cap) {
+  nameApplies.push_back(name);
+  operations.emplace_back("name.apply");
+  if (warn && cap) {
+    std::snprintf(warn, cap, "%s", nameClash.empty() ? "" : (" Warning: " + nameClash + " has the same name.").c_str());
+  }
+}
 namespace Clock { static void applyTimezone() { ++timezoneCalls; } }
 const char* cmd_certgen(const String&) { ++certCalls; operations.emplace_back("certificate"); return "fixture certificate generated"; }
 static WifiNetworkSaveResult saveSetupWifiNetwork(const String& ssid, const String& password) {
@@ -148,7 +162,7 @@ static std::vector<std::string> liveValues() {
     std::to_string(gSettings.i2cEnabled), std::to_string(gSettings.tofAutoStart),
     std::to_string(gSettings.ledEnabled), std::to_string(gSettings.tzOffsetMinutes),
     std::to_string(gSettings.logLevel), std::to_string(gSettings.mqttPort),
-    std::to_string(gSettings.unrelated), gSettings.espnowDeviceName, gSettings.bleDeviceName,
+    std::to_string(gSettings.unrelated), gSettings.espnowDeviceName,
     gSettings.espnowFriendlyName, gSettings.espnowRoom, gSettings.espnowZone,
     std::to_string(gSettings.espnowStationary), gSettings.ntpServer, gSettings.mqttHost,
     gSettings.mqttUser, gSettings.mqttPassword,
@@ -160,7 +174,7 @@ static std::vector<std::string> liveValues() {
 static void reset() {
   discardSetupWizard();
   gSettings = {};
-  gSettings.espnowDeviceName = "old-device"; gSettings.bleDeviceName = "old-ble";
+  gSettings.espnowDeviceName = "old-device";
   gSettings.espnowFriendlyName = "old-friendly"; gSettings.espnowRoom = "old-room";
   gSettings.espnowZone = "old-zone"; gSettings.espnowStationary = true;
   gSettings.tzOffsetMinutes = 123; gSettings.logLevel = 2;
@@ -170,7 +184,7 @@ static void reset() {
 #if ENABLE_NEOPIXEL
   gSettings.ledStartupEffect = "custom-effect";
 #endif
-  operations.clear(); output.clear(); changed.clear();
+  operations.clear(); output.clear(); changed.clear(); nameApplies.clear(); nameClash.clear();
   mainSave = debugSave = scopeAvailable = scopeResult = true;
   connected = scopeActive = failReserve = cancelRequested = false;
   wifiResult = WifiNetworkSaveResult::Accepted; wifiSaveCalls = 0;
@@ -288,10 +302,31 @@ static void stagingAndPortValidation() {
   check(getWizardDraftValues().mqttHost == "new.host" && getWizardDraftValues().mqttPort == 65535);
   patch = {}; check(wizardStageMqttSettings(patch));
   check(getWizardDraftValues().mqttHost == "new.host" && getWizardDraftValues().mqttPassword == "new-secret");
-  patch.espnowFriendlyName = "new-name"; patch.espnowRoom = "new-room"; patch.espnowStationary = false;
+  // The display label and the device name are separate: a label alone leaves
+  // the name as it was (it used to become the name, cut and unchecked).
+  patch.espnowFriendlyName = "My Kitchen"; patch.espnowRoom = "new-room"; patch.espnowStationary = false;
   check(wizardStageEspNowSettings(patch));
-  check(getWizardDraftValues().deviceName == "new-name" && getWizardDraftValues().bleDeviceName == "new-name");
+  check(getWizardDraftValues().deviceName == "old-device" && getWizardDraftValues().espnowFriendlyName == "My Kitchen");
   check(getWizardDraftValues().espnowRoom == "new-room" && getWizardDraftValues().espnowZone == "old-zone");
+  patch.deviceName = "new-name";
+  check(wizardStageEspNowSettings(patch));
+  check(getWizardDraftValues().deviceName == "new-name");
+  // A name the rule refuses is not staged.
+  for (const char* bad : {"My Kitchen", "a_b", "-lead", "clear", "AA-BB-CC-DD-EE-FF"}) {
+    patch.deviceName = bad;
+    check(!wizardStageEspNowSettings(patch));
+    check(getWizardDraftValues().deviceName == "new-name");
+  }
+  patch.deviceName = std::string(31, 'n');
+  check(wizardStageEspNowSettings(patch) && getWizardDraftValues().deviceName == std::string(31, 'n'));
+  // The checked text setter keeps the buffer on a refused name.
+  check(wizardSetDeviceName("bad name") != nullptr && wizardSetDeviceName("good-name") == nullptr);
+  check(std::strcmp(getWizardDeviceName(), "good-name") == 0);
+  char offer[32];
+  wizardSuggestDeviceName("My Kitchen", offer);
+  check(std::strcmp(offer, "My-Kitchen") == 0);
+  wizardSuggestDeviceName("", offer);
+  check(std::strcmp(offer, std::string(31, 'n').c_str()) == 0);  // no label: the draft's name
   noLiveEffects(original);
   for (const char* invalid : {"0", "-1", "65536", "70000", "1883junk", "one", "1.5", "1 2", "99999999999999999999999"}) {
     int port = 99; check(!wizardParseMqttPort(invalid, port)); check(port == 99);
@@ -314,8 +349,8 @@ static void editDeviceName(const char* name) {
     check(row->type == WIZARD_ITEM_DEVICE_NAME);
     setWizardCurrentSelection(static_cast<int>(index));
     check(!wizardActivateCurrentItem()); // The ordinary action does not cycle text.
-    check(std::strlen(name) <= 19);
-    std::strcpy(getWizardDeviceNameBuf(), name);
+    check(std::strlen(name) <= 31);
+    check(wizardSetDeviceName(name) == nullptr);
     char label[32], value[64];
     check(wizardFormatMenuItem(WIZARD_PAGE_SYSTEM, static_cast<int>(index),
                               label, sizeof(label), value, sizeof(value)));
@@ -332,8 +367,7 @@ static void deviceNameBackAndApply() {
   editDeviceName("system-edited");
   check(wizardPrevPage());
   check(getWizardCurrentPage() == WIZARD_PAGE_SENSORS);
-  check(getWizardDraftValues().deviceName == "system-edited" &&
-        getWizardDraftValues().bleDeviceName == "system-edited");
+  check(getWizardDraftValues().deviceName == "system-edited");
   noLiveEffects(original);
 
   SetupWizardResult result;
@@ -342,14 +376,24 @@ static void deviceNameBackAndApply() {
   check(std::strcmp(getWizardDeviceName(), "system-edited") == 0);
   check(!wizardNextPage(result) && result.completed);
   noLiveEffects(original);
+  nameClash = "Kitchen (AA:BB:CC:DD:EE:01)";
   check(wizardSaveAndApplySettings(result));
-  check(gSettings.espnowDeviceName == "system-edited" && gSettings.bleDeviceName == "system-edited");
+  check(gSettings.espnowDeviceName == "system-edited");
   check(gSettings.espnowFriendlyName == "old-friendly");
+  // The new name is handed on once (ESP-NOW, hostname) after the settings are
+  // applied and before the setup connects, with the warning shown.
+  check(nameApplies.size() == 1 && nameApplies[0] == "system-edited");
+  const auto applied = std::find(operations.begin(), operations.end(), "settings.apply");
+  const auto handed = std::find(operations.begin(), operations.end(), "name.apply");
+  check(applied != operations.end() && handed != operations.end() && applied < handed);
+  check(std::count_if(output.begin(), output.end(), [](const std::string& line) {
+          return line.find("Device name set to system-edited. Warning: Kitchen (AA:BB:CC:DD:EE:01) has the same name.") !=
+                 std::string::npos;
+        }) == 1);
 }
 
 static void deviceNameRevertPreservesExternalChanges() {
   reset();
-  gSettings.bleDeviceName = gSettings.espnowDeviceName;
   const auto original = liveValues(); initSetupWizard();
   setWizardCurrentPage(WIZARD_PAGE_SYSTEM);
   editDeviceName("temporary-name");
@@ -358,18 +402,16 @@ static void deviceNameRevertPreservesExternalChanges() {
   check(wizardNextPage(result));
   editDeviceName("old-device");
   check(wizardPrevPage());
-  check(getWizardDraftValues().deviceName == "old-device" &&
-        getWizardDraftValues().bleDeviceName == "old-device");
+  check(getWizardDraftValues().deviceName == "old-device");
   noLiveEffects(original);
 
   // Reverting the accepted draft must remove this wizard's ownership of the
   // edit, allowing names subsequently changed by another surface to survive.
   gSettings.espnowDeviceName = "outside-device";
-  gSettings.bleDeviceName = "outside-ble";
   check(wizardNextPage(result));
   check(!wizardNextPage(result) && result.completed);
   check(wizardSaveAndApplySettings(result));
-  check(gSettings.espnowDeviceName == "outside-device" && gSettings.bleDeviceName == "outside-ble");
+  check(gSettings.espnowDeviceName == "outside-device");
   check(changed.empty());
 }
 
@@ -379,7 +421,7 @@ static void deviceNameESPNowRevisit() {
   wizardSetFeatureEnabled("espnow", true);
   setWizardCurrentPage(WIZARD_PAGE_ESPNOW);
   SetupWizardResult patch;
-  patch.espnowFriendlyName = "radio-first"; patch.espnowStationary = true;
+  patch.espnowFriendlyName = "radio-first"; patch.deviceName = "radio-first"; patch.espnowStationary = true;
   check(wizardStageEspNowSettings(patch));
   check(std::strcmp(getWizardDeviceName(), "radio-first") == 0);
   SetupWizardResult result;
@@ -395,11 +437,10 @@ static void deviceNameESPNowRevisit() {
   check(getWizardDraftValues().deviceName == "system-last");
   patch = {}; patch.espnowStationary = true;
   check(wizardStageEspNowSettings(patch)); // Empty revisited name keeps the System edit.
-  check(getWizardDraftValues().deviceName == "system-last" &&
-        getWizardDraftValues().bleDeviceName == "system-last");
+  check(getWizardDraftValues().deviceName == "system-last");
   check(std::strcmp(getWizardDeviceName(), "system-last") == 0);
 
-  patch.espnowFriendlyName = "radio-latest";
+  patch.espnowFriendlyName = "radio-latest"; patch.deviceName = "radio-latest";
   check(wizardStageEspNowSettings(patch));
   check(std::strcmp(getWizardDeviceName(), "radio-latest") == 0);
   for (int step = 0; getWizardCurrentPage() != WIZARD_PAGE_SYSTEM && step < WIZARD_PAGE_COUNT; ++step) {
@@ -410,18 +451,19 @@ static void deviceNameESPNowRevisit() {
   check(!wizardNextPage(result) && result.completed);
   noLiveEffects(original);
   check(wizardSaveAndApplySettings(result));
-  check(gSettings.espnowDeviceName == "radio-latest" && gSettings.bleDeviceName == "radio-latest" &&
+  check(gSettings.espnowDeviceName == "radio-latest" &&
         gSettings.espnowFriendlyName == "radio-latest");
 #endif
 }
 
 static void untouchedLongDeviceName() {
   reset();
-  gSettings.espnowDeviceName = "device-name-longer-than-nineteen-bytes";
-  gSettings.bleDeviceName = "separate-ble-name-longer-than-nineteen";
+  // A stored name the rule refuses (longer than 31 bytes) is not cut into the
+  // text field: the field offers the name in use, and the stored one stays
+  // untouched unless the user edits it.
+  gSettings.espnowDeviceName = "device-name-longer-than-thirty-one-bytes";
   const auto original = liveValues(); initSetupWizard();
-  check(std::strlen(getWizardDeviceName()) == 19);
-  check(std::string(getWizardDeviceName()) == gSettings.espnowDeviceName.substr(0, 19));
+  check(std::string(getWizardDeviceName()) == "HardwareOne-A1B2C3");
   check(getWizardDraftValues().deviceName == gSettings.espnowDeviceName);
   setWizardCurrentPage(WIZARD_PAGE_SYSTEM);
   check(wizardPrevPage());
@@ -583,6 +625,9 @@ int main() {
   cancellationAndRestart(); navigationAndModes(); stagingAndPortValidation(); invalidDraftFinish();
   deviceNameBackAndApply(); deviceNameRevertPreservesExternalChanges();
   deviceNameESPNowRevisit(); untouchedLongDeviceName();
+  // A save that leaves the name as it was hands nothing on.
+  reset(); initSetupWizard();
+  { SetupWizardResult same = completed(); check(wizardSaveAndApplySettings(same) && nameApplies.empty()); }
   touchedOnlyApply(); completionFailuresAndNoop(); completionEffects();
   std::printf("wizard draft (network=%d): %u checks passed\n", ENABLE_WIFI, checks);
 }

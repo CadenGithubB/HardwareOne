@@ -329,8 +329,8 @@ int main() {
   check(espnowRekeyInitiate(B.mac), "c1 initiate accepted");
   check(gSent.size() == 1 && s->state == SESSION_REKEYING && gSent[0].ttl == 1 &&
         std::memcmp(gSent[0].dst, B.mac, 6) == 0 &&
-        gSent[0].flags == (ESPNOW_V4_FLAG_HANDSHAKE | ESPNOW_V4_FLAG_ACK_REQ),
-        "c1 one REKEY (HANDSHAKE|ACK_REQ, ttl 1) sent, session REKEYING");
+        gSent[0].flags == ESPNOW_V4_FLAG_ACK_REQ,
+        "c1 one REKEY (ACK_REQ, ttl 1) sent, session REKEYING");
   if (frameAsRekey(gSent[0], &rk)) deliver(B, peerReply(B, rk));
   check(s->state == SESSION_ACTIVE && keysConverged(s, B) && gDrains == 1,
         "c1 reply applied: ACTIVE, keys converged, pending ring drained");

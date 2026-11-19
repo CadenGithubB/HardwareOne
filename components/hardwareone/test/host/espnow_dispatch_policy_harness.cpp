@@ -32,10 +32,11 @@ static unsigned gHandlerCalls = 0;
 static unsigned gCleanups = 0;
 static unsigned gWarns = 0;
 static unsigned gPrints = 0;
+static uint16_t gLastPayloadLen = 0;
 
 static void noteHandler(const char* name, const V4RxCtx& ctx) {
-  (void)ctx;
   gLastHandler = name;
+  gLastPayloadLen = ctx.payloadLen;
   ++gHandlerCalls;
 }
 
@@ -177,6 +178,12 @@ static uint16_t gFrameFp = kPeerAMeshFp;
   static const uint8_t peerA[6] = {0x02, 0x11, 0x22, 0x33, 0x44, 0x01};
   return std::memcmp(mac, peerA, 6) == 0 ? kPeerAMeshFp : (uint16_t)0x1111;
 }
+// SUBSCRIBE_UPDATE's store (peerIdentitySetSubscriptions double) and the
+// handler's log line.
+[[maybe_unused]] static unsigned gSubscribeCalls = 0;
+[[maybe_unused]] static uint32_t gSubscribeMask = 0;
+#define INFO_ESPNOWF(...) debugSink(__VA_ARGS__)
+[[maybe_unused]] static const char* MAC_STR(const uint8_t*) { return "mac"; }
 // INSERT_TEXT_HANDLER
 
 // INSERT_HANDLER_STUBS
@@ -187,6 +194,9 @@ static uint16_t gFrameFp = kPeerAMeshFp;
 
 // The production cleanup walks the reassembly table; this double only counts.
 static void v4_dispatch_post_cleanup(const esp_now_recv_info*, const EspNowV4Header*) { ++gCleanups; }
+
+// The receive-drop counter of System_ESPNow.cpp (espnowstats rxLengthDrops).
+static uint32_t gEspNowRxLenDrops = 0;
 
 // INSERT_DISPATCH
 
@@ -232,8 +242,11 @@ static bool run(uint8_t type, bool paired, bool authed, bool enc, bool keyed) {
   EspNowV4Header h{};
   h.type = type;
   h.fragCount = 1;
-  uint8_t payload[16] = {};
-  bool claimed = v4_dispatch_table_try(&ri, &h, payload, sizeof payload, paired, authed, enc, "peer");
+  // A payload of the row's minimum length, so the policy gates are what decide.
+  const V4OpcodeEntry* row = v4_dispatch_lookup(type);
+  uint8_t payload[256] = {};
+  const uint16_t len = row ? row->minLen : 16;
+  bool claimed = v4_dispatch_table_try(&ri, &h, payload, len, paired, authed, enc, "peer");
   return claimed && gHandlerCalls == 1;
 }
 
@@ -562,8 +575,10 @@ static bool bondRun(uint8_t type, uint8_t* src, bool paired, bool enc, bool minu
   EspNowV4Header h{};
   h.type = type;
   h.fragCount = 1;
-  uint8_t payload[16] = {};
-  const bool claimed = v4_dispatch_table_try(&ri, &h, payload, sizeof payload, paired, enc, enc, "peer");
+  const V4OpcodeEntry* row = v4_dispatch_lookup(type);
+  uint8_t payload[256] = {};
+  const uint16_t len = row ? row->minLen : 16;
+  const bool claimed = v4_dispatch_table_try(&ri, &h, payload, len, paired, enc, enc, "peer");
   return claimed && gHandlerCalls == 1;
 }
 
@@ -710,6 +725,123 @@ static unsigned runBondCases() {
   return failures;
 }
 
+// ---- The length column: every row's minimum, enforced before the handler -----
+static const struct { uint8_t opcode; uint16_t minLen; bool exact; } kExpectedMinLen[] = {
+// INSERT_EXPECTED_MINLEN
+};
+
+// One frame of `len` bytes for `row`, with every trust bit its policy gates ask
+// for (paired, sealed, from the configured bond partner on a keyed device).
+static bool lengthRun(const V4OpcodeEntry& row, uint16_t len) {
+  gHandlerCalls = 0;
+  gLastHandler.clear();
+  gLastPayloadLen = 0;
+  gEspNow->encryptionEnabled = true;
+  esp_now_recv_info ri{gSrc, nullptr, nullptr};
+  EspNowV4Header h{};
+  h.type = row.opcode;
+  h.fragCount = 1;
+  static uint8_t payload[300];
+  std::memset(payload, 0x20, sizeof payload);  // printable, so the text row takes it
+  return v4_dispatch_table_try(&ri, &h, payload, len, true, true, true, "peer");
+}
+
+static unsigned runLengthCases() {
+  unsigned failures = 0;
+  auto check = [&](const std::string& what, bool ok) {
+    if (!ok) ++failures;
+    std::printf("%s %s\n", ok ? "ok  " : "FAIL", what.c_str());
+  };
+  check("the length column: one expected minimum per row (minLen never rises after 1.0)",
+        sizeof(kExpectedMinLen) / sizeof(kExpectedMinLen[0]) == kV4HandlerTableSize);
+  gSettings.bondModeEnabled = true;
+  gSettings.bondPeerMac = String(macText(gSrc).c_str());
+  gNowMs += 61000;
+  for (const auto& want : kExpectedMinLen) {
+    const V4OpcodeEntry* row = v4_dispatch_lookup(want.opcode);
+    const std::string name = opcodeName(want.opcode);
+    check(name + ": minLen " + std::to_string(want.minLen) + (want.exact ? " (exact)" : "") +
+              " (minLen never rises after 1.0)",
+          row && row->minLen == want.minLen && ((row->flags & V4_OPC_LEN_EXACT) != 0) == want.exact);
+    if (!row) continue;
+    if (want.minLen > 0) {
+      const uint32_t before = gEspNowRxLenDrops;
+      const bool claimed = lengthRun(*row, (uint16_t)(want.minLen - 1));
+      check(name + ": one byte short is claimed, dropped before the handler and counted once",
+            claimed && gHandlerCalls == 0 && gEspNowRxLenDrops == before + 1);
+    }
+    {
+      const uint32_t before = gEspNowRxLenDrops;
+      const bool claimed = lengthRun(*row, want.minLen);
+      const bool realHandler = gLastHandler.empty();
+      check(name + ": exactly the minimum passes the length gate",
+            claimed && gEspNowRxLenDrops == before && (realHandler || (gHandlerCalls == 1 &&
+                                                                          gLastPayloadLen == want.minLen)));
+    }
+    {
+      const uint32_t before = gEspNowRxLenDrops;
+      const uint16_t longer = (uint16_t)(want.minLen + (want.exact ? 1 : 7));
+      const bool claimed = lengthRun(*row, longer);
+      if (want.exact) {
+        check(name + ": a handshake frame one byte long is dropped and counted (exact length)",
+              claimed && gHandlerCalls == 0 && gEspNowRxLenDrops == before + 1);
+      } else {
+        const bool realHandler = gLastHandler.empty();
+        check(name + ": a longer frame reaches the handler with its length intact (read up to known fields)",
+              claimed && gEspNowRxLenDrops == before &&
+                  (realHandler || (gHandlerCalls == 1 && gLastPayloadLen == longer)));
+      }
+    }
+  }
+  gSettings.bondModeEnabled = false;
+  gSettings.bondPeerMac = String("");
+
+  // A 0-byte STREAM is a length drop: the empty STREAM_BEGIN / STREAM_END
+  // markers of a remote command are gone in 1.0, and sendEspNowStreamMessage
+  // skips a blank line (espnow_tx_multiframe S3b), so no sender sends one.
+  {
+    const V4OpcodeEntry* row = v4_dispatch_lookup(ESPNOW_V4_TYPE_STREAM);
+    const uint32_t before = gEspNowRxLenDrops;
+    check("an empty STREAM is dropped and counted (no 1.0 sender sends one)",
+          row && lengthRun(*row, 0) && gEspNowRxLenDrops == before + 1 && gHandlerCalls == 0);
+  }
+  // SUBSCRIBE_UPDATE from a later sender: 24 bytes, reserved bytes not 0.
+  // Reserved bytes are ignored, so the subscription is stored.
+  {
+    const V4OpcodeEntry* row = v4_dispatch_lookup(ESPNOW_V4_TYPE_SUBSCRIBE_UPDATE);
+    gSubscribeCalls = 0;
+    esp_now_recv_info ri{gSrc, nullptr, nullptr};
+    EspNowV4Header h{};
+    h.type = ESPNOW_V4_TYPE_SUBSCRIBE_UPDATE;
+    h.fragCount = 1;
+    uint8_t payload[24];
+    std::memset(payload, 0xA5, sizeof payload);
+    payload[0] = 0x0F; payload[1] = payload[2] = payload[3] = 0;
+    const bool claimed = row && v4_dispatch_table_try(&ri, &h, payload, sizeof payload, true, true, true, "peer");
+    check("SUBSCRIBE_UPDATE longer than 16 bytes with reserved bytes set: the subscription is stored",
+          claimed && gSubscribeCalls == 1 && gSubscribeMask == 0x0F);
+  }
+  // SESSION_UNKNOWN from a later sender (20 bytes): the hint still reaches its rule.
+  {
+    resetText(true);
+    EspNowV4Header h{};
+    h.type = ESPNOW_V4_TYPE_SESSION_UNKNOWN;
+    h.headerLen = sizeof(EspNowV4Header);
+    h.fragCount = 1;
+    h.ttl = 1;
+    h.meshFingerprint = kPeerAMeshFp;
+    std::memcpy(h.origin, gPeerA, 6);
+    wifi_pkt_rx_ctrl_t ctrl{-50};
+    esp_now_recv_info info{gPeerA, nullptr, &ctrl};
+    uint8_t payload[20] = {0x2A, 0x00};
+    const uint32_t before = gEspNowRxLenDrops;
+    const bool claimed = v4_dispatch_table_try(&info, &h, payload, sizeof payload, true, true, false, "alpha");
+    check("SESSION_UNKNOWN of 20 bytes (a later sender) reaches the SESSION_UNKNOWN rule",
+          claimed && gHintRuleCalls == 1 && gEspNowRxLenDrops == before);
+  }
+  return failures;
+}
+
 int main() {
   unsigned failures = 0;
   auto expect = [&](const char* what, bool got, bool want) {
@@ -812,7 +944,7 @@ int main() {
   bool zeroFlagOk = true;
   for (size_t i = 0; i < kV4HandlerTableSize; i++) {
     const V4OpcodeEntry& row = kV4HandlerTable[i];
-    if (row.flags != 0 || zeroFlagAllowed(row.opcode)) continue;
+    if ((row.flags & ~V4_OPC_LEN_EXACT) != 0 || zeroFlagAllowed(row.opcode)) continue;
     zeroFlagOk = false;
     std::printf("FAIL zero-flag row outside the allow-list: opcode %u (%s) accepts plaintext from any MAC\n",
                 (unsigned)row.opcode, opcodeName(row.opcode));
@@ -822,6 +954,7 @@ int main() {
 
   failures += runTextCases();
   failures += runBondCases();
+  failures += runLengthCases();
 
   std::printf("ENABLE_BONDED_MODE=%d: %u failure%s\n", ENABLE_BONDED_MODE, failures, failures == 1 ? "" : "s");
   return failures ? 1 : 0;

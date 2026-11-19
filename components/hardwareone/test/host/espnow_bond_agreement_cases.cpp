@@ -1170,6 +1170,133 @@ static void caseRoleChoice() {
   bondRoleWords(words, sizeof(words));
   CHECK(std::strstr(words, "master (chosen with 'bondrole'") != nullptr, "role words: %s", words);
 }
+// The partner's session capability word lacks the bond bit: its firmware was
+// built without bond mode (p4x_eye, say). The owner's rule (2026-11-18): no
+// BOND_REQUEST to it, ever, and the user is told once. Checked at send time,
+// so a turn of the tick between the session going ACTIVE and
+// bondNotifySessionEstablished, or a reset of the agreement while the session
+// is up, sends nothing either. "FAILS WITHOUT THE RULE": a tree that sends the
+// request whatever the word says.
+static void caseNoBondBuild() {
+#if HW1_HAVE_CAPS
+  const uint32_t noBond = sessioncaps::buildCaps(false, true, false);
+  const uint32_t withBond = sessioncaps::buildCaps(true, true, false);
+  const char* const kLine = "was built without bond mode, so it cannot be a bond partner";
+
+  // The race: a request is due (the bond was just set up) and the tick runs
+  // after the session went ACTIVE with A's word, before the session hook.
+  bondedToA(kMasterSelf, BOND_ROLE_MASTER);
+  gCapsFor = kPeerA;
+  gCapsWord = noBond;
+  gCapsConfirmed = true;
+  bondagree::reset(gBondAgree);
+  tick();
+  CHECK(requestsTo(kPeerA) == 0, "a tick between ACTIVE and the session hook sends no request (FAILS WITHOUT THE RULE)");
+  CHECK(linesWith(kLine) == 1 && linesWith("Run 'bonddisconnect' here, or install a build with bond mode on it") == 1,
+        "the user is told once, with what to do (%zu lines)", linesWith(kLine));
+  BondAgreementView view = bondAgreementView();
+  CHECK(view.state == BOND_AGREEMENT_DECLINED && std::strcmp(bondAgreementReasonKey(view), "no_bond_build") == 0,
+        "bondstatus: declined / %s", bondAgreementReasonKey(view));
+  CHECK(linesWith("asked again every minute") == 0, "the line does not promise a request a minute");
+
+  // The session hook: not online, no capability sync, still nothing sent.
+  bondNotifySessionEstablished(kPeerA);
+  advance(3 * 60000);
+  CHECK(requestsTo(kPeerA) == 0 && !gEspNow->bondPeerOnline && !gEspNow->bondNeedsCapabilityRequest,
+        "the partner never goes online and is never asked (%zu requests)", requestsTo(kPeerA));
+  CHECK(gAutoStarts == 0, "no handshake is started for it");
+  CHECK(authLinesWith("partner was built without bond mode") == 1, "the auth-log record says why");
+  CHECK(linesWith(kLine) == 1, "no second line while it stays so");
+
+  // A second session with the same build: no second line.
+  gSessionUp = false;
+  advance(2000);
+  gSessionUp = true;
+  bondNotifySessionEstablished(kPeerA);
+  advance(2 * 60000);
+  CHECK(requestsTo(kPeerA) == 0 && linesWith(kLine) == 1,
+        "a new session without bond mode asks nothing and says nothing again (%zu lines)", linesWith(kLine));
+
+  // A reset of the agreement (a settings change) with the session up.
+  bondagree::reset(gBondAgree);
+  advance(1000);
+  CHECK(requestsTo(kPeerA) == 0, "a reset with the session up sends no request (FAILS WITHOUT THE RULE)");
+
+  char text[200];
+  bondAgreementDescribe(text, sizeof text);
+  CHECK(std::strstr(text, kLine) != nullptr && std::strstr(text, "asked again every minute") == nullptr &&
+        std::strstr(text, "bonddisconnect") != nullptr, "status line: %s", text);
+
+  // bondconnect to it with the bond set already: says how it stands.
+  std::string reply = cmd_bond_connect(String(kMacA));
+  CHECK(reply.find(kLine) != std::string::npos && reply.find("Run 'bondconnect") == std::string::npos,
+        "bondconnect to the partner set says it cannot bond: %s", reply.c_str());
+  advance(1000);
+  CHECK(requestsTo(kPeerA) == 0, "and asks nothing");
+
+  // A partner reflashed with bond mode: a new session with the bit asks at once.
+  gCapsWord = withBond;
+  const uint16_t seq = sessionUpAndRequest(kPeerA);
+  CHECK(requestsTo(kPeerA) == 1 && seq != 0, "a session whose word has the bond bit asks again (%zu requests)",
+        requestsTo(kPeerA));
+  view = bondAgreementView();
+  CHECK(view.state == BOND_AGREEMENT_UNKNOWN, "the decline is forgotten: unknown until it answers");
+
+  // bondconnect to a device whose live session says no bond mode: refused,
+  // nothing set.
+  resetWorld(kMasterSelf);
+  gMaster.mac = kPeerC;
+  gCapsFor = kPeerA;
+  gCapsWord = noBond;
+  reply = cmd_bond_connect(String(kMacA));
+  CHECK(reply.rfind("Error:", 0) == 0 && reply.find(kLine) != std::string::npos,
+        "bondconnect is refused: %s", reply.c_str());
+  CHECK(!gSettings.bondModeEnabled && gSettings.bondPeerMac.length() == 0 && requestsTo(kPeerA) == 0,
+        "and changes no setting");
+
+  // A word not yet confirmed (the responder's view, from an OPEN that may be a
+  // replayed copy): no request either, but no verdict and no line until it is.
+  bondedToA(kWorkerSelf, BOND_ROLE_WORKER);
+  gCapsFor = kPeerA;
+  gCapsWord = noBond;
+  gCapsConfirmed = false;
+  bondNotifySessionEstablished(kPeerA);
+  advance(70000);
+  CHECK(requestsTo(kPeerA) == 0 && linesWith(kLine) == 0 &&
+        bondAgreementView().state != BOND_AGREEMENT_DECLINED && !gEspNow->bondPeerOnline,
+        "an unconfirmed word holds the request without a verdict");
+  reply = cmd_bond_connect(String(kMacA));
+  CHECK(reply.rfind("Error:", 0) != 0 || reply.find(kLine) == std::string::npos,
+        "bondconnect is not refused on an unconfirmed word: %s", reply.c_str());
+  gCapsConfirmed = true;    // a sealed frame of the session opened
+  advance(61000);
+  CHECK(requestsTo(kPeerA) == 0 && linesWith(kLine) == 1 && bondAgreementView().state == BOND_AGREEMENT_DECLINED,
+        "once confirmed the user is told (%zu lines)", linesWith(kLine));
+
+  // An online bond and then a session whose word lacks the bond bit but is
+  // not confirmed (a replayed OPEN the partner signed while it once ran a build
+  // without bond mode): the bond is not taken offline and its sync is kept
+  // until the word is confirmed. Then the tick declines it.
+  bondedToA(kWorkerSelf, BOND_ROLE_WORKER);
+  gCapsFor = kPeerA;
+  gCapsWord = withBond;
+  gCapsConfirmed = true;
+  bondNotifySessionEstablished(kPeerA);
+  CHECK(gEspNow->bondPeerOnline, "setup: the bond is online over a session with the bond bit");
+  gCapsWord = noBond;
+  gCapsConfirmed = false;
+  bondNotifySessionEstablished(kPeerA);
+  CHECK(gEspNow->bondPeerOnline && linesWith(kLine) == 0,
+        "an unconfirmed word without the bond bit does not take an online bond down (FAILS WITHOUT THE RULE)");
+  gCapsConfirmed = true;
+  advance(61000);
+  CHECK(!gEspNow->bondPeerOnline && linesWith(kLine) == 1 && bondAgreementView().state == BOND_AGREEMENT_DECLINED,
+        "once the word is confirmed the bond goes offline and the user is told (%zu lines)", linesWith(kLine));
+#else
+  CHECK(false, "the tree has no session capability word (espnowPeerSessionCaps)");
+#endif
+}
+
 int main() {
   caseMutual();
   caseRequestFromNonPartner();
@@ -1185,6 +1312,7 @@ int main() {
   caseConnectAgainAsksAgain();
   caseJsonText();
   caseRoleChoice();
+  caseNoBondBuild();
   std::printf("espnow_bond_agreement: %d checks, %d failed\n", gChecks, gFailures);
   return gFailures ? 1 : 0;
 }

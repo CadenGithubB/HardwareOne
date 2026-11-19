@@ -266,13 +266,13 @@ inline void streamEspNowInner(httpd_req_t* req) {
 <div class='setup-modal-requirements'>
 <strong>Requirements:</strong>
 <ul>
-<li>1-19 ASCII characters</li>
-<li>Letters, numbers, hyphens, underscores only</li>
-<li>No spaces or special characters</li>
+<li>1-31 letters, numbers and hyphens</li>
+<li>Not starting or ending with a hyphen; no spaces, underscores or other characters</li>
+<li>Also the Bluetooth name and the Wi-Fi hostname</li>
 </ul>
 </div>
 <div class='setup-modal-error' id='setup-error'></div>
-<input type='text' id='setup-device-name' class='setup-modal-input' placeholder='Enter device name (e.g., darkblue)' maxlength='19' autocomplete='off' data-guest-hide>
+<input type='text' id='setup-device-name' class='setup-modal-input' placeholder='Enter device name (e.g., darkblue)' maxlength='31' autocomplete='off' data-guest-hide>
 <div class='setup-modal-buttons'>
 <button class='btn' id='btn-setup-cancel'>Cancel</button>
 <button class='btn' id='btn-setup-save' data-guest-hide>Set Name & Initialize</button>
@@ -1145,7 +1145,7 @@ inline void streamEspNowInner(httpd_req_t* req) {
       };
       hw.$('btn-espnow-init').addEventListener('click', function() {
         // Check if first-time setup is needed
-        hw.postFormText('/api/cli', { cmd: 'espnowsetname' })
+        hw.postFormText('/api/cli', { cmd: 'devicename' })
         .then(text => {
           // If device name is not set, show setup modal
           if (text.indexOf('(not set)') >= 0) {
@@ -1316,25 +1316,14 @@ inline void streamEspNowInner(httpd_req_t* req) {
         const deviceName = hw.$('setup-device-name').value.trim();
         const errorDiv = hw.$('setup-error');
         
-        // Validate name
         if (deviceName.length === 0) {
           errorDiv.textContent = 'Please enter a device name';
           errorDiv.style.display = 'block';
           return;
         }
-        if (deviceName.length > 19) {
-          errorDiv.textContent = 'Device name must be 19 characters or less';
-          errorDiv.style.display = 'block';
-          return;
-        }
-        if (!/^[a-zA-Z0-9_-]+$/.test(deviceName)) {
-          errorDiv.textContent = 'Device name can only contain letters, numbers, hyphens, and underscores';
-          errorDiv.style.display = 'block';
-          return;
-        }
-        
-        // Set the device name
-        hw.postFormText('/api/cli', { cmd: 'espnowsetname ' + deviceName })
+        // The firmware checks the name (one rule, System_DeviceName.h) and its
+        // reply says why a name is refused.
+        hw.postFormText('/api/cli', { cmd: 'devicename "' + deviceName.replace(/"/g, '') + '"' })
         .then(text => {
           if (text.indexOf('Error') >= 0) {
             errorDiv.textContent = text;

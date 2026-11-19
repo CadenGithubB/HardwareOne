@@ -33,6 +33,7 @@
 
 #include "System_CommandReply.h"
 #include "System_ESPNow_GroupCore.h"
+#include "System_DeviceName.h"  // the device-name rule (metadata receive)
 #include "System_MacText.h"
 
 void webBatchTestStringAppend() {}
@@ -1348,13 +1349,13 @@ static void testInboxAndRefresh() {
   CHECK(a && b && a != b && metadataInboxFor(macOf(1)) == a, "G18: two senders do not get an entry each");
   if (!a || !b) return;
   a->frameWaiting = true;
-  a->payload[0] = 'A';
+  a->payload.deviceName[0] = 'A';
   b->frameWaiting = true;
-  b->payload[0] = 'B';
-  a->payload[0] = 'a';  // a newer frame of the same sender replaces its older one
+  b->payload.deviceName[0] = 'B';
+  a->payload.deviceName[0] = 'a';  // a newer frame of the same sender replaces its older one
   MetadataInboxEntry* first = metadataInboxTakeFrame();
   MetadataInboxEntry* second = metadataInboxTakeFrame();
-  CHECK(first == a && first->payload[0] == 'a' && second == b && second->payload[0] == 'B' &&
+  CHECK(first == a && first->payload.deviceName[0] == 'a' && second == b && second->payload.deviceName[0] == 'B' &&
             metadataInboxTakeFrame() == nullptr,
         "G18: the frames of two senders were not both handed out once");
   // One sender that sends with every pass does not keep another from its turn.

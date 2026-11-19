@@ -2,13 +2,14 @@
 //
 // The runner pastes the production Settings::MeshIdentity record into the
 // Settings double and the production mesh-slot and device-name code at the
-// production marker: meshFingerprintForLabel, recomputeAllMeshFingerprints, the
+// production marker: the mesh-id helpers (refresh, snapshot, clash slot, the
+// boot clash resolution, fingerprintForPeer, staging and commit), the
 // meshes settings writer and reader, setEspNowPassphrase,
 // initPrimaryMeshFromLegacySettings, the start-passphrase and hint helpers, the
 // espnowmeshes subcommands (add, remove, delete, enable, setdefault,
 // setpassphrase, listjson) with the delete guard's counters, the helpers that
-// keep the running instance on the passphrase a start would load, and
-// cmd_espnow_setname. A stop whose cleanup is still pending is modelled by
+// keep the running instance on the passphrase a start would load, the device
+// name's ESP-NOW side and the one setter cmd_devicename (System_DeviceName.cpp). A stop whose cleanup is still pending is modelled by
 // clearing gState.initialized with the passphrase left in place, as
 // deinitEspNow leaves it when it returns early.
 // ArduinoJson is the vendored library. Everything else here is a small double:
@@ -22,10 +23,14 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <map>
 #include <string>
 #include <vector>
 
 #include "System_CommandReply.h"
+#include "System_DeviceName.h"         // the device-name rule (the setter and the alias checks)
+#include "System_ESPNow_MeshIdCore.h"  // the mesh id: pick, clashSlot
+#include "System_MacText.h"            // macToDisplay (espnowNameInUseBy)
 
 void webBatchTestStringAppend() {}
 
@@ -43,6 +48,10 @@ static int gChecks = 0;
   } while (0)
 
 #define ENABLE_BONDED_MODE 1
+#define ENABLE_ESPNOW 1
+static int gWarnLines = 0;
+#define WARN_ESPNOWF(...) (++gWarnLines)
+#define ERROR_ESPNOWF(...) ((void)0)
 #define PSRAM_JSON_DOC(name) JsonDocument name
 #define EXT_RAM_BSS_ATTR
 
@@ -134,6 +143,7 @@ void deriveKeyFromPassphrase(const String& passphrase, uint8_t* key) {
 }
 
 // ---- Mesh key cache doubles.
+static uint16_t meshKeysIdFor(const uint8_t stretched[32]);  // below, with the mesh-id doubles
 static bool gDerivedValid[Settings::N_MESHES] = {};
 static int gInvalidations[Settings::N_MESHES] = {};
 static void meshKeysInvalidate(uint8_t i) {
@@ -146,6 +156,9 @@ static bool meshKeysStretchPassphrase(uint8_t i) {
   return true;
 }
 static bool meshKeysDerive(uint8_t i) {
+  // As production: keys and the mesh id come from the stretched key together.
+  if (!gSettings.meshes[i].passphraseStretchedKeyValid) { gDerivedValid[i] = false; return false; }
+  gSettings.meshes[i].fingerprint = meshKeysIdFor(gSettings.meshes[i].passphraseStretchedKey);
   gDerivedValid[i] = true;
   return true;
 }
@@ -156,15 +169,69 @@ static const MeshDerivedKeys* meshKeysGet(uint8_t i) {
 }
 static void sodium_memzero(void* p, size_t n) { std::memset(p, 0, n); }
 
-// CRC16-CCITT (0x1021, init 0xFFFF), as the wire code computes label fingerprints.
-static uint16_t v4_crc16_ccitt(const uint8_t* data, size_t len) {
-  uint16_t crc = 0xFFFF;
-  for (size_t i = 0; i < len; i++) {
-    crc ^= (uint16_t)data[i] << 8;
-    for (int b = 0; b < 8; b++) crc = (crc & 0x8000) ? (uint16_t)((crc << 1) ^ 0x1021) : (uint16_t)(crc << 1);
+// ---- The mesh id behind the key doubles (System_ESPNow_MeshIdCore.h has the
+// rule; test_espnow_mesh_id_kat.py pins the real derivation). The toy stretch
+// puts a label+passphrase's id in its first two bytes, so meshid::pick reads it
+// back; a case can force the id a label+passphrase gives, to make a clash.
+static std::map<std::string, uint16_t> gForcedIds;
+static bool gCryptoReady = true;
+static int gStretches = 0;
+static bool espnowCryptoReady() { return gCryptoReady; }
+static bool meshKeysStretchInto(const String& label, const String& passphrase, uint8_t out[32]) {
+  std::memset(out, 0, 32);
+  if (!gCryptoReady || passphrase.length() == 0) return false;
+  ++gStretches;
+  const std::string key = std::string(label.c_str()) + "/" + passphrase.c_str();
+  uint16_t id;
+  const auto forced = gForcedIds.find(key);
+  if (forced != gForcedIds.end()) {
+    id = forced->second;
+  } else {
+    uint32_t h = 2166136261u;
+    for (unsigned char c : key) h = (h ^ c) * 16777619u;
+    id = (uint16_t)(h ^ (h >> 16));
+    if (id == 0) id = 1;
   }
-  return crc;
+  std::memset(out, 0x5A, 32);
+  out[0] = (uint8_t)(id & 0xFF);
+  out[1] = (uint8_t)(id >> 8);
+  return true;
 }
+static uint16_t meshKeysIdFor(const uint8_t stretched[32]) { return meshid::pick(stretched); }
+static uint8_t meshKeysRefreshIds() {
+  uint8_t changed = 0;
+  for (uint8_t i = 0; i < Settings::N_MESHES; i++) {
+    Settings::MeshIdentity& m = gSettings.meshes[i];
+    if (m.label.length() == 0 || !m.passphraseStretchedKeyValid) continue;
+    const uint16_t id = meshKeysIdFor(m.passphraseStretchedKey);
+    if (id != m.fingerprint) { m.fingerprint = id; ++changed; }
+  }
+  return changed;
+}
+
+// ---- The device name's other users (System_SelfDevice.cpp) and the metadata
+// cache espnowNameInUseBy reads.
+static int gHostnameApplies = 0;
+// Console lines (BROADCAST_PRINTF), for the pair commands' shared-name note.
+static std::vector<std::string> gBroadcasts;
+#define BROADCAST_PRINTF(...)                                       \
+  do {                                                              \
+    char _line[256];                                                \
+    std::snprintf(_line, sizeof _line, __VA_ARGS__);                \
+    gBroadcasts.emplace_back(_line);                                \
+  } while (0)
+namespace SelfDevice {
+static String deviceName() {
+  return devicename::valid(gSettings.espnowDeviceName.c_str()) ? gSettings.espnowDeviceName
+                                                                : String("HardwareOne-A1B2C3");
+}
+static void applyHostname() { ++gHostnameApplies; }
+}  // namespace SelfDevice
+struct MeshPeerMeta { uint8_t mac[6]; char name[32]; bool isActive; };
+static MeshPeerMeta gMetaSlots[4] = {};
+static MeshPeerMeta* gMeshPeerMeta = gMetaSlots;
+static int gMeshPeerSlots = 4;
+
 
 // ---- Stored identities double (slot i is returned only while valid, as in production).
 struct PeerIdentity {
@@ -301,6 +368,12 @@ static void resetNeverStarted() {
     gDerivedValid[i] = false;
     gInvalidations[i] = 0;
   }
+  gForcedIds.clear();
+  gCryptoReady = true;
+  gStretches = 0;
+  gWarnLines = 0;
+  gHostnameApplies = 0;
+  std::memset(gMetaSlots, 0, sizeof(gMetaSlots));
 }
 // What a start does to the tables these commands read: the instance exists, the
 // registry is in RAM with this device's own entry, slot 0 is bootstrapped.
@@ -420,7 +493,7 @@ static void testOnlyMeshCanBeRemovedAndDeleted() {
   startEspNow();
   CHECK(gSettings.meshes[0].label == String("primary") && gSettings.meshes[0].enabled && gSettings.meshes[0].isDefault &&
             gSettings.meshes[0].passphrase.length() == 0 &&
-            gSettings.meshes[0].fingerprint == meshFingerprintForLabel(String("primary")),
+            gSettings.meshes[0].fingerprint == 0,  // no passphrase: no mesh id
         "M2 the next start did not set up the unconfigured 'primary' mesh");
   makeBenchLeftover();
   CHECK(!isError(meshesCmd_delete(String("bench"))), "M2 delete");
@@ -636,7 +709,7 @@ static void testDeleteFreesTheSlot() {
   // D3c: a mesh labelled "primary" in another slot never gets a twin in slot 0.
   resetAll();
   gSettings.meshes[0].label = "home";
-  gSettings.meshes[0].fingerprint = meshFingerprintForLabel(String("home"));
+  gSettings.meshes[0].fingerprint = 0;  // never keyed: no mesh id
   CHECK(!isError(meshesCmd_add(String("primary"))) && !isError(meshesCmd_setdefault(String("primary"))), "D3c setup");
   startEspNow();
   CHECK(!isError(meshesCmd_delete(String("home"))), "D3c delete home");
@@ -766,7 +839,8 @@ static void testSlotsSurviveARestart() {
   CHECK(slotOf("primary") == 0 && slotIsEmpty(1) && slotOf("work") == 2,
         "S1 the meshes changed slot across a restart (primary %d, work %d)", slotOf("primary"), slotOf("work"));
   CHECK(gSettings.meshes[2].passphrase == String("work-passphrase") && gSettings.meshes[2].passphraseStretchedKeyValid &&
-            gSettings.meshes[2].enabled && gSettings.meshes[2].fingerprint == meshFingerprintForLabel(String("work")),
+            gSettings.meshes[2].enabled && gSettings.meshes[2].fingerprint != 0 &&
+            gSettings.meshes[2].fingerprint == meshKeysIdFor(gSettings.meshes[2].passphraseStretchedKey),
         "S1 the mesh in slot 2 lost its passphrase, key, state or fingerprint");
   CHECK(gSettings.bondModeEnabledMesh[2] && gSettings.bondPeerMacMesh[2] == String("02:00:00:00:00:09"),
         "S1 the bond settings are no longer beside their mesh");
@@ -962,57 +1036,57 @@ static void testMessagesNameTheMesh() {
 static void testNameCanBeCleared() {
   // N1: 'clear' removes the name while ESP-NOW is stopped.
   resetAll();
-  CHECK(has(cmd_espnow_setname(String("benchp4")), "benchp4"), "N1 setup");
+  CHECK(has(cmd_devicename(String("benchp4")), "benchp4"), "N1 setup");
   CHECK(gSettings.espnowFirstTimeSetup, "N1 setup flag");
   gState.devices[0].name = "benchp4";  // the own entry
   gEvents.clear();
   gMetadataChanged = false;
-  const char* r = cmd_espnow_setname(String("clear"));
+  const char* r = cmd_devicename(String("clear"));
   CHECK(!isError(r) && has(r, "cleared"), "N1 clear refused: %s", r);
   CHECK(gSettings.espnowDeviceName.length() == 0, "N1 the name is still '%s'", gSettings.espnowDeviceName.c_str());
   CHECK(!gSettings.espnowFirstTimeSetup, "N1 the setup-done flag stayed set with no name");
   CHECK(gState.devices[0].name.length() == 0, "N1 the stopped instance kept the name");
   CHECK(gMetadataChanged, "N1 metadata not marked changed");
-  CHECK(gEvents.size() == 1 && gEvents[0].kind == SYSEVT_SETTING_CHANGED && gEvents[0].subject == "espnowDeviceName",
+  CHECK(gEvents.size() == 1 && gEvents[0].kind == SYSEVT_SETTING_CHANGED && gEvents[0].subject == "deviceName",
         "N1 no setting-changed event");
-  CHECK(has(cmd_espnow_setname(String("")), "(not set)"), "N1 the query still shows a name");
+  CHECK(has(cmd_devicename(String("")), "(not set)"), "N1 the query still shows a name");
 
   // N2: refused while ESP-NOW runs or is still shutting down; the name stays.
   resetAll();
-  CHECK(has(cmd_espnow_setname(String("benchp4")), "benchp4"), "N2 setup");
+  CHECK(has(cmd_devicename(String("benchp4")), "benchp4"), "N2 setup");
   gState.initialized = true;
-  r = cmd_espnow_setname(String("clear"));
+  r = cmd_devicename(String("clear"));
   CHECK(isError(r) && has(r, "closeespnow"), "N2 cleared under a running ESP-NOW: %s", r);
   CHECK(gSettings.espnowDeviceName == String("benchp4"), "N2 a refused clear changed the name");
   gState.initialized = false;
   gShutdownPending = true;
-  CHECK(isError(cmd_espnow_setname(String("clear"))), "N2 cleared during a pending shutdown");
+  CHECK(isError(cmd_devicename(String("clear"))), "N2 cleared during a pending shutdown");
   gShutdownPending = false;
 
   // N3: clearing an unset name is a plain answer, with no write and no event.
   resetAll();
   const int persistsBefore = gPersists;
-  r = cmd_espnow_setname(String("clear"));
+  r = cmd_devicename(String("clear"));
   CHECK(!isError(r) && has(r, "(not set)") && gPersists == persistsBefore && gEvents.empty(), "N3 unset name: %s", r);
 
   // N4: ordinary names still work and validate-only still answers without acting.
   resetAll();
-  CHECK(isError(cmd_espnow_setname(String("has.dot"))), "N4 a name with '.' was accepted");
+  CHECK(isError(cmd_devicename(String("has.dot"))), "N4 a name with '.' was accepted");
   gCliValidateOnly = true;
-  CHECK(has(cmd_espnow_setname(String("clear")), "VALID"), "N4 validate-only");
+  CHECK(has(cmd_devicename(String("clear")), "VALID"), "N4 validate-only");
   gCliValidateOnly = false;
 
   // N5: with the radio off the own address may not be readable; the clear still happens.
   resetAll();
-  CHECK(has(cmd_espnow_setname(String("benchp4")), "benchp4"), "N5 setup");
+  CHECK(has(cmd_devicename(String("benchp4")), "benchp4"), "N5 setup");
   gSelfMacReadable = false;
-  r = cmd_espnow_setname(String("clear"));
+  r = cmd_devicename(String("clear"));
   CHECK(!isError(r) && gSettings.espnowDeviceName.length() == 0, "N5 clear with no readable address: %s", r);
 
   // N6: a device that has not started ESP-NOW since boot (no instance).
   resetNeverStarted();
-  CHECK(has(cmd_espnow_setname(String("benchp4")), "benchp4"), "N6 setup");
-  r = cmd_espnow_setname(String("clear"));
+  CHECK(has(cmd_devicename(String("benchp4")), "benchp4"), "N6 setup");
+  r = cmd_devicename(String("clear"));
   CHECK(!isError(r) && gSettings.espnowDeviceName.length() == 0, "N6 clear with no instance: %s", r);
 }
 
@@ -1326,7 +1400,205 @@ static void testPendingStopHoldsNoPassphrase() {
   gShutdownPending = false;
 }
 
+// The mesh id comes from the mesh key (System_ESPNow_MeshIdCore.h): none (0)
+// until a passphrase is set, never 0 on the air, unique among this device's
+// meshes (a command that would clash is refused and changes nothing), kept when
+// the passphrase is cleared, and a clash found at boot keeps the lower slot.
+static void testMeshIds() {
+  static const uint8_t kBcast[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+  // I1: 'add fjqo' (CRC16 of the label is 0) then a passphrase: a nonzero id.
+  resetAll();
+  const char* r = meshesCmd_add(String("fjqo"));
+  CHECK(!isError(r) && has(r, "mesh id: none until a passphrase is set"), "I1 add: %s", r);
+  CHECK(gSettings.meshes[slotOf("fjqo")].fingerprint == 0, "I1 a mesh without a passphrase has an id");
+  CHECK(!isError(meshesCmd_setpassphrase(String("fjqo"), String("fjqo-passphrase"))), "I1 setpassphrase");
+  const uint16_t fjqoId = gSettings.meshes[slotOf("fjqo")].fingerprint;
+  CHECK(fjqoId != 0, "I1 the keyed mesh has no id (FAILS ON BASE: CRC16('fjqo') == 0)");
+
+  // I2: the default 'primary' has no passphrase: frames take the keyed mesh's
+  // id, never 0; with no keyed mesh nothing has an id (nothing is sent).
+  CHECK(fingerprintForPeer(kBcast) == fjqoId, "I2 a broadcast took the keyless default mesh's id 0 (got 0x%04X)",
+        (unsigned)fingerprintForPeer(kBcast));
+  resetAll();
+  CHECK(fingerprintForPeer(kBcast) == 0, "I2 a device with only a keyless mesh has an id to send");
+
+  // I3: a passphrase whose id another mesh here has is refused; nothing changes.
+  resetAll();
+  CHECK(!isError(meshesCmd_add(String("lab"))) && !isError(meshesCmd_setpassphrase(String("lab"), String("lab-passphrase"))),
+        "I3 setup lab");
+  const uint16_t labId = gSettings.meshes[slotOf("lab")].fingerprint;
+  CHECK(!isError(meshesCmd_add(String("work"))), "I3 add work");
+  const int work = slotOf("work");
+  gForcedIds["work/work-passphrase"] = labId;
+  int persists = gPersists;
+  r = meshesCmd_setpassphrase(String("work"), String("work-passphrase"));
+  CHECK(isError(r) && has(r, "would get mesh id") && has(r, "'lab'"), "I3 a clashing passphrase was taken: %s", r);
+  CHECK(gSettings.meshes[work].passphrase.length() == 0 && !gSettings.meshes[work].passphraseStretchedKeyValid &&
+            gSettings.meshes[work].fingerprint == 0 && gPersists == persists,
+        "I3 the refused passphrase changed the mesh");
+
+  // I4: the same for a rename (the label is part of the key): the label stays.
+  CHECK(!isError(meshesCmd_setpassphrase(String("work"), String("other-passphrase"))), "I4 setup");
+  const uint16_t workId = gSettings.meshes[work].fingerprint;
+  CHECK(workId != 0 && workId != labId, "I4 setup ids");
+  gForcedIds["garage/other-passphrase"] = labId;
+  r = meshesCmd_rename(String("work"), String("garage"));
+  CHECK(isError(r) && has(r, "would get mesh id"), "I4 a clashing rename was taken: %s", r);
+  CHECK(gSettings.meshes[work].label == String("work") && gSettings.meshes[work].fingerprint == workId &&
+            gSettings.meshes[work].passphrase == String("other-passphrase"),
+        "I4 the refused rename changed the mesh");
+  r = meshesCmd_rename(String("work"), String("shed"));
+  CHECK(!isError(r) && has(r, "new mesh id") && gSettings.meshes[work].fingerprint != workId,
+        "I4 a rename does not give a new id: %s", r);
+
+  // I5: enable stages the key of a mesh whose stretched key is not cached; a
+  // clash refuses the enable and the mesh stays disabled.
+  CHECK(!isError(meshesCmd_remove(String("shed"))) && !gSettings.meshes[work].enabled, "I5 setup remove");
+  gSettings.meshes[work].passphraseStretchedKeyValid = false;
+  gForcedIds["shed/other-passphrase"] = labId;
+  r = meshesCmd_enable(String("shed"));
+  CHECK(isError(r) && has(r, "would get mesh id") && !gSettings.meshes[work].enabled, "I5 a clashing enable: %s", r);
+  gForcedIds.erase("shed/other-passphrase");
+  r = meshesCmd_enable(String("shed"));
+  CHECK(!isError(r) && gSettings.meshes[work].enabled && gSettings.meshes[work].fingerprint != 0 &&
+            gSettings.meshes[work].fingerprint != labId && has(r, "mesh id 0x"),
+        "I5 enable: %s", r);
+
+  // I6: a cleared passphrase keeps the id (paired devices keep their traffic),
+  // and the id survives a save and load without a key to derive it from.
+  CHECK(!isError(meshesCmd_setpassphrase(String("lab"), String(""))), "I6 clear");
+  CHECK(gSettings.meshes[slotOf("lab")].fingerprint == labId, "I6 the cleared mesh lost its id");
+  saveAndReload();
+  CHECK(gSettings.meshes[slotOf("lab")].fingerprint == labId, "I6 the stored id did not survive a restart");
+
+  // I7: a passphrase change gives a new id and says so.
+  resetAll();
+  CHECK(!isError(meshesCmd_add(String("lab"))) && !isError(meshesCmd_setpassphrase(String("lab"), String("first-passphrase"))),
+        "I7 setup");
+  startEspNow();
+  r = meshesCmd_setpassphrase(String("lab"), String("second-passphrase"));
+  CHECK(!isError(r) && has(r, "mesh id is now 0x") && has(r, "all traffic with them stops"),
+        "I7 the reply does not say the mesh id changed: %s", r);
+
+  // I8: two meshes with one id at boot (an edited settings file): the lower slot
+  // keeps it, the higher one is off the air for this boot, nothing is written.
+  resetAll();
+  CHECK(!isError(meshesCmd_add(String("lab"))) && !isError(meshesCmd_setpassphrase(String("lab"), String("lab-passphrase"))) &&
+            !isError(meshesCmd_add(String("work"))) && !isError(meshesCmd_setpassphrase(String("work"), String("work-passphrase"))),
+        "I8 setup");
+  const int labSlot = slotOf("lab"), workSlot = slotOf("work");
+  std::memcpy(gSettings.meshes[workSlot].passphraseStretchedKey, gSettings.meshes[labSlot].passphraseStretchedKey, 32);
+  gEvents.clear();
+  gWarnLines = 0;
+  persists = gPersists;
+  espnowMeshIdsAfterKeyInit();
+  CHECK(gSettings.meshes[labSlot].fingerprint != 0 && gSettings.meshes[workSlot].fingerprint == 0 &&
+            gSettings.meshes[workSlot].enabled && gPersists == persists,
+        "I8 the boot clash was not resolved toward the lower slot (lab 0x%04X, work 0x%04X)",
+        (unsigned)gSettings.meshes[labSlot].fingerprint, (unsigned)gSettings.meshes[workSlot].fingerprint);
+  CHECK(gWarnLines == 1 && gEvents.size() == 1, "I8 the clash was not reported once (%d WARN, %zu events)",
+        gWarnLines, gEvents.size());
+  // I8b: the next ESP-NOW start (PrimaryMeshBootstrap) and a settings reload
+  // refresh every keyed mesh's id from its key. The loser keeps no id and no
+  // keys, and is not reported again.
+  meshIdRefreshAll();
+  meshIdRefreshAll();
+  CHECK(gSettings.meshes[workSlot].fingerprint == 0 && !gDerivedValid[workSlot] &&
+            gSettings.meshes[labSlot].fingerprint != 0,
+        "I8b the clash loser regained id 0x%04X after the start's refresh (lab 0x%04X)",
+        (unsigned)gSettings.meshes[workSlot].fingerprint, (unsigned)gSettings.meshes[labSlot].fingerprint);
+  CHECK(gWarnLines == 1 && gEvents.size() == 1, "I8b the clash was reported again at a refresh (%d WARN, %zu events)",
+        gWarnLines, gEvents.size());
+  // I8c: once the clash is gone (another key for 'work'), a refresh gives it
+  // its own id back, and a later clash is reported again.
+  gSettings.meshes[workSlot].passphraseStretchedKey[0] ^= 0x01;
+  meshIdRefreshAll();
+  CHECK(gSettings.meshes[workSlot].fingerprint != 0 &&
+            gSettings.meshes[workSlot].fingerprint != gSettings.meshes[labSlot].fingerprint,
+        "I8c 'work' got no id back once its key differs (0x%04X)", (unsigned)gSettings.meshes[workSlot].fingerprint);
+  std::memcpy(gSettings.meshes[workSlot].passphraseStretchedKey, gSettings.meshes[labSlot].passphraseStretchedKey, 32);
+  meshIdRefreshAll();
+  CHECK(gSettings.meshes[workSlot].fingerprint == 0 && gWarnLines == 2,
+        "I8c a new clash was not resolved and reported (work 0x%04X, %d WARN)",
+        (unsigned)gSettings.meshes[workSlot].fingerprint, gWarnLines);
+  // I8d: the clash loser, disabled, with its stretched key cached: enabling it
+  // is refused and nothing changes (the enable's stretched-key branch).
+  gSettings.meshes[workSlot].enabled = false;
+  gSettings.meshes[workSlot].isDefault = false;
+  {
+    const uint16_t labIdNow = gSettings.meshes[labSlot].fingerprint;
+    const char* r8 = meshesCmd_enable(String("work"));
+    CHECK(isError(r8) && has(r8, "mesh id") && !gSettings.meshes[workSlot].enabled &&
+              gSettings.meshes[workSlot].fingerprint == 0,
+          "I8d enabling the clash loser (cached key) was not refused: %s", r8);
+    // I8e: no passphrase, a stored id another mesh has (an edited file): the
+    // enable's stored-id branch refuses it too.
+    gSettings.meshes[workSlot].passphrase = String("");
+    gSettings.meshes[workSlot].passphraseStretchedKeyValid = false;
+    gSettings.meshes[workSlot].fingerprint = labIdNow;
+    r8 = meshesCmd_enable(String("work"));
+    CHECK(isError(r8) && has(r8, "mesh id") && !gSettings.meshes[workSlot].enabled,
+          "I8e enabling a mesh whose stored id another mesh has was not refused: %s", r8);
+  }
+}
+
+// The one device name ('devicename', System_DeviceName.cpp): the rule, the
+// warning when another device has the name, and the hostname.
+static void testDeviceNameSetter() {
+  resetAll();
+  const std::string n31(31, 'k');
+  const char* r = cmd_devicename(String(n31.c_str()));
+  CHECK(!isError(r) && gSettings.espnowDeviceName == String(n31.c_str()),
+        "G1 a 31-byte name was refused (FAILS ON BASE: 19-byte limit): %s", r);
+  CHECK(gHostnameApplies == 1, "G1 the hostname was not handed on");
+  for (const char* bad : {"a_b", "-lead", "trail-", "clear-", "all", "JSON", "DEADBEEFCAFE", "aa-bb-cc-dd-ee-ff"}) {
+    r = cmd_devicename(String(bad));
+    CHECK(isError(r) && gSettings.espnowDeviceName == String(n31.c_str()), "G2 '%s' was taken: %s", bad, r);
+  }
+  r = cmd_devicename(String(std::string(32, 'k').c_str()));
+  CHECK(isError(r) && has(r, "31"), "G2 a 32-byte name: %s", r);
+  // Another device here has the name (ignoring case): set, with a warning that names it.
+  startEspNow();
+  addRegistryDevice(5, 0);  // "peer"
+  r = cmd_devicename(String("PEER"));
+  CHECK(!isError(r) && gSettings.espnowDeviceName == String("PEER") && has(r, "Warning:") &&
+            has(r, "peer (02:00:00:00:00:05)") && has(r, "need the MAC"),
+        "G3 a name a paired device has: %s", r);
+  const uint8_t metaMac[6] = {0x02, 0, 0, 0, 0, 0x33};
+  std::memcpy(gMetaSlots[0].mac, metaMac, 6);
+  std::snprintf(gMetaSlots[0].name, sizeof(gMetaSlots[0].name), "kitchen");
+  gMetaSlots[0].isActive = true;
+  r = cmd_devicename(String("Kitchen"));
+  CHECK(!isError(r) && has(r, "Warning:") && has(r, "kitchen (02:00:00:00:00:33)"), "G3 a name a peer announces: %s", r);
+  r = cmd_devicename(String("garage"));
+  CHECK(!isError(r) && !has(r, "Warning"), "G3 a free name warned: %s", r);
+}
+
+// A peer's name given to the pair commands (espnowPeerAliasRefusal): the
+// device-name rule refuses it with one wording; a name another device here has
+// is taken with a note.
+static void testPeerAliasRule() {
+  resetAll();
+  for (const char* bad : {"a_b", "-lead", "all", "JSON", "DEADBEEFCAFE", "two words"}) {
+    const char* r = espnowPeerAliasRefusal(String(bad));
+    CHECK(r && has(r, "Error: Peer name:"), "P1 the peer name '%s' was not refused: %s", bad, r ? r : "(taken)");
+  }
+  const char* r = espnowPeerAliasRefusal(String(std::string(32, 'p').c_str()));
+  CHECK(r && has(r, "31"), "P1 a 32-byte peer name was not refused: %s", r ? r : "(taken)");
+  gBroadcasts.clear();
+  CHECK(espnowPeerAliasRefusal(String("Shed-2")) == nullptr && gBroadcasts.empty(), "P2 a free valid peer name");
+  startEspNow();
+  addRegistryDevice(5, 0);  // "peer"
+  const uint8_t other[6] = {0x02, 0, 0, 0, 0, 0x44};
+  CHECK(espnowPeerAliasRefusal(String("Peer"), other) == nullptr && gBroadcasts.size() == 1 &&
+            has(gBroadcasts[0].c_str(), "also the name of peer (02:00:00:00:00:05)"),
+        "P3 a peer name another device has is taken with a note (%zu lines)", gBroadcasts.size());
+}
+
 int main() {
+  testMeshIds();
+  testPeerAliasRule();
+  testDeviceNameSetter();
   testOnlyMeshCanBeRemovedAndDeleted();
   testDeleteFreesTheSlot();
   testSlotsSurviveARestart();

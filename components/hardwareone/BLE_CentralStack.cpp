@@ -22,6 +22,7 @@
 #include "System_MemUtil.h"
 #include "System_MemoryMonitor.h"
 #include "System_RadioCompanion.h"
+#include "System_SelfDevice.h"  // the device name, the GAP name of this host
 #include "System_Settings.h"
 #include "System_Utils.h"  // rebootDevice
 
@@ -39,11 +40,9 @@ std::atomic<bool> sReady{false};
 BLEScan* sScan = nullptr;
 const char* sRefusal = "";
 
-// The local name of the client-role host. The client role never advertises
-// (the console service on the client host is reachable over the phone link
-// only), so the name is informational; the server role names itself from the
-// setting when `openconsole` starts it.
-constexpr const char* kClientHostName = "HardwareOne";
+// The client-role host's GAP name is the device name (SelfDevice::deviceName,
+// the one name ESP-NOW, Bluetooth and Wi-Fi use), as the server role's is. The
+// client role never advertises, but the glasses and the phone can read it.
 
 // The process-global local ATT MTU of the client role. The glasses negotiate
 // against it (G2_BLE_LOCAL_MTU_PREF); the ring and the phone take whatever the
@@ -206,7 +205,8 @@ bool bleStackUp() {
       return refuse("not enough internal DRAM for the Bluetooth host");
     }
   }
-  if (!bluetoothHalInit(kClientHostName)) {
+  const String hostName = SelfDevice::deviceName();
+  if (!bluetoothHalInit(hostName.c_str())) {
     rollbackPartialHost("BLE host initialization");
     return refuse("BLE host initialization failed");
   }

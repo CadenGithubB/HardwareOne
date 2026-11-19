@@ -4,7 +4,7 @@
 > Regenerate with `python3 tools/command_registry.py reference`.
 > Source of truth is the `CommandEntry` tables in `components/hardwareone/*.cpp`.
 
-1039 commands across 57 modules (1039 registry entries).
+1038 commands across 57 modules (1038 registry entries).
 
 Commands are matched case-insensitively, and lookup uses longest-prefix matching, so `automation list` resolves to the `automation` dispatcher with `list` as its argument.
 
@@ -16,10 +16,10 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 - [`system`](#system) — 26 commands
 - [`versions`](#versions) — 1 commands
 - [`wifi`](#wifi) — 21 commands
-- [`espnow`](#espnow) — 129 commands
+- [`espnow`](#espnow) — 128 commands
 - [`c6`](#c6) — 10 commands
 - [`mqtt`](#mqtt) — 27 commands
-- [`bluetooth`](#bluetooth) — 23 commands
+- [`bluetooth`](#bluetooth) — 22 commands
 - [`phone`](#phone) — 10 commands
 - [`relay`](#relay) — 2 commands
 - [`filesystem`](#filesystem) — 10 commands
@@ -52,7 +52,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 - [`automation`](#automation) — 9 commands
 - [`battery`](#battery) — 3 commands
 - [`debug`](#debug) — 181 commands
-- [`settings`](#settings) — 17 commands
+- [`settings`](#settings) — 18 commands
 - [`sensorlog`](#sensorlog) — 2 commands
 - [`health`](#health) — 2 commands
 - [`users`](#users) — 22 commands
@@ -158,7 +158,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 
 | Command | | Description |
 | ------- | :-: | ----------- |
-| `bondconnect` | A | Connect to bonded peer device: 'bondconnect <mac_or_name>'. Run it on both devices. (async - bond establishes when peer is seen; watch bondstatus)<br/>`Usage: bondconnect <mac_or_name> Returns immediately; the bond completes when the peer appears via heartbeat - watch 'bondstatus'. The peer is asked to confirm; until 'bondconnect' is run there too it answers that it is not bonded, and 'bondstatus' says so. A role chosen with 'bondrole' is kept; else the other than the one the peer's user chose; else the higher address is master.` |
+| `bondconnect` | A | Connect to bonded peer device: 'bondconnect <mac_or_name>'. Run it on both devices. (async - bond establishes when peer is seen; watch bondstatus)<br/>`Usage: bondconnect <mac_or_name> Returns immediately; the bond completes when the peer appears via heartbeat - watch 'bondstatus'. The peer is asked to confirm; until 'bondconnect' is run there too it answers that it is not bonded, and 'bondstatus' says so. A role chosen with 'bondrole' is kept; else the other than the one the peer's user chose; else the higher address is master. Refused when the peer's session shows its build has no bond mode (espnowsessions caps).` |
 | `bonddisconnect` | A | Disconnect from bonded peer device. The peer is told that the bond ended. |
 | `bondforward` | A | Bond master: forward the bond partner's readings, battery state and events to the mesh master named on this device: 'bondforward [on\|off\|sensors <all\|default\|name,name,...>]'.<br/>`Usage: bondforward [on \| off \| sensors <all \| default \| name,name,...>] No argument shows whether the partner's data is forwarded, and why not. Off by default. Only to the master named here, when it is paired in this device's primary mesh. Input is not forwarded unless named. That master may ask for the partner's readings (espnowsensorreq <partner> via <this device> there).` |
 | `bondforwardsensors` | A | Set the sensors a bond master forwards, as a mask: <0..2047><br/>`Usage: bondforwardsensors <0..2047> (bit i: sensor i; 'bondforward sensors <names>' sets it by name)` |
@@ -191,7 +191,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `espnowbattery` |  | Mesh master: show the battery state other devices sent: 'espnowbattery [json] [<name_or_mac>] [from <n>]'.<br/>`Usage: espnowbattery [json] [<name_or_mac>] [from <n>] A device sends its battery state to the master named on it (espnowpowerinterval). json: 'next' is the number to pass as 'from' when not every device fitted one reply.` |
 | `espnowbondmodeenabled` | A | Enable/disable bond mode: <0\|1><br/>`Usage: espnowbondmodeenabled <0\|1>` |
 | `espnowbondpeermac` | A | Set bond peer MAC address<br/>`Usage: espnowbondpeermac <AA:BB:CC:DD:EE:FF>` |
-| `espnowbroadcast` |  | Broadcast message: 'espnowbroadcast <message>'. (async send; delivery only, no reply)<br/>`Usage: espnowbroadcast <message> (single frame, <= 186 bytes while any enabled mesh has a passphrase, 218 otherwise; longer text is refused) Fails when the frame reached no peer. There is no per-device delivery count and no per-device reply.` |
+| `espnowbroadcast` |  | Broadcast message: 'espnowbroadcast <message>'. (async send; delivery only, no reply)<br/>`Usage: espnowbroadcast <message> (single frame, <= 202 bytes while any enabled mesh has a passphrase, 218 otherwise; longer text is refused) Fails when the frame reached no peer. There is no per-device delivery count and no per-device reply.` |
 | `espnowbroadcaststats` |  | Show broadcast ACK tracking statistics. |
 | `espnowbrowse` | A | Browse a peer's files; user/pass are an account ON THE TARGET: 'espnowbrowse <target> <target-user> <target-pass> ["path"]'. (async - result via espnowmessages json)<br/>`Usage: espnowbrowse <target> <target-user> <target-pass> ["path"] [json] Credentials are verified ON THE TARGET device, not this one. Returns OK on delivery; the remote listing arrives later - read with 'espnowmessages json' (match the reqId).` |
 | `espnowchannel` | A | Get/set preferred ESP-NOW channel: 'espnowchannel [1-13\|auto\|resync]'. No arg shows a checker (actual vs expected). Set the SAME value on both devices to pair off-grid.<br/>`Usage: espnowchannel [<1..13>\|auto\|resync] (no arg) = show preference, actual radio channel, expected, and an OK/MISMATCH check. auto (0) = follow WiFi, pin fallback when offline. 1-13 = force this channel when not joined to WiFi. resync = force the radio back onto the correct channel now (no setting change). Two devices only hear each other on the same channel — set both the same for field use.` |
@@ -255,20 +255,19 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `espnowrouterstats` |  | Show message router statistics and metrics. |
 | `espnowsaturation` |  | Show ESP-NOW link saturation: frames/sec, stream-queue depth, drops, ACK RTT (rolling 30s). |
 | `espnowsaturationreset` |  | Clear the saturation rolling window (use before a stress test). |
-| `espnowsend` |  | Send message to one peer, relayed over multiple hops if it is out of radio range: 'espnowsend [json] <name_or_mac> <message>'. Requires ESP-NOW encryption enabled. (async send; delivery only, no reply)<br/>`Usage: espnowsend [json] <name_or_mac> <message> Requires ESP-NOW encryption (set a mesh passphrase first); plaintext send was removed. Leading 'json' flag returns {schema,ok,msgId} for delivery-status polling ("queued":true while it waits). Returns OK when sent, or queued until the session with the peer opens (sent then, or failed after 5 s; up to 4 wait per peer); one-way message, no result comes back. Out-of-range peers are reached via relays when a route exists ('espnowmeshroutes'); a relayed message is split at ~130 chars per piece instead of ~200.` |
+| `espnowsend` |  | Send message to one peer, relayed over multiple hops if it is out of radio range: 'espnowsend [json] <name_or_mac> <message>'. Requires ESP-NOW encryption enabled. (async send; delivery only, no reply)<br/>`Usage: espnowsend [json] <name_or_mac> <message> Requires ESP-NOW encryption (set a mesh passphrase first); plaintext send was removed. Leading 'json' flag returns {schema,ok,msgId} for delivery-status polling ("queued":true while it waits). Returns OK when sent, or queued until the session with the peer opens (sent then, or failed after 5 s; up to 4 wait per peer); one-way message, no result comes back. Out-of-range peers are reached via relays when a route exists ('espnowmeshroutes'); a relayed message is split at ~146 chars per piece instead of ~200.` |
 | `espnowsendfile` | A | Send file: 'espnowsendfile <name_or_mac> "<filepath>"'. (synchronous send; fails if the receiver rejects/cancels mid-transfer)<br/>`Usage: espnowsendfile <name_or_mac> "<filepath>" Blocks until the file is sent. 'success' means every chunk was transmitted and the receiver did not cancel; final storage is confirmed by the receiver's CRC check, which is not reported back here.` |
 | `espnowsensorbroadcast` |  | Enable/disable all sensor ESP-NOW communication: 'espnowsensorbroadcast <on\|off>'.<br/>`Usage: espnowsensorbroadcast [on\|off]` |
 | `espnowsensorbroadcastinterval` | A | Set sensor broadcast interval: <100-10000 ms><br/>`Usage: espnowsensorbroadcastinterval <100..10000>` |
-| `espnowsensorreq` | A | Hand-send a SENSOR_REQ to a paired worker, or to a bond partner through the bond master that forwards for it ('<partner> via <bond master>').<br/>`Usage: espnowsensorreq <MAC\|name> [via <MAC\|name>] <sensors> <mode> <intervalMs> <leaseMs> sensors: names, comma separated (tof,imu), 'all', or a mask (0x6). mode: subscribe\|sub\|0, unsubscribe\|unsub\|1, oneshot\|once\|2. A forwarded partner: its name and 'via' the bond master (espnowforwardlinks lists them); its name alone when it is not paired here. The bond master needs 'bondforward on' and forwards only the sensors it names (bondforward sensors).` |
+| `espnowsensorreq` | A | Hand-send a SENSOR_REQ to a paired worker, or to a bond partner through the bond master that forwards for it ('<partner> via <bond master>').<br/>`Usage: espnowsensorreq <MAC\|name> [via <MAC\|name>] <sensors> <mode> <intervalMs> <leaseMs> sensors: names, comma separated (tof,imu), 'all', or a mask (0x6). mode: subscribe\|sub\|0, unsubscribe\|unsub\|1, oneshot\|once\|2. A forwarded partner: its name and 'via' the bond master (espnowforwardlinks lists them); its name alone when it is not paired here. The bond master needs 'bondforward on' and forwards only the sensors it names (bondforward sensors). Refused when the session shows the device has no sensors in its build (or, 'via', no bond mode).` |
 | `espnowsensorstatus` |  | Show what this device sends to the mesh master (readings, battery state, events) and why not, and what it received, lost and refused: 'espnowsensorstatus [json [<name_or_mac> [via <name_or_mac>]]]'.<br/>`Usage: espnowsensorstatus [json [<name_or_mac> [via <name_or_mac>]]] json <name_or_mac>: everything this device keeps of one sending device. via <name_or_mac>: the bond partner that device forwards for (also found by the name its link shows).` |
 | `espnowsensorstream` |  | Send one sensor's readings to the master named on this device: 'espnowsensorstream <sensor> <on\|off>'. (on this device only; the readings show on the master's espnowsensorstatus)<br/>`Usage: espnowsensorstream <thermal\|tof\|imu\|gps\|input\|fmradio\|camera\|microphone\|rtc\|presence\|apds> <on\|off> The readings go to the master named on this device (espnowmasterfingerprint), which must be paired with it. The reply says where they go, or why nothing is sent yet. On a bond master it asks the bond partner.` |
 | `espnowsessionopen` | A | Initiate SESSION handshake (requires prior espnowkeyex). (async - session goes ACTIVE later; check espnowsessions)<br/>`Usage: espnowsessionopen <name_or_mac> [<mesh>] Returns OK when SESSION_OPEN is sent; the session becomes ACTIVE when CONFIRM arrives - run 'espnowsessions'.` |
-| `espnowsessions` |  | Show in-RAM session state (peer, sessionId, dir, age, counters). |
+| `espnowsessions` |  | Show in-RAM session state (peer, mesh slot, sessionId, dir, age, counters) and each peer's capabilities from its handshake (caps=bond,remote_fs,...); the first line shows this device's. |
 | `espnowsessionsend` | A | DIAGNOSTIC: send an AEAD-encrypted CHAT message over an active session (exercises the session-crypto path). NOT executed on the peer and returns no reply - to RUN a command use 'espnowremote'.<br/>`Usage: espnowsessionsend <name_or_mac> <message> Delivers an encrypted CHAT message (lands in the peer's espnowmessages). It is NOT command execution and no reply comes back. To run a command on the peer: espnowremote <target> <target-user> <target-pass> <command>.` |
-| `espnowsetname` | A | Get/set device name: 'espnowsetname [name\|clear]'.<br/>`Usage: espnowsetname [<name>\|clear] (<=19 bytes; letters, numbers, - and _ only; 'clear' removes it while ESP-NOW is stopped)` |
 | `espnowsetpassphrase` | S | Set encryption passphrase on a mesh: 'espnowsetpassphrase <mesh> <phrase>'.<br/>`Usage: espnowsetpassphrase <mesh> <passphrase> espnowsetpassphrase <mesh> clear` |
 | `espnowstationary` |  | Get/set stationary flag: 'espnowstationary [0\|1]'.<br/>`Usage: espnowstationary [on\|off\|0\|1]` |
-| `espnowstats` |  | Show ESP-NOW statistics (messages, errors, etc.). |
+| `espnowstats` |  | Show ESP-NOW statistics (messages, errors, and received frames dropped by cause: too short for their type, an unknown must-understand flag, an unknown mesh id). |
 | `espnowstatus` |  | Show ESP-NOW status and configuration. |
 | `espnowsubs` |  | List peers + their event-subscription bitmaps (what they want from us). |
 | `espnowtagcmd` | A | Run command on all devices accepted here as holders of a tag; user/pass must be valid on EACH target device. (async - replies via espnowmessages json)<br/>`Usage: espnowtagcmd <tag> <target-user> <target-pass> <command> Credentials are checked ON EACH target device, not this one. One tag per command: a tag list (a comma) is refused. Goes only to peers whose tag was accepted on this device (espnowgroups, espnowgroupaccept); a peer that only announces the tag is skipped and counted in the reply. Returns OK on dispatch; each device's reply arrives later in 'espnowmessages json'.` |
@@ -353,7 +352,6 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `bleevent` |  | Send event to BLE client: <event>.<br/>`Usage: bleevent <message>` |
 | `bleinfo` |  | Show BLE configuration and settings. (add 'json' for JSON output) |
 | `blemode` | A | Get/set the saved Bluetooth boot role: client = the shared stack for glasses, ring and phone (default); server = the app console server (legacy).<br/>`Usage: blemode [client\|server] client = the shared client stack: glasses, ring and phone open on it (openg2 / openring / openphone; auto-reconnect at boot) server = the app console server, advertising at boot (openconsole starts it now; it never coexists with the client stack)` |
-| `blename` |  | Get/set BLE device name [name].<br/>`Usage: blename [name]` |
 | `blepeers` |  | List all registered BLE peers and their state. |
 | `bleread` |  | Read the Bluetooth role, app console and relay pipe. (add 'json' for JSON output) |
 | `blerecords` | A | BLE scan/connect records with the Wi-Fi state (no addresses).<br/>`Usage: blerecords [scans\|connects\|clear]` |
@@ -1121,6 +1119,7 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 | ------- | :-: | ----------- |
 | `beginwrite` | A | Start owner-scoped settings write coalescing until savesettings (not a RAM transaction). |
 | `controls` |  | Per-module control descriptor (JSON): controls json [module]<br/>`Usage: controls json <module> (e.g. 'controls json imu'); 'controls json' lists modules` |
+| `devicename` | A | Get/set the device name (ESP-NOW name, Bluetooth name, Wi-Fi hostname): 'devicename [name\|clear]'.<br/>`Usage: devicename [<name>\|clear] (1-31 letters, digits and '-'; not starting or ending with '-'; not clear/all/json/none or a MAC address; 'clear' while ESP-NOW is stopped)` |
 | `displayrequireauth` | S | Require auth for display: <0\|1><br/>`Usage: displayrequireauth <0\|1>` |
 | `httpautostart` | A | Auto-start HTTP server at boot: <0\|1><br/>`Usage: httpautostart <0\|1>` |
 | `httpsenabled` | A | Enable/disable HTTPS: <0\|1> (reboot required)<br/>`Usage: httpsenabled <0\|1>` |

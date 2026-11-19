@@ -109,6 +109,21 @@ def check_sources(component: Path) -> None:
             "espnowForwardRequestTarget(a.arg(0).c_str(), nullptr, mac, origin, &linkGen)" in sensorreq and
             "rq.fwdLink    = linkGen;" in sensorreq,
             "espnowsensorreq names a forwarded partner ('via', or its name alone) and sends the link number")
+    # The session capability word (1.0): the device itself must have a sensor to
+    # send; through a bond master ('via', fwdLink) only that master's bond mode
+    # counts, never its own sensors (it answers with its partner's). A word not
+    # yet confirmed refuses nothing.
+    # The rule is sessioncaps::sensorRequestRefusal (test_espnow_session_caps_core
+    # runs it); the command must ask it with the session's word and the link,
+    # and return its refusal before anything is sent.
+    gate = re.search(r"const bool capsKnown = espnowPeerSessionCaps\(mac, &peerCaps, &capsConfirmed\);\s*"
+                     r"const sessioncaps::SensorReqRefusal refusal =\s*"
+                     r"sessioncaps::sensorRequestRefusal\(capsKnown, capsConfirmed, peerCaps, linkGen != 0\);\s*"
+                     r"if \(refusal != sessioncaps::SensorReqRefusal::None\) \{", sensorreq)
+    require(gate is not None and "return getDebugBuffer();" in sensorreq[gate.end():gate.end() + 900] and
+            gate.start() < sensorreq.index("espnowtx::sendAeadSync("),
+            "espnowsensorreq asks sessioncaps::sensorRequestRefusal (sensor_send for the device itself, the bond "
+            "bit through a bond master, a confirmed word only) and returns the refusal before the send")
     require(sensorreq.index("resolveDeviceNameOrMac(a.arg(0), mac)") <
             sensorreq.index("espnowForwardRequestTarget(a.arg(0).c_str(), nullptr"),
             "a device paired here is asked directly; a forwarded partner only when no paired device has that name")

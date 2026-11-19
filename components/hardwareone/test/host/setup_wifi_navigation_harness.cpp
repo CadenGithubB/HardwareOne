@@ -55,6 +55,11 @@ static void clearWizardWifiChoices() {
 }
 static void appendPromptTo(char*, size_t) { ++prompts; }
 static char* getWizardDeviceNameBuf() { return deviceName; }
+// The wizard's checked name setter (System_SetupWizard.cpp; the rule is System_DeviceName.h).
+[[maybe_unused]] static const char* wizardSetDeviceName(const char* typed) {
+  std::snprintf(getWizardDeviceNameBuf(), 21, "%s", typed);
+  return nullptr;
+}
 static int showWizardOptionalPageIntro(SetupWizardPage page, const char*, const char*) {
   assert(page == WIZARD_PAGE_WIFI && !introChoices.empty());
   int value = introChoices.front(); introChoices.pop_front();

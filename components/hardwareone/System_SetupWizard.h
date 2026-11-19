@@ -39,8 +39,7 @@ struct SetupWizardResult {
   bool wifiConfigured = false;
   String wifiSsid;
   String wifiPassword;
-  String deviceName;           // ESP-NOW device name; UI can also set BLE name
-  String bleDeviceName;
+  String deviceName;           // the device name (System_DeviceName.h): ESP-NOW, Bluetooth, Wi-Fi hostname
   int timezoneOffset = 0;
   String timezoneAbbrev;
   int logLevel = 0;
@@ -150,6 +149,14 @@ const char* const* getLedEffects();
 size_t getLedEffectCount();
 const char* getWizardDeviceName();
 char* getWizardDeviceNameBuf();
+// Put a typed device name into the wizard's buffer when it passes the rule
+// (System_DeviceName.h). nullptr on success, else the one wording of the fault
+// (the buffer is unchanged).
+const char* wizardSetDeviceName(const char* typed);
+// The device name the ESP-NOW page offers for a display label: the label made
+// into a name (spaces to '-', other characters dropped), else the draft's
+// name, else the name in use (HardwareOne-XXXXXX).
+void wizardSuggestDeviceName(const char* label, char (&out)[32]);
 
 // ============================================================================
 // Wizard Actions

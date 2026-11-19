@@ -55,6 +55,7 @@ struct Device {
   std::vector<Frame> outbox;         // every frame this device sent
   size_t delivered;                  // outbox frames already handed to the peer
   std::vector<std::string> log;
+  uint32_t caps;                     // this device's session capability word
 };
 static Device A, B;
 static Device* gCur = &A;  // the device whose code is running
@@ -110,6 +111,9 @@ static EspNowState gStateObj{true};
 static EspNowState* gEspNow = &gStateObj;
 
 static const EspNowIdentity& espnowIdentityGet() { return gCur->id; }
+// The image's capability word (production: System_ESPNow_Handlers_Crypto.cpp),
+// per modelled device; a case changes it to model a reflash.
+[[maybe_unused]] static uint32_t espnowLocalSessionCaps() { return gCur->caps; }
 static int espnowSelfStaMac(uint8_t out[6]) { std::memcpy(out, gCur->mac, 6); return 0; }
 static const PeerIdentity* peerIdentityFindByMac(const uint8_t mac[6]) {
   const PeerIdentity& p = gCur->peer;
@@ -371,7 +375,7 @@ static Frame signedRekey(Device& from, Device& to, uint32_t prevTxSeq) {
   std::memcpy(f.src, from.mac, 6);
   std::memcpy(f.dst, to.mac, 6);
   f.type = ESPNOW_V4_TYPE_SESSION_REKEY;
-  f.flags = ESPNOW_V4_FLAG_HANDSHAKE | ESPNOW_V4_FLAG_ACK_REQ;
+  f.flags = ESPNOW_V4_FLAG_ACK_REQ;
   f.msgId = generateMessageId();
   const uint8_t* p = reinterpret_cast<const uint8_t*>(&rk);
   f.payload.assign(p, p + sizeof rk);
@@ -449,6 +453,7 @@ static void makeDevice(Device& d, const char* name, uint8_t lastMacByte) {
   espnowCryptoRandomBytes(d.id.pub, 32);
   std::memcpy(d.id.sec + 32, d.id.pub, 32);
   d.id.valid = true;
+  d.caps = 0;
 }
 
 static void pairIdentities() {
@@ -465,6 +470,8 @@ static void pairIdentities() {
 int main() {
   makeDevice(A, "A", 0x0A);  // numerically lower MAC: the A side
   makeDevice(B, "B", 0x0B);
+  A.caps = 0x000000FEu;      // every 1.0 bit but bond
+  B.caps = 0x000100FFu;      // every 1.0 bit, and a reserved one from "later firmware"
   pairIdentities();
   char label[200];
 
@@ -482,8 +489,8 @@ int main() {
   check(espnowRekeyInitiate(B.mac) && A.outbox.size() == 2 && sessOf(A)->state == SESSION_REKEYING,
         "C2 A initiates: one REKEY sent, A REKEYING");
   check(A.outbox.back().type == ESPNOW_V4_TYPE_SESSION_REKEY &&
-        A.outbox.back().flags == (ESPNOW_V4_FLAG_HANDSHAKE | ESPNOW_V4_FLAG_ACK_REQ),
-        "C2 the REKEY is a HANDSHAKE|ACK_REQ frame");
+        A.outbox.back().flags == ESPNOW_V4_FLAG_ACK_REQ,
+        "C2 the REKEY is a plaintext ACK_REQ frame (no HANDSHAKE flag at 1.0)");
   deliver(take(A), B);
   check(B.outbox.size() == 2 && sessOf(B)->state == SESSION_ACTIVE, "C2 B replies once and is ACTIVE");
   deliver(take(B), A);
@@ -907,6 +914,139 @@ int main() {
   deliver(take(A), B);
   check(B.outbox.size() == bBefore + 1 && B.outbox.back().type == ESPNOW_V4_TYPE_SESSION_CONFIRM,
         "C21 the B side answers A's OPEN with a CONFIRM and sends no OPEN copy");
+
+  // ---- The session capability word (1.0) -------------------------------------
+  // "FAILS WITHOUT THE RULE": a tree whose OPEN/CONFIRM carry no word, or whose
+  // signed transcripts do not cover it.
+#ifdef HW1_SESSION_CAPS
+  // C22 — each side keeps the other's word; the initiator's view is confirmed
+  // at once, the responder's after the first sealed frame of the session.
+  resetDevices();
+  use(A);
+  check(espnowSessionOpenInitiate(B.mac, "mesh") && A.outbox.size() == 1, "C22 setup: A sends OPEN");
+  deliver(take(A), B);
+  deliver(take(B), A);   // no sealed frame yet (establish() would seal one each way)
+  check(sessOf(A)->state == SESSION_ACTIVE && sessOf(B)->state == SESSION_ACTIVE, "C22 setup: both ACTIVE");
+  {
+    V4PayloadSessionOpen om{};
+    V4PayloadSessionConfirm cm{};
+    std::memcpy(&om, A.outbox[0].payload.data(), sizeof om);
+    std::memcpy(&cm, B.outbox[0].payload.data(), sizeof cm);
+    const uint8_t* op = A.outbox[0].payload.data();
+    const uint8_t* cp = B.outbox[0].payload.data();
+    check(A.outbox[0].payload.size() == 130 && B.outbox[0].payload.size() == 146,
+          "C22 OPEN is 130 bytes and CONFIRM 146");
+    check(op[62] == 0xFE && op[63] == 0 && op[64] == 0 && op[65] == 0 && om.sessionCaps == A.caps,
+          "C22 OPEN carries A's word, little endian at offset 62");
+    check(cp[78] == 0xFF && cp[79] == 0 && cp[80] == 0x01 && cp[81] == 0 && cm.sessionCaps == B.caps,
+          "C22 CONFIRM carries B's word, little endian at offset 78");
+  }
+  check(sessOf(A)->peerSessionCaps == B.caps && sessOf(A)->peerSessionCapsConfirmed == 1,
+        "C22 A keeps B's word (reserved bit too), confirmed (from the CONFIRM)");
+  check(sessOf(B)->peerSessionCaps == A.caps && sessOf(B)->peerSessionCapsConfirmed == 0,
+        "C22 B keeps A's word, not yet confirmed (an OPEN can be a replayed copy)");
+  check(sealOpen(B, A) && sessOf(B)->peerSessionCapsConfirmed == 0,
+        "C22 B's own sealed frame does not confirm A's word");
+  check(sealOpen(A, B) && sessOf(B)->peerSessionCapsConfirmed == 1,
+        "C22 the first sealed frame from A confirms A's word on B");
+  check(keysMirror(), "C22 the session works both ways");
+
+  // C23 — the word is signed: a changed caps byte in OPEN is refused.
+  resetDevices();
+  use(A);
+  check(espnowSessionOpenInitiate(B.mac, "mesh") && A.outbox.size() == 1, "C23 setup: A sends OPEN");
+  {
+    Frame f = take(A);
+    f.payload[62] ^= 0x01;   // bond bit of A's word
+    deliver(f, B);
+    check(B.outbox.empty() && sessOf(B) == nullptr,
+          "C23 an OPEN whose caps byte changed gets no CONFIRM and no slot (FAILS WITHOUT THE RULE)");
+    check(logsContaining(B, "WARN", "signature") == 1, "C23 B says the signature does not match");
+  }
+
+  // C24 — the same for CONFIRM: A's slot is cleared.
+  resetDevices();
+  use(A);
+  check(espnowSessionOpenInitiate(B.mac, "mesh"), "C24 setup: A sends OPEN");
+  deliver(take(A), B);
+  {
+    Frame f = take(B);
+    check(f.type == ESPNOW_V4_TYPE_SESSION_CONFIRM, "C24 setup: B answers with CONFIRM");
+    f.payload[78] ^= 0x01;
+    deliver(f, A);
+    SessionState* sa = sessOf(A);
+    check(sa == nullptr || sa->state != SESSION_ACTIVE,
+          "C24 a CONFIRM whose caps byte changed does not make A ACTIVE (FAILS WITHOUT THE RULE)");
+    check(logsContaining(A, "WARN", "Ed25519 verify failed") == 1, "C24 A says the signature failed");
+  }
+
+  // C25 — a REKEY keeps the words on both sides.
+  resetDevices();
+  check(establish(), "C25 setup: session established");
+  gNow += kRekeyMinIntervalMs + 1000;
+  check(rekeyRound(A, B), "C25 a rekey round completes");
+  check(sessOf(A)->peerSessionCaps == B.caps && sessOf(B)->peerSessionCaps == A.caps &&
+        sessOf(A)->peerSessionCapsConfirmed == 1,
+        "C25 both words survive the rekey");
+
+  // C26 — a new handshake after the peer's word changed (a reflash) stores the
+  // new word; while it is in flight the slot holds no word.
+  B.caps = 0x000000FFu;
+  use(A);
+  check(espnowSessionOpenInitiate(B.mac, "mesh"), "C26 A re-handshakes over the live session");
+  check(sessOf(A)->state == SESSION_ESTABLISHING && sessOf(A)->peerSessionCaps == 0 &&
+        sessOf(A)->peerSessionCapsConfirmed == 0,
+        "C26 the ESTABLISHING slot keeps no word from the last session");
+  deliver(take(A), B);
+  deliver(take(B), A);
+  check(keysMirror() && sessOf(A)->peerSessionCaps == 0xFFu, "C26 the new word replaces the old");
+  B.caps = 0x000100FFu;
+
+  // C27 — the glare re-send signs the same word, and B takes it.
+  resetDevices();
+  use(B);
+  check(espnowSessionOpenInitiate(A.mac, "mesh"), "C27 setup: B opens");
+  use(A);
+  check(espnowSessionOpenInitiate(B.mac, "mesh"), "C27 setup: A opens too (glare)");
+  {
+    Frame lost = take(A);   // A's first OPEN is lost
+    deliver(take(B), A);    // B's OPEN reaches A: A keeps its own and sends it again
+    check(A.outbox.size() == 2 && A.outbox[1].type == ESPNOW_V4_TYPE_SESSION_OPEN &&
+          A.outbox[1].payload == lost.payload,
+          "C27 A's copy is byte for byte its first OPEN, caps included");
+    deliver(take(A), B);
+    deliver(take(B), A);
+    check(keysMirror() && sessOf(B)->peerSessionCaps == A.caps && sessOf(A)->peerSessionCaps == B.caps,
+          "C27 the copy verifies at B and both keep the other's word");
+  }
+
+  // C28 — golden transcripts: 75 and 91 bytes, the word last, little endian.
+  {
+    uint8_t initMac[6] = {1, 2, 3, 4, 5, 6}, respMac[6] = {7, 8, 9, 10, 11, 12};
+    uint8_t eph[32], nA[16], nB[16];
+    for (int i = 0; i < 32; i++) eph[i] = (uint8_t)(0x40 + i);
+    for (int i = 0; i < 16; i++) { nA[i] = (uint8_t)(0x80 + i); nB[i] = (uint8_t)(0xC0 + i); }
+    uint8_t ot[kOpenTranscriptLen + 1], ct[kConfirmTranscriptLen + 1];
+    std::memset(ot, 0xEE, sizeof ot);
+    std::memset(ct, 0xEE, sizeof ct);
+    buildOpenTranscript(ot, 0xBEEF, initMac, respMac, eph, nA, 0x12345678u);
+    buildConfirmTranscript(ct, 0xBEEF, respMac, initMac, eph, nA, nB, 0x9ABCDEF0u);
+    check(kOpenTranscriptLen == 75 && kConfirmTranscriptLen == 91, "C28 transcript lengths 75 and 91");
+    check(std::memcmp(ot, "v4-sopen:", 9) == 0 && ot[9] == 0xEF && ot[10] == 0xBE &&
+          std::memcmp(ot + 11, initMac, 6) == 0 && std::memcmp(ot + 17, respMac, 6) == 0 &&
+          std::memcmp(ot + 23, eph, 32) == 0 && std::memcmp(ot + 55, nA, 16) == 0 &&
+          ot[71] == 0x78 && ot[72] == 0x56 && ot[73] == 0x34 && ot[74] == 0x12 && ot[75] == 0xEE,
+          "C28 OPEN transcript: label, id, MACs, eph, nonceA, caps LE at 71..74, nothing past 75");
+    check(std::memcmp(ct, "v4-sconf:", 9) == 0 && ct[9] == 0xEF && ct[10] == 0xBE &&
+          std::memcmp(ct + 11, respMac, 6) == 0 && std::memcmp(ct + 17, initMac, 6) == 0 &&
+          std::memcmp(ct + 23, eph, 32) == 0 && std::memcmp(ct + 55, nA, 16) == 0 &&
+          std::memcmp(ct + 71, nB, 16) == 0 &&
+          ct[87] == 0xF0 && ct[88] == 0xDE && ct[89] == 0xBC && ct[90] == 0x9A && ct[91] == 0xEE,
+          "C28 CONFIRM transcript: ... nonceB, caps LE at 87..90, nothing past 91");
+  }
+#else
+  check(false, "the tree has no session capability word (HW1_SESSION_CAPS unset)");
+#endif
 
   check(gGuardDepth == 0, "no lock left held");
   std::printf("%u failure(s)\n", gFailures);

@@ -6399,7 +6399,7 @@ bool processOledInput() {
             BROADCAST_PRINTF("[OLED] Setting ESP-NOW name: %s", deviceName);
             // First set the name via command system
             char setnameCmd[48];
-            snprintf(setnameCmd, sizeof(setnameCmd), "espnowsetname %s", deviceName);
+            snprintf(setnameCmd, sizeof(setnameCmd), "devicename %s", deviceName);
             executeOledCommand(setnameCmd);
             if (gSettings.espnowDeviceName.length() > 0) {
               // Then initialize ESP-NOW via command system

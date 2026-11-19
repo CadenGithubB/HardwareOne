@@ -8,7 +8,7 @@
 //   * the 12-byte header: every field at its stated offset, round trip, and a
 //     payload that is too short;
 //   * planning: the part counts at the frame budgets of a direct and a routed
-//     path, every part within its frame, 472 bytes on both paths, 473 refused;
+//     path, every part within its frame, 536 bytes on both paths, 537 refused;
 //   * the round trip of a reading through the parts, with a part missing, out
 //     of order, repeated, of another reading, left open too long, and hostile
 //     counts and lengths (run under ASan);
@@ -88,7 +88,7 @@ static void testSensorTable() {
 
 static void testHeader() {
   CHECK(kReadingHeaderLen == 12);
-  CHECK(kPartMaxDirect == 190 && kPartMaxRouted == 118 && kReadingMaxBytes == 472 && kReadingMaxParts == 4);
+  CHECK(kPartMaxDirect == 190 && kPartMaxRouted == 134 && kReadingMaxBytes == 536 && kReadingMaxParts == 4);
   ReadingHeader h = {};
   h.sensorType = REMOTE_SENSOR_GPS;
   h.flags = kReadingFlagStreamStart;
@@ -125,10 +125,10 @@ static void testPlanning() {
   struct Case { size_t len; uint16_t cap; uint8_t parts; };
   const Case cases[] = {
     { 1, kFrameCapDirect, 1 },   { 190, kFrameCapDirect, 1 }, { 191, kFrameCapDirect, 2 },
-    { 380, kFrameCapDirect, 2 }, { 381, kFrameCapDirect, 3 }, { 472, kFrameCapDirect, 3 },
-    { 1, kFrameCapRouted, 1 },   { 118, kFrameCapRouted, 1 }, { 119, kFrameCapRouted, 2 },
-    { 236, kFrameCapRouted, 2 }, { 237, kFrameCapRouted, 3 }, { 354, kFrameCapRouted, 3 },
-    { 355, kFrameCapRouted, 4 }, { 472, kFrameCapRouted, 4 },
+    { 380, kFrameCapDirect, 2 }, { 381, kFrameCapDirect, 3 }, { 536, kFrameCapDirect, 3 },
+    { 1, kFrameCapRouted, 1 },   { 134, kFrameCapRouted, 1 }, { 135, kFrameCapRouted, 2 },
+    { 268, kFrameCapRouted, 2 }, { 269, kFrameCapRouted, 3 }, { 402, kFrameCapRouted, 3 },
+    { 403, kFrameCapRouted, 4 }, { 536, kFrameCapRouted, 4 },
   };
   for (const Case& c : cases) {
     PartPlan plan;
@@ -149,8 +149,8 @@ static void testPlanning() {
   }
   // One maximum on both paths; over it nothing is planned.
   PartPlan plan;
-  CHECK(!planParts(473, kFrameCapDirect, plan) && plan.count == 0);
-  CHECK(!planParts(473, kFrameCapRouted, plan));
+  CHECK(!planParts(537, kFrameCapDirect, plan) && plan.count == 0);
+  CHECK(!planParts(537, kFrameCapRouted, plan));
   CHECK(!planParts(0, kFrameCapDirect, plan));
   CHECK(!planParts(100, kReadingHeaderLen, plan));  // no room for data at all
   CHECK(!planParts(100, 0, plan));
@@ -238,7 +238,7 @@ static void testAssembly() {
   // A middle part is missing: nothing completes, and the reading is given up once.
   {
     Receiver rx;
-    const std::vector<Part> parts = partsOf(jsonOf(472), kFrameCapRouted, REMOTE_SENSOR_TOF, 7, 100);
+    const std::vector<Part> parts = partsOf(jsonOf(536), kFrameCapRouted, REMOTE_SENSOR_TOF, 7, 100);
     CHECK(rx.feed(parts[0], 10).verdict == PartVerdict::Stored);
     PartResult r = rx.feed(parts[2], 11);
     CHECK(r.verdict == PartVerdict::Dropped && r.incomplete == 1 && !rx.a.open);
@@ -266,7 +266,7 @@ static void testAssembly() {
   // A part repeated, a part out of order, a part of another reading.
   {
     Receiver rx;
-    const std::vector<Part> parts = partsOf(jsonOf(472), kFrameCapRouted, REMOTE_SENSOR_TOF, 7, 100);
+    const std::vector<Part> parts = partsOf(jsonOf(536), kFrameCapRouted, REMOTE_SENSOR_TOF, 7, 100);
     CHECK(rx.feed(parts[0], 10).verdict == PartVerdict::Stored);
     CHECK(rx.feed(parts[1], 10).verdict == PartVerdict::Stored);
     PartResult r = rx.feed(parts[1], 11);  // repeated: the reading cannot be trusted any more
@@ -362,7 +362,7 @@ static void testAssembly() {
     r = partAccept(rx.a, rx.buf.data(), kReadingMaxBytes - 1, good[0].h, good[0].data.data(), good[0].data.size(), 50,
                    &out, &outLen);
     CHECK(r.verdict == PartVerdict::Malformed);  // a buffer that is too small is never written
-    // Parts that say "four of 190 bytes each": the fourth would pass 472 bytes.
+    // Parts that say "four of 190 bytes each": the third would pass 536 bytes.
     std::vector<uint8_t> big(kPartMaxDirect, 'y');
     Part q;
     q.h = ReadingHeader{};
@@ -806,7 +806,7 @@ static void testFingerprintArg() {
 // 2026-11-18: a request for ToF and IMU used to start IMU only).
 static void testStreamCtrlQueue() {
   StreamCtrlQueue q = {};
-  uint16_t on = 0xFFFF, off = 0xFFFF;
+  SensorMask on = 0xFFFFFFFFu, off = 0xFFFFFFFFu;
   streamCtrlTake(q, &on, &off);
   CHECK(on == 0 && off == 0);
   streamCtrlPut(q, REMOTE_SENSOR_TOF, true);

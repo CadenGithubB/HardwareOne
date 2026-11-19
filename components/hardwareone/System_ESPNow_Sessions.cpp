@@ -95,6 +95,8 @@ SessionState* sessionAllocate(const uint8_t peerMac[6], uint8_t meshId) {
     existing->rxSeqHighWater = 0;
     existing->rxSeqBitmap = 0;
     existing->establishedAtMs = 0;
+    existing->peerSessionCaps = 0;          // the new handshake brings the peer's word
+    existing->peerSessionCapsConfirmed = 0;
     existing->lastUseMs = (uint32_t)millis();
     return existing;
   }
@@ -413,6 +415,9 @@ bool sessionUnwrapFrame(SessionState* s,
   }
   *outPlainLen = cipherLen;
   s->lastUseMs = (uint32_t)millis();
+  // The peer holds this session's keys, so the capability word its OPEN
+  // carried is its current one, not a replayed copy (SessionCapsCore.h).
+  s->peerSessionCapsConfirmed = 1;
   return true;
 }
 

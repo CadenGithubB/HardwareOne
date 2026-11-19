@@ -65,6 +65,32 @@ BOND_OPCODES = ('BOND_HEARTBEAT', 'BOND_STREAM_CTRL', 'BOND_CAP_REQ', 'BOND_CAP_
 # them has no second block.
 BOND_AGREEMENT_OPCODES = ('BOND_REQUEST', 'BOND_NOTICE')
 
+# The receive table's minimum payload length per opcode (System_ESPNow_Wire.h,
+# ESPNOW_V4_MINLEN_*), and the six exact-length handshake rows. These are the
+# 1.0 values and they never rise: a frame of a 1.0 sender must stay accepted
+# by every later receiver. A struct that grows after 1.0 keeps its row's value
+# here; a test failure that asks for a larger number is the bug, not this table.
+EXPECTED_MINLEN = {
+    'KEY_EX_HELLO': 72, 'KEY_EX_REPLY': 72, 'KEY_EX_CONFIRM': 18,
+    'SESSION_OPEN': 130, 'SESSION_CONFIRM': 146, 'SESSION_REKEY': 130,
+    'SESSION_UNKNOWN': 12, 'TIME_SYNC': 16,
+    'TEXT': 1, 'BOOT': 1, 'CMD': 1, 'CMD_RESP': 1, 'USER_SYNC': 1, 'STREAM': 1,
+    'RELAY_DATA': 40, 'PEER_LIST': 4, 'HEARTBEAT': 44, 'PAIR_BEACON': 36,
+    'PAIR_REQUEST': 40, 'PAIR_ACCEPT': 40, 'PAIR_REJECT': 40,
+    'SENSOR_STATUS': 16, 'SENSOR_REQ': 16, 'SUBSCRIBE_UPDATE': 16, 'BOND_SENSOR_STATUS': 16,
+    'SENSOR_ENVELOPE': 13, 'BOND_SENSOR_DATA': 13,
+    'POWER_STATUS': 24, 'BOND_POWER_STATUS': 24, 'EVENT_PUSH': 128, 'BOND_EVENT_PUSH': 128,
+    'FORWARD_LINK': 96, 'TOPO_REQ': 8, 'TOPO_START': 8, 'TOPO_PEER': 46,
+    'METADATA_REQ': 0, 'BOND_CAP_REQ': 0, 'SETTINGS_REQ': 0, 'SCHEMA_REQ': 0, 'BOND_STATUS_REQ': 0,
+    'MANIFEST_REQ': 0, 'METADATA_RESP': 202, 'METADATA_PUSH': 202,
+    'FILE_START': 72, 'FILE_DATA': 3, 'FILE_END': 5, 'FILE_CANCEL': 1,
+    'FS_LIST_REQ': 144, 'FS_LIST_REPLY': 140, 'FS_STAT_REQ': 140, 'FS_GET_REQ': 140, 'FS_GET_ACK': 140,
+    'FS_STAT_REPLY': 164, 'BOND_HEARTBEAT': 24, 'BOND_STREAM_CTRL': 4, 'BOND_CAP_RESP': 84,
+    'BOND_STATUS_RESP': 28, 'BOND_REQUEST': 8, 'BOND_NOTICE': 8,
+}
+EXACT_LENGTH = ('KEY_EX_HELLO', 'KEY_EX_REPLY', 'KEY_EX_CONFIRM', 'SESSION_OPEN', 'SESSION_CONFIRM', 'SESSION_REKEY')
+ROW = r'\{\s*ESPNOW_V4_TYPE_(\w+)\s*,([^,]*),\s*(ESPNOW_V4_MINLEN_\w+)\s*,\s*(\w+)\s*\}'
+
 
 def main():
     p = argparse.ArgumentParser(description=__doc__,
@@ -91,6 +117,9 @@ def main():
     types = '\n'.join(extract_block(wire, marker) + ';' for marker in
                       ('enum EspNowV4Type', 'enum EspNowV4Flags',
                        'struct __attribute__((packed)) EspNowV4Header'))
+    minlen_defines = re.findall(r'^#define ESPNOW_V4_MINLEN_\w+\b.*$', wire, re.MULTILINE)
+    assert minlen_defines, 'System_ESPNow_Wire.h has no ESPNOW_V4_MINLEN_* constants (the table has no minLen column)'
+    types += '\n' + '\n'.join(minlen_defines)
     ctx = extract_block(rxctx, 'struct V4RxCtx') + ';'
     # The policy slice carries every V4_OPC_FLAG_* constant, so the harness never
     # names one that the overlay may lack.
@@ -131,6 +160,14 @@ def main():
                          '  ++gBootSeenCalls;\n}\n'
                          + extract_block(source, 'static void v4h_boot('))
         real_handlers.append('v4h_boot')
+    # SUBSCRIBE_UPDATE's handler runs for real: a longer frame and reserved
+    # bytes that are not 0 still reach the subscription store (a double).
+    if 'static void v4h_subscribe_update(' in source:
+        text_handler += ('\n\n' + extract_block(wire, 'struct __attribute__((packed)) V4PayloadSubscribe') + ';\n'
+                         'static bool peerIdentitySetSubscriptions(const uint8_t*, uint32_t mask) {\n'
+                         '  ++gSubscribeCalls;\n  ++gHandlerCalls;\n  gSubscribeMask = mask;\n  return true;\n}\n'
+                         + extract_block(source, 'static void v4h_subscribe_update('))
+        real_handlers.append('v4h_subscribe_update')
     # The SESSION_UNKNOWN row's handler runs for real when the tree has it; the
     # rule behind it is a recording double (espnow_peer_restart_tests runs it).
     if 'static void v4h_session_unknown(' in source:
@@ -167,8 +204,24 @@ def main():
         f'bond agreement rows changed, update BOND_AGREEMENT_OPCODES: {agreement_rows}'
     agreement_opcodes = '\n'.join(f'  ESPNOW_V4_TYPE_{name},' for name in agreement_rows)
 
-    handlers = sorted(set(re.findall(r'\{\s*ESPNOW_V4_TYPE_\w+\s*,[^,]*,\s*(\w+)\s*\}', table)))
+    rows = re.findall(ROW, table)
+    assert rows, 'no handler rows with a minLen column found in kV4HandlerTable'
+    all_rows = re.findall(r'\{\s*ESPNOW_V4_TYPE_(\w+)\s*,', table)
+    assert sorted(all_rows) == sorted(r[0] for r in rows), 'every kV4HandlerTable row has a minLen column'
+    for name, flags, minlen, _handler in rows:
+        assert minlen == f'ESPNOW_V4_MINLEN_{name}', f'the {name} row names its own minimum: {minlen}'
+        assert name in EXPECTED_MINLEN, f'a new row {name}: add its 1.0 minimum to EXPECTED_MINLEN'
+        exact = 'V4_OPC_LEN_EXACT' in flags
+        assert exact == (name in EXACT_LENGTH), f'V4_OPC_LEN_EXACT is on exactly the six handshake rows ({name})'
+    handlers = sorted(set(r[3] for r in rows))
     assert handlers, 'no handler rows found in kV4HandlerTable'
+    bond_names = set(BOND_OPCODES) | set(BOND_AGREEMENT_OPCODES)
+    def minlen_rows(names):
+        return '\n'.join(f'  {{ ESPNOW_V4_TYPE_{n}, {EXPECTED_MINLEN[n]}, {"true" if n in EXACT_LENGTH else "false"} }},'
+                          for n in names)
+    present = [r[0] for r in rows]
+    expected_minlen = (minlen_rows(n for n in present if n not in bond_names) + '\n#if ENABLE_BONDED_MODE\n' +
+                       minlen_rows(n for n in present if n in bond_names) + '\n#endif')
     assert 'v4h_text' in handlers, 'the TEXT row must name v4h_text'
     stubs = '\n'.join(f'static void {name}(const V4RxCtx& ctx) {{ noteHandler("{name}", ctx); }}'
                       for name in handlers if name not in real_handlers)
@@ -195,7 +248,8 @@ def main():
                        ('// INSERT_DISPATCH', dispatch),
                        ('// INSERT_DRAIN', drain),
                        ('// INSERT_OPCODE_NAMES', names),
-                       ('// INSERT_ZERO_FLAG_ALLOWED', allowed)]:
+                       ('// INSERT_ZERO_FLAG_ALLOWED', allowed),
+                       ('// INSERT_EXPECTED_MINLEN', expected_minlen)]:
         assert harness.count(tag) == 1, tag
         harness = harness.replace(tag, value)
 

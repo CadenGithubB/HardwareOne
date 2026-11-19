@@ -74,6 +74,7 @@ Adafruit_PWMServoDriver
 BLEAddress
 BLEAdvertisedDevice
 BLEAdvertisedDeviceCallbacks
+BLEAdvertisementData
 BLEAdvertising
 BLECharacteristic
 BLECharacteristicCallbacks

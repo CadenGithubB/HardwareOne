@@ -9,6 +9,7 @@
 // System_ESPNow.h to time the HEARTBEAT+ACK round-trip directly.
 
 #include "G2_Page_ESPNow.h"
+#include "System_DeviceName.h"  // devicename::kMaxLen (the device name's 31 bytes)
 
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
 
@@ -1029,7 +1030,7 @@ static void nameThenOpenCommit(const char* text) {
     showMainMenu();
     return;
   }
-  String line = String("espnowsetname \"") + text + "\"";
+  String line = String("devicename \"") + text + "\"";
   G2CmdCookie cookie = buildCookie();
   if (!g2SubmitHijackCommand(line.c_str(), cookie, onNameThenOpenDone, nullptr)) {
     DEBUG_G2F("[G2-ESP-NOW-APP] name-then-open: setname submit FAILED");
@@ -1041,7 +1042,7 @@ static bool beginNameThenOpenEntry() {
   TextEntryConfig cfg = {};
   cfg.prompt   = "ESPNow Name";
   cfg.initial  = gSettings.espnowDeviceName.c_str();
-  cfg.maxLen   = 19;  // V4 wire field is 20 bytes including NUL
+  cfg.maxLen   = devicename::kMaxLen;  // the device name (31 bytes; 32-byte wire field)
   cfg.onCommit = nameThenOpenCommit;
   cfg.onCancel = nameThenOpenCancel;
   if (!g2BeginTextEntry(cfg)) {

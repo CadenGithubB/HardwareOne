@@ -115,7 +115,7 @@ Note: read the global on/off via `automation system status json`, not from
 | Command (+`json`) | Reply shape |
 |---|---|
 | `blestatus` (alias `bleread`) | `{"schema":1,"initialized","state","activeConnections","maxConnections","totalConnections","commandsReceived","responsesSent","connections":[{"index","connId","authed","user","mac","connectedSec","commands"}],"link":{...},"phoneLink"?:{...},"hint"?}`; the console keys from `state` to `connections` are present only while `initialized` (the app console server runs; the console on the phone link shows only in `link` and `phoneLink`). `link` and `hint`: sec. 11.3; `phoneLink` (pipe builds): sec. 11.9 |
-| `bleinfo` | `buildBleInfoJson`'s 13 keys (`schema`, `deviceName`, `txPower`, `autoStart`, `requireAuth`, `secureChannelRequired`, `initialized`, `state`, `connections`, `maxConnections`, `totalConnections`, `commandsReceived`, `clients`), plus `phoneLink` (full form, sec. 11.9) in pipe builds. Errors: `{"error":"oom"}`, `"unavailable"`, `"status too large"` |
+| `bleinfo` | `buildBleInfoJson`'s 13 keys (`schema`, `deviceName` (the one device name, `devicename`; `HardwareOne-XXXXXX` when none is set), `txPower`, `autoStart`, `requireAuth`, `secureChannelRequired`, `initialized`, `state`, `connections`, `maxConnections`, `totalConnections`, `commandsReceived`, `clients`), plus `phoneLink` (full form, sec. 11.9) in pipe builds. Errors: `{"error":"oom"}`, `"unavailable"`, `"status too large"` |
 | `wifistatus` (alias `wifiread`) | `{"schema":1,"connected","ssid","ip","rssi","mac"}` or `{"schema":1,"connected":false,"savedSsid"?,"mac"}` (`savedSsid` is omitted when the saved list cannot be read) |
 | `wifilist` | `{"schema":1,"networks":[{"index","priority","ssid","hidden","primary"}],"count"}` |
 | `mqttstatus` | `{"schema":1,"enabled","connected","host","port","user","baseTopic","publishIntervalMs","lastError"?}` |
@@ -154,13 +154,13 @@ Note: read the global on/off via `automation system status json`, not from
 | `espnowrooms` | `{"schema":1,"rooms":[{"room","devices":[{"name","tags","online","accepted","pendingTags"?}]}],"count","notShown"?}` |
 | `espnowgroups` (or `espnowgroups json <name_or_mac>`; admin) | `{"schema":1,"peers":[{"mac","name","room","tags","acceptedRoom","acceptedTags","pendingRoom","pendingTags"}],"count","pendingCount","notShown"?}` |
 | `espnowgroupaccept json <name_or_mac\|all>` / `espnowgroupdrop json <name_or_mac\|all>` (admin; `json` leads) | `{"schema":1,"peers":[{"mac","name","room","tags","acceptedRoom","acceptedTags","pendingRoom","pendingTags","changed"}],"ok","count","changed","saved","error"?,"notShown"?}` |
-| `espnowsessions` | `{"schema":1,"sessions":[{"slot","mac","meshId","sessionId","dir","state","ageMs","txSeq","rxHwm"}]}` |
+| `espnowsessions` | `{"schema":1,"selfCaps":[...],"sessions":[{"slot","mac","meshId","sessionId","dir","state","ageMs","txSeq","rxHwm","caps"?,"capsWord"?}],"more"?}` - `meshId` is the mesh slot index. `selfCaps` / `caps`: the names of the capability bits set in this device's / the peer's session word (`bond`, `remote_fs`, `file_receive`, `sensor_send`, `collect`, `relay_forward`, `time_master`, `session_unknown`); `caps` and `capsWord` (the whole 32-bit word, reserved bits included) only for an ACTIVE or REKEY session. `more`?: present only when the list did not fit the reply (about 13 sessions with every capability set); the number of sessions left out at the end |
 | `espnowrouterstats` | `{"schema":1,"messagesSent","messagesReceived","messagesFailed","v4FragTx","v4FragRx","reassembled","reassemblyGc","reassemblyTimeouts","nextMessageId"}` |
 | `espnowsubs` | `{"schema":1,"peers":[{"mac","meshId","subs"}]}` - `subs` is a 32-bit bitmask int |
 | `espnowidentity` | `{"schema":1,"valid","mac","pub","createdAtSec","regenCount"}` |
 | `espnowmeshmetrics` | `{"schema":1,"mode","activePeers","ttl","adaptiveTtl"}` |
 | `ring status` | `{"schema":1,"connected","name","mtu","rx","upMs","scanFound"}` (no address) |
-| `espnowmeshstatus` / `espnowlist` / `espnowstats` | already JSON (pre-existing) |
+| `espnowmeshstatus` / `espnowlist` / `espnowstats` | already JSON (pre-existing). `espnowstats json` adds `rxLengthDrops`, `rxMustUnderstandDrops`, `rxUnknownMeshIdDrops` and, once it is nonzero, `rxUnknownMeshIdLast` (the last mesh id dropped) and `rxUnknownMeshIdLastMac` |
 
 ### ESP-NOW peer metadata is pull-only
 - **Self** = `espnowdeviceinfo json`; **peers** = `espnowdevices json`.
@@ -318,7 +318,7 @@ contract in sec. 6 is **unchanged**.)
   `counter` (the sender's: with its MAC and the sensor they name one reading), `received`, `lost`, `late`, `repeated`, `restarts`,
   `resumes` and `incomplete`. `lost - late` is what never arrived; `incomplete` counts readings of
   that sender (any sensor) of which a frame was missing, and is part of `lost`. `data` is at most
-  472 bytes.
+  536 bytes.
 - `espnowsensorstatus json`: `role` is `worker`, `backup` or `master`. On every device: `targets`
   (the masters named on this device that are paired: `kind` `primary` or `backup`, `mac`, `name`,
   `session`), `masterNamed`, `battery` (`sends`, `whyNot`, `intervalS`, `sent`, `lastSentAgoS`),

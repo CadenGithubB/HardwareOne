@@ -1190,6 +1190,64 @@ static void caseOldFirmwarePartner() {
   CHECK(gDev[1].local.role == kRoleWorker && !gDev[0].s.roleConflict && lineCount(0, Line::RoleConflict) == 0);
 }
 
+// The partner's session capability word lacks the bond bit (its build has no
+// bond mode): planRequest sends nothing and starts no handshake, a confirmed
+// word declines with kReasonNoBondBuild once (one line, also over several
+// sessions), an unconfirmed one only holds the request, onSessionUp does not
+// make it online, and a session whose word has the bit ends the decline.
+static void caseNoBondBuild() {
+  State s = {};
+  Local local = {};
+  local.bonded = true;
+  std::memcpy(local.partner, "\x02\x00\x00\x00\x00\x0A", 6);
+  local.partnerNoBond = true;
+  local.partnerNoBondConfirmed = true;
+  reset(s);
+  uint32_t now = 1000;
+  // A request is due; the session is ACTIVE; the hook has not run yet.
+  RequestPlan plan = planRequest(s, local, now, true);
+  CHECK(!plan.send && !plan.kickHandshake && plan.noBondBuildLine);
+  CHECK(s.agreement == Agreement::Declined && s.reason == kReasonNoBondBuild && !s.requestDue);
+  CHECK(std::strcmp(reasonKey(kReasonNoBondBuild), "no_bond_build") == 0);
+  CHECK(std::strstr(reasonPhrase(kReasonNoBondBuild), "built without bond mode") != nullptr);
+  CHECK(kReasonNoBondBuild > kReasonRoleConflict);   // never on the wire
+  // The hook: not online.
+  CHECK(!onSessionUp(s, now, false, false));
+  // An hour of ticks, with and without the session: nothing sent, no kick, one line.
+  int lines = 1;
+  for (uint32_t t = 0; t < 3600000; t += 1000) {
+    now += 1000;
+    const bool session = (t / 600000) % 2 == 0;
+    if (!hasWork(s, now)) continue;
+    plan = planRequest(s, local, now, session);
+    CHECK(!plan.send && !plan.kickHandshake);
+    lines += plan.noBondBuildLine;
+  }
+  CHECK(lines == 1);
+  // A new session with the same word: no line, still nothing.
+  CHECK(!onSessionUp(s, now, true, false));
+  plan = planRequest(s, local, now + kRequestRepeatMs, true);
+  CHECK(!plan.send && !plan.noBondBuildLine);
+  // reset() (a settings change) with the session up: no request; the user is told again.
+  reset(s);
+  plan = planRequest(s, local, now, true);
+  CHECK(!plan.send && plan.noBondBuildLine);
+  // A word that is not confirmed holds the request without a verdict.
+  State u = {};
+  reset(u);
+  Local unconfirmed = local;
+  unconfirmed.partnerNoBondConfirmed = false;
+  plan = planRequest(u, unconfirmed, now, true);
+  CHECK(!plan.send && !plan.kickHandshake && !plan.noBondBuildLine && u.agreement == Agreement::Unknown);
+  // Reflashed with bond mode: the session's word has the bit.
+  local.partnerNoBond = false;
+  local.partnerNoBondConfirmed = false;
+  CHECK(onSessionUp(s, now, false, true));
+  CHECK(s.agreement == Agreement::Unknown && s.reason == kReasonNone && s.requestDue);
+  plan = planRequest(s, local, now, true);
+  CHECK(plan.send);
+}
+
 int main() {
   caseMutual();
   caseOneSided();
@@ -1217,6 +1275,7 @@ int main() {
   caseBondconnectUsesPeerChoice();
   caseNoChoiceNoSwitch();
   caseOldFirmwarePartner();
+  caseNoBondBuild();
   std::printf("espnow_bond_agree_core: %u checks passed\n", gChecks);
   return 0;
 }

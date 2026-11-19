@@ -228,15 +228,17 @@ static void forwardLinkIngest(const uint8_t* src, const char* srcName, const uin
   const bool partnerPaired = fwdPairedKey(f.partnerMac, pairedKey);
   const bool keyMatches = partnerPaired && memcmp(pairedKey, f.partnerKey, 32) == 0;
   // The name shown for the partner: this device's own for a paired partner,
-  // else the announced one (cleaned; its address when empty).
-  char shown[33] = "";
+  // else the announced one when it passes the device-name rule (never cut or
+  // cleaned); its address otherwise. Only an announced name can be taken.
+  char shown[devicename::kFieldLen] = "";
+  bool announcedName = false;
   if (partnerPaired) {
     fwdNameOf(f.partnerMac, shown, sizeof(shown));
   } else {
-    espnowsensor::wireTextCopy(f.partnerName, sizeof(f.partnerName), shown, sizeof(shown));
-    if (!shown[0]) macToDisplay(f.partnerMac, shown, sizeof(shown));
+    announcedName = devicename::getField(f.partnerName, sizeof(f.partnerName), shown);
+    if (!announcedName) macToDisplay(f.partnerMac, shown, sizeof(shown));
   }
-  const bool nameTaken = !partnerPaired && fwdNameTaken(shown);
+  const bool nameTaken = announcedName && fwdNameTaken(shown);
   // Any paired device may announce (the receive table lets only paired
   // devices' session frames through): the same rule as for its own readings.
   uint8_t result = espnowfwd::announceCheck(f, src, self, receives, partnerPaired, keyMatches, nameTaken);
@@ -359,7 +361,7 @@ void espnowForwardResumeTaken(const uint8_t via[6], uint8_t streamId) {
   espnowfwd::ForwardLink* e = fwdFind(via);
   if (!e || streamId >= espnowfwd::kStreamIdCount) return;
   FWD_LOCK();
-  e->resumeMask = (uint16_t)(e->resumeMask & ~(1u << streamId));
+  e->resumeMask = (espnowsensor::SensorMask)(e->resumeMask & ~(1u << streamId));
   FWD_UNLOCK();
 }
 

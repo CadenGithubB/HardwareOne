@@ -414,7 +414,6 @@ struct Settings {
       sessionIdleUart(0),
       bleAutoStart(false),  // BLE server is opt-in; the "G2 Companion" archetype (or Advanced setup) enables it
       bleRequireAuth(true),
-      bleDeviceName("HardwareOne"),
       bleTxPower(3),
       bleMode(kBleModeDefaultForBuild),
       c6AutoRecover(true),
@@ -769,7 +768,7 @@ struct Settings {
   bool espnowCaptureToSd;              // Master toggle: save ESP-NOW frames to SD
   bool espnowCaptureSkipHeartbeats;    // Skip type 7 HEARTBEAT and 14 BOND_HEARTBEAT
   // ESP-NOW device identity
-  String espnowDeviceName;             // Device name for ESP-NOW topology (user-configurable)
+  String espnowDeviceName;             // THE device name (System_DeviceName.h; set with 'devicename'): ESP-NOW name, BLE name, Wi-Fi hostname
   // ESP-NOW device metadata (for mesh organization and HA discovery)
   String espnowRoom;                   // Room assignment: "Kitchen", "Bedroom", etc.
   String espnowZone;                   // Sub-location within room: "Counter", "Door", "Ceiling"
@@ -822,9 +821,10 @@ struct Settings {
   // ============================================================================
   // A device can belong to up to N_MESHES independent meshes simultaneously
   // (home + work + lab, etc.). Each mesh has its own passphrase, group key,
-  // and peer set. The V4 frame header carries a `meshFingerprint` (CRC16 of
-  // the label) so receivers know which mesh a frame belongs to regardless
-  // of local-index differences between devices.
+  // and peer set. The V4 frame header carries a `meshFingerprint` (the mesh
+  // id, derived from the mesh key: System_ESPNow_MeshIdCore.h) so receivers
+  // know which mesh a frame belongs to regardless of local-index differences
+  // between devices.
   //
   // meshes[0] is the "primary" mesh. A device can participate in up to N_MESHES
   // independent meshes simultaneously.
@@ -834,7 +834,7 @@ struct Settings {
     String   label;                    // Human-readable name, e.g. "primary", "work"
     String   passphrase;               // User-typed (raw). 3.6 will remove this from persistence — only ever
                                        //   held in RAM long enough to (re)compute passphraseStretchedKey.
-    uint16_t fingerprint;              // CRC16-CCITT of label — stamped in V4 header meshFingerprint
+    uint16_t fingerprint;              // the mesh id (System_ESPNow_MeshIdCore.h): from the mesh key, 0 = none; stamped in V4 header meshFingerprint; stored as "meshId"
     bool     enabled;                  // Inactive meshes are skipped in heartbeat emission, RX validation
     bool     isDefault;                // The mesh new pairings join unless overridden
     // 32-byte mesh master key: PBKDF2-HMAC-SHA256(passphrase,
@@ -881,7 +881,7 @@ struct Settings {
   // to the master named on it (bondforward; off by default), these sensors only
   // (bit i: sensor i; default every sensor but input).
   bool bondForwardToMesh;
-  uint16_t bondForwardSensors;
+  uint32_t bondForwardSensors;  // espnowsensor::SensorMask (32 bits)
 #endif
   // ESP-NOW buffer size settings (runtime tuning)
   // NOTE: kept OUTSIDE the #if ENABLE_AUTOMATION block so the always-compiled
@@ -1188,7 +1188,6 @@ struct Settings {
   // Bluetooth settings
   bool bleAutoStart;      // Auto-start Bluetooth at boot (enables BLE server)
   bool bleRequireAuth;    // Require login before accepting BLE commands (always required, per-connection)
-  String bleDeviceName;         // BLE advertised device name (default: "HardwareOne")
   int bleTxPower;               // BLE TX power level 0-7 (0=min, 7=max, default: 3)
   int bleMode;                  // BLE role: 0=Server, 1=G2 central (+ optional phone), 2=phone-only central.
   // ESP32-C6 radio companion (P4X-EYE; the fields exist on every build so the
@@ -1646,6 +1645,7 @@ extern const SettingsModule micSettingsModule;
 extern const SettingsModule edgeImpulseSettingsModule;
 extern const SettingsModule espsrSettingsModule;
 extern const SettingsModule clockSettingsModule;
+extern const SettingsModule deviceSettingsModule;
 extern const SettingsModule sensorLogSettingsModule;
 extern const SettingsModule systemLogSettingsModule;
 extern const SettingsModule batteryLogSettingsModule;

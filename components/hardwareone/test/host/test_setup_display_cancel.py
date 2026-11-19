@@ -58,6 +58,7 @@ def generate(component: Path = COMPONENT) -> str:
         "#if ENABLE_WIFI\n" + first[cache_start:cache_end],
         extract_block(first, "bool getOledWifiSelection("),
         extract_block(oled, "static bool wizardNextRequested("),
+        extract_block(oled, "static bool oledAskDeviceName("),
         extract_block(oled, "bool handleWizardPageInput("),
         extract_block(mode, "static WizardSubMode subModeForPage("),
         extract_block(mode, "static void wizardMode_onTick("),

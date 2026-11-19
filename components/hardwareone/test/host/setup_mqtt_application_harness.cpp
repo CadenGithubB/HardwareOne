@@ -95,6 +95,11 @@ static void broadcastOutput(const char*) {}
 static void appendPromptTo(char*, size_t) {}
 static void clearWizardWifiChoices() { ++clearCalls; }
 static char* getWizardDeviceNameBuf() { return deviceName; }
+// The wizard's checked name setter (System_SetupWizard.cpp; the rule is System_DeviceName.h).
+[[maybe_unused]] static const char* wizardSetDeviceName(const char* typed) {
+  std::snprintf(getWizardDeviceNameBuf(), 21, "%s", typed);
+  return nullptr;
+}
 static bool writeSettingsJson() { ++saveCalls; return true; }
 static bool startMqtt() { ++startCalls; return true; }
 static CliModeInputResult unrelatedPage(const String&, char*, size_t) {

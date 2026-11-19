@@ -11,7 +11,7 @@
 // The owner (System_ESPNow_PowerEvents.cpp) holds the state and the locks.
 //
 // Both frames are one ordinary session frame, also through a relay (24 and
-// 128 bytes of the 130 a routed frame carries). Each carries the sender's
+// 128 bytes of the 146 a routed frame carries). Each carries the sender's
 // boot tag and a counter of its own, judged by the receiver with the counter
 // rule of the readings (System_ESPNow_SensorCore.h): the same value goes to
 // the primary and the backup master, so what two masters kept can be merged

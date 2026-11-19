@@ -100,7 +100,7 @@ def check_sources(component: Path) -> None:
             require(re.search(rf"\b{name}\b", code) is None, f"{path.name}: {name} is gone")
     espnow = (component / "System_ESPNow.cpp").read_text()
     table = strip_comments(extract_block(espnow, "static const V4OpcodeEntry kV4HandlerTable[]"))
-    row = re.search(r"\{\s*ESPNOW_V4_TYPE_TIME_SYNC\s*,([^,]*),\s*(\w+)\s*\}", table)
+    row = re.search(r"\{\s*ESPNOW_V4_TYPE_TIME_SYNC\s*,([^,]*),\s*ESPNOW_V4_MINLEN_TIME_SYNC\s*,\s*(\w+)\s*\}", table)
     require(row is not None, "kV4HandlerTable has a TIME_SYNC row")
     flags = {flag.strip() for flag in row.group(1).split("|")}
     require(flags == {"V4_OPC_FLAG_REQ_PAIRED", "V4_OPC_FLAG_REQ_SESSION_ENC"},

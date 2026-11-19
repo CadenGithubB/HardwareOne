@@ -311,6 +311,7 @@ set(hardwareone_srcs
         System_BondedPeer.cpp
         System_MeshPeers.cpp
         System_SelfDevice.cpp
+        System_DeviceName.cpp
         System_Clock.cpp
         System_NTP.cpp
         network/wifi/System_WiFiNetworks.cpp

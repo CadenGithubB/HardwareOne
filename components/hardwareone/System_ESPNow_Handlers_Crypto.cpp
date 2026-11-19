@@ -19,6 +19,8 @@
 #include "System_ESPNow_HandshakeBackoff.h"
 #include "System_ESPNow_Identity.h"
 #include "System_ESPNow_MeshKeys.h"
+#include "System_ESPNow_Sensors.h"         // sensorTypeInThisBuild: the sensor_send capability
+#include "System_ESPNow_SessionCapsCore.h"  // the session capability word
 #include "System_ESPNow_Sessions.h"
 #include "System_ESPNow_Wire.h"
 #include "System_CommandTypes.h"   // ExecReq::DeferredFn
@@ -231,7 +233,7 @@ static void sendKeyExConfirm(const uint8_t peerMac[6], uint16_t meshFingerprint,
   const auto& self = espnowIdentityGet();
   if (self.valid) memcpy(conf.pubFingerprint, self.pub, 8);
   v4_send_frame(peerMac, ESPNOW_V4_TYPE_KEY_EX_CONFIRM,
-                ESPNOW_V4_FLAG_HANDSHAKE | ESPNOW_V4_FLAG_ACK_REQ,
+                ESPNOW_V4_FLAG_ACK_REQ,
                 generateMessageId(),
                 reinterpret_cast<const uint8_t*>(&conf), sizeof(conf), 1);
 }
@@ -266,12 +268,10 @@ static uint16_t sessionRejectLogCount(const uint8_t mac[6]) {
 // ============================================================================
 
 void v4hKeyExHello(const V4RxCtx& ctx) {
-  if (ctx.payloadLen != sizeof(V4PayloadKeyExHello)) {
-    WARN_ESPNOWF("KEY_EX_HELLO: bad payload size %u (want %u)",
-                 (unsigned)ctx.payloadLen, (unsigned)sizeof(V4PayloadKeyExHello));
-    return;
-  }
-  const auto* msg = reinterpret_cast<const V4PayloadKeyExHello*>(ctx.payload);
+  // The receive table admits exactly 72 bytes (V4_OPC_LEN_EXACT).
+  V4PayloadKeyExHello hello;
+  ctx.read(hello);
+  const V4PayloadKeyExHello* msg = &hello;
 
   const uint8_t* bootKey = nullptr;
   int meshSlot = verifyKeyExPayload(ctx, msg->meshFingerprint,
@@ -380,17 +380,16 @@ void v4hKeyExHello(const V4RxCtx& ctx) {
   }
 
   v4_send_frame(msg->senderMac, ESPNOW_V4_TYPE_KEY_EX_REPLY,
-                ESPNOW_V4_FLAG_HANDSHAKE | ESPNOW_V4_FLAG_ACK_REQ,
+                ESPNOW_V4_FLAG_ACK_REQ,
                 generateMessageId(),
                 reinterpret_cast<const uint8_t*>(&reply), sizeof(reply), 1);
 }
 
 void v4hKeyExReply(const V4RxCtx& ctx) {
-  if (ctx.payloadLen != sizeof(V4PayloadKeyExReply)) {
-    WARN_ESPNOWF("KEY_EX_REPLY: bad payload size %u", (unsigned)ctx.payloadLen);
-    return;
-  }
-  const auto* msg = reinterpret_cast<const V4PayloadKeyExReply*>(ctx.payload);
+  // The receive table admits exactly 72 bytes (V4_OPC_LEN_EXACT).
+  V4PayloadKeyExReply replyMsg;
+  ctx.read(replyMsg);
+  const V4PayloadKeyExReply* msg = &replyMsg;
 
   const uint8_t* bootKey = nullptr;
   int meshSlot = verifyKeyExPayload(ctx, msg->meshFingerprint,
@@ -498,11 +497,10 @@ void v4hKeyExReply(const V4RxCtx& ctx) {
 }
 
 void v4hKeyExConfirm(const V4RxCtx& ctx) {
-  if (ctx.payloadLen != sizeof(V4PayloadKeyExConfirm)) {
-    WARN_ESPNOWF("KEY_EX_CONFIRM: bad payload size %u", (unsigned)ctx.payloadLen);
-    return;
-  }
-  const auto* msg = reinterpret_cast<const V4PayloadKeyExConfirm*>(ctx.payload);
+  // The receive table admits exactly 18 bytes (V4_OPC_LEN_EXACT).
+  V4PayloadKeyExConfirm confirmMsg;
+  ctx.read(confirmMsg);
+  const V4PayloadKeyExConfirm* msg = &confirmMsg;
 
   // No HMAC on CONFIRM — it's just an acknowledgement, the prior REPLY's
   // HMAC already authenticated this peer. What we check here is that the
@@ -594,7 +592,7 @@ static bool keyExSendHello(const uint8_t peerMac[6], int slot) {
   }
 
   bool ok = v4_send_frame(peerMac, ESPNOW_V4_TYPE_KEY_EX_HELLO,
-                          ESPNOW_V4_FLAG_HANDSHAKE | ESPNOW_V4_FLAG_ACK_REQ,
+                          ESPNOW_V4_FLAG_ACK_REQ,
                           generateMessageId(),
                           reinterpret_cast<const uint8_t*>(&hello), sizeof(hello), 1);
   if (ok) {
@@ -812,6 +810,17 @@ bool espnowHandshakeStartNow(const uint8_t peerMac[6]) {
 // Phase 3.4 — SESSION handshake
 // ============================================================================
 
+// This image's capability word (System_ESPNow_SessionCapsCore.h), sent in our
+// SESSION_OPEN and SESSION_CONFIRM. It describes the build only, never a
+// setting, so it is the same for the whole boot. Any task (a read).
+uint32_t espnowLocalSessionCaps() {
+  bool sensors = false;
+  for (int t = 0; t < REMOTE_SENSOR_MAX && !sensors; t++) {
+    sensors = sensorTypeInThisBuild(static_cast<RemoteSensorType>(t));
+  }
+  return sessioncaps::buildCaps(ENABLE_BONDED_MODE != 0, sensors, /*collect=*/false);
+}
+
 namespace {
 
 constexpr const char* kOpenLabel    = "v4-sopen:";   // 9 bytes including ':'
@@ -819,43 +828,63 @@ constexpr const char* kConfirmLabel = "v4-sconf:";   // 9 bytes
 constexpr const char* kRekeyLabel   = "v4-rekey:";   // 9 bytes (Phase 3.6)
 constexpr size_t      kLabelLen     = 9;
 
+// Signed transcript lengths: the label, then the frame's fields up to its
+// signature (System_ESPNow_Wire.h, "SESSION establishment payloads").
+constexpr size_t kOpenTranscriptLen    = kLabelLen + 2 + 6 + 6 + 32 + 16 + 4;
+constexpr size_t kConfirmTranscriptLen = kLabelLen + 2 + 6 + 6 + 32 + 16 + 16 + 4;
+static_assert(kOpenTranscriptLen == 75, "OPEN transcript is 75 bytes");
+static_assert(kConfirmTranscriptLen == 91, "CONFIRM transcript is 91 bytes");
+
+// Writes the transcript fields in order; integers little endian.
+struct TranscriptCursor {
+  uint8_t* p;
+  void bytes(const void* src, size_t n) { memcpy(p, src, n); p += n; }
+  void u16(uint16_t v) { *p++ = (uint8_t)(v & 0xFF); *p++ = (uint8_t)(v >> 8); }
+  void u32(uint32_t v) { for (int i = 0; i < 4; i++) *p++ = (uint8_t)(v >> (8 * i)); }
+};
+
 // Build the OPEN transcript for sign/verify:
-//   "v4-sopen:" || sessionId(2 LE) || initMac(6) || respMac(6) || eph(32) || nonceA(16)
-// Total 9 + 2 + 6 + 6 + 32 + 16 = 71 bytes.
-void buildOpenTranscript(uint8_t out[71],
+//   "v4-sopen:" || sessionId(2 LE) || initMac(6) || respMac(6) || eph(32) || nonceA(16) ||
+//   sessionCaps(4 LE)
+// Total 9 + 2 + 6 + 6 + 32 + 16 + 4 = 75 bytes.
+void buildOpenTranscript(uint8_t out[kOpenTranscriptLen],
                          uint16_t sessionId,
                          const uint8_t initMac[6],
                          const uint8_t respMac[6],
                          const uint8_t eph[32],
-                         const uint8_t nonceA[16]) {
-  memcpy(out, kOpenLabel, kLabelLen);
-  out[9]  = (uint8_t)(sessionId & 0xFF);
-  out[10] = (uint8_t)((sessionId >> 8) & 0xFF);
-  memcpy(out + 11, initMac, 6);
-  memcpy(out + 17, respMac, 6);
-  memcpy(out + 23, eph, 32);
-  memcpy(out + 55, nonceA, 16);
+                         const uint8_t nonceA[16],
+                         uint32_t sessionCaps) {
+  TranscriptCursor c{out};
+  c.bytes(kOpenLabel, kLabelLen);
+  c.u16(sessionId);
+  c.bytes(initMac, 6);
+  c.bytes(respMac, 6);
+  c.bytes(eph, 32);
+  c.bytes(nonceA, 16);
+  c.u32(sessionCaps);
 }
 
 // Build the CONFIRM transcript:
 //   "v4-sconf:" || sessionId(2 LE) || respMac(6) || initMac(6) || eph(32) ||
-//   nonceA(16) || nonceB(16)
-// Total 9 + 2 + 6 + 6 + 32 + 16 + 16 = 87 bytes.
-void buildConfirmTranscript(uint8_t out[87],
+//   nonceA(16) || nonceB(16) || sessionCaps(4 LE)
+// Total 9 + 2 + 6 + 6 + 32 + 16 + 16 + 4 = 91 bytes.
+void buildConfirmTranscript(uint8_t out[kConfirmTranscriptLen],
                             uint16_t sessionId,
                             const uint8_t respMac[6],
                             const uint8_t initMac[6],
                             const uint8_t eph[32],
                             const uint8_t nonceA[16],
-                            const uint8_t nonceB[16]) {
-  memcpy(out, kConfirmLabel, kLabelLen);
-  out[9]  = (uint8_t)(sessionId & 0xFF);
-  out[10] = (uint8_t)((sessionId >> 8) & 0xFF);
-  memcpy(out + 11, respMac, 6);
-  memcpy(out + 17, initMac, 6);
-  memcpy(out + 23, eph, 32);
-  memcpy(out + 55, nonceA, 16);
-  memcpy(out + 71, nonceB, 16);
+                            const uint8_t nonceB[16],
+                            uint32_t sessionCaps) {
+  TranscriptCursor c{out};
+  c.bytes(kConfirmLabel, kLabelLen);
+  c.u16(sessionId);
+  c.bytes(respMac, 6);
+  c.bytes(initMac, 6);
+  c.bytes(eph, 32);
+  c.bytes(nonceA, 16);
+  c.bytes(nonceB, 16);
+  c.u32(sessionCaps);
 }
 
 // Build the REKEY transcript:
@@ -932,13 +961,15 @@ bool sessionOpenSendAgain(SessionState* s, const uint8_t peerMac[6]) {
   memcpy(open.responderMac, peerMac, 6);
   if (!espnowCryptoX25519Public(open.ephX25519Pub, s->aeadKeyRx)) return false;
   memcpy(open.nonceA, s->aeadKeyTx, 16);
-  uint8_t transcript[71];
-  buildOpenTranscript(transcript, open.sessionId, selfMac, peerMac, open.ephX25519Pub, open.nonceA);
+  open.sessionCaps = espnowLocalSessionCaps();   // fixed for the boot: the same word as the first copy
+  uint8_t transcript[kOpenTranscriptLen];
+  buildOpenTranscript(transcript, open.sessionId, selfMac, peerMac, open.ephX25519Pub, open.nonceA,
+                      open.sessionCaps);
   if (!espnowCryptoEd25519Sign(open.signature, transcript, sizeof(transcript), self.sec)) return false;
   s->openResent = 1;
   s->lastUseMs = (uint32_t)millis();
   return v4_send_frame(peerMac, ESPNOW_V4_TYPE_SESSION_OPEN,
-                       ESPNOW_V4_FLAG_HANDSHAKE | ESPNOW_V4_FLAG_ACK_REQ,
+                       ESPNOW_V4_FLAG_ACK_REQ,
                        generateMessageId(),
                        reinterpret_cast<const uint8_t*>(&open), sizeof(open), 1);
 }
@@ -977,10 +1008,10 @@ void runDeferredSessionOpen(void* arg) {
     return;
   }
 
-  uint8_t transcript[71];
+  uint8_t transcript[kOpenTranscriptLen];
   buildOpenTranscript(transcript, msg->sessionId,
                       msg->initiatorMac, msg->responderMac,
-                      msg->ephX25519Pub, msg->nonceA);
+                      msg->ephX25519Pub, msg->nonceA, msg->sessionCaps);
   if (!espnowCryptoEd25519Verify(msg->signature, transcript, sizeof(transcript),
                                  peer->longTermPub)) {
     uint16_t n = sessionRejectLogCount(msg->initiatorMac);
@@ -1057,6 +1088,12 @@ void runDeferredSessionOpen(void* arg) {
   if (!s) { free(w); return; }
   s->sessionId    = msg->sessionId;
   s->myDirection  = sessionIsASide(selfMac, msg->initiatorMac) ? 0 : 1;
+  // The initiator's capability word, verified above. Stored before the slot
+  // goes ACTIVE, so nothing that sees the session up sees it without the word.
+  // Confirmed only once a sealed frame of this session opens (an OPEN can be
+  // a replayed copy; SessionCapsCore.h).
+  s->peerSessionCaps = msg->sessionCaps;
+  s->peerSessionCapsConfirmed = 0;
 
   uint8_t ephPub[32], ephSec[32], nonceB[16];
   if (!espnowCryptoX25519Keygen(ephPub, ephSec)) {
@@ -1093,11 +1130,12 @@ void runDeferredSessionOpen(void* arg) {
   memcpy(conf.ephX25519Pub, ephPub, 32);
   memcpy(conf.nonceA, msg->nonceA, 16);
   memcpy(conf.nonceB, nonceB, 16);
+  conf.sessionCaps = espnowLocalSessionCaps();
 
-  uint8_t confTranscript[87];
+  uint8_t confTranscript[kConfirmTranscriptLen];
   buildConfirmTranscript(confTranscript, msg->sessionId,
                          selfMac, msg->initiatorMac,
-                         ephPub, msg->nonceA, nonceB);
+                         ephPub, msg->nonceA, nonceB, conf.sessionCaps);
   const auto& self = espnowIdentityGet();
   if (!self.valid ||
       !espnowCryptoEd25519Sign(conf.signature, confTranscript,
@@ -1116,7 +1154,7 @@ void runDeferredSessionOpen(void* arg) {
                (unsigned)msg->sessionId, s->myDirection == 0 ? 'A' : 'B');
 
   v4_send_frame(msg->initiatorMac, ESPNOW_V4_TYPE_SESSION_CONFIRM,
-                ESPNOW_V4_FLAG_HANDSHAKE | ESPNOW_V4_FLAG_ACK_REQ,
+                ESPNOW_V4_FLAG_ACK_REQ,
                 generateMessageId(),
                 reinterpret_cast<const uint8_t*>(&conf), sizeof(conf), 1);
   // Frames this device queued for the peer (our own SESSION_OPEN lost the
@@ -1170,10 +1208,10 @@ void runDeferredSessionConfirm(void* arg) {
     return;
   }
 
-  uint8_t transcript[87];
+  uint8_t transcript[kConfirmTranscriptLen];
   buildConfirmTranscript(transcript, msg->sessionId,
                          msg->responderMac, msg->initiatorMac,
-                         msg->ephX25519Pub, msg->nonceA, msg->nonceB);
+                         msg->ephX25519Pub, msg->nonceA, msg->nonceB, msg->sessionCaps);
   if (!espnowCryptoEd25519Verify(msg->signature, transcript, sizeof(transcript),
                                  peer->longTermPub)) {
     WARN_ESPNOWF("SESSION_CONFIRM: Ed25519 verify failed");
@@ -1203,6 +1241,11 @@ void runDeferredSessionConfirm(void* arg) {
   // Bond token already derived inside sessionDeriveAeadKeys above (per-session).
   sodium_memzero(shared, sizeof(shared));
 
+  // The responder's capability word, verified above and bound to our fresh
+  // nonceA: confirmed at once. Stored before the slot goes ACTIVE, so the
+  // bond tick (espnow_task) never sees this session up without it.
+  s->peerSessionCaps = msg->sessionCaps;
+  s->peerSessionCapsConfirmed = 1;
   s->state           = SESSION_ACTIVE;
   s->establishedAtMs = (uint32_t)millis();
   s->lastUseMs       = s->establishedAtMs;
@@ -1224,17 +1267,14 @@ void runDeferredSessionConfirm(void* arg) {
 // On-RX handlers — espnow_task scope. Lightweight: size-check + PSRAM copy +
 // enqueue. All heavy crypto runs in the deferred function on cmd_exec.
 void v4hSessionOpen(const V4RxCtx& ctx) {
-  if (ctx.payloadLen != sizeof(V4PayloadSessionOpen)) {
-    WARN_ESPNOWF("SESSION_OPEN: bad payload size %u", (unsigned)ctx.payloadLen);
-    return;
-  }
+  // The receive table admits exactly sizeof(V4PayloadSessionOpen) (V4_OPC_LEN_EXACT).
   auto* w = static_cast<DeferredSessionOpenWork*>(
       ps_alloc(sizeof(DeferredSessionOpenWork), AllocPref::PreferPsram, "espnow.sopen.defer"));
   if (!w) {
     ERROR_ESPNOWF("SESSION_OPEN: PSRAM alloc failed (defer drop)");
     return;
   }
-  memcpy(&w->msg, ctx.payload, sizeof(w->msg));
+  ctx.read(w->msg);
   memcpy(w->headerOrigin, ctx.h->origin, 6);
   if (!submitDeferredToCmdExec(runDeferredSessionOpen, w)) {
     ERROR_ESPNOWF("SESSION_OPEN: cmd_exec queue full, dropping");
@@ -1243,17 +1283,14 @@ void v4hSessionOpen(const V4RxCtx& ctx) {
 }
 
 void v4hSessionConfirm(const V4RxCtx& ctx) {
-  if (ctx.payloadLen != sizeof(V4PayloadSessionConfirm)) {
-    WARN_ESPNOWF("SESSION_CONFIRM: bad payload size %u", (unsigned)ctx.payloadLen);
-    return;
-  }
+  // The receive table admits exactly sizeof(V4PayloadSessionConfirm) (V4_OPC_LEN_EXACT).
   auto* w = static_cast<DeferredSessionConfirmWork*>(
       ps_alloc(sizeof(DeferredSessionConfirmWork), AllocPref::PreferPsram, "espnow.sconf.defer"));
   if (!w) {
     ERROR_ESPNOWF("SESSION_CONFIRM: PSRAM alloc failed (defer drop)");
     return;
   }
-  memcpy(&w->msg, ctx.payload, sizeof(w->msg));
+  ctx.read(w->msg);
   memcpy(w->headerOrigin, ctx.h->origin, 6);
   if (!submitDeferredToCmdExec(runDeferredSessionConfirm, w)) {
     ERROR_ESPNOWF("SESSION_CONFIRM: cmd_exec queue full, dropping");
@@ -1346,9 +1383,10 @@ bool espnowSessionOpenInitiate(const uint8_t peerMac[6], const char* meshLabel,
   memcpy(open.responderMac, peerMac, 6);
   memcpy(open.ephX25519Pub, ephPub, 32);
   memcpy(open.nonceA, nonceA, 16);
+  open.sessionCaps = espnowLocalSessionCaps();
 
-  uint8_t transcript[71];
-  buildOpenTranscript(transcript, sessionId, selfMac, peerMac, ephPub, nonceA);
+  uint8_t transcript[kOpenTranscriptLen];
+  buildOpenTranscript(transcript, sessionId, selfMac, peerMac, ephPub, nonceA, open.sessionCaps);
   if (!espnowCryptoEd25519Sign(open.signature, transcript, sizeof(transcript), self.sec)) {
     ERROR_ESPNOWF("SESSION_OPEN initiate: signing failed");
     sessionClear(s);
@@ -1356,7 +1394,7 @@ bool espnowSessionOpenInitiate(const uint8_t peerMac[6], const char* meshLabel,
   }
 
   bool ok = v4_send_frame(peerMac, ESPNOW_V4_TYPE_SESSION_OPEN,
-                          ESPNOW_V4_FLAG_HANDSHAKE | ESPNOW_V4_FLAG_ACK_REQ,
+                          ESPNOW_V4_FLAG_ACK_REQ,
                           generateMessageId(),
                           reinterpret_cast<const uint8_t*>(&open), sizeof(open), 1);
   if (ok) {
@@ -1513,8 +1551,8 @@ bool sendRekey(SessionState* s, const uint8_t peerMac[6], bool armRetry) {
 
   // Snapshot txSeq before we send — the signature commits to it for transcript
   // uniqueness. The REKEY frame itself does NOT bump it: it ships via
-  // v4_send_frame with FLAG_HANDSHAKE (plaintext, signed under our identity
-  // key), and txSeqNext is only ever incremented by sessionWrapFrame on the
+  // v4_send_frame as a plaintext frame signed under our identity key, and
+  // txSeqNext is only ever incremented by sessionWrapFrame on the
   // session-wrapped data path.
   uint32_t txSeqAtSign = s->txSeqNext;
 
@@ -1549,7 +1587,7 @@ bool sendRekey(SessionState* s, const uint8_t peerMac[6], bool armRetry) {
 
   const uint32_t msgId = generateMessageId();
   bool ok = v4_send_frame(peerMac, ESPNOW_V4_TYPE_SESSION_REKEY,
-                          ESPNOW_V4_FLAG_HANDSHAKE | ESPNOW_V4_FLAG_ACK_REQ,
+                          ESPNOW_V4_FLAG_ACK_REQ,
                           msgId,
                           reinterpret_cast<const uint8_t*>(&rk), sizeof(rk), 1);
   if (ok) {
@@ -1705,11 +1743,7 @@ void runDeferredRekey(void* arg) {
 }  // namespace
 
 void v4hSessionRekey(const V4RxCtx& ctx) {
-  if (ctx.payloadLen != sizeof(V4PayloadSessionRekey)) {
-    WARN_ESPNOWF("REKEY: bad payload size %u (expected %u)",
-                 (unsigned)ctx.payloadLen, (unsigned)sizeof(V4PayloadSessionRekey));
-    return;
-  }
+  // The receive table admits exactly sizeof(V4PayloadSessionRekey) (V4_OPC_LEN_EXACT).
   // PSRAM-copy + defer to cmd_exec (verify+ECDH+KDF+optional sign+send
   // is the same crypto profile as SESSION_OPEN/CONFIRM, so the same defer
   // architecture applies — keeps it off espnow_task's 6656 B stack).
@@ -1719,7 +1753,7 @@ void v4hSessionRekey(const V4RxCtx& ctx) {
     ERROR_ESPNOWF("REKEY: PSRAM alloc failed");
     return;
   }
-  memcpy(&w->msg, ctx.payload, sizeof(V4PayloadSessionRekey));
+  ctx.read(w->msg);
   memcpy(w->srcMac, ctx.recv_info->src_addr, 6);
   if (!submitDeferredToCmdExec(runDeferredRekey, w)) {
     ERROR_ESPNOWF("REKEY: cmd_exec queue full — dropping");
@@ -1796,7 +1830,7 @@ void rekeyRetrySweep(uint32_t nowMs) {
                  MAC_ARGS(resend.peerMac),
                  (unsigned)resend.retriesLeft);
     v4_send_frame(resend.peerMac, ESPNOW_V4_TYPE_SESSION_REKEY,
-                  ESPNOW_V4_FLAG_HANDSHAKE | ESPNOW_V4_FLAG_ACK_REQ, resend.msgId,
+                  ESPNOW_V4_FLAG_ACK_REQ, resend.msgId,
                   reinterpret_cast<const uint8_t*>(&resend.frame), sizeof(resend.frame), 1);
   }
 }

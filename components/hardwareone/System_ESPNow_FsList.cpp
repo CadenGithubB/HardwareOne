@@ -285,16 +285,22 @@ void fsListCancel(uint32_t reqId) {
 // RX bridge — sender side (reply arrives)
 // ============================================================================
 
+// The receive style of System_ESPNow_Wire.h ("Frame rules"): the receive
+// table has already dropped a frame shorter than its opcode's minimum, so a
+// fixed frame is complete; a longer one is read up to the fields known here,
+// and what a frame lacks (a direct call off the table) reads as 0.
+template <class T>
+static void fsWireRead(T& out, const uint8_t* payload, uint16_t payloadLen) {
+  memset(&out, 0, sizeof(T));
+  const size_t n = payloadLen < sizeof(T) ? payloadLen : sizeof(T);
+  if (payload && n) memcpy(&out, payload, n);
+}
+
 void fsListOnReplyReceived(const uint8_t srcMac[6],
                            const uint8_t* payload, uint16_t payloadLen) {
-  if (payloadLen < sizeof(V4PayloadFsListReplyHeader)) {
-    WARN_ESPNOWF("[FSLIST] REPLY too short: %u bytes", payloadLen);
-    return;
-  }
-
   // Validate the structure: header followed by entryCount entries.
   V4PayloadFsListReplyHeader hdr;
-  memcpy(&hdr, payload, sizeof(hdr));
+  fsWireRead(hdr, payload, payloadLen);
   uint16_t expectedLen = sizeof(hdr) + (uint16_t)hdr.entryCount * sizeof(V4PayloadFsEntry);
   if (payloadLen < expectedLen) {
     WARN_ESPNOWF("[FSLIST] REPLY reqId=%u entryCount=%u: payload %u < expected %u",
@@ -307,9 +313,12 @@ void fsListOnReplyReceived(const uint8_t srcMac[6],
     hdr.entryCount = FS_LIST_ENTRIES_PER_REPLY;
   }
 
+  // The entries are handed to the callback where they lie in the frame:
+  // V4PayloadFsEntry is packed (alignment 1), so any offset is a valid one.
+  static_assert(alignof(V4PayloadFsEntry) == 1, "FS entries are read in place");
   const V4PayloadFsEntry* entries =
       (hdr.entryCount > 0)
-          ? (const V4PayloadFsEntry*)(payload + sizeof(hdr))
+          ? reinterpret_cast<const V4PayloadFsEntry*>(payload + sizeof(hdr))  // wire-read: packed, counted above
           : nullptr;
 
   // Snapshot callback + clear slot under lock so we can fire callback without
@@ -424,11 +433,9 @@ static void runDeferredFsOpOnCmdExec(void* arg) {
 static void captureDeferred(uint8_t op, const uint8_t srcMac[6],
                             const uint8_t* payload, uint16_t payloadLen,
                             uint16_t expectedSize) {
-  if (payloadLen < expectedSize) {
-    WARN_ESPNOWF("[FSLIST] REQ (op=%u) too short: %u < %u",
-                 op, payloadLen, expectedSize);
-    return;
-  }
+  // The receive table drops a request shorter than its opcode's minimum
+  // (expectedSize); this check only guards a direct call.
+  if (payloadLen < expectedSize) return;
   fsListInit();
   ScopedLock lk;
   if (!lk.held) {
@@ -512,12 +519,8 @@ void fsGetOnRequestReceived(const uint8_t srcMac[6],
 
 void fsStatOnReplyReceived(const uint8_t srcMac[6],
                            const uint8_t* payload, uint16_t payloadLen) {
-  if (payloadLen < sizeof(V4PayloadFsStatReply)) {
-    WARN_ESPNOWF("[FSLIST] STAT_REPLY too short: %u bytes", payloadLen);
-    return;
-  }
   V4PayloadFsStatReply reply;
-  memcpy(&reply, payload, sizeof(reply));
+  fsWireRead(reply, payload, payloadLen);
 
   FsStatReplyCallback cb = nullptr;
   {
@@ -533,12 +536,8 @@ void fsStatOnReplyReceived(const uint8_t srcMac[6],
 
 void fsGetOnAckReceived(const uint8_t srcMac[6],
                         const uint8_t* payload, uint16_t payloadLen) {
-  if (payloadLen < sizeof(V4PayloadFsGetAck)) {
-    WARN_ESPNOWF("[FSLIST] GET_ACK too short: %u bytes", payloadLen);
-    return;
-  }
   V4PayloadFsGetAck ack;
-  memcpy(&ack, payload, sizeof(ack));
+  fsWireRead(ack, payload, payloadLen);
 
   FsGetAckCallback cb = nullptr;
   {

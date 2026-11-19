@@ -115,8 +115,15 @@ struct SessionState {
                                     //   REKEY reply we sent, and a peer REKEY arriving now answers
                                     //   that reply: it is applied and not answered again
   uint16_t recentSessionIds[4];     // ids this slot held before sessionId, newest first (0 = empty)
+
+  // ---- The peer's capability word (System_ESPNow_SessionCapsCore.h) -------------
+  // From its SESSION_OPEN (we answered) or SESSION_CONFIRM (we opened), stored
+  // before the slot goes ACTIVE. A REKEY keeps it; a new handshake replaces it.
+  uint32_t peerSessionCaps;
+  uint8_t  peerSessionCapsConfirmed; // 1: from a CONFIRM, or a sealed frame of the session has
+                                     //   opened since; 0: only a (possibly replayed) OPEN says so
 };
-static_assert(sizeof(SessionState) <= 240, "keep session record reasonably small");
+static_assert(sizeof(SessionState) <= 248, "keep session record reasonably small");
 
 // One-time allocation of the gSessions table in PSRAM. Idempotent; safe to
 // call multiple times. Returns false only on alloc failure.

@@ -172,7 +172,7 @@ static constexpr BaseType_t PRO_CORE = 0;
 #include "System_ESPNow_Tx.h"
 
 // ---- stubbed radio ---------------------------------------------------------
-static constexpr uint16_t kDirectCap = 202, kRoutedCap = 130, kFragment = 200;
+static constexpr uint16_t kDirectCap = 202, kRoutedCap = 146, kFragment = 200;
 uint16_t v4_single_frame_cap(const uint8_t* dst) {
   return meshRouterIsRouted(dst) ? kRoutedCap : kDirectCap;
 }
@@ -278,7 +278,7 @@ int main() {
   CHECK(gRadio.size() == 1 && gRadio.front().task == DISPATCHER);
 
   // C: the destination's cap decides: 150 B from cmd_exec to a routed peer
-  //    (cap 130) runs on cmd_exec, the same 150 B to a direct peer (cap 202) is
+  //    (cap 146) runs on cmd_exec, the same 150 B to a direct peer (cap 202) is
   //    dispatcher work.
   gRadio.clear();
   uint8_t mid[150] = {3};
@@ -299,18 +299,19 @@ int main() {
   CHECK(gRadio.size() == 1 && gRadio.front().task == DISPATCHER);
 
   // I: another task's synchronous multi-frame job stays dispatcher work. The FS
-  //    RPC requests (LIST 144 B) are sent from httpd and the OLED loop, whose
-  //    stacks are not sized for the send path; to a routed peer (cap 130) that
-  //    is 2 fragments, queued and sent by the dispatcher with the real outcome.
+  //    RPC requests are sent from httpd and the OLED loop, whose stacks are
+  //    not sized for the send path. LIST (144 B) fits one routed frame since
+  //    the 16-byte group tag; a 160 B payload to a routed peer (cap 146) is 2
+  //    fragments, queued and sent by the dispatcher with the real outcome.
   gCurrentTask = HTTPD;
   gRadio.clear();
   espnowtx::getStats(&s);
   const uint32_t sentBeforeI = s.sent;
-  uint8_t fsListReq[144] = {6};
+  uint8_t fsListReq[160] = {6};
   CHECK(espnowtx::sendAeadSync(kRouted, 9, 0, 12, fsListReq, sizeof fsListReq, 1, 2000));
-  std::printf("I: 144 B from httpd to a routed peer ran on %s\n",
+  std::printf("I: 160 B from httpd to a routed peer ran on %s\n",
               gRadio.empty() ? "nothing" : taskName(gRadio.front().task));
-  if (!(gRadio.size() == 1 && gRadio.front().task == DISPATCHER && gRadio.front().len == 144)) {
+  if (!(gRadio.size() == 1 && gRadio.front().task == DISPATCHER && gRadio.front().len == 160)) {
     std::fprintf(stderr, "FAIL I: a non-cmd_exec task's multi-frame sync send ran on that task's stack, "
                          "not on the espnow_tx dispatcher\n");
     ++failures;
@@ -393,7 +394,7 @@ String redactOutputForLog(const String& message) { return message; }
 #define ESPNOW_V4_MAX_PAYLOAD (250 - 32)
 #define ESPNOW_V4_AEAD_TAG_LEN 16
 #define ESPNOW_V4_MAX_PLAINTEXT (ESPNOW_V4_MAX_PAYLOAD - ESPNOW_V4_AEAD_TAG_LEN)
-#define ESPNOW_V4_RELAY_MAX_INNER_PLAINTEXT 130
+#define ESPNOW_V4_RELAY_MAX_INNER_PLAINTEXT 146
 static constexpr uint8_t ESPNOW_V4_TYPE_STREAM = 90;
 
 struct EspNowState {
@@ -513,7 +514,7 @@ static void expectOneSend(const char* label, const uint8_t* mac, uint32_t msgId,
 
 int main() {
   // S1: legacy stream (startstream) to a direct target: a 400-char line is
-  //     clamped to one frame (202 B); to a routed target, 130 B.
+  //     clamped to one frame (202 B); to a routed target, 146 B.
   resetStream();
   gState.streamActive = true;
   std::memcpy(gState.streamTarget, kDirect, 6);
@@ -525,16 +526,16 @@ int main() {
   gState.streamActive = true;
   std::memcpy(gState.streamTarget, kRouted, 6);
   sendEspNowStreamMessage(line(400));
-  expectOneSend("S1 legacy routed", kRouted, 0, 130);
+  expectOneSend("S1 legacy routed", kRouted, 0, 146);
 
-  // S2: command-session stream from cmd_exec: direct 202 B, routed 130 B.
+  // S2: command-session stream from cmd_exec: direct 202 B, routed 146 B.
   for (int routed = 0; routed < 2; ++routed) {
     resetStream();
     queueEspNowRequest(1, 42, routed ? kRouted : kDirect);
     runOnExec(ORIGIN_ESPNOW, 42);
     sendEspNowStreamMessage(line(400));
     expectOneSend(routed ? "S2 session routed" : "S2 session direct",
-                  routed ? kRouted : kDirect, 42, routed ? 130 : 202);
+                  routed ? kRouted : kDirect, 42, routed ? 146 : 202);
   }
 
   // S3: short lines pass whole on both paths.
@@ -548,6 +549,30 @@ int main() {
   runOnExec(ORIGIN_ESPNOW, 7);
   sendEspNowStreamMessage(line(50));
   expectOneSend("S3 session short", kDirect, 7, 50);
+
+  // S3b: a blank line (broadcastOutput("") ends every listing) sends no frame
+  //      on either path: STREAM's 1-byte minimum would drop and count it as a
+  //      short frame at the receiver. It also spends no legacy rate slot.
+  resetStream();
+  gState.streamActive = true;
+  std::memcpy(gState.streamTarget, kDirect, 6);
+  sendEspNowStreamMessage(String(""));
+  if (!gSends.empty()) {
+    std::fprintf(stderr, "FAIL S3b: a blank legacy stream line sent a %u-byte STREAM\n",
+                 (unsigned)gSends.front().len);
+    ++failures;
+  }
+  sendEspNowStreamMessage(line(20));
+  CHECK(gSends.size() == 1 && gState.streamDroppedCount == 0);
+  resetStream();
+  queueEspNowRequest(0, 9, kDirect);
+  runOnExec(ORIGIN_ESPNOW, 9);
+  sendEspNowStreamMessage(String(""));
+  if (!gSends.empty()) {
+    std::fprintf(stderr, "FAIL S3b: a blank command-session line sent a %u-byte STREAM\n",
+                 (unsigned)gSends.front().len);
+    ++failures;
+  }
 
   // S4: the legacy rate limit still drops a second line within 100 ms.
   resetStream();

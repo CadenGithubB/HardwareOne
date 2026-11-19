@@ -57,7 +57,7 @@ static uint32_t gNowMs = 5000;
 static BfBond gBond = {};
 static bool gHeld = false;
 static bool gSetting = false;
-static uint16_t gMask = espnowfwd::kSensorMaskDefault;
+static espnowsensor::SensorMask gMask = espnowfwd::kSensorMaskDefault;
 static bool gMeshOn = true;
 static uint8_t gRole = 0;
 static SensorReceiverTargets gTargets = {};
@@ -110,12 +110,12 @@ static uint32_t bfEpoch() { return gBond.epoch; }
 // first, the settings and the agreement follow one by one.
 static bool bfHeld(uint32_t epoch) { return gHeld || gBond.epoch != epoch; }
 static bool bfSettingOn() { return gSetting; }
-static uint16_t bfSensorMask() { return gMask; }
+static espnowsensor::SensorMask bfSensorMask() { return gMask; }
 static void bfSetSettingOn(bool on) {
   notUnderLock();
   gSetting = on;
 }
-static void bfSetSensorMask(uint16_t mask) {
+static void bfSetSensorMask(espnowsensor::SensorMask mask) {
   notUnderLock();
   gMask = mask;
 }
@@ -156,8 +156,8 @@ static bool bfPartnerOnline() {
 }
 // The saved 'bondstream' settings (what this device's user chose to stream
 // at the partner on every bond session).
-static uint16_t gSavedStreams = 0;
-static uint16_t bfSavedStreams() {
+static espnowsensor::SensorMask gSavedStreams = 0;
+static espnowsensor::SensorMask bfSavedStreams() {
   notUnderLock();
   return gSavedStreams;
 }
@@ -178,7 +178,8 @@ static bool bfHandshake(const uint8_t mac[6]) {
 static uint16_t bfBootTag() { return 0x0042; }
 static uint16_t bfFrameCap(const uint8_t mac[6]) {
   const TestSession* s = sessionOf(mac);
-  return (s && s->routed) ? 130 : 202;
+  // The device's v4_single_frame_cap: the 1.0 budgets, 146 through a relay.
+  return (s && s->routed) ? espnowsensor::kFrameCapRouted : espnowsensor::kFrameCapDirect;
 }
 static bool bfQueue(uint8_t kind, const uint8_t mac[6], const uint8_t* payload, uint16_t len) {
   notUnderLock();
@@ -281,7 +282,7 @@ static size_t count(uint8_t kind, const uint8_t* to = nullptr) {
   return n;
 }
 static void answer(const uint8_t from[6], uint8_t answers, uint8_t result, uint8_t gen, const uint8_t* partner = kPorch,
-                   uint8_t streams = espnowfwd::kStreamsAll, uint16_t mask = espnowfwd::kSensorMaskDefault) {
+                   uint8_t streams = espnowfwd::kStreamsAll, espnowsensor::SensorMask mask = espnowfwd::kSensorMaskDefault) {
   espnowfwd::LinkFrame a{};
   a.op = espnowfwd::kOpAnswer;
   a.answers = answers;
@@ -468,12 +469,15 @@ static void testAnnounceAndForward() {
         h.flags == (espnowsensor::kReadingFlagStreamStart | espnowsensor::kReadingFlagForwarded) && h.fwdLink == 1 &&
         h.partCount == 1 && std::string((const char*)gSent[0].bytes.data() + 12, gSent[0].bytes.size() - 12) == "{\"v\":7}",
         "X's sensor, counter, boot tag and stream start, with the forwarded bit and link 1");
-  // 472 bytes through a relay: four parts of 12 + 118, all with the same number.
+  // The largest reading (536 bytes) through a relay: four parts of 12 + 134,
+  // each filling one routed frame (146), all with the same number.
+  static_assert(espnowsensor::kFrameCapRouted == 146 && espnowsensor::kReadingMaxBytes == 536,
+                "the 1.0 routed budget (16-byte group tag)");
   gSent.clear();
   sessionOf(kHub)->routed = true;
-  reading(kPorch, REMOTE_SENSOR_IMU, 8, jsonOf(472));
-  check(count(154) == 4 && gSent[0].bytes.size() == 130 && gSent[3].bytes.size() == 12 + 472 - 3 * 118,
-        "472 bytes routed: four parts, each one routed frame");
+  reading(kPorch, REMOTE_SENSOR_IMU, 8, jsonOf(536));
+  check(count(154) == 4 && gSent.size() == 4 && gSent[0].bytes.size() == 146 && gSent[3].bytes.size() == 146,
+        "536 bytes routed: four parts, each one full routed frame");
   bool same = true;
   std::string joined;
   for (uint8_t i = 0; i < 4; ++i) {
@@ -483,7 +487,7 @@ static void testAnnounceAndForward() {
            (p.flags & espnowsensor::kReadingFlagForwarded);
     joined.append((const char*)gSent[i].bytes.data() + 12, gSent[i].bytes.size() - 12);
   }
-  check(same && joined == jsonOf(472), "every part carries X's numbers and the link number; the text is whole");
+  check(same && joined == jsonOf(536), "every part carries X's numbers and the link number; the text is whole");
   sessionOf(kHub)->routed = false;
   // A sensor that is not forwarded (input, by default).
   gSent.clear();
@@ -823,10 +827,10 @@ static void testReviewCases() {
   // the longest reason, every count at its largest.
   sBf.req.applied = sBf.req.refused = 0xFFFFFFFFu;
   sBf.req.lastRefused = (uint8_t)espnowfwd::ReqVerdict::NotBondMaster;
-  sBf.req.leases.leased = (uint16_t)espnowsensor::kSensorMaskAll;
+  sBf.req.leases.leased = (espnowsensor::SensorMask)espnowsensor::kSensorMaskAll;
   for (auto& n : sBf.req.refusedBy) n = 0xFFFFFFFFu;
   sBf.req.lacking = 0xFFFFFFFFu;
-  sBf.req.lastLacking = (uint16_t)espnowsensor::kSensorMaskAll;
+  sBf.req.lastLacking = (espnowsensor::SensorMask)espnowsensor::kSensorMaskAll;
   gLongNames = true;
   char lines[espnowfwd::kStatusLinesCap];
   bondForwardStatusLines(lines, sizeof(lines));
@@ -1005,7 +1009,7 @@ static void testStatusAndRequests() {
   run(6);
   check(gCtrl.empty(), "IMU streams already: neither on nor off");
   // This device's user streams ToF (bondstream, saved): the lease's end leaves it on.
-  gSavedStreams = (uint16_t)tof;
+  gSavedStreams = (espnowsensor::SensorMask)tof;
   request(kHub, espnowfwd::kReqSubscribe, tof, 5000);
   run(6);
   check(gCtrl.empty(), "the user's own stream: not touched by the lease");
@@ -1170,7 +1174,7 @@ static void testLeaseReview() {
   upAndAccepted();
   request(kHub, espnowfwd::kReqSubscribe, (uint32_t)(tof | imu), 600000);
   gCtrl.clear();
-  gMask = (uint16_t)(espnowfwd::kSensorMaskDefault & ~tof);
+  gMask = (espnowsensor::SensorMask)(espnowfwd::kSensorMaskDefault & ~tof);
   run(1);
   check(ctrlCount(REMOTE_SENSOR_TOF, false) == 1 && ctrlCount(REMOTE_SENSOR_IMU, false) == 0 &&
         sBf.req.leases.leased == imu, "ToF no longer forwarded: its lease ends");

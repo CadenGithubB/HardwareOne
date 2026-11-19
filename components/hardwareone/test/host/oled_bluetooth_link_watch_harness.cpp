@@ -344,10 +344,14 @@ static void phonePipePairClose(uint32_t id) {
 
 // System_Settings.h
 struct Settings {
-  String bleDeviceName; int bleTxPower = 3; int bleMode = 0; bool bleAutoStart = false;
+  int bleTxPower = 3; int bleMode = 0; bool bleAutoStart = false;
   bool bleConsoleOnPipe = true; String phonePipeSecret; bool phonePipeSecretGenerated = false;
 };
 static Settings gSettings;
+
+// System_SelfDevice.h: the device name as Bluetooth uses it (one name, 'devicename').
+static String gDeviceNameInUse = String("HardwareOne");
+namespace SelfDevice { static String deviceName() { return gDeviceNameInUse; } }
 
 // ArduinoJson.h: bleLinkStatusJson and bleLinkPhoneJson compile; other tests run their keys.
 struct JsonObject {
@@ -621,7 +625,7 @@ static void statusConsole() {
   EXPECT_ROWS(render(OLED_BLUETOOTH_STATUS), "Role: App console", "Console: hidden", "Clients: 0/4 Adv: off");
 
   // A long device name is cut with a tilde.
-  gSettings.bleDeviceName = String("HardwareOne-Kitchen-01");
+  gDeviceNameInUse = String("HardwareOne-Kitchen-01");
   CHECK(render(OLED_BLUETOOTH_STATUS)[ENABLE_BLE_PHONE_PIPE ? 4 : 3] == "Name: HardwareOne~");
 
   // Saved as the glasses: the Saved row follows the role.

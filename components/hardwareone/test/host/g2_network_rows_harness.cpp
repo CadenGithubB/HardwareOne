@@ -14,6 +14,8 @@
 #include <cstring>
 #include <string>
 
+#include "System_DeviceName.h"  // devicename::kMaxLen (the glasses name editor's limit)
+
 #ifndef ENABLE_WIFI
 #define ENABLE_WIFI 1
 #endif

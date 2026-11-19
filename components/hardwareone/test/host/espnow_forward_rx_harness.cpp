@@ -216,6 +216,21 @@ static ForwardResolve resolve(const uint8_t src[6], bool bitSet, uint8_t fwdLink
   return espnowForwardResolve(src, "glasses", false, hasBit, bitSet, fwdLink, stream, out);
 }
 
+// The announced partner name follows the device-name rule (System_DeviceName.h):
+// a name that breaks it is not used and never cleaned; the partner is shown by
+// its address, and only a valid announced name can be name_taken.
+static void testAnnouncedNameRule() {
+  resetAll();
+  gRole = 1;
+  rx(kGlasses, "glasses", announceOf(1, 7, kPorch, "porch two"));
+  check(lastResult() == espnowfwd::kResultAccepted, "an announcement with an invalid name is still accepted");
+  char shown[33];
+  espnowForwardOriginName(kGlasses, kPorch, shown, sizeof(shown));
+  check(std::string(shown) == "02:A0:00:00:00:01", "an invalid announced name is shown as the address, not cleaned");
+  rx(kGlasses, "glasses", announceOf(2, 7, kPorch2, "SHED"));
+  check(lastResult() == espnowfwd::kResultNameTaken, "a valid announced name another device has: name_taken");
+}
+
 static void testAnnounce() {
   resetAll();
   // A worker keeps nothing: not_receiver.
@@ -556,6 +571,7 @@ static void testReviewCases() {
 }
 
 int main() {
+  testAnnouncedNameRule();
   testAnnounce();
   testResolveAndWithdraw();
   testTableAndReplies();

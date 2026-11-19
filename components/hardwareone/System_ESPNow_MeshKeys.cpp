@@ -10,6 +10,7 @@
 
 #include "System_Debug.h"
 #include "System_ESPNow_Crypto.h"
+#include "System_ESPNow_MeshIdCore.h"  // the mesh id: subkey 3, "esp-mid1", pick
 #include "System_Settings.h"
 
 namespace {
@@ -41,6 +42,32 @@ void computeMeshSalt(const String& label, uint8_t out[32]) {
 
 }  // namespace
 
+bool meshKeysStretchInto(const String& label, const String& passphrase, uint8_t out[32]) {
+  memset(out, 0, 32);
+  if (!espnowCryptoReady() || passphrase.length() == 0) return false;
+  uint8_t salt[32];
+  computeMeshSalt(label, salt);
+  const bool ok = espnowCryptoPbkdf2HmacSha256(
+      out,
+      reinterpret_cast<const uint8_t*>(passphrase.c_str()), passphrase.length(),
+      salt, sizeof(salt),
+      kPbkdf2Iters);
+  sodium_memzero(salt, sizeof(salt));
+  if (!ok) sodium_memzero(out, 32);
+  return ok;
+}
+
+uint16_t meshKeysIdFor(const uint8_t stretched[32]) {
+  uint8_t sub[32];
+  if (!espnowCryptoKdfSubkey(sub, stretched, meshid::kSubkeyId, meshid::kKdfContext)) {
+    sodium_memzero(sub, sizeof(sub));
+    return 0;
+  }
+  const uint16_t id = meshid::pick(sub);
+  sodium_memzero(sub, sizeof(sub));
+  return id;
+}
+
 bool meshKeysStretchPassphrase(uint8_t meshIdx) {
   if (meshIdx >= Settings::N_MESHES) return false;
   if (!espnowCryptoReady()) return false;
@@ -55,18 +82,9 @@ bool meshKeysStretchPassphrase(uint8_t meshIdx) {
     return false;
   }
 
-  uint8_t salt[32];
-  computeMeshSalt(m.label, salt);
-
   uint32_t startMs = millis();
-  bool ok = espnowCryptoPbkdf2HmacSha256(
-      m.passphraseStretchedKey,
-      reinterpret_cast<const uint8_t*>(m.passphrase.c_str()), m.passphrase.length(),
-      salt, sizeof(salt),
-      kPbkdf2Iters);
+  bool ok = meshKeysStretchInto(m.label, m.passphrase, m.passphraseStretchedKey);
   uint32_t elapsedMs = millis() - startMs;
-
-  sodium_memzero(salt, sizeof(salt));
 
   if (!ok) {
     memset(m.passphraseStretchedKey, 0, sizeof(m.passphraseStretchedKey));
@@ -97,14 +115,18 @@ bool meshKeysDerive(uint8_t meshIdx) {
                                    kSubkeyBootstrap, kCtxBootstrap);
   bool ok2 = espnowCryptoKdfSubkey(dk.groupKey,     m.passphraseStretchedKey,
                                    kSubkeyGroup,    kCtxGroup);
-  if (!ok1 || !ok2) {
+  const uint16_t id = meshKeysIdFor(m.passphraseStretchedKey);
+  if (!ok1 || !ok2 || id == 0) {
     memset(&dk, 0, sizeof(dk));
     dk.valid = false;
-    ERROR_ESPNOWF("mesh '%s' subkey derivation failed (boot=%d group=%d)",
-                  m.label.c_str(), ok1 ? 1 : 0, ok2 ? 1 : 0);
+    ERROR_ESPNOWF("mesh '%s' subkey derivation failed (boot=%d group=%d id=0x%04X)",
+                  m.label.c_str(), ok1 ? 1 : 0, ok2 ? 1 : 0, (unsigned)id);
     return false;
   }
-  dk.fingerprint = m.fingerprint;
+  // The mesh id comes from the key (System_ESPNow_MeshIdCore.h). The slot and
+  // its derived keys always carry the same id.
+  m.fingerprint = id;
+  dk.fingerprint = id;
   dk.valid = true;
   return true;
 }
@@ -122,6 +144,31 @@ uint8_t meshKeysInitAll() {
     if (meshKeysDerive(i)) validCount++;
   }
   return validCount;
+}
+
+uint8_t meshKeysRefreshIds() {
+  uint8_t changed = 0;
+  if (!espnowCryptoReady()) return 0;
+  for (uint8_t i = 0; i < Settings::N_MESHES; i++) {
+    Settings::MeshIdentity& m = gSettings.meshes[i];
+    if (m.label.length() == 0 || !m.passphraseStretchedKeyValid) continue;
+    const uint16_t id = meshKeysIdFor(m.passphraseStretchedKey);
+    if (id == 0) {
+      ERROR_ESPNOWF("mesh '%s': its key gives no mesh id", m.label.c_str());
+      continue;
+    }
+    if (id != m.fingerprint) {
+      if (m.fingerprint != 0) {
+        WARN_ESPNOWF("mesh '%s': stored mesh id 0x%04X does not match its key; using 0x%04X",
+                     m.label.c_str(), (unsigned)m.fingerprint, (unsigned)id);
+      }
+      m.fingerprint = id;
+      changed++;
+    }
+    MeshDerivedKeys& dk = gMeshDerivedKeys[i];
+    if (dk.valid) dk.fingerprint = id;
+  }
+  return changed;
 }
 
 void meshKeysInvalidate(uint8_t meshIdx) {

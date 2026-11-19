@@ -14,6 +14,20 @@ The version stays 0.99.99.1 until the 1.0 gate in `RELEASING.md` is met; this se
 everything user-visible since the v0.99.99.1 tag.
 
 ### Added
+- ESP-NOW session capabilities (1.0 wire format): each side of a session handshake states what its
+  firmware build can do in a 32-bit word inside the signed SESSION_OPEN and SESSION_CONFIRM, which grow
+  to 130 and 146 bytes: bond mode, remote file access, file receive, sensor sending, collector,
+  relay forwarding, time master, SESSION_UNKNOWN; bits 8-31 are reserved (sent 0, shown as `+0x...`).
+  The word describes the build only, never a setting, so it is fixed for the boot and a rekey keeps it.
+  `espnowsessions` shows each peer's word (`caps=bond,remote_fs,...`) and this device's on its first
+  line; `espnowsessions json` adds `caps`, `capsWord` per session and `selfCaps`. The text column
+  `meshId=` is now `meshSlot=` (it always was the mesh slot index, not the mesh id in the frame header).
+  Builds before this change cannot open sessions with builds after it (the handshake frames are taken
+  only at their exact length), so the fleet is reflashed together, as the 1.0 full erase requires.
+  Host-tested; not yet run on hardware.
+- `espnowstats` shows `RX Must-Understand Drops` (JSON `rxMustUnderstandDrops`): frames dropped because
+  their header carries a must-understand flag this firmware does not know, with one warning a minute
+  naming the sender.
 - `espnowhistorykb [<0..32>]` (admin, settings group "mesh"): the ESP-NOW message history per peer and per
   direction, in KB. 0 (the default) means 16 KB on boards with PSRAM and 2 KB without; the board maximum is
   32 KB (4 KB without PSRAM), and a cap over all peer slots (1 MB and at most a quarter of the PSRAM found;
@@ -103,10 +117,10 @@ everything user-visible since the v0.99.99.1 tag.
   clock is good to a few seconds; a device that is in the mesh but not paired with the master gets
   no time. Host-tested (rules, the device side against a settable clock, the receive gates and a
   relay hop); builds for the XIAO S3 and the P4; not yet run on hardware.
-- ESP-NOW sensor readings of up to 472 bytes arrive, and the receiver counts what was lost. A
+- ESP-NOW sensor readings of up to 536 bytes arrive, and the receiver counts what was lost. A
   reading over 200 bytes was refused in the sender with a debug line, so ToF and FM radio readings
   never arrived. A reading now travels in 1 to 4 frames (also through a relay) and is put together
-  by the receiver; one over 472 bytes is not sent. Each reading carries the sender's count for that
+  by the receiver; one over 536 bytes is not sent. Each reading carries the sender's count for that
   sensor, so the receiver counts lost, late and repeated readings and notices a restarted sender.
   The receiver stamps each reading with its own clock at arrival (UTC, in milliseconds; absent
   while its clock is not set) and its uptime; a time carried by the sender is not trusted. An older
@@ -207,6 +221,10 @@ everything user-visible since the v0.99.99.1 tag.
   as it did (its bond heartbeat counts as its agreement). Host-tested; not yet run on hardware.
 
 ### Fixed
+- `espnowmeshes add fjqo` gave the mesh id 0 (CRC16 of "fjqo"), which every receiver took as "no mesh"; a
+  mesh id now comes from the mesh key and is never 0.
+- A device name of 20-31 bytes, or one with characters outside the old rule, could be set through the
+  setup wizard (it copied the free-text label unchecked) and was cut to 19 bytes on the air.
 - ESP-NOW: messages sent to a device that has just restarted are no longer sent into the session it no
   longer has. Sessions live in RAM, so a restarted device has none, while its peers kept the old one and
   sealed messages into it; the restarted device could not open them and dropped them without a word
@@ -723,6 +741,74 @@ everything user-visible since the v0.99.99.1 tag.
   yet tested on hardware.
 
 ### Changed
+- ESP-NOW 1.0 frame rules (a full-erase install: devices on builds from before this change do not talk
+  to devices after it). Every frame layout is fixed, little-endian and checked byte by byte at build
+  time; each message type has a minimum length, a shorter frame is dropped and counted (`espnowstats`:
+  "RX Length Drops", `rxLengthDrops` in JSON, with `rxMustUnderstandDrops` and `rxUnknownMeshIdDrops`
+  beside it), and a longer one is read up to the fields the receiver knows, so later releases can add
+  fields at the end. Frames whose payload ends in text, data or a list (sensor reading parts, command
+  replies, file data, peer and file lists, relayed frames, and text, stream, boot, command and user-sync
+  frames) are fixed-header frames that never grow. Reserved bytes are sent as 0 and ignored. The group-signed (mesh broadcast) tag is
+  16 bytes instead of 32: a signed broadcast (`espnowbroadcast`) carries up to 202 bytes (was 186), a
+  frame through a relay 146 bytes of sealed payload (was 130), so a sensor reading can be up to 536
+  bytes (was 472). A device's details (room, zone, tags) now reach a device that is only reachable
+  through a relay: they travel as sealed pieces there, where before the relay refused them. A blank line
+  of a remote command's output is no longer sent, so it no longer counts as a short frame on the
+  receiver. Sensor masks are 32 bits everywhere (the forward-link frame and the bond status grew to hold them; `bondforwardsensors`
+  takes a 32-bit value). Name fields in frames are 32 bytes. The ping of the glasses' ESP-NOW page now
+  carries a full heartbeat, so the receiving device counts it as a heartbeat from the sender and
+  records it as alive. A command's reply text no longer ends with a NUL byte on the wire. Host-tested
+  (layouts, the receive table, the 16-byte tag, the routed budgets); not yet run on hardware.
+- One device name (1.0 wire format, part B: names and mesh id). A device has one name, 1-31 bytes of
+  letters, digits and `-` (not starting or ending with `-`, not `clear`/`all`/`json`/`none`, not an
+  address), checked in one place (`System_DeviceName.h`). It is the ESP-NOW name, the Bluetooth name and
+  the Wi-Fi hostname (the hostname was never set before), and `devicename [<name>|clear]` sets it in
+  every build; `espnowsetname`, `blename` and the Bluetooth-only `bluetoothDeviceName` setting are gone,
+  and the settings row moved from `espnow.deviceName` to `system.device.deviceName`. Without a stored
+  name Bluetooth and Wi-Fi use `HardwareOne-XXXXXX` (on a P4 board from the P4's own address, not the
+  radio address of its C6). `devicename` and the setup wizard warn when another device this one knows has
+  the name (both are then shown by address); a name chosen in the setup wizard is the Wi-Fi hostname of
+  the connection the wizard makes and reaches ESP-NOW at once, as one set with `devicename` does. The
+  Bluetooth client roles (glasses, ring, phone central) use the name as their GAP name too, not the fixed
+  "HardwareOne". Every frame that carries the name has a 32-byte field
+  with the NUL always present (HEARTBEAT 32 -> 44 bytes, PAIR_BEACON 24 -> 36, PAIR_REQUEST/ACCEPT/REJECT
+  28 -> 40, BOND_CAP_RESP's name 20 -> 32 bytes); a received name that breaks the rule is shown by address
+  (`peer-XXXXXX` in the pairing list) instead of being cut or cleaned, and TOPO_PEER no longer sends the
+  word "Unknown" for a peer without a name. Peer names given to the pair commands follow the same rule.
+  The setup wizard asks the display label and the device name separately (the name is offered from the
+  label). The Bluetooth scan response carries up to 29 bytes of the name.
+- The mesh id in every ESP-NOW frame comes from the mesh key (KDF subkey 3, context `esp-mid1`) instead
+  of CRC16 of the label: a mesh has none until its passphrase is set and then sends nothing, the id is
+  never 0 (a receiver drops 0 and counts it, and no send path sends it), it is stored and kept when the
+  passphrase is cleared, and `espnowsetpassphrase`, `espnowmeshes rename` and `espnowmeshes enable`
+  refuse a change that would give one mesh another mesh's id on the device. Two meshes with one id in an
+  edited settings file: the higher slot is off the air until a passphrase or label changes, with one WARN
+  a boot; an ESP-NOW start or a settings reload no longer gives it the id back. A passphrase change now gives a new id (the reply says so).
+  `espnowstats` counts frames dropped for an unknown mesh id with the last id and sender, and a paired
+  device or key exchange sending another id is named in one WARN a minute. Neighbouring fleets that share
+  a label but not a passphrase no longer pass each other's mesh gate, and the id no longer reveals the
+  label.
+- A bond partner whose firmware was built without bond mode (the P4X-EYE glasses build, for one) is no
+  longer asked to bond. Its session's capability word says so; no BOND_REQUEST is sent to it (also not
+  from a turn of the bond tick right as the session comes up, nor after a settings change), it is not
+  shown online, and no handshake is started for it. The user is told once: `<name> was built without
+  bond mode, so it cannot be a bond partner. Run 'bonddisconnect' here, or install a build with bond mode
+  on it`; `bondstatus` shows it (`agreementReason` `no_bond_build` in JSON) and `bondconnect` to such a
+  device is refused. A device answering a handshake trusts the word only after the first encrypted frame
+  of the session arrives (a recorded SESSION_OPEN can be replayed); until then it only holds the request
+  and does not set the partner online, but a bond that was online is not taken down either.
+  A new session whose word has the bond bit (the partner was reflashed) asks again at once.
+  `espnowsensorreq` is refused for a device whose build has no sensors (through `via`, for a bond master
+  built without bond mode). `espnowsessions` lists each peer's capabilities; its JSON stays whole JSON with
+  any number of sessions (those that do not fit the reply are counted in `more`). Host-tested; not yet run on hardware.
+- ESP-NOW header flags have two classes (1.0 rule): bits 0xF000 are must-understand, and a frame with one
+  this firmware does not know is dropped before it is acknowledged, remembered, authenticated or
+  forwarded, and counted; every other unknown bit is ignored. 1.0 defines no must-understand bit. The
+  flags nothing set or nothing read are removed: ENCRYPTED (0x0002), COMPRESS (0x0004), STREAM_BEGIN
+  (0x0010), STREAM_END (0x0020), HANDSHAKE (0x0400) and PRIORITY_HIGH (0x0800); handshake frames carry
+  only ACK_REQ now, and a remote command no longer sends the two empty STREAM frames before and after its
+  output (the receiver never used them; an empty STREAM is now dropped as too short). Host-tested; not yet
+  run on hardware.
 - The ESP-NOW message history takes no memory until a peer has a message. It used to take about 791 KB
   of PSRAM at every ESP-NOW start (five peers' worth), and about 158 KB for each further peer. A peer's
   history is now 32 KB by default (16 KB received, 16 KB sent; 4 KB in all without PSRAM), kept in PSRAM

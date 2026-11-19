@@ -88,10 +88,11 @@ static void check(bool ok, const char* what) {
 
 int main() {
   // The frame budgets every layout below is sized against.
-  check(ESPNOW_V4_MAX_PLAINTEXT == 202 && ESPNOW_V4_RELAY_MAX_INNER_FRAME == 178 &&
-        ESPNOW_V4_RELAY_MAX_INNER_PLAINTEXT == 130, "202 bytes direct, 130 through a relay");
+  check(ESPNOW_V4_BROADCAST_AUTH_TAG_LEN == 16 && ESPNOW_V4_MAX_PLAINTEXT == 202 &&
+        ESPNOW_V4_RELAY_MAX_INNER_FRAME == 194 && ESPNOW_V4_RELAY_MAX_INNER_PAYLOAD == 162 &&
+        ESPNOW_V4_RELAY_MAX_INNER_PLAINTEXT == 146, "202 bytes direct, 146 through a relay (16-byte group tag)");
   check(SENSOR_READING_HEADER_LEN == 12 && SENSOR_READING_MAX_PARTS == 4 && SENSOR_READING_PART_MAX_DIRECT == 190 &&
-        SENSOR_READING_PART_MAX_ROUTED == 118 && SENSOR_READING_MAX_BYTES == 472, "the reading's sizes");
+        SENSOR_READING_PART_MAX_ROUTED == 134 && SENSOR_READING_MAX_BYTES == 536, "the reading's sizes");
   check(espnowsensor::kFrameCapDirect == ESPNOW_V4_MAX_PLAINTEXT &&
         espnowsensor::kFrameCapRouted == ESPNOW_V4_RELAY_MAX_INNER_PLAINTEXT &&
         espnowsensor::kReadingMaxBytes == SENSOR_READING_MAX_BYTES &&
@@ -131,7 +132,7 @@ int main() {
           back.partCount == 4 && back.counter == 0xFFFE && back.bootTag == 0x1234 && back.ageMs == 0x89ABCDEFu &&
           back.flags == 0x03, "parseReadingHeader reads them back");
     // A forwarded reading: flag bit 2 and the link number in byte 7, nothing
-    // else moves (the 12-byte header and the 472-byte reading are unchanged).
+    // else moves (the 12-byte header and the 536-byte reading are unchanged).
     wire.flags = (uint8_t)(wire.flags | espnowsensor::kReadingFlagForwarded);
     wire.fwdLink = 0x5C;
     h.flags = (uint8_t)(h.flags | espnowsensor::kReadingFlagForwarded);
@@ -296,11 +297,12 @@ int main() {
         offsetof(V4PayloadForwardLink, linkGen) == 1 && offsetof(V4PayloadForwardLink, viaBootTag) == 2 &&
         offsetof(V4PayloadForwardLink, streams) == 4 && offsetof(V4PayloadForwardLink, result) == 5 &&
         offsetof(V4PayloadForwardLink, answers) == 6 && offsetof(V4PayloadForwardLink, reserved0) == 7 &&
-        offsetof(V4PayloadForwardLink, partnerMac) == 8 && offsetof(V4PayloadForwardLink, sensorMask) == 14 &&
-        offsetof(V4PayloadForwardLink, partnerKey) == 16 && offsetof(V4PayloadForwardLink, partnerName) == 48 &&
-        offsetof(V4PayloadForwardLink, reserved1) == 80 && sizeof(((V4PayloadForwardLink*)nullptr)->reserved1) == 16,
+        offsetof(V4PayloadForwardLink, partnerMac) == 8 && offsetof(V4PayloadForwardLink, reserved1) == 14 &&
+        offsetof(V4PayloadForwardLink, sensorMask) == 16 && sizeof(((V4PayloadForwardLink*)nullptr)->sensorMask) == 4 &&
+        offsetof(V4PayloadForwardLink, partnerKey) == 20 && offsetof(V4PayloadForwardLink, partnerName) == 52 &&
+        offsetof(V4PayloadForwardLink, reserved2) == 84 && sizeof(((V4PayloadForwardLink*)nullptr)->reserved2) == 12,
         "V4PayloadForwardLink: 0 op, 1 link number, 2 boot tag, 4 streams, 5 result, 6 answers, 8 partner, "
-        "14 sensors, 16 key[32], 48 name[32], 80 reserved[16]");
+        "14 reserved, 16 sensors (32 bits), 20 key[32], 52 name[32], 84 reserved[12]");
   {
     V4PayloadForwardLink wire{};
     wire.op = espnowfwd::kOpAnnounce;
@@ -424,7 +426,7 @@ def rule_failures(component: Path) -> list[str]:
     espnow = files["System_ESPNow.cpp"]
     table = strip_comments(extract_block(espnow, "static const V4OpcodeEntry kV4HandlerTable[]"))
     rows = {name: {flag.strip() for flag in flags.split("|")}
-            for name, flags in re.findall(r"\{\s*ESPNOW_V4_TYPE_(\w+)\s*,([^,]*),\s*\w+\s*\}", table)}
+            for name, flags in re.findall(r"\{\s*ESPNOW_V4_TYPE_(\w+)\s*,([^,]*),\s*ESPNOW_V4_MINLEN_\w+\s*,\s*\w+\s*\}", table)}
     paired_session = {"V4_OPC_FLAG_REQ_PAIRED", "V4_OPC_FLAG_REQ_SESSION_ENC"}
     for name in ("SENSOR_STATUS", "SENSOR_REQ", "SENSOR_ENVELOPE"):
         expect(rows.get(name) == paired_session,
@@ -492,7 +494,7 @@ def rule_failures(component: Path) -> list[str]:
     expect("ESPNOW_V4_TYPE_BOND_SENSOR_STATUS = 185," in wire_text and "BOND_SENSOR_STATUS=185" in wire_text,
            "the opcode 185 has its number and is in the opcode map")
     expect(re.search(r"\{ ESPNOW_V4_TYPE_BOND_SENSOR_STATUS, V4_OPC_FLAG_REQ_PAIRED \| V4_OPC_FLAG_REQ_BOND_PEER \| "
-                     r"V4_OPC_FLAG_REQ_SESSION_ENC, v4hBondSensorStatus \}", espnow) is not None and
+                     r"V4_OPC_FLAG_REQ_SESSION_ENC, ESPNOW_V4_MINLEN_BOND_SENSOR_STATUS, v4hBondSensorStatus \}", espnow) is not None and
            depth_in(espnow, "  { ESPNOW_V4_TYPE_BOND_SENSOR_STATUS,", "ENABLE_BONDED_MODE") == 1,
            "185 is a bond row: only from the bond partner, over its session, in a bond build")
     sensor_req = strip_comments(extract_block(espnow, "static void v4h_sensor_req(const V4RxCtx& ctx)"))
@@ -507,18 +509,17 @@ def rule_failures(component: Path) -> list[str]:
            "the bond worker's refusal comes before anything else is looked at")
     # A request with the link byte: for this device's bond partner, handed to
     # the bond master's side and never applied to this device's own sensors.
-    expect(re.search(r"if \(ctx\.payloadLen >= sizeof\(V4PayloadSensorReq\) &&\s*"
-                     r"\(\(const V4PayloadSensorReq\*\)ctx\.payload\)->fwdLink != 0\) \{", sensor_req) is not None,
+    expect(re.search(r"V4PayloadSensorReq rq;\s*ctx\.read\(rq\);\s*if \(rq\.fwdLink != 0\) \{", sensor_req) is not None,
            "v4h_sensor_req takes every request with the link byte set as one for the bond partner")
-    fwd_at = sensor_req.index("->fwdLink != 0")
-    fwd_block = extract_block(sensor_req, "->fwdLink != 0)")
+    fwd_at = sensor_req.index("rq.fwdLink != 0")
+    fwd_block = extract_block(sensor_req, "rq.fwdLink != 0)")
     # The block ends with its return, after the #if/#else/#endif: whatever the
     # build, the request never falls through to the own-sensor path.
     expect(re.search(r"#endif\s*return;\s*\}$", fwd_block) is not None,
            "the request for the bond partner returns at the end of its block, in every build")
     expect(sensor_req.index("if (!espnowfwd::meshDataAllowed(bondWorker)) {") < fwd_at <
            sensor_req.index("gSettings.espnowAcceptSensorControl") and
-           "bondForwardSensorRequest(ctx.recv_info->src_addr, fwd->mode, fwd->sensorMask, fwd->intervalMs, fwd->leaseMs," in fwd_block
+           "bondForwardSensorRequest(ctx.recv_info->src_addr, rq.mode, rq.sensorMask, rq.intervalMs, rq.leaseMs," in fwd_block
            and "meshSensorReqPending" not in fwd_block,
            "a request for the bond partner goes to the bond master's side and returns before the own-sensor path")
     expect("if (wants && !plan.viaBond)" in power, "the battery step starts no handshake with the bond partner")
@@ -601,7 +602,7 @@ def rule_failures(component: Path) -> list[str]:
     # reading is 30 s old.
     summary_at = strip_comments(definition(sensors, "static bool remoteSensorPeerSummaryAt(int index, RemoteSensorPeerSummary* out)"))
     status_cmd = strip_comments(definition(sensors, "const char* cmd_espnow_sensorstatus(const String& argsInput)"))
-    expect("if (e.valid) out->readMask |= (uint16_t)(1u << k);" in summary_at and
+    expect("if (e.valid) out->readMask |= espnowsensor::sensorBit((uint8_t)k);" in summary_at and
            re.search(r'\(summary\.readMask & \(1u << k\)\) \? "no reading for 30 s" : "streaming, no reading yet"',
                      status_cmd) is not None,
            "a streaming sensor with no reading kept is listed as 'streaming, no reading yet'")
@@ -630,8 +631,9 @@ def rule_failures(component: Path) -> list[str]:
     for name in ("OLED_Mode_Network.cpp", "G2_Page_ESPNow.cpp"):
         expect("uint8_t" in code[name] and re.search(r"\[REMOTE_SENSOR_SLOTS_MAX\]", code[name]) is not None,
                f"{name}: its slot index arrays are sized by REMOTE_SENSOR_SLOTS_MAX")
-    expect("static_assert(REMOTE_SENSOR_MAX <= 16" in files["System_ESPNow.h"],
-           "System_ESPNow.h: the 16-bit bond status masks are guarded")
+    expect("static_assert(REMOTE_SENSOR_MAX <= 30" in files["System_ESPNow_SensorCore.h"] and
+           "using SensorMask = uint32_t;" in files["System_ESPNow_SensorCore.h"],
+           "System_ESPNow_SensorCore.h: sensor masks are 32 bits (SensorMask), with room for the forward resume bits")
 
     # The sender: a reading is cut by the frame budget of its target and never
     # parked; the broadcaster prints nothing.

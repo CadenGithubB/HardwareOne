@@ -2,7 +2,8 @@
 """Run the actual ESP-NOW metadata setters, payload builder, sender and push tick.
 
 Extracts metaGetSet (with the metadata text policy when the source has it),
-cmd_espnow_stationary, cmd_espnow_setname, buildMetadataPayload, sendMetadata,
+cmd_espnow_stationary, espnowDeviceNameApplied (the ESP-NOW side of
+'devicename'), buildMetadataPayload, sendMetadata,
 the metadata tracking block and metadataPushTick from System_ESPNow.cpp, plus the
 real SessionState, EspNowEventCategory and V4PayloadMetadata definitions, and
 compiles them beside session-table, subscription, transport, settings and clock
@@ -31,7 +32,7 @@ ESPNOW_MARKERS = (
     'static void sendMetadata(',
     'static const char* metaGetSet(',
     '\nconst char* cmd_espnow_stationary(',
-    '\nconst char* cmd_espnow_setname(',
+    '\nvoid espnowDeviceNameApplied(',
     '// Metadata transmission tracking',
     '// Master/Backup heartbeat tracking',
 )
@@ -75,7 +76,7 @@ def main():
     production = '\n\n'.join(extract_block(source, m) for m in (
         *policy, 'static void buildMetadataPayload(', 'static void sendMetadata(',
         'static const char* metaGetSet(', '\nconst char* cmd_espnow_stationary(',
-        '\nconst char* cmd_espnow_setname('))
+        '\nvoid espnowDeviceNameApplied('))
     tick = extract_block(source, TICK_MARKER) if source.count(TICK_MARKER) == 1 else NO_TICK
 
     harness = (HERE / 'espnow_metadata_push_harness.cpp').read_text()

@@ -2,12 +2,14 @@
 """Run the actual ESP-NOW mesh-slot commands and the device-name command.
 
 Extracts the production Settings::MeshIdentity record and, from
-System_ESPNow.cpp, meshFingerprintForLabel, the meshes settings writer and
+System_ESPNow.cpp, the mesh-id helpers (refresh, clash check, the boot
+clash resolution, fingerprintForPeer, the staging of a new key and id), the meshes settings writer and
 reader, setEspNowPassphrase, initPrimaryMeshFromLegacySettings, the
 start-passphrase and hint helpers, the helpers that keep a running instance on
 the passphrase a start would load, the espnowmeshes subcommands (add, remove,
 delete, enable, setdefault, setpassphrase, listjson) with the delete guard's
-counters, and cmd_espnow_setname, and runs them with the vendored ArduinoJson against host
+counters, the device name's ESP-NOW side and the one setter cmd_devicename
+(System_DeviceName.cpp), and runs them with the vendored ArduinoJson against host
 doubles for settings writes, the key cache, stored identities, the device
 registry, events and the ESP-NOW state.
 
@@ -44,8 +46,12 @@ HERE = Path(__file__).resolve().parent
 
 # Each marker stops before the opening brace: extract_block takes the first "{" after it.
 BASE = (
-    'static uint16_t meshFingerprintForLabel(const String& label) ',
-    'static void recomputeAllMeshFingerprints()',
+    'static void meshIdSnapshot(',
+    'static int meshIdClashSlot(',
+    'static void meshIdResolveClashes()',
+    'static void meshIdRefreshAll()',
+    'void espnowMeshIdsAfterKeyInit()',
+    'static uint16_t fingerprintForPeer(const uint8_t* mac)',
     'void espnowMeshesWriteJson(',
     'void espnowMeshesReadJson(',
     'static void setEspNowPassphrase(const String& passphrase)',
@@ -76,6 +82,9 @@ PARSE_MESH_ARG = 'static uint8_t parseMeshArgOrDefault('
 ADD = (
     'static bool isValidMeshLabel(',
     'static int findFreeMeshSlot()',
+    'static const char* meshIdClashReply(',
+    'static const char* meshIdStage(',
+    'static void meshIdCommit(',
     'static const char* meshesCmd_add(',
 )
 # Each is taken when the source has it, in this order.
@@ -95,8 +104,14 @@ REST = (
     'static const char* meshesCmd_setpassphrase(',
     'static const char* meshesCmd_rename(',
     'static int meshSlotByLabel(',
-    'const char* cmd_espnow_setname(',
+    'const char* espnowDeviceNameClearRefusal()',
+    'void espnowDeviceNameApplied(',
+    'bool espnowNameInUseBy(',
+    'static const char* espnowPeerAliasRefusal(',
 )
+# The one device-name setter, compiled in every build (System_DeviceName.cpp).
+SETTER = 'const char* cmd_devicename(const String& argsInput)'
+HAND_ON = 'void deviceNameApply(const String& name, char* warn, size_t warnCap)'
 LIVE_SLOT = 'static int8_t gEspNowLivePassphraseSlot = -1;'
 
 
@@ -155,6 +170,10 @@ def main():
         order.append(DELETE)
     order += list(REST)
     pieces = [definition(source, marker, 'System_ESPNow.cpp') for marker in order]
+    names = read('System_DeviceName.cpp')
+    if HAND_ON in names:  # the one hand-on of a new name, beside the setter
+        pieces.append(definition(names, HAND_ON, 'System_DeviceName.cpp'))
+    pieces.append(definition(names, SETTER, 'System_DeviceName.cpp'))
 
     # What the harness cannot run is pinned in the source.
     init = ''
@@ -308,7 +327,8 @@ def main():
         stub = stub.replace(anchor, '  long toInt() const { return std::strtol(text_.c_str(), nullptr, 10); }\n' + anchor)
         stub = stub.replace('#include <string>', '#include <cstdlib>\n#include <string>', 1)
         (Path(tmp) / 'Arduino.h').write_text(stub)
-        shutil.copy(a.component / 'System_CommandReply.h', Path(tmp) / 'System_CommandReply.h')
+        for name in ('System_CommandReply.h', 'System_DeviceName.h', 'System_ESPNow_MeshIdCore.h', 'System_MacText.h'):
+            (Path(tmp) / name).write_text(read(name))
         cmd = [a.cxx, '-std=c++17', '-Wall', '-Wextra', '-Werror', '-pedantic', '-Wno-unused-function',
                '-DARDUINOJSON_ENABLE_ARDUINO_STRING=1', '-DARDUINOJSON_ENABLE_ARDUINO_STREAM=0',
                '-DARDUINOJSON_ENABLE_ARDUINO_PRINT=0', '-DARDUINOJSON_ENABLE_PROGMEM=0',

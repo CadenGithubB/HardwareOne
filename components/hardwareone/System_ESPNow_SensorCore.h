@@ -11,7 +11,7 @@
 // frames ("parts") of opcode SENSOR_ENVELOPE (154), or BOND_SENSOR_DATA (179)
 // to a bond partner; each part starts with the 12-byte header below. A part
 // is an ordinary single frame, also through a relay, where a frame carries
-// less. The largest reading is 472 bytes on every path.
+// less. The largest reading is 536 bytes on every path.
 #pragma once
 
 #include <stddef.h>
@@ -64,9 +64,15 @@ inline constexpr SensorRow kSensorTable[REMOTE_SENSOR_MAX] = {
   { REMOTE_SENSOR_APDS,       "apds",       "APDS",  "Gesture/Color" },
 };
 
+// A mask of sensor types: 32 bits everywhere, on the wire and in RAM.
+// The forward resume mask adds battery and events after the sensors
+// (System_ESPNow_ForwardCore.h), so at most 30 sensor types fit.
+using SensorMask = uint32_t;
+static_assert(REMOTE_SENSOR_MAX <= 30, "sensor masks are 32 bits; the forward resume mask adds battery and events");
+
 // The mask bit of a sensor type, in every mask that names sensors.
-constexpr uint32_t sensorBit(uint8_t id) { return (uint32_t)1u << id; }
-constexpr uint32_t kSensorMaskAll = ((uint32_t)1u << REMOTE_SENSOR_MAX) - 1u;
+constexpr SensorMask sensorBit(uint8_t id) { return (SensorMask)1u << id; }
+constexpr SensorMask kSensorMaskAll = (SensorMask)((1ull << REMOTE_SENSOR_MAX) - 1u);
 
 inline const char* sensorName(int id) {
   return (id >= 0 && id < REMOTE_SENSOR_MAX) ? kSensorTable[id].name : "unknown";
@@ -237,11 +243,12 @@ constexpr uint32_t elapsedSinceMs(uint32_t nowMs, uint32_t stampMs) {
 constexpr size_t   kReadingHeaderLen  = 12;
 constexpr uint8_t  kReadingMaxParts   = 4;
 constexpr uint16_t kFrameCapDirect    = 202;  // ESPNOW_V4_MAX_PLAINTEXT
-constexpr uint16_t kFrameCapRouted    = 130;  // ESPNOW_V4_RELAY_MAX_INNER_PLAINTEXT
+constexpr uint16_t kFrameCapRouted    = 146;  // ESPNOW_V4_RELAY_MAX_INNER_PLAINTEXT
 constexpr uint16_t kPartMaxDirect     = kFrameCapDirect - kReadingHeaderLen;   // 190
-constexpr uint16_t kPartMaxRouted     = kFrameCapRouted - kReadingHeaderLen;   // 118
+constexpr uint16_t kPartMaxRouted     = kFrameCapRouted - kReadingHeaderLen;   // 134
 // The stated maximum of one reading: four parts through a relay.
-constexpr uint16_t kReadingMaxBytes   = kReadingMaxParts * kPartMaxRouted;      // 472
+constexpr uint16_t kReadingMaxBytes   = kReadingMaxParts * kPartMaxRouted;      // 536
+static_assert(kReadingMaxBytes == 536, "the 536-byte limit is named in DropReason::TooLong's text");
 
 constexpr uint8_t kReadingFlagAgeValid    = 0x01;
 constexpr uint8_t kReadingFlagStreamStart = 0x02;
@@ -297,7 +304,7 @@ struct PartPlan {
   uint16_t partSize;  // data bytes of every part but the last
 };
 
-// `frameCap` is what one sealed frame to the target carries (202 direct, 130
+// `frameCap` is what one sealed frame to the target carries (202 direct, 146
 // through a relay). False for an empty reading, one over kReadingMaxBytes, or
 // a frame too small to carry it in four parts.
 inline bool planParts(size_t len, uint16_t frameCap, PartPlan& plan) {
@@ -786,7 +793,7 @@ inline const char* dropReasonKey(DropReason r) {
 inline const char* dropReasonText(DropReason r) {
   switch (r) {
     case DropReason::None:         return "sent";
-    case DropReason::TooLong:      return "the reading is over the 472-byte limit";
+    case DropReason::TooLong:      return "the reading is over the 536-byte limit";
     case DropReason::NoReceiver:   return "no device has asked for them and no master is named on this device";
     case DropReason::NoSession:    return "the receiving device has no session with this device yet";
     case DropReason::QueueFull:    return "the send queue is full";
@@ -984,21 +991,21 @@ inline const char* fingerprintEditorArg(const char* cmd, const char* value) {
 // frames back to back); for one sensor the last one wins. Sensor numbers this
 // firmware does not know are dropped.
 struct StreamCtrlQueue {
-  uint16_t pending;  // sensors with a switch to apply
-  uint16_t on;       // of those: on (else off)
+  SensorMask pending;  // sensors with a switch to apply
+  SensorMask on;       // of those: on (else off)
 };
 
 inline void streamCtrlPut(StreamCtrlQueue& q, uint8_t sensor, bool on) {
   if (sensor >= REMOTE_SENSOR_MAX) return;
-  const uint16_t bit = (uint16_t)sensorBit(sensor);
-  q.pending = (uint16_t)(q.pending | bit);
-  q.on = on ? (uint16_t)(q.on | bit) : (uint16_t)(q.on & ~bit);
+  const SensorMask bit = sensorBit(sensor);
+  q.pending = q.pending | bit;
+  q.on = on ? (q.on | bit) : (q.on & ~bit);
 }
 
 // Takes every pending switch: `on`, `off` the sensors to switch on and off.
-inline void streamCtrlTake(StreamCtrlQueue& q, uint16_t* on, uint16_t* off) {
-  *on = (uint16_t)(q.pending & q.on);
-  *off = (uint16_t)(q.pending & ~q.on);
+inline void streamCtrlTake(StreamCtrlQueue& q, SensorMask* on, SensorMask* off) {
+  *on = q.pending & q.on;
+  *off = q.pending & ~q.on;
   q.pending = 0;
   q.on = 0;
 }

@@ -82,7 +82,7 @@ def check_sources(component: Path) -> None:
     espnow = (component / "System_ESPNow.cpp").read_text()
     table = strip_comments(extract_block(espnow, "static const V4OpcodeEntry kV4HandlerTable[]"))
     rows = {name: ({flag.strip() for flag in flags.split("|")}, handler)
-            for name, flags, handler in re.findall(r"\{\s*ESPNOW_V4_TYPE_(\w+)\s*,([^,]*),\s*(\w+)\s*\}", table)}
+            for name, flags, handler in re.findall(r"\{\s*ESPNOW_V4_TYPE_(\w+)\s*,([^,]*),\s*ESPNOW_V4_MINLEN_\w+\s*,\s*(\w+)\s*\}", table)}
     for name, handler in (("POWER_STATUS", "v4hPowerStatus"), ("EVENT_PUSH", "v4hEventPush")):
         require(name in rows, f"kV4HandlerTable has a {name} row")
         require(rows[name][0] == {"V4_OPC_FLAG_REQ_PAIRED", "V4_OPC_FLAG_REQ_SESSION_ENC"},

@@ -120,14 +120,24 @@ OLD_LINES = (
 # glue (from its first comment line to the heartbeat handler's comment) and the
 # two receive paths that ask it.
 AGREE_LINE = 'static bondagree::State gBondAgree = {};'
+# bondAgreementSessionUp gained `noBondBuild` with the session capability word (1.0),
+# then `noBondConfirmed` (a decline waits for a confirmed word).
+SESSION_UP_DECIDE = ('static bool bondAgreementSessionUp(const uint8_t* partner, bool* wasOffline, bool* wentOnline, '
+                     'bool* noBondBuild, bool* noBondConfirmed)',
+                     'static bool bondAgreementSessionUp(const uint8_t* partner, bool* wasOffline, bool* wentOnline, '
+                     'bool* noBondBuild)',
+                     'static bool bondAgreementSessionUp(const uint8_t* partner, bool* wasOffline, bool* wentOnline)')
 AGREE_FORWARD = ('static void bondAgreementReset();',
-                 'static bool bondAgreementSessionUp(const uint8_t* partner, bool* wasOffline, bool* wentOnline);',
+                 SESSION_UP_DECIDE,
                  'static void bondAgreementPostOnline(const uint8_t* partner);',
                  'static void bondTellPartnerEnded(const uint8_t* nextPartner);')
 AGREE_START = '// System_ESPNow_BondAgreeCore.h has the rules.'
 AGREE_END = '// BOND_HEARTBEAT — bond-mode keepalive from paired peer'
 AGREE_WIRE_START = '// BOND_REQUEST flags.'
 AGREE_HEADERS = ('System_ESPNow_BondAgreeCore.h', 'System_Deadline.h')
+# The session capability word's rules, where the tree has them (HW1_HAVE_CAPS).
+CAPS_HEADER = 'System_ESPNow_SessionCapsCore.h'
+CAPS_MARK = 'bool espnowPeerSessionCaps('
 HEARTBEAT_RX = 'static void v4h_bond_heartbeat(const V4RxCtx& ctx)'
 SESSION_UP = 'void bondNotifySessionEstablished(const uint8_t* peerMac)'
 CASES_LINE = '// ---- Cases ---'
@@ -174,7 +184,8 @@ def assemble(a):
 
     pieces = []
     types = [definition(header, 'enum BondSyncRequestType : uint8_t', 'System_ESPNow.h') + ';',
-             definition(header, 'struct CapabilitySummary', 'System_ESPNow.h') + ';']
+             definition(read('System_ESPNow_Wire.h'), 'struct __attribute__((packed)) CapabilitySummary',
+                        'System_ESPNow_Wire.h') + ';']
     if have_agree:
         # The payloads and reason codes as they are on the wire, the status
         # view, and the declarations the frame hold's functions need.
@@ -186,6 +197,8 @@ def assemble(a):
         types += [definition(header, 'enum BondAgreementState : uint8_t', 'System_ESPNow.h') + ';',
                   definition(header, 'struct BondAgreementView', 'System_ESPNow.h') + ';']
         for line in AGREE_FORWARD:
+            if isinstance(line, tuple):   # either form, the one the tree has
+                line = next((f + ';' for f in line if source.count(f + ';') == 1), line[0] + ';')
             if source.count(line) != 1:
                 sys.exit(f'FAIL extraction: {line!r}')
             pieces.append(line)
@@ -348,8 +361,8 @@ def assemble(a):
         after_write = up[up.index('logAuthAttempt('):]
         assert 'gEspNow' not in after_write and 'systemEventPost' not in after_write, \
             'bondNotifySessionEstablished does more than return after the auth-log write'
-        decide = definition(source, 'static bool bondAgreementSessionUp(const uint8_t* partner, bool* wasOffline,'
-                            ' bool* wentOnline) ', 'System_ESPNow.cpp')
+        decide_marker = next((f + ' ' for f in SESSION_UP_DECIDE if f + ' {' in source), SESSION_UP_DECIDE[0] + ' ')
+        decide = definition(source, decide_marker, 'System_ESPNow.cpp')
         held = decide[decide.index('portENTER_CRITICAL(&gBondAgreeLock);'):decide.index('portEXIT_CRITICAL(&gBondAgreeLock);')]
         assert decide.count('portENTER_CRITICAL(') == 1 and 'bondagree::onSessionUp(' in held and \
             'gEspNow->bondPeerOnline = true;' in held and 'bondNeedsCapabilityRequest = true;' in held and \
@@ -393,7 +406,8 @@ def assemble(a):
           f'bond end helper: {"present" if have_end else "absent"}; '
           f'hold counter: {"present" if have_epoch else "absent"}; '
           f'bond agreement: {"present" if have_agree else "absent"}', flush=True)
-    have = {'HOLD': have_hold, 'ASK': have_ask, 'KICK': have_kick, 'AGREE': have_agree}
+    have_caps = have_agree and CAPS_MARK in source
+    have = {'HOLD': have_hold, 'ASK': have_ask, 'KICK': have_kick, 'AGREE': have_agree, 'CAPS': have_caps}
     return harness, have, read
 
 
@@ -402,11 +416,13 @@ def build_and_run(a, harness, have, read, name):
     with tempfile.TemporaryDirectory(prefix=f'hw1-{name}-') as tmp:
         unit, exe = Path(tmp) / f'{name}.cpp', Path(tmp) / name
         unit.write_text(harness)
-        for name in ('System_MacText.h', 'System_CommandReply.h'):
+        for name in ('System_MacText.h', 'System_CommandReply.h', 'System_DeviceName.h'):
             shutil.copy(a.component / name, Path(tmp) / name)
         if have['AGREE']:
             for header in AGREE_HEADERS:
                 (Path(tmp) / header).write_text(read(header))
+        if have.get('CAPS'):
+            (Path(tmp) / CAPS_HEADER).write_text(read(CAPS_HEADER))
         # The pasted commands keep parameters this harness does not use (the
         # firmware builds without -Wextra).
         cmd = [a.cxx, '-std=c++17', '-Wall', '-Wextra', '-Werror', '-pedantic', '-Wno-unused-function',

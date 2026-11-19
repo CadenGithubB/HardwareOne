@@ -205,7 +205,7 @@ static void hello(const Peer& p, unsigned mesh = 0, bool forge = false) {
   if (forge) msg.hmac[0] ^= 0x01;
   EspNowV4Header h{};
   h.type = ESPNOW_V4_TYPE_KEY_EX_HELLO;
-  h.flags = ESPNOW_V4_FLAG_HANDSHAKE | ESPNOW_V4_FLAG_ACK_REQ;
+  h.flags = ESPNOW_V4_FLAG_ACK_REQ;
   h.msgId = generateMessageId();
   std::memcpy(h.origin, p.mac, 6);
   esp_now_recv_info ri{p.mac, kSelfMac};
@@ -235,7 +235,7 @@ static void replyFrom(const Peer& p, unsigned mesh = 0) {
                    gMeshKeys[mesh].bootstrapKey, msg.hmac);
   EspNowV4Header h{};
   h.type = ESPNOW_V4_TYPE_KEY_EX_REPLY;
-  h.flags = ESPNOW_V4_FLAG_HANDSHAKE | ESPNOW_V4_FLAG_ACK_REQ;
+  h.flags = ESPNOW_V4_FLAG_ACK_REQ;
   h.msgId = generateMessageId();
   std::memcpy(h.origin, p.mac, 6);
   esp_now_recv_info ri{p.mac, kSelfMac};

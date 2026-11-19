@@ -51,6 +51,7 @@ def main():
         extract_block(setup, "bool wizardHandleCancelInput("),
         extract_block(setup, "static String waitForWizardInput("),
         extract_block(mode, "static WizardSubMode subModeForPage("),
+        extract_block(oled, "static bool oledAskDeviceName("),
         *handlers, extract_block(mode, "static CliModeInputResult wizardMode_onInput("),
     ])
     harness = (HERE / "setup_espnow_application_harness.cpp").read_text()
@@ -60,7 +61,7 @@ def main():
                           .replace("// INSERT_PRODUCTION_FUNCTIONS", functions))
         executable = Path(temp) / "test"
         command = [args.cxx, "-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic",
-                   "-Wno-unused-function", str(source), "-o", str(executable)]
+                   "-Wno-unused-function", "-I", str(COMPONENT), str(source), "-o", str(executable)]
         if args.sanitize:
             command[1:1] = ["-fsanitize=address,undefined", "-fno-sanitize-recover=all", "-fno-omit-frame-pointer", "-g"]
         subprocess.run(command, check=True, timeout=60)

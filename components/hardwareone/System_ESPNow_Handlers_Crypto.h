@@ -38,6 +38,11 @@ void v4hKeyExHello   (const V4RxCtx& ctx);
 void v4hKeyExReply   (const V4RxCtx& ctx);
 void v4hKeyExConfirm (const V4RxCtx& ctx);
 
+// This image's session capability word (System_ESPNow_SessionCapsCore.h):
+// what its build can do, fixed for the boot. Sent in SESSION_OPEN and
+// SESSION_CONFIRM inside the signed transcript. Any task.
+uint32_t espnowLocalSessionCaps();
+
 // Initiator entry point. Build KEY_EX_HELLO with our pubkey + HMAC over the
 // mesh bootstrap key, then send to `peerMac`. Mesh slot is identified by
 // label; pass empty string to use the configured default mesh.

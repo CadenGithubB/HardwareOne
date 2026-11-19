@@ -264,7 +264,7 @@ struct SensorBroadcastSpec {
 
 static const SensorBroadcastSpec gSensorSpecs[REMOTE_SENSOR_MAX] = {
 #if ENABLE_THERMAL_SENSOR
-  // DISABLED: the 768-pixel frame is far over the largest reading (472 bytes,
+  // DISABLED: the 768-pixel frame is far over the largest reading (536 bytes,
   // System_ESPNow_SensorCore.h). Re-enable over the mesh by pointing this at
   // thermalBuildSummaryJson (~90 B).
   [REMOTE_SENSOR_THERMAL]    = { nullptr, 0, 0 },
@@ -1515,7 +1515,7 @@ bool sensorSendReadingTo(const uint8_t dst[6], bool viaBond, RemoteSensorType se
   }
   taskEXIT_CRITICAL(&gSensorBcastTaskMux);
 
-  // 190 bytes of text per frame to a direct peer, 118 through a relay. Should
+  // 190 bytes of text per frame to a direct peer, 134 through a relay. Should
   // the route change before the frame leaves, the reading may be lost, and
   // the receiver then counts it lost.
   espnowsensor::PartPlan plan;
@@ -2343,10 +2343,10 @@ struct RemoteSensorPeerSummary {
   uint8_t via[6];
   uint8_t link;
   char name[32];
-  uint16_t presentMask;    // sensors listed
-  uint16_t streamingMask;  // ... that the sender says it streams
-  uint16_t freshMask;      // ... with a reading within REMOTE_SENSOR_TTL_MS
-  uint16_t readMask;       // ... with a reading kept at all (a status frame alone lists a sensor)
+  espnowsensor::SensorMask presentMask;    // sensors listed
+  espnowsensor::SensorMask streamingMask;  // ... that the sender says it streams
+  espnowsensor::SensorMask freshMask;      // ... with a reading within REMOTE_SENSOR_TTL_MS
+  espnowsensor::SensorMask readMask;       // ... with a reading kept at all (a status frame alone lists a sensor)
   uint32_t received, lost, late, incomplete, malformed;
 };
 
@@ -2372,10 +2372,10 @@ static bool remoteSensorPeerSummaryAt(int index, RemoteSensorPeerSummary* out) {
       out->late += peer.counts[k].late;
       if (!peer.slots || !slotPresent(peer.slots[k], nowMs)) continue;
       const RemoteSensorData& e = peer.slots[k];
-      out->presentMask |= (uint16_t)(1u << k);
-      if (e.enabled) out->streamingMask |= (uint16_t)(1u << k);
-      if (slotFresh(e, nowMs)) out->freshMask |= (uint16_t)(1u << k);
-      if (e.valid) out->readMask |= (uint16_t)(1u << k);
+      out->presentMask |= espnowsensor::sensorBit((uint8_t)k);
+      if (e.enabled) out->streamingMask |= espnowsensor::sensorBit((uint8_t)k);
+      if (slotFresh(e, nowMs)) out->freshMask |= espnowsensor::sensorBit((uint8_t)k);
+      if (e.valid) out->readMask |= espnowsensor::sensorBit((uint8_t)k);
     }
   }
   taskEXIT_CRITICAL(&gRemoteSensorMux);

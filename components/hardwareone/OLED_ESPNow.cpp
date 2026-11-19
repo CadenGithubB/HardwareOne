@@ -1,4 +1,5 @@
 #include "OLED_ESPNow.h"
+#include "System_DeviceName.h"  // devicename::kMaxLen (the device name's 31 bytes)
 #include "System_CommandReply.h"  // the reply words and how to read them
 
 #if ENABLE_OLED_DISPLAY && ENABLE_ESPNOW
@@ -212,7 +213,7 @@ void oledEspNowShowNameKeyboard() {
   if (gSettings.espnowDeviceName.length() > 0) {
     initialText = gSettings.espnowDeviceName.c_str();
   }
-  oledKeyboardInit("Device Name:", initialText, 19,
+  oledKeyboardInit("Device Name:", initialText, devicename::kMaxLen,
                    OledKeyboardDictationPolicy::ALLOW_PLAINTEXT);
 }
 
@@ -456,7 +457,7 @@ static int sRoomCount = 0;
 
 // Cached device list for selected room
 struct RoomDeviceEntry {
-  char name[24];
+  char name[32];  // a device name (31 bytes) + NUL
   uint8_t mac[6];
   bool alive;
   bool pending;  // says it is in this room; not accepted here, so room commands skip it
@@ -716,7 +717,7 @@ static void onPairReqReject(void* /*ud*/) { oledEspNowAnswerPairRequest("espnowr
 
 void oledEspNowPollPairRequest() {
   if (oledConfirmIsActive()) return;                       // a dialog is already up
-  char reqName[24];
+  char reqName[32];
   uint8_t mac[6];
   uint32_t atMs = 0;
   if (!espnowGetIncomingPairRequest(reqName, sizeof(reqName), mac, &atMs)) return;
@@ -763,7 +764,7 @@ void oledEspNowDisplayPairing(Adafruit_SSD1306* display) {
     // The header line shows our own request while it runs and its result for a
     // while after: a timed-out request is retried by selecting the peer again
     // (a peer that already paired us answers the repeat with Accept).
-    char outName[24];
+    char outName[32];
     char head[22];
     switch (espnowGetPairRequestOutcome(outName, sizeof(outName))) {
       case ESPNOW_PAIR_OUT_WAITING:   snprintf(head, sizeof(head), "Waiting: %.11s", outName); break;
@@ -776,7 +777,7 @@ void oledEspNowDisplayPairing(Adafruit_SSD1306* display) {
     const int maxRows = 3;
     int start = (sPairingSel >= maxRows) ? sPairingSel - maxRows + 1 : 0;
     for (int i = start; i < n && i < start + maxRows; i++) {
-      char nm[24]; uint8_t mac[6]; int rssi = 0;
+      char nm[32]; uint8_t mac[6]; int rssi = 0;
       if (!espnowGetPairCandidate(i, nm, sizeof(nm), mac, &rssi)) continue;
       display->setCursor(0, y);
       display->print(i == sPairingSel ? "> " : "  ");
@@ -1106,7 +1107,7 @@ bool oledEspNowHandleInput(int deltaX, int deltaY, uint32_t newlyPressed) {
         if (gNavEvents.up && sPairingSel > 0)       { sPairingSel--; return true; }
         if (gNavEvents.down && sPairingSel < n - 1) { sPairingSel++; return true; }
         if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
-          uint8_t mac[6]; char nm[24]; int rssi = 0;
+          uint8_t mac[6]; char nm[32]; int rssi = 0;
           if (n > 0 && espnowGetPairCandidate(sPairingSel, nm, sizeof(nm), mac, &rssi)) {
             char cmd[48];
             snprintf(cmd, sizeof(cmd), "espnowpairrequest " MAC_FMT,
@@ -2319,7 +2320,7 @@ void oledEspNowApplySettingsEdit(const String& value) {
   String cmd;
   switch (gOledEspNowState.settingsEditField) {
     case 0: // Device Name
-      cmd = "espnowsetname " + value;
+      cmd = "devicename " + value;
       break;
     case 1: // Room
       cmd = "espnowroom " + value;
@@ -2374,7 +2375,7 @@ struct DeviceConfigAction {
 static const DeviceConfigAction kDeviceConfigActions[] = {
   { "Restart Device",  "reboot",             nullptr,                        0,  false },
   { "Set Role",        "espnowmeshrole",     "Role (master/backup/worker):", 16, false },
-  { "Set Name",        "espnowsetname",      "Device Name:",                 16, true  },
+  { "Set Name",        "devicename",         "Device Name:",                 31, true  },
   { "Set Room",        "espnowroom",         "Room:",                        16, false },
   { "Set Zone",        "espnowzone",         "Zone:",                        16, false },
   { "Set Pretty Name", "espnowfriendlyname", "Pretty Name:",                 24, false },

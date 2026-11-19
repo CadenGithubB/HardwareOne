@@ -87,6 +87,11 @@ static SetupWizardResult runSetupWizard() {
 #define DEBUG_CLIF(...) do {} while (0)
 static void appendPromptTo(char*, size_t) { assert(false && "unexpected navigation"); }
 static char* getWizardDeviceNameBuf() { static char buffer[21]; return buffer; }
+// The wizard's checked name setter (System_SetupWizard.cpp; the rule is System_DeviceName.h).
+[[maybe_unused]] static const char* wizardSetDeviceName(const char* typed) {
+  std::snprintf(getWizardDeviceNameBuf(), 21, "%s", typed);
+  return nullptr;
+}
 static CliModeInputResult unexpectedDispatch(const String&, char*, size_t) {
   assert(false && "completion test unexpectedly entered another page"); return CLI_MODE_HANDLED;
 }

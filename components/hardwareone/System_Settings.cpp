@@ -673,6 +673,7 @@ const char* cmd_controls(const String& argsInput);  // defined below; machine-re
 // Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
 const CommandEntry settingsCommands[] = {
   { "controls", "Per-module control descriptor (JSON): controls json [module]", false, cmd_controls, "Usage: controls json <module>  (e.g. 'controls json imu'); 'controls json' lists modules" },
+  { "devicename", "Get/set the device name (ESP-NOW name, Bluetooth name, Wi-Fi hostname): 'devicename [name|clear]'.", true, cmd_devicename, "Usage: devicename [<name>|clear]   (1-31 letters, digits and '-'; not starting or ending with '-'; not clear/all/json/none or a MAC address; 'clear' while ESP-NOW is stopped)" },
 #if ENABLE_WIFI
   // ---- WiFi Network Settings ----
   { "wifitxpower", "Set WiFi TX power: <dBm>", true, cmd_wifitxpower, "Usage: wifitxpower <2..21>" },
@@ -2973,6 +2974,7 @@ void registerAllSettingsModules() {
 #endif
   // Timezone must persist on radioless builds, so this is never #if-gated.
   registerSettingsModule(&clockSettingsModule);
+  registerSettingsModule(&deviceSettingsModule);  // the device name (System_DeviceName.cpp)
 #if ENABLE_NEOPIXEL
   registerSettingsModule(&ledSettingsModule);
 #endif

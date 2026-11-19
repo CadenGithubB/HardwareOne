@@ -22,6 +22,7 @@
 #include <string>
 #include <strings.h>
 #include <vector>
+#include "System_DeviceName.h"  // the device-name rule (normalizeMetadataWireText, processMetadata)
 
 void webBatchTestStringAppend() {}
 
@@ -267,7 +268,10 @@ static void testWireScrub() {
   CHECK(std::strcmp(m->room, "_b_x_/b_") == 0, "M1: cache room '%s', expected '_b_x_/b_'", m->room);
   CHECK(std::strcmp(m->friendlyName, "a_b_c_d_e") == 0, "M1: cache friendlyName '%s', expected 'a_b_c_d_e'",
         m->friendlyName);
-  CHECK(std::strcmp(m->name, "peer_B") == 0, "M1: cache name '%s', expected 'peer_B'", m->name);
+  // The device name follows the one rule (System_DeviceName.h): a name that
+  // breaks it is dropped (the peer is shown by address), never cleaned to
+  // "peer_B"; the drop counts as one in the WARN's total.
+  CHECK(m->name[0] == '\0', "M1: cache name '%s', expected none (an invalid name is dropped, not cleaned)", m->name);
   CHECK(std::strcmp(m->tags, "t1,_img src=x onerror=1_") == 0, "M1: cache tags '%s'", m->tags);
   CHECK(std::strlen(m->zone) == 31, "M1: unterminated wire zone stored with length %zu, expected 31",
         std::strlen(m->zone));

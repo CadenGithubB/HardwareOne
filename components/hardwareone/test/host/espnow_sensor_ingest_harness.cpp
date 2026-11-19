@@ -148,7 +148,7 @@ static bool espnowSessionUp(const uint8_t* mac, uint32_t* establishedAtMs = null
 }
 static uint16_t v4_single_frame_cap(const uint8_t* dst) {
   const TestSession* s = sessionOf(dst);
-  return (s && s->routed) ? 130 : 202;
+  return (s && s->routed) ? 146 : 202;
 }
 static std::vector<std::string> gHandshakes;
 static bool espnowHandshakeAutoStart(const uint8_t* mac) {
@@ -626,8 +626,8 @@ static void testParts() {
   // readers keep the last complete reading.
   const std::string big = jsonOf(SENSOR_READING_MAX_BYTES);
   espnowsensor::PartPlan plan;
-  espnowsensor::planParts(big.size(), 130, plan);
-  check(plan.count == 4, "472 bytes are four routed parts");
+  espnowsensor::planParts(big.size(), 146, plan);
+  check(plan.count == 4, "536 bytes are four routed parts");
   for (uint8_t i = 0; i < plan.count; ++i) {
     size_t offset = 0, n = 0;
     espnowsensor::partSpan(plan, big.size(), i, offset, n);
@@ -640,20 +640,20 @@ static void testParts() {
     std::vector<uint8_t> frame(espnowsensor::kReadingHeaderLen + n);
     espnowsensor::packReadingHeader(frame.data(), h);
     std::memcpy(frame.data() + espnowsensor::kReadingHeaderLen, big.data() + offset, n);
-    check(frame.size() <= 130, "a routed part fits a routed frame");
+    check(frame.size() <= 146, "a routed part fits a routed frame");
     remoteSensorIngestPart(kPorch, "porch", frame.data(), frame.size(), false);
     if (i + 1 < plan.count) check(textOf(kPorch, REMOTE_SENSOR_TOF) == first, "the previous reading stays until the new one is whole");
   }
   check(textOf(kPorch, REMOTE_SENSOR_TOF) == big, "the whole reading is stored, byte for byte");
   RemoteSensorInfo info;
   remoteSensorInfoFor(kPorch, nullptr, REMOTE_SENSOR_TOF, &info);
-  check(info.jsonLength == SENSOR_READING_MAX_BYTES && info.counter == 2, "length 472, counter 2");
+  check(info.jsonLength == SENSOR_READING_MAX_BYTES && info.counter == 2, "length 536, counter 2");
   check(has(json(kPorch, REMOTE_SENSOR_TOF), big), "and comes back whole in the JSON reply");
   // A middle part is lost: nothing is stored, it is counted incomplete, and
   // the next reading counts it lost.
-  deliver(kPorch, "porch", REMOTE_SENSOR_TOF, 7, 3, jsonOf(400), false, 0, 130, /*losePart=*/1);
+  deliver(kPorch, "porch", REMOTE_SENSOR_TOF, 7, 3, jsonOf(400), false, 0, 146, /*losePart=*/1);
   check(textOf(kPorch, REMOTE_SENSOR_TOF) == big && incompleteOf(kPorch) == 1, "a reading with a lost part is not stored");
-  deliver(kPorch, "porch", REMOTE_SENSOR_TOF, 7, 4, jsonOf(200), false, 0, 130);
+  deliver(kPorch, "porch", REMOTE_SENSOR_TOF, 7, 4, jsonOf(200), false, 0, 146);
   check(textOf(kPorch, REMOTE_SENSOR_TOF) == jsonOf(200) && countsOf(kPorch, REMOTE_SENSOR_TOF).lost == 1 &&
         incompleteOf(kPorch) == 1, "the next reading counts it lost, once");
   check(has(json(kPorch, REMOTE_SENSOR_TOF), "\"lost\":1,") && has(json(kPorch, REMOTE_SENSOR_TOF), "\"incomplete\":1"),
@@ -661,8 +661,8 @@ static void testParts() {
   // Two senders send parts in turn: each has its own open reading.
   const std::string a = jsonOf(300), b = jsonOf(350);
   espnowsensor::PartPlan pa, pb;
-  espnowsensor::planParts(a.size(), 130, pa);
-  espnowsensor::planParts(b.size(), 130, pb);
+  espnowsensor::planParts(a.size(), 146, pa);
+  espnowsensor::planParts(b.size(), 146, pb);
   for (uint8_t i = 0; i < 3; ++i) {
     for (int who = 0; who < 2; ++who) {
       const std::string& text = who ? b : a;
@@ -980,26 +980,26 @@ static void testSend() {
   gSentParts.clear();
   const std::string big = jsonOf(SENSOR_READING_MAX_BYTES);
   check(sensorSendReadingTo(kHub, false, REMOTE_SENSOR_TOF, big.data(), big.size(), &why) && gSentParts.size() == 3,
-        "472 bytes direct: three frames");
+        "536 bytes direct: three frames");
   for (const SentPart& p : gSentParts) check(p.bytes.size() <= 202, "each within a direct frame");
   check(textOf(gSelfMac, REMOTE_SENSOR_TOF) == big, "received whole");
   gSessions[0].routed = true;
   gSentParts.clear();
   check(sensorSendReadingTo(kHub, false, REMOTE_SENSOR_TOF, big.data(), big.size(), &why) && gSentParts.size() == 4,
-        "472 bytes through a relay: four frames");
-  for (const SentPart& p : gSentParts) check(p.bytes.size() <= 130, "each within a routed frame");
+        "536 bytes through a relay: four frames");
+  for (const SentPart& p : gSentParts) check(p.bytes.size() <= 146, "each within a routed frame");
   check(headerOf(gSentParts[3]).partIndex == 3 && headerOf(gSentParts[3]).partCount == 4 &&
         headerOf(gSentParts[0]).counter == headerOf(gSentParts[3]).counter, "all parts carry the same counter");
   check(textOf(gSelfMac, REMOTE_SENSOR_TOF) == big && countsOf(gSelfMac, REMOTE_SENSOR_TOF).lost == 0, "received whole, nothing lost");
   gSentParts.clear();
-  check(sensorSendReadingTo(kHub, false, REMOTE_SENSOR_IMU, jsonOf(130).data(), 130, &why) && gSentParts.size() == 2,
-        "130 bytes through a relay: two frames (one direct)");
+  check(sensorSendReadingTo(kHub, false, REMOTE_SENSOR_IMU, jsonOf(135).data(), 135, &why) && gSentParts.size() == 2,
+        "135 bytes through a relay: two frames (one direct)");
 
   // Too long: not sent, and the receiver sees the gap.
   gSentParts.clear();
   const std::string tooLong = jsonOf(SENSOR_READING_MAX_BYTES) + " ";
   check(!sensorSendReadingTo(kHub, false, REMOTE_SENSOR_TOF, tooLong.data(), tooLong.size(), &why) &&
-        why == espnowsensor::DropReason::TooLong && gSentParts.empty(), "473 bytes: not sent, reason too_long");
+        why == espnowsensor::DropReason::TooLong && gSentParts.empty(), "537 bytes: not sent, reason too_long");
   check(sensorSendReadingTo(kHub, false, REMOTE_SENSOR_TOF, jsonOf(50).data(), 50, &why), "the next one is sent");
   check(countsOf(gSelfMac, REMOTE_SENSOR_TOF).lost == 1, "and the receiver counts the dropped one as lost");
 
@@ -1259,7 +1259,7 @@ static void linkUp(uint8_t gen) {
 // One reading forwarded by kGlasses for kPartner: X's sensor, boot tag and
 // counter, bit 2 and the link number in byte 7.
 static void deliverForwarded(uint8_t sensor, uint16_t counter, const std::string& text, uint8_t fwdLink,
-                             uint8_t flags = espnowsensor::kReadingFlagForwarded, uint16_t cap = 130,
+                             uint8_t flags = espnowsensor::kReadingFlagForwarded, uint16_t cap = 146,
                              bool fromBond = false, const uint8_t* src = kGlasses) {
   espnowsensor::PartPlan plan;
   if (!espnowsensor::planParts(text.size(), cap, plan)) std::exit(2);
@@ -1352,10 +1352,10 @@ static void testForwarded() {
   // last part of a reading in parts, not the first.
   linkUp(4);
   gResumeTaken = 0;
-  const std::string big = jsonOf(400);  // 4 routed parts
+  const std::string big = jsonOf(500);  // 4 routed parts
   espnowsensor::PartPlan plan;
-  espnowsensor::planParts(big.size(), 130, plan);
-  check(plan.count == 4, "a 400-byte reading is four routed parts");
+  espnowsensor::planParts(big.size(), 146, plan);
+  check(plan.count == 4, "a 500-byte reading is four routed parts");
   for (uint8_t i = 0; i < 3; ++i) {
     size_t offset = 0, n = 0;
     espnowsensor::partSpan(plan, big.size(), i, offset, n);

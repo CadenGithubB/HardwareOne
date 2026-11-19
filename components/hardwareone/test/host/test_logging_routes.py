@@ -89,7 +89,7 @@ SERIAL_WRITE_ALLOWED: dict[str, int] = {
     "System_Microphone.cpp": 4,
     "System_Mutex.cpp": 1,
     "System_Settings.cpp": 1,
-    "System_SetupWizard.cpp": 59,
+    "System_SetupWizard.cpp": 62,   # the serial wizard asks the display label and the device name separately
 }
 ROM_PRINT_ALLOWED: dict[str, int] = {
     "System_CrashRecord.cpp": 13,

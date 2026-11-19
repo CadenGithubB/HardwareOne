@@ -53,7 +53,8 @@
 #include "i2csensor_mlx90640.h"   // ThermalCache, readings, gThermalRunning/Connected
 #include "i2csensor_vl53l4cx.h"   // TofCache, readings, gTofRunning/Connected
 #include "i2csensor_bno055.h"     // ImuCache, readings, gImuRunning/Connected
-#include "System_SelfDevice.h"  // SelfDevice::firmwareVersion() for the Device Info BLE characteristic
+#include "System_SelfDevice.h"  // SelfDevice::firmwareVersion() for the Device Info BLE characteristic; deviceName()
+#include "System_DeviceName.h"  // the advertised name (29 of the name's up to 31 bytes)
 #include "System_Settings.h"
 #include "BLE_SecureChannel.h"  // app-layer Secure Channel v1 (replaces BLE link-layer bonding)
 #include "System_AuthIdentity.h"      // currentAuthContext() — gate blesecret to trusted transports
@@ -2164,9 +2165,11 @@ bool initBluetooth() {
 
   BLE_DEBUGF(DEBUG_BLE_CORE, "Initializing ESP32 BLE...");
   
-  // Initialize ESP32 BLE with configured device name
-  const char* deviceName = gSettings.bleDeviceName.length() > 0 ? gSettings.bleDeviceName.c_str() : "HardwareOne";
-  const bool stackReady = bluetoothHalInit(deviceName);
+  // Initialize ESP32 BLE with the device name (System_DeviceName.h: the one
+  // name, or HardwareOne-XXXXXX when none is set). The GAP device name holds
+  // all of it, up to 31 bytes; the advertisement below carries up to 29.
+  const String deviceName = SelfDevice::deviceName();
+  const bool stackReady = bluetoothHalInit(deviceName.c_str());
 
   if (!stackReady) {
     sBleServerRefusal = "the Bluetooth host or controller did not start";
@@ -2278,6 +2281,22 @@ bool initBluetooth() {
   pAdvertising->setScanResponse(true);
   pAdvertising->setMinPreferred(0x06);  // Help with iPhone connection issues
   pAdvertising->setMinPreferred(0x12);
+  {
+    // The scan response carries the name. Arduino's default one puts the whole
+    // GAP name in and breaks above 29 bytes (BLEAdvertising.cpp), and a device
+    // name may have 31, so it is built here: the complete name up to 29 bytes,
+    // else its first 29 as the shortened name.
+    char advName[devicename::kAdvertMax + 1];
+    bool complete = true;
+    devicename::advertisedName(deviceName.c_str(), advName, sizeof(advName), &complete);
+    BLEAdvertisementData scanResponse;
+    if (complete) {
+      scanResponse.setName(String(advName));
+    } else {
+      scanResponse.setShortName(String(advName));
+    }
+    pAdvertising->setScanResponseData(scanResponse);
+  }
 
   {
     BleLifecycleGuard lifecycle;
@@ -2299,7 +2318,7 @@ bool initBluetooth() {
 
   BLE_DEBUGF(DEBUG_BLE_CORE, "Bluetooth initialized successfully");
   broadcastOutput("[BLE] Initialized - ready to advertise");
-  systemEventPost(SYSEVT_BLE_ON, deviceName);
+  systemEventPost(SYSEVT_BLE_ON, deviceName.c_str());
 
   return true;
 }
@@ -4270,38 +4289,6 @@ static const char* cmd_bleevent(const String& argsInput) {
   return "Error: Failed to send event";
 }
 
-static const char* cmd_blename(const String& argsInput) {
-  // The command dispatcher supplies arguments without the command name.
-  const char* args = argsInput.c_str();
-  while (*args == ' ') args++;
-  
-  if (*args != '\0') {
-    // Extract new name
-    size_t len = strlen(args);
-    // Trim trailing spaces
-    while (len > 0 && args[len - 1] == ' ') len--;
-    
-    if (len == 0 || len > 29) {
-      return "Error: Name must be 1-29 characters";
-    }
-    
-    String newName(args, len);
-    setSetting(gSettings.bleDeviceName, newName);
-    
-    if (!ensureDebugBuffer()) return "Name saved (restart BLE to apply)";
-    char* buf = getDebugBuffer();
-    snprintf(buf, 1024, "BLE name set to '%s'. Restart Bluetooth to apply (closeble && openble)", newName.c_str());
-    BLE_DEBUGF(DEBUG_BLE_CORE, "BLE device name updated to '%s'", newName.c_str());
-    return buf;
-  }
-  
-  // Show current name
-  if (!ensureDebugBuffer()) return gSettings.bleDeviceName.c_str();
-  char* buf = getDebugBuffer();
-  snprintf(buf, 1024, "BLE Device Name: %s", gSettings.bleDeviceName.c_str());
-  return buf;
-}
-
 static const char* cmd_bletxpower(const String& argsInput) {
   if (!bluetoothHalSupportsTxPower()) {
     return "Error: BLE TX power control is unavailable on this radio backend";
@@ -4347,7 +4334,7 @@ static const char* cmd_bletxpower(const String& argsInput) {
 bool buildBleInfoJson(JsonObject out) {
   if (out.isNull()) return false;
   out["schema"]              = 1;
-  out["deviceName"]     = gSettings.bleDeviceName;
+  out["deviceName"]     = SelfDevice::deviceName();  // the device name (set with 'devicename')
   out["txPower"]        = gSettings.bleTxPower;
   out["autoStart"]      = gSettings.bleAutoStart;
   out["requireAuth"]    = gSettings.bleRequireAuth;
@@ -4407,7 +4394,7 @@ static const char* cmd_bleinfo(const String& argsInput) {
   int w;
 
   w = snprintf(buf + pos, rem, "=== BLE Configuration ===\n"); if (w > 0) { pos += w; rem -= w; }
-  w = snprintf(buf + pos, rem, "Device Name:  %s\n", gSettings.bleDeviceName.c_str());                    if (w > 0) { pos += w; rem -= w; }
+  w = snprintf(buf + pos, rem, "Device Name:  %s\n", SelfDevice::deviceName().c_str());                    if (w > 0) { pos += w; rem -= w; }
   w = snprintf(buf + pos, rem, "TX Power:     %d (0=min/-12dBm, 7=max/+9dBm)\n", gSettings.bleTxPower);  if (w > 0) { pos += w; rem -= w; }
   w = snprintf(buf + pos, rem, "Auto-Start:   %s\n", gSettings.bleAutoStart  ? "Yes" : "No");       if (w > 0) { pos += w; rem -= w; }
   w = snprintf(buf + pos, rem, "Require Auth: %s\n", gSettings.bleRequireAuth ? "Yes" : "No");      if (w > 0) { pos += w; rem -= w; }
@@ -4600,7 +4587,6 @@ const CommandEntry bluetoothCommands[] = {
   { "bleread",      "Read the Bluetooth role, app console and relay pipe. (add 'json' for JSON output)", false, cmd_blestatus },
   { "blestatus",    "Show the Bluetooth role, app console and relay pipe. (add 'json' for JSON output)", false, cmd_blestatus },
   { "bleinfo",      "Show BLE configuration and settings. (add 'json' for JSON output)",      false, cmd_bleinfo },
-  { "blename",      "Get/set BLE device name [name].",           false, cmd_blename, "Usage: blename [name]" },
   { "bletxpower",   "Get/set BLE TX power [0-7].",               false, cmd_bletxpower, "Usage: bletxpower [0..7]" },
   { "bledisconnect","Disconnect BLE app clients: all, or one by connection id [connId].", true, cmd_bledisconnect, "Usage: bledisconnect [connId]" },
   { "bleadv",       "Start/stop/toggle BLE advertising [start|stop|toggle].", true, cmd_bleadv, "Usage: bleadv [start|stop|toggle]" },
@@ -4663,7 +4649,6 @@ const SettingEntry bluetoothSettingsEntries[] = {
   { "bleEnabled", SETTING_BOOL, &gSettings.bleEnabled, 1, 0, nullptr, 0, 1, "Enabled", nullptr, false, nullptr, "bleenabled" },
   { "bluetoothAutoStart",    SETTING_BOOL,   &gSettings.bleAutoStart,    false, 0, nullptr, 0, 1, "Auto-start at boot", nullptr, false, nullptr, "bleautostart" },
   { "bluetoothRequireAuth",  SETTING_BOOL,   &gSettings.bleRequireAuth,  true, 0, nullptr, 0, 1, "Require Authentication", nullptr, false, nullptr, "blerequireauth" },
-  { "bluetoothDeviceName", SETTING_STRING, &gSettings.bleDeviceName, 0, 0, "HardwareOne", 0, 0, "Device Name", nullptr, false, nullptr, "blename" },
   { "bluetoothTxPower",      SETTING_INT,    &gSettings.bleTxPower,            3, 0, nullptr, 0, 7, "TX Power (0-7)", nullptr, false, nullptr, "bletxpower" },
   { "bluetoothMode",         SETTING_INT,    &gSettings.bleMode,               kBleModeDefaultForBuild, 0, nullptr, 0, kBleModeMaximum, "Mode", kBleModeChoices, false, nullptr, "blemode" },
   { "bleRequireSecureChannel", SETTING_BOOL, &gSettings.bleRequireSecureChannel, true, 0, nullptr, 0, 1, "Require Secure Channel", nullptr, false, nullptr, "blesecure" },

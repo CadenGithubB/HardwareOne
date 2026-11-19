@@ -512,8 +512,8 @@ String identifySensor(uint8_t address);
 // There is deliberately NO "age" key: local consumers derive it (millis()-ts,
 // same clock), and remote ones can't use a sender-relative age anyway — they
 // stamp arrival time instead. Dropping it also keeps a reading smaller: one
-// of up to 190 bytes travels in a single frame to a direct peer (118 through
-// a relay; the largest reading is 472 bytes in four frames,
+// of up to 190 bytes travels in a single frame to a direct peer (134 through
+// a relay; the largest reading is 536 bytes in four frames,
 // System_ESPNow_SensorCore.h). Returns bytes written
 // (always < bufSize, leaving room for the caller's suffix), or 0 on
 // error/overflow — a 0 return means the caller must NOT append.

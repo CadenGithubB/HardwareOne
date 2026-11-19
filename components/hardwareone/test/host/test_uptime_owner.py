@@ -39,7 +39,7 @@ ASKERS = (
     ("G2_Glasses.cpp", 1),            # the glasses status page
     ("OLED_Mode_System.cpp", 1),      # the OLED system page
     ("System_Automation.cpp", 1),     # the UPTIME condition sensor
-    ("System_ESPNow.cpp", 10),        # heartbeats, bond status, capability summary, stats
+    ("System_ESPNow.cpp", 7),         # heartbeats (v4FillHeartbeat), bond status, capability summary, stats
     ("System_I2C.cpp", 1),            # i2cmetrics rates
     ("System_SensorLogging.cpp", 1),  # the track stamp without GPS time
     ("System_Utils.cpp", 2),          # the command audit stamp (and the status reply)

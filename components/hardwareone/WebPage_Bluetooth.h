@@ -224,7 +224,7 @@ inline void streamBluetoothInner(httpd_req_t* req) {
         <div>
           <div class='bt-section-label'>Device Name</div>
           <div class='bt-field-row'>
-            <input type='text' id='bt-cfg-name' class='form-control' maxlength='30' placeholder='e.g. HardwareOne' data-guest-hide />
+            <input type='text' id='bt-cfg-name' class='form-control' maxlength='31' placeholder='e.g. Kitchen-Cam' title='The device name: also the ESP-NOW name and the Wi-Fi hostname' data-guest-hide />
             <button class='btn' id='btn-bt-savename' data-guest-hide>Save</button>
           </div>
 
@@ -1168,7 +1168,8 @@ R"JS(
     bind('btn-bt-loadconfig', function(){ loadConfig(); });
     bind('btn-bt-savename', function(){
       var inp = el('bt-cfg-name'); if(!inp) return;
-      cli('blename ' + inp.value.trim()).then(function(o){ setText('bt-cfg-status', o); });
+      // The one device name ('devicename'): also the ESP-NOW name and the Wi-Fi hostname.
+      cli('devicename "' + inp.value.trim().replace(/"/g, '') + '"').then(function(o){ setText('bt-cfg-status', o); });
     });
     bind('btn-bt-savetx', function(){
       var inp = el('bt-cfg-txpower'); if(!inp) return;

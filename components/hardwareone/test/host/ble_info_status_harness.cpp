@@ -64,12 +64,19 @@ using TransportSessionEpoch = uint32_t;
 static BleSystemState state{};
 static BleSystemState* gBleState = &state;
 static struct {
-  String bleDeviceName = "Bench \"Bluetooth\"\\unit\n";
+  // The Bluetooth-only name setting is gone (one device name, 'devicename'):
+  // bleinfo reports SelfDevice::deviceName(). A stale value here shows a
+  // build that still reads the old setting.
+  String bleDeviceName = "stale-ble-setting";
   int bleTxPower = 5, bleMode = 0;
   bool bleAutoStart = true, bleRequireAuth = true;
   bool bleConsoleOnPipe = true;
   String bleSecureChannelSecret;
 } gSettings;
+// The device name as Bluetooth uses it (System_SelfDevice.cpp); the harness sets
+// it. Escaping is still checked although the rule never lets quotes in.
+static String gEffectiveDeviceName = "Bench \"Bluetooth\"\\unit\n";
+namespace SelfDevice { [[maybe_unused]] static String deviceName() { return gEffectiveDeviceName; } }
 static bool secureRequired = true;
 static std::atomic<unsigned> secureCalls{0};
 static bool bleScRequired() { ++secureCalls; return secureRequired; }
@@ -446,8 +453,8 @@ static void checkSchema(JsonVariantConst doc, bool initialized, bool cli = false
         "the phone link block is bleinfo json's own, in pipe builds only");
   check(doc.as<JsonObjectConst>().size() == 13u + (block ? 1u : 0u),
         "BLE schema contains exactly the characterized fields");
-  check(doc["schema"] == 1 && doc["deviceName"] == gSettings.bleDeviceName,
-        "schema version and escaped device name preserved");
+  check(doc["schema"] == 1 && doc["deviceName"] == gEffectiveDeviceName,
+        "schema version and escaped device name (the device name in use, not a Bluetooth-only setting) preserved");
   check(doc["txPower"] == 5 && doc["autoStart"] == true && doc["requireAuth"] == true &&
         doc["secureChannelRequired"] == secureRequired, "configuration facts preserved");
   check(doc["initialized"] == initialized && doc["maxConnections"] == BLE_MAX_CONNECTIONS,
@@ -1248,8 +1255,8 @@ static void ownerChecks() {
           state.connections[0].user == "replaced after lock release", "documents do not share mutable output");
   }
   populate();
-  std::string oldName = gSettings.bleDeviceName.c_str();
-  gSettings.bleDeviceName = std::string(2200, 'N');
+  std::string oldName = gEffectiveDeviceName.c_str();
+  gEffectiveDeviceName = std::string(2200, 'N');
   {
     JsonDocument doc;
     check(buildBleInfoJson(doc.to<JsonObject>()) && measureJson(doc) > 2048,
@@ -1257,7 +1264,7 @@ static void ownerChecks() {
     check(std::strcmp(cmd_bleinfo("json"), "{\"error\":\"status too large\"}") == 0,
           "CLI rejects oversized output without truncation");
   }
-  gSettings.bleDeviceName = oldName;
+  gEffectiveDeviceName = oldName;
   // Characterize every observed JSON allocation failure site in the actual CLI.
   jsonAllocator.reset();
   check(parsed(cmd_bleinfo("json"))["schema"] == 1, "CLI baseline before fault sweep");

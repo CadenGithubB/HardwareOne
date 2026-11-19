@@ -48,8 +48,8 @@ from console import ANSI, ConsoleTimeout, MeshConsole, extract_json_objects
 HERE = Path(__file__).resolve().parent
 BOUNDARIES = (1, 201, 202, 203, 400, 401, 1024)
 DEFAULT_BOARDS = {
-    "p4": {"port": os.environ.get("HW1_P4_PORT", "/dev/ttyP4"), "mac": os.environ.get("HW1_P4_MAC", "02:48:57:31:01:a8"), "name": "HW1_P4"},
-    "s3": {"port": os.environ.get("HW1_S3_PORT", "/dev/ttyS3"), "mac": os.environ.get("HW1_S3_MAC", "02:48:57:31:00:d0"), "name": "HW1_S3"},
+    "p4": {"port": os.environ.get("HW1_P4_PORT", "/dev/ttyP4"), "mac": os.environ.get("HW1_P4_MAC", "02:48:57:31:01:a8"), "name": "HW1-P4"},
+    "s3": {"port": os.environ.get("HW1_S3_PORT", "/dev/ttyS3"), "mac": os.environ.get("HW1_S3_MAC", "02:48:57:31:00:d0"), "name": "HW1-S3"},
 }
 FATAL = re.compile(r"Guru Meditation|panic'ed|assert failed|abort\(\) was called|"
                    r"ESP_ERROR_CHECK failed|Brownout detector|Task watchdog got triggered")
@@ -293,7 +293,7 @@ class MeshRunner:
 
     def configure(self, key: str) -> dict:
         spec, label = self.config[key], self.credentials["mesh_label"]
-        for command in ("espnowenabled 1", f"espnowsetname {spec['name']}", "espnowchannel 6", "openespnow", "espnowmode mesh"):
+        for command in ("espnowenabled 1", f"devicename {spec['name']}", "espnowchannel 6", "openespnow", "espnowmode mesh"):
             self.command(key, command, timeout=60)
         meshes = self.json_command(key, "espnowmeshes listjson", "meshes", schema=False)
         if not any(mesh.get("label") == label for mesh in meshes["meshes"]):

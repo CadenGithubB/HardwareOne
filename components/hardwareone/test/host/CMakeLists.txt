@@ -187,6 +187,19 @@ target_compile_definitions(espnow_pair_core_tests PRIVATE
 target_compile_options(espnow_pair_core_tests PRIVATE
   -Wall -Wextra -Werror -pedantic)
 
+# The device-name rule and the mesh-id helpers (System_DeviceName.h,
+# System_ESPNow_MeshIdCore.h, production dependency-free headers): the 1-31
+# byte letters/digits/'-' rule with its reserved words and address shapes, the
+# 32-byte wire field (zero-filled, NUL required, never cut or cleaned), the BLE
+# advertised name, the wizard's suggestion from a label, and the mesh id's pick
+# (first nonzero little-endian pair) and clash check.
+add_executable(device_name_core_tests test_device_name_core.cpp)
+set_target_properties(device_name_core_tests PROPERTIES
+  CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+target_include_directories(device_name_core_tests PRIVATE ../..)
+target_compile_options(device_name_core_tests PRIVATE
+  -Wall -Wextra -Werror -pedantic)
+
 # Bond agreement rules (System_ESPNow_BondAgreeCore.h, the production
 # dependency-free header): modelled devices exchanging BOND_REQUEST and
 # BOND_NOTICE over a channel that can lose frames. Mutual and one-sided bonds,
@@ -274,6 +287,16 @@ set_target_properties(espnow_forward_core_tests PROPERTIES
   CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
 target_include_directories(espnow_forward_core_tests PRIVATE ../..)
 target_compile_options(espnow_forward_core_tests PRIVATE
+  -Wall -Wextra -Werror -pedantic)
+
+# The session capability word (System_ESPNow_SessionCapsCore.h, the production
+# dependency-free header): bit values, the known mask, the image's word and its
+# text for espnowsessions.
+add_executable(espnow_session_caps_core_tests test_espnow_session_caps_core.cpp)
+set_target_properties(espnow_session_caps_core_tests PROPERTIES
+  CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+target_include_directories(espnow_session_caps_core_tests PRIVATE ../..)
+target_compile_options(espnow_session_caps_core_tests PRIVATE
   -Wall -Wextra -Werror -pedantic)
 
 # Rules of mesh time (System_ESPNow_TimeCore.h, the production dependency-free
@@ -525,6 +548,10 @@ if(HW1_SANITIZE)
   target_compile_options(espnow_time_core_tests PRIVATE
     -fsanitize=address,undefined -g)
   target_link_options(espnow_time_core_tests PRIVATE
+    -fsanitize=address,undefined)
+  target_compile_options(espnow_session_caps_core_tests PRIVATE
+    -fsanitize=address,undefined -g)
+  target_link_options(espnow_session_caps_core_tests PRIVATE
     -fsanitize=address,undefined)
   target_compile_options(espnow_power_event_core_tests PRIVATE
     -fsanitize=address,undefined -g)
@@ -821,6 +848,16 @@ add_test(
           ${CMAKE_CURRENT_LIST_DIR}/test_espnow_dispatch_policy.py
           ${ESPNOW_DISPATCH_POLICY_TEST_ARGS})
 
+# ESP-NOW V4 header flags (1.0): no removed flag comes back, every flag is both
+# set and read, 0xF000 is the must-understand class, and the receive front door
+# drops and counts a frame with an unknown must-understand bit before it is
+# acknowledged, remembered, authenticated or flooded (source lint; the
+# behaviour runs in espnow_rx_frontend).
+add_test(
+  NAME espnow_header_flags
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_espnow_header_flags.py)
+
 # ESP-NOW V4 fragment reassembler: v4_reasm_accept / v4_reasm_release / dispatch cleanup on
 # crafted post-unwrap fragments, plus a run with no reassembly table.
 set(ESPNOW_REASSEMBLY_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
@@ -898,6 +935,20 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_espnow_metadata_push.py
           ${ESPNOW_METADATA_PUSH_TEST_ARGS})
+
+# espnowsessions output (README "ESP-NOW session list output"): the production
+# command over 0-16 ACTIVE sessions with every capability bit set; the JSON form
+# is whole JSON inside the debug buffer (sessions left out counted in "more"),
+# the text form says how many it did not show.
+set(ESPNOW_SESSIONS_OUTPUT_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND ESPNOW_SESSIONS_OUTPUT_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME espnow_sessions_output
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_espnow_sessions_output.py
+          ${ESPNOW_SESSIONS_OUTPUT_TEST_ARGS})
 
 # ESP-NOW history readers (README "ESP-NOW history readers"): the readers' name
 # cache (System_ESPNow_HistoryNames.h, dependency-free) as a unit, and the
@@ -1459,11 +1510,13 @@ add_test(NAME memutil_no_psram COMMAND memutil_no_psram_tests)
 add_test(NAME memtracker_core_tests COMMAND memtracker_core_tests)
 add_test(NAME heap_low_core_tests COMMAND heap_low_core_tests)
 add_test(NAME espnow_pair_core_tests COMMAND espnow_pair_core_tests)
+add_test(NAME device_name_core_tests COMMAND device_name_core_tests)
 add_test(NAME espnow_bond_agree_core_tests COMMAND espnow_bond_agree_core_tests)
 add_test(NAME espnow_group_core_tests COMMAND espnow_group_core_tests)
 add_test(NAME espnow_history_core_tests COMMAND espnow_history_core_tests)
 add_test(NAME espnow_history_stress_tests COMMAND espnow_history_stress_tests)
 add_test(NAME espnow_sensor_core_tests COMMAND espnow_sensor_core_tests)
+add_test(NAME espnow_session_caps_core_tests COMMAND espnow_session_caps_core_tests)
 add_test(NAME espnow_time_core_tests COMMAND espnow_time_core_tests)
 add_test(NAME espnow_power_event_core_tests COMMAND espnow_power_event_core_tests)
 add_test(NAME espnow_forward_core_tests COMMAND espnow_forward_core_tests)
@@ -2617,8 +2670,18 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_espnow_sensor_wire.py
           ${SETUP_MQTT_TEST_ARGS})
+# The 1.0 frame rules of System_ESPNow_Wire.h: every struct packed, every size
+# and field offset asserted and equal to the golden table, little-endian
+# stated, the bond capability and status structs in the wire header, one
+# receive style (no payload casts, no per-handler length checks) and 32-bit
+# sensor masks (README "ESP-NOW frame rules").
+add_test(
+  NAME espnow_wire_layout
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_espnow_wire_layout.py
+          ${SETUP_MQTT_TEST_ARGS})
 # ... and the production sender and receiver of System_ESPNow_Sensors.cpp end
-# to end: readings up to 472 bytes in parts, the receiver's arrival stamp and
+# to end: readings up to 536 bytes in parts, the receiver's arrival stamp and
 # loss counts, refusals, who keeps readings by mesh role, the status frame,
 # sixteen senders and a seventeenth, the reasons a reading is not sent, what
 # the stream command says.
@@ -2768,8 +2831,12 @@ add_test(
 
 # Mesh slots and the device name can be taken back to a new device's state:
 # the only mesh can be disabled, 'espnowmeshes delete' frees a slot, one enabled
-# mesh is the default, messages use the mesh's own label, 'espnowsetname clear',
-# and a running ESP-NOW always uses the passphrase a start would load.
+# mesh is the default, messages use the mesh's own label, 'devicename clear',
+# and a running ESP-NOW always uses the passphrase a start would load. The mesh
+# id comes from the mesh key: none until a passphrase is set, unique among the
+# device's meshes (a clashing setpassphrase, rename or enable is refused), kept
+# when the passphrase is cleared; the one device-name setter checks the rule
+# and warns when another device here has the name.
 set(ESPNOW_MESH_SLOTS_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
 if(HW1_SANITIZE)
   list(APPEND ESPNOW_MESH_SLOTS_TEST_ARGS --sanitize)
@@ -2779,6 +2846,30 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_espnow_mesh_slots.py
           ${ESPNOW_MESH_SLOTS_TEST_ARGS})
+
+# The one device name (System_DeviceName.h): no Bluetooth-only name or
+# espnowsetname is left, Bluetooth and the Wi-Fi hostname use the device name
+# (scan response with the advertised 29 bytes; hostname handed on at boot and by
+# the setter), and every frame name field is written with putField and read
+# with getField. Source contract; the rule itself is device_name_core_tests.
+add_test(
+  NAME device_name_sources
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_device_name_sources.py)
+
+# The mesh id derivation is a cross-device contract (System_ESPNow_MeshIdCore.h):
+# known answers for KDF subkey 3 / "esp-mid1" and pick, reproduced with Python's
+# BLAKE2b, the production pick compiled from the header, and the MeshKeys.cpp
+# and Crypto.cpp call sites pinned.
+set(ESPNOW_MESH_ID_KAT_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND ESPNOW_MESH_ID_KAT_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME espnow_mesh_id_kat
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_espnow_mesh_id_kat.py
+          ${ESPNOW_MESH_ID_KAT_TEST_ARGS})
 
 # The boot-time walk over the stored peer identities says when it is incomplete
 # (an identity that is stored but not in the cache, or names a mesh slot this

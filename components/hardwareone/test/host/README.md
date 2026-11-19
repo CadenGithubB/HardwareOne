@@ -4047,9 +4047,47 @@ over 47 characters with a full message) takes printf's path. Source contract:
 `debugOutputTask` writes the serial line and both system-log-file lines
 through it. It takes `--cxx`, `--sanitize` and `--component <directory>`.
 
+## ESP-NOW frame rules
+
+`espnow_wire_layout` (`test_espnow_wire_layout.py`) pins the 1.0 frame rules of `System_ESPNow_Wire.h`. It finds
+every struct in the header and checks that each is `__attribute__((packed))` and has a `static_assert` on its size
+and an `offsetof` assert on every field it declares; that the header states little-endian once and asserts it;
+and that `CapabilitySummary` and `BondPeerStatus` live there and no longer in `System_ESPNow.h`. It compiles the
+header itself (with its four rules headers over a stub `Arduino.h` and build config) together with a golden
+table of every 1.0 layout, field by field, so a moved or resized field fails the build of the test. Source scans
+check one receive style (no `System_ESPNow*.cpp` code casts a payload to a wire struct pointer, the in-place FS
+list entries excepted; no handler compares `ctx.payloadLen` with a `sizeof` or subtracts from it, copies of a text
+tail into a local buffer excepted) and 32-bit sensor masks (no 16-bit `*Mask` in the sensor and forwarding code,
+`receivedPeerMask` excepted; `bondForwardSensors` is 32 bits). Fixed-header frames (RELAY_DATA, PEER_LIST,
+SENSOR_ENVELOPE / BOND_SENSOR_DATA, CMD_RESP, FILE_DATA, FS_LIST_REPLY and the text-only frames), whose payload ends
+in data or fixed-stride entries, never grow: the rules block and `docs/COMPATIBILITY.md` name them, each of their
+structs is marked "Fixed header: cannot grow", and every `ctx.tail()` read starts after one of them. The limits that
+follow from the 16-byte group tag (the signed-frame fit on send, the flood size check, the relay wrap, the
+PEER_LIST receive limit, the signed BOOT limit) compare against the named constants, never a written-out number.
+Reserved bytes are sent as 0: no sender fills a wire struct field by field without declaring it `= {}`, and the
+shared builders (`v4FillHeartbeat`, `buildMetadataPayload`, `buildCapabilitySummary`, `buildLocalBondStatus`)
+clear the struct first. It takes `--cxx` and `--component <directory>`; the base tree at 4c8f7627 fails it.
+
+`espnow_mesh_id_kat` (`test_espnow_mesh_id_kat.py`) checks the 1.0 mesh id against known answers computed in
+Python (libsodium's BLAKE2b KDF, subkey 3, context `esp-mid1`, the first nonzero 16-bit pair) and runs
+`meshid::pick` on host-built subkeys. Source checks pin `meshKeysIdFor`, `meshKeysDerive` and
+`meshKeysRefreshIds` (every keyed mesh, enabled or not, takes its key's id; `espnow_mesh_slots` runs a double of
+it), and that every send path that stamps a header's mesh id refuses id 0.
+
+`device_name_core_tests` runs the device-name rule (`System_DeviceName.h`): 1-31 letters, digits and `-`, no
+leading or trailing `-`, not a command word or a MAC address, the 32-byte wire field with its NUL and zero fill,
+`getField` refusing an invalid name, the case-insensitive clash check and the 29-byte advertised name.
+`device_name_sources` (`test_device_name_sources.py`) pins what cannot run on the host: no Bluetooth-only name or
+`espnowsetname` is left; the boot hands the hostname to Wi-Fi after the settings load, and `applyHostname` also
+renames a running station; a new name is handed on in one place (`deviceNameApply`: ESP-NOW, the hostname, the
+"same name" warning), by `devicename` on set and clear and by the setup wizards' save after it applies the
+settings, and no other file does it itself; Bluetooth's server and client roles use the device name as their GAP
+name and a cut name is advertised as shortened; every frame field that carries the name is written with
+`putField` and read with `getField`; `espnow pair` and `espnowpairsecure` return the peer-name refusal.
+
 ## ESP-NOW dispatch policy
 
-`espnow_dispatch_policy` extracts the production V4 opcode table, its flag constants, the lookup, the dispatcher (`v4_dispatch_table_try`), `espnowOriginIsKnown`, `v4h_text` and the espnow_task text-queue drain from `System_ESPNow.cpp`. It also extracts `LogMessageType` and `TextQueueEntry` from `System_ESPNow.h`, the opcode/flag enums and header from `System_ESPNow_Wire.h`, and `V4RxCtx`. It generates one recording double per other handler named in the table and compiles the harness with `ENABLE_BONDED_MODE` 1 and 0. It checks the following. SUBSCRIBE_UPDATE needs a paired, session-encrypted frame. TIME_SYNC, SENSOR_STATUS, SENSOR_REQ and SENSOR_ENVELOPE need one too, on a keyed and a keyless device, with no bond partner required; a signed broadcast is not enough for them. Once the device has a mesh passphrase, TEXT and BOOT need an authenticated frame, and a plaintext one is dropped with one warning; a keyless device still accepts plaintext. Plaintext TEXT accepted on a keyless device is filed under its origin MAC, never a paired peer's name, and posts no `SYSEVT_TEXT_RX`. Authenticated text (BROADCAST_AUTH or session-encrypted, direct or relayed) keeps its registry name, encryption flag, per-fragment records and single bus event, and BOOT stays a system notice. The retired opcode 150 has no row. Every zero-flag row is on an explicit allow-list (handshakes, HEARTBEAT, TOPO_*, USER_SYNC); this is a subset check, so later items may only shrink the list. `--component <component-directory>` or `--source-dir <overlay>` replays the pre-fix sources. It uses ASan/UBSan when `HW1_SANITIZE` is enabled and mocks history, the event bus and the radio.
+`espnow_dispatch_policy` extracts the production V4 opcode table, its flag constants, the lookup, the dispatcher (`v4_dispatch_table_try`), `espnowOriginIsKnown`, `v4h_text` and the espnow_task text-queue drain from `System_ESPNow.cpp`. It also extracts `LogMessageType` and `TextQueueEntry` from `System_ESPNow.h`, the opcode/flag enums and header from `System_ESPNow_Wire.h`, and `V4RxCtx`. It generates one recording double per other handler named in the table and compiles the harness with `ENABLE_BONDED_MODE` 1 and 0. It checks the following. SUBSCRIBE_UPDATE needs a paired, session-encrypted frame. TIME_SYNC, SENSOR_STATUS, SENSOR_REQ and SENSOR_ENVELOPE need one too, on a keyed and a keyless device, with no bond partner required; a signed broadcast is not enough for them. Once the device has a mesh passphrase, TEXT and BOOT need an authenticated frame, and a plaintext one is dropped with one warning; a keyless device still accepts plaintext. Plaintext TEXT accepted on a keyless device is filed under its origin MAC, never a paired peer's name, and posts no `SYSEVT_TEXT_RX`. Authenticated text (BROADCAST_AUTH or session-encrypted, direct or relayed) keeps its registry name, encryption flag, per-fragment records and single bus event, and BOOT stays a system notice. The retired opcode 150 has no row. Every zero-flag row is on an explicit allow-list (handshakes, HEARTBEAT, TOPO_*, USER_SYNC); this is a subset check, so later items may only shrink the list (`V4_OPC_LEN_EXACT` is not a policy flag). The length column: every row has a minimum length equal to the 1.0 value in the driver's `EXPECTED_MINLEN` (these never rise), `V4_OPC_LEN_EXACT` is on exactly the six handshake rows, and for every row, with all its policy gates passed, one byte short is dropped before the handler and counted once in `gEspNowRxLenDrops`, the minimum passes, and a longer frame reaches the handler with its length intact (a handshake frame one byte long is dropped). An empty STREAM is dropped and counted (1.0 removed the empty STREAM_BEGIN / STREAM_END markers); a 24-byte SUBSCRIBE_UPDATE with reserved bytes set reaches the subscription store through the real handler, and a 20-byte SESSION_UNKNOWN reaches its rule. `--component <component-directory>` or `--source-dir <overlay>` replays the pre-fix sources. It uses ASan/UBSan when `HW1_SANITIZE` is enabled and mocks history, the event bus and the radio.
 
 ## ESP-NOW fragment reassembly
 
@@ -4101,6 +4139,32 @@ extra round instead of an endless exchange, that a re-delivered SESSION_OPEN (th
 id) keeps the live session, and that normal, concurrent, retransmitted, glare and post-reboot handshakes still
 converge. `--source-dir <component-directory>` replays the former REKEY storm and session reset against a pre-fix
 tree. It does not qualify libsodium primitives or radio timing.
+
+## ESP-NOW session capability word and header flag classes (1.0)
+
+```sh
+python3 components/hardwareone/test/host/test_espnow_session_rekey.py --sanitize
+python3 components/hardwareone/test/host/test_espnow_rx_frontend.py --sanitize
+python3 components/hardwareone/test/host/test_espnow_bond_agreement.py --sanitize
+python3 components/hardwareone/test/host/test_espnow_header_flags.py
+```
+
+SESSION_OPEN (130 bytes) and SESSION_CONFIRM (146 bytes) carry each side's 32-bit capability word
+(`System_ESPNow_SessionCapsCore.h`) right before the signature, inside the signed transcripts (75 and 91 bytes).
+`espnow_session_rekey` (C22-C28) checks that each side keeps the other's word (the initiator's view confirmed at
+once, the responder's after the first sealed frame of the session), that a changed caps byte in OPEN or CONFIRM
+fails the signature, that a REKEY keeps the words, that a new handshake replaces them and holds none while in
+flight, that the glare re-send signs the same word, and golden transcript bytes. `espnow_session_caps_core_tests`
+compiles the header: bit values, the image's word, the text with reserved bits as `+0x...`.
+`espnow_bond_agreement` (caseNoBondBuild) and `espnow_bond_agree_core_tests` (caseNoBondBuild) check the owner's
+rule that a partner whose word lacks the bond bit gets no BOND_REQUEST: not from a tick between the session going
+ACTIVE and the session hook, not after a reset, not over later sessions; one line, `no_bond_build` in bondstatus,
+bondconnect refused on a confirmed word, the decline ended by a session whose word has the bit.
+`espnow_rx_frontend` (testMustUnderstandFlags) checks that a frame with a must-understand header bit (0xF000) is
+dropped before it is opened, acknowledged, remembered or flooded, and counted, that every other unknown bit is
+ignored, and that a relay forwards a routed envelope without looking inside while the final receiver drops the
+inner frame. `espnow_header_flags` is the source lint: no removed flag comes back, every flag is both set and read,
+the class and the position of the drop in the front door.
 
 ## ESP-NOW deadlines across the millis() wrap
 
@@ -4187,8 +4251,8 @@ bit orders named the sensors, and the readers of the receiver's table freed its 
 
 `espnow_sensor_core_tests` compiles `System_ESPNow_SensorCore.h` (the production dependency-free header): the one
 sensor table (a name per type in order, both ways, the mask bit); the 12-byte reading header at its stated
-offsets; the part counts at the direct (202) and routed (130) frame budgets with every part inside its frame,
-472 bytes on both paths and 473 refused; the round trip of a reading through its parts with a part missing, out
+offsets; the part counts at the direct (202) and routed (146) frame budgets with every part inside its frame,
+536 bytes on both paths and 537 refused; the round trip of a reading through its parts with a part missing, out
 of order, repeated, of another reading, left open for more than 2 s, and hostile counts and lengths under ASan;
 the counter rule (first, new with and without a gap, repeat, late, the wrap, a restart by boot tag, eight late in
 a row, the stream-start flag, silence longer than the late window, two receivers of one sender); the JSON text
@@ -4226,7 +4290,7 @@ stream switched on by hand.
 `espnow_sensor_ingest` compiles the production sender and receiver of `System_ESPNow_Sensors.cpp` (the blocks
 between its `SENSOR_*_HOST_BEGIN` and `_END` marks, `remoteSensorTableEnsure` and `getRemoteSensorDataJson`)
 with the rules header; the harness's radio queue hands every part the sender produces to the receiver. A reading
-of up to 472 bytes arrives whole, in 1 to 3 frames direct and up to 4 through a relay; 473 bytes are not sent,
+of up to 536 bytes arrives whole, in 1 to 3 frames direct and up to 4 through a relay; 537 bytes are not sent,
 counted, and seen as a gap by the receiver. The receiver stamps a reading with its own UTC epoch (0, `null` in
 JSON, while its clock is not set) and its uptime, and says how its clock was set. Lost, late, repeated,
 restarted and resumed readings are counted per sender and sensor; a repeat or a late reading changes neither the
@@ -4388,7 +4452,7 @@ allocate under the lock. `espnow_bond_forward` compiles the production code of
 `System_ESPNow_BondForward.cpp` between `BOND_FORWARD_HOST_BEGIN` and `BOND_FORWARD_HOST_END` against a host bond,
 named masters and sessions with session ids: every reason with its `bondforward` reply, `bondforward sensors`,
 the announcement's bytes, readings cut for the master's path with the partner's header plus the bit and link
-number (four routed parts of 472 bytes), battery state acknowledged to both masters, events with bit and byte, a
+number (four routed parts of 536 bytes), battery state acknowledged to both masters, events with bit and byte, a
 frame of another source or after a partner change began, off at once, a full queue, `not_kept_here`, the JSON
 object and the `bondstatus` lines (the longest of each proven to fit), a rekey, a new session, a query, the
 refresh, an absent partner, a decline, a partner change (the tick waits while it runs), another hold epoch, a
@@ -4674,12 +4738,21 @@ python3 components/hardwareone/test/host/test_espnow_fslist_locking.py --sanitiz
 python3 components/hardwareone/test/host/test_espnow_tx_multiframe.py --sanitize
 ```
 
-`espnow_tx_multiframe` compiles the production `espnowtx` namespace from `System_ESPNow_Tx.cpp` (queue, completion pool, `submit`/`submitSync`, `sendAead`/`sendAeadSync`, the dispatcher task body and `stop()`) against single-threaded FreeRTOS doubles and a stubbed radio whose multi-frame path models the per-fragment ACK wait; while a sender waits, producers submit fire-and-forget jobs and the dispatcher drains unless it is the task that is waiting. A 4 KB `sendAeadSync` from cmd_exec must run on cmd_exec with no queue drops among the 42 jobs submitted during its waits; the destination's single-frame cap decides (150 B from cmd_exec to a routed peer runs on cmd_exec, to a direct peer and exactly at 202 B it stays dispatcher work); another task's synchronous multi-frame job (httpd's 144 B FS request to a routed peer) stays dispatcher work; failure accounting, the self-deadlock guard, refusal before `init()` and after `stop()`, and the fire-and-forget path are unchanged. A second unit extracts `sendEspNowStreamMessage`, its session helper and lookup and `v4_single_frame_cap` from `System_ESPNow.cpp` and checks that STREAM lines are clamped to one frame (202 B direct, 130 B routed) on the legacy and the command-session path, with the rate limit, the cmd_exec-only session gate and suspension kept. The script checks that `System_ESPNow_Wire.h` still defines the budgets the doubles mirror. `--component <dir>` / `--source-dir <dir>` read the production sources from another tree; the f4cc542 sources fail the dispatcher-placement, queue-drop, routed-cap and four STREAM-length checks. Radio timing, real ACK loss and task stack depth are not modelled. The second unit also extracts `streamCmdIdForCurrentTask` and `espnowStreamOutputWanted` (A9). The session a line streams to is the one of the command `cmd_exec` is running, taken from its command context (origin `ORIGIN_ESPNOW`, `ctx.id` == the request msgId): with two requests queued each requester gets only its own output, and a web command or a deferred job on `cmd_exec` streams nothing to a queued requester. The `broadcastOutputCore` gate stays closed for other tasks and origins while a request is only queued, and the legacy `startstream` sink still hears every task while a remote command is in flight. A source check pins the order around it: the per-task validate drop before the gate, STREAM_BEGIN before submit, STREAM_END before CMD_RESP before `destroyStreamSession`, and `commandExecTask` clearing the context before the async callback. The pre-fix tree (one global id set at queue time) fails S7-S10 and the source check.
+`espnow_tx_multiframe` compiles the production `espnowtx` namespace from `System_ESPNow_Tx.cpp` (queue, completion pool, `submit`/`submitSync`, `sendAead`/`sendAeadSync`, the dispatcher task body and `stop()`) against single-threaded FreeRTOS doubles and a stubbed radio whose multi-frame path models the per-fragment ACK wait; while a sender waits, producers submit fire-and-forget jobs and the dispatcher drains unless it is the task that is waiting. A 4 KB `sendAeadSync` from cmd_exec must run on cmd_exec with no queue drops among the 42 jobs submitted during its waits; the destination's single-frame cap decides (150 B from cmd_exec to a routed peer runs on cmd_exec, to a direct peer and exactly at 202 B it stays dispatcher work); another task's synchronous multi-frame job (httpd's 160 B payload to a routed peer; a 144 B FS request now fits one routed frame) stays dispatcher work; failure accounting, the self-deadlock guard, refusal before `init()` and after `stop()`, and the fire-and-forget path are unchanged. A second unit extracts `sendEspNowStreamMessage`, its session helper and lookup and `v4_single_frame_cap` from `System_ESPNow.cpp` and checks that STREAM lines are clamped to one frame (202 B direct, 146 B routed) on the legacy and the command-session path, with the rate limit, the cmd_exec-only session gate and suspension kept. The script checks that `System_ESPNow_Wire.h` still defines the budgets the doubles mirror. `--component <dir>` / `--source-dir <dir>` read the production sources from another tree; the f4cc542 sources fail the dispatcher-placement, queue-drop, routed-cap and four STREAM-length checks. Radio timing, real ACK loss and task stack depth are not modelled. The second unit also extracts `streamCmdIdForCurrentTask` and `espnowStreamOutputWanted` (A9). The session a line streams to is the one of the command `cmd_exec` is running, taken from its command context (origin `ORIGIN_ESPNOW`, `ctx.id` == the request msgId): with two requests queued each requester gets only its own output, and a web command or a deferred job on `cmd_exec` streams nothing to a queued requester. The `broadcastOutputCore` gate stays closed for other tasks and origins while a request is only queued, and the legacy `startstream` sink still hears every task while a remote command is in flight. A source check pins the order around it: the per-task validate drop before the gate, CMD_RESP before `destroyStreamSession` with no empty STREAM_BEGIN / STREAM_END frame (removed at 1.0), and `commandExecTask` clearing the context before the async callback. The pre-fix tree (one global id set at queue time) fails S7-S10 and the source check.
+
+## ESP-NOW session list output
+
+`espnow_sessions_output` (`test_espnow_sessions_output.py`) runs the production `cmd_espnow_sessions` over a session
+table double with 0 to 16 ACTIVE sessions, every capability bit set and the largest numbers. The JSON form
+(`docs/APP_JSON_CONTRACT.md`) is always whole JSON inside the 4096-byte debug buffer, with the sessions it cannot
+hold left out at the end and counted in `more`; the text form always ends in a NUL and says how many sessions it
+did not show. A tree that writes into 1024 bytes fails it (four such sessions overflowed that, and `serializeJson`
+then left the reply without a terminator). `--component <dir>`; ASan/UBSan under `HW1_SANITIZE=ON`.
 
 ## ESP-NOW metadata push
 
 `espnow_metadata_push` extracts the production metadata setters (`metaGetSet`
-with the metadata text policy, `cmd_espnow_stationary`, `cmd_espnow_setname`),
+with the metadata text policy, `cmd_espnow_stationary`),
 `buildMetadataPayload`, `sendMetadata`, the metadata tracking block and
 `metadataPushTick` from `System_ESPNow.cpp`, plus the real `SessionState`,
 `EspNowEventCategory` and `V4PayloadMetadata` definitions, and runs them against
@@ -4691,7 +4764,10 @@ subscribes to METADATA_PUSH as one type-55 frame after the settle window
 edits coalesces into one frame; the deadline is millis()-wrap safe; a change
 made while ESP-NOW is down is kept; a failed send is not retried; rejected
 values do not arm a push; and the request/response path (forced RESP,
-debounced non-forced RESP) is unchanged. `--component <hardwareone dir>` and
+debounced non-forced RESP) is unchanged. To a peer reached through a relay
+(146 bytes a frame) the 202-byte METADATA goes through `v4_send_payload_smart`,
+which splits it, never as one sealed frame the relay would refuse (P10b).
+`--component <hardwareone dir>` and
 `--source-dir <overlay>` replay other production sources; a tree without the
 push tick compiles against a no-op tick and fails on behavior. ASan/UBSan under
 `HW1_SANITIZE=ON`.
@@ -6770,8 +6846,14 @@ not a registered command. The form shows a refusal that leads with "Error" as it
 replies to the web page's remote file browser.
 
 `espnow_mesh_slots` runs the production `espnowmeshes` subcommands, the meshes settings writer and reader (with the
-vendored ArduinoJson), the slot 0 bootstrap, the passphrase messages and `cmd_espnow_setname` on the production
-mesh record. A device's only mesh can be disabled and deleted, which leaves no mesh, as on a new device; `delete`
+vendored ArduinoJson), the slot 0 bootstrap, the passphrase messages and the device-name setter `devicename` with
+its hand-on `deviceNameApply` (System_DeviceName.cpp) on the production mesh record. The mesh id cases (I1-I8e): a
+new mesh has id 0 (`espnowmeshes add fjqo` no longer collides), a passphrase gives the key's id, `setpassphrase`,
+`rename` and `enable` (both the cached-key and the stored-id branch) refuse an id another mesh here has and change
+nothing, a cleared passphrase keeps the id across a restart, and two meshes with one id at boot leave the higher
+slot off the air with one WARN, which a later ESP-NOW start or settings reload does not undo or repeat (I8b), until
+its key differs (I8c). The device-name cases (G1-G3) check the rule, the hostname hand-on and the warning naming a
+paired device or a peer that has the name; P1-P3 run the pair commands' peer-name rule (`espnowPeerAliasRefusal`). A device's only mesh can be disabled and deleted, which leaves no mesh, as on a new device; `delete`
 frees a slot for `add`, clears its keys and bond settings, and is refused while a stored identity or a registry
 device (in RAM, or in the saved file before the first start) still names the slot, and when either cannot be read.
 After deleting a middle slot and a save and load, every mesh is still in its slot; files without slot numbers load
@@ -6788,7 +6870,7 @@ the web marker agree. An instance whose stop is still pending is left holding no
 passphrase follows `espnowmeshes remove`: refused with the same reply while that mesh is the default and another
 mesh is enabled, otherwise the mesh is disabled and no longer the default; the web page greys out Clear passphrase
 in the refused case, and its action panel writes mesh labels into attributes escaped. Exactly one enabled mesh is
-the default after `enable`; the start-up warning names the mesh a start loads the passphrase from; `espnowsetname
+the default after `enable`; the start-up warning names the mesh a start loads the passphrase from; `devicename
 clear` works only while ESP-NOW is stopped. A pairing with no mesh argument goes to the default mesh and never to a
 slot without a mesh (`meshSlotForPairing`); an empty label matches no mesh; deleting a mesh whose passphrase is not
 the live one leaves the live one alone (the instance records the slot its passphrase came from; the text does not
@@ -6929,6 +7011,13 @@ glare change in the production handlers: the A side keeps its SESSION_OPEN and s
 when the peer's OPEN arrives; a peer that missed the first copy yields to the second and one session stands at once
 (before: a 6 s ESTABLISHING timeout); a peer that already answered ignores the copy; one copy per attempt; the B side
 sends none. `--source-dir` with the tree before the change fails the cases marked FAILS ON BASE.
+
+`espnow_rx_frontend` (1.0 frame rules) runs the production `v4_group_tag` with the receive path: a group-signed
+frame is header + payload + a 16-byte tag and is accepted, a one-bit change of the tag is dropped, a frame carrying
+the pre-1.0 32-byte tag is dropped, and a flooded frame goes on with a 16-byte tag. The routed budgets are 194 bytes
+of inner frame and 146 of sealed plaintext; the time, sensor, battery, event and forward-link frames reach their
+handlers through a relay at those sizes. Frames that reach a handler are sized to the row's minimum (a
+METADATA_PUSH is 202 bytes, a KEY_EX_HELLO 72).
 
 ```sh
 ctest --test-dir <build> -R 'espnow_(peer_restart_tests|rx_frontend|dispatch_policy|session_rekey)' --output-on-failure
