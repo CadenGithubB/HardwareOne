@@ -171,14 +171,18 @@ struct FakeWiFi {
 };
 static FakeWiFi WiFi;
 
-// The console double counts every byte the connect drains.
+// The console double: scripted input, and a count of every byte the connect
+// reads from it.
 struct FakeSerial {
-  int pending = 0;
+  std::string input;
+  size_t next = 0;
   int reads = 0;
-  int available() { return pending; }
+  int pending() const { return static_cast<int>(input.size() - next); }
+  int available() { return pending(); }
   int read() {
-    if (pending > 0) { --pending; ++reads; }
-    return 'x';
+    if (next >= input.size()) return -1;
+    ++reads;
+    return static_cast<unsigned char>(input[next++]);
   }
 };
 static FakeSerial Serial;
@@ -293,14 +297,28 @@ uint32_t otaSafetySetupRemainingMs() { return gSetupRemainingMs; }
 static CommandContext gWebContext{ORIGIN_WEB};
 static CommandContext gSerialContext{ORIGIN_SERIAL};
 
-static void reset(std::vector<ScriptedNetwork> script, CommandContext* context, int pendingBytes) {
+// Everything the main loop's CLI would read next: the typeahead the connect
+// kept, then what is still unread on Serial.
+static std::string drainConsoleLikeMainLoop() {
+  std::string out;
+  char c;
+  while (wifiConsoleTypeaheadPop(c)) out += c;
+  while (Serial.available() > 0) out += static_cast<char>(Serial.read());
+  return out;
+}
+
+static void reset(std::vector<ScriptedNetwork> script, CommandContext* context, std::string input) {
   gScript = std::move(script);
   gDriver = DriverState{};
   gConnectCalls.clear();
   gMessages.clear();
   gCommandContext = context;
+  {
+    char c;
+    while (wifiConsoleTypeaheadPop(c)) {}
+  }
   Serial = FakeSerial{};
-  Serial.pending = pendingBytes;
+  Serial.input = std::move(input);
   gWifiUserCancelled = false;
   gSetupRemainingMs = UINT32_MAX;
   gEspNowInitialized = false;
@@ -318,6 +336,10 @@ static void reset(std::vector<ScriptedNetwork> script, CommandContext* context, 
   sBackgroundConnectActive.store(false);
   sBackgroundConnectSuperseded.store(false);
 #endif
+}
+
+static void reset(std::vector<ScriptedNetwork> script, CommandContext* context, int pendingBytes) {
+  reset(std::move(script), context, std::string(static_cast<size_t>(pendingBytes), 'x'));
 }
 
 static bool modeRequested(const std::vector<wifi_mode_t>& modes, wifi_mode_t mode) {
@@ -418,7 +440,7 @@ int main() {
   {
     reset(missing(2), &gWebContext, 1);
     require(!huntBest(budget, WifiConnectOrigin::COMMAND), "web origin: hunt runs to the end");
-    require(Serial.reads == 0 && Serial.pending == 1, "web origin: the console byte is left for the main loop");
+    require(Serial.reads == 0 && Serial.pending() == 1, "web origin: the console byte is left for the main loop");
     require(!gWifiUserCancelled, "web origin: a console keystroke does not cancel the hunt");
     require(connectCalls("missing-2") == 3, "web origin: every saved network was tried");
   }
@@ -427,18 +449,69 @@ int main() {
     require(!huntBest(budget, WifiConnectOrigin::COMMAND), "no command context (companion restore): hunt runs");
     require(Serial.reads == 0 && !gWifiUserCancelled, "no command context: the console is not read");
   }
-  {
-    reset(missing(2), &gSerialContext, 1);
+  // Only Ctrl-C (0x03) or Esc (0x1B) cancels a console-owned connect.
+  for (const char key : {'\x03', '\x1b'}) {
+    const char* what = key == '\x03' ? "Ctrl-C" : "Esc";
+    char label[96];
+    reset(missing(2), &gSerialContext, std::string(1, key));
     const unsigned long t0 = millis();
-    require(!huntBest(budget, WifiConnectOrigin::COMMAND), "serial origin: cancelled hunt reports no connection");
-    require(gWifiUserCancelled && Serial.reads == 1, "serial origin: a keystroke cancels and is consumed");
-    require(millis() - t0 < 5000, "serial origin: cancellation is immediate");
-    require(connectCalls("missing-2") == 0, "serial origin: the hunt stops at the first network");
+    std::snprintf(label, sizeof(label), "serial origin, %s: cancelled hunt reports no connection", what);
+    require(!huntBest(budget, WifiConnectOrigin::COMMAND), label);
+    std::snprintf(label, sizeof(label), "serial origin, %s: cancels and is consumed", what);
+    require(gWifiUserCancelled && Serial.reads == 1 && drainConsoleLikeMainLoop().empty(), label);
+    std::snprintf(label, sizeof(label), "serial origin, %s: cancellation is immediate", what);
+    require(millis() - t0 < 5000, label);
+    std::snprintf(label, sizeof(label), "serial origin, %s: the hunt stops at the first network", what);
+    require(connectCalls("missing-2") == 0, label);
+    std::snprintf(label, sizeof(label), "serial origin, %s: the driver's join is stopped", what);
+    require(!gDriver.connecting, label);
+    std::snprintf(label, sizeof(label), "serial origin, %s: said once", what);
+    int said = 0;
+    for (const auto& m : gMessages) said += m.find("cancelled by user") != std::string::npos;
+    require(said == 1, label);
+  }
+  // Any other key is a command being typed: no cancel, and it reaches the CLI
+  // whole and in order (typeahead first, then what is still on Serial).
+  {
+    reset(missing(2), &gSerialContext, "wifistatus\n");
+    require(!huntBest(budget, WifiConnectOrigin::COMMAND), "serial origin, typed line: hunt runs");
+    require(!gWifiUserCancelled, "serial origin, typed line: not cancelled");
+    require(connectCalls("missing-2") == 3, "serial origin, typed line: every saved network was tried");
+    require(drainConsoleLikeMainLoop() == "wifistatus\n", "serial origin, typed line: kept for the CLI");
+  }
+  // Keys typed before Ctrl-C are kept; bytes after it stay unread on Serial.
+  {
+    reset(missing(2), &gSerialContext, std::string("ab\x03" "cd"));
+    require(!huntBest(budget, WifiConnectOrigin::COMMAND), "typed then Ctrl-C: no connection");
+    require(gWifiUserCancelled && Serial.reads == 3, "typed then Ctrl-C: reads stop at the cancel key");
+    require(drainConsoleLikeMainLoop() == "abcd", "typed then Ctrl-C: the other keys reach the CLI in order");
+  }
+  // A full typeahead leaves the rest unread on Serial rather than dropping it.
+  {
+    const std::string line(300, 'k');
+    reset(missing(1), &gSerialContext, line);
+    require(!huntBest(budget, WifiConnectOrigin::COMMAND), "long typeahead: hunt runs");
+    require(!gWifiUserCancelled && Serial.pending() > 0, "long typeahead: the overflow stays on Serial");
+    require(drainConsoleLikeMainLoop() == line, "long typeahead: every byte reaches the CLI in order");
+  }
+  // A single-target connect (openwifi --index) cancels the same way.
+  {
+    reset({{"hs-1", Behaviour::Handshaking, 0}}, &gSerialContext, std::string(1, '\x1b'));
+    WifiConnectionTarget target;
+    require(wifiNetworkConnectionById(1, target), "single target cancel: lookup");
+    require(!connectWifiTarget(target, 35000, false), "single target cancel: no connection");
+    require(gWifiUserCancelled && connectCalls("hs-1") == 1 && !gDriver.connecting,
+            "single target cancel: one attempt, the driver's join stopped");
   }
   {
-    reset(missing(2), nullptr, 1);
+    reset(missing(2), nullptr, std::string(1, '\x03'));
     require(!huntBest(budget, WifiConnectOrigin::BOOT), "boot: cancelled hunt reports no connection");
-    require(gWifiUserCancelled && Serial.reads == 1, "boot: a keystroke skips the connect");
+    require(gWifiUserCancelled && Serial.reads == 1, "boot: Ctrl-C skips the connect");
+  }
+  {
+    reset(missing(1), nullptr, "x");
+    require(!huntBest(budget, WifiConnectOrigin::BOOT), "boot, other key: hunt runs");
+    require(!gWifiUserCancelled && drainConsoleLikeMainLoop() == "x", "boot, other key: kept for the CLI");
   }
 
 #if HW1_WIFI_CONNECT_BUDGET_API
@@ -508,7 +581,7 @@ int main() {
   {
     reset(missing(2), nullptr, 1);
     require(!huntBest(budget, WifiConnectOrigin::BACKGROUND), "background: hunt runs to the end");
-    require(Serial.reads == 0 && Serial.pending == 1 && !gWifiUserCancelled,
+    require(Serial.reads == 0 && Serial.pending() == 1 && !gWifiUserCancelled,
             "background: the console is not read");
     require(connectCalls("missing-2") == 3, "background: every saved network was tried");
   }

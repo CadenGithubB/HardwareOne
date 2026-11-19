@@ -124,6 +124,31 @@ static void testSession(){
  reset();haveLease=false;d=session("status");assert(d["exchange"]==""&&d["busy"]==true&&d["transcriptPath"]=="");
  reset();d=session("start");assert(d["success"]==true&&beginCalls==1);
  reset();guest=true;d=session("start");assert(d["success"]==false&&beginCalls==0);
+ // The real busy case keeps its text for an App source.
+ reset();allowBegin=false;d=session("start");assert(d["success"]==false&&d["error"]=="Transcription is busy"&&beginCalls==1);
+ reset();d=session("status");assert(!d.containsKey("consumer"));
+ // A source the App admission never takes (serial here) is refused up front,
+ // and its status carries only service-wide facts, never an idle lease view.
+ for(CommandSource source:{SOURCE_SERIAL,SOURCE_INTERNAL}){
+  reset();auth.transport=source;d=session("start");
+  assert(d["success"]==false&&d["error"]=="Transcription runs from the glasses, the device screen or the web page, not from this connection"&&beginCalls==0);
+  reset();auth.transport=source;guest=true;d=session("start");assert(d["success"]==false&&beginCalls==0);
+  reset();auth.transport=source;d=session("status");
+  assert(d["success"]==true&&d["consumer"]=="unsupported"&&d["available"]==true&&d["micSource"]=="auto"&&currentLookups==0);
+  // continuous is the build capability (ENABLE_LOCAL_STT), as before; the
+  // serial bench tool reads it.
+  assert(d["continuous"]==true);
+  for(const char* key:{"exchange","busy","active","done","preparing","captureActive","inferenceActive","elapsedMs","level","failure","saveEnabled","saveComplete","saveError","sttText"})assert(!d.containsKey(key));
+  reset();auth.transport=source;d=session("");assert(d["consumer"]=="unsupported");
+  for(const auto* args:{"status 1122334455667788","stop 1122334455667788","cancel 1122334455667788","next 1122334455667788","ack 1122334455667788 9 0 13","bogus"}){
+   reset();auth.transport=source;current.source=source;d=session(args);
+   assert(d["success"]==false&&d["error"]=="Transcription runs from the glasses, the device screen or the web page, not from this connection");
+   assert(!d.containsKey("sttText")&&stopCalls==0&&cancelCalls==0&&commitCalls==0);
+  }
+  reset();auth.transport=source;epochLive=false;d=session("status");assert(d["success"]==false&&!d.containsKey("consumer"));
+ }
+ // The device screen and the glasses are App sources like the web.
+ for(CommandSource source:{SOURCE_LOCAL_DISPLAY,SOURCE_G2_GLASSES}){reset();auth.transport=source;d=session("start");assert(d["success"]==true&&beginCalls==1&&!d.containsKey("consumer"));}
  reset();d=session("next 1122334455667788");assert(d["success"]==true&&d["sttText"]=="private words"&&d["sequence"]==9&&d["length"]==13);
  // The display copy rides beside the raw text; the receipt still names the raw bytes. Sequence 9 is not the session's first phrase.
  assert(d["display"]=="Private words"&&!lastParagraphStart&&d["length"]==13);

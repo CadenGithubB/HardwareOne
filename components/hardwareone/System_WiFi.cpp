@@ -144,6 +144,54 @@ static bool wifiConnectWait(unsigned long ms, const WifiConnectBounds& bounds) {
   return !wifiConnectSuperseded(bounds);
 }
 
+// Console bytes a connect read while it watched for a cancel key. A connect
+// that owns the console (wifiConsoleCancelApplies) is the only reader then: the
+// main loop is blocked on the serial command, or at boot has not started. So
+// the connect has to read the bytes to find Ctrl-C or Esc, and keeps every
+// other byte here; the main loop's CLI drain takes these before Serial, so a
+// line typed during the connect still arrives whole and in order. One writer
+// (the connect) and one reader (the main loop).
+struct WifiConsoleTypeahead {
+  static constexpr uint16_t kSize = 128;
+  char bytes[kSize];
+  std::atomic<uint16_t> head{0};  // next write
+  std::atomic<uint16_t> tail{0};  // next read
+
+  bool full() const {
+    return (head.load(std::memory_order_relaxed) + 1) % kSize ==
+           tail.load(std::memory_order_acquire);
+  }
+  void push(char c) {
+    const uint16_t at = head.load(std::memory_order_relaxed);
+    bytes[at] = c;
+    head.store((at + 1) % kSize, std::memory_order_release);
+  }
+  bool pop(char& c) {
+    const uint16_t at = tail.load(std::memory_order_relaxed);
+    if (at == head.load(std::memory_order_acquire)) return false;
+    c = bytes[at];
+    tail.store((at + 1) % kSize, std::memory_order_release);
+    return true;
+  }
+};
+static WifiConsoleTypeahead sWifiConsoleTypeahead;
+
+bool wifiConsoleTypeaheadPop(char& c) { return sWifiConsoleTypeahead.pop(c); }
+
+// True once Ctrl-C (0x03) or Esc (0x1B) has arrived on the console; that key is
+// consumed. Other bytes go to the typeahead. When it is full the rest stays
+// unread in the UART buffer for the main loop, so nothing is dropped (a cancel
+// key behind them is then not seen).
+static bool wifiConsoleCancelKeyPressed() {
+  while (Serial.available() > 0 && !sWifiConsoleTypeahead.full()) {
+    const int c = Serial.read();
+    if (c < 0) break;
+    if (c == 0x03 || c == 0x1B) return true;
+    sWifiConsoleTypeahead.push(static_cast<char>(c));
+  }
+  return false;
+}
+
 // Helper functions defined later in this file
 static const char* wifiStatusToString(wl_status_t status);
 static void wifiEnsureIdle(unsigned long waitMs);
@@ -811,7 +859,8 @@ bool connectToBestWifiNetwork(uint32_t budgetMs, WifiConnectOrigin origin) {
         WARN_WIFIF("[WiFi] cancellation cleanup deferred: radio busy");
       }
       delay(100);
-      broadcastOutput("*** WiFi connection cancelled by user ***");
+      // The attempt has already said "cancelled by user"; the caller's reply
+      // says it again for the command.
       return false;
     }
     if (!connected && wifiConnectSuperseded(bounds)) break;
@@ -1003,6 +1052,13 @@ const char* cmd_wificonnect(const String& originalCmd) {
     return "Error: WiFi boot connect is still stopping; retry openwifi";
   }
 
+  // A serial-console request can be cancelled from the console (the attempt
+  // reads only Ctrl-C and Esc; other keys are kept for the CLI).
+  gWifiUserCancelled = false;
+  if (wifiNetworkCount() > 0 && wifiConsoleCancelApplies(WifiConnectOrigin::COMMAND)) {
+    broadcastOutput("(Ctrl-C or Esc cancels)");
+  }
+
   if (useBest) {
     // Use shared connection logic
     connected = connectToBestWifiNetwork();
@@ -1017,13 +1073,17 @@ const char* cmd_wificonnect(const String& originalCmd) {
     // in 40 ms. 25 s gives the driver room for two full cycles.
     connected = useSavedId ? connectWifiTarget(selected, 35000, false)
                            : connectWifiIndex(index1 - 1, 35000);
-    if (!connected && prevSsid.length() > 0) {
+    // A cancel stops here: no rollback join for the user to wait out.
+    if (!connected && !gWifiUserCancelled && prevSsid.length() > 0) {
       connectWifiSsid(prevSsid, 15000);
     }
   }
 
   if (connected) {
     return "[WiFi] Connected successfully";
+  }
+  if (gWifiUserCancelled) {
+    return "WiFi connect cancelled. Not connected; run openwifi to try again.";
   }
 
   if (useBest) {
@@ -2175,13 +2235,16 @@ static bool connectWifiTargetWithin(const WifiConnectionTarget& nw, unsigned lon
                     wifiStatusToString(currentStatus), currentStatus, millis() - start);
         lastStatus = currentStatus;
       }
-      // Check for user escape input during WiFi connection. Only a request that
-      // owns the console reads it (see wifiConsoleCancelApplies); otherwise the
-      // main loop is the console's reader and a keystroke there is a command.
-      if (bounds.consoleCancels && Serial.available()) {
-        while (Serial.available()) Serial.read();  // consume all pending input
+      // Ctrl-C or Esc cancels. Only a request that owns the console reads it
+      // (see wifiConsoleCancelApplies); otherwise the main loop is the
+      // console's reader and a keystroke there is a command. Other keys typed
+      // here reach the CLI afterwards (wifiConsoleTypeaheadPop).
+      if (bounds.consoleCancels && wifiConsoleCancelKeyPressed()) {
         DEBUG_WIFIF("[connectWiFiIndex] Connection cancelled by user");
         gWifiUserCancelled = true;  // Set global flag for multi-attempt cancellation
+        // Stop the driver's own join as well (the radio guard is held here),
+        // or it may still associate after the "cancelled" line.
+        esp_wifi_disconnect();
         broadcastOutput("*** WiFi connection cancelled by user ***");
         return false;  // connection cancelled
       }
@@ -3209,7 +3272,7 @@ void setupWifi(uint32_t budgetMs, WifiConnectOrigin origin) {
   // Inform user they can escape WiFi connection attempts, when this request
   // may read the console at all.
   if (wifiConsoleCancelApplies(origin)) {
-    broadcastOutput("Starting WiFi connection... (Press any key in Serial Monitor to skip)");
+    broadcastOutput("Starting WiFi connection... (Ctrl-C or Esc cancels)");
   } else {
     broadcastOutput("Starting WiFi connection...");
   }
@@ -3235,6 +3298,7 @@ void setupWifi(uint32_t budgetMs, WifiConnectOrigin origin) {
   }
 
   bool connected = false;
+  gWifiUserCancelled = false;
   if (savedCount > 0) {
     broadcastOutput("Attempting WiFi connection directly...");
     DEBUG_WIFIF("[WiFi Setup] Calling connectToBestWiFiNetwork() directly");
@@ -3253,6 +3317,8 @@ void setupWifi(uint32_t budgetMs, WifiConnectOrigin origin) {
       sBackgroundConnectSuperseded.load(std::memory_order_acquire)) {
     // A WiFi command took the radio over; it reports its own outcome.
     DEBUG_WIFIF("[WiFi Setup] Background connect superseded");
+  } else if (!connected && gWifiUserCancelled) {
+    broadcastOutput("WiFi connect cancelled; continuing without network");
   } else if (!connected) {
     broadcastOutput("WiFi connect timed out; continuing without network");
     // Once-per-boot latch: setupWifi can also run via first-time setup.

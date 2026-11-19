@@ -49,6 +49,7 @@ REMOVED_MACRO = re.compile(r"(?<![A-Za-z0-9_])(DEBUGF|DEBUGF_BROADCAST)\s*\(")
 # Calls per file. Regenerate with --print-allowances after removing some.
 IDF_LOG_ALLOWED: dict[str, int] = {
     "BLE_CoexRecords.cpp": 5,
+    "BLE_PhoneGatt.cpp": 1,   # bench record: PIPE_SETUP gatt_if/conn at MTU, so a Bluedroid GATT_BUSY conn_id is attributable; host-compiled without the project log
     "BLE_PhonePipe.cpp": 4,
     "BLE_SetupWorker.cpp": 2,
     "G2_Glasses.cpp": 12,
@@ -68,11 +69,11 @@ IDF_LOG_ALLOWED: dict[str, int] = {
     "System_OTASafety.cpp": 12,
     "System_RadioCompanion.cpp": 2,
     "System_STT.cpp": 38,     # TL bench trace lines; +4 for the phrase leveler and the glasses gain (TL phrasegain, TL g2autogain)
-    "System_STTLocal.cpp": 22,
+    "System_STTLocal.cpp": 23,   # +1 2026-11-19: the boot model-slot reservation skip line (TL slot reserved=0 reason=model)
     "System_STTRawCapture.cpp": 2,
     "System_Utils.cpp": 2,    # rebootDevice: the SDMMC quiesce record, printed just before esp_restart(); a queued line would not drain
     "stt/quartznet_runtime.cpp": 5,
-    "stt/citrinet_runtime.cpp": 7,   # QuartzNet's runtime's five model-load/resident-model/admission lines, the image-trim record (TL e3t) and the bench self-check (HW1_STT_SELFCHECK builds)
+    "stt/citrinet_runtime.cpp": 9,   # +2 2026-11-19: model-slot reservation result and its PSRAM skip (TL slot); QuartzNet's runtime's five model-load/resident-model/admission lines, the image-trim record (TL e3t) and the bench self-check (HW1_STT_SELFCHECK builds)
     "stt/stt_heap_watch.inc": 5,     # diagnostic builds only (HW1_STT_HEAP_WATCH): the low-point report
     "stt/stt_dl_metadata.cpp": 1,
     "stt/stt_internal_memory.cpp": 1,

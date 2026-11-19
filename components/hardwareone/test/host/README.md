@@ -6403,9 +6403,15 @@ Path switching and the OPEN phases are covered as follows:
   is credited to the state that was asked for, only when the interval lands in
   its range.
 - `ble_reconnect_schedule` runs the real `commitAdmission` through repeated
-  attempts: the phone caps at 30 s (A-3), the glasses keep 5/15/45/90/180 s,
-  and the ring follows faceclaw (2 s after a drop, then 2/4/8/16/32/60 s, each
-  step equal to the ring's own hold after that many failures).
+  attempts: the phone retries at 2/4/8/16 s, then 30 s up to attempt 24, then
+  60 s for good, each timed from the attempt's end (`blePeerNoteAttemptFailed`,
+  no intent bump); `blePeerExpediteReconnect` pulls the next try to now
+  without an intent bump and is refused after a user disconnect; the phone's
+  reseek windows (manual `openphone` 60 s, a restore 120 s) keep a one-shot
+  retrying with auto-reconnect off until they end. The glasses keep
+  5/15/45/90/180 s, and the ring follows faceclaw (2 s after a drop, then
+  2/4/8/16/32/60 s, each step equal to the ring's own hold after that many
+  failures).
 - `ble_coex_records` runs the shared coexistence records
   (docs/WIFI_BLE_COEXISTENCE_STUDY.md, lever 1). It covers the Wi-Fi state
   classifier's priorities (scanning over associated, associated over a connect
@@ -6464,7 +6470,7 @@ Path switching and the OPEN phases are covered as follows:
 - `ble_setup_worker` runs the one BLE setup worker's scheduler
   (`BLE_SetupWorkerCore.h`, docs/BLE_SETUP_WORKER_PLAN.md) as is, under
   ASan/UBSan and ThreadSanitizer: the turn order (glasses, ring retirement,
-  ring, phone), the pass-over bound (measured over a random schedule),
+  phone, ring; a ring passed over by the phone runs next), the pass-over bound (measured over a random schedule),
   token-matched picks when a job is withdrawn and resubmitted during `ready()`,
   exactly-once finish under a two-thread withdraw race, no allocations, wait
   accounting (G2-audio time paused, never reset, by other waits and by another

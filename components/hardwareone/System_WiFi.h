@@ -207,6 +207,11 @@ void wifiRehuntCancel();
 // Set around the boot-time connection so it does not start its own NTP sync.
 extern bool gSkipNtpInWifiConnect;
 
+// Keys typed at the serial console while a connect that owns it waited for
+// Ctrl-C or Esc (any other key is kept, not dropped). The main loop's serial
+// CLI takes them, oldest first, before it reads Serial.
+bool wifiConsoleTypeaheadPop(char& c);
+
 #else  // !ENABLE_WIFI
 
 #include <IPAddress.h>
@@ -220,6 +225,7 @@ inline bool connectToBestWifiNetwork() { return false; }
 inline void wifiEventLogDrain() {}
 inline void wifiRehuntPoll() {}
 inline void wifiRehuntCancel() {}
+inline bool wifiConsoleTypeaheadPop(char&) { return false; }
 inline const char* cmd_wifitxpower(const String&) { return "WiFi disabled"; }
 inline const char* cmd_wifiautoreconnect(const String&) { return "WiFi disabled"; }
 

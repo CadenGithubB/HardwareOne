@@ -235,6 +235,35 @@ everything user-visible since the v0.99.99.1 tag.
   run on hardware.
 
 ### Fixed
+- Local speech (Citrinet): transcription stopped working after one or two sessions with "No contiguous PSRAM
+  block for speech model". The in-place trim of the 22.7 MB model image left a ~1.3 MB hole that other
+  allocations filled, so a freed model left a block too small to reload. The model block is now reserved once
+  at boot (before PSRAM fragments) and lent to each session, never freed; the card is read and verified once
+  per boot; memory pressure sheds the LM, speaker model and feature pool, never the weights; calls over 10 s
+  are split at quiet points for the resident model. Host-tested; not yet run on hardware.
+- `transcription start` from a connection that cannot hold a session (serial, MQTT, ESP-NOW, UART) says it runs
+  from the glasses, the device screen or the web page instead of "Transcription is busy"; `transcription status`
+  there reports `"consumer":"unsupported"` with service-wide fields only.
+- `openwifi` and the boot Wi-Fi connect cancel only on Ctrl-C or Esc; other keys typed meanwhile reach the
+  console afterwards instead of cancelling, and a cancel says so instead of "Check signal and password".
+- Phone link survives being out and about (field log 2026-11-19, P4X-EYE portable): `openphone` no
+  longer cancels a connect in progress (it brings the next try forward; "connect pending (busy, the
+  scheduler retries)" and the "phone intent changed" end it caused are gone), and nothing that asks for
+  the phone while it is connected drops the link. Reconnects retry at 2/4/8/16/30 s, 30 s up to about
+  10 min of outage, then every 60 s, timed from the end of each attempt and reset on success; every
+  failed attempt (not found, no link capacity, a setup turn that ended unused) schedules the next one.
+  When the phone's advertisement is heard in the ring's or glasses' scan, the next try comes at once
+  (at most every 5 s, and not while the phone was already heard but its link kept failing). A manual
+  `openphone` keeps trying for 60 s and a radio restore (recycle, role switch) for 120 s, also with
+  auto-reconnect off. A missed MTU answer is asked once more instead of failing the attempt; a silent
+  HELLO no longer counts toward the old-app hold, and a hold is re-checked every 10 min; a host
+  recovery holds the phone's setup at most 30 s; the phone's setup turn now comes before the ring's.
+- LLM HTTP source (OpenClaw over the phone relay): selectable while the phone is down, and ready while
+  the link is reconnecting; autostart retries every 5-60 s and at once when a path comes back, instead
+  of one try per boot; a chat waits up to 30 s for the phone link and retries the phone once when
+  nothing was sent; a closed link, no paired phone or the app's relay off fail at once with that
+  reason. A failed request no longer marks the source ERROR (it shows as "last request: ..." while
+  READY).
 - Phone link: `phone pair new`, `phone pair`, `phone forget`, `phone stats`, `relay status` and
   `phone scan` no longer fail with "phone pipe busy" on a boot where the phone link never opened (bench
   P4X-EYE, v0.99.99.1, never paired: `phone pair new` was refused every time). The phone pipe's owner
@@ -835,11 +864,17 @@ everything user-visible since the v0.99.99.1 tag.
   counters (`blerecords`) are kept as before. Host-tested; not yet run on hardware.
 
 ### Changed
+- `phone status` shows the next try, the attempt count and what the last scan heard (` next=<s>s
+  try=<k> heard=<n> phone=<n> path='<text>'`), and its JSON adds the optional `pathState`, `pathText`,
+  `retryInS` and `attempt`; `blepeers` rows add `want= next= try= last=`. `llmgenerate json`,
+  `llmretry`, `llmload` and `llmask json` add an optional `reason` when not ready or refused;
+  `llmstatus` shows the HTTP request path; `relay status` shows path waits and same-path retries;
+  `llmunload` keeps the HTTP default from being reselected automatically for the rest of the boot.
 - R1 ring: a direct ring connect gives up at 25 s, before Bluedroid's own 30 s link timer
   (`RING_DIRECT_CONNECT_TIMEOUT_MS`, after faceclaw). Automatic ring reconnects back off as
   faceclaw's do: 2 s after a drop, then 2 s doubling up to 60 s after each failed attempt, counted
   from the failure, starting over after a successful connect (the reconnect scheduler's ring steps
-  now match that hold; glasses keep 5/15/45/90/180 s, the phone 5/15/30 s). Manual `openring` is never
+  now match that hold; glasses keep 5/15/45/90/180 s; the phone's steps are under Fixed). Manual `openring` is never
   held, and the ring link still asks for no connection priority. The ring is also held by the glasses'
   own ring link; our direct link for Health forwarding is kept. Not yet run on hardware.
 - G2: the half-connected repair reconnects a missing arm by its saved address with a 25 s direct

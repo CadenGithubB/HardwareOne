@@ -1526,6 +1526,10 @@ void hardwareone_setup() {
     while (1) delay(1000);
   }
 #if ENABLE_LOCAL_STT
+  // The speech model's weights keep one PSRAM block for the whole boot
+  // (Citrinet: 22.7 MB), taken now while PSRAM is still in one piece; later
+  // allocations can then never split the room a model load needs.
+  sttLocalReserveModel();
   // The speech vocabulary file lives beside the model (card or internal); it
   // loads once here and again on `sttvocab reload`.
   sttVocabularyInit();
@@ -2744,8 +2748,14 @@ void hardwareone_loop() {
   // makes this drain a no-op while the wizard is active, so every byte
   // reaches waitForSerialInputBlocking() instead. See declaration in
   // System_SetupWizard.h.
-  while (!gWizardOwnsSerial && Serial.available()) {
-    char c = Serial.read();
+  // Keys typed while an openwifi (or the boot connect) watched the console for
+  // Ctrl-C/Esc were kept by it; they come first, then Serial.
+  while (!gWizardOwnsSerial) {
+    char c;
+    if (!wifiConsoleTypeaheadPop(c)) {
+      if (!Serial.available()) break;
+      c = Serial.read();
+    }
     if (c == '\r') continue;
     const TransportSessionEpoch liveSerialInputEpoch =
         serialTransportInputEpoch();

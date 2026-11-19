@@ -49,6 +49,15 @@ def generate(component: Path = COMPONENT) -> str:
         support.extend(re.findall(r"^static constexpr uint32_t kWifi\w+Ms = \d+;$", source, re.MULTILINE))
         support.append(extract_block(source, "static bool wifiConsoleCancelApplies("))
         support.append(extract_block(source, "static WifiConnectBounds wifiConnectBounds("))
+        # Only Ctrl-C/Esc cancel; other console bytes are kept for the CLI.
+        cancel_keys = "struct WifiConsoleTypeahead" in source
+        if cancel_keys:
+            support.append(extract_block(source, "struct WifiConsoleTypeahead") + ";")
+            support.append("static WifiConsoleTypeahead sWifiConsoleTypeahead;")
+            support.append(extract_block(source, "bool wifiConsoleTypeaheadPop("))
+            support.append(extract_block(source, "static bool wifiConsoleCancelKeyPressed("))
+        else:
+            support.append("bool wifiConsoleTypeaheadPop(char&) { return false; }")
         support.append(extract_block(source, "uint32_t wifiBootConnectBudgetMs("))
         support.append("#define HW1_WIFI_CONNECT_BUDGET_API 1")
         # The superseding radio command's side of a BACKGROUND boot connect.
@@ -67,6 +76,7 @@ def generate(component: Path = COMPONENT) -> str:
         support.append("static bool huntBest(uint32_t budgetMs, WifiConnectOrigin origin) "
                        "{ return connectToBestWifiNetwork(budgetMs, origin); }")
     else:
+        support.append("bool wifiConsoleTypeaheadPop(char&) { return false; }")
         support.append("enum class WifiConnectOrigin : uint8_t { COMMAND = 0, BOOT };")
         support.append("constexpr uint32_t kWifiConnectHuntBudgetMs = 150000;")
         support.append("#define HW1_WIFI_CONNECT_BUDGET_API 0")

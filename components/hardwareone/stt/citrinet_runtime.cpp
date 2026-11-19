@@ -15,6 +15,7 @@
 #include "stt_lm_wordpiece.h"
 #include "stt_model_selection.h"
 #include "stt_model_container.h"
+#include "stt_model_slot.h"
 #include "dl_model_base.hpp"
 #if HW1_STT_RESIDENT_MODEL
 // The tree-local ESP-DL (tools/p4/prepare_esp_dl.py) provides the metadata
@@ -66,7 +67,21 @@ constexpr size_t kArenaPerOutput=9728;
 constexpr size_t kMaxGreedyTokens=(identity::kMaxFeatureFrames+7)/8;
 // Per-stage inference time accumulated across segments (sttperf stages).
 static constexpr int kStageProfileMax = 512;
-namespace { lm::wordpiece::Pieces* gPieces=nullptr; }
+namespace {
+lm::wordpiece::Pieces* gPieces=nullptr;
+// The weights' boot-lifetime block (stt_model_slot.h), explicit PSRAM requests. Reserved at boot
+// (reserveModel) or by the first call, never freed; sessions and one-shot calls borrow it.
+void* slotAlloc(size_t n) { return heap_caps_aligned_alloc(16,n,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT); }
+void* slotShrink(void* p,size_t n) { return heap_caps_realloc(p,n,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT); }
+void slotRelease(void* p) { heap_caps_free(p); }
+constexpr ModelSlotHeap kSlotHeap{slotAlloc,slotShrink,slotRelease};
+ModelSlot gSlot(identity::kRawBytes,identity::kResidentKeepBytes);
+// Only when no block was reserved at boot (or the board's PSRAM could not spare one) and none is free now:
+// after a restart the boot reservation takes the block before anything else can split PSRAM.
+constexpr char kNoModelBlock[]="No 22.7 MB PSRAM block free for the speech model. Restart the device; it then stays loaded.";
+static_assert(identity::kRawBytes>22650000 && identity::kRawBytes<22750000,"kNoModelBlock names the model's size");
+static_assert(sizeof(kNoModelBlock)<=96,"the broker's error buffers are 96 bytes");
+}
 const lm::wordpiece::Pieces* citrinetPieces() { return gPieces; }
 STT_PROFILE_BSS static uint32_t gStageTotalUs[kStageProfileMax];
 static uint32_t gStageSegments = 0;
@@ -170,9 +185,10 @@ bool tensor(dl::TensorBase* t, size_t frames, size_t channels, int exponent) {
 #define HW1_STT_SELFCHECK 0
 #endif
 #if HW1_STT_RESIDENT_MODEL
-// ---- HW1_STT_RESIDENT_MODEL: one resident vendor model per session ----
-// Built once at the broker's 20 s cap (STT_MAX_CAPTURE_MS; the broker never
-// sends more) and re-shaped for every later call. ESP-DL modules keep no
+// ---- HW1_STT_RESIDENT_MODEL: one resident vendor model per boot ----
+// Built once, after the first session's warm-up, at the broker's 10 s phrase
+// cap, and re-shaped for every later call; it stays with the weights' block
+// (gResident) until the device restarts. ESP-DL modules keep no
 // shape state (Conv rebuilds its arguments from the live tensor shapes on each
 // forward), TensorBase::set_shape never reallocates, and the greedy plan gave
 // each tensor its max-length extent, so a call runs on a prefix of the same
@@ -212,6 +228,8 @@ struct ModelCache::Resident {
     static void operator delete(void* p,const std::nothrow_t&) noexcept { sttPsramFree(p); }
 };
 namespace {
+// The resident model built on gSlot's image: lent with the block, never freed while its image is valid.
+ModelCache::Resident* gResident=nullptr;
 // Lists every activation tensor with the rate it runs at: ceil(T/d) for d = 1 (feature frames), 2, 4 or 8
 // (after each stride-2 stage), or length 1 (squeeze-and-excitation pooling and its two 1x1 convolutions).
 // At the build length these five lengths are distinct; any other tensor refuses the resident model.
@@ -272,21 +290,48 @@ bool shapeResident(ModelCache::Resident& r,size_t frames,size_t outputs) {
 }
 }
 #endif  // HW1_STT_RESIDENT_MODEL
-ModelCache::~ModelCache() { reset(); }
-#if HW1_STT_RESIDENT_MODEL
-// The resident model references the weights zero-copy: destroy it first.
-void ModelCache::reset() { delete resident_; resident_=nullptr; residentTried_=false; heap_caps_free(raw_); raw_=nullptr; }
-// Its arena still holds the last call's activations and quantized input:
-// freed whenever the session changes hands (SttLocalSession::moveTo), and the
-// next owner's first call may build a fresh one. A trimmed image cannot build
-// another model (transcribe(), kResidentKeepBytes): its model stays for as long
-// as the weights do, and changing hands zeroes that arena instead.
-void ModelCache::dropResident() {
-    if(resident_ && resident_->trimmed) { resident_->model->clear_arena(); return; }
-    delete resident_; resident_=nullptr; residentTried_=false;
+bool reserveModel() {
+    if(gSlot.reserved())return true;
+    // A session needs about 9 MB beside the weights on the P4X-EYE (its audio, the LM, the resident model, the
+    // speaker model); a board whose PSRAM cannot spare that much leaves the block to its first call.
+    constexpr size_t kLeaveFree=6u<<20;
+    const size_t total=heap_caps_get_total_size(MALLOC_CAP_SPIRAM), before=heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    if(total<identity::kRawBytes+kLeaveFree || before<identity::kRawBytes+kLeaveFree) {
+        ESP_LOGW("STT","TL slot reserved=0 reason=psram total=%u free=%u need=%u",unsigned(total),unsigned(before),
+                 unsigned(identity::kRawBytes+kLeaveFree));
+        return false;
+    }
+    const bool ok=gSlot.reserve(kSlotHeap);
+    ESP_LOGI("STT","TL slot reserved=%d bytes=%u psram_free=%u psram_largest=%u",ok ? 1 : 0,unsigned(identity::kRawBytes),
+             unsigned(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)),unsigned(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM)));
+    return ok;
 }
+size_t singleCallSamples() {
+#if HW1_STT_RESIDENT_MODEL
+    return gSlot.trimmed() ? kResidentMaxSamples : 0;
 #else
-void ModelCache::reset() { heap_caps_free(raw_); raw_=nullptr; }
+    return 0;
+#endif
+}
+ModelCache::~ModelCache() { reset(); }
+// The weights (and the resident model) stay with gSlot for the whole boot: a cache gives the slot back, never
+// frees it. The resident arena still holds this user's last activations and quantized input: zeroed first, so
+// the next user (another run, a parked session's adopter) never sees them.
+void ModelCache::reset() {
+#if HW1_STT_RESIDENT_MODEL
+    if(gSlot.lentTo(this) && resident_)resident_->model->clear_arena();
+    resident_=nullptr; residentTried_=false;
+#endif
+    raw_=nullptr;
+    gSlot.giveBack(this);
+}
+#if HW1_STT_RESIDENT_MODEL
+// The session changes hands (SttLocalSession::moveTo): the model stays, its arena is zeroed. A session whose
+// build attempt failed lets its next owner try again.
+void ModelCache::dropResident() {
+    if(resident_)resident_->model->clear_arena();
+    else residentTried_=false;
+}
 #endif
 #if HW1_STT_RUNTIME_DIAGNOSTICS
 bool ModelCache::verify() const {
@@ -359,16 +404,32 @@ bool transcribe(ModelReader reader, const int16_t* pcm, size_t samples,
     const size_t frontendBytes=frames*kBins*sizeof(float)+sizeof(fe::FrontendWorkspace);
     constexpr size_t metadataMargin=1024*1024;
     const size_t remainingBudget=arenaBudget+frontendBytes+metadataMargin;
-    // A null cache keeps one-shot calls self-contained. Continuous sessions
-    // retain this allocation only until their worker has joined/closed.
+    // The weights live in gSlot for the whole boot. A session's cache borrows the slot until the session
+    // closes (or is parked and released: ModelCache::reset gives it back); a null cache (a one-shot call)
+    // borrows it for this call. The broker runs one worker at a time and hands a parked session over before
+    // a run starts; a release still under way is awaited briefly.
     ModelCache temporary;
     ModelCache& weights=cache ? *cache : temporary;
+    for(int tries=0;!gSlot.lend(&weights);++tries) {
+        if(cancelled(control))return fail("Cancelled");
+        if(tries>=200)return fail("Speech model is in use by another run");
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    if(!weights.raw_ && gSlot.loaded()) {
+        weights.raw_=gSlot.block();
 #if HW1_STT_RESIDENT_MODEL
-    // A trimmed image serves its resident model only: a call that model cannot take reloads the file.
-    if(weights.raw_ && weights.resident_ && weights.resident_->trimmed && samples>kResidentMaxSamples)weights.reset();
+        weights.resident_=gResident; weights.residentTried_=false;
+#endif
+    }
+#if HW1_STT_RESIDENT_MODEL
+    // A trimmed image serves its 10 s resident model only; sttLocalTranscribe cuts longer audio into pieces.
+    if(gSlot.trimmed() && samples>kResidentMaxSamples)return fail("Speech over 10 s must be transcribed in pieces");
 #endif
     const bool reused=weights.raw_!=nullptr;
-    const size_t newWeights=reused ? 0 : identity::kRawBytes;
+    // Only the boot's first load needs the weights' size in one free block: later loads (a failed read
+    // retried) go into the same block.
+    const bool newBlock=!gSlot.reserved();
+    const size_t newWeights=newBlock ? identity::kRawBytes : 0;
 #if HW1_STT_RESIDENT_MODEL
     // The resident path already owns its arena and metadata. Its remaining
     // allocation budget is independent of cold construction and of allocations
@@ -383,14 +444,14 @@ bool transcribe(ModelReader reader, const int16_t* pcm, size_t samples,
     auto shed=[&] { return decoder && decoder->release && decoder->release(decoder->context); };
     auto psramAdmitted=[&] {
         return heap_caps_get_free_size(MALLOC_CAP_SPIRAM)>=newWeights+callBudget
-            && (reused || heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM)>=identity::kRawBytes);
+            && (!newBlock || heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM)>=identity::kRawBytes);
     };
 #else
     // Optional decoder memory (a cached LM) yields before any refusal.
     auto shed=[&] { return decoder && decoder->release && decoder->release(decoder->context); };
     auto psramAdmitted=[&] {
         return heap_caps_get_free_size(MALLOC_CAP_SPIRAM)>=newWeights+remainingBudget
-            && (reused || heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM)>=identity::kRawBytes);
+            && (!newBlock || heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM)>=identity::kRawBytes);
     };
     const auto internalBudget=internalMemoryBudget(false);
     const size_t callInternal=internalBudget.total;
@@ -415,40 +476,48 @@ bool transcribe(ModelReader reader, const int16_t* pcm, size_t samples,
         return fail(internalFree<requiredInternal ? "Not enough internal SRAM for speech" :
                     internalLargest<internalBudget.contiguous ? "No contiguous internal SRAM block for speech" :
                     psramFree<requiredPsram ? "Not enough PSRAM for speech" :
-                    "No contiguous PSRAM block for speech model");
+                    kNoModelBlock);
     }
     if(!reused) {
-        Buffer candidate(identity::kRawBytes);
-        if(!candidate.p)return fail("Cannot allocate STT model");
+        // Into the boot-lifetime block (allocated here when boot did not). A failed or cancelled read leaves
+        // the block reserved and empty: the next call reads into it again.
+        if(!gSlot.reserve(kSlotHeap))return fail(kNoModelBlock);
+        auto* const raw=static_cast<uint8_t*>(gSlot.block());
+        (void)gSlot.setLoaded(false);
         gLoadReadUs=0;
         const int64_t loadStart=esp_timer_get_time();
         const bool loaded=identity::kCodec==0
-            ? readStoredModel(reader,static_cast<uint8_t*>(candidate.p),control)
-            : inflateModel(reader,static_cast<uint8_t*>(candidate.p),control);
+            ? readStoredModel(reader,raw,control)
+            : inflateModel(reader,raw,control);
         if(!loaded)return fail(cancelled(control)?"Cancelled":"STT model read failed");
         const int64_t hashStart=esp_timer_get_time();
         uint8_t hash[32];
-        if(!digest(candidate.p,identity::kRawBytes,hash) || memcmp(hash,identity::kRawSha,32))return fail("STT model checksum mismatch");
+        if(!digest(raw,identity::kRawBytes,hash) || memcmp(hash,identity::kRawSha,32))return fail("STT model checksum mismatch");
         const int64_t hashEnd=esp_timer_get_time();
-        // Once per session (weights are cached after this), so always logged.
+        // Once per boot (the weights stay after this), so always logged.
         ESP_LOGI("STT","model %u bytes %s: read %lu ms, inflate %lu ms, sha256 %lu ms, total %lu ms",
                  unsigned(identity::kRawBytes),identity::kCodec==0?"stored":"zlib",
                  (unsigned long)(gLoadReadUs/1000),
                  (unsigned long)((hashStart-loadStart-gLoadReadUs)/1000),
                  (unsigned long)((hashEnd-hashStart)/1000),
                  (unsigned long)((hashEnd-loadStart)/1000));
+        (void)gSlot.setLoaded(true);   // publish only fully verified weights
+        weights.raw_=raw;
         if(cancelled(control))return fail("Cancelled");
-        weights.raw_=candidate.release(); // publish only fully verified weights
     }
-    // Cached weights were fully verified (SHA-256) when this session loaded
-    // them. Re-hashing all 7.2 MB before every segment cost ~0.6 s per
-    // segment on the P4 (sttperf), so production reuse trusts that check;
-    // diagnostics probes keep the per-segment re-validation.
+    // The weights were fully verified (SHA-256) when the slot loaded them.
+    // Re-hashing all 22.7 MB before every segment would cost seconds per
+    // segment on the P4, so production reuse trusts that check; diagnostics
+    // probes keep the per-segment re-validation.
 #if HW1_STT_RUNTIME_DIAGNOSTICS
     else {
         uint8_t hash[32];
         if(!digest(weights.raw_,identity::kRawBytes,hash) || memcmp(hash,identity::kRawSha,32)) {
-            weights.reset();
+            // The block stays reserved; the model built on the bad bytes goes, and the next call reloads.
+#if HW1_STT_RESIDENT_MODEL
+            delete gResident; gResident=nullptr; weights.resident_=nullptr; weights.residentTried_=false;
+#endif
+            weights.raw_=nullptr; (void)gSlot.setLoaded(false);
             return fail("Cached STT model checksum mismatch");
         }
     }
@@ -690,10 +759,12 @@ bool transcribe(ModelReader reader, const int16_t* pcm, size_t samples,
     stats.decodeMs=millis()-start;
     if(cancelled(control))return fail("Cancelled");
 #if HW1_STT_RESIDENT_MODEL
-    // Build the session's resident model once, after the session's first
-    // call (the warm-up) has decoded, so a lazily loaded LM already took its
-    // PSRAM, and after this call's own model and arena are gone. It needs the
-    // budget of a 20 s per-call build and must leave kResidentKeepFree.
+    // Build the resident model once per boot (it stays with the weights,
+    // gResident), after the first session's first call (the warm-up) has
+    // decoded, so a lazily loaded LM already took its PSRAM, and after this
+    // call's own model and arena are gone. It needs the budget of a 10 s
+    // per-call build and must leave kResidentKeepFree. A failed attempt is
+    // retried by the next session.
     if(cache && !cache->resident_ && !cache->residentTried_) {
         cache->residentTried_=true;
         perCall.reset();
@@ -728,6 +799,7 @@ bool transcribe(ModelReader reader, const int16_t* pcm, size_t samples,
         // internal RAM. TL e3m: bytes requested per metadata kind. All
         // numeric, so tl_capture.py records both lines.
         if(cache->resident_) {
+            gResident=cache->resident_;
             size_t arenaPsram=0,arenaInternal=0;
             cache->resident_->model->get_arena_size(&arenaPsram,&arenaInternal);
             ESP_LOGI("STT","TL e3 resident=1 t=%lu build_ms=%lu tensors=%u int_used=%u psram_used=%u int_free=%u psram_free=%u"
@@ -815,16 +887,20 @@ bool transcribe(ModelReader reader, const int16_t* pcm, size_t samples,
             // The resident model reads the image's tables and weights only. What the packager put after them
             // (tools/stt_p4/repack_espdl.py: per-channel exponents, parameter shapes and names, the embedded
             // test tensors) was copied out while models were built, and no other model will be built from this
-            // image: return it. A shrinking realloc stays in place; were the block ever moved, every parameter
-            // tensor would point at freed memory, so the cache is emptied and the next call loads the file again.
+            // image: return it, once per boot. The block is never freed or regrown, so the tail is ordinary free
+            // memory from now on. A shrinking realloc stays in place; were the block ever moved, every parameter
+            // tensor would point at freed memory: the slot then drops the model and the next call reserves and
+            // loads again.
             if(identity::kResidentKeepBytes<identity::kRawBytes) {
-                void* const kept=heap_caps_realloc(cache->raw_,identity::kResidentKeepBytes,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
-                const bool inPlace=kept==cache->raw_;
-                if(inPlace)cache->resident_->trimmed=true;
-                else if(kept) { cache->raw_=kept; cache->reset(); }
+                const ModelSlot::Trim trim=gSlot.trim(kSlotHeap);
+                if(trim==ModelSlot::Trim::Trimmed)cache->resident_->trimmed=true;
+                else if(trim==ModelSlot::Trim::Lost) {
+                    delete gResident; gResident=nullptr; cache->resident_=nullptr; cache->raw_=nullptr;
+                }
                 ESP_LOGI("STT","TL e3t keep=%u freed=%u ok=%d psram_free=%u psram_largest=%u",
                          unsigned(identity::kResidentKeepBytes),unsigned(identity::kRawBytes-identity::kResidentKeepBytes),
-                         kept ? (inPlace ? 1 : -1) : 0,unsigned(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)),
+                         trim==ModelSlot::Trim::Trimmed ? 1 : trim==ModelSlot::Trim::Lost ? -1 : 0,
+                         unsigned(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)),
                          unsigned(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM)));
             }
 #endif
@@ -854,8 +930,8 @@ bool transcribe(ModelReader reader, const int16_t* pcm, size_t samples,
 #else
     internalMemory.success(false);
 #endif
-    // Model destructor releases its arena before temporary weights are freed.
-    // Session weights remain immutable and are rechecked on the next call.
+    // A per-call model's destructor releases its arena; the weights stay in
+    // gSlot (a one-shot call's temporary cache gives the slot back).
     return true;
 }
 }

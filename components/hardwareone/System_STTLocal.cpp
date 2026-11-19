@@ -40,6 +40,11 @@ using hw1::stt::sttPsramFree;
 #endif
 #include <algorithm>
 #endif
+#if HW1_STT_CITRINET
+// The weights' boot-lifetime block, and cutting audio the trimmed image cannot take in one call.
+#include "stt/citrinet_runtime.h"
+#include "stt/stt_model_slot.h"
+#endif
 namespace {
 // Selection pairs the fixed path with its generated, SHA-pinned identity.
 // Explicit path overrides remain available to standalone deployment experiments.
@@ -407,8 +412,48 @@ bool sttLocalTranscribe(const int16_t* pcm,size_t samples,char* text,size_t text
 #else
     const hw1::stt::Decoder* decoding=nullptr;
 #endif
+    hw1::stt::ModelCache* const weights=backend ? &backend->weights : nullptr;
+#if HW1_STT_CITRINET
+    // Once the weights are trimmed to the 10 s resident model (after the boot's first session), longer audio
+    // (`stt record` takes up to 20 s) is transcribed in pieces cut at quiet points and joined with a space.
+    const size_t piece=hw1::stt::singleCallSamples();
+    if(piece && pcm && samples>piece) {
+        size_t cuts[4];
+        const size_t count=hw1::stt::splitSpeech(pcm,samples,piece,hw1::stt::identity::kSampleRate,cuts,4);
+        auto refuse=[&](const char* why) {
+            if(text&&textCap)text[0]=0;
+            if(error&&errorCap)snprintf(error,errorCap,"%s",why);
+            return false;
+        };
+        if(!count)return refuse("STT audio too long to transcribe in pieces");
+        size_t used=0, from=0;
+        if(text&&textCap)text[0]=0;
+        for(size_t k=0;k<=count;++k) {
+            const size_t to=k<count ? cuts[k] : samples, gap=used ? 1 : 0;
+            if(!text || textCap<used+gap+2)return refuse("STT transcript exceeds result capacity");
+            File part=k ? openModel() : file;
+            if(!part || part.isDirectory())return refuse("Cannot open local STT model");
+            SttLocalStats s;
+            if(!hw1::stt::transcribe({&part,part.size(),readModel},pcm+from,to-from,text+used+gap,textCap-used-gap,control,s,
+                                     error,errorCap,nullptr,weights,decoding,nullptr)) {
+                text[0]=0;
+                return false;
+            }
+            const size_t len=strlen(text+used+gap);
+            if(len) { if(gap)text[used]=' '; used+=gap+len; }
+            if(!k) { stats=s; stats.samples=uint32_t(samples); }
+            else {
+                stats.featureFrames+=s.featureFrames; stats.outputFrames+=s.outputFrames;
+                stats.loadMs+=s.loadMs; stats.frontendMs+=s.frontendMs; stats.inferenceMs+=s.inferenceMs; stats.decodeMs+=s.decodeMs;
+                stats.lmUsed=stats.lmUsed && s.lmUsed;
+            }
+            from=to;
+        }
+        return true;
+    }
+#endif
     return hw1::stt::transcribe({&file,file.size(),readModel},pcm,samples,text,textCap,control,stats,error,errorCap,
-                              nullptr,backend ? &backend->weights : nullptr,decoding,prefix);
+                              nullptr,weights,decoding,prefix);
 }
 #if HW1_STT_SPEAKER_LABELS
 namespace {
@@ -808,7 +853,21 @@ SttLocalCallBudget sttLocalCallBudget(size_t samples,const SttLocalSession* sess
     out.total=hw1::stt::callBudget(samples,backend ? &backend->weights : nullptr,&out.contiguous);
     return out;
 }
+void sttLocalReserveModel() {
+#if HW1_STT_CITRINET
+    // Only for a model this boot can load (the card is mounted by now, initFilesystem): without the card or the
+    // matching file the block would sit unused all boot. A card inserted later gets the block from its first
+    // call; a restart with the card in reserves it here again.
+    const char* missing=nullptr;
+    if(!sttLocalAvailable(nullptr,0,&missing)) {
+        ESP_LOGW("STT","TL slot reserved=0 reason=model (%s)",missing ? missing : "unavailable");
+        return;
+    }
+    (void)hw1::stt::reserveModel();
+#endif
+}
 #else
+void sttLocalReserveModel() {}
 SttLocalCallBudget sttLocalCallBudget(size_t,const SttLocalSession*) { return {}; }
 bool sttLocalAvailable(char* error,size_t cap,const char** reason) {
     const char* problem="Local transcription is unsupported on this target. Use a supported build.";

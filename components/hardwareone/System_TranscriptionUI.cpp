@@ -45,10 +45,36 @@ bool actor(DictationAppLease& lease) {
 bool live(const DictationAppLease& lease) {
   return transportSessionEpochIsLive(lease.source, lease.epoch);
 }
+// The App admission in System_Dictation.cpp (dictationBeginImpl) takes only
+// these transports; any other caller (serial, MQTT, ESP-NOW, ...) can never
+// hold a lease, so say so instead of reporting a busy or idle service.
+constexpr const char* kUnsupportedSource =
+    "Transcription runs from the glasses, the device screen or the web page, not from this connection";
+bool appSource(CommandSource source) {
+  return source == SOURCE_LOCAL_DISPLAY || source == SOURCE_G2_GLASSES || source == SOURCE_WEB;
+}
 void putId(JsonDocument& doc, uint64_t id) {
   char text[17]{};
   if (id) snprintf(text, sizeof(text), "%08lx%08lx", (unsigned long)(id >> 32), (unsigned long)(uint32_t)id);
   doc["exchange"] = text;
+}
+// Status for a caller that cannot hold a lease: only the service-wide facts.
+// Lease state (exchange, busy, active, preparing, ...) is left out because
+// dictationAppSnapshot() cannot see it from here and would report it as idle.
+void putUnsupportedStatus(JsonDocument& doc) {
+  const char* why = nullptr;
+  doc["consumer"] = "unsupported";
+  doc["note"] = kUnsupportedSource;
+  doc["available"] = dictationAvailable(&why);
+  doc["reason"] = why ? why : "";
+  doc["saveDefault"] = gSettings.sttSaveTranscripts;
+  doc["micSource"] = gSettings.micSource;
+  doc["micPdm"] = audioSourceAvailable(AUDIO_SRC_LOCAL_PDM);
+  doc["micG2"] = audioSourceAvailable(AUDIO_SRC_G2_LEFT);
+  // Without a lease putStatus reported this build capability, not session
+  // state; the USB bench tool (experiments/stt_p4/tools/transcription_ui_usb.py)
+  // reads it over serial, so keep it.
+  doc["continuous"] = bool(ENABLE_LOCAL_STT);
 }
 void putStatus(JsonDocument& doc, const DictationAppLease& lease) {
   DictationAppSnapshot app{};
@@ -85,7 +111,10 @@ const char* commandSession(const String& input) {
   if (!actor(lease)) return error(doc, "Sign in to use transcription");
   if (args.unterminatedQuote()) return error(doc, "Invalid arguments");
   const String op = args.count() ? args.arg(0) : "status";
-  if (op == "status" && args.count() <= 1) {
+  if (!appSource(lease.source)) {
+    if (op != "status" || args.count() > 1) return error(doc, kUnsupportedSource);
+    putUnsupportedStatus(doc);
+  } else if (op == "status" && args.count() <= 1) {
     DictationAppLease current{};
     if (dictationAppCurrent(lease.source, lease.epoch, &current,
                             DictationAppPurpose::Transcription)) lease = current;

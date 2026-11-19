@@ -135,6 +135,10 @@ bool sttAnySessionActive();
 // run (dictation, QuickNote, Transcription, Conversate) adopts the resident
 // model instead of loading a second copy and parks it again on exit while the
 // hold lasts; a one-shot run, which keeps its self-contained load, frees it.
+// On the Citrinet build the weights and the resident model stay in their
+// boot-lifetime PSRAM block whatever happens here (sttLocalReserveModel):
+// "freeing" a parked session releases its LM and gives the weights back, and
+// only the boot's first run reads the model from the card.
 // `load` also loads it now on a short-lived task when nothing is resident, no
 // run is active, ESP-SR is not running and free PSRAM holds the model (as the
 // last warm load took) above sttWarmTick's floor (60 s back-off after a failed

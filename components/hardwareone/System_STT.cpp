@@ -424,8 +424,10 @@ static void sttWarmLoader(void*) {
     const SttLocalControl control{nullptr, sttWarmLoadCancelled, nullptr};
     ok = sttLocalTranscribe(silence, kSamples, text, sizeof(text), control, stats, error,
                             sizeof(error), &gWarmSession) && gWarmSession.warm();
-    // Parked, the session holds only weights and the LM (a resident model the
-    // load built is freed; the adopting run builds its own).
+    // Parked, the session holds only weights and the LM: the resident
+    // model's arena is zeroed (on the Citrinet build the model itself stays
+    // with the weights' boot-lifetime block; elsewhere it is freed and the
+    // adopting run builds its own).
     gWarmSession.dropCallState();
     free(silence);
   }
@@ -472,7 +474,9 @@ static void sttWarmAdopt(SttLocalSession& session, bool (*cancelled)(void*), voi
   }
 }
 // A one-shot run makes room instead: it takes the parked model (awaiting a
-// warm load in progress, like a continuous run) and frees it.
+// warm load in progress, like a continuous run) and frees it. On the Citrinet
+// build that frees the LM and gives the weights back, so the one-shot call can
+// borrow them (one holder at a time; it would otherwise wait 2 s and fail).
 static void sttWarmYield(bool (*cancelled)(void*), void* context) {
   SttLocalSession parked;
   sttWarmAdopt(parked, cancelled, context);
@@ -2177,9 +2181,10 @@ static void sttContinuousWorker(void*) {
     sttWarmAdopt(backendSession, sttStreamCancelled, &run);
 #ifdef ESP_PLATFORM
     {
-      // Warm-up: load/verify the 7 MB model and the LM now, while the capture
-      // task calibrates and the wearer starts talking. Otherwise the first
-      // segment pays ~11 s of loading before any text (sttperf seg 1).
+      // Warm-up: load/verify the model (once per boot on the Citrinet build,
+      // whose weights then stay) and the LM now, while the capture task
+      // calibrates and the wearer starts talking. Otherwise the first segment
+      // pays the loading before any text (sttperf seg 1).
       constexpr size_t kWarmSamples = STT_SAMPLE_RATE / 2;
       auto* silence = static_cast<int16_t*>(heap_caps_calloc(kWarmSamples, sizeof(int16_t), MALLOC_CAP_SPIRAM));
       if (silence) {

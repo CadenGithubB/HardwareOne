@@ -131,12 +131,15 @@ bool sttSpeakerLabel(SttLocalSession* session, const int16_t* pcm, size_t sample
 // Single-worker backend lifetime: one task uses a session at a time. Reset
 // after the final call has returned, including failure/cancellation.
 // FreeRTOS self-deleting tasks must reset explicitly before vTaskDelete().
-// A session holds the pinned, SHA-verified model weights, the system language
-// model and, with HW1_STT_RESIDENT_MODEL, its resident model, whose arena
-// keeps the last call's activations until the next call of the same run
-// overwrites them. moveTo frees the resident model first, so an idle session
-// the broker hands to its next run (sttKeepWarm) carries only weights and LM:
-// PCM, features, activations and text never pass from one run to the next.
+// A session borrows the pinned, SHA-verified model weights and, with
+// HW1_STT_RESIDENT_MODEL, the resident model built on them; on the Citrinet
+// build both stay in one PSRAM block for the whole boot (stt/stt_model_slot.h,
+// sttLocalReserveModel) and closing a session gives them back, never frees
+// them. The session owns the system language model. The resident model's arena
+// keeps the last call's activations until the next call overwrites them;
+// moveTo and reset zero it, so an idle session the broker hands to its next run
+// (sttKeepWarm) carries only weights and LM: PCM, features, activations and
+// text never pass from one run to the next.
 class SttLocalSession {
  public:
   SttLocalSession() = default;
@@ -147,12 +150,11 @@ class SttLocalSession {
   // Hands this idle session's backend to the empty, idle `to`; this one is
   // left empty. A language model the old owner shed under memory pressure
   // gets one load attempt again, as in a new session.
-  // A resident model is freed, never handed over (dropCallState); the new
-  // owner's first call builds its own.
+  // The resident model's arena is zeroed first (dropCallState).
   void moveTo(SttLocalSession& to);
-  // Frees what calls left for this session's later calls, i.e. the resident
-  // model and its activation arena (HW1_STT_RESIDENT_MODEL; otherwise
-  // nothing); verified weights and the LM stay.
+  // Clears what calls left for this session's later calls, i.e. the resident
+  // model's activation arena (HW1_STT_RESIDENT_MODEL; otherwise nothing);
+  // the weights, the resident model and the LM stay.
   void dropCallState();
   SttLocalSession(const SttLocalSession&) = delete;
   SttLocalSession& operator=(const SttLocalSession&) = delete;
@@ -171,6 +173,11 @@ class SttLocalSession {
   friend void sttSpeakerDrain(SttLocalSession*, uint32_t, const SttLocalControl&);
 };
 
+// Boot, once, before other features split PSRAM: reserves the block the speech
+// model's weights keep for the whole boot (Citrinet: 22.7 MB of the P4X-EYE's
+// 32 MB; nothing elsewhere). Without it the first call reserves the block, if
+// one that large is still free. Loads nothing; never blocks.
+void sttLocalReserveModel();
 // Cheap availability check for the configured, fixed model path; does not load
 // a model. A true result is readiness to attempt a run, not proof of its result.
 // Optional reason points to a static actionable message, safe to cache.

@@ -86,8 +86,10 @@ class ModelCache {
     // stt_dl_metadata.h). Destroyed before the weights.
     struct Resident;
     // Frees the resident model and its arena (the weights stay); the next
-    // call may build a new one. For a session that changes hands. A Citrinet
-    // image trimmed to its weights keeps the model and zeroes the arena.
+    // call may build a new one. For a session that changes hands. The
+    // Citrinet build keeps one model per boot with its weights
+    // (stt_model_slot.h) and only zeroes the arena; its reset() gives the
+    // weights back to that slot instead of freeing them.
     void dropResident();
 #endif
 #if HW1_STT_RUNTIME_DIAGNOSTICS
