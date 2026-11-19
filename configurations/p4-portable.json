@@ -1,0 +1,19 @@
+{
+  "board": "p4x_eye",
+  "features": {
+    "CUSTOM_ENABLE_WEB_R1_HEALTH": 1,
+    "ENABLE_BLE_PHONE_PIPE": 1,
+    "ENABLE_CAMERA_SENSOR": 0,
+    "ENABLE_ESP_SR": 0,
+    "ENABLE_LLM_BACKEND": 1,
+    "ENABLE_LLM_SOURCE_HTTP": 1,
+    "ENABLE_LOCAL_STT": 1,
+    "ENABLE_SDMMC_CARD": 1
+  },
+  "sdkconfig": {
+    "CONFIG_ESP_HTTP_CLIENT_ENABLE_CUSTOM_TRANSPORT": true,
+    "CONFIG_HEAP_USE_HOOKS": true
+  },
+  "summary": "The carry-around P4X-EYE: speech-to-text, G2 glasses, R1 ring, phone link, the HTTP assistant (OpenClaw) and microSD; ESP-NOW worker in the home mesh. No camera.",
+  "title": "Portable"
+}
